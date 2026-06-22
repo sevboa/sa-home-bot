@@ -1,0 +1,51 @@
+# Пример конфигурации home-sentinel-bot.
+# Скопируйте в config.toml и подставьте свои значения.
+# Любое значение можно переопределить переменной окружения с префиксом
+# SENTINEL__ и разделителем вложенности "__", например:
+#   SENTINEL__TELEGRAM__TOKEN=123:abc
+# Подписки задаются ТОЛЬКО в TOML.
+
+[telegram]
+token = "PUT-YOUR-BOT-TOKEN-HERE"
+
+[database]
+path = "./data/sentinel.sqlite"
+
+[schedule]
+scan_cron = "*/1 * * * *"          # снимать срез датчиков раз в минуту
+housekeeping_cron = "0 3 * * *"    # уборка ночью
+
+[sensors.cpu]
+enabled = true
+warn_c = 80.0
+crit_c = 90.0
+hysteresis_delta_c = 5.0            # обратно в ok при temp < warn - delta
+consecutive_to_alert = 3
+consecutive_to_clear = 3
+
+[sensors.disks]
+enabled = true
+warn_c = 55.0
+crit_c = 65.0
+hysteresis_delta_c = 5.0
+consecutive_to_alert = 2
+consecutive_to_clear = 2
+devices = []                       # пусто = автоопределение через smartctl
+
+[logging]
+level = "INFO"
+format = "plain"                   # plain | json
+
+# --- Подписки (тихих часов нет) ---
+
+[[subscriptions]]
+name = "me"
+chat_id = 123456789
+event_types = ["*"]                # перегрев + система
+allowed_commands = ["status", "stats", "scan_now"]
+
+[[subscriptions]]
+name = "family_room"
+chat_id = -1009999999
+event_types = ["overheat_started", "overheat_cleared"]
+allowed_commands = []

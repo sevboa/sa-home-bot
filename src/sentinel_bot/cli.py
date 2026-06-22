@@ -1,0 +1,61 @@
+"""Точка входа CLI: разбор аргументов, загрузка Settings, запуск приложения."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import sys
+
+from sentinel_bot import __version__
+from sentinel_bot.config import Settings
+from sentinel_bot.utils.logging import configure_logging
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="sentinel-bot",
+        description="Личный бот-сторож температуры CPU и дисков домашней машины.",
+    )
+    parser.add_argument("--config", "-c", default=None, help="путь к config.toml")
+    parser.add_argument(
+        "--check-config",
+        action="store_true",
+        help="загрузить и напечатать разобранный конфиг, затем выйти",
+    )
+    parser.add_argument("--version", "-V", action="version", version=f"sentinel-bot {__version__}")
+    return parser
+
+
+def _redacted(settings: Settings) -> dict:
+    data = settings.model_dump(mode="json")
+    token = data.get("telegram", {}).get("token", "")
+    if token:
+        data["telegram"]["token"] = token[:4] + "…(скрыто)"
+    return data
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+
+    try:
+        settings = Settings.load(args.config)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
+        return 2
+
+    if args.check_config:
+        import json
+
+        print(json.dumps(_redacted(settings), ensure_ascii=False, indent=2))
+        return 0
+
+    configure_logging(settings.logging.level, settings.logging.format)
+
+    # Импорт здесь, чтобы --check-config не тянул тяжёлые зависимости.
+    from sentinel_bot.app import run
+
+    try:
+        asyncio.run(run(settings))
+    except KeyboardInterrupt:
+        return 0
+    return 0
