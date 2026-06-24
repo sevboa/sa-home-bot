@@ -1,6 +1,6 @@
-# home-sentinel-bot
+# sa-home-bot
 
-> **Версия:** 0.1.0 (MVP) · **Статус:** ядро готово · Python 3.11+ · 53 теста, ruff чисто
+> **Версия:** 0.2.0 · **Статус:** ядро готово · Python 3.11+ · 59 тестов, ruff чисто
 
 Личный Telegram-бот-сторож домашней машины: следит за температурой CPU и дисков,
 шлёт предупреждение при перегреве и сообщение о возврате к норме, сообщает о
@@ -29,7 +29,7 @@
 - Для температуры CPU: `psutil` (ставится автоматически); опционально
   `lm-sensors` (бинарь `sensors`) как fallback.
 - Для температуры дисков: `smartmontools` (бинарь `smartctl`). Чтение SMART
-  обычно требует прав root.
+  обычно требует прав root — см. [«Права на SMART»](#права-на-smart-диски).
 
 ## Установка
 
@@ -59,13 +59,13 @@ cp config.example.toml config.toml
 Проверка конфига без запуска:
 
 ```bash
-sentinel-bot --config ./config.toml --check-config
+sa-home-bot --config ./config.toml --check-config
 ```
 
 ## Запуск
 
 ```bash
-sentinel-bot --config ./config.toml
+sa-home-bot --config ./config.toml
 ```
 
 Останов — `Ctrl+C` (SIGINT) или SIGTERM: бот штатно гасится, дошлёт прощание и
@@ -77,10 +77,50 @@ sentinel-bot --config ./config.toml
 Управляющие (нужно право в `allowed_commands` подписного чата): `/status`,
 `/stats`, `/scan_now`.
 
+## Права на SMART (диски)
+
+Чтение SMART требует root. Под пользовательской службой (`User=`, не root) есть
+два пути:
+
+1. **sudo-обёртка** (рекомендуется, не отходя от user-службы). Создайте
+   `~/.local/bin/smartctl`:
+
+   ```bash
+   #!/bin/sh
+   exec sudo /usr/sbin/smartctl "$@"
+   ```
+
+   ```bash
+   chmod +x ~/.local/bin/smartctl
+   ```
+
+   и беспарольный sudo в `/etc/sudoers.d/10-diag`:
+
+   ```
+   <user> ALL=(root) NOPASSWD: /usr/sbin/smartctl
+   ```
+
+   Адаптер ищет бинарь через `shutil.which`, поэтому обёртка из `~/.local/bin`
+   (если каталог в `PATH` службы) подхватывается автоматически.
+
+2. **Системная служба с `User=root`** — проще, но отход от непривилегированного
+   запуска.
+
+USB-мосты требуют типа адаптера (`-d`): он берётся автоматически из
+`smartctl --scan`, либо задаётся вручную в `[sensors.disks] devices` как
+`"/dev/sda:sntjmicron"`. Устройства без SMART (eMMC `/dev/mmcblk*` и т.п.)
+пропускаются молча.
+
+Проверить вручную, что мост отдаёт температуру:
+
+```bash
+smartctl -d sntjmicron -j -A /dev/sda   # temperature.current должно быть не null
+```
+
 ## Структура проекта
 
 ```
-src/sentinel_bot/
+src/sa_home_bot/
 ├── cli.py / app.py        # точка входа и сборка жизненного цикла
 ├── config.py / runtime.py # настройки (TOML+env), uptime
 ├── domain/                # чистое ядро: модели, политика порогов, reconciliation, рендер
@@ -112,11 +152,11 @@ ruff check .      # линтер
 
 ## Запуск под systemd (опционально)
 
-`/etc/systemd/system/sentinel-bot.service`:
+`/etc/systemd/system/sa-home-bot.service`:
 
 ```ini
 [Unit]
-Description=home-sentinel-bot
+Description=sa-home-bot
 After=network-online.target
 Wants=network-online.target
 
@@ -125,8 +165,8 @@ Type=simple
 # smartctl обычно требует root; иначе укажите непривилегированного пользователя
 # и настройте доступ к устройствам (cap_sys_rawio / sudoers).
 User=root
-WorkingDirectory=/opt/home-sentinel-bot
-ExecStart=/opt/home-sentinel-bot/.venv/bin/sentinel-bot --config /opt/home-sentinel-bot/config.toml
+WorkingDirectory=/opt/sa-home-bot
+ExecStart=/opt/sa-home-bot/.venv/bin/sa-home-bot --config /opt/sa-home-bot/config.toml
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
@@ -138,6 +178,6 @@ WantedBy=multi-user.target
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now sentinel-bot
-journalctl -u sentinel-bot -f
+sudo systemctl enable --now sa-home-bot
+journalctl -u sa-home-bot -f
 ```

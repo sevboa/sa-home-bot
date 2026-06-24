@@ -1,6 +1,6 @@
-from sentinel_bot.config import SubscriptionConfig
-from sentinel_bot.subscriptions.book import SubscriptionBook
-from sentinel_bot.subscriptions.models import Subscription
+from sa_home_bot.config import SubscriptionConfig
+from sa_home_bot.subscriptions.book import SubscriptionBook
+from sa_home_bot.subscriptions.models import Subscription
 
 
 def _book() -> SubscriptionBook:

@@ -1,11 +1,11 @@
-from sentinel_bot.bot.lifecycle import (
+from sa_home_bot.bot.lifecycle import (
     broadcast_system,
     render_link_restored,
     render_shutdown,
     render_startup,
 )
-from sentinel_bot.config import SubscriptionConfig
-from sentinel_bot.subscriptions.book import SubscriptionBook
+from sa_home_bot.config import SubscriptionConfig
+from sa_home_bot.subscriptions.book import SubscriptionBook
 
 
 class FakeNotifier:

@@ -3,8 +3,8 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "home-sentinel-bot"
-version = "0.1.0"
+name = "sa-home-bot"
+version = "0.2.0"
 description = "Личный Telegram-бот-сторож для мониторинга температуры CPU и дисков домашней машины"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -26,13 +26,13 @@ dev = [
 ]
 
 [project.scripts]
-sentinel-bot = "sentinel_bot.cli:main"
+sa-home-bot = "sa_home_bot.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-sentinel_bot = ["db/schema.sql"]
+sa_home_bot = ["db/schema.sql"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sentinel_bot.domain.models import KIND_CPU, SensorReading
-from sentinel_bot.domain.policy import ComponentPolicy, FixedThresholdPolicy
+from sa_home_bot.domain.models import KIND_CPU, SensorReading
+from sa_home_bot.domain.policy import ComponentPolicy, FixedThresholdPolicy
 
 BASE_TIME = datetime(2026, 6, 22, 12, 0, 0, tzinfo=UTC)
 

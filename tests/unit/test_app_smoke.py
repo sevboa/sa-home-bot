@@ -3,17 +3,17 @@
 import asyncio
 from types import SimpleNamespace
 
-import sentinel_bot.app as app_module
-from sentinel_bot.app import STATE_CLEAN_SHUTDOWN, run
-from sentinel_bot.config import (
+import sa_home_bot.app as app_module
+from sa_home_bot.app import STATE_CLEAN_SHUTDOWN, run
+from sa_home_bot.config import (
     DatabaseConfig,
     Settings,
     SubscriptionConfig,
     TelegramConfig,
 )
-from sentinel_bot.db.connection import Database
-from sentinel_bot.db.migrations import apply_migrations
-from sentinel_bot.db.store import Store
+from sa_home_bot.db.connection import Database
+from sa_home_bot.db.migrations import apply_migrations
+from sa_home_bot.db.store import Store
 
 
 class FakeBot:

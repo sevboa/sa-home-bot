@@ -1,7 +1,7 @@
 from datetime import timedelta
 
-from sentinel_bot.domain.health import classify_events, compute_health_diff
-from sentinel_bot.domain.models import (
+from sa_home_bot.domain.health import classify_events, compute_health_diff
+from sa_home_bot.domain.models import (
     ALERTING,
     EVENT_OVERHEAT_CLEARED,
     EVENT_OVERHEAT_STARTED,

@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from sentinel_bot.worker.queue import DedupQueue
+from sa_home_bot.worker.queue import DedupQueue
 
 
 @dataclass

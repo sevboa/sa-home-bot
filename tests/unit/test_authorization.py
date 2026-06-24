@@ -1,8 +1,8 @@
 from types import SimpleNamespace
 
-from sentinel_bot.bot.middlewares import DENIED_TEXT, AuthorizationMiddleware, extract_command
-from sentinel_bot.config import SubscriptionConfig
-from sentinel_bot.subscriptions.book import SubscriptionBook
+from sa_home_bot.bot.middlewares import DENIED_TEXT, AuthorizationMiddleware, extract_command
+from sa_home_bot.config import SubscriptionConfig
+from sa_home_bot.subscriptions.book import SubscriptionBook
 
 
 def _book():

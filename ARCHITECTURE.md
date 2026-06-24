@@ -1,4 +1,4 @@
-# Архитектура домашнего бота-сторожа (home-sentinel-bot)
+# Архитектура домашнего бота-сторожа (sa-home-bot)
 
 ## 0. Контекст и происхождение
 
@@ -87,8 +87,8 @@
 Как в оригинале:
 
 - обычный Python-пакет с `pyproject.toml` (PEP 621);
-- установка `pip install -e .`, entry point `sentinel-bot` в `[project.scripts]`;
-- запуск `sentinel-bot --config ./config.toml`, либо переменные окружения;
+- установка `pip install -e .`, entry point `sa-home-bot` в `[project.scripts]`;
+- запуск `sa-home-bot --config ./config.toml`, либо переменные окружения;
 - graceful shutdown по SIGINT/SIGTERM;
 - никаких ОС-сервисов внутри приложения; снаружи можно завернуть в systemd
   (пример unit-файла — в README как опциональный материал). Так как бот «крутится
@@ -261,7 +261,7 @@
 ## 5. Структура проекта
 
 ```
-home-sentinel-bot/
+sa-home-bot/
 ├── pyproject.toml
 ├── README.md
 ├── config.example.toml
@@ -269,7 +269,7 @@ home-sentinel-bot/
 ├── AUTHORIZATION.md           # детали модели прав
 ├── IMPLEMENTATION_PLAN.md     # пошаговый план
 ├── src/
-│   └── sentinel_bot/
+│   └── sa_home_bot/
 │       ├── __init__.py
 │       ├── __main__.py
 │       ├── cli.py             # argparse, загрузка Settings, --check-config

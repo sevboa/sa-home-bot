@@ -1,4 +1,4 @@
-from sentinel_bot.domain.models import (
+from sa_home_bot.domain.models import (
     ALERTING,
     EVENT_OVERHEAT_CLEARED,
     EVENT_OVERHEAT_STARTED,
@@ -6,7 +6,7 @@ from sentinel_bot.domain.models import (
     Event,
     HealthState,
 )
-from sentinel_bot.domain.render import render_event, render_state_line
+from sa_home_bot.domain.render import render_event, render_state_line
 
 from .conftest import BASE_TIME
 

@@ -1,4 +1,4 @@
-# План реализации home-sentinel-bot
+# План реализации sa-home-bot
 
 Документ — пошаговый план. Архитектура и контракты — в
 [`ARCHITECTURE.md`](./ARCHITECTURE.md), права — в
@@ -17,15 +17,15 @@
 
 ## Этап 0. Скелет проекта
 
-- `pyproject.toml` (PEP 621), entry point `sentinel-bot = "sentinel_bot.cli:main"`,
+- `pyproject.toml` (PEP 621), entry point `sa-home-bot = "sa_home_bot.cli:main"`,
   зависимости: `aiogram`, `apscheduler`, `aiosqlite`, `pydantic-settings`,
   `psutil`; dev: `pytest`, `pytest-asyncio`, `ruff`.
 - Дерево каталогов из `ARCHITECTURE.md` §5 с пустыми `__init__.py`.
 - `config.py` — все pydantic-модели Settings (см. §7 архитектуры), `config.example.toml`.
 - `cli.py` — argparse, `--config`, `--check-config` (загрузить и напечатать конфиг).
 - `utils/logging.py` — plain/json.
-- **Готово:** `pip install -e ".[dev]"`, `sentinel-bot --help`,
-  `sentinel-bot --config ./config.toml --check-config` работают.
+- **Готово:** `pip install -e ".[dev]"`, `sa-home-bot --help`,
+  `sa-home-bot --config ./config.toml --check-config` работают.
 
 ## Этап 1. БД и миграции
 
@@ -206,7 +206,7 @@ CREATE TABLE IF NOT EXISTS health_notifications (
 
 ## Проверка end-to-end (после MVP)
 
-1. **Конфиг:** `sentinel-bot --config ./config.toml --check-config` — печатает
+1. **Конфиг:** `sa-home-bot --config ./config.toml --check-config` — печатает
    разобранный конфиг без ошибок.
 2. **Unit + lint:** `pytest` (всё зелёное), `ruff check .` (чисто).
 3. **Сухой прогон с мок-датчиками:** прогнать `SensorScanJob` на фикстурах

@@ -1,4 +1,4 @@
-from sentinel_bot.domain.policy import BAND_MID, BAND_OVER, BAND_UNDER, FixedThresholdPolicy
+from sa_home_bot.domain.policy import BAND_MID, BAND_OVER, BAND_UNDER, FixedThresholdPolicy
 
 from .conftest import make_reading
 

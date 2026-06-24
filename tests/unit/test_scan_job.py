@@ -2,19 +2,19 @@
 
 import pytest_asyncio
 
-from sentinel_bot.config import (
+from sa_home_bot.config import (
     CpuSensorConfig,
     SensorsConfig,
     Settings,
     SubscriptionConfig,
     TelegramConfig,
 )
-from sentinel_bot.db.connection import Database
-from sentinel_bot.db.migrations import apply_migrations
-from sentinel_bot.db.store import Store
-from sentinel_bot.jobs.base import JobContext
-from sentinel_bot.jobs.scan import SensorScanJob
-from sentinel_bot.subscriptions.book import SubscriptionBook
+from sa_home_bot.db.connection import Database
+from sa_home_bot.db.migrations import apply_migrations
+from sa_home_bot.db.store import Store
+from sa_home_bot.jobs.base import JobContext
+from sa_home_bot.jobs.scan import SensorScanJob
+from sa_home_bot.subscriptions.book import SubscriptionBook
 
 from .conftest import make_reading
 

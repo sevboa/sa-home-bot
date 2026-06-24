@@ -1,4 +1,4 @@
-# Пример конфигурации home-sentinel-bot.
+# Пример конфигурации sa-home-bot.
 # Скопируйте в config.toml и подставьте свои значения.
 # Любое значение можно переопределить переменной окружения с префиксом
 # SENTINEL__ и разделителем вложенности "__", например:
@@ -30,7 +30,12 @@ crit_c = 65.0
 hysteresis_delta_c = 5.0
 consecutive_to_alert = 2
 consecutive_to_clear = 2
-devices = []                       # пусто = автоопределение через smartctl
+# Пусто = автоопределение через `smartctl --scan` (тип адаптера -d берётся оттуда).
+# Можно задать вручную "устройство:тип", если автоскан определяет тип неверно —
+# например USB-мост JMicron без -d отдаёт temperature: null:
+#   devices = ["/dev/sda:sntjmicron", "/dev/sdb:sat"]
+# eMMC (/dev/mmcblk*) и подобные без SMART пропускаются автоматически.
+devices = []
 
 [logging]
 level = "INFO"

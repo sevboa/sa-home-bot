@@ -1,10 +1,10 @@
 import pytest
 import pytest_asyncio
 
-from sentinel_bot.db.connection import Database
-from sentinel_bot.db.migrations import apply_migrations
-from sentinel_bot.db.store import NOTIF_ALERT, Store
-from sentinel_bot.domain.models import (
+from sa_home_bot.db.connection import Database
+from sa_home_bot.db.migrations import apply_migrations
+from sa_home_bot.db.store import NOTIF_ALERT, Store
+from sa_home_bot.domain.models import (
     ALERTING,
     OK,
     HealthDiff,
