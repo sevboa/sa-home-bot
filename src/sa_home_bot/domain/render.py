@@ -66,7 +66,7 @@ def _fmt_duration(td) -> str:
         return f"{hours} ч {minutes} м"
     if minutes:
         return f"{minutes} м"
-    return "<1 м"
+    return "&lt;1 м"  # &lt; — «<» экранирован для HTML parse_mode
 
 
 def render_downtime(events: list[PowerEvent]) -> str:

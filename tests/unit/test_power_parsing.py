@@ -149,3 +149,11 @@ def test_render_shows_span_and_downtime():
 
 def test_render_downtime_empty():
     assert "Нет данных" in render_downtime([])
+
+
+def test_render_escapes_short_downtime_for_html():
+    # Простой <1 минуты не должен давать сырой «<» — иначе Telegram HTML падает.
+    from sa_home_bot.domain.render import _fmt_duration
+    from datetime import timedelta
+
+    assert _fmt_duration(timedelta(seconds=30)) == "&lt;1 м"
