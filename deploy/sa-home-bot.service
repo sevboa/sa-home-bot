@@ -1,0 +1,23 @@
+[Unit]
+Description=sa-home-bot — бот-сторож домашней машины (температуры CPU/дисков)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# root нужен для smartctl (SAT-команды к USB-дискам); smartd работает так же.
+User=root
+WorkingDirectory=/home/sevboa/Github/sa-home-bot
+ExecStart=/home/sevboa/Github/sa-home-bot/.venv/bin/sa-home-bot --config /home/sevboa/Github/sa-home-bot/config.toml
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Немного изоляции (root, но без лишнего)
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

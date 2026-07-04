@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from math import sqrt
 
 from sa_home_bot.db.connection import Database
 from sa_home_bot.domain.models import (
@@ -18,7 +19,9 @@ from sa_home_bot.domain.models import (
     HealthDiff,
     HealthState,
     KnownState,
+    SensorReading,
 )
+from sa_home_bot.domain.policy import BaselineStats
 
 NOTIF_ALERT = "alert"
 NOTIF_CLEARED = "cleared"
@@ -265,6 +268,50 @@ class Store:
         )
         row = await cur.fetchone()
         return row["message_id"] if row else None
+
+    # --- readings (история для BaselinePolicy) ---
+
+    async def record_readings(self, readings: list[SensorReading]) -> None:
+        """Записать срез показаний в историю (для baseline)."""
+        if not readings:
+            return
+        async with self.db.transaction() as conn:
+            await conn.executemany(
+                "INSERT INTO readings(component_id, temperature_c, taken_at) VALUES(?, ?, ?)",
+                [(r.component_id, r.temperature_c, _iso(r.taken_at)) for r in readings],
+            )
+
+    async def baseline_stats(self, component_id: str, window: int) -> BaselineStats:
+        """Статистика по последним ``window`` показаниям компонента."""
+        cur = await self.db.conn.execute(
+            "SELECT COUNT(*) AS n, AVG(t) AS m, AVG(t*t) AS mm FROM ("
+            "  SELECT temperature_c AS t FROM readings WHERE component_id=? "
+            "  ORDER BY id DESC LIMIT ?"
+            ")",
+            (component_id, window),
+        )
+        row = await cur.fetchone()
+        n = row["n"] or 0
+        if n == 0:
+            return BaselineStats(count=0, mean=0.0, std=0.0)
+        mean = row["m"]
+        variance = max(0.0, (row["mm"] or 0.0) - mean * mean)
+        return BaselineStats(count=n, mean=mean, std=sqrt(variance))
+
+    async def prune_readings(self, keep_per_component: int) -> int:
+        """Оставить последние ``keep_per_component`` показаний на каждый компонент."""
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                "DELETE FROM readings WHERE id IN ("
+                "  SELECT id FROM ("
+                "    SELECT id, ROW_NUMBER() OVER ("
+                "      PARTITION BY component_id ORDER BY id DESC"
+                "    ) AS rn FROM readings"
+                "  ) WHERE rn > ?"
+                ")",
+                (keep_per_component,),
+            )
+            return cur.rowcount
 
     # --- housekeeping ---
 

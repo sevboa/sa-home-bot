@@ -33,6 +33,18 @@ CREATE TABLE IF NOT EXISTS health_states (
     notified_cleared_at   TEXT                 -- когда успешно разослали "остыл"
 );
 
+-- История показаний датчиков (для BaselinePolicy, этап 2).
+-- Пишется только когда хотя бы один вид датчиков в режиме mode="baseline".
+CREATE TABLE IF NOT EXISTS readings (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    component_id  TEXT NOT NULL,               -- "cpu:package" / "disk:/dev/sda"
+    temperature_c REAL NOT NULL,
+    taken_at      TEXT NOT NULL
+);
+
+-- Скользящее окно берётся по последним id в рамках component_id.
+CREATE INDEX IF NOT EXISTS idx_readings_component ON readings(component_id, id);
+
 -- Отправленные сообщения: по одному на (component, chat, kind) —
 -- нужно для reply "остыл" на исходный "перегрев".
 CREATE TABLE IF NOT EXISTS health_notifications (

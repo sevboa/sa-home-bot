@@ -12,7 +12,7 @@ from sa_home_bot.domain.models import (
     Transition,
 )
 
-from .conftest import BASE_TIME
+from .conftest import BASE_TIME, make_reading
 
 
 @pytest_asyncio.fixture
@@ -116,3 +116,57 @@ async def test_prune_job_runs(store, keep):
         await store.finish_job_run(rid, "ok", BASE_TIME)
     await store.prune_job_runs(keep_last=keep)
     assert len(await store.recent_job_runs(limit=100)) == keep
+
+
+# --- readings / baseline_stats ---
+
+
+async def test_baseline_stats_empty(store):
+    stats = await store.baseline_stats("cpu:pkg", window=100)
+    assert stats.count == 0
+    assert stats.mean == 0.0
+    assert stats.std == 0.0
+
+
+async def test_baseline_stats_mean_and_std(store):
+    for t in (38.0, 40.0, 42.0):
+        await store.record_readings([make_reading(t)])
+    stats = await store.baseline_stats("cpu:pkg", window=100)
+    assert stats.count == 3
+    assert stats.mean == pytest.approx(40.0)
+    # популяционное std для {38,40,42} = sqrt(8/3) ≈ 1.633
+    assert stats.std == pytest.approx((8 / 3) ** 0.5)
+
+
+async def test_baseline_stats_respects_window(store):
+    for t in (10.0, 20.0, 30.0, 40.0, 50.0):
+        await store.record_readings([make_reading(t)])
+    # Окно 2 -> последние два (40, 50).
+    stats = await store.baseline_stats("cpu:pkg", window=2)
+    assert stats.count == 2
+    assert stats.mean == pytest.approx(45.0)
+
+
+async def test_baseline_stats_isolated_per_component(store):
+    await store.record_readings(
+        [
+            make_reading(40.0, component_id="cpu:pkg"),
+            make_reading(50.0, component_id="disk:/dev/sda"),
+        ]
+    )
+    cpu = await store.baseline_stats("cpu:pkg", window=100)
+    disk = await store.baseline_stats("disk:/dev/sda", window=100)
+    assert cpu.count == 1 and cpu.mean == pytest.approx(40.0)
+    assert disk.count == 1 and disk.mean == pytest.approx(50.0)
+
+
+async def test_prune_readings_keeps_last_per_component(store):
+    for t in range(10):
+        await store.record_readings(
+            [make_reading(float(t), component_id="cpu:pkg"),
+             make_reading(float(t), component_id="disk:/dev/sda")]
+        )
+    deleted = await store.prune_readings(keep_per_component=3)
+    assert deleted == 14  # (10 - 3) на каждый из двух компонентов
+    assert (await store.baseline_stats("cpu:pkg", window=100)).count == 3
+    assert (await store.baseline_stats("disk:/dev/sda", window=100)).count == 3

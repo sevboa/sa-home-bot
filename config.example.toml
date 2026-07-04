@@ -22,6 +22,16 @@ crit_c = 90.0
 hysteresis_delta_c = 5.0            # обратно в ok при temp < warn - delta
 consecutive_to_alert = 3
 consecutive_to_clear = 3
+# Политика порогов: "fixed" (по умолчанию) — жёсткие warn/crit выше.
+# "baseline" — адаптивный порог: копит историю показаний в БД и алертит на
+# аномальное отклонение вверх. Порог = min(warn_c, mean + k_sigma*max(std, min_std)),
+# то есть baseline только опускает порог (ловит перегрев раньше на холодной машине),
+# warn_c остаётся верхней страховкой. Пока накоплено < baseline_min_samples — fixed.
+mode = "fixed"                      # fixed | baseline
+baseline_window = 240              # сколько последних показаний брать в статистику
+baseline_min_samples = 30          # минимум истории, иначе холодный старт (fixed)
+baseline_k_sigma = 4.0             # порог = mean + k_sigma * std
+baseline_min_std_c = 3.0           # нижняя граница std (защита от слишком узкого окна)
 
 [sensors.disks]
 enabled = true
@@ -30,6 +40,11 @@ crit_c = 65.0
 hysteresis_delta_c = 5.0
 consecutive_to_alert = 2
 consecutive_to_clear = 2
+mode = "fixed"                      # fixed | baseline (см. [sensors.cpu])
+baseline_window = 240
+baseline_min_samples = 30
+baseline_k_sigma = 4.0
+baseline_min_std_c = 3.0
 # Пусто = автоопределение через `smartctl --scan` (тип адаптера -d берётся оттуда).
 # Можно задать вручную "устройство:тип", если автоскан определяет тип неверно —
 # например USB-мост JMicron без -d отдаёт temperature: null:

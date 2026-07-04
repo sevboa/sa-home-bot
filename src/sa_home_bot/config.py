@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field
 from pydantic_settings import (
@@ -33,7 +33,24 @@ class ScheduleConfig(BaseModel):
     housekeeping_cron: str = "0 3 * * *"
 
 
-class CpuSensorConfig(BaseModel):
+class _BaselineParams(BaseModel):
+    """Общие поля выбора политики порогов и параметров baseline.
+
+    ``mode="fixed"`` (по умолчанию) — фиксированные warn/crit. ``mode="baseline"``
+    включает адаптивный порог: ``min(warn_c, mean + k_sigma * max(std, min_std))``
+    по последним ``baseline_window`` показаниям. Пока накоплено меньше
+    ``baseline_min_samples`` — используется фиксированный warn_c (холодный старт).
+    Baseline только повышает чувствительность; warn_c остаётся верхней страховкой.
+    """
+
+    mode: Literal["fixed", "baseline"] = "fixed"
+    baseline_window: int = Field(default=240, ge=1)
+    baseline_min_samples: int = Field(default=30, ge=1)
+    baseline_k_sigma: float = Field(default=4.0, gt=0)
+    baseline_min_std_c: float = Field(default=3.0, ge=0)
+
+
+class CpuSensorConfig(_BaselineParams):
     enabled: bool = True
     warn_c: float = 80.0
     crit_c: float = 90.0
@@ -42,7 +59,7 @@ class CpuSensorConfig(BaseModel):
     consecutive_to_clear: int = Field(default=3, ge=1)
 
 
-class DiskSensorConfig(BaseModel):
+class DiskSensorConfig(_BaselineParams):
     enabled: bool = True
     warn_c: float = 55.0
     crit_c: float = 65.0

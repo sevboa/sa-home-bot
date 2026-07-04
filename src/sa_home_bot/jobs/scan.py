@@ -21,7 +21,12 @@ from sa_home_bot.domain.models import (
     HealthState,
     SensorReading,
 )
-from sa_home_bot.domain.policy import ComponentPolicy, FixedThresholdPolicy
+from sa_home_bot.domain.policy import (
+    BaselinePolicy,
+    BaselineStats,
+    ComponentPolicy,
+    FixedThresholdPolicy,
+)
 from sa_home_bot.domain.render import render_event
 from sa_home_bot.jobs.base import JobContext, JobResult
 
@@ -44,35 +49,58 @@ class SensorScanJob:
     def job_type(self) -> str:
         return JOB_TYPE
 
-    def _build_resolver(self, config):
+    def _build_resolver(self, config, stats: dict[str, BaselineStats]):
         cpu_cfg = config.sensors.cpu
         disk_cfg = config.sensors.disks
-        cpu_policy = ComponentPolicy(
-            policy=FixedThresholdPolicy(cpu_cfg.warn_c, cpu_cfg.crit_c, cpu_cfg.hysteresis_delta_c),
-            consecutive_to_alert=cpu_cfg.consecutive_to_alert,
-            consecutive_to_clear=cpu_cfg.consecutive_to_clear,
-        )
-        disk_policy = ComponentPolicy(
-            policy=FixedThresholdPolicy(
-                disk_cfg.warn_c, disk_cfg.crit_c, disk_cfg.hysteresis_delta_c
-            ),
-            consecutive_to_alert=disk_cfg.consecutive_to_alert,
-            consecutive_to_clear=disk_cfg.consecutive_to_clear,
-        )
 
         def resolve(reading: SensorReading) -> ComponentPolicy:
-            return cpu_policy if reading.kind == KIND_CPU else disk_policy
+            cfg = cpu_cfg if reading.kind == KIND_CPU else disk_cfg
+            if cfg.mode == "baseline":
+                policy = BaselinePolicy(
+                    warn_c=cfg.warn_c,
+                    crit_c=cfg.crit_c,
+                    hysteresis_delta_c=cfg.hysteresis_delta_c,
+                    stats=stats.get(reading.component_id, BaselineStats(0, 0.0, 0.0)),
+                    min_samples=cfg.baseline_min_samples,
+                    k_sigma=cfg.baseline_k_sigma,
+                    min_std_c=cfg.baseline_min_std_c,
+                )
+            else:
+                policy = FixedThresholdPolicy(cfg.warn_c, cfg.crit_c, cfg.hysteresis_delta_c)
+            return ComponentPolicy(
+                policy=policy,
+                consecutive_to_alert=cfg.consecutive_to_alert,
+                consecutive_to_clear=cfg.consecutive_to_clear,
+            )
 
         return resolve
 
     async def run(self, ctx: JobContext) -> JobResult:
         now = _now()
         readings = await ctx.sensors.read_all()
-        resolver = self._build_resolver(ctx.config)
+        cpu_cfg = ctx.config.sensors.cpu
+        disk_cfg = ctx.config.sensors.disks
+        uses_baseline = "baseline" in (cpu_cfg.mode, disk_cfg.mode)
+
+        # Статистику берём по ПРОШЛЫМ показаниям — текущее ещё не записано,
+        # чтобы аномалия оценивалась относительно накопленной нормы.
+        stats: dict[str, BaselineStats] = {}
+        if uses_baseline:
+            for r in readings:
+                cfg = cpu_cfg if r.kind == KIND_CPU else disk_cfg
+                if cfg.mode == "baseline":
+                    stats[r.component_id] = await ctx.store.baseline_stats(
+                        r.component_id, cfg.baseline_window
+                    )
+
+        resolver = self._build_resolver(ctx.config, stats)
         known = await ctx.store.get_known_states()
 
         diff = compute_health_diff(readings, known, resolver, now)
         await ctx.store.apply_diff(diff, now)
+
+        if uses_baseline:
+            await ctx.store.record_readings(readings)
 
         alerts_sent = await self._dispatch_alerts(ctx, now)
         clears_sent = await self._dispatch_clears(ctx, now)
