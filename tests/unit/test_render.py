@@ -59,6 +59,16 @@ def _states():
     ]
 
 
+def _disks():
+    from sa_home_bot.domain.models import DISK_OK, DISK_WARN, DiskSummary
+
+    return [
+        DiskSummary("HDD1", DISK_WARN, 31.0, 137_000_000_000, 245_000_000_000, "ST9250"),
+        DiskSummary("HDD2", DISK_OK, 29.0, 277_000_000_000, 314_000_000_000, "Hitachi"),
+        DiskSummary("eMMC", None, None, 49_000_000_000, 56_000_000_000, None),
+    ]
+
+
 def test_render_status_full_lists_all_components():
     text = render_status_full(_states())
     assert "перегрев" in text.lower()  # sdb в ALERTING
@@ -79,19 +89,25 @@ def test_render_status_summary_has_uptime_temps_and_outage():
         up_at=BASE_TIME + timedelta(hours=2),
         down_approx=True,
     )
-    text = render_status_summary(BASE_TIME, timedelta(hours=1, minutes=47), _states(), outage)
+    cpu = [s for s in _states() if s.kind == KIND_CPU]
+    text = render_status_summary(
+        BASE_TIME, timedelta(hours=1, minutes=47), cpu, _disks(), outage
+    )
     assert "Сводка" in text
     assert "Аптайм" in text
     assert "CPU: 42.0°C" in text
-    assert "sda" in text and "sdb" in text
-    assert "🔥" in text  # sdb горячий
+    assert "HDD1 ⚠️" in text and "HDD2 ✅" in text  # smart-иконки
+    assert "eMMC ❔" in text  # SMART недоступен
+    assert "31°C" in text  # температура HDD1
+    assert "137 / 245 ГБ" in text  # свободное место
     assert "Последнее отключение" in text
 
 
 def test_render_status_summary_no_data():
-    text = render_status_summary(BASE_TIME, None, [], None)
-    assert "нет данных" in text.lower()
+    text = render_status_summary(BASE_TIME, None, [], [], None)
+    assert "Сводка" in text
     assert "Аптайм" not in text  # uptime None — строку не добавляем
+    assert "Диски" not in text  # дисков нет — секцию не показываем
 
 
 def test_render_stats_counts_and_runs():

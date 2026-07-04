@@ -9,6 +9,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from sa_home_bot.bot import commands, status_view
+from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.worker.queue import DedupQueue
@@ -20,9 +21,12 @@ router = Router(name="status")
 
 @router.message(Command(commands.STATUS.name))
 async def cmd_status(
-    message: Message, store: Store, subscription: Subscription | None = None
+    message: Message,
+    store: Store,
+    config: Settings,
+    subscription: Subscription | None = None,
 ) -> None:
-    text = await status_view.build_summary_text(store)
+    text = await status_view.build_summary_text(store, list(config.sensors.disks.devices))
     keyboard = status_view.build_status_keyboard(subscription)
     await message.answer(text, reply_markup=keyboard)
 

@@ -14,6 +14,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sa_home_bot.bot import commands
 from sa_home_bot.db.store import Store
+from sa_home_bot.domain.models import KIND_CPU
 from sa_home_bot.domain.render import (
     render_downtime,
     render_stats,
@@ -21,6 +22,7 @@ from sa_home_bot.domain.render import (
     render_status_summary,
 )
 from sa_home_bot.jobs.scan import SensorScanJob
+from sa_home_bot.sensors.disks import read_disk_summaries_sync
 from sa_home_bot.sensors.power import read_power_events_sync, read_uptime_sync
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.worker.queue import DedupQueue
@@ -49,13 +51,17 @@ def build_status_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def build_summary_text(store: Store) -> str:
+async def build_summary_text(store: Store, disk_specs: list[str]) -> str:
     loop = asyncio.get_running_loop()
     states = await store.get_all_states()
+    cpu_states = [s for s in states if s.kind == KIND_CPU]
     uptime = await loop.run_in_executor(None, read_uptime_sync)
+    disks = await loop.run_in_executor(None, read_disk_summaries_sync, disk_specs)
     events = await loop.run_in_executor(None, read_power_events_sync, 1)
     last_outage = events[0] if events else None
-    return render_status_summary(datetime.now(tz=UTC), uptime, states, last_outage)
+    return render_status_summary(
+        datetime.now(tz=UTC), uptime, cpu_states, disks, last_outage
+    )
 
 
 async def build_full_text(store: Store) -> str:

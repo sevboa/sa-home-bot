@@ -12,12 +12,20 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 
-from sa_home_bot.domain.models import KIND_DISK, SensorReading
+from sa_home_bot.domain.models import (
+    DISK_FAIL,
+    DISK_OK,
+    DISK_WARN,
+    KIND_DISK,
+    DiskSummary,
+    SensorReading,
+)
 
 log = logging.getLogger(__name__)
 
@@ -182,3 +190,179 @@ def read_disks_sync(specs: list[str], now: datetime) -> list[SensorReading]:
         if reading is not None:
             readings.append(reading)
     return readings
+
+
+# --- Сводка по дискам для /status (SMART-здоровье + температура + место) ---
+
+
+@dataclass(frozen=True)
+class BlockDisk:
+    """Физический диск из lsblk: путь, тип носителя, точки монтирования."""
+
+    path: str  # /dev/sda
+    is_mmc: bool  # eMMC/SD — SMART недоступен
+    mountpoints: tuple[str, ...]
+    model: str | None
+
+
+def health_args(target: DiskTarget) -> list[str]:
+    """Аргументы smartctl для здоровья+атрибутов: ``[-d тип] -j -H -A /dev/X``."""
+    args: list[str] = []
+    if target.dev_type:
+        args += ["-d", target.dev_type]
+    args += ["-j", "-H", "-A", target.name]
+    return args
+
+
+def _extract_temp(data: dict) -> float | None:
+    temp = None
+    if isinstance(data.get("temperature"), dict):
+        temp = data["temperature"].get("current")
+    if temp is None:
+        table = data.get("ata_smart_attributes", {}).get("table", [])
+        for attr in table:
+            if attr.get("id") == 194:
+                temp = attr.get("raw", {}).get("value")
+                break
+    return float(temp) if temp is not None else None
+
+
+def parse_health(data: dict) -> str | None:
+    """Классифицировать SMART-здоровье: DISK_OK | DISK_WARN | DISK_FAIL | None.
+
+    FAILED → диск при смерти. PASSED, но с pending/uncorrectable секторами →
+    предупреждение. Иначе — норма. Нет smart_status → None (недоступно).
+    """
+    passed = data.get("smart_status", {}).get("passed")
+    if passed is None:
+        return None
+    if passed is False:
+        return DISK_FAIL
+
+    def _attr(idn: int) -> int:
+        for a in data.get("ata_smart_attributes", {}).get("table", []):
+            if a.get("id") == idn:
+                return a.get("raw", {}).get("value") or 0
+        return 0
+
+    pending = _attr(197)  # Current_Pending_Sector
+    uncorrectable = _attr(198)  # Offline_Uncorrectable
+    return DISK_WARN if (pending or uncorrectable) else DISK_OK
+
+
+def parse_lsblk_disks(data: dict) -> list[BlockDisk]:
+    """Разобрать ``lsblk -J`` в список физических дисков (type=disk)."""
+    disks: list[BlockDisk] = []
+    for dev in data.get("blockdevices", []):
+        if dev.get("type") != "disk" or "boot" in (dev.get("name") or ""):
+            continue  # пропускаем mmcblkXbootY и не-диски
+        mps: list[str] = []
+        _collect_mountpoints(dev, mps)
+        tran = dev.get("tran")
+        name = dev.get("name") or ""
+        disks.append(
+            BlockDisk(
+                path=dev.get("path") or f"/dev/{name}",
+                is_mmc=(tran == "mmc") or name.startswith("mmcblk"),
+                mountpoints=tuple(mps),
+                model=dev.get("model"),
+            )
+        )
+    return disks
+
+
+def _collect_mountpoints(node: dict, out: list[str]) -> None:
+    mp = node.get("mountpoint")
+    if not mp and isinstance(node.get("mountpoints"), list):
+        mp = next((m for m in node["mountpoints"] if m), None)
+    if mp and mp != "[SWAP]":
+        out.append(mp)
+    for child in node.get("children", []):
+        _collect_mountpoints(child, out)
+
+
+def _disk_usage(mountpoints: tuple[str, ...]) -> tuple[int | None, int | None]:
+    """Суммарные (free, total) байты по смонтированным ФС диска."""
+    import psutil
+
+    free = total = 0
+    seen = False
+    for mp in mountpoints:
+        try:
+            u = psutil.disk_usage(mp)
+        except OSError:
+            continue
+        free += u.free
+        total += u.total
+        seen = True
+    return (free, total) if seen else (None, None)
+
+
+def _list_block_disks_sync() -> list[BlockDisk]:
+    if shutil.which("lsblk") is None:
+        return []
+    try:
+        out = subprocess.run(
+            ["lsblk", "-J", "-b", "-o", "NAME,TYPE,MOUNTPOINT,TRAN,MODEL,PATH"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("lsblk не сработал: %s", exc)
+        return []
+    try:
+        return parse_lsblk_disks(json.loads(out.stdout))
+    except json.JSONDecodeError as exc:
+        log.warning("lsblk: невалидный JSON: %s", exc)
+        return []
+
+
+def _label_disks(disks: list[BlockDisk]) -> list[tuple[str, BlockDisk]]:
+    """Назначить метки: не-mmc диски → HDD1, HDD2…; mmc → eMMC."""
+    labelled: list[tuple[str, BlockDisk]] = []
+    hdd_n = 0
+    for d in sorted(disks, key=lambda x: (x.is_mmc, x.path)):
+        if d.is_mmc:
+            label = "eMMC"
+        else:
+            hdd_n += 1
+            label = f"HDD{hdd_n}"
+        labelled.append((label, d))
+    return labelled
+
+
+def read_disk_summaries_sync(specs: list[str]) -> list[DiskSummary]:
+    """Собрать сводку по ВСЕМ физическим дискам (блокирующе, через executor).
+
+    SMART-здоровье/температура снимаются только для дисков с известным типом
+    адаптера (из конфига), сопоставление по реальному пути (by-id → /dev/sdX) —
+    иначе автоопределение USB-моста виснет. Свободное место — по точкам
+    монтирования, для всех дисков (включая eMMC без SMART).
+    """
+    # SMART по реальному пути устройства.
+    smart: dict[str, tuple[str | None, float | None]] = {}
+    for target in _resolve_targets(specs):
+        if not is_smart_capable(target.name):
+            continue
+        data = _run_smartctl(health_args(target))
+        if not data:
+            continue
+        real = os.path.realpath(target.name)
+        smart[real] = (parse_health(data), _extract_temp(data))
+
+    summaries: list[DiskSummary] = []
+    for label, disk in _label_disks(_list_block_disks_sync()):
+        health, temp = smart.get(os.path.realpath(disk.path), (None, None))
+        free, total = _disk_usage(disk.mountpoints)
+        summaries.append(
+            DiskSummary(
+                label=label,
+                health=health,
+                temperature_c=temp,
+                free_bytes=free,
+                total_bytes=total,
+                model=disk.model,
+            )
+        )
+    return summaries

@@ -7,11 +7,14 @@ from html import escape
 
 from sa_home_bot.domain.models import (
     ALERTING,
+    DISK_FAIL,
+    DISK_OK,
+    DISK_WARN,
     EVENT_OVERHEAT_CLEARED,
     EVENT_OVERHEAT_STARTED,
     KIND_CPU,
-    KIND_DISK,
     POWER_CLEAN,
+    DiskSummary,
     Event,
     HealthState,
     PowerEvent,
@@ -101,32 +104,47 @@ def render_status_full(states: list[HealthState]) -> str:
     return "\n".join(lines)
 
 
+_DISK_ICON = {DISK_OK: "✅", DISK_WARN: "⚠️", DISK_FAIL: "❌"}
+
+
+def _fmt_gb(nbytes: int | None) -> str:
+    return "?" if nbytes is None else f"{nbytes / 1e9:.0f}"
+
+
+def render_disk_line(d: DiskSummary) -> str:
+    """Строка диска в сводке: «HDD1 ⚠️ 31°C · своб. 137 / 245 ГБ»."""
+    icon = _DISK_ICON.get(d.health, "❔")  # ❔ — SMART недоступен (eMMC)
+    parts = [f"{escape(d.label)} {icon}"]
+    if d.temperature_c is not None:
+        parts.append(f"{d.temperature_c:.0f}°C")
+    if d.total_bytes:
+        parts.append(f"· своб. {_fmt_gb(d.free_bytes)} / {_fmt_gb(d.total_bytes)} ГБ")
+    else:
+        parts.append("· не смонтирован")
+    return " ".join(parts)
+
+
 def render_status_summary(
     now: datetime,
     uptime: timedelta | None,
-    states: list[HealthState],
+    cpu_states: list[HealthState],
+    disks: list[DiskSummary],
     last_outage: PowerEvent | None,
 ) -> str:
-    """Краткая сводка (/status): время отчёта, аптайм, температуры, отключение."""
+    """Краткая сводка (/status): время отчёта, аптайм, температуры, диски, отключение."""
     lines = [f"📊 <b>Сводка</b> — {_fmt_dt(now)}"]
     if uptime is not None:
         lines.append(f"⏱ Аптайм: {_fmt_duration(uptime)}")
 
-    cpu = [s for s in states if s.kind == KIND_CPU]
-    disks = [s for s in states if s.kind == KIND_DISK]
+    cpu = [s for s in cpu_states if s.kind == KIND_CPU]
     if cpu:
         hot = any(s.status == ALERTING for s in cpu)
         tmax = max(s.temperature_c for s in cpu)
         lines.append(f"{'🔥' if hot else '✅'} CPU: {tmax:.1f}°C")
+
     if disks:
-        parts = [
-            f"{escape(s.label)} {s.temperature_c:.0f}°C"
-            f"{' 🔥' if s.status == ALERTING else ''}"
-            for s in disks
-        ]
-        lines.append("💽 Диски: " + " · ".join(parts))
-    if not states:
-        lines.append("Пока нет данных — сканер ещё не снимал срез.")
+        lines.append("💽 <b>Диски</b>")
+        lines.extend(render_disk_line(d) for d in disks)
 
     if last_outage is not None:
         lines.append("")

@@ -27,6 +27,11 @@ EVENT_SYSTEM = "system"
 POWER_CLEAN = "clean"  # штатное выключение/перезагрузка (был shutdown)
 POWER_UNEXPECTED = "unexpected"  # внезапное (crash): питание/зависание/reset
 
+# --- SMART-здоровье диска (для сводки /status) ---
+DISK_OK = "ok"  # SMART PASSED, нет битых секторов
+DISK_WARN = "warning"  # PASSED, но есть pending/uncorrectable сектора
+DISK_FAIL = "failed"  # SMART FAILED — диск при смерти
+
 
 @dataclass(frozen=True)
 class SensorReading:
@@ -106,6 +111,23 @@ class PowerEvent:
         if self.down_at is None or self.up_at is None:
             return None
         return self.up_at - self.down_at
+
+
+@dataclass(frozen=True)
+class DiskSummary:
+    """Краткая сводка по физическому диску для /status.
+
+    Собирается на лету (не из БД): SMART-здоровье и температура — из smartctl
+    (только для дисков с известным типом адаптера), свободное место — из точек
+    монтирования. `health`/`temperature_c` = None, если SMART недоступен (eMMC).
+    """
+
+    label: str  # короткая метка: HDD1, HDD2, eMMC
+    health: str | None  # DISK_OK | DISK_WARN | DISK_FAIL | None (недоступно)
+    temperature_c: float | None
+    free_bytes: int | None
+    total_bytes: int | None
+    model: str | None = None
 
 
 @dataclass(frozen=True)
