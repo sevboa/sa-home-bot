@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # --- Статусы компонента ---
 OK = "ok"
@@ -88,14 +88,24 @@ class PowerEvent:
     """Одно отключение машины, восстановленное из журнала загрузок (`last`).
 
     Каждая завершённая boot-сессия даёт одно событие: либо штатное выключение
-    (`POWER_CLEAN`, известен момент `shutdown_at`), либо внезапный обрыв
-    (`POWER_UNEXPECTED` — в wtmp нет момента выключения, только факт `crash`).
+    (`POWER_CLEAN` — `down_at` = точный момент shutdown), либо внезапный обрыв
+    (`POWER_UNEXPECTED` — в wtmp момента выключения нет, только факт `crash`;
+    `down_at` оценивается по последнему событию systemd-журнала перед обрывом,
+    поле `down_approx=True`). `up_at` — когда машина поднялась снова.
     """
 
     kind: str  # POWER_CLEAN | POWER_UNEXPECTED
-    boot_at: datetime  # когда началась сессия, которая так завершилась (включение)
-    shutdown_at: datetime | None  # момент штатного выключения (только clean)
-    next_boot_at: datetime | None  # когда машина поднялась снова (для unexpected — оценка)
+    boot_at: datetime  # старт сессии, которая так завершилась (для сопоставления с journal)
+    down_at: datetime | None  # когда машина погасла (для unexpected может быть None)
+    up_at: datetime | None  # когда поднялась снова
+    down_approx: bool = False  # down_at приблизителен (из journal, а не точный shutdown)
+
+    @property
+    def downtime(self) -> timedelta | None:
+        """Длительность простоя, если известны оба конца."""
+        if self.down_at is None or self.up_at is None:
+            return None
+        return self.up_at - self.down_at
 
 
 @dataclass(frozen=True)

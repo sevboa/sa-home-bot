@@ -47,7 +47,26 @@ def render_state_line(state: HealthState) -> str:
 
 
 def _fmt_dt(dt) -> str:
-    return dt.strftime("%d.%m %H:%M")
+    # last даёт время с локальным offset, journal — в UTC; приводим к единой
+    # локальной TZ процесса, чтобы обе метки печатались в одном поясе.
+    return dt.astimezone().strftime("%d.%m %H:%M")
+
+
+def _fmt_duration(td) -> str:
+    """Простой в человекочитаемом виде: «2 д 3 ч» / «9 ч 11 м» / «17 м»."""
+    total = int(td.total_seconds())
+    if total < 0:
+        total = 0
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    if days:
+        return f"{days} д {hours} ч"
+    if hours:
+        return f"{hours} ч {minutes} м"
+    if minutes:
+        return f"{minutes} м"
+    return "<1 м"
 
 
 def render_downtime(events: list[PowerEvent]) -> str:
@@ -56,12 +75,11 @@ def render_downtime(events: list[PowerEvent]) -> str:
         return "Нет данных об отключениях (журнал `last` пуст или недоступен)."
     lines = ["<b>Последние отключения</b>", ""]
     for e in events:
-        if e.kind == POWER_CLEAN:
-            when = _fmt_dt(e.shutdown_at) if e.shutdown_at else "?"
-            lines.append(f"🔌 штатно — {when}")
-        else:
-            tail = f", поднялась {_fmt_dt(e.next_boot_at)}" if e.next_boot_at else ""
-            lines.append(
-                f"⚡ внезапно — работала с {_fmt_dt(e.boot_at)}, оборвана{tail}"
-            )
+        icon, word = ("🔌", "штатно") if e.kind == POWER_CLEAN else ("⚡", "внезапно")
+        down = ("≈ " if e.down_approx else "") + _fmt_dt(e.down_at) if e.down_at else "?"
+        up = _fmt_dt(e.up_at) if e.up_at else "?"
+        span = f"{down} → {up}"
+        dt = e.downtime
+        tail = f" · простой {_fmt_duration(dt)}" if dt is not None else ""
+        lines.append(f"{icon} <b>{word}</b> · {span}{tail}")
     return "\n".join(lines)

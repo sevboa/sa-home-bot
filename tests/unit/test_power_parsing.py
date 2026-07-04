@@ -1,58 +1,123 @@
-"""Парсинг журнала загрузок (`last`) и рендер /downtime."""
+"""Парсинг журнала загрузок (`last` + `journalctl`) и рендер /downtime."""
 
 from __future__ import annotations
 
+import json
+from datetime import datetime
+
 from sa_home_bot.domain.models import POWER_CLEAN, POWER_UNEXPECTED
 from sa_home_bot.domain.render import render_downtime
-from sa_home_bot.sensors.power import parse_last_reboots
+from sa_home_bot.sensors.power import (
+    enrich_unexpected,
+    parse_journal_boots,
+    parse_last_reboots,
+)
 
-# Реальный по форме вывод `last -xR --time-format iso reboot` (новые сверху).
+# Реальный по форме вывод `last -xR --time-format iso reboot` (новые сверху,
+# непрерывная цепочка: up_at каждого = START следующей строки).
 SAMPLE = """\
 reboot   system boot  6.12.90 2026-07-05T00:23:52+0500  - still running
 reboot   system boot  6.12.90 2026-07-04T12:15:39+0500  - crash
 reboot   system boot  6.12.90 2026-07-04T10:42:51+0500  - crash
+reboot   system boot  6.12.90 2026-06-29T10:12:08+0500  - crash
 reboot   system boot  6.12.90 2026-06-28T16:30:05+0500  - 2026-06-29T01:45:53+0500   (09:15)
-reboot   system boot  6.12.90 2026-06-28T04:24:37+0500  - 2026-06-28T10:00:00+0500   (05:35)
 
 wtmp begins Mon Jun 22 15:28:00 2026
 """
 
 
+def _epoch_us(iso: str) -> int:
+    return int(datetime.fromisoformat(iso).timestamp() * 1_000_000)
+
+
+# journalctl --list-boots -o json: сессии по времени, first/last в микросекундах.
+# first_entry намеренно на ~12 с позже last-START (как на реальной машине).
+JOURNAL = json.dumps(
+    [
+        {
+            "index": -1,
+            "first_entry": _epoch_us("2026-07-04T12:15:51+0500"),
+            "last_entry": _epoch_us("2026-07-04T15:12:01+0500"),  # обрыв сессии 12:15
+        },
+        {
+            "index": -2,
+            "first_entry": _epoch_us("2026-07-04T10:43:04+0500"),
+            "last_entry": _epoch_us("2026-07-04T11:58:01+0500"),  # обрыв сессии 10:42
+        },
+        {
+            "index": 0,
+            "first_entry": _epoch_us("2026-07-05T00:24:02+0500"),
+            "last_entry": _epoch_us("2026-07-05T01:26:01+0500"),
+        },
+    ]
+)
+
+
 def test_parse_classifies_crash_and_clean():
     events = parse_last_reboots(SAMPLE)
-    kinds = [e.kind for e in events]
-    assert kinds == [
+    assert [e.kind for e in events] == [
         POWER_UNEXPECTED,  # 04.07 12:15 crash
         POWER_UNEXPECTED,  # 04.07 10:42 crash
+        POWER_UNEXPECTED,  # 29.06 10:12 crash
         POWER_CLEAN,       # 28.06 16:30 → 29.06 01:45
-        POWER_CLEAN,       # 28.06 04:24 → 28.06 10:00
     ]
 
 
-def test_clean_event_has_shutdown_time():
+def test_clean_event_has_exact_down_and_up():
     events = parse_last_reboots(SAMPLE)
-    clean = events[2]
+    clean = events[3]
     assert clean.kind == POWER_CLEAN
-    assert clean.shutdown_at is not None
-    assert clean.shutdown_at.hour == 1 and clean.shutdown_at.minute == 45
+    assert clean.down_approx is False
+    assert clean.down_at.hour == 1 and clean.down_at.minute == 45  # штатный shutdown
+    assert clean.up_at.hour == 10 and clean.up_at.minute == 12     # поднялась 29.06 10:12
+    assert clean.downtime is not None  # оба конца известны
 
 
-def test_unexpected_event_recovery_time():
+def test_unexpected_without_journal_has_no_down_at():
     events = parse_last_reboots(SAMPLE)
-    # Самое новое отключение (crash 12:15) — машина поднялась в текущую сессию 00:23.
     first = events[0]
     assert first.kind == POWER_UNEXPECTED
-    assert first.shutdown_at is None
-    assert first.next_boot_at is not None
-    assert first.next_boot_at.hour == 0 and first.next_boot_at.minute == 23
-    # Следующий crash (10:42) поднялся в сессию 12:15.
-    assert events[1].next_boot_at.hour == 12 and events[1].next_boot_at.minute == 15
+    assert first.down_at is None       # без journal обрыв неизвестен
+    assert first.down_approx is True
+    assert first.up_at.hour == 0 and first.up_at.minute == 23  # поднялась 05.07 00:23
+    assert first.downtime is None
+
+
+def test_enrich_fills_down_at_from_journal():
+    events = parse_last_reboots(SAMPLE)
+    boots = parse_journal_boots(JOURNAL)
+    enriched = enrich_unexpected(events, boots)
+    crash = enriched[0]  # сессия 04.07 12:15 → last_entry 15:12
+    assert crash.kind == POWER_UNEXPECTED
+    # Сравнение aware-datetime TZ-независимо (журнал хранит время в UTC).
+    assert crash.down_at == datetime.fromisoformat("2026-07-04T15:12:01+0500")
+    assert crash.down_approx is True
+    # простой: 15:12 04.07 → 00:23 05.07 ≈ 9 ч 11 м
+    assert crash.downtime is not None
+    assert 9 * 3600 < crash.downtime.total_seconds() < 10 * 3600
+
+
+def test_enrich_leaves_clean_untouched():
+    events = parse_last_reboots(SAMPLE)
+    boots = parse_journal_boots(JOURNAL)
+    enriched = enrich_unexpected(events, boots)
+    clean = enriched[3]
+    assert clean.down_at.hour == 1 and clean.down_at.minute == 45  # не тронут journal-ом
+
+
+def test_enrich_no_match_keeps_none():
+    # journal без подходящих сессий → down_at остаётся None.
+    events = parse_last_reboots(SAMPLE)
+    far = json.dumps(
+        [{"index": 0, "first_entry": _epoch_us("2020-01-01T00:00:00+0500"),
+          "last_entry": _epoch_us("2020-01-01T01:00:00+0500")}]
+    )
+    enriched = enrich_unexpected(events, parse_journal_boots(far))
+    assert enriched[0].down_at is None
 
 
 def test_still_running_is_not_an_event():
-    events = parse_last_reboots(SAMPLE)
-    # 5 reboot-строк, но текущая (still running) — не отключение.
-    assert len(events) == 4
+    assert len(parse_last_reboots(SAMPLE)) == 4
 
 
 def test_limit_truncates_to_newest():
@@ -66,13 +131,20 @@ def test_parse_ignores_noise_lines():
     assert parse_last_reboots("wtmp begins ...\n\n") == []
 
 
-def test_render_downtime_shows_both_reasons():
-    events = parse_last_reboots(SAMPLE)
+def test_parse_journal_boots_handles_garbage():
+    assert parse_journal_boots("not json") == []
+    assert parse_journal_boots("[]") == []
+    assert parse_journal_boots('[{"index": 0}]') == []  # нет first/last
+
+
+def test_render_shows_span_and_downtime():
+    events = enrich_unexpected(parse_last_reboots(SAMPLE), parse_journal_boots(JOURNAL))
     text = render_downtime(events)
-    assert "⚡ внезапно" in text
-    assert "🔌 штатно" in text
-    assert "поднялась 05.07 00:23" in text
-    assert "🔌 штатно — 29.06 01:45" in text
+    assert "⚡ <b>внезапно</b>" in text
+    assert "🔌 <b>штатно</b>" in text
+    assert "→" in text
+    assert "простой" in text
+    assert "≈" in text  # приблизительный момент внезапного обрыва
 
 
 def test_render_downtime_empty():
