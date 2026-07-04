@@ -23,6 +23,10 @@ EVENT_OVERHEAT_STARTED = "overheat_started"
 EVENT_OVERHEAT_CLEARED = "overheat_cleared"
 EVENT_SYSTEM = "system"
 
+# --- Характер отключения машины (см. sensors/power.py) ---
+POWER_CLEAN = "clean"  # штатное выключение/перезагрузка (был shutdown)
+POWER_UNEXPECTED = "unexpected"  # внезапное (crash): питание/зависание/reset
+
 
 @dataclass(frozen=True)
 class SensorReading:
@@ -77,6 +81,21 @@ class HealthDiff:
 
     states: list[HealthState]
     transitions: list[Transition]
+
+
+@dataclass(frozen=True)
+class PowerEvent:
+    """Одно отключение машины, восстановленное из журнала загрузок (`last`).
+
+    Каждая завершённая boot-сессия даёт одно событие: либо штатное выключение
+    (`POWER_CLEAN`, известен момент `shutdown_at`), либо внезапный обрыв
+    (`POWER_UNEXPECTED` — в wtmp нет момента выключения, только факт `crash`).
+    """
+
+    kind: str  # POWER_CLEAN | POWER_UNEXPECTED
+    boot_at: datetime  # когда началась сессия, которая так завершилась (включение)
+    shutdown_at: datetime | None  # момент штатного выключения (только clean)
+    next_boot_at: datetime | None  # когда машина поднялась снова (для unexpected — оценка)
 
 
 @dataclass(frozen=True)

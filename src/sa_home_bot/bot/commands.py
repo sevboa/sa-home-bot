@@ -21,8 +21,9 @@ WHOAMI = Command("whoami", "показать user_id и chat_id", universal=True
 STATUS = Command("status", "состояние компонентов (CPU/диски)", universal=False)
 STATS = Command("stats", "статистика прогонов сканера", universal=False)
 SCAN_NOW = Command("scan_now", "форс-скан датчиков", universal=False)
+DOWNTIME = Command("downtime", "последние отключения машины", universal=False)
 
-ALL_COMMANDS: list[Command] = [HELP, PING, WHOAMI, STATUS, STATS, SCAN_NOW]
+ALL_COMMANDS: list[Command] = [HELP, PING, WHOAMI, STATUS, STATS, SCAN_NOW, DOWNTIME]
 
 UNIVERSAL_COMMANDS: list[Command] = [c for c in ALL_COMMANDS if c.universal]
 CONTROL_COMMANDS: list[Command] = [c for c in ALL_COMMANDS if not c.universal]
