@@ -22,6 +22,37 @@ def test_render_startup_clean_vs_crash():
     assert "сбоя" in render_startup(clean=False)
 
 
+def _outage(kind):
+    from datetime import UTC, datetime
+
+    from sa_home_bot.domain.models import POWER_UNEXPECTED, PowerEvent
+
+    return PowerEvent(
+        kind=kind,
+        boot_at=datetime(2026, 7, 4, 12, 15, tzinfo=UTC),
+        down_at=datetime(2026, 7, 4, 15, 12, tzinfo=UTC),
+        up_at=datetime(2026, 7, 5, 0, 23, tzinfo=UTC),
+        down_approx=(kind == POWER_UNEXPECTED),
+    )
+
+
+def test_render_startup_appends_power_loss_details():
+    from sa_home_bot.domain.models import POWER_UNEXPECTED
+
+    text = render_startup(clean=False, last_outage=_outage(POWER_UNEXPECTED))
+    assert "потеря питания" in text
+    assert "Последнее отключение" in text
+    assert "простой" in text  # строка события приложена
+
+
+def test_render_startup_ignores_clean_last_outage():
+    from sa_home_bot.domain.models import POWER_CLEAN
+
+    # Если последнее отключение штатное — деталей о питании не показываем.
+    text = render_startup(clean=False, last_outage=_outage(POWER_CLEAN))
+    assert "Последнее отключение" not in text
+
+
 def test_render_shutdown_and_link_restored():
     assert "офлайн" in render_shutdown()
     assert "восстановлена" in render_link_restored(125)

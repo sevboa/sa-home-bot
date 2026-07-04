@@ -21,6 +21,7 @@ from sa_home_bot.db.store import Store
 from sa_home_bot.jobs.base import JobContext
 from sa_home_bot.runtime import Runtime
 from sa_home_bot.scheduler.setup import build_scheduler, register_jobs
+from sa_home_bot.sensors.power import read_power_events_sync
 from sa_home_bot.sensors.source import SensorSource
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.utils.lifespan import Lifespan
@@ -67,8 +68,17 @@ async def run(settings: Settings) -> None:
     # 8. Меню команд по правам чатов.
     await set_bot_commands(bot, book)
 
-    # 9. Системное приветствие (clean/crash).
-    await broadcast_system(book, notifier, render_startup(clean=started_clean))
+    # 9. Системное приветствие (clean/crash). После сбоя пробуем приложить
+    #    детали последнего отключения, если это была потеря питания.
+    last_outage = None
+    if not started_clean:
+        loop = asyncio.get_running_loop()
+        events = await loop.run_in_executor(None, read_power_events_sync, 1)
+        if events:
+            last_outage = events[0]
+    await broadcast_system(
+        book, notifier, render_startup(clean=started_clean, last_outage=last_outage)
+    )
 
     # 10. JobContext + worker.
     ctx = JobContext(

@@ -69,17 +69,20 @@ def _fmt_duration(td) -> str:
     return "&lt;1 м"  # &lt; — «<» экранирован для HTML parse_mode
 
 
+def render_outage_line(e: PowerEvent) -> str:
+    """Одна строка отключения: «⚡ внезапно · ≈ 04.07 15:12 → 05.07 00:23 · простой 9 ч 11 м»."""
+    icon, word = ("🔌", "штатно") if e.kind == POWER_CLEAN else ("⚡", "внезапно")
+    down = ("≈ " if e.down_approx else "") + _fmt_dt(e.down_at) if e.down_at else "?"
+    up = _fmt_dt(e.up_at) if e.up_at else "?"
+    span = f"{down} → {up}"
+    tail = f" · простой {_fmt_duration(e.downtime)}" if e.downtime is not None else ""
+    return f"{icon} <b>{word}</b> · {span}{tail}"
+
+
 def render_downtime(events: list[PowerEvent]) -> str:
     """Сообщение /downtime — список последних отключений машины."""
     if not events:
         return "Нет данных об отключениях (журнал `last` пуст или недоступен)."
     lines = ["<b>Последние отключения</b>", ""]
-    for e in events:
-        icon, word = ("🔌", "штатно") if e.kind == POWER_CLEAN else ("⚡", "внезапно")
-        down = ("≈ " if e.down_approx else "") + _fmt_dt(e.down_at) if e.down_at else "?"
-        up = _fmt_dt(e.up_at) if e.up_at else "?"
-        span = f"{down} → {up}"
-        dt = e.downtime
-        tail = f" · простой {_fmt_duration(dt)}" if dt is not None else ""
-        lines.append(f"{icon} <b>{word}</b> · {span}{tail}")
+    lines.extend(render_outage_line(e) for e in events)
     return "\n".join(lines)
