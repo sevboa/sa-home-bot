@@ -20,7 +20,7 @@ def _build_help(subscription: Subscription | None) -> str:
         lines.append(f"/{cmd.name} — {cmd.description}")
     available_control = [
         cmd
-        for cmd in commands.CONTROL_COMMANDS
+        for cmd in commands.MENU_CONTROL_COMMANDS
         if subscription is not None and subscription.allows_command(cmd.name)
     ]
     if available_control:

@@ -186,6 +186,18 @@ def _run(args: list[str]) -> str | None:
     return proc.stdout
 
 
+def read_uptime_sync() -> timedelta | None:
+    """Аптайм машины (psutil.boot_time). Вызывать через executor. None при ошибке."""
+    try:
+        import psutil
+
+        boot = datetime.fromtimestamp(psutil.boot_time(), tz=UTC)
+        return datetime.now(tz=UTC) - boot
+    except Exception as exc:  # noqa: BLE001 — аптайм не критичен, не роняем сводку
+        log.warning("Не удалось получить аптайм: %s", exc)
+        return None
+
+
 def read_power_events_sync(limit: int = 10) -> list[PowerEvent]:
     """Блокирующе собрать историю отключений. Вызывать через executor.
 

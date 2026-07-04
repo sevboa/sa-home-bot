@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from html import escape
 
 from sa_home_bot.domain.models import (
@@ -9,6 +10,7 @@ from sa_home_bot.domain.models import (
     EVENT_OVERHEAT_CLEARED,
     EVENT_OVERHEAT_STARTED,
     KIND_CPU,
+    KIND_DISK,
     POWER_CLEAN,
     Event,
     HealthState,
@@ -85,4 +87,75 @@ def render_downtime(events: list[PowerEvent]) -> str:
         return "Нет данных об отключениях (журнал `last` пуст или недоступен)."
     lines = ["<b>Последние отключения</b>", ""]
     lines.extend(render_outage_line(e) for e in events)
+    return "\n".join(lines)
+
+
+def render_status_full(states: list[HealthState]) -> str:
+    """Подробный статус компонентов (/status_full) — по строке на компонент."""
+    if not states:
+        return "Пока нет данных — сканер ещё не снимал срез."
+    alerting = [s for s in states if s.status == ALERTING]
+    header = "🔥 <b>Есть перегрев!</b>" if alerting else "✅ <b>Всё в норме.</b>"
+    lines = [header, ""]
+    lines.extend(render_state_line(s) for s in states)
+    return "\n".join(lines)
+
+
+def render_status_summary(
+    now: datetime,
+    uptime: timedelta | None,
+    states: list[HealthState],
+    last_outage: PowerEvent | None,
+) -> str:
+    """Краткая сводка (/status): время отчёта, аптайм, температуры, отключение."""
+    lines = [f"📊 <b>Сводка</b> — {_fmt_dt(now)}"]
+    if uptime is not None:
+        lines.append(f"⏱ Аптайм: {_fmt_duration(uptime)}")
+
+    cpu = [s for s in states if s.kind == KIND_CPU]
+    disks = [s for s in states if s.kind == KIND_DISK]
+    if cpu:
+        hot = any(s.status == ALERTING for s in cpu)
+        tmax = max(s.temperature_c for s in cpu)
+        lines.append(f"{'🔥' if hot else '✅'} CPU: {tmax:.1f}°C")
+    if disks:
+        parts = [
+            f"{escape(s.label)} {s.temperature_c:.0f}°C"
+            f"{' 🔥' if s.status == ALERTING else ''}"
+            for s in disks
+        ]
+        lines.append("💽 Диски: " + " · ".join(parts))
+    if not states:
+        lines.append("Пока нет данных — сканер ещё не снимал срез.")
+
+    if last_outage is not None:
+        lines.append("")
+        lines.append("Последнее отключение:")
+        lines.append(render_outage_line(last_outage))
+    return "\n".join(lines)
+
+
+def _fmt_run(run: dict) -> str:
+    icon = {"ok": "✅", "error": "❌", "running": "⏳"}.get(run["status"], "•")
+    started = run["started_at"]
+    try:
+        started = datetime.fromisoformat(started).strftime("%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        pass
+    return f"{icon} {run['job_type']} @ {started}"
+
+
+def render_stats(counts: dict, runs: list[dict]) -> str:
+    """Сводка прогонов сканера (/stats) из job_runs."""
+    if not runs:
+        return "Прогонов сканера ещё не было."
+    total = sum(counts.values())
+    lines = [
+        "<b>Статистика сканера</b>",
+        f"Всего прогонов: {total} (ok={counts.get('ok', 0)}, "
+        f"error={counts.get('error', 0)}, running={counts.get('running', 0)})",
+        "",
+        "Последние:",
+    ]
+    lines.extend(_fmt_run(r) for r in runs)
     return "\n".join(lines)

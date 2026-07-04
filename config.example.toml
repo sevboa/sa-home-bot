@@ -62,7 +62,7 @@ format = "plain"                   # plain | json
 name = "me"
 chat_id = 123456789
 event_types = ["*"]                # перегрев + система
-allowed_commands = ["status", "stats", "scan_now", "downtime"]
+allowed_commands = ["status", "status_full", "stats", "scan_now", "downtime"]
 
 [[subscriptions]]
 name = "family_room"

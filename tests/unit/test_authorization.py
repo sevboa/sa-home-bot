@@ -1,6 +1,11 @@
 from types import SimpleNamespace
 
-from sa_home_bot.bot.middlewares import DENIED_TEXT, AuthorizationMiddleware, extract_command
+from sa_home_bot.bot.middlewares import (
+    DENIED_TEXT,
+    AuthorizationMiddleware,
+    CallbackAuthorizationMiddleware,
+    extract_command,
+)
 from sa_home_bot.config import SubscriptionConfig
 from sa_home_bot.subscriptions.book import SubscriptionBook
 
@@ -82,3 +87,43 @@ async def test_control_command_broken_chat_denied():
     msg = _message(2, "/status")
     assert await mw(_passthrough, msg, {}) is None
     assert msg._answered == [DENIED_TEXT]
+
+
+# --- callback-кнопки под /status ---
+
+
+def _callback(chat_id: int | None, data: str):
+    alerts: list[tuple[str, bool]] = []
+
+    async def answer(text=None, show_alert=False):
+        alerts.append((text, show_alert))
+
+    message = SimpleNamespace(chat=SimpleNamespace(id=chat_id)) if chat_id is not None else None
+    return SimpleNamespace(data=data, message=message, answer=answer, _alerts=alerts)
+
+
+def _cb_book():
+    return SubscriptionBook.from_config(
+        [SubscriptionConfig(name="me", chat_id=1, allowed_commands=["status", "downtime"])]
+    )
+
+
+async def test_callback_allowed_action_passes():
+    mw = CallbackAuthorizationMiddleware(_cb_book())
+    cb = _callback(1, "st:downtime")  # право есть
+    data: dict = {}
+    assert await mw(_passthrough, cb, data) == "HANDLED"
+    assert data["subscription"].name == "me"
+
+
+async def test_callback_action_without_right_denied():
+    mw = CallbackAuthorizationMiddleware(_cb_book())
+    cb = _callback(1, "st:scan")  # scan_now не в allowed_commands
+    assert await mw(_passthrough, cb, {}) is None
+    assert cb._alerts and cb._alerts[0][1] is True  # show_alert
+
+
+async def test_callback_unknown_data_passes_through():
+    mw = CallbackAuthorizationMiddleware(_cb_book())
+    cb = _callback(1, "other:thing")
+    assert await mw(_passthrough, cb, {}) == "HANDLED"

@@ -11,7 +11,10 @@ from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefaul
 
 from sa_home_bot.bot import commands
 from sa_home_bot.bot.handlers import basic, control, power, stats, status
-from sa_home_bot.bot.middlewares import AuthorizationMiddleware
+from sa_home_bot.bot.middlewares import (
+    AuthorizationMiddleware,
+    CallbackAuthorizationMiddleware,
+)
 from sa_home_bot.subscriptions.book import SubscriptionBook
 
 log = logging.getLogger(__name__)
@@ -24,6 +27,7 @@ def build_bot(token: str) -> Bot:
 def build_dispatcher(book: SubscriptionBook) -> Dispatcher:
     dp = Dispatcher()
     dp.message.middleware(AuthorizationMiddleware(book))
+    dp.callback_query.middleware(CallbackAuthorizationMiddleware(book))
     dp.include_router(basic.router)
     dp.include_router(status.router)
     dp.include_router(stats.router)
@@ -49,7 +53,7 @@ async def set_bot_commands(bot: Bot, book: SubscriptionBook) -> None:
             continue
         chat_cmds = list(universal) + [
             _to_bot_command(c)
-            for c in commands.CONTROL_COMMANDS
+            for c in commands.MENU_CONTROL_COMMANDS
             if sub.allows_command(c.name)
         ]
         try:

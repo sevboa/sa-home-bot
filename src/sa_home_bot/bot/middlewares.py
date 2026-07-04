@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiogram import BaseMiddleware
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from sa_home_bot.bot import commands
 from sa_home_bot.subscriptions.book import SubscriptionBook
@@ -57,5 +57,39 @@ class AuthorizationMiddleware(BaseMiddleware):
                 log.info("Отказ в /%s для chat_id=%s", command, chat_id)
                 await event.answer(DENIED_TEXT)
                 return None
+
+        return await handler(event, data)
+
+
+class CallbackAuthorizationMiddleware(BaseMiddleware):
+    """Права на кнопки-действия под /status (callback_data «st:<код>»)."""
+
+    def __init__(self, book: SubscriptionBook) -> None:
+        self._book = book
+
+    async def __call__(
+        self,
+        handler: Callable[[CallbackQuery, dict[str, Any]], Awaitable[Any]],
+        event: CallbackQuery,
+        data: dict[str, Any],
+    ) -> Any:
+        chat = event.message.chat if event.message else None
+        chat_id = chat.id if chat else None
+        subscription = self._book.for_chat(chat_id) if chat_id is not None else None
+        data["subscription"] = subscription
+
+        cmd = commands.command_for_callback(event.data)
+        # Не наша кнопка — пропускаем (обработается по месту или проигнорируется).
+        if cmd is None:
+            return await handler(event, data)
+
+        if (
+            subscription is None
+            or subscription.broken
+            or not subscription.allows_command(cmd.name)
+        ):
+            log.info("Отказ в кнопке %s для chat_id=%s", event.data, chat_id)
+            await event.answer("⛔️ Недоступно", show_alert=True)
+            return None
 
         return await handler(event, data)
