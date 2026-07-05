@@ -25,7 +25,7 @@ STATUS_FULL = Command(
     "status_full", "подробный статус компонентов", universal=False, menu=False
 )
 STATS = Command("stats", "статистика прогонов сканера", universal=False, menu=False)
-SCAN_NOW = Command("scan_now", "форс-скан датчиков", universal=False, menu=False)
+SCAN_NOW = Command("scan_now", "форс-скан датчиков и дисков", universal=False, menu=False)
 DOWNTIME = Command(
     "downtime", "последние отключения машины", universal=False, menu=False
 )

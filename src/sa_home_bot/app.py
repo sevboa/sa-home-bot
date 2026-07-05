@@ -19,6 +19,7 @@ from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
 from sa_home_bot.jobs.base import JobContext
+from sa_home_bot.jobs.smart import SmartScanJob
 from sa_home_bot.runtime import Runtime
 from sa_home_bot.scheduler.setup import build_scheduler, register_jobs
 from sa_home_bot.sensors.power import read_power_events_sync
@@ -95,6 +96,10 @@ async def run(settings: Settings) -> None:
     scheduler = build_scheduler()
     register_jobs(scheduler, queue, settings)
     scheduler.start()
+
+    # Разовый SMART-снимок на старте — чтобы baseline и иконки /status
+    # наполнились сразу, не дожидаясь первого часового тика.
+    await queue.put(SmartScanJob())
 
     # 12. Polling.
     polling_task = asyncio.create_task(

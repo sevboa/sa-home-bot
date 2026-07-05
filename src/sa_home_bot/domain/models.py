@@ -21,6 +21,8 @@ KIND_DISK = "disk"
 # --- Типы событий ---
 EVENT_OVERHEAT_STARTED = "overheat_started"
 EVENT_OVERHEAT_CLEARED = "overheat_cleared"
+EVENT_SMART_DEGRADED = "smart_degraded"  # SMART-здоровье диска ухудшилось
+EVENT_SMART_RECOVERED = "smart_recovered"  # SMART-показатели улучшились
 EVENT_SYSTEM = "system"
 
 # --- Характер отключения машины (см. sensors/power.py) ---
@@ -139,4 +141,48 @@ class Event:
     kind: str
     label: str
     temperature_c: float
+    at: datetime
+
+
+@dataclass(frozen=True)
+class SmartSnapshot:
+    """Снимок ключевых SMART-счётчиков одного диска — baseline для дельты.
+
+    Собирается нечастым SmartScanJob из ``smartctl -H -A`` (read-only, без
+    self-test'ов). ``attrs`` — сырые (raw) значения только отслеживаемых
+    атрибутов (``domain.smart.MONITORED_SMART_ATTRS``), присутствующих в выводе.
+    ``health`` — агрегат ``smart_status`` + сбойные сектора (DISK_OK/WARN/FAIL).
+    """
+
+    component_id: str  # "disk:/dev/sda" (по realpath устройства)
+    label: str  # модель диска
+    health: str | None  # DISK_OK | DISK_WARN | DISK_FAIL | None (недоступно)
+    attrs: dict[int, int]  # id SMART-атрибута -> raw-значение
+    taken_at: datetime
+
+
+@dataclass(frozen=True)
+class SmartAttrChange:
+    """Изменение одного SMART-счётчика между снимками."""
+
+    attr_id: int
+    name: str
+    old: int
+    new: int
+
+
+@dataclass(frozen=True)
+class SmartChange:
+    """Изменение SMART-состояния диска между снимками (для рассылки).
+
+    ``event_type`` — EVENT_SMART_DEGRADED (рост сбойных секторов / падение
+    класса здоровья доминирует) либо EVENT_SMART_RECOVERED (только улучшения).
+    """
+
+    component_id: str
+    label: str
+    event_type: str
+    health_from: str | None
+    health_to: str | None
+    attr_changes: tuple[SmartAttrChange, ...]
     at: datetime

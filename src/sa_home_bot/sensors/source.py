@@ -10,7 +10,7 @@ import asyncio
 from datetime import UTC, datetime
 
 from sa_home_bot.config import SensorsConfig
-from sa_home_bot.domain.models import SensorReading
+from sa_home_bot.domain.models import SensorReading, SmartSnapshot
 from sa_home_bot.sensors import cpu, disks
 
 
@@ -40,3 +40,13 @@ class SensorSource:
             self.read_cpu(), self.read_disks()
         )
         return [*cpu_readings, *disk_readings]
+
+    async def read_smart_snapshots(self) -> list[SmartSnapshot]:
+        """Снимок SMART-счётчиков дисков (read-only, для мониторинга деградации)."""
+        if not self._config.disks.enabled:
+            return []
+        loop = asyncio.get_running_loop()
+        devices = list(self._config.disks.devices)
+        return await loop.run_in_executor(
+            None, disks.read_smart_snapshots_sync, devices, _now()
+        )

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from math import sqrt
 
@@ -20,11 +21,15 @@ from sa_home_bot.domain.models import (
     HealthState,
     KnownState,
     SensorReading,
+    SmartSnapshot,
 )
 from sa_home_bot.domain.policy import BaselineStats
 
 NOTIF_ALERT = "alert"
 NOTIF_CLEARED = "cleared"
+
+# app_state-ключ: метки времени принятых ручных форс-сканов (лимитер).
+MANUAL_SCAN_TICKS_KEY = "manual_scan_ticks"
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -65,6 +70,19 @@ class Store:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, value),
             )
+
+    async def get_manual_scan_ticks(self) -> list[datetime]:
+        """Метки принятых ручных форс-сканов (для лимитера)."""
+        raw = await self.get_state(MANUAL_SCAN_TICKS_KEY)
+        if not raw:
+            return []
+        try:
+            return [datetime.fromisoformat(s) for s in json.loads(raw)]
+        except (ValueError, TypeError):
+            return []
+
+    async def set_manual_scan_ticks(self, ticks: list[datetime]) -> None:
+        await self.set_state(MANUAL_SCAN_TICKS_KEY, json.dumps([_iso(t) for t in ticks]))
 
     # --- job_runs ---
 
@@ -312,6 +330,45 @@ class Store:
                 (keep_per_component,),
             )
             return cur.rowcount
+
+    # --- smart_snapshots (baseline для дельты SMART) ---
+
+    async def get_smart_snapshot(self, component_id: str) -> SmartSnapshot | None:
+        cur = await self.db.conn.execute(
+            "SELECT * FROM smart_snapshots WHERE component_id=?", (component_id,)
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        return SmartSnapshot(
+            component_id=row["component_id"],
+            label=row["label"],
+            health=row["health"],
+            attrs={int(k): int(v) for k, v in json.loads(row["attrs_json"]).items()},
+            taken_at=datetime.fromisoformat(row["taken_at"]),
+        )
+
+    async def get_smart_health_map(self) -> dict[str, str | None]:
+        """realpath устройства -> последнее SMART-здоровье из снимков (для /status).
+
+        Ключ — реальный путь (``/dev/sda``), т.е. component_id без префикса
+        ``disk:``; сопоставляется с ``os.path.realpath`` физического диска.
+        """
+        cur = await self.db.conn.execute("SELECT component_id, health FROM smart_snapshots")
+        rows = await cur.fetchall()
+        return {r["component_id"].removeprefix("disk:"): r["health"] for r in rows}
+
+    async def save_smart_snapshot(self, snap: SmartSnapshot) -> None:
+        attrs_json = json.dumps({str(k): v for k, v in snap.attrs.items()})
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "INSERT INTO smart_snapshots(component_id, label, health, attrs_json, taken_at) "
+                "VALUES(?, ?, ?, ?, ?) "
+                "ON CONFLICT(component_id) DO UPDATE SET "
+                "label=excluded.label, health=excluded.health, "
+                "attrs_json=excluded.attrs_json, taken_at=excluded.taken_at",
+                (snap.component_id, snap.label, snap.health, attrs_json, _iso(snap.taken_at)),
+            )
 
     # --- housekeeping ---
 

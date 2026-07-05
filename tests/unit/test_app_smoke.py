@@ -6,7 +6,10 @@ from types import SimpleNamespace
 import sa_home_bot.app as app_module
 from sa_home_bot.app import STATE_CLEAN_SHUTDOWN, run
 from sa_home_bot.config import (
+    CpuSensorConfig,
     DatabaseConfig,
+    DiskSensorConfig,
+    SensorsConfig,
     Settings,
     SubscriptionConfig,
     TelegramConfig,
@@ -66,6 +69,11 @@ async def test_app_boots_and_shuts_down_cleanly(tmp_path, monkeypatch):
     settings = Settings(
         telegram=TelegramConfig(token="x"),
         database=DatabaseConfig(path=db_path),
+        # Датчики выключены — смоук без обращения к железу (smartctl/psutil).
+        sensors=SensorsConfig(
+            cpu=CpuSensorConfig(enabled=False),
+            disks=DiskSensorConfig(enabled=False),
+        ),
         subscriptions=[
             SubscriptionConfig(name="me", chat_id=1, event_types=["*"]),
         ],

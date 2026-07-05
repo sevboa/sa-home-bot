@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from sa_home_bot.bot import commands
+from sa_home_bot.bot import commands, scan_limit
 from sa_home_bot.db.store import Store
 from sa_home_bot.domain.models import KIND_CPU
 from sa_home_bot.domain.render import (
@@ -22,6 +22,7 @@ from sa_home_bot.domain.render import (
     render_status_summary,
 )
 from sa_home_bot.jobs.scan import SensorScanJob
+from sa_home_bot.jobs.smart import SmartScanJob
 from sa_home_bot.sensors.disks import read_disk_summaries_sync
 from sa_home_bot.sensors.power import read_power_events_sync, read_uptime_sync
 from sa_home_bot.subscriptions.models import Subscription
@@ -55,8 +56,13 @@ async def build_summary_text(store: Store, disk_specs: list[str]) -> str:
     loop = asyncio.get_running_loop()
     states = await store.get_all_states()
     cpu_states = [s for s in states if s.kind == KIND_CPU]
+    # Иконка здоровья диска — из снимков БД (совпадает с алертами SmartScanJob);
+    # температура/место — на лету.
+    health_map = await store.get_smart_health_map()
     uptime = await loop.run_in_executor(None, read_uptime_sync)
-    disks = await loop.run_in_executor(None, read_disk_summaries_sync, disk_specs)
+    disks = await loop.run_in_executor(
+        None, read_disk_summaries_sync, disk_specs, health_map
+    )
     events = await loop.run_in_executor(None, read_power_events_sync, 1)
     last_outage = events[0] if events else None
     return render_status_summary(
@@ -80,8 +86,19 @@ async def build_downtime_text() -> str:
     return render_downtime(events)
 
 
-async def build_scan_text(queue: DedupQueue) -> str:
-    queued = await queue.put(SensorScanJob())
-    if queued:
-        return "🔄 Скан поставлен в очередь."
-    return "⏳ Скан уже в очереди — дождитесь результата."
+async def build_scan_text(store: Store, queue: DedupQueue) -> str:
+    """Ручной форс-скан датчиков + дисков с лимитом (раз в минуту, 5 в сутки).
+
+    Слот лимита расходуется только когда реально поставлен новый job (если оба
+    скана уже в очереди — метку не пишем).
+    """
+    now = datetime.now(tz=UTC)
+    decision = scan_limit.decide(await store.get_manual_scan_ticks(), now)
+    if not decision.allowed:
+        return decision.reason
+    sensor_queued = await queue.put(SensorScanJob())
+    smart_queued = await queue.put(SmartScanJob())
+    if not (sensor_queued or smart_queued):
+        return "⏳ Скан уже в очереди — дождитесь результата."
+    await store.set_manual_scan_ticks(list(decision.ticks))
+    return "🔄 Скан датчиков и дисков поставлен в очередь."

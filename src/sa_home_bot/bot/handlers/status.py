@@ -44,7 +44,7 @@ async def _dispatch_action(code: str, store: Store, queue: DedupQueue) -> str:
     if code == "downtime":
         return await status_view.build_downtime_text()
     if code == "scan":
-        return await status_view.build_scan_text(queue)
+        return await status_view.build_scan_text(store, queue)
     return "Неизвестное действие."
 
 

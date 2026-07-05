@@ -12,7 +12,8 @@ token = "PUT-YOUR-BOT-TOKEN-HERE"
 path = "./data/sentinel.sqlite"
 
 [schedule]
-scan_cron = "*/1 * * * *"          # снимать срез датчиков раз в минуту
+scan_cron = "*/1 * * * *"          # снимать температуру датчиков раз в минуту
+smart_cron = "0 * * * *"           # снимок SMART-счётчиков дисков раз в час
 housekeeping_cron = "0 3 * * *"    # уборка ночью
 
 [sensors.cpu]
@@ -58,14 +59,18 @@ format = "plain"                   # plain | json
 
 # --- Подписки (тихих часов нет) ---
 
+# Типы событий: overheat_started, overheat_cleared (температура),
+#               smart_degraded, smart_recovered (SMART-здоровье дисков),
+#               system (старт/останов/восстановление связи). "*" = все.
+
 [[subscriptions]]
 name = "me"
 chat_id = 123456789
-event_types = ["*"]                # перегрев + система
+event_types = ["*"]                # всё: перегрев + SMART + система
 allowed_commands = ["status", "status_full", "stats", "scan_now", "downtime"]
 
 [[subscriptions]]
 name = "family_room"
 chat_id = -1009999999
-event_types = ["overheat_started", "overheat_cleared"]
+event_types = ["overheat_started", "overheat_cleared", "smart_degraded"]
 allowed_commands = []

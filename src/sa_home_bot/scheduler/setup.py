@@ -14,6 +14,7 @@ from apscheduler.triggers.cron import CronTrigger
 from sa_home_bot.config import Settings
 from sa_home_bot.jobs.housekeeping import HousekeepingJob
 from sa_home_bot.jobs.scan import SensorScanJob
+from sa_home_bot.jobs.smart import SmartScanJob
 from sa_home_bot.worker.queue import DedupQueue
 
 log = logging.getLogger(__name__)
@@ -27,6 +28,9 @@ def register_jobs(scheduler: AsyncIOScheduler, queue: DedupQueue, config: Settin
     async def enqueue_scan() -> None:
         await queue.put(SensorScanJob())
 
+    async def enqueue_smart() -> None:
+        await queue.put(SmartScanJob())
+
     async def enqueue_housekeeping() -> None:
         await queue.put(HousekeepingJob())
 
@@ -34,6 +38,14 @@ def register_jobs(scheduler: AsyncIOScheduler, queue: DedupQueue, config: Settin
         enqueue_scan,
         CronTrigger.from_crontab(config.schedule.scan_cron, timezone="UTC"),
         id="sensor_scan",
+        coalesce=True,
+        max_instances=1,
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        enqueue_smart,
+        CronTrigger.from_crontab(config.schedule.smart_cron, timezone="UTC"),
+        id="smart_scan",
         coalesce=True,
         max_instances=1,
         replace_existing=True,
@@ -47,7 +59,8 @@ def register_jobs(scheduler: AsyncIOScheduler, queue: DedupQueue, config: Settin
         replace_existing=True,
     )
     log.info(
-        "Запланировано: scan=%s, housekeeping=%s",
+        "Запланировано: scan=%s, smart=%s, housekeeping=%s",
         config.schedule.scan_cron,
+        config.schedule.smart_cron,
         config.schedule.housekeeping_cron,
     )

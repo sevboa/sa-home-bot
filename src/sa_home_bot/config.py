@@ -30,6 +30,7 @@ class DatabaseConfig(BaseModel):
 
 class ScheduleConfig(BaseModel):
     scan_cron: str = "*/1 * * * *"
+    smart_cron: str = "0 * * * *"  # снимок SMART-счётчиков дисков раз в час
     housekeeping_cron: str = "0 3 * * *"
 
 

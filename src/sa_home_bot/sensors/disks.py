@@ -25,7 +25,9 @@ from sa_home_bot.domain.models import (
     KIND_DISK,
     DiskSummary,
     SensorReading,
+    SmartSnapshot,
 )
+from sa_home_bot.domain.smart import MONITORED_SMART_ATTRS
 
 log = logging.getLogger(__name__)
 
@@ -332,15 +334,22 @@ def _label_disks(disks: list[BlockDisk]) -> list[tuple[str, BlockDisk]]:
     return labelled
 
 
-def read_disk_summaries_sync(specs: list[str]) -> list[DiskSummary]:
+def read_disk_summaries_sync(
+    specs: list[str], health_overrides: dict[str, str | None] | None = None
+) -> list[DiskSummary]:
     """Собрать сводку по ВСЕМ физическим дискам (блокирующе, через executor).
 
-    SMART-здоровье/температура снимаются только для дисков с известным типом
-    адаптера (из конфига), сопоставление по реальному пути (by-id → /dev/sdX) —
-    иначе автоопределение USB-моста виснет. Свободное место — по точкам
-    монтирования, для всех дисков (включая eMMC без SMART).
+    Температура снимается на лету (меняется быстро), сопоставление по реальному
+    пути (by-id → /dev/sdX) — иначе автоопределение USB-моста виснет. Свободное
+    место — по точкам монтирования, для всех дисков (включая eMMC без SMART).
+
+    SMART-здоровье (иконка) берётся из ``health_overrides`` — карты
+    ``realpath -> health`` из последних снимков БД (SmartScanJob), чтобы иконка в
+    /status совпадала с состоянием, по которому шлются алерты. Для диска, которого
+    ещё нет в снимках (холодный старт до первого прогона), health берётся из
+    живого опроса. Без ``health_overrides`` весь health — живой (старое поведение).
     """
-    # SMART по реальному пути устройства.
+    # SMART по реальному пути устройства (живой опрос: temp + запасной health).
     smart: dict[str, tuple[str | None, float | None]] = {}
     for target in _resolve_targets(specs):
         if not is_smart_capable(target.name):
@@ -353,7 +362,12 @@ def read_disk_summaries_sync(specs: list[str]) -> list[DiskSummary]:
 
     summaries: list[DiskSummary] = []
     for label, disk in _label_disks(_list_block_disks_sync()):
-        health, temp = smart.get(os.path.realpath(disk.path), (None, None))
+        real = os.path.realpath(disk.path)
+        live_health, temp = smart.get(real, (None, None))
+        if health_overrides is not None and real in health_overrides:
+            health = health_overrides[real]  # из БД (совпадает с алертами)
+        else:
+            health = live_health  # холодный старт / overrides не заданы
         free, total = _disk_usage(disk.mountpoints)
         summaries.append(
             DiskSummary(
@@ -366,3 +380,72 @@ def read_disk_summaries_sync(specs: list[str]) -> list[DiskSummary]:
             )
         )
     return summaries
+
+
+# --- Снимок SMART-счётчиков для мониторинга деградации (SmartScanJob) ---
+
+
+def _raw_count(raw: dict) -> int | None:
+    """Чистый счётчик из SMART raw: ведущее число ``raw.string``.
+
+    ``raw.value`` у части дисков пакует несколько полей в одно число
+    (напр. Hitachi: string ``'31 (0 9)'`` при value ``589855``) — берём первый
+    токен строки; при её отсутствии/непарсибельности откатываемся к ``value``.
+    """
+    s = raw.get("string")
+    if isinstance(s, str):
+        head = s.strip().split(" ", 1)[0]
+        try:
+            return int(head)
+        except ValueError:
+            pass
+    v = raw.get("value")
+    return int(v) if v is not None else None
+
+
+def _raw_attrs(data: dict) -> dict[int, int]:
+    """Счётчики отслеживаемых SMART-атрибутов из таблицы ATA (чистые значения)."""
+    out: dict[int, int] = {}
+    for a in data.get("ata_smart_attributes", {}).get("table", []):
+        aid = a.get("id")
+        if aid in MONITORED_SMART_ATTRS:
+            val = _raw_count(a.get("raw", {}))
+            if val is not None:
+                out[aid] = val
+    return out
+
+
+def parse_smart_snapshot(component_id: str, data: dict, now: datetime) -> SmartSnapshot:
+    """Собрать снимок SMART-счётчиков из ``smartctl -H -A /dev/X``."""
+    model = data.get("model_name") or data.get("device", {}).get("name") or component_id
+    return SmartSnapshot(
+        component_id=component_id,
+        label=str(model),
+        health=parse_health(data),
+        attrs=_raw_attrs(data),
+        taken_at=now,
+    )
+
+
+def read_smart_snapshots_sync(specs: list[str], now: datetime) -> list[SmartSnapshot]:
+    """Снять SMART-снимки по сконфигурированным дискам (блокирующе).
+
+    Read-only ``-H -A``, self-test'ы НЕ запускаются — диск не изнашивается.
+    Опрашиваются только устройства с известным типом адаптера (конфиг/автоскан);
+    ключ снимка — realpath устройства (стабилен при by-id ↔ /dev/sdX). Ошибка/
+    таймаут одного устройства не роняет остальные; дубли по realpath отсекаются.
+    """
+    snapshots: list[SmartSnapshot] = []
+    seen: set[str] = set()
+    for target in _resolve_targets(specs):
+        if not is_smart_capable(target.name):
+            continue
+        real = os.path.realpath(target.name)
+        if real in seen:
+            continue
+        seen.add(real)
+        data = _run_smartctl(health_args(target))
+        if not data:
+            continue
+        snapshots.append(parse_smart_snapshot(f"disk:{real}", data, now))
+    return snapshots

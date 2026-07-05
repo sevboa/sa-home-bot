@@ -45,6 +45,17 @@ CREATE TABLE IF NOT EXISTS readings (
 -- Скользящее окно берётся по последним id в рамках component_id.
 CREATE INDEX IF NOT EXISTS idx_readings_component ON readings(component_id, id);
 
+-- Последний SMART-снимок диска (baseline для дельты деградации).
+-- Одна строка на диск; обновляется нечастым SmartScanJob. attrs_json —
+-- сырые raw-значения отслеживаемых атрибутов: {"5": 31, "197": 0, ...}.
+CREATE TABLE IF NOT EXISTS smart_snapshots (
+    component_id  TEXT PRIMARY KEY,    -- "disk:/dev/sda" (по realpath)
+    label         TEXT NOT NULL,       -- модель диска
+    health        TEXT,                -- ok / warning / failed / NULL
+    attrs_json    TEXT NOT NULL,       -- {"<attr_id>": <raw>, ...}
+    taken_at      TEXT NOT NULL
+);
+
 -- Отправленные сообщения: по одному на (component, chat, kind) —
 -- нужно для reply "остыл" на исходный "перегрев".
 CREATE TABLE IF NOT EXISTS health_notifications (

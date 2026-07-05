@@ -12,12 +12,14 @@ from sa_home_bot.domain.models import (
     DISK_WARN,
     EVENT_OVERHEAT_CLEARED,
     EVENT_OVERHEAT_STARTED,
+    EVENT_SMART_DEGRADED,
     KIND_CPU,
     POWER_CLEAN,
     DiskSummary,
     Event,
     HealthState,
     PowerEvent,
+    SmartChange,
 )
 
 
@@ -37,6 +39,31 @@ def render_event(event: Event) -> str:
     if event.type == EVENT_OVERHEAT_CLEARED:
         return f"✅ <b>Норма</b> — {kind} «{label}» остыл{body}"
     return f"ℹ️ {kind} «{label}»: {temp} ({when})"
+
+
+_HEALTH_WORD = {DISK_OK: "норма", DISK_WARN: "предупреждение", DISK_FAIL: "СБОЙ"}
+
+
+def _health_word(health: str | None) -> str:
+    return _HEALTH_WORD.get(health, "н/д")
+
+
+def render_smart_change(change: SmartChange) -> str:
+    """Текст уведомления об изменении SMART-здоровья диска."""
+    label = escape(change.label)
+    if change.event_type == EVENT_SMART_DEGRADED:
+        lines = [f"⚠️ <b>SMART: ухудшение</b> — диск «{label}»"]
+    else:
+        lines = [f"✅ <b>SMART: улучшение</b> — диск «{label}»"]
+    if change.health_to != change.health_from:
+        lines.append(
+            f"Здоровье: {_health_word(change.health_from)} → "
+            f"<b>{_health_word(change.health_to)}</b>"
+        )
+    for c in change.attr_changes:
+        arrow = "🔺" if c.new > c.old else "🔻"
+        lines.append(f"{arrow} {escape(c.name)}: {c.old} → <b>{c.new}</b>")
+    return "\n".join(lines)
 
 
 def render_state_line(state: HealthState) -> str:
