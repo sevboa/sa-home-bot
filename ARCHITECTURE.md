@@ -315,11 +315,20 @@ sa-home-bot/
 │       │   ├── server.py      # ProtoServer (unix-сокет, NDJSON, broadcast событий)
 │       │   └── client.py      # ProtoClient (запрос-ответ по id + события)
 │       │
+│       ├── monitor/           # служба monitor (отдельный процесс, --service monitor)
+│       │   ├── app.py         # сборка: своя БД + датчики + scheduler + proto-сервер
+│       │   ├── service.py     # MonitorService: describe/get_state/scan_now
+│       │   └── dispatch.py    # ProtoEventDispatcher (события → broadcast)
+│       │
 │       ├── bot/
 │       │   ├── setup.py       # Bot/Dispatcher, set_bot_commands
 │       │   ├── commands.py    # единый реестр команд
 │       │   ├── middlewares.py # ChatContext, DI, AuthorizationMiddleware
 │       │   ├── notifier.py    # Notifier (ретраи, чанкование)
+│       │   ├── dispatch.py    # TelegramEventDispatcher (фан-аут по подпискам)
+│       │   ├── monitor_link.py    # клиент монитора с автопереподключением
+│       │   ├── monitor_events.py  # proto-событие → Event/SmartChange → рассылка
+│       │   ├── monitor_state.py   # парсинг get_state/событий в доменные модели
 │       │   ├── link_watch.py  # ← аналог connection_watch.py (новое имя)
 │       │   ├── lifecycle.py   # ← аналог system_events.py (новое имя)
 │       │   └── handlers/

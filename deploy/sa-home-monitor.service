@@ -1,0 +1,22 @@
+# Пользовательский юнит: ~/.config/systemd/user/sa-home-monitor.service
+# systemctl --user enable --now sa-home-monitor
+[Unit]
+Description=sa-home-monitor (служба мониторинга датчиков: температуры, SMART)
+# Сеть монитору не нужна — только диски и датчики.
+After=local-fs.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/sevboa/Github/sa-home-bot
+ExecStart=/home/sevboa/Github/sa-home-bot/.venv/bin/sa-home-bot --service monitor --config /home/sevboa/Github/sa-home-bot/config.toml
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+# При остановке монитор дорабатывает текущую очередь job'ов (smartctl бывает
+# медленным на USB-мостах) — даём запас.
+TimeoutStopSec=90
+# ~/.local/bin — первым: там sudo-обёртка smartctl (беспарольный read-only sudo).
+Environment=PATH=/home/sevboa/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+
+[Install]
+WantedBy=default.target
