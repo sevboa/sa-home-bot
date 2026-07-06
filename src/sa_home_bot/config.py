@@ -90,6 +90,18 @@ class WakeConfig(BaseModel):
     wait_timeout_s: float = Field(default=120.0, gt=0)
 
 
+class MonitorConfig(BaseModel):
+    """Служба monitor (отдельный процесс, `sa-home-bot --service monitor`).
+
+    ``socket`` — unix-сокет протокола v0, через который бот (и позже сервис
+    ноды) общается с монитором. ``db_path`` — собственная БД монитора
+    (readings, health_states, SMART, job_runs); БД бота остаётся отдельной.
+    """
+
+    socket: Path = Path("./data/monitor.sock")
+    db_path: Path = Path("./data/monitor.sqlite")
+
+
 class LoggingConfig(BaseModel):
     level: str = "INFO"
     format: str = "plain"  # plain | json
@@ -118,6 +130,7 @@ class Settings(BaseSettings):
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     sensors: SensorsConfig = Field(default_factory=SensorsConfig)
+    monitor: MonitorConfig = Field(default_factory=MonitorConfig)
     wake: WakeConfig = Field(default_factory=WakeConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     subscriptions: list[SubscriptionConfig] = Field(default_factory=list)

@@ -2,6 +2,7 @@
 
 import pytest_asyncio
 
+from sa_home_bot.bot.dispatch import TelegramEventDispatcher
 from sa_home_bot.config import (
     CpuSensorConfig,
     SensorsConfig,
@@ -73,11 +74,11 @@ async def ctx(tmp_path):
     notifier = FakeNotifier()
     # 60 ровных тиков ~40°C (норма) + устойчивый скачок до 60°C.
     sensors = FakeSensors([40.0] * 60 + [60.0] * 4)
+    store = Store(db)
     context = JobContext(
-        store=Store(db),
+        store=store,
         sensors=sensors,
-        notifier=notifier,
-        subscriptions=book,
+        dispatcher=TelegramEventDispatcher(notifier, book, store),
         config=_settings(),
     )
     yield context, notifier

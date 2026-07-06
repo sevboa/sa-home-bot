@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 import pytest_asyncio
 
+from sa_home_bot.bot.dispatch import TelegramEventDispatcher
 from sa_home_bot.config import (
     DiskSensorConfig,
     SensorsConfig,
@@ -207,7 +208,10 @@ def _ctx(store, sensors, notifier) -> JobContext:
         [SubscriptionConfig(name="me", chat_id=1, event_types=["*"], allowed_commands=[])]
     )
     return JobContext(
-        store=store, sensors=sensors, notifier=notifier, subscriptions=book, config=_settings()
+        store=store,
+        sensors=sensors,
+        dispatcher=TelegramEventDispatcher(notifier, book, store),
+        config=_settings(),
     )
 
 

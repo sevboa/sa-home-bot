@@ -18,6 +18,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config", "-c", default=None, help="путь к config.toml")
     parser.add_argument(
+        "--service",
+        choices=("bot", "monitor"),
+        default="bot",
+        help="какую службу запустить: telegram-бот (по умолчанию) или монитор датчиков",
+    )
+    parser.add_argument(
         "--check-config",
         action="store_true",
         help="загрузить и напечатать разобранный конфиг, затем выйти",
@@ -52,7 +58,10 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(settings.logging.level, settings.logging.format)
 
     # Импорт здесь, чтобы --check-config не тянул тяжёлые зависимости.
-    from sa_home_bot.app import run
+    if args.service == "monitor":
+        from sa_home_bot.monitor.app import run_monitor as run
+    else:
+        from sa_home_bot.app import run
 
     try:
         asyncio.run(run(settings))

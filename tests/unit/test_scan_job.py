@@ -2,6 +2,7 @@
 
 import pytest_asyncio
 
+from sa_home_bot.bot.dispatch import TelegramEventDispatcher
 from sa_home_bot.config import (
     CpuSensorConfig,
     SensorsConfig,
@@ -67,11 +68,11 @@ async def ctx(tmp_path):
     )
     notifier = FakeNotifier()
     sensors = FakeSensors([40, 95, 95, 95, 40, 40])
+    store = Store(db)
     context = JobContext(
-        store=Store(db),
+        store=store,
         sensors=sensors,
-        notifier=notifier,
-        subscriptions=book,
+        dispatcher=TelegramEventDispatcher(notifier, book, store),
         config=_settings(),
     )
     yield context, notifier

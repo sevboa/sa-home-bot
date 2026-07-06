@@ -99,15 +99,22 @@ class ProtoServer:
         self._path.unlink(missing_ok=True)
         log.info("ProtoServer остановлен")
 
-    async def broadcast_event(self, event_type: str, data: dict[str, Any] | None = None) -> None:
-        """Разослать событие всем подключённым клиентам."""
+    async def broadcast_event(self, event_type: str, data: dict[str, Any] | None = None) -> int:
+        """Разослать событие всем подключённым клиентам.
+
+        Возвращает число соединений, в которые событие реально записалось, —
+        вызывающий по нему решает, считать ли событие доставленным.
+        """
         info = self._handler.describe().info
         env = make_event(event_type, data, src=Address(node=info.node, service=info.service))
+        delivered = 0
         for conn in list(self._connections):
             try:
                 await conn.send(env)
+                delivered += 1
             except (ConnectionError, OSError):
                 self._connections.discard(conn)
+        return delivered
 
     async def _handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter

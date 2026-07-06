@@ -53,6 +53,13 @@ baseline_min_std_c = 3.0
 # eMMC (/dev/mmcblk*) и подобные без SMART пропускаются автоматически.
 devices = []
 
+# Служба monitor (отдельный процесс: `sa-home-bot --service monitor`).
+# Бот общается с ней по протоколу v0 через unix-сокет (см. PROTOCOL.md).
+# У монитора СВОЯ БД — [database].path остаётся боту.
+[monitor]
+socket = "./data/monitor.sock"
+db_path = "./data/monitor.sqlite"
+
 # Wake-on-LAN: /wake шлёт magic packet на MAC машины в локальной сети.
 # На стороне Windows должно быть включено: WoL в BIOS/UEFI, «Wake on Magic Packet»
 # в свойствах сетевого адаптера, и выключен «быстрый запуск» (Fast Startup).

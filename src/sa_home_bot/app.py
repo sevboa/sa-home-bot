@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from sa_home_bot.bot.dispatch import TelegramEventDispatcher
 from sa_home_bot.bot.lifecycle import (
     broadcast_system,
     render_link_restored,
@@ -85,8 +86,7 @@ async def run(settings: Settings) -> None:
     ctx = JobContext(
         store=store,
         sensors=sensors,
-        notifier=notifier,
-        subscriptions=book,
+        dispatcher=TelegramEventDispatcher(notifier, book, store),
         config=settings,
     )
     worker = JobWorker(queue, ctx)

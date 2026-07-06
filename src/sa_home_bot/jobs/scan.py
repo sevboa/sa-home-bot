@@ -2,8 +2,9 @@
 
 Инварианты (ARCHITECTURE §4.2, §9):
 - состояние коммитится одной транзакцией (apply_diff);
-- отправка — отдельный шаг; notified_* выставляется только после успеха,
-  поэтому падение между записью и отправкой не теряет и не дублирует.
+- отправка — отдельный шаг; notified_* выставляется только когда диспетчер
+  принял событие (handled), поэтому падение между записью и отправкой не
+  теряет и не дублирует.
 """
 
 from __future__ import annotations
@@ -11,7 +12,6 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-from sa_home_bot.db.store import NOTIF_ALERT, NOTIF_CLEARED
 from sa_home_bot.domain.health import compute_health_diff
 from sa_home_bot.domain.models import (
     EVENT_OVERHEAT_CLEARED,
@@ -27,7 +27,6 @@ from sa_home_bot.domain.policy import (
     ComponentPolicy,
     FixedThresholdPolicy,
 )
-from sa_home_bot.domain.render import render_event
 from sa_home_bot.jobs.base import JobContext, JobResult
 
 log = logging.getLogger(__name__)
@@ -116,19 +115,10 @@ class SensorScanJob:
         sent = 0
         for state in await ctx.store.pending_alerts():
             event = _event_from_state(state, EVENT_OVERHEAT_STARTED, now)
-            text = render_event(event)
-            delivered = False
-            for sub in ctx.subscriptions.accepting(EVENT_OVERHEAT_STARTED):
-                message_id = await ctx.notifier.send_direct(sub.chat_id, text)
-                if message_id is not None:
-                    delivered = True
-                    await ctx.store.record_notification(
-                        state.component_id, sub.chat_id, NOTIF_ALERT, message_id, now
-                    )
-            # Помечаем доставленным, даже если часть чатов не ответила, —
-            # иначе следующий тик зашлёт дубль живым подписчикам.
-            await ctx.store.mark_alert_notified(state.component_id, now)
-            if delivered:
+            result = await ctx.dispatcher.dispatch_alert(event)
+            if result.handled:
+                await ctx.store.mark_alert_notified(state.component_id, now)
+            if result.delivered:
                 sent += 1
         return sent
 
@@ -136,20 +126,10 @@ class SensorScanJob:
         sent = 0
         for state in await ctx.store.pending_clears():
             event = _event_from_state(state, EVENT_OVERHEAT_CLEARED, now)
-            text = render_event(event)
-            delivered = False
-            for sub in ctx.subscriptions.accepting(EVENT_OVERHEAT_CLEARED):
-                reply_to = await ctx.store.get_alert_message_id(state.component_id, sub.chat_id)
-                message_id = await ctx.notifier.send_direct(
-                    sub.chat_id, text, reply_to_message_id=reply_to
-                )
-                if message_id is not None:
-                    delivered = True
-                    await ctx.store.record_notification(
-                        state.component_id, sub.chat_id, NOTIF_CLEARED, message_id, now
-                    )
-            await ctx.store.mark_cleared_notified(state.component_id, now)
-            if delivered:
+            result = await ctx.dispatcher.dispatch_clear(event)
+            if result.handled:
+                await ctx.store.mark_cleared_notified(state.component_id, now)
+            if result.delivered:
                 sent += 1
         return sent
 
