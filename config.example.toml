@@ -53,6 +53,16 @@ baseline_min_std_c = 3.0
 # eMMC (/dev/mmcblk*) и подобные без SMART пропускаются автоматически.
 devices = []
 
+# Wake-on-LAN: /wake шлёт magic packet на MAC машины в локальной сети.
+# На стороне Windows должно быть включено: WoL в BIOS/UEFI, «Wake on Magic Packet»
+# в свойствах сетевого адаптера, и выключен «быстрый запуск» (Fast Startup).
+[wake]
+mac = ""                           # пусто = функция выключена, напр. "AA:BB:CC:DD:EE:FF"
+ip = ""                            # опционально: если задан, /wake проверит ping до и после
+broadcast = "255.255.255.255"      # broadcast-адрес подсети, напр. "192.168.0.255"
+port = 9                           # стандартный порт WoL (7 или 9)
+wait_timeout_s = 120.0             # сколько ждать ответа на ping после пробуждения
+
 [logging]
 level = "INFO"
 format = "plain"                   # plain | json

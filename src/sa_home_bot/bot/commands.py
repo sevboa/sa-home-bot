@@ -29,6 +29,7 @@ SCAN_NOW = Command("scan_now", "форс-скан датчиков и диско
 DOWNTIME = Command(
     "downtime", "последние отключения машины", universal=False, menu=False
 )
+WAKE = Command("wake", "разбудить домашний ПК (Wake-on-LAN)", universal=False)
 
 ALL_COMMANDS: list[Command] = [
     HELP,
@@ -39,6 +40,7 @@ ALL_COMMANDS: list[Command] = [
     STATS,
     SCAN_NOW,
     DOWNTIME,
+    WAKE,
 ]
 
 UNIVERSAL_COMMANDS: list[Command] = [c for c in ALL_COMMANDS if c.universal]

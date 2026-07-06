@@ -75,6 +75,21 @@ class SensorsConfig(BaseModel):
     disks: DiskSensorConfig = Field(default_factory=DiskSensorConfig)
 
 
+class WakeConfig(BaseModel):
+    """Wake-on-LAN для внешней машины (например, домашнего ПК).
+
+    Пустой ``mac`` = функция выключена (/wake ответит «не настроено»).
+    ``ip`` опционален: если задан, /wake сначала проверит, не в сети ли машина
+    уже, а после отправки magic packet подождёт ответа на ping.
+    """
+
+    mac: str = ""
+    ip: str = ""
+    broadcast: str = "255.255.255.255"
+    port: int = Field(default=9, ge=1, le=65535)
+    wait_timeout_s: float = Field(default=120.0, gt=0)
+
+
 class LoggingConfig(BaseModel):
     level: str = "INFO"
     format: str = "plain"  # plain | json
@@ -103,6 +118,7 @@ class Settings(BaseSettings):
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     sensors: SensorsConfig = Field(default_factory=SensorsConfig)
+    wake: WakeConfig = Field(default_factory=WakeConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     subscriptions: list[SubscriptionConfig] = Field(default_factory=list)
 

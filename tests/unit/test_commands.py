@@ -9,7 +9,7 @@ from sa_home_bot.subscriptions.models import Subscription
 
 def test_menu_hides_status_subactions():
     menu_names = {c.name for c in commands.MENU_CONTROL_COMMANDS}
-    assert menu_names == {"status"}  # только status в меню
+    assert menu_names == {"status", "wake"}  # подкоманды /status скрыты
     for name in ("status_full", "stats", "scan_now", "downtime"):
         assert commands.get(name).menu is False
 

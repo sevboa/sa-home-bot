@@ -321,7 +321,8 @@ sa-home-bot/
 │       │       ├── basic.py   # start/help/ping/whoami
 │       │       ├── status.py
 │       │       ├── stats.py
-│       │       └── control.py # /scan_now
+│       │       ├── control.py # /scan_now
+│       │       └── wake.py    # /wake (Wake-on-LAN)
 │       │
 │       └── utils/
 │           ├── lifespan.py    # стек shutdown-колбэков + сигналы

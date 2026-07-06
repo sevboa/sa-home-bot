@@ -75,7 +75,16 @@ sa-home-bot --config ./config.toml
 
 Универсальные (везде, без проверок): `/help`, `/ping`, `/whoami`.
 Управляющие (нужно право в `allowed_commands` подписного чата): `/status`,
-`/stats`, `/scan_now`.
+`/stats`, `/scan_now`, `/wake`.
+
+### /wake — Wake-on-LAN
+
+Будит машину в локальной сети (например, домашний ПК) magic packet'ом на её MAC.
+Настройка — секция `[wake]` в config.toml (`mac`, опционально `ip` для
+ping-проверки «проснулась ли»). На целевой Windows-машине должны быть включены:
+WoL в BIOS/UEFI, «Wake on Magic Packet» в свойствах сетевого адаптера, и
+выключен «быстрый запуск» (Fast Startup). Надёжно работает только по
+Ethernet-кабелю.
 
 ## Права на SMART (диски)
 
