@@ -102,6 +102,20 @@ class MonitorConfig(BaseModel):
     db_path: Path = Path("./data/monitor.sqlite")
 
 
+class NodeConfig(BaseModel):
+    """Сервис ноды (супервизор, `sa-home-bot --service node`).
+
+    Нода запускает службы из ``assignments`` дочерними процессами, рестартит
+    упавших и отдаёт статус/управление по протоколу v0 через ``socket``
+    (клиент — ``nodectl``). Известные назначения: ``monitor``, ``telegram-bot``.
+    """
+
+    socket: Path = Path("./data/node.sock")
+    assignments: list[str] = Field(default_factory=lambda: ["monitor", "telegram-bot"])
+    restart_delay_s: float = Field(default=5.0, gt=0)
+    stop_timeout_s: float = Field(default=90.0, gt=0)  # SIGTERM → SIGKILL
+
+
 class LoggingConfig(BaseModel):
     level: str = "INFO"
     format: str = "plain"  # plain | json
@@ -131,6 +145,7 @@ class Settings(BaseSettings):
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     sensors: SensorsConfig = Field(default_factory=SensorsConfig)
     monitor: MonitorConfig = Field(default_factory=MonitorConfig)
+    node: NodeConfig = Field(default_factory=NodeConfig)
     wake: WakeConfig = Field(default_factory=WakeConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     subscriptions: list[SubscriptionConfig] = Field(default_factory=list)

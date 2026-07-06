@@ -19,9 +19,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", "-c", default=None, help="путь к config.toml")
     parser.add_argument(
         "--service",
-        choices=("bot", "monitor"),
+        choices=("bot", "monitor", "node"),
         default="bot",
-        help="какую службу запустить: telegram-бот (по умолчанию) или монитор датчиков",
+        help="какую службу запустить: telegram-бот (по умолчанию), "
+        "монитор датчиков или сервис ноды (супервизор)",
     )
     parser.add_argument(
         "--check-config",
@@ -58,13 +59,22 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(settings.logging.level, settings.logging.format)
 
     # Импорт здесь, чтобы --check-config не тянул тяжёлые зависимости.
-    if args.service == "monitor":
-        from sa_home_bot.monitor.app import run_monitor as run
+    if args.service == "node":
+        from sa_home_bot.node.app import run_node
+
+        # Ноде нужен путь к конфигу — она передаёт его дочерним службам.
+        coro = run_node(settings, config_path=args.config)
+    elif args.service == "monitor":
+        from sa_home_bot.monitor.app import run_monitor
+
+        coro = run_monitor(settings)
     else:
         from sa_home_bot.app import run
 
+        coro = run(settings)
+
     try:
-        asyncio.run(run(settings))
+        asyncio.run(coro)
     except KeyboardInterrupt:
         return 0
     return 0

@@ -1,0 +1,29 @@
+# Пользовательский юнит: ~/.config/systemd/user/sa-home-node.service
+# systemctl --user enable --now sa-home-node
+#
+# Единственный юнит системы: нода-супервизор сама запускает monitor и
+# telegram-bot дочерними процессами, рестартит упавших (nodectl status).
+[Unit]
+Description=sa-home-node (нода: супервизор monitor и telegram-bot)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/sevboa/Github/sa-home-bot
+# Гейт: не стартовать, пока не резолвится api.telegram.org — иначе telegram-bot
+# после ребута пометит подписки broken (DNS ещё не поднялся). Монитору сеть не
+# нужна, но задержка его старта на время поднятия сети терпима.
+ExecStartPre=/bin/sh -c 'until getent hosts api.telegram.org >/dev/null 2>&1; do sleep 3; done'
+ExecStart=/home/sevboa/Github/sa-home-bot/.venv/bin/sa-home-bot --service node --config /home/sevboa/Github/sa-home-bot/config.toml
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=300
+KillSignal=SIGTERM
+# Нода гасит детей сама: telegram-bot быстро, monitor дорабатывает очередь
+# (smartctl на USB-мостах бывает медленным) — даём запас.
+TimeoutStopSec=150
+# ~/.local/bin — первым: там sudo-обёртка smartctl (беспарольный read-only sudo).
+Environment=PATH=/home/sevboa/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+
+[Install]
+WantedBy=default.target

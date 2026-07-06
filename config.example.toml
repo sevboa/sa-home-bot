@@ -60,6 +60,14 @@ devices = []
 socket = "./data/monitor.sock"
 db_path = "./data/monitor.sqlite"
 
+# Сервис ноды (супервизор: `sa-home-bot --service node`, консоль — nodectl).
+# Нода запускает назначенные службы дочерними процессами и рестартит упавшие.
+[node]
+socket = "./data/node.sock"
+assignments = ["monitor", "telegram-bot"]
+restart_delay_s = 5.0              # пауза перед перезапуском упавшей службы
+stop_timeout_s = 90.0              # SIGTERM → SIGKILL при остановке
+
 # Wake-on-LAN: /wake шлёт magic packet на MAC машины в локальной сети.
 # На стороне Windows должно быть включено: WoL в BIOS/UEFI, «Wake on Magic Packet»
 # в свойствах сетевого адаптера, и выключен «быстрый запуск» (Fast Startup).

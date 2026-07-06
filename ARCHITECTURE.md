@@ -320,6 +320,11 @@ sa-home-bot/
 │       │   ├── service.py     # MonitorService: describe/get_state/scan_now
 │       │   └── dispatch.py    # ProtoEventDispatcher (события → broadcast)
 │       │
+│       ├── node/              # сервис ноды (супервизор, --service node)
+│       │   ├── app.py         # сборка: proto-сервер ноды + супервизор назначений
+│       │   ├── service.py     # NodeService: get_state, start/stop/restart
+│       │   └── supervisor.py  # дочерние процессы, рестарт упавших, события
+│       │
 │       ├── bot/
 │       │   ├── setup.py       # Bot/Dispatcher, set_bot_commands
 │       │   ├── commands.py    # единый реестр команд
