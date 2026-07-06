@@ -83,6 +83,11 @@ class ProtoClient:
         self._reader = None
         self._fail_pending(ConnectionError("клиент закрыт"))
 
+    async def join(self) -> None:
+        """Дождаться завершения фоновой читающей задачи (EOF/обрыв/закрытие)."""
+        if self._reader_task is not None:
+            await self._reader_task
+
     # --- Запросы ---
 
     async def hello(self, dst: Address | None = None) -> ServiceInfo:

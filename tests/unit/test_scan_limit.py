@@ -84,32 +84,65 @@ async def test_store_manual_scan_ticks_bad_json(store):
     assert await store.get_manual_scan_ticks() == []
 
 
-# --- build_scan_text: оба скана + расход слота + блокировка ---
+# --- build_scan_text: команда монитору + расход слота + блокировка ---
 
 
-async def test_build_scan_enqueues_both_and_records_tick(store):
+class FakeLink:
+    def __init__(self, result=None, fail=False):
+        self.calls: list[str] = []
+        self._result = result if result is not None else {
+            "sensor_queued": True,
+            "smart_queued": True,
+        }
+        self._fail = fail
+
+    async def command(self, action, args=None):
+        from sa_home_bot.bot.monitor_link import MonitorUnavailableError
+
+        if self._fail:
+            raise MonitorUnavailableError("нет связи")
+        self.calls.append(action)
+        return self._result
+
+
+async def test_build_scan_sends_command_and_records_tick(store):
     from sa_home_bot.bot import status_view
-    from sa_home_bot.worker.queue import DedupQueue
 
-    queue = DedupQueue()
-    text = await status_view.build_scan_text(store, queue)
+    link = FakeLink()
+    text = await status_view.build_scan_text(store, link)
 
     assert "датчиков и дисков" in text
-    keys = {(await queue.get()).dedup_key for _ in range(2)}
-    assert keys == {"sensor-scan", "smart-scan"}  # оба поставлены
+    assert link.calls == ["scan_now"]
     # Слот израсходован — записана одна метка.
     assert len(await store.get_manual_scan_ticks()) == 1
 
 
 async def test_build_scan_blocked_when_too_soon(store):
-    from datetime import UTC, datetime
-
     from sa_home_bot.bot import status_view
-    from sa_home_bot.worker.queue import DedupQueue
 
     await store.set_manual_scan_ticks([datetime.now(tz=UTC)])  # только что сканили
-    queue = DedupQueue()
-    text = await status_view.build_scan_text(store, queue)
+    link = FakeLink()
+    text = await status_view.build_scan_text(store, link)
 
     assert "Слишком часто" in text
-    assert queue.qsize() == 0  # ничего не поставлено
+    assert link.calls == []  # до монитора не дошло
+
+
+async def test_build_scan_monitor_down_keeps_slot(store):
+    from sa_home_bot.bot import status_view
+
+    text = await status_view.build_scan_text(store, FakeLink(fail=True))
+
+    assert "недоступна" in text
+    # Слот НЕ израсходован — скан не состоялся.
+    assert await store.get_manual_scan_ticks() == []
+
+
+async def test_build_scan_already_queued_keeps_slot(store):
+    from sa_home_bot.bot import status_view
+
+    link = FakeLink(result={"sensor_queued": False, "smart_queued": False})
+    text = await status_view.build_scan_text(store, link)
+
+    assert "уже в очереди" in text
+    assert await store.get_manual_scan_ticks() == []

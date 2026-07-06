@@ -1,4 +1,11 @@
-"""Сборка и жизненный цикл приложения (ARCHITECTURE.md §8)."""
+"""Сборка и жизненный цикл telegram-бота (ARCHITECTURE.md §8).
+
+С этапа 13 бот — фронтенд: датчиками, порогами и планировщиком владеет
+служба monitor (отдельный процесс, `--service monitor`). Бот держит одно
+подключение к ней (MonitorLink), получает события и рассылает их в чаты;
+/status и прочие данные — через get_state по протоколу. В БД бота остаются
+только его вещи: app_state, message_id для reply-цепочек, лимит форс-сканов.
+"""
 
 from __future__ import annotations
 
@@ -13,22 +20,18 @@ from sa_home_bot.bot.lifecycle import (
     render_startup,
 )
 from sa_home_bot.bot.link_watch import LinkWatchMiddleware
+from sa_home_bot.bot.monitor_events import build_event_handler
+from sa_home_bot.bot.monitor_link import MonitorLink
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.setup import build_bot, build_dispatcher, set_bot_commands
 from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
-from sa_home_bot.jobs.base import JobContext
-from sa_home_bot.jobs.smart import SmartScanJob
 from sa_home_bot.runtime import Runtime
-from sa_home_bot.scheduler.setup import build_scheduler, register_jobs
 from sa_home_bot.sensors.power import read_power_events_sync
-from sa_home_bot.sensors.source import SensorSource
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.utils.lifespan import Lifespan
-from sa_home_bot.worker.queue import DedupQueue
-from sa_home_bot.worker.worker import JobWorker
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +41,7 @@ STATE_CLEAN_SHUTDOWN = "last_shutdown_clean"
 async def run(settings: Settings) -> None:
     runtime = Runtime()
 
-    # 1-2. Логирование уже настроено в CLI; БД + миграции.
+    # 1-2. Логирование уже настроено в CLI; БД бота + миграции.
     db = Database(settings.database.path)
     await db.open()
     await apply_migrations(db)
@@ -49,12 +52,10 @@ async def run(settings: Settings) -> None:
     started_clean = prev in (None, "1")
     await store.set_state(STATE_CLEAN_SHUTDOWN, "0")
 
-    # 3-5. Подписки, датчики, очередь.
+    # 3. Подписки.
     book = SubscriptionBook.from_config(settings.subscriptions)
-    sensors = SensorSource(settings.sensors)
-    queue = DedupQueue()
 
-    # 6. Bot + Notifier + watchdog связи.
+    # 4. Bot + Notifier + watchdog связи.
     bot = build_bot(settings.telegram.token)
     notifier = Notifier(bot)
 
@@ -64,13 +65,13 @@ async def run(settings: Settings) -> None:
     bot.session.middleware(LinkWatchMiddleware(on_reconnect))
     dp = build_dispatcher(book)
 
-    # 7. Валидация подписок (пометка broken).
+    # 5. Валидация подписок (пометка broken).
     await book.validate_on_startup(bot)
 
-    # 8. Меню команд по правам чатов.
+    # 6. Меню команд по правам чатов.
     await set_bot_commands(bot, book)
 
-    # 9. Системное приветствие (clean/crash). После сбоя пробуем приложить
+    # 7. Системное приветствие (clean/crash). После сбоя пробуем приложить
     #    детали последнего отключения, если это была потеря питания.
     last_outage = None
     if not started_clean:
@@ -82,31 +83,19 @@ async def run(settings: Settings) -> None:
         book, notifier, render_startup(clean=started_clean, last_outage=last_outage)
     )
 
-    # 10. JobContext + worker.
-    ctx = JobContext(
-        store=store,
-        sensors=sensors,
-        dispatcher=TelegramEventDispatcher(notifier, book, store),
-        config=settings,
+    # 8. Связь с монитором: события → рендер → рассылка подписчикам.
+    dispatcher = TelegramEventDispatcher(notifier, book, store)
+    link = MonitorLink(
+        settings.monitor.socket, on_event=build_event_handler(dispatcher)
     )
-    worker = JobWorker(queue, ctx)
-    worker_task = asyncio.create_task(worker.run(), name="job-worker")
+    await link.start()
 
-    # 11. Scheduler.
-    scheduler = build_scheduler()
-    register_jobs(scheduler, queue, settings)
-    scheduler.start()
-
-    # Разовый SMART-снимок на старте — чтобы baseline и иконки /status
-    # наполнились сразу, не дожидаясь первого часового тика.
-    await queue.put(SmartScanJob())
-
-    # 12. Polling.
+    # 9. Polling.
     polling_task = asyncio.create_task(
         dp.start_polling(
             bot,
             store=store,
-            queue=queue,
+            link=link,
             runtime=runtime,
             config=settings,
             notifier=notifier,
@@ -120,16 +109,14 @@ async def run(settings: Settings) -> None:
     lifespan.install_signal_handlers()
     log.info("Бот запущен (uptime-старт зафиксирован)")
 
-    # 13. Ждать сигнала, затем остановить всё в обратном порядке.
+    # 10. Ждать сигнала, затем остановить всё в обратном порядке.
     try:
         await lifespan.wait()
     finally:
         await _shutdown(
-            scheduler=scheduler,
             dp=dp,
             polling_task=polling_task,
-            queue=queue,
-            worker_task=worker_task,
+            link=link,
             book=book,
             notifier=notifier,
             store=store,
@@ -140,11 +127,9 @@ async def run(settings: Settings) -> None:
 
 async def _shutdown(
     *,
-    scheduler,
     dp,
     polling_task: asyncio.Task,
-    queue: DedupQueue,
-    worker_task: asyncio.Task,
+    link: MonitorLink,
     book: SubscriptionBook,
     notifier: Notifier,
     store: Store,
@@ -153,8 +138,8 @@ async def _shutdown(
 ) -> None:
     log.info("Останов приложения...")
 
-    # Стоп scheduler (новые тики не ставятся).
-    scheduler.shutdown(wait=False)
+    # Стоп связи с монитором (новые события не принимаются).
+    await link.stop()
 
     # Стоп polling. stop_polling кидает RuntimeError, если polling ещё не успел
     # запуститься (быстрый SIGINT) или упал на старте (например, бэд-токен).
@@ -175,10 +160,6 @@ async def _shutdown(
 
     # Дослать прощание, пока сессия бота жива.
     await broadcast_system(book, notifier, render_shutdown())
-
-    # Worker дорабатывает текущий job и завершается по sentinel.
-    await queue.stop()
-    await worker_task
 
     # Флаг чистого завершения — до закрытия БД.
     await store.set_state(STATE_CLEAN_SHUTDOWN, "1")

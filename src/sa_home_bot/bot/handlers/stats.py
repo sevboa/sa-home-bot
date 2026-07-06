@@ -7,11 +7,11 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from sa_home_bot.bot import commands, status_view
-from sa_home_bot.db.store import Store
+from sa_home_bot.bot.monitor_link import MonitorLink
 
 router = Router(name="stats")
 
 
 @router.message(Command(commands.STATS.name))
-async def cmd_stats(message: Message, store: Store) -> None:
-    await message.answer(await status_view.build_stats_text(store))
+async def cmd_stats(message: Message, link: MonitorLink) -> None:
+    await message.answer(await status_view.build_stats_text(link))

@@ -9,10 +9,9 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from sa_home_bot.bot import commands, status_view
-from sa_home_bot.config import Settings
+from sa_home_bot.bot.monitor_link import MonitorLink
 from sa_home_bot.db.store import Store
 from sa_home_bot.subscriptions.models import Subscription
-from sa_home_bot.worker.queue import DedupQueue
 
 log = logging.getLogger(__name__)
 
@@ -22,27 +21,26 @@ router = Router(name="status")
 @router.message(Command(commands.STATUS.name))
 async def cmd_status(
     message: Message,
-    store: Store,
-    config: Settings,
+    link: MonitorLink,
     subscription: Subscription | None = None,
 ) -> None:
-    text = await status_view.build_summary_text(store, config)
+    text = await status_view.build_summary_text(link)
     keyboard = status_view.build_status_keyboard(subscription)
     await message.answer(text, reply_markup=keyboard)
 
 
 @router.message(Command(commands.STATUS_FULL.name))
-async def cmd_status_full(message: Message, store: Store) -> None:
-    await message.answer(await status_view.build_full_text(store))
+async def cmd_status_full(message: Message, link: MonitorLink) -> None:
+    await message.answer(await status_view.build_full_text(link))
 
 
-async def _dispatch_action(code: str, store: Store, queue: DedupQueue) -> str:
+async def _dispatch_action(code: str, store: Store, link: MonitorLink) -> str:
     if code == "full":
-        return await status_view.build_full_text(store)
+        return await status_view.build_full_text(link)
     if code == "stats":
-        return await status_view.build_stats_text(store)
+        return await status_view.build_stats_text(link)
     if code == "scan":
-        return await status_view.build_scan_text(store, queue)
+        return await status_view.build_scan_text(store, link)
     return "Неизвестное действие."
 
 
@@ -57,7 +55,7 @@ def _parse_offset(parts: list[str]) -> int:
 
 @router.callback_query(F.data.startswith(f"{commands.CALLBACK_PREFIX}:"))
 async def on_status_action(
-    callback: CallbackQuery, store: Store, queue: DedupQueue
+    callback: CallbackQuery, store: Store, link: MonitorLink
 ) -> None:
     # Права уже проверены CallbackAuthorizationMiddleware.
     cmd = commands.command_for_callback(callback.data)
@@ -76,6 +74,6 @@ async def on_status_action(
         text, keyboard = await status_view.build_downtime_page(_parse_offset(parts))
         await callback.message.edit_text(text, reply_markup=keyboard)
     else:
-        text = await _dispatch_action(code, store, queue)
+        text = await _dispatch_action(code, store, link)
         await callback.message.answer(text)
     await callback.answer()
