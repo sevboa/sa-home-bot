@@ -310,6 +310,11 @@ sa-home-bot/
 │       ├── scheduler/
 │       │   └── setup.py       # build_scheduler, register_jobs
 │       │
+│       ├── proto/             # протокол v0 служб ноды (см. PROTOCOL.md)
+│       │   ├── messages.py    # конверт, hello/describe/get_state/command/event
+│       │   ├── server.py      # ProtoServer (unix-сокет, NDJSON, broadcast событий)
+│       │   └── client.py      # ProtoClient (запрос-ответ по id + события)
+│       │
 │       ├── bot/
 │       │   ├── setup.py       # Bot/Dispatcher, set_bot_commands
 │       │   ├── commands.py    # единый реестр команд
