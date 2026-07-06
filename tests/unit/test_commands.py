@@ -27,6 +27,12 @@ def test_command_for_callback():
     assert commands.command_for_callback(None) is None
 
 
+def test_command_for_callback_downtime_pagination():
+    # «st:downtime_page:<offset>» — те же права, что и у команды DOWNTIME.
+    assert commands.command_for_callback("st:downtime_page:10") is commands.DOWNTIME
+    assert commands.command_for_callback("st:downtime_page:0") is commands.DOWNTIME
+
+
 def _sub(*allowed: str) -> Subscription:
     return Subscription(chat_id=1, name="me", allowed_commands=frozenset(allowed))
 

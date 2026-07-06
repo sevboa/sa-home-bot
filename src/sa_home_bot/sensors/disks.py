@@ -321,10 +321,15 @@ def _list_block_disks_sync() -> list[BlockDisk]:
 
 
 def _label_disks(disks: list[BlockDisk]) -> list[tuple[str, BlockDisk]]:
-    """Назначить метки: не-mmc диски → HDD1, HDD2…; mmc → eMMC."""
+    """Назначить метки: не-mmc диски → HDD1, HDD2…; mmc → eMMC.
+
+    eMMC — первой (сразу после CPU в /status): для неё нет температуры (SMART
+    недоступен), поэтому в сводке она должна открывать список дисков, а не
+    прятаться в конце.
+    """
     labelled: list[tuple[str, BlockDisk]] = []
     hdd_n = 0
-    for d in sorted(disks, key=lambda x: (x.is_mmc, x.path)):
+    for d in sorted(disks, key=lambda x: (not x.is_mmc, x.path)):
         if d.is_mmc:
             label = "eMMC"
         else:

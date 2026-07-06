@@ -55,6 +55,14 @@ STATUS_ACTIONS: dict[str, Command] = {
 }
 CALLBACK_PREFIX = "st"
 
+# Пагинация /downtime («st:downtime_page:<offset>») — не кнопка под /status,
+# но требует тех же прав, что и сама команда DOWNTIME.
+DOWNTIME_PAGE_CODE = "downtime_page"
+_ALL_CALLBACK_ACTIONS: dict[str, Command] = {
+    **STATUS_ACTIONS,
+    DOWNTIME_PAGE_CODE: DOWNTIME,
+}
+
 _BY_NAME = {c.name: c for c in ALL_COMMANDS}
 
 
@@ -73,10 +81,14 @@ def is_control(name: str) -> bool:
 
 
 def command_for_callback(data: str | None) -> Command | None:
-    """Разобрать callback_data кнопки «st:<код>» в команду-действие."""
+    """Разобрать callback_data «st:<код>[:<аргумент>]» в команду-действие.
+
+    Третий сегмент (offset пагинации /downtime) игнорируется — код действия
+    всегда второй сегмент.
+    """
     if not data:
         return None
-    parts = data.split(":", 1)
-    if len(parts) != 2 or parts[0] != CALLBACK_PREFIX:
+    parts = data.split(":")
+    if len(parts) < 2 or parts[0] != CALLBACK_PREFIX:
         return None
-    return STATUS_ACTIONS.get(parts[1])
+    return _ALL_CALLBACK_ACTIONS.get(parts[1])

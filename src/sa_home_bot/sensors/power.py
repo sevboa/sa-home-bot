@@ -198,18 +198,26 @@ def read_uptime_sync() -> timedelta | None:
         return None
 
 
-def read_power_events_sync(limit: int = 10) -> list[PowerEvent]:
-    """Блокирующе собрать историю отключений. Вызывать через executor.
+def read_power_events_sync(
+    offset: int = 0, limit: int = 10
+) -> tuple[list[PowerEvent], bool]:
+    """Блокирующе собрать страницу истории отключений. Вызывать через executor.
 
     `last` обязателен (классификация и времена). `journalctl` опционален —
     без него внезапные события остаются без точного `down_at`.
+
+    Возвращает (события страницы `[offset:offset+limit]`, есть ли следующая
+    страница) — для этого запрашивается на одно событие больше, чем нужно.
     """
     last_out = _run(LAST_ARGS)
     if last_out is None:
-        return []
-    events = parse_last_reboots(last_out, limit=limit)
+        return [], False
+    events = parse_last_reboots(last_out, limit=offset + limit + 1)
 
     journal_out = _run(JOURNAL_ARGS)
     if journal_out is not None:
         events = enrich_unexpected(events, parse_journal_boots(journal_out))
-    return events
+
+    page = events[offset : offset + limit]
+    has_next = len(events) > offset + limit
+    return page, has_next

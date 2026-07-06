@@ -102,3 +102,11 @@ def test_label_disks_hdd_numbering_and_emmc():
     labels = dict((label, d.path) for label, d in _label_disks(disks))
     assert labels["HDD1"] == "/dev/sda"
     assert labels["eMMC"] == "/dev/mmcblk0"
+
+
+def test_label_disks_emmc_comes_first():
+    # eMMC без температуры (SMART недоступен) должна открывать список дисков
+    # (в /status — сразу после CPU), а не оказываться в конце.
+    disks = parse_lsblk_disks(LSBLK)
+    ordered_labels = [label for label, _ in _label_disks(disks)]
+    assert ordered_labels[0] == "eMMC"

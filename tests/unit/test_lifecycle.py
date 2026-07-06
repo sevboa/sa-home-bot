@@ -42,7 +42,7 @@ def test_render_startup_appends_power_loss_details():
     text = render_startup(clean=False, last_outage=_outage(POWER_UNEXPECTED))
     assert "потеря питания" in text
     assert "Последнее отключение" in text
-    assert "простой" in text  # строка события приложена
+    assert "9h 11m" in text  # длительность простоя приложена (d/h/m/s)
 
 
 def test_render_startup_ignores_clean_last_outage():

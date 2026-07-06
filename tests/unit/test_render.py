@@ -91,23 +91,46 @@ def test_render_status_summary_has_uptime_temps_and_outage():
     )
     cpu = [s for s in _states() if s.kind == KIND_CPU]
     text = render_status_summary(
-        BASE_TIME, timedelta(hours=1, minutes=47), cpu, _disks(), outage
+        BASE_TIME,
+        timedelta(hours=1, minutes=47),
+        cpu,
+        _disks(),
+        outage,
+        cpu_warn_c=80.0,
+        cpu_crit_c=90.0,
+        disk_warn_c=55.0,
+        disk_crit_c=65.0,
     )
-    assert "Сводка" in text
-    assert "Аптайм" in text
+    assert "2026-06-22" in text  # дата отчёта, без слова "Сводка"
+    assert "uptime: 1 h" in text
     assert "CPU: 42.0°C" in text
-    assert "HDD1 ⚠️" in text and "HDD2 ✅" in text  # smart-иконки
-    assert "eMMC ❔" in text  # SMART недоступен
+    assert "⚠️ HDD ST9250" in text and "✅ HDD Hitachi" in text  # иконка + модель
+    assert "❔ eMMC:" in text  # SMART недоступен, однострочно (нет температуры)
     assert "31°C" in text  # температура HDD1
-    assert "137 / 245 ГБ" in text  # свободное место
-    assert "Последнее отключение" in text
+    assert "108 из 245 ГБ" in text  # занятое место (было — свободное)
+    assert "last off:" in text
 
 
 def test_render_status_summary_no_data():
-    text = render_status_summary(BASE_TIME, None, [], [], None)
-    assert "Сводка" in text
-    assert "Аптайм" not in text  # uptime None — строку не добавляем
-    assert "Диски" not in text  # дисков нет — секцию не показываем
+    text = render_status_summary(
+        BASE_TIME, None, [], [], None,
+        cpu_warn_c=80.0, cpu_crit_c=90.0, disk_warn_c=55.0, disk_crit_c=65.0,
+    )
+    assert "2026-06-22" in text
+    assert "uptime:" not in text  # uptime None — строку не добавляем
+    assert "HDD" not in text  # дисков нет — секцию не показываем
+
+
+def test_disk_temp_mood_matches_configured_alert_thresholds():
+    # «Настроение» температуры — та же шкала warn_c/crit_c, что и у реальных
+    # алертов (не выдуманные отдельно числа): 48°C ниже warn_c=55 — норма,
+    # но выше warn_c=45 — уже «жарко». Иконка не должна противоречить алерту.
+    from sa_home_bot.domain.models import DISK_OK, DiskSummary
+    from sa_home_bot.domain.render import render_disk_line
+
+    disk = DiskSummary("HDD1", DISK_OK, 48.0, 100_000_000_000, 200_000_000_000, "X")
+    assert "🙂" in render_disk_line(disk, warn_c=55.0, crit_c=65.0)
+    assert "🥵" in render_disk_line(disk, warn_c=45.0, crit_c=65.0)
 
 
 def test_render_stats_counts_and_runs():

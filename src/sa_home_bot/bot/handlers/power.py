@@ -13,4 +13,5 @@ router = Router(name="power")
 
 @router.message(Command(commands.DOWNTIME.name))
 async def cmd_downtime(message: Message) -> None:
-    await message.answer(await status_view.build_downtime_text())
+    text, keyboard = await status_view.build_downtime_page()
+    await message.answer(text, reply_markup=keyboard)

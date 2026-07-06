@@ -74,7 +74,7 @@ async def run(settings: Settings) -> None:
     last_outage = None
     if not started_clean:
         loop = asyncio.get_running_loop()
-        events = await loop.run_in_executor(None, read_power_events_sync, 1)
+        events, _ = await loop.run_in_executor(None, read_power_events_sync, 0, 1)
         if events:
             last_outage = events[0]
     await broadcast_system(

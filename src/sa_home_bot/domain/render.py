@@ -81,11 +81,31 @@ def render_state_line(state: HealthState) -> str:
 def _fmt_dt(dt) -> str:
     # last даёт время с локальным offset, journal — в UTC; приводим к единой
     # локальной TZ процесса, чтобы обе метки печатались в одном поясе.
-    return dt.astimezone().strftime("%d.%m %H:%M")
+    return dt.astimezone().strftime("%m/%d %H:%M")
 
 
 def _fmt_duration(td) -> str:
-    """Простой в человекочитаемом виде: «2 д 3 ч» / «9 ч 11 м» / «17 м»."""
+    """Простой в d/h/m/s, только ненулевые единицы: «9m» / «8h 26m» / «1d 2h»."""
+    total = int(td.total_seconds())
+    if total < 0:
+        total = 0
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if seconds or not parts:
+        parts.append(f"{seconds}s")
+    return " ".join(parts)
+
+
+def _fmt_uptime_short(td) -> str:
+    """Аптайм одной крупнейшей единицей по-английски: «1 d» / «5 h» / «17 m»."""
     total = int(td.total_seconds())
     if total < 0:
         total = 0
@@ -93,29 +113,35 @@ def _fmt_duration(td) -> str:
     hours, rem = divmod(rem, 3600)
     minutes = rem // 60
     if days:
-        return f"{days} д {hours} ч"
+        return f"{days} d"
     if hours:
-        return f"{hours} ч {minutes} м"
+        return f"{hours} h"
     if minutes:
-        return f"{minutes} м"
-    return "&lt;1 м"  # &lt; — «<» экранирован для HTML parse_mode
+        return f"{minutes} m"
+    return "&lt;1 m"  # &lt; — «<» экранирован для HTML parse_mode
 
 
 def render_outage_line(e: PowerEvent) -> str:
-    """Одна строка отключения: «⚡ внезапно · ≈ 04.07 15:12 → 05.07 00:23 · простой 9 ч 11 м»."""
-    icon, word = ("🔌", "штатно") if e.kind == POWER_CLEAN else ("⚡", "внезапно")
-    down = ("≈ " if e.down_approx else "") + _fmt_dt(e.down_at) if e.down_at else "?"
+    """Одна строка отключения: «⚡ 07/05 10:57 - 07/05 11:06 (9m)»."""
+    icon = "🔌" if e.kind == POWER_CLEAN else "⚡"
+    down = _fmt_dt(e.down_at) if e.down_at else "?"
     up = _fmt_dt(e.up_at) if e.up_at else "?"
-    span = f"{down} → {up}"
-    tail = f" · простой {_fmt_duration(e.downtime)}" if e.downtime is not None else ""
-    return f"{icon} <b>{word}</b> · {span}{tail}"
+    tail = f" ({_fmt_duration(e.downtime)})" if e.downtime is not None else ""
+    return f"{icon} {down} - {up}{tail}"
 
 
-def render_downtime(events: list[PowerEvent]) -> str:
-    """Сообщение /downtime — список последних отключений машины."""
+def render_downtime(events: list[PowerEvent], offset: int = 0) -> str:
+    """Сообщение /downtime — страница отключений машины (постранично по 10)."""
     if not events:
+        if offset:
+            return "Дальше отключений нет."
         return "Нет данных об отключениях (журнал `last` пуст или недоступен)."
-    lines = ["<b>Последние отключения</b>", ""]
+    header = (
+        "<b>Последние отключения</b>"
+        if offset == 0
+        else f"<b>Отключения {offset + 1}–{offset + len(events)}</b>"
+    )
+    lines = [header, ""]
     lines.extend(render_outage_line(e) for e in events)
     return "\n".join(lines)
 
@@ -133,22 +159,67 @@ def render_status_full(states: list[HealthState]) -> str:
 
 _DISK_ICON = {DISK_OK: "✅", DISK_WARN: "⚠️", DISK_FAIL: "❌"}
 
+# Пороги «настроения» (🥶/🙂/🥵/🔥) — те же warn_c/crit_c, что уже настроены в
+# config.sensors для реальных алертов (не независимая шкала): 🥵 совпадает с
+# приближением к предупреждению, 🔥 — с уже сработавшим алертом. Так эмодзи не
+# противоречит факту наличия/отсутствия уведомления.
+#
+# «Холодно» — порог ниже реальных алертов, датащитами не регламентируется
+# (нижний предел там 0°C, что бессмысленно как бытовой ориентир): для дисков —
+# обычная комнатная температура (по паспортам Seagate Momentus 5400.6 и Hitachi
+# Travelstar Z5K320 — рабочий диапазон 0-60°C, ниже комнатной работающий диск
+# практически не бывает); для CPU — измеренный холостой ход этой машины
+# 33-37°C (см. CLAUDE.md), Tjunction max Celeron N3350 ≈105°C.
+_DISK_TEMP_COLD_C = 25.0
+_CPU_TEMP_COLD_C = 35.0
 
-def _fmt_gb(nbytes: int | None) -> str:
-    return "?" if nbytes is None else f"{nbytes / 1e9:.0f}"
+
+def _temp_mood(temp_c: float, cold: float, warn_c: float, crit_c: float) -> str:
+    if temp_c >= crit_c:
+        return "🔥"
+    if temp_c >= warn_c:
+        return "🥵"
+    if temp_c >= cold:
+        return "🙂"
+    return "🥶"
 
 
-def render_disk_line(d: DiskSummary) -> str:
-    """Строка диска в сводке: «HDD1 ⚠️ 31°C · своб. 137 / 245 ГБ»."""
+def _disk_temp_mood(temp_c: float, warn_c: float, crit_c: float) -> str:
+    return _temp_mood(temp_c, _DISK_TEMP_COLD_C, warn_c, crit_c)
+
+
+def _cpu_temp_mood(temp_c: float, warn_c: float, crit_c: float) -> str:
+    return _temp_mood(temp_c, _CPU_TEMP_COLD_C, warn_c, crit_c)
+
+
+def _fmt_gb(nbytes: int) -> str:
+    return f"{nbytes / 1e9:.0f}"
+
+
+def _disk_usage(d: DiskSummary) -> str:
+    """Занятое место: «7 из 57 ГБ (10%)» (было — свободное; теперь занятое)."""
+    if not d.total_bytes:
+        return "не смонтирован"
+    used = d.total_bytes - (d.free_bytes or 0)
+    pct = round(used / d.total_bytes * 100)
+    return f"{_fmt_gb(used)} из {_fmt_gb(d.total_bytes)} ГБ ({pct}%)"
+
+
+def render_disk_line(d: DiskSummary, warn_c: float, crit_c: float) -> str:
+    """Строка диска: «HDD ST9250315AS» + «27°C 🥶| 117 из 245 ГБ (50%)».
+
+    Без температуры (eMMC — SMART недоступен) — одной строкой:
+    «❔ eMMC: 7 из 57 ГБ (10%)». `warn_c`/`crit_c` — пороги алертов дисков
+    из config.sensors.disks (та же шкала, что и для реальных уведомлений).
+    """
     icon = _DISK_ICON.get(d.health, "❔")  # ❔ — SMART недоступен (eMMC)
-    parts = [f"{escape(d.label)} {icon}"]
-    if d.temperature_c is not None:
-        parts.append(f"{d.temperature_c:.0f}°C")
-    if d.total_bytes:
-        parts.append(f"· своб. {_fmt_gb(d.free_bytes)} / {_fmt_gb(d.total_bytes)} ГБ")
-    else:
-        parts.append("· не смонтирован")
-    return " ".join(parts)
+    is_emmc = d.label == "eMMC"
+    heading = "eMMC" if is_emmc else f"HDD {escape(d.model) if d.model else '?'}"
+    usage = _disk_usage(d)
+    if d.temperature_c is None:
+        return f"{icon} {heading}: {usage}"
+    mood = _disk_temp_mood(d.temperature_c, warn_c, crit_c)
+    return f"{icon} {heading}\n {d.temperature_c:.0f}°C {mood}| {usage}"
 
 
 def render_status_summary(
@@ -157,26 +228,36 @@ def render_status_summary(
     cpu_states: list[HealthState],
     disks: list[DiskSummary],
     last_outage: PowerEvent | None,
+    cpu_warn_c: float,
+    cpu_crit_c: float,
+    disk_warn_c: float,
+    disk_crit_c: float,
 ) -> str:
-    """Краткая сводка (/status): время отчёта, аптайм, температуры, диски, отключение."""
-    lines = [f"📊 <b>Сводка</b> — {_fmt_dt(now)}"]
-    if uptime is not None:
-        lines.append(f"⏱ Аптайм: {_fmt_duration(uptime)}")
+    """Краткая сводка (/status): время отчёта, аптайм, температуры, диски, отключение.
 
+    `*_warn_c`/`*_crit_c` — пороги алертов из config.sensors (те же, что уже
+    настроены для реальных уведомлений о перегреве/SMART) — используются и
+    для эмодзи-«настроения» температуры, чтобы иконка не противоречила факту
+    срабатывания алерта.
+    """
+    lines = [now.astimezone().strftime("%Y-%m-%d %H:%M")]
+    if uptime is not None:
+        lines.append(f"uptime: {_fmt_uptime_short(uptime)}")
+    if last_outage is not None:
+        lines.append(f"last off: {render_outage_line(last_outage)}")
+
+    body: list[str] = []
     cpu = [s for s in cpu_states if s.kind == KIND_CPU]
     if cpu:
         hot = any(s.status == ALERTING for s in cpu)
         tmax = max(s.temperature_c for s in cpu)
-        lines.append(f"{'🔥' if hot else '✅'} CPU: {tmax:.1f}°C")
+        mood = _cpu_temp_mood(tmax, cpu_warn_c, cpu_crit_c)
+        body.append(f"{'🔥' if hot else '✅'} CPU: {tmax:.1f}°C {mood}")
+    body.extend(render_disk_line(d, disk_warn_c, disk_crit_c) for d in disks)
 
-    if disks:
-        lines.append("💽 <b>Диски</b>")
-        lines.extend(render_disk_line(d) for d in disks)
-
-    if last_outage is not None:
+    if body:
         lines.append("")
-        lines.append("Последнее отключение:")
-        lines.append(render_outage_line(last_outage))
+        lines.extend(body)
     return "\n".join(lines)
 
 

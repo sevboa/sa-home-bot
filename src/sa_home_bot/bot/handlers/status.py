@@ -26,7 +26,7 @@ async def cmd_status(
     config: Settings,
     subscription: Subscription | None = None,
 ) -> None:
-    text = await status_view.build_summary_text(store, list(config.sensors.disks.devices))
+    text = await status_view.build_summary_text(store, config)
     keyboard = status_view.build_status_keyboard(subscription)
     await message.answer(text, reply_markup=keyboard)
 
@@ -41,11 +41,18 @@ async def _dispatch_action(code: str, store: Store, queue: DedupQueue) -> str:
         return await status_view.build_full_text(store)
     if code == "stats":
         return await status_view.build_stats_text(store)
-    if code == "downtime":
-        return await status_view.build_downtime_text()
     if code == "scan":
         return await status_view.build_scan_text(store, queue)
     return "Неизвестное действие."
+
+
+def _parse_offset(parts: list[str]) -> int:
+    if len(parts) <= 2:
+        return 0
+    try:
+        return max(0, int(parts[2]))
+    except ValueError:
+        return 0
 
 
 @router.callback_query(F.data.startswith(f"{commands.CALLBACK_PREFIX}:"))
@@ -57,7 +64,18 @@ async def on_status_action(
     if cmd is None or callback.message is None:
         await callback.answer()
         return
-    code = callback.data.split(":", 1)[1]
-    text = await _dispatch_action(code, store, queue)
-    await callback.message.answer(text)
+    parts = callback.data.split(":")
+    code = parts[1]
+
+    if code == "downtime":
+        # Кнопка под /status — новая страница отдельным сообщением.
+        text, keyboard = await status_view.build_downtime_page()
+        await callback.message.answer(text, reply_markup=keyboard)
+    elif code == commands.DOWNTIME_PAGE_CODE:
+        # Кнопка «Следующие/Предыдущие 10» — редактируем то же сообщение.
+        text, keyboard = await status_view.build_downtime_page(_parse_offset(parts))
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    else:
+        text = await _dispatch_action(code, store, queue)
+        await callback.message.answer(text)
     await callback.answer()

@@ -7,10 +7,12 @@ from datetime import datetime
 
 from sa_home_bot.domain.models import POWER_CLEAN, POWER_UNEXPECTED
 from sa_home_bot.domain.render import render_downtime
+from sa_home_bot.sensors import power as power_module
 from sa_home_bot.sensors.power import (
     enrich_unexpected,
     parse_journal_boots,
     parse_last_reboots,
+    read_power_events_sync,
 )
 
 # Реальный по форме вывод `last -xR --time-format iso reboot` (новые сверху,
@@ -140,21 +142,79 @@ def test_parse_journal_boots_handles_garbage():
 def test_render_shows_span_and_downtime():
     events = enrich_unexpected(parse_last_reboots(SAMPLE), parse_journal_boots(JOURNAL))
     text = render_downtime(events)
-    assert "⚡ <b>внезапно</b>" in text
-    assert "🔌 <b>штатно</b>" in text
-    assert "→" in text
-    assert "простой" in text
-    assert "≈" in text  # приблизительный момент внезапного обрыва
+    assert "⚡ " in text
+    assert "🔌 " in text
+    assert " - " in text  # компактный диапазон вместо «→»
+    assert "m" in text or "h" in text  # длительность в d/h/m/s
 
 
 def test_render_downtime_empty():
     assert "Нет данных" in render_downtime([])
 
 
-def test_render_escapes_short_downtime_for_html():
-    # Простой <1 минуты не должен давать сырой «<» — иначе Telegram HTML падает.
+def test_render_downtime_empty_next_page():
+    # Пустая следующая страница — не «нет данных вообще», а «дальше пусто».
+    text = render_downtime([], offset=10)
+    assert "Дальше отключений нет" in text
+    assert "Нет данных" not in text
+
+
+def test_render_downtime_page_header_shows_range():
+    events = parse_last_reboots(SAMPLE, limit=2)
+    text = render_downtime(events, offset=2)
+    assert "Отключения 3–4" in text
+    assert "Последние отключения" not in text
+
+
+def test_render_downtime_entries_are_single_lines_without_numbering():
+    # Каждая запись — одна компактная строка без номера и лишних переносов.
+    events = parse_last_reboots(SAMPLE, limit=2)
+    text = render_downtime(events, offset=2)
+    lines = [line for line in text.split("\n") if line]
+    assert any(line.startswith("⚡ ") for line in lines)
+    assert not any(line[0].isdigit() for line in lines)  # без нумерации
+    # Заголовок + 2 записи (пустая строка-разделитель отфильтрована) — 3 строки.
+    assert len(lines) == 3
+
+
+def test_read_power_events_sync_paginates(monkeypatch):
+    # SAMPLE содержит 4 отключения — страница по 2 с offset=0 должна сигналить
+    # о наличии следующей страницы, offset=2 (последние 2) — уже нет.
+    def fake_run(args):
+        if args[0] == "last":
+            return SAMPLE
+        return None  # journalctl недоступен — не важно для пагинации
+
+    monkeypatch.setattr(power_module, "_run", fake_run)
+
+    page1, has_next1 = read_power_events_sync(offset=0, limit=2)
+    assert len(page1) == 2
+    assert has_next1 is True
+
+    page2, has_next2 = read_power_events_sync(offset=2, limit=2)
+    assert len(page2) == 2
+    assert has_next2 is False
+
+    page3, has_next3 = read_power_events_sync(offset=4, limit=2)
+    assert page3 == []
+    assert has_next3 is False
+
+
+def test_fmt_duration_units():
     from datetime import timedelta
 
     from sa_home_bot.domain.render import _fmt_duration
 
-    assert _fmt_duration(timedelta(seconds=30)) == "&lt;1 м"
+    assert _fmt_duration(timedelta(seconds=30)) == "30s"
+    assert _fmt_duration(timedelta(minutes=9)) == "9m"
+    assert _fmt_duration(timedelta(hours=8, minutes=26, seconds=15)) == "8h 26m 15s"
+    assert _fmt_duration(timedelta(days=1, hours=2)) == "1d 2h"
+
+
+def test_fmt_uptime_short_sub_minute_is_html_safe():
+    # Аптайм <1 минуты не должен давать сырой «<» — иначе Telegram HTML падает.
+    from datetime import timedelta
+
+    from sa_home_bot.domain.render import _fmt_uptime_short
+
+    assert _fmt_uptime_short(timedelta(seconds=30)) == "&lt;1 m"

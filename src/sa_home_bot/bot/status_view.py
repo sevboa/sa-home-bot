@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sa_home_bot.bot import commands, scan_limit
+from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.domain.models import KIND_CPU
 from sa_home_bot.domain.render import (
@@ -36,6 +37,9 @@ _LABELS: dict[str, str] = {
     "scan": "🔄 Скан",
 }
 
+# Постранично по 10 отключений (см. sensors.power.read_power_events_sync).
+DOWNTIME_PAGE_SIZE = 10
+
 
 def build_status_keyboard(
     subscription: Subscription | None,
@@ -52,7 +56,7 @@ def build_status_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def build_summary_text(store: Store, disk_specs: list[str]) -> str:
+async def build_summary_text(store: Store, config: Settings) -> str:
     loop = asyncio.get_running_loop()
     states = await store.get_all_states()
     cpu_states = [s for s in states if s.kind == KIND_CPU]
@@ -61,12 +65,20 @@ async def build_summary_text(store: Store, disk_specs: list[str]) -> str:
     health_map = await store.get_smart_health_map()
     uptime = await loop.run_in_executor(None, read_uptime_sync)
     disks = await loop.run_in_executor(
-        None, read_disk_summaries_sync, disk_specs, health_map
+        None, read_disk_summaries_sync, list(config.sensors.disks.devices), health_map
     )
-    events = await loop.run_in_executor(None, read_power_events_sync, 1)
+    events, _ = await loop.run_in_executor(None, read_power_events_sync, 0, 1)
     last_outage = events[0] if events else None
     return render_status_summary(
-        datetime.now(tz=UTC), uptime, cpu_states, disks, last_outage
+        datetime.now(tz=UTC),
+        uptime,
+        cpu_states,
+        disks,
+        last_outage,
+        cpu_warn_c=config.sensors.cpu.warn_c,
+        cpu_crit_c=config.sensors.cpu.crit_c,
+        disk_warn_c=config.sensors.disks.warn_c,
+        disk_crit_c=config.sensors.disks.crit_c,
     )
 
 
@@ -80,10 +92,41 @@ async def build_stats_text(store: Store) -> str:
     return render_stats(counts, runs)
 
 
-async def build_downtime_text() -> str:
+def _downtime_callback(offset: int) -> str:
+    return f"{commands.CALLBACK_PREFIX}:{commands.DOWNTIME_PAGE_CODE}:{offset}"
+
+
+def _downtime_keyboard(offset: int, has_next: bool) -> InlineKeyboardMarkup | None:
+    """Кнопки «Предыдущие 10» / «Следующие 10» под страницей /downtime."""
+    buttons = []
+    if offset > 0:
+        prev_offset = max(0, offset - DOWNTIME_PAGE_SIZE)
+        buttons.append(
+            InlineKeyboardButton(
+                text="⬅️ Предыдущие 10", callback_data=_downtime_callback(prev_offset)
+            )
+        )
+    if has_next:
+        next_offset = offset + DOWNTIME_PAGE_SIZE
+        buttons.append(
+            InlineKeyboardButton(
+                text="➡️ Следующие 10", callback_data=_downtime_callback(next_offset)
+            )
+        )
+    if not buttons:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[buttons])
+
+
+async def build_downtime_page(offset: int = 0) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Текст + клавиатура одной страницы /downtime (по 10 отключений)."""
     loop = asyncio.get_running_loop()
-    events = await loop.run_in_executor(None, read_power_events_sync, 10)
-    return render_downtime(events)
+    events, has_next = await loop.run_in_executor(
+        None, read_power_events_sync, offset, DOWNTIME_PAGE_SIZE
+    )
+    text = render_downtime(events, offset)
+    keyboard = _downtime_keyboard(offset, has_next)
+    return text, keyboard
 
 
 async def build_scan_text(store: Store, queue: DedupQueue) -> str:
