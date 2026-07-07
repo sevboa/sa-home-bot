@@ -102,3 +102,19 @@ def test_render_status_table():
 
 def test_render_services_empty():
     assert "не назначены" in render_services([])
+
+
+def test_resolve_socket_relative_to_config_dir(tmp_path):
+    import argparse
+
+    from sa_home_bot.nodectl import _resolve_socket
+
+    config = tmp_path / "config.toml"
+    config.write_text('[node]\nsocket = "./data/node.sock"\n')
+    args = argparse.Namespace(socket=None, config=str(config))
+    # Относительный сокет из конфига — относительно каталога конфига, не CWD.
+    assert _resolve_socket(args) == tmp_path.resolve() / "data/node.sock"
+
+    # Явный --socket всегда важнее конфига.
+    args = argparse.Namespace(socket="/run/x.sock", config=str(config))
+    assert str(_resolve_socket(args)) == "/run/x.sock"

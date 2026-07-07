@@ -49,7 +49,12 @@ def _resolve_socket(args: argparse.Namespace) -> Path:
     if config_path is None and Path(DEFAULT_CONFIG).exists():
         config_path = DEFAULT_CONFIG
     settings = Settings.load(config_path)
-    return settings.node.socket
+    sock = settings.node.socket
+    # Относительный путь в конфиге — относительно каталога конфига, а не CWD:
+    # так `nodectl -c ~/proj/config.toml status` работает из любого каталога.
+    if not sock.is_absolute() and config_path is not None:
+        sock = Path(config_path).resolve().parent / sock
+    return sock
 
 
 def _fmt_started(iso: str | None) -> str:
