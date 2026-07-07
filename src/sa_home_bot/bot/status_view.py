@@ -3,7 +3,7 @@
 Билдеры вызываются и из message-хендлеров (ввод команды вручную), и из
 callback-хендлеров (нажатие кнопки), поэтому логика собрана здесь в одном
 месте. Данные о здоровье/дисках/статистике приходят от службы monitor по
-протоколу (MonitorLink); недоступный монитор — честный текст об этом, а не
+протоколу (ServiceLink); недоступный монитор — честный текст об этом, а не
 исключение в чат. Локальным остался только /downtime (журнал `last` этой же
 машины).
 """
@@ -11,18 +11,18 @@ callback-хендлеров (нажатие кнопки), поэтому лог
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from sa_home_bot.bot import commands, scan_limit
-from sa_home_bot.bot.monitor_link import MonitorLink, MonitorUnavailableError
+from sa_home_bot.bot import commands
 from sa_home_bot.bot.monitor_state import (
     parse_disk_summary,
     parse_health_state,
     parse_outage,
 )
-from sa_home_bot.db.store import Store
+from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.domain.models import KIND_CPU
 from sa_home_bot.domain.render import (
     render_downtime,
@@ -30,49 +30,67 @@ from sa_home_bot.domain.render import (
     render_status_full,
     render_status_summary,
 )
-from sa_home_bot.proto.messages import ProtoError
+from sa_home_bot.proto.messages import ActionSpec, ProtoError
 from sa_home_bot.sensors.power import read_power_events_sync
 from sa_home_bot.subscriptions.models import Subscription
 
-# Подписи кнопок для callback-кодов (см. commands.STATUS_ACTIONS).
+# Подписи кнопок-представлений (см. commands.STATUS_ACTIONS).
 _LABELS: dict[str, str] = {
     "full": "🔎 Подробно",
     "stats": "📈 Статистика",
     "downtime": "⏻ Отключения",
-    "scan": "🔄 Скан",
 }
 
 # Постранично по 10 отключений (см. sensors.power.read_power_events_sync).
 DOWNTIME_PAGE_SIZE = 10
-
-# id действия монитора (объявлено в его describe).
-MONITOR_ACTION_SCAN = "scan_now"
 
 MONITOR_DOWN_TEXT = (
     "⚠️ Служба мониторинга недоступна — бот не может получить данные датчиков. "
     "Проверьте, запущен ли монитор."
 )
 
+MONITOR_SERVICE = "monitor"
+
 
 def build_status_keyboard(
     subscription: Subscription | None,
+    monitor_actions: Sequence[ActionSpec] = (),
 ) -> InlineKeyboardMarkup | None:
-    """Кнопки под /status — только те действия, что разрешены подписке."""
+    """Кнопки под /status: представления бота + действия монитора из describe.
+
+    Представления (подробно/статистика/отключения) — свои у бота, права по
+    имени команды. Действия — динамические из describe монитора, права
+    `действие@monitor` (или голое имя действия — совместимость).
+    """
+    if subscription is None:
+        return None
     buttons = [
         InlineKeyboardButton(text=_LABELS[code], callback_data=f"{commands.CALLBACK_PREFIX}:{code}")
         for code, cmd in commands.STATUS_ACTIONS.items()
-        if subscription is not None and subscription.allows_command(cmd.name)
+        if subscription.allows_command(cmd.name)
     ]
+    for action in monitor_actions:
+        if action.params:  # действия с параметрами в /status не выносим
+            continue
+        if subscription.allows_action(action.id, MONITOR_SERVICE):
+            buttons.append(
+                InlineKeyboardButton(
+                    text=action.title,
+                    callback_data=(
+                        f"{commands.ACTION_CALLBACK_PREFIX}:{MONITOR_SERVICE}:{action.id}"
+                    ),
+                )
+            )
     if not buttons:
         return None
     rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def build_summary_text(link: MonitorLink) -> str:
+async def build_summary_text(link: ServiceLink) -> str:
     try:
         state = await link.get_state()
-    except (MonitorUnavailableError, ProtoError):
+    except (ServiceUnavailableError, ProtoError):
         return MONITOR_DOWN_TEXT
     states = [parse_health_state(h) for h in state.get("health", [])]
     cpu_states = [s for s in states if s.kind == KIND_CPU]
@@ -94,18 +112,18 @@ async def build_summary_text(link: MonitorLink) -> str:
     )
 
 
-async def build_full_text(link: MonitorLink) -> str:
+async def build_full_text(link: ServiceLink) -> str:
     try:
         state = await link.get_state()
-    except (MonitorUnavailableError, ProtoError):
+    except (ServiceUnavailableError, ProtoError):
         return MONITOR_DOWN_TEXT
     return render_status_full([parse_health_state(h) for h in state.get("health", [])])
 
 
-async def build_stats_text(link: MonitorLink) -> str:
+async def build_stats_text(link: ServiceLink) -> str:
     try:
         state = await link.get_state()
-    except (MonitorUnavailableError, ProtoError):
+    except (ServiceUnavailableError, ProtoError):
         return MONITOR_DOWN_TEXT
     return render_stats(state.get("job_counts", {}), state.get("recent_runs", []))
 
@@ -147,22 +165,3 @@ async def build_downtime_page(offset: int = 0) -> tuple[str, InlineKeyboardMarku
     return text, keyboard
 
 
-async def build_scan_text(store: Store, link: MonitorLink) -> str:
-    """Ручной форс-скан через монитор с лимитом (раз в минуту, 5 в сутки).
-
-    Слот лимита расходуется только когда монитор реально поставил новый job
-    (если оба скана уже в его очереди — метку не пишем). Метки лимита — в БД
-    бота: лимит защищает от спама кнопкой, это забота фронтенда.
-    """
-    now = datetime.now(tz=UTC)
-    decision = scan_limit.decide(await store.get_manual_scan_ticks(), now)
-    if not decision.allowed:
-        return decision.reason
-    try:
-        result = await link.command(MONITOR_ACTION_SCAN)
-    except (MonitorUnavailableError, ProtoError):
-        return MONITOR_DOWN_TEXT
-    if not (result.get("sensor_queued") or result.get("smart_queued")):
-        return "⏳ Скан уже в очереди — дождитесь результата."
-    await store.set_manual_scan_ticks(list(decision.ticks))
-    return "🔄 Скан датчиков и дисков поставлен в очередь."

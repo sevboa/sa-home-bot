@@ -2,7 +2,7 @@
 
 С этапа 13 бот — фронтенд: датчиками, порогами и планировщиком владеет
 служба monitor (отдельный процесс, `--service monitor`). Бот держит одно
-подключение к ней (MonitorLink), получает события и рассылает их в чаты;
+подключение к ней (ServiceLink), получает события и рассылает их в чаты;
 /status и прочие данные — через get_state по протоколу. В БД бота остаются
 только его вещи: app_state, message_id для reply-цепочек, лимит форс-сканов.
 """
@@ -21,8 +21,8 @@ from sa_home_bot.bot.lifecycle import (
 )
 from sa_home_bot.bot.link_watch import LinkWatchMiddleware
 from sa_home_bot.bot.monitor_events import build_event_handler
-from sa_home_bot.bot.monitor_link import MonitorLink
 from sa_home_bot.bot.notifier import Notifier
+from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.bot.setup import build_bot, build_dispatcher, set_bot_commands
 from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
@@ -83,12 +83,17 @@ async def run(settings: Settings) -> None:
         book, notifier, render_startup(clean=started_clean, last_outage=last_outage)
     )
 
-    # 8. Связь с монитором: события → рендер → рассылка подписчикам.
+    # 8. Связь со службами ноды: монитор (события → рассылка) и сама нода
+    #    (раздел /node: состояние служб, динамические действия из describe).
     dispatcher = TelegramEventDispatcher(notifier, book, store)
-    link = MonitorLink(
-        settings.monitor.socket, on_event=build_event_handler(dispatcher)
+    link = ServiceLink(
+        settings.monitor.socket,
+        display_name="монитор",
+        on_event=build_event_handler(dispatcher),
     )
     await link.start()
+    node_link = ServiceLink(settings.node.socket, display_name="нода")
+    await node_link.start()
 
     # 9. Polling.
     polling_task = asyncio.create_task(
@@ -96,6 +101,7 @@ async def run(settings: Settings) -> None:
             bot,
             store=store,
             link=link,
+            node_link=node_link,
             runtime=runtime,
             config=settings,
             notifier=notifier,
@@ -117,6 +123,7 @@ async def run(settings: Settings) -> None:
             dp=dp,
             polling_task=polling_task,
             link=link,
+            node_link=node_link,
             book=book,
             notifier=notifier,
             store=store,
@@ -129,7 +136,8 @@ async def _shutdown(
     *,
     dp,
     polling_task: asyncio.Task,
-    link: MonitorLink,
+    link: ServiceLink,
+    node_link: ServiceLink,
     book: SubscriptionBook,
     notifier: Notifier,
     store: Store,
@@ -138,8 +146,9 @@ async def _shutdown(
 ) -> None:
     log.info("Останов приложения...")
 
-    # Стоп связи с монитором (новые события не принимаются).
+    # Стоп связи со службами (новые события не принимаются).
     await link.stop()
+    await node_link.stop()
 
     # Стоп polling. stop_polling кидает RuntimeError, если polling ещё не успел
     # запуститься (быстрый SIGINT) или упал на старте (например, бэд-токен).

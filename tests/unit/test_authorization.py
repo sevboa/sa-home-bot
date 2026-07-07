@@ -118,9 +118,26 @@ async def test_callback_allowed_action_passes():
 
 async def test_callback_action_without_right_denied():
     mw = CallbackAuthorizationMiddleware(_cb_book())
-    cb = _callback(1, "st:scan")  # scan_now не в allowed_commands
+    cb = _callback(1, "st:full")  # status_full не в allowed_commands
     assert await mw(_passthrough, cb, {}) is None
     assert cb._alerts and cb._alerts[0][1] is True  # show_alert
+
+
+async def test_callback_dynamic_action_checks_action_at_service():
+    book = SubscriptionBook.from_config(
+        [SubscriptionConfig(name="me", chat_id=1, allowed_commands=["restart@node"])]
+    )
+    mw = CallbackAuthorizationMiddleware(book)
+
+    ok = _callback(1, "act:node:restart:telegram-bot")  # право есть
+    assert await mw(_passthrough, ok, {}) == "HANDLED"
+
+    denied = _callback(1, "act:node:stop:monitor")  # stop@node не выдан
+    assert await mw(_passthrough, denied, {}) is None
+    assert denied._alerts and denied._alerts[0][1] is True
+
+    stranger = _callback(999, "act:node:restart:monitor")  # чужой чат
+    assert await mw(_passthrough, stranger, {}) is None
 
 
 async def test_callback_unknown_data_passes_through():

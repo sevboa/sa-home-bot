@@ -98,11 +98,20 @@ def test_service_description_roundtrip():
                 title="Запустить скан",
                 params=(ActionParam(name="force", type="bool", required=False),),
             ),
+            ActionSpec(
+                id="restart",
+                title="Перезапустить",
+                params=(
+                    ActionParam(name="name", choices=("monitor", "telegram-bot")),
+                ),
+            ),
         ),
     )
     restored = ServiceDescription.from_payload(desc.to_payload())
     assert restored == desc
     assert restored.find_action("scan_now").params[0].name == "force"
+    assert restored.find_action("scan_now").params[0].choices is None
+    assert restored.find_action("restart").params[0].choices == ("monitor", "telegram-bot")
     assert restored.find_action("nope") is None
 
 

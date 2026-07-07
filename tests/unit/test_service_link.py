@@ -1,4 +1,4 @@
-"""MonitorLink: запросы, недоступный монитор, переподключение, события."""
+"""ServiceLink: запросы, недоступный монитор, переподключение, события."""
 
 import asyncio
 import shutil
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from sa_home_bot.bot.monitor_link import MonitorLink, MonitorUnavailableError
+from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.proto.messages import ActionSpec, ServiceDescription, ServiceInfo
 from sa_home_bot.proto.server import ProtoServer
 
@@ -35,7 +35,7 @@ def sock_dir():
     shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-async def _wait_connected(link: MonitorLink, timeout: float = 5.0) -> None:
+async def _wait_connected(link: ServiceLink, timeout: float = 5.0) -> None:
     async with asyncio.timeout(timeout):
         while not link.connected:
             await asyncio.sleep(0.02)
@@ -43,11 +43,11 @@ async def _wait_connected(link: MonitorLink, timeout: float = 5.0) -> None:
 
 async def test_requests_and_unavailable(sock_dir):
     socket_path = sock_dir / "m.sock"
-    link = MonitorLink(socket_path, reconnect_delay=0.1)
+    link = ServiceLink(socket_path, reconnect_delay=0.1)
     await link.start()
     try:
         # Монитора нет — запрос отваливается сразу и понятно.
-        with pytest.raises(MonitorUnavailableError):
+        with pytest.raises(ServiceUnavailableError):
             await link.get_state()
 
         server = ProtoServer(socket_path, FakeMonitor())
@@ -74,7 +74,7 @@ async def test_reconnects_and_receives_events(sock_dir):
         events.append(env.payload)
         got_event.set()
 
-    link = MonitorLink(socket_path, on_event=on_event, reconnect_delay=0.1)
+    link = ServiceLink(socket_path, on_event=on_event, reconnect_delay=0.1)
     await link.start()
     try:
         await _wait_connected(link)

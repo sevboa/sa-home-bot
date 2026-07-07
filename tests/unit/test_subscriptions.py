@@ -41,10 +41,25 @@ def test_allows_command():
     assert not sub.allows_command("scan_now")
 
 
+def test_allows_action_full_and_bare_forms():
+    sub = Subscription(
+        "me", 1, allowed_commands=frozenset({"restart@node", "scan_now"})
+    )
+    # Полная форма `действие@служба`.
+    assert sub.allows_action("restart", "node")
+    assert not sub.allows_action("restart", "monitor")  # другая служба
+    assert not sub.allows_action("stop", "node")  # другое действие
+    # Голое имя действия — совместимость со старыми конфигами: любая служба.
+    assert sub.allows_action("scan_now", "monitor")
+
+
 def test_broken_blocks_everything():
-    sub = Subscription("me", 1, frozenset({"*"}), frozenset({"status"})).with_broken()
+    sub = Subscription(
+        "me", 1, frozenset({"*"}), frozenset({"status", "restart@node"})
+    ).with_broken()
     assert not sub.accepts_event("system")
     assert not sub.allows_command("status")
+    assert not sub.allows_action("restart", "node")
 
 
 def test_book_for_chat_and_accepting():

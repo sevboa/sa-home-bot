@@ -98,7 +98,12 @@ sa-home-bot --config ./config.toml                     # бот вручную (
 
 Универсальные (везде, без проверок): `/help`, `/ping`, `/whoami`.
 Управляющие (нужно право в `allowed_commands` подписного чата): `/status`,
-`/stats`, `/scan_now`, `/wake`.
+`/stats`, `/scan_now`, `/node`, `/wake`.
+
+`/node` — раздел управления нодой: состояние служб под супервизией и кнопки
+start/stop/restart. Кнопки действий (и под `/status`, и под `/node`) бот строит
+динамически из `describe` служб; права на них — `действие@служба`
+(см. [`AUTHORIZATION.md`](./AUTHORIZATION.md) §3.3).
 
 ### /wake — Wake-on-LAN
 

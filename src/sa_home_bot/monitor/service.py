@@ -69,7 +69,7 @@ class MonitorService:
         return ServiceDescription(
             info=ServiceInfo(node=self._node, service=SERVICE_NAME, version=__version__),
             capabilities=("temperature", "smart", "power"),
-            actions=(ActionSpec(id=ACTION_SCAN_NOW, title="Запустить скан"),),
+            actions=(ActionSpec(id=ACTION_SCAN_NOW, title="🔄 Скан датчиков"),),
         )
 
     async def get_state(self) -> dict[str, Any]:

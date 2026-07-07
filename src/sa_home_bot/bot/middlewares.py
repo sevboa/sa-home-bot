@@ -78,6 +78,17 @@ class CallbackAuthorizationMiddleware(BaseMiddleware):
         subscription = self._book.for_chat(chat_id) if chat_id is not None else None
         data["subscription"] = subscription
 
+        # Динамические действия служб («act:<служба>:<действие>[:<значение>]»):
+        # право — `действие@служба` из describe, не имя команды бота.
+        action = commands.parse_action_callback(event.data)
+        if action is not None:
+            service, action_id, _ = action
+            if subscription is None or not subscription.allows_action(action_id, service):
+                log.info("Отказ в действии %s для chat_id=%s", event.data, chat_id)
+                await event.answer("⛔️ Недоступно", show_alert=True)
+                return None
+            return await handler(event, data)
+
         cmd = commands.command_for_callback(event.data)
         # Не наша кнопка — пропускаем (обработается по месту или проигнорируется).
         if cmd is None:

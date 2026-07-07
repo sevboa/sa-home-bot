@@ -25,5 +25,20 @@ class Subscription:
             return False
         return command in self.allowed_commands
 
+    def allows_action(self, action_id: str, service: str) -> bool:
+        """Право на действие службы (кнопки из describe).
+
+        Полная форма в конфиге — ``действие@служба`` (``restart@node``);
+        голое имя (``scan_now``) тоже принимается — совместимость со старыми
+        конфигами. С появлением удалённых нод форма расширится до
+        ``действие@служба@нода``.
+        """
+        if self.broken:
+            return False
+        return (
+            f"{action_id}@{service}" in self.allowed_commands
+            or action_id in self.allowed_commands
+        )
+
     def with_broken(self, broken: bool = True) -> Subscription:
         return replace(self, broken=broken)

@@ -67,7 +67,7 @@ async def test_app_boots_and_shuts_down_cleanly(tmp_path, monkeypatch):
     settings = Settings(
         telegram=TelegramConfig(token="x"),
         database=DatabaseConfig(path=db_path),
-        # Монитор не запущен — MonitorLink просто крутит переподключение в фоне.
+        # Монитор не запущен — ServiceLink просто крутит переподключение в фоне.
         monitor=MonitorConfig(
             socket=tmp_path / "monitor.sock", db_path=tmp_path / "monitor.sqlite"
         ),

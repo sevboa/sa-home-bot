@@ -72,77 +72,102 @@ async def store(tmp_path):
     await db.close()
 
 
-async def test_store_manual_scan_ticks_roundtrip(store):
-    assert await store.get_manual_scan_ticks() == []
+async def test_store_action_ticks_roundtrip(store):
+    assert await store.get_action_ticks("monitor:scan_now") == []
     ticks = [T0 - timedelta(minutes=5), T0]
-    await store.set_manual_scan_ticks(ticks)
-    assert await store.get_manual_scan_ticks() == ticks
+    await store.set_action_ticks("monitor:scan_now", ticks)
+    assert await store.get_action_ticks("monitor:scan_now") == ticks
+    # Ключи независимы по действиям.
+    assert await store.get_action_ticks("monitor:other") == []
 
 
-async def test_store_manual_scan_ticks_bad_json(store):
-    await store.set_state("manual_scan_ticks", "не-json")
-    assert await store.get_manual_scan_ticks() == []
+async def test_store_action_ticks_bad_json(store):
+    await store.set_state("action_ticks:monitor:scan_now", "не-json")
+    assert await store.get_action_ticks("monitor:scan_now") == []
 
 
-# --- build_scan_text: команда монитору + расход слота + блокировка ---
+# --- actions.run_action: describe → команда, лимит, расход слота ---
 
 
 class FakeLink:
-    def __init__(self, result=None, fail=False):
-        self.calls: list[str] = []
+    display_name = "монитор"
+
+    def __init__(self, result=None, fail=False, action_ids=("scan_now",)):
+        from sa_home_bot.proto.messages import ActionSpec
+
+        self.calls: list[tuple[str, dict]] = []
+        self.connected = not fail
         self._result = result if result is not None else {
             "sensor_queued": True,
             "smart_queued": True,
         }
         self._fail = fail
+        self._actions = tuple(
+            ActionSpec(id=a, title=f"Действие {a}") for a in action_ids
+        )
+
+    async def actions(self):
+        return self._actions
 
     async def command(self, action, args=None):
-        from sa_home_bot.bot.monitor_link import MonitorUnavailableError
+        from sa_home_bot.bot.service_link import ServiceUnavailableError
 
         if self._fail:
-            raise MonitorUnavailableError("нет связи")
-        self.calls.append(action)
+            raise ServiceUnavailableError("нет связи")
+        self.calls.append((action, args or {}))
         return self._result
 
 
-async def test_build_scan_sends_command_and_records_tick(store):
-    from sa_home_bot.bot import status_view
+async def test_run_action_sends_command_and_records_tick(store):
+    from sa_home_bot.bot import actions
 
     link = FakeLink()
-    text = await status_view.build_scan_text(store, link)
+    text = await actions.run_action(store, link, "monitor", "scan_now")
 
-    assert "датчиков и дисков" in text
-    assert link.calls == ["scan_now"]
+    assert "Принято" in text
+    assert link.calls == [("scan_now", {})]
     # Слот израсходован — записана одна метка.
-    assert len(await store.get_manual_scan_ticks()) == 1
+    assert len(await store.get_action_ticks("monitor:scan_now")) == 1
 
 
-async def test_build_scan_blocked_when_too_soon(store):
-    from sa_home_bot.bot import status_view
+async def test_run_action_blocked_when_too_soon(store):
+    from sa_home_bot.bot import actions
 
-    await store.set_manual_scan_ticks([datetime.now(tz=UTC)])  # только что сканили
+    await store.set_action_ticks("monitor:scan_now", [datetime.now(tz=UTC)])
     link = FakeLink()
-    text = await status_view.build_scan_text(store, link)
+    text = await actions.run_action(store, link, "monitor", "scan_now")
 
     assert "Слишком часто" in text
     assert link.calls == []  # до монитора не дошло
 
 
-async def test_build_scan_monitor_down_keeps_slot(store):
-    from sa_home_bot.bot import status_view
+async def test_run_action_service_down_keeps_slot(store):
+    from sa_home_bot.bot import actions
 
-    text = await status_view.build_scan_text(store, FakeLink(fail=True))
+    text = await actions.run_action(store, FakeLink(fail=True), "monitor", "scan_now")
 
     assert "недоступна" in text
-    # Слот НЕ израсходован — скан не состоялся.
-    assert await store.get_manual_scan_ticks() == []
+    # Слот НЕ израсходован — действие не состоялось.
+    assert await store.get_action_ticks("monitor:scan_now") == []
 
 
-async def test_build_scan_already_queued_keeps_slot(store):
-    from sa_home_bot.bot import status_view
+async def test_run_action_already_queued_keeps_slot(store):
+    from sa_home_bot.bot import actions
 
     link = FakeLink(result={"sensor_queued": False, "smart_queued": False})
-    text = await status_view.build_scan_text(store, link)
+    text = await actions.run_action(store, link, "monitor", "scan_now")
 
-    assert "уже в очереди" in text
-    assert await store.get_manual_scan_ticks() == []
+    assert "Уже в очереди" in text
+    assert await store.get_action_ticks("monitor:scan_now") == []
+
+
+async def test_run_action_not_rate_limited_for_node(store):
+    from sa_home_bot.bot import actions
+
+    link = FakeLink(result={"service": {"name": "monitor"}}, action_ids=("restart",))
+    # Два подряд — node-действия не лимитируются.
+    await actions.run_action(store, link, "node", "restart", "monitor")
+    text = await actions.run_action(store, link, "node", "restart", "monitor")
+    assert "Принято" in text
+    assert len(link.calls) == 2
+    assert await store.get_action_ticks("node:restart") == []

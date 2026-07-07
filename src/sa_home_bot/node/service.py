@@ -26,24 +26,28 @@ ACTION_START = "start"
 ACTION_STOP = "stop"
 ACTION_RESTART = "restart"
 
-_NAME_PARAM = ActionParam(name="name", type="string", required=True, title="Служба")
-
-
 class NodeService:
     def __init__(self, supervisor: Supervisor) -> None:
         self._supervisor = supervisor
         self._node = socket.gethostname()
 
     def describe(self) -> ServiceDescription:
+        # choices — имена служб под супервизией: фронтенд строит кнопку на
+        # каждое значение, ничего не хардкодя.
+        name_param = ActionParam(
+            name="name",
+            type="string",
+            required=True,
+            title="Служба",
+            choices=tuple(self._supervisor.services),
+        )
         return ServiceDescription(
             info=ServiceInfo(node=self._node, service=SERVICE_NAME, version=__version__),
             capabilities=("supervisor",),
             actions=(
-                ActionSpec(id=ACTION_START, title="Запустить службу", params=(_NAME_PARAM,)),
-                ActionSpec(id=ACTION_STOP, title="Остановить службу", params=(_NAME_PARAM,)),
-                ActionSpec(
-                    id=ACTION_RESTART, title="Перезапустить службу", params=(_NAME_PARAM,)
-                ),
+                ActionSpec(id=ACTION_START, title="▶️ Запустить", params=(name_param,)),
+                ActionSpec(id=ACTION_STOP, title="⏹ Остановить", params=(name_param,)),
+                ActionSpec(id=ACTION_RESTART, title="🔄 Перезапустить", params=(name_param,)),
             ),
         )
 

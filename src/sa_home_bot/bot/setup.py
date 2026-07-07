@@ -10,7 +10,7 @@ from aiogram.enums import ParseMode
 from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 
 from sa_home_bot.bot import commands
-from sa_home_bot.bot.handlers import basic, control, power, stats, status, wake
+from sa_home_bot.bot.handlers import basic, control, node, power, stats, status, wake
 from sa_home_bot.bot.middlewares import (
     AuthorizationMiddleware,
     CallbackAuthorizationMiddleware,
@@ -34,6 +34,7 @@ def build_dispatcher(book: SubscriptionBook) -> Dispatcher:
     dp.include_router(control.router)
     dp.include_router(power.router)
     dp.include_router(wake.router)
+    dp.include_router(node.router)
     return dp
 
 

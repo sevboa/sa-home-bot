@@ -29,6 +29,7 @@ SCAN_NOW = Command("scan_now", "форс-скан датчиков и диско
 DOWNTIME = Command(
     "downtime", "последние отключения машины", universal=False, menu=False
 )
+NODE = Command("node", "нода: состояние и управление службами", universal=False)
 WAKE = Command("wake", "разбудить домашний ПК (Wake-on-LAN)", universal=False)
 
 ALL_COMMANDS: list[Command] = [
@@ -40,6 +41,7 @@ ALL_COMMANDS: list[Command] = [
     STATS,
     SCAN_NOW,
     DOWNTIME,
+    NODE,
     WAKE,
 ]
 
@@ -48,14 +50,30 @@ CONTROL_COMMANDS: list[Command] = [c for c in ALL_COMMANDS if not c.universal]
 # Управляющие, попадающие в меню/help (сейчас только STATUS).
 MENU_CONTROL_COMMANDS: list[Command] = [c for c in CONTROL_COMMANDS if c.menu]
 
-# Кнопки-действия под /status: callback-код → команда.
+# Кнопки-представления под /status: callback-код → команда. Действия служб
+# (скан и т.п.) сюда не входят — они строятся динамически из describe (см.
+# ACTION_CALLBACK_PREFIX).
 STATUS_ACTIONS: dict[str, Command] = {
     "full": STATUS_FULL,
     "stats": STATS,
     "downtime": DOWNTIME,
-    "scan": SCAN_NOW,
 }
 CALLBACK_PREFIX = "st"
+
+# Динамические действия служб: «act:<служба>:<действие>[:<значение>]»,
+# например «act:monitor:scan_now» или «act:node:restart:telegram-bot».
+# Право — `действие@служба` (Subscription.allows_action).
+ACTION_CALLBACK_PREFIX = "act"
+
+
+def parse_action_callback(data: str | None) -> tuple[str, str, str | None] | None:
+    """Разобрать «act:<служба>:<действие>[:<значение>]» → (служба, действие, значение)."""
+    if not data:
+        return None
+    parts = data.split(":")
+    if len(parts) < 3 or parts[0] != ACTION_CALLBACK_PREFIX or not parts[1] or not parts[2]:
+        return None
+    return parts[1], parts[2], (parts[3] if len(parts) > 3 and parts[3] else None)
 
 # Пагинация /downtime («st:downtime_page:<offset>») — не кнопка под /status,
 # но требует тех же прав, что и сама команда DOWNTIME.

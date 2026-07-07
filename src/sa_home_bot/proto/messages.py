@@ -226,26 +226,35 @@ class ServiceInfo:
 
 @dataclass(frozen=True)
 class ActionParam:
-    """Параметр действия: имя, тип, обязательность."""
+    """Параметр действия: имя, тип, обязательность.
+
+    ``choices`` — допустимые значения (если конечны): фронтенд строит по ним
+    UI (кнопка на значение), ничего не зная о семантике параметра.
+    """
 
     name: str
     type: str = "string"  # string | int | float | bool
     required: bool = True
     title: str | None = None  # человекочитаемое имя для UI
+    choices: tuple[str, ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         raw: dict[str, Any] = {"name": self.name, "type": self.type, "required": self.required}
         if self.title is not None:
             raw["title"] = self.title
+        if self.choices is not None:
+            raw["choices"] = list(self.choices)
         return raw
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> ActionParam:
+        choices = raw.get("choices")
         return cls(
             name=str(raw["name"]),
             type=str(raw.get("type", "string")),
             required=bool(raw.get("required", True)),
             title=raw.get("title"),
+            choices=tuple(str(c) for c in choices) if choices is not None else None,
         )
 
 

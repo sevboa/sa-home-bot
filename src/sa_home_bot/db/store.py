@@ -28,8 +28,8 @@ from sa_home_bot.domain.policy import BaselineStats
 NOTIF_ALERT = "alert"
 NOTIF_CLEARED = "cleared"
 
-# app_state-ключ: метки времени принятых ручных форс-сканов (лимитер).
-MANUAL_SCAN_TICKS_KEY = "manual_scan_ticks"
+# Префикс app_state-ключей: метки времени принятых ручных действий (лимитер).
+ACTION_TICKS_PREFIX = "action_ticks:"
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -71,9 +71,9 @@ class Store:
                 (key, value),
             )
 
-    async def get_manual_scan_ticks(self) -> list[datetime]:
-        """Метки принятых ручных форс-сканов (для лимитера)."""
-        raw = await self.get_state(MANUAL_SCAN_TICKS_KEY)
+    async def get_action_ticks(self, action_key: str) -> list[datetime]:
+        """Метки принятых ручных действий (для лимитера), ключ — «служба:действие»."""
+        raw = await self.get_state(ACTION_TICKS_PREFIX + action_key)
         if not raw:
             return []
         try:
@@ -81,8 +81,10 @@ class Store:
         except (ValueError, TypeError):
             return []
 
-    async def set_manual_scan_ticks(self, ticks: list[datetime]) -> None:
-        await self.set_state(MANUAL_SCAN_TICKS_KEY, json.dumps([_iso(t) for t in ticks]))
+    async def set_action_ticks(self, action_key: str, ticks: list[datetime]) -> None:
+        await self.set_state(
+            ACTION_TICKS_PREFIX + action_key, json.dumps([_iso(t) for t in ticks])
+        )
 
     # --- job_runs ---
 
