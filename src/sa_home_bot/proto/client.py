@@ -136,23 +136,32 @@ class ProtoClient:
         dst: Address | None = None,
     ) -> dict[str, Any]:
         """Отправить запрос и дождаться ответа. ProtoError при ok=False."""
+        env = make_request(type_, payload, src=self._src, dst=dst)
+        response = await self.forward(env)
+        if response.ok is not True:
+            raise ProtoError(response.error_code() or "unknown", response.error_message())
+        return response.payload
+
+    async def forward(self, env: Envelope) -> Envelope:
+        """Переслать готовый конверт и вернуть весь конверт ответа (id сохраняется).
+
+        Для маршрутизации нодой: чужой запрос уходит как есть, ответ (включая
+        ok=False) возвращается конвертом, а не исключением — нода отдаёт его
+        исходному клиенту без переупаковки.
+        """
         if self._writer is None:
             raise ConnectionError("клиент не подключён")
         if self._reader_task is not None and self._reader_task.done():
             raise ConnectionError("соединение закрыто")
-        env = make_request(type_, payload, src=self._src, dst=dst)
         future: asyncio.Future[Envelope] = asyncio.get_running_loop().create_future()
         self._pending[env.id] = future
         try:
             async with self._write_lock:
                 self._writer.write(encode(env))
                 await self._writer.drain()
-            response = await asyncio.wait_for(future, timeout=self._timeout)
+            return await asyncio.wait_for(future, timeout=self._timeout)
         finally:
             self._pending.pop(env.id, None)
-        if response.ok is not True:
-            raise ProtoError(response.error_code() or "unknown", response.error_message())
-        return response.payload
 
     # --- Чтение сокета ---
 

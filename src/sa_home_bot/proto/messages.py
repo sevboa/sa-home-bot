@@ -32,6 +32,8 @@ ERR_UNSUPPORTED_PROTO = "unsupported_proto"
 ERR_UNKNOWN_TYPE = "unknown_type"
 ERR_UNKNOWN_ACTION = "unknown_action"
 ERR_UNAUTHORIZED = "unauthorized"  # TCP без/до auth или неверный токен; соединение закрывается
+ERR_UNKNOWN_DST = "unknown_dst"  # dst указывает на неизвестную ноду/службу
+ERR_UNAVAILABLE = "unavailable"  # нода/служба известна, но сейчас нет соединения
 ERR_INTERNAL = "internal"
 
 # Максимальная длина одного сообщения на проводе (защита от мусора в сокете).

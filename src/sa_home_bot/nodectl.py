@@ -90,7 +90,15 @@ def render_services(services: list[dict]) -> str:
 
 def render_status(state: dict) -> str:
     header = f"Нода {state.get('node', '?')} (v{state.get('version', '?')})"
-    return header + "\n" + render_services(state.get("services", []))
+    out = header + "\n" + render_services(state.get("services", []))
+    peers = state.get("peers") or []
+    if peers:
+        lines = [
+            f"  {'✅' if p.get('alive') else '⛔'} {p.get('id', '?')} ({p.get('endpoint', '?')})"
+            for p in peers
+        ]
+        out += "\nПиры:\n" + "\n".join(lines)
+    return out
 
 
 def render_event(env: Envelope) -> str:

@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import hmac
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -58,6 +59,11 @@ class ServiceHandler(Protocol):
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]: ...
 
 
+# Маршрутизатор запросов (сервис ноды): вернул конверт — это ответ (запрос был
+# переслан по dst), вернул None — запрос локальный, обрабатывает handler.
+Router = Callable[[Envelope], Awaitable[Envelope | None]]
+
+
 class _Connection:
     """Одно клиентское подключение: writer + лок, чтобы ответы и broadcast
     событий не перемешивались в сокете."""
@@ -80,6 +86,7 @@ class ProtoServer:
         handler: ServiceHandler,
         *,
         token: str = "",
+        router: Router | None = None,
     ) -> None:
         self._endpoint = parse_endpoint(endpoint)
         if isinstance(self._endpoint, TcpEndpoint) and not token:
@@ -88,8 +95,10 @@ class ProtoServer:
             )
         self._token = token
         self._handler = handler
+        self._router = router
         self._server: asyncio.Server | None = None
         self._connections: set[_Connection] = set()
+        self._request_tasks: set[asyncio.Task] = set()
 
     @property
     def endpoint(self) -> Endpoint:
@@ -124,6 +133,10 @@ class ProtoServer:
     async def stop(self) -> None:
         if self._server is not None:
             self._server.close()
+        for task in list(self._request_tasks):
+            task.cancel()
+        if self._request_tasks:
+            await asyncio.gather(*self._request_tasks, return_exceptions=True)
         # Сначала закрыть живые соединения: с Python 3.12 wait_closed() ждёт
         # завершения обработчиков, а те висят на readline() до закрытия сокета.
         for conn in list(self._connections):
@@ -146,6 +159,11 @@ class ProtoServer:
         """
         info = self._handler.describe().info
         env = make_event(event_type, data, src=Address(node=info.node, service=info.service))
+        return await self.broadcast_envelope(env)
+
+    async def broadcast_envelope(self, env: Envelope) -> int:
+        """Разослать готовый конверт (в т.ч. ретрансляция события чужой ноды —
+        src оригинала сохраняется). Возвращает число реальных доставок."""
         delivered = 0
         for conn in list(self._connections):
             if not conn.authenticated:
@@ -174,7 +192,12 @@ class ProtoServer:
                     break  # EOF — клиент отключился
                 if line.strip() == b"":
                     continue
-                await self._handle_line(conn, line)
+                # Каждый запрос — своя задача: медленный форвард к удалённой
+                # ноде не блокирует остальные запросы этого соединения
+                # (ответы матчатся клиентом по id, порядок не важен).
+                task = asyncio.create_task(self._handle_line(conn, line))
+                self._request_tasks.add(task)
+                task.add_done_callback(self._request_tasks.discard)
         except (ConnectionError, OSError):
             pass  # обрыв клиента — норма
         finally:
@@ -194,7 +217,12 @@ class ProtoServer:
                 elif not conn.authenticated:
                     raise ProtoError(ERR_UNAUTHORIZED, "сначала auth с токеном")
                 else:
-                    response = await self._dispatch(request)
+                    response = None
+                    if self._router is not None:
+                        # Чужой адресат — маршрутизатор вернёт готовый ответ.
+                        response = await self._router(request)
+                    if response is None:
+                        response = await self._dispatch(request)
             except ProtoError as exc:
                 close_after = exc.code == ERR_UNAUTHORIZED
                 request_id = request.id if request is not None else "?"

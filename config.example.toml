@@ -95,6 +95,14 @@ stop_timeout_s = 90.0              # SIGTERM → SIGKILL при остановк
 [swarm]
 token = ""
 
+# Удалённые ноды роя (discovery «на минималках» — статический список).
+# id — hostname ноды (dst.node в конверте), endpoint — её сервис ноды.
+# Запрос к чужой ноде шлётся своей ноде, та пересылает сама («спроси любого»);
+# свой id в списке игнорируется — конфиг роя можно держать общим.
+#[[swarm.nodes]]
+#id = "winpc"
+#endpoint = "tcp://winpc.tail61d88b.ts.net:8710"
+
 # Wake-on-LAN: /wake шлёт magic packet на MAC машины в локальной сети.
 # На стороне Windows должно быть включено: WoL в BIOS/UEFI, «Wake on Magic Packet»
 # в свойствах сетевого адаптера, и выключен «быстрый запуск» (Fast Startup).

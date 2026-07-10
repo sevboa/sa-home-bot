@@ -10,6 +10,7 @@ import socket
 from typing import Any
 
 from sa_home_bot import __version__
+from sa_home_bot.node.peers import NodeRouter
 from sa_home_bot.node.supervisor import Supervisor
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
@@ -27,8 +28,9 @@ ACTION_STOP = "stop"
 ACTION_RESTART = "restart"
 
 class NodeService:
-    def __init__(self, supervisor: Supervisor) -> None:
+    def __init__(self, supervisor: Supervisor, router: NodeRouter | None = None) -> None:
         self._supervisor = supervisor
+        self._router = router
         self._node = socket.gethostname()
 
     def describe(self) -> ServiceDescription:
@@ -57,6 +59,7 @@ class NodeService:
             "service": SERVICE_NAME,
             "version": __version__,
             "services": [svc.to_dict() for svc in self._supervisor.services.values()],
+            "peers": self._router.peers_state() if self._router is not None else [],
         }
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:

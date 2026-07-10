@@ -143,6 +143,19 @@ class NodeConfig(BaseModel):
     stop_timeout_s: float = Field(default=90.0, gt=0)  # SIGTERM → SIGKILL
 
 
+class SwarmNodeConfig(BaseModel):
+    """Удалённая нода роя (discovery «на минималках» — статический список).
+
+    ``id`` — имя ноды (hostname), как в ``dst.node`` конверта;
+    ``endpoint`` — endpoint её сервиса ноды, обычно ``tcp://host:port``
+    (tailscale-адрес). Запросы к чужим нодам нода пересылает сама
+    (правило «спроси любого», ARCHITECTURE §11 п. 2).
+    """
+
+    id: str
+    endpoint: str
+
+
 class SwarmConfig(BaseModel):
     """Общие параметры роя.
 
@@ -152,6 +165,7 @@ class SwarmConfig(BaseModel):
     """
 
     token: str = ""
+    nodes: list[SwarmNodeConfig] = Field(default_factory=list)
 
 
 class LoggingConfig(BaseModel):
