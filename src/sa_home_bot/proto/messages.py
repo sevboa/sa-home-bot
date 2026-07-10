@@ -16,6 +16,7 @@ from typing import Any
 PROTO_VERSION = 0
 
 # --- Типы сообщений ---
+MSG_AUTH = "auth"  # только TCP: первое сообщение соединения, payload {"token"}
 MSG_HELLO = "hello"
 MSG_DESCRIBE = "describe"
 MSG_GET_STATE = "get_state"
@@ -23,13 +24,14 @@ MSG_COMMAND = "command"
 MSG_RESPONSE = "response"
 MSG_EVENT = "event"
 
-REQUEST_TYPES = frozenset({MSG_HELLO, MSG_DESCRIBE, MSG_GET_STATE, MSG_COMMAND})
+REQUEST_TYPES = frozenset({MSG_AUTH, MSG_HELLO, MSG_DESCRIBE, MSG_GET_STATE, MSG_COMMAND})
 
 # --- Коды ошибок ---
 ERR_BAD_REQUEST = "bad_request"
 ERR_UNSUPPORTED_PROTO = "unsupported_proto"
 ERR_UNKNOWN_TYPE = "unknown_type"
 ERR_UNKNOWN_ACTION = "unknown_action"
+ERR_UNAUTHORIZED = "unauthorized"  # TCP без/до auth или неверный токен; соединение закрывается
 ERR_INTERNAL = "internal"
 
 # Максимальная длина одного сообщения на проводе (защита от мусора в сокете).

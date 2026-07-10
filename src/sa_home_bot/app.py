@@ -88,11 +88,14 @@ async def run(settings: Settings) -> None:
     dispatcher = TelegramEventDispatcher(notifier, book, store)
     link = ServiceLink(
         settings.monitor.socket,
+        token=settings.swarm.token,
         display_name="монитор",
         on_event=build_event_handler(dispatcher),
     )
     await link.start()
-    node_link = ServiceLink(settings.node.socket, display_name="нода")
+    node_link = ServiceLink(
+        settings.node.socket, token=settings.swarm.token, display_name="нода"
+    )
     await node_link.start()
 
     async def refresh_menu() -> None:
@@ -100,7 +103,10 @@ async def run(settings: Settings) -> None:
         await set_bot_commands(bot, book, await apps_link.actions())
 
     apps_link = ServiceLink(
-        settings.apps.socket, display_name="приложения", on_connected=refresh_menu
+        settings.apps.socket,
+        token=settings.swarm.token,
+        display_name="приложения",
+        on_connected=refresh_menu,
     )
     await apps_link.start()
 

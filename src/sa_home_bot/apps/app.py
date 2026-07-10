@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 
 async def run_apps(settings: Settings) -> None:
     service = AppsService(settings)
-    server = ProtoServer(settings.apps.socket, service)
+    server = ProtoServer(settings.apps.socket, service, token=settings.swarm.token)
     await server.start()
 
     lifespan = Lifespan()

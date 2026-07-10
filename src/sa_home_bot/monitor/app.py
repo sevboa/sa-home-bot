@@ -39,7 +39,7 @@ async def run_monitor(settings: Settings) -> None:
     sensors = SensorSource(settings.sensors)
     queue = DedupQueue()
     service = MonitorService(settings, store, queue)
-    server = ProtoServer(settings.monitor.socket, service)
+    server = ProtoServer(settings.monitor.socket, service, token=settings.swarm.token)
     await server.start()
 
     # 3. Worker: события уходят broadcast'ом по протоколу.

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from sa_home_bot.proto.client import EventCallback, ProtoClient
+from sa_home_bot.proto.endpoints import Endpoint, parse_endpoint
 from sa_home_bot.proto.messages import ActionSpec, Address, ProtoError, ServiceDescription
 
 log = logging.getLogger(__name__)
@@ -32,14 +33,16 @@ class ServiceUnavailableError(RuntimeError):
 class ServiceLink:
     def __init__(
         self,
-        socket_path: str | Path,
+        endpoint: str | Path | Endpoint,
         *,
+        token: str = "",
         display_name: str = "служба",
         on_event: EventCallback | None = None,
         on_connected: Callable[[], Awaitable[None]] | None = None,
         reconnect_delay: float = RECONNECT_DELAY_S,
     ) -> None:
-        self._path = Path(socket_path)
+        self._endpoint = parse_endpoint(endpoint)
+        self._token = token
         self.display_name = display_name
         self._on_event = on_event
         self._on_connected = on_connected
@@ -101,7 +104,7 @@ class ServiceLink:
         client = self._client
         if client is None:
             raise ServiceUnavailableError(
-                f"нет соединения: {self.display_name} ({self._path})"
+                f"нет соединения: {self.display_name} ({self._endpoint})"
             )
         return client
 
@@ -111,7 +114,8 @@ class ServiceLink:
         logged_down = False
         while True:
             client = ProtoClient(
-                self._path,
+                self._endpoint,
+                token=self._token,
                 src=Address(service="telegram-bot"),
                 on_event=self._on_event,
             )

@@ -104,17 +104,23 @@ def test_render_services_empty():
     assert "не назначены" in render_services([])
 
 
-def test_resolve_socket_relative_to_config_dir(tmp_path):
+def test_resolve_endpoint_relative_to_config_dir(tmp_path):
     import argparse
+    from pathlib import Path
 
-    from sa_home_bot.nodectl import _resolve_socket
+    from sa_home_bot.nodectl import _resolve_endpoint
+    from sa_home_bot.proto.endpoints import TcpEndpoint, UnixEndpoint
 
     config = tmp_path / "config.toml"
-    config.write_text('[node]\nsocket = "./data/node.sock"\n')
+    config.write_text('[node]\nsocket = "./data/node.sock"\n[swarm]\ntoken = "t"\n')
     args = argparse.Namespace(socket=None, config=str(config))
     # Относительный сокет из конфига — относительно каталога конфига, не CWD.
-    assert _resolve_socket(args) == tmp_path.resolve() / "data/node.sock"
+    endpoint, token = _resolve_endpoint(args)
+    assert endpoint == UnixEndpoint(tmp_path.resolve() / "data/node.sock")
+    assert token == "t"
 
-    # Явный --socket всегда важнее конфига.
+    # Явный --socket всегда важнее конфига (и понимает tcp://).
     args = argparse.Namespace(socket="/run/x.sock", config=str(config))
-    assert str(_resolve_socket(args)) == "/run/x.sock"
+    assert _resolve_endpoint(args)[0] == UnixEndpoint(Path("/run/x.sock"))
+    args = argparse.Namespace(socket="tcp://127.0.0.1:8710", config=str(config))
+    assert _resolve_endpoint(args)[0] == TcpEndpoint("127.0.0.1", 8710)

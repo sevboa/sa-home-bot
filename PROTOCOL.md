@@ -7,8 +7,17 @@
 
 ## Транспорт и кадрирование
 
-- **Linux:** unix-сокет (права `0600`). **Windows (позже):** TCP на
-  `127.0.0.1` + токен — формат сообщений тот же.
+- Endpoint задаётся строкой (`proto/endpoints.py`): путь
+  (`./data/node.sock`, допустим префикс `unix:`) — unix-сокет (Linux,
+  права `0600`); `tcp://host:port` — TCP (Windows и межнодовый канал).
+  Формат сообщений одинаковый.
+- **TCP требует аутентификацию** общим токеном роя (`[swarm].token`):
+  первое сообщение соединения — запрос `auth` с payload `{"token": "…"}`,
+  ответ `{"authenticated": true}`. Любой другой запрос до auth и неверный
+  токен → ошибка `unauthorized`, сервер закрывает соединение. События
+  рассылаются только аутентифицированным. Сервер на TCP без настроенного
+  токена не стартует. Unix-сокет защищён правами файла — auth не нужен
+  (запрос `auth` на нём отвечает ok без проверки).
 - Кадрирование — **NDJSON**: одно сообщение = одна строка UTF-8 JSON,
   завершённая `\n`. Лимит на сообщение — 1 MiB.
 
@@ -39,6 +48,7 @@
 
 | Тип | payload запроса | payload ответа |
 |---|---|---|
+| `auth` | `{token}` (только TCP, первым) | `{authenticated: true}` |
 | `hello` | — | `{node, service, version, proto}` |
 | `describe` | — | hello + `capabilities: [str]` + `actions: […]` |
 | `get_state` | — | произвольное состояние службы (dict) |
@@ -66,7 +76,8 @@
 ```
 
 Коды ошибок: `bad_request`, `unsupported_proto`, `unknown_type`,
-`unknown_action`, `internal`.
+`unknown_action`, `unauthorized` (TCP: нет/до auth или неверный токен;
+после ответа соединение закрывается), `internal`.
 
 ### Событие (сервер → все подключённые, без запроса)
 
@@ -82,11 +93,12 @@
 
 ## Обвязка
 
-- `proto.server.ProtoServer(path, handler)` — сервер одной службы.
-  `handler` реализует `ServiceHandler`: `describe()`, `get_state()`,
+- `proto.server.ProtoServer(endpoint, handler, token=…)` — сервер одной
+  службы. `handler` реализует `ServiceHandler`: `describe()`, `get_state()`,
   `run_command(action, args)`. События — `broadcast_event(type, data)`.
   Падение обработчика запроса → ответ `internal`, сервер живёт дальше.
-- `proto.client.ProtoClient(path, on_event=…)` — клиент: `hello()`,
-  `describe()`, `get_state()`, `command()`. Ответы матчатся по `id`,
-  события уходят в callback. Обрыв соединения роняет ожидающие запросы
-  `ConnectionError`; переподключение — забота вызывающего.
+- `proto.client.ProtoClient(endpoint, token=…, on_event=…)` — клиент:
+  `hello()`, `describe()`, `get_state()`, `command()`. На TCP `connect()`
+  сам проходит auth (неверный токен → `ProtoError`). Ответы матчатся по
+  `id`, события уходят в callback. Обрыв соединения роняет ожидающие
+  запросы `ConnectionError`; переподключение — забота вызывающего.

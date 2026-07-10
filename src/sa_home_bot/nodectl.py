@@ -1,13 +1,14 @@
 """nodectl — локальная консоль управления нодой (базовый интерфейс ноды).
 
-Подключается к сокету сервиса ноды по протоколу v0:
+Подключается к endpoint'у сервиса ноды по протоколу v0:
 
     nodectl status                # нода и её службы
     nodectl start|stop|restart X  # управление службой
     nodectl events                # живой хвост событий (Ctrl+C — выход)
 
-Сокет берётся из --socket, либо из [node].socket указанного --config,
-либо из ./config.toml, либо дефолт ./data/node.sock.
+Endpoint берётся из --socket (путь unix-сокета или tcp://host:port), либо из
+[node].socket указанного --config, либо из ./config.toml, либо дефолт
+./data/node.sock. Токен для tcp — [swarm].token конфига.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from pathlib import Path
 
 from sa_home_bot.config import Settings
 from sa_home_bot.proto.client import ProtoClient
+from sa_home_bot.proto.endpoints import Endpoint, parse_endpoint, resolve_endpoint
 from sa_home_bot.proto.messages import Envelope, ProtoError
 
 DEFAULT_CONFIG = "./config.toml"
@@ -32,7 +34,9 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="nodectl", description="Консоль управления нодой sa-home."
     )
     parser.add_argument("--config", "-c", default=None, help="путь к config.toml")
-    parser.add_argument("--socket", "-s", default=None, help="путь к сокету ноды")
+    parser.add_argument(
+        "--socket", "-s", default=None, help="endpoint ноды: путь сокета или tcp://host:port"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status", help="статус ноды и её служб")
     for action in ("start", "stop", "restart"):
@@ -42,19 +46,18 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _resolve_socket(args: argparse.Namespace) -> Path:
-    if args.socket:
-        return Path(args.socket)
+def _resolve_endpoint(args: argparse.Namespace) -> tuple[Endpoint, str]:
+    """Endpoint ноды + токен ([swarm].token — нужен только для tcp)."""
     config_path = args.config
     if config_path is None and Path(DEFAULT_CONFIG).exists():
         config_path = DEFAULT_CONFIG
     settings = Settings.load(config_path)
-    sock = settings.node.socket
+    if args.socket:
+        return parse_endpoint(args.socket), settings.swarm.token
     # Относительный путь в конфиге — относительно каталога конфига, а не CWD:
     # так `nodectl -c ~/proj/config.toml status` работает из любого каталога.
-    if not sock.is_absolute() and config_path is not None:
-        sock = Path(config_path).resolve().parent / sock
-    return sock
+    base = Path(config_path).resolve().parent if config_path is not None else None
+    return resolve_endpoint(settings.node.socket, base), settings.swarm.token
 
 
 def _fmt_started(iso: str | None) -> str:
@@ -99,7 +102,7 @@ def render_event(env: Envelope) -> str:
 
 
 async def _run(args: argparse.Namespace) -> int:
-    socket_path = _resolve_socket(args)
+    endpoint, token = _resolve_endpoint(args)
 
     events_mode = args.command == "events"
     printed = asyncio.Event()
@@ -108,11 +111,11 @@ async def _run(args: argparse.Namespace) -> int:
         print(render_event(env), flush=True)
         printed.set()
 
-    client = ProtoClient(socket_path, on_event=on_event if events_mode else None)
+    client = ProtoClient(endpoint, token=token, on_event=on_event if events_mode else None)
     try:
         await client.connect()
-    except (ConnectionError, OSError) as exc:
-        print(f"Нода недоступна ({socket_path}): {exc}", file=sys.stderr)
+    except (ConnectionError, OSError, ProtoError) as exc:
+        print(f"Нода недоступна ({endpoint}): {exc}", file=sys.stderr)
         return 1
 
     try:

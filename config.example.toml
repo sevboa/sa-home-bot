@@ -54,7 +54,8 @@ baseline_min_std_c = 3.0
 devices = []
 
 # Служба monitor (отдельный процесс: `sa-home-bot --service monitor`).
-# Бот общается с ней по протоколу v0 через unix-сокет (см. PROTOCOL.md).
+# Бот общается с ней по протоколу v0 (см. PROTOCOL.md). socket — endpoint:
+# unix-путь (Linux) или "tcp://127.0.0.1:8711" (Windows; требует [swarm].token).
 # У монитора СВОЯ БД — [database].path остаётся боту.
 [monitor]
 socket = "./data/monitor.sock"
@@ -86,6 +87,13 @@ socket = "./data/node.sock"
 assignments = ["monitor", "apps", "telegram-bot"]
 restart_delay_s = 5.0              # пауза перед перезапуском упавшей службы
 stop_timeout_s = 90.0              # SIGTERM → SIGKILL при остановке
+
+# Общие параметры роя. token — общий секрет: обязателен для служб на
+# TCP-endpoint'ах (Windows-нода, межнодовый канал), unix-сокеты его не требуют.
+# Сгенерировать: `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`.
+# Один и тот же токен должен стоять на всех нодах роя.
+[swarm]
+token = ""
 
 # Wake-on-LAN: /wake шлёт magic packet на MAC машины в локальной сети.
 # На стороне Windows должно быть включено: WoL в BIOS/UEFI, «Wake on Magic Packet»

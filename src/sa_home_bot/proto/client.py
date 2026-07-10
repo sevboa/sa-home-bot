@@ -1,7 +1,8 @@
 """Клиент протокола v0: запрос-ответ по id + приём событий.
 
-Одно подключение к своей локальной ноде/службе. Фоновая задача читает сокет:
-ответы резолвят ожидающие future по id запроса, события уходят в callback
+Одно подключение к своей локальной ноде/службе (unix-сокет или TCP; на TCP
+`connect()` сам проходит auth токеном). Фоновая задача читает сокет: ответы
+резолвят ожидающие future по id запроса, события уходят в callback
 `on_event`. Падение callback'а не валит читателя. Переподключение — забота
 вызывающего (этап 13: бот переживает обрыв и реконнектится).
 """
@@ -15,8 +16,10 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from sa_home_bot.proto.endpoints import Endpoint, TcpEndpoint, UnixEndpoint, parse_endpoint
 from sa_home_bot.proto.messages import (
     MAX_MESSAGE_BYTES,
+    MSG_AUTH,
     MSG_COMMAND,
     MSG_DESCRIBE,
     MSG_EVENT,
@@ -43,13 +46,15 @@ DEFAULT_TIMEOUT = 10.0
 class ProtoClient:
     def __init__(
         self,
-        socket_path: str | Path,
+        endpoint: str | Path | Endpoint,
         *,
+        token: str = "",
         src: Address | None = None,
         on_event: EventCallback | None = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
-        self._path = Path(socket_path)
+        self._endpoint = parse_endpoint(endpoint)
+        self._token = token
         self._src = src
         self._on_event = on_event
         self._timeout = timeout
@@ -64,10 +69,22 @@ class ProtoClient:
         return self._writer is not None
 
     async def connect(self) -> None:
-        self._reader, self._writer = await asyncio.open_unix_connection(
-            path=str(self._path), limit=MAX_MESSAGE_BYTES
-        )
+        if isinstance(self._endpoint, UnixEndpoint):
+            self._reader, self._writer = await asyncio.open_unix_connection(
+                path=str(self._endpoint.path), limit=MAX_MESSAGE_BYTES
+            )
+        else:
+            self._reader, self._writer = await asyncio.open_connection(
+                host=self._endpoint.host, port=self._endpoint.port, limit=MAX_MESSAGE_BYTES
+            )
         self._reader_task = asyncio.create_task(self._read_loop(), name="proto-client-reader")
+        if isinstance(self._endpoint, TcpEndpoint):
+            # TCP требует auth первым сообщением; неверный токен → ProtoError.
+            try:
+                await self.request(MSG_AUTH, {"token": self._token})
+            except BaseException:
+                await self.close()
+                raise
 
     async def close(self) -> None:
         if self._reader_task is not None:

@@ -144,7 +144,7 @@ async def test_event_reaches_all_clients(rpc):
         events2.append(env)
         got2.set()
 
-    client2 = ProtoClient(client._path, on_event=on_event2, timeout=5.0)
+    client2 = ProtoClient(client._endpoint, on_event=on_event2, timeout=5.0)
     await client2.connect()
     try:
         # дождаться регистрации второго подключения на сервере

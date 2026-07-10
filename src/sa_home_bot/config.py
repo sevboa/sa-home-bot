@@ -93,12 +93,13 @@ class WakeConfig(BaseModel):
 class MonitorConfig(BaseModel):
     """Служба monitor (отдельный процесс, `sa-home-bot --service monitor`).
 
-    ``socket`` — unix-сокет протокола v0, через который бот (и позже сервис
-    ноды) общается с монитором. ``db_path`` — собственная БД монитора
-    (readings, health_states, SMART, job_runs); БД бота остаётся отдельной.
+    ``socket`` — endpoint протокола v0 (unix-путь или ``tcp://host:port``,
+    см. PROTOCOL.md), через который бот (и позже сервис ноды) общается
+    с монитором. ``db_path`` — собственная БД монитора (readings,
+    health_states, SMART, job_runs); БД бота остаётся отдельной.
     """
 
-    socket: Path = Path("./data/monitor.sock")
+    socket: str = "./data/monitor.sock"
     db_path: Path = Path("./data/monitor.sqlite")
 
 
@@ -123,7 +124,7 @@ class AppsConfig(BaseModel):
     в систему не ходит — только запросы к этой службе.
     """
 
-    socket: Path = Path("./data/apps.sock")
+    socket: str = "./data/apps.sock"
     items: list[AppConfig] = Field(default_factory=list)
 
 
@@ -136,10 +137,21 @@ class NodeConfig(BaseModel):
     ``telegram-bot``, ``apps``.
     """
 
-    socket: Path = Path("./data/node.sock")
+    socket: str = "./data/node.sock"
     assignments: list[str] = Field(default_factory=lambda: ["monitor", "telegram-bot"])
     restart_delay_s: float = Field(default=5.0, gt=0)
     stop_timeout_s: float = Field(default=90.0, gt=0)  # SIGTERM → SIGKILL
+
+
+class SwarmConfig(BaseModel):
+    """Общие параметры роя.
+
+    ``token`` — общий секрет роя: обязателен для служб на TCP-endpoint'ах
+    (Windows-нода, межнодовый канал); unix-сокеты защищены правами файла
+    и токен не используют. Один токен на весь рой (домашняя сеть/tailnet).
+    """
+
+    token: str = ""
 
 
 class LoggingConfig(BaseModel):
@@ -173,6 +185,7 @@ class Settings(BaseSettings):
     monitor: MonitorConfig = Field(default_factory=MonitorConfig)
     apps: AppsConfig = Field(default_factory=AppsConfig)
     node: NodeConfig = Field(default_factory=NodeConfig)
+    swarm: SwarmConfig = Field(default_factory=SwarmConfig)
     wake: WakeConfig = Field(default_factory=WakeConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     subscriptions: list[SubscriptionConfig] = Field(default_factory=list)

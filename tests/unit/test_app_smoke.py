@@ -69,7 +69,7 @@ async def test_app_boots_and_shuts_down_cleanly(tmp_path, monkeypatch):
         database=DatabaseConfig(path=db_path),
         # Монитор не запущен — ServiceLink просто крутит переподключение в фоне.
         monitor=MonitorConfig(
-            socket=tmp_path / "monitor.sock", db_path=tmp_path / "monitor.sqlite"
+            socket=str(tmp_path / "monitor.sock"), db_path=tmp_path / "monitor.sqlite"
         ),
         subscriptions=[
             SubscriptionConfig(name="me", chat_id=1, event_types=["*"]),

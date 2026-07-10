@@ -37,7 +37,9 @@ async def run_node(settings: Settings, config_path: str | None = None) -> None:
     if not supervisor.services:
         log.warning("Нет ни одного валидного назначения — нода работает вхолостую")
 
-    server = ProtoServer(settings.node.socket, NodeService(supervisor))
+    server = ProtoServer(
+        settings.node.socket, NodeService(supervisor), token=settings.swarm.token
+    )
     await server.start()
     await supervisor.start_all()
 
