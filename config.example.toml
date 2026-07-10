@@ -60,11 +60,30 @@ devices = []
 socket = "./data/monitor.sock"
 db_path = "./data/monitor.sqlite"
 
+# Служба apps (адаптер приложений: `sa-home-bot --service apps`) — умения роя
+# поверх готового софта (торрент-клиент, медиасервер): по протоколу отвечает
+# состоянием systemd-юнита и ссылками на веб-морду. Каждое приложение — скилл
+# первого уровня в /skills; право в подписке — "<id>@apps".
+[apps]
+socket = "./data/apps.sock"
+
+[[apps.items]]
+id = "qbittorrent"
+title = "🧲 qBittorrent"
+unit = "qbittorrent-nox.service"   # системный systemd-юнит
+urls = ["http://192.168.0.100:8080"]
+
+[[apps.items]]
+id = "jellyfin"
+title = "🎬 Jellyfin"
+unit = "jellyfin.service"
+urls = ["http://192.168.0.100:8096"]
+
 # Сервис ноды (супервизор: `sa-home-bot --service node`, консоль — nodectl).
 # Нода запускает назначенные службы дочерними процессами и рестартит упавшие.
 [node]
 socket = "./data/node.sock"
-assignments = ["monitor", "telegram-bot"]
+assignments = ["monitor", "apps", "telegram-bot"]
 restart_delay_s = 5.0              # пауза перед перезапуском упавшей службы
 stop_timeout_s = 90.0              # SIGTERM → SIGKILL при остановке
 
@@ -88,17 +107,19 @@ format = "plain"                   # plain | json
 #               smart_degraded, smart_recovered (SMART-здоровье дисков),
 #               system (старт/останов/восстановление связи). "*" = все.
 
-# allowed_commands: имена команд бота (status, node, wake, ...) и права на
-# динамические действия служб в форме "действие@служба" (кнопки из describe):
-#   start@node / stop@node / restart@node — управление службами под /node.
+# allowed_commands: имена команд бота (nodes, status, wake, ...) и права на
+# динамические действия служб в форме "действие@служба" (из describe):
+#   <id>@apps (qbittorrent@apps, ...) — скилл-приложение: команда в меню бота;
+#   start@node / stop@node / restart@node — управление на карточке службы.
 # Голое имя действия (scan_now) даёт и текстовую команду, и кнопку у любой службы.
 [[subscriptions]]
 name = "me"
 chat_id = 123456789
 event_types = ["*"]                # всё: перегрев + SMART + система
 allowed_commands = [
-    "status", "status_full", "stats", "downtime", "node", "scan_now",
-    "start@node", "stop@node", "restart@node",
+    "nodes", "status", "status_full", "stats", "downtime",
+    "scan_now", "start@node", "stop@node", "restart@node",
+    "qbittorrent@apps", "jellyfin@apps",
 ]
 
 [[subscriptions]]

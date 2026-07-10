@@ -83,8 +83,8 @@ async def run(settings: Settings) -> None:
         book, notifier, render_startup(clean=started_clean, last_outage=last_outage)
     )
 
-    # 8. Связь со службами ноды: монитор (события → рассылка) и сама нода
-    #    (раздел /node: состояние служб, динамические действия из describe).
+    # 8. Связь со службами ноды: монитор (события → рассылка), сама нода
+    #    (карточки нод/служб) и apps (скилы-приложения: команды меню).
     dispatcher = TelegramEventDispatcher(notifier, book, store)
     link = ServiceLink(
         settings.monitor.socket,
@@ -95,6 +95,15 @@ async def run(settings: Settings) -> None:
     node_link = ServiceLink(settings.node.socket, display_name="нода")
     await node_link.start()
 
+    async def refresh_menu() -> None:
+        # Скилы-приложения появились/изменились — перестроить меню команд.
+        await set_bot_commands(bot, book, await apps_link.actions())
+
+    apps_link = ServiceLink(
+        settings.apps.socket, display_name="приложения", on_connected=refresh_menu
+    )
+    await apps_link.start()
+
     # 9. Polling.
     polling_task = asyncio.create_task(
         dp.start_polling(
@@ -102,6 +111,7 @@ async def run(settings: Settings) -> None:
             store=store,
             link=link,
             node_link=node_link,
+            apps_link=apps_link,
             runtime=runtime,
             config=settings,
             notifier=notifier,
@@ -124,6 +134,7 @@ async def run(settings: Settings) -> None:
             polling_task=polling_task,
             link=link,
             node_link=node_link,
+            apps_link=apps_link,
             book=book,
             notifier=notifier,
             store=store,
@@ -138,6 +149,7 @@ async def _shutdown(
     polling_task: asyncio.Task,
     link: ServiceLink,
     node_link: ServiceLink,
+    apps_link: ServiceLink,
     book: SubscriptionBook,
     notifier: Notifier,
     store: Store,
@@ -149,6 +161,7 @@ async def _shutdown(
     # Стоп связи со службами (новые события не принимаются).
     await link.stop()
     await node_link.stop()
+    await apps_link.stop()
 
     # Стоп polling. stop_polling кидает RuntimeError, если polling ещё не успел
     # запуститься (быстрый SIGINT) или упал на старте (например, бэд-токен).

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sa-home-bot"
-version = "0.9.0"
-description = "Личный Telegram-бот-сторож для мониторинга температуры CPU и дисков домашней машины"
+version = "0.10.0"
+description = "Рой домашних машин: нода-супервизор, службы (мониторинг, приложения) и Telegram-бот"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

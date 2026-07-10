@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -35,11 +36,13 @@ class ServiceLink:
         *,
         display_name: str = "служба",
         on_event: EventCallback | None = None,
+        on_connected: Callable[[], Awaitable[None]] | None = None,
         reconnect_delay: float = RECONNECT_DELAY_S,
     ) -> None:
         self._path = Path(socket_path)
         self.display_name = display_name
         self._on_event = on_event
+        self._on_connected = on_connected
         self._delay = reconnect_delay
         self._client: ProtoClient | None = None
         self._task: asyncio.Task | None = None
@@ -125,6 +128,16 @@ class ServiceLink:
                 )
                 logged_down = False
                 self._client = client
+                if self._on_connected is not None:
+                    # Свежий describe уже в кэше — подписчик может перестроить UI.
+                    try:
+                        await self._on_connected()
+                    except Exception:  # noqa: BLE001 — хук не должен рвать соединение
+                        log.warning(
+                            "Ошибка on_connected-хука службы %s",
+                            self.display_name,
+                            exc_info=True,
+                        )
                 try:
                     await client.join()
                 finally:

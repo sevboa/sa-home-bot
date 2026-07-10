@@ -33,6 +33,7 @@ EVENT_SERVICE_STOPPED = "service_stopped"
 ASSIGNMENT_ARGS: dict[str, list[str]] = {
     "monitor": ["--service", "monitor"],
     "telegram-bot": ["--service", "bot"],
+    "apps": ["--service", "apps"],
 }
 
 

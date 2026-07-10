@@ -8,10 +8,12 @@ from sa_home_bot.proto.messages import ActionParam, ActionSpec
 from sa_home_bot.subscriptions.models import Subscription
 
 
-def test_menu_hides_status_subactions():
+def test_menu_has_only_nodes_skill():
+    # В меню из реестра — только «Управление нодами»; остальные скилы
+    # первого уровня динамические (из describe apps, см. build_menu_commands).
     menu_names = {c.name for c in commands.MENU_CONTROL_COMMANDS}
-    assert menu_names == {"status", "node", "wake"}  # подкоманды /status скрыты
-    for name in ("status_full", "stats", "scan_now", "downtime"):
+    assert menu_names == {"nodes"}
+    for name in ("status", "status_full", "stats", "scan_now", "downtime", "wake"):
         assert commands.get(name).menu is False
 
 
@@ -47,6 +49,15 @@ def test_command_for_callback_downtime_pagination():
     # «st:downtime_page:<offset>» — те же права, что и у команды DOWNTIME.
     assert commands.command_for_callback("st:downtime_page:10") is commands.DOWNTIME
     assert commands.command_for_callback("st:downtime_page:0") is commands.DOWNTIME
+
+
+def test_command_for_callback_node_hierarchy_and_wake():
+    # Список нод и карточка службы — права /nodes; карточка ноды — данные
+    # /status; кнопка WoL — права /wake.
+    assert commands.command_for_callback("st:nodes") is commands.NODES
+    assert commands.command_for_callback("st:nodecard") is commands.STATUS
+    assert commands.command_for_callback("st:svc:monitor") is commands.NODES
+    assert commands.command_for_callback("st:wake") is commands.WAKE
 
 
 def _sub(*allowed: str) -> Subscription:

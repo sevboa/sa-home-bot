@@ -1,4 +1,4 @@
-"""/node — состояние ноды и служб; обработка динамических действий «act:…».
+"""/nodes — список нод роя; обработка динамических действий «act:…».
 
 Права на callback уже проверены CallbackAuthorizationMiddleware
 (`действие@служба`). Здесь только маршрутизация к нужному линку и рендер.
@@ -14,8 +14,9 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from sa_home_bot.bot import actions, commands, node_view
+from sa_home_bot.bot import actions, apps_view, commands, node_view
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
+from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.proto.messages import ProtoError
 from sa_home_bot.subscriptions.models import Subscription
@@ -25,13 +26,16 @@ log = logging.getLogger(__name__)
 router = Router(name="node")
 
 
-@router.message(Command(commands.NODE.name))
-async def cmd_node(
+@router.message(Command(commands.NODES.name))
+async def cmd_nodes(
     message: Message,
     node_link: ServiceLink,
+    config: Settings,
     subscription: Subscription | None = None,
 ) -> None:
-    text, keyboard = await node_view.build_node_view(node_link, subscription)
+    text, keyboard = await node_view.build_nodes_list_view(
+        node_link, subscription, config.wake
+    )
     await message.answer(text, reply_markup=keyboard)
 
 
@@ -57,6 +61,8 @@ async def on_dynamic_action(
     store: Store,
     link: ServiceLink,
     node_link: ServiceLink,
+    apps_link: ServiceLink,
+    config: Settings,
     subscription: Subscription | None = None,
 ) -> None:
     parsed = commands.parse_action_callback(callback.data)
@@ -69,12 +75,27 @@ async def on_dynamic_action(
         error = await _run_node_action(node_link, action_id, value)
         if error is not None:
             await callback.message.answer(error)
+        elif value is not None:
+            # Действие над службой — перерисовать её карточку свежим состоянием.
+            text, keyboard = await node_view.build_service_card_view(
+                node_link, subscription, value
+            )
+            with contextlib.suppress(TelegramBadRequest):
+                await callback.message.edit_text(text, reply_markup=keyboard)
         else:
-            # Перерисовать карточку ноды свежим состоянием.
-            text, keyboard = await node_view.build_node_view(node_link, subscription)
+            text, keyboard = await node_view.build_nodes_list_view(
+                node_link, subscription, config.wake
+            )
             with contextlib.suppress(TelegramBadRequest):
                 await callback.message.edit_text(text, reply_markup=keyboard)
         await callback.answer("Готово" if error is None else None)
+        return
+
+    if service == apps_view.APPS_SERVICE:
+        # Кнопки act:apps из старых сообщений — тот же скилл, что команда.
+        text = await apps_view.run_app_skill(apps_link, action_id, value)
+        await callback.message.answer(text, disable_web_page_preview=True)
+        await callback.answer()
         return
 
     if service == "monitor":

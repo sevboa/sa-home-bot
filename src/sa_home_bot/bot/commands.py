@@ -19,8 +19,12 @@ PING = Command("ping", "проверка живости (pong)", universal=True)
 WHOAMI = Command("whoami", "показать user_id и chat_id", universal=True)
 
 # Управляющие — требуют права в allowed_commands не-broken подписки.
-# STATUS — единственная в меню; остальные скрыты и вызываются кнопками под /status.
-STATUS = Command("status", "краткая сводка состояния", universal=False)
+# Меню бота — скилы роя первого уровня: динамические команды-приложения из
+# describe службы apps (см. setup.build_menu_commands) + «Управление нодами»
+# (/nodes). Остальное скрыто и вызывается кнопками: /status — карточка
+# локальной ноды, доступная из списка нод.
+NODES = Command("nodes", "управление нодами роя", universal=False)
+STATUS = Command("status", "карточка локальной ноды", universal=False, menu=False)
 STATUS_FULL = Command(
     "status_full", "подробный статус компонентов", universal=False, menu=False
 )
@@ -29,19 +33,19 @@ SCAN_NOW = Command("scan_now", "форс-скан датчиков и диско
 DOWNTIME = Command(
     "downtime", "последние отключения машины", universal=False, menu=False
 )
-NODE = Command("node", "нода: состояние и управление службами", universal=False)
-WAKE = Command("wake", "разбудить домашний ПК (Wake-on-LAN)", universal=False)
+# Wake — кнопка в разделе /nodes; командой тоже работает, но в меню не нужна.
+WAKE = Command("wake", "разбудить домашний ПК (Wake-on-LAN)", universal=False, menu=False)
 
 ALL_COMMANDS: list[Command] = [
     HELP,
     PING,
     WHOAMI,
+    NODES,
     STATUS,
     STATUS_FULL,
     STATS,
     SCAN_NOW,
     DOWNTIME,
-    NODE,
     WAKE,
 ]
 
@@ -59,6 +63,14 @@ STATUS_ACTIONS: dict[str, Command] = {
     "downtime": DOWNTIME,
 }
 CALLBACK_PREFIX = "st"
+
+# Иерархия раздела нод: список нод («st:nodes») → карточка ноды
+# («st:nodecard», = /status: мониторинг + службы) → карточка службы
+# («st:svc:<имя>», данные + кнопки управления). Wake-on-LAN — «st:wake».
+NODES_CODE = "nodes"
+NODE_CARD_CODE = "nodecard"
+SERVICE_CARD_CODE = "svc"
+WAKE_CODE = "wake"
 
 # Динамические действия служб: «act:<служба>:<действие>[:<значение>]»,
 # например «act:monitor:scan_now» или «act:node:restart:telegram-bot».
@@ -81,6 +93,10 @@ DOWNTIME_PAGE_CODE = "downtime_page"
 _ALL_CALLBACK_ACTIONS: dict[str, Command] = {
     **STATUS_ACTIONS,
     DOWNTIME_PAGE_CODE: DOWNTIME,
+    NODES_CODE: NODES,
+    NODE_CARD_CODE: STATUS,  # карточка ноды = данные /status
+    SERVICE_CARD_CODE: NODES,  # карточка службы — часть управления нодами
+    WAKE_CODE: WAKE,
 }
 
 _BY_NAME = {c.name: c for c in ALL_COMMANDS}

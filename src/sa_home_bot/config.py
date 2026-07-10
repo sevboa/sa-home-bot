@@ -102,12 +102,38 @@ class MonitorConfig(BaseModel):
     db_path: Path = Path("./data/monitor.sqlite")
 
 
+class AppConfig(BaseModel):
+    """Одно приложение под присмотром службы apps (умение роя).
+
+    ``id`` — идентификатор действия в describe (и право ``id@apps``),
+    ``unit`` — системный systemd-юнит, ``urls`` — ссылки на веб-морду.
+    """
+
+    id: str
+    title: str
+    unit: str
+    urls: list[str] = Field(default_factory=list)
+
+
+class AppsConfig(BaseModel):
+    """Служба apps (адаптер приложений, `sa-home-bot --service apps`).
+
+    Умения роя поверх готового софта (торрент, медиасервер): служба отвечает
+    по протоколу v0 состоянием systemd-юнита и ссылками на веб-морду. Бот сам
+    в систему не ходит — только запросы к этой службе.
+    """
+
+    socket: Path = Path("./data/apps.sock")
+    items: list[AppConfig] = Field(default_factory=list)
+
+
 class NodeConfig(BaseModel):
     """Сервис ноды (супервизор, `sa-home-bot --service node`).
 
     Нода запускает службы из ``assignments`` дочерними процессами, рестартит
     упавших и отдаёт статус/управление по протоколу v0 через ``socket``
-    (клиент — ``nodectl``). Известные назначения: ``monitor``, ``telegram-bot``.
+    (клиент — ``nodectl``). Известные назначения: ``monitor``,
+    ``telegram-bot``, ``apps``.
     """
 
     socket: Path = Path("./data/node.sock")
@@ -145,6 +171,7 @@ class Settings(BaseSettings):
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     sensors: SensorsConfig = Field(default_factory=SensorsConfig)
     monitor: MonitorConfig = Field(default_factory=MonitorConfig)
+    apps: AppsConfig = Field(default_factory=AppsConfig)
     node: NodeConfig = Field(default_factory=NodeConfig)
     wake: WakeConfig = Field(default_factory=WakeConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)

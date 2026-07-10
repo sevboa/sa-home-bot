@@ -1,12 +1,12 @@
-"""/wake — разбудить домашний ПК по Wake-on-LAN."""
+"""/wake и кнопка «Разбудить ПК» в /nodes — Wake-on-LAN домашнего ПК."""
 
 from __future__ import annotations
 
 import logging
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from sa_home_bot import wol
 from sa_home_bot.bot import commands
@@ -19,9 +19,11 @@ NOT_CONFIGURED_TEXT = (
     "⚙️ Wake-on-LAN не настроен: задайте mac в секции [wake] файла config.toml."
 )
 
+WAKE_CALLBACK_DATA = f"{commands.CALLBACK_PREFIX}:{commands.WAKE_CODE}"
 
-@router.message(Command(commands.WAKE.name))
-async def cmd_wake(message: Message, config: Settings) -> None:
+
+async def _do_wake(message: Message, config: Settings) -> None:
+    """Общий сценарий: команда /wake и кнопка в /nodes делают одно и то же."""
     wake = config.wake
     if not wake.mac:
         await message.answer(NOT_CONFIGURED_TEXT)
@@ -52,3 +54,18 @@ async def cmd_wake(message: Message, config: Settings) -> None:
             f"⚠️ Машина не ответила на ping за {wake.wait_timeout_s:.0f} с. "
             "Проверьте, что WoL включён в BIOS и в настройках сетевой карты Windows."
         )
+
+
+@router.message(Command(commands.WAKE.name))
+async def cmd_wake(message: Message, config: Settings) -> None:
+    await _do_wake(message, config)
+
+
+@router.callback_query(F.data == WAKE_CALLBACK_DATA)
+async def on_wake_button(callback: CallbackQuery, config: Settings) -> None:
+    # Право (команда wake) уже проверено CallbackAuthorizationMiddleware.
+    if callback.message is None:
+        await callback.answer()
+        return
+    await callback.answer()
+    await _do_wake(callback.message, config)

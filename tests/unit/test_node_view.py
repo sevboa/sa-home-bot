@@ -1,6 +1,17 @@
-"""Раздел /node: рендер состояния и динамическая клавиатура из describe ноды."""
+"""Раздел нод: список нод → карточка ноды → карточка службы."""
 
-from sa_home_bot.bot.node_view import build_node_keyboard, render_node_state
+from sa_home_bot.bot.node_view import (
+    NODE_DOWN_TEXT,
+    NODES_HEADER,
+    REMOTE_STUB_TEXT,
+    build_node_card_keyboard,
+    build_nodes_list_keyboard,
+    build_service_card_keyboard,
+    render_nodes_list,
+    render_service_card,
+    render_services_block,
+)
+from sa_home_bot.config import WakeConfig
 from sa_home_bot.proto.messages import ActionParam, ActionSpec
 from sa_home_bot.subscriptions.models import Subscription
 
@@ -35,44 +46,109 @@ def _sub(*allowed: str) -> Subscription:
     return Subscription(chat_id=1, name="me", allowed_commands=frozenset(allowed))
 
 
-def test_render_node_state():
-    text = render_node_state(NODE_STATE)
-    assert "Нода alfred" in text and "v0.9.0" in text
+# --- Список нод ---------------------------------------------------------------
+
+
+def test_nodes_list_counts_running_services():
+    text = render_nodes_list(NODE_STATE, None)
+    assert NODES_HEADER in text
+    assert "alfred" in text and "1/2 работают" in text
+    assert REMOTE_STUB_TEXT not in text
+
+
+def test_nodes_list_with_wake_shows_remote_stub():
+    text = render_nodes_list(NODE_STATE, WakeConfig(mac="AA:BB:CC:DD:EE:FF"))
+    assert REMOTE_STUB_TEXT in text
+
+
+def test_nodes_list_node_down():
+    assert NODE_DOWN_TEXT in render_nodes_list(None, None)
+
+
+def test_nodes_list_keyboard_card_and_wake():
+    kb = build_nodes_list_keyboard(
+        _sub("status", "wake"), "alfred", WakeConfig(mac="AA:BB:CC:DD:EE:FF")
+    )
+    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert codes == ["st:nodecard", "st:wake"]
+
+
+def test_nodes_list_keyboard_respects_rights():
+    wake = WakeConfig(mac="AA:BB:CC:DD:EE:FF")
+    kb = build_nodes_list_keyboard(_sub("wake"), "alfred", wake)
+    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert codes == ["st:wake"]  # без права status нет карточки
+    assert build_nodes_list_keyboard(_sub("stats"), "alfred", WakeConfig()) is None
+    assert build_nodes_list_keyboard(None, "alfred", wake) is None
+
+
+# --- Карточка ноды ------------------------------------------------------------
+
+
+def test_services_block_renders_statuses():
+    text = render_services_block(NODE_STATE)
+    assert "Службы ноды alfred" in text and "v0.9.0" in text
     assert "✅ <b>monitor</b> — работает, pid 123" in text
     assert "⏹ <b>telegram-bot</b> — остановлена" in text
 
 
-def test_render_node_state_empty():
-    assert "не назначены" in render_node_state({"node": "x", "version": "1", "services": []})
-
-
-def test_keyboard_action_per_choice_with_full_rights():
-    kb = build_node_keyboard(
-        _sub("start@node", "stop@node", "restart@node"), _node_actions()
+def test_services_block_empty():
+    assert "не назначены" in render_services_block(
+        {"node": "x", "version": "1", "services": []}
     )
-    buttons = [b for row in kb.inline_keyboard for b in row]
-    # 3 действия × 2 службы = 6 кнопок, callback несёт службу-значение.
-    assert len(buttons) == 6
-    callbacks = {b.callback_data for b in buttons}
-    assert "act:node:restart:telegram-bot" in callbacks
-    assert "act:node:stop:monitor" in callbacks
-    texts = {b.text for b in buttons}
-    assert "🔄 Перезапустить · monitor" in texts
 
 
-def test_keyboard_filters_by_action_permission():
-    kb = build_node_keyboard(_sub("restart@node"), _node_actions())
-    callbacks = [b.callback_data for row in kb.inline_keyboard for b in row]
-    assert callbacks == ["act:node:restart:monitor", "act:node:restart:telegram-bot"]
+def test_node_card_keyboard_views_and_service_cards():
+    monitor_actions = [ActionSpec(id="scan_now", title="🔄 Скан датчиков")]
+    kb = build_node_card_keyboard(
+        _sub("status_full", "nodes", "scan_now@monitor"),
+        monitor_actions,
+        ["monitor", "telegram-bot"],
+    )
+    codes = {b.callback_data for row in kb.inline_keyboard for b in row}
+    assert codes == {
+        "st:full",
+        "act:monitor:scan_now",
+        "st:svc:monitor",
+        "st:svc:telegram-bot",
+    }
 
 
-def test_keyboard_none_without_rights():
-    assert build_node_keyboard(_sub("status"), _node_actions()) is None
-    assert build_node_keyboard(None, _node_actions()) is None
+def test_node_card_keyboard_service_cards_need_nodes_right():
+    kb = build_node_card_keyboard(_sub("status_full"), [], ["monitor"])
+    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert codes == ["st:full"]
 
 
-def test_action_without_params_is_single_button():
-    actions = [ActionSpec(id="reload", title="Перечитать конфиг")]
-    kb = build_node_keyboard(_sub("reload@node"), actions)
-    button = kb.inline_keyboard[0][0]
-    assert button.callback_data == "act:node:reload"
+# --- Карточка службы ----------------------------------------------------------
+
+
+def test_service_card_text():
+    text = render_service_card("alfred", NODE_STATE["services"][0])
+    assert "Служба monitor" in text and "нода alfred" in text
+    assert "✅ работает, pid 123" in text
+    assert "Рестартов после падений: 0" in text
+
+
+def test_service_card_keyboard_actions_for_this_service():
+    kb = build_service_card_keyboard(
+        _sub("start@node", "stop@node", "restart@node"), _node_actions(), "monitor"
+    )
+    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert codes == [
+        "act:node:start:monitor",
+        "act:node:stop:monitor",
+        "act:node:restart:monitor",
+    ]
+
+
+def test_service_card_keyboard_filters_by_right_and_choices():
+    kb = build_service_card_keyboard(_sub("restart@node"), _node_actions(), "monitor")
+    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert codes == ["act:node:restart:monitor"]
+    # Служба вне choices действия — кнопок нет.
+    assert (
+        build_service_card_keyboard(_sub("restart@node"), _node_actions(), "apps")
+        is None
+    )
+    assert build_service_card_keyboard(None, _node_actions(), "monitor") is None
