@@ -41,7 +41,7 @@ def _default_config() -> str | None:
             return str(path)
     return None
 
-_STATUS_ICON = {"running": "✅", "restarting": "🔄", "stopped": "⏹"}
+_STATUS_ICON = {"running": "🟢", "restarting": "🟠", "stopped": "🔴"}
 
 POWER_ACTIONS = ("poweroff", "reboot", "suspend")
 
@@ -95,7 +95,7 @@ def render_services(services: list[dict]) -> str:
         return "Службы не назначены."
     rows = [("СЛУЖБА", "СОСТОЯНИЕ", "PID", "РЕСТАРТЫ", "ЗАПУЩЕНА")]
     for svc in services:
-        icon = _STATUS_ICON.get(svc.get("status", ""), "❔")
+        icon = _STATUS_ICON.get(svc.get("status", ""), "⚪")
         rows.append(
             (
                 svc.get("name", "?"),
@@ -125,7 +125,7 @@ def render_status(state: dict) -> str:
     peers = state.get("peers") or []
     if peers:
         lines = [
-            f"  {'✅' if p.get('alive') else '⛔'} {p.get('id', '?')} ({p.get('endpoint', '?')})"
+            f"  {'🟢' if p.get('alive') else '🔴'} {p.get('id', '?')} ({p.get('endpoint', '?')})"
             for p in peers
         ]
         out += "\nПиры:\n" + "\n".join(lines)

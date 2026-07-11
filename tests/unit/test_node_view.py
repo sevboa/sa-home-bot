@@ -6,8 +6,10 @@ from sa_home_bot.bot.node_view import (
     REMOTE_STUB_TEXT,
     build_node_card_keyboard,
     build_nodes_list_keyboard,
+    build_remote_node_card_keyboard,
     build_service_card_keyboard,
     render_nodes_list,
+    render_remote_node_card,
     render_service_card,
     render_services_block,
 )
@@ -27,6 +29,14 @@ NODE_STATE = {
             "started_at": "2026-07-07T06:14:50+00:00",
         },
         {"name": "telegram-bot", "status": "stopped", "pid": None, "restarts": 2},
+    ],
+}
+
+NODE_STATE_WITH_PEERS = {
+    **NODE_STATE,
+    "peers": [
+        {"id": "arch-t480", "endpoint": "tcp://100.110.58.31:8710", "alive": True},
+        {"id": "winpc", "endpoint": "tcp://100.64.0.5:8710", "alive": False},
     ],
 }
 
@@ -65,21 +75,61 @@ def test_nodes_list_node_down():
     assert NODE_DOWN_TEXT in render_nodes_list(None, None)
 
 
+def test_nodes_list_shows_peers_with_lamps():
+    text = render_nodes_list(NODE_STATE_WITH_PEERS, None)
+    assert "🟢 <b>arch-t480</b>" in text
+    assert "🔴 <b>winpc</b> — не в сети" in text
+
+
 def test_nodes_list_keyboard_card_and_wake():
     kb = build_nodes_list_keyboard(
-        _sub("status", "wake"), "alfred", WakeConfig(mac="AA:BB:CC:DD:EE:FF")
+        _sub("status", "wake"), "alfred", wake=WakeConfig(mac="AA:BB:CC:DD:EE:FF")
     )
     codes = [b.callback_data for row in kb.inline_keyboard for b in row]
     assert codes == ["st:nodecard", "st:wake"]
 
 
+def test_nodes_list_keyboard_includes_peer_cards():
+    # «st:nodecard[…]» проверяется правом status (как и локальная карточка) —
+    # доступ к /nodes само по себе уже требует права nodes.
+    kb = build_nodes_list_keyboard(
+        _sub("status"), "alfred", NODE_STATE_WITH_PEERS["peers"]
+    )
+    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert codes == ["st:nodecard", "st:nodecard:arch-t480", "st:nodecard:winpc"]
+
+
+def test_nodes_list_keyboard_peer_cards_need_status_right():
+    kb = build_nodes_list_keyboard(
+        _sub("nodes"), "alfred", NODE_STATE_WITH_PEERS["peers"]
+    )
+    assert kb is None  # ни локальной, ни удалённых карточек, ни wake
+
+
 def test_nodes_list_keyboard_respects_rights():
     wake = WakeConfig(mac="AA:BB:CC:DD:EE:FF")
-    kb = build_nodes_list_keyboard(_sub("wake"), "alfred", wake)
+    kb = build_nodes_list_keyboard(_sub("wake"), "alfred", wake=wake)
     codes = [b.callback_data for row in kb.inline_keyboard for b in row]
     assert codes == ["st:wake"]  # без права status нет карточки
-    assert build_nodes_list_keyboard(_sub("stats"), "alfred", WakeConfig()) is None
-    assert build_nodes_list_keyboard(None, "alfred", wake) is None
+    assert build_nodes_list_keyboard(_sub("stats"), "alfred", wake=WakeConfig()) is None
+    assert build_nodes_list_keyboard(None, "alfred", wake=wake) is None
+
+
+# --- Карточка удалённой ноды --------------------------------------------------
+
+
+def test_remote_node_card_renders_uptime_and_services():
+    state = {**NODE_STATE, "uptime_s": 65.0, "system_uptime_s": 3725.0}
+    text = render_remote_node_card(state)
+    assert "Нода alfred" in text and "v0.9.0" in text
+    assert "Аптайм: система 1ч 2м 5с · нода 1м 5с" in text
+    assert "🟢 <b>monitor</b>" in text and "🔴 <b>telegram-bot</b>" in text
+
+
+def test_remote_node_card_keyboard_needs_nodes_right():
+    assert build_remote_node_card_keyboard(_sub("status")) is None
+    kb = build_remote_node_card_keyboard(_sub("nodes"))
+    assert [b.callback_data for row in kb.inline_keyboard for b in row] == ["st:nodes"]
 
 
 # --- Карточка ноды ------------------------------------------------------------
@@ -88,8 +138,8 @@ def test_nodes_list_keyboard_respects_rights():
 def test_services_block_renders_statuses():
     text = render_services_block(NODE_STATE)
     assert "Службы ноды alfred" in text and "v0.9.0" in text
-    assert "✅ <b>monitor</b> — работает, pid 123" in text
-    assert "⏹ <b>telegram-bot</b> — остановлена" in text
+    assert "🟢 <b>monitor</b> — работает, pid 123" in text
+    assert "🔴 <b>telegram-bot</b> — остановлена" in text
 
 
 def test_services_block_empty():
@@ -126,7 +176,7 @@ def test_node_card_keyboard_service_cards_need_nodes_right():
 def test_service_card_text():
     text = render_service_card("alfred", NODE_STATE["services"][0])
     assert "Служба monitor" in text and "нода alfred" in text
-    assert "✅ работает, pid 123" in text
+    assert "🟢 работает, pid 123" in text
     assert "Рестартов после падений: 0" in text
 
 

@@ -73,9 +73,15 @@ async def on_status_action(
         )
         await callback.message.answer(text, reply_markup=keyboard)
     elif code == commands.NODE_CARD_CODE:
-        text, keyboard = await node_view.build_node_card_view(
-            link, node_link, subscription
-        )
+        node_id = parts[2] if len(parts) > 2 and parts[2] else None
+        if node_id:
+            text, keyboard = await node_view.build_remote_node_card_view(
+                node_link, subscription, node_id
+            )
+        else:
+            text, keyboard = await node_view.build_node_card_view(
+                link, node_link, subscription
+            )
         await callback.message.answer(text, reply_markup=keyboard)
     elif code == commands.SERVICE_CARD_CODE:
         name = parts[2] if len(parts) > 2 else ""

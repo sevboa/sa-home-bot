@@ -129,7 +129,7 @@ def test_render_status_table():
     }
     text = render_status(state)
     assert "Нода alfred (v0.8.0)" in text
-    assert "✅ running" in text and "⏹ stopped" in text
+    assert "🟢 running" in text and "🔴 stopped" in text
     assert "123" in text and "—" in text
     assert "Пиры" not in text  # без пиров секция не рисуется
     assert "Аптайм" not in text  # без полей аптайма строка не рисуется
@@ -143,7 +143,7 @@ def test_render_status_table():
         {"id": "winpc", "endpoint": "tcp://192.168.0.50:8710", "alive": False},
     ]
     text = render_status(state)
-    assert "Пиры:" in text and "⛔ winpc (tcp://192.168.0.50:8710)" in text
+    assert "Пиры:" in text and "🔴 winpc (tcp://192.168.0.50:8710)" in text
 
 
 def test_render_services_empty():

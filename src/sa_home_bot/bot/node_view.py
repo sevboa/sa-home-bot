@@ -17,7 +17,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sa_home_bot.bot import commands, status_view
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import WakeConfig
-from sa_home_bot.proto.messages import ActionSpec, ProtoError
+from sa_home_bot.proto.messages import ActionSpec, Address, ProtoError
+from sa_home_bot.runtime import format_duration
 from sa_home_bot.subscriptions.models import Subscription
 
 NODE_SERVICE = "node"
@@ -36,17 +37,30 @@ REMOTE_STUB_TEXT = (
 
 WAKE_BUTTON_TEXT = "🔌 Разбудить ПК"
 
+# Лампочки статуса — единый словарь для служб (running/restarting/stopped) и
+# пиров (alive/dead). ⚪ — статус неизвестен (нет данных).
+LAMP_GREEN = "🟢"
+LAMP_ORANGE = "🟠"
+LAMP_RED = "🔴"
+LAMP_GRAY = "⚪"
+
 _STATUS_LINE = {
-    "running": "✅ <b>{name}</b> — работает, pid {pid}, рестартов {restarts}",
-    "restarting": "🔄 <b>{name}</b> — упала, перезапускается (рестартов {restarts})",
-    "stopped": "⏹ <b>{name}</b> — остановлена",
+    "running": f"{LAMP_GREEN} <b>{{name}}</b> — работает, pid {{pid}}, рестартов {{restarts}}",
+    "restarting": (
+        f"{LAMP_ORANGE} <b>{{name}}</b> — упала, перезапускается (рестартов {{restarts}})"
+    ),
+    "stopped": f"{LAMP_RED} <b>{{name}}</b> — остановлена",
 }
 
 _CARD_STATUS = {
-    "running": "✅ работает",
-    "restarting": "🔄 перезапускается",
-    "stopped": "⏹ остановлена",
+    "running": f"{LAMP_GREEN} работает",
+    "restarting": f"{LAMP_ORANGE} перезапускается",
+    "stopped": f"{LAMP_RED} остановлена",
 }
+
+
+def _peer_lamp(alive: bool) -> str:
+    return LAMP_GREEN if alive else LAMP_RED
 
 
 def _fmt_since(iso: str | None) -> str:
@@ -86,9 +100,13 @@ def render_nodes_list(state: dict | None, wake: WakeConfig | None) -> str:
         services = state.get("services", [])
         running = sum(1 for s in services if s.get("status") == "running")
         lines.append(
-            f"🖥 <b>{state.get('node', '?')}</b> — 🟢 в сети, "
+            f"{LAMP_GREEN} <b>{state.get('node', '?')}</b> (эта нода) — "
             f"службы: {running}/{len(services)} работают"
         )
+        for peer in state.get("peers", []):
+            lamp = _peer_lamp(bool(peer.get("alive")))
+            note = "" if peer.get("alive") else " — не в сети"
+            lines.append(f"{lamp} <b>{peer.get('id', '?')}</b>{note}")
     if wake is not None and wake.mac:
         lines.append(REMOTE_STUB_TEXT)
     return "\n".join(lines)
@@ -97,17 +115,30 @@ def render_nodes_list(state: dict | None, wake: WakeConfig | None) -> str:
 def build_nodes_list_keyboard(
     subscription: Subscription | None,
     node_name: str | None,
+    peers: Sequence[dict] = (),
     wake: WakeConfig | None = None,
 ) -> InlineKeyboardMarkup | None:
     if subscription is None:
         return None
     buttons: list[InlineKeyboardButton] = []
-    if node_name and subscription.allows_command(commands.STATUS.name):
-        buttons.append(
-            InlineKeyboardButton(
-                text=f"📋 Карточка {node_name}",
-                callback_data=f"{commands.CALLBACK_PREFIX}:{commands.NODE_CARD_CODE}",
+    # «st:nodecard[…]» проверяется правом STATUS (см. commands._ALL_CALLBACK_ACTIONS)
+    # и для локальной карточки, и для карточек пиров — единое правило.
+    if subscription.allows_command(commands.STATUS.name):
+        if node_name:
+            buttons.append(
+                InlineKeyboardButton(
+                    text=f"📋 Карточка {node_name}",
+                    callback_data=f"{commands.CALLBACK_PREFIX}:{commands.NODE_CARD_CODE}",
+                )
             )
+        buttons.extend(
+            InlineKeyboardButton(
+                text=f"📋 Карточка {peer.get('id', '?')}",
+                callback_data=(
+                    f"{commands.CALLBACK_PREFIX}:{commands.NODE_CARD_CODE}:{peer.get('id', '')}"
+                ),
+            )
+            for peer in peers
         )
     buttons.extend(_wake_rows(subscription, wake))
     return _rows(buttons)
@@ -120,9 +151,10 @@ async def build_nodes_list_view(
 ) -> tuple[str, InlineKeyboardMarkup | None]:
     state = await _node_state(node_link)
     node_name = state.get("node") if state is not None else None
+    peers = state.get("peers", []) if state is not None else []
     return (
         render_nodes_list(state, wake),
-        build_nodes_list_keyboard(subscription, node_name, wake),
+        build_nodes_list_keyboard(subscription, node_name, peers, wake),
     )
 
 
@@ -136,7 +168,9 @@ def render_services_block(state: dict) -> str:
         lines.append("Службы не назначены.")
         return "\n".join(lines)
     for svc in services:
-        template = _STATUS_LINE.get(svc.get("status", ""), "❔ <b>{name}</b> — {status}")
+        template = _STATUS_LINE.get(
+            svc.get("status", ""), f"{LAMP_GRAY} <b>{{name}}</b> — {{status}}"
+        )
         line = template.format(
             name=svc.get("name", "?"),
             status=svc.get("status", "?"),
@@ -191,11 +225,54 @@ async def build_node_card_view(
     return f"{summary}\n\n{services_block}", keyboard
 
 
+# --- Карточка удалённой ноды (read-only, «спроси любого») -------------------
+
+
+def render_remote_node_card(state: dict) -> str:
+    lines = [f"🕸 <b>Нода {state.get('node', '?')}</b> (v{state.get('version', '?')})"]
+    uptime_bits = []
+    if state.get("system_uptime_s") is not None:
+        uptime_bits.append(f"система {format_duration(state['system_uptime_s'])}")
+    if state.get("uptime_s") is not None:
+        uptime_bits.append(f"нода {format_duration(state['uptime_s'])}")
+    if uptime_bits:
+        lines.append("Аптайм: " + " · ".join(uptime_bits))
+    lines.append("")
+    lines.append(render_services_block(state))
+    return "\n".join(lines)
+
+
+def build_remote_node_card_keyboard(
+    subscription: Subscription | None,
+) -> InlineKeyboardMarkup | None:
+    if subscription is None or not subscription.allows_command(commands.NODES.name):
+        return None
+    return _rows(
+        [
+            InlineKeyboardButton(
+                text="🔙 Список нод",
+                callback_data=f"{commands.CALLBACK_PREFIX}:{commands.NODES_CODE}",
+            )
+        ]
+    )
+
+
+async def build_remote_node_card_view(
+    node_link: ServiceLink,
+    subscription: Subscription | None,
+    node_id: str,
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    state = await _node_state(node_link, dst=Address(node=node_id, service=NODE_SERVICE))
+    if state is None:
+        return f"⚠️ Нода «{node_id}» недоступна (нет связи или она спит).", None
+    return render_remote_node_card(state), build_remote_node_card_keyboard(subscription)
+
+
 # --- Карточка службы ---------------------------------------------------------
 
 
 def render_service_card(node_name: str, svc: dict) -> str:
-    status = _CARD_STATUS.get(svc.get("status", ""), f"❔ {svc.get('status', '?')}")
+    status = _CARD_STATUS.get(svc.get("status", ""), f"{LAMP_GRAY} {svc.get('status', '?')}")
     lines = [
         f"⚙️ <b>Служба {svc.get('name', '?')}</b> · нода {node_name}",
         "",
@@ -258,8 +335,8 @@ async def build_service_card_view(
 # --- Общее -------------------------------------------------------------------
 
 
-async def _node_state(node_link: ServiceLink) -> dict | None:
+async def _node_state(node_link: ServiceLink, dst: Address | None = None) -> dict | None:
     try:
-        return await node_link.get_state()
+        return await node_link.get_state(dst=dst)
     except (ServiceUnavailableError, ProtoError):
         return None

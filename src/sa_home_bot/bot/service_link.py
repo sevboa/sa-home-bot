@@ -76,17 +76,19 @@ class ServiceLink:
 
     # --- Запросы к службе ---
 
-    async def get_state(self) -> dict[str, Any]:
+    async def get_state(self, dst: Address | None = None) -> dict[str, Any]:
         client = self._require_client()
         try:
-            return await client.get_state()
+            return await client.get_state(dst=dst)
         except (ConnectionError, OSError, TimeoutError) as exc:
             raise ServiceUnavailableError(str(exc)) from exc
 
-    async def command(self, action: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def command(
+        self, action: str, args: dict[str, Any] | None = None, dst: Address | None = None
+    ) -> dict[str, Any]:
         client = self._require_client()
         try:
-            return await client.command(action, args)
+            return await client.command(action, args, dst=dst)
         except (ConnectionError, OSError, TimeoutError) as exc:
             raise ServiceUnavailableError(str(exc)) from exc
 
