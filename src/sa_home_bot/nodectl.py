@@ -4,6 +4,7 @@
 
     nodectl status                # нода и её службы
     nodectl start|stop|restart X  # управление службой
+    nodectl restart_node          # перезапустить саму ноду (не службу)
     nodectl poweroff|reboot|suspend  # питание машины
     nodectl events                # живой хвост событий (Ctrl+C — выход)
     nodectl -n winpc status       # то же о ноде winpc («спроси любого»:
@@ -43,7 +44,10 @@ def _default_config() -> str | None:
 
 _STATUS_ICON = {"running": "🟢", "restarting": "🟠", "stopped": "🔴"}
 
-POWER_ACTIONS = ("poweroff", "reboot", "suspend")
+# Действия без параметров, объявленные динамически (describe): нода может
+# их не поддерживать (напр. restart_node без колбэка) — тогда сервер вернёт
+# unknown_action, а не молчаливо съест команду.
+NO_ARG_ACTIONS = ("restart_node", "poweroff", "reboot", "suspend")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -65,6 +69,7 @@ def _build_parser() -> argparse.ArgumentParser:
     for action in ("start", "stop", "restart"):
         p = sub.add_parser(action, help=f"{action} службы")
         p.add_argument("name", help="имя службы (см. nodectl status)")
+    sub.add_parser("restart_node", help="перезапустить саму ноду (супервизор)")
     sub.add_parser("poweroff", help="выключить машину ноды")
     sub.add_parser("reboot", help="перезагрузить машину ноды")
     sub.add_parser("suspend", help="усыпить машину ноды")
@@ -165,7 +170,7 @@ async def _run(args: argparse.Namespace) -> int:
         elif args.command in ("start", "stop", "restart"):
             result = await client.command(args.command, {"name": args.name}, dst=dst)
             print(render_services([result["service"]]))
-        elif args.command in POWER_ACTIONS:
+        elif args.command in NO_ARG_ACTIONS:
             result = await client.command(args.command, dst=dst)
             where = f"нода {args.node}" if args.node else "нода"
             print(f"Принято: {where} выполнит {result.get('scheduled', args.command)} "
