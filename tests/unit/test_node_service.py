@@ -170,3 +170,24 @@ def test_resolve_endpoint_relative_to_config_dir(tmp_path):
     assert _resolve_endpoint(args)[0] == UnixEndpoint(Path("/run/x.sock"))
     args = argparse.Namespace(socket="tcp://127.0.0.1:8710", config=str(config))
     assert _resolve_endpoint(args)[0] == TcpEndpoint("127.0.0.1", 8710)
+
+
+def test_resolve_endpoint_falls_back_to_xdg_config(tmp_path, monkeypatch):
+    import argparse
+
+    from sa_home_bot.nodectl import _resolve_endpoint
+    from sa_home_bot.proto.endpoints import TcpEndpoint
+
+    # CWD без config.toml, зато конфиг лежит в ~/.config/sa-home-bot/
+    # (нода, установленная через pipx) — nodectl должен найти его сам.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    xdg = tmp_path / ".config" / "sa-home-bot"
+    xdg.mkdir(parents=True)
+    (xdg / "config.toml").write_text(
+        '[node]\nsocket = "tcp://100.64.0.1:8710"\n[swarm]\ntoken = "t"\n'
+    )
+    args = argparse.Namespace(socket=None, config=None)
+    endpoint, token = _resolve_endpoint(args)
+    assert endpoint == TcpEndpoint("100.64.0.1", 8710)
+    assert token == "t"

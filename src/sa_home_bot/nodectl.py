@@ -10,8 +10,9 @@
                                   # запрос идёт своей ноде, та пересылает)
 
 Endpoint берётся из --socket (путь unix-сокета или tcp://host:port), либо из
-[node].socket указанного --config, либо из ./config.toml, либо дефолт
-./data/node.sock. Токен для tcp — [swarm].token конфига.
+[node].socket указанного --config, либо из первого найденного конфига по
+умолчанию (./config.toml, потом ~/.config/sa-home-bot/config.toml), либо
+дефолт ./data/node.sock. Токен для tcp — [swarm].token конфига.
 """
 
 from __future__ import annotations
@@ -28,7 +29,17 @@ from sa_home_bot.proto.endpoints import Endpoint, parse_endpoint, resolve_endpoi
 from sa_home_bot.proto.messages import Address, Envelope, ProtoError
 from sa_home_bot.runtime import format_duration
 
-DEFAULT_CONFIG = "./config.toml"
+# Кандидаты конфига без --config: рабочий каталог (разработка на alfred),
+# затем XDG-путь (нода, установленная через pipx).
+DEFAULT_CONFIGS = ("./config.toml", "~/.config/sa-home-bot/config.toml")
+
+
+def _default_config() -> str | None:
+    for candidate in DEFAULT_CONFIGS:
+        path = Path(candidate).expanduser()
+        if path.exists():
+            return str(path)
+    return None
 
 _STATUS_ICON = {"running": "✅", "restarting": "🔄", "stopped": "⏹"}
 
@@ -63,9 +74,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _resolve_endpoint(args: argparse.Namespace) -> tuple[Endpoint, str]:
     """Endpoint ноды + токен ([swarm].token — нужен только для tcp)."""
-    config_path = args.config
-    if config_path is None and Path(DEFAULT_CONFIG).exists():
-        config_path = DEFAULT_CONFIG
+    config_path = args.config if args.config is not None else _default_config()
     settings = Settings.load(config_path)
     if args.socket:
         return parse_endpoint(args.socket), settings.swarm.token
