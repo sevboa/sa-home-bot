@@ -18,7 +18,7 @@ from sa_home_bot.bot import actions, apps_view, commands, node_view
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
-from sa_home_bot.proto.messages import ProtoError
+from sa_home_bot.proto.messages import Address, ProtoError
 from sa_home_bot.subscriptions.models import Subscription
 
 log = logging.getLogger(__name__)
@@ -40,16 +40,21 @@ async def cmd_nodes(
 
 
 async def _run_node_action(
-    node_link: ServiceLink, action_id: str, value: str | None
+    node_link: ServiceLink, action_id: str, value: str | None, node_id: str | None
 ) -> str | None:
-    """Выполнить действие ноды; вернуть текст ошибки или None при успехе."""
-    action = await actions.find_action(node_link, action_id)
+    """Выполнить действие ноды (свою или пира); текст ошибки или None при успехе."""
+    dst = Address(node=node_id, service=node_view.NODE_SERVICE) if node_id else None
+    action = await actions.find_action(node_link, action_id, dst=dst)
     if action is None:
         return "Действие недоступно."
     try:
-        await node_link.command(action.id, actions.build_args(action, value))
+        await node_link.command(action.id, actions.build_args(action, value), dst=dst)
     except ServiceUnavailableError:
-        return node_view.NODE_DOWN_TEXT
+        return (
+            f"⚠️ Нода «{node_id}» недоступна (нет связи или она спит)."
+            if node_id
+            else node_view.NODE_DOWN_TEXT
+        )
     except ProtoError as exc:
         return f"⚠️ Ошибка: {exc.message}"
     return None
@@ -69,16 +74,23 @@ async def on_dynamic_action(
     if parsed is None or callback.message is None:
         await callback.answer()
         return
-    service, action_id, value = parsed
+    service, action_id, value, node_id = parsed
 
     if service == node_view.NODE_SERVICE:
-        error = await _run_node_action(node_link, action_id, value)
+        error = await _run_node_action(node_link, action_id, value, node_id)
         if error is not None:
             await callback.message.answer(error)
         elif value is not None:
-            # Действие над службой — перерисовать её карточку свежим состоянием.
+            # Действие над службой (своей или пира) — перерисовать её карточку.
             text, keyboard = await node_view.build_service_card_view(
-                node_link, subscription, value
+                node_link, subscription, value, node_id
+            )
+            with contextlib.suppress(TelegramBadRequest):
+                await callback.message.edit_text(text, reply_markup=keyboard)
+        elif node_id is not None:
+            # Питание пира — перерисовать его карточку.
+            text, keyboard = await node_view.build_remote_node_card_view(
+                node_link, subscription, node_id
             )
             with contextlib.suppress(TelegramBadRequest):
                 await callback.message.edit_text(text, reply_markup=keyboard)

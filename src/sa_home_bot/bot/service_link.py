@@ -92,8 +92,23 @@ class ServiceLink:
         except (ConnectionError, OSError, TimeoutError) as exc:
             raise ServiceUnavailableError(str(exc)) from exc
 
+    async def describe(self, dst: Address | None = None) -> ServiceDescription | None:
+        """describe «в моменте», без кэша — для запроса к чужой ноде (dst).
+
+        Своя служба обычно обходится кэширующим `.actions()`; это — для
+        случая, когда describe нужен именно сейчас и именно с этим dst
+        (карточка/действия пира).
+        """
+        client = self._client
+        if client is None:
+            return None
+        try:
+            return await client.describe(dst=dst)
+        except (ConnectionError, OSError, TimeoutError, ProtoError):
+            return None
+
     async def actions(self) -> tuple[ActionSpec, ...]:
-        """Действия службы: живой describe, при недоступности — кэш или пусто."""
+        """Действия своей службы: живой describe, при недоступности — кэш или пусто."""
         client = self._client
         if client is not None:
             try:

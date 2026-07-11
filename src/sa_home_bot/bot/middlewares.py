@@ -82,7 +82,7 @@ class CallbackAuthorizationMiddleware(BaseMiddleware):
         # право — `действие@служба` из describe, не имя команды бота.
         action = commands.parse_action_callback(event.data)
         if action is not None:
-            service, action_id, _ = action
+            service, action_id, _, _ = action
             if subscription is None or not subscription.allows_action(action_id, service):
                 log.info("Отказ в действии %s для chat_id=%s", event.data, chat_id)
                 await event.answer("⛔️ Недоступно", show_alert=True)

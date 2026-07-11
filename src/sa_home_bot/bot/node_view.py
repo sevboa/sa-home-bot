@@ -5,6 +5,11 @@
 («st:svc:<имя>» — данные службы + кнопки управления из describe ноды).
 Кнопки управления строятся динамически: действия — из describe, права —
 `действие@node`; wake — по праву команды `wake`.
+
+Рой равноправен (§11 п. 1): карточки и кнопки пиров («st:nodecard:<id>»,
+«st:svc:<имя>:<id>») устроены так же, как у своей ноды, только несут
+node_id пира в callback — фактическое исполнение маршрутизирует нода
+(«спроси любого», п. 2), боту не нужно знать, кто отвечает.
 """
 
 from __future__ import annotations
@@ -87,6 +92,23 @@ def _rows(buttons: list[InlineKeyboardButton]) -> InlineKeyboardMarkup | None:
     return InlineKeyboardMarkup(
         inline_keyboard=[buttons[i : i + 2] for i in range(0, len(buttons), 2)]
     )
+
+
+def _power_buttons(
+    subscription: Subscription,
+    node_actions: Sequence[ActionSpec],
+    node_id: str | None = None,
+) -> list[InlineKeyboardButton]:
+    """Кнопки действий без параметров (poweroff/reboot/suspend) — локально
+    или на пире (node_id); право — то же `действие@node`, что и у служб."""
+    return [
+        InlineKeyboardButton(
+            text=action.title,
+            callback_data=commands.action_callback(action.id, node_id=node_id),
+        )
+        for action in node_actions
+        if not action.params and subscription.allows_action(action.id, NODE_SERVICE)
+    ]
 
 
 # --- Список нод -------------------------------------------------------------
@@ -187,8 +209,9 @@ def build_node_card_keyboard(
     subscription: Subscription | None,
     monitor_actions: Sequence[ActionSpec],
     service_names: Sequence[str],
+    node_actions: Sequence[ActionSpec] = (),
 ) -> InlineKeyboardMarkup | None:
-    """Представления мониторинга + действия монитора + карточки служб."""
+    """Представления мониторинга + действия монитора + карточки служб + питание."""
     if subscription is None:
         return None
     buttons: list[InlineKeyboardButton] = []
@@ -205,6 +228,7 @@ def build_node_card_keyboard(
             )
             for name in service_names
         )
+    buttons.extend(_power_buttons(subscription, node_actions))
     return _rows(buttons)
 
 
@@ -220,7 +244,7 @@ async def build_node_card_view(
         [s.get("name", "?") for s in state.get("services", [])] if state is not None else []
     )
     keyboard = build_node_card_keyboard(
-        subscription, await monitor_link.actions(), service_names
+        subscription, await monitor_link.actions(), service_names, await node_link.actions()
     )
     return f"{summary}\n\n{services_block}", keyboard
 
@@ -244,17 +268,32 @@ def render_remote_node_card(state: dict) -> str:
 
 def build_remote_node_card_keyboard(
     subscription: Subscription | None,
+    node_id: str,
+    service_names: Sequence[str] = (),
+    node_actions: Sequence[ActionSpec] = (),
 ) -> InlineKeyboardMarkup | None:
+    """Карточки служб + питание пира — те же права и кнопки, что у своей ноды
+    (ARCHITECTURE §11 п. 1: рой равноправен, управление не зависит от того,
+    чья это нода физически) — только каждая кнопка несёт node_id пира."""
     if subscription is None or not subscription.allows_command(commands.NODES.name):
         return None
-    return _rows(
-        [
-            InlineKeyboardButton(
-                text="🔙 Список нод",
-                callback_data=f"{commands.CALLBACK_PREFIX}:{commands.NODES_CODE}",
-            )
-        ]
+    buttons: list[InlineKeyboardButton] = [
+        InlineKeyboardButton(
+            text=f"⚙️ {name}",
+            callback_data=(
+                f"{commands.CALLBACK_PREFIX}:{commands.SERVICE_CARD_CODE}:{name}:{node_id}"
+            ),
+        )
+        for name in service_names
+    ]
+    buttons.extend(_power_buttons(subscription, node_actions, node_id))
+    buttons.append(
+        InlineKeyboardButton(
+            text="🔙 Список нод",
+            callback_data=f"{commands.CALLBACK_PREFIX}:{commands.NODES_CODE}",
+        )
     )
+    return _rows(buttons)
 
 
 async def build_remote_node_card_view(
@@ -262,7 +301,8 @@ async def build_remote_node_card_view(
     subscription: Subscription | None,
     node_id: str,
 ) -> tuple[str, InlineKeyboardMarkup | None]:
-    state = await _node_state(node_link, dst=Address(node=node_id, service=NODE_SERVICE))
+    node_dst = Address(node=node_id, service=NODE_SERVICE)
+    state = await _node_state(node_link, dst=node_dst)
     if state is None:
         return f"⚠️ Нода «{node_id}» недоступна (нет связи или она спит).", None
     # Датчики — через тот же node_link (маршрутизация «спроси любого»):
@@ -271,8 +311,12 @@ async def build_remote_node_card_view(
     monitor_summary = await status_view.build_summary_text(
         node_link, dst=Address(node=node_id, service=status_view.MONITOR_SERVICE)
     )
+    service_names = [s.get("name", "?") for s in state.get("services", [])]
+    desc = await node_link.describe(dst=node_dst)
+    node_actions = desc.actions if desc is not None else ()
     text = f"{monitor_summary}\n\n{render_remote_node_card(state)}"
-    return text, build_remote_node_card_keyboard(subscription)
+    keyboard = build_remote_node_card_keyboard(subscription, node_id, service_names, node_actions)
+    return text, keyboard
 
 
 # --- Карточка службы ---------------------------------------------------------
@@ -297,8 +341,12 @@ def build_service_card_keyboard(
     subscription: Subscription | None,
     node_actions: Sequence[ActionSpec],
     service_name: str,
+    node_id: str | None = None,
 ) -> InlineKeyboardMarkup | None:
-    """Действия ноды, применимые к этой службе (параметр name из choices)."""
+    """Действия ноды, применимые к этой службе (параметр name из choices).
+
+    node_id — служба на пире: та же кнопка, но с адресом пира в callback.
+    """
     if subscription is None:
         return None
     buttons: list[InlineKeyboardButton] = []
@@ -311,10 +359,7 @@ def build_service_card_keyboard(
         buttons.append(
             InlineKeyboardButton(
                 text=action.title,
-                callback_data=(
-                    f"{commands.ACTION_CALLBACK_PREFIX}:{NODE_SERVICE}:"
-                    f"{action.id}:{service_name}"
-                ),
+                callback_data=commands.action_callback(action.id, service_name, node_id),
             )
         )
     return _rows(buttons)
@@ -324,18 +369,27 @@ async def build_service_card_view(
     node_link: ServiceLink,
     subscription: Subscription | None,
     service_name: str,
+    node_id: str | None = None,
 ) -> tuple[str, InlineKeyboardMarkup | None]:
-    state = await _node_state(node_link)
+    dst = Address(node=node_id, service=NODE_SERVICE) if node_id else None
+    state = await _node_state(node_link, dst=dst)
     if state is None:
-        return NODE_DOWN_TEXT, None
+        return (
+            f"⚠️ Нода «{node_id}» недоступна (нет связи или она спит)."
+            if node_id
+            else NODE_DOWN_TEXT
+        ), None
     svc = next(
         (s for s in state.get("services", []) if s.get("name") == service_name), None
     )
     if svc is None:
         return f"Служба «{service_name}» не найдена на ноде.", None
-    keyboard = build_service_card_keyboard(
-        subscription, await node_link.actions(), service_name
-    )
+    if node_id:
+        desc = await node_link.describe(dst=dst)
+        node_actions = desc.actions if desc is not None else ()
+    else:
+        node_actions = await node_link.actions()
+    keyboard = build_service_card_keyboard(subscription, node_actions, service_name, node_id)
     return render_service_card(state.get("node", "?"), svc), keyboard
 
 

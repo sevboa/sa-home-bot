@@ -52,6 +52,10 @@ def _node_actions() -> list[ActionSpec]:
     ]
 
 
+def _power_action(action_id: str) -> ActionSpec:
+    return ActionSpec(id=action_id, title=f"⏻ {action_id}")
+
+
 def _sub(*allowed: str) -> Subscription:
     return Subscription(chat_id=1, name="me", allowed_commands=frozenset(allowed))
 
@@ -127,9 +131,25 @@ def test_remote_node_card_renders_uptime_and_services():
 
 
 def test_remote_node_card_keyboard_needs_nodes_right():
-    assert build_remote_node_card_keyboard(_sub("status")) is None
-    kb = build_remote_node_card_keyboard(_sub("nodes"))
+    assert build_remote_node_card_keyboard(_sub("status"), "arch-t480") is None
+    kb = build_remote_node_card_keyboard(_sub("nodes"), "arch-t480")
     assert [b.callback_data for row in kb.inline_keyboard for b in row] == ["st:nodes"]
+
+
+def test_remote_node_card_keyboard_has_service_and_power_buttons():
+    kb = build_remote_node_card_keyboard(
+        _sub("nodes", "restart@node", "poweroff@node"),
+        "arch-t480",
+        ["monitor", "telegram-bot"],
+        [*_node_actions(), _power_action("poweroff")],
+    )
+    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert codes == [
+        "st:svc:monitor:arch-t480",
+        "st:svc:telegram-bot:arch-t480",
+        "act:node:poweroff::arch-t480",
+        "st:nodes",
+    ]
 
 
 # --- Карточка ноды ------------------------------------------------------------
@@ -170,6 +190,17 @@ def test_node_card_keyboard_service_cards_need_nodes_right():
     assert codes == ["st:full"]
 
 
+def test_node_card_keyboard_includes_power_buttons():
+    kb = build_node_card_keyboard(
+        _sub("poweroff@node", "suspend@node"),
+        [],
+        [],
+        [_power_action("poweroff"), _power_action("suspend"), _power_action("reboot")],
+    )
+    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert codes == ["act:node:poweroff", "act:node:suspend"]  # reboot без права — нет кнопки
+
+
 # --- Карточка службы ----------------------------------------------------------
 
 
@@ -190,6 +221,14 @@ def test_service_card_keyboard_actions_for_this_service():
         "act:node:stop:monitor",
         "act:node:restart:monitor",
     ]
+
+
+def test_service_card_keyboard_carries_peer_node_id():
+    kb = build_service_card_keyboard(
+        _sub("restart@node"), _node_actions(), "monitor", "arch-t480"
+    )
+    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert codes == ["act:node:restart:monitor:arch-t480"]
 
 
 def test_service_card_keyboard_filters_by_right_and_choices():

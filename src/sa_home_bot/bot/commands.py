@@ -72,20 +72,36 @@ NODE_CARD_CODE = "nodecard"
 SERVICE_CARD_CODE = "svc"
 WAKE_CODE = "wake"
 
-# Динамические действия служб: «act:<служба>:<действие>[:<значение>]»,
-# например «act:monitor:scan_now» или «act:node:restart:telegram-bot».
-# Право — `действие@служба` (Subscription.allows_action).
+# Динамические действия служб: «act:<служба>:<действие>[:<значение>[:<node_id>]]»,
+# например «act:monitor:scan_now», «act:node:restart:telegram-bot» (локально)
+# или «act:node:restart:telegram-bot:arch-t480» (та же кнопка для пира —
+# «спроси любого», ARCHITECTURE §11 п. 2: рой равноправен, любая нода
+# управляется с любой). Право — `действие@служба`, не зависит от node_id
+# (Subscription.allows_action) — правило одно на весь рой.
 ACTION_CALLBACK_PREFIX = "act"
 
 
-def parse_action_callback(data: str | None) -> tuple[str, str, str | None] | None:
-    """Разобрать «act:<служба>:<действие>[:<значение>]» → (служба, действие, значение)."""
+def action_callback(action_id: str, value: str | None = None, node_id: str | None = None) -> str:
+    """Собрать «act:node:<действие>[:<значение>[:<node_id>]]» для кнопки."""
+    parts = [ACTION_CALLBACK_PREFIX, "node", action_id]
+    if value or node_id:
+        parts.append(value or "")
+    if node_id:
+        parts.append(node_id)
+    return ":".join(parts)
+
+
+def parse_action_callback(data: str | None) -> tuple[str, str, str | None, str | None] | None:
+    """«act:<служба>:<действие>[:<значение>[:<node_id>]]» →
+    (служба, действие, значение, node_id)."""
     if not data:
         return None
     parts = data.split(":")
     if len(parts) < 3 or parts[0] != ACTION_CALLBACK_PREFIX or not parts[1] or not parts[2]:
         return None
-    return parts[1], parts[2], (parts[3] if len(parts) > 3 and parts[3] else None)
+    value = parts[3] if len(parts) > 3 and parts[3] else None
+    node_id = parts[4] if len(parts) > 4 and parts[4] else None
+    return parts[1], parts[2], value, node_id
 
 # Пагинация /downtime («st:downtime_page:<offset>») — не кнопка под /status,
 # но требует тех же прав, что и сама команда DOWNTIME.

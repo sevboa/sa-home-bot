@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from sa_home_bot.bot import scan_limit
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.db.store import Store
-from sa_home_bot.proto.messages import ActionSpec, ProtoError
+from sa_home_bot.proto.messages import ActionSpec, Address, ProtoError
 
 log = logging.getLogger(__name__)
 
@@ -28,8 +28,15 @@ def unavailable_text(link: ServiceLink) -> str:
     return f"⚠️ Служба «{link.display_name}» недоступна — попробуйте позже."
 
 
-async def find_action(link: ServiceLink, action_id: str) -> ActionSpec | None:
-    for action in await link.actions():
+async def find_action(
+    link: ServiceLink, action_id: str, dst: Address | None = None
+) -> ActionSpec | None:
+    if dst is None:
+        source = await link.actions()
+    else:
+        desc = await link.describe(dst=dst)
+        source = desc.actions if desc is not None else ()
+    for action in source:
         if action.id == action_id:
             return action
     return None

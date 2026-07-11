@@ -34,15 +34,41 @@ def test_parse_action_callback():
         "monitor",
         "scan_now",
         None,
+        None,
     )
     assert commands.parse_action_callback("act:node:restart:telegram-bot") == (
         "node",
         "restart",
         "telegram-bot",
+        None,
+    )
+    # Кнопка пира: значение + node_id, и power-действие без значения + node_id.
+    assert commands.parse_action_callback("act:node:restart:telegram-bot:arch-t480") == (
+        "node",
+        "restart",
+        "telegram-bot",
+        "arch-t480",
+    )
+    assert commands.parse_action_callback("act:node:poweroff::arch-t480") == (
+        "node",
+        "poweroff",
+        None,
+        "arch-t480",
     )
     assert commands.parse_action_callback("st:full") is None
     assert commands.parse_action_callback("act:node") is None
     assert commands.parse_action_callback(None) is None
+
+
+def test_action_callback_builds_expected_strings():
+    assert commands.action_callback("poweroff") == "act:node:poweroff"
+    assert commands.action_callback("restart", "telegram-bot") == "act:node:restart:telegram-bot"
+    assert commands.action_callback("poweroff", node_id="arch-t480") == (
+        "act:node:poweroff::arch-t480"
+    )
+    assert commands.action_callback("restart", "telegram-bot", "arch-t480") == (
+        "act:node:restart:telegram-bot:arch-t480"
+    )
 
 
 def test_command_for_callback_downtime_pagination():

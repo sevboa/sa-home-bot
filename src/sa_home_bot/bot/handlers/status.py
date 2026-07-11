@@ -85,8 +85,9 @@ async def on_status_action(
         await callback.message.answer(text, reply_markup=keyboard)
     elif code == commands.SERVICE_CARD_CODE:
         name = parts[2] if len(parts) > 2 else ""
+        node_id = parts[3] if len(parts) > 3 and parts[3] else None
         text, keyboard = await node_view.build_service_card_view(
-            node_link, subscription, name
+            node_link, subscription, name, node_id
         )
         await callback.message.answer(text, reply_markup=keyboard)
     elif code == "full":
