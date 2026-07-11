@@ -30,7 +30,7 @@ from sa_home_bot.domain.render import (
     render_status_full,
     render_status_summary,
 )
-from sa_home_bot.proto.messages import ActionSpec, ProtoError
+from sa_home_bot.proto.messages import ActionSpec, Address, ProtoError
 from sa_home_bot.sensors.power import read_power_events_sync
 from sa_home_bot.subscriptions.models import Subscription
 
@@ -87,9 +87,9 @@ def build_status_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def build_summary_text(link: ServiceLink) -> str:
+async def build_summary_text(link: ServiceLink, dst: Address | None = None) -> str:
     try:
-        state = await link.get_state()
+        state = await link.get_state(dst=dst)
     except (ServiceUnavailableError, ProtoError):
         return MONITOR_DOWN_TEXT
     states = [parse_health_state(h) for h in state.get("health", [])]

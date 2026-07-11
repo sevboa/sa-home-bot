@@ -265,7 +265,14 @@ async def build_remote_node_card_view(
     state = await _node_state(node_link, dst=Address(node=node_id, service=NODE_SERVICE))
     if state is None:
         return f"⚠️ Нода «{node_id}» недоступна (нет связи или она спит).", None
-    return render_remote_node_card(state), build_remote_node_card_keyboard(subscription)
+    # Датчики — через тот же node_link (маршрутизация «спроси любого»):
+    # если у пира нет назначения monitor, get_state ответит unknown_dst,
+    # build_summary_text превратит это в честный MONITOR_DOWN_TEXT.
+    monitor_summary = await status_view.build_summary_text(
+        node_link, dst=Address(node=node_id, service=status_view.MONITOR_SERVICE)
+    )
+    text = f"{monitor_summary}\n\n{render_remote_node_card(state)}"
+    return text, build_remote_node_card_keyboard(subscription)
 
 
 # --- Карточка службы ---------------------------------------------------------
