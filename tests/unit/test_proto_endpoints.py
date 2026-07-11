@@ -37,7 +37,7 @@ def test_tcp():
 
 
 def test_tcp_hostname_and_brackets():
-    assert parse_endpoint("tcp://alfred.tail61d88b.ts.net:8710").host.endswith("ts.net")
+    assert parse_endpoint("tcp://alfred.tailnet-example.ts.net:8710").host.endswith("ts.net")
     assert parse_endpoint("tcp://[::1]:8710") == TcpEndpoint("::1", 8710)
 
 
