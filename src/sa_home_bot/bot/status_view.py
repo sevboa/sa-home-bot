@@ -99,7 +99,7 @@ async def build_summary_text(link: ServiceLink, dst: Address | None = None) -> s
     thresholds = state.get("thresholds", {})
     cpu_th = thresholds.get("cpu", {})
     disk_th = thresholds.get("disk", {})
-    return render_status_summary(
+    text = render_status_summary(
         datetime.now(tz=UTC),
         timedelta(seconds=uptime_s) if uptime_s is not None else None,
         cpu_states,
@@ -110,6 +110,10 @@ async def build_summary_text(link: ServiceLink, dst: Address | None = None) -> s
         disk_warn_c=disk_th.get("warn_c", 0.0),
         disk_crit_c=disk_th.get("crit_c", 0.0),
     )
+    missing = state.get("missing_requirements") or []
+    if missing:
+        text += "\n" + "\n".join(f"⚠️ {hint}" for hint in missing)
+    return text
 
 
 async def build_full_text(link: ServiceLink) -> str:

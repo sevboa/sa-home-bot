@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest_asyncio
 
-from sa_home_bot.config import Settings, TelegramConfig
+from sa_home_bot.config import DiskSensorConfig, SensorsConfig, Settings, TelegramConfig
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
@@ -56,6 +56,45 @@ async def test_get_state_returns_health_from_store(service):
     assert state["health"][0]["temperature_c"] == 42.0
     assert state["last_outage"] is None
     assert state["thresholds"]["cpu"]["warn_c"] == 80.0
+
+
+async def test_get_state_flags_missing_smartctl_when_disks_enabled(service, monkeypatch):
+    svc, _, _ = service
+    monkeypatch.setattr("shutil.which", lambda name: None)  # smartctl не найден
+
+    with (
+        patch("sa_home_bot.monitor.service.read_uptime_sync", return_value=None),
+        patch("sa_home_bot.monitor.service.read_disk_summaries_sync", return_value=[]),
+        patch("sa_home_bot.monitor.service.read_power_events_sync", return_value=([], False)),
+    ):
+        state = await svc.get_state()
+
+    assert len(state["missing_requirements"]) == 1
+    assert "smartmontools" in state["missing_requirements"][0]
+
+
+async def test_get_state_quiet_when_disks_disabled(tmp_path, monkeypatch):
+    db = Database(tmp_path / "monitor.sqlite")
+    await db.open()
+    await apply_migrations(db)
+    store = Store(db)
+    settings = Settings(
+        telegram=TelegramConfig(token="x"),
+        sensors=SensorsConfig(disks=DiskSensorConfig(enabled=False)),
+        subscriptions=[],
+    )
+    svc = MonitorService(settings, store, DedupQueue())
+    monkeypatch.setattr("shutil.which", lambda name: None)  # smartctl всё равно не найден
+
+    with (
+        patch("sa_home_bot.monitor.service.read_uptime_sync", return_value=None),
+        patch("sa_home_bot.monitor.service.read_disk_summaries_sync", return_value=[]),
+        patch("sa_home_bot.monitor.service.read_power_events_sync", return_value=([], False)),
+    ):
+        state = await svc.get_state()
+    await db.close()
+
+    assert state["missing_requirements"] == []  # диски выключены — не шумим
 
 
 async def test_scan_now_queues_both_jobs_once(service):

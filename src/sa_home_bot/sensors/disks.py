@@ -28,12 +28,19 @@ from sa_home_bot.domain.models import (
     SmartSnapshot,
 )
 from sa_home_bot.domain.smart import MONITORED_SMART_ATTRS
+from sa_home_bot.utils.requirements import Requirement
 
 log = logging.getLogger(__name__)
 
 # Таймаут одного вызова smartctl. Защищает скан от зависшего USB-моста:
 # опрос диска прерывается, остальные диски опрашиваются дальше.
 SMARTCTL_TIMEOUT_S = 20
+
+SMARTCTL_REQUIREMENT = Requirement(
+    program="smartctl",
+    package="smartmontools",
+    note="температура и здоровье дисков по SMART",
+)
 
 # Префиксы устройств без поддержки SMART — не опрашиваем (eMMC, optical, loop,
 # software-RAID, device-mapper, ram/zram). Иначе — спам ошибок в лог каждый скан.
@@ -124,13 +131,12 @@ def parse_device_temp(device: str, data: dict, now: datetime) -> SensorReading |
 
 
 def _run_smartctl(args: list[str]) -> dict | None:
-    smartctl = shutil.which("smartctl")
-    if not smartctl:
-        log.warning("smartctl не найден (установите smartmontools)")
+    if not SMARTCTL_REQUIREMENT.available():
+        log.warning("smartctl недоступен: %s", SMARTCTL_REQUIREMENT.install_hint())
         return None
     try:
         out = subprocess.run(
-            [smartctl, *args],
+            ["smartctl", *args],
             capture_output=True,
             text=True,
             timeout=SMARTCTL_TIMEOUT_S,
