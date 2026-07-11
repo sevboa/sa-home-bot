@@ -3,8 +3,9 @@
 `get_state` — статус служб под супервизией, аптайм и presence пиров;
 действия start/stop/restart объявлены в describe с параметром ``name``
 и валидируются сервером по нему. Power-действия (выключить/перезагрузить/
-усыпить машину) — умения роя: кроссплатформенные команды, выполнение с
-задержкой, чтобы ответ успел уйти клиенту.
+усыпить машину) и ``restart_node`` (сама нода-супервизор, не путать с
+рестартом службы) — умения роя без параметров: выполнение с задержкой,
+чтобы ответ успел уйти клиенту.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import asyncio
 import logging
 import socket
 import sys
+from collections.abc import Callable
 from typing import Any
 
 from sa_home_bot import __version__
@@ -37,11 +39,16 @@ ACTION_START = "start"
 ACTION_STOP = "stop"
 ACTION_RESTART = "restart"
 
+ACTION_RESTART_NODE = "restart_node"
+
 ACTION_POWEROFF = "poweroff"
 ACTION_REBOOT = "reboot"
 ACTION_SUSPEND = "suspend"
 
-# Пауза перед выполнением power-команды: ответ и события должны успеть уйти.
+RESTART_NODE_TITLE = "🔄 Перезапустить ноду"
+
+# Пауза перед выполнением power-команды/само-рестарта: ответ и события
+# должны успеть уйти.
 POWER_DELAY_S = 1.0
 
 
@@ -90,6 +97,7 @@ class NodeService:
         *,
         node_id: str = "",
         power_runner=None,
+        restart_node: Callable[[], None] | None = None,
     ) -> None:
         self._supervisor = supervisor
         self._router = router
@@ -97,6 +105,7 @@ class NodeService:
         self._runtime = Runtime()
         self._power = power_commands()
         self._power_runner = power_runner or _default_power_runner
+        self._restart_node = restart_node
 
     def describe(self) -> ServiceDescription:
         # choices — имена служб под супервизией: фронтенд строит кнопку на
@@ -116,6 +125,11 @@ class NodeService:
                 ActionSpec(id=ACTION_STOP, title="⏹ Остановить", params=(name_param,)),
                 ActionSpec(id=ACTION_RESTART, title="🔄 Перезапустить", params=(name_param,)),
                 *(
+                    (ActionSpec(id=ACTION_RESTART_NODE, title=RESTART_NODE_TITLE),)
+                    if self._restart_node is not None
+                    else ()
+                ),
+                *(
                     ActionSpec(id=action, title=_POWER_TITLES[action])
                     for action in self._power
                 ),
@@ -134,6 +148,8 @@ class NodeService:
         }
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
+        if action == ACTION_RESTART_NODE:
+            return self._schedule_restart_node()
         if action in self._power:
             return self._schedule_power(action)
         name = str(args.get("name", ""))
@@ -163,3 +179,17 @@ class NodeService:
         task = asyncio.create_task(run(), name=f"power-{action}")
         self._power_task = task  # ссылка, чтобы задачу не собрал GC
         return {"scheduled": action, "delay_s": POWER_DELAY_S}
+
+    def _schedule_restart_node(self) -> dict[str, Any]:
+        # describe() объявляет это действие только когда restart_node задан,
+        # сервер валидирует action по describe — сюда без колбэка не дойти.
+        assert self._restart_node is not None
+        log.warning("Запрошен само-рестарт ноды через %.0f с", POWER_DELAY_S)
+
+        async def run() -> None:
+            await asyncio.sleep(POWER_DELAY_S)
+            self._restart_node()
+
+        task = asyncio.create_task(run(), name="restart-node")
+        self._power_task = task  # ссылка, чтобы задачу не собрал GC
+        return {"scheduled": ACTION_RESTART_NODE, "delay_s": POWER_DELAY_S}

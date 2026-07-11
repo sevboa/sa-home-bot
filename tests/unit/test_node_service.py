@@ -98,6 +98,31 @@ async def test_power_actions_declared_and_scheduled(monkeypatch):
     assert ran == [["systemctl", "poweroff"]]
 
 
+async def test_restart_node_not_declared_without_callback():
+    sup, _ = _fake_supervisor()
+    desc = NodeService(sup).describe()
+    assert desc.find_action("restart_node") is None
+
+
+async def test_restart_node_declared_and_scheduled(monkeypatch):
+    import asyncio
+
+    from sa_home_bot.node import service as service_module
+
+    monkeypatch.setattr(service_module, "POWER_DELAY_S", 0.0)
+    sup, _ = _fake_supervisor()
+    calls: list[str] = []
+
+    svc = NodeService(sup, restart_node=lambda: calls.append("restart"))
+    action = svc.describe().find_action("restart_node")
+    assert action is not None and not action.params
+
+    result = await svc.run_command("restart_node", {})
+    assert result["scheduled"] == "restart_node"
+    await asyncio.sleep(0.05)
+    assert calls == ["restart"]
+
+
 async def test_get_state_has_uptime():
     sup, _ = _fake_supervisor()
     state = await NodeService(sup).get_state()

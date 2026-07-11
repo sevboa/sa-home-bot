@@ -132,7 +132,11 @@ format = "plain"                   # plain | json
 # allowed_commands: имена команд бота (nodes, status, wake, ...) и права на
 # динамические действия служб в форме "действие@служба" (из describe):
 #   <id>@apps (qbittorrent@apps, ...) — скилл-приложение: команда в меню бота;
-#   start@node / stop@node / restart@node — управление на карточке службы.
+#   start@node / stop@node / restart@node — управление службой на её карточке;
+#   restart_node@node — перезапуск самой ноды-супервизора (не путать с restart
+#   службы); poweroff/reboot/suspend@node — питание машины. Право не зависит
+#   от того, чья это физически нода (ARCHITECTURE §11 п. 1) — работает
+#   одинаково и на своей карточке, и на карточке любого пира.
 # Голое имя действия (scan_now) даёт и текстовую команду, и кнопку у любой службы.
 [[subscriptions]]
 name = "me"
@@ -140,7 +144,8 @@ chat_id = 123456789
 event_types = ["*"]                # всё: перегрев + SMART + система
 allowed_commands = [
     "nodes", "status", "status_full", "stats", "downtime",
-    "scan_now", "start@node", "stop@node", "restart@node",
+    "scan_now", "start@node", "stop@node", "restart@node", "restart_node@node",
+    "poweroff@node", "reboot@node", "suspend@node",
     "qbittorrent@apps", "jellyfin@apps",
 ]
 

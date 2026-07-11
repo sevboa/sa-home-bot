@@ -43,10 +43,20 @@ def build_router(settings: Settings, node_id: str, on_peer_event) -> NodeRouter:
     return NodeRouter(node_id, peers=peers, local_services=local)
 
 
-async def run_node(settings: Settings, config_path: str | None = None) -> None:
+async def run_node(settings: Settings, config_path: str | None = None) -> bool:
+    """Запустить ноду; вернуть True, если перед выходом запрошен само-рестарт
+    (см. `restart_node` — cli.main() тогда делает os.execv на том же PID)."""
     # Сервер создаётся до супервизора: emit замыкается на его broadcast.
     server: ProtoServer | None = None
     node_id = settings.node.id or socket.gethostname()
+    lifespan = Lifespan()
+    restart_requested = False
+
+    def request_restart() -> None:
+        nonlocal restart_requested
+        restart_requested = True
+        log.warning("Нода %s: запрошен само-рестарт", node_id)
+        lifespan.trigger()
 
     async def emit(event_type: str, data: dict) -> None:
         if server is not None:
@@ -78,7 +88,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> None:
         endpoints.append(settings.node.listen)
     server = ProtoServer(
         endpoints,
-        NodeService(supervisor, router, node_id=node_id),
+        NodeService(supervisor, router, node_id=node_id, restart_node=request_restart),
         token=settings.swarm.token,
         router=router.route,
     )
@@ -87,7 +97,6 @@ async def run_node(settings: Settings, config_path: str | None = None) -> None:
         await link.start()
     await supervisor.start_all()
 
-    lifespan = Lifespan()
     lifespan.install_signal_handlers()
     log.info(
         "Нода %s запущена: службы [%s], пиры [%s], endpoints [%s]",
@@ -106,3 +115,4 @@ async def run_node(settings: Settings, config_path: str | None = None) -> None:
             await link.stop()
         await server.stop()
         log.info("Нода остановлена чисто")
+    return restart_requested

@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
+import os
 import sys
 
 from sa_home_bot import __version__
 from sa_home_bot.config import Settings
 from sa_home_bot.utils.logging import configure_logging
+
+log = logging.getLogger(__name__)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -78,7 +82,13 @@ def main(argv: list[str] | None = None) -> int:
         coro = run(settings)
 
     try:
-        asyncio.run(coro)
+        restart = asyncio.run(coro)
     except KeyboardInterrupt:
         return 0
+    if restart:
+        # run_node вернул True (запрошен само-рестарт «restart_node»): чистый
+        # останов уже прошёл, заменяем образ процесса на себя же — тот же PID,
+        # работает и под systemd (Restart= не нужен), и вручную в терминале.
+        log.info("Само-рестарт: %s", sys.argv)
+        os.execv(sys.argv[0], sys.argv)
     return 0
