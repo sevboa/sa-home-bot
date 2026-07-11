@@ -3,18 +3,31 @@
 #
 # Единственный юнит системы: нода-супервизор сама запускает monitor и
 # telegram-bot дочерними процессами, рестартит упавших (nodectl status).
+#
+# Установка — pip в отдельный venv, не git-checkout (2026-07-11):
+#   python3 -m venv ~/.local/share/sa-home-bot-venv
+#   ~/.local/share/sa-home-bot-venv/bin/pip install "git+https://github.com/sevboa/sa-home-bot.git@vX.Y.Z"
+#   ln -sf ~/.local/share/sa-home-bot-venv/bin/{sa-home-bot,nodectl} ~/.local/bin/
+# Обновление — та же pip install-команда с новым тегом + restart (тот же
+# рецепт, что для arch-t480, только там pipx вместо ручного venv — на
+# Debian системный python "externally managed", pipx через apt нужен sudo).
+# Конфиг — ~/.config/sa-home-bot/config.toml, данные —
+# ~/.local/share/sa-home-bot/data/. Пути socket/db_path/database.path в
+# конфиге — АБСОЛЮТНЫЕ: относительные резолвятся от WorkingDirectory
+# процесса, а его не всегда легко удержать равным каталогу конфига (грабли
+# 2026-07-11 при переезде с репо-установки — держите пути абсолютными).
 [Unit]
 Description=sa-home-node (нода: супервизор monitor и telegram-bot)
 After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/sevboa/Github/sa-home-bot
+WorkingDirectory=/home/sevboa/.local/share/sa-home-bot
 # Гейт: не стартовать, пока не резолвится api.telegram.org — иначе telegram-bot
 # после ребута пометит подписки broken (DNS ещё не поднялся). Монитору сеть не
 # нужна, но задержка его старта на время поднятия сети терпима.
 ExecStartPre=/bin/sh -c 'until getent hosts api.telegram.org >/dev/null 2>&1; do sleep 3; done'
-ExecStart=/home/sevboa/Github/sa-home-bot/.venv/bin/sa-home-bot --service node --config /home/sevboa/Github/sa-home-bot/config.toml
+ExecStart=/home/sevboa/.local/share/sa-home-bot-venv/bin/sa-home-bot --service node --config /home/sevboa/.config/sa-home-bot/config.toml
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=300

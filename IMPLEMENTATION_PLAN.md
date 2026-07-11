@@ -412,6 +412,32 @@ graceful-путём, что при SIGTERM, затем `os.execv(sys.argv[0], sy
 право нужно явно выдать в `allowed_commands` (`restart_node@node`).
 Живой тест: реальный подпроцесс, `restart_node` по протоколу — PID до и
 после команды совпал, лог показывает чистый останов + релонч за ~1с.
+
+**alfred переведён с git-checkout на pip-установку** ✅ (2026-07-11) — по
+тому же принципу, что arch-t480 (pipx), но вручную: на Debian системный
+python «externally managed» (PEP 668), pipx через apt требует sudo-пароль,
+которого не было — вместо него `python3 -m venv ~/.local/share/sa-home-bot-venv`
++ `pip install git+…@vX.Y.Z` (тот же результат, что pipx). Раскладка:
+venv в `~/.local/share/sa-home-bot-venv/`, конфиг в
+`~/.config/sa-home-bot/config.toml`, данные в
+`~/.local/share/sa-home-bot/data/` (перенесены с сохранением, проверено
+md5sum до/после), CLI (`sa-home-bot`/`nodectl`) — симлинками в
+`~/.local/bin/`. `deploy/sa-home-node.service` обновлён под новую
+раскладку. Старый repo-checkout (`~/Github/sa-home-bot`) не удалён —
+остаётся окружением разработки; старый `config.toml` переименован в
+`config.toml.old-devsetup`, чтобы не путать со старым в поисках nodectl
+по умолчанию.
+
+**Грабли и урок:** относительные пути (`socket`, `db_path`,
+`database.path`) резолвятся от `WorkingDirectory` процесса — когда конфиг
+и данные разъехались по XDG-каталогам (`~/.config/` vs `~/.local/share/`),
+`nodectl -c ~/.config/sa-home-bot/config.toml` резолвил сокет от каталога
+конфига и не находил его. Исправлено переводом всех путей в конфиге
+alfred (и заодно arch-t480 — та же потенциальная мина, работало по
+случайности, что `WorkingDirectory` не задан = `$HOME`) на абсолютные;
+`config.example.toml` и юнит теперь явно рекомендуют абсолютные пути при
+раздельных config/data каталогах.
+
 - `/status` показывает обе машины; `/wake` будит ПК (готово); presence —
   ping/hello, каталог умений ПК помечается недоступным, пока нода спит.
   Спящая не-24/7 нода — норма, а не алерт.

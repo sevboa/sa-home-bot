@@ -10,6 +10,7 @@ venv/
 .ruff_cache/
 data/
 config.toml
+config.toml.*
 *.sqlite
 *.sqlite-*
 *.swp
