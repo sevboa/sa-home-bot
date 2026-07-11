@@ -8,8 +8,10 @@
 
 from __future__ import annotations
 
+import logging
+import tomllib
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal, get_args
 
 from pydantic import BaseModel, Field
 from pydantic_settings import (
@@ -18,6 +20,41 @@ from pydantic_settings import (
     SettingsConfigDict,
     TomlConfigSettingsSource,
 )
+
+log = logging.getLogger(__name__)
+
+
+def unknown_config_keys(
+    data: dict[str, Any], model: type[BaseModel], prefix: str = ""
+) -> list[str]:
+    """Дотированные пути полей TOML, которых нет в моделях, — почти всегда опечатки.
+
+    Конфиг сознательно терпим к лишним полям (extra="ignore": старый код
+    должен переживать конфиг более новой версии), поэтому опечатка вида
+    ``assigments`` молча включает дефолт. Этот обход находит такие поля,
+    чтобы load() их хотя бы прокричал в лог.
+    """
+    unknown: list[str] = []
+    for key, value in data.items():
+        field = model.model_fields.get(key)
+        if field is None:
+            unknown.append(prefix + key)
+            continue
+        annotation = field.annotation
+        if (
+            isinstance(value, dict)
+            and isinstance(annotation, type)
+            and issubclass(annotation, BaseModel)
+        ):
+            unknown += unknown_config_keys(value, annotation, f"{prefix}{key}.")
+        elif isinstance(value, list):
+            args = get_args(annotation)
+            item_type = args[0] if args else None
+            if isinstance(item_type, type) and issubclass(item_type, BaseModel):
+                for i, item in enumerate(value):
+                    if isinstance(item, dict):
+                        unknown += unknown_config_keys(item, item_type, f"{prefix}{key}[{i}].")
+    return unknown
 
 
 class TelegramConfig(BaseModel):
@@ -134,13 +171,14 @@ class NodeConfig(BaseModel):
     Нода запускает службы из ``assignments`` дочерними процессами, рестартит
     упавших и отдаёт статус/управление по протоколу v0 через ``socket``
     (клиент — ``nodectl``). Известные назначения: ``monitor``,
-    ``telegram-bot``, ``apps``. ``id`` — имя ноды в рое (dst.node в
+    ``telegram-bot``, ``apps``; по умолчанию пусто — назначения только
+    явные (голая нода — норма). ``id`` — имя ноды в рое (dst.node в
     конверте); пусто = hostname машины.
     """
 
     id: str = ""
     socket: str = "./data/node.sock"
-    assignments: list[str] = Field(default_factory=lambda: ["monitor", "telegram-bot"])
+    assignments: list[str] = Field(default_factory=list)
     restart_delay_s: float = Field(default=5.0, gt=0)
     stop_timeout_s: float = Field(default=90.0, gt=0)  # SIGTERM → SIGKILL
 
@@ -223,7 +261,11 @@ class Settings(BaseSettings):
 
     @classmethod
     def load(cls, config_path: str | Path | None) -> Settings:
-        """Загрузить настройки из TOML (если задан) с применением env-оверрайда."""
+        """Загрузить настройки из TOML (если задан) с применением env-оверрайда.
+
+        Неизвестные поля TOML не ошибка (совместимость версий), но каждое
+        уходит warning'ом в лог — опечатка не должна молчать.
+        """
         if config_path is not None:
             path = Path(config_path)
             if not path.exists():
@@ -232,6 +274,12 @@ class Settings(BaseSettings):
         else:
             cls._toml_path = None
         try:
-            return cls()
+            settings = cls()
         finally:
             cls._toml_path = None
+        if config_path is not None:
+            with open(path, "rb") as f:
+                raw = tomllib.load(f)
+            for key in unknown_config_keys(raw, cls):
+                log.warning("Конфиг %s: неизвестное поле %r — опечатка? Игнорируется", path, key)
+        return settings
