@@ -82,7 +82,10 @@ urls = ["http://192.168.0.100:8096"]
 
 # Сервис ноды (супервизор: `sa-home-bot --service node`, консоль — nodectl).
 # Нода запускает назначенные службы дочерними процессами и рестартит упавшие.
+# id — имя ноды в рое (пусто = hostname). Умения питания (poweroff/reboot/
+# suspend) объявляются в describe автоматически; в боте право — "<...>@node".
 [node]
+#id = "alfred"
 socket = "./data/node.sock"
 assignments = ["monitor", "apps", "telegram-bot"]
 restart_delay_s = 5.0              # пауза перед перезапуском упавшей службы

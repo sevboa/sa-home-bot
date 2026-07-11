@@ -46,7 +46,7 @@ def build_router(settings: Settings, node_id: str, on_peer_event) -> NodeRouter:
 async def run_node(settings: Settings, config_path: str | None = None) -> None:
     # Сервер создаётся до супервизора: emit замыкается на его broadcast.
     server: ProtoServer | None = None
-    node_id = socket.gethostname()
+    node_id = settings.node.id or socket.gethostname()
 
     async def emit(event_type: str, data: dict) -> None:
         if server is not None:
@@ -73,7 +73,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> None:
     router = build_router(settings, node_id, on_peer_event)
     server = ProtoServer(
         settings.node.socket,
-        NodeService(supervisor, router),
+        NodeService(supervisor, router, node_id=node_id),
         token=settings.swarm.token,
         router=router.route,
     )

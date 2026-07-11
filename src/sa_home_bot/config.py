@@ -134,9 +134,11 @@ class NodeConfig(BaseModel):
     Нода запускает службы из ``assignments`` дочерними процессами, рестартит
     упавших и отдаёт статус/управление по протоколу v0 через ``socket``
     (клиент — ``nodectl``). Известные назначения: ``monitor``,
-    ``telegram-bot``, ``apps``.
+    ``telegram-bot``, ``apps``. ``id`` — имя ноды в рое (dst.node в
+    конверте); пусто = hostname машины.
     """
 
+    id: str = ""
     socket: str = "./data/node.sock"
     assignments: list[str] = Field(default_factory=lambda: ["monitor", "telegram-bot"])
     restart_delay_s: float = Field(default=5.0, gt=0)

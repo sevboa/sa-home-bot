@@ -73,6 +73,39 @@ async def test_unknown_service_is_bad_request():
     assert "monitor" in exc_info.value.message  # подсказывает известные
 
 
+async def test_power_actions_declared_and_scheduled(monkeypatch):
+    import asyncio
+
+    from sa_home_bot.node import service as service_module
+
+    monkeypatch.setattr(service_module, "POWER_DELAY_S", 0.0)
+    sup, _ = _fake_supervisor()
+    ran: list[list[str]] = []
+
+    async def fake_runner(argv):
+        ran.append(argv)
+
+    svc = NodeService(sup, power_runner=fake_runner)
+    desc = svc.describe()
+    assert "power" in desc.capabilities
+    for action_id in ("poweroff", "reboot", "suspend"):
+        action = desc.find_action(action_id)
+        assert action is not None and not action.params
+
+    result = await svc.run_command("poweroff", {})
+    assert result["scheduled"] == "poweroff"
+    await asyncio.sleep(0.05)  # дать отложенной задаче выполниться
+    assert ran == [["systemctl", "poweroff"]]
+
+
+async def test_get_state_has_uptime():
+    sup, _ = _fake_supervisor()
+    state = await NodeService(sup).get_state()
+    assert state["uptime_s"] >= 0
+    # на Linux /proc/uptime всегда есть; поле не None и растёт от загрузки
+    assert state["system_uptime_s"] > 0
+
+
 def test_render_status_table():
     state = {
         "node": "alfred",
@@ -99,6 +132,12 @@ def test_render_status_table():
     assert "✅ running" in text and "⏹ stopped" in text
     assert "123" in text and "—" in text
     assert "Пиры" not in text  # без пиров секция не рисуется
+    assert "Аптайм" not in text  # без полей аптайма строка не рисуется
+
+    state["system_uptime_s"] = 90061.0  # 1д 1ч 1м 1с
+    state["uptime_s"] = 65.0
+    text = render_status(state)
+    assert "Аптайм: система 1д 1ч 1м 1с · нода 1м 5с" in text
 
     state["peers"] = [
         {"id": "winpc", "endpoint": "tcp://192.168.0.50:8710", "alive": False},

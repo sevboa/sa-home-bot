@@ -4,7 +4,10 @@
 
     nodectl status                # нода и её службы
     nodectl start|stop|restart X  # управление службой
+    nodectl poweroff|reboot|suspend  # питание машины
     nodectl events                # живой хвост событий (Ctrl+C — выход)
+    nodectl -n winpc status       # то же о ноде winpc («спроси любого»:
+                                  # запрос идёт своей ноде, та пересылает)
 
 Endpoint берётся из --socket (путь unix-сокета или tcp://host:port), либо из
 [node].socket указанного --config, либо из ./config.toml, либо дефолт
@@ -22,11 +25,14 @@ from pathlib import Path
 from sa_home_bot.config import Settings
 from sa_home_bot.proto.client import ProtoClient
 from sa_home_bot.proto.endpoints import Endpoint, parse_endpoint, resolve_endpoint
-from sa_home_bot.proto.messages import Envelope, ProtoError
+from sa_home_bot.proto.messages import Address, Envelope, ProtoError
+from sa_home_bot.runtime import format_duration
 
 DEFAULT_CONFIG = "./config.toml"
 
 _STATUS_ICON = {"running": "✅", "restarting": "🔄", "stopped": "⏹"}
+
+POWER_ACTIONS = ("poweroff", "reboot", "suspend")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -37,11 +43,20 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--socket", "-s", default=None, help="endpoint ноды: путь сокета или tcp://host:port"
     )
+    parser.add_argument(
+        "--node",
+        "-n",
+        default=None,
+        help="id удалённой ноды роя: запрос пойдёт через свою ноду",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status", help="статус ноды и её служб")
     for action in ("start", "stop", "restart"):
         p = sub.add_parser(action, help=f"{action} службы")
         p.add_argument("name", help="имя службы (см. nodectl status)")
+    sub.add_parser("poweroff", help="выключить машину ноды")
+    sub.add_parser("reboot", help="перезагрузить машину ноды")
+    sub.add_parser("suspend", help="усыпить машину ноды")
     sub.add_parser("events", help="живой хвост событий ноды (Ctrl+C — выход)")
     return parser
 
@@ -90,6 +105,13 @@ def render_services(services: list[dict]) -> str:
 
 def render_status(state: dict) -> str:
     header = f"Нода {state.get('node', '?')} (v{state.get('version', '?')})"
+    uptime_bits = []
+    if state.get("system_uptime_s") is not None:
+        uptime_bits.append(f"система {format_duration(state['system_uptime_s'])}")
+    if state.get("uptime_s") is not None:
+        uptime_bits.append(f"нода {format_duration(state['uptime_s'])}")
+    if uptime_bits:
+        header += "\nАптайм: " + " · ".join(uptime_bits)
     out = header + "\n" + render_services(state.get("services", []))
     peers = state.get("peers") or []
     if peers:
@@ -111,6 +133,8 @@ def render_event(env: Envelope) -> str:
 
 async def _run(args: argparse.Namespace) -> int:
     endpoint, token = _resolve_endpoint(args)
+    # -n/--node: адресат в конверте, пересылку делает своя нода (§11 п. 2).
+    dst = Address(node=args.node, service="node") if args.node else None
 
     events_mode = args.command == "events"
     printed = asyncio.Event()
@@ -128,10 +152,15 @@ async def _run(args: argparse.Namespace) -> int:
 
     try:
         if args.command == "status":
-            print(render_status(await client.get_state()))
+            print(render_status(await client.get_state(dst=dst)))
         elif args.command in ("start", "stop", "restart"):
-            result = await client.command(args.command, {"name": args.name})
+            result = await client.command(args.command, {"name": args.name}, dst=dst)
             print(render_services([result["service"]]))
+        elif args.command in POWER_ACTIONS:
+            result = await client.command(args.command, dst=dst)
+            where = f"нода {args.node}" if args.node else "нода"
+            print(f"Принято: {where} выполнит {result.get('scheduled', args.command)} "
+                  f"через {result.get('delay_s', '?')} с.")
         elif events_mode:
             info = await client.hello()
             print(f"События ноды {info.node} (Ctrl+C — выход):", flush=True)
