@@ -12,3 +12,5 @@ data/
 config.toml
 *.sqlite
 *.sqlite-*
+*.swp
+.*.swp
