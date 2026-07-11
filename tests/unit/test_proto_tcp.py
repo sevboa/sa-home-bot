@@ -107,6 +107,48 @@ async def test_events_only_to_authenticated(tcp_server):
         await authed.close()
 
 
+async def test_dual_listen_unix_and_tcp():
+    """Нода слушает unix (локальные, без auth) и tcp (пиры, с auth) сразу."""
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    tmpdir = Path(tempfile.mkdtemp(prefix="sa-dual-"))
+    server = ProtoServer(
+        [tmpdir / "node.sock", TcpEndpoint("127.0.0.1", 0)], FakeService(), token=TOKEN
+    )
+    await server.start()
+    try:
+        unix_ep, tcp_ep = server.endpoints
+        got = asyncio.Event()
+
+        async def on_event(env):
+            got.set()
+
+        # Локальный клиент по unix — токен не нужен.
+        local = ProtoClient(unix_ep, on_event=on_event, timeout=5.0)
+        await local.connect()
+        assert (await local.hello()).node == "winpc"
+        # Пир по tcp — с токеном.
+        peer = ProtoClient(tcp_ep, token=TOKEN, timeout=5.0)
+        await peer.connect()
+        assert (await peer.get_state())["status"] == "ok"
+        # Событие доходит обоим.
+        assert await server.broadcast_event("x", {}) == 2
+        await asyncio.wait_for(got.wait(), timeout=5.0)
+        # На tcp-слушателе auth обязателен даже при живом unix-слушателе.
+        reader, writer = await asyncio.open_connection(tcp_ep.host, tcp_ep.port)
+        writer.write(encode(make_request("get_state")))
+        await writer.drain()
+        assert decode(await reader.readline()).error_code() == ERR_UNAUTHORIZED
+        writer.close()
+        await local.close()
+        await peer.close()
+    finally:
+        await server.stop()
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 async def test_repeated_auth_is_ok(tcp_server):
     client = ProtoClient(tcp_server.endpoint, token=TOKEN, timeout=5.0)
     await client.connect()

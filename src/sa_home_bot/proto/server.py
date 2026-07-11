@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import hmac
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -82,57 +83,70 @@ class _Connection:
 class ProtoServer:
     def __init__(
         self,
-        endpoint: str | Path | Endpoint,
+        endpoint: str | Path | Endpoint | Sequence[str | Path | Endpoint],
         handler: ServiceHandler,
         *,
         token: str = "",
         router: Router | None = None,
     ) -> None:
-        self._endpoint = parse_endpoint(endpoint)
-        if isinstance(self._endpoint, TcpEndpoint) and not token:
-            raise ValueError(
-                f"TCP-endpoint {self._endpoint} требует токен ([swarm].token в конфиге)"
-            )
+        # Нода слушает и unix (локальные фронтенды), и tcp (пиры) — список.
+        single = isinstance(endpoint, (str, Path, UnixEndpoint, TcpEndpoint))
+        raw = [endpoint] if single else list(endpoint)
+        if not raw:
+            raise ValueError("нужен хотя бы один endpoint")
+        self._endpoints = [parse_endpoint(e) for e in raw]
+        for ep in self._endpoints:
+            if isinstance(ep, TcpEndpoint) and not token:
+                raise ValueError(f"TCP-endpoint {ep} требует токен ([swarm].token в конфиге)")
         self._token = token
         self._handler = handler
         self._router = router
-        self._server: asyncio.Server | None = None
+        self._servers: list[asyncio.Server] = []
         self._connections: set[_Connection] = set()
         self._request_tasks: set[asyncio.Task] = set()
 
     @property
     def endpoint(self) -> Endpoint:
-        """Фактический endpoint (для tcp с портом 0 — после start() реальный порт)."""
-        return self._endpoint
+        """Первый endpoint (для tcp с портом 0 — после start() реальный порт)."""
+        return self._endpoints[0]
+
+    @property
+    def endpoints(self) -> tuple[Endpoint, ...]:
+        return tuple(self._endpoints)
 
     @property
     def connection_count(self) -> int:
         return len(self._connections)
 
     async def start(self) -> None:
-        if isinstance(self._endpoint, UnixEndpoint):
-            path = self._endpoint.path
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.unlink(missing_ok=True)  # хвост от прошлого запуска
-            self._server = await asyncio.start_unix_server(
-                self._handle_client, path=str(path), limit=MAX_MESSAGE_BYTES
-            )
-            path.chmod(0o600)
-        else:
-            self._server = await asyncio.start_server(
-                self._handle_client,
-                host=self._endpoint.host,
-                port=self._endpoint.port,
-                limit=MAX_MESSAGE_BYTES,
-            )
-            if self._endpoint.port == 0:  # порт выбрала ОС (тесты) — узнать реальный
-                bound = self._server.sockets[0].getsockname()
-                self._endpoint = TcpEndpoint(self._endpoint.host, bound[1])
-        log.info("ProtoServer слушает %s", self._endpoint)
+        for i, ep in enumerate(self._endpoints):
+            if isinstance(ep, UnixEndpoint):
+                path = ep.path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.unlink(missing_ok=True)  # хвост от прошлого запуска
+                server = await asyncio.start_unix_server(
+                    # unix доверяет правам файла — auth соединению не нужен
+                    functools.partial(self._handle_client, trusted=True),
+                    path=str(path),
+                    limit=MAX_MESSAGE_BYTES,
+                )
+                path.chmod(0o600)
+            else:
+                server = await asyncio.start_server(
+                    functools.partial(self._handle_client, trusted=False),
+                    host=ep.host,
+                    port=ep.port,
+                    limit=MAX_MESSAGE_BYTES,
+                )
+                if ep.port == 0:  # порт выбрала ОС (тесты) — узнать реальный
+                    bound = server.sockets[0].getsockname()
+                    self._endpoints[i] = TcpEndpoint(ep.host, bound[1])
+            self._servers.append(server)
+            log.info("ProtoServer слушает %s", self._endpoints[i])
 
     async def stop(self) -> None:
-        if self._server is not None:
-            self._server.close()
+        for server in self._servers:
+            server.close()
         for task in list(self._request_tasks):
             task.cancel()
         if self._request_tasks:
@@ -144,11 +158,12 @@ class ProtoServer:
             with contextlib.suppress(Exception):
                 await conn.writer.wait_closed()
         self._connections.clear()
-        if self._server is not None:
-            await self._server.wait_closed()
-            self._server = None
-        if isinstance(self._endpoint, UnixEndpoint):
-            self._endpoint.path.unlink(missing_ok=True)
+        for server in self._servers:
+            await server.wait_closed()
+        self._servers.clear()
+        for ep in self._endpoints:
+            if isinstance(ep, UnixEndpoint):
+                ep.path.unlink(missing_ok=True)
         log.info("ProtoServer остановлен")
 
     async def broadcast_event(self, event_type: str, data: dict[str, Any] | None = None) -> int:
@@ -176,10 +191,14 @@ class ProtoServer:
         return delivered
 
     async def _handle_client(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        *,
+        trusted: bool,
     ) -> None:
-        # Unix-сокет доверяет правам файла; на TCP доверие даёт только auth.
-        conn = _Connection(writer, authenticated=isinstance(self._endpoint, UnixEndpoint))
+        # trusted=True у unix-слушателя (права файла); на TCP доверие даёт auth.
+        conn = _Connection(writer, authenticated=trusted)
         self._connections.add(conn)
         try:
             while True:
@@ -242,7 +261,8 @@ class ProtoServer:
             return make_response(request, {"authenticated": True})
         token = request.payload.get("token")
         if not isinstance(token, str) or not hmac.compare_digest(token, self._token):
-            log.warning("ProtoServer: отвергнут клиент с неверным токеном (%s)", self._endpoint)
+            peer = conn.writer.get_extra_info("peername")
+            log.warning("ProtoServer: отвергнут клиент с неверным токеном (%s)", peer)
             raise ProtoError(ERR_UNAUTHORIZED, "неверный токен")
         conn.authenticated = True
         return make_response(request, {"authenticated": True})

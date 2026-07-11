@@ -71,8 +71,13 @@ async def run_node(settings: Settings, config_path: str | None = None) -> None:
         log.warning("Нет ни одного валидного назначения — нода работает вхолостую")
 
     router = build_router(settings, node_id, on_peer_event)
+    # Нода слушает socket (локальные фронтенды) и, если задан, listen —
+    # TCP для пиров роя.
+    endpoints = [settings.node.socket]
+    if settings.node.listen:
+        endpoints.append(settings.node.listen)
     server = ProtoServer(
-        settings.node.socket,
+        endpoints,
         NodeService(supervisor, router, node_id=node_id),
         token=settings.swarm.token,
         router=router.route,
@@ -85,11 +90,11 @@ async def run_node(settings: Settings, config_path: str | None = None) -> None:
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
     log.info(
-        "Нода %s запущена: службы [%s], пиры [%s], endpoint %s",
+        "Нода %s запущена: службы [%s], пиры [%s], endpoints [%s]",
         node_id,
         ", ".join(supervisor.services),
         ", ".join(router.peers) or "—",
-        server.endpoint,
+        ", ".join(str(ep) for ep in server.endpoints),
     )
 
     try:

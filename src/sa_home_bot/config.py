@@ -173,11 +173,14 @@ class NodeConfig(BaseModel):
     (клиент — ``nodectl``). Известные назначения: ``monitor``,
     ``telegram-bot``, ``apps``; по умолчанию пусто — назначения только
     явные (голая нода — норма). ``id`` — имя ноды в рое (dst.node в
-    конверте); пусто = hostname машины.
+    конверте); пусто = hostname машины. ``listen`` — дополнительный
+    endpoint для пиров (обычно ``tcp://<tailscale-ip>:8710``): нода
+    слушает и ``socket`` (локальные фронтенды), и его; пусто = нет.
     """
 
     id: str = ""
     socket: str = "./data/node.sock"
+    listen: str = ""
     assignments: list[str] = Field(default_factory=list)
     restart_delay_s: float = Field(default=5.0, gt=0)
     stop_timeout_s: float = Field(default=90.0, gt=0)  # SIGTERM → SIGKILL
