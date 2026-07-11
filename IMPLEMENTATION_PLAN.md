@@ -413,20 +413,19 @@ graceful-путём, что при SIGTERM, затем `os.execv(sys.argv[0], sy
 Живой тест: реальный подпроцесс, `restart_node` по протоколу — PID до и
 после команды совпал, лог показывает чистый останов + релонч за ~1с.
 
-**alfred переведён с git-checkout на pip-установку** ✅ (2026-07-11) — по
-тому же принципу, что arch-t480 (pipx), но вручную: на Debian системный
-python «externally managed» (PEP 668), pipx через apt требует sudo-пароль,
-которого не было — вместо него `python3 -m venv ~/.local/share/sa-home-bot-venv`
-+ `pip install git+…@vX.Y.Z` (тот же результат, что pipx). Раскладка:
-venv в `~/.local/share/sa-home-bot-venv/`, конфиг в
+**alfred переведён с git-checkout на pip-установку** ✅ (2026-07-11) —
+сначала временный ручной venv (Debian требовал sudo для `pipx` через apt,
+пароля не было), затем пользователь сам выполнил `sudo apt install pipx`
+и alfred переставлен на настоящий `pipx install git+…@vX.Y.Z` — теперь
+рецепт идентичен arch-t480. Раскладка: конфиг в
 `~/.config/sa-home-bot/config.toml`, данные в
 `~/.local/share/sa-home-bot/data/` (перенесены с сохранением, проверено
-md5sum до/после), CLI (`sa-home-bot`/`nodectl`) — симлинками в
-`~/.local/bin/`. `deploy/sa-home-node.service` обновлён под новую
-раскладку. Старый repo-checkout (`~/Github/sa-home-bot`) не удалён —
-остаётся окружением разработки; старый `config.toml` переименован в
-`config.toml.old-devsetup`, чтобы не путать со старым в поисках nodectl
-по умолчанию.
+md5sum до/после), CLI (`sa-home-bot`/`nodectl`) — симлинками pipx в
+`~/.local/bin/`. Временный `~/.local/share/sa-home-bot-venv` удалён.
+`deploy/sa-home-node.service` обновлён под pipx-раскладку. Старый
+repo-checkout (`~/Github/sa-home-bot`) не удалён — остаётся окружением
+разработки; старый `config.toml` переименован в `config.toml.old-devsetup`,
+чтобы не путать со старым в поисках nodectl по умолчанию.
 
 **Грабли и урок:** относительные пути (`socket`, `db_path`,
 `database.path`) резолвятся от `WorkingDirectory` процесса — когда конфиг
