@@ -374,7 +374,13 @@ presence/честная деградация, одно умение — мног
    `power` (poweroff/reboot/suspend) и аптайм — кроссплатформенно
    (`node/service.py`, `[node].id`, `nodectl -n` + power-подкоманды).
    WoL для ноутбука по Wi-Fi скорее всего не работает — «включить» может
-   остаться только у Windows-ПК (Ethernet).
+   остаться только у Windows-ПК (Ethernet). Мониторинг на arch-t480 ✅
+   (2026-07-11): `assignments = ["monitor"]`, температура CPU (coretemp/
+   acpitz/nvme через psutil) читается без root и видна сквозь маршрутизацию
+   с alfred. Температура NVMe по SMART требует root — на alfred для этого
+   есть обёртка `~/.local/bin/smartctl` → `sudo -n smartctl` (см.
+   `/etc/sudoers.d/10-diag`); на ноутбуке пока не настроено (нужен пароль
+   пользователя, не стал трогать sudoers за него).
    Уроки UX для install.ps1: конфиг генерировать, а не давать копировать
    (опечатка `assigments` молча включила дефолтные назначения — подумать
    о warning на неизвестные поля), юнит/службу ставит скрипт, не человек.
