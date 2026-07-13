@@ -3,6 +3,7 @@
 from datetime import UTC, datetime
 from unittest.mock import patch
 
+import pytest
 import pytest_asyncio
 
 from sa_home_bot.config import DiskSensorConfig, SensorsConfig, Settings, TelegramConfig
@@ -11,9 +12,19 @@ from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
 from sa_home_bot.domain.health import compute_health_diff
 from sa_home_bot.monitor.service import ACTION_SCAN_NOW, MonitorService
+from sa_home_bot.utils.requirements import requirements_registry
 from sa_home_bot.worker.queue import DedupQueue
 
 from .conftest import cpu_policy, make_reading
+
+
+@pytest.fixture(autouse=True)
+def _clean_requirements_registry():
+    # Синглтон живёт дольше одного теста — изолируем реальные NEEDS_PRIVILEGE
+    # диагнозы между тестами (сама статика per-запусковая, не тухнет).
+    requirements_registry.reset()
+    yield
+    requirements_registry.reset()
 
 
 @pytest_asyncio.fixture
@@ -60,7 +71,10 @@ async def test_get_state_returns_health_from_store(service):
 
 async def test_get_state_flags_missing_smartctl_when_disks_enabled(service, monkeypatch):
     svc, _, _ = service
-    monkeypatch.setattr("shutil.which", lambda name: None)  # smartctl не найден
+    # smartctl не найден, остальные утилиты (в т.ч. journalctl) — как обычно.
+    monkeypatch.setattr(
+        "shutil.which", lambda name: None if name == "smartctl" else f"/usr/bin/{name}"
+    )
 
     with (
         patch("sa_home_bot.monitor.service.read_uptime_sync", return_value=None),
@@ -69,8 +83,10 @@ async def test_get_state_flags_missing_smartctl_when_disks_enabled(service, monk
     ):
         state = await svc.get_state()
 
-    assert len(state["missing_requirements"]) == 1
-    assert "smartmontools" in state["missing_requirements"][0]
+    assert len(state["requirements"]) == 1
+    assert state["requirements"][0]["id"] == "smartctl"
+    assert state["requirements"][0]["status"] == "missing_program"
+    assert "smartmontools" in state["requirements"][0]["hint"]
 
 
 async def test_get_state_quiet_when_disks_disabled(tmp_path, monkeypatch):
@@ -84,7 +100,10 @@ async def test_get_state_quiet_when_disks_disabled(tmp_path, monkeypatch):
         subscriptions=[],
     )
     svc = MonitorService(settings, store, DedupQueue())
-    monkeypatch.setattr("shutil.which", lambda name: None)  # smartctl всё равно не найден
+    # smartctl всё равно не найден, но диски выключены — не должен попасть в вывод.
+    monkeypatch.setattr(
+        "shutil.which", lambda name: None if name == "smartctl" else f"/usr/bin/{name}"
+    )
 
     with (
         patch("sa_home_bot.monitor.service.read_uptime_sync", return_value=None),
@@ -94,7 +113,7 @@ async def test_get_state_quiet_when_disks_disabled(tmp_path, monkeypatch):
         state = await svc.get_state()
     await db.close()
 
-    assert state["missing_requirements"] == []  # диски выключены — не шумим
+    assert state["requirements"] == []  # диски выключены — не шумим
 
 
 async def test_scan_now_queues_both_jobs_once(service):

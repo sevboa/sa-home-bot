@@ -110,9 +110,9 @@ async def build_summary_text(link: ServiceLink, dst: Address | None = None) -> s
         disk_warn_c=disk_th.get("warn_c", 0.0),
         disk_crit_c=disk_th.get("crit_c", 0.0),
     )
-    missing = state.get("missing_requirements") or []
-    if missing:
-        text += "\n" + "\n".join(f"⚠️ {hint}" for hint in missing)
+    problems = state.get("requirements") or []
+    if problems:
+        text += "\n" + "\n".join(f"⚠️ {p['hint']}" for p in problems)
     return text
 
 

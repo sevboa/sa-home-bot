@@ -28,7 +28,12 @@ from sa_home_bot.domain.models import (
     SmartSnapshot,
 )
 from sa_home_bot.domain.smart import MONITORED_SMART_ATTRS
-from sa_home_bot.utils.requirements import Requirement
+from sa_home_bot.utils.requirements import (
+    Requirement,
+    RequirementStatus,
+    looks_like_permission_error,
+    requirements_registry,
+)
 
 log = logging.getLogger(__name__)
 
@@ -131,7 +136,9 @@ def parse_device_temp(device: str, data: dict, now: datetime) -> SensorReading |
 
 
 def _run_smartctl(args: list[str]) -> dict | None:
-    if not SMARTCTL_REQUIREMENT.available():
+    diagnosis = SMARTCTL_REQUIREMENT.diagnose()
+    if diagnosis is not RequirementStatus.OK:
+        requirements_registry.report(SMARTCTL_REQUIREMENT, diagnosis)
         log.warning("smartctl недоступен: %s", SMARTCTL_REQUIREMENT.install_hint())
         return None
     try:
@@ -151,12 +158,16 @@ def _run_smartctl(args: list[str]) -> dict | None:
     # smartctl возвращает ненулевой код при некритичных предупреждениях,
     # но JSON всё равно валиден — парсим stdout.
     if not out.stdout.strip():
+        if looks_like_permission_error(out.stderr):
+            requirements_registry.report(SMARTCTL_REQUIREMENT, RequirementStatus.NEEDS_PRIVILEGE)
         return None
     try:
-        return json.loads(out.stdout)
+        data = json.loads(out.stdout)
     except json.JSONDecodeError as exc:
         log.warning("smartctl %s: невалидный JSON: %s", " ".join(args), exc)
         return None
+    requirements_registry.report(SMARTCTL_REQUIREMENT, RequirementStatus.OK)
+    return data
 
 
 def discover_devices_sync() -> list[DiskTarget]:

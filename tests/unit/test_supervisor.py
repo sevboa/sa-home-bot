@@ -128,3 +128,42 @@ async def test_supervisor_skips_unknown_assignment():
     )
     assert list(sup.services) == ["monitor"]
     assert sup.get("no-such-service") is None
+
+
+# --- assign/unassign: назначения в рантайме, без рестарта ноды ---
+
+
+async def test_assign_adds_service_without_starting_it():
+    events = Events()
+    sup = Supervisor([], None, emit=events.emit)
+    svc = sup.assign("apps")
+    assert list(sup.services) == ["apps"]
+    assert svc.status == STOPPED  # assign не стартует сама, это отдельный шаг
+
+
+async def test_assign_is_idempotent_returns_same_instance():
+    events = Events()
+    sup = Supervisor(["monitor"], None, emit=events.emit)
+    existing = sup.get("monitor")
+    assert sup.assign("monitor") is existing  # не пересоздаёт уже назначенную
+
+
+def test_assign_unknown_name_raises():
+    events = Events()
+    sup = Supervisor([], None, emit=events.emit)
+    with pytest.raises(ValueError):
+        sup.assign("no-such-service")
+
+
+async def test_unassign_removes_and_stops_service():
+    events = Events()
+    sup = Supervisor(["apps"], None, emit=events.emit)
+    await sup.unassign("apps")
+    assert list(sup.services) == []
+    assert sup.get("apps") is None
+
+
+async def test_unassign_unknown_name_is_noop():
+    events = Events()
+    sup = Supervisor([], None, emit=events.emit)
+    await sup.unassign("no-such-service")  # не бросает

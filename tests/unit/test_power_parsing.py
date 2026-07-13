@@ -180,7 +180,7 @@ def test_render_downtime_entries_are_single_lines_without_numbering():
 def test_read_power_events_sync_paginates(monkeypatch):
     # SAMPLE содержит 4 отключения — страница по 2 с offset=0 должна сигналить
     # о наличии следующей страницы, offset=2 (последние 2) — уже нет.
-    def fake_run(args):
+    def fake_run(args, requirement=None):
         if args[0] == "last":
             return SAMPLE
         return None  # journalctl недоступен — не важно для пагинации

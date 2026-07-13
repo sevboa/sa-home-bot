@@ -25,6 +25,12 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from sa_home_bot.domain.models import POWER_CLEAN, POWER_UNEXPECTED, PowerEvent
+from sa_home_bot.utils.requirements import (
+    Requirement,
+    RequirementStatus,
+    looks_like_permission_error,
+    requirements_registry,
+)
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +38,12 @@ log = logging.getLogger(__name__)
 # --time-format iso: разбираемое время с offset вместо локализованного.
 LAST_ARGS = ["last", "-xR", "--time-format", "iso", "reboot"]
 JOURNAL_ARGS = ["journalctl", "--list-boots", "-o", "json"]
+
+JOURNALCTL_REQUIREMENT = Requirement(
+    program="journalctl",
+    package="systemd",
+    note="точное время внезапных отключений",
+)
 
 _STILL_RUNNING = "still"  # last пишет "still running" для текущей сессии
 # Макс. расхождение START (last) и first_entry (journal) при сопоставлении сессий.
@@ -168,10 +180,16 @@ def _nearest_boot(
     return best
 
 
-def _run(args: list[str]) -> str | None:
-    """Запустить подпроцесс, вернуть stdout или None при любой ошибке."""
+def _run(args: list[str], requirement: Requirement | None = None) -> str | None:
+    """Запустить подпроцесс, вернуть stdout или None при любой ошибке.
+
+    ``requirement`` — если задан, диагноз реального вызова (нехватка прав)
+    репортится в `requirements_registry` (см. `utils/requirements.py`).
+    """
     if shutil.which(args[0]) is None:
         log.warning("Утилита `%s` не найдена", args[0])
+        if requirement is not None:
+            requirements_registry.report(requirement, RequirementStatus.MISSING_PROGRAM)
         return None
     try:
         proc = subprocess.run(
@@ -182,7 +200,11 @@ def _run(args: list[str]) -> str | None:
         return None
     if proc.returncode != 0:
         log.warning("`%s` вернул код %s: %s", args[0], proc.returncode, proc.stderr.strip())
+        if requirement is not None and looks_like_permission_error(proc.stderr):
+            requirements_registry.report(requirement, RequirementStatus.NEEDS_PRIVILEGE)
         return None
+    if requirement is not None:
+        requirements_registry.report(requirement, RequirementStatus.OK)
     return proc.stdout
 
 
@@ -214,7 +236,7 @@ def read_power_events_sync(
         return [], False
     events = parse_last_reboots(last_out, limit=offset + limit + 1)
 
-    journal_out = _run(JOURNAL_ARGS)
+    journal_out = _run(JOURNAL_ARGS, requirement=JOURNALCTL_REQUIREMENT)
     if journal_out is not None:
         events = enrich_unexpected(events, parse_journal_boots(journal_out))
 

@@ -21,6 +21,7 @@ from sa_home_bot.bot.lifecycle import (
 )
 from sa_home_bot.bot.link_watch import LinkWatchMiddleware
 from sa_home_bot.bot.monitor_events import build_event_handler
+from sa_home_bot.bot.node_events import build_node_event_handler
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.bot.setup import build_bot, build_dispatcher, set_bot_commands
@@ -94,7 +95,10 @@ async def run(settings: Settings) -> None:
     )
     await link.start()
     node_link = ServiceLink(
-        settings.node.socket, token=settings.swarm.token, display_name="нода"
+        settings.node.socket,
+        token=settings.swarm.token,
+        display_name="нода",
+        on_event=build_node_event_handler(book, notifier),
     )
     await node_link.start()
 

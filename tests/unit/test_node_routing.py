@@ -198,3 +198,48 @@ async def test_peer_event_relayed_with_original_src():
         await remote.stop()
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# --- add_local_service/remove_local_service, add_peer/remove_peer (этап 17/18) ---
+
+
+async def test_add_and_remove_local_service(swarm):
+    remote, peer, router, _, client, _, _ = swarm
+    # Переиспользуем уже поднятый линк на "remote" как будто это локальная apps.
+    extra = PeerLink("apps", peer.endpoint, reconnect_delay=0.1)
+    await router.add_local_service("apps", extra)
+    try:
+        for _ in range(100):
+            if extra.alive:
+                break
+            await asyncio.sleep(0.02)
+        state = await client.get_state(dst=Address(service="apps"))
+        assert state["cpu_c"] == 47.5
+
+        await router.remove_local_service("apps")
+        with pytest.raises(ProtoError) as exc_info:
+            await client.get_state(dst=Address(service="apps"))
+        assert exc_info.value.code == ERR_UNKNOWN_DST
+    finally:
+        await router.remove_local_service("apps")  # idempotent — на случай ассерта выше
+
+
+async def test_add_and_remove_peer(swarm):
+    remote, _, router, _, client, _, _ = swarm
+    # Новый пир "arch" на том же сокете, что "winpc" (для теста годится).
+    new_peer = PeerLink("arch", remote.endpoints[0], reconnect_delay=0.1)
+    await router.add_peer(new_peer)
+    try:
+        for _ in range(100):
+            if new_peer.alive:
+                break
+            await asyncio.sleep(0.02)
+        state = await client.get_state(dst=Address(node="arch", service="monitor"))
+        assert state["cpu_c"] == 47.5
+
+        await router.remove_peer("arch")
+        with pytest.raises(ProtoError) as exc_info:
+            await client.get_state(dst=Address(node="arch", service="monitor"))
+        assert exc_info.value.code == ERR_UNKNOWN_DST
+    finally:
+        await router.remove_peer("arch")

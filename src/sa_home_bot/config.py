@@ -176,12 +176,18 @@ class NodeConfig(BaseModel):
     конверте); пусто = hostname машины. ``listen`` — дополнительный
     endpoint для пиров (обычно ``tcp://<tailscale-ip>:8710``): нода
     слушает и ``socket`` (локальные фронтенды), и его; пусто = нет.
+
+    ``assignments`` — стартовый набор, не единственный источник: рантайм
+    (``assign``/``unassign`` по протоколу — nodectl/бот) хранит фактический
+    список в ``state_path`` (см. `node/state.py`), объединяемом с этим при
+    старте. Снять TOML-назначение можно только правкой конфига.
     """
 
     id: str = ""
     socket: str = "./data/node.sock"
     listen: str = ""
     assignments: list[str] = Field(default_factory=list)
+    state_path: str = "./data/node-state.json"
     restart_delay_s: float = Field(default=5.0, gt=0)
     stop_timeout_s: float = Field(default=90.0, gt=0)  # SIGTERM → SIGKILL
 
@@ -205,10 +211,20 @@ class SwarmConfig(BaseModel):
     ``token`` — общий секрет роя: обязателен для служб на TCP-endpoint'ах
     (Windows-нода, межнодовый канал); unix-сокеты защищены правами файла
     и токен не используют. Один токен на весь рой (домашняя сеть/tailnet).
+
+    ``nodes`` — статический список (совместимость, продолжает работать).
+    ``join`` — endpoint одной уже существующей ноды роя, используется
+    ТОЛЬКО при самом первом запуске новой ноды (пока персистентный список
+    пиров в `node/state.py` пуст): нода спрашивает у него полный граф
+    известных пиров и связывается со всеми напрямую («один seed → полный
+    mesh»). При следующих рестартах не используется повторно — полагаемся
+    на уже сохранённый список. Пусто = не присоединяться самостоятельно
+    (только статический ``nodes``).
     """
 
     token: str = ""
     nodes: list[SwarmNodeConfig] = Field(default_factory=list)
+    join: str = ""
 
 
 class LoggingConfig(BaseModel):

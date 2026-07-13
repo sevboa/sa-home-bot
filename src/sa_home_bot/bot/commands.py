@@ -81,9 +81,14 @@ WAKE_CODE = "wake"
 ACTION_CALLBACK_PREFIX = "act"
 
 
-def action_callback(action_id: str, value: str | None = None, node_id: str | None = None) -> str:
-    """Собрать «act:node:<действие>[:<значение>[:<node_id>]]» для кнопки."""
-    parts = [ACTION_CALLBACK_PREFIX, "node", action_id]
+def action_callback(
+    action_id: str,
+    value: str | None = None,
+    node_id: str | None = None,
+    service: str = "node",
+) -> str:
+    """Собрать «act:<служба>:<действие>[:<значение>[:<node_id>]]» для кнопки."""
+    parts = [ACTION_CALLBACK_PREFIX, service, action_id]
     if value or node_id:
         parts.append(value or "")
     if node_id:

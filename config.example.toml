@@ -92,11 +92,16 @@ urls = ["http://192.168.0.100:8096"]
 # suspend) объявляются в describe автоматически; в боте право — "<...>@node".
 # listen — дополнительный endpoint для пиров роя (нода слушает оба):
 # unix-сокет остаётся локальным фронтендам, tcp — межнодовому каналу.
+# assignments — стартовый набор; assign/unassign по протоколу (nodectl/бот,
+# право assign@node/unassign@node) меняют его в рантайме без правки конфига
+# и без рестарта ноды — фактический список хранится в state_path, переживает
+# рестарт (TOML остаётся минимумом, снять его назначение можно только правкой).
 [node]
 #id = "alfred"
 socket = "./data/node.sock"
 #listen = "tcp://<tailscale-ip>:8710"   # требует [swarm].token
 assignments = ["monitor", "apps", "telegram-bot"]
+state_path = "./data/node-state.json"
 restart_delay_s = 5.0              # пауза перед перезапуском упавшей службы
 stop_timeout_s = 90.0              # SIGTERM → SIGKILL при остановке
 
@@ -107,7 +112,18 @@ stop_timeout_s = 90.0              # SIGTERM → SIGKILL при остановк
 [swarm]
 token = ""
 
-# Удалённые ноды роя (discovery «на минималках» — статический список).
+# join — endpoint ОДНОЙ уже существующей ноды роя: заполняется ТОЛЬКО при
+# установке новой ноды (пусто = не присоединяться). При первом старте нода
+# один раз запросит у него полный список пиров и свяжется со всеми напрямую
+# («один seed → полный mesh»); дальше рой сам разъедется (третьи узлы
+# узнают о новичке через ретрансляцию события node_joined). При следующих
+# рестартах join не повторяется — список пиров уже сохранён (node-state.json).
+# То же самое можно сделать вручную с уже работающей ноды: `nodectl join
+# tcp://<сосед>:8710`. Замена ручной правки [[swarm.nodes]] на каждой ноде.
+#join = "tcp://alfred.tailXXXXXX.ts.net:8710"
+
+# Удалённые ноды роя (совместимость — статический список продолжает
+# работать наравне с join; можно использовать любой способ или оба сразу).
 # id — hostname ноды (dst.node в конверте), endpoint — её сервис ноды.
 # Запрос к чужой ноде шлётся своей ноде, та пересылает сама («спроси любого»);
 # свой id в списке игнорируется — конфиг роя можно держать общим.
@@ -138,6 +154,8 @@ format = "plain"                   # plain | json
 # allowed_commands: имена команд бота (nodes, status, wake, ...) и права на
 # динамические действия служб в форме "действие@служба" (из describe):
 #   <id>@apps (qbittorrent@apps, ...) — скилл-приложение: команда в меню бота;
+#   start@apps / stop@apps / restart@apps — реальное управление юнитом
+#   приложения (кнопки на карточке; нужны права на машине — nodectl fix);
 #   start@node / stop@node / restart@node — управление службой на её карточке;
 #   restart_node@node — перезапуск самой ноды-супервизора (не путать с restart
 #   службы); poweroff/reboot/suspend@node — питание машины. Право не зависит
@@ -153,6 +171,7 @@ allowed_commands = [
     "scan_now", "start@node", "stop@node", "restart@node", "restart_node@node",
     "poweroff@node", "reboot@node", "suspend@node",
     "qbittorrent@apps", "jellyfin@apps",
+    "start@apps", "stop@apps", "restart@apps",
 ]
 
 [[subscriptions]]

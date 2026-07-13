@@ -7,6 +7,10 @@
     nodectl restart_node          # перезапустить саму ноду (не службу)
     nodectl poweroff|reboot|suspend  # питание машины
     nodectl events                # живой хвост событий (Ctrl+C — выход)
+    nodectl fix                   # доустановить/донастроить права на месте
+                                  # (интерактивный sudo, см. node/fixups.py) —
+                                  # единственная команда, которая НЕ ходит по
+                                  # протоколу к ноде, а работает локально
     nodectl -n winpc status       # то же о ноде winpc («спроси любого»:
                                   # запрос идёт своей ноде, та пересылает)
 
@@ -25,6 +29,7 @@ from datetime import datetime
 from pathlib import Path
 
 from sa_home_bot.config import Settings
+from sa_home_bot.node.fixups import FixupError, build_fixups
 from sa_home_bot.proto.client import ProtoClient
 from sa_home_bot.proto.endpoints import Endpoint, parse_endpoint, resolve_endpoint
 from sa_home_bot.proto.messages import Address, Envelope, ProtoError
@@ -69,11 +74,21 @@ def _build_parser() -> argparse.ArgumentParser:
     for action in ("start", "stop", "restart"):
         p = sub.add_parser(action, help=f"{action} службы")
         p.add_argument("name", help="имя службы (см. nodectl status)")
+    p = sub.add_parser("assign", help="назначить службу ноде (без правки конфига)")
+    p.add_argument("name", help="monitor | telegram-bot | apps")
+    p = sub.add_parser("unassign", help="снять назначение службы")
+    p.add_argument("name", help="имя службы (см. nodectl status)")
+    p = sub.add_parser("join", help="присоединиться к рою через уже существующую ноду")
+    p.add_argument("endpoint", help="endpoint соседа: tcp://host:port")
     sub.add_parser("restart_node", help="перезапустить саму ноду (супервизор)")
     sub.add_parser("poweroff", help="выключить машину ноды")
     sub.add_parser("reboot", help="перезагрузить машину ноды")
     sub.add_parser("suspend", help="усыпить машину ноды")
     sub.add_parser("events", help="живой хвост событий ноды (Ctrl+C — выход)")
+    sub.add_parser(
+        "fix",
+        help="доустановить программы/права на месте (интерактивный sudo, локально)",
+    )
     return parser
 
 
@@ -145,6 +160,46 @@ def render_event(env: Envelope) -> str:
     return f"{stamp} {name} {details}".rstrip()
 
 
+def _run_fix(args: argparse.Namespace) -> int:
+    """``nodectl fix`` — единственная команда, работающая локально (не по
+    протоколу): читает конфиг напрямую, чинит недостающие права интерактивным
+    sudo. См. `node/fixups.py`."""
+    config_path = args.config if args.config is not None else _default_config()
+    settings = Settings.load(config_path)
+    fixups = build_fixups(settings)
+    if not fixups:
+        print("Все известные фиксы либо не нужны для текущих назначений, либо уже применены.")
+        return 0
+
+    print(f"Нужно проверить {len(fixups)} фикс(ов) под назначения {settings.node.assignments}:")
+    failed: list[str] = []
+    for fixup in fixups:
+        if fixup.check():
+            print(f"  ✅ {fixup.title} — уже применено")
+            continue
+        print(f"  ⏳ {fixup.title} — применяю (может спросить пароль sudo)...")
+        try:
+            fixup.apply()
+        except FixupError as exc:
+            print(f"  ❌ {fixup.title}: {exc}", file=sys.stderr)
+            failed.append(fixup.id)
+            continue
+        if fixup.check():
+            print(f"  ✅ {fixup.title} — применено")
+        else:
+            print(
+                f"  ⚠️ {fixup.title}: команда прошла, но проверка всё ещё отрицательна",
+                file=sys.stderr,
+            )
+            failed.append(fixup.id)
+
+    if failed:
+        print(f"\nНе применилось: {', '.join(failed)} — см. вывод выше.", file=sys.stderr)
+        return 1
+    print("\nГотово. Перезапустите затронутые службы: nodectl restart <name>.")
+    return 0
+
+
 async def _run(args: argparse.Namespace) -> int:
     endpoint, token = _resolve_endpoint(args)
     # -n/--node: адресат в конверте, пересылку делает своя нода (§11 п. 2).
@@ -167,9 +222,19 @@ async def _run(args: argparse.Namespace) -> int:
     try:
         if args.command == "status":
             print(render_status(await client.get_state(dst=dst)))
-        elif args.command in ("start", "stop", "restart"):
+        elif args.command in ("start", "stop", "restart", "assign"):
             result = await client.command(args.command, {"name": args.name}, dst=dst)
             print(render_services([result["service"]]))
+        elif args.command == "unassign":
+            result = await client.command(args.command, {"name": args.name}, dst=dst)
+            print(f"Снято: {result.get('unassigned', args.name)}")
+        elif args.command == "join":
+            result = await client.command("join", {"endpoint": args.endpoint}, dst=dst)
+            added = result.get("peers_added") or []
+            print(
+                f"Присоединились через {args.endpoint}. "
+                f"Новых пиров: {', '.join(added) if added else 'нет'}."
+            )
         elif args.command in NO_ARG_ACTIONS:
             result = await client.command(args.command, dst=dst)
             where = f"нода {args.node}" if args.node else "нода"
@@ -190,6 +255,8 @@ async def _run(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    if args.command == "fix":
+        return _run_fix(args)
     try:
         return asyncio.run(_run(args))
     except KeyboardInterrupt:

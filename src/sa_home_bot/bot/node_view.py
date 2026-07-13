@@ -19,7 +19,7 @@ from datetime import datetime
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from sa_home_bot.bot import commands, status_view
+from sa_home_bot.bot import actions, commands, status_view
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import WakeConfig
 from sa_home_bot.proto.messages import ActionSpec, Address, ProtoError
@@ -84,14 +84,6 @@ def _wake_rows(subscription: Subscription, wake: WakeConfig | None) -> list[Inli
             callback_data=f"{commands.CALLBACK_PREFIX}:{commands.WAKE_CODE}",
         )
     ]
-
-
-def _rows(buttons: list[InlineKeyboardButton]) -> InlineKeyboardMarkup | None:
-    if not buttons:
-        return None
-    return InlineKeyboardMarkup(
-        inline_keyboard=[buttons[i : i + 2] for i in range(0, len(buttons), 2)]
-    )
 
 
 def _power_buttons(
@@ -163,7 +155,7 @@ def build_nodes_list_keyboard(
             for peer in peers
         )
     buttons.extend(_wake_rows(subscription, wake))
-    return _rows(buttons)
+    return actions.rows(buttons)
 
 
 async def build_nodes_list_view(
@@ -205,6 +197,30 @@ def render_services_block(state: dict) -> str:
     return "\n".join(lines)
 
 
+_ACTION_ASSIGN = "assign"
+
+
+def _assign_buttons(
+    subscription: Subscription,
+    node_actions: Sequence[ActionSpec],
+    assigned: Sequence[str],
+) -> list[InlineKeyboardButton]:
+    """Кнопка «➕ Назначить X» на каждое ещё не назначенное известное имя."""
+    if not subscription.allows_action(_ACTION_ASSIGN, NODE_SERVICE):
+        return []
+    assign = next((a for a in node_actions if a.id == _ACTION_ASSIGN), None)
+    if assign is None or not assign.params:
+        return []
+    return [
+        InlineKeyboardButton(
+            text=f"➕ Назначить {name}",
+            callback_data=commands.action_callback(_ACTION_ASSIGN, name),
+        )
+        for name in (assign.params[0].choices or ())
+        if name not in assigned
+    ]
+
+
 def build_node_card_keyboard(
     subscription: Subscription | None,
     monitor_actions: Sequence[ActionSpec],
@@ -229,7 +245,8 @@ def build_node_card_keyboard(
             for name in service_names
         )
     buttons.extend(_power_buttons(subscription, node_actions))
-    return _rows(buttons)
+    buttons.extend(_assign_buttons(subscription, node_actions, service_names))
+    return actions.rows(buttons)
 
 
 async def build_node_card_view(
@@ -293,7 +310,7 @@ def build_remote_node_card_keyboard(
             callback_data=f"{commands.CALLBACK_PREFIX}:{commands.NODES_CODE}",
         )
     )
-    return _rows(buttons)
+    return actions.rows(buttons)
 
 
 async def build_remote_node_card_view(
@@ -347,22 +364,9 @@ def build_service_card_keyboard(
 
     node_id — служба на пире: та же кнопка, но с адресом пира в callback.
     """
-    if subscription is None:
-        return None
-    buttons: list[InlineKeyboardButton] = []
-    for action in node_actions:
-        if not subscription.allows_action(action.id, NODE_SERVICE):
-            continue
-        param = action.params[0] if action.params else None
-        if param is None or not param.choices or service_name not in param.choices:
-            continue
-        buttons.append(
-            InlineKeyboardButton(
-                text=action.title,
-                callback_data=commands.action_callback(action.id, service_name, node_id),
-            )
-        )
-    return _rows(buttons)
+    return actions.build_choice_keyboard(
+        subscription, node_actions, NODE_SERVICE, service_name, node_id
+    )
 
 
 async def build_service_card_view(

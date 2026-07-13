@@ -44,5 +44,5 @@ async def cmd_app_skill(
         log.info("Отказ в скилле /%s для chat_id=%s", command, message.chat.id)
         await message.answer(DENIED_TEXT)
         return
-    text = await apps_view.run_app_skill(apps_link, command)
-    await message.answer(text, disable_web_page_preview=True)
+    text, keyboard = await apps_view.run_app_skill(apps_link, subscription, command)
+    await message.answer(text, reply_markup=keyboard, disable_web_page_preview=True)

@@ -15,32 +15,90 @@ from __future__ import annotations
 import logging
 import socket
 
-from sa_home_bot.config import Settings
+from sa_home_bot.config import Settings, SwarmNodeConfig
 from sa_home_bot.node.peers import NodeRouter, PeerLink
-from sa_home_bot.node.service import NodeService
+from sa_home_bot.node.service import EVENT_NODE_JOINED, NodeService
+from sa_home_bot.node.state import NodeState
 from sa_home_bot.node.supervisor import Supervisor
-from sa_home_bot.proto.messages import Envelope
+from sa_home_bot.proto.messages import MSG_EVENT, Envelope, ProtoError
 from sa_home_bot.proto.server import ProtoServer
 from sa_home_bot.utils.lifespan import Lifespan
 
 log = logging.getLogger(__name__)
 
-def build_router(settings: Settings, node_id: str, on_peer_event) -> NodeRouter:
-    """Маршрутизатор: пиры из [[swarm.nodes]] + локальные службы из назначений."""
+# Локальные службы со своим proto-сервером, к которым нода умеет
+# проксировать (telegram-bot — клиент, своего сервера у него нет).
+def local_service_endpoints(settings: Settings) -> dict[str, str]:
+    return {"monitor": settings.monitor.socket, "apps": settings.apps.socket}
+
+
+def build_router(
+    settings: Settings,
+    node_id: str,
+    assignments: list[str],
+    extra_peers: list[SwarmNodeConfig],
+    on_peer_event,
+) -> NodeRouter:
+    """Маршрутизатор: пиры из [[swarm.nodes]] ∪ персистентного состояния
+    (join, этап 18) + локальные службы из назначений.
+
+    ``assignments`` — эффективный набор (TOML ∪ персистентное состояние
+    ноды), не только `settings.node.assignments` — см. `node/state.py`.
+    """
+    peer_configs: dict[str, SwarmNodeConfig] = {n.id: n for n in settings.swarm.nodes}
+    for p in extra_peers:
+        peer_configs.setdefault(p.id, p)
     peers = {
-        n.id: PeerLink(n.id, n.endpoint, token=settings.swarm.token, on_event=on_peer_event)
-        for n in settings.swarm.nodes
-        if n.id != node_id  # свой id в списке — не пир (общий конфиг роя)
+        pid: PeerLink(pid, cfg.endpoint, token=settings.swarm.token, on_event=on_peer_event)
+        for pid, cfg in peer_configs.items()
+        if pid != node_id  # свой id в списке — не пир
     }
-    # Локальные службы с proto-сервером, к которым нода умеет проксировать
-    # (telegram-bot — клиент, своего сервера у него нет).
-    proxied = {"monitor": settings.monitor.socket, "apps": settings.apps.socket}
     local = {
         name: PeerLink(name, endpoint, token=settings.swarm.token)
-        for name, endpoint in proxied.items()
-        if name in settings.node.assignments
+        for name, endpoint in local_service_endpoints(settings).items()
+        if name in assignments
     }
     return NodeRouter(node_id, peers=peers, local_services=local)
+
+
+def _remember_peer(state: NodeState, node_id: str, endpoint: str) -> None:
+    """Персистентный справочник пиров: только id+endpoint, не полный конфиг."""
+    others = [p for p in state.peers if p.id != node_id]
+    state.peers = [*others, SwarmNodeConfig(id=node_id, endpoint=endpoint)]
+
+
+async def _relay_peer_event(
+    env: Envelope,
+    *,
+    node_id: str,
+    router: NodeRouter,
+    state: NodeState,
+    state_path: str,
+    token: str,
+    on_peer_event,
+    server: ProtoServer | None,
+) -> None:
+    """Ретрансляция события пира своим клиентам + замыкание сетки (этап 18).
+
+    Событие с собственным ``src.node`` — эхо от соседа, ему тут делать
+    нечего. ``node_joined`` от уже связанного пира — авто-подключиться к
+    новому узлу тем же путём, каким мы сами узнаём о событиях: так третий
+    узел, не участвовавший в handshake напрямую, всё равно достраивает
+    полную сетку за один хоп репликации события, без отдельного каталога.
+    """
+    if env.src is not None and env.src.node == node_id:
+        return
+    if env.type == MSG_EVENT and env.payload.get("event") == EVENT_NODE_JOINED:
+        data = env.payload.get("data", {})
+        new_id, new_endpoint = data.get("node_id"), data.get("endpoint")
+        if new_id and new_endpoint and new_id != node_id and new_id not in router.peers:
+            link = PeerLink(new_id, new_endpoint, token=token, on_event=on_peer_event)
+            await router.add_peer(link)
+            _remember_peer(state, new_id, new_endpoint)
+            state.save(state_path)
+            log.info("Рой: авто-подключение к %s (%s) по node_joined", new_id, new_endpoint)
+    if server is not None:
+        await server.broadcast_envelope(env)
 
 
 async def run_node(settings: Settings, config_path: str | None = None) -> bool:
@@ -63,15 +121,27 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
             await server.broadcast_event(event_type, data)
 
     async def on_peer_event(env: Envelope) -> None:
-        # Ретрансляция события пира своим клиентам (бот, nodectl). Событие
-        # с собственным src.node — эхо от соседа, ему тут делать нечего.
-        if env.src is not None and env.src.node == node_id:
-            return
-        if server is not None:
-            await server.broadcast_envelope(env)
+        await _relay_peer_event(
+            env,
+            node_id=node_id,
+            router=router,
+            state=state,
+            state_path=settings.node.state_path,
+            token=settings.swarm.token,
+            on_peer_event=on_peer_event,
+            server=server,
+        )
+
+    # assignments в TOML — стартовый набор, не единственный источник:
+    # состояние из assign/unassign в рантайме (nodectl/бот) переживает
+    # рестарт через state_path (node/state.py), а не только через TOML.
+    # То же для пиров: [[swarm.nodes]] — стартовый список, join (этап 18)
+    # добавляет к нему динамически.
+    state = NodeState.load(settings.node.state_path)
+    effective_assignments = sorted(set(settings.node.assignments) | set(state.assignments))
 
     supervisor = Supervisor(
-        settings.node.assignments,
+        effective_assignments,
         config_path,
         emit=emit,
         restart_delay_s=settings.node.restart_delay_s,
@@ -80,22 +150,49 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
     if not supervisor.services:
         log.warning("Нет ни одного валидного назначения — нода работает вхолостую")
 
-    router = build_router(settings, node_id, on_peer_event)
+    router = build_router(settings, node_id, effective_assignments, state.peers, on_peer_event)
     # Нода слушает socket (локальные фронтенды) и, если задан, listen —
     # TCP для пиров роя.
     endpoints = [settings.node.socket]
     if settings.node.listen:
         endpoints.append(settings.node.listen)
-    server = ProtoServer(
-        endpoints,
-        NodeService(supervisor, router, node_id=node_id, restart_node=request_restart),
-        token=settings.swarm.token,
-        router=router.route,
+    node_service = NodeService(
+        supervisor,
+        router,
+        node_id=node_id,
+        restart_node=request_restart,
+        state=state,
+        state_path=settings.node.state_path,
+        local_service_endpoints=local_service_endpoints(settings),
+        swarm_token=settings.swarm.token,
+        own_endpoint=settings.node.listen,
+        emit=emit,
     )
+    server = ProtoServer(endpoints, node_service, token=settings.swarm.token, router=router.route)
     await server.start()
     for link in (*router.peers.values(), *router.local_services.values()):
         await link.start()
     await supervisor.start_all()
+
+    # Первый запуск с заданным swarm.join и ещё пустым списком пиров:
+    # разовый bootstrap через тот же NodeService.join(), что и `nodectl join`
+    # (принцип «сначала действие ноды») — дальше рой сам разъедется (join
+    # соседа ретранслирует node_joined остальным — «замыкание сетки» выше).
+    # Повторные рестарты join не повторяют — полагаемся на persisted-список.
+    if settings.swarm.join and not state.peers:
+        try:
+            result = await node_service.join(settings.swarm.join)
+            log.info(
+                "swarm.join: присоединились через %s, новых пиров: %s",
+                settings.swarm.join,
+                result["peers_added"],
+            )
+        except ProtoError as exc:
+            log.warning(
+                "swarm.join: сосед %s недоступен (%s) — присоединюсь позже",
+                settings.swarm.join,
+                exc,
+            )
 
     lifespan.install_signal_handlers()
     log.info(

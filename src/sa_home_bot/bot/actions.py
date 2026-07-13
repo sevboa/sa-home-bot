@@ -9,12 +9,16 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
-from sa_home_bot.bot import scan_limit
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+from sa_home_bot.bot import commands, scan_limit
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.db.store import Store
 from sa_home_bot.proto.messages import ActionSpec, Address, ProtoError
+from sa_home_bot.subscriptions.models import Subscription
 
 log = logging.getLogger(__name__)
 
@@ -94,3 +98,40 @@ async def run_action(
     if limited and decision is not None and text != ALREADY_QUEUED_TEXT:
         await store.set_action_ticks(f"{service}:{action_id}", list(decision.ticks))
     return text
+
+
+def rows(buttons: list[InlineKeyboardButton]) -> InlineKeyboardMarkup | None:
+    if not buttons:
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+    )
+
+
+def build_choice_keyboard(
+    subscription: Subscription | None,
+    service_actions: Sequence[ActionSpec],
+    service: str,
+    value: str,
+    node_id: str | None = None,
+) -> InlineKeyboardMarkup | None:
+    """Кнопки действий, чей первый параметр — choices, содержащий ``value``.
+
+    Общий паттерн карточки «объект среди choices» (служба ноды по имени,
+    приложение apps по id): право — `действие@service`, значение уходит в
+    callback вторым полем. ``node_id`` — та же карточка на пире.
+    """
+    if subscription is None:
+        return None
+    buttons = [
+        InlineKeyboardButton(
+            text=action.title,
+            callback_data=commands.action_callback(action.id, value, node_id, service=service),
+        )
+        for action in service_actions
+        if subscription.allows_action(action.id, service)
+        and action.params
+        and action.params[0].choices
+        and value in action.params[0].choices
+    ]
+    return rows(buttons)

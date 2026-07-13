@@ -168,3 +168,23 @@ class NodeRouter:
             {"id": link.name, "endpoint": str(link.endpoint), "alive": link.alive}
             for link in self.peers.values()
         ]
+
+    async def add_local_service(self, name: str, link: PeerLink) -> None:
+        """Добавить проксируемую локальную службу в рантайме (assign, этап 17)."""
+        self.local_services[name] = link
+        await link.start()
+
+    async def remove_local_service(self, name: str) -> None:
+        link = self.local_services.pop(name, None)
+        if link is not None:
+            await link.stop()
+
+    async def add_peer(self, link: PeerLink) -> None:
+        """Добавить пира в рантайме (join, этап 18)."""
+        self.peers[link.name] = link
+        await link.start()
+
+    async def remove_peer(self, node_id: str) -> None:
+        link = self.peers.pop(node_id, None)
+        if link is not None:
+            await link.stop()

@@ -178,22 +178,31 @@ class Supervisor:
         stop_timeout_s: float = 90.0,
     ) -> None:
         self.services: dict[str, SupervisedService] = {}
+        self._config_path = config_path
+        self._emit = emit
+        self._restart_delay_s = restart_delay_s
+        self._stop_timeout_s = stop_timeout_s
         for name in assignments:
-            args = ASSIGNMENT_ARGS.get(name)
-            if args is None:
+            try:
+                self.services[name] = self._make_service(name)
+            except ValueError:
                 log.error("Неизвестное назначение %r — пропускаю "
                           "(знаю: %s)", name, ", ".join(ASSIGNMENT_ARGS))
-                continue
-            cli_args = list(args)
-            if config_path is not None:
-                cli_args += ["--config", str(config_path)]
-            self.services[name] = SupervisedService(
-                name,
-                cli_args,
-                emit=emit,
-                restart_delay_s=restart_delay_s,
-                stop_timeout_s=stop_timeout_s,
-            )
+
+    def _make_service(self, name: str) -> SupervisedService:
+        args = ASSIGNMENT_ARGS.get(name)
+        if args is None:
+            raise ValueError(f"неизвестное назначение: {name!r}")
+        cli_args = list(args)
+        if self._config_path is not None:
+            cli_args += ["--config", str(self._config_path)]
+        return SupervisedService(
+            name,
+            cli_args,
+            emit=self._emit,
+            restart_delay_s=self._restart_delay_s,
+            stop_timeout_s=self._stop_timeout_s,
+        )
 
     async def start_all(self) -> None:
         for svc in self.services.values():
@@ -207,3 +216,22 @@ class Supervisor:
 
     def get(self, name: str) -> SupervisedService | None:
         return self.services.get(name)
+
+    def assign(self, name: str) -> SupervisedService:
+        """Добавить назначение в рантайме (без рестарта ноды).
+
+        Идемпотентно: уже назначенная служба возвращается как есть, не
+        пересоздаётся (и не теряет счётчик рестартов/pid).
+        """
+        existing = self.services.get(name)
+        if existing is not None:
+            return existing
+        svc = self._make_service(name)  # ValueError на неизвестное имя — наружу
+        self.services[name] = svc
+        return svc
+
+    async def unassign(self, name: str) -> None:
+        """Снять назначение: остановить и убрать из-под супервизии."""
+        svc = self.services.pop(name, None)
+        if svc is not None:
+            await svc.stop()

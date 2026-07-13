@@ -105,8 +105,8 @@ async def on_dynamic_action(
 
     if service == apps_view.APPS_SERVICE:
         # Кнопки act:apps из старых сообщений — тот же скилл, что команда.
-        text = await apps_view.run_app_skill(apps_link, action_id, value)
-        await callback.message.answer(text, disable_web_page_preview=True)
+        text, keyboard = await apps_view.run_app_skill(apps_link, subscription, action_id, value)
+        await callback.message.answer(text, reply_markup=keyboard, disable_web_page_preview=True)
         await callback.answer()
         return
 

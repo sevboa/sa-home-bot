@@ -3,7 +3,8 @@
 import pytest
 
 from sa_home_bot.node.service import NodeService
-from sa_home_bot.node.supervisor import STOPPED, Supervisor
+from sa_home_bot.node.state import NodeState
+from sa_home_bot.node.supervisor import STOPPED, SupervisedService, Supervisor
 from sa_home_bot.nodectl import render_services, render_status
 from sa_home_bot.proto.messages import ProtoError
 
@@ -173,6 +174,99 @@ def test_render_status_table():
 
 def test_render_services_empty():
     assert "не назначены" in render_services([])
+
+
+# --- assign/unassign: назначения в рантайме (этап 17) ---
+
+
+def test_describe_declares_assign_and_unassign():
+    sup, _ = _fake_supervisor()
+    desc = NodeService(sup).describe()
+    assign = desc.find_action("assign")
+    assert assign is not None
+    assert set(assign.params[0].choices) == {"monitor", "telegram-bot", "apps"}
+    unassign = desc.find_action("unassign")
+    assert unassign is not None
+    assert set(unassign.params[0].choices) == {"monitor", "telegram-bot"}  # только назначенные
+
+
+async def test_assign_starts_service_and_persists(tmp_path, monkeypatch):
+    started: list[str] = []
+
+    async def fake_start(self):
+        started.append(self.name)
+
+    monkeypatch.setattr(SupervisedService, "start", fake_start)
+
+    async def emit(event_type, data):
+        pass
+
+    sup = Supervisor([], None, emit=emit)
+    state_path = tmp_path / "node-state.json"
+    svc = NodeService(sup, state=NodeState(), state_path=str(state_path))
+
+    result = await svc.run_command("assign", {"name": "apps"})
+    assert result["service"]["name"] == "apps"
+    assert started == ["apps"]
+    assert "apps" in sup.services
+    assert NodeState.load(state_path).assignments == ["apps"]
+
+
+async def test_assign_idempotent_reuses_existing_service(monkeypatch):
+    started: list[str] = []
+
+    async def fake_start(self):
+        started.append(self.name)
+
+    monkeypatch.setattr(SupervisedService, "start", fake_start)
+
+    async def emit(event_type, data):
+        pass
+
+    sup = Supervisor(["monitor"], None, emit=emit)
+    original = sup.get("monitor")
+    svc = NodeService(sup)
+
+    await svc.run_command("assign", {"name": "monitor"})
+    assert sup.get("monitor") is original  # не пересоздана
+    assert started == ["monitor"]
+
+
+async def test_assign_unknown_name_is_bad_request():
+    sup, _ = _fake_supervisor()
+    with pytest.raises(ProtoError) as exc_info:
+        await NodeService(sup).run_command("assign", {"name": "no-such-service"})
+    assert exc_info.value.code == "bad_request"
+
+
+async def test_unassign_stops_removes_and_persists(tmp_path, monkeypatch):
+    stopped: list[str] = []
+
+    async def fake_stop(self):
+        stopped.append(self.name)
+
+    monkeypatch.setattr(SupervisedService, "stop", fake_stop)
+
+    async def emit(event_type, data):
+        pass
+
+    sup = Supervisor(["apps"], None, emit=emit)
+    state_path = tmp_path / "node-state.json"
+    state = NodeState(assignments=["apps"])
+    svc = NodeService(sup, state=state, state_path=str(state_path))
+
+    result = await svc.run_command("unassign", {"name": "apps"})
+    assert result == {"unassigned": "apps"}
+    assert "apps" not in sup.services
+    assert stopped == ["apps"]
+    assert NodeState.load(state_path).assignments == []
+
+
+async def test_unassign_unknown_service_is_bad_request():
+    sup, _ = _fake_supervisor()
+    with pytest.raises(ProtoError) as exc_info:
+        await NodeService(sup).run_command("unassign", {"name": "ghost"})
+    assert exc_info.value.code == "bad_request"
 
 
 def test_resolve_endpoint_relative_to_config_dir(tmp_path):

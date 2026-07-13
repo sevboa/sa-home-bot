@@ -25,7 +25,12 @@ from sa_home_bot.proto.messages import (
     ServiceInfo,
 )
 from sa_home_bot.sensors.disks import SMARTCTL_REQUIREMENT, read_disk_summaries_sync
-from sa_home_bot.sensors.power import read_power_events_sync, read_uptime_sync
+from sa_home_bot.sensors.power import (
+    JOURNALCTL_REQUIREMENT,
+    read_power_events_sync,
+    read_uptime_sync,
+)
+from sa_home_bot.utils.requirements import requirements_registry
 from sa_home_bot.worker.queue import DedupQueue
 
 SERVICE_NAME = "monitor"
@@ -87,9 +92,17 @@ class MonitorService:
 
         cpu_cfg = self._settings.sensors.cpu
         disk_cfg = self._settings.sensors.disks
-        missing_requirements = []
-        if disk_cfg.enabled and not SMARTCTL_REQUIREMENT.available():
-            missing_requirements.append(SMARTCTL_REQUIREMENT.install_hint())
+        # smartctl — только если мониторинг дисков включён (иначе не шумим
+        # про программу, от которой ничего и не ждали); journalctl — всегда,
+        # он нужен для истории отключений независимо от датчиков.
+        smartctl_problem = (
+            requirements_registry.problem_for(SMARTCTL_REQUIREMENT) if disk_cfg.enabled else None
+        )
+        requirements = [
+            p
+            for p in (smartctl_problem, requirements_registry.problem_for(JOURNALCTL_REQUIREMENT))
+            if p is not None
+        ]
         return {
             "node": self._node,
             "service": SERVICE_NAME,
@@ -104,7 +117,7 @@ class MonitorService:
                 "cpu": {"warn_c": cpu_cfg.warn_c, "crit_c": cpu_cfg.crit_c},
                 "disk": {"warn_c": disk_cfg.warn_c, "crit_c": disk_cfg.crit_c},
             },
-            "missing_requirements": missing_requirements,
+            "requirements": requirements,
         }
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
