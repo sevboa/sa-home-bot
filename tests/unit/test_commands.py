@@ -8,13 +8,21 @@ from sa_home_bot.proto.messages import ActionParam, ActionSpec
 from sa_home_bot.subscriptions.models import Subscription
 
 
-def test_menu_has_only_nodes_skill():
-    # В меню из реестра — только «Управление нодами»; остальные скилы
-    # первого уровня динамические (из describe apps, см. build_menu_commands).
+def test_menu_has_only_swarm_skill():
+    # В меню из реестра — только «Сводка роя»; остальные скилы первого
+    # уровня динамические (из describe apps, см. build_menu_commands).
     menu_names = {c.name for c in commands.MENU_CONTROL_COMMANDS}
-    assert menu_names == {"nodes"}
-    for name in ("status", "status_full", "stats", "scan_now", "downtime", "wake"):
+    assert menu_names == {"swarm"}
+    for name in ("nodes", "status", "status_full", "stats", "scan_now", "downtime", "wake"):
         assert commands.get(name).menu is False
+
+
+def test_required_right_for_aliases():
+    # /swarm и /nodes живут под одним правом «nodes» — конфиги не ломаются.
+    assert commands.required_right("swarm") == "nodes"
+    assert commands.required_right("nodes") == "nodes"
+    assert commands.required_right("status") == "status"
+    assert commands.required_right("no-such") == "no-such"  # неизвестное — как есть
 
 
 def test_all_status_actions_are_control_commands():

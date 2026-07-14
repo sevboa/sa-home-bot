@@ -90,31 +90,42 @@ async def test_store_action_ticks_bad_json(store):
 
 
 class FakeLink:
-    display_name = "монитор"
+    """Фейковый node_link: run_action всегда адресует службу через dst."""
+
+    display_name = "нода"
 
     def __init__(self, result=None, fail=False, action_ids=("scan_now",)):
-        from sa_home_bot.proto.messages import ActionSpec
+        from sa_home_bot.proto.messages import (
+            ActionSpec,
+            ServiceDescription,
+            ServiceInfo,
+        )
 
         self.calls: list[tuple[str, dict]] = []
+        self.dsts: list = []
         self.connected = not fail
         self._result = result if result is not None else {
             "sensor_queued": True,
             "smart_queued": True,
         }
         self._fail = fail
-        self._actions = tuple(
-            ActionSpec(id=a, title=f"Действие {a}") for a in action_ids
+        self._describe = ServiceDescription(
+            info=ServiceInfo(node="alfred", service="x", version="0"),
+            actions=tuple(ActionSpec(id=a, title=f"Действие {a}") for a in action_ids),
         )
 
-    async def actions(self):
-        return self._actions
+    async def describe(self, dst=None):
+        if self._fail:
+            return None
+        return self._describe
 
-    async def command(self, action, args=None):
+    async def command(self, action, args=None, dst=None):
         from sa_home_bot.bot.service_link import ServiceUnavailableError
 
         if self._fail:
             raise ServiceUnavailableError("нет связи")
         self.calls.append((action, args or {}))
+        self.dsts.append(dst)
         return self._result
 
 
@@ -171,3 +182,26 @@ async def test_run_action_not_rate_limited_for_node(store):
     assert "Принято" in text
     assert len(link.calls) == 2
     assert await store.get_action_ticks("node:restart") == []
+
+
+async def test_run_action_addresses_service_via_dst(store):
+    from sa_home_bot.bot import actions
+
+    link = FakeLink()
+    await actions.run_action(store, link, "monitor", "scan_now")
+    assert link.dsts[0].node is None and link.dsts[0].service == "monitor"
+
+    await actions.run_action(store, link, "monitor", "scan_now", node_id="arch-t480")
+    assert link.dsts[1].node == "arch-t480"
+
+
+async def test_run_action_peer_has_separate_limit_slot(store):
+    from sa_home_bot.bot import actions
+
+    link = FakeLink()
+    # Слот своей ноды израсходован — скан пира всё равно проходит.
+    await actions.run_action(store, link, "monitor", "scan_now")
+    text = await actions.run_action(store, link, "monitor", "scan_now", node_id="arch-t480")
+    assert "Принято" in text
+    assert len(await store.get_action_ticks("monitor:scan_now")) == 1
+    assert len(await store.get_action_ticks("arch-t480:monitor:scan_now")) == 1

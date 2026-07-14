@@ -1,0 +1,217 @@
+"""Сводка роя (/swarm, алиас /nodes): агрегатная шапка + строка на ноду.
+
+Данные собираются веером через одну свою ноду («спроси любого»): для каждой
+живой ноды — get_state её сервиса node и её монитора, всё параллельно
+(ProtoClient мультиплексирует запросы по id конверта) с коротким таймаутом
+на запрос — зависший пир не тормозит сводку, мёртвому запросов не шлём.
+
+Шапка — плотные факты без воздуха: сколько нод/в сети, разъезд версий ПО
+(ноды обновляются вручную — отставшие видны сразу), последний сбой по рою.
+Ограничение честности: у каждой ноды виден только ПОСЛЕДНИЙ outage — если
+после сбоя было штатное выключение, сбой из шапки исчезает (доп. запросов
+к истории ради этого сознательно не делаем).
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from datetime import UTC, datetime
+
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+from sa_home_bot.bot import actions, commands, node_links, node_view, status_view
+from sa_home_bot.bot.monitor_state import parse_outage
+from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
+from sa_home_bot.config import WakeConfig
+from sa_home_bot.domain.models import KIND_CPU, POWER_UNEXPECTED, PowerEvent
+from sa_home_bot.proto.messages import Address, ProtoError
+from sa_home_bot.runtime import format_duration
+from sa_home_bot.subscriptions.models import Subscription
+
+SWARM_HEADER = "🕸 <b>Рой</b>"
+
+# Домашний ПК известен рою только адресом для WoL, своей ноды на нём ещё нет.
+REMOTE_STUB_TEXT = (
+    "💻 <b>Домашний ПК</b> — вне роя (нода ещё не развёрнута), Wake-on-LAN"
+)
+
+WAKE_BUTTON_TEXT = "🔌 Разбудить ПК"
+
+# Таймаут одного запроса к пиру: зависший (но формально подключённый) пир
+# не должен держать сводку дольше этого.
+PEER_TIMEOUT_S = 3.0
+
+
+@dataclass
+class _NodeReport:
+    node_id: str
+    alive: bool
+    state: dict | None = None  # get_state сервиса node (None — не ответил)
+    monitor: dict | None = None  # get_state монитора (None — не ответил/нет)
+
+
+async def _fetch(node_link: ServiceLink, dst: Address | None) -> dict | None:
+    try:
+        return await asyncio.wait_for(node_link.get_state(dst=dst), PEER_TIMEOUT_S)
+    except (ServiceUnavailableError, ProtoError, TimeoutError):
+        return None
+
+
+async def _collect(node_link: ServiceLink, own_state: dict) -> list[_NodeReport]:
+    """Параллельный сбор состояний всех нод роя (своя — первой)."""
+    own = _NodeReport(node_id=own_state.get("node", "?"), alive=True, state=own_state)
+    reports = [own]
+    for peer in own_state.get("peers", []):
+        pid = peer.get("id", "?")
+        reports.append(_NodeReport(node_id=pid, alive=bool(peer.get("alive"))))
+
+    async def fill(report: _NodeReport) -> None:
+        node_dst = (
+            Address(node=report.node_id, service=node_view.NODE_SERVICE)
+            if report.state is None
+            else None
+        )
+        if report.state is None:
+            report.state = await _fetch(node_link, node_dst)
+        report.monitor = await _fetch(
+            node_link, Address(node=report.node_id, service=status_view.MONITOR_SERVICE)
+        )
+
+    await asyncio.gather(*(fill(r) for r in reports if r.alive))
+    return reports
+
+
+def _version_key(version: str) -> tuple[int, ...]:
+    """Покомпонентное сравнение версий; нечисловые компоненты считаются 0."""
+    parts = []
+    for chunk in version.split("."):
+        try:
+            parts.append(int(chunk))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
+
+
+def _versions_line(reports: list[_NodeReport]) -> str | None:
+    versions = {
+        r.node_id: r.state["version"]
+        for r in reports
+        if r.state is not None and r.state.get("version")
+    }
+    if not versions:
+        return None
+    latest = max(versions.values(), key=_version_key)
+    stale = {nid: v for nid, v in versions.items() if v != latest}
+    if not stale:
+        return f"ПО: v{latest} у всех"
+    lagging = ", ".join(f"{nid} (v{v})" for nid, v in sorted(stale.items()))
+    return f"ПО: свежая v{latest} · отстаёт {lagging}"
+
+
+def _last_failure_line(reports: list[_NodeReport], now: datetime) -> str | None:
+    """Самый свежий внезапный сбой по рою (см. ограничение в докстроке модуля)."""
+    freshest: tuple[datetime, str, PowerEvent] | None = None
+    for r in reports:
+        if r.monitor is None:
+            continue
+        outage = parse_outage(r.monitor.get("last_outage"))
+        if outage is None or outage.kind != POWER_UNEXPECTED:
+            continue
+        moment = outage.down_at or outage.boot_at
+        if freshest is None or moment > freshest[0]:
+            freshest = (moment, r.node_id, outage)
+    if freshest is None:
+        return None
+    moment, node_id, _ = freshest
+    ago = format_duration((now - moment).total_seconds())
+    return f"Последний сбой: {node_id}, {ago} назад"
+
+
+def _cpu_max(monitor: dict) -> float | None:
+    temps = [
+        h.get("temperature_c")
+        for h in monitor.get("health", [])
+        if h.get("kind") == KIND_CPU and h.get("temperature_c") is not None
+    ]
+    return max(temps) if temps else None
+
+
+def _node_line(report: _NodeReport) -> str:
+    name = node_links.node_command(report.node_id) or f"<b>{report.node_id}</b>"
+    if not report.alive:
+        return f"{node_view.LAMP_RED} {name} — не в сети"
+    if report.state is None:
+        return f"{node_view.LAMP_RED} {name} — не отвечает"
+
+    bits = [f"v{report.state.get('version', '?')}"]
+    services = report.state.get("services", [])
+    running = sum(1 for s in services if s.get("status") == "running")
+    bits.append(f"службы {running}/{len(services)}")
+
+    if report.monitor is None:
+        bits.append("монитор не отвечает")
+    else:
+        cpu = _cpu_max(report.monitor)
+        if cpu is not None:
+            bits.append(f"CPU {cpu:.0f}°C")
+        alerting = sum(
+            1 for h in report.monitor.get("health", []) if h.get("status") == "alerting"
+        )
+        if alerting:
+            bits.append(f"🔔 {alerting}")
+        if report.monitor.get("requirements"):
+            bits.append("⚠️")
+    return f"{node_view.LAMP_GREEN} {name} · " + " · ".join(bits)
+
+
+def render_swarm(
+    reports: list[_NodeReport], wake: WakeConfig | None, now: datetime
+) -> str:
+    total = len(reports)
+    online = sum(1 for r in reports if r.alive and r.state is not None)
+    lines = [f"{SWARM_HEADER}: {total} нод, в сети {online}"]
+    for extra in (_versions_line(reports), _last_failure_line(reports, now)):
+        if extra:
+            lines.append(extra)
+    lines.append("")
+    lines.extend(_node_line(r) for r in reports)
+    if wake is not None and wake.mac:
+        lines.append(REMOTE_STUB_TEXT)
+    return "\n".join(lines)
+
+
+def _wake_rows(
+    subscription: Subscription, wake: WakeConfig | None
+) -> list[InlineKeyboardButton]:
+    if wake is None or not wake.mac or not subscription.allows_command(commands.WAKE.name):
+        return []
+    return [
+        InlineKeyboardButton(
+            text=WAKE_BUTTON_TEXT,
+            callback_data=f"{commands.CALLBACK_PREFIX}:{commands.WAKE_CODE}",
+        )
+    ]
+
+
+def build_swarm_keyboard(
+    subscription: Subscription | None, wake: WakeConfig | None
+) -> InlineKeyboardMarkup | None:
+    """Только действия (wake) — навигация к нодам идёт ссылками в тексте."""
+    if subscription is None:
+        return None
+    return actions.rows(_wake_rows(subscription, wake))
+
+
+async def build_swarm_view(
+    node_link: ServiceLink,
+    subscription: Subscription | None,
+    wake: WakeConfig | None = None,
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    try:
+        own_state = await node_link.get_state()
+    except (ServiceUnavailableError, ProtoError):
+        return node_view.NODE_DOWN_TEXT, None
+    reports = await _collect(node_link, own_state)
+    text = render_swarm(reports, wake, datetime.now(tz=UTC))
+    return text, build_swarm_keyboard(subscription, wake)

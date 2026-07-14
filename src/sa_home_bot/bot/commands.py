@@ -11,6 +11,8 @@ class Command:
     description: str
     universal: bool  # True — работает везде без проверок
     menu: bool = True  # показывать в меню бота и /help
+    right: str | None = None  # имя права в allowed_commands (None = name):
+    # алиасы вроде /swarm↔/nodes живут под одним правом, конфиги не ломаются
 
 
 # Универсальные — всегда и везде, не указываются в allowed_commands.
@@ -20,10 +22,11 @@ WHOAMI = Command("whoami", "показать user_id и chat_id", universal=True
 
 # Управляющие — требуют права в allowed_commands не-broken подписки.
 # Меню бота — скилы роя первого уровня: динамические команды-приложения из
-# describe службы apps (см. setup.build_menu_commands) + «Управление нодами»
-# (/nodes). Остальное скрыто и вызывается кнопками: /status — карточка
-# локальной ноды, доступная из списка нод.
-NODES = Command("nodes", "управление нодами роя", universal=False)
+# describe службы apps (см. setup.build_menu_commands) + «Сводка роя»
+# (/swarm; /nodes — алиас под тем же правом). Остальное скрыто и вызывается
+# ссылками/кнопками: /status — карточка локальной ноды.
+SWARM = Command("swarm", "сводка роя", universal=False, right="nodes")
+NODES = Command("nodes", "сводка роя (алиас /swarm)", universal=False, menu=False)
 STATUS = Command("status", "карточка локальной ноды", universal=False, menu=False)
 STATUS_FULL = Command(
     "status_full", "подробный статус компонентов", universal=False, menu=False
@@ -40,6 +43,7 @@ ALL_COMMANDS: list[Command] = [
     HELP,
     PING,
     WHOAMI,
+    SWARM,
     NODES,
     STATUS,
     STATUS_FULL,
@@ -125,6 +129,14 @@ _BY_NAME = {c.name: c for c in ALL_COMMANDS}
 
 def get(name: str) -> Command | None:
     return _BY_NAME.get(name)
+
+
+def required_right(name: str) -> str:
+    """Имя права команды в allowed_commands (алиасы делят одно право)."""
+    cmd = _BY_NAME.get(name)
+    if cmd is None:
+        return name
+    return cmd.right or cmd.name
 
 
 def is_universal(name: str) -> bool:

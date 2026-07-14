@@ -13,7 +13,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from sa_home_bot.bot import commands, node_view, status_view
+from sa_home_bot.bot import commands, node_view, status_view, swarm_view
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
@@ -27,18 +27,19 @@ router = Router(name="status")
 @router.message(Command(commands.STATUS.name))
 async def cmd_status(
     message: Message,
-    link: ServiceLink,
     node_link: ServiceLink,
     subscription: Subscription | None = None,
 ) -> None:
     # /status — ярлык карточки локальной ноды (мониторинг + службы).
-    text, keyboard = await node_view.build_node_card_view(link, node_link, subscription)
+    text, keyboard = await node_view.build_node_card_view(node_link, subscription)
     await message.answer(text, reply_markup=keyboard)
 
 
 @router.message(Command(commands.STATUS_FULL.name))
-async def cmd_status_full(message: Message, link: ServiceLink) -> None:
-    await message.answer(await status_view.build_full_text(link))
+async def cmd_status_full(message: Message, node_link: ServiceLink) -> None:
+    await message.answer(
+        await status_view.build_full_text(node_link, dst=status_view.monitor_dst(None))
+    )
 
 
 def _parse_offset(parts: list[str]) -> int:
@@ -54,7 +55,6 @@ def _parse_offset(parts: list[str]) -> int:
 async def on_status_action(
     callback: CallbackQuery,
     store: Store,
-    link: ServiceLink,
     node_link: ServiceLink,
     config: Settings,
     subscription: Subscription | None = None,
@@ -68,20 +68,16 @@ async def on_status_action(
     code = parts[1]
 
     if code == commands.NODES_CODE:
-        text, keyboard = await node_view.build_nodes_list_view(
+        # Старые кнопки «Список нод» из чатов — теперь сводка роя.
+        text, keyboard = await swarm_view.build_swarm_view(
             node_link, subscription, config.wake
         )
         await callback.message.answer(text, reply_markup=keyboard)
     elif code == commands.NODE_CARD_CODE:
         node_id = parts[2] if len(parts) > 2 and parts[2] else None
-        if node_id:
-            text, keyboard = await node_view.build_remote_node_card_view(
-                node_link, subscription, node_id
-            )
-        else:
-            text, keyboard = await node_view.build_node_card_view(
-                link, node_link, subscription
-            )
+        text, keyboard = await node_view.build_node_card_view(
+            node_link, subscription, node_id
+        )
         await callback.message.answer(text, reply_markup=keyboard)
     elif code == commands.SERVICE_CARD_CODE:
         name = parts[2] if len(parts) > 2 else ""
@@ -91,16 +87,30 @@ async def on_status_action(
         )
         await callback.message.answer(text, reply_markup=keyboard)
     elif code == "full":
-        await callback.message.answer(await status_view.build_full_text(link))
+        node_id = parts[2] if len(parts) > 2 and parts[2] else None
+        await callback.message.answer(
+            await status_view.build_full_text(
+                node_link, dst=status_view.monitor_dst(node_id)
+            )
+        )
     elif code == "stats":
-        await callback.message.answer(await status_view.build_stats_text(link))
+        node_id = parts[2] if len(parts) > 2 and parts[2] else None
+        await callback.message.answer(
+            await status_view.build_stats_text(
+                node_link, dst=status_view.monitor_dst(node_id)
+            )
+        )
     elif code == "downtime":
         # Кнопка на карточке ноды — новая страница отдельным сообщением.
-        text, keyboard = await status_view.build_downtime_page()
+        node_id = parts[2] if len(parts) > 2 and parts[2] else None
+        text, keyboard = await status_view.build_downtime_page(node_link, node_id=node_id)
         await callback.message.answer(text, reply_markup=keyboard)
     elif code == commands.DOWNTIME_PAGE_CODE:
         # Кнопка «Следующие/Предыдущие 10» — редактируем то же сообщение.
-        text, keyboard = await status_view.build_downtime_page(_parse_offset(parts))
+        node_id = parts[3] if len(parts) > 3 and parts[3] else None
+        text, keyboard = await status_view.build_downtime_page(
+            node_link, _parse_offset(parts), node_id=node_id
+        )
         await callback.message.edit_text(text, reply_markup=keyboard)
     else:
         await callback.message.answer("Неизвестное действие.")

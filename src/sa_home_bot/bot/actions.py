@@ -71,23 +71,31 @@ async def run_action(
     service: str,
     action_id: str,
     value: str | None = None,
+    node_id: str | None = None,
 ) -> str:
-    """Выполнить действие службы, вернуть текст для чата."""
-    action = await find_action(link, action_id)
+    """Выполнить действие службы (своей или пира), вернуть текст для чата.
+
+    ``link`` — линк к своей ноде («спроси любого»): адресация службы/ноды —
+    через ``dst`` конверта, включая службы своей ноды (node_id=None).
+    Ключ анти-спам лимита включает node_id — форс-скан пира не расходует
+    слот своей ноды (и наоборот).
+    """
+    dst = Address(node=node_id, service=service)
+    action = await find_action(link, action_id, dst=dst)
     if action is None:
         return unavailable_text(link) if not link.connected else "Действие недоступно."
 
     limited = service in RATE_LIMITED_SERVICES
+    key = f"{node_id}:{service}:{action_id}" if node_id else f"{service}:{action_id}"
     decision = None
     if limited:
         now = datetime.now(tz=UTC)
-        key = f"{service}:{action_id}"
         decision = scan_limit.decide(await store.get_action_ticks(key), now)
         if not decision.allowed:
             return decision.reason
 
     try:
-        result = await link.command(action.id, build_args(action, value))
+        result = await link.command(action.id, build_args(action, value), dst=dst)
     except ServiceUnavailableError:
         return unavailable_text(link)
     except ProtoError as exc:
@@ -96,7 +104,7 @@ async def run_action(
     text = render_result(action, result)
     # Слот лимита расходуем только если действие реально принято.
     if limited and decision is not None and text != ALREADY_QUEUED_TEXT:
-        await store.set_action_ticks(f"{service}:{action_id}", list(decision.ticks))
+        await store.set_action_ticks(key, list(decision.ticks))
     return text
 
 

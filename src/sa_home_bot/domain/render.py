@@ -205,21 +205,28 @@ def _disk_usage(d: DiskSummary) -> str:
     return f"{_fmt_gb(used)} из {_fmt_gb(d.total_bytes)} ГБ ({pct}%)"
 
 
-def render_disk_line(d: DiskSummary, warn_c: float, crit_c: float) -> str:
-    """Строка диска: «HDD ST9250315AS» + «27°C 🥶| 117 из 245 ГБ (50%)».
+# Вид носителя → слово в заголовке строки диска.
+_KIND_WORD = {"hdd": "HDD", "ssd": "SSD", "nvme": "NVMe", "emmc": "eMMC"}
 
-    Без температуры (eMMC — SMART недоступен) — одной строкой:
-    «❔ eMMC: 7 из 57 ГБ (10%)». `warn_c`/`crit_c` — пороги алертов дисков
+
+def render_disk_line(d: DiskSummary, warn_c: float, crit_c: float) -> str:
+    """Строка диска: «NVMe Samsung 970» + «27°C 🥶| 117 из 245 ГБ (50%)».
+
+    У eMMC SMART физически нет — иконку здоровья не показываем вовсе
+    («eMMC: 7 из 57 ГБ (10%)»). У SMART-способных дисков ❔ значит ровно
+    «данных SMART нет» (нет прав/программы/холодный старт); причину объясняет
+    ⚠️-строка requirements в сводке. `warn_c`/`crit_c` — пороги алертов дисков
     из config.sensors.disks (та же шкала, что и для реальных уведомлений).
     """
-    icon = _DISK_ICON.get(d.health, "❔")  # ❔ — SMART недоступен (eMMC)
-    is_emmc = d.label == "eMMC"
-    heading = "eMMC" if is_emmc else f"HDD {escape(d.model) if d.model else '?'}"
+    word = _KIND_WORD.get(d.kind, "HDD")
+    is_emmc = d.kind == "emmc"
+    heading = word if is_emmc else f"{word} {escape(d.model) if d.model else '?'}"
+    icon = "" if is_emmc else _DISK_ICON.get(d.health, "❔") + " "
     usage = _disk_usage(d)
     if d.temperature_c is None:
-        return f"{icon} {heading}: {usage}"
+        return f"{icon}{heading}: {usage}"
     mood = _disk_temp_mood(d.temperature_c, warn_c, crit_c)
-    return f"{icon} {heading}\n {d.temperature_c:.0f}°C {mood}| {usage}"
+    return f"{icon}{heading}\n {d.temperature_c:.0f}°C {mood}| {usage}"
 
 
 def render_status_summary(

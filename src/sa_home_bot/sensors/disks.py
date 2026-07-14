@@ -214,12 +214,21 @@ def read_disks_sync(specs: list[str], now: datetime) -> list[SensorReading]:
 # --- Сводка по дискам для /status (SMART-здоровье + температура + место) ---
 
 
+# Виды носителей (DiskSummary.kind); определяют метку и ожидание SMART.
+KIND_HDD = "hdd"
+KIND_SSD = "ssd"
+KIND_NVME = "nvme"
+KIND_EMMC = "emmc"
+
+_KIND_LABEL = {KIND_HDD: "HDD", KIND_SSD: "SSD", KIND_NVME: "NVMe", KIND_EMMC: "eMMC"}
+
+
 @dataclass(frozen=True)
 class BlockDisk:
-    """Физический диск из lsblk: путь, тип носителя, точки монтирования."""
+    """Физический диск из lsblk: путь, вид носителя, точки монтирования."""
 
     path: str  # /dev/sda
-    is_mmc: bool  # eMMC/SD — SMART недоступен
+    kind: str  # KIND_HDD | KIND_SSD | KIND_NVME | KIND_EMMC
     mountpoints: tuple[str, ...]
     model: str | None
 
@@ -269,6 +278,27 @@ def parse_health(data: dict) -> str | None:
     return DISK_WARN if (pending or uncorrectable) else DISK_OK
 
 
+def _is_rotational(rota) -> bool:
+    """ROTA из lsblk: bool или строка "0"/"1"; отсутствие поля — считаем HDD
+    (старый lsblk без колонки — честная деградация к прежнему поведению)."""
+    if isinstance(rota, str):
+        return rota.strip() != "0"
+    if rota is None:
+        return True
+    return bool(rota)
+
+
+def _disk_kind(name: str, tran: str | None, rota) -> str:
+    """Вид носителя по данным lsblk (eMMC и SD не различаем — не усложняем)."""
+    if tran == "mmc" or name.startswith("mmcblk"):
+        return KIND_EMMC
+    if tran == "nvme" or name.startswith("nvme"):
+        return KIND_NVME
+    if not _is_rotational(rota):
+        return KIND_SSD
+    return KIND_HDD
+
+
 def parse_lsblk_disks(data: dict) -> list[BlockDisk]:
     """Разобрать ``lsblk -J`` в список физических дисков (type=disk)."""
     disks: list[BlockDisk] = []
@@ -277,12 +307,11 @@ def parse_lsblk_disks(data: dict) -> list[BlockDisk]:
             continue  # пропускаем mmcblkXbootY и не-диски
         mps: list[str] = []
         _collect_mountpoints(dev, mps)
-        tran = dev.get("tran")
         name = dev.get("name") or ""
         disks.append(
             BlockDisk(
                 path=dev.get("path") or f"/dev/{name}",
-                is_mmc=(tran == "mmc") or name.startswith("mmcblk"),
+                kind=_disk_kind(name, dev.get("tran"), dev.get("rota")),
                 mountpoints=tuple(mps),
                 model=dev.get("model"),
             )
@@ -322,7 +351,7 @@ def _list_block_disks_sync() -> list[BlockDisk]:
         return []
     try:
         out = subprocess.run(
-            ["lsblk", "-J", "-b", "-o", "NAME,TYPE,MOUNTPOINT,TRAN,MODEL,PATH"],
+            ["lsblk", "-J", "-b", "-o", "NAME,TYPE,MOUNTPOINT,TRAN,MODEL,PATH,ROTA"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -338,20 +367,26 @@ def _list_block_disks_sync() -> list[BlockDisk]:
 
 
 def _label_disks(disks: list[BlockDisk]) -> list[tuple[str, BlockDisk]]:
-    """Назначить метки: не-mmc диски → HDD1, HDD2…; mmc → eMMC.
+    """Назначить метки по виду носителя: HDD1/HDD2, SSD, NVMe, eMMC.
 
+    Номер добавляется только когда дисков одного вида больше одного.
     eMMC — первой (сразу после CPU в /status): для неё нет температуры (SMART
     недоступен), поэтому в сводке она должна открывать список дисков, а не
     прятаться в конце.
     """
+    ordered = sorted(disks, key=lambda x: (x.kind != KIND_EMMC, x.path))
+    per_kind: dict[str, int] = {}
+    for d in ordered:
+        per_kind[d.kind] = per_kind.get(d.kind, 0) + 1
+    counters: dict[str, int] = {}
     labelled: list[tuple[str, BlockDisk]] = []
-    hdd_n = 0
-    for d in sorted(disks, key=lambda x: (not x.is_mmc, x.path)):
-        if d.is_mmc:
-            label = "eMMC"
+    for d in ordered:
+        base = _KIND_LABEL[d.kind]
+        if per_kind[d.kind] > 1:
+            counters[d.kind] = counters.get(d.kind, 0) + 1
+            label = f"{base}{counters[d.kind]}"
         else:
-            hdd_n += 1
-            label = f"HDD{hdd_n}"
+            label = base
         labelled.append((label, d))
     return labelled
 
@@ -399,6 +434,7 @@ def read_disk_summaries_sync(
                 free_bytes=free,
                 total_bytes=total,
                 model=disk.model,
+                kind=disk.kind,
             )
         )
     return summaries

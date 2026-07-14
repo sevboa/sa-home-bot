@@ -17,7 +17,17 @@ from aiogram.enums import ParseMode
 from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 
 from sa_home_bot.bot import apps_view, commands
-from sa_home_bot.bot.handlers import apps, basic, control, node, power, stats, status, wake
+from sa_home_bot.bot.handlers import (
+    apps,
+    basic,
+    control,
+    node,
+    node_links,
+    power,
+    stats,
+    status,
+    wake,
+)
 from sa_home_bot.bot.middlewares import (
     AuthorizationMiddleware,
     CallbackAuthorizationMiddleware,
@@ -46,6 +56,8 @@ def build_dispatcher(book: SubscriptionBook) -> Dispatcher:
     dp.include_router(control.router)
     dp.include_router(power.router)
     dp.include_router(node.router)
+    # node_links до apps: ловит фиксированные префиксы /node_* и /svc_*.
+    dp.include_router(node_links.router)
     # apps последним: ловит динамические команды-скилы, остальное игнорирует.
     dp.include_router(apps.router)
     return dp
@@ -68,7 +80,7 @@ def build_menu_commands(
     menu += [
         _to_bot_command(c)
         for c in commands.MENU_CONTROL_COMMANDS
-        if subscription.allows_command(c.name)
+        if subscription.allows_command(c.right or c.name)
     ]
     menu += [_to_bot_command(c) for c in commands.UNIVERSAL_COMMANDS]
     return menu

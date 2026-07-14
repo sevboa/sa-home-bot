@@ -49,10 +49,11 @@ class AuthorizationMiddleware(BaseMiddleware):
         if command is None or commands.is_universal(command):
             return await handler(event, data)
 
-        # Управляющая команда — проверяем права.
+        # Управляющая команда — проверяем права (алиасы делят одно право).
         if commands.is_control(command):
+            right = commands.required_right(command)
             if subscription is None or subscription.broken or not subscription.allows_command(
-                command
+                right
             ):
                 log.info("Отказ в /%s для chat_id=%s", command, chat_id)
                 await event.answer(DENIED_TEXT)
@@ -97,7 +98,7 @@ class CallbackAuthorizationMiddleware(BaseMiddleware):
         if (
             subscription is None
             or subscription.broken
-            or not subscription.allows_command(cmd.name)
+            or not subscription.allows_command(cmd.right or cmd.name)
         ):
             log.info("Отказ в кнопке %s для chat_id=%s", event.data, chat_id)
             await event.answer("⛔️ Недоступно", show_alert=True)

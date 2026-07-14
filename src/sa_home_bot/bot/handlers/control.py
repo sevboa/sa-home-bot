@@ -14,5 +14,5 @@ router = Router(name="control")
 
 
 @router.message(Command(commands.SCAN_NOW.name))
-async def cmd_scan_now(message: Message, store: Store, link: ServiceLink) -> None:
-    await message.answer(await actions.run_action(store, link, "monitor", "scan_now"))
+async def cmd_scan_now(message: Message, store: Store, node_link: ServiceLink) -> None:
+    await message.answer(await actions.run_action(store, node_link, "monitor", "scan_now"))

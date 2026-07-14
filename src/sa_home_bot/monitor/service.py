@@ -20,6 +20,7 @@ from sa_home_bot.domain.models import HealthState, PowerEvent
 from sa_home_bot.jobs.scan import SensorScanJob
 from sa_home_bot.jobs.smart import SmartScanJob
 from sa_home_bot.proto.messages import (
+    ActionParam,
     ActionSpec,
     ServiceDescription,
     ServiceInfo,
@@ -36,6 +37,11 @@ from sa_home_bot.worker.queue import DedupQueue
 SERVICE_NAME = "monitor"
 
 ACTION_SCAN_NOW = "scan_now"
+ACTION_DOWNTIME = "downtime"
+
+# Границы страницы истории отключений (защита от абсурдных запросов).
+DOWNTIME_DEFAULT_LIMIT = 10
+DOWNTIME_MAX_LIMIT = 50
 
 
 def _health_dict(state: HealthState) -> dict[str, Any]:
@@ -71,10 +77,22 @@ class MonitorService:
         self._node = socket.gethostname()
 
     def describe(self) -> ServiceDescription:
+        # downtime — команда-представление (чтение с параметрами): фронтенды
+        # не рисуют её кнопкой (у неё есть params), а зовут сами с offset/limit.
         return ServiceDescription(
             info=ServiceInfo(node=self._node, service=SERVICE_NAME, version=__version__),
             capabilities=("temperature", "smart", "power"),
-            actions=(ActionSpec(id=ACTION_SCAN_NOW, title="🔄 Скан датчиков"),),
+            actions=(
+                ActionSpec(id=ACTION_SCAN_NOW, title="🔄 Скан датчиков"),
+                ActionSpec(
+                    id=ACTION_DOWNTIME,
+                    title="⏻ Отключения",
+                    params=(
+                        ActionParam(name="offset", type="int", required=False),
+                        ActionParam(name="limit", type="int", required=False),
+                    ),
+                ),
+            ),
         )
 
     async def get_state(self) -> dict[str, Any]:
@@ -125,5 +143,33 @@ class MonitorService:
             sensor_queued = await self._queue.put(SensorScanJob())
             smart_queued = await self._queue.put(SmartScanJob())
             return {"sensor_queued": sensor_queued, "smart_queued": smart_queued}
+        if action == ACTION_DOWNTIME:
+            return await self._downtime_page(args)
         # Сервер валидирует action по describe — сюда неизвестное не доходит.
         raise ValueError(f"необъявленное действие: {action}")
+
+    async def _downtime_page(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Страница истории отключений ЭТОЙ машины (`last`+`journalctl`).
+
+        Раньше бот читал журнал сам — работало только для своей машины;
+        теперь история любой ноды доступна по протоколу («спроси любого»).
+        """
+        try:
+            offset = max(0, int(args.get("offset", 0)))
+        except (TypeError, ValueError):
+            offset = 0
+        try:
+            limit = int(args.get("limit", DOWNTIME_DEFAULT_LIMIT))
+        except (TypeError, ValueError):
+            limit = DOWNTIME_DEFAULT_LIMIT
+        limit = max(1, min(limit, DOWNTIME_MAX_LIMIT))
+
+        loop = asyncio.get_running_loop()
+        events, has_next = await loop.run_in_executor(
+            None, read_power_events_sync, offset, limit
+        )
+        return {
+            "events": [_outage_dict(e) for e in events],
+            "offset": offset,
+            "has_next": has_next,
+        }

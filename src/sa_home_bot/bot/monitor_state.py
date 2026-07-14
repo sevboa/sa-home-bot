@@ -37,6 +37,9 @@ def parse_health_state(raw: dict[str, Any]) -> HealthState:
 
 
 def parse_disk_summary(raw: dict[str, Any]) -> DiskSummary:
+    # kind появился позже label: старый монитор его не шлёт — выводим из
+    # метки (eMMC узнаваема), остальное честно деградирует к hdd.
+    kind = raw.get("kind") or ("emmc" if raw["label"] == "eMMC" else "hdd")
     return DiskSummary(
         label=raw["label"],
         health=raw.get("health"),
@@ -44,6 +47,7 @@ def parse_disk_summary(raw: dict[str, Any]) -> DiskSummary:
         free_bytes=raw.get("free_bytes"),
         total_bytes=raw.get("total_bytes"),
         model=raw.get("model"),
+        kind=kind,
     )
 
 

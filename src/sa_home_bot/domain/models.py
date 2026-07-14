@@ -121,15 +121,20 @@ class DiskSummary:
 
     Собирается на лету (не из БД): SMART-здоровье и температура — из smartctl
     (только для дисков с известным типом адаптера), свободное место — из точек
-    монтирования. `health`/`temperature_c` = None, если SMART недоступен (eMMC).
+    монтирования. `health`/`temperature_c` = None, если SMART недоступен
+    (у eMMC — физически; у прочих — нет прав/программы, см. requirements).
+
+    ``kind`` — вид носителя; дефолт "hdd" — совместимость со старыми
+    мониторами, в чьих ответах поля ещё нет.
     """
 
-    label: str  # короткая метка: HDD1, HDD2, eMMC
+    label: str  # короткая метка: HDD1, SSD, NVMe, eMMC
     health: str | None  # DISK_OK | DISK_WARN | DISK_FAIL | None (недоступно)
     temperature_c: float | None
     free_bytes: int | None
     total_bytes: int | None
     model: str | None = None
+    kind: str = "hdd"  # hdd | ssd | nvme | emmc
 
 
 @dataclass(frozen=True)

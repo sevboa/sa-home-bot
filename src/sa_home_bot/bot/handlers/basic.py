@@ -34,7 +34,7 @@ def build_help(
     skills += [
         f"/{cmd.name} — {cmd.description}"
         for cmd in commands.MENU_CONTROL_COMMANDS
-        if subscription is not None and subscription.allows_command(cmd.name)
+        if subscription is not None and subscription.allows_command(cmd.right or cmd.name)
     ]
     lines = ["<b>Доступные команды</b>", ""]
     if skills:

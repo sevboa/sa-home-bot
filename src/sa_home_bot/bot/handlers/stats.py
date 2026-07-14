@@ -13,5 +13,7 @@ router = Router(name="stats")
 
 
 @router.message(Command(commands.STATS.name))
-async def cmd_stats(message: Message, link: ServiceLink) -> None:
-    await message.answer(await status_view.build_stats_text(link))
+async def cmd_stats(message: Message, node_link: ServiceLink) -> None:
+    await message.answer(
+        await status_view.build_stats_text(node_link, dst=status_view.monitor_dst(None))
+    )

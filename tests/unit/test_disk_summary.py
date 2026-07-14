@@ -66,22 +66,45 @@ def test_health_args_includes_type_and_flags():
 
 
 # Форма реального `lsblk -J -b`: диски + служебные mmcblk*boot* + разделы.
+# ROTA у современного lsblk — bool; sda/sdb — вращающиеся USB-HDD.
 LSBLK = {
     "blockdevices": [
         {
             "name": "sda", "type": "disk", "tran": "usb", "model": "ST9250315AS",
-            "path": "/dev/sda",
+            "path": "/dev/sda", "rota": True,
             "children": [{"name": "sda1", "type": "part", "mountpoints": ["/mnt/scratch"]}],
         },
         {
             "name": "mmcblk0", "type": "disk", "tran": "mmc", "model": None,
-            "path": "/dev/mmcblk0",
+            "path": "/dev/mmcblk0", "rota": False,
             "children": [
                 {"name": "mmcblk0p2", "type": "part", "mountpoints": ["[SWAP]"]},
                 {"name": "mmcblk0p3", "type": "part", "mountpoints": ["/"]},
             ],
         },
         {"name": "mmcblk0boot0", "type": "disk", "path": "/dev/mmcblk0boot0"},
+    ]
+}
+
+# Ноутбук с NVMe (arch-t480) + SATA SSD со строковым ROTA (старый формат lsblk).
+LSBLK_MIXED = {
+    "blockdevices": [
+        {
+            "name": "nvme0n1", "type": "disk", "tran": "nvme", "model": "SAMSUNG 970",
+            "path": "/dev/nvme0n1", "rota": False,
+        },
+        {
+            "name": "sda", "type": "disk", "tran": "sata", "model": "Crucial MX500",
+            "path": "/dev/sda", "rota": "0",
+        },
+        {
+            "name": "sdb", "type": "disk", "tran": "usb", "model": "WD Blue",
+            "path": "/dev/sdb", "rota": "1",
+        },
+        {
+            "name": "sdc", "type": "disk", "tran": "usb", "model": "Hitachi",
+            "path": "/dev/sdc",  # без ROTA (старый lsblk) → считаем HDD
+        },
     ]
 }
 
@@ -94,14 +117,31 @@ def test_parse_lsblk_skips_boot_and_collects_mounts():
     assert sda.mountpoints == ("/mnt/scratch",)
     mmc = next(d for d in disks if d.path == "/dev/mmcblk0")
     assert mmc.mountpoints == ("/",)  # SWAP исключён
-    assert mmc.is_mmc is True and sda.is_mmc is False
+    assert mmc.kind == "emmc" and sda.kind == "hdd"
 
 
-def test_label_disks_hdd_numbering_and_emmc():
+def test_parse_lsblk_kinds_nvme_ssd_hdd():
+    kinds = {d.path: d.kind for d in parse_lsblk_disks(LSBLK_MIXED)}
+    assert kinds == {
+        "/dev/nvme0n1": "nvme",
+        "/dev/sda": "ssd",  # строковый ROTA "0"
+        "/dev/sdb": "hdd",  # строковый ROTA "1"
+        "/dev/sdc": "hdd",  # ROTA отсутствует — деградация к hdd
+    }
+
+
+def test_label_disks_single_of_kind_without_number():
     disks = parse_lsblk_disks(LSBLK)
     labels = dict((label, d.path) for label, d in _label_disks(disks))
-    assert labels["HDD1"] == "/dev/sda"
+    # По одному диску каждого вида — метки без номера.
+    assert labels["HDD"] == "/dev/sda"
     assert labels["eMMC"] == "/dev/mmcblk0"
+
+
+def test_label_disks_numbering_only_when_multiple():
+    labels = [label for label, _ in _label_disks(parse_lsblk_disks(LSBLK_MIXED))]
+    # NVMe и SSD по одному — без номера; HDD два — HDD1/HDD2.
+    assert labels == ["NVMe", "SSD", "HDD1", "HDD2"]
 
 
 def test_label_disks_emmc_comes_first():
@@ -110,3 +150,16 @@ def test_label_disks_emmc_comes_first():
     disks = parse_lsblk_disks(LSBLK)
     ordered_labels = [label for label, _ in _label_disks(disks)]
     assert ordered_labels[0] == "eMMC"
+
+
+def test_parse_disk_summary_kind_fallback_for_old_monitor():
+    # Ответ монитора старой версии (без поля kind) — бот не падает: eMMC
+    # выводится из метки, остальное деградирует к hdd.
+    from sa_home_bot.bot.monitor_state import parse_disk_summary
+
+    old_hdd = parse_disk_summary({"label": "HDD1", "model": "X"})
+    assert old_hdd.kind == "hdd"
+    old_emmc = parse_disk_summary({"label": "eMMC"})
+    assert old_emmc.kind == "emmc"
+    new_nvme = parse_disk_summary({"label": "NVMe", "kind": "nvme"})
+    assert new_nvme.kind == "nvme"

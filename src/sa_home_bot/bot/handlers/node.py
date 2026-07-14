@@ -1,4 +1,4 @@
-"""/nodes — список нод роя; обработка динамических действий «act:…».
+"""/swarm (алиас /nodes) — сводка роя; обработка динамических действий «act:…».
 
 Права на callback уже проверены CallbackAuthorizationMiddleware
 (`действие@служба`). Здесь только маршрутизация к нужному линку и рендер.
@@ -14,7 +14,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from sa_home_bot.bot import actions, apps_view, commands, node_view
+from sa_home_bot.bot import actions, apps_view, commands, node_view, swarm_view
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
@@ -25,17 +25,63 @@ log = logging.getLogger(__name__)
 
 router = Router(name="node")
 
+# Имя собственной службы бота в назначениях ноды (см. supervisor.ASSIGNMENT_ARGS).
+SELF_SERVICE_NAME = "telegram-bot"
 
-@router.message(Command(commands.NODES.name))
-async def cmd_nodes(
+SELF_RESTART_TEXT = "🔄 Перезапускаюсь, вернусь через минуту."
+SELF_STOP_TEXT = (
+    "⏹ Останавливаюсь. Запустить меня снова можно только с ноды: "
+    "<code>nodectl start telegram-bot</code>."
+)
+
+# Ключ app_state с id последнего callback'а само-рестарта — защита от
+# переигрыша: Telegram мог не подтвердить offset до смерти процесса, и после
+# рестарта тот же callback приедет снова (иначе бот перезапускал бы себя в цикле).
+SELF_RESTART_CB_KEY = "self_restart_cb"
+
+
+def _is_self_shutdown(action_id: str, value: str | None, node_id: str | None) -> bool:
+    """Действие, убивающее сам процесс бота: stop/restart своей службы
+    telegram-bot или само-рестарт своей ноды (нода перезапускает и детей)."""
+    if node_id is not None:
+        return False  # чужой telegram-bot — обычная ветка
+    if action_id == "restart_node":
+        return True
+    return action_id in ("stop", "restart") and value == SELF_SERVICE_NAME
+
+
+async def _handle_self_shutdown(
+    callback: CallbackQuery, store: Store, node_link: ServiceLink, action_id: str, value: str | None
+) -> None:
+    """Спец-кейс: бот просит ноду убить себя же.
+
+    Ответ ноды не дождаться (нода ждёт нашей смерти) — прощаемся ДО команды,
+    ошибки рвущегося линка глотаем, карточку не перерисовываем. После подъёма
+    штатное «Сторож снова на посту» шлёт lifecycle.
+    """
+    if await store.get_state(SELF_RESTART_CB_KEY) == callback.id:
+        log.warning("Повторный callback само-рестарта %s — игнорирую", callback.id)
+        await callback.answer()
+        return
+    await store.set_state(SELF_RESTART_CB_KEY, callback.id)
+
+    await callback.answer()
+    await callback.message.answer(
+        SELF_STOP_TEXT if action_id == "stop" else SELF_RESTART_TEXT
+    )
+    with contextlib.suppress(ServiceUnavailableError, ProtoError, TimeoutError):
+        args = {"name": value} if value else {}
+        await node_link.command(action_id, args)
+
+
+@router.message(Command(commands.SWARM.name, commands.NODES.name))
+async def cmd_swarm(
     message: Message,
     node_link: ServiceLink,
     config: Settings,
     subscription: Subscription | None = None,
 ) -> None:
-    text, keyboard = await node_view.build_nodes_list_view(
-        node_link, subscription, config.wake
-    )
+    text, keyboard = await swarm_view.build_swarm_view(node_link, subscription, config.wake)
     await message.answer(text, reply_markup=keyboard)
 
 
@@ -64,7 +110,6 @@ async def _run_node_action(
 async def on_dynamic_action(
     callback: CallbackQuery,
     store: Store,
-    link: ServiceLink,
     node_link: ServiceLink,
     apps_link: ServiceLink,
     config: Settings,
@@ -76,27 +121,25 @@ async def on_dynamic_action(
         return
     service, action_id, value, node_id = parsed
 
+    if service == node_view.NODE_SERVICE and _is_self_shutdown(action_id, value, node_id):
+        await _handle_self_shutdown(callback, store, node_link, action_id, value)
+        return
+
     if service == node_view.NODE_SERVICE:
         error = await _run_node_action(node_link, action_id, value, node_id)
         if error is not None:
             await callback.message.answer(error)
-        elif value is not None:
+        elif value is not None and action_id not in ("assign", "unassign"):
             # Действие над службой (своей или пира) — перерисовать её карточку.
             text, keyboard = await node_view.build_service_card_view(
                 node_link, subscription, value, node_id
             )
             with contextlib.suppress(TelegramBadRequest):
                 await callback.message.edit_text(text, reply_markup=keyboard)
-        elif node_id is not None:
-            # Питание пира — перерисовать его карточку.
-            text, keyboard = await node_view.build_remote_node_card_view(
-                node_link, subscription, node_id
-            )
-            with contextlib.suppress(TelegramBadRequest):
-                await callback.message.edit_text(text, reply_markup=keyboard)
         else:
-            text, keyboard = await node_view.build_nodes_list_view(
-                node_link, subscription, config.wake
+            # Питание/назначение — перерисовать карточку самой ноды.
+            text, keyboard = await node_view.build_node_card_view(
+                node_link, subscription, node_id
             )
             with contextlib.suppress(TelegramBadRequest):
                 await callback.message.edit_text(text, reply_markup=keyboard)
@@ -111,7 +154,9 @@ async def on_dynamic_action(
         return
 
     if service == "monitor":
-        text = await actions.run_action(store, link, service, action_id, value)
+        text = await actions.run_action(
+            store, node_link, service, action_id, value, node_id=node_id
+        )
         await callback.message.answer(text)
         await callback.answer()
         return

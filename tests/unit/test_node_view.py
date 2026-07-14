@@ -1,19 +1,13 @@
-"""Раздел нод: список нод → карточка ноды → карточка службы."""
+"""Раздел нод: единая карточка ноды → карточка службы (сводка роя — в
+test_swarm_view.py)."""
 
 from sa_home_bot.bot.node_view import (
-    NODE_DOWN_TEXT,
-    NODES_HEADER,
-    REMOTE_STUB_TEXT,
     build_node_card_keyboard,
-    build_nodes_list_keyboard,
-    build_remote_node_card_keyboard,
     build_service_card_keyboard,
-    render_nodes_list,
-    render_remote_node_card,
+    render_node_card_header,
     render_service_card,
     render_services_block,
 )
-from sa_home_bot.config import WakeConfig
 from sa_home_bot.proto.messages import ActionParam, ActionSpec
 from sa_home_bot.subscriptions.models import Subscription
 
@@ -31,15 +25,6 @@ NODE_STATE = {
         {"name": "telegram-bot", "status": "stopped", "pid": None, "restarts": 2},
     ],
 }
-
-NODE_STATE_WITH_PEERS = {
-    **NODE_STATE,
-    "peers": [
-        {"id": "arch-t480", "endpoint": "tcp://100.110.58.31:8710", "alive": True},
-        {"id": "winpc", "endpoint": "tcp://100.64.0.5:8710", "alive": False},
-    ],
-}
-
 
 def _node_actions() -> list[ActionSpec]:
     name_param = ActionParam(
@@ -60,106 +45,27 @@ def _sub(*allowed: str) -> Subscription:
     return Subscription(chat_id=1, name="me", allowed_commands=frozenset(allowed))
 
 
-# --- Список нод ---------------------------------------------------------------
+# --- Единая карточка ноды (своя и пир — один рендер и одна клавиатура) --------
 
 
-def test_nodes_list_counts_running_services():
-    text = render_nodes_list(NODE_STATE, None)
-    assert NODES_HEADER in text
-    assert "alfred" in text and "1/2 работают" in text
-    assert REMOTE_STUB_TEXT not in text
-
-
-def test_nodes_list_with_wake_shows_remote_stub():
-    text = render_nodes_list(NODE_STATE, WakeConfig(mac="AA:BB:CC:DD:EE:FF"))
-    assert REMOTE_STUB_TEXT in text
-
-
-def test_nodes_list_node_down():
-    assert NODE_DOWN_TEXT in render_nodes_list(None, None)
-
-
-def test_nodes_list_shows_peers_with_lamps():
-    text = render_nodes_list(NODE_STATE_WITH_PEERS, None)
-    assert "🟢 <b>arch-t480</b>" in text
-    assert "🔴 <b>winpc</b> — не в сети" in text
-
-
-def test_nodes_list_keyboard_card_and_wake():
-    kb = build_nodes_list_keyboard(
-        _sub("status", "wake"), "alfred", wake=WakeConfig(mac="AA:BB:CC:DD:EE:FF")
-    )
-    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
-    assert codes == ["st:nodecard", "st:wake"]
-
-
-def test_nodes_list_keyboard_includes_peer_cards():
-    # «st:nodecard[…]» проверяется правом status (как и локальная карточка) —
-    # доступ к /nodes само по себе уже требует права nodes.
-    kb = build_nodes_list_keyboard(
-        _sub("status"), "alfred", NODE_STATE_WITH_PEERS["peers"]
-    )
-    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
-    assert codes == ["st:nodecard", "st:nodecard:arch-t480", "st:nodecard:winpc"]
-
-
-def test_nodes_list_keyboard_peer_cards_need_status_right():
-    kb = build_nodes_list_keyboard(
-        _sub("nodes"), "alfred", NODE_STATE_WITH_PEERS["peers"]
-    )
-    assert kb is None  # ни локальной, ни удалённых карточек, ни wake
-
-
-def test_nodes_list_keyboard_respects_rights():
-    wake = WakeConfig(mac="AA:BB:CC:DD:EE:FF")
-    kb = build_nodes_list_keyboard(_sub("wake"), "alfred", wake=wake)
-    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
-    assert codes == ["st:wake"]  # без права status нет карточки
-    assert build_nodes_list_keyboard(_sub("stats"), "alfred", wake=WakeConfig()) is None
-    assert build_nodes_list_keyboard(None, "alfred", wake=wake) is None
-
-
-# --- Карточка удалённой ноды --------------------------------------------------
-
-
-def test_remote_node_card_renders_uptime_and_services():
+def test_node_card_header_renders_name_version_uptime():
     state = {**NODE_STATE, "uptime_s": 65.0, "system_uptime_s": 3725.0}
-    text = render_remote_node_card(state)
+    text = render_node_card_header(state)
     assert "Нода alfred" in text and "v0.9.0" in text
     assert "Аптайм: система 1ч 2м 5с · нода 1м 5с" in text
-    assert "🟢 <b>monitor</b>" in text and "🔴 <b>telegram-bot</b>" in text
 
 
-def test_remote_node_card_keyboard_needs_nodes_right():
-    assert build_remote_node_card_keyboard(_sub("status"), "arch-t480") is None
-    kb = build_remote_node_card_keyboard(_sub("nodes"), "arch-t480")
-    assert [b.callback_data for row in kb.inline_keyboard for b in row] == ["st:nodes"]
+def test_node_card_header_without_uptime_fields():
+    text = render_node_card_header(NODE_STATE)
+    assert "Нода alfred" in text
+    assert "Аптайм" not in text
 
 
-def test_remote_node_card_keyboard_has_service_and_power_buttons():
-    kb = build_remote_node_card_keyboard(
-        _sub("nodes", "restart@node", "poweroff@node"),
-        "arch-t480",
-        ["monitor", "telegram-bot"],
-        [*_node_actions(), _power_action("poweroff")],
-    )
-    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
-    assert codes == [
-        "st:svc:monitor:arch-t480",
-        "st:svc:telegram-bot:arch-t480",
-        "act:node:poweroff::arch-t480",
-        "st:nodes",
-    ]
-
-
-# --- Карточка ноды ------------------------------------------------------------
-
-
-def test_services_block_renders_statuses():
+def test_services_block_renders_statuses_with_links():
     text = render_services_block(NODE_STATE)
-    assert "Службы ноды alfred" in text and "v0.9.0" in text
-    assert "🟢 <b>monitor</b> — работает, pid 123" in text
-    assert "🔴 <b>telegram-bot</b> — остановлена" in text
+    # Имя службы — ссылка на её карточку; дефисы нормализованы.
+    assert "🟢 /svc_alfred_monitor — работает, pid 123" in text
+    assert "🔴 /svc_alfred_telegram_bot — остановлена" in text
 
 
 def test_services_block_empty():
@@ -168,7 +74,8 @@ def test_services_block_empty():
     )
 
 
-def test_node_card_keyboard_views_and_service_cards():
+def test_node_card_keyboard_actions_only_no_service_cards():
+    # Навигация к службам — ссылками в тексте, кнопок ⚙️ больше нет.
     monitor_actions = [ActionSpec(id="scan_now", title="🔄 Скан датчиков")]
     kb = build_node_card_keyboard(
         _sub("status_full", "nodes", "scan_now@monitor"),
@@ -176,18 +83,32 @@ def test_node_card_keyboard_views_and_service_cards():
         ["monitor", "telegram-bot"],
     )
     codes = {b.callback_data for row in kb.inline_keyboard for b in row}
+    assert codes == {"st:full", "act:monitor:scan_now"}
+
+
+def test_node_card_keyboard_peer_carries_node_id_everywhere():
+    # Тот же состав кнопок, что у своей ноды, — каждая несёт node_id пира
+    # (ARCHITECTURE §11 п. 1: рой равноправен).
+    monitor_actions = [ActionSpec(id="scan_now", title="🔄 Скан датчиков")]
+    assign = ActionSpec(
+        id="assign",
+        title="➕ Назначить",
+        params=(ActionParam(name="name", choices=("monitor", "apps")),),
+    )
+    kb = build_node_card_keyboard(
+        _sub("status_full", "nodes", "scan_now@monitor", "poweroff@node", "assign@node"),
+        monitor_actions,
+        ["monitor"],
+        [_power_action("poweroff"), assign],
+        node_id="arch-t480",
+    )
+    codes = {b.callback_data for row in kb.inline_keyboard for b in row}
     assert codes == {
-        "st:full",
-        "act:monitor:scan_now",
-        "st:svc:monitor",
-        "st:svc:telegram-bot",
+        "st:full:arch-t480",
+        "act:monitor:scan_now::arch-t480",
+        "act:node:poweroff::arch-t480",
+        "act:node:assign:apps:arch-t480",  # «Назначить» доступно и пиру
     }
-
-
-def test_node_card_keyboard_service_cards_need_nodes_right():
-    kb = build_node_card_keyboard(_sub("status_full"), [], ["monitor"])
-    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
-    assert codes == ["st:full"]
 
 
 def test_node_card_keyboard_includes_power_buttons():
@@ -206,7 +127,8 @@ def test_node_card_keyboard_includes_power_buttons():
 
 def test_service_card_text():
     text = render_service_card("alfred", NODE_STATE["services"][0])
-    assert "Служба monitor" in text and "нода alfred" in text
+    assert "Служба monitor" in text
+    assert "нода /node_alfred" in text  # обратный переход — ссылкой
     assert "🟢 работает, pid 123" in text
     assert "Рестартов после падений: 0" in text
 

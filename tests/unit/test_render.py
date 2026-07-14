@@ -65,7 +65,7 @@ def _disks():
     return [
         DiskSummary("HDD1", DISK_WARN, 31.0, 137_000_000_000, 245_000_000_000, "ST9250"),
         DiskSummary("HDD2", DISK_OK, 29.0, 277_000_000_000, 314_000_000_000, "Hitachi"),
-        DiskSummary("eMMC", None, None, 49_000_000_000, 56_000_000_000, None),
+        DiskSummary("eMMC", None, None, 49_000_000_000, 56_000_000_000, None, kind="emmc"),
     ]
 
 
@@ -105,7 +105,8 @@ def test_render_status_summary_has_uptime_temps_and_outage():
     assert "uptime: 1 h" in text
     assert "CPU: 42.0°C" in text
     assert "⚠️ HDD ST9250" in text and "✅ HDD Hitachi" in text  # иконка + модель
-    assert "❔ eMMC:" in text  # SMART недоступен, однострочно (нет температуры)
+    # eMMC — без иконки здоровья вовсе (SMART у неё физически нет), однострочно.
+    assert "\neMMC:" in text and "❔ eMMC" not in text
     assert "31°C" in text  # температура HDD1
     assert "108 из 245 ГБ" in text  # занятое место (было — свободное)
     assert "last off:" in text
@@ -131,6 +132,29 @@ def test_disk_temp_mood_matches_configured_alert_thresholds():
     disk = DiskSummary("HDD1", DISK_OK, 48.0, 100_000_000_000, 200_000_000_000, "X")
     assert "🙂" in render_disk_line(disk, warn_c=55.0, crit_c=65.0)
     assert "🥵" in render_disk_line(disk, warn_c=45.0, crit_c=65.0)
+
+
+def test_disk_line_heading_by_kind():
+    from sa_home_bot.domain.models import DISK_OK, DiskSummary
+    from sa_home_bot.domain.render import render_disk_line
+
+    nvme = DiskSummary("NVMe", DISK_OK, 40.0, 1, 2, "SAMSUNG 970", kind="nvme")
+    ssd = DiskSummary("SSD", DISK_OK, 35.0, 1, 2, "Crucial MX500", kind="ssd")
+    assert "NVMe SAMSUNG 970" in render_disk_line(nvme, warn_c=55.0, crit_c=65.0)
+    assert "SSD Crucial MX500" in render_disk_line(ssd, warn_c=55.0, crit_c=65.0)
+
+
+def test_disk_line_question_mark_only_for_smart_capable():
+    from sa_home_bot.domain.models import DiskSummary
+    from sa_home_bot.domain.render import render_disk_line
+
+    # SMART-способный диск без данных (нет прав/программы) — ❔.
+    no_smart = DiskSummary("NVMe", None, None, 1, 2, "SAMSUNG 970", kind="nvme")
+    assert render_disk_line(no_smart, warn_c=55.0, crit_c=65.0).startswith("❔")
+    # У eMMC SMART физически нет — без иконки вовсе.
+    emmc = DiskSummary("eMMC", None, None, 1, 2, None, kind="emmc")
+    line = render_disk_line(emmc, warn_c=55.0, crit_c=65.0)
+    assert line.startswith("eMMC:") and "❔" not in line
 
 
 def test_render_stats_counts_and_runs():
