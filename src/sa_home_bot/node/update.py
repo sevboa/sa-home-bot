@@ -16,6 +16,7 @@ import logging
 import re
 import subprocess
 
+from sa_home_bot.proto.client import DEFAULT_TIMEOUT
 from sa_home_bot.utils.version import version_key
 
 log = logging.getLogger(__name__)
@@ -24,9 +25,15 @@ PACKAGE_NAME = "sa-home-bot"
 
 _TAG_RE = re.compile(r"v\d+(?:\.\d+)*")
 
-# Таймауты внешних вызовов: ls-remote — короткая read-only сетевая операция;
-# pipx install — git clone + сборка пакета, может идти существенно дольше.
-LS_REMOTE_TIMEOUT_S = 15
+# ls-remote — короткая read-only сетевая операция, вызывается синхронно внутри
+# check_update/update и ждёт ответа клиент (nodectl/бот) с таймаутом
+# DEFAULT_TIMEOUT протокола. Держим заметно меньше него — иначе клиент
+# сдаётся раньше, чем сервер успевает честно ответить "сеть не сработала", и
+# вместо аккуратной ошибки прилетает голый TimeoutError на всё соединение.
+LS_REMOTE_TIMEOUT_S = DEFAULT_TIMEOUT - 3
+# pipx install — git clone + сборка пакета, но это фоновая задача
+# (asyncio.create_task в node/service.py) — клиент её не ждёт, таймаут можно
+# держать большим.
 PIPX_INSTALL_TIMEOUT_S = 300
 
 

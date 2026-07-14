@@ -290,6 +290,9 @@ async def _run(args: argparse.Namespace) -> int:
     except ProtoError as exc:
         print(f"Ошибка: {exc.message}", file=sys.stderr)
         return 1
+    except TimeoutError:
+        print("Нода не ответила вовремя — попробуйте ещё раз.", file=sys.stderr)
+        return 1
     finally:
         await client.close()
     return 0

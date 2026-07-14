@@ -100,6 +100,8 @@ async def run_action(
         return unavailable_text(link)
     except ProtoError as exc:
         return f"⚠️ Ошибка: {exc.message}"
+    except (ConnectionError, OSError, TimeoutError):
+        return f"⚠️ Служба «{link.display_name}» не ответила вовремя — попробуйте позже."
 
     text = render_result(action, result)
     # Слот лимита расходуем только если действие реально принято.
