@@ -299,12 +299,34 @@ def _disk_kind(name: str, tran: str | None, rota) -> str:
     return KIND_HDD
 
 
+def _is_empty_media(size) -> bool:
+    """SIZE=0 у диска — нет вставленного носителя (пустой картридер/привод).
+
+    Отсутствие поля SIZE (старый lsblk без колонки) — не считаем пустым,
+    честная деградация к прежнему поведению (как с ROTA)."""
+    if size is None:
+        return False
+    if isinstance(size, str):
+        size = size.strip()
+        if not size:
+            return False
+    try:
+        return int(size) == 0
+    except (TypeError, ValueError):
+        return False
+
+
 def parse_lsblk_disks(data: dict) -> list[BlockDisk]:
-    """Разобрать ``lsblk -J`` в список физических дисков (type=disk)."""
+    """Разобрать ``lsblk -J`` в список физических дисков (type=disk).
+
+    Диски с SIZE=0 (пустой картридер/оптический привод без носителя)
+    пропускаются — показывать нечего."""
     disks: list[BlockDisk] = []
     for dev in data.get("blockdevices", []):
         if dev.get("type") != "disk" or "boot" in (dev.get("name") or ""):
             continue  # пропускаем mmcblkXbootY и не-диски
+        if _is_empty_media(dev.get("size")):
+            continue
         mps: list[str] = []
         _collect_mountpoints(dev, mps)
         name = dev.get("name") or ""
@@ -351,7 +373,7 @@ def _list_block_disks_sync() -> list[BlockDisk]:
         return []
     try:
         out = subprocess.run(
-            ["lsblk", "-J", "-b", "-o", "NAME,TYPE,MOUNTPOINT,TRAN,MODEL,PATH,ROTA"],
+            ["lsblk", "-J", "-b", "-o", "NAME,TYPE,MOUNTPOINT,TRAN,MODEL,PATH,ROTA,SIZE"],
             capture_output=True,
             text=True,
             timeout=10,

@@ -152,6 +152,37 @@ def test_label_disks_emmc_comes_first():
     assert ordered_labels[0] == "eMMC"
 
 
+# Многослотовый USB-картридер: три вставленных слота имеют реальный SIZE,
+# пустые (нет карты) отдают SIZE=0.
+LSBLK_CARD_READER = {
+    "blockdevices": [
+        {
+            "name": "sda", "type": "disk", "tran": "usb", "model": "Card Reader",
+            "path": "/dev/sda", "rota": False, "size": 0,
+        },
+        {
+            "name": "sdb", "type": "disk", "tran": "usb", "model": "Card Reader",
+            "path": "/dev/sdb", "rota": False, "size": "0",  # lsblk иногда отдаёт строкой
+        },
+        {
+            "name": "sdc", "type": "disk", "tran": "usb", "model": "Samsung SD",
+            "path": "/dev/sdc", "rota": False, "size": 32000000000,
+        },
+    ]
+}
+
+
+def test_parse_lsblk_skips_empty_card_reader_slots():
+    disks = parse_lsblk_disks(LSBLK_CARD_READER)
+    assert [d.path for d in disks] == ["/dev/sdc"]
+
+
+def test_parse_lsblk_keeps_disk_without_size_field():
+    # Старый lsblk без колонки SIZE — не должны случайно скрыть настоящий диск.
+    disks = parse_lsblk_disks(LSBLK)
+    assert {d.path for d in disks} == {"/dev/sda", "/dev/mmcblk0"}
+
+
 def test_parse_disk_summary_kind_fallback_for_old_monitor():
     # Ответ монитора старой версии (без поля kind) — бот не падает: eMMC
     # выводится из метки, остальное деградирует к hdd.

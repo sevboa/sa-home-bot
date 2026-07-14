@@ -10,6 +10,7 @@ from sa_home_bot.node.fixups import (
     build_fixups,
     make_apps_unit_fixup,
     smartctl_sudoers_content,
+    smartctl_wrapper_content,
 )
 
 
@@ -54,6 +55,11 @@ def test_apps_unit_fixup_needed_only_when_apps_assigned():
 def test_smartctl_sudoers_content_pins_absolute_path_and_wildcard_args():
     content = smartctl_sudoers_content("/usr/sbin/smartctl", "sevboa")
     assert content == "sevboa ALL=(root) NOPASSWD: /usr/sbin/smartctl *\n"
+
+
+def test_smartctl_wrapper_content_execs_real_binary_via_sudo():
+    content = smartctl_wrapper_content("/usr/sbin/smartctl")
+    assert content == '#!/bin/sh\nexec sudo -n /usr/sbin/smartctl "$@"\n'
 
 
 def test_apps_unit_sudoers_content_only_start_stop_restart_of_this_unit():

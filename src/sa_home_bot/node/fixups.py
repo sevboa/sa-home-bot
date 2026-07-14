@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
@@ -103,13 +104,23 @@ INSTALL_SMARTMONTOOLS = Fixup(
 )
 
 
-# --- smartctl: узкий sudoers-снипет (NOPASSWD только на конкретный бинарник) ---
+# --- smartctl: узкий sudoers-снипет + обёртка в PATH (NOPASSWD на конкретный бинарник) ---
+#
+# Само по себе право sudo без пароля ничего не даёт: код (sensors/disks.py) зовёт
+# голое `smartctl`, sudo не добавляет. Юнит ноды кладёт ~/.local/bin первым в PATH
+# (см. deploy/sa-home-node.service) специально ради обёртки-скрипта, которая молча
+# перенаправляет вызов в `sudo -n <настоящий smartctl>`. Оба шага нужны вместе.
 
 SMARTCTL_SUDOERS_FILE = "50-sa-home-node-smartctl"
+SMARTCTL_WRAPPER_PATH = Path.home() / ".local" / "bin" / "smartctl"
 
 
-def _smartctl_sudoers_check() -> bool:
-    return (SUDOERS_DIR / SMARTCTL_SUDOERS_FILE).exists()
+def _real_smartctl_path() -> str | None:
+    """Резолвит настоящий smartctl, игнорируя нашу же обёртку в PATH (иначе
+    повторный запуск фикса поставил бы sudoers-снипет на сам скрипт-обёртку)."""
+    wrapper_dir = str(SMARTCTL_WRAPPER_PATH.parent)
+    dirs = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d != wrapper_dir]
+    return shutil.which("smartctl", path=os.pathsep.join(dirs))
 
 
 def smartctl_sudoers_content(smartctl_path: str, user: str) -> str:
@@ -118,16 +129,31 @@ def smartctl_sudoers_content(smartctl_path: str, user: str) -> str:
     return f"{user} ALL=(root) NOPASSWD: {smartctl_path} *\n"
 
 
+def smartctl_wrapper_content(real_path: str) -> str:
+    """Скрипт-обёртка ~/.local/bin/smartctl: прозрачно зовёт настоящий smartctl
+    под root через sudo. Код продолжает звать голое `smartctl` — не знает про sudo."""
+    return f"#!/bin/sh\nexec sudo -n {real_path} \"$@\"\n"
+
+
+def _smartctl_sudoers_check() -> bool:
+    return (SUDOERS_DIR / SMARTCTL_SUDOERS_FILE).exists() and SMARTCTL_WRAPPER_PATH.exists()
+
+
 def _smartctl_sudoers_apply() -> None:
-    path = shutil.which("smartctl")
+    path = _real_smartctl_path()
     if path is None:
         raise FixupError("smartctl не найден в PATH — сначала install-smartmontools")
-    _install_sudoers_snippet(SMARTCTL_SUDOERS_FILE, smartctl_sudoers_content(path, getuser()))
+    if not (SUDOERS_DIR / SMARTCTL_SUDOERS_FILE).exists():
+        _install_sudoers_snippet(SMARTCTL_SUDOERS_FILE, smartctl_sudoers_content(path, getuser()))
+    if not SMARTCTL_WRAPPER_PATH.exists():
+        SMARTCTL_WRAPPER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        SMARTCTL_WRAPPER_PATH.write_text(smartctl_wrapper_content(path))
+        SMARTCTL_WRAPPER_PATH.chmod(0o755)
 
 
 SMARTCTL_SUDOERS = Fixup(
     id="smartctl-sudoers",
-    title="Разрешить smartctl без пароля (узкий sudoers)",
+    title="Разрешить smartctl без пароля (sudoers + обёртка ~/.local/bin)",
     needed=_smartmontools_needed,
     check=_smartctl_sudoers_check,
     apply=_smartctl_sudoers_apply,
