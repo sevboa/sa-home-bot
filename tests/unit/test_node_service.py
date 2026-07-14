@@ -269,6 +269,185 @@ async def test_unassign_unknown_service_is_bad_request():
     assert exc_info.value.code == "bad_request"
 
 
+# --- check_update/update: самообновление через pipx (без рестарта) ---
+
+
+def test_update_actions_not_declared_without_update_source():
+    sup, _ = _fake_supervisor()
+    desc = NodeService(sup).describe()
+    assert desc.find_action("check_update") is None
+    assert desc.find_action("update") is None
+
+
+def test_update_actions_declared_with_update_source():
+    sup, _ = _fake_supervisor()
+    desc = NodeService(sup, update_source="https://github.com/x/y.git").describe()
+    assert desc.find_action("check_update") is not None
+    update_action = desc.find_action("update")
+    assert update_action is not None and not update_action.params
+
+
+async def test_get_state_has_no_update_field_without_source():
+    sup, _ = _fake_supervisor()
+    state = await NodeService(sup).get_state()
+    assert "update" not in state
+
+
+async def test_get_state_reports_restart_required(monkeypatch):
+    from sa_home_bot.node import service as service_module
+
+    monkeypatch.setattr(service_module, "__version__", "0.21.0")
+    monkeypatch.setattr(
+        service_module.node_update, "installed_version", lambda: "0.22.0"
+    )
+    sup, _ = _fake_supervisor()
+    svc = NodeService(sup, update_source="https://github.com/x/y.git")
+    state = await svc.get_state()
+    assert state["update"] == {
+        "running": "0.21.0",
+        "installed": "0.22.0",
+        "restart_required": True,
+        "last": None,
+    }
+
+
+async def test_get_state_no_restart_required_when_versions_match(monkeypatch):
+    from sa_home_bot.node import service as service_module
+
+    monkeypatch.setattr(service_module, "__version__", "0.22.0")
+    monkeypatch.setattr(
+        service_module.node_update, "installed_version", lambda: "0.22.0"
+    )
+    sup, _ = _fake_supervisor()
+    svc = NodeService(sup, update_source="https://github.com/x/y.git")
+    state = await svc.get_state()
+    assert state["update"]["restart_required"] is False
+
+
+async def test_check_update_reports_versions(monkeypatch):
+    from sa_home_bot.node import service as service_module
+
+    async def fake_latest(repo_url):
+        assert repo_url == "https://github.com/x/y.git"
+        return "v0.22.0"
+
+    monkeypatch.setattr(service_module.node_update, "latest_tag", fake_latest)
+    monkeypatch.setattr(service_module.node_update, "installed_version", lambda: "0.21.0")
+
+    sup, _ = _fake_supervisor()
+    svc = NodeService(sup, update_source="https://github.com/x/y.git")
+    result = await svc.run_command("check_update", {})
+    assert result == {
+        "repo": "https://github.com/x/y.git",
+        "running": svc.describe().info.version,
+        "installed": "0.21.0",
+        "latest": "v0.22.0",
+    }
+
+
+async def test_check_update_network_failure_is_internal_error(monkeypatch):
+    from sa_home_bot.node import service as service_module
+
+    async def fake_latest(repo_url):
+        return None
+
+    monkeypatch.setattr(service_module.node_update, "latest_tag", fake_latest)
+
+    sup, _ = _fake_supervisor()
+    svc = NodeService(sup, update_source="https://github.com/x/y.git")
+    with pytest.raises(ProtoError) as exc_info:
+        await svc.run_command("check_update", {})
+    assert exc_info.value.code == "internal"
+
+
+async def test_update_already_current_does_not_reinstall(monkeypatch):
+    from sa_home_bot.node import service as service_module
+
+    async def fake_latest(repo_url):
+        return "v0.22.0"
+
+    called = []
+
+    async def fake_reinstall(repo_url, ref):
+        called.append((repo_url, ref))
+        return True, "ok"
+
+    monkeypatch.setattr(service_module.node_update, "latest_tag", fake_latest)
+    monkeypatch.setattr(service_module.node_update, "installed_version", lambda: "v0.22.0")
+    monkeypatch.setattr(service_module.node_update, "pipx_reinstall", fake_reinstall)
+
+    sup, _ = _fake_supervisor()
+    svc = NodeService(sup, update_source="https://github.com/x/y.git")
+    result = await svc.run_command("update", {})
+
+    assert result == {"up_to_date": True, "version": "v0.22.0"}
+    assert called == []  # pipx не звали
+
+
+async def test_update_schedules_background_reinstall_and_emits_event(monkeypatch):
+    import asyncio
+
+    from sa_home_bot.node import service as service_module
+
+    async def fake_latest(repo_url):
+        return "v0.22.0"
+
+    async def fake_reinstall(repo_url, ref):
+        assert (repo_url, ref) == ("https://github.com/x/y.git", "v0.22.0")
+        return True, "installed ok"
+
+    monkeypatch.setattr(service_module.node_update, "latest_tag", fake_latest)
+    monkeypatch.setattr(service_module.node_update, "installed_version", lambda: "v0.21.0")
+    monkeypatch.setattr(service_module.node_update, "pipx_reinstall", fake_reinstall)
+
+    events: list[tuple[str, dict]] = []
+
+    async def emit(event_type, data):
+        events.append((event_type, data))
+
+    sup, _ = _fake_supervisor()
+    svc = NodeService(sup, update_source="https://github.com/x/y.git", emit=emit)
+    result = await svc.run_command("update", {})
+    assert result == {"scheduled": True, "target_version": "v0.22.0"}
+
+    await asyncio.sleep(0.05)  # дать фоновой задаче выполниться
+    assert events == [("update_finished", {"ok": True, "version": "v0.22.0", "error": None})]
+    assert svc._last_update == {"ok": True, "version": "v0.22.0", "error": None}
+
+
+async def test_update_concurrent_call_is_bad_request(monkeypatch):
+    import asyncio
+
+    from sa_home_bot.node import service as service_module
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_latest(repo_url):
+        return "v0.22.0"
+
+    async def slow_reinstall(repo_url, ref):
+        started.set()
+        await release.wait()
+        return True, "ok"
+
+    monkeypatch.setattr(service_module.node_update, "latest_tag", fake_latest)
+    monkeypatch.setattr(service_module.node_update, "installed_version", lambda: "v0.21.0")
+    monkeypatch.setattr(service_module.node_update, "pipx_reinstall", slow_reinstall)
+
+    sup, _ = _fake_supervisor()
+    svc = NodeService(sup, update_source="https://github.com/x/y.git")
+    await svc.run_command("update", {})
+    await started.wait()
+
+    with pytest.raises(ProtoError) as exc_info:
+        await svc.run_command("update", {})
+    assert exc_info.value.code == "bad_request"
+
+    release.set()
+    await asyncio.sleep(0.05)
+
+
 def test_resolve_endpoint_relative_to_config_dir(tmp_path):
     import argparse
     from pathlib import Path

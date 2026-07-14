@@ -64,13 +64,15 @@ def _fmt_since(iso: str | None) -> str:
     return f", с {local.strftime('%d.%m %H:%M')}"
 
 
-def _power_buttons(
+def _simple_action_buttons(
     subscription: Subscription,
     node_actions: Sequence[ActionSpec],
     node_id: str | None = None,
 ) -> list[InlineKeyboardButton]:
-    """Кнопки действий без параметров (poweroff/reboot/suspend) — локально
-    или на пире (node_id); право — то же `действие@node`, что и у служб."""
+    """Кнопки действий без параметров (питание, restart_node, самообновление
+    check_update/update и т.п.) — локально или на пире (node_id); право —
+    то же `действие@node`, что и у служб. Название не про питание конкретно —
+    любое зеро-параметрическое действие ноды попадает сюда автоматически."""
     return [
         InlineKeyboardButton(
             text=action.title,
@@ -94,6 +96,12 @@ def render_node_card_header(state: dict) -> str:
         uptime_bits.append(f"нода {format_duration(state['uptime_s'])}")
     if uptime_bits:
         lines.append("Аптайм: " + " · ".join(uptime_bits))
+    update = state.get("update")
+    if update and update.get("restart_required"):
+        lines.append(
+            f"⚠️ Обновлено до v{update.get('installed')} — ждёт перезапуска "
+            f"(restart_node)"
+        )
     return "\n".join(lines)
 
 
@@ -160,8 +168,8 @@ def build_node_card_keyboard(
 ) -> InlineKeyboardMarkup | None:
     """Кнопки карточки ноды — одинаковые для своей (node_id=None) и пира.
 
-    Только действия: представления/действия монитора + питание + назначение
-    служб. Навигация к карточкам служб — ссылками в тексте (см.
+    Только действия: представления/действия монитора + питание/самообновление
+    + назначение служб. Навигация к карточкам служб — ссылками в тексте (см.
     render_services_block), не кнопками. Рой равноправен (ARCHITECTURE §11
     п. 1) — узел лишь несёт node_id в callback'ах, набор кнопок и права не
     зависят от того, чья это физически машина.
@@ -172,7 +180,7 @@ def build_node_card_keyboard(
     base = status_view.build_status_keyboard(subscription, monitor_actions, node_id)
     if base is not None:
         buttons.extend(b for row in base.inline_keyboard for b in row)
-    buttons.extend(_power_buttons(subscription, node_actions, node_id))
+    buttons.extend(_simple_action_buttons(subscription, node_actions, node_id))
     buttons.extend(_assign_buttons(subscription, node_actions, service_names, node_id))
     return actions.rows(buttons)
 

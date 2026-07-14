@@ -19,12 +19,14 @@ from typing import Any
 
 from sa_home_bot import __version__
 from sa_home_bot.config import SwarmNodeConfig
+from sa_home_bot.node import update as node_update
 from sa_home_bot.node.peers import NodeRouter, PeerLink
 from sa_home_bot.node.state import NodeState
 from sa_home_bot.node.supervisor import ASSIGNMENT_ARGS, EventEmitter, Supervisor
 from sa_home_bot.proto.client import ProtoClient
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
+    ERR_INTERNAL,
     ERR_UNAVAILABLE,
     ActionParam,
     ActionSpec,
@@ -56,9 +58,15 @@ ACTION_POWEROFF = "poweroff"
 ACTION_REBOOT = "reboot"
 ACTION_SUSPEND = "suspend"
 
+ACTION_CHECK_UPDATE = "check_update"
+ACTION_UPDATE = "update"
+EVENT_UPDATE_FINISHED = "update_finished"
+
 RESTART_NODE_TITLE = "🔄 Перезапустить ноду"
 SWARM_JOIN_TITLE = "🤝 Присоединить ноду"
 JOIN_TITLE = "🔗 Присоединиться к рою"
+CHECK_UPDATE_TITLE = "🔍 Проверить обновления"
+UPDATE_TITLE = "⬆️ Обновить"
 
 # Пауза перед выполнением power-команды/само-рестарта: ответ и события
 # должны успеть уйти.
@@ -117,6 +125,7 @@ class NodeService:
         swarm_token: str = "",
         own_endpoint: str = "",
         emit: EventEmitter | None = None,
+        update_source: str | None = None,
     ) -> None:
         self._supervisor = supervisor
         self._router = router
@@ -139,6 +148,12 @@ class NodeService:
         # связи — действие объявляется только когда есть куда стучаться.
         self._own_endpoint = own_endpoint
         self._emit = emit
+        # Самообновление через pipx (не требует root — в отличие от
+        # `nodectl fix`, можно звать прямо из этого процесса). None — ставили
+        # не из git-репозитория (dev-чекаут и т.п.) — умение не объявляется.
+        self._update_source = update_source
+        self._updating = False
+        self._last_update: dict[str, Any] | None = None
 
     def describe(self) -> ServiceDescription:
         # choices — имена служб под супервизией: фронтенд строит кнопку на
@@ -191,6 +206,14 @@ class NodeService:
                     else ()
                 ),
                 *(
+                    (
+                        ActionSpec(id=ACTION_CHECK_UPDATE, title=CHECK_UPDATE_TITLE),
+                        ActionSpec(id=ACTION_UPDATE, title=UPDATE_TITLE),
+                    )
+                    if self._update_source is not None
+                    else ()
+                ),
+                *(
                     ActionSpec(id=action, title=_POWER_TITLES[action])
                     for action in self._power
                 ),
@@ -198,7 +221,7 @@ class NodeService:
         )
 
     async def get_state(self) -> dict[str, Any]:
-        return {
+        state: dict[str, Any] = {
             "node": self._node,
             "service": SERVICE_NAME,
             "version": __version__,
@@ -207,6 +230,15 @@ class NodeService:
             "services": [svc.to_dict() for svc in self._supervisor.services.values()],
             "peers": self._router.peers_state() if self._router is not None else [],
         }
+        if self._update_source is not None:
+            installed = node_update.installed_version()
+            state["update"] = {
+                "running": __version__,
+                "installed": installed,
+                "restart_required": installed is not None and installed != __version__,
+                "last": self._last_update,
+            }
+        return state
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if action == ACTION_RESTART_NODE:
@@ -217,6 +249,10 @@ class NodeService:
             return await self._swarm_join(args)
         if action == ACTION_JOIN:
             return await self.join(str(args.get("endpoint", "")))
+        if action == ACTION_CHECK_UPDATE:
+            return await self._check_update()
+        if action == ACTION_UPDATE:
+            return await self._update()
         name = str(args.get("name", ""))
         if action == ACTION_ASSIGN:
             return await self._assign(name)
@@ -344,6 +380,67 @@ class NodeService:
                 self._remember_peer(pid, peer_endpoint)
                 added.append(pid)
         return {"joined_via": endpoint, "peers_added": added}
+
+    async def _check_update(self) -> dict[str, Any]:
+        """Только посмотреть: что работает, что на диске, что в репозитории.
+        Ничего не переустанавливает."""
+        assert self._update_source is not None
+        latest = await node_update.latest_tag(self._update_source)
+        if latest is None:
+            raise ProtoError(ERR_INTERNAL, "не удалось проверить обновления (сеть?)")
+        return {
+            "repo": self._update_source,
+            "running": __version__,
+            "installed": node_update.installed_version(),
+            "latest": latest,
+        }
+
+    async def _update(self) -> dict[str, Any]:
+        """Подтянуть последний тег через pipx — БЕЗ рестарта процесса.
+
+        Файлы на диске обновляются сразу; уже загруженный в память код
+        продолжает работать по-старому, пока человек не выполнит
+        restart_node — get_state().update.restart_required честно скажет,
+        когда это нужно.
+        """
+        assert self._update_source is not None
+        latest = await node_update.latest_tag(self._update_source)
+        if latest is None:
+            raise ProtoError(ERR_INTERNAL, "не удалось проверить обновления (сеть?)")
+        installed = node_update.installed_version()
+        if installed == latest:
+            return {"up_to_date": True, "version": latest}
+        if self._updating:
+            raise ProtoError(ERR_BAD_REQUEST, "обновление уже выполняется")
+        self._schedule_update(latest)
+        return {"scheduled": True, "target_version": latest}
+
+    def _schedule_update(self, target_version: str) -> None:
+        assert self._update_source is not None
+        self._updating = True
+        repo = self._update_source
+
+        async def run() -> None:
+            try:
+                ok, output = await node_update.pipx_reinstall(repo, target_version)
+            except Exception as exc:  # noqa: BLE001 — фон не должен уронить ноду
+                ok, output = False, str(exc)
+            finally:
+                self._updating = False
+            if ok:
+                log.warning("Обновление до %s установлено — нужен restart_node", target_version)
+            else:
+                log.error("Обновление до %s не удалось: %s", target_version, output)
+            self._last_update = {
+                "ok": ok,
+                "version": target_version,
+                "error": None if ok else output,
+            }
+            if self._emit is not None:
+                await self._emit(EVENT_UPDATE_FINISHED, self._last_update)
+
+        task = asyncio.create_task(run(), name="node-update")
+        self._update_task = task  # ссылка, чтобы задачу не собрал GC
 
     def _schedule_power(self, action: str) -> dict[str, Any]:
         argv = self._power[action]

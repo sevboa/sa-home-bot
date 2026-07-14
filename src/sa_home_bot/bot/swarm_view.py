@@ -28,6 +28,7 @@ from sa_home_bot.domain.models import KIND_CPU, POWER_UNEXPECTED, PowerEvent
 from sa_home_bot.proto.messages import Address, ProtoError
 from sa_home_bot.runtime import format_duration
 from sa_home_bot.subscriptions.models import Subscription
+from sa_home_bot.utils.version import version_key
 
 SWARM_HEADER = "🕸 <b>Рой</b>"
 
@@ -82,17 +83,6 @@ async def _collect(node_link: ServiceLink, own_state: dict) -> list[_NodeReport]
     return reports
 
 
-def _version_key(version: str) -> tuple[int, ...]:
-    """Покомпонентное сравнение версий; нечисловые компоненты считаются 0."""
-    parts = []
-    for chunk in version.split("."):
-        try:
-            parts.append(int(chunk))
-        except ValueError:
-            parts.append(0)
-    return tuple(parts)
-
-
 def _versions_line(reports: list[_NodeReport]) -> str | None:
     versions = {
         r.node_id: r.state["version"]
@@ -101,7 +91,7 @@ def _versions_line(reports: list[_NodeReport]) -> str | None:
     }
     if not versions:
         return None
-    latest = max(versions.values(), key=_version_key)
+    latest = max(versions.values(), key=version_key)
     stale = {nid: v for nid, v in versions.items() if v != latest}
     if not stale:
         return f"ПО: v{latest} у всех"

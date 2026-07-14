@@ -11,6 +11,10 @@
                                   # (интерактивный sudo, см. node/fixups.py) —
                                   # единственная команда, которая НЕ ходит по
                                   # протоколу к ноде, а работает локально
+    nodectl check_update          # что в репозитории vs что работает/на диске
+    nodectl update                # pipx install --force до последнего тега;
+                                  # НЕ перезапускает процесс — только доустанавливает
+                                  # файлы, restart_node потом делает человек
     nodectl -n winpc status       # то же о ноде winpc («спроси любого»:
                                   # запрос идёт своей ноде, та пересылает)
 
@@ -89,6 +93,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "fix",
         help="доустановить программы/права на месте (интерактивный sudo, локально)",
     )
+    sub.add_parser("check_update", help="сверить работающую/установленную/доступную версии")
+    sub.add_parser(
+        "update", help="pipx install --force до последнего тега (без рестарта процесса)"
+    )
     return parser
 
 
@@ -149,7 +157,37 @@ def render_status(state: dict) -> str:
             for p in peers
         ]
         out += "\nПиры:\n" + "\n".join(lines)
+    update = state.get("update")
+    if update and update.get("restart_required"):
+        out += (
+            f"\n⚠️ Обновлено до v{update.get('installed')} — "
+            f"требуется nodectl restart_node"
+        )
     return out
+
+
+def render_check_update(result: dict) -> str:
+    lines = [
+        f"Репозиторий: {result.get('repo', '?')}",
+        f"Работает: v{result.get('running', '?')}",
+        f"На диске: v{result.get('installed') or '?'}",
+        f"В репозитории: v{result.get('latest', '?')}",
+    ]
+    if result.get("installed") == result.get("latest"):
+        lines.append("Установлена последняя версия.")
+    else:
+        lines.append("Доступно обновление — nodectl update.")
+    return "\n".join(lines)
+
+
+def render_update_result(result: dict) -> str:
+    if result.get("up_to_date"):
+        return f"Уже последняя версия v{result.get('version', '?')}."
+    target = result.get("target_version", "?")
+    return (
+        f"Запущено обновление до v{target} в фоне (файлы на диске, процесс не тронут). "
+        f"После завершения — nodectl restart_node."
+    )
 
 
 def render_event(env: Envelope) -> str:
@@ -235,6 +273,10 @@ async def _run(args: argparse.Namespace) -> int:
                 f"Присоединились через {args.endpoint}. "
                 f"Новых пиров: {', '.join(added) if added else 'нет'}."
             )
+        elif args.command == "check_update":
+            print(render_check_update(await client.command("check_update", dst=dst)))
+        elif args.command == "update":
+            print(render_update_result(await client.command("update", dst=dst)))
         elif args.command in NO_ARG_ACTIONS:
             result = await client.command(args.command, dst=dst)
             where = f"нода {args.node}" if args.node else "нода"

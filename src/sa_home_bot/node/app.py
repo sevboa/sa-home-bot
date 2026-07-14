@@ -16,6 +16,7 @@ import logging
 import socket
 
 from sa_home_bot.config import Settings, SwarmNodeConfig
+from sa_home_bot.node import update as node_update
 from sa_home_bot.node.peers import NodeRouter, PeerLink
 from sa_home_bot.node.service import EVENT_NODE_JOINED, NodeService
 from sa_home_bot.node.state import NodeState
@@ -167,6 +168,9 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         swarm_token=settings.swarm.token,
         own_endpoint=settings.node.listen,
         emit=emit,
+        # Дешёвая файловая проверка (без сети) — editable/не-git установка
+        # (dev-чекаут) даёт None, и check_update/update не объявляются.
+        update_source=node_update.origin_repo_url(),
     )
     server = ProtoServer(endpoints, node_service, token=settings.swarm.token, router=router.route)
     await server.start()
