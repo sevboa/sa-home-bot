@@ -23,7 +23,7 @@ class Subscription:
     def allows_command(self, command: str) -> bool:
         if self.broken:
             return False
-        return command in self.allowed_commands
+        return WILDCARD in self.allowed_commands or command in self.allowed_commands
 
     def allows_action(self, action_id: str, service: str) -> bool:
         """Право на действие службы (кнопки из describe).
@@ -32,11 +32,19 @@ class Subscription:
         голое имя (``scan_now``) тоже принимается — совместимость со старыми
         конфигами. С появлением удалённых нод форма расширится до
         ``действие@служба@нода``.
+
+        Групповые права (без перечисления каждого действия по имени):
+        ``*@служба`` — любое действие этой службы (новое умение на службе,
+        объявленное через describe, сразу доступно без правки конфига —
+        то же самое свойство, что у динамического UI бота); голый ``*`` —
+        вообще любая команда/действие (полный доступ, для админа).
         """
         if self.broken:
             return False
         return (
-            f"{action_id}@{service}" in self.allowed_commands
+            WILDCARD in self.allowed_commands
+            or f"{WILDCARD}@{service}" in self.allowed_commands
+            or f"{action_id}@{service}" in self.allowed_commands
             or action_id in self.allowed_commands
         )
 

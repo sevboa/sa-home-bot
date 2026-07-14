@@ -53,6 +53,27 @@ def test_allows_action_full_and_bare_forms():
     assert sub.allows_action("scan_now", "monitor")
 
 
+def test_wildcard_allows_any_command():
+    sub = Subscription("me", 1, allowed_commands=frozenset({"*"}))
+    assert sub.allows_command("status")
+    assert sub.allows_command("anything")
+
+
+def test_wildcard_allows_any_action_of_any_service():
+    sub = Subscription("me", 1, allowed_commands=frozenset({"*"}))
+    assert sub.allows_action("restart", "node")
+    assert sub.allows_action("check_update", "node")
+    assert sub.allows_action("scan_now", "monitor")
+
+
+def test_service_wildcard_allows_only_that_service():
+    sub = Subscription("me", 1, allowed_commands=frozenset({"*@node"}))
+    assert sub.allows_action("restart", "node")
+    assert sub.allows_action("check_update", "node")  # новое действие — без правки конфига
+    assert not sub.allows_action("scan_now", "monitor")  # другая служба
+    assert not sub.allows_command("status")  # * относится только к действиям службы node
+
+
 def test_broken_blocks_everything():
     sub = Subscription(
         "me", 1, frozenset({"*"}), frozenset({"status", "restart@node"})
