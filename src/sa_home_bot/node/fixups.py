@@ -28,6 +28,24 @@ log = logging.getLogger(__name__)
 
 SUDOERS_DIR = Path("/etc/sudoers.d")
 
+# `nodectl fix` запускают интерактивно по SSH под обычным логином — его PATH
+# (в отличие от PATH юнита ноды, deploy/sa-home-node.service) обычно НЕ
+# включает /usr/sbin и /sbin, где пакеты кладут smartctl, visudo и т.п.
+# Фолбэк туда — иначе `shutil.which` их не находит, хотя они установлены.
+_SBIN_FALLBACK_DIRS = ("/usr/local/sbin", "/usr/sbin", "/sbin")
+
+
+def _which(name: str) -> str | None:
+    """``shutil.which`` с фолбэком на типовые sbin-каталоги (см. выше)."""
+    found = shutil.which(name)
+    if found is not None:
+        return found
+    for d in _SBIN_FALLBACK_DIRS:
+        candidate = Path(d) / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
 
 class FixupError(Exception):
     """Фикс не удалось применить — `nodectl fix` продолжает со следующим."""
@@ -44,20 +62,29 @@ class Fixup:
 
 def _sudo(argv: list[str]) -> None:
     """Настоящий интерактивный ``sudo`` — наследует TTY, пароль нигде не хранится."""
-    result = subprocess.run(["sudo", *argv])
+    try:
+        result = subprocess.run(["sudo", *argv])
+    except OSError as exc:
+        raise FixupError(f"не удалось запустить sudo {' '.join(argv)}: {exc}") from exc
     if result.returncode != 0:
         raise FixupError(f"sudo {' '.join(argv)} завершился кодом {result.returncode}")
 
 
 def _install_sudoers_snippet(name: str, content: str) -> None:
     """Валидировать содержимое через ``visudo`` и установить файл под sudo."""
+    visudo = _which("visudo")
+    if visudo is None:
+        raise FixupError("visudo не найден (проверьте установку пакета sudo)")
     with tempfile.NamedTemporaryFile("w", suffix=".sudoers", delete=False) as tmp:
         tmp.write(content)
         tmp_path = Path(tmp.name)
     try:
-        check = subprocess.run(
-            ["visudo", "-cf", str(tmp_path)], capture_output=True, text=True
-        )
+        try:
+            check = subprocess.run(
+                [visudo, "-cf", str(tmp_path)], capture_output=True, text=True
+            )
+        except OSError as exc:
+            raise FixupError(f"не удалось запустить visudo: {exc}") from exc
         if check.returncode != 0:
             raise FixupError(f"visudo отверг сниппет {name}: {check.stderr.strip()}")
         _sudo(
@@ -116,11 +143,21 @@ SMARTCTL_WRAPPER_PATH = Path.home() / ".local" / "bin" / "smartctl"
 
 
 def _real_smartctl_path() -> str | None:
-    """Резолвит настоящий smartctl, игнорируя нашу же обёртку в PATH (иначе
-    повторный запуск фикса поставил бы sudoers-снипет на сам скрипт-обёртку)."""
+    """Резолвит настоящий smartctl: игнорирует нашу же обёртку в PATH (иначе
+    повторный запуск фикса поставил бы sudoers-снипет на сам скрипт-обёртку)
+    и добавляет фолбэк на sbin-каталоги (см. ``_which``) — интерактивный PATH
+    обычного пользователя обычно не включает /usr/sbin, где smartmontools
+    ставит бинарник."""
     wrapper_dir = str(SMARTCTL_WRAPPER_PATH.parent)
     dirs = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d != wrapper_dir]
-    return shutil.which("smartctl", path=os.pathsep.join(dirs))
+    found = shutil.which("smartctl", path=os.pathsep.join(dirs))
+    if found is not None:
+        return found
+    for d in _SBIN_FALLBACK_DIRS:
+        candidate = Path(d) / "smartctl"
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
 
 
 def smartctl_sudoers_content(smartctl_path: str, user: str) -> str:
