@@ -202,6 +202,14 @@ def _run_fix(args: argparse.Namespace) -> int:
     """``nodectl fix`` — единственная команда, работающая локально (не по
     протоколу): читает конфиг напрямую, чинит недостающие права интерактивным
     sudo. См. `node/fixups.py`."""
+    if sys.platform == "win32":
+        print(
+            "nodectl fix пока не поддерживается на Windows: все рецепты — про "
+            "sudoers/пакетные менеджеры Linux. Установку на Windows делает "
+            "deploy/install-node.ps1.",
+            file=sys.stderr,
+        )
+        return 1
     config_path = args.config if args.config is not None else _default_config()
     settings = Settings.load(config_path)
     fixups = build_fixups(settings)

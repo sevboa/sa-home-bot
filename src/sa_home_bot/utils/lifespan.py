@@ -23,7 +23,11 @@ class Lifespan:
 
     def install_signal_handlers(self) -> None:
         loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
+        # SIGBREAK — только Windows: супервизор шлёт дочерней службе
+        # CTRL_BREAK_EVENT (см. node/supervisor.py), питон видит его как SIGBREAK.
+        sigbreak = getattr(signal, "SIGBREAK", None)
+        signals = [signal.SIGINT, signal.SIGTERM] + ([sigbreak] if sigbreak else [])
+        for sig in signals:
             try:
                 loop.add_signal_handler(sig, self.trigger)
             except NotImplementedError:  # напр. Windows

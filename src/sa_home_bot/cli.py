@@ -14,6 +14,11 @@ from sa_home_bot.utils.logging import configure_logging
 
 log = logging.getLogger(__name__)
 
+# Windows: os.execv не заменяет образ процесса (новый PID, обёртка службы
+# сочтёт ноду умершей) — само-рестарт там делается выходом с этим кодом,
+# перезапуск выполняет обёртка (WinSW <onfailure action="restart"/>) или человек.
+RESTART_EXIT_CODE = 10
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -89,6 +94,10 @@ def main(argv: list[str] | None = None) -> int:
         # run_node вернул True (запрошен само-рестарт «restart_node»): чистый
         # останов уже прошёл, заменяем образ процесса на себя же — тот же PID,
         # работает и под systemd (Restart= не нужен), и вручную в терминале.
+        if sys.platform == "win32":
+            log.info("Само-рестарт: выход с кодом %d, перезапуск — за обёрткой "
+                     "службы (WinSW) или вручную", RESTART_EXIT_CODE)
+            return RESTART_EXIT_CODE
         log.info("Само-рестарт: %s", sys.argv)
         os.execv(sys.argv[0], sys.argv)
     return 0

@@ -59,6 +59,12 @@ baseline_min_std_c = 3.0
 # eMMC (/dev/mmcblk*) и подобные без SMART пропускаются автоматически.
 devices = []
 
+# [sensors.lhm] — только для Windows-ноды: температуры CPU/дисков читаются
+# через LibreHardwareMonitorLib.dll (pythonnet). На Linux секция игнорируется.
+# Полный пример Windows-конфига — deploy/config-windows.example.toml.
+#[sensors.lhm]
+#dll_path = ""                      # пусто = автопоиск типовых мест
+
 # Служба monitor (отдельный процесс: `sa-home-bot --service monitor`).
 # Бот общается с ней по протоколу v0 (см. PROTOCOL.md). socket — endpoint:
 # unix-путь (Linux) или "tcp://127.0.0.1:8711" (Windows; требует [swarm].token).

@@ -218,3 +218,14 @@ def test_fmt_uptime_short_sub_minute_is_html_safe():
     from sa_home_bot.domain.render import _fmt_uptime_short
 
     assert _fmt_uptime_short(timedelta(seconds=30)) == "&lt;1 m"
+
+
+def test_read_power_events_unsupported_on_windows(monkeypatch):
+    import sys
+
+    called = []
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(power_module, "_run", lambda *a, **kw: called.append(a))
+    events, has_next = power_module.read_power_events_sync()
+    assert (events, has_next) == ([], False)
+    assert called == []  # ни last, ни journalctl не дёргались

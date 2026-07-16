@@ -1,0 +1,55 @@
+# Конфигурация Windows-ноды (этап 19). Скопируйте в
+# %LOCALAPPDATA%\sa-home-bot\config.toml и подставьте свои значения.
+#
+# Отличия от Linux-ноды:
+#  - unix-сокетов на Windows нет — ВСЕ endpoint'ы только tcp://127.0.0.1:<порт>,
+#    поэтому [swarm].token обязателен даже для локальных служб;
+#  - температуры читает LibreHardwareMonitor (LibreHardwareMonitorLib.dll +
+#    pythonnet), а не psutil/lm-sensors — см. [sensors.lhm];
+#  - истории отключений (`last`/journalctl) пока нет — монитор честно скажет
+#    «не поддерживается на этой ОС»;
+#  - пути держите АБСОЛЮТНЫМИ (резолв от WorkingDirectory — те же грабли,
+#    что на Linux, см. config.example.toml).
+
+# Windows-нода — без телеграм-бота: фронтенд остаётся на alfred,
+# сюда назначается только мониторинг (позже — apps-win, power уже встроен).
+[node]
+id = "winpc"                          # имя ноды в рое (пусто = hostname)
+socket = "tcp://127.0.0.1:8710"       # локальные фронтенды (nodectl)
+listen = "tcp://100.x.y.z:8710"       # tailscale-адрес ЭТОЙ машины — канал роя
+assignments = ["monitor"]
+state_path = 'C:\Users\<вы>\AppData\Local\sa-home-bot\data\node-state.json'
+restart_delay_s = 5.0
+stop_timeout_s = 90.0
+
+[monitor]
+socket = "tcp://127.0.0.1:8711"
+db_path = 'C:\Users\<вы>\AppData\Local\sa-home-bot\data\monitor.sqlite'
+
+[sensors.cpu]
+enabled = true
+warn_c = 85.0                          # десктопные CPU горячее серверных — подберите
+crit_c = 95.0
+
+[sensors.disks]
+enabled = true
+warn_c = 55.0
+crit_c = 65.0
+# devices на Windows не нужен: температуры дисков идут из LHM целиком,
+# smartctl (если поставить smartmontools) — только для SMART-снимков деградации.
+
+[sensors.lhm]
+# Путь к LibreHardwareMonitorLib.dll. Пусто = автопоиск:
+#   %LOCALAPPDATA%\sa-home-bot\LibreHardwareMonitorLib.dll (кладёт install-node.ps1)
+#   %PROGRAMFILES%\LibreHardwareMonitor\LibreHardwareMonitorLib.dll
+dll_path = ""
+
+[swarm]
+# Тот же токен, что на остальных нодах роя.
+token = "PUT-SWARM-TOKEN-HERE"
+# Разовый bootstrap при первом старте: endpoint любой живой ноды роя.
+join = "tcp://alfred.tailXXXXXX.ts.net:8710"
+
+[logging]
+level = "INFO"
+format = "plain"

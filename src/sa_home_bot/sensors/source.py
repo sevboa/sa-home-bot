@@ -26,14 +26,18 @@ class SensorSource:
         if not self._config.cpu.enabled:
             return []
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, cpu.read_cpu_sync, _now())
+        return await loop.run_in_executor(
+            None, cpu.read_cpu_sync, _now(), self._config.lhm.dll_path
+        )
 
     async def read_disks(self) -> list[SensorReading]:
         if not self._config.disks.enabled:
             return []
         loop = asyncio.get_running_loop()
         devices = list(self._config.disks.devices)
-        return await loop.run_in_executor(None, disks.read_disks_sync, devices, _now())
+        return await loop.run_in_executor(
+            None, disks.read_disks_sync, devices, _now(), self._config.lhm.dll_path
+        )
 
     async def read_all(self) -> list[SensorReading]:
         cpu_readings, disk_readings = await asyncio.gather(

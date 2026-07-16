@@ -1,5 +1,8 @@
 """Адаптер температуры CPU: psutil, fallback на `sensors -j` (lm-sensors).
 
+На Windows ни psutil, ни lm-sensors температур не дают — там источник
+LibreHardwareMonitor (см. `sensors/lhm.py`), диспетчеризация в `read_cpu_sync`.
+
 Парсинг вынесен в чистые функции (`parse_psutil_temps`, `parse_lm_sensors`),
 чтобы тестировать на фикстурах без реального железа. Блокирующие вызовы делает
 вызывающий код (SensorSource) через run_in_executor.
@@ -11,6 +14,7 @@ import json
 import logging
 import shutil
 import subprocess
+import sys
 from datetime import datetime
 
 from sa_home_bot.domain.models import KIND_CPU, SensorReading
@@ -70,8 +74,13 @@ def parse_lm_sensors(data: dict, now: datetime) -> list[SensorReading]:
     return readings
 
 
-def read_cpu_sync(now: datetime) -> list[SensorReading]:
-    """Снять температуры CPU (блокирующе). psutil → fallback lm-sensors."""
+def read_cpu_sync(now: datetime, lhm_dll_path: str = "") -> list[SensorReading]:
+    """Снять температуры CPU (блокирующе). psutil → fallback lm-sensors;
+    на Windows — LibreHardwareMonitor."""
+    if sys.platform == "win32":
+        from sa_home_bot.sensors import lhm
+
+        return lhm.read_cpu_readings_sync(lhm_dll_path, now)
     try:
         import psutil
 

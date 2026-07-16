@@ -39,9 +39,18 @@ log = logging.getLogger(__name__)
 LAST_ARGS = ["last", "-xR", "--time-format", "iso", "reboot"]
 JOURNAL_ARGS = ["journalctl", "--list-boots", "-o", "json"]
 
+# История отключений строится на wtmp/journald — на Windows её пока нет
+# (platforms → «не поддерживается на этой ОС» вместо подсказки про apt).
+LAST_REQUIREMENT = Requirement(
+    program="last",
+    package="util-linux",
+    platforms=("linux",),
+    note="история отключений машины",
+)
 JOURNALCTL_REQUIREMENT = Requirement(
     program="journalctl",
     package="systemd",
+    platforms=("linux",),
     note="точное время внезапных отключений",
 )
 
@@ -231,7 +240,11 @@ def read_power_events_sync(
     Возвращает (события страницы `[offset:offset+limit]`, есть ли следующая
     страница) — для этого запрашивается на одно событие больше, чем нужно.
     """
-    last_out = _run(LAST_ARGS)
+    if not LAST_REQUIREMENT.available():
+        # Не та ОС / нет `last` — не шумим в лог каждым сканом, причину
+        # объяснит requirements в get_state монитора.
+        return [], False
+    last_out = _run(LAST_ARGS, requirement=LAST_REQUIREMENT)
     if last_out is None:
         return [], False
     events = parse_last_reboots(last_out, limit=offset + limit + 1)

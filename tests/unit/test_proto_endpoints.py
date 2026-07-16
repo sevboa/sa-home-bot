@@ -73,3 +73,14 @@ def test_resolve_absolute_and_tcp_unchanged():
     assert resolve_endpoint("/tmp/x.sock", Path("/opt")) == UnixEndpoint(Path("/tmp/x.sock"))
     assert resolve_endpoint("tcp://h:1", Path("/opt")) == TcpEndpoint("h", 1)
     assert resolve_endpoint("./x.sock", None) == UnixEndpoint(Path("./x.sock"))
+
+
+def test_unix_rejected_on_windows(monkeypatch):
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    for raw in ("./data/node.sock", "unix:/tmp/x.sock", Path("/tmp/x.sock")):
+        with pytest.raises(ValueError, match="tcp://127.0.0.1"):
+            parse_endpoint(raw)
+    # tcp продолжает работать
+    assert parse_endpoint("tcp://127.0.0.1:8710") == TcpEndpoint("127.0.0.1", 8710)

@@ -12,6 +12,8 @@ from sa_home_bot.node.supervisor import (
     STOPPED,
     SupervisedService,
     Supervisor,
+    spawn_kwargs,
+    terminate_gracefully,
 )
 
 
@@ -167,3 +169,47 @@ async def test_unassign_unknown_name_is_noop():
     events = Events()
     sup = Supervisor([], None, emit=events.emit)
     await sup.unassign("no-such-service")  # не бросает
+
+
+# --- Windows-специфика: process group при спавне, CTRL_BREAK вместо terminate ---
+
+
+def test_spawn_kwargs_empty_on_linux():
+    assert spawn_kwargs() == {}
+
+
+def test_spawn_kwargs_new_process_group_on_windows(monkeypatch):
+    import subprocess
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    assert spawn_kwargs() == {"creationflags": 0x200}
+
+
+class _FakeProc:
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def terminate(self) -> None:
+        self.calls.append("terminate")
+
+    def send_signal(self, sig) -> None:
+        self.calls.append(("signal", sig))
+
+
+def test_terminate_gracefully_sigterm_on_linux():
+    proc = _FakeProc()
+    terminate_gracefully(proc)
+    assert proc.calls == ["terminate"]
+
+
+def test_terminate_gracefully_ctrl_break_on_windows(monkeypatch):
+    import signal
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(signal, "CTRL_BREAK_EVENT", 21, raising=False)
+    proc = _FakeProc()
+    terminate_gracefully(proc)
+    assert proc.calls == [("signal", 21)]

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sa-home-bot"
-version = "0.23.4"
+version = "0.24.0"
 description = "Рой домашних машин: нода-супервизор, службы (мониторинг, приложения) и Telegram-бот"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,6 +23,11 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.4",
+]
+# Windows-нода: pythonnet для LibreHardwareMonitorLib.dll (sensors/lhm.py).
+# Установка: pipx install "sa-home-bot[windows] @ git+https://…@vX.Y.Z"
+windows = [
+    "pythonnet>=3.0; sys_platform == 'win32'",
 ]
 
 [project.scripts]

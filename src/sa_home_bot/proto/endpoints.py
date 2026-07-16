@@ -9,11 +9,21 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 TCP_PREFIX = "tcp://"
 UNIX_PREFIX = "unix:"
+
+
+def _unix_endpoint(path: Path) -> UnixEndpoint:
+    if sys.platform == "win32":
+        raise ValueError(
+            f"unix-сокет {str(path)!r} недоступен на Windows — "
+            "укажите в конфиге tcp://127.0.0.1:<порт> (см. PROTOCOL.md, «Транспорт»)"
+        )
+    return UnixEndpoint(path)
 
 
 @dataclass(frozen=True)
@@ -41,7 +51,7 @@ def parse_endpoint(value: str | Path | Endpoint) -> Endpoint:
     if isinstance(value, (UnixEndpoint, TcpEndpoint)):
         return value
     if isinstance(value, Path):
-        return UnixEndpoint(value)
+        return _unix_endpoint(value)
 
     raw = value.strip()
     if not raw:
@@ -63,9 +73,9 @@ def parse_endpoint(value: str | Path | Endpoint) -> Endpoint:
             rest = rest[2:]
         if not rest:
             raise ValueError(f"невалидный unix-endpoint: {raw!r}")
-        return UnixEndpoint(Path(rest))
+        return _unix_endpoint(Path(rest))
 
-    return UnixEndpoint(Path(raw))
+    return _unix_endpoint(Path(raw))
 
 
 def resolve_endpoint(value: str | Path | Endpoint, base_dir: Path | None = None) -> Endpoint:

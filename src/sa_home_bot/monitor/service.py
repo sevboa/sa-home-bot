@@ -26,8 +26,10 @@ from sa_home_bot.proto.messages import (
     ServiceInfo,
 )
 from sa_home_bot.sensors.disks import SMARTCTL_REQUIREMENT, read_disk_summaries_sync
+from sa_home_bot.sensors.lhm import lhm_problem
 from sa_home_bot.sensors.power import (
     JOURNALCTL_REQUIREMENT,
+    LAST_REQUIREMENT,
     read_power_events_sync,
     read_uptime_sync,
 )
@@ -105,20 +107,32 @@ class MonitorService:
             read_disk_summaries_sync,
             list(self._settings.sensors.disks.devices),
             health_map,
+            self._settings.sensors.lhm.dll_path,
         )
         outages, _ = await loop.run_in_executor(None, read_power_events_sync, 0, 1)
 
         cpu_cfg = self._settings.sensors.cpu
         disk_cfg = self._settings.sensors.disks
         # smartctl — только если мониторинг дисков включён (иначе не шумим
-        # про программу, от которой ничего и не ждали); journalctl — всегда,
-        # он нужен для истории отключений независимо от датчиков.
+        # про программу, от которой ничего и не ждали); история отключений
+        # (`last`, journalctl) — всегда, она не зависит от датчиков. journalctl
+        # упоминается отдельно, только когда сам `last` в порядке — иначе оба
+        # сводятся к одной проблеме (нет истории отключений / не та ОС).
         smartctl_problem = (
             requirements_registry.problem_for(SMARTCTL_REQUIREMENT) if disk_cfg.enabled else None
         )
+        last_problem = requirements_registry.problem_for(LAST_REQUIREMENT)
+        journal_problem = (
+            None if last_problem else requirements_registry.problem_for(JOURNALCTL_REQUIREMENT)
+        )
         requirements = [
             p
-            for p in (smartctl_problem, requirements_registry.problem_for(JOURNALCTL_REQUIREMENT))
+            for p in (
+                smartctl_problem,
+                last_problem,
+                journal_problem,
+                lhm_problem(self._settings.sensors.lhm.dll_path),
+            )
             if p is not None
         ]
         return {

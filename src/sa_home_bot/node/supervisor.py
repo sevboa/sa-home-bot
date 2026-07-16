@@ -12,11 +12,33 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import signal
+import subprocess
 import sys
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 log = logging.getLogger(__name__)
+
+
+def spawn_kwargs() -> dict:
+    """Доп. аргументы запуска дочернего процесса службы.
+
+    Windows: отдельная process group — только так дочернюю службу можно
+    остановить мягко (CTRL_BREAK_EVENT доставляется группе; в группе родителя
+    он прилетел бы и самой ноде)."""
+    if sys.platform == "win32":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {}
+
+
+def terminate_gracefully(proc: asyncio.subprocess.Process) -> None:
+    """Попросить процесс завершиться: SIGTERM; на Windows — CTRL_BREAK_EVENT
+    (``proc.terminate()`` там = TerminateProcess, без шанса попрощаться)."""
+    if sys.platform == "win32":
+        proc.send_signal(signal.CTRL_BREAK_EVENT)
+    else:
+        proc.terminate()
 
 EventEmitter = Callable[[str, dict], Awaitable[None]]
 
@@ -107,7 +129,7 @@ class SupervisedService:
         self._desired_running = False
         proc = self._proc
         if proc is not None and proc.returncode is None:
-            proc.terminate()
+            terminate_gracefully(proc)
             try:
                 await asyncio.wait_for(proc.wait(), timeout=self._stop_timeout)
             except TimeoutError:
@@ -131,7 +153,7 @@ class SupervisedService:
         while self._desired_running:
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    sys.executable, "-m", "sa_home_bot", *self._cli_args
+                    sys.executable, "-m", "sa_home_bot", *self._cli_args, **spawn_kwargs()
                 )
             except OSError as exc:
                 log.error("Не удалось запустить службу %s: %s", self.name, exc)

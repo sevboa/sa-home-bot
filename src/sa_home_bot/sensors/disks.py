@@ -15,6 +15,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -192,12 +193,20 @@ def _resolve_targets(specs: list[str]) -> list[DiskTarget]:
     return targets
 
 
-def read_disks_sync(specs: list[str], now: datetime) -> list[SensorReading]:
+def read_disks_sync(
+    specs: list[str], now: datetime, lhm_dll_path: str = ""
+) -> list[SensorReading]:
     """Снять температуры дисков (блокирующе).
 
     Опрос каждого устройства изолирован: ошибка/таймаут одного не роняет
     остальные. Устройства без SMART (eMMC и т.п.) молча пропускаются.
+    На Windows источник — LibreHardwareMonitor (см. `sensors/lhm.py`),
+    smartctl там остаётся только для SMART-снимков деградации.
     """
+    if sys.platform == "win32":
+        from sa_home_bot.sensors import lhm
+
+        return lhm.read_disk_readings_sync(lhm_dll_path, now)
     readings: list[SensorReading] = []
     for target in _resolve_targets(specs):
         if not is_smart_capable(target.name):
@@ -414,9 +423,14 @@ def _label_disks(disks: list[BlockDisk]) -> list[tuple[str, BlockDisk]]:
 
 
 def read_disk_summaries_sync(
-    specs: list[str], health_overrides: dict[str, str | None] | None = None
+    specs: list[str],
+    health_overrides: dict[str, str | None] | None = None,
+    lhm_dll_path: str = "",
 ) -> list[DiskSummary]:
     """Собрать сводку по ВСЕМ физическим дискам (блокирующе, через executor).
+
+    На Windows сводка строится из LibreHardwareMonitor (lsblk там нет);
+    health/свободное место в ней пока пустые — см. `sensors/lhm.py`.
 
     Температура снимается на лету (меняется быстро), сопоставление по реальному
     пути (by-id → /dev/sdX) — иначе автоопределение USB-моста виснет. Свободное
@@ -428,6 +442,10 @@ def read_disk_summaries_sync(
     ещё нет в снимках (холодный старт до первого прогона), health берётся из
     живого опроса. Без ``health_overrides`` весь health — живой (старое поведение).
     """
+    if sys.platform == "win32":
+        from sa_home_bot.sensors import lhm
+
+        return lhm.read_disk_summaries_sync(lhm_dll_path)
     # SMART по реальному пути устройства (живой опрос: temp + запасной health).
     smart: dict[str, tuple[str | None, float | None]] = {}
     for target in _resolve_targets(specs):

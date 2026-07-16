@@ -31,6 +31,7 @@ _PACKAGE_MANAGERS: tuple[tuple[str, str], ...] = (
     ("zypper", "sudo zypper install {pkg}"),
     ("apk", "sudo apk add {pkg}"),
     ("brew", "brew install {pkg}"),
+    ("winget", "winget install {pkg}"),  # Windows; ищет по имени/moniker'у
 )
 
 # То же самое, но как argv для реального вызова (nodectl fix) — без "sudo":

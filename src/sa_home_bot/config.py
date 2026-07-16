@@ -107,9 +107,21 @@ class DiskSensorConfig(_BaselineParams):
     devices: list[str] = Field(default_factory=list)
 
 
+class LhmSensorConfig(BaseModel):
+    """LibreHardwareMonitor — источник температур на Windows (`sensors/lhm.py`).
+
+    ``dll_path`` — путь к LibreHardwareMonitorLib.dll; пусто — поиск по
+    типовым местам (%LOCALAPPDATA%\\sa-home-bot, Program Files). На Linux
+    секция игнорируется.
+    """
+
+    dll_path: str = ""
+
+
 class SensorsConfig(BaseModel):
     cpu: CpuSensorConfig = Field(default_factory=CpuSensorConfig)
     disks: DiskSensorConfig = Field(default_factory=DiskSensorConfig)
+    lhm: LhmSensorConfig = Field(default_factory=LhmSensorConfig)
 
 
 class WakeConfig(BaseModel):
