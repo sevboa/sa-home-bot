@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -188,24 +189,43 @@ _computer = None  # кэш LHM Computer: Open() дорогой, живёт до 
 _last_error: str | None = None  # последняя причина недоступности (для requirements)
 _warned = False  # предупреждение в лог — один раз, не каждым сканом
 _cpu_temps_missing = False  # CPU в дереве есть, температур нет — типично «не админ»
+_runtime_load_attempted = False  # pythonnet.load() вызван (успешно или нет) — не повторяем
+_runtime_lock = threading.Lock()
 
 
 def _ensure_runtime() -> None:
-    """Явно загрузить .NET-runtime ДО первого ``import clr``.
+    """Явно загрузить .NET-runtime ДО первого ``import clr`` — РОВНО ОДИН РАЗ.
 
     Автозагрузка pythonnet на живой машине (2026-07-17) подняла runtime не
     полностью — ``clr`` остался пустышкой без ``AddReference``; с явным
-    "netfx" работает. PYTHONNET_RUNTIME уважается; повторная загрузка /
-    уже загруженный runtime — не ошибка, работаем с тем, что есть.
+    "netfx" работает. PYTHONNET_RUNTIME уважается.
+
+    Живой баг 2026-07-17 (второй заход): вызывался без защиты от повторного/
+    параллельного вызова — ``lhm_problem()`` (requirements-проверка в
+    ``get_state()``, event loop) и реальное чтение датчиков (sensor_scan,
+    executor-поток) оба звали ``_ensure_runtime()``, и при совпадении по
+    времени ДВА потока одновременно инициализировали pythonnet — гонка
+    ломала ``clr`` ещё сильнее (`no attribute '_add_pending_namespaces'`,
+    внутренняя структура CLR-хостинга, не просто "AddReference отсутствует").
+    Инициализация .NET-рантайма в принципе рассчитана на один раз за
+    процесс — лочим и не повторяем, даже если первая попытка не удалась
+    (повтор только усугубляет, не чинит).
     """
-    try:
-        import pythonnet  # noqa: PLC0415 — ставится только на Windows
-    except ImportError:
-        return  # нет pythonnet — import clr скажет об этом понятной подсказкой
-    try:
-        pythonnet.load(os.environ.get("PYTHONNET_RUNTIME", "netfx"))
-    except Exception:  # noqa: BLE001
-        pass
+    global _runtime_load_attempted
+    if _runtime_load_attempted:
+        return
+    with _runtime_lock:
+        if _runtime_load_attempted:  # ждали лок, пока другой поток уже попробовал
+            return
+        _runtime_load_attempted = True
+        try:
+            import pythonnet  # noqa: PLC0415 — ставится только на Windows
+        except ImportError:
+            return  # нет pythonnet — import clr скажет об этом понятной подсказкой
+        try:
+            pythonnet.load(os.environ.get("PYTHONNET_RUNTIME", "netfx"))
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def dll_candidates(configured: str = "") -> list[Path]:

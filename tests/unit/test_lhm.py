@@ -196,16 +196,46 @@ def test_zero_and_negative_temperatures_filtered():
     assert disk_readings_from_tree([disk], BASE_TIME) == []
 
 
-def test_ensure_runtime_loads_netfx_and_respects_env(monkeypatch):
+def test_ensure_runtime_loads_netfx_once(monkeypatch):
+    monkeypatch.setattr(lhm, "_runtime_load_attempted", False)
     calls: list[str] = []
     fake = types.SimpleNamespace(load=lambda runtime: calls.append(runtime))
     monkeypatch.setitem(sys.modules, "pythonnet", fake)
     monkeypatch.delenv("PYTHONNET_RUNTIME", raising=False)
     lhm._ensure_runtime()
     assert calls == ["netfx"]
-    monkeypatch.setenv("PYTHONNET_RUNTIME", "coreclr")
+
+
+def test_ensure_runtime_does_not_reload_on_second_call(monkeypatch):
+    # Живой баг 2026-07-17: lhm_problem() (event loop) и реальное чтение
+    # датчиков (executor-поток) оба звали _ensure_runtime() — без защиты от
+    # повторного вызова конкурентная повторная загрузка ломала pythonnet
+    # ещё сильнее ('_add_pending_namespaces'), а не просто не помогала.
+    monkeypatch.setattr(lhm, "_runtime_load_attempted", False)
+    calls: list[str] = []
+    fake = types.SimpleNamespace(load=lambda runtime: calls.append(runtime))
+    monkeypatch.setitem(sys.modules, "pythonnet", fake)
     lhm._ensure_runtime()
-    assert calls == ["netfx", "coreclr"]
+    monkeypatch.setenv("PYTHONNET_RUNTIME", "coreclr")  # даже смена env не триггерит повтор
+    lhm._ensure_runtime()
+    assert calls == ["netfx"]  # второго вызова load() не было
+
+
+def test_ensure_runtime_sticky_after_failed_load(monkeypatch):
+    # Неудачная попытка тоже помечается — повтор не чинит, только рискует
+    # гонкой при параллельном вызове.
+    monkeypatch.setattr(lhm, "_runtime_load_attempted", False)
+    calls: list[str] = []
+
+    def failing_load(runtime):
+        calls.append(runtime)
+        raise RuntimeError("already loaded a different runtime")
+
+    fake = types.SimpleNamespace(load=failing_load)
+    monkeypatch.setitem(sys.modules, "pythonnet", fake)
+    lhm._ensure_runtime()
+    lhm._ensure_runtime()
+    assert calls == ["netfx"]  # вторая попытка не предпринималась
 
 
 def test_lhm_problem_hints_admin_when_cpu_has_no_temps(monkeypatch):
