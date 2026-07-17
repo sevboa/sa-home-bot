@@ -1,78 +1,96 @@
 # Автообновление Windows-ноды (этап 19, п. 4). Регистрируется
-# install-node.ps1 как ежедневная задача планировщика.
+# install-node.ps1 как ежедневная задача планировщика (от SYSTEM).
 #
-# Переиспользует УЖЕ существующий протокольный механизм ноды
-# (node/update.py, node/service.py) через nodectl — не дублирует
-# pipx/git-логику здесь. Три шага:
-#   1. nodectl update    — если есть новый тег, запускает pipx install
-#      --force в фоне на стороне ноды и сразу возвращается (не ждёт).
-#   2. nodectl events     — слушаем живой поток событий, ждём
-#      update_finished (успех/неудача) с общим таймаутом.
-#   3. nodectl restart_node — только если обновление реально прошло
-#      успешно; сам процесс не заменяется (Windows), нода выходит с
-#      RESTART_EXIT_CODE=10 — перезапуск подхватывает WinSW
-#      (<onfailure action="restart"/> в sa-home-node.xml).
+# НЕ использует протокольное умение nodectl update (node/update.py) — это
+# сознательный отход от Linux-модели. Живая находка 2026-07-17: на
+# Windows "горячий" pipx install --force поверх РАБОТАЮЩЕЙ ноды падает с
+# WinError 5 (Access Denied) — Windows не даёt перезаписать DLL
+# (в частности ClrLoader.dll у pythonnet/LHM), пока её держит открытой
+# работающий процесс. На Linux так можно (там разрешено перезаписывать
+# открytый файл, старый процесс держит старый inode) — отсюда и модель
+# node/update.py "обнови файлы на диске сейчас, рестарт — когда сможет
+# человек/WinSW". На Windows с активным LHM это в принципе не работает,
+# пока служба жива, — nodectl update на такой ноде будет надёжно
+# проваливаться (pipx откатится, ничего не сломает, но и не обновит).
 #
-# Ничего не делает, если версия уже последняя — безопасно гонять хоть
-# каждый час.
+# Поэтому здесь — честный цикл СТОП → pipx install --force → СТАРТ,
+# без обращения к самой ноде вообще (работает, даже если нода уже упала).
+# target-тег определяется напрямую через git ls-remote — та же логика,
+# что node/update.py:latest_tag(), но без сети/протокола к ноде.
 
+# GitExe/PipxExe — АБСОЛЮТНЫЕ пути, не полагаемся на PATH: задача идёт от
+# SYSTEM, у которого PATH может не включать то, что winget/pipx прописали
+# только в User- или даже "текущий процесс"-scope (та же ловушка, что
+# была со smartctl — см. install-node.ps1, живая находка 2026-07-17).
 param(
-    [string]$ConfigPath = "$env:USERPROFILE\sa-home-bot\config.toml",
-    [string]$NodectlExe = "$env:USERPROFILE\AppData\Local\pipx\pipx\venvs\sa-home-bot\Scripts\nodectl.exe",
-    [int]$TimeoutSec = 360   # запас над внутренним таймаутом pipx (300s) в node/update.py
+    [Parameter(Mandatory = $true)]
+    [string]$RepoUrl,
+    [Parameter(Mandatory = $true)]
+    [string]$GitExe,
+    [Parameter(Mandatory = $true)]
+    [string]$PipxExe,
+    [string]$ServiceName = "sa-home-node",
+    [int]$ServiceStopTimeoutSec = 120
 )
 
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$env:PYTHONIOENCODING = "utf-8"
 
 function Log($msg) {
     Write-Output "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $msg"
 }
 
-$updateOutput = & $NodectlExe -c $ConfigPath update 2>&1
-Log "nodectl update: $updateOutput"
+# --- 1. Последний тег в репозитории ---
+$tagRefs = & $GitExe ls-remote --tags --refs $RepoUrl 2>$null
+if (-not $tagRefs) {
+    Log "git ls-remote не вернул тегов (сеть/репозиторий?) — пропускаю."
+    exit 0
+}
+$tags = $tagRefs | ForEach-Object { ($_ -split "refs/tags/")[-1] } | Where-Object { $_ -match '^v\d+(\.\d+)*$' }
+if (-not $tags) {
+    Log "Не нашёл ни одного тега формата vX.Y.Z — пропускаю."
+    exit 0
+}
+$latestTag = $tags | Sort-Object { [version]($_ -replace '^v', '') } | Select-Object -Last 1
+$latestVersion = $latestTag.TrimStart('v')
 
-if ($updateOutput -match "Уже последняя версия") {
-    Log "Обновление не требуется."
+# --- 2. Что установлено сейчас (pipx, не то, что в памяти процесса) ---
+$pipxJson = & $PipxExe list --json | ConvertFrom-Json
+$installed = $pipxJson.venvs.'sa-home-bot'.metadata.main_package.package_version
+if (-not $installed) {
+    Log "ОШИБКА: sa-home-bot не найден в 'pipx list' — пропускаю."
+    exit 1
+}
+
+Log "Установлено: $installed / В репозитории: $latestVersion"
+if ($installed -eq $latestVersion) {
+    Log "Уже последняя версия — обновление не требуется."
     exit 0
 }
 
-# "Запущено обновление ... в фоне" — слушаем events до update_finished.
-Log "Обновление запущено, жду update_finished (до ${TimeoutSec}s)..."
-
-$job = Start-Job -ScriptBlock {
-    param($exe, $cfg)
-    & $exe -c $cfg events
-} -ArgumentList $NodectlExe, $ConfigPath
-
-$deadline = (Get-Date).AddSeconds($TimeoutSec)
-$finishedLine = $null
-while ((Get-Date) -lt $deadline) {
-    $lines = Receive-Job -Job $job
-    foreach ($line in $lines) {
-        Log "event: $line"
-        if ($line -match "update_finished") {
-            $finishedLine = $line
-            break
-        }
-    }
-    if ($finishedLine) { break }
-    Start-Sleep -Seconds 3
+# --- 3. Стоп → pipx install --force → старт ---
+Log "Останавливаю службу $ServiceName..."
+Stop-Service -Name $ServiceName -ErrorAction Stop
+$deadline = (Get-Date).AddSeconds($ServiceStopTimeoutSec)
+while ((Get-Service $ServiceName).Status -ne 'Stopped' -and (Get-Date) -lt $deadline) {
+    Start-Sleep -Seconds 2
 }
-Stop-Job -Job $job -ErrorAction SilentlyContinue | Out-Null
-Remove-Job -Job $job -Force -ErrorAction SilentlyContinue | Out-Null
-
-if (-not $finishedLine) {
-    Log "ОШИБКА: update_finished не пришёл за ${TimeoutSec}s — рестарт НЕ выполняется, проверьте вручную."
-    exit 1
-}
-if ($finishedLine -notmatch "ok=True") {
-    Log "ОШИБКА: обновление завершилось неудачей — рестарт НЕ выполняется: $finishedLine"
+if ((Get-Service $ServiceName).Status -ne 'Stopped') {
+    Log "ОШИБКА: служба не остановилась за ${ServiceStopTimeoutSec}s — прерываю, обновление НЕ выполнено."
     exit 1
 }
 
-Log "Обновление успешно установлено на диск — перезапуск ноды..."
-$restartOutput = & $NodectlExe -c $ConfigPath restart_node 2>&1
-Log "nodectl restart_node: $restartOutput"
+Log "pipx install --force до $latestTag..."
+$installOutput = & $PipxExe install --force "sa-home-bot[windows] @ git+$RepoUrl@$latestTag" 2>&1
+$installOk = $LASTEXITCODE -eq 0
+Log ($installOutput -join "`n")
+
+Log "Запускаю службу $ServiceName..."
+Start-Service -Name $ServiceName
+
+if (-not $installOk) {
+    Log "ОШИБКА: pipx install завершился с кодом $LASTEXITCODE — служба перезапущена на СТАРОЙ версии (venv при неудаче не трогается, см. вывод выше)."
+    exit 1
+}
+Log "Обновление до $latestTag установлено, служба перезапущена."
 exit 0
