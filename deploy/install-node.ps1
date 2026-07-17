@@ -112,6 +112,7 @@ if ($runningService -and $runningService.Status -eq "Running") {
 
 $pipxVenvs = (& $pipxToolExe environment --value PIPX_LOCAL_VENVS 2>$null)
 if (-not $pipxVenvs) { $pipxVenvs = "$env:USERPROFILE\pipx\venvs" }  # запасной путь на старых pipx
+$pipxHome = Split-Path $pipxVenvs -Parent  # venvs всегда прямо под PIPX_HOME
 $saHomeBotExe = Join-Path $pipxVenvs "sa-home-bot\Scripts\sa-home-bot.exe"
 $nodectlExe = Join-Path $pipxVenvs "sa-home-bot\Scripts\nodectl.exe"
 if (-not (Test-Path $saHomeBotExe)) { throw "pipx install прошёл, но $saHomeBotExe не найден — проверьте вывод выше." }
@@ -244,7 +245,7 @@ Step "Задача автообновления"
 $autoUpdateScript = Join-Path $InstallDir "win-auto-update.ps1"
 Copy-Item (Join-Path $PSScriptRoot "win-auto-update.ps1") $autoUpdateScript -Force
 
-$argStr = "-ExecutionPolicy Bypass -NoProfile -File `"$autoUpdateScript`" -RepoUrl `"$RepoUrl`" -GitExe `"$gitExe`" -PipxExe `"$pipxToolExe`""
+$argStr = "-ExecutionPolicy Bypass -NoProfile -File `"$autoUpdateScript`" -RepoUrl `"$RepoUrl`" -GitExe `"$gitExe`" -PipxExe `"$pipxToolExe`" -PipxHome `"$pipxHome`""
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $argStr
 $trigger = New-ScheduledTaskTrigger -Daily -At $AutoUpdateTime
 $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest

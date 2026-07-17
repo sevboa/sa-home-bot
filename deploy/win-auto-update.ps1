@@ -22,6 +22,16 @@
 # SYSTEM, у которого PATH может не включать то, что winget/pipx прописали
 # только в User- или даже "текущий процесс"-scope (та же ловушка, что
 # была со smartctl — см. install-node.ps1, живая находка 2026-07-17).
+#
+# PipxHome — ЕЩЁ важнее: pipx хранит venv'ы в каталоге, который сам
+# вычисляет из %LOCALAPPDATA% ВЫЗЫВАЮЩЕГО аккаунта. У SYSTEM свой
+# %LOCALAPPDATA% (системный профиль), отличный от того, что реально
+# использует служба (User). Без явного PIPX_HOME задача вроде бы
+# успешно отрабатывает pipx install --force, но ставит пакет в venv
+# ПОД SYSTEM — призрак, никак не связанный с реально работающей службой
+# (живой баг 2026-07-17: nodectl update рапортовал "успех", но
+# installed_version() после этого честно продолжал видеть старую версию —
+# см. node/update.py:_pipx_home). Задаём переменную окружения явно.
 param(
     [Parameter(Mandatory = $true)]
     [string]$RepoUrl,
@@ -29,12 +39,15 @@ param(
     [string]$GitExe,
     [Parameter(Mandatory = $true)]
     [string]$PipxExe,
+    [Parameter(Mandatory = $true)]
+    [string]$PipxHome,
     [string]$ServiceName = "sa-home-node",
     [int]$ServiceStopTimeoutSec = 120
 )
 
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$env:PIPX_HOME = $PipxHome
 
 function Log($msg) {
     Write-Output "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $msg"

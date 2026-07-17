@@ -13,8 +13,11 @@ import asyncio
 import importlib.metadata
 import json
 import logging
+import os
 import re
 import subprocess
+import sys
+from pathlib import Path
 
 from sa_home_bot.proto.client import DEFAULT_TIMEOUT
 from sa_home_bot.utils.version import version_key
@@ -112,6 +115,23 @@ async def latest_tag(repo_url: str) -> str | None:
     return await loop.run_in_executor(None, _latest_tag_sync, repo_url)
 
 
+def _pipx_home() -> str:
+    """PIPX_HOME, вычисленный от РЕАЛЬНО работающего интерпретатора, а не
+    унаследованный от аккаунта, который зовёт pipx.
+
+    pipx-венв всегда имеет структуру ``<PIPX_HOME>/venvs/<pkg>/{bin,Scripts}/
+    python[.exe]`` — четвёртый родитель ``sys.executable`` и есть PIPX_HOME.
+
+    Живой баг 2026-07-17: Windows-служба идёт от LocalSystem, у которого
+    СВОЙ %LOCALAPPDATA% (системный профиль), отличный от того, откуда
+    реально запущен процесс. Без явного PIPX_HOME `pipx install --force`
+    молча ставит пакет в venv ПОД LocalSystem — "успешно", но мимо venv'а,
+    из которого служба фактически работает; `installed_version()` после
+    такого "обновления" честно продолжает видеть старую версию.
+    """
+    return str(Path(sys.executable).parents[3])
+
+
 async def pipx_reinstall(repo_url: str, ref: str) -> tuple[bool, str]:
     """`pipx install --force git+<repo_url>@<ref>` — без sudo, без TTY.
 
@@ -119,6 +139,7 @@ async def pipx_reinstall(repo_url: str, ref: str) -> tuple[bool, str]:
     наружу — вызывающий код (фоновая задача) сам решает, что делать с провалом.
     """
     spec = f"git+{repo_url}@{ref}"
+    env = {**os.environ, "PIPX_HOME": _pipx_home()}
     try:
         proc = await asyncio.create_subprocess_exec(
             "pipx",
@@ -127,6 +148,7 @@ async def pipx_reinstall(repo_url: str, ref: str) -> tuple[bool, str]:
             spec,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            env=env,
         )
         stdout, _ = await asyncio.wait_for(
             proc.communicate(), timeout=PIPX_INSTALL_TIMEOUT_S

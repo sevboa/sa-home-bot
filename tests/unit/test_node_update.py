@@ -170,7 +170,7 @@ async def test_pipx_reinstall_success(monkeypatch):
     calls = []
 
     async def fake_exec(*args, **kwargs):
-        calls.append(args)
+        calls.append((args, kwargs))
         return _FakeProc(0, b"installed sa-home-bot 0.22.0\n")
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
@@ -178,12 +178,26 @@ async def test_pipx_reinstall_success(monkeypatch):
 
     assert ok is True
     assert "0.22.0" in output
-    assert calls[0] == (
+    args, kwargs = calls[0]
+    assert args == (
         "pipx",
         "install",
         "--force",
         "git+https://x/repo.git@v0.22.0",
     )
+    # PIPX_HOME передан явно — без него pipx под другим аккаунтом (Windows
+    # LocalSystem-служба) ставит пакет мимо реально работающего venv'а
+    # (живой баг 2026-07-17, см. _pipx_home).
+    assert kwargs["env"]["PIPX_HOME"] == update._pipx_home()
+
+
+def test_pipx_home_derived_from_running_interpreter(monkeypatch):
+    # Path() платформозависим (POSIX-тест не парсит "\\" как разделитель) —
+    # формула ("4-й родитель") на Windows проверена живьём 2026-07-17:
+    # C:\...\pipx\pipx\venvs\sa-home-bot\Scripts\python.exe → C:\...\pipx\pipx.
+    fake_python = "/home/x/.local/share/pipx/venvs/sa-home-bot/bin/python"
+    monkeypatch.setattr(update.sys, "executable", fake_python)
+    assert update._pipx_home() == "/home/x/.local/share/pipx"
 
 
 async def test_pipx_reinstall_failure_returns_output_tail(monkeypatch):
