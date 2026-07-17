@@ -1,5 +1,6 @@
-# Конфигурация Windows-ноды (этап 19). Скопируйте в
-# %LOCALAPPDATA%\sa-home-bot\config.toml и подставьте свои значения.
+# Конфигурация Windows-ноды (этап 19). install-node.ps1 генерирует такой
+# же файл автоматически в C:\ProgramData\sa-home-bot\config.toml — этот
+# файл здесь для справки/ручной установки.
 #
 # Отличия от Linux-ноды:
 #  - unix-сокетов на Windows нет — ВСЕ endpoint'ы только tcp://127.0.0.1:<порт>,
@@ -9,7 +10,14 @@
 #  - истории отключений (`last`/journalctl) пока нет — монитор честно скажет
 #    «не поддерживается на этой ОС»;
 #  - пути держите АБСОЛЮТНЫМИ (резолв от WorkingDirectory — те же грабли,
-#    что на Linux, см. config.example.toml).
+#    что на Linux, см. config.example.toml);
+#  - всё (конфиг/данные/pipx-venv) — под C:\ProgramData\sa-home-bot, НЕ в
+#    профиле конкретного пользователя: служба идёт от LocalSystem, задача
+#    автообновления — от SYSTEM, у каждого свой профиль/%LOCALAPPDATA%,
+#    отличный от интерактивного пользователя (живой баг 2026-07-17 —
+#    pipx install --force из-под LocalSystem "успешно" ставил пакет в venv
+#    ПОД LocalSystem, а не туда, откуда служба реально запущена).
+#    ProgramData — общее для всех аккаунтов место, снимает всю эту путаницу.
 
 # Windows-нода — без телеграм-бота: фронтенд остаётся на alfred,
 # сюда назначается только мониторинг (позже — apps-win, power уже встроен).
@@ -18,13 +26,13 @@ id = "winpc"                          # имя ноды в рое (пусто = 
 socket = "tcp://127.0.0.1:8710"       # локальные фронтенды (nodectl)
 listen = "tcp://100.x.y.z:8710"       # tailscale-адрес ЭТОЙ машины — канал роя
 assignments = ["monitor"]
-state_path = 'C:\Users\<вы>\AppData\Local\sa-home-bot\data\node-state.json'
+state_path = 'C:\ProgramData\sa-home-bot\data\node-state.json'
 restart_delay_s = 5.0
 stop_timeout_s = 90.0
 
 [monitor]
 socket = "tcp://127.0.0.1:8711"
-db_path = 'C:\Users\<вы>\AppData\Local\sa-home-bot\data\monitor.sqlite'
+db_path = 'C:\ProgramData\sa-home-bot\data\monitor.sqlite'
 
 [sensors.cpu]
 enabled = true
@@ -39,10 +47,11 @@ crit_c = 65.0
 # smartctl (если поставить smartmontools) — только для SMART-снимков деградации.
 
 [sensors.lhm]
-# Путь к LibreHardwareMonitorLib.dll. Пусто = автопоиск:
-#   %LOCALAPPDATA%\sa-home-bot\LibreHardwareMonitorLib.dll (кладёт install-node.ps1)
+# Путь к LibreHardwareMonitorLib.dll. install-node.ps1 прописывает явно
+# (C:\ProgramData\sa-home-bot\lhm\...); пусто = автопоиск:
+#   %LOCALAPPDATA%\sa-home-bot\LibreHardwareMonitorLib.dll
 #   %PROGRAMFILES%\LibreHardwareMonitor\LibreHardwareMonitorLib.dll
-dll_path = ""
+dll_path = 'C:\ProgramData\sa-home-bot\lhm\LibreHardwareMonitorLib.dll'
 
 [swarm]
 # Тот же токен, что на остальных нодах роя.

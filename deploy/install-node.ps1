@@ -45,7 +45,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Tag,
 
-    [string]$InstallDir = "$env:USERPROFILE\sa-home-bot",
+    [string]$InstallDir = "C:\ProgramData\sa-home-bot",
     [string]$NodeId = $env:COMPUTERNAME,
     [string]$SwarmToken = "",
     [string]$JoinEndpoint = "",
@@ -68,6 +68,23 @@ if (-not $isAdmin) {
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+
+# PIPX_HOME — ЖЁСТКО закреплён на account-independent путь под ProgramData
+# (не $env:USERPROFILE): pipx иначе вычисляет каталог venv'ов из
+# %LOCALAPPDATA% ВЫЗЫВАЮЩЕГО аккаунта — служба идёт от LocalSystem/задача
+# планировщика от SYSTEM, у каждого свой профиль, отдельный от вашего.
+# Живой баг 2026-07-17: pipx install --force от LocalSystem "успешно"
+# ставил пакет в venv ПОД LocalSystem — призрак, никак не связанный с
+# реально запущенной службой (installed_version() после такого
+# "обновления" честно продолжал видеть старую версию). Установка venv'а
+# в ProgramData ОДИН РАЗ и для всех — то же место видят и вы, и служба,
+# и задача автообновления, независимо от того, кто сейчас зовёт pipx.
+$pipxHomeTarget = Join-Path $InstallDir "pipx"
+$machineHome = [Environment]::GetEnvironmentVariable("PIPX_HOME", "Machine")
+if ($machineHome -ne $pipxHomeTarget) {
+    [Environment]::SetEnvironmentVariable("PIPX_HOME", $pipxHomeTarget, "Machine")
+}
+$env:PIPX_HOME = $pipxHomeTarget  # подхватить в этом же процессе, не дожидаясь нового логона
 
 # --- 1. Python / git / pipx ---
 Step "Python, git, pipx"
@@ -111,7 +128,7 @@ if ($runningService -and $runningService.Status -eq "Running") {
 & $pipxToolExe install --force "sa-home-bot[windows] @ git+$RepoUrl@$Tag"
 
 $pipxVenvs = (& $pipxToolExe environment --value PIPX_LOCAL_VENVS 2>$null)
-if (-not $pipxVenvs) { $pipxVenvs = "$env:USERPROFILE\pipx\venvs" }  # запасной путь на старых pipx
+if (-not $pipxVenvs) { $pipxVenvs = Join-Path $pipxHomeTarget "venvs" }  # запасной путь на старых pipx
 $pipxHome = Split-Path $pipxVenvs -Parent  # venvs всегда прямо под PIPX_HOME
 $saHomeBotExe = Join-Path $pipxVenvs "sa-home-bot\Scripts\sa-home-bot.exe"
 $nodectlExe = Join-Path $pipxVenvs "sa-home-bot\Scripts\nodectl.exe"
