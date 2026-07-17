@@ -50,10 +50,12 @@ def _walk(tree: list[dict]):
 
 
 def _temp_sensors(node: dict) -> list[dict]:
+    """Температурные сенсоры с правдоподобным значением: None и ≤0°C — мусор
+    (без прав администратора LHM не грузит драйвер и отдаёт нули)."""
     return [
         s
         for s in node.get("sensors", [])
-        if s.get("type") == SENSOR_TEMPERATURE and s.get("value") is not None
+        if s.get("type") == SENSOR_TEMPERATURE and (s.get("value") or 0) > 0
     ]
 
 
@@ -172,6 +174,25 @@ def disk_summaries_from_tree(tree: list[dict]) -> list[DiskSummary]:
 _computer = None  # кэш LHM Computer: Open() дорогой, живёт до конца процесса
 _last_error: str | None = None  # последняя причина недоступности (для requirements)
 _warned = False  # предупреждение в лог — один раз, не каждым сканом
+_cpu_temps_missing = False  # CPU в дереве есть, температур нет — типично «не админ»
+
+
+def _ensure_runtime() -> None:
+    """Явно загрузить .NET-runtime ДО первого ``import clr``.
+
+    Автозагрузка pythonnet на живой машине (2026-07-17) подняла runtime не
+    полностью — ``clr`` остался пустышкой без ``AddReference``; с явным
+    "netfx" работает. PYTHONNET_RUNTIME уважается; повторная загрузка /
+    уже загруженный runtime — не ошибка, работаем с тем, что есть.
+    """
+    try:
+        import pythonnet  # noqa: PLC0415 — ставится только на Windows
+    except ImportError:
+        return  # нет pythonnet — import clr скажет об этом понятной подсказкой
+    try:
+        pythonnet.load(os.environ.get("PYTHONNET_RUNTIME", "netfx"))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def dll_candidates(configured: str = "") -> list[Path]:
@@ -200,6 +221,7 @@ def _open_computer(dll: Path):
     global _computer
     if _computer is not None:
         return _computer
+    _ensure_runtime()
     try:
         import clr  # pythonnet; ставится только на Windows
     except ImportError as exc:
@@ -272,7 +294,11 @@ def _safe_tree(dll_path: str) -> list[dict]:
 
 
 def read_cpu_readings_sync(dll_path: str, now: datetime) -> list[SensorReading]:
-    return cpu_readings_from_tree(_safe_tree(dll_path), now)
+    global _cpu_temps_missing
+    tree = _safe_tree(dll_path)
+    readings = cpu_readings_from_tree(tree, now)
+    _cpu_temps_missing = not readings and any(n.get("type") == HW_CPU for n in _walk(tree))
+    return readings
 
 
 def read_disk_readings_sync(dll_path: str, now: datetime) -> list[SensorReading]:
@@ -293,6 +319,7 @@ def lhm_problem(dll_path: str = "") -> dict | None:
     if sys.platform != "win32":
         return None
     hint: str | None = None
+    _ensure_runtime()
     try:
         import clr  # noqa: F401
     except ImportError:
@@ -307,6 +334,15 @@ def lhm_problem(dll_path: str = "") -> dict | None:
         )
     if hint is None:
         hint = _last_error  # ошибка последнего реального чтения (если была)
-    if hint is None:
-        return None
-    return {"id": "lhm", "status": "missing_program", "hint": hint}
+    if hint is not None:
+        return {"id": "lhm", "status": "missing_program", "hint": hint}
+    if _cpu_temps_missing:
+        return {
+            "id": "lhm",
+            "status": "needs_privilege",
+            "hint": (
+                "LHM не видит температур CPU — запустите ноду от имени "
+                "администратора (драйвер датчиков требует прав)"
+            ),
+        }
+    return None

@@ -5,6 +5,7 @@ dict'ов (фикстуры), как smartctl-парсеры работают с
 """
 
 import sys
+import types
 
 from sa_home_bot.sensors import lhm
 from sa_home_bot.sensors.lhm import (
@@ -164,3 +165,47 @@ def test_safe_read_returns_empty_and_remembers_error(monkeypatch):
     monkeypatch.setattr(lhm, "find_dll", lambda configured="": None)
     assert lhm.read_cpu_readings_sync("", BASE_TIME) == []
     assert "LibreHardwareMonitorLib.dll" in (lhm._last_error or "")
+
+
+def test_zero_and_negative_temperatures_filtered():
+    # LHM без прав администратора отдаёт нули — это не «CPU замёрз»
+    node = _cpu_node()
+    node["sensors"] = [
+        {"type": "Temperature", "name": "Core", "value": 0.0},
+        {"type": "Temperature", "name": "CCD1", "value": -1.0},
+    ]
+    assert cpu_readings_from_tree([node], BASE_TIME) == []
+    disk = _hdd_node()
+    disk["sensors"] = [{"type": "Temperature", "name": "Temperature", "value": 0.0}]
+    assert disk_readings_from_tree([disk], BASE_TIME) == []
+
+
+def test_ensure_runtime_loads_netfx_and_respects_env(monkeypatch):
+    calls: list[str] = []
+    fake = types.SimpleNamespace(load=lambda runtime: calls.append(runtime))
+    monkeypatch.setitem(sys.modules, "pythonnet", fake)
+    monkeypatch.delenv("PYTHONNET_RUNTIME", raising=False)
+    lhm._ensure_runtime()
+    assert calls == ["netfx"]
+    monkeypatch.setenv("PYTHONNET_RUNTIME", "coreclr")
+    lhm._ensure_runtime()
+    assert calls == ["netfx", "coreclr"]
+
+
+def test_lhm_problem_hints_admin_when_cpu_has_no_temps(monkeypatch):
+    # дерево читается, CPU есть, температур нет → подсказка про администратора
+    node = _cpu_node()
+    node["sensors"] = [{"type": "Temperature", "name": "Core", "value": 0.0}]
+    monkeypatch.setattr(lhm, "read_tree_sync", lambda dll_path="": [node])
+    assert lhm.read_cpu_readings_sync("", BASE_TIME) == []
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "clr", types.ModuleType("clr"))
+    monkeypatch.setattr(lhm, "find_dll", lambda configured="": object())
+    problem = lhm.lhm_problem()
+    assert problem is not None
+    assert problem["status"] == "needs_privilege"
+    assert "администратора" in problem["hint"]
+    # с настоящими температурами подсказка уходит
+    monkeypatch.setattr(lhm, "read_tree_sync", lambda dll_path="": [_cpu_node()])
+    assert lhm.read_cpu_readings_sync("", BASE_TIME) != []
+    assert lhm.lhm_problem() is None
