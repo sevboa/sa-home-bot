@@ -1,0 +1,43 @@
+<!--
+  Служба WinSW для Windows-ноды (этап 19, п. 4). Устанавливается
+  deploy\install-node.ps1 как C:\<INSTALL_DIR>\service\sa-home-node.xml
+  рядом с переименованным WinSW-x64.exe (sa-home-node.exe — имя exe
+  должно совпадать с именем этого файла, так WinSW находит свой конфиг).
+
+  Плейсхолдеры %PIPX_EXE%, %CONFIG_PATH%, %INSTALL_DIR% подставляет
+  install-node.ps1 при генерации.
+
+  onfailure ловит ЛЮБОЙ ненулевой код возврата — это покрывает и
+  настоящий краш, и намеренный само-рестарт ноды (RESTART_EXIT_CODE=10,
+  cli.py): на win32 restart_node не может заменить образ процесса
+  (os.execv не работает), поэтому нода просто выходит с кодом 10, а
+  перезапуск — забота обёртки службы.
+
+  Штатная остановка (Stop-Service): WinSW сам создаёт дочерний процесс
+  в новой группе процессов и на стоп шлёт Ctrl+C дочернему консольному
+  процессу (см. документацию WinSW) — Lifespan ноды ловит это как SIGINT
+  и гасит supervisor/детей штатно (тот же путь, что systemd SIGTERM на
+  Linux). Force-kill — только после <stoptimeout>.
+-->
+<service>
+  <id>sa-home-node</id>
+  <name>sa-home-node</name>
+  <description>sa-home-bot: нода-супервизор (Windows)</description>
+
+  <executable>%PIPX_EXE%</executable>
+  <arguments>--service node --config "%CONFIG_PATH%"</arguments>
+  <workingdirectory>%INSTALL_DIR%</workingdirectory>
+
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>8</keepFiles>
+  </log>
+
+  <onfailure action="restart" delay="5 sec"/>
+  <onfailure action="restart" delay="30 sec"/>
+  <resetfailure>1 hour</resetfailure>
+
+  <stoptimeout>90 sec</stoptimeout>
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>false</delayedAutoStart>
+</service>

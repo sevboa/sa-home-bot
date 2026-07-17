@@ -392,7 +392,12 @@ class NodeService:
             "repo": self._update_source,
             "running": __version__,
             "installed": node_update.installed_version(),
-            "latest": latest,
+            # latest_tag() отдаёт git-тег как есть ("vX.Y.Z") — а
+            # installed_version()/__version__ без префикса ("X.Y.Z", PEP 440);
+            # без lstrip сравнение installed == latest никогда бы не совпадало
+            # (баг 2026-07-17: update считал себя устаревшим на каждой
+            # свежепоставленной версии и переустанавливался вхолостую).
+            "latest": latest.lstrip("v"),
         }
 
     async def _update(self) -> dict[str, Any]:
@@ -404,25 +409,26 @@ class NodeService:
         когда это нужно.
         """
         assert self._update_source is not None
-        latest = await node_update.latest_tag(self._update_source)
+        latest = await node_update.latest_tag(self._update_source)  # тег с "v" — нужен git-ref
         if latest is None:
             raise ProtoError(ERR_INTERNAL, "не удалось проверить обновления (сеть?)")
+        target_version = latest.lstrip("v")  # для сравнения/отображения — см. _check_update
         installed = node_update.installed_version()
-        if installed == latest:
-            return {"up_to_date": True, "version": latest}
+        if installed == target_version:
+            return {"up_to_date": True, "version": target_version}
         if self._updating:
             raise ProtoError(ERR_BAD_REQUEST, "обновление уже выполняется")
-        self._schedule_update(latest)
-        return {"scheduled": True, "target_version": latest}
+        self._schedule_update(latest, target_version)
+        return {"scheduled": True, "target_version": target_version}
 
-    def _schedule_update(self, target_version: str) -> None:
+    def _schedule_update(self, git_ref: str, target_version: str) -> None:
         assert self._update_source is not None
         self._updating = True
         repo = self._update_source
 
         async def run() -> None:
             try:
-                ok, output = await node_update.pipx_reinstall(repo, target_version)
+                ok, output = await node_update.pipx_reinstall(repo, git_ref)
             except Exception as exc:  # noqa: BLE001 — фон не должен уронить ноду
                 ok, output = False, str(exc)
             finally:

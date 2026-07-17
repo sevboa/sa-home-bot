@@ -341,7 +341,8 @@ async def test_check_update_reports_versions(monkeypatch):
         "repo": "https://github.com/x/y.git",
         "running": svc.describe().info.version,
         "installed": "0.21.0",
-        "latest": "v0.22.0",
+        # "v"-префикс тега снят — сравнимо с installed/running (PEP 440, без "v")
+        "latest": "0.22.0",
     }
 
 
@@ -373,14 +374,15 @@ async def test_update_already_current_does_not_reinstall(monkeypatch):
         return True, "ok"
 
     monkeypatch.setattr(service_module.node_update, "latest_tag", fake_latest)
-    monkeypatch.setattr(service_module.node_update, "installed_version", lambda: "v0.22.0")
+    # installed_version() — реальный importlib.metadata.version(), без "v" (PEP 440)
+    monkeypatch.setattr(service_module.node_update, "installed_version", lambda: "0.22.0")
     monkeypatch.setattr(service_module.node_update, "pipx_reinstall", fake_reinstall)
 
     sup, _ = _fake_supervisor()
     svc = NodeService(sup, update_source="https://github.com/x/y.git")
     result = await svc.run_command("update", {})
 
-    assert result == {"up_to_date": True, "version": "v0.22.0"}
+    assert result == {"up_to_date": True, "version": "0.22.0"}
     assert called == []  # pipx не звали
 
 
@@ -397,7 +399,7 @@ async def test_update_schedules_background_reinstall_and_emits_event(monkeypatch
         return True, "installed ok"
 
     monkeypatch.setattr(service_module.node_update, "latest_tag", fake_latest)
-    monkeypatch.setattr(service_module.node_update, "installed_version", lambda: "v0.21.0")
+    monkeypatch.setattr(service_module.node_update, "installed_version", lambda: "0.21.0")
     monkeypatch.setattr(service_module.node_update, "pipx_reinstall", fake_reinstall)
 
     events: list[tuple[str, dict]] = []
@@ -408,11 +410,11 @@ async def test_update_schedules_background_reinstall_and_emits_event(monkeypatch
     sup, _ = _fake_supervisor()
     svc = NodeService(sup, update_source="https://github.com/x/y.git", emit=emit)
     result = await svc.run_command("update", {})
-    assert result == {"scheduled": True, "target_version": "v0.22.0"}
+    assert result == {"scheduled": True, "target_version": "0.22.0"}
 
     await asyncio.sleep(0.05)  # дать фоновой задаче выполниться
-    assert events == [("update_finished", {"ok": True, "version": "v0.22.0", "error": None})]
-    assert svc._last_update == {"ok": True, "version": "v0.22.0", "error": None}
+    assert events == [("update_finished", {"ok": True, "version": "0.22.0", "error": None})]
+    assert svc._last_update == {"ok": True, "version": "0.22.0", "error": None}
 
 
 async def test_update_concurrent_call_is_bad_request(monkeypatch):
@@ -432,7 +434,7 @@ async def test_update_concurrent_call_is_bad_request(monkeypatch):
         return True, "ok"
 
     monkeypatch.setattr(service_module.node_update, "latest_tag", fake_latest)
-    monkeypatch.setattr(service_module.node_update, "installed_version", lambda: "v0.21.0")
+    monkeypatch.setattr(service_module.node_update, "installed_version", lambda: "0.21.0")
     monkeypatch.setattr(service_module.node_update, "pipx_reinstall", slow_reinstall)
 
     sup, _ = _fake_supervisor()
