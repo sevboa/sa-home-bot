@@ -31,8 +31,14 @@ DLL_NAME = "LibreHardwareMonitorLib.dll"
 HW_CPU = "Cpu"
 HW_STORAGE = "Storage"
 SENSOR_TEMPERATURE = "Temperature"
+SENSOR_COMPOSITE_TEMPERATURE = "Composite Temperature"  # основной сенсор NVMe в LHM
 
 _KIND_LABEL = {KIND_HDD: "HDD", KIND_SSD: "SSD", KIND_NVME: "NVMe"}
+
+# Сенсоры типа Temperature, которые НЕ являются показаниями — это настроенные
+# LHM пороги (у NVMe: 80°C и там, и там), max()-fallback иначе принимает их
+# за самое горячее реальное показание (живой баг 2026-07-17: 55°C → 80°C).
+_TEMP_THRESHOLD_NAMES = {"Warning Temperature", "Critical Temperature"}
 
 
 class LhmUnavailable(Exception):
@@ -55,7 +61,9 @@ def _temp_sensors(node: dict) -> list[dict]:
     return [
         s
         for s in node.get("sensors", [])
-        if s.get("type") == SENSOR_TEMPERATURE and (s.get("value") or 0) > 0
+        if s.get("type") == SENSOR_TEMPERATURE
+        and (s.get("value") or 0) > 0
+        and s.get("name") not in _TEMP_THRESHOLD_NAMES
     ]
 
 
@@ -89,9 +97,11 @@ def cpu_readings_from_tree(tree: list[dict], now: datetime) -> list[SensorReadin
 def disk_readings_from_tree(tree: list[dict], now: datetime) -> list[SensorReading]:
     """Температуры дисков — одна запись на физический диск.
 
-    У NVMe LHM отдаёт несколько температурных сенсоров ("Temperature",
-    "Temperature 1/2"): приоритет основному "Temperature", иначе максимум —
-    для алертов интересен самый горячий датчик.
+    У NVMe LHM отдаёт несколько температурных сенсоров ("Composite
+    Temperature", "Temperature #1/2", плюс пороги "Warning/Critical
+    Temperature" — не показания, отфильтрованы в `_temp_sensors`):
+    приоритет основному "Temperature"/"Composite Temperature", иначе
+    максимум остальных — для алертов интересен самый горячий датчик.
     """
     readings: list[SensorReading] = []
     for node in _walk(tree):
@@ -116,7 +126,10 @@ def _disk_temp(node: dict) -> float | None:
     temps = _temp_sensors(node)
     if not temps:
         return None
-    primary = next((s for s in temps if s.get("name") == SENSOR_TEMPERATURE), None)
+    primary = next(
+        (s for s in temps if s.get("name") in (SENSOR_TEMPERATURE, SENSOR_COMPOSITE_TEMPERATURE)),
+        None,
+    )
     return float(primary["value"] if primary else max(s["value"] for s in temps))
 
 

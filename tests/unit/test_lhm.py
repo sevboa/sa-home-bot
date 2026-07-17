@@ -119,6 +119,22 @@ def test_disk_without_temp_sensors_skipped():
     assert disk_readings_from_tree([node], BASE_TIME) == []
 
 
+def test_disk_reading_uses_composite_and_ignores_threshold_sensors():
+    # Живой баг 2026-07-17: реальные имена LHM для NVMe — "Composite
+    # Temperature" (не "Temperature") плюс пороги Warning/Critical (те же
+    # 80°C, что и предел устройства) — max()-fallback путал их с показаниями.
+    node = _nvme_node()
+    node["sensors"] = [
+        {"type": "Temperature", "name": "Composite Temperature", "value": 55.0},
+        {"type": "Temperature", "name": "Temperature #1", "value": 54.85},
+        {"type": "Temperature", "name": "Temperature #2", "value": 60.85},
+        {"type": "Temperature", "name": "Warning Temperature", "value": 80.0},
+        {"type": "Temperature", "name": "Critical Temperature", "value": 80.0},
+    ]
+    readings = disk_readings_from_tree([node], BASE_TIME)
+    assert readings[0].temperature_c == 55.0
+
+
 def test_disk_summaries_kinds_and_labels():
     hdd2 = _hdd_node()
     hdd2["id"] = "/hdd/1"
