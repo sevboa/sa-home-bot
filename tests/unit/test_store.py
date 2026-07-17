@@ -7,6 +7,7 @@ from sa_home_bot.db.store import NOTIF_ALERT, Store
 from sa_home_bot.domain.models import (
     ALERTING,
     OK,
+    DiskSummary,
     HealthDiff,
     HealthState,
     Transition,
@@ -39,6 +40,20 @@ async def test_app_state_roundtrip(store):
     assert await store.get_state("x") == "1"
     await store.set_state("x", "2")
     assert await store.get_state("x") == "2"
+
+
+async def test_disk_summaries_roundtrip(store):
+    assert await store.get_disk_summaries() is None  # до первого SensorScanJob
+
+    disks = [
+        DiskSummary("NVMe", "ok", 45.0, 100, 200, "Samsung 980", "nvme"),
+        DiskSummary("eMMC", None, None, 50, 53, None, "emmc"),
+    ]
+    await store.save_disk_summaries(disks)
+    assert await store.get_disk_summaries() == disks
+
+    await store.save_disk_summaries([])
+    assert await store.get_disk_summaries() == []
 
 
 async def test_apply_diff_insert_then_alert_pending(store):

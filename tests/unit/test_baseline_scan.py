@@ -30,6 +30,9 @@ class FakeSensors:
         self._i += 1
         return [make_reading(temp)]
 
+    async def read_disk_summaries(self, health_overrides):
+        return []
+
 
 class FakeNotifier:
     def __init__(self) -> None:

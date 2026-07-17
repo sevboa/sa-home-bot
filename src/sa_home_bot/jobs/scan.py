@@ -104,6 +104,8 @@ class SensorScanJob:
         alerts_sent = await self._dispatch_alerts(ctx, now)
         clears_sent = await self._dispatch_clears(ctx, now)
 
+        await self._refresh_disk_summaries(ctx)
+
         return JobResult(
             components_scanned=len(readings),
             transitions=len(diff.transitions),
@@ -132,6 +134,18 @@ class SensorScanJob:
             if result.delivered:
                 sent += 1
         return sent
+
+    async def _refresh_disk_summaries(self, ctx: JobContext) -> None:
+        """Пересчитать DiskSummary (для /status) и закэшировать в БД.
+
+        Тот же живой опрос (smartctl/LHM), что раньше делал `MonitorService.
+        get_state()` синхронно на каждый запрос бота — здесь он уходит в
+        фон на кадансе scan_cron, а бот читает готовый кэш (см.
+        `Store.get_disk_summaries`).
+        """
+        health_overrides = await ctx.store.get_smart_health_map()
+        disks = await ctx.sensors.read_disk_summaries(health_overrides)
+        await ctx.store.save_disk_summaries(disks)
 
 
 def _event_from_state(state: HealthState, event_type: str, now: datetime) -> Event:

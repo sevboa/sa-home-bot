@@ -15,6 +15,7 @@ from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
 from sa_home_bot.jobs.base import JobContext
+from sa_home_bot.jobs.scan import SensorScanJob
 from sa_home_bot.jobs.smart import SmartScanJob
 from sa_home_bot.monitor.dispatch import ProtoEventDispatcher
 from sa_home_bot.monitor.service import MonitorService
@@ -52,11 +53,13 @@ async def run_monitor(settings: Settings) -> None:
     worker = JobWorker(queue, ctx)
     worker_task = asyncio.create_task(worker.run(), name="job-worker")
 
-    # 4. Scheduler + разовый SMART-снимок на старте (baseline сразу).
+    # 4. Scheduler + разовые снимки на старте (baseline и кэш дисков сразу,
+    # не через минуту ожидания первого тика scan_cron).
     scheduler = build_scheduler()
     register_jobs(scheduler, queue, settings)
     scheduler.start()
     await queue.put(SmartScanJob())
+    await queue.put(SensorScanJob())
 
     lifespan = Lifespan()
     lifespan.install_signal_handlers()

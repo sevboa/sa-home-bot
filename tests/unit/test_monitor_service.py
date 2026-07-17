@@ -59,10 +59,10 @@ async def test_get_state_returns_health_from_store(service):
     diff = compute_health_diff([make_reading(42.0)], {}, lambda r: cpu_policy(), now)
     await store.apply_diff(diff, now)
 
-    # Железо не трогаем: блокирующие читатели подменяются.
+    # Железо не трогаем: блокирующие читатели подменяются. Диски — кэш из
+    # Store (см. SensorScanJob), тут просто пуст (SensorScanJob не запускался).
     with (
         patch("sa_home_bot.monitor.service.read_uptime_sync", return_value=None),
-        patch("sa_home_bot.monitor.service.read_disk_summaries_sync", return_value=[]),
         patch("sa_home_bot.monitor.service.read_power_events_sync", return_value=([], False)),
     ):
         state = await svc.get_state()
@@ -84,7 +84,6 @@ async def test_get_state_flags_missing_smartctl_when_disks_enabled(service, monk
 
     with (
         patch("sa_home_bot.monitor.service.read_uptime_sync", return_value=None),
-        patch("sa_home_bot.monitor.service.read_disk_summaries_sync", return_value=[]),
         patch("sa_home_bot.monitor.service.read_power_events_sync", return_value=([], False)),
     ):
         state = await svc.get_state()
@@ -113,7 +112,6 @@ async def test_get_state_quiet_when_disks_disabled(tmp_path, monkeypatch):
 
     with (
         patch("sa_home_bot.monitor.service.read_uptime_sync", return_value=None),
-        patch("sa_home_bot.monitor.service.read_disk_summaries_sync", return_value=[]),
         patch("sa_home_bot.monitor.service.read_power_events_sync", return_value=([], False)),
     ):
         state = await svc.get_state()

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from datetime import datetime
 from math import sqrt
 
@@ -17,6 +18,7 @@ from sa_home_bot.db.connection import Database
 from sa_home_bot.domain.models import (
     ALERTING,
     OK,
+    DiskSummary,
     HealthDiff,
     HealthState,
     KnownState,
@@ -30,6 +32,10 @@ NOTIF_CLEARED = "cleared"
 
 # Префикс app_state-ключей: метки времени принятых ручных действий (лимитер).
 ACTION_TICKS_PREFIX = "action_ticks:"
+
+# app_state-ключ кэша DiskSummary (см. docstring класса) — пишет SensorScanJob
+# раз в scan_cron, читает MonitorService.get_state() вместо живого опроса.
+DISK_SUMMARIES_KEY = "disk_summaries_cache"
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -371,6 +377,16 @@ class Store:
                 "attrs_json=excluded.attrs_json, taken_at=excluded.taken_at",
                 (snap.component_id, snap.label, snap.health, attrs_json, _iso(snap.taken_at)),
             )
+
+    async def save_disk_summaries(self, disks: list[DiskSummary]) -> None:
+        await self.set_state(DISK_SUMMARIES_KEY, json.dumps([asdict(d) for d in disks]))
+
+    async def get_disk_summaries(self) -> list[DiskSummary] | None:
+        """Последний кэш DiskSummary или None — до первого прогона SensorScanJob."""
+        raw = await self.get_state(DISK_SUMMARIES_KEY)
+        if raw is None:
+            return None
+        return [DiskSummary(**d) for d in json.loads(raw)]
 
     # --- housekeeping ---
 

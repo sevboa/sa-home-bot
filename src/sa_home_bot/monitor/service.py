@@ -25,7 +25,7 @@ from sa_home_bot.proto.messages import (
     ServiceDescription,
     ServiceInfo,
 )
-from sa_home_bot.sensors.disks import SMARTCTL_REQUIREMENT, read_disk_summaries_sync
+from sa_home_bot.sensors.disks import SMARTCTL_REQUIREMENT
 from sa_home_bot.sensors.lhm import lhm_problem
 from sa_home_bot.sensors.power import (
     JOURNALCTL_REQUIREMENT,
@@ -100,16 +100,14 @@ class MonitorService:
     async def get_state(self) -> dict[str, Any]:
         loop = asyncio.get_running_loop()
         states = await self._store.get_all_states()
-        health_map = await self._store.get_smart_health_map()
-        uptime = await loop.run_in_executor(None, read_uptime_sync)
-        disks = await loop.run_in_executor(
-            None,
-            read_disk_summaries_sync,
-            list(self._settings.sensors.disks.devices),
-            health_map,
-            self._settings.sensors.lhm.dll_path,
+        # Диски — кэш SensorScanJob (см. Store.save_disk_summaries), не
+        # живой опрос: smartctl/LHM на каждый запрос бота делали /status и
+        # особенно веерный /swarm заметно медленными (живой баг 2026-07-18).
+        disks = await self._store.get_disk_summaries() or []
+        uptime, (outages, _) = await asyncio.gather(
+            loop.run_in_executor(None, read_uptime_sync),
+            loop.run_in_executor(None, read_power_events_sync, 0, 1),
         )
-        outages, _ = await loop.run_in_executor(None, read_power_events_sync, 0, 1)
 
         cpu_cfg = self._settings.sensors.cpu
         disk_cfg = self._settings.sensors.disks

@@ -10,7 +10,7 @@ import asyncio
 from datetime import UTC, datetime
 
 from sa_home_bot.config import SensorsConfig
-from sa_home_bot.domain.models import SensorReading, SmartSnapshot
+from sa_home_bot.domain.models import DiskSummary, SensorReading, SmartSnapshot
 from sa_home_bot.sensors import cpu, disks
 
 
@@ -53,4 +53,18 @@ class SensorSource:
         devices = list(self._config.disks.devices)
         return await loop.run_in_executor(
             None, disks.read_smart_snapshots_sync, devices, _now()
+        )
+
+    async def read_disk_summaries(
+        self, health_overrides: dict[str, str | None]
+    ) -> list[DiskSummary]:
+        """Сводка по дискам для /status (health/temp/место) — для кэша в БД."""
+        loop = asyncio.get_running_loop()
+        devices = list(self._config.disks.devices)
+        return await loop.run_in_executor(
+            None,
+            disks.read_disk_summaries_sync,
+            devices,
+            health_overrides,
+            self._config.lhm.dll_path,
         )

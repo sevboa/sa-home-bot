@@ -13,6 +13,7 @@ from sa_home_bot.config import (
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
+from sa_home_bot.domain.models import DiskSummary
 from sa_home_bot.jobs.base import JobContext
 from sa_home_bot.jobs.scan import SensorScanJob
 from sa_home_bot.subscriptions.book import SubscriptionBook
@@ -21,14 +22,18 @@ from .conftest import make_reading
 
 
 class FakeSensors:
-    def __init__(self, temps: list[float]) -> None:
+    def __init__(self, temps: list[float], disks: list[DiskSummary] | None = None) -> None:
         self._temps = temps
         self._i = 0
+        self._disks = disks or []
 
     async def read_all(self):
         temp = self._temps[min(self._i, len(self._temps) - 1)]
         self._i += 1
         return [make_reading(temp)]
+
+    async def read_disk_summaries(self, health_overrides):
+        return self._disks
 
 
 class FakeNotifier:
@@ -114,3 +119,16 @@ async def test_no_duplicate_alert_while_still_hot(ctx):
         await job.run(context)
     alert_sends = [s for s in notifier.sent if "Перегрев" in s[1]]
     assert len(alert_sends) == 1
+
+
+async def test_run_caches_disk_summaries_in_store(ctx):
+    """Живой баг 2026-07-18: /swarm и /status считали диски вживую на каждый
+    запрос — теперь их снимает SensorScanJob и кладёт в Store, отдача клиенту
+    (MonitorService.get_state) читает готовый кэш."""
+    context, _ = ctx
+    disks = [DiskSummary("NVMe", "ok", 45.0, 100, 200, "Samsung 980", "nvme")]
+    context.sensors = FakeSensors([40], disks=disks)
+
+    assert await context.store.get_disk_summaries() is None
+    await SensorScanJob().run(context)
+    assert await context.store.get_disk_summaries() == disks
