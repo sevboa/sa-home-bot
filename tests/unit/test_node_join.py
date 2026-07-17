@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from sa_home_bot.node.app import _relay_peer_event
+from sa_home_bot.node.app import SeenEvents, _relay_peer_event
 from sa_home_bot.node.peers import NodeRouter, PeerLink
 from sa_home_bot.node.service import NodeService
 from sa_home_bot.node.state import NodeState
@@ -168,6 +168,7 @@ async def test_relay_peer_event_auto_adds_new_peer(tmp_path):
         token="",
         on_peer_event=lambda e: None,
         server=None,
+        seen=SeenEvents(),
     )
 
     assert added == [("C", "tcp://c:8710")]
@@ -193,6 +194,7 @@ async def test_relay_peer_event_ignores_own_echo():
         token="",
         on_peer_event=lambda e: None,
         server=None,
+        seen=SeenEvents(),
     )
     assert calls == []
 
@@ -217,5 +219,53 @@ async def test_relay_peer_event_skips_already_known_peer():
         token="",
         on_peer_event=lambda e: None,
         server=None,
+        seen=SeenEvents(),
     )
     assert calls == []  # уже в router.peers — не трогаем
+
+
+# --- Дедуп ретрансляции: живой инцидент 2026-07-17, шторм в связном рое ---
+
+
+async def test_relay_peer_event_deduplicates_by_envelope_id():
+    """В полносвязном рое одно событие приходит несколькими путями —
+    вторая (и дальнейшие) копия ТОГО ЖЕ env.id не должна ретранслироваться
+    заново, иначе это лавина (см. SeenEvents docstring)."""
+    router = NodeRouter("B")
+    broadcasts: list[str] = []
+
+    class _FakeServer:
+        async def broadcast_envelope(self, env):
+            broadcasts.append(env.id)
+
+    env = make_event(
+        "update_finished",
+        {"ok": True},
+        src=Address(node="A", service="node"),
+    )
+    seen = SeenEvents()
+    for _ in range(3):  # три "копии" одного и того же события (разные пути)
+        await _relay_peer_event(
+            env,
+            node_id="B",
+            router=router,
+            state=NodeState(),
+            state_path="/dev/null",
+            token="",
+            on_peer_event=lambda e: None,
+            server=_FakeServer(),
+            seen=seen,
+        )
+
+    assert broadcasts == [env.id]  # разослано ровно один раз
+
+
+async def test_seen_events_bounded_size():
+    from sa_home_bot.node.app import SeenEvents as _SeenEvents
+
+    seen = _SeenEvents(maxsize=3)
+    for i in range(5):
+        assert seen.seen(f"id{i}") is False
+    # старые id вытеснены — id0/id1 больше не считаются виденными
+    assert seen.seen("id0") is False
+    assert seen.seen("id4") is True  # свежий всё ещё в наборе

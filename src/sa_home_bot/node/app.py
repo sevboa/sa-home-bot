@@ -33,6 +33,41 @@ def local_service_endpoints(settings: Settings) -> dict[str, str]:
     return {"monitor": settings.monitor.socket, "apps": settings.apps.socket}
 
 
+_MAX_SEEN_EVENTS = 512  # с запасом — событий (join/update_finished) мало, часты не бывают
+
+
+class SeenEvents:
+    """Ограниченный набор недавно виденных id событий — защита от штормов
+    ретрансляции.
+
+    Живой инцидент 2026-07-17: в полносвязном рое из 3 нод (alfred,
+    arch-t480, winpc — каждая напрямую связана с каждой) единственная
+    проверка в `_relay_peer_event` («не эхо ли это моего же события»)
+    ловит только прямой возврат к источнику, но НЕ повторные копии,
+    приходящие от РАЗНЫХ соседей одним и тем же путём через треугольник —
+    каждый узел ретранслирует КАЖДУЮ полученную копию по всем своим рёбрам
+    заново, без счётчика «уже переслал». Событие размножается лавинообразно
+    (без верхней границы, кроме размера графа) — Telegram забанил бота
+    rate-limit'ом (429, retry-after 578с) примерно через 7 минут шторма.
+    `env.id` — uuid4, генерируется один раз в `make_event()` и не меняется
+    при ретрансляции (`broadcast_envelope` пересылает тот же `Envelope`) —
+    надёжный ключ дедупа.
+    """
+
+    def __init__(self, maxsize: int = _MAX_SEEN_EVENTS) -> None:
+        self._maxsize = maxsize
+        self._ids: dict[str, None] = {}
+
+    def seen(self, event_id: str) -> bool:
+        """True, если уже видели этот id — иначе запоминает и возвращает False."""
+        if event_id in self._ids:
+            return True
+        self._ids[event_id] = None
+        if len(self._ids) > self._maxsize:
+            self._ids.pop(next(iter(self._ids)))
+        return False
+
+
 def build_router(
     settings: Settings,
     node_id: str,
@@ -78,6 +113,7 @@ async def _relay_peer_event(
     token: str,
     on_peer_event,
     server: ProtoServer | None,
+    seen: SeenEvents,
 ) -> None:
     """Ретрансляция события пира своим клиентам + замыкание сетки (этап 18).
 
@@ -86,8 +122,14 @@ async def _relay_peer_event(
     новому узлу тем же путём, каким мы сами узнаём о событиях: так третий
     узел, не участвовавший в handshake напрямую, всё равно достраивает
     полную сетку за один хоп репликации события, без отдельного каталога.
+
+    ``seen`` — дедуп по ``env.id``: в связном рое (≥3 узла, каждый с каждым)
+    одно событие приходит несколькими путями, а без дедупа каждый узел
+    ретранслирует КАЖДУЮ полученную копию заново — лавина (см. SeenEvents).
     """
     if env.src is not None and env.src.node == node_id:
+        return
+    if seen.seen(env.id):
         return
     if env.type == MSG_EVENT and env.payload.get("event") == EVENT_NODE_JOINED:
         data = env.payload.get("data", {})
@@ -110,6 +152,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
     node_id = settings.node.id or socket.gethostname()
     lifespan = Lifespan()
     restart_requested = False
+    seen_events = SeenEvents()
 
     def request_restart() -> None:
         nonlocal restart_requested
@@ -131,6 +174,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
             token=settings.swarm.token,
             on_peer_event=on_peer_event,
             server=server,
+            seen=seen_events,
         )
 
     # assignments в TOML — стартовый набор, не единственный источник:
