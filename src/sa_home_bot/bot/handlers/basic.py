@@ -28,7 +28,10 @@ def build_help(
     skills = [
         f"/{action.id} — {action.title}: состояние и веб-морда"
         for action in app_actions
-        if subscription is not None
+        # Параметризованные (start/stop/restart) — только кнопки на карточке
+        # конкретного приложения, не голые команды (см. bot/setup.py).
+        if not action.params
+        and subscription is not None
         and subscription.allows_action(action.id, apps_view.APPS_SERVICE)
     ]
     skills += [

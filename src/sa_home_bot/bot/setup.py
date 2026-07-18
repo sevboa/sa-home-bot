@@ -75,7 +75,12 @@ def build_menu_commands(
     menu = [
         BotCommand(command=action.id, description=f"{action.title}: состояние и веб-морда")
         for action in app_actions
-        if subscription.allows_action(action.id, apps_view.APPS_SERVICE)
+        # Параметризованные (start/stop/restart с обязательным "какое
+        # приложение") — только кнопки на карточке конкретного приложения
+        # (apps_view.run_app_skill), не голые команды меню — живой баг
+        # 2026-07-18: /start/stop/restart лезли в меню без указания, какое
+        # приложение, и падали "нет такого приложения: ''".
+        if not action.params and subscription.allows_action(action.id, apps_view.APPS_SERVICE)
     ]
     menu += [
         _to_bot_command(c)
