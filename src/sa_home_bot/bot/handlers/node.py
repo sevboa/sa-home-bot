@@ -87,23 +87,39 @@ async def cmd_swarm(
 
 async def _run_node_action(
     node_link: ServiceLink, action_id: str, value: str | None, node_id: str | None
-) -> str | None:
-    """Выполнить действие ноды (свою или пира); текст ошибки или None при успехе."""
+) -> tuple[str | None, dict | None]:
+    """Выполнить действие ноды (свою или пира); (текст ошибки, ответ команды).
+
+    Ответ нужен действиям без побочного эффекта на карточке (`check_update`
+    ничего не меняет в get_state() — редрайв карточки не покажет результат,
+    его надо явно отрисовать вызывающему)."""
     dst = Address(node=node_id, service=node_view.NODE_SERVICE) if node_id else None
     action = await actions.find_action(node_link, action_id, dst=dst)
     if action is None:
-        return "Действие недоступно."
+        return "Действие недоступно.", None
     try:
-        await node_link.command(action.id, actions.build_args(action, value), dst=dst)
+        result = await node_link.command(action.id, actions.build_args(action, value), dst=dst)
     except ServiceUnavailableError:
         return (
             f"⚠️ Нода «{node_id}» недоступна (нет связи или она спит)."
             if node_id
             else node_view.NODE_DOWN_TEXT
-        )
+        ), None
     except ProtoError as exc:
-        return f"⚠️ Ошибка: {exc.message}"
-    return None
+        return f"⚠️ Ошибка: {exc.message}", None
+    return None, result
+
+
+def _format_check_update(result: dict) -> str:
+    running = result.get("running", "?")
+    installed = result.get("installed") or "?"
+    latest = str(result.get("latest", "?")).lstrip("v")
+    if latest not in ("?", installed):
+        return (
+            f"⬆️ Доступно обновление: v{latest} (сейчас установлено v{installed}, "
+            f"запущено v{running}) — нажмите «Обновить»"
+        )
+    return f"✅ Обновлений нет — установлена последняя версия (v{installed})"
 
 
 @router.callback_query(F.data.startswith(f"{commands.ACTION_CALLBACK_PREFIX}:"))
@@ -126,9 +142,13 @@ async def on_dynamic_action(
         return
 
     if service == node_view.NODE_SERVICE:
-        error = await _run_node_action(node_link, action_id, value, node_id)
+        error, result = await _run_node_action(node_link, action_id, value, node_id)
         if error is not None:
             await callback.message.answer(error)
+        elif action_id == "check_update":
+            # Без побочного эффекта на get_state() — карточку перерисовывать
+            # незачем, результат некому больше показать, кроме как тут.
+            await callback.message.answer(_format_check_update(result or {}))
         elif value is not None and action_id not in ("assign", "unassign"):
             # Действие над службой (своей или пира) — перерисовать её карточку.
             text, keyboard = await node_view.build_service_card_view(
