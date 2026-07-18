@@ -2,13 +2,20 @@
 
 import asyncio
 
+import pytest_asyncio
+
+from sa_home_bot.bot import wake_state
 from sa_home_bot.bot.node_view import NODE_DOWN_TEXT
 from sa_home_bot.bot.swarm_view import (
     PEER_TIMEOUT_S,
     REMOTE_STUB_TEXT,
     build_swarm_view,
+    find_lan_waker,
 )
 from sa_home_bot.config import WakeConfig
+from sa_home_bot.db.connection import Database
+from sa_home_bot.db.migrations import apply_migrations
+from sa_home_bot.db.store import Store
 from sa_home_bot.subscriptions.models import Subscription
 
 OWN_STATE = {
@@ -181,3 +188,56 @@ async def test_swarm_node_down():
     text, keyboard = await build_swarm_view(DeadLink(), _sub("nodes"))
     assert text == NODE_DOWN_TEXT
     assert keyboard is None
+
+
+# --- wake через рой: кэширование реквизитов + кнопка на уснувшую ноду (этап 19 п.6) ---
+
+
+@pytest_asyncio.fixture
+async def store(tmp_path):
+    db = Database(tmp_path / "test.sqlite")
+    await db.open()
+    await apply_migrations(db)
+    yield Store(db)
+    await db.close()
+
+
+ALFRED_WAKE = {"mac": "7c:83:34:b4:59:ac", "ip": "192.168.0.100", "broadcast": "192.168.0.255"}
+WINPC_WAKE = {"mac": "aa:bb:cc:dd:ee:ff", "ip": "192.168.0.50", "broadcast": "192.168.0.255"}
+
+
+async def test_swarm_view_caches_wake_info_from_alive_nodes(store):
+    own = {**OWN_STATE, "wake": ALFRED_WAKE}
+    link = FakeNodeLink(own=own, routes=_routes())
+    await build_swarm_view(link, _sub("nodes"), store=store)
+    assert await wake_state.cached(store, "alfred") == ALFRED_WAKE
+
+
+async def test_swarm_offline_node_gets_wake_button_when_cached(store):
+    await wake_state.remember(store, "winpc", WINPC_WAKE)
+    link = FakeNodeLink(routes=_routes())
+    _, keyboard = await build_swarm_view(link, _sub("nodes", "wake"), store=store)
+    codes = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+    assert "st:wake:winpc" in codes
+
+
+async def test_swarm_offline_node_no_button_without_cache(store):
+    link = FakeNodeLink(routes=_routes())
+    _, keyboard = await build_swarm_view(link, _sub("nodes", "wake"), store=store)
+    codes = [b.callback_data for row in keyboard.inline_keyboard for b in row] if keyboard else []
+    assert not any(c.startswith("st:wake:") for c in codes)
+
+
+async def test_find_lan_waker_picks_matching_broadcast(store):
+    own = {**OWN_STATE, "wake": ALFRED_WAKE}
+    link = FakeNodeLink(own=own, routes=_routes())
+    waker = await find_lan_waker(link, store, "winpc", "192.168.0.255")
+    assert waker == "alfred"
+    # Заодно освежил кэш живых нод, увиденных в этом же fan-out.
+    assert await wake_state.cached(store, "alfred") == ALFRED_WAKE
+
+
+async def test_find_lan_waker_none_without_matching_subnet(store):
+    own = {**OWN_STATE, "wake": ALFRED_WAKE}
+    link = FakeNodeLink(own=own, routes=_routes())
+    assert await find_lan_waker(link, store, "winpc", "10.0.0.255") is None

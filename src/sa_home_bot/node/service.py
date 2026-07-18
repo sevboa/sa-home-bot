@@ -17,7 +17,7 @@ import sys
 from collections.abc import Callable
 from typing import Any
 
-from sa_home_bot import __version__
+from sa_home_bot import __version__, wol
 from sa_home_bot.config import SwarmNodeConfig
 from sa_home_bot.node import update as node_update
 from sa_home_bot.node.peers import NodeRouter, PeerLink
@@ -62,11 +62,14 @@ ACTION_CHECK_UPDATE = "check_update"
 ACTION_UPDATE = "update"
 EVENT_UPDATE_FINISHED = "update_finished"
 
+ACTION_SEND_WOL = "send_wol"  # рой просит ЭТУ ноду разбудить кого-то в её LAN
+
 RESTART_NODE_TITLE = "🔄 Перезапустить ноду"
 SWARM_JOIN_TITLE = "🤝 Присоединить ноду"
 JOIN_TITLE = "🔗 Присоединиться к рою"
 CHECK_UPDATE_TITLE = "🔍 Проверить обновления"
 UPDATE_TITLE = "⬆️ Обновить"
+SEND_WOL_TITLE = "📡 Отправить Wake-on-LAN"
 
 # Пауза перед выполнением power-команды/само-рестарта: ответ и события
 # должны успеть уйти.
@@ -172,6 +175,7 @@ class NodeService:
             title="Назначение",
             choices=tuple(ASSIGNMENT_ARGS),
         )
+        mac_param = ActionParam(name="mac", type="string", required=True, title="MAC цели")
         return ServiceDescription(
             info=ServiceInfo(node=self._node, service=SERVICE_NAME, version=__version__),
             capabilities=("supervisor", "power"),
@@ -181,6 +185,7 @@ class NodeService:
                 ActionSpec(id=ACTION_RESTART, title="🔄 Перезапустить", params=(name_param,)),
                 ActionSpec(id=ACTION_ASSIGN, title="➕ Назначить", params=(assign_param,)),
                 ActionSpec(id=ACTION_UNASSIGN, title="➖ Снять", params=(name_param,)),
+                ActionSpec(id=ACTION_SEND_WOL, title=SEND_WOL_TITLE, params=(mac_param,)),
                 *(
                     (
                         ActionSpec(
@@ -221,6 +226,7 @@ class NodeService:
         )
 
     async def get_state(self) -> dict[str, Any]:
+        wake_info = wol.detect_local_wake_info()
         state: dict[str, Any] = {
             "node": self._node,
             "service": SERVICE_NAME,
@@ -229,6 +235,13 @@ class NodeService:
             "system_uptime_s": system_uptime_seconds(),
             "services": [svc.to_dict() for svc in self._supervisor.services.values()],
             "peers": self._router.peers_state() if self._router is not None else [],
+            # Свои Ethernet-реквизиты (None — Wi-Fi/без LAN): бот кэширует их,
+            # пока нода жива, и использует, когда та уснёт (этап 19 п.6).
+            "wake": (
+                {"mac": wake_info.mac, "ip": wake_info.ip, "broadcast": wake_info.broadcast}
+                if wake_info is not None
+                else None
+            ),
         }
         if self._update_source is not None:
             installed = node_update.installed_version()
@@ -253,6 +266,8 @@ class NodeService:
             return await self._check_update()
         if action == ACTION_UPDATE:
             return await self._update()
+        if action == ACTION_SEND_WOL:
+            return self._send_wol(args)
         name = str(args.get("name", ""))
         if action == ACTION_ASSIGN:
             return await self._assign(name)
@@ -304,6 +319,22 @@ class NodeService:
             self._state.assignments.remove(name)
             self._save_state()
         return {"unassigned": name}
+
+    def _send_wol(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Разослать magic packet в СВОЙ LAN-сегмент — вызывается пиром роя,
+        когда именно эта нода оказалась в одной подсети со спящей целью
+        (bot/wake_state.py + bot/swarm_view.find_lan_waker, этап 19 п.6)."""
+        try:
+            mac = wol.normalize_mac(str(args.get("mac", "")))
+        except ValueError as exc:
+            raise ProtoError(ERR_BAD_REQUEST, str(exc)) from exc
+        info = wol.detect_local_wake_info()
+        try:
+            wol.send_magic_packet(mac, bind_ip=info.ip if info is not None else "")
+        except OSError as exc:
+            raise ProtoError(ERR_INTERNAL, f"не удалось отправить magic packet: {exc}") from exc
+        log.warning("Wake-on-LAN: %s разослала magic packet для %s", self._node, mac)
+        return {"sent": True, "mac": mac}
 
     def _save_state(self) -> None:
         if self._state_path is not None:

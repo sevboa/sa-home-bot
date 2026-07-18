@@ -1,4 +1,16 @@
-"""/wake и кнопка «Разбудить ПК» в /nodes — Wake-on-LAN домашнего ПК."""
+"""/wake и кнопки «Разбудить ПК»/«Разбудить <нода>» — Wake-on-LAN.
+
+Два пути (этап 19 п.6, IMPLEMENTATION_PLAN.md):
+- ручной (запасной, совместимость) — фиксированная машина из [wake] конфига,
+  magic packet шлёт сам бот; годится, только если бот крутится в той же LAN,
+  что и цель;
+- через рой — нода сама знает MAC/IP/broadcast своего Ethernet-интерфейса
+  (node/service.py:get_state()["wake"]), бот кэширует их, пока нода жива
+  (bot/wake_state.py), а когда та уснула — просит отправить magic packet
+  живую ноду из того же сегмента LAN (swarm_view.find_lan_waker). Так сигнал
+  уходит в правильную подсеть, даже если сам бот — на удалённой машине
+  (например, ходит к ноде через tailscale).
+"""
 
 from __future__ import annotations
 
@@ -9,21 +21,26 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from sa_home_bot import wol
-from sa_home_bot.bot import commands
+from sa_home_bot.bot import commands, swarm_view
+from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
+from sa_home_bot.bot.wake_state import cached as cached_wake_info
 from sa_home_bot.config import Settings
+from sa_home_bot.db.store import Store
+from sa_home_bot.proto.messages import Address, ProtoError
 
 router = Router(name="wake")
 log = logging.getLogger(__name__)
 
 NOT_CONFIGURED_TEXT = (
-    "⚙️ Wake-on-LAN не настроен: задайте mac в секции [wake] файла config.toml."
+    "⚙️ Wake-on-LAN не настроен: задайте mac в секции [wake] файла config.toml, "
+    "либо дождитесь, пока нужная нода роя хотя бы раз появится в сети."
 )
 
-WAKE_CALLBACK_DATA = f"{commands.CALLBACK_PREFIX}:{commands.WAKE_CODE}"
+WAKE_CALLBACK_PREFIX = f"{commands.CALLBACK_PREFIX}:{commands.WAKE_CODE}"
 
 
-async def _do_wake(message: Message, config: Settings) -> None:
-    """Общий сценарий: команда /wake и кнопка в /nodes делают одно и то же."""
+async def _wake_manual(message: Message, config: Settings) -> None:
+    """Ручной путь: фиксированная машина из [wake], magic packet шлёт бот."""
     wake = config.wake
     if not wake.mac:
         await message.answer(NOT_CONFIGURED_TEXT)
@@ -56,16 +73,57 @@ async def _do_wake(message: Message, config: Settings) -> None:
         )
 
 
+async def _wake_swarm_node(
+    message: Message, node_link: ServiceLink, store: Store, node_id: str
+) -> None:
+    """Путь через рой: будим известную ноду по её кэшированным реквизитам —
+    отправляет не бот, а живая нода из той же LAN (см. докстринг модуля)."""
+    info = await cached_wake_info(store, node_id)
+    if info is None:
+        await message.answer(
+            f"⚙️ Нет данных о MAC «{node_id}» — нода ещё ни разу не была видна в рое."
+        )
+        return
+
+    waker = await swarm_view.find_lan_waker(node_link, store, node_id, info["broadcast"])
+    if waker is None:
+        await message.answer(
+            f"⚠️ Некому отправить сигнал: нет живой ноды в той же сети, что «{node_id}»."
+        )
+        return
+
+    dst = Address(node=waker, service="node")
+    try:
+        await node_link.command("send_wol", {"mac": info["mac"]}, dst=dst)
+    except ServiceUnavailableError:
+        await message.answer(f"⚠️ Нода «{waker}» перестала отвечать во время отправки.")
+        return
+    except ProtoError as exc:
+        await message.answer(f"❌ {waker}: {exc.message}")
+        return
+
+    await message.answer(
+        f"🔌 Magic packet для «{node_id}» (<code>{info['mac']}</code>) отправлен через "
+        f"ноду «{waker}». Появится в /nodes, как поднимется."
+    )
+
+
 @router.message(Command(commands.WAKE.name))
 async def cmd_wake(message: Message, config: Settings) -> None:
-    await _do_wake(message, config)
+    await _wake_manual(message, config)
 
 
-@router.callback_query(F.data == WAKE_CALLBACK_DATA)
-async def on_wake_button(callback: CallbackQuery, config: Settings) -> None:
+@router.callback_query(F.data.startswith(WAKE_CALLBACK_PREFIX))
+async def on_wake_button(
+    callback: CallbackQuery, config: Settings, node_link: ServiceLink, store: Store
+) -> None:
     # Право (команда wake) уже проверено CallbackAuthorizationMiddleware.
     if callback.message is None:
         await callback.answer()
         return
+    node_id = commands.parse_wake_callback(callback.data)
     await callback.answer()
-    await _do_wake(callback.message, config)
+    if node_id is None:
+        await _wake_manual(callback.message, config)
+    else:
+        await _wake_swarm_node(callback.message, node_link, store, node_id)

@@ -100,6 +100,26 @@ def action_callback(
     return ":".join(parts)
 
 
+def wake_callback(node_id: str | None = None) -> str:
+    """Собрать «st:wake[:<node_id>]»: без node_id — ручной путь ([wake] в
+    конфиге), с node_id — точечная кнопка «Разбудить <нода>» для конкретной
+    уснувшей ноды роя (bot/wake_state.py)."""
+    parts = [CALLBACK_PREFIX, WAKE_CODE]
+    if node_id:
+        parts.append(node_id)
+    return ":".join(parts)
+
+
+def parse_wake_callback(data: str | None) -> str | None:
+    """«st:wake[:<node_id>]» → node_id (None — ручной путь [wake])."""
+    if not data:
+        return None
+    parts = data.split(":")
+    if len(parts) < 2 or parts[0] != CALLBACK_PREFIX or parts[1] != WAKE_CODE:
+        return None
+    return parts[2] if len(parts) > 2 and parts[2] else None
+
+
 def parse_action_callback(data: str | None) -> tuple[str, str, str | None, str | None] | None:
     """«act:<служба>:<действие>[:<значение>[:<node_id>]]» →
     (служба, действие, значение, node_id)."""

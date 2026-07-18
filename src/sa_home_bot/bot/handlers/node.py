@@ -79,9 +79,12 @@ async def cmd_swarm(
     message: Message,
     node_link: ServiceLink,
     config: Settings,
+    store: Store,
     subscription: Subscription | None = None,
 ) -> None:
-    text, keyboard = await swarm_view.build_swarm_view(node_link, subscription, config.wake)
+    text, keyboard = await swarm_view.build_swarm_view(
+        node_link, subscription, config.wake, store
+    )
     await message.answer(text, reply_markup=keyboard)
 
 

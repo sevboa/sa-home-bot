@@ -450,6 +450,68 @@ async def test_update_concurrent_call_is_bad_request(monkeypatch):
     await asyncio.sleep(0.05)
 
 
+# --- send_wol / get_state()["wake"]: рой сам отправляет WoL (этап 19 п.6) ---
+
+
+def test_describe_declares_send_wol_with_mac_param():
+    sup, _ = _fake_supervisor()
+    action = NodeService(sup).describe().find_action("send_wol")
+    assert action is not None
+    assert action.params[0].name == "mac"
+    assert action.params[0].required
+
+
+async def test_get_state_reports_wake_info_when_ethernet(monkeypatch):
+    from sa_home_bot import wol
+    from sa_home_bot.node import service as service_module
+
+    info = wol.LocalWakeInfo(mac="aa:bb:cc:dd:ee:ff", ip="192.168.0.100", broadcast="192.168.0.255")
+    monkeypatch.setattr(service_module.wol, "detect_local_wake_info", lambda: info)
+
+    sup, _ = _fake_supervisor()
+    state = await NodeService(sup).get_state()
+    assert state["wake"] == {
+        "mac": "aa:bb:cc:dd:ee:ff",
+        "ip": "192.168.0.100",
+        "broadcast": "192.168.0.255",
+    }
+
+
+async def test_get_state_wake_none_without_ethernet(monkeypatch):
+    from sa_home_bot.node import service as service_module
+
+    monkeypatch.setattr(service_module.wol, "detect_local_wake_info", lambda: None)
+    sup, _ = _fake_supervisor()
+    state = await NodeService(sup).get_state()
+    assert state["wake"] is None
+
+
+async def test_send_wol_normalizes_mac_and_binds_to_own_ip(monkeypatch):
+    from sa_home_bot import wol
+    from sa_home_bot.node import service as service_module
+
+    info = wol.LocalWakeInfo(mac="7c:83:34:b4:59:ac", ip="192.168.0.100", broadcast="192.168.0.255")
+    monkeypatch.setattr(service_module.wol, "detect_local_wake_info", lambda: info)
+    sent = {}
+
+    def fake_send(mac, broadcast="255.255.255.255", port=9, repeats=3, bind_ip=""):
+        sent.update(mac=mac, bind_ip=bind_ip)
+
+    monkeypatch.setattr(service_module.wol, "send_magic_packet", fake_send)
+
+    sup, _ = _fake_supervisor()
+    result = await NodeService(sup).run_command("send_wol", {"mac": "AA-BB-CC-DD-EE-FF"})
+    assert result == {"sent": True, "mac": "aa:bb:cc:dd:ee:ff"}
+    assert sent == {"mac": "aa:bb:cc:dd:ee:ff", "bind_ip": "192.168.0.100"}
+
+
+async def test_send_wol_invalid_mac_is_bad_request():
+    sup, _ = _fake_supervisor()
+    with pytest.raises(ProtoError) as exc_info:
+        await NodeService(sup).run_command("send_wol", {"mac": "не мак"})
+    assert exc_info.value.code == "bad_request"
+
+
 def test_resolve_endpoint_relative_to_config_dir(tmp_path):
     import argparse
     from pathlib import Path

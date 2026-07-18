@@ -15,15 +15,17 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from sa_home_bot.bot import actions, commands, node_links, node_view, status_view
+from sa_home_bot.bot import actions, commands, node_links, node_view, status_view, wake_state
 from sa_home_bot.bot.monitor_state import parse_outage
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import WakeConfig
+from sa_home_bot.db.store import Store
 from sa_home_bot.domain.models import KIND_CPU, POWER_UNEXPECTED, PowerEvent
 from sa_home_bot.proto.messages import Address, ProtoError
 from sa_home_bot.runtime import format_duration
@@ -174,34 +176,93 @@ def render_swarm(
 def _wake_rows(
     subscription: Subscription, wake: WakeConfig | None
 ) -> list[InlineKeyboardButton]:
+    """Ручная кнопка — фиксированная машина из [wake] (запасной путь)."""
     if wake is None or not wake.mac or not subscription.allows_command(commands.WAKE.name):
         return []
-    return [
-        InlineKeyboardButton(
-            text=WAKE_BUTTON_TEXT,
-            callback_data=f"{commands.CALLBACK_PREFIX}:{commands.WAKE_CODE}",
+    return [InlineKeyboardButton(text=WAKE_BUTTON_TEXT, callback_data=commands.wake_callback())]
+
+
+async def _offline_wake_rows(
+    subscription: Subscription, store: Store, reports: Sequence[_NodeReport]
+) -> list[InlineKeyboardButton]:
+    """Точечная кнопка на каждую уснувшую ноду, чьи реквизиты уже известны
+    (см. wake_state.remember, вызывается ниже при сборе сводки)."""
+    if not subscription.allows_command(commands.WAKE.name):
+        return []
+    buttons = []
+    for r in reports:
+        if r.alive:
+            continue
+        if await wake_state.cached(store, r.node_id) is None:
+            continue
+        buttons.append(
+            InlineKeyboardButton(
+                text=f"🔌 Разбудить {r.node_id}",
+                callback_data=commands.wake_callback(r.node_id),
+            )
         )
-    ]
+    return buttons
 
 
-def build_swarm_keyboard(
-    subscription: Subscription | None, wake: WakeConfig | None
+async def _remember_wake_info(store: Store, reports: Sequence[_NodeReport]) -> None:
+    for r in reports:
+        if r.state is not None:
+            await wake_state.remember(store, r.node_id, r.state.get("wake"))
+
+
+async def build_swarm_keyboard(
+    subscription: Subscription | None,
+    wake: WakeConfig | None,
+    reports: Sequence[_NodeReport] = (),
+    store: Store | None = None,
 ) -> InlineKeyboardMarkup | None:
     """Только действия (wake) — навигация к нодам идёт ссылками в тексте."""
     if subscription is None:
         return None
-    return actions.rows(_wake_rows(subscription, wake))
+    buttons = _wake_rows(subscription, wake)
+    if store is not None:
+        buttons = buttons + await _offline_wake_rows(subscription, store, reports)
+    return actions.rows(buttons)
+
+
+async def find_lan_waker(
+    node_link: ServiceLink, store: Store, target_node_id: str, target_broadcast: str
+) -> str | None:
+    """Живая нода в том же сегменте LAN, что и уснувшая ``target_node_id``
+    (совпадает объявленный ею broadcast) — она отправит magic packet вместо
+    бота, который вполне может крутиться вне этой локалки (этап 19 п.6).
+
+    Заодно свежит кэш wake-реквизитов всех увиденных сейчас нод — тот же
+    fan-out, что и сводка /swarm, отдельного запроса не требует.
+    """
+    try:
+        own_state = await node_link.get_state()
+    except (ServiceUnavailableError, ProtoError):
+        return None
+    reports = await _collect(node_link, own_state)
+    await _remember_wake_info(store, reports)
+    for r in reports:
+        if not r.alive or r.node_id == target_node_id or r.state is None:
+            continue
+        candidate = r.state.get("wake")
+        if candidate and candidate.get("broadcast") == target_broadcast:
+            return r.node_id
+    return None
 
 
 async def build_swarm_view(
     node_link: ServiceLink,
     subscription: Subscription | None,
     wake: WakeConfig | None = None,
+    store: Store | None = None,
 ) -> tuple[str, InlineKeyboardMarkup | None]:
     try:
         own_state = await node_link.get_state()
     except (ServiceUnavailableError, ProtoError):
         return node_view.NODE_DOWN_TEXT, None
     reports = await _collect(node_link, own_state)
+    if store is not None:
+        await _remember_wake_info(store, reports)
     text = render_swarm(reports, wake, datetime.now(tz=UTC))
-    return text, build_swarm_keyboard(subscription, wake)
+    keyboard = await build_swarm_keyboard(subscription, wake, reports, store)
+    return text, keyboard
