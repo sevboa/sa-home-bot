@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import socket
+import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -41,6 +43,39 @@ log = logging.getLogger(__name__)
 EventCallback = Callable[[Envelope], Awaitable[None]]
 
 DEFAULT_TIMEOUT = 10.0
+
+# Живая находка 2026-07-20: TCP по умолчанию не замечает молча пропавшего
+# собеседника (сон машины, обрыв сети без FIN/RST) — _read_loop висит на
+# readline() неограниченно, PeerLink.alive продолжает врать "жив" даже
+# когда пир давно недоступен (сломало presence в /swarm и кнопку "разбудить"
+# — там же и обнаружено). Без явной настройки ОС-таймаут — часы, не годится.
+TCP_KEEPALIVE_IDLE_S = 20
+TCP_KEEPALIVE_INTERVAL_S = 10
+TCP_KEEPALIVE_COUNT = 3
+
+
+def _enable_tcp_keepalive(sock: socket.socket) -> None:
+    """Пробы каждые ``TCP_KEEPALIVE_INTERVAL_S`` после ``_IDLE_S`` простоя;
+    ``_COUNT`` неудач подряд — ОС рвёт соединение сама, без участия
+    приложения. Настройка best-effort: не у всех платформ есть все опции,
+    голый ``SO_KEEPALIVE`` (системные дефолты) — не хуже, чем было."""
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    if sys.platform == "win32":
+        with contextlib.suppress(OSError, AttributeError):
+            sock.ioctl(
+                socket.SIO_KEEPALIVE_VALS,
+                (1, TCP_KEEPALIVE_IDLE_S * 1000, TCP_KEEPALIVE_INTERVAL_S * 1000),
+            )
+    else:
+        for opt_name, value in (
+            ("TCP_KEEPIDLE", TCP_KEEPALIVE_IDLE_S),
+            ("TCP_KEEPINTVL", TCP_KEEPALIVE_INTERVAL_S),
+            ("TCP_KEEPCNT", TCP_KEEPALIVE_COUNT),
+        ):
+            opt = getattr(socket, opt_name, None)
+            if opt is not None:
+                with contextlib.suppress(OSError):
+                    sock.setsockopt(socket.IPPROTO_TCP, opt, value)
 
 
 class ProtoClient:
@@ -77,6 +112,9 @@ class ProtoClient:
             self._reader, self._writer = await asyncio.open_connection(
                 host=self._endpoint.host, port=self._endpoint.port, limit=MAX_MESSAGE_BYTES
             )
+            raw_sock = self._writer.get_extra_info("socket")
+            if raw_sock is not None:
+                _enable_tcp_keepalive(raw_sock)
         self._reader_task = asyncio.create_task(self._read_loop(), name="proto-client-reader")
         if isinstance(self._endpoint, TcpEndpoint):
             # TCP требует auth первым сообщением; неверный токен → ProtoError.

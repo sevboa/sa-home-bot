@@ -1,6 +1,7 @@
 """Пара клиент↔сервер протокола v0 по TCP c auth-токеном."""
 
 import asyncio
+import socket
 
 import pytest
 
@@ -156,3 +157,46 @@ async def test_repeated_auth_is_ok(tcp_server):
         assert (await client.request("auth", {"token": TOKEN}))["authenticated"] is True
     finally:
         await client.close()
+
+
+# --- TCP keepalive: обнаружение молча пропавшего пира (2026-07-20) ---
+
+
+async def test_tcp_connect_enables_keepalive(tcp_server):
+    """Без этого сон/обрыв сети у пира не замечается годами (ОС-дефолт) —
+    PeerLink.alive врал бы "жив" бесконечно (живой баг, см. proto/client.py)."""
+    client = ProtoClient(tcp_server.endpoint, token=TOKEN, timeout=5.0)
+    await client.connect()
+    try:
+        raw_sock = client._writer.get_extra_info("socket")
+        assert raw_sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) != 0
+    finally:
+        await client.close()
+
+
+async def test_unix_connect_does_not_touch_keepalive(tmp_path):
+    """Unix-сокеты не роняют connect() попыткой выставить TCP-опции."""
+    from sa_home_bot.proto.messages import ServiceDescription, ServiceInfo
+
+    class Svc:
+        def describe(self):
+            return ServiceDescription(info=ServiceInfo(node="n", service="s", version="0.1"))
+
+        async def get_state(self):
+            return {}
+
+        async def run_command(self, action, args):
+            return {}
+
+    sock_path = tmp_path / "u.sock"
+    server = ProtoServer(sock_path, Svc())
+    await server.start()
+    try:
+        client = ProtoClient(sock_path, timeout=5.0)
+        await client.connect()  # не должно бросить исключение
+        try:
+            assert (await client.hello()).node == "n"
+        finally:
+            await client.close()
+    finally:
+        await server.stop()
