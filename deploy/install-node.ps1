@@ -1,4 +1,4 @@
-# Установка/обновление Windows-ноды sa-home-bot (этап 19, п. 4).
+﻿# Установка/обновление Windows-ноды sa-home-bot (этап 19, п. 4).
 # Запускать из PowerShell ОТ ИМЕНИ АДМИНИСТРАТОРА:
 #
 #   .\install-node.ps1 -Tag v0.24.1 -SwarmToken "..." -JoinEndpoint "tcp://alfred.tailXXXXXX.ts.net:8710"

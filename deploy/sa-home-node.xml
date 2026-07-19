@@ -1,4 +1,4 @@
-<!--
+﻿<!--
   Служба WinSW для Windows-ноды (этап 19, п. 4). Устанавливается
   deploy\install-node.ps1 как C:\<INSTALL_DIR>\service\sa-home-node.xml
   рядом с переименованным WinSW-x64.exe (sa-home-node.exe — имя exe
