@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import socket
+import sys
 
 from sa_home_bot.config import Settings, SwarmNodeConfig
 from sa_home_bot.node import update as node_update
@@ -95,6 +96,21 @@ def build_router(
         if name in assignments
     }
     return NodeRouter(node_id, peers=peers, local_services=local)
+
+
+def update_source_for_this_platform() -> str | None:
+    """origin_repo_url(), но всегда None на win32.
+
+    `pipx install --force` там пытается перезаписать sa-home-node.exe и
+    venv-DLL, которые держит открытыми ЭТОТ ЖЕ работающий процесс (WinError
+    5/32, живые находки 2026-07-17/2026-07-19) — структурно не работает,
+    пока служба жива, никаким env/флагом не обойти. Единственный рабочий
+    путь — внешний стоп→install→старт, см. deploy/win-auto-update.ps1;
+    версия ноды всё равно видна в /swarm (расхождение по тегам).
+    """
+    if sys.platform == "win32":
+        return None
+    return node_update.origin_repo_url()
 
 
 def _remember_peer(state: NodeState, node_id: str, endpoint: str) -> None:
@@ -213,8 +229,9 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         own_endpoint=settings.node.listen,
         emit=emit,
         # Дешёвая файловая проверка (без сети) — editable/не-git установка
-        # (dev-чекаут) даёт None, и check_update/update не объявляются.
-        update_source=node_update.origin_repo_url(),
+        # (dev-чекаут) или win32 дают None, и check_update/update не
+        # объявляются (см. update_source_for_this_platform).
+        update_source=update_source_for_this_platform(),
     )
     server = ProtoServer(endpoints, node_service, token=settings.swarm.token, router=router.route)
     await server.start()
