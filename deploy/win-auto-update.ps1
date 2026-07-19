@@ -94,8 +94,28 @@ if ((Get-Service $ServiceName).Status -ne 'Stopped') {
 }
 
 Log "pipx install --force до $latestTag..."
-$installOutput = & $PipxExe install --force "sa-home-bot[windows] @ git+$RepoUrl@$latestTag" 2>&1
-$installOk = $LASTEXITCODE -eq 0
+# Живая находка 2026-07-19: pipx/pip пишут в stderr даже безобидный прогресс,
+# а при $ErrorActionPreference = "Stop" (см. верх файла) PowerShell превращает
+# КАЖДУЮ строку stderr нативного процесса в завершающую ошибку — сюда, к
+# гарантированному Start-Service, скрипт тогда не добирался вовсе, и упавшее
+# обновление роняло службу НАСОВСЕМ (до ручного вмешательства), а не просто
+# откатывалось на старую версию, как задумано. Поэтому: EAP=Continue именно
+# на время вызова pipx, плюс try/catch снаружи — до Start-Service ниже
+# доходим при любом исходе (исключение, ненулевой код возврата — не важно).
+$installOk = $false
+$installOutput = $null
+try {
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $installOutput = & $PipxExe install --force "sa-home-bot[windows] @ git+$RepoUrl@$latestTag" 2>&1
+        $installOk = $LASTEXITCODE -eq 0
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+} catch {
+    $installOutput = $_
+}
 Log ($installOutput -join "`n")
 
 Log "Запускаю службу $ServiceName..."
