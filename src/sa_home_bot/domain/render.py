@@ -31,7 +31,7 @@ def render_event(event: Event) -> str:
     """Текст уведомления для события перегрева/возврата к норме."""
     label = escape(event.label)
     temp = f"{event.temperature_c:.1f}°C"
-    when = event.at.strftime("%H:%M:%S")
+    when = event.at.astimezone().strftime("%H:%M:%S")
     kind = _kind_word(event.kind)
     body = f"\nТемпература: <b>{temp}</b>\nВремя: {when}"
     if event.type == EVENT_OVERHEAT_STARTED:
@@ -74,7 +74,7 @@ def render_state_line(state: HealthState) -> str:
     kind = _kind_word(state.kind)
     suffix = ""
     if state.status == ALERTING and state.alerting_since is not None:
-        suffix = f" с {state.alerting_since.strftime('%H:%M:%S')}"
+        suffix = f" с {state.alerting_since.astimezone().strftime('%H:%M:%S')}"
     return f"{icon} {kind} «{label}»: <b>{temp}</b>{suffix}"
 
 

@@ -2,10 +2,18 @@
 
 pythonnet/dll в тестах не трогаем — парсеры работают с деревом простых
 dict'ов (фикстуры), как smartctl-парсеры работают с JSON-фикстурами.
+
+``_hardware_node``/``_update_with_timeout`` дальше в файле — исключение:
+им достаточно "утиных" fake-объектов (Identifier/Name/Sensors/SubHardware/
+Update()) без реального pythonnet, поэтому таймаут/бан/изоляцию узла
+тестируем напрямую, а не только через дерево-фикстуру.
 """
 
 import sys
+import threading
 import types
+
+import pytest
 
 from sa_home_bot.sensors import lhm
 from sa_home_bot.sensors.lhm import (
@@ -255,3 +263,99 @@ def test_lhm_problem_hints_admin_when_cpu_has_no_temps(monkeypatch):
     monkeypatch.setattr(lhm, "read_tree_sync", lambda dll_path="": [_cpu_node()])
     assert lhm.read_cpu_readings_sync("", BASE_TIME) != []
     assert lhm.lhm_problem() is None
+
+
+# --- _update_with_timeout/_hardware_node: таймаут+бан зависшего железа,
+# изоляция одного плохого узла от остальных (живая находка 2026-07-20) ---
+
+
+class _FakeHw:
+    """Утиный аналог LHM IHardware — только то, что реально трогает код."""
+
+    def __init__(self, hw_id, name="fake", hw_type="Storage", sensors=(), subhardware=()):
+        self.Identifier = hw_id
+        self.Name = name
+        self.HardwareType = hw_type
+        self.Sensors = list(sensors)
+        self.SubHardware = list(subhardware)
+        self.update_calls = 0
+
+    def Update(self):
+        self.update_calls += 1
+
+
+class _HangingHw(_FakeHw):
+    """Update() блокируется, пока тест явно не отпустит (имитация зависшего
+    драйвера — не бросает исключение, просто не возвращается)."""
+
+    def __init__(self, hw_id, release: threading.Event):
+        super().__init__(hw_id)
+        self._release = release
+
+    def Update(self):
+        self.update_calls += 1
+        self._release.wait(5)  # тест снимает в finally — не течёт после себя
+
+
+class _RaisingHw(_FakeHw):
+    def Update(self):
+        self.update_calls += 1
+        raise RuntimeError("Индекс находился вне границ массива")
+
+
+@pytest.fixture(autouse=True)
+def _clean_hw_blacklist():
+    lhm._blacklisted_hw_ids.clear()
+    yield
+    lhm._blacklisted_hw_ids.clear()
+
+
+def test_update_with_timeout_blacklists_hanging_hardware(monkeypatch):
+    monkeypatch.setattr(lhm, "HW_UPDATE_TIMEOUT_S", 0.05)
+    release = threading.Event()
+    hw = _HangingHw("/hang/0", release)
+    try:
+        lhm._update_with_timeout(hw)
+        assert hw.Identifier in lhm._blacklisted_hw_ids
+        # повторный вызов на забаненный id больше не трогает Update() —
+        # не подаёт новую задачу в пул на каждый следующий скан.
+        lhm._update_with_timeout(hw)
+        assert hw.update_calls == 1
+    finally:
+        release.set()  # отпускаем поток пула, чтобы не утёк после теста
+
+
+def test_update_with_timeout_skips_already_blacklisted():
+    lhm._blacklisted_hw_ids.add("/known-bad/0")
+    hw = _FakeHw("/known-bad/0")
+    lhm._update_with_timeout(hw)
+    assert hw.update_calls == 0
+
+
+def test_update_with_timeout_succeeds_normally():
+    hw = _FakeHw("/ok/0")
+    lhm._update_with_timeout(hw)
+    assert hw.update_calls == 1
+    assert hw.Identifier not in lhm._blacklisted_hw_ids
+
+
+def test_safe_hardware_node_isolates_failing_node_from_siblings():
+    good = _FakeHw("/good/0", hw_type="Cpu")
+    bad = _RaisingHw("/bad/0")
+
+    tree = [n for n in (lhm._safe_hardware_node(hw) for hw in (good, bad)) if n is not None]
+
+    assert len(tree) == 1
+    assert tree[0]["id"] == "/good/0"
+    assert good.update_calls == 1
+    assert bad.update_calls == 1  # честно попытались — не сломало соседа
+
+
+def test_hardware_node_isolates_failing_subhardware():
+    bad_sub = _RaisingHw("/bad/sub")
+    parent = _FakeHw("/parent/0", subhardware=[bad_sub])
+
+    node = lhm._hardware_node(parent)
+
+    assert node["id"] == "/parent/0"
+    assert node["subhardware"] == []  # плохой subhardware тихо выпал

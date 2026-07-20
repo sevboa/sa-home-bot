@@ -14,6 +14,7 @@ pythonnet нужен только на реальной Windows, тесты го
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import os
 import sys
@@ -192,6 +193,22 @@ _cpu_temps_missing = False  # CPU в дереве есть, температур
 _runtime_load_attempted = False  # pythonnet.load() вызван (успешно или нет) — не повторяем
 _runtime_lock = threading.Lock()
 
+# hw.Update() иногда виснет навсегда вместо исключения (живая находка
+# 2026-07-20 — конкретное железо, похоже, съёмный картридер без носителя).
+# Python не может прибить нативный/.NET-вызов изнутри потока — вместо этого
+# гоним каждый Update() в отдельном пуле с таймаутом; зависший вызов так и
+# останется висеть там навсегда (утечёт один поток), но раз зависший
+# Identifier мы больше не трогаем — второй раз тот же узел не подвесит
+# новый поток. Пул отдельный от дефолтного executor'а вызывающего кода,
+# чтобы утёкшие потоки не отъедали его у остальных блокирующих операций
+# (smartctl и т.п.).
+HW_UPDATE_TIMEOUT_S = 5.0
+_hw_update_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=8, thread_name_prefix="lhm-hw-update"
+)
+_blacklisted_hw_ids: set[str] = set()
+_blacklist_lock = threading.Lock()
+
 
 def _ensure_runtime() -> None:
     """Явно загрузить .NET-runtime ДО первого ``import clr`` — РОВНО ОДИН РАЗ.
@@ -274,9 +291,47 @@ def _open_computer(dll: Path):
     return computer
 
 
+def _update_with_timeout(hw) -> None:
+    """``hw.Update()`` с таймаутом и баном зависшего узла.
+
+    Живая находка 2026-07-20: CPU и диски читаются из разных потоков
+    executor'а (SensorSource.read_all → asyncio.gather) без блокировки —
+    конкурентный ``hw.Update()`` на общем ``_computer`` иногда ронял LHM с
+    IndexOutOfRangeException (StorageDevice.ToggleSpaceSensors). Пробовали
+    сериализовать весь проход одним ``threading.Lock`` — стало СТРОГО хуже:
+    JobWorker строго последовательный (worker/worker.py — один job зараз), и
+    вместо гонки-с-быстрым-крашем конкретное железо (похоже, тот же
+    картридер) без гонки просто зависает в ``hw.Update()`` навсегда — лок
+    держался вечно, весь сбор датчиков на ноде намертво стоял без единой
+    ошибки в логе, до ручного рестарта службы.
+
+    Вместо лока — таймаут: гоним ``Update()`` в отдельном пуле, ждём не
+    дольше ``HW_UPDATE_TIMEOUT_S``. Если не уложился — Python не может
+    прибить зависший поток (нативный/.NET-вызов не прерывается изнутри), но
+    Identifier запоминаем как забаненный и больше НЕ пытаемся обновлять —
+    один зависший узел утекает ровно один раз, не с каждым сканом.
+    """
+    hw_id = str(hw.Identifier)
+    if hw_id in _blacklisted_hw_ids:
+        return
+    future = _hw_update_pool.submit(hw.Update)
+    try:
+        future.result(timeout=HW_UPDATE_TIMEOUT_S)
+    except concurrent.futures.TimeoutError:
+        with _blacklist_lock:
+            _blacklisted_hw_ids.add(hw_id)
+        log.error(
+            "LHM: %s (%s) не ответил на Update() за %.0fс — исключаю из "
+            "дальнейших сканов (похоже на зависшее съёмное устройство)",
+            hw_id,
+            hw.Name,
+            HW_UPDATE_TIMEOUT_S,
+        )
+
+
 def _hardware_node(hw) -> dict:
     """LHM IHardware → дерево простых dict'ов (формат чистых парсеров выше)."""
-    hw.Update()
+    _update_with_timeout(hw)
     return {
         "id": str(hw.Identifier),
         "type": str(hw.HardwareType),
@@ -289,29 +344,27 @@ def _hardware_node(hw) -> dict:
             }
             for s in hw.Sensors
         ],
-        "subhardware": [_hardware_node(sub) for sub in hw.SubHardware],
+        "subhardware": [
+            n for n in (_safe_hardware_node(sub) for sub in hw.SubHardware) if n is not None
+        ],
     }
 
 
-def read_tree_sync(dll_path: str = "") -> list[dict]:
-    """Снять срез дерева датчиков LHM (блокирующе, через executor вызывающего).
+def _safe_hardware_node(hw) -> dict | None:
+    """``_hardware_node()``, но одно проблемное устройство (исключение, не
+    только таймаут — см. ``_update_with_timeout``) не должно ронять сбор
+    остальных: раньше единственное упавшее storage-железо гасило ВЕСЬ срез
+    (включая уже честно прочитанный CPU) — см. ``_safe_tree``, которая
+    ловила это на уровне всего дерева целиком."""
+    try:
+        return _hardware_node(hw)
+    except Exception:  # noqa: BLE001 — один узел не должен ронять остальные
+        log.warning("LHM: узел %s пропущен из-за ошибки", hw.Identifier, exc_info=True)
+        return None
 
-    Живая находка 2026-07-20: CPU и диски читаются из разных потоков
-    executor'а (SensorSource.read_all → asyncio.gather) без блокировки —
-    конкурентный hw.Update() на общем _computer иногда ронял LHM с
-    IndexOutOfRangeException (StorageDevice.ToggleSpaceSensors). Пробовали
-    сериализовать весь проход одним threading.Lock — стало СТРОГО хуже:
-    JobWorker строго последовательный (worker/worker.py — один job зараз),
-    и вместо гонки-с-быстрым-крашем конкретное железо (похоже, тот же
-    картридер) без гонки просто зависает в hw.Update() навсегда — лок
-    держится вечно, весь сбор датчиков на ноде намертво стоит без единой
-    ошибки в логе (не то что каждый скан, а вообще, до ручного рестарта
-    службы). Крash хоть и уродливый в статусе, но самовосстанавливается на
-    следующем скане — откачено обратно на не залоченный вариант. Правильный
-    фикс — таймаут на hw.Update() конкретного узла (в отдельном потоке,
-    отбросить/забанить зависший Identifier) — не сделан, отслеживается
-    отдельно.
-    """
+
+def read_tree_sync(dll_path: str = "") -> list[dict]:
+    """Снять срез дерева датчиков LHM (блокирующе, через executor вызывающего)."""
     dll = find_dll(dll_path)
     if dll is None:
         looked = ", ".join(str(c) for c in dll_candidates(dll_path)) or "—"
@@ -320,7 +373,7 @@ def read_tree_sync(dll_path: str = "") -> list[dict]:
             "и/или укажите путь в [sensors.lhm].dll_path"
         )
     computer = _open_computer(dll)
-    return [_hardware_node(hw) for hw in computer.Hardware]
+    return [n for n in (_safe_hardware_node(hw) for hw in computer.Hardware) if n is not None]
 
 
 def _safe_tree(dll_path: str) -> list[dict]:
