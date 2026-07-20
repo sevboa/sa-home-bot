@@ -56,6 +56,7 @@ ASSIGNMENT_ARGS: dict[str, list[str]] = {
     "monitor": ["--service", "monitor"],
     "telegram-bot": ["--service", "bot"],
     "apps": ["--service", "apps"],
+    "torrents": ["--service", "torrents"],
 }
 
 

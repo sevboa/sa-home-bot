@@ -25,6 +25,7 @@ from sa_home_bot.bot.node_events import build_node_event_handler
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.bot.setup import build_bot, build_dispatcher, set_bot_commands
+from sa_home_bot.bot.torrent_pending import PendingTorrents
 from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
@@ -114,6 +115,14 @@ async def run(settings: Settings) -> None:
     )
     await apps_link.start()
 
+    torrents_link = ServiceLink(
+        settings.torrents.socket,
+        token=settings.swarm.token,
+        display_name="торренты",
+    )
+    await torrents_link.start()
+    pending_torrents = PendingTorrents()
+
     # 9. Polling.
     polling_task = asyncio.create_task(
         dp.start_polling(
@@ -122,6 +131,8 @@ async def run(settings: Settings) -> None:
             link=link,
             node_link=node_link,
             apps_link=apps_link,
+            torrents_link=torrents_link,
+            pending_torrents=pending_torrents,
             runtime=runtime,
             config=settings,
             notifier=notifier,
@@ -145,6 +156,7 @@ async def run(settings: Settings) -> None:
             link=link,
             node_link=node_link,
             apps_link=apps_link,
+            torrents_link=torrents_link,
             book=book,
             notifier=notifier,
             store=store,
@@ -160,6 +172,7 @@ async def _shutdown(
     link: ServiceLink,
     node_link: ServiceLink,
     apps_link: ServiceLink,
+    torrents_link: ServiceLink,
     book: SubscriptionBook,
     notifier: Notifier,
     store: Store,
@@ -172,6 +185,7 @@ async def _shutdown(
     await link.stop()
     await node_link.stop()
     await apps_link.stop()
+    await torrents_link.stop()
 
     # Стоп polling. stop_polling кидает RuntimeError, если polling ещё не успел
     # запуститься (быстрый SIGINT) или упал на старте (например, бэд-токен).

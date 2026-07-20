@@ -26,6 +26,7 @@ from sa_home_bot.bot.handlers import (
     power,
     stats,
     status,
+    torrents,
     wake,
 )
 from sa_home_bot.bot.middlewares import (
@@ -58,6 +59,8 @@ def build_dispatcher(book: SubscriptionBook) -> Dispatcher:
     dp.include_router(node.router)
     # node_links до apps: ловит фиксированные префиксы /node_* и /svc_*.
     dp.include_router(node_links.router)
+    # torrents: документы/magnet-ссылки, не пересекается с командами.
+    dp.include_router(torrents.router)
     # apps последним: ловит динамические команды-скилы, остальное игнорирует.
     dp.include_router(apps.router)
     return dp

@@ -28,10 +28,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", "-c", default=None, help="путь к config.toml")
     parser.add_argument(
         "--service",
-        choices=("bot", "monitor", "apps", "node"),
+        choices=("bot", "monitor", "apps", "torrents", "node"),
         default="bot",
         help="какую службу запустить: telegram-бот (по умолчанию), "
-        "монитор датчиков, адаптер приложений или сервис ноды (супервизор)",
+        "монитор датчиков, адаптер приложений, адаптер торрент-клиента "
+        "или сервис ноды (супервизор)",
     )
     parser.add_argument(
         "--check-config",
@@ -47,6 +48,8 @@ def _redacted(settings: Settings) -> dict:
     token = data.get("telegram", {}).get("token", "")
     if token:
         data["telegram"]["token"] = token[:4] + "…(скрыто)"
+    if data.get("torrents", {}).get("qbittorrent_password"):
+        data["torrents"]["qbittorrent_password"] = "…(скрыто)"
     return data
 
 
@@ -81,6 +84,10 @@ def main(argv: list[str] | None = None) -> int:
         from sa_home_bot.apps.app import run_apps
 
         coro = run_apps(settings)
+    elif args.service == "torrents":
+        from sa_home_bot.torrents.app import run_torrents
+
+        coro = run_torrents(settings)
     else:
         from sa_home_bot.app import run
 

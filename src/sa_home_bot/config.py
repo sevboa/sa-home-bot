@@ -177,6 +177,24 @@ class AppsConfig(BaseModel):
     items: list[AppConfig] = Field(default_factory=list)
 
 
+class TorrentsConfig(BaseModel):
+    """Служба torrents (адаптер qBittorrent, `sa-home-bot --service torrents`).
+
+    Умение роя «добавить торрент по .torrent-файлу/magnet-ссылке из чата» —
+    в отличие от apps (systemd start/stop/status), здесь бот реально
+    проксирует данные в Web API готового клиента. ``save_dirs`` — конечный
+    список директорий, которые можно предложить пользователю кнопками
+    (ActionParam.choices, PROTOCOL.md); порядок важен — callback-кнопки в
+    боте адресуют директорию по индексу в этом списке.
+    """
+
+    socket: str = "./data/torrents.sock"
+    qbittorrent_url: str = "http://127.0.0.1:8080"
+    qbittorrent_user: str = ""
+    qbittorrent_password: str = ""
+    save_dirs: list[str] = Field(default_factory=list)
+
+
 class NodeConfig(BaseModel):
     """Сервис ноды (супервизор, `sa-home-bot --service node`).
 
@@ -269,6 +287,7 @@ class Settings(BaseSettings):
     sensors: SensorsConfig = Field(default_factory=SensorsConfig)
     monitor: MonitorConfig = Field(default_factory=MonitorConfig)
     apps: AppsConfig = Field(default_factory=AppsConfig)
+    torrents: TorrentsConfig = Field(default_factory=TorrentsConfig)
     node: NodeConfig = Field(default_factory=NodeConfig)
     swarm: SwarmConfig = Field(default_factory=SwarmConfig)
     wake: WakeConfig = Field(default_factory=WakeConfig)

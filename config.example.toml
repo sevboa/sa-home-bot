@@ -92,6 +92,23 @@ title = "🎬 Jellyfin"
 unit = "jellyfin.service"
 urls = ["http://192.168.0.100:8096"]
 
+# Служба torrents (адаптер qBittorrent, `sa-home-bot --service torrents`):
+# умение роя «добавить торрент по .torrent-файлу/magnet-ссылке из чата»
+# (в отличие от apps выше — реальный Web API, не только systemd-статус).
+# save_dirs — конечный список директорий; бот предложит их кнопками, право
+# в подписке — "add@torrents". qbittorrent_password — секрет, не коммитить.
+[torrents]
+socket = "./data/torrents.sock"
+qbittorrent_url = "http://127.0.0.1:8080"
+qbittorrent_user = "sevboa"
+qbittorrent_password = ""
+save_dirs = [
+    "/mnt/data/torrents/complete",
+    "/mnt/data/pr",
+    "/mnt/scratch/torrents/complete",
+    "/mnt/scratch/pr",
+]
+
 # Сервис ноды (супервизор: `sa-home-bot --service node`, консоль — nodectl).
 # Нода запускает назначенные службы дочерними процессами и рестартит упавшие.
 # id — имя ноды в рое (пусто = hostname). Умения питания (poweroff/reboot/
@@ -106,7 +123,7 @@ urls = ["http://192.168.0.100:8096"]
 #id = "alfred"
 socket = "./data/node.sock"
 #listen = "tcp://<tailscale-ip>:8710"   # требует [swarm].token
-assignments = ["monitor", "apps", "telegram-bot"]
+assignments = ["monitor", "apps", "torrents", "telegram-bot"]
 state_path = "./data/node-state.json"
 restart_delay_s = 5.0              # пауза перед перезапуском упавшей службы
 stop_timeout_s = 90.0              # SIGTERM → SIGKILL при остановке
@@ -162,6 +179,8 @@ format = "plain"                   # plain | json
 #   <id>@apps (qbittorrent@apps, ...) — скилл-приложение: команда в меню бота;
 #   start@apps / stop@apps / restart@apps — реальное управление юнитом
 #   приложения (кнопки на карточке; нужны права на машине — nodectl fix);
+#   add@torrents — прислать .torrent-файл/magnet-ссылку в чат: бот спросит,
+#   в какую директорию сохранить (кнопки из torrents.save_dirs);
 #   start@node / stop@node / restart@node — управление службой на её карточке;
 #   restart_node@node — перезапуск самой ноды-супервизора (не путать с restart
 #   службы); poweroff/reboot/suspend@node / check_update@node / update@node —

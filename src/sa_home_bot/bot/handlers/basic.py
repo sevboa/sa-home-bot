@@ -44,6 +44,8 @@ def build_help(
         lines += skills
         lines.append("")
     lines += [f"/{cmd.name} — {cmd.description}" for cmd in commands.UNIVERSAL_COMMANDS]
+    if subscription is not None and subscription.allows_action("add", "torrents"):
+        lines += ["", "🧲 Пришлите .torrent-файл или magnet-ссылку — предложу, куда сохранить."]
     lines += ["", ABOUT_LINE]
     return "\n".join(lines)
 

@@ -31,7 +31,11 @@ log = logging.getLogger(__name__)
 # Локальные службы со своим proto-сервером, к которым нода умеет
 # проксировать (telegram-bot — клиент, своего сервера у него нет).
 def local_service_endpoints(settings: Settings) -> dict[str, str]:
-    return {"monitor": settings.monitor.socket, "apps": settings.apps.socket}
+    return {
+        "monitor": settings.monitor.socket,
+        "apps": settings.apps.socket,
+        "torrents": settings.torrents.socket,
+    }
 
 
 _MAX_SEEN_EVENTS = 512  # с запасом — событий (join/update_finished) мало, часты не бывают

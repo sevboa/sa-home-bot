@@ -184,7 +184,7 @@ def test_describe_declares_assign_and_unassign():
     desc = NodeService(sup).describe()
     assign = desc.find_action("assign")
     assert assign is not None
-    assert set(assign.params[0].choices) == {"monitor", "telegram-bot", "apps"}
+    assert set(assign.params[0].choices) == {"monitor", "telegram-bot", "apps", "torrents"}
     unassign = desc.find_action("unassign")
     assert unassign is not None
     assert set(unassign.params[0].choices) == {"monitor", "telegram-bot"}  # только назначенные
