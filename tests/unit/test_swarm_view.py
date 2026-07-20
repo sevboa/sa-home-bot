@@ -221,6 +221,19 @@ async def test_swarm_offline_node_gets_wake_button_when_cached(store):
     assert "st:wake:winpc" in codes
 
 
+async def test_swarm_not_responding_node_gets_wake_button_when_cached(store):
+    # alive=True (PeerLink формально ещё не заметил обрыв — TCP keepalive
+    # не мгновенный), но get_state зависает/недоступен — "не отвечает",
+    # не "не в сети". Кнопка нужна и тут (живая находка 2026-07-20).
+    await wake_state.remember(store, "winpc", WINPC_WAKE)
+    own = {**OWN_STATE, "peers": [{"id": "winpc", "endpoint": "tcp://y:8710", "alive": True}]}
+    link = FakeNodeLink(own=own, routes={})  # нет маршрута winpc:node → state=None
+    text, keyboard = await build_swarm_view(link, _sub("nodes", "wake"), store=store)
+    assert "/node_winpc — не отвечает" in text
+    codes = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+    assert "st:wake:winpc" in codes
+
+
 async def test_swarm_offline_node_no_button_without_cache(store):
     link = FakeNodeLink(routes=_routes())
     _, keyboard = await build_swarm_view(link, _sub("nodes", "wake"), store=store)

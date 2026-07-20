@@ -186,12 +186,21 @@ async def _offline_wake_rows(
     subscription: Subscription, store: Store, reports: Sequence[_NodeReport]
 ) -> list[InlineKeyboardButton]:
     """Точечная кнопка на каждую уснувшую ноду, чьи реквизиты уже известны
-    (см. wake_state.remember, вызывается ниже при сборе сводки)."""
+    (см. wake_state.remember, вызывается ниже при сборе сводки).
+
+    «Недоступна для будильника» — не только формально disconnected
+    (``alive=False``, «не в сети» в _node_line), но и «не отвечает»
+    (``alive=True``, но get_state не дозвался, ``state is None``) — то же
+    промежуточное состояние, в котором PeerLink ещё не обнаружил обрыв
+    (TCP keepalive обнаруживает пропажу пира не мгновенно, см.
+    proto/client.py). Иначе пользователь видит "не отвечает" и не может
+    разбудить именно тогда, когда это и нужно (живая находка 2026-07-20).
+    """
     if not subscription.allows_command(commands.WAKE.name):
         return []
     buttons = []
     for r in reports:
-        if r.alive:
+        if r.alive and r.state is not None:
             continue
         if await wake_state.cached(store, r.node_id) is None:
             continue
