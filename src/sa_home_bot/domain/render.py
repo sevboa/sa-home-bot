@@ -272,7 +272,7 @@ def _fmt_run(run: dict) -> str:
     icon = {"ok": "✅", "error": "❌", "running": "⏳"}.get(run["status"], "•")
     started = run["started_at"]
     try:
-        started = datetime.fromisoformat(started).strftime("%m-%d %H:%M:%S")
+        started = datetime.fromisoformat(started).astimezone().strftime("%m-%d %H:%M:%S")
     except (ValueError, TypeError):
         pass
     return f"{icon} {run['job_type']} @ {started}"
