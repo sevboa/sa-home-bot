@@ -450,6 +450,98 @@ async def test_update_concurrent_call_is_bad_request(monkeypatch):
     await asyncio.sleep(0.05)
 
 
+# --- update на win32: дёргаем задачу планировщика, а не pipx в процессе ---
+
+
+async def test_update_on_win32_triggers_scheduled_task_not_pipx(monkeypatch):
+    import asyncio
+
+    from sa_home_bot.node import service as service_module
+
+    async def fake_latest(repo_url):
+        return "v0.22.0"
+
+    async def fake_pipx_reinstall(repo_url, ref):
+        raise AssertionError("на win32 pipx_reinstall звать нельзя")
+
+    triggered = []
+
+    async def fake_trigger_task():
+        triggered.append(True)
+        return True, "SUCCESS: Attempted to run the scheduled task"
+
+    monkeypatch.setattr(service_module.sys, "platform", "win32")
+    monkeypatch.setattr(service_module.node_update, "latest_tag", fake_latest)
+    monkeypatch.setattr(service_module.node_update, "installed_version", lambda: "0.21.0")
+    monkeypatch.setattr(service_module.node_update, "pipx_reinstall", fake_pipx_reinstall)
+    monkeypatch.setattr(service_module.node_update, "trigger_scheduled_task", fake_trigger_task)
+
+    sup, _ = _fake_supervisor()
+    svc = NodeService(sup, update_source="https://github.com/x/y.git")
+    result = await svc.run_command("update", {})
+    assert result == {"scheduled": True, "target_version": "0.22.0", "via": "scheduled_task"}
+
+    await asyncio.sleep(0.05)  # дать фоновой задаче выполниться
+    assert triggered == [True]
+    assert svc._updating is False
+
+
+async def test_update_on_win32_failure_emits_event(monkeypatch):
+    import asyncio
+
+    from sa_home_bot.node import service as service_module
+
+    async def fake_latest(repo_url):
+        return "v0.22.0"
+
+    async def fake_trigger_task():
+        return False, "задача не найдена"
+
+    monkeypatch.setattr(service_module.sys, "platform", "win32")
+    monkeypatch.setattr(service_module.node_update, "latest_tag", fake_latest)
+    monkeypatch.setattr(service_module.node_update, "installed_version", lambda: "0.21.0")
+    monkeypatch.setattr(service_module.node_update, "trigger_scheduled_task", fake_trigger_task)
+
+    events: list[tuple[str, dict]] = []
+
+    async def emit(event_type, data):
+        events.append((event_type, data))
+
+    sup, _ = _fake_supervisor()
+    svc = NodeService(sup, update_source="https://github.com/x/y.git", emit=emit)
+    await svc.run_command("update", {})
+
+    await asyncio.sleep(0.05)
+    assert events == [
+        ("update_finished", {"ok": False, "version": "0.22.0", "error": "задача не найдена"})
+    ]
+
+
+async def test_update_on_win32_already_current_does_not_trigger_task(monkeypatch):
+    from sa_home_bot.node import service as service_module
+
+    async def fake_latest(repo_url):
+        return "v0.22.0"
+
+    triggered = []
+
+    async def fake_trigger_task():
+        triggered.append(True)
+        return True, "ok"
+
+    monkeypatch.setattr(service_module.sys, "platform", "win32")
+    monkeypatch.setattr(service_module.node_update, "latest_tag", fake_latest)
+    monkeypatch.setattr(service_module.node_update, "installed_version", lambda: "0.22.0")
+    monkeypatch.setattr(service_module.node_update, "trigger_scheduled_task", fake_trigger_task)
+
+    sup, _ = _fake_supervisor()
+    svc = NodeService(sup, update_source="https://github.com/x/y.git")
+    result = await svc.run_command("update", {})
+
+    assert result == {"up_to_date": True, "version": "0.22.0"}
+    assert triggered == []
+
+
 # --- send_wol / get_state()["wake"]: рой сам отправляет WoL (этап 19 п.6) ---
 
 

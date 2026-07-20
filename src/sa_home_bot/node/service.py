@@ -432,10 +432,12 @@ class NodeService:
         }
 
     async def _update(self) -> dict[str, Any]:
-        """Подтянуть последний тег через pipx — БЕЗ рестарта процесса.
+        """Подтянуть последний тег — БЕЗ рестарта процесса (на Linux) или
+        через внешнюю задачу планировщика, которая рестарт делает сама
+        (на win32, см. _schedule_windows_update).
 
-        Файлы на диске обновляются сразу; уже загруженный в память код
-        продолжает работать по-старому, пока человек не выполнит
+        На Linux файлы на диске обновляются сразу; уже загруженный в память
+        код продолжает работать по-старому, пока человек не выполнит
         restart_node — get_state().update.restart_required честно скажет,
         когда это нужно.
         """
@@ -449,8 +451,40 @@ class NodeService:
             return {"up_to_date": True, "version": target_version}
         if self._updating:
             raise ProtoError(ERR_BAD_REQUEST, "обновление уже выполняется")
+        if sys.platform == "win32":
+            return self._schedule_windows_update(target_version)
         self._schedule_update(latest, target_version)
         return {"scheduled": True, "target_version": target_version}
+
+    def _schedule_windows_update(self, target_version: str) -> dict[str, Any]:
+        """На win32 pipx_reinstall в процессе не работает (WinError 5 — см.
+        update_source_for_this_platform) — вместо этого дёргаем задачу
+        планировщика (deploy/win-auto-update.ps1): она сама стопает службу,
+        ставит pipx, стартует заново. Процесс, ответивший на этот RPC, скоро
+        сам умрёт от Stop-Service — событие об успехе эмитить уже некому,
+        поэтому фиксируем только неудачу (задача не запустилась вообще)."""
+        self._updating = True
+
+        async def run() -> None:
+            try:
+                ok, output = await node_update.trigger_scheduled_task()
+            except Exception as exc:  # noqa: BLE001 — фон не должен уронить ноду
+                ok, output = False, str(exc)
+            finally:
+                self._updating = False
+            if ok:
+                log.warning(
+                    "Задача автообновления запущена — служба скоро перезапустится сама"
+                )
+                return
+            log.error("Не удалось запустить задачу автообновления: %s", output)
+            self._last_update = {"ok": False, "version": target_version, "error": output}
+            if self._emit is not None:
+                await self._emit(EVENT_UPDATE_FINISHED, self._last_update)
+
+        task = asyncio.create_task(run(), name="node-update-win")
+        self._update_task = task  # ссылка, чтобы задачу не собрал GC
+        return {"scheduled": True, "target_version": target_version, "via": "scheduled_task"}
 
     def _schedule_update(self, git_ref: str, target_version: str) -> None:
         assert self._update_source is not None

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import logging
 import socket
-import sys
 
 from sa_home_bot.config import Settings, SwarmNodeConfig
 from sa_home_bot.node import update as node_update
@@ -103,17 +102,17 @@ def build_router(
 
 
 def update_source_for_this_platform() -> str | None:
-    """origin_repo_url(), но всегда None на win32.
+    """origin_repo_url() — умение (check_update/update) объявляется, если
+    пакет поставлен из git, независимо от ОС.
 
-    `pipx install --force` там пытается перезаписать sa-home-node.exe и
-    venv-DLL, которые держит открытыми ЭТОТ ЖЕ работающий процесс (WinError
-    5/32, живые находки 2026-07-17/2026-07-19) — структурно не работает,
-    пока служба жива, никаким env/флагом не обойти. Единственный рабочий
-    путь — внешний стоп→install→старт, см. deploy/win-auto-update.ps1;
-    версия ноды всё равно видна в /swarm (расхождение по тегам).
+    На win32 сама переустановка (`NodeService._update()`) не зовёт
+    pipx_reinstall в процессе — `pipx install --force` там пытается
+    перезаписать sa-home-node.exe и venv-DLL, которые держит открытыми ЭТОТ
+    ЖЕ работающий процесс (WinError 5/32, живые находки 2026-07-17/
+    2026-07-19). Вместо этого она дёргает Windows-задачу планировщика
+    (deploy/win-auto-update.ps1, `node_update.trigger_scheduled_task()`) —
+    та делает честный стоп→install→старт извне.
     """
-    if sys.platform == "win32":
-        return None
     return node_update.origin_repo_url()
 
 

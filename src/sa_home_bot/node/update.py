@@ -159,3 +159,42 @@ async def pipx_reinstall(repo_url: str, ref: str) -> tuple[bool, str]:
     if proc.returncode != 0:
         return False, output[-2000:]  # хвост — обычно там суть ошибки
     return True, output[-2000:]
+
+
+# Имя задачи из install-node.ps1 (Register-ScheduledTask -TaskName ...) — вне
+# синхронизации с ним нет, но оба места в одном репозитории и меняются вместе.
+WINDOWS_AUTOUPDATE_TASK_NAME = "sa-home-node-autoupdate"
+
+SCHTASKS_RUN_TIMEOUT_S = 30
+
+
+async def trigger_scheduled_task(task_name: str = WINDOWS_AUTOUPDATE_TASK_NAME) -> tuple[bool, str]:
+    """Дёрнуть Windows-задачу планировщика прямо сейчас, не дожидаясь суточного
+    расписания.
+
+    На win32 `pipx install --force` из процесса ноды структурно не работает
+    (WinError 5 — venv-DLL/exe держит открытыми ЭТОТ ЖЕ работающий процесс,
+    живые находки 2026-07-17/2026-07-19) — единственный рабочий путь внешний:
+    deploy/win-auto-update.ps1, зарегистрированный install-node.ps1 как
+    задача планировщика от SYSTEM. Служба ноды сама тоже идёт от LocalSystem
+    (WinSW без <serviceaccount> — деplой/sa-home-node.xml), поэтому прав на
+    `schtasks /run` над SYSTEM-задачей у неё достаточно. Задача сама стопает
+    службу → pipx install → стартует — вызвавший это процесс скоро умрёт,
+    ответ на RPC уходит раньше (fire-and-forget), см. NodeService._update().
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "schtasks",
+            "/run",
+            "/tn",
+            task_name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=SCHTASKS_RUN_TIMEOUT_S)
+    except (OSError, TimeoutError) as exc:
+        return False, str(exc)
+    output = stdout.decode(errors="replace").strip()
+    if proc.returncode != 0:
+        return False, output
+    return True, output
