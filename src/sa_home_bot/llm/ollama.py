@@ -22,7 +22,11 @@ log = logging.getLogger(__name__)
 
 _VERSION_PROBE_TIMEOUT_S = 3.0
 _WARMUP_POLL_INTERVAL_S = 2.0
-_WARMUP_TIMEOUT_S = 90.0
+# Живая находка 2026-07-23: WSL на этой конкретной машине (старая LTSC-
+# инсталляция) автоматически "засыпает" между вызовами wsl.exe и холодно
+# стартует по новой на каждый прогрев — иногда заметно дольше 90с (первый
+# прогон в проде занял ~95с и не уложился, curl сразу после — уже отвечал).
+_WARMUP_TIMEOUT_S = 150.0
 
 
 def _post_json_sync(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:

@@ -216,7 +216,7 @@ class LlmConfig(BaseModel):
     model: str = "qwen2.5:7b"
     wsl_distro: str = "Docker"
     ollama_container: str = "ollama"
-    request_timeout_s: float = Field(default=180.0, gt=0)
+    request_timeout_s: float = Field(default=240.0, gt=0)
     idle_sleep_after_s: float = Field(default=1800.0, gt=0)
 
 
