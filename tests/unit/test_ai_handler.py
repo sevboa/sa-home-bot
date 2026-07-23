@@ -1,6 +1,7 @@
-"""/ai: новый диалог (с текстом/без), продолжение через reply, права на
-реплай. Presence/wake-сценарий уже покрыт test_ai_flow.py — здесь он
-замокан (ai_flow.request_alfred), тестируется только оркестрация хендлера
+"""/alfred (+ скрытый алиас /ai): новый диалог (с текстом/без), продолжение
+через reply, права на реплай, уведомление админов о сбоях. Presence/wake-
+сценарий уже покрыт test_ai_flow.py — здесь он замокан
+(ai_flow.request_alfred), тестируется только оркестрация хендлера
 (bot/handlers/ai.py): запись ai_turns, резолв reply, форматирование."""
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
+from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 
 
@@ -54,6 +56,15 @@ class FakeMessage:
         return await self.answer(text)
 
 
+class FakeNotifier:
+    def __init__(self) -> None:
+        self.sent: list[tuple[int, str]] = []
+
+    async def send_direct(self, chat_id, text, reply_to_message_id=None):
+        self.sent.append((chat_id, text))
+        return 1
+
+
 @pytest_asyncio.fixture
 async def store(tmp_path):
     db = Database(tmp_path / "test.sqlite")
@@ -71,13 +82,22 @@ def _now() -> datetime:
     return datetime.now(tz=UTC)
 
 
-async def test_cmd_ai_without_text_sends_stub_and_records_empty_turn(store):
-    message = FakeMessage(1, text="/ai")
-    await ai_handler.cmd_ai(message, node_link=None, store=store, config=Settings())
+def _admin_book() -> SubscriptionBook:
+    return SubscriptionBook(
+        [Subscription(chat_id=999, name="admin", allowed_commands=frozenset({"*"}))]
+    )
 
-    assert message.sent == [ai_handler.STUB_TEXT]
-    # Заглушка записана как ход диалога (message_id ответа бота, не команды) —
-    # видно по выборке всей истории треда.
+
+async def test_cmd_ai_without_text_sends_opening_line_and_records_empty_turn(store):
+    message = FakeMessage(1, text="/alfred")
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+    )
+
+    assert message.sent == [ai_handler.OPENING_TEXT]
+    # Открывающая реплика записана как ход диалога (message_id ответа бота,
+    # не команды) — видно по выборке всей истории треда.
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert len(rows) == 1
     assert rows[0]["content"] == ""
@@ -87,14 +107,17 @@ async def test_cmd_ai_without_text_sends_stub_and_records_empty_turn(store):
 async def test_cmd_ai_with_text_calls_ai_flow_and_records_both_turns(store, monkeypatch):
     seen_history = []
 
-    async def fake_request(message, node_link, store_, config, history):
+    async def fake_request(message, node_link, store_, config, history, book, notifier):
         seen_history.append(history)
         return "Добгый день, сэ"
 
     monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
-    message = FakeMessage(1, text="/ai привет")
+    message = FakeMessage(1, text="/ai привет")  # алиас — работает так же, как /alfred
 
-    await ai_handler.cmd_ai(message, node_link=None, store=store, config=Settings())
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+    )
 
     assert seen_history == [[{"role": "user", "content": "привет"}]]
     assert message.bot.typing_chats == [1]
@@ -107,16 +130,43 @@ async def test_cmd_ai_with_text_calls_ai_flow_and_records_both_turns(store, monk
 
 
 async def test_cmd_ai_returns_none_from_ai_flow_sends_nothing_extra(store, monkeypatch):
-    async def fake_unavailable(message, node_link, store_, config, history):
+    async def fake_unavailable(message, node_link, store_, config, history, book, notifier):
         return None  # ai_flow уже сообщил пользователю сама (не тестируем тут)
 
     monkeypatch.setattr(ai_flow, "request_alfred", fake_unavailable)
-    message = FakeMessage(1, text="/ai привет")
+    message = FakeMessage(1, text="/alfred привет")
 
-    await ai_handler.cmd_ai(message, node_link=None, store=store, config=Settings())
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+    )
 
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert len(rows) == 1  # только реплика юзера, ответ ассистента не записан
+    assert rows[0]["role"] == "user"
+
+
+async def test_cmd_ai_unhandled_exception_apologizes_and_notifies_admin(store, monkeypatch):
+    async def boom(message, node_link, store_, config, history, book, notifier):
+        raise RuntimeError("что-то сломалось")
+
+    monkeypatch.setattr(ai_flow, "request_alfred", boom)
+    message = FakeMessage(1, text="/alfred привет")
+    notifier = FakeNotifier()
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=notifier,
+    )
+
+    assert message.sent == ["<b>Альфред:</b> Прошу прощения, что-то пошло не так, сэр."]
+    assert len(notifier.sent) == 1
+    admin_chat_id, admin_text = notifier.sent[0]
+    assert admin_chat_id == 999
+    assert "RuntimeError" in admin_text
+    # Ответ ассистента не записан — только реплика юзера.
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    assert len(rows) == 1
     assert rows[0]["role"] == "user"
 
 
@@ -152,6 +202,8 @@ async def test_on_ai_reply_denied_without_right(store):
         node_link=None,
         store=store,
         config=Settings(),
+        book=_admin_book(),
+        notifier=FakeNotifier(),
         subscription=_sub(),  # без права chat@llm
     )
 
@@ -166,7 +218,7 @@ async def test_on_ai_reply_appends_history_and_answers(store, monkeypatch):
 
     seen_history = []
 
-    async def fake_request(message, node_link, store_, config, history):
+    async def fake_request(message, node_link, store_, config, history, book, notifier):
         seen_history.append(history)
         return "втогой ответ"
 
@@ -179,6 +231,8 @@ async def test_on_ai_reply_appends_history_and_answers(store, monkeypatch):
         node_link=None,
         store=store,
         config=Settings(),
+        book=_admin_book(),
+        notifier=FakeNotifier(),
         subscription=_sub("chat@llm"),
     )
 

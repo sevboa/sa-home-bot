@@ -1,9 +1,10 @@
-"""/ai — диалог с Альфредом (LLM-служба на winpc), продолжение через reply.
+"""/alfred (видимый в меню) и /ai (скрытый алиас, как /swarm↔/nodes) —
+диалог с Альфредом (LLM-служба на winpc), продолжение через reply.
 
 Дизайн диалога — LLM_INTEGRATION_PLAN.md §6 (dialogue_id = message_id
-команды /ai, reply-цепочка резолвится через ai_turns, не через дерево
-Telegram-реплаев). Presence/wake-сценарий и форматирование ответа —
-bot/ai_flow.py.
+команды, которой начат тред; реплай-цепочка резолвится через ai_turns, не
+через дерево Telegram-реплаев). Presence/wake-сценарий и форматирование
+ответа — bot/ai_flow.py.
 """
 
 from __future__ import annotations
@@ -17,16 +18,22 @@ from aiogram.filters import Command, Filter
 from aiogram.types import Message
 
 from sa_home_bot.bot import ai_flow, commands
+from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
+from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 
 router = Router(name="ai")
 log = logging.getLogger(__name__)
 
-STUB_TEXT = "Диалог начат. Ответьте на это сообщение, чтобы продолжить."
 ALFRED_PREFIX = "<b>Альфред:</b> "
+# Открывающая реплика без текста после /alfred — сам Альфред, не системное
+# "диалог начат" (не должно читаться как интерфейс бота, см. обсуждение с
+# пользователем 2026-07-23). Искажение «р» — как в Агнольд/Альбегт: это
+# фиксированная строка, не вывод модели, поэтому пишем сами.
+OPENING_TEXT = ALFRED_PREFIX + "Да, сэг? Слушаю вас."
 
 
 def _format_answer(raw: str) -> str:
@@ -47,12 +54,14 @@ class AiReplyContinuation(Filter):
         return {"ai_dialogue_id": row["dialogue_id"]}
 
 
-@router.message(Command(commands.AI.name))
+@router.message(Command(commands.ALFRED.name, commands.AI.name))
 async def cmd_ai(
     message: Message,
     node_link: ServiceLink,
     store: Store,
     config: Settings,
+    book: SubscriptionBook,
+    notifier: Notifier,
 ) -> None:
     dialogue_id = message.message_id
     parts = (message.text or "").split(maxsplit=1)
@@ -60,7 +69,7 @@ async def cmd_ai(
     now = datetime.now(tz=UTC)
 
     if not prompt:
-        sent = await message.answer(STUB_TEXT)
+        sent = await message.answer(OPENING_TEXT)
         # Пустой content — при первом reply история для LLM не тянет заглушку
         # (ai_turns_for_dialogue отфильтровывает пустые content на выборке).
         await store.record_ai_turn(
@@ -70,7 +79,14 @@ async def cmd_ai(
 
     await store.record_ai_turn(message.chat.id, dialogue_id, dialogue_id, "user", prompt, now)
     await _ask_and_reply(
-        message, node_link, store, config, dialogue_id, [{"role": "user", "content": prompt}]
+        message,
+        node_link,
+        store,
+        config,
+        book,
+        notifier,
+        dialogue_id,
+        [{"role": "user", "content": prompt}],
     )
 
 
@@ -81,12 +97,14 @@ async def on_ai_reply(
     node_link: ServiceLink,
     store: Store,
     config: Settings,
+    book: SubscriptionBook,
+    notifier: Notifier,
     subscription: Subscription | None = None,
 ) -> None:
     # AuthorizationMiddleware не проверяет права на не-командные сообщения —
     # проверяем право сами (защита от продолжения треда в чате, у которого
     # право chat@llm с тех пор отозвали).
-    right = commands.required_right(commands.AI.name)
+    right = commands.required_right(commands.ALFRED.name)
     if subscription is None or not subscription.allows_command(right):
         return
     text = (message.text or "").strip()
@@ -101,7 +119,9 @@ async def on_ai_reply(
     history = [
         {"role": r["role"], "content": r["content"]} for r in history_rows if r["content"]
     ]
-    await _ask_and_reply(message, node_link, store, config, ai_dialogue_id, history)
+    await _ask_and_reply(
+        message, node_link, store, config, book, notifier, ai_dialogue_id, history
+    )
 
 
 async def _ask_and_reply(
@@ -109,13 +129,27 @@ async def _ask_and_reply(
     node_link: ServiceLink,
     store: Store,
     config: Settings,
+    book: SubscriptionBook,
+    notifier: Notifier,
     dialogue_id: int,
     history: list[dict[str, str]],
 ) -> None:
     await message.bot.send_chat_action(message.chat.id, "typing")
-    raw = await ai_flow.request_alfred(message, node_link, store, config, history)
+    try:
+        raw = await ai_flow.request_alfred(
+            message, node_link, store, config, history, book, notifier
+        )
+    except Exception as exc:  # noqa: BLE001 — страховка: баг тут не должен быть молчаливым
+        log.exception("ai: необработанная ошибка в диалоге chat=%s", message.chat.id)
+        await message.answer("<b>Альфред:</b> Прошу прощения, что-то пошло не так, сэр.")
+        await ai_flow.notify_admins(
+            book,
+            notifier,
+            f"🔥 /ai (chat={message.chat.id}): необработанное исключение {exc!r}",
+        )
+        return
     if raw is None:
-        return  # недоступность уже сообщена пользователю (ai_flow)
+        return  # недоступность/ошибка уже сообщена пользователю (ai_flow)
     sent = await message.reply(_format_answer(raw))
     await store.record_ai_turn(
         message.chat.id, sent.message_id, dialogue_id, "assistant", raw, datetime.now(tz=UTC)

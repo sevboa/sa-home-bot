@@ -39,10 +39,14 @@ DOWNTIME = Command(
 # Wake — кнопка в разделе /nodes; командой тоже работает, но в меню не нужна.
 WAKE = Command("wake", "разбудить домашний ПК (Wake-on-LAN)", universal=False, menu=False)
 # Право — не голое имя команды, а действие@служба (как у динамических экшенов
-# apps/torrents) — так /ai не завязана на отдельное "право команды бота",
+# apps/torrents) — так /alfred не завязана на отдельное "право команды бота",
 # а участвует в общем правиле «действие@служба» (allows_action-совместимая
 # строка, проверяется через allows_command — см. AUTHORIZATION.md).
-AI = Command("ai", "диалог с Альфредом (LLM)", universal=False, menu=True, right="chat@llm")
+# /alfred — видимое в меню имя (нарочно без упоминания LLM/ИИ в описании —
+# в общем чате не должно бросаться в глаза); /ai — тот же скилл под тем же
+# правом, скрытый алиас (как /swarm↔/nodes), меню не засоряет.
+ALFRED = Command("alfred", "позвать Альфреда", universal=False, menu=True, right="chat@llm")
+AI = Command("ai", "то же самое, что /alfred", universal=False, menu=False, right="chat@llm")
 
 ALL_COMMANDS: list[Command] = [
     HELP,
@@ -56,6 +60,7 @@ ALL_COMMANDS: list[Command] = [
     SCAN_NOW,
     DOWNTIME,
     WAKE,
+    ALFRED,
     AI,
 ]
 

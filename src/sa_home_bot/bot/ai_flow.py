@@ -17,10 +17,13 @@ from aiogram.types import Message
 
 from sa_home_bot.bot import swarm_view
 from sa_home_bot.bot.handlers.wake import wake_swarm_node_core
+from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.proto.messages import ERR_UNAVAILABLE, ERR_UNKNOWN_DST, Address, ProtoError
+from sa_home_bot.subscriptions.book import SubscriptionBook
+from sa_home_bot.subscriptions.models import WILDCARD
 
 log = logging.getLogger(__name__)
 
@@ -42,12 +45,35 @@ def _is_unavailable(exc: Exception) -> bool:
     return isinstance(exc, ProtoError) and exc.code in (ERR_UNAVAILABLE, ERR_UNKNOWN_DST)
 
 
+_GENERIC_ERROR_TEXT = "<b>Альфред:</b> Прошу прощения, не вышло — попробуйте чуть позже."
+
+
+def _error_text(exc: ProtoError) -> str:  # noqa: ARG001 — деталь только для лога/админа
+    # Не «недоступна» (нода жива, но сама генерация упала — например Ollama
+    # не поднялась за отведённое время) — раньше улетало необработанным
+    # исключением, пользователь не получал вообще никакого ответа. Текст
+    # намеренно общий — подробности (exc.message) идут только админу
+    # (notify_admins), пользователю не палим внутреннюю кухню/инфраструктуру.
+    return _GENERIC_ERROR_TEXT
+
+
+async def notify_admins(book: SubscriptionBook, notifier: Notifier, text: str) -> None:
+    """Диагностика падений /ai — в чаты с полным доступом (allowed_commands
+    содержит "*"), не пользователю. Молчаливая деградация («Альбегт», нода
+    просто спит) сюда не попадает — только настоящие сбои (см. вызовы ниже)."""
+    for sub in book.all():
+        if WILDCARD in sub.allowed_commands:
+            await notifier.send_direct(sub.chat_id, text)
+
+
 async def request_alfred(
     message: Message,
     node_link: ServiceLink,
     store: Store,
     settings: Settings,
     history: list[dict[str, str]],
+    book: SubscriptionBook,
+    notifier: Notifier,
 ) -> str | None:
     """Сходить в llm.chat с presence/wake-сценарием.
 
@@ -57,6 +83,7 @@ async def request_alfred(
     """
     dst = Address(node=LLM_NODE, service=LLM_SERVICE)
     timeout = settings.llm.request_timeout_s
+    chat_id = message.chat.id if message.chat else "?"
 
     async def _ask() -> str:
         result = await node_link.command(
@@ -66,9 +93,15 @@ async def request_alfred(
 
     try:
         return await _ask()
-    except (ServiceUnavailableError, ProtoError) as exc:
+    except ServiceUnavailableError:
+        pass
+    except ProtoError as exc:
         if not _is_unavailable(exc):
-            raise
+            await message.answer(_error_text(exc))
+            await notify_admins(
+                book, notifier, f"⚠️ /ai (chat={chat_id}): {exc.code} — {exc.message}"
+            )
+            return None
 
     # --- недоступна: шаги -> молчаливый wake -> poll до 30с -> Агнольд/Альбегт ---
     await message.answer(STEPS_TEXT)
@@ -83,8 +116,15 @@ async def request_alfred(
     await message.answer(ARNOLD_WAKING)
     try:
         return await _ask()
-    except (ServiceUnavailableError, ProtoError) as exc:
-        if not _is_unavailable(exc):
-            raise
+    except ServiceUnavailableError:
         await message.answer(ALBERT_UNAVAILABLE)
+        return None
+    except ProtoError as exc:
+        if _is_unavailable(exc):
+            await message.answer(ALBERT_UNAVAILABLE)
+        else:
+            await message.answer(_error_text(exc))
+            await notify_admins(
+                book, notifier, f"⚠️ /ai (chat={chat_id}, после wake): {exc.code} — {exc.message}"
+            )
         return None

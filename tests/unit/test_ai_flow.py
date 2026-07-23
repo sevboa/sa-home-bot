@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest_asyncio
 
 from sa_home_bot.bot import ai_flow, wake_state
@@ -12,7 +14,9 @@ from sa_home_bot.config import LlmConfig, Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
-from sa_home_bot.proto.messages import ERR_UNAVAILABLE, ProtoError
+from sa_home_bot.proto.messages import ERR_INTERNAL, ERR_UNAVAILABLE, ProtoError
+from sa_home_bot.subscriptions.book import SubscriptionBook
+from sa_home_bot.subscriptions.models import Subscription
 
 WINPC_WAKE = {"mac": "aa:bb:cc:dd:ee:ff", "ip": "192.168.0.50", "broadcast": "192.168.0.255"}
 ALFRED_WAKE = {"mac": "7c:83:34:b4:59:ac", "ip": "192.168.0.100", "broadcast": "192.168.0.255"}
@@ -27,11 +31,28 @@ OWN_STATE = {
 
 
 class FakeMessage:
+    chat = SimpleNamespace(id=1)
+
     def __init__(self) -> None:
         self.answers: list[str] = []
 
     async def answer(self, text, **kwargs):
         self.answers.append(text)
+
+
+class FakeNotifier:
+    def __init__(self) -> None:
+        self.sent: list[tuple[int, str]] = []
+
+    async def send_direct(self, chat_id, text, reply_to_message_id=None):
+        self.sent.append((chat_id, text))
+        return 1
+
+
+def _admin_book() -> SubscriptionBook:
+    return SubscriptionBook(
+        [Subscription(chat_id=999, name="admin", allowed_commands=frozenset({"*"}))]
+    )
 
 
 class FakeNodeLink:
@@ -90,7 +111,8 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
     link = FakeNodeLink(chat_results=[{"response": "Добгый день, сэ"}])
 
     raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}]
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
+        _admin_book(), FakeNotifier(),
     )
 
     assert raw == "Добгый день, сэ"
@@ -113,7 +135,8 @@ async def test_unavailable_then_woken_within_30s(store, monkeypatch):
     )
 
     raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}]
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
+        _admin_book(), FakeNotifier(),
     )
 
     assert raw == "Сейчас подойду"
@@ -128,7 +151,8 @@ async def test_unavailable_and_no_wake_data_gives_up_immediately(store, monkeypa
     link = FakeNodeLink(chat_results=[ProtoError(ERR_UNAVAILABLE, "нода недоступна")])
 
     raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}]
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
+        _admin_book(), FakeNotifier(),
     )
 
     assert raw is None
@@ -147,7 +171,8 @@ async def test_unavailable_wake_sent_but_still_unreachable_after_30s(store, monk
     )
 
     raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}]
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
+        _admin_book(), FakeNotifier(),
     )
 
     assert raw is None
@@ -168,7 +193,8 @@ async def test_woken_but_retry_call_still_fails(store, monkeypatch):
     )
 
     raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}]
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
+        _admin_book(), FakeNotifier(),
     )
 
     assert raw is None
@@ -177,3 +203,58 @@ async def test_woken_but_retry_call_still_fails(store, monkeypatch):
         ai_flow.ARNOLD_WAKING,
         ai_flow.ALBERT_UNAVAILABLE,
     ]
+
+
+async def test_internal_error_on_first_try_answers_user_and_notifies_admin(store):
+    # Не «недоступна» (нода жива, Ollama сама упала) — раньше улетало
+    # необработанным исключением, теперь: сообщение юзеру + диагностика админу.
+    message = FakeMessage()
+    notifier = FakeNotifier()
+    link = FakeNodeLink(
+        chat_results=[ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева")]
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
+        _admin_book(), notifier,
+    )
+
+    assert raw is None
+    # Без «шагов» — это не сценарий недоступности узла. Текст пользователю —
+    # намеренно общий (не палим инфраструктуру/LLM), подробности — только
+    # админу.
+    assert message.answers == [ai_flow._GENERIC_ERROR_TEXT]
+    assert "Ollama" not in message.answers[0]
+    assert link.wol_sent == []  # это не сценарий недоступности — wake не трогаем
+    assert len(notifier.sent) == 1
+    admin_chat_id, admin_text = notifier.sent[0]
+    assert admin_chat_id == 999
+    assert "internal" in admin_text
+    assert "Ollama не поднялась после прогрева" in admin_text
+
+
+async def test_internal_error_after_wake_answers_user_and_notifies_admin(store, monkeypatch):
+    await wake_state.remember(store, "winpc", WINPC_WAKE)
+    monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
+    message = FakeMessage()
+    notifier = FakeNotifier()
+    link = FakeNodeLink(
+        chat_results=[
+            ProtoError(ERR_UNAVAILABLE, "нода недоступна"),
+            ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева"),
+        ],
+        get_state_routes={"winpc:llm": {"asleep": False}},
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
+        _admin_book(), notifier,
+    )
+
+    assert raw is None
+    assert message.answers == [
+        ai_flow.STEPS_TEXT,
+        ai_flow.ARNOLD_WAKING,
+        ai_flow._GENERIC_ERROR_TEXT,
+    ]
+    assert len(notifier.sent) == 1

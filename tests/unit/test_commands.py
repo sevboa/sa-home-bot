@@ -8,13 +8,21 @@ from sa_home_bot.proto.messages import ActionParam, ActionSpec
 from sa_home_bot.subscriptions.models import Subscription
 
 
-def test_menu_has_only_swarm_and_ai_skills():
-    # В меню из реестра — «Сводка роя» и «/ai»; остальные скилы первого
-    # уровня динамические (из describe apps, см. build_menu_commands).
+def test_menu_has_only_swarm_and_alfred_skills():
+    # В меню из реестра — «Сводка роя» и «/alfred»; /ai — скрытый алиас
+    # (как /swarm↔/nodes), в меню/help не должен светиться (сознательно —
+    # чтобы в общем чате не так явно читалось как ИИ). Остальные скилы
+    # первого уровня динамические (из describe apps, build_menu_commands).
     menu_names = {c.name for c in commands.MENU_CONTROL_COMMANDS}
-    assert menu_names == {"swarm", "ai"}
-    for name in ("nodes", "status", "status_full", "stats", "scan_now", "downtime", "wake"):
+    assert menu_names == {"swarm", "alfred"}
+    for name in (
+        "nodes", "status", "status_full", "stats", "scan_now", "downtime", "wake", "ai",
+    ):
         assert commands.get(name).menu is False
+
+
+def test_ai_is_hidden_alias_of_alfred_same_right():
+    assert commands.required_right("ai") == commands.required_right("alfred") == "chat@llm"
 
 
 def test_required_right_for_aliases():
