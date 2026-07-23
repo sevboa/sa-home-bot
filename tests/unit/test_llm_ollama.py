@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import urllib.error
+
 import pytest
 
 from sa_home_bot.config import LlmConfig
@@ -19,9 +21,10 @@ def _cfg(**overrides) -> LlmConfig:
 
 @pytest.fixture(autouse=True)
 def fast_warmup(monkeypatch):
-    # Не ждать реальные секунды между попытками прогрева.
+    # Не ждать реальные секунды между попытками прогрева/ретрая.
     monkeypatch.setattr(ollama, "_WARMUP_POLL_INTERVAL_S", 0.01)
     monkeypatch.setattr(ollama, "_WARMUP_TIMEOUT_S", 0.03)
+    monkeypatch.setattr(ollama, "_POST_RETRY_DELAY_S", 0.01)
 
 
 class FakeProc:
@@ -174,6 +177,59 @@ async def test_generate_wraps_http_error(monkeypatch):
     with pytest.raises(ProtoError) as excinfo:
         await ollama.generate(_cfg(), "привет", "system")
     assert excinfo.value.code == ERR_INTERNAL
+
+
+async def test_chat_retries_once_after_transient_connection_error(monkeypatch):
+    # Живая находка: сразу после холодного старта контейнера первый POST
+    # иногда обрывается, хотя /api/version уже отвечал — один ретрай.
+    monkeypatch.setattr(ollama, "ensure_running", _noop)
+    calls = {"n": 0}
+
+    def fake_post(url, payload, timeout):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.URLError("Remote end closed connection without response")
+        return {"message": {"content": "Добгый день"}}
+
+    monkeypatch.setattr(ollama, "_post_json_sync", fake_post)
+    result = await ollama.chat(_cfg(), [{"role": "user", "content": "привет"}], "system")
+
+    assert result == {"message": {"content": "Добгый день"}}
+    assert calls["n"] == 2
+
+
+async def test_chat_gives_up_after_exhausting_retries(monkeypatch):
+    monkeypatch.setattr(ollama, "ensure_running", _noop)
+    calls = {"n": 0}
+
+    def fake_post(url, payload, timeout):
+        calls["n"] += 1
+        raise urllib.error.URLError("connection reset")
+
+    monkeypatch.setattr(ollama, "_post_json_sync", fake_post)
+    with pytest.raises(ProtoError) as excinfo:
+        await ollama.chat(_cfg(), [{"role": "user", "content": "привет"}], "system")
+
+    assert excinfo.value.code == ERR_INTERNAL
+    assert calls["n"] == ollama._POST_RETRY_ATTEMPTS  # не бесконечный ретрай
+
+
+async def test_chat_does_not_retry_real_http_error_response(monkeypatch):
+    # HTTPError — реальный ответ сервера (например, модель не найдена) —
+    # повторный точно такой же запрос даст тот же результат, ретрай бессмыслен.
+    monkeypatch.setattr(ollama, "ensure_running", _noop)
+    calls = {"n": 0}
+
+    def fake_post(url, payload, timeout):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(url, 404, "model not found", None, None)
+
+    monkeypatch.setattr(ollama, "_post_json_sync", fake_post)
+    with pytest.raises(ProtoError) as excinfo:
+        await ollama.chat(_cfg(), [{"role": "user", "content": "привет"}], "system")
+
+    assert excinfo.value.code == ERR_INTERNAL
+    assert calls["n"] == 1  # ни одного ретрая
 
 
 async def _noop(cfg):

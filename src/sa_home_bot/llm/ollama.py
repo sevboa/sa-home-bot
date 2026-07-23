@@ -26,7 +26,17 @@ _WARMUP_POLL_INTERVAL_S = 2.0
 # инсталляция) автоматически "засыпает" между вызовами wsl.exe и холодно
 # стартует по новой на каждый прогрев — иногда заметно дольше 90с (первый
 # прогон в проде занял ~95с и не уложился, curl сразу после — уже отвечал).
+# Это ожидаемый режим работы (по требованию пользователя 2026-07-23: модель
+# не должна быть постоянно поднята — машина используется и для другого),
+# не баг, который нужно скрывать держа WSL всегда тёплым.
 _WARMUP_TIMEOUT_S = 150.0
+# Живая находка 2026-07-23 (позже в тот же день): даже когда /api/version
+# уже отвечает, самый первый /api/generate|chat сразу после холодного старта
+# контейнера иногда обрывается ("Remote end closed connection without
+# response") — GPU/модельный бэкенд Ollama ещё не полностью готов принимать
+# реальные запросы, хотя HTTP-сервер уже слушает. Один короткий ретрай.
+_POST_RETRY_ATTEMPTS = 2
+_POST_RETRY_DELAY_S = 3.0
 
 
 def _post_json_sync(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
@@ -108,8 +118,38 @@ async def stop(cfg: LlmConfig) -> None:
     await _wsl_exec(cfg, "docker", "stop", cfg.ollama_container)
 
 
-async def generate(cfg: LlmConfig, prompt: str, system: str) -> dict[str, Any]:
+def _is_transient_connection_error(exc: Exception) -> bool:
+    # HTTPError — реальный ответ сервера (в т.ч. с ошибкой) — не транзиентная
+    # проблема соединения, ретраить бессмысленно (тот же результат снова).
+    if isinstance(exc, urllib.error.HTTPError):
+        return False
+    return isinstance(exc, (urllib.error.URLError, TimeoutError, OSError))
+
+
+async def _post_with_retry(cfg: LlmConfig, url: str, payload: dict[str, Any]) -> dict[str, Any]:
     await ensure_running(cfg)
+    last_exc: Exception | None = None
+    for attempt in range(1, _POST_RETRY_ATTEMPTS + 1):
+        try:
+            return await asyncio.to_thread(_post_json_sync, url, payload, cfg.request_timeout_s)
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            last_exc = exc
+            if attempt >= _POST_RETRY_ATTEMPTS or not _is_transient_connection_error(exc):
+                break
+            log.warning(
+                "llm: %s оборвался сразу после прогрева (%s) — повтор через %.0fс "
+                "(попытка %d/%d)",
+                url,
+                exc,
+                _POST_RETRY_DELAY_S,
+                attempt,
+                _POST_RETRY_ATTEMPTS,
+            )
+            await asyncio.sleep(_POST_RETRY_DELAY_S)
+    raise ProtoError(ERR_INTERNAL, f"{url}: {last_exc}")
+
+
+async def generate(cfg: LlmConfig, prompt: str, system: str) -> dict[str, Any]:
     payload = {
         "model": cfg.model,
         "prompt": prompt,
@@ -117,21 +157,10 @@ async def generate(cfg: LlmConfig, prompt: str, system: str) -> dict[str, Any]:
         "stream": False,
         "think": False,
     }
-    try:
-        return await asyncio.to_thread(
-            _post_json_sync, f"{cfg.ollama_url}/api/generate", payload, cfg.request_timeout_s
-        )
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-        raise ProtoError(ERR_INTERNAL, f"Ollama /api/generate: {exc}") from exc
+    return await _post_with_retry(cfg, f"{cfg.ollama_url}/api/generate", payload)
 
 
 async def chat(cfg: LlmConfig, messages: list[dict[str, str]], system: str) -> dict[str, Any]:
-    await ensure_running(cfg)
     full_messages = [{"role": "system", "content": system}, *messages]
     payload = {"model": cfg.model, "messages": full_messages, "stream": False, "think": False}
-    try:
-        return await asyncio.to_thread(
-            _post_json_sync, f"{cfg.ollama_url}/api/chat", payload, cfg.request_timeout_s
-        )
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-        raise ProtoError(ERR_INTERNAL, f"Ollama /api/chat: {exc}") from exc
+    return await _post_with_retry(cfg, f"{cfg.ollama_url}/api/chat", payload)
