@@ -88,20 +88,47 @@ def _admin_book() -> SubscriptionBook:
     )
 
 
-async def test_cmd_ai_without_text_sends_opening_line_and_records_empty_turn(store):
+async def test_cmd_ai_without_text_asks_model_for_greeting(store, monkeypatch):
+    # Без текста — не заготовленная строка, а сама модель здоровается
+    # (решение пользователя 2026-07-23: не экономить обращения к локальной
+    # модели). Директива-приветствие в историю не пишется, только ответ.
+    seen_history = []
+
+    async def fake_request(message, node_link, store_, config, history, book, notifier):
+        seen_history.append(history)
+        return "Да, сэг? Слушаю вас"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
     message = FakeMessage(1, text="/alfred")
+
     await ai_handler.cmd_ai(
         message, node_link=None, store=store, config=Settings(),
         book=_admin_book(), notifier=FakeNotifier(),
     )
 
-    assert message.sent == [ai_handler.OPENING_TEXT]
-    # Открывающая реплика записана как ход диалога (message_id ответа бота,
-    # не команды) — видно по выборке всей истории треда.
+    assert seen_history == [[{"role": "user", "content": ai_handler.OPENING_PROMPT}]]
+    assert message.sent == [ai_handler._format_answer("Да, сэг? Слушаю вас")]
+    # Только ответ ассистента — сама директива не осела в истории диалога.
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert len(rows) == 1
-    assert rows[0]["content"] == ""
     assert rows[0]["role"] == "assistant"
+    assert rows[0]["content"] == "Да, сэг? Слушаю вас"
+
+
+async def test_cmd_ai_without_text_unavailable_records_nothing(store, monkeypatch):
+    async def fake_unavailable(message, node_link, store_, config, history, book, notifier):
+        return None  # ai_flow уже сообщил пользователю сама
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_unavailable)
+    message = FakeMessage(1, text="/alfred")
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+    )
+
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    assert rows == []  # директива нигде не сохраняется — начать нечего
 
 
 async def test_cmd_ai_with_text_calls_ai_flow_and_records_both_turns(store, monkeypatch):

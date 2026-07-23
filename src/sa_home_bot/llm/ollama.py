@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import urllib.error
@@ -37,6 +38,15 @@ _WARMUP_TIMEOUT_S = 150.0
 # реальные запросы, хотя HTTP-сервер уже слушает. Один короткий ретрай.
 _POST_RETRY_ATTEMPTS = 3
 _POST_RETRY_DELAY_S = 3.0
+# Живая находка 2026-07-23 (ещё позже): короткоживущие вызовы `wsl.exe`
+# (запустился → выполнил → сразу вышел) не держат WSL2-VM живой — она может
+# погаснуть уже через считаные секунды после каждого такого вызова, даже
+# посреди прогрева/ретрая (прямой curl с этой же машины ловил то же самое —
+# не баг конкретно HTTP-клиента). Раз WoL-подобного «держать поднятым
+# постоянно» пользователь не хочет (машина используется и для другого),
+# держим WSL живой только на время самого запроса — фоновым `sleep`-процессом
+# вокруг всего _post_with_retry (прогрев + все попытки POST).
+_KEEPALIVE_MARGIN_S = 60.0
 
 
 def _post_json_sync(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
@@ -61,6 +71,44 @@ async def ollama_version(
         return await asyncio.to_thread(_get_json_sync, f"{cfg.ollama_url}/api/version", timeout)
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):
         return None
+
+
+class _WslKeepalive:
+    """Держит WSL2-VM живой на время реального запроса: короткие
+    `wsl -d ... -- <cmd>` вызовы сами по себе не мешают VM погаснуть сразу
+    после выхода — а живой присоединённый процесс внутри неё мешает."""
+
+    def __init__(self, cfg: LlmConfig, duration_s: float) -> None:
+        self._cfg = cfg
+        self._duration_s = duration_s
+        self._proc: asyncio.subprocess.Process | None = None
+
+    async def __aenter__(self) -> _WslKeepalive:
+        try:
+            self._proc = await asyncio.create_subprocess_exec(
+                "wsl",
+                "-d",
+                self._cfg.wsl_distro,
+                "-u",
+                "root",
+                "--",
+                "sleep",
+                str(int(self._duration_s)),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except OSError as exc:
+            log.warning("llm: не удалось запустить keepalive-процесс WSL: %s", exc)
+            self._proc = None
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        if self._proc is None:
+            return
+        with contextlib.suppress(ProcessLookupError):
+            self._proc.terminate()
+        with contextlib.suppress(TimeoutError, asyncio.TimeoutError):
+            await asyncio.wait_for(self._proc.wait(), timeout=5.0)
 
 
 async def _wsl_exec(cfg: LlmConfig, *args: str) -> bool:
@@ -132,26 +180,36 @@ async def _post_with_retry(cfg: LlmConfig, url: str, payload: dict[str, Any]) ->
     секунды, так что она может успеть заснуть заново в промежутке между
     успешным прогревом и самим POST (или между ретраями) — без повторной
     проверки ретрай просто бился бы в ту же отвалившуюся WSL/контейнер.
-    ``ensure_running`` быстрый no-op, если Ollama и так уже отвечает."""
-    last_exc: Exception | None = None
-    for attempt in range(1, _POST_RETRY_ATTEMPTS + 1):
-        await ensure_running(cfg)
-        try:
-            return await asyncio.to_thread(_post_json_sync, url, payload, cfg.request_timeout_s)
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-            last_exc = exc
-            if attempt >= _POST_RETRY_ATTEMPTS or not _is_transient_connection_error(exc):
-                break
-            log.warning(
-                "llm: %s оборвался сразу после прогрева (%s) — повтор через %.0fс "
-                "(попытка %d/%d)",
-                url,
-                exc,
-                _POST_RETRY_DELAY_S,
-                attempt,
-                _POST_RETRY_ATTEMPTS,
-            )
-            await asyncio.sleep(_POST_RETRY_DELAY_S)
+    ``ensure_running`` быстрый no-op, если Ollama и так уже отвечает. Весь
+    прогрев+ретраи идут под keepalive-процессом (``_WslKeepalive``) — без
+    него WSL успевала погаснуть прямо посреди этой же последовательности."""
+    keepalive_budget = (
+        _WARMUP_TIMEOUT_S
+        + _POST_RETRY_ATTEMPTS * (cfg.request_timeout_s + _POST_RETRY_DELAY_S)
+        + _KEEPALIVE_MARGIN_S
+    )
+    async with _WslKeepalive(cfg, keepalive_budget):
+        last_exc: Exception | None = None
+        for attempt in range(1, _POST_RETRY_ATTEMPTS + 1):
+            await ensure_running(cfg)
+            try:
+                return await asyncio.to_thread(
+                    _post_json_sync, url, payload, cfg.request_timeout_s
+                )
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+                last_exc = exc
+                if attempt >= _POST_RETRY_ATTEMPTS or not _is_transient_connection_error(exc):
+                    break
+                log.warning(
+                    "llm: %s оборвался сразу после прогрева (%s) — повтор через %.0fс "
+                    "(попытка %d/%d)",
+                    url,
+                    exc,
+                    _POST_RETRY_DELAY_S,
+                    attempt,
+                    _POST_RETRY_ATTEMPTS,
+                )
+                await asyncio.sleep(_POST_RETRY_DELAY_S)
     raise ProtoError(ERR_INTERNAL, f"{url}: {last_exc}")
 
 

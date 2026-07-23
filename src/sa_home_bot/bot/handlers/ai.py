@@ -29,11 +29,16 @@ router = Router(name="ai")
 log = logging.getLogger(__name__)
 
 ALFRED_PREFIX = "<b>Альфред:</b> "
-# Открывающая реплика без текста после /alfred — сам Альфред, не системное
-# "диалог начат" (не должно читаться как интерфейс бота, см. обсуждение с
-# пользователем 2026-07-23). Искажение «р» — как в Агнольд/Альбегт: это
-# фиксированная строка, не вывод модели, поэтому пишем сами.
-OPENING_TEXT = ALFRED_PREFIX + "Да, сэг? Слушаю вас."
+# Без текста после /alfred — не системная заглушка "диалог начат", а сама
+# модель здоровается (решение пользователя 2026-07-23: локальная модель,
+# незачем экономить обращения к ней ради заготовленной строки — иначе одна
+# и та же неизменная фраза на каждый /alfred быстро выдаёт, что это бот).
+# Сама директива в историю диалога НЕ попадает — только то, что модель
+# ответит на неё, как на первый (и единственный пока) ход ассистента.
+OPENING_PROMPT = (
+    "Тебя только что позвали, без конкретного вопроса. Поприветствуй "
+    "коротко, в характере — дай понять, что ты здесь и готов слушать."
+)
 
 
 def _format_answer(raw: str) -> str:
@@ -66,27 +71,18 @@ async def cmd_ai(
     dialogue_id = message.message_id
     parts = (message.text or "").split(maxsplit=1)
     prompt = parts[1].strip() if len(parts) > 1 else ""
-    now = datetime.now(tz=UTC)
 
-    if not prompt:
-        sent = await message.answer(OPENING_TEXT)
-        # Пустой content — при первом reply история для LLM не тянет заглушку
-        # (ai_turns_for_dialogue отфильтровывает пустые content на выборке).
-        await store.record_ai_turn(
-            message.chat.id, sent.message_id, dialogue_id, "assistant", "", now
-        )
-        return
+    if prompt:
+        now = datetime.now(tz=UTC)
+        await store.record_ai_turn(message.chat.id, dialogue_id, dialogue_id, "user", prompt, now)
+        history = [{"role": "user", "content": prompt}]
+    else:
+        # Директива-приветствие не сохраняется как ход диалога — только то,
+        # что модель на неё ответит (см. OPENING_PROMPT выше).
+        history = [{"role": "user", "content": OPENING_PROMPT}]
 
-    await store.record_ai_turn(message.chat.id, dialogue_id, dialogue_id, "user", prompt, now)
     await _ask_and_reply(
-        message,
-        node_link,
-        store,
-        config,
-        book,
-        notifier,
-        dialogue_id,
-        [{"role": "user", "content": prompt}],
+        message, node_link, store, config, book, notifier, dialogue_id, history
     )
 
 

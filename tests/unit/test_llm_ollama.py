@@ -232,5 +232,62 @@ async def test_chat_does_not_retry_real_http_error_response(monkeypatch):
     assert calls["n"] == 1  # ни одного ретрая
 
 
+class FakeKeepaliveProc:
+    def __init__(self) -> None:
+        self.terminated = False
+        self.waited = False
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    async def wait(self) -> int:
+        self.waited = True
+        return 0
+
+
+async def test_post_with_retry_starts_and_terminates_keepalive(monkeypatch):
+    # Живая находка: короткоживущие вызовы wsl.exe не держат WSL2-VM живой —
+    # без фонового keepalive-процесса она гаснет посреди самого запроса.
+    monkeypatch.setattr(ollama, "ensure_running", _noop)
+    fake_proc = FakeKeepaliveProc()
+    spawn_calls = []
+
+    async def fake_exec(*args, **kwargs):
+        spawn_calls.append(args)
+        return fake_proc
+
+    monkeypatch.setattr(ollama.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(
+        ollama, "_post_json_sync", lambda url, payload, timeout: {"message": {"content": "ok"}}
+    )
+
+    result = await ollama.chat(
+        _cfg(wsl_distro="Docker"), [{"role": "user", "content": "привет"}], "system"
+    )
+
+    assert result == {"message": {"content": "ok"}}
+    assert spawn_calls[0][:6] == ("wsl", "-d", "Docker", "-u", "root", "--")
+    assert spawn_calls[0][6] == "sleep"
+    assert fake_proc.terminated is True
+    assert fake_proc.waited is True
+
+
+async def test_keepalive_spawn_failure_does_not_break_request(monkeypatch):
+    # Не удалось поднять keepalive (например, самого wsl.exe нет) — не
+    # повод валить весь запрос, просто едем без подстраховки.
+    monkeypatch.setattr(ollama, "ensure_running", _noop)
+
+    async def fake_exec(*args, **kwargs):
+        raise OSError("wsl.exe not found")
+
+    monkeypatch.setattr(ollama.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(
+        ollama, "_post_json_sync", lambda url, payload, timeout: {"message": {"content": "ok"}}
+    )
+
+    result = await ollama.chat(_cfg(), [{"role": "user", "content": "привет"}], "system")
+    assert result == {"message": {"content": "ok"}}
+
+
 async def _noop(cfg):
     pass
