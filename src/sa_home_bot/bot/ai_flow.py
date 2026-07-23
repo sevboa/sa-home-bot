@@ -108,7 +108,17 @@ async def _build_context_note(message: Message, store: Store, dialogue_id: int) 
         starter = await store.ai_turn(message.chat.id, dialogue_id)
         starter_name = starter.get("user_name") if starter else None
         if starter_name and starter_name != sender_name:
-            lines.append(f"Этот разговор начал(а): {starter_name}.")
+            lines.append(
+                f"Этот разговор начал(а) {starter_name}, а сейчас в него отвечает "
+                f"{sender_name} — не тот человек, кто начинал. Это чужой тред: не "
+                f"отказывай в ответе, но веди себя чуть сдержаннее, чем со "
+                f"{starter_name} — обратись к {sender_name} по имени и мягко "
+                f"дай понять, что это разговор {starter_name} (например: «Это, "
+                f"кажется, беседа {starter_name}, сэр/мадам — но извольте, чем "
+                f"могу быть полезен?» или предложи начать свой отдельный "
+                f"разговор), не подхватывай тему с тем же радушием, как с тем, "
+                f"кто начал."
+            )
 
         participants = await store.chat_participants(message.chat.id)
         others = [

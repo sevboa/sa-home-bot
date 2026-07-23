@@ -396,6 +396,7 @@ async def test_context_note_group_includes_starter_and_other_participants(store)
     assert "Пётр" in note  # сейчас пишет
     assert "Иван (@ivan)" in note  # начал тред
     assert "Мария" in note  # ещё обращалась (другой тред, тот же чат)
+    assert "чужой тред" in note  # инструкция вести себя сдержаннее в тред другого
 
 
 async def test_context_note_skips_starter_line_when_same_as_sender(store):
@@ -410,3 +411,4 @@ async def test_context_note_skips_starter_line_when_same_as_sender(store):
 
     assert note.count("Иван (@ivan)") == 1  # не повторяем "начал" для того же человека
     assert "начал" not in note
+    assert "чужой тред" not in note  # свой же тред — подсказка про сдержанность не нужна
