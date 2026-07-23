@@ -120,7 +120,7 @@ save_dirs = [
 [llm]
 socket = "./data/llm.sock"
 ollama_url = "http://127.0.0.1:11434"
-model = "qwen2.5:7b"
+model = "qwen3:14b"
 wsl_distro = "Docker"
 ollama_container = "ollama"
 request_timeout_s = 240.0

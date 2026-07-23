@@ -213,7 +213,7 @@ class LlmConfig(BaseModel):
 
     socket: str = "./data/llm.sock"
     ollama_url: str = "http://127.0.0.1:11434"
-    model: str = "qwen2.5:7b"
+    model: str = "qwen3:14b"
     wsl_distro: str = "Docker"
     ollama_container: str = "ollama"
     request_timeout_s: float = Field(default=240.0, gt=0)

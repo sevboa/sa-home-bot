@@ -41,7 +41,7 @@ db_path = 'C:\ProgramData\sa-home-bot\data\monitor.sqlite'
 [llm]
 socket = "tcp://127.0.0.1:8712"
 ollama_url = "http://127.0.0.1:11434"
-model = "qwen2.5:7b"
+model = "qwen3:14b"
 wsl_distro = "Docker"
 ollama_container = "ollama"
 request_timeout_s = 240.0
