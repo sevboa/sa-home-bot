@@ -57,8 +57,20 @@ ASSIGNMENT_ARGS: dict[str, list[str]] = {
     "telegram-bot": ["--service", "bot"],
     "apps": ["--service", "apps"],
     "torrents": ["--service", "torrents"],
-    "llm": ["--service", "llm"],
 }
+
+# Живая находка 2026-07-23: служба llm на Windows-ноде дёргает wsl.exe, а
+# тот из-под Session-0 (Windows-служба sa-home-node, LocalSystem) вообще не
+# запускается (exit code -1) — WSL2 требует интерактивную пользовательскую
+# сессию. Поэтому "llm" супервизором НЕ спавнится (не в ASSIGNMENT_ARGS) —
+# на нодах, где это нужно, процесс поднимается отдельно, задачей
+# планировщика от интерактивного пользователя (deploy/llm-runner.ps1),
+# супервизор её не видит и не трогает. При этом "llm" остаётся в
+# [node].assignments — это НЕ то же самое, что супервизия: NodeRouter
+# (node/app.py::build_router) строит локальный маршрут к settings.llm.socket
+# по тому же списку assignments независимо от Supervisor, так что запрос
+# всё равно доедет — до внешне управляемого процесса, слушающего тот же порт.
+EXTERNALLY_MANAGED_ASSIGNMENTS = frozenset({"llm"})
 
 
 def _now_iso() -> str:
@@ -207,6 +219,12 @@ class Supervisor:
         self._restart_delay_s = restart_delay_s
         self._stop_timeout_s = stop_timeout_s
         for name in assignments:
+            if name in EXTERNALLY_MANAGED_ASSIGNMENTS:
+                log.info(
+                    "Назначение %r — внешне управляемый процесс, супервизор его не спавнит "
+                    "(только маршрутизация)", name
+                )
+                continue
             try:
                 self.services[name] = self._make_service(name)
             except ValueError:

@@ -132,6 +132,18 @@ async def test_supervisor_skips_unknown_assignment():
     assert sup.get("no-such-service") is None
 
 
+async def test_supervisor_skips_externally_managed_llm_silently():
+    # WSL2 требует интерактивную сессию, которой у Session-0 службы нет
+    # (живая находка 2026-07-23) — супервизор не пытается спавнить "llm",
+    # но это не "неизвестное назначение" (не логируется как ошибка), а
+    # намеренный пропуск: маршрутизация к ней всё равно строится отдельно
+    # в build_router() по тому же списку assignments (node/app.py).
+    events = Events()
+    sup = Supervisor(["monitor", "llm"], None, emit=events.emit)
+    assert list(sup.services) == ["monitor"]
+    assert sup.get("llm") is None
+
+
 # --- assign/unassign: назначения в рантайме, без рестарта ноды ---
 
 

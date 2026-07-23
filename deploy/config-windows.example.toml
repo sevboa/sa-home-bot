@@ -21,6 +21,18 @@
 
 # Windows-нода — без телеграм-бота: фронтенд остаётся на alfred,
 # сюда назначается мониторинг и, на GPU-машине (winpc), llm — Альфред.
+#
+# "llm" в assignments НУЖНА для маршрутизации (NodeRouter в node/app.py
+# строит локальный PeerLink к settings.llm.socket по этому же списку), но
+# сама служба llm сюда НЕ спавнится супервизором sa-home-node — живая
+# находка 2026-07-23: wsl.exe не запускается из-под Windows-службы
+# (Session 0, LocalSystem, exit code -1) — WSL2 требует интерактивную
+# пользовательскую сессию. Поэтому "llm" явно исключена из ASSIGNMENT_ARGS
+# (node/supervisor.py::EXTERNALLY_MANAGED_ASSIGNMENTS) — процесс `sa-home-bot
+# --service llm` поднимается отдельно, задачей планировщика от
+# интерактивного пользователя (deploy/llm-runner.ps1, регистрация — в
+# комментарии самого скрипта). На нодах без GPU/llm assignments остаётся
+# как в примере выше — просто ["monitor"].
 [node]
 id = "winpc"                          # имя ноды в рое (пусто = hostname)
 socket = "tcp://127.0.0.1:8710"       # локальные фронтенды (nodectl)
@@ -37,7 +49,9 @@ db_path = 'C:\ProgramData\sa-home-bot\data\monitor.sqlite'
 # LLM (Альфред) — Docker Engine внутри WSL2 (дистрибутив "Docker") + контейнер
 # ollama, поднятые вручную (LLM_INTEGRATION_PLAN.md §1). ollama_url — loopback
 # ЭТОЙ же машины, наружу не смотрит; сама служба llm ходит туда локально,
-# рой достаёт до неё только своим TCP-протоколом (socket ниже).
+# рой достаёт до неё только своим TCP-протоколом (socket ниже). Процесс
+# запускается НЕ супервизором ноды, а deploy/llm-runner.ps1 — см. комментарий
+# у [node] выше.
 [llm]
 socket = "tcp://127.0.0.1:8712"
 ollama_url = "http://127.0.0.1:11434"

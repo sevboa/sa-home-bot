@@ -184,7 +184,9 @@ def test_describe_declares_assign_and_unassign():
     desc = NodeService(sup).describe()
     assign = desc.find_action("assign")
     assert assign is not None
-    assert set(assign.params[0].choices) == {"monitor", "telegram-bot", "apps", "torrents", "llm"}
+    # llm сознательно не в ASSIGNMENT_ARGS — не супервизируется (живая находка
+    # 2026-07-23, node/supervisor.py::EXTERNALLY_MANAGED_ASSIGNMENTS).
+    assert set(assign.params[0].choices) == {"monitor", "telegram-bot", "apps", "torrents"}
     unassign = desc.find_action("unassign")
     assert unassign is not None
     assert set(unassign.params[0].choices) == {"monitor", "telegram-bot"}  # только назначенные
