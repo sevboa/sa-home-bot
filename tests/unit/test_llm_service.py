@@ -44,16 +44,19 @@ async def test_ask_calls_ollama_generate_with_system_prompt(monkeypatch):
 
     async def fake_generate(cfg, prompt, system):
         calls.append((cfg.model, prompt, system))
-        return {"response": "Здравствуйте, сэ"}
+        return {"response": "Здравствуйте, сэр"}
 
     monkeypatch.setattr(llm_service.ollama, "generate", fake_generate)
     svc = LlmService(_settings())
     result = await svc.run_command("ask", {"prompt": "Как погода?"})
 
-    assert result == {"response": "Здравствуйте, сэ", "model": "qwen2.5:7b"}
+    # Картавость — детерминированная замена р→г в коде (живая находка
+    # 2026-07-24: чисто промптом модель подменяла буквы ненадёжно), не вывод
+    # модели как есть.
+    assert result == {"response": "Здгавствуйте, сэг", "model": "qwen2.5:7b"}
     assert calls[0][0] == "qwen2.5:7b"
     assert calls[0][1] == "Как погода?"
-    assert "р" in calls[0][2].lower()  # системный промпт реально ушёл
+    assert calls[0][2] == llm_service.SYSTEM_PROMPT  # системный промпт реально ушёл
 
 
 async def test_ask_rejects_missing_prompt():
@@ -66,7 +69,7 @@ async def test_ask_rejects_missing_prompt():
 async def test_chat_calls_ollama_chat_and_extracts_message(monkeypatch):
     async def fake_chat(cfg, messages, system):
         assert messages == [{"role": "user", "content": "привет"}]
-        return {"message": {"role": "assistant", "content": "Добгый день"}}
+        return {"message": {"role": "assistant", "content": "Добрый день"}}
 
     monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
     svc = LlmService(_settings())
