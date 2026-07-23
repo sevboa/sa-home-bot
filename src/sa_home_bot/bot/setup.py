@@ -66,8 +66,14 @@ def build_dispatcher(book: SubscriptionBook) -> Dispatcher:
     dp.include_router(node_links.router)
     # torrents: документы/magnet-ссылки, не пересекается с командами.
     dp.include_router(torrents.router)
-    # apps последним: ловит динамические команды-скилы, остальное игнорирует.
+    # apps последним из "точных" роутеров: ловит динамические команды-скилы,
+    # остальное игнорирует.
     dp.include_router(apps.router)
+    # ai.catchall — самый широкий фильтр из всех (любой текст в личке,
+    # @упоминание в группе), поэтому регистрируется самым последним: должен
+    # получить только то, что не разобрал никто более специфичный выше
+    # (magnet-ссылки в torrents, команды в остальных роутерах и т.д.).
+    dp.include_router(ai.catchall_router)
     return dp
 
 

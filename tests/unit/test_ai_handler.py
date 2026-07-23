@@ -32,17 +32,26 @@ class FakeBot:
 @dataclass
 class FakeChat:
     id: int
+    type: str = "private"
+
+
+@dataclass
+class FakeEntity:
+    type: str
+    offset: int
+    length: int
 
 
 class FakeMessage:
     _next_id = 1000
 
-    def __init__(self, chat_id, text=None, reply_to=None):
-        self.chat = FakeChat(chat_id)
+    def __init__(self, chat_id, text=None, reply_to=None, chat_type="private", entities=None):
+        self.chat = FakeChat(chat_id, type=chat_type)
         self.message_id = FakeMessage._next_id
         FakeMessage._next_id += 1
         self.text = text
         self.reply_to_message = reply_to
+        self.entities = entities
         self.bot = FakeBot()
         self.sent: list[str] = []
 
@@ -306,3 +315,173 @@ async def test_on_ai_reply_without_text_still_asks_model(store, monkeypatch):
     rows = await store.ai_turns_for_dialogue(1, 500)
     assert [r["role"] for r in rows] == ["assistant", "assistant"]
     assert rows[-1]["content"] == "Простите, не расслышал, сэр"
+
+
+# --- неявные триггеры: любое сообщение в личке, @упоминание в группе
+# (живая просьба пользователя 2026-07-23) ---
+
+
+async def test_private_chat_text_filter_matches_plain_text():
+    filt = ai_handler.PrivateChatText()
+    msg = FakeMessage(1, text="как дела", chat_type="private")
+    assert await filt(msg) is True
+
+
+async def test_private_chat_text_filter_ignores_commands():
+    filt = ai_handler.PrivateChatText()
+    msg = FakeMessage(1, text="/status", chat_type="private")
+    assert await filt(msg) is False
+
+
+async def test_private_chat_text_filter_ignores_groups():
+    filt = ai_handler.PrivateChatText()
+    msg = FakeMessage(1, text="как дела", chat_type="group")
+    assert await filt(msg) is False
+
+
+async def test_private_chat_text_filter_ignores_empty_text():
+    filt = ai_handler.PrivateChatText()
+    msg = FakeMessage(1, text=None, chat_type="private")
+    assert await filt(msg) is False
+
+
+async def test_group_mention_filter_matches_and_strips_mention():
+    filt = ai_handler.GroupMention()
+    text = "@alfredbot как погода?"
+    entities = [FakeEntity(type="mention", offset=0, length=len("@alfredbot"))]
+    msg = FakeMessage(1, text=text, chat_type="group", entities=entities)
+    result = await filt(msg, bot_username="alfredbot")
+    assert result == {"mention_prompt": "как погода?"}
+
+
+async def test_group_mention_filter_ignores_other_mentions():
+    filt = ai_handler.GroupMention()
+    text = "@someone_else привет"
+    entities = [FakeEntity(type="mention", offset=0, length=len("@someone_else"))]
+    msg = FakeMessage(1, text=text, chat_type="group", entities=entities)
+    assert await filt(msg, bot_username="alfredbot") is False
+
+
+async def test_group_mention_filter_ignores_private_chat():
+    filt = ai_handler.GroupMention()
+    text = "@alfredbot привет"
+    entities = [FakeEntity(type="mention", offset=0, length=len("@alfredbot"))]
+    msg = FakeMessage(1, text=text, chat_type="private", entities=entities)
+    assert await filt(msg, bot_username="alfredbot") is False
+
+
+async def test_on_private_message_starts_new_dialogue_when_none_exists(store, monkeypatch):
+    seen_history = []
+
+    async def fake_request(message, node_link, store_, config, history, book, notifier):
+        seen_history.append(history)
+        return "Здгавствуйте, сэ"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, text="добрый вечер", chat_type="private")
+
+    await ai_handler.on_private_message(
+        message, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=FakeNotifier(), subscription=_sub("chat@llm"),
+    )
+
+    assert seen_history == [[{"role": "user", "content": "добрый вечер"}]]
+    assert message.sent == [ai_handler._format_answer("Здгавствуйте, сэ")]
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    assert [r["role"] for r in rows] == ["user", "assistant"]
+
+
+async def test_on_private_message_continues_latest_dialogue(store, monkeypatch):
+    await store.record_ai_turn(1, 500, 500, "user", "первый вопрос", _now())
+    await store.record_ai_turn(1, 501, 500, "assistant", "первый ответ", _now())
+
+    seen_history = []
+
+    async def fake_request(message, node_link, store_, config, history, book, notifier):
+        seen_history.append(history)
+        return "втогой ответ"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, text="а что насчёт этого?", chat_type="private")
+
+    await ai_handler.on_private_message(
+        message, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=FakeNotifier(), subscription=_sub("chat@llm"),
+    )
+
+    assert seen_history == [
+        [
+            {"role": "user", "content": "первый вопрос"},
+            {"role": "assistant", "content": "первый ответ"},
+            {"role": "user", "content": "а что насчёт этого?"},
+        ]
+    ]
+    rows = await store.ai_turns_for_dialogue(1, 500)
+    assert len(rows) == 4  # старый тред пополнился, новый не завёлся
+
+
+async def test_on_private_message_denied_without_right(store):
+    message = FakeMessage(1, text="привет", chat_type="private")
+
+    await ai_handler.on_private_message(
+        message, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=FakeNotifier(), subscription=_sub(),
+    )
+
+    assert message.sent == []
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    assert rows == []
+
+
+async def test_on_group_mention_with_text_starts_fresh_dialogue(store, monkeypatch):
+    seen_history = []
+
+    async def fake_request(message, node_link, store_, config, history, book, notifier):
+        seen_history.append(history)
+        return "Слушаю, сэ"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, text="@alfredbot какая погода?", chat_type="group")
+
+    await ai_handler.on_group_mention(
+        message, mention_prompt="какая погода?", node_link=None, store=store,
+        config=Settings(), book=_admin_book(), notifier=FakeNotifier(),
+        subscription=_sub("chat@llm"),
+    )
+
+    assert seen_history == [[{"role": "user", "content": "какая погода?"}]]
+    assert message.sent == [ai_handler._format_answer("Слушаю, сэ")]
+
+
+async def test_on_group_mention_without_text_asks_model_for_greeting(store, monkeypatch):
+    seen_history = []
+
+    async def fake_request(message, node_link, store_, config, history, book, notifier):
+        seen_history.append(history)
+        return "Да, сэг?"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, text="@alfredbot", chat_type="group")
+
+    await ai_handler.on_group_mention(
+        message, mention_prompt="", node_link=None, store=store,
+        config=Settings(), book=_admin_book(), notifier=FakeNotifier(),
+        subscription=_sub("chat@llm"),
+    )
+
+    assert seen_history == [[{"role": "user", "content": ai_handler.OPENING_PROMPT}]]
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    assert len(rows) == 1  # директива-приветствие не записана, только ответ
+    assert rows[0]["role"] == "assistant"
+
+
+async def test_on_group_mention_denied_without_right(store):
+    message = FakeMessage(1, text="@alfredbot привет", chat_type="group")
+
+    await ai_handler.on_group_mention(
+        message, mention_prompt="привет", node_link=None, store=store,
+        config=Settings(), book=_admin_book(), notifier=FakeNotifier(),
+        subscription=_sub(),
+    )
+
+    assert message.sent == []

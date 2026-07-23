@@ -218,3 +218,20 @@ async def test_ai_turns_for_dialogue_ordered_by_message_id(store):
     assert [r["role"] for r in rows] == ["user", "assistant", "user"]
 
 
+async def test_latest_ai_dialogue_none_when_no_turns(store):
+    assert await store.latest_ai_dialogue(CHAT_ID) is None
+
+
+async def test_latest_ai_dialogue_returns_most_recent_by_message_id(store):
+    await store.record_ai_turn(CHAT_ID, 500, 500, "user", "первый диалог", BASE_TIME)
+    await store.record_ai_turn(
+        CHAT_ID, 501, 500, "assistant", "ответ", BASE_TIME + timedelta(seconds=1)
+    )
+    await store.record_ai_turn(
+        CHAT_ID, 600, 600, "user", "новый диалог", BASE_TIME + timedelta(seconds=2)
+    )
+    assert await store.latest_ai_dialogue(CHAT_ID) == 600
+    # Другой чат не влияет.
+    assert await store.latest_ai_dialogue(CHAT_ID + 1) is None
+
+

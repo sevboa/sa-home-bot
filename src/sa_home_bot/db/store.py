@@ -422,6 +422,16 @@ class Store:
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
+    async def latest_ai_dialogue(self, chat_id: int) -> int | None:
+        """dialogue_id последнего хода в чате — для неявного продолжения
+        разговора в личке (любое сообщение без /alfred и без reply)."""
+        cur = await self.db.conn.execute(
+            "SELECT dialogue_id FROM ai_turns WHERE chat_id=? ORDER BY message_id DESC LIMIT 1",
+            (chat_id,),
+        )
+        row = await cur.fetchone()
+        return row["dialogue_id"] if row else None
+
     # --- housekeeping ---
 
     async def prune_job_runs(self, keep_last: int = 500) -> int:

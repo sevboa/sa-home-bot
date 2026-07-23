@@ -26,6 +26,13 @@ from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 
 router = Router(name="ai")
+# catchall — неявные триггеры (без /alfred, без reply): любое сообщение в
+# личке, упоминание бота через @ в группе. Заведён отдельным роутером —
+# регистрируется в setup.py ПОСЛЕДНИМ (после apps), чтобы не перехватывать
+# то, что предназначено другим роутерам (magnet-ссылки в torrents и т.п.);
+# router (выше) с точными фильтрами (команда, реплай на свой тред)
+# остаётся зарегистрирован рано, как раньше.
+catchall_router = Router(name="ai_catchall")
 log = logging.getLogger(__name__)
 
 ALFRED_PREFIX = "<b>Альфред:</b> "
@@ -66,6 +73,42 @@ class AiReplyContinuation(Filter):
         if row is None:
             return False
         return {"ai_dialogue_id": row["dialogue_id"]}
+
+
+class PrivateChatText(Filter):
+    """Любое обычное текстовое сообщение в личке — там нет других
+    собеседников и других команд, которым текст мог бы предназначаться, так
+    что молчаливое "разговариваем с Альфредом по умолчанию" уместно.
+    Команды (текст с "/") сюда не попадают — их разбирают другие роутеры."""
+
+    async def __call__(self, message: Message) -> bool:
+        return (
+            message.chat is not None
+            and message.chat.type == "private"
+            and bool(message.text)
+            and not message.text.startswith("/")
+        )
+
+
+class GroupMention(Filter):
+    """Упоминание бота через @username в группе — единственный неявный
+    триггер там (в отличие от личек группа шумная, отвечать на каждое
+    сообщение нельзя)."""
+
+    async def __call__(self, message: Message, bot_username: str) -> bool | dict:
+        if message.chat is None or message.chat.type not in ("group", "supergroup"):
+            return False
+        if not message.text or not message.entities:
+            return False
+        mention = f"@{bot_username}".lower()
+        for entity in message.entities:
+            if entity.type != "mention":
+                continue
+            piece = message.text[entity.offset : entity.offset + entity.length]
+            if piece.lower() == mention:
+                rest = message.text[: entity.offset] + message.text[entity.offset + entity.length :]
+                return {"mention_prompt": rest.strip()}
+        return False
 
 
 @router.message(Command(commands.ALFRED.name, commands.AI.name))
@@ -135,6 +178,65 @@ async def on_ai_reply(
     await _ask_and_reply(
         message, node_link, store, config, book, notifier, ai_dialogue_id, history
     )
+
+
+@catchall_router.message(PrivateChatText())
+async def on_private_message(
+    message: Message,
+    node_link: ServiceLink,
+    store: Store,
+    config: Settings,
+    book: SubscriptionBook,
+    notifier: Notifier,
+    subscription: Subscription | None = None,
+) -> None:
+    # Не команда — AuthorizationMiddleware её не проверяла, права смотрим сами
+    # (как в on_ai_reply); в неавторизованной личке просто молчим.
+    right = commands.required_right(commands.ALFRED.name)
+    if subscription is None or not subscription.allows_command(right):
+        return
+
+    text = message.text.strip()
+    dialogue_id = await store.latest_ai_dialogue(message.chat.id)
+    if dialogue_id is None:
+        # Первое сообщение в этой личке — новый тред, как /alfred.
+        dialogue_id = message.message_id
+
+    now = datetime.now(tz=UTC)
+    await store.record_ai_turn(message.chat.id, message.message_id, dialogue_id, "user", text, now)
+    history_rows = await store.ai_turns_for_dialogue(message.chat.id, dialogue_id)
+    history = [{"role": r["role"], "content": r["content"]} for r in history_rows if r["content"]]
+
+    await _ask_and_reply(message, node_link, store, config, book, notifier, dialogue_id, history)
+
+
+@catchall_router.message(GroupMention())
+async def on_group_mention(
+    message: Message,
+    mention_prompt: str,
+    node_link: ServiceLink,
+    store: Store,
+    config: Settings,
+    book: SubscriptionBook,
+    notifier: Notifier,
+    subscription: Subscription | None = None,
+) -> None:
+    right = commands.required_right(commands.ALFRED.name)
+    if subscription is None or not subscription.allows_command(right):
+        return
+
+    dialogue_id = message.message_id
+    if mention_prompt:
+        now = datetime.now(tz=UTC)
+        await store.record_ai_turn(
+            message.chat.id, dialogue_id, dialogue_id, "user", mention_prompt, now
+        )
+        history = [{"role": "user", "content": mention_prompt}]
+    else:
+        # Позвали без текста — та же заглушка-директива, что и голый /alfred.
+        history = [{"role": "user", "content": OPENING_PROMPT}]
+
+    await _ask_and_reply(message, node_link, store, config, book, notifier, dialogue_id, history)
 
 
 async def _ask_and_reply(

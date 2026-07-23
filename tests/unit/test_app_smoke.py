@@ -29,6 +29,9 @@ class FakeBot:
     async def get_chat(self, chat_id):
         return object()
 
+    async def get_me(self):
+        return SimpleNamespace(username="fakebot")
+
     async def set_my_commands(self, commands, scope=None):
         return True
 

@@ -60,6 +60,7 @@ async def run(settings: Settings) -> None:
     # 4. Bot + Notifier + watchdog связи.
     bot = build_bot(settings.telegram.token)
     notifier = Notifier(bot)
+    bot_username = (await bot.get_me()).username
 
     async def on_reconnect(downtime: float) -> None:
         await broadcast_system(book, notifier, render_link_restored(downtime))
@@ -137,6 +138,7 @@ async def run(settings: Settings) -> None:
             config=settings,
             notifier=notifier,
             book=book,
+            bot_username=bot_username,
             handle_signals=False,
         ),
         name="polling",
