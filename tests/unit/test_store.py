@@ -189,7 +189,7 @@ async def test_prune_readings_keeps_last_per_component(store):
     assert (await store.baseline_stats("disk:/dev/sda", window=100)).count == 3
 
 
-# --- ai_turns / ai_dialogues (/ai) ---
+# --- ai_turns (/ai) ---
 
 CHAT_ID = 111
 
@@ -218,27 +218,3 @@ async def test_ai_turns_for_dialogue_ordered_by_message_id(store):
     assert [r["role"] for r in rows] == ["user", "assistant", "user"]
 
 
-async def test_open_idle_ai_dialogues_excludes_recent_and_closed(store):
-    stale = BASE_TIME
-    fresh = BASE_TIME + timedelta(hours=1)
-    await store.record_ai_turn(CHAT_ID, 500, 500, "user", "старый диалог", stale)
-    await store.record_ai_turn(CHAT_ID, 600, 600, "user", "свежий диалог", fresh)
-
-    threshold = BASE_TIME + timedelta(minutes=30)
-    open_dialogues = await store.open_idle_ai_dialogues(threshold)
-    assert open_dialogues == [(CHAT_ID, 500)]
-
-    await store.mark_ai_dialogue_closed(CHAT_ID, 500, fresh)
-    assert await store.open_idle_ai_dialogues(threshold) == []
-
-
-async def test_record_ai_turn_bumps_last_activity_and_reopens_dialogue(store):
-    await store.record_ai_turn(CHAT_ID, 500, 500, "user", "вопрос", BASE_TIME)
-    threshold = BASE_TIME + timedelta(minutes=30)
-    await store.mark_ai_dialogue_closed(CHAT_ID, 500, threshold)
-    assert await store.open_idle_ai_dialogues(threshold) == []
-
-    # Новый ход в закрытом диалоге — снова открывает его (closed_at сброшен).
-    later = BASE_TIME + timedelta(hours=1)
-    await store.record_ai_turn(CHAT_ID, 501, 500, "assistant", "ответ", later)
-    assert await store.open_idle_ai_dialogues(later + timedelta(minutes=1)) == [(CHAT_ID, 500)]

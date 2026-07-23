@@ -82,15 +82,3 @@ CREATE TABLE IF NOT EXISTS ai_turns (
     PRIMARY KEY (chat_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_ai_turns_dialogue ON ai_turns(chat_id, dialogue_id, message_id);
-
--- /ai: одна строка на диалог — только для идле-свипа (bot/ai_idle.py),
--- закрывающего диалог курсивным сообщением после простоя. Обновляется на
--- каждый новый ход в этом диалоге (record_ai_turn), не хранит саму историю
--- (та — в ai_turns).
-CREATE TABLE IF NOT EXISTS ai_dialogues (
-    chat_id           INTEGER NOT NULL,
-    dialogue_id       INTEGER NOT NULL,
-    last_activity_at  TEXT NOT NULL,
-    closed_at         TEXT,
-    PRIMARY KEY (chat_id, dialogue_id)
-);

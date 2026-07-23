@@ -12,6 +12,7 @@ winpc недоступна, показать «шаги», молча разбу
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from aiogram.types import Message
 
@@ -31,10 +32,15 @@ LLM_NODE = "winpc"
 LLM_SERVICE = "llm"
 ACTION_CHAT = "chat"
 
-STEPS_TEXT = "Вы слышите приближающиеся шаги..."
+STEPS_TEXT = "<i>Вы слышите приближающиеся шаги...</i>"
 ARNOLD_WAKING = "<b>Агнольд:</b> Сейчас Альфред подойдёт"
 ALBERT_UNAVAILABLE = "<b>Альбегт:</b> К сожалению Альфреда нет на месте, попробуйте позже, сэр"
 ALBERT_ASLEEP = "<b>Альбегт:</b> Альфред, кажется, уснул — обратитесь позже, сэр"
+# Закрытие треда, когда служба llm сама гасит контейнер по простою
+# (llm/service.py::EVENT_IDLE_SLEEP) — не отсюда, а из bot/node_events.py
+# (событие прилетает не в ответ на сообщение пользователя), но текст —
+# часть того же персонажа, поэтому живёт здесь.
+CLOSING_TEXT = "<i>Альфред не дождался обращения и уходит к себе в подсобку</i>"
 
 WAKE_POLL_TIMEOUT_S = 30.0
 WAKE_POLL_INTERVAL_S = 3.0
@@ -87,9 +93,13 @@ async def request_alfred(
     chat_id = message.chat.id if message.chat else "?"
 
     async def _ask() -> str:
-        result = await node_link.command(
-            ACTION_CHAT, {"messages": history}, dst=dst, timeout=timeout
-        )
+        args: dict[str, Any] = {"messages": history}
+        if message.chat is not None:
+            # chat_id — не для маршрутизации (та по dst), а чтобы служба
+            # знала, какие чаты уведомлять при llm_idle_sleep (см. докстринг
+            # модуля и llm/service.py).
+            args["chat_id"] = message.chat.id
+        result = await node_link.command(ACTION_CHAT, args, dst=dst, timeout=timeout)
         return result.get("response", "")
 
     # Узнать заранее, не спит ли модель (idle-таймер llm/service.py) — если

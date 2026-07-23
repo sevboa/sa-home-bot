@@ -19,7 +19,16 @@ log = logging.getLogger(__name__)
 
 
 async def run_llm(settings: Settings) -> None:
-    service = LlmService(settings)
+    # server создаётся после service (см. node/app.py::run_node — тот же
+    # приём) — emit замыкается на переменную server, реально дёргается уже
+    # после server.start().
+    server: ProtoServer | None = None
+
+    async def emit(event_type: str, data: dict) -> None:
+        if server is not None:
+            await server.broadcast_event(event_type, data)
+
+    service = LlmService(settings, emit=emit)
     server = ProtoServer(settings.llm.socket, service, token=settings.swarm.token)
     await server.start()
     idle_task = asyncio.create_task(service.idle_loop(), name="llm-idle-loop")

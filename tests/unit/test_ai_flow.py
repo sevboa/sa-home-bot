@@ -121,7 +121,11 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
     assert raw == "Добгый день, сэ"
     assert message.answers == []  # никаких «шагов»/Агнольда — узел жив, модель не спит
     assert link.command_calls == [
-        ("chat", {"messages": [{"role": "user", "content": "привет"}]}, "winpc")
+        (
+            "chat",
+            {"messages": [{"role": "user", "content": "привет"}], "chat_id": 1},
+            "winpc",
+        )
     ]
 
 

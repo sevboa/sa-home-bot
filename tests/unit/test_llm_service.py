@@ -21,6 +21,14 @@ def _settings(**overrides) -> Settings:
     return Settings(llm=LlmConfig(model="qwen2.5:7b", **overrides))
 
 
+class FakeEmitter:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+
+    async def __call__(self, event_type: str, data: dict) -> None:
+        self.events.append((event_type, data))
+
+
 def test_describe_declares_ask_chat_sleep():
     desc = LlmService(_settings()).describe()
     assert desc.info.service == "llm"
@@ -153,3 +161,107 @@ async def test_idle_check_is_noop_once_already_asleep(monkeypatch):
     await svc._maybe_sleep_idle()
 
     assert calls == []  # уже спит — второй docker stop не нужен
+
+
+# --- chat_id tracking + llm_idle_sleep (живая находка 2026-07-23: закрытие
+# диалога должно быть событийным — один раз на сон контейнера, только в
+# реально спрашивавшие чаты — а не сканом БД по каждому диалогу отдельно) ---
+
+
+async def test_chat_tracks_chat_id_for_idle_sleep_event(monkeypatch):
+    async def fake_chat(cfg, messages, system):
+        return {"message": {"content": "ответ"}}
+
+    async def fake_stop(cfg):
+        pass
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    monkeypatch.setattr(llm_service.ollama, "stop", fake_stop)
+    emitter = FakeEmitter()
+    svc = LlmService(_settings(), emit=emitter)
+
+    await svc.run_command(
+        "chat", {"messages": [{"role": "user", "content": "привет"}], "chat_id": 42}
+    )
+    await svc.run_command(
+        "chat", {"messages": [{"role": "user", "content": "снова"}], "chat_id": 7}
+    )
+    await svc.run_command("sleep", {})
+
+    assert emitter.events == [("llm_idle_sleep", {"chat_ids": [7, 42]})]
+
+
+async def test_sleep_without_active_chats_emits_nothing(monkeypatch):
+    async def fake_stop(cfg):
+        pass
+
+    monkeypatch.setattr(llm_service.ollama, "stop", fake_stop)
+    emitter = FakeEmitter()
+    svc = LlmService(_settings(), emit=emitter)
+
+    await svc.run_command("sleep", {})
+
+    assert emitter.events == []
+
+
+async def test_idle_triggered_sleep_also_emits(monkeypatch):
+    async def fake_generate(cfg, prompt, system):
+        return {"response": "ответ"}
+
+    async def fake_stop(cfg):
+        pass
+
+    monkeypatch.setattr(llm_service.ollama, "generate", fake_generate)
+    monkeypatch.setattr(llm_service.ollama, "stop", fake_stop)
+    emitter = FakeEmitter()
+    svc = LlmService(_settings(idle_sleep_after_s=60.0), emit=emitter)
+
+    await svc.run_command("ask", {"prompt": "привет", "chat_id": 1})
+    svc._last_activity = datetime.now(tz=UTC) - timedelta(seconds=61)
+
+    await svc._maybe_sleep_idle()
+
+    assert emitter.events == [("llm_idle_sleep", {"chat_ids": [1]})]
+
+
+async def test_active_chat_ids_reset_after_emit(monkeypatch):
+    async def fake_chat(cfg, messages, system):
+        return {"message": {"content": "ответ"}}
+
+    async def fake_stop(cfg):
+        pass
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    monkeypatch.setattr(llm_service.ollama, "stop", fake_stop)
+    emitter = FakeEmitter()
+    svc = LlmService(_settings(), emit=emitter)
+
+    await svc.run_command(
+        "chat", {"messages": [{"role": "user", "content": "привет"}], "chat_id": 1}
+    )
+    await svc.run_command("sleep", {})
+    await svc.run_command("sleep", {})  # второй сон подряд — новых чатов не было
+
+    assert emitter.events == [("llm_idle_sleep", {"chat_ids": [1]})]
+
+
+async def test_emit_failure_does_not_break_sleep(monkeypatch):
+    async def fake_chat(cfg, messages, system):
+        return {"message": {"content": "ответ"}}
+
+    async def fake_stop(cfg):
+        pass
+
+    async def broken_emit(event_type, data):
+        raise RuntimeError("сеть моргнула")
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    monkeypatch.setattr(llm_service.ollama, "stop", fake_stop)
+    svc = LlmService(_settings(), emit=broken_emit)
+
+    await svc.run_command(
+        "chat", {"messages": [{"role": "user", "content": "привет"}], "chat_id": 1}
+    )
+    await svc.run_command("sleep", {})  # не должно бросить исключение
+
+    assert (await svc.get_state())["asleep"] is True

@@ -95,7 +95,13 @@ def build_router(
         if pid != node_id  # свой id в списке — не пир
     }
     local = {
-        name: PeerLink(name, endpoint, token=settings.swarm.token)
+        # on_event=on_peer_event: локальные службы (пока актуально для llm —
+        # llm_idle_sleep, живая находка 2026-07-23) тоже могут эмитить
+        # события, которые нужно довезти до бота через ту же ретрансляцию,
+        # что уже работает для событий пиров (_relay_peer_event ниже —
+        # дедуп по SeenEvents одинаково защищает от эха что для пиров,
+        # что для локальных служб).
+        name: PeerLink(name, endpoint, token=settings.swarm.token, on_event=on_peer_event)
         for name, endpoint in local_service_endpoints(settings).items()
         if name in assignments
     }
