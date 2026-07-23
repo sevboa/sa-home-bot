@@ -32,6 +32,17 @@
 # (живой баг 2026-07-17: nodectl update рапортовал "успех", но
 # installed_version() после этого честно продолжал видеть старую версию —
 # см. node/update.py:_pipx_home). Задаём переменную окружения явно.
+# Живая находка 2026-07-23: на нодах со службой llm (winpc) этот скрипт
+# стал ЛОМАТЬ обновление - pip падал с WinError 32 (файл занят), потому что
+# sa-home-bot.exe держит открытым процесс "--service llm", запущенный ОТДЕЛЬНО
+# от sa-home-node.service - задачей планировщика sa-home-llm (llm-runner.ps1),
+# т.к. WSL2 не запускается из-под Session 0 (см. node/supervisor.py::
+# EXTERNALLY_MANAGED_ASSIGNMENTS). Стоп/старт только sa-home-node этот
+# отдельный процесс не трогал вовсе. Теперь скрипт останавливает
+# (Stop-ScheduledTask) и эту задачу тоже перед pip install, и перезапускает
+# (Start-ScheduledTask) после - на нодах без такой задачи (LlmTaskName не
+# существует, Get-ScheduledTask -ErrorAction SilentlyContinue) шаг тихо
+# пропускается.
 param(
     [Parameter(Mandatory = $true)]
     [string]$RepoUrl,
@@ -42,7 +53,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$PipxHome,
     [string]$ServiceName = "sa-home-node",
-    [int]$ServiceStopTimeoutSec = 120
+    [int]$ServiceStopTimeoutSec = 120,
+    [string]$LlmTaskName = "sa-home-llm"
 )
 
 $ErrorActionPreference = "Stop"
@@ -81,6 +93,8 @@ if ($installed -eq $latestVersion) {
     exit 0
 }
 
+$llmTaskExists = $null -ne (Get-ScheduledTask -TaskName $LlmTaskName -ErrorAction SilentlyContinue)
+
 # --- 3. Стоп → pipx install --force → старт ---
 Log "Останавливаю службу $ServiceName..."
 Stop-Service -Name $ServiceName -ErrorAction Stop
@@ -91,6 +105,15 @@ while ((Get-Service $ServiceName).Status -ne 'Stopped' -and (Get-Date) -lt $dead
 if ((Get-Service $ServiceName).Status -ne 'Stopped') {
     Log "ОШИБКА: служба не остановилась за ${ServiceStopTimeoutSec}s — прерываю, обновление НЕ выполнено."
     exit 1
+}
+
+if ($llmTaskExists) {
+    # llm - отдельный от службы процесс (Session 0 не может звать wsl.exe,
+    # см. заметку у param() выше), сам держит открытым sa-home-bot.exe -
+    # без остановки pip падает с "файл занят" на переустановке.
+    Log "Останавливаю задачу $LlmTaskName (держит открытым sa-home-bot.exe)..."
+    Stop-ScheduledTask -TaskName $LlmTaskName -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
 }
 
 Log "pipx install --force до $latestTag..."
@@ -120,6 +143,14 @@ Log ($installOutput -join "`n")
 
 Log "Запускаю службу $ServiceName..."
 Start-Service -Name $ServiceName
+
+if ($llmTaskExists) {
+    # Перезапускаем независимо от $installOk — при неудачном install venv
+    # откатывается на старую версию (см. заметку у pipx выше), llm на ней
+    # тоже должна снова подняться, а не остаться лежать.
+    Log "Запускаю задачу $LlmTaskName..."
+    Start-ScheduledTask -TaskName $LlmTaskName -ErrorAction SilentlyContinue
+}
 
 if (-not $installOk) {
     Log "ОШИБКА: pipx install завершился с кодом $LASTEXITCODE — служба перезапущена на СТАРОЙ версии (venv при неудаче не трогается, см. вывод выше)."
