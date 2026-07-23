@@ -145,6 +145,28 @@ async def test_asleep_model_shows_steps_but_no_wake(store):
     assert link.wol_sent == []  # узел был доступен — будить не нужно
 
 
+async def test_asleep_warmup_fails_answers_as_albert_not_generic_error(store):
+    # Прогрев не уложился (Ollama не поднялась) — раз мы уже знали, что
+    # модель спит, это подаётся как «Альфред, кажется, уснул» (Альбегт),
+    # а не безликое «Прошу прощения, не вышло» от самого Альфреда.
+    message = FakeMessage()
+    notifier = FakeNotifier()
+    link = FakeNodeLink(
+        chat_results=[ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева")],
+        get_state_routes={"winpc:llm": {"asleep": True}},
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
+        _admin_book(), notifier,
+    )
+
+    assert raw is None
+    assert message.answers == [ai_flow.STEPS_TEXT, ai_flow.ALBERT_ASLEEP]
+    assert link.wol_sent == []  # узел был доступен — будить не нужно
+    assert len(notifier.sent) == 1  # админ всё равно узнаёт о сбое
+
+
 async def test_unavailable_then_woken_within_30s(store, monkeypatch):
     await wake_state.remember(store, "winpc", WINPC_WAKE)
     monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)

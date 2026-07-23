@@ -34,6 +34,7 @@ ACTION_CHAT = "chat"
 STEPS_TEXT = "Вы слышите приближающиеся шаги..."
 ARNOLD_WAKING = "<b>Агнольд:</b> Сейчас Альфред подойдёт"
 ALBERT_UNAVAILABLE = "<b>Альбегт:</b> К сожалению Альфреда нет на месте, попробуйте позже, сэр"
+ALBERT_ASLEEP = "<b>Альбегт:</b> Альфред, кажется, уснул — обратитесь позже, сэр"
 
 WAKE_POLL_TIMEOUT_S = 30.0
 WAKE_POLL_INTERVAL_S = 3.0
@@ -96,6 +97,7 @@ async def request_alfred(
     # ждать до request_timeout_s без всякой обратной связи. Узел при этом
     # доступен (просто отвечает не сразу) — это не сценарий wake ниже.
     steps_shown = False
+    asleep_warmup = False
     try:
         state = await node_link.get_state(dst=dst)
     except (ServiceUnavailableError, ProtoError):
@@ -103,6 +105,7 @@ async def request_alfred(
     if state is not None and state.get("asleep"):
         await message.answer(STEPS_TEXT)
         steps_shown = True
+        asleep_warmup = True
 
     try:
         return await _ask()
@@ -110,7 +113,11 @@ async def request_alfred(
         pass
     except ProtoError as exc:
         if not _is_unavailable(exc):
-            await message.answer(_error_text(exc))
+            # Узел был доступен и мы знали, что модель спит (прогрев) — если
+            # именно прогрев и не уложился, это не «внутренняя ошибка» в
+            # глазах пользователя, а прямое продолжение «шагов»: Альбегт,
+            # а не голое извинение Альфреда.
+            await message.answer(ALBERT_ASLEEP if asleep_warmup else _error_text(exc))
             await notify_admins(
                 book, notifier, f"⚠️ /ai (chat={chat_id}): {exc.code} — {exc.message}"
             )
