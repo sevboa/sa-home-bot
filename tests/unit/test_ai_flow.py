@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest_asyncio
@@ -32,6 +33,7 @@ OWN_STATE = {
 
 class FakeMessage:
     chat = SimpleNamespace(id=1)
+    from_user = None
 
     def __init__(self) -> None:
         self.answers: list[str] = []
@@ -47,6 +49,27 @@ class FakeNotifier:
     async def send_direct(self, chat_id, text, reply_to_message_id=None):
         self.sent.append((chat_id, text))
         return 1
+
+
+class FakeUser:
+    def __init__(self, first_name, last_name=None, username=None, id=1):  # noqa: A002
+        self.id = id
+        self.first_name = first_name
+        self.last_name = last_name
+        self.username = username
+
+    @property
+    def full_name(self):
+        return f"{self.first_name} {self.last_name}" if self.last_name else self.first_name
+
+
+class NoteMessage:
+    """Мини-заглушка Message только для _build_context_note — не тянет весь
+    presence/wake-сценарий FakeMessage/FakeNodeLink."""
+
+    def __init__(self, chat_id, chat_type, from_user):
+        self.chat = SimpleNamespace(id=chat_id, type=chat_type)
+        self.from_user = from_user
 
 
 def _admin_book() -> SubscriptionBook:
@@ -114,7 +137,7 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
     )
 
     raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
         _admin_book(), FakeNotifier(),
     )
 
@@ -140,7 +163,7 @@ async def test_asleep_model_shows_steps_but_no_wake(store):
     )
 
     raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
         _admin_book(), FakeNotifier(),
     )
 
@@ -161,7 +184,7 @@ async def test_asleep_warmup_fails_answers_as_albert_not_generic_error(store):
     )
 
     raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
         _admin_book(), notifier,
     )
 
@@ -184,7 +207,7 @@ async def test_unavailable_then_woken_within_30s(store, monkeypatch):
     )
 
     raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
         _admin_book(), FakeNotifier(),
     )
 
@@ -206,7 +229,7 @@ async def test_unavailable_and_no_wake_data_gives_up_immediately(store, monkeypa
     link = FakeNodeLink()
 
     raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
         _admin_book(), FakeNotifier(),
     )
 
@@ -224,7 +247,7 @@ async def test_unavailable_wake_sent_but_still_unreachable_after_30s(store, monk
     link = FakeNodeLink(get_state_routes={})  # winpc:llm так и не отвечает
 
     raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
         _admin_book(), FakeNotifier(),
     )
 
@@ -246,7 +269,7 @@ async def test_woken_but_retry_call_still_fails(store, monkeypatch):
     )
 
     raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
         _admin_book(), FakeNotifier(),
     )
 
@@ -272,7 +295,7 @@ async def test_internal_error_on_first_try_answers_user_and_notifies_admin(store
     )
 
     raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
         _admin_book(), notifier,
     )
 
@@ -304,7 +327,7 @@ async def test_internal_error_after_wake_answers_user_and_notifies_admin(store, 
     )
 
     raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
         _admin_book(), notifier,
     )
 
@@ -319,3 +342,71 @@ async def test_internal_error_after_wake_answers_user_and_notifies_admin(store, 
         ai_flow.ALBERT_ASLEEP,
     ]
     assert len(notifier.sent) == 1
+
+
+# --- display_name / _build_context_note (2026-07-24: "кто пишет", "кто
+# начал", "кто ещё обращался" — контекст для промпта LLM) ---
+
+
+def test_display_name_with_username():
+    assert ai_flow.display_name(FakeUser("Иван", username="ivan")) == "Иван (@ivan)"
+
+
+def test_display_name_without_username():
+    assert ai_flow.display_name(FakeUser("Иван", "Иванов")) == "Иван Иванов"
+
+
+def test_display_name_none_for_missing_user():
+    assert ai_flow.display_name(None) is None
+
+
+async def test_context_note_none_without_sender(store):
+    message = NoteMessage(1, "private", None)
+    assert await ai_flow._build_context_note(message, store, dialogue_id=1) is None
+
+
+async def test_context_note_private_chat_only_mentions_sender(store):
+    message = NoteMessage(1, "private", FakeUser("Иван", username="ivan"))
+    note = await ai_flow._build_context_note(message, store, dialogue_id=1)
+    assert note is not None
+    assert "Иван (@ivan)" in note
+    assert "начал" not in note
+    assert "также обращались" not in note
+
+
+async def test_context_note_group_includes_starter_and_other_participants(store):
+    ivan = FakeUser("Иван", username="ivan", id=10)
+    maria = FakeUser("Мария", id=20)
+    petr = FakeUser("Пётр", id=30)
+    now = datetime.now(tz=UTC)
+
+    # Иван начал этот тред (dialogue_id=500).
+    await store.record_ai_turn(
+        1, 500, 500, "user", "привет", now, user_id=10, user_name=ai_flow.display_name(ivan)
+    )
+    await store.record_ai_turn(1, 501, 500, "assistant", "Здравствуйте", now)
+    # Мария обращалась к Альфреду в этом же чате, но в другом треде.
+    await store.record_ai_turn(
+        1, 600, 600, "user", "как дела", now, user_id=20, user_name=ai_flow.display_name(maria)
+    )
+
+    message = NoteMessage(1, "group", petr)
+    note = await ai_flow._build_context_note(message, store, dialogue_id=500)
+
+    assert "Пётр" in note  # сейчас пишет
+    assert "Иван (@ivan)" in note  # начал тред
+    assert "Мария" in note  # ещё обращалась (другой тред, тот же чат)
+
+
+async def test_context_note_skips_starter_line_when_same_as_sender(store):
+    ivan = FakeUser("Иван", username="ivan", id=10)
+    now = datetime.now(tz=UTC)
+    await store.record_ai_turn(
+        1, 500, 500, "user", "привет", now, user_id=10, user_name=ai_flow.display_name(ivan)
+    )
+
+    message = NoteMessage(1, "group", ivan)
+    note = await ai_flow._build_context_note(message, store, dialogue_id=500)
+
+    assert note.count("Иван (@ivan)") == 1  # не повторяем "начал" для того же человека
+    assert "начал" not in note

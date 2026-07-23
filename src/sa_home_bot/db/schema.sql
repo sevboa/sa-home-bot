@@ -72,6 +72,12 @@ CREATE TABLE IF NOT EXISTS health_notifications (
 -- dialogue_id — message_id самой команды /ai, начавшей тред (свой же способ
 -- адресации уже монотонен и уникален в рамках чата, отдельный uuid не нужен).
 -- PRIMARY KEY составной: telegram message_id уникален только в рамках чата.
+-- user_id/user_name — отправитель хода (только role='user'; для 'assistant'
+-- NULL, это сам Альфред). Нужны, чтобы промпт LLM знал, кто именно пишет,
+-- кто начал тред и кто ещё обращался к Альфреду в этом чате (см.
+-- bot/ai_flow.py::_build_context_note). На уже существующих БД эти колонки
+-- добавляются миграцией ALTER TABLE (db/migrations.py) — CREATE TABLE IF NOT
+-- EXISTS их бы не подхватил.
 CREATE TABLE IF NOT EXISTS ai_turns (
     chat_id       INTEGER NOT NULL,
     message_id    INTEGER NOT NULL,   -- id именно этого сообщения (юзера или бота)
@@ -79,6 +85,8 @@ CREATE TABLE IF NOT EXISTS ai_turns (
     role          TEXT NOT NULL,      -- user / assistant
     content       TEXT NOT NULL,
     created_at    TEXT NOT NULL,
+    user_id       INTEGER,            -- telegram user id отправителя (role='user')
+    user_name     TEXT,               -- отображаемое имя отправителя (role='user')
     PRIMARY KEY (chat_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_ai_turns_dialogue ON ai_turns(chat_id, dialogue_id, message_id);

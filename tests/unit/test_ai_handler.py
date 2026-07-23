@@ -54,6 +54,7 @@ class FakeMessage:
         self.entities = entities
         self.bot = FakeBot()
         self.sent: list[str] = []
+        self.from_user = None
 
     async def answer(self, text, **kwargs):
         sent = FakeMessage(self.chat.id)
@@ -103,7 +104,9 @@ async def test_cmd_ai_without_text_asks_model_for_greeting(store, monkeypatch):
     # модели). Директива-приветствие в историю не пишется, только ответ.
     seen_history = []
 
-    async def fake_request(message, node_link, store_, config, history, book, notifier):
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier
+    ):
         seen_history.append(history)
         return "Да, сэг? Слушаю вас"
 
@@ -125,7 +128,9 @@ async def test_cmd_ai_without_text_asks_model_for_greeting(store, monkeypatch):
 
 
 async def test_cmd_ai_without_text_unavailable_records_nothing(store, monkeypatch):
-    async def fake_unavailable(message, node_link, store_, config, history, book, notifier):
+    async def fake_unavailable(
+        message, node_link, store_, config, history, dialogue_id, book, notifier
+    ):
         return None  # ai_flow уже сообщил пользователю сама
 
     monkeypatch.setattr(ai_flow, "request_alfred", fake_unavailable)
@@ -143,7 +148,9 @@ async def test_cmd_ai_without_text_unavailable_records_nothing(store, monkeypatc
 async def test_cmd_ai_with_text_calls_ai_flow_and_records_both_turns(store, monkeypatch):
     seen_history = []
 
-    async def fake_request(message, node_link, store_, config, history, book, notifier):
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier
+    ):
         seen_history.append(history)
         return "Добгый день, сэ"
 
@@ -166,7 +173,9 @@ async def test_cmd_ai_with_text_calls_ai_flow_and_records_both_turns(store, monk
 
 
 async def test_cmd_ai_returns_none_from_ai_flow_sends_nothing_extra(store, monkeypatch):
-    async def fake_unavailable(message, node_link, store_, config, history, book, notifier):
+    async def fake_unavailable(
+        message, node_link, store_, config, history, dialogue_id, book, notifier
+    ):
         return None  # ai_flow уже сообщил пользователю сама (не тестируем тут)
 
     monkeypatch.setattr(ai_flow, "request_alfred", fake_unavailable)
@@ -183,7 +192,9 @@ async def test_cmd_ai_returns_none_from_ai_flow_sends_nothing_extra(store, monke
 
 
 async def test_cmd_ai_unhandled_exception_apologizes_and_notifies_admin(store, monkeypatch):
-    async def boom(message, node_link, store_, config, history, book, notifier):
+    async def boom(
+        message, node_link, store_, config, history, dialogue_id, book, notifier
+    ):
         raise RuntimeError("что-то сломалось")
 
     monkeypatch.setattr(ai_flow, "request_alfred", boom)
@@ -254,7 +265,9 @@ async def test_on_ai_reply_appends_history_and_answers(store, monkeypatch):
 
     seen_history = []
 
-    async def fake_request(message, node_link, store_, config, history, book, notifier):
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier
+    ):
         seen_history.append(history)
         return "втогой ответ"
 
@@ -290,7 +303,9 @@ async def test_on_ai_reply_without_text_still_asks_model(store, monkeypatch):
 
     seen_history = []
 
-    async def fake_request(message, node_link, store_, config, history, book, notifier):
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier
+    ):
         seen_history.append(history)
         return "Простите, не расслышал, сэр"
 
@@ -373,7 +388,9 @@ async def test_group_mention_filter_ignores_private_chat():
 async def test_on_private_message_starts_new_dialogue_when_none_exists(store, monkeypatch):
     seen_history = []
 
-    async def fake_request(message, node_link, store_, config, history, book, notifier):
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier
+    ):
         seen_history.append(history)
         return "Здгавствуйте, сэ"
 
@@ -397,7 +414,9 @@ async def test_on_private_message_continues_latest_dialogue(store, monkeypatch):
 
     seen_history = []
 
-    async def fake_request(message, node_link, store_, config, history, book, notifier):
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier
+    ):
         seen_history.append(history)
         return "втогой ответ"
 
@@ -436,7 +455,9 @@ async def test_on_private_message_denied_without_right(store):
 async def test_on_group_mention_with_text_starts_fresh_dialogue(store, monkeypatch):
     seen_history = []
 
-    async def fake_request(message, node_link, store_, config, history, book, notifier):
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier
+    ):
         seen_history.append(history)
         return "Слушаю, сэ"
 
@@ -456,7 +477,9 @@ async def test_on_group_mention_with_text_starts_fresh_dialogue(store, monkeypat
 async def test_on_group_mention_without_text_asks_model_for_greeting(store, monkeypatch):
     seen_history = []
 
-    async def fake_request(message, node_link, store_, config, history, book, notifier):
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier
+    ):
         seen_history.append(history)
         return "Да, сэг?"
 

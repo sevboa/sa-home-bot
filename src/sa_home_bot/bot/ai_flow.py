@@ -15,7 +15,7 @@ import asyncio
 import logging
 from typing import Any
 
-from aiogram.types import Message
+from aiogram.types import Message, User
 
 from sa_home_bot.bot import swarm_view
 from sa_home_bot.bot.handlers.wake import wake_swarm_node_core
@@ -81,12 +81,58 @@ async def notify_admins(book: SubscriptionBook, notifier: Notifier, text: str) -
             await notifier.send_direct(sub.chat_id, text)
 
 
+def display_name(user: User | None) -> str | None:
+    """Имя для промпта LLM и для колонки ai_turns.user_name: имя(+фамилия)
+    Telegram-профиля, плюс @username в скобках, если он есть (полезно, когда
+    у двух собеседников совпадают имена)."""
+    if user is None:
+        return None
+    name = user.full_name
+    return f"{name} (@{user.username})" if user.username else name
+
+
+async def _build_context_note(message: Message, store: Store, dialogue_id: int) -> str | None:
+    """Служебная заметка для модели (не для пользователя): кто сейчас пишет,
+    кто начал этот тред и кто ещё обращался к Альфреду в этом чате.
+
+    Последние два пункта — только для групп: в личке собеседник всегда один
+    и тот же, уточнять нечего. Строится заново на каждый запрос (не
+    хранится в ai_turns) — участники чата могут появляться по ходу дела."""
+    sender_name = display_name(message.from_user)
+    if sender_name is None:
+        return None
+    lines = [f"Сейчас с тобой говорит: {sender_name}."]
+
+    is_group = message.chat is not None and message.chat.type in ("group", "supergroup")
+    if is_group:
+        starter = await store.ai_turn(message.chat.id, dialogue_id)
+        starter_name = starter.get("user_name") if starter else None
+        if starter_name and starter_name != sender_name:
+            lines.append(f"Этот разговор начал(а): {starter_name}.")
+
+        participants = await store.chat_participants(message.chat.id)
+        others = [
+            p["user_name"]
+            for p in participants
+            if p["user_name"] and p["user_name"] not in (sender_name, starter_name)
+        ]
+        if others:
+            lines.append("В этом чате к тебе также обращались: " + ", ".join(others) + ".")
+
+    lines.append(
+        "Это справка для тебя, не пересказывай её вслух — просто учти при ответе "
+        "(например, обратиться по имени), если уместно."
+    )
+    return " ".join(lines)
+
+
 async def request_alfred(
     message: Message,
     node_link: ServiceLink,
     store: Store,
     settings: Settings,
     history: list[dict[str, str]],
+    dialogue_id: int,
     book: SubscriptionBook,
     notifier: Notifier,
 ) -> str | None:
@@ -99,9 +145,14 @@ async def request_alfred(
     dst = Address(node=LLM_NODE, service=LLM_SERVICE)
     timeout = settings.llm.request_timeout_s
     chat_id = message.chat.id if message.chat else "?"
+    context_note = await _build_context_note(message, store, dialogue_id)
 
     async def _ask() -> str:
-        args: dict[str, Any] = {"messages": history}
+        if context_note:
+            messages = [{"role": "system", "content": context_note}, *history]
+        else:
+            messages = history
+        args: dict[str, Any] = {"messages": messages}
         if message.chat is not None:
             # chat_id — не для маршрутизации (та по dst), а чтобы служба
             # знала, какие чаты уведомлять при llm_idle_sleep (см. докстринг

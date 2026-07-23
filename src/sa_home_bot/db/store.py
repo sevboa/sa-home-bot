@@ -398,12 +398,14 @@ class Store:
         role: str,
         content: str,
         at: datetime,
+        user_id: int | None = None,
+        user_name: str | None = None,
     ) -> None:
         async with self.db.transaction() as conn:
             await conn.execute(
-                "INSERT INTO ai_turns(chat_id, message_id, dialogue_id, role, content, created_at) "
-                "VALUES(?, ?, ?, ?, ?, ?)",
-                (chat_id, message_id, dialogue_id, role, content, _iso(at)),
+                "INSERT INTO ai_turns(chat_id, message_id, dialogue_id, role, content, "
+                "created_at, user_id, user_name) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                (chat_id, message_id, dialogue_id, role, content, _iso(at), user_id, user_name),
             )
 
     async def ai_turn(self, chat_id: int, message_id: int) -> dict | None:
@@ -418,6 +420,21 @@ class Store:
         cur = await self.db.conn.execute(
             "SELECT * FROM ai_turns WHERE chat_id=? AND dialogue_id=? ORDER BY message_id",
             (chat_id, dialogue_id),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def chat_participants(self, chat_id: int) -> list[dict]:
+        """Различные пользователи (role='user'), кто когда-либо обращался к
+        Альфреду в этом чате — для группового контекста промпта
+        (bot/ai_flow.py::_build_context_note). Старые записи без user_id
+        (до миграции) в выборку не попадают — это не критично, участники
+        со временем "подтянутся" новыми обращениями."""
+        cur = await self.db.conn.execute(
+            "SELECT user_id, user_name, MIN(message_id) AS first_message_id "
+            "FROM ai_turns WHERE chat_id=? AND role='user' AND user_id IS NOT NULL "
+            "GROUP BY user_id ORDER BY first_message_id",
+            (chat_id,),
         )
         rows = await cur.fetchall()
         return [dict(r) for r in rows]

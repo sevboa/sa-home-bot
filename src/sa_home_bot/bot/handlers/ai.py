@@ -126,7 +126,17 @@ async def cmd_ai(
 
     if prompt:
         now = datetime.now(tz=UTC)
-        await store.record_ai_turn(message.chat.id, dialogue_id, dialogue_id, "user", prompt, now)
+        sender = message.from_user
+        await store.record_ai_turn(
+            message.chat.id,
+            dialogue_id,
+            dialogue_id,
+            "user",
+            prompt,
+            now,
+            user_id=sender.id if sender else None,
+            user_name=ai_flow.display_name(sender),
+        )
         history = [{"role": "user", "content": prompt}]
     else:
         # Директива-приветствие не сохраняется как ход диалога — только то,
@@ -159,8 +169,16 @@ async def on_ai_reply(
 
     if text:
         now = datetime.now(tz=UTC)
+        sender = message.from_user
         await store.record_ai_turn(
-            message.chat.id, message.message_id, ai_dialogue_id, "user", text, now
+            message.chat.id,
+            message.message_id,
+            ai_dialogue_id,
+            "user",
+            text,
+            now,
+            user_id=sender.id if sender else None,
+            user_name=ai_flow.display_name(sender),
         )
         history_rows = await store.ai_turns_for_dialogue(message.chat.id, ai_dialogue_id)
         history = [
@@ -203,7 +221,17 @@ async def on_private_message(
         dialogue_id = message.message_id
 
     now = datetime.now(tz=UTC)
-    await store.record_ai_turn(message.chat.id, message.message_id, dialogue_id, "user", text, now)
+    sender = message.from_user
+    await store.record_ai_turn(
+        message.chat.id,
+        message.message_id,
+        dialogue_id,
+        "user",
+        text,
+        now,
+        user_id=sender.id if sender else None,
+        user_name=ai_flow.display_name(sender),
+    )
     history_rows = await store.ai_turns_for_dialogue(message.chat.id, dialogue_id)
     history = [{"role": r["role"], "content": r["content"]} for r in history_rows if r["content"]]
 
@@ -228,8 +256,16 @@ async def on_group_mention(
     dialogue_id = message.message_id
     if mention_prompt:
         now = datetime.now(tz=UTC)
+        sender = message.from_user
         await store.record_ai_turn(
-            message.chat.id, dialogue_id, dialogue_id, "user", mention_prompt, now
+            message.chat.id,
+            dialogue_id,
+            dialogue_id,
+            "user",
+            mention_prompt,
+            now,
+            user_id=sender.id if sender else None,
+            user_name=ai_flow.display_name(sender),
         )
         history = [{"role": "user", "content": mention_prompt}]
     else:
@@ -252,7 +288,7 @@ async def _ask_and_reply(
     await message.bot.send_chat_action(message.chat.id, "typing")
     try:
         raw = await ai_flow.request_alfred(
-            message, node_link, store, config, history, book, notifier
+            message, node_link, store, config, history, dialogue_id, book, notifier
         )
     except Exception as exc:  # noqa: BLE001 — страховка: баг тут не должен быть молчаливым
         log.exception("ai: необработанная ошибка в диалоге chat=%s", message.chat.id)
