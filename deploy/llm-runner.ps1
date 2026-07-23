@@ -11,13 +11,20 @@
 # actually running llm), example registration:
 #
 #   $action = New-ScheduledTaskAction -Execute "powershell.exe" `
-#       -Argument '-NoProfile -ExecutionPolicy Bypass -File "C:\ProgramData\sa-home-bot\llm-runner.ps1"'
+#       -Argument '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\ProgramData\sa-home-bot\llm-runner.ps1"'
 #   $trigger = New-ScheduledTaskTrigger -AtLogOn -User "User"
 #   $principal = New-ScheduledTaskPrincipal -UserId "User" -LogonType Interactive -RunLevel Limited
 #   $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopOnIdleEnd `
 #       -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 #   Register-ScheduledTask -TaskName "sa-home-llm" -Action $action -Trigger $trigger `
 #       -Principal $principal -Settings $settings -Force
+#
+# -WindowStyle Hidden (live finding 2026-07-24): interactive session means a
+# real, visible console window on the desktop. Left visible, a stray click
+# into it can trigger Windows Console Quick Edit Mode (text selection with
+# the mouse) - the console then blocks on ReadConsole until Enter/right-click,
+# silently freezing the whole restart loop (and Alfred with it) with no crash
+# and no log line to explain why. Hidden, there is nothing to click.
 #
 # NOTE (live finding 2026-07-23): this file must stay plain ASCII. Windows
 # PowerShell 5.1 auto-detects source encoding for .ps1 files without a BOM
