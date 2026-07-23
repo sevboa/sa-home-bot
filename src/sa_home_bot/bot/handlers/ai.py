@@ -18,7 +18,7 @@ from aiogram.filters import Command, Filter
 from aiogram.types import Message
 
 from sa_home_bot.bot import ai_flow, commands
-from sa_home_bot.bot.notifier import Notifier
+from sa_home_bot.bot.notifier import Notifier, chunk_text
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
@@ -301,7 +301,23 @@ async def _ask_and_reply(
         return
     if raw is None:
         return  # недоступность/ошибка уже сообщена пользователю (ai_flow)
-    sent = await message.reply(_format_answer(raw))
+    sent = await _send_alfred_reply(message, raw)
     await store.record_ai_turn(
         message.chat.id, sent.message_id, dialogue_id, "assistant", raw, datetime.now(tz=UTC)
     )
+
+
+async def _send_alfred_reply(message: Message, raw: str) -> Message:
+    """Отправить ответ Альфреда, при необходимости несколькими сообщениями.
+
+    Промпт (llm/prompt.py) просит модель укладываться в ~3500 знаков и
+    самой предлагать продолжение — но это не гарантия (модель может
+    промахнуться), а Telegram режёт сообщение на 4096 символах. Без этой
+    страховки длинный ответ ронял бы весь хендлер необработанным
+    TelegramBadRequest. Возвращает последнее отправленное сообщение —
+    именно на него отвечает пользователь, продолжая тред."""
+    chunks = chunk_text(_format_answer(raw))
+    sent = await message.reply(chunks[0])
+    for chunk in chunks[1:]:
+        sent = await message.answer(chunk)
+    return sent

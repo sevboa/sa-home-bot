@@ -172,6 +172,34 @@ async def test_cmd_ai_with_text_calls_ai_flow_and_records_both_turns(store, monk
     assert rows[1]["content"] == "Добгый день, сэ"
 
 
+async def test_cmd_ai_long_response_is_split_across_telegram_messages(store, monkeypatch):
+    # Промпт (llm/prompt.py) просит модель уложиться в ~3500 знаков — но это
+    # не гарантия, а Telegram режёт на 4096. Без чанкования в
+    # _send_alfred_reply длинный ответ уронил бы хендлер TelegramBadRequest.
+    long_answer = "Жили-были. " * 500
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier
+    ):
+        return long_answer
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, text="/alfred расскажи историю")
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+    )
+
+    expected_chunks = ai_handler.chunk_text(ai_handler._format_answer(long_answer))
+    assert len(expected_chunks) > 1  # проверка не имеет смысла на одном чанке
+    assert message.sent == expected_chunks
+
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    assert rows[-1]["role"] == "assistant"
+    assert rows[-1]["content"] == long_answer  # в БД — цельный текст, не куски
+
+
 async def test_cmd_ai_returns_none_from_ai_flow_sends_nothing_extra(store, monkeypatch):
     async def fake_unavailable(
         message, node_link, store_, config, history, dialogue_id, book, notifier

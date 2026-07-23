@@ -15,7 +15,7 @@ MAX_LEN = 4096
 MAX_RETRIES = 3
 
 
-def _chunk(text: str, limit: int = MAX_LEN) -> list[str]:
+def chunk_text(text: str, limit: int = MAX_LEN) -> list[str]:
     if len(text) <= limit:
         return [text]
     chunks: list[str] = []
@@ -39,7 +39,7 @@ class Notifier:
         self, chat_id: int, text: str, reply_to_message_id: int | None = None
     ) -> int | None:
         """Отправить сообщение. Вернуть message_id первого чанка или None при провале."""
-        chunks = _chunk(text)
+        chunks = chunk_text(text)
         first_message_id: int | None = None
         for i, chunk in enumerate(chunks):
             reply = (
