@@ -189,7 +189,9 @@ async def test_unavailable_then_woken_within_30s(store, monkeypatch):
     )
 
     assert raw == "Сейчас подойду"
-    assert message.answers == [ai_flow.STEPS_TEXT, ai_flow.ARNOLD_WAKING]
+    # Второе «шаги» — про поднятие контейнера (отдельная неопределённость
+    # от самого wake); успех не добавляет отдельного сообщения персонажа.
+    assert message.answers == [ai_flow.STEPS_TEXT, ai_flow.ARNOLD_WAKING, ai_flow.STEPS_TEXT]
     assert link.wol_sent == [{"mac": WINPC_WAKE["mac"]}]  # разбудили молча
 
 
@@ -250,6 +252,7 @@ async def test_woken_but_retry_call_still_fails(store, monkeypatch):
     assert message.answers == [
         ai_flow.STEPS_TEXT,
         ai_flow.ARNOLD_WAKING,
+        ai_flow.STEPS_TEXT,
         ai_flow.ALBERT_UNAVAILABLE,
     ]
 
@@ -301,9 +304,13 @@ async def test_internal_error_after_wake_answers_user_and_notifies_admin(store, 
     )
 
     assert raw is None
+    # Провал именно после успешного wake (контейнер не поднялся) — это
+    # шаги уже Альбегта, не безликое извинение Альфреда: Агнольд успешно
+    # разбудил машину, а дальше не задалось у того, кто пошёл за Альфредом.
     assert message.answers == [
         ai_flow.STEPS_TEXT,
         ai_flow.ARNOLD_WAKING,
-        ai_flow._GENERIC_ERROR_TEXT,
+        ai_flow.STEPS_TEXT,
+        ai_flow.ALBERT_ASLEEP,
     ]
     assert len(notifier.sent) == 1

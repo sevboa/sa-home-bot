@@ -271,3 +271,38 @@ async def test_on_ai_reply_appends_history_and_answers(store, monkeypatch):
         ]
     ]
     assert message.sent == [ai_handler._format_answer("втогой ответ")]
+
+
+async def test_on_ai_reply_without_text_still_asks_model(store, monkeypatch):
+    # Реплай стикером/фото без подписи (message.text пуст) — раньше молча
+    # игнорировался, теперь модель всё равно спрашивают, с пометкой, что
+    # ход был пустым (директива не пишется в ai_turns).
+    await store.record_ai_turn(1, 500, 500, "assistant", "", _now())
+
+    seen_history = []
+
+    async def fake_request(message, node_link, store_, config, history, book, notifier):
+        seen_history.append(history)
+        return "Простите, не расслышал, сэр"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, text=None)  # стикер и т.п. — text=None
+
+    await ai_handler.on_ai_reply(
+        message,
+        ai_dialogue_id=500,
+        node_link=None,
+        store=store,
+        config=Settings(),
+        book=_admin_book(),
+        notifier=FakeNotifier(),
+        subscription=_sub("chat@llm"),
+    )
+
+    assert seen_history == [[{"role": "user", "content": ai_handler.EMPTY_REPLY_PROMPT}]]
+    assert message.sent == [ai_handler._format_answer("Простите, не расслышал, сэр")]
+
+    # Директива не осела в истории — только ответ ассистента.
+    rows = await store.ai_turns_for_dialogue(1, 500)
+    assert [r["role"] for r in rows] == ["assistant", "assistant"]
+    assert rows[-1]["content"] == "Простите, не расслышал, сэр"

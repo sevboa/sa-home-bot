@@ -146,6 +146,12 @@ async def request_alfred(
         return None
 
     await message.answer(ARNOLD_WAKING)
+    # Второе «шаги»: машина проснулась (шаги были Агнольда), но контейнер с
+    # моделью — отдельное, тоже не гарантированное ожидание. Если оно
+    # провалится — это уже шаги Альбегта (см. ALBERT_ASLEEP ниже), не
+    # переиспользуем первое сообщение, чтобы сюжетно оба провала были у
+    # разных персонажей, а успех — молча «оказывается, шёл Агнольд».
+    await message.answer(STEPS_TEXT)
     try:
         return await _ask()
     except ServiceUnavailableError:
@@ -155,7 +161,7 @@ async def request_alfred(
         if _is_unavailable(exc):
             await message.answer(ALBERT_UNAVAILABLE)
         else:
-            await message.answer(_error_text(exc))
+            await message.answer(ALBERT_ASLEEP)
             await notify_admins(
                 book, notifier, f"⚠️ /ai (chat={chat_id}, после wake): {exc.code} — {exc.message}"
             )

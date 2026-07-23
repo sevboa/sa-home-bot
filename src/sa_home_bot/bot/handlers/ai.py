@@ -39,6 +39,15 @@ OPENING_PROMPT = (
     "Тебя только что позвали, без конкретного вопроса. Поприветствуй "
     "коротко, в характере — дай понять, что ты здесь и готов слушать."
 )
+# Реплай в тред без текста (стикер/фото/голосовое без подписи и т.п.) — тоже
+# не молчим (раньше просто игнорировали, диалог как будто не реагировал),
+# а сообщаем модели, что ход был пустым — та же логика, что и OPENING_PROMPT:
+# директива не сохраняется как ход диалога, только ответ на неё.
+EMPTY_REPLY_PROMPT = (
+    "Пользователь ответил в этом треде, не написав никакого текста "
+    "(например, стикером или фото без подписи). Отреагируй коротко, в "
+    "характере — переспроси или отметь, что не расслышал."
+)
 
 
 def _format_answer(raw: str) -> str:
@@ -104,17 +113,25 @@ async def on_ai_reply(
     if subscription is None or not subscription.allows_command(right):
         return
     text = (message.text or "").strip()
-    if not text:
-        return
 
-    now = datetime.now(tz=UTC)
-    await store.record_ai_turn(
-        message.chat.id, message.message_id, ai_dialogue_id, "user", text, now
-    )
-    history_rows = await store.ai_turns_for_dialogue(message.chat.id, ai_dialogue_id)
-    history = [
-        {"role": r["role"], "content": r["content"]} for r in history_rows if r["content"]
-    ]
+    if text:
+        now = datetime.now(tz=UTC)
+        await store.record_ai_turn(
+            message.chat.id, message.message_id, ai_dialogue_id, "user", text, now
+        )
+        history_rows = await store.ai_turns_for_dialogue(message.chat.id, ai_dialogue_id)
+        history = [
+            {"role": r["role"], "content": r["content"]} for r in history_rows if r["content"]
+        ]
+    else:
+        # Пустой ход не пишем в ai_turns (как OPENING_PROMPT) — модель видит
+        # директиву только в этом запросе, история треда её не запоминает.
+        history_rows = await store.ai_turns_for_dialogue(message.chat.id, ai_dialogue_id)
+        history = [
+            {"role": r["role"], "content": r["content"]} for r in history_rows if r["content"]
+        ]
+        history.append({"role": "user", "content": EMPTY_REPLY_PROMPT})
+
     await _ask_and_reply(
         message, node_link, store, config, book, notifier, ai_dialogue_id, history
     )
