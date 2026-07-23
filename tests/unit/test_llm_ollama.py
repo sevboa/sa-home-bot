@@ -236,19 +236,18 @@ class FakeKeepaliveProc:
     def __init__(self) -> None:
         self.terminated = False
         self.waited = False
+        self.returncode = None  # None = ещё выполняется, как настоящий Process
 
     def terminate(self) -> None:
         self.terminated = True
 
     async def wait(self) -> int:
         self.waited = True
+        self.returncode = 0
         return 0
 
 
-async def test_post_with_retry_starts_and_terminates_keepalive(monkeypatch):
-    # Живая находка: короткоживущие вызовы wsl.exe не держат WSL2-VM живой —
-    # без фонового keepalive-процесса она гаснет посреди самого запроса.
-    monkeypatch.setattr(ollama, "ensure_running", _noop)
+async def test_wsl_keepalive_start_spawns_long_sleep(monkeypatch):
     fake_proc = FakeKeepaliveProc()
     spawn_calls = []
 
@@ -257,36 +256,50 @@ async def test_post_with_retry_starts_and_terminates_keepalive(monkeypatch):
         return fake_proc
 
     monkeypatch.setattr(ollama.asyncio, "create_subprocess_exec", fake_exec)
-    monkeypatch.setattr(
-        ollama, "_post_json_sync", lambda url, payload, timeout: {"message": {"content": "ok"}}
-    )
+    keepalive = ollama.WslKeepalive(_cfg(wsl_distro="Docker"), duration_s=1860.0)
 
-    result = await ollama.chat(
-        _cfg(wsl_distro="Docker"), [{"role": "user", "content": "привет"}], "system"
-    )
+    assert keepalive.alive is False
+    await keepalive.start()
 
-    assert result == {"message": {"content": "ok"}}
     assert spawn_calls[0][:6] == ("wsl", "-d", "Docker", "-u", "root", "--")
-    assert spawn_calls[0][6] == "sleep"
+    assert spawn_calls[0][6:8] == ("sleep", "1860")
+    assert keepalive.alive is True
+
+
+async def test_wsl_keepalive_stop_terminates_process(monkeypatch):
+    fake_proc = FakeKeepaliveProc()
+
+    async def fake_exec(*args, **kwargs):
+        return fake_proc
+
+    monkeypatch.setattr(ollama.asyncio, "create_subprocess_exec", fake_exec)
+    keepalive = ollama.WslKeepalive(_cfg(), duration_s=60.0)
+    await keepalive.start()
+
+    await keepalive.stop()
+
     assert fake_proc.terminated is True
     assert fake_proc.waited is True
+    assert keepalive.alive is False
 
 
-async def test_keepalive_spawn_failure_does_not_break_request(monkeypatch):
+async def test_wsl_keepalive_spawn_failure_leaves_it_not_alive(monkeypatch):
     # Не удалось поднять keepalive (например, самого wsl.exe нет) — не
-    # повод валить весь запрос, просто едем без подстраховки.
-    monkeypatch.setattr(ollama, "ensure_running", _noop)
-
+    # повод валить вызывающий код, просто остаётся "не живым".
     async def fake_exec(*args, **kwargs):
         raise OSError("wsl.exe not found")
 
     monkeypatch.setattr(ollama.asyncio, "create_subprocess_exec", fake_exec)
-    monkeypatch.setattr(
-        ollama, "_post_json_sync", lambda url, payload, timeout: {"message": {"content": "ok"}}
-    )
+    keepalive = ollama.WslKeepalive(_cfg(), duration_s=60.0)
 
-    result = await ollama.chat(_cfg(), [{"role": "user", "content": "привет"}], "system")
-    assert result == {"message": {"content": "ok"}}
+    await keepalive.start()  # не бросает
+
+    assert keepalive.alive is False
+
+
+async def test_wsl_keepalive_stop_without_start_is_noop():
+    keepalive = ollama.WslKeepalive(_cfg(), duration_s=60.0)
+    await keepalive.stop()  # не бросает, даже если start() не звали
 
 
 async def _noop(cfg):

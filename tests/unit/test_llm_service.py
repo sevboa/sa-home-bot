@@ -265,3 +265,70 @@ async def test_emit_failure_does_not_break_sleep(monkeypatch):
     await svc.run_command("sleep", {})  # не должно бросить исключение
 
     assert (await svc.get_state())["asleep"] is True
+
+
+# --- WSL keepalive живёт весь тёплый период, не один запрос (живая
+# находка 2026-07-23: раньше держался только на время одного вызова в
+# llm/ollama.py, и WSL гасла уже через секунды после ответа — задолго до
+# idle_sleep_after_s) ---
+
+
+class FakeKeepalive:
+    def __init__(self, cfg, duration_s) -> None:
+        self.duration_s = duration_s
+        self._alive = False
+        self.start_calls = 0
+        self.stop_calls = 0
+
+    @property
+    def alive(self) -> bool:
+        return self._alive
+
+    async def start(self) -> None:
+        self.start_calls += 1
+        self._alive = True
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
+        self._alive = False
+
+
+def test_keepalive_duration_covers_idle_window(monkeypatch):
+    monkeypatch.setattr(llm_service.ollama, "WslKeepalive", FakeKeepalive)
+    svc = LlmService(_settings(idle_sleep_after_s=1800.0))
+    assert svc._keepalive.duration_s == 1800.0 + 60.0  # запас поверх idle-порога
+
+
+async def test_keepalive_started_on_first_activity_and_not_restarted(monkeypatch):
+    async def fake_chat(cfg, messages, system):
+        return {"message": {"content": "ответ"}}
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    monkeypatch.setattr(llm_service.ollama, "WslKeepalive", FakeKeepalive)
+    svc = LlmService(_settings())
+
+    await svc.run_command("chat", {"messages": [{"role": "user", "content": "1"}]})
+    await svc.run_command("chat", {"messages": [{"role": "user", "content": "2"}]})
+
+    assert svc._keepalive.start_calls == 1  # второй раз уже жив — не перезапускаем
+
+
+async def test_keepalive_stopped_only_when_service_actually_sleeps(monkeypatch):
+    async def fake_chat(cfg, messages, system):
+        return {"message": {"content": "ответ"}}
+
+    async def fake_stop(cfg):
+        pass
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    monkeypatch.setattr(llm_service.ollama, "stop", fake_stop)
+    monkeypatch.setattr(llm_service.ollama, "WslKeepalive", FakeKeepalive)
+    svc = LlmService(_settings())
+
+    await svc.run_command("chat", {"messages": [{"role": "user", "content": "1"}]})
+    assert svc._keepalive.alive is True
+
+    await svc.run_command("sleep", {})
+
+    assert svc._keepalive.alive is False
+    assert svc._keepalive.stop_calls == 1

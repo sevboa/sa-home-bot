@@ -11,6 +11,7 @@ winpc недоступна, показать «шаги», молча разбу
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -44,6 +45,13 @@ CLOSING_TEXT = "<i>Альфред не дождался обращения и у
 
 WAKE_POLL_TIMEOUT_S = 30.0
 WAKE_POLL_INTERVAL_S = 3.0
+# Живая находка 2026-07-23: TCP-keepalive (proto/client.py) обнаруживает
+# пропавшего пира не мгновенно (до ~50с — TCP_KEEPALIVE_IDLE_S=20 +
+# INTERVAL_S=10 * COUNT=3), а get_state() без явного укороченного таймаута
+# ждёт весь дефолт ProtoClient (10с) на каждый хоп. Если presence-проверка
+# уже говорит "недоступна" — не тратим ещё раз время на полноценный _ask()
+# (до request_timeout_s) с тем же исходом, сразу идём в сценарий wake.
+_PRESENCE_CHECK_TIMEOUT_S = 3.0
 
 
 def _is_unavailable(exc: Exception) -> bool:
@@ -106,32 +114,37 @@ async def request_alfred(
     # да, предупредить о прогреве СРАЗУ, а не оставлять пользователя молча
     # ждать до request_timeout_s без всякой обратной связи. Узел при этом
     # доступен (просто отвечает не сразу) — это не сценарий wake ниже.
+    # Короткий таймаут (см. _PRESENCE_CHECK_TIMEOUT_S) — это только быстрая
+    # проверка, не повод ждать так же долго, как за настоящим ответом.
     steps_shown = False
     asleep_warmup = False
+    known_unavailable = False
     try:
-        state = await node_link.get_state(dst=dst)
-    except (ServiceUnavailableError, ProtoError):
-        state = None  # не знаем, спит или недоступна вовсе — увидим по chat
+        state = await asyncio.wait_for(node_link.get_state(dst=dst), _PRESENCE_CHECK_TIMEOUT_S)
+    except (ServiceUnavailableError, ProtoError, TimeoutError):
+        state = None
+        known_unavailable = True  # презумпция: раз даже get_state не достучался — недоступна
     if state is not None and state.get("asleep"):
         await message.answer(STEPS_TEXT)
         steps_shown = True
         asleep_warmup = True
 
-    try:
-        return await _ask()
-    except ServiceUnavailableError:
-        pass
-    except ProtoError as exc:
-        if not _is_unavailable(exc):
-            # Узел был доступен и мы знали, что модель спит (прогрев) — если
-            # именно прогрев и не уложился, это не «внутренняя ошибка» в
-            # глазах пользователя, а прямое продолжение «шагов»: Альбегт,
-            # а не голое извинение Альфреда.
-            await message.answer(ALBERT_ASLEEP if asleep_warmup else _error_text(exc))
-            await notify_admins(
-                book, notifier, f"⚠️ /ai (chat={chat_id}): {exc.code} — {exc.message}"
-            )
-            return None
+    if not known_unavailable:
+        try:
+            return await _ask()
+        except ServiceUnavailableError:
+            pass
+        except ProtoError as exc:
+            if not _is_unavailable(exc):
+                # Узел был доступен и мы знали, что модель спит (прогрев) —
+                # если именно прогрев и не уложился, это не «внутренняя
+                # ошибка» в глазах пользователя, а прямое продолжение
+                # «шагов»: Альбегт, а не голое извинение Альфреда.
+                await message.answer(ALBERT_ASLEEP if asleep_warmup else _error_text(exc))
+                await notify_admins(
+                    book, notifier, f"⚠️ /ai (chat={chat_id}): {exc.code} — {exc.message}"
+                )
+                return None
 
     # --- недоступна: шаги (если ещё не показали) -> молчаливый wake -> poll
     # до 30с -> Агнольд/Альбегт ---

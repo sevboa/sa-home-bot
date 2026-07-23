@@ -61,6 +61,15 @@ class LlmService:
         self._last_activity = datetime.now(tz=UTC)
         self._asleep = False
         self._active_chat_ids: set[int] = set()
+        # Живая находка 2026-07-23: короткоживущие вызовы wsl.exe (прогрев,
+        # ретраи в llm/ollama.py) сами по себе не держат WSL2-VM живой — она
+        # гасла уже через секунды после КАЖДОГО ответа, а не через
+        # idle_sleep_after_s. Keepalive-процесс теперь живёт здесь, на весь
+        # тёплый период (старт при выходе из простоя, стоп — вместе с
+        # реальным сном), не вокруг одного запроса (см. llm/ollama.py).
+        self._keepalive = ollama.WslKeepalive(
+            self._cfg, duration_s=self._cfg.idle_sleep_after_s + 60.0
+        )
 
     def describe(self) -> ServiceDescription:
         return ServiceDescription(
@@ -106,25 +115,27 @@ class LlmService:
             "asleep": self._asleep,
         }
 
-    def _touch(self, chat_id: Any = None) -> None:
+    async def _touch(self, chat_id: Any = None) -> None:
         self._last_activity = datetime.now(tz=UTC)
         self._asleep = False
         if isinstance(chat_id, int):
             self._active_chat_ids.add(chat_id)
+        if not self._keepalive.alive:
+            await self._keepalive.start()
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if action == ACTION_ASK:
             prompt = args.get("prompt")
             if not isinstance(prompt, str) or not prompt:
                 raise ProtoError(ERR_BAD_REQUEST, "prompt должен быть непустой строкой")
-            self._touch(args.get("chat_id"))
+            await self._touch(args.get("chat_id"))
             result = await ollama.generate(self._cfg, prompt, SYSTEM_PROMPT)
             return {"response": result.get("response", ""), "model": self._cfg.model}
         if action == ACTION_CHAT:
             messages = args.get("messages")
             if not isinstance(messages, list) or not messages:
                 raise ProtoError(ERR_BAD_REQUEST, "messages должен быть непустым списком")
-            self._touch(args.get("chat_id"))
+            await self._touch(args.get("chat_id"))
             result = await ollama.chat(self._cfg, messages, SYSTEM_PROMPT)
             reply = result.get("message", {}).get("content", "")
             return {"response": reply, "model": self._cfg.model}
@@ -136,6 +147,7 @@ class LlmService:
 
     async def _sleep_now(self) -> None:
         await ollama.stop(self._cfg)
+        await self._keepalive.stop()
         self._asleep = True
         if self._active_chat_ids:
             chat_ids = sorted(self._active_chat_ids)

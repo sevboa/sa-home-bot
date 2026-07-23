@@ -196,10 +196,14 @@ async def test_unavailable_then_woken_within_30s(store, monkeypatch):
 
 
 async def test_unavailable_and_no_wake_data_gives_up_immediately(store, monkeypatch):
+    # get_state_routes пуст — presence-проверка сама уже "недоступна",
+    # полноценный _ask() с этим же исходом не запускается вовсе (живая
+    # находка 2026-07-23: не тратим до request_timeout_s на заведомо
+    # обречённую попытку, см. _PRESENCE_CHECK_TIMEOUT_S).
     monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
     monkeypatch.setattr(ai_flow, "WAKE_POLL_TIMEOUT_S", 0.05)
     message = FakeMessage()
-    link = FakeNodeLink(chat_results=[ProtoError(ERR_UNAVAILABLE, "нода недоступна")])
+    link = FakeNodeLink()
 
     raw = await ai_flow.request_alfred(
         message, link, store, _settings(), [{"role": "user", "content": "привет"}],
@@ -209,6 +213,7 @@ async def test_unavailable_and_no_wake_data_gives_up_immediately(store, monkeypa
     assert raw is None
     assert message.answers == [ai_flow.STEPS_TEXT, ai_flow.ALBERT_UNAVAILABLE]
     assert link.wol_sent == []  # нечем будить — нет кэша MAC
+    assert link.command_calls == []  # chat вообще не пытались звать
 
 
 async def test_unavailable_wake_sent_but_still_unreachable_after_30s(store, monkeypatch):
@@ -216,10 +221,7 @@ async def test_unavailable_wake_sent_but_still_unreachable_after_30s(store, monk
     monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
     monkeypatch.setattr(ai_flow, "WAKE_POLL_TIMEOUT_S", 0.05)
     message = FakeMessage()
-    link = FakeNodeLink(
-        chat_results=[ProtoError(ERR_UNAVAILABLE, "нода недоступна")],
-        get_state_routes={},  # winpc:llm так и не отвечает
-    )
+    link = FakeNodeLink(get_state_routes={})  # winpc:llm так и не отвечает
 
     raw = await ai_flow.request_alfred(
         message, link, store, _settings(), [{"role": "user", "content": "привет"}],
@@ -260,10 +262,13 @@ async def test_woken_but_retry_call_still_fails(store, monkeypatch):
 async def test_internal_error_on_first_try_answers_user_and_notifies_admin(store):
     # Не «недоступна» (нода жива, Ollama сама упала) — раньше улетало
     # необработанным исключением, теперь: сообщение юзеру + диагностика админу.
+    # get_state должен успешно ответить (узел доступен) — иначе presence-
+    # проверка сама сочтёт это недоступностью и chat не будет вызван вовсе.
     message = FakeMessage()
     notifier = FakeNotifier()
     link = FakeNodeLink(
-        chat_results=[ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева")]
+        chat_results=[ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева")],
+        get_state_routes={"winpc:llm": {"asleep": False}},
     )
 
     raw = await ai_flow.request_alfred(
