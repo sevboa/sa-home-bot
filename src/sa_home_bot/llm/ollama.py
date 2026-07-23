@@ -35,7 +35,7 @@ _WARMUP_TIMEOUT_S = 150.0
 # контейнера иногда обрывается ("Remote end closed connection without
 # response") — GPU/модельный бэкенд Ollama ещё не полностью готов принимать
 # реальные запросы, хотя HTTP-сервер уже слушает. Один короткий ретрай.
-_POST_RETRY_ATTEMPTS = 2
+_POST_RETRY_ATTEMPTS = 3
 _POST_RETRY_DELAY_S = 3.0
 
 
@@ -127,9 +127,15 @@ def _is_transient_connection_error(exc: Exception) -> bool:
 
 
 async def _post_with_retry(cfg: LlmConfig, url: str, payload: dict[str, Any]) -> dict[str, Any]:
-    await ensure_running(cfg)
+    """``ensure_running`` вызывается на КАЖДУЮ попытку, не один раз до цикла:
+    живая находка — эта конкретная машина держит WSL тёплой считаные
+    секунды, так что она может успеть заснуть заново в промежутке между
+    успешным прогревом и самим POST (или между ретраями) — без повторной
+    проверки ретрай просто бился бы в ту же отвалившуюся WSL/контейнер.
+    ``ensure_running`` быстрый no-op, если Ollama и так уже отвечает."""
     last_exc: Exception | None = None
     for attempt in range(1, _POST_RETRY_ATTEMPTS + 1):
+        await ensure_running(cfg)
         try:
             return await asyncio.to_thread(_post_json_sync, url, payload, cfg.request_timeout_s)
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
