@@ -108,7 +108,10 @@ async def store(tmp_path):
 
 async def test_fast_path_no_narrative_when_node_already_up(store):
     message = FakeMessage()
-    link = FakeNodeLink(chat_results=[{"response": "Добгый день, сэ"}])
+    link = FakeNodeLink(
+        chat_results=[{"response": "Добгый день, сэ"}],
+        get_state_routes={"winpc:llm": {"asleep": False}},
+    )
 
     raw = await ai_flow.request_alfred(
         message, link, store, _settings(), [{"role": "user", "content": "привет"}],
@@ -116,10 +119,30 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
     )
 
     assert raw == "Добгый день, сэ"
-    assert message.answers == []  # никаких «шагов»/Агнольда — узел был жив
+    assert message.answers == []  # никаких «шагов»/Агнольда — узел жив, модель не спит
     assert link.command_calls == [
         ("chat", {"messages": [{"role": "user", "content": "привет"}]}, "winpc")
     ]
+
+
+async def test_asleep_model_shows_steps_but_no_wake(store):
+    # Узел доступен, модель просто спит (idle-таймер llm/service.py) — не
+    # сценарий wake (магик-пакет тут ни при чём), но пользователь должен
+    # увидеть «шаги», а не молча ждать до request_timeout_s.
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[{"response": "Секунду, сэг"}],
+        get_state_routes={"winpc:llm": {"asleep": True}},
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert raw == "Секунду, сэг"
+    assert message.answers == [ai_flow.STEPS_TEXT]
+    assert link.wol_sent == []  # узел был доступен — будить не нужно
 
 
 async def test_unavailable_then_woken_within_30s(store, monkeypatch):

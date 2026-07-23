@@ -91,6 +91,19 @@ async def request_alfred(
         )
         return result.get("response", "")
 
+    # Узнать заранее, не спит ли модель (idle-таймер llm/service.py) — если
+    # да, предупредить о прогреве СРАЗУ, а не оставлять пользователя молча
+    # ждать до request_timeout_s без всякой обратной связи. Узел при этом
+    # доступен (просто отвечает не сразу) — это не сценарий wake ниже.
+    steps_shown = False
+    try:
+        state = await node_link.get_state(dst=dst)
+    except (ServiceUnavailableError, ProtoError):
+        state = None  # не знаем, спит или недоступна вовсе — увидим по chat
+    if state is not None and state.get("asleep"):
+        await message.answer(STEPS_TEXT)
+        steps_shown = True
+
     try:
         return await _ask()
     except ServiceUnavailableError:
@@ -103,8 +116,10 @@ async def request_alfred(
             )
             return None
 
-    # --- недоступна: шаги -> молчаливый wake -> poll до 30с -> Агнольд/Альбегт ---
-    await message.answer(STEPS_TEXT)
+    # --- недоступна: шаги (если ещё не показали) -> молчаливый wake -> poll
+    # до 30с -> Агнольд/Альбегт ---
+    if not steps_shown:
+        await message.answer(STEPS_TEXT)
     outcome = await wake_swarm_node_core(node_link, store, LLM_NODE)
     became_available = outcome.ok and await swarm_view.wait_for_service(
         node_link, LLM_NODE, LLM_SERVICE, WAKE_POLL_TIMEOUT_S, WAKE_POLL_INTERVAL_S
