@@ -84,11 +84,16 @@ class ServiceLink:
             raise ServiceUnavailableError(str(exc)) from exc
 
     async def command(
-        self, action: str, args: dict[str, Any] | None = None, dst: Address | None = None
+        self,
+        action: str,
+        args: dict[str, Any] | None = None,
+        dst: Address | None = None,
+        *,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         client = self._require_client()
         try:
-            return await client.command(action, args, dst=dst)
+            return await client.command(action, args, dst=dst, timeout=timeout)
         except (ConnectionError, OSError, TimeoutError) as exc:
             raise ServiceUnavailableError(str(exc)) from exc
 

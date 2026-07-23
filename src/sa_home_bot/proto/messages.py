@@ -77,7 +77,17 @@ class Address:
 
 @dataclass(frozen=True)
 class Envelope:
-    """Конверт сообщения. Ответ несёт `id` исходного запроса."""
+    """Конверт сообщения. Ответ несёт `id` исходного запроса.
+
+    ``timeout_s`` — необязательный таймаут ожидания ответа (сек), который
+    хочет вызывающий вместо дефолтного `ProtoClient.DEFAULT_TIMEOUT`. Едет
+    вместе с конвертом через все хопы форварда без изменений (сервер
+    пересылает тот же объект `Envelope` дальше, см. `node/peers.py`), поэтому
+    один параметр на клиенте применяется на каждом хопе цепочки
+    бот → своя нода → пир/локальная служба — без переделки протокола
+    маршрутизации. Нужен, в частности, для `llm.chat`/`llm.ask` (генерация,
+    в т.ч. с холодным стартом, дольше дефолтных 10с — см. LLM_INTEGRATION_PLAN.md §3).
+    """
 
     type: str
     id: str
@@ -87,6 +97,7 @@ class Envelope:
     payload: dict[str, Any] = field(default_factory=dict)
     ok: bool | None = None  # только для response
     error: dict[str, Any] | None = None  # {"code", "message"} при ok=False
+    timeout_s: float | None = None
 
     def error_code(self) -> str | None:
         return (self.error or {}).get("code")
@@ -105,8 +116,11 @@ def make_request(
     *,
     src: Address | None = None,
     dst: Address | None = None,
+    timeout_s: float | None = None,
 ) -> Envelope:
-    return Envelope(type=type_, id=new_id(), src=src, dst=dst, payload=payload or {})
+    return Envelope(
+        type=type_, id=new_id(), src=src, dst=dst, payload=payload or {}, timeout_s=timeout_s
+    )
 
 
 def make_response(request: Envelope, payload: dict[str, Any] | None = None) -> Envelope:
@@ -149,6 +163,8 @@ def encode(env: Envelope) -> bytes:
         raw["error"] = env.error
     if env.payload:
         raw["payload"] = env.payload
+    if env.timeout_s is not None:
+        raw["timeout_s"] = env.timeout_s
     return json.dumps(raw, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
 
 
@@ -185,6 +201,9 @@ def decode(line: bytes) -> Envelope:
     ok = raw.get("ok")
     if ok is not None and not isinstance(ok, bool):
         raise ProtoError(ERR_BAD_REQUEST, "ok должен быть булевым")
+    timeout_s = raw.get("timeout_s")
+    if timeout_s is not None and not isinstance(timeout_s, (int, float)):
+        raise ProtoError(ERR_BAD_REQUEST, "timeout_s должен быть числом")
 
     return Envelope(
         type=msg_type,
@@ -195,6 +214,7 @@ def decode(line: bytes) -> Envelope:
         payload=payload,
         ok=ok,
         error=error,
+        timeout_s=float(timeout_s) if timeout_s is not None else None,
     )
 
 

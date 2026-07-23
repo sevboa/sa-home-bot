@@ -195,6 +195,31 @@ class TorrentsConfig(BaseModel):
     save_dirs: list[str] = Field(default_factory=list)
 
 
+class LlmConfig(BaseModel):
+    """Служба llm (Альфред, `sa-home-bot --service llm`) — только на winpc.
+
+    ``ollama_url`` — loopback-адрес Ollama на этой же машине (см. §0
+    LLM_INTEGRATION_PLAN.md: наружу это никогда не смотрит, только служба →
+    Ollama локально). ``wsl_distro``/``ollama_container`` — имена,
+    зафиксированные при ручной настройке инфраструктуры (см. документ выше,
+    §1). ``request_timeout_s`` — таймаут ответа `ask`/`chat` по протоколу
+    роя (генерация, в т.ч. с холодным стартом WSL/контейнера, дольше
+    типичных «быстрых» действий — см. Envelope.timeout_s в proto/messages.py).
+    ``idle_sleep_after_s`` — после стольки секунд без запросов служба сама
+    останавливает контейнер (освобождает VRAM); бот независимо закрывает
+    диалог тем же порогом (bot/ai_idle.py) — таймеры не координируются
+    протоколом, только общим значением конфига.
+    """
+
+    socket: str = "./data/llm.sock"
+    ollama_url: str = "http://127.0.0.1:11434"
+    model: str = "qwen2.5:7b"
+    wsl_distro: str = "Docker"
+    ollama_container: str = "ollama"
+    request_timeout_s: float = Field(default=180.0, gt=0)
+    idle_sleep_after_s: float = Field(default=1800.0, gt=0)
+
+
 class NodeConfig(BaseModel):
     """Сервис ноды (супервизор, `sa-home-bot --service node`).
 
@@ -288,6 +313,7 @@ class Settings(BaseSettings):
     monitor: MonitorConfig = Field(default_factory=MonitorConfig)
     apps: AppsConfig = Field(default_factory=AppsConfig)
     torrents: TorrentsConfig = Field(default_factory=TorrentsConfig)
+    llm: LlmConfig = Field(default_factory=LlmConfig)
     node: NodeConfig = Field(default_factory=NodeConfig)
     swarm: SwarmConfig = Field(default_factory=SwarmConfig)
     wake: WakeConfig = Field(default_factory=WakeConfig)

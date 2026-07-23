@@ -36,6 +36,26 @@ def test_request_roundtrip():
     assert decoded.dst.node == "alfred"
 
 
+def test_request_roundtrip_with_timeout_s():
+    # llm.chat/ask используют это поле, чтобы попросить больше времени на
+    # ответ, чем DEFAULT_TIMEOUT (proto/client.py) — едет через все хопы
+    # форварда без изменений (см. докстринг Envelope).
+    env = make_request(MSG_GET_STATE, timeout_s=180.0)
+    decoded = decode(encode(env))
+    assert decoded.timeout_s == 180.0
+
+    without = decode(encode(make_request(MSG_GET_STATE)))
+    assert without.timeout_s is None
+
+
+def test_decode_rejects_non_numeric_timeout_s():
+    raw = json.loads(encode(make_request(MSG_GET_STATE)))
+    raw["timeout_s"] = "180"
+    with pytest.raises(ProtoError) as exc_info:
+        decode(json.dumps(raw).encode())
+    assert exc_info.value.code == ERR_BAD_REQUEST
+
+
 def test_response_roundtrip_ok_and_error():
     request = make_request(MSG_GET_STATE)
     ok = decode(encode(make_response(request, {"cpu": 42.0})))

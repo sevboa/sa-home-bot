@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -30,6 +31,16 @@ from sa_home_bot.proto.messages import Address, ProtoError
 
 router = Router(name="wake")
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class WakeOutcome:
+    """Результат `wake_swarm_node_core` — ``detail`` уже готовый HTML-текст
+    для чата (с эмодзи, как в исходных сообщениях `/wake`), чтобы обёртка
+    `_wake_swarm_node` могла просто переслать его без изменения поведения."""
+
+    ok: bool
+    detail: str
 
 NOT_CONFIGURED_TEXT = (
     "⚙️ Wake-on-LAN не настроен: задайте mac в секции [wake] файла config.toml, "
@@ -73,39 +84,46 @@ async def _wake_manual(message: Message, config: Settings) -> None:
         )
 
 
-async def _wake_swarm_node(
-    message: Message, node_link: ServiceLink, store: Store, node_id: str
-) -> None:
-    """Путь через рой: будим известную ноду по её кэшированным реквизитам —
-    отправляет не бот, а живая нода из той же LAN (см. докстринг модуля)."""
+async def wake_swarm_node_core(
+    node_link: ServiceLink, store: Store, node_id: str
+) -> WakeOutcome:
+    """Ядро пути через рой, без побочных сообщений в чат: будим известную
+    ноду по её кэшированным реквизитам — отправляет не бот, а живая нода из
+    той же LAN (см. докстринг модуля). Переиспользуется и `_wake_swarm_node`
+    (кнопка/команда `/wake`, шлёт `.detail` пользователю как есть), и
+    `bot/ai_flow.py` (молчаливый wake перед `/ai`, `.detail` не показывается)."""
     info = await cached_wake_info(store, node_id)
     if info is None:
-        await message.answer(
-            f"⚙️ Нет данных о MAC «{node_id}» — нода ещё ни разу не была видна в рое."
+        return WakeOutcome(
+            False, f"⚙️ Нет данных о MAC «{node_id}» — нода ещё ни разу не была видна в рое."
         )
-        return
 
     waker = await swarm_view.find_lan_waker(node_link, store, node_id, info["broadcast"])
     if waker is None:
-        await message.answer(
-            f"⚠️ Некому отправить сигнал: нет живой ноды в той же сети, что «{node_id}»."
+        return WakeOutcome(
+            False, f"⚠️ Некому отправить сигнал: нет живой ноды в той же сети, что «{node_id}»."
         )
-        return
 
     dst = Address(node=waker, service="node")
     try:
         await node_link.command("send_wol", {"mac": info["mac"]}, dst=dst)
     except ServiceUnavailableError:
-        await message.answer(f"⚠️ Нода «{waker}» перестала отвечать во время отправки.")
-        return
+        return WakeOutcome(False, f"⚠️ Нода «{waker}» перестала отвечать во время отправки.")
     except ProtoError as exc:
-        await message.answer(f"❌ {waker}: {exc.message}")
-        return
+        return WakeOutcome(False, f"❌ {waker}: {exc.message}")
 
-    await message.answer(
+    return WakeOutcome(
+        True,
         f"🔌 Magic packet для «{node_id}» (<code>{info['mac']}</code>) отправлен через "
-        f"ноду «{waker}». Появится в /nodes, как поднимется."
+        f"ноду «{waker}». Появится в /nodes, как поднимется.",
     )
+
+
+async def _wake_swarm_node(
+    message: Message, node_link: ServiceLink, store: Store, node_id: str
+) -> None:
+    outcome = await wake_swarm_node_core(node_link, store, node_id)
+    await message.answer(outcome.detail)
 
 
 @router.message(Command(commands.WAKE.name))

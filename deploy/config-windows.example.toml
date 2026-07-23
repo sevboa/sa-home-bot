@@ -20,12 +20,12 @@
 #    ProgramData — общее для всех аккаунтов место, снимает всю эту путаницу.
 
 # Windows-нода — без телеграм-бота: фронтенд остаётся на alfred,
-# сюда назначается только мониторинг (позже — apps-win, power уже встроен).
+# сюда назначается мониторинг и, на GPU-машине (winpc), llm — Альфред.
 [node]
 id = "winpc"                          # имя ноды в рое (пусто = hostname)
 socket = "tcp://127.0.0.1:8710"       # локальные фронтенды (nodectl)
 listen = "tcp://100.x.y.z:8710"       # tailscale-адрес ЭТОЙ машины — канал роя
-assignments = ["monitor"]
+assignments = ["monitor", "llm"]
 state_path = 'C:\ProgramData\sa-home-bot\data\node-state.json'
 restart_delay_s = 5.0
 stop_timeout_s = 90.0
@@ -33,6 +33,19 @@ stop_timeout_s = 90.0
 [monitor]
 socket = "tcp://127.0.0.1:8711"
 db_path = 'C:\ProgramData\sa-home-bot\data\monitor.sqlite'
+
+# LLM (Альфред) — Docker Engine внутри WSL2 (дистрибутив "Docker") + контейнер
+# ollama, поднятые вручную (LLM_INTEGRATION_PLAN.md §1). ollama_url — loopback
+# ЭТОЙ же машины, наружу не смотрит; сама служба llm ходит туда локально,
+# рой достаёт до неё только своим TCP-протоколом (socket ниже).
+[llm]
+socket = "tcp://127.0.0.1:8712"
+ollama_url = "http://127.0.0.1:11434"
+model = "qwen2.5:7b"
+wsl_distro = "Docker"
+ollama_container = "ollama"
+request_timeout_s = 180.0
+idle_sleep_after_s = 1800.0
 
 [sensors.cpu]
 enabled = true

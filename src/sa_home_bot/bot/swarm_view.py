@@ -234,6 +234,29 @@ async def build_swarm_keyboard(
     return actions.rows(buttons)
 
 
+async def wait_for_service(
+    node_link: ServiceLink,
+    node_id: str,
+    service: str,
+    timeout_s: float,
+    interval_s: float = 3.0,
+) -> bool:
+    """Опрашивать get_state удалённой службы, пока не ответит или не истечёт
+    ``timeout_s`` (используется bot/ai_flow.py после молчаливого wake —
+    дождаться, пока winpc/llm снова окажется на связи). Каждая попытка сама
+    ограничена ``PEER_TIMEOUT_S`` через `_fetch` — зависший, но формально
+    подключённый пир не растягивает ожидание."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    dst = Address(node=node_id, service=service)
+    while True:
+        if await _fetch(node_link, dst) is not None:
+            return True
+        if loop.time() >= deadline:
+            return False
+        await asyncio.sleep(interval_s)
+
+
 async def find_lan_waker(
     node_link: ServiceLink, store: Store, target_node_id: str, target_broadcast: str
 ) -> str | None:

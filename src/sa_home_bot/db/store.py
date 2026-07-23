@@ -388,6 +388,69 @@ class Store:
             return None
         return [DiskSummary(**d) for d in json.loads(raw)]
 
+    # --- ai_turns / ai_dialogues (/ai, диалог с Альфредом) ---
+
+    async def record_ai_turn(
+        self,
+        chat_id: int,
+        message_id: int,
+        dialogue_id: int,
+        role: str,
+        content: str,
+        at: datetime,
+    ) -> None:
+        """Записать ход диалога и заодно освежить его last_activity_at
+        (idle-свип bot/ai_idle.py смотрит только на ai_dialogues, не на
+        MAX() по ai_turns — не пересчитывать это на каждый свип)."""
+        at_s = _iso(at)
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "INSERT INTO ai_turns(chat_id, message_id, dialogue_id, role, content, created_at) "
+                "VALUES(?, ?, ?, ?, ?, ?)",
+                (chat_id, message_id, dialogue_id, role, content, at_s),
+            )
+            await conn.execute(
+                "INSERT INTO ai_dialogues(chat_id, dialogue_id, last_activity_at, closed_at) "
+                "VALUES(?, ?, ?, NULL) "
+                "ON CONFLICT(chat_id, dialogue_id) DO UPDATE SET "
+                "last_activity_at=excluded.last_activity_at, closed_at=NULL",
+                (chat_id, dialogue_id, at_s),
+            )
+
+    async def ai_turn(self, chat_id: int, message_id: int) -> dict | None:
+        """Резолв reply: чьё это сообщение и к какому диалогу относится."""
+        cur = await self.db.conn.execute(
+            "SELECT * FROM ai_turns WHERE chat_id=? AND message_id=?", (chat_id, message_id)
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def ai_turns_for_dialogue(self, chat_id: int, dialogue_id: int) -> list[dict]:
+        cur = await self.db.conn.execute(
+            "SELECT * FROM ai_turns WHERE chat_id=? AND dialogue_id=? ORDER BY message_id",
+            (chat_id, dialogue_id),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def open_idle_ai_dialogues(self, older_than: datetime) -> list[tuple[int, int]]:
+        """(chat_id, dialogue_id) диалогов без хода дольше ``older_than`` и ещё
+        не закрытых курсивным сообщением (bot/ai_idle.py)."""
+        cur = await self.db.conn.execute(
+            "SELECT chat_id, dialogue_id FROM ai_dialogues "
+            "WHERE closed_at IS NULL AND last_activity_at < ?",
+            (_iso(older_than),),
+        )
+        rows = await cur.fetchall()
+        return [(r["chat_id"], r["dialogue_id"]) for r in rows]
+
+    async def mark_ai_dialogue_closed(self, chat_id: int, dialogue_id: int, at: datetime) -> None:
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "UPDATE ai_dialogues SET closed_at=? WHERE chat_id=? AND dialogue_id=?",
+                (_iso(at), chat_id, dialogue_id),
+            )
+
     # --- housekeeping ---
 
     async def prune_job_runs(self, keep_last: int = 500) -> int:

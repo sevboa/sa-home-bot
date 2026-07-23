@@ -109,6 +109,23 @@ save_dirs = [
     "/mnt/scratch/pr",
 ]
 
+# Служба llm (Альфред, `sa-home-bot --service llm`) — на практике только на
+# Windows-ноде с GPU (winpc), но секция описывается в схеме статично, иначе
+# --check-config на других нодах не увидит поля. ollama_url — loopback-адрес
+# Ollama на ТОЙ ЖЕ машине, наружу не смотрит (LLM_INTEGRATION_PLAN.md §0).
+# request_timeout_s — таймаут ask/chat по протоколу роя (генерация с холодным
+# стартом WSL/контейнера дольше типичных «быстрых» действий).
+# idle_sleep_after_s — после стольки секунд без запросов служба сама
+# останавливает контейнер (освобождает VRAM); право в подписке — "chat@llm".
+[llm]
+socket = "./data/llm.sock"
+ollama_url = "http://127.0.0.1:11434"
+model = "qwen2.5:7b"
+wsl_distro = "Docker"
+ollama_container = "ollama"
+request_timeout_s = 180.0
+idle_sleep_after_s = 1800.0
+
 # Сервис ноды (супервизор: `sa-home-bot --service node`, консоль — nodectl).
 # Нода запускает назначенные службы дочерними процессами и рестартит упавшие.
 # id — имя ноды в рое (пусто = hostname). Умения питания (poweroff/reboot/

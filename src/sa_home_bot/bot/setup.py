@@ -18,6 +18,7 @@ from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefaul
 
 from sa_home_bot.bot import apps_view, commands
 from sa_home_bot.bot.handlers import (
+    ai,
     apps,
     basic,
     control,
@@ -49,6 +50,10 @@ def build_dispatcher(book: SubscriptionBook) -> Dispatcher:
     dp.message.middleware(AuthorizationMiddleware(book))
     dp.callback_query.middleware(CallbackAuthorizationMiddleware(book))
     dp.include_router(basic.router)
+    # ai: команда /ai + узкий фильтр реплаев на свои же диалоги (резолвится
+    # по ai_turns, не по дереву Telegram-реплаев) — не пересекается с другими
+    # роутерами, но пусть проверяется рано.
+    dp.include_router(ai.router)
     # wake раньше status: его callback «st:wake» точечный, а on_status_action
     # ловит весь префикс «st:».
     dp.include_router(wake.router)

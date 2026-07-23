@@ -38,6 +38,11 @@ DOWNTIME = Command(
 )
 # Wake — кнопка в разделе /nodes; командой тоже работает, но в меню не нужна.
 WAKE = Command("wake", "разбудить домашний ПК (Wake-on-LAN)", universal=False, menu=False)
+# Право — не голое имя команды, а действие@служба (как у динамических экшенов
+# apps/torrents) — так /ai не завязана на отдельное "право команды бота",
+# а участвует в общем правиле «действие@служба» (allows_action-совместимая
+# строка, проверяется через allows_command — см. AUTHORIZATION.md).
+AI = Command("ai", "диалог с Альфредом (LLM)", universal=False, menu=True, right="chat@llm")
 
 ALL_COMMANDS: list[Command] = [
     HELP,
@@ -51,6 +56,7 @@ ALL_COMMANDS: list[Command] = [
     SCAN_NOW,
     DOWNTIME,
     WAKE,
+    AI,
 ]
 
 UNIVERSAL_COMMANDS: list[Command] = [c for c in ALL_COMMANDS if c.universal]

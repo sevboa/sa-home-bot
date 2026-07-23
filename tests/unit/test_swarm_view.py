@@ -11,6 +11,7 @@ from sa_home_bot.bot.swarm_view import (
     REMOTE_STUB_TEXT,
     build_swarm_view,
     find_lan_waker,
+    wait_for_service,
 )
 from sa_home_bot.config import WakeConfig
 from sa_home_bot.db.connection import Database
@@ -254,3 +255,36 @@ async def test_find_lan_waker_none_without_matching_subnet(store):
     own = {**OWN_STATE, "wake": ALFRED_WAKE}
     link = FakeNodeLink(own=own, routes=_routes())
     assert await find_lan_waker(link, store, "winpc", "10.0.0.255") is None
+
+
+# --- wait_for_service (bot/ai_flow.py: poll после молчаливого wake) ---
+
+
+async def test_wait_for_service_returns_true_immediately_when_reachable():
+    link = FakeNodeLink(routes={"winpc:llm": {"asleep": False}})
+    assert await wait_for_service(link, "winpc", "llm", timeout_s=5.0, interval_s=0.01) is True
+    assert link.requests == ["winpc:llm"]
+
+
+async def test_wait_for_service_polls_until_available():
+    calls = {"n": 0}
+    link = FakeNodeLink(routes={})
+
+    async def flaky_get_state(dst=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            from sa_home_bot.bot.service_link import ServiceUnavailableError
+
+            raise ServiceUnavailableError("ещё нет")
+        return {"asleep": False}
+
+    link.get_state = flaky_get_state
+    ok = await wait_for_service(link, "winpc", "llm", timeout_s=5.0, interval_s=0.01)
+    assert ok is True
+    assert calls["n"] == 3
+
+
+async def test_wait_for_service_gives_up_after_timeout():
+    link = FakeNodeLink(routes={})  # winpc:llm никогда не появляется в routes
+    ok = await wait_for_service(link, "winpc", "llm", timeout_s=0.05, interval_s=0.01)
+    assert ok is False

@@ -28,11 +28,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", "-c", default=None, help="путь к config.toml")
     parser.add_argument(
         "--service",
-        choices=("bot", "monitor", "apps", "torrents", "node"),
+        choices=("bot", "monitor", "apps", "torrents", "llm", "node"),
         default="bot",
         help="какую службу запустить: telegram-бот (по умолчанию), "
-        "монитор датчиков, адаптер приложений, адаптер торрент-клиента "
-        "или сервис ноды (супервизор)",
+        "монитор датчиков, адаптер приложений, адаптер торрент-клиента, "
+        "служба LLM (Альфред) или сервис ноды (супервизор)",
     )
     parser.add_argument(
         "--check-config",
@@ -88,6 +88,10 @@ def main(argv: list[str] | None = None) -> int:
         from sa_home_bot.torrents.app import run_torrents
 
         coro = run_torrents(settings)
+    elif args.service == "llm":
+        from sa_home_bot.llm.app import run_llm
+
+        coro = run_llm(settings)
     else:
         from sa_home_bot.app import run
 

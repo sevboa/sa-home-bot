@@ -8,11 +8,11 @@ from sa_home_bot.proto.messages import ActionParam, ActionSpec
 from sa_home_bot.subscriptions.models import Subscription
 
 
-def test_menu_has_only_swarm_skill():
-    # В меню из реестра — только «Сводка роя»; остальные скилы первого
+def test_menu_has_only_swarm_and_ai_skills():
+    # В меню из реестра — «Сводка роя» и «/ai»; остальные скилы первого
     # уровня динамические (из describe apps, см. build_menu_commands).
     menu_names = {c.name for c in commands.MENU_CONTROL_COMMANDS}
-    assert menu_names == {"swarm"}
+    assert menu_names == {"swarm", "ai"}
     for name in ("nodes", "status", "status_full", "stats", "scan_now", "downtime", "wake"):
         assert commands.get(name).menu is False
 

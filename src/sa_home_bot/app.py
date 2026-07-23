@@ -10,8 +10,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
+from sa_home_bot.bot.ai_idle import run_idle_sweep
 from sa_home_bot.bot.dispatch import TelegramEventDispatcher
 from sa_home_bot.bot.lifecycle import (
     broadcast_system,
@@ -123,6 +125,12 @@ async def run(settings: Settings) -> None:
     await torrents_link.start()
     pending_torrents = PendingTorrents()
 
+    # Идле-свип диалогов /ai (курсивное закрытие треда после простоя) —
+    # независим от идле-таймера самой службы llm, см. bot/ai_idle.py.
+    ai_idle_task = asyncio.create_task(
+        run_idle_sweep(store, notifier, settings), name="ai-idle-sweep"
+    )
+
     # 9. Polling.
     polling_task = asyncio.create_task(
         dp.start_polling(
@@ -157,6 +165,7 @@ async def run(settings: Settings) -> None:
             node_link=node_link,
             apps_link=apps_link,
             torrents_link=torrents_link,
+            ai_idle_task=ai_idle_task,
             book=book,
             notifier=notifier,
             store=store,
@@ -173,6 +182,7 @@ async def _shutdown(
     node_link: ServiceLink,
     apps_link: ServiceLink,
     torrents_link: ServiceLink,
+    ai_idle_task: asyncio.Task,
     book: SubscriptionBook,
     notifier: Notifier,
     store: Store,
@@ -186,6 +196,10 @@ async def _shutdown(
     await node_link.stop()
     await apps_link.stop()
     await torrents_link.stop()
+
+    ai_idle_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await ai_idle_task
 
     # Стоп polling. stop_polling кидает RuntimeError, если polling ещё не успел
     # запуститься (быстрый SIGINT) или упал на старте (например, бэд-токен).

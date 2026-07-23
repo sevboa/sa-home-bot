@@ -161,9 +161,11 @@ class ProtoClient:
         action: str,
         args: dict[str, Any] | None = None,
         dst: Address | None = None,
+        *,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         return await self.request(
-            MSG_COMMAND, {"action": action, "args": args or {}}, dst=dst
+            MSG_COMMAND, {"action": action, "args": args or {}}, dst=dst, timeout=timeout
         )
 
     async def request(
@@ -172,9 +174,15 @@ class ProtoClient:
         payload: dict[str, Any] | None = None,
         *,
         dst: Address | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
-        """Отправить запрос и дождаться ответа. ProtoError при ok=False."""
-        env = make_request(type_, payload, src=self._src, dst=dst)
+        """Отправить запрос и дождаться ответа. ProtoError при ok=False.
+
+        ``timeout`` — переопределить таймаут ожидания для этого конкретного
+        запроса (едет в конверте как ``timeout_s`` и переживает форвард через
+        чужие ноды, см. докстринг `Envelope`); без него — `self._timeout`.
+        """
+        env = make_request(type_, payload, src=self._src, dst=dst, timeout_s=timeout)
         response = await self.forward(env)
         if response.ok is not True:
             raise ProtoError(response.error_code() or "unknown", response.error_message())
@@ -193,11 +201,12 @@ class ProtoClient:
             raise ConnectionError("соединение закрыто")
         future: asyncio.Future[Envelope] = asyncio.get_running_loop().create_future()
         self._pending[env.id] = future
+        timeout = env.timeout_s if env.timeout_s is not None else self._timeout
         try:
             async with self._write_lock:
                 self._writer.write(encode(env))
                 await self._writer.drain()
-            return await asyncio.wait_for(future, timeout=self._timeout)
+            return await asyncio.wait_for(future, timeout=timeout)
         finally:
             self._pending.pop(env.id, None)
 

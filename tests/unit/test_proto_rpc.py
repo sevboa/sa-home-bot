@@ -164,6 +164,43 @@ async def test_server_survives_garbage_line(rpc):
     assert (await client.get_state())["status"] == "ok"
 
 
+async def test_timeout_s_overrides_default_per_request(tmp_path):
+    """`timeout` в command()/request() побеждает DEFAULT_TIMEOUT клиента —
+    режет долгий дефолт и продлевает короткий (llm.chat/ask, см.
+    Envelope.timeout_s)."""
+
+    class SlowMonitor(FakeMonitor):
+        def describe(self) -> ServiceDescription:
+            base = super().describe()
+            return ServiceDescription(
+                info=base.info,
+                capabilities=base.capabilities,
+                actions=(*base.actions, ActionSpec(id="slow", title="Медленно")),
+            )
+
+        async def run_command(self, action: str, args: dict) -> dict:
+            if action == "slow":
+                await asyncio.sleep(0.3)
+                return {"accepted": True}
+            return await super().run_command(action, args)
+
+    socket_path = tmp_path / "slow.sock"
+    server = ProtoServer(socket_path, SlowMonitor())
+    await server.start()
+    # Дефолт клиента короче обработки "slow" — без override запрос падает.
+    client = ProtoClient(socket_path, timeout=0.05)
+    await client.connect()
+    try:
+        with pytest.raises(TimeoutError):
+            await client.command("slow")
+        # override продлевает конкретно этот запрос — проходит.
+        result = await client.command("slow", timeout=2.0)
+        assert result == {"accepted": True}
+    finally:
+        await client.close()
+        await server.stop()
+
+
 async def test_server_stop_fails_pending_and_closes_client(rpc):
     _, server, client, _, _ = rpc
     await server.stop()
