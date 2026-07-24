@@ -63,6 +63,29 @@ async def test_calc_power(store):
     assert await tools.tool_calc(_ctx(store), {"expression": "2 ** 10"}) == "1024"
 
 
+async def test_calc_pi_constant(store):
+    result = await tools.tool_calc(_ctx(store), {"expression": "2 * pi"})
+    assert result.startswith("6.283185")
+
+
+async def test_calc_e_constant(store):
+    result = await tools.tool_calc(_ctx(store), {"expression": "e"})
+    assert result.startswith("2.718281")
+
+
+async def test_calc_cylinder_surface_area_formula(store):
+    # Живой баг 2026-07-24: модель раньше не могла посчитать формулу с π
+    # через calc вообще (переменные были запрещены) — площадь поверхности
+    # цилиндра (r=1.5, h=2): 2*pi*r*(r+h) = 2*pi*1.5*3.5 ≈ 32.9867.
+    result = await tools.tool_calc(_ctx(store), {"expression": "2 * pi * 1.5 * (1.5 + 2)"})
+    assert result.startswith("32.98")
+
+
+async def test_calc_rejects_arbitrary_names(store):
+    result = await tools.tool_calc(_ctx(store), {"expression": "x + 1"})
+    assert result.startswith("ошибка")
+
+
 async def test_calc_rejects_non_arithmetic_expression(store):
     result = await tools.tool_calc(
         _ctx(store), {"expression": "__import__('os').system('ls')"}

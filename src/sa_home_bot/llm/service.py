@@ -24,7 +24,7 @@ from typing import Any
 from sa_home_bot import __version__
 from sa_home_bot.config import LlmConfig, Settings
 from sa_home_bot.llm import ollama
-from sa_home_bot.llm.prompt import SYSTEM_PROMPT, apply_speech_defect
+from sa_home_bot.llm.prompt import SYSTEM_PROMPT, apply_speech_defect, strip_math_notation
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     ActionParam,
@@ -136,7 +136,7 @@ class LlmService:
                 raise ProtoError(ERR_BAD_REQUEST, "prompt должен быть непустой строкой")
             await self._touch(args.get("chat_id"))
             result = await ollama.generate(self._cfg, prompt, SYSTEM_PROMPT)
-            response = apply_speech_defect(result.get("response", ""))
+            response = apply_speech_defect(strip_math_notation(result.get("response", "")))
             return {"response": response, "model": self._cfg.model}
         if action == ACTION_CHAT:
             messages = args.get("messages")
@@ -154,7 +154,7 @@ class LlmService:
             tool_calls = message.get("tool_calls")
             if tool_calls:
                 return {"tool_calls": tool_calls, "model": self._cfg.model}
-            reply = apply_speech_defect(message.get("content", ""))
+            reply = apply_speech_defect(strip_math_notation(message.get("content", "")))
             return {"response": reply, "model": self._cfg.model}
         if action == ACTION_SLEEP:
             await self._sleep_now()

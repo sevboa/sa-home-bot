@@ -24,6 +24,7 @@ import ast
 import asyncio
 import json
 import logging
+import math
 import operator
 import time
 import urllib.error
@@ -65,12 +66,19 @@ _ALLOWED_UNARYOPS: dict[type, Callable[[Any], Any]] = {
     ast.UAdd: operator.pos,
     ast.USub: operator.neg,
 }
+# Живая находка 2026-07-24: реальная задача (площадь цилиндра, формула с π)
+# показала, что без именованных констант модель вынуждена подставлять
+# приближение "3.14159" сама (или вообще не звать тул) — добавлены pi/e как
+# единственные разрешённые "переменные", не произвольные имена.
+_ALLOWED_NAMES: dict[str, float] = {"pi": math.pi, "e": math.e}
 _MAX_POW_EXPONENT = 1000  # защита от x**(огромное число) — не таймаут, а память/CPU
 
 
 def _safe_eval(node: ast.AST) -> float:
     if isinstance(node, ast.Constant) and isinstance(node.value, int | float):
         return node.value
+    if isinstance(node, ast.Name) and node.id in _ALLOWED_NAMES:
+        return _ALLOWED_NAMES[node.id]
     if isinstance(node, ast.BinOp) and type(node.op) in _ALLOWED_BINOPS:
         left, right = _safe_eval(node.left), _safe_eval(node.right)
         if isinstance(node.op, ast.Pow) and abs(right) > _MAX_POW_EXPONENT:
@@ -78,7 +86,9 @@ def _safe_eval(node: ast.AST) -> float:
         return _ALLOWED_BINOPS[type(node.op)](left, right)
     if isinstance(node, ast.UnaryOp) and type(node.op) in _ALLOWED_UNARYOPS:
         return _ALLOWED_UNARYOPS[type(node.op)](_safe_eval(node.operand))
-    raise ValueError("недопустимое выражение (разрешены только числа и + - * / ** ())")
+    raise ValueError(
+        "недопустимое выражение (разрешены только числа, pi, e и + - * / ** ())"
+    )
 
 
 async def tool_calc(ctx: ToolContext, args: dict[str, Any]) -> str:
@@ -301,15 +311,17 @@ TOOL_DECLARATIONS: list[dict[str, Any]] = [
             "name": "calc",
             "description": (
                 "Точно вычислить арифметическое выражение (числа, + - * / ** и скобки, "
-                "без переменных и функций). Используй для любой реальной арифметики — "
-                "не считай в уме, если можно вызвать это."
+                "плюс константы pi и e — без произвольных переменных и функций). "
+                "Используй для ЛЮБОЙ реальной арифметики, включая формулы (площадь, "
+                "объём и т.п.) — подставь известные числа и pi/e в выражение и вызови "
+                "тул, не считай и не подставляй в уме."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "expression": {
                         "type": "string",
-                        "description": "Например: (2 + 3) * 4 / 7",
+                        "description": "Например: 2 * pi * 1.5 * (1.5 + 2)",
                     }
                 },
                 "required": ["expression"],
