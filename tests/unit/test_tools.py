@@ -5,6 +5,7 @@ get_weather, convert_currency, remind. Диспетчер цикла (bot/ai_flo
 
 from __future__ import annotations
 
+import json
 import math
 from datetime import UTC, datetime, timedelta
 
@@ -334,6 +335,73 @@ async def test_convert_currency_rejects_non_numeric_amount(store):
 
 async def test_convert_currency_rejects_missing_currency_codes(store):
     result = await tools.tool_convert_currency(_ctx(store), {"amount": 10, "from": "USD"})
+    assert result.startswith("ошибка")
+
+
+# --- get_time ---
+#
+# Живой баг 2026-07-24: модель сама считала разницу часовых поясов (Москва
+# vs Казахстан) и ошибалась — тул должен считать её детерминированно, без
+# сети (statically place -> IANA timezone + zoneinfo).
+
+
+async def test_get_time_known_place_with_explicit_instant(store):
+    result = await tools.tool_get_time(
+        _ctx(store), {"place": "Казахстан", "at": "2026-07-24T20:28:00+03:00"}
+    )
+    data = json.loads(result)
+    assert data["timezone"] == "Asia/Almaty"
+    assert data["utc_offset"] == "+05:00"
+    # 20:28 UTC+3 == 22:28 UTC+5 (Казахстан на 2 часа впереди Москвы)
+    assert data["local_time"] == "2026-07-24 22:28"
+    assert data["weekday"] == "пятница"
+
+
+async def test_get_time_is_case_and_whitespace_insensitive(store):
+    result = await tools.tool_get_time(
+        _ctx(store), {"place": "  МОСКВА  ", "at": "2026-07-24T20:28:00+03:00"}
+    )
+    data = json.loads(result)
+    assert data["timezone"] == "Europe/Moscow"
+    assert data["local_time"] == "2026-07-24 20:28"
+
+
+async def test_get_time_defaults_to_now_without_at(store, monkeypatch):
+    fixed_now = datetime(2026, 7, 24, 17, 28, tzinfo=UTC)
+
+    class _FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz is not None else fixed_now.replace(tzinfo=None)
+
+    monkeypatch.setattr(tools, "datetime", _FixedDatetime)
+    result = await tools.tool_get_time(_ctx(store), {"place": "Москва"})
+    data = json.loads(result)
+    # 17:28 UTC == 20:28 UTC+3 (Москва)
+    assert data["local_time"] == "2026-07-24 20:28"
+
+
+async def test_get_time_unknown_place_is_honest_refusal(store):
+    result = await tools.tool_get_time(_ctx(store), {"place": "Атлантида"})
+    assert result.startswith("не знаю часовой пояс")
+
+
+async def test_get_time_rejects_missing_place(store):
+    result = await tools.tool_get_time(_ctx(store), {})
+    assert result.startswith("ошибка")
+
+
+async def test_get_time_rejects_naive_at(store):
+    result = await tools.tool_get_time(
+        _ctx(store), {"place": "Москва", "at": "2026-07-24T20:28:00"}
+    )
+    assert result.startswith("ошибка")
+
+
+async def test_get_time_rejects_malformed_at(store):
+    result = await tools.tool_get_time(
+        _ctx(store), {"place": "Москва", "at": "не дата"}
+    )
     assert result.startswith("ошибка")
 
 

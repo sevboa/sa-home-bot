@@ -637,7 +637,7 @@ async def test_reply_context_truncates_long_foreign_message(store):
     note = await ai_flow._build_context_note(message, store, dialogue_id=500)
 
     assert "…" in note
-    assert len(note) < len(long_text) + 200  # обрезано, а не вставлено целиком
+    assert long_text not in note  # обрезано, а не вставлено целиком
 
 
 async def test_no_reply_context_without_reply_to_message(store):

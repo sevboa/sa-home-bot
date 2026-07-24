@@ -43,6 +43,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
@@ -50,6 +51,20 @@ from sa_home_bot.proto.messages import Address, ProtoError
 from sa_home_bot.tasks import protocol as task_protocol
 
 log = logging.getLogger(__name__)
+
+# Дни недели по-русски — используется и здесь (tool_get_time), и в
+# bot/ai_flow.py::_build_context_note (импортируется оттуда как
+# ai_tools.WEEKDAYS_RU, обратного импорта нет — ai_flow и так уже
+# импортирует этот модуль).
+WEEKDAYS_RU = (
+    "понедельник",
+    "вторник",
+    "среда",
+    "четверг",
+    "пятница",
+    "суббота",
+    "воскресенье",
+)
 
 # Куда стрелять llm.chat для отложенных задач, создаваемых тулом remind —
 # тот же узел/служба, что и живой /ai (bot/ai_flow.py::LLM_NODE/LLM_SERVICE).
@@ -310,6 +325,77 @@ async def tool_convert_currency(ctx: ToolContext, args: dict[str, Any]) -> str:
     )
 
 
+# --- get_time ---
+#
+# Живой баг 2026-07-24: на вопрос "точное время по Москве/в Казахстане"
+# модель сама пересчитывала часовые пояса — неверно и непоследовательно
+# (например, разница Москва/Казахстан то 3 часа, то время без указания
+# пояса вообще выдавалось за конкретный пояс). Часовой пояс — тот же класс
+# факта, что погода и курс валют (см. докстринг файла): не полагаться на
+# "память" модели, а считать детерминированно. В отличие от get_weather,
+# сеть тут не нужна вообще — координаты города не важны, важен только IANA
+# часовой пояс, поэтому вместо геокодинга — статическая таблица
+# место→пояс и расчёт через stdlib zoneinfo (без новых зависимостей,
+# requires-python >=3.11).
+
+_PLACE_TIMEZONES: dict[str, str] = {
+    "москва": "Europe/Moscow",
+    "россия": "Europe/Moscow",
+    "казахстан": "Asia/Almaty",
+    "алматы": "Asia/Almaty",
+    "астана": "Asia/Almaty",
+    "киев": "Europe/Kyiv",
+    "украина": "Europe/Kyiv",
+    "минск": "Europe/Minsk",
+    "беларусь": "Europe/Minsk",
+    "ташкент": "Asia/Tashkent",
+    "узбекистан": "Asia/Tashkent",
+    "лондон": "Europe/London",
+    "великобритания": "Europe/London",
+    "нью-йорк": "America/New_York",
+    "сша": "America/New_York",
+}
+
+
+async def tool_get_time(ctx: ToolContext, args: dict[str, Any]) -> str:
+    place_raw = args.get("place")
+    if not isinstance(place_raw, str) or not place_raw.strip():
+        return "ошибка: не указано место (place)"
+    place = place_raw.strip()
+    tz_name = _PLACE_TIMEZONES.get(place.lower())
+    if tz_name is None:
+        return f"не знаю часовой пояс для «{place}» — не могу посчитать точно, не додумывай"
+
+    at_raw = args.get("at")
+    if isinstance(at_raw, str) and at_raw.strip():
+        try:
+            at = datetime.fromisoformat(at_raw)
+        except ValueError:
+            return "ошибка: 'at' должен быть в формате ISO 8601, например 2026-07-24T20:28:00+03:00"
+        if at.tzinfo is None:
+            return "ошибка: 'at' должен содержать смещение часового пояса (например +03:00)"
+        at_utc = at.astimezone(UTC)
+    else:
+        at_utc = datetime.now(UTC)
+
+    try:
+        target = at_utc.astimezone(ZoneInfo(tz_name))
+    except ZoneInfoNotFoundError:
+        log.warning("tool_get_time: система не знает часовой пояс %s", tz_name)
+        return f"внутренняя ошибка: не удалось определить часовой пояс {tz_name}"
+    offset = target.strftime("%z")
+    return json.dumps(
+        {
+            "place": place,
+            "timezone": tz_name,
+            "utc_offset": f"{offset[:3]}:{offset[3:]}",
+            "local_time": target.strftime("%Y-%m-%d %H:%M"),
+            "weekday": WEEKDAYS_RU[target.weekday()],
+        },
+        ensure_ascii=False,
+    )
+
+
 # --- remind: единственный тул, ходящий по протоколу роя, см. докстринг модуля ---
 
 
@@ -389,6 +475,7 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "calc": tool_calc,
     "get_weather": tool_get_weather,
     "convert_currency": tool_convert_currency,
+    "get_time": tool_get_time,
     "remind": tool_remind,
 }
 
@@ -461,6 +548,39 @@ TOOL_DECLARATIONS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["amount", "from", "to"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_time",
+            "description": (
+                "Точно узнать текущее время (и день недели) в конкретном "
+                "городе или стране. Часовые пояса и разницу между ними НЕ "
+                "считай сам — модель на практике их путает. Используй этот "
+                "тул для ЛЮБОГО вопроса про время не 'у нас/сейчас' (то уже "
+                "есть в контексте разговора), а в другом городе/стране. Если "
+                "тул не знает место — так и скажи, не досчитывай сам."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "place": {
+                        "type": "string",
+                        "description": "Город или страна (например: Москва, Казахстан)",
+                    },
+                    "at": {
+                        "type": "string",
+                        "description": (
+                            "Необязательно: конкретный момент времени в ISO 8601 "
+                            "СО смещением (например 2026-08-01T12:00:00+03:00) — "
+                            "для вопросов про другую дату, не 'сейчас'. Без этого "
+                            "поля берётся текущий момент."
+                        ),
+                    },
+                },
+                "required": ["place"],
             },
         },
     },
