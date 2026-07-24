@@ -50,11 +50,13 @@ class FakeMessage:
         self.message_id = FakeMessage._next_id
         FakeMessage._next_id += 1
         self.text = text
+        self.caption = None
         self.reply_to_message = reply_to
         self.entities = entities
         self.bot = FakeBot()
         self.sent: list[str] = []
         self.from_user = None
+        self.quote = None
 
     async def answer(self, text, **kwargs):
         sent = FakeMessage(self.chat.id)

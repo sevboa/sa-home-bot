@@ -34,6 +34,8 @@ OWN_STATE = {
 class FakeMessage:
     chat = SimpleNamespace(id=1)
     from_user = None
+    reply_to_message = None
+    quote = None
 
     def __init__(self) -> None:
         self.answers: list[str] = []
@@ -67,9 +69,26 @@ class NoteMessage:
     """Мини-заглушка Message только для _build_context_note — не тянет весь
     presence/wake-сценарий FakeMessage/FakeNodeLink."""
 
-    def __init__(self, chat_id, chat_type, from_user):
+    def __init__(self, chat_id, chat_type, from_user, reply_to_message=None, quote=None):
         self.chat = SimpleNamespace(id=chat_id, type=chat_type)
         self.from_user = from_user
+        self.reply_to_message = reply_to_message
+        self.quote = quote
+
+
+class FakeRepliedMessage:
+    """Заглушка reply_to_message — сообщение, на которое отвечают."""
+
+    def __init__(self, message_id, from_user=None, text=None, caption=None):
+        self.message_id = message_id
+        self.from_user = from_user
+        self.text = text
+        self.caption = caption
+
+
+class FakeQuote:
+    def __init__(self, text):
+        self.text = text
 
 
 def _admin_book() -> SubscriptionBook:
@@ -412,3 +431,76 @@ async def test_context_note_skips_starter_line_when_same_as_sender(store):
     assert note.count("Иван (@ivan)") == 1  # не повторяем "начал" для того же человека
     assert "начал" not in note
     assert "чужой тред" not in note  # свой же тред — подсказка про сдержанность не нужна
+
+
+# --- реплай-контекст: содержимое сообщения, на которое отвечают, и
+# конкретно выделенная (quote) цитата (2026-07-24) ---
+
+
+async def test_reply_context_includes_foreign_message_text(store):
+    # Реплай на сообщение, не принадлежащее ни одному ходу Альфреда —
+    # модель иначе его вообще не увидела бы.
+    vasya = FakeUser("Вася", id=99)
+    foreign = FakeRepliedMessage(777, from_user=vasya, text="Когда следующий матч?")
+    ivan = FakeUser("Иван", username="ivan", id=10)
+
+    message = NoteMessage(1, "group", ivan, reply_to_message=foreign)
+    note = await ai_flow._build_context_note(message, store, dialogue_id=500)
+
+    assert "Вася" in note
+    assert "Когда следующий матч?" in note
+
+
+async def test_reply_context_skips_text_already_in_current_dialogue_history(store):
+    # Реплай на сообщение Альфреда из ТЕКУЩЕГО треда — текст уже есть в
+    # истории, отдельно дублировать не нужно.
+    ivan = FakeUser("Иван", username="ivan", id=10)
+    now = datetime.now(tz=UTC)
+    await store.record_ai_turn(1, 500, 500, "user", "привет", now, user_id=10, user_name="Иван")
+    await store.record_ai_turn(1, 501, 500, "assistant", "Слушаю, сэр", now)
+
+    reply_to = FakeRepliedMessage(501, text="Слушаю, сэр")
+    message = NoteMessage(1, "group", ivan, reply_to_message=reply_to)
+    note = await ai_flow._build_context_note(message, store, dialogue_id=500)
+
+    assert "Сообщение, на которое сейчас отвечают" not in note
+
+
+async def test_reply_context_includes_quote_even_for_own_thread(store):
+    # Quote (выделенный при ответе фрагмент) — информация, которой нет в
+    # истории диалога, поэтому добавляется даже для реплая в свой же тред.
+    ivan = FakeUser("Иван", username="ivan", id=10)
+    now = datetime.now(tz=UTC)
+    await store.record_ai_turn(1, 500, 500, "user", "привет", now, user_id=10, user_name="Иван")
+    await store.record_ai_turn(
+        1, 501, 500, "assistant", "Я умею много всего, сэр", now
+    )
+
+    reply_to = FakeRepliedMessage(501, text="Я умею много всего, сэр")
+    message = NoteMessage(
+        1, "group", ivan, reply_to_message=reply_to, quote=FakeQuote("много всего")
+    )
+    note = await ai_flow._build_context_note(message, store, dialogue_id=500)
+
+    assert "много всего" in note
+    assert "Сообщение, на которое сейчас отвечают" not in note  # текст уже в истории
+
+
+async def test_reply_context_truncates_long_foreign_message(store):
+    ivan = FakeUser("Иван", username="ivan", id=10)
+    long_text = "Ы" * (ai_flow._REPLY_QUOTE_MAX_CHARS + 200)
+    foreign = FakeRepliedMessage(777, from_user=None, text=long_text)
+
+    message = NoteMessage(1, "group", ivan, reply_to_message=foreign)
+    note = await ai_flow._build_context_note(message, store, dialogue_id=500)
+
+    assert "…" in note
+    assert len(note) < len(long_text) + 200  # обрезано, а не вставлено целиком
+
+
+async def test_no_reply_context_without_reply_to_message(store):
+    ivan = FakeUser("Иван", username="ivan", id=10)
+    message = NoteMessage(1, "private", ivan)
+    note = await ai_flow._build_context_note(message, store, dialogue_id=500)
+
+    assert "отвечают" not in note
