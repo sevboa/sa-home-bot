@@ -80,13 +80,24 @@ def build_router(
     assignments: list[str],
     extra_peers: list[SwarmNodeConfig],
     on_peer_event,
+    on_local_event,
 ) -> NodeRouter:
     """Маршрутизатор: пиры из [[swarm.nodes]] ∪ персистентного состояния
     (join, этап 18) + локальные службы из назначений.
 
     ``assignments`` — эффективный набор (TOML ∪ персистентное состояние
     ноды), не только `settings.node.assignments` — см. `node/state.py`.
-    """
+
+    ``on_peer_event``/``on_local_event`` — РАЗНЫЕ колбэки (живая находка
+    2026-07-24, живой баг на проде: `task_result` от службы tasks молча
+    терялся). Локальная служба репортует СВОЙ ЖЕ узел в `describe().info.
+    node` (см. proto/server.py::broadcast_event — `src=Address(node=info.
+    node,...)`), который для локальной службы равен `node_id` этой самой
+    ноды — эхо-проверка в `_relay_peer_event` (`env.src.node == node_id`)
+    расценивала это как "моё же событие вернулось от соседа" и молча
+    дропала. Для событий ПИРОВ (`src.node` — чужой узел) проверка верна, для
+    ЛОКАЛЬНЫХ служб — никогда не эхо (локальная связь однонаправленная,
+    возврата по кругу физически нет), проверять нечего."""
     peer_configs: dict[str, SwarmNodeConfig] = {n.id: n for n in settings.swarm.nodes}
     for p in extra_peers:
         peer_configs.setdefault(p.id, p)
@@ -96,13 +107,11 @@ def build_router(
         if pid != node_id  # свой id в списке — не пир
     }
     local = {
-        # on_event=on_peer_event: локальные службы (пока актуально для llm —
-        # llm_idle_sleep, живая находка 2026-07-23) тоже могут эмитить
-        # события, которые нужно довезти до бота через ту же ретрансляцию,
-        # что уже работает для событий пиров (_relay_peer_event ниже —
-        # дедуп по SeenEvents одинаково защищает от эха что для пиров,
-        # что для локальных служб).
-        name: PeerLink(name, endpoint, token=settings.swarm.token, on_event=on_peer_event)
+        # on_event=on_local_event (НЕ on_peer_event, см. докстринг выше) —
+        # локальные службы (llm — llm_idle_sleep, tasks — task_result и
+        # т.п.) тоже могут эмитить события, которые нужно довезти до бота
+        # через ту же ретрансляцию, что уже работает для событий пиров.
+        name: PeerLink(name, endpoint, token=settings.swarm.token, on_event=on_local_event)
         for name, endpoint in local_service_endpoints(settings).items()
         if name in assignments
     }
@@ -141,20 +150,30 @@ async def _relay_peer_event(
     on_peer_event,
     server: ProtoServer | None,
     seen: SeenEvents,
+    is_local: bool = False,
 ) -> None:
-    """Ретрансляция события пира своим клиентам + замыкание сетки (этап 18).
+    """Ретрансляция события (пира или локальной службы) своим клиентам +
+    замыкание сетки (этап 18) для событий пиров.
 
-    Событие с собственным ``src.node`` — эхо от соседа, ему тут делать
-    нечего. ``node_joined`` от уже связанного пира — авто-подключиться к
-    новому узлу тем же путём, каким мы сами узнаём о событиях: так третий
-    узел, не участвовавший в handshake напрямую, всё равно достраивает
-    полную сетку за один хоп репликации события, без отдельного каталога.
+    Эхо-проверка (``env.src.node == node_id`` — "моё же событие вернулось
+    от соседа") применяется ТОЛЬКО к событиям пиров (``is_local=False``):
+    локальная служба репортует src.node == node_id этой же ноды не потому,
+    что это эхо, а потому что это буквально её собственный узел — для
+    локальной связи возврата по кругу не бывает (см. build_router). Живой
+    баг на проде 2026-07-24: без этого различения `task_result` от службы
+    tasks молча терялся здесь же, до бота дело не доходило.
+
+    ``node_joined`` от уже связанного пира — авто-подключиться к новому
+    узлу тем же путём, каким мы сами узнаём о событиях: так третий узел, не
+    участвовавший в handshake напрямую, всё равно достраивает полную сетку
+    за один хоп репликации события, без отдельного каталога. Локальная
+    служба этот тип события никогда не эмитит — веткой ниже не задевается.
 
     ``seen`` — дедуп по ``env.id``: в связном рое (≥3 узла, каждый с каждым)
     одно событие приходит несколькими путями, а без дедупа каждый узел
     ретранслирует КАЖДУЮ полученную копию заново — лавина (см. SeenEvents).
     """
-    if env.src is not None and env.src.node == node_id:
+    if not is_local and env.src is not None and env.src.node == node_id:
         return
     if seen.seen(env.id):
         return
@@ -204,6 +223,20 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
             seen=seen_events,
         )
 
+    async def on_local_event(env: Envelope) -> None:
+        await _relay_peer_event(
+            env,
+            node_id=node_id,
+            router=router,
+            state=state,
+            state_path=settings.node.state_path,
+            token=settings.swarm.token,
+            on_peer_event=on_peer_event,
+            server=server,
+            seen=seen_events,
+            is_local=True,
+        )
+
     # assignments в TOML — стартовый набор, не единственный источник:
     # состояние из assign/unassign в рантайме (nodectl/бот) переживает
     # рестарт через state_path (node/state.py), а не только через TOML.
@@ -222,7 +255,9 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
     if not supervisor.services:
         log.warning("Нет ни одного валидного назначения — нода работает вхолостую")
 
-    router = build_router(settings, node_id, effective_assignments, state.peers, on_peer_event)
+    router = build_router(
+        settings, node_id, effective_assignments, state.peers, on_peer_event, on_local_event
+    )
     # Нода слушает socket (локальные фронтенды) и, если задан, listen —
     # TCP для пиров роя.
     endpoints = [settings.node.socket]

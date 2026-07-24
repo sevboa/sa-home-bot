@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from sa_home_bot.node.app import SeenEvents, _relay_peer_event
+from sa_home_bot.config import Settings
+from sa_home_bot.node.app import SeenEvents, _relay_peer_event, build_router
 from sa_home_bot.node.peers import NodeRouter, PeerLink
 from sa_home_bot.node.service import NodeService
 from sa_home_bot.node.state import NodeState
@@ -197,6 +198,83 @@ async def test_relay_peer_event_ignores_own_echo():
         seen=SeenEvents(),
     )
     assert calls == []
+
+
+async def test_relay_peer_event_local_service_same_node_id_is_not_echo():
+    """Живой баг на проде 2026-07-24: событие локальной службы (tasks на
+    ноде alfred) репортует src.node == "alfred" — тот же id, что и у самой
+    ноды-маршрутизатора (не потому что это эхо, а потому что служба и нода
+    физически один и тот же узел). Без is_local=True это неотличимо от
+    "моё же событие вернулось от соседа" и молча дропалось — task_result
+    никогда не доходил до бота (см. tasks-service-redesign, TASK_KIND_LLM_CHAT
+    молчаливо терялся). is_local=True обязан пропустить его дальше."""
+    router = NodeRouter("alfred")
+    broadcasts: list[str] = []
+
+    class _FakeServer:
+        async def broadcast_envelope(self, env):
+            broadcasts.append(env.id)
+
+    env = make_event(
+        "task_result",
+        {"task_id": 1, "ok": True},
+        src=Address(node="alfred", service="tasks"),  # локальная служба, НЕ эхо
+    )
+    await _relay_peer_event(
+        env,
+        node_id="alfred",
+        router=router,
+        state=NodeState(),
+        state_path="/dev/null",
+        token="",
+        on_peer_event=lambda e: None,
+        server=_FakeServer(),
+        seen=SeenEvents(),
+        is_local=True,
+    )
+    assert broadcasts == [env.id]  # не дропнуто
+
+
+async def test_relay_peer_event_peer_same_node_id_still_treated_as_echo():
+    # Тот же env, но is_local=False (по умолчанию, как для реальных пиров)
+    # — эхо-проверка должна сработать как раньше, ничего не сломано.
+    router = NodeRouter("alfred")
+
+    class _FakeServer:
+        async def broadcast_envelope(self, env):
+            raise AssertionError("не должно быть вызвано — это эхо")
+
+    env = make_event(
+        "task_result",
+        {"task_id": 1, "ok": True},
+        src=Address(node="alfred", service="tasks"),
+    )
+    await _relay_peer_event(
+        env,
+        node_id="alfred",
+        router=router,
+        state=NodeState(),
+        state_path="/dev/null",
+        token="",
+        on_peer_event=lambda e: None,
+        server=_FakeServer(),
+        seen=SeenEvents(),
+    )  # is_local не передан — default False
+
+
+async def test_build_router_wires_local_services_to_on_local_event():
+    settings = Settings()
+
+    def on_peer_event(e):
+        pass
+
+    def on_local_event(e):
+        pass
+
+    router = build_router(settings, "alfred", ["tasks"], [], on_peer_event, on_local_event)
+    assert "tasks" in router.local_services
+    assert router.local_services["tasks"]._on_event is on_local_event
+    assert router.local_services["tasks"]._on_event is not on_peer_event
 
 
 async def test_relay_peer_event_skips_already_known_peer():
