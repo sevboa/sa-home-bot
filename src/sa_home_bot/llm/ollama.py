@@ -210,6 +210,21 @@ async def _post_with_retry(cfg: LlmConfig, url: str, payload: dict[str, Any]) ->
     raise ProtoError(ERR_INTERNAL, f"{url}: {last_exc}")
 
 
+# Живая находка 2026-07-24: без явного "keep_alive" в запросе Ollama сама
+# выгружает модель из памяти через 5 минут после последнего ответа — это
+# ПОЛНОСТЬЮ отдельный от cfg.idle_sleep_after_s таймер (тот управляет только
+# жизнью WSL2-VM/контейнера, не самой моделью внутри Ollama). Служба об
+# этом не узнаёт (_asleep не выставляется, llm_idle_sleep не эмитится) —
+# пользователь видел только "модель зачем-то выгружается за несколько
+# минут" без единой реплики в характере. Передаём то же idle_sleep_after_s
+# как keep_alive (в секундах, Ollama принимает число) — модель и служба
+# теперь согласны, когда наступает сон, и num_ctx (см. LlmConfig.num_ctx) —
+# фиксирован явно на каждый вызов одинаково, иначе Ollama не переиспользует
+# KV-кэш между запросами, считая их разной конфигурацией.
+def _keep_alive_options(cfg: LlmConfig) -> dict[str, Any]:
+    return {"keep_alive": cfg.idle_sleep_after_s, "options": {"num_ctx": cfg.num_ctx}}
+
+
 async def generate(cfg: LlmConfig, prompt: str, system: str) -> dict[str, Any]:
     payload = {
         "model": cfg.model,
@@ -217,6 +232,7 @@ async def generate(cfg: LlmConfig, prompt: str, system: str) -> dict[str, Any]:
         "system": system,
         "stream": False,
         "think": False,
+        **_keep_alive_options(cfg),
     }
     return await _post_with_retry(cfg, f"{cfg.ollama_url}/api/generate", payload)
 
@@ -239,6 +255,7 @@ async def chat(
         # (False на быстром проходе, True на проходе-эскалации) — этот
         # дефолт остаётся только подстраховкой для прочих вызовов chat().
         "think": cfg.think_chat if think is None else think,
+        **_keep_alive_options(cfg),
     }
     if tools:
         payload["tools"] = tools
