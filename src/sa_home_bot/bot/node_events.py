@@ -4,22 +4,24 @@
 ``llm_idle_sleep`` (служба llm сама погасила контейнер по простою —
 llm/service.py, ретранслируется сюда тем же механизмом, что и события
 пиров, см. node/app.py::build_router — локальным службам тоже включён
-on_event).
+on_event), ``llm_service_restart`` (сам процесс службы llm останавливается
+— деплой/апдейт/ручной restart, см. llm/app.py::run_llm/LlmService.
+notify_restart — тот же список активных chat_id, что и у idle_sleep).
 
 ``node_joined``/``update_finished`` — тип в чат ``system`` (тот же канал,
 что старт/останов, `bot/lifecycle.py`), рассылаются всем подпискам.
-``llm_idle_sleep`` — адресно, только в перечисленные в событии chat_id (не
-через event_types подписки: список чатов уже точный, дублировать его
-подписками незачем). Остальные события ноды (``service_started``/
-``service_failed`` и т.п.) сюда не заведены — отдельная функциональность,
-вне рамок этого модуля.
+``llm_idle_sleep``/``llm_service_restart`` — адресно, только в
+перечисленные в событии chat_id (не через event_types подписки: список
+чатов уже точный, дублировать его подписками незачем). Остальные события
+ноды (``service_started``/``service_failed`` и т.п.) сюда не заведены —
+отдельная функциональность, вне рамок этого модуля.
 """
 
 from __future__ import annotations
 
 import logging
 
-from sa_home_bot.bot.ai_flow import CLOSING_TEXT
+from sa_home_bot.bot.ai_flow import CLOSING_TEXT, RESTART_TEXT
 from sa_home_bot.bot.lifecycle import broadcast_system
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.proto.messages import Envelope
@@ -29,10 +31,11 @@ log = logging.getLogger(__name__)
 
 EVENT_NODE_JOINED = "node_joined"
 EVENT_UPDATE_FINISHED = "update_finished"
-# Строковый литерал, не импорт из llm/service.py — та же конвенция, что и
+# Строковые литералы, не импорт из llm/service.py — та же конвенция, что и
 # для событий выше (это не "источник правды", просто совпадающая строка;
 # импорт бота из пакета llm ради одной константы того не стоит).
 EVENT_LLM_IDLE_SLEEP = "llm_idle_sleep"
+EVENT_LLM_SERVICE_RESTART = "llm_service_restart"
 
 
 def render_node_joined(node_id: str, endpoint: str) -> str:
@@ -75,6 +78,10 @@ def build_node_event_handler(book: SubscriptionBook, notifier: Notifier):
             # чатов, где были запросы за это тёплое окно (llm/service.py).
             for chat_id in data.get("chat_ids", []):
                 await notifier.send_direct(chat_id, CLOSING_TEXT)
+            return
+        elif name == EVENT_LLM_SERVICE_RESTART:
+            for chat_id in data.get("chat_ids", []):
+                await notifier.send_direct(chat_id, RESTART_TEXT)
             return
         else:
             return

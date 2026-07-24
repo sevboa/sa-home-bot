@@ -5,6 +5,7 @@ get_weather, convert_currency, remind. Диспетчер цикла (bot/ai_flo
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -64,13 +65,25 @@ async def test_calc_power(store):
 
 
 async def test_calc_pi_constant(store):
-    result = await tools.tool_calc(_ctx(store), {"expression": "2 * pi"})
-    assert result.startswith("6.283185")
+    assert await tools.tool_calc(_ctx(store), {"expression": "2 * pi"}) == "6.283185"
 
 
 async def test_calc_e_constant(store):
-    result = await tools.tool_calc(_ctx(store), {"expression": "e"})
-    assert result.startswith("2.718281")
+    assert await tools.tool_calc(_ctx(store), {"expression": "e"}) == "2.718282"
+
+
+async def test_calc_rounds_long_float_results(store):
+    result = await tools.tool_calc(_ctx(store), {"expression": "1 / 3"})
+    assert result == "0.333333"
+
+
+async def test_calc_caret_as_power(store):
+    # Живой баг 2026-07-24: модель пишет "1.5^2" (математическая нотация),
+    # не питоновское "1.5**2" — тул должен понимать оба.
+    assert await tools.tool_calc(_ctx(store), {"expression": "1.5^2"}) == "2.25"
+    assert await tools.tool_calc(
+        _ctx(store), {"expression": "2 * pi * 1.5^2 + 2 * pi * 1.5 * 2"}
+    ) == str(round(2 * math.pi * 1.5**2 + 2 * math.pi * 1.5 * 2, 6))
 
 
 async def test_calc_cylinder_surface_area_formula(store):

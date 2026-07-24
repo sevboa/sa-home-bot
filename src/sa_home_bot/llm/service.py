@@ -9,7 +9,9 @@
 `llm_idle_sleep` со списком этих chat_id (ретранслируется до бота тем же
 механизмом, что node_joined/update_finished — см. node/app.py::build_router,
 bot/node_events.py) — бот шлёт туда закрывающее сообщение РОВНО один раз,
-а не сканирует диалоги сам.
+а не сканирует диалоги сам. Тем же приёмом (см. notify_restart) служба
+извещает те же чаты перед собственным остановом (деплой/апдейт/ручной
+restart) — событие `llm_service_restart`, другой текст в боте.
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ ACTION_CHAT = "chat"
 ACTION_SLEEP = "sleep"
 
 EVENT_IDLE_SLEEP = "llm_idle_sleep"
+EVENT_SERVICE_RESTART = "llm_service_restart"
 
 _IDLE_CHECK_INTERVAL_S = 60.0
 
@@ -173,6 +176,22 @@ class LlmService:
                 await self._emit(EVENT_IDLE_SLEEP, {"chat_ids": chat_ids})
             except Exception:  # noqa: BLE001 — сбой эмита не должен ронять идле-таймер
                 log.exception("llm: не удалось эмитить %s", EVENT_IDLE_SLEEP)
+
+    async def notify_restart(self) -> None:
+        """Перед остановом процесса (см. llm/app.py::run_llm, finally-блок) —
+        если за текущее тёплое окно были активные чаты, известить их: служба
+        перезапускается (деплой/апдейт/ручной restart), а не просто зависла.
+        Тот же приём, что EVENT_IDLE_SLEEP (§8.5-соседняя механика), другой
+        повод и текст — решение пользователя 2026-07-24. Не трогает
+        _active_chat_ids/асинхронный Ollama-контейнер: процесс всё равно
+        сейчас завершится, чистить состояние незачем."""
+        if not self._active_chat_ids:
+            return
+        chat_ids = sorted(self._active_chat_ids)
+        try:
+            await self._emit(EVENT_SERVICE_RESTART, {"chat_ids": chat_ids})
+        except Exception:  # noqa: BLE001 — сбой эмита не должен мешать останову
+            log.exception("llm: не удалось эмитить %s", EVENT_SERVICE_RESTART)
 
     async def _maybe_sleep_idle(self) -> None:
         if self._asleep:

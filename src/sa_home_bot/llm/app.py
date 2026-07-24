@@ -46,5 +46,9 @@ async def run_llm(settings: Settings) -> None:
         idle_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await idle_task
+        # До остановки proto-сервера — известить чаты с активным диалогом,
+        # что Альфред отходит по делам (деплой/апдейт/ручной restart), а не
+        # просто не отвечает (см. LlmService.notify_restart).
+        await service.notify_restart()
         await server.stop()
         log.info("Служба llm остановлена чисто")

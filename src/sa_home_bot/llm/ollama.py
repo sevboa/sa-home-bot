@@ -232,7 +232,7 @@ async def chat(
         "model": cfg.model,
         "messages": full_messages,
         "stream": False,
-        "think": False,
+        "think": cfg.think_chat,
     }
     if tools:
         payload["tools"] = tools

@@ -72,6 +72,7 @@ _ALLOWED_UNARYOPS: dict[type, Callable[[Any], Any]] = {
 # единственные разрешённые "переменные", не произвольные имена.
 _ALLOWED_NAMES: dict[str, float] = {"pi": math.pi, "e": math.e}
 _MAX_POW_EXPONENT = 1000  # защита от x**(огромное число) — не таймаут, а память/CPU
+_ROUND_NDIGITS = 6  # "32.98672286269283" читается хуже, чем "32.986723"
 
 
 def _safe_eval(node: ast.AST) -> float:
@@ -87,7 +88,7 @@ def _safe_eval(node: ast.AST) -> float:
     if isinstance(node, ast.UnaryOp) and type(node.op) in _ALLOWED_UNARYOPS:
         return _ALLOWED_UNARYOPS[type(node.op)](_safe_eval(node.operand))
     raise ValueError(
-        "недопустимое выражение (разрешены только числа, pi, e и + - * / ** ())"
+        "недопустимое выражение (разрешены только числа, pi, e и + - * / ** или ^ ())"
     )
 
 
@@ -95,13 +96,26 @@ async def tool_calc(ctx: ToolContext, args: dict[str, Any]) -> str:
     expr = args.get("expression")
     if not isinstance(expr, str) or not expr.strip():
         return "ошибка: пустое выражение"
+    # Живая находка 2026-07-24: модель пишет степень как в математике,
+    # "1.5^2", не как в Python "1.5**2". У "^" в Python СОВСЕМ другой
+    # приоритет операций (ниже "+", а не выше "*", как у степени) — трактовать
+    # AST-узел BitXor напрямую как "**" ломает любое выражение сложнее
+    # одного "a^b" (проверено: "2*pi*1.5^2+2*pi*1.5*2" вычислялось неверно).
+    # Текстовая замена ДО парсинга — "^" в разрешённых выражениях больше
+    # никогда и ни для чего другого не встречается, поэтому безопасна.
+    expr = expr.replace("^", "**")
     try:
         tree = ast.parse(expr, mode="eval")
         value = _safe_eval(tree.body)
     except (SyntaxError, ValueError, ZeroDivisionError, TypeError, OverflowError) as exc:
         return f"ошибка вычисления: {exc}"
-    if isinstance(value, float) and value.is_integer():
-        value = int(value)
+    if isinstance(value, float):
+        if value.is_integer():
+            value = int(value)
+        else:
+            # "32.98672286269283" — избыточная точность, которую персонаж
+            # никогда бы не произнёс; округляем, не обрубая до неточности.
+            value = round(value, _ROUND_NDIGITS)
     return str(value)
 
 
@@ -310,18 +324,19 @@ TOOL_DECLARATIONS: list[dict[str, Any]] = [
         "function": {
             "name": "calc",
             "description": (
-                "Точно вычислить арифметическое выражение (числа, + - * / ** и скобки, "
-                "плюс константы pi и e — без произвольных переменных и функций). "
-                "Используй для ЛЮБОЙ реальной арифметики, включая формулы (площадь, "
-                "объём и т.п.) — подставь известные числа и pi/e в выражение и вызови "
-                "тул, не считай и не подставляй в уме."
+                "Точно вычислить арифметическое выражение (числа, + - * / скобки, "
+                "степень как ** или ^, плюс константы pi и e — без произвольных "
+                "переменных и функций). Используй для ЛЮБОЙ реальной арифметики, "
+                "включая формулы (площадь, объём и т.п.) — подставь известные "
+                "числа и pi/e в выражение и вызови тул, не считай и не "
+                "подставляй в уме."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "expression": {
                         "type": "string",
-                        "description": "Например: 2 * pi * 1.5 * (1.5 + 2)",
+                        "description": "Например: 2 * pi * 1.5 * (1.5 + 2) или 1.5^2",
                     }
                 },
                 "required": ["expression"],

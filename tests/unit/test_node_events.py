@@ -1,5 +1,7 @@
-"""bot/node_events.py: node_joined/update_finished → системное уведомление."""
+"""bot/node_events.py: node_joined/update_finished → системное уведомление,
+llm_idle_sleep/llm_service_restart → адресное сообщение в конкретные чаты."""
 
+from sa_home_bot.bot.ai_flow import CLOSING_TEXT, RESTART_TEXT
 from sa_home_bot.bot.node_events import (
     build_node_event_handler,
     render_node_joined,
@@ -125,6 +127,45 @@ async def test_handler_ignores_update_finished_without_src_node():
     handler = build_node_event_handler(book, notifier)
 
     env = make_event("update_finished", {"ok": True, "version": "0.22.0"}, src=None)
+    await handler(env)
+
+    assert notifier.sent == []
+
+
+async def test_handler_sends_closing_text_to_each_listed_chat_on_idle_sleep():
+    book = _book()
+    notifier = FakeNotifier()
+    handler = build_node_event_handler(book, notifier)
+
+    env = make_event(
+        "llm_idle_sleep", {"chat_ids": [7, 42]}, src=Address(node="winpc", service="llm")
+    )
+    await handler(env)
+
+    assert notifier.sent == [(7, CLOSING_TEXT), (42, CLOSING_TEXT)]
+
+
+async def test_handler_sends_restart_text_to_each_listed_chat():
+    book = _book()
+    notifier = FakeNotifier()
+    handler = build_node_event_handler(book, notifier)
+
+    env = make_event(
+        "llm_service_restart", {"chat_ids": [7, 42]}, src=Address(node="winpc", service="llm")
+    )
+    await handler(env)
+
+    assert notifier.sent == [(7, RESTART_TEXT), (42, RESTART_TEXT)]
+
+
+async def test_handler_restart_event_with_no_chats_sends_nothing():
+    book = _book()
+    notifier = FakeNotifier()
+    handler = build_node_event_handler(book, notifier)
+
+    env = make_event(
+        "llm_service_restart", {"chat_ids": []}, src=Address(node="winpc", service="llm")
+    )
     await handler(env)
 
     assert notifier.sent == []

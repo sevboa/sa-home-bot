@@ -335,3 +335,51 @@ async def test_keepalive_stopped_only_when_service_actually_sleeps(monkeypatch):
 
     assert svc._keepalive.alive is False
     assert svc._keepalive.stop_calls == 1
+
+
+# --- notify_restart (перед остановом процесса, llm/app.py — известить
+# активные чаты, что служба перезапускается, а не просто зависла) ---
+
+
+async def test_notify_restart_emits_for_active_chats(monkeypatch):
+    async def fake_chat(cfg, messages, system, tools=None):
+        return {"message": {"content": "ответ"}}
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    emitter = FakeEmitter()
+    svc = LlmService(_settings(), emit=emitter)
+
+    await svc.run_command(
+        "chat", {"messages": [{"role": "user", "content": "привет"}], "chat_id": 42}
+    )
+    await svc.run_command(
+        "chat", {"messages": [{"role": "user", "content": "снова"}], "chat_id": 7}
+    )
+    await svc.notify_restart()
+
+    assert emitter.events == [("llm_service_restart", {"chat_ids": [7, 42]})]
+
+
+async def test_notify_restart_without_active_chats_emits_nothing():
+    emitter = FakeEmitter()
+    svc = LlmService(_settings(), emit=emitter)
+
+    await svc.notify_restart()
+
+    assert emitter.events == []
+
+
+async def test_notify_restart_failure_is_swallowed(monkeypatch):
+    async def fake_chat(cfg, messages, system, tools=None):
+        return {"message": {"content": "ответ"}}
+
+    async def failing_emit(event_type, data):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    svc = LlmService(_settings(), emit=failing_emit)
+
+    await svc.run_command(
+        "chat", {"messages": [{"role": "user", "content": "привет"}], "chat_id": 1}
+    )
+    await svc.notify_restart()  # не должно бросить исключение наружу

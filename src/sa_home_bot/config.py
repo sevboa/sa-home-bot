@@ -209,6 +209,16 @@ class LlmConfig(BaseModel):
     останавливает контейнер (освобождает VRAM) и, если за это время были
     чаты с запросами, эмитит событие `llm_idle_sleep` со списком их
     chat_id — бот (bot/node_events.py) шлёт туда закрывающее сообщение.
+
+    ``think_chat`` — thinking-режим qwen3 для действия `chat` (не `ask` —
+    тот используется только для короткого приветствия, где точность не
+    важна). Живая находка 2026-07-24: изначально стоял False ради скорости
+    (LLM_INTEGRATION_PLAN.md §5), но на реальной задаче с формулой (площадь
+    цилиндра) модель без рассуждения путала формулу и ошибалась в
+    арифметике на нескольких попытках подряд — с `think=true` (проверено
+    прямым запросом к Ollama) модель надёжно выводит формулу и вызывает
+    calc с верным выражением. Компромисс — заметно дольше (~30-40с на
+    раунд вместо секунд), но для расчётов корректность важнее.
     """
 
     socket: str = "./data/llm.sock"
@@ -218,6 +228,7 @@ class LlmConfig(BaseModel):
     ollama_container: str = "ollama"
     request_timeout_s: float = Field(default=240.0, gt=0)
     idle_sleep_after_s: float = Field(default=1800.0, gt=0)
+    think_chat: bool = True
 
 
 class WeatherConfig(BaseModel):
