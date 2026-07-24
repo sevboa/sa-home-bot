@@ -320,9 +320,9 @@ async def test_internal_error_on_first_try_answers_user_and_notifies_admin(store
 
     assert raw is None
     # Без «шагов» — это не сценарий недоступности узла. Текст пользователю —
-    # намеренно общий (не палим инфраструктуру/LLM), подробности — только
-    # админу.
-    assert message.answers == [ai_flow._GENERIC_ERROR_TEXT]
+    # в характере персонажа (Альбегт просит повторить), без утечки техники;
+    # подробности — только админу.
+    assert message.answers == [ai_flow.ALBERT_HICCUP]
     assert "Ollama" not in message.answers[0]
     assert link.wol_sent == []  # это не сценарий недоступности — wake не трогаем
     assert len(notifier.sent) == 1
