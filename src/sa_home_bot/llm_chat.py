@@ -14,6 +14,7 @@ aiogram (см. докстринг ToolContext), поэтому служба task
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from sa_home_bot.bot import tools as ai_tools
@@ -29,6 +30,13 @@ ACTION_CHAT = "chat"
 # PLAN.md §7.1 п.5).
 MAX_TOOL_ROUNDS = 4
 
+# (имя тула, аргументы, результат) — вызывается после каждого тула. Этот
+# модуль сам БД не трогает (см. докстринг модуля — им пользуется и служба
+# tasks, у которой БД бота нет вовсе); колбэк передаёт вызывающий (живой
+# /ai в bot/ai_flow.py пишет в Store.record_tool_call, tasks его просто не
+# передаёт — см. schema.sql::ai_tool_calls).
+ToolCallSink = Callable[[str, dict[str, Any], str], Awaitable[None]]
+
 
 async def run_chat_loop(
     node_link: ServiceLink,
@@ -39,6 +47,7 @@ async def run_chat_loop(
     think: bool,
     telegram_chat_id: int | None,
     log_chat_id: Any,
+    on_tool_call: ToolCallSink | None = None,
 ) -> str:
     """Один проход диалога с моделью: раунды tool-calling (до
     MAX_TOOL_ROUNDS), пока не придёт финальный текст.
@@ -78,18 +87,16 @@ async def run_chat_loop(
                 except Exception as exc:  # noqa: BLE001 — сбой тула не должен ронять диалог
                     log.exception("llm_chat: тул %s упал (chat=%s)", name, log_chat_id)
                     tool_result = f"внутренняя ошибка инструмента: {exc}"
-                else:
-                    # Живая находка 2026-07-24: без этой строки в проде не
-                    # видно вообще, вызывает ли модель тул и с чем — баг
-                    # "получил не знаю пояс, но всё равно придумал время"
-                    # диагностировать было нечем, кроме логов Ollama.
-                    log.info(
-                        "llm_chat: тул %s(%s) -> %s (chat=%s)",
-                        name,
-                        call_args,
-                        tool_result,
-                        log_chat_id,
-                    )
+            # Живая находка 2026-07-24: раньше в проде не было видно вообще,
+            # вызывает ли модель тул и с чем — баг "получил не знаю пояс, но
+            # всё равно придумал время" диагностировать было нечем, кроме
+            # логов Ollama. on_tool_call — durable-версия для живого /ai
+            # (см. ToolCallSink выше).
+            log.info(
+                "llm_chat: тул %s(%s) -> %s (chat=%s)", name, call_args, tool_result, log_chat_id
+            )
+            if on_tool_call is not None:
+                await on_tool_call(name, call_args, tool_result)
             messages.append({"role": "tool", "content": tool_result, "name": name})
     # Лимит раундов исчерпан — модель зациклилась на вызовах инструментов,
     # не дав финального текста.

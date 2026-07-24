@@ -236,6 +236,35 @@ async def test_latest_ai_dialogue_returns_most_recent_by_message_id(store):
     assert await store.latest_ai_dialogue(CHAT_ID + 1) is None
 
 
+# --- ai_tool_calls (трасса вызовов тулов /ai, живая находка 2026-07-24) ---
+
+
+async def test_tool_calls_for_dialogue_empty_when_none_recorded(store):
+    assert await store.tool_calls_for_dialogue(CHAT_ID, 500) == []
+
+
+async def test_record_tool_call_roundtrip(store):
+    await store.record_tool_call(
+        CHAT_ID, 500, 42, "get_time", {"place": "Италия"}, '{"utc_offset": "+02:00"}', BASE_TIME
+    )
+    rows = await store.tool_calls_for_dialogue(CHAT_ID, 500)
+    assert len(rows) == 1
+    assert rows[0]["tool_name"] == "get_time"
+    assert rows[0]["args_json"] == '{"place": "Италия"}'
+    assert rows[0]["result"] == '{"utc_offset": "+02:00"}'
+    assert rows[0]["trigger_message_id"] == 42
+
+
+async def test_tool_calls_for_dialogue_ordered_and_isolated(store):
+    await store.record_tool_call(CHAT_ID, 500, 1, "calc", {}, "4", BASE_TIME)
+    await store.record_tool_call(
+        CHAT_ID, 500, 1, "get_time", {}, "21:00", BASE_TIME + timedelta(seconds=1)
+    )
+    await store.record_tool_call(CHAT_ID, 600, 1, "calc", {}, "9", BASE_TIME)
+    rows = await store.tool_calls_for_dialogue(CHAT_ID, 500)
+    assert [r["tool_name"] for r in rows] == ["calc", "get_time"]
+
+
 # --- tasks (служба tasks, отложенные задачи роя) ---
 
 

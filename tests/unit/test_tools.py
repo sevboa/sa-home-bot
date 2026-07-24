@@ -408,6 +408,66 @@ async def test_get_time_italy(store):
     assert data["local_time"] == "2026-07-24 19:28"  # летнее CEST = UTC+2
 
 
+# --- get_time: places (сравнение нескольких мест, разница) ---
+#
+# Живая находка 2026-07-24: на вопрос "разница между Москвой и Италией"
+# модель считала сама и путалась (то 2 часа не в ту сторону, то не в ту) —
+# теперь places считает разницу детерминированно, моделью не пересчитывается.
+
+
+async def test_get_time_places_returns_each_place_and_differences(store):
+    result = await tools.tool_get_time(
+        _ctx(store),
+        {"places": ["Москва", "Италия", "Казахстан"], "at": "2026-07-24T20:28:00+03:00"},
+    )
+    data = json.loads(result)
+    by_place = {p["place"]: p for p in data["places"]}
+    assert by_place["Москва"]["utc_offset"] == "+03:00"
+    assert by_place["Италия"]["utc_offset"] == "+02:00"
+    assert by_place["Казахстан"]["utc_offset"] == "+05:00"
+    # Москва впереди Италии на 1 ч (MSK+3 vs CEST+2), Казахстан впереди
+    # обоих (+5) — раньше модель сама считала эту разницу и ошибалась.
+    # Места отдаются в том же (именительном) виде, в каком их передали —
+    # тул не склоняет, это на совести модели при пересказе.
+    assert any("Москва впереди Италия на 1 ч" in d for d in data["differences"])
+    assert any("Казахстан впереди Москва на 2 ч" in d for d in data["differences"])
+
+
+async def test_get_time_places_single_entry_behaves_like_place(store):
+    # places с одним элементом — тот же плоский формат, что и place.
+    result_places = await tools.tool_get_time(
+        _ctx(store), {"places": ["Москва"], "at": "2026-07-24T20:28:00+03:00"}
+    )
+    result_place = await tools.tool_get_time(
+        _ctx(store), {"place": "Москва", "at": "2026-07-24T20:28:00+03:00"}
+    )
+    assert result_places == result_place
+
+
+async def test_get_time_places_partial_unknown_still_answers_known(store):
+    result = await tools.tool_get_time(
+        _ctx(store),
+        {"places": ["Москва", "Атлантида"], "at": "2026-07-24T20:28:00+03:00"},
+    )
+    data = json.loads(result)
+    assert [p["place"] for p in data["places"]] == ["Москва"]
+    assert data["unknown_places"] == ["Атлантида"]
+
+
+async def test_get_time_places_all_unknown_is_honest_refusal(store):
+    result = await tools.tool_get_time(_ctx(store), {"places": ["Атлантида", "Нарния"]})
+    assert result.startswith("не знаю часовой пояс")
+
+
+async def test_get_time_places_same_offset_reports_no_difference(store):
+    result = await tools.tool_get_time(
+        _ctx(store),
+        {"places": ["Казахстан", "Алматы"], "at": "2026-07-24T20:28:00+03:00"},
+    )
+    data = json.loads(result)
+    assert "одинаковое время" in data["differences"][0]
+
+
 async def test_get_time_rejects_missing_place(store):
     result = await tools.tool_get_time(_ctx(store), {})
     assert result.startswith("ошибка")

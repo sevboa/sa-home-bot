@@ -91,6 +91,26 @@ CREATE TABLE IF NOT EXISTS ai_turns (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_turns_dialogue ON ai_turns(chat_id, dialogue_id, message_id);
 
+-- Трасса вызовов тулов /ai (get_time, get_weather, calc, convert_currency,
+-- remind) — живая находка 2026-07-24: "шиза" с часовыми поясами (модель то
+-- врёт про место, которого нет в таблице get_time, то вообще не зовёт тул)
+-- была недиагностируема — ai_turns.content хранит только финальный текст
+-- ответа, по нему нельзя понять, вызывался ли тул и что он вернул. Пишется
+-- только из bot/ai_flow.py (там есть Store) через колбэк в llm_chat.
+-- run_chat_loop — служба tasks (свои задачи/self-scheduling) БД бота не
+-- видит вовсе (см. docstring ToolContext в bot/tools.py) и трассу не пишет.
+CREATE TABLE IF NOT EXISTS ai_tool_calls (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id            INTEGER NOT NULL,
+    dialogue_id        INTEGER NOT NULL,
+    trigger_message_id INTEGER,
+    tool_name          TEXT NOT NULL,
+    args_json          TEXT NOT NULL,
+    result             TEXT NOT NULL,
+    created_at         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ai_tool_calls_dialogue ON ai_tool_calls(chat_id, dialogue_id);
+
 -- Отложенные задачи роя — служба tasks (`sa-home-bot --service tasks`,
 -- sa_home_bot/tasks/), собственная таблица этой службы (не бота — эта
 -- схема общая для всех служб проекта, см. db/migrations.py). Замена

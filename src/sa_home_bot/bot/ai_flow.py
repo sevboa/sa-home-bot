@@ -63,7 +63,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from aiogram.types import Message, User
@@ -423,6 +423,24 @@ async def request_alfred(
         )
         telegram_chat_id = message.chat.id if message.chat is not None else None
 
+        async def _record_tool_call(name: str, call_args: dict[str, Any], result: str) -> None:
+            # Живая находка 2026-07-24: "шиза" с часовыми поясами была
+            # недиагностируема — ai_turns хранит только финальный текст
+            # ответа, не видно, звала ли модель тул вообще и что тот
+            # вернул (см. schema.sql::ai_tool_calls). Пишет только живой
+            # /ai — у него есть Store, у службы tasks его нет вовсе.
+            if telegram_chat_id is None:
+                return
+            await store.record_tool_call(
+                chat_id=telegram_chat_id,
+                dialogue_id=dialogue_id,
+                trigger_message_id=message.message_id,
+                tool_name=name,
+                args=call_args,
+                result=result,
+                at=datetime.now(tz=UTC),
+            )
+
         # Вариативное рассуждение (см. THINK_MARKER/_TRIAGE_INSTRUCTION
         # выше): быстрый проход с think=false и инструкцией самой попросить
         # подумать, если вопрос того требует — свой список сообщений
@@ -438,6 +456,7 @@ async def request_alfred(
             think=False,
             telegram_chat_id=telegram_chat_id,
             log_chat_id=chat_id,
+            on_tool_call=_record_tool_call,
         )
         if THINK_MARKER not in fast_answer:
             return fast_answer
@@ -456,6 +475,7 @@ async def request_alfred(
             think=True,
             telegram_chat_id=telegram_chat_id,
             log_chat_id=chat_id,
+            on_tool_call=_record_tool_call,
         )
 
     # Узнать заранее, не спит ли модель (idle-таймер llm/service.py) — если

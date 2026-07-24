@@ -205,6 +205,32 @@ async def test_tool_call_round_trip_reaches_final_response(store):
     assert second_messages[-1] == {"role": "tool", "content": "4", "name": "calc"}
 
 
+async def test_tool_call_is_recorded_in_store(store):
+    # Живая находка 2026-07-24: "шиза" с часовыми поясами была
+    # недиагностируема — ai_turns хранит только финальный текст ответа, не
+    # видно, звала ли модель тул вообще. Теперь каждый вызов тула пишется
+    # через колбэк в Store.record_tool_call (schema.sql::ai_tool_calls).
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[
+            {"tool_calls": [{"function": {"name": "calc", "arguments": {"expression": "2 + 2"}}}]},
+            {"response": "Отвечу: 4"},
+        ],
+        get_state_routes={"winpc:llm": {"asleep": False}},
+    )
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "сколько 2+2"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    calls = await store.tool_calls_for_dialogue(message.chat.id, 1)
+    assert len(calls) == 1
+    assert calls[0]["tool_name"] == "calc"
+    assert calls[0]["result"] == "4"
+    assert calls[0]["trigger_message_id"] == message.message_id
+
+
 async def test_unknown_tool_name_reported_back_to_model(store):
     message = FakeMessage()
     link = FakeNodeLink(

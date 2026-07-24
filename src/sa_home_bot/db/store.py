@@ -13,6 +13,7 @@ import json
 from dataclasses import asdict
 from datetime import datetime
 from math import sqrt
+from typing import Any
 
 from sa_home_bot.db.connection import Database
 from sa_home_bot.domain.models import (
@@ -435,6 +436,42 @@ class Store:
             "FROM ai_turns WHERE chat_id=? AND role='user' AND user_id IS NOT NULL "
             "GROUP BY user_id ORDER BY first_message_id",
             (chat_id,),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def record_tool_call(
+        self,
+        chat_id: int,
+        dialogue_id: int,
+        trigger_message_id: int | None,
+        tool_name: str,
+        args: dict[str, Any],
+        result: str,
+        at: datetime,
+    ) -> None:
+        """Трасса вызова тула /ai — см. schema.sql::ai_tool_calls. Пишет
+        только живой /ai (bot/ai_flow.py через колбэк в llm_chat.
+        run_chat_loop) — служба tasks БД бота не видит вовсе."""
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "INSERT INTO ai_tool_calls(chat_id, dialogue_id, trigger_message_id, "
+                "tool_name, args_json, result, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (
+                    chat_id,
+                    dialogue_id,
+                    trigger_message_id,
+                    tool_name,
+                    json.dumps(args, ensure_ascii=False),
+                    result,
+                    _iso(at),
+                ),
+            )
+
+    async def tool_calls_for_dialogue(self, chat_id: int, dialogue_id: int) -> list[dict]:
+        cur = await self.db.conn.execute(
+            "SELECT * FROM ai_tool_calls WHERE chat_id=? AND dialogue_id=? ORDER BY id",
+            (chat_id, dialogue_id),
         )
         rows = await cur.fetchall()
         return [dict(r) for r in rows]

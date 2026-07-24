@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import itertools
 import json
 import logging
 import math
@@ -383,14 +384,28 @@ _PLACE_TIMEZONES: dict[str, str] = {
 }
 
 
+def _format_hours_diff(minutes: int) -> str:
+    hours, mins = divmod(abs(minutes), 60)
+    return f"{hours} ч" if mins == 0 else f"{hours} ч {mins} мин"
+
+
 async def tool_get_time(ctx: ToolContext, args: dict[str, Any]) -> str:
-    place_raw = args.get("place")
-    if not isinstance(place_raw, str) or not place_raw.strip():
-        return "ошибка: не указано место (place)"
-    place = place_raw.strip()
-    tz_name = _PLACE_TIMEZONES.get(place.lower())
-    if tz_name is None:
-        return f"не знаю часовой пояс для «{place}» — не могу посчитать точно, не додумывай"
+    # Живая находка 2026-07-24: на вопрос "разница между Москвой и Италией"
+    # тула не было вовсе — модель считала её сама в уме и путалась,
+    # противореча даже собственным же названным поясам. places (список) —
+    # для сравнения нескольких мест разом, тул сам детерминированно считает
+    # разницу; place (одно место) остаётся как раньше, формат ответа для
+    # него не меняется.
+    places_raw = args.get("places")
+    if isinstance(places_raw, list) and places_raw:
+        place_list = [p.strip() for p in places_raw if isinstance(p, str) and p.strip()]
+    else:
+        single = args.get("place")
+        if not isinstance(single, str) or not single.strip():
+            return "ошибка: не указано место (place или places)"
+        place_list = [single.strip()]
+    if not place_list:
+        return "ошибка: не указано место (place или places)"
 
     at_raw = args.get("at")
     if isinstance(at_raw, str) and at_raw.strip():
@@ -404,22 +419,70 @@ async def tool_get_time(ctx: ToolContext, args: dict[str, Any]) -> str:
     else:
         at_utc = datetime.now(UTC)
 
-    try:
-        target = at_utc.astimezone(ZoneInfo(tz_name))
-    except ZoneInfoNotFoundError:
-        log.warning("tool_get_time: система не знает часовой пояс %s", tz_name)
-        return f"внутренняя ошибка: не удалось определить часовой пояс {tz_name}"
-    offset = target.strftime("%z")
-    return json.dumps(
-        {
-            "place": place,
-            "timezone": tz_name,
-            "utc_offset": f"{offset[:3]}:{offset[3:]}",
-            "local_time": target.strftime("%Y-%m-%d %H:%M"),
-            "weekday": WEEKDAYS_RU[target.weekday()],
-        },
-        ensure_ascii=False,
-    )
+    resolved: list[tuple[str, str, datetime]] = []
+    unknown: list[str] = []
+    for place in place_list:
+        tz_name = _PLACE_TIMEZONES.get(place.lower())
+        if tz_name is None:
+            unknown.append(place)
+            continue
+        try:
+            target = at_utc.astimezone(ZoneInfo(tz_name))
+        except ZoneInfoNotFoundError:
+            log.warning("tool_get_time: система не знает часовой пояс %s", tz_name)
+            return f"внутренняя ошибка: не удалось определить часовой пояс {tz_name}"
+        resolved.append((place, tz_name, target))
+
+    if not resolved:
+        return (
+            f"не знаю часовой пояс для «{', '.join(unknown)}» — "
+            "не могу посчитать точно, не додумывай"
+        )
+
+    if len(place_list) == 1:
+        # Один запрошенный — прежний плоский формат, поведение не меняется.
+        place, tz_name, target = resolved[0]
+        offset = target.strftime("%z")
+        return json.dumps(
+            {
+                "place": place,
+                "timezone": tz_name,
+                "utc_offset": f"{offset[:3]}:{offset[3:]}",
+                "local_time": target.strftime("%Y-%m-%d %H:%M"),
+                "weekday": WEEKDAYS_RU[target.weekday()],
+            },
+            ensure_ascii=False,
+        )
+
+    entries = []
+    for place, tz_name, target in resolved:
+        offset = target.strftime("%z")
+        entries.append(
+            {
+                "place": place,
+                "timezone": tz_name,
+                "utc_offset": f"{offset[:3]}:{offset[3:]}",
+                "local_time": target.strftime("%Y-%m-%d %H:%M"),
+                "weekday": WEEKDAYS_RU[target.weekday()],
+            }
+        )
+    payload: dict[str, Any] = {"places": entries}
+    if unknown:
+        payload["unknown_places"] = unknown
+
+    # Разница между КАЖДОЙ парой посчитана здесь, а не моделью — именно
+    # ручной пересчёт разницы между поясами и был источником "шизы".
+    diffs = []
+    for (place_a, _, target_a), (place_b, _, target_b) in itertools.combinations(resolved, 2):
+        delta_minutes = round((target_b.utcoffset() - target_a.utcoffset()).total_seconds() / 60)
+        if delta_minutes == 0:
+            diffs.append(f"{place_a} и {place_b}: одинаковое время")
+        elif delta_minutes > 0:
+            diffs.append(f"{place_b} впереди {place_a} на {_format_hours_diff(delta_minutes)}")
+        else:
+            diffs.append(f"{place_a} впереди {place_b} на {_format_hours_diff(delta_minutes)}")
+    payload["differences"] = diffs
+    return json.dumps(payload, ensure_ascii=False)
 
 
 # --- remind: единственный тул, ходящий по протоколу роя, см. докстринг модуля ---
@@ -583,22 +646,40 @@ TOOL_DECLARATIONS: list[dict[str, Any]] = [
             "name": "get_time",
             "description": (
                 "Точно узнать текущее время (и день недели) в конкретном "
-                "городе или стране. Часовые пояса и разницу между ними НЕ "
-                "считай сам — модель на практике их путает. Используй этот "
-                "тул для ЛЮБОГО вопроса про время не 'у нас/сейчас' (то уже "
-                "есть в контексте разговора), а в другом городе/стране — "
+                "городе/стране, а также разницу во времени между НЕСКОЛЬКИМИ "
+                "местами. Часовые пояса и разницу между ними НЕ считай сам — "
+                "модель на практике их путает и противоречит сама себе даже "
+                "после того, как назвала верные названия поясов. Используй "
+                "этот тул для ЛЮБОГО вопроса про время не 'у нас/сейчас' (то "
+                "уже есть в контексте разговора), а в другом городе/стране — "
                 "ВКЛЮЧАЯ короткие вопросы-продолжения вроде 'а в Х?' сразу "
                 "после уже заданного вопроса про другое место: это НОВОЕ "
                 "место, вызови тул заново, не выводи по аналогии с прошлым "
-                "ответом. Если тул не знает место — так и скажи как есть, "
-                "не досчитывай и не придумывай сам."
+                "ответом. Если спрашивают РАЗНИЦУ между двумя и более местами "
+                "(или список часовых поясов сразу для нескольких мест) — "
+                "передай ВСЕ места в places одним вызовом, тул сам посчитает "
+                "разницу (поле differences в ответе) — НЕ вычитай время двух "
+                "мест сам. Если тул не знает место — так и скажи как есть, не "
+                "досчитывай и не придумывай сам."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "place": {
                         "type": "string",
-                        "description": "Город или страна (например: Москва, Казахстан)",
+                        "description": (
+                            "Город или страна (например: Москва) — для ОДНОГО места. "
+                            "Если мест несколько (сравнение/разница) — используй places."
+                        ),
+                    },
+                    "places": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Список мест (например: [\"Москва\", \"Италия\"]) — для "
+                            "сравнения нескольких мест или вопроса про разницу во "
+                            "времени между ними. Если задан, place игнорируется."
+                        ),
                     },
                     "at": {
                         "type": "string",
@@ -610,7 +691,6 @@ TOOL_DECLARATIONS: list[dict[str, Any]] = [
                         ),
                     },
                 },
-                "required": ["place"],
             },
         },
     },
