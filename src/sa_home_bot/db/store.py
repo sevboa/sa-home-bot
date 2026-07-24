@@ -449,6 +449,32 @@ class Store:
         row = await cur.fetchone()
         return row["dialogue_id"] if row else None
 
+    # --- reminders (тул remind, /ai, LLM_INTEGRATION_PLAN.md §8.5) ---
+
+    async def create_reminder(
+        self, chat_id: int, text: str, due_at: datetime, created_at: datetime
+    ) -> int:
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                "INSERT INTO reminders(chat_id, text, due_at, created_at) VALUES(?, ?, ?, ?)",
+                (chat_id, text, _iso(due_at), _iso(created_at)),
+            )
+            return cur.lastrowid
+
+    async def due_reminders(self, now: datetime) -> list[dict]:
+        cur = await self.db.conn.execute(
+            "SELECT * FROM reminders WHERE fired_at IS NULL AND due_at<=? ORDER BY due_at",
+            (_iso(now),),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def mark_reminder_fired(self, reminder_id: int, at: datetime) -> None:
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "UPDATE reminders SET fired_at=? WHERE id=?", (_iso(at), reminder_id)
+            )
+
     # --- housekeeping ---
 
     async def prune_job_runs(self, keep_last: int = 500) -> int:

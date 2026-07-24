@@ -90,3 +90,17 @@ CREATE TABLE IF NOT EXISTS ai_turns (
     PRIMARY KEY (chat_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_ai_turns_dialogue ON ai_turns(chat_id, dialogue_id, message_id);
+
+-- Напоминания тула remind (/ai, LLM_INTEGRATION_PLAN.md §8.5) — плоская
+-- очередь "когда напомнить в каком чате", опрашивается фоновым циклом
+-- bot/reminders.py. due_at/created_at/fired_at — UTC ISO (as everywhere
+-- else: сравнение строк работает только при едином часовом поясе).
+CREATE TABLE IF NOT EXISTS reminders (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     INTEGER NOT NULL,
+    text        TEXT NOT NULL,
+    due_at      TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    fired_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(due_at) WHERE fired_at IS NULL;

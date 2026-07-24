@@ -67,7 +67,7 @@ async def test_ask_rejects_missing_prompt():
 
 
 async def test_chat_calls_ollama_chat_and_extracts_message(monkeypatch):
-    async def fake_chat(cfg, messages, system):
+    async def fake_chat(cfg, messages, system, tools=None):
         assert messages == [{"role": "user", "content": "привет"}]
         return {"message": {"role": "assistant", "content": "Добрый день"}}
 
@@ -172,7 +172,7 @@ async def test_idle_check_is_noop_once_already_asleep(monkeypatch):
 
 
 async def test_chat_tracks_chat_id_for_idle_sleep_event(monkeypatch):
-    async def fake_chat(cfg, messages, system):
+    async def fake_chat(cfg, messages, system, tools=None):
         return {"message": {"content": "ответ"}}
 
     async def fake_stop(cfg):
@@ -228,7 +228,7 @@ async def test_idle_triggered_sleep_also_emits(monkeypatch):
 
 
 async def test_active_chat_ids_reset_after_emit(monkeypatch):
-    async def fake_chat(cfg, messages, system):
+    async def fake_chat(cfg, messages, system, tools=None):
         return {"message": {"content": "ответ"}}
 
     async def fake_stop(cfg):
@@ -249,7 +249,7 @@ async def test_active_chat_ids_reset_after_emit(monkeypatch):
 
 
 async def test_emit_failure_does_not_break_sleep(monkeypatch):
-    async def fake_chat(cfg, messages, system):
+    async def fake_chat(cfg, messages, system, tools=None):
         return {"message": {"content": "ответ"}}
 
     async def fake_stop(cfg):
@@ -303,7 +303,7 @@ def test_keepalive_duration_covers_idle_window(monkeypatch):
 
 
 async def test_keepalive_started_on_first_activity_and_not_restarted(monkeypatch):
-    async def fake_chat(cfg, messages, system):
+    async def fake_chat(cfg, messages, system, tools=None):
         return {"message": {"content": "ответ"}}
 
     monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
@@ -317,7 +317,7 @@ async def test_keepalive_started_on_first_activity_and_not_restarted(monkeypatch
 
 
 async def test_keepalive_stopped_only_when_service_actually_sleeps(monkeypatch):
-    async def fake_chat(cfg, messages, system):
+    async def fake_chat(cfg, messages, system, tools=None):
         return {"message": {"content": "ответ"}}
 
     async def fake_stop(cfg):

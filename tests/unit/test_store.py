@@ -235,3 +235,34 @@ async def test_latest_ai_dialogue_returns_most_recent_by_message_id(store):
     assert await store.latest_ai_dialogue(CHAT_ID + 1) is None
 
 
+# --- reminders (тул remind, /ai, LLM_INTEGRATION_PLAN.md §8.5) ---
+
+
+async def test_due_reminders_empty_when_none_created(store):
+    assert await store.due_reminders(BASE_TIME) == []
+
+
+async def test_due_reminders_only_returns_past_due_unfired(store):
+    await store.create_reminder(CHAT_ID, "полить цветы", BASE_TIME, BASE_TIME)
+    await store.create_reminder(
+        CHAT_ID, "ещё не пора", BASE_TIME + timedelta(hours=1), BASE_TIME
+    )
+    due = await store.due_reminders(BASE_TIME)
+    assert [r["text"] for r in due] == ["полить цветы"]
+
+
+async def test_due_reminders_ordered_by_due_at(store):
+    await store.create_reminder(
+        CHAT_ID, "второй", BASE_TIME + timedelta(minutes=5), BASE_TIME
+    )
+    await store.create_reminder(CHAT_ID, "первый", BASE_TIME, BASE_TIME)
+    due = await store.due_reminders(BASE_TIME + timedelta(hours=1))
+    assert [r["text"] for r in due] == ["первый", "второй"]
+
+
+async def test_mark_reminder_fired_excludes_from_due(store):
+    reminder_id = await store.create_reminder(CHAT_ID, "разовое", BASE_TIME, BASE_TIME)
+    await store.mark_reminder_fired(reminder_id, BASE_TIME)
+    assert await store.due_reminders(BASE_TIME + timedelta(hours=1)) == []
+
+

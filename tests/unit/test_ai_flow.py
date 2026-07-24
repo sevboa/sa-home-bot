@@ -162,13 +162,79 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
 
     assert raw == "Добгый день, сэ"
     assert message.answers == []  # никаких «шагов»/Агнольда — узел жив, модель не спит
-    assert link.command_calls == [
-        (
-            "chat",
-            {"messages": [{"role": "user", "content": "привет"}], "chat_id": 1},
-            "winpc",
-        )
-    ]
+    assert len(link.command_calls) == 1
+    action, args, node = link.command_calls[0]
+    assert (action, node) == ("chat", "winpc")
+    assert args["chat_id"] == 1
+    assert args["tools"] == ai_flow.ai_tools.TOOL_DECLARATIONS
+    # FakeMessage.from_user is None — заметка содержит только время (§8.1),
+    # без сведений об отправителе; всё равно вставляется перед текущим ходом.
+    assert args["messages"][-1] == {"role": "user", "content": "привет"}
+    assert len(args["messages"]) == 2
+    assert args["messages"][0]["role"] == "system"
+    assert "Точное время сейчас" in args["messages"][0]["content"]
+
+
+async def test_tool_call_round_trip_reaches_final_response(store):
+    # Первый ответ модели — просьба вызвать calc; второй, после того как
+    # результат дописан в messages, — уже финальный текст (§7.1 плана).
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[
+            {"tool_calls": [{"function": {"name": "calc", "arguments": {"expression": "2 + 2"}}}]},
+            {"response": "Отвечу: 4"},
+        ],
+        get_state_routes={"winpc:llm": {"asleep": False}},
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "сколько 2+2"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert raw == "Отвечу: 4"
+    assert len(link.command_calls) == 2
+    second_messages = link.command_calls[1][1]["messages"]
+    assert second_messages[-2]["role"] == "assistant"
+    assert second_messages[-1] == {"role": "tool", "content": "4", "name": "calc"}
+
+
+async def test_unknown_tool_name_reported_back_to_model(store):
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[
+            {"tool_calls": [{"function": {"name": "no_such_tool", "arguments": {}}}]},
+            {"response": "ладно"},
+        ],
+        get_state_routes={"winpc:llm": {"asleep": False}},
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "..."}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert raw == "ладно"
+    tool_msg = link.command_calls[1][1]["messages"][-1]
+    assert tool_msg["role"] == "tool"
+    assert "неизвестный инструмент" in tool_msg["content"]
+
+
+async def test_tool_call_round_limit_falls_back_to_hiccup(store):
+    tool_calls = [{"function": {"name": "calc", "arguments": {"expression": "1+1"}}}]
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[{"tool_calls": tool_calls}] * ai_flow._MAX_TOOL_ROUNDS,
+        get_state_routes={"winpc:llm": {"asleep": False}},
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "..."}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert raw is None
+    assert message.answers == [ai_flow.ALBERT_HICCUP]
 
 
 async def test_asleep_model_shows_steps_but_no_wake(store):
@@ -379,9 +445,13 @@ def test_display_name_none_for_missing_user():
     assert ai_flow.display_name(None) is None
 
 
-async def test_context_note_none_without_sender(store):
+async def test_context_note_time_only_without_sender(store):
+    # Без отправителя (from_user=None) заметка больше не пустая — время
+    # (§8.1 плана) вставляется безусловно, только сведений о собеседнике нет.
     message = NoteMessage(1, "private", None)
-    assert await ai_flow._build_context_note(message, store, dialogue_id=1) is None
+    note = await ai_flow._build_context_note(message, store, dialogue_id=1)
+    assert "Точное время сейчас" in note
+    assert "говорит" not in note
 
 
 async def test_context_note_private_chat_only_mentions_sender(store):

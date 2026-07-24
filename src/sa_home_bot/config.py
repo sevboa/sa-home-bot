@@ -220,6 +220,18 @@ class LlmConfig(BaseModel):
     idle_sleep_after_s: float = Field(default=1800.0, gt=0)
 
 
+class WeatherConfig(BaseModel):
+    """Город дома для тула ``get_weather`` (/ai, LLM_INTEGRATION_PLAN.md
+    §8.4). Не отдельная служба роя — Open-Meteo не требует ключа и не хранит
+    состояния, вызов делает сам бот-процесс (см. bot/tools.py). Обычное
+    название города, не координаты — широту/долготу тул сам получает через
+    геокодинг-API того же провайдера (детерминированно, не полагаясь на
+    "память" модели о географии) и кэширует на время жизни процесса. Пусто
+    по умолчанию — тул явно ответит "не настроено"."""
+
+    city: str = ""
+
+
 class NodeConfig(BaseModel):
     """Сервис ноды (супервизор, `sa-home-bot --service node`).
 
@@ -314,6 +326,7 @@ class Settings(BaseSettings):
     apps: AppsConfig = Field(default_factory=AppsConfig)
     torrents: TorrentsConfig = Field(default_factory=TorrentsConfig)
     llm: LlmConfig = Field(default_factory=LlmConfig)
+    weather: WeatherConfig = Field(default_factory=WeatherConfig)
     node: NodeConfig = Field(default_factory=NodeConfig)
     swarm: SwarmConfig = Field(default_factory=SwarmConfig)
     wake: WakeConfig = Field(default_factory=WakeConfig)

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
 from sa_home_bot.bot.dispatch import TelegramEventDispatcher
@@ -23,6 +24,7 @@ from sa_home_bot.bot.link_watch import LinkWatchMiddleware
 from sa_home_bot.bot.monitor_events import build_event_handler
 from sa_home_bot.bot.node_events import build_node_event_handler
 from sa_home_bot.bot.notifier import Notifier
+from sa_home_bot.bot.reminders import reminder_loop
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.bot.setup import build_bot, build_dispatcher, set_bot_commands
 from sa_home_bot.bot.torrent_pending import PendingTorrents
@@ -124,7 +126,11 @@ async def run(settings: Settings) -> None:
     await torrents_link.start()
     pending_torrents = PendingTorrents()
 
-    # 9. Polling.
+    # 9. Тул remind (/ai, LLM_INTEGRATION_PLAN.md §8.5) — фоновый опрос своей
+    #    очереди в БД бота, доставка через тот же Notifier.
+    reminders_task = asyncio.create_task(reminder_loop(store, notifier), name="reminders")
+
+    # 10. Polling.
     polling_task = asyncio.create_task(
         dp.start_polling(
             bot,
@@ -148,13 +154,14 @@ async def run(settings: Settings) -> None:
     lifespan.install_signal_handlers()
     log.info("Бот запущен (uptime-старт зафиксирован)")
 
-    # 10. Ждать сигнала, затем остановить всё в обратном порядке.
+    # 11. Ждать сигнала, затем остановить всё в обратном порядке.
     try:
         await lifespan.wait()
     finally:
         await _shutdown(
             dp=dp,
             polling_task=polling_task,
+            reminders_task=reminders_task,
             link=link,
             node_link=node_link,
             apps_link=apps_link,
@@ -171,6 +178,7 @@ async def _shutdown(
     *,
     dp,
     polling_task: asyncio.Task,
+    reminders_task: asyncio.Task,
     link: ServiceLink,
     node_link: ServiceLink,
     apps_link: ServiceLink,
@@ -182,6 +190,12 @@ async def _shutdown(
     db: Database,
 ) -> None:
     log.info("Останов приложения...")
+
+    # Стоп фонового опроса напоминаний — до polling, не участвует в приёме
+    # апдейтов Telegram, безопасно снять первым.
+    reminders_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await reminders_task
 
     # Стоп связи со службами (новые события не принимаются).
     await link.stop()

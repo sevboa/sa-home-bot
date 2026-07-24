@@ -221,7 +221,19 @@ async def generate(cfg: LlmConfig, prompt: str, system: str) -> dict[str, Any]:
     return await _post_with_retry(cfg, f"{cfg.ollama_url}/api/generate", payload)
 
 
-async def chat(cfg: LlmConfig, messages: list[dict[str, str]], system: str) -> dict[str, Any]:
+async def chat(
+    cfg: LlmConfig,
+    messages: list[dict[str, Any]],
+    system: str,
+    tools: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     full_messages = [{"role": "system", "content": system}, *messages]
-    payload = {"model": cfg.model, "messages": full_messages, "stream": False, "think": False}
+    payload: dict[str, Any] = {
+        "model": cfg.model,
+        "messages": full_messages,
+        "stream": False,
+        "think": False,
+    }
+    if tools:
+        payload["tools"] = tools
     return await _post_with_retry(cfg, f"{cfg.ollama_url}/api/chat", payload)

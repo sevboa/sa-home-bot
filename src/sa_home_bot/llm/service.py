@@ -101,6 +101,12 @@ class LlmService:
                             required=False,
                             title="Chat, откуда пришёл запрос (для llm_idle_sleep)",
                         ),
+                        ActionParam(
+                            name="tools",
+                            type="string",
+                            required=False,
+                            title="Декларации инструментов (tool-calling, план §7)",
+                        ),
                     ),
                 ),
                 ActionSpec(id=ACTION_SLEEP, title="Уложить модель спать"),
@@ -136,9 +142,19 @@ class LlmService:
             messages = args.get("messages")
             if not isinstance(messages, list) or not messages:
                 raise ProtoError(ERR_BAD_REQUEST, "messages должен быть непустым списком")
+            tools = args.get("tools") or None
             await self._touch(args.get("chat_id"))
-            result = await ollama.chat(self._cfg, messages, SYSTEM_PROMPT)
-            reply = apply_speech_defect(result.get("message", {}).get("content", ""))
+            result = await ollama.chat(self._cfg, messages, SYSTEM_PROMPT, tools=tools)
+            message = result.get("message", {})
+            # Модель попросила вызвать инструмент(ы) — служба llm сама по рою
+            # не ходит (нет ServiceLink к соседям, только к своей Ollama), это
+            # исполняет фронтенд (см. LLM_INTEGRATION_PLAN.md §7.1). Ответ тут
+            # НЕ прогоняем через apply_speech_defect — это ещё не финальный
+            # текст персонажа, а служебные данные для цикла вызовов.
+            tool_calls = message.get("tool_calls")
+            if tool_calls:
+                return {"tool_calls": tool_calls, "model": self._cfg.model}
+            reply = apply_speech_defect(message.get("content", ""))
             return {"response": reply, "model": self._cfg.model}
         if action == ACTION_SLEEP:
             await self._sleep_now()

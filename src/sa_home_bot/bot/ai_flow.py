@@ -63,17 +63,25 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Any
 
 from aiogram.types import Message, User
 
 from sa_home_bot.bot import swarm_view
+from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.handlers.wake import wake_swarm_node_core
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
-from sa_home_bot.proto.messages import ERR_UNAVAILABLE, ERR_UNKNOWN_DST, Address, ProtoError
+from sa_home_bot.proto.messages import (
+    ERR_INTERNAL,
+    ERR_UNAVAILABLE,
+    ERR_UNKNOWN_DST,
+    Address,
+    ProtoError,
+)
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import WILDCARD
 
@@ -110,6 +118,21 @@ WAKE_POLL_INTERVAL_S = 3.0
 # уже говорит "недоступна" — не тратим ещё раз время на полноценный _ask()
 # (до request_timeout_s) с тем же исходом, сразу идём в сценарий wake.
 _PRESENCE_CHECK_TIMEOUT_S = 3.0
+# Сколько раз подряд можно уйти в tool_calls, прежде чем модель обязана
+# дать финальный текстовый ответ — защита от зацикливания (LLM_INTEGRATION_
+# PLAN.md §7.1 п.5). Превышение — тот же путь, что прочие внутренние сбои
+# (ALBERT_HICCUP), не зависание запроса.
+_MAX_TOOL_ROUNDS = 4
+
+_WEEKDAYS_RU = (
+    "понедельник",
+    "вторник",
+    "среда",
+    "четверг",
+    "пятница",
+    "суббота",
+    "воскресенье",
+)
 
 
 def _is_unavailable(exc: Exception) -> bool:
@@ -204,21 +227,29 @@ async def _reply_context_lines(message: Message, store: Store, dialogue_id: int)
     return lines
 
 
-async def _build_context_note(message: Message, store: Store, dialogue_id: int) -> str | None:
-    """Служебная заметка для модели (не для пользователя): кто сейчас пишет,
-    кто начал этот тред, кто ещё обращался к Альфреду в этом чате, и что за
-    сообщение цитируют/на что отвечают (см. _reply_context_lines).
+async def _build_context_note(message: Message, store: Store, dialogue_id: int) -> str:
+    """Служебная заметка для модели (не для пользователя): точное время
+    сейчас (§8.1 плана — маленькие локальные модели плохо знают "сейчас", а
+    время нужно почти на каждый запрос, отдельного тула для этого не
+    заводим), кто сейчас пишет, кто начал этот тред, кто ещё обращался к
+    Альфреду в этом чате, и что за сообщение цитируют/на что отвечают (см.
+    _reply_context_lines).
 
     Пункты про тред/участников — только для групп: в личке собеседник
     всегда один и тот же, уточнять нечего. Строится заново на каждый запрос
-    (не хранится в ai_turns) — участники чата могут появляться по ходу дела."""
-    sender_name = display_name(message.from_user)
-    if sender_name is None:
-        return None
-    lines = [f"Сейчас с тобой говорит: {sender_name}."]
+    (не хранится в ai_turns) — участники чата могут появляться по ходу дела,
+    а время не имеет смысла хранить вовсе."""
+    now_local = datetime.now().astimezone()
+    lines = [
+        f"Точное время сейчас: {now_local:%Y-%m-%d %H:%M} "
+        f"({_WEEKDAYS_RU[now_local.weekday()]})."
+    ]
 
+    sender_name = display_name(message.from_user)
     is_group = message.chat is not None and message.chat.type in ("group", "supergroup")
-    if is_group:
+    if sender_name is not None:
+        lines.append(f"Сейчас с тобой говорит: {sender_name}.")
+    if sender_name is not None and is_group:
         starter = await store.ai_turn(message.chat.id, dialogue_id)
         starter_name = starter.get("user_name") if starter else None
         if starter_name and starter_name != sender_name:
@@ -283,17 +314,48 @@ async def request_alfred(
             # тем словом). history[-1] — всегда текущий ход пользователя
             # (см. вызовы request_alfred в bot/handlers/ai.py — history
             # собирается с ним последним).
-            messages = [*history[:-1], {"role": "system", "content": context_note}, history[-1]]
+            messages: list[dict[str, Any]] = [
+                *history[:-1], {"role": "system", "content": context_note}, history[-1]
+            ]
         else:
-            messages = history
-        args: dict[str, Any] = {"messages": messages}
-        if message.chat is not None:
-            # chat_id — не для маршрутизации (та по dst), а чтобы служба
-            # знала, какие чаты уведомлять при llm_idle_sleep (см. докстринг
-            # модуля и llm/service.py).
-            args["chat_id"] = message.chat.id
-        result = await node_link.command(ACTION_CHAT, args, dst=dst, timeout=timeout)
-        return result.get("response", "")
+            messages = list(history)
+        tool_ctx = ai_tools.ToolContext(
+            chat_id=message.chat.id if message.chat else None, store=store, settings=settings
+        )
+        # Цикл tool-calling (LLM_INTEGRATION_PLAN.md §7.1): модель либо
+        # отвечает текстом сразу, либо просит вызвать один или несколько
+        # инструментов — тогда дописываем результат в messages и спрашиваем
+        # снова, пока не придёт текст или не кончится лимит раундов.
+        for _round in range(_MAX_TOOL_ROUNDS):
+            args: dict[str, Any] = {"messages": messages, "tools": ai_tools.TOOL_DECLARATIONS}
+            if message.chat is not None:
+                # chat_id — не для маршрутизации (та по dst), а чтобы служба
+                # знала, какие чаты уведомлять при llm_idle_sleep (см.
+                # докстринг модуля и llm/service.py).
+                args["chat_id"] = message.chat.id
+            result = await node_link.command(ACTION_CHAT, args, dst=dst, timeout=timeout)
+            tool_calls = result.get("tool_calls")
+            if not tool_calls:
+                return result.get("response", "")
+            messages.append({"role": "assistant", "tool_calls": tool_calls})
+            for call in tool_calls:
+                fn = call.get("function", {}) if isinstance(call, dict) else {}
+                name = fn.get("name", "")
+                call_args = fn.get("arguments") or {}
+                handler = ai_tools.TOOL_HANDLERS.get(name)
+                if handler is None:
+                    tool_result = f"неизвестный инструмент: {name}"
+                else:
+                    try:
+                        tool_result = await handler(tool_ctx, call_args)
+                    except Exception as exc:  # noqa: BLE001 — сбой тула не должен ронять диалог
+                        log.exception("ai: тул %s упал (chat=%s)", name, chat_id)
+                        tool_result = f"внутренняя ошибка инструмента: {exc}"
+                messages.append({"role": "tool", "content": tool_result, "name": name})
+        # Лимит раундов исчерпан — модель зациклилась на вызовах инструментов,
+        # не дав финального текста. Тот же путь, что прочие внутренние сбои
+        # (ALBERT_HICCUP ниже), не тихое зависание запроса.
+        raise ProtoError(ERR_INTERNAL, "превышен лимит раундов tool-calling")
 
     # Узнать заранее, не спит ли модель (idle-таймер llm/service.py) — если
     # да, предупредить о прогреве СРАЗУ, а не оставлять пользователя молча
