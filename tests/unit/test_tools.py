@@ -386,6 +386,28 @@ async def test_get_time_unknown_place_is_honest_refusal(store):
     assert result.startswith("не знаю часовой пояс")
 
 
+async def test_get_time_greenwich_is_fixed_utc_not_london_dst(store):
+    # Живая находка 2026-07-24: "по Гринвичу" в быту значит "по UTC"
+    # (всегда 0), не гражданское время обсерватории (Europe/London уходит
+    # в BST летом) — проверяем на летней дате, где разница была бы видна.
+    result = await tools.tool_get_time(
+        _ctx(store), {"place": "Гринвич", "at": "2026-07-24T20:28:00+03:00"}
+    )
+    data = json.loads(result)
+    assert data["timezone"] == "UTC"
+    assert data["utc_offset"] == "+00:00"
+    assert data["local_time"] == "2026-07-24 17:28"
+
+
+async def test_get_time_italy(store):
+    result = await tools.tool_get_time(
+        _ctx(store), {"place": "Италия", "at": "2026-07-24T20:28:00+03:00"}
+    )
+    data = json.loads(result)
+    assert data["timezone"] == "Europe/Rome"
+    assert data["local_time"] == "2026-07-24 19:28"  # летнее CEST = UTC+2
+
+
 async def test_get_time_rejects_missing_place(store):
     result = await tools.tool_get_time(_ctx(store), {})
     assert result.startswith("ошибка")

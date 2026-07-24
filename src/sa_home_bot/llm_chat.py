@@ -78,6 +78,18 @@ async def run_chat_loop(
                 except Exception as exc:  # noqa: BLE001 — сбой тула не должен ронять диалог
                     log.exception("llm_chat: тул %s упал (chat=%s)", name, log_chat_id)
                     tool_result = f"внутренняя ошибка инструмента: {exc}"
+                else:
+                    # Живая находка 2026-07-24: без этой строки в проде не
+                    # видно вообще, вызывает ли модель тул и с чем — баг
+                    # "получил не знаю пояс, но всё равно придумал время"
+                    # диагностировать было нечем, кроме логов Ollama.
+                    log.info(
+                        "llm_chat: тул %s(%s) -> %s (chat=%s)",
+                        name,
+                        call_args,
+                        tool_result,
+                        log_chat_id,
+                    )
             messages.append({"role": "tool", "content": tool_result, "name": name})
     # Лимит раундов исчерпан — модель зациклилась на вызовах инструментов,
     # не дав финального текста.
