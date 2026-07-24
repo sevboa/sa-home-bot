@@ -207,6 +207,29 @@ async def _shutdown(
     with contextlib.suppress(asyncio.CancelledError):
         await reminders_task
 
+    # Живая находка 2026-07-24 (второй заход, живой баг на проде): раньше
+    # это шло ПОСЛЕ link.stop()/node_link.stop() — осиротевшая задача
+    # /ai-хендлера (aiogram не ждёт её в dp.stop_polling(), см. докстринг
+    # ActiveAiChats) успевала упасть на разорванном node_link и слала голое
+    # "что-то пошло не так" то до RESTART_TEXT, то после, то и то, и другое
+    # разом. Теперь — СНАЧАЛА известить и отменить, пока node_link/сессия
+    # бота ещё живы: CancelledError не Exception, try/finally в
+    # bot/handlers/ai.py::_ask_and_reply снимет регистрацию молча, минуя
+    # голый "что-то пошло не так" из except Exception.
+    for chat_id, task in active_ai_chats.snapshot().items():
+        try:
+            await notifier.send_direct(chat_id, RESTART_TEXT)
+        except Exception:  # noqa: BLE001 — сбой одного уведомления не должен рвать shutdown
+            log.warning("Не удалось известить chat=%s о рестарте", chat_id, exc_info=True)
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001 — сбой одной /ai-задачи не должен рвать shutdown
+            log.warning("/ai-задача chat=%s упала при остановке", chat_id, exc_info=True)
+
     # Стоп связи со службами (новые события не принимаются).
     await link.stop()
     await node_link.stop()
@@ -229,19 +252,6 @@ async def _shutdown(
         pass
     except Exception:  # noqa: BLE001 — ошибку polling не даём сорвать shutdown
         log.warning("polling завершился с ошибкой", exc_info=True)
-
-    # Живая находка 2026-07-24: think_chat растянул /ai-ответ до 30-40с —
-    # закрытие сессии бота ниже посреди такого запроса роняет его голой
-    # TelegramNetworkError/"Connector is closed" пользователю в лицо. Пока
-    # сессия ещё жива — известить чаты с активным запросом в характере
-    # (RESTART_TEXT), а не оставлять их с сырой сетевой ошибкой. Сам
-    # хендлер после этого всё равно упадёт при попытке отправить настоящий
-    # ответ — это ожидаемо (see ActiveAiChats docstring), просто тихо.
-    for chat_id in active_ai_chats.snapshot():
-        try:
-            await notifier.send_direct(chat_id, RESTART_TEXT)
-        except Exception:  # noqa: BLE001 — сбой одного уведомления не должен рвать shutdown
-            log.warning("Не удалось известить chat=%s о рестарте", chat_id, exc_info=True)
 
     # Дослать прощание, пока сессия бота жива.
     await broadcast_system(book, notifier, render_shutdown())

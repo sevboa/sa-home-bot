@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 from datetime import UTC, datetime
@@ -294,18 +295,21 @@ async def _ask_and_reply(
     history: list[dict[str, str]],
     active_ai_chats: ai_flow.ActiveAiChats,
 ) -> None:
-    # Регистрация на время запроса — bot/app.py::_shutdown() перед закрытием
-    # сессии бота рассылает RESTART_TEXT по этому множеству (см. докстринг
-    # ActiveAiChats): без этого редеплой во время долгого think-ответа
-    # обрывает запрос голой сетевой ошибкой, а не в характере персонажа.
+    # Регистрация задачи (не просто chat_id — см. докстринг ActiveAiChats,
+    # второй заход) на время запроса: bot/app.py::_shutdown() перед разрывом
+    # связи со службами уведомляет RESTART_TEXT'ом и ОТМЕНЯЕТ эту задачу —
+    # без этого редеплой во время долгого think-ответа либо обрывает запрос
+    # голой сетевой ошибкой, либо (после первой попытки чинить) шлёт голую
+    # ошибку ВМЕСТЕ с RESTART_TEXT — гонка, не гарантия.
     chat_id = message.chat.id if message.chat else None
-    active_ai_chats.add(chat_id)
+    task = asyncio.current_task()
+    active_ai_chats.register(chat_id, task)
     try:
         await _do_ask_and_reply(
             message, node_link, store, config, book, notifier, dialogue_id, history
         )
     finally:
-        active_ai_chats.discard(chat_id)
+        active_ai_chats.unregister(chat_id, task)
 
 
 async def _do_ask_and_reply(

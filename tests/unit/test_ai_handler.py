@@ -270,8 +270,8 @@ async def test_ask_and_reply_registers_chat_while_request_in_flight(store, monke
         book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=active_ai_chats,
     )
 
-    assert seen_snapshot == [[1]]  # зарегистрирован во время самого запроса
-    assert active_ai_chats.snapshot() == []  # и снят по завершении
+    assert list(seen_snapshot[0]) == [1]  # зарегистрирован во время самого запроса
+    assert active_ai_chats.snapshot() == {}  # и снят по завершении
 
 
 async def test_ask_and_reply_unregisters_chat_even_on_exception(store, monkeypatch):
@@ -290,7 +290,7 @@ async def test_ask_and_reply_unregisters_chat_even_on_exception(store, monkeypat
         book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=active_ai_chats,
     )
 
-    assert active_ai_chats.snapshot() == []
+    assert active_ai_chats.snapshot() == {}
 
 
 async def test_ai_reply_continuation_filter_matches_known_turn(store):

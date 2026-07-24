@@ -246,6 +246,19 @@ async def test_tool_call_round_limit_falls_back_to_hiccup(store):
 # модель сама попросила подумать ---
 
 
+def test_think_marker_survives_llm_service_transforms():
+    # Живой баг на проде 2026-07-24: старый маркер с кириллической "Р"
+    # утекал в чат мангленным ("[[ТГЕБУЕТСЯ_ГАЗМЫШЛЕНИЕ]]") — llm/service.py
+    # прогоняет ЛЮБОЙ ответ модели (в т.ч. этот служебный маркер) через
+    # apply_speech_defect/strip_math_notation до того, как отдать боту.
+    # Маркер обязан пережить обе трансформации байт-в-байт, иначе проверка
+    # "THINK_MARKER not in fast_answer" в _ask() молча перестаёт работать.
+    from sa_home_bot.llm.prompt import apply_speech_defect, strip_math_notation
+
+    transformed = apply_speech_defect(strip_math_notation(ai_flow.THINK_MARKER))
+    assert transformed == ai_flow.THINK_MARKER
+
+
 async def test_fast_path_no_thinking_when_marker_absent(store):
     message = FakeMessage()
     link = FakeNodeLink(
@@ -686,43 +699,59 @@ async def test_context_note_inserted_right_before_current_turn(store):
 
 
 # --- ActiveAiChats (живая находка 2026-07-24: редеплой бота посреди
-# долгого think_chat-ответа обрывал /ai голой сетевой ошибкой — bot/app.py
-# перед закрытием сессии рассылает RESTART_TEXT по этому множеству) ---
+# долгого думающего ответа обрывал /ai голой сетевой ошибкой; второй заход —
+# хранит саму asyncio.Task (не просто chat_id), чтобы bot/app.py::_shutdown
+# мог не только уведомить, но и по-настоящему отменить задачу до того, как
+# она сама упадёт на разорванном node_link) ---
 
 
 def test_active_ai_chats_starts_empty():
-    assert ai_flow.ActiveAiChats().snapshot() == []
+    assert ai_flow.ActiveAiChats().snapshot() == {}
 
 
-def test_active_ai_chats_add_and_snapshot():
+def test_active_ai_chats_register_and_snapshot():
     chats = ai_flow.ActiveAiChats()
-    chats.add(42)
-    chats.add(7)
-    assert chats.snapshot() == [7, 42]
+    task42, task7 = object(), object()
+    chats.register(42, task42)
+    chats.register(7, task7)
+    assert chats.snapshot() == {42: task42, 7: task7}
 
 
-def test_active_ai_chats_add_is_idempotent():
+def test_active_ai_chats_register_overwrites_same_chat():
     chats = ai_flow.ActiveAiChats()
-    chats.add(42)
-    chats.add(42)
-    assert chats.snapshot() == [42]
+    old_task, new_task = object(), object()
+    chats.register(42, old_task)
+    chats.register(42, new_task)
+    assert chats.snapshot() == {42: new_task}
 
 
-def test_active_ai_chats_discard_removes():
+def test_active_ai_chats_unregister_removes():
     chats = ai_flow.ActiveAiChats()
-    chats.add(42)
-    chats.discard(42)
-    assert chats.snapshot() == []
+    task = object()
+    chats.register(42, task)
+    chats.unregister(42, task)
+    assert chats.snapshot() == {}
 
 
-def test_active_ai_chats_discard_missing_is_noop():
+def test_active_ai_chats_unregister_missing_is_noop():
     chats = ai_flow.ActiveAiChats()
-    chats.discard(42)  # не бросает, даже если chat_id не был добавлен
-    assert chats.snapshot() == []
+    chats.unregister(42, object())  # не бросает, даже если не был зарегистрирован
+    assert chats.snapshot() == {}
+
+
+def test_active_ai_chats_unregister_only_matching_task():
+    # Если chat_id успел перерегистрироваться на новую задачу (например,
+    # новый /ai подряд), unregister по СТАРОЙ задаче не должен снять новую.
+    chats = ai_flow.ActiveAiChats()
+    old_task, new_task = object(), object()
+    chats.register(42, old_task)
+    chats.register(42, new_task)
+    chats.unregister(42, old_task)
+    assert chats.snapshot() == {42: new_task}
 
 
 def test_active_ai_chats_ignores_none():
     chats = ai_flow.ActiveAiChats()
-    chats.add(None)
-    chats.discard(None)
-    assert chats.snapshot() == []
+    chats.register(None, object())
+    chats.unregister(None, object())
+    assert chats.snapshot() == {}
