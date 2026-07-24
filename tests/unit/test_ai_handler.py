@@ -117,7 +117,7 @@ async def test_cmd_ai_without_text_asks_model_for_greeting(store, monkeypatch):
 
     await ai_handler.cmd_ai(
         message, node_link=None, store=store, config=Settings(),
-        book=_admin_book(), notifier=FakeNotifier(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
     )
 
     assert seen_history == [[{"role": "user", "content": ai_handler.OPENING_PROMPT}]]
@@ -140,7 +140,7 @@ async def test_cmd_ai_without_text_unavailable_records_nothing(store, monkeypatc
 
     await ai_handler.cmd_ai(
         message, node_link=None, store=store, config=Settings(),
-        book=_admin_book(), notifier=FakeNotifier(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
     )
 
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
@@ -161,7 +161,7 @@ async def test_cmd_ai_with_text_calls_ai_flow_and_records_both_turns(store, monk
 
     await ai_handler.cmd_ai(
         message, node_link=None, store=store, config=Settings(),
-        book=_admin_book(), notifier=FakeNotifier(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
     )
 
     assert seen_history == [[{"role": "user", "content": "привет"}]]
@@ -190,7 +190,7 @@ async def test_cmd_ai_long_response_is_split_across_telegram_messages(store, mon
 
     await ai_handler.cmd_ai(
         message, node_link=None, store=store, config=Settings(),
-        book=_admin_book(), notifier=FakeNotifier(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
     )
 
     expected_chunks = ai_handler.chunk_text(ai_handler._format_answer(long_answer))
@@ -213,7 +213,7 @@ async def test_cmd_ai_returns_none_from_ai_flow_sends_nothing_extra(store, monke
 
     await ai_handler.cmd_ai(
         message, node_link=None, store=store, config=Settings(),
-        book=_admin_book(), notifier=FakeNotifier(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
     )
 
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
@@ -233,7 +233,7 @@ async def test_cmd_ai_unhandled_exception_apologizes_and_notifies_admin(store, m
 
     await ai_handler.cmd_ai(
         message, node_link=None, store=store, config=Settings(),
-        book=_admin_book(), notifier=notifier,
+        book=_admin_book(), notifier=notifier, active_ai_chats=ai_flow.ActiveAiChats(),
     )
 
     assert message.sent == ["<b>Альфред:</b> Прошу прощения, что-то пошло не так, сэр."]
@@ -245,6 +245,52 @@ async def test_cmd_ai_unhandled_exception_apologizes_and_notifies_admin(store, m
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert len(rows) == 1
     assert rows[0]["role"] == "user"
+
+
+# --- active_ai_chats: регистрация chat_id на время запроса (живая находка
+# 2026-07-24 — bot/app.py::_shutdown рассылает RESTART_TEXT по этому
+# множеству перед закрытием сессии, см. ai_flow.ActiveAiChats) ---
+
+
+async def test_ask_and_reply_registers_chat_while_request_in_flight(store, monkeypatch):
+    active_ai_chats = ai_flow.ActiveAiChats()
+    seen_snapshot = []
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier
+    ):
+        seen_snapshot.append(active_ai_chats.snapshot())
+        return "ответ"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, text="/alfred привет")
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=active_ai_chats,
+    )
+
+    assert seen_snapshot == [[1]]  # зарегистрирован во время самого запроса
+    assert active_ai_chats.snapshot() == []  # и снят по завершении
+
+
+async def test_ask_and_reply_unregisters_chat_even_on_exception(store, monkeypatch):
+    active_ai_chats = ai_flow.ActiveAiChats()
+
+    async def boom(
+        message, node_link, store_, config, history, dialogue_id, book, notifier
+    ):
+        raise RuntimeError("бум")
+
+    monkeypatch.setattr(ai_flow, "request_alfred", boom)
+    message = FakeMessage(1, text="/alfred привет")
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=active_ai_chats,
+    )
+
+    assert active_ai_chats.snapshot() == []
 
 
 async def test_ai_reply_continuation_filter_matches_known_turn(store):
@@ -280,7 +326,7 @@ async def test_on_ai_reply_denied_without_right(store):
         store=store,
         config=Settings(),
         book=_admin_book(),
-        notifier=FakeNotifier(),
+        notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
         subscription=_sub(),  # без права chat@llm
     )
 
@@ -311,7 +357,7 @@ async def test_on_ai_reply_appends_history_and_answers(store, monkeypatch):
         store=store,
         config=Settings(),
         book=_admin_book(),
-        notifier=FakeNotifier(),
+        notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
         subscription=_sub("chat@llm"),
     )
 
@@ -349,7 +395,7 @@ async def test_on_ai_reply_without_text_still_asks_model(store, monkeypatch):
         store=store,
         config=Settings(),
         book=_admin_book(),
-        notifier=FakeNotifier(),
+        notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
         subscription=_sub("chat@llm"),
     )
 
@@ -429,7 +475,8 @@ async def test_on_private_message_starts_new_dialogue_when_none_exists(store, mo
 
     await ai_handler.on_private_message(
         message, node_link=None, store=store, config=Settings(),
-        book=_admin_book(), notifier=FakeNotifier(), subscription=_sub("chat@llm"),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(), subscription=_sub("chat@llm"),
     )
 
     assert seen_history == [[{"role": "user", "content": "добрый вечер"}]]
@@ -455,7 +502,8 @@ async def test_on_private_message_continues_latest_dialogue(store, monkeypatch):
 
     await ai_handler.on_private_message(
         message, node_link=None, store=store, config=Settings(),
-        book=_admin_book(), notifier=FakeNotifier(), subscription=_sub("chat@llm"),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(), subscription=_sub("chat@llm"),
     )
 
     assert seen_history == [
@@ -474,7 +522,8 @@ async def test_on_private_message_denied_without_right(store):
 
     await ai_handler.on_private_message(
         message, node_link=None, store=store, config=Settings(),
-        book=_admin_book(), notifier=FakeNotifier(), subscription=_sub(),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(), subscription=_sub(),
     )
 
     assert message.sent == []
@@ -497,7 +546,7 @@ async def test_on_group_mention_with_text_starts_fresh_dialogue(store, monkeypat
     await ai_handler.on_group_mention(
         message, mention_prompt="какая погода?", node_link=None, store=store,
         config=Settings(), book=_admin_book(), notifier=FakeNotifier(),
-        subscription=_sub("chat@llm"),
+        active_ai_chats=ai_flow.ActiveAiChats(), subscription=_sub("chat@llm"),
     )
 
     assert seen_history == [[{"role": "user", "content": "какая погода?"}]]
@@ -519,7 +568,7 @@ async def test_on_group_mention_without_text_asks_model_for_greeting(store, monk
     await ai_handler.on_group_mention(
         message, mention_prompt="", node_link=None, store=store,
         config=Settings(), book=_admin_book(), notifier=FakeNotifier(),
-        subscription=_sub("chat@llm"),
+        active_ai_chats=ai_flow.ActiveAiChats(), subscription=_sub("chat@llm"),
     )
 
     assert seen_history == [[{"role": "user", "content": ai_handler.OPENING_PROMPT}]]
@@ -534,7 +583,7 @@ async def test_on_group_mention_denied_without_right(store):
     await ai_handler.on_group_mention(
         message, mention_prompt="привет", node_link=None, store=store,
         config=Settings(), book=_admin_book(), notifier=FakeNotifier(),
-        subscription=_sub(),
+        active_ai_chats=ai_flow.ActiveAiChats(), subscription=_sub(),
     )
 
     assert message.sent == []

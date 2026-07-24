@@ -623,3 +623,46 @@ async def test_context_note_inserted_right_before_current_turn(store):
     assert sent_messages[-1] == {"role": "user", "content": "текущий вопрос"}
     assert sent_messages[-2]["role"] == "system"
     assert sent_messages[:-2] == history[:-1]
+
+
+# --- ActiveAiChats (живая находка 2026-07-24: редеплой бота посреди
+# долгого think_chat-ответа обрывал /ai голой сетевой ошибкой — bot/app.py
+# перед закрытием сессии рассылает RESTART_TEXT по этому множеству) ---
+
+
+def test_active_ai_chats_starts_empty():
+    assert ai_flow.ActiveAiChats().snapshot() == []
+
+
+def test_active_ai_chats_add_and_snapshot():
+    chats = ai_flow.ActiveAiChats()
+    chats.add(42)
+    chats.add(7)
+    assert chats.snapshot() == [7, 42]
+
+
+def test_active_ai_chats_add_is_idempotent():
+    chats = ai_flow.ActiveAiChats()
+    chats.add(42)
+    chats.add(42)
+    assert chats.snapshot() == [42]
+
+
+def test_active_ai_chats_discard_removes():
+    chats = ai_flow.ActiveAiChats()
+    chats.add(42)
+    chats.discard(42)
+    assert chats.snapshot() == []
+
+
+def test_active_ai_chats_discard_missing_is_noop():
+    chats = ai_flow.ActiveAiChats()
+    chats.discard(42)  # не бросает, даже если chat_id не был добавлен
+    assert chats.snapshot() == []
+
+
+def test_active_ai_chats_ignores_none():
+    chats = ai_flow.ActiveAiChats()
+    chats.add(None)
+    chats.discard(None)
+    assert chats.snapshot() == []

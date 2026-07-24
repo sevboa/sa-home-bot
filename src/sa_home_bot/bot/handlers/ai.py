@@ -119,6 +119,7 @@ async def cmd_ai(
     config: Settings,
     book: SubscriptionBook,
     notifier: Notifier,
+    active_ai_chats: ai_flow.ActiveAiChats,
 ) -> None:
     dialogue_id = message.message_id
     parts = (message.text or "").split(maxsplit=1)
@@ -144,7 +145,7 @@ async def cmd_ai(
         history = [{"role": "user", "content": OPENING_PROMPT}]
 
     await _ask_and_reply(
-        message, node_link, store, config, book, notifier, dialogue_id, history
+        message, node_link, store, config, book, notifier, dialogue_id, history, active_ai_chats
     )
 
 
@@ -157,6 +158,7 @@ async def on_ai_reply(
     config: Settings,
     book: SubscriptionBook,
     notifier: Notifier,
+    active_ai_chats: ai_flow.ActiveAiChats,
     subscription: Subscription | None = None,
 ) -> None:
     # AuthorizationMiddleware не проверяет права на не-командные сообщения —
@@ -194,7 +196,7 @@ async def on_ai_reply(
         history.append({"role": "user", "content": EMPTY_REPLY_PROMPT})
 
     await _ask_and_reply(
-        message, node_link, store, config, book, notifier, ai_dialogue_id, history
+        message, node_link, store, config, book, notifier, ai_dialogue_id, history, active_ai_chats
     )
 
 
@@ -206,6 +208,7 @@ async def on_private_message(
     config: Settings,
     book: SubscriptionBook,
     notifier: Notifier,
+    active_ai_chats: ai_flow.ActiveAiChats,
     subscription: Subscription | None = None,
 ) -> None:
     # Не команда — AuthorizationMiddleware её не проверяла, права смотрим сами
@@ -235,7 +238,9 @@ async def on_private_message(
     history_rows = await store.ai_turns_for_dialogue(message.chat.id, dialogue_id)
     history = [{"role": r["role"], "content": r["content"]} for r in history_rows if r["content"]]
 
-    await _ask_and_reply(message, node_link, store, config, book, notifier, dialogue_id, history)
+    await _ask_and_reply(
+        message, node_link, store, config, book, notifier, dialogue_id, history, active_ai_chats
+    )
 
 
 @catchall_router.message(GroupMention())
@@ -247,6 +252,7 @@ async def on_group_mention(
     config: Settings,
     book: SubscriptionBook,
     notifier: Notifier,
+    active_ai_chats: ai_flow.ActiveAiChats,
     subscription: Subscription | None = None,
 ) -> None:
     right = commands.required_right(commands.ALFRED.name)
@@ -272,10 +278,37 @@ async def on_group_mention(
         # Позвали без текста — та же заглушка-директива, что и голый /alfred.
         history = [{"role": "user", "content": OPENING_PROMPT}]
 
-    await _ask_and_reply(message, node_link, store, config, book, notifier, dialogue_id, history)
+    await _ask_and_reply(
+        message, node_link, store, config, book, notifier, dialogue_id, history, active_ai_chats
+    )
 
 
 async def _ask_and_reply(
+    message: Message,
+    node_link: ServiceLink,
+    store: Store,
+    config: Settings,
+    book: SubscriptionBook,
+    notifier: Notifier,
+    dialogue_id: int,
+    history: list[dict[str, str]],
+    active_ai_chats: ai_flow.ActiveAiChats,
+) -> None:
+    # Регистрация на время запроса — bot/app.py::_shutdown() перед закрытием
+    # сессии бота рассылает RESTART_TEXT по этому множеству (см. докстринг
+    # ActiveAiChats): без этого редеплой во время долгого think-ответа
+    # обрывает запрос голой сетевой ошибкой, а не в характере персонажа.
+    chat_id = message.chat.id if message.chat else None
+    active_ai_chats.add(chat_id)
+    try:
+        await _do_ask_and_reply(
+            message, node_link, store, config, book, notifier, dialogue_id, history
+        )
+    finally:
+        active_ai_chats.discard(chat_id)
+
+
+async def _do_ask_and_reply(
     message: Message,
     node_link: ServiceLink,
     store: Store,

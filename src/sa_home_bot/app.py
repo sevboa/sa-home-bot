@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import logging
 
+from sa_home_bot.bot.ai_flow import RESTART_TEXT, ActiveAiChats
 from sa_home_bot.bot.dispatch import TelegramEventDispatcher
 from sa_home_bot.bot.lifecycle import (
     broadcast_system,
@@ -130,6 +131,12 @@ async def run(settings: Settings) -> None:
     #    очереди в БД бота, доставка через тот же Notifier.
     reminders_task = asyncio.create_task(reminder_loop(store, notifier), name="reminders")
 
+    # Чаты с прямо сейчас идущим /ai-запросом — на останове (_shutdown)
+    # известить их RESTART_TEXT'ом до закрытия сессии бота (см. докстринг
+    # ActiveAiChats: думающий think_chat-ответ может идти 30-40с, за это
+    # время бота вполне могут перезапустить деплоем).
+    active_ai_chats = ActiveAiChats()
+
     # 10. Polling.
     polling_task = asyncio.create_task(
         dp.start_polling(
@@ -145,6 +152,7 @@ async def run(settings: Settings) -> None:
             notifier=notifier,
             book=book,
             bot_username=bot_username,
+            active_ai_chats=active_ai_chats,
             handle_signals=False,
         ),
         name="polling",
@@ -162,6 +170,7 @@ async def run(settings: Settings) -> None:
             dp=dp,
             polling_task=polling_task,
             reminders_task=reminders_task,
+            active_ai_chats=active_ai_chats,
             link=link,
             node_link=node_link,
             apps_link=apps_link,
@@ -179,6 +188,7 @@ async def _shutdown(
     dp,
     polling_task: asyncio.Task,
     reminders_task: asyncio.Task,
+    active_ai_chats: ActiveAiChats,
     link: ServiceLink,
     node_link: ServiceLink,
     apps_link: ServiceLink,
@@ -219,6 +229,19 @@ async def _shutdown(
         pass
     except Exception:  # noqa: BLE001 — ошибку polling не даём сорвать shutdown
         log.warning("polling завершился с ошибкой", exc_info=True)
+
+    # Живая находка 2026-07-24: think_chat растянул /ai-ответ до 30-40с —
+    # закрытие сессии бота ниже посреди такого запроса роняет его голой
+    # TelegramNetworkError/"Connector is closed" пользователю в лицо. Пока
+    # сессия ещё жива — известить чаты с активным запросом в характере
+    # (RESTART_TEXT), а не оставлять их с сырой сетевой ошибкой. Сам
+    # хендлер после этого всё равно упадёт при попытке отправить настоящий
+    # ответ — это ожидаемо (see ActiveAiChats docstring), просто тихо.
+    for chat_id in active_ai_chats.snapshot():
+        try:
+            await notifier.send_direct(chat_id, RESTART_TEXT)
+        except Exception:  # noqa: BLE001 — сбой одного уведомления не должен рвать shutdown
+            log.warning("Не удалось известить chat=%s о рестарте", chat_id, exc_info=True)
 
     # Дослать прощание, пока сессия бота жива.
     await broadcast_system(book, notifier, render_shutdown())

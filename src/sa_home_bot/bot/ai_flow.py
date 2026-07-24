@@ -118,6 +118,44 @@ CLOSING_TEXT = "<i>Альфред не дождался обращения и у
 # сбой — пользователь попросил именно это 2026-07-24.
 RESTART_TEXT = "<i>У Альфреда появились другие дела</i>"
 
+
+class ActiveAiChats:
+    """Множество chat_id с прямо сейчас идущим /ai-запросом.
+
+    Живая находка 2026-07-24: раньше RESTART_TEXT слался только при
+    останове службы llm (winpc) — но останов самого БОТА (alfred, любой
+    деплой/restart_node) с тем же успехом обрывает запрос на середине:
+    `bot.session.close()` в _shutdown() закрывает HTTP-коннектор, и уже
+    ушедший на LLM запрос падает с TelegramNetworkError/"Connector is
+    closed" прямо в лицо пользователю — голым "что-то пошло не так", а не
+    в характере. Раньше это было маловероятно (ответ занимал секунды), но
+    v0.35.0 включил think_chat (~30-40с на раунд) — окно для такой коллизии
+    выросло на порядок. Инстанс живёт в bot/app.py::run(), хендлеры
+    (bot/handlers/ai.py::_ask_and_reply) регистрируют/снимают chat_id на
+    время своего запроса; _shutdown() перед закрытием сессии рассылает
+    RESTART_TEXT по снимку множества — тем самым пользователь получает
+    "У Альфреда появились другие дела" ДО того, как соединение оборвётся,
+    а не голую сетевую ошибку после. Сам оборвавшийся хендлер всё равно
+    позже упадёт при попытке отправить настоящий ответ (сессия уже
+    закрыта) — это ожидаемо и не страшно, тот путь уже устойчив к сбоям
+    (log.exception, не роняет процесс), просто пользователь этого уже не
+    увидит вторым сообщением поверх первого."""
+
+    def __init__(self) -> None:
+        self._chat_ids: set[int] = set()
+
+    def add(self, chat_id: int | None) -> None:
+        if chat_id is not None:
+            self._chat_ids.add(chat_id)
+
+    def discard(self, chat_id: int | None) -> None:
+        if chat_id is not None:
+            self._chat_ids.discard(chat_id)
+
+    def snapshot(self) -> list[int]:
+        return sorted(self._chat_ids)
+
+
 WAKE_POLL_TIMEOUT_S = 90.0
 WAKE_POLL_INTERVAL_S = 3.0
 # Живая находка 2026-07-23: TCP-keepalive (proto/client.py) обнаруживает
