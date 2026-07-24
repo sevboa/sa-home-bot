@@ -223,6 +223,20 @@ async def request_alfred(
     timeout = settings.llm.request_timeout_s
     chat_id = message.chat.id if message.chat else "?"
     context_note = await _build_context_note(message, store, dialogue_id)
+    # Диагностика живой находки 2026-07-24: проверяем, действительно ли
+    # message.reply_to_message/message.quote приходят от Telegram так, как
+    # ожидалось — временный лог, не для постоянной эксплуатации (полный
+    # текст диалога уходит в journal). Убрать после проверки.
+    reply_to = message.reply_to_message
+    log.info(
+        "ai: контекст chat=%s dialogue=%s reply_to_id=%s reply_to_text=%r quote=%r note=%r",
+        chat_id,
+        dialogue_id,
+        reply_to.message_id if reply_to else None,
+        (reply_to.text or reply_to.caption) if reply_to else None,
+        message.quote.text if message.quote else None,
+        context_note,
+    )
 
     async def _ask() -> str:
         if context_note:
