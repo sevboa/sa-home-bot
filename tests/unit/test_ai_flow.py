@@ -32,7 +32,7 @@ OWN_STATE = {
 
 
 class FakeMessage:
-    chat = SimpleNamespace(id=1)
+    chat = SimpleNamespace(id=1, type="private")
     from_user = None
     reply_to_message = None
     quote = None
@@ -504,3 +504,52 @@ async def test_no_reply_context_without_reply_to_message(store):
     note = await ai_flow._build_context_note(message, store, dialogue_id=500)
 
     assert "отвечают" not in note
+
+
+async def test_reply_context_quote_is_self_contained_for_own_thread(store):
+    # Живая находка 2026-07-24: старая формулировка ("в нём выделено...")
+    # ссылалась на строку про "чужое сообщение", которая для своего же
+    # треда как раз пропускается — "нём" повисало без антецедента, и
+    # модель на практике путала процитированное слово с другим. Новая
+    # формулировка должна называть источник цитаты сама, без внешних ссылок.
+    ivan = FakeUser("Иван", username="ivan", id=10)
+    now = datetime.now(tz=UTC)
+    await store.record_ai_turn(1, 500, 500, "user", "привет", now, user_id=10, user_name="Иван")
+    await store.record_ai_turn(1, 501, 500, "assistant", "не имею привычки", now)
+
+    reply_to = FakeRepliedMessage(501, text="не имею привычки")
+    message = NoteMessage(
+        1, "group", ivan, reply_to_message=reply_to, quote=FakeQuote("привычки")
+    )
+    note = await ai_flow._build_context_note(message, store, dialogue_id=500)
+
+    assert "твоего же предыдущего сообщения" in note.lower() or "твоего же" in note
+    assert "привычки»" in note
+
+
+async def test_context_note_inserted_right_before_current_turn(store):
+    # Живая находка 2026-07-24: заметка вставлялась ПЕРЕД всей историей —
+    # на длинном треде это слишком далеко от текущего хода, модель хуже
+    # использовала её (проверено вживую: верная цитата в заметке, но не тот
+    # ответ). Теперь заметка должна идти прямо перед последним (текущим)
+    # сообщением истории, а не в самом начале.
+    message = FakeMessage()
+    message.from_user = FakeUser("Иван", username="ivan", id=10)
+    link = FakeNodeLink(
+        chat_results=[{"response": "ответ"}],
+        get_state_routes={"winpc:llm": {"asleep": False}},
+    )
+    history = [
+        {"role": "user", "content": "первый вопрос"},
+        {"role": "assistant", "content": "первый ответ"},
+        {"role": "user", "content": "текущий вопрос"},
+    ]
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), history, 500, _admin_book(), FakeNotifier()
+    )
+
+    sent_messages = link.command_calls[0][1]["messages"]
+    assert sent_messages[-1] == {"role": "user", "content": "текущий вопрос"}
+    assert sent_messages[-2]["role"] == "system"
+    assert sent_messages[:-2] == history[:-1]
