@@ -140,12 +140,19 @@ async def _resolve_city(city: str) -> tuple[float, float, str] | None:
 
 
 async def tool_get_weather(ctx: ToolContext, args: dict[str, Any]) -> str:
-    city = ctx.settings.weather.city
+    # Живой баг 2026-07-24: декларация раньше не принимала город вообще
+    # ("узнать погоду ДОМА") — модель на прямой вопрос про другой город
+    # честно отказывала, а не молчаливо путала его с домом. args["city"] —
+    # необязательный: без него — прежнее поведение (город из конфига).
+    requested_city = args.get("city")
+    city = requested_city.strip() if isinstance(requested_city, str) else ""
     if not city:
-        return "погода не настроена — не задан город дома в конфиге ([weather].city)"
+        city = ctx.settings.weather.city
+        if not city:
+            return "погода не настроена — не задан ни город в вопросе, ни город дома в конфиге"
     resolved = await _resolve_city(city)
     if resolved is None:
-        return f"не удалось определить координаты города «{city}» — проверь название в конфиге"
+        return f"не удалось определить координаты города «{city}»"
     lat, lon, label = resolved
     url = (
         "https://api.open-meteo.com/v1/forecast"
@@ -233,8 +240,21 @@ TOOL_DECLARATIONS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_weather",
-            "description": "Узнать текущую погоду дома (температура, ощущается как, ветер).",
-            "parameters": {"type": "object", "properties": {}},
+            "description": (
+                "Узнать текущую погоду (температура, ощущается как, ветер) в любом "
+                "городе мира — не только дома. Если пользователь называет город, "
+                "передай его в city; если спрашивает просто 'какая погода' без "
+                "уточнения — не передавай city вовсе, вернётся погода дома."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string",
+                        "description": "Город, если он назван явно (например: Алматы)",
+                    }
+                },
+            },
         },
     },
     {

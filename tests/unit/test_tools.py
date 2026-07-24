@@ -135,6 +135,38 @@ async def test_get_weather_caches_geocoding_across_calls(store, monkeypatch):
     assert geocode_calls == 1  # второй раз — из _GEOCODE_CACHE, без сети
 
 
+async def test_get_weather_explicit_city_in_args_overrides_home(store, monkeypatch):
+    # Живой баг 2026-07-24: тул раньше не принимал город аргументом вообще —
+    # на "погода в Алматы" модель честно отвечала "умею только дома".
+    def fake_get_json(url, timeout):
+        if "geocoding-api" in url:
+            assert "name=%D0%9A%D0%B0%D0%B7%D0%B0%D0%BD%D1%8C" in url
+            return _GEOCODE_RESPONSE
+        return _FORECAST_RESPONSE
+
+    monkeypatch.setattr(tools, "_get_json_sync", fake_get_json)
+    settings = Settings(weather=WeatherConfig(city="Москва"))  # дом — другой город
+    result = await tools.tool_get_weather(_ctx(store, settings), {"city": "Казань"})
+    assert "Казань, Россия" in result
+
+
+async def test_get_weather_falls_back_to_home_city_without_args(store, monkeypatch):
+    def fake_get_json(url, timeout):
+        if "geocoding-api" in url:
+            assert "name=%D0%9C%D0%BE%D1%81%D0%BA%D0%B2%D0%B0" in url  # "Москва"
+            return {
+                "results": [
+                    {"name": "Москва", "latitude": 55.75, "longitude": 37.6, "country": "Россия"}
+                ]
+            }
+        return _FORECAST_RESPONSE
+
+    monkeypatch.setattr(tools, "_get_json_sync", fake_get_json)
+    settings = Settings(weather=WeatherConfig(city="Москва"))
+    result = await tools.tool_get_weather(_ctx(store, settings), {})
+    assert "Москва, Россия" in result
+
+
 async def test_get_weather_city_not_found(store, monkeypatch):
     def fake_get_json(url, timeout):
         return {"results": []}
