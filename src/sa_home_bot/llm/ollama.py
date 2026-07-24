@@ -226,13 +226,19 @@ async def chat(
     messages: list[dict[str, Any]],
     system: str,
     tools: list[dict[str, Any]] | None = None,
+    think: bool | None = None,
 ) -> dict[str, Any]:
     full_messages = [{"role": "system", "content": system}, *messages]
     payload: dict[str, Any] = {
         "model": cfg.model,
         "messages": full_messages,
         "stream": False,
-        "think": cfg.think_chat,
+        # think=None — вызывающий не уточнил, использовать дефолт службы
+        # (cfg.think_chat). Живая находка 2026-07-24 (вариативное
+        # рассуждение): bot/ai_flow.py теперь всегда передаёт think явно
+        # (False на быстром проходе, True на проходе-эскалации) — этот
+        # дефолт остаётся только подстраховкой для прочих вызовов chat().
+        "think": cfg.think_chat if think is None else think,
     }
     if tools:
         payload["tools"] = tools

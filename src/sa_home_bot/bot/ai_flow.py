@@ -171,6 +171,36 @@ _PRESENCE_CHECK_TIMEOUT_S = 3.0
 # (ALBERT_HICCUP), не зависание запроса.
 _MAX_TOOL_ROUNDS = 4
 
+# Вариативное рассуждение (LLM_INTEGRATION_PLAN.md §7, живая находка
+# 2026-07-24): включать think=true на КАЖДЫЙ запрос надёжно для расчётов,
+# но раздувает даже "привет" до 30-40с. Вместо этого — быстрый проход
+# (think=false) с инструкцией самой решить, нужно ли ей подумать над ИМЕННО
+# этим вопросом; если да — вернуть только этот маркер, без попытки
+# угадать ответ, и мы переспросим уже в режиме рассуждения. Строка выбрана
+# заведомо не встречающейся в обычном тексте (не просто слово — реальный
+# ответ про, скажем, шахматы или мышление никогда не выведет её случайно).
+THINK_MARKER = "[[ТРЕБУЕТСЯ_РАЗМЫШЛЕНИЕ]]"
+# Живая находка 2026-07-24 (проверено прямыми запросами к Ollama, не только
+# юнит-тестами): мягкая формулировка ("если требует обдумывания, с которым
+# не стоит спешить") на задаче про цилиндр промолчала и дала прямой (и
+# неверный) ответ — модель переоценивает свою уверенность. Явное перечисление
+# триггеров ("формула, геометрия, физика, многошаговый расчёт") плюс "ДАЖЕ
+# если кажется, что знаешь ответ" — сработало надёжно. При этом тривиальная
+# арифметика ("2+2") осталась в быстром проходе, не переоценивается в
+# другую сторону — модель не бросается за маркером на каждое число.
+_TRIAGE_INSTRUCTION = (
+    "Прежде чем ответить на СЛЕДУЮЩЕЕ сообщение, проверь: есть ли в нём "
+    "формула, геометрия, физика, многошаговый расчёт или логическая задача, "
+    "где легко ошибиться? Если да — ДАЖЕ если тебе кажется, что ты и так "
+    "знаешь ответ, НЕ отвечай и НЕ считай сам, а выведи ТОЛЬКО одну строку "
+    f"без всего остального: {THINK_MARKER}. Если вопрос простой (бытовой, "
+    "светский, о себе или о доме, тривиальная арифметика вроде «сколько "
+    "будет 2+2») — отвечай сразу и как обычно, в характере."
+)
+# Показывается перед вторым (думающим) проходом — пользователь явно
+# попросил лаконичную реплику в духе персонажа, не техническое "думаю...".
+THINKING_TEXT = "<i>На лице Альфреда проступает задумчивость</i>"
+
 _WEEKDAYS_RU = (
     "понедельник",
     "вторник",
@@ -330,6 +360,60 @@ async def _build_context_note(message: Message, store: Store, dialogue_id: int) 
     return " ".join(lines)
 
 
+async def _run_chat_loop(
+    node_link: ServiceLink,
+    dst: Address,
+    timeout: float,
+    messages: list[dict[str, Any]],
+    tool_ctx: ai_tools.ToolContext,
+    think: bool,
+    telegram_chat_id: int | None,
+    log_chat_id: Any,
+) -> str:
+    """Один проход диалога с моделью (LLM_INTEGRATION_PLAN.md §7.1): раунды
+    tool-calling (до _MAX_TOOL_ROUNDS), пока не придёт финальный текст.
+
+    ``messages`` мутируется по ходу (дописываются tool_calls/результаты) —
+    вызывающий передаёт отдельный список на каждый проход, если хочет
+    сохранить исходную историю чистой (см. request_alfred: быстрый и
+    думающий проходы используют РАЗНЫЕ списки, второй не должен унаследовать
+    служебный шум/маркер первого)."""
+    for _round in range(_MAX_TOOL_ROUNDS):
+        args: dict[str, Any] = {
+            "messages": messages,
+            "tools": ai_tools.TOOL_DECLARATIONS,
+            "think": think,
+        }
+        if telegram_chat_id is not None:
+            # chat_id — не для маршрутизации (та по dst), а чтобы служба
+            # знала, какие чаты уведомлять при llm_idle_sleep (см.
+            # докстринг модуля и llm/service.py).
+            args["chat_id"] = telegram_chat_id
+        result = await node_link.command(ACTION_CHAT, args, dst=dst, timeout=timeout)
+        tool_calls = result.get("tool_calls")
+        if not tool_calls:
+            return result.get("response", "")
+        messages.append({"role": "assistant", "tool_calls": tool_calls})
+        for call in tool_calls:
+            fn = call.get("function", {}) if isinstance(call, dict) else {}
+            name = fn.get("name", "")
+            call_args = fn.get("arguments") or {}
+            handler = ai_tools.TOOL_HANDLERS.get(name)
+            if handler is None:
+                tool_result = f"неизвестный инструмент: {name}"
+            else:
+                try:
+                    tool_result = await handler(tool_ctx, call_args)
+                except Exception as exc:  # noqa: BLE001 — сбой тула не должен ронять диалог
+                    log.exception("ai: тул %s упал (chat=%s)", name, log_chat_id)
+                    tool_result = f"внутренняя ошибка инструмента: {exc}"
+            messages.append({"role": "tool", "content": tool_result, "name": name})
+    # Лимит раундов исчерпан — модель зациклилась на вызовах инструментов,
+    # не дав финального текста. Тот же путь, что прочие внутренние сбои
+    # (ALBERT_HICCUP в request_alfred), не тихое зависание запроса.
+    raise ProtoError(ERR_INTERNAL, "превышен лимит раундов tool-calling")
+
+
 async def request_alfred(
     message: Message,
     node_link: ServiceLink,
@@ -361,48 +445,50 @@ async def request_alfred(
             # тем словом). history[-1] — всегда текущий ход пользователя
             # (см. вызовы request_alfred в bot/handlers/ai.py — history
             # собирается с ним последним).
-            messages: list[dict[str, Any]] = [
+            base_messages: list[dict[str, Any]] = [
                 *history[:-1], {"role": "system", "content": context_note}, history[-1]
             ]
         else:
-            messages = list(history)
+            base_messages = list(history)
         tool_ctx = ai_tools.ToolContext(
             chat_id=message.chat.id if message.chat else None, store=store, settings=settings
         )
-        # Цикл tool-calling (LLM_INTEGRATION_PLAN.md §7.1): модель либо
-        # отвечает текстом сразу, либо просит вызвать один или несколько
-        # инструментов — тогда дописываем результат в messages и спрашиваем
-        # снова, пока не придёт текст или не кончится лимит раундов.
-        for _round in range(_MAX_TOOL_ROUNDS):
-            args: dict[str, Any] = {"messages": messages, "tools": ai_tools.TOOL_DECLARATIONS}
-            if message.chat is not None:
-                # chat_id — не для маршрутизации (та по dst), а чтобы служба
-                # знала, какие чаты уведомлять при llm_idle_sleep (см.
-                # докстринг модуля и llm/service.py).
-                args["chat_id"] = message.chat.id
-            result = await node_link.command(ACTION_CHAT, args, dst=dst, timeout=timeout)
-            tool_calls = result.get("tool_calls")
-            if not tool_calls:
-                return result.get("response", "")
-            messages.append({"role": "assistant", "tool_calls": tool_calls})
-            for call in tool_calls:
-                fn = call.get("function", {}) if isinstance(call, dict) else {}
-                name = fn.get("name", "")
-                call_args = fn.get("arguments") or {}
-                handler = ai_tools.TOOL_HANDLERS.get(name)
-                if handler is None:
-                    tool_result = f"неизвестный инструмент: {name}"
-                else:
-                    try:
-                        tool_result = await handler(tool_ctx, call_args)
-                    except Exception as exc:  # noqa: BLE001 — сбой тула не должен ронять диалог
-                        log.exception("ai: тул %s упал (chat=%s)", name, chat_id)
-                        tool_result = f"внутренняя ошибка инструмента: {exc}"
-                messages.append({"role": "tool", "content": tool_result, "name": name})
-        # Лимит раундов исчерпан — модель зациклилась на вызовах инструментов,
-        # не дав финального текста. Тот же путь, что прочие внутренние сбои
-        # (ALBERT_HICCUP ниже), не тихое зависание запроса.
-        raise ProtoError(ERR_INTERNAL, "превышен лимит раундов tool-calling")
+        telegram_chat_id = message.chat.id if message.chat is not None else None
+
+        # Вариативное рассуждение (см. THINK_MARKER/_TRIAGE_INSTRUCTION
+        # выше): быстрый проход с think=false и инструкцией самой попросить
+        # подумать, если вопрос того требует — свой список сообщений
+        # (триаж-инструкция и возможные tool-раунды быстрого прохода не
+        # должны попасть в думающий проход, если до него дойдёт).
+        triage_messages = [*base_messages, {"role": "system", "content": _TRIAGE_INSTRUCTION}]
+        fast_answer = await _run_chat_loop(
+            node_link,
+            dst,
+            timeout,
+            triage_messages,
+            tool_ctx,
+            think=False,
+            telegram_chat_id=telegram_chat_id,
+            log_chat_id=chat_id,
+        )
+        if THINK_MARKER not in fast_answer:
+            return fast_answer
+
+        # Модель попросила подумать — показать это в характере и
+        # переспросить уже в режиме рассуждения; свежий список сообщений
+        # без триаж-инструкции и без маркера, второй проход о протоколе
+        # ничего не знает и просто отвечает по существу.
+        await message.answer(THINKING_TEXT)
+        return await _run_chat_loop(
+            node_link,
+            dst,
+            timeout,
+            list(base_messages),
+            tool_ctx,
+            think=True,
+            telegram_chat_id=telegram_chat_id,
+            log_chat_id=chat_id,
+        )
 
     # Узнать заранее, не спит ли модель (idle-таймер llm/service.py) — если
     # да, предупредить о прогреве СРАЗУ, а не оставлять пользователя молча

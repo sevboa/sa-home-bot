@@ -110,6 +110,12 @@ class LlmService:
                             required=False,
                             title="Декларации инструментов (tool-calling, план §7)",
                         ),
+                        ActionParam(
+                            name="think",
+                            type="bool",
+                            required=False,
+                            title="Режим рассуждения qwen3 (по умолчанию — think_chat из конфига)",
+                        ),
                     ),
                 ),
                 ActionSpec(id=ACTION_SLEEP, title="Уложить модель спать"),
@@ -146,8 +152,11 @@ class LlmService:
             if not isinstance(messages, list) or not messages:
                 raise ProtoError(ERR_BAD_REQUEST, "messages должен быть непустым списком")
             tools = args.get("tools") or None
+            think = args.get("think")
+            if think is not None and not isinstance(think, bool):
+                raise ProtoError(ERR_BAD_REQUEST, "think должен быть булевым значением")
             await self._touch(args.get("chat_id"))
-            result = await ollama.chat(self._cfg, messages, SYSTEM_PROMPT, tools=tools)
+            result = await ollama.chat(self._cfg, messages, SYSTEM_PROMPT, tools=tools, think=think)
             message = result.get("message", {})
             # Модель попросила вызвать инструмент(ы) — служба llm сама по рою
             # не ходит (нет ServiceLink к соседям, только к своей Ollama), это

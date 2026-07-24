@@ -67,7 +67,7 @@ async def test_ask_rejects_missing_prompt():
 
 
 async def test_chat_calls_ollama_chat_and_extracts_message(monkeypatch):
-    async def fake_chat(cfg, messages, system, tools=None):
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
         assert messages == [{"role": "user", "content": "привет"}]
         return {"message": {"role": "assistant", "content": "Добрый день"}}
 
@@ -85,6 +85,52 @@ async def test_chat_rejects_non_list_messages():
         await svc.run_command("chat", {"messages": "не список"})
     with pytest.raises(ProtoError):
         await svc.run_command("chat", {"messages": []})
+
+
+# --- think (вариативное рассуждение, LLM_INTEGRATION_PLAN.md §7 —
+# bot/ai_flow.py теперь передаёт think явно на каждый вызов) ---
+
+
+async def test_chat_passes_explicit_think_through_to_ollama(monkeypatch):
+    seen = {}
+
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
+        seen["think"] = think
+        return {"message": {"content": "ответ"}}
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    svc = LlmService(_settings())
+    await svc.run_command(
+        "chat", {"messages": [{"role": "user", "content": "1"}], "think": True}
+    )
+    assert seen["think"] is True
+
+    await svc.run_command(
+        "chat", {"messages": [{"role": "user", "content": "1"}], "think": False}
+    )
+    assert seen["think"] is False
+
+
+async def test_chat_without_think_arg_defers_to_ollama_default(monkeypatch):
+    seen = {}
+
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
+        seen["think"] = think
+        return {"message": {"content": "ответ"}}
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    svc = LlmService(_settings())
+    await svc.run_command("chat", {"messages": [{"role": "user", "content": "1"}]})
+    assert seen["think"] is None  # ollama.chat сам подставит cfg.think_chat
+
+
+async def test_chat_rejects_non_bool_think():
+    svc = LlmService(_settings())
+    with pytest.raises(ProtoError) as excinfo:
+        await svc.run_command(
+            "chat", {"messages": [{"role": "user", "content": "1"}], "think": "да"}
+        )
+    assert excinfo.value.code == ERR_BAD_REQUEST
 
 
 async def test_sleep_action_stops_ollama_and_marks_asleep(monkeypatch):
@@ -172,7 +218,7 @@ async def test_idle_check_is_noop_once_already_asleep(monkeypatch):
 
 
 async def test_chat_tracks_chat_id_for_idle_sleep_event(monkeypatch):
-    async def fake_chat(cfg, messages, system, tools=None):
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
         return {"message": {"content": "ответ"}}
 
     async def fake_stop(cfg):
@@ -228,7 +274,7 @@ async def test_idle_triggered_sleep_also_emits(monkeypatch):
 
 
 async def test_active_chat_ids_reset_after_emit(monkeypatch):
-    async def fake_chat(cfg, messages, system, tools=None):
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
         return {"message": {"content": "ответ"}}
 
     async def fake_stop(cfg):
@@ -249,7 +295,7 @@ async def test_active_chat_ids_reset_after_emit(monkeypatch):
 
 
 async def test_emit_failure_does_not_break_sleep(monkeypatch):
-    async def fake_chat(cfg, messages, system, tools=None):
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
         return {"message": {"content": "ответ"}}
 
     async def fake_stop(cfg):
@@ -303,7 +349,7 @@ def test_keepalive_duration_covers_idle_window(monkeypatch):
 
 
 async def test_keepalive_started_on_first_activity_and_not_restarted(monkeypatch):
-    async def fake_chat(cfg, messages, system, tools=None):
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
         return {"message": {"content": "ответ"}}
 
     monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
@@ -317,7 +363,7 @@ async def test_keepalive_started_on_first_activity_and_not_restarted(monkeypatch
 
 
 async def test_keepalive_stopped_only_when_service_actually_sleeps(monkeypatch):
-    async def fake_chat(cfg, messages, system, tools=None):
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
         return {"message": {"content": "ответ"}}
 
     async def fake_stop(cfg):
@@ -342,7 +388,7 @@ async def test_keepalive_stopped_only_when_service_actually_sleeps(monkeypatch):
 
 
 async def test_notify_restart_emits_for_active_chats(monkeypatch):
-    async def fake_chat(cfg, messages, system, tools=None):
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
         return {"message": {"content": "ответ"}}
 
     monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
@@ -370,7 +416,7 @@ async def test_notify_restart_without_active_chats_emits_nothing():
 
 
 async def test_notify_restart_failure_is_swallowed(monkeypatch):
-    async def fake_chat(cfg, messages, system, tools=None):
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
         return {"message": {"content": "ответ"}}
 
     async def failing_emit(event_type, data):

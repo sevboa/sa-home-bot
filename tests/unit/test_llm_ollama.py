@@ -167,6 +167,45 @@ async def test_chat_prepends_system_message(monkeypatch):
     assert posted["payload"]["messages"][1] == {"role": "user", "content": "привет"}
 
 
+async def test_chat_think_none_falls_back_to_config_default(monkeypatch):
+    # Вариативное рассуждение (bot/ai_flow.py) всегда передаёт think явно —
+    # think=None остаётся подстраховкой для прочих вызывающих (см. LlmConfig
+    # .think_chat docstring).
+    monkeypatch.setattr(ollama, "ensure_running", _noop)
+    posted = {}
+
+    def fake_post(url, payload, timeout):
+        posted["payload"] = payload
+        return {"message": {"content": "ответ"}}
+
+    monkeypatch.setattr(ollama, "_post_json_sync", fake_post)
+    await ollama.chat(_cfg(think_chat=True), [{"role": "user", "content": "1"}], "system")
+    assert posted["payload"]["think"] is True
+
+    await ollama.chat(_cfg(think_chat=False), [{"role": "user", "content": "1"}], "system")
+    assert posted["payload"]["think"] is False
+
+
+async def test_chat_explicit_think_overrides_config_default(monkeypatch):
+    monkeypatch.setattr(ollama, "ensure_running", _noop)
+    posted = {}
+
+    def fake_post(url, payload, timeout):
+        posted["payload"] = payload
+        return {"message": {"content": "ответ"}}
+
+    monkeypatch.setattr(ollama, "_post_json_sync", fake_post)
+    await ollama.chat(
+        _cfg(think_chat=True), [{"role": "user", "content": "1"}], "system", think=False
+    )
+    assert posted["payload"]["think"] is False
+
+    await ollama.chat(
+        _cfg(think_chat=False), [{"role": "user", "content": "1"}], "system", think=True
+    )
+    assert posted["payload"]["think"] is True
+
+
 async def test_generate_wraps_http_error(monkeypatch):
     monkeypatch.setattr(ollama, "ensure_running", _noop)
 

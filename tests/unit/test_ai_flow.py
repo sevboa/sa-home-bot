@@ -162,15 +162,19 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
 
     assert raw == "Добгый день, сэ"
     assert message.answers == []  # никаких «шагов»/Агнольда — узел жив, модель не спит
+    # Один вызов — быстрый (think=false) проход сразу дал финальный текст,
+    # без маркера THINK_MARKER, вторая (думающая) попытка не понадобилась.
     assert len(link.command_calls) == 1
     action, args, node = link.command_calls[0]
     assert (action, node) == ("chat", "winpc")
     assert args["chat_id"] == 1
+    assert args["think"] is False
     assert args["tools"] == ai_flow.ai_tools.TOOL_DECLARATIONS
-    # FakeMessage.from_user is None — заметка содержит только время (§8.1),
-    # без сведений об отправителе; всё равно вставляется перед текущим ходом.
-    assert args["messages"][-1] == {"role": "user", "content": "привет"}
-    assert len(args["messages"]) == 2
+    # Последнее сообщение — триаж-инструкция (см. THINK_MARKER); текущий ход
+    # пользователя и заметка о времени (§8.1) идут перед ней.
+    assert args["messages"][-1] == {"role": "system", "content": ai_flow._TRIAGE_INSTRUCTION}
+    assert args["messages"][-2] == {"role": "user", "content": "привет"}
+    assert len(args["messages"]) == 3
     assert args["messages"][0]["role"] == "system"
     assert "Точное время сейчас" in args["messages"][0]["content"]
 
@@ -235,6 +239,59 @@ async def test_tool_call_round_limit_falls_back_to_hiccup(store):
 
     assert raw is None
     assert message.answers == [ai_flow.ALBERT_HICCUP]
+
+
+# --- вариативное рассуждение (THINK_MARKER/THINKING_TEXT): быстрый проход
+# (think=false) с триаж-инструкцией; думающий (think=true) — только если
+# модель сама попросила подумать ---
+
+
+async def test_fast_path_no_thinking_when_marker_absent(store):
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[{"response": "Добгый день, сэ"}],
+        get_state_routes={"winpc:llm": {"asleep": False}},
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert raw == "Добгый день, сэ"
+    assert message.answers == []  # THINKING_TEXT не показывался — думать не понадобилось
+    assert len(link.command_calls) == 1
+    assert link.command_calls[0][1]["think"] is False
+
+
+async def test_escalates_to_thinking_when_marker_returned(store):
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[
+            {"response": f"кое-что... {ai_flow.THINK_MARKER}"},
+            {"response": "Точный ответ после раздумий"},
+        ],
+        get_state_routes={"winpc:llm": {"asleep": False}},
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "сложный вопрос"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert raw == "Точный ответ после раздумий"
+    assert message.answers == [ai_flow.THINKING_TEXT]
+    assert len(link.command_calls) == 2
+    first_args = link.command_calls[0][1]
+    second_args = link.command_calls[1][1]
+    assert first_args["think"] is False
+    assert second_args["think"] is True
+    # Второй (думающий) проход не видит триаж-инструкцию первого — свежий
+    # список сообщений, а не продолжение с маркером внутри.
+    assert not any(
+        m.get("content") == ai_flow._TRIAGE_INSTRUCTION for m in second_args["messages"]
+    )
+    assert second_args["messages"][-1] == {"role": "user", "content": "сложный вопрос"}
 
 
 async def test_asleep_model_shows_steps_but_no_wake(store):
@@ -620,9 +677,12 @@ async def test_context_note_inserted_right_before_current_turn(store):
     )
 
     sent_messages = link.command_calls[0][1]["messages"]
-    assert sent_messages[-1] == {"role": "user", "content": "текущий вопрос"}
-    assert sent_messages[-2]["role"] == "system"
-    assert sent_messages[:-2] == history[:-1]
+    # Последнее сообщение — триаж-инструкция (см. THINK_MARKER), перед ней —
+    # текущий ход, перед ним — заметка о контексте.
+    assert sent_messages[-1] == {"role": "system", "content": ai_flow._TRIAGE_INSTRUCTION}
+    assert sent_messages[-2] == {"role": "user", "content": "текущий вопрос"}
+    assert sent_messages[-3]["role"] == "system"
+    assert sent_messages[:-3] == history[:-1]
 
 
 # --- ActiveAiChats (живая находка 2026-07-24: редеплой бота посреди
