@@ -43,6 +43,12 @@ SERVICE_NAME = "llm"
 ACTION_ASK = "ask"
 ACTION_CHAT = "chat"
 ACTION_SLEEP = "sleep"
+# Прогреть контейнер БЕЗ генерации — для службы tasks (tasks/service.py),
+# которая будит цель заранее (prewake_loop, за PREWAKE_LEAD_S до due_at) и
+# не хочет тратить эту попытку на настоящий ask/chat (живая находка
+# 2026-07-24: ensure_running и так вызывается лениво внутри ask/chat, но
+# тогда прогрев занял бы ПЕРВЫЙ реальный запрос, а не время заранее).
+ACTION_WARMUP = "warmup"
 
 EVENT_IDLE_SLEEP = "llm_idle_sleep"
 EVENT_SERVICE_RESTART = "llm_service_restart"
@@ -119,6 +125,7 @@ class LlmService:
                     ),
                 ),
                 ActionSpec(id=ACTION_SLEEP, title="Уложить модель спать"),
+                ActionSpec(id=ACTION_WARMUP, title="Прогреть модель заранее (без ответа)"),
             ),
         )
 
@@ -171,6 +178,12 @@ class LlmService:
         if action == ACTION_SLEEP:
             await self._sleep_now()
             return {"asleep": True}
+        if action == ACTION_WARMUP:
+            # НЕ _touch(chat_id) — прогрев не значит, что был реальный чат,
+            # ложный chat_id раздул бы список для EVENT_IDLE_SLEEP.
+            await ollama.ensure_running(self._cfg)
+            await self._touch()
+            return {"asleep": False}
         # Сервер валидирует action по describe — сюда неизвестное не доходит.
         raise ValueError(f"необъявленное действие: {action}")
 

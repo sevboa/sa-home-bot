@@ -70,13 +70,12 @@ from aiogram.types import Message, User
 
 from sa_home_bot.bot import swarm_view
 from sa_home_bot.bot import tools as ai_tools
-from sa_home_bot.bot.handlers.wake import wake_swarm_node_core
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
+from sa_home_bot.llm_chat import run_chat_loop
 from sa_home_bot.proto.messages import (
-    ERR_INTERNAL,
     ERR_UNAVAILABLE,
     ERR_UNKNOWN_DST,
     Address,
@@ -84,12 +83,12 @@ from sa_home_bot.proto.messages import (
 )
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import WILDCARD
+from sa_home_bot.wake_core import wake_swarm_node_core
 
 log = logging.getLogger(__name__)
 
 LLM_NODE = "winpc"
 LLM_SERVICE = "llm"
-ACTION_CHAT = "chat"
 
 STEPS_TEXT = "<i>Вы слышите приближающиеся шаги...</i>"
 ARNOLD_WAKING = "<b>Агнольд:</b> Сейчас Альфред подойдёт"
@@ -117,6 +116,15 @@ CLOSING_TEXT = "<i>Альфред не дождался обращения и у
 # рассылает bot/node_events.py), другой повод и текст: явно НЕ выглядит как
 # сбой — пользователь попросил именно это 2026-07-24.
 RESTART_TEXT = "<i>У Альфреда появились другие дела</i>"
+# Отложенная задача (тул remind, служба tasks) сработала, но за отведённое
+# на прогрев время (см. tasks/service.py::PREWAKE_LEAD_S) Альфреда так и не
+# нашли — не отсюда, а из bot/node_events.py по событию task_result
+# (ok=False), решение пользователя 2026-07-24: доложить об этом один раз,
+# без повторных попыток растягивать сам момент срабатывания.
+ALBERT_TASK_MISSED = (
+    "<b>Альбегт:</b> Прошу прощения, не удалось найти Альфреда, чтобы он "
+    "сделал, что обещал."
+)
 
 
 class ActiveAiChats:
@@ -169,11 +177,6 @@ WAKE_POLL_INTERVAL_S = 3.0
 # уже говорит "недоступна" — не тратим ещё раз время на полноценный _ask()
 # (до request_timeout_s) с тем же исходом, сразу идём в сценарий wake.
 _PRESENCE_CHECK_TIMEOUT_S = 3.0
-# Сколько раз подряд можно уйти в tool_calls, прежде чем модель обязана
-# дать финальный текстовый ответ — защита от зацикливания (LLM_INTEGRATION_
-# PLAN.md §7.1 п.5). Превышение — тот же путь, что прочие внутренние сбои
-# (ALBERT_HICCUP), не зависание запроса.
-_MAX_TOOL_ROUNDS = 4
 
 # Вариативное рассуждение (LLM_INTEGRATION_PLAN.md §7, живая находка
 # 2026-07-24): включать think=true на КАЖДЫЙ запрос надёжно для расчётов,
@@ -375,60 +378,6 @@ async def _build_context_note(message: Message, store: Store, dialogue_id: int) 
     return " ".join(lines)
 
 
-async def _run_chat_loop(
-    node_link: ServiceLink,
-    dst: Address,
-    timeout: float,
-    messages: list[dict[str, Any]],
-    tool_ctx: ai_tools.ToolContext,
-    think: bool,
-    telegram_chat_id: int | None,
-    log_chat_id: Any,
-) -> str:
-    """Один проход диалога с моделью (LLM_INTEGRATION_PLAN.md §7.1): раунды
-    tool-calling (до _MAX_TOOL_ROUNDS), пока не придёт финальный текст.
-
-    ``messages`` мутируется по ходу (дописываются tool_calls/результаты) —
-    вызывающий передаёт отдельный список на каждый проход, если хочет
-    сохранить исходную историю чистой (см. request_alfred: быстрый и
-    думающий проходы используют РАЗНЫЕ списки, второй не должен унаследовать
-    служебный шум/маркер первого)."""
-    for _round in range(_MAX_TOOL_ROUNDS):
-        args: dict[str, Any] = {
-            "messages": messages,
-            "tools": ai_tools.TOOL_DECLARATIONS,
-            "think": think,
-        }
-        if telegram_chat_id is not None:
-            # chat_id — не для маршрутизации (та по dst), а чтобы служба
-            # знала, какие чаты уведомлять при llm_idle_sleep (см.
-            # докстринг модуля и llm/service.py).
-            args["chat_id"] = telegram_chat_id
-        result = await node_link.command(ACTION_CHAT, args, dst=dst, timeout=timeout)
-        tool_calls = result.get("tool_calls")
-        if not tool_calls:
-            return result.get("response", "")
-        messages.append({"role": "assistant", "tool_calls": tool_calls})
-        for call in tool_calls:
-            fn = call.get("function", {}) if isinstance(call, dict) else {}
-            name = fn.get("name", "")
-            call_args = fn.get("arguments") or {}
-            handler = ai_tools.TOOL_HANDLERS.get(name)
-            if handler is None:
-                tool_result = f"неизвестный инструмент: {name}"
-            else:
-                try:
-                    tool_result = await handler(tool_ctx, call_args)
-                except Exception as exc:  # noqa: BLE001 — сбой тула не должен ронять диалог
-                    log.exception("ai: тул %s упал (chat=%s)", name, log_chat_id)
-                    tool_result = f"внутренняя ошибка инструмента: {exc}"
-            messages.append({"role": "tool", "content": tool_result, "name": name})
-    # Лимит раундов исчерпан — модель зациклилась на вызовах инструментов,
-    # не дав финального текста. Тот же путь, что прочие внутренние сбои
-    # (ALBERT_HICCUP в request_alfred), не тихое зависание запроса.
-    raise ProtoError(ERR_INTERNAL, "превышен лимит раундов tool-calling")
-
-
 async def request_alfred(
     message: Message,
     node_link: ServiceLink,
@@ -466,7 +415,11 @@ async def request_alfred(
         else:
             base_messages = list(history)
         tool_ctx = ai_tools.ToolContext(
-            chat_id=message.chat.id if message.chat else None, store=store, settings=settings
+            chat_id=message.chat.id if message.chat else None,
+            dialogue_id=dialogue_id,
+            trigger_message_id=message.message_id if message.chat else None,
+            settings=settings,
+            node_link=node_link,
         )
         telegram_chat_id = message.chat.id if message.chat is not None else None
 
@@ -476,7 +429,7 @@ async def request_alfred(
         # (триаж-инструкция и возможные tool-раунды быстрого прохода не
         # должны попасть в думающий проход, если до него дойдёт).
         triage_messages = [*base_messages, {"role": "system", "content": _TRIAGE_INSTRUCTION}]
-        fast_answer = await _run_chat_loop(
+        fast_answer = await run_chat_loop(
             node_link,
             dst,
             timeout,
@@ -494,7 +447,7 @@ async def request_alfred(
         # без триаж-инструкции и без маркера, второй проход о протоколе
         # ничего не знает и просто отвечает по существу.
         await message.answer(THINKING_TEXT)
-        return await _run_chat_loop(
+        return await run_chat_loop(
             node_link,
             dst,
             timeout,

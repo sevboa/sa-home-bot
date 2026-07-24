@@ -2,20 +2,29 @@
 
 Каждый тул — узкая функция в явном реестре TOOL_HANDLERS, не общий прокси
 на произвольное действие роя (§7.2 плана — общий прокси был бы дырой в
-правах: модель дозвонилась бы куда угодно). Все тулы здесь read-only,
-кроме ``remind`` — тот пишет только в свою узкую табличку "отложенное
-сообщение самому себе", не управляет системой (см. §8.5). Декларации
-(TOOL_DECLARATIONS) — формат OpenAI function-calling, который Ollama
-понимает нативно для tool-calling-моделей (qwen3 в их числе).
+правах: модель дозвонилась бы куда угодно). Декларации (TOOL_DECLARATIONS)
+— формат OpenAI function-calling, который Ollama понимает нативно для
+tool-calling-моделей (qwen3 в их числе).
 
 Погода, конвертер валют и калькулятор не ходят по протоколу роя вообще —
 это не системные операции конкретной ноды (как apps/monitor), а либо
 чистый расчёт, либо публичный API без ключа/состояния, одинаково доступный
-с любой ноды. Выполняются прямо здесь, в процессе бота (см. §8.4 плана —
-решение упростить относительно первоначального черновика с отдельной
-службой "net"). Арифметику конвертера (сумма * курс) делает сам тул на
-Python, не второй проход через тул calc — для одного умножения гонять его
-ещё раз через модель не даёт выгоды в точности, только лишний круг.
+с любой ноды. Выполняются прямо здесь (см. §8.4 плана — решение упростить
+относительно первоначального черновика с отдельной службой "net").
+Арифметику конвертера (сумма * курс) делает сам тул на Python, не второй
+проход через тул calc — для одного умножения гонять его ещё раз через
+модель не даёт выгоды в точности, только лишний круг.
+
+``remind`` — единственный тул, ходящий по протоколу роя (в службу tasks,
+см. sa_home_bot.tasks) — ставит отложенную задачу "спросить нейронку ещё
+раз в момент X" (§8.5 плана, генерализовано 2026-07-24: раньше писал
+готовый текст константным напоминанием прямо в БД бота, теперь сама
+доставка — новый живой ответ модели, см. sa_home_bot.tasks.service).
+Никакого доступа "в систему" — только создание такой задачи.
+
+Этот модуль сознательно не зависит от aiogram — его импортирует не только
+бот, но и служба tasks (см. докстринг ToolContext), которой Telegram не
+нужен вовсе.
 """
 
 from __future__ import annotations
@@ -31,21 +40,41 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
-from sa_home_bot.db.store import Store
+from sa_home_bot.proto.messages import Address, ProtoError
+from sa_home_bot.tasks import protocol as task_protocol
 
 log = logging.getLogger(__name__)
+
+# Куда стрелять llm.chat для отложенных задач, создаваемых тулом remind —
+# тот же узел/служба, что и живой /ai (bot/ai_flow.py::LLM_NODE/LLM_SERVICE).
+# Продублировано здесь как литерал, а не импортировано оттуда: ai_flow.py
+# сам импортирует этот модуль (bot.tools) — обратный импорт был бы циклом.
+LLM_NODE = "winpc"
+LLM_SERVICE = "llm"
 
 
 @dataclass
 class ToolContext:
+    """``history`` — сообщения, которые ПРЯМО СЕЙЧАС видит модель (та же
+    ссылка, что и ``messages`` в llm_chat.run_chat_loop, живая находка
+    2026-07-24) — тул remind берёт снимок диалога отсюда, не из БД: у
+    службы tasks (второй пользователь этого модуля, см. докстринг файла)
+    нет доступа к ai_turns бота, а живому /ai читать БД ради того же самого
+    незачем, раз список уже в памяти. ``node_link`` — только remind ходит
+    по протоколу (в службу tasks); прочим тулам не нужен."""
+
     chat_id: int | None
-    store: Store
+    dialogue_id: int | None
+    trigger_message_id: int | None
     settings: Settings
+    node_link: ServiceLink | None = None
+    history: list[dict[str, Any]] = field(default_factory=list)
 
 
 ToolHandler = Callable[["ToolContext", dict[str, Any]], Awaitable[str]]
@@ -281,18 +310,20 @@ async def tool_convert_currency(ctx: ToolContext, args: dict[str, Any]) -> str:
     )
 
 
-# --- remind: единственный пишущий тул, см. докстринг модуля ---
+# --- remind: единственный тул, ходящий по протоколу роя, см. докстринг модуля ---
 
 
 async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
-    if ctx.chat_id is None:
-        return "ошибка: напоминания недоступны вне чата"
+    if ctx.chat_id is None or ctx.dialogue_id is None or ctx.trigger_message_id is None:
+        return "ошибка: отложенные задачи недоступны вне диалога"
+    if ctx.node_link is None:
+        return "ошибка: служба задач недоступна"
     when_raw = args.get("when")
     text = args.get("text")
     if not isinstance(when_raw, str) or not when_raw.strip():
         return "ошибка: не указано время (when, ISO 8601)"
     if not isinstance(text, str) or not text.strip():
-        return "ошибка: не указан текст напоминания"
+        return "ошибка: не указано, что сделать/сказать (text)"
     try:
         due_at = datetime.fromisoformat(when_raw)
     except ValueError:
@@ -304,11 +335,54 @@ async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
     if due_at.tzinfo is None:
         due_at = due_at.astimezone()
     due_at_utc = due_at.astimezone(UTC)
-    now = datetime.now(tz=UTC)
-    if due_at_utc <= now:
+    if due_at_utc <= datetime.now(tz=UTC):
         return "ошибка: указанное время уже прошло"
-    await ctx.store.create_reminder(ctx.chat_id, text.strip(), due_at_utc, now)
-    return f"напоминание создано на {due_at.strftime('%Y-%m-%d %H:%M')} (местное время)"
+
+    # Директива дописывается в снимок ТЕКУЩЕЙ истории (ctx.history — то, что
+    # модель видит прямо сейчас, см. докстринг ToolContext) — служба tasks
+    # прогоняет ровно этот список через llm.chat заново в момент due_at, без
+    # доступа к ai_turns бота (решение пользователя 2026-07-24: снимок
+    # делается здесь, при создании задачи, а не реконструируется позже).
+    # "Настало время" привязано к due_at, а не к моменту создания задачи —
+    # due_at и есть момент фактического срабатывания (с точностью до
+    # интервала опроса службы tasks).
+    directive = (
+        f"Настало время ({due_at:%Y-%m-%d %H:%M}), на которое тебя раньше "
+        f"попросили сделать вот что: «{text.strip()}». Сделай/скажи это "
+        "сейчас, от своего имени, в характере — как будто сам вспомнил, а не "
+        "отвечаешь на прямой вопрос. Если нужно что-то посчитать или узнать "
+        "(погоду, курс) — пользуйся инструментами, не полагайся на память."
+    )
+    task_args = {
+        "messages": [*ctx.history, {"role": "user", "content": directive}],
+        "tools": TOOL_DECLARATIONS,
+        "think": ctx.settings.llm.think_chat,
+        "chat_id": ctx.chat_id,
+    }
+    meta = {
+        "kind": task_protocol.TASK_KIND_LLM_CHAT,
+        "chat_id": ctx.chat_id,
+        "dialogue_id": ctx.dialogue_id,
+        "trigger_message_id": ctx.trigger_message_id,
+    }
+    dst = Address(node=task_protocol.NODE_ID, service=task_protocol.SERVICE_NAME)
+    try:
+        await ctx.node_link.command(
+            task_protocol.ACTION_CREATE,
+            {
+                "due_at": due_at_utc.isoformat(),
+                "dst_node": LLM_NODE,
+                "dst_service": LLM_SERVICE,
+                "action": task_protocol.ACTION_CHAT_LOOP,
+                "args": task_args,
+                "timeout_s": ctx.settings.llm.request_timeout_s,
+                "meta": meta,
+            },
+            dst=dst,
+        )
+    except (ServiceUnavailableError, ProtoError) as exc:
+        return f"внутренняя ошибка: не удалось поставить задачу ({exc})"
+    return f"задача поставлена на {due_at.strftime('%Y-%m-%d %H:%M')} (местное время)"
 
 
 TOOL_HANDLERS: dict[str, ToolHandler] = {
@@ -395,10 +469,14 @@ TOOL_DECLARATIONS: list[dict[str, Any]] = [
         "function": {
             "name": "remind",
             "description": (
-                "Поставить напоминание в этом же чате на конкретный момент времени. "
-                "Переведи то, что попросил пользователь ('через 20 минут', 'завтра "
-                "в 9 утра'), в точную дату-время сам, используя текущее время из "
-                "контекста разговора."
+                "Поставить отложенную задачу в этом же чате на конкретный момент "
+                "времени — НЕ готовый текст, а то, что нужно СДЕЛАТЬ или СКАЗАТЬ, "
+                "когда время наступит: в этот момент тебя вызовут заново и ты сам "
+                "сформулируешь ответ, при необходимости пользуясь другими "
+                "инструментами (например, посмотреть погоду именно в тот момент, "
+                "а не сейчас). Переведи то, что попросил пользователь ('через 20 "
+                "минут', 'завтра в 9 утра'), в точную дату-время сам, используя "
+                "текущее время из контекста разговора."
             ),
             "parameters": {
                 "type": "object",
@@ -407,7 +485,10 @@ TOOL_DECLARATIONS: list[dict[str, Any]] = [
                         "type": "string",
                         "description": "Точная дата-время в ISO 8601, например 2026-07-24T21:30:00",
                     },
-                    "text": {"type": "string", "description": "О чём напомнить"},
+                    "text": {
+                        "type": "string",
+                        "description": "Что нужно сделать или сказать в момент срабатывания",
+                    },
                 },
                 "required": ["when", "text"],
             },

@@ -91,16 +91,29 @@ CREATE TABLE IF NOT EXISTS ai_turns (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_turns_dialogue ON ai_turns(chat_id, dialogue_id, message_id);
 
--- Напоминания тула remind (/ai, LLM_INTEGRATION_PLAN.md §8.5) — плоская
--- очередь "когда напомнить в каком чате", опрашивается фоновым циклом
--- bot/reminders.py. due_at/created_at/fired_at — UTC ISO (as everywhere
--- else: сравнение строк работает только при едином часовом поясе).
-CREATE TABLE IF NOT EXISTS reminders (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id     INTEGER NOT NULL,
-    text        TEXT NOT NULL,
-    due_at      TEXT NOT NULL,
-    created_at  TEXT NOT NULL,
-    fired_at    TEXT
+-- Отложенные задачи роя — служба tasks (`sa-home-bot --service tasks`,
+-- sa_home_bot/tasks/), собственная таблица этой службы (не бота — эта
+-- схема общая для всех служб проекта, см. db/migrations.py). Замена
+-- старого reminders (был здесь до 2026-07-24, писал прямо в БД бота и
+-- доставлял константный текст) — задача теперь произвольная протокольная
+-- команда (dst_node/dst_service/action/args_json), а результат/неудача
+-- отдаётся событием (task_result) тому, кто её создал (meta_json —
+-- непрозрачные данные заказчика, эта служба их не читает, только хранит и
+-- возвращает целиком). due_at/created_at/fired_at — UTC ISO (сравнение
+-- строк работает только при едином часовом поясе, как везде в проекте).
+-- prewake_done — за PREWAKE_LEAD_S до due_at служба пробует разбудить dst
+-- заранее (см. tasks/service.py) — 0/1, важен только факт "уже пробовали".
+CREATE TABLE IF NOT EXISTS tasks (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    dst_node     TEXT NOT NULL,
+    dst_service  TEXT NOT NULL,
+    action       TEXT NOT NULL,
+    args_json    TEXT NOT NULL,
+    timeout_s    REAL NOT NULL,
+    meta_json    TEXT NOT NULL,
+    due_at       TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    fired_at     TEXT,
+    prewake_done INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(due_at) WHERE fired_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(due_at) WHERE fired_at IS NULL;

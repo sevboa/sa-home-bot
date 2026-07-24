@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest_asyncio
 
+from sa_home_bot import llm_chat
 from sa_home_bot.bot import ai_flow, wake_state
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.config import LlmConfig, Settings
@@ -33,6 +34,7 @@ OWN_STATE = {
 
 class FakeMessage:
     chat = SimpleNamespace(id=1, type="private")
+    message_id = 42
     from_user = None
     reply_to_message = None
     quote = None
@@ -228,7 +230,7 @@ async def test_tool_call_round_limit_falls_back_to_hiccup(store):
     tool_calls = [{"function": {"name": "calc", "arguments": {"expression": "1+1"}}}]
     message = FakeMessage()
     link = FakeNodeLink(
-        chat_results=[{"tool_calls": tool_calls}] * ai_flow._MAX_TOOL_ROUNDS,
+        chat_results=[{"tool_calls": tool_calls}] * llm_chat.MAX_TOOL_ROUNDS,
         get_state_routes={"winpc:llm": {"asleep": False}},
     )
 

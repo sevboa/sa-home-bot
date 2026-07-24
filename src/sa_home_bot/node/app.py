@@ -35,6 +35,7 @@ def local_service_endpoints(settings: Settings) -> dict[str, str]:
         "apps": settings.apps.socket,
         "torrents": settings.torrents.socket,
         "llm": settings.llm.socket,
+        "tasks": settings.tasks.socket,
     }
 
 

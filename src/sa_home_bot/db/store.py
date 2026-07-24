@@ -449,31 +449,59 @@ class Store:
         row = await cur.fetchone()
         return row["dialogue_id"] if row else None
 
-    # --- reminders (тул remind, /ai, LLM_INTEGRATION_PLAN.md §8.5) ---
+    # --- tasks (служба tasks, отложенные задачи роя, sa_home_bot/tasks/) ---
 
-    async def create_reminder(
-        self, chat_id: int, text: str, due_at: datetime, created_at: datetime
+    async def create_task(
+        self,
+        dst_node: str,
+        dst_service: str,
+        action: str,
+        args: dict,
+        timeout_s: float,
+        meta: dict,
+        due_at: datetime,
+        created_at: datetime,
     ) -> int:
         async with self.db.transaction() as conn:
             cur = await conn.execute(
-                "INSERT INTO reminders(chat_id, text, due_at, created_at) VALUES(?, ?, ?, ?)",
-                (chat_id, text, _iso(due_at), _iso(created_at)),
+                "INSERT INTO tasks(dst_node, dst_service, action, args_json, timeout_s, "
+                "meta_json, due_at, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    dst_node,
+                    dst_service,
+                    action,
+                    json.dumps(args, ensure_ascii=False),
+                    timeout_s,
+                    json.dumps(meta, ensure_ascii=False),
+                    _iso(due_at),
+                    _iso(created_at),
+                ),
             )
             return cur.lastrowid
 
-    async def due_reminders(self, now: datetime) -> list[dict]:
+    async def due_tasks(self, now: datetime) -> list[dict]:
         cur = await self.db.conn.execute(
-            "SELECT * FROM reminders WHERE fired_at IS NULL AND due_at<=? ORDER BY due_at",
+            "SELECT * FROM tasks WHERE fired_at IS NULL AND due_at<=? ORDER BY due_at",
             (_iso(now),),
         )
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
-    async def mark_reminder_fired(self, reminder_id: int, at: datetime) -> None:
+    async def mark_task_fired(self, task_id: int, at: datetime) -> None:
         async with self.db.transaction() as conn:
-            await conn.execute(
-                "UPDATE reminders SET fired_at=? WHERE id=?", (_iso(at), reminder_id)
-            )
+            await conn.execute("UPDATE tasks SET fired_at=? WHERE id=?", (_iso(at), task_id))
+
+    async def tasks_needing_prewake(self, deadline: datetime) -> list[dict]:
+        cur = await self.db.conn.execute(
+            "SELECT * FROM tasks WHERE fired_at IS NULL AND prewake_done=0 AND due_at<=?",
+            (_iso(deadline),),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def mark_task_prewake_done(self, task_id: int) -> None:
+        async with self.db.transaction() as conn:
+            await conn.execute("UPDATE tasks SET prewake_done=1 WHERE id=?", (task_id,))
 
     # --- housekeeping ---
 

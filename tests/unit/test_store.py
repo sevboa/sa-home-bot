@@ -1,3 +1,4 @@
+import json
 from datetime import timedelta
 
 import pytest
@@ -235,34 +236,52 @@ async def test_latest_ai_dialogue_returns_most_recent_by_message_id(store):
     assert await store.latest_ai_dialogue(CHAT_ID + 1) is None
 
 
-# --- reminders (тул remind, /ai, LLM_INTEGRATION_PLAN.md §8.5) ---
+# --- tasks (служба tasks, отложенные задачи роя) ---
 
 
-async def test_due_reminders_empty_when_none_created(store):
-    assert await store.due_reminders(BASE_TIME) == []
-
-
-async def test_due_reminders_only_returns_past_due_unfired(store):
-    await store.create_reminder(CHAT_ID, "полить цветы", BASE_TIME, BASE_TIME)
-    await store.create_reminder(
-        CHAT_ID, "ещё не пора", BASE_TIME + timedelta(hours=1), BASE_TIME
+async def _create_task(store, *, text: str, due_at, created_at=BASE_TIME):
+    return await store.create_task(
+        "winpc", "llm", "chat_loop", {"text": text}, 60.0, {"chat_id": CHAT_ID}, due_at, created_at
     )
-    due = await store.due_reminders(BASE_TIME)
-    assert [r["text"] for r in due] == ["полить цветы"]
 
 
-async def test_due_reminders_ordered_by_due_at(store):
-    await store.create_reminder(
-        CHAT_ID, "второй", BASE_TIME + timedelta(minutes=5), BASE_TIME
-    )
-    await store.create_reminder(CHAT_ID, "первый", BASE_TIME, BASE_TIME)
-    due = await store.due_reminders(BASE_TIME + timedelta(hours=1))
-    assert [r["text"] for r in due] == ["первый", "второй"]
+async def test_due_tasks_empty_when_none_created(store):
+    assert await store.due_tasks(BASE_TIME) == []
 
 
-async def test_mark_reminder_fired_excludes_from_due(store):
-    reminder_id = await store.create_reminder(CHAT_ID, "разовое", BASE_TIME, BASE_TIME)
-    await store.mark_reminder_fired(reminder_id, BASE_TIME)
-    assert await store.due_reminders(BASE_TIME + timedelta(hours=1)) == []
+async def test_due_tasks_only_returns_past_due_unfired(store):
+    await _create_task(store, text="полить цветы", due_at=BASE_TIME)
+    await _create_task(store, text="ещё не пора", due_at=BASE_TIME + timedelta(hours=1))
+    due = await store.due_tasks(BASE_TIME)
+    assert [json.loads(r["args_json"])["text"] for r in due] == ["полить цветы"]
+
+
+async def test_due_tasks_ordered_by_due_at(store):
+    await _create_task(store, text="второй", due_at=BASE_TIME + timedelta(minutes=5))
+    await _create_task(store, text="первый", due_at=BASE_TIME)
+    due = await store.due_tasks(BASE_TIME + timedelta(hours=1))
+    assert [json.loads(r["args_json"])["text"] for r in due] == ["первый", "второй"]
+
+
+async def test_mark_task_fired_excludes_from_due(store):
+    task_id = await _create_task(store, text="разовое", due_at=BASE_TIME)
+    await store.mark_task_fired(task_id, BASE_TIME)
+    assert await store.due_tasks(BASE_TIME + timedelta(hours=1)) == []
+
+
+async def test_tasks_needing_prewake_only_unfired_and_before_deadline(store):
+    soon = await _create_task(store, text="скоро", due_at=BASE_TIME + timedelta(minutes=2))
+    await _create_task(store, text="далеко", due_at=BASE_TIME + timedelta(hours=1))
+    fired = await _create_task(store, text="уже сработало", due_at=BASE_TIME)
+    await store.mark_task_fired(fired, BASE_TIME)
+
+    due = await store.tasks_needing_prewake(BASE_TIME + timedelta(minutes=5))
+    assert [r["id"] for r in due] == [soon]
+
+
+async def test_mark_task_prewake_done_excludes_from_needing_prewake(store):
+    task_id = await _create_task(store, text="скоро", due_at=BASE_TIME + timedelta(minutes=2))
+    await store.mark_task_prewake_done(task_id)
+    assert await store.tasks_needing_prewake(BASE_TIME + timedelta(minutes=5)) == []
 
 

@@ -29,11 +29,11 @@ class FakeEmitter:
         self.events.append((event_type, data))
 
 
-def test_describe_declares_ask_chat_sleep():
+def test_describe_declares_ask_chat_sleep_warmup():
     desc = LlmService(_settings()).describe()
     assert desc.info.service == "llm"
     assert desc.capabilities == ("qwen2.5:7b",)
-    assert [a.id for a in desc.actions] == ["ask", "chat", "sleep"]
+    assert [a.id for a in desc.actions] == ["ask", "chat", "sleep", "warmup"]
     assert desc.find_action("ask").params[0].name == "prompt"
     assert desc.find_action("chat").params[0].name == "messages"
     assert desc.find_action("sleep").params == ()
@@ -162,6 +162,39 @@ async def test_ask_after_sleep_wakes_up_again(monkeypatch):
 
     await svc.run_command("ask", {"prompt": "привет"})
     assert (await svc.get_state())["asleep"] is False
+
+
+async def test_warmup_ensures_running_without_generating(monkeypatch):
+    calls = []
+
+    async def fake_ensure_running(cfg):
+        calls.append(cfg.model)
+
+    monkeypatch.setattr(llm_service.ollama, "ensure_running", fake_ensure_running)
+    svc = LlmService(_settings())
+    result = await svc.run_command("warmup", {})
+    assert result == {"asleep": False}
+    assert calls == ["qwen2.5:7b"]
+    assert (await svc.get_state())["asleep"] is False
+
+
+async def test_warmup_does_not_add_chat_id_to_active_chats(monkeypatch):
+    # Живая находка (см. llm/service.py::run_command): прогрев — не реальный
+    # чат, не должен раздувать список для EVENT_IDLE_SLEEP.
+    async def fake_ensure_running(cfg):
+        pass
+
+    monkeypatch.setattr(llm_service.ollama, "ensure_running", fake_ensure_running)
+
+    async def fake_stop(cfg):
+        pass
+
+    monkeypatch.setattr(llm_service.ollama, "stop", fake_stop)
+    emitter = FakeEmitter()
+    svc = LlmService(_settings(), emit=emitter)
+    await svc.run_command("warmup", {})
+    await svc.run_command("sleep", {})
+    assert emitter.events == []  # ни одного llm_idle_sleep — не было chat_id
 
 
 async def test_idle_check_sleeps_after_threshold(monkeypatch):

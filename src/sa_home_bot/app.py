@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 
 from sa_home_bot.bot.ai_flow import RESTART_TEXT, ActiveAiChats
@@ -25,7 +24,6 @@ from sa_home_bot.bot.link_watch import LinkWatchMiddleware
 from sa_home_bot.bot.monitor_events import build_event_handler
 from sa_home_bot.bot.node_events import build_node_event_handler
 from sa_home_bot.bot.notifier import Notifier
-from sa_home_bot.bot.reminders import reminder_loop
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.bot.setup import build_bot, build_dispatcher, set_bot_commands
 from sa_home_bot.bot.torrent_pending import PendingTorrents
@@ -103,7 +101,7 @@ async def run(settings: Settings) -> None:
         settings.node.socket,
         token=settings.swarm.token,
         display_name="нода",
-        on_event=build_node_event_handler(book, notifier),
+        on_event=build_node_event_handler(book, notifier, store),
     )
     await node_link.start()
 
@@ -126,10 +124,6 @@ async def run(settings: Settings) -> None:
     )
     await torrents_link.start()
     pending_torrents = PendingTorrents()
-
-    # 9. Тул remind (/ai, LLM_INTEGRATION_PLAN.md §8.5) — фоновый опрос своей
-    #    очереди в БД бота, доставка через тот же Notifier.
-    reminders_task = asyncio.create_task(reminder_loop(store, notifier), name="reminders")
 
     # Чаты с прямо сейчас идущим /ai-запросом — на останове (_shutdown)
     # известить их RESTART_TEXT'ом до закрытия сессии бота (см. докстринг
@@ -169,7 +163,6 @@ async def run(settings: Settings) -> None:
         await _shutdown(
             dp=dp,
             polling_task=polling_task,
-            reminders_task=reminders_task,
             active_ai_chats=active_ai_chats,
             link=link,
             node_link=node_link,
@@ -187,7 +180,6 @@ async def _shutdown(
     *,
     dp,
     polling_task: asyncio.Task,
-    reminders_task: asyncio.Task,
     active_ai_chats: ActiveAiChats,
     link: ServiceLink,
     node_link: ServiceLink,
@@ -200,12 +192,6 @@ async def _shutdown(
     db: Database,
 ) -> None:
     log.info("Останов приложения...")
-
-    # Стоп фонового опроса напоминаний — до polling, не участвует в приёме
-    # апдейтов Telegram, безопасно снять первым.
-    reminders_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await reminders_task
 
     # Живая находка 2026-07-24 (второй заход, живой баг на проде): раньше
     # это шло ПОСЛЕ link.stop()/node_link.stop() — осиротевшая задача

@@ -195,6 +195,31 @@ class TorrentsConfig(BaseModel):
     save_dirs: list[str] = Field(default_factory=list)
 
 
+class TasksConfig(BaseModel):
+    """Служба tasks (`sa-home-bot --service tasks`) — генерализованные
+    отложенные задачи роя (замена старого тула remind, писавшего прямо в
+    БД бота константным текстом, живая находка 2026-07-24: пользователь
+    явно попросил отдельный сервис роя, а не доработку внутри бота).
+
+    Задача = due_at + произвольная протокольная команда (dst_node/
+    dst_service/action/args) + непрозрачные meta, которые эта служба не
+    читает, только хранит и возвращает целиком в событии `task_result`
+    вызывающему (например боту — bot/node_events.py). Один специальный
+    action — ``chat_loop`` (см. tasks/protocol.py) — не форвардится как
+    есть, а прогоняется через полный цикл tool-calling поверх llm.chat
+    (sa_home_bot.llm_chat.run_chat_loop): это единственный сейчас
+    предусмотренный «богатый» тип задачи — тул remind (bot/tools.py)
+    создаёт именно такие, в том числе может создать сама модель во время
+    собственного ответа (self-scheduling).
+
+    ``db_path`` — своя БД (как у monitor), не БД бота: у этой службы нет
+    доступа к Telegram и к диалогам бота, только к своей очереди задач.
+    """
+
+    socket: str = "./data/tasks.sock"
+    db_path: Path = Path("./data/tasks.sqlite")
+
+
 class LlmConfig(BaseModel):
     """Служба llm (Альфред, `sa-home-bot --service llm`) — только на winpc.
 
@@ -339,6 +364,7 @@ class Settings(BaseSettings):
     apps: AppsConfig = Field(default_factory=AppsConfig)
     torrents: TorrentsConfig = Field(default_factory=TorrentsConfig)
     llm: LlmConfig = Field(default_factory=LlmConfig)
+    tasks: TasksConfig = Field(default_factory=TasksConfig)
     weather: WeatherConfig = Field(default_factory=WeatherConfig)
     node: NodeConfig = Field(default_factory=NodeConfig)
     swarm: SwarmConfig = Field(default_factory=SwarmConfig)

@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from sa_home_bot import wake_core
 from sa_home_bot.bot import actions, commands, node_links, node_view, status_view, wake_state
 from sa_home_bot.bot.monitor_state import parse_outage
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
@@ -234,52 +235,13 @@ async def build_swarm_keyboard(
     return actions.rows(buttons)
 
 
-async def wait_for_service(
-    node_link: ServiceLink,
-    node_id: str,
-    service: str,
-    timeout_s: float,
-    interval_s: float = 3.0,
-) -> bool:
-    """Опрашивать get_state удалённой службы, пока не ответит или не истечёт
-    ``timeout_s`` (используется bot/ai_flow.py после молчаливого wake —
-    дождаться, пока winpc/llm снова окажется на связи). Каждая попытка сама
-    ограничена ``PEER_TIMEOUT_S`` через `_fetch` — зависший, но формально
-    подключённый пир не растягивает ожидание."""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout_s
-    dst = Address(node=node_id, service=service)
-    while True:
-        if await _fetch(node_link, dst) is not None:
-            return True
-        if loop.time() >= deadline:
-            return False
-        await asyncio.sleep(interval_s)
-
-
-async def find_lan_waker(
-    node_link: ServiceLink, store: Store, target_node_id: str, target_broadcast: str
-) -> str | None:
-    """Живая нода в том же сегменте LAN, что и уснувшая ``target_node_id``
-    (совпадает объявленный ею broadcast) — она отправит magic packet вместо
-    бота, который вполне может крутиться вне этой локалки (этап 19 п.6).
-
-    Заодно свежит кэш wake-реквизитов всех увиденных сейчас нод — тот же
-    fan-out, что и сводка /swarm, отдельного запроса не требует.
-    """
-    try:
-        own_state = await node_link.get_state()
-    except (ServiceUnavailableError, ProtoError):
-        return None
-    reports = await _collect(node_link, own_state)
-    await _remember_wake_info(store, reports)
-    for r in reports:
-        if not r.alive or r.node_id == target_node_id or r.state is None:
-            continue
-        candidate = r.state.get("wake")
-        if candidate and candidate.get("broadcast") == target_broadcast:
-            return r.node_id
-    return None
+# find_lan_waker/wait_for_service — вынесены в sa_home_bot.wake_core (живая
+# находка 2026-07-24: служба tasks, без Telegram, тоже должна уметь будить
+# спящую цель перед сроком задачи, а этот модуль тянет aiogram на весь
+# файл). Реэкспорт здесь — чтобы не трогать остальные вызовы в этом файле
+# и в bot/handlers/wake.py, поведение /wake и /swarm не менялось.
+find_lan_waker = wake_core.find_lan_waker
+wait_for_service = wake_core.wait_for_service
 
 
 async def build_swarm_view(

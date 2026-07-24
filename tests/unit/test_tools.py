@@ -41,8 +41,43 @@ def _clear_module_caches():
     tools._RATES_CACHE.clear()
 
 
-def _ctx(store, settings=None, chat_id=CHAT_ID):
-    return tools.ToolContext(chat_id=chat_id, store=store, settings=settings or Settings())
+def _ctx(
+    store,
+    settings=None,
+    chat_id=CHAT_ID,
+    *,
+    dialogue_id=1,
+    trigger_message_id=1,
+    node_link=None,
+    history=None,
+):
+    # ``store`` не используется ToolContext'ом напрямую (только remind
+    # ходит по протоколу через node_link, см. bot/tools.py) — параметр
+    # сохранён ради существующих вызовов ниже, не задействован здесь.
+    del store
+    return tools.ToolContext(
+        chat_id=chat_id,
+        dialogue_id=dialogue_id,
+        trigger_message_id=trigger_message_id,
+        settings=settings or Settings(),
+        node_link=node_link,
+        history=history if history is not None else [],
+    )
+
+
+class _FakeNodeLink:
+    """Двойник ServiceLink для remind — фиксирует последний вызов command()
+    без реального протокола/сети."""
+
+    def __init__(self, *, raises: Exception | None = None) -> None:
+        self.calls: list[tuple[str, dict, object]] = []
+        self._raises = raises
+
+    async def command(self, action, args=None, dst=None, *, timeout=None):
+        self.calls.append((action, args or {}, dst))
+        if self._raises is not None:
+            raise self._raises
+        return {"task_id": 1}
 
 
 # --- calc ---
@@ -305,31 +340,75 @@ async def test_convert_currency_rejects_missing_currency_codes(store):
 # --- remind ---
 
 
-async def test_remind_creates_reminder_for_future_time(store):
+async def test_remind_creates_task_for_future_time(store):
+    link = _FakeNodeLink()
     when = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
-    result = await tools.tool_remind(_ctx(store), {"when": when, "text": "полить цветы"})
-    assert "создано" in result
-    due = await store.due_reminders(datetime.now(UTC) + timedelta(hours=2))
-    assert [r["text"] for r in due] == ["полить цветы"]
+    result = await tools.tool_remind(
+        _ctx(store, node_link=link), {"when": when, "text": "полить цветы"}
+    )
+    assert "задача поставлена" in result
+    assert len(link.calls) == 1
+    action, args, dst = link.calls[0]
+    assert action == tools.task_protocol.ACTION_CREATE
+    assert dst.node == tools.task_protocol.NODE_ID
+    assert dst.service == tools.task_protocol.SERVICE_NAME
+    assert args["dst_node"] == tools.LLM_NODE
+    assert args["dst_service"] == tools.LLM_SERVICE
+    assert args["action"] == tools.task_protocol.ACTION_CHAT_LOOP
+    assert args["meta"]["kind"] == tools.task_protocol.TASK_KIND_LLM_CHAT
+    assert args["meta"]["chat_id"] == CHAT_ID
+    assert "полить цветы" in args["args"]["messages"][-1]["content"]
+
+
+async def test_remind_includes_history_snapshot_in_directive(store):
+    link = _FakeNodeLink()
+    history = [{"role": "user", "content": "привет"}, {"role": "assistant", "content": "привет!"}]
+    when = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    await tools.tool_remind(
+        _ctx(store, node_link=link, history=history), {"when": when, "text": "напомни"}
+    )
+    messages = link.calls[0][1]["args"]["messages"]
+    assert messages[:2] == history
 
 
 async def test_remind_rejects_past_time(store):
+    link = _FakeNodeLink()
     when = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
-    result = await tools.tool_remind(_ctx(store), {"when": when, "text": "поздно"})
+    result = await tools.tool_remind(_ctx(store, node_link=link), {"when": when, "text": "поздно"})
     assert result.startswith("ошибка")
+    assert link.calls == []
 
 
 async def test_remind_rejects_invalid_iso(store):
-    result = await tools.tool_remind(_ctx(store), {"when": "завтра", "text": "текст"})
+    result = await tools.tool_remind(
+        _ctx(store, node_link=_FakeNodeLink()), {"when": "завтра", "text": "текст"}
+    )
     assert result.startswith("ошибка")
 
 
 async def test_remind_rejects_missing_text(store):
     when = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
-    result = await tools.tool_remind(_ctx(store), {"when": when, "text": ""})
+    result = await tools.tool_remind(
+        _ctx(store, node_link=_FakeNodeLink()), {"when": when, "text": ""}
+    )
     assert result.startswith("ошибка")
 
 
 async def test_remind_without_chat_id(store):
-    result = await tools.tool_remind(_ctx(store, chat_id=None), {"when": "x", "text": "x"})
-    assert "вне чата" in result
+    result = await tools.tool_remind(
+        _ctx(store, chat_id=None, node_link=_FakeNodeLink()), {"when": "x", "text": "x"}
+    )
+    assert "вне диалога" in result
+
+
+async def test_remind_without_node_link(store):
+    when = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    result = await tools.tool_remind(_ctx(store, node_link=None), {"when": when, "text": "x"})
+    assert "служба задач недоступна" in result
+
+
+async def test_remind_reports_error_when_task_service_unreachable(store):
+    link = _FakeNodeLink(raises=tools.ServiceUnavailableError("boom"))
+    when = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    result = await tools.tool_remind(_ctx(store, node_link=link), {"when": when, "text": "x"})
+    assert result.startswith("внутренняя ошибка")

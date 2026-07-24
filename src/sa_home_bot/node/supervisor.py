@@ -57,6 +57,7 @@ ASSIGNMENT_ARGS: dict[str, list[str]] = {
     "telegram-bot": ["--service", "bot"],
     "apps": ["--service", "apps"],
     "torrents": ["--service", "torrents"],
+    "tasks": ["--service", "tasks"],
 }
 
 # Живая находка 2026-07-23: служба llm на Windows-ноде дёргает wsl.exe, а
