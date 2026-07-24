@@ -133,6 +133,53 @@ async def test_chat_rejects_non_bool_think():
     assert excinfo.value.code == ERR_BAD_REQUEST
 
 
+# --- role (живая находка 2026-07-25: триаж "думать ли"/"звать ли тул"
+# вынесен в отдельный вызов с маленьким промптом без персонажа — см.
+# llm/prompt.py::ROUTER_SYSTEM_PROMPT — чтобы не конкурировать за внимание
+# модели с 12 правилами персонажа Альфреда) ---
+
+
+async def test_chat_role_router_uses_router_prompt_not_persona(monkeypatch):
+    seen = {}
+
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
+        seen["system"] = system
+        return {"message": {"content": "OK"}}
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    svc = LlmService(_settings())
+    await svc.run_command(
+        "chat", {"messages": [{"role": "user", "content": "1"}], "role": "router"}
+    )
+    assert seen["system"] == llm_service.ROUTER_SYSTEM_PROMPT
+    assert seen["system"] != llm_service.SYSTEM_PROMPT
+
+
+async def test_chat_role_absent_or_persona_uses_persona_prompt(monkeypatch):
+    seen = []
+
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
+        seen.append(system)
+        return {"message": {"content": "ответ"}}
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    svc = LlmService(_settings())
+    await svc.run_command("chat", {"messages": [{"role": "user", "content": "1"}]})
+    await svc.run_command(
+        "chat", {"messages": [{"role": "user", "content": "1"}], "role": "persona"}
+    )
+    assert seen == [llm_service.SYSTEM_PROMPT, llm_service.SYSTEM_PROMPT]
+
+
+async def test_chat_rejects_unknown_role():
+    svc = LlmService(_settings())
+    with pytest.raises(ProtoError) as excinfo:
+        await svc.run_command(
+            "chat", {"messages": [{"role": "user", "content": "1"}], "role": "admin"}
+        )
+    assert excinfo.value.code == ERR_BAD_REQUEST
+
+
 async def test_sleep_action_stops_ollama_and_marks_asleep(monkeypatch):
     calls = []
 

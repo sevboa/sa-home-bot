@@ -153,7 +153,7 @@ async def store(tmp_path):
 async def test_fast_path_no_narrative_when_node_already_up(store):
     message = FakeMessage()
     link = FakeNodeLink(
-        chat_results=[{"response": "Добгый день, сэ"}],
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Добгый день, сэ"}],
         get_state_routes={"winpc:llm": {"asleep": False}},
     )
 
@@ -164,30 +164,37 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
 
     assert raw == "Добгый день, сэ"
     assert message.answers == []  # никаких «шагов»/Агнольда — узел жив, модель не спит
-    # Один вызов — быстрый (think=false) проход сразу дал финальный текст,
-    # без маркера THINK_MARKER, вторая (думающая) попытка не понадобилась.
-    assert len(link.command_calls) == 1
-    action, args, node = link.command_calls[0]
+    # Два вызова — лёгкий router-проход (без персонажа, решает think/тулы),
+    # затем персонажный проход с уже известным think=false.
+    assert len(link.command_calls) == 2
+    action, router_args, node = link.command_calls[0]
     assert (action, node) == ("chat", "winpc")
-    assert args["chat_id"] == 1
-    assert args["think"] is False
-    assert args["tools"] == ai_flow.ai_tools.TOOL_DECLARATIONS
-    # Последнее сообщение — триаж-инструкция (см. THINK_MARKER); текущий ход
-    # пользователя и заметка о времени (§8.1) идут перед ней.
-    assert args["messages"][-1] == {"role": "system", "content": ai_flow._TRIAGE_INSTRUCTION}
-    assert args["messages"][-2] == {"role": "user", "content": "привет"}
-    assert len(args["messages"]) == 3
-    assert args["messages"][0]["role"] == "system"
-    assert "Точное время сейчас" in args["messages"][0]["content"]
+    assert router_args["chat_id"] == 1
+    assert router_args["think"] is False
+    assert router_args["tools"] == ai_flow.ai_tools.TOOL_DECLARATIONS
+    assert router_args["role"] == "router"
+    persona_args = link.command_calls[1][1]
+    assert "role" not in persona_args
+    assert persona_args["think"] is False
+    # Router и персонажный проход видят ОДНУ и ту же историю — никакой
+    # отдельной триаж-инструкции больше не вставляется в сообщения.
+    assert router_args["messages"] == persona_args["messages"]
+    assert router_args["messages"][-1] == {"role": "user", "content": "привет"}
+    assert len(router_args["messages"]) == 2
+    assert router_args["messages"][0]["role"] == "system"
+    assert "Точное время сейчас" in router_args["messages"][0]["content"]
 
 
 async def test_tool_call_round_trip_reaches_final_response(store):
-    # Первый ответ модели — просьба вызвать calc; второй, после того как
-    # результат дописан в messages, — уже финальный текст (§7.1 плана).
+    # Тул вызывается в router-проходе (round 1: просьба вызвать calc, round
+    # 2: после результата — решение "OK"), персонажный проход (3й вызов)
+    # видит уже готовый результат тула в истории и формулирует финальный
+    # ответ (§7.1 плана).
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[
             {"tool_calls": [{"function": {"name": "calc", "arguments": {"expression": "2 + 2"}}}]},
+            {"response": ai_flow.ROUTE_OK},
             {"response": "Отвечу: 4"},
         ],
         get_state_routes={"winpc:llm": {"asleep": False}},
@@ -199,10 +206,13 @@ async def test_tool_call_round_trip_reaches_final_response(store):
     )
 
     assert raw == "Отвечу: 4"
-    assert len(link.command_calls) == 2
-    second_messages = link.command_calls[1][1]["messages"]
-    assert second_messages[-2]["role"] == "assistant"
-    assert second_messages[-1] == {"role": "tool", "content": "4", "name": "calc"}
+    assert len(link.command_calls) == 3
+    router_round2_messages = link.command_calls[1][1]["messages"]
+    assert router_round2_messages[-2]["role"] == "assistant"
+    assert router_round2_messages[-1] == {"role": "tool", "content": "4", "name": "calc"}
+    # Персонажный проход видит тот же обмен с тулом, что и router.
+    assert link.command_calls[2][1]["messages"] == router_round2_messages
+    assert "role" not in link.command_calls[2][1]
 
 
 async def test_tool_call_is_recorded_in_store(store):
@@ -214,6 +224,7 @@ async def test_tool_call_is_recorded_in_store(store):
     link = FakeNodeLink(
         chat_results=[
             {"tool_calls": [{"function": {"name": "calc", "arguments": {"expression": "2 + 2"}}}]},
+            {"response": ai_flow.ROUTE_OK},
             {"response": "Отвечу: 4"},
         ],
         get_state_routes={"winpc:llm": {"asleep": False}},
@@ -236,6 +247,7 @@ async def test_unknown_tool_name_reported_back_to_model(store):
     link = FakeNodeLink(
         chat_results=[
             {"tool_calls": [{"function": {"name": "no_such_tool", "arguments": {}}}]},
+            {"response": ai_flow.ROUTE_OK},
             {"response": "ладно"},
         ],
         get_state_routes={"winpc:llm": {"asleep": False}},
@@ -290,7 +302,7 @@ def test_think_marker_survives_llm_service_transforms():
 async def test_fast_path_no_thinking_when_marker_absent(store):
     message = FakeMessage()
     link = FakeNodeLink(
-        chat_results=[{"response": "Добгый день, сэ"}],
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Добгый день, сэ"}],
         get_state_routes={"winpc:llm": {"asleep": False}},
     )
 
@@ -301,8 +313,9 @@ async def test_fast_path_no_thinking_when_marker_absent(store):
 
     assert raw == "Добгый день, сэ"
     assert message.answers == []  # THINKING_TEXT не показывался — думать не понадобилось
-    assert len(link.command_calls) == 1
+    assert len(link.command_calls) == 2
     assert link.command_calls[0][1]["think"] is False
+    assert link.command_calls[1][1]["think"] is False
 
 
 async def test_escalates_to_thinking_when_marker_returned(store):
@@ -323,16 +336,16 @@ async def test_escalates_to_thinking_when_marker_returned(store):
     assert raw == "Точный ответ после раздумий"
     assert message.answers == [ai_flow.THINKING_TEXT]
     assert len(link.command_calls) == 2
-    first_args = link.command_calls[0][1]
-    second_args = link.command_calls[1][1]
-    assert first_args["think"] is False
-    assert second_args["think"] is True
-    # Второй (думающий) проход не видит триаж-инструкцию первого — свежий
-    # список сообщений, а не продолжение с маркером внутри.
-    assert not any(
-        m.get("content") == ai_flow._TRIAGE_INSTRUCTION for m in second_args["messages"]
-    )
-    assert second_args["messages"][-1] == {"role": "user", "content": "сложный вопрос"}
+    router_args = link.command_calls[0][1]
+    persona_args = link.command_calls[1][1]
+    assert router_args["role"] == "router"
+    assert router_args["think"] is False
+    assert "role" not in persona_args
+    assert persona_args["think"] is True
+    # Персонажный проход видит ту же историю, что и router (никакой
+    # отдельной триаж-инструкции/маркера в сообщениях не остаётся).
+    assert persona_args["messages"] == router_args["messages"]
+    assert persona_args["messages"][-1] == {"role": "user", "content": "сложный вопрос"}
 
 
 async def test_asleep_model_shows_steps_but_no_wake(store):
@@ -341,7 +354,7 @@ async def test_asleep_model_shows_steps_but_no_wake(store):
     # увидеть «шаги», а не молча ждать до request_timeout_s.
     message = FakeMessage()
     link = FakeNodeLink(
-        chat_results=[{"response": "Секунду, сэг"}],
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Секунду, сэг"}],
         get_state_routes={"winpc:llm": {"asleep": True}},
     )
 
@@ -384,6 +397,7 @@ async def test_unavailable_then_woken_within_30s(store, monkeypatch):
     link = FakeNodeLink(
         chat_results=[
             ProtoError(ERR_UNAVAILABLE, "нода недоступна"),
+            {"response": ai_flow.ROUTE_OK},
             {"response": "Сейчас подойду"},
         ],
         get_state_routes={"winpc:llm": {"asleep": False}},
@@ -704,7 +718,7 @@ async def test_context_note_inserted_right_before_current_turn(store):
     message = FakeMessage()
     message.from_user = FakeUser("Иван", username="ivan", id=10)
     link = FakeNodeLink(
-        chat_results=[{"response": "ответ"}],
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "ответ"}],
         get_state_routes={"winpc:llm": {"asleep": False}},
     )
     history = [
@@ -718,12 +732,11 @@ async def test_context_note_inserted_right_before_current_turn(store):
     )
 
     sent_messages = link.command_calls[0][1]["messages"]
-    # Последнее сообщение — триаж-инструкция (см. THINK_MARKER), перед ней —
-    # текущий ход, перед ним — заметка о контексте.
-    assert sent_messages[-1] == {"role": "system", "content": ai_flow._TRIAGE_INSTRUCTION}
-    assert sent_messages[-2] == {"role": "user", "content": "текущий вопрос"}
-    assert sent_messages[-3]["role"] == "system"
-    assert sent_messages[:-3] == history[:-1]
+    # Последнее сообщение — текущий ход, перед ним — заметка о контексте
+    # (никакой отдельной триаж-инструкции больше не вставляется).
+    assert sent_messages[-1] == {"role": "user", "content": "текущий вопрос"}
+    assert sent_messages[-2]["role"] == "system"
+    assert sent_messages[:-2] == history[:-1]
 
 
 # --- ActiveAiChats (живая находка 2026-07-24: редеплой бота посреди

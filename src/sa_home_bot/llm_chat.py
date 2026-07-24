@@ -48,6 +48,7 @@ async def run_chat_loop(
     telegram_chat_id: int | None,
     log_chat_id: Any,
     on_tool_call: ToolCallSink | None = None,
+    role: str | None = None,
 ) -> str:
     """Один проход диалога с моделью: раунды tool-calling (до
     MAX_TOOL_ROUNDS), пока не придёт финальный текст.
@@ -57,7 +58,13 @@ async def run_chat_loop(
     сохранить исходную историю чистой. ``tool_ctx.history`` привязывается к
     этому же списку (та же ссылка) — тул remind видит в нём ровно то, что
     сейчас видит модель (включая уже случившиеся раунды tool-calling), не
-    отдельный запрос к БД (у службы tasks её и нет)."""
+    отдельный запрос к БД (у службы tasks её и нет).
+
+    ``role`` — какой системный промпт использует служба llm (см.
+    llm/service.py, llm/prompt.py): ``None``/не передан — персонаж Альфреда
+    (по умолчанию, как было всегда), ``"router"`` — служебный триаж без
+    персонажа (живая находка 2026-07-25: см. llm/prompt.py::
+    ROUTER_SYSTEM_PROMPT про то, почему триаж выделен в отдельный вызов)."""
     tool_ctx.history = messages
     for _round in range(MAX_TOOL_ROUNDS):
         args: dict[str, Any] = {
@@ -69,6 +76,8 @@ async def run_chat_loop(
             # chat_id — не для маршрутизации (та по dst), а чтобы служба
             # llm знала, какие чаты уведомлять при llm_idle_sleep.
             args["chat_id"] = telegram_chat_id
+        if role is not None:
+            args["role"] = role
         result = await node_link.command(ACTION_CHAT, args, dst=dst, timeout=timeout)
         tool_calls = result.get("tool_calls")
         if not tool_calls:

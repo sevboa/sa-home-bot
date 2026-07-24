@@ -26,7 +26,12 @@ from typing import Any
 from sa_home_bot import __version__
 from sa_home_bot.config import LlmConfig, Settings
 from sa_home_bot.llm import ollama
-from sa_home_bot.llm.prompt import SYSTEM_PROMPT, apply_speech_defect, strip_math_notation
+from sa_home_bot.llm.prompt import (
+    ROUTER_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+    apply_speech_defect,
+    strip_math_notation,
+)
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     ActionParam,
@@ -122,6 +127,16 @@ class LlmService:
                             required=False,
                             title="Режим рассуждения qwen3 (по умолчанию — think_chat из конфига)",
                         ),
+                        ActionParam(
+                            name="role",
+                            type="string",
+                            required=False,
+                            title=(
+                                "Какой системный промпт использовать: 'persona' "
+                                "(по умолчанию, Альфред) или 'router' (служебный "
+                                "триаж без персонажа, см. llm/prompt.py)"
+                            ),
+                        ),
                     ),
                 ),
                 ActionSpec(id=ACTION_SLEEP, title="Уложить модель спать"),
@@ -162,8 +177,12 @@ class LlmService:
             think = args.get("think")
             if think is not None and not isinstance(think, bool):
                 raise ProtoError(ERR_BAD_REQUEST, "think должен быть булевым значением")
+            role = args.get("role") or "persona"
+            if role not in ("persona", "router"):
+                raise ProtoError(ERR_BAD_REQUEST, f"неизвестная role: {role!r}")
+            system = ROUTER_SYSTEM_PROMPT if role == "router" else SYSTEM_PROMPT
             await self._touch(args.get("chat_id"))
-            result = await ollama.chat(self._cfg, messages, SYSTEM_PROMPT, tools=tools, think=think)
+            result = await ollama.chat(self._cfg, messages, system, tools=tools, think=think)
             message = result.get("message", {})
             # Модель попросила вызвать инструмент(ы) — служба llm сама по рою
             # не ходит (нет ServiceLink к соседям, только к своей Ollama), это
