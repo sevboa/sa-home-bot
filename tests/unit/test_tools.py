@@ -1,6 +1,7 @@
 """Инструменты tool-calling для /ai (LLM_INTEGRATION_PLAN.md §7-8): calc,
-get_weather, remind. Диспетчер цикла (bot/ai_flow.py) тестируется отдельно
-в test_ai_flow.py — здесь только сами обработчики в изоляции."""
+get_weather, convert_currency, remind. Диспетчер цикла (bot/ai_flow.py)
+тестируется отдельно в test_ai_flow.py — здесь только сами обработчики в
+изоляции."""
 
 from __future__ import annotations
 
@@ -28,13 +29,15 @@ async def store(tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def _clear_geocode_cache():
-    # _GEOCODE_CACHE — на уровне модуля (кэш на время жизни процесса, см.
-    # bot/tools.py), между тестами общий процесс — без сброса второй тест с
-    # тем же названием города получил бы результат геокодинга первого.
+def _clear_module_caches():
+    # _GEOCODE_CACHE/_RATES_CACHE — на уровне модуля (кэш на время жизни
+    # процесса, см. bot/tools.py), между тестами общий процесс — без сброса
+    # второй тест с тем же городом/валютой получил бы результат первого.
     tools._GEOCODE_CACHE.clear()
+    tools._RATES_CACHE.clear()
     yield
     tools._GEOCODE_CACHE.clear()
+    tools._RATES_CACHE.clear()
 
 
 def _ctx(store, settings=None, chat_id=CHAT_ID):
@@ -197,6 +200,70 @@ async def test_get_weather_handles_forecast_network_error(store, monkeypatch):
     settings = Settings(weather=WeatherConfig(city="Казань"))
     result = await tools.tool_get_weather(_ctx(store, settings), {})
     assert "недоступен" in result
+
+
+# --- convert_currency ---
+
+_RATES_RESPONSE = {"result": "success", "base_code": "USD", "rates": {"USD": 1, "RUB": 78.42}}
+
+
+async def test_convert_currency_computes_result(store, monkeypatch):
+    def fake_get_json(url, timeout):
+        assert "open.er-api.com/v6/latest/USD" in url
+        return _RATES_RESPONSE
+
+    monkeypatch.setattr(tools, "_get_json_sync", fake_get_json)
+    result = await tools.tool_convert_currency(
+        _ctx(store), {"amount": 100, "from": "usd", "to": "rub"}
+    )
+    assert '"rate": 78.42' in result
+    assert '"result": 7842.0' in result
+
+
+async def test_convert_currency_caches_rates_across_calls(store, monkeypatch):
+    fetch_calls = 0
+
+    def fake_get_json(url, timeout):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return _RATES_RESPONSE
+
+    monkeypatch.setattr(tools, "_get_json_sync", fake_get_json)
+    ctx = _ctx(store)
+    await tools.tool_convert_currency(ctx, {"amount": 1, "from": "USD", "to": "RUB"})
+    await tools.tool_convert_currency(ctx, {"amount": 2, "from": "USD", "to": "RUB"})
+    assert fetch_calls == 1  # второй раз — из _RATES_CACHE, без сети
+
+
+async def test_convert_currency_unknown_target_code(store, monkeypatch):
+    monkeypatch.setattr(tools, "_get_json_sync", lambda url, timeout: _RATES_RESPONSE)
+    result = await tools.tool_convert_currency(
+        _ctx(store), {"amount": 10, "from": "USD", "to": "XXX"}
+    )
+    assert "неизвестный код валюты" in result
+
+
+async def test_convert_currency_handles_network_error(store, monkeypatch):
+    def fake_get_json(url, timeout):
+        raise OSError("boom")
+
+    monkeypatch.setattr(tools, "_get_json_sync", fake_get_json)
+    result = await tools.tool_convert_currency(
+        _ctx(store), {"amount": 10, "from": "USD", "to": "RUB"}
+    )
+    assert "недоступен" in result
+
+
+async def test_convert_currency_rejects_non_numeric_amount(store):
+    result = await tools.tool_convert_currency(
+        _ctx(store), {"amount": "много", "from": "USD", "to": "RUB"}
+    )
+    assert result.startswith("ошибка")
+
+
+async def test_convert_currency_rejects_missing_currency_codes(store):
+    result = await tools.tool_convert_currency(_ctx(store), {"amount": 10, "from": "USD"})
+    assert result.startswith("ошибка")
 
 
 # --- remind ---

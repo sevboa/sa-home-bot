@@ -8,12 +8,14 @@
 (TOOL_DECLARATIONS) — формат OpenAI function-calling, который Ollama
 понимает нативно для tool-calling-моделей (qwen3 в их числе).
 
-Погода и калькулятор не ходят по протоколу роя вообще — это не системные
-операции конкретной ноды (как apps/monitor), а либо чистый расчёт, либо
-публичный API без ключа/состояния, одинаково доступный с любой ноды.
-Выполняются прямо здесь, в процессе бота (см. §8.4 плана — решение
-упростить относительно первоначального черновика с отдельной службой
-"net").
+Погода, конвертер валют и калькулятор не ходят по протоколу роя вообще —
+это не системные операции конкретной ноды (как apps/monitor), а либо
+чистый расчёт, либо публичный API без ключа/состояния, одинаково доступный
+с любой ноды. Выполняются прямо здесь, в процессе бота (см. §8.4 плана —
+решение упростить относительно первоначального черновика с отдельной
+службой "net"). Арифметику конвертера (сумма * курс) делает сам тул на
+Python, не второй проход через тул calc — для одного умножения гонять его
+ещё раз через модель не даёт выгоды в точности, только лишний круг.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ import asyncio
 import json
 import logging
 import operator
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -92,7 +95,20 @@ async def tool_calc(ctx: ToolContext, args: dict[str, Any]) -> str:
     return str(value)
 
 
-# --- get_weather: публичный API без ключа, вызывает сам бот-процесс ---
+# --- HTTP-обвязка, общая для get_weather и convert_currency ниже: оба —
+# публичные API без ключа/состояния, вызывает сам бот-процесс (не системные
+# операции конкретной ноды, как apps/monitor — одинаково доступны с любой
+# ноды, отдельная служба под них не нужна, см. §8.4 плана). ---
+
+_HTTP_TIMEOUT_S = 10.0
+
+
+def _get_json_sync(url: str, timeout: float) -> dict[str, Any]:
+    with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 — фиксированные публичные host'ы
+        return json.loads(resp.read())
+
+
+# --- get_weather ---
 #
 # Координаты города не просит у пользователя/модели напрямую — небольшая
 # локальная модель не гарантированно точна в географических фактах (может
@@ -103,13 +119,7 @@ async def tool_calc(ctx: ToolContext, args: dict[str, Any]) -> str:
 # процесса (_GEOCODE_CACHE) — город из конфига не меняется на лету (конфиг
 # читается один раз при старте), незачем резолвить его на каждый запрос.
 
-_WEATHER_TIMEOUT_S = 10.0
 _GEOCODE_CACHE: dict[str, tuple[float, float, str]] = {}
-
-
-def _get_json_sync(url: str, timeout: float) -> dict[str, Any]:
-    with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 — фиксированные публичные host'ы
-        return json.loads(resp.read())
 
 
 async def _resolve_city(city: str) -> tuple[float, float, str] | None:
@@ -123,7 +133,7 @@ async def _resolve_city(city: str) -> tuple[float, float, str] | None:
         f"?name={urllib.parse.quote(city)}&count=1&language=ru&format=json"
     )
     try:
-        data = await asyncio.to_thread(_get_json_sync, url, _WEATHER_TIMEOUT_S)
+        data = await asyncio.to_thread(_get_json_sync, url, _HTTP_TIMEOUT_S)
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         log.warning("tool_get_weather: геокодирование «%s» не удалось: %s", city, exc)
         return None
@@ -161,7 +171,7 @@ async def tool_get_weather(ctx: ToolContext, args: dict[str, Any]) -> str:
         "&timezone=auto"
     )
     try:
-        data = await asyncio.to_thread(_get_json_sync, url, _WEATHER_TIMEOUT_S)
+        data = await asyncio.to_thread(_get_json_sync, url, _HTTP_TIMEOUT_S)
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         log.warning("tool_get_weather: %s", exc)
         return "не удалось получить погоду — сервис недоступен, повтори позже"
@@ -173,6 +183,75 @@ async def tool_get_weather(ctx: ToolContext, args: dict[str, Any]) -> str:
             "feels_like_c": current.get("apparent_temperature"),
             "wind_speed_kmh": current.get("wind_speed_10m"),
             "weather_code": current.get("weather_code"),
+        },
+        ensure_ascii=False,
+    )
+
+
+# --- convert_currency ---
+#
+# Умножение делает сам тул (обычный Python), не второй раунд через calc —
+# для одной операции "сумма * курс" гонять её ещё и через модель незачем,
+# только лишний круг генерации без выгоды в точности. Курсы — тоже не из
+# "памяти" модели (устаревают за часы-дни), а с открытого API без ключа
+# (open.er-api.com — рыночные курсы, ~160 валют, включая RUB/KZT и т.п.),
+# кэшируются на _RATES_TTL_S — курсы обновляются на источнике не чаще
+# раза в сутки, кэш на час экономит сеть, не портя актуальность на глаз.
+
+_RATES_TTL_S = 3600.0
+_RATES_CACHE: dict[str, tuple[float, dict[str, float]]] = {}
+
+
+async def _get_rates(base: str) -> dict[str, float] | None:
+    """Курсы всех валют за 1 единицу ``base``, или None — база не найдена
+    сервисом, либо сам сервис недоступен."""
+    now = time.monotonic()
+    cached = _RATES_CACHE.get(base)
+    if cached is not None and now - cached[0] < _RATES_TTL_S:
+        return cached[1]
+    url = f"https://open.er-api.com/v6/latest/{urllib.parse.quote(base)}"
+    try:
+        data = await asyncio.to_thread(_get_json_sync, url, _HTTP_TIMEOUT_S)
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        log.warning("tool_convert_currency: %s", exc)
+        return None
+    if data.get("result") != "success":
+        return None
+    rates = data.get("rates")
+    if not isinstance(rates, dict):
+        return None
+    _RATES_CACHE[base] = (now, rates)
+    return rates
+
+
+async def tool_convert_currency(ctx: ToolContext, args: dict[str, Any]) -> str:
+    amount = args.get("amount")
+    from_raw = args.get("from")
+    to_raw = args.get("to")
+    if not isinstance(amount, int | float):
+        return "ошибка: 'amount' должен быть числом"
+    if not isinstance(from_raw, str) or not from_raw.strip():
+        return "ошибка: не указана исходная валюта (from)"
+    if not isinstance(to_raw, str) or not to_raw.strip():
+        return "ошибка: не указана целевая валюта (to)"
+    from_code = from_raw.strip().upper()
+    to_code = to_raw.strip().upper()
+    rates = await _get_rates(from_code)
+    if rates is None:
+        return "не удалось получить курс валют — сервис недоступен, повтори позже"
+    rate = rates.get(to_code)
+    if rate is None:
+        return (
+            f"неизвестный код валюты «{to_code}» или «{from_code}» "
+            "(нужен формат ISO 4217, например USD, RUB, KZT)"
+        )
+    return json.dumps(
+        {
+            "amount": amount,
+            "from": from_code,
+            "to": to_code,
+            "rate": rate,
+            "result": round(amount * rate, 4),
         },
         ensure_ascii=False,
     )
@@ -211,6 +290,7 @@ async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
 TOOL_HANDLERS: dict[str, ToolHandler] = {
     "calc": tool_calc,
     "get_weather": tool_get_weather,
+    "convert_currency": tool_convert_currency,
     "remind": tool_remind,
 }
 
@@ -254,6 +334,32 @@ TOOL_DECLARATIONS: list[dict[str, Any]] = [
                         "description": "Город, если он назван явно (например: Алматы)",
                     }
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "convert_currency",
+            "description": (
+                "Точно перевести сумму из одной валюты в другую по актуальному курсу. "
+                "Используй для любого вопроса про курс/конвертацию денег — не пытайся "
+                "вспомнить курс сам, он быстро устаревает."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "amount": {"type": "number", "description": "Сумма для перевода"},
+                    "from": {
+                        "type": "string",
+                        "description": "Код исходной валюты, ISO 4217 (например USD)",
+                    },
+                    "to": {
+                        "type": "string",
+                        "description": "Код целевой валюты, ISO 4217 (например RUB)",
+                    },
+                },
+                "required": ["amount", "from", "to"],
             },
         },
     },
