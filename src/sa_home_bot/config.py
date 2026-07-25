@@ -376,6 +376,31 @@ class SubscriptionConfig(BaseModel):
     allowed_commands: list[str] = Field(default_factory=list)
 
 
+class PersonConfig(BaseModel):
+    """Один известный собеседник /ai — bot/ai_flow.py сопоставляет с ним
+    отправителя сообщения (по telegram_username, а для тех, у кого username
+    неизвестен, — по telegram_id) и подмешивает в context_note точный
+    возраст и местное время (см. bot/ai_flow.py::_find_known_person).
+
+    Живая находка 2026-07-25: ФИО/дата рождения/город — персональные данные
+    живых людей, поэтому только в config.toml (gitignored), не в примере в
+    репозитории — там лишь плейсхолдеры (config.example.toml). Отдельно от
+    llm-prompt.toml: там — семейное древо и правила поведения одним
+    промптом персонажа (общее знание, не завязанное на "кто пишет прямо
+    сейчас"), здесь — сырые факты для детерминированного вычисления
+    возраста/времени в коде (те же соображения, что и с часовыми поясами:
+    не поручать модели арифметику с датами, когда код может посчитать
+    точно)."""
+
+    telegram_username: str = ""  # без "@", матчится с message.from_user.username
+    telegram_id: int = 0  # фоллбэк на случай, когда username неизвестен (0 = не задан)
+    full_name: str
+    gender: Literal["m", "f"]
+    city: str = ""
+    timezone: str = ""  # IANA-имя, напр. "Asia/Almaty"; пусто — время не подмешиваем
+    birth_date: str = ""  # ISO "YYYY-MM-DD"; пусто — возраст неизвестен, не считаем
+
+
 def _load_persona_prompt(path: Path, settings: Settings) -> None:
     """Подмешать settings.llm.persona_prompt из отдельного локального файла.
 
@@ -426,6 +451,7 @@ class Settings(BaseSettings):
     wake: WakeConfig = Field(default_factory=WakeConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     subscriptions: list[SubscriptionConfig] = Field(default_factory=list)
+    people: list[PersonConfig] = Field(default_factory=list)
 
     @classmethod
     def settings_customise_sources(

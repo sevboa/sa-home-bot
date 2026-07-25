@@ -242,3 +242,28 @@ name = "family_room"
 chat_id = -1009999999
 event_types = ["overheat_started", "overheat_cleared", "smart_degraded"]
 allowed_commands = []
+
+# Известные собеседники /ai (bot/ai_flow.py::_find_known_person) — по
+# telegram_username (без "@") сопоставляет отправителя, telegram_id —
+# фоллбэк для тех, чей username неизвестен. Даёт персонажу Альфреда точный
+# возраст и местное время собеседника (bot/ai_flow.py::_known_person_note),
+# без этого — не пытается угадывать. ФИО/дата рождения — персональные
+# данные, ЭТОТ файл — только пример с вымышленными значениями, реальные
+# впишите в свой gitignored config.toml.
+[[people]]
+telegram_username = "ivan"    # без "@"
+telegram_id = 0                # 0 = не задан, матчим по username
+full_name = "Иван Иванович Иванов"
+gender = "m"                   # "m" | "f"
+city = "Алматы"
+timezone = "Asia/Almaty"       # IANA-имя; пусто — время не подмешиваем
+birth_date = "1990-01-01"      # ISO YYYY-MM-DD; пусто — возраст неизвестен
+
+[[people]]
+telegram_username = ""         # username неизвестен — матчим по telegram_id
+telegram_id = 100000001
+full_name = "Мария Ивановна Иванова"
+gender = "f"
+city = "Москва"
+timezone = "Europe/Moscow"
+birth_date = ""

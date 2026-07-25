@@ -63,8 +63,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram.types import Message, User
 
@@ -72,7 +73,7 @@ from sa_home_bot.bot import swarm_view
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
-from sa_home_bot.config import Settings
+from sa_home_bot.config import PersonConfig, Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.llm.prompt import ROUTE_OK, THINK_MARKER
 from sa_home_bot.llm_chat import run_chat_loop
@@ -237,6 +238,76 @@ def display_name(user: User | None) -> str | None:
     return f"{name} (@{user.username})" if user.username else name
 
 
+def _find_known_person(settings: Settings, user: User | None) -> PersonConfig | None:
+    """Сопоставить отправителя с settings.people (config.py::PersonConfig).
+
+    По username в первую очередь (у большинства он есть) — по telegram_id
+    как фоллбэк, для тех, чей username не был известен человеку, который
+    вписывал config.toml (у них там telegram_username = "")."""
+    if user is None:
+        return None
+    username = (user.username or "").lower()
+    for person in settings.people:
+        if username and person.telegram_username.lower() == username:
+            return person
+    for person in settings.people:
+        if person.telegram_id and person.telegram_id == user.id:
+            return person
+    return None
+
+
+def _person_age(person: PersonConfig, today: date) -> int | None:
+    """Точный возраст на сегодня — детерминированно в коде, не поручаем
+    модели вычитание дат (та же логика, что и с часовыми поясами: живая
+    находка про то, что маленькие модели систематически ошибаются в
+    арифметике с датами)."""
+    if not person.birth_date:
+        return None
+    try:
+        birth = date.fromisoformat(person.birth_date)
+    except ValueError:
+        return None
+    return today.year - birth.year - ((today.month, today.day) < (birth.month, birth.day))
+
+
+# (субъект "он/она", предложный "у него/у неё", притяжательный "его/её" —
+# для "него"/"неё" совпадает с предложным только у мужского рода, поэтому
+# три отдельных формы, не выводим одну из другой).
+_PRONOUNS = {"m": ("он", "него", "его"), "f": ("она", "неё", "её")}
+
+
+def _known_person_note(person: PersonConfig) -> str | None:
+    """Заметка о собеседнике, которого узнали по settings.people: точное
+    местное время в его/её городе (не пояс сервера — верхняя строка) и
+    точный возраст. Правила о ТОМ, как это использовать (обращение по
+    нику, такт с возрастом дам, поправка тона на разницу в возрасте с
+    самим Альфредом, родственные связи) — в характере персонажа
+    (llm-prompt.toml, не дублируем здесь построчно)."""
+    subject, prepositional, possessive = _PRONOUNS[person.gender]
+    parts = [f"Ты знаешь этого собеседника — это {person.full_name}."]
+
+    if person.timezone:
+        try:
+            local_now = datetime.now(ZoneInfo(person.timezone))
+        except ZoneInfoNotFoundError:
+            local_now = None
+        if local_now is not None:
+            city = f" в {person.city}" if person.city else ""
+            parts.append(
+                f"У {prepositional}{city} сейчас "
+                f"{local_now:%H:%M} ({ai_tools.WEEKDAYS_RU[local_now.weekday()]}) — "
+                f"это {possessive} часовой пояс, а не пояс сервера выше; называй "
+                f"именно это время, если он{'а' if person.gender == 'f' else ''} "
+                f"спросит который час или это иначе уместно."
+            )
+
+    age = _person_age(person, date.today())
+    if age is not None:
+        parts.append(f"Точный возраст {subject} сейчас: {age} лет.")
+
+    return " ".join(parts)
+
+
 # Реплай на явно длинное сообщение (например, кто-то процитировал большой
 # форвард) режем — это справочная заметка, а не полноценный ход диалога,
 # ей не место раздувать контекст модели ради текста, который сама история
@@ -304,18 +375,23 @@ async def _reply_context_lines(message: Message, store: Store, dialogue_id: int)
     return lines
 
 
-async def _build_context_note(message: Message, store: Store, dialogue_id: int) -> str:
+async def _build_context_note(
+    message: Message, store: Store, dialogue_id: int, settings: Settings | None = None
+) -> str:
     """Служебная заметка для модели (не для пользователя): точное время
     сейчас (§8.1 плана — маленькие локальные модели плохо знают "сейчас", а
     время нужно почти на каждый запрос, отдельного тула для этого не
-    заводим), кто сейчас пишет, кто начал этот тред, кто ещё обращался к
-    Альфреду в этом чате, и что за сообщение цитируют/на что отвечают (см.
-    _reply_context_lines).
+    заводим), кто сейчас пишет — включая местное время/возраст, если это
+    известный собеседник из settings.people (см. _known_person_note), кто
+    начал этот тред, кто ещё обращался к Альфреду в этом чате, и что за
+    сообщение цитируют/на что отвечают (см. _reply_context_lines).
 
     Пункты про тред/участников — только для групп: в личке собеседник
     всегда один и тот же, уточнять нечего. Строится заново на каждый запрос
     (не хранится в ai_turns) — участники чата могут появляться по ходу дела,
-    а время не имеет смысла хранить вовсе."""
+    а время не имеет смысла хранить вовсе. settings — опциональный параметр
+    (не Optional по смыслу, а ради существующих тестов/вызовов, где список
+    известных людей не нужен): без него просто пропускаем сопоставление."""
     # Живой баг 2026-07-24: голая строка времени без указания пояса —
     # модель на вопрос "это в каком часовом поясе" отвечала наугад и
     # противоречила себе же. Явный UTC-оффсет плюс запрет досчитывать чужой
@@ -328,14 +404,20 @@ async def _build_context_note(message: Message, store: Store, dialogue_id: int) 
         f"Точное время сейчас (пояс сервера, UTC{offset[:3]}:{offset[3:]}): "
         f"{now_local:%Y-%m-%d %H:%M} ({ai_tools.WEEKDAYS_RU[now_local.weekday()]}). "
         "Это ПОЯС СЕРВЕРА, не обязательно пояс собеседника — если тебя "
-        "спросят, в каком поясе сейчас сам собеседник, честно скажи, что не "
-        "знаешь, не додумывай."
+        "спросят, в каком поясе сейчас сам собеседник, и ниже нет отдельной "
+        "строки про его/её местное время — честно скажи, что не знаешь, не "
+        "додумывай."
     ]
 
     sender_name = display_name(message.from_user)
     is_group = message.chat is not None and message.chat.type in ("group", "supergroup")
     if sender_name is not None:
         lines.append(f"Сейчас с тобой говорит: {sender_name}.")
+    known_person = _find_known_person(settings, message.from_user) if settings else None
+    if known_person is not None:
+        note = _known_person_note(known_person)
+        if note:
+            lines.append(note)
     if sender_name is not None and is_group:
         starter = await store.ai_turn(message.chat.id, dialogue_id)
         starter_name = starter.get("user_name") if starter else None
@@ -389,7 +471,7 @@ async def request_alfred(
     dst = Address(node=LLM_NODE, service=LLM_SERVICE)
     timeout = settings.llm.request_timeout_s
     chat_id = message.chat.id if message.chat else "?"
-    context_note = await _build_context_note(message, store, dialogue_id)
+    context_note = await _build_context_note(message, store, dialogue_id, settings)
 
     async def _ask() -> str:
         if context_note:
