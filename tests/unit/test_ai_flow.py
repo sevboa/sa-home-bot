@@ -638,6 +638,14 @@ async def test_context_note_time_only_without_sender(store):
     assert "говорит" not in note
 
 
+async def test_context_note_includes_alfred_own_time_always(store):
+    # Живая находка 2026-07-25: личное время Альфреда (ALFRED_TIMEZONE) —
+    # безусловно, не привязано к тому, узнан ли отправитель.
+    message = NoteMessage(1, "private", None)
+    note = await ai_flow._build_context_note(message, store, dialogue_id=1)
+    assert "ТВОЁ (Альфреда) личное время" in note
+
+
 async def test_context_note_private_chat_only_mentions_sender(store):
     message = NoteMessage(1, "private", FakeUser("Иван", username="ivan"))
     note = await ai_flow._build_context_note(message, store, dialogue_id=1)
