@@ -15,9 +15,12 @@ from sa_home_bot.llm import service as llm_service
 from sa_home_bot.llm.service import LlmService
 from sa_home_bot.proto.messages import ERR_BAD_REQUEST, ProtoError
 
+PERSONA = "ТЕСТОВЫЙ ПЕРСОНАЖ (persona_prompt в тестовом конфиге)"
+
 
 def _settings(**overrides) -> Settings:
     overrides.setdefault("idle_sleep_after_s", 1800.0)
+    overrides.setdefault("persona_prompt", PERSONA)
     return Settings(llm=LlmConfig(model="qwen2.5:7b", **overrides))
 
 
@@ -56,7 +59,24 @@ async def test_ask_calls_ollama_generate_with_system_prompt(monkeypatch):
     assert result == {"response": "Здгавствуйте, сэг", "model": "qwen2.5:7b"}
     assert calls[0][0] == "qwen2.5:7b"
     assert calls[0][1] == "Как погода?"
-    assert calls[0][2] == llm_service.SYSTEM_PROMPT  # системный промпт реально ушёл
+    assert calls[0][2] == PERSONA  # системный промпт реально ушёл
+
+
+async def test_ask_falls_back_to_default_persona_when_unconfigured(monkeypatch):
+    # Живая находка 2026-07-25: текст персонажа убран из репозитория в
+    # settings.llm.persona_prompt (локальный config.toml) — если он не
+    # заполнен (свежий чекаут, CI), служба не должна слать Ollama пустую
+    # строку системным промптом.
+    calls = []
+
+    async def fake_generate(cfg, prompt, system):
+        calls.append(system)
+        return {"response": "ответ"}
+
+    monkeypatch.setattr(llm_service.ollama, "generate", fake_generate)
+    svc = LlmService(_settings(persona_prompt=""))
+    await svc.run_command("ask", {"prompt": "привет"})
+    assert calls[0] == llm_service.DEFAULT_PERSONA_PROMPT
 
 
 async def test_ask_rejects_missing_prompt():
@@ -152,7 +172,7 @@ async def test_chat_role_router_uses_router_prompt_not_persona(monkeypatch):
         "chat", {"messages": [{"role": "user", "content": "1"}], "role": "router"}
     )
     assert seen["system"] == llm_service.ROUTER_SYSTEM_PROMPT
-    assert seen["system"] != llm_service.SYSTEM_PROMPT
+    assert seen["system"] != PERSONA
 
 
 async def test_chat_role_absent_or_persona_uses_persona_prompt(monkeypatch):
@@ -168,7 +188,7 @@ async def test_chat_role_absent_or_persona_uses_persona_prompt(monkeypatch):
     await svc.run_command(
         "chat", {"messages": [{"role": "user", "content": "1"}], "role": "persona"}
     )
-    assert seen == [llm_service.SYSTEM_PROMPT, llm_service.SYSTEM_PROMPT]
+    assert seen == [PERSONA, PERSONA]
 
 
 async def test_chat_rejects_unknown_role():

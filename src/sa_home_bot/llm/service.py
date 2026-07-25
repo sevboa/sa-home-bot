@@ -27,8 +27,8 @@ from sa_home_bot import __version__
 from sa_home_bot.config import LlmConfig, Settings
 from sa_home_bot.llm import ollama
 from sa_home_bot.llm.prompt import (
+    DEFAULT_PERSONA_PROMPT,
     ROUTER_SYSTEM_PROMPT,
-    SYSTEM_PROMPT,
     apply_speech_defect,
     strip_math_notation,
 )
@@ -70,6 +70,16 @@ async def _noop_emit(event_type: str, data: dict[str, Any]) -> None:
 class LlmService:
     def __init__(self, settings: Settings, *, emit: EventEmitter = _noop_emit) -> None:
         self._cfg: LlmConfig = settings.llm
+        # Живая находка 2026-07-25: текст персонажа убран из репозитория
+        # (см. llm/prompt.py) — берём его из локального config.toml
+        # (settings.llm.persona_prompt), фоллбэк на безликую заглушку, если
+        # он не заполнен, чтобы служба не падала на пустом system-промпте.
+        self._persona_prompt = self._cfg.persona_prompt or DEFAULT_PERSONA_PROMPT
+        if not self._cfg.persona_prompt:
+            log.warning(
+                "settings.llm.persona_prompt пуст — используется безликая заглушка "
+                "DEFAULT_PERSONA_PROMPT вместо характера персонажа"
+            )
         self._node = socket.gethostname()
         self._emit = emit
         self._last_activity = datetime.now(tz=UTC)
@@ -166,7 +176,7 @@ class LlmService:
             if not isinstance(prompt, str) or not prompt:
                 raise ProtoError(ERR_BAD_REQUEST, "prompt должен быть непустой строкой")
             await self._touch(args.get("chat_id"))
-            result = await ollama.generate(self._cfg, prompt, SYSTEM_PROMPT)
+            result = await ollama.generate(self._cfg, prompt, self._persona_prompt)
             response = apply_speech_defect(strip_math_notation(result.get("response", "")))
             return {"response": response, "model": self._cfg.model}
         if action == ACTION_CHAT:
@@ -180,7 +190,7 @@ class LlmService:
             role = args.get("role") or "persona"
             if role not in ("persona", "router"):
                 raise ProtoError(ERR_BAD_REQUEST, f"неизвестная role: {role!r}")
-            system = ROUTER_SYSTEM_PROMPT if role == "router" else SYSTEM_PROMPT
+            system = ROUTER_SYSTEM_PROMPT if role == "router" else self._persona_prompt
             await self._touch(args.get("chat_id"))
             result = await ollama.chat(self._cfg, messages, system, tools=tools, think=think)
             message = result.get("message", {})

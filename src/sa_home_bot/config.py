@@ -278,6 +278,16 @@ class LlmConfig(BaseModel):
     idle_sleep_after_s: float = Field(default=1800.0, gt=0)
     think_chat: bool = True
     num_ctx: int = Field(default=8192, gt=0)
+    # Живая находка 2026-07-25: текст персонажа (тон, характер, конкретные
+    # реплики) намеренно НЕ в репозитории — слишком личный/объёмный для
+    # config.toml. На практике заполняется не здесь напрямую, а отдельным
+    # локальным файлом llm-prompt.toml рядом с config.toml (см.
+    # _load_persona_prompt ниже) — держать десятки строк персонажа среди
+    # обычных настроек было неудобно. Поле здесь — просто пункт назначения:
+    # можно заполнить и прямо в config.toml, если отдельный файл не нужен.
+    # DEFAULT_PERSONA_PROMPT (llm/prompt.py) — безликая заглушка на случай,
+    # если ни то ни другое не заполнено (свежий чекаут, CI).
+    persona_prompt: str = ""
 
 
 class WeatherConfig(BaseModel):
@@ -366,6 +376,29 @@ class SubscriptionConfig(BaseModel):
     allowed_commands: list[str] = Field(default_factory=list)
 
 
+def _load_persona_prompt(path: Path, settings: Settings) -> None:
+    """Подмешать settings.llm.persona_prompt из отдельного локального файла.
+
+    Живая находка 2026-07-25: текст персонажа (тон, характер, конкретные
+    реплики) убран из репозитория — слишком личный/объёмный, чтобы жить в
+    основном ``config.toml`` вперемешку с обычными настройками. Живёт
+    рядом, в ``llm-prompt.toml`` (тот же каталог, что и config_path),
+    gitignored так же, как config.toml. Формат — один ключ верхнего уровня:
+    ``persona_prompt = \"\"\"...многострочный текст...\"\"\"``. Файла может не
+    быть вовсе (нода без службы llm, например alfred) — тогда молча
+    пропускаем, LlmConfig.persona_prompt остаётся пустым и в дело идёт
+    llm/prompt.py::DEFAULT_PERSONA_PROMPT (см. llm/service.py)."""
+    if not path.exists():
+        return
+    with open(path, "rb") as f:
+        raw = tomllib.load(f)
+    persona = raw.get("persona_prompt")
+    if isinstance(persona, str) and persona.strip():
+        settings.llm.persona_prompt = persona
+    else:
+        log.warning("%s: нет непустого ключа persona_prompt — игнорируется", path)
+
+
 class Settings(BaseSettings):
     """Корневая модель настроек."""
 
@@ -432,4 +465,5 @@ class Settings(BaseSettings):
                 raw = tomllib.load(f)
             for key in unknown_config_keys(raw, cls):
                 log.warning("Конфиг %s: неизвестное поле %r — опечатка? Игнорируется", path, key)
+            _load_persona_prompt(path.parent / "llm-prompt.toml", settings)
         return settings
