@@ -125,7 +125,7 @@ class LlmService:
                             name="think",
                             type="bool",
                             required=False,
-                            title="Режим рассуждения qwen3 (по умолчанию — think_chat из конфига)",
+                            title="Режим рассуждения qwen3 (не передан — модель решает сама)",
                         ),
                         ActionParam(
                             name="role",

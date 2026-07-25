@@ -44,7 +44,7 @@ async def run_chat_loop(
     timeout: float,
     messages: list[dict[str, Any]],
     tool_ctx: ai_tools.ToolContext,
-    think: bool,
+    think: bool | None,
     telegram_chat_id: int | None,
     log_chat_id: Any,
     on_tool_call: ToolCallSink | None = None,
@@ -64,14 +64,21 @@ async def run_chat_loop(
     llm/service.py, llm/prompt.py): ``None``/не передан — персонаж Альфреда
     (по умолчанию, как было всегда), ``"router"`` — служебный триаж без
     персонажа (живая находка 2026-07-25: см. llm/prompt.py::
-    ROUTER_SYSTEM_PROMPT про то, почему триаж выделен в отдельный вызов)."""
+    ROUTER_SYSTEM_PROMPT про то, почему триаж выделен в отдельный вызов).
+
+    ``think=None`` — не слать поле think вообще (живая находка 2026-07-25,
+    решение пользователя): на qwen3.5/3.6 принудительный think=false
+    ломал качество ответа (несуществующие даты, проигнорированный верный
+    результат тула) — у этих моделей своя адаптивная логика "думать/не
+    думать", не мешать ей явным флагом. См. llm/ollama.py::chat()."""
     tool_ctx.history = messages
     for _round in range(MAX_TOOL_ROUNDS):
         args: dict[str, Any] = {
             "messages": messages,
             "tools": ai_tools.TOOL_DECLARATIONS,
-            "think": think,
         }
+        if think is not None:
+            args["think"] = think
         if telegram_chat_id is not None:
             # chat_id — не для маршрутизации (та по dst), а чтобы служба
             # llm знала, какие чаты уведомлять при llm_idle_sleep.

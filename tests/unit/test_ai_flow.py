@@ -164,8 +164,9 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
 
     assert raw == "Добгый день, сэ"
     assert message.answers == []  # никаких «шагов»/Агнольда — узел жив, модель не спит
-    # Два вызова — лёгкий router-проход (без персонажа, решает think/тулы),
-    # затем персонажный проход с уже известным think=false.
+    # Два вызова — лёгкий router-проход (без персонажа, решает think/тулы,
+    # ЯВНО think=false ради скорости), затем персонажный проход БЕЗ think
+    # вообще — роутер не настоял на думании, модель решает сама.
     assert len(link.command_calls) == 2
     action, router_args, node = link.command_calls[0]
     assert (action, node) == ("chat", "winpc")
@@ -175,7 +176,7 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
     assert router_args["role"] == "router"
     persona_args = link.command_calls[1][1]
     assert "role" not in persona_args
-    assert persona_args["think"] is False
+    assert "think" not in persona_args
     # Router и персонажный проход видят ОДНУ и ту же историю — никакой
     # отдельной триаж-инструкции больше не вставляется в сообщения.
     assert router_args["messages"] == persona_args["messages"]
@@ -315,7 +316,7 @@ async def test_fast_path_no_thinking_when_marker_absent(store):
     assert message.answers == []  # THINKING_TEXT не показывался — думать не понадобилось
     assert len(link.command_calls) == 2
     assert link.command_calls[0][1]["think"] is False
-    assert link.command_calls[1][1]["think"] is False
+    assert "think" not in link.command_calls[1][1]
 
 
 async def test_escalates_to_thinking_when_marker_returned(store):

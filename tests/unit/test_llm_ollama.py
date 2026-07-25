@@ -167,10 +167,14 @@ async def test_chat_prepends_system_message(monkeypatch):
     assert posted["payload"]["messages"][1] == {"role": "user", "content": "привет"}
 
 
-async def test_chat_think_none_falls_back_to_config_default(monkeypatch):
-    # Вариативное рассуждение (bot/ai_flow.py) всегда передаёт think явно —
-    # think=None остаётся подстраховкой для прочих вызывающих (см. LlmConfig
-    # .think_chat docstring).
+async def test_chat_think_none_omits_key_from_payload(monkeypatch):
+    # Живая находка 2026-07-25: раньше think=None подставлял cfg.think_chat
+    # как дефолт — решение пользователя изменило семантику, потому что
+    # принудительный think=false на новых моделях (qwen3.5/3.6, свой
+    # renderer/parser) давал галлюцинации. Теперь think=None значит "не
+    # слать поле think вообще" — пусть модель решает сама, cfg.think_chat
+    # этот путь больше не подставляет (используется явно только в
+    # bot/tools.py::tool_remind для отложенных задач).
     monkeypatch.setattr(ollama, "ensure_running", _noop)
     posted = {}
 
@@ -180,10 +184,10 @@ async def test_chat_think_none_falls_back_to_config_default(monkeypatch):
 
     monkeypatch.setattr(ollama, "_post_json_sync", fake_post)
     await ollama.chat(_cfg(think_chat=True), [{"role": "user", "content": "1"}], "system")
-    assert posted["payload"]["think"] is True
+    assert "think" not in posted["payload"]
 
     await ollama.chat(_cfg(think_chat=False), [{"role": "user", "content": "1"}], "system")
-    assert posted["payload"]["think"] is False
+    assert "think" not in posted["payload"]
 
 
 async def test_chat_explicit_think_overrides_config_default(monkeypatch):

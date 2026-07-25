@@ -461,13 +461,21 @@ async def request_alfred(
 
         if needs_think:
             await message.answer(THINKING_TEXT)
+        # think=True принудительно только когда роутер настоял (see выше);
+        # иначе None — не слать флаг вообще, а не форсировать False. Живая
+        # находка 2026-07-25: на qwen3.5/3.6 форсированный think=false на
+        # персонажном проходе давал галлюцинации (несуществующие даты,
+        # проигнорированный верный результат тула, даже без всякой
+        # арифметики) — решение пользователя: у этих моделей своя
+        # адаптивная логика "думать/не думать", доверять ей, а не
+        # перебивать явным флагом там, где роутер сам не настаивает.
         return await run_chat_loop(
             node_link,
             dst,
             timeout,
             router_messages,
             tool_ctx,
-            think=needs_think,
+            think=True if needs_think else None,
             telegram_chat_id=telegram_chat_id,
             log_chat_id=chat_id,
             on_tool_call=_record_tool_call,

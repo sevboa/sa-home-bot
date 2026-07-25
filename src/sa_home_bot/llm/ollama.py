@@ -249,14 +249,20 @@ async def chat(
         "model": cfg.model,
         "messages": full_messages,
         "stream": False,
-        # think=None — вызывающий не уточнил, использовать дефолт службы
-        # (cfg.think_chat). Живая находка 2026-07-24 (вариативное
-        # рассуждение): bot/ai_flow.py теперь всегда передаёт think явно
-        # (False на быстром проходе, True на проходе-эскалации) — этот
-        # дефолт остаётся только подстраховкой для прочих вызовов chat().
-        "think": cfg.think_chat if think is None else think,
         **_keep_alive_options(cfg),
     }
+    # think=None — не отправлять ключ "think" вообще, а не подставлять
+    # свой дефолт (было cfg.think_chat). Живая находка 2026-07-25: на
+    # qwen3.5/3.6 (новый renderer/parser, см. llm/prompt.py) принудительный
+    # think=false на персонажном проходе давал галлюцинации (несуществующие
+    # даты, проигнорированный верный результат тула) — решение пользователя:
+    # раз у этих моделей есть собственная адаптивная логика "думать/не
+    # думать", не мешать ей явным флагом, когда роутер сам не настаивает на
+    # think=true. Роутер по-прежнему передаёт think=false ЯВНО (ему нужна
+    # гарантированная скорость, не адаптивность) — это единственный
+    # оставшийся потребитель именно False.
+    if think is not None:
+        payload["think"] = think
     if tools:
         payload["tools"] = tools
     return await _post_with_retry(cfg, f"{cfg.ollama_url}/api/chat", payload)
