@@ -60,7 +60,10 @@ log = logging.getLogger(__name__)
 
 PREWAKE_LEAD_S = 300.0
 POLL_INTERVAL_S = 30.0
-_PRESENCE_TIMEOUT_S = 3.0
+# Живая находка 2026-07-25 (та же, что и bot/ai_flow.py::_PRESENCE_CHECK_
+# TIMEOUT_S): 3с ловило ложные "недоступна" на кратковременных подтормаживаниях
+# winpc (WSL2/Ollama), не будучи реальным сном/недоступностью.
+_PRESENCE_TIMEOUT_S = 6.0
 WAKE_POLL_TIMEOUT_S = 90.0
 WAKE_POLL_INTERVAL_S = 3.0
 # Прогрев самой цели (например ACTION_WARMUP службы llm) — не все службы
