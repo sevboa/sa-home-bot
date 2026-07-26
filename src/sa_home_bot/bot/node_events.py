@@ -9,16 +9,21 @@ on_event), ``llm_service_restart`` (сам процесс службы llm ос�
 notify_restart — тот же список активных chat_id, что и у idle_sleep),
 ``task_prewake``/``task_result`` (служба tasks — отложенные задачи роя, см.
 sa_home_bot.tasks; у той нет доступа к Telegram, доставка и запись в
-ai_turns делаются здесь, по meta, которую сама служба tasks не читает).
+ai_turns делаются здесь, по meta, которую сама служба tasks не читает),
+``tool_call`` (та же служба tasks — факт вызова инструмента моделью внутри
+уже сработавшей chat_loop-задачи, self-scheduled remind; только имя тула,
+без аргументов/результата, см. tasks/protocol.py::EVENT_TOOL_CALL).
 
 ``node_joined``/``update_finished`` — тип в чат ``system`` (тот же канал,
 что старт/останов, `bot/lifecycle.py`), рассылаются всем подпискам.
 ``llm_idle_sleep``/``llm_service_restart``/``task_prewake``/``task_result``
 — адресно, только в конкретный chat_id из данных события (не через
 event_types подписки: адрес уже точный, дублировать его подписками
-незачем). Остальные события ноды (``service_started``/``service_failed`` и
-т.п.) сюда не заведены — отдельная функциональность, вне рамок этого
-модуля.
+незачем). ``tool_call`` — через подписки с ``event_types=["alfred_tool_call"]``
+(`bot/lifecycle.py::notify_tool_call`) — тот же путь, что и для живого /ai
+(bot/ai_flow.py::request_alfred), адресата в самом событии нет. Остальные
+события ноды (``service_started``/``service_failed`` и т.п.) сюда не
+заведены — отдельная функциональность, вне рамок этого модуля.
 """
 
 from __future__ import annotations
@@ -36,7 +41,7 @@ from sa_home_bot.bot.ai_flow import (
     RESTART_TEXT,
     STEPS_TEXT,
 )
-from sa_home_bot.bot.lifecycle import broadcast_system
+from sa_home_bot.bot.lifecycle import broadcast_system, notify_tool_call
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.db.store import Store
 from sa_home_bot.proto.messages import Envelope
@@ -154,6 +159,9 @@ def build_node_event_handler(book: SubscriptionBook, notifier: Notifier, store: 
             return
         if name == task_protocol.EVENT_TASK_RESULT:
             await _handle_task_result(notifier, store, data)
+            return
+        if name == task_protocol.EVENT_TOOL_CALL:
+            await notify_tool_call(book, notifier, data.get("name", "?"))
             return
         if name == EVENT_NODE_JOINED:
             node_id = data.get("node_id")

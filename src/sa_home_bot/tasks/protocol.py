@@ -31,6 +31,13 @@ EVENT_TASK_PREWAKE = "task_prewake"
 # итог исполнения задачи в момент due_at.
 EVENT_TASK_RESULT = "task_result"
 
+# tool_call: {name: str} — факт вызова инструмента моделью ВНУТРИ
+# сработавшей chat_loop-задачи (self-scheduled remind). Только имя, без
+# аргументов/результата — используется bot/node_events.py для дебаг-
+# уведомлений (см. bot/lifecycle.py::notify_tool_call), не для доставки
+# ответа пользователю.
+EVENT_TOOL_CALL = "tool_call"
+
 # meta.kind — единственный сейчас распознаваемый потребителями (bot/
 # node_events.py) вид задачи: результат/неудачу нужно доставить в Telegram
 # как ответ Альфреда, продолжающий диалог meta.dialogue_id.

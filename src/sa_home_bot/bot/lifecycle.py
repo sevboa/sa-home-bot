@@ -56,3 +56,15 @@ async def broadcast_system(
             sent += 1
     log.info("Системное событие разослано %d подписчикам", sent)
     return sent
+
+
+# Дебаг-канал: факт вызова инструмента Alfred'ом (живой /ai и self-scheduled
+# remind через службу tasks), без аргументов/результата — нужно только знать,
+# обращалась ли модель в тул и в какой (решение пользователя 2026-07-27).
+EVENT_ALFRED_TOOL_CALL = "alfred_tool_call"
+
+
+async def notify_tool_call(book: SubscriptionBook, notifier: Notifier, tool_name: str) -> None:
+    text = f"🔧 Alfred вызвал инструмент: {tool_name}"
+    for sub in book.accepting(EVENT_ALFRED_TOOL_CALL):
+        await notifier.send_direct(sub.chat_id, text)

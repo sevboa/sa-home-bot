@@ -61,6 +61,7 @@ from sa_home_bot.proto.messages import (
     ServiceDescription,
     ServiceInfo,
 )
+from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.tasks import protocol
 
 log = logging.getLogger(__name__)
@@ -97,6 +98,13 @@ class TasksService:
         self._node_link = node_link
         self._emit = emit
         self._node = socket.gethostname()
+        # Права заказчика задачи. Читаются из того же конфига, что у бота
+        # (подписки — часть Settings), потому что БД бота этой службе
+        # недоступна. Резолв — в МОМЕНТ СРАБАТЫВАНИЯ по meta["chat_id"], а не
+        # снимком в meta при создании: если право отобрали, пока задача ждала
+        # в очереди, отложенный ответ им уже не воспользуется. Не
+        # «оптимизировать» в снимок — это и есть смысл конструкции.
+        self._book = SubscriptionBook.from_config(settings.subscriptions)
         # Идущие прогревы: fire_loop дожидается прогрева СВОЕЙ задачи, а не
         # читает presence посреди него. Живая находка 2026-07-27: циклы
         # независимы, и задача со сроком меньше PREWAKE_LEAD_S получала
@@ -378,12 +386,16 @@ class TasksService:
 
         task_args = json.loads(row["args_json"])
         messages = list(task_args.get("messages") or [])
+        chat_id = meta.get("chat_id")
         tool_ctx = ai_tools.ToolContext(
-            chat_id=meta.get("chat_id"),
+            chat_id=chat_id,
             dialogue_id=meta.get("dialogue_id"),
             trigger_message_id=meta.get("trigger_message_id"),
             settings=self._settings,
             node_link=self._node_link,
+            # См. self._book: права на момент срабатывания, не на момент
+            # создания задачи. Подписки уже нет → None → тулы без прав.
+            subscription=self._book.for_chat(chat_id) if isinstance(chat_id, int) else None,
         )
         try:
             raw = await run_chat_loop(

@@ -72,6 +72,7 @@ from aiogram.types import Message, User
 from sa_home_bot import wake_core
 from sa_home_bot.bot import swarm_view
 from sa_home_bot.bot import tools as ai_tools
+from sa_home_bot.bot.lifecycle import notify_tool_call
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import PersonConfig, Settings
@@ -520,6 +521,7 @@ async def request_alfred(
             # ответа, не видно, звала ли модель тул вообще и что тот
             # вернул (см. schema.sql::ai_tool_calls). Пишет только живой
             # /ai — у него есть Store, у службы tasks его нет вовсе.
+            await notify_tool_call(book, notifier, name)
             if telegram_chat_id is None:
                 return
             await store.record_tool_call(

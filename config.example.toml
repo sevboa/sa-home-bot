@@ -102,7 +102,9 @@ urls = ["http://192.168.0.100:8096"]
 # умение роя «добавить торрент по .torrent-файлу/magnet-ссылке из чата»
 # (в отличие от apps выше — реальный Web API, не только systemd-статус).
 # save_dirs — конечный список директорий; бот предложит их кнопками, право
-# в подписке — "add@torrents". qbittorrent_password — секрет, не коммитить.
+# в подписке — "add@torrents". Отдельно "list@torrents" — read-only «что
+# качается» (им же гейтится swarm_status(what="torrents") у Альфреда).
+# qbittorrent_password — секрет, не коммитить.
 [torrents]
 socket = "./data/torrents.sock"
 qbittorrent_url = "http://127.0.0.1:8080"
@@ -151,6 +153,30 @@ think_chat = true
 # умолчанию — тул явно откажет, не покажет погоду не пойми где.
 [weather]
 city = ""
+
+# Служба tasks (`sa-home-bot --service tasks`) — отложенные задачи роя: тул
+# remind ставит «спросить нейронку ещё раз в момент X», служба будит цель
+# заранее и прогоняет диалог через llm.chat в срок. db_path — своя БД, не БД
+# бота (доступа к диалогам и Telegram у службы нет).
+[tasks]
+socket = "./data/tasks.sock"
+db_path = "./data/tasks.sqlite"
+
+# Служба net (`sa-home-bot --service net`) — веб-поиск для /ai через СВОЙ
+# SearXNG (LLM_INTEGRATION_PLAN.md §9). Право в подписке — "search@net".
+# Сам SearXNG ставится на ноду отдельно (venv + uWSGI под systemd, слушает
+# только localhost) — его удобно завести как [[apps.items]] выше, чтобы
+# управлять службой apps. ВАЖНО: в settings.yml SearXNG формат json выключен
+# по умолчанию — включить явно, иначе сюда прилетит HTML вместо JSON.
+# Redis не нужен: limiter при localhost-биндинге не требуется, а лишние
+# постоянные записи на eMMC ради кэша не нужны.
+[net]
+socket = "./data/net.sock"
+searxng_url = "http://127.0.0.1:8888"
+request_timeout_s = 20.0
+probe_timeout_s = 5.0
+max_results = 5
+language = "ru"
 
 # Сервис ноды (супервизор: `sa-home-bot --service node`, консоль — nodectl).
 # Нода запускает назначенные службы дочерними процессами и рестартит упавшие.
@@ -251,6 +277,8 @@ format = "plain"                   # plain | json
 #   приложения (кнопки на карточке; нужны права на машине — nodectl fix);
 #   add@torrents — прислать .torrent-файл/magnet-ссылку в чат: бот спросит,
 #   в какую директорию сохранить (кнопки из torrents.save_dirs);
+#   list@torrents — read-only «что сейчас качается»;
+#   search@net — веб-поиск через свой SearXNG;
 #   start@node / stop@node / restart@node — управление службой на её карточке;
 #   restart_node@node — перезапуск самой ноды-супервизора (не путать с restart
 #   службы); poweroff/reboot/suspend@node / check_update@node / update@node —
@@ -264,6 +292,13 @@ format = "plain"                   # plain | json
 #   рестарта ради добавления строчки, тот же принцип, что у динамического UI;
 #   голый "*" — вообще любая команда/действие всех служб (полный доступ, для
 #   доверенного админского чата).
+# ЭТИ ЖЕ права ограничивают Альфреда (/ai): инструменты, которыми он может
+# пользоваться в разговоре с конкретным собеседником, собираются по ЕГО
+# подписке — Альфред не может больше, чем сам пользователь, и не «отказывает»,
+# а честно не умеет (инструмента просто нет). Подробности и таблица тулов —
+# AUTHORIZATION.md §3.4. Практически: без "status"/"nodes" Альфред не
+# расскажет про состояние машин, без "list@torrents" — про закачки, без
+# "search@net" — не полезет в интернет.
 [[subscriptions]]
 name = "me"
 chat_id = 123456789
@@ -274,6 +309,18 @@ allowed_commands = ["*"]           # админ — полный доступ к
 name = "family_room"
 chat_id = -1009999999
 event_types = ["overheat_started", "overheat_cleared", "smart_degraded"]
+allowed_commands = []
+
+# Дебаг-канал: факт вызова инструмента Альфредом (get_weather, convert_currency,
+# get_time, remind и любые будущие тулы) — только имя, без аргументов/результата,
+# и из живого /ai, и из self-scheduled remind (служба tasks). См.
+# bot/lifecycle.py::notify_tool_call. Присутствие этой подписки и есть
+# "включённый дебаг" — отдельного тумблера в конфиге нет, добавили секцию —
+# уведомления пошли, убрали — перестали.
+[[subscriptions]]
+name = "alfred_debug"
+chat_id = -1000000000000
+event_types = ["alfred_tool_call"]
 allowed_commands = []
 
 # Известные собеседники /ai (bot/ai_flow.py::_find_known_person) — по
