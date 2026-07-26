@@ -27,6 +27,8 @@ class FakePeer:
         self.endpoint = f"tcp://{node_id}:8710"
         self.alive = alive
         self.node_kind = KIND_SERVER
+        # Момент первой неудачи соединения; None — попытки ещё не было.
+        self.down_since = None if alive else 0.0
         self._singletons = singletons
 
     def downtime_s(self):
@@ -249,6 +251,39 @@ async def test_supervisor_does_not_restart_a_fenced_service(monkeypatch):
     assert noted == ["telegram-bot@alfred"]
     assert slot.status == STOPPED
     assert slot.restarts == 0
+
+
+async def test_first_decision_waits_for_peer_links_to_settle():
+    """Линки поднимаются асинхронно: реши аренда сразу — вернувшаяся основная
+    нода запустила бы бота поверх работающего резерва (живая находка при
+    выкатке 0.38.0: перекрытие 5 с)."""
+    peer = FakePeer("jeeves", {SLOT: _entry("jeeves", running=True, role="standby")})
+    peer.alive = False
+    peer.down_since = None  # соединение ещё даже не пробовали
+    slot = FakeSlot("telegram-bot@alfred")
+    lease, _ = _lease("alfred", KIND_SERVER, slot, peer)
+    lease._settle_s = 0.6
+
+    await lease.start()
+    await lease.stop()
+    # За время ожидания связь так и не поднялась — решаем по тому, что есть,
+    # но ожидание было (иначе тест бы не отличался от прямого tick).
+    assert slot.calls == ["start"]
+
+
+async def test_settle_ends_as_soon_as_every_peer_has_answered():
+    peer = FakePeer("jeeves", {SLOT: _entry("jeeves", running=True, role="standby")})
+    slot = FakeSlot("telegram-bot@alfred")
+    lease, _ = _lease("alfred", KIND_SERVER, slot, peer)
+    lease._settle_s = 30.0  # столько ждать не придётся: пир жив с самого начала
+
+    start = time.monotonic()
+    await lease.start()
+    await lease.stop()
+    assert time.monotonic() - start < 5.0
+    # Резерв работает — не запускаемся поверх, а объявляем притязание.
+    assert slot.calls == []
+    assert lease.local_state()[SLOT]["claiming"] is True
 
 
 async def test_startup_does_not_launch_singletons_directly():

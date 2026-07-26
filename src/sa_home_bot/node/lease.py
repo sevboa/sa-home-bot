@@ -50,6 +50,10 @@ POLL_INTERVAL_S = 10.0
 FAILOVER_GRACE_S = 120.0
 FENCED_HOLDOFF_S = 300.0
 PEER_TIMEOUT_S = 5.0
+# Сколько ждать связей с соседями перед самым первым решением аренды: пока
+# линки не поднялись, рой выглядит пустым, и служба досталась бы тому, кто
+# просто быстрее стартовал. Секунды здесь дешевле перекрытия двух поллеров.
+STARTUP_SETTLE_S = 15.0
 
 EVENT_SINGLETON_ACTIVATED = "singleton_activated"
 EVENT_SINGLETON_YIELDED = "singleton_yielded"
@@ -94,7 +98,9 @@ class LeaseManager:
         grace_s: float = FAILOVER_GRACE_S,
         holdoff_s: float = FENCED_HOLDOFF_S,
         poll_interval_s: float = POLL_INTERVAL_S,
+        settle_s: float = STARTUP_SETTLE_S,
     ) -> None:
+        self._settle_s = settle_s
         self._node_id = node_id
         self._node_kind = node_kind
         self._supervisor = supervisor
@@ -256,7 +262,35 @@ class LeaseManager:
 
     # --- цикл ---------------------------------------------------------------
 
+    async def _settle(self) -> None:
+        """Дать связям с соседями подняться до первого решения.
+
+        Линки поднимаются асинхронно, и в первую же секунду после старта ноды
+        все пиры выглядят недоступными. Решать по такой картине нельзя:
+        вернувшаяся основная нода сочла бы службу свободной и запустила её
+        поверх работающего резерва — ровно то перекрытие, которого избегает
+        механизм притязаний. Ждём, пока каждый пир либо ответит, либо получит
+        свою попытку соединения (``down_since`` ставится при первой неудаче).
+        """
+        if self._router is None or not self._router.peers:
+            return
+        deadline = time.monotonic() + self._settle_s
+        while time.monotonic() < deadline:
+            unknown = [
+                link
+                for link in self._router.peers.values()
+                if not link.alive and link.down_since is None
+            ]
+            if not unknown:
+                return
+            await asyncio.sleep(0.5)
+        log.info(
+            "Аренда: не все соседи ответили за %.0f с — решаю по тому, что есть",
+            self._settle_s,
+        )
+
     async def start(self) -> None:
+        await self._settle()
         with contextlib.suppress(Exception):
             await self.tick()
         self._task = asyncio.create_task(self._run(), name="lease-manager")
