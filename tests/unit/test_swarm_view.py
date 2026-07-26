@@ -27,8 +27,8 @@ OWN_STATE = {
         {"name": "telegram-bot", "status": "running"},
     ],
     "peers": [
-        {"id": "arch-t480", "endpoint": "tcp://x:8710", "alive": True},
-        {"id": "winpc", "endpoint": "tcp://y:8710", "alive": False},
+        {"id": "arch-t480", "endpoint": "tcp://x:8710", "alive": True, "kind": "workstation"},
+        {"id": "winpc", "endpoint": "tcp://y:8710", "alive": False, "kind": "workstation"},
     ],
 }
 
@@ -143,7 +143,20 @@ async def test_swarm_node_lines_links_and_facts():
     assert "🟢 /node_alfred · v0.22.0 · службы 2/2 · CPU 48°C" in text
     # У arch: алерт (🔔 1) и ⚠️ requirements.
     assert "🟢 /node_arch_t480 · v0.21.0 · службы 1/1 · CPU 91°C · 🔔 1 · ⚠️" in text
-    assert "🔴 /node_winpc — не в сети" in text
+    # winpc — рабочая станция: выключена = норма, не авария (ARCH §11 п. 4).
+    assert "⚪ /node_winpc — спит (это норма)" in text
+
+
+async def test_swarm_offline_always_on_node_is_an_alarm():
+    """Пропажа машины, обязанной быть в сети (server/vps), — красная строка,
+    в отличие от спящей рабочей станции."""
+    own = {
+        **OWN_STATE,
+        "peers": [{"id": "jeeves", "endpoint": "tcp://z:8710", "alive": False, "kind": "vps"}],
+    }
+    link = FakeNodeLink(own=own, routes={})
+    text, _ = await build_swarm_view(link, _sub("nodes"))
+    assert "🔴 /node_jeeves — не в сети" in text
 
 
 async def test_swarm_dead_peer_gets_no_requests():
@@ -222,10 +235,24 @@ async def test_swarm_offline_node_gets_wake_button_when_cached(store):
     assert "st:wake:winpc" in codes
 
 
+async def test_swarm_offline_vps_gets_no_wake_button(store):
+    """VDS не разбудить magic-пакетом — кнопка обещала бы невыполнимое."""
+    await wake_state.remember(store, "jeeves", WINPC_WAKE)
+    own = {
+        **OWN_STATE,
+        "peers": [{"id": "jeeves", "endpoint": "tcp://z:8710", "alive": False, "kind": "vps"}],
+    }
+    link = FakeNodeLink(own=own, routes={})
+    _, keyboard = await build_swarm_view(link, _sub("nodes", "wake"), store=store)
+    codes = [b.callback_data for row in keyboard.inline_keyboard for b in row] if keyboard else []
+    assert "st:wake:jeeves" not in codes
+
+
 async def test_swarm_not_responding_node_gets_wake_button_when_cached(store):
     # alive=True (PeerLink формально ещё не заметил обрыв — TCP keepalive
     # не мгновенный), но get_state зависает/недоступен — "не отвечает",
     # не "не в сети". Кнопка нужна и тут (живая находка 2026-07-20).
+    # Тип тут не сообщён — старая нода: поведение прежнее, кнопка есть.
     await wake_state.remember(store, "winpc", WINPC_WAKE)
     own = {**OWN_STATE, "peers": [{"id": "winpc", "endpoint": "tcp://y:8710", "alive": True}]}
     link = FakeNodeLink(own=own, routes={})  # нет маршрута winpc:node → state=None

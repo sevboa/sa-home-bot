@@ -10,6 +10,8 @@ import sys
 
 from sa_home_bot import __version__
 from sa_home_bot.config import Settings
+from sa_home_bot.node.supervisor import FENCED_EXIT_CODE
+from sa_home_bot.services import registry
 from sa_home_bot.utils.logging import configure_logging
 
 log = logging.getLogger(__name__)
@@ -28,12 +30,19 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", "-c", default=None, help="путь к config.toml")
     parser.add_argument(
         "--service",
-        choices=("bot", "monitor", "apps", "torrents", "llm", "tasks", "node"),
+        choices=registry.cli_service_choices(),
         default="bot",
         help="какую службу запустить: telegram-бот (по умолчанию), "
         "монитор датчиков, адаптер приложений, адаптер торрент-клиента, "
         "служба LLM (Альфред), служба отложенных задач роя (tasks) или "
         "сервис ноды (супервизор)",
+    )
+    parser.add_argument(
+        "--instance",
+        default="",
+        help="имя инстанса службы-синглтона (конкретного бота): его переносимые "
+        "настройки берутся из пакета instances/<служба>.<инстанс>.toml рядом с "
+        "config.toml и реплицируются по рою",
     )
     parser.add_argument(
         "--check-config",
@@ -58,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
     try:
-        settings = Settings.load(args.config)
+        settings = Settings.load(args.config, instance=args.instance)
     except (FileNotFoundError, ValueError) as exc:
         print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
         return 2
@@ -103,9 +112,15 @@ def main(argv: list[str] | None = None) -> int:
         coro = run(settings)
 
     try:
-        restart = asyncio.run(coro)
+        result = asyncio.run(coro)
     except KeyboardInterrupt:
         return 0
+    if args.service == registry.SERVICES["telegram-bot"].cli_name:
+        # Бот вернул True — его вытеснил другой поллер того же токена. Код
+        # выхода говорит ноде «не перезапускай»: решение за арендой лидерства
+        # (node/supervisor.py::FENCED_EXIT_CODE).
+        return FENCED_EXIT_CODE if result else 0
+    restart = result
     if restart:
         # run_node вернул True (запрошен само-рестарт «restart_node»): чистый
         # останов уже прошёл, заменяем образ процесса на себя же — тот же PID,

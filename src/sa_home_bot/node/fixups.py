@@ -21,6 +21,7 @@ from getpass import getuser
 from pathlib import Path
 
 from sa_home_bot.config import AppConfig, Settings
+from sa_home_bot.node import assignments
 from sa_home_bot.sensors.disks import SMARTCTL_REQUIREMENT
 from sa_home_bot.utils.requirements import install_argv
 
@@ -108,7 +109,10 @@ def _install_sudoers_snippet(name: str, content: str) -> None:
 
 
 def _smartmontools_needed(settings: Settings) -> bool:
-    return "monitor" in settings.node.assignments and settings.sensors.disks.enabled
+    return (
+        assignments.has_service(settings.node.assignments, "monitor")
+        and settings.sensors.disks.enabled
+    )
 
 
 def _smartmontools_check() -> bool:
@@ -201,7 +205,7 @@ SMARTCTL_SUDOERS = Fixup(
 
 
 def _journalctl_needed(settings: Settings) -> bool:
-    return "monitor" in settings.node.assignments
+    return assignments.has_service(settings.node.assignments, "monitor")
 
 
 def _in_group(group: str) -> bool:
@@ -243,7 +247,7 @@ def _apps_unit_sudoers_file(app_id: str) -> str:
 
 
 def _apps_unit_needed(settings: Settings) -> bool:
-    return "apps" in settings.node.assignments
+    return assignments.has_service(settings.node.assignments, "apps")
 
 
 def apps_unit_sudoers_content(app: AppConfig, systemctl_path: str, user: str) -> str:

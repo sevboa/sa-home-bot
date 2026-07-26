@@ -28,6 +28,7 @@ from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import WakeConfig
 from sa_home_bot.db.store import Store
 from sa_home_bot.domain.models import KIND_CPU, POWER_UNEXPECTED, PowerEvent
+from sa_home_bot.node.kind import traits_for
 from sa_home_bot.proto.messages import Address, ProtoError
 from sa_home_bot.runtime import format_duration
 from sa_home_bot.subscriptions.models import Subscription
@@ -53,6 +54,7 @@ class _NodeReport:
     alive: bool
     state: dict | None = None  # get_state сервиса node (None — не ответил)
     monitor: dict | None = None  # get_state монитора (None — не ответил/нет)
+    kind: str = ""  # тип машины (server|workstation|vps), см. node/kind.py
 
 
 async def _fetch(node_link: ServiceLink, dst: Address | None) -> dict | None:
@@ -64,11 +66,24 @@ async def _fetch(node_link: ServiceLink, dst: Address | None) -> dict | None:
 
 async def _collect(node_link: ServiceLink, own_state: dict) -> list[_NodeReport]:
     """Параллельный сбор состояний всех нод роя (своя — первой)."""
-    own = _NodeReport(node_id=own_state.get("node", "?"), alive=True, state=own_state)
+    own = _NodeReport(
+        node_id=own_state.get("node", "?"),
+        alive=True,
+        state=own_state,
+        kind=own_state.get("kind", ""),
+    )
     reports = [own]
     for peer in own_state.get("peers", []):
         pid = peer.get("id", "?")
-        reports.append(_NodeReport(node_id=pid, alive=bool(peer.get("alive"))))
+        reports.append(
+            _NodeReport(
+                node_id=pid,
+                alive=bool(peer.get("alive")),
+                # Тип известен и для недоступной ноды — нода его помнит
+                # (node/watch.py), иначе не отличить сон от аварии.
+                kind=str(peer.get("kind") or ""),
+            )
+        )
 
     async def fill(report: _NodeReport) -> None:
         node_dst = (
@@ -133,6 +148,10 @@ def _cpu_max(monitor: dict) -> float | None:
 def _node_line(report: _NodeReport) -> str:
     name = node_links.node_command(report.node_id) or f"<b>{report.node_id}</b>"
     if not report.alive:
+        # Машина, которая штатно выключается, — это не авария: правило роя
+        # п. 4 «спящая не-24/7 нода — норма» (ARCHITECTURE §11).
+        if not traits_for(report.kind).always_on:
+            return f"{node_view.LAMP_GRAY} {name} — спит (это норма)"
         return f"{node_view.LAMP_RED} {name} — не в сети"
     if report.state is None:
         return f"{node_view.LAMP_RED} {name} — не отвечает"
@@ -202,6 +221,14 @@ async def _offline_wake_rows(
     buttons = []
     for r in reports:
         if r.alive and r.state is not None:
+            continue
+        # Машину, которая не должна выключаться (сервер, VDS), будить нечем и
+        # незачем: WoL — про рабочие станции в локальной сети. Кнопка на VDS
+        # только вводила бы в заблуждение, что молчание лечится нажатием.
+        # Тип НЕ сообщён (нода старой версии) — ведём себя как раньше и кнопку
+        # показываем: наличие кэшированных WoL-реквизитов само по себе значит,
+        # что машина когда-то представилась пригодной для побудки.
+        if r.kind and not traits_for(r.kind).wakeable:
             continue
         if await wake_state.cached(store, r.node_id) is None:
             continue

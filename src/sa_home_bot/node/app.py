@@ -16,27 +16,31 @@ import logging
 import socket
 
 from sa_home_bot.config import Settings, SwarmNodeConfig
+from sa_home_bot.node import assignments as assignments_mod
 from sa_home_bot.node import update as node_update
+from sa_home_bot.node.instances import InstanceStore, instances_dir
+from sa_home_bot.node.lease import LeaseManager
 from sa_home_bot.node.peers import NodeRouter, PeerLink
+from sa_home_bot.node.replication import (
+    EVENT_INSTANCE_CONFIG_CHANGED,
+    ConfigReplicator,
+)
 from sa_home_bot.node.service import EVENT_NODE_JOINED, NodeService
 from sa_home_bot.node.state import NodeState
 from sa_home_bot.node.supervisor import Supervisor
+from sa_home_bot.node.watch import PresenceWatcher
 from sa_home_bot.proto.messages import MSG_EVENT, Envelope, ProtoError
 from sa_home_bot.proto.server import ProtoServer
+from sa_home_bot.services import registry
 from sa_home_bot.utils.lifespan import Lifespan
 
 log = logging.getLogger(__name__)
 
 # Локальные службы со своим proto-сервером, к которым нода умеет
 # проксировать (telegram-bot — клиент, своего сервера у него нет).
+# Состав — из реестра служб (services/registry.py), а не из списка здесь.
 def local_service_endpoints(settings: Settings) -> dict[str, str]:
-    return {
-        "monitor": settings.monitor.socket,
-        "apps": settings.apps.socket,
-        "torrents": settings.torrents.socket,
-        "llm": settings.llm.socket,
-        "tasks": settings.tasks.socket,
-    }
+    return registry.service_endpoints(settings)
 
 
 _MAX_SEEN_EVENTS = 512  # с запасом — событий (join/update_finished) мало, часты не бывают
@@ -74,6 +78,18 @@ class SeenEvents:
         return False
 
 
+def _safe_parse_all(items: list[str]) -> list[assignments_mod.Assignment]:
+    """Разобрать назначения, пропустив битые: об их непонятности уже сказал
+    супервизор — второй раз ругаться на то же самое незачем."""
+    parsed = []
+    for item in items:
+        try:
+            parsed.append(assignments_mod.parse(item))
+        except assignments_mod.AssignmentError:
+            continue
+    return parsed
+
+
 def build_router(
     settings: Settings,
     node_id: str,
@@ -106,6 +122,9 @@ def build_router(
         for pid, cfg in peer_configs.items()
         if pid != node_id  # свой id в списке — не пир
     }
+    # Маршрут строится по ИМЕНИ СЛУЖБЫ, а не по строке назначения целиком:
+    # "telegram-bot@alfred:standby" — это всё та же служба telegram-bot.
+    assigned_services = {a.service for a in _safe_parse_all(assignments)}
     local = {
         # on_event=on_local_event (НЕ on_peer_event, см. докстринг выше) —
         # локальные службы (llm — llm_idle_sleep, tasks — task_result и
@@ -113,7 +132,7 @@ def build_router(
         # через ту же ретрансляцию, что уже работает для событий пиров.
         name: PeerLink(name, endpoint, token=settings.swarm.token, on_event=on_local_event)
         for name, endpoint in local_service_endpoints(settings).items()
-        if name in assignments
+        if name in assigned_services
     }
     return NodeRouter(node_id, peers=peers, local_services=local)
 
@@ -151,6 +170,7 @@ async def _relay_peer_event(
     server: ProtoServer | None,
     seen: SeenEvents,
     is_local: bool = False,
+    replicator: ConfigReplicator | None = None,
 ) -> None:
     """Ретрансляция события (пира или локальной службы) своим клиентам +
     замыкание сетки (этап 18) для событий пиров.
@@ -186,6 +206,14 @@ async def _relay_peer_event(
             _remember_peer(state, new_id, new_endpoint)
             state.save(state_path)
             log.info("Рой: авто-подключение к %s (%s) по node_joined", new_id, new_endpoint)
+    if (
+        replicator is not None
+        and env.type == MSG_EVENT
+        and env.payload.get("event") == EVENT_INSTANCE_CONFIG_CHANGED
+    ):
+        # Сосед объявил новую ревизию пакета — забрать её, если этот инстанс
+        # назначен и нам (node/replication.py).
+        await replicator.on_config_changed(env)
     if server is not None:
         await server.broadcast_envelope(env)
 
@@ -195,6 +223,8 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
     (см. `restart_node` — cli.main() тогда делает os.execv на том же PID)."""
     # Сервер создаётся до супервизора: emit замыкается на его broadcast.
     server: ProtoServer | None = None
+    replicator: ConfigReplicator | None = None
+    lease: LeaseManager | None = None
     node_id = settings.node.id or socket.gethostname()
     lifespan = Lifespan()
     restart_requested = False
@@ -221,6 +251,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
             on_peer_event=on_peer_event,
             server=server,
             seen=seen_events,
+            replicator=replicator,
         )
 
     async def on_local_event(env: Envelope) -> None:
@@ -245,18 +276,47 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
     state = NodeState.load(settings.node.state_path)
     effective_assignments = sorted(set(settings.node.assignments) | set(state.assignments))
 
+    def on_fenced(slot_name: str) -> None:
+        # Аренда создаётся ниже супервизора (ей нужен router), поэтому
+        # колбэк смотрит на переменную, а не захватывает объект.
+        if lease is not None:
+            lease.note_fenced(slot_name)
+
     supervisor = Supervisor(
         effective_assignments,
         config_path,
         emit=emit,
         restart_delay_s=settings.node.restart_delay_s,
         stop_timeout_s=settings.node.stop_timeout_s,
+        on_fenced=on_fenced,
     )
     if not supervisor.services:
         log.warning("Нет ни одного валидного назначения — нода работает вхолостую")
 
     router = build_router(
         settings, node_id, effective_assignments, state.peers, on_peer_event, on_local_event
+    )
+    # Пакеты настроек лежат рядом с config.toml; без файлового конфига их
+    # попросту негде держать — тогда репликации нет (и она не нужна).
+    packages_dir = instances_dir(config_path)
+    replicator = (
+        ConfigReplicator(
+            node_id,
+            InstanceStore(packages_dir, node_id),
+            supervisor=supervisor,
+            router=router,
+            emit=emit,
+        )
+        if packages_dir is not None
+        else None
+    )
+    lease = LeaseManager(
+        node_id,
+        settings.node.kind,
+        supervisor,
+        router=router,
+        emit=emit,
+        grace_s=settings.swarm.failover_grace_s,
     )
     # Нода слушает socket (локальные фронтенды) и, если задан, listen —
     # TCP для пиров роя.
@@ -278,12 +338,34 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         # (dev-чекаут) или win32 дают None, и check_update/update не
         # объявляются (см. update_source_for_this_platform).
         update_source=update_source_for_this_platform(),
+        node_kind=settings.node.kind,
+        replicator=replicator,
+        lease=lease,
     )
     server = ProtoServer(endpoints, node_service, token=settings.swarm.token, router=router.route)
     await server.start()
     for link in (*router.peers.values(), *router.local_services.values()):
         await link.start()
+    # До запуска служб: пакет, правленный пока нода была выключена, должен
+    # вступить в силу сразу, а не после лишнего рестарта службы.
+    if replicator is not None:
+        await replicator.start()
     await supervisor.start_all()
+    # Синглтоны стартует аренда, а не start_all: даже активная роль сначала
+    # убеждается, что службу не держит другая нода (node/lease.py).
+    await lease.start()
+
+    # Присутствие соседей: пропажа ноды, обязанной быть в сети, — авария;
+    # пропажа рабочей станции — норма (node/watch.py).
+    watcher = PresenceWatcher(
+        node_id,
+        router,
+        emit=emit,
+        state=state,
+        state_path=settings.node.state_path,
+        down_after_s=settings.swarm.node_down_alert_after_s,
+    )
+    await watcher.start()
 
     # Первый запуск с заданным swarm.join и ещё пустым списком пиров:
     # разовый bootstrap через тот же NodeService.join(), что и `nodectl join`
@@ -318,6 +400,10 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         await lifespan.wait()
     finally:
         log.info("Останов ноды...")
+        await watcher.stop()
+        await lease.stop()
+        if replicator is not None:
+            await replicator.stop()
         await supervisor.stop_all()
         for link in (*router.peers.values(), *router.local_services.values()):
             await link.stop()

@@ -228,12 +228,17 @@ class ServiceInfo:
     node: str
     service: str
     version: str
+    # Тип машины ноды (server|workstation|vps) — едет уже в hello, чтобы рой
+    # знал, ждать ли ноду всегда и можно ли её будить, без отдельного запроса.
+    # Пусто — нода старой версии: см. node/kind.py::traits_for (консервативно).
+    node_kind: str = ""
 
     def to_payload(self) -> dict[str, Any]:
         return {
             "node": self.node,
             "service": self.service,
             "version": self.version,
+            "node_kind": self.node_kind,
             "proto": PROTO_VERSION,
         }
 
@@ -244,6 +249,7 @@ class ServiceInfo:
                 node=str(payload["node"]),
                 service=str(payload["service"]),
                 version=str(payload["version"]),
+                node_kind=str(payload.get("node_kind", "")),
             )
         except KeyError as exc:
             raise ProtoError(ERR_BAD_REQUEST, f"hello без поля {exc}") from exc

@@ -49,7 +49,7 @@
 | Тип | payload запроса | payload ответа |
 |---|---|---|
 | `auth` | `{token}` (только TCP, первым) | `{authenticated: true}` |
-| `hello` | — | `{node, service, version, proto}` |
+| `hello` | — | `{node, service, version, node_kind, proto}` |
 | `describe` | — | hello + `capabilities: [str]` + `actions: […]` |
 | `get_state` | — | произвольное состояние службы (dict) |
 | `command` | `{action, args: {…}}` | результат действия (dict) |
@@ -85,6 +85,20 @@ down_approx, downtime_s}], "offset": 0, "has_next": true}` — история
 перезапускается сам — только человек через `restart_node`; до этого
 `get_state()` честно отдаёт `update.restart_required=true`.
 
+**Репликация пакетов настроек** (`node/replication.py`) — два действия
+сервиса ноды, которые зовёт не человек, а другая нода: `list_instances`
+(`{service}` → `{service, instances: [{service, instance, rev, hash,
+updated_at, origin_node}]}`) и `get_instance_config` (`{service, instance}` →
+`{meta: {...}, content: "<TOML целиком>"}`). Оба с обязательными параметрами,
+поэтому фронтенды их кнопками не рисуют. `get_instance_config` отдаёт секреты
+службы (токен бота) — адресным ответом по каналу роя, который уже защищён
+(TCP + `[swarm].token`, unix-сокет — правами файла), а не broadcast'ом.
+
+`get_state` сервиса ноды дополнительно несёт `kind` (тип машины), `instances`
+(ревизии своих пакетов) и `singletons` (`{"<служба>@<инстанс>": {role,
+running, claiming, rank, fenced}}` — на этом рой строит решение аренды,
+`node/lease.py`). Записи `peers` теперь содержат `kind` и `down_s`.
+
 ### Ответ (сервер → клиент)
 
 ```json
@@ -109,6 +123,14 @@ down_approx, downtime_s}], "offset": 0, "has_next": true}` — история
  "src": {"node": "alfred", "service": "monitor"},
  "payload": {"event": "overheat_started", "data": {…}}}
 ```
+
+События роя, добавленные вместе с типами нод и резервом синглтонов:
+`node_down`/`node_up` (`{node, kind, down_s}` — пропала/вернулась нода,
+обязанная быть в сети; объявляет одна нода, `node/watch.py`),
+`instance_config_changed` (метаданные ревизии пакета — сам пакет забирается
+отдельным запросом), `singleton_activated`/`singleton_yielded`
+(`{slot, node}` — служба переехала между нодами), `service_fenced`
+(`{name}` — экземпляр вытеснен другим, перезапускать не следует).
 
 Доставка — только текущим подключённым (at-most-once). Гарантированная
 доставка алертов остаётся на слое выше: monitor хранит pending-флаги в своей

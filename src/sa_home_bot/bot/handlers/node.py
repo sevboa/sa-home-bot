@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 
 router = Router(name="node")
 
-# Имя собственной службы бота в назначениях ноды (см. supervisor.ASSIGNMENT_ARGS).
+# Имя собственной службы бота в назначениях ноды (см. services/registry.py).
 SELF_SERVICE_NAME = "telegram-bot"
 
 SELF_RESTART_TEXT = "🔄 Перезапускаюсь, вернусь через минуту."

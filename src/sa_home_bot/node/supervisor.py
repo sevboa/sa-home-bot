@@ -18,6 +18,10 @@ import sys
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
+from sa_home_bot.node import assignments as assignments_mod
+from sa_home_bot.node.assignments import Assignment
+from sa_home_bot.services import registry
+
 log = logging.getLogger(__name__)
 
 
@@ -50,29 +54,13 @@ STOPPED = "stopped"  # остановлена вручную или ещё не 
 EVENT_SERVICE_STARTED = "service_started"
 EVENT_SERVICE_FAILED = "service_failed"
 EVENT_SERVICE_STOPPED = "service_stopped"
+EVENT_SERVICE_FENCED = "service_fenced"
 
-# Известные назначения: имя → аргументы CLI этого же пакета.
-ASSIGNMENT_ARGS: dict[str, list[str]] = {
-    "monitor": ["--service", "monitor"],
-    "telegram-bot": ["--service", "bot"],
-    "apps": ["--service", "apps"],
-    "torrents": ["--service", "torrents"],
-    "tasks": ["--service", "tasks"],
-}
-
-# Живая находка 2026-07-23: служба llm на Windows-ноде дёргает wsl.exe, а
-# тот из-под Session-0 (Windows-служба sa-home-node, LocalSystem) вообще не
-# запускается (exit code -1) — WSL2 требует интерактивную пользовательскую
-# сессию. Поэтому "llm" супервизором НЕ спавнится (не в ASSIGNMENT_ARGS) —
-# на нодах, где это нужно, процесс поднимается отдельно, задачей
-# планировщика от интерактивного пользователя (deploy/llm-runner.ps1),
-# супервизор её не видит и не трогает. При этом "llm" остаётся в
-# [node].assignments — это НЕ то же самое, что супервизия: NodeRouter
-# (node/app.py::build_router) строит локальный маршрут к settings.llm.socket
-# по тому же списку assignments независимо от Supervisor, так что запрос
-# всё равно доедет — до внешне управляемого процесса, слушающего тот же порт.
-EXTERNALLY_MANAGED_ASSIGNMENTS = frozenset({"llm"})
-
+# Служба вышла потому, что её вытеснил другой её же экземпляр: для бота это
+# 409 Conflict от Telegram — у токена может быть лишь один поллер. Отдельный
+# код, а не обычное падение: перезапускать тут нечего, надо замолчать
+# (см. node/lease.py::note_fenced).
+FENCED_EXIT_CODE = 11
 
 def _now_iso() -> str:
     return datetime.now(tz=UTC).isoformat()
@@ -89,8 +77,14 @@ class SupervisedService:
         emit: EventEmitter,
         restart_delay_s: float = 5.0,
         stop_timeout_s: float = 90.0,
+        assignment: Assignment | None = None,
+        on_fenced: Callable[[str], None] | None = None,
     ) -> None:
         self.name = name
+        self._on_fenced = on_fenced
+        # Назначение целиком (роль, инстанс, приоритет) — нужно аренде
+        # лидерства и репликации пакетов, супервизии самой хватает cli_args.
+        self.assignment = assignment or Assignment(service=name)
         self._cli_args = cli_args
         self._emit = emit
         self._restart_delay = restart_delay_s
@@ -123,6 +117,9 @@ class SupervisedService:
             "restarts": self.restarts,
             "last_exit_code": self.last_exit_code,
             "started_at": self.started_at,
+            "service": self.assignment.service,
+            "instance": self.assignment.instance,
+            "role": self.assignment.role,
         }
 
     # --- Управление ---
@@ -192,6 +189,18 @@ class SupervisedService:
             self.last_exit_code = rc
             if not self._desired_running:
                 break  # остановили сами — stop() эмитит service_stopped
+            if rc == FENCED_EXIT_CODE:
+                # Служба сама сообщила: её вытеснил другой экземпляр (для бота
+                # это 409 от Telegram). Перезапускать её — значит мешать тому,
+                # кто держит службу по праву; решение отдаём аренде.
+                log.warning("Служба %s вытеснена другим экземпляром — не перезапускаю",
+                            self.name)
+                self._desired_running = False
+                self._status = STOPPED
+                await self._emit(EVENT_SERVICE_FENCED, {"name": self.name})
+                if self._on_fenced is not None:
+                    self._on_fenced(self.name)
+                break
             log.warning("Служба %s завершилась (код %s) — перезапуск через %.0f с",
                         self.name, rc, self._restart_delay)
             self._status = RESTARTING
@@ -213,42 +222,66 @@ class Supervisor:
         emit: EventEmitter,
         restart_delay_s: float = 5.0,
         stop_timeout_s: float = 90.0,
+        on_fenced: Callable[[str], None] | None = None,
     ) -> None:
         self.services: dict[str, SupervisedService] = {}
         self._config_path = config_path
         self._emit = emit
+        self._on_fenced = on_fenced
         self._restart_delay_s = restart_delay_s
         self._stop_timeout_s = stop_timeout_s
-        for name in assignments:
-            if name in EXTERNALLY_MANAGED_ASSIGNMENTS:
+        for item in assignments:
+            try:
+                assignment = assignments_mod.parse(item)
+            except assignments_mod.AssignmentError as exc:
+                log.error("Назначение %r не разбирается (%s) — пропускаю", item, exc)
+                continue
+            svc_spec = registry.spec(assignment.service)
+            if svc_spec is not None and svc_spec.externally_managed:
                 log.info(
                     "Назначение %r — внешне управляемый процесс, супервизор его не спавнит "
-                    "(только маршрутизация)", name
+                    "(только маршрутизация)", item
                 )
                 continue
             try:
-                self.services[name] = self._make_service(name)
+                self.services[assignment.key] = self._make_service(assignment)
             except ValueError:
                 log.error("Неизвестное назначение %r — пропускаю "
-                          "(знаю: %s)", name, ", ".join(ASSIGNMENT_ARGS))
+                          "(знаю: %s)", item, ", ".join(registry.supervised_names()))
 
-    def _make_service(self, name: str) -> SupervisedService:
-        args = ASSIGNMENT_ARGS.get(name)
-        if args is None:
-            raise ValueError(f"неизвестное назначение: {name!r}")
-        cli_args = list(args)
+    def _make_service(self, assignment: str | Assignment) -> SupervisedService:
+        if isinstance(assignment, str):
+            assignment = assignments_mod.parse(assignment)
+        svc_spec = registry.spec(assignment.service)
+        if svc_spec is None or svc_spec.externally_managed:
+            raise ValueError(f"неизвестное назначение: {assignment.service!r}")
+        cli_args = svc_spec.cli_args
+        if assignment.instance:
+            # Инстансная служба читает свой пакет настроек — без этого она
+            # поднялась бы на общем конфиге, то есть не на тех настройках.
+            cli_args += ["--instance", assignment.instance]
         if self._config_path is not None:
             cli_args += ["--config", str(self._config_path)]
         return SupervisedService(
-            name,
+            assignment.key,
             cli_args,
             emit=self._emit,
             restart_delay_s=self._restart_delay_s,
             stop_timeout_s=self._stop_timeout_s,
+            assignment=assignment,
+            on_fenced=self._on_fenced,
         )
 
     async def start_all(self) -> None:
         for svc in self.services.values():
+            # Службы-синглтоны поднимает не старт ноды, а аренда лидерства
+            # (node/lease.py) — и активную тоже. Иначе вернувшаяся основная
+            # нода запустила бы второй поллер поверх работающего резерва, и
+            # 409 от Telegram прилетел бы как раз ей, законному владельцу.
+            spec = registry.spec(svc.assignment.service)
+            if spec is not None and spec.singleton:
+                log.info("Служба %s — синглтон: запуск решает аренда лидерства", svc.name)
+                continue
             await svc.start()
 
     async def stop_all(self) -> None:
@@ -263,14 +296,16 @@ class Supervisor:
     def assign(self, name: str) -> SupervisedService:
         """Добавить назначение в рантайме (без рестарта ноды).
 
+        ``name`` — строка назначения целиком (``telegram-bot@alfred:standby``).
         Идемпотентно: уже назначенная служба возвращается как есть, не
         пересоздаётся (и не теряет счётчик рестартов/pid).
         """
-        existing = self.services.get(name)
+        assignment = assignments_mod.parse(name)
+        existing = self.services.get(assignment.key)
         if existing is not None:
             return existing
-        svc = self._make_service(name)  # ValueError на неизвестное имя — наружу
-        self.services[name] = svc
+        svc = self._make_service(assignment)  # ValueError на неизвестное имя — наружу
+        self.services[assignment.key] = svc
         return svc
 
     async def unassign(self, name: str) -> None:

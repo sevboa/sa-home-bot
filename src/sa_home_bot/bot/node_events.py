@@ -46,7 +46,11 @@ from sa_home_bot.tasks import protocol as task_protocol
 log = logging.getLogger(__name__)
 
 EVENT_NODE_JOINED = "node_joined"
+EVENT_NODE_DOWN = "node_down"
+EVENT_NODE_UP = "node_up"
 EVENT_UPDATE_FINISHED = "update_finished"
+EVENT_SINGLETON_ACTIVATED = "singleton_activated"
+EVENT_SINGLETON_YIELDED = "singleton_yielded"
 # Строковые литералы, не импорт из llm/service.py — та же конвенция, что и
 # для событий выше (это не "источник правды", просто совпадающая строка;
 # импорт бота из пакета llm ради одной константы того не стоит).
@@ -103,6 +107,33 @@ def render_node_joined(node_id: str, endpoint: str) -> str:
     return f"🕸 К рою присоединилась нода «{node_id}» ({endpoint})."
 
 
+def _human_downtime(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"{minutes} мин"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} ч {minutes} мин" if minutes else f"{hours} ч"
+
+
+def render_node_down(node_id: str, down_s: float) -> str:
+    return (
+        f"🔌 Нода «{node_id}» не отвечает уже {_human_downtime(down_s)} — "
+        f"а эта машина должна быть в сети всегда."
+    )
+
+
+def render_node_up(node_id: str) -> str:
+    return f"✅ Нода «{node_id}» снова на связи."
+
+
+def render_singleton_activated(slot: str, node_id: str) -> str:
+    return f"🎛 Службу «{slot}» приняла нода «{node_id}»."
+
+
+def render_singleton_yielded(slot: str, node_id: str) -> str:
+    return f"🎛 Нода «{node_id}» уступила службу «{slot}» — вернулась основная."
+
+
 def render_update_finished(node_id: str, ok: bool, version: str | None, error: str | None) -> str:
     if ok:
         return (
@@ -129,6 +160,28 @@ def build_node_event_handler(book: SubscriptionBook, notifier: Notifier, store: 
             if not node_id:
                 return
             text = render_node_joined(node_id, data.get("endpoint") or "?")
+        elif name in (EVENT_NODE_DOWN, EVENT_NODE_UP):
+            # Объект события — пропавшая нода из payload, а не src (объявляет
+            # тот сосед, что её видит; см. node/watch.py::_is_announcer).
+            node_id = data.get("node")
+            if not node_id:
+                return
+            text = (
+                render_node_down(node_id, float(data.get("down_s") or 0))
+                if name == EVENT_NODE_DOWN
+                else render_node_up(node_id)
+            )
+        elif name in (EVENT_SINGLETON_ACTIVATED, EVENT_SINGLETON_YIELDED):
+            slot, node_id = data.get("slot"), data.get("node")
+            if not slot or not node_id:
+                return
+            # Переезд бота между нодами сообщает уже поднявшийся экземпляр —
+            # тот, что уступил, к этому моменту закрывает сессию.
+            text = (
+                render_singleton_activated(slot, node_id)
+                if name == EVENT_SINGLETON_ACTIVATED
+                else render_singleton_yielded(slot, node_id)
+            )
         elif name == EVENT_UPDATE_FINISHED:
             # Событие описывает саму себя — src это и есть обновившаяся
             # нода (в отличие от node_joined, где src — сосед, а объект

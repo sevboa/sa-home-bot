@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 
 from sa_home_bot.proto.client import EventCallback, ProtoClient
 from sa_home_bot.proto.endpoints import Endpoint
@@ -57,6 +58,14 @@ class PeerLink:
         self._delay = reconnect_delay
         self._client: ProtoClient | None = None
         self._task: asyncio.Task | None = None
+        # Тип машины соседа из его hello. Держим и после обрыва: чтобы решить,
+        # нормально ли, что нода пропала, нужно знать её тип именно тогда,
+        # когда её уже не спросить.
+        self.node_kind: str = ""
+        # Момент последней потери связи (monotonic) — от него отсчитывается
+        # порог «пропала слишком надолго» для алерта о ноде, которая обязана
+        # быть в сети. None — связь есть либо ещё ни разу не устанавливалась.
+        self.down_since: float | None = None
 
     @property
     def alive(self) -> bool:
@@ -81,6 +90,18 @@ class PeerLink:
         except (ConnectionError, OSError, TimeoutError) as exc:
             raise ProtoError(ERR_UNAVAILABLE, f"{self.name}: {exc}") from exc
 
+    def _mark_down(self) -> None:
+        """Запомнить момент потери связи — только первый, чтобы циклы
+        переподключения не сбрасывали отсчёт до порога алерта."""
+        if self.down_since is None:
+            self.down_since = time.monotonic()
+
+    def downtime_s(self) -> float | None:
+        """Сколько секунд связи нет; None — связь есть."""
+        if self.alive or self.down_since is None:
+            return None
+        return time.monotonic() - self.down_since
+
     async def _run(self) -> None:
         logged_down = False
         while True:
@@ -100,13 +121,18 @@ class PeerLink:
                     "PeerLink %s: связь установлена (%s/%s)", self.name, info.node, info.service
                 )
                 logged_down = False
+                if info.node_kind:
+                    self.node_kind = info.node_kind
+                self.down_since = None
                 self._client = client
                 try:
                     await client.join()
                 finally:
                     self._client = None
+                    self._mark_down()
                 log.warning("PeerLink %s: связь потеряна, переподключение...", self.name)
             except (ConnectionError, OSError, TimeoutError, ProtoError) as exc:
+                self._mark_down()
                 if not logged_down:
                     log.warning(
                         "PeerLink %s недоступен (%s) — переподключение каждые %.0f с",
@@ -165,7 +191,15 @@ class NodeRouter:
     def peers_state(self) -> list[dict[str, object]]:
         """Presence пиров для get_state ноды (/nodes, nodectl status)."""
         return [
-            {"id": link.name, "endpoint": str(link.endpoint), "alive": link.alive}
+            {
+                "id": link.name,
+                "endpoint": str(link.endpoint),
+                "alive": link.alive,
+                # Тип соседа и длительность недоступности: по ним фронтенд
+                # отличает «спит, это норма» от «пропал сервер, это авария».
+                "kind": link.node_kind,
+                "down_s": link.downtime_s(),
+            }
             for link in self.peers.values()
         ]
 

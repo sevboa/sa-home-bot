@@ -21,6 +21,9 @@ from pydantic_settings import (
     TomlConfigSettingsSource,
 )
 
+from sa_home_bot.node.instances import INSTANCES_DIRNAME, PACKAGE_SUFFIX
+from sa_home_bot.node.kind import NodeKind
+
 log = logging.getLogger(__name__)
 
 
@@ -318,9 +321,15 @@ class NodeConfig(BaseModel):
     (``assign``/``unassign`` по протоколу — nodectl/бот) хранит фактический
     список в ``state_path`` (см. `node/state.py`), объединяемом с этим при
     старте. Снять TOML-назначение можно только правкой конфига.
+
+    ``kind`` — тип машины (``server`` | ``workstation`` | ``vps``). Не делает
+    ноду главной (рой равноправен), а отвечает на вопросы «алертить ли о её
+    пропаже», «можно ли её будить по WoL», «есть ли у неё датчики железа» и
+    задаёт базовый приоритет аренды синглтонов — см. `node/kind.py`.
     """
 
     id: str = ""
+    kind: NodeKind = "server"
     socket: str = "./data/node.sock"
     listen: str = ""
     assignments: list[str] = Field(default_factory=list)
@@ -340,6 +349,10 @@ class SwarmNodeConfig(BaseModel):
 
     id: str
     endpoint: str
+    # Тип машины соседа, узнанный из его hello и сохранённый в состоянии ноды.
+    # В TOML заполнять не нужно (и не следует — источник истины сам сосед):
+    # поле нужно, чтобы знать тип ноды, которая прямо сейчас недоступна.
+    kind: str = ""
 
 
 class SwarmConfig(BaseModel):
@@ -362,6 +375,15 @@ class SwarmConfig(BaseModel):
     token: str = ""
     nodes: list[SwarmNodeConfig] = Field(default_factory=list)
     join: str = ""
+    # Сколько нода, обязанная быть в сети (kind=server|vps), может быть
+    # недоступна, прежде чем рой сочтёт это аварией и пришлёт node_down.
+    # С запасом больше типичного рестарта ноды и перезагрузки машины, чтобы
+    # плановый ребут не будил владельца ночью.
+    node_down_alert_after_s: float = Field(default=300.0, gt=0)
+    # Сколько резервная нода ждёт, прежде чем перенять службу-синглтон у
+    # пропавшей основной. Слишком мало — служба скачет по рою на каждом
+    # моргании сети; слишком много — бот дольше молчит после реальной аварии.
+    failover_grace_s: float = Field(default=120.0, gt=0)
 
 
 class LoggingConfig(BaseModel):
@@ -401,6 +423,30 @@ class PersonConfig(BaseModel):
     birth_date: str = ""  # ISO "YYYY-MM-DD"; пусто — возраст неизвестен, не считаем
 
 
+def _warn_on_shadowed_sections(config_path: Path, instance_path: Path) -> None:
+    """Предупредить о секциях, оставшихся в общем конфиге после переезда.
+
+    Молчать тут нельзя: владелец правит знакомый ``config.toml``, не понимает,
+    почему ничего не изменилось, — а изменилось бы, правь он пакет. Пакет
+    выигрывает намеренно (он же реплицируется), поэтому единственное честное
+    поведение — сказать, где теперь живёт настройка.
+    """
+    try:
+        with open(config_path, "rb") as f:
+            base = tomllib.load(f)
+        with open(instance_path, "rb") as f:
+            package = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return
+    shadowed = sorted(set(base) & set(package))
+    if shadowed:
+        log.warning(
+            "Конфиг %s: секции %s теперь живут в пакете инстанса %s и берутся оттуда — "
+            "перенесите правки туда и удалите их из общего конфига",
+            config_path, ", ".join(f"[{s}]" for s in shadowed), instance_path.name,
+        )
+
+
 def _load_persona_prompt(path: Path, settings: Settings) -> None:
     """Подмешать settings.llm.persona_prompt из отдельного локального файла.
 
@@ -435,6 +481,8 @@ class Settings(BaseSettings):
 
     # Путь к TOML, выставляется в load() до инстанцирования.
     _toml_path: ClassVar[Path | None] = None
+    # Путь к пакету настроек инстанса — там же и так же.
+    _instance_path: ClassVar[Path | None] = None
 
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
@@ -462,15 +510,31 @@ class Settings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        # Приоритет: init > env > TOML. То есть env переопределяет TOML.
+        # Приоритет: init > env > пакет инстанса > TOML. Пакет выше общего
+        # конфига потому, что он и есть источник истины для своих секций:
+        # оставшаяся в config.toml копия — след прошлой раскладки, она не
+        # должна переигрывать то, что рой только что синхронизировал.
         sources: list[PydanticBaseSettingsSource] = [init_settings, env_settings]
+        if cls._instance_path is not None:
+            sources.append(TomlConfigSettingsSource(settings_cls, toml_file=cls._instance_path))
         if cls._toml_path is not None:
             sources.append(TomlConfigSettingsSource(settings_cls, toml_file=cls._toml_path))
         return tuple(sources)
 
     @classmethod
-    def load(cls, config_path: str | Path | None) -> Settings:
+    def load(
+        cls,
+        config_path: str | Path | None,
+        *,
+        instance: str = "",
+        instance_service: str = "telegram-bot",
+    ) -> Settings:
         """Загрузить настройки из TOML (если задан) с применением env-оверрайда.
+
+        ``instance`` — имя инстанса службы-синглтона (конкретного бота): его
+        переносимые настройки лежат отдельным пакетом рядом с config.toml и
+        реплицируются по рою (см. `node/instances.py`). Пусто — пакета нет,
+        всё берётся из общего конфига, как раньше.
 
         Неизвестные поля TOML не ошибка (совместимость версий), но каждое
         уходит warning'ом в лог — опечатка не должна молчать.
@@ -482,10 +546,25 @@ class Settings(BaseSettings):
             cls._toml_path = path
         else:
             cls._toml_path = None
+        instance_path = None
+        if instance and config_path is not None:
+            instance_path = (
+                Path(config_path).parent
+                / INSTANCES_DIRNAME
+                / f"{instance_service}.{instance}{PACKAGE_SUFFIX}"
+            )
+            if not instance_path.exists():
+                raise FileNotFoundError(
+                    f"Пакет настроек инстанса не найден: {instance_path}"
+                )
+        cls._instance_path = instance_path
         try:
             settings = cls()
         finally:
             cls._toml_path = None
+            cls._instance_path = None
+        if instance_path is not None:
+            _warn_on_shadowed_sections(path, instance_path)
         if config_path is not None:
             with open(path, "rb") as f:
                 raw = tomllib.load(f)

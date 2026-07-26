@@ -19,10 +19,18 @@ from typing import Any
 
 from sa_home_bot import __version__, wol
 from sa_home_bot.config import SwarmNodeConfig
+from sa_home_bot.node import assignments as assignments_mod
+from sa_home_bot.node import kind as node_kinds
 from sa_home_bot.node import update as node_update
+from sa_home_bot.node.lease import LeaseManager
 from sa_home_bot.node.peers import NodeRouter, PeerLink
+from sa_home_bot.node.replication import (
+    ACTION_GET_INSTANCE_CONFIG,
+    ACTION_LIST_INSTANCES,
+    ConfigReplicator,
+)
 from sa_home_bot.node.state import NodeState
-from sa_home_bot.node.supervisor import ASSIGNMENT_ARGS, EventEmitter, Supervisor
+from sa_home_bot.node.supervisor import EventEmitter, Supervisor
 from sa_home_bot.proto.client import ProtoClient
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
@@ -35,6 +43,7 @@ from sa_home_bot.proto.messages import (
     ServiceInfo,
 )
 from sa_home_bot.runtime import Runtime
+from sa_home_bot.services import registry
 from sa_home_bot.utils.system import system_uptime_seconds
 
 log = logging.getLogger(__name__)
@@ -129,10 +138,22 @@ class NodeService:
         own_endpoint: str = "",
         emit: EventEmitter | None = None,
         update_source: str | None = None,
+        node_kind: str = node_kinds.KIND_SERVER,
+        replicator: ConfigReplicator | None = None,
+        lease: LeaseManager | None = None,
     ) -> None:
+        # Репликация пакетов настроек: None — на этой ноде каталога пакетов
+        # нет (конфиг не файловый), обмениваться нечем.
+        self._replicator = replicator
+        # Аренда синглтонов: None — в тестах/сборках без неё.
+        self._lease = lease
         self._supervisor = supervisor
         self._router = router
         self._node = node_id or socket.gethostname()
+        # Тип машины: не привилегия, а ответ на «ждать ли ноду всегда», «можно
+        # ли будить», «есть ли датчики железа» — см. node/kind.py.
+        self._kind = node_kind
+        self._traits = node_kinds.traits_for(node_kind)
         self._runtime = Runtime()
         self._power = power_commands()
         self._power_runner = power_runner or _default_power_runner
@@ -158,6 +179,21 @@ class NodeService:
         self._updating = False
         self._last_update: dict[str, Any] | None = None
 
+    def _assignable_here(self) -> tuple[str, ...]:
+        """Что осмысленно назначить именно этой машине.
+
+        Служба, которой нужны термозоны и SMART, на виртуалке бессмысленна —
+        не предлагаем её в choices, чтобы бот не рисовал кнопку, ведущую к
+        службе, которой нечего мерить. Уже назначенное (правкой конфига,
+        например) при этом работает — фильтр только про предложение.
+        """
+        names = registry.assignable_names()
+        if self._traits.hardware_sensors:
+            return names
+        return tuple(
+            n for n in names if not registry.SERVICES[n].needs_hardware_sensors
+        )
+
     def describe(self) -> ServiceDescription:
         # choices — имена служб под супервизией: фронтенд строит кнопку на
         # каждое значение, ничего не хардкодя.
@@ -173,11 +209,16 @@ class NodeService:
             type="string",
             required=True,
             title="Назначение",
-            choices=tuple(ASSIGNMENT_ARGS),
+            choices=self._assignable_here(),
         )
         mac_param = ActionParam(name="mac", type="string", required=True, title="MAC цели")
         return ServiceDescription(
-            info=ServiceInfo(node=self._node, service=SERVICE_NAME, version=__version__),
+            info=ServiceInfo(
+                node=self._node,
+                service=SERVICE_NAME,
+                version=__version__,
+                node_kind=self._kind,
+            ),
             capabilities=("supervisor", "power"),
             actions=(
                 ActionSpec(id=ACTION_START, title="▶️ Запустить", params=(name_param,)),
@@ -222,6 +263,32 @@ class NodeService:
                     ActionSpec(id=action, title=_POWER_TITLES[action])
                     for action in self._power
                 ),
+                # Репликация настроек: оба действия с обязательными
+                # параметрами, поэтому фронтенды их кнопками не рисуют и зовёт
+                # их только другая нода (PROTOCOL.md, «команды-представления»).
+                # get_instance_config отдаёт секреты — канал внутри роя уже
+                # защищён (TCP + токен роя, unix-сокет — правами файла).
+                *(
+                    (
+                        ActionSpec(
+                            id=ACTION_LIST_INSTANCES,
+                            title="📦 Пакеты настроек",
+                            params=(
+                                ActionParam(name="service", required=True, title="Служба"),
+                            ),
+                        ),
+                        ActionSpec(
+                            id=ACTION_GET_INSTANCE_CONFIG,
+                            title="📦 Забрать пакет настроек",
+                            params=(
+                                ActionParam(name="service", required=True, title="Служба"),
+                                ActionParam(name="instance", required=True, title="Инстанс"),
+                            ),
+                        ),
+                    )
+                    if self._replicator is not None
+                    else ()
+                ),
             ),
         )
 
@@ -231,6 +298,15 @@ class NodeService:
             "node": self._node,
             "service": SERVICE_NAME,
             "version": __version__,
+            "kind": self._kind,
+            # Ревизии пакетов настроек — по ним соседи понимают, у кого версия
+            # свежее, и подтягивают её (node/replication.py).
+            "instances": (
+                self._replicator.local_revisions() if self._replicator is not None else []
+            ),
+            # Кто из нод держит службу-синглтон: на этом соседи строят своё
+            # решение брать/уступать (node/lease.py).
+            "singletons": self._lease.local_state() if self._lease is not None else {},
             "uptime_s": round(self._runtime.uptime_seconds(), 1),
             "system_uptime_s": system_uptime_seconds(),
             "services": [svc.to_dict() for svc in self._supervisor.services.values()],
@@ -268,6 +344,10 @@ class NodeService:
             return await self._update()
         if action == ACTION_SEND_WOL:
             return self._send_wol(args)
+        if action == ACTION_LIST_INSTANCES:
+            return self._list_instances(args)
+        if action == ACTION_GET_INSTANCE_CONFIG:
+            return self._get_instance_config(args)
         name = str(args.get("name", ""))
         if action == ACTION_ASSIGN:
             return await self._assign(name)
@@ -294,31 +374,77 @@ class NodeService:
         ноды через state_path). Идемпотентно — повторный assign не дублирует.
         """
         try:
+            assignment = assignments_mod.parse(name)
             svc = self._supervisor.assign(name)
         except ValueError as exc:
             raise ProtoError(ERR_BAD_REQUEST, str(exc)) from exc
-        await svc.start()
-        endpoint = self._local_service_endpoints.get(name)
-        already_linked = self._router is not None and name in self._router.local_services
+        # Синглтон не запускаем прямо здесь: его черёд определит аренда
+        # лидерства, убедившись, что службу не держит другая нода
+        # (node/lease.py). Для активной роли это ожидание нулевое.
+        spec = registry.spec(assignment.service)
+        if spec is None or not spec.singleton:
+            await svc.start()
+        # Маршрут — по имени службы: "telegram-bot@alfred" и "telegram-bot"
+        # ведут к одному и тому же сокету.
+        service = assignment.service
+        endpoint = self._local_service_endpoints.get(service)
+        already_linked = self._router is not None and service in self._router.local_services
         if self._router is not None and endpoint is not None and not already_linked:
-            link = PeerLink(name, endpoint, token=self._swarm_token)
-            await self._router.add_local_service(name, link)
+            link = PeerLink(service, endpoint, token=self._swarm_token)
+            await self._router.add_local_service(service, link)
         if name not in self._state.assignments:
             self._state.assignments.append(name)
             self._save_state()
         return {"service": svc.to_dict()}
 
     async def _unassign(self, name: str) -> dict[str, Any]:
-        if self._supervisor.get(name) is None:
+        # Снять можно и по ключу слота ("telegram-bot@alfred"), и по строке
+        # назначения целиком — так же, как её задавали.
+        try:
+            key = assignments_mod.parse(name).key
+        except assignments_mod.AssignmentError:
+            key = name
+        if self._supervisor.get(key) is None:
             known = ", ".join(self._supervisor.services) or "нет служб"
             raise ProtoError(ERR_BAD_REQUEST, f"нет такой службы: {name!r} (есть: {known})")
-        await self._supervisor.unassign(name)
+        service = self._supervisor.services[key].assignment.service
+        await self._supervisor.unassign(key)
         if self._router is not None:
-            await self._router.remove_local_service(name)
-        if name in self._state.assignments:
-            self._state.assignments.remove(name)
-            self._save_state()
+            await self._router.remove_local_service(service)
+        # В состоянии лежит исходная строка назначения — найти её по ключу.
+        for item in list(self._state.assignments):
+            try:
+                same = assignments_mod.parse(item).key == key
+            except assignments_mod.AssignmentError:
+                same = item == key
+            if same:
+                self._state.assignments.remove(item)
+                self._save_state()
         return {"unassigned": name}
+
+    def _list_instances(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self._replicator is None:
+            raise ProtoError(ERR_BAD_REQUEST, "на этой ноде нет каталога пакетов настроек")
+        service = str(args.get("service", ""))
+        revisions = [
+            meta for meta in self._replicator.local_revisions() if meta["service"] == service
+        ]
+        return {"service": service, "instances": revisions}
+
+    def _get_instance_config(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Отдать пакет настроек соседу. Зовётся нодой, не человеком: пакет
+        содержит секреты службы (токен бота), поэтому едет адресным ответом
+        по защищённому каналу роя, а не broadcast'ом."""
+        if self._replicator is None:
+            raise ProtoError(ERR_BAD_REQUEST, "на этой ноде нет каталога пакетов настроек")
+        service = str(args.get("service", ""))
+        instance = str(args.get("instance", ""))
+        payload = self._replicator.package_payload(service, instance)
+        if payload is None:
+            raise ProtoError(
+                ERR_BAD_REQUEST, f"нет пакета настроек {service}@{instance} на ноде {self._node}"
+            )
+        return payload
 
     def _send_wol(self, args: dict[str, Any]) -> dict[str, Any]:
         """Разослать magic packet в СВОЙ LAN-сегмент — вызывается пиром роя,

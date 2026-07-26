@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from aiogram.exceptions import TelegramConflictError
+
 from sa_home_bot.bot.ai_flow import RESTART_TEXT, ActiveAiChats
 from sa_home_bot.bot.dispatch import TelegramEventDispatcher
 from sa_home_bot.bot.lifecycle import (
@@ -41,7 +43,9 @@ log = logging.getLogger(__name__)
 STATE_CLEAN_SHUTDOWN = "last_shutdown_clean"
 
 
-async def run(settings: Settings) -> None:
+async def run(settings: Settings) -> bool:
+    """Запустить бота. True на выходе — нас вытеснил другой экземпляр того же
+    бота (409 Conflict); cli.main превращает это в FENCED_EXIT_CODE."""
     runtime = Runtime()
 
     # 1-2. Логирование уже настроено в CLI; БД бота + миграции.
@@ -154,6 +158,24 @@ async def run(settings: Settings) -> None:
 
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
+
+    fenced = False
+
+    def _on_polling_done(task: asyncio.Task) -> None:
+        """409 Conflict — не сбой, а сообщение извне: этот же токен уже
+        опрашивает другой экземпляр бота. Спорить с Telegram бессмысленно и
+        вредно (два поллера отбирают апдейты друг у друга), поэтому выходим
+        особым кодом: нода поймёт, что перезапускать нас не надо, и отдаст
+        решение аренде лидерства (node/lease.py)."""
+        nonlocal fenced
+        if task.cancelled():
+            return
+        if isinstance(task.exception(), TelegramConflictError):
+            fenced = True
+            log.error("Этот же бот уже запущен где-то ещё (409 Conflict) — уступаю")
+            lifespan.trigger()
+
+    polling_task.add_done_callback(_on_polling_done)
     log.info("Бот запущен (uptime-старт зафиксирован)")
 
     # 11. Ждать сигнала, затем остановить всё в обратном порядке.
@@ -174,6 +196,7 @@ async def run(settings: Settings) -> None:
             bot=bot,
             db=db,
         )
+    return fenced
 
 
 async def _shutdown(

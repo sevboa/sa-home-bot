@@ -13,6 +13,10 @@ config.toml
 config.toml.*
 llm-prompt.toml
 llm-prompt.toml.*
+# Пакеты настроек инстансов содержат секреты (токен бота) и персональные
+# данные; в репозитории живёт только пример.
+instances/*
+!instances/*.example.toml
 *.sqlite
 *.sqlite-*
 *.swp
