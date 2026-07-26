@@ -187,19 +187,34 @@ async def _post_with_retry(cfg: LlmConfig, url: str, payload: dict[str, Any]) ->
     (до 30 минут), не только на один запрос (живая находка 2026-07-23: раньше
     keepalive был здесь и WSL гасла уже через секунды после ответа) —
     владеет им llm/service.py::LlmService (WslKeepalive.start()/stop()
-    вокруг всего простоя, не вокруг одного запроса)."""
+    вокруг всего простоя, не вокруг одного запроса).
+
+    Живая находка 2026-07-27: ретраи считались без оглядки на общий бюджет —
+    3 попытки по (до 150с прогрева + до request_timeout_s на сам POST)
+    складывались в ~20 минут, тогда как вызывающий ждёт ровно
+    request_timeout_s (Envelope.timeout_s). Клиент отваливался задолго до
+    того, как служба сдавалась, и вместо внятной ошибки наверх приходил
+    голый таймаут. Теперь дедлайн общий: новая попытка не начинается, если
+    время вызывающего всё равно вышло.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + cfg.request_timeout_s
     last_exc: Exception | None = None
     for attempt in range(1, _POST_RETRY_ATTEMPTS + 1):
         await ensure_running(cfg)
+        left = deadline - loop.time()
+        if left <= 0:
+            break
         try:
-            return await asyncio.to_thread(_post_json_sync, url, payload, cfg.request_timeout_s)
+            return await asyncio.to_thread(_post_json_sync, url, payload, left)
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
             last_exc = exc
             if attempt >= _POST_RETRY_ATTEMPTS or not _is_transient_connection_error(exc):
                 break
+            if deadline - loop.time() <= _POST_RETRY_DELAY_S:
+                break
             log.warning(
-                "llm: %s оборвался сразу после прогрева (%s) — повтор через %.0fс "
-                "(попытка %d/%d)",
+                "llm: %s оборвался сразу после прогрева (%s) — повтор через %.0fс (попытка %d/%d)",
                 url,
                 exc,
                 _POST_RETRY_DELAY_S,
@@ -207,6 +222,10 @@ async def _post_with_retry(cfg: LlmConfig, url: str, payload: dict[str, Any]) ->
                 _POST_RETRY_ATTEMPTS,
             )
             await asyncio.sleep(_POST_RETRY_DELAY_S)
+    if last_exc is None:
+        raise ProtoError(
+            ERR_INTERNAL, f"{url}: бюджет {cfg.request_timeout_s:.0f}с истёк на прогреве"
+        )
     raise ProtoError(ERR_INTERNAL, f"{url}: {last_exc}")
 
 
@@ -223,6 +242,20 @@ async def _post_with_retry(cfg: LlmConfig, url: str, payload: dict[str, Any]) ->
 # KV-кэш между запросами, считая их разной конфигурацией.
 def _keep_alive_options(cfg: LlmConfig) -> dict[str, Any]:
     return {"keep_alive": cfg.idle_sleep_after_s, "options": {"num_ctx": cfg.num_ctx}}
+
+
+async def preload(cfg: LlmConfig) -> None:
+    """Загрузить модель в память, ничего не генерируя.
+
+    Живая находка 2026-07-27: `ensure_running` поднимает только WSL/контейнер
+    и ждёт /api/version — модели в памяти при этом нет, и первый же реальный
+    запрос платит десятки секунд за её загрузку. Для отложенных задач это
+    значит «прогрето» ≠ «ответит в срок». Ollama на пустом prompt именно
+    загружает модель и сразу отвечает (это её штатный способ preload), а
+    keep_alive держит её до конца тёплого окна — как и у обычных запросов.
+    """
+    payload = {"model": cfg.model, "prompt": "", "stream": False, **_keep_alive_options(cfg)}
+    await _post_with_retry(cfg, f"{cfg.ollama_url}/api/generate", payload)
 
 
 async def generate(cfg: LlmConfig, prompt: str, system: str) -> dict[str, Any]:

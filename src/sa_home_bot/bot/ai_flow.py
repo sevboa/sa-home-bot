@@ -69,6 +69,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram.types import Message, User
 
+from sa_home_bot import wake_core
 from sa_home_bot.bot import swarm_view
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.notifier import Notifier
@@ -113,9 +114,7 @@ ALBERT_ASLEEP = "<b>Альбегт:</b> Альфред, кажется, усну
 # явно попросил (2026-07-24) не пускать техническое в чат. Решение: даже не
 # зная точной причины, подаём это тем же персонажем — Альфред как будто на
 # секунду отвлёкся, просим повторить.
-ALBERT_HICCUP = (
-    "<b>Альбегт:</b> Прошу прощения, Альфред на секунду отвлёкся — повторите, сэр/мадам"
-)
+ALBERT_HICCUP = "<b>Альбегт:</b> Прошу прощения, Альфред на секунду отвлёкся — повторите, сэр/мадам"
 # Закрытие треда, когда служба llm сама гасит контейнер по простою
 # (llm/service.py::EVENT_IDLE_SLEEP) — не отсюда, а из bot/node_events.py
 # (событие прилетает не в ответ на сообщение пользователя), но текст —
@@ -126,14 +125,14 @@ CLOSING_TEXT = "<i>Альфред не дождался обращения и у
 # рассылает bot/node_events.py), другой повод и текст: явно НЕ выглядит как
 # сбой — пользователь попросил именно это 2026-07-24.
 RESTART_TEXT = "<i>У Альфреда появились другие дела</i>"
-# Отложенная задача (тул remind, служба tasks) сработала, но за отведённое
-# на прогрев время (см. tasks/service.py::PREWAKE_LEAD_S) Альфреда так и не
-# нашли — не отсюда, а из bot/node_events.py по событию task_result
-# (ok=False), решение пользователя 2026-07-24: доложить об этом один раз,
-# без повторных попыток растягивать сам момент срабатывания.
+# Отложенная задача (тул remind, служба tasks) сработала, но Альфреда так и
+# не нашли — не отсюда, а из bot/node_events.py по событию task_result
+# (ok=False). Решение пользователя 2026-07-27: сюда доходит только после
+# того, как служба будила цель заранее (PREWAKE_LEAD_S) И повторяла попытки
+# ещё FIRE_GRACE_S после срока — то есть это уже настоящая неудача, а не
+# «просто не успели прогреть» (см. tasks/service.py).
 ALBERT_TASK_MISSED = (
-    "<b>Альбегт:</b> Прошу прощения, не удалось найти Альфреда, чтобы он "
-    "сделал, что обещал."
+    "<b>Альбегт:</b> Прошу прощения, не удалось найти Альфреда, чтобы он сделал, что обещал."
 )
 
 
@@ -178,23 +177,14 @@ class ActiveAiChats:
         return dict(self._tasks)
 
 
-WAKE_POLL_TIMEOUT_S = 90.0
-WAKE_POLL_INTERVAL_S = 3.0
-# Живая находка 2026-07-23: TCP-keepalive (proto/client.py) обнаруживает
-# пропавшего пира не мгновенно (до ~50с — TCP_KEEPALIVE_IDLE_S=20 +
-# INTERVAL_S=10 * COUNT=3), а get_state() без явного укороченного таймаута
-# ждёт весь дефолт ProtoClient (10с) на каждый хоп. Если presence-проверка
-# уже говорит "недоступна" — не тратим ещё раз время на полноценный _ask()
-# (до request_timeout_s) с тем же исходом, сразу идём в сценарий wake.
-#
-# Живая находка 2026-07-25: 3с оказалось мало — winpc (WSL2/Ollama) иногда
-# на пару секунд подтормаживает с ответом на get_state, не будучи реально
-# недоступной (сеть быстрая — tailscale ping ~1мс, TCP keepalive не рвался,
-# событий сна в Windows нет вовсе), но presence-проверка ложно решала, что
-# нода уснула — пользователь получал "шаги"/WoL посреди уже идущего
-# диалога вместо быстрого ответа. Увеличено с запасом под такие подтормаживания,
-# всё ещё намного меньше TCP-keepalive-обнаружения и WAKE_POLL_TIMEOUT_S.
-_PRESENCE_CHECK_TIMEOUT_S = 6.0
+# Сценарные константы presence/wake — общие с службой tasks, живут в
+# wake_core.py (живая находка 2026-07-27: пока их было две копии, правку
+# 2b8fae7 пришлось делать в обоих файлах, и они всё равно разъезжались —
+# WAKE_POLL_TIMEOUT_S здесь и там уже значил разное). Здесь только
+# реэкспорт под привычными именами, чтобы не трогать тесты и вызовы.
+WAKE_POLL_TIMEOUT_S = wake_core.WAKE_POLL_TIMEOUT_S
+WAKE_POLL_INTERVAL_S = wake_core.WAKE_POLL_INTERVAL_S
+_PRESENCE_CHECK_TIMEOUT_S = wake_core.PRESENCE_TIMEOUT_S
 
 # Вариативное рассуждение (LLM_INTEGRATION_PLAN.md §7, живая находка
 # 2026-07-24): включать think=true на КАЖДЫЙ запрос надёжно для расчётов,
@@ -509,7 +499,9 @@ async def request_alfred(
             # (см. вызовы request_alfred в bot/handlers/ai.py — history
             # собирается с ним последним).
             base_messages: list[dict[str, Any]] = [
-                *history[:-1], {"role": "system", "content": context_note}, history[-1]
+                *history[:-1],
+                {"role": "system", "content": context_note},
+                history[-1],
             ]
         else:
             base_messages = list(history)

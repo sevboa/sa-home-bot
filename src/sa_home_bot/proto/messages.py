@@ -232,6 +232,14 @@ class ServiceInfo:
     # знал, ждать ли ноду всегда и можно ли её будить, без отдельного запроса.
     # Пусто — нода старой версии: см. node/kind.py::traits_for (консервативно).
     node_kind: str = ""
+    # Ethernet-реквизиты для Wake-on-LAN (mac/ip/broadcast) — по той же
+    # причине, что и node_kind выше: чтобы сосед знал, КАК будить, ещё до
+    # того, как цель уснула и её уже не спросить. Живая находка 2026-07-27:
+    # раньше это ехало только в get_state() и оседало в БД спрашивавшего —
+    # у службы без своей истории опросов (tasks) кэш оставался пустым
+    # навсегда, и разбудить она не могла никогда (см. wake_core.
+    # resolve_wake_info). None — нода старой версии либо без Ethernet.
+    wake: dict[str, str] | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -239,17 +247,20 @@ class ServiceInfo:
             "service": self.service,
             "version": self.version,
             "node_kind": self.node_kind,
+            "wake": self.wake,
             "proto": PROTO_VERSION,
         }
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> ServiceInfo:
+        wake = payload.get("wake")
         try:
             return cls(
                 node=str(payload["node"]),
                 service=str(payload["service"]),
                 version=str(payload["version"]),
                 node_kind=str(payload.get("node_kind", "")),
+                wake={str(k): str(v) for k, v in wake.items()} if isinstance(wake, dict) else None,
             )
         except KeyError as exc:
             raise ProtoError(ERR_BAD_REQUEST, f"hello без поля {exc}") from exc

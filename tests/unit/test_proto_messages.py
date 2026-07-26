@@ -121,9 +121,7 @@ def test_service_description_roundtrip():
             ActionSpec(
                 id="restart",
                 title="Перезапустить",
-                params=(
-                    ActionParam(name="name", choices=("monitor", "telegram-bot")),
-                ),
+                params=(ActionParam(name="name", choices=("monitor", "telegram-bot")),),
             ),
         ),
     )
@@ -138,3 +136,21 @@ def test_service_description_roundtrip():
 def test_hello_payload_requires_fields():
     with pytest.raises(ProtoError):
         ServiceInfo.from_payload({"node": "alfred"})
+
+
+def test_hello_carries_wake_info():
+    # Реквизиты WoL едут уже в hello (как и node_kind): сосед должен знать,
+    # КАК будить ноду, к моменту, когда она уснула и её уже не спросить —
+    # см. wake_core.resolve_wake_info.
+    wake = {"mac": "04:92:26:da:63:7c", "ip": "192.168.0.105", "broadcast": "192.168.0.255"}
+    info = ServiceInfo(node="winpc", service="node", version="0.38.1", wake=wake)
+    assert ServiceInfo.from_payload(info.to_payload()) == info
+
+
+def test_hello_without_wake_is_old_node():
+    # Нода прежней версии поля не шлёт — это не ошибка разбора, просто её
+    # нечем будить (как и Wi-Fi-ноду, у которой wake=None).
+    restored = ServiceInfo.from_payload(
+        {"node": "arch-t480", "service": "node", "version": "0.30.0"}
+    )
+    assert restored.wake is None

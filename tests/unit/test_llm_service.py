@@ -93,9 +93,7 @@ async def test_chat_calls_ollama_chat_and_extracts_message(monkeypatch):
 
     monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
     svc = LlmService(_settings())
-    result = await svc.run_command(
-        "chat", {"messages": [{"role": "user", "content": "привет"}]}
-    )
+    result = await svc.run_command("chat", {"messages": [{"role": "user", "content": "привет"}]})
     assert result == {"response": "Добгый день", "model": "qwen2.5:7b"}
 
 
@@ -120,14 +118,10 @@ async def test_chat_passes_explicit_think_through_to_ollama(monkeypatch):
 
     monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
     svc = LlmService(_settings())
-    await svc.run_command(
-        "chat", {"messages": [{"role": "user", "content": "1"}], "think": True}
-    )
+    await svc.run_command("chat", {"messages": [{"role": "user", "content": "1"}], "think": True})
     assert seen["think"] is True
 
-    await svc.run_command(
-        "chat", {"messages": [{"role": "user", "content": "1"}], "think": False}
-    )
+    await svc.run_command("chat", {"messages": [{"role": "user", "content": "1"}], "think": False})
     assert seen["think"] is False
 
 
@@ -231,17 +225,26 @@ async def test_ask_after_sleep_wakes_up_again(monkeypatch):
     assert (await svc.get_state())["asleep"] is False
 
 
-async def test_warmup_ensures_running_without_generating(monkeypatch):
+async def test_warmup_also_preloads_model(monkeypatch):
+    # Живая находка 2026-07-27: раньше прогрев только поднимал WSL/контейнер
+    # (ensure_running), а модель оставалась выгруженной — "прогретая" служба
+    # всё равно платила за её загрузку на первом реальном запросе, и
+    # отложенная задача опаздывала на десятки секунд. Теперь прогрев тянет и
+    # саму модель в память (ollama.preload).
     calls = []
 
     async def fake_ensure_running(cfg):
-        calls.append(cfg.model)
+        calls.append(("ensure_running", cfg.model))
+
+    async def fake_preload(cfg):
+        calls.append(("preload", cfg.model))
 
     monkeypatch.setattr(llm_service.ollama, "ensure_running", fake_ensure_running)
+    monkeypatch.setattr(llm_service.ollama, "preload", fake_preload)
     svc = LlmService(_settings())
     result = await svc.run_command("warmup", {})
     assert result == {"asleep": False}
-    assert calls == ["qwen2.5:7b"]
+    assert calls == [("ensure_running", "qwen2.5:7b"), ("preload", "qwen2.5:7b")]
     assert (await svc.get_state())["asleep"] is False
 
 
@@ -251,7 +254,11 @@ async def test_warmup_does_not_add_chat_id_to_active_chats(monkeypatch):
     async def fake_ensure_running(cfg):
         pass
 
+    async def fake_preload(cfg):
+        pass
+
     monkeypatch.setattr(llm_service.ollama, "ensure_running", fake_ensure_running)
+    monkeypatch.setattr(llm_service.ollama, "preload", fake_preload)
 
     async def fake_stop(cfg):
         pass

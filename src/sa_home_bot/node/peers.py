@@ -62,6 +62,10 @@ class PeerLink:
         # нормально ли, что нода пропала, нужно знать её тип именно тогда,
         # когда её уже не спросить.
         self.node_kind: str = ""
+        # Ethernet-реквизиты соседа из его hello (ServiceInfo.wake). Держим и
+        # после обрыва по той же причине, что и node_kind: чтобы РАЗБУДИТЬ
+        # ноду, надо знать её MAC именно тогда, когда её уже не спросить.
+        self.wake_info: dict[str, str] | None = None
         # Момент последней потери связи (monotonic) — от него отсчитывается
         # порог «пропала слишком надолго» для алерта о ноде, которая обязана
         # быть в сети. None — связь есть либо ещё ни разу не устанавливалась.
@@ -123,6 +127,8 @@ class PeerLink:
                 logged_down = False
                 if info.node_kind:
                     self.node_kind = info.node_kind
+                if info.wake:
+                    self.wake_info = info.wake
                 self.down_since = None
                 self._client = client
                 try:
@@ -199,6 +205,10 @@ class NodeRouter:
                 # отличает «спит, это норма» от «пропал сервер, это авария».
                 "kind": link.node_kind,
                 "down_s": link.downtime_s(),
+                # Реквизиты WoL соседа, известные с последнего hello — так
+                # любая служба может разбудить его, не имея собственного
+                # кэша опросов (см. wake_core.resolve_wake_info).
+                "wake": link.wake_info,
             }
             for link in self.peers.values()
         ]

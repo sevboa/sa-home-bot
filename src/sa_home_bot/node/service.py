@@ -218,6 +218,7 @@ class NodeService:
                 service=SERVICE_NAME,
                 version=__version__,
                 node_kind=self._kind,
+                wake=self._local_wake_payload(),
             ),
             capabilities=("supervisor", "power"),
             actions=(
@@ -292,8 +293,17 @@ class NodeService:
             ),
         )
 
+    @staticmethod
+    def _local_wake_payload() -> dict[str, str] | None:
+        """Свои Ethernet-реквизиты для WoL (None — Wi-Fi/без LAN). Один вид
+        для hello (ServiceInfo.wake) и для get_state()["wake"] — соседи
+        кладут в кэш то же самое, откуда бы ни узнали."""
+        info = wol.detect_local_wake_info()
+        if info is None:
+            return None
+        return {"mac": info.mac, "ip": info.ip, "broadcast": info.broadcast}
+
     async def get_state(self) -> dict[str, Any]:
-        wake_info = wol.detect_local_wake_info()
         state: dict[str, Any] = {
             "node": self._node,
             "service": SERVICE_NAME,
@@ -313,11 +323,7 @@ class NodeService:
             "peers": self._router.peers_state() if self._router is not None else [],
             # Свои Ethernet-реквизиты (None — Wi-Fi/без LAN): бот кэширует их,
             # пока нода жива, и использует, когда та уснёт (этап 19 п.6).
-            "wake": (
-                {"mac": wake_info.mac, "ip": wake_info.ip, "broadcast": wake_info.broadcast}
-                if wake_info is not None
-                else None
-            ),
+            "wake": self._local_wake_payload(),
         }
         if self._update_source is not None:
             installed = node_update.installed_version()
@@ -599,9 +605,7 @@ class NodeService:
             finally:
                 self._updating = False
             if ok:
-                log.warning(
-                    "Задача автообновления запущена — служба скоро перезапустится сама"
-                )
+                log.warning("Задача автообновления запущена — служба скоро перезапустится сама")
                 return
             log.error("Не удалось запустить задачу автообновления: %s", output)
             self._last_update = {"ok": False, "version": target_version, "error": output}

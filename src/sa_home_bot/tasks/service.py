@@ -22,11 +22,19 @@ tool-calling поверх llm.chat (sa_home_bot.llm_chat.run_chat_loop): это
 создал задачу — человек через /ai или модель во время собственного ответа).
 
 Прогрев (prewake_loop) — за PREWAKE_LEAD_S до due_at, если dst не отвечает
-или спит, пробуем разбудить его заранее (тот же WoL-путь, что /wake, см.
-wake_core.py) — единственная попытка; если к моменту fire_loop dst всё ещё
-не тёплый, задача сразу считается неудачной, без второй попытки на самом
-сроке (решение пользователя 2026-07-24: холодный старт до ~150с не должен
-растягивать сам момент срабатывания)."""
+или спит, будим его заранее (тот же WoL-путь, что /wake, см. wake_core.py),
+чтобы ответ пришёл ровно в срок.
+
+Живая находка 2026-07-27 (инцидент 19:34-19:39, напоминание не доставлено).
+Прежняя схема — единственная попытка прогрева и мгновенный отказ на самом
+сроке, если цель не тёплая (решение пользователя 2026-07-24: холодный старт
+не должен растягивать момент срабатывания) — на практике дала худшее из
+двух: WoL из этой службы не уходил ВООБЩЕ (пустой кэш wake-реквизитов, см.
+wake_core.resolve_wake_info), 5 минут форы пропали впустую, а на сроке
+задача сдалась за 6 секунд. Новая схема (решение пользователя 2026-07-27):
+фора увеличена до 10 минут, а на сроке служба сама будит цель и повторяет
+попытки до FIRE_GRACE_S после due_at — лучше напоминание с опозданием в
+пару минут, чем «пропущено»."""
 
 from __future__ import annotations
 
@@ -46,7 +54,6 @@ from sa_home_bot.db.store import Store
 from sa_home_bot.llm_chat import run_chat_loop
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
-    ERR_UNKNOWN_ACTION,
     ActionParam,
     ActionSpec,
     Address,
@@ -58,17 +65,16 @@ from sa_home_bot.tasks import protocol
 
 log = logging.getLogger(__name__)
 
-PREWAKE_LEAD_S = 300.0
+# За сколько до срока начинать будить цель. Решение пользователя 2026-07-27:
+# 10 минут — холодный старт winpc плюс загрузка 35B-модели в память заведомо
+# укладываются, и ответ приходит ровно в срок, а не после него.
+PREWAKE_LEAD_S = 600.0
 POLL_INTERVAL_S = 30.0
-# Живая находка 2026-07-25 (та же, что и bot/ai_flow.py::_PRESENCE_CHECK_
-# TIMEOUT_S): 3с ловило ложные "недоступна" на кратковременных подтормаживаниях
-# winpc (WSL2/Ollama), не будучи реальным сном/недоступностью.
-_PRESENCE_TIMEOUT_S = 6.0
-WAKE_POLL_TIMEOUT_S = 90.0
-WAKE_POLL_INTERVAL_S = 3.0
-# Прогрев самой цели (например ACTION_WARMUP службы llm) — не все службы
-# такое объявляют, отсутствие поддержки (ERR_UNKNOWN_ACTION) — не сбой.
-WARMUP_TIMEOUT_S = 180.0
+# Сколько после due_at ещё пытаться, если цель так и не поднялась (решение
+# пользователя 2026-07-27). Дальше — честное "пропущено": напоминание,
+# опоздавшее на десятки минут, уже вреднее молчания.
+FIRE_GRACE_S = 300.0
+FIRE_RETRY_INTERVAL_S = 30.0
 
 EventEmitter = Callable[[str, dict[str, Any]], Awaitable[None]]
 
@@ -91,6 +97,15 @@ class TasksService:
         self._node_link = node_link
         self._emit = emit
         self._node = socket.gethostname()
+        # Идущие прогревы: fire_loop дожидается прогрева СВОЕЙ задачи, а не
+        # читает presence посреди него. Живая находка 2026-07-27: циклы
+        # независимы, и задача со сроком меньше PREWAKE_LEAD_S получала
+        # прогрев и срабатывание практически одновременно — presence видела
+        # ещё не поднятую ноду и задача падала при живом идущем прогреве.
+        self._prewake_inflight: dict[int, asyncio.Task] = {}
+        # Кому уже показали «шаги» (EVENT_TASK_PREWAKE waking) — чтобы не
+        # повторять то же сообщение на срабатывании.
+        self._waking_announced: set[int] = set()
 
     def describe(self) -> ServiceDescription:
         return ServiceDescription(
@@ -179,7 +194,10 @@ class TasksService:
             dst_service,
             task_action,
             task_args or {},
-            float(timeout_s) if timeout_s else 60.0,
+            # Дефолт — бюджет запроса к модели: единственный «богатый» тип
+            # задачи (chat_loop) заведомо не укладывается в прежние 60с, а
+            # обычным командам такой запас не мешает.
+            float(timeout_s) if timeout_s else self._settings.llm.request_timeout_s,
             meta or {},
             due_at.astimezone(UTC),
             now,
@@ -203,7 +221,10 @@ class TasksService:
             # снова, пока предыдущая попытка (прогрев может занять минуты)
             # ещё идёт.
             await self._store.mark_task_prewake_done(row["id"])
-            asyncio.create_task(self._prewake_one_safe(row), name=f"tasks-prewake-{row['id']}")
+            task_id = row["id"]
+            job = asyncio.create_task(self._prewake_one_safe(row), name=f"tasks-prewake-{task_id}")
+            self._prewake_inflight[task_id] = job
+            job.add_done_callback(lambda _job, tid=task_id: self._prewake_inflight.pop(tid, None))
 
     async def _prewake_one_safe(self, row: dict) -> None:
         try:
@@ -212,64 +233,43 @@ class TasksService:
             log.exception("tasks: сбой прогрева задачи id=%s", row["id"])
 
     async def _prewake_one(self, row: dict) -> None:
-        dst = Address(node=row["dst_node"], service=row["dst_service"])
+        task_id = row["id"]
         meta = json.loads(row["meta_json"])
-        try:
-            state = await asyncio.wait_for(self._node_link.get_state(dst=dst), _PRESENCE_TIMEOUT_S)
-        except (ServiceUnavailableError, ProtoError, TimeoutError):
-            state = None
-        if state is not None and not state.get("asleep"):
-            return  # уже тёплая — тихо, показывать нечего
+        dst = Address(node=row["dst_node"], service=row["dst_service"])
 
-        await self._emit(
-            protocol.EVENT_TASK_PREWAKE, {"task_id": row["id"], "meta": meta, "status": "waking"}
+        state = await wake_core.fetch_state(
+            self._node_link, dst, timeout_s=wake_core.PRESENCE_TIMEOUT_S
         )
-        if state is None:
-            outcome = await wake_core.wake_swarm_node_core(
-                self._node_link, self._store, row["dst_node"]
-            )
-            became = outcome.ok and await wake_core.wait_for_service(
-                self._node_link,
-                row["dst_node"],
-                row["dst_service"],
-                WAKE_POLL_TIMEOUT_S,
-                WAKE_POLL_INTERVAL_S,
-            )
-            if not became:
-                await self._emit(
-                    protocol.EVENT_TASK_PREWAKE,
-                    {
-                        "task_id": row["id"],
-                        "meta": meta,
-                        "status": "failed",
-                        "reason": "unreachable",
-                    },
-                )
-                return
+        if state is not None and not state.get("asleep"):
+            log.info("tasks: задача id=%s — цель уже тёплая, прогрев не нужен", task_id)
+            return  # тихо: показывать пользователю нечего
 
-        warmed = await self._try_warmup(dst)
-        if warmed:
+        await self._announce_waking(task_id, meta)
+        outcome = await wake_core.ensure_service_ready(
+            self._node_link, self._store, row["dst_node"], row["dst_service"]
+        )
+        log.info("tasks: прогрев задачи id=%s -> %s", task_id, outcome)
+        if outcome == wake_core.READY:
             await self._emit(
-                protocol.EVENT_TASK_PREWAKE, {"task_id": row["id"], "meta": meta, "status": "ready"}
+                protocol.EVENT_TASK_PREWAKE, {"task_id": task_id, "meta": meta, "status": "ready"}
             )
-        else:
-            await self._emit(
-                protocol.EVENT_TASK_PREWAKE,
-                {"task_id": row["id"], "meta": meta, "status": "failed", "reason": "warmup_failed"},
-            )
+            return
+        # Не сдаёмся насовсем: на сроке будет ещё одна серия попыток
+        # (_fire_chat_loop), поэтому здесь НЕ эмитим failed — иначе
+        # пользователь получил бы «не смог» от ещё не проигранной задачи.
+        log.warning(
+            "tasks: прогрев задачи id=%s не удался (%s), повторим на сроке", task_id, outcome
+        )
 
-    async def _try_warmup(self, dst: Address) -> bool:
-        """Лучшее из возможного: дёргаем условное действие ``warmup`` у
-        цели (llm/service.py его объявляет) — отсутствие поддержки
-        (ERR_UNKNOWN_ACTION) не ошибка, просто у этой службы нет отдельного
-        прогрева (dst и так уже отвечает — этого достаточно)."""
-        try:
-            await self._node_link.command("warmup", {}, dst=dst, timeout=WARMUP_TIMEOUT_S)
-            return True
-        except ProtoError as exc:
-            return exc.code == ERR_UNKNOWN_ACTION
-        except ServiceUnavailableError:
-            return False
+    async def _announce_waking(self, task_id: int, meta: dict) -> None:
+        """«Шаги» показываем один раз на задачу — прогрев и срабатывание
+        могут оба упереться в спящую ноду, дублировать сообщение незачем."""
+        if task_id in self._waking_announced:
+            return
+        self._waking_announced.add(task_id)
+        await self._emit(
+            protocol.EVENT_TASK_PREWAKE, {"task_id": task_id, "meta": meta, "status": "waking"}
+        )
 
     # --- срабатывание ---
 
@@ -295,10 +295,21 @@ class TasksService:
             await self._fire_one(row)
         except Exception:  # noqa: BLE001
             log.exception("tasks: сбой срабатывания задачи id=%s", row["id"])
+        finally:
+            # Задача отыграна — её пометка о показанных «шагах» больше не
+            # нужна (иначе множество росло бы всю жизнь процесса).
+            self._waking_announced.discard(row["id"])
 
     async def _fire_one(self, row: dict) -> None:
         dst = Address(node=row["dst_node"], service=row["dst_service"])
         meta = json.loads(row["meta_json"])
+
+        # Прогрев этой же задачи может быть ещё в работе (срок ближе, чем
+        # PREWAKE_LEAD_S) — дождаться его, а не гонять с ним наперегонки.
+        job = self._prewake_inflight.get(row["id"])
+        if job is not None and not job.done():
+            log.info("tasks: задача id=%s ждёт свой идущий прогрев", row["id"])
+            await asyncio.wait([job], timeout=FIRE_GRACE_S)
 
         if row["action"] == protocol.ACTION_CHAT_LOOP:
             await self._fire_chat_loop(row, dst, meta)
@@ -321,19 +332,43 @@ class TasksService:
         )
 
     async def _fire_chat_loop(self, row: dict, dst: Address, meta: dict) -> None:
-        # За PREWAKE_LEAD_S уже была одна полноценная попытка прогрева (см.
-        # _prewake_one) — второй раз ждать здесь ещё 90-150с не будем
-        # (решение пользователя 2026-07-24), сразу проверяем и, если не
-        # готова, докладываем неудачу.
-        try:
-            state = await asyncio.wait_for(self._node_link.get_state(dst=dst), _PRESENCE_TIMEOUT_S)
-        except (ServiceUnavailableError, ProtoError, TimeoutError):
-            state = None
-        if state is None or state.get("asleep"):
+        # Решение пользователя 2026-07-27: на сроке служба сама доводит цель
+        # до готовности (WoL + ожидание + прогрев) и повторяет попытки до
+        # FIRE_GRACE_S. Прежний вариант — presence на 6с и мгновенный отказ —
+        # означал, что спящая машина гарантированно съедала напоминание
+        # (инцидент 19:34, см. докстринг модуля).
+        task_id = row["id"]
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + FIRE_GRACE_S
+        outcome = wake_core.UNREACHABLE
+        while True:
+            outcome = await wake_core.ensure_service_ready(
+                self._node_link,
+                self._store,
+                row["dst_node"],
+                row["dst_service"],
+                # Не выходить за общий бюджет задачи ради одного ожидания WoL.
+                wake_timeout_s=min(wake_core.WAKE_POLL_TIMEOUT_S, max(deadline - loop.time(), 0.0)),
+            )
+            if outcome == wake_core.READY:
+                break
+            await self._announce_waking(task_id, meta)
+            if deadline - loop.time() <= FIRE_RETRY_INTERVAL_S:
+                break
+            log.warning(
+                "tasks: задача id=%s — цель не готова (%s), повтор через %.0fс",
+                task_id,
+                outcome,
+                FIRE_RETRY_INTERVAL_S,
+            )
+            await asyncio.sleep(FIRE_RETRY_INTERVAL_S)
+
+        if outcome != wake_core.READY:
+            log.warning("tasks: задача id=%s провалена: цель так и не поднялась", task_id)
             await self._emit(
                 protocol.EVENT_TASK_RESULT,
                 {
-                    "task_id": row["id"],
+                    "task_id": task_id,
                     "meta": meta,
                     "ok": False,
                     "error": "цель недоступна/не прогрета к моменту срабатывания",
@@ -362,12 +397,14 @@ class TasksService:
                 log_chat_id=row["id"],
             )
         except (ServiceUnavailableError, ProtoError) as exc:
+            log.warning("tasks: задача id=%s — запрос к модели не удался: %s", task_id, exc)
             await self._emit(
                 protocol.EVENT_TASK_RESULT,
-                {"task_id": row["id"], "meta": meta, "ok": False, "error": str(exc)},
+                {"task_id": task_id, "meta": meta, "ok": False, "error": str(exc)},
             )
             return
+        log.info("tasks: задача id=%s доставлена (%d символов)", task_id, len(raw))
         await self._emit(
             protocol.EVENT_TASK_RESULT,
-            {"task_id": row["id"], "meta": meta, "ok": True, "result": {"response": raw}},
+            {"task_id": task_id, "meta": meta, "ok": True, "result": {"response": raw}},
         )

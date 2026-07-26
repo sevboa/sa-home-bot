@@ -104,9 +104,7 @@ class LlmService:
                     id=ACTION_ASK,
                     title="Спросить Альфреда",
                     params=(
-                        ActionParam(
-                            name="prompt", type="string", required=True, title="Вопрос"
-                        ),
+                        ActionParam(name="prompt", type="string", required=True, title="Вопрос"),
                     ),
                 ),
                 ActionSpec(
@@ -211,6 +209,10 @@ class LlmService:
             # НЕ _touch(chat_id) — прогрев не значит, что был реальный чат,
             # ложный chat_id раздул бы список для EVENT_IDLE_SLEEP.
             await ollama.ensure_running(self._cfg)
+            # И саму модель — в память: без этого «прогретая» служба всё
+            # равно платит за загрузку на первом же реальном запросе (см.
+            # ollama.preload, живая находка 2026-07-27).
+            await ollama.preload(self._cfg)
             await self._touch()
             return {"asleep": False}
         # Сервер валидирует action по describe — сюда неизвестное не доходит.
