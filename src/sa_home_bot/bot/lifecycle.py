@@ -66,5 +66,12 @@ EVENT_ALFRED_TOOL_CALL = "alfred_tool_call"
 
 async def notify_tool_call(book: SubscriptionBook, notifier: Notifier, tool_name: str) -> None:
     text = f"🔧 Alfred вызвал инструмент: {tool_name}"
-    for sub in book.accepting(EVENT_ALFRED_TOOL_CALL):
-        await notifier.send_direct(sub.chat_id, text)
+    # Живая находка 2026-07-27: НЕ book.accepting() — тот трактует "*" в
+    # event_types как "всё", а у админской подписки event_types=["*"]
+    # (полный охват системных событий). На вызов тула, происходящий на
+    # каждой реплике, это давало спам в личный чат админа, хотя дебаг-канал
+    # для него не заводили. alfred_tool_call — только явный opt-in по
+    # точному имени, вайлдкард на него не распространяется.
+    for sub in book.all():
+        if not sub.broken and EVENT_ALFRED_TOOL_CALL in sub.event_types:
+            await notifier.send_direct(sub.chat_id, text)
