@@ -119,11 +119,20 @@ def render_services_block(state: dict) -> str:
         lines = ["Службы не назначены."]
         return "\n".join(lines)
     for svc in services:
+        name = _svc_display(node_id, svc.get("name", "?"))
+        # Внешне управляемая (llm): pid/рестарты/время старта чужого процесса
+        # ноде неизвестны — не показываем «pid —, рестартов 0», это читалось
+        # бы как поломка. Только честный статус по связи со службой.
+        if svc.get("external"):
+            lamp = LAMP_GREEN if svc.get("status") == "running" else LAMP_RED
+            state_text = "работает" if svc.get("status") == "running" else "не отвечает"
+            lines.append(f"{lamp} {name} — {state_text} (внешняя служба)")
+            continue
         template = _STATUS_LINE.get(
             svc.get("status", ""), f"{LAMP_GRAY} {{name}} — {{status}}"
         )
         line = template.format(
-            name=_svc_display(node_id, svc.get("name", "?")),
+            name=name,
             status=svc.get("status", "?"),
             pid=svc.get("pid") or "—",
             restarts=svc.get("restarts", 0),
@@ -240,8 +249,13 @@ def render_service_card(node_name: str, svc: dict) -> str:
         f"Статус: {status}"
         + (f", pid {svc['pid']}" if svc.get("pid") else "")
         + _fmt_since(svc.get("started_at") if svc.get("status") == "running" else None),
-        f"Рестартов после падений: {svc.get('restarts', 0)}",
     ]
+    if svc.get("external"):
+        # Процесс не наш — супервизор его не поднимает, счётчика рестартов и
+        # кода выхода у ноды нет (см. node/service.py::_services_state).
+        lines.append("Запуском управляет не нода (внешняя служба).")
+        return "\n".join(lines)
+    lines.append(f"Рестартов после падений: {svc.get('restarts', 0)}")
     if svc.get("last_exit_code") is not None:
         lines.append(f"Последний код выхода: {svc['last_exit_code']}")
     return "\n".join(lines)

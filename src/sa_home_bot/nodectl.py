@@ -124,9 +124,14 @@ def render_services(services: list[dict]) -> str:
     rows = [("СЛУЖБА", "СОСТОЯНИЕ", "PID", "РЕСТАРТЫ", "ЗАПУЩЕНА")]
     for svc in services:
         icon = _STATUS_ICON.get(svc.get("status", ""), "⚪")
+        # Внешне управляемая (llm на Windows) — пометка, чтобы «—» вместо pid
+        # и времени старта читались как «чужой процесс», а не как поломка.
+        name = svc.get("name", "?")
+        if svc.get("external"):
+            name += " (внешняя)"
         rows.append(
             (
-                svc.get("name", "?"),
+                name,
                 f"{icon} {svc.get('status', '?')}",
                 str(svc.get("pid") or "—"),
                 str(svc.get("restarts", 0)),

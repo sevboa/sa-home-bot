@@ -2,6 +2,7 @@
 
 import pytest
 
+from sa_home_bot.node.peers import NodeRouter, PeerLink
 from sa_home_bot.node.service import NodeService
 from sa_home_bot.node.state import NodeState
 from sa_home_bot.node.supervisor import STOPPED, SupervisedService, Supervisor
@@ -649,3 +650,36 @@ def test_resolve_endpoint_falls_back_to_xdg_config(tmp_path, monkeypatch):
     endpoint, token = _resolve_endpoint(args)
     assert endpoint == TcpEndpoint("100.64.0.1", 8710)
     assert token == "t"
+
+
+async def test_get_state_shows_externally_managed_service():
+    """Внешне управляемое назначение (llm) супервизор не спавнит, поэтому его
+    нет в `supervisor.services` — но рой обязан о нём знать.
+
+    Живой баг 2026-07-28: на winpc работающая llm вообще не показывалась ни в
+    /nodes, ни в `nodectl status` («на ноде winpc нет службы llm»), потому что
+    список брался только из супервизора.
+    """
+    sup, _ = _fake_supervisor()
+    router = NodeRouter(
+        "winpc",
+        local_services={"llm": PeerLink("llm", "unix:///tmp/llm.sock")},
+    )
+    state = await NodeService(sup, router).get_state()
+
+    llm = next((s for s in state["services"] if s["name"] == "llm"), None)
+    assert llm is not None, "внешне управляемая служба не попала в состояние ноды"
+    assert llm["external"] is True
+    # Связи с ней нет (линк не запускали) — статус честный, а не выдуманный.
+    assert llm["status"] == STOPPED
+    # Супервизируемые службы никуда не делись.
+    assert "monitor" in [s["name"] for s in state["services"]]
+
+
+def test_render_services_marks_external():
+    """nodectl помечает внешнюю службу — иначе пустые pid/рестарты читаются
+    как поломка."""
+    table = render_services(
+        [{"name": "llm", "status": "running", "pid": None, "restarts": 0, "external": True}]
+    )
+    assert "llm (внешняя)" in table

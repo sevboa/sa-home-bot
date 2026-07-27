@@ -22,6 +22,7 @@ from sa_home_bot.proto.endpoints import Endpoint
 from sa_home_bot.proto.messages import (
     ERR_UNAVAILABLE,
     ERR_UNKNOWN_DST,
+    Address,
     Envelope,
     ProtoError,
 )
@@ -29,6 +30,20 @@ from sa_home_bot.proto.messages import (
 log = logging.getLogger(__name__)
 
 RECONNECT_DELAY_S = 5.0
+
+# Живая находка 2026-07-28: одних ОС-таймаутов мало. TCP не замечает
+# собеседника, у которого сокет жив, а процесс завис (не читает и не
+# отвечает) — а именно это неотличимо от «нода работает» по состоянию
+# соединения. Прикладной heartbeat ловит и это, и всё остальное: сон,
+# ребут без FIN/RST, забитый Send-Q — независимо от платформы и настроек ОС.
+#
+# `hello` берём как пробу намеренно: он уже реализован обеими сторонами и
+# ничего не меняет на той стороне — расширять протокол ради ping не нужно.
+HEARTBEAT_INTERVAL_S = 5.0
+HEARTBEAT_TIMEOUT_S = 4.0
+# Промахов подряд до разрыва: один потерянный ответ на нагруженной ноде —
+# не повод рвать рабочий линк, два подряд — уже отказ.
+HEARTBEAT_MISSES = 2
 
 # Служба самого сервиса ноды: запросы к ней (и без dst) обрабатываются локально.
 NODE_SERVICE = "node"
@@ -50,14 +65,23 @@ class PeerLink:
         token: str = "",
         on_event: EventCallback | None = None,
         reconnect_delay: float = RECONNECT_DELAY_S,
+        self_node: str = "",
     ) -> None:
         self.name = name
         self.endpoint = endpoint
         self._token = token
         self._on_event = on_event
         self._delay = reconnect_delay
+        # Имя СВОЕЙ ноды: едет в auth, чтобы сосед узнал нас при
+        # переподключении (см. proto/server.py::_note_peer).
+        self._src = Address(node=self_node) if self_node else None
         self._client: ProtoClient | None = None
         self._task: asyncio.Task | None = None
+        # Мы сами рвём соединение (heartbeat/reconnect_now), а не нас
+        # останавливают: `ProtoClient.close()` отменяет читающую задачу, и
+        # `join()` в `_run` получает CancelledError — без этого флага она
+        # неотличима от stop() и убивала бы весь цикл переподключения.
+        self._dropping = False
         # Тип машины соседа из его hello. Держим и после обрыва: чтобы решить,
         # нормально ли, что нода пропала, нужно знать её тип именно тогда,
         # когда её уже не спросить.
@@ -92,7 +116,53 @@ class PeerLink:
         try:
             return await client.forward(env)
         except (ConnectionError, OSError, TimeoutError) as exc:
+            # Запрос ушёл в никуда — линк подозрителен, переустанавливаем его
+            # сразу, а не ждём, пока это заметит heartbeat: иначе следующий
+            # запрос повторит ту же минуту ожидания.
+            self.reconnect_now(f"запрос не доехал ({exc})")
             raise ProtoError(ERR_UNAVAILABLE, f"{self.name}: {exc}") from exc
+
+    def reconnect_now(self, reason: str) -> None:
+        """Считать текущее соединение мёртвым и переподключиться немедленно.
+
+        Нужно, когда о смерти линка известно РАНЬШЕ любых таймаутов — сосед
+        сам постучался к нам заново (значит, он перезагрузился, а наш
+        исходящий линк к нему держит труп прошлого соединения, см.
+        proto/server.py). Закрытие клиента роняет `join()` в `_run`, дальше
+        обычный путь переподключения.
+        """
+        client = self._client
+        if client is None:
+            return
+        log.info("PeerLink %s: %s — переподключаюсь немедленно", self.name, reason)
+        self._client = None
+        self._dropping = True
+        asyncio.create_task(client.close(), name=f"peer-link-drop-{self.name}")
+
+    async def _heartbeat(self, client: ProtoClient) -> None:
+        """Периодическая проба соединения (см. HEARTBEAT_* выше).
+
+        ``HEARTBEAT_MISSES`` промахов подряд — закрываем клиента, чем роняем
+        `join()` в `_run`; переподключение дальше идёт обычным путём.
+        """
+        misses = 0
+        while True:
+            await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+            try:
+                await asyncio.wait_for(client.hello(), timeout=HEARTBEAT_TIMEOUT_S)
+                misses = 0
+            except (ConnectionError, OSError, TimeoutError, ProtoError) as exc:
+                misses += 1
+                if misses >= HEARTBEAT_MISSES:
+                    log.warning(
+                        "PeerLink %s: не отвечает на %d пробы подряд (%s) — рву соединение",
+                        self.name,
+                        misses,
+                        exc,
+                    )
+                    self._dropping = True
+                    await client.close()
+                    return
 
     def _mark_down(self) -> None:
         """Запомнить момент потери связи — только первый, чтобы циклы
@@ -109,7 +179,9 @@ class PeerLink:
     async def _run(self) -> None:
         logged_down = False
         while True:
-            client = ProtoClient(self.endpoint, token=self._token, on_event=self._on_event)
+            client = ProtoClient(
+                self.endpoint, token=self._token, on_event=self._on_event, src=self._src
+            )
             try:
                 await client.connect()
                 info = await client.hello()
@@ -131,9 +203,22 @@ class PeerLink:
                     self.wake_info = info.wake
                 self.down_since = None
                 self._client = client
+                heartbeat = asyncio.create_task(
+                    self._heartbeat(client), name=f"peer-link-hb-{self.name}"
+                )
                 try:
                     await client.join()
+                except asyncio.CancelledError:
+                    # Соединение оборвали МЫ (см. `_dropping`) — это штатный
+                    # путь к переподключению. Отмена не наша — пробрасываем,
+                    # иначе stop() не остановит линк.
+                    if not self._dropping:
+                        raise
                 finally:
+                    self._dropping = False
+                    heartbeat.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await heartbeat
                     self._client = None
                     self._mark_down()
                 log.warning("PeerLink %s: связь потеряна, переподключение...", self.name)

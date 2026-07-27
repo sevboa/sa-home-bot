@@ -73,6 +73,9 @@ class _Connection:
         self.writer = writer
         self.lock = asyncio.Lock()
         self.authenticated = authenticated
+        # Имя узла клиента из auth (см. proto/client.py::connect) — пусто у
+        # локальных фронтендов и у нод старых версий.
+        self.node: str = ""
 
     async def send(self, env: Envelope) -> None:
         async with self.lock:
@@ -88,6 +91,7 @@ class ProtoServer:
         *,
         token: str = "",
         router: Router | None = None,
+        on_peer_connect: Callable[[str], None] | None = None,
     ) -> None:
         # Нода слушает и unix (локальные фронтенды), и tcp (пиры) — список.
         single = isinstance(endpoint, (str, Path, UnixEndpoint, TcpEndpoint))
@@ -101,6 +105,9 @@ class ProtoServer:
         self._token = token
         self._handler = handler
         self._router = router
+        # Зовётся, когда сосед аутентифицировался и назвался: повод считать
+        # собственный исходящий линк к нему протухшим (он явно перезапустился).
+        self._on_peer_connect = on_peer_connect
         self._servers: list[asyncio.Server] = []
         self._connections: set[_Connection] = set()
         self._request_tasks: set[asyncio.Task] = set()
@@ -258,6 +265,7 @@ class ProtoServer:
 
     def _authenticate(self, conn: _Connection, request: Envelope) -> Envelope:
         if conn.authenticated:  # unix или повторный auth — токен не проверяем
+            self._note_peer(conn, request)
             return make_response(request, {"authenticated": True})
         token = request.payload.get("token")
         if not isinstance(token, str) or not hmac.compare_digest(token, self._token):
@@ -265,7 +273,27 @@ class ProtoServer:
             log.warning("ProtoServer: отвергнут клиент с неверным токеном (%s)", peer)
             raise ProtoError(ERR_UNAUTHORIZED, "неверный токен")
         conn.authenticated = True
+        self._note_peer(conn, request)
         return make_response(request, {"authenticated": True})
+
+    def _note_peer(self, conn: _Connection, request: Envelope) -> None:
+        """Сосед назвался в auth: закрыть его прошлые (мёртвые) соединения и
+        сообщить наверх, что линк к нему пора переустановить.
+
+        Живая находка 2026-07-28: после трёх перезагрузок winpc на alfred
+        висело ЧЕТЫРЕ входящих ESTAB от неё — сервер их не закрывал, потому
+        что обрыв без FIN/RST для него неотличим от простоя. Раз сосед с тем
+        же именем пришёл заново, прошлые его соединения заведомо трупы.
+        """
+        node = request.payload.get("node")
+        if not isinstance(node, str) or not node:
+            return
+        conn.node = node
+        for other in [c for c in self._connections if c is not conn and c.node == node]:
+            self._connections.discard(other)
+            other.writer.close()
+        if self._on_peer_connect is not None:
+            self._on_peer_connect(node)
 
     async def _dispatch(self, request: Envelope) -> Envelope:
         if request.type == MSG_HELLO:

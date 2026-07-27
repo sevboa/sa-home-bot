@@ -303,6 +303,44 @@ class NodeService:
             return None
         return {"mac": info.mac, "ip": info.ip, "broadcast": info.broadcast}
 
+    def _services_state(self) -> list[dict[str, Any]]:
+        """Службы ноды для /nodes и `nodectl status`.
+
+        Супервизор знает не все: внешне управляемые назначения (llm на
+        Windows-ноде — её поднимает scheduled task в интерактивной сессии,
+        см. deploy/llm-runner.ps1) он сознательно не спавнит, поэтому в
+        `supervisor.services` их нет. Живой баг 2026-07-28: из-за этого
+        рабочая llm вообще не показывалась в рое — «на ноде winpc нет службы
+        llm», хотя она отвечала. Берём их из маршрутизатора: линк к локальной
+        службе есть ровно тогда, когда она назначена, а его `alive` — честное
+        состояние (процесс отвечает), лучшее, что о ней вообще известно
+        снаружи: ни pid, ни времени старта чужого процесса нода не знает.
+        """
+        services = [svc.to_dict() for svc in self._supervisor.services.values()]
+        if self._router is None:
+            return services
+        supervised = {svc.assignment.service for svc in self._supervisor.services.values()}
+        for name, link in self._router.local_services.items():
+            if name in supervised:
+                continue
+            services.append(
+                {
+                    "name": name,
+                    "status": "running" if link.alive else "stopped",
+                    "pid": None,
+                    "restarts": 0,
+                    "last_exit_code": None,
+                    "started_at": None,
+                    "service": name,
+                    "instance": None,
+                    "role": None,
+                    # Фронтенду: это не наш процесс — не предлагать start/stop,
+                    # супервизор такую службу не поднимет (см. nodectl.py).
+                    "external": True,
+                }
+            )
+        return services
+
     async def get_state(self) -> dict[str, Any]:
         state: dict[str, Any] = {
             "node": self._node,
@@ -319,7 +357,7 @@ class NodeService:
             "singletons": self._lease.local_state() if self._lease is not None else {},
             "uptime_s": round(self._runtime.uptime_seconds(), 1),
             "system_uptime_s": system_uptime_seconds(),
-            "services": [svc.to_dict() for svc in self._supervisor.services.values()],
+            "services": self._services_state(),
             "peers": self._router.peers_state() if self._router is not None else [],
             # Свои Ethernet-реквизиты (None — Wi-Fi/без LAN): бот кэширует их,
             # пока нода жива, и использует, когда та уснёт (этап 19 п.6).

@@ -118,7 +118,18 @@ def build_router(
     for p in extra_peers:
         peer_configs.setdefault(p.id, p)
     peers = {
-        pid: PeerLink(pid, cfg.endpoint, token=settings.swarm.token, on_event=on_peer_event)
+        pid: PeerLink(
+            pid,
+            cfg.endpoint,
+            token=settings.swarm.token,
+            on_event=on_peer_event,
+            # Представляемся соседу в auth — по этому имени он уронит свой
+            # протухший линк к нам, когда мы переподключимся после ребута
+            # (proto/server.py::_note_peer). Локальным службам ниже незачем:
+            # они живут в том же процессе-родителе, «переподключения после
+            # ребута соседа» там не бывает.
+            self_node=node_id,
+        )
         for pid, cfg in peer_configs.items()
         if pid != node_id  # свой id в списке — не пир
     }
@@ -342,7 +353,21 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         replicator=replicator,
         lease=lease,
     )
-    server = ProtoServer(endpoints, node_service, token=settings.swarm.token, router=router.route)
+    def on_peer_connect(peer_node: str) -> None:
+        """Сосед постучался к нам заново — значит, он перезапустился, и наш
+        исходящий линк к нему держит труп прошлого соединения. Роняем его
+        сразу, не дожидаясь ни heartbeat'а, ни ОС-таймаутов."""
+        link = router.peers.get(peer_node)
+        if link is not None:
+            link.reconnect_now("сосед подключился заново")
+
+    server = ProtoServer(
+        endpoints,
+        node_service,
+        token=settings.swarm.token,
+        router=router.route,
+        on_peer_connect=on_peer_connect,
+    )
     await server.start()
     for link in (*router.peers.values(), *router.local_services.values()):
         await link.start()
