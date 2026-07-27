@@ -84,6 +84,10 @@ _SPECS: tuple[ServiceSpec, ...] = (
     # tasks по смыслу тоже синглтон (своя БД напоминаний), но резерва для неё
     # пока не делаем: БД не реплицируется, и включать аренду без этого рано.
     ServiceSpec(name="tasks", cli_name="tasks", endpoint_attr="tasks.socket"),
+    # net — обёртка над локальным SearXNG (веб-поиск для /ai). Обычная
+    # служба: где стоит SearXNG, там её и назначают (сейчас alfred, см.
+    # net/protocol.py::NODE_ID).
+    ServiceSpec(name="net", cli_name="net", endpoint_attr="net.socket"),
     # Живая находка 2026-07-23: служба llm на Windows-ноде дёргает wsl.exe, а
     # тот из-под Session-0 (Windows-служба sa-home-node, LocalSystem) вообще
     # не запускается (exit code -1) — WSL2 требует интерактивную сессию.

@@ -34,7 +34,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default="bot",
         help="какую службу запустить: telegram-бот (по умолчанию), "
         "монитор датчиков, адаптер приложений, адаптер торрент-клиента, "
-        "служба LLM (Альфред), служба отложенных задач роя (tasks) или "
+        "служба LLM (Альфред), служба отложенных задач роя (tasks), "
+        "веб-поиск через локальный SearXNG (net) или "
         "сервис ноды (супервизор)",
     )
     parser.add_argument(
@@ -106,6 +107,10 @@ def main(argv: list[str] | None = None) -> int:
         from sa_home_bot.tasks.app import run_tasks
 
         coro = run_tasks(settings)
+    elif args.service == "net":
+        from sa_home_bot.net.app import run_net
+
+        coro = run_net(settings)
     else:
         from sa_home_bot.app import run
 

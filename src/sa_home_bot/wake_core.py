@@ -55,11 +55,20 @@ UNREACHABLE = "unreachable"
 WARMUP_FAILED = "warmup_failed"
 
 
+# Имена служб, к которым ходит обзорный сбор. Литералами, а не импортом из
+# bot/node_view.py и bot/status_view.py — те тянут aiogram, чего этот модуль
+# сознательно избегает (см. докстринг).
+NODE_SERVICE = "node"
+MONITOR_SERVICE = "monitor"
+
+
 @dataclass
 class NodeReport:
     node_id: str
     alive: bool
     state: dict | None = None  # get_state сервиса node (None — не ответил)
+    monitor: dict | None = None  # get_state монитора (None — не ответил/нет)
+    kind: str = ""  # тип машины (server|workstation|vps), см. node/kind.py
 
 
 async def fetch_state(
@@ -78,21 +87,52 @@ async def fetch_state(
         return None
 
 
-async def collect_reports(node_link: ServiceLink, own_state: dict) -> list[NodeReport]:
-    """Параллельный сбор состояний всех нод роя (своя — первой). Минимальная
-    версия для нужд wake — без монитора (см. bot/swarm_view.py::_collect
-    для полной сводки /swarm, которая дополнительно тянет monitor.get_state
-    на каждую ноду)."""
-    own = NodeReport(node_id=own_state.get("node", "?"), alive=True, state=own_state)
+async def collect_reports(
+    node_link: ServiceLink, own_state: dict, *, with_monitor: bool = False
+) -> list[NodeReport]:
+    """Параллельный сбор состояний всех нод роя (своя — первой).
+
+    ``with_monitor`` — дополнительно опросить монитор каждой ноды. Нужен
+    сводке /swarm и тулу swarm_status (здоровье/диски); сценариям wake — нет,
+    там лишний запрос на каждую ноду ради данных, которые никто не прочтёт.
+
+    Раньше версия с монитором жила отдельной копией в bot/swarm_view.py
+    (``_collect``/``_NodeReport``) — слито сюда, когда за теми же данными
+    пришёл тул swarm_status: bot/tools.py не может импортировать swarm_view,
+    тот тянет aiogram, а служба tasks импортирует tools.
+    """
+    own = NodeReport(
+        node_id=own_state.get("node", "?"),
+        alive=True,
+        state=own_state,
+        kind=own_state.get("kind", ""),
+    )
     reports = [own]
     for peer in own_state.get("peers", []):
         pid = peer.get("id", "?")
-        reports.append(NodeReport(node_id=pid, alive=bool(peer.get("alive"))))
+        reports.append(
+            NodeReport(
+                node_id=pid,
+                alive=bool(peer.get("alive")),
+                # Тип известен и для недоступной ноды — нода его помнит
+                # (node/watch.py), иначе не отличить сон от аварии.
+                kind=str(peer.get("kind") or ""),
+            )
+        )
 
     async def fill(report: NodeReport) -> None:
+        # Таймаут читается здесь, а не берётся дефолтом fetch_state: дефолт
+        # аргумента вычисляется один раз при импорте, и подмена
+        # PEER_TIMEOUT_S (тесты про зависшего пира) до него не доходила бы.
         if report.state is None:
-            dst = Address(node=report.node_id, service="node")
-            report.state = await fetch_state(node_link, dst)
+            dst = Address(node=report.node_id, service=NODE_SERVICE)
+            report.state = await fetch_state(node_link, dst, timeout_s=PEER_TIMEOUT_S)
+        if with_monitor:
+            report.monitor = await fetch_state(
+                node_link,
+                Address(node=report.node_id, service=MONITOR_SERVICE),
+                timeout_s=PEER_TIMEOUT_S,
+            )
 
     await asyncio.gather(*(fill(r) for r in reports if r.alive))
     return reports

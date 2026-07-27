@@ -397,6 +397,11 @@ class TasksService:
             # создания задачи. Подписки уже нет → None → тулы без прав.
             subscription=self._book.for_chat(chat_id) if isinstance(chat_id, int) else None,
         )
+        async def _emit_tool_call(name: str, call_args: dict[str, Any], result: str) -> None:
+            # Только факт вызова — bot/node_events.py ретранслирует в дебаг-
+            # группу через notify_tool_call (эта служба Telegram не видит).
+            await self._emit(protocol.EVENT_TOOL_CALL, {"name": name})
+
         try:
             raw = await run_chat_loop(
                 self._node_link,
@@ -407,6 +412,7 @@ class TasksService:
                 think=bool(task_args.get("think", True)),
                 telegram_chat_id=task_args.get("chat_id"),
                 log_chat_id=row["id"],
+                on_tool_call=_emit_tool_call,
             )
         except (ServiceUnavailableError, ProtoError) as exc:
             log.warning("tasks: задача id=%s — запрос к модели не удался: %s", task_id, exc)

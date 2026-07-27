@@ -1,10 +1,14 @@
 """Инструменты (tool-calling) для диалога /ai — LLM_INTEGRATION_PLAN.md §7-8.
 
-Каждый тул — узкая функция в явном реестре TOOL_HANDLERS, не общий прокси
+Каждый тул — узкая функция в явном реестре TOOLS, не общий прокси
 на произвольное действие роя (§7.2 плана — общий прокси был бы дырой в
-правах: модель дозвонилась бы куда угодно). Декларации (TOOL_DECLARATIONS)
-— формат OpenAI function-calling, который Ollama понимает нативно для
+правах: модель дозвонилась бы куда угодно). Декларация тула — формат
+OpenAI function-calling, который Ollama понимает нативно для
 tool-calling-моделей (qwen3 в их числе).
+
+Комплект тулов не одинаков для всех: ``tools_for(subscription)`` отдаёт
+только то, на что у собеседника есть права (см. блок «права тулов» ниже) —
+Альфред не может больше, чем пользователь, который с ним говорит.
 
 Погода, конвертер валют и калькулятор не ходят по протоколу роя вообще —
 это не системные операции конкретной ноды (как apps/monitor), а либо
@@ -31,6 +35,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import copy
 import itertools
 import json
 import logging
@@ -46,9 +51,15 @@ from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from sa_home_bot import wake_core
+from sa_home_bot.bot import commands
+from sa_home_bot.bot.monitor_state import parse_disk_summary, parse_health_state
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
+from sa_home_bot.net import protocol as net_protocol
+from sa_home_bot.node.kind import traits_for
 from sa_home_bot.proto.messages import Address, ProtoError
+from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.tasks import protocol as task_protocol
 
 log = logging.getLogger(__name__)
@@ -83,7 +94,12 @@ class ToolContext:
     службы tasks (второй пользователь этого модуля, см. докстринг файла)
     нет доступа к ai_turns бота, а живому /ai читать БД ради того же самого
     незачем, раз список уже в памяти. ``node_link`` — только remind ходит
-    по протоколу (в службу tasks); прочим тулам не нужен."""
+    по протоколу (в службу tasks); прочим тулам не нужен.
+
+    ``subscription`` — права собеседника, по ним собирается комплект тулов
+    (см. tools_for): Альфред не умеет того, чего не может сам пользователь.
+    ``None`` — подписки нет, остаются только тулы без прав (fail-closed).
+    """
 
     chat_id: int | None
     dialogue_id: int | None
@@ -91,9 +107,147 @@ class ToolContext:
     settings: Settings
     node_link: ServiceLink | None = None
     history: list[dict[str, Any]] = field(default_factory=list)
+    subscription: Subscription | None = None
 
 
 ToolHandler = Callable[["ToolContext", dict[str, Any]], Awaitable[str]]
+
+
+# --- права тулов: Альфред не может больше, чем его собеседник ---
+#
+# Исходное правило §7.2 плана ("реестр один и тот же для всех, у кого есть
+# chat@llm") держалось на том, что тулы ничего не знали про систему: калькулятор
+# и погода одинаковы для всех. С появлением swarm_status это перестало быть
+# правдой — иначе /ai стал бы обходным путём вокруг подписок: пользователь, у
+# которого нет /status, спрашивал бы у Альфреда и получал то же самое.
+#
+# Требование пользователя (2026-07-27) сформулировано так: Альфред не
+# ОТКАЗЫВАЕТ, а именно НЕ УМЕЕТ. Поэтому фильтрация — на уровне деклараций
+# (tools_for), а не проверкой внутри обработчика: тула, на который нет прав,
+# модель не видит вовсе и не обещает того, чего не сделает.
+
+
+@dataclass(frozen=True)
+class CommandRight:
+    """Право уровня команды бота — то же, чем гейтится сама команда.
+
+    ``/status`` проверяется через ``allows_command(commands.STATUS.name)``
+    (bot/handlers/node_links.py) — тул, отдающий те же данные, требует ровно
+    того же права, а не своего собственного.
+    """
+
+    name: str
+
+    def granted(self, subscription: Subscription) -> bool:
+        return subscription.allows_command(self.name)
+
+
+@dataclass(frozen=True)
+class ActionRight:
+    """Право на действие службы в форме ``действие@служба`` (``list@torrents``).
+
+    Групповые формы (``*@torrents``, голый ``*``) уже поддержаны в
+    Subscription.allows_action — админу ничего дописывать не нужно.
+    """
+
+    action: str
+    service: str
+
+    def granted(self, subscription: Subscription) -> bool:
+        return subscription.allows_action(self.action, self.service)
+
+
+ToolRight = CommandRight | ActionRight
+
+
+@dataclass(frozen=True)
+class VariantRights:
+    """Права на ОТДЕЛЬНЫЕ значения enum-параметра одного тула.
+
+    swarm_status — не один доступ, а четыре разных (ноды, здоровье, диски,
+    торренты), и права на них у пользователя могут отличаться. Заводить под
+    каждое отдельный тул значило бы четырежды повторить описание и раздуть
+    контекст модели, поэтому вместо этого из ``enum`` вырезаются недоступные
+    значения. Если не осталось ни одного — тул не объявляется целиком.
+    """
+
+    param: str
+    rights: tuple[tuple[str, ToolRight], ...]
+
+    def allowed_values(self, subscription: Subscription) -> list[str]:
+        return [value for value, right in self.rights if right.granted(subscription)]
+
+
+@dataclass(frozen=True)
+class ToolSpec:
+    """Тул целиком в одном месте: обработчик, декларация и требуемое право.
+
+    До этого обработчики и декларации жили в двух параллельных словарях, и
+    добавление прав размножило бы их до трёх — тот же повод завести единое
+    описание, что и у ServiceSpec в services/registry.py.
+
+    ``requires=None`` — тул прав не требует: чистый расчёт (calc) или
+    публичный API без ключа (погода, курсы валют), ничего про систему не
+    раскрывает и доступа к ней не даёт.
+    """
+
+    name: str
+    handler: ToolHandler
+    declaration: dict[str, Any]
+    requires: ToolRight | None = None
+    variants: VariantRights | None = None
+
+    def declaration_for(self, subscription: Subscription) -> dict[str, Any] | None:
+        """Декларация под конкретную подписку; None — тул недоступен."""
+        if self.requires is not None and not self.requires.granted(subscription):
+            return None
+        if self.variants is None:
+            return self.declaration
+        allowed = self.variants.allowed_values(subscription)
+        if not allowed:
+            return None
+        declaration = copy.deepcopy(self.declaration)
+        params = declaration["function"]["parameters"]["properties"]
+        params[self.variants.param]["enum"] = allowed
+        return declaration
+
+
+@dataclass(frozen=True)
+class ToolKit:
+    """Что модели дают на этот конкретный диалог (см. tools_for)."""
+
+    declarations: list[dict[str, Any]]
+    handlers: dict[str, ToolHandler]
+
+
+def tools_for(subscription: Subscription | None) -> ToolKit:
+    """Комплект тулов под права собеседника.
+
+    ``subscription is None`` — чат без подписки вовсе: остаются только тулы
+    без ``requires`` (fail-closed). Такое возможно у службы tasks, если
+    подписку удалили из конфига между постановкой задачи и её срабатыванием.
+
+    Побочная выгода фильтрации: декларации целиком уезжают в контекст модели
+    на КАЖДОМ раунде (см. config.py про их размер) — у собеседника с урезанными
+    правами их просто меньше.
+    """
+    declarations: list[dict[str, Any]] = []
+    handlers: dict[str, ToolHandler] = {}
+    for spec in TOOLS:
+        if subscription is None:
+            if spec.requires is not None or spec.variants is not None:
+                continue
+            declaration: dict[str, Any] | None = spec.declaration
+        else:
+            declaration = spec.declaration_for(subscription)
+        if declaration is None:
+            continue
+        declarations.append(declaration)
+        # Исполнение фильтруется тем же решением, что и объявление: модель
+        # может выдумать имя тула, которого ей не давали, — тогда сработает
+        # ветка "неизвестный инструмент" в llm_chat.run_chat_loop.
+        handlers[spec.name] = spec.handler
+    return ToolKit(declarations=declarations, handlers=handlers)
 
 
 # --- calc: без сети и без роя, ast с белым списком узлов (не eval()) ---
@@ -528,9 +682,13 @@ async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
         "отвечаешь на прямой вопрос. Если нужно что-то посчитать или узнать "
         "(погоду, курс) — пользуйся инструментами, не полагайся на память."
     )
+    # "tools" здесь не кладём: комплект собирается заново в момент
+    # срабатывания, по правам собеседника на ТОТ момент (llm_chat.run_chat_loop
+    # → tools_for). Раньше сюда клался снимок TOOL_DECLARATIONS, но его никто
+    # не читал — цикл всегда подставлял свой список, а снимок лишь раздувал
+    # args_json задачи.
     task_args = {
         "messages": [*ctx.history, {"role": "user", "content": directive}],
-        "tools": TOOL_DECLARATIONS,
         "think": ctx.settings.llm.think_chat,
         "chat_id": ctx.chat_id,
     }
@@ -560,168 +718,445 @@ async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
     return f"задача поставлена на {due_at.strftime('%Y-%m-%d %H:%M')} (местное время)"
 
 
-TOOL_HANDLERS: dict[str, ToolHandler] = {
-    "calc": tool_calc,
-    "get_weather": tool_get_weather,
-    "convert_currency": tool_convert_currency,
-    "get_time": tool_get_time,
-    "remind": tool_remind,
+_DECL_CALC: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "calc",
+        "description": (
+            "Точно вычислить арифметическое выражение (числа, + - * / скобки, "
+            "степень как ** или ^, плюс константы pi и e — без произвольных "
+            "переменных и функций). Используй для ЛЮБОЙ реальной арифметики, "
+            "включая формулы (площадь, объём и т.п.) — подставь известные "
+            "числа и pi/e в выражение и вызови тул, не считай и не "
+            "подставляй в уме."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "expression": {
+                    "type": "string",
+                    "description": "Например: 2 * pi * 1.5 * (1.5 + 2) или 1.5^2",
+                }
+            },
+            "required": ["expression"],
+        },
+    },
 }
 
-TOOL_DECLARATIONS: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "calc",
-            "description": (
-                "Точно вычислить арифметическое выражение (числа, + - * / скобки, "
-                "степень как ** или ^, плюс константы pi и e — без произвольных "
-                "переменных и функций). Используй для ЛЮБОЙ реальной арифметики, "
-                "включая формулы (площадь, объём и т.п.) — подставь известные "
-                "числа и pi/e в выражение и вызови тул, не считай и не "
-                "подставляй в уме."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "expression": {
-                        "type": "string",
-                        "description": "Например: 2 * pi * 1.5 * (1.5 + 2) или 1.5^2",
-                    }
-                },
-                "required": ["expression"],
+_DECL_WEATHER: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": (
+            "Узнать текущую погоду (температура, ощущается как, ветер) в любом "
+            "городе мира — не только дома. Если пользователь называет город, "
+            "передай его в city; если спрашивает просто 'какая погода' без "
+            "уточнения — не передавай city вовсе, вернётся погода дома."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "city": {
+                    "type": "string",
+                    "description": "Город, если он назван явно (например: Алматы)",
+                }
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": (
-                "Узнать текущую погоду (температура, ощущается как, ветер) в любом "
-                "городе мира — не только дома. Если пользователь называет город, "
-                "передай его в city; если спрашивает просто 'какая погода' без "
-                "уточнения — не передавай city вовсе, вернётся погода дома."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "city": {
-                        "type": "string",
-                        "description": "Город, если он назван явно (например: Алматы)",
-                    }
+}
+
+_DECL_CURRENCY: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "convert_currency",
+        "description": (
+            "Точно перевести сумму из одной валюты в другую по актуальному курсу. "
+            "Используй для любого вопроса про курс/конвертацию денег — не пытайся "
+            "вспомнить курс сам, он быстро устаревает."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "amount": {"type": "number", "description": "Сумма для перевода"},
+                "from": {
+                    "type": "string",
+                    "description": "Код исходной валюты, ISO 4217 (например USD)",
+                },
+                "to": {
+                    "type": "string",
+                    "description": "Код целевой валюты, ISO 4217 (например RUB)",
                 },
             },
+            "required": ["amount", "from", "to"],
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "convert_currency",
-            "description": (
-                "Точно перевести сумму из одной валюты в другую по актуальному курсу. "
-                "Используй для любого вопроса про курс/конвертацию денег — не пытайся "
-                "вспомнить курс сам, он быстро устаревает."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "amount": {"type": "number", "description": "Сумма для перевода"},
-                    "from": {
-                        "type": "string",
-                        "description": "Код исходной валюты, ISO 4217 (например USD)",
-                    },
-                    "to": {
-                        "type": "string",
-                        "description": "Код целевой валюты, ISO 4217 (например RUB)",
-                    },
+}
+
+_DECL_TIME: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "get_time",
+        "description": (
+            "Точно узнать текущее время (и день недели) в конкретном "
+            "городе/стране, а также разницу во времени между НЕСКОЛЬКИМИ "
+            "местами. Часовые пояса и разницу между ними НЕ считай сам — "
+            "модель на практике их путает и противоречит сама себе даже "
+            "после того, как назвала верные названия поясов. Используй "
+            "этот тул для ЛЮБОГО вопроса про время не 'у нас/сейчас' (то "
+            "уже есть в контексте разговора), а в другом городе/стране — "
+            "ВКЛЮЧАЯ короткие вопросы-продолжения вроде 'а в Х?' сразу "
+            "после уже заданного вопроса про другое место: это НОВОЕ "
+            "место, вызови тул заново, не выводи по аналогии с прошлым "
+            "ответом. Если спрашивают РАЗНИЦУ между двумя и более местами "
+            "(или список часовых поясов сразу для нескольких мест) — "
+            "передай ВСЕ места в places одним вызовом, тул сам посчитает "
+            "разницу (поле differences в ответе) — НЕ вычитай время двух "
+            "мест сам. Если тул не знает место — так и скажи как есть, не "
+            "досчитывай и не придумывай сам."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "place": {
+                    "type": "string",
+                    "description": (
+                        "Город или страна (например: Москва) — для ОДНОГО места. "
+                        "Если мест несколько (сравнение/разница) — используй places."
+                    ),
                 },
-                "required": ["amount", "from", "to"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_time",
-            "description": (
-                "Точно узнать текущее время (и день недели) в конкретном "
-                "городе/стране, а также разницу во времени между НЕСКОЛЬКИМИ "
-                "местами. Часовые пояса и разницу между ними НЕ считай сам — "
-                "модель на практике их путает и противоречит сама себе даже "
-                "после того, как назвала верные названия поясов. Используй "
-                "этот тул для ЛЮБОГО вопроса про время не 'у нас/сейчас' (то "
-                "уже есть в контексте разговора), а в другом городе/стране — "
-                "ВКЛЮЧАЯ короткие вопросы-продолжения вроде 'а в Х?' сразу "
-                "после уже заданного вопроса про другое место: это НОВОЕ "
-                "место, вызови тул заново, не выводи по аналогии с прошлым "
-                "ответом. Если спрашивают РАЗНИЦУ между двумя и более местами "
-                "(или список часовых поясов сразу для нескольких мест) — "
-                "передай ВСЕ места в places одним вызовом, тул сам посчитает "
-                "разницу (поле differences в ответе) — НЕ вычитай время двух "
-                "мест сам. Если тул не знает место — так и скажи как есть, не "
-                "досчитывай и не придумывай сам."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "place": {
-                        "type": "string",
-                        "description": (
-                            "Город или страна (например: Москва) — для ОДНОГО места. "
-                            "Если мест несколько (сравнение/разница) — используй places."
-                        ),
-                    },
-                    "places": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": (
-                            "Список мест (например: [\"Москва\", \"Италия\"]) — для "
-                            "сравнения нескольких мест или вопроса про разницу во "
-                            "времени между ними. Если задан, place игнорируется."
-                        ),
-                    },
-                    "at": {
-                        "type": "string",
-                        "description": (
-                            "Необязательно: конкретный момент времени в ISO 8601 "
-                            "СО смещением (например 2026-08-01T12:00:00+03:00) — "
-                            "для вопросов про другую дату, не 'сейчас'. Без этого "
-                            "поля берётся текущий момент."
-                        ),
-                    },
+                "places": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        'Список мест (например: ["Москва", "Италия"]) — для '
+                        "сравнения нескольких мест или вопроса про разницу во "
+                        "времени между ними. Если задан, place игнорируется."
+                    ),
+                },
+                "at": {
+                    "type": "string",
+                    "description": (
+                        "Необязательно: конкретный момент времени в ISO 8601 "
+                        "СО смещением (например 2026-08-01T12:00:00+03:00) — "
+                        "для вопросов про другую дату, не 'сейчас'. Без этого "
+                        "поля берётся текущий момент."
+                    ),
                 },
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "remind",
-            "description": (
-                "Поставить отложенную задачу в этом же чате на конкретный момент "
-                "времени — НЕ готовый текст, а то, что нужно СДЕЛАТЬ или СКАЗАТЬ, "
-                "когда время наступит: в этот момент тебя вызовут заново и ты сам "
-                "сформулируешь ответ, при необходимости пользуясь другими "
-                "инструментами (например, посмотреть погоду именно в тот момент, "
-                "а не сейчас). Переведи то, что попросил пользователь ('через 20 "
-                "минут', 'завтра в 9 утра'), в точную дату-время сам, используя "
-                "текущее время из контекста разговора."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "when": {
-                        "type": "string",
-                        "description": "Точная дата-время в ISO 8601, например 2026-07-24T21:30:00",
-                    },
-                    "text": {
-                        "type": "string",
-                        "description": "Что нужно сделать или сказать в момент срабатывания",
-                    },
+}
+
+# --- swarm_status: read-only состояние роя (LLM_INTEGRATION_PLAN.md §8.3) ---
+#
+# Сбор данных переиспользует wake_core.collect_reports — тот же веерный опрос,
+# что и у сводки /swarm (bot/swarm_view.py), только без Telegram-рендеринга:
+# модель получает JSON, а не строку с эмодзи. Второго пути к данным здесь нет.
+
+WHAT_NODES = "nodes"
+WHAT_HEALTH = "health"
+WHAT_DISKS = "disks"
+WHAT_TORRENTS = "torrents"
+
+TORRENTS_SERVICE = "torrents"
+TORRENTS_ACTION_LIST = "list"
+
+
+async def _own_state(ctx: ToolContext) -> dict[str, Any] | None:
+    if ctx.node_link is None:
+        return None
+    return await wake_core.fetch_state(ctx.node_link, None)
+
+
+def _node_summary(report: wake_core.NodeReport) -> dict[str, Any]:
+    traits = traits_for(report.kind)
+    summary: dict[str, Any] = {
+        "node": report.node_id,
+        "kind": report.kind or "неизвестно",
+        "online": report.alive and report.state is not None,
+    }
+    if not summary["online"]:
+        # Различие «спит — это норма» vs «пропала машина, обязанная быть в
+        # сети» — правило роя (ARCHITECTURE §11 п. 4). Отдаём полем, а не
+        # эмодзи: решение, как это сказать, остаётся за персонажем.
+        summary["sleeping_is_normal"] = not traits.always_on
+        return summary
+    state = report.state or {}
+    services = state.get("services", [])
+    summary["version"] = state.get("version", "?")
+    summary["services_running"] = sum(1 for s in services if s.get("status") == "running")
+    summary["services_total"] = len(services)
+    if state.get("system_uptime_s") is not None:
+        summary["uptime_s"] = state["system_uptime_s"]
+    return summary
+
+
+def _health_summary(report: wake_core.NodeReport) -> dict[str, Any]:
+    entry: dict[str, Any] = {"node": report.node_id}
+    if report.monitor is None:
+        entry["error"] = "монитор не отвечает"
+        return entry
+    components = []
+    for raw in report.monitor.get("health", []):
+        try:
+            state = parse_health_state(raw)
+        except KeyError:
+            continue  # монитор старой версии — пропускаем, а не роняем тул
+        components.append(
+            {
+                "label": state.label,
+                "kind": state.kind,
+                "status": state.status,
+                "temperature_c": state.temperature_c,
+            }
+        )
+    entry["components"] = components
+    if report.monitor.get("requirements"):
+        entry["requirements_unmet"] = [r.get("id") for r in report.monitor["requirements"]]
+    return entry
+
+
+def _disks_summary(report: wake_core.NodeReport) -> dict[str, Any]:
+    entry: dict[str, Any] = {"node": report.node_id}
+    if report.monitor is None:
+        entry["error"] = "монитор не отвечает"
+        return entry
+    disks = []
+    for raw in report.monitor.get("disks", []):
+        try:
+            disk = parse_disk_summary(raw)
+        except KeyError:
+            continue
+        disks.append(
+            {
+                "label": disk.label,
+                "kind": disk.kind,
+                "health": disk.health,
+                "temperature_c": disk.temperature_c,
+                "free_bytes": disk.free_bytes,
+                "total_bytes": disk.total_bytes,
+            }
+        )
+    entry["disks"] = disks
+    if report.monitor.get("uptime_s") is not None:
+        entry["monitor_uptime_s"] = report.monitor["uptime_s"]
+    return entry
+
+
+def _service_host(reports: list[wake_core.NodeReport], service: str) -> str | None:
+    """Нода, несущая службу. Спрашиваем рой, а не хардкодим имя: службы
+    переезжают (назначения меняются кнопкой в боте, без правки кода)."""
+    for report in reports:
+        for svc in (report.state or {}).get("services", []):
+            if svc.get("name") == service:
+                return report.node_id
+    return None
+
+
+async def tool_swarm_status(ctx: ToolContext, args: dict[str, Any]) -> str:
+    if ctx.node_link is None:
+        return "недоступно: нет связи с роем"
+    what = str(args.get("what") or "").strip()
+    wanted_node = args.get("node")
+    wanted_node = str(wanted_node).strip() if wanted_node else None
+
+    # Права уже проверены при сборке комплекта (tools_for): значений, которых
+    # собеседнику не положено, в enum не было. Но модель может передать
+    # что угодно, поэтому сверяемся ещё раз — по той же подписке.
+    allowed = _SWARM_VARIANTS.allowed_values(ctx.subscription) if ctx.subscription else []
+    if what not in allowed:
+        return f"не умею: {what or 'без уточнения'}"
+
+    own = await _own_state(ctx)
+    if own is None:
+        return "недоступно: своя нода не отвечает"
+    with_monitor = what in (WHAT_HEALTH, WHAT_DISKS)
+    reports = await wake_core.collect_reports(ctx.node_link, own, with_monitor=with_monitor)
+    if wanted_node is not None:
+        picked = [r for r in reports if r.node_id == wanted_node]
+        if not picked:
+            known = ", ".join(r.node_id for r in reports) or "нет данных"
+            return f"нет такой ноды: {wanted_node} (известны: {known})"
+        reports = picked
+
+    if what == WHAT_NODES:
+        return json.dumps({"nodes": [_node_summary(r) for r in reports]}, ensure_ascii=False)
+    if what == WHAT_HEALTH:
+        return json.dumps({"health": [_health_summary(r) for r in reports]}, ensure_ascii=False)
+    if what == WHAT_DISKS:
+        return json.dumps({"disks": [_disks_summary(r) for r in reports]}, ensure_ascii=False)
+
+    host = _service_host(reports, TORRENTS_SERVICE)
+    if host is None:
+        return "недоступно: службы торрентов нет ни на одной доступной ноде"
+    try:
+        result = await ctx.node_link.command(
+            TORRENTS_ACTION_LIST,
+            {},
+            dst=Address(node=host, service=TORRENTS_SERVICE),
+        )
+    except (ServiceUnavailableError, ProtoError, TimeoutError) as exc:
+        # §7.3 плана: отказ тула — обычный результат для модели, а не сбой
+        # цикла. Спящая нода не должна ронять диалог.
+        return f"недоступно: {host} не ответил ({exc})"
+    return json.dumps({"node": host, **result}, ensure_ascii=False)
+
+
+_SWARM_VARIANTS = VariantRights(
+    param="what",
+    rights=(
+        # Право на данные — то же, чем гейтится команда бота с теми же данными
+        # (/nodes, /status): Альфред не расширяет доступ, а повторяет его.
+        (WHAT_NODES, CommandRight(commands.NODES.name)),
+        (WHAT_HEALTH, CommandRight(commands.STATUS.name)),
+        (WHAT_DISKS, CommandRight(commands.STATUS.name)),
+        (WHAT_TORRENTS, ActionRight(TORRENTS_ACTION_LIST, TORRENTS_SERVICE)),
+    ),
+)
+
+_DECL_SWARM_STATUS: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "swarm_status",
+        "description": (
+            "Узнать реальное состояние домашнего роя машин: какие ноды сейчас "
+            "в сети или спят, температуры и здоровье железа, диски и место, "
+            "что качается в торрентах. Используй для ЛЮБОГО вопроса про то, "
+            "как себя чувствуют машины, что с ними происходит и что на них "
+            "качается — не отвечай по памяти, состояние меняется постоянно. "
+            "Значения what перечислены в enum: то, чего там нет, ты не умеешь."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "what": {
+                    "type": "string",
+                    # enum подставляется под права собеседника (см. tools_for).
+                    "enum": [v for v, _ in _SWARM_VARIANTS.rights],
+                    "description": (
+                        "nodes — состав роя, кто в сети и кто спит; "
+                        "health — температуры и здоровье компонентов; "
+                        "disks — диски, место и их состояние; "
+                        "torrents — что сейчас качается"
+                    ),
                 },
-                "required": ["when", "text"],
+                "node": {
+                    "type": "string",
+                    "description": (
+                        "Имя конкретной ноды (например: alfred), если "
+                        "спрашивают про одну машину. Без этого — по всему рою."
+                    ),
+                },
             },
+            "required": ["what"],
         },
     },
-]
+}
+
+
+# --- web_search: интернет через свой SearXNG (LLM_INTEGRATION_PLAN.md §9) ---
+
+
+async def tool_web_search(ctx: ToolContext, args: dict[str, Any]) -> str:
+    if ctx.node_link is None:
+        return "недоступно: нет связи с роем"
+    query = str(args.get("query") or "").strip()
+    if not query:
+        return "ошибка: не указан поисковый запрос"
+    dst = Address(node=net_protocol.NODE_ID, service=net_protocol.SERVICE_NAME)
+    try:
+        result = await ctx.node_link.command(
+            net_protocol.ACTION_SEARCH, {"query": query}, dst=dst
+        )
+    except (ServiceUnavailableError, ProtoError, TimeoutError) as exc:
+        # §7.3: недоступный поисковик — обычный результат тула, персонаж сам
+        # решит, как об этом сказать; цикл tool-calling не роняем.
+        return f"недоступно: поиск не работает ({exc})"
+    if not result.get("results"):
+        return f"по запросу «{query}» ничего не нашлось"
+    return json.dumps(result, ensure_ascii=False)
+
+
+_DECL_WEB_SEARCH: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": (
+            "Поискать в интернете. Используй, когда ответа нет в разговоре и "
+            "он может не совпадать с тем, что ты помнишь: свежие события, "
+            "новости, цены, факты после твоего обучения, а также всё, в чём "
+            "не уверен — лучше поискать, чем придумать. Возвращает заголовки, "
+            "ссылки и короткие выдержки; самих страниц по ссылкам ты не "
+            "видишь, поэтому отвечай по выдержкам и не выдумывай деталей, "
+            "которых в них нет."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Поисковый запрос обычными словами",
+                }
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+
+_DECL_REMIND: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "remind",
+        "description": (
+            "Поставить отложенную задачу в этом же чате на конкретный момент "
+            "времени — НЕ готовый текст, а то, что нужно СДЕЛАТЬ или СКАЗАТЬ, "
+            "когда время наступит: в этот момент тебя вызовут заново и ты сам "
+            "сформулируешь ответ, при необходимости пользуясь другими "
+            "инструментами (например, посмотреть погоду именно в тот момент, "
+            "а не сейчас). Переведи то, что попросил пользователь ('через 20 "
+            "минут', 'завтра в 9 утра'), в точную дату-время сам, используя "
+            "текущее время из контекста разговора."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "when": {
+                    "type": "string",
+                    "description": "Точная дата-время в ISO 8601, например 2026-07-24T21:30:00",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Что нужно сделать или сказать в момент срабатывания",
+                },
+            },
+            "required": ["when", "text"],
+        },
+    },
+}
+
+
+# Порядок задаёт порядок деклараций в контексте модели.
+TOOLS: tuple[ToolSpec, ...] = (
+    ToolSpec(name="calc", handler=tool_calc, declaration=_DECL_CALC),
+    ToolSpec(name="get_weather", handler=tool_get_weather, declaration=_DECL_WEATHER),
+    ToolSpec(name="convert_currency", handler=tool_convert_currency, declaration=_DECL_CURRENCY),
+    ToolSpec(name="get_time", handler=tool_get_time, declaration=_DECL_TIME),
+    ToolSpec(
+        name="swarm_status",
+        handler=tool_swarm_status,
+        declaration=_DECL_SWARM_STATUS,
+        variants=_SWARM_VARIANTS,
+    ),
+    ToolSpec(
+        name="web_search",
+        handler=tool_web_search,
+        declaration=_DECL_WEB_SEARCH,
+        requires=ActionRight(net_protocol.ACTION_SEARCH, net_protocol.SERVICE_NAME),
+    ),
+    # remind сознательно без requires: он появился до правил доступа и уже
+    # работает у живых пользователей — привязка к праву отобрала бы рабочее
+    # умение у тех, кому его никто не запрещал. Долг: завести под него право
+    # create@tasks, когда будет повод трогать подписки в проде.
+    ToolSpec(name="remind", handler=tool_remind, declaration=_DECL_REMIND),
+)

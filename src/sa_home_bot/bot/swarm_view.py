@@ -14,22 +14,20 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sa_home_bot import wake_core
-from sa_home_bot.bot import actions, commands, node_links, node_view, status_view, wake_state
+from sa_home_bot.bot import actions, commands, node_links, node_view, wake_state
 from sa_home_bot.bot.monitor_state import parse_outage
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import WakeConfig
 from sa_home_bot.db.store import Store
 from sa_home_bot.domain.models import KIND_CPU, POWER_UNEXPECTED, PowerEvent
 from sa_home_bot.node.kind import traits_for
-from sa_home_bot.proto.messages import Address, ProtoError
+from sa_home_bot.proto.messages import ProtoError
 from sa_home_bot.runtime import format_duration
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.utils.version import version_key
@@ -43,62 +41,10 @@ REMOTE_STUB_TEXT = (
 
 WAKE_BUTTON_TEXT = "🔌 Разбудить ПК"
 
-# Таймаут одного запроса к пиру: зависший (но формально подключённый) пир
-# не должен держать сводку дольше этого.
-PEER_TIMEOUT_S = 3.0
-
-
-@dataclass
-class _NodeReport:
-    node_id: str
-    alive: bool
-    state: dict | None = None  # get_state сервиса node (None — не ответил)
-    monitor: dict | None = None  # get_state монитора (None — не ответил/нет)
-    kind: str = ""  # тип машины (server|workstation|vps), см. node/kind.py
-
-
-async def _fetch(node_link: ServiceLink, dst: Address | None) -> dict | None:
-    try:
-        return await asyncio.wait_for(node_link.get_state(dst=dst), PEER_TIMEOUT_S)
-    except (ServiceUnavailableError, ProtoError, TimeoutError):
-        return None
-
-
-async def _collect(node_link: ServiceLink, own_state: dict) -> list[_NodeReport]:
-    """Параллельный сбор состояний всех нод роя (своя — первой)."""
-    own = _NodeReport(
-        node_id=own_state.get("node", "?"),
-        alive=True,
-        state=own_state,
-        kind=own_state.get("kind", ""),
-    )
-    reports = [own]
-    for peer in own_state.get("peers", []):
-        pid = peer.get("id", "?")
-        reports.append(
-            _NodeReport(
-                node_id=pid,
-                alive=bool(peer.get("alive")),
-                # Тип известен и для недоступной ноды — нода его помнит
-                # (node/watch.py), иначе не отличить сон от аварии.
-                kind=str(peer.get("kind") or ""),
-            )
-        )
-
-    async def fill(report: _NodeReport) -> None:
-        node_dst = (
-            Address(node=report.node_id, service=node_view.NODE_SERVICE)
-            if report.state is None
-            else None
-        )
-        if report.state is None:
-            report.state = await _fetch(node_link, node_dst)
-        report.monitor = await _fetch(
-            node_link, Address(node=report.node_id, service=status_view.MONITOR_SERVICE)
-        )
-
-    await asyncio.gather(*(fill(r) for r in reports if r.alive))
-    return reports
+# Сбор состояний роя живёт в wake_core (telegram-независимое ядро) — здесь
+# только рендеринг. Раньше это была локальная копия _NodeReport/_collect;
+# слито, когда за теми же данными пришёл тул swarm_status (bot/tools.py).
+_NodeReport = wake_core.NodeReport
 
 
 def _versions_line(reports: list[_NodeReport]) -> str | None:
@@ -281,7 +227,7 @@ async def build_swarm_view(
         own_state = await node_link.get_state()
     except (ServiceUnavailableError, ProtoError):
         return node_view.NODE_DOWN_TEXT, None
-    reports = await _collect(node_link, own_state)
+    reports = await wake_core.collect_reports(node_link, own_state, with_monitor=True)
     if store is not None:
         await _remember_wake_info(store, reports)
     text = render_swarm(reports, wake, datetime.now(tz=UTC))

@@ -94,8 +94,21 @@ class FakeQuote:
 
 
 def _admin_book() -> SubscriptionBook:
+    """Админский чат для уведомлений (999) + сам собеседник (1, чат FakeMessage).
+
+    У собеседника права перечислены группами, но БЕЗ голого "*" — иначе
+    notify_admins считал бы админом и его тоже. По этой подписке собирается
+    комплект тулов для /ai (bot/tools.py::tools_for).
+    """
     return SubscriptionBook(
-        [Subscription(chat_id=999, name="admin", allowed_commands=frozenset({"*"}))]
+        [
+            Subscription(chat_id=999, name="admin", allowed_commands=frozenset({"*"})),
+            Subscription(
+                chat_id=1,
+                name="speaker",
+                allowed_commands=frozenset({"*@node", "*@monitor", "*@torrents", "*@net"}),
+            ),
+        ]
     )
 
 
@@ -172,7 +185,11 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
     assert (action, node) == ("chat", "winpc")
     assert router_args["chat_id"] == 1
     assert router_args["think"] is False
-    assert router_args["tools"] == ai_flow.ai_tools.TOOL_DECLARATIONS
+    # Комплект собран под права собеседника, а не глобальный список.
+    assert (
+        router_args["tools"]
+        == ai_flow.ai_tools.tools_for(_admin_book().for_chat(1)).declarations
+    )
     assert router_args["role"] == "router"
     persona_args = link.command_calls[1][1]
     assert "role" not in persona_args

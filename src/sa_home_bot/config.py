@@ -223,6 +223,33 @@ class TasksConfig(BaseModel):
     db_path: Path = Path("./data/tasks.sqlite")
 
 
+class NetConfig(BaseModel):
+    """Служба net (`sa-home-bot --service net`) — веб-поиск через локальный
+    SearXNG (LLM_INTEGRATION_PLAN.md §9).
+
+    Сам SearXNG ставится на ноду отдельно (venv + uWSGI под systemd) и в
+    ``settings.yml`` ему нужно ЯВНО включить формат json — по умолчанию он
+    выключен, и служба получила бы HTML вместо структурированного ответа.
+
+    Redis, который упоминался в исходном плане как эфемерный кэш, сознательно
+    не заводим: на alfred слабый CPU и отдельно отслеживаемый износ eMMC, а
+    limiter SearXNG (единственное, ради чего Redis нужен по-настоящему) не
+    требуется — слушаем только localhost, запросов снаружи нет.
+
+    ``max_results`` — сколько результатов отдавать: ответ целиком уезжает в
+    контекст модели, полная выдача там не нужна и стоит токенов.
+    """
+
+    socket: str = "./data/net.sock"
+    searxng_url: str = "http://127.0.0.1:8888"
+    request_timeout_s: float = Field(default=20.0, gt=0)
+    # Проба живости в get_state — короче рабочего таймаута: карточка службы не
+    # должна висеть 20 секунд из-за мёртвого поисковика.
+    probe_timeout_s: float = Field(default=5.0, gt=0)
+    max_results: int = Field(default=5, ge=1, le=20)
+    language: str = "ru"
+
+
 class LlmConfig(BaseModel):
     """Служба llm (Альфред, `sa-home-bot --service llm`) — только на winpc.
 
@@ -253,8 +280,8 @@ class LlmConfig(BaseModel):
     ``num_ctx`` — окно контекста Ollama, явно фиксированное (живая находка
     2026-07-24): раньше нигде не передавалось, работал дефолт модели/Ollama,
     который может оказаться меньше, чем реально нужно системному промпту
-    Альфреда (~2900 ток.) + декларациям тулов (~1000-1200 ток.,
-    bot/tools.py::TOOL_DECLARATIONS) + растущей истории диалога — риск
+    Альфреда (~2900 ток.) + декларациям тулов (~1000-1200 ток. у собеседника
+    с полными правами, bot/tools.py::tools_for) + растущей истории — риск
     тихого обрезания старых сообщений в длинных чатах. 8192 — с запасом;
     при нехватке памяти на winpc можно уменьшить.
 
@@ -493,6 +520,7 @@ class Settings(BaseSettings):
     torrents: TorrentsConfig = Field(default_factory=TorrentsConfig)
     llm: LlmConfig = Field(default_factory=LlmConfig)
     tasks: TasksConfig = Field(default_factory=TasksConfig)
+    net: NetConfig = Field(default_factory=NetConfig)
     weather: WeatherConfig = Field(default_factory=WeatherConfig)
     node: NodeConfig = Field(default_factory=NodeConfig)
     swarm: SwarmConfig = Field(default_factory=SwarmConfig)

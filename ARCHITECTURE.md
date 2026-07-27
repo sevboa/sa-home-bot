@@ -300,6 +300,12 @@ sa-home-bot/
 │       │   ├── app.py
 │       │   └── service.py
 │       │
+│       ├── net/               # служба net: веб-поиск через свой SearXNG
+│       │   ├── protocol.py    #   константы для bot/tools.py (без импортов)
+│       │   ├── searxng.py     #   urllib + to_thread, только localhost
+│       │   ├── app.py
+│       │   └── service.py
+│       │
 │       ├── subscriptions/
 │       │   ├── models.py      # Subscription (без quiet_hours)
 │       │   └── book.py        # SubscriptionBook (аналог registry)

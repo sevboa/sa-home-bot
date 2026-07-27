@@ -17,6 +17,7 @@ from sa_home_bot.config import Settings, WeatherConfig
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
+from sa_home_bot.subscriptions.models import Subscription
 
 CHAT_ID = 111
 
@@ -51,6 +52,7 @@ def _ctx(
     trigger_message_id=1,
     node_link=None,
     history=None,
+    subscription=None,
 ):
     # ``store`` не используется ToolContext'ом напрямую (только remind
     # ходит по протоколу через node_link, см. bot/tools.py) — параметр
@@ -63,7 +65,15 @@ def _ctx(
         settings=settings or Settings(),
         node_link=node_link,
         history=history if history is not None else [],
+        subscription=subscription,
     )
+
+
+def _sub(*allowed: str) -> Subscription:
+    return Subscription(chat_id=CHAT_ID, name="me", allowed_commands=frozenset(allowed))
+
+
+ADMIN = _sub("*")
 
 
 class _FakeNodeLink:
@@ -562,3 +572,275 @@ async def test_remind_reports_error_when_task_service_unreachable(store):
     when = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
     result = await tools.tool_remind(_ctx(store, node_link=link), {"when": when, "text": "x"})
     assert result.startswith("внутренняя ошибка")
+
+
+# --- права: комплект тулов собирается под подписку собеседника ---
+
+
+def _names(subscription) -> list[str]:
+    return [d["function"]["name"] for d in tools.tools_for(subscription).declarations]
+
+
+def _enum(subscription) -> list[str]:
+    """Значения what, которые видит модель у swarm_status при этих правах."""
+    decl = next(
+        d
+        for d in tools.tools_for(subscription).declarations
+        if d["function"]["name"] == "swarm_status"
+    )
+    return decl["function"]["parameters"]["properties"]["what"]["enum"]
+
+
+def test_tools_for_admin_gets_everything():
+    assert set(_names(ADMIN)) == {s.name for s in tools.TOOLS}
+
+
+def test_tools_for_none_is_fail_closed():
+    """Подписки нет вовсе — остаются только тулы без прав. Так бывает у
+    службы tasks, если подписку удалили, пока задача ждала в очереди."""
+    names = _names(None)
+    assert "swarm_status" not in names
+    assert set(names) == {s.name for s in tools.TOOLS if s.requires is None and s.variants is None}
+
+
+def test_tools_for_none_gives_no_handler_either():
+    """Фильтрация не только в декларациях: выдуманное имя не должно найти
+    обработчик (иначе права были бы лишь подсказкой модели)."""
+    assert "swarm_status" not in tools.tools_for(None).handlers
+
+
+def test_swarm_status_hidden_without_any_status_right():
+    """Ни /status, ни /nodes, ни торренты — тула нет вовсе, а не «есть, но
+    отказывает»: требование «Альфред не умеет, а не отказывает»."""
+    assert "swarm_status" not in _names(_sub("ai"))
+
+
+def test_swarm_status_enum_narrowed_to_granted_variants():
+    assert _enum(_sub("nodes")) == ["nodes"]
+
+
+def test_swarm_status_torrents_needs_list_right():
+    assert "torrents" not in _enum(_sub("status", "nodes"))
+    assert "torrents" in _enum(_sub("status", "list@torrents"))
+
+
+def test_filtering_does_not_mutate_shared_declaration():
+    """enum режется на копии — иначе первый же ограниченный собеседник
+    испортил бы декларацию для всех последующих."""
+    _enum(_sub("nodes"))
+    assert _enum(ADMIN) == ["nodes", "health", "disks", "torrents"]
+
+
+# --- swarm_status: сам обработчик (сбор данных через wake_core) ---
+
+
+_OWN_STATE = {
+    "node": "alfred",
+    "kind": "server",
+    "version": "0.38.1",
+    "system_uptime_s": 7200,
+    "services": [
+        {"name": "monitor", "status": "running"},
+        {"name": "torrents", "status": "running"},
+    ],
+    "peers": [{"id": "winpc", "alive": False, "kind": "workstation"}],
+}
+
+_ALFRED_MONITOR = {
+    "health": [
+        {
+            "component_id": "cpu:pkg",
+            "kind": "cpu",
+            "label": "CPU",
+            "status": "ok",
+            "temperature_c": 37.0,
+        }
+    ],
+    "disks": [
+        {"label": "eMMC", "kind": "emmc", "health": None, "free_bytes": 51000000000},
+    ],
+    "requirements": [],
+}
+
+
+class _FakeSwarmLink:
+    """Двойник ServiceLink: маршрутизирует get_state/command по dst."""
+
+    def __init__(self, states=None, command_result=None, command_raises=None):
+        self._states = states or {}
+        self._command_result = command_result if command_result is not None else {"torrents": []}
+        self._command_raises = command_raises
+        self.commands: list[tuple[str, object]] = []
+
+    async def get_state(self, dst=None):
+        key = "own" if dst is None else f"{dst.node}:{dst.service}"
+        if key in self._states:
+            return self._states[key]
+        raise tools.ServiceUnavailableError("нет связи")
+
+    async def command(self, action, args=None, dst=None, *, timeout=None):
+        self.commands.append((action, dst))
+        if self._command_raises is not None:
+            raise self._command_raises
+        return self._command_result
+
+
+def _swarm_link(**kwargs):
+    states = {"own": _OWN_STATE, "alfred:monitor": _ALFRED_MONITOR}
+    states.update(kwargs.pop("states", {}))
+    return _FakeSwarmLink(states=states, **kwargs)
+
+
+async def test_swarm_status_nodes_marks_sleeping_workstation_as_normal(store):
+    link = _swarm_link()
+    raw = await tools.tool_swarm_status(
+        _ctx(store, node_link=link, subscription=ADMIN), {"what": "nodes"}
+    )
+    nodes = {n["node"]: n for n in json.loads(raw)["nodes"]}
+    assert nodes["alfred"]["online"] is True
+    assert nodes["alfred"]["services_running"] == 2
+    # winpc — рабочая станция: выключена = норма, а не авария (ARCH §11 п. 4).
+    assert nodes["winpc"]["online"] is False
+    assert nodes["winpc"]["sleeping_is_normal"] is True
+
+
+async def test_swarm_status_offline_always_on_node_is_not_normal(store):
+    own = {**_OWN_STATE, "peers": [{"id": "jeeves", "alive": False, "kind": "vps"}]}
+    link = _swarm_link(states={"own": own})
+    raw = await tools.tool_swarm_status(
+        _ctx(store, node_link=link, subscription=ADMIN), {"what": "nodes"}
+    )
+    jeeves = next(n for n in json.loads(raw)["nodes"] if n["node"] == "jeeves")
+    assert jeeves["sleeping_is_normal"] is False
+
+
+async def test_swarm_status_health_returns_temperatures(store):
+    link = _swarm_link()
+    raw = await tools.tool_swarm_status(
+        _ctx(store, node_link=link, subscription=ADMIN), {"what": "health", "node": "alfred"}
+    )
+    entry = json.loads(raw)["health"][0]
+    assert entry["node"] == "alfred"
+    assert entry["components"][0]["temperature_c"] == 37.0
+
+
+async def test_swarm_status_disks_returns_free_space(store):
+    link = _swarm_link()
+    raw = await tools.tool_swarm_status(
+        _ctx(store, node_link=link, subscription=ADMIN), {"what": "disks", "node": "alfred"}
+    )
+    disk = json.loads(raw)["disks"][0]["disks"][0]
+    assert disk["label"] == "eMMC"
+    assert disk["free_bytes"] == 51000000000
+
+
+async def test_swarm_status_torrents_finds_hosting_node(store):
+    """Ноду со службой ищем в состоянии роя, а не хардкодим: назначения
+    меняются кнопкой в боте, без правки кода."""
+    link = _swarm_link(command_result={"torrents": [{"name": "Foo"}], "count": 1})
+    raw = await tools.tool_swarm_status(
+        _ctx(store, node_link=link, subscription=ADMIN), {"what": "torrents"}
+    )
+    payload = json.loads(raw)
+    assert payload["node"] == "alfred"
+    assert payload["count"] == 1
+    action, dst = link.commands[0]
+    assert (action, dst.node, dst.service) == ("list", "alfred", "torrents")
+
+
+async def test_swarm_status_torrents_service_absent(store):
+    own = {**_OWN_STATE, "services": [{"name": "monitor", "status": "running"}]}
+    link = _swarm_link(states={"own": own})
+    result = await tools.tool_swarm_status(
+        _ctx(store, node_link=link, subscription=ADMIN), {"what": "torrents"}
+    )
+    assert result.startswith("недоступно")
+
+
+async def test_swarm_status_unreachable_service_degrades_to_text(store):
+    """§7.3: спящая нода — обычный результат для модели, а не сбой цикла."""
+    link = _swarm_link(command_raises=tools.ServiceUnavailableError("нода спит"))
+    result = await tools.tool_swarm_status(
+        _ctx(store, node_link=link, subscription=ADMIN), {"what": "torrents"}
+    )
+    assert result.startswith("недоступно")
+
+
+async def test_swarm_status_rejects_variant_without_right(store):
+    """Модель может передать значение, которого не было в её enum — тул
+    сверяется с подпиской повторно, а не доверяет декларации."""
+    link = _swarm_link()
+    result = await tools.tool_swarm_status(
+        _ctx(store, node_link=link, subscription=_sub("nodes")), {"what": "torrents"}
+    )
+    assert result.startswith("не умею")
+    assert link.commands == []
+
+
+async def test_swarm_status_without_subscription_refuses(store):
+    result = await tools.tool_swarm_status(
+        _ctx(store, node_link=_swarm_link(), subscription=None), {"what": "nodes"}
+    )
+    assert result.startswith("не умею")
+
+
+async def test_swarm_status_unknown_node_lists_known_ones(store):
+    link = _swarm_link()
+    result = await tools.tool_swarm_status(
+        _ctx(store, node_link=link, subscription=ADMIN), {"what": "nodes", "node": "нету"}
+    )
+    assert "нет такой ноды" in result
+    assert "alfred" in result and "winpc" in result
+
+
+async def test_swarm_status_own_node_down(store):
+    link = _FakeSwarmLink(states={})
+    result = await tools.tool_swarm_status(
+        _ctx(store, node_link=link, subscription=ADMIN), {"what": "nodes"}
+    )
+    assert result.startswith("недоступно")
+
+
+# --- web_search: интернет через службу net ---
+
+
+async def test_web_search_requires_search_right():
+    assert "web_search" not in _names(_sub("status", "nodes"))
+    assert "web_search" in _names(_sub("search@net"))
+
+
+async def test_web_search_calls_net_service(store):
+    link = _FakeSwarmLink(
+        command_result={"query": "погода", "results": [{"title": "T", "url": "u"}], "count": 1}
+    )
+    raw = await tools.tool_web_search(
+        _ctx(store, node_link=link, subscription=ADMIN), {"query": "погода"}
+    )
+    assert json.loads(raw)["count"] == 1
+    action, dst = link.commands[0]
+    assert (action, dst.node, dst.service) == ("search", "alfred", "net")
+
+
+async def test_web_search_empty_results_reads_as_plain_text(store):
+    """Пустая выдача — не ошибка и не JSON: модели проще не пересказывать
+    пустой список, а прямо сказать, что ничего не нашлось."""
+    link = _FakeSwarmLink(command_result={"query": "чепуха", "results": [], "count": 0})
+    result = await tools.tool_web_search(
+        _ctx(store, node_link=link, subscription=ADMIN), {"query": "чепуха"}
+    )
+    assert "ничего не нашлось" in result
+
+
+async def test_web_search_unavailable_degrades_to_text(store):
+    link = _FakeSwarmLink(command_raises=tools.ServiceUnavailableError("net спит"))
+    result = await tools.tool_web_search(
+        _ctx(store, node_link=link, subscription=ADMIN), {"query": "q"}
+    )
+    assert result.startswith("недоступно")
+
+
+async def test_web_search_without_query(store):
+    result = await tools.tool_web_search(
+        _ctx(store, node_link=_FakeSwarmLink(), subscription=ADMIN), {}
+    )
+    assert result.startswith("ошибка")

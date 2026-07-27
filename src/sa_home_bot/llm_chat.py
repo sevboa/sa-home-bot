@@ -6,7 +6,7 @@
 для живого /ai, sa_home_bot.tasks.service — для отложенных задач вида
 "спросить нейронку", в т.ч. созданных самой моделью через тул remind).
 
-Зависит от bot.tools (ToolContext/TOOL_HANDLERS) — это чистый Python без
+Зависит от bot.tools (ToolContext/tools_for) — это чистый Python без
 aiogram (см. докстринг ToolContext), поэтому служба tasks может его
 импортировать, не таща Telegram-зависимости.
 """
@@ -72,10 +72,14 @@ async def run_chat_loop(
     результат тула) — у этих моделей своя адаптивная логика "думать/не
     думать", не мешать ей явным флагом. См. llm/ollama.py::chat()."""
     tool_ctx.history = messages
+    # Комплект собирается ОДИН раз на проход и по правам собеседника: тула, на
+    # который у него нет прав, модель не видит вовсе (см. bot/tools.py::
+    # tools_for — требование "Альфред не отказывает, а не умеет").
+    toolkit = ai_tools.tools_for(tool_ctx.subscription)
     for _round in range(MAX_TOOL_ROUNDS):
         args: dict[str, Any] = {
             "messages": messages,
-            "tools": ai_tools.TOOL_DECLARATIONS,
+            "tools": toolkit.declarations,
         }
         if think is not None:
             args["think"] = think
@@ -94,7 +98,10 @@ async def run_chat_loop(
             fn = call.get("function", {}) if isinstance(call, dict) else {}
             name = fn.get("name", "")
             call_args = fn.get("arguments") or {}
-            handler = ai_tools.TOOL_HANDLERS.get(name)
+            # Тот же отфильтрованный комплект, что ушёл в декларации: если
+            # модель выдумает имя тула, которого ей не давали, — сюда она не
+            # пройдёт, права проверены один раз и в одном месте.
+            handler = toolkit.handlers.get(name)
             if handler is None:
                 tool_result = f"неизвестный инструмент: {name}"
             else:

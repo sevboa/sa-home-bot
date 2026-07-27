@@ -512,6 +512,9 @@ async def request_alfred(
             trigger_message_id=message.message_id if message.chat else None,
             settings=settings,
             node_link=node_link,
+            # Права собеседника ограничивают комплект тулов: Альфред не должен
+            # быть обходным путём вокруг подписок (bot/tools.py::tools_for).
+            subscription=book.for_chat(message.chat.id) if message.chat else None,
         )
         telegram_chat_id = message.chat.id if message.chat is not None else None
 

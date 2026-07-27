@@ -7,7 +7,6 @@ import pytest_asyncio
 from sa_home_bot.bot import wake_state
 from sa_home_bot.bot.node_view import NODE_DOWN_TEXT
 from sa_home_bot.bot.swarm_view import (
-    PEER_TIMEOUT_S,
     REMOTE_STUB_TEXT,
     build_swarm_view,
     find_lan_waker,
@@ -18,6 +17,7 @@ from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
 from sa_home_bot.subscriptions.models import Subscription
+from sa_home_bot.wake_core import PEER_TIMEOUT_S
 
 OWN_STATE = {
     "node": "alfred",
@@ -168,7 +168,8 @@ async def test_swarm_dead_peer_gets_no_requests():
 async def test_swarm_hung_peer_does_not_block(monkeypatch):
     # Зависший (но «живой») пир упирается в таймаут — сводка выходит,
     # его строка честно говорит «не отвечает».
-    monkeypatch.setattr("sa_home_bot.bot.swarm_view.PEER_TIMEOUT_S", 0.05)
+    # Сбор состояний живёт в wake_core (bot/swarm_view.py только рендерит).
+    monkeypatch.setattr("sa_home_bot.wake_core.PEER_TIMEOUT_S", 0.05)
     link = FakeNodeLink(routes=_routes(), hang=("arch-t480:node", "arch-t480:monitor"))
     text, _ = await asyncio.wait_for(build_swarm_view(link, _sub("nodes")), timeout=5)
     assert "/node_arch_t480 — не отвечает" in text
