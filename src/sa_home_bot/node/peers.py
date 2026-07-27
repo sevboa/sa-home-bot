@@ -104,6 +104,10 @@ class PeerLink:
         # порог «пропала слишком надолго» для алерта о ноде, которая обязана
         # быть в сети. None — связь есть либо ещё ни разу не устанавливалась.
         self.down_since: float | None = None
+        # Сосед предупредил, что гасится штатно (событие node_leaving,
+        # этап 23): его недоступность — не авария даже для always_on-машины.
+        # Сбрасывается, когда связь установилась заново.
+        self.left: bool = False
 
     @property
     def alive(self) -> bool:
@@ -131,6 +135,18 @@ class PeerLink:
             # запрос повторит ту же минуту ожидания.
             self.reconnect_now(f"запрос не доехал ({exc})")
             raise ProtoError(ERR_UNAVAILABLE, f"{self.name}: {exc}") from exc
+
+    def note_left(self) -> None:
+        """Сосед объявил штатный уход (node_leaving): пометить и уронить линк
+        сразу — точный детект вместо ожидания heartbeat. Цикл переподключения
+        продолжает стучаться как обычно (дёшево: connection refused) — он же
+        и заметит возвращение."""
+        self.left = True
+        self.reconnect_now("нода уходит штатно")
+        # Линк мог быть уже оборван (reconnect_now тогда ничего не делает) —
+        # отсчёт простоя всё равно должен начаться, иначе PresenceWatcher
+        # не увидит ни ухода, ни возвращения.
+        self._mark_down()
 
     def reconnect_now(self, reason: str) -> None:
         """Считать текущее соединение мёртвым и переподключиться немедленно.
@@ -218,6 +234,7 @@ class PeerLink:
                 if info.wake:
                     self.wake_info = info.wake
                 self.down_since = None
+                self.left = False  # вернулась — прошлый штатный уход исчерпан
                 self._client = client
                 heartbeat = asyncio.create_task(
                     self._heartbeat(client), name=f"peer-link-hb-{self.name}"
@@ -318,6 +335,9 @@ class NodeRouter:
                 # отличает «спит, это норма» от «пропал сервер, это авария».
                 "kind": link.node_kind,
                 "down_s": link.downtime_s(),
+                # Штатный уход (node_leaving) — фронтенд отличает «выключена
+                # нарочно» от «пропала» и не пугает красной лампой.
+                "left": link.left,
                 # Реквизиты WoL соседа, известные с последнего hello — так
                 # любая служба может разбудить его, не имея собственного
                 # кэша опросов (см. wake_core.resolve_wake_info).

@@ -53,6 +53,12 @@ log = logging.getLogger(__name__)
 EVENT_NODE_JOINED = "node_joined"
 EVENT_NODE_DOWN = "node_down"
 EVENT_NODE_UP = "node_up"
+# Этап 23: штатный уход (нода прощается сама, мгновенно) и возвращение
+# после НЕаварийной недоступности (объявитель, node/watch.py) — оба
+# информационные и осмысленны для любого типа машины, в отличие от
+# аварийных node_down/node_up, которые рождаются только для always_on.
+EVENT_NODE_LEAVING = "node_leaving"
+EVENT_NODE_RETURNED = "node_returned"
 EVENT_UPDATE_FINISHED = "update_finished"
 EVENT_SINGLETON_ACTIVATED = "singleton_activated"
 EVENT_SINGLETON_YIELDED = "singleton_yielded"
@@ -131,6 +137,14 @@ def render_node_up(node_id: str) -> str:
     return f"✅ Нода «{node_id}» снова на связи."
 
 
+def render_node_leaving(node_id: str) -> str:
+    return f"🌙 Нода «{node_id}» выключается штатно."
+
+
+def render_node_returned(node_id: str) -> str:
+    return f"👋 Нода «{node_id}» вернулась в строй."
+
+
 def render_singleton_activated(slot: str, node_id: str) -> str:
     return f"🎛 Службу «{slot}» приняла нода «{node_id}»."
 
@@ -168,17 +182,22 @@ def build_node_event_handler(book: SubscriptionBook, notifier: Notifier, store: 
             if not node_id:
                 return
             text = render_node_joined(node_id, data.get("endpoint") or "?")
-        elif name in (EVENT_NODE_DOWN, EVENT_NODE_UP):
-            # Объект события — пропавшая нода из payload, а не src (объявляет
-            # тот сосед, что её видит; см. node/watch.py::_is_announcer).
+        elif name in (EVENT_NODE_DOWN, EVENT_NODE_UP, EVENT_NODE_LEAVING, EVENT_NODE_RETURNED):
+            # Объект события — нода из payload, а не src: node_down/node_up/
+            # node_returned объявляет сосед-объявитель (node/watch.py::
+            # _is_announcer), node_leaving нода шлёт про себя, но данные
+            # устроены одинаково.
             node_id = data.get("node")
             if not node_id:
                 return
-            text = (
-                render_node_down(node_id, float(data.get("down_s") or 0))
-                if name == EVENT_NODE_DOWN
-                else render_node_up(node_id)
-            )
+            if name == EVENT_NODE_DOWN:
+                text = render_node_down(node_id, float(data.get("down_s") or 0))
+            elif name == EVENT_NODE_UP:
+                text = render_node_up(node_id)
+            elif name == EVENT_NODE_LEAVING:
+                text = render_node_leaving(node_id)
+            else:
+                text = render_node_returned(node_id)
         elif name in (EVENT_SINGLETON_ACTIVATED, EVENT_SINGLETON_YIELDED):
             slot, node_id = data.get("slot"), data.get("node")
             if not slot or not node_id:

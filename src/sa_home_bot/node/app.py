@@ -30,7 +30,7 @@ from sa_home_bot.node.replication import (
 from sa_home_bot.node.service import EVENT_NODE_JOINED, NodeService
 from sa_home_bot.node.state import NodeState
 from sa_home_bot.node.supervisor import Supervisor
-from sa_home_bot.node.watch import PresenceWatcher
+from sa_home_bot.node.watch import EVENT_NODE_LEAVING, PresenceWatcher
 from sa_home_bot.proto.messages import MSG_EVENT, Envelope, ProtoError
 from sa_home_bot.proto.server import ProtoServer
 from sa_home_bot.services import registry
@@ -280,6 +280,17 @@ async def _relay_peer_event(
         await replicator.on_config_changed(env)
     if server is not None:
         await server.broadcast_envelope(dataclasses.replace(env, hops=env.hops + 1))
+    if env.type == MSG_EVENT and env.payload.get("event") == EVENT_NODE_LEAVING:
+        # Сосед прощается перед остановкой (этап 23): роняем линк к нему и
+        # помечаем уход штатным — точный детект вместо heartbeat и без
+        # ложного node_down через down_after_s. СТРОГО после ретрансляции:
+        # note_left рвёт то самое соединение, по которому событие пришло, —
+        # отмена читающей задачи (мы выполняемся в её callback'е) прилетела
+        # бы на ближайшем await и оборвала бы рассылку боту.
+        leaving = env.payload.get("data", {}).get("node") or (env.src.node if env.src else None)
+        left_link = router.peers.get(leaving) if leaving else None
+        if left_link is not None:
+            left_link.note_left()
 
 
 async def run_node(settings: Settings, config_path: str | None = None) -> bool:
@@ -490,6 +501,11 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         await lifespan.wait()
     finally:
         log.info("Останов ноды...")
+        # Прощаемся ПЕРВЫМ делом, пока соединения живы: соседи по node_leaving
+        # мгновенно и точно узнают о штатном уходе (этап 23) — без этого
+        # «корректно остановилась» и «выдернули из розетки» неотличимы.
+        # Рассылка ограничена SEND_TIMEOUT_S — остановку не задержит.
+        await emit(EVENT_NODE_LEAVING, {"node": node_id, "kind": settings.node.kind})
         await watcher.stop()
         await lease.stop()
         if replicator is not None:

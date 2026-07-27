@@ -15,6 +15,8 @@ from sa_home_bot.bot.ai_flow import (
 from sa_home_bot.bot.node_events import (
     build_node_event_handler,
     render_node_joined,
+    render_node_leaving,
+    render_node_returned,
     render_update_finished,
 )
 from sa_home_bot.config import SubscriptionConfig
@@ -321,3 +323,31 @@ async def test_task_result_ignores_non_llm_chat_kind():
 
     assert notifier.sent == []
     assert store.recorded_turns == []
+
+
+async def test_handler_broadcasts_on_node_leaving_and_returned():
+    """Этап 23: штатный уход и возвращение — системные уведомления для
+    любого типа машины (в отличие от аварийных node_down/node_up)."""
+    book = _book()
+    notifier = FakeNotifier()
+    handler = build_node_event_handler(book, notifier, FakeStore())
+
+    await handler(
+        make_event(
+            "node_leaving",
+            {"node": "winpc", "kind": "workstation"},
+            src=Address(node="winpc", service="node"),
+        )
+    )
+    await handler(
+        make_event(
+            "node_returned",
+            {"node": "winpc", "kind": "workstation"},
+            src=Address(node="alfred", service="node"),
+        )
+    )
+
+    assert notifier.sent == [
+        (1, render_node_leaving("winpc")),
+        (1, render_node_returned("winpc")),
+    ]

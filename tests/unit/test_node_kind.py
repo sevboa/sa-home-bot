@@ -20,6 +20,7 @@ class FakeLink:
         self.endpoint = f"tcp://{name}:8710"
         self.alive = alive
         self.node_kind = kind
+        self.left = False
         self._down_s = down_s
 
     def downtime_s(self) -> float | None:

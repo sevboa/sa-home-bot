@@ -353,10 +353,14 @@ class NodeConfig(BaseModel):
     ноду главной (рой равноправен), а отвечает на вопросы «алертить ли о её
     пропаже», «можно ли её будить по WoL», «есть ли у неё датчики железа» и
     задаёт базовый приоритет аренды синглтонов — см. `node/kind.py`.
+    По умолчанию ``workstation``: консервативнее молчать, чем шуметь — прежний
+    дефолт ``server`` делал из ненастроенного ноутбука машину, обязанную быть
+    в сети (живой пример: бесполезные алерты про arch-t480, этап 23 п. 4).
+    Серверу и VDS тип задаётся явно — как уже сделано у alfred и jeeves.
     """
 
     id: str = ""
-    kind: NodeKind = "server"
+    kind: NodeKind = "workstation"
     socket: str = "./data/node.sock"
     listen: str = ""
     assignments: list[str] = Field(default_factory=list)

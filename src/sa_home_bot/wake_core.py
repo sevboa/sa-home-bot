@@ -69,6 +69,7 @@ class NodeReport:
     state: dict | None = None  # get_state сервиса node (None — не ответил)
     monitor: dict | None = None  # get_state монитора (None — не ответил/нет)
     kind: str = ""  # тип машины (server|workstation|vps), см. node/kind.py
+    left: bool = False  # нода предупредила о штатном уходе (node_leaving)
 
 
 async def fetch_state(
@@ -117,6 +118,7 @@ async def collect_reports(
                 # Тип известен и для недоступной ноды — нода его помнит
                 # (node/watch.py), иначе не отличить сон от аварии.
                 kind=str(peer.get("kind") or ""),
+                left=bool(peer.get("left")),
             )
         )
 

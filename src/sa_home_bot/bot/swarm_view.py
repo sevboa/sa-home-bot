@@ -94,6 +94,10 @@ def _cpu_max(monitor: dict) -> float | None:
 def _node_line(report: _NodeReport) -> str:
     name = node_links.node_command(report.node_id) or f"<b>{report.node_id}</b>"
     if not report.alive:
+        # Нода, предупредившая об уходе (node_leaving), выключена нарочно —
+        # не пугаем красной лампой даже сервер.
+        if report.left:
+            return f"{node_view.LAMP_GRAY} {name} — выключена штатно"
         # Машина, которая штатно выключается, — это не авария: правило роя
         # п. 4 «спящая не-24/7 нода — норма» (ARCHITECTURE §11).
         if not traits_for(report.kind).always_on:

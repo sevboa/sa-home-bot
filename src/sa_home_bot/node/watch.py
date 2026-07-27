@@ -33,8 +33,19 @@ log = logging.getLogger(__name__)
 
 POLL_INTERVAL_S = 30.0
 
+# Авария: нода, обязанная быть в сети, молчит дольше down_after_s.
 EVENT_NODE_DOWN = "node_down"
+# Конец аварии: та же нода снова на связи (только после node_down).
 EVENT_NODE_UP = "node_up"
+# Штатный уход: нода сама предупреждает соседей перед остановкой (эмитит
+# run_node при завершении, этап 23). НЕ рождается вотчером — сама уходящая
+# нода и есть источник, дедуп по env.id делает остальное.
+EVENT_NODE_LEAVING = "node_leaving"
+# Возвращение ноды после недоступности, которая НЕ была аварией (штатный
+# уход, сон рабочей станции): информационно, для любого типа машины.
+# До этапа 23 возвращение workstation не объявлялось вообще (node_up
+# требовал предшествующего node_down, который для неё не рождается).
+EVENT_NODE_RETURNED = "node_returned"
 
 
 class PresenceWatcher:
@@ -61,6 +72,11 @@ class PresenceWatcher:
         # Пиры, о падении которых мы уже сообщили — чтобы не повторять алерт
         # каждый тик и чтобы знать, о чьём возвращении сообщить.
         self._reported_down: set[str] = set()
+        # Пиры, замеченные недоступными хотя бы на одном тике (любой тип
+        # машины): по этому набору объявляется возвращение. Тик как порог —
+        # естественный дебаунс: моргание линка короче интервала опроса не
+        # порождает «вернулась».
+        self._seen_down: set[str] = set()
         self._task: asyncio.Task | None = None
 
     async def start(self) -> None:
@@ -120,18 +136,32 @@ class PresenceWatcher:
         for link in self._router.peers.values():
             down_s = link.downtime_s()
             if down_s is None:  # на связи
+                was_down = link.name in self._seen_down
+                self._seen_down.discard(link.name)
                 if link.name in self._reported_down:
+                    # Конец аварии — node_up, как и раньше.
                     self._reported_down.discard(link.name)
                     if announcer:
                         await self._emit(
                             EVENT_NODE_UP,
                             {"node": link.name, "kind": self._known_kind(link.name)},
                         )
+                elif was_down and announcer:
+                    # Недоступность не была аварией (штатный уход, сон
+                    # рабочей станции) — возвращение всё равно осмысленно
+                    # для ЛЮБОГО типа машины (этап 23 п. 3).
+                    await self._emit(
+                        EVENT_NODE_RETURNED,
+                        {"node": link.name, "kind": self._known_kind(link.name)},
+                    )
                 continue
+            self._seen_down.add(link.name)
             if link.name in self._reported_down:
                 continue
             if down_s < self._down_after_s:
                 continue
+            if link.left:
+                continue  # предупредила об уходе — недоступность не авария
             if not traits_for(self._known_kind(link.name)).alerts_when_unreachable:
                 continue  # машина, которая штатно бывает выключена — молчим
             # Помечаем пропавшей независимо от того, объявляем ли мы: иначе
