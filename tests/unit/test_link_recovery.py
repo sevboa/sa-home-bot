@@ -271,3 +271,99 @@ async def test_занятый_порт_не_ждём(monkeypatch):
     with pytest.raises(OSError) as exc:
         await server.start()
     assert exc.value.errno == errno_mod.EADDRINUSE
+
+
+@pytest.mark.asyncio
+async def test_close_не_виснет_на_полумёртвом_сокете(sock_dir, monkeypatch):
+    """`close()` обязан вернуться, даже если сокет не подтверждает закрытие.
+
+    Живой баг 2026-07-28 (прод): `wait_closed()` без таймаута завис на
+    полумёртвом TCP (данные в Send-Q не уходят, FIN не подтверждается) и
+    подвесил весь цикл переподключения PeerLink — в логе «связь потеряна»
+    и тишина три минуты, линк не восстановился сам.
+    """
+    from sa_home_bot.proto import client as client_mod
+
+    monkeypatch.setattr(client_mod, "CLOSE_TIMEOUT_S", 0.05)
+
+    service = FakePeerService()
+    endpoint = f"unix://{sock_dir / 'peer.sock'}"
+    server = ProtoServer(endpoint, service)
+    await server.start()
+    client = ProtoClient(endpoint)
+    await client.connect()
+
+    async def never_closes():
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(client._writer, "wait_closed", never_closes)
+    try:
+        # Уложиться обязаны в CLOSE_TIMEOUT_S, а не ждать вечно.
+        await asyncio.wait_for(client.close(), timeout=2.0)
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_одновременный_разрыв_и_heartbeat_не_убивают_линк(sock_dir, monkeypatch):
+    """Гонка reconnect_now + heartbeat не должна вешать цикл переподключения.
+
+    Живой баг 2026-07-28 (прод): forward() позвал reconnect_now, в ту же
+    секунду heartbeat досчитал промахи — оба закрывали клиента параллельно,
+    `wait_closed()` на полумёртвом сокете висел без таймаута, и линк не
+    переподключался вообще («связь потеряна» и тишина три минуты).
+    """
+    monkeypatch.setattr(peers_mod, "HEARTBEAT_INTERVAL_S", 0.02)
+    monkeypatch.setattr(peers_mod, "HEARTBEAT_TIMEOUT_S", 0.02)
+    monkeypatch.setattr(peers_mod, "HEARTBEAT_MISSES", 1)
+
+    service = FakePeerService()
+    endpoint = f"unix://{sock_dir / 'peer.sock'}"
+    server = ProtoServer(endpoint, service)
+    await server.start()
+
+    link = PeerLink("winpc", endpoint, reconnect_delay=0.05)
+    await link.start()
+    try:
+        assert await _wait_for(lambda: link.alive)
+        # Оба пути разрыва одновременно, несколько раз подряд.
+        for _ in range(5):
+            link.reconnect_now("гонка")
+            link.reconnect_now("гонка ещё раз")
+            await asyncio.sleep(0.03)
+        assert await _wait_for(lambda: link.alive, timeout=10.0), (
+            "линк не переподключился после гонки разрывов"
+        )
+    finally:
+        await link.stop()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_цикл_переподключения_переживает_любую_ошибку(sock_dir, monkeypatch, caplog):
+    """Неожиданное исключение не должно убивать задачу линка молча."""
+    service = FakePeerService()
+    endpoint = f"unix://{sock_dir / 'peer.sock'}"
+    server = ProtoServer(endpoint, service)
+    await server.start()
+
+    calls = {"n": 0}
+    real_hello = ProtoClient.hello
+
+    async def exploding_hello(self, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("что-то совсем неожиданное")
+        return await real_hello(self, *args, **kwargs)
+
+    monkeypatch.setattr(ProtoClient, "hello", exploding_hello)
+
+    link = PeerLink("winpc", endpoint, reconnect_delay=0.05)
+    await link.start()
+    try:
+        assert await _wait_for(lambda: link.alive, timeout=10.0), (
+            "линк умер на непредвиденной ошибке вместо повторной попытки"
+        )
+    finally:
+        await link.stop()
+        await server.stop()

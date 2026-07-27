@@ -147,7 +147,9 @@ class PeerLink:
         log.info("PeerLink %s: %s — переподключаюсь немедленно", self.name, reason)
         self._client = None
         self._dropping = True
-        asyncio.create_task(client.close(), name=f"peer-link-drop-{self.name}")
+        # abort(), а не close(): закрывает соединение ровно один владелец —
+        # цикл `_run` в своём finally (см. ProtoClient.abort).
+        client.abort()
 
     async def _heartbeat(self, client: ProtoClient) -> None:
         """Периодическая проба соединения (см. HEARTBEAT_* выше).
@@ -171,7 +173,7 @@ class PeerLink:
                         exc,
                     )
                     self._dropping = True
-                    await client.close()
+                    client.abort()  # закрывает `_run`, см. reconnect_now
                     return
 
     def _mark_down(self) -> None:
@@ -246,9 +248,21 @@ class PeerLink:
                         self._delay,
                     )
                     logged_down = True
+            except asyncio.CancelledError:
+                raise  # stop(): выходим из цикла, это единственный законный путь
+            except Exception:
+                # Живая находка 2026-07-28: любое НЕОЖИДАННОЕ исключение здесь
+                # убивало задачу линка молча (create_task никому не жалуется) —
+                # линк оставался мёртвым навсегда, пока не перезапустят ноду.
+                # Цикл переподключения обязан переживать что угодно.
+                self._mark_down()
+                log.exception("PeerLink %s: непредвиденная ошибка, продолжаю попытки", self.name)
             finally:
                 self._client = None
-                await client.close()
+                # Закрытие не должно задерживать следующую попытку: сокет мог
+                # остаться полумёртвым (см. ProtoClient.close).
+                with contextlib.suppress(Exception):
+                    await client.close()
             await asyncio.sleep(self._delay)
 
 

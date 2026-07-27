@@ -44,6 +44,10 @@ EventCallback = Callable[[Envelope], Awaitable[None]]
 
 DEFAULT_TIMEOUT = 10.0
 
+# Потолок на закрытие соединения (см. close): полумёртвый сокет не должен
+# задерживать переподключение.
+CLOSE_TIMEOUT_S = 5.0
+
 # Живая находка 2026-07-20: TCP по умолчанию не замечает молча пропавшего
 # собеседника (сон машины, обрыв сети без FIN/RST) — _read_loop висит на
 # readline() неограниченно, PeerLink.alive продолжает врать "жив" даже
@@ -169,12 +173,32 @@ class ProtoClient:
                 await self._reader_task
             self._reader_task = None
         if self._writer is not None:
-            self._writer.close()
+            writer, self._writer = self._writer, None
+            writer.close()
+            # Живая находка 2026-07-28: без таймаута `wait_closed()` виснет на
+            # полумёртвом сокете (данные в Send-Q не уходят, FIN не
+            # подтверждается) — и вешает весь цикл переподключения PeerLink,
+            # который зовёт close() перед новой попыткой. Сокет всё равно уже
+            # closed(); дожидаться подтверждения не обязательно.
             with contextlib.suppress(Exception):
-                await self._writer.wait_closed()
-            self._writer = None
+                await asyncio.wait_for(writer.wait_closed(), timeout=CLOSE_TIMEOUT_S)
         self._reader = None
         self._fail_pending(ConnectionError("клиент закрыт"))
+
+    def abort(self) -> None:
+        """Синхронно оборвать соединение, не дожидаясь закрытия.
+
+        Роняет читающую задачу — а с ней и `join()` у того, кто держит этот
+        клиент; полное `close()` делает уже он, в одном месте. Так убран
+        источник гонки: раньше `close()` звали параллельно из heartbeat и из
+        reconnect_now, и они переплетались на общих полях (живая находка
+        2026-07-28: линк после этого не переподключался вовсе).
+        """
+        if self._reader_task is not None:
+            self._reader_task.cancel()
+        if self._writer is not None:
+            with contextlib.suppress(Exception):
+                self._writer.close()
 
     async def join(self) -> None:
         """Дождаться завершения фоновой читающей задачи (EOF/обрыв/закрытие)."""
