@@ -111,12 +111,16 @@ class ProtoClient:
         *,
         token: str = "",
         src: Address | None = None,
+        incarnation: str = "",
         on_event: EventCallback | None = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         self._endpoint = parse_endpoint(endpoint)
         self._token = token
         self._src = src
+        # Инкарнация нашего процесса (см. node/peers.py::NODE_INCARNATION):
+        # едет в auth, чтобы сосед отличил наш перезапуск от переподключения.
+        self._incarnation = incarnation
         self._on_event = on_event
         self._timeout = timeout
         self._reader: asyncio.StreamReader | None = None
@@ -151,6 +155,7 @@ class ProtoClient:
             auth_payload: dict[str, Any] = {"token": self._token}
             if self._src is not None and self._src.node:
                 auth_payload["node"] = self._src.node
+                auth_payload["incarnation"] = self._incarnation
             try:
                 await self.request(MSG_AUTH, auth_payload)
             except BaseException:

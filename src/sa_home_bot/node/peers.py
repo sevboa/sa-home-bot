@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import logging
 import time
+import uuid
 
 from sa_home_bot.proto.client import EventCallback, ProtoClient
 from sa_home_bot.proto.endpoints import Endpoint
@@ -44,6 +45,15 @@ HEARTBEAT_TIMEOUT_S = 4.0
 # Промахов подряд до разрыва: один потерянный ответ на нагруженной ноде —
 # не повод рвать рабочий линк, два подряд — уже отказ.
 HEARTBEAT_MISSES = 2
+
+# Инкарнация процесса: новая на каждый запуск ноды. Сосед по ней отличает
+# «я перезагрузился» от «я просто переподключился».
+#
+# Живая находка 2026-07-28 (прод, через полчаса после первой версии фикса):
+# без неё случился взаимный цикл — alfred рвал линк к winpc, переподключался,
+# его auth заставлял winpc порвать свой линк к alfred, и так каждые 10 с по
+# кругу. Реагировать надо на СМЕНУ инкарнации, а не на факт подключения.
+NODE_INCARNATION = uuid.uuid4().hex
 
 # Служба самого сервиса ноды: запросы к ней (и без dst) обрабатываются локально.
 NODE_SERVICE = "node"
@@ -180,7 +190,11 @@ class PeerLink:
         logged_down = False
         while True:
             client = ProtoClient(
-                self.endpoint, token=self._token, on_event=self._on_event, src=self._src
+                self.endpoint,
+                token=self._token,
+                on_event=self._on_event,
+                src=self._src,
+                incarnation=NODE_INCARNATION,
             )
             try:
                 await client.connect()

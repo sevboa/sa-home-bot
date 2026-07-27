@@ -108,6 +108,9 @@ class ProtoServer:
         # Зовётся, когда сосед аутентифицировался и назвался: повод считать
         # собственный исходящий линк к нему протухшим (он явно перезапустился).
         self._on_peer_connect = on_peer_connect
+        # Последняя известная инкарнация каждого соседа: смена = он
+        # перезапустился (см. _note_peer).
+        self._peer_incarnations: dict[str, str] = {}
         self._servers: list[asyncio.Server] = []
         self._connections: set[_Connection] = set()
         self._request_tasks: set[asyncio.Task] = set()
@@ -277,18 +280,34 @@ class ProtoServer:
         return make_response(request, {"authenticated": True})
 
     def _note_peer(self, conn: _Connection, request: Envelope) -> None:
-        """Сосед назвался в auth: закрыть его прошлые (мёртвые) соединения и
-        сообщить наверх, что линк к нему пора переустановить.
+        """Сосед назвался в auth: если это его НОВЫЙ запуск — закрыть прошлые
+        (мёртвые) соединения и сообщить наверх, что линк к нему пора
+        переустановить.
 
         Живая находка 2026-07-28: после трёх перезагрузок winpc на alfred
         висело ЧЕТЫРЕ входящих ESTAB от неё — сервер их не закрывал, потому
-        что обрыв без FIN/RST для него неотличим от простоя. Раз сосед с тем
-        же именем пришёл заново, прошлые его соединения заведомо трупы.
+        что обрыв без FIN/RST для него неотличим от простоя.
+
+        Реагируем именно на СМЕНУ инкарнации, а не на факт подключения
+        (живая находка того же дня, прод): первая версия дёргала колбэк на
+        каждый auth — alfred рвал линк к winpc, переподключался, его auth
+        заставлял winpc порвать свой линк к alfred, и так по кругу каждые
+        10 с. Инкарнация процесса при переподключении не меняется, при
+        перезапуске — меняется.
         """
         node = request.payload.get("node")
         if not isinstance(node, str) or not node:
             return
         conn.node = node
+        incarnation = request.payload.get("incarnation")
+        if not isinstance(incarnation, str):
+            incarnation = ""
+        previous = self._peer_incarnations.get(node)
+        self._peer_incarnations[node] = incarnation
+        # Первое соединение с этим узлом за нашу жизнь: нам не с чем
+        # сравнивать и нечего инвалидировать.
+        if previous is None or previous == incarnation:
+            return
         for other in [c for c in self._connections if c is not conn and c.node == node]:
             self._connections.discard(other)
             other.writer.close()

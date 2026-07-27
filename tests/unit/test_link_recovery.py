@@ -122,10 +122,10 @@ async def test_reconnect_now_поднимает_связь_заново(sock_dir
 
 
 @pytest.mark.asyncio
-async def test_вернувшийся_сосед_опознаётся_по_auth():
-    """Сосед назвался в auth → сервер зовёт колбэк и закрывает его прошлые
-    соединения (иначе они копятся: на проде их было четыре, по одному на
-    каждый ребут winpc)."""
+async def test_перезапустившийся_сосед_роняет_старое_соединение(monkeypatch):
+    """Сосед пришёл с ДРУГОЙ инкарнацией (перезапустился) → сервер зовёт
+    колбэк и закрывает его прошлое соединение (иначе они копятся: на проде
+    их было четыре, по одному на каждый ребут winpc)."""
     connected: list[str] = []
     service = FakePeerService()
     server = ProtoServer(
@@ -133,28 +133,65 @@ async def test_вернувшийся_сосед_опознаётся_по_auth(
     )
     await server.start()
     addr = server.endpoint
+    first = second = None
     try:
         first = PeerLink(
             "winpc", f"tcp://{addr.host}:{addr.port}", token="s3cret", self_node="alfred"
         )
         await first.start()
         assert await _wait_for(lambda: first.alive)
-        assert await _wait_for(lambda: connected == ["alfred"])
+        # Первое соединение: сравнивать не с чем, дёргать нечего.
+        assert connected == []
         assert server.connection_count == 1
 
-        # Тот же узел приходит заново — прошлое соединение должно закрыться,
-        # а не остаться висеть вторым.
+        # Тот же узел, но процесс перезапустился — новая инкарнация.
+        monkeypatch.setattr(peers_mod, "NODE_INCARNATION", "второй-запуск")
         second = PeerLink(
             "winpc", f"tcp://{addr.host}:{addr.port}", token="s3cret", self_node="alfred"
         )
         await second.start()
-        assert await _wait_for(lambda: connected == ["alfred", "alfred"])
+        assert await _wait_for(lambda: connected == ["alfred"])
         assert await _wait_for(lambda: server.connection_count == 1), (
             f"старое соединение не закрыто: {server.connection_count}"
         )
     finally:
-        await first.stop()
-        await second.stop()
+        for link in (first, second):
+            if link is not None:
+                await link.stop()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_переподключение_без_перезапуска_не_дёргает_колбэк():
+    """Инкарнация та же — сосед просто переподключился.
+
+    Живой баг 2026-07-28: реакция на КАЖДЫЙ auth породила взаимный цикл —
+    alfred рвал линк к winpc, переподключался, чем заставлял winpc порвать
+    свой линк к alfred, и так каждые 10 с по кругу.
+    """
+    connected: list[str] = []
+    service = FakePeerService()
+    server = ProtoServer(
+        TcpEndpoint("127.0.0.1", 0), service, token="s3cret", on_peer_connect=connected.append
+    )
+    await server.start()
+    addr = server.endpoint
+    link = PeerLink(
+        "winpc",
+        f"tcp://{addr.host}:{addr.port}",
+        token="s3cret",
+        self_node="alfred",
+        reconnect_delay=0.05,
+    )
+    await link.start()
+    try:
+        assert await _wait_for(lambda: link.alive)
+        for _ in range(3):
+            link.reconnect_now("тест")
+            assert await _wait_for(lambda: link.alive)
+        assert connected == [], f"колбэк сработал на переподключении: {connected}"
+    finally:
+        await link.stop()
         await server.stop()
 
 
