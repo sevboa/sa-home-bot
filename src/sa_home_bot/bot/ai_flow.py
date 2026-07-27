@@ -218,6 +218,14 @@ _PRESENCE_CHECK_TIMEOUT_S = wake_core.PRESENCE_TIMEOUT_S
 # пользователь явно попросил лаконичную реплику в духе персонажа, не
 # техническое "думаю...".
 THINKING_TEXT = "<i>На лице Альфреда проступает задумчивость</i>"
+# Поход в интернет (тул web_search) — самый долгий из инструментов не сам по
+# себе (SearXNG отвечает за ~1.5 с), а потому что модель делает несколько
+# поисков подряд, переформулируя запрос, и между ними думает: живой замер
+# 2026-07-27 — три минуты от вопроса до ответа. Без этой строки такая пауза
+# читается как зависший бот. Шлётся ОДИН раз за запрос, по первому же
+# web_search (см. _record_tool_call), а не на каждый поиск.
+SURFING_TEXT = "<i>Альфред увлечённо сёрфит интернет...</i>"
+SURFING_TOOL = "web_search"
 
 
 def _is_unavailable(exc: Exception) -> bool:
@@ -383,7 +391,12 @@ async def _reply_context_lines(message: Message, store: Store, dialogue_id: int)
 
 
 async def _build_context_note(
-    message: Message, store: Store, dialogue_id: int, settings: Settings | None = None
+    message: Message,
+    store: Store,
+    dialogue_id: int,
+    settings: Settings | None = None,
+    *,
+    has_web_search: bool = True,
 ) -> str:
     """Служебная заметка для модели (не для пользователя): точное время
     сейчас (§8.1 плана — маленькие локальные модели плохо знают "сейчас", а
@@ -416,6 +429,23 @@ async def _build_context_note(
         "строки про его/её местное время — честно скажи, что не знаешь, не "
         "додумывай."
     ]
+    if not has_web_search:
+        # Живая находка 2026-07-27: в чате без права search@net тула
+        # web_search модель не видит вовсе (bot/tools.py::tools_for) — и,
+        # не зная, что поиск в принципе бывает, отвечает про свежие события
+        # из памяти, ВЫДУМЫВАЯ даты и факты. Молчаливое отсутствие
+        # инструмента само по себе не учит модель осторожности, поэтому
+        # говорим прямо — тем же приёмом, что и строка про часовой пояс выше
+        # («честно скажи, что не знаешь, не додумывай»).
+        lines.append(
+            "Выхода в интернет у тебя сейчас нет — проверить ничего не "
+            "можешь. Если спрашивают о свежем (новости, события последних "
+            "лет, чей-то запуск/матч/курс, «что было вчера») — прямо скажи, "
+            "что сейчас без интернета и потому не знаешь. НЕ придумывай "
+            "события, даты, числа и названия и не выдавай за факт то, что "
+            "помнишь: память могла устареть или подвести. Признаться в "
+            "незнании — не стыдно, соврать — стыдно."
+        )
     alfred_now = datetime.now(ZoneInfo(ALFRED_TIMEZONE))
     lines.append(
         f"Отдельно: ТВОЁ (Альфреда) личное время сейчас — там, где ты живёшь: "
@@ -487,7 +517,18 @@ async def request_alfred(
     dst = Address(node=LLM_NODE, service=LLM_SERVICE)
     timeout = settings.llm.request_timeout_s
     chat_id = message.chat.id if message.chat else "?"
-    context_note = await _build_context_note(message, store, dialogue_id, settings)
+    # Права собеседника ограничивают комплект тулов: Альфред не должен быть
+    # обходным путём вокруг подписок (bot/tools.py::tools_for). Резолвим один
+    # раз — комплект нужен и заметке (знает ли он про интернет), и tool_ctx.
+    subscription = book.for_chat(message.chat.id) if message.chat else None
+    has_web_search = SURFING_TOOL in ai_tools.tools_for(subscription).handlers
+    context_note = await _build_context_note(
+        message, store, dialogue_id, settings, has_web_search=has_web_search
+    )
+    # Список как изменяемая ячейка: _record_tool_call — вложенная функция, а
+    # nonlocal через два уровня вложенности (_ask → колбэк) читается хуже.
+    # Непустой = вставка «сёрфит» за этот запрос уже отправлена.
+    surfing_announced: list[bool] = []
 
     async def _ask() -> str:
         if context_note:
@@ -512,9 +553,7 @@ async def request_alfred(
             trigger_message_id=message.message_id if message.chat else None,
             settings=settings,
             node_link=node_link,
-            # Права собеседника ограничивают комплект тулов: Альфред не должен
-            # быть обходным путём вокруг подписок (bot/tools.py::tools_for).
-            subscription=book.for_chat(message.chat.id) if message.chat else None,
+            subscription=subscription,
         )
         telegram_chat_id = message.chat.id if message.chat is not None else None
 
@@ -525,6 +564,13 @@ async def request_alfred(
             # вернул (см. schema.sql::ai_tool_calls). Пишет только живой
             # /ai — у него есть Store, у службы tasks его нет вовсе.
             await notify_tool_call(book, notifier, name)
+            if name == SURFING_TOOL and not surfing_announced:
+                # Флаг — в области request_alfred, а не _ask: пересборка
+                # ответа после пробуждения ноды не должна слать вставку
+                # повторно. Колбэк общий для router- и персонажного прохода,
+                # поэтому без флага строк было бы несколько на один запрос.
+                surfing_announced.append(True)
+                await message.answer(SURFING_TEXT)
             if telegram_chat_id is None:
                 return
             await store.record_tool_call(

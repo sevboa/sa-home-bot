@@ -143,6 +143,13 @@ class FakeNodeLink:
         if action == "send_wol":
             self.wol_sent.append(args)
             return {"sent": True}
+        if action == "search":
+            # Служба net (тул web_search) — отвечаем канонично, не ходя в сеть.
+            return {
+                "query": args.get("query", ""),
+                "results": [{"title": "T", "url": "u"}],
+                "count": 1,
+            }
         assert action == "chat"
         result = self._chat_results.pop(0)
         if isinstance(result, Exception):
@@ -282,11 +289,49 @@ async def test_unknown_tool_name_reported_back_to_model(store):
     assert "неизвестный инструмент" in tool_msg["content"]
 
 
-async def test_tool_call_round_limit_falls_back_to_hiccup(store):
+async def test_tool_call_round_limit_squeezes_answer_without_tools(store):
+    """Лимит раундов исчерпан — не сбой, а последний запрос БЕЗ инструментов.
+
+    Живая находка 2026-07-27: модель делала три поиска подряд и упиралась в
+    лимит, после чего пользователь получал ALBERT_HICCUP, прождав минуты, —
+    хотя результаты тулов уже лежали в messages и отвечать было чем.
+    """
     tool_calls = [{"function": {"name": "calc", "arguments": {"expression": "1+1"}}}]
     message = FakeMessage()
     link = FakeNodeLink(
-        chat_results=[{"tool_calls": tool_calls}] * llm_chat.MAX_TOOL_ROUNDS,
+        chat_results=[
+            # router-проход: упирается в лимит...
+            *[{"tool_calls": tool_calls}] * llm_chat.MAX_TOOL_ROUNDS,
+            # ...и дожимает решение уже без тулов
+            {"response": ai_flow.ROUTE_OK},
+            # персонажный проход
+            {"response": "Двá, сэг"},
+        ],
+        get_state_routes={"winpc:llm": {"asleep": False}},
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "..."}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert raw == "Двá, сэг"
+    assert ai_flow.ALBERT_HICCUP not in message.answers
+    # Дожимающий запрос — ровно тот, что идёт сразу после исчерпания лимита;
+    # у него пустой tools, иначе модели снова было бы что вызвать.
+    squeeze_args = link.command_calls[llm_chat.MAX_TOOL_ROUNDS][1]
+    assert squeeze_args["tools"] == []
+
+
+async def test_empty_answer_after_round_limit_is_still_a_hiccup(store):
+    """Пустой ответ, когда звать уже нечего, — настоящий сбой генерации."""
+    tool_calls = [{"function": {"name": "calc", "arguments": {"expression": "1+1"}}}]
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[
+            *[{"tool_calls": tool_calls}] * llm_chat.MAX_TOOL_ROUNDS,
+            {"response": ""},
+        ],
         get_state_routes={"winpc:llm": {"asleep": False}},
     )
 
@@ -915,3 +960,123 @@ def test_active_ai_chats_ignores_none():
     chats.register(None, object())
     chats.unregister(None, object())
     assert chats.snapshot() == {}
+
+
+# --- «Альфред увлечённо сёрфит»: пауза на поиск не должна читаться как
+# зависший бот (живой замер 2026-07-27: три минуты от вопроса до ответа) ---
+
+
+def _search_call(query: str = "новости"):
+    return {"function": {"name": "web_search", "arguments": {"query": query}}}
+
+
+async def test_web_search_announces_surfing_once_per_request(store):
+    """Вставка шлётся ОДИН раз, хотя поисков за запрос бывает несколько и
+    колбэк общий для router- и персонажного прохода."""
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[
+            {"tool_calls": [_search_call("первый")]},
+            {"response": ai_flow.ROUTE_OK},
+            {"tool_calls": [_search_call("второй")]},
+            {"response": "Вот что нашёл, сэг"},
+        ],
+        get_state_routes={"winpc:llm": {"asleep": False}},
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "что нового?"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert raw == "Вот что нашёл, сэг"
+    assert message.answers.count(ai_flow.SURFING_TEXT) == 1
+    # Оба поиска реально случились — вставка не подменяет работу тула.
+    calls = await store.tool_calls_for_dialogue(message.chat.id, 1)
+    assert [c["tool_name"] for c in calls] == ["web_search", "web_search"]
+
+
+async def test_other_tools_do_not_announce_surfing(store):
+    """calc/погода отрабатывают за миллисекунды — про сёрфинг там врать нечего."""
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[
+            {"tool_calls": [{"function": {"name": "calc", "arguments": {"expression": "2+2"}}}]},
+            {"response": ai_flow.ROUTE_OK},
+            {"response": "Четыге"},
+        ],
+        get_state_routes={"winpc:llm": {"asleep": False}},
+    )
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "2+2"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert ai_flow.SURFING_TEXT not in message.answers
+
+
+# --- нет права на поиск => прямое указание не выдумывать (2026-07-27) ---
+
+
+def _note_msg(messages) -> str:
+    """Служебная заметка — единственное system-сообщение в запросе."""
+    return next(m["content"] for m in messages if m["role"] == "system")
+
+
+async def test_without_search_right_model_is_told_not_to_invent(store):
+    """Живая находка: без права search@net модель не видит тул вовсе и,
+    не зная, что поиск бывает, отвечала про свежие события из памяти —
+    выдумывая даты и факты. Молчаливое отсутствие тула её не останавливает,
+    нужно сказать прямо."""
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Не знаю, сэг"}],
+        get_state_routes={"winpc:llm": {"asleep": False}},
+    )
+    book = SubscriptionBook(
+        [Subscription(chat_id=1, name="группа", allowed_commands=frozenset({"chat@llm"}))]
+    )
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(),
+        [{"role": "user", "content": "что вчера запустил SpaceX?"}], 1,
+        book, FakeNotifier(),
+    )
+
+    note = _note_msg(link.command_calls[0][1]["messages"])
+    assert "Выхода в интернет у тебя сейчас нет" in note
+    assert "НЕ придумывай" in note
+
+
+async def test_with_search_right_no_such_warning(store):
+    """У кого поиск есть — предупреждение только сбивало бы с толку."""
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Извольте"}],
+        get_state_routes={"winpc:llm": {"asleep": False}},
+    )
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "новости?"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    note = _note_msg(link.command_calls[0][1]["messages"])
+    assert "Выхода в интернет у тебя сейчас нет" not in note
+
+
+async def test_chat_without_subscription_also_warned(store):
+    """Fail-closed: подписки нет — тулов нет, значит и интернета нет."""
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "..."}],
+        get_state_routes={"winpc:llm": {"asleep": False}},
+    )
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "?"}], 1,
+        SubscriptionBook([]), FakeNotifier(),
+    )
+
+    assert "Выхода в интернет" in _note_msg(link.command_calls[0][1]["messages"])

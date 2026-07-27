@@ -28,7 +28,12 @@ ACTION_CHAT = "chat"
 # Сколько раз подряд можно уйти в tool_calls, прежде чем модель обязана дать
 # финальный текстовый ответ — защита от зацикливания (LLM_INTEGRATION_
 # PLAN.md §7.1 п.5).
-MAX_TOOL_ROUNDS = 4
+#
+# 5 (было 4, решение пользователя 2026-07-27): с появлением web_search модель
+# на одном вопросе делает несколько поисков подряд, переформулируя запрос —
+# на живом вопросе про Нидерланды ушло три раунда только на поиск, и лимита
+# в 4 едва хватало.
+MAX_TOOL_ROUNDS = 5
 
 # (имя тула, аргументы, результат) — вызывается после каждого тула. Этот
 # модуль сам БД не трогает (см. докстринг модуля — им пользуется и служба
@@ -53,6 +58,10 @@ async def run_chat_loop(
     """Один проход диалога с моделью: раунды tool-calling (до
     MAX_TOOL_ROUNDS), пока не придёт финальный текст.
 
+    Если лимит раундов исчерпан, а модель всё ещё зовёт инструменты, проход
+    НЕ падает: делается ещё один запрос без деклараций инструментов — звать
+    нечего, и модель формулирует ответ из уже собранного (см. конец функции).
+
     ``messages`` мутируется по ходу (дописываются tool_calls/результаты) —
     вызывающий передаёт отдельный список на каждый проход, если хочет
     сохранить исходную историю чистой. ``tool_ctx.history`` привязывается к
@@ -76,11 +85,9 @@ async def run_chat_loop(
     # который у него нет прав, модель не видит вовсе (см. bot/tools.py::
     # tools_for — требование "Альфред не отказывает, а не умеет").
     toolkit = ai_tools.tools_for(tool_ctx.subscription)
-    for _round in range(MAX_TOOL_ROUNDS):
-        args: dict[str, Any] = {
-            "messages": messages,
-            "tools": toolkit.declarations,
-        }
+
+    def _chat_args(tools: list[dict[str, Any]]) -> dict[str, Any]:
+        args: dict[str, Any] = {"messages": messages, "tools": tools}
         if think is not None:
             args["think"] = think
         if telegram_chat_id is not None:
@@ -89,6 +96,10 @@ async def run_chat_loop(
             args["chat_id"] = telegram_chat_id
         if role is not None:
             args["role"] = role
+        return args
+
+    for _round in range(MAX_TOOL_ROUNDS):
+        args = _chat_args(toolkit.declarations)
         result = await node_link.command(ACTION_CHAT, args, dst=dst, timeout=timeout)
         tool_calls = result.get("tool_calls")
         if not tool_calls:
@@ -121,6 +132,25 @@ async def run_chat_loop(
             if on_tool_call is not None:
                 await on_tool_call(name, call_args, tool_result)
             messages.append({"role": "tool", "content": tool_result, "name": name})
-    # Лимит раундов исчерпан — модель зациклилась на вызовах инструментов,
-    # не дав финального текста.
-    raise ProtoError(ERR_INTERNAL, "превышен лимит раундов tool-calling")
+    # Лимит раундов исчерпан. Раньше здесь был ProtoError → пользователь
+    # получал ALBERT_HICCUP («Альфред отвлёкся, повторите») после того, как
+    # прождал несколько минут, — и это при том, что результаты инструментов
+    # уже лежали в messages, отвечать было ЧЕМ. Живая находка 2026-07-27: на
+    # вопросе про Нидерланды модель сделала три поиска подряд и упёрлась в
+    # лимит буквально на последнем раунде.
+    #
+    # Решение пользователя: не ломаться, а дожать. Последний запрос идёт БЕЗ
+    # деклараций инструментов — тогда модели просто нечего вызвать, и она
+    # обязана сформулировать текст из того, что уже собрала.
+    log.info(
+        "llm_chat: лимит раундов (%d) исчерпан, дожимаем ответ без тулов (chat=%s)",
+        MAX_TOOL_ROUNDS,
+        log_chat_id,
+    )
+    result = await node_link.command(ACTION_CHAT, _chat_args([]), dst=dst, timeout=timeout)
+    response = result.get("response", "")
+    if response:
+        return response
+    # Пустой ответ без единого доступного инструмента — это уже не
+    # «зациклилась», а настоящий сбой генерации: сюда и правда нужен HICCUP.
+    raise ProtoError(ERR_INTERNAL, "модель не дала ответа после лимита раундов")
