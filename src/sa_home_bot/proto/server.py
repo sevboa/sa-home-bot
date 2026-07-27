@@ -47,6 +47,7 @@ from sa_home_bot.proto.messages import (
     make_event,
     make_response,
 )
+from sa_home_bot.proto.tcpopts import enable_tcp_keepalive
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +71,16 @@ Router = Callable[[Envelope], Awaitable[Envelope | None]]
 # Tailscale: лучше подождать лишнее, чем не подняться совсем.
 BIND_RETRY_TIMEOUT_S = 180.0
 BIND_RETRY_INTERVAL_S = 3.0
+
+# Потолок на одну запись в клиентский сокет. Зависание записи — это не
+# исключение, а вечный await на drain() полумёртвого соединения: без потолка
+# один залипший клиент останавливал ВСЮ рассылку событий, а с ней и emit()
+# супервизора/аренды/репликации — жизненный цикл служб ноды.
+SEND_TIMEOUT_S = 10.0
+
+# Сколько TCP-клиенту дано на первое сообщение (auth): молчащее
+# неаутентифицированное соединение иначе висит в _connections вечно.
+AUTH_TIMEOUT_S = 10.0
 
 
 class _Connection:
@@ -230,17 +241,39 @@ class ProtoServer:
 
     async def broadcast_envelope(self, env: Envelope) -> int:
         """Разослать готовый конверт (в т.ч. ретрансляция события чужой ноды —
-        src оригинала сохраняется). Возвращает число реальных доставок."""
-        delivered = 0
-        for conn in list(self._connections):
-            if not conn.authenticated:
-                continue
-            try:
-                await conn.send(env)
-                delivered += 1
-            except (ConnectionError, OSError):
-                self._connections.discard(conn)
-        return delivered
+        src оригинала сохраняется). Возвращает число реальных доставок.
+
+        Рассылка параллельная и с потолком на каждого получателя: раньше
+        соединения обходились последовательно и без таймаута — один
+        полумёртвый клиент с забитым Send-Q блокировал и остальных
+        получателей, и await emit() у супервизора/аренды (head-of-line).
+        """
+        conns = [conn for conn in self._connections if conn.authenticated]
+        if not conns:
+            return 0
+        results = await asyncio.gather(*(self._send_bounded(conn, env) for conn in conns))
+        return sum(results)
+
+    async def _send_bounded(self, conn: _Connection, env: Envelope) -> bool:
+        """Записать конверт с потолком SEND_TIMEOUT_S; не уложился — клиент
+        полумёртв, его соединение закрывается, чтобы не копить такие же
+        зависшие записи дальше."""
+        try:
+            await asyncio.wait_for(conn.send(env), timeout=SEND_TIMEOUT_S)
+            return True
+        except TimeoutError:
+            log.warning(
+                "ProtoServer: запись клиенту %s не прошла за %.0f с — закрываю соединение",
+                conn.node or conn.writer.get_extra_info("peername"),
+                SEND_TIMEOUT_S,
+            )
+            self._connections.discard(conn)
+            with contextlib.suppress(Exception):
+                conn.writer.close()
+            return False
+        except (ConnectionError, OSError):
+            self._connections.discard(conn)
+            return False
 
     async def _handle_client(
         self,
@@ -251,11 +284,30 @@ class ProtoServer:
     ) -> None:
         # trusted=True у unix-слушателя (права файла); на TCP доверие даёт auth.
         conn = _Connection(writer, authenticated=trusted)
+        if not trusted:
+            # Принятой стороне keepalive нужен так же, как исходящей: сосед,
+            # умерший без FIN, иначе висит тут до tcp_retries2 (~15 минут)
+            # или вечно — см. proto/tcpopts.py.
+            raw_sock = writer.get_extra_info("socket")
+            if raw_sock is not None:
+                enable_tcp_keepalive(raw_sock)
         self._connections.add(conn)
         try:
             while True:
                 try:
-                    line = await reader.readline()
+                    if conn.authenticated:
+                        line = await reader.readline()
+                    else:
+                        # До auth соединению не верим и ждать его вечно не
+                        # готовы: молчащий клиент держал бы слот бессрочно.
+                        line = await asyncio.wait_for(reader.readline(), AUTH_TIMEOUT_S)
+                except TimeoutError:
+                    log.warning(
+                        "ProtoServer: клиент %s не прислал auth за %.0f с — закрываю",
+                        writer.get_extra_info("peername"),
+                        AUTH_TIMEOUT_S,
+                    )
+                    break
                 except (asyncio.LimitOverrunError, ValueError):
                     log.warning("ProtoServer: сообщение длиннее лимита, закрываю соединение")
                     break
@@ -302,8 +354,14 @@ class ProtoServer:
                 log.exception("ProtoServer: обработчик запроса упал")
                 request_id = request.id if request is not None else "?"
                 response = make_error_response(request_id, ERR_INTERNAL, "внутренняя ошибка")
-            await conn.send(response)
+            # Тот же потолок, что у broadcast: полумёртвый клиент не должен
+            # бесконечно держать задачу запроса на своём drain().
+            await asyncio.wait_for(conn.send(response), timeout=SEND_TIMEOUT_S)
             if close_after:
+                conn.writer.close()
+        except TimeoutError:
+            self._connections.discard(conn)
+            with contextlib.suppress(Exception):
                 conn.writer.close()
         except (ConnectionError, OSError):
             self._connections.discard(conn)

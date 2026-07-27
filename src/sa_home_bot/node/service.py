@@ -141,6 +141,8 @@ class NodeService:
         node_kind: str = node_kinds.KIND_SERVER,
         replicator: ConfigReplicator | None = None,
         lease: LeaseManager | None = None,
+        make_peer_link: Callable[[str, str], PeerLink] | None = None,
+        make_local_link: Callable[[str, str], PeerLink] | None = None,
     ) -> None:
         # Репликация пакетов настроек: None — на этой ноде каталога пакетов
         # нет (конфиг не файловый), обмениваться нечем.
@@ -168,6 +170,18 @@ class NodeService:
         # telegram-bot — клиент, сервера у него нет, сюда не входит.
         self._local_service_endpoints = local_service_endpoints or {}
         self._swarm_token = swarm_token
+        # Фабрики линков из node/app.py::make_link_factories: несут on_event и
+        # self_node, которые здесь взять больше неоткуда. Живой баг (аудит
+        # 2026-07-28): линки, собранные тут на месте голым PeerLink(...,
+        # token=...), не принимали события соседа/службы до рестарта ноды и
+        # не представлялись в auth. Запасной вариант — для тестов и сборок
+        # без событийной части.
+        self._make_peer_link = make_peer_link or (
+            lambda pid, ep: PeerLink(pid, ep, token=swarm_token, self_node=self._node)
+        )
+        self._make_local_link = make_local_link or (
+            lambda name, ep: PeerLink(name, ep, token=swarm_token)
+        )
         # swarm_join: без своего TCP-адреса нечего давать соседям для обратной
         # связи — действие объявляется только когда есть куда стучаться.
         self._own_endpoint = own_endpoint
@@ -434,7 +448,7 @@ class NodeService:
         endpoint = self._local_service_endpoints.get(service)
         already_linked = self._router is not None and service in self._router.local_services
         if self._router is not None and endpoint is not None and not already_linked:
-            link = PeerLink(service, endpoint, token=self._swarm_token)
+            link = self._make_local_link(service, endpoint)
             await self._router.add_local_service(service, link)
         if name not in self._state.assignments:
             self._state.assignments.append(name)
@@ -527,7 +541,7 @@ class NodeService:
             if existing is None or str(existing.endpoint) != caller_endpoint:
                 if existing is not None:
                     await self._router.remove_peer(caller_id)
-                link = PeerLink(caller_id, caller_endpoint, token=self._swarm_token)
+                link = self._make_peer_link(caller_id, caller_endpoint)
                 await self._router.add_peer(link)
             self._remember_peer(caller_id, caller_endpoint)
 
@@ -576,7 +590,7 @@ class NodeService:
                 pid, peer_endpoint = peer.get("id"), peer.get("endpoint")
                 if not pid or not peer_endpoint or pid == self._node or pid in self._router.peers:
                     continue
-                link = PeerLink(pid, peer_endpoint, token=self._swarm_token)
+                link = self._make_peer_link(pid, peer_endpoint)
                 await self._router.add_peer(link)
                 self._remember_peer(pid, peer_endpoint)
                 added.append(pid)

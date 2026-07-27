@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 
 from sa_home_bot.config import Settings
-from sa_home_bot.node.app import SeenEvents, _relay_peer_event, build_router
+from sa_home_bot.node.app import (
+    SeenEvents,
+    _relay_peer_event,
+    build_router,
+    make_link_factories,
+)
 from sa_home_bot.node.peers import NodeRouter, PeerLink
 from sa_home_bot.node.service import NodeService
 from sa_home_bot.node.state import NodeState
@@ -166,8 +171,7 @@ async def test_relay_peer_event_auto_adds_new_peer(tmp_path):
         router=router,
         state=state,
         state_path=str(state_path),
-        token="",
-        on_peer_event=lambda e: None,
+        make_peer_link=PeerLink,
         server=None,
         seen=SeenEvents(),
     )
@@ -192,8 +196,7 @@ async def test_relay_peer_event_ignores_own_echo():
         router=router,
         state=NodeState(),
         state_path="/dev/null",
-        token="",
-        on_peer_event=lambda e: None,
+        make_peer_link=PeerLink,
         server=None,
         seen=SeenEvents(),
     )
@@ -226,8 +229,7 @@ async def test_relay_peer_event_local_service_same_node_id_is_not_echo():
         router=router,
         state=NodeState(),
         state_path="/dev/null",
-        token="",
-        on_peer_event=lambda e: None,
+        make_peer_link=PeerLink,
         server=_FakeServer(),
         seen=SeenEvents(),
         is_local=True,
@@ -255,8 +257,7 @@ async def test_relay_peer_event_peer_same_node_id_still_treated_as_echo():
         router=router,
         state=NodeState(),
         state_path="/dev/null",
-        token="",
-        on_peer_event=lambda e: None,
+        make_peer_link=PeerLink,
         server=_FakeServer(),
         seen=SeenEvents(),
     )  # is_local не передан — default False
@@ -271,10 +272,65 @@ async def test_build_router_wires_local_services_to_on_local_event():
     def on_local_event(e):
         pass
 
-    router = build_router(settings, "alfred", ["tasks"], [], on_peer_event, on_local_event)
+    make_peer_link, make_local_link = make_link_factories(
+        settings, "alfred", on_peer_event, on_local_event
+    )
+    router = build_router(settings, "alfred", ["tasks"], [], make_peer_link, make_local_link)
     assert "tasks" in router.local_services
     assert router.local_services["tasks"]._on_event is on_local_event
     assert router.local_services["tasks"]._on_event is not on_peer_event
+
+
+async def test_link_factories_wire_events_and_identity():
+    """Фабрики — единственный источник правды: пир получает on_peer_event и
+    self_node (представление в auth), локальная служба — on_local_event.
+    Живой баг (аудит 2026-07-28): динамические линки из node/service.py
+    собирались без того и другого — события терялись до рестарта ноды."""
+    settings = Settings()
+
+    def on_peer_event(e):
+        pass
+
+    def on_local_event(e):
+        pass
+
+    make_peer_link, make_local_link = make_link_factories(
+        settings, "alfred", on_peer_event, on_local_event
+    )
+    peer = make_peer_link("winpc", "tcp://w:8710")
+    assert peer._on_event is on_peer_event
+    assert peer._src is not None and peer._src.node == "alfred"
+
+    local = make_local_link("tasks", "unix:/tmp/tasks.sock")
+    assert local._on_event is on_local_event
+
+
+async def test_swarm_join_and_join_use_peer_link_factory(two_nodes):
+    """Динамические линки (join с обеих сторон) обязаны собираться фабрикой —
+    иначе присоединившаяся нода глуха к событиям роя до своего рестарта."""
+    router_a, _, _, svc_a, _, a_listen = two_nodes["a"]
+    router_b, _, _, svc_b, _, _ = two_nodes["b"]
+
+    events_a: list = []
+    events_b: list = []
+
+    async def on_peer_event_a(env):
+        events_a.append(env)
+
+    async def on_peer_event_b(env):
+        events_b.append(env)
+
+    svc_a._make_peer_link = lambda pid, ep: PeerLink(
+        pid, ep, on_event=on_peer_event_a, self_node="A"
+    )
+    svc_b._make_peer_link = lambda pid, ep: PeerLink(
+        pid, ep, on_event=on_peer_event_b, self_node="B"
+    )
+
+    await svc_b.join(str(a_listen))
+    # Обе стороны собрали линк своей фабрикой: on_event на месте.
+    assert router_b.peers["A"]._on_event is on_peer_event_b
+    assert router_a.peers["B"]._on_event is on_peer_event_a
 
 
 async def test_relay_peer_event_skips_already_known_peer():
@@ -294,8 +350,7 @@ async def test_relay_peer_event_skips_already_known_peer():
         router=router,
         state=NodeState(),
         state_path="/dev/null",
-        token="",
-        on_peer_event=lambda e: None,
+        make_peer_link=PeerLink,
         server=None,
         seen=SeenEvents(),
     )
@@ -329,8 +384,7 @@ async def test_relay_peer_event_deduplicates_by_envelope_id():
             router=router,
             state=NodeState(),
             state_path="/dev/null",
-            token="",
-            on_peer_event=lambda e: None,
+            make_peer_link=PeerLink,
             server=_FakeServer(),
             seen=seen,
         )

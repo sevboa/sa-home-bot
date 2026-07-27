@@ -87,6 +87,13 @@ class Envelope:
     бот → своя нода → пир/локальная служба — без переделки протокола
     маршрутизации. Нужен, в частности, для `llm.chat`/`llm.ask` (генерация,
     в т.ч. с холодным стартом, дольше дефолтных 10с — см. LLM_INTEGRATION_PLAN.md §3).
+
+    ``hops`` — сколько ретрансляций пережило СОБЫТИЕ (второй предохранитель
+    от шторма, независимый от дедупа SeenEvents — см. ARCHITECTURE §11
+    «топология событийной сети» и node/app.py::MAX_EVENT_HOPS). Инкрементится
+    нодой при каждой ретрансляции; отсутствие поля в JSON = 0, поэтому ноды
+    старых версий события с ним принимают и не ломаются (лишь не наращивают
+    счётчик — защита деградирует до одного рубежа, как было до v0.43).
     """
 
     type: str
@@ -98,6 +105,7 @@ class Envelope:
     ok: bool | None = None  # только для response
     error: dict[str, Any] | None = None  # {"code", "message"} при ok=False
     timeout_s: float | None = None
+    hops: int = 0
 
     def error_code(self) -> str | None:
         return (self.error or {}).get("code")
@@ -165,6 +173,8 @@ def encode(env: Envelope) -> bytes:
         raw["payload"] = env.payload
     if env.timeout_s is not None:
         raw["timeout_s"] = env.timeout_s
+    if env.hops:
+        raw["hops"] = env.hops
     return json.dumps(raw, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
 
 
@@ -204,6 +214,9 @@ def decode(line: bytes) -> Envelope:
     timeout_s = raw.get("timeout_s")
     if timeout_s is not None and not isinstance(timeout_s, (int, float)):
         raise ProtoError(ERR_BAD_REQUEST, "timeout_s должен быть числом")
+    hops = raw.get("hops", 0)
+    if not isinstance(hops, int) or isinstance(hops, bool) or hops < 0:
+        raise ProtoError(ERR_BAD_REQUEST, "hops должен быть неотрицательным целым")
 
     return Envelope(
         type=msg_type,
@@ -215,6 +228,7 @@ def decode(line: bytes) -> Envelope:
         ok=ok,
         error=error,
         timeout_s=float(timeout_s) if timeout_s is not None else None,
+        hops=hops,
     )
 
 

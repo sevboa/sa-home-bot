@@ -12,8 +12,10 @@ broadcast'ом подключённым клиентам (nodectl events).
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import socket
+from collections.abc import Callable
 
 from sa_home_bot.config import Settings, SwarmNodeConfig
 from sa_home_bot.node import assignments as assignments_mod
@@ -36,6 +38,9 @@ from sa_home_bot.utils.lifespan import Lifespan
 
 log = logging.getLogger(__name__)
 
+# Фабрика линка: (имя, endpoint) → PeerLink со всеми обязательными колбэками.
+LinkFactory = Callable[[str, str], PeerLink]
+
 # Локальные службы со своим proto-сервером, к которым нода умеет
 # проксировать (telegram-bot — клиент, своего сервера у него нет).
 # Состав — из реестра служб (services/registry.py), а не из списка здесь.
@@ -43,7 +48,20 @@ def local_service_endpoints(settings: Settings) -> dict[str, str]:
     return registry.service_endpoints(settings)
 
 
-_MAX_SEEN_EVENTS = 512  # с запасом — событий (join/update_finished) мало, часты не бывают
+# Размер дедуп-набора: изначально 512 «событий мало», но с тех пор через тот
+# же канал ходят tool_call/task_result/llm_idle_sleep/алерты монитора — при
+# всплеске больше maxsize РАЗНЫХ id за время оборота циркулирующей копии
+# старый id вытесняется и событие принимается повторно, т.е. защита протекает
+# ровно в штормовом сценарии. 2048 строк-ключей — копейки по памяти.
+_MAX_SEEN_EVENTS = 2048
+
+# Второй предохранитель от шторма ретрансляции, НЕЗАВИСИМЫЙ от дедупа
+# (ARCHITECTURE §11: «TTL/hop-limit в конверте — предохранитель на случай
+# рассинхрона»). Дедуп по id — единственный барьер, и он дырявый по краям:
+# рестарт ноды сбрасывает набор, переполнение вытесняет старые id. Диаметр
+# полного графа — 1 хоп, будущего Chord — O(log n): 8 хватает с запасом,
+# а лавине — нет.
+MAX_EVENT_HOPS = 8
 
 
 class SeenEvents:
@@ -90,19 +108,19 @@ def _safe_parse_all(items: list[str]) -> list[assignments_mod.Assignment]:
     return parsed
 
 
-def build_router(
-    settings: Settings,
-    node_id: str,
-    assignments: list[str],
-    extra_peers: list[SwarmNodeConfig],
-    on_peer_event,
-    on_local_event,
-) -> NodeRouter:
-    """Маршрутизатор: пиры из [[swarm.nodes]] ∪ персистентного состояния
-    (join, этап 18) + локальные службы из назначений.
+def make_link_factories(
+    settings: Settings, node_id: str, on_peer_event, on_local_event
+) -> tuple[LinkFactory, LinkFactory]:
+    """Единственный источник правды о том, КАК создавать линки.
 
-    ``assignments`` — эффективный набор (TOML ∪ персистентное состояние
-    ноды), не только `settings.node.assignments` — см. `node/state.py`.
+    Живой баг (найден аудитом 2026-07-28): линки, созданные в рантайме
+    (`join`/`swarm_join`/`assign` в node/service.py), собирались на месте
+    голым `PeerLink(id, endpoint, token=...)` — без `on_event` (события
+    соседа/службы молча терялись до рестарта ноды — тот же класс бага, что
+    уже чинил 00f9e00 для локальных служб) и без `self_node` (в auth не
+    ехали имя и инкарнация — уборка протухших линков после ребута соседа,
+    proto/server.py::_note_peer, для них не работала). Фабрики закрывают
+    класс бага целиком: все шесть точек создания используют их.
 
     ``on_peer_event``/``on_local_event`` — РАЗНЫЕ колбэки (живая находка
     2026-07-24, живой баг на проде: `task_result` от службы tasks молча
@@ -114,13 +132,11 @@ def build_router(
     дропала. Для событий ПИРОВ (`src.node` — чужой узел) проверка верна, для
     ЛОКАЛЬНЫХ служб — никогда не эхо (локальная связь однонаправленная,
     возврата по кругу физически нет), проверять нечего."""
-    peer_configs: dict[str, SwarmNodeConfig] = {n.id: n for n in settings.swarm.nodes}
-    for p in extra_peers:
-        peer_configs.setdefault(p.id, p)
-    peers = {
-        pid: PeerLink(
-            pid,
-            cfg.endpoint,
+
+    def make_peer_link(peer_id: str, endpoint: str) -> PeerLink:
+        return PeerLink(
+            peer_id,
+            endpoint,
             token=settings.swarm.token,
             on_event=on_peer_event,
             # Представляемся соседу в auth — по этому имени он уронит свой
@@ -130,6 +146,37 @@ def build_router(
             # ребута соседа» там не бывает.
             self_node=node_id,
         )
+
+    def make_local_link(service: str, endpoint: str) -> PeerLink:
+        # on_event=on_local_event (НЕ on_peer_event, см. докстринг выше) —
+        # локальные службы (llm — llm_idle_sleep, tasks — task_result и
+        # т.п.) тоже могут эмитить события, которые нужно довезти до бота
+        # через ту же ретрансляцию, что уже работает для событий пиров.
+        return PeerLink(service, endpoint, token=settings.swarm.token, on_event=on_local_event)
+
+    return make_peer_link, make_local_link
+
+
+def build_router(
+    settings: Settings,
+    node_id: str,
+    assignments: list[str],
+    extra_peers: list[SwarmNodeConfig],
+    make_peer_link: LinkFactory,
+    make_local_link: LinkFactory,
+) -> NodeRouter:
+    """Маршрутизатор: пиры из [[swarm.nodes]] ∪ персистентного состояния
+    (join, этап 18) + локальные службы из назначений.
+
+    ``assignments`` — эффективный набор (TOML ∪ персистентное состояние
+    ноды), не только `settings.node.assignments` — см. `node/state.py`.
+
+    Линки создаются только фабриками (см. make_link_factories)."""
+    peer_configs: dict[str, SwarmNodeConfig] = {n.id: n for n in settings.swarm.nodes}
+    for p in extra_peers:
+        peer_configs.setdefault(p.id, p)
+    peers = {
+        pid: make_peer_link(pid, cfg.endpoint)
         for pid, cfg in peer_configs.items()
         if pid != node_id  # свой id в списке — не пир
     }
@@ -137,11 +184,7 @@ def build_router(
     # "telegram-bot@alfred:standby" — это всё та же служба telegram-bot.
     assigned_services = {a.service for a in _safe_parse_all(assignments)}
     local = {
-        # on_event=on_local_event (НЕ on_peer_event, см. докстринг выше) —
-        # локальные службы (llm — llm_idle_sleep, tasks — task_result и
-        # т.п.) тоже могут эмитить события, которые нужно довезти до бота
-        # через ту же ретрансляцию, что уже работает для событий пиров.
-        name: PeerLink(name, endpoint, token=settings.swarm.token, on_event=on_local_event)
+        name: make_local_link(name, endpoint)
         for name, endpoint in local_service_endpoints(settings).items()
         if name in assigned_services
     }
@@ -176,8 +219,7 @@ async def _relay_peer_event(
     router: NodeRouter,
     state: NodeState,
     state_path: str,
-    token: str,
-    on_peer_event,
+    make_peer_link: LinkFactory,
     server: ProtoServer | None,
     seen: SeenEvents,
     is_local: bool = False,
@@ -190,9 +232,9 @@ async def _relay_peer_event(
     от соседа") применяется ТОЛЬКО к событиям пиров (``is_local=False``):
     локальная служба репортует src.node == node_id этой же ноды не потому,
     что это эхо, а потому что это буквально её собственный узел — для
-    локальной связи возврата по кругу не бывает (см. build_router). Живой
-    баг на проде 2026-07-24: без этого различения `task_result` от службы
-    tasks молча терялся здесь же, до бота дело не доходило.
+    локальной связи возврата по кругу не бывает (см. make_link_factories).
+    Живой баг на проде 2026-07-24: без этого различения `task_result` от
+    службы tasks молча терялся здесь же, до бота дело не доходило.
 
     ``node_joined`` от уже связанного пира — авто-подключиться к новому
     узлу тем же путём, каким мы сами узнаём о событиях: так третий узел, не
@@ -203,16 +245,27 @@ async def _relay_peer_event(
     ``seen`` — дедуп по ``env.id``: в связном рое (≥3 узла, каждый с каждым)
     одно событие приходит несколькими путями, а без дедупа каждый узел
     ретранслирует КАЖДУЮ полученную копию заново — лавина (см. SeenEvents).
+    Второй, независимый рубеж — счётчик ретрансляций в конверте: событие,
+    пережившее MAX_EVENT_HOPS пересылок, уже точно циркулирует по кругу
+    (диаметр полного графа — 1), дальше не идёт.
     """
     if not is_local and env.src is not None and env.src.node == node_id:
         return
     if seen.seen(env.id):
         return
+    if env.hops >= MAX_EVENT_HOPS:
+        log.warning(
+            "Рой: событие %s (%s) пережило %d ретрансляций — дропаю (циркуляция?)",
+            env.payload.get("event"),
+            env.id,
+            env.hops,
+        )
+        return
     if env.type == MSG_EVENT and env.payload.get("event") == EVENT_NODE_JOINED:
         data = env.payload.get("data", {})
         new_id, new_endpoint = data.get("node_id"), data.get("endpoint")
         if new_id and new_endpoint and new_id != node_id and new_id not in router.peers:
-            link = PeerLink(new_id, new_endpoint, token=token, on_event=on_peer_event)
+            link = make_peer_link(new_id, new_endpoint)
             await router.add_peer(link)
             _remember_peer(state, new_id, new_endpoint)
             state.save(state_path)
@@ -226,7 +279,7 @@ async def _relay_peer_event(
         # назначен и нам (node/replication.py).
         await replicator.on_config_changed(env)
     if server is not None:
-        await server.broadcast_envelope(env)
+        await server.broadcast_envelope(dataclasses.replace(env, hops=env.hops + 1))
 
 
 async def run_node(settings: Settings, config_path: str | None = None) -> bool:
@@ -258,8 +311,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
             router=router,
             state=state,
             state_path=settings.node.state_path,
-            token=settings.swarm.token,
-            on_peer_event=on_peer_event,
+            make_peer_link=make_peer_link,
             server=server,
             seen=seen_events,
             replicator=replicator,
@@ -272,12 +324,15 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
             router=router,
             state=state,
             state_path=settings.node.state_path,
-            token=settings.swarm.token,
-            on_peer_event=on_peer_event,
+            make_peer_link=make_peer_link,
             server=server,
             seen=seen_events,
             is_local=True,
         )
+
+    make_peer_link, make_local_link = make_link_factories(
+        settings, node_id, on_peer_event, on_local_event
+    )
 
     # assignments в TOML — стартовый набор, не единственный источник:
     # состояние из assign/unassign в рантайме (nodectl/бот) переживает
@@ -305,7 +360,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         log.warning("Нет ни одного валидного назначения — нода работает вхолостую")
 
     router = build_router(
-        settings, node_id, effective_assignments, state.peers, on_peer_event, on_local_event
+        settings, node_id, effective_assignments, state.peers, make_peer_link, make_local_link
     )
     # Пакеты настроек лежат рядом с config.toml; без файлового конфига их
     # попросту негде держать — тогда репликации нет (и она не нужна).
@@ -352,6 +407,10 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         node_kind=settings.node.kind,
         replicator=replicator,
         lease=lease,
+        # Динамические линки (join/assign в рантайме) обязаны собираться теми
+        # же фабриками, что и стартовые, — см. make_link_factories.
+        make_peer_link=make_peer_link,
+        make_local_link=make_local_link,
     )
     def on_peer_connect(peer_node: str) -> None:
         """Сосед постучался к нам заново — значит, он перезапустился, и наш
