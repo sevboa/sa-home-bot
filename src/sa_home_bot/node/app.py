@@ -361,6 +361,13 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         if link is not None:
             link.reconnect_now("сосед подключился заново")
 
+    # Сигналы перехватываем ДО первого долгого шага, а не после того, как всё
+    # поднялось (живая находка 2026-07-28): `server.start()` ждёт появления
+    # своего адреса до трёх минут (Tailscale поднимается не мгновенно), и всё
+    # это время остановка обрабатывалась бы по умолчанию — процесс умирал бы
+    # на месте, не погасив уже запущенные дочерние службы.
+    lifespan.install_signal_handlers()
+
     server = ProtoServer(
         endpoints,
         node_service,
@@ -412,7 +419,6 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
                 exc,
             )
 
-    lifespan.install_signal_handlers()
     log.info(
         "Нода %s запущена: службы [%s], пиры [%s], endpoints [%s]",
         node_id,

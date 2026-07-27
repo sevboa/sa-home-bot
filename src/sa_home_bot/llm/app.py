@@ -30,11 +30,12 @@ async def run_llm(settings: Settings) -> None:
 
     service = LlmService(settings, emit=emit)
     server = ProtoServer(settings.llm.socket, service, token=settings.swarm.token)
-    await server.start()
-    idle_task = asyncio.create_task(service.idle_loop(), name="llm-idle-loop")
-
+    # Обработчики сигналов — до start(): он ждёт появления своего адреса
+    # (см. proto/server.py), и всё это время остановка иначе не обрабатывалась бы.
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
+    await server.start()
+    idle_task = asyncio.create_task(service.idle_loop(), name="llm-idle-loop")
     log.info(
         "Служба llm запущена: модель %s, сокет %s", settings.llm.model, settings.llm.socket
     )

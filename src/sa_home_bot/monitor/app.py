@@ -41,6 +41,10 @@ async def run_monitor(settings: Settings) -> None:
     queue = DedupQueue()
     service = MonitorService(settings, store, queue)
     server = ProtoServer(settings.monitor.socket, service, token=settings.swarm.token)
+    # Обработчики сигналов — до start(): он ждёт появления своего адреса
+    # (см. proto/server.py), и всё это время остановка иначе не обрабатывалась бы.
+    lifespan = Lifespan()
+    lifespan.install_signal_handlers()
     await server.start()
 
     # 3. Worker: события уходят broadcast'ом по протоколу.
@@ -61,8 +65,6 @@ async def run_monitor(settings: Settings) -> None:
     await queue.put(SmartScanJob())
     await queue.put(SensorScanJob())
 
-    lifespan = Lifespan()
-    lifespan.install_signal_handlers()
     log.info("Монитор запущен, сокет %s", settings.monitor.socket)
 
     try:

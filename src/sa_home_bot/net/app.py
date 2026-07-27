@@ -19,10 +19,11 @@ log = logging.getLogger(__name__)
 async def run_net(settings: Settings) -> None:
     service = NetService(settings)
     server = ProtoServer(settings.net.socket, service, token=settings.swarm.token)
-    await server.start()
-
+    # Обработчики сигналов — до start(): он ждёт появления своего адреса
+    # (см. proto/server.py), и всё это время остановка иначе не обрабатывалась бы.
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
+    await server.start()
     log.info(
         "Служба net запущена: SearXNG %s, сокет %s",
         settings.net.searxng_url,

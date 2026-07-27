@@ -19,10 +19,11 @@ log = logging.getLogger(__name__)
 async def run_apps(settings: Settings) -> None:
     service = AppsService(settings)
     server = ProtoServer(settings.apps.socket, service, token=settings.swarm.token)
-    await server.start()
-
+    # Обработчики сигналов — до start(): он ждёт появления своего адреса
+    # (см. proto/server.py), и всё это время остановка иначе не обрабатывалась бы.
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
+    await server.start()
     log.info(
         "Служба apps запущена: %d приложений, сокет %s",
         len(settings.apps.items),

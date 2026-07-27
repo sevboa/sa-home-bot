@@ -46,13 +46,14 @@ async def run_tasks(settings: Settings) -> None:
 
     service = TasksService(settings, store, node_link, emit=emit)
     server = ProtoServer(settings.tasks.socket, service, token=settings.swarm.token)
+    # Обработчики сигналов — до start(): он ждёт появления своего адреса
+    # (см. proto/server.py), и всё это время остановка иначе не обрабатывалась бы.
+    lifespan = Lifespan()
+    lifespan.install_signal_handlers()
     await server.start()
 
     prewake_task = asyncio.create_task(service.prewake_loop(), name="tasks-prewake-loop")
     fire_task = asyncio.create_task(service.fire_loop(), name="tasks-fire-loop")
-
-    lifespan = Lifespan()
-    lifespan.install_signal_handlers()
     log.info("Служба tasks запущена: сокет %s", settings.tasks.socket)
 
     try:
