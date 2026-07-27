@@ -215,3 +215,59 @@ async def test_клиент_без_self_node_не_ломает_auth():
     finally:
         await client.close()
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_сервер_ждёт_появления_своего_адреса(monkeypatch):
+    """Адреса ещё нет (Tailscale не поднялся) — нода обязана дождаться его,
+    а не упасть.
+
+    Живой баг 2026-07-28: winpc не появлялась в рое после включения —
+    `could not bind on any address out of [('100.78.225.83', 8710)]`.
+    """
+    from sa_home_bot.proto import server as server_mod
+
+    monkeypatch.setattr(server_mod, "BIND_RETRY_INTERVAL_S", 0.01)
+    real_start_server = asyncio.start_server
+    attempts = {"n": 0}
+
+    async def flaky_start_server(*args, **kwargs):
+        attempts["n"] += 1
+        if attempts["n"] < 3:  # первые попытки — адреса ещё нет
+            raise OSError("could not bind on any address out of [('100.99.99.99', 8710)]")
+        return await real_start_server(*args, **kwargs)
+
+    monkeypatch.setattr(server_mod.asyncio, "start_server", flaky_start_server)
+
+    server = ProtoServer(TcpEndpoint("127.0.0.1", 0), FakePeerService(), token="s3cret")
+    await server.start()
+    try:
+        assert attempts["n"] == 3, "сервер не дождался появления адреса"
+        addr = server.endpoint
+        client = ProtoClient(f"tcp://{addr.host}:{addr.port}", token="s3cret")
+        await client.connect()
+        assert (await client.hello()).node == "winpc"
+        await client.close()
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_занятый_порт_не_ждём(monkeypatch):
+    """EADDRINUSE — чужой процесс на порту, ожидание не поможет: падаем сразу,
+    а не висим три минуты."""
+    import errno as errno_mod
+
+    from sa_home_bot.proto import server as server_mod
+
+    monkeypatch.setattr(server_mod, "BIND_RETRY_INTERVAL_S", 0.01)
+
+    async def busy_start_server(*args, **kwargs):
+        raise OSError(errno_mod.EADDRINUSE, "address already in use")
+
+    monkeypatch.setattr(server_mod.asyncio, "start_server", busy_start_server)
+
+    server = ProtoServer(TcpEndpoint("127.0.0.1", 9999), FakePeerService(), token="s3cret")
+    with pytest.raises(OSError) as exc:
+        await server.start()
+    assert exc.value.errno == errno_mod.EADDRINUSE

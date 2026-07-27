@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import functools
 import hmac
 import logging
@@ -63,6 +64,12 @@ class ServiceHandler(Protocol):
 # Маршрутизатор запросов (сервис ноды): вернул конверт — это ответ (запрос был
 # переслан по dst), вернул None — запрос локальный, обрабатывает handler.
 Router = Callable[[Envelope], Awaitable[Envelope | None]]
+
+# Сколько ждать появления собственного адреса при старте (см.
+# _start_tcp_with_retry). С запасом больше типичных 40-60 с подъёма
+# Tailscale: лучше подождать лишнее, чем не подняться совсем.
+BIND_RETRY_TIMEOUT_S = 180.0
+BIND_RETRY_INTERVAL_S = 3.0
 
 
 class _Connection:
@@ -128,6 +135,46 @@ class ProtoServer:
     def connection_count(self) -> int:
         return len(self._connections)
 
+    async def _start_tcp_with_retry(self, ep: TcpEndpoint) -> asyncio.Server:
+        """Забиндиться на TCP-адрес, дожидаясь его появления.
+
+        Живая находка 2026-07-28: на winpc нода падала на старте с
+        ``could not bind on any address out of [('100.78.225.83', 8710)]`` —
+        служба Windows поднимается за секунды, а Tailscale отдаёт свой адрес
+        только через 40-60 с (ему нужно достучаться до координационного
+        сервера и поднять туннель). WinSW отрабатывал два ретрая и сдавался:
+        обёртка числилась RUNNING, а ноды в рое не было до ручного рестарта.
+
+        Адрес интерфейса, которого ещё нет — состояние временное и штатное,
+        а не повод не запуститься. Ждём его до ``BIND_RETRY_TIMEOUT_S``;
+        занятый порт (чужой процесс) — не тот случай, падаем сразу.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + BIND_RETRY_TIMEOUT_S
+        waiting_logged = False
+        while True:
+            try:
+                return await asyncio.start_server(
+                    functools.partial(self._handle_client, trusted=False),
+                    host=ep.host,
+                    port=ep.port,
+                    limit=MAX_MESSAGE_BYTES,
+                )
+            except OSError as exc:
+                # EADDRINUSE — порт занят кем-то другим, ожидание не поможет.
+                if exc.errno == errno.EADDRINUSE or loop.time() >= deadline:
+                    raise
+                if not waiting_logged:
+                    log.warning(
+                        "ProtoServer: адреса %s ещё нет (%s) — жду его появления "
+                        "до %.0f с (обычно поднимается Tailscale)",
+                        ep,
+                        exc,
+                        BIND_RETRY_TIMEOUT_S,
+                    )
+                    waiting_logged = True
+                await asyncio.sleep(BIND_RETRY_INTERVAL_S)
+
     async def start(self) -> None:
         for i, ep in enumerate(self._endpoints):
             if isinstance(ep, UnixEndpoint):
@@ -142,12 +189,7 @@ class ProtoServer:
                 )
                 path.chmod(0o600)
             else:
-                server = await asyncio.start_server(
-                    functools.partial(self._handle_client, trusted=False),
-                    host=ep.host,
-                    port=ep.port,
-                    limit=MAX_MESSAGE_BYTES,
-                )
+                server = await self._start_tcp_with_retry(ep)
                 if ep.port == 0:  # порт выбрала ОС (тесты) — узнать реальный
                     bound = server.sockets[0].getsockname()
                     self._endpoints[i] = TcpEndpoint(ep.host, bound[1])
