@@ -14,7 +14,7 @@ import asyncio
 import logging
 import socket
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from sa_home_bot import __version__, wol
@@ -107,6 +107,21 @@ _POWER_TITLES = {
 }
 
 
+def _endpoint_list(raw: Any, *, first: str) -> list[str]:
+    """Список адресов из сообщения роя, с ``first`` во главе.
+
+    Поле ``endpoints`` появилось в этапе 24 и необязательно: нода старой
+    версии присылает только ``endpoint``, и тогда список из него одного —
+    ровно прежнее поведение.
+    """
+    values = [first] if first else []
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str) and item and item not in values:
+                values.append(item)
+    return values
+
+
 async def _default_power_runner(argv: list[str]) -> None:
     proc = await asyncio.create_subprocess_exec(
         *argv,
@@ -136,13 +151,14 @@ class NodeService:
         local_service_endpoints: dict[str, str] | None = None,
         swarm_token: str = "",
         own_endpoint: str = "",
+        advertise: Callable[[], list[str]] | None = None,
         emit: EventEmitter | None = None,
         update_source: str | None = None,
         node_kind: str = node_kinds.KIND_SERVER,
         replicator: ConfigReplicator | None = None,
         lease: LeaseManager | None = None,
-        make_peer_link: Callable[[str, str], PeerLink] | None = None,
-        make_local_link: Callable[[str, str], PeerLink] | None = None,
+        make_peer_link: Callable[[str, str | Sequence[str]], PeerLink] | None = None,
+        make_local_link: Callable[[str, str | Sequence[str]], PeerLink] | None = None,
     ) -> None:
         # Репликация пакетов настроек: None — на этой ноде каталога пакетов
         # нет (конфиг не файловый), обмениваться нечем.
@@ -185,6 +201,11 @@ class NodeService:
         # swarm_join: без своего TCP-адреса нечего давать соседям для обратной
         # связи — действие объявляется только когда есть куда стучаться.
         self._own_endpoint = own_endpoint
+        # Чем нода представляется рою (этап 24): все реально слушаемые адреса,
+        # а не один из конфига. Живёт колбэком, потому что список меняется —
+        # tailscale-адрес приезжает через десятки секунд после старта, LAN
+        # доступен сразу (см. ProtoServer.advertised_endpoints).
+        self._advertise = advertise
         self._emit = emit
         # Самообновление через pipx (не требует root — в отличие от
         # `nodectl fix`, можно звать прямо из этого процесса). None — ставили
@@ -233,6 +254,7 @@ class NodeService:
                 version=__version__,
                 node_kind=self._kind,
                 wake=self._local_wake_payload(),
+                endpoints=tuple(self._advertised()),
             ),
             capabilities=("supervisor", "power"),
             actions=(
@@ -306,6 +328,17 @@ class NodeService:
                 ),
             ),
         )
+
+    def _advertised(self) -> list[str]:
+        """Свои адреса для рою — реально слушаемые, иначе настроенный.
+
+        Запасной вариант нужен не только тестам: пока сервер не поднялся (и в
+        сборках без него) единственная правда о себе — это конфиг.
+        """
+        live = self._advertise() if self._advertise is not None else []
+        if live:
+            return live
+        return [self._own_endpoint] if self._own_endpoint else []
 
     @staticmethod
     def _local_wake_payload() -> dict[str, str] | None:
@@ -531,6 +564,9 @@ class NodeService:
         """
         caller_id = str(args.get("node_id", ""))
         caller_endpoint = str(args.get("endpoint", ""))
+        # Список адресов присоединяющегося (этап 24) — необязательный: нода
+        # старой версии пришлёт только endpoint, и это по-прежнему работает.
+        caller_endpoints = _endpoint_list(args.get("endpoints"), first=caller_endpoint)
         if not caller_id or not caller_endpoint:
             raise ProtoError(ERR_BAD_REQUEST, "swarm_join требует node_id и endpoint")
         if caller_id == self._node:
@@ -538,28 +574,54 @@ class NodeService:
 
         if self._router is not None:
             existing = self._router.peers.get(caller_id)
-            if existing is None or str(existing.endpoint) != caller_endpoint:
+            if existing is None or existing.endpoints != caller_endpoints:
                 if existing is not None:
                     await self._router.remove_peer(caller_id)
-                link = self._make_peer_link(caller_id, caller_endpoint)
+                link = self._make_peer_link(caller_id, caller_endpoints)
                 await self._router.add_peer(link)
-            self._remember_peer(caller_id, caller_endpoint)
+            self._remember_peer(caller_id, caller_endpoint, caller_endpoints)
 
         if self._emit is not None:
-            await self._emit(EVENT_NODE_JOINED, {"node_id": caller_id, "endpoint": caller_endpoint})
+            await self._emit(
+                EVENT_NODE_JOINED,
+                {
+                    "node_id": caller_id,
+                    "endpoint": caller_endpoint,
+                    "endpoints": caller_endpoints,
+                },
+            )
 
+        advertised = self._advertised()
         peers: list[dict[str, Any]] = [
-            {"id": self._node, "endpoint": self._own_endpoint, "alive": True}
+            {
+                "id": self._node,
+                "endpoint": advertised[0] if advertised else self._own_endpoint,
+                "endpoints": advertised,
+                "alive": True,
+            }
         ]
         if self._router is not None:
             peers += self._router.peers_state()
         return {"peers": peers}
 
-    def _remember_peer(self, node_id: str, endpoint: str) -> None:
+    def _remember_peer(self, node_id: str, endpoint: str, endpoints: Sequence[str] = ()) -> None:
         """Персистентный справочник пиров (не полный конфиг соседа — только
-        id+endpoint, см. node/state.py)."""
+        id + последний удачный адрес + прочие известные пути, node/state.py).
+
+        Тип соседа при перезаписи сохраняется — см. node/app.py::_remember_peer.
+        """
+        known = next((p for p in self._state.peers if p.id == node_id), None)
         others = [p for p in self._state.peers if p.id != node_id]
-        self._state.peers = [*others, SwarmNodeConfig(id=node_id, endpoint=endpoint)]
+        rest = [e for e in endpoints if e != endpoint]
+        self._state.peers = [
+            *others,
+            SwarmNodeConfig(
+                id=node_id,
+                endpoint=endpoint,
+                endpoints=rest,
+                kind=known.kind if known is not None else "",
+            ),
+        ]
         self._save_state()
 
     async def join(self, endpoint: str) -> dict[str, Any]:
@@ -573,11 +635,17 @@ class NodeService:
         """
         if not endpoint:
             raise ProtoError(ERR_BAD_REQUEST, "join требует endpoint")
+        advertised = self._advertised()
         client = ProtoClient(endpoint, token=self._swarm_token)
         try:
             await client.connect()
             result = await client.command(
-                "swarm_join", {"node_id": self._node, "endpoint": self._own_endpoint}
+                "swarm_join",
+                {
+                    "node_id": self._node,
+                    "endpoint": advertised[0] if advertised else self._own_endpoint,
+                    "endpoints": advertised,
+                },
             )
         except (ConnectionError, OSError, TimeoutError, ProtoError) as exc:
             raise ProtoError(ERR_UNAVAILABLE, f"сосед {endpoint} недоступен: {exc}") from exc
@@ -590,9 +658,10 @@ class NodeService:
                 pid, peer_endpoint = peer.get("id"), peer.get("endpoint")
                 if not pid or not peer_endpoint or pid == self._node or pid in self._router.peers:
                     continue
-                link = self._make_peer_link(pid, peer_endpoint)
+                peer_endpoints = _endpoint_list(peer.get("endpoints"), first=peer_endpoint)
+                link = self._make_peer_link(pid, peer_endpoints)
                 await self._router.add_peer(link)
-                self._remember_peer(pid, peer_endpoint)
+                self._remember_peer(pid, peer_endpoint, peer_endpoints)
                 added.append(pid)
         return {"joined_via": endpoint, "peers_added": added}
 

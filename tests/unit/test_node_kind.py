@@ -18,6 +18,7 @@ class FakeLink:
     def __init__(self, name: str, *, alive: bool, kind: str = "", down_s: float | None = None):
         self.name = name
         self.endpoint = f"tcp://{name}:8710"
+        self.endpoints = [self.endpoint]
         self.alive = alive
         self.node_kind = kind
         self.left = False

@@ -109,7 +109,13 @@ class PresenceWatcher:
             if peer is None:
                 self._state.peers.append(
                     SwarmNodeConfig(
-                        id=link.name, endpoint=str(link.endpoint), kind=link.node_kind
+                        id=link.name,
+                        endpoint=str(link.endpoint),
+                        # Все известные пути к соседу, а не только текущий:
+                        # запись, впервые созданная здесь, не должна терять
+                        # выученные адреса (этап 24).
+                        endpoints=[e for e in link.endpoints if e != str(link.endpoint)],
+                        kind=link.node_kind,
                     )
                 )
                 changed = True

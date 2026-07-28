@@ -254,6 +254,13 @@ class ServiceInfo:
     # навсегда, и разбудить она не могла никогда (см. wake_core.
     # resolve_wake_info). None — нода старой версии либо без Ethernet.
     wake: dict[str, str] | None = None
+    # Все адреса, по которым к этой ноде можно прийти (этап 24), в порядке
+    # предпочтения — сосед по ним ходит, а не по одному захардкоженному в его
+    # конфиге. Без этого домашний рой не собирался без интернета: единственным
+    # известным адресом был tailscale-адрес, а он появляется через 40-60 с
+    # после загрузки и только при живой сети. Пусто — нода старой версии либо
+    # без TCP-слушателя (только unix-сокет): тогда работает адрес из конфига.
+    endpoints: tuple[str, ...] = ()
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -262,12 +269,14 @@ class ServiceInfo:
             "version": self.version,
             "node_kind": self.node_kind,
             "wake": self.wake,
+            "endpoints": list(self.endpoints),
             "proto": PROTO_VERSION,
         }
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> ServiceInfo:
         wake = payload.get("wake")
+        raw_endpoints = payload.get("endpoints")
         try:
             return cls(
                 node=str(payload["node"]),
@@ -275,6 +284,11 @@ class ServiceInfo:
                 version=str(payload["version"]),
                 node_kind=str(payload.get("node_kind", "")),
                 wake={str(k): str(v) for k, v in wake.items()} if isinstance(wake, dict) else None,
+                endpoints=(
+                    tuple(str(e) for e in raw_endpoints if e)
+                    if isinstance(raw_endpoints, list)
+                    else ()
+                ),
             )
         except KeyError as exc:
             raise ProtoError(ERR_BAD_REQUEST, f"hello без поля {exc}") from exc

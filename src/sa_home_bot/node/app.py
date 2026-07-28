@@ -15,7 +15,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import socket
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from sa_home_bot.config import Settings, SwarmNodeConfig
 from sa_home_bot.node import assignments as assignments_mod
@@ -38,8 +38,9 @@ from sa_home_bot.utils.lifespan import Lifespan
 
 log = logging.getLogger(__name__)
 
-# Фабрика линка: (имя, endpoint) → PeerLink со всеми обязательными колбэками.
-LinkFactory = Callable[[str, str], PeerLink]
+# Фабрика линка: (имя, endpoint или список адресов) → PeerLink со всеми
+# обязательными колбэками.
+LinkFactory = Callable[[str, "str | Sequence[str]"], PeerLink]
 
 # Локальные службы со своим proto-сервером, к которым нода умеет
 # проксировать (telegram-bot — клиент, своего сервера у него нет).
@@ -109,7 +110,7 @@ def _safe_parse_all(items: list[str]) -> list[assignments_mod.Assignment]:
 
 
 def make_link_factories(
-    settings: Settings, node_id: str, on_peer_event, on_local_event
+    settings: Settings, node_id: str, on_peer_event, on_local_event, on_endpoints=None
 ) -> tuple[LinkFactory, LinkFactory]:
     """Единственный источник правды о том, КАК создавать линки.
 
@@ -133,12 +134,16 @@ def make_link_factories(
     ЛОКАЛЬНЫХ служб — никогда не эхо (локальная связь однонаправленная,
     возврата по кругу физически нет), проверять нечего."""
 
-    def make_peer_link(peer_id: str, endpoint: str) -> PeerLink:
+    def make_peer_link(peer_id: str, endpoint: str | Sequence[str]) -> PeerLink:
         return PeerLink(
             peer_id,
             endpoint,
             token=settings.swarm.token,
             on_event=on_peer_event,
+            # Адреса, которые сосед назовёт в hello (этап 24), сохраняются в
+            # состоянии ноды — иначе выученный LAN-путь терялся бы при каждом
+            # рестарте и рой снова начинал бы с одного адреса из конфига.
+            on_endpoints=on_endpoints,
             # Представляемся соседу в auth — по этому имени он уронит свой
             # протухший линк к нам, когда мы переподключимся после ребута
             # (proto/server.py::_note_peer). Локальным службам ниже незачем:
@@ -147,7 +152,7 @@ def make_link_factories(
             self_node=node_id,
         )
 
-    def make_local_link(service: str, endpoint: str) -> PeerLink:
+    def make_local_link(service: str, endpoint: str | Sequence[str]) -> PeerLink:
         # on_event=on_local_event (НЕ on_peer_event, см. докстринг выше) —
         # локальные службы (llm — llm_idle_sleep, tasks — task_result и
         # т.п.) тоже могут эмитить события, которые нужно довезти до бота
@@ -155,6 +160,26 @@ def make_link_factories(
         return PeerLink(service, endpoint, token=settings.swarm.token, on_event=on_local_event)
 
     return make_peer_link, make_local_link
+
+
+def peer_candidates(
+    nodes: Sequence[SwarmNodeConfig], extra: Sequence[SwarmNodeConfig]
+) -> dict[str, list[str]]:
+    """Адреса каждого пира из обоих источников, в порядке проб (этап 24).
+
+    Состояние ноды идёт ПЕРВЫМ, а не как раньше (TOML побеждал целиком):
+    там лежит последний удачный путь и всё, что сосед о себе рассказал, —
+    то есть более свежая правда, чем один адрес, вписанный в конфиг руками.
+    Сам конфиг при этом не теряется: он добавляется следом и остаётся
+    единственным, что работает, когда состояние пустое (первый запуск).
+    """
+    out: dict[str, list[str]] = {}
+    for cfg in (*extra, *nodes):
+        known = out.setdefault(cfg.id, [])
+        for value in (cfg.endpoint, *cfg.endpoints):
+            if value and value not in known:
+                known.append(value)
+    return out
 
 
 def build_router(
@@ -172,12 +197,9 @@ def build_router(
     ноды), не только `settings.node.assignments` — см. `node/state.py`.
 
     Линки создаются только фабриками (см. make_link_factories)."""
-    peer_configs: dict[str, SwarmNodeConfig] = {n.id: n for n in settings.swarm.nodes}
-    for p in extra_peers:
-        peer_configs.setdefault(p.id, p)
     peers = {
-        pid: make_peer_link(pid, cfg.endpoint)
-        for pid, cfg in peer_configs.items()
+        pid: make_peer_link(pid, candidates)
+        for pid, candidates in peer_candidates(settings.swarm.nodes, extra_peers).items()
         if pid != node_id  # свой id в списке — не пир
     }
     # Маршрут строится по ИМЕНИ СЛУЖБЫ, а не по строке назначения целиком:
@@ -206,10 +228,29 @@ def update_source_for_this_platform() -> str | None:
     return node_update.origin_repo_url()
 
 
-def _remember_peer(state: NodeState, node_id: str, endpoint: str) -> None:
-    """Персистентный справочник пиров: только id+endpoint, не полный конфиг."""
+def _remember_peer(
+    state: NodeState, node_id: str, endpoint: str, endpoints: Sequence[str] = ()
+) -> None:
+    """Персистентный справочник пиров: id + последний удачный адрес + все
+    остальные известные пути к нему (этап 24), не полный конфиг.
+
+    Тип соседа (его пишет PresenceWatcher, node/watch.py) при перезаписи
+    сохраняется: он узнаётся из hello и нужен именно тогда, когда соседа уже
+    не спросить — потерять его на обновлении адресов значило бы разучиться
+    отличать «сервер пропал» от «рабочая станция уснула».
+    """
+    known = next((p for p in state.peers if p.id == node_id), None)
     others = [p for p in state.peers if p.id != node_id]
-    state.peers = [*others, SwarmNodeConfig(id=node_id, endpoint=endpoint)]
+    rest = [e for e in endpoints if e != endpoint]
+    state.peers = [
+        *others,
+        SwarmNodeConfig(
+            id=node_id,
+            endpoint=endpoint,
+            endpoints=rest,
+            kind=known.kind if known is not None else "",
+        ),
+    ]
 
 
 async def _relay_peer_event(
@@ -265,11 +306,17 @@ async def _relay_peer_event(
         data = env.payload.get("data", {})
         new_id, new_endpoint = data.get("node_id"), data.get("endpoint")
         if new_id and new_endpoint and new_id != node_id and new_id not in router.peers:
-            link = make_peer_link(new_id, new_endpoint)
+            # Новый узел назвал все свои адреса (этап 24) — связываемся по
+            # лучшему из них, а не по одному, попавшему в событие.
+            raw = data.get("endpoints")
+            candidates = [new_endpoint]
+            if isinstance(raw, list):
+                candidates += [e for e in raw if isinstance(e, str) and e and e != new_endpoint]
+            link = make_peer_link(new_id, candidates)
             await router.add_peer(link)
-            _remember_peer(state, new_id, new_endpoint)
+            _remember_peer(state, new_id, new_endpoint, candidates)
             state.save(state_path)
-            log.info("Рой: авто-подключение к %s (%s) по node_joined", new_id, new_endpoint)
+            log.info("Рой: авто-подключение к %s (%s) по node_joined", new_id, candidates)
     if (
         replicator is not None
         and env.type == MSG_EVENT
@@ -341,8 +388,16 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
             is_local=True,
         )
 
+    def on_peer_endpoints(peer_id: str, endpoints: list[str]) -> None:
+        """Линк узнал новые адреса соседа или переехал на другой путь —
+        сохранить, чтобы не переучиваться после каждого рестарта."""
+        if not endpoints:
+            return
+        _remember_peer(state, peer_id, endpoints[0], endpoints)
+        state.save(settings.node.state_path)
+
     make_peer_link, make_local_link = make_link_factories(
-        settings, node_id, on_peer_event, on_local_event
+        settings, node_id, on_peer_event, on_local_event, on_peer_endpoints
     )
 
     # assignments в TOML — стартовый набор, не единственный источник:
@@ -395,11 +450,10 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         emit=emit,
         grace_s=settings.swarm.failover_grace_s,
     )
-    # Нода слушает socket (локальные фронтенды) и, если задан, listen —
-    # TCP для пиров роя.
-    endpoints = [settings.node.socket]
-    if settings.node.listen:
-        endpoints.append(settings.node.listen)
+    # Нода слушает socket (локальные фронтенды) и все адреса из listen —
+    # TCP для пиров роя. Адрес, которого ещё нет (tailscale поднимается
+    # десятки секунд), старт не задерживает: сервер доберёт его фоном.
+    endpoints = [settings.node.socket, *settings.node.listen]
     node_service = NodeService(
         supervisor,
         router,
@@ -409,7 +463,11 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         state_path=settings.node.state_path,
         local_service_endpoints=local_service_endpoints(settings),
         swarm_token=settings.swarm.token,
-        own_endpoint=settings.node.listen,
+        # Настроенный адрес объявляет умения join/swarm_join (он статичен и
+        # известен сразу), а рою нода называет то, что РЕАЛЬНО слушает —
+        # список меняется, пока адреса доезжают (см. ProtoServer.start).
+        own_endpoint=settings.node.listen[0] if settings.node.listen else "",
+        advertise=lambda: server.advertised_endpoints() if server is not None else [],
         emit=emit,
         # Дешёвая файловая проверка (без сети) — editable/не-git установка
         # (dev-чекаут) или win32 дают None, и check_update/update не

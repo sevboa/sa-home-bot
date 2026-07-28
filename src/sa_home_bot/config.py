@@ -13,7 +13,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, ClassVar, Literal, get_args
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -340,9 +340,18 @@ class NodeConfig(BaseModel):
     (клиент — ``nodectl``). Известные назначения: ``monitor``,
     ``telegram-bot``, ``apps``; по умолчанию пусто — назначения только
     явные (голая нода — норма). ``id`` — имя ноды в рое (dst.node в
-    конверте); пусто = hostname машины. ``listen`` — дополнительный
-    endpoint для пиров (обычно ``tcp://<tailscale-ip>:8710``): нода
-    слушает и ``socket`` (локальные фронтенды), и его; пусто = нет.
+    конверте); пусто = hostname машины. ``listen`` — адрес (или список
+    адресов) для пиров: нода слушает и ``socket`` (локальные фронтенды),
+    и их; пусто = нет.
+
+    Адресов имеет смысл держать несколько (этап 24) — например,
+    tailscale-адрес и LAN-адрес, или один ``tcp://0.0.0.0:8710``. Причина
+    не в маршруте (между домашними нодами tailscale и так ходит по LAN
+    напрямую), а в доступности: единственный tailscale-адрес появляется
+    через 40–60 с после загрузки и не появляется вовсе без интернета —
+    и тогда две машины в двух метрах друг от друга не видят друг друга,
+    хотя LAN исправна. Расширение поверхности осознанное: TCP в любом
+    случае требует ``[swarm].token`` первым сообщением.
 
     ``assignments`` — стартовый набор, не единственный источник: рантайм
     (``assign``/``unassign`` по протоколу — nodectl/бот) хранит фактический
@@ -362,11 +371,21 @@ class NodeConfig(BaseModel):
     id: str = ""
     kind: NodeKind = "workstation"
     socket: str = "./data/node.sock"
-    listen: str = ""
+    listen: list[str] = Field(default_factory=list)
     assignments: list[str] = Field(default_factory=list)
     state_path: str = "./data/node-state.json"
     restart_delay_s: float = Field(default=5.0, gt=0)
     stop_timeout_s: float = Field(default=90.0, gt=0)  # SIGTERM → SIGKILL
+
+    @field_validator("listen", mode="before")
+    @classmethod
+    def _listen_as_list(cls, value: Any) -> Any:
+        """``listen = "tcp://..."`` (одна строка, как было до этапа 24) и
+        ``listen = ["tcp://...", ...]`` — обе формы валидны; пустая строка
+        по-прежнему значит «TCP не слушаем»."""
+        if isinstance(value, str):
+            return [value] if value.strip() else []
+        return value
 
 
 class SwarmNodeConfig(BaseModel):
@@ -376,10 +395,17 @@ class SwarmNodeConfig(BaseModel):
     ``endpoint`` — endpoint её сервиса ноды, обычно ``tcp://host:port``
     (tailscale-адрес). Запросы к чужим нодам нода пересылает сама
     (правило «спроси любого», ARCHITECTURE §11 п. 2).
+
+    ``endpoints`` — остальные известные адреса той же ноды (LAN и т.п.),
+    выученные из её hello (этап 24). В TOML заполнять не нужно: там
+    достаточно одного адреса, по которому сосед найдётся впервые, — дальше
+    он сам расскажет о себе всё, и список переживёт рестарт через
+    состояние ноды. ``endpoint`` при этом — последний удачный путь.
     """
 
     id: str
     endpoint: str
+    endpoints: list[str] = Field(default_factory=list)
     # Тип машины соседа, узнанный из его hello и сохранённый в состоянии ноды.
     # В TOML заполнять не нужно (и не следует — источник истины сам сосед):
     # поле нужно, чтобы знать тип ноды, которая прямо сейчас недоступна.

@@ -17,20 +17,40 @@ import contextlib
 import logging
 import time
 import uuid
+from collections.abc import Callable, Sequence
+from pathlib import Path
 
 from sa_home_bot.proto.client import EventCallback, ProtoClient
-from sa_home_bot.proto.endpoints import Endpoint
+from sa_home_bot.proto.endpoints import (
+    Endpoint,
+    endpoint_rank,
+    is_loopback,
+    parse_endpoint,
+)
 from sa_home_bot.proto.messages import (
     ERR_UNAVAILABLE,
     ERR_UNKNOWN_DST,
     Address,
     Envelope,
     ProtoError,
+    ServiceInfo,
 )
 
 log = logging.getLogger(__name__)
 
 RECONNECT_DELAY_S = 5.0
+
+# Потолок на одну попытку подключения (connect + hello). Нужен именно из-за
+# перебора адресов (этап 24): у адреса, до которого нет маршрута, ОС-таймаут
+# TCP-connect — десятки секунд или минуты, и линк всё это время не пробовал
+# бы следующий, рабочий адрес. Локальная сеть отвечает за миллисекунды,
+# tailscale — за десятки миллисекунд; пяти секунд хватает с запасом.
+CONNECT_TIMEOUT_S = 5.0
+
+# Сколько адресов помнить про одного соседа. Выученные адреса не забываются
+# (сосед может вернуться по любому из них), но и копиться бесконечно им
+# незачем: каждый лишний — это ещё одна неудачная попытка в цикле проб.
+MAX_ENDPOINTS = 8
 
 # Живая находка 2026-07-28: одних ОС-таймаутов мало. TCP не замечает
 # собеседника, у которого сокет жив, а процесс завис (не читает и не
@@ -59,26 +79,87 @@ NODE_INCARNATION = uuid.uuid4().hex
 NODE_SERVICE = "node"
 
 
+def _parse_all(values: Sequence[str | Path | Endpoint]) -> list[Endpoint]:
+    """Разобрать адреса, пропустив битые: одна опечатка в списке не должна
+    лишать линк остальных, рабочих путей."""
+    out: list[Endpoint] = []
+    for value in values:
+        try:
+            ep = parse_endpoint(value)
+        except ValueError as exc:
+            log.warning("PeerLink: пропускаю адрес %r (%s)", value, exc)
+            continue
+        if ep not in out:
+            out.append(ep)
+    return out
+
+
+async def _handshake(client: ProtoClient) -> ServiceInfo:
+    """Подключиться и спросить «кто ты» — одной операцией под общим таймаутом."""
+    await client.connect()
+    return await client.hello()
+
+
+def _answers_to(info: ServiceInfo, name: str) -> bool:
+    """Тот ли, к кому шли: для соседа-ноды сходится имя узла, для локальной
+    службы — имя службы. Регистр не важен: имя ноды — это hostname, и в
+    конфиге его пишут как придётся."""
+    return name.lower() in (info.node.lower(), info.service.lower())
+
+
+def _order_endpoints(
+    endpoints: Sequence[Endpoint], first: Endpoint | None = None
+) -> list[Endpoint]:
+    """Порядок проб: последний удачный → локальный путь → оверлей.
+
+    ``sorted`` стабилен, поэтому внутри одного ранга сохраняется исходный
+    порядок (конфиг важнее выученного — он написан человеком).
+    """
+    ordered = sorted(endpoints, key=endpoint_rank)
+    if first is not None and first in ordered:
+        ordered.remove(first)
+        ordered.insert(0, first)
+    return ordered
+
+
 class PeerLink:
-    """Постоянный линк к endpoint'у (удалённая нода или локальная служба).
+    """Постоянный линк к соседу (удалённая нода или локальная служба).
 
     Фоновая задача держит соединение и переподключается после обрыва;
     ``forward`` пересылает конверт как есть. Нет соединения — быстрый
     ``unavailable``, а не зависание.
+
+    Адресов у соседа может быть несколько (этап 24): LAN, tailscale, и те,
+    что он сам назвал в hello. Линк пробует их по очереди — последний
+    удачный, затем локальные, затем оверлей (`proto/endpoints.endpoint_rank`).
+    ``endpoint`` — тот адрес, по которому связь есть (или была) сейчас.
     """
 
     def __init__(
         self,
         name: str,
-        endpoint: str | Endpoint,
+        endpoint: str | Endpoint | Sequence[str | Endpoint],
         *,
         token: str = "",
         on_event: EventCallback | None = None,
+        on_endpoints: Callable[[str, list[str]], None] | None = None,
         reconnect_delay: float = RECONNECT_DELAY_S,
         self_node: str = "",
     ) -> None:
         self.name = name
-        self.endpoint = endpoint
+        raw = [endpoint] if isinstance(endpoint, (str, Path, Endpoint)) else list(endpoint)
+        parsed = _parse_all(raw)
+        if not parsed:
+            raise ValueError(f"линку {name} не задан ни один endpoint")
+        # Первый заданный адрес — «последний удачный» (так его кладёт нода,
+        # поднимая линк из состояния): с него и начинаем перебор.
+        self._candidates: list[Endpoint] = _order_endpoints(parsed, first=parsed[0])
+        # Адрес, по которому связь есть/была последний раз: с него начинается
+        # следующий перебор и его показывает /nodes.
+        self.endpoint: Endpoint = self._candidates[0]
+        # Кому сообщать выученные адреса соседа (нода сохраняет их в своём
+        # состоянии — переживают рестарт, см. node/state.py).
+        self._on_endpoints = on_endpoints
         self._token = token
         self._on_event = on_event
         self._delay = reconnect_delay
@@ -87,6 +168,8 @@ class PeerLink:
         self._src = Address(node=self_node) if self_node else None
         self._client: ProtoClient | None = None
         self._task: asyncio.Task | None = None
+        # Чем закончилась последняя попытка перебора адресов — только для лога.
+        self._last_error: Exception | None = None
         # Мы сами рвём соединение (heartbeat/reconnect_now), а не нас
         # останавливают: `ProtoClient.close()` отменяет читающую задачу, и
         # `join()` в `_run` получает CancelledError — без этого флага она
@@ -112,6 +195,42 @@ class PeerLink:
     @property
     def alive(self) -> bool:
         return self._client is not None
+
+    @property
+    def endpoints(self) -> list[str]:
+        """Все известные адреса соседа, в порядке проб."""
+        return [str(ep) for ep in self._candidates]
+
+    def learn_endpoints(self, advertised: Sequence[str]) -> None:
+        """Запомнить адреса, которые сосед назвал в hello.
+
+        Выученное не вытесняет заданное в конфиге, а дополняет: сосед знает
+        свои адреса точнее (он их и слушает), но конфиг — единственное, что
+        работает, пока сосед недоступен и спросить его нельзя.
+
+        Loopback отбраковывается жёстко: по ``127.0.0.1`` мы попадём не к
+        соседу, а к себе — и, если у себя тот же порт, примем свою же ноду
+        за него (от этого спасает ещё и сверка имени в `_dial`).
+        """
+        known = set(self._candidates)
+        added: list[Endpoint] = []
+        for ep in _parse_all(list(advertised)):
+            if len(known) >= MAX_ENDPOINTS:
+                break
+            if ep in known or is_loopback(ep):
+                continue
+            known.add(ep)
+            added.append(ep)
+        if not added:
+            return
+        self._candidates = _order_endpoints([*self._candidates, *added], first=self.endpoint)
+        log.info(
+            "PeerLink %s: узнал новые адреса соседа — %s",
+            self.name,
+            ", ".join(str(ep) for ep in added),
+        )
+        if self._on_endpoints is not None:
+            self._on_endpoints(self.name, self.endpoints)
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._run(), name=f"peer-link-{self.name}")
@@ -204,67 +323,115 @@ class PeerLink:
             return None
         return time.monotonic() - self.down_since
 
-    async def _run(self) -> None:
-        logged_down = False
-        while True:
+    async def _dial(self) -> tuple[ProtoClient, ServiceInfo, Endpoint] | None:
+        """Пройти адреса соседа по порядку до первого, который ответил СВОИМ
+        именем. None — не ответил ни один.
+
+        Каждая попытка ограничена ``CONNECT_TIMEOUT_S``: без потолка адрес,
+        до которого нет маршрута, съедал бы ОС-таймаут TCP-connect (десятки
+        секунд), и следующий, рабочий адрес не пробовался бы вовсе.
+
+        Ответивший чужим именем — кандидат последней очереди, а не отказ: имя
+        в ``[[swarm.nodes]]`` человек пишет как ему удобно, и оно вполне
+        законно может не совпадать с hostname соседа. Пока есть другие
+        адреса, пробуем их; не нашлось ничего лучше — берём его и ругаемся
+        в лог, как ругались до этапа 24.
+        """
+        last_error: Exception | None = None
+        mismatched: tuple[ProtoClient, ServiceInfo, Endpoint] | None = None
+        for ep in list(self._candidates):
             client = ProtoClient(
-                self.endpoint,
+                ep,
                 token=self._token,
                 on_event=self._on_event,
                 src=self._src,
                 incarnation=NODE_INCARNATION,
             )
             try:
-                await client.connect()
-                info = await client.hello()
-                if info.node != self.name and info.service != self.name:
-                    log.warning(
-                        "PeerLink %s: на %s отвечает %s/%s — проверь конфиг",
-                        self.name,
-                        self.endpoint,
-                        info.node,
-                        info.service,
-                    )
-                log.info(
-                    "PeerLink %s: связь установлена (%s/%s)", self.name, info.node, info.service
-                )
-                logged_down = False
-                if info.node_kind:
-                    self.node_kind = info.node_kind
-                if info.wake:
-                    self.wake_info = info.wake
-                self.down_since = None
-                self.left = False  # вернулась — прошлый штатный уход исчерпан
-                self._client = client
-                heartbeat = asyncio.create_task(
-                    self._heartbeat(client), name=f"peer-link-hb-{self.name}"
-                )
-                try:
-                    await client.join()
-                except asyncio.CancelledError:
-                    # Соединение оборвали МЫ (см. `_dropping`) — это штатный
-                    # путь к переподключению. Отмена не наша — пробрасываем,
-                    # иначе stop() не остановит линк.
-                    if not self._dropping:
-                        raise
-                finally:
-                    self._dropping = False
-                    heartbeat.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await heartbeat
-                    self._client = None
-                    self._mark_down()
-                log.warning("PeerLink %s: связь потеряна, переподключение...", self.name)
+                info = await asyncio.wait_for(_handshake(client), timeout=CONNECT_TIMEOUT_S)
+            except asyncio.CancelledError:
+                # Синхронный abort, а не await close(): нас уже отменяют,
+                # любой await здесь получит отмену повторно и не доработает.
+                client.abort()
+                if mismatched is not None:
+                    mismatched[0].abort()
+                raise
             except (ConnectionError, OSError, TimeoutError, ProtoError) as exc:
-                self._mark_down()
-                if not logged_down:
-                    log.warning(
-                        "PeerLink %s недоступен (%s) — переподключение каждые %.0f с",
-                        self.name,
-                        exc,
-                        self._delay,
-                    )
-                    logged_down = True
+                last_error = exc
+                with contextlib.suppress(Exception):
+                    await client.close()
+                continue
+            # Не тот, к кому шли: по этому адресу либо чужая нода, либо мы
+            # сами (сосед мог объявить адрес, который в НАШЕЙ сети занят
+            # кем-то другим) — но, возможно, и просто другое имя в конфиге.
+            if not _answers_to(info, self.name):
+                log.warning(
+                    "PeerLink %s: на %s отвечает %s/%s — проверь конфиг",
+                    self.name,
+                    ep,
+                    info.node,
+                    info.service,
+                )
+                if mismatched is None:
+                    mismatched = (client, info, ep)
+                else:
+                    with contextlib.suppress(Exception):
+                        await client.close()
+                continue
+            if mismatched is not None:
+                with contextlib.suppress(Exception):
+                    await mismatched[0].close()
+            return client, info, ep
+        if mismatched is not None:
+            return mismatched
+        self._last_error = last_error
+        return None
+
+    async def _serve(self, client: ProtoClient, info: ServiceInfo, endpoint: Endpoint) -> None:
+        """Связь установлена: держать её, пока не оборвётся."""
+        switched = endpoint != self.endpoint
+        if switched:
+            log.info("PeerLink %s: путь сменился на %s", self.name, endpoint)
+        # Удачный адрес становится первым в следующем переборе — и он же
+        # переживает рестарт ноды (см. on_endpoints).
+        self.endpoint = endpoint
+        self._candidates = _order_endpoints(self._candidates, first=endpoint)
+        if switched and self._on_endpoints is not None:
+            self._on_endpoints(self.name, self.endpoints)
+        log.info("PeerLink %s: связь установлена (%s/%s)", self.name, info.node, info.service)
+        if info.node_kind:
+            self.node_kind = info.node_kind
+        if info.wake:
+            self.wake_info = info.wake
+        if info.endpoints:
+            self.learn_endpoints(info.endpoints)
+        self.down_since = None
+        self.left = False  # вернулась — прошлый штатный уход исчерпан
+        self._client = client
+        heartbeat = asyncio.create_task(self._heartbeat(client), name=f"peer-link-hb-{self.name}")
+        try:
+            await client.join()
+        except asyncio.CancelledError:
+            # Соединение оборвали МЫ (см. `_dropping`) — это штатный путь к
+            # переподключению. Отмена не наша — пробрасываем, иначе stop()
+            # не остановит линк.
+            if not self._dropping:
+                raise
+        finally:
+            self._dropping = False
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
+            self._client = None
+            self._mark_down()
+        log.warning("PeerLink %s: связь потеряна, переподключение...", self.name)
+
+    async def _run(self) -> None:
+        logged_down = False
+        while True:
+            dialed = None
+            try:
+                dialed = await self._dial()
             except asyncio.CancelledError:
                 raise  # stop(): выходим из цикла, это единственный законный путь
             except Exception:
@@ -272,6 +439,28 @@ class PeerLink:
                 # убивало задачу линка молча (create_task никому не жалуется) —
                 # линк оставался мёртвым навсегда, пока не перезапустят ноду.
                 # Цикл переподключения обязан переживать что угодно.
+                log.exception("PeerLink %s: непредвиденная ошибка, продолжаю попытки", self.name)
+            if dialed is None:
+                self._mark_down()
+                if not logged_down:
+                    log.warning(
+                        "PeerLink %s недоступен ни по одному адресу [%s] (%s) — "
+                        "переподключение каждые %.0f с",
+                        self.name,
+                        ", ".join(self.endpoints),
+                        self._last_error,
+                        self._delay,
+                    )
+                    logged_down = True
+                await asyncio.sleep(self._delay)
+                continue
+            logged_down = False
+            client, info, endpoint = dialed
+            try:
+                await self._serve(client, info, endpoint)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
                 self._mark_down()
                 log.exception("PeerLink %s: непредвиденная ошибка, продолжаю попытки", self.name)
             finally:
@@ -330,6 +519,10 @@ class NodeRouter:
             {
                 "id": link.name,
                 "endpoint": str(link.endpoint),
+                # Все известные пути к соседу (этап 24): по ним нода, узнавшая
+                # о нём от другой, свяжется напрямую хоть по LAN, хоть по
+                # tailscale — а не по одному адресу из чужого конфига.
+                "endpoints": link.endpoints,
                 "alive": link.alive,
                 # Тип соседа и длительность недоступности: по ним фронтенд
                 # отличает «спит, это норма» от «пропал сервер, это авария».

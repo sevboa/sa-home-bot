@@ -23,7 +23,13 @@ from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
-from sa_home_bot.proto.endpoints import Endpoint, TcpEndpoint, UnixEndpoint, parse_endpoint
+from sa_home_bot.proto.endpoints import (
+    Endpoint,
+    TcpEndpoint,
+    UnixEndpoint,
+    advertisable,
+    parse_endpoint,
+)
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     ERR_INTERNAL,
@@ -66,11 +72,15 @@ class ServiceHandler(Protocol):
 # переслан по dst), вернул None — запрос локальный, обрабатывает handler.
 Router = Callable[[Envelope], Awaitable[Envelope | None]]
 
-# Сколько ждать появления собственного адреса при старте (см.
-# _start_tcp_with_retry). С запасом больше типичных 40-60 с подъёма
-# Tailscale: лучше подождать лишнее, чем не подняться совсем.
+# Сколько ждать появления собственного адреса при старте, когда не поднялся
+# НИ ОДИН (см. start). С запасом больше типичных 40-60 с подъёма Tailscale:
+# лучше подождать лишнее, чем не подняться совсем.
 BIND_RETRY_TIMEOUT_S = 180.0
 BIND_RETRY_INTERVAL_S = 3.0
+# Насколько редко добирать оставшиеся адреса, когда ждать уже некуда: нода
+# работает, слушатель у неё есть, недостающий адрес — лишний путь, а не
+# жизненная необходимость. Раз в полминуты хватит и логи не засоряет.
+BIND_RETRY_SLOW_INTERVAL_S = 30.0
 
 # Потолок на одну запись в клиентский сокет. Зависание записи — это не
 # исключение, а вечный await на drain() полумёртвого соединения: без потолка
@@ -81,6 +91,12 @@ SEND_TIMEOUT_S = 10.0
 # Сколько TCP-клиенту дано на первое сообщение (auth): молчащее
 # неаутентифицированное соединение иначе висит в _connections вечно.
 AUTH_TIMEOUT_S = 10.0
+
+# Потолок на ожидание закрытия слушателя. С Python 3.12 `wait_closed()` ждёт
+# завершения ВСЕХ принятых обработчиков — то есть заложник любого клиента,
+# который не отпустил сокет. Останов ноды не должен зависеть от чужой
+# доброй воли (тот же принцип, что у ProtoClient.CLOSE_TIMEOUT_S).
+CLOSE_TIMEOUT_S = 5.0
 
 
 class _Connection:
@@ -129,7 +145,13 @@ class ProtoServer:
         # Последняя известная инкарнация каждого соседа: смена = он
         # перезапустился (см. _note_peer).
         self._peer_incarnations: dict[str, str] = {}
-        self._servers: list[asyncio.Server] = []
+        # Слушатели по индексу endpoint'а: адрес может подняться позже
+        # остальных (tailscale) — тогда его слот пуст, а нода уже работает.
+        self._bound: dict[int, asyncio.Server] = {}
+        self._bind_task: asyncio.Task | None = None
+        # Останов начался: обработчик соединения, принятого в этот момент, не
+        # должен начинать работу (см. stop и _handle_client).
+        self._stopping = False
         self._connections: set[_Connection] = set()
         self._request_tasks: set[asyncio.Task] = set()
 
@@ -140,14 +162,55 @@ class ProtoServer:
 
     @property
     def endpoints(self) -> tuple[Endpoint, ...]:
+        """Все настроенные адреса — включая те, что ещё не поднялись."""
         return tuple(self._endpoints)
+
+    @property
+    def bound_endpoints(self) -> tuple[Endpoint, ...]:
+        """Адреса, на которых сервер СЕЙЧАС реально слушает."""
+        return tuple(self._endpoints[i] for i in sorted(self._bound))
+
+    def advertised_endpoints(self) -> list[str]:
+        """Что объявлять рою в hello: реально слушаемые TCP-адреса, без
+        loopback, с раскрытым ``0.0.0.0`` (см. proto/endpoints.advertisable).
+        """
+        return advertisable(self.bound_endpoints)
 
     @property
     def connection_count(self) -> int:
         return len(self._connections)
 
-    async def _start_tcp_with_retry(self, ep: TcpEndpoint) -> asyncio.Server:
-        """Забиндиться на TCP-адрес, дожидаясь его появления.
+    async def _bind_one(self, index: int) -> None:
+        """Одна попытка поднять слушатель на ``self._endpoints[index]``.
+
+        OSError наружу — вызывающий решает, ждать адрес или сдаться.
+        """
+        ep = self._endpoints[index]
+        if isinstance(ep, UnixEndpoint):
+            path = ep.path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.unlink(missing_ok=True)  # хвост от прошлого запуска
+            server = await asyncio.start_unix_server(
+                # unix доверяет правам файла — auth соединению не нужен
+                functools.partial(self._handle_client, trusted=True),
+                path=str(path),
+                limit=MAX_MESSAGE_BYTES,
+            )
+            path.chmod(0o600)
+        else:
+            server = await asyncio.start_server(
+                functools.partial(self._handle_client, trusted=False),
+                host=ep.host,
+                port=ep.port,
+                limit=MAX_MESSAGE_BYTES,
+            )
+            if ep.port == 0:  # порт выбрала ОС (тесты) — узнать реальный
+                self._endpoints[index] = TcpEndpoint(ep.host, server.sockets[0].getsockname()[1])
+        self._bound[index] = server
+        log.info("ProtoServer слушает %s", self._endpoints[index])
+
+    async def start(self) -> None:
+        """Поднять слушатели. Адрес, которого ещё нет, ноду не блокирует.
 
         Живая находка 2026-07-28: на winpc нода падала на старте с
         ``could not bind on any address out of [('100.78.225.83', 8710)]`` —
@@ -156,59 +219,82 @@ class ProtoServer:
         сервера и поднять туннель). WinSW отрабатывал два ретрая и сдавался:
         обёртка числилась RUNNING, а ноды в рое не было до ручного рестарта.
 
-        Адрес интерфейса, которого ещё нет — состояние временное и штатное,
-        а не повод не запуститься. Ждём его до ``BIND_RETRY_TIMEOUT_S``;
-        занятый порт (чужой процесс) — не тот случай, падаем сразу.
+        Ждать такой адрес нужно, только пока не поднялось НИЧЕГО: нода без
+        единого слушателя бесполезна. Если хоть один адрес есть (unix-сокет
+        или LAN — этап 24), нода стартует немедленно и работает, а
+        недостающие адреса добираются фоном — ровно так домашний рой
+        собирается по LAN, не дожидаясь ни Tailscale, ни интернета.
+        """
+        pending: list[int] = []
+        for i in range(len(self._endpoints)):
+            try:
+                await self._bind_one(i)
+            except OSError as exc:
+                # EADDRINUSE — порт занят кем-то другим, ожидание не поможет.
+                if exc.errno == errno.EADDRINUSE:
+                    raise
+                log.warning("ProtoServer: адреса %s ещё нет (%s)", self._endpoints[i], exc)
+                pending.append(i)
+        if pending and not self._bound:
+            pending = await self._wait_for_first(pending)
+        if pending:
+            self._bind_task = asyncio.create_task(self._bind_later(pending), name="proto-bind")
+
+    async def _wait_for_first(self, pending: list[int]) -> list[int]:
+        """Ни один адрес не поднялся: ждать первого до BIND_RETRY_TIMEOUT_S.
+        Вернуть тех, кто так и не поднялся; не поднялся никто — OSError."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + BIND_RETRY_TIMEOUT_S
+        log.warning(
+            "ProtoServer: нет ни одного адреса — жду появления до %.0f с "
+            "(обычно поднимается Tailscale)",
+            BIND_RETRY_TIMEOUT_S,
+        )
+        last_exc: OSError | None = None
+        while True:
+            await asyncio.sleep(BIND_RETRY_INTERVAL_S)
+            for i in list(pending):
+                try:
+                    await self._bind_one(i)
+                    pending.remove(i)
+                except OSError as exc:
+                    if exc.errno == errno.EADDRINUSE:
+                        raise
+                    last_exc = exc
+            if self._bound:
+                return pending
+            if loop.time() >= deadline:
+                assert last_exc is not None
+                raise last_exc
+
+    async def _bind_later(self, pending: list[int]) -> None:
+        """Добирать оставшиеся адреса фоном — нода уже работает.
+
+        Без дедлайна нарочно: tailscale-адрес может появиться и через час
+        (провайдер лежал), а с ним появляется и путь к нодам вне LAN.
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + BIND_RETRY_TIMEOUT_S
-        waiting_logged = False
-        while True:
-            try:
-                return await asyncio.start_server(
-                    functools.partial(self._handle_client, trusted=False),
-                    host=ep.host,
-                    port=ep.port,
-                    limit=MAX_MESSAGE_BYTES,
-                )
-            except OSError as exc:
-                # EADDRINUSE — порт занят кем-то другим, ожидание не поможет.
-                if exc.errno == errno.EADDRINUSE or loop.time() >= deadline:
-                    raise
-                if not waiting_logged:
-                    log.warning(
-                        "ProtoServer: адреса %s ещё нет (%s) — жду его появления "
-                        "до %.0f с (обычно поднимается Tailscale)",
-                        ep,
-                        exc,
-                        BIND_RETRY_TIMEOUT_S,
-                    )
-                    waiting_logged = True
-                await asyncio.sleep(BIND_RETRY_INTERVAL_S)
-
-    async def start(self) -> None:
-        for i, ep in enumerate(self._endpoints):
-            if isinstance(ep, UnixEndpoint):
-                path = ep.path
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.unlink(missing_ok=True)  # хвост от прошлого запуска
-                server = await asyncio.start_unix_server(
-                    # unix доверяет правам файла — auth соединению не нужен
-                    functools.partial(self._handle_client, trusted=True),
-                    path=str(path),
-                    limit=MAX_MESSAGE_BYTES,
-                )
-                path.chmod(0o600)
-            else:
-                server = await self._start_tcp_with_retry(ep)
-                if ep.port == 0:  # порт выбрала ОС (тесты) — узнать реальный
-                    bound = server.sockets[0].getsockname()
-                    self._endpoints[i] = TcpEndpoint(ep.host, bound[1])
-            self._servers.append(server)
-            log.info("ProtoServer слушает %s", self._endpoints[i])
+        while pending:
+            interval = (
+                BIND_RETRY_INTERVAL_S if loop.time() < deadline else BIND_RETRY_SLOW_INTERVAL_S
+            )
+            await asyncio.sleep(interval)
+            for i in list(pending):
+                try:
+                    await self._bind_one(i)
+                    pending.remove(i)
+                except OSError:
+                    continue  # адреса всё ещё нет — о нём уже сказано в start()
 
     async def stop(self) -> None:
-        for server in self._servers:
+        self._stopping = True
+        if self._bind_task is not None:
+            self._bind_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._bind_task
+            self._bind_task = None
+        for server in self._bound.values():
             server.close()
         for task in list(self._request_tasks):
             task.cancel()
@@ -221,9 +307,14 @@ class ProtoServer:
             with contextlib.suppress(Exception):
                 await conn.writer.wait_closed()
         self._connections.clear()
-        for server in self._servers:
-            await server.wait_closed()
-        self._servers.clear()
+        for server in self._bound.values():
+            # Под потолком: обработчик соединения, принятого прямо в момент
+            # останова, в _connections ещё не попал — закрыть его writer было
+            # некому, и без потолка мы ждали бы его вечно (живая находка при
+            # работе над этапом 24: тест двух нод вис на teardown).
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(server.wait_closed(), timeout=CLOSE_TIMEOUT_S)
+        self._bound.clear()
         for ep in self._endpoints:
             if isinstance(ep, UnixEndpoint):
                 ep.path.unlink(missing_ok=True)
@@ -282,6 +373,12 @@ class ProtoServer:
         *,
         trusted: bool,
     ) -> None:
+        if self._stopping:
+            # Соединение принято ровно между закрытием слушателя и обходом
+            # списка в stop(): обслуживать его уже некому, а брошенный
+            # обработчик держал бы `wait_closed()` в заложниках.
+            writer.close()
+            return
         # trusted=True у unix-слушателя (права файла); на TCP доверие даёт auth.
         conn = _Connection(writer, authenticated=trusted)
         if not trusted:
