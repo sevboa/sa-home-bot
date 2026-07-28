@@ -14,7 +14,10 @@ Tailscale не отдал адрес (40–60 с после загрузки), �
 import asyncio
 import errno
 import shutil
+import socket
+import sys
 import tempfile
+import types
 from pathlib import Path
 
 import pytest
@@ -36,6 +39,8 @@ from sa_home_bot.proto.endpoints import (
     endpoint_rank,
     is_loopback,
     is_unspecified,
+    is_virtual_iface,
+    local_ipv4_addresses,
 )
 from sa_home_bot.proto.messages import ActionSpec, ServiceDescription, ServiceInfo
 from sa_home_bot.proto.server import ProtoServer
@@ -131,6 +136,41 @@ def test_0000_раскрывается_в_адреса_интерфейсов(mo
         "tcp://192.168.0.100:8710",
         "tcp://100.73.52.92:8710",
     ]
+
+
+def test_адреса_виртуальных_сетей_не_объявляются(monkeypatch):
+    """Найдено при деплое этапа 24 на winpc: WSL и Hyper-V дают хосту адреса
+    172.x, снаружи недостижимые НИКОГДА. Объявленные рою, они становятся
+    мёртвыми кандидатами впереди настоящего LAN-адреса — сосед тратит на
+    каждый полный CONNECT_TIMEOUT_S, и «LAN как основной путь» не работает."""
+    class FakeAddr:
+        def __init__(self, address: str) -> None:
+            self.family = socket.AF_INET
+            self.address = address
+
+    fake_ifaces = {
+        "vEthernet (WSL)": [FakeAddr("172.18.64.1")],
+        "vEthernet (Default Switch)": [FakeAddr("172.26.48.1")],
+        "docker0": [FakeAddr("172.17.0.1")],
+        "Ethernet": [FakeAddr("192.168.0.105")],
+        "Tailscale": [FakeAddr("100.78.225.83")],
+    }
+    # local_ipv4_addresses импортирует psutil внутри функции — подменяем модуль.
+    monkeypatch.setitem(
+        sys.modules, "psutil", types.SimpleNamespace(net_if_addrs=lambda: fake_ifaces)
+    )
+
+    assert local_ipv4_addresses() == ["192.168.0.105", "100.78.225.83"]
+
+
+def test_настоящий_мост_и_оверлей_под_фильтр_не_попадают():
+    """`br0` — обычно РЕАЛЬНЫЙ мост LAN, `br-<hash>` — docker; tailscale0 —
+    рабочий путь, просто медленнее LAN."""
+    assert not is_virtual_iface("br0")
+    assert not is_virtual_iface("tailscale0")
+    assert not is_virtual_iface("enp1s0")
+    assert is_virtual_iface("br-1a2b3c4d")
+    assert is_virtual_iface("vEthernet (WSL)")
 
 
 # --- Нода слушает несколько адресов ---

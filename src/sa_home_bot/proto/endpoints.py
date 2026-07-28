@@ -35,6 +35,11 @@ _LOOPBACK_HOSTNAMES = frozenset({"localhost", "localhost.localdomain"})
 # зато и медленнее LAN, и мёртвый без сети. Отсюда отдельный ранг.
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
 
+# Имена интерфейсов виртуальных сетей — их адреса рою не объявляем
+# (см. is_virtual_iface). Windows: "vEthernet (WSL)", "vEthernet (Default
+# Switch)"; Linux: docker0, br-<id>, veth<id>, virbr0, vmnet1.
+_VIRTUAL_IFACE_MARKERS = ("vethernet", "docker", "virbr", "vmnet", "br-", "veth")
+
 # Ранги для порядка проб (меньше — пробуем раньше).
 RANK_LOCAL = 0  # unix-сокет: тот же хост, дешевле некуда
 RANK_LAN = 1  # приватная сеть 192.168/10./172.16 — прямой путь без оверлея
@@ -153,14 +158,35 @@ def endpoint_rank(ep: Endpoint) -> int:
     return RANK_OTHER
 
 
+def is_virtual_iface(name: str) -> bool:
+    """Интерфейс — хост-сторона виртуальной сети (WSL, Hyper-V, docker, libvirt).
+
+    Адрес на таком интерфейсе выглядит как обычный приватный (172.26.48.1), но
+    снаружи машины к нему не прийти НИКОГДА: это адрес хоста в NAT-сети
+    контейнеров. Объявить его рою — значит подсунуть соседу мёртвого кандидата,
+    на который тот потратит полный `CONNECT_TIMEOUT_S`. Найдено при деплое
+    этапа 24: winpc с WSL и Hyper-V объявил три таких адреса, и настоящий
+    LAN-адрес оказался четвёртым в очереди проб.
+
+    Отличить можно только по имени интерфейса — диапазоны у них честно
+    приватные. `tailscale0`/`Tailscale` под фильтр не попадает намеренно: это
+    рабочий путь, просто медленнее LAN (см. RANK_OVERLAY).
+    """
+    low = name.lower()
+    return any(marker in low for marker in _VIRTUAL_IFACE_MARKERS)
+
+
 def local_ipv4_addresses() -> list[str]:
-    """Свои IPv4, кроме loopback — чем раскрывается ``0.0.0.0`` при объявлении
-    адресов рою (см. advertisable)."""
+    """Свои IPv4, кроме loopback и виртуальных сетей — чем раскрывается
+    ``0.0.0.0`` при объявлении адресов рою (см. advertisable)."""
     # psutil уже в зависимостях (sensors, wol) — отдельной возиться не с чем.
     import psutil
 
     found: list[str] = []
-    for addrs in psutil.net_if_addrs().values():
+    for iface, addrs in psutil.net_if_addrs().items():
+        if is_virtual_iface(iface):
+            log.debug("адреса интерфейса %s не объявляем: виртуальная сеть", iface)
+            continue
         for addr in addrs:
             if addr.family != socket.AF_INET or not addr.address:
                 continue
