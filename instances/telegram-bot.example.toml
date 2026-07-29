@@ -39,6 +39,15 @@ chat_id = 123456789
 event_types = ["*"]
 allowed_commands = ["*"]
 
+# Приватный вход (AUTHORIZATION.md §10): что получает тот, кто погасил код
+# приглашения. Сам список гостей здесь НЕ живёт — он в файле-спутнике
+# instances/telegram-bot.<имя>.guests.toml, который ведёт бот и перезаписывает
+# целиком (реплицируется так же, как этот пакет, поэтому гости переживают
+# переезд бота на резерв).
+#[invites]
+#grant_commands = ["chat@llm", "recall@memory", "remember@memory"]
+#grant_events = []
+
 # Известные собеседники /ai — персональные данные живых людей.
 #[[people]]
 #telegram_username = "someone"

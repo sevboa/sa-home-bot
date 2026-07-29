@@ -47,6 +47,14 @@ WAKE = Command("wake", "разбудить домашний ПК (Wake-on-LAN)",
 # правом, скрытый алиас (как /swarm↔/nodes), меню не засоряет.
 ALFRED = Command("alfred", "позвать Альфреда", universal=False, menu=True, right="chat@llm")
 AI = Command("ai", "то же самое, что /alfred", universal=False, menu=False, right="chat@llm")
+# Приватный вход (AUTHORIZATION.md §10). Обе — под одним правом `invite`: кто
+# приглашает, тот и выставляет. Скрытые (как /status, /stats и прочие): это
+# админский инструмент, а не скилл роя, и в меню чата ему не место — тем
+# более что чаще всего оно у админа и так открыто по `*`.
+INVITE = Command("invite", "выпустить код приглашения", universal=False, menu=False,
+                 right="invite")
+GUESTS = Command("guests", "приглашённые и открытые коды", universal=False, menu=False,
+                 right="invite")
 
 ALL_COMMANDS: list[Command] = [
     HELP,
@@ -62,6 +70,8 @@ ALL_COMMANDS: list[Command] = [
     WAKE,
     ALFRED,
     AI,
+    INVITE,
+    GUESTS,
 ]
 
 UNIVERSAL_COMMANDS: list[Command] = [c for c in ALL_COMMANDS if c.universal]
@@ -146,9 +156,18 @@ def parse_action_callback(data: str | None) -> tuple[str, str, str | None, str |
 # Пагинация /downtime («st:downtime_page:<offset>») — не кнопка под /status,
 # но требует тех же прав, что и сама команда DOWNTIME.
 DOWNTIME_PAGE_CODE = "downtime_page"
+# Кнопка «выставить гостя» под /guests («st:guest_revoke:<chat_id>») — здесь
+# же, чтобы право проверяла общая CallbackAuthorizationMiddleware, а не сам
+# обработчик: неизвестный ей префикс она пропускает без проверок.
+GUEST_REVOKE_CODE = "guest_revoke"
+# То же для ещё не погашенного кода («st:code_revoke:<КОД>») — выпустил и
+# передумал.
+CODE_REVOKE_CODE = "code_revoke"
 _ALL_CALLBACK_ACTIONS: dict[str, Command] = {
     **STATUS_ACTIONS,
     DOWNTIME_PAGE_CODE: DOWNTIME,
+    GUEST_REVOKE_CODE: GUESTS,
+    CODE_REVOKE_CODE: GUESTS,
     NODES_CODE: NODES,
     NODE_CARD_CODE: STATUS,  # карточка ноды = данные /status
     SERVICE_CARD_CODE: NODES,  # карточка службы — часть управления нодами

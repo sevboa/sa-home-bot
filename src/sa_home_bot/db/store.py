@@ -540,6 +540,84 @@ class Store:
         async with self.db.transaction() as conn:
             await conn.execute("UPDATE tasks SET prewake_done=1 WHERE id=?", (task_id,))
 
+    # --- invites (приватный вход, bot/invites.py) ---
+
+    async def create_invite(
+        self,
+        code: str,
+        issued_by_chat_id: int,
+        issued_by_user_id: int | None,
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> None:
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "INSERT INTO invites(code, issued_by_chat_id, issued_by_user_id, "
+                "created_at, expires_at) VALUES(?, ?, ?, ?, ?)",
+                (
+                    code,
+                    issued_by_chat_id,
+                    issued_by_user_id,
+                    _iso(created_at),
+                    _iso(expires_at),
+                ),
+            )
+
+    async def redeem_invite(
+        self,
+        code: str,
+        *,
+        at: datetime,
+        chat_id: int,
+        user_id: int | None,
+        user_name: str | None,
+    ) -> dict | None:
+        """Погасить код. None — кода нет, он уже использован, отозван или истёк.
+
+        Проверка и погашение — одним UPDATE с условием: два сообщения с одним
+        и тем же кодом могут прийти одновременно, и «сначала проверил, потом
+        записал» дало бы двух гостей на один одноразовый код.
+        """
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                "UPDATE invites SET redeemed_at=?, redeemed_chat_id=?, redeemed_user_id=?, "
+                "redeemed_user_name=? WHERE code=? AND redeemed_at IS NULL "
+                "AND revoked_at IS NULL AND expires_at>?",
+                (_iso(at), chat_id, user_id, user_name, code, _iso(at)),
+            )
+            if cur.rowcount == 0:
+                return None
+            cur = await conn.execute("SELECT * FROM invites WHERE code=?", (code,))
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def open_invites(self, now: datetime) -> list[dict]:
+        """Выпущенные и ещё годные коды — для /guests."""
+        cur = await self.db.conn.execute(
+            "SELECT * FROM invites WHERE redeemed_at IS NULL AND revoked_at IS NULL "
+            "AND expires_at>? ORDER BY created_at",
+            (_iso(now),),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def revoke_invite(self, code: str, at: datetime) -> bool:
+        """Отозвать ещё не погашенный код. False — гасить было нечего."""
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                "UPDATE invites SET revoked_at=? WHERE code=? AND redeemed_at IS NULL "
+                "AND revoked_at IS NULL",
+                (_iso(at), code),
+            )
+            return cur.rowcount > 0
+
+    async def prune_invites(self, older_than: datetime) -> int:
+        """Убрать давно истёкшие/погашенные коды — их след уже в подписках."""
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                "DELETE FROM invites WHERE expires_at<?", (_iso(older_than),)
+            )
+            return cur.rowcount
+
     # --- housekeeping ---
 
     async def prune_job_runs(self, keep_last: int = 500) -> int:

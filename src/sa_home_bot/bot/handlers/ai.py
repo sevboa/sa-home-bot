@@ -294,6 +294,38 @@ async def on_group_mention(
     )
 
 
+async def start_dialogue(
+    message: Message,
+    prompt: str,
+    *,
+    node_link: ServiceLink,
+    store: Store,
+    config: Settings,
+    book: SubscriptionBook,
+    notifier: Notifier,
+    active_ai_chats: ai_flow.ActiveAiChats,
+    tool_calls: ToolCalls,
+) -> None:
+    """Начать тред директивой, как голый /alfred, — но не по команде человека.
+
+    Нужна приватному входу (bot/handlers/invites.py): гостя встречает сам
+    Альфред, а не заготовленная строка. Директива в историю не пишется —
+    только ответ на неё (та же логика, что у OPENING_PROMPT).
+    """
+    await _ask_and_reply(
+        message,
+        node_link,
+        store,
+        config,
+        book,
+        notifier,
+        message.message_id,
+        [{"role": "user", "content": prompt}],
+        active_ai_chats,
+        tool_calls,
+    )
+
+
 async def _ask_and_reply(
     message: Message,
     node_link: ServiceLink,

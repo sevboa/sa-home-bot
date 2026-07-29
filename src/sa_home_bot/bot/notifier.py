@@ -9,6 +9,8 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from aiogram.types import InlineKeyboardMarkup, ReplyParameters
 
+from sa_home_bot.subscriptions.models import WILDCARD
+
 log = logging.getLogger(__name__)
 
 MAX_LEN = 4096
@@ -29,6 +31,20 @@ def chunk_text(text: str, limit: int = MAX_LEN) -> list[str]:
     if rest:
         chunks.append(rest)
     return chunks
+
+
+async def notify_admins(book, notifier: Notifier, text: str) -> None:
+    """Служебное сообщение — в чаты с полным доступом (``*`` в
+    allowed_commands), не пользователю.
+
+    Сюда идут диагностика падений /ai (см. bot/ai_flow.py, где эта функция и
+    жила раньше) и события приватного входа: кто вошёл по инвайту, кто
+    ломится подбором (bot/invites.py). ``book`` не типизирован намеренно —
+    иначе notifier зависел бы от подписок, которые зависят от конфига.
+    """
+    for sub in book.all():
+        if WILDCARD in sub.allowed_commands:
+            await notifier.send_direct(sub.chat_id, text)
 
 
 class Notifier:

@@ -10,7 +10,10 @@ from sa_home_bot.config import Settings
 from sa_home_bot.node.instances import (
     InstanceMeta,
     InstanceStore,
+    base_instance,
     content_hash,
+    guests_package_path,
+    is_satellite,
     slot_key,
 )
 
@@ -226,3 +229,60 @@ def test_missing_package_is_a_clear_error(tmp_path):
 def test_without_instance_nothing_changes(tmp_path):
     config = _config(tmp_path, '[telegram]\ntoken = "plain"\n')
     assert Settings.load(config).telegram.token == "plain"
+
+
+# --- сателлиты (гостевой пакет, AUTHORIZATION.md §10) -----------------------
+
+
+def test_base_instance_resolves_satellites():
+    assert base_instance("alfred") == "alfred"
+    assert base_instance("alfred.guests") == "alfred"
+    assert is_satellite("alfred.guests") is True
+    assert is_satellite("alfred") is False
+
+
+def test_guests_package_lives_next_to_its_owner(tmp_path):
+    owner = tmp_path / "instances" / "telegram-bot.alfred.toml"
+    assert guests_package_path(owner).name == "telegram-bot.alfred.guests.toml"
+
+
+def test_satellite_is_an_ordinary_package_for_the_store(tmp_path):
+    """Ничего расширять не пришлось: имя разбирается по первой точке, поэтому
+    сателлит виден как обычный пакет со своей ревизией."""
+    store = _store(tmp_path)
+    path = store.package_path("telegram-bot", "alfred.guests")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"[[guest_subscriptions]]\n")
+
+    metas = {(m.service, m.instance): m for m in store.refresh_all()}
+    assert ("telegram-bot", "alfred.guests") in metas
+    assert store.read_meta("telegram-bot", "alfred.guests").rev == 1
+
+
+def test_guest_package_supplies_guest_subscriptions(tmp_path):
+    config = _config(tmp_path, "")
+    pkg = tmp_path / "instances" / "telegram-bot.alfred.toml"
+    pkg.parent.mkdir()
+    pkg.write_text('[telegram]\ntoken = "111:aaa"\n')
+    guests_package_path(pkg).write_text(
+        '[[guest_subscriptions]]\nname = "гость"\nchat_id = 77\n'
+        'allowed_commands = ["chat@llm"]\n',
+        encoding="utf-8",
+    )
+
+    settings = Settings.load(config, instance="alfred")
+    assert [g.chat_id for g in settings.guest_subscriptions] == [77]
+    assert settings.subscriptions == []  # владельческие не затёрты гостевыми
+    assert settings.guests_path == guests_package_path(pkg)
+
+
+def test_missing_guest_package_is_not_an_error(tmp_path):
+    config = _config(tmp_path, "")
+    pkg = tmp_path / "instances" / "telegram-bot.alfred.toml"
+    pkg.parent.mkdir()
+    pkg.write_text('[telegram]\ntoken = "111:aaa"\n')
+
+    settings = Settings.load(config, instance="alfred")
+    assert settings.guest_subscriptions == []
+    # Путь всё равно известен — по нему бот запишет первого же гостя.
+    assert settings.guests_path == guests_package_path(pkg)

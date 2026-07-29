@@ -73,7 +73,7 @@ from sa_home_bot import wake_core
 from sa_home_bot.bot import swarm_view
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.lifecycle import notify_tool_call
-from sa_home_bot.bot.notifier import Notifier
+from sa_home_bot.bot.notifier import Notifier, notify_admins  # noqa: F401 — реэкспорт, см. ниже
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import PersonConfig, Settings
@@ -88,10 +88,14 @@ from sa_home_bot.proto.messages import (
     ProtoError,
 )
 from sa_home_bot.subscriptions.book import SubscriptionBook
-from sa_home_bot.subscriptions.models import WILDCARD
 from sa_home_bot.wake_core import wake_swarm_node_core
 
 log = logging.getLogger(__name__)
+
+# Реэкспорт notify_admins (импорт выше): исторически она жила здесь, и вызовы
+# вида ai_flow.notify_admins(...) остаются рабочими; сама функция переехала в
+# bot/notifier.py — ею пользуется и приватный вход (bot/invites.py), которому
+# вся LLM-обвязка этого модуля не нужна.
 
 LLM_NODE = "winpc"
 LLM_SERVICE = "llm"
@@ -314,15 +318,6 @@ def _is_unavailable(exc: Exception) -> bool:
     if isinstance(exc, ServiceUnavailableError):
         return True
     return isinstance(exc, ProtoError) and exc.code in (ERR_UNAVAILABLE, ERR_UNKNOWN_DST)
-
-
-async def notify_admins(book: SubscriptionBook, notifier: Notifier, text: str) -> None:
-    """Диагностика падений /ai — в чаты с полным доступом (allowed_commands
-    содержит "*"), не пользователю. Молчаливая деградация («Альбегт», нода
-    просто спит) сюда не попадает — только настоящие сбои (см. вызовы ниже)."""
-    for sub in book.all():
-        if WILDCARD in sub.allowed_commands:
-            await notifier.send_direct(sub.chat_id, text)
 
 
 def display_name(user: User | None) -> str | None:

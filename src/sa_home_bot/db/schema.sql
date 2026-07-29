@@ -158,3 +158,27 @@ CREATE VIRTUAL TABLE IF NOT EXISTS facts USING fts5(
     created_at UNINDEXED,
     tokenize='trigram'
 );
+
+-- Инвайт-коды приватного входа (бот, sa_home_bot/bot/invites.py). Эфемерная
+-- часть механизма: сама выданная подписка живёт в гостевом ПАКЕТЕ и потому
+-- переживает переезд бота на резервную ноду (subscriptions/guests.py), а
+-- непогашенные коды здесь — нет, и это осознанно: при TTL в час проще
+-- выпустить новый, чем реплицировать секрет с коротким сроком жизни.
+-- code — уже нормализованный (верхний регистр, без разделителей).
+-- issued_by_chat_id — чат админа, выпустившего код: ему уйдёт уведомление о
+-- том, кто именно вошёл. redeemed_* заполняются при погашении, revoked_at —
+-- при отзыве до погашения; и то, и другое делает код непригодным.
+CREATE TABLE IF NOT EXISTS invites (
+    code               TEXT PRIMARY KEY,
+    issued_by_chat_id  INTEGER NOT NULL,
+    issued_by_user_id  INTEGER,
+    created_at         TEXT NOT NULL,
+    expires_at         TEXT NOT NULL,
+    redeemed_at        TEXT,
+    redeemed_chat_id   INTEGER,
+    redeemed_user_id   INTEGER,
+    redeemed_user_name TEXT,
+    revoked_at         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_invites_open ON invites(expires_at)
+    WHERE redeemed_at IS NULL AND revoked_at IS NULL;

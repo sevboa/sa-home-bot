@@ -21,7 +21,11 @@ from pydantic_settings import (
     TomlConfigSettingsSource,
 )
 
-from sa_home_bot.node.instances import INSTANCES_DIRNAME, PACKAGE_SUFFIX
+from sa_home_bot.node.instances import (
+    INSTANCES_DIRNAME,
+    PACKAGE_SUFFIX,
+    guests_package_path,
+)
 from sa_home_bot.node.kind import NodeKind
 
 log = logging.getLogger(__name__)
@@ -475,6 +479,42 @@ class SubscriptionConfig(BaseModel):
     allowed_commands: list[str] = Field(default_factory=list)
 
 
+class GuestSubscriptionConfig(SubscriptionConfig):
+    """Подписка, выданная инвайт-кодом, — из гостевого пакета.
+
+    Живёт не там, где владельческие: гостевой пакет
+    ``instances/telegram-bot.<инстанс>.guests.toml`` ведёт сам бот и
+    перезаписывает целиком, тогда как основной пакет правит человек (см.
+    subscriptions/guests.py). Отдельное поле ``guest_subscriptions``, а не
+    вторая пачка ``[[subscriptions]]``, потому что pydantic-settings не
+    сливает списки из разных источников — гостевой затёр бы владельческий.
+    """
+
+    invited_by_chat_id: int = 0
+    invited_at: str = ""  # UTC ISO, когда код погашен
+    invited_user: str = ""  # как подписался гость (для /guests), не идентификатор
+
+
+class InvitesConfig(BaseModel):
+    """Приватный вход: одноразовые коды приглашения (AUTHORIZATION.md §10).
+
+    ``grant_*`` — что именно получает гость при активации. По умолчанию —
+    только разговор с Альфредом и память о себе: тулы фильтруются подпиской
+    (§3.4), поэтому ни рой, ни торренты гостю не видны. События не шлём
+    вовсе — алерты о температуре дисков не его дело.
+    """
+
+    enabled: bool = True
+    ttl_s: float = Field(default=3600.0, gt=0)
+    grant_commands: list[str] = Field(
+        default_factory=lambda: ["chat@llm", "recall@memory", "remember@memory"]
+    )
+    grant_events: list[str] = Field(default_factory=list)
+    # Потолок попыток «похожего на код» из одного неподписного чата за час:
+    # молчание само по себе от онлайн-подбора не защищает.
+    max_attempts_per_hour: int = Field(default=5, gt=0)
+
+
 class PersonConfig(BaseModel):
     """Один известный собеседник /ai — bot/ai_flow.py сопоставляет с ним
     отправителя сообщения (по telegram_username, а для тех, у кого username
@@ -560,6 +600,8 @@ class Settings(BaseSettings):
     _toml_path: ClassVar[Path | None] = None
     # Путь к пакету настроек инстанса — там же и так же.
     _instance_path: ClassVar[Path | None] = None
+    # Путь к гостевому пакету (его ведёт бот) — там же и так же.
+    _guests_path: ClassVar[Path | None] = None
 
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
@@ -577,8 +619,15 @@ class Settings(BaseSettings):
     swarm: SwarmConfig = Field(default_factory=SwarmConfig)
     wake: WakeConfig = Field(default_factory=WakeConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    invites: InvitesConfig = Field(default_factory=InvitesConfig)
     subscriptions: list[SubscriptionConfig] = Field(default_factory=list)
+    guest_subscriptions: list[GuestSubscriptionConfig] = Field(default_factory=list)
     people: list[PersonConfig] = Field(default_factory=list)
+    # Куда бот пишет гостевые подписки. Не настройка человека, а результат
+    # load(): боту не передают ни config_path, ни имя инстанса, а путь ему
+    # нужен (subscriptions/guests.py). None — конфиг не файловый или инстанс
+    # не задан: гостей принимать некуда, инвайты просто не работают.
+    guests_path: Path | None = None
 
     @classmethod
     def settings_customise_sources(
@@ -594,6 +643,11 @@ class Settings(BaseSettings):
         # оставшаяся в config.toml копия — след прошлой раскладки, она не
         # должна переигрывать то, что рой только что синхронизировал.
         sources: list[PydanticBaseSettingsSource] = [init_settings, env_settings]
+        # Гостевой пакет — отдельным источником: его единственное поле
+        # (guest_subscriptions) ни с чем не пересекается, поэтому место в
+        # порядке приоритетов роли не играет.
+        if cls._guests_path is not None and cls._guests_path.exists():
+            sources.append(TomlConfigSettingsSource(settings_cls, toml_file=cls._guests_path))
         if cls._instance_path is not None:
             sources.append(TomlConfigSettingsSource(settings_cls, toml_file=cls._instance_path))
         if cls._toml_path is not None:
@@ -626,6 +680,7 @@ class Settings(BaseSettings):
         else:
             cls._toml_path = None
         instance_path = None
+        guests_path = None
         if instance and config_path is not None:
             instance_path = (
                 Path(config_path).parent
@@ -636,12 +691,18 @@ class Settings(BaseSettings):
                 raise FileNotFoundError(
                     f"Пакет настроек инстанса не найден: {instance_path}"
                 )
+            # Гостевого пакета может ещё не быть (никого не приглашали) —
+            # это не ошибка, в отличие от отсутствия основного.
+            guests_path = guests_package_path(instance_path)
         cls._instance_path = instance_path
+        cls._guests_path = guests_path
         try:
             settings = cls()
         finally:
             cls._toml_path = None
             cls._instance_path = None
+            cls._guests_path = None
+        settings.guests_path = guests_path
         if instance_path is not None:
             _warn_on_shadowed_sections(path, instance_path)
         if config_path is not None:

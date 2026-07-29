@@ -277,3 +277,81 @@ async def test_node_without_packages_reports_none(tmp_path):
 
 async def _noop(event_type: str, data: dict) -> None:
     return None
+
+
+# --- сателлиты (гостевой пакет, AUTHORIZATION.md §10) -----------------------
+
+GUESTS = '[[guest_subscriptions]]\nname = "гость"\nchat_id = 77\n'.encode()
+
+
+async def test_satellite_of_our_instance_is_pulled(tmp_path):
+    """Гостевой пакет принадлежит тому же инстансу — резерв обязан получить и
+    его, иначе после переезда бота гости просто исчезнут."""
+    meta = InstanceMeta(
+        service="telegram-bot",
+        instance="alfred.guests",
+        rev=1,
+        hash=content_hash(GUESTS),
+        updated_at="2026-07-29T10:00:00+00:00",
+        origin_node="alfred",
+    )
+    peer = FakePeer("alfred", package=GUESTS, meta=meta)
+    rep, store, _, _ = _replicator(
+        tmp_path, assignments=["telegram-bot@alfred:standby"], peers=[peer]
+    )
+
+    await rep.on_config_changed(_changed_event(meta, "alfred"))
+    assert store.read_package("telegram-bot", "alfred.guests") == GUESTS
+
+
+async def test_local_guest_edit_does_not_restart_the_bot(tmp_path):
+    """Гостевой пакет пишет сам бот и своё изменение уже держит в памяти:
+    рестарт ничего бы не дал, зато оборвал бы разговор ровно в тот момент,
+    когда гостя только что впустили."""
+    rep, store, supervisor, events = _replicator(
+        tmp_path, assignments=["telegram-bot@alfred"]
+    )
+    path = store.package_path("telegram-bot", "alfred.guests")
+    path.parent.mkdir(parents=True)
+    path.write_bytes(GUESTS)
+    slot = supervisor.services["telegram-bot@alfred"]
+    restarted: list[bool] = []
+
+    async def fake_restart() -> None:
+        restarted.append(True)
+
+    slot.restart = fake_restart
+    slot._status = "running"
+
+    await rep.announce_local_changes()
+    assert restarted == []
+    # Но рою правка всё равно объявлена — резерву она нужна.
+    assert [e[0] for e in events] == [EVENT_INSTANCE_CONFIG_CHANGED]
+
+
+async def test_incoming_guest_package_restarts_the_owner_slot(tmp_path):
+    """У сателлита своего слота нет: перезапускать надо хозяина — иначе
+    прилетевший от соседа состав гостей не вступит в силу."""
+    meta = InstanceMeta(
+        service="telegram-bot",
+        instance="alfred.guests",
+        rev=5,
+        hash=content_hash(GUESTS),
+        updated_at="2026-07-29T11:00:00+00:00",
+        origin_node="jeeves2",
+    )
+    peer = FakePeer("jeeves2", package=GUESTS, meta=meta)
+    rep, _, supervisor, _ = _replicator(
+        tmp_path, assignments=["telegram-bot@alfred"], peers=[peer]
+    )
+    slot = supervisor.services["telegram-bot@alfred"]
+    restarted: list[bool] = []
+
+    async def fake_restart() -> None:
+        restarted.append(True)
+
+    slot.restart = fake_restart
+    slot._status = "running"
+
+    await rep.on_config_changed(_changed_event(meta, "jeeves2"))
+    assert restarted == [True]

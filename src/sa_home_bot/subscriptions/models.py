@@ -6,6 +6,14 @@ from dataclasses import dataclass, field, replace
 
 WILDCARD = "*"
 
+# Откуда взялась подписка. Владельческая (config) правится человеком в
+# config.toml/пакете инстанса; гостевая (guest) выдана инвайт-кодом и живёт в
+# гостевом пакете, который ведёт сам бот (subscriptions/guests.py). Различие
+# нужно ровно в двух местах: что перезаписывать при выдаче/отзыве гостя и что
+# показывать в /guests — прав оно не касается.
+SOURCE_CONFIG = "config"
+SOURCE_GUEST = "guest"
+
 
 @dataclass(frozen=True)
 class Subscription:
@@ -14,6 +22,14 @@ class Subscription:
     event_types: frozenset[str] = field(default_factory=frozenset)
     allowed_commands: frozenset[str] = field(default_factory=frozenset)
     broken: bool = False
+    source: str = SOURCE_CONFIG
+    invited_by_chat_id: int = 0
+    invited_at: str = ""  # UTC ISO
+    invited_user: str = ""  # как подписался гость, для /guests
+
+    @property
+    def is_guest(self) -> bool:
+        return self.source == SOURCE_GUEST
 
     def accepts_event(self, event_type: str) -> bool:
         if self.broken:

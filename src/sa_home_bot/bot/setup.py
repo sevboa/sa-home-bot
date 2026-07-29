@@ -1,27 +1,24 @@
-"""Сборка Bot/Dispatcher, цепочка middleware, меню команд per-chat.
+"""Сборка Bot/Dispatcher и цепочки middleware.
 
-Меню — скилы роя первого уровня: динамические команды-приложения из describe
-службы apps + «Управление нодами», затем универсальные. Меню перестраивается
-при (пере)подключении к службе apps — новое приложение на любой ноде = новая
-команда в меню без изменения кода бота.
+Меню команд живёт в `bot/menu.py` (его правят и старт, и хендлеры), здесь —
+порядок роутеров и барьеры: `SilenceGate` на входе для чужих, авторизация
+команд для своих (AUTHORIZATION.md §5, §10).
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 
-from sa_home_bot.bot import apps_view, commands
 from sa_home_bot.bot.handlers import (
     ai,
     apps,
     basic,
     control,
+    invites,
     node,
     node_links,
     power,
@@ -31,13 +28,18 @@ from sa_home_bot.bot.handlers import (
     torrents,
     wake,
 )
+from sa_home_bot.bot.invites import Gatekeeper
+from sa_home_bot.bot.menu import (  # noqa: F401 — реэкспорт: меню переехало в
+    # bot/menu.py, но привычные импорты из setup остаются рабочими.
+    build_menu_commands,
+    set_bot_commands,
+)
 from sa_home_bot.bot.middlewares import (
     AuthorizationMiddleware,
     CallbackAuthorizationMiddleware,
+    SilenceGate,
 )
-from sa_home_bot.proto.messages import ActionSpec
 from sa_home_bot.subscriptions.book import SubscriptionBook
-from sa_home_bot.subscriptions.models import Subscription
 
 log = logging.getLogger(__name__)
 
@@ -46,10 +48,16 @@ def build_bot(token: str) -> Bot:
     return Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 
 
-def build_dispatcher(book: SubscriptionBook) -> Dispatcher:
+def build_dispatcher(book: SubscriptionBook, gate: Gatekeeper) -> Dispatcher:
     dp = Dispatcher()
+    # Гейт молчания — САМЫЙ первый и на update целиком: чужой чат не должен
+    # доходить ни до одного роутера, каким бы путём он ни пришёл.
+    dp.update.outer_middleware(SilenceGate(book, gate))
     dp.message.middleware(AuthorizationMiddleware(book))
     dp.callback_query.middleware(CallbackAuthorizationMiddleware(book))
+    # invites рано: ловит /invite, /guests и то единственное сообщение, каким
+    # чужой чат стал своим (JustAdmitted) — до всех широких фильтров.
+    dp.include_router(invites.router)
     dp.include_router(basic.router)
     # tool_debug: единственный обработчик своего callback-префикса, к
     # сообщениям и командам не относится вовсе.
@@ -79,55 +87,3 @@ def build_dispatcher(book: SubscriptionBook) -> Dispatcher:
     # (magnet-ссылки в torrents, команды в остальных роутерах и т.д.).
     dp.include_router(ai.catchall_router)
     return dp
-
-
-def _to_bot_command(cmd: commands.Command) -> BotCommand:
-    return BotCommand(command=cmd.name, description=cmd.description)
-
-
-def build_menu_commands(
-    subscription: Subscription,
-    app_actions: Sequence[ActionSpec] = (),
-) -> list[BotCommand]:
-    """Меню чата: скилы (приложения + ноды) по правам, затем универсальные."""
-    menu = [
-        BotCommand(command=action.id, description=f"{action.title}: состояние и веб-морда")
-        for action in app_actions
-        # Параметризованные (start/stop/restart с обязательным "какое
-        # приложение") — только кнопки на карточке конкретного приложения
-        # (apps_view.run_app_skill), не голые команды меню — живой баг
-        # 2026-07-18: /start/stop/restart лезли в меню без указания, какое
-        # приложение, и падали "нет такого приложения: ''".
-        if not action.params and subscription.allows_action(action.id, apps_view.APPS_SERVICE)
-    ]
-    menu += [
-        _to_bot_command(c)
-        for c in commands.MENU_CONTROL_COMMANDS
-        if subscription.allows_command(c.right or c.name)
-    ]
-    menu += [_to_bot_command(c) for c in commands.UNIVERSAL_COMMANDS]
-    return menu
-
-
-async def set_bot_commands(
-    bot: Bot,
-    book: SubscriptionBook,
-    app_actions: Sequence[ActionSpec] = (),
-) -> None:
-    """default scope — универсальные; per-chat — скилы по правам + универсальные."""
-    universal = [_to_bot_command(c) for c in commands.UNIVERSAL_COMMANDS]
-    try:
-        await bot.set_my_commands(universal, scope=BotCommandScopeDefault())
-    except Exception as exc:  # noqa: BLE001 — сетевой блип при старте не должен ронять бот
-        log.warning("Не удалось задать меню по умолчанию: %s", exc)
-
-    for sub in book.all():
-        if sub.broken:
-            continue
-        try:
-            await bot.set_my_commands(
-                build_menu_commands(sub, app_actions),
-                scope=BotCommandScopeChat(chat_id=sub.chat_id),
-            )
-        except Exception as exc:  # noqa: BLE001 — не критично для запуска
-            log.warning("Не удалось задать меню для chat_id=%s: %s", sub.chat_id, exc)

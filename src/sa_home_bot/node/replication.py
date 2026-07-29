@@ -30,7 +30,13 @@ import contextlib
 import logging
 
 from sa_home_bot.node.assignments import Assignment
-from sa_home_bot.node.instances import InstanceMeta, InstanceStore, slot_key
+from sa_home_bot.node.instances import (
+    InstanceMeta,
+    InstanceStore,
+    base_instance,
+    is_satellite,
+    slot_key,
+)
 from sa_home_bot.node.peers import NodeRouter
 from sa_home_bot.node.supervisor import EventEmitter, Supervisor
 from sa_home_bot.proto.messages import (
@@ -98,9 +104,10 @@ class ConfigReplicator:
         ]
 
     def _cares_about(self, service: str, instance: str) -> bool:
-        return any(
-            a.service == service and a.instance == instance for a in self._my_instances()
-        )
+        """Наш ли это пакет. Сателлит (``<инстанс>.guests``) принадлежит
+        своему хозяину: назначен инстанс — значит нужны и его спутники."""
+        base = base_instance(instance)
+        return any(a.service == service and a.instance == base for a in self._my_instances())
 
     def local_revisions(self) -> list[dict]:
         """Ревизии наших пакетов — этим нода отвечает на get_state."""
@@ -113,7 +120,15 @@ class ConfigReplicator:
         changed = self._store.refresh_all()
         for meta in changed:
             await self._emit(EVENT_INSTANCE_CONFIG_CHANGED, meta.to_dict())
-            await self._apply_to_running_service(meta)
+            # Сателлит правит сама служба (гостевые подписки — бот), и своё
+            # изменение она уже держит в памяти — рестарт ей ничего не даст,
+            # зато оборвал бы разговор ровно в тот момент, когда гостя только
+            # что впустили. Правку сателлита руками рестартом тоже не ловим:
+            # файл заявлен как ведомый службой (subscriptions/guests.py),
+            # человеку туда лезть незачем. Реплика от соседа — другое дело
+            # (см. _pull): там наша копия действительно отстала.
+            if not is_satellite(meta.instance):
+                await self._apply_to_running_service(meta)
         return changed
 
     # --- приём -------------------------------------------------------------
@@ -216,8 +231,11 @@ class ConfigReplicator:
     async def _apply_to_running_service(self, meta: InstanceMeta) -> None:
         """Новый пакет вступает в силу только рестартом — конфиг читается
         один раз при старте и дальше иммутабелен (ARCHITECTURE §9 п. 7).
-        Резервную службу не трогаем: она и не запущена."""
-        slot = self._supervisor.get(slot_key(meta.service, meta.instance))
+        Резервную службу не трогаем: она и не запущена.
+
+        Слот ищем по хозяину: у сателлита своего слота нет — он часть
+        настроек той же службы, что и основной пакет."""
+        slot = self._supervisor.get(slot_key(meta.service, base_instance(meta.instance)))
         if slot is None or slot.assignment.standby:
             return
         if slot.status != "running":

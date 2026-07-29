@@ -41,10 +41,47 @@ PACKAGE_SUFFIX = ".toml"
 META_SUFFIX = ".rev.json"
 INSTANCES_DIRNAME = "instances"
 
+# Пакет-**сателлит**: та же служба и тот же инстанс, но файл ведёт не человек,
+# а сама служба (для telegram-bot — гостевые подписки, выданные инвайтами,
+# см. subscriptions/guests.py). Отдельный файл потому, что два писателя в
+# одном — это и затёртые комментарии владельца, и расхождение ревизий при
+# одновременной правке.
+#
+# Ничего в механизме репликации ради этого расширять не пришлось: имя файла
+# разбирается по ПЕРВОЙ точке (см. known()), поэтому
+# `telegram-bot.alfred.guests.toml` уже виден как служба `telegram-bot`,
+# инстанс `alfred.guests` — со своим сайдкаром, своей ревизией и обычной
+# рассылкой по рою. Знать про сателлита нужно только в двух местах
+# ConfigReplicator: чей он (base_instance) и какой слот перезапускать.
+SATELLITE_GUESTS = ".guests"
+SATELLITE_SUFFIXES = (SATELLITE_GUESTS,)
+
 
 def slot_key(service: str, instance: str) -> str:
     """Имя пары «служба + инстанс»: и ключ слота супервизора, и имя файла."""
     return f"{service}@{instance}" if instance else service
+
+
+def base_instance(instance: str) -> str:
+    """Инстанс, которому принадлежит пакет: сателлит → его хозяин.
+
+    ``alfred.guests`` → ``alfred``; обычный инстанс возвращается как есть.
+    """
+    for suffix in SATELLITE_SUFFIXES:
+        if instance.endswith(suffix):
+            return instance[: -len(suffix)]
+    return instance
+
+
+def is_satellite(instance: str) -> bool:
+    return base_instance(instance) != instance
+
+
+def guests_package_path(package_path: Path) -> Path:
+    """Путь гостевого пакета рядом с основным (файла может не быть)."""
+    return package_path.with_name(
+        package_path.name[: -len(PACKAGE_SUFFIX)] + SATELLITE_GUESTS + PACKAGE_SUFFIX
+    )
 
 
 @dataclass(frozen=True)
@@ -101,7 +138,7 @@ def content_hash(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
-def _atomic_write(path: Path, data: bytes) -> None:
+def atomic_write(path: Path, data: bytes) -> None:
     """Запись без промежуточного состояния — как в node/state.py.
 
     Пакет читает стартующая служба; увидеть его наполовину записанным она
@@ -266,7 +303,7 @@ class InstanceStore:
         package = self.package_path(meta.service, meta.instance)
         if package is None:
             return False
-        _atomic_write(package, data)
+        atomic_write(package, data)
         self._write_meta(meta)
         log.info(
             "Пакет %s обновлён с ноды %s — ревизия %d",
@@ -278,7 +315,7 @@ class InstanceStore:
         path = self.meta_path(meta.service, meta.instance)
         if path is None:
             return
-        _atomic_write(
+        atomic_write(
             path,
             json.dumps(meta.to_dict(), ensure_ascii=False, indent=2).encode("utf-8"),
         )

@@ -16,6 +16,7 @@ from aiogram.exceptions import TelegramConflictError
 
 from sa_home_bot.bot.ai_flow import RESTART_TEXT, ActiveAiChats
 from sa_home_bot.bot.dispatch import TelegramEventDispatcher
+from sa_home_bot.bot.invites import Gatekeeper
 from sa_home_bot.bot.lifecycle import (
     broadcast_system,
     render_link_restored,
@@ -37,6 +38,7 @@ from sa_home_bot.db.store import Store
 from sa_home_bot.runtime import Runtime
 from sa_home_bot.sensors.power import read_power_events_sync
 from sa_home_bot.subscriptions.book import SubscriptionBook
+from sa_home_bot.subscriptions.guests import GuestStore
 from sa_home_bot.utils.lifespan import Lifespan
 
 log = logging.getLogger(__name__)
@@ -60,8 +62,8 @@ async def run(settings: Settings) -> bool:
     started_clean = prev in (None, "1")
     await store.set_state(STATE_CLEAN_SHUTDOWN, "0")
 
-    # 3. Подписки.
-    book = SubscriptionBook.from_config(settings.subscriptions)
+    # 3. Подписки: владельческие из конфига + гости, впущенные инвайтами.
+    book = SubscriptionBook.from_config(settings.subscriptions, settings.guest_subscriptions)
 
     # 4. Bot + Notifier + watchdog связи.
     bot = build_bot(settings.telegram.token)
@@ -72,7 +74,15 @@ async def run(settings: Settings) -> bool:
         await broadcast_system(book, notifier, render_link_restored(downtime))
 
     bot.session.middleware(LinkWatchMiddleware(on_reconnect))
-    dp = build_dispatcher(book)
+    # Привратник: единственный способ для чужого чата что-то от бота получить
+    # (bot/invites.py). Пишет гостей в реплицируемый пакет — тот же путь, что
+    # у владельческих настроек, поэтому гость переживает переезд бота.
+    gate = Gatekeeper(
+        settings.invites, store, book, GuestStore(settings.guests_path), notifier
+    )
+    if not gate.enabled:
+        log.info("Приглашения выключены (нет пакета инстанса или [invites].enabled=false)")
+    dp = build_dispatcher(book, gate)
 
     # 5. Валидация подписок (пометка broken).
     await book.validate_on_startup(bot)
@@ -154,6 +164,7 @@ async def run(settings: Settings) -> bool:
             config=settings,
             notifier=notifier,
             book=book,
+            gate=gate,
             bot_username=bot_username,
             active_ai_chats=active_ai_chats,
             handle_signals=False,
