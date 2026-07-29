@@ -619,16 +619,11 @@ def test_swarm_status_enum_narrowed_to_granted_variants():
     assert _enum(_sub("nodes")) == ["nodes"]
 
 
-def test_swarm_status_torrents_needs_list_right():
-    assert "torrents" not in _enum(_sub("status", "nodes"))
-    assert "torrents" in _enum(_sub("status", "list@torrents"))
-
-
 def test_filtering_does_not_mutate_shared_declaration():
     """enum режется на копии — иначе первый же ограниченный собеседник
     испортил бы декларацию для всех последующих."""
     _enum(_sub("nodes"))
-    assert _enum(ADMIN) == ["nodes", "health", "disks", "torrents"]
+    assert _enum(ADMIN) == ["nodes", "health", "disks"]
 
 
 # --- swarm_status: сам обработчик (сбор данных через wake_core) ---
@@ -671,6 +666,7 @@ class _FakeSwarmLink:
         self._command_result = command_result if command_result is not None else {"torrents": []}
         self._command_raises = command_raises
         self.commands: list[tuple[str, object]] = []
+        self.sent_args: list[dict] = []
 
     async def get_state(self, dst=None):
         key = "own" if dst is None else f"{dst.node}:{dst.service}"
@@ -680,6 +676,7 @@ class _FakeSwarmLink:
 
     async def command(self, action, args=None, dst=None, *, timeout=None):
         self.commands.append((action, dst))
+        self.sent_args.append(args or {})
         if self._command_raises is not None:
             raise self._command_raises
         return self._command_result
@@ -734,44 +731,12 @@ async def test_swarm_status_disks_returns_free_space(store):
     assert disk["free_bytes"] == 51000000000
 
 
-async def test_swarm_status_torrents_finds_hosting_node(store):
-    """Ноду со службой ищем в состоянии роя, а не хардкодим: назначения
-    меняются кнопкой в боте, без правки кода."""
-    link = _swarm_link(command_result={"torrents": [{"name": "Foo"}], "count": 1})
-    raw = await tools.tool_swarm_status(
-        _ctx(store, node_link=link, subscription=ADMIN), {"what": "torrents"}
-    )
-    payload = json.loads(raw)
-    assert payload["node"] == "alfred"
-    assert payload["count"] == 1
-    action, dst = link.commands[0]
-    assert (action, dst.node, dst.service) == ("list", "alfred", "torrents")
-
-
-async def test_swarm_status_torrents_service_absent(store):
-    own = {**_OWN_STATE, "services": [{"name": "monitor", "status": "running"}]}
-    link = _swarm_link(states={"own": own})
-    result = await tools.tool_swarm_status(
-        _ctx(store, node_link=link, subscription=ADMIN), {"what": "torrents"}
-    )
-    assert result.startswith("недоступно")
-
-
-async def test_swarm_status_unreachable_service_degrades_to_text(store):
-    """§7.3: спящая нода — обычный результат для модели, а не сбой цикла."""
-    link = _swarm_link(command_raises=tools.ServiceUnavailableError("нода спит"))
-    result = await tools.tool_swarm_status(
-        _ctx(store, node_link=link, subscription=ADMIN), {"what": "torrents"}
-    )
-    assert result.startswith("недоступно")
-
-
 async def test_swarm_status_rejects_variant_without_right(store):
     """Модель может передать значение, которого не было в её enum — тул
     сверяется с подпиской повторно, а не доверяет декларации."""
     link = _swarm_link()
     result = await tools.tool_swarm_status(
-        _ctx(store, node_link=link, subscription=_sub("nodes")), {"what": "torrents"}
+        _ctx(store, node_link=link, subscription=_sub("nodes")), {"what": "disks"}
     )
     assert result.startswith("не умею")
     assert link.commands == []
@@ -799,6 +764,174 @@ async def test_swarm_status_own_node_down(store):
         _ctx(store, node_link=link, subscription=ADMIN), {"what": "nodes"}
     )
     assert result.startswith("недоступно")
+
+
+# --- torrents: закачки целиком (список, место, magnet, пауза/запуск) ---
+
+
+def _tor_enum(subscription) -> list[str]:
+    """Значения action, которые видит модель у тула torrents."""
+    decl = next(
+        (
+            d
+            for d in tools.tools_for(subscription).declarations
+            if d["function"]["name"] == "torrents"
+        ),
+        None,
+    )
+    if decl is None:
+        return []
+    return decl["function"]["parameters"]["properties"]["action"]["enum"]
+
+
+def test_torrents_enum_is_per_action_right():
+    """Право на каждое действие своё: посмотреть список — не то же самое,
+    что добавить раздачу или остановить чужую закачку."""
+    assert _tor_enum(_sub("list@torrents")) == ["list"]
+    assert _tor_enum(_sub("list@torrents", "pause@torrents")) == ["list", "pause"]
+    assert _tor_enum(ADMIN) == ["list", "space", "add", "pause", "resume"]
+
+
+def test_torrents_hidden_without_any_torrent_right():
+    assert "torrents" not in _names(_sub("status", "nodes"))
+    assert "torrents" not in tools.tools_for(_sub("status")).handlers
+
+
+def test_torrents_group_right_covers_all_actions():
+    """«*@torrents» — новое умение службы доступно сразу, без правки конфига."""
+    assert _tor_enum(_sub("*@torrents")) == ["list", "space", "add", "pause", "resume"]
+
+
+async def test_torrents_list_finds_hosting_node(store):
+    """Ноду со службой ищем в состоянии роя, а не хардкодим: назначения
+    меняются кнопкой в боте, без правки кода."""
+    link = _swarm_link(command_result={"torrents": [{"name": "Foo"}], "count": 1})
+    raw = await tools.tool_torrents(
+        _ctx(store, node_link=link, subscription=ADMIN), {"action": "list"}
+    )
+    payload = json.loads(raw)
+    assert payload["node"] == "alfred"
+    assert payload["count"] == 1
+    action, dst = link.commands[0]
+    assert (action, dst.node, dst.service) == ("list", "alfred", "torrents")
+
+
+async def test_torrents_space_passes_through(store):
+    link = _swarm_link(command_result={"dirs": [{"path": "/mnt/data/pr", "free_bytes": 1}]})
+    raw = await tools.tool_torrents(
+        _ctx(store, node_link=link, subscription=ADMIN), {"action": "space"}
+    )
+    assert json.loads(raw)["dirs"][0]["free_bytes"] == 1
+    assert link.commands[0][0] == "space"
+
+
+async def test_torrents_add_sends_magnet_and_save_path(store):
+    link = _swarm_link(command_result={"name": "Foo", "save_path": "/mnt/data/pr"})
+    await tools.tool_torrents(
+        _ctx(store, node_link=link, subscription=ADMIN),
+        {
+            "action": "add",
+            "magnet": "magnet:?xt=urn:btih:abc",
+            "save_path": "/mnt/data/pr",
+            "name": "Foo",
+        },
+    )
+    assert link.sent_args[0] == {
+        "source": "magnet:?xt=urn:btih:abc",
+        "save_path": "/mnt/data/pr",
+        "name": "Foo",
+    }
+
+
+async def test_torrents_add_refuses_anything_but_magnet(store):
+    """Сужение намеренное: произвольный http-адрес в руках модели — это
+    «скачай что угодно по ссылке из разговора», файлы человек шлёт сам."""
+    link = _swarm_link()
+    result = await tools.tool_torrents(
+        _ctx(store, node_link=link, subscription=ADMIN),
+        {"action": "add", "magnet": "https://example.org/foo.torrent"},
+    )
+    assert result.startswith("ошибка")
+    assert link.commands == []
+
+
+async def test_torrents_add_without_save_path_points_at_space(store):
+    """Сервер протокола ответил бы «нет обязательного параметра: save_path» —
+    формально верно, но не говорит модели, где взять значение."""
+    link = _swarm_link()
+    result = await tools.tool_torrents(
+        _ctx(store, node_link=link, subscription=ADMIN),
+        {"action": "add", "magnet": "magnet:?xt=urn:btih:abc"},
+    )
+    assert result.startswith("ошибка")
+    assert "space" in result
+    assert link.commands == []
+
+
+async def test_torrents_pause_sends_name(store):
+    link = _swarm_link(command_result={"paused": ["Foo.S01"], "count": 1})
+    raw = await tools.tool_torrents(
+        _ctx(store, node_link=link, subscription=ADMIN), {"action": "pause", "name": "Foo.S01"}
+    )
+    assert json.loads(raw)["paused"] == ["Foo.S01"]
+    assert link.sent_args[0] == {"name": "Foo.S01"}
+
+
+async def test_torrents_pause_without_name_asks_for_it(store):
+    link = _swarm_link()
+    result = await tools.tool_torrents(
+        _ctx(store, node_link=link, subscription=ADMIN), {"action": "pause"}
+    )
+    assert result.startswith("ошибка")
+    assert link.commands == []
+
+
+async def test_torrents_service_refusal_reads_as_answer(store):
+    """Отказ службы (мало места, неоднозначное имя) — готовый ответ модели с
+    объяснением, что делать дальше, а не «внутренняя ошибка»."""
+    link = _swarm_link(command_raises=tools.ProtoError("bad_request", "мало места в /mnt/data/pr"))
+    result = await tools.tool_torrents(
+        _ctx(store, node_link=link, subscription=ADMIN),
+        {"action": "add", "magnet": "magnet:?xt=urn:btih:abc", "save_path": "/mnt/data/pr"},
+    )
+    assert result == "не вышло: мало места в /mnt/data/pr"
+
+
+async def test_torrents_unreachable_service_degrades_to_text(store):
+    """§7.3: спящая нода — обычный результат для модели, а не сбой цикла."""
+    link = _swarm_link(command_raises=tools.ServiceUnavailableError("нода спит"))
+    result = await tools.tool_torrents(
+        _ctx(store, node_link=link, subscription=ADMIN), {"action": "list"}
+    )
+    assert result.startswith("недоступно")
+
+
+async def test_torrents_service_absent_in_swarm(store):
+    own = {**_OWN_STATE, "services": [{"name": "monitor", "status": "running"}]}
+    link = _swarm_link(states={"own": own})
+    result = await tools.tool_torrents(
+        _ctx(store, node_link=link, subscription=ADMIN), {"action": "list"}
+    )
+    assert result.startswith("недоступно")
+
+
+async def test_torrents_rejects_action_without_right(store):
+    """Модель может назвать действие, которого не было в её enum — тул
+    сверяется с подпиской повторно, а не доверяет декларации."""
+    link = _swarm_link()
+    result = await tools.tool_torrents(
+        _ctx(store, node_link=link, subscription=_sub("list@torrents")),
+        {"action": "pause", "name": "все"},
+    )
+    assert result.startswith("не умею")
+    assert link.commands == []
+
+
+async def test_torrents_without_subscription_refuses(store):
+    result = await tools.tool_torrents(
+        _ctx(store, node_link=_swarm_link(), subscription=None), {"action": "list"}
+    )
+    assert result.startswith("не умею")
 
 
 # --- web_search: интернет через службу net ---
