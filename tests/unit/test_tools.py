@@ -53,6 +53,7 @@ def _ctx(
     node_link=None,
     history=None,
     subscription=None,
+    dismissal=None,
 ):
     # ``store`` не используется ToolContext'ом напрямую (только remind
     # ходит по протоколу через node_link, см. bot/tools.py) — параметр
@@ -66,6 +67,7 @@ def _ctx(
         node_link=node_link,
         history=history if history is not None else [],
         subscription=subscription,
+        dismissal=dismissal,
     )
 
 
@@ -932,6 +934,73 @@ async def test_torrents_without_subscription_refuses(store):
         _ctx(store, node_link=_swarm_link(), subscription=None), {"action": "list"}
     )
     assert result.startswith("не умею")
+
+
+# --- dismiss: «ты свободен» — намерение, а не действие ---
+
+
+def _dismiss_enum(subscription) -> list[str]:
+    decl = next(
+        (
+            d
+            for d in tools.tools_for(subscription).declarations
+            if d["function"]["name"] == "dismiss"
+        ),
+        None,
+    )
+    if decl is None:
+        return []
+    return decl["function"]["parameters"]["properties"]["mode"]["enum"]
+
+
+def test_dismiss_modes_gated_by_the_same_rights_as_buttons():
+    assert _dismiss_enum(_sub("sleep@llm")) == ["model"]
+    assert _dismiss_enum(_sub("suspend@node")) == ["sleep"]
+    assert _dismiss_enum(ADMIN) == ["model", "sleep", "off"]
+
+
+def test_dismiss_hidden_without_any_power_right():
+    assert "dismiss" not in _names(_sub("chat@llm", "status"))
+
+
+async def test_dismiss_only_records_intent(store):
+    """Гасить модель прямо в туле нельзя: ответ — прощание, ради которого всё
+    и затевалось, — в этот момент ещё не сгенерирован."""
+    box = tools.DismissalBox()
+    link = _swarm_link()
+    result = await tools.tool_dismiss(
+        _ctx(store, node_link=link, subscription=ADMIN, dismissal=box), {"mode": "off"}
+    )
+    assert box.mode == "off"
+    assert link.commands == []  # ничего не выключено ЗДЕСЬ
+    assert result.startswith("принято")
+
+
+async def test_dismiss_without_box_is_honest(store):
+    """У службы tasks исполнить намерение после ответа некому — обещать
+    выключение, которого не будет, нельзя."""
+    result = await tools.tool_dismiss(
+        _ctx(store, subscription=ADMIN, dismissal=None), {"mode": "off"}
+    )
+    assert result.startswith("недоступно")
+
+
+async def test_dismiss_rejects_mode_without_right(store):
+    box = tools.DismissalBox()
+    result = await tools.tool_dismiss(
+        _ctx(store, subscription=_sub("sleep@llm"), dismissal=box), {"mode": "off"}
+    )
+    assert result.startswith("не умею")
+    assert box.mode is None
+
+
+async def test_dismiss_without_subscription_refuses(store):
+    box = tools.DismissalBox()
+    result = await tools.tool_dismiss(
+        _ctx(store, subscription=None, dismissal=box), {"mode": "model"}
+    )
+    assert result.startswith("не умею")
+    assert box.mode is None
 
 
 # --- web_search: интернет через службу net ---

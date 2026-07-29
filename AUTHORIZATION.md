@@ -123,6 +123,8 @@
 | `swarm_status(what="nodes")` | `nodes` (то же, что команда `/nodes`) |
 | `swarm_status(what="health"\|"disks")` | `status` (то же, что `/status`) |
 | `torrents(action="list"\|"space"\|"add"\|"pause"\|"resume")` | `<action>@torrents` — ровно то же право, что у человека на ту же операцию |
+| `dismiss(mode="model")` | `sleep@llm` — выгрузить модель |
+| `dismiss(mode="sleep"\|"off")` | `suspend@node` / `poweroff@node` — то же, что кнопки «Усыпить/Выключить машину» на карточке ноды |
 | `web_search` | `search@net` |
 
 У `swarm_status` и `torrents` право проверяется **на каждое значение**

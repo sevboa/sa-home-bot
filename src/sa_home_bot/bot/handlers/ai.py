@@ -19,6 +19,7 @@ from aiogram.filters import Command, Filter
 from aiogram.types import Message
 
 from sa_home_bot.bot import ai_flow, commands
+from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.notifier import Notifier, chunk_text
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.config import Settings
@@ -323,9 +324,14 @@ async def _do_ask_and_reply(
     history: list[dict[str, str]],
 ) -> None:
     await message.bot.send_chat_action(message.chat.id, "typing")
+    # Ячейка под «Альфреда отпустили» (тул dismiss): сам тул ничего не гасит —
+    # ответ в этот момент ещё генерируется той самой моделью, которую предстоит
+    # выгрузить (см. bot/tools.py::DismissalBox). Исполняем ниже, после того
+    # как прощание реально уехало в чат.
+    dismissal = ai_tools.DismissalBox()
     try:
         raw = await ai_flow.request_alfred(
-            message, node_link, store, config, history, dialogue_id, book, notifier
+            message, node_link, store, config, history, dialogue_id, book, notifier, dismissal
         )
     except Exception as exc:  # noqa: BLE001 — страховка: баг тут не должен быть молчаливым
         log.exception("ai: необработанная ошибка в диалоге chat=%s", message.chat.id)
@@ -342,6 +348,10 @@ async def _do_ask_and_reply(
     await store.record_ai_turn(
         message.chat.id, sent.message_id, dialogue_id, "assistant", raw, datetime.now(tz=UTC)
     )
+    if dismissal.mode is not None:
+        # Ход диалога уже записан: если машину выключат, а тред потом
+        # продолжат реплаем — история не потеряется, Альфреда просто разбудят.
+        await ai_flow.perform_dismissal(message, node_link, dismissal.mode, book, notifier)
 
 
 async def _send_alfred_reply(message: Message, raw: str) -> Message:

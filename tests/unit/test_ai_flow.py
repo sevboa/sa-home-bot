@@ -1080,3 +1080,131 @@ async def test_chat_without_subscription_also_warned(store):
     )
 
     assert "Выхода в интернет" in _note_msg(link.command_calls[0][1]["messages"])
+
+
+# --- роспуск: «ты свободен» (тул dismiss + perform_dismissal) ---
+
+
+class FakeDismissLink:
+    """Двойник ServiceLink для perform_dismissal: фиксирует, кому и что
+    отправили, и умеет падать на конкретном действии."""
+
+    display_name = "нода"
+
+    def __init__(self, fail_on=None, exc=None):
+        self.calls: list[tuple[str, dict, str, str]] = []
+        self._fail_on = fail_on
+        self._exc = exc or ServiceUnavailableError("нет связи")
+
+    async def command(self, action, args=None, dst=None, timeout=None):
+        self.calls.append((action, args or {}, dst.node, dst.service))
+        if action == self._fail_on:
+            raise self._exc
+        return {"ok": True}
+
+
+async def test_dismiss_tool_powers_nothing_off_during_the_request(store):
+    """Тул только назначает уход: пока идёт запрос, гасить нельзя — ответом
+    занята ровно та модель, которую предстоит выгрузить."""
+    message = FakeMessage()
+    box = ai_flow.ai_tools.DismissalBox()
+    link = FakeNodeLink(
+        chat_results=[
+            {"tool_calls": [{"function": {"name": "dismiss", "arguments": {"mode": "off"}}}]},
+            {"response": ai_flow.ROUTE_OK},
+            {"response": "Всего доброго, сэг"},
+        ],
+        get_state_routes={"winpc:llm": {"asleep": False}},
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "спасибо, свободен"}], 1,
+        _admin_book(), FakeNotifier(), box,
+    )
+
+    assert raw == "Всего доброго, сэг"
+    assert box.mode == "off"
+    # Ни одной power-команды за время запроса — только сами chat-раунды.
+    assert {call[0] for call in link.command_calls} == {"chat"}
+
+
+async def test_perform_dismissal_off_unloads_model_then_powers_machine_off(store):
+    message = FakeMessage()
+    link = FakeDismissLink()
+
+    await ai_flow.perform_dismissal(
+        message, link, ai_flow.ai_tools.DISMISS_OFF, _admin_book(), FakeNotifier()
+    )
+
+    assert link.calls == [
+        # quiet=True — прощание уже сказано, llm_idle_sleep поверх него был бы
+        # прямым противоречием («не дождался обращения»).
+        ("sleep", {"quiet": True}, "winpc", "llm"),
+        ("poweroff", {}, "winpc", "node"),
+    ]
+    assert message.answers == [ai_flow.DISMISS_TEXTS[ai_flow.ai_tools.DISMISS_OFF]]
+
+
+async def test_perform_dismissal_sleep_suspends_instead_of_powering_off(store):
+    message = FakeMessage()
+    link = FakeDismissLink()
+
+    await ai_flow.perform_dismissal(
+        message, link, ai_flow.ai_tools.DISMISS_SLEEP, _admin_book(), FakeNotifier()
+    )
+
+    assert [c[0] for c in link.calls] == ["sleep", "suspend"]
+    assert message.answers == [ai_flow.DISMISS_TEXTS[ai_flow.ai_tools.DISMISS_SLEEP]]
+
+
+async def test_perform_dismissal_model_only_leaves_the_machine_alone(store):
+    message = FakeMessage()
+    link = FakeDismissLink()
+
+    await ai_flow.perform_dismissal(
+        message, link, ai_flow.ai_tools.DISMISS_MODEL, _admin_book(), FakeNotifier()
+    )
+
+    assert [c[0] for c in link.calls] == ["sleep"]
+    assert message.answers == [ai_flow.DISMISS_TEXTS[ai_flow.ai_tools.DISMISS_MODEL]]
+
+
+async def test_perform_dismissal_powers_off_even_if_model_did_not_unload(store):
+    """Невыгруженная модель погаснет вместе с машиной — не повод отменять
+    выключение, которое человек уже попросил и получил на него прощание."""
+    message = FakeMessage()
+    link = FakeDismissLink(fail_on="sleep")
+
+    await ai_flow.perform_dismissal(
+        message, link, ai_flow.ai_tools.DISMISS_OFF, _admin_book(), FakeNotifier()
+    )
+
+    assert [c[0] for c in link.calls] == ["sleep", "poweroff"]
+    assert message.answers == [ai_flow.DISMISS_TEXTS[ai_flow.ai_tools.DISMISS_OFF]]
+
+
+async def test_perform_dismissal_reports_when_machine_stayed_up(store):
+    message = FakeMessage()
+    notifier = FakeNotifier()
+    link = FakeDismissLink(fail_on="poweroff")
+
+    await ai_flow.perform_dismissal(
+        message, link, ai_flow.ai_tools.DISMISS_OFF, _admin_book(), notifier
+    )
+
+    assert message.answers == [ai_flow.DISMISS_FAILED_TEXT]
+    assert notifier.sent and "poweroff" in notifier.sent[0][1]
+
+
+async def test_perform_dismissal_model_only_failure_is_reported(store):
+    """Для mode=model выгрузка модели — единственное, что было обещано."""
+    message = FakeMessage()
+    notifier = FakeNotifier()
+    link = FakeDismissLink(fail_on="sleep")
+
+    await ai_flow.perform_dismissal(
+        message, link, ai_flow.ai_tools.DISMISS_MODEL, _admin_book(), notifier
+    )
+
+    assert message.answers == [ai_flow.DISMISS_FAILED_TEXT]
+    assert notifier.sent and "llm.sleep" in notifier.sent[0][1]

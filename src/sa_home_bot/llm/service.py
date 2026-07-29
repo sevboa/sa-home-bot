@@ -147,7 +147,18 @@ class LlmService:
                         ),
                     ),
                 ),
-                ActionSpec(id=ACTION_SLEEP, title="Уложить модель спать"),
+                ActionSpec(
+                    id=ACTION_SLEEP,
+                    title="Уложить модель спать",
+                    params=(
+                        ActionParam(
+                            name="quiet",
+                            type="bool",
+                            required=False,
+                            title="Молча — не слать чатам llm_idle_sleep",
+                        ),
+                    ),
+                ),
                 ActionSpec(id=ACTION_WARMUP, title="Прогреть модель заранее (без ответа)"),
             ),
         )
@@ -203,7 +214,7 @@ class LlmService:
             reply = apply_speech_defect(strip_math_notation(message.get("content", "")))
             return {"response": reply, "model": self._cfg.model}
         if action == ACTION_SLEEP:
-            await self._sleep_now()
+            await self._sleep_now(quiet=bool(args.get("quiet")))
             return {"asleep": True}
         if action == ACTION_WARMUP:
             # НЕ _touch(chat_id) — прогрев не значит, что был реальный чат,
@@ -218,10 +229,23 @@ class LlmService:
         # Сервер валидирует action по describe — сюда неизвестное не доходит.
         raise ValueError(f"необъявленное действие: {action}")
 
-    async def _sleep_now(self) -> None:
+    async def _sleep_now(self, *, quiet: bool = False) -> None:
+        """``quiet`` — погасить контейнер, не прощаясь с чатами.
+
+        Нужен для штатного роспуска («Альфред, ты свободен» → бот сам уже
+        отправил прощание модели, см. bot/ai_flow.py::perform_dismissal):
+        `llm_idle_sleep` рендерится в «не дождался обращения и уходит», что
+        прямо противоречило бы только что сказанному. Очистка списка чатов
+        при этом ВАЖНА и в тихом режиме: сразу после роспуска машину обычно
+        выключают, а останов процесса шлёт тем же чатам `llm_service_restart`
+        («появились другие дела») — пустой список гасит и его.
+        """
         await ollama.stop(self._cfg)
         await self._keepalive.stop()
         self._asleep = True
+        if quiet:
+            self._active_chat_ids.clear()
+            return
         if self._active_chat_ids:
             chat_ids = sorted(self._active_chat_ids)
             self._active_chat_ids.clear()

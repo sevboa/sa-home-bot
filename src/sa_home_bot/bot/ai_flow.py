@@ -227,6 +227,35 @@ THINKING_TEXT = "<i>На лице Альфреда проступает заду
 SURFING_TEXT = "<i>Альфред увлечённо сёрфит интернет...</i>"
 SURFING_TOOL = "web_search"
 
+# --- роспуск («ты свободен», тул dismiss) ---------------------------------
+#
+# Ремарки уходят ПОСЛЕ прощания самой модели: тул только назначает уход, а
+# исполняет его bot/handlers/ai.py, когда ответ уже отправлен (см.
+# bot/tools.py::DismissalBox про то, почему не сразу). Тексты — такие же
+# ремарки в характере, как CLOSING_TEXT/RESTART_TEXT выше, разница только в
+# поводе: там Альфред уходит сам, здесь его отпустили.
+DISMISS_TEXTS = {
+    ai_tools.DISMISS_MODEL: "<i>Альфред откланивается и уходит к себе в подсобку</i>",
+    ai_tools.DISMISS_SLEEP: "<i>Альфред откланивается; свет гаснет, машина засыпает</i>",
+    ai_tools.DISMISS_OFF: "<i>Альфред откланивается; свет гаснет, машина выключается</i>",
+}
+# Машину гасим через её же ноду-супервизора — теми же действиями, что и
+# кнопки «Усыпить/Выключить машину» на карточке ноды (node/service.py).
+NODE_SERVICE = "node"
+DISMISS_NODE_ACTIONS = {
+    ai_tools.DISMISS_SLEEP: "suspend",
+    ai_tools.DISMISS_OFF: "poweroff",
+}
+LLM_SLEEP_ACTION = "sleep"
+# Роспуск не должен ждать столько же, сколько ответ модели: команды короткие
+# (обе только ставят задачу на своей стороне), а пользователь уже получил
+# прощание и ждёт лишь ремарку.
+DISMISS_TIMEOUT_S = 15.0
+DISMISS_FAILED_TEXT = (
+    "<b>Альбегт:</b> Альфред уже попрощался, но машину погасить не вышло — "
+    "она осталась на ногах, сэр/мадам"
+)
+
 
 def _is_unavailable(exc: Exception) -> bool:
     if isinstance(exc, ServiceUnavailableError):
@@ -498,6 +527,57 @@ async def _build_context_note(
     return " ".join(lines)
 
 
+async def perform_dismissal(
+    message: Message,
+    node_link: ServiceLink,
+    mode: str,
+    book: SubscriptionBook,
+    notifier: Notifier,
+) -> None:
+    """Исполнить роспуск, назначенный тулом dismiss (bot/tools.py).
+
+    Зовётся ТОЛЬКО после того, как прощание Альфреда уже отправлено в чат
+    (bot/handlers/ai.py) — до этого гасить нечего и незачем: ответ ещё
+    генерируется той самой моделью, которую предстоит выгрузить.
+
+    Порядок — модель, потом машина: выгрузка контейнера штатная и быстрая, а
+    выдёргивать питание из-под работающей WSL2/Docker-связки лишний раз
+    незачем (см. память про хрупкость этого стека на winpc). Неудача с
+    моделью выключение машины не отменяет — она всё равно погасит контейнер
+    вместе со всем остальным.
+    """
+    llm_dst = Address(node=LLM_NODE, service=LLM_SERVICE)
+    try:
+        # quiet=True — прощание уже сказано, а llm_idle_sleep отрендерился бы
+        # поверх него в «не дождался обращения» (llm/service.py::_sleep_now).
+        await node_link.command(
+            LLM_SLEEP_ACTION, {"quiet": True}, dst=llm_dst, timeout=DISMISS_TIMEOUT_S
+        )
+    except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
+        log.warning("ai_flow: роспуск — модель не выгрузилась: %s", exc)
+        if mode == ai_tools.DISMISS_MODEL:
+            await message.answer(DISMISS_FAILED_TEXT)
+            await notify_admins(book, notifier, f"⚠️ роспуск Альфреда: llm.sleep — {exc}")
+            return
+
+    action = DISMISS_NODE_ACTIONS.get(mode)
+    if action is not None:
+        try:
+            await node_link.command(
+                action,
+                {},
+                dst=Address(node=LLM_NODE, service=NODE_SERVICE),
+                timeout=DISMISS_TIMEOUT_S,
+            )
+        except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
+            log.warning("ai_flow: роспуск — %s не удался: %s", action, exc)
+            await message.answer(DISMISS_FAILED_TEXT)
+            await notify_admins(book, notifier, f"⚠️ роспуск Альфреда: {action} — {exc}")
+            return
+
+    await message.answer(DISMISS_TEXTS[mode])
+
+
 async def request_alfred(
     message: Message,
     node_link: ServiceLink,
@@ -507,12 +587,17 @@ async def request_alfred(
     dialogue_id: int,
     book: SubscriptionBook,
     notifier: Notifier,
+    dismissal: ai_tools.DismissalBox | None = None,
 ) -> str | None:
     """Сходить в llm.chat с presence/wake-сценарием.
 
     Возвращает сырой текст ответа модели, либо None — Альфреда не нашли
     (сообщение об этом пользователю уже отправлено здесь же, вызывающему
     отвечать больше нечего).
+
+    ``dismissal`` — ячейка под «меня отпустили» (тул dismiss): заполняется
+    здесь, а исполняется вызывающим после отправки ответа (см.
+    perform_dismissal). Без неё тул честно скажет, что сейчас не умеет.
     """
     dst = Address(node=LLM_NODE, service=LLM_SERVICE)
     timeout = settings.llm.request_timeout_s
@@ -554,6 +639,7 @@ async def request_alfred(
             settings=settings,
             node_link=node_link,
             subscription=subscription,
+            dismissal=dismissal,
         )
         telegram_chat_id = message.chat.id if message.chat is not None else None
 

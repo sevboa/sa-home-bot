@@ -107,7 +107,7 @@ async def test_cmd_ai_without_text_asks_model_for_greeting(store, monkeypatch):
     seen_history = []
 
     async def fake_request(
-        message, node_link, store_, config, history, dialogue_id, book, notifier
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None
     ):
         seen_history.append(history)
         return "Да, сэг? Слушаю вас"
@@ -131,7 +131,7 @@ async def test_cmd_ai_without_text_asks_model_for_greeting(store, monkeypatch):
 
 async def test_cmd_ai_without_text_unavailable_records_nothing(store, monkeypatch):
     async def fake_unavailable(
-        message, node_link, store_, config, history, dialogue_id, book, notifier
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None
     ):
         return None  # ai_flow уже сообщил пользователю сама
 
@@ -151,7 +151,7 @@ async def test_cmd_ai_with_text_calls_ai_flow_and_records_both_turns(store, monk
     seen_history = []
 
     async def fake_request(
-        message, node_link, store_, config, history, dialogue_id, book, notifier
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None
     ):
         seen_history.append(history)
         return "Добгый день, сэ"
@@ -181,7 +181,7 @@ async def test_cmd_ai_long_response_is_split_across_telegram_messages(store, mon
     long_answer = "Жили-были. " * 500
 
     async def fake_request(
-        message, node_link, store_, config, history, dialogue_id, book, notifier
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None
     ):
         return long_answer
 
@@ -204,7 +204,7 @@ async def test_cmd_ai_long_response_is_split_across_telegram_messages(store, mon
 
 async def test_cmd_ai_returns_none_from_ai_flow_sends_nothing_extra(store, monkeypatch):
     async def fake_unavailable(
-        message, node_link, store_, config, history, dialogue_id, book, notifier
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None
     ):
         return None  # ai_flow уже сообщил пользователю сама (не тестируем тут)
 
@@ -223,7 +223,7 @@ async def test_cmd_ai_returns_none_from_ai_flow_sends_nothing_extra(store, monke
 
 async def test_cmd_ai_unhandled_exception_apologizes_and_notifies_admin(store, monkeypatch):
     async def boom(
-        message, node_link, store_, config, history, dialogue_id, book, notifier
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None
     ):
         raise RuntimeError("что-то сломалось")
 
@@ -257,7 +257,7 @@ async def test_ask_and_reply_registers_chat_while_request_in_flight(store, monke
     seen_snapshot = []
 
     async def fake_request(
-        message, node_link, store_, config, history, dialogue_id, book, notifier
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None
     ):
         seen_snapshot.append(active_ai_chats.snapshot())
         return "ответ"
@@ -278,7 +278,7 @@ async def test_ask_and_reply_unregisters_chat_even_on_exception(store, monkeypat
     active_ai_chats = ai_flow.ActiveAiChats()
 
     async def boom(
-        message, node_link, store_, config, history, dialogue_id, book, notifier
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None
     ):
         raise RuntimeError("бум")
 
@@ -342,7 +342,7 @@ async def test_on_ai_reply_appends_history_and_answers(store, monkeypatch):
     seen_history = []
 
     async def fake_request(
-        message, node_link, store_, config, history, dialogue_id, book, notifier
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None
     ):
         seen_history.append(history)
         return "втогой ответ"
@@ -380,7 +380,7 @@ async def test_on_ai_reply_without_text_still_asks_model(store, monkeypatch):
     seen_history = []
 
     async def fake_request(
-        message, node_link, store_, config, history, dialogue_id, book, notifier
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None
     ):
         seen_history.append(history)
         return "Простите, не расслышал, сэр"
@@ -465,7 +465,7 @@ async def test_on_private_message_starts_new_dialogue_when_none_exists(store, mo
     seen_history = []
 
     async def fake_request(
-        message, node_link, store_, config, history, dialogue_id, book, notifier
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None
     ):
         seen_history.append(history)
         return "Здгавствуйте, сэ"
@@ -492,7 +492,7 @@ async def test_on_private_message_continues_latest_dialogue(store, monkeypatch):
     seen_history = []
 
     async def fake_request(
-        message, node_link, store_, config, history, dialogue_id, book, notifier
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None
     ):
         seen_history.append(history)
         return "втогой ответ"
@@ -535,7 +535,7 @@ async def test_on_group_mention_with_text_starts_fresh_dialogue(store, monkeypat
     seen_history = []
 
     async def fake_request(
-        message, node_link, store_, config, history, dialogue_id, book, notifier
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None
     ):
         seen_history.append(history)
         return "Слушаю, сэ"
@@ -557,7 +557,7 @@ async def test_on_group_mention_without_text_asks_model_for_greeting(store, monk
     seen_history = []
 
     async def fake_request(
-        message, node_link, store_, config, history, dialogue_id, book, notifier
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None
     ):
         seen_history.append(history)
         return "Да, сэг?"
@@ -587,3 +587,62 @@ async def test_on_group_mention_denied_without_right(store):
     )
 
     assert message.sent == []
+
+
+# --- роспуск: гасим только ПОСЛЕ того, как прощание уехало в чат ---
+
+
+async def test_dismissal_runs_after_the_farewell_is_sent(store, monkeypatch):
+    seen = []
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None
+    ):
+        dismissal.mode = "off"
+        return "Всего добгого, сэг"
+
+    async def fake_perform(message, node_link, mode, book, notifier):
+        # Снимок на момент выключения: прощание уже отправлено, ход записан.
+        seen.append((mode, list(message.sent), await store.ai_turns_for_dialogue(1, dialogue_id)))
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    monkeypatch.setattr(ai_flow, "perform_dismissal", fake_perform)
+    message = FakeMessage(1, text="/alfred спасибо, свободен")
+    dialogue_id = message.message_id
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+    )
+
+    assert len(seen) == 1
+    mode, sent_at_that_moment, rows = seen[0]
+    assert mode == "off"
+    assert sent_at_that_moment == [ai_handler._format_answer("Всего добгого, сэг")]
+    assert [r["role"] for r in rows] == ["user", "assistant"]
+
+
+async def test_no_dismissal_when_alfred_never_answered(store, monkeypatch):
+    """Ответа не было (нода не отозвалась) — прощаться не с чем, и гасить
+    машину по намерению, о котором пользователь ничего не услышал, нельзя."""
+    performed = []
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None
+    ):
+        dismissal.mode = "off"
+        return None
+
+    async def fake_perform(message, node_link, mode, book, notifier):
+        performed.append(mode)
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    monkeypatch.setattr(ai_flow, "perform_dismissal", fake_perform)
+    message = FakeMessage(1, text="/alfred свободен")
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+    )
+
+    assert performed == []

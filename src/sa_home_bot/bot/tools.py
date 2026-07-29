@@ -87,6 +87,30 @@ LLM_NODE = "winpc"
 LLM_SERVICE = "llm"
 
 
+DISMISS_MODEL = "model"
+DISMISS_SLEEP = "sleep"
+DISMISS_OFF = "off"
+
+
+@dataclass
+class DismissalBox:
+    """Изменяемая ячейка «Альфреда распустили» — заполняется тулом dismiss,
+    исполняется ПОСЛЕ того, как прощание уехало в чат.
+
+    Тул не может выключить машину прямо в обработчике: ответ модели в этот
+    момент ещё не сгенерирован (тул зовётся раньше персонажного прохода),
+    и погашенная Ollama оборвала бы диалог на полуслове — пользователь
+    получил бы «Альфред отвлёкся» вместо прощания. Поэтому тул только
+    записывает намерение, а исполняет его bot/handlers/ai.py уже после
+    отправки ответа (bot/ai_flow.py::perform_dismissal).
+
+    ``None`` в ``ToolContext.dismissal`` — исполнить намерение некому
+    (служба tasks, тесты): тул честно говорит, что сейчас не умеет.
+    """
+
+    mode: str | None = None
+
+
 @dataclass
 class ToolContext:
     """``history`` — сообщения, которые ПРЯМО СЕЙЧАС видит модель (та же
@@ -109,6 +133,7 @@ class ToolContext:
     node_link: ServiceLink | None = None
     history: list[dict[str, Any]] = field(default_factory=list)
     subscription: Subscription | None = None
+    dismissal: DismissalBox | None = None
 
 
 ToolHandler = Callable[["ToolContext", dict[str, Any]], Awaitable[str]]
@@ -1232,6 +1257,96 @@ _DECL_TORRENTS: dict[str, Any] = {
 }
 
 
+# --- dismiss: «ты свободен» — погасить модель и машину под ней ---
+#
+# Единственный тул, который НИЧЕГО не делает в момент вызова (см.
+# DismissalBox): гасить Ollama прямо здесь — значит оборвать ещё не
+# сгенерированный ответ модели, то есть прощание, ради которого всё и
+# затевалось. Тул записывает намерение, исполняет его bot/handlers/ai.py
+# после отправки ответа.
+#
+# Машина здесь не параметр и не результат поиска по рою — это ровно та
+# нода, с которой ТОЛЬКО ЧТО разговаривали (LLM_NODE, тот же адрес, что у
+# самого диалога в bot/ai_flow.py). Иначе «выключись» в руках модели
+# означало бы «выключи любую машину роя», включая ту, на которой живёт сам
+# бот, — а этого не должно быть даже как опечатки.
+
+
+async def tool_dismiss(ctx: ToolContext, args: dict[str, Any]) -> str:
+    mode = str(args.get("mode") or "").strip()
+    allowed = _DISMISS_VARIANTS.allowed_values(ctx.subscription) if ctx.subscription else []
+    if mode not in allowed:
+        return f"не умею: {mode or 'без уточнения'}"
+    if ctx.dismissal is None:
+        # Отложенная задача (служба tasks) или иной не-живой вызов: некому
+        # исполнить намерение после ответа — честно говорим «сейчас нет»,
+        # а не обещаем выключение, которого не будет.
+        return "недоступно: распустить себя можно только в живом разговоре"
+    ctx.dismissal.mode = mode
+    if mode == DISMISS_MODEL:
+        return "принято: модель будет выгружена сразу после твоего ответа — попрощайся"
+    machine = "выключена" if mode == DISMISS_OFF else "усыплена"
+    return (
+        f"принято: сразу после твоего ответа модель будет выгружена, а машина — {machine}. "
+        "Попрощайся сейчас — это твоя последняя реплика в этом разговоре."
+    )
+
+
+_DISMISS_VARIANTS = VariantRights(
+    param="mode",
+    rights=(
+        # Право на то же самое, что и кнопки на карточке ноды/службы у
+        # человека: погасить модель — sleep@llm, усыпить и выключить машину —
+        # suspend@node / poweroff@node.
+        (DISMISS_MODEL, ActionRight("sleep", LLM_SERVICE)),
+        (DISMISS_SLEEP, ActionRight("suspend", "node")),
+        (DISMISS_OFF, ActionRight("poweroff", "node")),
+    ),
+)
+
+_DECL_DISMISS: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "dismiss",
+        "description": (
+            "Уйти на покой: выгрузить себя (модель) из памяти машины и, если "
+            "просят, усыпить или выключить саму машину — штатно, как человек "
+            "гасит свет, уходя. Вызывай, когда собеседник ОТПУСКАЕТ тебя: "
+            "«ты свободен», «больше не нужен», «иди отдыхай/спать», "
+            "«выключись», «пока» на прощание, а также в конце просьбы вида "
+            "«сделай то-то и выключись» — там сначала сделай дело "
+            "(остальными инструментами), а этот вызови последним.\n"
+            "Не вызывай, если тебя просто поблагодарили или попрощались "
+            "посреди разговора, не отпуская: «спасибо» — не команда уходить. "
+            "Сомневаешься между «отпустили» и «просто вежливость» — "
+            "переспроси словами, а не вызывай.\n"
+            "Ничего не гаснет мгновенно: инструмент только назначает уход, а "
+            "случится он сразу ПОСЛЕ твоего ответа. Поэтому вызови его и в "
+            "той же реплике попрощайся — второго хода у тебя уже не будет, "
+            "разбудить тебя сможет только новое обращение.\n"
+            "Значения mode перечислены в enum: то, чего там нет, ты не умеешь."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    # enum подставляется под права собеседника (см. tools_for).
+                    "enum": [v for v, _ in _DISMISS_VARIANTS.rights],
+                    "description": (
+                        "model — выгрузить только модель, машина продолжает "
+                        "работать (по умолчанию, если просто отпустили); "
+                        "sleep — усыпить машину («иди спать»); "
+                        "off — выключить машину («выключись», «выключи комп»)"
+                    ),
+                },
+            },
+            "required": ["mode"],
+        },
+    },
+}
+
+
 # --- web_search: интернет через свой SearXNG (LLM_INTEGRATION_PLAN.md §9) ---
 
 
@@ -1331,6 +1446,12 @@ TOOLS: tuple[ToolSpec, ...] = (
         handler=tool_torrents,
         declaration=_DECL_TORRENTS,
         variants=_TORRENTS_VARIANTS,
+    ),
+    ToolSpec(
+        name="dismiss",
+        handler=tool_dismiss,
+        declaration=_DECL_DISMISS,
+        variants=_DISMISS_VARIANTS,
     ),
     ToolSpec(
         name="web_search",

@@ -39,7 +39,8 @@ def test_describe_declares_ask_chat_sleep_warmup():
     assert [a.id for a in desc.actions] == ["ask", "chat", "sleep", "warmup"]
     assert desc.find_action("ask").params[0].name == "prompt"
     assert desc.find_action("chat").params[0].name == "messages"
-    assert desc.find_action("sleep").params == ()
+    quiet = desc.find_action("sleep").params[0]
+    assert (quiet.name, quiet.type, quiet.required) == ("quiet", "bool", False)
 
 
 async def test_ask_calls_ollama_generate_with_system_prompt(monkeypatch):
@@ -345,6 +346,35 @@ async def test_chat_tracks_chat_id_for_idle_sleep_event(monkeypatch):
     await svc.run_command("sleep", {})
 
     assert emitter.events == [("llm_idle_sleep", {"chat_ids": [7, 42]})]
+
+
+async def test_quiet_sleep_says_nothing_and_forgets_chats(monkeypatch):
+    """Штатный роспуск («ты свободен»): прощание уже сказано ботом, и
+    llm_idle_sleep («не дождался обращения») противоречил бы ему. Список
+    чатов при этом чистится — иначе останов процесса при выключении машины
+    доложит тем же чатам llm_service_restart."""
+
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
+        return {"message": {"content": "ответ"}}
+
+    async def fake_stop(cfg):
+        pass
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    monkeypatch.setattr(llm_service.ollama, "stop", fake_stop)
+    emitter = FakeEmitter()
+    svc = LlmService(_settings(), emit=emitter)
+
+    await svc.run_command(
+        "chat", {"messages": [{"role": "user", "content": "спасибо, свободен"}], "chat_id": 42}
+    )
+    result = await svc.run_command("sleep", {"quiet": True})
+
+    assert result == {"asleep": True}
+    assert (await svc.get_state())["asleep"] is True
+    assert emitter.events == []
+    await svc.notify_restart()
+    assert emitter.events == []  # и останов процесса следом — тоже молча
 
 
 async def test_sleep_without_active_chats_emits_nothing(monkeypatch):
