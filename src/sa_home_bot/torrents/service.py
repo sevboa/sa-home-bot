@@ -23,6 +23,22 @@ swarm_status: до него служба вообще не умела расск
 часть имени; неоднозначность — не «остановим на всякий случай все похожие»,
 а честная ошибка со списком кандидатов (`все` — отдельное явное слово).
 
+`search` — поиск по трекерам ЧУЖИМИ руками: встроенным поисковым движком
+qBittorrent и его плагинами (`search_start`/`search_results` Web API).
+Заведено 2026-07-29, потому что Альфред с одним `web_search` (SearXNG)
+упирался в стену: выдача поисковика даёт заголовок, ссылку и сниппет, а
+magnet живёт ВНУТРИ темы трекера, часто ещё и под логином — открыть
+страницу модель не может ничем. Плагин же логинится сам и отдаёт готовые
+поля (имя, размер, сиды), по которым уже можно выбирать осмысленно.
+
+Ссылка из результатов поиска — это НЕ magnet, а `dl.php?t=…`, который
+отдаётся только авторизованному. Поэтому `add` для таких ссылок качает
+метафайл не через qBittorrent, а через `nova2dl.py` самого qBittorrent
+(`_fetch_via_plugin`) — тем же способом, каким это делает его собственный
+GUI: плагин отдаёт .torrent своей сессией, а мы добавляем его как файл, уже
+с нужным `save_path`. Штатное `search/downloadTorrent` Web API так не умеет
+— оно кладёт раздачу в директорию по умолчанию, мимо выбора «куда сохранить».
+
 `space` — сколько места на дисках директорий сохранения. Свободное место
 считается локально (`shutil.disk_usage`) — служба живёт на той же машине,
 что и qBittorrent, спрашивать его Web API про чужие ФС незачем; сам
@@ -37,9 +53,15 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import logging
 import shutil
 import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import qbittorrentapi
 
@@ -55,12 +77,31 @@ from sa_home_bot.proto.messages import (
     ServiceInfo,
 )
 
+log = logging.getLogger(__name__)
+
 SERVICE_NAME = "torrents"
 ACTION_ADD = "add"
 ACTION_LIST = "list"
 ACTION_PAUSE = "pause"
 ACTION_RESUME = "resume"
 ACTION_SPACE = "space"
+ACTION_SEARCH = "search"
+
+# Сколько находок отдавать. Их читает модель и выбирает одну — на десятке
+# строк выбор по сидам/размеру делается ничуть не хуже, чем на полусотне, а
+# контекст не раздувается.
+SEARCH_LIMIT = 10
+# Плагин ходит на живой трекер (логин + страница выдачи) — это секунды, но
+# не мгновение; ждём завершения задания, а не первой пустой выдачи.
+SEARCH_WAIT_S = 45.0
+SEARCH_POLL_S = 0.5
+SEARCH_RUNNING = "Running"
+# Скачивание метафайла руками плагина (nova2dl) — короткая операция, но по
+# сети; свой потолок, чтобы зависший трекер не держал команду вечно.
+PLUGIN_FETCH_TIMEOUT_S = 60.0
+# Где живут поисковый движок и плагины qBittorrent (nova2dl.py, engines/).
+# Пусто в конфиге — путь по умолчанию для Linux-сборки.
+DEFAULT_NOVA_DIR = "~/.local/share/qBittorrent/nova3"
 
 # Сколько раздач отдавать за раз. Ответ читает и человек, и модель (тул
 # torrents) — полный список на сотню раздач бесполезен обоим, а в контексте
@@ -83,6 +124,21 @@ ALL_SELECTORS = frozenset({"*", "all", "все", "всё", "все закачк�
 
 def _is_magnet_or_url(source: str) -> bool:
     return source.startswith(("magnet:", "http://", "https://"))
+
+
+_ENGINE_ERROR_MARK = "[Error]"
+
+
+def _is_engine_error(result: dict[str, Any]) -> bool:
+    return _ENGINE_ERROR_MARK in str(result.get("fileName", "")) or str(
+        result.get("fileUrl", "")
+    ).endswith("/error")
+
+
+def _engine_error_text(result: dict[str, Any]) -> str:
+    name = str(result.get("fileName", ""))
+    _, _, tail = name.partition(_ENGINE_ERROR_MARK)
+    return (tail.lstrip(": ") or name).strip() or "плагин не сказал, что именно"
 
 
 def _disk_usage(path: str) -> tuple[int | None, int | None]:
@@ -116,11 +172,23 @@ class TorrentsService:
     def describe(self) -> ServiceDescription:
         return ServiceDescription(
             info=ServiceInfo(node=self._node, service=SERVICE_NAME, version=__version__),
-            capabilities=(ACTION_ADD, ACTION_LIST, ACTION_PAUSE, ACTION_RESUME, ACTION_SPACE),
+            capabilities=(
+                ACTION_ADD,
+                ACTION_LIST,
+                ACTION_PAUSE,
+                ACTION_RESUME,
+                ACTION_SPACE,
+                ACTION_SEARCH,
+            ),
             actions=(
                 ActionSpec(
                     id=ACTION_LIST,
                     title="📋 Что качается",
+                ),
+                ActionSpec(
+                    id=ACTION_SEARCH,
+                    title="🔎 Поиск по трекерам",
+                    params=(ActionParam(name="query", type="string", title="Что ищем"),),
                 ),
                 ActionSpec(
                     id=ACTION_SPACE,
@@ -167,13 +235,136 @@ class TorrentsService:
             password=self._cfg.qbittorrent_password,
         )
 
+    def _nova_dir(self) -> Path:
+        raw = self._cfg.search_engine_dir or DEFAULT_NOVA_DIR
+        return Path(raw).expanduser()
+
+    @staticmethod
+    def _plugin_for(plugins: list[Any], url: str) -> str | None:
+        """Имя включённого плагина, чей сайт совпадает с хостом ссылки.
+
+        Хост, а не префикс строки: у плагина в `url` полный адрес раздела
+        (`https://rutracker.org/forum/`), а ссылка из выдачи может вести на
+        другой путь того же сайта.
+        """
+        host = urlsplit(url).netloc.lower()
+        if not host:
+            return None
+        for plugin in plugins:
+            if not plugin.get("enabled"):
+                continue
+            if urlsplit(str(plugin.get("url", ""))).netloc.lower() == host:
+                return str(plugin.get("name"))
+        return None
+
+    def _fetch_via_plugin(self, plugin: str, url: str) -> bytes:
+        """Метафайл руками самого плагина (его авторизованной сессией).
+
+        Ровно тот путь, которым качает GUI qBittorrent: `nova2dl.py <плагин>
+        <ссылка>` печатает «<путь к .torrent> <ссылка>». Свой HTTP-клиент
+        здесь бесполезен — `dl.php` отдаётся только залогиненному, а куки
+        живут внутри плагина.
+        """
+        nova = self._nova_dir() / "nova2dl.py"
+        if not nova.exists():
+            raise ProtoError(
+                ERR_INTERNAL,
+                f"поисковый движок qBittorrent не найден: нет {nova} "
+                "(проверьте [torrents].search_engine_dir)",
+            )
+        try:
+            proc = subprocess.run(  # noqa: S603 — фиксированный argv, интерпретатор свой
+                [sys.executable, str(nova), plugin, url],
+                capture_output=True,
+                timeout=PLUGIN_FETCH_TIMEOUT_S,
+                check=False,
+                cwd=str(self._nova_dir()),
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ProtoError(ERR_INTERNAL, f"плагин {plugin} не отдал файл: {exc}") from exc
+        out = proc.stdout.decode(errors="replace").strip()
+        # Успех — одна строка «<путь> <ссылка>»; всё прочее (в т.ч. текст
+        # ошибки, который плагин печатает вместо пути) — неудача.
+        path = Path(out.split(" ", 1)[0]) if out else None
+        if path is None or not path.is_file():
+            log.warning(
+                "nova2dl %s: rc=%s out=%r err=%r", plugin, proc.returncode, out, proc.stderr
+            )
+            raise ProtoError(
+                ERR_INTERNAL,
+                f"плагин {plugin} не отдал .torrent — вероятно, не настроен логин к трекеру",
+            )
+        try:
+            return path.read_bytes()
+        finally:
+            path.unlink(missing_ok=True)
+
+    def _search_sync(self, query: str, limit: int) -> dict[str, Any]:
+        client = self._client()
+        try:
+            client.auth_log_in()
+            if not [p for p in client.search_plugins() if p.get("enabled")]:
+                raise ProtoError(
+                    ERR_BAD_REQUEST,
+                    "поиск по трекерам не настроен: в qBittorrent нет ни одного "
+                    "включённого поискового плагина",
+                )
+            job = client.search_start(pattern=query, plugins="enabled", category="all")
+            search_id = job["id"]
+            try:
+                deadline = time.monotonic() + SEARCH_WAIT_S
+                while time.monotonic() < deadline:
+                    statuses = client.search_status(search_id=search_id)
+                    if not statuses or statuses[0].get("status") != SEARCH_RUNNING:
+                        break
+                    time.sleep(SEARCH_POLL_S)
+                raw = client.search_results(search_id=search_id, limit=limit)
+            finally:
+                # Задание живёт в qBittorrent, пока его не удалят: без этого
+                # каждый вопрос Альфреда оставлял бы за собой мусор.
+                client.search_delete(search_id=search_id)
+        except qbittorrentapi.APIError as exc:
+            raise ProtoError(ERR_INTERNAL, f"qBittorrent отклонил запрос: {exc}") from exc
+        finally:
+            client.auth_log_out()
+
+        # Сбой плагина приезжает НЕ ошибкой, а фальшивой «находкой»: имя вида
+        # «[запрос][Error]: …», ссылка «<сайт>/error», 100 сидов и терабайт
+        # размера (так плагины показывают проблему в GUI). Пропустить такое в
+        # модель — значит дать ей «раздачу» с рекордными сидами, которую она
+        # честно предложит скачать. Отделяем и превращаем в настоящий отказ.
+        broken = [r for r in raw.get("results", []) if _is_engine_error(r)]
+        usable = [r for r in raw.get("results", []) if not _is_engine_error(r)]
+        if broken and not usable:
+            raise ProtoError(ERR_INTERNAL, f"поиск не отработал: {_engine_error_text(broken[0])}")
+
+        results = [
+            {
+                "name": r.get("fileName", "?"),
+                "size_bytes": int(r.get("fileSize", 0) or 0),
+                "seeders": max(0, int(r.get("nbSeeders", 0) or 0)),
+                "leechers": max(0, int(r.get("nbLeechers", 0) or 0)),
+                # Именно это значение потом уходит в add как source: у
+                # трекеров с логином это не magnet, а ссылка на метафайл.
+                "source": r.get("fileUrl", ""),
+                "page": r.get("descrLink", ""),
+            }
+            for r in usable
+        ]
+        # Сортировка по сидам — то, по чему выбирают раздачу в первую очередь;
+        # qBittorrent отдаёт результаты в порядке прихода от плагинов.
+        results.sort(key=lambda r: r["seeders"], reverse=True)
+        return {"results": results[:limit], "count": len(results[:limit]), "query": query}
+
     def _add_sync(self, source: str, save_path: str) -> int | None:
         """Свободные байты в целевой директории после приёма раздачи (или
         None — путь недоступен). Раздача не принимается вовсе, если места и
         так почти нет (MIN_FREE_BYTES)."""
-        if _is_magnet_or_url(source):
-            payload: dict[str, Any] = {"urls": source}
-        else:
+        payload: dict[str, Any] = {}
+        plugin: str | None = None
+        if source.startswith("magnet:"):
+            payload = {"urls": source}
+        elif not _is_magnet_or_url(source):
             try:
                 payload = {"torrent_files": base64.b64decode(source, validate=True)}
             except (binascii.Error, ValueError) as exc:
@@ -189,6 +380,21 @@ class TorrentsService:
         client = self._client()
         try:
             client.auth_log_in()
+            if not payload:
+                # Осталась http(s)-ссылка: принимаем её ТОЛЬКО как находку
+                # своего же поиска (см. докстринг модуля). Отдать её
+                # qBittorrent напрямую нельзя — с трекера под логином
+                # вернётся страница входа вместо метафайла, а пускать модель
+                # качать по произвольному адресу из разговора незачем.
+                plugin = self._plugin_for(list(client.search_plugins()), source)
+                if plugin is None:
+                    raise ProtoError(
+                        ERR_BAD_REQUEST,
+                        "ссылку на .torrent беру только с трекеров, для которых "
+                        "установлен поисковый плагин (иначе нужна magnet-ссылка "
+                        "или сам файл)",
+                    )
+                payload = {"torrent_files": self._fetch_via_plugin(plugin, source)}
             client.torrents_add(save_path=save_path, **payload)
         except qbittorrentapi.APIError as exc:
             raise ProtoError(ERR_INTERNAL, f"qBittorrent отклонил запрос: {exc}") from exc
@@ -313,6 +519,12 @@ class TorrentsService:
             return {"torrents": torrents, "count": len(torrents), "limit": LIST_LIMIT}
         if action == ACTION_SPACE:
             return await asyncio.to_thread(self._space_sync)
+        if action == ACTION_SEARCH:
+            query = str(args.get("query") or "").strip()
+            if not query:
+                raise ProtoError(ERR_BAD_REQUEST, "не указан поисковый запрос (query)")
+            limit = min(int(args.get("limit") or SEARCH_LIMIT), SEARCH_LIMIT)
+            return await asyncio.to_thread(self._search_sync, query, limit)
         if action in (ACTION_PAUSE, ACTION_RESUME):
             selector = str(args.get("name") or "").strip()
             if not selector:

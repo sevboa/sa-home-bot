@@ -68,6 +68,23 @@ class FakeClient:
             raise FakeClient.fail_with
         FakeClient.switched.append(("resume", kwargs["torrent_hashes"]))
 
+    def search_plugins(self):
+        return FakeClient.plugins
+
+    def search_start(self, **kwargs):
+        FakeClient.search_kwargs = kwargs
+        return {"id": 7}
+
+    def search_status(self, search_id=None):
+        return [{"id": search_id, "status": "Stopped", "total": len(FakeClient.found)}]
+
+    def search_results(self, search_id=None, limit=None):
+        FakeClient.results_limit = limit
+        return {"results": FakeClient.found[:limit], "total": len(FakeClient.found)}
+
+    def search_delete(self, search_id=None):
+        FakeClient.deleted.append(search_id)
+
 
 @pytest.fixture(autouse=True)
 def fake_qbittorrent(monkeypatch):
@@ -78,6 +95,10 @@ def fake_qbittorrent(monkeypatch):
     FakeClient.logged_out = False
     FakeClient.info = []
     FakeClient.info_kwargs = {}
+    FakeClient.plugins = [{"name": "rutracker", "enabled": True, "url": "https://rutracker.org/forum/"}]
+    FakeClient.found = []
+    FakeClient.deleted = []
+    FakeClient.search_kwargs = {}
     monkeypatch.setattr(torrents_service.qbittorrentapi, "Client", FakeClient)
     return FakeClient
 
@@ -96,7 +117,7 @@ def fake_disk(monkeypatch):
 def test_describe_declares_add_action_with_save_path_choices():
     desc = TorrentsService(_settings()).describe()
     assert desc.info.service == "torrents"
-    assert desc.capabilities == ("add", "list", "pause", "resume", "space")
+    assert desc.capabilities == ("add", "list", "pause", "resume", "space", "search")
     action = desc.find_action("add")
     names = [p.name for p in action.params]
     assert names == ["source", "name", "save_path"]
@@ -350,3 +371,154 @@ async def test_add_refuses_when_disk_is_almost_full(fake_disk, fake_qbittorrent)
     assert excinfo.value.code == ERR_BAD_REQUEST
     assert "мало места" in excinfo.value.message
     assert fake_qbittorrent.calls == []  # до qBittorrent дело не дошло
+
+
+# --- search: ищет сам торрент-клиент своими плагинами ---
+
+
+_FOUND = [
+    {
+        "fileName": "3 Body Problem S01 1080p",
+        "fileSize": 48 * GIB,
+        "nbSeeders": 120,
+        "nbLeechers": 5,
+        "fileUrl": "https://rutracker.org/forum/dl.php?t=6503560",
+        "descrLink": "https://rutracker.org/forum/viewtopic.php?t=6503560",
+    },
+    {
+        "fileName": "3 Body Problem S01 2160p",
+        "fileSize": 190 * GIB,
+        "nbSeeders": 300,
+        "nbLeechers": 9,
+        "fileUrl": "https://rutracker.org/forum/dl.php?t=6503561",
+        "descrLink": "https://rutracker.org/forum/viewtopic.php?t=6503561",
+    },
+]
+
+
+async def test_search_returns_narrow_slice_sorted_by_seeders(fake_qbittorrent):
+    fake_qbittorrent.found = list(_FOUND)
+    result = await TorrentsService(_settings()).run_command("search", {"query": "задача трёх тел"})
+
+    assert result["query"] == "задача трёх тел"
+    assert [r["name"] for r in result["results"]] == [
+        "3 Body Problem S01 2160p",  # больше сидов — первым
+        "3 Body Problem S01 1080p",
+    ]
+    assert result["results"][0] == {
+        "name": "3 Body Problem S01 2160p",
+        "size_bytes": 190 * GIB,
+        "seeders": 300,
+        "leechers": 9,
+        "source": "https://rutracker.org/forum/dl.php?t=6503561",
+        "page": "https://rutracker.org/forum/viewtopic.php?t=6503561",
+    }
+    assert fake_qbittorrent.search_kwargs["plugins"] == "enabled"
+    # Задание живёт в qBittorrent, пока его не удалят — иначе каждый вопрос
+    # оставлял бы мусор.
+    assert fake_qbittorrent.deleted == [7]
+
+
+async def test_search_without_plugins_says_so(fake_qbittorrent):
+    fake_qbittorrent.plugins = []
+    with pytest.raises(ProtoError) as excinfo:
+        await TorrentsService(_settings()).run_command("search", {"query": "что-нибудь"})
+    assert excinfo.value.code == ERR_BAD_REQUEST
+    assert "плагин" in excinfo.value.message
+
+
+async def test_search_without_query_is_bad_request():
+    with pytest.raises(ProtoError) as excinfo:
+        await TorrentsService(_settings()).run_command("search", {})
+    assert excinfo.value.code == ERR_BAD_REQUEST
+
+
+async def test_search_limit_is_capped(fake_qbittorrent):
+    await TorrentsService(_settings()).run_command("search", {"query": "x", "limit": 500})
+    assert fake_qbittorrent.results_limit == torrents_service.SEARCH_LIMIT
+
+
+# --- add по находке: метафайл качает плагин, не qBittorrent ---
+
+
+async def test_add_search_result_fetches_torrent_via_plugin(fake_qbittorrent, monkeypatch):
+    """С трекера под логином qBittorrent по ссылке получил бы страницу входа —
+    файл отдаёт сам плагин своей сессией (nova2dl)."""
+    fetched = []
+
+    def fake_fetch(self, plugin, url):
+        fetched.append((plugin, url))
+        return b"d8:announce...e"
+
+    monkeypatch.setattr(TorrentsService, "_fetch_via_plugin", fake_fetch)
+    await TorrentsService(_settings()).run_command(
+        "add",
+        {"source": "https://rutracker.org/forum/dl.php?t=6503560", "save_path": SAVE_DIRS[0]},
+    )
+    assert fetched == [("rutracker", "https://rutracker.org/forum/dl.php?t=6503560")]
+    _, kwargs = fake_qbittorrent.calls[0]
+    assert kwargs["torrent_files"] == b"d8:announce...e"
+    assert kwargs["save_path"] == SAVE_DIRS[0]
+    assert "urls" not in kwargs
+
+
+async def test_add_url_from_site_without_plugin_is_refused(fake_qbittorrent):
+    """«Скачай вот по этой ссылке» из разговора — не наш случай: без плагина
+    ни авторизации, ни доверия к адресу нет."""
+    with pytest.raises(ProtoError) as excinfo:
+        await TorrentsService(_settings()).run_command(
+            "add", {"source": "https://example.org/foo.torrent", "save_path": SAVE_DIRS[0]}
+        )
+    assert excinfo.value.code == ERR_BAD_REQUEST
+    assert "плагин" in excinfo.value.message
+    assert fake_qbittorrent.calls == []
+
+
+def test_plugin_lookup_matches_by_host_not_prefix():
+    plugins = [
+        {"name": "rutracker", "enabled": True, "url": "https://rutracker.org/forum/"},
+        {"name": "sleeping", "enabled": False, "url": "https://rutor.info/"},
+    ]
+    match = TorrentsService._plugin_for
+    # Другой путь того же сайта — тот же плагин.
+    assert match(plugins, "https://rutracker.org/forum/dl.php?t=1") == "rutracker"
+    assert match(plugins, "https://rutracker.org/anything") == "rutracker"
+    # Выключенный плагин не в счёт, чужой сайт — тем более.
+    assert match(plugins, "https://rutor.info/torrent/1") is None
+    assert match(plugins, "https://example.org/x.torrent") is None
+
+
+async def test_search_turns_plugin_failure_into_a_real_error(fake_qbittorrent):
+    """Сбой плагин отдаёт не ошибкой, а фальшивой находкой с рекордными
+    сидами — пропустить её в модель значит предложить человеку скачать
+    «раздачу» с текстом ошибки в имени."""
+    fake_qbittorrent.found = [
+        {
+            "fileName": "[3 Body Problem][Error]: Request to login.php failed with status: 403",
+            "fileSize": 1099511627776,
+            "nbSeeders": 100,
+            "nbLeechers": 100,
+            "fileUrl": "https://rutracker.org/forum/error",
+            "descrLink": "file:///home/sevboa/rutracker.log",
+        }
+    ]
+    with pytest.raises(ProtoError) as excinfo:
+        await TorrentsService(_settings()).run_command("search", {"query": "3 Body Problem"})
+    assert excinfo.value.code == ERR_INTERNAL
+    assert "403" in excinfo.value.message
+
+
+async def test_search_keeps_real_results_when_one_plugin_failed(fake_qbittorrent):
+    fake_qbittorrent.found = [
+        {
+            "fileName": "[x][Error]: сломался один плагин",
+            "fileSize": 1099511627776,
+            "nbSeeders": 100,
+            "nbLeechers": 100,
+            "fileUrl": "https://rutor.info/error",
+            "descrLink": "file:///log",
+        },
+        _FOUND[0],
+    ]
+    result = await TorrentsService(_settings()).run_command("search", {"query": "x"})
+    assert [r["name"] for r in result["results"]] == ["3 Body Problem S01 1080p"]

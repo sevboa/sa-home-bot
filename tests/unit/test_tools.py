@@ -791,7 +791,7 @@ def test_torrents_enum_is_per_action_right():
     что добавить раздачу или остановить чужую закачку."""
     assert _tor_enum(_sub("list@torrents")) == ["list"]
     assert _tor_enum(_sub("list@torrents", "pause@torrents")) == ["list", "pause"]
-    assert _tor_enum(ADMIN) == ["list", "space", "add", "pause", "resume"]
+    assert _tor_enum(ADMIN) == ["list", "space", "search", "add", "pause", "resume"]
 
 
 def test_torrents_hidden_without_any_torrent_right():
@@ -801,7 +801,7 @@ def test_torrents_hidden_without_any_torrent_right():
 
 def test_torrents_group_right_covers_all_actions():
     """«*@torrents» — новое умение службы доступно сразу, без правки конфига."""
-    assert _tor_enum(_sub("*@torrents")) == ["list", "space", "add", "pause", "resume"]
+    assert _tor_enum(_sub("*@torrents")) == ["list", "space", "search", "add", "pause", "resume"]
 
 
 async def test_torrents_list_finds_hosting_node(store):
@@ -845,13 +845,47 @@ async def test_torrents_add_sends_magnet_and_save_path(store):
     }
 
 
-async def test_torrents_add_refuses_anything_but_magnet(store):
-    """Сужение намеренное: произвольный http-адрес в руках модели — это
-    «скачай что угодно по ссылке из разговора», файлы человек шлёт сам."""
+async def test_torrents_add_takes_a_search_result_url_too(store):
+    """Ссылка из выдачи своего же поиска — это не magnet, а адрес метафайла
+    на трекере; проверку «а можно ли с этого сайта» делает служба."""
+    link = _swarm_link(command_result={"name": "Foo", "save_path": "/mnt/data/pr"})
+    await tools.tool_torrents(
+        _ctx(store, node_link=link, subscription=ADMIN),
+        {
+            "action": "add",
+            "magnet": "https://rutracker.org/forum/dl.php?t=1",
+            "save_path": "/mnt/data/pr",
+        },
+    )
+    assert link.sent_args[0]["source"] == "https://rutracker.org/forum/dl.php?t=1"
+
+
+async def test_torrents_add_refuses_a_source_that_is_not_a_link(store):
+    """Base64-файл модели взяться неоткуда — его человек присылает сам."""
     link = _swarm_link()
     result = await tools.tool_torrents(
         _ctx(store, node_link=link, subscription=ADMIN),
-        {"action": "add", "magnet": "https://example.org/foo.torrent"},
+        {"action": "add", "magnet": "ZDg6YW5ub3VuY2U="},
+    )
+    assert result.startswith("ошибка")
+    assert link.commands == []
+
+
+async def test_torrents_search_sends_query(store):
+    link = _swarm_link(command_result={"results": [{"name": "Foo", "seeders": 10}], "count": 1})
+    raw = await tools.tool_torrents(
+        _ctx(store, node_link=link, subscription=ADMIN),
+        {"action": "search", "query": "задача трёх тел"},
+    )
+    assert json.loads(raw)["count"] == 1
+    assert link.commands[0][0] == "search"
+    assert link.sent_args[0] == {"query": "задача трёх тел"}
+
+
+async def test_torrents_search_without_query_asks_for_it(store):
+    link = _swarm_link()
+    result = await tools.tool_torrents(
+        _ctx(store, node_link=link, subscription=ADMIN), {"action": "search"}
     )
     assert result.startswith("ошибка")
     assert link.commands == []

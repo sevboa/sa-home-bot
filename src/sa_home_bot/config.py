@@ -196,6 +196,12 @@ class TorrentsConfig(BaseModel):
     qbittorrent_user: str = ""
     qbittorrent_password: str = ""
     save_dirs: list[str] = Field(default_factory=list)
+    # Каталог поискового движка qBittorrent (`nova2dl.py`, `engines/`) — им
+    # служба качает метафайлы с трекеров под логином (см. докстринг
+    # torrents/service.py). Пусто — путь по умолчанию для Linux-сборки
+    # (`~/.local/share/qBittorrent/nova3`); задавать нужно, только если
+    # qBittorrent живёт под другим пользователем или в другой ОС.
+    search_engine_dir: str = ""
 
 
 class TasksConfig(BaseModel):
