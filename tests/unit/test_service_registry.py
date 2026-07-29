@@ -21,7 +21,7 @@ def test_known_services():
         "telegram-bot",
         "apps",
         "torrents",
-        "tasks",
+        "tasks", "memory",
         "net",
         "llm",
     }

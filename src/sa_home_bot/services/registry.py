@@ -88,6 +88,10 @@ _SPECS: tuple[ServiceSpec, ...] = (
     # служба: где стоит SearXNG, там её и назначают (сейчас alfred, см.
     # net/protocol.py::NODE_ID).
     ServiceSpec(name="net", cli_name="net", endpoint_attr="net.socket"),
+    # memory — долгая память Альфреда о чате. Как и net, живёт там, где нода
+    # круглосуточная (см. memory/protocol.py::NODE_ID): вспоминать должно
+    # получаться всегда, а не только когда проснулась машина с моделью.
+    ServiceSpec(name="memory", cli_name="memory", endpoint_attr="memory.socket"),
     # Живая находка 2026-07-23: служба llm на Windows-ноде дёргает wsl.exe, а
     # тот из-под Session-0 (Windows-служба sa-home-node, LocalSystem) вообще
     # не запускается (exit code -1) — WSL2 требует интерактивную сессию.

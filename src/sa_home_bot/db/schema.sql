@@ -137,3 +137,24 @@ CREATE TABLE IF NOT EXISTS tasks (
     prewake_done INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(due_at) WHERE fired_at IS NULL;
+
+-- Долгая память Альфреда о чате (служба memory, sa_home_bot/memory/).
+-- Виртуальная таблица FTS5: сам текст индексируется, chat_id и created_at
+-- лежат рядом как UNINDEXED (их не ищут, но отдают в ответе) — так вся
+-- запись живёт в одной таблице, без пары «данные + индекс» и триггеров
+-- синхронизации между ними. Токенайзер trigram, а не стандартный: он ищет
+-- по подстроке, что для русского практичнее (см. memory/service.py).
+-- ВНИМАНИЕ: память привязана к chat_id — общего хранилища на весь дом нет
+-- сознательно, иначе сказанное в личке всплыло бы в общей группе.
+-- scope: 'chat' — знает только этот разговор; 'common' — общее знание дома
+-- (кто такой Альфред, как он выглядит, что умеет рой), видно во всех чатах.
+-- sensitive: личное (адрес, здоровье, деньги, документы) — такое НИКОГДА не
+-- бывает common и в контекст уходит с оговоркой «не пересказывай вслух».
+CREATE VIRTUAL TABLE IF NOT EXISTS facts USING fts5(
+    text,
+    chat_id UNINDEXED,
+    scope UNINDEXED,
+    sensitive UNINDEXED,
+    created_at UNINDEXED,
+    tokenize='trigram'
+);

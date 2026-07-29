@@ -204,6 +204,20 @@ class TorrentsConfig(BaseModel):
     search_engine_dir: str = ""
 
 
+class MemoryConfig(BaseModel):
+    """Служба memory (`sa-home-bot --service memory`) — долгая память Альфреда
+    о чате (факты и предпочтения, которые модель иначе забывает между
+    разговорами; см. memory/service.py).
+
+    ``db_path`` — своя БД (как у tasks и monitor): служба живёт отдельным
+    процессом и к БД бота отношения не имеет. Память привязана к чату, общего
+    хранилища на весь дом нет — решение пользователя 2026-07-29.
+    """
+
+    socket: str = "./data/memory.sock"
+    db_path: Path = Path("./data/memory.sqlite")
+
+
 class TasksConfig(BaseModel):
     """Служба tasks (`sa-home-bot --service tasks`) — генерализованные
     отложенные задачи роя (замена старого тула remind, писавшего прямо в
@@ -556,6 +570,7 @@ class Settings(BaseSettings):
     torrents: TorrentsConfig = Field(default_factory=TorrentsConfig)
     llm: LlmConfig = Field(default_factory=LlmConfig)
     tasks: TasksConfig = Field(default_factory=TasksConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     net: NetConfig = Field(default_factory=NetConfig)
     weather: WeatherConfig = Field(default_factory=WeatherConfig)
     node: NodeConfig = Field(default_factory=NodeConfig)

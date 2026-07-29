@@ -80,6 +80,7 @@ from sa_home_bot.config import PersonConfig, Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.llm.prompt import ROUTE_OK, THINK_MARKER
 from sa_home_bot.llm_chat import run_chat_loop
+from sa_home_bot.memory import protocol as memory_protocol
 from sa_home_bot.proto.messages import (
     ERR_UNAVAILABLE,
     ERR_UNKNOWN_DST,
@@ -258,6 +259,51 @@ DISMISS_FAILED_TEXT = (
 )
 
 
+# --- долгая память (служба memory) ---
+#
+# Факты подмешиваются в служебную заметку САМИ, до ответа, а не только по
+# зову тула: модель зовёт инструменты далеко не всегда, а «ты же знаешь, куда
+# я качаю» звучит в разговоре без всякого повода спрашивать память.
+# Бюджет жёсткий — на 16k контекста память не имеет права занимать больше
+# нескольких строк (живая находка 2026-07-29: декларации тулов и выдача
+# поиска уже однажды выбили окно, и ответ пришёл пустым).
+MEMORY_RECALL_LIMIT = 3
+MEMORY_FACT_CHARS = 160
+MEMORY_TIMEOUT_S = 5.0
+
+
+async def recall_facts(node_link: ServiceLink, chat_id: int | None, text: str) -> list[str]:
+    """Факты из памяти чата под текущую реплику; пусто — память молчит.
+
+    Любой сбой памяти — пустой список, а не ошибка: разговор не должен
+    падать из-за необязательной справки.
+    """
+    if chat_id is None or not text.strip():
+        return []
+    dst = Address(node=memory_protocol.NODE_ID, service=memory_protocol.SERVICE_NAME)
+    try:
+        result = await node_link.command(
+            memory_protocol.ACTION_RECALL,
+            {"query": text, "chat_id": chat_id, "limit": MEMORY_RECALL_LIMIT},
+            dst=dst,
+            timeout=MEMORY_TIMEOUT_S,
+        )
+    except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
+        log.debug("ai_flow: память не ответила: %s", exc)
+        return []
+    facts: list[str] = []
+    for fact in result.get("facts", []):
+        text_value = str(fact.get("text", ""))[:MEMORY_FACT_CHARS]
+        if not text_value:
+            continue
+        # Личное помечаем прямо в заметке: видимость уже ограничена запросом
+        # (такой факт физически не выйдет за свой чат), а это — просьба не
+        # произносить его вслух без повода.
+        facts.append(f"{text_value} [личное: знай, но вслух не пересказывай]"
+                     if fact.get("sensitive") else text_value)
+    return facts
+
+
 def _is_unavailable(exc: Exception) -> bool:
     if isinstance(exc, ServiceUnavailableError):
         return True
@@ -427,6 +473,7 @@ async def _build_context_note(
     settings: Settings | None = None,
     *,
     has_web_search: bool = True,
+    memory_facts: list[str] | None = None,
 ) -> str:
     """Служебная заметка для модели (не для пользователя): точное время
     сейчас (§8.1 плана — маленькие локальные модели плохо знают "сейчас", а
@@ -519,6 +566,16 @@ async def _build_context_note(
         if others:
             lines.append("В этом чате к тебе также обращались: " + ", ".join(others) + ".")
 
+    if memory_facts:
+        # Не «вот факты», а «ты это помнишь»: для персонажа это его
+        # собственная память, а не справка, зачитанная кем-то со стороны.
+        lines.append(
+            "Из того, что ты помнишь про этот разговор и его людей: "
+            + "; ".join(memory_facts)
+            + ". Пользуйся, если к месту, но не зачитывай списком и не "
+            "объявляй, что «сверился с памятью»."
+        )
+
     lines.extend(await _reply_context_lines(message, store, dialogue_id))
 
     lines.append(
@@ -609,8 +666,16 @@ async def request_alfred(
     # раз — комплект нужен и заметке (знает ли он про интернет), и tool_ctx.
     subscription = book.for_chat(message.chat.id) if message.chat else None
     has_web_search = SURFING_TOOL in ai_tools.tools_for(subscription).handlers
+    memory_facts = await recall_facts(
+        node_link, message.chat.id if message.chat else None, message.text or ""
+    )
     context_note = await _build_context_note(
-        message, store, dialogue_id, settings, has_web_search=has_web_search
+        message,
+        store,
+        dialogue_id,
+        settings,
+        has_web_search=has_web_search,
+        memory_facts=memory_facts,
     )
     # Список как изменяемая ячейка: _record_tool_call — вложенная функция, а
     # nonlocal через два уровня вложенности (_ask → колбэк) читается хуже.

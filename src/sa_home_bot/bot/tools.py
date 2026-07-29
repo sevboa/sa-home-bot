@@ -57,6 +57,7 @@ from sa_home_bot.bot import commands
 from sa_home_bot.bot.monitor_state import parse_disk_summary, parse_health_state
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
+from sa_home_bot.memory import protocol as memory_protocol
 from sa_home_bot.net import protocol as net_protocol
 from sa_home_bot.node.kind import traits_for
 from sa_home_bot.proto.messages import Address, ProtoError
@@ -1376,6 +1377,105 @@ _DECL_DISMISS: dict[str, Any] = {
 }
 
 
+# --- memory: долгая память о чате (служба memory) ---
+#
+# Модель не выбирает, чью память трогать: chat_id проставляет бот из
+# ToolContext. Иначе «вспомни, что тебе говорили в другом чате» стало бы
+# рабочей просьбой — а память сознательно раздельная (memory/service.py).
+#
+# Вспоминает не только модель по своей воле: бот перед каждым запросом сам
+# подмешивает подходящие факты в служебную заметку (bot/ai_flow.py) — на тул
+# надежда плохая, модель зовёт его далеко не всегда.
+
+
+async def tool_memory(ctx: ToolContext, args: dict[str, Any]) -> str:
+    if ctx.node_link is None:
+        return "недоступно: нет связи с роем"
+    if ctx.chat_id is None:
+        return "недоступно: память привязана к разговору, а его сейчас нет"
+    action = str(args.get("action") or "").strip()
+    allowed = _MEMORY_VARIANTS.allowed_values(ctx.subscription) if ctx.subscription else []
+    if action not in allowed:
+        return f"не умею: {action or 'без уточнения'}"
+
+    payload: dict[str, Any] = {"chat_id": ctx.chat_id}
+    if action == memory_protocol.ACTION_REMEMBER:
+        text = str(args.get("text") or "").strip()
+        if not text:
+            return "ошибка: не сказано, что запомнить (text)"
+        payload["text"] = text
+    elif action == memory_protocol.ACTION_RECALL:
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return "ошибка: не сказано, о чём вспомнить (query)"
+        payload["query"] = query
+    elif action == memory_protocol.ACTION_FORGET:
+        raw_id = args.get("id")
+        if raw_id is None:
+            return "ошибка: не указан номер факта (id) — возьми его из recall"
+        payload["id"] = raw_id
+
+    dst = Address(node=memory_protocol.NODE_ID, service=memory_protocol.SERVICE_NAME)
+    try:
+        result = await ctx.node_link.command(action, payload, dst=dst)
+    except ProtoError as exc:
+        return f"не вышло: {exc.message}"
+    except (ServiceUnavailableError, TimeoutError) as exc:
+        return f"недоступно: память не отвечает ({exc})"
+    if action == memory_protocol.ACTION_RECALL and not result.get("facts"):
+        return "в памяти про это ничего нет"
+    return json.dumps(result, ensure_ascii=False)
+
+
+_MEMORY_VARIANTS = VariantRights(
+    param="action",
+    rights=(
+        (memory_protocol.ACTION_RECALL, ActionRight("recall", memory_protocol.SERVICE_NAME)),
+        (memory_protocol.ACTION_REMEMBER, ActionRight("remember", memory_protocol.SERVICE_NAME)),
+        (memory_protocol.ACTION_FORGET, ActionRight("forget", memory_protocol.SERVICE_NAME)),
+    ),
+)
+
+_DECL_MEMORY: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "memory",
+        "description": (
+            "Твоя долгая память об ЭТОМ разговоре и его людях — то, что иначе "
+            "забудется, когда тред закончится: привычки и предпочтения "
+            "(«качаем в такую-то папку», «смотрим в такой-то озвучке»), "
+            "договорённости, имена и роли машин, всё названное «запомни».\n"
+            "remember — записать ОДНУ мысль своими словами, коротко и так, "
+            "чтобы через месяц было понятно без разговора вокруг. Не "
+            "пересказывай беседу и не записывай мелочи вроде «спросил "
+            "погоду» — память не дневник.\n"
+            "recall — поискать в памяти словами. Подходящее и так "
+            "подмешивается тебе перед ответом, так что зови recall, только "
+            "если нужно копнуть глубже, чем уже дали.\n"
+            "forget — стереть факт по id из recall (когда он устарел или "
+            "человек просит забыть).\n"
+            "Память у каждого разговора своя, чужую ты не видишь — это не "
+            "ограничение, которое надо обходить, а как оно устроено."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    # enum подставляется под права собеседника (см. tools_for).
+                    "enum": [v for v, _ in _MEMORY_VARIANTS.rights],
+                    "description": "recall — вспомнить; remember — запомнить; forget — забыть",
+                },
+                "text": {"type": "string", "description": "remember: сам факт, одной мыслью"},
+                "query": {"type": "string", "description": "recall: о чём вспомнить, словами"},
+                "id": {"type": "integer", "description": "forget: номер факта из recall"},
+            },
+            "required": ["action"],
+        },
+    },
+}
+
+
 # --- web_search: интернет через свой SearXNG (LLM_INTEGRATION_PLAN.md §9) ---
 
 
@@ -1475,6 +1575,12 @@ TOOLS: tuple[ToolSpec, ...] = (
         handler=tool_torrents,
         declaration=_DECL_TORRENTS,
         variants=_TORRENTS_VARIANTS,
+    ),
+    ToolSpec(
+        name="memory",
+        handler=tool_memory,
+        declaration=_DECL_MEMORY,
+        variants=_MEMORY_VARIANTS,
     ),
     ToolSpec(
         name="dismiss",

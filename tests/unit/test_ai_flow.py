@@ -38,6 +38,7 @@ class FakeMessage:
     from_user = None
     reply_to_message = None
     quote = None
+    text = "привет"
 
     def __init__(self) -> None:
         self.answers: list[str] = []
@@ -115,7 +116,11 @@ def _admin_book() -> SubscriptionBook:
 class FakeNodeLink:
     display_name = "нода"
 
-    def __init__(self, own=None, chat_results=(), get_state_routes=None, wol_sent=None):
+    def __init__(
+        self, own=None, chat_results=(), get_state_routes=None, wol_sent=None, memory_facts=()
+    ):
+        self.memory_facts = list(memory_facts)
+        self.recall_calls: list[dict] = []
         self._own = own or OWN_STATE
         # chat_results — список результатов/исключений, по одному на каждый
         # вызов command("chat", ...) (по порядку) — эмулирует "недоступна,
@@ -139,6 +144,13 @@ class FakeNodeLink:
         raise ServiceUnavailableError("нет связи")
 
     async def command(self, action, args=None, dst=None, timeout=None):
+        if action == "recall":
+            # Память спрашивается перед КАЖДЫМ запросом (bot/ai_flow.py::
+            # recall_facts) — в command_calls её не пишем, иначе каждый тест
+            # про раунды chat считал бы её лишним вызовом. По умолчанию
+            # память пуста: заметка остаётся ровно такой, как была раньше.
+            self.recall_calls.append(args)
+            return {"facts": list(self.memory_facts), "count": len(self.memory_facts)}
         self.command_calls.append((action, args, dst.node if dst else None))
         if action == "send_wol":
             self.wol_sent.append(args)
@@ -1208,3 +1220,55 @@ async def test_perform_dismissal_model_only_failure_is_reported(store):
 
     assert message.answers == [ai_flow.DISMISS_FAILED_TEXT]
     assert notifier.sent and "llm.sleep" in notifier.sent[0][1]
+
+
+# --- долгая память: факты подмешиваются сами, до ответа ---
+
+
+async def test_memory_facts_land_in_the_context_note(store):
+    """На тул надежда плохая — модель зовёт его далеко не всегда, поэтому
+    подходящее подмешивается в заметку само."""
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Как скажете"}],
+        get_state_routes={"winpc:llm": {"asleep": False}},
+        memory_facts=[
+            {"text": "Качаем в /mnt/data/pr", "sensitive": False},
+            {"text": "Код от домофона 1234", "sensitive": True},
+        ],
+    )
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "скачай кино"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert link.recall_calls[0]["chat_id"] == 1
+    note = _note_msg(link.command_calls[0][1]["messages"])
+    assert "Качаем в /mnt/data/pr" in note
+    # Личное уходит с оговоркой: видимость уже ограничена запросом к службе,
+    # а это — просьба не произносить вслух без повода.
+    assert "Код от домофона 1234 [личное: знай, но вслух не пересказывай]" in note
+
+
+async def test_silent_memory_leaves_the_note_as_it_was(store):
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "…"}],
+        get_state_routes={"winpc:llm": {"asleep": False}},
+    )
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert "Из того, что ты помнишь" not in _note_msg(link.command_calls[0][1]["messages"])
+
+
+async def test_broken_memory_does_not_break_the_conversation(store):
+    """Память необязательна: её сбой не должен ронять разговор."""
+    facts = await ai_flow.recall_facts(
+        FakeNodeLink(chat_results=[]), 1, "привет"
+    )
+    assert facts == []

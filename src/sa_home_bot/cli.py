@@ -111,6 +111,10 @@ def main(argv: list[str] | None = None) -> int:
         from sa_home_bot.net.app import run_net
 
         coro = run_net(settings)
+    elif args.service == "memory":
+        from sa_home_bot.memory.app import run_memory
+
+        coro = run_memory(settings)
     else:
         from sa_home_bot.app import run
 

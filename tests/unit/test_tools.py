@@ -1084,3 +1084,54 @@ async def test_web_search_without_query(store):
         _ctx(store, node_link=_FakeSwarmLink(), subscription=ADMIN), {}
     )
     assert result.startswith("ошибка")
+
+
+# --- memory: долгая память о чате ---
+
+
+async def test_memory_tool_never_lets_the_model_choose_whose_memory(store):
+    """chat_id проставляет бот из контекста, а не модель: иначе «вспомни, что
+    тебе говорили в другом чате» стало бы рабочей просьбой."""
+    link = _FakeSwarmLink(command_result={"facts": [{"id": 1, "text": "Качаем в /mnt/data/pr"}]})
+    await tools.tool_memory(
+        _ctx(store, node_link=link, subscription=ADMIN, chat_id=777),
+        {"action": "recall", "query": "куда качаем", "chat_id": 999},
+    )
+    action, dst = link.commands[0]
+    assert (action, dst.node, dst.service) == ("recall", "alfred", "memory")
+    assert link.sent_args[0]["chat_id"] == 777  # свой чат, не подсунутый моделью
+
+
+async def test_memory_tool_rights_are_per_action():
+    decl = next(
+        d for d in tools.tools_for(_sub("recall@memory")).declarations
+        if d["function"]["name"] == "memory"
+    )
+    assert decl["function"]["parameters"]["properties"]["action"]["enum"] == ["recall"]
+    assert "memory" not in _names(_sub("status", "nodes"))
+
+
+async def test_memory_tool_does_not_expose_scope_to_the_model():
+    """Общее знание дома заводит человек руками — сказанное в одном чате не
+    должно вдруг стать видимым во всех."""
+    decl = next(
+        d for d in tools.tools_for(ADMIN).declarations if d["function"]["name"] == "memory"
+    )
+    params = decl["function"]["parameters"]["properties"]
+    assert "scope" not in params and "chat_id" not in params
+
+
+async def test_memory_recall_without_facts_reads_as_plain_text(store):
+    link = _FakeSwarmLink(command_result={"facts": [], "count": 0})
+    result = await tools.tool_memory(
+        _ctx(store, node_link=link, subscription=ADMIN), {"action": "recall", "query": "что-то"}
+    )
+    assert result == "в памяти про это ничего нет"
+
+
+async def test_memory_outside_a_dialogue_is_honest(store):
+    result = await tools.tool_memory(
+        _ctx(store, node_link=_FakeSwarmLink(), subscription=ADMIN, chat_id=None),
+        {"action": "recall", "query": "что-то"},
+    )
+    assert result.startswith("недоступно")
