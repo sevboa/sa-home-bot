@@ -483,6 +483,11 @@ def test_plugin_lookup_matches_by_host_not_prefix():
     # Другой путь того же сайта — тот же плагин.
     assert match(plugins, "https://rutracker.org/forum/dl.php?t=1") == "rutracker"
     assert match(plugins, "https://rutracker.org/anything") == "rutracker"
+    # Живая находка 2026-07-29: rutor ищет на rutor.info, а качать отдаёт с
+    # d.rutor.info — поддомен это тот же сайт, иначе своя же находка
+    # отвергалась бы как «ссылка с чужого сайта».
+    assert match([{"name": "rutor", "enabled": True, "url": "https://rutor.info/"}],
+                 "https://d.rutor.info/download/977537") == "rutor"
     # Выключенный плагин не в счёт, чужой сайт — тем более.
     assert match(plugins, "https://rutor.info/torrent/1") is None
     assert match(plugins, "https://example.org/x.torrent") is None

@@ -241,11 +241,13 @@ class TorrentsService:
 
     @staticmethod
     def _plugin_for(plugins: list[Any], url: str) -> str | None:
-        """Имя включённого плагина, чей сайт совпадает с хостом ссылки.
+        """Имя включённого плагина, чьему сайту принадлежит ссылка.
 
-        Хост, а не префикс строки: у плагина в `url` полный адрес раздела
-        (`https://rutracker.org/forum/`), а ссылка из выдачи может вести на
-        другой путь того же сайта.
+        Сравниваем хосты, а не префикс строки: у плагина в `url` адрес
+        раздела (`https://rutracker.org/forum/`), а ссылка из выдачи ведёт на
+        другой путь. Поддомен считается тем же сайтом — живая находка
+        2026-07-29: rutor ищет на `rutor.info`, а качать отдаёт с
+        `d.rutor.info`, и точное сравнение хостов такую находку отвергало.
         """
         host = urlsplit(url).netloc.lower()
         if not host:
@@ -253,7 +255,8 @@ class TorrentsService:
         for plugin in plugins:
             if not plugin.get("enabled"):
                 continue
-            if urlsplit(str(plugin.get("url", ""))).netloc.lower() == host:
+            site = urlsplit(str(plugin.get("url", ""))).netloc.lower()
+            if site and (host == site or host.endswith(f".{site}")):
                 return str(plugin.get("name"))
         return None
 
