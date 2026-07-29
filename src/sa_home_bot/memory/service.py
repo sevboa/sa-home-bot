@@ -78,6 +78,23 @@ SCOPES = (SCOPE_CHAT, SCOPE_COMMON)
 _WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
 
+def _stem(word: str) -> str:
+    """Слово → его начало, по которому ищем.
+
+    Живая находка 2026-07-29 (первый же настоящий прогон): записали «смотрим
+    в озвучкЕ», спросили «какая у нас озвучкА» — ноль находок. Триграммный
+    индекс ищет подстроку целиком, и хвост «-ка» в «озвучке» не встречается.
+    Отрезание окончания превращает поиск в поиск по началу слова, что и
+    нужно: «озвуч» найдёт и «озвучке», и «озвучка», и «озвучкой». Это не
+    морфология, а грубое приближение — зато без словарей и зависимостей.
+    """
+    if len(word) >= 6:
+        return word[:-2]
+    if len(word) >= 4:
+        return word[:-1]
+    return word
+
+
 def _match_query(text: str) -> str:
     """Текст сообщения → выражение MATCH для FTS5.
 
@@ -87,7 +104,7 @@ def _match_query(text: str) -> str:
     FTS5 (`AND`, `NOT`, `*`) из живого сообщения ломают разбор запроса.
     """
     words = [w for w in _WORD_RE.findall(text.lower()) if len(w) >= MIN_WORD_CHARS]
-    return " OR ".join(f'"{w}"' for w in dict.fromkeys(words))
+    return " OR ".join(f'"{_stem(w)}"' for w in dict.fromkeys(words))
 
 
 def _row_to_fact(row: Any) -> dict[str, Any]:

@@ -36,11 +36,15 @@ async def test_remember_then_recall_by_meaningful_words(svc):
     assert result["facts"][0]["scope"] == "chat"
 
 
-async def test_recall_finds_by_substring_not_exact_word(svc):
-    """Токенайзер trigram: «озвучк» находит «озвучке» — для русского это
-    практичнее стандартного (полной морфологии всё равно не будет)."""
+async def test_recall_survives_a_different_word_ending(svc):
+    """Живая находка: записали «в озвучкЕ», спросили «какая озвучкА» — и
+    триграммный индекс не нашёл ничего, потому что ищет подстроку целиком.
+    Окончание у слов запроса отрезается — это не морфология, а грубое
+    приближение, но именно оно и нужно."""
     await svc.run_command("remember", {"text": "Смотрим в озвучке LostFilm", "chat_id": FAMILY})
-    assert (await svc.run_command("recall", {"query": "озвучк", "chat_id": FAMILY}))["count"] == 1
+    for query in ("озвучк", "а какая у нас озвучка?", "в какой озвучкой смотрим"):
+        found = await svc.run_command("recall", {"query": query, "chat_id": FAMILY})
+        assert found["count"] == 1, query
 
 
 async def test_memory_of_one_chat_is_invisible_to_another(svc):
