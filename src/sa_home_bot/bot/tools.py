@@ -1072,6 +1072,7 @@ TORRENTS_ACTION_ADD = "add"
 TORRENTS_ACTION_PAUSE = "pause"
 TORRENTS_ACTION_RESUME = "resume"
 TORRENTS_ACTION_SEARCH = "search"
+TORRENTS_ACTION_DETAILS = "details"
 
 # Что тул принимает как источник раздачи: magnet-ссылку — от человека, либо
 # ссылку из выдачи СВОЕГО ЖЕ поиска (action=search) — её служба скачает
@@ -1110,6 +1111,14 @@ async def _torrents_host(ctx: ToolContext) -> tuple[str | None, str]:
 
 def _torrents_args(action: str, args: dict[str, Any]) -> dict[str, Any] | str:
     """Аргументы команды службе, либо текст ошибки для модели."""
+    if action == TORRENTS_ACTION_DETAILS:
+        page = str(args.get("page") or "").strip()
+        if not page.startswith(("http://", "https://")):
+            return (
+                "ошибка: нужна ссылка page из результата поиска (action=«search»), "
+                "скопированная дословно"
+            )
+        return {"page": page}
     if action == TORRENTS_ACTION_SEARCH:
         query = str(args.get("query") or "").strip()
         if not query:
@@ -1193,6 +1202,7 @@ _TORRENTS_VARIANTS = VariantRights(
         (TORRENTS_ACTION_LIST, ActionRight(TORRENTS_ACTION_LIST, TORRENTS_SERVICE)),
         (TORRENTS_ACTION_SPACE, ActionRight(TORRENTS_ACTION_SPACE, TORRENTS_SERVICE)),
         (TORRENTS_ACTION_SEARCH, ActionRight(TORRENTS_ACTION_SEARCH, TORRENTS_SERVICE)),
+        (TORRENTS_ACTION_DETAILS, ActionRight(TORRENTS_ACTION_DETAILS, TORRENTS_SERVICE)),
         (TORRENTS_ACTION_ADD, ActionRight(TORRENTS_ACTION_ADD, TORRENTS_SERVICE)),
         (TORRENTS_ACTION_PAUSE, ActionRight(TORRENTS_ACTION_PAUSE, TORRENTS_SERVICE)),
         (TORRENTS_ACTION_RESUME, ActionRight(TORRENTS_ACTION_RESUME, TORRENTS_SERVICE)),
@@ -1218,7 +1228,13 @@ _DECL_TORRENTS: dict[str, Any] = {
             "leechers и source. Выбирай осмысленно — больше сидов значит "
             "быстрее, размер сверяй с тем, что просил человек (качество, "
             "лимит по гигабайтам), — и передавай source ДОСЛОВНО в "
-            "action=«add». Если подходящего нет или выбор неочевиден — "
+            "action=«add». Если нужно решить между похожими раздачами или "
+            "человек спрашивает про озвучку, качество картинки, число серий "
+            "— открой карточку ОДНОЙ из них: action=«details» со ссылкой "
+            "page из той же находки. По одной за раз и только когда это "
+            "правда нужно: страница большая, а весь список так листать — "
+            "долго и незачем.\n"
+            "Если подходящего нет или выбор неочевиден — "
             "покажи находки и спроси, а не бери первую попавшуюся. Поле "
             "used_query в ответе значит, что твой запрос ничего не дал и "
             "искали более широким: выдача шире просьбы, сверяй имена находок "
@@ -1260,6 +1276,8 @@ _DECL_TORRENTS: dict[str, Any] = {
                         "list — что сейчас качается (имена, прогресс, скорость); "
                         "space — директории сохранения и свободное место; "
                         "search — найти раздачу на трекерах по названию; "
+                        "details — прочитать карточку ОДНОЙ найденной раздачи "
+                        "(озвучка, качество, состав, размер); "
                         "add — поставить раздачу на закачку (magnet-ссылка "
                         "человека или source из найденного); "
                         "pause — остановить раздачу; resume — снова запустить"
@@ -1283,6 +1301,13 @@ _DECL_TORRENTS: dict[str, Any] = {
                         "Только для add: откуда качать — magnet-ссылка, как её "
                         "дал человек, ЛИБО значение source из результата "
                         "action=«search», скопированное дословно"
+                    ),
+                },
+                "page": {
+                    "type": "string",
+                    "description": (
+                        "Только для details: ссылка page из результата "
+                        "action=«search», дословно"
                     ),
                 },
                 "save_path": {

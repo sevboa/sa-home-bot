@@ -39,6 +39,12 @@ GUI: плагин отдаёт .torrent своей сессией, а мы до�
 с нужным `save_path`. Штатное `search/downloadTorrent` Web API так не умеет
 — оно кладёт раздачу в директорию по умолчанию, мимо выбора «куда сохранить».
 
+`details` — карточка одной найденной раздачи: страница трекера, очищенная
+от разметки. В выдаче поиска есть только имя, размер и сиды — а «какая
+озвучка», «какой битрейт», «сколько серий» живёт на странице. Ходим только
+по сайтам с установленным плагином (то же ограничение, что у `add`) и
+только по одной странице за вызов.
+
 `space` — сколько места на дисках директорий сохранения. Свободное место
 считается локально (`shutil.disk_usage`) — служба живёт на той же машине,
 что и qBittorrent, спрашивать его Web API про чужие ФС незачем; сам
@@ -53,6 +59,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import html
 import logging
 import re
 import shutil
@@ -60,6 +67,8 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -87,6 +96,7 @@ ACTION_PAUSE = "pause"
 ACTION_RESUME = "resume"
 ACTION_SPACE = "space"
 ACTION_SEARCH = "search"
+ACTION_DETAILS = "details"
 
 # Сколько находок отдавать. Их читает модель и выбирает одну — на десятке
 # строк выбор по сидам/размеру делается ничуть не хуже, чем на полусотне, а
@@ -100,6 +110,19 @@ SEARCH_RUNNING = "Running"
 # Скачивание метафайла руками плагина (nova2dl) — короткая операция, но по
 # сети; свой потолок, чтобы зависший трекер не держал команду вечно.
 PLUGIN_FETCH_TIMEOUT_S = 60.0
+# Карточка раздачи (details): что забирать со страницы трекера. Голова —
+# название и «о фильме», техническая часть — качество/видео/аудио/размер.
+# Живая находка 2026-07-29: на руторе техническая карточка лежит ПОСЛЕ
+# синопсиса (позиция ~3300 при полном тексте страницы в 16 000 знаков), так
+# что «первые N символов» теряют ровно то, ради чего страницу и открывают —
+# поэтому берём голову И отдельным куском техническую часть.
+DETAILS_HEAD_CHARS = 900
+DETAILS_TECH_CHARS = 1100
+DETAILS_TIMEOUT_S = 20.0
+# UA обычного браузера: с «Python-urllib» часть трекеров отвечает отказом, а
+# ничего специфичного для конкретного клиента мы не делаем.
+DETAILS_UA = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+
 # Где живут поисковый движок и плагины qBittorrent (nova2dl.py, engines/).
 # Пусто в конфиге — путь по умолчанию для Linux-сборки.
 DEFAULT_NOVA_DIR = "~/.local/share/qBittorrent/nova3"
@@ -167,6 +190,54 @@ def _query_ladder(query: str) -> list[str]:
     return attempts[:MAX_QUERY_ATTEMPTS]
 
 
+# Вырезаем то, что на странице раздачи заведомо не про раздачу: скрипты и
+# навигацию. Список id/class намеренно общий — у трекеров они называются
+# примерно одинаково, а промахнуться безопасно: не вырезали — просто больше
+# мусора в тексте, вырезали лишнее — текст короче.
+_PAGE_DROP_TAGS_RE = re.compile(r"(?is)<(script|style|head|nav|noscript)\b.*?</\1>")
+_PAGE_DROP_BLOCKS_RE = re.compile(
+    r'(?is)<(div|table|ul)[^>]*(?:id|class)="[^"]*'
+    r'(?:menu|logo|sidebar|footer|header|news_table)[^"]*".*?</\1>'
+)
+_PAGE_BREAK_RE = re.compile(r"(?i)<br\s*/?>|</(?:p|div|tr|li|h\d)>")
+_PAGE_TAG_RE = re.compile(r"(?s)<[^>]+>")
+_PAGE_MAGNET_RE = re.compile(r'href="(magnet:[^"]+)"', re.IGNORECASE)
+# Начало технической части карточки — по словам, одинаковым у русских
+# трекеров. Строка целиком, а не вхождение: «качество» встречается и в
+# описании фильма.
+# Длина строки, с которой начинается «содержательная» часть страницы (см.
+# _page_text): пункты меню короче, названия раздач и подписи полей — длиннее.
+_MEANINGFUL_LINE_CHARS = 25
+_PAGE_TECH_RE = re.compile(
+    r"(?im)^\s*(?:качество|формат|видео|аудио|перевод|продолжительность|субтитры|размер)\b"
+)
+
+
+def _page_text(page: str) -> str:
+    text = _PAGE_DROP_BLOCKS_RE.sub(" ", _PAGE_DROP_TAGS_RE.sub(" ", page))
+    text = _PAGE_TAG_RE.sub(" ", _PAGE_BREAK_RE.sub("\n", text))
+    text = html.unescape(text)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    # Живая находка 2026-07-29: вырезание блоков по id/class ловит не всё —
+    # у настоящей страницы меню сделано вложенными div'ами, и нежадный
+    # «до первого </div>» останавливается раньше. Верхнее меню при этом
+    # узнаётся по форме: короткие строки-ссылки («Топ», «Категории», «Чат»)
+    # до первой содержательной. Их и снимаем, а то они съедают голову
+    # карточки, которой отведено немного.
+    first = next((i for i, line in enumerate(lines) if len(line) >= _MEANINGFUL_LINE_CHARS), 0)
+    return "\n".join(lines[first:])
+
+
+def _page_summary(text: str) -> str:
+    """Голова страницы + техническая карточка (см. DETAILS_HEAD_CHARS)."""
+    head = text[:DETAILS_HEAD_CHARS]
+    match = _PAGE_TECH_RE.search(text, len(head))
+    if match is None:
+        return head
+    tech = text[match.start() : match.start() + DETAILS_TECH_CHARS]
+    return f"{head}\n…\n{tech}"
+
+
 _ENGINE_ERROR_MARK = "[Error]"
 
 
@@ -220,6 +291,7 @@ class TorrentsService:
                 ACTION_RESUME,
                 ACTION_SPACE,
                 ACTION_SEARCH,
+                ACTION_DETAILS,
             ),
             actions=(
                 ActionSpec(
@@ -230,6 +302,11 @@ class TorrentsService:
                     id=ACTION_SEARCH,
                     title="🔎 Поиск по трекерам",
                     params=(ActionParam(name="query", type="string", title="Что ищем"),),
+                ),
+                ActionSpec(
+                    id=ACTION_DETAILS,
+                    title="📖 Карточка раздачи",
+                    params=(ActionParam(name="page", type="string", title="Ссылка на страницу"),),
                 ),
                 ActionSpec(
                     id=ACTION_SPACE,
@@ -360,6 +437,48 @@ class TorrentsService:
             # каждый вопрос Альфреда оставлял бы за собой мусор.
             client.search_delete(search_id=search_id)
         return list(raw.get("results", []))
+
+    def _details_sync(self, page: str) -> dict[str, Any]:
+        """Карточка раздачи со страницы трекера.
+
+        Ходим только на сайты, для которых установлен поисковый плагин — то
+        же ограничение, что и у `add`: «открой вот эту ссылку из разговора»
+        модели давать незачем, а свои же находки открывать надо.
+        """
+        client = self._client()
+        try:
+            client.auth_log_in()
+            plugin = self._plugin_for(list(client.search_plugins()), page)
+        except qbittorrentapi.APIError as exc:
+            raise ProtoError(ERR_INTERNAL, f"qBittorrent отклонил запрос: {exc}") from exc
+        finally:
+            client.auth_log_out()
+        if plugin is None:
+            raise ProtoError(
+                ERR_BAD_REQUEST,
+                "открываю только страницы трекеров, для которых установлен "
+                "поисковый плагин — этот сайт не из них",
+            )
+
+        request = urllib.request.Request(page, headers={"User-Agent": DETAILS_UA})
+        try:
+            with urllib.request.urlopen(request, timeout=DETAILS_TIMEOUT_S) as resp:  # noqa: S310
+                raw = resp.read()
+                # Кодировку берём из заголовков: рутор отдаёт utf-8, а
+                # рутрекер и его родня — cp1251, и без этого текст приезжает
+                # кракозябрами.
+                charset = resp.headers.get_content_charset() or "utf-8"
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise ProtoError(ERR_INTERNAL, f"страница не открылась: {exc}") from exc
+        body = raw.decode(charset, errors="replace")
+
+        magnet = _PAGE_MAGNET_RE.search(body)
+        result: dict[str, Any] = {"page": page, "text": _page_summary(_page_text(body))}
+        if magnet is not None:
+            # Со страницы magnet берётся напрямую — его можно отдать в add как
+            # есть, не поднимая плагин ради метафайла.
+            result["magnet"] = html.unescape(magnet.group(1))
+        return result
 
     def _search_sync(self, query: str, limit: int) -> dict[str, Any]:
         client = self._client()
@@ -588,6 +707,11 @@ class TorrentsService:
             return {"torrents": torrents, "count": len(torrents), "limit": LIST_LIMIT}
         if action == ACTION_SPACE:
             return await asyncio.to_thread(self._space_sync)
+        if action == ACTION_DETAILS:
+            page = str(args.get("page") or "").strip()
+            if not page.startswith(("http://", "https://")):
+                raise ProtoError(ERR_BAD_REQUEST, "не указана ссылка на страницу раздачи (page)")
+            return await asyncio.to_thread(self._details_sync, page)
         if action == ACTION_SEARCH:
             query = str(args.get("query") or "").strip()
             if not query:

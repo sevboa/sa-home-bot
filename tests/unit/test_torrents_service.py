@@ -117,7 +117,9 @@ def fake_disk(monkeypatch):
 def test_describe_declares_add_action_with_save_path_choices():
     desc = TorrentsService(_settings()).describe()
     assert desc.info.service == "torrents"
-    assert desc.capabilities == ("add", "list", "pause", "resume", "space", "search")
+    assert desc.capabilities == (
+        "add", "list", "pause", "resume", "space", "search", "details",
+    )
     action = desc.find_action("add")
     names = [p.name for p in action.params]
     assert names == ["source", "name", "save_path"]
@@ -570,3 +572,57 @@ async def test_search_reports_used_query_only_when_it_differs(fake_qbittorrent):
     fake_qbittorrent.found = list(_FOUND)
     result = await TorrentsService(_settings()).run_command("search", {"query": "3 body problem"})
     assert "used_query" not in result
+
+
+# --- details: карточка одной раздачи со страницы трекера ---
+
+_PAGE_HTML = """
+<html><head><title>t</title><script>var x=1;</script></head><body>
+<div id="menu">Топ Категории Всё Поиск Комменты Залить Чат</div>
+<div id="content">
+<h1>Задача трёх тел / 3 Body Problem [S01] (2024) WEB-DLRip | LostFilm</h1>
+<div id="download"><a href="magnet:?xt=urn:btih:d7d8&amp;dn=rutor">Скачать</a></div>
+<p>О фильме: %s</p>
+<table id="details"><tr><td>Качество : WEB-DLRip</td></tr>
+<tr><td>Видео : 720x304, XviD</td></tr>
+<tr><td>Аудио#1 : Russian AC3 |LostFilm|</td></tr></table>
+</div></body></html>
+""" % ("синопсис. " * 300)
+
+
+async def test_details_keeps_technical_card_behind_a_long_synopsis(monkeypatch):
+    """Живая находка: на руторе «Качество/Видео/Аудио» лежит ПОСЛЕ длинного
+    синопсиса — наивные «первые N символов» теряют ровно то, ради чего
+    страницу и открывают."""
+    monkeypatch.setattr(
+        TorrentsService, "_fetch_page", lambda self, url: _PAGE_HTML, raising=False
+    )
+
+    text = torrents_service._page_summary(torrents_service._page_text(_PAGE_HTML))
+
+    assert "Задача трёх тел" in text  # голова страницы
+    assert "Качество : WEB-DLRip" in text  # и техническая карточка
+    assert "Видео : 720x304, XviD" in text
+    assert "Топ Категории" not in text  # навигация вырезана
+    assert len(text) < 2200
+
+
+def test_page_text_drops_scripts_and_navigation():
+    text = torrents_service._page_text(_PAGE_HTML)
+    assert "var x=1" not in text
+    assert "Топ Категории" not in text
+
+
+async def test_details_refuses_site_without_plugin(fake_qbittorrent):
+    with pytest.raises(ProtoError) as excinfo:
+        await TorrentsService(_settings()).run_command(
+            "details", {"page": "https://example.org/torrent/1"}
+        )
+    assert excinfo.value.code == ERR_BAD_REQUEST
+    assert "плагин" in excinfo.value.message
+
+
+async def test_details_without_link_is_bad_request():
+    with pytest.raises(ProtoError) as excinfo:
+        await TorrentsService(_settings()).run_command("details", {"page": "не ссылка"})
+    assert excinfo.value.code == ERR_BAD_REQUEST

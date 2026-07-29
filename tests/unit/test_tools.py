@@ -791,7 +791,9 @@ def test_torrents_enum_is_per_action_right():
     что добавить раздачу или остановить чужую закачку."""
     assert _tor_enum(_sub("list@torrents")) == ["list"]
     assert _tor_enum(_sub("list@torrents", "pause@torrents")) == ["list", "pause"]
-    assert _tor_enum(ADMIN) == ["list", "space", "search", "add", "pause", "resume"]
+    assert _tor_enum(ADMIN) == [
+        "list", "space", "search", "details", "add", "pause", "resume",
+    ]
 
 
 def test_torrents_hidden_without_any_torrent_right():
@@ -801,7 +803,9 @@ def test_torrents_hidden_without_any_torrent_right():
 
 def test_torrents_group_right_covers_all_actions():
     """«*@torrents» — новое умение службы доступно сразу, без правки конфига."""
-    assert _tor_enum(_sub("*@torrents")) == ["list", "space", "search", "add", "pause", "resume"]
+    assert _tor_enum(_sub("*@torrents")) == [
+        "list", "space", "search", "details", "add", "pause", "resume",
+    ]
 
 
 async def test_torrents_list_finds_hosting_node(store):

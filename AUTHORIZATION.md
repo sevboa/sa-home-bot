@@ -97,7 +97,8 @@
   процесс — рестарт делает человек через `restart_node`, см. `node/update.py`.
 - `list@torrents` — read-only список того, что качается; `space@torrents` —
   свободное место в директориях сохранения; `search@torrents` — поиск по
-  трекерам движком qBittorrent; `add@torrents` — добавить раздачу;
+  трекерам движком qBittorrent; `details@torrents` — карточка найденной
+  раздачи со страницы трекера; `add@torrents` — добавить раздачу;
   `pause@torrents`/`resume@torrents` — остановить/снова запустить раздачу;
 - `search@net` — веб-поиск через локальный SearXNG.
 
@@ -123,7 +124,7 @@
 | `calc`, `get_time`, `get_weather`, `convert_currency`, `remind` | нет (чистый расчёт или публичный API; `remind` — исторически, см. ниже) |
 | `swarm_status(what="nodes")` | `nodes` (то же, что команда `/nodes`) |
 | `swarm_status(what="health"\|"disks")` | `status` (то же, что `/status`) |
-| `torrents(action="list"\|"space"\|"search"\|"add"\|"pause"\|"resume")` | `<action>@torrents` — ровно то же право, что у человека на ту же операцию |
+| `torrents(action="list"\|"space"\|"search"\|"details"\|"add"\|"pause"\|"resume")` | `<action>@torrents` — ровно то же право, что у человека на ту же операцию |
 | `dismiss(mode="model")` | `sleep@llm` — выгрузить модель |
 | `dismiss(mode="sleep"\|"off")` | `suspend@node` / `poweroff@node` — то же, что кнопки «Усыпить/Выключить машину» на карточке ноды |
 | `web_search` | `search@net` |
