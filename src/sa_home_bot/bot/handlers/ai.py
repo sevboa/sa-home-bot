@@ -356,6 +356,18 @@ async def _do_ask_and_reply(
         return
     if raw is None:
         return  # недоступность/ошибка уже сообщена пользователю (ai_flow)
+    if not raw.strip():
+        # Живая находка 2026-07-29: модель может вернуть пустой текст (у неё
+        # кончилось окно контекста — декларации тулов плюс выдача поиска), и
+        # пользователь получал сообщение из одного префикса «Альфред:».
+        # Пустая реплика не ход диалога: в ai_turns не пишем, отвечаем тем же
+        # персонажем, что и на сбой генерации, а подробности — админу.
+        log.warning("ai: пустой ответ модели (chat=%s)", message.chat.id)
+        await message.answer(ai_flow.ALBERT_HICCUP)
+        await ai_flow.notify_admins(
+            book, notifier, f"⚠️ /ai (chat={message.chat.id}): модель вернула пустой ответ"
+        )
+        return
     sent = await _send_alfred_reply(message, raw)
     await store.record_ai_turn(
         message.chat.id, sent.message_id, dialogue_id, "assistant", raw, datetime.now(tz=UTC)

@@ -682,3 +682,30 @@ async def test_no_dismissal_when_alfred_never_answered(store, monkeypatch):
     )
 
     assert performed == []
+
+
+async def test_empty_model_answer_is_not_sent_as_a_bare_prefix(store, monkeypatch):
+    """Живая находка: у модели кончалось окно контекста и она возвращала
+    пустой текст — в чат уходило сообщение из одного «Альфред:»."""
+
+    async def fake_empty(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None
+    ):
+        return "   "
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_empty)
+    message = FakeMessage(1, text="/alfred привет")
+    notifier = FakeNotifier()
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=notifier, active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(),
+    )
+
+    assert message.sent == [ai_flow.ALBERT_HICCUP]
+    assert notifier.sent and "пустой ответ" in notifier.sent[0][1]
+    # Пустая реплика — не ход диалога: в истории её нет.
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    assert [r["role"] for r in rows] == ["user"]
