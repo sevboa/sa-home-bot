@@ -7,7 +7,7 @@ import logging
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
-from aiogram.types import ReplyParameters
+from aiogram.types import InlineKeyboardMarkup, ReplyParameters
 
 log = logging.getLogger(__name__)
 
@@ -36,9 +36,17 @@ class Notifier:
         self._bot = bot
 
     async def send_direct(
-        self, chat_id: int, text: str, reply_to_message_id: int | None = None
+        self,
+        chat_id: int,
+        text: str,
+        reply_to_message_id: int | None = None,
+        reply_markup: InlineKeyboardMarkup | None = None,
     ) -> int | None:
-        """Отправить сообщение. Вернуть message_id первого чанка или None при провале."""
+        """Отправить сообщение. Вернуть message_id первого чанка или None при провале.
+
+        ``reply_markup`` вешается на ПЕРВЫЙ чанк: кнопка относится к
+        сообщению целиком, а не к его хвосту (у длинных текстов чанков
+        несколько, см. chunk_text)."""
         chunks = chunk_text(text)
         first_message_id: int | None = None
         for i, chunk in enumerate(chunks):
@@ -49,7 +57,9 @@ class Notifier:
                 if (i == 0 and reply_to_message_id is not None)
                 else None
             )
-            message_id = await self._send_one(chat_id, chunk, reply)
+            message_id = await self._send_one(
+                chat_id, chunk, reply, reply_markup if i == 0 else None
+            )
             if message_id is None:
                 return first_message_id
             if first_message_id is None:
@@ -57,12 +67,16 @@ class Notifier:
         return first_message_id
 
     async def _send_one(
-        self, chat_id: int, text: str, reply: ReplyParameters | None
+        self,
+        chat_id: int,
+        text: str,
+        reply: ReplyParameters | None,
+        reply_markup: InlineKeyboardMarkup | None = None,
     ) -> int | None:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 msg = await self._bot.send_message(
-                    chat_id, text, reply_parameters=reply
+                    chat_id, text, reply_parameters=reply, reply_markup=reply_markup
                 )
                 return msg.message_id
             except TelegramRetryAfter as exc:

@@ -75,6 +75,7 @@ from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.lifecycle import notify_tool_call
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
+from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import PersonConfig, Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.llm.prompt import ROUTE_OK, THINK_MARKER
@@ -588,6 +589,7 @@ async def request_alfred(
     book: SubscriptionBook,
     notifier: Notifier,
     dismissal: ai_tools.DismissalBox | None = None,
+    tool_calls: ToolCalls | None = None,
 ) -> str | None:
     """Сходить в llm.chat с presence/wake-сценарием.
 
@@ -649,7 +651,9 @@ async def request_alfred(
             # ответа, не видно, звала ли модель тул вообще и что тот
             # вернул (см. schema.sql::ai_tool_calls). Пишет только живой
             # /ai — у него есть Store, у службы tasks его нет вовсе.
-            await notify_tool_call(book, notifier, name)
+            await notify_tool_call(
+                book, notifier, name, args=call_args, result=result, debug=tool_calls
+            )
             if name == SURFING_TOOL and not surfing_announced:
                 # Флаг — в области request_alfred, а не _ask: пересборка
                 # ответа после пробуждения ноды не должна слать вставку

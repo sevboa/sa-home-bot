@@ -17,6 +17,11 @@
                                   # файлы, restart_node потом делает человек
     nodectl -n winpc status       # то же о ноде winpc («спроси любого»:
                                   # запрос идёт своей ноде, та пересылает)
+    nodectl describe torrents     # какие умения объявляет служба
+    nodectl call torrents search query="задача трёх тел"
+                                  # вызвать любое умение любой службы роя —
+                                  # тем же путём, каким это делает Альфред
+                                  # (bot/tools.py); ответ печатается как JSON
 
 Endpoint берётся из --socket (путь unix-сокета или tcp://host:port), либо из
 [node].socket указанного --config, либо из первого найденного конфига по
@@ -28,15 +33,22 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from sa_home_bot.config import Settings
 from sa_home_bot.node.fixups import FixupError, build_fixups
 from sa_home_bot.proto.client import ProtoClient
 from sa_home_bot.proto.endpoints import Endpoint, parse_endpoint, resolve_endpoint
-from sa_home_bot.proto.messages import Address, Envelope, ProtoError
+from sa_home_bot.proto.messages import (
+    Address,
+    Envelope,
+    ProtoError,
+    ServiceDescription,
+)
 from sa_home_bot.runtime import format_duration
 
 # Кандидаты конфига без --config: рабочий каталог (разработка на alfred),
@@ -93,6 +105,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "fix",
         help="доустановить программы/права на месте (интерактивный sudo, локально)",
     )
+    p = sub.add_parser(
+        "call", help="вызвать любое умение любой службы роя (то же, что делает Альфред)"
+    )
+    p.add_argument("service", help="имя службы: torrents, monitor, apps, llm, net, tasks, node")
+    p.add_argument("action", help="id действия (см. nodectl describe <служба>)")
+    p.add_argument(
+        "args",
+        nargs="*",
+        metavar="ключ=значение",
+        help="аргументы действия; true/false/числа распознаются по виду",
+    )
+    p = sub.add_parser("describe", help="какие умения объявляет служба и с какими параметрами")
+    p.add_argument("service", help="имя службы")
     sub.add_parser("check_update", help="сверить работающую/установленную/доступную версии")
     sub.add_parser(
         "update", help="pipx install --force до последнего тега (без рестарта процесса)"
@@ -251,6 +276,56 @@ def _run_fix(args: argparse.Namespace) -> int:
     return 0
 
 
+def _service_dst(args: argparse.Namespace) -> Address:
+    """Адресат для call/describe: своя нода, если -n не задан.
+
+    Служба указывается всегда — в этом и смысл команды: дотянуться до любого
+    умения роя ровно тем же путём, каким ходит Альфред (bot/tools.py), а не
+    только до самого супервизора.
+    """
+    return Address(node=args.node, service=args.service)
+
+
+def _call_args(pairs: list[str]) -> dict[str, Any]:
+    """``ключ=значение`` → аргументы действия.
+
+    Тип угадывается по виду значения: протокол разрешает только
+    string|int|float|bool (PROTOCOL.md), а из командной строки всё приходит
+    строками — без распознавания `quiet=true` уехало бы строкой «true».
+    Значение может содержать «=» (magnet-ссылки), поэтому режем по первому.
+    """
+    args: dict[str, Any] = {}
+    for pair in pairs:
+        key, sep, raw = pair.partition("=")
+        if not sep:
+            raise ValueError(f"аргумент без «=»: {pair!r}")
+        args[key] = _guess_type(raw)
+    return args
+
+
+def _guess_type(raw: str) -> Any:
+    if raw.lower() in ("true", "false"):
+        return raw.lower() == "true"
+    for cast in (int, float):
+        try:
+            return cast(raw)
+        except ValueError:
+            continue
+    return raw
+
+
+def render_describe(desc: ServiceDescription) -> str:
+    lines = [f"Служба {desc.info.service} на {desc.info.node} (v{desc.info.version})"]
+    for action in desc.actions:
+        params = ", ".join(
+            f"{p.name}{'' if p.required else '?'}:{p.type}"
+            + (f" [{'|'.join(p.choices)}]" if p.choices else "")
+            for p in action.params
+        )
+        lines.append(f"  {action.id:16} {action.title}" + (f"  ({params})" if params else ""))
+    return "\n".join(lines)
+
+
 async def _run(args: argparse.Namespace) -> int:
     endpoint, token = _resolve_endpoint(args)
     # -n/--node: адресат в конверте, пересылку делает своя нода (§11 п. 2).
@@ -286,6 +361,14 @@ async def _run(args: argparse.Namespace) -> int:
                 f"Присоединились через {args.endpoint}. "
                 f"Новых пиров: {', '.join(added) if added else 'нет'}."
             )
+        elif args.command == "call":
+            result = await client.command(
+                args.action, _call_args(args.args), dst=_service_dst(args)
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        elif args.command == "describe":
+            desc = await client.describe(dst=_service_dst(args))
+            print(render_describe(desc))
         elif args.command == "check_update":
             print(render_check_update(await client.command("check_update", dst=dst)))
         elif args.command == "update":

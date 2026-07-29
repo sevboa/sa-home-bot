@@ -27,6 +27,7 @@ from sa_home_bot.bot.handlers import (
     power,
     stats,
     status,
+    tool_debug,
     torrents,
     wake,
 )
@@ -50,6 +51,9 @@ def build_dispatcher(book: SubscriptionBook) -> Dispatcher:
     dp.message.middleware(AuthorizationMiddleware(book))
     dp.callback_query.middleware(CallbackAuthorizationMiddleware(book))
     dp.include_router(basic.router)
+    # tool_debug: единственный обработчик своего callback-префикса, к
+    # сообщениям и командам не относится вовсе.
+    dp.include_router(tool_debug.router)
     # ai: команда /ai + узкий фильтр реплаев на свои же диалоги (резолвится
     # по ai_turns, не по дереву Telegram-реплаев) — не пересекается с другими
     # роутерами, но пусть проверяется рано.

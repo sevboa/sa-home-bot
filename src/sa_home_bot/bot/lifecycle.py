@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
+from sa_home_bot.bot import tool_debug
 from sa_home_bot.bot.notifier import Notifier
+from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.domain.models import EVENT_SYSTEM, POWER_UNEXPECTED, PowerEvent
 from sa_home_bot.domain.render import render_outage_line
 from sa_home_bot.runtime import format_duration
@@ -59,13 +62,31 @@ async def broadcast_system(
 
 
 # Дебаг-канал: факт вызова инструмента Alfred'ом (живой /ai и self-scheduled
-# remind через службу tasks), без аргументов/результата — нужно только знать,
-# обращалась ли модель в тул и в какой (решение пользователя 2026-07-27).
+# remind через службу tasks). Само сообщение короткое — «обращался ли и в
+# какой тул» (решение пользователя 2026-07-27); вход и выход прячутся за
+# кнопкой «развернуть» (bot/tool_debug.py, просьба пользователя 2026-07-29):
+# на каждой реплике вываливать килобайты выдачи в чат незачем, но когда
+# модель ищет и не находит — без них не разобраться.
 EVENT_ALFRED_TOOL_CALL = "alfred_tool_call"
 
 
-async def notify_tool_call(book: SubscriptionBook, notifier: Notifier, tool_name: str) -> None:
-    text = f"🔧 Alfred вызвал инструмент: {tool_name}"
+async def notify_tool_call(
+    book: SubscriptionBook,
+    notifier: Notifier,
+    tool_name: str,
+    *,
+    args: dict[str, Any] | None = None,
+    result: str | None = None,
+    debug: ToolCalls | None = None,
+) -> None:
+    """``debug``/``args``/``result`` — если известны, к сообщению добавляется
+    кнопка «развернуть». У события от службы tasks (bot/node_events.py) их
+    нет: та шлёт по рою только имя тула, и кнопке нечего показывать."""
+    text = tool_debug.render_short(tool_name)
+    markup = None
+    if debug is not None and args is not None and result is not None:
+        token = debug.add(tool_debug.ToolCall(name=tool_name, args=args, result=result))
+        markup = tool_debug.keyboard(token, expanded=False)
     # Живая находка 2026-07-27: НЕ book.accepting() — тот трактует "*" в
     # event_types как "всё", а у админской подписки event_types=["*"]
     # (полный охват системных событий). На вызов тула, происходящий на
@@ -74,4 +95,4 @@ async def notify_tool_call(book: SubscriptionBook, notifier: Notifier, tool_name
     # точному имени, вайлдкард на него не распространяется.
     for sub in book.all():
         if not sub.broken and EVENT_ALFRED_TOOL_CALL in sub.event_types:
-            await notifier.send_direct(sub.chat_id, text)
+            await notifier.send_direct(sub.chat_id, text, reply_markup=markup)

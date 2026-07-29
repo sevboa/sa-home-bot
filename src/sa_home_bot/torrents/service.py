@@ -54,6 +54,7 @@ import asyncio
 import base64
 import binascii
 import logging
+import re
 import shutil
 import socket
 import subprocess
@@ -124,6 +125,46 @@ ALL_SELECTORS = frozenset({"*", "all", "все", "всё", "все закачк�
 
 def _is_magnet_or_url(source: str) -> bool:
     return source.startswith(("magnet:", "http://", "https://"))
+
+
+# Живая находка 2026-07-29: трекер (rutor) ищет запрос как НЕПРЕРЫВНУЮ фразу
+# в заголовке раздачи, поэтому любое лишнее слово обнуляет выдачу целиком:
+# «задача трёх тел» → 10 находок, «задача трёх тел 2024» → ноль. Модель же
+# упорно дописывает год, качество и имя релизера (в логе — восемь пустых
+# попыток подряд, каждая с новым набором лишних слов). Просить её в промпте
+# «передавай только название» помогает не всегда, поэтому лестница попыток
+# живёт здесь: запрос как есть → без шумовых слов → всё короче и короче.
+_QUERY_NOISE_RE = re.compile(
+    r"\b(?:"
+    r"19\d{2}|20\d{2}"  # год
+    r"|[sS]\d{1,2}(?:[eE]\d{1,3})?"  # S01, S01E02
+    r"|\d{3,4}[pi]"  # 1080p, 720i, 2160p
+    r"|web-?dl(?:rip)?|web-?rip|hd-?rip|bd-?rip|dvd-?rip|blu-?ray|hdtv|remux"
+    r"|hevc|avc|x26[45]|h\.?26[45]"
+    r"|сериал|сезон|series|season"
+    r")\b",
+    re.IGNORECASE,
+)
+_PUNCT_ONLY_RE = re.compile(r"^[\W_]+$")
+# Потолок попыток: каждая — живой запрос к трекеру (~1–2 с). Пяти хватает,
+# чтобы дойти от полного названия релиза до двух слов.
+MAX_QUERY_ATTEMPTS = 5
+
+
+def _clean_query(query: str) -> str:
+    words = [w for w in _QUERY_NOISE_RE.sub(" ", query).split() if not _PUNCT_ONLY_RE.match(w)]
+    return " ".join(words)
+
+
+def _query_ladder(query: str) -> list[str]:
+    """Запросы к трекеру от самого точного к самому широкому (см. выше)."""
+    attempts = [query.strip()]
+    cleaned = _clean_query(query)
+    words = cleaned.split()
+    for candidate in (cleaned, *(" ".join(words[:n]) for n in (4, 3, 2))):
+        if candidate and candidate not in attempts:
+            attempts.append(candidate)
+    return attempts[:MAX_QUERY_ATTEMPTS]
 
 
 _ENGINE_ERROR_MARK = "[Error]"
@@ -302,6 +343,24 @@ class TorrentsService:
         finally:
             path.unlink(missing_ok=True)
 
+    def _run_search_job(self, client: Any, pattern: str, limit: int) -> list[dict[str, Any]]:
+        """Одно задание поиска: старт → ожидание → результаты → уборка."""
+        job = client.search_start(pattern=pattern, plugins="enabled", category="all")
+        search_id = job["id"]
+        try:
+            deadline = time.monotonic() + SEARCH_WAIT_S
+            while time.monotonic() < deadline:
+                statuses = client.search_status(search_id=search_id)
+                if not statuses or statuses[0].get("status") != SEARCH_RUNNING:
+                    break
+                time.sleep(SEARCH_POLL_S)
+            raw = client.search_results(search_id=search_id, limit=limit)
+        finally:
+            # Задание живёт в qBittorrent, пока его не удалят: без этого
+            # каждый вопрос Альфреда оставлял бы за собой мусор.
+            client.search_delete(search_id=search_id)
+        return list(raw.get("results", []))
+
     def _search_sync(self, query: str, limit: int) -> dict[str, Any]:
         client = self._client()
         try:
@@ -312,32 +371,29 @@ class TorrentsService:
                     "поиск по трекерам не настроен: в qBittorrent нет ни одного "
                     "включённого поискового плагина",
                 )
-            job = client.search_start(pattern=query, plugins="enabled", category="all")
-            search_id = job["id"]
-            try:
-                deadline = time.monotonic() + SEARCH_WAIT_S
-                while time.monotonic() < deadline:
-                    statuses = client.search_status(search_id=search_id)
-                    if not statuses or statuses[0].get("status") != SEARCH_RUNNING:
-                        break
-                    time.sleep(SEARCH_POLL_S)
-                raw = client.search_results(search_id=search_id, limit=limit)
-            finally:
-                # Задание живёт в qBittorrent, пока его не удалят: без этого
-                # каждый вопрос Альфреда оставлял бы за собой мусор.
-                client.search_delete(search_id=search_id)
+            attempts = _query_ladder(query)
+            usable: list[dict[str, Any]] = []
+            broken: list[dict[str, Any]] = []
+            used_query = attempts[0]
+            for attempt in attempts:
+                raw = self._run_search_job(client, attempt, limit)
+                # Сбой плагина приезжает НЕ ошибкой, а фальшивой «находкой»:
+                # имя вида «[запрос][Error]: …», ссылка «<сайт>/error», 100
+                # сидов и терабайт размера (так плагины показывают проблему в
+                # GUI). Пропустить такое в модель — значит дать ей «раздачу» с
+                # рекордными сидами, которую она честно предложит скачать.
+                broken = [r for r in raw if _is_engine_error(r)]
+                usable = [r for r in raw if not _is_engine_error(r)]
+                used_query = attempt
+                if usable or broken:
+                    # Пусто из-за лишних слов — пробуем короче; сломанный
+                    # плагин короче не починится, дальше идти незачем.
+                    break
         except qbittorrentapi.APIError as exc:
             raise ProtoError(ERR_INTERNAL, f"qBittorrent отклонил запрос: {exc}") from exc
         finally:
             client.auth_log_out()
 
-        # Сбой плагина приезжает НЕ ошибкой, а фальшивой «находкой»: имя вида
-        # «[запрос][Error]: …», ссылка «<сайт>/error», 100 сидов и терабайт
-        # размера (так плагины показывают проблему в GUI). Пропустить такое в
-        # модель — значит дать ей «раздачу» с рекордными сидами, которую она
-        # честно предложит скачать. Отделяем и превращаем в настоящий отказ.
-        broken = [r for r in raw.get("results", []) if _is_engine_error(r)]
-        usable = [r for r in raw.get("results", []) if not _is_engine_error(r)]
         if broken and not usable:
             raise ProtoError(ERR_INTERNAL, f"поиск не отработал: {_engine_error_text(broken[0])}")
 
@@ -357,7 +413,17 @@ class TorrentsService:
         # Сортировка по сидам — то, по чему выбирают раздачу в первую очередь;
         # qBittorrent отдаёт результаты в порядке прихода от плагинов.
         results.sort(key=lambda r: r["seeders"], reverse=True)
-        return {"results": results[:limit], "count": len(results[:limit]), "query": query}
+        payload: dict[str, Any] = {
+            "results": results[:limit],
+            "count": len(results[:limit]),
+            "query": query,
+        }
+        if used_query != query.strip():
+            # Модель должна знать, что искали не совсем то, о чём её просили:
+            # выдача шире запрошенного, и год/качество надо проверять глазами
+            # по именам находок, а не считать, что трекер их уже учёл.
+            payload["used_query"] = used_query
+        return payload
 
     def _add_sync(self, source: str, save_path: str) -> int | None:
         """Свободные байты в целевой директории после приёма раздачи (или

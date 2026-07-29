@@ -22,6 +22,7 @@ from sa_home_bot.bot import ai_flow, commands
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.notifier import Notifier, chunk_text
 from sa_home_bot.bot.service_link import ServiceLink
+from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.subscriptions.book import SubscriptionBook
@@ -122,6 +123,7 @@ async def cmd_ai(
     book: SubscriptionBook,
     notifier: Notifier,
     active_ai_chats: ai_flow.ActiveAiChats,
+    tool_calls: ToolCalls,
 ) -> None:
     dialogue_id = message.message_id
     parts = (message.text or "").split(maxsplit=1)
@@ -147,7 +149,8 @@ async def cmd_ai(
         history = [{"role": "user", "content": OPENING_PROMPT}]
 
     await _ask_and_reply(
-        message, node_link, store, config, book, notifier, dialogue_id, history, active_ai_chats
+        message, node_link, store, config, book, notifier, dialogue_id, history,
+        active_ai_chats, tool_calls,
     )
 
 
@@ -161,6 +164,7 @@ async def on_ai_reply(
     book: SubscriptionBook,
     notifier: Notifier,
     active_ai_chats: ai_flow.ActiveAiChats,
+    tool_calls: ToolCalls,
     subscription: Subscription | None = None,
 ) -> None:
     # AuthorizationMiddleware не проверяет права на не-командные сообщения —
@@ -198,7 +202,8 @@ async def on_ai_reply(
         history.append({"role": "user", "content": EMPTY_REPLY_PROMPT})
 
     await _ask_and_reply(
-        message, node_link, store, config, book, notifier, ai_dialogue_id, history, active_ai_chats
+        message, node_link, store, config, book, notifier, ai_dialogue_id, history,
+        active_ai_chats, tool_calls,
     )
 
 
@@ -211,6 +216,7 @@ async def on_private_message(
     book: SubscriptionBook,
     notifier: Notifier,
     active_ai_chats: ai_flow.ActiveAiChats,
+    tool_calls: ToolCalls,
     subscription: Subscription | None = None,
 ) -> None:
     # Не команда — AuthorizationMiddleware её не проверяла, права смотрим сами
@@ -241,7 +247,8 @@ async def on_private_message(
     history = [{"role": r["role"], "content": r["content"]} for r in history_rows if r["content"]]
 
     await _ask_and_reply(
-        message, node_link, store, config, book, notifier, dialogue_id, history, active_ai_chats
+        message, node_link, store, config, book, notifier, dialogue_id, history,
+        active_ai_chats, tool_calls,
     )
 
 
@@ -255,6 +262,7 @@ async def on_group_mention(
     book: SubscriptionBook,
     notifier: Notifier,
     active_ai_chats: ai_flow.ActiveAiChats,
+    tool_calls: ToolCalls,
     subscription: Subscription | None = None,
 ) -> None:
     right = commands.required_right(commands.ALFRED.name)
@@ -281,7 +289,8 @@ async def on_group_mention(
         history = [{"role": "user", "content": OPENING_PROMPT}]
 
     await _ask_and_reply(
-        message, node_link, store, config, book, notifier, dialogue_id, history, active_ai_chats
+        message, node_link, store, config, book, notifier, dialogue_id, history,
+        active_ai_chats, tool_calls,
     )
 
 
@@ -295,6 +304,7 @@ async def _ask_and_reply(
     dialogue_id: int,
     history: list[dict[str, str]],
     active_ai_chats: ai_flow.ActiveAiChats,
+    tool_calls: ToolCalls,
 ) -> None:
     # Регистрация задачи (не просто chat_id — см. докстринг ActiveAiChats,
     # второй заход) на время запроса: bot/app.py::_shutdown() перед разрывом
@@ -307,7 +317,7 @@ async def _ask_and_reply(
     active_ai_chats.register(chat_id, task)
     try:
         await _do_ask_and_reply(
-            message, node_link, store, config, book, notifier, dialogue_id, history
+            message, node_link, store, config, book, notifier, dialogue_id, history, tool_calls
         )
     finally:
         active_ai_chats.unregister(chat_id, task)
@@ -322,6 +332,7 @@ async def _do_ask_and_reply(
     notifier: Notifier,
     dialogue_id: int,
     history: list[dict[str, str]],
+    tool_calls: ToolCalls,
 ) -> None:
     await message.bot.send_chat_action(message.chat.id, "typing")
     # Ячейка под «Альфреда отпустили» (тул dismiss): сам тул ничего не гасит —
@@ -331,7 +342,8 @@ async def _do_ask_and_reply(
     dismissal = ai_tools.DismissalBox()
     try:
         raw = await ai_flow.request_alfred(
-            message, node_link, store, config, history, dialogue_id, book, notifier, dismissal
+            message, node_link, store, config, history, dialogue_id, book, notifier, dismissal,
+            tool_calls,
         )
     except Exception as exc:  # noqa: BLE001 — страховка: баг тут не должен быть молчаливым
         log.exception("ai: необработанная ошибка в диалоге chat=%s", message.chat.id)

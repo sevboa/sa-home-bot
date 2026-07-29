@@ -35,7 +35,7 @@ class FakeBot:
     async def set_my_commands(self, commands, scope=None):
         return True
 
-    async def send_message(self, chat_id, text, reply_parameters=None):
+    async def send_message(self, chat_id, text, reply_parameters=None, reply_markup=None):
         self.sent.append(text)
         return SimpleNamespace(message_id=1)
 

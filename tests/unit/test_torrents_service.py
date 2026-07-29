@@ -527,3 +527,46 @@ async def test_search_keeps_real_results_when_one_plugin_failed(fake_qbittorrent
     ]
     result = await TorrentsService(_settings()).run_command("search", {"query": "x"})
     assert [r["name"] for r in result["results"]] == ["3 Body Problem S01 1080p"]
+
+
+def test_query_ladder_goes_from_exact_to_broad():
+    """Живая находка: трекер ищет запрос как непрерывную фразу в заголовке —
+    год и качество обнуляют выдачу, а модель их упорно дописывает."""
+    ladder = torrents_service._query_ladder(
+        "Задача трёх тел / 3 Body Problem [S01] (2024) WEBRip 1080p от Kerob | L2"
+    )
+    assert ladder[0].startswith("Задача трёх тел /")  # сперва как просили
+    assert "2024" not in ladder[1] and "1080p" not in ladder[1] and "S01" not in ladder[1]
+    assert "Задача трёх тел" in ladder  # до рабочего варианта лестница доходит
+    assert len(ladder) <= torrents_service.MAX_QUERY_ATTEMPTS
+
+
+def test_query_ladder_keeps_a_clean_query_as_is():
+    assert torrents_service._query_ladder("3 body problem") == ["3 body problem", "3 body"]
+
+
+async def test_search_retries_shorter_when_nothing_found(fake_qbittorrent):
+    tried: list[str] = []
+
+    def only_short_query_finds(self, client, pattern, limit):
+        tried.append(pattern)
+        return list(_FOUND) if pattern == "Задача трёх тел" else []
+
+    original = TorrentsService._run_search_job
+    try:
+        TorrentsService._run_search_job = only_short_query_finds
+        result = await TorrentsService(_settings()).run_command(
+            "search", {"query": "Задача трёх тел (2024) WEBRip 1080p"}
+        )
+    finally:
+        TorrentsService._run_search_job = original
+
+    assert result["count"] == 2
+    assert result["used_query"] == "Задача трёх тел"
+    assert tried[0] == "Задача трёх тел (2024) WEBRip 1080p"  # сперва как просили
+
+
+async def test_search_reports_used_query_only_when_it_differs(fake_qbittorrent):
+    fake_qbittorrent.found = list(_FOUND)
+    result = await TorrentsService(_settings()).run_command("search", {"query": "3 body problem"})
+    assert "used_query" not in result

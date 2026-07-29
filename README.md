@@ -73,7 +73,14 @@ sa-home-bot --service node --config ./config.toml   # нода поднимае�
 nodectl status                                      # статус служб ноды
 nodectl restart telegram-bot                        # управление службой
 nodectl events                                      # живой хвост событий
+nodectl describe torrents                           # какие умения у службы
+nodectl call torrents search query="матрица"        # вызвать любое умение роя
 ```
+
+`call`/`describe` ходят к службам ровно тем же путём, что и бот с Альфредом
+(`Address{node, service}` в конверте) — это способ руками повторить то, что
+делает модель, и увидеть сырой ответ службы. С `-n <нода>` — к службе на
+соседней машине.
 
 Нода объявляет **тип своей машины** — `[node] kind`: `server` (24/7, реальное
 железо), `workstation` (штатно спит и выключается, будится по WoL) или `vps`
