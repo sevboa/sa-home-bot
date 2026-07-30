@@ -470,3 +470,17 @@ def test_expiry_is_spelled_in_minutes(seconds, expected):
 
     expires = datetime.now(tz=UTC) + timedelta(seconds=seconds)
     assert invite_handlers._format_expiry(expires) == expected
+
+
+def test_guest_list_shows_local_time():
+    """Живая находка 2026-07-30: /guests показывал UTC («вошёл 05:02» вместо
+    10:02) — обрезка ISO-строки вместо перевода в местное время."""
+    from datetime import UTC, datetime
+
+    from sa_home_bot.bot.handlers import invites as invite_handlers
+
+    moment = datetime(2026, 7, 30, 5, 2, tzinfo=UTC)
+    expected = moment.astimezone().strftime("%Y-%m-%d %H:%M")
+    assert invite_handlers._local_time(moment.isoformat()) == expected
+    # Мусор не роняет список — показываем как есть.
+    assert invite_handlers._local_time("не дата") == "не дата"

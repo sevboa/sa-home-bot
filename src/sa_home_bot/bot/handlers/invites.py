@@ -119,6 +119,19 @@ async def cmd_invite(
     )
 
 
+def _local_time(iso: str) -> str:
+    """UTC-метку из базы — в местное время, как везде в боте.
+
+    Хранится всё в UTC (одно правило на проект), а показывать надо то время,
+    которое человек видит на своих часах: обрезка ISO-строки давала «05:02»
+    вместо «10:02» — живая находка 2026-07-30.
+    """
+    try:
+        return datetime.fromisoformat(iso).astimezone().strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return iso
+
+
 @router.message(Command(commands.GUESTS.name))
 async def cmd_guests(message: Message, gate: Gatekeeper, book: SubscriptionBook) -> None:
     guests = sorted(book.guests(), key=lambda g: g.invited_at)
@@ -127,9 +140,10 @@ async def cmd_guests(message: Message, gate: Gatekeeper, book: SubscriptionBook)
     lines = ["<b>Приглашённые</b>", ""]
     if guests:
         for guest in guests:
+            # «вход», а не «вошёл»: гость бывает и женщиной, а рода мы не знаем.
             lines.append(
                 f"• {escape(guest.name)} — <code>{guest.chat_id}</code>"
-                + (f", вошёл {guest.invited_at[:16].replace('T', ' ')}" if guest.invited_at else "")
+                + (f", вход {_local_time(guest.invited_at)}" if guest.invited_at else "")
             )
     else:
         lines.append("Пока никого.")
@@ -137,7 +151,7 @@ async def cmd_guests(message: Message, gate: Gatekeeper, book: SubscriptionBook)
         lines += ["", "<b>Открытые коды</b>", ""]
         lines += [
             f"• <code>{invites.format_code(row['code'])}</code> — до "
-            f"{row['expires_at'][:16].replace('T', ' ')}"
+            f"{_local_time(row['expires_at'])}"
             for row in open_codes
         ]
 
