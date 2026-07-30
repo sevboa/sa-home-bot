@@ -49,11 +49,12 @@ import urllib.request
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from html import escape
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sa_home_bot import wake_core
-from sa_home_bot.bot import commands
+from sa_home_bot.bot import commands, invites, recipients
 from sa_home_bot.bot.monitor_state import parse_disk_summary, parse_health_state
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
@@ -125,6 +126,13 @@ class ToolContext:
     ``subscription`` — права собеседника, по ним собирается комплект тулов
     (см. tools_for): Альфред не умеет того, чего не может сам пользователь.
     ``None`` — подписки нет, остаются только тулы без прав (fail-closed).
+
+    ``book``/``notifier``/``store``/``author`` нужны одному тулу — ``tell``
+    (передать сообщение человеку в личку): найти получателя среди подписок,
+    отправить ему сообщение и записать его как ход диалога, чтобы получатель
+    мог ответить реплаем. У службы tasks этих вещей нет вовсе (см. докстринг
+    файла), поэтому там тул честно скажет, что сейчас не умеет, — так же, как
+    ``dismiss`` без ``dismissal``.
     """
 
     chat_id: int | None
@@ -135,6 +143,11 @@ class ToolContext:
     history: list[dict[str, Any]] = field(default_factory=list)
     subscription: Subscription | None = None
     dismissal: DismissalBox | None = None
+    book: Any | None = None  # SubscriptionBook — не типизируем, чтобы tools не
+    # зависели от подписок (они зависят от конфига, а конфиг импортирует ноду)
+    notifier: Any | None = None  # bot/notifier.py::Notifier
+    store: Any | None = None  # db/store.py::Store
+    author: str | None = None  # как зовут того, кто прямо сейчас говорит
 
 
 ToolHandler = Callable[["ToolContext", dict[str, Any]], Awaitable[str]]
@@ -1526,6 +1539,111 @@ _DECL_WEB_SEARCH: dict[str, Any] = {
 }
 
 
+# --- tell: передать человеку личное сообщение (IMPLEMENTATION_PLAN.md этап 28) ---
+
+# Право — «действие@служба» на ту же службу llm, что и сам разговор
+# (`chat@llm`): передача сообщений — это умение Альфреда, а не отдельная
+# команда бота. Гостям по умолчанию НЕ выдаётся (см. [invites].grant_commands):
+# впустили поговорить — не значит разрешили писать другим людям от чужого
+# имени.
+TELL_RIGHT = "tell@llm"
+
+# Потолок доставок от одного автора за час: модель может увлечься и отправить
+# одно и то же несколько раз, а получатель этого не просил.
+TELL_MAX_PER_HOUR = 10
+_tell_limiter = invites.AttemptLimiter(TELL_MAX_PER_HOUR)
+
+
+def render_tell(text: str, author: str | None) -> str:
+    """Как выглядит доставленное сообщение.
+
+    Отдельная «шапка» обязательна: человек должен видеть, что это не бот сам
+    придумал написать и не сообщение от системы, а Альфред передаёт просьбу
+    конкретного человека. Текст — от Альфреда и в его манере, поэтому идёт
+    как обычная его реплика.
+    """
+    who = f" по просьбе {escape(author)}" if author else ""
+    return f"📨 <b>Альфред{who}:</b>\n\n{escape(text.strip())}"
+
+
+async def tool_tell(ctx: ToolContext, args: dict[str, Any]) -> str:
+    if ctx.book is None or ctx.notifier is None:
+        return "недоступно: сейчас я не могу никому написать"
+    if ctx.chat_id is None:
+        return "недоступно: непонятно, от кого передавать"
+    who = str(args.get("recipient") or "").strip()
+    text = str(args.get("text") or "").strip()
+    if not who:
+        return "ошибка: не сказано, кому передать (recipient)"
+    if not text:
+        return "ошибка: не сказано, что передать (text)"
+
+    found = recipients.find_recipients(who, ctx.book, ctx.settings.people)
+    if not found:
+        return (
+            f"не получилось: «{who}» я не знаю — писать я могу только тем, кто "
+            "уже принял приглашение и говорит со мной в личном чате"
+        )
+    if len(found) > 1:
+        names = ", ".join(f"{r.display} ({r.chat_id})" for r in found)
+        return f"уточни, кому именно: под «{who}» подходят {names}"
+    target = found[0]
+    if target.chat_id == ctx.chat_id:
+        return "не нужно: это тот же чат, просто скажи это здесь"
+    if not _tell_limiter.register(ctx.chat_id):
+        return "не сейчас: слишком много сообщений передано за последний час"
+
+    message_id = await ctx.notifier.send_direct(target.chat_id, render_tell(text, ctx.author))
+    if message_id is None:
+        return f"не дошло: {target.display} сейчас недоступен"
+    # Записываем как свой ход в диалоге получателя: тогда он ответит обычным
+    # реплаем и разговор продолжится (реплай-цепочка резолвится по ai_turns,
+    # см. bot/handlers/ai.py::AiReplyContinuation), а не упрётся в сообщение,
+    # на которое некому отвечать.
+    if ctx.store is not None:
+        await ctx.store.record_ai_turn(
+            target.chat_id, message_id, message_id, "assistant", text, datetime.now(tz=UTC)
+        )
+    log.info(
+        "tell: сообщение от chat=%s доставлено chat=%s (%s)",
+        ctx.chat_id, target.chat_id, target.display,
+    )
+    return f"передано: {target.display} получил сообщение"
+
+
+_DECL_TELL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "tell",
+        "description": (
+            "Передать личное сообщение другому человеку в его личный чат с "
+            "тобой. Используй, когда собеседник просит что-то кому-то "
+            "сообщить, передать, спросить или напомнить ('скажи Андрею, что…', "
+            "'спроси у Наташи…'). Текст сообщения придумываешь ТЫ: перескажи "
+            "просьбу своими словами, в своей манере, и упомяни, от кого она — "
+            "это не пересылка дословной цитаты. Писать можно только тем, кто "
+            "уже принят и говорит с тобой лично; если человека не нашлось или "
+            "подходит сразу несколько — тул скажет об этом, тогда переспроси у "
+            "собеседника, а не угадывай."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "recipient": {
+                    "type": "string",
+                    "description": "Имя или @username получателя, как его назвал собеседник",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Готовый текст сообщения — то, что получатель прочтёт",
+                },
+            },
+            "required": ["recipient", "text"],
+        },
+    },
+}
+
+
 _DECL_REMIND: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -1594,6 +1712,12 @@ TOOLS: tuple[ToolSpec, ...] = (
         declaration=_DECL_WEB_SEARCH,
         requires=ActionRight(net_protocol.ACTION_SEARCH, net_protocol.SERVICE_NAME),
     ),
+    # tell — право в форме «действие@служба» на ту же службу llm, что и сам
+    # разговор: проверяется через allows_command, как chat@llm у /alfred (см.
+    # AUTHORIZATION.md §3.2). Групповые формы (*@llm, голый *) работают как
+    # обычно, поэтому админу дописывать ничего не нужно.
+    ToolSpec(name="tell", handler=tool_tell, declaration=_DECL_TELL,
+             requires=CommandRight(TELL_RIGHT)),
     # remind сознательно без requires: он появился до правил доступа и уже
     # работает у живых пользователей — привязка к праву отобрала бы рабочее
     # умение у тех, кому его никто не запрещал. Долг: завести под него право

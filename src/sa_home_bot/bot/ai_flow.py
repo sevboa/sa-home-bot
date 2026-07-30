@@ -708,6 +708,13 @@ async def request_alfred(
             node_link=node_link,
             subscription=subscription,
             dismissal=dismissal,
+            # Для тула tell: кому можно передать сообщение (book), чем
+            # отправить (notifier), где записать доставленное как ход диалога
+            # получателя (store) и от кого оно (author).
+            book=book,
+            notifier=notifier,
+            store=store,
+            author=display_name(message.from_user),
         )
         telegram_chat_id = message.chat.id if message.chat is not None else None
 
