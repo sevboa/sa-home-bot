@@ -357,3 +357,39 @@ async def test_stranger_update_reaches_no_router(store, tmp_path):
         await bot.session.close()
 
     assert seen == []
+
+
+# --- код, присланный в подписной чат -------------------------------------
+
+
+async def test_known_code_is_recognised_inside(store, tmp_path):
+    """Живая находка 2026-07-30: код, присланный уже подписанным человеком,
+    уезжал в разговор с Альфредом и оттуда в веб-поиск. Распознаём такой код
+    до того, как он попадёт куда-либо ещё."""
+    gate = _gate(store, tmp_path)
+    code, _ = await gate.issue(chat_id=1, user_id=None)
+
+    known = await gate.known_code(invites.format_code(code))
+    assert known is not None
+    found_code, row = known
+    assert found_code == code
+    assert row["issued_by_chat_id"] == 1
+
+
+async def test_random_lookalike_string_is_not_a_code(store, tmp_path):
+    """Восемь символов из алфавита — слишком слабый признак сам по себе:
+    перехватывать по нему любую похожую строку в живом разговоре нельзя."""
+    gate = _gate(store, tmp_path)
+    await gate.issue(chat_id=1, user_id=None)
+    assert await gate.known_code("ZZZZ9999") is None
+    assert await gate.known_code("привет, как дела") is None
+
+
+async def test_redeemed_code_is_still_recognisable(store, tmp_path):
+    gate = _gate(store, tmp_path)
+    code, _ = await gate.issue(chat_id=1, user_id=None)
+    await gate.try_admit(77, code)
+
+    known = await gate.known_code(code)
+    assert known is not None
+    assert known[1]["redeemed_at"] is not None

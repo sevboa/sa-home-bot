@@ -159,6 +159,26 @@ class Gatekeeper:
     async def open_codes(self) -> list[dict]:
         return await self._store.open_invites(datetime.now(tz=UTC))
 
+    async def known_code(self, text: str | None) -> tuple[str, dict] | None:
+        """Наш ли это код (в любом состоянии) — вместе с его записью.
+
+        Нужно там, где код прислали в чат, который и так подписной: сам по
+        себе гейт такое сообщение пропускает как обычный текст, и оно уезжает
+        в разговор с Альфредом. Живая находка 2026-07-30: так и вышло —
+        модель приняла код за поисковый запрос и отправила его в веб-поиск,
+        то есть секрет уехал во внешний поисковик. Распознать код надо до
+        того, как он попадёт куда-либо ещё.
+
+        Проверяем не только формат, но и наличие в базе: восемь символов из
+        алфавита — слишком слабый признак, чтобы перехватывать по нему любую
+        похожую строку в живом разговоре.
+        """
+        code = normalize(text)
+        if code is None:
+            return None
+        row = await self._store.find_invite(code)
+        return (code, row) if row is not None else None
+
     async def revoke_code(self, code: str) -> bool:
         return await self._store.revoke_invite(code, datetime.now(tz=UTC))
 

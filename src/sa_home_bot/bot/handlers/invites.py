@@ -173,6 +173,56 @@ async def on_code_revoke(callback: CallbackQuery, gate: Gatekeeper) -> None:
         )
 
 
+class CodeFromInsider(Filter):
+    """Код приглашения, присланный в чат, который и так подписной.
+
+    Живая находка 2026-07-30 (первый живой прогон): человек, у которого
+    подписка уже была, прислал код боту — гейт пропустил сообщение как
+    обычный текст, и оно уехало в разговор с Альфредом, а тот принял код за
+    поисковый запрос и отправил его в веб-поиск. То есть одноразовый секрет
+    ушёл во внешний поисковик, а человек так и не понял, почему «инвайт не
+    работает». Перехватываем такое сообщение до всех широких фильтров.
+    """
+
+    async def __call__(self, message: Message, gate: Gatekeeper) -> bool | dict:
+        known = await gate.known_code(message.text)
+        if known is None:
+            return False
+        code, row = known
+        return {"insider_code": code, "insider_code_row": row}
+
+
+@router.message(CodeFromInsider())
+async def on_code_from_insider(
+    message: Message,
+    insider_code: str,
+    insider_code_row: dict,
+    notifier: Notifier,
+) -> None:
+    """Объяснить, что код тут не нужен, и не пустить его дальше в разговор."""
+    if insider_code_row.get("redeemed_at"):
+        await message.answer("🔑 Этот код уже использован — второй раз он не сработает.")
+        return
+    if insider_code_row.get("revoked_at"):
+        await message.answer("🔑 Этот код отозван.")
+        return
+    await message.answer(
+        "🔑 Это код приглашения — вам он не нужен, вы и так у меня в списке.\n\n"
+        "Код нужен тому, кого приглашаете: пусть он сам пришлёт его мне в личку "
+        "или откроет ссылку из приглашения."
+    )
+    issuer = insider_code_row.get("issued_by_chat_id")
+    if issuer and issuer != message.chat.id:
+        # Код мог уйти не по адресу — тот, кто его выпускал, должен знать и
+        # решить, отзывать ли (/guests).
+        await notifier.send_direct(
+            issuer,
+            f"ℹ️ Код <code>{invites.format_code(insider_code)}</code> прислали мне из чата "
+            f"<code>{message.chat.id}</code>, который и так подписан — я объяснил, что он "
+            "здесь не нужен. Если код ушёл не тому, отзовите его в /guests.",
+        )
+
+
 @router.message(JustAdmitted())
 async def on_admitted(
     message: Message,

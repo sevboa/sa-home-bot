@@ -591,6 +591,13 @@ class Store:
             row = await cur.fetchone()
             return dict(row) if row else None
 
+    async def find_invite(self, code: str) -> dict | None:
+        """Код как он есть, в любом состоянии — нужен, чтобы отличить
+        присланный код от случайной строки из восьми символов."""
+        cur = await self.db.conn.execute("SELECT * FROM invites WHERE code=?", (code,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
     async def open_invites(self, now: datetime) -> list[dict]:
         """Выпущенные и ещё годные коды — для /guests."""
         cur = await self.db.conn.execute(
