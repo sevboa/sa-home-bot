@@ -254,7 +254,12 @@ class TasksService:
 
         await self._announce_waking(task_id, meta)
         outcome = await wake_core.ensure_service_ready(
-            self._node_link, self._store, row["dst_node"], row["dst_service"]
+            self._node_link,
+            self._store,
+            row["dst_node"],
+            row["dst_service"],
+            # До срока ещё PREWAKE_LEAD_S — здесь можно ждать прогрев целиком.
+            warmup_timeout_s=self._settings.llm.warmup_timeout_s,
         )
         log.info("tasks: прогрев задачи id=%s -> %s", task_id, outcome)
         if outcome == wake_core.READY:
@@ -357,6 +362,10 @@ class TasksService:
                 row["dst_service"],
                 # Не выходить за общий бюджет задачи ради одного ожидания WoL.
                 wake_timeout_s=min(wake_core.WAKE_POLL_TIMEOUT_S, max(deadline - loop.time(), 0.0)),
+                # То же и для прогрева: его собственный потолок (360 с)
+                # рассчитан на prewake, где до срока ещё десять минут; здесь
+                # срок уже наступил, и ждать дольше остатка бессмысленно.
+                warmup_timeout_s=max(deadline - loop.time(), 0.0),
             )
             if outcome == wake_core.READY:
                 break

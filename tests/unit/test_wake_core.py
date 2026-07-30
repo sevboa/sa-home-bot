@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import pytest
 import pytest_asyncio
 
 from sa_home_bot import wake_core
@@ -145,3 +146,66 @@ async def test_try_warmup_tolerates_services_without_warmup(store):
 
     link = NoWarmup(OWN_STATE, routes={"winpc:tasks": {"asleep": True}})
     assert await wake_core.ensure_service_ready(link, store, "winpc", "tasks") == wake_core.READY
+
+
+# --- прогрев: бюджет и наблюдаемость (живой сбой 2026-07-30) ----------------
+
+
+class WarmupSpy(FakeNodeLink):
+    """Служба на связи, но прогрев отвечает так, как задано в тесте."""
+
+    def __init__(self, own, routes=None, *, outcome="ok"):
+        super().__init__(own, routes)
+        self._outcome = outcome
+        self.warmup_timeouts: list[float | None] = []
+
+    async def command(self, action, args=None, dst=None, timeout=None):
+        if action == "warmup":
+            self.commands.append((action, args or {}, dst.node if dst else None))
+            self.warmup_timeouts.append(timeout)
+            if self._outcome == "ok":
+                return {}
+            if self._outcome == "unknown":
+                raise ProtoError(ERR_UNKNOWN_ACTION, "нет действия warmup")
+            if self._outcome == "timeout":
+                raise TimeoutError("не дождались")
+            raise ProtoError("internal", "Ollama не поднялась после прогрева WSL/контейнера")
+        return await super().command(action, args, dst, timeout)
+
+
+async def test_warmup_budget_outlives_a_cold_model_load(store):
+    """Замер 2026-07-30: холодный старт 35B-модели — 201 с, а прогрев ждал
+    180 с и сдавался, хотя модель бы поднялась."""
+    assert wake_core.WARMUP_TIMEOUT_S >= 300.0
+
+    link = WarmupSpy(OWN_STATE, routes={"winpc:llm": {"asleep": True}})
+    await wake_core.ensure_service_ready(link, store, "winpc", "llm")
+    assert link.warmup_timeouts == [wake_core.WARMUP_TIMEOUT_S]
+
+
+async def test_warmup_timeout_can_be_narrowed_by_caller(store):
+    """На сроке задачи ждать дольше остатка бюджета бессмысленно."""
+    link = WarmupSpy(OWN_STATE, routes={"winpc:llm": {"asleep": True}})
+    await wake_core.ensure_service_ready(
+        link, store, "winpc", "llm", warmup_timeout_s=42.0
+    )
+    assert link.warmup_timeouts == [42.0]
+
+
+async def test_service_without_warmup_is_still_ready(store):
+    link = WarmupSpy(OWN_STATE, routes={"winpc:llm": {"asleep": True}}, outcome="unknown")
+    assert await wake_core.ensure_service_ready(link, store, "winpc", "llm") == wake_core.READY
+
+
+@pytest.mark.parametrize("outcome", ["error", "timeout"])
+async def test_failed_warmup_is_reported_with_its_reason(store, caplog, outcome):
+    """Раньше причина оставалась только в логах службы на другой машине —
+    на alfred было видно лишь «прогрев не удался»."""
+    link = WarmupSpy(OWN_STATE, routes={"winpc:llm": {"asleep": True}}, outcome=outcome)
+    with caplog.at_level("WARNING"):
+        result = await wake_core.ensure_service_ready(link, store, "winpc", "llm")
+    assert result == wake_core.WARMUP_FAILED
+    text = caplog.text
+    assert "winpc" in text and "llm" in text
+    # В логе не просто «не удалось», а что именно ответила служба.
+    assert ("Ollama" in text) or ("TimeoutError" in text)

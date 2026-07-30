@@ -330,6 +330,13 @@ class LlmConfig(BaseModel):
     ollama_container: str = "ollama"
     request_timeout_s: float = Field(default=240.0, gt=0)
     idle_sleep_after_s: float = Field(default=1800.0, gt=0)
+    # Сколько ждать прогрева модели, прежде чем счесть службу неготовой
+    # (wake_core.try_warmup). Отдельно от request_timeout_s, потому что
+    # платится за ХОЛОДНЫЙ старт: замер 2026-07-30 на winpc — 201 с на
+    # загрузку 35B-модели с диска, при прежних 180 с отложенные задачи
+    # проваливались, хотя модель поднималась. Железо у нод разное, поэтому
+    # настройка, а не константа.
+    warmup_timeout_s: float = Field(default=360.0, gt=0)
     think_chat: bool = True
     num_ctx: int = Field(default=8192, gt=0)
     # Живая находка 2026-07-25: текст персонажа (тон, характер, конкретные

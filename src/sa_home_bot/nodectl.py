@@ -116,6 +116,16 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="ключ=значение",
         help="аргументы действия; true/false/числа распознаются по виду",
     )
+    # Долгие умения (llm warmup/ask грузят модель — на 35B это минуты) с
+    # дефолтом в 10 с проверить было нельзя: консоль отвечала «нода не
+    # ответила вовремя», хотя служба честно работала (живой разбор 2026-07-30).
+    p.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        metavar="СЕК",
+        help="сколько ждать ответа (по умолчанию — обычный таймаут протокола)",
+    )
     p = sub.add_parser("describe", help="какие умения объявляет служба и с какими параметрами")
     p.add_argument("service", help="имя службы")
     sub.add_parser("check_update", help="сверить работающую/установленную/доступную версии")
@@ -362,8 +372,9 @@ async def _run(args: argparse.Namespace) -> int:
                 f"Новых пиров: {', '.join(added) if added else 'нет'}."
             )
         elif args.command == "call":
+            extra = {"timeout": args.timeout} if args.timeout else {}
             result = await client.command(
-                args.action, _call_args(args.args), dst=_service_dst(args)
+                args.action, _call_args(args.args), dst=_service_dst(args), **extra
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
         elif args.command == "describe":

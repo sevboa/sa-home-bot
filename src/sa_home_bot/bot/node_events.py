@@ -42,7 +42,7 @@ from sa_home_bot.bot.ai_flow import (
     STEPS_TEXT,
 )
 from sa_home_bot.bot.lifecycle import broadcast_system, notify_tool_call
-from sa_home_bot.bot.notifier import Notifier
+from sa_home_bot.bot.notifier import Notifier, notify_admins
 from sa_home_bot.db.store import Store
 from sa_home_bot.proto.messages import Envelope
 from sa_home_bot.subscriptions.book import SubscriptionBook
@@ -90,7 +90,9 @@ async def _handle_task_prewake(notifier: Notifier, data: dict) -> None:
         await notifier.send_direct(chat_id, text)
 
 
-async def _handle_task_result(notifier: Notifier, store: Store, data: dict) -> None:
+async def _handle_task_result(
+    notifier: Notifier, store: Store, data: dict, book: SubscriptionBook | None = None
+) -> None:
     meta = data.get("meta") or {}
     if meta.get("kind") != task_protocol.TASK_KIND_LLM_CHAT:
         return
@@ -102,6 +104,16 @@ async def _handle_task_result(notifier: Notifier, store: Store, data: dict) -> N
         await notifier.send_direct(
             chat_id, ALBERT_TASK_MISSED, reply_to_message_id=trigger_message_id
         )
+        # Пользователю — персонаж, админу — причина. Живой сбой 2026-07-30:
+        # «Альбегт» был единственным следом провалившейся задачи, и разбор
+        # свёлся к чтению логов трёх машин, включая Windows-службу.
+        if book is not None:
+            await notify_admins(
+                book,
+                notifier,
+                f"⚠️ Отложенная задача (chat={chat_id}) не выполнена: "
+                f"{html.escape(str(data.get('error') or 'причина не указана'))}",
+            )
         return
     raw = (data.get("result") or {}).get("response", "")
     sent_id = await notifier.send_direct(
@@ -172,7 +184,7 @@ def build_node_event_handler(book: SubscriptionBook, notifier: Notifier, store: 
             await _handle_task_prewake(notifier, data)
             return
         if name == task_protocol.EVENT_TASK_RESULT:
-            await _handle_task_result(notifier, store, data)
+            await _handle_task_result(notifier, store, data, book)
             return
         if name == task_protocol.EVENT_TOOL_CALL:
             await notify_tool_call(book, notifier, data.get("name", "?"))

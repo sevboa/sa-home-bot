@@ -47,7 +47,15 @@ WAKE_POLL_INTERVAL_S = 3.0
 
 # Прогрев самой службы (ACTION_WARMUP у llm) — не все службы такое
 # объявляют, отсутствие поддержки (ERR_UNKNOWN_ACTION) не сбой.
-WARMUP_TIMEOUT_S = 180.0
+#
+# Живой сбой 2026-07-30: было 180 с — меньше, чем реальный холодный старт
+# модели. Замер на winpc: Qwen3.6-35B-A3B поднимается с диска 201 с
+# (`load_duration` из ответа Ollama), то есть первый прогрев после долгого
+# простоя был обречён независимо от того, здоров бэкенд или нет. Значение
+# согласовано с `[llm].request_timeout_s` (360 с): дольше ждать бессмысленно —
+# столько же ждёт и обычный запрос. Вызывающий может задать своё
+# (`ensure_service_ready(warmup_timeout_s=...)`) — железо у нод разное.
+WARMUP_TIMEOUT_S = 360.0
 
 # Исходы ensure_service_ready.
 READY = "ready"
@@ -220,17 +228,33 @@ async def resolve_wake_info(
     return None
 
 
-async def try_warmup(node_link: ServiceLink, dst: Address) -> bool:
+async def try_warmup(
+    node_link: ServiceLink, dst: Address, timeout_s: float = WARMUP_TIMEOUT_S
+) -> bool:
     """Лучшее из возможного: дёргаем условное действие ``warmup`` у цели
     (llm/service.py его объявляет) — отсутствие поддержки
     (ERR_UNKNOWN_ACTION) не ошибка, просто у этой службы нет отдельного
-    прогрева (раз dst и так отвечает, этого достаточно)."""
+    прогрева (раз dst и так отвечает, этого достаточно).
+
+    Причина неудачи обязательно уходит в лог: без этого разбор сводился к
+    «прогрев не удался» на одной машине и походу за логами службы на другой
+    (живой сбой 2026-07-30 — на winpc это ещё и Windows-служба).
+    """
     try:
-        await node_link.command("warmup", {}, dst=dst, timeout=WARMUP_TIMEOUT_S)
+        await node_link.command("warmup", {}, dst=dst, timeout=timeout_s)
         return True
     except ProtoError as exc:
-        return exc.code == ERR_UNKNOWN_ACTION
-    except (ServiceUnavailableError, TimeoutError):
+        if exc.code == ERR_UNKNOWN_ACTION:
+            return True
+        log.warning(
+            "wake: %s/%s отказал в прогреве: %s — %s", dst.node, dst.service, exc.code, exc.message
+        )
+        return False
+    except (ServiceUnavailableError, TimeoutError) as exc:
+        log.warning(
+            "wake: %s/%s не ответил на прогрев за %.0f с (%s)",
+            dst.node, dst.service, timeout_s, type(exc).__name__,
+        )
         return False
 
 
@@ -241,6 +265,7 @@ async def ensure_service_ready(
     service: str,
     *,
     wake_timeout_s: float | None = None,
+    warmup_timeout_s: float = WARMUP_TIMEOUT_S,
 ) -> str:
     """Довести службу на (возможно спящей) ноде до готовности отвечать.
 
@@ -272,7 +297,7 @@ async def ensure_service_ready(
             )
             return UNREACHABLE
 
-    if await try_warmup(node_link, dst):
+    if await try_warmup(node_link, dst, warmup_timeout_s):
         return READY
     log.warning("wake: прогрев %s/%s не удался", node_id, service)
     return WARMUP_FAILED
