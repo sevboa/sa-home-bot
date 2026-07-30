@@ -74,11 +74,24 @@ class JustAdmitted(Filter):
 
 
 def _format_expiry(expires: datetime) -> str:
+    """Срок кода словами — «60 минут», а не «1 ч 0 мин».
+
+    Минуты, а не часы: код живёт час по умолчанию, и «60 минут» человек
+    оценивает без пересчёта. Округление вверх — чтобы только что выпущенный
+    код не оказался «доступен 59 минут» из-за долей секунды.
+    """
     left = expires - datetime.now(tz=UTC)
-    minutes = max(int(left.total_seconds() // 60), 0)
-    if minutes >= 60:
-        return f"{minutes // 60} ч {minutes % 60} мин"
-    return f"{minutes} мин"
+    minutes = max(-(-int(left.total_seconds()) // 60), 0)
+    tail = minutes % 100
+    if 11 <= tail <= 14:
+        word = "минут"
+    elif tail % 10 == 1:
+        word = "минута"
+    elif tail % 10 in (2, 3, 4):
+        word = "минуты"
+    else:
+        word = "минут"
+    return f"{minutes} {word}"
 
 
 @router.message(Command(commands.INVITE.name))
@@ -93,13 +106,16 @@ async def cmd_invite(
     sender = message.from_user
     code, expires = await gate.issue(message.chat.id, sender.id if sender else None)
     link = f"https://t.me/{bot_username}?start={code}"
+    # Коротко: код, ссылка и одна пояснительная строка. Всё остальное, что тут
+    # было раньше (что код одноразовый, что в группе нужен именно код, какие
+    # права получит гость), владелец и так знает — а пересылать это сообщение
+    # человеку проще, когда лишнего в нём нет.
     await message.answer(
         "🔑 <b>Код приглашения</b>\n\n"
         f"<code>{invites.format_code(code)}</code>\n\n"
-        f"Ссылка (нажать и отправить /start): {link}\n\n"
-        f"Годен {_format_expiry(expires)}, срабатывает один раз. "
-        "В группе ссылка не поможет — там код нужно прислать сообщением.\n"
-        "Гость получит право говорить со мной; остальное — по вашему решению."
+        f"{link}\n\n"
+        "<i>Сообщите код Альфреду или воспользуйтесь ссылкой. "
+        f"Инвайт доступен в течение {_format_expiry(expires)}.</i>"
     )
 
 

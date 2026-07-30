@@ -454,3 +454,19 @@ async def test_welcome_prompt_without_memory_is_the_plain_directive(store, tmp_p
     message = SimpleNamespace(chat=SimpleNamespace(id=77))
     prompt = await invite_handlers._welcome_prompt(None, message, admission.subscription)
     assert prompt == invite_handlers.WELCOME_PROMPT
+
+
+# --- текст сообщения с кодом ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("seconds", "expected"),
+    [(3600, "60 минут"), (60, "1 минута"), (180, "3 минуты"), (720, "12 минут"), (0, "0 минут")],
+)
+def test_expiry_is_spelled_in_minutes(seconds, expected):
+    from datetime import UTC, datetime, timedelta
+
+    from sa_home_bot.bot.handlers import invites as invite_handlers
+
+    expires = datetime.now(tz=UTC) + timedelta(seconds=seconds)
+    assert invite_handlers._format_expiry(expires) == expected
