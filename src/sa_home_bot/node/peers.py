@@ -175,6 +175,9 @@ class PeerLink:
         # `join()` в `_run` получает CancelledError — без этого флага она
         # неотличима от stop() и убивала бы весь цикл переподключения.
         self._dropping = False
+        # Линк останавливают насовсем (stop): отмену в этом состоянии нельзя
+        # спутать с нашим же сбросом соединения — см. `_serve` (этап 29).
+        self._stopping = False
         # Тип машины соседа из его hello. Держим и после обрыва: чтобы решить,
         # нормально ли, что нода пропала, нужно знать её тип именно тогда,
         # когда её уже не спросить.
@@ -236,6 +239,12 @@ class PeerLink:
         self._task = asyncio.create_task(self._run(), name=f"peer-link-{self.name}")
 
     async def stop(self) -> None:
+        # Флаг ДО cancel: иначе отмена, пришедшая ровно в окно между
+        # `reconnect_now()` и пробуждением `_serve`, была бы неотличима от
+        # нашего собственного сброса соединения — её проглотили бы, и линк
+        # продолжил бы переподключаться, а `await self._task` не вернулся бы
+        # никогда (этап 29; на проде это выглядело как «нода не гасится»).
+        self._stopping = True
         if self._task is not None:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -414,8 +423,10 @@ class PeerLink:
         except asyncio.CancelledError:
             # Соединение оборвали МЫ (см. `_dropping`) — это штатный путь к
             # переподключению. Отмена не наша — пробрасываем, иначе stop()
-            # не остановит линк.
-            if not self._dropping:
+            # не остановит линк. `_stopping` старше `_dropping`: линк, который
+            # гасят, не переподключается, даже если мы сами только что сбросили
+            # соединение.
+            if not self._dropping or self._stopping:
                 raise
         finally:
             self._dropping = False
@@ -428,7 +439,7 @@ class PeerLink:
 
     async def _run(self) -> None:
         logged_down = False
-        while True:
+        while not self._stopping:
             dialed = None
             try:
                 dialed = await self._dial()

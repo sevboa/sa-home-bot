@@ -302,10 +302,24 @@ class ProtoServer:
             await asyncio.gather(*self._request_tasks, return_exceptions=True)
         # Сначала закрыть живые соединения: с Python 3.12 wait_closed() ждёт
         # завершения обработчиков, а те висят на readline() до закрытия сокета.
-        for conn in list(self._connections):
+        conns = list(self._connections)
+        for conn in conns:
             conn.writer.close()
-            with contextlib.suppress(Exception):
-                await conn.writer.wait_closed()
+        if conns:
+            # Под общим потолком и параллельно (этап 29). Голый
+            # `await wait_closed()` на каждое соединение по очереди — то самое
+            # место, где останов ноды мог не закончиться никогда: у
+            # полумёртвого клиента данные в Send-Q не уходят, FIN не
+            # подтверждается, и закрытие не завершается ни через минуту, ни
+            # через час. Сокет к этому моменту уже closed(); ждать
+            # подтверждения приятно, но не обязательно.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        *(conn.writer.wait_closed() for conn in conns), return_exceptions=True
+                    ),
+                    timeout=CLOSE_TIMEOUT_S,
+                )
         self._connections.clear()
         for server in self._bound.values():
             # Под потолком: обработчик соединения, принятого прямо в момент
@@ -412,6 +426,13 @@ class ProtoServer:
                     break  # EOF — клиент отключился
                 if line.strip() == b"":
                     continue
+                if self._stopping:
+                    # Останов уже идёт: принимать новые команды нечестно —
+                    # выполнить их некому. Живой случай (этап 29): пока
+                    # останов висел на полумёртвом соединении, нода по другому
+                    # соединению приняла ещё один restart_node и ответила
+                    # «принято», хотя уже выключалась.
+                    break
                 # Каждый запрос — своя задача: медленный форвард к удалённой
                 # ноде не блокирует остальные запросы этого соединения
                 # (ответы матчатся клиентом по id, порядок не важен).
@@ -423,8 +444,11 @@ class ProtoServer:
         finally:
             self._connections.discard(conn)
             writer.close()
+            # Под потолком по той же причине, что и в stop(): у полумёртвого
+            # клиента закрытие не подтверждается никогда, а обработчик,
+            # застрявший здесь, держит в заложниках `wait_closed()` слушателя.
             with contextlib.suppress(Exception):
-                await writer.wait_closed()
+                await asyncio.wait_for(writer.wait_closed(), timeout=CLOSE_TIMEOUT_S)
 
     async def _handle_line(self, conn: _Connection, line: bytes) -> None:
         try:

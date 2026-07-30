@@ -62,6 +62,12 @@ EVENT_SERVICE_FENCED = "service_fenced"
 # (см. node/lease.py::note_fenced).
 FENCED_EXIT_CODE = 11
 
+# Сколько ждать выхода задачи наблюдения после того, как процесс службы уже
+# погашен: она либо выходит сразу, либо спит перед перезапуском — дольше ждать
+# нечего (этап 29).
+SUPERVISE_EXIT_TIMEOUT_S = 5.0
+
+
 def _now_iso() -> str:
     return datetime.now(tz=UTC).isoformat()
 
@@ -150,8 +156,21 @@ class SupervisedService:
                 proc.kill()
                 await proc.wait()
         if self._task is not None:
-            await self._task
-            self._task = None
+            task, self._task = self._task, None
+            # Задача наблюдения обязана выйти сама (`_desired_running=False`),
+            # но ждать её без потолка нельзя: она может спать перед
+            # перезапуском или писать событие полумёртвому клиенту, а останов
+            # ноды не должен зависеть от этого (этап 29).
+            done, _ = await asyncio.wait({task}, timeout=SUPERVISE_EXIT_TIMEOUT_S)
+            if not done:
+                log.warning(
+                    "Служба %s: наблюдающая задача не завершилась за %.0f с — снимаю",
+                    self.name,
+                    SUPERVISE_EXIT_TIMEOUT_S,
+                )
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         self._status = STOPPED
         await self._emit(EVENT_SERVICE_STOPPED, {"name": self.name})
 

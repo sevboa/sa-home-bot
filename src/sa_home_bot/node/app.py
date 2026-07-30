@@ -35,8 +35,18 @@ from sa_home_bot.proto.messages import MSG_EVENT, Envelope, ProtoError
 from sa_home_bot.proto.server import ProtoServer
 from sa_home_bot.services import registry
 from sa_home_bot.utils.lifespan import Lifespan
+from sa_home_bot.utils.shutdown import STEP_TIMEOUT_S, ShutdownBudget, arm_hard_exit
 
 log = logging.getLogger(__name__)
+
+# Сколько времени даётся всему останову СВЕРХ срока на гашение дочерних служб
+# (`[node].stop_timeout_s`): прощание с роем, фоновые задачи, линки, сокеты.
+# Двадцати секунд хватает рою из десятка нод даже при полностью мёртвой сети.
+SHUTDOWN_BUDGET_S = 20.0
+
+# Запас сторожу поверх бюджета: сначала свои потолки и честная запись в лог,
+# и только потом — принудительный выход.
+HARD_EXIT_MARGIN_S = 15.0
 
 # Фабрика линка: (имя, endpoint или список адресов) → PeerLink со всеми
 # обязательными колбэками.
@@ -559,18 +569,34 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         await lifespan.wait()
     finally:
         log.info("Останов ноды...")
+        # Каждый шаг — под потолком, вся последовательность — под общим
+        # бюджетом (этап 29: на jeeves останов не заканчивался никогда, и по
+        # логу нельзя было понять, на чём именно он встал). Детям бюджет
+        # отдельный: погасить службу — честная работа, а не зависание, и
+        # укладываться она обязана в свой stop_timeout_s.
+        budget = ShutdownBudget(total_s=settings.node.stop_timeout_s + SHUTDOWN_BUDGET_S)
+        # Последний рубеж — за нашим кодом: даже пройдя все шаги, процесс
+        # может застрять в уборке задач внутри asyncio.run().
+        arm_hard_exit(budget.total_s + HARD_EXIT_MARGIN_S)
         # Прощаемся ПЕРВЫМ делом, пока соединения живы: соседи по node_leaving
         # мгновенно и точно узнают о штатном уходе (этап 23) — без этого
         # «корректно остановилась» и «выдернули из розетки» неотличимы.
-        # Рассылка ограничена SEND_TIMEOUT_S — остановку не задержит.
-        await emit(EVENT_NODE_LEAVING, {"node": node_id, "kind": settings.node.kind})
-        await watcher.stop()
-        await lease.stop()
+        farewell = emit(EVENT_NODE_LEAVING, {"node": node_id, "kind": settings.node.kind})
+        await budget.step("прощание с роем", farewell)
+        await budget.step("присутствие соседей", watcher.stop())
+        await budget.step("аренда лидерства", lease.stop())
         if replicator is not None:
-            await replicator.stop()
-        await supervisor.stop_all()
+            await budget.step("репликация настроек", replicator.stop())
+        await budget.step(
+            "останов служб",
+            supervisor.stop_all(),
+            timeout=settings.node.stop_timeout_s + STEP_TIMEOUT_S,
+        )
         for link in (*router.peers.values(), *router.local_services.values()):
-            await link.stop()
-        await server.stop()
-        log.info("Нода остановлена чисто")
+            await budget.step(f"линк {link.name}", link.stop())
+        await budget.step("proto-сервер", server.stop())
+        if budget.overdue:
+            log.error("Нода остановлена с оговорками: не уложились [%s]", ", ".join(budget.overdue))
+        else:
+            log.info("Нода остановлена чисто")
     return restart_requested

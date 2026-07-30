@@ -7,9 +7,16 @@ import logging
 import signal
 from collections.abc import Awaitable, Callable
 
+from sa_home_bot.utils.shutdown import ShutdownBudget
+
 log = logging.getLogger(__name__)
 
 ShutdownCallback = Callable[[], Awaitable[None]]
+
+# Потолок на один shutdown-колбэк службы: закрыть БД, отписаться от поллинга,
+# погасить сокет. Больше десяти секунд это не занимает ни при какой погоде, а
+# зависшую службу всё равно добьёт супервизор ноды (stop_timeout_s).
+CALLBACK_TIMEOUT_S = 10.0
 
 
 class Lifespan:
@@ -41,8 +48,10 @@ class Lifespan:
         await self._stop.wait()
 
     async def shutdown(self) -> None:
+        # Каждый колбэк — под потолком (этап 29): служба, которая не может
+        # закрыть свой сокет, не имеет права держать останов. Сорвавшийся
+        # колбэк называется в логе, остальные выполняются как обычно.
+        budget = ShutdownBudget(total_s=CALLBACK_TIMEOUT_S * len(self._callbacks) + 1)
         for callback in reversed(self._callbacks):
-            try:
-                await callback()
-            except Exception:  # noqa: BLE001 — один сбойный колбэк не блокирует остальные
-                log.exception("Ошибка в shutdown-колбэке")
+            name = getattr(callback, "__qualname__", repr(callback))
+            await budget.step(name, callback(), timeout=CALLBACK_TIMEOUT_S)
