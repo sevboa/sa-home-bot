@@ -393,3 +393,64 @@ async def test_redeemed_code_is_still_recognisable(store, tmp_path):
     known = await gate.known_code(code)
     assert known is not None
     assert known[1]["redeemed_at"] is not None
+
+
+# --- приветствие гостя ---------------------------------------------------
+
+
+def test_welcome_prompt_demands_the_help_hint():
+    """Решение пользователя 2026-07-30: приветствие пишет модель, но подсказка
+    про /help в нём обязательна."""
+    from sa_home_bot.bot.handlers import invites as invite_handlers
+
+    assert "/help" in invite_handlers.WELCOME_PROMPT
+    assert "/help" in invite_handlers.FALLBACK_HINT
+    assert invite_handlers.HELP_COMMAND == "/help"
+
+
+async def test_welcome_prompt_uses_what_memory_knows(store, tmp_path, monkeypatch):
+    """Обычный путь подмешивания памяти ищет по тексту реплики, а реплика тут —
+    инвайт-код; поэтому память спрашивается отдельно, по имени гостя."""
+    from types import SimpleNamespace
+
+    from sa_home_bot.bot import ai_flow
+    from sa_home_bot.bot.handlers import invites as invite_handlers
+
+    asked: list[str] = []
+
+    async def fake_recall(node_link, chat_id, query):
+        asked.append(query)
+        return ["любит чай без сахара"]
+
+    monkeypatch.setattr(ai_flow, "recall_facts", fake_recall)
+    gate = _gate(store, tmp_path)
+    code, _ = await gate.issue(chat_id=1, user_id=None)
+    admission = await gate.try_admit(77, code, user_name="Наташа Сорокина (@nava40a)")
+
+    message = SimpleNamespace(chat=SimpleNamespace(id=77))
+    prompt = await invite_handlers._welcome_prompt(None, message, admission.subscription)
+
+    # Запрос — по имени, без хвоста «(@username)».
+    assert asked == ["Наташа Сорокина"]
+    assert "любит чай без сахара" in prompt
+    assert "как со знакомым" in prompt
+    assert "/help" in prompt  # требование не теряется, когда есть что вспомнить
+
+
+async def test_welcome_prompt_without_memory_is_the_plain_directive(store, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from sa_home_bot.bot import ai_flow
+    from sa_home_bot.bot.handlers import invites as invite_handlers
+
+    async def fake_recall(node_link, chat_id, query):
+        return []
+
+    monkeypatch.setattr(ai_flow, "recall_facts", fake_recall)
+    gate = _gate(store, tmp_path)
+    code, _ = await gate.issue(chat_id=1, user_id=None)
+    admission = await gate.try_admit(77, code, user_name="Никто")
+
+    message = SimpleNamespace(chat=SimpleNamespace(id=77))
+    prompt = await invite_handlers._welcome_prompt(None, message, admission.subscription)
+    assert prompt == invite_handlers.WELCOME_PROMPT

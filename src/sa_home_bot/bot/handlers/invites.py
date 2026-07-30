@@ -39,6 +39,9 @@ log = logging.getLogger(__name__)
 router = Router(name="invites")
 
 WELCOME_TEXT = "🔑 Приглашение принято — добро пожаловать."
+HELP_COMMAND = f"/{commands.HELP.name}"
+# Дописывается, если модель всё-таки не упомянула /help сама (см. ниже).
+FALLBACK_HINT = f"<i>Полный список команд — {HELP_COMMAND}</i>"
 NO_INVITES_TEXT = (
     "⚠️ Приглашения выключены: боту некуда записать гостя (нет пакета инстанса). "
     "Запустите бота с <code>--instance</code>, тогда гостевые подписки будут "
@@ -46,10 +49,20 @@ NO_INVITES_TEXT = (
 )
 # Директива приветствия. Как и OPENING_PROMPT в bot/handlers/ai.py, в историю
 # диалога не пишется — только ответ на неё.
+#
+# Решение пользователя 2026-07-30: встречает гостя ИМЕННО модель, а не
+# заготовленный текст, и заведомо небыстрый путь (разбудить машину, прогреть
+# модель — со «шагами» и Агнольдом, см. ai_flow) здесь не недостаток, а
+# интрига: первое впечатление важнее пары секунд. Единственное жёсткое
+# требование к содержанию — подсказка про /help в конце: без неё гость не
+# узнает, что ещё умеет бот, а меню команд у него появляется молча.
 WELCOME_PROMPT = (
-    "Тебя только что познакомили с новым собеседником: его впустили по "
-    "одноразовому приглашению. Поздоровайся коротко, в характере, представься "
-    "и скажи, что тебя можно просто спрашивать."
+    "Тебя только что познакомили с новым собеседником: его впустили в дом по "
+    "одноразовому приглашению, и это его первые секунды здесь. Поздоровайся в "
+    "характере, представься и дай понять, что к тебе можно обращаться просто "
+    "словами, без команд. ОБЯЗАТЕЛЬНО закончи сообщение отдельной строкой с "
+    "подсказкой, что полный список доступных команд открывается по /help — "
+    "именно так, с косой чертой, чтобы её можно было нажать."
 )
 
 
@@ -237,17 +250,23 @@ async def on_admitted(
     active_ai_chats: ai_flow.ActiveAiChats,
     tool_calls: ToolCalls,
 ) -> None:
-    """Первое, что видит впущенный: факт входа, права — и живой Альфред.
+    """Первое, что видит впущенный, — живого Альфреда, а не системный текст.
 
-    Порядок важен. Сначала уходит короткое системное сообщение: оно не
-    зависит ни от какой службы, поэтому человек в любом случае понимает, что
-    попал внутрь. Приветствие Альфреда — вторым: LLM-нода может спать или
-    вовсе отсутствовать, и ждать её ради факта «вы вошли» незачем.
+    Решение пользователя 2026-07-30: встречает гостя модель. Дорога к ней
+    бывает долгой (машину надо разбудить, модель — прогреть), и по пути гость
+    увидит «шаги» и Агнольда из обычного presence-сценария (bot/ai_flow.py) —
+    это оставлено намеренно, как интрига: расположить к себе важнее, чем
+    ответить за секунду.
+
+    Системное «приглашение принято» со списком команд осталось ровно на один
+    случай — Альфреда не нашли вовсе: молча впустить и ничего не сказать
+    нельзя, человек не поймёт, сработал ли код.
     """
     subscription = admission.subscription
     app_actions = await apps_link.actions()
+    # Меню чата — молча: список команд гость увидит по /help, о котором ему
+    # скажет сам Альфред.
     await refresh_chat_menu(bot, message.chat.id, subscription, app_actions)
-    await message.answer(WELCOME_TEXT + "\n\n" + build_help(subscription, app_actions))
 
     if admission.invited_by_chat_id and admission.invited_by_chat_id != message.chat.id:
         await notifier.send_direct(
@@ -257,19 +276,29 @@ async def on_admitted(
         )
 
     right = commands.required_right(commands.ALFRED.name)
-    if not subscription.allows_command(right):
+    greeting = None
+    if subscription.allows_command(right):
+        greeting = await ai_handlers.start_dialogue(
+            message,
+            await _welcome_prompt(node_link, message, subscription),
+            node_link=node_link,
+            store=store,
+            config=config,
+            book=book,
+            notifier=notifier,
+            active_ai_chats=active_ai_chats,
+            tool_calls=tool_calls,
+        )
+    if greeting is None:
+        await message.answer(WELCOME_TEXT + "\n\n" + build_help(subscription, app_actions))
         return
-    await ai_handlers.start_dialogue(
-        message,
-        await _welcome_prompt(node_link, message, subscription),
-        node_link=node_link,
-        store=store,
-        config=config,
-        book=book,
-        notifier=notifier,
-        active_ai_chats=active_ai_chats,
-        tool_calls=tool_calls,
-    )
+    if HELP_COMMAND not in greeting:
+        # Промпт просит модель закончить подсказкой про /help, но обещание
+        # модели — не гарантия (та же природа, что у живой находки про
+        # get_time: маленькая модель выполняет инструкцию не всегда). Раз
+        # подсказка объявлена обязательной, дописываем её сами — одной
+        # строкой, чтобы не спорить с только что сказанным.
+        await message.answer(FALLBACK_HINT)
 
 
 async def _welcome_prompt(

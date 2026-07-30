@@ -305,14 +305,18 @@ async def start_dialogue(
     notifier: Notifier,
     active_ai_chats: ai_flow.ActiveAiChats,
     tool_calls: ToolCalls,
-) -> None:
+) -> str | None:
     """Начать тред директивой, как голый /alfred, — но не по команде человека.
 
     Нужна приватному входу (bot/handlers/invites.py): гостя встречает сам
     Альфред, а не заготовленная строка. Директива в историю не пишется —
     только ответ на неё (та же логика, что у OPENING_PROMPT).
+
+    Возвращает текст ответа Альфреда; None — не нашли (сообщение об этом
+    пользователю уже ушло, но вызывающий может добавить своё, см. приветствие
+    гостя).
     """
-    await _ask_and_reply(
+    return await _ask_and_reply(
         message,
         node_link,
         store,
@@ -337,7 +341,15 @@ async def _ask_and_reply(
     history: list[dict[str, str]],
     active_ai_chats: ai_flow.ActiveAiChats,
     tool_calls: ToolCalls,
-) -> None:
+) -> str | None:
+    """Текст ответа Альфреда, если он реально уехал в чат, иначе None.
+
+    Возврат нужен приветствию гостя (bot/handlers/invites.py): не нашли
+    Альфреда — впущенного нельзя оставить без единого слова, а нашли —
+    надо убедиться, что в приветствии есть обещанная подсказка про /help.
+    Обычным путям (/alfred, реплай, личка) результат не нужен, они его
+    игнорируют.
+    """
     # Регистрация задачи (не просто chat_id — см. докстринг ActiveAiChats,
     # второй заход) на время запроса: bot/app.py::_shutdown() перед разрывом
     # связи со службами уведомляет RESTART_TEXT'ом и ОТМЕНЯЕТ эту задачу —
@@ -348,7 +360,7 @@ async def _ask_and_reply(
     task = asyncio.current_task()
     active_ai_chats.register(chat_id, task)
     try:
-        await _do_ask_and_reply(
+        return await _do_ask_and_reply(
             message, node_link, store, config, book, notifier, dialogue_id, history, tool_calls
         )
     finally:
@@ -365,7 +377,7 @@ async def _do_ask_and_reply(
     dialogue_id: int,
     history: list[dict[str, str]],
     tool_calls: ToolCalls,
-) -> None:
+) -> str | None:
     await message.bot.send_chat_action(message.chat.id, "typing")
     # Ячейка под «Альфреда отпустили» (тул dismiss): сам тул ничего не гасит —
     # ответ в этот момент ещё генерируется той самой моделью, которую предстоит
@@ -385,9 +397,9 @@ async def _do_ask_and_reply(
             notifier,
             f"🔥 /ai (chat={message.chat.id}): необработанное исключение {exc!r}",
         )
-        return
+        return None
     if raw is None:
-        return  # недоступность/ошибка уже сообщена пользователю (ai_flow)
+        return None  # недоступность/ошибка уже сообщена пользователю (ai_flow)
     if not raw.strip():
         # Живая находка 2026-07-29: модель может вернуть пустой текст (у неё
         # кончилось окно контекста — декларации тулов плюс выдача поиска), и
@@ -399,7 +411,7 @@ async def _do_ask_and_reply(
         await ai_flow.notify_admins(
             book, notifier, f"⚠️ /ai (chat={message.chat.id}): модель вернула пустой ответ"
         )
-        return
+        return None
     sent = await _send_alfred_reply(message, raw)
     await store.record_ai_turn(
         message.chat.id, sent.message_id, dialogue_id, "assistant", raw, datetime.now(tz=UTC)
@@ -408,6 +420,7 @@ async def _do_ask_and_reply(
         # Ход диалога уже записан: если машину выключат, а тред потом
         # продолжат реплаем — история не потеряется, Альфреда просто разбудят.
         await ai_flow.perform_dismissal(message, node_link, dismissal.mode, book, notifier)
+    return raw
 
 
 async def _send_alfred_reply(message: Message, raw: str) -> Message:
