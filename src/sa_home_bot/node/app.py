@@ -20,6 +20,7 @@ from collections.abc import Callable, Sequence
 from sa_home_bot.config import Settings, SwarmNodeConfig
 from sa_home_bot.node import assignments as assignments_mod
 from sa_home_bot.node import update as node_update
+from sa_home_bot.node.discovery import SwarmDiscovery
 from sa_home_bot.node.instances import InstanceStore, instances_dir
 from sa_home_bot.node.lease import LeaseManager
 from sa_home_bot.node.peers import NodeRouter, PeerLink
@@ -537,6 +538,21 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
     )
     await watcher.start()
 
+    # Маячок в локальной сети (этап 31): соседа в той же локалке не нужно
+    # вписывать в конфиг, а уехавший DHCP-адрес чинится сам. Собирается
+    # последним — ему нужны и join сервиса ноды, и реальные адреса сервера.
+    discovery = SwarmDiscovery(
+        node_id,
+        router,
+        token=settings.swarm.token,
+        join=node_service.join,
+        advertise=server.advertised_endpoints,
+        cfg=settings.swarm.discovery,
+        node_kind=settings.node.kind,
+    )
+    node_service.attach_discovery(discovery.state)
+    await discovery.start()
+
     # Первый запуск с заданным swarm.join и ещё пустым списком пиров:
     # разовый bootstrap через тот же NodeService.join(), что и `nodectl join`
     # (принцип «сначала действие ноды») — дальше рой сам разъедется (join
@@ -584,6 +600,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         farewell = emit(EVENT_NODE_LEAVING, {"node": node_id, "kind": settings.node.kind})
         await budget.step("прощание с роем", farewell)
         await budget.step("присутствие соседей", watcher.stop())
+        await budget.step("маячок discovery", discovery.stop())
         await budget.step("аренда лидерства", lease.stop())
         if replicator is not None:
             await budget.step("репликация настроек", replicator.stop())

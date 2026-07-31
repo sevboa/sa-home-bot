@@ -213,6 +213,15 @@ class NodeService:
         self._update_source = update_source
         self._updating = False
         self._last_update: dict[str, Any] | None = None
+        # Маячок discovery (node/discovery.py) собирается ПОСЛЕ службы — ему
+        # нужен наш же join(), — поэтому не параметр конструктора, а колбэк,
+        # который node/app.py прицепляет следом. None — маячка нет.
+        self._discovery_state: Callable[[], dict[str, Any]] | None = None
+
+    def attach_discovery(self, state: Callable[[], dict[str, Any]]) -> None:
+        """Показывать состояние маячка в get_state: без этого «почему сосед
+        не нашёлся» выясняется только по логам."""
+        self._discovery_state = state
 
     def _assignable_here(self) -> tuple[str, ...]:
         """Что осмысленно назначить именно этой машине.
@@ -410,6 +419,8 @@ class NodeService:
             # пока нода жива, и использует, когда та уснёт (этап 19 п.6).
             "wake": self._local_wake_payload(),
         }
+        if self._discovery_state is not None:
+            state["discovery"] = self._discovery_state()
         if self._update_source is not None:
             installed = node_update.installed_version()
             state["update"] = {

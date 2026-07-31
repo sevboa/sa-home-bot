@@ -93,6 +93,13 @@ token = "PUT-SWARM-TOKEN-HERE"
 # Разовый bootstrap при первом старте: endpoint любой живой ноды роя.
 join = "tcp://alfred.tailXXXXXX.ts.net:8710"
 
+# Маячок в локальной сети (см. config.example.toml): соседа в той же локалке
+# не нужно вписывать руками, а сменившийся DHCP-адрес чинится сам. Входящий
+# UDP 32167 открывает install-node.ps1 правилом фаервола.
+[swarm.discovery]
+enabled = true
+port = 32167
+
 [logging]
 level = "INFO"
 format = "plain"

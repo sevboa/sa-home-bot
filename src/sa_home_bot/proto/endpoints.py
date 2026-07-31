@@ -201,6 +201,27 @@ def local_ipv4_addresses() -> list[str]:
     return found
 
 
+def local_broadcast_addresses() -> list[str]:
+    """Broadcast-адреса своих сетей — куда стучится маячок discovery (этап 31).
+
+    Тот же фильтр виртуальных интерфейсов, что и у ``local_ipv4_addresses``:
+    broadcast NAT-сети WSL/docker уводит запрос в никуда — отвечать оттуда
+    некому, а пакет всё равно уходит.
+    """
+    import psutil
+
+    found: list[str] = []
+    for iface, addrs in psutil.net_if_addrs().items():
+        if is_virtual_iface(iface):
+            continue
+        for addr in addrs:
+            if addr.family != socket.AF_INET or not addr.broadcast:
+                continue
+            if addr.broadcast not in found:
+                found.append(addr.broadcast)
+    return found
+
+
 def advertisable(endpoints: list[Endpoint] | tuple[Endpoint, ...]) -> list[str]:
     """Какие из своих адресов имеет смысл объявить соседям, в порядке проб.
 

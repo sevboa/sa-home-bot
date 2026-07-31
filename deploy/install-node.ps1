@@ -50,6 +50,7 @@ param(
     [string]$SwarmToken = "",
     [string]$JoinEndpoint = "",
     [string]$ListenAddress = "",  # tcp://<адрес>:8710, анонсируется пирам — НЕ 0.0.0.0 (own_endpoint, node/app.py); пусто = автоопределение по tailscale ip
+    [int]$DiscoveryPort = 32167,  # UDP-маячок роя ([swarm.discovery].port, этап 31)
     [string]$RepoUrl = "https://github.com/sevboa/sa-home-bot",
     [string]$LhmVersion = "v0.9.6",
     [string]$WinSwVersion = "v2.12.0",
@@ -187,6 +188,12 @@ dll_path = '$lhmDir\LibreHardwareMonitorLib.dll'
 token = "$SwarmToken"
 $joinLine
 
+# Маячок в локальной сети: соседа не нужно вписывать руками, сменившийся
+# DHCP-адрес чинится сам. Порт открыт правилом фаервола ниже по скрипту.
+[swarm.discovery]
+enabled = true
+port = $DiscoveryPort
+
 [logging]
 level = "INFO"
 format = "plain"
@@ -194,7 +201,30 @@ format = "plain"
     Write-Host "Сгенерирован $configPath — проверьте listen/id при необходимости."
 }
 
-# --- 4. LibreHardwareMonitor ---
+# --- 4. Фаервол: входящие порты ноды ---
+# Оба правила ставились до этого руками, и на TCP-порте уже споткнулись при
+# выкатке этапа 24 (нода слушала, а сосед из локалки не достучался). Скрипт
+# и так требует прав администратора — значит, может закрыть этот пробел сам.
+Step "Правила фаервола"
+function Ensure-FirewallRule($name, $protocol, $port) {
+    if (Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue) {
+        Write-Host "Правило '$name' уже есть."
+        return
+    }
+    New-NetFirewallRule -DisplayName $name -Direction Inbound -Action Allow `
+        -Protocol $protocol -LocalPort $port -Profile Private, Domain | Out-Null
+    Write-Host "Добавлено правило '$name' ($protocol $port, только частная/доменная сеть)."
+}
+# Порт берём из listen — он же в конфиге; при повторном запуске конфиг уже
+# есть, и $ListenAddress пуст, поэтому запасной вариант 8710.
+$nodePort = 8710
+if ($ListenAddress -match ':(\d+)$') { $nodePort = [int]$Matches[1] }
+Ensure-FirewallRule "sa-home-node (рой, TCP)" "TCP" $nodePort
+# UDP-маячок discovery (этап 31): без него нода видна соседям только по
+# статике/join — сама себя в локалке она объявить не сможет.
+Ensure-FirewallRule "sa-home-node (discovery, UDP)" "UDP" $DiscoveryPort
+
+# --- 5. LibreHardwareMonitor ---
 Step "LibreHardwareMonitor"
 $lhmDll = Join-Path $lhmDir "LibreHardwareMonitorLib.dll"
 if (Test-Path $lhmDll) {
@@ -208,7 +238,7 @@ else {
     Remove-Item $lhmZip -Force
 }
 
-# --- 5. smartmontools + системный PATH ---
+# --- 6. smartmontools + системный PATH ---
 Step "smartmontools"
 $smartctl = Get-Command smartctl -ErrorAction SilentlyContinue
 if (-not $smartctl) {
@@ -229,7 +259,7 @@ if (Test-Path $smartBin) {
     }
 }
 
-# --- 6. Служба WinSW ---
+# --- 7. Служба WinSW ---
 Step "Служба sa-home-node (WinSW)"
 $serviceDir = Join-Path $InstallDir "service"
 New-Item -ItemType Directory -Force -Path $serviceDir | Out-Null
@@ -257,7 +287,7 @@ else {
     Restart-Service -Name "sa-home-node"
 }
 
-# --- 7. Автообновление (задача планировщика) ---
+# --- 8. Автообновление (задача планировщика) ---
 Step "Задача автообновления"
 $autoUpdateScript = Join-Path $InstallDir "win-auto-update.ps1"
 Copy-Item (Join-Path $PSScriptRoot "win-auto-update.ps1") $autoUpdateScript -Force
