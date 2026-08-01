@@ -51,6 +51,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="загрузить и напечатать разобранный конфиг, затем выйти",
     )
     parser.add_argument("--version", "-V", action="version", version=f"sa-home-bot {__version__}")
+
+    from sa_home_bot.setup_wizard import add_init_subparser
+
+    subparsers = parser.add_subparsers(dest="command")
+    add_init_subparser(subparsers)
     return parser
 
 
@@ -66,6 +71,9 @@ def _redacted(settings: Settings) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+
+    if getattr(args, "command", None) == "init":
+        return args._run(args)
 
     try:
         settings = Settings.load(args.config, instance=args.instance)

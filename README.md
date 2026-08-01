@@ -39,6 +39,20 @@ source .venv/bin/activate
 pip install -e ".[dev]"      # dev — для тестов и линтера; без них: pip install -e .
 ```
 
+Ставить ноду в прод — через `pipx`, без git-checkout (Debian считает системный
+python «externally managed», PEP 668):
+
+```bash
+sudo apt install -y pipx git && pipx ensurepath   # один раз, единственный шаг с root — pipx тянет репозиторий через git
+pipx install "git+https://github.com/sevboa/sa-home-bot.git@vX.Y.Z"
+sa-home-bot init                              # config.toml + (на Linux) systemd-юнит
+```
+
+`init` спросит id/тип машины/что поднимать/токен и адрес роя (пусто у join —
+это первая нода нового роя); с флагами (`--node-id`, `--kind`, `--join`,
+`--token`, …) и `--non-interactive` работает и без tty — для установки по
+SSH одной командой. `--help` — полный список.
+
 ## Конфигурация
 
 Скопируйте пример и отредактируйте:
@@ -270,14 +284,16 @@ ruff check .      # линтер
 
 ## Запуск под systemd (опционально)
 
-systemd-юнит **один — у ноды** (шаблон в [`deploy/`](./deploy)): остальными
-процессами управляет она сама. SMART под непривилегированным пользователем —
-через sudo-обёртку `~/.local/bin/smartctl` (см. «Права на SMART» выше).
+systemd-юнит **один — у ноды**: остальными процессами управляет она сама.
+`sa-home-bot init` пишет его сам (см. «Установка»); руками — шаблон в
+[`deploy/`](./deploy). SMART под непривилегированным пользователем — через
+sudo-обёртку `~/.local/bin/smartctl` (см. «Права на SMART» выше).
 
 ```bash
-cp deploy/sa-home-node.service ~/.config/systemd/user/
+cp deploy/sa-home-node.service ~/.config/systemd/user/   # не нужно после `sa-home-bot init`
 systemctl --user daemon-reload
 systemctl --user enable --now sa-home-node
+sudo loginctl enable-linger $USER      # службы переживут выход из сессии
 journalctl --user -u sa-home-node -f   # логи ноды и её служб (все в одном юните)
 nodectl status                          # статус служб под супервизией
 ```
