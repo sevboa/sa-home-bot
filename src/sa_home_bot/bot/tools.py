@@ -85,7 +85,7 @@ WEEKDAYS_RU = (
 # тот же узел/служба, что и живой /ai (bot/ai_flow.py::LLM_NODE/LLM_SERVICE).
 # Продублировано здесь как литерал, а не импортировано оттуда: ai_flow.py
 # сам импортирует этот модуль (bot.tools) — обратный импорт был бы циклом.
-LLM_NODE = "winpc"
+LLM_NODE = "mycraft"
 LLM_SERVICE = "llm"
 
 

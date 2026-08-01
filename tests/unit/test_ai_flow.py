@@ -21,7 +21,7 @@ from sa_home_bot.proto.messages import ERR_INTERNAL, ERR_UNAVAILABLE, ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 
-WINPC_WAKE = {"mac": "aa:bb:cc:dd:ee:ff", "ip": "192.168.0.50", "broadcast": "192.168.0.255"}
+MYCRAFT_WAKE = {"mac": "aa:bb:cc:dd:ee:ff", "ip": "192.168.0.50", "broadcast": "192.168.0.255"}
 ALFRED_WAKE = {"mac": "7c:83:34:b4:59:ac", "ip": "192.168.0.100", "broadcast": "192.168.0.255"}
 
 OWN_STATE = {
@@ -29,7 +29,7 @@ OWN_STATE = {
     "version": "0.27.0",
     "services": [],
     "wake": ALFRED_WAKE,
-    "peers": [{"id": "winpc", "endpoint": "tcp://y:8710", "alive": False}],
+    "peers": [{"id": "mycraft", "endpoint": "tcp://y:8710", "alive": False}],
 }
 
 
@@ -199,7 +199,7 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Добгый день, сэ"}],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     raw = await ai_flow.request_alfred(
@@ -214,7 +214,7 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
     # think=false — роутер не настоял на думании.
     assert len(link.command_calls) == 2
     action, router_args, node = link.command_calls[0]
-    assert (action, node) == ("chat", "winpc")
+    assert (action, node) == ("chat", "mycraft")
     assert router_args["chat_id"] == 1
     assert router_args["think"] is False
     # Комплект собран под права собеседника, а не глобальный список.
@@ -247,7 +247,7 @@ async def test_tool_call_round_trip_reaches_final_response(store):
             {"response": ai_flow.ROUTE_OK},
             {"response": "Отвечу: 4"},
         ],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     raw = await ai_flow.request_alfred(
@@ -277,7 +277,7 @@ async def test_tool_call_is_recorded_in_store(store):
             {"response": ai_flow.ROUTE_OK},
             {"response": "Отвечу: 4"},
         ],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     await ai_flow.request_alfred(
@@ -300,7 +300,7 @@ async def test_unknown_tool_name_reported_back_to_model(store):
             {"response": ai_flow.ROUTE_OK},
             {"response": "ладно"},
         ],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     raw = await ai_flow.request_alfred(
@@ -332,7 +332,7 @@ async def test_tool_call_round_limit_squeezes_answer_without_tools(store):
             # персонажный проход
             {"response": "Двá, сэг"},
         ],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     raw = await ai_flow.request_alfred(
@@ -357,7 +357,7 @@ async def test_empty_answer_after_round_limit_is_still_a_hiccup(store):
             *[{"tool_calls": tool_calls}] * llm_chat.MAX_TOOL_ROUNDS,
             {"response": ""},
         ],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     raw = await ai_flow.request_alfred(
@@ -391,7 +391,7 @@ async def test_fast_path_no_thinking_when_marker_absent(store):
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Добгый день, сэ"}],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     raw = await ai_flow.request_alfred(
@@ -413,7 +413,7 @@ async def test_escalates_to_thinking_when_marker_returned(store):
             {"response": f"кое-что... {ai_flow.THINK_MARKER}"},
             {"response": "Точный ответ после раздумий"},
         ],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     raw = await ai_flow.request_alfred(
@@ -443,7 +443,7 @@ async def test_asleep_model_shows_steps_but_no_wake(store):
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Секунду, сэг"}],
-        get_state_routes={"winpc:llm": {"asleep": True}},
+        get_state_routes={"mycraft:llm": {"asleep": True}},
     )
 
     raw = await ai_flow.request_alfred(
@@ -464,7 +464,7 @@ async def test_asleep_warmup_fails_answers_as_albert_not_generic_error(store):
     notifier = FakeNotifier()
     link = FakeNodeLink(
         chat_results=[ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева")],
-        get_state_routes={"winpc:llm": {"asleep": True}},
+        get_state_routes={"mycraft:llm": {"asleep": True}},
     )
 
     raw = await ai_flow.request_alfred(
@@ -479,7 +479,7 @@ async def test_asleep_warmup_fails_answers_as_albert_not_generic_error(store):
 
 
 async def test_unavailable_then_woken_within_30s(store, monkeypatch):
-    await wake_state.remember(store, "winpc", WINPC_WAKE)
+    await wake_state.remember(store, "mycraft", MYCRAFT_WAKE)
     monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
     message = FakeMessage()
     link = FakeNodeLink(
@@ -488,7 +488,7 @@ async def test_unavailable_then_woken_within_30s(store, monkeypatch):
             {"response": ai_flow.ROUTE_OK},
             {"response": "Сейчас подойду"},
         ],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     raw = await ai_flow.request_alfred(
@@ -500,7 +500,7 @@ async def test_unavailable_then_woken_within_30s(store, monkeypatch):
     # Второе «шаги» — про поднятие контейнера (отдельная неопределённость
     # от самого wake); успех не добавляет отдельного сообщения персонажа.
     assert message.answers == [ai_flow.STEPS_TEXT, ai_flow.ARNOLD_WAKING, ai_flow.STEPS_TEXT]
-    assert link.wol_sent == [{"mac": WINPC_WAKE["mac"]}]  # разбудили молча
+    assert link.wol_sent == [{"mac": MYCRAFT_WAKE["mac"]}]  # разбудили молча
 
 
 async def test_unavailable_and_no_wake_data_gives_up_immediately(store, monkeypatch):
@@ -525,11 +525,11 @@ async def test_unavailable_and_no_wake_data_gives_up_immediately(store, monkeypa
 
 
 async def test_unavailable_wake_sent_but_still_unreachable_after_30s(store, monkeypatch):
-    await wake_state.remember(store, "winpc", WINPC_WAKE)
+    await wake_state.remember(store, "mycraft", MYCRAFT_WAKE)
     monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
     monkeypatch.setattr(ai_flow, "WAKE_POLL_TIMEOUT_S", 0.05)
     message = FakeMessage()
-    link = FakeNodeLink(get_state_routes={})  # winpc:llm так и не отвечает
+    link = FakeNodeLink(get_state_routes={})  # mycraft:llm так и не отвечает
 
     raw = await ai_flow.request_alfred(
         message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
@@ -538,11 +538,11 @@ async def test_unavailable_wake_sent_but_still_unreachable_after_30s(store, monk
 
     assert raw is None
     assert message.answers == [ai_flow.STEPS_TEXT, ai_flow.ALBERT_UNAVAILABLE]
-    assert link.wol_sent == [{"mac": WINPC_WAKE["mac"]}]  # будили, но не помогло
+    assert link.wol_sent == [{"mac": MYCRAFT_WAKE["mac"]}]  # будили, но не помогло
 
 
 async def test_woken_but_retry_call_still_fails(store, monkeypatch):
-    await wake_state.remember(store, "winpc", WINPC_WAKE)
+    await wake_state.remember(store, "mycraft", MYCRAFT_WAKE)
     monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
     message = FakeMessage()
     link = FakeNodeLink(
@@ -550,7 +550,7 @@ async def test_woken_but_retry_call_still_fails(store, monkeypatch):
             ProtoError(ERR_UNAVAILABLE, "нода недоступна"),
             ProtoError(ERR_UNAVAILABLE, "опять недоступна"),
         ],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     raw = await ai_flow.request_alfred(
@@ -576,7 +576,7 @@ async def test_internal_error_on_first_try_answers_user_and_notifies_admin(store
     notifier = FakeNotifier()
     link = FakeNodeLink(
         chat_results=[ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева")],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     raw = await ai_flow.request_alfred(
@@ -599,7 +599,7 @@ async def test_internal_error_on_first_try_answers_user_and_notifies_admin(store
 
 
 async def test_internal_error_after_wake_answers_user_and_notifies_admin(store, monkeypatch):
-    await wake_state.remember(store, "winpc", WINPC_WAKE)
+    await wake_state.remember(store, "mycraft", MYCRAFT_WAKE)
     monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
     message = FakeMessage()
     notifier = FakeNotifier()
@@ -608,7 +608,7 @@ async def test_internal_error_after_wake_answers_user_and_notifies_admin(store, 
             ProtoError(ERR_UNAVAILABLE, "нода недоступна"),
             ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева"),
         ],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     raw = await ai_flow.request_alfred(
@@ -908,7 +908,7 @@ async def test_context_note_inserted_right_before_current_turn(store):
     message.from_user = FakeUser("Иван", username="ivan", id=10)
     link = FakeNodeLink(
         chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "ответ"}],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
     history = [
         {"role": "user", "content": "первый вопрос"},
@@ -1006,7 +1006,7 @@ async def test_web_search_announces_surfing_once_per_request(store):
             {"tool_calls": [_search_call("второй")]},
             {"response": "Вот что нашёл, сэг"},
         ],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     raw = await ai_flow.request_alfred(
@@ -1030,7 +1030,7 @@ async def test_other_tools_do_not_announce_surfing(store):
             {"response": ai_flow.ROUTE_OK},
             {"response": "Четыге"},
         ],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     await ai_flow.request_alfred(
@@ -1057,7 +1057,7 @@ async def test_without_search_right_model_is_told_not_to_invent(store):
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Не знаю, сэг"}],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
     book = SubscriptionBook(
         [Subscription(chat_id=1, name="группа", allowed_commands=frozenset({"chat@llm"}))]
@@ -1079,7 +1079,7 @@ async def test_with_search_right_no_such_warning(store):
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Извольте"}],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     await ai_flow.request_alfred(
@@ -1096,7 +1096,7 @@ async def test_chat_without_subscription_also_warned(store):
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "..."}],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     await ai_flow.request_alfred(
@@ -1139,7 +1139,7 @@ async def test_dismiss_tool_powers_nothing_off_during_the_request(store):
             {"response": ai_flow.ROUTE_OK},
             {"response": "Всего доброго, сэг"},
         ],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     raw = await ai_flow.request_alfred(
@@ -1164,8 +1164,8 @@ async def test_perform_dismissal_off_unloads_model_then_powers_machine_off(store
     assert link.calls == [
         # quiet=True — прощание уже сказано, llm_idle_sleep поверх него был бы
         # прямым противоречием («не дождался обращения»).
-        ("sleep", {"quiet": True}, "winpc", "llm"),
-        ("poweroff", {}, "winpc", "node"),
+        ("sleep", {"quiet": True}, "mycraft", "llm"),
+        ("poweroff", {}, "mycraft", "node"),
     ]
     assert message.answers == [ai_flow.DISMISS_TEXTS[ai_flow.ai_tools.DISMISS_OFF]]
 
@@ -1244,7 +1244,7 @@ async def test_memory_facts_land_in_the_context_note(store):
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Как скажете"}],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
         memory_facts=[
             {"text": "Качаем в /mnt/data/pr", "sensitive": False},
             {"text": "Код от домофона 1234", "sensitive": True},
@@ -1268,7 +1268,7 @@ async def test_silent_memory_leaves_the_note_as_it_was(store):
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "…"}],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     await ai_flow.request_alfred(
@@ -1297,7 +1297,7 @@ async def test_typing_fires_for_the_chat_around_the_actual_ask(store):
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Добгый день, сэ"}],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     await ai_flow.request_alfred(
@@ -1314,7 +1314,7 @@ async def test_typing_uses_the_topic_thread_id(store):
     message.message_thread_id = 777
     link = FakeNodeLink(
         chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "ответ"}],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     await ai_flow.request_alfred(
@@ -1349,7 +1349,7 @@ async def test_typing_does_not_fire_during_asleep_warmup_before_the_retry(store)
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Секунду, сэг"}],
-        get_state_routes={"winpc:llm": {"asleep": True}},
+        get_state_routes={"mycraft:llm": {"asleep": True}},
     )
 
     await ai_flow.request_alfred(
@@ -1374,7 +1374,7 @@ async def test_typing_keepalive_repeats_while_the_model_is_slow(store, monkeypat
 
     link = SlowLink(
         chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "ответ"}],
-        get_state_routes={"winpc:llm": {"asleep": False}},
+        get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     await ai_flow.request_alfred(

@@ -150,12 +150,20 @@ async def ensure_running(cfg: LlmConfig) -> None:
     (`_WARMUP_TIMEOUT_S`, чисто внутренний, локальный), протокольный таймаут
     роя (`Envelope.timeout_s`) считается от начала запроса бота и покрывает
     в том числе и этот прогрев.
+
+    ``container_backend == "native"`` (Linux, systemd) — своего "подъёма"
+    нет: Ollama держит себя живой сама (Restart=on-failure), здесь только
+    ждём, пока она ответит (например, после рестарта systemd-юнита) — без
+    wsl.exe/docker, которых на этой платформе просто нет.
     """
     if await ollama_version(cfg) is not None:
         return
-    log.info("llm: Ollama не отвечает — прогрев WSL/контейнера %s", cfg.ollama_container)
-    await _wsl_exec(cfg, "true")  # поднять сам дистрибутив WSL
-    await _wsl_exec(cfg, "docker", "start", cfg.ollama_container)
+    if cfg.container_backend == "native":
+        log.info("llm: Ollama (native) не отвечает — жду поднятия systemd-сервиса")
+    else:
+        log.info("llm: Ollama не отвечает — прогрев WSL/контейнера %s", cfg.ollama_container)
+        await _wsl_exec(cfg, "true")  # поднять сам дистрибутив WSL
+        await _wsl_exec(cfg, "docker", "start", cfg.ollama_container)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _WARMUP_TIMEOUT_S
     while loop.time() < deadline:
@@ -166,6 +174,20 @@ async def ensure_running(cfg: LlmConfig) -> None:
 
 
 async def stop(cfg: LlmConfig) -> None:
+    """``native`` — процесс Ollama не трогаем (systemd always-on, отдельный
+    выделенный сервер под LLM — гасить его нечем и незачем), только просим
+    Ollama немедленно выгрузить модель из RAM явным `keep_alive: 0` (не
+    дожидаясь её собственного 5-минутного таймера, живая находка
+    2026-07-24 в LlmConfig). ``wsl-docker`` — прежнее поведение: гасим
+    контейнер, освобождая VRAM.
+    """
+    if cfg.container_backend == "native":
+        payload = {"model": cfg.model, "prompt": "", "stream": False, "keep_alive": 0}
+        try:
+            await _post_with_retry(cfg, f"{cfg.ollama_url}/api/generate", payload)
+        except ProtoError:
+            log.warning("llm: не удалось явно выгрузить модель (keep_alive=0)")
+        return
     await _wsl_exec(cfg, "docker", "stop", cfg.ollama_container)
 
 

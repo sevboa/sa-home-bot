@@ -123,20 +123,29 @@ save_dirs = [
 # приходит страница входа. Пусто = `~/.local/share/qBittorrent/nova3`.
 # search_engine_dir = ""
 
-# Служба llm (Альфред, `sa-home-bot --service llm`) — на практике только на
-# Windows-ноде с GPU (winpc), но секция описывается в схеме статично, иначе
-# --check-config на других нодах не увидит поля. ollama_url — loopback-адрес
-# Ollama на ТОЙ ЖЕ машине, наружу не смотрит (LLM_INTEGRATION_PLAN.md §0).
+# Служба llm (Альфред, `sa-home-bot --service llm`) — на GPU-ноде Windows
+# (winpc, container_backend="wsl-docker") или на постоянной Linux-ноде с
+# нативной Ollama (mycraft, container_backend="native", CPU-only — с
+# 2026-08-02). Секция описывается в схеме статично, иначе --check-config на
+# других нодах не увидит поля. ollama_url — loopback-адрес Ollama на ТОЙ ЖЕ
+# машине, наружу не смотрит (LLM_INTEGRATION_PLAN.md §0).
 # request_timeout_s — таймаут ask/chat по протоколу роя (генерация с холодным
-# стартом WSL/контейнера дольше типичных «быстрых» действий).
-# idle_sleep_after_s — после стольки секунд без запросов служба сама
-# останавливает контейнер (освобождает VRAM); право в подписке — "chat@llm".
+# стартом WSL/контейнера/загрузки модели дольше типичных «быстрых» действий).
+# idle_sleep_after_s — после стольки секунд без запросов служба усыпляет
+# модель (wsl-docker — гасит контейнер целиком; native — явный keep_alive=0
+# Ollama, сам процесс не трогается); право в подписке — "chat@llm".
 # think_chat — thinking-режим qwen3 для chat (не для ask — там не нужен):
 # заметно дольше (~30-40с на раунд), но без него модель на реальных задачах
 # с формулами путается в арифметике и не всегда зовёт calc — точность того
 # стоит (LLM_INTEGRATION_PLAN.md, живая находка 2026-07-24).
+#
+# container_backend — "wsl-docker" (дефолт, только Windows: служба сама
+# поднимает/гасит WSL2+Docker через wsl.exe) или "native" (Linux: Ollama —
+# systemd-сервис, always-on, служба её не стартует/не гасит, только просит
+# выгрузить модель). wsl_distro/ollama_container нужны только "wsl-docker".
 [llm]
 socket = "./data/llm.sock"
+container_backend = "wsl-docker"       # "wsl-docker" (Windows) | "native" (Linux)
 ollama_url = "http://127.0.0.1:11434"
 model = "qwen3:14b"
 wsl_distro = "Docker"

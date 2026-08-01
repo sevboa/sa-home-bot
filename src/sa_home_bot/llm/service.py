@@ -176,7 +176,10 @@ class LlmService:
         self._asleep = False
         if isinstance(chat_id, int):
             self._active_chat_ids.add(chat_id)
-        if not self._keepalive.alive:
+        # Keepalive держит живой WSL2-VM — актуально только для
+        # container_backend="wsl-docker" (winpc); на native-Linux (mycraft)
+        # Ollama — always-on systemd-сервис, никакого wsl.exe тут нет.
+        if self._cfg.container_backend == "wsl-docker" and not self._keepalive.alive:
             await self._keepalive.start()
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -241,7 +244,8 @@ class LlmService:
         («появились другие дела») — пустой список гасит и его.
         """
         await ollama.stop(self._cfg)
-        await self._keepalive.stop()
+        if self._cfg.container_backend == "wsl-docker":
+            await self._keepalive.stop()
         self._asleep = True
         if quiet:
             self._active_chat_ids.clear()

@@ -102,7 +102,7 @@ log = logging.getLogger(__name__)
 # bot/notifier.py — ею пользуется и приватный вход (bot/invites.py), которому
 # вся LLM-обвязка этого модуля не нужна.
 
-LLM_NODE = "winpc"
+LLM_NODE = "mycraft"
 LLM_SERVICE = "llm"
 
 # Личное место жительства Альфреда (не дома семьи — своё, персонажное; см.

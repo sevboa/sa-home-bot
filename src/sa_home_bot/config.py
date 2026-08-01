@@ -275,13 +275,27 @@ class NetConfig(BaseModel):
 
 
 class LlmConfig(BaseModel):
-    """Служба llm (Альфред, `sa-home-bot --service llm`) — только на winpc.
+    """Служба llm (Альфред, `sa-home-bot --service llm`) — на winpc (GPU,
+    WSL2+Docker) и на Linux-нодах с постоянно поднятой нативной Ollama
+    (mycraft, CPU-only, с 2026-08-02).
+
+    ``container_backend`` — как служба управляет жизнью Ollama:
+    ``"wsl-docker"`` (дефолт, winpc) — Ollama живёт в Docker-контейнере
+    внутри WSL2, служба сама поднимает/гасит их через `wsl.exe`/`docker`
+    (см. llm/ollama.py::ensure_running/stop, живая находка 2026-07-23 —
+    WSL не запускается из-под Session 0, поэтому службу поднимает
+    deploy/llm-runner.ps1, а не супервизор ноды). ``"native"`` (Linux) —
+    Ollama установлена как systemd-сервис и всегда поднята сама
+    (Restart=on-failure), служба её не стартует/не гасит — вместо
+    "усыпить контейнер" `stop()` шлёт Ollama явный `keep_alive: 0`,
+    выгружая модель из RAM немедленно, не трогая сам процесс.
 
     ``ollama_url`` — loopback-адрес Ollama на этой же машине (см. §0
     LLM_INTEGRATION_PLAN.md: наружу это никогда не смотрит, только служба →
     Ollama локально). ``wsl_distro``/``ollama_container`` — имена,
     зафиксированные при ручной настройке инфраструктуры (см. документ выше,
-    §1). ``request_timeout_s`` — таймаут ответа `ask`/`chat` по протоколу
+    §1); используются только при ``container_backend = "wsl-docker"``.
+    ``request_timeout_s`` — таймаут ответа `ask`/`chat` по протоколу
     роя (генерация, в т.ч. с холодным стартом WSL/контейнера, дольше
     типичных «быстрых» действий — см. Envelope.timeout_s в proto/messages.py).
     ``idle_sleep_after_s`` — после стольки секунд без запросов служба сама
@@ -324,6 +338,7 @@ class LlmConfig(BaseModel):
     """
 
     socket: str = "./data/llm.sock"
+    container_backend: str = "wsl-docker"  # "wsl-docker" | "native"
     ollama_url: str = "http://127.0.0.1:11434"
     model: str = "qwen3:14b"
     wsl_distro: str = "Docker"
