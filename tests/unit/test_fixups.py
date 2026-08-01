@@ -98,6 +98,17 @@ def test_which_returns_none_when_nowhere_found(tmp_path, monkeypatch):
     assert fixups_module._which("does-not-exist") is None
 
 
+def test_smartmontools_check_falls_back_to_sbin_dirs(tmp_path, monkeypatch):
+    # Живой баг 2026-08-01 на mycraft: apt честно ставит smartctl в
+    # /usr/sbin, а check() голым shutil.which (без фолбэка на sbin, в
+    # отличие от _real_smartctl_path) считал его отсутствующим — фикс вечно
+    # висел "команда прошла, но проверка отрицательна".
+    monkeypatch.setattr(fixups_module.shutil, "which", lambda name: None)
+    monkeypatch.setattr(fixups_module, "_SBIN_FALLBACK_DIRS", (str(tmp_path),))
+    _make_executable(tmp_path / "smartctl")
+    assert INSTALL_SMARTMONTOOLS.check()
+
+
 def test_install_sudoers_snippet_raises_fixup_error_without_visudo(monkeypatch):
     monkeypatch.setattr(fixups_module, "_which", lambda name: None)
     try:

@@ -118,7 +118,12 @@ def _smartmontools_needed(settings: Settings) -> bool:
 
 
 def _smartmontools_check() -> bool:
-    return shutil.which("smartctl") is not None
+    # _which(), не голый shutil.which(): интерактивный логин-шелл по SSH
+    # обычно не включает /usr/sbin, где apt кладёт smartctl (см. _which) —
+    # тем же путём, что smartctl-sudoers уже резолвит настоящий бинарник,
+    # иначе фикс вечно считает пакет неприменённым (живой баг 2026-08-01
+    # на mycraft: apt честно отвечает «уже установлен», а check() — нет).
+    return _which("smartctl") is not None
 
 
 def _smartmontools_apply() -> None:
@@ -295,6 +300,12 @@ def make_apps_unit_fixup(app: AppConfig) -> Fixup:
 # экраном на «Выключить», просто явно для этого логина.
 
 POWER_POLKIT_RULE_FILE = Path("/etc/polkit-1/rules.d/50-sa-home-node-power.rules")
+# Пакет называется polkitd на Debian/Ubuntu (policykit-1 там же — пустой
+# переходный пакет, apt-cache policy отдаёт "Кандидат: (отсутствует)"); на
+# прочих дистрибутивах это просто polkit. Минимальная установка сервера
+# (headless, без DE) его вообще не тянет — живой баг 2026-08-01 на mycraft:
+# каталога /etc/polkit-1 не было вовсе, install падал с ENOENT.
+POWER_POLKIT_PACKAGE = "polkitd"
 _POWER_POLKIT_ACTIONS = (
     "power-off",
     "power-off-multiple-sessions",
@@ -330,11 +341,22 @@ def _power_control_check() -> bool:
 
 
 def _power_control_apply() -> None:
+    if not POWER_POLKIT_RULE_FILE.parent.is_dir():
+        argv = install_argv(POWER_POLKIT_PACKAGE)
+        if argv is None:
+            raise FixupError(
+                f"polkit не установлен, и неизвестен пакетный менеджер для установки "
+                f"пакета {POWER_POLKIT_PACKAGE!r}"
+            )
+        _sudo(argv)
     content = power_polkit_rule_content(getuser())
     with tempfile.NamedTemporaryFile("w", suffix=".rules", delete=False) as tmp:
         tmp.write(content)
         tmp_path = Path(tmp.name)
     try:
+        # -d на случай, если пакет почему-то не создал rules.d сам (или его
+        # вовсе нет — см. комментарий у POWER_POLKIT_PACKAGE).
+        _sudo(["install", "-d", "-m", "0755", str(POWER_POLKIT_RULE_FILE.parent)])
         _sudo(
             [
                 "install",
