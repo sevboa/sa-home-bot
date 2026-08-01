@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
 from aiogram import Bot
@@ -15,6 +16,48 @@ log = logging.getLogger(__name__)
 
 MAX_LEN = 4096
 MAX_RETRIES = 3
+# Telegram сам гасит typing-action примерно через 5с — повторяем чуть чаще,
+# чтобы индикатор не мигал видимым образом.
+TYPING_KEEPALIVE_INTERVAL_S = 4.0
+
+
+@contextlib.asynccontextmanager
+async def typing_action(bot: Bot, chat_id: int, message_thread_id: int | None = None):
+    """Держать индикатор «печатает» в чате, пока не выйдем из блока.
+
+    Решение пользователя 2026-08-01: индикатор должен гореть не с момента,
+    как человек написал, а именно пока модель готовит ответ — во время
+    presence-проверки и прогрева контейнера/машины (wake-сценарий,
+    bot/ai_flow.py::request_alfred) у пользователя уже есть свои текстовые
+    «шаги»/«Агнольд», дублировать typing поверх них не нужно. Поэтому этим
+    контекст-менеджером оборачивают именно вызов модели (``_ask()``), а не
+    весь хендлер целиком."""
+
+    async def _send() -> None:
+        try:
+            await bot.send_chat_action(chat_id, "typing", message_thread_id=message_thread_id)
+        except TelegramAPIError:
+            pass  # не критично — просто не обновится в этот раз
+
+    async def _loop() -> None:
+        while True:
+            await asyncio.sleep(TYPING_KEEPALIVE_INTERVAL_S)
+            await _send()
+
+    # Первый вызов — сразу и синхронно (внутри __aenter__), не через
+    # create_task: если запрос к модели ни разу по-настоящему не
+    # приостановится (нет реального I/O-ожидания на своём пути), фоновая
+    # задача рискует не получить ни одного шанса выполниться до отмены в
+    # finally — индикатор не загорелся бы вовсе. Цикл-повтор ниже нужен
+    # только чтобы Telegram не погасил его сам примерно через 5с.
+    await _send()
+    task = asyncio.create_task(_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 def chunk_text(text: str, limit: int = MAX_LEN) -> list[str]:

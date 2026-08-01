@@ -180,7 +180,6 @@ async def test_cmd_ai_with_text_calls_ai_flow_and_records_both_turns(store, monk
     )
 
     assert seen_history == [[{"role": "user", "content": "привет"}]]
-    assert message.bot.typing_chats == [1]
     assert message.sent == [ai_handler._format_answer("Добгый день, сэ")]
 
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
@@ -849,43 +848,11 @@ async def test_on_private_message_in_topic_continues_same_topic_without_reply(st
     assert [r["role"] for r in rows] == ["user", "assistant", "user", "assistant"]
 
 
-async def test_typing_indicator_uses_message_thread_id_of_the_topic(store, monkeypatch):
-    async def fake_request(
-        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None
-    ):
-        return "ответ"
-
-    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
-    message = FakeMessage(1, text="/alfred привет", message_thread_id=777)
-
-    await ai_handler.cmd_ai(
-        message, node_link=None, store=store, config=Settings(),
-        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
-        tool_calls=ToolCalls(),
-    )
-
-    assert message.bot.typing_chats == [1]
-    assert message.bot.typing_threads == [777]
-
-
-async def test_typing_indicator_has_no_thread_outside_topics(store, monkeypatch):
-    async def fake_request(
-        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None
-    ):
-        return "ответ"
-
-    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
-    message = FakeMessage(1, text="/alfred привет")  # без message_thread_id
-
-    await ai_handler.cmd_ai(
-        message, node_link=None, store=store, config=Settings(),
-        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
-        tool_calls=ToolCalls(),
-    )
-
-    assert message.bot.typing_threads == [None]
+# typing-индикатор: раньше проверялся здесь (разовый вызов на приём
+# сообщения), теперь живёт внутри ai_flow.request_alfred как keep-alive
+# вокруг самого вызова модели (решение пользователя 2026-08-01) — эта функция
+# в тестах хендлера как раз замокана, так что покрытие переехало целиком в
+# test_ai_flow.py (test_typing_*).
 
 
 async def test_empty_model_answer_is_not_sent_as_a_bare_prefix(store, monkeypatch):

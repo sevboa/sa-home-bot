@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
@@ -32,9 +33,20 @@ OWN_STATE = {
 }
 
 
+class FakeBot:
+    def __init__(self) -> None:
+        self.typing_chats: list[int] = []
+        self.typing_threads: list[int | None] = []
+
+    async def send_chat_action(self, chat_id, action, message_thread_id=None):
+        self.typing_chats.append(chat_id)
+        self.typing_threads.append(message_thread_id)
+
+
 class FakeMessage:
     chat = SimpleNamespace(id=1, type="private")
     message_id = 42
+    message_thread_id = None
     from_user = None
     reply_to_message = None
     quote = None
@@ -42,6 +54,7 @@ class FakeMessage:
 
     def __init__(self) -> None:
         self.answers: list[str] = []
+        self.bot = FakeBot()
 
     async def answer(self, text, **kwargs):
         self.answers.append(text)
@@ -1272,3 +1285,104 @@ async def test_broken_memory_does_not_break_the_conversation(store):
         FakeNodeLink(chat_results=[]), 1, "привет"
     )
     assert facts == []
+
+
+# --- typing keep-alive: индикатор "печатает" должен гореть только пока
+# модель реально готовит ответ (решение пользователя 2026-08-01) — не с
+# момента приёма сообщения человеком, и не во время presence-проверки/
+# прогрева контейнера (тем этапам хватает своих текстовых "шагов") ---
+
+
+async def test_typing_fires_for_the_chat_around_the_actual_ask(store):
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Добгый день, сэ"}],
+        get_state_routes={"winpc:llm": {"asleep": False}},
+    )
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert message.bot.typing_chats == [message.chat.id]
+    assert message.bot.typing_threads == [None]  # вне топика — без message_thread_id
+
+
+async def test_typing_uses_the_topic_thread_id(store):
+    message = FakeMessage()
+    message.message_thread_id = 777
+    link = FakeNodeLink(
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "ответ"}],
+        get_state_routes={"winpc:llm": {"asleep": False}},
+    )
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert message.bot.typing_threads == [777]
+
+
+async def test_typing_does_not_fire_while_node_unreachable_and_no_wake_data(store, monkeypatch):
+    # get_state_routes пуст — presence-проверка сама уже "недоступна", до
+    # настоящей генерации дело не доходит (см. test_unavailable_and_no_wake_
+    # data_gives_up_immediately) — значит и typing загораться не должен.
+    monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(ai_flow, "WAKE_POLL_TIMEOUT_S", 0.05)
+    message = FakeMessage()
+    link = FakeNodeLink()
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert message.bot.typing_chats == []
+
+
+async def test_typing_does_not_fire_during_asleep_warmup_before_the_retry(store):
+    # Модель спит (см. test_asleep_model_shows_steps_but_no_wake) — "шаги"
+    # уже сказаны текстом, до typing на этом этапе доходить не должно; он
+    # загорится только внутри самого _ask(), который ниже успешно отвечает.
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Секунду, сэг"}],
+        get_state_routes={"winpc:llm": {"asleep": True}},
+    )
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert message.bot.typing_chats == [message.chat.id]  # ровно вокруг _ask(), не раньше
+
+
+async def test_typing_keepalive_repeats_while_the_model_is_slow(store, monkeypatch):
+    from sa_home_bot.bot import notifier as notifier_module
+
+    monkeypatch.setattr(notifier_module, "TYPING_KEEPALIVE_INTERVAL_S", 0.01)
+    message = FakeMessage()
+
+    class SlowLink(FakeNodeLink):
+        async def command(self, action, args=None, dst=None, timeout=None):
+            if action == "chat":
+                await asyncio.sleep(0.05)
+            return await super().command(action, args, dst, timeout)
+
+    link = SlowLink(
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "ответ"}],
+        get_state_routes={"winpc:llm": {"asleep": False}},
+    )
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    # Два раунда "chat" по 0.05с каждый на интервале в 0.01с — keep-alive
+    # обязан повториться хотя бы раз, не только зажечься единожды.
+    assert len(message.bot.typing_chats) > 1
+    assert set(message.bot.typing_chats) == {message.chat.id}

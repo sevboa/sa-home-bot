@@ -62,6 +62,7 @@ ALBERT_HICCUP ("Альфред на секунду отвлёкся — повт
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from datetime import UTC, date, datetime
 from typing import Any
@@ -73,7 +74,11 @@ from sa_home_bot import wake_core
 from sa_home_bot.bot import swarm_view
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.lifecycle import notify_tool_call
-from sa_home_bot.bot.notifier import Notifier, notify_admins  # noqa: F401 — реэкспорт, см. ниже
+from sa_home_bot.bot.notifier import (  # noqa: F401 — реэкспорт, см. ниже
+    Notifier,
+    notify_admins,
+    typing_action,
+)
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import PersonConfig, Settings
@@ -637,6 +642,15 @@ async def perform_dismissal(
     await message.answer(DISMISS_TEXTS[mode])
 
 
+def _typing_while_asking(message: Message) -> contextlib.AbstractAsyncContextManager[None]:
+    """typing_action на чат/топик этого сообщения — no-op, если chat неизвестен
+    (message.chat может быть None в синтетических вызовах вроде start_dialogue
+    из тестов; в реальном Telegram-апдейте он всегда есть)."""
+    if message.chat is None:
+        return contextlib.nullcontext()
+    return typing_action(message.bot, message.chat.id, message.message_thread_id)
+
+
 async def request_alfred(
     message: Message,
     node_link: ServiceLink,
@@ -820,7 +834,8 @@ async def request_alfred(
 
     if not known_unavailable:
         try:
-            return await _ask()
+            async with _typing_while_asking(message):
+                return await _ask()
         except ServiceUnavailableError:
             pass
         except ProtoError as exc:
@@ -857,7 +872,8 @@ async def request_alfred(
     # разных персонажей, а успех — молча «оказывается, шёл Агнольд».
     await message.answer(STEPS_TEXT)
     try:
-        return await _ask()
+        async with _typing_while_asking(message):
+            return await _ask()
     except ServiceUnavailableError:
         await message.answer(ALBERT_UNAVAILABLE)
         return None

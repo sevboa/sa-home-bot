@@ -418,11 +418,11 @@ async def _do_ask_and_reply(
     history: list[dict[str, str]],
     tool_calls: ToolCalls,
 ) -> str | None:
-    # message_thread_id: если ответ готовится для сообщения внутри топика,
-    # индикатор должен светиться в этом топике, а не в основном треде чата.
-    await message.bot.send_chat_action(
-        message.chat.id, "typing", message_thread_id=message.message_thread_id
-    )
+    # typing-индикатор (keep-alive, пока модель реально готовит ответ) —
+    # внутри ai_flow.request_alfred, вокруг самого вызова модели (не здесь и
+    # не сразу на приём сообщения: во время presence-проверки и прогрева
+    # контейнера/машины у пользователя уже есть текстовые «шаги»/«Агнольд»,
+    # решение пользователя 2026-08-01, см. bot/notifier.py::typing_action).
     # Ячейка под «Альфреда отпустили» (тул dismiss): сам тул ничего не гасит —
     # ответ в этот момент ещё генерируется той самой моделью, которую предстоит
     # выгрузить (см. bot/tools.py::DismissalBox). Исполняем ниже, после того
