@@ -59,7 +59,12 @@ def _matches(query: str, candidate: str) -> bool:
         return False
     if query == candidate_norm:
         return True
-    return any(word.startswith(query) for word in candidate_norm.replace("(", " ").split())
+    # invited_user обычно выглядит как "Имя Фамилия (@username)" (bot/invites.py) —
+    # без разбора скобки/"@" слово "(@username)" не начинается с "username",
+    # и голый юзернейм-запрос никогда не находит человека, только имя (живой
+    # баг 2026-08-01: "nava40a" не находил Наташу, "наташа" — находил).
+    words = candidate_norm.replace("(", " ").replace(")", " ").split()
+    return any(word.lstrip("@").startswith(query) for word in words)
 
 
 def _is_private(chat_id: int) -> bool:
