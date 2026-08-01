@@ -15,10 +15,12 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import secrets
 import shutil
 import socket
+import subprocess
 import sys
 from pathlib import Path
 
@@ -65,6 +67,8 @@ def add_init_subparser(subparsers: argparse._SubParsersAction) -> None:
                          help="перезаписать config.toml/юнит, если уже существуют")
     parser.add_argument("--no-systemd-unit", action="store_true",
                          help="не писать user-юнит systemd (только config.toml)")
+    parser.add_argument("--no-start", action="store_true",
+                         help="не запускать юнит — только записать файлы и напечатать команды")
     parser.set_defaults(_run=run_init)
 
 
@@ -98,20 +102,52 @@ def _toml_scalar(value: str | list[str]) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+# Сокет/БД каждой службы по умолчанию — относительный путь ("./data/x.sock"),
+# который две разные программы резолвят от РАЗНЫХ каталогов: сам сервис — от
+# своего WorkingDirectory (data_dir), а `nodectl` — от каталога config.toml
+# (nodectl.py::_resolve_endpoint). Если это разные каталоги (а они разные —
+# конфиг в ~/.config, данные в ~/.local/share), `nodectl status` ищет сокет
+# не там и не находит («No such file or directory») — живой баг 2026-08-01
+# на mycraft. Лечится тем же, чем на alfred в проде: путь абсолютный.
+_SERVICE_PATH_DEFAULTS: dict[str, dict[str, str]] = {
+    "database": {"path": "sentinel.sqlite"},
+    "monitor": {"socket": "monitor.sock", "db_path": "monitor.sqlite"},
+    "apps": {"socket": "apps.sock"},
+    "torrents": {"socket": "torrents.sock"},
+    "memory": {"socket": "memory.sock", "db_path": "memory.sqlite"},
+    "tasks": {"socket": "tasks.sock", "db_path": "tasks.sqlite"},
+    "net": {"socket": "net.sock"},
+    "llm": {"socket": "llm.sock"},
+}
+
+
+def _render_service_paths(data_dir: Path) -> str:
+    lines = []
+    for section, fields in _SERVICE_PATH_DEFAULTS.items():
+        lines.append(f"[{section}]")
+        for field, filename in fields.items():
+            absolute = data_dir / "data" / filename
+            lines.append(f"{field} = {_toml_scalar(str(absolute))}")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def _render_config(*, node_id: str, kind: str, assignments: list[str],
-                    listen: list[str], token: str, join: str) -> str:
+                    listen: list[str], token: str, join: str, data_dir: Path) -> str:
     return (
         "# Сгенерировано `sa-home-bot init`. Это не единственный источник —\n"
-        "# остальные секции берут дефолты из кода (см. config.example.toml в\n"
-        "# репозитории, если нужно переопределить что-то ещё).\n"
+        "# остальное (списки приложений, учётные данные, подписки бота) —\n"
+        "# дефолты из кода, правь руками (см. config.example.toml в репозитории).\n"
         "\n"
         "[node]\n"
         f"id = {_toml_scalar(node_id)}\n"
         f"kind = {_toml_scalar(kind)}\n"
+        f"socket = {_toml_scalar(str(data_dir / 'data' / 'node.sock'))}\n"
         f"assignments = {_toml_scalar(assignments)}\n"
         f"listen = {_toml_scalar(listen)}\n"
         "\n"
-        "[swarm]\n"
+        + _render_service_paths(data_dir)
+        + "\n[swarm]\n"
         f"token = {_toml_scalar(token)}\n"
         f"join = {_toml_scalar(join)}\n"
     )
@@ -140,6 +176,47 @@ def _render_systemd_unit(*, exec_path: str, config_path: Path, data_dir: Path) -
         "[Install]\n"
         "WantedBy=default.target\n"
     )
+
+
+def _run_step(cmd: list[str]) -> bool:
+    """Выполнить команду, унаследовав stdio (чтобы `sudo` мог спросить пароль
+    прямо в терминале). Возвращает успех; сама печатает, если не вышло —
+    вызывающий код это не фатально, юнит всё равно можно поднять руками."""
+    print(f"$ {' '.join(cmd)}")
+    try:
+        subprocess.run(cmd, check=True)
+    except FileNotFoundError:
+        print(f"  {cmd[0]} не найден", file=sys.stderr)
+        return False
+    except subprocess.CalledProcessError as exc:
+        print(f"  упало с кодом {exc.returncode}", file=sys.stderr)
+        return False
+    return True
+
+
+def _enable_and_start(*, interactive: bool) -> None:
+    print()
+    ok = _run_step(["systemctl", "--user", "daemon-reload"])
+    ok = _run_step(["systemctl", "--user", "enable", "--now", "sa-home-node"]) and ok
+
+    if interactive:
+        # sudo сам спросит пароль на терминале — здесь есть кому его ввести.
+        _run_step(["sudo", "loginctl", "enable-linger", getpass.getuser()])
+    else:
+        print(
+            "Не в интерактивном режиме — не зову sudo (спросить пароль было бы не у кого).\n"
+            f"Выполни сам, чтобы служба пережила выход из сессии: "
+            f"sudo loginctl enable-linger {getpass.getuser()}"
+        )
+
+    if ok:
+        print("\nnodectl status / journalctl --user -u sa-home-node -f — посмотреть, что внутри")
+    else:
+        print(
+            "\nАвтозапуск не задался целиком — доделай руками:\n"
+            "  systemctl --user daemon-reload\n"
+            "  systemctl --user enable --now sa-home-node"
+        )
 
 
 def run_init(args: argparse.Namespace) -> int:
@@ -184,22 +261,38 @@ def run_init(args: argparse.Namespace) -> int:
             else []
         )
 
+    # Пусто у join не обязательно значит «нода — первая»: если рой уже есть в
+    # ЭТОЙ ЖЕ локальной сети, LAN-маячок (node/discovery.py) сам разошлёт
+    # запрос и присоединится, как только совпадёт [swarm].token — вводить IP
+    # руками для этого не нужно. Поэтому решаем отдельно, прежде чем решать
+    # про токен: не знаем адрес — не значит основываем новый рой.
     join = args.join
+    founding_new_swarm = False
     if join is None:
-        join = _prompt(
-            "Адрес существующей ноды роя, tcp://host:port (пусто — это первая нода нового роя)", ""
-        ) if interactive else ""
+        if interactive:
+            founding_new_swarm = not _prompt_yes_no(
+                "В этой локальной сети уже есть рой (другие ноды sa-home-bot)?", True
+            )
+            join = "" if founding_new_swarm else _prompt(
+                "IP:порт соседа, если знаешь (пусто — понадеемся на LAN-маячок: "
+                "он сам найдёт и присоединится по общему токену)", ""
+            )
+        else:
+            join = ""
 
     token = args.token
     if token is None:
-        if join:
+        # Токен обязателен всюду, кроме случая «эта нода основывает новый
+        # рой» — тогда безопасно предложить сгенерировать новый.
+        must_paste_token = bool(join) or (interactive and not founding_new_swarm)
+        if must_paste_token:
             if interactive:
                 token = _prompt(
                     "Токен роя (тот же, что в config.toml существующей ноды — "
                     "см. `grep -A3 '^\\[swarm\\]' " + str(DEFAULT_CONFIG_PATH) + "` на ней)"
                 )
                 while not token:
-                    token = _prompt("Токен обязателен при непустом --join, повтори")
+                    token = _prompt("Токен обязателен, повтори")
             else:
                 missing_for_noninteractive.append("--token (обязателен вместе с --join)")
                 token = ""
@@ -233,7 +326,7 @@ def run_init(args: argparse.Namespace) -> int:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
         _render_config(node_id=node_id, kind=kind, assignments=assignments,
-                        listen=listen, token=token, join=join),
+                        listen=listen, token=token, join=join, data_dir=data_dir),
         encoding="utf-8",
     )
     (data_dir / "data").mkdir(parents=True, exist_ok=True)
@@ -258,7 +351,9 @@ def run_init(args: argparse.Namespace) -> int:
     if not join:
         print(f"\nТокен роя (сохрани — понадобится для следующих нод): {token}")
 
-    if unit_written:
+    if unit_written and not args.no_start:
+        _enable_and_start(interactive=interactive)
+    elif unit_written:
         print(
             "\nДальше:\n"
             "  systemctl --user daemon-reload\n"
