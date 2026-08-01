@@ -251,15 +251,39 @@ def run_init(args: argparse.Namespace) -> int:
             else []
         )
 
+    # Пустой listen — не "только исходящие", а "нельзя вступить в рой вовсе":
+    # swarm_join на принимающей стороне требует наш endpoint
+    # (node/service.py::_swarm_join, ERR_BAD_REQUEST без него), а его неоткуда
+    # взять без хотя бы одного слушаемого TCP-адреса (_advertised() вернёт
+    # пусто) — живой баг 2026-08-01 на mycraft, из-за него не проходил join.
+    # Для vps (публичный IP) дефолт 0.0.0.0 давать нельзя — светить рой в
+    # интернет («Node jeeves»): там нужен явный tailscale/приватный адрес.
     listen = _split_csv(args.listen) if args.listen is not None else None
     if listen is None:
-        listen = (
-            _split_csv(_prompt(
-                "Адрес(а) для входящих соединений от пиров (пусто — только исходящие)", ""
+        if kind != "vps":
+            # server/workstation — обычная машина за роутером: слушать все
+            # интерфейсы безопасно (том числе, эта дальнейшая переменная не
+            # переспрашивается, а просто применяется). --listen всё ещё
+            # переопределяет, если нужен конкретный интерфейс.
+            listen = ["tcp://0.0.0.0:8710"]
+        elif interactive:
+            listen = _split_csv(_prompt(
+                "Публичная машина (vps) — адрес(а) для входящих соединений от "
+                "пиров, НЕ 0.0.0.0: явный приватный/tailscale-адрес, иначе рой "
+                "торчит в интернет", "",
             ))
-            if interactive
-            else []
-        )
+            while not listen and not _prompt_yes_no(
+                "Пусто — нода не сможет вступить в рой вовсе (swarm_join требует наш "
+                "адрес). Точно оставить пустым?", False,
+            ):
+                listen = _split_csv(_prompt("Адрес(а) для входящих соединений от пиров", ""))
+        else:
+            listen = []
+            print(
+                "listen пуст (kind=vps) — нода не сможет вступить в рой, "
+                "пока не задашь --listen явно",
+                file=sys.stderr,
+            )
 
     # Пусто у join не обязательно значит «нода — первая»: если рой уже есть в
     # ЭТОЙ ЖЕ локальной сети, LAN-маячок (node/discovery.py) сам разошлёт

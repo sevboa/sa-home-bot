@@ -118,6 +118,76 @@ def test_non_interactive_with_join_and_token_writes_join(tmp_path):
     assert parsed["node"]["kind"] == "server"
 
 
+def test_non_interactive_defaults_listen_to_all_interfaces(tmp_path):
+    """Живой баг 2026-08-01 на mycraft: пустой listen проходит валидацию
+    config.toml, но node/service.py::_swarm_join требует наш endpoint —
+    с пустым listen у ноды его нет, и join падает всегда с bad_request.
+    Дефолт больше не пустой (кроме vps, см. следующий тест)."""
+    config_path = tmp_path / "config.toml"
+    args = _parser_args([
+        "init", "--non-interactive",
+        "--config", str(config_path),
+        "--data-dir", str(tmp_path / "data-dir"),
+        "--token", "t",
+        "--kind", "workstation",
+        "--no-systemd-unit",
+    ])
+
+    assert setup_wizard.run_init(args) == 0
+    parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    assert parsed["node"]["listen"] == ["tcp://0.0.0.0:8710"]
+
+
+def test_non_interactive_vps_listen_stays_empty_but_warns(tmp_path, capsys):
+    """vps — публичный IP (см. node-jeeves): 0.0.0.0 туда светить нельзя,
+    нужен явный приватный/tailscale-адрес. Раз его не дали — предупреждаем,
+    а не молча ломаем join, как это было на mycraft."""
+    config_path = tmp_path / "config.toml"
+    args = _parser_args([
+        "init", "--non-interactive",
+        "--config", str(config_path),
+        "--data-dir", str(tmp_path / "data-dir"),
+        "--token", "t",
+        "--kind", "vps",
+        "--no-systemd-unit",
+    ])
+
+    assert setup_wizard.run_init(args) == 0
+    parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    assert parsed["node"]["listen"] == []
+    assert "не сможет вступить в рой" in capsys.readouterr().err
+
+
+def test_interactive_refuses_empty_listen_unless_confirmed(tmp_path, monkeypatch):
+    """kind=vps — единственный случай, где дефолт listen сам по себе пуст,
+    так что ответ "" на первую попытку реально даёт пустой список (для
+    server/workstation дефолт непустой, и "" вернул бы его же)."""
+    monkeypatch.setattr(setup_wizard.sys.stdin, "isatty", lambda: True)
+    answers = iter([
+        "",                      # listen попытка 1: пусто (дефолт для vps тоже пуст)
+        "n",                     # "точно оставить пустым?" — нет
+        "tcp://100.64.0.5:8710", # listen попытка 2: реальный адрес
+        "n",                     # рой ещё не существует
+        "y",                     # сгенерировать токен
+    ])
+    monkeypatch.setattr("builtins.input", lambda *_a: next(answers))
+
+    config_path = tmp_path / "config.toml"
+    args = _parser_args([
+        "init",
+        "--config", str(config_path),
+        "--data-dir", str(tmp_path / "data-dir"),
+        "--node-id", "jeeves2",
+        "--kind", "vps",
+        "--assignments", "",
+        "--no-systemd-unit",
+    ])
+
+    assert setup_wizard.run_init(args) == 0
+    parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    assert parsed["node"]["listen"] == ["tcp://100.64.0.5:8710"]
+
+
 def test_refuses_to_overwrite_without_force(tmp_path):
     config_path = tmp_path / "config.toml"
     config_path.write_text("# уже стоит своя нода\n", encoding="utf-8")
@@ -152,8 +222,7 @@ def test_interactive_prompts_fill_in_missing_values(tmp_path, monkeypatch):
     answers = iter([
         "mycraft",       # node id
         "workstation",   # kind
-        "monitor",       # assignments
-        "",              # listen
+        "monitor",       # assignments (listen для non-vps больше не спрашивается)
         "n",             # рой в этой LAN ещё не существует — эта нода первая
         "n",             # не генерировать токен...
         "pasted-token",  # ...а вставить свой
@@ -172,6 +241,7 @@ def test_interactive_prompts_fill_in_missing_values(tmp_path, monkeypatch):
     parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
     assert parsed["node"]["id"] == "mycraft"
     assert parsed["node"]["assignments"] == ["monitor"]
+    assert parsed["node"]["listen"] == ["tcp://0.0.0.0:8710"]
     assert parsed["swarm"]["join"] == ""
     assert parsed["swarm"]["token"] == "pasted-token"
 
@@ -186,8 +256,7 @@ def test_interactive_existing_swarm_without_known_address_requires_token(tmp_pat
     answers = iter([
         "mycraft",              # node id
         "server",               # kind
-        "",                     # assignments
-        "",                     # listen
+        "",                     # assignments (listen для non-vps больше не спрашивается)
         "y",                    # да, рой в этой LAN уже есть
         "",                     # IP соседа не знаю — понадеемся на маячок
         "existing-real-token",  # токен обязателен, не предлагали генерировать
@@ -204,6 +273,7 @@ def test_interactive_existing_swarm_without_known_address_requires_token(tmp_pat
 
     assert setup_wizard.run_init(args) == 0
     parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    assert parsed["node"]["listen"] == ["tcp://0.0.0.0:8710"]
     assert parsed["swarm"]["join"] == ""
     assert parsed["swarm"]["token"] == "existing-real-token"
 
