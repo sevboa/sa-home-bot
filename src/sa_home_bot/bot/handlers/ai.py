@@ -5,6 +5,21 @@
 команды, которой начат тред; реплай-цепочка резолвится через ai_turns, не
 через дерево Telegram-реплаев). Presence/wake-сценарий и форматирование
 ответа — bot/ai_flow.py.
+
+**Telegram Private Chat Topics (этап 32, IMPLEMENTATION_PLAN.md, добавлено
+2026-08-01):** если сообщение отправлено внутри топика личного чата
+(`message.message_thread_id` не пуст), `dialogue_id` — это id топика, а не
+message_id сообщения. Дальше топик и есть тред: любое сообщение внутри
+него — продолжение, без обязательного reply на сообщение бота (в отличие
+от треда без топика, где reply по-прежнему единственный способ
+продолжить). `aiogram` сам пробрасывает `message_thread_id` в
+`message.answer()`/`.reply()` — ответ уезжает в тот же топик без
+дополнительных параметров. Живой спайк на боевом боте (2026-08-01):
+`createForumTopic`/`sendMessage(message_thread_id=…)`/`editMessageText`
+внутри топика личного чата отработали с первой попытки — регрессия Bot
+API 10.0, которую ловили другие проекты (`sendMessage` с
+`message_thread_id` → `400: message thread not found`), на этом боте не
+воспроизвелась.
 """
 
 from __future__ import annotations
@@ -62,6 +77,14 @@ EMPTY_REPLY_PROMPT = (
 
 def _format_answer(raw: str) -> str:
     return ALFRED_PREFIX + html.escape(raw.strip())
+
+
+def _dialogue_id_for(message: Message) -> int:
+    """id диалога: id топика (Private Chat Topics), если сообщение отправлено
+    внутри него — весь топик тогда один тред. Иначе — message_id этого
+    сообщения, как раньше (новый тред на каждое непарное сообщение вне
+    топика)."""
+    return message.message_thread_id or message.message_id
 
 
 class AiReplyContinuation(Filter):
@@ -125,7 +148,8 @@ async def cmd_ai(
     active_ai_chats: ai_flow.ActiveAiChats,
     tool_calls: ToolCalls,
 ) -> None:
-    dialogue_id = message.message_id
+    dialogue_id = _dialogue_id_for(message)
+    in_topic = message.message_thread_id is not None
     parts = (message.text or "").split(maxsplit=1)
     prompt = parts[1].strip() if len(parts) > 1 else ""
 
@@ -134,7 +158,7 @@ async def cmd_ai(
         sender = message.from_user
         await store.record_ai_turn(
             message.chat.id,
-            dialogue_id,
+            message.message_id,
             dialogue_id,
             "user",
             prompt,
@@ -142,6 +166,19 @@ async def cmd_ai(
             user_id=sender.id if sender else None,
             user_name=ai_flow.display_name(sender),
         )
+
+    if in_topic:
+        # Топик — уже тред сам по себе: /alfred внутри него не сбрасывает
+        # контекст (в отличие от /alfred вне топика, который всегда начинает
+        # диалог заново), а продолжает то, что там уже накопилось — как
+        # обычное сообщение в этом же топике (см. on_private_message).
+        history_rows = await store.ai_turns_for_dialogue(message.chat.id, dialogue_id)
+        history = [
+            {"role": r["role"], "content": r["content"]} for r in history_rows if r["content"]
+        ]
+        if not prompt:
+            history.append({"role": "user", "content": OPENING_PROMPT})
+    elif prompt:
         history = [{"role": "user", "content": prompt}]
     else:
         # Директива-приветствие не сохраняется как ход диалога — только то,
@@ -226,12 +263,13 @@ async def on_private_message(
         return
 
     text = message.text.strip()
-    # Без reply — всегда новый тред (как /alfred), а не продолжение самого
-    # свежего: иначе история в личке растёт бесконечно, ничем не ограниченная
-    # (живой баг 2026-08-01). Продолжить старый тред по-прежнему можно
-    # реплаем — см. AiReplyContinuation. Временное решение до нормального
-    # управления сессиями (склеивание по времени и т.п.).
-    dialogue_id = message.message_id
+    # Без топика и без reply — всегда новый тред (как /alfred), а не
+    # продолжение самого свежего: иначе история в личке растёт бесконечно,
+    # ничем не ограниченная (живой баг 2026-08-01). Продолжить такой тред
+    # по-прежнему можно реплаем — см. AiReplyContinuation. Внутри топика
+    # (Private Chat Topics) эта проблема решена нормально: dialogue_id — id
+    # топика, любое сообщение в нём само по себе продолжение, reply не нужен.
+    dialogue_id = _dialogue_id_for(message)
 
     now = datetime.now(tz=UTC)
     sender = message.from_user
@@ -271,13 +309,13 @@ async def on_group_mention(
     if subscription is None or not subscription.allows_command(right):
         return
 
-    dialogue_id = message.message_id
+    dialogue_id = _dialogue_id_for(message)
     if mention_prompt:
         now = datetime.now(tz=UTC)
         sender = message.from_user
         await store.record_ai_turn(
             message.chat.id,
-            dialogue_id,
+            message.message_id,
             dialogue_id,
             "user",
             mention_prompt,
@@ -325,7 +363,7 @@ async def start_dialogue(
         config,
         book,
         notifier,
-        message.message_id,
+        _dialogue_id_for(message),
         [{"role": "user", "content": prompt}],
         active_ai_chats,
         tool_calls,
@@ -380,7 +418,11 @@ async def _do_ask_and_reply(
     history: list[dict[str, str]],
     tool_calls: ToolCalls,
 ) -> str | None:
-    await message.bot.send_chat_action(message.chat.id, "typing")
+    # message_thread_id: если ответ готовится для сообщения внутри топика,
+    # индикатор должен светиться в этом топике, а не в основном треде чата.
+    await message.bot.send_chat_action(
+        message.chat.id, "typing", message_thread_id=message.message_thread_id
+    )
     # Ячейка под «Альфреда отпустили» (тул dismiss): сам тул ничего не гасит —
     # ответ в этот момент ещё генерируется той самой моделью, которую предстоит
     # выгрузить (см. bot/tools.py::DismissalBox). Исполняем ниже, после того

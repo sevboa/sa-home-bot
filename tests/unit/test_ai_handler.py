@@ -25,9 +25,11 @@ from sa_home_bot.subscriptions.models import Subscription
 class FakeBot:
     def __init__(self) -> None:
         self.typing_chats: list[int] = []
+        self.typing_threads: list[int | None] = []
 
-    async def send_chat_action(self, chat_id, action):
+    async def send_chat_action(self, chat_id, action, message_thread_id=None):
         self.typing_chats.append(chat_id)
+        self.typing_threads.append(message_thread_id)
 
 
 @dataclass
@@ -46,7 +48,10 @@ class FakeEntity:
 class FakeMessage:
     _next_id = 1000
 
-    def __init__(self, chat_id, text=None, reply_to=None, chat_type="private", entities=None):
+    def __init__(
+        self, chat_id, text=None, reply_to=None, chat_type="private", entities=None,
+        message_thread_id=None,
+    ):
         self.chat = FakeChat(chat_id, type=chat_type)
         self.message_id = FakeMessage._next_id
         FakeMessage._next_id += 1
@@ -54,13 +59,16 @@ class FakeMessage:
         self.caption = None
         self.reply_to_message = reply_to
         self.entities = entities
+        self.message_thread_id = message_thread_id
         self.bot = FakeBot()
         self.sent: list[str] = []
         self.from_user = None
         self.quote = None
 
     async def answer(self, text, **kwargs):
-        sent = FakeMessage(self.chat.id)
+        # aiogram реально пробрасывает message_thread_id из контекста
+        # исходного сообщения — здесь тот же эффект, для реалистичности тестов.
+        sent = FakeMessage(self.chat.id, message_thread_id=self.message_thread_id)
         sent.text = text
         self.sent.append(text)
         return sent
@@ -683,6 +691,201 @@ async def test_no_dismissal_when_alfred_never_answered(store, monkeypatch):
     )
 
     assert performed == []
+
+
+# --- Telegram Private Chat Topics: dialogue_id = id топика, любое
+# сообщение внутри него — продолжение без reply (этап 32, 2026-08-01) ---
+
+
+async def test_cmd_ai_in_topic_dialogue_id_is_the_topic_not_the_message(store, monkeypatch):
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None
+    ):
+        return "ответ"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, text="/alfred привет", message_thread_id=777)
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(),
+    )
+
+    # Тред привязан к топику (777), а не к message_id этого сообщения —
+    # ai_turns_for_dialogue по message_id ничего не найдёт.
+    assert await store.ai_turns_for_dialogue(1, message.message_id) == []
+    rows = await store.ai_turns_for_dialogue(1, 777)
+    assert [r["role"] for r in rows] == ["user", "assistant"]
+
+
+async def test_cmd_ai_in_topic_continues_existing_topic_history(store, monkeypatch):
+    await store.record_ai_turn(1, 601, 777, "user", "первый вопрос в топике", _now())
+    await store.record_ai_turn(1, 602, 777, "assistant", "первый ответ в топике", _now())
+
+    seen_history = []
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None
+    ):
+        seen_history.append(history)
+        return "втогой ответ"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    # /alfred внутри топика — НЕ сбрасывает контекст, в отличие от /alfred
+    # вне топика (там каждый вызов — новый тред).
+    message = FakeMessage(1, text="/alfred а что насчёт этого?", message_thread_id=777)
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(),
+    )
+
+    assert seen_history == [
+        [
+            {"role": "user", "content": "первый вопрос в топике"},
+            {"role": "assistant", "content": "первый ответ в топике"},
+            {"role": "user", "content": "а что насчёт этого?"},
+        ]
+    ]
+
+
+async def test_cmd_ai_in_topic_without_text_continues_with_opening_prompt(store, monkeypatch):
+    await store.record_ai_turn(1, 601, 777, "user", "первый вопрос", _now())
+    await store.record_ai_turn(1, 602, 777, "assistant", "первый ответ", _now())
+
+    seen_history = []
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None
+    ):
+        seen_history.append(history)
+        return "Да, сэг?"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, text="/alfred", message_thread_id=777)
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(),
+    )
+
+    # Голый /alfred внутри топика с уже начатой историей — не заменяет её
+    # заготовкой, а дописывает директиву-приветствие в конец.
+    assert seen_history == [
+        [
+            {"role": "user", "content": "первый вопрос"},
+            {"role": "assistant", "content": "первый ответ"},
+            {"role": "user", "content": ai_handler.OPENING_PROMPT},
+        ]
+    ]
+
+
+async def test_cmd_ai_in_fresh_topic_without_text_is_same_as_outside_topic(store, monkeypatch):
+    seen_history = []
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None
+    ):
+        seen_history.append(history)
+        return "Да, сэг?"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, text="/alfred", message_thread_id=777)
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(),
+    )
+
+    assert seen_history == [[{"role": "user", "content": ai_handler.OPENING_PROMPT}]]
+
+
+async def test_on_private_message_in_topic_continues_same_topic_without_reply(store, monkeypatch):
+    # В отличие от чата без топиков (см. test_on_private_message_always_
+    # starts_new_dialogue_even_with_prior_history) — внутри топика reply не
+    # нужен вовсе, любое сообщение в нём само по себе продолжение.
+    seen_history = []
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None
+    ):
+        seen_history.append(history)
+        return f"ответ {len(seen_history)}"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+
+    first = FakeMessage(1, text="первое сообщение", chat_type="private", message_thread_id=777)
+    await ai_handler.on_private_message(
+        first, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
+    )
+
+    second = FakeMessage(1, text="второе сообщение", chat_type="private", message_thread_id=777)
+    await ai_handler.on_private_message(
+        second, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
+    )
+
+    assert seen_history[0] == [{"role": "user", "content": "первое сообщение"}]
+    assert seen_history[1] == [
+        {"role": "user", "content": "первое сообщение"},
+        {"role": "assistant", "content": "ответ 1"},
+        {"role": "user", "content": "второе сообщение"},
+    ]
+    rows = await store.ai_turns_for_dialogue(1, 777)
+    assert [r["role"] for r in rows] == ["user", "assistant", "user", "assistant"]
+
+
+async def test_typing_indicator_uses_message_thread_id_of_the_topic(store, monkeypatch):
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None
+    ):
+        return "ответ"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, text="/alfred привет", message_thread_id=777)
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(),
+    )
+
+    assert message.bot.typing_chats == [1]
+    assert message.bot.typing_threads == [777]
+
+
+async def test_typing_indicator_has_no_thread_outside_topics(store, monkeypatch):
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None
+    ):
+        return "ответ"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, text="/alfred привет")  # без message_thread_id
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=Settings(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(),
+    )
+
+    assert message.bot.typing_threads == [None]
 
 
 async def test_empty_model_answer_is_not_sent_as_a_bare_prefix(store, monkeypatch):
