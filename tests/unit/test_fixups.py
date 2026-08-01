@@ -8,12 +8,16 @@ from sa_home_bot.node import fixups as fixups_module
 from sa_home_bot.node.fixups import (
     INSTALL_SMARTMONTOOLS,
     JOURNALCTL_GROUP,
+    POWER_CONTROL_POLKIT,
     SMARTCTL_SUDOERS,
+    WOL_ENABLE,
     apps_unit_sudoers_content,
     build_fixups,
     make_apps_unit_fixup,
+    power_polkit_rule_content,
     smartctl_sudoers_content,
     smartctl_wrapper_content,
+    wol_unit_content,
 )
 
 
@@ -22,11 +26,16 @@ def _make_executable(path):
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
-def _settings(assignments: list[str], apps: list[AppConfig] | None = None) -> Settings:
+def _settings(
+    assignments: list[str], apps: list[AppConfig] | None = None, kind: str = "server"
+) -> Settings:
+    # kind="server" по умолчанию — нейтрально относительно power-control/WoL
+    # фиксов (нужны только workstation, см. NodeTraits.power_controllable);
+    # так существующие тесты про assignments не задевает несвязанная ось.
     return Settings(
         telegram=TelegramConfig(token="x"),
         subscriptions=[],
-        node=NodeConfig(assignments=assignments),
+        node=NodeConfig(assignments=assignments, kind=kind),
         apps=AppsConfig(items=apps or []),
     )
 
@@ -149,3 +158,41 @@ def test_build_fixups_monitor_and_apps_together():
         "journalctl-group",
         "apps-unit-sudoers-jellyfin",
     }
+
+
+# --- power-control-polkit / wol-enable: только workstation (always_on=False) —
+# server/vps недоступность которых уже авария, добровольно уводить в офлайн
+# (даже своей же кнопкой в боте) не предлагается вообще, см. node/kind.py.
+
+
+def test_power_control_and_wol_needed_only_for_workstation():
+    for kind in ("server", "vps"):
+        settings = _settings([], kind=kind)
+        assert not POWER_CONTROL_POLKIT.needed(settings)
+        assert not WOL_ENABLE.needed(settings)
+    settings = _settings([], kind="workstation")
+    assert POWER_CONTROL_POLKIT.needed(settings)
+    assert WOL_ENABLE.needed(settings)
+
+
+def test_build_fixups_includes_power_and_wol_only_for_workstation():
+    ids = {f.id for f in build_fixups(_settings([], kind="workstation"))}
+    assert {"power-control-polkit", "wol-enable"} <= ids
+    for kind in ("server", "vps"):
+        ids = {f.id for f in build_fixups(_settings([], kind=kind))}
+        assert "power-control-polkit" not in ids
+        assert "wol-enable" not in ids
+
+
+def test_power_polkit_rule_content_lists_login1_actions_for_user():
+    content = power_polkit_rule_content("sevboa")
+    assert 'subject.user == "sevboa"' in content
+    for action in ("power-off", "reboot", "suspend"):
+        assert f'"org.freedesktop.login1.{action}"' in content
+    assert "polkit.Result.YES" in content
+
+
+def test_wol_unit_content_runs_ethtool_wol_g_on_given_iface():
+    content = wol_unit_content("/usr/sbin/ethtool", "enp1s0")
+    assert "ExecStart=/usr/sbin/ethtool -s enp1s0 wol g\n" in content
+    assert "Type=oneshot" in content

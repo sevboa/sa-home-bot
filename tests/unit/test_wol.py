@@ -125,3 +125,13 @@ def test_detect_local_wake_info_none_on_virtual_iface(monkeypatch: pytest.Monkey
 def test_detect_local_wake_info_none_without_default_route(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(wol, "_default_route_ip", lambda: None)
     assert wol.detect_local_wake_info() is None
+
+
+def test_detect_local_wake_iface_on_ethernet(monkeypatch: pytest.MonkeyPatch):
+    _mock_lan(monkeypatch, "enp1s0")
+    assert wol.detect_local_wake_iface() == "enp1s0"
+
+
+def test_detect_local_wake_iface_none_on_virtual_iface(monkeypatch: pytest.MonkeyPatch):
+    _mock_lan(monkeypatch, "tailscale0")
+    assert wol.detect_local_wake_iface() is None

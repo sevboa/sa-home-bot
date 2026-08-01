@@ -24,6 +24,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from sa_home_bot.config import Settings
+from sa_home_bot.node.fixups import build_fixups, run_fixups
+
 DEFAULT_CONFIG_PATH = Path("~/.config/sa-home-bot/config.toml").expanduser()
 DEFAULT_DATA_DIR = Path("~/.local/share/sa-home-bot").expanduser()
 
@@ -219,6 +222,33 @@ def _enable_and_start(*, interactive: bool) -> None:
         )
 
 
+def _apply_init_fixups(config_path: Path, *, interactive: bool) -> None:
+    """Сразу после первой установки доустановить/донастроить то, что нельзя
+    сделать без root (WoL, polkit-разрешение на power-действия и т.п.) —
+    те же рецепты, что и `nodectl fix` (node/fixups.py), просто без отдельного
+    ручного вызова. Что именно нужно — решает `needed()` каждого фикса по
+    типу машины/назначениям, здесь про конкретные фиксы ничего не знаем."""
+    if not sys.platform.startswith("linux"):
+        return
+    settings = Settings.load(config_path)
+    fixups = build_fixups(settings)
+    if not fixups:
+        return
+    if not interactive:
+        print(
+            f"\nЕсть {len(fixups)} донастройк(а/и), нужен sudo — не в интерактивном "
+            "режиме, спросить пароль не у кого. Выполни отдельно на ноде: nodectl fix"
+        )
+        return
+    print(f"\nДонастраиваю {len(fixups)} шаг(ов) под тип машины/назначения:")
+    failed = run_fixups(fixups)
+    if failed:
+        print(
+            f"Не применилось: {', '.join(failed)} — донастрой отдельно: nodectl fix",
+            file=sys.stderr,
+        )
+
+
 def run_init(args: argparse.Namespace) -> int:
     interactive = not args.non_interactive and sys.stdin.isatty()
     missing_for_noninteractive: list[str] = []
@@ -356,6 +386,8 @@ def run_init(args: argparse.Namespace) -> int:
     (data_dir / "data").mkdir(parents=True, exist_ok=True)
     print(f"Записан {config_path}")
     print(f"Каталог данных {data_dir}/data готов")
+
+    _apply_init_fixups(config_path, interactive=interactive)
 
     unit_written = False
     if not args.no_systemd_unit and sys.platform.startswith("linux"):

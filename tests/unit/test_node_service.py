@@ -78,6 +78,7 @@ async def test_unknown_service_is_bad_request():
 async def test_power_actions_declared_and_scheduled(monkeypatch):
     import asyncio
 
+    from sa_home_bot.node import kind as node_kinds
     from sa_home_bot.node import service as service_module
 
     monkeypatch.setattr(service_module, "POWER_DELAY_S", 0.0)
@@ -87,7 +88,11 @@ async def test_power_actions_declared_and_scheduled(monkeypatch):
     async def fake_runner(argv):
         ran.append(argv)
 
-    svc = NodeService(sup, power_runner=fake_runner)
+    # power-действия доступны только там, где машину штатно уводят в офлайн
+    # (workstation) — см. NodeTraits.power_controllable.
+    svc = NodeService(
+        sup, power_runner=fake_runner, node_kind=node_kinds.KIND_WORKSTATION
+    )
     desc = svc.describe()
     assert "power" in desc.capabilities
     for action_id in ("poweroff", "reboot", "suspend"):
@@ -98,6 +103,17 @@ async def test_power_actions_declared_and_scheduled(monkeypatch):
     assert result["scheduled"] == "poweroff"
     await asyncio.sleep(0.05)  # дать отложенной задаче выполниться
     assert ran == [["systemctl", "poweroff"]]
+
+
+@pytest.mark.parametrize("kind", ["server", "vps"])
+async def test_power_actions_not_declared_for_always_on_kinds(kind):
+    """server/vps: недоступность — авария, поэтому добровольный увод в офлайн
+    (даже своей же кнопкой) не предлагается вообще — см. NodeTraits.power_controllable."""
+    sup, _ = _fake_supervisor()
+    svc = NodeService(sup, node_kind=kind)
+    desc = svc.describe()
+    for action_id in ("poweroff", "reboot", "suspend"):
+        assert desc.find_action(action_id) is None
 
 
 async def test_restart_node_not_declared_without_callback():

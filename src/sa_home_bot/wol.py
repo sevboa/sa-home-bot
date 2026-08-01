@@ -129,8 +129,8 @@ def _default_route_ip() -> str | None:
             return None
 
 
-def detect_local_wake_info() -> LocalWakeInfo | None:
-    """MAC/IP/broadcast интерфейса, которым эта нода смотрит в свой LAN.
+def detect_local_wake_iface() -> str | None:
+    """Имя проводного интерфейса, которым эта нода смотрит в свой LAN.
 
     None — нет проводного интерфейса по умолчанию (Wi-Fi-ноутбук, dev-песочница
     без сети и т.п.): WoL на таких ненадёжен, умение сознательно не
@@ -145,6 +145,21 @@ def detect_local_wake_info() -> LocalWakeInfo | None:
     )
     if iface is None or _VIRTUAL_IFACE_RE.match(iface) or _is_wireless(iface):
         return None
+    return iface
+
+
+def detect_local_wake_info() -> LocalWakeInfo | None:
+    """MAC/IP/broadcast интерфейса, которым эта нода смотрит в свой LAN.
+
+    None — см. ``detect_local_wake_iface``.
+    """
+    iface = detect_local_wake_iface()
+    if iface is None:
+        return None
+    ip = _default_route_ip()
+    if ip is None:
+        return None
+    addrs = psutil.net_if_addrs()
     mac_raw = next(
         (s.address for s in addrs[iface] if s.family == psutil.AF_LINK and s.address), None
     )

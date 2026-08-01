@@ -226,10 +226,12 @@ async def on_private_message(
         return
 
     text = message.text.strip()
-    dialogue_id = await store.latest_ai_dialogue(message.chat.id)
-    if dialogue_id is None:
-        # Первое сообщение в этой личке — новый тред, как /alfred.
-        dialogue_id = message.message_id
+    # Без reply — всегда новый тред (как /alfred), а не продолжение самого
+    # свежего: иначе история в личке растёт бесконечно, ничем не ограниченная
+    # (живой баг 2026-08-01). Продолжить старый тред по-прежнему можно
+    # реплаем — см. AiReplyContinuation. Временное решение до нормального
+    # управления сессиями (склеивание по времени и т.п.).
+    dialogue_id = message.message_id
 
     now = datetime.now(tz=UTC)
     sender = message.from_user

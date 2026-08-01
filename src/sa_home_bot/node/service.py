@@ -173,7 +173,9 @@ class NodeService:
         self._kind = node_kind
         self._traits = node_kinds.traits_for(node_kind)
         self._runtime = Runtime()
-        self._power = power_commands()
+        # Power-действия (poweroff/reboot/suspend) объявляются только машине,
+        # которую можно добровольно уводить в офлайн — см. NodeTraits.power_controllable.
+        self._power = power_commands() if self._traits.power_controllable else {}
         self._power_runner = power_runner or _default_power_runner
         self._restart_node = restart_node
         # assign/unassign: состояние ноды переживает рестарт через state_path

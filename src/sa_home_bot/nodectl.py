@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from sa_home_bot.config import Settings
-from sa_home_bot.node.fixups import FixupError, build_fixups
+from sa_home_bot.node.fixups import build_fixups, run_fixups
 from sa_home_bot.proto.client import ProtoClient
 from sa_home_bot.proto.endpoints import Endpoint, parse_endpoint, resolve_endpoint
 from sa_home_bot.proto.messages import (
@@ -258,26 +258,7 @@ def _run_fix(args: argparse.Namespace) -> int:
         return 0
 
     print(f"Нужно проверить {len(fixups)} фикс(ов) под назначения {settings.node.assignments}:")
-    failed: list[str] = []
-    for fixup in fixups:
-        if fixup.check():
-            print(f"  ✅ {fixup.title} — уже применено")
-            continue
-        print(f"  ⏳ {fixup.title} — применяю (может спросить пароль sudo)...")
-        try:
-            fixup.apply()
-        except FixupError as exc:
-            print(f"  ❌ {fixup.title}: {exc}", file=sys.stderr)
-            failed.append(fixup.id)
-            continue
-        if fixup.check():
-            print(f"  ✅ {fixup.title} — применено")
-        else:
-            print(
-                f"  ⚠️ {fixup.title}: команда прошла, но проверка всё ещё отрицательна",
-                file=sys.stderr,
-            )
-            failed.append(fixup.id)
+    failed = run_fixups(fixups)
 
     if failed:
         print(f"\nНе применилось: {', '.join(failed)} — см. вывод выше.", file=sys.stderr)

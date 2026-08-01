@@ -509,7 +509,12 @@ async def test_on_private_message_starts_new_dialogue_when_none_exists(store, mo
     assert [r["role"] for r in rows] == ["user", "assistant"]
 
 
-async def test_on_private_message_continues_latest_dialogue(store, monkeypatch):
+async def test_on_private_message_always_starts_new_dialogue_even_with_prior_history(
+    store, monkeypatch
+):
+    # Без reply — всегда новый тред, а не бесконечное пополнение самого
+    # свежего (живой баг 2026-08-01: история в личке росла без предела).
+    # Продолжить старый тред по-прежнему можно реплаем на сообщение бота.
     await store.record_ai_turn(1, 500, 500, "user", "первый вопрос", _now())
     await store.record_ai_turn(1, 501, 500, "assistant", "первый ответ", _now())
 
@@ -532,15 +537,11 @@ async def test_on_private_message_continues_latest_dialogue(store, monkeypatch):
         tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
     )
 
-    assert seen_history == [
-        [
-            {"role": "user", "content": "первый вопрос"},
-            {"role": "assistant", "content": "первый ответ"},
-            {"role": "user", "content": "а что насчёт этого?"},
-        ]
-    ]
-    rows = await store.ai_turns_for_dialogue(1, 500)
-    assert len(rows) == 4  # старый тред пополнился, новый не завёлся
+    assert seen_history == [[{"role": "user", "content": "а что насчёт этого?"}]]
+    old_thread = await store.ai_turns_for_dialogue(1, 500)
+    assert len(old_thread) == 2  # старый тред не тронут
+    new_thread = await store.ai_turns_for_dialogue(1, message.message_id)
+    assert [r["role"] for r in new_thread] == ["user", "assistant"]
 
 
 async def test_on_private_message_denied_without_right(store):

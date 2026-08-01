@@ -20,8 +20,10 @@ from dataclasses import dataclass
 from getpass import getuser
 from pathlib import Path
 
+from sa_home_bot import wol
 from sa_home_bot.config import AppConfig, Settings
 from sa_home_bot.node import assignments
+from sa_home_bot.node import kind as node_kinds
 from sa_home_bot.sensors.disks import SMARTCTL_REQUIREMENT
 from sa_home_bot.utils.requirements import install_argv
 
@@ -281,12 +283,191 @@ def make_apps_unit_fixup(app: AppConfig) -> Fixup:
     )
 
 
+# --- power control: разрешить ноде выключать/перезагружать/усыплять машину
+# без sudo (только workstation — см. NodeTraits.power_controllable) ---
+#
+# node/service.py вызывает голое `systemctl poweroff/reboot/suspend` (см.
+# инвариант в шапке файла: долгоживущий процесс сам sudo не зовёт). Обычный
+# пользователь без активной локальной сессии (systemd --user юнит, вход по
+# SSH) не может это сделать без разрешения — по умолчанию logind/polkit
+# спросят интерактивную аутентификацию, которую подать некому. Правило
+# polkit — то же самое разрешение, что получает пользователь за физическим
+# экраном на «Выключить», просто явно для этого логина.
+
+POWER_POLKIT_RULE_FILE = Path("/etc/polkit-1/rules.d/50-sa-home-node-power.rules")
+_POWER_POLKIT_ACTIONS = (
+    "power-off",
+    "power-off-multiple-sessions",
+    "reboot",
+    "reboot-multiple-sessions",
+    "suspend",
+    "suspend-multiple-sessions",
+)
+
+
+def _power_control_needed(settings: Settings) -> bool:
+    return node_kinds.traits_for(settings.node.kind).power_controllable
+
+
+def power_polkit_rule_content(user: str) -> str:
+    """Содержимое правила polkit: только перечисленные login1-действия и
+    только для ``user`` — не carte blanche на остальные действия polkit."""
+    ids = ",\n        ".join(f'"org.freedesktop.login1.{a}"' for a in _POWER_POLKIT_ACTIONS)
+    return (
+        "// Сгенерировано sa-home-bot (nodectl fix) — нода-супервизор "
+        "выключает/перезагружает/усыпляет свою workstation без sudo.\n"
+        "polkit.addRule(function(action, subject) {\n"
+        f"    if ([\n        {ids}\n    ].indexOf(action.id) !== -1 "
+        f'&& subject.user == "{user}") {{\n'
+        "        return polkit.Result.YES;\n"
+        "    }\n"
+        "});\n"
+    )
+
+
+def _power_control_check() -> bool:
+    return POWER_POLKIT_RULE_FILE.exists()
+
+
+def _power_control_apply() -> None:
+    content = power_polkit_rule_content(getuser())
+    with tempfile.NamedTemporaryFile("w", suffix=".rules", delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = Path(tmp.name)
+    try:
+        _sudo(
+            [
+                "install",
+                "-m",
+                "0644",
+                "-o",
+                "root",
+                "-g",
+                "root",
+                str(tmp_path),
+                str(POWER_POLKIT_RULE_FILE),
+            ]
+        )
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+POWER_CONTROL_POLKIT = Fixup(
+    id="power-control-polkit",
+    title="Разрешить ноде выключать/перезагружать/усыплять машину без sudo (polkit)",
+    needed=_power_control_needed,
+    check=_power_control_check,
+    apply=_power_control_apply,
+)
+
+
+# --- Wake-on-LAN: включить приём magic packet на проводном интерфейсе
+# (только workstation — этой машине штатно быть выключенной и просыпаться) ---
+
+WOL_UNIT_FILE = Path("/etc/systemd/system/sa-home-wol.service")
+WOL_UNIT_NAME = WOL_UNIT_FILE.name
+
+
+def _wol_needed(settings: Settings) -> bool:
+    return node_kinds.traits_for(settings.node.kind).wakeable
+
+
+def wol_unit_content(ethtool_path: str, iface: str) -> str:
+    """systemd-юнит вместо правки /etc/network/interfaces — работает
+    одинаково под ifupdown, NetworkManager и systemd-networkd, не зависит от
+    того, чем на конкретной машине управляется сеть."""
+    return (
+        "[Unit]\n"
+        "Description=sa-home-bot: включить Wake-on-LAN (magic packet)\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"ExecStart={ethtool_path} -s {iface} wol g\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+
+
+def _wol_check() -> bool:
+    return WOL_UNIT_FILE.exists()
+
+
+def _wol_apply() -> None:
+    iface = wol.detect_local_wake_iface()
+    if iface is None:
+        raise FixupError(
+            "не нашёл проводной Ethernet-интерфейс по умолчанию — WoL настраивать не на чем"
+        )
+    ethtool_path = _which("ethtool")
+    if ethtool_path is None:
+        argv = install_argv("ethtool")
+        if argv is None:
+            raise FixupError("ethtool не найден и неизвестен пакетный менеджер для установки")
+        _sudo(argv)
+        ethtool_path = _which("ethtool")
+        if ethtool_path is None:
+            raise FixupError("ethtool не нашёлся после установки")
+    content = wol_unit_content(ethtool_path, iface)
+    with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = Path(tmp.name)
+    try:
+        _sudo(
+            ["install", "-m", "0644", "-o", "root", "-g", "root", str(tmp_path), str(WOL_UNIT_FILE)]
+        )
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    _sudo(["systemctl", "daemon-reload"])
+    _sudo(["systemctl", "enable", "--now", WOL_UNIT_NAME])
+
+
+WOL_ENABLE = Fixup(
+    id="wol-enable",
+    title="Включить Wake-on-LAN (magic packet) на проводном интерфейсе",
+    needed=_wol_needed,
+    check=_wol_check,
+    apply=_wol_apply,
+)
+
+
 def build_fixups(settings: Settings) -> list[Fixup]:
     """Известные фиксы, актуальные для текущих назначений ноды (``needed``)."""
     fixups = [
         INSTALL_SMARTMONTOOLS,
         SMARTCTL_SUDOERS,
         JOURNALCTL_GROUP,
+        POWER_CONTROL_POLKIT,
+        WOL_ENABLE,
         *(make_apps_unit_fixup(app) for app in settings.apps.items),
     ]
     return [f for f in fixups if f.needed(settings)]
+
+
+def run_fixups(fixups: list[Fixup]) -> list[str]:
+    """Применить фиксы по одному (идемпотентно), печатая прогресс.
+
+    Общий код между ``nodectl fix`` и ``sa-home-bot init`` (который зовёт
+    фиксы сам сразу после первой установки workstation-ноды). Возвращает id
+    тех, что не удалось применить/подтвердить.
+    """
+    failed: list[str] = []
+    for fixup in fixups:
+        if fixup.check():
+            print(f"  ✅ {fixup.title} — уже применено")
+            continue
+        print(f"  ⏳ {fixup.title} — применяю (может спросить пароль sudo)...")
+        try:
+            fixup.apply()
+        except FixupError as exc:
+            print(f"  ❌ {fixup.title}: {exc}")
+            failed.append(fixup.id)
+            continue
+        if fixup.check():
+            print(f"  ✅ {fixup.title} — применено")
+        else:
+            print(f"  ⚠️ {fixup.title}: команда прошла, но проверка всё ещё отрицательна")
+            failed.append(fixup.id)
+    return failed
