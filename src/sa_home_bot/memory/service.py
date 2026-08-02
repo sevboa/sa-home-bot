@@ -10,7 +10,8 @@
 (bot/tools.py) — модель этого параметра не видит вовсе и до чужой памяти
 дотянуться не может.
 
-Поверх этого две оси (просьба пользователя 2026-07-29):
+Поверх этого несколько осей (просьба пользователя 2026-07-29, `family` —
+2026-08-03):
 
 * `scope="common"` — общее знание дома: кто такой Альфред, как он выглядит,
   что умеет рой, кто есть кто. Видно из любого разговора, потому что это не
@@ -19,6 +20,14 @@
   вызове. Такие записи заводит человек руками (`nodectl call memory
   remember scope=common …`) — тул модели этого параметра не даёт, чтобы
   сказанное в одном чате не стало вдруг общим знанием.
+* `scope="family"` — то же самое, но видно не отовсюду, а только из чатов,
+  перечисленных в `[memory].family_chat_ids` (свои люди — семья, а не любой
+  гость/группа). Живая находка 2026-08-02: человек рассказал Альфреду свой
+  день рождения в СВОЁМ личном чате, а спросили про это из ЧУЖОГО (тоже
+  семейного) чата — обычный `scope="chat"` этого не показывает, а
+  `scope="common"` показал бы кому угодно, вплоть до случайного гостя по
+  инвайту. Как и `common`, заводится только человеком руками — тул модели
+  этого параметра тоже не даёт.
 * `sensitive=true` — личное (адрес, здоровье, деньги, документы). Никогда не
   бывает `common` (служба откажет), а в контекст уезжает с оговоркой «знай,
   но вслух не пересказывай» (bot/ai_flow.py). Честно про границы: жёсткая
@@ -52,6 +61,7 @@ from sa_home_bot.memory.protocol import (
     ACTION_REMEMBER,
     SCOPE_CHAT,
     SCOPE_COMMON,
+    SCOPE_FAMILY,
     SERVICE_NAME,
 )
 from sa_home_bot.proto.messages import (
@@ -74,7 +84,7 @@ MAX_RECALL = 10
 # Короче трёх букв триграммный индекс не ищет в принципе, а предлоги и союзы
 # как поисковые слова только шумят.
 MIN_WORD_CHARS = 3
-SCOPES = (SCOPE_CHAT, SCOPE_COMMON)
+SCOPES = (SCOPE_CHAT, SCOPE_FAMILY, SCOPE_COMMON)
 _WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
 
@@ -138,8 +148,11 @@ class MemoryService:
                             name="scope",
                             type="string",
                             required=False,
-                            title="chat (по умолчанию) или common — общее знание дома",
-                            choices=(SCOPE_CHAT, SCOPE_COMMON),
+                            title=(
+                                "chat (по умолчанию), family — видно чатам из "
+                                "family_chat_ids, или common — видно всем"
+                            ),
+                            choices=(SCOPE_CHAT, SCOPE_FAMILY, SCOPE_COMMON),
                         ),
                         ActionParam(
                             name="sensitive",
@@ -192,11 +205,12 @@ class MemoryService:
         except (TypeError, ValueError) as exc:
             raise ProtoError(ERR_BAD_REQUEST, f"chat_id должен быть числом: {raw!r}") from exc
 
-    @staticmethod
-    def _scope(args: dict[str, Any], *, sensitive: bool) -> str:
+    def _scope(self, args: dict[str, Any], *, chat_id: int, sensitive: bool) -> str:
         scope = str(args.get("scope") or SCOPE_CHAT).strip().lower()
         if scope not in SCOPES:
-            raise ProtoError(ERR_BAD_REQUEST, f"неизвестный scope: {scope!r} (есть: chat, common)")
+            raise ProtoError(
+                ERR_BAD_REQUEST, f"неизвестный scope: {scope!r} (есть: chat, family, common)"
+            )
         if scope == SCOPE_COMMON and sensitive:
             # Не «предупредим и запишем», а отказ: общее знание видно во всех
             # чатах, и личное там не место по определению.
@@ -205,12 +219,19 @@ class MemoryService:
                 "личный факт не может быть общим: sensitive-записи живут только "
                 "в том разговоре, где их сказали",
             )
+        if scope == SCOPE_FAMILY and chat_id not in self._cfg.family_chat_ids:
+            # Иначе чат, не входящий в семью, мог бы записать факт, который
+            # семья потом увидит у себя, — граница держится в обе стороны.
+            raise ProtoError(
+                ERR_BAD_REQUEST,
+                "scope=family доступен только чатам из [memory].family_chat_ids",
+            )
         return scope
 
     async def _remember(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)
         sensitive = bool(args.get("sensitive"))
-        scope = self._scope(args, sensitive=sensitive)
+        scope = self._scope(args, chat_id=chat_id, sensitive=sensitive)
         text = str(args.get("text") or "").strip()
         if not text:
             raise ProtoError(ERR_BAD_REQUEST, "нечего запоминать (text пуст)")
@@ -235,14 +256,21 @@ class MemoryService:
         match = _match_query(str(args.get("query") or ""))
         if not match:
             return {"facts": [], "count": 0}
-        # Общее знание дома видно из любого разговора, всё остальное — только
-        # из своего: это и есть граница приватности, и держится она запросом,
-        # а не обещанием модели молчать.
-        cur = await self._db.conn.execute(
+        # Общее знание дома видно из любого разговора; семейное — только из
+        # чатов-родственников; всё остальное — только из своего. Это и есть
+        # граница приватности, и держится она запросом, а не обещанием модели
+        # молчать.
+        sql = (
             "SELECT rowid AS id, text, scope, sensitive, created_at FROM facts "
-            "WHERE facts MATCH ? AND (chat_id = ? OR scope = ?) ORDER BY rank LIMIT ?",
-            (match, chat_id, SCOPE_COMMON, limit),
+            "WHERE facts MATCH ? AND (chat_id = ? OR scope = ?"
         )
+        params: list[Any] = [match, chat_id, SCOPE_COMMON]
+        if chat_id in self._cfg.family_chat_ids:
+            sql += " OR scope = ?"
+            params.append(SCOPE_FAMILY)
+        sql += ") ORDER BY rank LIMIT ?"
+        params.append(limit)
+        cur = await self._db.conn.execute(sql, params)
         facts = [_row_to_fact(row) for row in await cur.fetchall()]
         return {"facts": facts, "count": len(facts)}
 
@@ -265,11 +293,14 @@ class MemoryService:
     async def _list(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)
         limit = min(int(args.get("limit") or MAX_RECALL), MAX_RECALL)
-        cur = await self._db.conn.execute(
-            "SELECT rowid AS id, text, scope, sensitive, created_at FROM facts "
-            "WHERE chat_id = ? OR scope = ? ORDER BY rowid DESC LIMIT ?",
-            (chat_id, SCOPE_COMMON, limit),
-        )
+        sql = "SELECT rowid AS id, text, scope, sensitive, created_at FROM facts WHERE chat_id = ? OR scope = ?"
+        params: list[Any] = [chat_id, SCOPE_COMMON]
+        if chat_id in self._cfg.family_chat_ids:
+            sql += " OR scope = ?"
+            params.append(SCOPE_FAMILY)
+        sql += " ORDER BY rowid DESC LIMIT ?"
+        params.append(limit)
+        cur = await self._db.conn.execute(sql, params)
         facts = [_row_to_fact(row) for row in await cur.fetchall()]
         return {"facts": facts, "count": len(facts)}
 

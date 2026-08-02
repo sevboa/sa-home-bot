@@ -236,10 +236,18 @@ class MemoryConfig(BaseModel):
     ``db_path`` — своя БД (как у tasks и monitor): служба живёт отдельным
     процессом и к БД бота отношения не имеет. Память привязана к чату, общего
     хранилища на весь дом нет — решение пользователя 2026-07-29.
+
+    ``family_chat_ids`` — чаты, которым доступен scope="family" (решение
+    пользователя 2026-08-03): факт, записанный с этим scope из ЛЮБОГО чата
+    из списка, виден во ВСЕХ чатах из списка — в отличие от scope="common"
+    (виден вообще всем, включая случайных гостей). Список правит человек
+    руками (как и сам scope="family" — тул модели его не даёт, см.
+    memory/service.py, по аналогии с common).
     """
 
     socket: str = "./data/memory.sock"
     db_path: Path = Path("./data/memory.sqlite")
+    family_chat_ids: list[int] = Field(default_factory=list)
 
 
 class TasksConfig(BaseModel):
@@ -614,15 +622,20 @@ class InvitesConfig(BaseModel):
     """Приватный вход: одноразовые коды приглашения (AUTHORIZATION.md §10).
 
     ``grant_*`` — что именно получает гость при активации. По умолчанию —
-    только разговор с Альфредом и память о себе: тулы фильтруются подпиской
-    (§3.4), поэтому ни рой, ни торренты гостю не видны. События не шлём
-    вовсе — алерты о температуре дисков не его дело.
+    разговор с Альфредом, память о себе и веб-поиск: тулы фильтруются
+    подпиской (§3.4), поэтому ни рой, ни торренты гостю не видны. События не
+    шлём вовсе — алерты о температуре дисков не его дело.
     """
 
     enabled: bool = True
     ttl_s: float = Field(default=3600.0, gt=0)
     grant_commands: list[str] = Field(
-        default_factory=lambda: ["chat@llm", "recall@memory", "remember@memory"]
+        default_factory=lambda: [
+            "chat@llm",
+            "recall@memory",
+            "remember@memory",
+            "search@net",
+        ]
     )
     grant_events: list[str] = Field(default_factory=list)
     # Потолок попыток «похожего на код» из одного неподписного чата за час:
