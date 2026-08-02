@@ -485,6 +485,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         # объявляются (см. update_source_for_this_platform).
         update_source=update_source_for_this_platform(),
         node_kind=settings.node.kind,
+        power_controllable=settings.node.power_controllable,
         replicator=replicator,
         lease=lease,
         # Динамические линки (join/assign в рантайме) обязаны собираться теми

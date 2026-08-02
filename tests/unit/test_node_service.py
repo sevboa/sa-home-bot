@@ -108,9 +108,48 @@ async def test_power_actions_declared_and_scheduled(monkeypatch):
 @pytest.mark.parametrize("kind", ["server", "vps"])
 async def test_power_actions_not_declared_for_always_on_kinds(kind):
     """server/vps: недоступность — авария, поэтому добровольный увод в офлайн
-    (даже своей же кнопкой) не предлагается вообще — см. NodeTraits.power_controllable."""
+    (даже своей же кнопкой) без явного оверрайда не предлагается вообще —
+    см. NodeTraits.power_controllable."""
     sup, _ = _fake_supervisor()
     svc = NodeService(sup, node_kind=kind)
+    desc = svc.describe()
+    for action_id in ("poweroff", "reboot", "suspend"):
+        assert desc.find_action(action_id) is None
+
+
+async def test_power_actions_declared_for_server_with_explicit_override(monkeypatch):
+    """[node].power_controllable=true в конфиге — явное разрешение выключать/
+    перезагружать конкретный домашний сервер (например mycraft), не меняя
+    always_on/алерты о пропаже. VPS без такого оверрайда по-прежнему не
+    получает кнопок (см. тест выше) — только явно настроенная машина."""
+    import asyncio
+
+    from sa_home_bot.node import service as service_module
+
+    monkeypatch.setattr(service_module, "POWER_DELAY_S", 0.0)
+    sup, _ = _fake_supervisor()
+    ran: list[list[str]] = []
+
+    async def fake_runner(argv):
+        ran.append(argv)
+
+    svc = NodeService(
+        sup, power_runner=fake_runner, node_kind="server", power_controllable=True
+    )
+    desc = svc.describe()
+    for action_id in ("poweroff", "reboot", "suspend"):
+        assert desc.find_action(action_id) is not None
+
+    result = await svc.run_command("reboot", {})
+    assert result["scheduled"] == "reboot"
+    await asyncio.sleep(0.05)
+    assert ran == [["systemctl", "reboot"]]
+
+
+async def test_power_controllable_override_can_also_disable():
+    """Явный false отключает кнопки даже там, где тип машины их бы дал."""
+    sup, _ = _fake_supervisor()
+    svc = NodeService(sup, node_kind="workstation", power_controllable=False)
     desc = svc.describe()
     for action_id in ("poweroff", "reboot", "suspend"):
         assert desc.find_action(action_id) is None

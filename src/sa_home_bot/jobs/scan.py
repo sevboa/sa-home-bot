@@ -17,6 +17,7 @@ from sa_home_bot.domain.models import (
     EVENT_OVERHEAT_CLEARED,
     EVENT_OVERHEAT_STARTED,
     KIND_CPU,
+    KIND_GPU,
     Event,
     HealthState,
     SensorReading,
@@ -39,6 +40,16 @@ def _now() -> datetime:
     return datetime.now(tz=UTC)
 
 
+def _cfg_for_kind(config, kind: str):
+    """Секция sensors.* по виду показания: cpu/gpu — свои, всё остальное (диски)
+    — disk_cfg (дефолт, как и раньше до появления GPU)."""
+    if kind == KIND_CPU:
+        return config.sensors.cpu
+    if kind == KIND_GPU:
+        return config.sensors.gpu
+    return config.sensors.disks
+
+
 class SensorScanJob:
     @property
     def dedup_key(self) -> str:
@@ -49,11 +60,8 @@ class SensorScanJob:
         return JOB_TYPE
 
     def _build_resolver(self, config, stats: dict[str, BaselineStats]):
-        cpu_cfg = config.sensors.cpu
-        disk_cfg = config.sensors.disks
-
         def resolve(reading: SensorReading) -> ComponentPolicy:
-            cfg = cpu_cfg if reading.kind == KIND_CPU else disk_cfg
+            cfg = _cfg_for_kind(config, reading.kind)
             if cfg.mode == "baseline":
                 policy = BaselinePolicy(
                     warn_c=cfg.warn_c,
@@ -77,16 +85,19 @@ class SensorScanJob:
     async def run(self, ctx: JobContext) -> JobResult:
         now = _now()
         readings = await ctx.sensors.read_all()
-        cpu_cfg = ctx.config.sensors.cpu
-        disk_cfg = ctx.config.sensors.disks
-        uses_baseline = "baseline" in (cpu_cfg.mode, disk_cfg.mode)
+        sensors_cfg = ctx.config.sensors
+        uses_baseline = "baseline" in (
+            sensors_cfg.cpu.mode,
+            sensors_cfg.gpu.mode,
+            sensors_cfg.disks.mode,
+        )
 
         # Статистику берём по ПРОШЛЫМ показаниям — текущее ещё не записано,
         # чтобы аномалия оценивалась относительно накопленной нормы.
         stats: dict[str, BaselineStats] = {}
         if uses_baseline:
             for r in readings:
-                cfg = cpu_cfg if r.kind == KIND_CPU else disk_cfg
+                cfg = _cfg_for_kind(ctx.config, r.kind)
                 if cfg.mode == "baseline":
                     stats[r.component_id] = await ctx.store.baseline_stats(
                         r.component_id, cfg.baseline_window

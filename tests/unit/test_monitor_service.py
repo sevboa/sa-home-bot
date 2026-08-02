@@ -6,7 +6,13 @@ from unittest.mock import patch
 import pytest
 import pytest_asyncio
 
-from sa_home_bot.config import DiskSensorConfig, SensorsConfig, Settings, TelegramConfig
+from sa_home_bot.config import (
+    DiskSensorConfig,
+    GpuSensorConfig,
+    SensorsConfig,
+    Settings,
+    TelegramConfig,
+)
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
@@ -73,6 +79,7 @@ async def test_get_state_returns_health_from_store(service):
     assert state["health"][0]["temperature_c"] == 42.0
     assert state["last_outage"] is None
     assert state["thresholds"]["cpu"]["warn_c"] == 80.0
+    assert state["thresholds"]["gpu"]["warn_c"] == 80.0  # дефолт GpuSensorConfig
 
 
 async def test_get_state_flags_missing_smartctl_when_disks_enabled(service, monkeypatch):
@@ -118,6 +125,56 @@ async def test_get_state_quiet_when_disks_disabled(tmp_path, monkeypatch):
     await db.close()
 
     assert state["requirements"] == []  # диски выключены — не шумим
+
+
+async def test_get_state_quiet_when_gpu_disabled_by_default(tmp_path, monkeypatch):
+    """gpu.enabled=False (дефолт) — отсутствие nvidia-smi не должно шуметь на
+    нодах без видеокарты (все, кроме mycraft)."""
+    db = Database(tmp_path / "monitor.sqlite")
+    await db.open()
+    await apply_migrations(db)
+    store = Store(db)
+    settings = Settings(telegram=TelegramConfig(token="x"), subscriptions=[])
+    svc = MonitorService(settings, store, DedupQueue())
+    monkeypatch.setattr(
+        "shutil.which", lambda name: None if name == "nvidia-smi" else f"/usr/bin/{name}"
+    )
+
+    with (
+        patch("sa_home_bot.monitor.service.read_uptime_sync", return_value=None),
+        patch("sa_home_bot.monitor.service.read_power_events_sync", return_value=([], False)),
+    ):
+        state = await svc.get_state()
+    await db.close()
+
+    assert state["requirements"] == []
+
+
+async def test_get_state_flags_missing_nvidia_smi_when_gpu_enabled(tmp_path, monkeypatch):
+    db = Database(tmp_path / "monitor.sqlite")
+    await db.open()
+    await apply_migrations(db)
+    store = Store(db)
+    settings = Settings(
+        telegram=TelegramConfig(token="x"),
+        sensors=SensorsConfig(gpu=GpuSensorConfig(enabled=True)),
+        subscriptions=[],
+    )
+    svc = MonitorService(settings, store, DedupQueue())
+    monkeypatch.setattr(
+        "shutil.which", lambda name: None if name == "nvidia-smi" else f"/usr/bin/{name}"
+    )
+
+    with (
+        patch("sa_home_bot.monitor.service.read_uptime_sync", return_value=None),
+        patch("sa_home_bot.monitor.service.read_power_events_sync", return_value=([], False)),
+    ):
+        state = await svc.get_state()
+    await db.close()
+
+    assert len(state["requirements"]) == 1
+    assert state["requirements"][0]["id"] == "nvidia-smi"
+    assert state["requirements"][0]["status"] == "missing_program"
 
 
 async def test_scan_now_queues_both_jobs_once(service):

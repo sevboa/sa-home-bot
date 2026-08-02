@@ -26,6 +26,7 @@ from sa_home_bot.proto.messages import (
     ServiceInfo,
 )
 from sa_home_bot.sensors.disks import SMARTCTL_REQUIREMENT
+from sa_home_bot.sensors.gpu import NVIDIA_SMI_REQUIREMENT
 from sa_home_bot.sensors.lhm import lhm_problem
 from sa_home_bot.sensors.power import (
     JOURNALCTL_REQUIREMENT,
@@ -110,14 +111,19 @@ class MonitorService:
         )
 
         cpu_cfg = self._settings.sensors.cpu
+        gpu_cfg = self._settings.sensors.gpu
         disk_cfg = self._settings.sensors.disks
-        # smartctl — только если мониторинг дисков включён (иначе не шумим
-        # про программу, от которой ничего и не ждали); история отключений
-        # (`last`, journalctl) — всегда, она не зависит от датчиков. journalctl
-        # упоминается отдельно, только когда сам `last` в порядке — иначе оба
-        # сводятся к одной проблеме (нет истории отключений / не та ОС).
+        # smartctl/nvidia-smi — только если соответствующий датчик включён
+        # (иначе не шумим про программу, от которой ничего и не ждали);
+        # история отключений (`last`, journalctl) — всегда, она не зависит от
+        # датчиков. journalctl упоминается отдельно, только когда сам `last`
+        # в порядке — иначе оба сводятся к одной проблеме (нет истории
+        # отключений / не та ОС).
         smartctl_problem = (
             requirements_registry.problem_for(SMARTCTL_REQUIREMENT) if disk_cfg.enabled else None
+        )
+        nvidia_smi_problem = (
+            requirements_registry.problem_for(NVIDIA_SMI_REQUIREMENT) if gpu_cfg.enabled else None
         )
         last_problem = requirements_registry.problem_for(LAST_REQUIREMENT)
         journal_problem = (
@@ -127,6 +133,7 @@ class MonitorService:
             p
             for p in (
                 smartctl_problem,
+                nvidia_smi_problem,
                 last_problem,
                 journal_problem,
                 lhm_problem(self._settings.sensors.lhm.dll_path),
@@ -145,6 +152,7 @@ class MonitorService:
             "recent_runs": await self._store.recent_job_runs(limit=8),
             "thresholds": {
                 "cpu": {"warn_c": cpu_cfg.warn_c, "crit_c": cpu_cfg.crit_c},
+                "gpu": {"warn_c": gpu_cfg.warn_c, "crit_c": gpu_cfg.crit_c},
                 "disk": {"warn_c": disk_cfg.warn_c, "crit_c": disk_cfg.crit_c},
             },
             "requirements": requirements,

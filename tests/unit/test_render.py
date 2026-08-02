@@ -6,12 +6,14 @@ from sa_home_bot.domain.models import (
     EVENT_OVERHEAT_STARTED,
     KIND_CPU,
     KIND_DISK,
+    KIND_GPU,
     OK,
     Event,
     HealthState,
 )
 from sa_home_bot.domain.render import (
     render_event,
+    render_gpu_line,
     render_state_line,
     render_stats,
     render_status_full,
@@ -35,6 +37,23 @@ def test_render_overheat_cleared():
     assert "Норма" in text
     assert "остыл" in text
     assert "Диск" in text
+
+
+def test_render_overheat_started_gpu():
+    event = Event(EVENT_OVERHEAT_STARTED, "gpu:0", "gpu", "Tesla V100-SXM2-16GB", 91.0, BASE_TIME)
+    text = render_event(event)
+    assert "Перегрев" in text
+    assert "91.0°C" in text
+    assert "GPU" in text
+
+
+def test_render_gpu_line_hot_and_ok():
+    hot = HealthState("gpu:0", KIND_GPU, "Tesla V100-SXM2-16GB", ALERTING, 91.0, 0, None)
+    cool = HealthState("gpu:1", KIND_GPU, "RTX 3060", OK, 45.0, 0, None)
+    hot_line = render_gpu_line(hot, warn_c=80.0, crit_c=90.0)
+    cool_line = render_gpu_line(cool, warn_c=80.0, crit_c=90.0)
+    assert "🔥" in hot_line and "GPU Tesla V100-SXM2-16GB: 91.0°C" in hot_line
+    assert "✅" in cool_line and "GPU RTX 3060: 45.0°C" in cool_line
 
 
 def test_render_escapes_html_in_label():
@@ -90,20 +109,29 @@ def test_render_status_summary_has_uptime_temps_and_outage():
         down_approx=True,
     )
     cpu = [s for s in _states() if s.kind == KIND_CPU]
+    gpu = [HealthState("gpu:0", KIND_GPU, "Tesla V100-SXM2-16GB", OK, 41.0, 0, None)]
     text = render_status_summary(
         BASE_TIME,
         timedelta(hours=1, minutes=47),
         cpu,
+        gpu,
         _disks(),
         outage,
         cpu_warn_c=80.0,
         cpu_crit_c=90.0,
+        gpu_warn_c=80.0,
+        gpu_crit_c=90.0,
         disk_warn_c=55.0,
         disk_crit_c=65.0,
     )
     assert "2026-06-22" in text  # дата отчёта, без слова "Сводка"
     assert "uptime: 1 h" in text
     assert "CPU: 42.0°C" in text
+    # GPU идёт между CPU и дисками.
+    cpu_pos = text.index("CPU: 42.0°C")
+    gpu_pos = text.index("GPU Tesla V100-SXM2-16GB: 41.0°C")
+    disk_pos = text.index("HDD ST9250")
+    assert cpu_pos < gpu_pos < disk_pos
     assert "⚠️ HDD ST9250" in text and "✅ HDD Hitachi" in text  # иконка + модель
     # eMMC — без иконки здоровья вовсе (SMART у неё физически нет), однострочно.
     assert "\neMMC:" in text and "❔ eMMC" not in text
@@ -114,8 +142,10 @@ def test_render_status_summary_has_uptime_temps_and_outage():
 
 def test_render_status_summary_no_data():
     text = render_status_summary(
-        BASE_TIME, None, [], [], None,
-        cpu_warn_c=80.0, cpu_crit_c=90.0, disk_warn_c=55.0, disk_crit_c=65.0,
+        BASE_TIME, None, [], [], [], None,
+        cpu_warn_c=80.0, cpu_crit_c=90.0,
+        gpu_warn_c=80.0, gpu_crit_c=90.0,
+        disk_warn_c=55.0, disk_crit_c=65.0,
     )
     assert "2026-06-22" in text
     assert "uptime:" not in text  # uptime None — строку не добавляем
