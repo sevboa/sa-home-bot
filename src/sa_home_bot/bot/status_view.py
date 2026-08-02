@@ -22,7 +22,7 @@ from sa_home_bot.bot.monitor_state import (
     parse_outage,
 )
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
-from sa_home_bot.domain.models import KIND_CPU
+from sa_home_bot.domain.models import KIND_CPU, KIND_GPU
 from sa_home_bot.domain.render import (
     render_downtime,
     render_stats,
@@ -115,19 +115,24 @@ async def build_summary_text(link: ServiceLink, dst: Address | None = None) -> s
         return MONITOR_DOWN_TEXT
     states = [parse_health_state(h) for h in state.get("health", [])]
     cpu_states = [s for s in states if s.kind == KIND_CPU]
+    gpu_states = [s for s in states if s.kind == KIND_GPU]
     disks = [parse_disk_summary(d) for d in state.get("disks", [])]
     uptime_s = state.get("uptime_s")
     thresholds = state.get("thresholds", {})
     cpu_th = thresholds.get("cpu", {})
+    gpu_th = thresholds.get("gpu", {})
     disk_th = thresholds.get("disk", {})
     text = render_status_summary(
         datetime.now(tz=UTC),
         timedelta(seconds=uptime_s) if uptime_s is not None else None,
         cpu_states,
+        gpu_states,
         disks,
         parse_outage(state.get("last_outage")),
         cpu_warn_c=cpu_th.get("warn_c", 0.0),
         cpu_crit_c=cpu_th.get("crit_c", 0.0),
+        gpu_warn_c=gpu_th.get("warn_c", 0.0),
+        gpu_crit_c=gpu_th.get("crit_c", 0.0),
         disk_warn_c=disk_th.get("warn_c", 0.0),
         disk_crit_c=disk_th.get("crit_c", 0.0),
     )

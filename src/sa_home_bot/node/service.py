@@ -155,6 +155,7 @@ class NodeService:
         emit: EventEmitter | None = None,
         update_source: str | None = None,
         node_kind: str = node_kinds.KIND_SERVER,
+        power_controllable: bool | None = None,
         replicator: ConfigReplicator | None = None,
         lease: LeaseManager | None = None,
         make_peer_link: Callable[[str, str | Sequence[str]], PeerLink] | None = None,
@@ -175,7 +176,17 @@ class NodeService:
         self._runtime = Runtime()
         # Power-действия (poweroff/reboot/suspend) объявляются только машине,
         # которую можно добровольно уводить в офлайн — см. NodeTraits.power_controllable.
-        self._power = power_commands() if self._traits.power_controllable else {}
+        # ``power_controllable`` (параметр конструктора, из [node].power_controllable
+        # конфига) — явный оверрайд для конкретной машины: always_on-нода всё
+        # равно алертит о пропаже (traits.always_on не трогаем), но физически
+        # доступный домашний сервер можно разрешить выключать/перезагружать
+        # кнопкой, в отличие от удалённого VDS без такого оверрайда.
+        controllable = (
+            self._traits.power_controllable
+            if power_controllable is None
+            else power_controllable
+        )
+        self._power = power_commands() if controllable else {}
         self._power_runner = power_runner or _default_power_runner
         self._restart_node = restart_node
         # assign/unassign: состояние ноды переживает рестарт через state_path

@@ -25,7 +25,7 @@ from sa_home_bot.bot.monitor_state import parse_outage
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import WakeConfig
 from sa_home_bot.db.store import Store
-from sa_home_bot.domain.models import KIND_CPU, POWER_UNEXPECTED, PowerEvent
+from sa_home_bot.domain.models import KIND_CPU, KIND_GPU, POWER_UNEXPECTED, PowerEvent
 from sa_home_bot.node.kind import traits_for
 from sa_home_bot.proto.messages import ProtoError
 from sa_home_bot.runtime import format_duration
@@ -82,11 +82,11 @@ def _last_failure_line(reports: list[_NodeReport], now: datetime) -> str | None:
     return f"Последний сбой: {node_id}, {ago} назад"
 
 
-def _cpu_max(monitor: dict) -> float | None:
+def _temp_max(monitor: dict, kind: str) -> float | None:
     temps = [
         h.get("temperature_c")
         for h in monitor.get("health", [])
-        if h.get("kind") == KIND_CPU and h.get("temperature_c") is not None
+        if h.get("kind") == kind and h.get("temperature_c") is not None
     ]
     return max(temps) if temps else None
 
@@ -114,9 +114,12 @@ def _node_line(report: _NodeReport) -> str:
     if report.monitor is None:
         bits.append("монитор не отвечает")
     else:
-        cpu = _cpu_max(report.monitor)
+        cpu = _temp_max(report.monitor, KIND_CPU)
         if cpu is not None:
             bits.append(f"CPU {cpu:.0f}°C")
+        gpu = _temp_max(report.monitor, KIND_GPU)
+        if gpu is not None:
+            bits.append(f"GPU {gpu:.0f}°C")
         alerting = sum(
             1 for h in report.monitor.get("health", []) if h.get("status") == "alerting"
         )

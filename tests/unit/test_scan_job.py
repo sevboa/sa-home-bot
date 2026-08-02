@@ -5,6 +5,8 @@ import pytest_asyncio
 from sa_home_bot.bot.dispatch import TelegramEventDispatcher
 from sa_home_bot.config import (
     CpuSensorConfig,
+    DiskSensorConfig,
+    GpuSensorConfig,
     SensorsConfig,
     Settings,
     SubscriptionConfig,
@@ -13,7 +15,7 @@ from sa_home_bot.config import (
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
-from sa_home_bot.domain.models import DiskSummary
+from sa_home_bot.domain.models import KIND_GPU, DiskSummary
 from sa_home_bot.jobs.base import JobContext
 from sa_home_bot.jobs.scan import SensorScanJob
 from sa_home_bot.subscriptions.book import SubscriptionBook
@@ -132,3 +134,67 @@ async def test_run_caches_disk_summaries_in_store(ctx):
     assert await context.store.get_disk_summaries() is None
     await SensorScanJob().run(context)
     assert await context.store.get_disk_summaries() == disks
+
+
+class FakeGpuSensors:
+    """Отдаёт одно GPU-показание (kind=gpu) — проверить, что скан резолвит
+    его к config.sensors.gpu, а не по умолчанию к disk-порогам."""
+
+    def __init__(self, temps: list[float]) -> None:
+        self._temps = temps
+        self._i = 0
+
+    async def read_all(self):
+        temp = self._temps[min(self._i, len(self._temps) - 1)]
+        self._i += 1
+        return [make_reading(temp, component_id="gpu:0", kind=KIND_GPU, label="Tesla V100")]
+
+    async def read_disk_summaries(self, health_overrides):
+        return []
+
+
+@pytest_asyncio.fixture
+async def gpu_ctx(tmp_path):
+    db = Database(tmp_path / "scan_gpu.sqlite")
+    await db.open()
+    await apply_migrations(db)
+    book = SubscriptionBook.from_config(
+        [SubscriptionConfig(name="me", chat_id=1, event_types=["*"], allowed_commands=[])]
+    )
+    notifier = FakeNotifier()
+    settings = Settings(
+        telegram=TelegramConfig(token="x"),
+        sensors=SensorsConfig(
+            gpu=GpuSensorConfig(
+                enabled=True,
+                warn_c=80.0,
+                crit_c=90.0,
+                hysteresis_delta_c=5.0,
+                consecutive_to_alert=2,
+                consecutive_to_clear=2,
+            ),
+            # Порог дисков нарочно другой — если бы GPU резолвился на него,
+            # тест ниже не заметил бы перегрев на 85°C (< disk warn_c).
+            disks=DiskSensorConfig(enabled=True, warn_c=200.0, crit_c=250.0),
+        ),
+        subscriptions=[],
+    )
+    store = Store(db)
+    context = JobContext(
+        store=store,
+        sensors=FakeGpuSensors([40, 85, 85]),
+        dispatcher=TelegramEventDispatcher(notifier, book, store),
+        config=settings,
+    )
+    yield context, notifier
+    await db.close()
+
+
+async def test_gpu_reading_uses_gpu_thresholds_not_disk(gpu_ctx):
+    context, notifier = gpu_ctx
+    job = SensorScanJob()
+    for _ in range(3):
+        await job.run(context)
+    alert_sends = [s for s in notifier.sent if "Перегрев" in s[1]]
+    assert len(alert_sends) == 1
+    assert "GPU" in alert_sends[0][1]

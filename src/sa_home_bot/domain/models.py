@@ -16,6 +16,7 @@ ALERTING = "alerting"
 
 # --- Виды компонентов ---
 KIND_CPU = "cpu"
+KIND_GPU = "gpu"
 KIND_DISK = "disk"
 
 # --- Типы событий ---
@@ -39,8 +40,8 @@ DISK_FAIL = "failed"  # SMART FAILED — диск при смерти
 class SensorReading:
     """Мгновенное показание одного компонента."""
 
-    component_id: str  # "cpu:package" / "disk:/dev/sda"
-    kind: str  # KIND_CPU | KIND_DISK
+    component_id: str  # "cpu:package" / "gpu:0" / "disk:/dev/sda"
+    kind: str  # KIND_CPU | KIND_GPU | KIND_DISK
     label: str  # человекочитаемое имя
     temperature_c: float
     taken_at: datetime

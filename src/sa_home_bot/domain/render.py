@@ -14,6 +14,7 @@ from sa_home_bot.domain.models import (
     EVENT_OVERHEAT_STARTED,
     EVENT_SMART_DEGRADED,
     KIND_CPU,
+    KIND_GPU,
     POWER_CLEAN,
     DiskSummary,
     Event,
@@ -22,9 +23,11 @@ from sa_home_bot.domain.models import (
     SmartChange,
 )
 
+_KIND_WORD_EVENT = {KIND_CPU: "CPU", KIND_GPU: "GPU"}
+
 
 def _kind_word(kind: str) -> str:
-    return "CPU" if kind == KIND_CPU else "Диск"
+    return _KIND_WORD_EVENT.get(kind, "Диск")
 
 
 def render_event(event: Event) -> str:
@@ -169,9 +172,12 @@ _DISK_ICON = {DISK_OK: "✅", DISK_WARN: "⚠️", DISK_FAIL: "❌"}
 # обычная комнатная температура (по паспортам Seagate Momentus 5400.6 и Hitachi
 # Travelstar Z5K320 — рабочий диапазон 0-60°C, ниже комнатной работающий диск
 # практически не бывает); для CPU — измеренный холостой ход этой машины
-# 33-37°C (см. CLAUDE.md), Tjunction max Celeron N3350 ≈105°C.
+# 33-37°C (см. CLAUDE.md), Tjunction max Celeron N3350 ≈105°C; для GPU —
+# измеренный холостой ход Tesla V100 SXM2 на mycraft (33-41°C, см. память
+# tesla-v100-sxm2-thermal-check).
 _DISK_TEMP_COLD_C = 25.0
 _CPU_TEMP_COLD_C = 35.0
+_GPU_TEMP_COLD_C = 40.0
 
 
 def _temp_mood(temp_c: float, cold: float, warn_c: float, crit_c: float) -> str:
@@ -190,6 +196,10 @@ def _disk_temp_mood(temp_c: float, warn_c: float, crit_c: float) -> str:
 
 def _cpu_temp_mood(temp_c: float, warn_c: float, crit_c: float) -> str:
     return _temp_mood(temp_c, _CPU_TEMP_COLD_C, warn_c, crit_c)
+
+
+def _gpu_temp_mood(temp_c: float, warn_c: float, crit_c: float) -> str:
+    return _temp_mood(temp_c, _GPU_TEMP_COLD_C, warn_c, crit_c)
 
 
 def _fmt_gb(nbytes: int) -> str:
@@ -229,23 +239,40 @@ def render_disk_line(d: DiskSummary, warn_c: float, crit_c: float) -> str:
     return f"{icon}{heading}\n {d.temperature_c:.0f}°C {mood}| {usage}"
 
 
+def render_gpu_line(state: HealthState, warn_c: float, crit_c: float) -> str:
+    """Строка одной видеокарты: «✅ GPU Tesla V100-SXM2-16GB: 41.0°C 🙂».
+
+    В отличие от CPU (одна агрегированная строка по максимуму среди ядер/
+    сенсоров-однотипок), у GPU каждая карта — отдельное физическое устройство
+    с собственной идентичностью (V100 и RTX 3060 на mycraft ведут себя
+    совершенно по-разному) — поэтому строка на карту, не максимум по всем.
+    """
+    label = escape(state.label)
+    mood = _gpu_temp_mood(state.temperature_c, warn_c, crit_c)
+    icon = "🔥" if state.status == ALERTING else "✅"
+    return f"{icon} GPU {label}: {state.temperature_c:.1f}°C {mood}"
+
+
 def render_status_summary(
     now: datetime,
     uptime: timedelta | None,
     cpu_states: list[HealthState],
+    gpu_states: list[HealthState],
     disks: list[DiskSummary],
     last_outage: PowerEvent | None,
     cpu_warn_c: float,
     cpu_crit_c: float,
+    gpu_warn_c: float,
+    gpu_crit_c: float,
     disk_warn_c: float,
     disk_crit_c: float,
 ) -> str:
     """Краткая сводка (/status): время отчёта, аптайм, температуры, диски, отключение.
 
-    `*_warn_c`/`*_crit_c` — пороги алертов из config.sensors (те же, что уже
-    настроены для реальных уведомлений о перегреве/SMART) — используются и
-    для эмодзи-«настроения» температуры, чтобы иконка не противоречила факту
-    срабатывания алерта.
+    Порядок температурного блока — CPU → GPU → диски. `*_warn_c`/`*_crit_c` —
+    пороги алертов из config.sensors (те же, что уже настроены для реальных
+    уведомлений о перегреве/SMART) — используются и для эмодзи-«настроения»
+    температуры, чтобы иконка не противоречила факту срабатывания алерта.
     """
     lines = [now.astimezone().strftime("%Y-%m-%d %H:%M")]
     if uptime is not None:
@@ -260,6 +287,8 @@ def render_status_summary(
         tmax = max(s.temperature_c for s in cpu)
         mood = _cpu_temp_mood(tmax, cpu_warn_c, cpu_crit_c)
         body.append(f"{'🔥' if hot else '✅'} CPU: {tmax:.1f}°C {mood}")
+    gpu = [s for s in gpu_states if s.kind == KIND_GPU]
+    body.extend(render_gpu_line(g, gpu_warn_c, gpu_crit_c) for g in gpu)
     body.extend(render_disk_line(d, disk_warn_c, disk_crit_c) for d in disks)
 
     if body:

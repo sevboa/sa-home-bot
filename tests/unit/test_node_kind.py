@@ -197,5 +197,13 @@ def test_config_rejects_an_unknown_kind():
         NodeConfig(kind="toaster")
 
 
+def test_config_power_controllable_defaults_to_none():
+    from sa_home_bot.config import NodeConfig
+
+    assert NodeConfig().power_controllable is None
+    assert NodeConfig(power_controllable=True).power_controllable is True
+    assert NodeConfig(power_controllable=False).power_controllable is False
+
+
 async def _noop(event_type: str, data: dict) -> None:
     return None

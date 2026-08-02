@@ -114,6 +114,25 @@ class DiskSensorConfig(_BaselineParams):
     devices: list[str] = Field(default_factory=list)
 
 
+class GpuSensorConfig(_BaselineParams):
+    """Температура GPU через `nvidia-smi` (см. sensors/gpu.py).
+
+    ``enabled`` по умолчанию выключен (в отличие от cpu/disks): в отличие от
+    процессора и дисков, которые есть на КАЖДОЙ ноде, видеокарта — редкое
+    исключение (на 2026-08 — только mycraft, Tesla V100 + RTX 3060). Держать
+    датчик включённым по умолчанию значило бы шуметь «nvidia-smi не найден»
+    на каждой ноде без GPU — включается явно в конфиге той машины, где карта
+    есть.
+    """
+
+    enabled: bool = False
+    warn_c: float = 80.0
+    crit_c: float = 90.0
+    hysteresis_delta_c: float = 5.0
+    consecutive_to_alert: int = Field(default=3, ge=1)
+    consecutive_to_clear: int = Field(default=3, ge=1)
+
+
 class LhmSensorConfig(BaseModel):
     """LibreHardwareMonitor — источник температур на Windows (`sensors/lhm.py`).
 
@@ -127,6 +146,7 @@ class LhmSensorConfig(BaseModel):
 
 class SensorsConfig(BaseModel):
     cpu: CpuSensorConfig = Field(default_factory=CpuSensorConfig)
+    gpu: GpuSensorConfig = Field(default_factory=GpuSensorConfig)
     disks: DiskSensorConfig = Field(default_factory=DiskSensorConfig)
     lhm: LhmSensorConfig = Field(default_factory=LhmSensorConfig)
 
@@ -354,6 +374,22 @@ class LlmConfig(BaseModel):
     warmup_timeout_s: float = Field(default=360.0, gt=0)
     think_chat: bool = True
     num_ctx: int = Field(default=8192, gt=0)
+    # Режим работы bot/ai_flow.py::request_alfred с моделью — разные модели
+    # умеют разное, гонять их через одну и ту же схему нельзя.
+    # ``"router_think"`` (дефолт, как было всегда) — два прохода: лёгкий
+    # router без персонажа решает, нужно ли думать (THINK_MARKER, см.
+    # llm/prompt.py), затем персонажный проход с уже известным think.
+    # ``"single_call"`` — один персонажный проход сразу, без router и без
+    # поля think вовсе (роутер решал ТОЛЬКО думать или нет — если модель
+    # думать не умеет, решать нечего, а второй вызов на каждое сообщение
+    # остаётся чистым расходом). Живая находка 2026-08-02: gemma-4-26B-A4B
+    # (mycraft, container_backend="native") на любой think=true отвечает
+    # `400 {"error":"... does not support thinking"}` — подтверждено прямым
+    # curl'ом к Ollama, — router_think на такой модели гарантированно ломает
+    # ЛЮБОЙ вопрос, который router считает сложным (ALBERT_HICCUP). Указывать
+    # per-node/per-model в config.toml, а не константой в коде — думающие
+    # модели (qwen3.6 и т.п.) остаются на router_think.
+    mode: Literal["router_think", "single_call"] = "router_think"
     # Живая находка 2026-07-25: текст персонажа (тон, характер, конкретные
     # реплики) намеренно НЕ в репозитории — слишком личный/объёмный для
     # config.toml. На практике заполняется не здесь напрямую, а отдельным
@@ -412,10 +448,22 @@ class NodeConfig(BaseModel):
     дефолт ``server`` делал из ненастроенного ноутбука машину, обязанную быть
     в сети (живой пример: бесполезные алерты про arch-t480, этап 23 п. 4).
     Серверу и VDS тип задаётся явно — как уже сделано у alfred и jeeves.
+
+    ``power_controllable`` — явный оверрайд умения выключить/перезагрузить/
+    усыпить машину кнопкой в боте (``poweroff``/``reboot``/``suspend`` в
+    node/service.py). По умолчанию ``None`` — берётся из типа машины
+    (``NodeTraits.power_controllable``, node/kind.py): always_on-нода
+    (server/vps) кнопок не получает, потому что для неё недоступность —
+    авария, а не штатное состояние. Но «недоступность — авария» и «админ не
+    должен мочь сам выключить свой же сервер» — разные вещи: домашний сервер
+    (mycraft, alfred), в отличие от удалённого VDS, стоит физически рядом —
+    если что, кнопку питания нажмут руками. Поэтому явный ``true`` в конфиге
+    той машины включает кнопки, не трогая поведение алертов о пропаже.
     """
 
     id: str = ""
     kind: NodeKind = "workstation"
+    power_controllable: bool | None = None
     socket: str = "./data/node.sock"
     listen: list[str] = Field(default_factory=list)
     assignments: list[str] = Field(default_factory=list)

@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 
 from sa_home_bot.config import SensorsConfig
 from sa_home_bot.domain.models import DiskSummary, SensorReading, SmartSnapshot
-from sa_home_bot.sensors import cpu, disks
+from sa_home_bot.sensors import cpu, disks, gpu
 
 
 def _now() -> datetime:
@@ -30,6 +30,12 @@ class SensorSource:
             None, cpu.read_cpu_sync, _now(), self._config.lhm.dll_path
         )
 
+    async def read_gpu(self) -> list[SensorReading]:
+        if not self._config.gpu.enabled:
+            return []
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, gpu.read_gpu_sync, _now())
+
     async def read_disks(self) -> list[SensorReading]:
         if not self._config.disks.enabled:
             return []
@@ -40,10 +46,11 @@ class SensorSource:
         )
 
     async def read_all(self) -> list[SensorReading]:
-        cpu_readings, disk_readings = await asyncio.gather(
-            self.read_cpu(), self.read_disks()
+        # Порядок в списке = порядок отображения в /status: CPU → GPU → диски.
+        cpu_readings, gpu_readings, disk_readings = await asyncio.gather(
+            self.read_cpu(), self.read_gpu(), self.read_disks()
         )
-        return [*cpu_readings, *disk_readings]
+        return [*cpu_readings, *gpu_readings, *disk_readings]
 
     async def read_smart_snapshots(self) -> list[SmartSnapshot]:
         """Снимок SMART-счётчиков дисков (read-only, для мониторинга деградации)."""
