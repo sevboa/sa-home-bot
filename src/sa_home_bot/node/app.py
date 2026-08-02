@@ -361,7 +361,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
     lease: LeaseManager | None = None
     # Читается в on_local_event ниже, назначается только после создания
     # (тот же приём, что и server выше) — сама NodeService нужна там, чтобы
-    # среагировать на llm_idle_sleep своей же ноды (автовыключение по
+    # среагировать на llm_went_idle своей же ноды (автовыключение по
     # простою, node/service.py::maybe_auto_poweroff_idle).
     node_service: NodeService | None = None
     node_id = settings.node.id or socket.gethostname()
@@ -405,10 +405,16 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
             is_local=True,
         )
         # Строковый литерал, не импорт из llm/service.py — та же конвенция,
-        # что и в bot/node_events.py::EVENT_LLM_IDLE_SLEEP. Только НАТУРАЛЬНОЕ
-        # событие (llm/service.py::_sleep_now emit'ит его лишь когда quiet=False)
-        # — ручной роспуск Alfred не должен гасить машину сам по себе.
-        if env.payload.get("event") == "llm_idle_sleep" and node_service is not None:
+        # что и в bot/node_events.py::EVENT_LLM_IDLE_SLEEP. `llm_went_idle`
+        # (не `llm_idle_sleep`!) — эмитится ТОЛЬКО из _maybe_sleep_idle
+        # (натуральный тайм-аут простоя), безусловно, даже без активных
+        # chat_id (в отличие от llm_idle_sleep, который адресован реальным
+        # чатам и молчит, если чатов не было — живая находка 2026-08-03: с
+        # llm_idle_sleep автовыключение не срабатывало на машине, с которой
+        # Alfred просто ни разу не заговорили). Ручной роспуск Alfred
+        # (llm/service.py::_sleep_now(quiet=True)) не эмитит НИ ОДНО из двух
+        # событий — машину сам по себе не гасит.
+        if env.payload.get("event") == "llm_went_idle" and node_service is not None:
             asyncio.create_task(
                 node_service.maybe_auto_poweroff_idle(), name="idle-poweroff-check"
             )

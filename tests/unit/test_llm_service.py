@@ -407,7 +407,47 @@ async def test_idle_triggered_sleep_also_emits(monkeypatch):
 
     await svc._maybe_sleep_idle()
 
-    assert emitter.events == [("llm_idle_sleep", {"chat_ids": [1]})]
+    assert emitter.events == [
+        ("llm_idle_sleep", {"chat_ids": [1]}),
+        ("llm_went_idle", {}),
+    ]
+
+
+async def test_idle_triggered_sleep_emits_went_idle_even_without_chats(monkeypatch):
+    """Живая находка 2026-08-03 (обкатка автовыключения mycraft): warmup без
+    единого реального обращения не рождает llm_idle_sleep вовсе (адресован
+    чатам — см. test_warmup_does_not_add_chat_id_to_active_chats), но
+    node/service.py::maybe_auto_poweroff_idle всё равно должен узнать, что
+    простой наступил — иначе автовыключение никогда не сработало бы на
+    машине, с которой Alfred просто ни разу не заговорили."""
+
+    async def fake_stop(cfg):
+        pass
+
+    monkeypatch.setattr(llm_service.ollama, "stop", fake_stop)
+    emitter = FakeEmitter()
+    svc = LlmService(_settings(idle_sleep_after_s=60.0), emit=emitter)
+    svc._last_activity = datetime.now(tz=UTC) - timedelta(seconds=61)
+
+    await svc._maybe_sleep_idle()
+
+    assert emitter.events == [("llm_went_idle", {})]
+
+
+async def test_manual_sleep_does_not_emit_went_idle(monkeypatch):
+    """`llm_went_idle` — только естественный тайм-аут (_maybe_sleep_idle),
+    не ручной вызов действия sleep (роспуск через ai_flow.py или nodectl call)."""
+
+    async def fake_stop(cfg):
+        pass
+
+    monkeypatch.setattr(llm_service.ollama, "stop", fake_stop)
+    emitter = FakeEmitter()
+    svc = LlmService(_settings(), emit=emitter)
+
+    await svc.run_command("sleep", {})
+
+    assert emitter.events == []
 
 
 async def test_active_chat_ids_reset_after_emit(monkeypatch):

@@ -57,6 +57,16 @@ ACTION_WARMUP = "warmup"
 
 EVENT_IDLE_SLEEP = "llm_idle_sleep"
 EVENT_SERVICE_RESTART = "llm_service_restart"
+# Отдельно от EVENT_IDLE_SLEEP: тот адресован реальным чатам и намеренно НЕ
+# эмитится, если активных chat_id нет (см. run_command/ACTION_WARMUP — прогрев
+# не в счёт, test_warmup_does_not_add_chat_id_to_active_chats). Но
+# node/app.py::on_local_event нужен сигнал «простой дошёл до сна» БЕЗ этого
+# условия — иначе автовыключение (node/service.py::maybe_auto_poweroff_idle)
+# никогда не сработало бы на машине, с которой Alfred просто ни разу не
+# заговорили (живая находка 2026-08-03 при обкатке на mycraft: тестовый
+# warmup не породил EVENT_IDLE_SLEEP вовсе). Эмитится ТОЛЬКО из
+# _maybe_sleep_idle — естественного тайм-аута простоя, не ручного sleep.
+EVENT_WENT_IDLE = "llm_went_idle"
 
 _IDLE_CHECK_INTERVAL_S = 60.0
 
@@ -280,6 +290,10 @@ class LlmService:
         idle_for = (datetime.now(tz=UTC) - self._last_activity).total_seconds()
         if idle_for >= self._cfg.idle_sleep_after_s:
             await self._sleep_now()
+            try:
+                await self._emit(EVENT_WENT_IDLE, {})
+            except Exception:  # noqa: BLE001 — сбой эмита не должен ронять идле-таймер
+                log.exception("llm: не удалось эмитить %s", EVENT_WENT_IDLE)
 
     async def idle_loop(self) -> None:
         """Раз в минуту проверять простой; после `idle_sleep_after_s` без
