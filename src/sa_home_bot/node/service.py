@@ -69,11 +69,12 @@ ACTION_REBOOT = "reboot"
 ACTION_SUSPEND = "suspend"
 
 # Автовыключение по простою Alfred (config.py::NodeConfig.idle_poweroff,
-# maybe_auto_poweroff_idle ниже): если открыта SSH-сессия, выключение
-# откладывается и рою уходит это событие — админ либо сам закроет сессию и
+# maybe_auto_poweroff_idle ниже): если открыта SSH-сессия ИЛИ живёт
+# tmux-сессия (переживает разрыв SSH — utils/ssh_sessions.py), выключение
+# откладывается и рою уходит это событие — админ либо сам разберётся и
 # перевыключит руками, либо нажмёт кнопку ACTION_CLOSE_SSH_SESSIONS.
 ACTION_CLOSE_SSH_SESSIONS = "close_ssh_sessions"
-CLOSE_SSH_SESSIONS_TITLE = "🔌 Закрыть SSH-сессии и выключить"
+CLOSE_SSH_SESSIONS_TITLE = "🔌 Закрыть SSH+tmux и выключить"
 EVENT_IDLE_POWER_BLOCKED = "idle_power_blocked"
 
 ACTION_CHECK_UPDATE = "check_update"
@@ -839,15 +840,30 @@ class NodeService:
         self._power_task = task  # ссылка, чтобы задачу не собрал GC
         return {"scheduled": ACTION_RESTART_NODE, "delay_s": POWER_DELAY_S}
 
+    @staticmethod
+    async def _blocking_sessions() -> tuple[list[ssh_sessions.SshSession], list[str]]:
+        """Оба независимых сигнала «за машиной работают руками» — открытые
+        SSH-сессии и живые tmux-сессии (та переживает разрыв SSH — см.
+        докстроку utils/ssh_sessions.py, живая находка 2026-08-03: без этой
+        проверки отсоединившийся tmux с фоновой задачей не остановил бы
+        автовыключение)."""
+        ssh = await ssh_sessions.list_ssh_sessions()
+        tmux = await ssh_sessions.list_tmux_sessions()
+        return ssh, tmux
+
     async def _close_ssh_sessions(self) -> dict[str, Any]:
         """Кнопка/действие «выгнать всех и выключить» — и ручное (карточка
         ноды), и то, что жмёт админ из уведомления `EVENT_IDLE_POWER_BLOCKED`.
         Одно действие, не два шага (решение пользователя 2026-08-03): раз уж
-        закрываем чужую сессию, дальше выключаем сразу же, а не ждём
-        следующего простоя Alfred."""
-        sessions = await ssh_sessions.list_ssh_sessions()
-        await ssh_sessions.terminate_sessions([s.id for s in sessions])
-        result: dict[str, Any] = {"closed": len(sessions)}
+        закрываем чужие сессии, дальше выключаем сразу же, а не ждём
+        следующего простоя Alfred. tmux гасится целиком (kill-server, вместе
+        со всем, что в нём запущено) — тем же решением: кнопка означает
+        «выключить», а не «просто отсоединить»."""
+        ssh, tmux = await self._blocking_sessions()
+        await ssh_sessions.terminate_sessions([s.id for s in ssh])
+        if tmux:
+            await ssh_sessions.kill_tmux_server()
+        result: dict[str, Any] = {"closed": len(ssh), "tmux_killed": len(tmux)}
         if ACTION_POWEROFF in self._power:
             result.update(self._schedule_power(ACTION_POWEROFF))
         return result
@@ -858,21 +874,23 @@ class NodeService:
         же ноды. Ручной роспуск («Альфред, ты свободен») машину не трогает —
         это отдельное, явное решение человека, а не простой.
 
-        Открытая SSH-сессия — вероятный признак того, что за машиной сейчас
-        работают руками, не через Alfred (config.py::NodeConfig.idle_poweroff)."""
+        Открытая SSH-сессия или живая tmux-сессия — вероятный признак того,
+        что за машиной сейчас работают руками, не через Alfred
+        (config.py::NodeConfig.idle_poweroff)."""
         if not self._idle_poweroff:
             return
-        sessions = await ssh_sessions.list_ssh_sessions()
-        if not sessions:
+        ssh, tmux = await self._blocking_sessions()
+        if not ssh and not tmux:
             self._schedule_power(ACTION_POWEROFF)
             return
+        descriptions = [s.describe() for s in ssh] + [f"tmux: {name}" for name in tmux]
         log.warning(
-            "%s: простой Alfred, но выключение отложено — открыты SSH-сессии: %s",
+            "%s: простой Alfred, но выключение отложено — %s",
             self._node,
-            ", ".join(s.describe() for s in sessions),
+            ", ".join(descriptions),
         )
         if self._emit is not None:
             await self._emit(
                 EVENT_IDLE_POWER_BLOCKED,
-                {"node": self._node, "sessions": [s.describe() for s in sessions]},
+                {"node": self._node, "sessions": descriptions},
             )

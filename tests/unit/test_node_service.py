@@ -752,6 +752,22 @@ def test_close_ssh_sessions_declared_only_with_power_controllable():
     assert not_controllable.find_action("close_ssh_sessions") is None
 
 
+def _stub_no_blockers(monkeypatch, service_module):
+    """SSH и tmux оба пусты — без этого реальные `ssh_sessions.list_tmux_sessions`/
+    `kill_tmux_server` уходили бы в настоящий `tmux` этой (тестовой) машины,
+    а не мокнутой mycraft — живая находка 2026-08-03 при добавлении tmux-
+    проверки: на машине, где гоняются тесты, tmux реально установлен."""
+
+    async def no_ssh():
+        return []
+
+    async def no_tmux():
+        return []
+
+    monkeypatch.setattr(service_module.ssh_sessions, "list_ssh_sessions", no_ssh)
+    monkeypatch.setattr(service_module.ssh_sessions, "list_tmux_sessions", no_tmux)
+
+
 async def test_maybe_auto_poweroff_idle_noop_when_disabled(monkeypatch):
     """idle_poweroff=False (дефолт) — простой Alfred не выключает машину,
     даже если она вообще power_controllable."""
@@ -763,10 +779,7 @@ async def test_maybe_auto_poweroff_idle_noop_when_disabled(monkeypatch):
     async def fake_runner(argv):
         ran.append(argv)
 
-    async def fake_list_sessions():
-        return []
-
-    monkeypatch.setattr(service_module.ssh_sessions, "list_ssh_sessions", fake_list_sessions)
+    _stub_no_blockers(monkeypatch, service_module)
     svc = NodeService(sup, power_runner=fake_runner, node_kind="workstation")
     await svc.maybe_auto_poweroff_idle()
     assert ran == []
@@ -788,10 +801,7 @@ async def test_maybe_auto_poweroff_idle_powers_off_without_sessions(monkeypatch)
     async def emit(event_type, data):
         emitted.append((event_type, data))
 
-    async def fake_list_sessions():
-        return []
-
-    monkeypatch.setattr(service_module.ssh_sessions, "list_ssh_sessions", fake_list_sessions)
+    _stub_no_blockers(monkeypatch, service_module)
 
     svc = NodeService(
         sup,
@@ -825,6 +835,7 @@ async def test_maybe_auto_poweroff_idle_blocked_by_ssh_session(monkeypatch):
     async def fake_list_sessions():
         return [session]
 
+    _stub_no_blockers(monkeypatch, service_module)
     monkeypatch.setattr(service_module.ssh_sessions, "list_ssh_sessions", fake_list_sessions)
 
     svc = NodeService(
@@ -840,6 +851,42 @@ async def test_maybe_auto_poweroff_idle_blocked_by_ssh_session(monkeypatch):
     event_type, data = emitted[0]
     assert event_type == "idle_power_blocked"
     assert data["sessions"] == [session.describe()]
+
+
+async def test_maybe_auto_poweroff_idle_blocked_by_tmux_without_ssh(monkeypatch):
+    """Живая находка 2026-08-03: tmux переживает разрыв SSH — сигнал простоя
+    нужен и без единой открытой logind-сессии."""
+    from sa_home_bot.node import service as service_module
+
+    sup, _ = _fake_supervisor()
+    ran: list[list[str]] = []
+    emitted: list[tuple[str, dict]] = []
+
+    async def fake_runner(argv):
+        ran.append(argv)
+
+    async def emit(event_type, data):
+        emitted.append((event_type, data))
+
+    async def no_ssh():
+        return []
+
+    async def one_tmux():
+        return ["training-run"]
+
+    monkeypatch.setattr(service_module.ssh_sessions, "list_ssh_sessions", no_ssh)
+    monkeypatch.setattr(service_module.ssh_sessions, "list_tmux_sessions", one_tmux)
+
+    svc = NodeService(
+        sup,
+        power_runner=fake_runner,
+        node_kind="workstation",
+        idle_poweroff=True,
+        emit=emit,
+    )
+    await svc.maybe_auto_poweroff_idle()
+    assert ran == []
+    assert emitted[0][1]["sessions"] == ["tmux: training-run"]
 
 
 async def test_close_ssh_sessions_terminates_and_powers_off(monkeypatch):
@@ -864,13 +911,53 @@ async def test_close_ssh_sessions_terminates_and_powers_off(monkeypatch):
     async def fake_terminate(ids):
         terminated.extend(ids)
 
+    _stub_no_blockers(monkeypatch, service_module)
     monkeypatch.setattr(service_module.ssh_sessions, "list_ssh_sessions", fake_list_sessions)
     monkeypatch.setattr(service_module.ssh_sessions, "terminate_sessions", fake_terminate)
 
     svc = NodeService(sup, power_runner=fake_runner, node_kind="workstation")
     result = await svc.run_command("close_ssh_sessions", {})
     assert result["closed"] == 1
+    assert result["tmux_killed"] == 0
     assert result["scheduled"] == "poweroff"
     assert terminated == ["5"]
+    await asyncio.sleep(0.05)
+    assert ran == [["systemctl", "poweroff"]]
+
+
+async def test_close_ssh_sessions_also_kills_tmux(monkeypatch):
+    import asyncio
+
+    from sa_home_bot.node import service as service_module
+
+    monkeypatch.setattr(service_module, "POWER_DELAY_S", 0.0)
+    sup, _ = _fake_supervisor()
+    ran: list[list[str]] = []
+    killed: list[bool] = []
+
+    async def fake_runner(argv):
+        ran.append(argv)
+
+    async def no_ssh():
+        return []
+
+    async def one_tmux():
+        return ["training-run"]
+
+    async def terminate(ids):
+        assert ids == []
+
+    async def kill_server():
+        killed.append(True)
+
+    monkeypatch.setattr(service_module.ssh_sessions, "list_ssh_sessions", no_ssh)
+    monkeypatch.setattr(service_module.ssh_sessions, "list_tmux_sessions", one_tmux)
+    monkeypatch.setattr(service_module.ssh_sessions, "terminate_sessions", terminate)
+    monkeypatch.setattr(service_module.ssh_sessions, "kill_tmux_server", kill_server)
+
+    svc = NodeService(sup, power_runner=fake_runner, node_kind="workstation")
+    result = await svc.run_command("close_ssh_sessions", {})
+    assert result["tmux_killed"] == 1
+    assert killed == [True]
     await asyncio.sleep(0.05)
     assert ran == [["systemctl", "poweroff"]]

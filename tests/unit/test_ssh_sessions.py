@@ -74,3 +74,40 @@ async def test_terminate_sessions_calls_loginctl_per_id(monkeypatch):
         ("loginctl", "terminate-session", "5"),
         ("loginctl", "terminate-session", "6"),
     ]
+
+
+async def test_list_tmux_sessions_parses_names(monkeypatch):
+    async def fake(*argv: str) -> str:
+        assert argv == ("tmux", "list-sessions", "-F", "#{session_name}")
+        return "training-run\nmonitoring\n"
+
+    monkeypatch.setattr(ssh_sessions, "_run", fake)
+
+    assert await ssh_sessions.list_tmux_sessions() == ["training-run", "monitoring"]
+
+
+async def test_list_tmux_sessions_empty_when_not_installed(monkeypatch):
+    async def fake(*argv: str) -> str:
+        raise FileNotFoundError("tmux")
+
+    monkeypatch.setattr(ssh_sessions, "_run", fake)
+
+    assert await ssh_sessions.list_tmux_sessions() == []
+
+
+async def test_kill_tmux_server_calls_tmux(monkeypatch):
+    fake, calls = _fake_run({("tmux", "kill-server"): ""})
+    monkeypatch.setattr(ssh_sessions, "_run", fake)
+
+    await ssh_sessions.kill_tmux_server()
+
+    assert calls == [("tmux", "kill-server")]
+
+
+async def test_kill_tmux_server_noop_when_not_installed(monkeypatch):
+    async def fake(*argv: str) -> str:
+        raise FileNotFoundError("tmux")
+
+    monkeypatch.setattr(ssh_sessions, "_run", fake)
+
+    await ssh_sessions.kill_tmux_server()  # не бросает
