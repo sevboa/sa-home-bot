@@ -186,6 +186,10 @@ def _settings() -> Settings:
     return Settings(llm=LlmConfig(request_timeout_s=5.0))
 
 
+def _single_call_settings() -> Settings:
+    return Settings(llm=LlmConfig(request_timeout_s=5.0, mode="single_call"))
+
+
 @pytest_asyncio.fixture
 async def store(tmp_path):
     db = Database(tmp_path / "test.sqlite")
@@ -233,6 +237,32 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
     assert len(router_args["messages"]) == 2
     assert router_args["messages"][0]["role"] == "system"
     assert "Точное время сейчас" in router_args["messages"][0]["content"]
+
+
+async def test_single_call_mode_skips_router(store):
+    # LlmConfig.mode="single_call" (живая находка 2026-08-02: gemma-4-26B-A4B
+    # на mycraft отвечает 400 "does not support thinking" на любой
+    # think=true) — ни router-прохода, ни поля think в запросе вовсе, один
+    # персонажный вызов сразу.
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[{"response": "Добгый день, сэ"}],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _single_call_settings(),
+        [{"role": "user", "content": "привет"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert raw == "Добгый день, сэ"
+    assert message.answers == []  # ни «шагов», ни THINKING_TEXT — решать нечего
+    assert len(link.command_calls) == 1
+    action, args, node = link.command_calls[0]
+    assert (action, node) == ("chat", "mycraft")
+    assert "think" not in args
+    assert "role" not in args
 
 
 async def test_tool_call_round_trip_reaches_final_response(store):

@@ -760,6 +760,28 @@ async def request_alfred(
                 at=datetime.now(tz=UTC),
             )
 
+        if settings.llm.mode == "single_call":
+            # Режимы работы с моделью — LlmConfig.mode (config.py). Модели
+            # без поддержки thinking (живая находка 2026-08-02: gemma-4-26B-
+            # A4B на mycraft — 400 "does not support thinking" на любой
+            # think=true) роутеру нечего решать — думать всё равно нельзя,
+            # второй вызов на каждое сообщение был бы чистым расходом. Один
+            # персонажный проход сразу; think не передаём вовсе (та же
+            # логика "не мешать своей адаптивностью", что и think=None у
+            # qwen3.5/3.6 — см. комментарий ниже), а не False: False — тоже
+            # явный флаг, и не факт, что каждая такая модель его стерпит.
+            return await run_chat_loop(
+                node_link,
+                dst,
+                timeout,
+                list(base_messages),
+                tool_ctx,
+                think=None,
+                telegram_chat_id=telegram_chat_id,
+                log_chat_id=chat_id,
+                on_tool_call=_record_tool_call,
+            )
+
         # Вариативное рассуждение (см. комментарий выше про THINK_MARKER):
         # сначала лёгкий router-проход (без персонажа, ROUTER_SYSTEM_PROMPT),
         # который решает think и/или вызывает нужный тул — router_messages
