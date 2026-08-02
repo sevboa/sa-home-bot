@@ -119,9 +119,9 @@ async def test_power_actions_not_declared_for_always_on_kinds(kind):
 
 async def test_power_actions_declared_for_server_with_explicit_override(monkeypatch):
     """[node].power_controllable=true в конфиге — явное разрешение выключать/
-    перезагружать конкретный домашний сервер (например mycraft), не меняя
-    always_on/алерты о пропаже. VPS без такого оверрайда по-прежнему не
-    получает кнопок (см. тест выше) — только явно настроенная машина."""
+    перезагружать конкретный домашний сервер, не меняя always_on/алерты о
+    пропаже. VPS без такого оверрайда по-прежнему не получает кнопок (см.
+    тест выше) — только явно настроенная машина."""
     import asyncio
 
     from sa_home_bot.node import service as service_module
