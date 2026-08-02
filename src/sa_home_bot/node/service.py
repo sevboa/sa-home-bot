@@ -44,6 +44,7 @@ from sa_home_bot.proto.messages import (
 )
 from sa_home_bot.runtime import Runtime
 from sa_home_bot.services import registry
+from sa_home_bot.utils import ssh_sessions
 from sa_home_bot.utils.system import system_uptime_seconds
 
 log = logging.getLogger(__name__)
@@ -66,6 +67,14 @@ ACTION_RESTART_NODE = "restart_node"
 ACTION_POWEROFF = "poweroff"
 ACTION_REBOOT = "reboot"
 ACTION_SUSPEND = "suspend"
+
+# Автовыключение по простою Alfred (config.py::NodeConfig.idle_poweroff,
+# maybe_auto_poweroff_idle ниже): если открыта SSH-сессия, выключение
+# откладывается и рою уходит это событие — админ либо сам закроет сессию и
+# перевыключит руками, либо нажмёт кнопку ACTION_CLOSE_SSH_SESSIONS.
+ACTION_CLOSE_SSH_SESSIONS = "close_ssh_sessions"
+CLOSE_SSH_SESSIONS_TITLE = "🔌 Закрыть SSH-сессии и выключить"
+EVENT_IDLE_POWER_BLOCKED = "idle_power_blocked"
 
 ACTION_CHECK_UPDATE = "check_update"
 ACTION_UPDATE = "update"
@@ -156,6 +165,7 @@ class NodeService:
         update_source: str | None = None,
         node_kind: str = node_kinds.KIND_SERVER,
         power_controllable: bool | None = None,
+        idle_poweroff: bool = False,
         replicator: ConfigReplicator | None = None,
         lease: LeaseManager | None = None,
         make_peer_link: Callable[[str, str | Sequence[str]], PeerLink] | None = None,
@@ -188,6 +198,10 @@ class NodeService:
         )
         self._power = power_commands() if controllable else {}
         self._power_runner = power_runner or _default_power_runner
+        # Автовыключение по простою Alfred (см. config.py::NodeConfig.idle_poweroff)
+        # — осмысленно, только если машину вообще можно выключить; иначе
+        # флаг молча не действует, а не падает конфигом на server/vps.
+        self._idle_poweroff = idle_poweroff and controllable
         self._restart_node = restart_node
         # assign/unassign: состояние ноды переживает рестарт через state_path
         # (см. node/state.py); без него — только в памяти этого процесса
@@ -322,6 +336,15 @@ class NodeService:
                     ActionSpec(id=action, title=_POWER_TITLES[action])
                     for action in self._power
                 ),
+                *(
+                    (
+                        ActionSpec(
+                            id=ACTION_CLOSE_SSH_SESSIONS, title=CLOSE_SSH_SESSIONS_TITLE
+                        ),
+                    )
+                    if ACTION_POWEROFF in self._power
+                    else ()
+                ),
                 # Репликация настроек: оба действия с обязательными
                 # параметрами, поэтому фронтенды их кнопками не рисуют и зовёт
                 # их только другая нода (PROTOCOL.md, «команды-представления»).
@@ -449,6 +472,8 @@ class NodeService:
             return self._schedule_restart_node()
         if action in self._power:
             return self._schedule_power(action)
+        if action == ACTION_CLOSE_SSH_SESSIONS:
+            return await self._close_ssh_sessions()
         if action == ACTION_SWARM_JOIN:
             return await self._swarm_join(args)
         if action == ACTION_JOIN:
@@ -813,3 +838,41 @@ class NodeService:
         task = asyncio.create_task(run(), name="restart-node")
         self._power_task = task  # ссылка, чтобы задачу не собрал GC
         return {"scheduled": ACTION_RESTART_NODE, "delay_s": POWER_DELAY_S}
+
+    async def _close_ssh_sessions(self) -> dict[str, Any]:
+        """Кнопка/действие «выгнать всех и выключить» — и ручное (карточка
+        ноды), и то, что жмёт админ из уведомления `EVENT_IDLE_POWER_BLOCKED`.
+        Одно действие, не два шага (решение пользователя 2026-08-03): раз уж
+        закрываем чужую сессию, дальше выключаем сразу же, а не ждём
+        следующего простоя Alfred."""
+        sessions = await ssh_sessions.list_ssh_sessions()
+        await ssh_sessions.terminate_sessions([s.id for s in sessions])
+        result: dict[str, Any] = {"closed": len(sessions)}
+        if ACTION_POWEROFF in self._power:
+            result.update(self._schedule_power(ACTION_POWEROFF))
+        return result
+
+    async def maybe_auto_poweroff_idle(self) -> None:
+        """Вызывается node/app.py::on_local_event на КАЖДОЕ натуральное (не
+        тихое — см. llm/service.py::_sleep_now) событие `llm_idle_sleep` этой
+        же ноды. Ручной роспуск («Альфред, ты свободен») машину не трогает —
+        это отдельное, явное решение человека, а не простой.
+
+        Открытая SSH-сессия — вероятный признак того, что за машиной сейчас
+        работают руками, не через Alfred (config.py::NodeConfig.idle_poweroff)."""
+        if not self._idle_poweroff:
+            return
+        sessions = await ssh_sessions.list_ssh_sessions()
+        if not sessions:
+            self._schedule_power(ACTION_POWEROFF)
+            return
+        log.warning(
+            "%s: простой Alfred, но выключение отложено — открыты SSH-сессии: %s",
+            self._node,
+            ", ".join(s.describe() for s in sessions),
+        )
+        if self._emit is not None:
+            await self._emit(
+                EVENT_IDLE_POWER_BLOCKED,
+                {"node": self._node, "sessions": [s.describe() for s in sessions]},
+            )

@@ -12,6 +12,7 @@ broadcast'ом подключённым клиентам (nodectl events).
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 import socket
@@ -358,6 +359,11 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
     server: ProtoServer | None = None
     replicator: ConfigReplicator | None = None
     lease: LeaseManager | None = None
+    # Читается в on_local_event ниже, назначается только после создания
+    # (тот же приём, что и server выше) — сама NodeService нужна там, чтобы
+    # среагировать на llm_idle_sleep своей же ноды (автовыключение по
+    # простою, node/service.py::maybe_auto_poweroff_idle).
+    node_service: NodeService | None = None
     node_id = settings.node.id or socket.gethostname()
     lifespan = Lifespan()
     restart_requested = False
@@ -398,6 +404,14 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
             seen=seen_events,
             is_local=True,
         )
+        # Строковый литерал, не импорт из llm/service.py — та же конвенция,
+        # что и в bot/node_events.py::EVENT_LLM_IDLE_SLEEP. Только НАТУРАЛЬНОЕ
+        # событие (llm/service.py::_sleep_now emit'ит его лишь когда quiet=False)
+        # — ручной роспуск Alfred не должен гасить машину сам по себе.
+        if env.payload.get("event") == "llm_idle_sleep" and node_service is not None:
+            asyncio.create_task(
+                node_service.maybe_auto_poweroff_idle(), name="idle-poweroff-check"
+            )
 
     def on_peer_endpoints(peer_id: str, endpoints: list[str]) -> None:
         """Линк узнал новые адреса соседа или переехал на другой путь —
@@ -486,6 +500,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         update_source=update_source_for_this_platform(),
         node_kind=settings.node.kind,
         power_controllable=settings.node.power_controllable,
+        idle_poweroff=settings.node.idle_poweroff,
         replicator=replicator,
         lease=lease,
         # Динамические линки (join/assign в рантайме) обязаны собираться теми

@@ -738,3 +738,139 @@ def test_render_services_marks_external():
         [{"name": "llm", "status": "running", "pid": None, "restarts": 0, "external": True}]
     )
     assert "llm (внешняя)" in table
+
+
+# --- Автовыключение по простою Alfred (idle_poweroff) -----------------------
+
+
+def test_close_ssh_sessions_declared_only_with_power_controllable():
+    sup, _ = _fake_supervisor()
+    controllable = NodeService(sup, node_kind="workstation").describe()
+    assert controllable.find_action("close_ssh_sessions") is not None
+
+    not_controllable = NodeService(sup, node_kind="server").describe()
+    assert not_controllable.find_action("close_ssh_sessions") is None
+
+
+async def test_maybe_auto_poweroff_idle_noop_when_disabled(monkeypatch):
+    """idle_poweroff=False (дефолт) — простой Alfred не выключает машину,
+    даже если она вообще power_controllable."""
+    from sa_home_bot.node import service as service_module
+
+    sup, _ = _fake_supervisor()
+    ran: list[list[str]] = []
+
+    async def fake_runner(argv):
+        ran.append(argv)
+
+    async def fake_list_sessions():
+        return []
+
+    monkeypatch.setattr(service_module.ssh_sessions, "list_ssh_sessions", fake_list_sessions)
+    svc = NodeService(sup, power_runner=fake_runner, node_kind="workstation")
+    await svc.maybe_auto_poweroff_idle()
+    assert ran == []
+
+
+async def test_maybe_auto_poweroff_idle_powers_off_without_sessions(monkeypatch):
+    import asyncio
+
+    from sa_home_bot.node import service as service_module
+
+    monkeypatch.setattr(service_module, "POWER_DELAY_S", 0.0)
+    sup, _ = _fake_supervisor()
+    ran: list[list[str]] = []
+    emitted: list[tuple[str, dict]] = []
+
+    async def fake_runner(argv):
+        ran.append(argv)
+
+    async def emit(event_type, data):
+        emitted.append((event_type, data))
+
+    async def fake_list_sessions():
+        return []
+
+    monkeypatch.setattr(service_module.ssh_sessions, "list_ssh_sessions", fake_list_sessions)
+
+    svc = NodeService(
+        sup,
+        power_runner=fake_runner,
+        node_kind="workstation",
+        idle_poweroff=True,
+        emit=emit,
+    )
+    await svc.maybe_auto_poweroff_idle()
+    await asyncio.sleep(0.05)
+    assert ran == [["systemctl", "poweroff"]]
+    assert emitted == []
+
+
+async def test_maybe_auto_poweroff_idle_blocked_by_ssh_session(monkeypatch):
+    from sa_home_bot.node import service as service_module
+    from sa_home_bot.utils.ssh_sessions import SshSession
+
+    sup, _ = _fake_supervisor()
+    ran: list[list[str]] = []
+    emitted: list[tuple[str, dict]] = []
+
+    async def fake_runner(argv):
+        ran.append(argv)
+
+    async def emit(event_type, data):
+        emitted.append((event_type, data))
+
+    session = SshSession(id="5", user="sevboa", tty="pts/0", since="2026-08-03 01:08")
+
+    async def fake_list_sessions():
+        return [session]
+
+    monkeypatch.setattr(service_module.ssh_sessions, "list_ssh_sessions", fake_list_sessions)
+
+    svc = NodeService(
+        sup,
+        power_runner=fake_runner,
+        node_kind="workstation",
+        idle_poweroff=True,
+        emit=emit,
+    )
+    await svc.maybe_auto_poweroff_idle()
+    assert ran == []  # выключение отложено
+    assert len(emitted) == 1
+    event_type, data = emitted[0]
+    assert event_type == "idle_power_blocked"
+    assert data["sessions"] == [session.describe()]
+
+
+async def test_close_ssh_sessions_terminates_and_powers_off(monkeypatch):
+    import asyncio
+
+    from sa_home_bot.node import service as service_module
+    from sa_home_bot.utils.ssh_sessions import SshSession
+
+    monkeypatch.setattr(service_module, "POWER_DELAY_S", 0.0)
+    sup, _ = _fake_supervisor()
+    ran: list[list[str]] = []
+    terminated: list[str] = []
+
+    async def fake_runner(argv):
+        ran.append(argv)
+
+    session = SshSession(id="5", user="sevboa", tty="pts/0", since="2026-08-03 01:08")
+
+    async def fake_list_sessions():
+        return [session]
+
+    async def fake_terminate(ids):
+        terminated.extend(ids)
+
+    monkeypatch.setattr(service_module.ssh_sessions, "list_ssh_sessions", fake_list_sessions)
+    monkeypatch.setattr(service_module.ssh_sessions, "terminate_sessions", fake_terminate)
+
+    svc = NodeService(sup, power_runner=fake_runner, node_kind="workstation")
+    result = await svc.run_command("close_ssh_sessions", {})
+    assert result["closed"] == 1
+    assert result["scheduled"] == "poweroff"
+    assert terminated == ["5"]
+    await asyncio.sleep(0.05)
+    assert ran == [["systemctl", "poweroff"]]

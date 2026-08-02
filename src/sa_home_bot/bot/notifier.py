@@ -76,18 +76,22 @@ def chunk_text(text: str, limit: int = MAX_LEN) -> list[str]:
     return chunks
 
 
-async def notify_admins(book, notifier: Notifier, text: str) -> None:
+async def notify_admins(
+    book, notifier: Notifier, text: str, reply_markup: InlineKeyboardMarkup | None = None
+) -> None:
     """Служебное сообщение — в чаты с полным доступом (``*`` в
     allowed_commands), не пользователю.
 
     Сюда идут диагностика падений /ai (см. bot/ai_flow.py, где эта функция и
-    жила раньше) и события приватного входа: кто вошёл по инвайту, кто
-    ломится подбором (bot/invites.py). ``book`` не типизирован намеренно —
+    жила раньше), события приватного входа: кто вошёл по инвайту, кто
+    ломится подбором (bot/invites.py), и блокировка автовыключения ноды
+    открытой SSH-сессией (bot/node_events.py, ``reply_markup`` — кнопка
+    «закрыть сессии и выключить»). ``book`` не типизирован намеренно —
     иначе notifier зависел бы от подписок, которые зависят от конфига.
     """
     for sub in book.all():
         if WILDCARD in sub.allowed_commands:
-            await notifier.send_direct(sub.chat_id, text)
+            await notifier.send_direct(sub.chat_id, text, reply_markup=reply_markup)
 
 
 class Notifier:

@@ -465,6 +465,16 @@ class NodeConfig(BaseModel):
     id: str = ""
     kind: NodeKind = "workstation"
     power_controllable: bool | None = None
+    # По умолчанию выключено — явный opt-in для конкретной машины (как и
+    # power_controllable), не следствие типа/умений. Работает только вместе
+    # с power_controllable: когда служба llm этой же ноды засыпает САМА по
+    # простою (`llm_idle_sleep`, не тихий ручной роспуск — см.
+    # node/app.py::on_local_event), нода проверяет открытые SSH-сессии
+    # (utils/ssh_sessions.py) и либо выключается (systemctl poweroff), либо,
+    # если кто-то зашёл по SSH, шлёт админам событие `idle_power_blocked` с
+    # кнопкой «закрыть сессии и выключить» (node/service.py, bot/node_events.py).
+    # Отдельного тайм-аута нет — источник простоя один, `[llm].idle_sleep_after_s`.
+    idle_poweroff: bool = False
     socket: str = "./data/node.sock"
     listen: list[str] = Field(default_factory=list)
     assignments: list[str] = Field(default_factory=list)

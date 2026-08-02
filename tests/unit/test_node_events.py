@@ -13,7 +13,9 @@ from sa_home_bot.bot.ai_flow import (
     STEPS_TEXT,
 )
 from sa_home_bot.bot.node_events import (
+    build_close_ssh_keyboard,
     build_node_event_handler,
+    render_idle_power_blocked,
     render_node_joined,
     render_node_leaving,
     render_node_returned,
@@ -31,10 +33,12 @@ class FakeNotifier:
         # Отдельно — с reply_to_message_id, для тестов task_prewake/task_result
         # (остальные тесты этого файла реплаем не пользуются).
         self.sent_full: list[tuple[int, str, int | None]] = []
+        self.reply_markups: list[object] = []
 
-    async def send_direct(self, chat_id, text, reply_to_message_id=None):
+    async def send_direct(self, chat_id, text, reply_to_message_id=None, reply_markup=None):
         self.sent.append((chat_id, text))
         self.sent_full.append((chat_id, text, reply_to_message_id))
+        self.reply_markups.append(reply_markup)
         return 99
 
 
@@ -351,3 +355,77 @@ async def test_handler_broadcasts_on_node_leaving_and_returned():
         (1, render_node_leaving("winpc")),
         (1, render_node_returned("winpc")),
     ]
+
+
+# --- idle_power_blocked: автовыключение отложено открытой SSH-сессией ------
+
+
+def _admin_book() -> SubscriptionBook:
+    return SubscriptionBook.from_config(
+        [SubscriptionConfig(name="admin", chat_id=999, allowed_commands=["*"])]
+    )
+
+
+def test_render_idle_power_blocked_lists_sessions():
+    text = render_idle_power_blocked("mycraft", ["sevboa, pts/0, с 01:08"])
+    assert "mycraft" in text
+    assert "sevboa, pts/0, с 01:08" in text
+
+
+def test_build_close_ssh_keyboard_targets_node():
+    keyboard = build_close_ssh_keyboard("mycraft")
+    button = keyboard.inline_keyboard[0][0]
+    assert button.callback_data == "act:node:close_ssh_sessions::mycraft"
+
+
+async def test_handler_notifies_admins_with_close_ssh_button():
+    book = _admin_book()
+    notifier = FakeNotifier()
+    handler = build_node_event_handler(book, notifier, FakeStore())
+
+    await handler(
+        make_event(
+            "idle_power_blocked",
+            {"node": "mycraft", "sessions": ["sevboa, pts/0, с 01:08"]},
+            src=Address(node="mycraft", service="node"),
+        )
+    )
+
+    expected_text = render_idle_power_blocked("mycraft", ["sevboa, pts/0, с 01:08"])
+    assert notifier.sent == [(999, expected_text)]
+    assert notifier.reply_markups == [build_close_ssh_keyboard("mycraft")]
+
+
+async def test_handler_ignores_idle_power_blocked_without_sessions():
+    """Пустой список — событие бы эмитилось только если сессии есть
+    (node/service.py::maybe_auto_poweroff_idle), но handler защищается и
+    от пустых/битых данных, как и у остальных событий этого модуля."""
+    book = _admin_book()
+    notifier = FakeNotifier()
+    handler = build_node_event_handler(book, notifier, FakeStore())
+
+    await handler(
+        make_event(
+            "idle_power_blocked", {"node": "mycraft", "sessions": []}, src=Address(node="mycraft")
+        )
+    )
+
+    assert notifier.sent == []
+
+
+async def test_handler_does_not_notify_non_admin_chats_on_idle_power_blocked():
+    """`_book()` (не admin) не должна получить это — WILDCARD в allowed_commands
+    нужен именно для notify_admins, event_types="*" тут ни при чём."""
+    book = _book()
+    notifier = FakeNotifier()
+    handler = build_node_event_handler(book, notifier, FakeStore())
+
+    await handler(
+        make_event(
+            "idle_power_blocked",
+            {"node": "mycraft", "sessions": ["sevboa, pts/0"]},
+            src=Address(node="mycraft"),
+        )
+    )
+
+    assert notifier.sent == []

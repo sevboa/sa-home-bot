@@ -13,6 +13,10 @@ ai_turns делаются здесь, по meta, которую сама слу�
 ``tool_call`` (та же служба tasks — факт вызова инструмента моделью внутри
 уже сработавшей chat_loop-задачи, self-scheduled remind; только имя тула,
 без аргументов/результата, см. tasks/protocol.py::EVENT_TOOL_CALL).
+``idle_power_blocked`` (node/service.py::maybe_auto_poweroff_idle — простой
+Alfred дошёл до автовыключения ноды, но открыта SSH-сессия, выключение
+отложено) — адресно админам (notify_admins), с кнопкой «закрыть сессии и
+выключить» (node/service.py::ACTION_CLOSE_SSH_SESSIONS).
 
 ``node_joined``/``update_finished`` — тип в чат ``system`` (тот же канал,
 что старт/останов, `bot/lifecycle.py`), рассылаются всем подпискам.
@@ -21,9 +25,12 @@ ai_turns делаются здесь, по meta, которую сама слу�
 event_types подписки: адрес уже точный, дублировать его подписками
 незачем). ``tool_call`` — через подписки с ``event_types=["alfred_tool_call"]``
 (`bot/lifecycle.py::notify_tool_call`) — тот же путь, что и для живого /ai
-(bot/ai_flow.py::request_alfred), адресата в самом событии нет. Остальные
-события ноды (``service_started``/``service_failed`` и т.п.) сюда не
-заведены — отдельная функциональность, вне рамок этого модуля.
+(bot/ai_flow.py::request_alfred), адресата в самом событии нет.
+``idle_power_blocked`` — адресно админам (см. выше), не через подписки:
+это не про конкретный чат-диалог, а служебный алерт для тех, кто вообще
+управляет роем. Остальные события ноды (``service_started``/
+``service_failed`` и т.п.) сюда не заведены — отдельная функциональность,
+вне рамок этого модуля.
 """
 
 from __future__ import annotations
@@ -32,6 +39,9 @@ import html
 import logging
 from datetime import UTC, datetime
 
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+from sa_home_bot.bot import commands
 from sa_home_bot.bot.ai_flow import (
     ALBERT_ASLEEP,
     ALBERT_TASK_MISSED,
@@ -67,6 +77,10 @@ EVENT_SINGLETON_YIELDED = "singleton_yielded"
 # импорт бота из пакета llm ради одной константы того не стоит).
 EVENT_LLM_IDLE_SLEEP = "llm_idle_sleep"
 EVENT_LLM_SERVICE_RESTART = "llm_service_restart"
+# Тот же приём (строковый литерал) для события node/service.py и для id
+# действия, которое рисует кнопка ниже — ACTION_CLOSE_SSH_SESSIONS.
+EVENT_IDLE_POWER_BLOCKED = "idle_power_blocked"
+_CLOSE_SSH_SESSIONS_ACTION = "close_ssh_sessions"
 
 
 def _format_alfred_reply(raw: str) -> str:
@@ -174,6 +188,30 @@ def render_update_finished(node_id: str, ok: bool, version: str | None, error: s
     return f"⚠️ Обновление ноды «{node_id}» не удалось: {error}"
 
 
+def render_idle_power_blocked(node_id: str, sessions: list[str]) -> str:
+    lines = "\n".join(f"• {html.escape(s)}" for s in sessions)
+    return (
+        f"⚠️ Нода «{node_id}» простаивает (Alfred заснул по тайм-ауту), но не "
+        f"выключаюсь — открыта SSH-сессия:\n{lines}\n"
+        "Возможно, кто-то работает за машиной."
+    )
+
+
+def build_close_ssh_keyboard(node_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔌 Закрыть SSH-сессии и выключить",
+                    callback_data=commands.action_callback(
+                        _CLOSE_SSH_SESSIONS_ACTION, node_id=node_id, service="node"
+                    ),
+                )
+            ]
+        ]
+    )
+
+
 def build_node_event_handler(book: SubscriptionBook, notifier: Notifier, store: Store):
     """Callback для ServiceLink(node).on_event."""
 
@@ -241,6 +279,20 @@ def build_node_event_handler(book: SubscriptionBook, notifier: Notifier, store: 
         elif name == EVENT_LLM_SERVICE_RESTART:
             for chat_id in data.get("chat_ids", []):
                 await notifier.send_direct(chat_id, RESTART_TEXT)
+            return
+        elif name == EVENT_IDLE_POWER_BLOCKED:
+            # Адресно админам (notify_admins), не всем подпискам — служебный
+            # алерт про автовыключение, не про конкретный диалог.
+            node_id = data.get("node")
+            sessions = data.get("sessions") or []
+            if not node_id or not sessions:
+                return
+            await notify_admins(
+                book,
+                notifier,
+                render_idle_power_blocked(node_id, sessions),
+                reply_markup=build_close_ssh_keyboard(node_id),
+            )
             return
         else:
             return
