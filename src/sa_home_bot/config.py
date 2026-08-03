@@ -451,6 +451,13 @@ class VpnConfig(BaseModel):
     AmneziaVPN — тот кратно больше лимита Telegram-бота на файл).
     ``apk_cache_dir`` — кэш на jeeves; свежесть по GitHub API проверяется
     на каждый запрос (см. vpn/apk.py), а не по расписанию.
+
+    ``ios_app_store_url``/``google_play_url``/``official_download_url`` —
+    решение пользователя 2026-08-04: перед тем как слать сам файл .apk,
+    сначала показать все официальные способы поставить AmneziaWG (не только
+    Android/сайдлоад — на iOS сайдлоада нет вовсе). Проверены вручную
+    2026-08-04: App Store id6478942365 (издатель Privacy Technologies, тот
+    же, что публикует AmneziaVPN), Google Play org.amnezia.awg.
     """
 
     socket: str = "./data/vpn.sock"
@@ -477,6 +484,9 @@ class VpnConfig(BaseModel):
     sample_interval_s: float = Field(default=180.0, gt=0)
     apk_repo: str = "amnezia-vpn/amneziawg-android"
     apk_cache_dir: Path = Path("./data/vpn-apk")
+    ios_app_store_url: str = "https://apps.apple.com/app/amneziawg/id6478942365"
+    google_play_url: str = "https://play.google.com/store/apps/details?id=org.amnezia.awg"
+    official_download_url: str = "https://amnezia.org/downloads"
     config_message_ttl_s: float = Field(default=600.0, gt=0)
 
 

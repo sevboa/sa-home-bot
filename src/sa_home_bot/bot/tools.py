@@ -1650,15 +1650,35 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
         )
 
     if action == _VPN_ACTION_APK:
+        if ctx.notifier is None or ctx.chat_id is None:
+            return "недоступно: сейчас не могу отправить сообщение"
+        # Сначала официальные способы поставить AmneziaWG (решение
+        # пользователя 2026-08-04) — на iOS сайдлоада нет вовсе, а на
+        # Android апстор надёжнее файла, который надо ещё разрешить
+        # ставить из неизвестного источника. Дублирует _apk_links_text
+        # bot/handlers/vpn.py — тот модуль тянет aiogram (клавиатуры),
+        # этот модуль сознательно не должен (см. докстринг файла).
+        cfg = ctx.settings.vpn
+        await ctx.notifier.send_direct(
+            ctx.chat_id,
+            "📱 <b>AmneziaWG</b> — официальное приложение.\n\n"
+            f"🍎 App Store (iOS): {escape(cfg.ios_app_store_url)}\n"
+            f"🤖 Google Play (Android): {escape(cfg.google_play_url)}\n"
+            f"🌐 Официальный сайт (все платформы): {escape(cfg.official_download_url)}",
+            message_thread_id=ctx.message_thread_id,
+        )
         try:
             info = await ctx.node_link.command(vpn_protocol.ACTION_APK_INFO, {}, dst=dst)
         except ProtoError as exc:
-            return f"не вышло: {exc.message}"
+            return f"ссылки отправил, но подробности о .apk не вышло получить: {exc.message}"
         except (ServiceUnavailableError, TimeoutError) as exc:
-            return f"недоступно: VPN-служба не отвечает ({exc})"
+            return f"ссылки отправил, но VPN-служба не отвечает ({exc})"
         file_id = info.get("telegram_file_id")
-        if not file_id or ctx.notifier is None or ctx.chat_id is None:
-            return "приложение сейчас не кэшировано — попроси открыть /vpn и нажать «Приложение»"
+        if not file_id:
+            return (
+                "готово: ссылки на приложение ушли личным сообщением "
+                "(файл .apk сейчас не кэширован — попроси открыть /vpn и нажать «Приложение»)"
+            )
         sent = await ctx.notifier.send_document(
             ctx.chat_id,
             str(file_id),
@@ -1666,8 +1686,8 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
             message_thread_id=ctx.message_thread_id,
         )
         if sent:
-            return "готово: приложение ушло личным сообщением"
-        return "не вышло: отправка не удалась"
+            return "готово: ссылки и файл приложения ушли личным сообщением"
+        return "готово: ссылки ушли, но файл .apk отправить не вышло"
 
     if action == vpn_protocol.ACTION_RESOLVE_REQUEST:
         raw_id = args.get("request_id")
@@ -1758,8 +1778,9 @@ _DECL_VPN: dict[str, Any] = {
             "осталось мало — иначе тул откажет и скажет, когда можно "
             "попробовать снова), пока не упёрся в потолок самообслуживания "
             "(тогда используй request_extra — заявка админу, необязательный "
-            "gb — сколько ГБ); apk — прислать официальное приложение "
-            "AmneziaWG.\n"
+            "gb — сколько ГБ); apk — прислать ссылки на официальное "
+            "приложение AmneziaWG (App Store, Google Play, сайт) и, если "
+            "файл .apk уже кэширован, сразу сам файл.\n"
             "issue/reissue БЕЗ recipient — всегда себе, в ТЕКУЩИЙ разговор. "
             "«Выдай/перевыпусти доступ Наташе» (просьба выдать ДРУГОМУ "
             "человеку, не тому, кто сейчас пишет) — это recipient=«Наташа», "

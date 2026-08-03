@@ -175,6 +175,30 @@ def _card_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _apk_links_text(config: Settings) -> str:
+    cfg = config.vpn
+    return (
+        "📱 <b>AmneziaWG</b> — официальное приложение.\n\n"
+        f"🍎 App Store (iOS): {html.escape(cfg.ios_app_store_url)}\n"
+        f"🤖 Google Play (Android): {html.escape(cfg.google_play_url)}\n"
+        f"🌐 Официальный сайт (все платформы): {html.escape(cfg.official_download_url)}\n\n"
+        "Или получите файл .apk прямо здесь, без магазина приложений — кнопка ниже."
+    )
+
+
+def _apk_links_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📦 Дать APK",
+                    callback_data=commands.action_callback("apk", "send", service=SERVICE),
+                )
+            ]
+        ]
+    )
+
+
 def _is_admin(subscription: Subscription) -> bool:
     return subscription.allows_action(vpn_protocol.ACTION_PEERS, SERVICE)
 
@@ -325,11 +349,22 @@ async def handle_action(
         if not _is_private(chat_id):
             await callback.answer("Напишите мне в личку — там и пришлю.", show_alert=True)
             return
-        await callback.answer("Отправляю…")
-        text = await deliver_apk(
-            node_link, notifier, chat_id, message_thread_id=callback.message.message_thread_id
-        )
-        await callback.message.answer(text)
+        if value == "send":
+            # Второе нажатие — «📦 Дать APK» под сообщением со ссылками: сам
+            # файл шлём только теперь, а не сразу на первое нажатие (решение
+            # пользователя 2026-08-04 — на iOS сайдлоада нет вовсе, апстор
+            # надёжнее любого .apk). Кнопка прячется — второй раз файл не
+            # переспросить с того же сообщения по ошибке.
+            await callback.answer("Отправляю…")
+            text = await deliver_apk(
+                node_link, notifier, chat_id, message_thread_id=callback.message.message_thread_id
+            )
+            await callback.message.answer(text)
+            with contextlib.suppress(TelegramBadRequest):
+                await callback.message.edit_reply_markup(reply_markup=None)
+            return
+        await callback.answer()
+        await callback.message.answer(_apk_links_text(config), reply_markup=_apk_links_keyboard())
         return
 
     if action_id == vpn_protocol.ACTION_GRANT_EXTRA:

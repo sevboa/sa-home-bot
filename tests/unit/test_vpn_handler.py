@@ -32,14 +32,21 @@ class FakeMessage:
     def __init__(self, chat_id: int) -> None:
         self.chat = FakeChat(chat_id)
         self.answers: list[str] = []
+        self.answer_markups: list[object] = []
         self.edits: list[str] = []
         self.message_thread_id: int | None = None
+        self.reply_markup_cleared = False
 
-    async def answer(self, text, **kwargs):
+    async def answer(self, text, reply_markup=None, **kwargs):
         self.answers.append(text)
+        self.answer_markups.append(reply_markup)
 
     async def edit_text(self, text, **kwargs):
         self.edits.append(text)
+
+    async def edit_reply_markup(self, reply_markup=None, **kwargs):
+        if reply_markup is None:
+            self.reply_markup_cleared = True
 
 
 class FakeCallback:
@@ -127,6 +134,26 @@ async def test_grant_extra_hits_ceiling_converts_to_request(monkeypatch):
     assert any("№42" in text for text in callback.message.answers)
     actions = [c[0] for c in link.calls]
     assert vpn_protocol.ACTION_REQUEST_EXTRA in actions
+
+
+async def test_apk_first_click_shows_links_not_file():
+    link = FakeNodeLink()
+    notifier = FakeNotifier()
+    callback = FakeCallback("act:vpn:apk", chat_id=777)
+    await vpn_handlers.handle_action(callback, link, notifier, _config(), GUEST)
+    assert any("App Store" in text for text in callback.message.answers)
+    assert any("Google Play" in text for text in callback.message.answers)
+    assert link.calls == []  # ссылки статические — служба вообще не спрошена
+    assert notifier.sent_documents == []  # файл ещё не ушёл
+
+
+async def test_apk_send_click_delivers_file_and_hides_button():
+    link = FakeNodeLink(result={"telegram_file_id": "cached-id", "version": "2.0.1"})
+    notifier = FakeNotifier()
+    callback = FakeCallback("act:vpn:apk:send", chat_id=777)
+    await vpn_handlers.handle_action(callback, link, notifier, _config(), GUEST)
+    assert notifier.sent_documents[0][:2] == (777, "cached-id")
+    assert callback.message.reply_markup_cleared
 
 
 async def test_issue_in_group_chat_is_refused(monkeypatch):
