@@ -36,12 +36,14 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import base64
 import copy
 import itertools
 import json
 import logging
 import math
 import operator
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -1512,6 +1514,11 @@ _DECL_MEMORY: dict[str, Any] = {
 # chat_id, как и у memory, подставляет бот из ToolContext, не модель.
 
 _VPN_ACTION_APK = "apk"  # виртуальное действие бота (apk_info+доставка), не команда службы
+_VPN_UNSAFE_FILENAME = re.compile(r"[^\w\-]+")
+
+
+def _vpn_safe_filename(label: str) -> str:
+    return _VPN_UNSAFE_FILENAME.sub("_", label.strip()).strip("_") or "device"
 
 
 async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
@@ -1536,13 +1543,28 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
         except (ServiceUnavailableError, TimeoutError) as exc:
             return f"недоступно: VPN-служба не отвечает ({exc})"
         if ctx.notifier is not None:
-            await ctx.notifier.send_direct(
+            filename = f"amneziawg-{_vpn_safe_filename(device_label)}.conf"
+            await ctx.notifier.send_document(
                 ctx.chat_id,
-                f"🔐 Конфиг устройства «{escape(device_label)}»:\n"
-                f"<pre>{escape(result['config_text'])}</pre>",
+                str(result["config_text"]).encode("utf-8"),
+                filename=filename,
+                caption=(
+                    f"🔐 Конфиг устройства «{escape(device_label)}».\n"
+                    "Нажми на файл → «Открыть с помощью» → AmneziaWG — тоннель "
+                    "добавится сразу, без копирования."
+                ),
                 message_thread_id=ctx.message_thread_id,
             )
-        return "готово: конфиг ушёл отдельным личным сообщением (приватный ключ тебе не показываю)"
+            qr_b64 = result.get("qr_png_b64")
+            if qr_b64:
+                await ctx.notifier.send_photo(
+                    ctx.chat_id,
+                    base64.b64decode(qr_b64),
+                    filename="vpn-qr.png",
+                    caption="QR — для настройки с другого устройства",
+                    message_thread_id=ctx.message_thread_id,
+                )
+        return "готово: конфиг-файл (и QR) ушли личным сообщением (приватный ключ не показываю)"
 
     if action == _VPN_ACTION_APK:
         try:

@@ -1147,6 +1147,7 @@ class _FakeNotifier:
     def __init__(self) -> None:
         self.sent_direct: list[tuple[int, str]] = []
         self.sent_documents: list[tuple[int, object, str | None]] = []
+        self.sent_photos: list[tuple[int, object, str | None]] = []
 
     async def send_direct(
         self,
@@ -1159,9 +1160,17 @@ class _FakeNotifier:
         self.sent_direct.append((chat_id, text))
         return 1
 
-    async def send_document(self, chat_id, document, *, caption=None, message_thread_id=None):
+    async def send_document(
+        self, chat_id, document, *, filename=None, caption=None, message_thread_id=None
+    ):
         self.sent_documents.append((chat_id, document, caption))
         return (1, "tg-file-id")
+
+    async def send_photo(
+        self, chat_id, photo, *, filename=None, caption=None, message_thread_id=None
+    ):
+        self.sent_photos.append((chat_id, photo, caption))
+        return 1
 
 
 def _vpn_enum(subscription) -> list[str]:
@@ -1202,9 +1211,9 @@ async def test_vpn_issue_sends_secret_via_notifier_not_to_model(store):
         {"action": "issue", "device_label": "тел"},
     )
     assert "SECRET" not in result
-    assert notifier.sent_direct  # секрет ушёл личным сообщением
-    assert "SECRET" in notifier.sent_direct[0][1]
-    assert notifier.sent_direct[0][0] == 777
+    assert notifier.sent_documents  # секрет ушёл файлом .conf, а не текстом модели
+    assert b"SECRET" in notifier.sent_documents[0][1]
+    assert notifier.sent_documents[0][0] == 777
     action, dst = link.commands[0]
     assert (action, dst.node, dst.service) == ("issue", vpn_protocol.NODE_ID, "vpn")
     assert link.sent_args[0]["chat_id"] == 777  # свой чат, не подсунутый моделью

@@ -68,6 +68,7 @@ class FakeNodeLink:
 class FakeNotifier:
     def __init__(self) -> None:
         self.sent_direct: list[tuple[int, str]] = []
+        self.sent_documents: list[tuple[int, object, str | None]] = []
         self.sent_photos: list[tuple[int, object, str | None]] = []
         self.deleted: list[tuple[int, int]] = []
 
@@ -82,7 +83,15 @@ class FakeNotifier:
         self.sent_direct.append((chat_id, text))
         return len(self.sent_direct)
 
-    async def send_photo(self, chat_id, photo, *, caption=None, message_thread_id=None):
+    async def send_document(
+        self, chat_id, document, *, filename=None, caption=None, message_thread_id=None
+    ):
+        self.sent_documents.append((chat_id, document, caption))
+        return (len(self.sent_documents), "tg-file-id")
+
+    async def send_photo(
+        self, chat_id, photo, *, filename=None, caption=None, message_thread_id=None
+    ):
         self.sent_photos.append((chat_id, photo, caption))
         return len(self.sent_photos)
 
@@ -140,9 +149,9 @@ async def test_issue_in_private_chat_sends_secret_and_cleans_up():
     callback = FakeCallback("act:vpn:issue:телефон", chat_id=777)
     await vpn_handlers.handle_action(callback, link, notifier, _config(ttl_s=0.01), GUEST)
 
-    assert notifier.sent_direct
-    assert "SECRET" in notifier.sent_direct[0][1]
-    assert notifier.sent_direct[0][0] == 777
+    assert notifier.sent_documents  # секрет ушёл файлом .conf, не текстом
+    assert b"SECRET" in notifier.sent_documents[0][1]
+    assert notifier.sent_documents[0][0] == 777
 
     await asyncio.sleep(0.05)  # дать фоновой задаче автоудаления отработать
     assert notifier.deleted  # сообщение с секретом удалено сама собой

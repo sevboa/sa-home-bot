@@ -10,10 +10,15 @@ CallbackAuthorizationMiddleware (``действие@vpn``), здесь толь�
 (тот же приём, что apps/monitor: у "act:"-кнопок один обработчик на все
 службы, разбор — по service).
 
-Секрет (приватный ключ) уходит в личку один раз и текстом, и QR-картинкой,
-затем бот удаляет оба сообщения через ``[vpn].config_message_ttl_s`` —
-решение плана этапа 33: приватный ключ генерируется на сервере, в БД служба
-хранит только публичный (vpn/service.py)."""
+Секрет (приватный ключ) уходит в личку один раз файлом ``.conf`` (тап →
+«Открыть с помощью» → AmneziaWG импортирует тоннель без копирования — живая
+находка 2026-08-03: текст в `<pre>` заставлял гостя вручную создавать
+документ, а QR бесполезен, если сканировать нечем — телефон не может
+сфотографировать собственный экран) и QR-картинкой (для настройки с ДРУГОГО
+устройства), затем бот удаляет оба сообщения через
+``[vpn].config_message_ttl_s`` — решение плана этапа 33: приватный ключ
+генерируется на сервере, в БД служба хранит только публичный
+(vpn/service.py)."""
 
 from __future__ import annotations
 
@@ -22,12 +27,12 @@ import base64
 import contextlib
 import html
 import logging
+import re
 
 from aiogram import Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import (
-    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -188,6 +193,13 @@ async def _redraw_card(
         await callback.message.edit_text(_usage_text(usage), reply_markup=keyboard)
 
 
+_UNSAFE_FILENAME = re.compile(r"[^\w\-]+")
+
+
+def _safe_filename(label: str) -> str:
+    return _UNSAFE_FILENAME.sub("_", label.strip()).strip("_") or "device"
+
+
 async def _send_secret(
     notifier: Notifier,
     chat_id: int,
@@ -196,26 +208,38 @@ async def _send_secret(
     message_thread_id: int | None = None,
 ) -> None:
     device_label = html.escape(str(result.get("device_label") or ""))
-    config_text = html.escape(result.get("config_text") or "")
-    text_id = await notifier.send_direct(
+    config_text = str(result.get("config_text") or "")
+    filename = f"amneziawg-{_safe_filename(str(result.get('device_label') or 'device'))}.conf"
+    doc_sent = await notifier.send_document(
         chat_id,
-        f"🔐 Конфиг устройства «{device_label}»:\n<pre>{config_text}</pre>\n\n"
-        "Импортируйте в приложение AmneziaWG (сканом QR ниже или файлом) и "
-        "удалите эту переписку — сообщение исчезнет само через несколько минут.",
+        config_text.encode("utf-8"),
+        filename=filename,
+        caption=(
+            f"🔐 Конфиг устройства «{device_label}».\n"
+            "Нажмите на файл → «Открыть с помощью» → AmneziaWG — тоннель "
+            "добавится сразу, без копирования. Если настраиваете НЕ с этого "
+            "устройства — ниже есть QR для сканирования камерой. Удалите "
+            "переписку после импорта — сообщения исчезнут сами через "
+            "несколько минут."
+        ),
         message_thread_id=message_thread_id,
     )
+    doc_id = doc_sent[0] if doc_sent is not None else None
     photo_id = None
     qr_b64 = result.get("qr_png_b64")
     if qr_b64:
-        photo = BufferedInputFile(base64.b64decode(qr_b64), filename="vpn-qr.png")
         photo_id = await notifier.send_photo(
-            chat_id, photo, caption=f"QR — «{device_label}»", message_thread_id=message_thread_id
+            chat_id,
+            base64.b64decode(qr_b64),
+            filename="vpn-qr.png",
+            caption=f"QR — «{device_label}» (для настройки с другого устройства)",
+            message_thread_id=message_thread_id,
         )
 
     async def _cleanup() -> None:
         await asyncio.sleep(ttl_s)
-        if text_id is not None:
-            await notifier.delete_message(chat_id, text_id)
+        if doc_id is not None:
+            await notifier.delete_message(chat_id, doc_id)
         if photo_id is not None:
             await notifier.delete_message(chat_id, photo_id)
 

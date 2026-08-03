@@ -175,19 +175,24 @@ class Notifier:
     async def send_document(
         self,
         chat_id: int,
-        document: BufferedInputFile | str,
+        document: BufferedInputFile | bytes | str,
         *,
+        filename: str | None = None,
         caption: str | None = None,
         message_thread_id: int | None = None,
     ) -> tuple[int, str] | None:
-        """Отправить документ: байты (``BufferedInputFile``) или уже
-        загруженный в Telegram ``file_id`` (строка) — тогда байты никуда не
-        едут, Telegram переиспользует прежнюю загрузку.
+        """Отправить документ: байты (``BufferedInputFile`` или голый
+        ``bytes`` + ``filename`` — второе нужно вызывающим без aiogram,
+        см. bot/tools.py) или уже загруженный в Telegram ``file_id``
+        (строка) — тогда байты никуда не едут, Telegram переиспользует
+        прежнюю загрузку.
 
         Возвращает ``(message_id, file_id)`` — второе нужно вызывающему,
         чтобы запомнить file_id и не гонять файл повторно (см.
         bot/vpn_apk.py::deliver_apk). ``message_thread_id`` — см.
         send_direct."""
+        if isinstance(document, bytes):
+            document = BufferedInputFile(document, filename=filename or "file")
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 msg = await self._bot.send_document(
@@ -217,11 +222,14 @@ class Notifier:
     async def send_photo(
         self,
         chat_id: int,
-        photo: BufferedInputFile,
+        photo: BufferedInputFile | bytes,
         *,
+        filename: str | None = None,
         caption: str | None = None,
         message_thread_id: int | None = None,
     ) -> int | None:
+        if isinstance(photo, bytes):
+            photo = BufferedInputFile(photo, filename=filename or "photo.png")
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 msg = await self._bot.send_photo(
