@@ -410,6 +410,62 @@ class LlmConfig(BaseModel):
     persona_prompt: str = ""
 
 
+class VpnConfig(BaseModel):
+    """Служба vpn (`sa-home-bot --service vpn`) — AmneziaWG-доступ на jeeves,
+    выдаваемый и учитываемый через бота (Этап 33 IMPLEMENTATION_PLAN.md).
+
+    ``interface``/``subnet`` — интерфейс и подсеть, поднятые ops-скриптом
+    (``deploy/setup-awg-jeeves.sh``) отдельно от кода ноды: сама служба
+    интерфейс не создаёт, только читает/пишет пиров через ``awg`` под узким
+    sudoers (``node/fixups.py::AWG_SUDOERS``). ``jc``/``jmin``/``jmax``/
+    ``s1``/``s2``/``h1``-``h4`` — параметры обфускации AmneziaWG: ОБЯЗАНЫ
+    совпадать с тем, что реально прописано в серверном ``awg0.conf`` (их
+    подбирают один раз при установке, не на лету).
+
+    ``base_quota_gb`` — базовая месячная квота гостя; ``extra_step_gb`` —
+    шаг самостоятельной докупки кнопкой «+100 ГБ»; ``self_ceiling_gb`` —
+    потолок самообслуживания (решение пользователя 2026-08-03: до этого
+    порога гость добавляет трафик сам, выше — только заявкой админу).
+    ``warn_remaining_gb`` — на скольки гигабайтах ДО исчерпания слать
+    предупреждение (не процент, а абсолютный остаток — то же решение).
+    ``node_limit_gb`` — общий месячный лимit канала VDS по тарифу
+    (сообщено пользователем 2026-08-03: 10 ТБ) — при приближении событие
+    уходит админам, гостей не касается.
+
+    ``apk_repo`` — откуда брать официальный APK AmneziaWG (не полный клиент
+    AmneziaVPN — тот кратно больше лимита Telegram-бота на файл).
+    ``apk_cache_dir`` — кэш на jeeves; свежесть по GitHub API проверяется
+    на каждый запрос (см. vpn/apk.py), а не по расписанию.
+    """
+
+    socket: str = "./data/vpn.sock"
+    db_path: Path = Path("./data/vpn.sqlite")
+    interface: str = "awg0"
+    subnet: str = "10.9.0.0/24"
+    endpoint_host: str = ""
+    endpoint_port: int = Field(default=51820, ge=1, le=65535)
+    dns: str = "1.1.1.1"
+    jc: int = Field(default=5, ge=1)
+    jmin: int = Field(default=40, ge=0)
+    jmax: int = Field(default=70, ge=0)
+    s1: int = Field(default=50, ge=0)
+    s2: int = Field(default=80, ge=0)
+    h1: int = Field(default=5, ge=1)
+    h2: int = Field(default=6, ge=1)
+    h3: int = Field(default=7, ge=1)
+    h4: int = Field(default=8, ge=1)
+    base_quota_gb: int = Field(default=500, ge=0)
+    extra_step_gb: int = Field(default=100, gt=0)
+    self_ceiling_gb: int = Field(default=1000, ge=0)
+    warn_remaining_gb: int = Field(default=20, ge=0)
+    node_limit_gb: int = Field(default=10000, ge=0)
+    sample_interval_s: float = Field(default=180.0, gt=0)
+    max_peers_per_chat: int = Field(default=5, ge=1)
+    apk_repo: str = "amnezia-vpn/amneziawg-android"
+    apk_cache_dir: Path = Path("./data/vpn-apk")
+    config_message_ttl_s: float = Field(default=600.0, gt=0)
+
+
 class WeatherConfig(BaseModel):
     """Город дома для тула ``get_weather`` (/ai, LLM_INTEGRATION_PLAN.md
     §8.4). Не отдельная служба роя — Open-Meteo не требует ключа и не хранит
@@ -625,6 +681,14 @@ class InvitesConfig(BaseModel):
     разговор с Альфредом, память о себе и веб-поиск: тулы фильтруются
     подпиской (§3.4), поэтому ни рой, ни торренты гостю не видны. События не
     шлём вовсе — алерты о температуре дисков не его дело.
+
+    VPN (Этап 33) сюда НЕ входит по умолчанию — это отдельный ресурс с
+    реальной стоимостью трафика, выдавать его каждому новому гостю молча
+    неверно. Чтобы новые гости получали доступ к /vpn сразу при активации
+    кода, добавьте в свой ``config.toml`` (не в этот дефолт в коде):
+    ``usage@vpn, issue@vpn, reissue@vpn, revoke@vpn, grant_extra@vpn,
+    request_extra@vpn, apk@vpn``. Существующим гостям права можно выдать
+    точечно, поправив их подписку.
     """
 
     enabled: bool = True
@@ -742,6 +806,7 @@ class Settings(BaseSettings):
     tasks: TasksConfig = Field(default_factory=TasksConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     net: NetConfig = Field(default_factory=NetConfig)
+    vpn: VpnConfig = Field(default_factory=VpnConfig)
     weather: WeatherConfig = Field(default_factory=WeatherConfig)
     node: NodeConfig = Field(default_factory=NodeConfig)
     swarm: SwarmConfig = Field(default_factory=SwarmConfig)

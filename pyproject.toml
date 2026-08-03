@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sa-home-bot"
-version = "0.64.0"
+version = "0.65.0"
 description = "Рой домашних машин: нода-супервизор, службы (мониторинг, приложения) и Telegram-бот"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,6 +17,7 @@ dependencies = [
     "pydantic-settings>=2.2",
     "psutil>=5.9",
     "qbittorrent-api>=2024.1.58",
+    "segno>=1.6",
 ]
 
 [project.optional-dependencies]

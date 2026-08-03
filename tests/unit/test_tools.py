@@ -18,6 +18,7 @@ from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
 from sa_home_bot.subscriptions.models import Subscription
+from sa_home_bot.vpn import protocol as vpn_protocol
 
 CHAT_ID = 111
 
@@ -54,6 +55,7 @@ def _ctx(
     history=None,
     subscription=None,
     dismissal=None,
+    notifier=None,
 ):
     # ``store`` не используется ToolContext'ом напрямую (только remind
     # ходит по протоколу через node_link, см. bot/tools.py) — параметр
@@ -68,6 +70,7 @@ def _ctx(
         history=history if history is not None else [],
         subscription=subscription,
         dismissal=dismissal,
+        notifier=notifier,
     )
 
 
@@ -1135,3 +1138,105 @@ async def test_memory_outside_a_dialogue_is_honest(store):
         {"action": "recall", "query": "что-то"},
     )
     assert result.startswith("недоступно")
+
+
+# --- vpn: доступ к AmneziaWG на jeeves (Этап 33 IMPLEMENTATION_PLAN.md) ---
+
+
+class _FakeNotifier:
+    def __init__(self) -> None:
+        self.sent_direct: list[tuple[int, str]] = []
+        self.sent_documents: list[tuple[int, object, str | None]] = []
+
+    async def send_direct(self, chat_id, text, reply_to_message_id=None, reply_markup=None):
+        self.sent_direct.append((chat_id, text))
+        return 1
+
+    async def send_document(self, chat_id, document, *, caption=None):
+        self.sent_documents.append((chat_id, document, caption))
+        return (1, "tg-file-id")
+
+
+def _vpn_enum(subscription) -> list[str]:
+    decl = next(
+        (
+            d
+            for d in tools.tools_for(subscription).declarations
+            if d["function"]["name"] == "vpn"
+        ),
+        None,
+    )
+    if decl is None:
+        return []
+    return decl["function"]["parameters"]["properties"]["action"]["enum"]
+
+
+def test_vpn_enum_is_per_action_right():
+    assert _vpn_enum(_sub("usage@vpn")) == ["usage"]
+    assert _vpn_enum(ADMIN) == [
+        "usage", "issue", "reissue", "grant_extra", "request_extra", "apk", "peers",
+        "resolve_request",
+    ]
+
+
+def test_vpn_hidden_without_any_right():
+    assert "vpn" not in _names(_sub("status", "nodes"))
+
+
+async def test_vpn_issue_sends_secret_via_notifier_not_to_model(store):
+    """Приватный ключ никогда не должен попасть в текст, который видит
+    модель, — только в личное сообщение через ctx.notifier."""
+    link = _FakeSwarmLink(
+        command_result={"config_text": "[Interface]\nPrivateKey = SECRET", "device_label": "тел"}
+    )
+    notifier = _FakeNotifier()
+    result = await tools.tool_vpn(
+        _ctx(store, node_link=link, subscription=ADMIN, notifier=notifier, chat_id=777),
+        {"action": "issue", "device_label": "тел"},
+    )
+    assert "SECRET" not in result
+    assert notifier.sent_direct  # секрет ушёл личным сообщением
+    assert "SECRET" in notifier.sent_direct[0][1]
+    assert notifier.sent_direct[0][0] == 777
+    action, dst = link.commands[0]
+    assert (action, dst.node, dst.service) == ("issue", vpn_protocol.NODE_ID, "vpn")
+    assert link.sent_args[0]["chat_id"] == 777  # свой чат, не подсунутый моделью
+
+
+async def test_vpn_issue_refuses_outside_private_chat(store):
+    link = _FakeSwarmLink()
+    result = await tools.tool_vpn(
+        _ctx(store, node_link=link, subscription=ADMIN, notifier=_FakeNotifier(), chat_id=-100123),
+        {"action": "issue", "device_label": "тел"},
+    )
+    assert result.startswith("недоступно")
+    assert link.commands == []
+
+
+async def test_vpn_ceiling_error_tells_model_to_request_extra(store):
+    error = tools.ProtoError(vpn_protocol.ERR_QUOTA_CEILING, "потолок")
+    link = _FakeSwarmLink(command_raises=error)
+    result = await tools.tool_vpn(
+        _ctx(store, node_link=link, subscription=ADMIN), {"action": "grant_extra"}
+    )
+    assert "request_extra" in result
+
+
+async def test_vpn_apk_sends_by_cached_file_id(store):
+    link = _FakeSwarmLink(command_result={"telegram_file_id": "cached-id", "version": "2.0.1"})
+    notifier = _FakeNotifier()
+    result = await tools.tool_vpn(
+        _ctx(store, node_link=link, subscription=ADMIN, notifier=notifier, chat_id=777),
+        {"action": "apk"},
+    )
+    assert "готово" in result
+    assert notifier.sent_documents[0][:2] == (777, "cached-id")
+
+
+async def test_vpn_apk_without_cache_tells_to_use_bot_ui(store):
+    link = _FakeSwarmLink(command_result={"telegram_file_id": None, "version": "2.0.1"})
+    result = await tools.tool_vpn(
+        _ctx(store, node_link=link, subscription=ADMIN, notifier=_FakeNotifier(), chat_id=777),
+        {"action": "apk"},
+    )
+    assert "/vpn" in result

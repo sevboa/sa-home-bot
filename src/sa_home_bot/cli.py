@@ -35,8 +35,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="какую службу запустить: telegram-бот (по умолчанию), "
         "монитор датчиков, адаптер приложений, адаптер торрент-клиента, "
         "служба LLM (Альфред), служба отложенных задач роя (tasks), "
-        "веб-поиск через локальный SearXNG (net) или "
-        "сервис ноды (супервизор)",
+        "веб-поиск через локальный SearXNG (net), VPN-доступ AmneziaWG (vpn) "
+        "или сервис ноды (супервизор)",
     )
     parser.add_argument(
         "--instance",
@@ -123,6 +123,10 @@ def main(argv: list[str] | None = None) -> int:
         from sa_home_bot.memory.app import run_memory
 
         coro = run_memory(settings)
+    elif args.service == "vpn":
+        from sa_home_bot.vpn.app import run_vpn
+
+        coro = run_vpn(settings)
     else:
         from sa_home_bot.app import run
 

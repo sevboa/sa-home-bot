@@ -455,6 +455,57 @@ WOL_ENABLE = Fixup(
 )
 
 
+# --- vpn: узкий sudoers на `awg show`/`awg set <iface> peer` (Этап 33) ---
+#
+# Долгоживущий процесс службы vpn (node/service.py::VpnService, тот же
+# инвариант «сам sudo не зовёт») правит пиров AmneziaWG на jeeves. Root ноде
+# не отдаём: сниппет разрешает ровно `awg show *` (чтение счётчиков,
+# handshake, публичного ключа интерфейса) и `awg set <iface> peer *`
+# (добавить/снять пира и его allowed-ips) — НЕ `awg-quick` целиком (он
+# исполняет произвольные PostUp из конфига = равносилен root) и НЕ
+# `awg set <iface> private-key/listen-port` (эти параметры трогает только
+# ops-скрипт при установке, не служба). Путь резолвится через `_which` —
+# защита от PATH-hijack, тот же приём, что у smartctl_sudoers_content.
+
+AWG_SUDOERS_FILE = "50-sa-home-node-awg"
+
+
+def _vpn_needed(settings: Settings) -> bool:
+    return assignments.has_service(settings.node.assignments, "vpn")
+
+
+def awg_sudoers_content(awg_path: str, interface: str, user: str) -> str:
+    return (
+        f"{user} ALL=(root) NOPASSWD: {awg_path} show *, "
+        f"{awg_path} set {interface} peer *\n"
+    )
+
+
+def _awg_sudoers_check() -> bool:
+    return (SUDOERS_DIR / AWG_SUDOERS_FILE).exists()
+
+
+def _awg_sudoers_apply(settings: Settings) -> None:
+    path = _which("awg")
+    if path is None:
+        raise FixupError(
+            "awg не найден в PATH — сначала поставьте amneziawg-tools "
+            "(см. deploy/setup-awg-jeeves.sh)"
+        )
+    content = awg_sudoers_content(path, settings.vpn.interface, getuser())
+    _install_sudoers_snippet(AWG_SUDOERS_FILE, content)
+
+
+def make_awg_sudoers_fixup(settings: Settings) -> Fixup:
+    return Fixup(
+        id="awg-sudoers",
+        title="Разрешить управление awg без пароля (sudoers, только show/set peer)",
+        needed=_vpn_needed,
+        check=_awg_sudoers_check,
+        apply=lambda: _awg_sudoers_apply(settings),
+    )
+
+
 def build_fixups(settings: Settings) -> list[Fixup]:
     """Известные фиксы, актуальные для текущих назначений ноды (``needed``)."""
     fixups = [
@@ -463,6 +514,7 @@ def build_fixups(settings: Settings) -> list[Fixup]:
         JOURNALCTL_GROUP,
         POWER_CONTROL_POLKIT,
         WOL_ENABLE,
+        make_awg_sudoers_fixup(settings),
         *(make_apps_unit_fixup(app) for app in settings.apps.items),
     ]
     return [f for f in fixups if f.needed(settings)]

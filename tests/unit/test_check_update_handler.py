@@ -89,6 +89,7 @@ async def _dispatch(callback, store, link):
         store=store,
         node_link=link,
         apps_link=link,
+        notifier=None,
         config=_settings(),
         subscription=_sub(),
     )

@@ -24,6 +24,7 @@ def test_known_services():
         "tasks", "memory",
         "net",
         "llm",
+        "vpn",
     }
 
 

@@ -18,6 +18,11 @@ Alfred дошёл до автовыключения ноды, но открыт�
 отложено) — адресно админам (notify_admins), с кнопкой «закрыть сессии и
 выключить» (node/service.py::ACTION_CLOSE_SSH_SESSIONS).
 
+``vpn_quota_warning``/``vpn_quota_exceeded``/``vpn_access_restored`` —
+адресно гостю (vpn/service.py, Этап 33 IMPLEMENTATION_PLAN.md);
+``vpn_extra_requested``/``vpn_node_quota_warning``/``vpn_peer_issued`` —
+адресно админам; ``vpn_extra_resolved`` — гостю, чью заявку решили.
+
 ``node_joined``/``update_finished`` — тип в чат ``system`` (тот же канал,
 что старт/останов, `bot/lifecycle.py`), рассылаются всем подпискам.
 ``llm_idle_sleep``/``llm_service_restart``/``task_prewake``/``task_result``
@@ -51,12 +56,14 @@ from sa_home_bot.bot.ai_flow import (
     RESTART_TEXT,
     STEPS_TEXT,
 )
+from sa_home_bot.bot.handlers.vpn import resolve_request_callback
 from sa_home_bot.bot.lifecycle import broadcast_system, notify_tool_call
 from sa_home_bot.bot.notifier import Notifier, notify_admins
 from sa_home_bot.db.store import Store
 from sa_home_bot.proto.messages import Envelope
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.tasks import protocol as task_protocol
+from sa_home_bot.vpn import protocol as vpn_protocol
 
 log = logging.getLogger(__name__)
 
@@ -197,6 +204,21 @@ def render_idle_power_blocked(node_id: str, sessions: list[str]) -> str:
     )
 
 
+def _vpn_grant_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="➕ 100 ГБ",
+                    callback_data=commands.action_callback(
+                        "grant_extra", service=vpn_protocol.SERVICE_NAME
+                    ),
+                )
+            ]
+        ]
+    )
+
+
 def build_close_ssh_keyboard(node_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -292,6 +314,79 @@ def build_node_event_handler(book: SubscriptionBook, notifier: Notifier, store: 
                 notifier,
                 render_idle_power_blocked(node_id, sessions),
                 reply_markup=build_close_ssh_keyboard(node_id),
+            )
+            return
+        elif name == vpn_protocol.EVENT_VPN_QUOTA_WARNING:
+            chat_id = data.get("chat_id")
+            if chat_id is None:
+                return
+            remaining_gb = float(data.get("remaining_bytes") or 0) / 1_000_000_000
+            await notifier.send_direct(
+                chat_id,
+                f"📶 VPN: осталось ~{remaining_gb:.1f} ГБ трафика до конца месяца.",
+                reply_markup=_vpn_grant_keyboard(),
+            )
+            return
+        elif name == vpn_protocol.EVENT_VPN_QUOTA_EXCEEDED:
+            chat_id = data.get("chat_id")
+            if chat_id is None:
+                return
+            await notifier.send_direct(
+                chat_id,
+                "⛔️ VPN: месячный лимит трафика исчерпан, доступ приостановлен. "
+                "Можно добавить ещё через /vpn или дождаться начала месяца.",
+                reply_markup=_vpn_grant_keyboard(),
+            )
+            return
+        elif name == vpn_protocol.EVENT_VPN_ACCESS_RESTORED:
+            chat_id = data.get("chat_id")
+            if chat_id is None:
+                return
+            await notifier.send_direct(chat_id, "✅ VPN: доступ восстановлен.")
+            return
+        elif name == vpn_protocol.EVENT_VPN_EXTRA_REQUESTED:
+            chat_id = data.get("chat_id")
+            request_id = data.get("request_id")
+            if chat_id is None or request_id is None:
+                return
+            gb = float(data.get("bytes") or 0) / 1_000_000_000
+            await notify_admins(
+                book,
+                notifier,
+                f"✋ VPN: гость <code>{chat_id}</code> просит ещё {gb:.0f} ГБ "
+                f"(заявка №{request_id}).",
+                reply_markup=resolve_request_callback(int(request_id)),
+            )
+            return
+        elif name == vpn_protocol.EVENT_VPN_EXTRA_RESOLVED:
+            chat_id = data.get("chat_id")
+            if chat_id is None:
+                return
+            approved = bool(data.get("approved"))
+            await notifier.send_direct(
+                chat_id,
+                "✅ VPN: заявка на доп. трафик одобрена."
+                if approved
+                else "🚫 VPN: заявка на доп. трафик отклонена.",
+            )
+            return
+        elif name == vpn_protocol.EVENT_VPN_NODE_QUOTA_WARNING:
+            used_gb = float(data.get("used_bytes") or 0) / 1_000_000_000
+            limit_gb = float(data.get("limit_bytes") or 0) / 1_000_000_000
+            await notify_admins(
+                book,
+                notifier,
+                f"⚠️ VPN: канал jeeves близок к месячному лимиту тарифа — "
+                f"{used_gb:.0f} / {limit_gb:.0f} ГБ.",
+            )
+            return
+        elif name == vpn_protocol.EVENT_VPN_PEER_ISSUED:
+            chat_id = data.get("chat_id")
+            if chat_id is None:
+                return
+            device = html.escape(str(data.get("device_label") or ""))
+            await notify_admins(
+                book, notifier, f"🔐 VPN: выдан доступ гостю <code>{chat_id}</code> ({device})."
             )
             return
         else:

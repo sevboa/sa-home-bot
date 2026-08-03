@@ -231,6 +231,49 @@ probe_timeout_s = 5.0
 max_results = 5
 language = "ru"
 
+# Служба vpn (`sa-home-bot --service vpn`) — AmneziaWG-доступ на jeeves
+# (единственная нода с белым IP; Этап 33 IMPLEMENTATION_PLAN.md). Интерфейс
+# и подсеть поднимает ops-скрипт deploy/setup-awg-jeeves.sh, служба только
+# управляет пирами через `awg` под узким sudoers (nodectl fix ставит его
+# сам — см. node/fixups.py::AWG_SUDOERS). jc/jmin/jmax/s1/s2/h1-h4 —
+# параметры обфускации: ОБЯЗАНЫ дословно совпадать с тем, что реально
+# прописано в серверном /etc/amnezia/amneziawg/awg0.conf — подбираются один
+# раз при установке, значения ниже — только пример, не копировать вслепую.
+# endpoint_host — белый IP jeeves (нужен для рендера клиентского конфига).
+# base_quota_gb/extra_step_gb/self_ceiling_gb/warn_remaining_gb — решения
+# пользователя 2026-08-03: база 500 ГБ/мес, гость сам добавляет по 100 ГБ,
+# пока сумма не достигла 1 ТБ (self_ceiling_gb), дальше — заявка админу;
+# предупреждение — когда остаётся 20 ГБ. node_limit_gb — лимит канала VDS
+# по тарифу (сообщено пользователем: 10 ТБ/мес) — при приближении алерт
+# уходит админам, гостей не касается.
+[vpn]
+socket = "./data/vpn.sock"
+db_path = "./data/vpn.sqlite"
+interface = "awg0"
+subnet = "10.9.0.0/24"
+endpoint_host = ""
+endpoint_port = 51820
+dns = "1.1.1.1"
+jc = 5
+jmin = 40
+jmax = 70
+s1 = 50
+s2 = 80
+h1 = 5
+h2 = 6
+h3 = 7
+h4 = 8
+base_quota_gb = 500
+extra_step_gb = 100
+self_ceiling_gb = 1000
+warn_remaining_gb = 20
+node_limit_gb = 10000
+sample_interval_s = 180.0
+max_peers_per_chat = 5
+apk_repo = "amnezia-vpn/amneziawg-android"
+apk_cache_dir = "./data/vpn-apk"
+config_message_ttl_s = 600.0
+
 # Сервис ноды (супервизор: `sa-home-bot --service node`, консоль — nodectl).
 # Нода запускает назначенные службы дочерними процессами и рестартит упавшие.
 # id — имя ноды в рое (пусто = hostname). Умения питания (poweroff/reboot/
@@ -417,6 +460,10 @@ grant_events = []                  # алерты о температуре ди
 # другому человеку в личку («скажи Андрею, что…»). Впустить поговорить не то
 # же самое, что разрешить писать другим людям от чужого имени; кому нужно —
 # добавьте это право его подписке отдельно (AUTHORIZATION.md §3.4).
+# Тоже НЕ в списке: доступ к /vpn — реальный ресурс с ценой трафика, не
+# давать его молча каждому гостю. Хотите выдавать сразу — допишите сюда
+# "usage@vpn, issue@vpn, reissue@vpn, revoke@vpn, grant_extra@vpn,
+# request_extra@vpn, apk@vpn".
 
 [[subscriptions]]
 name = "family_room"

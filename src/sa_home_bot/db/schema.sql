@@ -182,3 +182,104 @@ CREATE TABLE IF NOT EXISTS invites (
 );
 CREATE INDEX IF NOT EXISTS idx_invites_open ON invites(expires_at)
     WHERE redeemed_at IS NULL AND revoked_at IS NULL;
+
+-- Служба vpn (AmneziaWG-доступ на jeeves, sa_home_bot/vpn/). Пир привязан к
+-- человеку (chat_id), не к устройству — квота считается суммарно по всем
+-- его пирам (device_label различает "телефон"/"ноутбук" и т.п.).
+-- status: active — на интерфейсе (или должен быть — реконсайлер сверяет);
+-- expired — снят перевыпуском (reissue), история расхода при этом
+-- сохраняется за старым peer_id; revoked — отозван вручную.
+-- Приватный ключ НИКОГДА не пишется в БД (только публичный) — секрет живёт
+-- только в конфиге, который получает гость, см. vpn/service.py::_issue.
+CREATE TABLE IF NOT EXISTS vpn_peers (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id            INTEGER NOT NULL,
+    device_label       TEXT NOT NULL,
+    public_key         TEXT NOT NULL UNIQUE,
+    address            TEXT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'active',
+    created_at         TEXT NOT NULL,
+    revoked_at         TEXT,
+    last_handshake_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_vpn_peers_chat ON vpn_peers(chat_id);
+
+-- Состояние сэмплера трафика: последние снятые счётчики `awg show <iface>
+-- transfer` (с момента поднятия интерфейса, не с начала месяца) — по ним
+-- считается дельта на следующем тике. Отрицательная дельта = интерфейс
+-- переподняли, дельта считается от нуля (см. vpn/service.py::sample_once).
+CREATE TABLE IF NOT EXISTS vpn_counters (
+    public_key  TEXT PRIMARY KEY,
+    last_rx     INTEGER NOT NULL DEFAULT 0,
+    last_tx     INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT
+);
+
+-- Накопленный расход по пиру за календарный месяц ("YYYY-MM") — история
+-- по месяцам, ролловер получается бесплатно (новый месяц = новая строка).
+CREATE TABLE IF NOT EXISTS vpn_peer_usage (
+    peer_id     INTEGER NOT NULL,
+    month       TEXT NOT NULL,
+    used_bytes  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (peer_id, month)
+);
+
+-- Гистерезис уведомлений о лимите за месяц: warned_limit_bytes — при каком
+-- лимите последний раз слали "осталось N ГБ" (сравнение с ТЕКУЩИМ лимитом
+-- решает, слать ли повторно после гранта); blocked_at — когда лимит был
+-- исчерпан (пиры сняты реконсайлером), NULL — доступ есть. chat_id=0 —
+-- сентинель для учёта состояния канала ВСЕЙ ноды (vpn/service.py::
+-- NODE_SENTINEL_CHAT_ID), реальный Telegram chat_id никогда не 0.
+CREATE TABLE IF NOT EXISTS vpn_quota_state (
+    chat_id             INTEGER NOT NULL,
+    month               TEXT NOT NULL,
+    warned_limit_bytes  INTEGER,
+    blocked_at          TEXT,
+    PRIMARY KEY (chat_id, month)
+);
+
+-- Добавки к базовой месячной квоте: source='self' — гость сам (+100 ГБ,
+-- пока не упёрся в потолок самообслуживания), 'admin' — админ (прямая
+-- установка через set_quota либо одобренная заявка, request_id тогда не
+-- NULL). Лимит месяца = base_quota_gb (конфиг) + SUM(bytes) по месяцу.
+-- Добавки не переносятся на следующий месяц (новая строка month = чистый
+-- сброс на базу) — решение пользователя 2026-08-03.
+CREATE TABLE IF NOT EXISTS vpn_quota_grants (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     INTEGER NOT NULL,
+    month       TEXT NOT NULL,
+    bytes       INTEGER NOT NULL,
+    source      TEXT NOT NULL,
+    request_id  INTEGER,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_vpn_quota_grants_chat_month ON vpn_quota_grants(chat_id, month);
+
+-- Заявки на трафик сверх потолка самообслуживания — гость просит, админ
+-- решает кнопками approve/deny (vpn/service.py::_resolve_request).
+CREATE TABLE IF NOT EXISTS vpn_requests (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     INTEGER NOT NULL,
+    bytes       INTEGER NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'pending',
+    created_at  TEXT NOT NULL,
+    decided_at  TEXT
+);
+
+-- Кэш официального APK AmneziaWG на jeeves — ровно одна строка (id=1).
+-- Свежесть по GitHub API проверяется на каждый запрос (vpn/apk.py), кэш —
+-- ускоритель доставки, не источник правды о версии. telegram_file_id —
+-- уже загруженный в Telegram файл (сбрасывается на NULL при обновлении
+-- версии, см. vpn/service.py::_download_apk), чтобы не гонять байты через
+-- рой повторно (bot/vpn_apk.py::deliver_apk).
+CREATE TABLE IF NOT EXISTS vpn_apk (
+    id                 INTEGER PRIMARY KEY CHECK (id = 1),
+    version            TEXT,
+    file_name          TEXT,
+    size               INTEGER,
+    sha256             TEXT,
+    path               TEXT,
+    telegram_file_id   TEXT,
+    checked_at         TEXT,
+    updated_at         TEXT
+);

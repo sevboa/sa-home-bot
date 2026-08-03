@@ -55,6 +55,11 @@ INVITE = Command("invite", "выпустить код приглашения", u
                  right="invite")
 GUESTS = Command("guests", "приглашённые и открытые коды", universal=False, menu=False,
                  right="invite")
+# VPN — карточка своего доступа (расход/лимит/устройства, кнопки «+100 ГБ»,
+# «новый доступ», «приложение»). Право — то же usage@vpn, что и у действия
+# usage службы: команда и кнопка под ней проверяются одним правилом
+# (действие@служба), как и у остальных скилов роя.
+VPN = Command("vpn", "доступ к VPN", universal=False, menu=True, right="usage@vpn")
 
 ALL_COMMANDS: list[Command] = [
     HELP,
@@ -72,6 +77,7 @@ ALL_COMMANDS: list[Command] = [
     AI,
     INVITE,
     GUESTS,
+    VPN,
 ]
 
 UNIVERSAL_COMMANDS: list[Command] = [c for c in ALL_COMMANDS if c.universal]

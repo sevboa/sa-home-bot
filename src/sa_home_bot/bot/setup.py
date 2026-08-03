@@ -26,6 +26,7 @@ from sa_home_bot.bot.handlers import (
     status,
     tool_debug,
     torrents,
+    vpn,
     wake,
 )
 from sa_home_bot.bot.invites import Gatekeeper
@@ -78,6 +79,9 @@ def build_dispatcher(book: SubscriptionBook, gate: Gatekeeper) -> Dispatcher:
     dp.include_router(node_links.router)
     # torrents: документы/magnet-ссылки, не пересекается с командами.
     dp.include_router(torrents.router)
+    # vpn: команда /vpn; её кнопки идут по общей "act:"-схеме и разбираются
+    # в node.on_dynamic_action (уже подключён выше), не здесь.
+    dp.include_router(vpn.router)
     # apps последним из "точных" роутеров: ловит динамические команды-скилы,
     # остальное игнорирует.
     dp.include_router(apps.router)

@@ -64,6 +64,7 @@ from sa_home_bot.node.kind import traits_for
 from sa_home_bot.proto.messages import Address, ProtoError
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.tasks import protocol as task_protocol
+from sa_home_bot.vpn import protocol as vpn_protocol
 
 log = logging.getLogger(__name__)
 
@@ -1496,6 +1497,168 @@ _DECL_MEMORY: dict[str, Any] = {
 }
 
 
+# --- vpn: доступ к AmneziaWG на jeeves (Этап 33 IMPLEMENTATION_PLAN.md) ---
+#
+# Секрет (приватный ключ) НИКОГДА не возвращается моделью текстом — issue/
+# reissue сами шлют конфиг+QR через ctx.notifier.send_direct в личку
+# (только приватный чат, ctx.chat_id > 0), модели достаётся лишь
+# подтверждение факта отправки. Иначе ключ осел бы в ai_turns/контексте
+# модели — прямое нарушение решения плана «секрет уходит в личку один раз».
+# chat_id, как и у memory, подставляет бот из ToolContext, не модель.
+
+_VPN_ACTION_APK = "apk"  # виртуальное действие бота (apk_info+доставка), не команда службы
+
+
+async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
+    if ctx.node_link is None:
+        return "недоступно: нет связи с роем"
+    action = str(args.get("action") or "").strip()
+    allowed = _VPN_VARIANTS.allowed_values(ctx.subscription) if ctx.subscription else []
+    if action not in allowed:
+        return f"не умею: {action or 'без уточнения'}"
+    dst = Address(node=vpn_protocol.NODE_ID, service=vpn_protocol.SERVICE_NAME)
+
+    if action in (vpn_protocol.ACTION_ISSUE, vpn_protocol.ACTION_REISSUE):
+        if ctx.chat_id is None or ctx.chat_id <= 0:
+            return "недоступно: секрет доступа отдаю только в личном чате, не в группе"
+        device_label = str(args.get("device_label") or "устройство").strip()
+        try:
+            result = await ctx.node_link.command(
+                action, {"chat_id": ctx.chat_id, "device_label": device_label}, dst=dst
+            )
+        except ProtoError as exc:
+            return f"не вышло: {exc.message}"
+        except (ServiceUnavailableError, TimeoutError) as exc:
+            return f"недоступно: VPN-служба не отвечает ({exc})"
+        if ctx.notifier is not None:
+            await ctx.notifier.send_direct(
+                ctx.chat_id,
+                f"🔐 Конфиг устройства «{escape(device_label)}»:\n"
+                f"<pre>{escape(result['config_text'])}</pre>",
+            )
+        return "готово: конфиг ушёл отдельным личным сообщением (приватный ключ тебе не показываю)"
+
+    if action == _VPN_ACTION_APK:
+        try:
+            info = await ctx.node_link.command(vpn_protocol.ACTION_APK_INFO, {}, dst=dst)
+        except ProtoError as exc:
+            return f"не вышло: {exc.message}"
+        except (ServiceUnavailableError, TimeoutError) as exc:
+            return f"недоступно: VPN-служба не отвечает ({exc})"
+        file_id = info.get("telegram_file_id")
+        if not file_id or ctx.notifier is None or ctx.chat_id is None:
+            return "приложение сейчас не кэшировано — попроси открыть /vpn и нажать «Приложение»"
+        sent = await ctx.notifier.send_document(
+            ctx.chat_id, str(file_id), caption=f"AmneziaWG {info.get('version', '')}"
+        )
+        if sent:
+            return "готово: приложение ушло личным сообщением"
+        return "не вышло: отправка не удалась"
+
+    if action == vpn_protocol.ACTION_RESOLVE_REQUEST:
+        raw_id = args.get("request_id")
+        if raw_id is None:
+            return "ошибка: не указан request_id"
+        payload: dict[str, Any] = {"request_id": raw_id, "approve": bool(args.get("approve"))}
+    elif action == vpn_protocol.ACTION_PEERS:
+        payload = {}
+    else:
+        if ctx.chat_id is None:
+            return "недоступно: VPN привязан к разговору, а его сейчас нет"
+        payload = {"chat_id": ctx.chat_id}
+        if action == vpn_protocol.ACTION_REQUEST_EXTRA:
+            gb = args.get("gb")
+            if gb:
+                payload["bytes"] = int(float(gb) * 1_000_000_000)
+
+    try:
+        result = await ctx.node_link.command(action, payload, dst=dst)
+    except ProtoError as exc:
+        if exc.code == vpn_protocol.ERR_QUOTA_CEILING:
+            return (
+                "потолок самообслуживания достигнут — вызови ещё раз с "
+                "action=«request_extra», чтобы отправить заявку админу"
+            )
+        return f"не вышло: {exc.message}"
+    except (ServiceUnavailableError, TimeoutError) as exc:
+        return f"недоступно: VPN-служба не отвечает ({exc})"
+    return json.dumps(result, ensure_ascii=False)
+
+
+_VPN_SERVICE = vpn_protocol.SERVICE_NAME
+_VPN_VARIANTS = VariantRights(
+    param="action",
+    rights=(
+        (vpn_protocol.ACTION_USAGE, ActionRight(vpn_protocol.ACTION_USAGE, _VPN_SERVICE)),
+        (vpn_protocol.ACTION_ISSUE, ActionRight(vpn_protocol.ACTION_ISSUE, _VPN_SERVICE)),
+        (vpn_protocol.ACTION_REISSUE, ActionRight(vpn_protocol.ACTION_REISSUE, _VPN_SERVICE)),
+        (
+            vpn_protocol.ACTION_GRANT_EXTRA,
+            ActionRight(vpn_protocol.ACTION_GRANT_EXTRA, _VPN_SERVICE),
+        ),
+        (
+            vpn_protocol.ACTION_REQUEST_EXTRA,
+            ActionRight(vpn_protocol.ACTION_REQUEST_EXTRA, _VPN_SERVICE),
+        ),
+        (_VPN_ACTION_APK, ActionRight(_VPN_ACTION_APK, _VPN_SERVICE)),
+        (vpn_protocol.ACTION_PEERS, ActionRight(vpn_protocol.ACTION_PEERS, _VPN_SERVICE)),
+        (
+            vpn_protocol.ACTION_RESOLVE_REQUEST,
+            ActionRight(vpn_protocol.ACTION_RESOLVE_REQUEST, _VPN_SERVICE),
+        ),
+    ),
+)
+
+_DECL_VPN: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "vpn",
+        "description": (
+            "Личный VPN на выходном узле (обход блокировок): свой расход/лимит, "
+            "выдать/перевыпустить доступ, попросить ещё трафика, прислать "
+            "приложение. Секрет доступа (конфиг) я отправляю отдельным личным "
+            "сообщением, не показываю его в разговоре, и только в личке, не в "
+            "группе.\n"
+            "usage — свой расход и лимит месяца; issue — выдать доступ новому "
+            "устройству (device_label — как назвать, например «телефон»); "
+            "reissue — перевыпустить существующее (старый переставит "
+            "работать); grant_extra — добавить трафика самому, пока не упёрся "
+            "в потолок самообслуживания (тогда используй request_extra — "
+            "заявка админу, необязательный gb — сколько ГБ); apk — прислать "
+            "официальное приложение AmneziaWG.\n"
+            "Значения action перечислены в enum: чего там нет — не умеешь."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": [v for v, _ in _VPN_VARIANTS.rights],
+                    "description": "какое действие выполнить",
+                },
+                "device_label": {
+                    "type": "string",
+                    "description": "issue/reissue: имя устройства, например «телефон»",
+                },
+                "gb": {
+                    "type": "number",
+                    "description": "request_extra: сколько ГБ попросить (по умолчанию — шаг)",
+                },
+                "request_id": {
+                    "type": "integer",
+                    "description": "resolve_request: номер заявки",
+                },
+                "approve": {
+                    "type": "boolean",
+                    "description": "resolve_request: одобрить (true) или отклонить (false)",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+}
+
+
 # --- web_search: интернет через свой SearXNG (LLM_INTEGRATION_PLAN.md §9) ---
 
 
@@ -1710,6 +1873,12 @@ TOOLS: tuple[ToolSpec, ...] = (
         handler=tool_memory,
         declaration=_DECL_MEMORY,
         variants=_MEMORY_VARIANTS,
+    ),
+    ToolSpec(
+        name="vpn",
+        handler=tool_vpn,
+        declaration=_DECL_VPN,
+        variants=_VPN_VARIANTS,
     ),
     ToolSpec(
         name="dismiss",

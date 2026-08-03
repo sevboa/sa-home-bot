@@ -121,6 +121,7 @@ _SERVICE_PATH_DEFAULTS: dict[str, dict[str, str]] = {
     "tasks": {"socket": "tasks.sock", "db_path": "tasks.sqlite"},
     "net": {"socket": "net.sock"},
     "llm": {"socket": "llm.sock"},
+    "vpn": {"socket": "vpn.sock", "db_path": "vpn.sqlite", "apk_cache_dir": "vpn-apk"},
 }
 
 

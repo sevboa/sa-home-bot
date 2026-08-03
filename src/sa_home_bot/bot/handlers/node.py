@@ -15,11 +15,14 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from sa_home_bot.bot import actions, apps_view, commands, node_view, swarm_view
+from sa_home_bot.bot.handlers import vpn as vpn_handlers
+from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.proto.messages import Address, ProtoError
 from sa_home_bot.subscriptions.models import Subscription
+from sa_home_bot.vpn import protocol as vpn_protocol
 
 log = logging.getLogger(__name__)
 
@@ -131,6 +134,7 @@ async def on_dynamic_action(
     store: Store,
     node_link: ServiceLink,
     apps_link: ServiceLink,
+    notifier: Notifier,
     config: Settings,
     subscription: Subscription | None = None,
 ) -> None:
@@ -139,6 +143,16 @@ async def on_dynamic_action(
         await callback.answer()
         return
     service, action_id, value, node_id = parsed
+
+    if service == vpn_protocol.SERVICE_NAME:
+        # Право на кнопку уже проверено (CallbackAuthorizationMiddleware),
+        # но handle_action ждёт не-None subscription — сюда без подписки не
+        # дойти (SilenceGate отсекает раньше).
+        if subscription is not None:
+            await vpn_handlers.handle_action(callback, node_link, notifier, config, subscription)
+        else:
+            await callback.answer()
+        return
 
     if service == node_view.NODE_SERVICE and _is_self_shutdown(action_id, value, node_id):
         await _handle_self_shutdown(callback, store, node_link, action_id, value)

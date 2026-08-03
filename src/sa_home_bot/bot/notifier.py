@@ -8,7 +8,7 @@ import logging
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
-from aiogram.types import InlineKeyboardMarkup, ReplyParameters
+from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, ReplyParameters
 
 from sa_home_bot.subscriptions.models import WILDCARD
 
@@ -157,3 +157,65 @@ class Notifier:
                 return None
         log.error("Исчерпаны ретраи отправки в chat=%s", chat_id)
         return None
+
+    async def send_document(
+        self,
+        chat_id: int,
+        document: BufferedInputFile | str,
+        *,
+        caption: str | None = None,
+    ) -> tuple[int, str] | None:
+        """Отправить документ: байты (``BufferedInputFile``) или уже
+        загруженный в Telegram ``file_id`` (строка) — тогда байты никуда не
+        едут, Telegram переиспользует прежнюю загрузку.
+
+        Возвращает ``(message_id, file_id)`` — второе нужно вызывающему,
+        чтобы запомнить file_id и не гонять файл повторно (см.
+        bot/vpn_apk.py::deliver_apk)."""
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                msg = await self._bot.send_document(chat_id, document, caption=caption)
+                file_id = msg.document.file_id if msg.document else ""
+                return msg.message_id, file_id
+            except TelegramRetryAfter as exc:
+                wait = exc.retry_after + 1
+                log.warning("429 от Telegram (chat=%s), жду %ss", chat_id, wait)
+                await asyncio.sleep(wait)
+            except TelegramAPIError as exc:
+                log.warning(
+                    "Не удалось отправить документ в chat=%s (попытка %s/%s): %s",
+                    chat_id,
+                    attempt,
+                    MAX_RETRIES,
+                    exc,
+                )
+                return None
+        log.error("Исчерпаны ретраи отправки документа в chat=%s", chat_id)
+        return None
+
+    async def send_photo(
+        self, chat_id: int, photo: BufferedInputFile, *, caption: str | None = None
+    ) -> int | None:
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                msg = await self._bot.send_photo(chat_id, photo, caption=caption)
+                return msg.message_id
+            except TelegramRetryAfter as exc:
+                wait = exc.retry_after + 1
+                log.warning("429 от Telegram (chat=%s), жду %ss", chat_id, wait)
+                await asyncio.sleep(wait)
+            except TelegramAPIError as exc:
+                log.warning(
+                    "Не удалось отправить фото в chat=%s (попытка %s/%s): %s",
+                    chat_id,
+                    attempt,
+                    MAX_RETRIES,
+                    exc,
+                )
+                return None
+        log.error("Исчерпаны ретраи отправки фото в chat=%s", chat_id)
+        return None
+
+    async def delete_message(self, chat_id: int, message_id: int) -> None:
+        with contextlib.suppress(TelegramAPIError):
+            await self._bot.delete_message(chat_id, message_id)

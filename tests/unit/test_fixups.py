@@ -12,8 +12,10 @@ from sa_home_bot.node.fixups import (
     SMARTCTL_SUDOERS,
     WOL_ENABLE,
     apps_unit_sudoers_content,
+    awg_sudoers_content,
     build_fixups,
     make_apps_unit_fixup,
+    make_awg_sudoers_fixup,
     power_polkit_rule_content,
     smartctl_sudoers_content,
     smartctl_wrapper_content,
@@ -64,6 +66,12 @@ def test_apps_unit_fixup_needed_only_when_apps_assigned():
     fixup = make_apps_unit_fixup(app)
     assert fixup.needed(_settings(["apps"], [app]))
     assert not fixup.needed(_settings(["monitor"], [app]))
+
+
+def test_awg_sudoers_needed_only_when_vpn_assigned():
+    fixup = make_awg_sudoers_fixup(_settings(["vpn"]))
+    assert fixup.needed(_settings(["vpn"]))
+    assert not fixup.needed(_settings(["apps"]))
 
 
 # --- Генерация содержимого sudoers-снипетов ---
@@ -126,6 +134,15 @@ def test_real_smartctl_path_falls_back_to_sbin(tmp_path, monkeypatch):
     assert fixups_module._real_smartctl_path() == str(tmp_path / "smartctl")
 
 
+def test_awg_sudoers_content_pins_absolute_path_and_interface():
+    content = awg_sudoers_content("/usr/local/bin/awg", "awg0", "sevboa")
+    assert "/usr/local/bin/awg show *" in content
+    assert "/usr/local/bin/awg set awg0 peer *" in content
+    # Не разрешаем изменение приватного ключа/порта интерфейса — только пиров.
+    assert "private-key" not in content
+    assert "awg-quick" not in content
+
+
 def test_apps_unit_sudoers_content_only_start_stop_restart_of_this_unit():
     app = AppConfig(id="jellyfin", title="Jellyfin", unit="jellyfin.service")
     content = apps_unit_sudoers_content(app, "/usr/bin/systemctl", "sevboa")
@@ -157,6 +174,11 @@ def test_build_fixups_includes_apps_unit_fixup_per_app():
     assert "apps-unit-sudoers-qbittorrent" in ids
     assert "apps-unit-sudoers-jellyfin" in ids
     assert "install-smartmontools" not in ids  # monitor не назначен
+
+
+def test_build_fixups_includes_awg_sudoers_when_vpn_assigned():
+    ids = {f.id for f in build_fixups(_settings(["vpn"]))}
+    assert "awg-sudoers" in ids
 
 
 def test_build_fixups_monitor_and_apps_together():
