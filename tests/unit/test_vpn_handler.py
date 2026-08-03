@@ -179,8 +179,14 @@ async def test_apk_first_click_shows_links_not_file():
     notifier = FakeNotifier()
     callback = FakeCallback("act:vpn:apk", chat_id=777)
     await vpn_handlers.handle_action(callback, link, notifier, _config(), GUEST, _pending())
-    assert any("App Store" in text for text in callback.message.answers)
-    assert any("Google Play" in text for text in callback.message.answers)
+    text = next(t for t in callback.message.answers if "App Store" in t)
+    assert "Google Play" in text
+    # Обе ссылки по магазину — текстом ("AmneziaVPN"/"AmneziaWG"), не длинным URL.
+    cfg = _config().vpn
+    assert f'<a href="{cfg.amneziavpn_ios_app_store_url}">AmneziaVPN</a>' in text
+    assert f'<a href="{cfg.ios_app_store_url}">AmneziaWG</a>' in text
+    assert f'<a href="{cfg.amneziavpn_google_play_url}">AmneziaVPN</a>' in text
+    assert f'<a href="{cfg.google_play_url}">AmneziaWG</a>' in text
     assert link.calls == []  # ссылки статические — служба вообще не спрошена
     assert notifier.sent_documents == []  # файл ещё не ушёл
 

@@ -1531,6 +1531,17 @@ def _vpn_conf_filename(device_label: str) -> str:
     return f"{slug[:budget]}_{stamp}.conf"
 
 
+def _vpn_store_row(emoji: str, store: str, vpn_url: str, wg_url: str) -> str:
+    """Строка «магазин: AmneziaVPN · AmneziaWG» — обе ссылки текстом, не
+    длинным URL (решение пользователя 2026-08-04). Дублирует
+    bot/handlers/vpn.py::_store_row — этот модуль сознательно не тянет
+    aiogram (см. докстринг у _VPN_ACTION_APK ниже)."""
+    return (
+        f'{emoji} {store}: <a href="{escape(vpn_url)}">AmneziaVPN</a> · '
+        f'<a href="{escape(wg_url)}">AmneziaWG</a>'
+    )
+
+
 async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
     if ctx.node_link is None:
         return "недоступно: нет связи с роем"
@@ -1679,8 +1690,14 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
             ctx.chat_id,
             "📱 Настоятельно рекомендуем полную версию — <b>AmneziaVPN</b>. Есть и "
             "облегчённая — <b>AmneziaWG</b> (её и использует эта настройка).\n\n"
-            f"🍎 App Store (iOS): {escape(cfg.ios_app_store_url)}\n"
-            f"🤖 Google Play (Android): {escape(cfg.google_play_url)}\n"
+            + _vpn_store_row(
+                "🍎", "App Store", cfg.amneziavpn_ios_app_store_url, cfg.ios_app_store_url
+            )
+            + "\n"
+            + _vpn_store_row(
+                "🤖", "Google Play", cfg.amneziavpn_google_play_url, cfg.google_play_url
+            )
+            + "\n"
             f"🌐 Официальный сайт (все платформы, обе версии): "
             f"{escape(cfg.official_download_url)}",
             message_thread_id=ctx.message_thread_id,

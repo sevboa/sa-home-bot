@@ -458,6 +458,15 @@ class VpnConfig(BaseModel):
     Android/сайдлоад — на iOS сайдлоада нет вовсе). Проверены вручную
     2026-08-04: App Store id6478942365 (издатель Privacy Technologies, тот
     же, что публикует AmneziaVPN), Google Play org.amnezia.awg.
+
+    ``amneziavpn_ios_app_store_url``/``amneziavpn_google_play_url`` —
+    решение пользователя 2026-08-04: сообщение с ссылками рекомендует
+    полную AmneziaVPN отдельными кликабельными ссылками рядом с AmneziaWG
+    (а не одной длинной URL текстом) — у неё, в отличие от AmneziaWG, нет
+    единой страницы загрузки со всеми платформами, только маркеты. Проверены
+    вручную 2026-08-04: App Store id1600529900, Google Play org.amnezia.vpn.
+    ``official_download_url`` остаётся общей ссылкой на страницу загрузок
+    (сейчас это фактически страница AmneziaVPN).
     """
 
     socket: str = "./data/vpn.sock"
@@ -486,6 +495,10 @@ class VpnConfig(BaseModel):
     apk_cache_dir: Path = Path("./data/vpn-apk")
     ios_app_store_url: str = "https://apps.apple.com/app/amneziawg/id6478942365"
     google_play_url: str = "https://play.google.com/store/apps/details?id=org.amnezia.awg"
+    amneziavpn_ios_app_store_url: str = "https://apps.apple.com/us/app/amneziavpn/id1600529900"
+    amneziavpn_google_play_url: str = (
+        "https://play.google.com/store/apps/details?id=org.amnezia.vpn"
+    )
     official_download_url: str = "https://amnezia.org/downloads"
     config_message_ttl_s: float = Field(default=600.0, gt=0)
 

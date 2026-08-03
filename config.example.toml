@@ -283,6 +283,8 @@ apk_repo = "amnezia-vpn/amneziawg-android"
 apk_cache_dir = "./data/vpn-apk"
 ios_app_store_url = "https://apps.apple.com/app/amneziawg/id6478942365"
 google_play_url = "https://play.google.com/store/apps/details?id=org.amnezia.awg"
+amneziavpn_ios_app_store_url = "https://apps.apple.com/us/app/amneziavpn/id1600529900"
+amneziavpn_google_play_url = "https://play.google.com/store/apps/details?id=org.amnezia.vpn"
 official_download_url = "https://amnezia.org/downloads"
 config_message_ttl_s = 600.0
 
