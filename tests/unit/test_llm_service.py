@@ -119,6 +119,23 @@ async def test_chat_calls_ollama_chat_and_extracts_message(monkeypatch):
     assert result == {"response": "Добгый день", "model": "qwen2.5:7b"}
 
 
+async def test_chat_puts_speech_remark_in_own_field_not_in_response(monkeypatch):
+    # Живой баг 2026-08-03: ремарка раньше дописывалась ПРЯМО в "response"
+    # (см. llm/speech_therapy.py::process) — уезжала одним сообщением с
+    # ответом и ломано отформатированной выше по стеку (bot/handlers/ai.py
+    # экранирует ВЕСЬ текст персонажа как plain text). rand=0.0 —
+    # наихудший случай, визит логопеда гарантирован.
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
+        return {"message": {"role": "assistant", "content": "сэр"}}
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    svc = LlmService(_settings(), speech_rand=lambda: 0.0)
+    result = await svc.run_command("chat", {"messages": [{"role": "user", "content": "привет"}]})
+
+    assert result["response"] == "сэг"  # без хвоста-ремарки
+    assert result["speech_remark"] == '🗣 <i>Логопед:</i> не «сэг», а «сэр»!'
+
+
 async def test_chat_rejects_non_list_messages():
     svc = LlmService(_settings())
     with pytest.raises(ProtoError):

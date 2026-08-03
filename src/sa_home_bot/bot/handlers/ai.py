@@ -428,10 +428,14 @@ async def _do_ask_and_reply(
     # выгрузить (см. bot/tools.py::DismissalBox). Исполняем ниже, после того
     # как прощание реально уехало в чат.
     dismissal = ai_tools.DismissalBox()
+    # Ремарка «Логопеда» (llm/speech_therapy.py) заполняется во время
+    # запроса, но отправляется отдельным сообщением ПОСЛЕ основного ответа
+    # ниже — см. ai_flow.SpeechRemarkBox про то, почему не сразу.
+    speech_remark = ai_flow.SpeechRemarkBox()
     try:
         raw = await ai_flow.request_alfred(
             message, node_link, store, config, history, dialogue_id, book, notifier, dismissal,
-            tool_calls,
+            tool_calls, speech_remark,
         )
     except Exception as exc:  # noqa: BLE001 — страховка: баг тут не должен быть молчаливым
         log.exception("ai: необработанная ошибка в диалоге chat=%s", message.chat.id)
@@ -460,6 +464,13 @@ async def _do_ask_and_reply(
     await store.record_ai_turn(
         message.chat.id, sent.message_id, dialogue_id, "assistant", raw, datetime.now(tz=UTC)
     )
+    if speech_remark.text is not None:
+        # Отдельным сообщением, БЕЗ html.escape (см. _format_answer) —
+        # ремарка сама генерирует безопасный HTML (llm/speech_therapy.py:
+        # слова-подстановки берутся из regex [А-Яа-яЁё]+, спецсимволов не
+        # бывает), экранировать её как обычный текст модели — снова сломать
+        # <i>-тег буквально в тег текста.
+        await message.answer(speech_remark.text)
     if dismissal.mode is not None:
         # Ход диалога уже записан: если машину выключат, а тред потом
         # продолжат реплаем — история не потеряется, Альфреда просто разбудят.

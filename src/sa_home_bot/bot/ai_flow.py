@@ -643,6 +643,20 @@ async def perform_dismissal(
     await message.answer(DISMISS_TEXTS[mode])
 
 
+class SpeechRemarkBox:
+    """Изменяемая ячейка под ремарку «Логопеда» (llm/speech_therapy.py) —
+    заполняется во время запроса к модели, отправляется вызывающим
+    (bot/handlers/ai.py) отдельным сообщением ПОСЛЕ ответа Альфреда.
+
+    Тот же паттерн, что и bot/tools.py::DismissalBox: колбэк из llm_chat.py
+    срабатывает до того, как этот код успевает отправить сам ответ (см.
+    _send_alfred_reply в bot/handlers/ai.py), поэтому раньше времени
+    отправлять ремарку нельзя — иначе она обгонит ответ, на который
+    ссылается. ``None`` — визита логопеда в этом ответе не было."""
+
+    text: str | None = None
+
+
 def _typing_while_asking(message: Message) -> contextlib.AbstractAsyncContextManager[None]:
     """typing_action на чат/топик этого сообщения — no-op, если chat неизвестен
     (message.chat может быть None в синтетических вызовах вроде start_dialogue
@@ -663,6 +677,7 @@ async def request_alfred(
     notifier: Notifier,
     dismissal: ai_tools.DismissalBox | None = None,
     tool_calls: ToolCalls | None = None,
+    speech_remark: SpeechRemarkBox | None = None,
 ) -> str | None:
     """Сходить в llm.chat с presence/wake-сценарием.
 
@@ -762,6 +777,10 @@ async def request_alfred(
                 at=datetime.now(tz=UTC),
             )
 
+        async def _record_speech_remark(remark: str) -> None:
+            if speech_remark is not None:
+                speech_remark.text = remark
+
         if settings.llm.mode == "single_call":
             # Режимы работы с моделью — LlmConfig.mode (config.py). Модели
             # без поддержки thinking (живая находка 2026-08-02: gemma-4-26B-
@@ -782,6 +801,7 @@ async def request_alfred(
                 telegram_chat_id=telegram_chat_id,
                 log_chat_id=chat_id,
                 on_tool_call=_record_tool_call,
+                on_speech_remark=_record_speech_remark,
             )
 
         # Вариативное рассуждение (см. комментарий выше про THINK_MARKER):
@@ -835,6 +855,7 @@ async def request_alfred(
             telegram_chat_id=telegram_chat_id,
             log_chat_id=chat_id,
             on_tool_call=_record_tool_call,
+            on_speech_remark=_record_speech_remark,
         )
 
     # Узнать заранее, не спит ли модель (idle-таймер llm/service.py) — если

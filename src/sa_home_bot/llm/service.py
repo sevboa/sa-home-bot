@@ -217,10 +217,13 @@ class LlmService:
             await self._touch(chat_id)
             result = await ollama.generate(self._cfg, prompt, self._persona_prompt)
             cleaned = strip_math_notation(result.get("response", ""))
-            response, just_cured = self._speech.process(cleaned, chat_id)
+            response, remark, just_cured = self._speech.process(cleaned, chat_id)
             if just_cured:
                 await self._emit_speech_cured()
-            return {"response": response, "model": self._cfg.model}
+            out: dict[str, Any] = {"response": response, "model": self._cfg.model}
+            if remark is not None:
+                out["speech_remark"] = remark
+            return out
         if action == ACTION_CHAT:
             messages = args.get("messages")
             if not isinstance(messages, list) or not messages:
@@ -246,10 +249,13 @@ class LlmService:
             if tool_calls:
                 return {"tool_calls": tool_calls, "model": self._cfg.model}
             cleaned = strip_math_notation(message.get("content", ""))
-            reply, just_cured = self._speech.process(cleaned, chat_id)
+            reply, remark, just_cured = self._speech.process(cleaned, chat_id)
             if just_cured:
                 await self._emit_speech_cured()
-            return {"response": reply, "model": self._cfg.model}
+            out: dict[str, Any] = {"response": reply, "model": self._cfg.model}
+            if remark is not None:
+                out["speech_remark"] = remark
+            return out
         if action == ACTION_SLEEP:
             await self._sleep_now(quiet=bool(args.get("quiet")))
             return {"asleep": True}

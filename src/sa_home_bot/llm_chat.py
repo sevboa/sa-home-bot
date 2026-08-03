@@ -42,6 +42,13 @@ MAX_TOOL_ROUNDS = 5
 # передаёт — см. schema.sql::ai_tool_calls).
 ToolCallSink = Callable[[str, dict[str, Any], str], Awaitable[None]]
 
+# Ремарка «Логопеда» (llm/speech_therapy.py) на финальный текстовый ответ —
+# отдельно от response, чтобы вызывающий мог отправить её отдельным
+# сообщением ПОСЛЕ ответа Альфреда (решение пользователя 2026-08-03: раньше
+# ремарка дописывалась в тот же текст и уезжала одним сообщением, к тому же
+# ломано отформатированным — см. bot/ai_flow.py::request_alfred).
+SpeechRemarkSink = Callable[[str], Awaitable[None]]
+
 
 async def run_chat_loop(
     node_link: ServiceLink,
@@ -53,6 +60,7 @@ async def run_chat_loop(
     telegram_chat_id: int | None,
     log_chat_id: Any,
     on_tool_call: ToolCallSink | None = None,
+    on_speech_remark: SpeechRemarkSink | None = None,
     role: str | None = None,
 ) -> str:
     """Один проход диалога с моделью: раунды tool-calling (до
@@ -98,11 +106,17 @@ async def run_chat_loop(
             args["role"] = role
         return args
 
+    async def _maybe_send_remark(result: dict[str, Any]) -> None:
+        remark = result.get("speech_remark")
+        if remark and on_speech_remark is not None:
+            await on_speech_remark(remark)
+
     for _round in range(MAX_TOOL_ROUNDS):
         args = _chat_args(toolkit.declarations)
         result = await node_link.command(ACTION_CHAT, args, dst=dst, timeout=timeout)
         tool_calls = result.get("tool_calls")
         if not tool_calls:
+            await _maybe_send_remark(result)
             return result.get("response", "")
         messages.append({"role": "assistant", "tool_calls": tool_calls})
         for call in tool_calls:
@@ -150,6 +164,7 @@ async def run_chat_loop(
     result = await node_link.command(ACTION_CHAT, _chat_args([]), dst=dst, timeout=timeout)
     response = result.get("response", "")
     if response:
+        await _maybe_send_remark(result)
         return response
     # Пустой ответ без единого доступного инструмента — это уже не
     # «зациклилась», а настоящий сбой генерации: сюда и правда нужен HICCUP.

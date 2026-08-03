@@ -265,6 +265,33 @@ async def test_single_call_mode_skips_router(store):
     assert "role" not in args
 
 
+async def test_speech_remark_is_captured_not_sent_inline(store):
+    # Живой баг 2026-08-03: ремарка «Логопеда» раньше дописывалась llm/
+    # service.py прямо в текст ответа — уезжала одним сообщением с ним И
+    # ломано отформатированной (bot/handlers/ai.py экранирует ВЕСЬ текст
+    # персонажа как plain text). Теперь служба llm отдаёт её отдельным
+    # полем speech_remark, а request_alfred только складывает её в box —
+    # отправка отдельным сообщением ПОСЛЕ ответа остаётся за вызывающим
+    # (bot/handlers/ai.py::_do_ask_and_reply), не за этой функцией.
+    message = FakeMessage()
+    remark = "🗣 <i>Логопед:</i> не «сэг», а «сэр»!"
+    link = FakeNodeLink(
+        chat_results=[{"response": "Добгый день, сэг", "speech_remark": remark}],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+    )
+    box = ai_flow.SpeechRemarkBox()
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _single_call_settings(),
+        [{"role": "user", "content": "привет"}], 1,
+        _admin_book(), FakeNotifier(), speech_remark=box,
+    )
+
+    assert raw == "Добгый день, сэг"  # ремарка НЕ подмешана в текст ответа
+    assert box.text == remark
+    assert message.answers == []  # request_alfred сама ничего не шлёт
+
+
 async def test_tool_call_round_trip_reaches_final_response(store):
     # Тул вызывается в router-проходе (round 1: просьба вызвать calc, round
     # 2: после результата — решение "OK"), персонажный проход (3й вызов)
@@ -420,7 +447,7 @@ def test_think_marker_survives_llm_service_transforms(tmp_path):
 
     cfg = LlmConfig(speech_therapy_state_path=str(tmp_path / "speech-therapy.json"))
     therapist = SpeechTherapist(cfg, rand=lambda: 0.0)
-    transformed, _ = therapist.process(strip_math_notation(ai_flow.THINK_MARKER), chat_id=None)
+    transformed, _, _ = therapist.process(strip_math_notation(ai_flow.THINK_MARKER), chat_id=None)
     assert transformed == ai_flow.THINK_MARKER
 
 

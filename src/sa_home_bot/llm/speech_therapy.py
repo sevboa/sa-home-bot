@@ -97,15 +97,21 @@ class SpeechTherapist:
             "cured": self._state.cured,
         }
 
-    def process(self, text: str, chat_id: int | None) -> tuple[str, bool]:
+    def process(self, text: str, chat_id: int | None) -> tuple[str, str | None, bool]:
         """Синхронно (см. докстринг модуля — никакого await внутри, это
         инвариант атомарности между параллельными вызовами run_command).
 
-        Возвращает (итоговый текст, только что вылечился ли Альфред этим
-        вызовом — True ровно на переходе cured False→True)."""
+        Возвращает (искажённый текст БЕЗ ремарки логопеда, ремарка визита
+        или None, только что вылечился ли Альфред этим вызовом — True ровно
+        на переходе cured False→True). Ремарка отдаётся отдельно от текста —
+        вызывающий (llm/service.py) решает, что с ней делать; раньше она
+        дописывалась в тот же текст, что ломало HTML-форматирование выше по
+        стеку (bot/handlers/ai.py экранирует ВЕСЬ текст персонажа как plain
+        text) и превращало ремарку в хвост одного с ответом сообщения вместо
+        отдельной реплики (решение пользователя 2026-08-03)."""
         pinned = chat_id is not None and chat_id in self._cfg.speech_therapy_pinned_chat_ids
         if not pinned and self._state.cured:
-            return text, False
+            return text, None, False
 
         result = list(text)
         visited = False
@@ -146,6 +152,4 @@ class SpeechTherapist:
             self._state.save(self._cfg.speech_therapy_state_path)
 
         final_text = "".join(result)
-        if remark is not None:
-            final_text = f"{final_text}\n{remark}"
-        return final_text, just_cured
+        return final_text, remark, just_cured
