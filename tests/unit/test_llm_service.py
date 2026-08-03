@@ -133,7 +133,7 @@ async def test_chat_puts_speech_remark_in_own_field_not_in_response(monkeypatch)
     result = await svc.run_command("chat", {"messages": [{"role": "user", "content": "привет"}]})
 
     assert result["response"] == "сэг"  # без хвоста-ремарки
-    assert result["speech_remark"] == '🗣 <i>Логопед:</i> не «сэг», а «сэр»!'
+    assert result["speech_remark"] == "🗣 <b>Логопед:</b> <i>Не «сэг», а «сэр»!</i>"
 
 
 async def test_chat_rejects_non_list_messages():

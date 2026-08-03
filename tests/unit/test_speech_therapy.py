@@ -88,9 +88,10 @@ def test_visit_registers_correction_and_excludes_word(tmp_path):
     therapist = SpeechTherapist(cfg, rand=lambda: _ALWAYS)
     text, remark, just_cured = therapist.process("сэр", chat_id=1)
     assert text == "сэг"
-    assert remark is not None
-    assert "🗣" in remark
-    assert "не «сэг», а «сэр»!" in remark
+    # rand всегда 0.0 -> индекс шаблона тоже 0 -> канонiчная формулировка
+    # (см. llm/speech_therapy.py::_REMARK_TEMPLATES[0]). Имя жирным, реплика
+    # курсивом — решение пользователя 2026-08-04.
+    assert remark == "🗣 <b>Логопед:</b> <i>Не «сэг», а «сэр»!</i>"
     assert just_cured is False
 
     snapshot = therapist.snapshot()
@@ -172,6 +173,24 @@ def test_chat_id_none_behaves_as_regular_unpinned_chat(tmp_path):
     assert text == "сэг"
     assert remark is None
     assert just_cured is False
+
+
+def test_all_remark_templates_format_cleanly_and_differ():
+    # Решение пользователя 2026-08-04: пул из ~30 фраз («скажи р-р-р-р,
+    # скажи эррр, не гыыы»), часть со словом ({corrupt}/{word}), часть без.
+    # +0.5 — детерминированный выбор бакета i вне зависимости от плавающей
+    # погрешности деления/умножения (i/N*N не всегда точно i).
+    from sa_home_bot.llm.speech_therapy import _REMARK_TEMPLATES, _pick_remark
+
+    seen = set()
+    for i in range(len(_REMARK_TEMPLATES)):
+        remark = _pick_remark((i + 0.5) / len(_REMARK_TEMPLATES), "робот")
+        assert remark.startswith("🗣 <b>Логопед:</b> <i>")
+        assert remark.endswith("</i>")
+        assert "{corrupt}" not in remark
+        assert "{word}" not in remark
+        seen.add(remark)
+    assert len(seen) == len(_REMARK_TEMPLATES)
 
 
 def test_text_without_r_words_is_untouched_and_state_not_saved(tmp_path):
