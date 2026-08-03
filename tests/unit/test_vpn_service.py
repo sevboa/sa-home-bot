@@ -11,7 +11,7 @@ from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.proto.messages import ERR_BAD_REQUEST, ProtoError
 from sa_home_bot.vpn import protocol as vpn_protocol
-from sa_home_bot.vpn.service import GB, VpnService
+from sa_home_bot.vpn.service import _FLOWER_NAMES, GB, VpnService, _random_device_label
 
 CHAT = 111
 OTHER_CHAT = 222
@@ -103,6 +103,26 @@ async def test_private_key_never_stored_in_db(env):
     assert "private" not in rows[0]["public_key"]
 
 
+def test_random_device_label_avoids_active_names_when_possible():
+    used = set(_FLOWER_NAMES[:-1])
+    assert _random_device_label(used) == _FLOWER_NAMES[-1]
+
+
+def test_random_device_label_falls_back_to_full_pool_when_exhausted():
+    assert _random_device_label(set(_FLOWER_NAMES)) in _FLOWER_NAMES
+
+
+async def test_issue_assigns_random_english_label_ignoring_manual_input(env):
+    svc, _backend, _events = env
+    result = await svc.run_command(
+        vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "device_label": "Мой телефон"}
+    )
+    # Имя больше не вводится вручную (решение 2026-08-04) — служба сама
+    # выбирает случайное английское слово, любой переданный device_label
+    # игнорируется.
+    assert result["device_label"] in _FLOWER_NAMES
+
+
 async def test_issue_has_no_device_cap(env):
     svc, _backend, _events = env
     # Старый max_peers_per_chat=2 остановил бы это на третьем устройстве;
@@ -116,18 +136,18 @@ async def test_issue_has_no_device_cap(env):
 
 async def test_reissue_expires_old_peer_and_keeps_label(env):
     svc, backend, _events = env
-    first = await svc.run_command(
-        vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "device_label": "ноутбук"}
-    )
+    first = await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
+    label = first["device_label"]  # имя случайное (решение 2026-08-04) — берём фактическое
     assert len(backend.peers) == 1
     old_address = first["address"]
 
     second = await svc.run_command(
-        vpn_protocol.ACTION_REISSUE, {"chat_id": CHAT, "device_label": "ноутбук"}
+        vpn_protocol.ACTION_REISSUE, {"chat_id": CHAT, "device_label": label}
     )
     # старый пир снят с интерфейса, на интерфейсе ровно один (новый) пир
     assert len(backend.peers) == 1
     assert second["config_text"] != first["config_text"]
+    assert second["device_label"] == label  # перевыпуск не меняет имя устройства
 
     cur = await svc._db.conn.execute(
         "SELECT status FROM vpn_peers WHERE address = ?", (old_address,)
@@ -137,10 +157,10 @@ async def test_reissue_expires_old_peer_and_keeps_label(env):
 
 async def test_revoke_removes_peer_from_interface(env):
     svc, backend, _events = env
-    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "device_label": "тел"})
+    issued = await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
     assert len(backend.peers) == 1
     result = await svc.run_command(
-        vpn_protocol.ACTION_REVOKE, {"chat_id": CHAT, "device_label": "тел"}
+        vpn_protocol.ACTION_REVOKE, {"chat_id": CHAT, "device_label": issued["device_label"]}
     )
     assert result["revoked"] is True
     assert len(backend.peers) == 0
@@ -346,8 +366,10 @@ async def test_usage_without_chat_id_includes_node_reserve_and_device_count(env)
 
 async def test_usage_without_chat_id_excludes_revoked_guests_from_reserve(env):
     svc, _backend, _events = env
-    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "device_label": "тел"})
-    await svc.run_command(vpn_protocol.ACTION_REVOKE, {"chat_id": CHAT, "device_label": "тел"})
+    issued = await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
+    await svc.run_command(
+        vpn_protocol.ACTION_REVOKE, {"chat_id": CHAT, "device_label": issued["device_label"]}
+    )
     summary = await svc.run_command(vpn_protocol.ACTION_USAGE, {})
     assert summary["chats"] == []
     assert summary["node"]["reserved_bytes"] == 0

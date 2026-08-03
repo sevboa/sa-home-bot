@@ -1514,40 +1514,21 @@ _DECL_MEMORY: dict[str, Any] = {
 # chat_id, как и у memory, подставляет бот из ToolContext, не модель.
 
 _VPN_ACTION_APK = "apk"  # виртуальное действие бота (apk_info+доставка), не команда службы
-_VPN_DEVICE_LABEL_ASCII = {
-    "телефон": "phone",
-    "ноутбук": "laptop",
-    "планшет": "tablet",
-    "пк": "pc",
-}
-_VPN_CYRILLIC_TO_LATIN = str.maketrans(
-    {
-        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
-        "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
-        "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
-        "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
-        "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
-    }
-)
-_VPN_UNSAFE_FILENAME = re.compile(r"[^a-zA-Z0-9_=+.-]+")
-# "amnezia-" — узнаваемый префикс (иначе файл потом не найти среди
-# загрузок, живая жалоба пользователя 2026-08-03), достаточно короткий,
-# чтобы после него оставалось место под слаг в лимите имени тоннеля.
-_VPN_FILENAME_PREFIX = "amnezia-"
+_VPN_UNSAFE_FILENAME = re.compile(r"[^a-z0-9]+")
 _VPN_MAX_TUNNEL_NAME = 15  # NAME_PATTERN wireguard-android: [a-zA-Z0-9_=+.-]{1,15}
 
 
-def _vpn_safe_filename(label: str) -> str:
+def _vpn_conf_filename(device_label: str) -> str:
     """Имя тоннеля в .conf = имя файла без расширения — приложения на базе
-    wireguard-android валидируют его по ``[a-zA-Z0-9_=+.-]{1,15}``:
-    кириллица или длинное имя даёт «неправильное имя» при импорте (живая
-    находка 2026-08-03)."""
-    key = label.strip().lower()
-    slug = _VPN_DEVICE_LABEL_ASCII.get(key)
-    if slug is None:
-        slug = _VPN_UNSAFE_FILENAME.sub("-", key.translate(_VPN_CYRILLIC_TO_LATIN)).strip("-")
-    slug = slug or "device"
-    return _VPN_FILENAME_PREFIX + slug[: _VPN_MAX_TUNNEL_NAME - len(_VPN_FILENAME_PREFIX)]
+    wireguard-android валидируют его по ``[a-zA-Z0-9_=+.-]{1,15}``. Имя
+    устройства теперь всегда английское слово из фиксированного пула
+    (vpn/service.py::_random_device_label, решение пользователя 2026-08-04)
+    — транслитерация больше не нужна, только метка времени на конце
+    (отличает разные выпуски одного и того же имени друг от друга)."""
+    slug = _VPN_UNSAFE_FILENAME.sub("", device_label.strip().lower()) or "device"
+    stamp = str(int(time.time()))[-6:]
+    budget = _VPN_MAX_TUNNEL_NAME - len(stamp) - 1
+    return f"{slug[:budget]}_{stamp}.conf"
 
 
 async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
@@ -1560,7 +1541,13 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
     dst = Address(node=vpn_protocol.NODE_ID, service=vpn_protocol.SERVICE_NAME)
 
     if action in (vpn_protocol.ACTION_ISSUE, vpn_protocol.ACTION_REISSUE):
-        device_label = str(args.get("device_label") or "устройство").strip()
+        # issue не принимает имя устройства вовсе (решение пользователя
+        # 2026-08-04) — служба сама выбирает случайное английское слово
+        # (vpn/service.py::_random_device_label). reissue по-прежнему
+        # требует его — им указывают, КАКОЕ существующее устройство менять.
+        device_label = str(args.get("device_label") or "").strip()
+        if action == vpn_protocol.ACTION_REISSUE and not device_label:
+            return "ошибка: не указано устройство (device_label) — какое перевыпустить"
         who = str(args.get("recipient") or "").strip()
         target_display: str | None = None
         if who:
@@ -1613,40 +1600,44 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
                 "и только потом вызови vpn ещё раз с теми же параметрами и "
                 "confirm=true — без этого параметра перевыпуск не выполнится."
             )
+        payload: dict[str, Any] = {"chat_id": target_chat_id}
+        if device_label:  # reissue — какое устройство; issue — служба выберет сама
+            payload["device_label"] = device_label
         try:
-            result = await ctx.node_link.command(
-                action, {"chat_id": target_chat_id, "device_label": device_label}, dst=dst
-            )
+            result = await ctx.node_link.command(action, payload, dst=dst)
         except ProtoError as exc:
             return f"не вышло: {exc.message}"
         except (ServiceUnavailableError, TimeoutError) as exc:
             return f"недоступно: VPN-служба не отвечает ({exc})"
+        issued_label = str(result.get("device_label") or device_label or "устройство")
         if ctx.notifier is not None:
-            filename = f"{_vpn_safe_filename(device_label)}.conf"
-            await ctx.notifier.send_document(
-                target_chat_id,
-                str(result["config_text"]).encode("utf-8"),
-                filename=filename,
-                caption=(
-                    f"🔐 Конфиг устройства «{escape(device_label)}».\n"
-                    "Нажми на файл → «Открыть с помощью» → AmneziaWG — тоннель "
-                    "добавится сразу, без копирования."
-                ),
-                message_thread_id=target_thread_id,
-            )
+            # QR сначала — сканируется прямо из приложения, удобно для
+            # настройки с ДРУГОГО устройства; файл — следом, для настройки
+            # С ЭТОГО (решение пользователя 2026-08-04).
             qr_b64 = result.get("qr_png_b64")
             if qr_b64:
                 await ctx.notifier.send_photo(
                     target_chat_id,
                     base64.b64decode(qr_b64),
                     filename="vpn-qr.png",
-                    caption="QR — для настройки с другого устройства",
+                    caption=f"📶 QR — устройство «{escape(issued_label)}».",
                     message_thread_id=target_thread_id,
                 )
+            await ctx.notifier.send_document(
+                target_chat_id,
+                str(result["config_text"]).encode("utf-8"),
+                filename=_vpn_conf_filename(issued_label),
+                caption=(
+                    f"🔐 Конфиг устройства «{escape(issued_label)}».\n"
+                    "Нажми на файл → «Открыть с помощью» → AmneziaWG — тоннель "
+                    "добавится сразу, без копирования."
+                ),
+                message_thread_id=target_thread_id,
+            )
         who_note = f" {target_display}" if target_display else ""
         return (
-            f"готово: конфиг-файл (и QR) ушли{who_note} личным сообщением "
-            "(приватный ключ не показываю)"
+            f"готово: устройство «{issued_label}», конфиг-файл (и QR) ушли{who_note} "
+            "личным сообщением (приватный ключ не показываю)"
         )
 
     if action == _VPN_ACTION_APK:
@@ -1768,10 +1759,12 @@ _DECL_VPN: dict[str, Any] = {
             "usage — свой расход и лимит месяца (у админа — с all_guests=true "
             "сводка по всем гостям: расход, лимит и число устройств каждого, "
             "плюс сколько трафика ноды ещё свободно от резерва); issue — "
-            "выдать доступ новому устройству (device_label — КАК НАЗВАТЬ "
-            "УСТРОЙСТВО, например «телефон», «ноутбук» — НЕ имя человека), "
-            "число устройств не ограничено; reissue — перевыпустить "
-            "существующее: старый ключ СРАЗУ перестаёт работать на устройстве, "
+            "выдать доступ НОВОМУ устройству, имя ему сама служба выбирает "
+            "случайно (не спрашивай, как назвать, и не передавай device_label — "
+            "он у issue игнорируется), число устройств не ограничено; "
+            "reissue — перевыпустить СУЩЕСТВУЮЩЕЕ устройство: device_label "
+            "ОБЯЗАТЕЛЕН (какое из уже выданных, имя видно в usage), имя при "
+            "перевыпуске не меняется, а старый ключ СРАЗУ перестаёт работать, "
             "поэтому сначала спроси подтверждение словами и вызови ещё раз с "
             "confirm=true, только когда получено явное согласие; grant_extra — "
             "добавить трафика самому (доступно, только когда трафика реально "
@@ -1790,12 +1783,13 @@ _DECL_VPN: dict[str, Any] = {
             "утверждай, что конфиг получил ты сам или собеседник.\n"
             "Как подключиться — объясняй своими словами по этим фактам, не "
             "выдумывай другой порядок: поставить приложение AmneziaWG (action="
-            "«apk» пришлёт его файлом, оно же есть в Google Play/F-Droid под "
-            "тем же именем) → открыть присланный файл .conf на ЭТОМ устройстве "
-            "и выбрать «Открыть с помощью» → AmneziaWG, тоннель добавится сам, "
-            "копировать ничего не нужно; чтобы настроить ДРУГОЕ устройство — "
-            "вместо файла отсканировать в приложении присланный QR → включить "
-            "тоннель тумблером в приложении.\n"
+            "«apk» пришлёт ссылки на App Store/Google Play/сайт, плюс сам "
+            "файл, если он уже под рукой) → сначала прилетает QR — отсканировать "
+            "его прямо в приложении удобно для настройки с ДРУГОГО устройства "
+            "(сфотографировать собственный экран телефон не может); следом — "
+            "файл .conf, для настройки С ЭТОГО устройства: открыть его и "
+            "выбрать «Открыть с помощью» → AmneziaWG, тоннель добавится сам, "
+            "копировать ничего не нужно.\n"
             "Значения action перечислены в enum: чего там нет — не умеешь."
         ),
         "parameters": {
@@ -1809,8 +1803,8 @@ _DECL_VPN: dict[str, Any] = {
                 "device_label": {
                     "type": "string",
                     "description": (
-                        "issue/reissue: имя УСТРОЙСТВА (телефон/ноутбук/...), "
-                        "не имя человека"
+                        "reissue: ОБЯЗАТЕЛЕН — имя существующего устройства "
+                        "(возьми из usage). issue его игнорирует — не передавай."
                     ),
                 },
                 "recipient": {

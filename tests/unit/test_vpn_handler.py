@@ -8,6 +8,7 @@ import asyncio
 import pytest_asyncio
 
 from sa_home_bot.bot.handlers import vpn as vpn_handlers
+from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings, VpnConfig
 from sa_home_bot.proto.messages import ProtoError
 from sa_home_bot.subscriptions.models import Subscription
@@ -75,6 +76,7 @@ class FakeNodeLink:
 class FakeNotifier:
     def __init__(self) -> None:
         self.sent_direct: list[tuple[int, str]] = []
+        self.sent_direct_markups: list[object] = []
         self.sent_documents: list[tuple[int, object, str | None]] = []
         self.sent_photos: list[tuple[int, object, str | None]] = []
         self.deleted: list[tuple[int, int]] = []
@@ -88,6 +90,7 @@ class FakeNotifier:
         message_thread_id=None,
     ):
         self.sent_direct.append((chat_id, text))
+        self.sent_direct_markups.append(reply_markup)
         return len(self.sent_direct)
 
     async def send_document(
@@ -110,11 +113,15 @@ def _config(ttl_s: float = 600.0) -> Settings:
     return Settings(vpn=VpnConfig(config_message_ttl_s=ttl_s))
 
 
+def _pending() -> PendingVpnSecrets:
+    return PendingVpnSecrets()
+
+
 async def test_grant_extra_redraws_card(monkeypatch):
     link = FakeNodeLink(result={"used_bytes": 0, "limit_bytes": 1, "remaining_bytes": 1})
     notifier = FakeNotifier()
     callback = FakeCallback("act:vpn:grant_extra", chat_id=777)
-    await vpn_handlers.handle_action(callback, link, notifier, _config(), GUEST)
+    await vpn_handlers.handle_action(callback, link, notifier, _config(), GUEST, _pending())
     actions = [c[0] for c in link.calls]
     assert vpn_protocol.ACTION_GRANT_EXTRA in actions
     assert vpn_protocol.ACTION_USAGE in actions  # редрайв карточки
@@ -130,7 +137,7 @@ async def test_grant_extra_hits_ceiling_converts_to_request(monkeypatch):
 
     link = ToggleLink()
     callback = FakeCallback("act:vpn:grant_extra", chat_id=777)
-    await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), GUEST)
+    await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), GUEST, _pending())
     assert any("№42" in text for text in callback.message.answers)
     actions = [c[0] for c in link.calls]
     assert vpn_protocol.ACTION_REQUEST_EXTRA in actions
@@ -140,7 +147,7 @@ async def test_apk_first_click_shows_links_not_file():
     link = FakeNodeLink()
     notifier = FakeNotifier()
     callback = FakeCallback("act:vpn:apk", chat_id=777)
-    await vpn_handlers.handle_action(callback, link, notifier, _config(), GUEST)
+    await vpn_handlers.handle_action(callback, link, notifier, _config(), GUEST, _pending())
     assert any("App Store" in text for text in callback.message.answers)
     assert any("Google Play" in text for text in callback.message.answers)
     assert link.calls == []  # ссылки статические — служба вообще не спрошена
@@ -151,43 +158,107 @@ async def test_apk_send_click_delivers_file_and_hides_button():
     link = FakeNodeLink(result={"telegram_file_id": "cached-id", "version": "2.0.1"})
     notifier = FakeNotifier()
     callback = FakeCallback("act:vpn:apk:send", chat_id=777)
-    await vpn_handlers.handle_action(callback, link, notifier, _config(), GUEST)
+    await vpn_handlers.handle_action(callback, link, notifier, _config(), GUEST, _pending())
     assert notifier.sent_documents[0][:2] == (777, "cached-id")
     assert callback.message.reply_markup_cleared
 
 
 async def test_issue_in_group_chat_is_refused(monkeypatch):
     link = FakeNodeLink()
-    callback = FakeCallback("act:vpn:issue:телефон", chat_id=-1001234)
-    await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), GUEST)
+    callback = FakeCallback("act:vpn:issue", chat_id=-1001234)
+    await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), GUEST, _pending())
     assert link.calls == []  # секрет не выпускался вовсе
     assert callback.answered  # но пользователю ответили (алертом)
 
 
-async def test_issue_in_private_chat_sends_secret_and_cleans_up():
+async def test_issue_sends_qr_first_then_config_button():
+    link = FakeNodeLink(
+        result={
+            "config_text": "[Interface]\nPrivateKey = SECRET",
+            "qr_png_b64": "cXI=",  # непустой — фейковый PNG в base64 ("qr")
+            "device_label": "Rose",
+        }
+    )
+    notifier = FakeNotifier()
+    callback = FakeCallback("act:vpn:issue", chat_id=777)
+    await vpn_handlers.handle_action(callback, link, notifier, _config(), GUEST, _pending())
+
+    # QR ушёл сразу, файл — ещё нет (решение пользователя 2026-08-04).
+    assert notifier.sent_photos and notifier.sent_photos[0][0] == 777
+    assert notifier.sent_documents == []
+    assert notifier.sent_direct and notifier.sent_direct[0][0] == 777
+    assert notifier.sent_direct_markups[0] is not None  # кнопка «Дать файл конфига»
+
+
+async def test_config_button_delivers_file_and_hides_itself():
     link = FakeNodeLink(
         result={
             "config_text": "[Interface]\nPrivateKey = SECRET",
             "qr_png_b64": "",
-            "device_label": "телефон",
+            "device_label": "Rose",
         }
     )
     notifier = FakeNotifier()
-    callback = FakeCallback("act:vpn:issue:телефон", chat_id=777)
-    await vpn_handlers.handle_action(callback, link, notifier, _config(ttl_s=0.01), GUEST)
+    pending = _pending()
+    callback = FakeCallback("act:vpn:issue", chat_id=777)
+    await vpn_handlers.handle_action(callback, link, notifier, _config(), GUEST, pending)
+
+    button_markup = notifier.sent_direct_markups[0]
+    token_button = button_markup.inline_keyboard[0][0]
+    callback2 = FakeCallback(token_button.callback_data, chat_id=777)
+    await vpn_handlers.handle_action(callback2, link, notifier, _config(), GUEST, pending)
 
     assert notifier.sent_documents  # секрет ушёл файлом .conf, не текстом
     assert b"SECRET" in notifier.sent_documents[0][1]
     assert notifier.sent_documents[0][0] == 777
+    assert callback2.message.reply_markup_cleared  # кнопка спряталась
+
+
+async def test_config_button_used_twice_refuses_second_time():
+    link = FakeNodeLink(
+        result={
+            "config_text": "[Interface]\nPrivateKey = SECRET",
+            "qr_png_b64": "",
+            "device_label": "Rose",
+        }
+    )
+    notifier = FakeNotifier()
+    pending = _pending()
+    callback = FakeCallback("act:vpn:issue", chat_id=777)
+    await vpn_handlers.handle_action(callback, link, notifier, _config(), GUEST, pending)
+    token_button = notifier.sent_direct_markups[0].inline_keyboard[0][0]
+
+    callback2 = FakeCallback(token_button.callback_data, chat_id=777)
+    await vpn_handlers.handle_action(callback2, link, notifier, _config(), GUEST, pending)
+    callback3 = FakeCallback(token_button.callback_data, chat_id=777)
+    await vpn_handlers.handle_action(callback3, link, notifier, _config(), GUEST, pending)
+
+    assert len(notifier.sent_documents) == 1  # второй раз файл не ушёл
+    assert callback3.answered  # но ответ (об устаревшей ссылке) есть
+
+
+async def test_issue_secret_cleans_up_after_ttl_without_click():
+    link = FakeNodeLink(
+        result={
+            "config_text": "[Interface]\nPrivateKey = SECRET",
+            "qr_png_b64": "cXI=",
+            "device_label": "Rose",
+        }
+    )
+    notifier = FakeNotifier()
+    callback = FakeCallback("act:vpn:issue", chat_id=777)
+    await vpn_handlers.handle_action(
+        callback, link, notifier, _config(ttl_s=0.01), GUEST, _pending()
+    )
 
     await asyncio.sleep(0.05)  # дать фоновой задаче автоудаления отработать
-    assert notifier.deleted  # сообщение с секретом удалено сама собой
+    assert len(notifier.deleted) == 2  # QR-сообщение и сообщение с кнопкой
 
 
 async def test_resolve_request_approve(monkeypatch):
     link = FakeNodeLink(result={"request_id": 7, "status": "approved"})
     callback = FakeCallback("act:vpn:resolve_request:7_approve", chat_id=1)
-    await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), ADMIN)
+    await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), ADMIN, _pending())
     action, args = link.calls[0]
     assert action == vpn_protocol.ACTION_RESOLVE_REQUEST
     assert args == {"request_id": 7, "approve": True}
@@ -197,7 +268,7 @@ async def test_resolve_request_approve(monkeypatch):
 async def test_resolve_request_deny(monkeypatch):
     link = FakeNodeLink(result={"request_id": 7, "status": "denied"})
     callback = FakeCallback("act:vpn:resolve_request:7_deny", chat_id=1)
-    await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), ADMIN)
+    await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), ADMIN, _pending())
     action, args = link.calls[0]
     assert args == {"request_id": 7, "approve": False}
     assert any("отклонена" in text for text in callback.message.answers)

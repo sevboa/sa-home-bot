@@ -26,6 +26,7 @@ import base64
 import io
 import ipaddress
 import logging
+import random
 import socket
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -81,6 +82,28 @@ GB = 1_000_000_000
 # таблицах, что и учёт по чатам (vpn_quota_state) — реальный Telegram
 # chat_id никогда не бывает 0, коллизии не будет.
 NODE_SENTINEL_CHAT_ID = 0
+
+# Имя устройства (решение пользователя 2026-08-04) больше не вводит ни
+# человек, ни модель — служба сама выбирает случайное слово из этого пула
+# при выдаче. Только английские буквы и не длиннее 8 символов: имя файла
+# .conf = "<слово>_<таймстамп>" не должно превышать 15 символов — предел
+# имени тоннеля wireguard-android (NAME_PATTERN, см. bot/handlers/vpn.py и
+# bot/tools.py, где имя файла реально собирается).
+_FLOWER_NAMES = (
+    "Rose", "Lily", "Iris", "Aster", "Poppy", "Daisy", "Tulip", "Lotus",
+    "Phlox", "Pansy", "Sedum", "Canna", "Hosta", "Orchid", "Violet",
+    "Dahlia", "Azalea", "Camellia", "Jasmine", "Lilac", "Peony", "Zinnia",
+    "Yarrow", "Crocus", "Freesia", "Begonia", "Petunia", "Gerbera",
+    "Mallow", "Cosmos",
+)
+
+
+def _random_device_label(used: set[str]) -> str:
+    """Случайное имя, по возможности не повторяющее уже активные устройства
+    этого гостя (не критично для работы — только чтобы список в /vpn не
+    путал одинаковыми именами; настоящая уникальность пира — public_key)."""
+    pool = [name for name in _FLOWER_NAMES if name not in used] or list(_FLOWER_NAMES)
+    return random.choice(pool)
 
 # Сколько держать ответ apk_info без повторного похода на GitHub — гость,
 # нажавший кнопку дважды подряд, не должен провоцировать два запроса к API.
@@ -182,8 +205,12 @@ class VpnService:
                 ActionSpec(id=ACTION_PEERS, title="🔌 Все пиры"),
                 ActionSpec(
                     id=ACTION_ISSUE,
+                    # Имя устройства служба выбирает сама (случайный цветок,
+                    # решение пользователя 2026-08-04) — device_param тут
+                    # больше не нужен, в отличие от reissue/revoke, которым
+                    # он указывает, КАКОЕ существующее устройство трогать.
                     title="➕ Выдать доступ",
-                    params=(chat_id_param, device_param),
+                    params=(chat_id_param,),
                 ),
                 ActionSpec(
                     id=ACTION_REISSUE,
@@ -377,13 +404,27 @@ class VpnService:
 
     # --- issue/reissue/revoke ---
 
-    async def _issue(self, args: dict[str, Any]) -> dict[str, Any]:
+    async def _active_labels(self, chat_id: int) -> set[str]:
+        cur = await self._db.conn.execute(
+            "SELECT device_label FROM vpn_peers WHERE chat_id = ? AND status = 'active'",
+            (chat_id,),
+        )
+        return {row["device_label"] for row in await cur.fetchall()}
+
+    async def _issue(
+        self, args: dict[str, Any], *, forced_label: str | None = None
+    ) -> dict[str, Any]:
         chat_id = self._chat_id(args)
-        device_label = str(args.get("device_label") or "").strip() or "устройство"
         # Число устройств на гостя намеренно не ограничено (решение
         # пользователя 2026-08-03) — реальный потолок стоимости уже задаёт
         # трафик (base_quota_gb/self_ceiling_gb), отдельный счётчик устройств
         # был бы лишней строгостью.
+        #
+        # Имя устройства больше не спрашиваем (решение пользователя
+        # 2026-08-04) — гость и модель путались, что тут вообще вводить;
+        # ``forced_label`` — только для _reissue ниже: у СУЩЕСТВУЮЩЕГО
+        # устройства имя не меняется при перевыпуске ключа.
+        device_label = forced_label or _random_device_label(await self._active_labels(chat_id))
         private_key, public_key = await self._backend.generate_keypair()
         address = _allocate_address(self._cfg.subnet, await self._active_addresses())
         now = _now().isoformat()
@@ -424,7 +465,7 @@ class VpnService:
             )
             await self._db.conn.commit()
             await self._backend.remove_peer(row["public_key"])
-        return await self._issue(args)
+        return await self._issue(args, forced_label=device_label)
 
     async def _revoke(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)

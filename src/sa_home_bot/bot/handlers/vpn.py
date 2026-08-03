@@ -10,15 +10,18 @@ CallbackAuthorizationMiddleware (``действие@vpn``), здесь толь�
 (тот же приём, что apps/monitor: у "act:"-кнопок один обработчик на все
 службы, разбор — по service).
 
-Секрет (приватный ключ) уходит в личку один раз файлом ``.conf`` (тап →
-«Открыть с помощью» → AmneziaWG импортирует тоннель без копирования — живая
-находка 2026-08-03: текст в `<pre>` заставлял гостя вручную создавать
-документ, а QR бесполезен, если сканировать нечем — телефон не может
-сфотографировать собственный экран) и QR-картинкой (для настройки с ДРУГОГО
-устройства), затем бот удаляет оба сообщения через
-``[vpn].config_message_ttl_s`` — решение плана этапа 33: приватный ключ
-генерируется на сервере, в БД служба хранит только публичный
-(vpn/service.py)."""
+Секрет (приватный ключ) уходит в личку дважды (решение пользователя
+2026-08-04): сразу QR-картинкой (сканируется камерой прямо из приложения —
+удобно для НАСТРОЙКИ С ДРУГОГО устройства), а файл ``.conf`` — по отдельной
+кнопке «Дать файл конфига» под сообщением с QR, только когда гость реально
+попросит (тап на файл → «Открыть с помощью» → AmneziaWG импортирует тоннель
+без копирования — живая находка 2026-08-03 про сам механизм импорта). Кнопка
+исчезает после использования. Приватный ключ до этого момента нигде не
+хранится: ни в БД (vpn/service.py и так хранит только публичный), ни в
+callback_data (лимит Telegram — 64 байта, весь конфиг туда не влезает) — он
+живёт в памяти процесса ровно до выдачи или до ``[vpn].config_message_ttl_s``
+(bot/vpn_secrets.py::PendingVpnSecrets), когда оба сообщения (QR и кнопка,
+а если файл всё же попросили — то и он) бот удаляет сам."""
 
 from __future__ import annotations
 
@@ -28,6 +31,7 @@ import contextlib
 import html
 import logging
 import re
+import time
 
 from aiogram import Router
 from aiogram.exceptions import TelegramBadRequest
@@ -43,6 +47,7 @@ from sa_home_bot.bot import commands
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.vpn_apk import deliver_apk
+from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings
 from sa_home_bot.proto.messages import Address, ProtoError
 from sa_home_bot.subscriptions.models import Subscription
@@ -54,10 +59,6 @@ router = Router(name="vpn")
 
 SERVICE = vpn_protocol.SERVICE_NAME
 _DST = Address(node=vpn_protocol.NODE_ID, service=SERVICE)
-
-# Ярлыки устройств для кнопки «новое устройство» — короткие, чтобы влезать
-# в callback_data (лимит Telegram — 64 байта на всю строку).
-_DEVICE_LABELS = ("телефон", "ноутбук", "планшет", "ПК")
 
 
 def _is_private(chat_id: int) -> bool:
@@ -149,20 +150,18 @@ def _card_keyboard(
                 )
             ]
         )
-    used_labels = {device["device_label"] for device in devices}
-    for label in _DEVICE_LABELS:
-        if label not in used_labels:
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        text=f"➕ Новое устройство: {label}",
-                        callback_data=commands.action_callback(
-                            vpn_protocol.ACTION_ISSUE, label, service=SERVICE
-                        ),
-                    )
-                ]
+    # Имя устройства служба выбирает сама — случайный цветок (решение
+    # пользователя 2026-08-04, см. vpn/service.py::_random_device_label) —
+    # кнопке больше нечего предлагать заранее, число устройств не
+    # ограничено, поэтому она всего одна и всегда доступна.
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="➕ Новое устройство",
+                callback_data=commands.action_callback(vpn_protocol.ACTION_ISSUE, service=SERVICE),
             )
-            break
+        ]
+    )
     if is_admin:
         rows.append(
             [
@@ -253,62 +252,38 @@ async def _redraw_card(
         await callback.message.edit_text(_usage_text(usage), reply_markup=keyboard)
 
 
-_DEVICE_LABEL_ASCII = {"телефон": "phone", "ноутбук": "laptop", "планшет": "tablet", "пк": "pc"}
-_CYRILLIC_TO_LATIN = str.maketrans(
-    {
-        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
-        "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
-        "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
-        "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
-        "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
-    }
-)
-_UNSAFE_FILENAME = re.compile(r"[^a-zA-Z0-9_=+.-]+")
-# Пользователь 2026-08-03: без узнаваемого префикса файл потом не найти
-# среди загрузок — "amnezia-" достаточно короток, чтобы после него
-# оставалось место под слаг в лимите имени тоннеля (см. ниже).
-_FILENAME_PREFIX = "amnezia-"
+_UNSAFE_FILENAME = re.compile(r"[^a-z0-9]+")
 _MAX_TUNNEL_NAME = 15  # NAME_PATTERN wireguard-android: [a-zA-Z0-9_=+.-]{1,15}
 
 
-def _safe_filename(label: str) -> str:
+def _conf_filename(device_label: str) -> str:
     """Имя тоннеля в .conf = имя файла без расширения — приложения на базе
     wireguard-android валидируют его по ``[a-zA-Z0-9_=+.-]{1,15}`` (см.
-    NAME_PATTERN в исходниках): кириллица или длинное имя даёт «неправильное
-    имя» при импорте (живая находка 2026-08-03)."""
-    key = label.strip().lower()
-    slug = _DEVICE_LABEL_ASCII.get(key)
-    if slug is None:
-        slug = _UNSAFE_FILENAME.sub("-", key.translate(_CYRILLIC_TO_LATIN)).strip("-")
-    slug = slug or "device"
-    return _FILENAME_PREFIX + slug[: _MAX_TUNNEL_NAME - len(_FILENAME_PREFIX)]
+    NAME_PATTERN в исходниках). device_label теперь всегда английское слово
+    из фиксированного пула (vpn/service.py::_random_device_label) —
+    транслитерация больше не нужна, только нормализация регистра и знак
+    подчёркивания перед меткой времени (решение пользователя 2026-08-04:
+    только английские символы и "_", метка времени в конце — отличает
+    разные выпуски одного и того же имени друг от друга)."""
+    slug = _UNSAFE_FILENAME.sub("", device_label.strip().lower()) or "device"
+    stamp = str(int(time.time()))[-6:]
+    budget = _MAX_TUNNEL_NAME - len(stamp) - 1  # "_" между слагом и меткой
+    return f"{slug[:budget]}_{stamp}.conf"
 
 
 async def _send_secret(
     notifier: Notifier,
+    pending: PendingVpnSecrets,
     chat_id: int,
+    action_id: str,
     result: dict,
     ttl_s: float,
     message_thread_id: int | None = None,
 ) -> None:
-    device_label = html.escape(str(result.get("device_label") or ""))
+    device_label = str(result.get("device_label") or "")
+    label_escaped = html.escape(device_label)
     config_text = str(result.get("config_text") or "")
-    filename = f"{_safe_filename(str(result.get('device_label') or 'device'))}.conf"
-    doc_sent = await notifier.send_document(
-        chat_id,
-        config_text.encode("utf-8"),
-        filename=filename,
-        caption=(
-            f"🔐 Конфиг устройства «{device_label}».\n"
-            "Нажмите на файл → «Открыть с помощью» → AmneziaWG — тоннель "
-            "добавится сразу, без копирования. Если настраиваете НЕ с этого "
-            "устройства — ниже есть QR для сканирования камерой. Удалите "
-            "переписку после импорта — сообщения исчезнут сами через "
-            "несколько минут."
-        ),
-        message_thread_id=message_thread_id,
-    )
-    doc_id = doc_sent[0] if doc_sent is not None else None
+
     photo_id = None
     qr_b64 = result.get("qr_png_b64")
     if qr_b64:
@@ -316,18 +291,52 @@ async def _send_secret(
             chat_id,
             base64.b64decode(qr_b64),
             filename="vpn-qr.png",
-            caption=f"QR — «{device_label}» (для настройки с другого устройства)",
+            caption=(
+                f"📶 QR — устройство «{label_escaped}». Откройте AmneziaWG → "
+                "«+» → «Сканировать QR-код» (удобно для настройки с "
+                "ДРУГОГО устройства — сфотографировать собственный экран "
+                "телефон не может)."
+            ),
             message_thread_id=message_thread_id,
         )
 
+    token = pending.put(config_text, device_label, ttl_s)
+    button_id = await notifier.send_direct(
+        chat_id,
+        "Настраиваете С ЭТОГО устройства? Удобнее файлом — нажмите ниже. "
+        "Кнопка одноразовая и скоро исчезнет.",
+        reply_markup=_get_config_keyboard(action_id, token),
+        message_thread_id=message_thread_id,
+    )
+
     async def _cleanup() -> None:
         await asyncio.sleep(ttl_s)
-        if doc_id is not None:
-            await notifier.delete_message(chat_id, doc_id)
+        pending.discard(token)
         if photo_id is not None:
             await notifier.delete_message(chat_id, photo_id)
+        if button_id is not None:
+            await notifier.delete_message(chat_id, button_id)
 
     asyncio.create_task(_cleanup(), name="vpn-secret-cleanup")
+
+
+def _get_config_keyboard(action_id: str, token: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📄 Дать файл конфига",
+                    # action_id — тот же, что выдал секрет (issue/reissue):
+                    # право на кнопку то же самое (issue@vpn/reissue@vpn),
+                    # заводить отдельное право под "забрать уже выданное"
+                    # незачем (тот же приём, что apk/apk:send).
+                    callback_data=commands.action_callback(
+                        action_id, f"f_{token}", service=SERVICE
+                    ),
+                )
+            ]
+        ]
+    )
 
 
 async def handle_action(
@@ -336,6 +345,7 @@ async def handle_action(
     notifier: Notifier,
     config: Settings,
     subscription: Subscription,
+    pending_vpn_secrets: PendingVpnSecrets,
 ) -> None:
     """Вызывается из bot/handlers/node.py::on_dynamic_action для service="vpn"."""
     parsed = commands.parse_action_callback(callback.data)
@@ -394,14 +404,40 @@ async def handle_action(
         if not _is_private(chat_id):
             await callback.answer("Секрет доступа выдаётся только в личке.", show_alert=True)
             return
-        if not value:
+        if value and value.startswith("f_"):
+            # «📄 Дать файл конфига» под уже отправленным QR — секрет ждёт в
+            # памяти (bot/vpn_secrets.py), а не в БД и не в самом
+            # callback_data (см. докстринг файла).
+            secret = pending_vpn_secrets.pop(value[2:])
+            if secret is None:
+                await callback.answer(
+                    "Ссылка устарела — запросите доступ ещё раз.", show_alert=True
+                )
+                return
+            await callback.answer("Отправляю…")
+            await notifier.send_document(
+                chat_id,
+                secret.config_text.encode("utf-8"),
+                filename=_conf_filename(secret.device_label),
+                caption=(
+                    f"🔐 Конфиг устройства «{html.escape(secret.device_label)}».\n"
+                    "Нажмите на файл → «Открыть с помощью» → AmneziaWG — "
+                    "тоннель добавится сразу, без копирования."
+                ),
+                message_thread_id=callback.message.message_thread_id,
+            )
+            with contextlib.suppress(TelegramBadRequest):
+                await callback.message.edit_reply_markup(reply_markup=None)
+            return
+        if action_id == vpn_protocol.ACTION_REISSUE and not value:
             await callback.answer()
             return
         await callback.answer("Выпускаю…")
+        payload = {"chat_id": chat_id}
+        if value:
+            payload["device_label"] = value
         try:
-            result = await node_link.command(
-                action_id, {"chat_id": chat_id, "device_label": value}, dst=_DST
-            )
+            result = await node_link.command(action_id, payload, dst=_DST)
         except ProtoError as exc:
             await callback.message.answer(f"⚠️ {exc.message}")
             return
@@ -410,7 +446,9 @@ async def handle_action(
             return
         await _send_secret(
             notifier,
+            pending_vpn_secrets,
             chat_id,
+            action_id,
             result,
             config.vpn.config_message_ttl_s,
             message_thread_id=callback.message.message_thread_id,

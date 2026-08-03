@@ -31,6 +31,7 @@ from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.bot.setup import build_bot, build_dispatcher, set_bot_commands
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.bot.torrent_pending import PendingTorrents
+from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
@@ -142,6 +143,9 @@ async def run(settings: Settings) -> bool:
     # Вход/выход вызовов инструментов для дебаг-канала: короткое сообщение
     # «🔧 Alfred вызвал инструмент» разворачивается кнопкой (bot/tool_debug.py).
     tool_calls = ToolCalls()
+    # Приватные ключи VPN между QR (сразу) и файлом .conf (по кнопке) —
+    # только в памяти процесса, никогда в БД (bot/vpn_secrets.py).
+    pending_vpn_secrets = PendingVpnSecrets()
 
     # Чаты с прямо сейчас идущим /ai-запросом — на останове (_shutdown)
     # известить их RESTART_TEXT'ом до закрытия сессии бота (см. докстринг
@@ -160,6 +164,7 @@ async def run(settings: Settings) -> bool:
             torrents_link=torrents_link,
             pending_torrents=pending_torrents,
             tool_calls=tool_calls,
+            pending_vpn_secrets=pending_vpn_secrets,
             runtime=runtime,
             config=settings,
             notifier=notifier,

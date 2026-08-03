@@ -18,6 +18,7 @@ from sa_home_bot.bot import actions, apps_view, commands, node_view, swarm_view
 from sa_home_bot.bot.handlers import vpn as vpn_handlers
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
+from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.proto.messages import Address, ProtoError
@@ -136,6 +137,7 @@ async def on_dynamic_action(
     apps_link: ServiceLink,
     notifier: Notifier,
     config: Settings,
+    pending_vpn_secrets: PendingVpnSecrets,
     subscription: Subscription | None = None,
 ) -> None:
     parsed = commands.parse_action_callback(callback.data)
@@ -149,7 +151,9 @@ async def on_dynamic_action(
         # но handle_action ждёт не-None subscription — сюда без подписки не
         # дойти (SilenceGate отсекает раньше).
         if subscription is not None:
-            await vpn_handlers.handle_action(callback, node_link, notifier, config, subscription)
+            await vpn_handlers.handle_action(
+                callback, node_link, notifier, config, subscription, pending_vpn_secrets
+            )
         else:
             await callback.answer()
         return

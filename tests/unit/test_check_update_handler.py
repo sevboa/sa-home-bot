@@ -9,6 +9,7 @@
 import pytest_asyncio
 
 from sa_home_bot.bot.handlers.node import on_dynamic_action
+from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings, TelegramConfig
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
@@ -91,6 +92,7 @@ async def _dispatch(callback, store, link):
         apps_link=link,
         notifier=None,
         config=_settings(),
+        pending_vpn_secrets=PendingVpnSecrets(),
         subscription=_sub(),
     )
 
