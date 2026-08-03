@@ -1,37 +1,14 @@
-"""apply_speech_defect — детерминированная картавость Альфреда (р→г) и
-strip_math_notation — зачистка LaTeX-разметки формул из ответа модели.
+"""strip_math_notation — зачистка LaTeX-разметки формул из ответа модели.
 
-Живая находка 2026-07-24: чисто промптовая инструкция ненадёжна для обоих
-(см. llm/prompt.py docstring) — заменяем/чистим в коде после ответа модели,
-не полагаясь на то, что модель сама будет соблюдать формат."""
+Живая находка 2026-07-24: чисто промптовая инструкция ненадёжна (см.
+llm/prompt.py docstring) — чистим в коде после ответа модели, не полагаясь
+на то, что модель сама будет соблюдать формат. Картавость (раньше здесь же
+— apply_speech_defect) теперь вероятностная, излечимая механика «Логопед»
+— см. tests/unit/test_speech_therapy.py."""
 
 from __future__ import annotations
 
-from sa_home_bot.llm.prompt import apply_speech_defect, strip_math_notation
-
-
-def test_replaces_lowercase_and_uppercase_r():
-    assert apply_speech_defect("сэр Роман") == "сэг Гоман"
-
-
-def test_replaces_every_occurrence_in_a_word():
-    assert apply_speech_defect("Температура") == "Темпегатуга"
-
-
-def test_is_idempotent_does_not_touch_already_substituted_g():
-    once = apply_speech_defect("сэр")
-    assert apply_speech_defect(once) == once
-
-
-def test_replaces_in_common_greeting_words():
-    assert apply_speech_defect("добрый день") == "добгый день"
-    assert apply_speech_defect("здравствуйте") == "здгавствуйте"
-    assert apply_speech_defect("хорошего дня") == "хогошего дня"
-
-
-def test_leaves_non_cyrillic_text_unchanged():
-    assert apply_speech_defect("Hello, world! 123") == "Hello, world! 123"
-
+from sa_home_bot.llm.prompt import strip_math_notation
 
 # --- strip_math_notation ---
 

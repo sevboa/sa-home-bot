@@ -61,6 +61,19 @@ async def broadcast_system(
     return sent
 
 
+async def broadcast_all(book: SubscriptionBook, notifier: Notifier, text: str) -> int:
+    """Буквально всем не-broken подпискам, без opt-in по event_types —
+    для событий, которые обязаны дойти и до гостей (у тех event_types по
+    умолчанию пуст, book.accepting() их бы не нашёл). Тот же приём, что
+    уже применён в notify_tool_call ниже."""
+    sent = 0
+    for sub in book.all():
+        if not sub.broken and await notifier.send_direct(sub.chat_id, text) is not None:
+            sent += 1
+    log.info("Событие разослано %d подписчикам (broadcast_all)", sent)
+    return sent
+
+
 # Дебаг-канал: факт вызова инструмента Alfred'ом (живой /ai и self-scheduled
 # remind через службу tasks). Само сообщение короткое — «обращался ли и в
 # какой тул» (решение пользователя 2026-07-27); вход и выход прячутся за

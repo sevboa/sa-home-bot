@@ -404,16 +404,23 @@ async def test_empty_answer_after_round_limit_is_still_a_hiccup(store):
 # модель сама попросила подумать ---
 
 
-def test_think_marker_survives_llm_service_transforms():
+def test_think_marker_survives_llm_service_transforms(tmp_path):
     # Живой баг на проде 2026-07-24: старый маркер с кириллической "Р"
     # утекал в чат мангленным ("[[ТГЕБУЕТСЯ_ГАЗМЫШЛЕНИЕ]]") — llm/service.py
     # прогоняет ЛЮБОЙ ответ модели (в т.ч. этот служебный маркер) через
-    # apply_speech_defect/strip_math_notation до того, как отдать боту.
-    # Маркер обязан пережить обе трансформации байт-в-байт, иначе проверка
+    # SpeechTherapist/strip_math_notation до того, как отдать боту. Маркер
+    # обязан пережить обе трансформации байт-в-байт, иначе проверка
     # "THINK_MARKER not in fast_answer" в _ask() молча перестаёт работать.
-    from sa_home_bot.llm.prompt import apply_speech_defect, strip_math_notation
+    # rand=0.0 — наихудший случай (искажение/визит логопеда сработали бы
+    # всегда) — показывает, что маркер защищён структурно (латиница вне
+    # regex [А-Яа-яЁё]+), не везением рандома.
+    from sa_home_bot.config import LlmConfig
+    from sa_home_bot.llm.prompt import strip_math_notation
+    from sa_home_bot.llm.speech_therapy import SpeechTherapist
 
-    transformed = apply_speech_defect(strip_math_notation(ai_flow.THINK_MARKER))
+    cfg = LlmConfig(speech_therapy_state_path=str(tmp_path / "speech-therapy.json"))
+    therapist = SpeechTherapist(cfg, rand=lambda: 0.0)
+    transformed, _ = therapist.process(strip_math_notation(ai_flow.THINK_MARKER), chat_id=None)
     assert transformed == ai_flow.THINK_MARKER
 
 

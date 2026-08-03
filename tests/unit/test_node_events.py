@@ -1,7 +1,10 @@
 """bot/node_events.py: node_joined/update_finished → системное уведомление,
 llm_idle_sleep/llm_service_restart/task_prewake/task_result → адресное
 сообщение в конкретные чаты (последние два — от службы tasks, генерализация
-2026-07-24 старого напоминания в отдельный сервис отложенных задач)."""
+2026-07-24 старого напоминания в отдельный сервис отложенных задач),
+llm_speech_cured → буквально всем подпискам (broadcast_all, не через
+event_types opt-in — Логопед долечил Альфреда, должны узнать все, включая
+гостей)."""
 
 from sa_home_bot.bot.ai_flow import (
     ALBERT_ASLEEP,
@@ -19,11 +22,13 @@ from sa_home_bot.bot.node_events import (
     render_node_joined,
     render_node_leaving,
     render_node_returned,
+    render_speech_cured,
     render_update_finished,
 )
 from sa_home_bot.config import SubscriptionConfig
 from sa_home_bot.proto.messages import Address, make_event
 from sa_home_bot.subscriptions.book import SubscriptionBook
+from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.tasks import protocol as task_protocol
 
 
@@ -207,6 +212,31 @@ async def test_handler_restart_event_with_no_chats_sends_nothing():
     await handler(env)
 
     assert notifier.sent == []
+
+
+# --- llm_speech_cured: Логопед долечил Альфреда — всем, включая гостей без
+# opt-in (в отличие от system-событий через broadcast_system) ---
+
+
+async def test_handler_broadcasts_speech_cured_to_everyone_including_guests():
+    book = SubscriptionBook(
+        [
+            # Обычная подписка без "system"/"*" в event_types — accepting()
+            # её бы не нашла, broadcast_all находит.
+            Subscription(name="plain", chat_id=1, event_types=frozenset({"overheat_started"})),
+            # Гостевая — event_types пуст по умолчанию (нет opt-in вообще).
+            Subscription(name="guest", chat_id=2, source="guest", event_types=frozenset()),
+            Subscription(name="dead", chat_id=3, broken=True, event_types=frozenset({"*"})),
+        ]
+    )
+    notifier = FakeNotifier()
+    store = FakeStore()
+    handler = build_node_event_handler(book, notifier, store)
+
+    env = make_event("llm_speech_cured", {}, src=Address(node="winpc", service="llm"))
+    await handler(env)
+
+    assert notifier.sent == [(1, render_speech_cured()), (2, render_speech_cured())]
 
 
 # --- task_prewake/task_result: служба tasks (см. tasks/protocol.py) ---

@@ -18,6 +18,14 @@ from sa_home_bot.proto.messages import ERR_BAD_REQUEST, ProtoError
 PERSONA = "ТЕСТОВЫЙ ПЕРСОНАЖ (persona_prompt в тестовом конфиге)"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_speech_therapy_state(tmp_path, monkeypatch):
+    # speech_therapy_state_path — относительный путь по умолчанию (см.
+    # config.py::LlmConfig) — без chdir тесты читали/писали бы реальный файл
+    # состояния Логопеда в репозитории.
+    monkeypatch.chdir(tmp_path)
+
+
 def _settings(**overrides) -> Settings:
     overrides.setdefault("idle_sleep_after_s", 1800.0)
     overrides.setdefault("persona_prompt", PERSONA)
@@ -43,6 +51,16 @@ def test_describe_declares_ask_chat_sleep_warmup():
     assert (quiet.name, quiet.type, quiet.required) == ("quiet", "bool", False)
 
 
+async def test_get_state_includes_speech_therapy_snapshot():
+    svc = LlmService(_settings())
+    state = await svc.get_state()
+    assert state["speech_therapy"] == {
+        "error_probability": 1.0,
+        "corrections_total": 0,
+        "cured": False,
+    }
+
+
 async def test_ask_calls_ollama_generate_with_system_prompt(monkeypatch):
     calls = []
 
@@ -51,12 +69,15 @@ async def test_ask_calls_ollama_generate_with_system_prompt(monkeypatch):
         return {"response": "Здравствуйте, сэр"}
 
     monkeypatch.setattr(llm_service.ollama, "generate", fake_generate)
-    svc = LlmService(_settings())
+    # speech_rand=0.5: гарантированно ниже стартовой error_probability=1.0
+    # (искажает), но выше вероятности визита логопеда 0.025 (без визита) —
+    # иначе к ответу мог бы случайно (~5%) прилипнуть текст логопеда и
+    # сломать точное сравнение ниже.
+    svc = LlmService(_settings(), speech_rand=lambda: 0.5)
     result = await svc.run_command("ask", {"prompt": "Как погода?"})
 
-    # Картавость — детерминированная замена р→г в коде (живая находка
-    # 2026-07-24: чисто промптом модель подменяла буквы ненадёжно), не вывод
-    # модели как есть.
+    # Картавость — вероятностная механика «Логопед» (llm/speech_therapy.py),
+    # не вывод модели как есть.
     assert result == {"response": "Здгавствуйте, сэг", "model": "qwen2.5:7b"}
     assert calls[0][0] == "qwen2.5:7b"
     assert calls[0][1] == "Как погода?"
@@ -93,7 +114,7 @@ async def test_chat_calls_ollama_chat_and_extracts_message(monkeypatch):
         return {"message": {"role": "assistant", "content": "Добрый день"}}
 
     monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
-    svc = LlmService(_settings())
+    svc = LlmService(_settings(), speech_rand=lambda: 0.5)  # см. комментарий выше
     result = await svc.run_command("chat", {"messages": [{"role": "user", "content": "привет"}]})
     assert result == {"response": "Добгый день", "model": "qwen2.5:7b"}
 

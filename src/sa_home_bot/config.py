@@ -408,6 +408,15 @@ class LlmConfig(BaseModel):
     # DEFAULT_PERSONA_PROMPT (llm/prompt.py) — безликая заглушка на случай,
     # если ни то ни другое не заполнено (свежий чекаут, CI).
     persona_prompt: str = ""
+    # Логопед (llm/speech_therapy.py) — состояние вероятностной, излечимой
+    # картавости Альфреда: вероятность искажения слова с «р», счётчик
+    # коррекций, исключённые слова. Тот же паттерн относительного пути, что
+    # у node/state.py — per-process, не singleton на весь рой.
+    speech_therapy_state_path: str = "./data/speech-therapy-state.json"
+    # Чаты, где картавость закреплена на 100% навсегда, независимо от
+    # общего прогресса лечения (и даже уже после полного излечения для
+    # остальных чатов) — решение пользователя 2026-08-03.
+    speech_therapy_pinned_chat_ids: list[int] = Field(default_factory=list)
 
 
 class VpnConfig(BaseModel):

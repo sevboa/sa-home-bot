@@ -29,9 +29,9 @@ from sa_home_bot.llm import ollama
 from sa_home_bot.llm.prompt import (
     DEFAULT_PERSONA_PROMPT,
     ROUTER_SYSTEM_PROMPT,
-    apply_speech_defect,
     strip_math_notation,
 )
+from sa_home_bot.llm.speech_therapy import SpeechTherapist
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     ActionParam,
@@ -67,6 +67,10 @@ EVENT_SERVICE_RESTART = "llm_service_restart"
 # warmup не породил EVENT_IDLE_SLEEP вовсе). Эмитится ТОЛЬКО из
 # _maybe_sleep_idle — естественного тайм-аута простоя, не ручного sleep.
 EVENT_WENT_IDLE = "llm_went_idle"
+# Логопед (llm/speech_therapy.py) вылечил Альфреда полностью — разовое
+# событие на весь процесс службы, боту нужно известить ВСЕ чаты (не только
+# активные, в отличие от EVENT_IDLE_SLEEP/EVENT_SERVICE_RESTART).
+EVENT_SPEECH_CURED = "llm_speech_cured"
 
 _IDLE_CHECK_INTERVAL_S = 60.0
 
@@ -78,7 +82,15 @@ async def _noop_emit(event_type: str, data: dict[str, Any]) -> None:
 
 
 class LlmService:
-    def __init__(self, settings: Settings, *, emit: EventEmitter = _noop_emit) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        emit: EventEmitter = _noop_emit,
+        speech_rand: Callable[[], float] | None = None,
+    ) -> None:
+        """``speech_rand`` — только для тестов: делает Логопеда (llm/speech_therapy.py)
+        детерминированным, не проброшено в конфиг/CLI."""
         self._cfg: LlmConfig = settings.llm
         # Живая находка 2026-07-25: текст персонажа убран из репозитория
         # (см. llm/prompt.py) — берём его из локального config.toml
@@ -103,6 +115,9 @@ class LlmService:
         # реальным сном), не вокруг одного запроса (см. llm/ollama.py).
         self._keepalive = ollama.WslKeepalive(
             self._cfg, duration_s=self._cfg.idle_sleep_after_s + 60.0
+        )
+        self._speech = SpeechTherapist(
+            self._cfg, **({"rand": speech_rand} if speech_rand is not None else {})
         )
 
     def describe(self) -> ServiceDescription:
@@ -179,6 +194,7 @@ class LlmService:
             "service": SERVICE_NAME,
             "model": self._cfg.model,
             "asleep": self._asleep,
+            "speech_therapy": self._speech.snapshot(),
         }
 
     async def _touch(self, chat_id: Any = None) -> None:
@@ -197,9 +213,13 @@ class LlmService:
             prompt = args.get("prompt")
             if not isinstance(prompt, str) or not prompt:
                 raise ProtoError(ERR_BAD_REQUEST, "prompt должен быть непустой строкой")
-            await self._touch(args.get("chat_id"))
+            chat_id = args.get("chat_id")
+            await self._touch(chat_id)
             result = await ollama.generate(self._cfg, prompt, self._persona_prompt)
-            response = apply_speech_defect(strip_math_notation(result.get("response", "")))
+            cleaned = strip_math_notation(result.get("response", ""))
+            response, just_cured = self._speech.process(cleaned, chat_id)
+            if just_cured:
+                await self._emit_speech_cured()
             return {"response": response, "model": self._cfg.model}
         if action == ACTION_CHAT:
             messages = args.get("messages")
@@ -213,18 +233,22 @@ class LlmService:
             if role not in ("persona", "router"):
                 raise ProtoError(ERR_BAD_REQUEST, f"неизвестная role: {role!r}")
             system = ROUTER_SYSTEM_PROMPT if role == "router" else self._persona_prompt
-            await self._touch(args.get("chat_id"))
+            chat_id = args.get("chat_id")
+            await self._touch(chat_id)
             result = await ollama.chat(self._cfg, messages, system, tools=tools, think=think)
             message = result.get("message", {})
             # Модель попросила вызвать инструмент(ы) — служба llm сама по рою
             # не ходит (нет ServiceLink к соседям, только к своей Ollama), это
             # исполняет фронтенд (см. LLM_INTEGRATION_PLAN.md §7.1). Ответ тут
-            # НЕ прогоняем через apply_speech_defect — это ещё не финальный
+            # НЕ прогоняем через SpeechTherapist — это ещё не финальный
             # текст персонажа, а служебные данные для цикла вызовов.
             tool_calls = message.get("tool_calls")
             if tool_calls:
                 return {"tool_calls": tool_calls, "model": self._cfg.model}
-            reply = apply_speech_defect(strip_math_notation(message.get("content", "")))
+            cleaned = strip_math_notation(message.get("content", ""))
+            reply, just_cured = self._speech.process(cleaned, chat_id)
+            if just_cured:
+                await self._emit_speech_cured()
             return {"response": reply, "model": self._cfg.model}
         if action == ACTION_SLEEP:
             await self._sleep_now(quiet=bool(args.get("quiet")))
@@ -241,6 +265,12 @@ class LlmService:
             return {"asleep": False}
         # Сервер валидирует action по describe — сюда неизвестное не доходит.
         raise ValueError(f"необъявленное действие: {action}")
+
+    async def _emit_speech_cured(self) -> None:
+        try:
+            await self._emit(EVENT_SPEECH_CURED, {})
+        except Exception:  # noqa: BLE001 — сбой эмита не должен ронять ответ пользователю
+            log.exception("llm: не удалось эмитить %s", EVENT_SPEECH_CURED)
 
     async def _sleep_now(self, *, quiet: bool = False) -> None:
         """``quiet`` — погасить контейнер, не прощаясь с чатами.

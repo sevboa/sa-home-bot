@@ -17,6 +17,9 @@ ai_turns делаются здесь, по meta, которую сама слу�
 Alfred дошёл до автовыключения ноды, но открыта SSH-сессия, выключение
 отложено) — адресно админам (notify_admins), с кнопкой «закрыть сессии и
 выключить» (node/service.py::ACTION_CLOSE_SSH_SESSIONS).
+``llm_speech_cured`` (llm/speech_therapy.py::SpeechTherapist — Логопед
+довёл вероятность искажения до 0%, разовое событие) — буквально всем
+подпискам (`bot/lifecycle.py::broadcast_all`), включая гостей без opt-in.
 
 ``vpn_quota_warning``/``vpn_quota_exceeded``/``vpn_access_restored`` —
 адресно гостю (vpn/service.py, Этап 33 IMPLEMENTATION_PLAN.md);
@@ -57,7 +60,7 @@ from sa_home_bot.bot.ai_flow import (
     STEPS_TEXT,
 )
 from sa_home_bot.bot.handlers.vpn import resolve_request_callback
-from sa_home_bot.bot.lifecycle import broadcast_system, notify_tool_call
+from sa_home_bot.bot.lifecycle import broadcast_all, broadcast_system, notify_tool_call
 from sa_home_bot.bot.notifier import Notifier, notify_admins
 from sa_home_bot.db.store import Store
 from sa_home_bot.proto.messages import Envelope
@@ -84,6 +87,10 @@ EVENT_SINGLETON_YIELDED = "singleton_yielded"
 # импорт бота из пакета llm ради одной константы того не стоит).
 EVENT_LLM_IDLE_SLEEP = "llm_idle_sleep"
 EVENT_LLM_SERVICE_RESTART = "llm_service_restart"
+# Логопед (llm/speech_therapy.py) вылечил Альфреда полностью — разовое
+# событие, адресат — буквально все чаты (broadcast_all, не broadcast_system:
+# гости не имеют opt-in по event_types, но пропустить их эту новость нельзя).
+EVENT_LLM_SPEECH_CURED = "llm_speech_cured"
 # Тот же приём (строковый литерал) для события node/service.py и для id
 # действия, которое рисует кнопка ниже — ACTION_CLOSE_SSH_SESSIONS.
 EVENT_IDLE_POWER_BLOCKED = "idle_power_blocked"
@@ -195,6 +202,13 @@ def render_update_finished(node_id: str, ok: bool, version: str | None, error: s
     return f"⚠️ Обновление ноды «{node_id}» не удалось: {error}"
 
 
+def render_speech_cured() -> str:
+    return (
+        "🎉 <b>Альфред полностью излечился от картавости!</b>\n"
+        "Логопед объявляет курс лечения завершённым."
+    )
+
+
 def render_idle_power_blocked(node_id: str, sessions: list[str]) -> str:
     lines = "\n".join(f"• {html.escape(s)}" for s in sessions)
     return (
@@ -301,6 +315,9 @@ def build_node_event_handler(book: SubscriptionBook, notifier: Notifier, store: 
         elif name == EVENT_LLM_SERVICE_RESTART:
             for chat_id in data.get("chat_ids", []):
                 await notifier.send_direct(chat_id, RESTART_TEXT)
+            return
+        elif name == EVENT_LLM_SPEECH_CURED:
+            await broadcast_all(book, notifier, render_speech_cured())
             return
         elif name == EVENT_IDLE_POWER_BLOCKED:
             # Адресно админам (notify_admins), не всем подпискам — служебный
