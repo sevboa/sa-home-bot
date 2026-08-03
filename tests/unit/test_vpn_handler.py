@@ -33,6 +33,7 @@ class FakeMessage:
         self.chat = FakeChat(chat_id)
         self.answers: list[str] = []
         self.edits: list[str] = []
+        self.message_thread_id: int | None = None
 
     async def answer(self, text, **kwargs):
         self.answers.append(text)
@@ -70,11 +71,18 @@ class FakeNotifier:
         self.sent_photos: list[tuple[int, object, str | None]] = []
         self.deleted: list[tuple[int, int]] = []
 
-    async def send_direct(self, chat_id, text, reply_to_message_id=None, reply_markup=None):
+    async def send_direct(
+        self,
+        chat_id,
+        text,
+        reply_to_message_id=None,
+        reply_markup=None,
+        message_thread_id=None,
+    ):
         self.sent_direct.append((chat_id, text))
         return len(self.sent_direct)
 
-    async def send_photo(self, chat_id, photo, *, caption=None):
+    async def send_photo(self, chat_id, photo, *, caption=None, message_thread_id=None):
         self.sent_photos.append((chat_id, photo, caption))
         return len(self.sent_photos)
 

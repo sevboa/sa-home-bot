@@ -51,9 +51,19 @@ async def _download_chunks(node_link: ServiceLink, expected_sha256: str | None) 
     return payload
 
 
-async def deliver_apk(node_link: ServiceLink, notifier: Notifier, chat_id: int) -> str:
+async def deliver_apk(
+    node_link: ServiceLink,
+    notifier: Notifier,
+    chat_id: int,
+    message_thread_id: int | None = None,
+) -> str:
     """Отправить актуальный APK гостю в личку. Возвращает текст результата
-    (пригоден и как ответ хендлера, и как ответ LLM-тула)."""
+    (пригоден и как ответ хендлера, и как ответ LLM-тула).
+
+    ``message_thread_id`` — топик, откуда пришёл запрос (Private Chat
+    Topics): без него документ уезжает в общий топик чата, а не туда, где
+    пользователь реально смотрит переписку (живой баг 2026-08-03 — файл
+    реально отправлялся и получал file_id, но был не виден в топике)."""
     try:
         info = await node_link.command(vpn_protocol.ACTION_APK_INFO, {}, dst=_DST)
     except ProtoError as exc:
@@ -68,7 +78,9 @@ async def deliver_apk(node_link: ServiceLink, notifier: Notifier, chat_id: int) 
 
     file_id = info.get("telegram_file_id")
     if file_id:
-        sent = await notifier.send_document(chat_id, str(file_id), caption=caption)
+        sent = await notifier.send_document(
+            chat_id, str(file_id), caption=caption, message_thread_id=message_thread_id
+        )
         if sent is not None:
             return "📱 Приложение отправлено."
         log.info("vpn: file_id APK устарел, качаю заново через рой")
@@ -82,7 +94,9 @@ async def deliver_apk(node_link: ServiceLink, notifier: Notifier, chat_id: int) 
 
     filename = str(info.get("file_name") or f"AmneziaWG-{version}.apk")
     document = BufferedInputFile(payload, filename=filename)
-    sent = await notifier.send_document(chat_id, document, caption=caption)
+    sent = await notifier.send_document(
+        chat_id, document, caption=caption, message_thread_id=message_thread_id
+    )
     if sent is None:
         return "не вышло: не удалось отправить файл"
     _message_id, new_file_id = sent

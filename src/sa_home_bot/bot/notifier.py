@@ -104,12 +104,17 @@ class Notifier:
         text: str,
         reply_to_message_id: int | None = None,
         reply_markup: InlineKeyboardMarkup | None = None,
+        message_thread_id: int | None = None,
     ) -> int | None:
         """Отправить сообщение. Вернуть message_id первого чанка или None при провале.
 
         ``reply_markup`` вешается на ПЕРВЫЙ чанк: кнопка относится к
         сообщению целиком, а не к его хвосту (у длинных текстов чанков
-        несколько, см. chunk_text)."""
+        несколько, см. chunk_text). ``message_thread_id`` — топик личного
+        чата (Private Chat Topics, bot/handlers/ai.py): без него
+        проактивная отправка (не ответ на сообщение) уезжает в общий топик,
+        а не туда, где пользователь реально смотрит переписку (живой баг
+        vpn: конфиг/QR/APK терялись из вида в топике — 2026-08-03)."""
         chunks = chunk_text(text)
         first_message_id: int | None = None
         for i, chunk in enumerate(chunks):
@@ -121,7 +126,11 @@ class Notifier:
                 else None
             )
             message_id = await self._send_one(
-                chat_id, chunk, reply, reply_markup if i == 0 else None
+                chat_id,
+                chunk,
+                reply,
+                reply_markup if i == 0 else None,
+                message_thread_id=message_thread_id,
             )
             if message_id is None:
                 return first_message_id
@@ -135,11 +144,16 @@ class Notifier:
         text: str,
         reply: ReplyParameters | None,
         reply_markup: InlineKeyboardMarkup | None = None,
+        message_thread_id: int | None = None,
     ) -> int | None:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 msg = await self._bot.send_message(
-                    chat_id, text, reply_parameters=reply, reply_markup=reply_markup
+                    chat_id,
+                    text,
+                    reply_parameters=reply,
+                    reply_markup=reply_markup,
+                    message_thread_id=message_thread_id,
                 )
                 return msg.message_id
             except TelegramRetryAfter as exc:
@@ -164,6 +178,7 @@ class Notifier:
         document: BufferedInputFile | str,
         *,
         caption: str | None = None,
+        message_thread_id: int | None = None,
     ) -> tuple[int, str] | None:
         """Отправить документ: байты (``BufferedInputFile``) или уже
         загруженный в Telegram ``file_id`` (строка) — тогда байты никуда не
@@ -171,10 +186,16 @@ class Notifier:
 
         Возвращает ``(message_id, file_id)`` — второе нужно вызывающему,
         чтобы запомнить file_id и не гонять файл повторно (см.
-        bot/vpn_apk.py::deliver_apk)."""
+        bot/vpn_apk.py::deliver_apk). ``message_thread_id`` — см.
+        send_direct."""
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                msg = await self._bot.send_document(chat_id, document, caption=caption)
+                msg = await self._bot.send_document(
+                    chat_id,
+                    document,
+                    caption=caption,
+                    message_thread_id=message_thread_id,
+                )
                 file_id = msg.document.file_id if msg.document else ""
                 return msg.message_id, file_id
             except TelegramRetryAfter as exc:
@@ -194,11 +215,18 @@ class Notifier:
         return None
 
     async def send_photo(
-        self, chat_id: int, photo: BufferedInputFile, *, caption: str | None = None
+        self,
+        chat_id: int,
+        photo: BufferedInputFile,
+        *,
+        caption: str | None = None,
+        message_thread_id: int | None = None,
     ) -> int | None:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                msg = await self._bot.send_photo(chat_id, photo, caption=caption)
+                msg = await self._bot.send_photo(
+                    chat_id, photo, caption=caption, message_thread_id=message_thread_id
+                )
                 return msg.message_id
             except TelegramRetryAfter as exc:
                 wait = exc.retry_after + 1

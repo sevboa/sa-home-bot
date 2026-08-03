@@ -189,7 +189,11 @@ async def _redraw_card(
 
 
 async def _send_secret(
-    notifier: Notifier, chat_id: int, result: dict, ttl_s: float
+    notifier: Notifier,
+    chat_id: int,
+    result: dict,
+    ttl_s: float,
+    message_thread_id: int | None = None,
 ) -> None:
     device_label = html.escape(str(result.get("device_label") or ""))
     config_text = html.escape(result.get("config_text") or "")
@@ -198,12 +202,15 @@ async def _send_secret(
         f"🔐 Конфиг устройства «{device_label}»:\n<pre>{config_text}</pre>\n\n"
         "Импортируйте в приложение AmneziaWG (сканом QR ниже или файлом) и "
         "удалите эту переписку — сообщение исчезнет само через несколько минут.",
+        message_thread_id=message_thread_id,
     )
     photo_id = None
     qr_b64 = result.get("qr_png_b64")
     if qr_b64:
         photo = BufferedInputFile(base64.b64decode(qr_b64), filename="vpn-qr.png")
-        photo_id = await notifier.send_photo(chat_id, photo, caption=f"QR — «{device_label}»")
+        photo_id = await notifier.send_photo(
+            chat_id, photo, caption=f"QR — «{device_label}»", message_thread_id=message_thread_id
+        )
 
     async def _cleanup() -> None:
         await asyncio.sleep(ttl_s)
@@ -235,7 +242,9 @@ async def handle_action(
             await callback.answer("Напишите мне в личку — там и пришлю.", show_alert=True)
             return
         await callback.answer("Отправляю…")
-        text = await deliver_apk(node_link, notifier, chat_id)
+        text = await deliver_apk(
+            node_link, notifier, chat_id, message_thread_id=callback.message.message_thread_id
+        )
         await callback.message.answer(text)
         return
 
@@ -280,7 +289,13 @@ async def handle_action(
         except ServiceUnavailableError:
             await callback.message.answer("⚠️ Служба VPN недоступна.")
             return
-        await _send_secret(notifier, chat_id, result, config.vpn.config_message_ttl_s)
+        await _send_secret(
+            notifier,
+            chat_id,
+            result,
+            config.vpn.config_message_ttl_s,
+            message_thread_id=callback.message.message_thread_id,
+        )
         await _redraw_card(callback, node_link, subscription)
         return
 

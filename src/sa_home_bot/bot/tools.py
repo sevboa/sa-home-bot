@@ -149,6 +149,11 @@ class ToolContext:
     notifier: Any | None = None  # bot/notifier.py::Notifier
     store: Any | None = None  # db/store.py::Store
     author: str | None = None  # как зовут того, кто прямо сейчас говорит
+    # Реальный Telegram message_thread_id (в отличие от dialogue_id — тот в
+    # чате без топика подменяется message_id, что для Bot API не тред и
+    # приведёт к 400). None вне топика — тулы должны передавать None, а не
+    # dialogue_id, в message_thread_id проактивных notifier.send_*.
+    message_thread_id: int | None = None
 
 
 ToolHandler = Callable[["ToolContext", dict[str, Any]], Awaitable[str]]
@@ -1535,6 +1540,7 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
                 ctx.chat_id,
                 f"🔐 Конфиг устройства «{escape(device_label)}»:\n"
                 f"<pre>{escape(result['config_text'])}</pre>",
+                message_thread_id=ctx.message_thread_id,
             )
         return "готово: конфиг ушёл отдельным личным сообщением (приватный ключ тебе не показываю)"
 
@@ -1549,7 +1555,10 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
         if not file_id or ctx.notifier is None or ctx.chat_id is None:
             return "приложение сейчас не кэшировано — попроси открыть /vpn и нажать «Приложение»"
         sent = await ctx.notifier.send_document(
-            ctx.chat_id, str(file_id), caption=f"AmneziaWG {info.get('version', '')}"
+            ctx.chat_id,
+            str(file_id),
+            caption=f"AmneziaWG {info.get('version', '')}",
+            message_thread_id=ctx.message_thread_id,
         )
         if sent:
             return "готово: приложение ушло личным сообщением"

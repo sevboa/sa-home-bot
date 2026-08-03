@@ -1148,11 +1148,18 @@ class _FakeNotifier:
         self.sent_direct: list[tuple[int, str]] = []
         self.sent_documents: list[tuple[int, object, str | None]] = []
 
-    async def send_direct(self, chat_id, text, reply_to_message_id=None, reply_markup=None):
+    async def send_direct(
+        self,
+        chat_id,
+        text,
+        reply_to_message_id=None,
+        reply_markup=None,
+        message_thread_id=None,
+    ):
         self.sent_direct.append((chat_id, text))
         return 1
 
-    async def send_document(self, chat_id, document, *, caption=None):
+    async def send_document(self, chat_id, document, *, caption=None, message_thread_id=None):
         self.sent_documents.append((chat_id, document, caption))
         return (1, "tg-file-id")
 

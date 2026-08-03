@@ -723,6 +723,7 @@ async def request_alfred(
             node_link=node_link,
             subscription=subscription,
             dismissal=dismissal,
+            message_thread_id=message.message_thread_id,
             # Для тула tell: кому можно передать сообщение (book), чем
             # отправить (notifier), где записать доставленное как ход диалога
             # получателя (store) и от кого оно (author).

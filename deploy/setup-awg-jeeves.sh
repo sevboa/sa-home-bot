@@ -39,11 +39,31 @@ BUILD_DIR="$(mktemp -d)"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
 echo "==> Проверка окружения"
-if ! command -v go >/dev/null 2>&1; then
-    echo "    ставлю golang (нужен для сборки amneziawg-go/amneziawg-tools)"
+if ! command -v gcc >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
     apt-get update -qq
-    apt-get install -y golang-go build-essential
+    apt-get install -y build-essential
 fi
+
+# amneziawg-go требует свежий Go (go.mod требует много новее, чем есть в
+# Debian oldstable/stable — на jeeves стоял golang-go 1.19, который даже не
+# парсит директиву "go 1.25.0" в go.mod). Системный Go не трогаем — тянем
+# официальный тарбол во временный каталог и используем только для сборки.
+GO_BIN="$(command -v go || true)"
+GO_OK=0
+if [ -n "$GO_BIN" ]; then
+    case "$(go version 2>/dev/null)" in
+        *" go1.2"[1-9]*|*" go1.[3-9][0-9]"*) GO_OK=1 ;;
+    esac
+fi
+if [ "$GO_OK" -ne 1 ]; then
+    GO_VERSION="$(curl -fsSL 'https://go.dev/VERSION?m=text' | head -1)"
+    echo "    системный Go отсутствует/устарел — качаю официальный ${GO_VERSION} во временный каталог"
+    curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-amd64.tar.gz" -o "$BUILD_DIR/go.tar.gz"
+    tar -C "$BUILD_DIR" -xzf "$BUILD_DIR/go.tar.gz"
+    GO_BIN="$BUILD_DIR/go/bin/go"
+fi
+PATH="$(dirname "$GO_BIN"):$PATH"
+export PATH
 
 echo "==> Сборка amneziawg-go (userspace WireGuard-имплементация с обфускацией)"
 if ! command -v amneziawg-go >/dev/null 2>&1; then
