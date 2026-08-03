@@ -92,29 +92,51 @@ def _usage_text(usage: dict) -> str:
 
 def _summary_text(summary: dict) -> str:
     chats = summary.get("chats") or []
-    if not chats:
-        return "Гостей с VPN-доступом пока нет."
     lines = [f"📊 <b>VPN — расход за {summary.get('month', '?')}</b>"]
+    node = summary.get("node") or {}
+    if node:
+        free = _gb(node.get("free_bytes", 0))
+        reserved = _gb(node.get("reserved_bytes", 0))
+        limit = _gb(node.get("limit_bytes", 0))
+        lines.append(
+            f"Резерв ноды: {reserved:.0f} / {limit:.0f} ГБ занято обещаниями "
+            f"гостям, свободно {free:.0f} ГБ"
+        )
+    if not chats:
+        lines.append("")
+        lines.append("Гостей с активным VPN-доступом пока нет.")
+        return "\n".join(lines)
+    lines.append("")
     for row in sorted(chats, key=lambda r: r["used_bytes"], reverse=True):
         used = _gb(row["used_bytes"])
         limit = _gb(row["limit_bytes"])
-        lines.append(f"• <code>{row['chat_id']}</code>: {used:.1f} / {limit:.0f} ГБ")
+        devices = row.get("device_count")
+        devices_note = f", устройств: {devices}" if devices is not None else ""
+        lines.append(f"• <code>{row['chat_id']}</code>: {used:.1f} / {limit:.0f} ГБ{devices_note}")
     return "\n".join(lines)
 
 
-def _card_keyboard(devices: list[dict], *, is_admin: bool) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
-        [
+def _card_keyboard(
+    devices: list[dict], *, is_admin: bool, can_self_serve: bool
+) -> InlineKeyboardMarkup:
+    top_row = [
+        InlineKeyboardButton(
+            text="📱 Приложение",
+            callback_data=commands.action_callback("apk", service=SERVICE),
+        ),
+    ]
+    if can_self_serve:
+        # Кнопка появляется, только когда самообслуживание реально доступно
+        # (см. vpn/service.py::_grant_extra) — иначе гость с почти полной
+        # квотой жал бы её впустую и получал отказ вместо понятной картины.
+        top_row.insert(
+            0,
             InlineKeyboardButton(
                 text="➕ 100 ГБ",
                 callback_data=commands.action_callback("grant_extra", service=SERVICE),
             ),
-            InlineKeyboardButton(
-                text="📱 Приложение",
-                callback_data=commands.action_callback("apk", service=SERVICE),
-            ),
-        ]
-    ]
+        )
+    rows: list[list[InlineKeyboardButton]] = [top_row]
     for device in devices:
         label = device["device_label"]
         rows.append(
@@ -169,26 +191,40 @@ async def _card(node_link: ServiceLink, chat_id: int) -> tuple[str, dict] | tupl
     return None, usage
 
 
+def _can_self_serve(usage: dict, config: Settings) -> bool:
+    threshold = config.vpn.warn_remaining_gb * 1_000_000_000
+    return usage.get("remaining_bytes", 0) <= threshold
+
+
 @router.message(Command(commands.VPN.name))
 async def cmd_vpn(
-    message: Message, node_link: ServiceLink, subscription: Subscription | None = None
+    message: Message,
+    node_link: ServiceLink,
+    config: Settings,
+    subscription: Subscription | None = None,
 ) -> None:
     error, usage = await _card(node_link, message.chat.id)
     if error is not None:
         await message.answer(error)
         return
     is_admin = subscription is not None and _is_admin(subscription)
-    keyboard = _card_keyboard(usage.get("devices") or [], is_admin=is_admin)
+    keyboard = _card_keyboard(
+        usage.get("devices") or [], is_admin=is_admin, can_self_serve=_can_self_serve(usage, config)
+    )
     await message.answer(_usage_text(usage), reply_markup=keyboard)
 
 
 async def _redraw_card(
-    callback: CallbackQuery, node_link: ServiceLink, subscription: Subscription
+    callback: CallbackQuery, node_link: ServiceLink, subscription: Subscription, config: Settings
 ) -> None:
     error, usage = await _card(node_link, callback.message.chat.id)
     if error is not None:
         return
-    keyboard = _card_keyboard(usage.get("devices") or [], is_admin=_is_admin(subscription))
+    keyboard = _card_keyboard(
+        usage.get("devices") or [],
+        is_admin=_is_admin(subscription),
+        can_self_serve=_can_self_serve(usage, config),
+    )
     with contextlib.suppress(TelegramBadRequest):
         await callback.message.edit_text(_usage_text(usage), reply_markup=keyboard)
 
@@ -316,7 +352,7 @@ async def handle_action(
             await callback.answer("⚠️ Служба VPN недоступна.", show_alert=True)
             return
         await callback.answer("Добавлено")
-        await _redraw_card(callback, node_link, subscription)
+        await _redraw_card(callback, node_link, subscription, config)
         return
 
     if action_id in (vpn_protocol.ACTION_ISSUE, vpn_protocol.ACTION_REISSUE):
@@ -344,7 +380,7 @@ async def handle_action(
             config.vpn.config_message_ttl_s,
             message_thread_id=callback.message.message_thread_id,
         )
-        await _redraw_card(callback, node_link, subscription)
+        await _redraw_card(callback, node_link, subscription, config)
         return
 
     if action_id == "usage_all":

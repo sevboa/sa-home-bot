@@ -380,21 +380,14 @@ class VpnService:
     async def _issue(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)
         device_label = str(args.get("device_label") or "").strip() or "устройство"
-        cur = await self._db.conn.execute(
-            "SELECT COUNT(*) AS n FROM vpn_peers WHERE chat_id = ? AND status = 'active'",
-            (chat_id,),
-        )
-        row = await cur.fetchone()
-        if row["n"] >= self._cfg.max_peers_per_chat:
-            raise ProtoError(
-                ERR_BAD_REQUEST,
-                f"достигнут лимит устройств ({self._cfg.max_peers_per_chat}) — "
-                "сначала отзовите одно",
-            )
+        # Число устройств на гостя намеренно не ограничено (решение
+        # пользователя 2026-08-03) — реальный потолок стоимости уже задаёт
+        # трафик (base_quota_gb/self_ceiling_gb), отдельный счётчик устройств
+        # был бы лишней строгостью.
         private_key, public_key = await self._backend.generate_keypair()
         address = _allocate_address(self._cfg.subnet, await self._active_addresses())
         now = _now().isoformat()
-        cur = await self._db.conn.execute(
+        await self._db.conn.execute(
             "INSERT INTO vpn_peers (chat_id, device_label, public_key, address, status, "
             "created_at) VALUES (?, ?, ?, ?, 'active', ?)",
             (chat_id, device_label, public_key, address, now),
@@ -489,24 +482,40 @@ class VpnService:
                 "blocked": state["blocked_at"] is not None,
                 "devices": await self._peers_for_chat(chat_id),
             }
+        # Сводка для админа — только гости с ДЕЙСТВУЮЩИМ доступом (не
+        # отозванным/просроченным): именно они «резервируют» трафик ноды,
+        # revoked/expired ничего больше не стоят.
         cur = await self._db.conn.execute(
-            "SELECT p.chat_id AS chat_id, COALESCE(SUM(u.used_bytes), 0) AS used FROM vpn_peers p "
-            "LEFT JOIN vpn_peer_usage u ON u.peer_id = p.id AND u.month = ? "
-            "GROUP BY p.chat_id",
-            (month,),
+            "SELECT DISTINCT chat_id FROM vpn_peers WHERE status = 'active'"
         )
-        rows = await cur.fetchall()
+        active_chat_ids = [row["chat_id"] for row in await cur.fetchall()]
         chats = []
-        for row in rows:
-            cid = row["chat_id"]
+        reserved_bytes = 0
+        for cid in active_chat_ids:
+            limit = await self._limit_bytes(cid, month)
             chats.append(
                 {
                     "chat_id": cid,
-                    "used_bytes": int(row["used"] or 0),
-                    "limit_bytes": await self._limit_bytes(cid, month),
+                    "used_bytes": await self._used_bytes(cid, month),
+                    "limit_bytes": limit,
+                    "device_count": len(await self._peers_for_chat(cid)),
                 }
             )
-        return {"month": month, "chats": chats}
+            reserved_bytes += limit
+        node_limit_bytes = self._cfg.node_limit_gb * GB
+        return {
+            "month": month,
+            "chats": chats,
+            # "Резерв" — сумма ЛИМИТОВ (не факта потребления) активных
+            # гостей: сколько канала занято обещаниями, даже если реально
+            # ещё не потрачено — решение пользователя 2026-08-03, чтобы
+            # видеть риск перерасхода тарифа ДО того, как он случится.
+            "node": {
+                "limit_bytes": node_limit_bytes,
+                "reserved_bytes": reserved_bytes,
+                "free_bytes": max(node_limit_bytes - reserved_bytes, 0),
+            },
+        }
 
     async def _set_quota(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)
@@ -525,6 +534,22 @@ class VpnService:
     async def _grant_extra(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)
         month = _month_key(_now())
+        # Самообслуживание открыто только когда трафик РЕАЛЬНО заканчивается
+        # (решение пользователя 2026-08-03) — гость с почти полной квотой не
+        # может докупить впрок; порог тот же, что у предупреждения
+        # (warn_remaining_gb), чтобы «пришло предупреждение» и «можно
+        # докупить» совпадали для гостя по смыслу.
+        used = await self._used_bytes(chat_id, month)
+        limit = await self._limit_bytes(chat_id, month)
+        remaining = limit - used
+        threshold = self._cfg.warn_remaining_gb * GB
+        if remaining > threshold:
+            raise ProtoError(
+                ERR_BAD_REQUEST,
+                "самообслуживание доступно только когда остаётся меньше "
+                f"{self._cfg.warn_remaining_gb} ГБ трафика — сейчас остаётся "
+                f"{remaining / GB:.1f} ГБ, попробуйте позже",
+            )
         self_granted = await self._granted_bytes(chat_id, month, source="self")
         step = self._cfg.extra_step_gb * GB
         ceiling = self._cfg.self_ceiling_gb * GB

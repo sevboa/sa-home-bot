@@ -435,11 +435,17 @@ class VpnConfig(BaseModel):
     шаг самостоятельной докупки кнопкой «+100 ГБ»; ``self_ceiling_gb`` —
     потолок самообслуживания (решение пользователя 2026-08-03: до этого
     порога гость добавляет трафик сам, выше — только заявкой админу).
-    ``warn_remaining_gb`` — на скольки гигабайтах ДО исчерпания слать
-    предупреждение (не процент, а абсолютный остаток — то же решение).
+    ``warn_remaining_gb`` — двойная роль (решение пользователя 2026-08-03):
+    на скольки гигабайтах ДО исчерпания слать предупреждение, И порог,
+    НИЖЕ которого вообще открыто самообслуживание («+100 ГБ» без
+    подтверждения админа) — гость с ещё почти полной квотой докупить
+    заранее не может, только когда трафик реально заканчивается
+    (см. vpn/service.py::_grant_extra). Не процент, а абсолютный остаток.
     ``node_limit_gb`` — общий месячный лимit канала VDS по тарифу
     (сообщено пользователем 2026-08-03: 10 ТБ) — при приближении событие
-    уходит админам, гостей не касается.
+    уходит админам, гостей не касается. Число устройств на гостя НЕ
+    ограничено (решение пользователя 2026-08-03: стоимость и так упирается
+    в трафик, отдельный потолок на устройства — лишняя строгость).
 
     ``apk_repo`` — откуда брать официальный APK AmneziaWG (не полный клиент
     AmneziaVPN — тот кратно больше лимита Telegram-бота на файл).
@@ -466,10 +472,9 @@ class VpnConfig(BaseModel):
     base_quota_gb: int = Field(default=500, ge=0)
     extra_step_gb: int = Field(default=100, gt=0)
     self_ceiling_gb: int = Field(default=1000, ge=0)
-    warn_remaining_gb: int = Field(default=20, ge=0)
+    warn_remaining_gb: int = Field(default=100, ge=0)
     node_limit_gb: int = Field(default=10000, ge=0)
     sample_interval_s: float = Field(default=180.0, gt=0)
-    max_peers_per_chat: int = Field(default=5, ge=1)
     apk_repo: str = "amnezia-vpn/amneziawg-android"
     apk_cache_dir: Path = Path("./data/vpn-apk")
     config_message_ttl_s: float = Field(default=600.0, gt=0)

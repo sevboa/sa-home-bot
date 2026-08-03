@@ -68,7 +68,6 @@ async def env(tmp_path):
         extra_step_gb=1,
         self_ceiling_gb=3,
         warn_remaining_gb=0,  # переопределяется по тестам, где нужно
-        max_peers_per_chat=2,
         endpoint_host="203.0.113.9",
     )
     svc = VpnService(Settings(vpn=cfg), db, backend, emit)
@@ -104,13 +103,15 @@ async def test_private_key_never_stored_in_db(env):
     assert "private" not in rows[0]["public_key"]
 
 
-async def test_max_peers_per_chat_enforced(env):
+async def test_issue_has_no_device_cap(env):
     svc, _backend, _events = env
-    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "device_label": "a"})
-    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "device_label": "b"})
-    with pytest.raises(ProtoError) as excinfo:
-        await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "device_label": "c"})
-    assert excinfo.value.code == ERR_BAD_REQUEST
+    # Старый max_peers_per_chat=2 остановил бы это на третьем устройстве;
+    # подсеть фикстуры (/29) вмещает 5 хостов — весь пул, без отдельного
+    # лимита числа устройств.
+    for label in ("a", "b", "c", "d", "e"):
+        await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "device_label": label})
+    result = await svc.run_command(vpn_protocol.ACTION_USAGE, {"chat_id": CHAT})
+    assert len(result["devices"]) == 5
 
 
 async def test_reissue_expires_old_peer_and_keeps_label(env):
@@ -289,6 +290,11 @@ async def test_access_restored_event_after_grant_unblocks(env):
 
 async def test_grant_extra_hits_self_ceiling_then_falls_back_to_request(env):
     svc, _backend, events = env
+    # Тест — про потолок self_ceiling_gb, не про порог "трафик заканчивается"
+    # (см. test_grant_extra_refused_while_plenty_of_quota_remains): снимаем
+    # второй гейт заведомо большим порогом, чтобы гость был "низким по
+    # трафику" при любом остатке в пределах self_ceiling_gb.
+    svc._cfg.warn_remaining_gb = svc._cfg.self_ceiling_gb
     # self_ceiling_gb=3, base_quota_gb=1, extra_step_gb=1 → после двух self
     # грантов (1+1+1=3) третий должен упереться в потолок.
     await svc.run_command(vpn_protocol.ACTION_GRANT_EXTRA, {"chat_id": CHAT})
@@ -303,6 +309,48 @@ async def test_grant_extra_hits_self_ceiling_then_falls_back_to_request(env):
     )
     assert result["status"] == "pending"
     assert any(n == vpn_protocol.EVENT_VPN_EXTRA_REQUESTED for n, _ in events)
+
+
+async def test_grant_extra_refused_while_plenty_of_quota_remains(env):
+    svc, backend, _events = env
+    # warn_remaining_gb=0 (дефолт фикстуры) — самообслуживание закрыто,
+    # пока остаток НЕ достиг этого порога.
+    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "device_label": "тел"})
+    with pytest.raises(ProtoError) as excinfo:
+        await svc.run_command(vpn_protocol.ACTION_GRANT_EXTRA, {"chat_id": CHAT})
+    assert excinfo.value.code == ERR_BAD_REQUEST
+
+    # трафик исчерпан (remaining=0) — теперь самообслуживание открыто.
+    pubkey = next(iter(backend.peers))
+    backend.set_traffic(pubkey, rx=GB, tx=0)  # ровно лимит (base_quota_gb=1)
+    await svc.sample_once()
+    result = await svc.run_command(vpn_protocol.ACTION_GRANT_EXTRA, {"chat_id": CHAT})
+    assert result["limit_bytes"] == 2 * GB
+
+
+async def test_usage_without_chat_id_includes_node_reserve_and_device_count(env):
+    svc, _backend, _events = env
+    svc._cfg.node_limit_gb = 10
+    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "device_label": "a"})
+    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "device_label": "b"})
+    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": OTHER_CHAT, "device_label": "c"})
+
+    summary = await svc.run_command(vpn_protocol.ACTION_USAGE, {})
+    by_chat = {row["chat_id"]: row for row in summary["chats"]}
+    assert by_chat[CHAT]["device_count"] == 2
+    assert by_chat[OTHER_CHAT]["device_count"] == 1
+    # base_quota_gb=1 ГБ на гостя, два активных гостя → резерв 2 ГБ из 10.
+    assert summary["node"]["reserved_bytes"] == 2 * GB
+    assert summary["node"]["free_bytes"] == 8 * GB
+
+
+async def test_usage_without_chat_id_excludes_revoked_guests_from_reserve(env):
+    svc, _backend, _events = env
+    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "device_label": "тел"})
+    await svc.run_command(vpn_protocol.ACTION_REVOKE, {"chat_id": CHAT, "device_label": "тел"})
+    summary = await svc.run_command(vpn_protocol.ACTION_USAGE, {})
+    assert summary["chats"] == []
+    assert summary["node"]["reserved_bytes"] == 0
 
 
 async def test_resolve_request_approve_grants_quota(env):

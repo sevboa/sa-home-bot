@@ -249,10 +249,13 @@ language = "ru"
 # endpoint_host — белый IP jeeves (нужен для рендера клиентского конфига).
 # base_quota_gb/extra_step_gb/self_ceiling_gb/warn_remaining_gb — решения
 # пользователя 2026-08-03: база 500 ГБ/мес, гость сам добавляет по 100 ГБ,
-# пока сумма не достигла 1 ТБ (self_ceiling_gb), дальше — заявка админу;
-# предупреждение — когда остаётся 20 ГБ. node_limit_gb — лимит канала VDS
-# по тарифу (сообщено пользователем: 10 ТБ/мес) — при приближении алерт
-# уходит админам, гостей не касается.
+# пока сумма не достигла 1 ТБ (self_ceiling_gb), дальше — заявка админу.
+# warn_remaining_gb — двойная роль: и порог предупреждения, и порог, ниже
+# которого вообще открыто самообслуживание («+100 ГБ» без подтверждения
+# админа) — 100 ГБ. node_limit_gb — лимит канала VDS по тарифу (сообщено
+# пользователем: 10 ТБ/мес) — при приближении алерт уходит админам, гостей
+# не касается. Число устройств на гостя не ограничено — стоимость и так
+# упирается в трафик.
 [vpn]
 socket = "./data/vpn.sock"
 db_path = "./data/vpn.sqlite"
@@ -273,10 +276,9 @@ h4 = 8
 base_quota_gb = 500
 extra_step_gb = 100
 self_ceiling_gb = 1000
-warn_remaining_gb = 20
+warn_remaining_gb = 100
 node_limit_gb = 10000
 sample_interval_s = 180.0
-max_peers_per_chat = 5
 apk_repo = "amnezia-vpn/amneziawg-android"
 apk_cache_dir = "./data/vpn-apk"
 config_message_ttl_s = 600.0
