@@ -143,6 +143,37 @@ async def test_grant_extra_hits_ceiling_converts_to_request(monkeypatch):
     assert vpn_protocol.ACTION_REQUEST_EXTRA in actions
 
 
+async def test_revoke_calls_service_and_redraws_card():
+    link = FakeNodeLink(result={"used_bytes": 0, "limit_bytes": 1, "remaining_bytes": 1})
+    notifier = FakeNotifier()
+    callback = FakeCallback("act:vpn:revoke:Rose", chat_id=777)
+    await vpn_handlers.handle_action(callback, link, notifier, _config(), GUEST, _pending())
+    action, args = link.calls[0]
+    assert action == vpn_protocol.ACTION_REVOKE
+    assert args == {"chat_id": 777, "device_label": "Rose"}
+    actions = [c[0] for c in link.calls]
+    assert vpn_protocol.ACTION_USAGE in actions  # редрайв карточки
+    assert any("Rose" in str(a) for a in callback.answered)
+
+
+async def test_revoke_without_label_is_noop():
+    link = FakeNodeLink()
+    callback = FakeCallback("act:vpn:revoke", chat_id=777)
+    await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), GUEST, _pending())
+    assert link.calls == []
+    assert callback.answered
+
+
+async def test_card_keyboard_offers_revoke_button_per_device():
+    keyboard = vpn_handlers._card_keyboard(
+        [{"device_label": "Rose"}], is_admin=False, can_self_serve=False
+    )
+    device_row = keyboard.inline_keyboard[1]
+    texts = [button.text for button in device_row]
+    assert any("Отозвать" in text for text in texts)
+    assert any("Перевыпустить" in text for text in texts)
+
+
 async def test_apk_first_click_shows_links_not_file():
     link = FakeNodeLink()
     notifier = FakeNotifier()

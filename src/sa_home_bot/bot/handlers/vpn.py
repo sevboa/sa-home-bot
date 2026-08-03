@@ -155,7 +155,13 @@ def _card_keyboard(
                     callback_data=commands.action_callback(
                         vpn_protocol.ACTION_REISSUE, label, service=SERVICE
                     ),
-                )
+                ),
+                InlineKeyboardButton(
+                    text=f"🗑 Отозвать «{label}»",
+                    callback_data=commands.action_callback(
+                        vpn_protocol.ACTION_REVOKE, label, service=SERVICE
+                    ),
+                ),
             ]
         )
     # Имя устройства служба выбирает сама — случайный цветок (решение
@@ -522,6 +528,24 @@ async def handle_action(
             config.vpn.config_message_ttl_s,
             message_thread_id=callback.message.message_thread_id,
         )
+        await _redraw_card(callback, node_link, subscription, config)
+        return
+
+    if action_id == vpn_protocol.ACTION_REVOKE:
+        if not value:
+            await callback.answer()
+            return
+        try:
+            await node_link.command(
+                vpn_protocol.ACTION_REVOKE, {"chat_id": chat_id, "device_label": value}, dst=_DST
+            )
+        except ProtoError as exc:
+            await callback.answer(f"⚠️ {exc.message}", show_alert=True)
+            return
+        except ServiceUnavailableError:
+            await callback.answer("⚠️ Служба VPN недоступна.", show_alert=True)
+            return
+        await callback.answer(f"Отозвано: «{value}»")
         await _redraw_card(callback, node_link, subscription, config)
         return
 

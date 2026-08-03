@@ -49,6 +49,7 @@ GUEST_RIGHTS: list[GuestRight] = [
     GuestRight("usage@vpn", "📶 VPN: своя карточка"),
     GuestRight("issue@vpn", "📶 VPN: выпустить доступ"),
     GuestRight("reissue@vpn", "📶 VPN: перевыпустить"),
+    GuestRight("revoke@vpn", "📶 VPN: отозвать устройство"),
     GuestRight("grant_extra@vpn", "📶 VPN: докупить +100 ГБ"),
     GuestRight("request_extra@vpn", "📶 VPN: заявка сверх лимита"),
     GuestRight("apk@vpn", "📶 VPN: приложение"),
