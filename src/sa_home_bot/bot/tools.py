@@ -1514,11 +1514,34 @@ _DECL_MEMORY: dict[str, Any] = {
 # chat_id, как и у memory, подставляет бот из ToolContext, не модель.
 
 _VPN_ACTION_APK = "apk"  # виртуальное действие бота (apk_info+доставка), не команда службы
-_VPN_UNSAFE_FILENAME = re.compile(r"[^\w\-]+")
+_VPN_DEVICE_LABEL_ASCII = {
+    "телефон": "phone",
+    "ноутбук": "laptop",
+    "планшет": "tablet",
+    "пк": "pc",
+}
+_VPN_CYRILLIC_TO_LATIN = str.maketrans(
+    {
+        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+        "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+        "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+        "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
+        "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+    }
+)
+_VPN_UNSAFE_FILENAME = re.compile(r"[^a-zA-Z0-9_=+.-]+")
 
 
 def _vpn_safe_filename(label: str) -> str:
-    return _VPN_UNSAFE_FILENAME.sub("_", label.strip()).strip("_") or "device"
+    """Имя тоннеля в .conf = имя файла без расширения — приложения на базе
+    wireguard-android валидируют его по ``[a-zA-Z0-9_=+.-]{1,15}``:
+    кириллица или длинное имя даёт «неправильное имя» при импорте (живая
+    находка 2026-08-03)."""
+    key = label.strip().lower()
+    slug = _VPN_DEVICE_LABEL_ASCII.get(key)
+    if slug is None:
+        slug = _VPN_UNSAFE_FILENAME.sub("-", key.translate(_VPN_CYRILLIC_TO_LATIN)).strip("-")
+    return (slug or "device")[:15]
 
 
 async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
@@ -1543,7 +1566,7 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
         except (ServiceUnavailableError, TimeoutError) as exc:
             return f"недоступно: VPN-служба не отвечает ({exc})"
         if ctx.notifier is not None:
-            filename = f"amneziawg-{_vpn_safe_filename(device_label)}.conf"
+            filename = f"{_vpn_safe_filename(device_label)}.conf"
             await ctx.notifier.send_document(
                 ctx.chat_id,
                 str(result["config_text"]).encode("utf-8"),

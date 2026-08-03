@@ -193,11 +193,30 @@ async def _redraw_card(
         await callback.message.edit_text(_usage_text(usage), reply_markup=keyboard)
 
 
-_UNSAFE_FILENAME = re.compile(r"[^\w\-]+")
+_DEVICE_LABEL_ASCII = {"телефон": "phone", "ноутбук": "laptop", "планшет": "tablet", "пк": "pc"}
+_CYRILLIC_TO_LATIN = str.maketrans(
+    {
+        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+        "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+        "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+        "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
+        "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+    }
+)
+_UNSAFE_FILENAME = re.compile(r"[^a-zA-Z0-9_=+.-]+")
 
 
 def _safe_filename(label: str) -> str:
-    return _UNSAFE_FILENAME.sub("_", label.strip()).strip("_") or "device"
+    """Имя тоннеля в .conf = имя файла без расширения — приложения на базе
+    wireguard-android валидируют его по ``[a-zA-Z0-9_=+.-]{1,15}`` (см.
+    NAME_PATTERN в исходниках): кириллица или длинное имя даёт «неправильное
+    имя» при импорте (живая находка 2026-08-03, полный сброс с побайтовым
+    ASCII вместо простого strip"_")."""
+    key = label.strip().lower()
+    slug = _DEVICE_LABEL_ASCII.get(key)
+    if slug is None:
+        slug = _UNSAFE_FILENAME.sub("-", key.translate(_CYRILLIC_TO_LATIN)).strip("-")
+    return (slug or "device")[:15]
 
 
 async def _send_secret(
@@ -209,7 +228,7 @@ async def _send_secret(
 ) -> None:
     device_label = html.escape(str(result.get("device_label") or ""))
     config_text = str(result.get("config_text") or "")
-    filename = f"amneziawg-{_safe_filename(str(result.get('device_label') or 'device'))}.conf"
+    filename = f"{_safe_filename(str(result.get('device_label') or 'device'))}.conf"
     doc_sent = await notifier.send_document(
         chat_id,
         config_text.encode("utf-8"),
