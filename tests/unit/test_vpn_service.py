@@ -123,6 +123,17 @@ async def test_issue_assigns_random_english_label_ignoring_manual_input(env):
     assert result["device_label"] in _FLOWER_NAMES
 
 
+async def test_issue_reports_prior_device_count(env):
+    svc, _backend, _events = env
+    # bot/handlers/vpn.py и bot/tools.py::tool_vpn выбирают порядок
+    # файл/QR по этому полю (решение пользователя 2026-08-04): 0 у первого
+    # устройства чата, дальше — растёт с каждой новой выдачей.
+    first = await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
+    assert first["prior_device_count"] == 0
+    second = await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
+    assert second["prior_device_count"] == 1
+
+
 async def test_issue_has_no_device_cap(env):
     svc, _backend, _events = env
     # Старый max_peers_per_chat=2 остановил бы это на третьем устройстве;

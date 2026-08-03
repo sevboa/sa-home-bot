@@ -716,7 +716,7 @@ class InvitesConfig(BaseModel):
     """
 
     enabled: bool = True
-    ttl_s: float = Field(default=3600.0, gt=0)
+    ttl_s: float = Field(default=86400.0, gt=0)  # 24 часа (решение пользователя 2026-08-04)
     grant_commands: list[str] = Field(
         default_factory=lambda: [
             "chat@llm",

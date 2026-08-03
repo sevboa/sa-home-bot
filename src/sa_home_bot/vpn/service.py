@@ -424,7 +424,8 @@ class VpnService:
         # 2026-08-04) — гость и модель путались, что тут вообще вводить;
         # ``forced_label`` — только для _reissue ниже: у СУЩЕСТВУЮЩЕГО
         # устройства имя не меняется при перевыпуске ключа.
-        device_label = forced_label or _random_device_label(await self._active_labels(chat_id))
+        existing_labels = await self._active_labels(chat_id)
+        device_label = forced_label or _random_device_label(existing_labels)
         private_key, public_key = await self._backend.generate_keypair()
         address = _allocate_address(self._cfg.subnet, await self._active_addresses())
         now = _now().isoformat()
@@ -445,6 +446,12 @@ class VpnService:
             "qr_png_b64": _render_qr_png_b64(conf),
             "address": address,
             "device_label": device_label,
+            # Число устройств чата ДО этой выдачи — bot/handlers/vpn.py и
+            # bot/tools.py::tool_vpn выбирают по нему, что показать первым
+            # (решение пользователя 2026-08-04): 0 — это первое устройство
+            # чата, скорее всего настраивается прямо с этого же телефона →
+            # удобнее файл; иначе — вероятно, для ДРУГОГО устройства → QR.
+            "prior_device_count": len(existing_labels),
         }
 
     async def _reissue(self, args: dict[str, Any]) -> dict[str, Any]:

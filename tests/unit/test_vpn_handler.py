@@ -171,19 +171,44 @@ async def test_issue_in_group_chat_is_refused(monkeypatch):
     assert callback.answered  # но пользователю ответили (алертом)
 
 
-async def test_issue_sends_qr_first_then_config_button():
+async def test_issue_first_device_sends_file_first_then_qr_button():
     link = FakeNodeLink(
         result={
             "config_text": "[Interface]\nPrivateKey = SECRET",
             "qr_png_b64": "cXI=",  # непустой — фейковый PNG в base64 ("qr")
             "device_label": "Rose",
+            "prior_device_count": 0,  # первое устройство чата
         }
     )
     notifier = FakeNotifier()
     callback = FakeCallback("act:vpn:issue", chat_id=777)
     await vpn_handlers.handle_action(callback, link, notifier, _config(), GUEST, _pending())
 
-    # QR ушёл сразу, файл — ещё нет (решение пользователя 2026-08-04).
+    # Первое устройство чата — файл ушёл сразу, QR — ещё нет (решение
+    # пользователя 2026-08-04: скорее всего настраивается прямо с этого
+    # телефона).
+    assert notifier.sent_documents and notifier.sent_documents[0][0] == 777
+    assert b"SECRET" in notifier.sent_documents[0][1]
+    assert notifier.sent_photos == []
+    assert notifier.sent_direct and notifier.sent_direct[0][0] == 777
+    assert notifier.sent_direct_markups[0] is not None  # кнопка «Дать QR-код»
+
+
+async def test_issue_second_device_sends_qr_first_then_config_button():
+    link = FakeNodeLink(
+        result={
+            "config_text": "[Interface]\nPrivateKey = SECRET",
+            "qr_png_b64": "cXI=",
+            "device_label": "Rose",
+            "prior_device_count": 1,  # уже есть хотя бы одно устройство
+        }
+    )
+    notifier = FakeNotifier()
+    callback = FakeCallback("act:vpn:issue", chat_id=777)
+    await vpn_handlers.handle_action(callback, link, notifier, _config(), GUEST, _pending())
+
+    # Второе и последующие устройства — обычно для другого устройства/
+    # человека, поэтому QR уходит сразу, а файл — за кнопкой.
     assert notifier.sent_photos and notifier.sent_photos[0][0] == 777
     assert notifier.sent_documents == []
     assert notifier.sent_direct and notifier.sent_direct[0][0] == 777
@@ -196,6 +221,7 @@ async def test_config_button_delivers_file_and_hides_itself():
             "config_text": "[Interface]\nPrivateKey = SECRET",
             "qr_png_b64": "",
             "device_label": "Rose",
+            "prior_device_count": 1,  # QR первым, файл — по кнопке
         }
     )
     notifier = FakeNotifier()
@@ -214,12 +240,37 @@ async def test_config_button_delivers_file_and_hides_itself():
     assert callback2.message.reply_markup_cleared  # кнопка спряталась
 
 
+async def test_config_button_reveals_qr_when_file_was_first():
+    link = FakeNodeLink(
+        result={
+            "config_text": "[Interface]\nPrivateKey = SECRET",
+            "qr_png_b64": "cXI=",
+            "device_label": "Rose",
+            "prior_device_count": 0,  # файл первым, QR — по кнопке
+        }
+    )
+    notifier = FakeNotifier()
+    pending = _pending()
+    callback = FakeCallback("act:vpn:issue", chat_id=777)
+    await vpn_handlers.handle_action(callback, link, notifier, _config(), GUEST, pending)
+
+    button_markup = notifier.sent_direct_markups[0]
+    token_button = button_markup.inline_keyboard[0][0]
+    callback2 = FakeCallback(token_button.callback_data, chat_id=777)
+    await vpn_handlers.handle_action(callback2, link, notifier, _config(), GUEST, pending)
+
+    assert notifier.sent_photos  # секрет ушёл QR-картинкой, не файлом
+    assert notifier.sent_photos[0][0] == 777
+    assert callback2.message.reply_markup_cleared  # кнопка спряталась
+
+
 async def test_config_button_used_twice_refuses_second_time():
     link = FakeNodeLink(
         result={
             "config_text": "[Interface]\nPrivateKey = SECRET",
             "qr_png_b64": "",
             "device_label": "Rose",
+            "prior_device_count": 1,
         }
     )
     notifier = FakeNotifier()
@@ -243,6 +294,7 @@ async def test_issue_secret_cleans_up_after_ttl_without_click():
             "config_text": "[Interface]\nPrivateKey = SECRET",
             "qr_png_b64": "cXI=",
             "device_label": "Rose",
+            "prior_device_count": 1,
         }
     )
     notifier = FakeNotifier()
@@ -252,7 +304,7 @@ async def test_issue_secret_cleans_up_after_ttl_without_click():
     )
 
     await asyncio.sleep(0.05)  # дать фоновой задаче автоудаления отработать
-    assert len(notifier.deleted) == 2  # QR-сообщение и сообщение с кнопкой
+    assert len(notifier.deleted) == 2  # сообщение с секретом и сообщение с кнопкой
 
 
 async def test_resolve_request_approve(monkeypatch):

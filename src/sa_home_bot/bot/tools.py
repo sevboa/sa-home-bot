@@ -1610,52 +1610,79 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
         except (ServiceUnavailableError, TimeoutError) as exc:
             return f"недоступно: VPN-служба не отвечает ({exc})"
         issued_label = str(result.get("device_label") or device_label or "устройство")
+        # Первое устройство чата — почти наверняка настраивается прямо с
+        # этого телефона (рекомендуем файл: «Открыть с помощью» → AmneziaWG
+        # импортирует тоннель без копирования), второе и далее — обычно для
+        # ДРУГОГО устройства или человека (рекомендуем QR). Тот же критерий,
+        # что и у кнопок /vpn (bot/handlers/vpn.py::_send_secret, решение
+        # пользователя 2026-08-04) — vpn/service.py::_issue::prior_device_count.
+        file_first = int(result.get("prior_device_count") or 0) == 0
         if ctx.notifier is not None:
-            # QR сначала — сканируется прямо из приложения, удобно для
-            # настройки с ДРУГОГО устройства; файл — следом, для настройки
-            # С ЭТОГО (решение пользователя 2026-08-04).
             qr_b64 = result.get("qr_png_b64")
-            if qr_b64:
-                await ctx.notifier.send_photo(
+            file_caption = (
+                f"🔐 Конфиг устройства «{escape(issued_label)}».\n"
+                "Нажми на файл → «Открыть с помощью» → AmneziaWG — тоннель "
+                "добавится сразу, без копирования."
+            )
+            qr_caption = f"📶 QR — устройство «{escape(issued_label)}»."
+
+            async def _send_file() -> None:
+                await ctx.notifier.send_document(
                     target_chat_id,
-                    base64.b64decode(qr_b64),
-                    filename="vpn-qr.png",
-                    caption=f"📶 QR — устройство «{escape(issued_label)}».",
+                    str(result["config_text"]).encode("utf-8"),
+                    filename=_vpn_conf_filename(issued_label),
+                    caption=file_caption,
                     message_thread_id=target_thread_id,
                 )
-            await ctx.notifier.send_document(
-                target_chat_id,
-                str(result["config_text"]).encode("utf-8"),
-                filename=_vpn_conf_filename(issued_label),
-                caption=(
-                    f"🔐 Конфиг устройства «{escape(issued_label)}».\n"
-                    "Нажми на файл → «Открыть с помощью» → AmneziaWG — тоннель "
-                    "добавится сразу, без копирования."
-                ),
-                message_thread_id=target_thread_id,
-            )
+
+            async def _send_qr() -> None:
+                if qr_b64:
+                    await ctx.notifier.send_photo(
+                        target_chat_id,
+                        base64.b64decode(qr_b64),
+                        filename="vpn-qr.png",
+                        caption=qr_caption,
+                        message_thread_id=target_thread_id,
+                    )
+
+            if file_first:
+                await _send_file()
+                await _send_qr()
+            else:
+                await _send_qr()
+                await _send_file()
         who_note = f" {target_display}" if target_display else ""
+        recommendation = (
+            "для настройки удобнее конфиг-файл"
+            if file_first
+            else "если это другое устройство — удобнее QR, отсканировать его камерой из приложения"
+        )
         return (
             f"готово: устройство «{issued_label}», конфиг-файл (и QR) ушли{who_note} "
-            "личным сообщением (приватный ключ не показываю)"
+            f"личным сообщением — {recommendation} (приватный ключ не показываю)"
         )
 
     if action == _VPN_ACTION_APK:
         if ctx.notifier is None or ctx.chat_id is None:
             return "недоступно: сейчас не могу отправить сообщение"
-        # Сначала официальные способы поставить AmneziaWG (решение
+        # Сначала официальные способы поставить приложение (решение
         # пользователя 2026-08-04) — на iOS сайдлоада нет вовсе, а на
         # Android апстор надёжнее файла, который надо ещё разрешить
-        # ставить из неизвестного источника. Дублирует _apk_links_text
-        # bot/handlers/vpn.py — тот модуль тянет aiogram (клавиатуры),
-        # этот модуль сознательно не должен (см. докстринг файла).
+        # ставить из неизвестного источника. Рекомендуем полную AmneziaVPN,
+        # у облегчённой AmneziaWG — только .apk как аварийный запасной
+        # способ (решение пользователя 2026-08-04). Дублирует
+        # _apk_links_text bot/handlers/vpn.py — тот модуль тянет aiogram
+        # (клавиатуры), этот модуль сознательно не должен (см. докстринг
+        # файла).
         cfg = ctx.settings.vpn
         await ctx.notifier.send_direct(
             ctx.chat_id,
-            "📱 <b>AmneziaWG</b> — официальное приложение.\n\n"
+            "📱 Настоятельно рекомендуем полную версию — <b>AmneziaVPN</b>. Есть и "
+            "облегчённая — <b>AmneziaWG</b> (её и использует эта настройка).\n\n"
             f"🍎 App Store (iOS): {escape(cfg.ios_app_store_url)}\n"
             f"🤖 Google Play (Android): {escape(cfg.google_play_url)}\n"
-            f"🌐 Официальный сайт (все платформы): {escape(cfg.official_download_url)}",
+            f"🌐 Официальный сайт (все платформы, обе версии): "
+            f"{escape(cfg.official_download_url)}",
             message_thread_id=ctx.message_thread_id,
         )
         try:

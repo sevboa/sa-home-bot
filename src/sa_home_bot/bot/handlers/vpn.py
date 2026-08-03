@@ -10,18 +10,26 @@ CallbackAuthorizationMiddleware (``действие@vpn``), здесь толь�
 (тот же приём, что apps/monitor: у "act:"-кнопок один обработчик на все
 службы, разбор — по service).
 
-Секрет (приватный ключ) уходит в личку дважды (решение пользователя
-2026-08-04): сразу QR-картинкой (сканируется камерой прямо из приложения —
-удобно для НАСТРОЙКИ С ДРУГОГО устройства), а файл ``.conf`` — по отдельной
-кнопке «Дать файл конфига» под сообщением с QR, только когда гость реально
-попросит (тап на файл → «Открыть с помощью» → AmneziaWG импортирует тоннель
-без копирования — живая находка 2026-08-03 про сам механизм импорта). Кнопка
-исчезает после использования. Приватный ключ до этого момента нигде не
-хранится: ни в БД (vpn/service.py и так хранит только публичный), ни в
-callback_data (лимит Telegram — 64 байта, весь конфиг туда не влезает) — он
-живёт в памяти процесса ровно до выдачи или до ``[vpn].config_message_ttl_s``
-(bot/vpn_secrets.py::PendingVpnSecrets), когда оба сообщения (QR и кнопка,
-а если файл всё же попросили — то и он) бот удаляет сам."""
+Секрет (приватный ключ) уходит в личку дважды, но порядок способов зависит
+от того, первое ли это устройство чата (решение пользователя 2026-08-04,
+критерий — vpn/service.py::_issue → ``prior_device_count``):
+
+- первое устройство чата — почти наверняка настраивается ПРЯМО С ЭТОГО
+  телефона, поэтому сразу уходит файл ``.conf`` (тап на файл → «Открыть с
+  помощью» → AmneziaWG импортирует тоннель без копирования — живая находка
+  2026-08-03 про сам механизм импорта), а QR — по кнопке, если всё же нужно
+  перенести на другое устройство;
+- второе и последующие устройства чата — скорее всего заводятся ДЛЯ ДРУГОГО
+  устройства (или человека), поэтому сразу уходит QR (сканируется камерой
+  прямо из приложения), а файл — по кнопке.
+
+Кнопка одна и исчезает после использования. Приватный ключ до этого момента
+нигде не хранится: ни в БД (vpn/service.py и так хранит только публичный),
+ни в callback_data (лимит Telegram — 64 байта, весь конфиг туда не влезает)
+— он живёт в памяти процесса ровно до выдачи или до
+``[vpn].config_message_ttl_s`` (bot/vpn_secrets.py::PendingVpnSecrets), когда
+оба сообщения (первый способ и кнопка, а если второй способ всё же
+попросили — то и он) бот удаляет сам."""
 
 from __future__ import annotations
 
@@ -177,11 +185,15 @@ def _card_keyboard(
 def _apk_links_text(config: Settings) -> str:
     cfg = config.vpn
     return (
-        "📱 <b>AmneziaWG</b> — официальное приложение.\n\n"
+        "📱 Настоятельно рекомендуем полную версию — <b>AmneziaVPN</b>. Есть и "
+        "облегчённая — <b>AmneziaWG</b> (её и использует эта настройка).\n\n"
         f"🍎 App Store (iOS): {html.escape(cfg.ios_app_store_url)}\n"
         f"🤖 Google Play (Android): {html.escape(cfg.google_play_url)}\n"
-        f"🌐 Официальный сайт (все платформы): {html.escape(cfg.official_download_url)}\n\n"
-        "Или получите файл .apk прямо здесь, без магазина приложений — кнопка ниже."
+        f"🌐 Официальный сайт (все платформы, обе версии): "
+        f"{html.escape(cfg.official_download_url)}\n\n"
+        "Если магазины недоступны — можно получить файл .apk облегчённой версии "
+        "прямо здесь, кнопка ниже. Это аварийный способ на случай, если "
+        "официальные способы не сработали, а не замена им."
     )
 
 
@@ -271,6 +283,22 @@ def _conf_filename(device_label: str) -> str:
     return f"{slug[:budget]}_{stamp}.conf"
 
 
+def _file_caption(label_escaped: str) -> str:
+    return (
+        f"🔐 Конфиг устройства «{label_escaped}».\n"
+        "Нажмите на файл → «Открыть с помощью» → AmneziaWG — тоннель "
+        "добавится сразу, без копирования."
+    )
+
+
+def _qr_caption(label_escaped: str) -> str:
+    return (
+        f"📶 QR — устройство «{label_escaped}». Откройте AmneziaWG → "
+        "«+» → «Сканировать QR-код» (удобно для настройки с ДРУГОГО "
+        "устройства — сфотографировать собственный экран телефон не может)."
+    )
+
+
 async def _send_secret(
     notifier: Notifier,
     pending: PendingVpnSecrets,
@@ -283,49 +311,72 @@ async def _send_secret(
     device_label = str(result.get("device_label") or "")
     label_escaped = html.escape(device_label)
     config_text = str(result.get("config_text") or "")
-
-    photo_id = None
     qr_b64 = result.get("qr_png_b64")
-    if qr_b64:
-        photo_id = await notifier.send_photo(
+
+    # Первое устройство чата — почти наверняка настраивается прямо с этого
+    # телефона (файл удобнее), второе и далее — обычно для другого устройства
+    # или человека (QR удобнее). См. докстринг файла и
+    # vpn/service.py::_issue::prior_device_count.
+    file_first = int(result.get("prior_device_count") or 0) == 0
+
+    primary_id: int | None
+    if file_first:
+        sent = await notifier.send_document(
             chat_id,
-            base64.b64decode(qr_b64),
-            filename="vpn-qr.png",
-            caption=(
-                f"📶 QR — устройство «{label_escaped}». Откройте AmneziaWG → "
-                "«+» → «Сканировать QR-код» (удобно для настройки с "
-                "ДРУГОГО устройства — сфотографировать собственный экран "
-                "телефон не может)."
-            ),
+            config_text.encode("utf-8"),
+            filename=_conf_filename(device_label),
+            caption=_file_caption(label_escaped),
             message_thread_id=message_thread_id,
         )
+        primary_id = sent[0] if sent is not None else None
+        reveal = "qr"
+        prompt = (
+            "Настраиваете ДРУГОЕ устройство? Удобнее QR-кодом — нажмите ниже. "
+            "Кнопка одноразовая и скоро исчезнет."
+        )
+        button_text = "📶 Дать QR-код"
+    else:
+        primary_id = None
+        if qr_b64:
+            primary_id = await notifier.send_photo(
+                chat_id,
+                base64.b64decode(qr_b64),
+                filename="vpn-qr.png",
+                caption=_qr_caption(label_escaped),
+                message_thread_id=message_thread_id,
+            )
+        reveal = "file"
+        prompt = (
+            "Настраиваете С ЭТОГО устройства? Удобнее файлом — нажмите ниже. "
+            "Кнопка одноразовая и скоро исчезнет."
+        )
+        button_text = "📄 Дать файл конфига"
 
-    token = pending.put(config_text, device_label, ttl_s)
+    token = pending.put(config_text, device_label, qr_b64, reveal, ttl_s)
     button_id = await notifier.send_direct(
         chat_id,
-        "Настраиваете С ЭТОГО устройства? Удобнее файлом — нажмите ниже. "
-        "Кнопка одноразовая и скоро исчезнет.",
-        reply_markup=_get_config_keyboard(action_id, token),
+        prompt,
+        reply_markup=_get_config_keyboard(action_id, token, button_text),
         message_thread_id=message_thread_id,
     )
 
     async def _cleanup() -> None:
         await asyncio.sleep(ttl_s)
         pending.discard(token)
-        if photo_id is not None:
-            await notifier.delete_message(chat_id, photo_id)
+        if primary_id is not None:
+            await notifier.delete_message(chat_id, primary_id)
         if button_id is not None:
             await notifier.delete_message(chat_id, button_id)
 
     asyncio.create_task(_cleanup(), name="vpn-secret-cleanup")
 
 
-def _get_config_keyboard(action_id: str, token: str) -> InlineKeyboardMarkup:
+def _get_config_keyboard(action_id: str, token: str, button_text: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📄 Дать файл конфига",
+                    text=button_text,
                     # action_id — тот же, что выдал секрет (issue/reissue):
                     # право на кнопку то же самое (issue@vpn/reissue@vpn),
                     # заводить отдельное право под "забрать уже выданное"
@@ -405,9 +456,10 @@ async def handle_action(
             await callback.answer("Секрет доступа выдаётся только в личке.", show_alert=True)
             return
         if value and value.startswith("f_"):
-            # «📄 Дать файл конфига» под уже отправленным QR — секрет ждёт в
-            # памяти (bot/vpn_secrets.py), а не в БД и не в самом
-            # callback_data (см. докстринг файла).
+            # Кнопка под уже отправленным первым способом (файл или QR) —
+            # секрет ждёт в памяти (bot/vpn_secrets.py), а не в БД и не в
+            # самом callback_data (см. докстринг файла). ``reveal`` говорит,
+            # какой из двух способов отдать теперь.
             secret = pending_vpn_secrets.pop(value[2:])
             if secret is None:
                 await callback.answer(
@@ -415,17 +467,23 @@ async def handle_action(
                 )
                 return
             await callback.answer("Отправляю…")
-            await notifier.send_document(
-                chat_id,
-                secret.config_text.encode("utf-8"),
-                filename=_conf_filename(secret.device_label),
-                caption=(
-                    f"🔐 Конфиг устройства «{html.escape(secret.device_label)}».\n"
-                    "Нажмите на файл → «Открыть с помощью» → AmneziaWG — "
-                    "тоннель добавится сразу, без копирования."
-                ),
-                message_thread_id=callback.message.message_thread_id,
-            )
+            label_escaped = html.escape(secret.device_label)
+            if secret.reveal == "qr" and secret.qr_png_b64:
+                await notifier.send_photo(
+                    chat_id,
+                    base64.b64decode(secret.qr_png_b64),
+                    filename="vpn-qr.png",
+                    caption=_qr_caption(label_escaped),
+                    message_thread_id=callback.message.message_thread_id,
+                )
+            else:
+                await notifier.send_document(
+                    chat_id,
+                    secret.config_text.encode("utf-8"),
+                    filename=_conf_filename(secret.device_label),
+                    caption=_file_caption(label_escaped),
+                    message_thread_id=callback.message.message_thread_id,
+                )
             with contextlib.suppress(TelegramBadRequest):
                 await callback.message.edit_reply_markup(reply_markup=None)
             return
