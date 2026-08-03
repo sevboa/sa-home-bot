@@ -1530,6 +1530,11 @@ _VPN_CYRILLIC_TO_LATIN = str.maketrans(
     }
 )
 _VPN_UNSAFE_FILENAME = re.compile(r"[^a-zA-Z0-9_=+.-]+")
+# "amnezia-" — узнаваемый префикс (иначе файл потом не найти среди
+# загрузок, живая жалоба пользователя 2026-08-03), достаточно короткий,
+# чтобы после него оставалось место под слаг в лимите имени тоннеля.
+_VPN_FILENAME_PREFIX = "amnezia-"
+_VPN_MAX_TUNNEL_NAME = 15  # NAME_PATTERN wireguard-android: [a-zA-Z0-9_=+.-]{1,15}
 
 
 def _vpn_safe_filename(label: str) -> str:
@@ -1541,7 +1546,8 @@ def _vpn_safe_filename(label: str) -> str:
     slug = _VPN_DEVICE_LABEL_ASCII.get(key)
     if slug is None:
         slug = _VPN_UNSAFE_FILENAME.sub("-", key.translate(_VPN_CYRILLIC_TO_LATIN)).strip("-")
-    return (slug or "device")[:15]
+    slug = slug or "device"
+    return _VPN_FILENAME_PREFIX + slug[: _VPN_MAX_TUNNEL_NAME - len(_VPN_FILENAME_PREFIX)]
 
 
 async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:

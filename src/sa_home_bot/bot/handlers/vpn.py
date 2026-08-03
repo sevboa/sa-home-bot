@@ -204,19 +204,24 @@ _CYRILLIC_TO_LATIN = str.maketrans(
     }
 )
 _UNSAFE_FILENAME = re.compile(r"[^a-zA-Z0-9_=+.-]+")
+# Пользователь 2026-08-03: без узнаваемого префикса файл потом не найти
+# среди загрузок — "amnezia-" достаточно короток, чтобы после него
+# оставалось место под слаг в лимите имени тоннеля (см. ниже).
+_FILENAME_PREFIX = "amnezia-"
+_MAX_TUNNEL_NAME = 15  # NAME_PATTERN wireguard-android: [a-zA-Z0-9_=+.-]{1,15}
 
 
 def _safe_filename(label: str) -> str:
     """Имя тоннеля в .conf = имя файла без расширения — приложения на базе
     wireguard-android валидируют его по ``[a-zA-Z0-9_=+.-]{1,15}`` (см.
     NAME_PATTERN в исходниках): кириллица или длинное имя даёт «неправильное
-    имя» при импорте (живая находка 2026-08-03, полный сброс с побайтовым
-    ASCII вместо простого strip"_")."""
+    имя» при импорте (живая находка 2026-08-03)."""
     key = label.strip().lower()
     slug = _DEVICE_LABEL_ASCII.get(key)
     if slug is None:
         slug = _UNSAFE_FILENAME.sub("-", key.translate(_CYRILLIC_TO_LATIN)).strip("-")
-    return (slug or "device")[:15]
+    slug = slug or "device"
+    return _FILENAME_PREFIX + slug[: _MAX_TUNNEL_NAME - len(_FILENAME_PREFIX)]
 
 
 async def _send_secret(
