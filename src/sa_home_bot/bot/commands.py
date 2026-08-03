@@ -162,18 +162,37 @@ def parse_action_callback(data: str | None) -> tuple[str, str, str | None, str |
 # Пагинация /downtime («st:downtime_page:<offset>») — не кнопка под /status,
 # но требует тех же прав, что и сама команда DOWNTIME.
 DOWNTIME_PAGE_CODE = "downtime_page"
-# Кнопка «выставить гостя» под /guests («st:guest_revoke:<chat_id>») — здесь
-# же, чтобы право проверяла общая CallbackAuthorizationMiddleware, а не сам
-# обработчик: неизвестный ей префикс она пропускает без проверок.
-GUEST_REVOKE_CODE = "guest_revoke"
-# То же для ещё не погашенного кода («st:code_revoke:<КОД>») — выпустил и
-# передумал.
-CODE_REVOKE_CODE = "code_revoke"
+
+# Иерархия /guests — все коды с префиксом «g_», единая точка входа
+# bot/handlers/invites.py::on_guest_screen (bot/guests_view.py строит текст и
+# клавиатуру каждого экрана). Право у всех одно — GUESTS (`invite`), как и
+# раньше: кто приглашает, тот и управляет.
+GUESTS_LIST_CODE = "g_list"  # «st:g_list:<offset>» — список гостей, страница
+OPEN_CODES_LIST_CODE = "g_codes"  # «st:g_codes:<offset>» — открытые коды
+GUEST_CARD_CODE = "g_card"  # «st:g_card:<chat_id>» — карточка гостя
+GUEST_KICK_CONFIRM_CODE = "g_kick_ask"  # «st:g_kick_ask:<chat_id>» — «точно?»
+GUEST_REVOKE_CODE = "g_kick"  # «st:g_kick:<chat_id>» — подтверждённый отзыв
+CODE_REVOKE_CODE = "g_code_off"  # «st:g_code_off:<code>» — отозвать код
+GUEST_STATS_CODE = "g_stats"  # «st:g_stats:<chat_id>» — расход VPN гостя
+GUEST_PERMS_CODE = "g_perms"  # «st:g_perms:<chat_id>:<offset>» — права гостя
+GUEST_PERM_OFF_CODE = "g_poff"  # «st:g_poff:<chat_id>:<offset>:<право>»
+GUEST_PERM_ADD_LIST_CODE = "g_padd"  # «st:g_padd:<chat_id>:<offset>»
+GUEST_PERM_ADD_CODE = "g_pon"  # «st:g_pon:<chat_id>:<offset>:<право>»
+
 _ALL_CALLBACK_ACTIONS: dict[str, Command] = {
     **STATUS_ACTIONS,
     DOWNTIME_PAGE_CODE: DOWNTIME,
+    GUESTS_LIST_CODE: GUESTS,
+    OPEN_CODES_LIST_CODE: GUESTS,
+    GUEST_CARD_CODE: GUESTS,
+    GUEST_KICK_CONFIRM_CODE: GUESTS,
     GUEST_REVOKE_CODE: GUESTS,
     CODE_REVOKE_CODE: GUESTS,
+    GUEST_STATS_CODE: GUESTS,
+    GUEST_PERMS_CODE: GUESTS,
+    GUEST_PERM_OFF_CODE: GUESTS,
+    GUEST_PERM_ADD_LIST_CODE: GUESTS,
+    GUEST_PERM_ADD_CODE: GUESTS,
     NODES_CODE: NODES,
     NODE_CARD_CODE: STATUS,  # карточка ноды = данные /status
     SERVICE_CARD_CODE: NODES,  # карточка службы — часть управления нодами

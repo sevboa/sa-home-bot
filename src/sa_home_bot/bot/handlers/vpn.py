@@ -214,6 +214,17 @@ def _is_admin(subscription: Subscription) -> bool:
     return subscription.allows_action(vpn_protocol.ACTION_PEERS, SERVICE)
 
 
+async def usage_text(node_link: ServiceLink, chat_id: int) -> str:
+    """Расход VPN произвольного чата — текстом, без клавиатуры.
+
+    Переиспользуется карточкой гостя в /guests (кнопка «Статистика VPN»):
+    та же служба и то же действие usage@vpn, что и у команды /vpn, только для
+    чужого chat_id — админ имеет право знать расход того, кем управляет.
+    """
+    error, usage = await _card(node_link, chat_id)
+    return error if error is not None else _usage_text(usage)
+
+
 async def _card(node_link: ServiceLink, chat_id: int) -> tuple[str, dict] | tuple[None, None]:
     try:
         usage = await node_link.command(

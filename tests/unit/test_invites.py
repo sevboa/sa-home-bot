@@ -196,6 +196,54 @@ async def test_guest_can_be_revoked(store, tmp_path):
     assert gate.revoke_guest(1) is False
 
 
+# --- точечная правка прав гостя (решение 2026-08-04) ----------------------
+
+
+async def test_add_guest_right_updates_book_and_package(store, tmp_path):
+    path = tmp_path / "telegram-bot.test.guests.toml"
+    gate = _gate(store, tmp_path)
+    code, _ = await gate.issue(chat_id=1, user_id=None)
+    await gate.try_admit(77, code)
+
+    updated = gate.add_guest_right(77, "usage@vpn")
+    assert updated is not None
+    assert updated.allows_command("usage@vpn")
+    assert gate._book.for_chat(77).allows_command("usage@vpn")  # noqa: SLF001
+
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    assert "usage@vpn" in data["guest_subscriptions"][0]["allowed_commands"]
+
+
+async def test_remove_guest_right_updates_book_and_package(store, tmp_path):
+    path = tmp_path / "telegram-bot.test.guests.toml"
+    cfg = InvitesConfig(grant_commands=["chat@llm", "search@net"])
+    gate = _gate(store, tmp_path, cfg=cfg)
+    code, _ = await gate.issue(chat_id=1, user_id=None)
+    await gate.try_admit(77, code)
+
+    updated = gate.remove_guest_right(77, "search@net")
+    assert updated is not None
+    assert not updated.allows_command("search@net")
+    assert updated.allows_command("chat@llm")  # прочие права не тронуты
+
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    assert data["guest_subscriptions"][0]["allowed_commands"] == ["chat@llm"]
+
+
+async def test_guest_rights_cannot_touch_owner_subscription(store, tmp_path):
+    # Владельческая подписка (chat_id=1 в _book()) — не гость: точечная
+    # правка прав её не касается, как и revoke_guest.
+    gate = _gate(store, tmp_path)
+    assert gate.add_guest_right(1, "usage@vpn") is None
+    assert gate.remove_guest_right(1, "invite") is None
+
+
+def test_guest_right_on_unknown_chat_is_noop(store, tmp_path):
+    gate = _gate(store, tmp_path)
+    assert gate.add_guest_right(9999, "usage@vpn") is None
+    assert gate.remove_guest_right(9999, "usage@vpn") is None
+
+
 # --- гостевой пакет ------------------------------------------------------
 
 

@@ -8,21 +8,19 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from datetime import UTC, datetime
 from html import escape
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, Filter
-from aiogram.types import (
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
-)
+from aiogram.types import CallbackQuery, Message
 
-from sa_home_bot.bot import ai_flow, commands, invites
+from sa_home_bot.bot import ai_flow, commands, guests_view, invites
 from sa_home_bot.bot.handlers import ai as ai_handlers
+from sa_home_bot.bot.handlers import vpn as vpn_handlers
 from sa_home_bot.bot.handlers.basic import build_help
 from sa_home_bot.bot.invites import Admission, Gatekeeper
 from sa_home_bot.bot.menu import refresh_chat_menu
@@ -119,101 +117,189 @@ async def cmd_invite(
     )
 
 
-def _local_time(iso: str) -> str:
-    """UTC-метку из базы — в местное время, как везде в боте.
+# Реэкспорт: старое имя используется тестом test_guest_list_shows_local_time,
+# каноническая реализация — в guests_view (её же зовут экраны /guests).
+_local_time = guests_view.format_local_time
 
-    Хранится всё в UTC (одно правило на проект), а показывать надо то время,
-    которое человек видит на своих часах: обрезка ISO-строки давала «05:02»
-    вместо «10:02» — живая находка 2026-07-30.
-    """
+
+def _parse_int(raw: str | None, default: int = 0) -> int:
     try:
-        return datetime.fromisoformat(iso).astimezone().strftime("%Y-%m-%d %H:%M")
+        return int(raw) if raw is not None else default
     except ValueError:
-        return iso
+        return default
 
 
 @router.message(Command(commands.GUESTS.name))
-async def cmd_guests(message: Message, gate: Gatekeeper, book: SubscriptionBook) -> None:
+async def cmd_guests(message: Message, book: SubscriptionBook) -> None:
     guests = sorted(book.guests(), key=lambda g: g.invited_at)
-    open_codes = await gate.open_codes()
-
-    lines = ["<b>Приглашённые</b>", ""]
-    if guests:
-        for guest in guests:
-            # «вход», а не «вошёл»: гость бывает и женщиной, а рода мы не знаем.
-            lines.append(
-                f"• {escape(guest.name)} — <code>{guest.chat_id}</code>"
-                + (f", вход {_local_time(guest.invited_at)}" if guest.invited_at else "")
-            )
-    else:
-        lines.append("Пока никого.")
-    if open_codes:
-        lines += ["", "<b>Открытые коды</b>", ""]
-        lines += [
-            f"• <code>{invites.format_code(row['code'])}</code> — до "
-            f"{_local_time(row['expires_at'])}"
-            for row in open_codes
-        ]
-
-    buttons = [
-        [
-            InlineKeyboardButton(
-                text=f"Выставить {guest.name}"[:64],
-                callback_data=f"{commands.CALLBACK_PREFIX}:"
-                f"{commands.GUEST_REVOKE_CODE}:{guest.chat_id}",
-            )
-        ]
-        for guest in guests
-    ]
-    buttons += [
-        [
-            InlineKeyboardButton(
-                text=f"Отозвать код {invites.format_code(row['code'])}",
-                callback_data=f"{commands.CALLBACK_PREFIX}:"
-                f"{commands.CODE_REVOKE_CODE}:{row['code']}",
-            )
-        ]
-        for row in open_codes
-    ]
-    await message.answer(
-        "\n".join(lines),
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None,
-    )
+    text, keyboard = guests_view.build_list_view(guests, 0)
+    await message.answer(text, reply_markup=keyboard)
 
 
-@router.callback_query(
-    F.data.startswith(f"{commands.CALLBACK_PREFIX}:{commands.GUEST_REVOKE_CODE}:")
-)
-async def on_guest_revoke(callback: CallbackQuery, gate: Gatekeeper, bot: Bot) -> None:
-    try:
-        chat_id = int((callback.data or "").rsplit(":", 1)[1])
-    except ValueError:
-        await callback.answer("Не разобрал, кого выставлять", show_alert=True)
+async def _redraw(callback: CallbackQuery, text: str, keyboard) -> None:
+    if callback.message is None:
         return
-    if not gate.revoke_guest(chat_id):
-        await callback.answer("Такого гостя уже нет", show_alert=True)
-        return
-    # Меню чата больше не наше дело — убираем, чтобы у выставленного не
-    # осталось кнопок, которые всё равно не сработают.
-    await refresh_chat_menu(bot, chat_id, None)
-    await callback.answer("Гость выставлен")
-    if callback.message:
-        await callback.message.answer(f"🚪 Гость <code>{chat_id}</code> больше не впущен.")
+    with contextlib.suppress(TelegramBadRequest):
+        await callback.message.edit_text(text, reply_markup=keyboard)
 
 
-@router.callback_query(
-    F.data.startswith(f"{commands.CALLBACK_PREFIX}:{commands.CODE_REVOKE_CODE}:")
-)
-async def on_code_revoke(callback: CallbackQuery, gate: Gatekeeper) -> None:
-    code = (callback.data or "").rsplit(":", 1)[1]
-    if not await gate.revoke_code(code):
-        await callback.answer("Код уже погашен или отозван", show_alert=True)
+async def _guest_or_redraw_list(
+    callback: CallbackQuery, book: SubscriptionBook, chat_id: int
+) -> Subscription | None:
+    """Найти гостя по chat_id; если его уже нет (отозван из другой сессии) —
+    честно откатить экран на список вместо ошибки в чат."""
+    sub = book.for_chat(chat_id)
+    if sub is not None and sub.is_guest:
+        return sub
+    await callback.answer("Такого гостя уже нет", show_alert=True)
+    guests = sorted(book.guests(), key=lambda g: g.invited_at)
+    text, keyboard = guests_view.build_list_view(guests, 0)
+    await _redraw(callback, text, keyboard)
+    return None
+
+
+@router.callback_query(F.data.startswith(f"{commands.CALLBACK_PREFIX}:g_"))
+async def on_guest_screen(
+    callback: CallbackQuery,
+    gate: Gatekeeper,
+    book: SubscriptionBook,
+    node_link: ServiceLink,
+    bot: Bot,
+) -> None:
+    """Единая точка входа во всю иерархию /guests (bot/guests_view.py строит
+    текст и клавиатуру каждого экрана; здесь — разбор callback'а, сетевые
+    вызовы и запись состояния). Права уже проверены
+    CallbackAuthorizationMiddleware (право GUESTS = `invite`)."""
+    parts = (callback.data or "").split(":")
+    code = parts[1] if len(parts) > 1 else ""
+
+    if code == commands.GUESTS_LIST_CODE:
+        offset = _parse_int(parts[2] if len(parts) > 2 else None)
+        guests = sorted(book.guests(), key=lambda g: g.invited_at)
+        text, keyboard = guests_view.build_list_view(guests, offset)
+        await _redraw(callback, text, keyboard)
+        await callback.answer()
         return
-    await callback.answer("Код отозван")
-    if callback.message:
-        await callback.message.answer(
-            f"🔒 Код <code>{invites.format_code(code)}</code> отозван."
+
+    if code == commands.OPEN_CODES_LIST_CODE:
+        offset = _parse_int(parts[2] if len(parts) > 2 else None)
+        open_codes = await gate.open_codes()
+        text, keyboard = guests_view.build_codes_view(open_codes, offset)
+        await _redraw(callback, text, keyboard)
+        await callback.answer()
+        return
+
+    if code == commands.CODE_REVOKE_CODE:
+        raw_code = parts[2] if len(parts) > 2 else ""
+        ok = await gate.revoke_code(raw_code)
+        toast = "Код отозван" if ok else "Код уже погашен или отозван"
+        await callback.answer(toast, show_alert=not ok)
+        open_codes = await gate.open_codes()
+        text, keyboard = guests_view.build_codes_view(open_codes, 0)
+        await _redraw(callback, text, keyboard)
+        return
+
+    if code == commands.GUEST_CARD_CODE:
+        chat_id = _parse_int(parts[2] if len(parts) > 2 else None, default=-1)
+        sub = await _guest_or_redraw_list(callback, book, chat_id)
+        if sub is None:
+            return
+        text, keyboard = guests_view.build_card_view(sub)
+        await _redraw(callback, text, keyboard)
+        await callback.answer()
+        return
+
+    if code == commands.GUEST_KICK_CONFIRM_CODE:
+        chat_id = _parse_int(parts[2] if len(parts) > 2 else None, default=-1)
+        sub = await _guest_or_redraw_list(callback, book, chat_id)
+        if sub is None:
+            return
+        text, keyboard = guests_view.build_kick_confirm_view(sub)
+        await _redraw(callback, text, keyboard)
+        await callback.answer()
+        return
+
+    if code == commands.GUEST_REVOKE_CODE:
+        chat_id = _parse_int(parts[2] if len(parts) > 2 else None, default=-1)
+        ok = gate.revoke_guest(chat_id)
+        if ok:
+            # Меню чата больше не наше дело — убираем, чтобы у выставленного
+            # не осталось кнопок, которые всё равно не сработают.
+            await refresh_chat_menu(bot, chat_id, None)
+            await callback.answer("Гость выставлен")
+            if callback.message:
+                await callback.message.answer(f"🚪 Гость <code>{chat_id}</code> больше не впущен.")
+        else:
+            await callback.answer("Такого гостя уже нет", show_alert=True)
+        guests = sorted(book.guests(), key=lambda g: g.invited_at)
+        text, keyboard = guests_view.build_list_view(guests, 0)
+        await _redraw(callback, text, keyboard)
+        return
+
+    if code == commands.GUEST_STATS_CODE:
+        chat_id = _parse_int(parts[2] if len(parts) > 2 else None, default=-1)
+        sub = await _guest_or_redraw_list(callback, book, chat_id)
+        if sub is None:
+            return
+        body = await vpn_handlers.usage_text(node_link, chat_id)
+        text, keyboard = guests_view.build_back_to_card_view(sub.name, chat_id, body)
+        await _redraw(callback, text, keyboard)
+        await callback.answer()
+        return
+
+    if code == commands.GUEST_PERMS_CODE:
+        chat_id = _parse_int(parts[2] if len(parts) > 2 else None, default=-1)
+        offset = _parse_int(parts[3] if len(parts) > 3 else None)
+        sub = await _guest_or_redraw_list(callback, book, chat_id)
+        if sub is None:
+            return
+        text, keyboard = guests_view.build_perms_view(sub, offset)
+        await _redraw(callback, text, keyboard)
+        await callback.answer()
+        return
+
+    if code == commands.GUEST_PERM_ADD_LIST_CODE:
+        chat_id = _parse_int(parts[2] if len(parts) > 2 else None, default=-1)
+        offset = _parse_int(parts[3] if len(parts) > 3 else None)
+        sub = await _guest_or_redraw_list(callback, book, chat_id)
+        if sub is None:
+            return
+        text, keyboard = guests_view.build_perm_add_view(sub, offset)
+        await _redraw(callback, text, keyboard)
+        await callback.answer()
+        return
+
+    if code == commands.GUEST_PERM_OFF_CODE:
+        chat_id = _parse_int(parts[2] if len(parts) > 2 else None, default=-1)
+        offset = _parse_int(parts[3] if len(parts) > 3 else None)
+        right = parts[4] if len(parts) > 4 else ""
+        updated = gate.remove_guest_right(chat_id, right)
+        if updated is None:
+            await _guest_or_redraw_list(callback, book, chat_id)
+            return
+        await refresh_chat_menu(bot, chat_id, updated)
+        await callback.answer("Право снято")
+        offset = guests_view.clamp_offset(
+            offset, guests_view.PERM_PAGE_SIZE, len(updated.allowed_commands)
         )
+        text, keyboard = guests_view.build_perms_view(updated, offset)
+        await _redraw(callback, text, keyboard)
+        return
+
+    if code == commands.GUEST_PERM_ADD_CODE:
+        chat_id = _parse_int(parts[2] if len(parts) > 2 else None, default=-1)
+        right = parts[4] if len(parts) > 4 else ""
+        updated = gate.add_guest_right(chat_id, right)
+        if updated is None:
+            await _guest_or_redraw_list(callback, book, chat_id)
+            return
+        await refresh_chat_menu(bot, chat_id, updated)
+        await callback.answer("Право выдано")
+        text, keyboard = guests_view.build_perms_view(updated, 0)
+        await _redraw(callback, text, keyboard)
+        return
+
+    await callback.answer()
 
 
 class CodeFromInsider(Filter):

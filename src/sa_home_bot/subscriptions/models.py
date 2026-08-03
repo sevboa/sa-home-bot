@@ -66,3 +66,6 @@ class Subscription:
 
     def with_broken(self, broken: bool = True) -> Subscription:
         return replace(self, broken=broken)
+
+    def with_allowed_commands(self, allowed_commands: frozenset[str]) -> Subscription:
+        return replace(self, allowed_commands=allowed_commands)

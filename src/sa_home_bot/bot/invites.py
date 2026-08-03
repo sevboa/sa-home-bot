@@ -265,3 +265,46 @@ class Gatekeeper:
         self._guests.save(self._book.guests())
         log.info("Гость chat_id=%s отозван", chat_id)
         return True
+
+    # --- права гостя (точечно, в рантайме) -----------------------------------
+    #
+    # Раньше (AUTHORIZATION.md §8.11 в старой редакции) права гостя были
+    # заданы раз и навсегда набором `[invites].grant_commands` — решение
+    # 2026-08-04 сняло это ограничение: гостевые подписки и так уже мутабельны
+    # в рантайме (revoke_guest выше), точечная правка — тот же приём, что и
+    # полный отзыв, только re-write подписки вместо её удаления.
+
+    def set_guest_rights(
+        self, chat_id: int, allowed_commands: frozenset[str]
+    ) -> Subscription | None:
+        """Переписать набор прав гостя целиком. None — не гость (или его нет).
+
+        Владельческую подписку так не тронуть: она иммутабельна во время
+        работы (правка = правка конфига + рестарт), и `sub.is_guest` это
+        гарантирует так же, как в revoke_guest.
+        """
+        sub = self._book.for_chat(chat_id)
+        if sub is None or not sub.is_guest:
+            return None
+        updated = sub.with_allowed_commands(allowed_commands)
+        self._book.add(updated)
+        self._guests.save(self._book.guests())
+        return updated
+
+    def add_guest_right(self, chat_id: int, right: str) -> Subscription | None:
+        sub = self._book.for_chat(chat_id)
+        if sub is None:
+            return None
+        updated = self.set_guest_rights(chat_id, sub.allowed_commands | {right})
+        if updated is not None:
+            log.info("Гостю chat_id=%s выдано право %s", chat_id, right)
+        return updated
+
+    def remove_guest_right(self, chat_id: int, right: str) -> Subscription | None:
+        sub = self._book.for_chat(chat_id)
+        if sub is None:
+            return None
+        updated = self.set_guest_rights(chat_id, sub.allowed_commands - {right})
+        if updated is not None:
+            log.info("У гостя chat_id=%s отозвано право %s", chat_id, right)
+        return updated
