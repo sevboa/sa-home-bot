@@ -1560,9 +1560,43 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
     dst = Address(node=vpn_protocol.NODE_ID, service=vpn_protocol.SERVICE_NAME)
 
     if action in (vpn_protocol.ACTION_ISSUE, vpn_protocol.ACTION_REISSUE):
-        if ctx.chat_id is None or ctx.chat_id <= 0:
-            return "недоступно: секрет доступа отдаю только в личном чате, не в группе"
         device_label = str(args.get("device_label") or "устройство").strip()
+        who = str(args.get("recipient") or "").strip()
+        target_display: str | None = None
+        if who:
+            # Выдать/перевыпустить доступ ДРУГОМУ человеку — только у админа
+            # (peers@vpn, тот же признак, что у кнопки «Все гости»). Секрет
+            # уходит В ЧАТ ПОЛУЧАТЕЛЯ, не того, кто просит — живой баг
+            # 2026-08-04: тул тихо создавал пир себе с меткой чужого имени и
+            # слал конфиг просящему, отдавая чужой приватный ключ не тому
+            # человеку, пока модель ещё и врала, что получатель его получил.
+            is_admin = ctx.subscription is not None and ActionRight(
+                vpn_protocol.ACTION_PEERS, _VPN_SERVICE
+            ).granted(ctx.subscription)
+            if not is_admin:
+                return (
+                    "недоступно: выдавать VPN другому человеку может только "
+                    "админ — пусть он попросит меня об этом сам, в своём чате"
+                )
+            if ctx.book is None:
+                return "недоступно: сейчас не могу искать получателей по имени"
+            found = recipients.find_recipients(who, ctx.book, ctx.settings.people)
+            if not found:
+                return (
+                    f"не получилось: «{who}» я не знаю — выдавать доступ я могу "
+                    "только тем, кто уже говорит со мной в личном чате"
+                )
+            if len(found) > 1:
+                names = ", ".join(f"{r.display} ({r.chat_id})" for r in found)
+                return f"уточни, кому именно: под «{who}» подходят {names}"
+            target_chat_id = found[0].chat_id
+            target_thread_id = None  # чужой чат — свои топики тут ни при чём
+            target_display = found[0].display
+        else:
+            if ctx.chat_id is None or ctx.chat_id <= 0:
+                return "недоступно: секрет доступа отдаю только в личном чате, не в группе"
+            target_chat_id = ctx.chat_id
+            target_thread_id = ctx.message_thread_id
         # reissue снимает старый ключ немедленно (vpn/service.py::_reissue) —
         # устройство, где он ещё стоит, обрывает соединение сразу же, до
         # того как человек успеет поставить новый .conf. Модель обязана
@@ -1571,16 +1605,17 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
         # ERR_QUOTA_CEILING ниже: тул возвращает модели, что сделать дальше,
         # вместо того чтобы действовать по собственной инициативе).
         if action == vpn_protocol.ACTION_REISSUE and not args.get("confirm"):
+            target_note = f" у {target_display}" if target_display else ""
             return (
-                f"уточни у собеседника: перевыпуск заменит ключ устройства «{device_label}» — "
-                "старый конфиг на нём перестанет работать СРАЗУ ЖЕ, ещё до того как "
-                "придёт новый файл. Спроси явное согласие и только потом вызови vpn "
-                "ещё раз с тем же device_label и confirm=true — без этого параметра "
-                "перевыпуск не выполнится."
+                f"уточни подтверждение: перевыпуск заменит ключ устройства "
+                f"«{device_label}»{target_note} — старый конфиг перестанет работать "
+                "СРАЗУ ЖЕ, ещё до того как придёт новый файл. Спроси явное согласие "
+                "и только потом вызови vpn ещё раз с теми же параметрами и "
+                "confirm=true — без этого параметра перевыпуск не выполнится."
             )
         try:
             result = await ctx.node_link.command(
-                action, {"chat_id": ctx.chat_id, "device_label": device_label}, dst=dst
+                action, {"chat_id": target_chat_id, "device_label": device_label}, dst=dst
             )
         except ProtoError as exc:
             return f"не вышло: {exc.message}"
@@ -1589,7 +1624,7 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
         if ctx.notifier is not None:
             filename = f"{_vpn_safe_filename(device_label)}.conf"
             await ctx.notifier.send_document(
-                ctx.chat_id,
+                target_chat_id,
                 str(result["config_text"]).encode("utf-8"),
                 filename=filename,
                 caption=(
@@ -1597,18 +1632,22 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
                     "Нажми на файл → «Открыть с помощью» → AmneziaWG — тоннель "
                     "добавится сразу, без копирования."
                 ),
-                message_thread_id=ctx.message_thread_id,
+                message_thread_id=target_thread_id,
             )
             qr_b64 = result.get("qr_png_b64")
             if qr_b64:
                 await ctx.notifier.send_photo(
-                    ctx.chat_id,
+                    target_chat_id,
                     base64.b64decode(qr_b64),
                     filename="vpn-qr.png",
                     caption="QR — для настройки с другого устройства",
-                    message_thread_id=ctx.message_thread_id,
+                    message_thread_id=target_thread_id,
                 )
-        return "готово: конфиг-файл (и QR) ушли личным сообщением (приватный ключ не показываю)"
+        who_note = f" {target_display}" if target_display else ""
+        return (
+            f"готово: конфиг-файл (и QR) ушли{who_note} личным сообщением "
+            "(приватный ключ не показываю)"
+        )
 
     if action == _VPN_ACTION_APK:
         try:
@@ -1709,17 +1748,25 @@ _DECL_VPN: dict[str, Any] = {
             "usage — свой расход и лимит месяца (у админа — с all_guests=true "
             "сводка по всем гостям: расход, лимит и число устройств каждого, "
             "плюс сколько трафика ноды ещё свободно от резерва); issue — "
-            "выдать доступ новому устройству (device_label — как назвать, "
-            "например «телефон»), число устройств не ограничено; reissue — "
-            "перевыпустить существующее: старый ключ СРАЗУ перестаёт работать "
-            "на устройстве, поэтому сначала спроси подтверждение у "
-            "собеседника словами и вызови ещё раз с confirm=true, только когда "
-            "он явно согласился; grant_extra — добавить трафика самому (доступно, "
-            "только когда трафика реально осталось мало — иначе тул откажет и "
-            "скажет, когда можно попробовать снова), пока не упёрся в потолок "
-            "самообслуживания (тогда используй request_extra — заявка админу, "
-            "необязательный gb — сколько ГБ); apk — прислать официальное "
-            "приложение AmneziaWG.\n"
+            "выдать доступ новому устройству (device_label — КАК НАЗВАТЬ "
+            "УСТРОЙСТВО, например «телефон», «ноутбук» — НЕ имя человека), "
+            "число устройств не ограничено; reissue — перевыпустить "
+            "существующее: старый ключ СРАЗУ перестаёт работать на устройстве, "
+            "поэтому сначала спроси подтверждение словами и вызови ещё раз с "
+            "confirm=true, только когда получено явное согласие; grant_extra — "
+            "добавить трафика самому (доступно, только когда трафика реально "
+            "осталось мало — иначе тул откажет и скажет, когда можно "
+            "попробовать снова), пока не упёрся в потолок самообслуживания "
+            "(тогда используй request_extra — заявка админу, необязательный "
+            "gb — сколько ГБ); apk — прислать официальное приложение "
+            "AmneziaWG.\n"
+            "issue/reissue БЕЗ recipient — всегда себе, в ТЕКУЩИЙ разговор. "
+            "«Выдай/перевыпусти доступ Наташе» (просьба выдать ДРУГОМУ "
+            "человеку, не тому, кто сейчас пишет) — это recipient=«Наташа», "
+            "доступно ТОЛЬКО админу; без права на это тул сам откажет, не "
+            "выдумывай, что получилось, если он сказал «недоступно». Секрет "
+            "тогда уходит В ЛИЧКУ ПОЛУЧАТЕЛЯ, не тому, кто попросил, — не "
+            "утверждай, что конфиг получил ты сам или собеседник.\n"
             "Как подключиться — объясняй своими словами по этим фактам, не "
             "выдумывай другой порядок: поставить приложение AmneziaWG (action="
             "«apk» пришлёт его файлом, оно же есть в Google Play/F-Droid под "
@@ -1740,7 +1787,18 @@ _DECL_VPN: dict[str, Any] = {
                 },
                 "device_label": {
                     "type": "string",
-                    "description": "issue/reissue: имя устройства, например «телефон»",
+                    "description": (
+                        "issue/reissue: имя УСТРОЙСТВА (телефон/ноутбук/...), "
+                        "не имя человека"
+                    ),
+                },
+                "recipient": {
+                    "type": "string",
+                    "description": (
+                        "issue/reissue: имя/ник ДРУГОГО человека, которому "
+                        "выдать доступ (не себе) — только у админа. Без этого "
+                        "параметра — всегда себе"
+                    ),
                 },
                 "all_guests": {
                     "type": "boolean",
