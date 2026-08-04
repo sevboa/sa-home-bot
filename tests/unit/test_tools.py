@@ -640,6 +640,11 @@ async def test_remind_after_event_creates_task_without_when(store):
     # due_at — страховка, не пусто, и не «прямо сейчас».
     due_at = datetime.fromisoformat(args["due_at"])
     assert due_at > datetime.now(UTC)
+    # Живой баг 2026-08-05: конкретное время дедлайна в директиве
+    # заставляло маленькую модель (Gemma) звать get_time по кругу, чтобы
+    # его "проверить" — решение системы, а не модели, время из текста убрано.
+    directive = args["args"]["messages"][-1]["content"]
+    assert due_at.strftime("%H:%M") not in directive
     assert "продолжи обновление роя" in args["args"]["messages"][-1]["content"]
 
 
