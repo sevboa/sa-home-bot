@@ -216,32 +216,43 @@ class PeerLink:
         return [str(ep) for ep in self._candidates]
 
     def learn_endpoints(self, advertised: Sequence[str]) -> None:
-        """Запомнить адреса, которые сосед назвал в hello.
+        """Взять адреса ЭТОГО hello как полную и единственную правду о
+        соседе — не добавить к тому, что копилось раньше.
 
-        Выученное не вытесняет заданное в конфиге, а дополняет: сосед знает
-        свои адреса точнее (он их и слушает), но конфиг — единственное, что
-        работает, пока сосед недоступен и спросить его нельзя.
+        Живая находка 2026-08-04: раньше выученное только прирастало ("не
+        забывается, сосед может вернуться по любому из них") — на практике
+        это значило, что стухший адрес (DHCP без резервации отдал его
+        другой машине, в том числе нам самим) простаивал в списке
+        кандидатов НАВСЕГДА, в надежде, что однажды "вернётся к старому".
+        Сосед сам знает точнее любой нашей памяти о прошлом, где он сейчас
+        слушает — берём ровно то, что он сказал ПРЯМО СЕЙЧАС, плюс адрес,
+        на котором связь есть в этот момент (он не может быть стухшим по
+        определению). Конфиг/состояние, с которых линк стартовал, не
+        трогаем здесь — они остаются попыткой для ПЕРВОГО подключения, пока
+        соседа ни разу не удавалось спросить о себе.
 
         Loopback отбраковывается жёстко: по ``127.0.0.1`` мы попадём не к
         соседу, а к себе — и, если у себя тот же порт, примем свою же ноду
         за него (от этого спасает ещё и сверка имени в `_dial`).
         """
-        known = set(self._candidates)
-        added: list[Endpoint] = []
+        # Адрес, на котором связь есть прямо сейчас, не проходит фильтр
+        # loopback: unix-сокет — заведомо валидный путь ИМЕННО когда мы уже
+        # соединены по нему (в отличие от только что объявленного 127.0.0.1
+        # соседом — тому верить нельзя, см. докстринг).
+        fresh: list[Endpoint] = [self.endpoint]
+        seen: set[Endpoint] = {self.endpoint}
         for ep in _parse_all(list(advertised)):
-            if len(known) >= MAX_ENDPOINTS:
-                break
-            if ep in known or is_loopback(ep):
+            if ep in seen or is_loopback(ep) or len(fresh) >= MAX_ENDPOINTS:
                 continue
-            known.add(ep)
-            added.append(ep)
-        if not added:
+            seen.add(ep)
+            fresh.append(ep)
+        if seen == set(self._candidates):
             return
-        self._candidates = _order_endpoints([*self._candidates, *added], first=self.endpoint)
+        self._candidates = _order_endpoints(fresh, first=self.endpoint)
         log.info(
-            "PeerLink %s: узнал новые адреса соседа — %s",
+            "PeerLink %s: адреса соседа (по последнему hello) — %s",
             self.name,
-            ", ".join(str(ep) for ep in added),
+            ", ".join(str(ep) for ep in self._candidates),
         )
         if self._on_endpoints is not None:
             self._on_endpoints(self.name, self.endpoints)
@@ -423,23 +434,37 @@ class PeerLink:
         return None
 
     async def _serve(self, client: ProtoClient, info: ServiceInfo, endpoint: Endpoint) -> None:
-        """Связь установлена: держать её, пока не оборвётся."""
-        switched = endpoint != self.endpoint
-        if switched:
-            log.info("PeerLink %s: путь сменился на %s", self.name, endpoint)
-        # Удачный адрес становится первым в следующем переборе — и он же
-        # переживает рестарт ноды (см. on_endpoints).
-        self.endpoint = endpoint
-        self._candidates = _order_endpoints(self._candidates, first=endpoint)
-        if switched and self._on_endpoints is not None:
-            self._on_endpoints(self.name, self.endpoints)
+        """Связь установлена: держать её, пока не оборвётся.
+
+        Своё представление о соседе (адрес, тип, WoL, список путей)
+        обновляем, только если ответ ПОДТВЕРЖДЁННО от него самого — не от
+        «запасного» мисматча (см. `_dial`): иначе устаревший кандидат, на
+        который сейчас отвечает ДРУГОЙ реальный сосед (не мы — тот случай
+        `_dial` уже отсекает целиком), приписал бы нашему линку чужие
+        данные. Инцидент 2026-08-04: так в список адресов «mycraft»
+        однажды попал настоящий LAN-адрес «winpc». Соединение при этом
+        всё равно используется (см. ниже) — «запасной» ответ лучше, чем
+        никакого, но он не должен становиться новой памятью о соседе.
+        """
+        confirmed = _answers_to(info, self.name)
+        if confirmed:
+            switched = endpoint != self.endpoint
+            if switched:
+                log.info("PeerLink %s: путь сменился на %s", self.name, endpoint)
+            # Удачный адрес становится первым в следующем переборе — и он же
+            # переживает рестарт ноды (см. on_endpoints).
+            self.endpoint = endpoint
+            self._candidates = _order_endpoints(self._candidates, first=endpoint)
+            if switched and self._on_endpoints is not None:
+                self._on_endpoints(self.name, self.endpoints)
         log.info("PeerLink %s: связь установлена (%s/%s)", self.name, info.node, info.service)
-        if info.node_kind:
-            self.node_kind = info.node_kind
-        if info.wake:
-            self.wake_info = info.wake
-        if info.endpoints:
-            self.learn_endpoints(info.endpoints)
+        if confirmed:
+            if info.node_kind:
+                self.node_kind = info.node_kind
+            if info.wake:
+                self.wake_info = info.wake
+            if info.endpoints:
+                self.learn_endpoints(info.endpoints)
         self.down_since = None
         self.left = False  # вернулась — прошлый штатный уход исчерпан
         self._client = client

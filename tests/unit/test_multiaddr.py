@@ -53,14 +53,21 @@ async def _emit(event_type, data):
 class FakeService:
     """Служба соседа, называющая себя и свои адреса как велено тестом."""
 
-    def __init__(self, node: str = "winpc", endpoints: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self, node: str = "winpc", endpoints: tuple[str, ...] = (), node_kind: str = ""
+    ) -> None:
         self.node = node
         self.endpoints = endpoints
+        self.node_kind = node_kind
 
     def describe(self) -> ServiceDescription:
         return ServiceDescription(
             info=ServiceInfo(
-                node=self.node, service="node", version="0.45.0", endpoints=self.endpoints
+                node=self.node,
+                service="node",
+                version="0.45.0",
+                endpoints=self.endpoints,
+                node_kind=self.node_kind,
             ),
             capabilities=(),
             actions=(ActionSpec(id="noop", title="Ничего"),),
@@ -354,6 +361,55 @@ async def test_единственный_адрес_отвечающий_нами
     finally:
         await link.stop()
         await ourselves.stop()
+
+
+@pytest.mark.asyncio
+async def test_устаревший_адрес_не_копится_после_свежего_hello(sock_dir):
+    """Живая находка 2026-08-04: раньше выученное только прирастало «в
+    надежде, что адрес вернётся к старому» — стухший кандидат простаивал
+    в списке навсегда. Свежий hello ЗАМЕНЯЕТ список, а не дополняет."""
+    stale = f"unix://{sock_dir / 'stale.sock'}"  # никто не слушает
+    right = f"unix://{sock_dir / 'right.sock'}"
+    service = FakeService(node="mycraft", endpoints=("tcp://192.168.0.103:8710",))
+    server = ProtoServer(right, service)
+    await server.start()
+
+    link = PeerLink("mycraft", [stale, right], reconnect_delay=0.05)
+    await link.start()
+    try:
+        assert await _wait_for(lambda: link.alive)
+        assert await _wait_for(lambda: stale not in link.endpoints), link.endpoints
+        assert "tcp://192.168.0.103:8710" in link.endpoints
+    finally:
+        await link.stop()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_мисматч_чужого_соседа_не_портит_kind_и_адреса(sock_dir):
+    """Найдено 2026-08-04: «запасной» ответ от РЕАЛЬНОГО, но другого
+    соседа (устаревший адрес переехал на него, не на нас — тот случай
+    гонит тест выше) раньше приписывал нашему линку чужие kind/endpoints.
+    Мисматч годится только для связи, не для памяти о соседе."""
+    wrong = f"unix://{sock_dir / 'wrong.sock'}"
+    other = ProtoServer(
+        wrong,
+        FakeService(
+            node="winpc", endpoints=("tcp://192.168.0.104:8710",), node_kind="workstation"
+        ),
+    )
+    await other.start()
+
+    link = PeerLink("mycraft", wrong, reconnect_delay=0.05)
+    await link.start()
+    try:
+        assert await _wait_for(lambda: link.alive)
+        await asyncio.sleep(0.1)
+        assert link.node_kind == ""
+        assert "tcp://192.168.0.104:8710" not in link.endpoints
+    finally:
+        await link.stop()
+        await other.stop()
 
 
 @pytest.mark.asyncio
