@@ -118,6 +118,54 @@ def test_services_list_view_empty():
     assert "не назначены" in text
 
 
+def _assign_action(*choices: str) -> ActionSpec:
+    return ActionSpec(
+        id="assign",
+        title="➕ Назначить",
+        params=(ActionParam(name="name", choices=choices),),
+    )
+
+
+def test_services_list_view_shows_assign_buttons_for_unassigned_names():
+    # Кнопка переехала сюда с карточки ноды (у кого есть право `nodes`) —
+    # по одной на каждое ещё не назначенное имя, уже назначенные не дублируются.
+    text, kb = build_services_list_view(
+        NODE_STATE,
+        node_id=None,
+        offset=0,
+        subscription=_sub("nodes", "assign@node"),
+        node_actions=[_assign_action("monitor", "telegram-bot", "apps")],
+    )
+    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert "act:node:assign:apps" in codes
+    assert "act:node:assign:monitor" not in codes  # уже назначена
+    assert "act:node:assign:telegram-bot" not in codes  # уже назначена
+
+
+def test_services_list_view_assign_buttons_carry_peer_node_id():
+    text, kb = build_services_list_view(
+        NODE_STATE,
+        node_id="arch-t480",
+        offset=0,
+        subscription=_sub("nodes", "assign@node"),
+        node_actions=[_assign_action("monitor", "telegram-bot", "apps")],
+    )
+    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert "act:node:assign:apps:arch-t480" in codes
+
+
+def test_services_list_view_no_assign_buttons_without_right():
+    text, kb = build_services_list_view(
+        NODE_STATE,
+        node_id=None,
+        offset=0,
+        subscription=_sub("nodes"),  # без assign@node
+        node_actions=[_assign_action("monitor", "telegram-bot", "apps")],
+    )
+    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert not any(c.startswith("act:node:assign") for c in codes)
+
+
 def test_node_card_keyboard_actions_only_no_service_cards():
     # Навигация к службам — отдельный постраничный экран (право `nodes`),
     # на карточке — счётчик и кнопка «⚙️ Службы», не полный список.
@@ -158,10 +206,36 @@ def test_node_card_keyboard_peer_carries_node_id_everywhere():
         "st:full:arch-t480",
         "act:monitor:scan_now::arch-t480",
         "act:node:poweroff::arch-t480",
-        "act:node:assign:apps:arch-t480",  # «Назначить» доступно и пиру
+        # «Назначить» тут нет — с правом `nodes` кнопка теперь на экране
+        # «Службы» (build_services_list_view), см. тест ниже.
         "st:sw_node:arch-t480",  # 🔄 Обновить
         "st:sw_svcs:arch-t480:0",  # ⚙️ Службы (1)
         "st:sw_nodes:0",  # ⬅️ Назад
+    }
+
+
+def test_node_card_keyboard_assign_stays_on_card_without_nodes_right():
+    # Без права `nodes` экрана «Службы» не существует — «➕ Назначить»
+    # остаётся единственным способом добавить службу, поэтому держится
+    # прямо на карточке (единственный экран, доступный такой подписке).
+    assign = ActionSpec(
+        id="assign",
+        title="➕ Назначить",
+        params=(ActionParam(name="name", choices=("monitor", "apps")),),
+    )
+    kb = build_node_card_keyboard(
+        _sub("poweroff@node", "assign@node"),
+        [],
+        ["monitor"],
+        [_power_action("poweroff"), assign],
+        node_id="arch-t480",
+    )
+    codes = {b.callback_data for row in kb.inline_keyboard for b in row}
+    assert codes == {
+        "act:node:poweroff::arch-t480",
+        "act:node:assign:apps:arch-t480",
+        "st:sw_node:arch-t480",  # 🔄 Обновить
+        # Без «nodes» — ни «Службы», ни «Назад» (тех экранов не существует).
     }
 
 

@@ -157,7 +157,24 @@ async def on_dynamic_action(
             # Без побочного эффекта на get_state() — карточку перерисовывать
             # незачем, результат некому больше показать, кроме как тут.
             await callback.message.answer(_format_check_update(result or {}))
-        elif value is not None and action_id not in ("assign", "unassign"):
+        elif action_id in ("assign", "unassign"):
+            # Назначение/снятие — глубже карточки ноды: у кого есть право
+            # `nodes`, кнопка «➕ Назначить X» теперь на экране «Службы»
+            # (node_view.build_services_list_view) — туда и возвращаем; у
+            # кого права нет, их единственный экран — сама карточка ноды.
+            if subscription is not None and subscription.allows_command(
+                commands.NODES.name
+            ):
+                text, keyboard = await node_view.build_services_page_view(
+                    node_link, subscription, node_id, 0
+                )
+            else:
+                text, keyboard = await node_view.build_node_card_view(
+                    node_link, subscription, node_id
+                )
+            with contextlib.suppress(TelegramBadRequest):
+                await callback.message.edit_text(text, reply_markup=keyboard)
+        elif value is not None:
             # Действие над службой (своей или пира) — перерисовать её карточку.
             text, keyboard = await node_view.build_service_card_view(
                 node_link, subscription, value, node_id
@@ -165,7 +182,7 @@ async def on_dynamic_action(
             with contextlib.suppress(TelegramBadRequest):
                 await callback.message.edit_text(text, reply_markup=keyboard)
         else:
-            # Питание/назначение — перерисовать карточку самой ноды.
+            # Питание — перерисовать карточку самой ноды.
             text, keyboard = await node_view.build_node_card_view(
                 node_link, subscription, node_id
             )

@@ -202,23 +202,30 @@ def build_node_card_keyboard(
 ) -> InlineKeyboardMarkup | None:
     """Кнопки карточки ноды — одинаковые для своей (node_id=None) и пира.
 
-    Действия (представления/действия монитора + питание/самообновление +
-    назначение служб) идут сеткой по 2 в ряд, как раньше. Плюс — отдельными
-    строками внизу: «🔄 Обновить» (та же карточка, свежие данные — доступно
-    всем, ничего нового не открывает) и, только при праве `nodes`, «⚙️ Службы»
-    (переход на отдельный постраничный экран, bot/handlers/swarm_panel.py) и
+    Действия (представления/действия монитора + питание/самообновление) идут
+    сеткой по 2 в ряд, как раньше. Плюс — отдельными строками внизу:
+    «🔄 Обновить» (та же карточка, свежие данные — доступно всем, ничего
+    нового не открывает) и, только при праве `nodes`, «⚙️ Службы» (переход
+    на отдельный постраничный экран, bot/handlers/swarm_panel.py) и
     «⬅️ Назад» (к списку нод той же панели). У кого права `nodes` нет —
     список служб виден как раньше, инлайн в тексте карточки
     (render_services_block), без кнопок навигации по нему.
+
+    «➕ Назначить X» — на карточке только у тех, у кого нет права `nodes` (им
+    больше некуда её деть, свой единственный экран — эта карточка); у кого
+    право есть, кнопка переехала глубже, на экран «Службы»
+    (build_services_list_view) — там ей самое место, среди уже назначенных.
     """
     if subscription is None:
         return None
+    has_nodes_right = subscription.allows_command(commands.NODES.name)
     buttons: list[InlineKeyboardButton] = []
     base = status_view.build_status_keyboard(subscription, monitor_actions, node_id)
     if base is not None:
         buttons.extend(b for row in base.inline_keyboard for b in row)
     buttons.extend(_simple_action_buttons(subscription, node_actions, node_id))
-    buttons.extend(_assign_buttons(subscription, node_actions, service_names, node_id))
+    if not has_nodes_right:
+        buttons.extend(_assign_buttons(subscription, node_actions, service_names, node_id))
     grid = actions.rows(buttons)
     rows: list[list[InlineKeyboardButton]] = list(grid.inline_keyboard) if grid else []
 
@@ -231,7 +238,7 @@ def build_node_card_keyboard(
             )
         ]
     )
-    if subscription.allows_command(commands.NODES.name):
+    if has_nodes_right:
         rows.append(
             [
                 InlineKeyboardButton(
@@ -313,10 +320,16 @@ async def build_node_card_view(
 
 
 def build_services_list_view(
-    state: dict, node_id: str | None, offset: int
+    state: dict,
+    node_id: str | None,
+    offset: int,
+    subscription: Subscription | None = None,
+    node_actions: Sequence[ActionSpec] = (),
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Постраничный список служб — как guests_view.build_perms_view: строка
-    на службу + кнопка её карточки, «⬅️ Назад» на карточку ноды."""
+    на службу + кнопка её карточки, ниже — «➕ Назначить X» на каждое ещё не
+    назначенное имя (переехало сюда с карточки ноды — тут её место, среди
+    уже назначенных), «⬅️ Назад» на карточку ноды."""
     services = state.get("services", [])
     node_name = state.get("node") or node_id or "?"
     lines = [f"⚙️ <b>Службы «{escape(node_name)}»</b> ({len(services)})", ""]
@@ -340,6 +353,13 @@ def build_services_list_view(
         ]
         for svc in page
     ]
+    if subscription is not None:
+        assigned = [s.get("name", "?") for s in services]
+        assign_grid = actions.rows(
+            _assign_buttons(subscription, node_actions, assigned, node_id)
+        )
+        if assign_grid:
+            buttons.extend(assign_grid.inline_keyboard)
     nav = nav_row(
         offset,
         SERVICES_PAGE_SIZE,
@@ -361,11 +381,17 @@ def build_services_list_view(
 
 async def build_services_page_view(
     node_link: ServiceLink,
+    subscription: Subscription | None,
     node_id: str | None,
     offset: int,
 ) -> tuple[str, InlineKeyboardMarkup | None]:
     """Обёртка над build_services_list_view — сама получает state ноды
-    (своей или пира), как build_node_card_view/build_service_card_view."""
+    (своей или пира), как build_node_card_view/build_service_card_view.
+
+    node_actions — нужны только ради choices действия `assign` (кнопки
+    «➕ Назначить X» на этом экране, см. build_services_list_view), поэтому
+    запрашиваются только когда есть подписка (без неё кнопок всё равно не
+    будет)."""
     dst = Address(node=node_id, service=NODE_SERVICE) if node_id else None
     state = await _node_state(node_link, dst=dst)
     if state is None:
@@ -375,7 +401,14 @@ async def build_services_page_view(
             else NODE_DOWN_TEXT
         ), None
     offset = clamp_offset(offset, SERVICES_PAGE_SIZE, len(state.get("services", [])))
-    return build_services_list_view(state, node_id, offset)
+    node_actions: Sequence[ActionSpec] = ()
+    if subscription is not None:
+        if node_id:
+            desc = await node_link.describe(dst=dst)
+            node_actions = desc.actions if desc is not None else ()
+        else:
+            node_actions = await node_link.actions()
+    return build_services_list_view(state, node_id, offset, subscription, node_actions)
 
 
 # --- Карточка службы ---------------------------------------------------------

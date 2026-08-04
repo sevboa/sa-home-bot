@@ -180,7 +180,9 @@ async def on_swarm_screen(
     if code == commands.SWARM_SVCS_CODE:
         node_id = _node_id(parts[2] if len(parts) > 2 else None)
         offset = _parse_int(parts[3] if len(parts) > 3 else None)
-        text, keyboard = await node_view.build_services_page_view(node_link, node_id, offset)
+        text, keyboard = await node_view.build_services_page_view(
+            node_link, subscription, node_id, offset
+        )
         await _redraw(callback, text, keyboard)
         await callback.answer()
         return
