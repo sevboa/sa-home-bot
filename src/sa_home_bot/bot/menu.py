@@ -55,7 +55,7 @@ def build_menu_commands(
         for c in commands.MENU_CONTROL_COMMANDS
         if subscription.allows_command(c.right or c.name)
     ]
-    menu += [_to_bot_command(c) for c in commands.UNIVERSAL_COMMANDS]
+    menu += [_to_bot_command(c) for c in commands.MENU_UNIVERSAL_COMMANDS]
     return menu
 
 
@@ -87,10 +87,9 @@ async def set_bot_commands(
 
     Пустой default — часть приватного входа (AUTHORIZATION.md §10). Меню
     команд Telegram показывает всякому, кто открыл чат с ботом, ещё до
-    первого сообщения: оставь там /help, /ping, /whoami — и молчание в ответ
-    на них выглядело бы поломкой, а список умений всё равно был бы виден
-    постороннему. Свои ничего не теряют: у каждого подписного чата меню своё,
-    per-chat scope перекрывает default.
+    первого сообщения: оставь там что-то — список умений всё равно был бы
+    виден постороннему. Свои ничего не теряют: у каждого подписного чата меню
+    своё, per-chat scope перекрывает default.
     """
     try:
         await bot.delete_my_commands(scope=BotCommandScopeDefault())

@@ -389,7 +389,7 @@ async def test_gate_passes_subscribed_chat(store, tmp_path):
 async def test_gate_swallows_everything_from_stranger(store, tmp_path):
     book = _book()
     gate = SilenceGate(book, _gate(store, tmp_path, book=book))
-    for text in ("/start", "/help", "/ping", "/whoami", "привет", "ZZZZ9999"):
+    for text in ("/start", "/ping", "/status", "привет", "ZZZZ9999"):
         assert await gate(_passthrough, _update(999, text), {}) is None
     # Кнопка из чужого чата — тоже ничего.
     assert await gate(_passthrough, _update(999, "любой", kind="callback"), {}) is None
@@ -434,7 +434,7 @@ async def test_stranger_update_reaches_no_router(store, tmp_path):
     user = User(id=999, is_bot=False, first_name="Чужой")
 
     try:
-        for text in ("/start", "/help", "привет"):
+        for text in ("/start", "/ping", "привет"):
             update = Update(
                 update_id=1,
                 message=Message(
@@ -487,14 +487,13 @@ async def test_redeemed_code_is_still_recognisable(store, tmp_path):
 # --- приветствие гостя ---------------------------------------------------
 
 
-def test_welcome_prompt_demands_the_help_hint():
+def test_welcome_prompt_demands_the_menu_hint():
     """Решение пользователя 2026-07-30: приветствие пишет модель, но подсказка
-    про /help в нём обязательна."""
+    про меню команд в нём обязательна (/help выпилен 2026-08-04)."""
     from sa_home_bot.bot.handlers import invites as invite_handlers
 
-    assert "/help" in invite_handlers.WELCOME_PROMPT
-    assert "/help" in invite_handlers.FALLBACK_HINT
-    assert invite_handlers.HELP_COMMAND == "/help"
+    assert invite_handlers.MENU_HINT_KEYWORD in invite_handlers.WELCOME_PROMPT.lower()
+    assert invite_handlers.MENU_HINT_KEYWORD in invite_handlers.FALLBACK_HINT.lower()
 
 
 async def test_welcome_prompt_uses_what_memory_knows(store, tmp_path, monkeypatch):
@@ -523,7 +522,8 @@ async def test_welcome_prompt_uses_what_memory_knows(store, tmp_path, monkeypatc
     assert asked == ["Наташа Сорокина"]
     assert "любит чай без сахара" in prompt
     assert "как со знакомым" in prompt
-    assert "/help" in prompt  # требование не теряется, когда есть что вспомнить
+    # требование про меню не теряется, когда есть что вспомнить
+    assert invite_handlers.MENU_HINT_KEYWORD in prompt.lower()
 
 
 async def test_welcome_prompt_without_memory_is_the_plain_directive(store, tmp_path, monkeypatch):

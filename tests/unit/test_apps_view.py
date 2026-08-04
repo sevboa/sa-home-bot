@@ -1,4 +1,4 @@
-"""Скилы-приложения: карточка, динамическое меню, /help, управление юнитом."""
+"""Скилы-приложения: карточка, динамическое меню, /start-справка, управление юнитом."""
 
 from sa_home_bot import __version__
 from sa_home_bot.bot.apps_view import render_app_card, run_app_skill
@@ -44,32 +44,34 @@ def test_app_card_failed_without_urls():
 
 
 def test_menu_skills_first_then_universal():
-    # Право «nodes» открывает /swarm — алиасы делят одно право.
+    # /swarm (право «nodes») теперь панель-раздел вроде /guests, /status —
+    # в меню не попадает (menu=False), хотя команда рабочая. /ping тоже
+    # скрыт (menu=False) — универсальных команд в меню сейчас нет.
     menu = build_menu_commands(
         _sub("nodes", "qbittorrent@apps", "jellyfin@apps"), _app_actions()
     )
     names = [c.command for c in menu]
-    assert names == ["qbittorrent", "jellyfin", "swarm", "help", "ping", "whoami"]
+    assert names == ["qbittorrent", "jellyfin"]
 
 
 def test_menu_filters_skills_by_rights():
     menu = build_menu_commands(_sub("jellyfin@apps"), _app_actions())
     names = [c.command for c in menu]
-    assert names == ["jellyfin", "help", "ping", "whoami"]
+    assert names == ["jellyfin"]
 
 
 def test_help_lists_allowed_skills_and_about():
     text = build_help(_sub("nodes", "qbittorrent@apps"), _app_actions())
     assert "/qbittorrent — 🧲 qBittorrent" in text
     assert "/jellyfin" not in text  # нет права
-    assert "/swarm" in text
+    assert "/swarm" not in text  # раздел-панель, скрыт из списка (menu=False)
     assert f"sa-home-bot v{__version__}" in text
 
 
 def test_help_without_subscription_only_universal():
     text = build_help(None, _app_actions())
     assert "/qbittorrent" not in text and "/swarm" not in text
-    assert "/help" in text and f"v{__version__}" in text
+    assert f"v{__version__}" in text
 
 
 # --- run_app_skill: карточка + кнопки управления / ошибка прав ---

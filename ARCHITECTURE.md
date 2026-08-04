@@ -207,12 +207,12 @@ watchdog связи с Telegram, идемпотентные уведомлени
 
 **Chat-level, не user-level**:
 
-- **Универсальные** (`/help`, `/ping`, `/whoami`) — работают везде без проверок,
-  не указываются в `allowed_commands`.
+- **Универсальные** (`/ping`) — работают везде без проверок, не указываются в
+  `allowed_commands`.
 - **Управляющие** (`/status`, `/stats`, `/scan_now`, позже `/mute`) — только в
   подписном, не-broken чате, если имя есть в `allowed_commands`. Проверяет
   `AuthorizationMiddleware` до handler'а.
-- `set_my_commands` и `/help` — это UX (показывают доступное), НЕ security.
+- `set_my_commands` и `/start` — это UX (показывают доступное), НЕ security.
   Реальная защита — в middleware.
 
 Единый источник правды по командам — `bot/commands.py` (имена + описания).
@@ -326,7 +326,7 @@ sa-home-bot/
 │       │   ├── link_watch.py  # слежение за связью с монитором
 │       │   ├── lifecycle.py   # системные события жизненного цикла
 │       │   └── handlers/
-│       │       ├── basic.py   # start/help/ping/whoami
+│       │       ├── basic.py   # start/ping
 │       │       ├── status.py
 │       │       ├── stats.py
 │       │       ├── control.py # /scan_now

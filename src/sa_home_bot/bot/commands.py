@@ -1,4 +1,4 @@
-"""Единый реестр команд: имена + описания. Источник правды для /help и меню."""
+"""Единый реестр команд: имена + описания. Источник правды для меню/списка умений."""
 
 from __future__ import annotations
 
@@ -10,22 +10,27 @@ class Command:
     name: str
     description: str
     universal: bool  # True — работает везде без проверок
-    menu: bool = True  # показывать в меню бота и /help
+    menu: bool = True  # показывать в меню бота и списке умений (/start)
     right: str | None = None  # имя права в allowed_commands (None = name):
     # алиасы вроде /swarm↔/nodes живут под одним правом, конфиги не ломаются
 
 
 # Универсальные — всегда и везде, не указываются в allowed_commands.
-HELP = Command("help", "список доступных команд", universal=True)
-PING = Command("ping", "проверка живости (pong)", universal=True)
-WHOAMI = Command("whoami", "показать user_id и chat_id", universal=True)
+# PING скрыт из меню/списка умений (menu=False) — рабочая команда,
+# но самостоятельной пользы в общем списке не несёт (решение 2026-08-04,
+# заодно выпилены /help и /whoami — надобность в них отпала).
+PING = Command("ping", "проверка живости (pong)", universal=True, menu=False)
 
 # Управляющие — требуют права в allowed_commands не-broken подписки.
 # Меню бота — скилы роя первого уровня: динамические команды-приложения из
 # describe службы apps (см. setup.build_menu_commands) + «Сводка роя»
 # (/swarm; /nodes — алиас под тем же правом). Остальное скрыто и вызывается
 # ссылками/кнопками: /status — карточка локальной ноды.
-SWARM = Command("swarm", "сводка роя", universal=False, right="nodes")
+# Решение пользователя 2026-08-04: панель /swarm стала иерархией в духе
+# /guests (bot/swarm_panel.py) — такой же раздел-«панель», как /status и
+# /guests, поэтому оба алиаса скрыты из меню (menu=False), а не
+# только NODES.
+SWARM = Command("swarm", "сводка роя", universal=False, menu=False, right="nodes")
 NODES = Command("nodes", "сводка роя (алиас /swarm)", universal=False, menu=False)
 STATUS = Command("status", "карточка локальной ноды", universal=False, menu=False)
 STATUS_FULL = Command(
@@ -62,9 +67,7 @@ GUESTS = Command("guests", "приглашённые и открытые код�
 VPN = Command("vpn", "доступ к VPN", universal=False, menu=True, right="usage@vpn")
 
 ALL_COMMANDS: list[Command] = [
-    HELP,
     PING,
-    WHOAMI,
     SWARM,
     NODES,
     STATUS,
@@ -82,7 +85,10 @@ ALL_COMMANDS: list[Command] = [
 
 UNIVERSAL_COMMANDS: list[Command] = [c for c in ALL_COMMANDS if c.universal]
 CONTROL_COMMANDS: list[Command] = [c for c in ALL_COMMANDS if not c.universal]
-# Управляющие, попадающие в меню/help (сейчас только STATUS).
+# Универсальные, попадающие в меню/список умений (сейчас — ни одной: PING
+# скрыт).
+MENU_UNIVERSAL_COMMANDS: list[Command] = [c for c in UNIVERSAL_COMMANDS if c.menu]
+# Управляющие, попадающие в меню/список умений (сейчас только STATUS).
 MENU_CONTROL_COMMANDS: list[Command] = [c for c in CONTROL_COMMANDS if c.menu]
 
 # Кнопки-представления под /status: callback-код → команда. Действия служб
@@ -180,6 +186,21 @@ GUEST_PERM_OFF_CODE = "g_poff"  # «st:g_poff:<chat_id>:<offset>:<право>»
 GUEST_PERM_ADD_LIST_CODE = "g_padd"  # «st:g_padd:<chat_id>:<offset>»
 GUEST_PERM_ADD_CODE = "g_pon"  # «st:g_pon:<chat_id>:<offset>:<право>»
 
+# Иерархия /swarm — все коды с префиксом «sw_», единая точка входа
+# bot/handlers/swarm_panel.py::on_swarm_screen (bot/swarm_panel.py и
+# bot/node_view.py строят текст и клавиатуру каждого экрана). Права —
+# те же, что уже были у /node_<id> (`status`) и /svc_<node>_<svc>
+# (`nodes`), см. докстринг bot/handlers/node_links.py — новых прав не
+# заводим, только даём им путь через кнопки, а не только текстовые ссылки.
+SWARM_PANEL_CODE = "sw_panel"  # «st:sw_panel» — сводная панель роя
+SWARM_SKILLS_CODE = "sw_skills"  # «st:sw_skills:<offset>» — список умений
+SWARM_SKILL_CODE = "sw_skill"  # «st:sw_skill:<app_id>» — карточка умения
+SWARM_NODES_CODE = "sw_nodes"  # «st:sw_nodes:<offset>» — список нод
+SWARM_NODE_CODE = "sw_node"  # «st:sw_node[:<node_id>]» — карточка ноды
+SWARM_SVCS_CODE = "sw_svcs"  # «st:sw_svcs:<node_id_or_->:<offset>» — список служб
+SWARM_SVC_CODE = "sw_svc"  # «st:sw_svc:<node_id_or_->:<имя>» — карточка службы
+SWARM_UPDATE_CODE = "sw_update"  # «st:sw_update» — проверка обновлений по рою
+
 _ALL_CALLBACK_ACTIONS: dict[str, Command] = {
     **STATUS_ACTIONS,
     DOWNTIME_PAGE_CODE: DOWNTIME,
@@ -199,6 +220,14 @@ _ALL_CALLBACK_ACTIONS: dict[str, Command] = {
     NODE_CARD_CODE: STATUS,  # карточка ноды = данные /status
     SERVICE_CARD_CODE: NODES,  # карточка службы — часть управления нодами
     WAKE_CODE: WAKE,
+    SWARM_PANEL_CODE: SWARM,
+    SWARM_SKILLS_CODE: SWARM,
+    SWARM_SKILL_CODE: SWARM,
+    SWARM_NODES_CODE: SWARM,
+    SWARM_NODE_CODE: STATUS,  # как /node_<id> — право `status`
+    SWARM_SVCS_CODE: NODES,  # как /svc_<node>_<svc> — право `nodes`
+    SWARM_SVC_CODE: NODES,
+    SWARM_UPDATE_CODE: SWARM,
 }
 
 _BY_NAME = {c.name: c for c in ALL_COMMANDS}

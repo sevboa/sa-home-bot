@@ -8,18 +8,31 @@ from sa_home_bot.proto.messages import ActionParam, ActionSpec
 from sa_home_bot.subscriptions.models import Subscription
 
 
-def test_menu_has_only_swarm_alfred_and_vpn_skills():
-    # В меню из реестра — «Сводка роя», «/alfred» и «/vpn» (гостю нужно
-    # найти доступ без подсказки); /ai — скрытый алиас (как /swarm↔/nodes),
-    # в меню/help не должен светиться (сознательно — чтобы в общем чате не
-    # так явно читалось как ИИ). Остальные скилы первого уровня динамические
-    # (из describe apps, build_menu_commands).
+def test_menu_has_only_alfred_and_vpn_skills():
+    # В меню из реестра — «/alfred» и «/vpn» (гостю нужно найти доступ без
+    # подсказки); /ai — скрытый алиас (как /swarm↔/nodes), в меню/списке
+    # умений не должен светиться (сознательно — чтобы в общем чате не так
+    # явно читалось как ИИ). /swarm — теперь раздел-панель (как /status,
+    # /guests): рабочая команда, но не первого уровня, поэтому тоже скрыт
+    # (menu=False). Остальные скилы первого уровня динамические (из describe
+    # apps, build_menu_commands).
     menu_names = {c.name for c in commands.MENU_CONTROL_COMMANDS}
-    assert menu_names == {"swarm", "alfred", "vpn"}
+    assert menu_names == {"alfred", "vpn"}
     for name in (
-        "nodes", "status", "status_full", "stats", "scan_now", "downtime", "wake", "ai",
+        "swarm", "nodes", "status", "status_full", "stats", "scan_now", "downtime", "wake", "ai",
     ):
         assert commands.get(name).menu is False
+
+
+def test_ping_is_universal_but_hidden_from_menu():
+    # /ping работает без проверок прав, но не попадает в меню/список умений
+    # (решение пользователя 2026-08-04: /help и /whoami выпилены целиком,
+    # /ping оставлен рабочим, но скрытым).
+    assert commands.PING.universal is True
+    assert commands.PING.menu is False
+    assert commands.PING not in commands.MENU_UNIVERSAL_COMMANDS
+    assert commands.get("help") is None
+    assert commands.get("whoami") is None
 
 
 def test_ai_is_hidden_alias_of_alfred_same_right():
