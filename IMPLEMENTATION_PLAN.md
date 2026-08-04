@@ -1865,6 +1865,9 @@ transfer-encoding) — токен в пути вместо HMAC-схемы ро�
    `family` — новое поле на `Subscription`/`SubscriptionConfig`/
    `GuestSubscriptionConfig` (config.py, subscriptions/models.py,
    subscriptions/book.py), симметричная проверка (оба конца — семья).
+   **Поле `family` уже заведено этапом 37** (`bot.family`, точнее
+   `Subscription.family`) под доступ к `memory scope=family` — этот этап
+   переиспользует его, ничего не переделывая в модели.
 5. **Не влияет на видимость тула.** `requires=CommandRight(TELL_RIGHT)` в
    `TOOLS` (том же месте) остаётся — это по-прежнему «есть ли тул вообще»;
    п. 1–3 — это уже КОМУ внутри уже вызванного тула можно писать.
@@ -1880,6 +1883,53 @@ transfer-encoding) — токен в пути вместо HMAC-схемы ро�
 даже если тот сам — семья; два члена `family` пишут друг другу без
 `tell_guests@llm`; `tell_guests@llm` открывает произвольного гостя (кроме
 владельца — тот и так всегда доступен).
+
+### Этап 37. Флаг «семья» у гостя + тулы Альфреда: список гостей, права, фильтры — ✅ v0.69.0 (2026-08-04)
+
+Запрос пользователя 2026-08-04: дать Альфреду доступ к списку гостей и их
+правам (с фильтром по праву и по флагу «семья»), и добавить в `/guests`
+возможность отметить гостя как члена семьи через интерфейс, а не только
+конфигом.
+
+1. **Новое поле `Subscription.family: bool`** (subscriptions/models.py) +
+   `with_family()`; на `SubscriptionConfig`/`GuestSubscriptionConfig`
+   (config.py) и в сериализации гостевого пакета (subscriptions/guests.py,
+   subscriptions/book.py). То же поле, что запланировано этапом 36 под
+   групповой `tell` — там ещё не реализовано, но модель данных уже общая.
+2. **`Gatekeeper.set_guest_family(chat_id, family)`** (bot/invites.py) —
+   точечная правка флага у гостя, по образцу `set_guest_rights`. Флаг не
+   входит в `allowed_commands` — `refresh_chat_menu` не нужен.
+3. **`/guests`**: тумблер «🏠 Сделать членом семьи» / «Исключить из семьи» на
+   карточке гостя (bot/guests_view.py, новый код `g_fam` в bot/commands.py,
+   ветка в bot/handlers/invites.py::on_guest_screen).
+4. **Флаг реально управляет доступом к `memory scope="family"`**, а не
+   только информационная метка — дополняет статический
+   `[memory].family_chat_ids` (§3.4/§4 AUTHORIZATION.md) для гостей,
+   выданных через `/guests`. Служба `memory` — отдельный процесс без
+   доступа к `SubscriptionBook`, поэтому флаг не читается там напрямую:
+   бот вычисляет `guest_family = ctx.subscription.family` и подставляет
+   его в каждый запрос (`bot/tools.py::tool_memory`,
+   `bot/ai_flow.py::recall_facts`), тем же приёмом, каким сейчас
+   подставляется `chat_id`. `memory/service.py::_is_family_chat` —
+   `chat_id in family_chat_ids OR args["guest_family"]`.
+5. **Новый тул `guests_list(right?, family?)`** (bot/tools.py) — только
+   чтение: список гостей с именем, chat_id, правами (человекочитаемо через
+   `guest_rights.label`) и флагом «семья», с опциональными фильтрами по
+   точной строке права и по `family=yes|no`. Требует то же право `invite`,
+   что и сама команда `/guests` — `guest_rights.py` сознательно не выдаёт
+   `invite` гостям точечно («сделало бы гостя соадминистратором», §10.4),
+   так что тул виден только владельцу.
+
+**Тесты:** round-trip `family` через гостевой TOML-пакет
+(tests/unit/test_invites.py); `Gatekeeper.set_guest_family` — гостя меняет,
+владельца не трогает, неизвестный чат — no-op; UI-тумблер на карточке
+(tests/unit/test_guests_view.py); `memory/service.py` — `scope=family`
+доступен по `guest_family=True` даже вне `family_chat_ids`
+(tests/unit/test_memory_service.py); `tool_memory`/`recall_facts` прокидывают
+флаг из `ctx.subscription.family` (tests/unit/test_tools.py,
+tests/unit/test_ai_flow.py); `guests_list` — видимость по праву, оба
+фильтра, пустая выдача, недоступность без `ctx.book`
+(tests/unit/test_tool_guests_list.py).
 
 ### Дальше (не детализируем)
 

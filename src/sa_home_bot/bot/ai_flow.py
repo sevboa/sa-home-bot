@@ -281,14 +281,18 @@ MEMORY_FACT_CHARS = 160
 MEMORY_TIMEOUT_S = 5.0
 
 
-async def recall_facts(node_link: ServiceLink, chat_id: int | None, text: str) -> list[str]:
+async def recall_facts(
+    node_link: ServiceLink, chat_id: int | None, text: str, *, guest_family: bool = False
+) -> list[str]:
     """Факты из памяти чата под текущую реплику; пусто — память молчит.
 
     Права здесь сознательно НЕ проверяются, хотя тул `memory` ими гейтится:
     сюда приходит только память САМОГО этого чата, общее знание дома
     (scope=common — кто такой Альфред, как выглядит) и, если чат в
-    `[memory].family_chat_ids`, семейное знание (scope=family) — ничего, на
-    что у собеседника не было бы права. Гейтить пришлось бы ровно наоборот:
+    `[memory].family_chat_ids` или это гость с флагом `family`
+    (`guest_family`, см. Subscription.family), семейное знание
+    (scope=family) — ничего, на что у собеседника не было бы права. Гейтить
+    пришлось бы ровно наоборот:
     справочник о персонаже нужен всем, кому вообще разрешено с ним говорить.
 
     Любой сбой памяти — пустой список, а не ошибка: разговор не должен
@@ -300,7 +304,12 @@ async def recall_facts(node_link: ServiceLink, chat_id: int | None, text: str) -
     try:
         result = await node_link.command(
             memory_protocol.ACTION_RECALL,
-            {"query": text, "chat_id": chat_id, "limit": MEMORY_RECALL_LIMIT},
+            {
+                "query": text,
+                "chat_id": chat_id,
+                "limit": MEMORY_RECALL_LIMIT,
+                "guest_family": guest_family,
+            },
             dst=dst,
             timeout=MEMORY_TIMEOUT_S,
         )
@@ -698,7 +707,10 @@ async def request_alfred(
     subscription = book.for_chat(message.chat.id) if message.chat else None
     has_web_search = SURFING_TOOL in ai_tools.tools_for(subscription).handlers
     memory_facts = await recall_facts(
-        node_link, message.chat.id if message.chat else None, message.text or ""
+        node_link,
+        message.chat.id if message.chat else None,
+        message.text or "",
+        guest_family=bool(subscription and subscription.family),
     )
     context_note = await _build_context_note(
         message,

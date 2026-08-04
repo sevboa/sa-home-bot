@@ -1351,6 +1351,39 @@ async def test_broken_memory_does_not_break_the_conversation(store):
     assert facts == []
 
 
+async def test_recall_facts_forwards_guest_family_flag():
+    link = FakeNodeLink(chat_results=[])
+    await ai_flow.recall_facts(link, 1, "текст", guest_family=True)
+    assert link.recall_calls[0]["guest_family"] is True
+
+    await ai_flow.recall_facts(link, 1, "текст")
+    assert link.recall_calls[1]["guest_family"] is False
+
+
+async def test_ask_passes_guest_family_from_subscription(store):
+    """Флаг «семья» гостя (Subscription.family, /guests) должен доехать до
+    memory тем же путём, что и chat_id — бот его проставляет, не модель."""
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "ответ"}],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+    )
+    book = SubscriptionBook(
+        [
+            Subscription(
+                chat_id=1, name="speaker", allowed_commands=frozenset({"chat@llm"}), family=True
+            ),
+        ]
+    )
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
+        book, FakeNotifier(),
+    )
+
+    assert link.recall_calls[0]["guest_family"] is True
+
+
 # --- typing keep-alive: индикатор "печатает" должен гореть только пока
 # модель реально готовит ответ (решение пользователя 2026-08-01) — не с
 # момента приёма сообщения человеком, и не во время presence-проверки/

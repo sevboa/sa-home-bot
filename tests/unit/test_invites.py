@@ -244,6 +244,40 @@ def test_guest_right_on_unknown_chat_is_noop(store, tmp_path):
     assert gate.remove_guest_right(9999, "usage@vpn") is None
 
 
+# --- флаг «семья» гостя (решение 2026-08-04) ------------------------------
+
+
+async def test_set_guest_family_updates_book_and_package(store, tmp_path):
+    path = tmp_path / "telegram-bot.test.guests.toml"
+    gate = _gate(store, tmp_path)
+    code, _ = await gate.issue(chat_id=1, user_id=None)
+    await gate.try_admit(77, code)
+
+    updated = gate.set_guest_family(77, True)
+    assert updated is not None
+    assert updated.family is True
+    assert gate._book.for_chat(77).family is True  # noqa: SLF001
+
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    assert data["guest_subscriptions"][0]["family"] is True
+
+    reverted = gate.set_guest_family(77, False)
+    assert reverted is not None
+    assert reverted.family is False
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    assert data["guest_subscriptions"][0]["family"] is False
+
+
+async def test_set_guest_family_cannot_touch_owner_subscription(store, tmp_path):
+    gate = _gate(store, tmp_path)
+    assert gate.set_guest_family(1, True) is None
+
+
+def test_set_guest_family_on_unknown_chat_is_noop(store, tmp_path):
+    gate = _gate(store, tmp_path)
+    assert gate.set_guest_family(9999, True) is None
+
+
 # --- гостевой пакет ------------------------------------------------------
 
 
@@ -275,6 +309,13 @@ def test_render_escapes_quotes():
     guest = Subscription(name='Гость "кавычки"', chat_id=5)
     data = tomllib.loads(render([guest]).decode("utf-8"))
     assert data["guest_subscriptions"][0]["name"] == 'Гость "кавычки"'
+
+
+def test_render_round_trips_family_flag():
+    guest = Subscription(name="Наташа", chat_id=6, family=True)
+    data = tomllib.loads(render([guest]).decode("utf-8"))
+    cfg = GuestSubscriptionConfig(**data["guest_subscriptions"][0])
+    assert cfg.family is True
 
 
 # --- книга подписок ------------------------------------------------------

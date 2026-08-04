@@ -26,6 +26,7 @@ class Subscription:
     invited_by_chat_id: int = 0
     invited_at: str = ""  # UTC ISO
     invited_user: str = ""  # как подписался гость, для /guests
+    family: bool = False  # свой человек — даёт доступ к memory scope=family
 
     @property
     def is_guest(self) -> bool:
@@ -69,3 +70,6 @@ class Subscription:
 
     def with_allowed_commands(self, allowed_commands: frozenset[str]) -> Subscription:
         return replace(self, allowed_commands=allowed_commands)
+
+    def with_family(self, family: bool) -> Subscription:
+        return replace(self, family=family)

@@ -37,6 +37,7 @@ def guest_subscription(cfg: GuestSubscriptionConfig) -> Subscription:
         invited_by_chat_id=cfg.invited_by_chat_id,
         invited_at=cfg.invited_at,
         invited_user=cfg.invited_user,
+        family=cfg.family,
     )
 
 
@@ -57,6 +58,7 @@ class SubscriptionBook:
                 chat_id=c.chat_id,
                 event_types=frozenset(c.event_types),
                 allowed_commands=frozenset(c.allowed_commands),
+                family=c.family,
             )
             for c in configs
         ]

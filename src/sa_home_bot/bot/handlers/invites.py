@@ -209,6 +209,20 @@ async def on_guest_screen(
         await callback.answer()
         return
 
+    if code == commands.GUEST_FAMILY_CODE:
+        chat_id = _parse_int(parts[2] if len(parts) > 2 else None, default=-1)
+        sub = await _guest_or_redraw_list(callback, book, chat_id)
+        if sub is None:
+            return
+        updated = gate.set_guest_family(chat_id, not sub.family)
+        if updated is None:
+            await _guest_or_redraw_list(callback, book, chat_id)
+            return
+        await callback.answer("Добавлен в семью" if updated.family else "Исключён из семьи")
+        text, keyboard = guests_view.build_card_view(updated)
+        await _redraw(callback, text, keyboard)
+        return
+
     if code == commands.GUEST_KICK_CONFIRM_CODE:
         chat_id = _parse_int(parts[2] if len(parts) > 2 else None, default=-1)
         sub = await _guest_or_redraw_list(callback, book, chat_id)

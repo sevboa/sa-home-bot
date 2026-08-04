@@ -70,6 +70,7 @@ def render(guests: Sequence[Subscription]) -> bytes:
         lines.append(f"invited_by_chat_id = {guest.invited_by_chat_id}")
         lines.append(f"invited_at = {_toml_string(guest.invited_at)}")
         lines.append(f"invited_user = {_toml_string(guest.invited_user)}")
+        lines.append(f"family = {str(guest.family).lower()}")
         lines.append("")
     return ("\n".join(lines)).encode("utf-8")
 

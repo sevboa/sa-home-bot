@@ -170,6 +170,7 @@ DOWNTIME_PAGE_CODE = "downtime_page"
 GUESTS_LIST_CODE = "g_list"  # «st:g_list:<offset>» — список гостей, страница
 OPEN_CODES_LIST_CODE = "g_codes"  # «st:g_codes:<offset>» — открытые коды
 GUEST_CARD_CODE = "g_card"  # «st:g_card:<chat_id>» — карточка гостя
+GUEST_FAMILY_CODE = "g_fam"  # «st:g_fam:<chat_id>» — переключить флаг «семья»
 GUEST_KICK_CONFIRM_CODE = "g_kick_ask"  # «st:g_kick_ask:<chat_id>» — «точно?»
 GUEST_REVOKE_CODE = "g_kick"  # «st:g_kick:<chat_id>» — подтверждённый отзыв
 CODE_REVOKE_CODE = "g_code_off"  # «st:g_code_off:<code>» — отозвать код
@@ -185,6 +186,7 @@ _ALL_CALLBACK_ACTIONS: dict[str, Command] = {
     GUESTS_LIST_CODE: GUESTS,
     OPEN_CODES_LIST_CODE: GUESTS,
     GUEST_CARD_CODE: GUESTS,
+    GUEST_FAMILY_CODE: GUESTS,
     GUEST_KICK_CONFIRM_CODE: GUESTS,
     GUEST_REVOKE_CODE: GUESTS,
     CODE_REVOKE_CODE: GUESTS,

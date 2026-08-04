@@ -6,13 +6,19 @@ from sa_home_bot.bot import commands, guest_rights, guests_view
 from sa_home_bot.subscriptions.models import SOURCE_GUEST, Subscription
 
 
-def _guest(chat_id: int, name: str = "Гость", rights: frozenset[str] = frozenset()) -> Subscription:
+def _guest(
+    chat_id: int,
+    name: str = "Гость",
+    rights: frozenset[str] = frozenset(),
+    family: bool = False,
+) -> Subscription:
     return Subscription(
         name=name,
         chat_id=chat_id,
         allowed_commands=rights,
         source=SOURCE_GUEST,
         invited_at="2026-08-01T10:00:00+00:00",
+        family=family,
     )
 
 
@@ -80,6 +86,24 @@ def test_card_view_has_perms_stats_kick_back():
     assert f"st:{commands.GUEST_KICK_CONFIRM_CODE}:77" in callbacks
     assert f"st:{commands.GUESTS_LIST_CODE}:0" in callbacks
     assert "77" in text
+
+
+def _button_texts(kb) -> list[str]:
+    return [b.text for row in kb.inline_keyboard for b in row]
+
+
+def test_card_view_shows_family_toggle():
+    not_family = _guest(77, family=False)
+    text, kb = guests_view.build_card_view(not_family)
+    callbacks = _callbacks(kb)
+    assert f"st:{commands.GUEST_FAMILY_CODE}:77" in callbacks
+    assert "Семья: нет" in text
+    assert any("Сделать членом семьи" in t for t in _button_texts(kb))
+
+    in_family = _guest(77, family=True)
+    text, kb = guests_view.build_card_view(in_family)
+    assert "Семья: да" in text
+    assert any("Исключить из семьи" in t for t in _button_texts(kb))
 
 
 def test_kick_confirm_view_asks_before_final_callback():

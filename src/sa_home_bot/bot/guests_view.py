@@ -159,6 +159,7 @@ def build_card_view(sub: Subscription) -> tuple[str, InlineKeyboardMarkup]:
     if sub.invited_user:
         lines.append(f"Представился: {escape(sub.invited_user)}")
     lines.append(f"Прав выдано: {len(sub.allowed_commands)}")
+    lines.append("🏠 Семья: да" if sub.family else "🏠 Семья: нет")
     buttons = [
         [
             InlineKeyboardButton(
@@ -170,6 +171,12 @@ def build_card_view(sub: Subscription) -> tuple[str, InlineKeyboardMarkup]:
             InlineKeyboardButton(
                 text="📊 Статистика VPN",
                 callback_data=_cb(commands.GUEST_STATS_CODE, sub.chat_id),
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🏠 Исключить из семьи" if sub.family else "🏠 Сделать членом семьи",
+                callback_data=_cb(commands.GUEST_FAMILY_CODE, sub.chat_id),
             )
         ],
         [

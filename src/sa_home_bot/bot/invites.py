@@ -308,3 +308,18 @@ class Gatekeeper:
         if updated is not None:
             log.info("У гостя chat_id=%s отозвано право %s", chat_id, right)
         return updated
+
+    def set_guest_family(self, chat_id: int, family: bool) -> Subscription | None:
+        """Переключить флаг «семья» у гостя. None — не гость (или его нет).
+
+        Флаг не входит в allowed_commands — это отдельная ось доступа,
+        дающая гостю ещё и scope="family" в памяти (memory/service.py).
+        """
+        sub = self._book.for_chat(chat_id)
+        if sub is None or not sub.is_guest:
+            return None
+        updated = sub.with_family(family)
+        self._book.add(updated)
+        self._guests.save(self._book.guests())
+        log.info("Гостю chat_id=%s флаг «семья» выставлен в %s", chat_id, family)
+        return updated

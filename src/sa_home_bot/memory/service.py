@@ -160,6 +160,15 @@ class MemoryService:
                             required=False,
                             title="Личное: не пересказывать вслух, никогда не common",
                         ),
+                        ActionParam(
+                            name="guest_family",
+                            type="bool",
+                            required=False,
+                            title=(
+                                "Этот chat_id сейчас — гость с флагом «семья» "
+                                "(вдобавок к family_chat_ids)"
+                            ),
+                        ),
                     ),
                 ),
                 ActionSpec(
@@ -168,6 +177,15 @@ class MemoryService:
                     params=(
                         ActionParam(name="query", type="string", title="О чём"),
                         ActionParam(name="chat_id", type="int", title="Чья память"),
+                        ActionParam(
+                            name="guest_family",
+                            type="bool",
+                            required=False,
+                            title=(
+                                "Этот chat_id сейчас — гость с флагом «семья» "
+                                "(вдобавок к family_chat_ids)"
+                            ),
+                        ),
                     ),
                 ),
                 ActionSpec(
@@ -181,7 +199,18 @@ class MemoryService:
                 ActionSpec(
                     id=ACTION_LIST,
                     title="📒 Что помню",
-                    params=(ActionParam(name="chat_id", type="int", title="Чья память"),),
+                    params=(
+                        ActionParam(name="chat_id", type="int", title="Чья память"),
+                        ActionParam(
+                            name="guest_family",
+                            type="bool",
+                            required=False,
+                            title=(
+                                "Этот chat_id сейчас — гость с флагом «семья» "
+                                "(вдобавок к family_chat_ids)"
+                            ),
+                        ),
+                    ),
                 ),
             ),
         )
@@ -205,6 +234,15 @@ class MemoryService:
         except (TypeError, ValueError) as exc:
             raise ProtoError(ERR_BAD_REQUEST, f"chat_id должен быть числом: {raw!r}") from exc
 
+    def _is_family_chat(self, args: dict[str, Any], chat_id: int) -> bool:
+        """chat_id в статическом [memory].family_chat_ids, ИЛИ бот подставил
+        guest_family=True — этот chat_id сейчас гость с флагом «семья»
+        (Subscription.family, bot/invites.py::Gatekeeper.set_guest_family).
+        Служба memory — отдельный процесс без доступа к SubscriptionBook,
+        поэтому флаг приходит с каждым запросом, а не читается тут напрямую.
+        """
+        return chat_id in self._cfg.family_chat_ids or bool(args.get("guest_family"))
+
     def _scope(self, args: dict[str, Any], *, chat_id: int, sensitive: bool) -> str:
         scope = str(args.get("scope") or SCOPE_CHAT).strip().lower()
         if scope not in SCOPES:
@@ -219,7 +257,7 @@ class MemoryService:
                 "личный факт не может быть общим: sensitive-записи живут только "
                 "в том разговоре, где их сказали",
             )
-        if scope == SCOPE_FAMILY and chat_id not in self._cfg.family_chat_ids:
+        if scope == SCOPE_FAMILY and not self._is_family_chat(args, chat_id):
             # Иначе чат, не входящий в семью, мог бы записать факт, который
             # семья потом увидит у себя, — граница держится в обе стороны.
             raise ProtoError(
@@ -265,7 +303,7 @@ class MemoryService:
             "WHERE facts MATCH ? AND (chat_id = ? OR scope = ?"
         )
         params: list[Any] = [match, chat_id, SCOPE_COMMON]
-        if chat_id in self._cfg.family_chat_ids:
+        if self._is_family_chat(args, chat_id):
             sql += " OR scope = ?"
             params.append(SCOPE_FAMILY)
         sql += ") ORDER BY rank LIMIT ?"
@@ -295,7 +333,7 @@ class MemoryService:
         limit = min(int(args.get("limit") or MAX_RECALL), MAX_RECALL)
         sql = "SELECT rowid AS id, text, scope, sensitive, created_at FROM facts WHERE chat_id = ? OR scope = ?"
         params: list[Any] = [chat_id, SCOPE_COMMON]
-        if chat_id in self._cfg.family_chat_ids:
+        if self._is_family_chat(args, chat_id):
             sql += " OR scope = ?"
             params.append(SCOPE_FAMILY)
         sql += " ORDER BY rowid DESC LIMIT ?"

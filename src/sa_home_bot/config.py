@@ -243,6 +243,14 @@ class MemoryConfig(BaseModel):
     (виден вообще всем, включая случайных гостей). Список правит человек
     руками (как и сам scope="family" — тул модели его не даёт, см.
     memory/service.py, по аналогии с common).
+
+    С решением 2026-08-04 этот список — не единственный источник доступа:
+    гость с флагом ``family`` (``/guests``, ``Subscription.family``,
+    ``bot/invites.py::Gatekeeper.set_guest_family``) получает тот же доступ
+    к scope="family", не будучи вписан сюда руками — служба memory узнаёт об
+    этом флагом ``guest_family`` в каждом запросе (см.
+    ``memory/service.py::_is_family_chat``, служба-процесс своего доступа к
+    гостевым подпискам не имеет).
     """
 
     socket: str = "./data/memory.sock"
@@ -693,6 +701,7 @@ class SubscriptionConfig(BaseModel):
     chat_id: int
     event_types: list[str] = Field(default_factory=lambda: ["*"])
     allowed_commands: list[str] = Field(default_factory=list)
+    family: bool = False  # свой человек — доступ к memory scope=family, см. MemoryConfig
 
 
 class GuestSubscriptionConfig(SubscriptionConfig):

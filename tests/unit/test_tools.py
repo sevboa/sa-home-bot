@@ -1132,6 +1132,27 @@ async def test_memory_recall_without_facts_reads_as_plain_text(store):
     assert result == "в памяти про это ничего нет"
 
 
+async def test_memory_tool_passes_guest_family_from_subscription(store):
+    """chat_id проставляет бот, не модель (см. тест выше) — тот же приём для
+    guest_family: тул кладёт его сам, из ctx.subscription.family, а не спрашивает
+    модель."""
+    link = _FakeSwarmLink(command_result={"facts": [], "count": 0})
+    family_sub = Subscription(
+        chat_id=CHAT_ID, name="me", allowed_commands=frozenset({"*"}), family=True
+    )
+    await tools.tool_memory(
+        _ctx(store, node_link=link, subscription=family_sub),
+        {"action": "recall", "query": "что-то"},
+    )
+    assert link.sent_args[0]["guest_family"] is True
+
+    await tools.tool_memory(
+        _ctx(store, node_link=link, subscription=ADMIN),
+        {"action": "recall", "query": "что-то"},
+    )
+    assert link.sent_args[1]["guest_family"] is False
+
+
 async def test_memory_outside_a_dialogue_is_honest(store):
     result = await tools.tool_memory(
         _ctx(store, node_link=_FakeSwarmLink(), subscription=ADMIN, chat_id=None),

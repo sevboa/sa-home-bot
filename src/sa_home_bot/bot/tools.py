@@ -56,7 +56,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sa_home_bot import wake_core
-from sa_home_bot.bot import commands, invites, recipients
+from sa_home_bot.bot import commands, guest_rights, invites, recipients
 from sa_home_bot.bot.monitor_state import parse_disk_summary, parse_health_state
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
@@ -1419,7 +1419,10 @@ async def tool_memory(ctx: ToolContext, args: dict[str, Any]) -> str:
     if action not in allowed:
         return f"не умею: {action or 'без уточнения'}"
 
-    payload: dict[str, Any] = {"chat_id": ctx.chat_id}
+    payload: dict[str, Any] = {
+        "chat_id": ctx.chat_id,
+        "guest_family": bool(ctx.subscription and ctx.subscription.family),
+    }
     if action == memory_protocol.ACTION_REMEMBER:
         text = str(args.get("text") or "").strip()
         if not text:
@@ -2052,6 +2055,68 @@ _DECL_TELL: dict[str, Any] = {
 }
 
 
+# --- guests_list: справочник гостей для владельца (то же право, что у самой
+# команды /guests — guest_rights.py сознательно не даёт invite гостям
+# точечно, «сделало бы гостя соадминистратором», так что тул виден только
+# владельцу). Только чтение — менять права/флаг «семья» тул не умеет, это
+# остаётся за человеком через /guests.
+
+
+async def tool_guests_list(ctx: ToolContext, args: dict[str, Any]) -> str:
+    if ctx.book is None:
+        return "недоступно: список гостей сейчас не виден"
+    all_guests = ctx.book.guests()
+    guests = all_guests
+    right = str(args.get("right") or "").strip()
+    if right:
+        guests = [g for g in guests if g.allows_command(right)]
+    family = str(args.get("family") or "any").strip().lower()
+    if family == "yes":
+        guests = [g for g in guests if g.family]
+    elif family == "no":
+        guests = [g for g in guests if not g.family]
+    if not guests:
+        return "гостей с такими условиями нет"
+    lines = [f"Гостей: {len(all_guests)} (после фильтра: {len(guests)})"]
+    for g in sorted(guests, key=lambda s: s.invited_at):
+        rights = ", ".join(guest_rights.label(r) for r in sorted(g.allowed_commands))
+        mark = "🏠 семья" if g.family else "не семья"
+        lines.append(f"• {g.name} (chat_id {g.chat_id}) — {mark} — {rights or 'прав нет'}")
+    return "\n".join(lines)
+
+
+_DECL_GUESTS_LIST: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "guests_list",
+        "description": (
+            "Твой личный справочник приглашённых гостей: имя, chat_id, права "
+            "и состоит ли человек в семье. Доступен только владельцу — если "
+            "тул тебе виден, значит спрашивает именно он; не пересказывай "
+            "этот справочник в чужом чате. right — точная строка права "
+            "(например 'chat@llm', 'recall@memory') — если задано, оставляет "
+            "только гостей с этим правом. family — 'yes' только семья, 'no' "
+            "только не семья, 'any' (по умолчанию) — все."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "right": {
+                    "type": "string",
+                    "description": "Точная строка права для фильтра, например 'chat@llm'",
+                },
+                "family": {
+                    "type": "string",
+                    "enum": ["any", "yes", "no"],
+                    "description": "Фильтр по флагу «семья»: any/yes/no",
+                },
+            },
+            "required": [],
+        },
+    },
+}
+
+
 _DECL_REMIND: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -2132,6 +2197,14 @@ TOOLS: tuple[ToolSpec, ...] = (
     # обычно, поэтому админу дописывать ничего не нужно.
     ToolSpec(name="tell", handler=tool_tell, declaration=_DECL_TELL,
              requires=CommandRight(TELL_RIGHT)),
+    # guests_list — то же право, что у самой команды /guests (invite):
+    # виден только владельцу, гостям guest_rights.py его не выдаёт.
+    ToolSpec(
+        name="guests_list",
+        handler=tool_guests_list,
+        declaration=_DECL_GUESTS_LIST,
+        requires=CommandRight(commands.required_right(commands.GUESTS.name)),
+    ),
     # remind сознательно без requires: он появился до правил доступа и уже
     # работает у живых пользователей — привязка к праву отобрала бы рабочее
     # умение у тех, кому его никто не запрещал. Долг: завести под него право

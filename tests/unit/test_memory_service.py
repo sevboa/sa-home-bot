@@ -66,6 +66,36 @@ async def test_common_knowledge_is_visible_from_every_chat(svc):
         assert found["facts"][0]["scope"] == "common"
 
 
+async def test_guest_family_flag_grants_family_scope_write_and_read(svc):
+    """family_chat_ids по умолчанию пуст (фикстура svc) — flag guest_family
+    даёт scope=family такому чату, ничего не меняя в конфиге."""
+    with pytest.raises(ProtoError):
+        await svc.run_command("remember", {"text": "x", "chat_id": PRIVATE, "scope": "family"})
+
+    await svc.run_command(
+        "remember",
+        {
+            "text": "День рождения в июне",
+            "chat_id": PRIVATE,
+            "scope": "family",
+            "guest_family": True,
+        },
+    )
+    without_flag = await svc.run_command(
+        "recall", {"query": "день рождения", "chat_id": FAMILY}
+    )
+    assert without_flag["count"] == 0
+
+    with_flag = await svc.run_command(
+        "recall", {"query": "день рождения", "chat_id": FAMILY, "guest_family": True}
+    )
+    assert with_flag["count"] == 1
+    assert with_flag["facts"][0]["scope"] == "family"
+
+    listed = await svc.run_command("list", {"chat_id": FAMILY, "guest_family": True})
+    assert any(f["scope"] == "family" for f in listed["facts"])
+
+
 async def test_sensitive_fact_can_never_be_common(svc):
     with pytest.raises(ProtoError) as excinfo:
         await svc.run_command(
