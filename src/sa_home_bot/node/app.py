@@ -266,10 +266,26 @@ def _remember_peer(
     ]
 
 
+# Живой баг 2026-08-05: emit() сразу после server.start() шлёт в
+# ProtoServer.broadcast_event, а тот рассылает только УЖЕ АУТЕНТИФИЦИРОВАННЫМ
+# соединениям (proto/server.py::_connections) — то есть соседям/локальным
+# службам, которые УСПЕЛИ переподключиться к нам после рестарта. Прямо
+# после старта их обычно ровно ноль (переподключение — отдельный процесс
+# на стороне соседа, не мгновенный), и событие рассылалось в пустоту без
+# единого получателя. Событие restart_applied ни разу не долетело до бота
+# с момента появления фичи. Решение — не гадать с задержкой, а повторять
+# рассылку, пока не появится хоть один получатель, в разумном окне.
+ANNOUNCE_VERSION_RETRY_S = 5.0
+ANNOUNCE_VERSION_WINDOW_S = 120.0
+
+
 async def _announce_version_if_changed(
     state: NodeState,
     state_path: str,
-    emit: Callable[[str, dict], Awaitable[None]],
+    broadcast: Callable[[str, dict], Awaitable[int]],
+    *,
+    retry_s: float = ANNOUNCE_VERSION_RETRY_S,
+    window_s: float = ANNOUNCE_VERSION_WINDOW_S,
 ) -> None:
     """Событие ``restart_applied``, если версия сменилась с прошлого старта.
 
@@ -281,15 +297,41 @@ async def _announce_version_if_changed(
     единственный источник правды «нода реально ИСПОЛНЯЕТ новую версию», не
     просто положила файлы на диск (для этого уже есть update_finished,
     node/service.py::_update).
+
+    ``state`` персистится СРАЗУ (до попытки доставки) — версия и так
+    сменилась реально, а повторный рестарт до истечения окна доставки не
+    должен решить, что "менялось дважды". Доставка — лучшая из возможных
+    попыток: `broadcast` (обычно ``ProtoServer.broadcast_event``, возвращает
+    число реальных доставок) повторяется каждые ``retry_s``, пока не
+    доставится хотя бы одному получателю или не истечёт ``window_s`` —
+    после этого молча сдаётся (событие best-effort, не source of truth:
+    swarm_status/check_update всё равно покажут актуальную версию).
     """
-    if state.last_known_version is not None and state.last_known_version != __version__:
-        await emit(
-            EVENT_RESTART_APPLIED,
-            {"from": state.last_known_version, "to": __version__},
-        )
-    if state.last_known_version != __version__:
+    if state.last_known_version is None:
         state.last_known_version = __version__
         state.save(state_path)
+        return
+    if state.last_known_version == __version__:
+        return
+    data = {"from": state.last_known_version, "to": __version__}
+    state.last_known_version = __version__
+    state.save(state_path)
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + window_s
+    while True:
+        if await broadcast(EVENT_RESTART_APPLIED, data) > 0:
+            return
+        if loop.time() >= deadline:
+            log.warning(
+                "restart_applied (%s -> %s): не удалось разослать за %.0fс — "
+                "нет ни одного подключённого получателя",
+                data["from"],
+                data["to"],
+                window_s,
+            )
+            return
+        await asyncio.sleep(retry_s)
 
 
 async def _relay_peer_event(
@@ -564,9 +606,14 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         on_peer_connect=on_peer_connect,
     )
     await server.start()
-    # После server.start() — emit уже реально рассылает (см. определение
-    # emit выше: broadcast_event молчит, пока server is None).
-    await _announce_version_if_changed(state, settings.node.state_path, emit)
+    # Фоновой задачей, не await: доставка ретраится до ANNOUNCE_VERSION_
+    # WINDOW_S, пока соседи/локальные службы переподключаются — ждать это
+    # синхронно означало бы задерживать старт остальных служб (см.
+    # докстринг _announce_version_if_changed про баг 2026-08-05).
+    asyncio.create_task(
+        _announce_version_if_changed(state, settings.node.state_path, server.broadcast_event),
+        name="announce-version",
+    )
     for link in (*router.peers.values(), *router.local_services.values()):
         await link.start()
     # До запуска служб: пакет, правленный пока нода была выключена, должен
