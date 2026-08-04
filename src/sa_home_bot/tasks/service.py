@@ -54,6 +54,8 @@ from sa_home_bot.db.store import Store
 from sa_home_bot.llm_chat import run_chat_loop
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
+    ERR_UNAVAILABLE,
+    ERR_UNKNOWN_DST,
     ActionParam,
     ActionSpec,
     Address,
@@ -82,6 +84,20 @@ EventEmitter = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 async def _noop_emit(event_type: str, data: dict[str, Any]) -> None:
     pass
+
+
+def _is_unavailable(exc: Exception) -> bool:
+    """Та же классификация, что у bot/ai_flow.py::_is_unavailable —
+    константы дублируются, а не импортируется сам модуль (там aiogram,
+    этой службе он не нужен, см. докстринг файла). Решение пользователя
+    2026-08-05: сбой "модель недоступна в моменте" не должен сразу сдаваться
+    честным "не удалось найти Альфреда" — стоит повторить в рамках
+    FIRE_GRACE_S, как уже делает прогрев/побудка (см. _fire_chat_loop).
+    Детерминированные ошибки (плохой запрос, внутренний сбой) сюда не
+    попадают — повтор их не лечит, только жжёт бюджет впустую."""
+    if isinstance(exc, ServiceUnavailableError):
+        return True
+    return isinstance(exc, ProtoError) and exc.code in (ERR_UNAVAILABLE, ERR_UNKNOWN_DST)
 
 
 class TasksService:
@@ -438,25 +454,52 @@ class TasksService:
             # группу через notify_tool_call (эта служба Telegram не видит).
             await self._emit(protocol.EVENT_TOOL_CALL, {"name": name})
 
-        try:
-            raw = await run_chat_loop(
-                self._node_link,
-                dst,
-                row["timeout_s"],
-                messages,
-                tool_ctx,
-                think=bool(task_args.get("think", True)),
-                telegram_chat_id=task_args.get("chat_id"),
-                log_chat_id=row["id"],
-                on_tool_call=_emit_tool_call,
-            )
-        except (ServiceUnavailableError, ProtoError) as exc:
-            log.warning("tasks: задача id=%s — запрос к модели не удался: %s", task_id, exc)
-            await self._emit(
-                protocol.EVENT_TASK_RESULT,
-                {"task_id": task_id, "meta": meta, "ok": False, "error": str(exc)},
-            )
-            return
+        # Живой баг 2026-08-05: bool(...) на "think" из args_json давило
+        # None ("не слать флаг вообще" — для моделей вроде Gemma без
+        # поддержки thinking, см. bot/ai_flow.py::request_alfred про
+        # mode="single_call") в явный False. Явный False — тоже флаг, и
+        # Ollama на такой модели одинаково падает 400 "does not support
+        # thinking" и на true, и на false — реагировать нужно на САМ факт
+        # присутствия ключа, не на его значение.
+        think_raw = task_args.get("think", True)
+        think = bool(think_raw) if think_raw is not None else None
+        # Повтор в рамках того же deadline, что уже отведён на побудку выше
+        # (решение пользователя 2026-08-05): "модель недоступна прямо
+        # сейчас" — не повод сразу сдаваться честным "не нашли Альфреда",
+        # если время до due_at+FIRE_GRACE_S ещё есть. Только для реально
+        # переходных сбоев (_is_unavailable) — детерминированные ошибки
+        # (баг в запросе, внутренний сбой модели) повтор не лечит.
+        while True:
+            try:
+                raw = await run_chat_loop(
+                    self._node_link,
+                    dst,
+                    row["timeout_s"],
+                    messages,
+                    tool_ctx,
+                    think=think,
+                    telegram_chat_id=task_args.get("chat_id"),
+                    log_chat_id=row["id"],
+                    on_tool_call=_emit_tool_call,
+                )
+                break
+            except (ServiceUnavailableError, ProtoError) as exc:
+                if not _is_unavailable(exc) or deadline - loop.time() <= FIRE_RETRY_INTERVAL_S:
+                    log.warning(
+                        "tasks: задача id=%s — запрос к модели не удался: %s", task_id, exc
+                    )
+                    await self._emit(
+                        protocol.EVENT_TASK_RESULT,
+                        {"task_id": task_id, "meta": meta, "ok": False, "error": str(exc)},
+                    )
+                    return
+                log.warning(
+                    "tasks: задача id=%s — модель недоступна (%s), повтор через %.0fс",
+                    task_id,
+                    exc,
+                    FIRE_RETRY_INTERVAL_S,
+                )
+                await asyncio.sleep(FIRE_RETRY_INTERVAL_S)
         log.info("tasks: задача id=%s доставлена (%d символов)", task_id, len(raw))
         await self._emit(
             protocol.EVENT_TASK_RESULT,

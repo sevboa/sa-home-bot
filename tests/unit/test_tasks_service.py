@@ -21,7 +21,12 @@ from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
-from sa_home_bot.proto.messages import ERR_UNKNOWN_ACTION, ProtoError
+from sa_home_bot.proto.messages import (
+    ERR_BAD_REQUEST,
+    ERR_UNAVAILABLE,
+    ERR_UNKNOWN_ACTION,
+    ProtoError,
+)
 from sa_home_bot.tasks import protocol
 from sa_home_bot.tasks import service as tasks_service
 from sa_home_bot.tasks.service import TasksService
@@ -254,6 +259,140 @@ async def test_fire_now_fires_pending_task_before_due_at(store, monkeypatch):
     ]
     # due_at не наступил — обычный опрос очереди не должен найти её снова.
     assert await store.due_tasks(datetime.now(tz=UTC)) == []
+
+
+async def test_fire_chat_loop_passes_think_none_through_json_roundtrip(store, monkeypatch):
+    # Живой баг 2026-08-05: bool(task_args.get("think", True)) давил
+    # think=None (mode="single_call", модель без thinking) в явный False —
+    # Ollama падала 400 "does not support thinking" на любом присутствии
+    # ключа, не только на true. think должен пройти JSON-круг как None.
+    captured: dict = {}
+
+    async def fake_chat_loop(*args, think=None, **kwargs):
+        captured["think"] = think
+        return "готово"
+
+    monkeypatch.setattr(tasks_service, "run_chat_loop", fake_chat_loop)
+    link = FakeNodeLink(OWN_STATE, routes={"winpc:llm": {"asleep": False}})
+    svc = _service(store, link, FakeEmitter())
+
+    row = _chat_row()
+    row["args_json"] = json.dumps(
+        {"messages": [{"role": "user", "content": "блины"}], "think": None}
+    )
+    await svc._fire_one(row)
+
+    assert captured["think"] is None
+
+
+async def test_fire_chat_loop_retries_transient_unavailable_then_succeeds(store, monkeypatch):
+    # Решение пользователя 2026-08-05: сбой "модель недоступна прямо сейчас"
+    # не должен сразу сдаваться "не нашли Альфреда" — есть время до
+    # deadline, стоит повторить.
+    monkeypatch.setattr(tasks_service, "FIRE_RETRY_INTERVAL_S", 0.01)
+    attempts: list[int] = []
+
+    async def flaky_chat_loop(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise ServiceUnavailableError("сеть моргнула")
+        return "получилось со второй попытки"
+
+    monkeypatch.setattr(tasks_service, "run_chat_loop", flaky_chat_loop)
+    link = FakeNodeLink(OWN_STATE, routes={"winpc:llm": {"asleep": False}})
+    emitter = FakeEmitter()
+
+    await _service(store, link, emitter)._fire_one(_chat_row())
+
+    assert len(attempts) == 2
+    assert emitter.results() == [
+        {
+            "task_id": 1,
+            "meta": META,
+            "ok": True,
+            "result": {"response": "получилось со второй попытки"},
+        }
+    ]
+
+
+async def test_fire_chat_loop_gives_up_after_grace_on_persistent_unavailable(store, monkeypatch):
+    monkeypatch.setattr(tasks_service, "FIRE_GRACE_S", 0.05)
+    monkeypatch.setattr(tasks_service, "FIRE_RETRY_INTERVAL_S", 0.01)
+    attempts: list[int] = []
+
+    async def always_unavailable(*args, **kwargs):
+        attempts.append(1)
+        raise ServiceUnavailableError("сеть моргнула")
+
+    monkeypatch.setattr(tasks_service, "run_chat_loop", always_unavailable)
+    link = FakeNodeLink(OWN_STATE, routes={"winpc:llm": {"asleep": False}})
+    emitter = FakeEmitter()
+
+    await _service(store, link, emitter)._fire_one(_chat_row())
+
+    assert len(attempts) >= 2  # именно повторяли, а не сдались с первого раза
+    assert emitter.results()[0]["ok"] is False
+
+
+async def test_fire_chat_loop_does_not_retry_deterministic_bad_request(store, monkeypatch):
+    # Ошибка в самом запросе (например, наш собственный баг с think) —
+    # повтор её не лечит, только жжёт бюджет: должен упасть с первой попытки.
+    monkeypatch.setattr(tasks_service, "FIRE_GRACE_S", 5.0)
+    monkeypatch.setattr(tasks_service, "FIRE_RETRY_INTERVAL_S", 0.01)
+    attempts: list[int] = []
+
+    async def bad_request(*args, **kwargs):
+        attempts.append(1)
+        raise ProtoError(ERR_BAD_REQUEST, "плохой запрос")
+
+    monkeypatch.setattr(tasks_service, "run_chat_loop", bad_request)
+    link = FakeNodeLink(OWN_STATE, routes={"winpc:llm": {"asleep": False}})
+    emitter = FakeEmitter()
+
+    await _service(store, link, emitter)._fire_one(_chat_row())
+
+    assert len(attempts) == 1
+    assert emitter.results()[0]["ok"] is False
+
+
+async def test_fire_chat_loop_retries_on_unavailable_proto_error_code(store, monkeypatch):
+    # ERR_UNAVAILABLE от службы llm классифицируется как переходный сбой
+    # ровно как и ServiceUnavailableError (bot/ai_flow.py::_is_unavailable —
+    # та же классификация, дублирована в tasks/service.py).
+    monkeypatch.setattr(tasks_service, "FIRE_RETRY_INTERVAL_S", 0.01)
+    attempts: list[int] = []
+
+    async def flaky_chat_loop(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise ProtoError(ERR_UNAVAILABLE, "служба спит")
+        return "ок"
+
+    monkeypatch.setattr(tasks_service, "run_chat_loop", flaky_chat_loop)
+    link = FakeNodeLink(OWN_STATE, routes={"winpc:llm": {"asleep": False}})
+    emitter = FakeEmitter()
+
+    await _service(store, link, emitter)._fire_one(_chat_row())
+
+    assert len(attempts) == 2
+    assert emitter.results()[0]["ok"] is True
+
+
+async def test_fire_chat_loop_coerces_truthy_think_to_bool(store, monkeypatch):
+    captured: dict = {}
+
+    async def fake_chat_loop(*args, think=None, **kwargs):
+        captured["think"] = think
+        return "готово"
+
+    monkeypatch.setattr(tasks_service, "run_chat_loop", fake_chat_loop)
+    link = FakeNodeLink(OWN_STATE, routes={"winpc:llm": {"asleep": False}})
+    svc = _service(store, link, FakeEmitter())
+
+    row = _chat_row()  # args_json без "think" — дефолт True
+    await svc._fire_one(row)
+
+    assert captured["think"] is True
 
 
 async def test_fire_now_on_unknown_task_reports_not_fired(store):

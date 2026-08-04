@@ -827,9 +827,16 @@ async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
     # не читал — цикл всегда подставлял свой список, а снимок лишь раздувал
     # args_json задачи.
     history = _close_pending_tool_calls(ctx.history)
+    # Живой баг 2026-08-05: think=True здесь слепо посылался даже для
+    # mode="single_call" (модель без thinking вовсе, напр. Gemma на
+    # mycraft) — на срабатывании Ollama падала 400 "does not support
+    # thinking". Та же логика, что у живого /ai (bot/ai_flow.py::
+    # request_alfred): для single_call think не передаём вовсе (None), а
+    # не False — присутствие ключа само по себе ломает такую модель.
+    think = None if ctx.settings.llm.mode == "single_call" else ctx.settings.llm.think_chat
     task_args = {
         "messages": [*history, {"role": "user", "content": directive}],
-        "think": ctx.settings.llm.think_chat,
+        "think": think,
         "chat_id": ctx.chat_id,
     }
     meta = {

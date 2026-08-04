@@ -13,7 +13,7 @@ import pytest
 import pytest_asyncio
 
 from sa_home_bot.bot import tools
-from sa_home_bot.config import Settings, WeatherConfig
+from sa_home_bot.config import LlmConfig, Settings, WeatherConfig
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
@@ -678,6 +678,29 @@ async def test_remind_after_event_without_store_is_an_error():
         {"after_event": {"node": "arch-t480", "event": "restart_applied"}, "text": "x"},
     )
     assert "недоступно" in result
+
+
+async def test_remind_omits_think_for_single_call_mode(store):
+    # Живой баг 2026-08-05: think=True слепо шёл в задачу даже когда модель
+    # (mode="single_call", напр. Gemma без thinking) падала на нём 400
+    # "does not support thinking". Для single_call think не передаём вовсе.
+    link = _FakeNodeLink()
+    when = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    settings = Settings(llm=LlmConfig(mode="single_call"))
+    await tools.tool_remind(
+        _ctx(store, settings=settings, node_link=link), {"when": when, "text": "x"}
+    )
+    assert link.calls[0][1]["args"]["think"] is None
+
+
+async def test_remind_keeps_explicit_think_for_router_think_mode(store):
+    link = _FakeNodeLink()
+    when = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    settings = Settings(llm=LlmConfig(mode="router_think", think_chat=True))
+    await tools.tool_remind(
+        _ctx(store, settings=settings, node_link=link), {"when": when, "text": "x"}
+    )
+    assert link.calls[0][1]["args"]["think"] is True
 
 
 async def test_remind_when_still_works_without_after_event(store):
