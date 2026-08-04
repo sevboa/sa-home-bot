@@ -311,6 +311,52 @@ async def test_единственный_адрес_с_чужим_именем_в
 
 
 @pytest.mark.asyncio
+async def test_адрес_отвечающий_нами_самими_уступает_правильному(sock_dir):
+    """Живая находка 2026-08-04: DHCP без резервации отдал IP, когда-то
+    выученный как адрес соседа, нам самим. Ответ «это я» — не «сосед иначе
+    называется» (RANK-фолбэк из теста выше), а гарантированно мёртвый
+    кандидат: пока есть настоящий адрес соседа, брать его."""
+    stale = f"unix://{sock_dir / 'stale.sock'}"
+    right = f"unix://{sock_dir / 'right.sock'}"
+    ourselves = ProtoServer(stale, FakeService(node="alfred"))
+    neighbour = ProtoServer(right, FakeService(node="mycraft"))
+    await ourselves.start()
+    await neighbour.start()
+
+    link = PeerLink("mycraft", [stale, right], reconnect_delay=0.05, self_node="alfred")
+    await link.start()
+    try:
+        assert await _wait_for(lambda: link.alive)
+        assert str(link.endpoint) == str(sock_dir / "right.sock"), (
+            "линк остался на адресе, где отвечаем мы сами"
+        )
+    finally:
+        await link.stop()
+        await neighbour.stop()
+        await ourselves.stop()
+
+
+@pytest.mark.asyncio
+async def test_единственный_адрес_отвечающий_нами_самими_не_считается_живым(sock_dir):
+    """В отличие от «просто другое имя в конфиге» (тест выше), ответ
+    буквально нашим собственным node_id никогда не годится даже как
+    последняя надежда — иначе линк подключается сам к себе и врёт
+    PresenceWatcher, что сосед «вернулся в строй»."""
+    stale = f"unix://{sock_dir / 'stale.sock'}"
+    ourselves = ProtoServer(stale, FakeService(node="alfred"))
+    await ourselves.start()
+
+    link = PeerLink("mycraft", stale, reconnect_delay=0.05, self_node="alfred")
+    await link.start()
+    try:
+        await asyncio.sleep(0.2)
+        assert not link.alive, "линк принял ответ от самого себя за соседа"
+    finally:
+        await link.stop()
+        await ourselves.stop()
+
+
+@pytest.mark.asyncio
 async def test_линк_учит_адреса_из_hello_и_сообщает_их_наверх(sock_dir):
     """Сосед знает свои адреса точнее, чем чужой конфиг, — рассказывает их
     в hello, а нода сохраняет (иначе выученное терялось бы на рестарте)."""
