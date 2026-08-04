@@ -4,9 +4,11 @@ from pathlib import Path
 
 import pytest
 
+from sa_home_bot.proto import endpoints
 from sa_home_bot.proto.endpoints import (
     TcpEndpoint,
     UnixEndpoint,
+    local_lan_ipv4_address,
     parse_endpoint,
     resolve_endpoint,
 )
@@ -84,3 +86,22 @@ def test_unix_rejected_on_windows(monkeypatch):
             parse_endpoint(raw)
     # tcp продолжает работать
     assert parse_endpoint("tcp://127.0.0.1:8710") == TcpEndpoint("127.0.0.1", 8710)
+
+
+# --- local_lan_ipv4_address: нужен именно домашний адрес, tailscale (CGNAT)
+# не в счёт (apps/service.py::_resolve_urls подставляет его в "{lan_ip}") ---
+
+
+def test_local_lan_ipv4_address_skips_tailscale_cgnat(monkeypatch):
+    # local_ipv4_addresses не сортирован по рангу — если tailscale оказался
+    # первым в списке, наивный "первый элемент" подставил бы оверлей вместо
+    # домашнего IP.
+    monkeypatch.setattr(
+        endpoints, "local_ipv4_addresses", lambda: ["100.73.52.92", "192.168.0.102"]
+    )
+    assert local_lan_ipv4_address() == "192.168.0.102"
+
+
+def test_local_lan_ipv4_address_none_without_lan(monkeypatch):
+    monkeypatch.setattr(endpoints, "local_ipv4_addresses", lambda: ["100.73.52.92"])
+    assert local_lan_ipv4_address() is None

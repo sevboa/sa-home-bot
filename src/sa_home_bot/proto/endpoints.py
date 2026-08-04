@@ -201,6 +201,21 @@ def local_ipv4_addresses() -> list[str]:
     return found
 
 
+def local_lan_ipv4_address() -> str | None:
+    """Первый настоящий LAN-адрес (приватная сеть, НЕ tailscale-оверлей) —
+    для мест, где нужен именно домашний IP, а не весь список кандидатов на
+    объявление рою (см. apps/service.py::_resolve_urls, ``{lan_ip}`` в
+    конфиге `[apps] items`). ``local_ipv4_addresses`` не отсортирован по
+    рангу (порядок — как отдал psutil), tailscale там не выкинут — годится
+    для объявления соседям (advertisable сам сортирует), но не для одного
+    конкретного адреса."""
+    for addr in local_ipv4_addresses():
+        ip = ipaddress.ip_address(addr)
+        if ip.is_private and ip not in _CGNAT:
+            return addr
+    return None
+
+
 def local_broadcast_addresses() -> list[str]:
     """Broadcast-адреса своих сетей — куда стучится маячок discovery (этап 31).
 

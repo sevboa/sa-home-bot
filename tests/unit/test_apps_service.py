@@ -59,6 +59,46 @@ async def test_get_state_reports_all_apps(fake_status):
     assert by_id["jellyfin"]["status"] == "inactive"
 
 
+# --- {lan_ip} в url: адрес ноды уже "уезжал" дважды (IMPLEMENTATION_PLAN.md,
+# этап 31), хардкодить его в конфиге не годится ---
+
+
+def test_resolve_urls_substitutes_lan_ip(monkeypatch):
+    monkeypatch.setattr(apps_service, "local_lan_ipv4_address", lambda: "192.168.0.102")
+    resolved = apps_service._resolve_urls(
+        ["http://{lan_ip}:8080", "http://alfred.tail61d88b.ts.net:8080"]
+    )
+    assert resolved == ["http://192.168.0.102:8080", "http://alfred.tail61d88b.ts.net:8080"]
+
+
+def test_resolve_urls_drops_placeholder_without_lan_ip(monkeypatch):
+    # Нет LAN-интерфейса (напр. только tailscale) — лучше не показать ссылку
+    # вовсе, чем показать битую "http://{lan_ip}:8080".
+    monkeypatch.setattr(apps_service, "local_lan_ipv4_address", lambda: None)
+    resolved = apps_service._resolve_urls(
+        ["http://{lan_ip}:8080", "http://alfred.tail61d88b.ts.net:8080"]
+    )
+    assert resolved == ["http://alfred.tail61d88b.ts.net:8080"]
+
+
+async def test_get_state_substitutes_lan_ip_for_configured_app(fake_status, monkeypatch):
+    monkeypatch.setattr(apps_service, "local_lan_ipv4_address", lambda: "192.168.0.102")
+    settings = Settings(
+        apps=AppsConfig(
+            items=[
+                AppConfig(
+                    id="jellyfin",
+                    title="🎬 Jellyfin",
+                    unit="jellyfin.service",
+                    urls=["http://{lan_ip}:8096"],
+                ),
+            ]
+        )
+    )
+    state = await AppsService(settings).get_state()
+    assert state["apps"][0]["urls"] == ["http://192.168.0.102:8096"]
+
+
 async def test_command_returns_app_card(fake_status):
     result = await AppsService(_settings()).run_command("qbittorrent", {})
     assert result["title"] == "🧲 qBittorrent"

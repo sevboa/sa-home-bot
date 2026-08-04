@@ -100,6 +100,12 @@ db_path = "./data/monitor.sqlite"
 # поверх готового софта (торрент-клиент, медиасервер): по протоколу отвечает
 # состоянием systemd-юнита и ссылками на веб-морду. Каждое приложение — скилл
 # первого уровня в /skills; право в подписке — "<id>@apps".
+# `{lan_ip}` в url подставляется на каждый запрос актуальным LAN-адресом
+# ноды (тем же способом, каким рой сам себя объявляет соседям, см.
+# proto/endpoints.py::local_ipv4_addresses) — не хардкодить IP, DHCP его
+# меняет (адрес alfred за время проекта уехал дважды, см.
+# IMPLEMENTATION_PLAN.md, этап 31). tailscale-адрес — стабильное имя,
+# подставлять незачем.
 [apps]
 socket = "./data/apps.sock"
 
@@ -107,13 +113,13 @@ socket = "./data/apps.sock"
 id = "qbittorrent"
 title = "🧲 qBittorrent"
 unit = "qbittorrent-nox.service"   # системный systemd-юнит
-urls = ["http://192.168.0.100:8080"]
+urls = ["http://{lan_ip}:8080"]
 
 [[apps.items]]
 id = "jellyfin"
 title = "🎬 Jellyfin"
 unit = "jellyfin.service"
-urls = ["http://192.168.0.100:8096"]
+urls = ["http://{lan_ip}:8096"]
 
 # Служба torrents (адаптер qBittorrent, `sa-home-bot --service torrents`):
 # умение роя «добавить торрент по .torrent-файлу/magnet-ссылке из чата»
@@ -132,6 +138,10 @@ save_dirs = [
     "/mnt/data/pr",
     "/mnt/scratch/torrents/complete",
     "/mnt/scratch/pr",
+    "/mnt/data/movies",
+    "/mnt/data/serials",
+    "/mnt/scratch/movies",
+    "/mnt/scratch/serials",
 ]
 # Поиск по трекерам (действие `search`) — встроенный движок qBittorrent и его
 # плагины; ставятся в самом qBittorrent («Поиск» → «Поисковые плагины»), логин

@@ -17,6 +17,7 @@ from typing import Any
 
 from sa_home_bot import __version__
 from sa_home_bot.config import AppConfig, Settings
+from sa_home_bot.proto.endpoints import local_lan_ipv4_address
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     ERR_INTERNAL,
@@ -86,6 +87,25 @@ async def _run_systemctl(action: str, unit: str) -> None:
         raise ProtoError(ERR_INTERNAL, f"systemctl {action} {unit} завершился ошибкой: {stderr}")
 
 
+def _resolve_urls(urls: list[str]) -> list[str]:
+    """Подставляет ``{lan_ip}`` актуальным LAN-адресом ноды вместо статики в
+    конфиге — тем же способом, каким рой уже объявляет себя соседям
+    (``proto/endpoints.py::local_lan_ipv4_address``, этап 31, PROTOCOL.md
+    «Маячок discovery»). Живая находка: адрес alfred за время проекта уехал
+    дважды (см. IMPLEMENTATION_PLAN.md, этап 31) — конфиг `[apps] items`
+    хардкодил старый IP и молча указывал в никуда, пока не заметили руками.
+    Ссылки на qBittorrent/Jellyfin — их человек открывает сам, поэтому лучше
+    вообще не показать ссылку (LAN недоступен), чем показать мёртвую."""
+    lan_ip = local_lan_ipv4_address()
+    resolved = []
+    for url in urls:
+        if "{lan_ip}" not in url:
+            resolved.append(url)
+        elif lan_ip is not None:
+            resolved.append(url.replace("{lan_ip}", lan_ip))
+    return resolved
+
+
 class AppsService:
     def __init__(self, settings: Settings) -> None:
         self._apps: dict[str, AppConfig] = {a.id: a for a in settings.apps.items}
@@ -117,7 +137,7 @@ class AppsService:
             "title": app.title,
             "unit": app.unit,
             "status": await read_unit_status(app.unit),
-            "urls": list(app.urls),
+            "urls": _resolve_urls(app.urls),
         }
 
     async def get_state(self) -> dict[str, Any]:
