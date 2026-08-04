@@ -771,6 +771,144 @@ async def test_swarm_status_own_node_down(store):
     assert result.startswith("недоступно")
 
 
+# --- node_manage: обновить/перезапустить ноду ---
+
+
+def _node_enum(subscription) -> list[str]:
+    """Значения action, которые видит модель у тула node_manage."""
+    decl = next(
+        (
+            d
+            for d in tools.tools_for(subscription).declarations
+            if d["function"]["name"] == "node_manage"
+        ),
+        None,
+    )
+    if decl is None:
+        return []
+    return decl["function"]["parameters"]["properties"]["action"]["enum"]
+
+
+def test_node_manage_enum_is_per_action_right():
+    """Право на каждое действие своё: посмотреть обновление — не то же
+    самое, что поставить его или перезапустить ноду."""
+    assert _node_enum(_sub("check_update@node")) == ["check_update"]
+    assert _node_enum(_sub("check_update@node", "update@node")) == ["check_update", "update"]
+    assert _node_enum(ADMIN) == ["check_update", "update", "restart_node"]
+
+
+def test_node_manage_hidden_without_any_node_right():
+    assert "node_manage" not in _names(_sub("ai"))
+
+
+async def test_node_manage_check_update_own_node(store):
+    link = _swarm_link(
+        command_result={
+            "repo": "git@example.com:sa-home-bot",
+            "running": "0.69.0",
+            "installed": "0.69.0",
+            "latest": "0.69.0",
+        }
+    )
+    result = await tools.tool_node_manage(
+        _ctx(store, node_link=link, subscription=ADMIN), {"action": "check_update"}
+    )
+    assert link.commands == [("check_update", None)]
+    assert json.loads(result)["latest"] == "0.69.0"
+
+
+async def test_node_manage_update_reports_target_version(store):
+    link = _swarm_link(command_result={"scheduled": True, "target_version": "0.70.0"})
+    result = await tools.tool_node_manage(
+        _ctx(store, node_link=link, subscription=ADMIN), {"action": "update"}
+    )
+    assert "0.70.0" in result
+    assert "restart_node" in result
+
+
+async def test_node_manage_update_up_to_date(store):
+    link = _swarm_link(command_result={"up_to_date": True, "version": "0.69.0"})
+    result = await tools.tool_node_manage(
+        _ctx(store, node_link=link, subscription=ADMIN), {"action": "update"}
+    )
+    assert "Уже последняя версия" in result
+
+
+async def test_node_manage_restart_own_node_warns_about_disappearing(store):
+    link = _swarm_link(command_result={"scheduled": "restart_node", "delay_s": 5})
+    result = await tools.tool_node_manage(
+        _ctx(store, node_link=link, subscription=ADMIN), {"action": "restart_node"}
+    )
+    assert link.commands == [("restart_node", None)]
+    assert "ненадолго пропаду" in result
+
+
+async def test_node_manage_restart_remote_node_targets_dst(store):
+    link = _swarm_link(command_result={"scheduled": "restart_node", "delay_s": 5})
+    result = await tools.tool_node_manage(
+        _ctx(store, node_link=link, subscription=ADMIN),
+        {"action": "restart_node", "node": "winpc"},
+    )
+    assert link.commands == [("restart_node", tools.Address(node="winpc", service="node"))]
+    assert "ненадолго пропаду" not in result
+    assert "winpc" in result
+
+
+async def test_node_manage_unknown_node_lists_known_ones(store):
+    link = _swarm_link()
+    result = await tools.tool_node_manage(
+        _ctx(store, node_link=link, subscription=ADMIN),
+        {"action": "check_update", "node": "нету"},
+    )
+    assert "нет такой ноды" in result
+    assert "alfred" in result and "winpc" in result
+    assert link.commands == []
+
+
+async def test_node_manage_rejects_action_without_right(store):
+    """Модель может передать значение, которого не было в её enum — тул
+    сверяется с подпиской повторно, а не доверяет декларации."""
+    link = _swarm_link()
+    result = await tools.tool_node_manage(
+        _ctx(store, node_link=link, subscription=_sub("check_update@node")),
+        {"action": "restart_node"},
+    )
+    assert result.startswith("не умею")
+    assert link.commands == []
+
+
+async def test_node_manage_without_subscription_refuses(store):
+    result = await tools.tool_node_manage(
+        _ctx(store, node_link=_swarm_link(), subscription=None), {"action": "check_update"}
+    )
+    assert result.startswith("не умею")
+
+
+async def test_node_manage_service_unavailable_degrades_to_text(store):
+    link = _swarm_link(command_raises=tools.ServiceUnavailableError("нода спит"))
+    result = await tools.tool_node_manage(
+        _ctx(store, node_link=link, subscription=ADMIN), {"action": "restart_node"}
+    )
+    assert result.startswith("недоступно")
+
+
+async def test_node_manage_proto_error_reads_as_answer(store):
+    link = _swarm_link(command_raises=tools.ProtoError("unknown_action", "нет такого действия"))
+    result = await tools.tool_node_manage(
+        _ctx(store, node_link=link, subscription=ADMIN), {"action": "update"}
+    )
+    assert result == "не вышло: нет такого действия"
+
+
+async def test_node_manage_own_node_down(store):
+    link = _FakeSwarmLink(states={})
+    result = await tools.tool_node_manage(
+        _ctx(store, node_link=link, subscription=ADMIN),
+        {"action": "check_update", "node": "winpc"},
+    )
+    assert result.startswith("недоступно")
+
+
 # --- torrents: закачки целиком (список, место, magnet, пауза/запуск) ---
 
 

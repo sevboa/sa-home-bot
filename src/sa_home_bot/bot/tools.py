@@ -1071,6 +1071,139 @@ _DECL_SWARM_STATUS: dict[str, Any] = {
 }
 
 
+# --- node_manage: обновить/перезапустить ноду роя ---
+#
+# Те же действия, что кнопки в карточке ноды (/nodes, bot/handlers/node.py) и
+# nodectl check_update/update/restart_node — права ровно те же (`действие@node`),
+# Альфред не умеет больше, чем сам собеседник. check_update ничего не меняет;
+# update ставит файлы на диск БЕЗ рестарта процесса (node/update.py) — новая
+# версия заработает только после отдельного restart_node. Само действие
+# restart_node перезапускает ноду-супервизор целиком (не одну службу); если
+# это своя же нода — та, где сейчас исполняется этот разговор, — Альфред сам
+# ненадолго пропадёт и вернётся (POWER_DELAY_S, лайфсайкл-«снова на посту»),
+# поэтому об этом стоит честно предупредить, а не молча выполнить.
+#
+# Сервер сам отсекает действие, которого нода не поддерживает (dev-чекаут без
+# update_source, нода без колбэка restart_node) — ERR_UNKNOWN_ACTION на этапе
+# _run_command (proto/server.py), до run_command, поэтому здесь не нужно
+# заранее знать, что умеет конкретная нода.
+
+NODE_SERVICE = "node"
+NODE_ACTION_CHECK_UPDATE = "check_update"
+NODE_ACTION_UPDATE = "update"
+NODE_ACTION_RESTART = "restart_node"
+
+
+async def _node_manage_dst(ctx: ToolContext, wanted_node: str | None) -> Address | str | None:
+    """dst для command(): ``None`` — своя нода, ``Address`` — чужая, ``str`` —
+    текст отказа для модели. Чужая нода сверяется со свежим списком роя (как у
+    swarm_status), а не улетает наугад — иначе вместо понятной ошибки был бы
+    голый таймаут на несуществующее имя."""
+    if not wanted_node:
+        return None
+    own = await _own_state(ctx)
+    if own is None:
+        return "недоступно: своя нода не отвечает"
+    reports = await wake_core.collect_reports(ctx.node_link, own, with_monitor=False)
+    known = {r.node_id for r in reports}
+    if wanted_node not in known:
+        known_text = ", ".join(sorted(known)) or "нет данных"
+        return f"нет такой ноды: {wanted_node} (известны: {known_text})"
+    return Address(node=wanted_node, service=NODE_SERVICE)
+
+
+async def tool_node_manage(ctx: ToolContext, args: dict[str, Any]) -> str:
+    if ctx.node_link is None:
+        return "недоступно: нет связи с роем"
+    action = str(args.get("action") or "").strip()
+    # Права уже проверены при сборке комплекта (tools_for), но модель может
+    # передать что угодно, поэтому сверяемся ещё раз, по той же подписке.
+    allowed = _NODE_MANAGE_VARIANTS.allowed_values(ctx.subscription) if ctx.subscription else []
+    if action not in allowed:
+        return f"не умею: {action or 'без уточнения'}"
+
+    wanted_node = args.get("node")
+    wanted_node = str(wanted_node).strip() if wanted_node else None
+    dst = await _node_manage_dst(ctx, wanted_node)
+    if isinstance(dst, str):
+        return dst
+
+    try:
+        result = await ctx.node_link.command(action, {}, dst=dst)
+    except ProtoError as exc:
+        return f"не вышло: {exc.message}"
+    except (ServiceUnavailableError, TimeoutError) as exc:
+        where = wanted_node or "своя нода"
+        return f"недоступно: {where} не ответил(а) ({exc})"
+
+    if action == NODE_ACTION_RESTART:
+        who = wanted_node or "своя нода"
+        text = f"Принято: {who} перезапустится через {result.get('delay_s', '?')} с."
+        if wanted_node is None:
+            text += " Это моя нода — я ненадолго пропаду из этого разговора и вернусь сам."
+        return text
+    if action == NODE_ACTION_UPDATE:
+        if result.get("up_to_date"):
+            return f"Уже последняя версия v{result.get('version', '?')} — обновлять нечего."
+        return (
+            f"Обновление до v{result.get('target_version', '?')} поставлено на диск в фоне "
+            "(сам процесс не тронут) — чтобы новая версия заработала, нужен ещё "
+            "action=«restart_node»."
+        )
+    return json.dumps({"node": wanted_node or "своя", **result}, ensure_ascii=False)
+
+
+_NODE_MANAGE_VARIANTS = VariantRights(
+    param="action",
+    rights=(
+        # Право на действие — то же `действие@node`, что и у кнопки в карточке
+        # ноды: Альфред не расширяет доступ.
+        (NODE_ACTION_CHECK_UPDATE, ActionRight(NODE_ACTION_CHECK_UPDATE, NODE_SERVICE)),
+        (NODE_ACTION_UPDATE, ActionRight(NODE_ACTION_UPDATE, NODE_SERVICE)),
+        (NODE_ACTION_RESTART, ActionRight(NODE_ACTION_RESTART, NODE_SERVICE)),
+    ),
+)
+
+_DECL_NODE_MANAGE: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "node_manage",
+        "description": (
+            "Обновить или перезапустить ноду домашнего роя — те же действия, "
+            "что кнопки в /nodes. check_update — посмотреть, есть ли новая "
+            "версия, ничего не меняя; update — поставить её файлы на диск БЕЗ "
+            "перезапуска процесса; restart_node — перезапустить саму ноду "
+            "(не отдельную службу) — после update это обязательно, иначе "
+            "новый код не заработает. Без node действие идёт на ту ноду, где "
+            "сейчас исполняюсь я сам — restart_node на ней ненадолго оборвёт "
+            "этот же разговор."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    # enum подставляется под права собеседника (см. tools_for).
+                    "enum": [v for v, _ in _NODE_MANAGE_VARIANTS.rights],
+                    "description": (
+                        "check_update — есть ли обновление; update — поставить "
+                        "его на диск; restart_node — перезапустить ноду"
+                    ),
+                },
+                "node": {
+                    "type": "string",
+                    "description": (
+                        "Имя конкретной ноды (например: alfred, mycraft). Без "
+                        "этого — своя нода."
+                    ),
+                },
+            },
+            "required": ["action"],
+        },
+    },
+}
+
+
 # --- torrents: закачки целиком (список, место, magnet, пауза/запуск) ---
 #
 # Раньше «что качается» было ещё одним значением what у swarm_status
@@ -2160,6 +2293,12 @@ TOOLS: tuple[ToolSpec, ...] = (
         handler=tool_swarm_status,
         declaration=_DECL_SWARM_STATUS,
         variants=_SWARM_VARIANTS,
+    ),
+    ToolSpec(
+        name="node_manage",
+        handler=tool_node_manage,
+        declaration=_DECL_NODE_MANAGE,
+        variants=_NODE_MANAGE_VARIANTS,
     ),
     ToolSpec(
         name="torrents",

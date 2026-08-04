@@ -153,6 +153,7 @@
 | `swarm_status(what="nodes")` | `nodes` (то же, что команда `/nodes`) |
 | `swarm_status(what="health"\|"disks")` | `status` (то же, что `/status`) |
 | `torrents(action="list"\|"space"\|"search"\|"details"\|"add"\|"pause"\|"resume")` | `<action>@torrents` — ровно то же право, что у человека на ту же операцию |
+| `node_manage(action="check_update"\|"update"\|"restart_node")` | `<action>@node` — то же право, что у кнопок «Проверить обновление»/«Обновить»/«Перезапустить ноду» на карточке |
 | `dismiss(mode="model")` | `sleep@llm` — выгрузить модель |
 | `dismiss(mode="sleep"\|"off")` | `suspend@node` / `poweroff@node` — то же, что кнопки «Усыпить/Выключить машину» на карточке ноды |
 | `memory(action="recall"\|"remember"\|"forget")` | `<action>@memory` |
@@ -161,11 +162,11 @@
 | `vpn(action="usage"\|"issue"\|"reissue"\|"grant_extra"\|"request_extra"\|"apk"\|"peers"\|"resolve_request")` | `<action>@vpn` — ровно то же право, что у человека на ту же операцию |
 | `guests_list(right?, family?)` — справочник гостей: имена, права, флаг «семья» | `invite` (то же, что команда `/guests`) |
 
-У `swarm_status` и `torrents` право проверяется **на каждое значение**
-параметра (`what`/`action`): недоступные вырезаются из `enum` в декларации, а
-если не осталось ни одного — тула нет совсем. Групповые формы работают как
-обычно: `*@torrents` и голый `*` дают доступ сразу, дописывать ничего не
-нужно.
+У `swarm_status`, `torrents` и `node_manage` право проверяется **на каждое
+значение** параметра (`what`/`action`): недоступные вырезаются из `enum` в
+декларации, а если не осталось ни одного — тула нет совсем. Групповые формы
+работают как обычно: `*@torrents`, `*@node` и голый `*` дают доступ сразу,
+дописывать ничего не нужно.
 
 `tell` — единственное умение, действующее **за пределами текущего чата**:
 Альфред пишет другому человеку в личку по просьбе собеседника («скажи
