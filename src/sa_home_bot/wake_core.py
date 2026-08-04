@@ -343,3 +343,71 @@ async def wake_swarm_node_core(node_link: ServiceLink, store: Store, node_id: st
         f"🔌 Magic packet для «{node_id}» (<code>{info['mac']}</code>) отправлен через "
         f"ноду «{waker}». Появится в /nodes, как поднимется.",
     )
+
+
+# Действие ноды, которым сверяется версия репозитория (node/service.py) —
+# литералом, не импортом из bot/tools.py (тот тянет aiogram-независимый, но
+# куда более тяжёлый набор зависимостей, а константа нужна тут одна).
+_CHECK_UPDATE_ACTION = "check_update"
+
+
+async def check_updates_summary(node_link: ServiceLink) -> str:
+    """Сводка обновлений по всему рою — одна строка для человека.
+
+    Версия репозитория одна на весь рой, и обновления у всех нод одни и те
+    же (решение пользователя 2026-08-04) — вместо check_update по каждой
+    ноде отдельно один вызов: последний тег плюс кто отстал.
+
+    Своя нода спрашивается ОДИН раз через check_update (там уже есть
+    latest_tag против репозитория) — остальные ноды не переспрашивают то же
+    самое сетью, их версии берутся из get_state() (collect_reports, тот же
+    веерный опрос, что и у /swarm и swarm_status).
+
+    Общее ядро для тула node_manage/check_all (bot/tools.py) и кнопки
+    «Проверить обновления» на панели /swarm (bot/handlers/swarm_panel.py) —
+    раньше жило только в tools.py::_node_check_all.
+    """
+    own = await fetch_state(node_link, None)
+    if own is None:
+        return "недоступно: своя нода не отвечает"
+    try:
+        own_check = await node_link.command(_CHECK_UPDATE_ACTION, {}, dst=None)
+    except ProtoError as exc:
+        return f"не вышло проверить обновления: {exc.message}"
+    except (ServiceUnavailableError, TimeoutError) as exc:
+        return f"недоступно: своя нода не ответила ({exc})"
+    latest = own_check.get("latest")
+    if not latest:
+        return "не удалось узнать последнюю версию (сеть?)"
+
+    reports = await collect_reports(node_link, own, with_monitor=False)
+    behind: list[str] = []
+    restart_only: list[str] = []
+    unreachable: list[str] = []
+    for r in reports:
+        if not r.alive or r.state is None:
+            unreachable.append(r.node_id)
+            continue
+        running = r.state.get("version")
+        if running and running != latest:
+            behind.append(r.node_id)
+            continue
+        # На последней версии, но, возможно, update уже лежит на диске, а
+        # restart_node ещё не выполняли (node/service.py::get_state).
+        if (r.state.get("update") or {}).get("restart_required"):
+            restart_only.append(r.node_id)
+
+    parts = [f"Последняя версия: v{latest}."]
+    if behind:
+        parts.append("Нужен update: " + ", ".join(sorted(behind)) + ".")
+    if restart_only:
+        parts.append(
+            "Update уже на диске, нужен только restart_node: "
+            + ", ".join(sorted(restart_only))
+            + "."
+        )
+    if unreachable:
+        parts.append("Не отвечают, не проверить: " + ", ".join(sorted(unreachable)) + ".")
+    if not behind and not restart_only:
+        parts.append("Все доступные ноды на последней версии.")
+    return " ".join(parts)

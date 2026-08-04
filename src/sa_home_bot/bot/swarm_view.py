@@ -63,7 +63,7 @@ def _versions_line(reports: list[_NodeReport]) -> str | None:
     return f"ПО: свежая v{latest} · отстаёт {lagging}"
 
 
-def _last_failure_line(reports: list[_NodeReport], now: datetime) -> str | None:
+def last_failure_line(reports: list[_NodeReport], now: datetime) -> str | None:
     """Самый свежий внезапный сбой по рою (см. ограничение в докстроке модуля)."""
     freshest: tuple[datetime, str, PowerEvent] | None = None
     for r in reports:
@@ -91,7 +91,7 @@ def _temp_max(monitor: dict, kind: str) -> float | None:
     return max(temps) if temps else None
 
 
-def _node_line(report: _NodeReport) -> str:
+def node_line(report: _NodeReport) -> str:
     name = node_links.node_command(report.node_id) or f"<b>{report.node_id}</b>"
     if not report.alive:
         # Нода, предупредившая об уходе (node_leaving), выключена нарочно —
@@ -136,17 +136,17 @@ def render_swarm(
     total = len(reports)
     online = sum(1 for r in reports if r.alive and r.state is not None)
     lines = [f"{SWARM_HEADER}: {total} нод, в сети {online}"]
-    for extra in (_versions_line(reports), _last_failure_line(reports, now)):
+    for extra in (_versions_line(reports), last_failure_line(reports, now)):
         if extra:
             lines.append(extra)
     lines.append("")
-    lines.extend(_node_line(r) for r in reports)
+    lines.extend(node_line(r) for r in reports)
     if wake is not None and wake.mac:
         lines.append(REMOTE_STUB_TEXT)
     return "\n".join(lines)
 
 
-def _wake_rows(
+def wake_rows(
     subscription: Subscription, wake: WakeConfig | None
 ) -> list[InlineKeyboardButton]:
     """Ручная кнопка — фиксированная машина из [wake] (запасной путь)."""
@@ -155,14 +155,15 @@ def _wake_rows(
     return [InlineKeyboardButton(text=WAKE_BUTTON_TEXT, callback_data=commands.wake_callback())]
 
 
-async def _offline_wake_rows(
+async def offline_wakeable_ids(
     subscription: Subscription, store: Store, reports: Sequence[_NodeReport]
-) -> list[InlineKeyboardButton]:
-    """Точечная кнопка на каждую уснувшую ноду, чьи реквизиты уже известны
-    (см. wake_state.remember, вызывается ниже при сборе сводки).
+) -> list[str]:
+    """node_id уснувших нод, для которых можно предложить будильник — общее
+    ядро для точечной кнопки на /swarm (``offline_wake_rows`` ниже) и
+    построчных кнопок в списке нод панели (bot/swarm_panel.py).
 
     «Недоступна для будильника» — не только формально disconnected
-    (``alive=False``, «не в сети» в _node_line), но и «не отвечает»
+    (``alive=False``, «не в сети» в node_line), но и «не отвечает»
     (``alive=True``, но get_state не дозвался, ``state is None``) — то же
     промежуточное состояние, в котором PeerLink ещё не обнаружил обрыв
     (TCP keepalive обнаруживает пропажу пира не мгновенно, см.
@@ -171,7 +172,7 @@ async def _offline_wake_rows(
     """
     if not subscription.allows_command(commands.WAKE.name):
         return []
-    buttons = []
+    ids = []
     for r in reports:
         if r.alive and r.state is not None:
             continue
@@ -185,16 +186,25 @@ async def _offline_wake_rows(
             continue
         if await wake_state.cached(store, r.node_id) is None:
             continue
-        buttons.append(
-            InlineKeyboardButton(
-                text=f"🔌 Разбудить {r.node_id}",
-                callback_data=commands.wake_callback(r.node_id),
-            )
+        ids.append(r.node_id)
+    return ids
+
+
+async def offline_wake_rows(
+    subscription: Subscription, store: Store, reports: Sequence[_NodeReport]
+) -> list[InlineKeyboardButton]:
+    """Точечная кнопка на каждую уснувшую ноду, чьи реквизиты уже известны
+    (см. wake_state.remember, вызывается ниже при сборе сводки)."""
+    ids = await offline_wakeable_ids(subscription, store, reports)
+    return [
+        InlineKeyboardButton(
+            text=f"🔌 Разбудить {node_id}", callback_data=commands.wake_callback(node_id)
         )
-    return buttons
+        for node_id in ids
+    ]
 
 
-async def _remember_wake_info(store: Store, reports: Sequence[_NodeReport]) -> None:
+async def remember_wake_info(store: Store, reports: Sequence[_NodeReport]) -> None:
     for r in reports:
         if r.state is not None:
             await wake_state.remember(store, r.node_id, r.state.get("wake"))
@@ -209,9 +219,9 @@ async def build_swarm_keyboard(
     """Только действия (wake) — навигация к нодам идёт ссылками в тексте."""
     if subscription is None:
         return None
-    buttons = _wake_rows(subscription, wake)
+    buttons = wake_rows(subscription, wake)
     if store is not None:
-        buttons = buttons + await _offline_wake_rows(subscription, store, reports)
+        buttons = buttons + await offline_wake_rows(subscription, store, reports)
     return actions.rows(buttons)
 
 
@@ -236,7 +246,7 @@ async def build_swarm_view(
         return node_view.NODE_DOWN_TEXT, None
     reports = await wake_core.collect_reports(node_link, own_state, with_monitor=True)
     if store is not None:
-        await _remember_wake_info(store, reports)
+        await remember_wake_info(store, reports)
     text = render_swarm(reports, wake, datetime.now(tz=UTC))
     keyboard = await build_swarm_keyboard(subscription, wake, reports, store)
     return text, keyboard

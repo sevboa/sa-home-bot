@@ -2,9 +2,12 @@
 test_swarm_view.py)."""
 
 from sa_home_bot.bot.node_view import (
+    SERVICES_PAGE_SIZE,
     build_node_card_keyboard,
     build_service_card_keyboard,
+    build_services_list_view,
     render_node_card_header,
+    render_node_card_summary,
     render_service_card,
     render_services_block,
 )
@@ -74,8 +77,50 @@ def test_services_block_empty():
     )
 
 
+def test_node_card_summary_is_just_a_count():
+    assert render_node_card_summary(NODE_STATE) == "Служб: 2"
+
+
+# --- Список служб (отдельный постраничный экран, право `nodes`) -------------
+
+
+def test_services_list_view_shows_status_lines_and_buttons():
+    text, kb = build_services_list_view(NODE_STATE, node_id=None, offset=0)
+    assert "Службы «alfred»" in text
+    assert "monitor" in text and "🟢" in text
+    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert "st:sw_svc:-:monitor" in codes
+    assert "st:sw_svc:-:telegram-bot" in codes
+    assert "st:sw_node:-" in codes  # ⬅️ Назад
+
+
+def test_services_list_view_peer_carries_node_id():
+    text, kb = build_services_list_view(NODE_STATE, node_id="arch-t480", offset=0)
+    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert "st:sw_svc:arch-t480:monitor" in codes
+    assert "st:sw_node:arch-t480" in codes
+
+
+def test_services_list_view_paginates():
+    many_services = {
+        "node": "alfred",
+        "services": [
+            {"name": f"svc{i}", "status": "running"} for i in range(SERVICES_PAGE_SIZE + 2)
+        ],
+    }
+    text, kb = build_services_list_view(many_services, node_id=None, offset=0)
+    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert f"st:sw_svcs:-:{SERVICES_PAGE_SIZE}" in codes
+
+
+def test_services_list_view_empty():
+    text, _ = build_services_list_view({"node": "alfred", "services": []}, None, 0)
+    assert "не назначены" in text
+
+
 def test_node_card_keyboard_actions_only_no_service_cards():
-    # Навигация к службам — ссылками в тексте, кнопок ⚙️ больше нет.
+    # Навигация к службам — отдельный постраничный экран (право `nodes`),
+    # на карточке — счётчик и кнопка «⚙️ Службы», не полный список.
     monitor_actions = [ActionSpec(id="scan_now", title="🔄 Скан датчиков")]
     kb = build_node_card_keyboard(
         _sub("status_full", "nodes", "scan_now@monitor"),
@@ -83,7 +128,13 @@ def test_node_card_keyboard_actions_only_no_service_cards():
         ["monitor", "telegram-bot"],
     )
     codes = {b.callback_data for row in kb.inline_keyboard for b in row}
-    assert codes == {"st:full", "act:monitor:scan_now"}
+    assert codes == {
+        "st:full",
+        "act:monitor:scan_now",
+        "st:sw_node:-",  # 🔄 Обновить
+        "st:sw_svcs:-:0",  # ⚙️ Службы (2)
+        "st:sw_nodes:0",  # ⬅️ Назад
+    }
 
 
 def test_node_card_keyboard_peer_carries_node_id_everywhere():
@@ -108,6 +159,9 @@ def test_node_card_keyboard_peer_carries_node_id_everywhere():
         "act:monitor:scan_now::arch-t480",
         "act:node:poweroff::arch-t480",
         "act:node:assign:apps:arch-t480",  # «Назначить» доступно и пиру
+        "st:sw_node:arch-t480",  # 🔄 Обновить
+        "st:sw_svcs:arch-t480:0",  # ⚙️ Службы (1)
+        "st:sw_nodes:0",  # ⬅️ Назад
     }
 
 
@@ -119,7 +173,9 @@ def test_node_card_keyboard_includes_power_buttons():
         [_power_action("poweroff"), _power_action("suspend"), _power_action("reboot")],
     )
     codes = [b.callback_data for row in kb.inline_keyboard for b in row]
-    assert codes == ["act:node:poweroff", "act:node:suspend"]  # reboot без права — нет кнопки
+    # reboot без права — нет кнопки; без права `nodes` — только «Обновить»,
+    # без «Службы»/«Назад» (тех экранов у этой подписки и так нет).
+    assert codes == ["act:node:poweroff", "act:node:suspend", "st:sw_node:-"]
 
 
 # --- Карточка службы ----------------------------------------------------------
@@ -142,6 +198,8 @@ def test_service_card_keyboard_actions_for_this_service():
         "act:node:start:monitor",
         "act:node:stop:monitor",
         "act:node:restart:monitor",
+        "st:sw_svc:-:monitor",  # 🔄 Обновить
+        "st:sw_svcs:-:0",  # ⬅️ Назад
     ]
 
 
@@ -150,16 +208,22 @@ def test_service_card_keyboard_carries_peer_node_id():
         _sub("restart@node"), _node_actions(), "monitor", "arch-t480"
     )
     codes = [b.callback_data for row in kb.inline_keyboard for b in row]
-    assert codes == ["act:node:restart:monitor:arch-t480"]
+    assert codes == [
+        "act:node:restart:monitor:arch-t480",
+        "st:sw_svc:arch-t480:monitor",
+        "st:sw_svcs:arch-t480:0",
+    ]
 
 
 def test_service_card_keyboard_filters_by_right_and_choices():
     kb = build_service_card_keyboard(_sub("restart@node"), _node_actions(), "monitor")
     codes = [b.callback_data for row in kb.inline_keyboard for b in row]
-    assert codes == ["act:node:restart:monitor"]
-    # Служба вне choices действия — кнопок нет.
-    assert (
-        build_service_card_keyboard(_sub("restart@node"), _node_actions(), "apps")
-        is None
-    )
+    assert codes == ["act:node:restart:monitor", "st:sw_svc:-:monitor", "st:sw_svcs:-:0"]
+    # Служба вне choices действия — кнопок действий нет, но «Обновить»/«Назад»
+    # остаются (право на сам переход сюда уже проверено выше по стеку).
+    no_action_kb = build_service_card_keyboard(_sub("restart@node"), _node_actions(), "apps")
+    assert [b.callback_data for row in no_action_kb.inline_keyboard for b in row] == [
+        "st:sw_svc:-:apps",
+        "st:sw_svcs:-:0",
+    ]
     assert build_service_card_keyboard(None, _node_actions(), "monitor") is None

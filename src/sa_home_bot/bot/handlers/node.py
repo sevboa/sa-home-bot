@@ -1,7 +1,9 @@
-"""/swarm (алиас /nodes) — сводка роя; обработка динамических действий «act:…».
+"""Обработка динамических действий «act:…» (питание, службы, апп-скилы, VPN).
 
-Права на callback уже проверены CallbackAuthorizationMiddleware
-(`действие@служба`). Здесь только маршрутизация к нужному линку и рендер.
+/swarm (алиас /nodes) переехал в bot/handlers/swarm_panel.py вместе со всей
+иерархией панели роя — здесь остался только разбор `act:`-кнопок. Права на
+callback уже проверены CallbackAuthorizationMiddleware (`действие@служба`).
+Здесь только маршрутизация к нужному линку и рендер.
 """
 
 from __future__ import annotations
@@ -11,10 +13,9 @@ import logging
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery
 
-from sa_home_bot.bot import actions, apps_view, commands, node_view, swarm_view
+from sa_home_bot.bot import actions, apps_view, commands, node_view
 from sa_home_bot.bot.handlers import vpn as vpn_handlers
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
@@ -76,20 +77,6 @@ async def _handle_self_shutdown(
     with contextlib.suppress(ServiceUnavailableError, ProtoError, TimeoutError):
         args = {"name": value} if value else {}
         await node_link.command(action_id, args)
-
-
-@router.message(Command(commands.SWARM.name, commands.NODES.name))
-async def cmd_swarm(
-    message: Message,
-    node_link: ServiceLink,
-    config: Settings,
-    store: Store,
-    subscription: Subscription | None = None,
-) -> None:
-    text, keyboard = await swarm_view.build_swarm_view(
-        node_link, subscription, config.wake, store
-    )
-    await message.answer(text, reply_markup=keyboard)
 
 
 async def _run_node_action(
@@ -188,9 +175,18 @@ async def on_dynamic_action(
         return
 
     if service == apps_view.APPS_SERVICE:
-        # Кнопки act:apps из старых сообщений — тот же скилл, что команда.
+        # Карточка умения (голая команда/svc или экран панели /swarm) —
+        # редрав на месте, не новое сообщение (единое сообщение — тот же
+        # приём, что у карточки ноды/службы чуть выше). Кнопка «⬅️ Назад»,
+        # добавленная панелью (bot/swarm_panel.py::build_skill_card_view) на
+        # входе, на этом редраве не переживёт — карточка умения сама по себе
+        # не знает, кто её открыл; не критично, полноценная навигация назад
+        # остаётся через /swarm.
         text, keyboard = await apps_view.run_app_skill(apps_link, subscription, action_id, value)
-        await callback.message.answer(text, reply_markup=keyboard, disable_web_page_preview=True)
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.edit_text(
+                text, reply_markup=keyboard, disable_web_page_preview=True
+            )
         await callback.answer()
         return
 

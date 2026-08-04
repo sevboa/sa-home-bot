@@ -26,6 +26,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sa_home_bot.bot import commands, guest_rights
 from sa_home_bot.bot.invites import format_code
+from sa_home_bot.bot.pagination import clamp_offset, nav_row  # noqa: F401 — реэкспорт
 from sa_home_bot.subscriptions.models import Subscription
 
 # Гостей и прав на странице немного (домашний контур, не десятки людей) —
@@ -52,31 +53,6 @@ def _cb(code: str, *parts: object) -> str:
     return ":".join([commands.CALLBACK_PREFIX, code, *(str(p) for p in parts)])
 
 
-def _nav_row(
-    offset: int, size: int, total: int, code: str, *prefix: object
-) -> list[InlineKeyboardButton]:
-    buttons: list[InlineKeyboardButton] = []
-    if offset > 0:
-        buttons.append(
-            InlineKeyboardButton(
-                text="⬅️", callback_data=_cb(code, *prefix, max(0, offset - size))
-            )
-        )
-    if offset + size < total:
-        buttons.append(
-            InlineKeyboardButton(text="➡️", callback_data=_cb(code, *prefix, offset + size))
-        )
-    return buttons
-
-
-def clamp_offset(offset: int, size: int, total: int) -> int:
-    """Страница могла опустеть (последнее право снято) — вернуть валидный offset."""
-    if total == 0:
-        return 0
-    last_page = ((total - 1) // size) * size
-    return min(max(offset, 0), last_page)
-
-
 # --- список гостей ------------------------------------------------------
 
 
@@ -101,7 +77,9 @@ def build_list_view(
         ]
         for guest in page
     ]
-    nav = _nav_row(offset, GUEST_PAGE_SIZE, len(guests), commands.GUESTS_LIST_CODE)
+    nav = nav_row(
+        offset, GUEST_PAGE_SIZE, len(guests), lambda o: _cb(commands.GUESTS_LIST_CODE, o)
+    )
     if nav:
         buttons.append(nav)
     buttons.append(
@@ -136,7 +114,9 @@ def build_codes_view(open_codes: Sequence[dict], offset: int) -> tuple[str, Inli
         ]
         for row in page
     ]
-    nav = _nav_row(offset, CODE_PAGE_SIZE, len(open_codes), commands.OPEN_CODES_LIST_CODE)
+    nav = nav_row(
+        offset, CODE_PAGE_SIZE, len(open_codes), lambda o: _cb(commands.OPEN_CODES_LIST_CODE, o)
+    )
     if nav:
         buttons.append(nav)
     buttons.append(
@@ -241,7 +221,12 @@ def build_perms_view(sub: Subscription, offset: int) -> tuple[str, InlineKeyboar
         ]
         for right in page
     ]
-    nav = _nav_row(offset, PERM_PAGE_SIZE, len(rights), commands.GUEST_PERMS_CODE, sub.chat_id)
+    nav = nav_row(
+        offset,
+        PERM_PAGE_SIZE,
+        len(rights),
+        lambda o: _cb(commands.GUEST_PERMS_CODE, sub.chat_id, o),
+    )
     if nav:
         buttons.append(nav)
     buttons.append(
@@ -279,8 +264,11 @@ def build_perm_add_view(sub: Subscription, offset: int) -> tuple[str, InlineKeyb
         ]
         for item in page
     ]
-    nav = _nav_row(
-        offset, PERM_PAGE_SIZE, len(addable), commands.GUEST_PERM_ADD_LIST_CODE, sub.chat_id
+    nav = nav_row(
+        offset,
+        PERM_PAGE_SIZE,
+        len(addable),
+        lambda o: _cb(commands.GUEST_PERM_ADD_LIST_CODE, sub.chat_id, o),
     )
     if nav:
         buttons.append(nav)

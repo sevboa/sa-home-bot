@@ -1202,59 +1202,12 @@ async def _node_manage_dst(ctx: ToolContext, wanted_node: str | None) -> Address
 
 
 async def _node_check_all(ctx: ToolContext) -> str:
-    """Версия репозитория одна на весь рой, и обновления у всех нод одни и те
-    же (решение пользователя 2026-08-04) — вместо check_update по каждой
-    ноде отдельно один вызов: последний тег плюс кто отстал.
-
-    Своя нода спрашивается ОДИН раз через check_update (там уже есть
-    latest_tag против репозитория) — остальные ноды не переспрашивают то же
-    самое сетью, их версии берутся из get_state() (wake_core.collect_reports,
-    тот же веерный опрос, что и у swarm_status)."""
-    own = await _own_state(ctx)
-    if own is None:
-        return "недоступно: своя нода не отвечает"
-    assert ctx.node_link is not None
-    try:
-        own_check = await ctx.node_link.command(NODE_ACTION_CHECK_UPDATE, {}, dst=None)
-    except ProtoError as exc:
-        return f"не вышло проверить обновления: {exc.message}"
-    except (ServiceUnavailableError, TimeoutError) as exc:
-        return f"недоступно: своя нода не ответила ({exc})"
-    latest = own_check.get("latest")
-    if not latest:
-        return "не удалось узнать последнюю версию (сеть?)"
-
-    reports = await wake_core.collect_reports(ctx.node_link, own, with_monitor=False)
-    behind: list[str] = []
-    restart_only: list[str] = []
-    unreachable: list[str] = []
-    for r in reports:
-        if not r.alive or r.state is None:
-            unreachable.append(r.node_id)
-            continue
-        running = r.state.get("version")
-        if running and running != latest:
-            behind.append(r.node_id)
-            continue
-        # На последней версии, но, возможно, update уже лежит на диске, а
-        # restart_node ещё не выполняли (node/service.py::get_state).
-        if (r.state.get("update") or {}).get("restart_required"):
-            restart_only.append(r.node_id)
-
-    parts = [f"Последняя версия: v{latest}."]
-    if behind:
-        parts.append("Нужен update: " + ", ".join(sorted(behind)) + ".")
-    if restart_only:
-        parts.append(
-            "Update уже на диске, нужен только restart_node: "
-            + ", ".join(sorted(restart_only))
-            + "."
-        )
-    if unreachable:
-        parts.append("Не отвечают, не проверить: " + ", ".join(sorted(unreachable)) + ".")
-    if not behind and not restart_only:
-        parts.append("Все доступные ноды на последней версии.")
-    return " ".join(parts)
+    """Сводка обновлений по всему рою — ядро в wake_core.check_updates_summary
+    (общее с кнопкой «Проверить обновления» панели /swarm,
+    bot/handlers/swarm_panel.py)."""
+    if ctx.node_link is None:
+        return "недоступно: нет связи с роем"
+    return await wake_core.check_updates_summary(ctx.node_link)
 
 
 async def tool_node_manage(ctx: ToolContext, args: dict[str, Any]) -> str:

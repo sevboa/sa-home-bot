@@ -24,6 +24,7 @@ from sa_home_bot.bot.handlers import (
     power,
     stats,
     status,
+    swarm_panel,
     tool_debug,
     torrents,
     vpn,
@@ -67,9 +68,10 @@ def build_dispatcher(book: SubscriptionBook, gate: Gatekeeper) -> Dispatcher:
     # по ai_turns, не по дереву Telegram-реплаев) — не пересекается с другими
     # роутерами, но пусть проверяется рано.
     dp.include_router(ai.router)
-    # wake раньше status: его callback «st:wake» точечный, а on_status_action
-    # ловит весь префикс «st:».
+    # wake и swarm_panel раньше status: их callback'ы («st:wake», «st:sw_*»)
+    # точечные, а on_status_action ловит весь префикс «st:».
     dp.include_router(wake.router)
+    dp.include_router(swarm_panel.router)
     dp.include_router(status.router)
     dp.include_router(stats.router)
     dp.include_router(control.router)

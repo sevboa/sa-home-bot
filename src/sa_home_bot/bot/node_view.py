@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from datetime import datetime
 from html import escape
@@ -21,12 +22,24 @@ from html import escape
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sa_home_bot.bot import actions, commands, node_links, status_view
+from sa_home_bot.bot.pagination import clamp_offset, nav_row
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.proto.messages import ActionSpec, Address, ProtoError
 from sa_home_bot.runtime import format_duration
 from sa_home_bot.subscriptions.models import Subscription
 
 NODE_SERVICE = "node"
+
+# Список служб на глубоком уровне (пагинация) без имени/имени-эмодзи в
+# запасе под текст кнопки — как в guests_view.
+_MAX_NAME_LEN = 40
+SERVICES_PAGE_SIZE = 6
+
+
+def _node_part(node_id: str | None) -> str:
+    """node_id для сегмента callback_data: «-» для своей ноды (пусто нельзя —
+    после него в «sw_svcs»/«sw_svc» всегда идёт ещё один сегмент)."""
+    return node_id or "-"
 
 NODE_DOWN_TEXT = (
     "⚠️ Нода недоступна — не могу получить состояние служб. "
@@ -143,6 +156,18 @@ def render_services_block(state: dict) -> str:
     return "\n".join(lines)
 
 
+def render_node_card_summary(state: dict) -> str:
+    """Короткая замена render_services_block — просто счётчик, без деталей.
+
+    Показывается тем, у кого есть право `nodes` (и вместе с ним — отдельный
+    постраничный экран со списком служб и кнопка «⚙️ Службы» на карточке,
+    см. build_node_card_keyboard/build_services_list_view). У кого права нет
+    — как раньше, полный список инлайн (render_services_block): другого
+    способа увидеть его у них нет, отбирать не за чем.
+    """
+    return f"Служб: {len(state.get('services', []))}"
+
+
 _ACTION_ASSIGN = "assign"
 
 
@@ -177,11 +202,14 @@ def build_node_card_keyboard(
 ) -> InlineKeyboardMarkup | None:
     """Кнопки карточки ноды — одинаковые для своей (node_id=None) и пира.
 
-    Только действия: представления/действия монитора + питание/самообновление
-    + назначение служб. Навигация к карточкам служб — ссылками в тексте (см.
-    render_services_block), не кнопками. Рой равноправен (ARCHITECTURE §11
-    п. 1) — узел лишь несёт node_id в callback'ах, набор кнопок и права не
-    зависят от того, чья это физически машина.
+    Действия (представления/действия монитора + питание/самообновление +
+    назначение служб) идут сеткой по 2 в ряд, как раньше. Плюс — отдельными
+    строками внизу: «🔄 Обновить» (та же карточка, свежие данные — доступно
+    всем, ничего нового не открывает) и, только при праве `nodes`, «⚙️ Службы»
+    (переход на отдельный постраничный экран, bot/handlers/swarm_panel.py) и
+    «⬅️ Назад» (к списку нод той же панели). У кого права `nodes` нет —
+    список служб виден как раньше, инлайн в тексте карточки
+    (render_services_block), без кнопок навигации по нему.
     """
     if subscription is None:
         return None
@@ -191,7 +219,38 @@ def build_node_card_keyboard(
         buttons.extend(b for row in base.inline_keyboard for b in row)
     buttons.extend(_simple_action_buttons(subscription, node_actions, node_id))
     buttons.extend(_assign_buttons(subscription, node_actions, service_names, node_id))
-    return actions.rows(buttons)
+    grid = actions.rows(buttons)
+    rows: list[list[InlineKeyboardButton]] = list(grid.inline_keyboard) if grid else []
+
+    node_part = _node_part(node_id)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🔄 Обновить",
+                callback_data=f"{commands.CALLBACK_PREFIX}:{commands.SWARM_NODE_CODE}:{node_part}",
+            )
+        ]
+    )
+    if subscription.allows_command(commands.NODES.name):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"⚙️ Службы ({len(service_names)})",
+                    callback_data=(
+                        f"{commands.CALLBACK_PREFIX}:{commands.SWARM_SVCS_CODE}:{node_part}:0"
+                    ),
+                )
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=f"{commands.CALLBACK_PREFIX}:{commands.SWARM_NODES_CODE}:0",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def build_node_card_view(
@@ -205,9 +264,24 @@ async def build_node_card_view(
     ноды, и сводка её монитора идут по dst-адресации, включая свой же
     монитор (лишний хоп через локальный unix-сокет дёшев, зато путь один).
     Нет назначения monitor / монитор лежит — честный MONITOR_DOWN_TEXT.
+
+    Четыре сетевых запроса (state ноды, state монитора, describe монитора,
+    describe/actions ноды) идут ПАРАЛЛЕЛЬНО (asyncio.gather) — важно, чтобы
+    карточка пира (путь идёт через свою ноду, лишний хоп) открывалась
+    быстро, а не ждала четыре круговых рейса подряд. Каждый из вызовов уже
+    сам гасит сетевые ошибки (_node_state / status_view.build_summary_text /
+    ServiceLink.describe / ServiceLink.actions — см. их докстринги), поэтому
+    gather не нужно оборачивать доп. try/except.
     """
     node_dst = Address(node=node_id, service=NODE_SERVICE) if node_id else None
-    state = await _node_state(node_link, dst=node_dst)
+    monitor_dst = Address(node=node_id, service=status_view.MONITOR_SERVICE)
+
+    state, monitor_summary, monitor_desc, node_desc_or_actions = await asyncio.gather(
+        _node_state(node_link, dst=node_dst),
+        status_view.build_summary_text(node_link, dst=monitor_dst),
+        node_link.describe(dst=monitor_dst),
+        node_link.describe(dst=node_dst) if node_id else node_link.actions(),
+    )
     if state is None:
         return (
             f"⚠️ Нода «{node_id}» недоступна (нет связи или она спит)."
@@ -215,25 +289,93 @@ async def build_node_card_view(
             else NODE_DOWN_TEXT
         ), None
 
-    monitor_dst = Address(node=node_id, service=status_view.MONITOR_SERVICE)
-    monitor_summary = await status_view.build_summary_text(node_link, dst=monitor_dst)
-    monitor_desc = await node_link.describe(dst=monitor_dst)
     monitor_actions = monitor_desc.actions if monitor_desc is not None else ()
-
     if node_id:
-        desc = await node_link.describe(dst=node_dst)
-        node_actions = desc.actions if desc is not None else ()
+        node_actions = node_desc_or_actions.actions if node_desc_or_actions is not None else ()
     else:
-        node_actions = await node_link.actions()
+        node_actions = node_desc_or_actions
 
     service_names = [s.get("name", "?") for s in state.get("services", [])]
-    text = "\n\n".join(
-        [monitor_summary, render_node_card_header(state), render_services_block(state)]
+    has_nodes_right = subscription is not None and subscription.allows_command(
+        commands.NODES.name
     )
+    services_section = (
+        render_node_card_summary(state) if has_nodes_right else render_services_block(state)
+    )
+    text = "\n\n".join([monitor_summary, render_node_card_header(state), services_section])
     keyboard = build_node_card_keyboard(
         subscription, monitor_actions, service_names, node_actions, node_id
     )
     return text, keyboard
+
+
+# --- Список служб ноды (отдельный экран, право `nodes`) ---------------------
+
+
+def build_services_list_view(
+    state: dict, node_id: str | None, offset: int
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Постраничный список служб — как guests_view.build_perms_view: строка
+    на службу + кнопка её карточки, «⬅️ Назад» на карточку ноды."""
+    services = state.get("services", [])
+    node_name = state.get("node") or node_id or "?"
+    lines = [f"⚙️ <b>Службы «{escape(node_name)}»</b> ({len(services)})", ""]
+    if not services:
+        lines.append("Службы не назначены.")
+    page = services[offset : offset + SERVICES_PAGE_SIZE]
+    for svc in page:
+        status = _CARD_STATUS.get(svc.get("status", ""), f"{LAMP_GRAY} {svc.get('status', '?')}")
+        lines.append(f"• {escape(svc.get('name', '?'))} — {status}")
+
+    node_part = _node_part(node_id)
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=f"⚙️ {svc.get('name', '?')}"[:_MAX_NAME_LEN],
+                callback_data=(
+                    f"{commands.CALLBACK_PREFIX}:{commands.SWARM_SVC_CODE}:"
+                    f"{node_part}:{svc.get('name', '?')}"
+                ),
+            )
+        ]
+        for svc in page
+    ]
+    nav = nav_row(
+        offset,
+        SERVICES_PAGE_SIZE,
+        len(services),
+        lambda o: f"{commands.CALLBACK_PREFIX}:{commands.SWARM_SVCS_CODE}:{node_part}:{o}",
+    )
+    if nav:
+        buttons.append(nav)
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=f"{commands.CALLBACK_PREFIX}:{commands.SWARM_NODE_CODE}:{node_part}",
+            )
+        ]
+    )
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def build_services_page_view(
+    node_link: ServiceLink,
+    node_id: str | None,
+    offset: int,
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Обёртка над build_services_list_view — сама получает state ноды
+    (своей или пира), как build_node_card_view/build_service_card_view."""
+    dst = Address(node=node_id, service=NODE_SERVICE) if node_id else None
+    state = await _node_state(node_link, dst=dst)
+    if state is None:
+        return (
+            f"⚠️ Нода «{node_id}» недоступна (нет связи или она спит)."
+            if node_id
+            else NODE_DOWN_TEXT
+        ), None
+    offset = clamp_offset(offset, SERVICES_PAGE_SIZE, len(state.get("services", [])))
+    return build_services_list_view(state, node_id, offset)
 
 
 # --- Карточка службы ---------------------------------------------------------
@@ -267,13 +409,41 @@ def build_service_card_keyboard(
     service_name: str,
     node_id: str | None = None,
 ) -> InlineKeyboardMarkup | None:
-    """Действия ноды, применимые к этой службе (параметр name из choices).
+    """Действия ноды, применимые к этой службе (параметр name из choices),
+    плюс «🔄 Обновить» (та же карточка) и «⬅️ Назад» (к списку служб той же
+    ноды). node_id — служба на пире: те же кнопки, но с адресом пира.
 
-    node_id — служба на пире: та же кнопка, но с адресом пира в callback.
+    Право на сам переход сюда — `nodes` (как /svc_<node>_<svc>, см.
+    bot/handlers/node_links.py) — CallbackAuthorizationMiddleware уже
+    проверила его до вызова, поэтому «Назад»/«Обновить» здесь безусловны.
     """
-    return actions.build_choice_keyboard(
+    if subscription is None:
+        return None
+    base = actions.build_choice_keyboard(
         subscription, node_actions, NODE_SERVICE, service_name, node_id
     )
+    rows: list[list[InlineKeyboardButton]] = list(base.inline_keyboard) if base else []
+    node_part = _node_part(node_id)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🔄 Обновить",
+                callback_data=(
+                    f"{commands.CALLBACK_PREFIX}:{commands.SWARM_SVC_CODE}:"
+                    f"{node_part}:{service_name}"
+                ),
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=f"{commands.CALLBACK_PREFIX}:{commands.SWARM_SVCS_CODE}:{node_part}:0",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def build_service_card_view(
