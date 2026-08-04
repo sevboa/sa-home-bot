@@ -45,8 +45,23 @@ def _post_json_sync(url: str, payload: dict[str, Any], timeout: float) -> dict[s
     req = urllib.request.Request(
         url, data=body, headers={"Content-Type": "application/json"}, method="POST"
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — только localhost
-        return json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — только localhost
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        # Живая находка 2026-08-04: str(exc) по умолчанию — голое "HTTP Error
+        # 400: Bad Request", тело ответа Ollama (с точной причиной валидации
+        # запроса) терялось молча. Разбор сбоя без него сводился к чтению
+        # логов трёх машин (см. bot/node_events.py::ALBERT_TASK_MISSED) —
+        # дописываем тело в exc.msg, оно же уходит дальше в ProtoError.
+        detail = exc.read().decode("utf-8", "replace").strip()
+        with contextlib.suppress(ValueError):
+            parsed = json.loads(detail)
+            if isinstance(parsed, dict) and parsed.get("error"):
+                detail = str(parsed["error"])
+        if detail:
+            exc.msg = f"{exc.msg}: {detail}"
+        raise
 
 
 def _get_json_sync(url: str, timeout: float) -> dict[str, Any]:

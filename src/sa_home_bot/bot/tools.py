@@ -708,6 +708,38 @@ async def tool_get_time(ctx: ToolContext, args: dict[str, Any]) -> str:
 _AFTER_EVENT_TYPES = (EVENT_RESTART_APPLIED, EVENT_UPDATE_FINISHED)
 
 
+def _close_pending_tool_calls(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Снимок ``ctx.history`` для remind делается ИЗ СЕРЕДИНЫ раунда
+    tool-calling (llm_chat.run_chat_loop::122-148 вызывает тулы строго
+    ПОСЛЕ того, как допишет в history единственное сообщение "assistant"
+    с tool_calls за весь раунд, и допишет ответное "tool" на каждый вызов
+    только ПОСЛЕ того, как его handler вернётся) — то есть в момент, когда
+    remind() строит снимок, вызов remind (и любые другие вызовы того же
+    раунда, идущие после него) там висят без ответного "tool"-сообщения.
+    Такая история при повторном проигрывании (служба tasks) кладёт перед
+    моделью assistant/tool_calls без ответа, за которым сразу новый user —
+    невалидная форма для Ollama (живой сбой 2026-08-04: HTTP 400 на /api/
+    chat, разобрано только благодаря телу ответа, см. llm/ollama.py).
+    Дозаполняем недостающие "tool"-ответы синтетической заглушкой, не трогая
+    сам живой ``history`` (та же мутируемая ссылка нужна остальным вызовам
+    этого раунда)."""
+    for i in range(len(history) - 1, -1, -1):
+        msg = history[i]
+        if msg.get("role") == "tool":
+            continue
+        if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+            return history
+        pending = msg["tool_calls"][len(history) - i - 1 :]
+        snapshot = list(history)
+        for call in pending:
+            fn = call.get("function", {}) if isinstance(call, dict) else {}
+            snapshot.append(
+                {"role": "tool", "content": "(результат не сохранён)", "name": fn.get("name", "")}
+            )
+        return snapshot
+    return history
+
+
 async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
     if ctx.chat_id is None or ctx.dialogue_id is None or ctx.trigger_message_id is None:
         return "ошибка: отложенные задачи недоступны вне диалога"
@@ -794,8 +826,9 @@ async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
     # → tools_for). Раньше сюда клался снимок TOOL_DECLARATIONS, но его никто
     # не читал — цикл всегда подставлял свой список, а снимок лишь раздувал
     # args_json задачи.
+    history = _close_pending_tool_calls(ctx.history)
     task_args = {
-        "messages": [*ctx.history, {"role": "user", "content": directive}],
+        "messages": [*history, {"role": "user", "content": directive}],
         "think": ctx.settings.llm.think_chat,
         "chat_id": ctx.chat_id,
     }

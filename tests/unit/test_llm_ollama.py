@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import io
 import urllib.error
 
 import pytest
@@ -25,6 +26,45 @@ def fast_warmup(monkeypatch):
     monkeypatch.setattr(ollama, "_WARMUP_POLL_INTERVAL_S", 0.01)
     monkeypatch.setattr(ollama, "_WARMUP_TIMEOUT_S", 0.03)
     monkeypatch.setattr(ollama, "_POST_RETRY_DELAY_S", 0.01)
+
+
+# --- _post_json_sync: тело HTTP-ошибки ---
+
+
+def test_post_json_sync_includes_json_error_body_in_http_error(monkeypatch):
+    # Живой сбой 2026-08-04: str(HTTPError) по умолчанию — голое "HTTP Error
+    # 400: Bad Request", а тело ответа Ollama (реальная причина отказа)
+    # молча терялось — разбор сводился к логам трёх машин. Тело должно
+    # попасть в сообщение исключения.
+    body = b'{"error": "messages: assistant tool_calls without a tool response"}'
+
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1:11434/api/chat", 400, "Bad Request", None, io.BytesIO(body)
+        )
+
+    monkeypatch.setattr(ollama.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        ollama._post_json_sync("http://127.0.0.1:11434/api/chat", {"messages": []}, 5.0)
+
+    assert "messages: assistant tool_calls without a tool response" in str(excinfo.value)
+
+
+def test_post_json_sync_includes_plain_text_error_body_in_http_error(monkeypatch):
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1:11434/api/chat",
+            500,
+            "Internal Server Error",
+            None,
+            io.BytesIO(b"panic: nil pointer"),
+        )
+
+    monkeypatch.setattr(ollama.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        ollama._post_json_sync("http://127.0.0.1:11434/api/chat", {"messages": []}, 5.0)
+
+    assert "panic: nil pointer" in str(excinfo.value)
 
 
 class FakeProc:

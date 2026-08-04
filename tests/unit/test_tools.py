@@ -533,6 +533,51 @@ async def test_remind_includes_history_snapshot_in_directive(store):
     assert messages[:2] == history
 
 
+async def test_remind_closes_dangling_tool_calls_in_snapshot(store):
+    # Живой сбой 2026-08-04: remind() читает ctx.history из СЕРЕДИНЫ раунда
+    # tool-calling (llm_chat.run_chat_loop дописывает assistant/tool_calls
+    # раньше, чем допишет ответное "tool" за сам вызов remind) — снимок с
+    # висящим tool_calls без ответа ломал повторный /api/chat к Ollama
+    # (HTTP 400) в момент срабатывания задачи. tool_remind обязан закрыть
+    # такой хвост синтетическим "tool"-ответом, не трогая сам ctx.history
+    # (остальные вызовы того же раунда мутируют ту же ссылку).
+    link = _FakeNodeLink()
+    history = [
+        {"role": "user", "content": "напомни и глянь погоду"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"function": {"name": "remind", "arguments": {}}},
+                {"function": {"name": "get_weather", "arguments": {}}},
+            ],
+        },
+    ]
+    when = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    await tools.tool_remind(
+        _ctx(store, node_link=link, history=history), {"when": when, "text": "напомни"}
+    )
+    messages = link.calls[0][1]["args"]["messages"]
+    assert messages[2] == {"role": "tool", "content": "(результат не сохранён)", "name": "remind"}
+    assert messages[3] == {
+        "role": "tool",
+        "content": "(результат не сохранён)",
+        "name": "get_weather",
+    }
+    assert messages[4]["role"] == "user"
+    # Исходный (живой, мутируемый другими вызовами того же раунда) history
+    # не тронут — правится только копия, уходящая в задачу.
+    assert history == [
+        {"role": "user", "content": "напомни и глянь погоду"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"function": {"name": "remind", "arguments": {}}},
+                {"function": {"name": "get_weather", "arguments": {}}},
+            ],
+        },
+    ]
+
+
 async def test_remind_rejects_past_time(store):
     link = _FakeNodeLink()
     when = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
