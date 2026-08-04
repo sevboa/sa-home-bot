@@ -16,8 +16,9 @@ import asyncio
 import dataclasses
 import logging
 import socket
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 
+from sa_home_bot import __version__
 from sa_home_bot.config import Settings, SwarmNodeConfig
 from sa_home_bot.node import assignments as assignments_mod
 from sa_home_bot.node import update as node_update
@@ -29,7 +30,7 @@ from sa_home_bot.node.replication import (
     EVENT_INSTANCE_CONFIG_CHANGED,
     ConfigReplicator,
 )
-from sa_home_bot.node.service import EVENT_NODE_JOINED, NodeService
+from sa_home_bot.node.service import EVENT_NODE_JOINED, EVENT_RESTART_APPLIED, NodeService
 from sa_home_bot.node.state import NodeState
 from sa_home_bot.node.supervisor import Supervisor
 from sa_home_bot.node.watch import EVENT_NODE_LEAVING, PresenceWatcher
@@ -263,6 +264,32 @@ def _remember_peer(
             kind=known.kind if known is not None else "",
         ),
     ]
+
+
+async def _announce_version_if_changed(
+    state: NodeState,
+    state_path: str,
+    emit: Callable[[str, dict], Awaitable[None]],
+) -> None:
+    """Событие ``restart_applied``, если версия сменилась с прошлого старта.
+
+    Молчит на самом первом старте с этим полем (``last_known_version`` ещё
+    ``None`` — иначе разом «применили обновление» получил бы весь рой сразу
+    после деплоя, где его в реальности не было) и когда версия не менялась.
+    Срабатывает и на обычном `restart_node`/`update`, и на ручном `nodectl
+    update` по SSH, и на голом передеплое юнита — в любом случае это
+    единственный источник правды «нода реально ИСПОЛНЯЕТ новую версию», не
+    просто положила файлы на диск (для этого уже есть update_finished,
+    node/service.py::_update).
+    """
+    if state.last_known_version is not None and state.last_known_version != __version__:
+        await emit(
+            EVENT_RESTART_APPLIED,
+            {"from": state.last_known_version, "to": __version__},
+        )
+    if state.last_known_version != __version__:
+        state.last_known_version = __version__
+        state.save(state_path)
 
 
 async def _relay_peer_event(
@@ -537,6 +564,9 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         on_peer_connect=on_peer_connect,
     )
     await server.start()
+    # После server.start() — emit уже реально рассылает (см. определение
+    # emit выше: broadcast_event молчит, пока server is None).
+    await _announce_version_if_changed(state, settings.node.state_path, emit)
     for link in (*router.peers.values(), *router.local_services.values()):
         await link.start()
     # До запуска служб: пакет, правленный пока нода была выключена, должен

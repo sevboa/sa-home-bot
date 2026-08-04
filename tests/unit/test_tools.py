@@ -576,6 +576,76 @@ async def test_remind_reports_error_when_task_service_unreachable(store):
     assert result.startswith("внутренняя ошибка")
 
 
+# --- remind(after_event=...): проснуться по событию, не по будильнику ---
+
+
+async def test_remind_after_event_creates_task_without_when(store):
+    link = _FakeNodeLink()
+    result = await tools.tool_remind(
+        _ctx(store, node_link=link),
+        {
+            "after_event": {"node": "arch-t480", "event": "restart_applied"},
+            "text": "продолжи обновление роя",
+        },
+    )
+    assert "жду событие" in result
+    assert "arch-t480" in result
+    action, args, dst = link.calls[0]
+    assert action == tools.task_protocol.ACTION_CREATE
+    # due_at — страховка, не пусто, и не «прямо сейчас».
+    due_at = datetime.fromisoformat(args["due_at"])
+    assert due_at > datetime.now(UTC)
+    assert "продолжи обновление роя" in args["args"]["messages"][-1]["content"]
+
+
+async def test_remind_after_event_registers_waiter_in_store(store):
+    link = _FakeNodeLink()
+    await tools.tool_remind(
+        _ctx(store, node_link=link),
+        {
+            "after_event": {"node": "arch-t480", "event": "restart_applied"},
+            "text": "продолжи",
+        },
+    )
+    # _FakeNodeLink.command всегда возвращает {"task_id": 1}.
+    assert await store.pop_event_waiter_for("arch-t480", "restart_applied") == 1
+
+
+async def test_remind_after_event_rejects_unknown_event_name(store):
+    result = await tools.tool_remind(
+        _ctx(store, node_link=_FakeNodeLink()),
+        {"after_event": {"node": "arch-t480", "event": "something_else"}, "text": "x"},
+    )
+    assert result.startswith("ошибка")
+
+
+async def test_remind_after_event_rejects_missing_node(store):
+    result = await tools.tool_remind(
+        _ctx(store, node_link=_FakeNodeLink()),
+        {"after_event": {"event": "restart_applied"}, "text": "x"},
+    )
+    assert result.startswith("ошибка")
+
+
+async def test_remind_after_event_without_store_is_an_error():
+    result = await tools.tool_remind(
+        _ctx(None, node_link=_FakeNodeLink()),
+        {"after_event": {"node": "arch-t480", "event": "restart_applied"}, "text": "x"},
+    )
+    assert "недоступно" in result
+
+
+async def test_remind_when_still_works_without_after_event(store):
+    # Обратная совместимость: обычный remind по времени не задет.
+    link = _FakeNodeLink()
+    when = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    result = await tools.tool_remind(
+        _ctx(store, node_link=link), {"when": when, "text": "полить цветы"}
+    )
+    assert "задача поставлена" in result
+    assert await store.pop_event_waiter_for("arch-t480", "restart_applied") is None
+
+
 # --- права: комплект тулов собирается под подписку собеседника ---
 
 
@@ -826,6 +896,32 @@ async def test_node_manage_update_reports_target_version(store):
     )
     assert "0.70.0" in result
     assert "restart_node" in result
+
+
+async def test_node_manage_update_scheduled_warns_against_immediate_restart(store):
+    # Живой баг 2026-08-04 (часть 2): update — фоновая операция, ответ
+    # приходит мгновенно, а restart_node сразу после неё рестартовал бы
+    # ноду на СТАРОМ коде. Ответ должен явно это запрещать и подсказывать
+    # remind(after_event=update_finished), а не оставлять модель гадать.
+    link = _swarm_link(command_result={"scheduled": True, "target_version": "0.70.0"})
+    result = await tools.tool_node_manage(
+        _ctx(store, node_link=link, subscription=ADMIN), {"action": "update", "node": "winpc"}
+    )
+    assert "НЕ вызывай restart_node прямо сейчас" in result
+    assert "winpc" in result
+    assert "remind(after_event=" in result
+    assert tools.EVENT_UPDATE_FINISHED in result
+
+
+async def test_node_manage_update_scheduled_on_own_node_resolves_its_id(store):
+    # Без явного node (своя нода) — id для after_event берём из get_state(),
+    # не оставляем подсказку без адресата.
+    link = _swarm_link(command_result={"scheduled": True, "target_version": "0.70.0"})
+    result = await tools.tool_node_manage(
+        _ctx(store, node_link=link, subscription=ADMIN), {"action": "update"}
+    )
+    assert "alfred" in result  # _OWN_STATE["node"]
+    assert "remind(after_event=" in result
 
 
 async def test_node_manage_update_up_to_date(store):

@@ -113,11 +113,21 @@ async def run(settings: Settings) -> bool:
         on_event=build_event_handler(dispatcher),
     )
     await link.start()
+    # node_link читается из замыкания геттером ниже, а не захватывается
+    # напрямую: сам callback передаётся в конструктор ServiceLink(node)
+    # раньше, чем переменной присвоено значение (тот же приём, что
+    # node_service в node/app.py::run_node) — к моменту первого реального
+    # события (после await node_link.start()) переменная уже назначена.
+    node_link: ServiceLink | None = None
+
+    def _get_node_link() -> ServiceLink | None:
+        return node_link
+
     node_link = ServiceLink(
         settings.node.socket,
         token=settings.swarm.token,
         display_name="нода",
-        on_event=build_node_event_handler(book, notifier, store),
+        on_event=build_node_event_handler(book, notifier, store, get_node_link=_get_node_link),
     )
     await node_link.start()
 

@@ -159,6 +159,13 @@ class TasksService:
                         ),
                     ),
                 ),
+                ActionSpec(
+                    id=protocol.ACTION_FIRE_NOW,
+                    title="Разбудить задачу немедленно",
+                    params=(
+                        ActionParam(name="task_id", type="int", required=True, title="Id задачи"),
+                    ),
+                ),
             ),
         )
 
@@ -168,6 +175,8 @@ class TasksService:
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if action == protocol.ACTION_CREATE:
             return await self._create(args)
+        if action == protocol.ACTION_FIRE_NOW:
+            return await self._fire_now(args)
         raise ValueError(f"необъявленное действие: {action}")
 
     async def _create(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -211,6 +220,24 @@ class TasksService:
             now,
         )
         return {"task_id": task_id}
+
+    async def _fire_now(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Разбудить задачу раньше due_at — по событию, не по будильнику
+        (см. protocol.ACTION_FIRE_NOW). Идемпотентно: задача, которую уже
+        отыграли (по этому же событию раньше, или по due_at, или повторным
+        fire_now), просто не находится — ``fired_at IS NULL`` в
+        ``get_pending_task`` и есть вся защита от двойного срабатывания,
+        та же, что у обычного `_fire_due`."""
+        task_id = args.get("task_id")
+        if not isinstance(task_id, int):
+            raise ProtoError(ERR_BAD_REQUEST, "task_id обязателен и должен быть числом")
+        row = await self._store.get_pending_task(task_id)
+        if row is None:
+            return {"fired": False, "reason": "нет такой задачи или уже сработала"}
+        now = datetime.now(tz=UTC)
+        await self._store.mark_task_fired(row["id"], now)
+        asyncio.create_task(self._fire_one_safe(row), name=f"task-fire-now-{row['id']}")
+        return {"fired": True}
 
     # --- прогрев заранее ---
 

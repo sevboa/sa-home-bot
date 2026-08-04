@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import html
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -62,8 +63,9 @@ from sa_home_bot.bot.ai_flow import (
 from sa_home_bot.bot.handlers.vpn import resolve_request_callback
 from sa_home_bot.bot.lifecycle import broadcast_all, broadcast_system, notify_tool_call
 from sa_home_bot.bot.notifier import Notifier, notify_admins
+from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.db.store import Store
-from sa_home_bot.proto.messages import Envelope
+from sa_home_bot.proto.messages import Address, Envelope, ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.tasks import protocol as task_protocol
 from sa_home_bot.vpn import protocol as vpn_protocol
@@ -80,6 +82,15 @@ EVENT_NODE_UP = "node_up"
 EVENT_NODE_LEAVING = "node_leaving"
 EVENT_NODE_RETURNED = "node_returned"
 EVENT_UPDATE_FINISHED = "update_finished"
+# Литерал, не импорт из node/service.py (та же причина, что у остальных
+# событий здесь: не источник правды, просто совпадающая строка, а модуль
+# ноды тяжёлый). Эмитится один раз на старте процесса, когда версия
+# сменилась с прошлого известного старта (node/app.py::
+# _announce_version_if_changed) — единственный сигнал "нода РЕАЛЬНО
+# исполняет новую версию", в отличие от update_finished (файлы на диске, до
+# рестарта). Матчится против remind(after_event=...) — см.
+# _maybe_fire_event_waiter ниже.
+EVENT_RESTART_APPLIED = "restart_applied"
 EVENT_SINGLETON_ACTIVATED = "singleton_activated"
 EVENT_SINGLETON_YIELDED = "singleton_yielded"
 # Строковые литералы, не импорт из llm/service.py — та же конвенция, что и
@@ -118,9 +129,37 @@ async def _handle_task_prewake(notifier: Notifier, data: dict) -> None:
         await notifier.send_direct(chat_id, text)
 
 
+async def _maybe_fire_event_waiter(
+    store: Store, get_node_link, node_id: str, event_type: str
+) -> None:
+    """Разбудить remind(after_event=...), если он ждал ровно это (node,
+    event_type) — иначе тихо ничего не делать (обычное дело: у события нет
+    ни одного ожидающего)."""
+    task_id = await store.pop_event_waiter_for(node_id, event_type)
+    if task_id is None:
+        return
+    node_link = get_node_link() if get_node_link is not None else None
+    if node_link is None:
+        log.warning("event_waiter task_id=%s: связи с нодой нет, останется на due_at", task_id)
+        return
+    dst = Address(node=task_protocol.NODE_ID, service=task_protocol.SERVICE_NAME)
+    try:
+        await node_link.command(task_protocol.ACTION_FIRE_NOW, {"task_id": task_id}, dst=dst)
+    except (ServiceUnavailableError, ProtoError) as exc:
+        log.warning("event_waiter task_id=%s: fire_now не удался (%s), ждём due_at", task_id, exc)
+
+
 async def _handle_task_result(
     notifier: Notifier, store: Store, data: dict, book: SubscriptionBook | None = None
 ) -> None:
+    task_id = data.get("task_id")
+    if isinstance(task_id, int):
+        # Задача уже сработала (по событию ИЛИ по due_at-таймауту) — ждать
+        # её больше незачем, а без этого сброса дублирующий fire_now по
+        # опоздавшему одноимённому событию был бы просто no-op (get_pending_
+        # task не находит уже отстрелянную), но строка в event_waiters
+        # осталась бы мёртвой навсегда.
+        await store.pop_event_waiter(task_id)
     meta = data.get("meta") or {}
     if meta.get("kind") != task_protocol.TASK_KIND_LLM_CHAT:
         return
@@ -202,6 +241,12 @@ def render_update_finished(node_id: str, ok: bool, version: str | None, error: s
     return f"⚠️ Обновление ноды «{node_id}» не удалось: {error}"
 
 
+def render_restart_applied(node_id: str, from_version: str | None, to_version: str) -> str:
+    if from_version:
+        return f"🔄 Нода «{node_id}» перезапустилась на v{to_version} (была v{from_version})."
+    return f"🔄 Нода «{node_id}» на связи, версия v{to_version}."
+
+
 def render_speech_cured() -> str:
     return (
         "🎉 <b>Альфред полностью излечился от картавости!</b>\n"
@@ -248,8 +293,19 @@ def build_close_ssh_keyboard(node_id: str) -> InlineKeyboardMarkup:
     )
 
 
-def build_node_event_handler(book: SubscriptionBook, notifier: Notifier, store: Store):
-    """Callback для ServiceLink(node).on_event."""
+def build_node_event_handler(
+    book: SubscriptionBook,
+    notifier: Notifier,
+    store: Store,
+    get_node_link: Callable[[], ServiceLink | None] | None = None,
+):
+    """Callback для ServiceLink(node).on_event.
+
+    ``get_node_link`` — геттер, не сам линк: этот хендлер собирается ДО
+    того, как ServiceLink(node) существует (сам этот callback передаётся
+    ему в конструктор — см. app.py), поэтому нужен нулевой уровень
+    отложенности, а не прямая ссылка на объект, которого пока нет.
+    """
 
     async def handle(env: Envelope) -> None:
         name = env.payload.get("event")
@@ -314,6 +370,15 @@ def build_node_event_handler(book: SubscriptionBook, notifier: Notifier, store: 
             text = render_update_finished(
                 env.src.node, bool(data.get("ok")), data.get("version"), data.get("error")
             )
+        elif name == EVENT_RESTART_APPLIED:
+            # Та же природа src, что у update_finished выше.
+            if env.src is None or not env.src.node:
+                return
+            event_node_id = env.src.node
+            to_version = data.get("to")
+            if not to_version:
+                return
+            text = render_restart_applied(env.src.node, data.get("from"), to_version)
         elif name == EVENT_LLM_IDLE_SLEEP:
             # Адресно — только в перечисленные chat_id, не всем подпискам
             # (не через broadcast_system): служба сама знает точный список
@@ -425,5 +490,7 @@ def build_node_event_handler(book: SubscriptionBook, notifier: Notifier, store: 
             return
         await store.record_event(name, event_node_id, text, datetime.now(tz=UTC))
         await broadcast_system(book, notifier, text)
+        if name in (EVENT_UPDATE_FINISHED, EVENT_RESTART_APPLIED) and event_node_id:
+            await _maybe_fire_event_waiter(store, get_node_link, event_node_id, name)
 
     return handle

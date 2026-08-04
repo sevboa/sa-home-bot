@@ -358,3 +358,41 @@ async def test_mark_task_prewake_done_excludes_from_needing_prewake(store):
     assert await store.tasks_needing_prewake(BASE_TIME + timedelta(minutes=5)) == []
 
 
+async def test_get_pending_task_returns_row_when_not_fired(store):
+    task_id = await _create_task(store, text="ждёт", due_at=BASE_TIME + timedelta(hours=1))
+    row = await store.get_pending_task(task_id)
+    assert row is not None
+    assert row["id"] == task_id
+
+
+async def test_get_pending_task_none_when_fired_or_missing(store):
+    task_id = await _create_task(store, text="уже было", due_at=BASE_TIME)
+    await store.mark_task_fired(task_id, BASE_TIME)
+    assert await store.get_pending_task(task_id) is None
+    assert await store.get_pending_task(task_id + 999) is None
+
+
+# --- event_waiters (remind after_event, bot/tools.py) ---
+
+
+async def test_pop_event_waiter_for_matches_and_removes(store):
+    await store.add_event_waiter(1, "arch-t480", "restart_applied", BASE_TIME)
+    assert await store.pop_event_waiter_for("arch-t480", "restart_applied") == 1
+    # Снята — повторно то же событие уже никого не находит.
+    assert await store.pop_event_waiter_for("arch-t480", "restart_applied") is None
+
+
+async def test_pop_event_waiter_for_no_match_leaves_others(store):
+    await store.add_event_waiter(1, "arch-t480", "restart_applied", BASE_TIME)
+    assert await store.pop_event_waiter_for("mycraft", "restart_applied") is None
+    assert await store.pop_event_waiter_for("arch-t480", "update_finished") is None
+    # Не задет — правильная пара всё ещё находится.
+    assert await store.pop_event_waiter_for("arch-t480", "restart_applied") == 1
+
+
+async def test_pop_event_waiter_removes_by_task_id_regardless_of_event(store):
+    await store.add_event_waiter(1, "arch-t480", "restart_applied", BASE_TIME)
+    await store.pop_event_waiter(1)
+    assert await store.pop_event_waiter_for("arch-t480", "restart_applied") is None
+
+

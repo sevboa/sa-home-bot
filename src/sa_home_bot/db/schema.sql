@@ -283,6 +283,27 @@ CREATE TABLE IF NOT EXISTS swarm_events (
 );
 CREATE INDEX IF NOT EXISTS idx_swarm_events_created ON swarm_events(created_at);
 
+-- Отложенный ход диалога (remind, bot/tools.py), ждущий не будильника
+-- (tasks.due_at), а конкретного события роя — «нода X применила рестарт»/
+-- «нода X закончила update» (решение пользователя 2026-08-04: Альфред не
+-- должен держать открытый ответ и гадать через check_update, пока нода
+-- перезапускается — вместо этого закрывает текущий ход и просыпается по
+-- приходу события). task_id — задача той же самой заявки в СЛУЖБЕ tasks
+-- (у той db/schema.sql общая, но файл БД отдельный от бота — здесь только
+-- сторона бота, где эти события и приходят, см. bot/node_events.py).
+-- due_at у задачи в tasks остаётся страховкой на случай, если событие не
+-- придёт вовсе (нода не поднялась) — тогда задача сработает по таймауту;
+-- строка чистится в любом случае при получении task_result (см.
+-- bot/node_events.py::_handle_task_result — не только при попадании
+-- события), поэтому отдельный housekeeping ей не нужен.
+CREATE TABLE IF NOT EXISTS event_waiters (
+    task_id     INTEGER PRIMARY KEY,
+    node        TEXT NOT NULL,
+    event_type  TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_event_waiters_match ON event_waiters(node, event_type);
+
 -- Кэш официального APK AmneziaWG на jeeves — ровно одна строка (id=1).
 -- Свежесть по GitHub API проверяется на каждый запрос (vpn/apk.py), кэш —
 -- ускоритель доставки, не источник правды о версии. telegram_file_id —

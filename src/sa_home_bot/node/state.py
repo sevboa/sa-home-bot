@@ -22,6 +22,15 @@ from sa_home_bot.config import SwarmNodeConfig
 class NodeState(BaseModel):
     assignments: list[str] = Field(default_factory=list)
     peers: list[SwarmNodeConfig] = Field(default_factory=list)
+    # Версия, под которой нода стартовала в ПРОШЛЫЙ раз — переживает рестарт
+    # именно поэтому персистится здесь, а не в памяти процесса (node/app.py
+    # сравнивает с текущим __version__ на старте и эмитит restart_applied,
+    # если версия сменилась). None — до сих пор не было ни одного старта с
+    # записанной версией (свежий стейт-файл или обновление с версии без
+    # этого поля) — событие в этом случае не эмитится, только запоминается
+    # текущая версия, иначе первый же старт бота на всём рое дал бы ложный
+    # "applied" без реального рестарта после update.
+    last_known_version: str | None = None
 
     @classmethod
     def load(cls, path: str | Path) -> NodeState:

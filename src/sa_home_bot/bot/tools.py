@@ -91,6 +91,21 @@ WEEKDAYS_RU = (
 LLM_NODE = "mycraft"
 LLM_SERVICE = "llm"
 
+# Литералы, не импорт из node/service.py (та же причина, что у
+# wake_core.py::_CHECK_UPDATE_ACTION — тот модуль тяжёлый, тянет
+# супервизор/пиров/discovery, а тулу remind нужна только пара строк-имён
+# событий для after_event).
+EVENT_UPDATE_FINISHED = "update_finished"
+EVENT_RESTART_APPLIED = "restart_applied"
+
+# Страховочный дедлайн для remind(after_event=...), если событие так и не
+# придёт (нода не поднялась) — без него задача ждала бы вечно, что хуже
+# честного «не подтвердилось» (тот же принцип, что у FIRE_GRACE_S в
+# tasks/service.py: лучше сработать с опозданием/сдаться, чем не
+# сработать никогда). Модель это число не указывает — иначе легко
+# промахнётся: сама нода не знает, сколько реально займёт её рестарт.
+RESTART_EVENT_FALLBACK_S = 300.0
+
 
 DISMISS_MODEL = "model"
 DISMISS_SLEEP = "sleep"
@@ -690,46 +705,90 @@ async def tool_get_time(ctx: ToolContext, args: dict[str, Any]) -> str:
 # --- remind: единственный тул, ходящий по протоколу роя, см. докстринг модуля ---
 
 
+_AFTER_EVENT_TYPES = (EVENT_RESTART_APPLIED, EVENT_UPDATE_FINISHED)
+
+
 async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
     if ctx.chat_id is None or ctx.dialogue_id is None or ctx.trigger_message_id is None:
         return "ошибка: отложенные задачи недоступны вне диалога"
     if ctx.node_link is None:
         return "ошибка: служба задач недоступна"
-    when_raw = args.get("when")
     text = args.get("text")
-    if not isinstance(when_raw, str) or not when_raw.strip():
-        return "ошибка: не указано время (when, ISO 8601)"
     if not isinstance(text, str) or not text.strip():
         return "ошибка: не указано, что сделать/сказать (text)"
-    try:
-        due_at = datetime.fromisoformat(when_raw)
-    except ValueError:
-        return "ошибка: 'when' должен быть в формате ISO 8601, например 2026-07-24T21:30:00"
-    # Наивную дату-время (без смещения) считаем локальным временем процесса —
-    # именно в нём отдана строка "текущее время" в контексте промпта
-    # (bot/ai_flow.py::_build_context_note), так что модель обычно отвечает
-    # тем же способом, без явного смещения.
-    if due_at.tzinfo is None:
-        due_at = due_at.astimezone()
-    due_at_utc = due_at.astimezone(UTC)
-    if due_at_utc <= datetime.now(tz=UTC):
-        return "ошибка: указанное время уже прошло"
+
+    after_event = args.get("after_event")
+    event_node: str | None = None
+    event_type: str | None = None
+    if after_event is not None:
+        if not isinstance(after_event, dict):
+            return "ошибка: after_event должен быть объектом {node, event}"
+        event_node = str(after_event.get("node") or "").strip()
+        event_type = str(after_event.get("event") or "").strip()
+        if not event_node or event_type not in _AFTER_EVENT_TYPES:
+            return (
+                "ошибка: after_event.node обязателен, after_event.event — одно из "
+                + ", ".join(_AFTER_EVENT_TYPES)
+            )
+        if ctx.store is None:
+            return "ошибка: ожидание по событию здесь недоступно"
+
+    when_raw = args.get("when")
+    if when_raw is None and after_event is None:
+        return "ошибка: не указано время (when, ISO 8601)"
+    if when_raw is not None:
+        if not isinstance(when_raw, str) or not when_raw.strip():
+            return "ошибка: не указано время (when, ISO 8601)"
+        try:
+            due_at = datetime.fromisoformat(when_raw)
+        except ValueError:
+            return "ошибка: 'when' должен быть в формате ISO 8601, например 2026-07-24T21:30:00"
+        # Наивную дату-время (без смещения) считаем локальным временем процесса —
+        # именно в нём отдана строка "текущее время" в контексте промпта
+        # (bot/ai_flow.py::_build_context_note), так что модель обычно отвечает
+        # тем же способом, без явного смещения.
+        if due_at.tzinfo is None:
+            due_at = due_at.astimezone()
+        due_at_utc = due_at.astimezone(UTC)
+        if due_at_utc <= datetime.now(tz=UTC):
+            return "ошибка: указанное время уже прошло"
+    else:
+        # after_event без when: дедлайн — страховка на случай, если событие
+        # не придёт вовсе, а не то, что модель должна угадывать (см.
+        # RESTART_EVENT_FALLBACK_S).
+        due_at_utc = datetime.now(tz=UTC) + timedelta(seconds=RESTART_EVENT_FALLBACK_S)
+        due_at = due_at_utc.astimezone()
 
     # Директива дописывается в снимок ТЕКУЩЕЙ истории (ctx.history — то, что
     # модель видит прямо сейчас, см. докстринг ToolContext) — служба tasks
-    # прогоняет ровно этот список через llm.chat заново в момент due_at, без
-    # доступа к ai_turns бота (решение пользователя 2026-07-24: снимок
+    # прогоняет ровно этот список через llm.chat заново в момент срабатывания,
+    # без доступа к ai_turns бота (решение пользователя 2026-07-24: снимок
     # делается здесь, при создании задачи, а не реконструируется позже).
-    # "Настало время" привязано к due_at, а не к моменту создания задачи —
-    # due_at и есть момент фактического срабатывания (с точностью до
-    # интервала опроса службы tasks).
-    directive = (
-        f"Настало время ({due_at:%Y-%m-%d %H:%M}), на которое тебя раньше "
-        f"попросили сделать вот что: «{text.strip()}». Сделай/скажи это "
-        "сейчас, от своего имени, в характере — как будто сам вспомнил, а не "
-        "отвечаешь на прямой вопрос. Если нужно что-то посчитать или узнать "
-        "(погоду, курс) — пользуйся инструментами, не полагайся на память."
-    )
+    if after_event is not None:
+        # Срабатывание могло прийти и по событию (раньше due_at, см.
+        # bot/node_events.py::_maybe_fire_event_waiter), и по таймауту —
+        # отсюда модель не знает, что именно случилось, и должна честно
+        # сверить состояние сама (check_update/node_manage), а не считать
+        # успех гарантированным.
+        directive = (
+            f"Ты ждал(а) событие «{event_type}» от ноды «{event_node}» (или "
+            f"истёк страховочный срок {due_at:%H:%M}), после чего тебя попросили "
+            f"сделать вот что: «{text.strip()}». Прежде чем продолжать, сверь "
+            "реальное состояние (например, node_manage/check_update) — событие "
+            "могло не прийти вовсе, тогда честно скажи, что не подтвердилось, "
+            "не выдавай желаемое за случившееся."
+        )
+    else:
+        # "Настало время" привязано к due_at, а не к моменту создания задачи —
+        # due_at и есть момент фактического срабатывания (с точностью до
+        # интервала опроса службы tasks).
+        directive = (
+            f"Настало время ({due_at:%Y-%m-%d %H:%M}), на которое тебя раньше "
+            f"попросили сделать вот что: «{text.strip()}». Сделай/скажи это "
+            "сейчас, от своего имени, в характере — как будто сам вспомнил, а не "
+            "отвечаешь на прямой вопрос. Если нужно что-то посчитать или узнать "
+            "(погоду, курс) — пользуйся инструментами, не полагайся на память."
+        )
     # "tools" здесь не кладём: комплект собирается заново в момент
     # срабатывания, по правам собеседника на ТОТ момент (llm_chat.run_chat_loop
     # → tools_for). Раньше сюда клался снимок TOOL_DECLARATIONS, но его никто
@@ -748,7 +807,7 @@ async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
     }
     dst = Address(node=task_protocol.NODE_ID, service=task_protocol.SERVICE_NAME)
     try:
-        await ctx.node_link.command(
+        result = await ctx.node_link.command(
             task_protocol.ACTION_CREATE,
             {
                 "due_at": due_at_utc.isoformat(),
@@ -763,6 +822,15 @@ async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
         )
     except (ServiceUnavailableError, ProtoError) as exc:
         return f"внутренняя ошибка: не удалось поставить задачу ({exc})"
+
+    if after_event is not None:
+        task_id = result.get("task_id")
+        if isinstance(task_id, int):
+            await ctx.store.add_event_waiter(task_id, event_node, event_type, datetime.now(tz=UTC))
+        return (
+            f"жду событие «{event_type}» от «{event_node}», страховочный срок — "
+            f"{due_at.strftime('%H:%M')} (местное время)"
+        )
     return f"задача поставлена на {due_at.strftime('%Y-%m-%d %H:%M')} (местное время)"
 
 
@@ -1247,12 +1315,45 @@ async def tool_node_manage(ctx: ToolContext, args: dict[str, Any]) -> str:
         return text
     if action == NODE_ACTION_UPDATE:
         if result.get("up_to_date"):
-            return f"Уже последняя версия v{result.get('version', '?')} — обновлять нечего."
-        return (
-            f"Обновление до v{result.get('target_version', '?')} поставлено на диск в фоне "
-            "(сам процесс не тронут) — чтобы новая версия заработала, нужен ещё "
-            "action=«restart_node»."
+            version = result.get("version", "?")
+            if result.get("restart_required"):
+                # Файлы на диске уже v{version}, но исполняется всё ещё
+                # старая версия — раньше здесь честно не проверялось (баг
+                # 2026-08-04), и "готово" звучало так, будто нода уже
+                # работает на новой версии, хотя это не так.
+                return (
+                    f"Файлы уже последней версии v{version} лежат на диске, но нода "
+                    "ЕЩЁ ИСПОЛНЯЕТ старый код — update не нужен, но нужен ещё "
+                    "action=«restart_node», иначе новая версия не заработает."
+                )
+            return f"Уже последняя версия v{version}, нода её и исполняет — делать нечего."
+        # update — фоновая операция (node/service.py::_schedule_update): этот
+        # ответ приходит МГНОВЕННО, а файлы на диск лягут только спустя
+        # какое-то время. Живой баг 2026-08-04 (часть 2): без явного запрета
+        # модель звала restart_node в ТОМ ЖЕ ходе, не дожидаясь реального
+        # завершения — нода перезапускалась и поднималась на СТАРОМ коде,
+        # который update ещё не успел заменить. remind(after_event=
+        # update_finished) — тот же механизм, что уже развязал ожидание
+        # restart_node/restart_applied, просто на шаг раньше в цепочке.
+        target_node = wanted_node
+        if target_node is None:
+            own = await _own_state(ctx)
+            target_node = (own or {}).get("node")
+        target_version = result.get("target_version", "?")
+        note = (
+            f"Обновление до v{target_version} поставлено на диск В ФОНЕ (сам процесс "
+            "не тронут, установка идёт асинхронно) — файлы ещё не готовы. НЕ вызывай "
+            "restart_node прямо сейчас, иначе нода перезапустится на СТАРОМ коде."
         )
+        if target_node:
+            note += (
+                f" Поставь remind(after_event={{\"node\": \"{target_node}\", \"event\": "
+                f'"{EVENT_UPDATE_FINISHED}"}}, text="вызови restart_node для '
+                f'{target_node} и продолжи задачу") — и закончи текущий ответ, не дожидаясь.'
+            )
+        else:
+            note += " Дождись подтверждения, прежде чем звать restart_node."
+        return note
     return json.dumps({"node": wanted_node or "своя", **result}, ensure_ascii=False)
 
 
@@ -1282,11 +1383,17 @@ _DECL_NODE_MANAGE: dict[str, Any] = {
             "последняя доступная версия и список нод, которым нужен update "
             "или хотя бы restart_node (node здесь не нужен и игнорируется); "
             "update — поставить новую версию на диск БЕЗ перезапуска "
-            "процесса; restart_node — перезапустить саму ноду (не отдельную "
-            "службу) — после update это обязательно, иначе новый код не "
-            "заработает. Без node (для check_update/update/restart_node) "
-            "действие идёт на ту ноду, где сейчас исполняюсь я сам — "
-            "restart_node на ней ненадолго оборвёт этот же разговор."
+            "процесса (это ФОНОВАЯ операция — ответ приходит мгновенно, а "
+            "файлы дописываются ещё какое-то время); restart_node — "
+            "перезапустить саму ноду (не отдельную службу) — после update "
+            "это обязательно, иначе новый код не заработает, но звать его "
+            "СРАЗУ после update — тоже ошибка: файлы могут быть ещё не "
+            "готовы, и нода перезапустится на старом коде. Между update и "
+            "restart_node (а после restart_node — до следующего шага плана) "
+            "используй remind(after_event=...), не проверяй/жди сам. Без "
+            "node (для check_update/update/restart_node) действие идёт на "
+            "ту ноду, где сейчас исполняюсь я сам — restart_node на ней "
+            "ненадолго оборвёт этот же разговор."
         ),
         "parameters": {
             "type": "object",
@@ -2367,14 +2474,19 @@ _DECL_REMIND: dict[str, Any] = {
     "function": {
         "name": "remind",
         "description": (
-            "Поставить отложенную задачу в этом же чате на конкретный момент "
-            "времени — НЕ готовый текст, а то, что нужно СДЕЛАТЬ или СКАЗАТЬ, "
-            "когда время наступит: в этот момент тебя вызовут заново и ты сам "
-            "сформулируешь ответ, при необходимости пользуясь другими "
-            "инструментами (например, посмотреть погоду именно в тот момент, "
-            "а не сейчас). Переведи то, что попросил пользователь ('через 20 "
-            "минут', 'завтра в 9 утра'), в точную дату-время сам, используя "
-            "текущее время из контекста разговора."
+            "Поставить отложенную задачу в этом же чате — НЕ готовый текст, а "
+            "то, что нужно СДЕЛАТЬ или СКАЗАТЬ, когда придёт время: тогда тебя "
+            "вызовут заново и ты сам сформулируешь ответ, при необходимости "
+            "пользуясь другими инструментами (например, посмотреть погоду "
+            "именно в тот момент, а не сейчас). Ровно ОДНО из двух — when ИЛИ "
+            "after_event. when — переведи то, что попросил пользователь "
+            "('через 20 минут', 'завтра в 9 утра'), в точную дату-время сам, "
+            "используя текущее время из контекста разговора. after_event — "
+            "для «обнови ноду и дальше» и похожего: НЕ сиди и не жди/не "
+            "переспрашивай состояние сам — поставь задачу проснуться, когда "
+            "нода реально подтвердит нужное, и сразу закончи текущий ответ "
+            "коротким «сделал, отпишусь как подтвердится» (страховочный срок "
+            "на случай, если событие не придёт, считается сам, без when)."
         ),
         "parameters": {
             "type": "object",
@@ -2383,12 +2495,36 @@ _DECL_REMIND: dict[str, Any] = {
                     "type": "string",
                     "description": "Точная дата-время в ISO 8601, например 2026-07-24T21:30:00",
                 },
+                "after_event": {
+                    "type": "object",
+                    "description": (
+                        "Проснуться по событию ноды, а не по времени — для "
+                        "node_manage(restart_node)/update, когда нужно дождаться "
+                        "реального результата, не выдумывая его заранее."
+                    ),
+                    "properties": {
+                        "node": {
+                            "type": "string",
+                            "description": "Имя ноды, чьего события ждать (например: arch-t480)",
+                        },
+                        "event": {
+                            "type": "string",
+                            "enum": list(_AFTER_EVENT_TYPES),
+                            "description": (
+                                "restart_applied — нода реально перезапустилась на новой "
+                                "версии (после restart_node); update_finished — файлы "
+                                "обновления легли на диск (после update, ДО рестарта)."
+                            ),
+                        },
+                    },
+                    "required": ["node", "event"],
+                },
                 "text": {
                     "type": "string",
                     "description": "Что нужно сделать или сказать в момент срабатывания",
                 },
             },
-            "required": ["when", "text"],
+            "required": ["text"],
         },
     },
 }

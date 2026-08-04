@@ -213,3 +213,90 @@ async def test_prewake_is_silent_when_target_already_warm(store):
 
     assert emitter.events == []  # ни «шагов», ни WoL — показывать нечего
     assert link.commands == []
+
+
+# --- fire_now: разбудить задачу по событию, а не по due_at (remind after_event) ---
+
+
+async def test_fire_now_fires_pending_task_before_due_at(store, monkeypatch):
+    async def fake_chat_loop(*args, **kwargs):
+        return "разбужен по событию"
+
+    monkeypatch.setattr(tasks_service, "run_chat_loop", fake_chat_loop)
+    link = FakeNodeLink(OWN_STATE, routes={"winpc:llm": {"asleep": False}})
+    emitter = FakeEmitter()
+    svc = _service(store, link, emitter)
+
+    far_future = datetime.now(tz=UTC) + timedelta(hours=1)
+    task_id = await store.create_task(
+        "winpc",
+        "llm",
+        protocol.ACTION_CHAT_LOOP,
+        {"messages": [{"role": "user", "content": "блины"}]},
+        60.0,
+        META,
+        far_future,
+        datetime.now(tz=UTC),
+    )
+
+    result = await svc.run_command(protocol.ACTION_FIRE_NOW, {"task_id": task_id})
+    assert result == {"fired": True}
+    for _ in range(10):
+        await asyncio.sleep(0)  # дать фоновой задаче (asyncio.create_task) выполниться
+
+    assert emitter.results() == [
+        {
+            "task_id": task_id,
+            "meta": META,
+            "ok": True,
+            "result": {"response": "разбужен по событию"},
+        }
+    ]
+    # due_at не наступил — обычный опрос очереди не должен найти её снова.
+    assert await store.due_tasks(datetime.now(tz=UTC)) == []
+
+
+async def test_fire_now_on_unknown_task_reports_not_fired(store):
+    svc = _service(store, FakeNodeLink(OWN_STATE), FakeEmitter())
+    result = await svc.run_command(protocol.ACTION_FIRE_NOW, {"task_id": 999})
+    assert result == {"fired": False, "reason": "нет такой задачи или уже сработала"}
+
+
+async def test_fire_now_is_idempotent_on_already_fired_task(store, monkeypatch):
+    async def fake_chat_loop(*args, **kwargs):
+        return "ответ"
+
+    monkeypatch.setattr(tasks_service, "run_chat_loop", fake_chat_loop)
+    link = FakeNodeLink(OWN_STATE, routes={"winpc:llm": {"asleep": False}})
+    svc = _service(store, link, FakeEmitter())
+
+    task_id = await store.create_task(
+        "winpc",
+        "llm",
+        protocol.ACTION_CHAT_LOOP,
+        {"messages": [{"role": "user", "content": "блины"}]},
+        60.0,
+        META,
+        datetime.now(tz=UTC) + timedelta(hours=1),
+        datetime.now(tz=UTC),
+    )
+
+    first = await svc.run_command(protocol.ACTION_FIRE_NOW, {"task_id": task_id})
+    for _ in range(10):
+        await asyncio.sleep(0)
+    second = await svc.run_command(protocol.ACTION_FIRE_NOW, {"task_id": task_id})
+
+    assert first == {"fired": True}
+    assert second == {"fired": False, "reason": "нет такой задачи или уже сработала"}
+
+
+async def test_fire_now_rejects_non_int_task_id(store):
+    from sa_home_bot.proto.messages import ProtoError
+
+    svc = _service(store, FakeNodeLink(OWN_STATE), FakeEmitter())
+    try:
+        await svc.run_command(protocol.ACTION_FIRE_NOW, {"task_id": "not-a-number"})
+    except ProtoError as exc:
+        assert "task_id" in exc.message
+    else:
+        raise AssertionError("ожидался ProtoError")

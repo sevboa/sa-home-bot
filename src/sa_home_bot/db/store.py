@@ -524,6 +524,19 @@ class Store:
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
+    async def get_pending_task(self, task_id: int) -> dict | None:
+        """Задача по id, если она ещё не сработала — иначе ``None``.
+
+        Для `fire_now` (tasks/service.py::_fire_now, remind after_event,
+        bot/tools.py): будим задачу раньше due_at по приходу события, а не
+        по будильнику. ``fired_at IS NULL`` в условии — та же защита от
+        повторного срабатывания, что и у `due_tasks`/`_fire_due`."""
+        cur = await self.db.conn.execute(
+            "SELECT * FROM tasks WHERE id=? AND fired_at IS NULL", (task_id,)
+        )
+        row = await cur.fetchone()
+        return dict(row) if row is not None else None
+
     async def mark_task_fired(self, task_id: int, at: datetime) -> None:
         async with self.db.transaction() as conn:
             await conn.execute("UPDATE tasks SET fired_at=? WHERE id=?", (_iso(at), task_id))
@@ -674,6 +687,41 @@ class Store:
                 (keep_last,),
             )
             return cur.rowcount
+
+    # --- event_waiters (remind after_event, bot/tools.py) ---
+
+    async def add_event_waiter(
+        self, task_id: int, node: str, event_type: str, created_at: datetime
+    ) -> None:
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "INSERT INTO event_waiters(task_id, node, event_type, created_at) "
+                "VALUES(?, ?, ?, ?)",
+                (task_id, node, event_type, _iso(created_at)),
+            )
+
+    async def pop_event_waiter_for(self, node: str, event_type: str) -> int | None:
+        """Первый ожидающий task_id под (node, event_type) — удаляет строку,
+        чтобы то же событие не смогло разбудить задачу дважды."""
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                "SELECT task_id FROM event_waiters WHERE node=? AND event_type=? "
+                "ORDER BY task_id LIMIT 1",
+                (node, event_type),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            task_id = row["task_id"]
+            await conn.execute("DELETE FROM event_waiters WHERE task_id=?", (task_id,))
+            return task_id
+
+    async def pop_event_waiter(self, task_id: int) -> None:
+        """Снять ожидание конкретной задачи — она уже сработала (по событию
+        ИЛИ по таймауту due_at в службе tasks, см. node_events.py::
+        _handle_task_result), повторно её ждать незачем."""
+        async with self.db.transaction() as conn:
+            await conn.execute("DELETE FROM event_waiters WHERE task_id=?", (task_id,))
 
     # --- housekeeping ---
 

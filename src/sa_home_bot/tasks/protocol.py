@@ -24,6 +24,15 @@ ACTION_CREATE = "create"
 # существующий "богатый" тип задачи.
 ACTION_CHAT_LOOP = "chat_loop"
 
+# Разбудить задачу РАНЬШЕ due_at — по приходу события роя, а не по
+# будильнику (remind after_event, bot/tools.py; матчинг события — на
+# стороне бота, bot/node_events.py, у него одного есть доступ ко всем
+# событиям роя). due_at у задачи остаётся страховкой: если fire_now не
+# пришёл вовсе (событие не случилось), задача всё равно сработает по
+# таймауту обычным путём (tasks/service.py::_fire_due). Решение
+# пользователя 2026-08-04.
+ACTION_FIRE_NOW = "fire_now"
+
 # task_prewake: {task_id, meta, status: "waking"|"ready"|"failed", reason?}
 # — прогресс попытки разбудить dst заранее (см. tasks/service.py).
 EVENT_TASK_PREWAKE = "task_prewake"

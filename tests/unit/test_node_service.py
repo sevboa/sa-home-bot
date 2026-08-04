@@ -437,13 +437,40 @@ async def test_update_already_current_does_not_reinstall(monkeypatch):
     # installed_version() — реальный importlib.metadata.version(), без "v" (PEP 440)
     monkeypatch.setattr(service_module.node_update, "installed_version", lambda: "0.22.0")
     monkeypatch.setattr(service_module.node_update, "pipx_reinstall", fake_reinstall)
+    # running тоже "0.22.0" — тест про "уже установлено, реинсталл не нужен",
+    # а не про restart_required (тот проверяется отдельно, ниже).
+    monkeypatch.setattr(service_module, "__version__", "0.22.0")
 
     sup, _ = _fake_supervisor()
     svc = NodeService(sup, update_source="https://github.com/x/y.git")
     result = await svc.run_command("update", {})
 
-    assert result == {"up_to_date": True, "version": "0.22.0"}
+    assert result == {"up_to_date": True, "version": "0.22.0", "restart_required": False}
     assert called == []  # pipx не звали
+
+
+async def test_update_already_installed_but_not_yet_running_reports_restart_required(
+    monkeypatch,
+):
+    """Живой баг 2026-08-04: update лёг на диск раньше (в прошлом вызове), но
+    restart_node ещё не делали — installed уже совпадает с target, но
+    ПРОЦЕСС всё ещё исполняет старую версию. up_to_date не должен молчать об
+    этом (Альфред читал "up_to_date" как "полностью готово" и пропускал
+    обязательный restart_node — см. bot/tools.py::tool_node_manage)."""
+    from sa_home_bot.node import service as service_module
+
+    async def fake_latest(repo_url):
+        return "v0.22.0"
+
+    monkeypatch.setattr(service_module.node_update, "latest_tag", fake_latest)
+    monkeypatch.setattr(service_module.node_update, "installed_version", lambda: "0.22.0")
+    monkeypatch.setattr(service_module, "__version__", "0.21.0")  # ещё старая, не рестартовали
+
+    sup, _ = _fake_supervisor()
+    svc = NodeService(sup, update_source="https://github.com/x/y.git")
+    result = await svc.run_command("update", {})
+
+    assert result == {"up_to_date": True, "version": "0.22.0", "restart_required": True}
 
 
 async def test_update_schedules_background_reinstall_and_emits_event(monkeypatch):
@@ -593,12 +620,13 @@ async def test_update_on_win32_already_current_does_not_trigger_task(monkeypatch
     monkeypatch.setattr(service_module.node_update, "latest_tag", fake_latest)
     monkeypatch.setattr(service_module.node_update, "installed_version", lambda: "0.22.0")
     monkeypatch.setattr(service_module.node_update, "trigger_scheduled_task", fake_trigger_task)
+    monkeypatch.setattr(service_module, "__version__", "0.22.0")
 
     sup, _ = _fake_supervisor()
     svc = NodeService(sup, update_source="https://github.com/x/y.git")
     result = await svc.run_command("update", {})
 
-    assert result == {"up_to_date": True, "version": "0.22.0"}
+    assert result == {"up_to_date": True, "version": "0.22.0", "restart_required": False}
     assert triggered == []
 
 

@@ -81,6 +81,18 @@ ACTION_CHECK_UPDATE = "check_update"
 ACTION_UPDATE = "update"
 EVENT_UPDATE_FINISHED = "update_finished"
 
+# Эмитится один раз при старте процесса, если версия успела смениться с
+# прошлого известного старта (node/state.py::last_known_version) — то есть
+# ФАЙЛЫ уже реально ИСПОЛНЯЮТСЯ, в отличие от update_finished (файлы легли
+# на диск, но процесс мог и не перезапуститься). Решение пользователя
+# 2026-08-04: без этого события отложенная задача-продолжение (remind
+# after_event, bot/tools.py) не может отличить «update лёг на диск» от
+# «рестарт реально применил новую версию» — а Альфред уже путал одно с
+# другим, докладывая «готово» до фактического restart_node. См.
+# node/app.py::_announce_version_if_changed — сравнение и эмит живут там
+# (там же лежит __version__ и state), не здесь.
+EVENT_RESTART_APPLIED = "restart_applied"
+
 ACTION_SEND_WOL = "send_wol"  # рой просит ЭТУ ноду разбудить кого-то в её LAN
 
 RESTART_NODE_TITLE = "🔄 Перезапустить ноду"
@@ -751,7 +763,19 @@ class NodeService:
         target_version = latest.lstrip("v")  # для сравнения/отображения — см. _check_update
         installed = node_update.installed_version()
         if installed == target_version:
-            return {"up_to_date": True, "version": target_version}
+            # Живой баг 2026-08-04: up_to_date сравнивал ТОЛЬКО installed
+            # (на диске) с target — если файлы уже легли раньше (этот же
+            # update уже вызывали, restart_node ещё не делали), ответ
+            # выглядел как "полностью готово", и Альфред пропускал
+            # необходимый restart_node, доложив о готовности ноды, которая
+            # на деле ещё исполняет старый код. running (== __version__)
+            # добавлен явно, чтобы вызывающий (bot/tools.py::
+            # tool_node_manage) не спутал "на диске" с "исполняется".
+            return {
+                "up_to_date": True,
+                "version": target_version,
+                "restart_required": __version__ != target_version,
+            }
         if self._updating:
             raise ProtoError(ERR_BAD_REQUEST, "обновление уже выполняется")
         if sys.platform == "win32":

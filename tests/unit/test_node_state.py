@@ -8,6 +8,13 @@ def test_load_missing_file_returns_empty_state(tmp_path):
     state = NodeState.load(tmp_path / "node-state.json")
     assert state.assignments == []
     assert state.peers == []
+    assert state.last_known_version is None
+
+
+def test_last_known_version_roundtrip(tmp_path):
+    path = tmp_path / "node-state.json"
+    NodeState(last_known_version="0.72.0").save(path)
+    assert NodeState.load(path).last_known_version == "0.72.0"
 
 
 def test_save_then_load_roundtrip(tmp_path):
