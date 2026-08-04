@@ -625,6 +625,56 @@ class Store:
             )
             return cur.rowcount
 
+    # --- swarm_events (журнал системных/админских событий, bot/node_events.py) ---
+
+    async def record_event(
+        self, event_type: str, node: str | None, text: str, at: datetime
+    ) -> None:
+        """Записать уже отрендеренный текст события — тот же, что уходит в
+        рассылку. Подрезка — отдельным prune_swarm_events из housekeeping
+        (тот же приём, что job_runs/invites), не на каждой записи."""
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "INSERT INTO swarm_events(event_type, node, text, created_at) "
+                "VALUES(?, ?, ?, ?)",
+                (event_type, node, text, _iso(at)),
+            )
+
+    async def recent_events(
+        self,
+        *,
+        node: str | None = None,
+        since: datetime | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Последние события, самые новые первыми — опционально по ноде
+        и/или не раньше ``since``."""
+        clauses: list[str] = []
+        params: list[object] = []
+        if node is not None:
+            clauses.append("node = ?")
+            params.append(node)
+        if since is not None:
+            clauses.append("created_at >= ?")
+            params.append(_iso(since))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        cur = await self.db.conn.execute(
+            f"SELECT event_type, node, text, created_at FROM swarm_events {where} "
+            "ORDER BY id DESC LIMIT ?",
+            params,
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def prune_swarm_events(self, keep_last: int = 500) -> int:
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                "DELETE FROM swarm_events WHERE id NOT IN "
+                "(SELECT id FROM swarm_events ORDER BY id DESC LIMIT ?)",
+                (keep_last,),
+            )
+            return cur.rowcount
+
     # --- housekeeping ---
 
     async def prune_job_runs(self, keep_last: int = 500) -> int:

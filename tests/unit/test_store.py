@@ -136,6 +136,50 @@ async def test_prune_job_runs(store, keep):
     assert len(await store.recent_job_runs(limit=100)) == keep
 
 
+# --- swarm_events (журнал для Альфреда, bot/node_events.py) ---
+
+
+async def test_recent_events_newest_first(store):
+    await store.record_event("node_down", "mycraft", "пропала", BASE_TIME)
+    await store.record_event(
+        "node_returned", "mycraft", "вернулась", BASE_TIME + timedelta(minutes=1)
+    )
+    events = await store.recent_events(limit=10)
+    assert [e["event_type"] for e in events] == ["node_returned", "node_down"]
+
+
+async def test_recent_events_filters_by_node(store):
+    await store.record_event("node_down", "mycraft", "mycraft пропала", BASE_TIME)
+    await store.record_event("node_down", "jeeves", "jeeves пропала", BASE_TIME)
+    events = await store.recent_events(node="jeeves", limit=10)
+    assert [e["text"] for e in events] == ["jeeves пропала"]
+
+
+async def test_recent_events_filters_by_since(store):
+    await store.record_event("node_down", "mycraft", "старое", BASE_TIME)
+    await store.record_event(
+        "node_up", "mycraft", "свежее", BASE_TIME + timedelta(hours=2)
+    )
+    events = await store.recent_events(since=BASE_TIME + timedelta(hours=1), limit=10)
+    assert [e["text"] for e in events] == ["свежее"]
+
+
+async def test_recent_events_respects_limit(store):
+    for i in range(5):
+        await store.record_event("node_up", "mycraft", str(i), BASE_TIME + timedelta(minutes=i))
+    events = await store.recent_events(limit=2)
+    assert [e["text"] for e in events] == ["4", "3"]
+
+
+async def test_prune_swarm_events_keeps_last(store):
+    for i in range(10):
+        await store.record_event("node_up", "mycraft", str(i), BASE_TIME + timedelta(minutes=i))
+    deleted = await store.prune_swarm_events(keep_last=3)
+    assert deleted == 7
+    events = await store.recent_events(limit=100)
+    assert [e["text"] for e in events] == ["9", "8", "7"]
+
+
 # --- readings / baseline_stats ---
 
 

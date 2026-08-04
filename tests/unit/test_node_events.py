@@ -6,6 +6,8 @@ llm_speech_cured → буквально всем подпискам (broadcast_a
 event_types opt-in — Логопед долечил Альфреда, должны узнать все, включая
 гостей)."""
 
+from unittest.mock import ANY
+
 from sa_home_bot.bot.ai_flow import (
     ALBERT_ASLEEP,
     ALBERT_TASK_MISSED,
@@ -50,9 +52,13 @@ class FakeNotifier:
 class FakeStore:
     def __init__(self) -> None:
         self.recorded_turns: list[tuple] = []
+        self.recorded_events: list[tuple] = []
 
     async def record_ai_turn(self, *args, **kwargs):
         self.recorded_turns.append((args, kwargs))
+
+    async def record_event(self, event_type, node, text, at):
+        self.recorded_events.append((event_type, node, text, at))
 
 
 def _book() -> SubscriptionBook:
@@ -84,6 +90,30 @@ async def test_handler_broadcasts_system_on_node_joined():
     await handler(env)
 
     assert notifier.sent == [(1, render_node_joined("arch-t480", "tcp://100.110.58.31:8710"))]
+
+
+async def test_handler_journals_system_events_for_alfred():
+    """Живой повод 2026-08-04: у Альфреда не было доступа к тому, что уже
+    произошло — только к текущему состоянию. Системные события (тот же
+    текст, что уходит в рассылку) теперь пишутся в журнал (db/schema.sql::
+    swarm_events) через store.record_event, до broadcast_system."""
+    book = _book()
+    notifier = FakeNotifier()
+    store = FakeStore()
+    handler = build_node_event_handler(book, notifier, store)
+
+    env = make_event(
+        "node_joined",
+        {"node_id": "arch-t480", "endpoint": "tcp://100.110.58.31:8710"},
+        src=Address(node="alfred", service="node"),
+    )
+    await handler(env)
+
+    assert len(store.recorded_events) == 1
+    event_type, node, text, _at = store.recorded_events[0]
+    assert event_type == "node_joined"
+    assert node == "arch-t480"
+    assert text == render_node_joined("arch-t480", "tcp://100.110.58.31:8710")
 
 
 async def test_handler_ignores_other_event_types():
@@ -411,7 +441,8 @@ def test_build_close_ssh_keyboard_targets_node():
 async def test_handler_notifies_admins_with_close_ssh_button():
     book = _admin_book()
     notifier = FakeNotifier()
-    handler = build_node_event_handler(book, notifier, FakeStore())
+    store = FakeStore()
+    handler = build_node_event_handler(book, notifier, store)
 
     await handler(
         make_event(
@@ -424,6 +455,9 @@ async def test_handler_notifies_admins_with_close_ssh_button():
     expected_text = render_idle_power_blocked("mycraft", ["sevboa, pts/0, с 01:08"])
     assert notifier.sent == [(999, expected_text)]
     assert notifier.reply_markups == [build_close_ssh_keyboard("mycraft")]
+    # Админский алерт (не broadcast_system) — тоже в журнал, см. решение
+    # пользователя 2026-08-04: «системные + админские».
+    assert store.recorded_events == [("idle_power_blocked", "mycraft", expected_text, ANY)]
 
 
 async def test_handler_ignores_idle_power_blocked_without_sessions():

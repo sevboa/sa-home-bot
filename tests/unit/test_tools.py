@@ -57,10 +57,6 @@ def _ctx(
     dismissal=None,
     notifier=None,
 ):
-    # ``store`` не используется ToolContext'ом напрямую (только remind
-    # ходит по протоколу через node_link, см. bot/tools.py) — параметр
-    # сохранён ради существующих вызовов ниже, не задействован здесь.
-    del store
     return tools.ToolContext(
         chat_id=chat_id,
         dialogue_id=dialogue_id,
@@ -71,6 +67,7 @@ def _ctx(
         subscription=subscription,
         dismissal=dismissal,
         notifier=notifier,
+        store=store,
     )
 
 
@@ -791,10 +788,15 @@ def _node_enum(subscription) -> list[str]:
 
 def test_node_manage_enum_is_per_action_right():
     """Право на каждое действие своё: посмотреть обновление — не то же
-    самое, что поставить его или перезапустить ноду."""
-    assert _node_enum(_sub("check_update@node")) == ["check_update"]
-    assert _node_enum(_sub("check_update@node", "update@node")) == ["check_update", "update"]
-    assert _node_enum(ADMIN) == ["check_update", "update", "restart_node"]
+    самое, что поставить его или перезапустить ноду. check_all делит право
+    с check_update — та же read-only «посмотреть», просто сразу по рою."""
+    assert _node_enum(_sub("check_update@node")) == ["check_update", "check_all"]
+    assert _node_enum(_sub("check_update@node", "update@node")) == [
+        "check_update",
+        "check_all",
+        "update",
+    ]
+    assert _node_enum(ADMIN) == ["check_update", "check_all", "update", "restart_node"]
 
 
 def test_node_manage_hidden_without_any_node_right():
@@ -906,6 +908,130 @@ async def test_node_manage_own_node_down(store):
         _ctx(store, node_link=link, subscription=ADMIN),
         {"action": "check_update", "node": "winpc"},
     )
+    assert result.startswith("недоступно")
+
+
+async def test_node_manage_check_all_summarizes_fleet(store):
+    """Живой повод 2026-08-04: версия кода одна на весь рой — вместо
+    check_update по каждой ноде отдельно один вызов сразу видит, кому
+    нужен update, кому только restart_node, а кто не ответил."""
+    own = {
+        "node": "alfred",
+        "kind": "server",
+        "version": "0.70.1",
+        "peers": [
+            {"id": "mycraft", "alive": True, "kind": "workstation"},
+            {"id": "jeeves", "alive": True, "kind": "vps"},
+            {"id": "winpc", "alive": False, "kind": "workstation"},
+        ],
+    }
+    link = _swarm_link(
+        states={
+            "own": own,
+            "mycraft:node": {"node": "mycraft", "version": "0.70.0"},
+            "jeeves:node": {
+                "node": "jeeves",
+                "version": "0.70.1",
+                "update": {"restart_required": True},
+            },
+        },
+        command_result={
+            "repo": "git@example.com:sa-home-bot",
+            "running": "0.70.1",
+            "installed": "0.70.1",
+            "latest": "0.70.1",
+        },
+    )
+    result = await tools.tool_node_manage(
+        _ctx(store, node_link=link, subscription=ADMIN), {"action": "check_all"}
+    )
+    assert "v0.70.1" in result
+    assert "Нужен update" in result and "mycraft" in result
+    assert "restart_node" in result and "jeeves" in result
+    assert "Не отвечают" in result and "winpc" in result
+
+
+async def test_node_manage_check_all_reports_up_to_date(store):
+    own = {
+        "node": "alfred",
+        "kind": "server",
+        "version": "0.70.1",
+        "peers": [{"id": "mycraft", "alive": True, "kind": "workstation"}],
+    }
+    link = _swarm_link(
+        states={"own": own, "mycraft:node": {"node": "mycraft", "version": "0.70.1"}},
+        command_result={
+            "repo": "git@example.com:sa-home-bot",
+            "running": "0.70.1",
+            "installed": "0.70.1",
+            "latest": "0.70.1",
+        },
+    )
+    result = await tools.tool_node_manage(
+        _ctx(store, node_link=link, subscription=ADMIN), {"action": "check_all"}
+    )
+    assert "все доступные ноды на последней версии" in result.lower()
+
+
+async def test_node_manage_check_all_own_node_down(store):
+    link = _FakeSwarmLink(states={})
+    result = await tools.tool_node_manage(
+        _ctx(store, node_link=link, subscription=ADMIN), {"action": "check_all"}
+    )
+    assert result.startswith("недоступно")
+
+
+# --- swarm_events: журнал того, что уже случилось (для Альфреда) ---
+
+
+def test_swarm_events_hidden_without_nodes_right():
+    assert "swarm_events" not in _names(_sub("ai"))
+
+
+async def test_swarm_events_lists_recent(store):
+    await store.record_event("node_down", "mycraft", "пропала", datetime.now(tz=UTC))
+    result = await tools.tool_swarm_events(
+        _ctx(store, subscription=ADMIN), {}
+    )
+    assert "пропала" in result and "node_down" in result
+
+
+async def test_swarm_events_filters_by_node(store):
+    now = datetime.now(tz=UTC)
+    await store.record_event("node_down", "mycraft", "mycraft пропала", now)
+    await store.record_event("node_down", "jeeves", "jeeves пропала", now)
+    result = await tools.tool_swarm_events(
+        _ctx(store, subscription=ADMIN), {"node": "jeeves"}
+    )
+    assert "jeeves пропала" in result
+    assert "mycraft пропала" not in result
+
+
+async def test_swarm_events_filters_by_hours(store):
+    now = datetime.now(tz=UTC)
+    await store.record_event("node_down", "mycraft", "старое", now - timedelta(hours=5))
+    await store.record_event("node_up", "mycraft", "свежее", now)
+    result = await tools.tool_swarm_events(_ctx(store, subscription=ADMIN), {"hours": 1})
+    assert "свежее" in result
+    assert "старое" not in result
+
+
+async def test_swarm_events_empty_says_so(store):
+    result = await tools.tool_swarm_events(_ctx(store, subscription=ADMIN), {})
+    assert "не нашлось" in result
+
+
+async def test_swarm_events_rejects_bad_hours(store):
+    result = await tools.tool_swarm_events(
+        _ctx(store, subscription=ADMIN), {"hours": "вчера"}
+    )
+    assert "должен быть числом" in result
+
+
+async def test_swarm_events_no_store_degrades_to_text(store):
+    # Служба tasks (второй пользователь этого модуля) не имеет доступа к БД
+    # бота — тот же приём деградации, что и у tool_tell без book/notifier.
+    result = await tools.tool_swarm_events(_ctx(None, subscription=ADMIN), {})
     assert result.startswith("недоступно")
 
 

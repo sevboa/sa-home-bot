@@ -263,10 +263,16 @@ def build_node_event_handler(book: SubscriptionBook, notifier: Notifier, store: 
         if name == task_protocol.EVENT_TOOL_CALL:
             await notify_tool_call(book, notifier, data.get("name", "?"))
             return
+        # Кого касается событие — для журнала (db/schema.sql::swarm_events,
+        # store.record_event ниже); заполняется в соответствующей ветке,
+        # None у событий не про конкретную ноду (сейчас таких, доходящих до
+        # записи в журнал, нет — оставлено на будущее).
+        event_node_id: str | None = None
         if name == EVENT_NODE_JOINED:
             node_id = data.get("node_id")
             if not node_id:
                 return
+            event_node_id = node_id
             text = render_node_joined(node_id, data.get("endpoint") or "?")
         elif name in (EVENT_NODE_DOWN, EVENT_NODE_UP, EVENT_NODE_LEAVING, EVENT_NODE_RETURNED):
             # Объект события — нода из payload, а не src: node_down/node_up/
@@ -276,6 +282,7 @@ def build_node_event_handler(book: SubscriptionBook, notifier: Notifier, store: 
             node_id = data.get("node")
             if not node_id:
                 return
+            event_node_id = node_id
             if name == EVENT_NODE_DOWN:
                 text = render_node_down(node_id, float(data.get("down_s") or 0))
             elif name == EVENT_NODE_UP:
@@ -288,6 +295,7 @@ def build_node_event_handler(book: SubscriptionBook, notifier: Notifier, store: 
             slot, node_id = data.get("slot"), data.get("node")
             if not slot or not node_id:
                 return
+            event_node_id = node_id
             # Переезд бота между нодами сообщает уже поднявшийся экземпляр —
             # тот, что уступил, к этому моменту закрывает сессию.
             text = (
@@ -302,6 +310,7 @@ def build_node_event_handler(book: SubscriptionBook, notifier: Notifier, store: 
             # событий уже устроена (см. node/app.py:_relay_peer_event).
             if env.src is None or not env.src.node:
                 return
+            event_node_id = env.src.node
             text = render_update_finished(
                 env.src.node, bool(data.get("ok")), data.get("version"), data.get("error")
             )
@@ -326,10 +335,12 @@ def build_node_event_handler(book: SubscriptionBook, notifier: Notifier, store: 
             sessions = data.get("sessions") or []
             if not node_id or not sessions:
                 return
+            idle_text = render_idle_power_blocked(node_id, sessions)
+            await store.record_event(name, node_id, idle_text, datetime.now(tz=UTC))
             await notify_admins(
                 book,
                 notifier,
-                render_idle_power_blocked(node_id, sessions),
+                idle_text,
                 reply_markup=build_close_ssh_keyboard(node_id),
             )
             return
@@ -367,11 +378,15 @@ def build_node_event_handler(book: SubscriptionBook, notifier: Notifier, store: 
             if chat_id is None or request_id is None:
                 return
             gb = float(data.get("bytes") or 0) / 1_000_000_000
+            extra_text = (
+                f"✋ VPN: гость <code>{chat_id}</code> просит ещё {gb:.0f} ГБ "
+                f"(заявка №{request_id})."
+            )
+            await store.record_event(name, None, extra_text, datetime.now(tz=UTC))
             await notify_admins(
                 book,
                 notifier,
-                f"✋ VPN: гость <code>{chat_id}</code> просит ещё {gb:.0f} ГБ "
-                f"(заявка №{request_id}).",
+                extra_text,
                 reply_markup=resolve_request_callback(int(request_id)),
             )
             return
@@ -390,24 +405,25 @@ def build_node_event_handler(book: SubscriptionBook, notifier: Notifier, store: 
         elif name == vpn_protocol.EVENT_VPN_NODE_QUOTA_WARNING:
             used_gb = float(data.get("used_bytes") or 0) / 1_000_000_000
             limit_gb = float(data.get("limit_bytes") or 0) / 1_000_000_000
-            await notify_admins(
-                book,
-                notifier,
+            node_quota_text = (
                 f"⚠️ VPN: канал jeeves близок к месячному лимиту тарифа — "
-                f"{used_gb:.0f} / {limit_gb:.0f} ГБ.",
+                f"{used_gb:.0f} / {limit_gb:.0f} ГБ."
             )
+            await store.record_event(name, None, node_quota_text, datetime.now(tz=UTC))
+            await notify_admins(book, notifier, node_quota_text)
             return
         elif name == vpn_protocol.EVENT_VPN_PEER_ISSUED:
             chat_id = data.get("chat_id")
             if chat_id is None:
                 return
             device = html.escape(str(data.get("device_label") or ""))
-            await notify_admins(
-                book, notifier, f"🔐 VPN: выдан доступ гостю <code>{chat_id}</code> ({device})."
-            )
+            issued_text = f"🔐 VPN: выдан доступ гостю <code>{chat_id}</code> ({device})."
+            await store.record_event(name, None, issued_text, datetime.now(tz=UTC))
+            await notify_admins(book, notifier, issued_text)
             return
         else:
             return
+        await store.record_event(name, event_node_id, text, datetime.now(tz=UTC))
         await broadcast_system(book, notifier, text)
 
     return handle

@@ -50,7 +50,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from html import escape
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -1071,6 +1071,94 @@ _DECL_SWARM_STATUS: dict[str, Any] = {
 }
 
 
+# --- swarm_events: журнал того, что уже произошло (в отличие от swarm_status —
+# текущего состояния) — bot/node_events.py::store.record_event пишет туда те
+# же строки, что уходят в рассылку. Решение пользователя 2026-08-04: до этого
+# у Альфреда не было доступа даже к тому, что уже случилось, не то что к
+# системным логам — только к состоянию /nodes прямо сейчас. Право — то же,
+# чем гейтится /nodes (CommandRight, не отдельное): это те же данные о рое,
+# только в прошедшем времени, не повод заводить новое право.
+
+DEFAULT_SWARM_EVENTS_LIMIT = 20
+MAX_SWARM_EVENTS_LIMIT = 100
+
+
+async def tool_swarm_events(ctx: ToolContext, args: dict[str, Any]) -> str:
+    if ctx.store is None:
+        return "недоступно: журнал событий здесь не подключён"
+    node = args.get("node")
+    node = str(node).strip() or None if node else None
+
+    since = None
+    hours_raw = args.get("hours")
+    if hours_raw is not None:
+        try:
+            hours = float(hours_raw)
+        except (TypeError, ValueError):
+            return f"hours должен быть числом: {hours_raw!r}"
+        since = datetime.now(tz=UTC) - timedelta(hours=max(hours, 0.0))
+
+    limit = DEFAULT_SWARM_EVENTS_LIMIT
+    limit_raw = args.get("limit")
+    if limit_raw is not None:
+        try:
+            limit = int(limit_raw)
+        except (TypeError, ValueError):
+            return f"limit должен быть числом: {limit_raw!r}"
+        limit = max(1, min(limit, MAX_SWARM_EVENTS_LIMIT))
+
+    events = await ctx.store.recent_events(node=node, since=since, limit=limit)
+    if not events:
+        return "в журнале ничего не нашлось за этот запрос"
+    return "\n".join(f"{e['created_at']} [{e['event_type']}] {e['text']}" for e in events)
+
+
+_DECL_SWARM_EVENTS: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "swarm_events",
+        "description": (
+            "Журнал того, что уже ПРОИЗОШЛО в домашнем рое — не текущее "
+            "состояние (для него swarm_status), а история: нода пропадала "
+            "или возвращалась, обновлялась, служба-синглтон переезжала "
+            "между нодами, плюс админские алерты (заявка на VPN-трафик, "
+            "автовыключение отложено из-за открытой SSH-сессии и т.п.). "
+            "Используй для вопросов вида «что случилось с X», «что было "
+            "ночью», «когда mycraft последний раз пропадала». Личные "
+            "события конкретных гостей (их собственные VPN-квоты) сюда не "
+            "попадают — это не про них."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "node": {
+                    "type": "string",
+                    "description": (
+                        "Только события про эту ноду (например: mycraft). "
+                        "Без этого — про весь рой."
+                    ),
+                },
+                "hours": {
+                    "type": "number",
+                    "description": (
+                        "Только события за последние N часов. Без этого — "
+                        "без ограничения по времени (просто последние по limit)."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": (
+                        f"Сколько последних событий вернуть "
+                        f"(по умолчанию {DEFAULT_SWARM_EVENTS_LIMIT}, "
+                        f"максимум {MAX_SWARM_EVENTS_LIMIT})."
+                    ),
+                },
+            },
+        },
+    },
+}
+
+
 # --- node_manage: обновить/перезапустить ноду роя ---
 #
 # Те же действия, что кнопки в карточке ноды (/nodes, bot/handlers/node.py) и
@@ -1090,6 +1178,7 @@ _DECL_SWARM_STATUS: dict[str, Any] = {
 
 NODE_SERVICE = "node"
 NODE_ACTION_CHECK_UPDATE = "check_update"
+NODE_ACTION_CHECK_ALL = "check_all"
 NODE_ACTION_UPDATE = "update"
 NODE_ACTION_RESTART = "restart_node"
 
@@ -1112,6 +1201,62 @@ async def _node_manage_dst(ctx: ToolContext, wanted_node: str | None) -> Address
     return Address(node=wanted_node, service=NODE_SERVICE)
 
 
+async def _node_check_all(ctx: ToolContext) -> str:
+    """Версия репозитория одна на весь рой, и обновления у всех нод одни и те
+    же (решение пользователя 2026-08-04) — вместо check_update по каждой
+    ноде отдельно один вызов: последний тег плюс кто отстал.
+
+    Своя нода спрашивается ОДИН раз через check_update (там уже есть
+    latest_tag против репозитория) — остальные ноды не переспрашивают то же
+    самое сетью, их версии берутся из get_state() (wake_core.collect_reports,
+    тот же веерный опрос, что и у swarm_status)."""
+    own = await _own_state(ctx)
+    if own is None:
+        return "недоступно: своя нода не отвечает"
+    assert ctx.node_link is not None
+    try:
+        own_check = await ctx.node_link.command(NODE_ACTION_CHECK_UPDATE, {}, dst=None)
+    except ProtoError as exc:
+        return f"не вышло проверить обновления: {exc.message}"
+    except (ServiceUnavailableError, TimeoutError) as exc:
+        return f"недоступно: своя нода не ответила ({exc})"
+    latest = own_check.get("latest")
+    if not latest:
+        return "не удалось узнать последнюю версию (сеть?)"
+
+    reports = await wake_core.collect_reports(ctx.node_link, own, with_monitor=False)
+    behind: list[str] = []
+    restart_only: list[str] = []
+    unreachable: list[str] = []
+    for r in reports:
+        if not r.alive or r.state is None:
+            unreachable.append(r.node_id)
+            continue
+        running = r.state.get("version")
+        if running and running != latest:
+            behind.append(r.node_id)
+            continue
+        # На последней версии, но, возможно, update уже лежит на диске, а
+        # restart_node ещё не выполняли (node/service.py::get_state).
+        if (r.state.get("update") or {}).get("restart_required"):
+            restart_only.append(r.node_id)
+
+    parts = [f"Последняя версия: v{latest}."]
+    if behind:
+        parts.append("Нужен update: " + ", ".join(sorted(behind)) + ".")
+    if restart_only:
+        parts.append(
+            "Update уже на диске, нужен только restart_node: "
+            + ", ".join(sorted(restart_only))
+            + "."
+        )
+    if unreachable:
+        parts.append("Не отвечают, не проверить: " + ", ".join(sorted(unreachable)) + ".")
+    if not behind and not restart_only:
+        parts.append("Все доступные ноды на последней версии.")
+    return " ".join(parts)
+
+
 async def tool_node_manage(ctx: ToolContext, args: dict[str, Any]) -> str:
     if ctx.node_link is None:
         return "недоступно: нет связи с роем"
@@ -1121,6 +1266,11 @@ async def tool_node_manage(ctx: ToolContext, args: dict[str, Any]) -> str:
     allowed = _NODE_MANAGE_VARIANTS.allowed_values(ctx.subscription) if ctx.subscription else []
     if action not in allowed:
         return f"не умею: {action or 'без уточнения'}"
+
+    if action == NODE_ACTION_CHECK_ALL:
+        # Не одноадресное действие — не проходит через _node_manage_dst/
+        # command(action, dst=...), сама опрашивает весь рой.
+        return await _node_check_all(ctx)
 
     wanted_node = args.get("node")
     wanted_node = str(wanted_node).strip() if wanted_node else None
@@ -1157,8 +1307,11 @@ _NODE_MANAGE_VARIANTS = VariantRights(
     param="action",
     rights=(
         # Право на действие — то же `действие@node`, что и у кнопки в карточке
-        # ноды: Альфред не расширяет доступ.
+        # ноды: Альфред не расширяет доступ. check_all — то же самое право,
+        # что check_update (то же самое read-only "видеть, есть ли новое"),
+        # просто сразу по всему рою, а не по одной ноде за раз.
         (NODE_ACTION_CHECK_UPDATE, ActionRight(NODE_ACTION_CHECK_UPDATE, NODE_SERVICE)),
+        (NODE_ACTION_CHECK_ALL, ActionRight(NODE_ACTION_CHECK_UPDATE, NODE_SERVICE)),
         (NODE_ACTION_UPDATE, ActionRight(NODE_ACTION_UPDATE, NODE_SERVICE)),
         (NODE_ACTION_RESTART, ActionRight(NODE_ACTION_RESTART, NODE_SERVICE)),
     ),
@@ -1171,12 +1324,16 @@ _DECL_NODE_MANAGE: dict[str, Any] = {
         "description": (
             "Обновить или перезапустить ноду домашнего роя — те же действия, "
             "что кнопки в /nodes. check_update — посмотреть, есть ли новая "
-            "версия, ничего не меняя; update — поставить её файлы на диск БЕЗ "
-            "перезапуска процесса; restart_node — перезапустить саму ноду "
-            "(не отдельную службу) — после update это обязательно, иначе "
-            "новый код не заработает. Без node действие идёт на ту ноду, где "
-            "сейчас исполняюсь я сам — restart_node на ней ненадолго оборвёт "
-            "этот же разговор."
+            "версия у ОДНОЙ ноды (своей или указанной в node), ничего не "
+            "меняя; check_all — то же самое, но сразу по всему рою: "
+            "последняя доступная версия и список нод, которым нужен update "
+            "или хотя бы restart_node (node здесь не нужен и игнорируется); "
+            "update — поставить новую версию на диск БЕЗ перезапуска "
+            "процесса; restart_node — перезапустить саму ноду (не отдельную "
+            "службу) — после update это обязательно, иначе новый код не "
+            "заработает. Без node (для check_update/update/restart_node) "
+            "действие идёт на ту ноду, где сейчас исполняюсь я сам — "
+            "restart_node на ней ненадолго оборвёт этот же разговор."
         ),
         "parameters": {
             "type": "object",
@@ -1186,15 +1343,17 @@ _DECL_NODE_MANAGE: dict[str, Any] = {
                     # enum подставляется под права собеседника (см. tools_for).
                     "enum": [v for v, _ in _NODE_MANAGE_VARIANTS.rights],
                     "description": (
-                        "check_update — есть ли обновление; update — поставить "
-                        "его на диск; restart_node — перезапустить ноду"
+                        "check_update — есть ли обновление у одной ноды; "
+                        "check_all — сводка по всему рою сразу; update — "
+                        "поставить его на диск; restart_node — перезапустить "
+                        "ноду"
                     ),
                 },
                 "node": {
                     "type": "string",
                     "description": (
                         "Имя конкретной ноды (например: alfred, mycraft). Без "
-                        "этого — своя нода."
+                        "этого — своя нода. Игнорируется при action=check_all."
                     ),
                 },
             },
@@ -2299,6 +2458,12 @@ TOOLS: tuple[ToolSpec, ...] = (
         handler=tool_node_manage,
         declaration=_DECL_NODE_MANAGE,
         variants=_NODE_MANAGE_VARIANTS,
+    ),
+    ToolSpec(
+        name="swarm_events",
+        handler=tool_swarm_events,
+        declaration=_DECL_SWARM_EVENTS,
+        requires=CommandRight(commands.NODES.name),
     ),
     ToolSpec(
         name="torrents",

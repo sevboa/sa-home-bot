@@ -266,6 +266,23 @@ CREATE TABLE IF NOT EXISTS vpn_requests (
     decided_at  TEXT
 );
 
+-- Журнал системных/админских событий роя (node_down/up/leaving/returned/
+-- joined, singleton, update_finished, admin-алерты VPN/idle_power_blocked —
+-- bot/node_events.py) — тот же текст, что уходит в рассылку, только ещё и
+-- на диск: до 2026-08-04 у Альфреда не было доступа к тому, что УЖЕ
+-- произошло, только к текущему состоянию (/nodes, /status). Личные события
+-- гостей (VPN-квоты конкретного чата, задачи) сюда намеренно не попадают —
+-- решение пользователя 2026-08-04: это чужая приватная информация, не
+-- «что случилось с роем».
+CREATE TABLE IF NOT EXISTS swarm_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type  TEXT NOT NULL,
+    node        TEXT,          -- кого касается; NULL — не про конкретную ноду
+    text        TEXT NOT NULL, -- уже отрендеренный текст рассылки
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_swarm_events_created ON swarm_events(created_at);
+
 -- Кэш официального APK AmneziaWG на jeeves — ровно одна строка (id=1).
 -- Свежесть по GitHub API проверяется на каждый запрос (vpn/apk.py), кэш —
 -- ускоритель доставки, не источник правды о версии. telegram_file_id —
