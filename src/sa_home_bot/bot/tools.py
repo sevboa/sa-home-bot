@@ -171,6 +171,15 @@ class ToolContext:
     # приведёт к 400). None вне топика — тулы должны передавать None, а не
     # dialogue_id, в message_thread_id проактивных notifier.send_*.
     message_thread_id: int | None = None
+    # (node, event_type), из-за которого сработала ЭТА задача-продолжение
+    # (remind after_event) — None у живого /ai (никто не будил). Живой
+    # инцидент 2026-08-05: модель, разбуженная по событию, систематически
+    # игнорировала прямой текстовый запрет "не зови remind на то же самое
+    # событие снова" и заново ставила remind на (node, event_type), из-за
+    # которого её только что разбудили — бесконечный цикл самопереноса без
+    # единого реального действия. Раз словесный запрет не работает, тул
+    # remind сверяет сам и жёстко отказывает, см. tool_remind.
+    woken_by: tuple[str, str] | None = None
 
 
 ToolHandler = Callable[["ToolContext", dict[str, Any]], Awaitable[str]]
@@ -775,6 +784,20 @@ async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
                 "ошибка: after_event.node обязателен, after_event.event — одно из "
                 + ", ".join(_AFTER_EVENT_TYPES)
             )
+        # Живой инцидент 2026-08-05: словесный запрет в директиве ("не зови
+        # remind на то же событие снова") модель систематически игнорирует —
+        # разбуженная по (node, event_type) заново ставит remind на ТО ЖЕ
+        # самое (node, event_type), бесконечно откладывая реальное действие.
+        # Жёсткий отказ вместо тихого согласия: разбуженный ход обязан либо
+        # выполнить порученное, либо честно сказать, что не вышло — не
+        # переносить решение на потом, когда "потом" уже наступило.
+        if ctx.woken_by == (event_node, event_type):
+            return (
+                f"ошибка: событие «{event_type}» от «{event_node}» уже наступило — "
+                "именно из-за него тебя сейчас разбудили. Ждать его снова нельзя "
+                "(зациклишься) — вызови действие, которое тебя просили сделать, "
+                "или честно сообщи, что не получилось."
+            )
 
     when_raw = args.get("when")
     if when_raw is None and after_event is None:
@@ -870,6 +893,12 @@ async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
         "dialogue_id": ctx.dialogue_id,
         "trigger_message_id": ctx.trigger_message_id,
     }
+    if after_event is not None:
+        # Восстанавливается в ToolContext.woken_by на срабатывании
+        # (tasks/service.py::_fire_chat_loop) — см. проверку выше про
+        # запрет повторного remind на то же (node, event_type).
+        meta["awaited_node"] = event_node
+        meta["awaited_event"] = event_type
     dst = Address(node=task_protocol.NODE_ID, service=task_protocol.SERVICE_NAME)
     create_args: dict[str, Any] = {
         "due_at": due_at_utc.isoformat(),

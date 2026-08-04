@@ -150,6 +150,52 @@ async def test_fire_wakes_sleeping_node_and_delivers(store, monkeypatch):
     ]
 
 
+async def test_fire_chat_loop_restores_woken_by_from_meta(store, monkeypatch):
+    # Живой инцидент 2026-08-05: модель, разбуженная по (node, event_type),
+    # заново ставила remind на то же самое событие — бесконечный цикл.
+    # ToolContext.woken_by должен быть восстановлен из meta, иначе
+    # tool_remind нечем сверять запрет (см. bot/tools.py::tool_remind).
+    captured: dict = {}
+
+    async def fake_chat_loop(*args, **kwargs):
+        captured["tool_ctx"] = args[4]
+        return "готово"
+
+    monkeypatch.setattr(tasks_service, "run_chat_loop", fake_chat_loop)
+    link = FakeNodeLink(OWN_STATE, routes={"winpc:llm": {"asleep": False}})
+    svc = _service(store, link, FakeEmitter())
+
+    row = _chat_row()
+    row["meta_json"] = json.dumps(
+        {
+            "kind": protocol.TASK_KIND_LLM_CHAT,
+            "chat_id": 42,
+            "dialogue_id": 7,
+            "awaited_node": "jeeves",
+            "awaited_event": "update_finished",
+        }
+    )
+    await svc._fire_one(row)
+
+    assert captured["tool_ctx"].woken_by == ("jeeves", "update_finished")
+
+
+async def test_fire_chat_loop_woken_by_none_without_awaited_meta(store, monkeypatch):
+    captured: dict = {}
+
+    async def fake_chat_loop(*args, **kwargs):
+        captured["tool_ctx"] = args[4]
+        return "готово"
+
+    monkeypatch.setattr(tasks_service, "run_chat_loop", fake_chat_loop)
+    link = FakeNodeLink(OWN_STATE, routes={"winpc:llm": {"asleep": False}})
+    svc = _service(store, link, FakeEmitter())
+
+    await svc._fire_one(_chat_row())  # META без awaited_node/awaited_event
+
+    assert captured["tool_ctx"].woken_by is None
+
+
 async def test_fire_gives_up_after_grace(store, monkeypatch):
     # Цель не поднялась за отведённое время — честное «пропущено», но лишь
     # после повторных попыток, а не с первой presence-проверки.

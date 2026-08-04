@@ -498,6 +498,8 @@ class TasksService:
         task_args = json.loads(row["args_json"])
         messages = list(task_args.get("messages") or [])
         chat_id = meta.get("chat_id")
+        awaited_node = meta.get("awaited_node")
+        awaited_event = meta.get("awaited_event")
         tool_ctx = ai_tools.ToolContext(
             chat_id=chat_id,
             dialogue_id=meta.get("dialogue_id"),
@@ -507,6 +509,12 @@ class TasksService:
             # См. self._book: права на момент срабатывания, не на момент
             # создания задачи. Подписки уже нет → None → тулы без прав.
             subscription=self._book.for_chat(chat_id) if isinstance(chat_id, int) else None,
+            # Живой инцидент 2026-08-05: модель, разбуженная по событию,
+            # заново ставила remind на то же (node, event_type) — tool_remind
+            # сверяет это с woken_by и жёстко отказывает (см. bot/tools.py).
+            woken_by=(awaited_node, awaited_event)
+            if isinstance(awaited_node, str) and isinstance(awaited_event, str)
+            else None,
         )
         async def _emit_tool_call(name: str, call_args: dict[str, Any], result: str) -> None:
             # Только факт вызова — bot/node_events.py ретранслирует в дебаг-

@@ -56,6 +56,7 @@ def _ctx(
     subscription=None,
     dismissal=None,
     notifier=None,
+    woken_by=None,
 ):
     return tools.ToolContext(
         chat_id=chat_id,
@@ -68,6 +69,7 @@ def _ctx(
         dismissal=dismissal,
         notifier=notifier,
         store=store,
+        woken_by=woken_by,
     )
 
 
@@ -751,6 +753,20 @@ async def test_remind_after_event_puts_await_event_in_create_rpc(store):
     assert args["await_event"] == {"node": "arch-t480", "event_type": "restart_applied"}
 
 
+async def test_remind_after_event_stores_awaited_pair_in_meta(store):
+    # Восстанавливается в ToolContext.woken_by на срабатывании
+    # (tasks/service.py::_fire_chat_loop) — иначе некому проверять
+    # запрет на повторный remind того же события.
+    link = _FakeNodeLink()
+    await tools.tool_remind(
+        _ctx(store, node_link=link),
+        {"after_event": {"node": "arch-t480", "event": "restart_applied"}, "text": "продолжи"},
+    )
+    _action, args, _dst = link.calls[0]
+    assert args["meta"]["awaited_node"] == "arch-t480"
+    assert args["meta"]["awaited_event"] == "restart_applied"
+
+
 async def test_remind_after_event_rejects_unknown_event_name(store):
     result = await tools.tool_remind(
         _ctx(store, node_link=_FakeNodeLink()),
@@ -765,6 +781,41 @@ async def test_remind_after_event_rejects_missing_node(store):
         {"after_event": {"event": "restart_applied"}, "text": "x"},
     )
     assert result.startswith("ошибка")
+
+
+async def test_remind_after_event_rejects_same_event_that_woke_this_run(store):
+    # Живой инцидент 2026-08-05: модель, разбуженная по (node, event_type),
+    # систематически игнорировала словесный запрет и заново ставила remind
+    # на ТО ЖЕ САМОЕ событие — бесконечный цикл самопереноса. Жёсткий отказ
+    # вместо тихого согласия.
+    link = _FakeNodeLink()
+    result = await tools.tool_remind(
+        _ctx(store, node_link=link, woken_by=("jeeves", "update_finished")),
+        {"after_event": {"node": "jeeves", "event": "update_finished"}, "text": "x"},
+    )
+    assert result.startswith("ошибка")
+    assert "уже наступило" in result
+    assert link.calls == []  # задача не создана — не просто отказ на словах
+
+
+async def test_remind_after_event_allows_different_node_than_woke_this_run(store):
+    link = _FakeNodeLink()
+    result = await tools.tool_remind(
+        _ctx(store, node_link=link, woken_by=("jeeves", "update_finished")),
+        {"after_event": {"node": "arch-t480", "event": "update_finished"}, "text": "x"},
+    )
+    assert "жду событие" in result
+    assert len(link.calls) == 1
+
+
+async def test_remind_after_event_allows_different_event_than_woke_this_run(store):
+    link = _FakeNodeLink()
+    result = await tools.tool_remind(
+        _ctx(store, node_link=link, woken_by=("jeeves", "update_finished")),
+        {"after_event": {"node": "jeeves", "event": "restart_applied"}, "text": "x"},
+    )
+    assert "жду событие" in result
+    assert len(link.calls) == 1
 
 
 async def test_remind_after_event_works_without_store():
