@@ -708,7 +708,9 @@ async def tool_get_time(ctx: ToolContext, args: dict[str, Any]) -> str:
 _AFTER_EVENT_TYPES = (EVENT_RESTART_APPLIED, EVENT_UPDATE_FINISHED)
 
 
-def _close_pending_tool_calls(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _close_pending_tool_calls(
+    history: list[dict[str, Any]], self_result: str | None = None
+) -> list[dict[str, Any]]:
     """Снимок ``ctx.history`` для remind делается ИЗ СЕРЕДИНЫ раунда
     tool-calling (llm_chat.run_chat_loop::122-148 вызывает тулы строго
     ПОСЛЕ того, как допишет в history единственное сообщение "assistant"
@@ -720,9 +722,19 @@ def _close_pending_tool_calls(history: list[dict[str, Any]]) -> list[dict[str, A
     моделью assistant/tool_calls без ответа, за которым сразу новый user —
     невалидная форма для Ollama (живой сбой 2026-08-04: HTTP 400 на /api/
     chat, разобрано только благодаря телу ответа, см. llm/ollama.py).
-    Дозаполняем недостающие "tool"-ответы синтетической заглушкой, не трогая
-    сам живой ``history`` (та же мутируемая ссылка нужна остальным вызовам
-    этого раунда)."""
+    Дозаполняем недостающие "tool"-ответы, не трогая сам живой ``history``
+    (та же мутируемая ссылка нужна остальным вызовам этого раунда).
+
+    ``self_result`` — живой баг 2026-08-05: node_manage зовёт remind
+    (after_event) ИЗНУТРИ СВОЕГО ЖЕ handler'а, до того как его собственный
+    результат попадёт в history — снимок раньше глушил его синтетической
+    заглушкой "(результат не сохранён)", и разбуженная модель не знала, что
+    её же update реально удался, терялась и вместо restart_node звала
+    get_time/remind по кругу. Первый висящий вызов в раунде — это ВСЕГДА
+    сам текущий (см. порядок обработки tool_calls в run_chat_loop), поэтому
+    именно ему подставляется настоящий результат, если он передан;
+    остальные (если раунд был из нескольких вызовов) — по-прежнему
+    заглушкой, их результат правда ещё не известен."""
     for i in range(len(history) - 1, -1, -1):
         msg = history[i]
         if msg.get("role") == "tool":
@@ -731,11 +743,12 @@ def _close_pending_tool_calls(history: list[dict[str, Any]]) -> list[dict[str, A
             return history
         pending = msg["tool_calls"][len(history) - i - 1 :]
         snapshot = list(history)
-        for call in pending:
+        for idx, call in enumerate(pending):
             fn = call.get("function", {}) if isinstance(call, dict) else {}
-            snapshot.append(
-                {"role": "tool", "content": "(результат не сохранён)", "name": fn.get("name", "")}
-            )
+            content = "(результат не сохранён)"
+            if idx == 0 and self_result is not None:
+                content = self_result
+            snapshot.append({"role": "tool", "content": content, "name": fn.get("name", "")})
         return snapshot
     return history
 
@@ -814,7 +827,10 @@ async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
             "продолжать, сверь реальное состояние (например, node_manage/"
             "check_update) — событие могло не прийти вовсе, тогда честно скажи, "
             "что не подтвердилось, не выдавай желаемое за случившееся. Просто "
-            "вызови нужный тул — время сейчас проверять не нужно."
+            "вызови нужный тул — время сейчас проверять не нужно. НЕ зови "
+            f"remind(after_event={{\"node\": \"{event_node}\", \"event\": "
+            f'"{event_type}"}}) снова — это то самое событие, по которому тебя '
+            "только что разбудили, ставить его ожидание заново — зациклиться."
         )
     else:
         # "Настало время" привязано к due_at, а не к моменту создания задачи —
@@ -832,7 +848,10 @@ async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
     # → tools_for). Раньше сюда клался снимок TOOL_DECLARATIONS, но его никто
     # не читал — цикл всегда подставлял свой список, а снимок лишь раздувал
     # args_json задачи.
-    history = _close_pending_tool_calls(ctx.history)
+    # Ключ только для внутреннего вызова из _auto_await_event (node_manage
+    # зовёт remind изнутри своего же handler'а) — не часть публичной схемы
+    # тула, модель его никогда не передаёт.
+    history = _close_pending_tool_calls(ctx.history, self_result=args.get("_self_result"))
     # Живой баг 2026-08-05: think=True здесь слепо посылался даже для
     # mode="single_call" (модель без thinking вовсе, напр. Gemma на
     # mycraft) — на срабатывании Ollama падала 400 "does not support
@@ -1317,15 +1336,28 @@ async def _node_manage_dst(ctx: ToolContext, wanted_node: str | None) -> Address
     return Address(node=wanted_node, service=NODE_SERVICE)
 
 
-async def _auto_await_event(ctx: ToolContext, node: str, event_type: str, text: str) -> str:
+async def _auto_await_event(
+    ctx: ToolContext, node: str, event_type: str, text: str, *, self_result: str
+) -> str:
     """Поставить remind(after_event=...) САМОМУ, а не просить модель сделать
     это ещё одним вызовом тула. Решение пользователя 2026-08-05, живой
     инцидент: модель словами пообещала «прослежу за процессом», но сам тул
     remind не позвала — ждать её слов ненадёжно (та же природа, что у
     известной проблемы с get_time), а раз событие для продолжения и так
     известно детерминированно (сразу после update/restart_node), пусть его
-    ставит код, а не просьба в тексте ответа."""
-    remind_args = {"after_event": {"node": node, "event": event_type}, "text": text}
+    ставит код, а не просьба в тексте ответа.
+
+    ``self_result`` — живой баг 2026-08-05 (часть 2): remind вызывается
+    ИЗНУТРИ handler'а node_manage, до того как его СОБСТВЕННЫЙ результат
+    попадёт в ctx.history — без self_result снимок глушил его заглушкой
+    "(результат не сохранён)", и разбуженная модель не знала, что update
+    реально удался, терялась и вместо restart_node звала get_time/remind
+    по кругу заново (см. _close_pending_tool_calls)."""
+    remind_args = {
+        "after_event": {"node": node, "event": event_type},
+        "text": text,
+        "_self_result": self_result,
+    }
     outcome = await tool_remind(ctx, remind_args)
     if outcome.startswith(("ошибка", "внутренняя ошибка")):
         return f" (не удалось поставить автоматическое ожидание для {node}: {outcome})"
@@ -1384,6 +1416,7 @@ async def tool_node_manage(ctx: ToolContext, args: dict[str, Any]) -> str:
                 EVENT_RESTART_APPLIED,
                 f"подтверди, что {wanted_node} поднялась на новой версии, и продолжи "
                 "задачу обновления роя (следующая нода, если она есть)",
+                self_result=text,
             )
         return text
     if action == NODE_ACTION_UPDATE:
@@ -1425,6 +1458,7 @@ async def tool_node_manage(ctx: ToolContext, args: dict[str, Any]) -> str:
                 EVENT_UPDATE_FINISHED,
                 f'вызови node_manage(action="restart_node", node="{target_node}") и '
                 "продолжи задачу обновления роя",
+                self_result=note,
             )
         else:
             note += " Не удалось определить имя ноды для авто-ожидания, дождись подтверждения сам."

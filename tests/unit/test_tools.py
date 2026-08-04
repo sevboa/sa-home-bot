@@ -499,6 +499,92 @@ async def test_get_time_rejects_malformed_at(store):
     assert result.startswith("ошибка")
 
 
+# --- _close_pending_tool_calls: снимок для remind из середины раунда ---
+
+
+def test_close_pending_tool_calls_returns_unchanged_when_last_is_not_tool_calls():
+    history = [{"role": "user", "content": "привет"}]
+    assert tools._close_pending_tool_calls(history) == history
+
+
+def test_close_pending_tool_calls_fills_generic_placeholder_without_self_result():
+    history = [
+        {"role": "user", "content": "обнови ноды"},
+        {
+            "role": "assistant",
+            "tool_calls": [{"function": {"name": "node_manage", "arguments": {}}}],
+        },
+    ]
+    snapshot = tools._close_pending_tool_calls(history)
+    assert snapshot[-1] == {
+        "role": "tool",
+        "content": "(результат не сохранён)",
+        "name": "node_manage",
+    }
+    assert history[-1].get("role") != "tool"  # живой history не тронут
+
+
+def test_close_pending_tool_calls_uses_self_result_for_pending_call():
+    # Живой баг 2026-08-05 (часть 2): node_manage зовёт remind изнутри
+    # своего же handler'а — его СОБСТВЕННЫЙ результат должен попасть в
+    # снимок, а не заглушка, иначе разбуженная модель не знает, что update
+    # реально удался.
+    history = [
+        {"role": "user", "content": "обнови ноды"},
+        {
+            "role": "assistant",
+            "tool_calls": [{"function": {"name": "node_manage", "arguments": {}}}],
+        },
+    ]
+    snapshot = tools._close_pending_tool_calls(history, self_result="Обновление поставлено")
+    assert snapshot[-1] == {
+        "role": "tool",
+        "content": "Обновление поставлено",
+        "name": "node_manage",
+    }
+
+
+def test_close_pending_tool_calls_self_result_only_for_first_of_several():
+    history = [
+        {"role": "user", "content": "обнови ноды"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"function": {"name": "node_manage", "arguments": {"node": "arch-t480"}}},
+                {"function": {"name": "node_manage", "arguments": {"node": "jeeves"}}},
+            ],
+        },
+    ]
+    snapshot = tools._close_pending_tool_calls(history, self_result="готово для arch-t480")
+    tail = snapshot[-2:]
+    assert tail[0] == {"role": "tool", "content": "готово для arch-t480", "name": "node_manage"}
+    assert tail[1] == {"role": "tool", "content": "(результат не сохранён)", "name": "node_manage"}
+
+
+def test_close_pending_tool_calls_skips_already_recorded_pending_calls():
+    # Первый вызов раунда УЖЕ получил ответ — self_result относится ко
+    # ВТОРОМУ (текущему обрабатываемому), а не переписывает первый задним
+    # числом.
+    history = [
+        {"role": "user", "content": "обнови ноды"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"function": {"name": "node_manage", "arguments": {"node": "arch-t480"}}},
+                {"function": {"name": "node_manage", "arguments": {"node": "jeeves"}}},
+            ],
+        },
+        {"role": "tool", "content": "уже записанный результат arch-t480", "name": "node_manage"},
+    ]
+    snapshot = tools._close_pending_tool_calls(history, self_result="готово для jeeves")
+    assert snapshot[-1] == {"role": "tool", "content": "готово для jeeves", "name": "node_manage"}
+    assert snapshot[-2] == {
+        "role": "tool",
+        "content": "уже записанный результат arch-t480",
+        "name": "node_manage",
+    }
+
+
 # --- remind ---
 
 
@@ -1004,6 +1090,47 @@ async def test_node_manage_update_scheduled_auto_schedules_wake_and_warns(store)
         "node": "winpc",
         "event_type": tools.EVENT_UPDATE_FINISHED,
     }
+
+
+async def test_node_manage_update_auto_schedule_snapshot_has_real_result_not_placeholder(store):
+    # Живой баг 2026-08-05 (часть 2): node_manage зовёт remind ИЗНУТРИ
+    # своего же handler'а, пока его собственный tool_calls в ctx.history
+    # ещё висит без ответа (та же ситуация, что и в реальном run_chat_loop
+    # посреди раунда) — снимок задачи-продолжения обязан содержать
+    # настоящий текст результата, а не "(результат не сохранён)", иначе
+    # разбуженная модель не знает, что update реально удался.
+    history = [
+        {"role": "user", "content": "обнови ноды"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "node_manage",
+                        "arguments": {"action": "update", "node": "winpc"},
+                    }
+                }
+            ],
+        },
+    ]
+    link = _swarm_link(command_result={"scheduled": True, "target_version": "0.70.0"})
+    result = await tools.tool_node_manage(
+        _ctx(store, node_link=link, subscription=ADMIN, history=history),
+        {"action": "update", "node": "winpc"},
+    )
+
+    create_calls = [
+        args
+        for action, args in zip(link.commands, link.sent_args, strict=True)
+        if action[0] == tools.task_protocol.ACTION_CREATE
+    ]
+    assert len(create_calls) == 1
+    snapshot_messages = create_calls[0]["args"]["messages"]
+    own_tool_result = snapshot_messages[-2]  # перед директивой-продолжением
+    assert own_tool_result["role"] == "tool"
+    assert own_tool_result["content"] != "(результат не сохранён)"
+    # Тот же текст, что вернулся модели этим самым вызовом.
+    assert own_tool_result["content"] in result
 
 
 async def test_node_manage_update_scheduled_on_own_node_resolves_its_id(store):
