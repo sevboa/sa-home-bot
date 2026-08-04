@@ -147,10 +147,16 @@ class Gatekeeper:
 
     # --- выпуск -------------------------------------------------------------
 
-    async def issue(self, chat_id: int, user_id: int | None) -> tuple[str, datetime]:
-        """Выпустить код для чата-приглашающего. Возвращает код и срок."""
+    async def issue(
+        self, chat_id: int, user_id: int | None, ttl_s: float | None = None
+    ) -> tuple[str, datetime]:
+        """Выпустить код для чата-приглашающего. Возвращает код и срок.
+
+        ``ttl_s`` — разовое переопределение срока (см. bot/handlers/
+        invites.py::cmd_invite, "/invite <часы>"); ``None`` — обычный
+        дефолт из конфига (``[invites].ttl_s``)."""
         now = datetime.now(tz=UTC)
-        expires = now + timedelta(seconds=self._cfg.ttl_s)
+        expires = now + timedelta(seconds=ttl_s if ttl_s is not None else self._cfg.ttl_s)
         code = generate_code()
         await self._store.create_invite(code, chat_id, user_id, now, expires)
         log.info("Выпущен инвайт-код (chat=%s, годен до %s)", chat_id, expires.isoformat())

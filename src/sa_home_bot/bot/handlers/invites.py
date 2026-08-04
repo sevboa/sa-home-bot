@@ -15,7 +15,7 @@ from html import escape
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, Filter
+from aiogram.filters import Command, CommandObject, Filter
 from aiogram.types import CallbackQuery, Message
 
 from sa_home_bot.bot import ai_flow, commands, guests_view, invites
@@ -47,6 +47,13 @@ NO_INVITES_TEXT = (
     "Запустите бота с <code>--instance</code>, тогда гостевые подписки будут "
     "жить рядом с основным пакетом и реплицироваться по рою."
 )
+# Потолок для "/invite <часы>" — не техническое ограничение, а страховка от
+# опечатки (лишний ноль превратит одноразовый код в код, живущий месяцами).
+MAX_INVITE_HOURS = 720.0  # 30 суток
+BAD_INVITE_HOURS_TEXT = (
+    f"ошибка: часы должны быть числом больше 0 и не больше {MAX_INVITE_HOURS:g} "
+    "(пример: <code>/invite 3</code>)"
+)
 # Директива приветствия. Как и OPENING_PROMPT в bot/handlers/ai.py, в историю
 # диалога не пишется — только ответ на неё.
 #
@@ -73,38 +80,65 @@ class JustAdmitted(Filter):
         return admission is not None
 
 
-def _format_expiry(expires: datetime) -> str:
-    """Срок кода словами — «60 минут», а не «1 ч 0 мин».
-
-    Минуты, а не часы: код живёт час по умолчанию, и «60 минут» человек
-    оценивает без пересчёта. Округление вверх — чтобы только что выпущенный
-    код не оказался «доступен 59 минут» из-за долей секунды.
-    """
-    left = expires - datetime.now(tz=UTC)
-    minutes = max(-(-int(left.total_seconds()) // 60), 0)
-    tail = minutes % 100
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    tail = n % 100
     if 11 <= tail <= 14:
-        word = "минут"
-    elif tail % 10 == 1:
-        word = "минута"
-    elif tail % 10 in (2, 3, 4):
-        word = "минуты"
-    else:
-        word = "минут"
-    return f"{minutes} {word}"
+        return many
+    if tail % 10 == 1:
+        return one
+    if tail % 10 in (2, 3, 4):
+        return few
+    return many
+
+
+def _format_expiry(expires: datetime) -> str:
+    """Срок кода словами — минуты для короткого срока, иначе часы/сутки:
+    «/invite <часы>» позволяет выпустить код и на несколько суток, а
+    «43200 минут» никто не читает. Округление вверх — чтобы только что
+    выпущенный код не оказался короче заявленного из-за долей секунды."""
+    left = expires - datetime.now(tz=UTC)
+    total_minutes = max(-(-int(left.total_seconds()) // 60), 0)
+    if total_minutes < 90:
+        return f"{total_minutes} {_plural(total_minutes, 'минута', 'минуты', 'минут')}"
+    total_hours = -(-total_minutes // 60)
+    if total_hours < 48:
+        return f"{total_hours} {_plural(total_hours, 'час', 'часа', 'часов')}"
+    days = -(-total_hours // 24)
+    return f"{days} {_plural(days, 'день', 'дня', 'дней')}"
+
+
+def _parse_invite_hours(raw: str | None) -> float | None:
+    """``None`` — аргумент не задан (дефолт [invites].ttl_s, сейчас 1 час).
+    ``ValueError`` — не число или вне диапазона (0, MAX_INVITE_HOURS]."""
+    if raw is None or not raw.strip():
+        return None
+    hours = float(raw.strip().replace(",", "."))
+    if not (0 < hours <= MAX_INVITE_HOURS):
+        raise ValueError(f"часы вне диапазона: {hours}")
+    return hours
 
 
 @router.message(Command(commands.INVITE.name))
 async def cmd_invite(
     message: Message,
+    command: CommandObject,
     gate: Gatekeeper,
     bot_username: str,
 ) -> None:
     if not gate.enabled:
         await message.answer(NO_INVITES_TEXT)
         return
+    try:
+        hours = _parse_invite_hours(command.args)
+    except ValueError:
+        await message.answer(BAD_INVITE_HOURS_TEXT)
+        return
     sender = message.from_user
-    code, expires = await gate.issue(message.chat.id, sender.id if sender else None)
+    code, expires = await gate.issue(
+        message.chat.id,
+        sender.id if sender else None,
+        ttl_s=hours * 3600.0 if hours is not None else None,
+    )
     link = f"https://t.me/{bot_username}?start={code}"
     # Коротко: код, ссылка и одна пояснительная строка. Всё остальное, что тут
     # было раньше (что код одноразовый, что в группе нужен именно код, какие

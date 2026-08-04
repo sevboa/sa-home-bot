@@ -738,7 +738,11 @@ class InvitesConfig(BaseModel):
     """
 
     enabled: bool = True
-    ttl_s: float = Field(default=86400.0, gt=0)  # 24 часа (решение пользователя 2026-08-04)
+    # Дефолт на случай /invite без аргумента часов (решение пользователя
+    # 2026-08-04, второй заход: сама команда теперь принимает "/invite
+    # <часы>" — раньше, когда переопределить было нечем, дефолт держали
+    # длинным (24ч), с аргументом смысла в этом больше нет).
+    ttl_s: float = Field(default=3600.0, gt=0)
     grant_commands: list[str] = Field(
         default_factory=lambda: [
             "chat@llm",

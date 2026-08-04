@@ -135,6 +135,28 @@ async def test_issued_code_admits_once(store, tmp_path):
     assert await gate.try_admit(78, code) is None
 
 
+async def test_issue_ttl_override_replaces_config_default(store, tmp_path):
+    """/invite <часы> (bot/handlers/invites.py::cmd_invite) переопределяет
+    [invites].ttl_s разово, не трогая конфиг."""
+    from datetime import UTC, datetime
+
+    cfg = InvitesConfig(ttl_s=3600.0)
+    gate = _gate(store, tmp_path, cfg=cfg)
+    before = datetime.now(tz=UTC)
+    _code, expires = await gate.issue(chat_id=1, user_id=None, ttl_s=10 * 3600.0)
+    assert 9.9 * 3600 < (expires - before).total_seconds() < 10.1 * 3600
+
+
+async def test_issue_without_ttl_uses_config_default(store, tmp_path):
+    from datetime import UTC, datetime
+
+    cfg = InvitesConfig(ttl_s=1800.0)
+    gate = _gate(store, tmp_path, cfg=cfg)
+    before = datetime.now(tz=UTC)
+    _code, expires = await gate.issue(chat_id=1, user_id=None)
+    assert 1790 < (expires - before).total_seconds() < 1810
+
+
 async def test_admitted_guest_gets_configured_rights(store, tmp_path):
     cfg = InvitesConfig(grant_commands=["chat@llm"], grant_events=[])
     gate = _gate(store, tmp_path, cfg=cfg)
@@ -559,6 +581,107 @@ def test_expiry_is_spelled_in_minutes(seconds, expected):
 
     expires = datetime.now(tz=UTC) + timedelta(seconds=seconds)
     assert invite_handlers._format_expiry(expires) == expected
+
+
+@pytest.mark.parametrize(
+    ("hours", "expected"),
+    [(2, "2 часа"), (5, "5 часов"), (47, "47 часов")],
+)
+def test_expiry_is_spelled_in_hours_beyond_90_minutes(hours, expected):
+    from datetime import UTC, datetime, timedelta
+
+    from sa_home_bot.bot.handlers import invites as invite_handlers
+
+    expires = datetime.now(tz=UTC) + timedelta(hours=hours)
+    assert invite_handlers._format_expiry(expires) == expected
+
+
+@pytest.mark.parametrize(
+    ("hours", "expected"),
+    [(48, "2 дня"), (24 * 5, "5 дней"), (24 * 30, "30 дней")],
+)
+def test_expiry_is_spelled_in_days_beyond_48_hours(hours, expected):
+    from datetime import UTC, datetime, timedelta
+
+    from sa_home_bot.bot.handlers import invites as invite_handlers
+
+    expires = datetime.now(tz=UTC) + timedelta(hours=hours)
+    assert invite_handlers._format_expiry(expires) == expected
+
+
+# --- /invite <часы> --------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw", [None, "", "  "])
+def test_parse_invite_hours_defaults_to_none(raw):
+    from sa_home_bot.bot.handlers import invites as invite_handlers
+
+    assert invite_handlers._parse_invite_hours(raw) is None
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("3", 3.0), ("0.5", 0.5), ("2,5", 2.5)])
+def test_parse_invite_hours_accepts_numbers(raw, expected):
+    from sa_home_bot.bot.handlers import invites as invite_handlers
+
+    assert invite_handlers._parse_invite_hours(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "не число", "9999", "abc3"])
+def test_parse_invite_hours_rejects_invalid_or_out_of_range(raw):
+    from sa_home_bot.bot.handlers import invites as invite_handlers
+
+    with pytest.raises(ValueError):
+        invite_handlers._parse_invite_hours(raw)
+
+
+class _FakeMessage:
+    def __init__(self, chat_id: int = 1, user_id: int | None = 10) -> None:
+        self.chat = SimpleNamespace(id=chat_id)
+        self.from_user = SimpleNamespace(id=user_id) if user_id is not None else None
+        self.answers: list[str] = []
+
+    async def answer(self, text: str, *args, **kwargs) -> None:
+        self.answers.append(text)
+
+
+def _command(args: str | None) -> object:
+    from aiogram.filters import CommandObject
+
+    return CommandObject(command="invite", args=args)
+
+
+async def test_cmd_invite_without_args_uses_config_default(store, tmp_path):
+    from sa_home_bot.bot.handlers import invites as invite_handlers
+
+    gate = _gate(store, tmp_path, cfg=InvitesConfig(ttl_s=3600.0))
+    message = _FakeMessage()
+    await invite_handlers.cmd_invite(message, _command(None), gate, "sa_home_test_bot")
+
+    assert len(message.answers) == 1
+    assert "60 минут" in message.answers[0]
+
+
+async def test_cmd_invite_with_hours_overrides_default(store, tmp_path):
+    from sa_home_bot.bot.handlers import invites as invite_handlers
+
+    gate = _gate(store, tmp_path, cfg=InvitesConfig(ttl_s=3600.0))
+    message = _FakeMessage()
+    await invite_handlers.cmd_invite(message, _command("3"), gate, "sa_home_test_bot")
+
+    assert len(message.answers) == 1
+    assert "3 часа" in message.answers[0]
+
+
+async def test_cmd_invite_rejects_bad_hours_without_issuing_code(store, tmp_path):
+    from sa_home_bot.bot.handlers import invites as invite_handlers
+
+    gate = _gate(store, tmp_path, cfg=InvitesConfig(ttl_s=3600.0))
+    message = _FakeMessage()
+    await invite_handlers.cmd_invite(message, _command("не число"), gate, "sa_home_test_bot")
+
+    assert message.answers == [invite_handlers.BAD_INVITE_HOURS_TEXT]
+    # Код не выпущен — открытых приглашений от этого чата нет.
+    assert await gate.open_codes() == []
 
 
 def test_guest_list_shows_local_time():
