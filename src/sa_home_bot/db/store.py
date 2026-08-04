@@ -237,6 +237,23 @@ class Store:
                         ),
                     )
 
+            # Компонент, пропавший из среза (сменил component_id/индекс,
+            # отвалилось железо), иначе висел бы в /status «призраком»
+            # навсегда — apply_diff никогда не видит его снова. Чистим
+            # только внутри видов, которые реально участвовали в этом
+            # скане, — вид датчика, отключённый в конфиге, своей истории
+            # не лишаем (для него diff.states просто пуст).
+            scanned_kinds = {st.kind for st in diff.states}
+            current_ids = {st.component_id for st in diff.states}
+            if scanned_kinds:
+                kind_ph = ",".join("?" for _ in scanned_kinds)
+                id_ph = ",".join("?" for _ in current_ids)
+                await conn.execute(
+                    f"DELETE FROM health_states WHERE kind IN ({kind_ph}) "
+                    f"AND component_id NOT IN ({id_ph})",
+                    (*scanned_kinds, *current_ids),
+                )
+
     # --- pending уведомления ---
 
     async def pending_alerts(self) -> list[HealthState]:

@@ -108,6 +108,32 @@ async def test_new_alert_cycle_resets_flags(store):
     assert [p.component_id for p in await store.pending_alerts()] == ["cpu:pkg"]
 
 
+async def test_apply_diff_purges_stale_components_within_scanned_kind(store):
+    # GPU сменил индекс (gpu:0 -> gpu:1) в рамках одного скана: старый
+    # component_id не должен остаться "призраком" навсегда.
+    gpu0 = HealthState("gpu:0", "gpu", "Tesla", OK, 37.0, 0, None)
+    await store.apply_diff(HealthDiff([gpu0], []), BASE_TIME)
+    assert "gpu:0" in await store.get_known_states()
+
+    gpu1 = HealthState("gpu:1", "gpu", "Tesla", OK, 37.0, 0, None)
+    await store.apply_diff(HealthDiff([gpu1], []), BASE_TIME)
+    known = await store.get_known_states()
+    assert "gpu:0" not in known
+    assert "gpu:1" in known
+
+
+async def test_apply_diff_keeps_other_kinds_when_one_kind_not_scanned(store):
+    # Датчик диска отключён в конфиге в этом скане (в diff.states его нет
+    # вовсе) — его историю не должно задеть чистка чужого вида (cpu).
+    disk = HealthState("disk:nvme", "disk", "NVMe", OK, 40.0, 0, None)
+    await store.apply_diff(HealthDiff([disk], []), BASE_TIME)
+
+    await store.apply_diff(HealthDiff([_state(OK, 40.0)], []), BASE_TIME)
+    known = await store.get_known_states()
+    assert "disk:nvme" in known
+    assert "cpu:pkg" in known
+
+
 async def test_notification_message_id_roundtrip(store):
     await store.apply_diff(HealthDiff([_state(ALERTING, 95.0, BASE_TIME)], []), BASE_TIME)
     await store.record_notification("cpu:pkg", 555, NOTIF_ALERT, 42, BASE_TIME)
