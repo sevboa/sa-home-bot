@@ -129,37 +129,34 @@ async def _handle_task_prewake(notifier: Notifier, data: dict) -> None:
         await notifier.send_direct(chat_id, text)
 
 
-async def _maybe_fire_event_waiter(
-    store: Store, get_node_link, node_id: str, event_type: str
-) -> None:
-    """Разбудить remind(after_event=...), если он ждал ровно это (node,
-    event_type) — иначе тихо ничего не делать (обычное дело: у события нет
-    ни одного ожидающего)."""
-    task_id = await store.pop_event_waiter_for(node_id, event_type)
-    if task_id is None:
-        return
+async def _maybe_fire_event_waiter(get_node_link, node_id: str, event_type: str) -> None:
+    """Сверить событие роя с ожидающими задачами службы tasks — та сама
+    хранит ожидания и решает, срабатывать ли (см. tasks/protocol.py::
+    ACTION_MATCH_EVENT — решение пользователя 2026-08-05: раньше ожидание
+    жило в БД бота, и remind, вызванный ИЗ УЖЕ СРАБОТАВШЕГО хода — а это
+    самый частый случай при обновлении нескольких нод по цепочке — не мог
+    его поставить вовсе, там нет доступа к БД бота). Здесь остаётся только
+    один RPC, без знания про task_id."""
     node_link = get_node_link() if get_node_link is not None else None
     if node_link is None:
-        log.warning("event_waiter task_id=%s: связи с нодой нет, останется на due_at", task_id)
         return
     dst = Address(node=task_protocol.NODE_ID, service=task_protocol.SERVICE_NAME)
     try:
-        await node_link.command(task_protocol.ACTION_FIRE_NOW, {"task_id": task_id}, dst=dst)
+        await node_link.command(
+            task_protocol.ACTION_MATCH_EVENT, {"node": node_id, "event_type": event_type}, dst=dst
+        )
     except (ServiceUnavailableError, ProtoError) as exc:
-        log.warning("event_waiter task_id=%s: fire_now не удался (%s), ждём due_at", task_id, exc)
+        log.warning(
+            "match_event(%s, %s) не удался (%s), останется на due_at", node_id, event_type, exc
+        )
 
 
 async def _handle_task_result(
     notifier: Notifier, store: Store, data: dict, book: SubscriptionBook | None = None
 ) -> None:
-    task_id = data.get("task_id")
-    if isinstance(task_id, int):
-        # Задача уже сработала (по событию ИЛИ по due_at-таймауту) — ждать
-        # её больше незачем, а без этого сброса дублирующий fire_now по
-        # опоздавшему одноимённому событию был бы просто no-op (get_pending_
-        # task не находит уже отстрелянную), но строка в event_waiters
-        # осталась бы мёртвой навсегда.
-        await store.pop_event_waiter(task_id)
+    # Очистка event_waiters (если была) — забота самой службы tasks
+    # (tasks/service.py::_fire_one/_fire_now), не бота: у бота больше нет
+    # доступа к этой таблице (см. _maybe_fire_event_waiter выше).
     meta = data.get("meta") or {}
     if meta.get("kind") != task_protocol.TASK_KIND_LLM_CHAT:
         return
@@ -491,6 +488,6 @@ def build_node_event_handler(
         await store.record_event(name, event_node_id, text, datetime.now(tz=UTC))
         await broadcast_system(book, notifier, text)
         if name in (EVENT_UPDATE_FINISHED, EVENT_RESTART_APPLIED) and event_node_id:
-            await _maybe_fire_event_waiter(store, get_node_link, event_node_id, name)
+            await _maybe_fire_event_waiter(get_node_link, event_node_id, name)
 
     return handle

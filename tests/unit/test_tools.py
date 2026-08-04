@@ -643,7 +643,11 @@ async def test_remind_after_event_creates_task_without_when(store):
     assert "продолжи обновление роя" in args["args"]["messages"][-1]["content"]
 
 
-async def test_remind_after_event_registers_waiter_in_store(store):
+async def test_remind_after_event_puts_await_event_in_create_rpc(store):
+    # Решение пользователя 2026-08-05, живой инцидент: ожидание теперь
+    # ставит сама служба tasks (await_event в том же ACTION_CREATE), а не
+    # БД бота — remind, вызванный из уже сработавшего хода (там нет
+    # ctx.store), тоже должен уметь его поставить.
     link = _FakeNodeLink()
     await tools.tool_remind(
         _ctx(store, node_link=link),
@@ -652,8 +656,8 @@ async def test_remind_after_event_registers_waiter_in_store(store):
             "text": "продолжи",
         },
     )
-    # _FakeNodeLink.command всегда возвращает {"task_id": 1}.
-    assert await store.pop_event_waiter_for("arch-t480", "restart_applied") == 1
+    _action, args, _dst = link.calls[0]
+    assert args["await_event"] == {"node": "arch-t480", "event_type": "restart_applied"}
 
 
 async def test_remind_after_event_rejects_unknown_event_name(store):
@@ -672,12 +676,18 @@ async def test_remind_after_event_rejects_missing_node(store):
     assert result.startswith("ошибка")
 
 
-async def test_remind_after_event_without_store_is_an_error():
+async def test_remind_after_event_works_without_store():
+    # Живой инцидент 2026-08-05: тул remind, вызванный ИЗ УЖЕ СРАБОТАВШЕГО
+    # хода (служба tasks, ctx.store там нет вовсе), должен уметь поставить
+    # after_event ровно как из живого чата.
+    link = _FakeNodeLink()
     result = await tools.tool_remind(
-        _ctx(None, node_link=_FakeNodeLink()),
+        _ctx(None, node_link=link),
         {"after_event": {"node": "arch-t480", "event": "restart_applied"}, "text": "x"},
     )
-    assert "недоступно" in result
+    assert "жду событие" in result
+    _action, args, _dst = link.calls[0]
+    assert args["await_event"] == {"node": "arch-t480", "event_type": "restart_applied"}
 
 
 async def test_remind_omits_think_for_single_call_mode(store):
@@ -711,7 +721,7 @@ async def test_remind_when_still_works_without_after_event(store):
         _ctx(store, node_link=link), {"when": when, "text": "полить цветы"}
     )
     assert "задача поставлена" in result
-    assert await store.pop_event_waiter_for("arch-t480", "restart_applied") is None
+    assert "await_event" not in link.calls[0][1]
 
 
 # --- права: комплект тулов собирается под подписку собеседника ---
@@ -966,30 +976,49 @@ async def test_node_manage_update_reports_target_version(store):
     assert "restart_node" in result
 
 
-async def test_node_manage_update_scheduled_warns_against_immediate_restart(store):
+async def test_node_manage_update_scheduled_auto_schedules_wake_and_warns(store):
     # Живой баг 2026-08-04 (часть 2): update — фоновая операция, ответ
     # приходит мгновенно, а restart_node сразу после неё рестартовал бы
-    # ноду на СТАРОМ коде. Ответ должен явно это запрещать и подсказывать
-    # remind(after_event=update_finished), а не оставлять модель гадать.
+    # ноду на СТАРОМ коде. Живой инцидент 2026-08-05: модель СЛОВАМИ
+    # обещала "прослежу", но remind сама не звала — теперь node_manage
+    # ставит ожидание САМ, без участия модели.
     link = _swarm_link(command_result={"scheduled": True, "target_version": "0.70.0"})
     result = await tools.tool_node_manage(
         _ctx(store, node_link=link, subscription=ADMIN), {"action": "update", "node": "winpc"}
     )
     assert "НЕ вызывай restart_node прямо сейчас" in result
     assert "winpc" in result
-    assert "remind(after_event=" in result
-    assert tools.EVENT_UPDATE_FINISHED in result
+    assert "поставлено автоматически" in result
+    create_calls = [
+        (action, args) for action, args in zip(link.commands, link.sent_args, strict=True)
+        if action[0] == tools.task_protocol.ACTION_CREATE
+    ]
+    assert len(create_calls) == 1
+    _action, create_args = create_calls[0]
+    assert create_args["await_event"] == {
+        "node": "winpc",
+        "event_type": tools.EVENT_UPDATE_FINISHED,
+    }
 
 
 async def test_node_manage_update_scheduled_on_own_node_resolves_its_id(store):
-    # Без явного node (своя нода) — id для after_event берём из get_state(),
-    # не оставляем подсказку без адресата.
+    # Без явного node (своя нода) — id для авто-ожидания берём из
+    # get_state(), не оставляем задачу без адресата.
     link = _swarm_link(command_result={"scheduled": True, "target_version": "0.70.0"})
     result = await tools.tool_node_manage(
         _ctx(store, node_link=link, subscription=ADMIN), {"action": "update"}
     )
-    assert "alfred" in result  # _OWN_STATE["node"]
-    assert "remind(after_event=" in result
+    assert "поставлено автоматически" in result
+    create_calls = [
+        args
+        for action, args in zip(link.commands, link.sent_args, strict=True)
+        if action[0] == tools.task_protocol.ACTION_CREATE
+    ]
+    assert len(create_calls) == 1
+    assert create_calls[0]["await_event"] == {
+        "node": "alfred",  # _OWN_STATE["node"]
+        "event_type": tools.EVENT_UPDATE_FINISHED,
+    }
 
 
 async def test_node_manage_update_up_to_date(store):
@@ -1015,9 +1044,23 @@ async def test_node_manage_restart_remote_node_targets_dst(store):
         _ctx(store, node_link=link, subscription=ADMIN),
         {"action": "restart_node", "node": "winpc"},
     )
-    assert link.commands == [("restart_node", tools.Address(node="winpc", service="node"))]
+    assert link.commands[0] == ("restart_node", tools.Address(node="winpc", service="node"))
     assert "ненадолго пропаду" not in result
     assert "winpc" in result
+    # Живой инцидент 2026-08-05: restart_node на чужой ноде тоже сам
+    # ставит ожидание restart_applied — не полагаясь на то, что модель
+    # позовёт remind, чтобы честно подтвердить итог.
+    assert "поставлено автоматически" in result
+    create_calls = [
+        args
+        for action, args in zip(link.commands, link.sent_args, strict=True)
+        if action[0] == tools.task_protocol.ACTION_CREATE
+    ]
+    assert len(create_calls) == 1
+    assert create_calls[0]["await_event"] == {
+        "node": "winpc",
+        "event_type": tools.EVENT_RESTART_APPLIED,
+    }
 
 
 async def test_node_manage_unknown_node_lists_known_ones(store):

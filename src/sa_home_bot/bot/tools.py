@@ -762,8 +762,6 @@ async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
                 "ошибка: after_event.node обязателен, after_event.event — одно из "
                 + ", ".join(_AFTER_EVENT_TYPES)
             )
-        if ctx.store is None:
-            return "ошибка: ожидание по событию здесь недоступно"
 
     when_raw = args.get("when")
     if when_raw is None and after_event is None:
@@ -846,27 +844,29 @@ async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
         "trigger_message_id": ctx.trigger_message_id,
     }
     dst = Address(node=task_protocol.NODE_ID, service=task_protocol.SERVICE_NAME)
+    create_args: dict[str, Any] = {
+        "due_at": due_at_utc.isoformat(),
+        "dst_node": LLM_NODE,
+        "dst_service": LLM_SERVICE,
+        "action": task_protocol.ACTION_CHAT_LOOP,
+        "args": task_args,
+        "timeout_s": ctx.settings.llm.request_timeout_s,
+        "meta": meta,
+    }
+    if after_event is not None:
+        # Ожидание живёт в самой службе tasks (не в БД бота — решение
+        # пользователя 2026-08-05, живой баг: remind, вызванный ИЗ УЖЕ
+        # СРАБОТАВШЕГО хода (тот код исполняется внутри tasks), не имел
+        # доступа к ctx.store вовсе — именно там чаще всего и нужно
+        # ставить следующее ожидание при обновлении нескольких нод по
+        # цепочке). См. tasks/protocol.py::ACTION_MATCH_EVENT.
+        create_args["await_event"] = {"node": event_node, "event_type": event_type}
     try:
-        result = await ctx.node_link.command(
-            task_protocol.ACTION_CREATE,
-            {
-                "due_at": due_at_utc.isoformat(),
-                "dst_node": LLM_NODE,
-                "dst_service": LLM_SERVICE,
-                "action": task_protocol.ACTION_CHAT_LOOP,
-                "args": task_args,
-                "timeout_s": ctx.settings.llm.request_timeout_s,
-                "meta": meta,
-            },
-            dst=dst,
-        )
+        await ctx.node_link.command(task_protocol.ACTION_CREATE, create_args, dst=dst)
     except (ServiceUnavailableError, ProtoError) as exc:
         return f"внутренняя ошибка: не удалось поставить задачу ({exc})"
 
     if after_event is not None:
-        task_id = result.get("task_id")
-        if isinstance(task_id, int):
-            await ctx.store.add_event_waiter(task_id, event_node, event_type, datetime.now(tz=UTC))
         return (
             f"жду событие «{event_type}» от «{event_node}», страховочный срок — "
             f"{due_at.strftime('%H:%M')} (местное время)"
@@ -1309,6 +1309,21 @@ async def _node_manage_dst(ctx: ToolContext, wanted_node: str | None) -> Address
     return Address(node=wanted_node, service=NODE_SERVICE)
 
 
+async def _auto_await_event(ctx: ToolContext, node: str, event_type: str, text: str) -> str:
+    """Поставить remind(after_event=...) САМОМУ, а не просить модель сделать
+    это ещё одним вызовом тула. Решение пользователя 2026-08-05, живой
+    инцидент: модель словами пообещала «прослежу за процессом», но сам тул
+    remind не позвала — ждать её слов ненадёжно (та же природа, что у
+    известной проблемы с get_time), а раз событие для продолжения и так
+    известно детерминированно (сразу после update/restart_node), пусть его
+    ставит код, а не просьба в тексте ответа."""
+    remind_args = {"after_event": {"node": node, "event": event_type}, "text": text}
+    outcome = await tool_remind(ctx, remind_args)
+    if outcome.startswith(("ошибка", "внутренняя ошибка")):
+        return f" (не удалось поставить автоматическое ожидание для {node}: {outcome})"
+    return f" Ожидание подтверждения для {node} поставлено автоматически — сообщу, когда придёт."
+
+
 async def _node_check_all(ctx: ToolContext) -> str:
     """Сводка обновлений по всему рою — ядро в wake_core.check_updates_summary
     (общее с кнопкой «Проверить обновления» панели /swarm,
@@ -1352,6 +1367,16 @@ async def tool_node_manage(ctx: ToolContext, args: dict[str, Any]) -> str:
         text = f"Принято: {who} перезапустится через {result.get('delay_s', '?')} с."
         if wanted_node is None:
             text += " Это моя нода — я ненадолго пропаду из этого разговора и вернусь сам."
+        else:
+            # Авто-ожидание restart_applied — та же причина, что у update
+            # ниже: не полагаться на то, что модель сама позовёт remind.
+            text += await _auto_await_event(
+                ctx,
+                wanted_node,
+                EVENT_RESTART_APPLIED,
+                f"подтверди, что {wanted_node} поднялась на новой версии, и продолжи "
+                "задачу обновления роя (следующая нода, если она есть)",
+            )
         return text
     if action == NODE_ACTION_UPDATE:
         if result.get("up_to_date"):
@@ -1386,13 +1411,15 @@ async def tool_node_manage(ctx: ToolContext, args: dict[str, Any]) -> str:
             "restart_node прямо сейчас, иначе нода перезапустится на СТАРОМ коде."
         )
         if target_node:
-            note += (
-                f" Поставь remind(after_event={{\"node\": \"{target_node}\", \"event\": "
-                f'"{EVENT_UPDATE_FINISHED}"}}, text="вызови restart_node для '
-                f'{target_node} и продолжи задачу") — и закончи текущий ответ, не дожидаясь.'
+            note += await _auto_await_event(
+                ctx,
+                target_node,
+                EVENT_UPDATE_FINISHED,
+                f'вызови node_manage(action="restart_node", node="{target_node}") и '
+                "продолжи задачу обновления роя",
             )
         else:
-            note += " Дождись подтверждения, прежде чем звать restart_node."
+            note += " Не удалось определить имя ноды для авто-ожидания, дождись подтверждения сам."
         return note
     return json.dumps({"node": wanted_node or "своя", **result}, ensure_ascii=False)
 
@@ -1428,14 +1455,14 @@ _DECL_NODE_MANAGE: dict[str, Any] = {
             "перезапустить саму ноду (не отдельную службу) — после update "
             "это обязательно, иначе новый код не заработает, но звать его "
             "СРАЗУ после update — тоже ошибка: файлы могут быть ещё не "
-            "готовы, и нода перезапустится на старом коде. Между update и "
-            "restart_node этой ЖЕ ноды используй remind(after_event=...), "
-            "не проверяй/жди сам. Эта зависимость — ТОЛЬКО внутри одной "
-            "ноды: если обновляешь несколько нод, не жди, пока одна "
-            "полностью закончит цикл (update → restart_node → подтверждение) "
-            "прежде чем начать следующую — запускай update для всех сразу, "
-            "каждая продолжится по своему собственному remind(after_event=...) "
-            "независимо. Без node (для check_update/update/restart_node) "
+            "готовы, и нода перезапустится на старом коде. Про это НЕ НУЖНО "
+            "заботиться самому: и update, и restart_node САМИ ставят "
+            "ожидание подтверждения (об этом скажет текст ответа) — не "
+            "зови remind ради этого сам, не проверяй/жди руками, просто "
+            "сообщи пользователю, что запущено, и (если обновляешь "
+            "несколько нод) сразу переходи к update следующей — ждать, "
+            "пока одна полностью закончит цикл, не нужно. Без node (для "
+            "check_update/update/restart_node) "
             "действие идёт на "
             "ту ноду, где сейчас исполняюсь я сам — restart_node на ней "
             "ненадолго оборвёт этот же разговор."
@@ -2527,11 +2554,13 @@ _DECL_REMIND: dict[str, Any] = {
             "after_event. when — переведи то, что попросил пользователь "
             "('через 20 минут', 'завтра в 9 утра'), в точную дату-время сам, "
             "используя текущее время из контекста разговора. after_event — "
-            "для «обнови ноду и дальше» и похожего: НЕ сиди и не жди/не "
-            "переспрашивай состояние сам — поставь задачу проснуться, когда "
-            "нода реально подтвердит нужное, и сразу закончи текущий ответ "
-            "коротким «сделал, отпишусь как подтвердится» (страховочный срок "
-            "на случай, если событие не придёт, считается сам, без when)."
+            "проснуться по событию ноды, а не по времени: НЕ сиди и не "
+            "жди/не переспрашивай состояние сам, а поставь задачу "
+            "проснуться, когда нода реально подтвердит нужное (страховочный "
+            "срок на случай, если событие не придёт, считается сам, без "
+            "when). Для update/restart_node ноды (node_manage) это НЕ "
+            "нужно — они уже сами ставят такое ожидание, вызывай remind "
+            "только для СВОИХ похожих случаев ожидания события."
         ),
         "parameters": {
             "type": "object",

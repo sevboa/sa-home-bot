@@ -55,26 +55,12 @@ class FakeStore:
     def __init__(self) -> None:
         self.recorded_turns: list[tuple] = []
         self.recorded_events: list[tuple] = []
-        self.waiters: dict[int, tuple[str, str]] = {}
 
     async def record_ai_turn(self, *args, **kwargs):
         self.recorded_turns.append((args, kwargs))
 
     async def record_event(self, event_type, node, text, at):
         self.recorded_events.append((event_type, node, text, at))
-
-    async def add_event_waiter(self, task_id, node, event_type, created_at):
-        self.waiters[task_id] = (node, event_type)
-
-    async def pop_event_waiter_for(self, node, event_type):
-        for task_id, (n, et) in list(self.waiters.items()):
-            if n == node and et == event_type:
-                del self.waiters[task_id]
-                return task_id
-        return None
-
-    async def pop_event_waiter(self, task_id):
-        self.waiters.pop(task_id, None)
 
 
 def _book() -> SubscriptionBook:
@@ -206,9 +192,12 @@ async def test_handler_broadcasts_on_update_finished_failure():
     assert notifier.sent == [(1, render_update_finished("alfred", False, None, "boom"))]
 
 
-class FakeFireNowLink:
+class FakeMatchEventLink:
     """Двойник ServiceLink(node) для _maybe_fire_event_waiter — фиксирует
-    вызовы fire_now без реального протокола."""
+    вызовы match_event без реального протокола. Матчинг (есть ли ожидающая
+    задача) теперь решает сама служба tasks (tasks/service.py::
+    _match_event) — бот только шлёт (node, event_type), не зная про
+    task_id вовсе (решение пользователя 2026-08-05, живой инцидент)."""
 
     def __init__(self, *, raises: Exception | None = None) -> None:
         self.calls: list[tuple[str, dict, object]] = []
@@ -218,7 +207,7 @@ class FakeFireNowLink:
         self.calls.append((action, args or {}, dst))
         if self._raises is not None:
             raise self._raises
-        return {"fired": True}
+        return {"matched": True, "task_id": 42}
 
 
 async def test_handler_broadcasts_on_restart_applied():
@@ -236,10 +225,9 @@ async def test_handler_broadcasts_on_restart_applied():
     assert store.recorded_events == [(EVENT_RESTART_APPLIED, "arch-t480", text, ANY)]
 
 
-async def test_handler_fires_matching_waiter_on_restart_applied():
+async def test_handler_calls_match_event_on_restart_applied():
     book, notifier, store = _book(), FakeNotifier(), FakeStore()
-    store.waiters[42] = ("arch-t480", EVENT_RESTART_APPLIED)
-    link = FakeFireNowLink()
+    link = FakeMatchEventLink()
     handler = build_node_event_handler(book, notifier, store, get_node_link=lambda: link)
     env = make_event(
         EVENT_RESTART_APPLIED,
@@ -250,51 +238,41 @@ async def test_handler_fires_matching_waiter_on_restart_applied():
 
     assert link.calls == [
         (
-            task_protocol.ACTION_FIRE_NOW,
-            {"task_id": 42},
+            task_protocol.ACTION_MATCH_EVENT,
+            {"node": "arch-t480", "event_type": EVENT_RESTART_APPLIED},
             Address(node=task_protocol.NODE_ID, service=task_protocol.SERVICE_NAME),
         )
     ]
-    # Снята — второе такое же событие уже не найдёт её снова.
-    assert store.waiters == {}
 
 
-async def test_handler_no_matching_waiter_does_not_call_fire_now():
+async def test_handler_calls_match_event_on_update_finished():
+    from sa_home_bot.bot.node_events import EVENT_UPDATE_FINISHED, render_update_finished
+
     book, notifier, store = _book(), FakeNotifier(), FakeStore()
-    link = FakeFireNowLink()
+    link = FakeMatchEventLink()
     handler = build_node_event_handler(book, notifier, store, get_node_link=lambda: link)
     env = make_event(
-        EVENT_RESTART_APPLIED,
-        {"from": "0.72.0", "to": "0.73.0"},
-        src=Address(node="arch-t480", service="node"),
+        "update_finished",
+        {"ok": True, "version": "0.75.3"},
+        src=Address(node="jeeves", service="node"),
     )
     await handler(env)
 
-    assert link.calls == []
+    assert notifier.sent == [(1, render_update_finished("jeeves", True, "0.75.3", None))]
+    assert link.calls == [
+        (
+            task_protocol.ACTION_MATCH_EVENT,
+            {"node": "jeeves", "event_type": EVENT_UPDATE_FINISHED},
+            Address(node=task_protocol.NODE_ID, service=task_protocol.SERVICE_NAME),
+        )
+    ]
 
 
-async def test_handler_waiter_on_wrong_node_is_not_fired():
-    book, notifier, store = _book(), FakeNotifier(), FakeStore()
-    store.waiters[42] = ("mycraft", EVENT_RESTART_APPLIED)  # другая нода
-    link = FakeFireNowLink()
-    handler = build_node_event_handler(book, notifier, store, get_node_link=lambda: link)
-    env = make_event(
-        EVENT_RESTART_APPLIED,
-        {"from": "0.72.0", "to": "0.73.0"},
-        src=Address(node="arch-t480", service="node"),
-    )
-    await handler(env)
-
-    assert link.calls == []
-    assert store.waiters == {42: ("mycraft", EVENT_RESTART_APPLIED)}
-
-
-async def test_handler_fire_now_failure_is_swallowed_not_raised():
+async def test_handler_match_event_failure_is_swallowed_not_raised():
     from sa_home_bot.bot.service_link import ServiceUnavailableError
 
     book, notifier, store = _book(), FakeNotifier(), FakeStore()
-    store.waiters[42] = ("arch-t480", EVENT_RESTART_APPLIED)
-    link = FakeFireNowLink(raises=ServiceUnavailableError("нет связи"))
+    link = FakeMatchEventLink(raises=ServiceUnavailableError("нет связи"))
     handler = build_node_event_handler(book, notifier, store, get_node_link=lambda: link)
     env = make_event(
         EVENT_RESTART_APPLIED,
@@ -308,7 +286,6 @@ async def test_handler_fire_now_failure_is_swallowed_not_raised():
 
 async def test_handler_without_get_node_link_does_not_crash():
     book, notifier, store = _book(), FakeNotifier(), FakeStore()
-    store.waiters[42] = ("arch-t480", EVENT_RESTART_APPLIED)
     handler = build_node_event_handler(book, notifier, store)  # без get_node_link
     env = make_event(
         EVENT_RESTART_APPLIED,
@@ -503,22 +480,6 @@ async def test_task_result_failure_sends_albert_task_missed_as_reply():
 
     assert notifier.sent_full == [(7, ALBERT_TASK_MISSED, 501)]
     assert store.recorded_turns == []
-
-
-async def test_task_result_pops_leftover_event_waiter():
-    """Задача сработала (по due_at-таймауту, событие так и не пришло) —
-    строка ожидания должна уйти, иначе осталась бы мёртвой навсегда."""
-    book, notifier, store = _book(), FakeNotifier(), FakeStore()
-    store.waiters[1] = ("arch-t480", EVENT_RESTART_APPLIED)
-    handler = build_node_event_handler(book, notifier, store)
-    env = make_event(
-        task_protocol.EVENT_TASK_RESULT,
-        {"task_id": 1, "meta": _LLM_CHAT_META, "ok": False, "error": "не подтвердилось"},
-        src=Address(node="alfred", service="tasks"),
-    )
-    await handler(env)
-
-    assert store.waiters == {}
 
 
 async def test_task_result_ignores_non_llm_chat_kind():

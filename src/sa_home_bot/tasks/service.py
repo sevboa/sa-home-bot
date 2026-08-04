@@ -173,6 +173,12 @@ class TasksService:
                             required=False,
                             title="Непрозрачные метаданные заказчика",
                         ),
+                        ActionParam(
+                            name="await_event",
+                            type="string",
+                            required=False,
+                            title="Ждать событие {node, event_type} раньше due_at",
+                        ),
                     ),
                 ),
                 ActionSpec(
@@ -180,6 +186,16 @@ class TasksService:
                     title="Разбудить задачу немедленно",
                     params=(
                         ActionParam(name="task_id", type="int", required=True, title="Id задачи"),
+                    ),
+                ),
+                ActionSpec(
+                    id=protocol.ACTION_MATCH_EVENT,
+                    title="Сверить событие роя с ожидающими задачами",
+                    params=(
+                        ActionParam(name="node", type="string", required=True, title="Нода"),
+                        ActionParam(
+                            name="event_type", type="string", required=True, title="Тип события"
+                        ),
                     ),
                 ),
             ),
@@ -193,6 +209,8 @@ class TasksService:
             return await self._create(args)
         if action == protocol.ACTION_FIRE_NOW:
             return await self._fire_now(args)
+        if action == protocol.ACTION_MATCH_EVENT:
+            return await self._match_event(args)
         raise ValueError(f"необъявленное действие: {action}")
 
     async def _create(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -220,6 +238,19 @@ class TasksService:
         timeout_s = args.get("timeout_s")
         if timeout_s is not None and not isinstance(timeout_s, int | float):
             raise ProtoError(ERR_BAD_REQUEST, "timeout_s должен быть числом")
+        await_event = args.get("await_event")
+        if await_event is not None:
+            if (
+                not isinstance(await_event, dict)
+                or not isinstance(await_event.get("node"), str)
+                or not await_event.get("node")
+                or not isinstance(await_event.get("event_type"), str)
+                or not await_event.get("event_type")
+            ):
+                raise ProtoError(
+                    ERR_BAD_REQUEST,
+                    "await_event должен быть {node: str, event_type: str}",
+                )
 
         now = datetime.now(tz=UTC)
         task_id = await self._store.create_task(
@@ -235,6 +266,10 @@ class TasksService:
             due_at.astimezone(UTC),
             now,
         )
+        if await_event is not None:
+            await self._store.add_event_waiter(
+                task_id, await_event["node"], await_event["event_type"], now
+            )
         return {"task_id": task_id}
 
     async def _fire_now(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -252,8 +287,28 @@ class TasksService:
             return {"fired": False, "reason": "нет такой задачи или уже сработала"}
         now = datetime.now(tz=UTC)
         await self._store.mark_task_fired(row["id"], now)
+        # Waiter (если был) больше не актуален — задача сработала именно по
+        # нему; чистим и на случай fire_now без match_event (напр. ручной
+        # вызов), чтобы строка не осталась мёртвой навсегда.
+        await self._store.pop_event_waiter(row["id"])
         asyncio.create_task(self._fire_one_safe(row), name=f"task-fire-now-{row['id']}")
         return {"fired": True}
+
+    async def _match_event(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Событие роя пришло (node, event_type) — разбудить, если кто-то
+        его ждал (remind after_event). Пара lookup+fire_now в одном RPC:
+        вызывающему (bot/node_events.py) не нужно знать про task_id вовсе."""
+        node = args.get("node")
+        event_type = args.get("event_type")
+        node_ok = isinstance(node, str) and bool(node)
+        event_ok = isinstance(event_type, str) and bool(event_type)
+        if not node_ok or not event_ok:
+            raise ProtoError(ERR_BAD_REQUEST, "node и event_type обязательны")
+        task_id = await self._store.pop_event_waiter_for(node, event_type)
+        if task_id is None:
+            return {"matched": False}
+        fired = await self._fire_now({"task_id": task_id})
+        return {"matched": bool(fired.get("fired")), "task_id": task_id}
 
     # --- прогрев заранее ---
 
@@ -344,6 +399,10 @@ class TasksService:
             # модели, до row["timeout_s"]) и не должно попасть под
             # повторный тик опроса, пока предыдущая попытка ещё идёт.
             await self._store.mark_task_fired(row["id"], now)
+            # Сработала по due_at-таймауту, не по событию (иначе match_event
+            # уже забрал бы waiter раньше) — ждать больше нечего, снимаем,
+            # чтобы строка не осталась мёртвой навсегда.
+            await self._store.pop_event_waiter(row["id"])
             asyncio.create_task(self._fire_one_safe(row), name=f"task-fire-{row['id']}")
 
     async def _fire_one_safe(self, row: dict) -> None:

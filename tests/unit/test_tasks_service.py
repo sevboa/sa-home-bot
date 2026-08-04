@@ -439,3 +439,171 @@ async def test_fire_now_rejects_non_int_task_id(store):
         assert "task_id" in exc.message
     else:
         raise AssertionError("ожидался ProtoError")
+
+
+# --- await_event/match_event: ждать событие роя, не будильник (remind after_event) ---
+
+
+async def test_create_with_await_event_registers_waiter(store):
+    svc = _service(store, FakeNodeLink(OWN_STATE), FakeEmitter())
+    due = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat()
+    result = await svc.run_command(
+        protocol.ACTION_CREATE,
+        {
+            "due_at": due,
+            "dst_node": "winpc",
+            "dst_service": "llm",
+            "action": protocol.ACTION_CHAT_LOOP,
+            "await_event": {"node": "arch-t480", "event_type": "restart_applied"},
+        },
+    )
+    task_id = result["task_id"]
+    assert await store.pop_event_waiter_for("arch-t480", "restart_applied") == task_id
+
+
+async def test_create_without_await_event_registers_no_waiter(store):
+    svc = _service(store, FakeNodeLink(OWN_STATE), FakeEmitter())
+    due = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat()
+    await svc.run_command(
+        protocol.ACTION_CREATE,
+        {
+            "due_at": due,
+            "dst_node": "winpc",
+            "dst_service": "llm",
+            "action": protocol.ACTION_CHAT_LOOP,
+        },
+    )
+    assert await store.pop_event_waiter_for("arch-t480", "restart_applied") is None
+
+
+async def test_create_rejects_malformed_await_event(store):
+    svc = _service(store, FakeNodeLink(OWN_STATE), FakeEmitter())
+    due = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat()
+    try:
+        await svc.run_command(
+            protocol.ACTION_CREATE,
+            {
+                "due_at": due,
+                "dst_node": "winpc",
+                "dst_service": "llm",
+                "action": protocol.ACTION_CHAT_LOOP,
+                "await_event": {"node": "arch-t480"},  # без event_type
+            },
+        )
+    except ProtoError as exc:
+        assert "await_event" in exc.message
+    else:
+        raise AssertionError("ожидался ProtoError")
+
+
+async def test_match_event_fires_matching_waiter(store, monkeypatch):
+    async def fake_chat_loop(*args, **kwargs):
+        return "продолжаю по плану"
+
+    monkeypatch.setattr(tasks_service, "run_chat_loop", fake_chat_loop)
+    link = FakeNodeLink(OWN_STATE, routes={"winpc:llm": {"asleep": False}})
+    emitter = FakeEmitter()
+    svc = _service(store, link, emitter)
+
+    due = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat()
+    created = await svc.run_command(
+        protocol.ACTION_CREATE,
+        {
+            "due_at": due,
+            "dst_node": "winpc",
+            "dst_service": "llm",
+            "action": protocol.ACTION_CHAT_LOOP,
+            "args": {"messages": [{"role": "user", "content": "продолжай"}]},
+            "meta": META,
+            "await_event": {"node": "arch-t480", "event_type": "update_finished"},
+        },
+    )
+
+    result = await svc.run_command(
+        protocol.ACTION_MATCH_EVENT, {"node": "arch-t480", "event_type": "update_finished"}
+    )
+    assert result == {"matched": True, "task_id": created["task_id"]}
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert emitter.results() == [
+        {
+            "task_id": created["task_id"],
+            "meta": META,
+            "ok": True,
+            "result": {"response": "продолжаю по плану"},
+        }
+    ]
+    # Снята — второй такой же событие уже не найдёт задачу снова.
+    second = await svc.run_command(
+        protocol.ACTION_MATCH_EVENT, {"node": "arch-t480", "event_type": "update_finished"}
+    )
+    assert second == {"matched": False}
+
+
+async def test_match_event_no_waiter_is_a_noop(store):
+    svc = _service(store, FakeNodeLink(OWN_STATE), FakeEmitter())
+    result = await svc.run_command(
+        protocol.ACTION_MATCH_EVENT, {"node": "arch-t480", "event_type": "update_finished"}
+    )
+    assert result == {"matched": False}
+
+
+async def test_match_event_wrong_node_does_not_fire(store):
+    svc = _service(store, FakeNodeLink(OWN_STATE), FakeEmitter())
+    due = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat()
+    await svc.run_command(
+        protocol.ACTION_CREATE,
+        {
+            "due_at": due,
+            "dst_node": "winpc",
+            "dst_service": "llm",
+            "action": protocol.ACTION_CHAT_LOOP,
+            "await_event": {"node": "arch-t480", "event_type": "update_finished"},
+        },
+    )
+    result = await svc.run_command(
+        protocol.ACTION_MATCH_EVENT, {"node": "mycraft", "event_type": "update_finished"}
+    )
+    assert result == {"matched": False}
+    # Ожидание arch-t480 всё ещё на месте.
+    assert await store.pop_event_waiter_for("arch-t480", "update_finished") is not None
+
+
+async def test_match_event_rejects_missing_args(store):
+    svc = _service(store, FakeNodeLink(OWN_STATE), FakeEmitter())
+    try:
+        await svc.run_command(protocol.ACTION_MATCH_EVENT, {"node": "arch-t480"})
+    except ProtoError as exc:
+        assert "node" in exc.message or "event_type" in exc.message
+    else:
+        raise AssertionError("ожидался ProtoError")
+
+
+async def test_fire_due_cleans_up_leftover_waiter_on_timeout(store, monkeypatch):
+    # Событие так и не пришло — сработала по due_at. Строка ожидания не
+    # должна остаться мёртвой навсегда.
+    async def fake_chat_loop(*args, **kwargs):
+        return "не подтвердилось, но всё равно продолжаю"
+
+    monkeypatch.setattr(tasks_service, "run_chat_loop", fake_chat_loop)
+    link = FakeNodeLink(OWN_STATE, routes={"winpc:llm": {"asleep": False}})
+    svc = _service(store, link, FakeEmitter())
+
+    now = datetime.now(tz=UTC)
+    task_id = await store.create_task(
+        "winpc",
+        "llm",
+        protocol.ACTION_CHAT_LOOP,
+        {"messages": [{"role": "user", "content": "x"}]},
+        60.0,
+        META,
+        now - timedelta(seconds=1),  # уже просрочено
+        now,
+    )
+    await store.add_event_waiter(task_id, "arch-t480", "update_finished", now)
+
+    await svc._fire_due()
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert await store.pop_event_waiter_for("arch-t480", "update_finished") is None
