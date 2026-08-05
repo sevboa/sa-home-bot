@@ -2707,13 +2707,33 @@ _NOTIFY_PERSONAS: tuple[dict[str, str], ...] = (
 _NOTIFY_PERSONAS_BY_TITLE = {p["title"]: p for p in _NOTIFY_PERSONAS}
 
 
+def _resolve_persona(raw: str) -> dict[str, str] | None:
+    """Найти персонажа по значению persona из notify_guest.
+
+    Терпимо к лишнему вокруг названия: модель иногда копирует persona не
+    отдельным словом, а вместе с эмодзи или другим текстом из ответа
+    notify_persona (живой баг 2026-08-05 — "Граф 🦇" вместо "Граф"), точное
+    совпадение по словарю такое не находило.
+    """
+    normalized = raw.strip()
+    if normalized in _NOTIFY_PERSONAS_BY_TITLE:
+        return _NOTIFY_PERSONAS_BY_TITLE[normalized]
+    for persona in _NOTIFY_PERSONAS:
+        if persona["title"].casefold() in normalized.casefold():
+            return persona
+    return None
+
+
 async def tool_notify_persona(ctx: ToolContext, args: dict[str, Any]) -> str:
     persona = random.choice(_NOTIFY_PERSONAS)
     return (
-        f"Персонаж: {persona['title']} {persona['emoji']}\n"
+        f"Персонаж: {persona['title']}\n"
+        f"Эмодзи персонажа (это для контекста, НЕ значение persona): "
+        f"{persona['emoji']}\n"
         f"Стиль: {persona['style_prompt']}\n"
         f"Напиши текст уведомления в этом стиле и вызови notify_guest с "
-        f"persona=\"{persona['title']}\"."
+        f'persona="{persona["title"]}" — ровно этим словом, без эмодзи и без '
+        f"кавычек внутри значения."
     )
 
 
@@ -2738,8 +2758,7 @@ _DECL_NOTIFY_PERSONA: dict[str, Any] = {
 }
 
 
-def render_notify(persona_title: str, text: str) -> str:
-    persona = _NOTIFY_PERSONAS_BY_TITLE[persona_title]
+def render_notify(persona: dict[str, str], text: str) -> str:
     body = escape(text.strip())
     title = escape(persona["title"])
     return f"{persona['emoji']} <b>{title} (официальное уведомление):</b>\n\n{body}"
@@ -2752,16 +2771,16 @@ async def tool_notify_guest(ctx: ToolContext, args: dict[str, Any]) -> str:
         return "недоступно: непонятно, откуда уведомлять"
     who = str(args.get("recipient") or "").strip()
     text = str(args.get("text") or "").strip()
-    persona_title = str(args.get("persona") or "").strip()
+    persona = _resolve_persona(str(args.get("persona") or ""))
     if not who:
         return "ошибка: не сказано, кому передать (recipient)"
     if not text:
         return "ошибка: не сказано, что передать (text)"
-    if persona_title not in _NOTIFY_PERSONAS_BY_TITLE:
+    if persona is None:
         return "ошибка: сначала вызови notify_persona и передай сюда его persona как есть"
 
     def render(_target: recipients.Recipient) -> str:
-        return render_notify(persona_title, text)
+        return render_notify(persona, text)
 
     return await _deliver_personal_message(ctx, who, text, render)
 

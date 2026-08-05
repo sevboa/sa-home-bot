@@ -456,6 +456,21 @@ async def test_notify_guest_uses_exactly_the_given_persona():
         assert persona["emoji"] in text
 
 
+async def test_notify_guest_tolerates_emoji_stuck_to_persona_name():
+    # Живой баг 2026-08-05: модель скопировала persona вместе с эмодзи из
+    # ответа notify_persona ("Админ 🤓" вместо "Админ") — точное совпадение
+    # по словарю такое не находило и отказывало, хотя notify_persona был
+    # вызван как положено.
+    notifier = FakeNotifier()
+    ctx = _ctx(chat_id=1, book=_book(), notifier=notifier, settings=Settings())
+    result = await ai_tools.tool_notify_guest(
+        ctx, {"recipient": "Андрей", "persona": "Админ 🤓", "text": "х"}
+    )
+    assert "передано" in result
+    chat_id, text = notifier.sent[0]
+    assert "Админ" in text
+
+
 async def test_notify_guest_refuses_unknown_persona():
     notifier = FakeNotifier()
     ctx = _ctx(chat_id=1, book=_book(), notifier=notifier, settings=Settings())
