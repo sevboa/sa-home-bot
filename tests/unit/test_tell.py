@@ -83,6 +83,13 @@ def _ctx(**over):
         author="Алексей (@sevboa)",
     )
     defaults.update(over)
+    # В реальном потоке (bot/ai_flow.py) ctx.subscription — это подписка
+    # САМОГО звонящего чата, не получателя; здесь по умолчанию берём её из
+    # book по chat_id, как и наяву, если тест не передал subscription сам.
+    defaults.setdefault(
+        "subscription",
+        defaults["book"].for_chat(defaults["chat_id"]) if defaults.get("book") else None,
+    )
     return ai_tools.ToolContext(**defaults)
 
 
@@ -245,3 +252,115 @@ def test_rendered_message_escapes_html():
     rendered = ai_tools.render_tell("<b>жирный</b>", "Алексей & Co")
     assert "&lt;b&gt;" in rendered
     assert "Алексей &amp; Co" in rendered
+
+
+# --- этап 36: владелец всегда доступен, «семья» — своя группа -----------
+
+OWNER_CHAT = 1
+PLAIN_GUEST_CHAT = 600  # tell@llm — может писать только владельцу
+FAMILY_A_CHAT = 601  # tell@llm + family
+FAMILY_B_CHAT = 602  # tell@llm + family
+PRIVILEGED_GUEST_CHAT = 603  # tell@llm + tell_guests@llm
+
+
+def _permission_book() -> SubscriptionBook:
+    return SubscriptionBook.from_config(
+        [SubscriptionConfig(name="owner", chat_id=OWNER_CHAT, allowed_commands=["*"])],
+        [
+            GuestSubscriptionConfig(
+                name="Гость Плоский",
+                chat_id=PLAIN_GUEST_CHAT,
+                allowed_commands=["chat@llm", "tell@llm"],
+                invited_user="Гость Плоский",
+            ),
+            GuestSubscriptionConfig(
+                name="Семья А",
+                chat_id=FAMILY_A_CHAT,
+                allowed_commands=["chat@llm", "tell@llm"],
+                invited_user="Семья А",
+                family=True,
+            ),
+            GuestSubscriptionConfig(
+                name="Семья Б",
+                chat_id=FAMILY_B_CHAT,
+                allowed_commands=["chat@llm", "tell@llm"],
+                invited_user="Семья Б",
+                family=True,
+            ),
+            GuestSubscriptionConfig(
+                name="Привилегированный",
+                chat_id=PRIVILEGED_GUEST_CHAT,
+                allowed_commands=["chat@llm", "tell@llm", "tell_guests@llm"],
+                invited_user="Привилегированный",
+            ),
+        ],
+    )
+
+
+async def test_tell_guest_always_reaches_owner_without_tell_guests_right():
+    book = _permission_book()
+    notifier = FakeNotifier()
+    ctx = _ctx(chat_id=PLAIN_GUEST_CHAT, book=book, notifier=notifier, settings=Settings())
+    result = await ai_tools.tool_tell(ctx, {"recipient": "owner", "text": "привет"})
+    assert "передано" in result
+    assert notifier.sent[0][0] == OWNER_CHAT
+
+
+async def test_tell_guest_cannot_reach_another_guest_without_right_or_family():
+    book = _permission_book()
+    notifier = FakeNotifier()
+    ctx = _ctx(chat_id=PLAIN_GUEST_CHAT, book=book, notifier=notifier, settings=Settings())
+    result = await ai_tools.tool_tell(
+        ctx, {"recipient": "Семья А", "text": "привет"}
+    )
+    assert "не умею" in result
+    assert notifier.sent == []
+
+
+async def test_tell_family_members_reach_each_other_without_tell_guests_right():
+    book = _permission_book()
+    notifier = FakeNotifier()
+    ctx = _ctx(chat_id=FAMILY_A_CHAT, book=book, notifier=notifier, settings=Settings())
+    result = await ai_tools.tool_tell(
+        ctx, {"recipient": "Семья Б", "text": "привет"}
+    )
+    assert "передано" in result
+    assert notifier.sent[0][0] == FAMILY_B_CHAT
+
+
+async def test_tell_family_flag_alone_does_not_open_non_family_guest():
+    """family — обход права tell_guests@llm, а не альтернатива ему: гость
+    без family по-прежнему недоступен, даже когда пишущий сам — семья."""
+    book = _permission_book()
+    notifier = FakeNotifier()
+    ctx = _ctx(chat_id=FAMILY_A_CHAT, book=book, notifier=notifier, settings=Settings())
+    result = await ai_tools.tool_tell(
+        ctx, {"recipient": "Гость Плоский", "text": "привет"}
+    )
+    assert "не умею" in result
+    assert notifier.sent == []
+
+
+async def test_tell_guests_right_opens_arbitrary_guest():
+    book = _permission_book()
+    notifier = FakeNotifier()
+    ctx = _ctx(
+        chat_id=PRIVILEGED_GUEST_CHAT, book=book, notifier=notifier, settings=Settings()
+    )
+    result = await ai_tools.tool_tell(
+        ctx, {"recipient": "Гость Плоский", "text": "привет"}
+    )
+    assert "передано" in result
+    assert notifier.sent[0][0] == PLAIN_GUEST_CHAT
+
+
+async def test_tell_guests_right_does_not_bypass_owner_check_twice():
+    """tell_guests@llm тоже открывает владельца — просто это уже разрешено
+    и без него (is_owner), проверяем, что права не конфликтуют."""
+    book = _permission_book()
+    notifier = FakeNotifier()
+    ctx = _ctx(
+        chat_id=PRIVILEGED_GUEST_CHAT, book=book, notifier=notifier, settings=Settings()
+    )
+    result = await ai_tools.tool_tell(ctx, {"recipient": "owner", "text": "привет"})
+    assert "передано" in result

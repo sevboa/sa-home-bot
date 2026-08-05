@@ -64,7 +64,7 @@ from sa_home_bot.memory import protocol as memory_protocol
 from sa_home_bot.net import protocol as net_protocol
 from sa_home_bot.node.kind import traits_for
 from sa_home_bot.proto.messages import Address, ProtoError
-from sa_home_bot.subscriptions.models import Subscription
+from sa_home_bot.subscriptions.models import WILDCARD, Subscription
 from sa_home_bot.tasks import protocol as task_protocol
 from sa_home_bot.vpn import protocol as vpn_protocol
 
@@ -2445,10 +2445,18 @@ _DECL_WEB_SEARCH: dict[str, Any] = {
 
 # Право — «действие@служба» на ту же службу llm, что и сам разговор
 # (`chat@llm`): передача сообщений — это умение Альфреда, а не отдельная
-# команда бота. Гостям по умолчанию НЕ выдаётся (см. [invites].grant_commands):
-# впустили поговорить — не значит разрешили писать другим людям от чужого
-# имени.
+# команда бота. TELL_RIGHT даёт только «дозваться до владельца» — владелец
+# (allows_command("*")) всегда получает сообщение от любого, у кого есть тул.
+# Писать ДРУГИМ гостям без TELL_GUESTS_RIGHT нельзя, даже имея TELL_RIGHT —
+# решение 2026-08-04 (этап 36 IMPLEMENTATION_PLAN.md), после живого бага
+# этапа 33 п. 7 (секрет VPN ушёл не тому получателю). Члены «семьи»
+# (Subscription.family) — исключение, им TELL_GUESTS_RIGHT не нужен, если
+# оба конца — семья.
 TELL_RIGHT = "tell@llm"
+
+# Право писать другим гостям (не владельцу). Точечное, не выдаётся по
+# умолчанию вместе с TELL_RIGHT — см. комментарий выше.
+TELL_GUESTS_RIGHT = "tell_guests@llm"
 
 # Потолок доставок от одного автора за час: модель может увлечься и отправить
 # одно и то же несколько раз, а получатель этого не просил.
@@ -2492,6 +2500,21 @@ async def tool_tell(ctx: ToolContext, args: dict[str, Any]) -> str:
     target = found[0]
     if target.chat_id == ctx.chat_id:
         return "не нужно: это тот же чат, просто скажи это здесь"
+
+    target_subscription = ctx.book.for_chat(target.chat_id)
+    is_owner = target_subscription is not None and target_subscription.allows_command(WILDCARD)
+    same_family = (
+        ctx.subscription is not None
+        and ctx.subscription.family
+        and target_subscription is not None
+        and target_subscription.family
+    )
+    has_tell_guests = ctx.subscription is not None and ctx.subscription.allows_command(
+        TELL_GUESTS_RIGHT
+    )
+    if not (is_owner or same_family or has_tell_guests):
+        return f"не умею: писать могу только владельцу, {target.display} — не он"
+
     if not _tell_limiter.register(ctx.chat_id):
         return "не сейчас: слишком много сообщений передано за последний час"
 

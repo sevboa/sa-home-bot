@@ -35,7 +35,8 @@ class GuestRight:
 # страница «Добавить право».
 GUEST_RIGHTS: list[GuestRight] = [
     GuestRight("chat@llm", "💬 Разговор с Альфредом"),
-    GuestRight("tell@llm", "📨 Передавать сообщения другим"),
+    GuestRight("tell@llm", "📨 Написать владельцу"),
+    GuestRight("tell_guests@llm", "📨 Писать другим гостям"),
     GuestRight("recall@memory", "🧠 Память: вспомнить"),
     GuestRight("remember@memory", "🧠 Память: запомнить"),
     GuestRight("forget@memory", "🧠 Память: забыть"),

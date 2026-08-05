@@ -1836,7 +1836,7 @@ transfer-encoding) — токен в пути вместо HMAC-схемы ро�
 слушатель на jeeves) или хватает LAN/tailscale — как и с VPN (этап 33),
 это меняет модель угроз и решается отдельно, не по умолчанию.
 
-### Этап 36. `tell` для всех гостей: владелец всегда доступен, «семья» — своя группа
+### Этап 36. `tell` для всех гостей: владелец всегда доступен, «семья» — своя группа — ✅ v0.76.0 (2026-08-05)
 
 Решение пользователя 2026-08-04 (после находки живого бага этапа 33 п. 7 —
 секрет VPN уходил не тому получателю): `tell@llm` перестаёт быть
@@ -1878,11 +1878,38 @@ transfer-encoding) — токен в пути вместо HMAC-схемы ро�
    владельца/семью/остальных, иначе это то же самое «всем можно всё», что
    уже подвело на VPN.
 
-**Тесты:** владелец всегда получает `tell` от гостя без `tell_guests@llm`;
-гость без `family` не может написать другому гостю без `tell_guests@llm`,
-даже если тот сам — семья; два члена `family` пишут друг другу без
-`tell_guests@llm`; `tell_guests@llm` открывает произвольного гостя (кроме
-владельца — тот и так всегда доступен).
+**Реализовано ровно по п. 1–5.** `bot/tools.py::TELL_GUESTS_RIGHT =
+"tell_guests@llm"` — новая константа рядом с `TELL_RIGHT`; проверка внутри
+`tool_tell` — после резолва `target` через `find_recipients`, до
+рейт-лимита: `is_owner = target_subscription.allows_command(WILDCARD)`,
+`same_family` — оба конца `Subscription.family`, `has_tell_guests =
+ctx.subscription.allows_command(TELL_GUESTS_RIGHT)`. Отдельного кода под
+«владелец-отправитель» не понадобилось: `allows_command` возвращает `True`
+на любую строку, если в `allowed_commands` есть голый `*` — тем самым
+`has_tell_guests` уже истинен для владельца без специального случая.
+`bot/guest_rights.py` — `tell@llm` переименован в каталоге на «Написать
+владельцу», добавлена строка `tell_guests@llm` («Писать другим гостям») —
+точечная выдача через `/guests` без правки кода бота (п. 2).
+
+**Тесты (написаны и зелёные, `tests/unit/test_tell.py`):** владелец всегда
+получает `tell` от гостя без `tell_guests@llm`
+(`test_tell_guest_always_reaches_owner_without_tell_guests_right`); гость
+без `family`/права не может написать другому гостю
+(`test_tell_guest_cannot_reach_another_guest_without_right_or_family`);
+`family` не альтернатива праву, а обход именно для пары семья↔семья
+(`test_tell_family_flag_alone_does_not_open_non_family_guest`); два члена
+`family` пишут друг другу без `tell_guests@llm`
+(`test_tell_family_members_reach_each_other_without_tell_guests_right`);
+`tell_guests@llm` открывает произвольного гостя
+(`test_tell_guests_right_opens_arbitrary_guest`). Полный прогон:
+1541 passed, `ruff` чист.
+
+**Не сделано (п. 6, намеренно — по тексту решения «только ПОСЛЕ» кода):**
+ручная выдача `tell@llm` действующим гостям в
+`instances/telegram-bot.alfred.guests.toml` (живые данные на сервере, не в
+репозитории) и добавление `tell@llm` в дефолт `[invites].grant_commands`
+(config.py:746) для новых приглашений — оба шага полностью на усмотрение
+пользователя, код их не форсирует.
 
 ### Этап 37. Флаг «семья» у гостя + тулы Альфреда: список гостей, права, фильтры — ✅ v0.69.0 (2026-08-04)
 
