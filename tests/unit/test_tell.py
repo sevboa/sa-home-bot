@@ -407,36 +407,71 @@ async def test_tell_by_personal_name_has_no_owner_role_marker():
     assert "к вам как к владельцу" not in text
 
 
-# --- notify_guest: официальное уведомление владельца гостю -----------------
+# --- notify_persona/notify_guest: официальное уведомление владельца гостю --
 
 
-async def test_notify_guest_is_declared_only_for_owner():
+async def test_notify_tools_are_declared_only_for_owner():
     owner = _book().for_chat(1)
     guest = _book().for_chat(ANDREY_CHAT)
+    assert "notify_persona" in ai_tools.tools_for(owner).handlers
     assert "notify_guest" in ai_tools.tools_for(owner).handlers
+    assert "notify_persona" not in ai_tools.tools_for(guest).handlers
     assert "notify_guest" not in ai_tools.tools_for(guest).handlers
+    assert "notify_persona" not in ai_tools.tools_for(None).handlers
     assert "notify_guest" not in ai_tools.tools_for(None).handlers
+
+
+async def test_notify_persona_returns_one_of_the_known_personas(monkeypatch):
+    picked = ai_tools._NOTIFY_PERSONAS[-1]
+    monkeypatch.setattr(ai_tools.random, "choice", lambda seq: picked)
+    ctx = _ctx(chat_id=1, book=_book(), settings=Settings())
+    result = await ai_tools.tool_notify_persona(ctx, {})
+    assert picked["title"] in result
+    assert picked["style_prompt"] in result
 
 
 async def test_notify_guest_delivers_without_on_behalf_of_marker():
     notifier = FakeNotifier()
     ctx = _ctx(chat_id=1, book=_book(), notifier=notifier, settings=Settings())
     result = await ai_tools.tool_notify_guest(
-        ctx, {"recipient": "Андрей", "text": "новое правило дома"}
+        ctx, {"recipient": "Андрей", "persona": "Хозяин", "text": "новое правило дома"}
     )
     assert "передано" in result
     chat_id, text = notifier.sent[0]
     assert chat_id == ANDREY_CHAT
     assert "по просьбе" not in text
     assert "новое правило дома" in text
-    assert any(p["title"] in text for p in ai_tools._NOTIFY_PERSONAS)
+    assert "Хозяин" in text
 
 
-async def test_notify_guest_persona_is_chosen_randomly(monkeypatch):
-    picked = ai_tools._NOTIFY_PERSONAS[-1]
-    monkeypatch.setattr(ai_tools.random, "choice", lambda seq: picked)
+async def test_notify_guest_uses_exactly_the_given_persona():
+    for persona in ai_tools._NOTIFY_PERSONAS:
+        notifier = FakeNotifier()
+        ctx = _ctx(chat_id=1, book=_book(), notifier=notifier, settings=Settings())
+        await ai_tools.tool_notify_guest(
+            ctx, {"recipient": "Андрей", "persona": persona["title"], "text": "х"}
+        )
+        chat_id, text = notifier.sent[0]
+        assert persona["title"] in text
+        assert persona["emoji"] in text
+
+
+async def test_notify_guest_refuses_unknown_persona():
     notifier = FakeNotifier()
     ctx = _ctx(chat_id=1, book=_book(), notifier=notifier, settings=Settings())
-    await ai_tools.tool_notify_guest(ctx, {"recipient": "Андрей", "text": "х"})
-    chat_id, text = notifier.sent[0]
-    assert picked["title"] in text
+    result = await ai_tools.tool_notify_guest(
+        ctx, {"recipient": "Андрей", "persona": "Дворецкий", "text": "х"}
+    )
+    assert "ошибка" in result
+    assert "notify_persona" in result
+    assert notifier.sent == []
+
+
+async def test_notify_guest_requires_persona():
+    notifier = FakeNotifier()
+    ctx = _ctx(chat_id=1, book=_book(), notifier=notifier, settings=Settings())
+    result = await ai_tools.tool_notify_guest(
+        ctx, {"recipient": "Андрей", "text": "х"}
+    )
+    assert "ошибка" in result
+    assert notifier.sent == []
