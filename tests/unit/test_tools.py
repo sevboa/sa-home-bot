@@ -1259,6 +1259,12 @@ async def test_node_manage_restart_remote_node_targets_dst(store):
         "node": "winpc",
         "event_type": tools.EVENT_RESTART_APPLIED,
     }
+    # Живой баг 2026-08-05 (третий заход): директива больше не просит
+    # переходить к "следующей ноде" — это сталкивало между собой несколько
+    # независимых self-scheduled цепочек, лезущих к чужим нодам разом.
+    directive = create_calls[0]["args"]["messages"][-1]["content"]
+    assert "следующая нода" not in directive
+    assert "переходить не нужно" in directive
 
 
 async def test_node_manage_unknown_node_lists_known_ones(store):
