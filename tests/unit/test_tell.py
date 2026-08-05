@@ -471,6 +471,20 @@ async def test_notify_guest_tolerates_emoji_stuck_to_persona_name():
     assert "Админ" in text
 
 
+async def test_notify_guest_can_target_the_owner_themselves():
+    # В отличие от tell, у notify_guest есть смысл слать себе (self-напоминание
+    # в стиле персонажа, например через remind) — "тот же чат" не отказ.
+    notifier = FakeNotifier()
+    ctx = _ctx(chat_id=1, book=_book(), notifier=notifier, settings=Settings())
+    result = await ai_tools.tool_notify_guest(
+        ctx, {"recipient": "me", "persona": "Граф", "text": "пора кушать"}
+    )
+    assert "передано" in result
+    chat_id, text = notifier.sent[0]
+    assert chat_id == 1
+    assert "Граф" in text
+
+
 async def test_notify_guest_refuses_unknown_persona():
     notifier = FakeNotifier()
     ctx = _ctx(chat_id=1, book=_book(), notifier=notifier, settings=Settings())
