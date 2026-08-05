@@ -32,6 +32,10 @@ class Subscription:
     def is_guest(self) -> bool:
         return self.source == SOURCE_GUEST
 
+    @property
+    def is_owner(self) -> bool:
+        return self.allows_command(WILDCARD)
+
     def accepts_event(self, event_type: str) -> bool:
         if self.broken:
             return False

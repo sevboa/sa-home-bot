@@ -364,3 +364,79 @@ async def test_tell_guests_right_does_not_bypass_owner_check_twice():
     )
     result = await ai_tools.tool_tell(ctx, {"recipient": "owner", "text": "привет"})
     assert "передано" in result
+
+
+# --- обращение к владельцу по роли, а не по личному имени -----------------
+#
+# _book() (в отличие от _permission_book()) называет владельческую подписку
+# технически "me" — как в прод-конфиге (instances/telegram-bot.alfred.toml),
+# а не "owner" — чтобы не подловить случайное совпадение имени со словом
+# роли (см. AUTHORIZATION.md, находка "владелец без гостевого имени").
+
+
+async def test_tell_reaches_owner_by_role_word_not_name():
+    notifier = FakeNotifier()
+    ctx = _ctx(chat_id=ANDREY_CHAT, book=_book(), notifier=notifier, settings=Settings())
+    result = await ai_tools.tool_tell(ctx, {"recipient": "хозяину", "text": "привет"})
+    assert "передано" in result
+    chat_id, text = notifier.sent[0]
+    assert chat_id == 1  # chat_id владельца в _book()
+    assert "к вам как к владельцу" in text
+
+
+async def test_tell_by_personal_name_has_no_owner_role_marker():
+    notifier = FakeNotifier()
+    people = [
+        PersonConfig(
+            telegram_username="asevbo",
+            telegram_id=1,
+            full_name="Алексей Александрович Севбо",
+            gender="m",
+        )
+    ]
+    ctx = _ctx(
+        chat_id=ANDREY_CHAT,
+        book=_book(),
+        notifier=notifier,
+        settings=Settings(people=people),
+    )
+    result = await ai_tools.tool_tell(ctx, {"recipient": "Алексей", "text": "привет"})
+    assert "передано" in result
+    chat_id, text = notifier.sent[0]
+    assert chat_id == 1
+    assert "к вам как к владельцу" not in text
+
+
+# --- notify_guest: официальное уведомление владельца гостю -----------------
+
+
+async def test_notify_guest_is_declared_only_for_owner():
+    owner = _book().for_chat(1)
+    guest = _book().for_chat(ANDREY_CHAT)
+    assert "notify_guest" in ai_tools.tools_for(owner).handlers
+    assert "notify_guest" not in ai_tools.tools_for(guest).handlers
+    assert "notify_guest" not in ai_tools.tools_for(None).handlers
+
+
+async def test_notify_guest_delivers_without_on_behalf_of_marker():
+    notifier = FakeNotifier()
+    ctx = _ctx(chat_id=1, book=_book(), notifier=notifier, settings=Settings())
+    result = await ai_tools.tool_notify_guest(
+        ctx, {"recipient": "Андрей", "text": "новое правило дома"}
+    )
+    assert "передано" in result
+    chat_id, text = notifier.sent[0]
+    assert chat_id == ANDREY_CHAT
+    assert "по просьбе" not in text
+    assert "новое правило дома" in text
+    assert any(p["title"] in text for p in ai_tools._NOTIFY_PERSONAS)
+
+
+async def test_notify_guest_persona_is_chosen_randomly(monkeypatch):
+    picked = ai_tools._NOTIFY_PERSONAS[-1]
+    monkeypatch.setattr(ai_tools.random, "choice", lambda seq: picked)
+    notifier = FakeNotifier()
+    ctx = _ctx(chat_id=1, book=_book(), notifier=notifier, settings=Settings())
+    await ai_tools.tool_notify_guest(ctx, {"recipient": "Андрей", "text": "х"})
+    chat_id, text = notifier.sent[0]
+    assert picked["title"] in text

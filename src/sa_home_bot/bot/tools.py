@@ -43,6 +43,7 @@ import json
 import logging
 import math
 import operator
+import random
 import re
 import time
 import urllib.error
@@ -64,7 +65,7 @@ from sa_home_bot.memory import protocol as memory_protocol
 from sa_home_bot.net import protocol as net_protocol
 from sa_home_bot.node.kind import traits_for
 from sa_home_bot.proto.messages import Address, ProtoError
-from sa_home_bot.subscriptions.models import WILDCARD, Subscription
+from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.tasks import protocol as task_protocol
 from sa_home_bot.vpn import protocol as vpn_protocol
 
@@ -2489,30 +2490,37 @@ TELL_MAX_PER_HOUR = 10
 _tell_limiter = invites.AttemptLimiter(TELL_MAX_PER_HOUR)
 
 
-def render_tell(text: str, author: str | None) -> str:
+def render_tell(text: str, author: str | None, to_owner_role: bool = False) -> str:
     """Как выглядит доставленное сообщение.
 
     Отдельная «шапка» обязательна: человек должен видеть, что это не бот сам
     придумал написать и не сообщение от системы, а Альфред передаёт просьбу
     конкретного человека. Текст — от Альфреда и в его манере, поэтому идёт
     как обычная его реплика.
+
+    ``to_owner_role`` — гость назвал не личное имя владельца, а его роль
+    («хозяин»/«владелец»/«админ», см. recipients.SOURCE_OWNER_ROLE): владелец
+    должен сразу увидеть, что к нему обратились официально, а не просто
+    написали лично ему как знакомому.
     """
+    role = " (к вам как к владельцу)" if to_owner_role else ""
     who = f" по просьбе {escape(author)}" if author else ""
-    return f"📨 <b>Альфред{who}:</b>\n\n{escape(text.strip())}"
+    return f"📨 <b>Альфред{role}{who}:</b>\n\n{escape(text.strip())}"
 
 
-async def tool_tell(ctx: ToolContext, args: dict[str, Any]) -> str:
-    if ctx.book is None or ctx.notifier is None:
-        return "недоступно: сейчас я не могу никому написать"
-    if ctx.chat_id is None:
-        return "недоступно: непонятно, от кого передавать"
-    who = str(args.get("recipient") or "").strip()
-    text = str(args.get("text") or "").strip()
-    if not who:
-        return "ошибка: не сказано, кому передать (recipient)"
-    if not text:
-        return "ошибка: не сказано, что передать (text)"
-
+async def _deliver_personal_message(
+    ctx: ToolContext,
+    who: str,
+    text: str,
+    render: Callable[[recipients.Recipient], str],
+    guard: Callable[[recipients.Recipient], str | None] | None = None,
+) -> str:
+    """Общая доставка личного сообщения — резолвинг получателя, лимит,
+    отправка, запись хода диалога. Права (если нужны) проверяет ``guard``:
+    он получает найденного получателя и либо разрешает (``None``), либо
+    возвращает готовый отказ. Без ``guard`` доставка разрешена всем, кто
+    вообще видит вызывающий тул — так и должно быть у admin-only тулов,
+    видимость которых уже гейтится декларацией (bot/tools.py:195-199)."""
     found = recipients.find_recipients(who, ctx.book, ctx.settings.people)
     if not found:
         return (
@@ -2526,24 +2534,15 @@ async def tool_tell(ctx: ToolContext, args: dict[str, Any]) -> str:
     if target.chat_id == ctx.chat_id:
         return "не нужно: это тот же чат, просто скажи это здесь"
 
-    target_subscription = ctx.book.for_chat(target.chat_id)
-    is_owner = target_subscription is not None and target_subscription.allows_command(WILDCARD)
-    same_family = (
-        ctx.subscription is not None
-        and ctx.subscription.family
-        and target_subscription is not None
-        and target_subscription.family
-    )
-    has_tell_guests = ctx.subscription is not None and ctx.subscription.allows_command(
-        TELL_GUESTS_RIGHT
-    )
-    if not (is_owner or same_family or has_tell_guests):
-        return f"не умею: писать могу только владельцу, {target.display} — не он"
+    if guard is not None:
+        refusal = guard(target)
+        if refusal is not None:
+            return refusal
 
     if not _tell_limiter.register(ctx.chat_id):
         return "не сейчас: слишком много сообщений передано за последний час"
 
-    message_id = await ctx.notifier.send_direct(target.chat_id, render_tell(text, ctx.author))
+    message_id = await ctx.notifier.send_direct(target.chat_id, render(target))
     if message_id is None:
         return f"не дошло: {target.display} сейчас недоступен"
     # Записываем как свой ход в диалоге получателя: тогда он ответит обычным
@@ -2559,6 +2558,42 @@ async def tool_tell(ctx: ToolContext, args: dict[str, Any]) -> str:
         ctx.chat_id, target.chat_id, target.display,
     )
     return f"передано: {target.display} получил сообщение"
+
+
+async def tool_tell(ctx: ToolContext, args: dict[str, Any]) -> str:
+    if ctx.book is None or ctx.notifier is None:
+        return "недоступно: сейчас я не могу никому написать"
+    if ctx.chat_id is None:
+        return "недоступно: непонятно, от кого передавать"
+    who = str(args.get("recipient") or "").strip()
+    text = str(args.get("text") or "").strip()
+    if not who:
+        return "ошибка: не сказано, кому передать (recipient)"
+    if not text:
+        return "ошибка: не сказано, что передать (text)"
+
+    def guard(target: recipients.Recipient) -> str | None:
+        target_subscription = ctx.book.for_chat(target.chat_id)
+        is_owner = target_subscription is not None and target_subscription.is_owner
+        same_family = (
+            ctx.subscription is not None
+            and ctx.subscription.family
+            and target_subscription is not None
+            and target_subscription.family
+        )
+        has_tell_guests = ctx.subscription is not None and ctx.subscription.allows_command(
+            TELL_GUESTS_RIGHT
+        )
+        if is_owner or same_family or has_tell_guests:
+            return None
+        return f"не умею: писать могу только владельцу, {target.display} — не он"
+
+    def render(target: recipients.Recipient) -> str:
+        return render_tell(
+            text, ctx.author, to_owner_role=target.source == recipients.SOURCE_OWNER_ROLE
+        )
+
+    return await _deliver_personal_message(ctx, who, text, render, guard=guard)
 
 
 _DECL_TELL: dict[str, Any] = {
@@ -2577,8 +2612,12 @@ _DECL_TELL: dict[str, Any] = {
             "собеседника, а не угадывай. Получателя ищет САМ ИНСТРУМЕНТ — не "
             "пытайся заранее выяснить, кто это (поиском в интернете, памятью "
             "или иначе): просто вызови tell с именем/ником ровно как назвал "
-            "собеседник. Если тул вернул отказ — перескажи ПРИЧИНУ ИЗ ЕГО "
-            "ОТВЕТА как есть, не выдумывай другую от себя."
+            "собеседник. Если собеседник не знает личного имени владельца и "
+            "говорит «хозяину»/«владельцу»/«админу» — это ТОЖЕ валидный "
+            "recipient, передай его как есть, тул сам поймёт, что имеется в "
+            "виду владелец, не пытайся угадать за него настоящее имя. Если "
+            "тул вернул отказ — перескажи ПРИЧИНУ ИЗ ЕГО ОТВЕТА как есть, не "
+            "выдумывай другую от себя."
         ),
         "parameters": {
             "type": "object",
@@ -2590,6 +2629,91 @@ _DECL_TELL: dict[str, Any] = {
                 "text": {
                     "type": "string",
                     "description": "Готовый текст сообщения — то, что получатель прочтёт",
+                },
+            },
+            "required": ["recipient", "text"],
+        },
+    },
+}
+
+
+# --- notify_guest: официальное уведомление гостю от владельца (не личная
+# передача — видимость тула сама по себе владельца от гостя отличает, той же
+# декларацией, что и guests_list, поэтому внутри обработчика прав не
+# проверяем, см. bot/tools.py:195-199). Заголовок и обёртка текста каждый раз
+# выбираются случайно из фиксированного набора «личин» — не для маскировки, а
+# чтобы уведомление сразу читалось иначе, чем обычный tell «по просьбе X».
+
+_NOTIFY_PERSONAS: tuple[dict[str, str], ...] = (
+    {"title": "Владелец", "emoji": "🏠", "opener": "", "closer": ""},
+    {"title": "Хозяин", "emoji": "🗝️", "opener": "", "closer": ""},
+    {
+        "title": "Админ",
+        "emoji": "🤓",
+        "opener": "Информирую по протоколу:",
+        "closer": "// конец уведомления",
+    },
+    {
+        "title": "Граф",
+        "emoji": "🧛",
+        "opener": "Приветствую, о смертный.",
+        "closer": "Засим откланиваюсь.",
+    },
+)
+
+
+def render_notify(text: str) -> str:
+    persona = random.choice(_NOTIFY_PERSONAS)
+    body = escape(text.strip())
+    if persona["opener"]:
+        body = f"{escape(persona['opener'])}\n{body}"
+    if persona["closer"]:
+        body = f"{body}\n{escape(persona['closer'])}"
+    title = escape(persona["title"])
+    return f"{persona['emoji']} <b>{title} (официальное уведомление):</b>\n\n{body}"
+
+
+async def tool_notify_guest(ctx: ToolContext, args: dict[str, Any]) -> str:
+    if ctx.book is None or ctx.notifier is None:
+        return "недоступно: сейчас я не могу никому написать"
+    if ctx.chat_id is None:
+        return "недоступно: непонятно, откуда уведомлять"
+    who = str(args.get("recipient") or "").strip()
+    text = str(args.get("text") or "").strip()
+    if not who:
+        return "ошибка: не сказано, кому передать (recipient)"
+    if not text:
+        return "ошибка: не сказано, что передать (text)"
+
+    def render(_target: recipients.Recipient) -> str:
+        return render_notify(text)
+
+    return await _deliver_personal_message(ctx, who, text, render)
+
+
+_DECL_NOTIFY_GUEST: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "notify_guest",
+        "description": (
+            "Официальное уведомление гостю — от твоего имени как "
+            "администрации дома, БЕЗ пометки «по просьбе владельца». Это "
+            "инструмент только владельца: используй его, когда ОН сам просит "
+            "что-то официально сообщить гостю (не передать личную просьбу — "
+            "для этого есть tell). Текст придумываешь ТЫ, как в tell. "
+            "Оформление (заголовок/подпись) тул выбирает сам случайно при "
+            "каждой отправке — не пытайся его задать или предсказать."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "recipient": {
+                    "type": "string",
+                    "description": "Имя или @username гостя, как его назвал владелец",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Готовый текст уведомления — то, что гость прочтёт",
                 },
             },
             "required": ["recipient", "text"],
@@ -2789,6 +2913,15 @@ TOOLS: tuple[ToolSpec, ...] = (
         name="guests_list",
         handler=tool_guests_list,
         declaration=_DECL_GUESTS_LIST,
+        requires=CommandRight(commands.required_right(commands.GUESTS.name)),
+    ),
+    # notify_guest — та же логика видимости, что у guests_list: право invite
+    # есть только у владельца, поэтому обработчику не нужно перепроверять,
+    # кто зовёт.
+    ToolSpec(
+        name="notify_guest",
+        handler=tool_notify_guest,
+        declaration=_DECL_NOTIFY_GUEST,
         requires=CommandRight(commands.required_right(commands.GUESTS.name)),
     ),
     # remind сознательно без requires: он появился до правил доступа и уже

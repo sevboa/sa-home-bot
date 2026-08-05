@@ -34,6 +34,27 @@ from sa_home_bot.subscriptions.book import SubscriptionBook
 # Откуда узнали про человека — нужно только для пояснений модели.
 SOURCE_PEOPLE = "people"
 SOURCE_SUBSCRIPTION = "subscription"
+# Гость назвал не имя, а роль владельца ("передай хозяину") — совсем не то
+# же самое, что найти владельца по имени: узнав source, tool_tell метит
+# доставленное сообщение, чтобы владелец видел разницу.
+SOURCE_OWNER_ROLE = "owner_role"
+
+# Начала слов, которыми гость называет владельца, не зная его личного имени.
+# Стебель, а не полный список форм — "админ" покрывает и "админу", и
+# "администратор"/"администратору" одним элементом.
+_OWNER_ROLE_STEMS = (
+    "хозя",  # хозяин/хозяину/хозяина/хозяином/хозяине
+    "владел",  # владелец/владельцу/владельца/владельцем
+    "админ",  # админ/админу и администратор/администратору
+    "граф",  # граф/графу/графа/графом
+    "собственник",  # собственник/собственнику/собственника/собственником
+    "owner",
+    "admin",
+)
+
+
+def _is_owner_role_reference(query: str) -> bool:
+    return any(query.startswith(stem) for stem in _OWNER_ROLE_STEMS)
 
 
 @dataclass(frozen=True)
@@ -97,5 +118,10 @@ def find_recipients(
     for sub in book.all():
         if _matches(wanted, sub.name) or _matches(wanted, sub.invited_user):
             remember(sub.chat_id, sub.invited_user or sub.name, SOURCE_SUBSCRIPTION)
+
+    if _is_owner_role_reference(wanted):
+        for sub in book.all():
+            if sub.is_owner:
+                remember(sub.chat_id, sub.invited_user or sub.name, SOURCE_OWNER_ROLE)
 
     return list(found.values())

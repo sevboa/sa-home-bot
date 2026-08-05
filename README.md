@@ -1,6 +1,6 @@
 # sa-home-bot
 
-> **Версия:** 0.60.4 · **Статус:** ядро готово · Python 3.11+ · 1222 теста, ruff чисто
+> **Версия:** 0.77.0 · **Статус:** ядро готово · Python 3.11+ · 1575 тестов, ruff чисто
 
 Личный Telegram-бот-сторож домашней машины: следит за температурой CPU и дисков,
 шлёт предупреждение при перегреве и сообщение о возврате к норме, сообщает о
@@ -44,7 +44,7 @@ python «externally managed», PEP 668):
 
 ```bash
 sudo apt install -y pipx git && pipx ensurepath   # один раз, единственный шаг с root — pipx тянет репозиторий через git
-pipx install "git+https://github.com/sevboa/sa-home-bot.git@v0.60.4"
+pipx install "git+https://github.com/sevboa/sa-home-bot.git@v0.77.0"
 sa-home-bot init                              # config.toml + (на Linux) systemd-юнит
 ```
 
@@ -261,7 +261,7 @@ src/sa_home_bot/
 ├── bot/                   # aiogram: команды, notifier, middleware, handlers,
 │                          # monitor_link/monitor_events (клиент монитора)
 └── utils/                 # logging, lifespan (LIFO-shutdown + сигналы)
-tests/unit/                # 200 тестов: домен, store, scan-job, proto, monitor, smoke app
+tests/unit/                # 1575 тестов: домен, store, scan-job, proto, monitor, smoke app
 ```
 
 ## Разработка

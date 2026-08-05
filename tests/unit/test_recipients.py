@@ -1,7 +1,14 @@
 """bot/recipients.py — find_recipients: как названного человека находят по
 [[people]] и подпискам (bot/tools.py::tool_tell)."""
 
-from sa_home_bot.bot.recipients import SOURCE_SUBSCRIPTION, _matches, find_recipients
+import pytest
+
+from sa_home_bot.bot.recipients import (
+    SOURCE_OWNER_ROLE,
+    SOURCE_SUBSCRIPTION,
+    _matches,
+    find_recipients,
+)
 from sa_home_bot.config import PersonConfig
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
@@ -82,3 +89,47 @@ def test_find_recipients_ignores_group_chats():
 def test_find_recipients_empty_query():
     book = SubscriptionBook([_guest("Наташа", 1243270013)])
     assert find_recipients("", book) == []
+
+
+# --- обращение к владельцу по роли, не по имени ---------------------------
+
+
+def _owner(chat_id: int = 188548043) -> Subscription:
+    # Прод-конфиг называет владельческую подписку технически, "me" — не по
+    # имени, которое гость мог бы угадать (instances/telegram-bot.alfred.toml).
+    return Subscription(name="me", chat_id=chat_id, allowed_commands=frozenset({"*"}))
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "хозяину", "хозяин", "хозяина", "хозяином",
+        "владельцу", "владелец", "владельца", "владельцем",
+        "админу", "админ", "администратору", "администратор",
+        "графу", "граф",
+        "собственнику", "собственник",
+        "admin", "owner",
+        "ХОЗЯИНУ", "Owner",  # регистр не важен
+    ],
+)
+def test_find_recipients_by_owner_role(query):
+    book = SubscriptionBook([_owner()])
+    found = find_recipients(query, book, [])
+    assert [r.chat_id for r in found] == [188548043]
+    assert found[0].source == SOURCE_OWNER_ROLE
+
+
+def test_owner_role_reference_finds_nobody_without_an_owner():
+    # Нет ни одной подписки с "*" (например, книга службы tasks) — роль
+    # никого не находит, а не ломается.
+    book = SubscriptionBook([_guest("Гость", 600)])
+    assert find_recipients("хозяину", book, []) == []
+
+
+def test_owner_role_reference_does_not_shadow_ordinary_guest_names():
+    # Обычный поиск по личному имени гостя не должен внезапно находить ещё
+    # и владельца — стебли роли проверяются отдельной веткой, не влияют на
+    # остальные пути поиска.
+    book = SubscriptionBook([_owner(), _guest("Максим", 601)])
+    found = find_recipients("максим", book, [])
+    assert [r.chat_id for r in found] == [601]

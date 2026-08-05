@@ -331,7 +331,10 @@ class MemoryService:
     async def _list(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)
         limit = min(int(args.get("limit") or MAX_RECALL), MAX_RECALL)
-        sql = "SELECT rowid AS id, text, scope, sensitive, created_at FROM facts WHERE chat_id = ? OR scope = ?"
+        sql = (
+            "SELECT rowid AS id, text, scope, sensitive, created_at "
+            "FROM facts WHERE chat_id = ? OR scope = ?"
+        )
         params: list[Any] = [chat_id, SCOPE_COMMON]
         if self._is_family_chat(args, chat_id):
             sql += " OR scope = ?"
