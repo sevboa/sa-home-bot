@@ -198,6 +198,35 @@ async def test_fire_chat_loop_restores_woken_by_from_meta(store, monkeypatch):
     assert captured["tool_ctx"].woken_by == ("jeeves", "update_finished")
 
 
+async def test_fire_chat_loop_restores_message_thread_id_from_meta(store, monkeypatch):
+    # Живой баг 2026-08-05 (второй заход): без восстановления отсюда
+    # ЭТА задача-продолжение теряла топик уже после первого self-scheduled
+    # прыжка remind (следующий шаг цепочки обновления роя уезжал бы в
+    # meta["message_thread_id"]=None у СЛЕДУЮЩЕЙ задачи).
+    captured: dict = {}
+
+    async def fake_chat_loop(*args, **kwargs):
+        captured["tool_ctx"] = args[4]
+        return "готово"
+
+    monkeypatch.setattr(tasks_service, "run_chat_loop", fake_chat_loop)
+    link = FakeNodeLink(OWN_STATE, routes={"winpc:llm": {"asleep": False}})
+    svc = _service(store, link, FakeEmitter())
+
+    row = _chat_row()
+    row["meta_json"] = json.dumps(
+        {
+            "kind": protocol.TASK_KIND_LLM_CHAT,
+            "chat_id": 42,
+            "dialogue_id": 7,
+            "message_thread_id": 42,
+        }
+    )
+    await svc._fire_one(row)
+
+    assert captured["tool_ctx"].message_thread_id == 42
+
+
 async def test_fire_chat_loop_woken_by_none_without_awaited_meta(store, monkeypatch):
     captured: dict = {}
 

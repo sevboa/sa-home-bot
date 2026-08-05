@@ -515,6 +515,14 @@ class TasksService:
             woken_by=(awaited_node, awaited_event)
             if isinstance(awaited_node, str) and isinstance(awaited_event, str)
             else None,
+            # Живой баг 2026-08-05 (второй заход): без восстановления отсюда
+            # ЭТА задача-продолжение, если сама зовёт remind (следующий шаг
+            # цепочки обновления роя), клала в meta НОВОЙ задачи
+            # message_thread_id=None — тред терялся уже после первого
+            # self-scheduled прыжка, хотя доставка САМОГО этого срабатывания
+            # (bot/node_events.py) топик уже уважала. Та же логика, что и у
+            # woken_by чуть выше.
+            message_thread_id=meta.get("message_thread_id"),
         )
         async def _emit_tool_call(name: str, call_args: dict[str, Any], result: str) -> None:
             # bot/node_events.py ретранслирует в дебаг-группу через
