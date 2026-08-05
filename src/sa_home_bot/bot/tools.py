@@ -892,6 +892,11 @@ async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
         "chat_id": ctx.chat_id,
         "dialogue_id": ctx.dialogue_id,
         "trigger_message_id": ctx.trigger_message_id,
+        # Живой баг 2026-08-05: без этого ответ tasks (bot/node_events.py::
+        # _handle_task_result/_handle_task_prewake) уезжал в общий топик
+        # личного чата, а не туда, где реально шла переписка (см. докстринг
+        # Notifier.send_direct про message_thread_id).
+        "message_thread_id": ctx.message_thread_id,
     }
     if after_event is not None:
         # Восстанавливается в ToolContext.woken_by на срабатывании

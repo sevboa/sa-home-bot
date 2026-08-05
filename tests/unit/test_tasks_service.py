@@ -150,6 +150,24 @@ async def test_fire_wakes_sleeping_node_and_delivers(store, monkeypatch):
     ]
 
 
+async def test_fire_chat_loop_emits_tool_call_with_args_and_result(store, monkeypatch):
+    # Живой баг 2026-08-05: раньше EVENT_TOOL_CALL нёс только {"name": ...} —
+    # кнопке «развернуть» на стороне бота (bot/node_events.py) было нечего
+    # показывать. args/result теперь должны доехать вместе с именем.
+    async def fake_chat_loop(*args, **kwargs):
+        await kwargs["on_tool_call"]("calc", {"expression": "1+1"}, "2")
+        return "готово"
+
+    monkeypatch.setattr(tasks_service, "run_chat_loop", fake_chat_loop)
+    link = FakeNodeLink(OWN_STATE, routes={"winpc:llm": {"asleep": False}})
+    emitter = FakeEmitter()
+
+    await _service(store, link, emitter)._fire_one(_chat_row())
+
+    tool_call_events = [d for t, d in emitter.events if t == protocol.EVENT_TOOL_CALL]
+    assert tool_call_events == [{"name": "calc", "args": {"expression": "1+1"}, "result": "2"}]
+
+
 async def test_fire_chat_loop_restores_woken_by_from_meta(store, monkeypatch):
     # Живой инцидент 2026-08-05: модель, разбуженная по (node, event_type),
     # заново ставила remind на то же самое событие — бесконечный цикл.

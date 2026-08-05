@@ -11,8 +11,8 @@ notify_restart — тот же список активных chat_id, что и 
 sa_home_bot.tasks; у той нет доступа к Telegram, доставка и запись в
 ai_turns делаются здесь, по meta, которую сама служба tasks не читает),
 ``tool_call`` (та же служба tasks — факт вызова инструмента моделью внутри
-уже сработавшей chat_loop-задачи, self-scheduled remind; только имя тула,
-без аргументов/результата, см. tasks/protocol.py::EVENT_TOOL_CALL).
+уже сработавшей chat_loop-задачи, self-scheduled remind; имя тула, аргументы
+и результат, см. tasks/protocol.py::EVENT_TOOL_CALL).
 ``idle_power_blocked`` (node/service.py::maybe_auto_poweroff_idle — простой
 Alfred дошёл до автовыключения ноды, но открыта SSH-сессия, выключение
 отложено) — адресно админам (notify_admins), с кнопкой «закрыть сессии и
@@ -64,6 +64,7 @@ from sa_home_bot.bot.handlers.vpn import resolve_request_callback
 from sa_home_bot.bot.lifecycle import broadcast_all, broadcast_system, notify_tool_call
 from sa_home_bot.bot.notifier import Notifier, notify_admins
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
+from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.db.store import Store
 from sa_home_bot.proto.messages import Address, Envelope, ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
@@ -119,14 +120,19 @@ async def _handle_task_prewake(notifier: Notifier, data: dict) -> None:
     chat_id = meta.get("chat_id")
     if chat_id is None:
         return
+    # Живой баг 2026-08-05: без этого «шаги»/«Агнольд»/«Альбегт» от tasks
+    # уезжали в общий топик личного чата, а не туда, где реально идёт
+    # переписка (см. tool_remind — meta несёт message_thread_id, докстринг
+    # Notifier.send_direct). None вне топика — как и было.
+    thread_id = meta.get("message_thread_id")
     status = data.get("status")
     if status == "waking":
-        await notifier.send_direct(chat_id, STEPS_TEXT)
+        await notifier.send_direct(chat_id, STEPS_TEXT, message_thread_id=thread_id)
     elif status == "ready":
-        await notifier.send_direct(chat_id, ARNOLD_WAKING)
+        await notifier.send_direct(chat_id, ARNOLD_WAKING, message_thread_id=thread_id)
     elif status == "failed":
         text = ALBERT_UNAVAILABLE if data.get("reason") == "unreachable" else ALBERT_ASLEEP
-        await notifier.send_direct(chat_id, text)
+        await notifier.send_direct(chat_id, text, message_thread_id=thread_id)
 
 
 async def _maybe_fire_event_waiter(get_node_link, node_id: str, event_type: str) -> None:
@@ -164,9 +170,16 @@ async def _handle_task_result(
     if chat_id is None:
         return
     trigger_message_id = meta.get("trigger_message_id")
+    # Живой баг 2026-08-05: без этого ответ tasks уезжал в общий топик
+    # личного чата, а не в тот, откуда пришёл исходный запрос (см.
+    # tool_remind — meta несёт message_thread_id).
+    thread_id = meta.get("message_thread_id")
     if not data.get("ok"):
         await notifier.send_direct(
-            chat_id, ALBERT_TASK_MISSED, reply_to_message_id=trigger_message_id
+            chat_id,
+            ALBERT_TASK_MISSED,
+            reply_to_message_id=trigger_message_id,
+            message_thread_id=thread_id,
         )
         # Пользователю — персонаж, админу — причина. Живой сбой 2026-07-30:
         # «Альбегт» был единственным следом провалившейся задачи, и разбор
@@ -181,7 +194,10 @@ async def _handle_task_result(
         return
     raw = (data.get("result") or {}).get("response", "")
     sent_id = await notifier.send_direct(
-        chat_id, _format_alfred_reply(raw), reply_to_message_id=trigger_message_id
+        chat_id,
+        _format_alfred_reply(raw),
+        reply_to_message_id=trigger_message_id,
+        message_thread_id=thread_id,
     )
     dialogue_id = meta.get("dialogue_id")
     if sent_id is not None and dialogue_id is not None:
@@ -295,6 +311,7 @@ def build_node_event_handler(
     notifier: Notifier,
     store: Store,
     get_node_link: Callable[[], ServiceLink | None] | None = None,
+    tool_calls: ToolCalls | None = None,
 ):
     """Callback для ServiceLink(node).on_event.
 
@@ -302,6 +319,13 @@ def build_node_event_handler(
     того, как ServiceLink(node) существует (сам этот callback передаётся
     ему в конструктор — см. app.py), поэтому нужен нулевой уровень
     отложенности, а не прямая ссылка на объект, которого пока нет.
+
+    ``tool_calls`` — тот же ``ToolCalls`` (bot/tool_debug.py), которым
+    пользуется живой /ai (bot/ai_flow.py::request_alfred): кнопке
+    «развернуть» на дебаг-сообщении о вызове тула из службы tasks нужен тот
+    же процесс-локальный склад входа/выхода, что и у живого диалога — сама
+    служба tasks Telegram не видит и кнопку нарисовать не может (живой баг
+    2026-08-05, см. tasks/protocol.py::EVENT_TOOL_CALL).
     """
 
     async def handle(env: Envelope) -> None:
@@ -314,7 +338,14 @@ def build_node_event_handler(
             await _handle_task_result(notifier, store, data, book)
             return
         if name == task_protocol.EVENT_TOOL_CALL:
-            await notify_tool_call(book, notifier, data.get("name", "?"))
+            await notify_tool_call(
+                book,
+                notifier,
+                data.get("name", "?"),
+                args=data.get("args"),
+                result=data.get("result"),
+                debug=tool_calls,
+            )
             return
         # Кого касается событие — для журнала (db/schema.sql::swarm_events,
         # store.record_event ниже); заполняется в соответствующей ветке,

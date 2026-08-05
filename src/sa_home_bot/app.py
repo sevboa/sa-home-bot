@@ -123,11 +123,20 @@ async def run(settings: Settings) -> bool:
     def _get_node_link() -> ServiceLink | None:
         return node_link
 
+    # Вход/выход вызовов инструментов для дебаг-канала: короткое сообщение
+    # «🔧 Alfred вызвал инструмент» разворачивается кнопкой (bot/tool_debug.
+    # py). Заведён здесь, ДО node_link — тому нужен уже готовый склад, чтобы
+    # кнопка «развернуть» работала и на self-scheduled remind (служба tasks,
+    # см. build_node_event_handler), не только на живом /ai.
+    tool_calls = ToolCalls()
+
     node_link = ServiceLink(
         settings.node.socket,
         token=settings.swarm.token,
         display_name="нода",
-        on_event=build_node_event_handler(book, notifier, store, get_node_link=_get_node_link),
+        on_event=build_node_event_handler(
+            book, notifier, store, get_node_link=_get_node_link, tool_calls=tool_calls
+        ),
     )
     await node_link.start()
 
@@ -150,9 +159,8 @@ async def run(settings: Settings) -> bool:
     )
     await torrents_link.start()
     pending_torrents = PendingTorrents()
-    # Вход/выход вызовов инструментов для дебаг-канала: короткое сообщение
-    # «🔧 Alfred вызвал инструмент» разворачивается кнопкой (bot/tool_debug.py).
-    tool_calls = ToolCalls()
+    # tool_calls заведён раньше (см. выше, до node_link) — здесь только
+    # использование дальше по функции (polling kwargs).
     # Приватные ключи VPN между QR (сразу) и файлом .conf (по кнопке) —
     # только в памяти процесса, никогда в БД (bot/vpn_secrets.py).
     pending_vpn_secrets = PendingVpnSecrets()

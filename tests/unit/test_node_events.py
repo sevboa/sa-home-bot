@@ -29,6 +29,7 @@ from sa_home_bot.bot.node_events import (
     render_speech_cured,
     render_update_finished,
 )
+from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import SubscriptionConfig
 from sa_home_bot.proto.messages import Address, make_event
 from sa_home_bot.subscriptions.book import SubscriptionBook
@@ -39,14 +40,22 @@ from sa_home_bot.tasks import protocol as task_protocol
 class FakeNotifier:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
-        # Отдельно — с reply_to_message_id, для тестов task_prewake/task_result
-        # (остальные тесты этого файла реплаем не пользуются).
-        self.sent_full: list[tuple[int, str, int | None]] = []
+        # Отдельно — с reply_to_message_id/message_thread_id, для тестов
+        # task_prewake/task_result (остальные тесты этого файла ими не
+        # пользуются).
+        self.sent_full: list[tuple[int, str, int | None, int | None]] = []
         self.reply_markups: list[object] = []
 
-    async def send_direct(self, chat_id, text, reply_to_message_id=None, reply_markup=None):
+    async def send_direct(
+        self,
+        chat_id,
+        text,
+        reply_to_message_id=None,
+        reply_markup=None,
+        message_thread_id=None,
+    ):
         self.sent.append((chat_id, text))
-        self.sent_full.append((chat_id, text, reply_to_message_id))
+        self.sent_full.append((chat_id, text, reply_to_message_id, message_thread_id))
         self.reply_markups.append(reply_markup)
         return 99
 
@@ -398,6 +407,21 @@ async def test_task_prewake_waking_sends_steps_text():
     assert notifier.sent == [(7, STEPS_TEXT)]
 
 
+async def test_task_prewake_replies_into_the_right_topic():
+    # Тот же живой баг 2026-08-05, что и у task_result — «шаги» тоже уезжали
+    # в общий топик без message_thread_id в meta.
+    book, notifier, store = _book(), FakeNotifier(), FakeStore()
+    handler = build_node_event_handler(book, notifier, store)
+    meta = {**_LLM_CHAT_META, "message_thread_id": 42}
+    env = make_event(
+        task_protocol.EVENT_TASK_PREWAKE,
+        {"task_id": 1, "meta": meta, "status": "waking"},
+        src=Address(node="alfred", service="tasks"),
+    )
+    await handler(env)
+    assert notifier.sent_full == [(7, STEPS_TEXT, None, 42)]
+
+
 async def test_task_prewake_ready_sends_arnold_waking():
     book, notifier, store = _book(), FakeNotifier(), FakeStore()
     handler = build_node_event_handler(book, notifier, store)
@@ -461,11 +485,27 @@ async def test_task_result_success_replies_to_trigger_and_records_turn():
     )
     await handler(env)
 
-    assert notifier.sent_full == [(7, "<b>Альфред:</b> Полил цветы, сэр", 501)]
+    assert notifier.sent_full == [(7, "<b>Альфред:</b> Полил цветы, сэр", 501, None)]
     assert len(store.recorded_turns) == 1
     args, _kwargs = store.recorded_turns[0]
     assert args[:4] == (7, 99, 500, "assistant")  # 99 — message_id, вернул FakeNotifier
     assert args[4] == "Полил цветы, сэр"
+
+
+async def test_task_result_success_replies_into_the_right_topic():
+    # Живой баг 2026-08-05: без message_thread_id в meta ответ tasks уезжал
+    # в общий топик личного чата, а не туда, где реально шёл запрос.
+    book, notifier, store = _book(), FakeNotifier(), FakeStore()
+    handler = build_node_event_handler(book, notifier, store)
+    meta = {**_LLM_CHAT_META, "message_thread_id": 42}
+    env = make_event(
+        task_protocol.EVENT_TASK_RESULT,
+        {"task_id": 1, "meta": meta, "ok": True, "result": {"response": "Готово"}},
+        src=Address(node="alfred", service="tasks"),
+    )
+    await handler(env)
+
+    assert notifier.sent_full == [(7, "<b>Альфред:</b> Готово", 501, 42)]
 
 
 async def test_task_result_failure_sends_albert_task_missed_as_reply():
@@ -478,7 +518,7 @@ async def test_task_result_failure_sends_albert_task_missed_as_reply():
     )
     await handler(env)
 
-    assert notifier.sent_full == [(7, ALBERT_TASK_MISSED, 501)]
+    assert notifier.sent_full == [(7, ALBERT_TASK_MISSED, 501, None)]
     assert store.recorded_turns == []
 
 
@@ -494,6 +534,56 @@ async def test_task_result_ignores_non_llm_chat_kind():
 
     assert notifier.sent == []
     assert store.recorded_turns == []
+
+
+# --- tool_call: дебаг-канал вызовов тула из self-scheduled remind (служба
+# tasks) — живой баг 2026-08-05, args/result раньше не доезжали вовсе ---
+
+
+def _tool_call_book() -> SubscriptionBook:
+    # event_types должен явно включать alfred_tool_call — notify_tool_call
+    # намеренно не трактует "*" как охват (см. её докстринг), обычный _book()
+    # с event_types=["*"] тула не получит. Имя не _admin_book — та занята
+    # ниже (idle_power_blocked), а имена в этом модуле резолвятся поздно.
+    return SubscriptionBook.from_config(
+        [SubscriptionConfig(name="admin", chat_id=9, event_types=["alfred_tool_call"])]
+    )
+
+
+async def test_tool_call_without_debug_store_sends_short_text_without_button():
+    notifier, store = FakeNotifier(), FakeStore()
+    handler = build_node_event_handler(_tool_call_book(), notifier, store)
+    env = make_event(
+        task_protocol.EVENT_TOOL_CALL,
+        {"name": "calc", "args": {"expression": "1+1"}, "result": "2"},
+        src=Address(node="alfred", service="tasks"),
+    )
+    await handler(env)
+
+    assert notifier.sent == [(9, "🔧 Alfred вызвал инструмент: calc")]
+    assert notifier.reply_markups == [None]
+
+
+async def test_tool_call_with_debug_store_attaches_expand_button_with_real_args_result():
+    notifier, store = FakeNotifier(), FakeStore()
+    tool_calls = ToolCalls()
+    handler = build_node_event_handler(_tool_call_book(), notifier, store, tool_calls=tool_calls)
+    env = make_event(
+        task_protocol.EVENT_TOOL_CALL,
+        {"name": "calc", "args": {"expression": "1+1"}, "result": "2"},
+        src=Address(node="alfred", service="tasks"),
+    )
+    await handler(env)
+
+    assert notifier.sent == [(9, "🔧 Alfred вызвал инструмент: calc")]
+    markup = notifier.reply_markups[0]
+    assert markup is not None
+    token = markup.inline_keyboard[0][0].callback_data.split(":")[-1]
+    call = tool_calls.get(token)
+    assert call is not None
+    assert call.name == "calc"
+    assert call.args == {"expression": "1+1"}
+    assert call.result == "2"
 
 
 async def test_handler_broadcasts_on_node_leaving_and_returned():

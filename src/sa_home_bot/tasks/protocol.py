@@ -50,11 +50,13 @@ EVENT_TASK_PREWAKE = "task_prewake"
 # итог исполнения задачи в момент due_at.
 EVENT_TASK_RESULT = "task_result"
 
-# tool_call: {name: str} — факт вызова инструмента моделью ВНУТРИ
-# сработавшей chat_loop-задачи (self-scheduled remind). Только имя, без
-# аргументов/результата — используется bot/node_events.py для дебаг-
-# уведомлений (см. bot/lifecycle.py::notify_tool_call), не для доставки
-# ответа пользователю.
+# tool_call: {name: str, args: dict, result: str} — факт вызова инструмента
+# моделью ВНУТРИ сработавшей chat_loop-задачи (self-scheduled remind).
+# Используется bot/node_events.py для дебаг-уведомлений (см. bot/
+# lifecycle.py::notify_tool_call — args/result дают кнопку «развернуть», как
+# и у живого /ai), не для доставки ответа пользователю. Живой баг 2026-08-05:
+# раньше уходило только имя — кнопке «развернуть» было нечего показывать,
+# разбор self-scheduled remind сводился к чтению логов процесса tasks.
 EVENT_TOOL_CALL = "tool_call"
 
 # meta.kind — единственный сейчас распознаваемый потребителями (bot/

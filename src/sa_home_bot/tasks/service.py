@@ -517,9 +517,13 @@ class TasksService:
             else None,
         )
         async def _emit_tool_call(name: str, call_args: dict[str, Any], result: str) -> None:
-            # Только факт вызова — bot/node_events.py ретранслирует в дебаг-
-            # группу через notify_tool_call (эта служба Telegram не видит).
-            await self._emit(protocol.EVENT_TOOL_CALL, {"name": name})
+            # bot/node_events.py ретранслирует в дебаг-группу через
+            # notify_tool_call (эта служба Telegram не видит). args/result
+            # едут вместе с именем (живой баг 2026-08-05) — иначе кнопке
+            # «развернуть» на той стороне нечего показывать.
+            await self._emit(
+                protocol.EVENT_TOOL_CALL, {"name": name, "args": call_args, "result": result}
+            )
 
         # Живой баг 2026-08-05: bool(...) на "think" из args_json давило
         # None ("не слать флаг вообще" — для моделей вроде Gemma без

@@ -57,6 +57,7 @@ def _ctx(
     dismissal=None,
     notifier=None,
     woken_by=None,
+    message_thread_id=None,
 ):
     return tools.ToolContext(
         chat_id=chat_id,
@@ -70,6 +71,7 @@ def _ctx(
         notifier=notifier,
         store=store,
         woken_by=woken_by,
+        message_thread_id=message_thread_id,
     )
 
 
@@ -608,6 +610,19 @@ async def test_remind_creates_task_for_future_time(store):
     assert args["meta"]["kind"] == tools.task_protocol.TASK_KIND_LLM_CHAT
     assert args["meta"]["chat_id"] == CHAT_ID
     assert "полить цветы" in args["args"]["messages"][-1]["content"]
+
+
+async def test_remind_carries_message_thread_id_in_meta(store):
+    # Живой баг 2026-08-05: без этого ответ tasks (bot/node_events.py)
+    # уезжал в общий топик личного чата, а не в тот, откуда пришёл запрос.
+    link = _FakeNodeLink()
+    when = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    await tools.tool_remind(
+        _ctx(store, node_link=link, message_thread_id=42),
+        {"when": when, "text": "полить цветы"},
+    )
+    _action, args, _dst = link.calls[0]
+    assert args["meta"]["message_thread_id"] == 42
 
 
 async def test_remind_includes_history_snapshot_in_directive(store):
