@@ -12,7 +12,11 @@ sa_home_bot.tasks; у той нет доступа к Telegram, доставка
 ai_turns делаются здесь, по meta, которую сама служба tasks не читает),
 ``tool_call`` (та же служба tasks — факт вызова инструмента моделью внутри
 уже сработавшей chat_loop-задачи, self-scheduled remind; имя тула, аргументы
-и результат, см. tasks/protocol.py::EVENT_TOOL_CALL).
+и результат, см. tasks/protocol.py::EVENT_TOOL_CALL). ``deliver_message``
+(живая находка 2026-08-06: tell/notify_guest, вызванные ИЗ ТОЙ ЖЕ
+chat_loop-задачи — своего Notifier у службы tasks нет, получателя и текст
+она уже подготовила сама, отправляет и пишет ai_turn здесь, см.
+tasks/protocol.py::EVENT_DELIVER_MESSAGE и bot/tools.py::ToolContext.emit).
 ``idle_power_blocked`` (node/service.py::maybe_auto_poweroff_idle — простой
 Alfred дошёл до автовыключения ноды, но открыта SSH-сессия, выключение
 отложено) — адресно админам (notify_admins), с кнопкой «закрыть сессии и
@@ -133,6 +137,29 @@ async def _handle_task_prewake(notifier: Notifier, data: dict) -> None:
     elif status == "failed":
         text = ALBERT_UNAVAILABLE if data.get("reason") == "unreachable" else ALBERT_ASLEEP
         await notifier.send_direct(chat_id, text, message_thread_id=thread_id)
+
+
+async def _handle_deliver_message(notifier: Notifier, store: Store, data: dict) -> None:
+    """tell/notify_guest, вызванные ВНУТРИ сработавшей chat_loop-задачи
+    (self-scheduled remind — bot/tools.py::ToolContext.emit): служба tasks
+    сама резолвит получателя (своя SubscriptionBook) и рендерит текст, но
+    отправить умеет только бот — единственный, у кого есть настоящий
+    Notifier (см. tasks/protocol.py::EVENT_DELIVER_MESSAGE). ``plain`` идёт
+    в ai_turns получателя (та же запись, что _deliver_personal_message
+    делает сама у живого /ai) — тогда реплай на уведомление продолжит
+    разговор обычным образом."""
+    chat_id = data.get("chat_id")
+    html_text = data.get("html")
+    if chat_id is None or not html_text:
+        return
+    thread_id = data.get("message_thread_id")
+    message_id = await notifier.send_direct(chat_id, html_text, message_thread_id=thread_id)
+    if message_id is None:
+        return
+    plain_text = data.get("plain") or html_text
+    await store.record_ai_turn(
+        chat_id, message_id, message_id, "assistant", plain_text, datetime.now(tz=UTC)
+    )
 
 
 async def _maybe_fire_event_waiter(get_node_link, node_id: str, event_type: str) -> None:
@@ -336,6 +363,9 @@ def build_node_event_handler(
             return
         if name == task_protocol.EVENT_TASK_RESULT:
             await _handle_task_result(notifier, store, data, book)
+            return
+        if name == task_protocol.EVENT_DELIVER_MESSAGE:
+            await _handle_deliver_message(notifier, store, data)
             return
         if name == task_protocol.EVENT_TOOL_CALL:
             await notify_tool_call(

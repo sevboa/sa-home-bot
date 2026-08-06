@@ -523,6 +523,15 @@ class TasksService:
             # (bot/node_events.py) топик уже уважала. Та же логика, что и у
             # woken_by чуть выше.
             message_thread_id=meta.get("message_thread_id"),
+            # Живая находка 2026-08-06: self._book — та же SubscriptionBook,
+            # что уже используется парой строк выше для subscription, и её
+            # хватает guests_list/резолвингу получателя (tell/notify_guest) —
+            # им нужен только конфиг, не живой Telegram. emit — мост для
+            # РЕАЛЬНОЙ отправки (см. ai_tools.ToolContext.emit): своего
+            # notifier у этого процесса нет и не будет, а через него бот
+            # доставит сообщение по EVENT_DELIVER_MESSAGE.
+            book=self._book,
+            emit=self._emit,
         )
         async def _emit_tool_call(name: str, call_args: dict[str, Any], result: str) -> None:
             # bot/node_events.py ретранслирует в дебаг-группу через

@@ -63,3 +63,21 @@ EVENT_TOOL_CALL = "tool_call"
 # node_events.py) вид задачи: результат/неудачу нужно доставить в Telegram
 # как ответ Альфреда, продолжающий диалог meta.dialogue_id.
 TASK_KIND_LLM_CHAT = "llm_chat"
+
+# deliver_message: {chat_id, html: str, plain: str, message_thread_id?} —
+# служба tasks не умеет говорить с Telegram напрямую (см. докстринг модуля
+# tasks/service.py), но тулы tell/notify_guest, вызванные ВНУТРИ сработавшей
+# chat_loop-задачи (self-scheduled remind — живой запрос пользователя
+# 2026-08-06: "напомни мне как граф, что пора спать" реально означает
+# remind, а не живой /ai), должны уметь отправить готовое сообщение. Бот —
+# единственный, у кого есть настоящий Notifier — берёт это на себя (см.
+# bot/node_events.py::_handle_deliver_message), как уже делает для
+# task_result. ``html`` — то, что реально уходит в Telegram (уже
+# отрендировано, с разметкой), ``plain`` — сырой текст без обёртки, для
+# записи в ai_turns получателя (та же пара, что render(target)/text у
+# bot/tools.py::_deliver_personal_message в живом /ai). Доставка отсюда —
+# fire-and-forget: служба tasks не ждёт подтверждения (round-trip запрос-
+# ответ в протокол не заведён, тот же компромисс, что и у task_result),
+# поэтому тул отвечает моделью "передано" оптимистично, не дожидаясь
+# реального ухода сообщения.
+EVENT_DELIVER_MESSAGE = "deliver_message"

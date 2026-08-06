@@ -95,3 +95,22 @@ async def test_guests_list_unavailable_without_book():
     )
     result = await ai_tools.tool_guests_list(ctx, {})
     assert result.startswith("недоступно")
+
+
+async def test_guests_list_works_from_self_scheduled_remind_without_notifier():
+    """Служба tasks (self-scheduled remind, живая находка 2026-08-06) не
+    даёт notifier/store вовсе, но свою SubscriptionBook теперь передаёт (см.
+    tasks/service.py::_fire_chat_loop) — только книга и нужна, тул читает
+    только конфиг подписок, а не живой Telegram."""
+    ctx = ai_tools.ToolContext(
+        chat_id=OWNER_CHAT,
+        dialogue_id=1,
+        trigger_message_id=1,
+        settings=Settings(),
+        book=_book(),
+        notifier=None,
+        store=None,
+    )
+    result = await ai_tools.tool_guests_list(ctx, {})
+    assert "Наташа" in result
+    assert "Игорь" in result

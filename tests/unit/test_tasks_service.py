@@ -243,6 +243,34 @@ async def test_fire_chat_loop_woken_by_none_without_awaited_meta(store, monkeypa
     assert captured["tool_ctx"].woken_by is None
 
 
+async def test_fire_chat_loop_wires_book_and_emit_bridge(store, monkeypatch):
+    # Живая находка 2026-08-06: tell/notify_guest, вызванные ИЗ сработавшей
+    # chat_loop-задачи (self-scheduled remind), падали в "недоступно" — у
+    # ToolContext не было ни book, ни моста доставки, хотя своя
+    # SubscriptionBook (self._book) и своя очередь событий (self._emit) у
+    # службы уже есть, просто не прокидывались дальше.
+    captured: dict = {}
+
+    async def fake_chat_loop(*args, **kwargs):
+        captured["tool_ctx"] = args[4]
+        return "готово"
+
+    monkeypatch.setattr(tasks_service, "run_chat_loop", fake_chat_loop)
+    link = FakeNodeLink(OWN_STATE, routes={"winpc:llm": {"asleep": False}})
+    emitter = FakeEmitter()
+    svc = _service(store, link, emitter)
+
+    await svc._fire_one(_chat_row())
+
+    tool_ctx = captured["tool_ctx"]
+    assert tool_ctx.book is svc._book
+    assert tool_ctx.notifier is None
+    assert tool_ctx.store is None
+    assert tool_ctx.emit is not None
+    await tool_ctx.emit("some_event", {"x": 1})
+    assert ("some_event", {"x": 1}) in emitter.events
+
+
 async def test_fire_gives_up_after_grace(store, monkeypatch):
     # Цель не поднялась за отведённое время — честное «пропущено», но лишь
     # после повторных попыток, а не с первой presence-проверки.

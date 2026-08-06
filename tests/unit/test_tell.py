@@ -13,6 +13,7 @@ from sa_home_bot.config import (
     SubscriptionConfig,
 )
 from sa_home_bot.subscriptions.book import SubscriptionBook
+from sa_home_bot.tasks import protocol as task_protocol
 
 ANDREY_CHAT = 555
 GROUP_CHAT = -100500
@@ -69,6 +70,18 @@ class FakeStore:
 
     async def record_ai_turn(self, chat_id, message_id, dialogue_id, role, content, at, **kw):
         self.turns.append((chat_id, message_id, dialogue_id, role, content))
+
+
+class FakeEmit:
+    """Мост службы tasks (ctx.emit) — вместо настоящего notifier собирает
+    события EVENT_DELIVER_MESSAGE, которые в проде уходят боту (см.
+    bot/node_events.py::_handle_deliver_message)."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+
+    async def __call__(self, event_type: str, data: dict) -> None:
+        self.events.append((event_type, data))
 
 
 def _ctx(**over):
@@ -202,6 +215,44 @@ async def test_tell_unavailable_without_notifier():
     отказывает, а честно не умеет (то же, что dismiss без dismissal)."""
     ctx = ai_tools.ToolContext(
         chat_id=1, dialogue_id=1, trigger_message_id=1, settings=Settings()
+    )
+    result = await ai_tools.tool_tell(ctx, {"recipient": "Андрей", "text": "привет"})
+    assert result.startswith("недоступно")
+
+
+async def test_tell_delivers_via_emit_bridge_when_no_notifier(monkeypatch):
+    """Служба tasks (self-scheduled remind, живая находка 2026-08-06): своей
+    книги подписок и моста хватает на резолвинг + доставку, даже без
+    настоящего notifier — тул просит бота отправить через
+    EVENT_DELIVER_MESSAGE, а не честно отказывает.
+
+    Свой лимитер (см. test_tell_stops_at_the_hourly_limit) — общий
+    ``_tell_limiter`` за счёт множества других тестов этого файла, шлющих с
+    chat_id=1, к этому месту почти наверняка исчерпан, а формулировка отказа
+    ("слишком много сообщений передано") сама содержит слово "передано" и
+    ложно проходит наивную проверку."""
+    from sa_home_bot.bot import invites
+
+    monkeypatch.setattr(
+        ai_tools, "_tell_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_PER_HOUR)
+    )
+    emit = FakeEmit()
+    ctx = _ctx(notifier=None, store=None, emit=emit)
+
+    result = await ai_tools.tool_tell(ctx, {"recipient": "Андрей", "text": "Ужин в семь"})
+
+    assert len(emit.events) == 1
+    event_type, data = emit.events[0]
+    assert event_type == task_protocol.EVENT_DELIVER_MESSAGE
+    assert "передано" in result
+    assert data["chat_id"] == ANDREY_CHAT
+    assert "Ужин в семь" in data["html"]
+    assert data["plain"] == "Ужин в семь"
+
+
+async def test_tell_still_unavailable_without_book_even_with_emit():
+    ctx = ai_tools.ToolContext(
+        chat_id=1, dialogue_id=1, trigger_message_id=1, settings=Settings(), emit=FakeEmit()
     )
     result = await ai_tools.tool_tell(ctx, {"recipient": "Андрей", "text": "привет"})
     assert result.startswith("недоступно")
@@ -504,3 +555,44 @@ async def test_notify_guest_requires_persona():
     )
     assert "ошибка" in result
     assert notifier.sent == []
+
+
+# --- notify_guest из self-scheduled remind (служба tasks) — живой баг
+# 2026-08-06: утренний remind звал notify_persona (работал — своих
+# зависимостей нет), а notify_guest падал в "недоступно: сейчас я не могу
+# никому написать", хотя владелец просил себя же уведомить в стиле
+# персонажа. Мост (ctx.emit) чинит именно этот сценарий.
+
+
+async def test_notify_guest_delivers_via_emit_bridge_when_no_notifier(monkeypatch):
+    # Тот же общий _tell_limiter, что и у теста tell чуть выше — сбрасываем
+    # по той же причине (см. его докстринг).
+    from sa_home_bot.bot import invites
+
+    monkeypatch.setattr(
+        ai_tools, "_tell_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_PER_HOUR)
+    )
+    emit = FakeEmit()
+    ctx = _ctx(chat_id=1, book=_book(), notifier=None, store=None, emit=emit, settings=Settings())
+
+    result = await ai_tools.tool_notify_guest(
+        ctx, {"recipient": "me", "persona": "Админ", "text": "Протокол «Утро» активирован"}
+    )
+
+    assert len(emit.events) == 1
+    event_type, data = emit.events[0]
+    assert event_type == task_protocol.EVENT_DELIVER_MESSAGE
+    assert data["chat_id"] == 1  # self-напоминание владельцу
+    assert "Админ" in data["html"]
+    assert "Протокол «Утро» активирован" in data["plain"]
+    assert "передано" in result
+
+
+async def test_notify_guest_still_unavailable_without_notifier_or_emit():
+    ctx = ai_tools.ToolContext(
+        chat_id=1, dialogue_id=1, trigger_message_id=1, settings=Settings(), book=_book()
+    )
+    result = await ai_tools.tool_notify_guest(
+        ctx, {"recipient": "me", "persona": "Админ", "text": "х"}
+    )
+    assert result.startswith("недоступно")

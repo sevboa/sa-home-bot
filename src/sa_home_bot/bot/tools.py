@@ -146,11 +146,15 @@ class ToolContext:
     (см. tools_for): Альфред не умеет того, чего не может сам пользователь.
     ``None`` — подписки нет, остаются только тулы без прав (fail-closed).
 
-    ``book``/``notifier``/``store``/``author`` нужны одному тулу — ``tell``
-    (передать сообщение человеку в личку): найти получателя среди подписок,
-    отправить ему сообщение и записать его как ход диалога, чтобы получатель
-    мог ответить реплаем. У службы tasks этих вещей нет вовсе (см. докстринг
-    файла), поэтому там тул честно скажет, что сейчас не умеет, — так же, как
+    ``book``/``notifier``/``store``/``author`` нужны тулам, которые ищут
+    получателя и шлют ему личное сообщение (``tell``, ``notify_guest``,
+    ``guests_list``): найти получателя среди подписок, отправить ему
+    сообщение и записать его как ход диалога, чтобы получатель мог ответить
+    реплаем. У службы tasks настоящего ``notifier``/``store`` нет (см.
+    докстринг файла tasks/service.py) — только ``book`` (своя
+    SubscriptionBook, тот же конфиг) и ``emit`` (см. ниже), поэтому доставка
+    там идёт через мост-событие, а не напрямую; без него (или у живого /ai,
+    где notifier есть напрямую и мост не нужен) — честный отказ, так же, как
     ``dismiss`` без ``dismissal``.
     """
 
@@ -181,6 +185,17 @@ class ToolContext:
     # единого реального действия. Раз словесный запрет не работает, тул
     # remind сверяет сам и жёстко отказывает, см. tool_remind.
     woken_by: tuple[str, str] | None = None
+    # Мост доставки для службы tasks (self-scheduled remind, живая находка
+    # 2026-08-06): там нет ни notifier, ни store (см. поля выше), но есть
+    # SubscriptionBook (передаётся сюда как ``book``) и своя очередь событий
+    # роя. ``emit`` — тот же EventEmitter, что у TasksService._emit
+    # (tasks/service.py) — позволяет tell/notify_guest попросить БОТА
+    # (единственного, у кого есть настоящий Notifier) реально отправить
+    # сообщение через tasks.protocol.EVENT_DELIVER_MESSAGE (см.
+    # bot/node_events.py::_handle_deliver_message), вместо честного отказа.
+    # None у живого /ai — там доставка идёт напрямую через notifier, мост не
+    # нужен.
+    emit: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None
 
 
 ToolHandler = Callable[["ToolContext", dict[str, Any]], Awaitable[str]]
@@ -2550,26 +2565,49 @@ async def _deliver_personal_message(
     if not _tell_limiter.register(ctx.chat_id):
         return "не сейчас: слишком много сообщений передано за последний час"
 
-    message_id = await ctx.notifier.send_direct(target.chat_id, render(target))
-    if message_id is None:
-        return f"не дошло: {target.display} сейчас недоступен"
-    # Записываем как свой ход в диалоге получателя: тогда он ответит обычным
-    # реплаем и разговор продолжится (реплай-цепочка резолвится по ai_turns,
-    # см. bot/handlers/ai.py::AiReplyContinuation), а не упрётся в сообщение,
-    # на которое некому отвечать.
-    if ctx.store is not None:
-        await ctx.store.record_ai_turn(
-            target.chat_id, message_id, message_id, "assistant", text, datetime.now(tz=UTC)
+    rendered = render(target)
+    if ctx.notifier is not None:
+        message_id = await ctx.notifier.send_direct(target.chat_id, rendered)
+        if message_id is None:
+            return f"не дошло: {target.display} сейчас недоступен"
+        # Записываем как свой ход в диалоге получателя: тогда он ответит
+        # обычным реплаем и разговор продолжится (реплай-цепочка резолвится
+        # по ai_turns, см. bot/handlers/ai.py::AiReplyContinuation), а не
+        # упрётся в сообщение, на которое некому отвечать.
+        if ctx.store is not None:
+            await ctx.store.record_ai_turn(
+                target.chat_id, message_id, message_id, "assistant", text, datetime.now(tz=UTC)
+            )
+        log.info(
+            "tell: сообщение от chat=%s доставлено chat=%s (%s)",
+            ctx.chat_id, target.chat_id, target.display,
         )
+        return f"передано: {target.display} получил сообщение"
+
+    # Служба tasks (self-scheduled remind, живая находка 2026-08-06): своего
+    # notifier нет, но есть мост к боту — единственному, у кого он есть (см.
+    # ToolContext.emit). Доставка fire-and-forget: bot/node_events.py::
+    # _handle_deliver_message шлёт сообщение и сам пишет ai_turn, здесь
+    # подтверждения ждать неоткуда (тот же компромисс, что у task_result).
+    assert ctx.emit is not None  # гарантировано вызывающим (tool_tell/tool_notify_guest)
+    await ctx.emit(
+        task_protocol.EVENT_DELIVER_MESSAGE,
+        {
+            "chat_id": target.chat_id,
+            "html": rendered,
+            "plain": text,
+            "message_thread_id": None,
+        },
+    )
     log.info(
-        "tell: сообщение от chat=%s доставлено chat=%s (%s)",
+        "tell: сообщение от chat=%s поставлено на доставку в chat=%s (%s) через tasks",
         ctx.chat_id, target.chat_id, target.display,
     )
-    return f"передано: {target.display} получил сообщение"
+    return f"передано: {target.display} получит сообщение"
 
 
 async def tool_tell(ctx: ToolContext, args: dict[str, Any]) -> str:
-    if ctx.book is None or ctx.notifier is None:
+    if ctx.book is None or (ctx.notifier is None and ctx.emit is None):
         return "недоступно: сейчас я не могу никому написать"
     if ctx.chat_id is None:
         return "недоступно: непонятно, от кого передавать"
@@ -2789,7 +2827,7 @@ def render_notify(persona: dict[str, str], text: str) -> str:
 
 
 async def tool_notify_guest(ctx: ToolContext, args: dict[str, Any]) -> str:
-    if ctx.book is None or ctx.notifier is None:
+    if ctx.book is None or (ctx.notifier is None and ctx.emit is None):
         return "недоступно: сейчас я не могу никому написать"
     if ctx.chat_id is None:
         return "недоступно: непонятно, откуда уведомлять"

@@ -586,6 +586,77 @@ async def test_tool_call_with_debug_store_attaches_expand_button_with_real_args_
     assert call.result == "2"
 
 
+# --- deliver_message: мост доставки для tell/notify_guest, вызванных ИЗ
+# сработавшей chat_loop-задачи (self-scheduled remind) — живая находка
+# 2026-08-06, служба tasks не умеет отправлять сама, см. tasks/protocol.py::
+# EVENT_DELIVER_MESSAGE и bot/tools.py::ToolContext.emit.
+
+
+async def test_deliver_message_sends_html_and_records_plain_turn():
+    book, notifier, store = _book(), FakeNotifier(), FakeStore()
+    handler = build_node_event_handler(book, notifier, store)
+    env = make_event(
+        task_protocol.EVENT_DELIVER_MESSAGE,
+        {"chat_id": 7, "html": "<b>Граф</b>: пора спать", "plain": "пора спать"},
+        src=Address(node="alfred", service="tasks"),
+    )
+    await handler(env)
+
+    assert notifier.sent_full == [(7, "<b>Граф</b>: пора спать", None, None)]
+    assert len(store.recorded_turns) == 1
+    args, _kwargs = store.recorded_turns[0]
+    assert args[:4] == (7, 99, 99, "assistant")  # 99 — message_id, вернул FakeNotifier
+    assert args[4] == "пора спать"
+
+
+async def test_deliver_message_respects_thread_id():
+    book, notifier, store = _book(), FakeNotifier(), FakeStore()
+    handler = build_node_event_handler(book, notifier, store)
+    env = make_event(
+        task_protocol.EVENT_DELIVER_MESSAGE,
+        {"chat_id": 7, "html": "текст", "plain": "текст", "message_thread_id": 42},
+        src=Address(node="alfred", service="tasks"),
+    )
+    await handler(env)
+
+    assert notifier.sent_full == [(7, "текст", None, 42)]
+
+
+async def test_deliver_message_ignores_missing_chat_id_or_text():
+    book, notifier, store = _book(), FakeNotifier(), FakeStore()
+    handler = build_node_event_handler(book, notifier, store)
+    for data in ({"html": "текст"}, {"chat_id": 7}, {"chat_id": 7, "html": ""}):
+        await handler(
+            make_event(
+                task_protocol.EVENT_DELIVER_MESSAGE,
+                data,
+                src=Address(node="alfred", service="tasks"),
+            )
+        )
+    assert notifier.sent == []
+    assert store.recorded_turns == []
+
+
+async def test_deliver_message_does_not_record_turn_on_failed_send():
+    book, store = _book(), FakeStore()
+
+    class FailingNotifier(FakeNotifier):
+        async def send_direct(self, *args, **kwargs):
+            await super().send_direct(*args, **kwargs)
+            return None
+
+    notifier = FailingNotifier()
+    handler = build_node_event_handler(book, notifier, store)
+    env = make_event(
+        task_protocol.EVENT_DELIVER_MESSAGE,
+        {"chat_id": 7, "html": "текст", "plain": "текст"},
+        src=Address(node="alfred", service="tasks"),
+    )
+    await handler(env)
+
+    assert store.recorded_turns == []
+
+
 async def test_handler_broadcasts_on_node_leaving_and_returned():
     """Этап 23: штатный уход и возвращение — системные уведомления для
     любого типа машины (в отличие от аварийных node_down/node_up)."""
