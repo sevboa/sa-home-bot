@@ -2499,10 +2499,17 @@ TELL_RIGHT = "tell@llm"
 # умолчанию вместе с TELL_RIGHT — см. комментарий выше.
 TELL_GUESTS_RIGHT = "tell_guests@llm"
 
-# Потолок доставок от одного автора за час: модель может увлечься и отправить
-# одно и то же несколько раз, а получатель этого не просил.
-TELL_MAX_PER_HOUR = 10
-_tell_limiter = invites.AttemptLimiter(TELL_MAX_PER_HOUR)
+# Живая находка 2026-08-06: раньше был один лимит на автора (10/час) —
+# рассылка ОДНОГО notify_guest десятерым разным гостям тратила его целиком
+# так же, как повторная отправка ОДНОМУ И ТОМУ ЖЕ человеку 10 раз подряд,
+# хотя риски у этих сценариев разные (первое — легитимная рассылка
+# владельца, второе — модель зациклилась и спамит). Решение пользователя:
+# два независимых потолка — сколько получает один конкретный человек и
+# сколько всего уходит из одного чата-инициатора.
+TELL_MAX_PER_RECIPIENT_PER_HOUR = 10  # одному и тому же адресату
+TELL_MAX_TOTAL_PER_HOUR = 100  # всего от одного чата-инициатора (рассылки)
+_tell_limiter = invites.AttemptLimiter(TELL_MAX_PER_RECIPIENT_PER_HOUR)  # ключ: (кто просил, кому)
+_tell_broadcast_limiter = invites.AttemptLimiter(TELL_MAX_TOTAL_PER_HOUR)  # ключ: кто просил
 
 
 def render_tell(text: str, author: str | None, to_owner_role: bool = False) -> str:
@@ -2562,8 +2569,13 @@ async def _deliver_personal_message(
         if refusal is not None:
             return refusal
 
-    if not _tell_limiter.register(ctx.chat_id):
-        return "не сейчас: слишком много сообщений передано за последний час"
+    # Порядок важен: сперва более тесный потолок (один получатель), чтобы
+    # зацикленная на одном человеке модель не жгла попусту общий бюджет
+    # рассылки — тогда отказ по нему не мешает рассылке другим.
+    if not _tell_limiter.register((ctx.chat_id, target.chat_id)):
+        return f"не сейчас: {target.display} уже получил слишком много сообщений за последний час"
+    if not _tell_broadcast_limiter.register(ctx.chat_id):
+        return "не сейчас: слишком много сообщений отправлено за последний час — общий лимит рассылки"
 
     rendered = render(target)
     if ctx.notifier is not None:

@@ -226,15 +226,18 @@ async def test_tell_delivers_via_emit_bridge_when_no_notifier(monkeypatch):
     настоящего notifier — тул просит бота отправить через
     EVENT_DELIVER_MESSAGE, а не честно отказывает.
 
-    Свой лимитер (см. test_tell_stops_at_the_hourly_limit) — общий
-    ``_tell_limiter`` за счёт множества других тестов этого файла, шлющих с
-    chat_id=1, к этому месту почти наверняка исчерпан, а формулировка отказа
-    ("слишком много сообщений передано") сама содержит слово "передано" и
-    ложно проходит наивную проверку."""
+    Свои лимитеры (см. test_tell_stops_at_the_hourly_limit) — общие
+    ``_tell_limiter``/``_tell_broadcast_limiter`` за счёт множества других
+    тестов этого файла, шлющих с chat_id=1, к этому месту почти наверняка
+    исчерпаны, а формулировка отказа по получателю сама содержит слово
+    "получил" и могла бы ложно пройти наивную проверку."""
     from sa_home_bot.bot import invites
 
     monkeypatch.setattr(
-        ai_tools, "_tell_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_PER_HOUR)
+        ai_tools, "_tell_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR)
+    )
+    monkeypatch.setattr(
+        ai_tools, "_tell_broadcast_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_TOTAL_PER_HOUR)
     )
     emit = FakeEmit()
     ctx = _ctx(notifier=None, store=None, emit=emit)
@@ -268,15 +271,83 @@ async def test_tell_stops_at_the_hourly_limit(monkeypatch):
     from sa_home_bot.bot import invites
 
     monkeypatch.setattr(ai_tools, "_tell_limiter", invites.AttemptLimiter(2))
+    monkeypatch.setattr(
+        ai_tools, "_tell_broadcast_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_TOTAL_PER_HOUR)
+    )
     notifier = FakeNotifier()
     ctx = _ctx(notifier=notifier)
     for _ in range(2):
         assert "передано" in await ai_tools.tool_tell(
             ctx, {"recipient": "Андрей", "text": "привет"}
         )
-    assert "не сейчас" in await ai_tools.tool_tell(
-        ctx, {"recipient": "Андрей", "text": "привет"}
+    result = await ai_tools.tool_tell(ctx, {"recipient": "Андрей", "text": "привет"})
+    assert "не сейчас" in result
+    assert "Андрей Иванов" in result  # отказ по КОНКРЕТНОМУ получателю, не общий
+    assert len(notifier.sent) == 2
+
+
+async def test_tell_broadcast_to_many_recipients_not_blocked_by_per_recipient_limit(monkeypatch):
+    # Живой инцидент 2026-08-06: рассылка ОДНОГО уведомления 10 РАЗНЫМ
+    # гостям исчерпывала прежний единый лимит на автора (10/час) целиком —
+    # хотя каждый получил ровно одно сообщение, что не спам. Теперь потолок
+    # на получателя (2 в этом тесте) не мешает рассылке разным людям.
+    from sa_home_bot.bot import invites
+
+    monkeypatch.setattr(ai_tools, "_tell_limiter", invites.AttemptLimiter(2))
+    monkeypatch.setattr(
+        ai_tools, "_tell_broadcast_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_TOTAL_PER_HOUR)
     )
+    book = SubscriptionBook.from_config(
+        [SubscriptionConfig(name="me", chat_id=1, allowed_commands=["*"])],
+        [
+            GuestSubscriptionConfig(
+                name=f"Гость{i}",
+                chat_id=1000 + i,
+                allowed_commands=["chat@llm"],
+                invited_user=f"Гость{i}",
+            )
+            for i in range(5)
+        ],
+    )
+    notifier = FakeNotifier()
+    ctx = _ctx(book=book, notifier=notifier, settings=Settings())
+    for i in range(5):
+        result = await ai_tools.tool_tell(ctx, {"recipient": f"Гость{i}", "text": "привет"})
+        assert "передано" in result
+    assert len(notifier.sent) == 5
+
+
+async def test_tell_broadcast_total_limit_stops_mass_send(monkeypatch):
+    # Общий потолок рассылки — страховка от по-настоящему массовой рассылки
+    # (например, если гостей окажется больше сотни), даже если по получателю
+    # лимит не тронут.
+    from sa_home_bot.bot import invites
+
+    monkeypatch.setattr(
+        ai_tools, "_tell_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR)
+    )
+    monkeypatch.setattr(ai_tools, "_tell_broadcast_limiter", invites.AttemptLimiter(2))
+    book = SubscriptionBook.from_config(
+        [SubscriptionConfig(name="me", chat_id=1, allowed_commands=["*"])],
+        [
+            GuestSubscriptionConfig(
+                name=f"Гость{i}",
+                chat_id=1000 + i,
+                allowed_commands=["chat@llm"],
+                invited_user=f"Гость{i}",
+            )
+            for i in range(3)
+        ],
+    )
+    notifier = FakeNotifier()
+    ctx = _ctx(book=book, notifier=notifier, settings=Settings())
+    for i in range(2):
+        assert "передано" in await ai_tools.tool_tell(
+            ctx, {"recipient": f"Гость{i}", "text": "привет"}
+        )
+    result = await ai_tools.tool_tell(ctx, {"recipient": "Гость2", "text": "привет"})
+    assert "не сейчас" in result
+    assert "общий лимит" in result
     assert len(notifier.sent) == 2
 
 
@@ -565,12 +636,15 @@ async def test_notify_guest_requires_persona():
 
 
 async def test_notify_guest_delivers_via_emit_bridge_when_no_notifier(monkeypatch):
-    # Тот же общий _tell_limiter, что и у теста tell чуть выше — сбрасываем
-    # по той же причине (см. его докстринг).
+    # Те же общие лимитеры, что и у теста tell чуть выше — сбрасываем по
+    # той же причине (см. его докстринг).
     from sa_home_bot.bot import invites
 
     monkeypatch.setattr(
-        ai_tools, "_tell_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_PER_HOUR)
+        ai_tools, "_tell_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR)
+    )
+    monkeypatch.setattr(
+        ai_tools, "_tell_broadcast_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_TOTAL_PER_HOUR)
     )
     emit = FakeEmit()
     ctx = _ctx(chat_id=1, book=_book(), notifier=None, store=None, emit=emit, settings=Settings())

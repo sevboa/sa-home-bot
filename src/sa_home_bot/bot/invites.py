@@ -19,6 +19,7 @@ import logging
 import re
 import secrets
 import time
+from collections.abc import Hashable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -74,7 +75,10 @@ def normalize(text: str | None) -> str | None:
 
 
 class AttemptLimiter:
-    """Счётчик попыток ввода кода из одного (неподписного) чата.
+    """Счётчик попыток под произвольным ключом (изначально — chat_id
+    неподписного чата, вводящего инвайт-код; bot/tools.py переиспользует
+    тот же класс под ключ-пару (откуда, кому) для tell/notify_guest — живая
+    находка 2026-08-06, см. её докстринг там).
 
     Живёт в памяти процесса и обнуляется при рестарте — сознательно: это
     защита от долбёжки, а не учётная запись, и хранить её в реплицируемом
@@ -86,24 +90,24 @@ class AttemptLimiter:
 
     def __init__(self, limit: int) -> None:
         self._limit = limit
-        self._hits: dict[int, list[float]] = {}
+        self._hits: dict[Hashable, list[float]] = {}
 
-    def register(self, chat_id: int, now: float | None = None) -> bool:
+    def register(self, key: Hashable, now: float | None = None) -> bool:
         """Засчитать попытку. False — лимит исчерпан, дальше не проверяем."""
         moment = time.monotonic() if now is None else now
-        hits = [t for t in self._hits.get(chat_id, []) if moment - t < self.WINDOW_S]
+        hits = [t for t in self._hits.get(key, []) if moment - t < self.WINDOW_S]
         hits.append(moment)
-        self._hits[chat_id] = hits
+        self._hits[key] = hits
         return len(hits) <= self._limit
 
-    def exhausted_now(self, chat_id: int) -> bool:
+    def exhausted_now(self, key: Hashable) -> bool:
         """Ровно ли сейчас исчерпан лимит — момент, когда стоит сказать админу
         (один раз на окно, а не на каждую следующую попытку)."""
-        return len(self._hits.get(chat_id, [])) == self._limit + 1
+        return len(self._hits.get(key, [])) == self._limit + 1
 
-    def forget(self, chat_id: int) -> None:
-        """Забыть чат — он больше не «чужой» (код принят)."""
-        self._hits.pop(chat_id, None)
+    def forget(self, key: Hashable) -> None:
+        """Забыть ключ — например, чат больше не «чужой» (код принят)."""
+        self._hits.pop(key, None)
 
 
 @dataclass(frozen=True)
