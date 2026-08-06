@@ -17,7 +17,7 @@ import pytest_asyncio
 
 from sa_home_bot import wake_core
 from sa_home_bot.bot.service_link import ServiceUnavailableError
-from sa_home_bot.config import Settings
+from sa_home_bot.config import GuestSubscriptionConfig, Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
@@ -269,6 +269,25 @@ async def test_fire_chat_loop_wires_book_and_emit_bridge(store, monkeypatch):
     assert tool_ctx.emit is not None
     await tool_ctx.emit("some_event", {"x": 1})
     assert ("some_event", {"x": 1}) in emitter.events
+
+
+def test_book_includes_guest_subscriptions_not_just_owner(store):
+    # Живой баг 2026-08-06 (инцидент с задачей id=129 на alfred): self._book
+    # строился только из settings.subscriptions — без settings.
+    # guest_subscriptions ни один гость не попадал в книгу remind-
+    # продолжений. Незаметно, пока ctx.book вообще не доходил до тулов; как
+    # только он стал доступен (см. _fire_chat_loop), guests_list внутри
+    # remind начал честно, но неверно отвечать "гостей с такими условиями
+    # нет" — тот же конфиг, что app.py:67 собирает книгу бота с ОБОИМИ
+    # аргументами.
+    settings = Settings(
+        guest_subscriptions=[
+            GuestSubscriptionConfig(name="Гость", chat_id=999, allowed_commands=["chat@llm"])
+        ]
+    )
+    link = FakeNodeLink(OWN_STATE, routes={})
+    svc = TasksService(settings, store, link, emit=FakeEmitter())
+    assert [g.chat_id for g in svc._book.guests()] == [999]
 
 
 async def test_fire_gives_up_after_grace(store, monkeypatch):
