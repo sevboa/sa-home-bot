@@ -2915,7 +2915,22 @@ async def tool_guests_list(ctx: ToolContext, args: dict[str, Any]) -> str:
     guests = all_guests
     right = str(args.get("right") or "").strip()
     if right:
-        guests = [g for g in guests if g.allows_command(right)]
+        if "@" in right:
+            guests = [g for g in guests if g.allows_command(right)]
+        else:
+            # Живой баг 2026-08-06: модель регулярно передаёт голое имя
+            # службы ("vpn"), а не точную строку права ("usage@vpn") — хотя
+            # в описании тула есть примеры с "@", результат выглядел как
+            # честный "гостей нет", а на деле фильтр просто не совпадал ни с
+            # чем. Голое имя без "@" теперь трактуем как "есть хоть какое-то
+            # право на эту службу" — то, что модель почти всегда и имела в
+            # виду.
+            suffix = f"@{right}"
+            guests = [
+                g
+                for g in guests
+                if g.allows_command("*") or any(c.endswith(suffix) for c in g.allowed_commands)
+            ]
     family = str(args.get("family") or "any").strip().lower()
     if family == "yes":
         guests = [g for g in guests if g.family]
@@ -2975,7 +2990,9 @@ _DECL_GUESTS_LIST: dict[str, Any] = {
             "именно он; не пересказывай этот справочник в чужом чате. "
             "right — точная строка права (например 'chat@llm', "
             "'recall@memory') — если задано, оставляет только гостей с этим "
-            "правом (узнать, у кого есть конкретное право). family — 'yes' "
+            "правом (узнать, у кого есть конкретное право); можно передать и "
+            "голое имя службы без действия (например 'vpn') — тогда "
+            "оставляет гостей хоть с каким-то правом на эту службу. family — 'yes' "
             "только семья, 'no' только не семья, 'any' (по умолчанию) — все. "
             "За один вызов отдаёт страницу (по умолчанию до 30 гостей) — "
             "перечисли в ответе ВСЕХ, кто попал в страницу, не выбирай сам "
@@ -2990,7 +3007,11 @@ _DECL_GUESTS_LIST: dict[str, Any] = {
             "properties": {
                 "right": {
                     "type": "string",
-                    "description": "Точная строка права для фильтра, например 'chat@llm'",
+                    "description": (
+                        "Строка права для фильтра — точная 'action@service' "
+                        "(например 'chat@llm') или голое имя службы без "
+                        "действия (например 'vpn' — любое право на VPN)"
+                    ),
                 },
                 "family": {
                     "type": "string",

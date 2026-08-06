@@ -72,6 +72,36 @@ async def test_guests_list_filters_by_right():
     assert "Игорь" not in result
 
 
+async def test_guests_list_bare_service_name_matches_any_right_on_it():
+    # Живой баг 2026-08-06: модель передала right="vpn" (голое имя службы,
+    # а не точная строка права вроде "usage@vpn") — фильтр молча ничего не
+    # находил, хотя гости с VPN-правами были, и "гостей с такими условиями
+    # нет" выглядело как правда. Голое имя без "@" теперь значит "есть
+    # хоть какое-то право на эту службу".
+    book = SubscriptionBook.from_config(
+        [SubscriptionConfig(name="me", chat_id=OWNER_CHAT, allowed_commands=["*"])],
+        [
+            GuestSubscriptionConfig(
+                name="Наташа", chat_id=NATASHA_CHAT, allowed_commands=["chat@llm", "usage@vpn"]
+            ),
+            GuestSubscriptionConfig(
+                name="Игорь", chat_id=IGOR_CHAT, allowed_commands=["chat@llm"]
+            ),
+        ],
+    )
+    result = await ai_tools.tool_guests_list(_ctx(book=book), {"right": "vpn"})
+    assert "Наташа" in result
+    assert "Игорь" not in result
+
+
+async def test_guests_list_bare_service_name_still_honours_exact_right():
+    # Точная форма "action@service" продолжает работать как раньше — новая
+    # терпимость только добавляет ветку для голого имени, не подменяет её.
+    result = await ai_tools.tool_guests_list(_ctx(), {"right": "recall@memory"})
+    assert "Наташа" in result
+    assert "Игорь" not in result
+
+
 async def test_guests_list_filters_by_family_yes():
     result = await ai_tools.tool_guests_list(_ctx(), {"family": "yes"})
     assert "Наташа" in result
