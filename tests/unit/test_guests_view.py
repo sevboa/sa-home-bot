@@ -30,7 +30,8 @@ def _callbacks(kb) -> list[str]:
 
 
 def test_list_view_paginates_and_links_cards():
-    guests = [_guest(i) for i in range(7)]
+    total = guests_view.GUEST_PAGE_SIZE + 2
+    guests = [_guest(i) for i in range(total)]
     text, kb = guests_view.build_list_view(guests, 0)
     callbacks = _callbacks(kb)
 
@@ -38,16 +39,19 @@ def test_list_view_paginates_and_links_cards():
     assert len(card_callbacks) == guests_view.GUEST_PAGE_SIZE
     # «Следующая страница» уносит на offset = размер страницы.
     assert f"st:{commands.GUESTS_LIST_CODE}:{guests_view.GUEST_PAGE_SIZE}" in callbacks
-    assert "7" in text  # счётчик в заголовке
+    assert str(total) in text  # счётчик в заголовке
 
 
 def test_list_view_second_page_has_only_prev_button():
-    guests = [_guest(i) for i in range(7)]
+    total = guests_view.GUEST_PAGE_SIZE + 2
+    guests = [_guest(i) for i in range(total)]
     _, kb = guests_view.build_list_view(guests, guests_view.GUEST_PAGE_SIZE)
     callbacks = _callbacks(kb)
     assert f"st:{commands.GUESTS_LIST_CODE}:0" in callbacks
+    next_offset = guests_view.GUEST_PAGE_SIZE * 2
     assert not any(
-        c.startswith(f"st:{commands.GUESTS_LIST_CODE}:") and c.endswith(":10") for c in callbacks
+        c.startswith(f"st:{commands.GUESTS_LIST_CODE}:") and c.endswith(f":{next_offset}")
+        for c in callbacks
     )
 
 

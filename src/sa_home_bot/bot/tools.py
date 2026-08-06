@@ -57,7 +57,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sa_home_bot import wake_core
-from sa_home_bot.bot import commands, guest_rights, invites, recipients
+from sa_home_bot.bot import commands, invites, recipients
 from sa_home_bot.bot.monitor_state import parse_disk_summary, parse_health_state
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
@@ -2904,6 +2904,9 @@ _DECL_NOTIFY_GUEST: dict[str, Any] = {
 # владельцу). Только чтение — менять права/флаг «семья» тул не умеет, это
 # остаётся за человеком через /guests.
 
+DEFAULT_GUESTS_LIST_LIMIT = 30
+MAX_GUESTS_LIST_LIMIT = 100
+
 
 async def tool_guests_list(ctx: ToolContext, args: dict[str, Any]) -> str:
     if ctx.book is None:
@@ -2920,11 +2923,43 @@ async def tool_guests_list(ctx: ToolContext, args: dict[str, Any]) -> str:
         guests = [g for g in guests if not g.family]
     if not guests:
         return "гостей с такими условиями нет"
+
+    offset_raw = args.get("offset")
+    try:
+        offset = max(0, int(offset_raw)) if offset_raw is not None else 0
+    except (TypeError, ValueError):
+        return f"offset должен быть числом: {offset_raw!r}"
+    limit = DEFAULT_GUESTS_LIST_LIMIT
+    limit_raw = args.get("limit")
+    if limit_raw is not None:
+        try:
+            limit = int(limit_raw)
+        except (TypeError, ValueError):
+            return f"limit должен быть числом: {limit_raw!r}"
+        limit = max(1, min(limit, MAX_GUESTS_LIST_LIMIT))
+
+    guests_sorted = sorted(guests, key=lambda s: s.invited_at)
+    page = guests_sorted[offset : offset + limit]
+    # Полный перечень прав на гостя (их бывает больше десятка) раздувал
+    # ответ настолько, что модель при пересказе в чат сама обрезала список
+    # гостей до нескольких штук и не отмечала обрезку (живая находка
+    # 2026-08-06). Вместо перечня прав в строке — только их число; узнать,
+    # у кого есть конкретное право, теперь можно фильтром right (сам
+    # список остаётся компактным независимо от фильтра).
     lines = [f"Гостей: {len(all_guests)} (после фильтра: {len(guests)})"]
-    for g in sorted(guests, key=lambda s: s.invited_at):
-        rights = ", ".join(guest_rights.label(r) for r in sorted(g.allowed_commands))
+    if not page:
+        lines.append(f"offset {offset} за пределами списка — всего подходит {len(guests)}")
+        return "\n".join(lines)
+    lines[0] += f", показаны {offset + 1}-{offset + len(page)}"
+    for g in page:
         mark = "🏠 семья" if g.family else "не семья"
-        lines.append(f"• {g.name} (chat_id {g.chat_id}) — {mark} — {rights or 'прав нет'}")
+        lines.append(f"• {g.name} (chat_id {g.chat_id}) — {mark} — прав: {len(g.allowed_commands)}")
+    next_offset = offset + len(page)
+    if next_offset < len(guests):
+        lines.append(
+            f"Это не все — ещё {len(guests) - next_offset}. Чтобы показать "
+            f"остальных, вызови guests_list снова с offset={next_offset}."
+        )
     return "\n".join(lines)
 
 
@@ -2933,13 +2968,22 @@ _DECL_GUESTS_LIST: dict[str, Any] = {
     "function": {
         "name": "guests_list",
         "description": (
-            "Твой личный справочник приглашённых гостей: имя, chat_id, права "
-            "и состоит ли человек в семье. Доступен только владельцу — если "
-            "тул тебе виден, значит спрашивает именно он; не пересказывай "
-            "этот справочник в чужом чате. right — точная строка права "
-            "(например 'chat@llm', 'recall@memory') — если задано, оставляет "
-            "только гостей с этим правом. family — 'yes' только семья, 'no' "
-            "только не семья, 'any' (по умолчанию) — все."
+            "Твой личный справочник приглашённых гостей: имя, chat_id, число "
+            "выданных прав и состоит ли человек в семье (сами права поимённо "
+            "список не показывает — это фильтр, а не перечень). Доступен "
+            "только владельцу — если тул тебе виден, значит спрашивает "
+            "именно он; не пересказывай этот справочник в чужом чате. "
+            "right — точная строка права (например 'chat@llm', "
+            "'recall@memory') — если задано, оставляет только гостей с этим "
+            "правом (узнать, у кого есть конкретное право). family — 'yes' "
+            "только семья, 'no' только не семья, 'any' (по умолчанию) — все. "
+            "За один вызов отдаёт страницу (по умолчанию до 30 гостей) — "
+            "перечисли в ответе ВСЕХ, кто попал в страницу, не выбирай сам "
+            "часть из них. Если в конце результата есть строка «Это не "
+            "все» — гостей больше, чем показано: обязательно скажи об этом "
+            "владельцу (сколько ещё) вместо того чтобы промолчать, и вызови "
+            "тул снова с указанным offset, если владелец хочет увидеть "
+            "остальных."
         ),
         "parameters": {
             "type": "object",
@@ -2952,6 +2996,22 @@ _DECL_GUESTS_LIST: dict[str, Any] = {
                     "type": "string",
                     "enum": ["any", "yes", "no"],
                     "description": "Фильтр по флагу «семья»: any/yes/no",
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": (
+                        "С какого гостя начать страницу (по умолчанию 0) — "
+                        "используй значение из «Это не все», чтобы показать "
+                        "следующих."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": (
+                        f"Сколько гостей на страницу (по умолчанию "
+                        f"{DEFAULT_GUESTS_LIST_LIMIT}, максимум "
+                        f"{MAX_GUESTS_LIST_LIMIT})."
+                    ),
                 },
             },
             "required": [],

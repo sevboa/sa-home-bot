@@ -97,6 +97,41 @@ async def test_guests_list_unavailable_without_book():
     assert result.startswith("недоступно")
 
 
+# --- компактность и пагинация (живая находка 2026-08-06: без этого модель
+# сама обрезала пересказ до нескольких гостей и не говорила, что список
+# неполный) -------------------------------------------------------------
+
+
+async def test_guests_list_is_always_compact_no_right_labels():
+    result = await ai_tools.tool_guests_list(_ctx(), {})
+    assert "прав: 2" in result  # Наташа: chat@llm, recall@memory
+    assert "Разговор с Альфредом" not in result
+
+    filtered = await ai_tools.tool_guests_list(_ctx(), {"right": "chat@llm"})
+    assert "Разговор с Альфредом" not in filtered
+    assert "прав: 1" in filtered  # Игорь: только chat@llm
+
+
+async def test_guests_list_pagination_notes_when_more_remain():
+    result = await ai_tools.tool_guests_list(_ctx(), {"limit": 1})
+    assert "Наташа" in result
+    assert "Игорь" not in result
+    assert "Это не все" in result
+    assert "offset=1" in result
+
+
+async def test_guests_list_pagination_second_page():
+    result = await ai_tools.tool_guests_list(_ctx(), {"limit": 1, "offset": 1})
+    assert "Игорь" in result
+    assert "Наташа" not in result
+    assert "Это не все" not in result
+
+
+async def test_guests_list_no_pagination_note_when_all_shown():
+    result = await ai_tools.tool_guests_list(_ctx(), {})
+    assert "Это не все" not in result
+
+
 async def test_guests_list_works_from_self_scheduled_remind_without_notifier():
     """Служба tasks (self-scheduled remind, живая находка 2026-08-06) не
     даёт notifier/store вовсе, но свою SubscriptionBook теперь передаёт (см.
