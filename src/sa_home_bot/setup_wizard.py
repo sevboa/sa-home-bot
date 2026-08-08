@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 
 from sa_home_bot.config import Settings
-from sa_home_bot.node.fixups import build_fixups, run_fixups
+from sa_home_bot.node.fixups import SMARTCTL_WRAPPER_PATH, build_fixups, run_fixups
 
 DEFAULT_CONFIG_PATH = Path("~/.config/sa-home-bot/config.toml").expanduser()
 DEFAULT_DATA_DIR = Path("~/.local/share/sa-home-bot").expanduser()
@@ -158,7 +158,11 @@ def _render_config(*, node_id: str, kind: str, assignments: list[str],
 
 
 def _render_systemd_unit(*, exec_path: str, config_path: Path, data_dir: Path) -> str:
-    local_bin = str(Path(exec_path).parent)
+    # Не Path(exec_path).parent: при pipx-установке exec_path может резолвиться
+    # до .local/share/pipx/venvs/.../bin (см. вызывающий код) — там нет обёртки
+    # smartctl. Обёртка всегда лежит в ~/.local/bin (см. fixups.SMARTCTL_WRAPPER_PATH),
+    # её и кладём первой в PATH.
+    local_bin = str(SMARTCTL_WRAPPER_PATH.parent)
     return (
         "[Unit]\n"
         "Description=sa-home-node (нода: супервизор служб роя)\n"

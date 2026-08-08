@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import tomllib
+from pathlib import Path
 
 import pytest
 
@@ -323,18 +324,21 @@ def test_cli_init_writes_config_loadable_by_settings(tmp_path):
     assert settings.swarm.token == "t"
 
 
-def test_render_systemd_unit_uses_absolute_paths(tmp_path):
+def test_render_systemd_unit_uses_absolute_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup_wizard, "SMARTCTL_WRAPPER_PATH", Path("/home/x/.local/bin/smartctl"))
     config_path = tmp_path / "config.toml"
     data_dir = tmp_path / "data-dir"
 
     content = setup_wizard._render_systemd_unit(
-        exec_path="/home/x/.local/bin/sa-home-bot",
+        exec_path="/home/x/.local/share/pipx/venvs/sa-home-bot/bin/sa-home-bot",
         config_path=config_path,
         data_dir=data_dir,
     )
 
     assert f"WorkingDirectory={data_dir}" in content
     assert f"--config {config_path}" in content
+    # PATH всегда начинается с ~/.local/bin (там обёртка smartctl из fixups),
+    # независимо от того, откуда реально резолвился exec_path (см. баг pipx).
     assert "Environment=PATH=/home/x/.local/bin:" in content
 
 

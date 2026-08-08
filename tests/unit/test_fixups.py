@@ -8,6 +8,7 @@ from sa_home_bot.node import fixups as fixups_module
 from sa_home_bot.node.fixups import (
     INSTALL_SMARTMONTOOLS,
     JOURNALCTL_GROUP,
+    NODE_UNIT_SMARTCTL_PATH,
     POWER_CONTROL_POLKIT,
     SMARTCTL_SUDOERS,
     WOL_ENABLE,
@@ -17,6 +18,7 @@ from sa_home_bot.node.fixups import (
     make_apps_unit_fixup,
     make_awg_sudoers_fixup,
     power_polkit_rule_content,
+    rewrite_unit_path_line,
     smartctl_sudoers_content,
     smartctl_wrapper_content,
     wol_unit_content,
@@ -56,6 +58,12 @@ def test_smartctl_sudoers_shares_needed_with_install():
     )
 
 
+def test_node_unit_smartctl_path_shares_needed_with_install():
+    assert NODE_UNIT_SMARTCTL_PATH.needed(_settings(["monitor"])) == INSTALL_SMARTMONTOOLS.needed(
+        _settings(["monitor"])
+    )
+
+
 def test_journalctl_needed_when_monitor_assigned():
     assert JOURNALCTL_GROUP.needed(_settings(["monitor"]))
     assert not JOURNALCTL_GROUP.needed(_settings(["apps"]))
@@ -85,6 +93,39 @@ def test_smartctl_sudoers_content_pins_absolute_path_and_wildcard_args():
 def test_smartctl_wrapper_content_execs_real_binary_via_sudo():
     content = smartctl_wrapper_content("/usr/sbin/smartctl")
     assert content == '#!/bin/sh\nexec sudo -n /usr/sbin/smartctl "$@"\n'
+
+
+# --- rewrite_unit_path_line(): чинит уже развёрнутые юниты (живой баг на
+# mycraft — PATH резолвился до pipx-venv вместо ~/.local/bin, см. setup_wizard).
+
+
+def test_rewrite_unit_path_line_moves_wrapper_dir_first():
+    content = (
+        "[Service]\n"
+        "Environment=PATH=/home/sevboa/.local/share/pipx/venvs/sa-home-bot/bin"
+        ":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\n"
+        "TimeoutStopSec=150\n"
+    )
+    new_content = rewrite_unit_path_line(content, "/home/sevboa/.local/bin")
+    assert (
+        "Environment=PATH=/home/sevboa/.local/bin"
+        ":/home/sevboa/.local/share/pipx/venvs/sa-home-bot/bin"
+        ":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\n" in new_content
+    )
+    # Остальные строки юнита не тронуты.
+    assert "[Service]\n" in new_content
+    assert "TimeoutStopSec=150\n" in new_content
+
+
+def test_rewrite_unit_path_line_returns_none_without_path_line():
+    content = "[Service]\nExecStart=/bin/true\n"
+    assert rewrite_unit_path_line(content, "/home/sevboa/.local/bin") is None
+
+
+def test_rewrite_unit_path_line_dedupes_wrapper_dir_already_present():
+    content = "Environment=PATH=/usr/local/bin:/home/sevboa/.local/bin:/usr/bin\n"
+    new_content = rewrite_unit_path_line(content, "/home/sevboa/.local/bin")
+    assert new_content == "Environment=PATH=/home/sevboa/.local/bin:/usr/local/bin:/usr/bin\n"
 
 
 # --- _which(): фолбэк на sbin-каталоги, которых обычно нет в PATH обычного
@@ -188,6 +229,7 @@ def test_build_fixups_monitor_and_apps_together():
     assert ids == {
         "install-smartmontools",
         "smartctl-sudoers",
+        "node-unit-smartctl-path",
         "journalctl-group",
         "apps-unit-sudoers-jellyfin",
     }

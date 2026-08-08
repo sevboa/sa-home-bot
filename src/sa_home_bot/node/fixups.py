@@ -208,6 +208,75 @@ SMARTCTL_SUDOERS = Fixup(
 )
 
 
+# --- юнит ноды: ~/.local/bin первым в PATH (там обёртка smartctl) ---
+#
+# `sa-home-bot init` кладёт эту строку сам (см. setup_wizard._render_systemd_unit),
+# но баг там же (до фикса 2026-08-08) мог развернуть путь исполняемого файла до
+# каталога pipx-venv вместо ~/.local/bin — юнит уже установлен без обёртки в
+# PATH, и smartctl-sudoers (выше) сам это не чинит: он трогает только сниппет
+# и обёртку, не юнит. Этот фикс чинит уже развёрнутые юниты той же командой.
+
+NODE_UNIT_FILE = Path.home() / ".config" / "systemd" / "user" / "sa-home-node.service"
+NODE_UNIT_NAME = "sa-home-node.service"
+
+
+def rewrite_unit_path_line(content: str, wrapper_dir: str) -> str | None:
+    """Переписать ``Environment=PATH=`` так, чтобы ``wrapper_dir`` шёл первым
+    (дубли самого себя убираются). ``None``, если такой строки в юните нет."""
+    lines = content.splitlines(keepends=True)
+    out: list[str] = []
+    found = False
+    for line in lines:
+        if line.startswith("Environment=PATH="):
+            found = True
+            newline = "\n" if line.endswith("\n") else ""
+            rest = line[len("Environment=PATH=") : len(line) - len(newline)]
+            dirs = [d for d in rest.split(os.pathsep) if d and d != wrapper_dir]
+            out.append(f"Environment=PATH={os.pathsep.join([wrapper_dir, *dirs])}{newline}")
+        else:
+            out.append(line)
+    return "".join(out) if found else None
+
+
+def _unit_path_first_dir(content: str) -> str | None:
+    for line in content.splitlines():
+        if line.startswith("Environment=PATH="):
+            return line[len("Environment=PATH=") :].split(os.pathsep, 1)[0] or None
+    return None
+
+
+def _node_unit_path_check() -> bool:
+    if not NODE_UNIT_FILE.exists():
+        return True  # юнит ещё не создан — sa-home-bot init допишет PATH сам
+    return _unit_path_first_dir(NODE_UNIT_FILE.read_text()) == str(SMARTCTL_WRAPPER_PATH.parent)
+
+
+def _node_unit_path_apply() -> None:
+    new_content = rewrite_unit_path_line(
+        NODE_UNIT_FILE.read_text(), str(SMARTCTL_WRAPPER_PATH.parent)
+    )
+    if new_content is None:
+        raise FixupError(f"в {NODE_UNIT_FILE} нет строки Environment=PATH= — правьте руками")
+    NODE_UNIT_FILE.write_text(new_content)
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+    result = subprocess.run(["systemctl", "--user", "restart", NODE_UNIT_NAME], check=False)
+    if result.returncode != 0:
+        log.warning(
+            "PATH юнита поправлен, но `systemctl --user restart %s` не сработал — "
+            "перезапустите ноду вручную",
+            NODE_UNIT_NAME,
+        )
+
+
+NODE_UNIT_SMARTCTL_PATH = Fixup(
+    id="node-unit-smartctl-path",
+    title="Поправить PATH юнита sa-home-node (~/.local/bin первым, там обёртка smartctl)",
+    needed=_smartmontools_needed,
+    check=_node_unit_path_check,
+    apply=_node_unit_path_apply,
+)
+
+
 # --- journalctl: доступ к журналу без root (группа systemd-journal) ---
 
 
@@ -511,6 +580,7 @@ def build_fixups(settings: Settings) -> list[Fixup]:
     fixups = [
         INSTALL_SMARTMONTOOLS,
         SMARTCTL_SUDOERS,
+        NODE_UNIT_SMARTCTL_PATH,
         JOURNALCTL_GROUP,
         POWER_CONTROL_POLKIT,
         WOL_ENABLE,
