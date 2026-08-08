@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -242,6 +243,21 @@ class BlockDisk:
     model: str | None
 
 
+_NVME_NAMESPACE_RE = re.compile(r"^(/dev/nvme\d+)n\d+$")
+
+
+def nvme_controller_path(path: str) -> str | None:
+    """``/dev/nvme0n1`` → ``/dev/nvme0``.
+
+    ``lsblk`` отдаёт namespace-устройство (диск с разделами), а
+    ``smartctl --scan``/SMART-команды для NVMe работают с контроллером —
+    другим device-node. Без пересчёта совпадений по realpath не будет и
+    температура/health NVMe в сводке всегда остаются пустыми. ``None``, если
+    путь не похож на NVMe namespace (ничего пересчитывать не нужно)."""
+    m = _NVME_NAMESPACE_RE.match(path)
+    return m.group(1) if m else None
+
+
 def health_args(target: DiskTarget) -> list[str]:
     """Аргументы smartctl для здоровья+атрибутов: ``[-d тип] -j -H -A /dev/X``."""
     args: list[str] = []
@@ -460,6 +476,10 @@ def read_disk_summaries_sync(
     summaries: list[DiskSummary] = []
     for label, disk in _label_disks(_list_block_disks_sync()):
         real = os.path.realpath(disk.path)
+        if disk.kind == KIND_NVME:
+            controller = nvme_controller_path(disk.path)
+            if controller is not None:
+                real = os.path.realpath(controller)
         live_health, temp = smart.get(real, (None, None))
         if health_overrides is not None and real in health_overrides:
             health = health_overrides[real]  # из БД (совпадает с алертами)

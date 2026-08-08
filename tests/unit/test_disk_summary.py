@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from sa_home_bot.domain.models import DISK_FAIL, DISK_OK, DISK_WARN
 from sa_home_bot.sensors.disks import (
+    BlockDisk,
     DiskTarget,
+    KIND_NVME,
     _extract_temp,
     _label_disks,
     health_args,
+    nvme_controller_path,
     parse_health,
     parse_lsblk_disks,
+    read_disk_summaries_sync,
 )
 
 
@@ -181,6 +185,44 @@ def test_parse_lsblk_keeps_disk_without_size_field():
     # Старый lsblk без колонки SIZE — не должны случайно скрыть настоящий диск.
     disks = parse_lsblk_disks(LSBLK)
     assert {d.path for d in disks} == {"/dev/sda", "/dev/mmcblk0"}
+
+
+# --- nvme_controller_path(): lsblk отдаёт namespace-устройство (/dev/nvme0n1),
+# а smartctl --scan/SMART для NVMe — контроллер (/dev/nvme0); без пересчёта
+# сопоставление по realpath никогда не срабатывает — живой баг на mycraft:
+# после починки PATH (обёртка smartctl доступна) NVMe всё равно показывал
+# пустую температуру именно из-за этого расхождения путей.
+
+
+def test_nvme_controller_path_strips_namespace_suffix():
+    assert nvme_controller_path("/dev/nvme0n1") == "/dev/nvme0"
+    assert nvme_controller_path("/dev/nvme1n2") == "/dev/nvme1"
+
+
+def test_nvme_controller_path_none_for_non_nvme():
+    assert nvme_controller_path("/dev/sda") is None
+    assert nvme_controller_path("/dev/nvme0") is None  # уже контроллер, не namespace
+
+
+def test_read_disk_summaries_matches_nvme_controller_to_namespace_device(monkeypatch):
+    from sa_home_bot.sensors import disks
+
+    monkeypatch.setattr(
+        disks, "discover_devices_sync", lambda: [DiskTarget("/dev/nvme0", "nvme")]
+    )
+    monkeypatch.setattr(
+        disks, "_run_smartctl", lambda args: _smart(True, pending=0, uncorrectable=0, temp=43)
+    )
+    monkeypatch.setattr(
+        disks,
+        "_list_block_disks_sync",
+        lambda: [BlockDisk(path="/dev/nvme0n1", kind=KIND_NVME, mountpoints=(), model="Samsung")],
+    )
+
+    summaries = read_disk_summaries_sync([])
+    assert len(summaries) == 1
+    assert summaries[0].temperature_c == 43.0
+    assert summaries[0].health == DISK_OK
 
 
 def test_parse_disk_summary_kind_fallback_for_old_monitor():
