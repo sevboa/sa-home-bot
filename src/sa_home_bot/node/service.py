@@ -95,6 +95,15 @@ EVENT_RESTART_APPLIED = "restart_applied"
 
 ACTION_SEND_WOL = "send_wol"  # рой просит ЭТУ ноду разбудить кого-то в её LAN
 
+# Дочерний процесс слота-синглтона (сейчас — только telegram-bot) сообщает:
+# я реально поднялся, а не просто спавнился ОС-процессом (для бота — успешный
+# bot.get_me(), см. app.py::run). Служебное действие, зовёт только сам
+# процесс по уже открытому node_link — человеку в UI делать тут нечего,
+# поэтому без choices на параметрах (см. describe()). Уходит в
+# LeaseManager.set_ready()/local_state()["ready"] — на нём строит решение
+# LeaseManager._decide() соседей (node/lease.py, SUPERIOR_READY_TIMEOUT_S).
+ACTION_REPORT_READY = "report_ready"
+
 RESTART_NODE_TITLE = "🔄 Перезапустить ноду"
 SWARM_JOIN_TITLE = "🤝 Присоединить ноду"
 JOIN_TITLE = "🔗 Присоединиться к рою"
@@ -313,6 +322,15 @@ class NodeService:
                 ActionSpec(id=ACTION_ASSIGN, title="➕ Назначить", params=(assign_param,)),
                 ActionSpec(id=ACTION_UNASSIGN, title="➖ Снять", params=(name_param,)),
                 ActionSpec(id=ACTION_SEND_WOL, title=SEND_WOL_TITLE, params=(mac_param,)),
+                # Без choices — служебное действие, не для UI (см. константу).
+                ActionSpec(
+                    id=ACTION_REPORT_READY,
+                    title="📶 Готовность службы",
+                    params=(
+                        ActionParam(name="name", required=True, title="Слот службы"),
+                        ActionParam(name="ready", type="bool", required=True, title="Готова"),
+                    ),
+                ),
                 *(
                     (
                         ActionSpec(
@@ -501,6 +519,8 @@ class NodeService:
             return self._list_instances(args)
         if action == ACTION_GET_INSTANCE_CONFIG:
             return self._get_instance_config(args)
+        if action == ACTION_REPORT_READY:
+            return self._report_ready(args)
         name = str(args.get("name", ""))
         if action == ACTION_ASSIGN:
             return await self._assign(name)
@@ -598,6 +618,21 @@ class NodeService:
                 ERR_BAD_REQUEST, f"нет пакета настроек {service}@{instance} на ноде {self._node}"
             )
         return payload
+
+    def _report_ready(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Дочерний процесс слота-синглтона подтверждает (или снимает)
+        готовность — см. ACTION_REPORT_READY. Best-effort со стороны
+        вызывающего (app.py::run), поэтому здесь достаточно мягкой валидации:
+        неизвестное имя слота — явная ошибка вызывающему, отсутствие аренды
+        на этой сборке/в тестах — тихий no-op, а не падение."""
+        name = str(args.get("name", ""))
+        if self._supervisor.get(name) is None:
+            known = ", ".join(self._supervisor.services) or "нет служб"
+            raise ProtoError(ERR_BAD_REQUEST, f"нет такой службы: {name!r} (есть: {known})")
+        ready = bool(args.get("ready", True))
+        if self._lease is not None:
+            self._lease.set_ready(name, ready)
+        return {"name": name, "ready": ready}
 
     def _send_wol(self, args: dict[str, Any]) -> dict[str, Any]:
         """Разослать magic packet в СВОЙ LAN-сегмент — вызывается пиром роя,

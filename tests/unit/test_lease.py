@@ -58,7 +58,10 @@ class FakeSlot:
         self.status = STOPPED
 
 
-def _lease(node_id: str, node_kind: str, slot: FakeSlot, *peers, grace_s: float = 120.0):
+def _lease(
+    node_id: str, node_kind: str, slot: FakeSlot, *peers,
+    grace_s: float = 120.0, ready_timeout_s: float = 9999.0,
+):
     events: list[tuple[str, dict]] = []
 
     async def emit(event_type: str, data: dict) -> None:
@@ -68,18 +71,20 @@ def _lease(node_id: str, node_kind: str, slot: FakeSlot, *peers, grace_s: float 
     supervisor.services[slot.name] = slot
     router = NodeRouter(node_id, peers={p.name: p for p in peers})
     manager = LeaseManager(
-        node_id, node_kind, supervisor, router=router, emit=emit, grace_s=grace_s
+        node_id, node_kind, supervisor, router=router, emit=emit,
+        grace_s=grace_s, ready_timeout_s=ready_timeout_s,
     )
     return manager, events
 
 
-def _entry(node: str, *, running=False, claiming=False, role="active",
+def _entry(node: str, *, running=False, claiming=False, ready=False, role="active",
            priority=100, fenced=False) -> dict:
     return {
         "node": node,
         "role": role,
         "running": running,
         "claiming": claiming,
+        "ready": ready,
         "rank": list(rank(parse(f"telegram-bot@alfred:{role}:prio={priority}"), KIND_SERVER, node)),
         "fenced": fenced,
     }
@@ -198,6 +203,92 @@ async def test_lower_ranked_node_waits_for_the_superior_to_take_it():
     lease, _ = _lease("jeeves", KIND_VPS, slot, peer, grace_s=0.0)
     await lease.tick()
     assert slot.calls == []
+
+
+# --- готовность и таймаут-подстраховка (фикс 2026-08-08) --------------------
+
+
+def test_ready_field_reported_in_local_state():
+    slot = FakeSlot("telegram-bot@alfred")
+    lease, _ = _lease("alfred", KIND_SERVER, slot)
+    assert lease.local_state()[SLOT]["ready"] is False
+    lease.set_ready(SLOT, True)
+    assert lease.local_state()[SLOT]["ready"] is True
+
+
+async def test_junior_does_not_reclaim_before_ready_timeout():
+    """Сразу после уступки младший не должен пытаться забрать слот обратно —
+    иначе не будет отличаться от того, что было (мгновенное перебрасывание
+    туда-сюда)."""
+    peer = FakePeer("alfred", {SLOT: _entry("alfred", claiming=True)})
+    slot = FakeSlot("telegram-bot@alfred:standby", status=RUNNING)
+    lease, _ = _lease("jeeves", KIND_VPS, slot, peer, grace_s=0.0, ready_timeout_s=9999.0)
+    await lease.tick()  # уступил
+    assert slot.calls == ["stop"]
+    await lease.tick()  # сразу следующий тик — таймаут (9999с) не мог истечь
+    assert slot.calls == ["stop"]
+
+
+async def test_junior_reclaims_after_superior_ready_timeout():
+    """Если старший так и не подтвердил готовность — младший не должен
+    держать бота немым бесконечно (живой инцидент 2026-08-08: ~18 минут без
+    держателя службы)."""
+    peer = FakePeer("alfred", {SLOT: _entry("alfred", claiming=True, ready=False)})
+    slot = FakeSlot("telegram-bot@alfred:standby", status=RUNNING)
+    lease, events = _lease("jeeves", KIND_VPS, slot, peer, grace_s=0.0, ready_timeout_s=0.0)
+    await lease.tick()  # уступил
+    await lease.tick()  # таймаут (0с) уже истёк — забирает обратно
+    assert slot.calls == ["stop", "start"]
+    assert [e[0] for e in events] == [EVENT_SINGLETON_YIELDED, EVENT_SINGLETON_ACTIVATED]
+
+
+async def test_junior_does_not_reclaim_if_superior_reports_ready():
+    """Даже с нулевым таймаутом — если старший успел подтвердить готовность,
+    забирать слот обратно не за чем."""
+    peer = FakePeer("alfred", {SLOT: _entry("alfred", claiming=True, ready=True)})
+    slot = FakeSlot("telegram-bot@alfred:standby", status=RUNNING)
+    lease, _ = _lease("jeeves", KIND_VPS, slot, peer, grace_s=0.0, ready_timeout_s=0.0)
+    await lease.tick()
+    await lease.tick()
+    assert slot.calls == ["stop"]
+
+
+async def test_junior_reclaim_uses_running_superior_ready_flag_too():
+    """Готовность может прийти и когда старший уже виден как running (не
+    только claiming) — оба случая учитываются одинаково."""
+    peer = FakePeer("alfred", {SLOT: _entry("alfred", running=True, ready=True)})
+    slot = FakeSlot("telegram-bot@alfred:standby", status=RUNNING)
+    lease, _ = _lease("jeeves", KIND_VPS, slot, peer, grace_s=0.0, ready_timeout_s=0.0)
+    await lease.tick()
+    await lease.tick()
+    assert slot.calls == ["stop"]  # не реклеймит — старший готов и running
+
+
+async def test_yielded_since_resets_between_episodes():
+    """Таймер «жду ready» не должен пережить эпизод, в котором старший
+    вовсе пропал (это уже отдельный, штатный failover через grace) —
+    иначе следующая, уже не связанная уступка мгновенно считалась бы
+    просроченной (ready_timeout_s=0.0 ниже сделал бы это мгновенным)."""
+    peer = FakePeer("alfred", {SLOT: _entry("alfred", claiming=True, ready=False)})
+    slot = FakeSlot("telegram-bot@alfred:standby", status=RUNNING)
+    lease, _ = _lease("jeeves", KIND_VPS, slot, peer, grace_s=999.0, ready_timeout_s=0.0)
+    await lease.tick()  # уступил, _yielded_since выставлен
+    assert slot.calls == ["stop"]
+
+    # Старший исчезает целиком (не просто "не ready") — обычный failover,
+    # не наш новый путь: до grace (999с) ещё далеко, реклейма быть не должно.
+    peer.alive = False
+    peer.down_since = 0.0
+    await lease.tick()
+    assert slot.calls == ["stop"]  # ни второго "stop", ни "start"
+
+    # Старший — уже другой эпизод, снова claiming. Будь _yielded_since
+    # унаследован из первого эпизода, ready_timeout_s=0.0 реклеймнул бы
+    # немедленно, хотя старший только что появился.
+    peer.alive = True
+    peer.down_since = None
+    await lease.tick()
+    assert slot.calls == ["stop"]  # всё ещё без "start"
 
 
 # --- fencing ----------------------------------------------------------------

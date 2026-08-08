@@ -55,6 +55,18 @@ PEER_TIMEOUT_S = 5.0
 # просто быстрее стартовал. Секунды здесь дешевле перекрытия двух поллеров.
 STARTUP_SETTLE_S = 15.0
 
+# Сколько младший ждёт после уступки, прежде чем считать, что вернувшаяся
+# основная нода не смогла реально подняться (не прислала report_ready), и
+# забрать слот обратно. Живой инцидент 2026-08-08: alfred объявил claiming
+# (см. "уступает младший" выше), но упал ещё до bot.get_me() — а супервизор
+# тихо потерял задачу наблюдения (см. node/supervisor.py) и больше не
+# пытался перезапуститься; jeeves же, увидев только «claiming», уступил
+# один раз и больше не перепроверял — служба провисела «ничьей» ~18 минут.
+# 45 с с запасом покрывает нормальный старт бота (в том инциденте открытие
+# БД + миграции + get_me() заняли ~19 с до краша) и не оставляет пользователя
+# без бота надолго, если старший процесс явно не поднимается.
+SUPERIOR_READY_TIMEOUT_S = 45.0
+
 EVENT_SINGLETON_ACTIVATED = "singleton_activated"
 EVENT_SINGLETON_YIELDED = "singleton_yielded"
 
@@ -99,6 +111,7 @@ class LeaseManager:
         holdoff_s: float = FENCED_HOLDOFF_S,
         poll_interval_s: float = POLL_INTERVAL_S,
         settle_s: float = STARTUP_SETTLE_S,
+        ready_timeout_s: float = SUPERIOR_READY_TIMEOUT_S,
     ) -> None:
         self._settle_s = settle_s
         self._node_id = node_id
@@ -109,12 +122,21 @@ class LeaseManager:
         self._grace_s = grace_s
         self._holdoff_s = holdoff_s
         self._poll_interval_s = poll_interval_s
+        self._ready_timeout_s = ready_timeout_s
         # Мы объявили притязание на слот и ждём, пока младший уступит.
         self._claiming: set[str] = set()
         # С какого момента слот никем не занят (monotonic) — база отсчёта grace.
         self._silent_since: dict[str, float] = {}
         # До какого момента слот трогать нельзя после 409 (monotonic).
         self._fenced_until: dict[str, float] = {}
+        # Готовность НАШИХ слотов (report_ready от дочернего процесса, см.
+        # set_ready) — сбрасывается в False при каждом новом спавне
+        # (node/app.py::on_spawned), иначе устаревшее "ready: true" пережило
+        # бы следующий краш.
+        self._ready: dict[str, bool] = {}
+        # С какого момента мы уступили слот старшему (monotonic) — база
+        # отсчёта ready_timeout_s (см. _decide).
+        self._yielded_since: dict[str, float] = {}
         self._task: asyncio.Task | None = None
 
     # --- наши слоты ---------------------------------------------------------
@@ -137,10 +159,22 @@ class LeaseManager:
                 "role": slot.assignment.role,
                 "running": slot.status == RUNNING,
                 "claiming": slot.name in self._claiming,
+                # Подтверждено ли дочерним процессом, что он реально поднялся
+                # (report_ready), а не просто спавнился ОС-процессом — см.
+                # set_ready() и node/service.py::ACTION_REPORT_READY.
+                "ready": self._ready.get(slot.name, False),
                 "rank": list(rank(slot.assignment, self._node_kind, self._node_id)),
                 "fenced": self._fenced_until.get(slot.name, 0.0) > now,
             }
         return state
+
+    def set_ready(self, slot_name: str, ready: bool) -> None:
+        """Дочерний процесс слота подтвердил (или снял) готовность —
+        вызывается извне: из NodeService.run_command(ACTION_REPORT_READY)
+        когда бот реально поднялся, и из node/app.py::on_spawned при каждом
+        новом спавне процесса (там — с ready=False, чтобы не пережить
+        следующий краш устаревшим "готов")."""
+        self._ready[slot_name] = ready
 
     # --- взгляд на соседей --------------------------------------------------
 
@@ -203,6 +237,7 @@ class LeaseManager:
                     EVENT_SINGLETON_YIELDED,
                     {"slot": slot.name, "node": self._node_id},
                 )
+                self._yielded_since[slot.name] = now
             return
 
         if self._fenced_until.get(slot.name, 0.0) > now:
@@ -211,7 +246,50 @@ class LeaseManager:
         if superior_holds:
             self._claiming.discard(slot.name)
             self._silent_since.pop(slot.name, None)
+            since = self._yielded_since.get(slot.name)
+            if since is not None and now - since >= self._ready_timeout_s:
+                superior_ready = any(
+                    p.get("ready")
+                    for p in superiors
+                    if p.get("running") or p.get("claiming")
+                )
+                if not superior_ready:
+                    # Старший всё ещё не подтвердил готовность (report_ready)
+                    # спустя ready_timeout_s после того, как мы ему уступили —
+                    # не дожидаемся, пока он перестанет казаться
+                    # running/claiming (может не перестать никогда, см.
+                    # SUPERIOR_READY_TIMEOUT_S), забираем слот сами. Если
+                    # старший всё же зашевелится позже — обычная ветка выше
+                    # сработает повторно на следующем тике; секундное
+                    # пересечение двух поллеров в этом редком краевом случае
+                    # безопасно разруливает существующий fencing (409/
+                    # note_fenced).
+                    log.warning(
+                        "Аренда %s: старшая нода не подтвердила готовность за "
+                        "%.0f с — забираю слот обратно",
+                        slot.name, self._ready_timeout_s,
+                    )
+                    self._yielded_since.pop(slot.name, None)
+                    await slot.start()
+                    await self._emit(
+                        EVENT_SINGLETON_ACTIVATED,
+                        {
+                            "slot": slot.name,
+                            "node": self._node_id,
+                            "reason": "superior_ready_timeout",
+                        },
+                    )
             return
+
+        # Ниже во всех ветках superior_holds уже точно False (иначе вернулись
+        # бы выше) — таймер «жду ready после уступки» из предыдущего эпизода
+        # тут больше не при делах: старший либо вовсе пропал (обычный
+        # failover через grace ниже), либо уступил место младшему
+        # (running_inferior). Сбрасываем один раз здесь, а не в каждой
+        # ветке — иначе ранний return по ещё не истёкшему grace (самый частый
+        # путь) пережил бы его нетронутым, и он ошибочно сработал бы в
+        # следующем, уже не связанном эпизоде уступки.
+        self._yielded_since.pop(slot.name, None)
 
         running_inferior = [p for p in inferiors if p.get("running")]
         if running_inferior:

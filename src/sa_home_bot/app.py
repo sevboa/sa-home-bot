@@ -36,6 +36,7 @@ from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
+from sa_home_bot.node.instances import slot_key
 from sa_home_bot.runtime import Runtime
 from sa_home_bot.sensors.power import read_power_events_sync
 from sa_home_bot.subscriptions.book import SubscriptionBook
@@ -47,9 +48,13 @@ log = logging.getLogger(__name__)
 STATE_CLEAN_SHUTDOWN = "last_shutdown_clean"
 
 
-async def run(settings: Settings) -> bool:
+async def run(settings: Settings, *, instance: str = "") -> bool:
     """Запустить бота. True на выходе — нас вытеснил другой экземпляр того же
-    бота (409 Conflict); cli.main превращает это в FENCED_EXIT_CODE."""
+    бота (409 Conflict); cli.main превращает это в FENCED_EXIT_CODE.
+
+    ``instance`` — имя инстанса (для slot_key/report_ready, см. ниже), то же,
+    что уходит в ``--instance`` CLI и в аренду лидерства (node/lease.py) как
+    ключ слота ``telegram-bot@<instance>``."""
     runtime = Runtime()
 
     # 1-2. Логирование уже настроено в CLI; БД бота + миграции.
@@ -130,6 +135,22 @@ async def run(settings: Settings) -> bool:
     # см. build_node_event_handler), не только на живом /ai.
     tool_calls = ToolCalls()
 
+    async def _report_bot_ready() -> None:
+        # bot.get_me() (шаг 4 выше) уже подтвердил живую сеть/DNS/Telegram —
+        # это лучшее доказательство готовности, которое у нас вообще есть, и
+        # именно там падал процесс в живом инциденте 2026-08-08. Отчёт —
+        # best-effort: сбой здесь не должен ронять бота (get_me() уже прошёл,
+        # это важнее), а node_link сам вызовет этот хук заново при каждом
+        # следующем переподключении к ноде (см. bot/service_link.py
+        # on_connected) — ни один разрыв не остаётся неотчитанным надолго.
+        try:
+            await node_link.command(
+                "report_ready",
+                {"name": slot_key("telegram-bot", instance), "ready": True},
+            )
+        except Exception:
+            log.warning("Не удалось сообщить ноде о готовности бота", exc_info=True)
+
     node_link = ServiceLink(
         settings.node.socket,
         token=settings.swarm.token,
@@ -137,6 +158,7 @@ async def run(settings: Settings) -> bool:
         on_event=build_node_event_handler(
             book, notifier, store, get_node_link=_get_node_link, tool_calls=tool_calls
         ),
+        on_connected=_report_bot_ready,
     )
     await node_link.start()
 

@@ -130,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         from sa_home_bot.app import run
 
-        coro = run(settings)
+        coro = run(settings, instance=args.instance)
 
     try:
         result = asyncio.run(coro)

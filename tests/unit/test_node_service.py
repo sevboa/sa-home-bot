@@ -75,6 +75,51 @@ async def test_unknown_service_is_bad_request():
     assert "monitor" in exc_info.value.message  # подсказывает известные
 
 
+def test_report_ready_action_declared_and_hidden_from_ui():
+    sup, _ = _fake_supervisor()
+    action = NodeService(sup).describe().find_action("report_ready")
+    assert action is not None
+    names = [p.name for p in action.params]
+    assert set(names) == {"name", "ready"}
+    # Без choices — человеку в UI кнопкой не рисуется, зовёт только сам
+    # дочерний процесс службы по уже открытому node_link.
+    assert all(p.choices is None for p in action.params)
+
+
+class _FakeLease:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, bool]] = []
+
+    def set_ready(self, slot_name: str, ready: bool) -> None:
+        self.calls.append((slot_name, ready))
+
+
+async def test_report_ready_updates_lease():
+    sup, _ = _fake_supervisor()
+    lease = _FakeLease()
+    svc = NodeService(sup, lease=lease)
+    result = await svc.run_command("report_ready", {"name": "telegram-bot", "ready": True})
+    assert lease.calls == [("telegram-bot", True)]
+    assert result == {"name": "telegram-bot", "ready": True}
+
+
+async def test_report_ready_unknown_slot_is_bad_request():
+    sup, _ = _fake_supervisor()
+    lease = _FakeLease()
+    svc = NodeService(sup, lease=lease)
+    with pytest.raises(ProtoError) as exc_info:
+        await svc.run_command("report_ready", {"name": "ghost", "ready": True})
+    assert exc_info.value.code == "bad_request"
+    assert lease.calls == []  # не дошли до аренды
+
+
+async def test_report_ready_without_lease_is_noop():
+    sup, _ = _fake_supervisor()
+    svc = NodeService(sup)  # lease=None (сборки/тесты без аренды)
+    result = await svc.run_command("report_ready", {"name": "telegram-bot", "ready": True})
+    assert result == {"name": "telegram-bot", "ready": True}  # не падает
+
+
 async def test_power_actions_declared_and_scheduled(monkeypatch):
     import asyncio
 

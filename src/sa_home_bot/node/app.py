@@ -514,6 +514,13 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         if lease is not None:
             lease.note_fenced(slot_name)
 
+    def on_spawned(slot_name: str) -> None:
+        # Новый спавн — старое "ready: true" (если было) устарело: дочерний
+        # процесс ещё не успел ничего подтвердить заново (см.
+        # node/lease.py::SUPERIOR_READY_TIMEOUT_S, app.py::_report_bot_ready).
+        if lease is not None:
+            lease.set_ready(slot_name, False)
+
     supervisor = Supervisor(
         effective_assignments,
         config_path,
@@ -521,6 +528,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         restart_delay_s=settings.node.restart_delay_s,
         stop_timeout_s=settings.node.stop_timeout_s,
         on_fenced=on_fenced,
+        on_spawned=on_spawned,
     )
     if not supervisor.services:
         log.warning("Нет ни одного валидного назначения — нода работает вхолостую")
@@ -549,6 +557,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         router=router,
         emit=emit,
         grace_s=settings.swarm.failover_grace_s,
+        ready_timeout_s=settings.swarm.superior_ready_timeout_s,
     )
     # Нода слушает socket (локальные фронтенды) и все адреса из listen —
     # TCP для пиров роя. Адрес, которого ещё нет (tailscale поднимается

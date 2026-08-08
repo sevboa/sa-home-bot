@@ -85,9 +85,11 @@ class SupervisedService:
         stop_timeout_s: float = 90.0,
         assignment: Assignment | None = None,
         on_fenced: Callable[[str], None] | None = None,
+        on_spawned: Callable[[str], None] | None = None,
     ) -> None:
         self.name = name
         self._on_fenced = on_fenced
+        self._on_spawned = on_spawned
         # Назначение целиком (роль, инстанс, приоритет) — нужно аренде
         # лидерства и репликации пакетов, супервизии самой хватает cli_args.
         self.assignment = assignment or Assignment(service=name)
@@ -136,10 +138,27 @@ class SupervisedService:
         self._desired_running = True
         self._spawned.clear()
         self._task = asyncio.create_task(self._run(), name=f"supervise-{self.name}")
+        # Страховка: если _run() всё же умрёт с необработанным исключением
+        # (не должно происходить после фикса самого цикла ниже, но тихая
+        # смерть fire-and-forget задачи иначе осталась бы совсем незаметной —
+        # self._task держит на неё ссылку, поэтому даже дефолтный обработчик
+        # asyncio "Task exception was never retrieved" не сработает).
+        self._task.add_done_callback(self._on_task_done)
         # Дождаться фактического запуска, чтобы ответ start/restart отражал
         # реальное состояние, а не снимок до спавна процесса.
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._spawned.wait(), timeout=5.0)
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.error(
+                "Служба %s: наблюдающая задача завершилась с необработанным "
+                "исключением — служба больше НЕ супервизируется",
+                self.name, exc_info=exc,
+            )
 
     async def stop(self) -> None:
         if not self._desired_running:
@@ -196,37 +215,66 @@ class SupervisedService:
                 await asyncio.sleep(self._restart_delay)
                 continue
 
-            self._proc = proc
-            self._status = RUNNING
-            self._spawned.set()
-            self.started_at = _now_iso()
-            log.info("Служба %s запущена (pid=%s)", self.name, proc.pid)
-            await self._emit(EVENT_SERVICE_STARTED, {"name": self.name, "pid": proc.pid})
+            # Всё, что ниже, обёрнуто в try/except: наблюдающая задача — это
+            # fire-and-forget asyncio.create_task без add_done_callback (кроме
+            # диагностической страховки в start()), и необработанное
+            # исключение здесь (например из самого _emit — broadcast упавшему
+            # клиенту в момент нестабильной сети) тихо убивало бы её навсегда,
+            # оставляя службу «ничьей»: start()/restart() после этого — no-op,
+            # пока _desired_running уже True (живой инцидент 2026-08-08,
+            # telegram-bot@alfred провисел без перезапуска ~20 минут).
+            try:
+                self._proc = proc
+                self._status = RUNNING
+                self._spawned.set()
+                self.started_at = _now_iso()
+                log.info("Служба %s запущена (pid=%s)", self.name, proc.pid)
+                if self._on_spawned is not None:
+                    self._on_spawned(self.name)
+                await self._emit(EVENT_SERVICE_STARTED, {"name": self.name, "pid": proc.pid})
 
-            rc = await proc.wait()
-            self._proc = None
-            self.last_exit_code = rc
-            if not self._desired_running:
-                break  # остановили сами — stop() эмитит service_stopped
-            if rc == FENCED_EXIT_CODE:
-                # Служба сама сообщила: её вытеснил другой экземпляр (для бота
-                # это 409 от Telegram). Перезапускать её — значит мешать тому,
-                # кто держит службу по праву; решение отдаём аренде.
-                log.warning("Служба %s вытеснена другим экземпляром — не перезапускаю",
-                            self.name)
-                self._desired_running = False
-                self._status = STOPPED
-                await self._emit(EVENT_SERVICE_FENCED, {"name": self.name})
-                if self._on_fenced is not None:
-                    self._on_fenced(self.name)
-                break
-            log.warning("Служба %s завершилась (код %s) — перезапуск через %.0f с",
-                        self.name, rc, self._restart_delay)
-            self._status = RESTARTING
-            self.restarts += 1
-            await self._emit(
-                EVENT_SERVICE_FAILED, {"name": self.name, "exit_code": rc}
-            )
+                rc = await proc.wait()
+                self._proc = None
+                self.last_exit_code = rc
+                if not self._desired_running:
+                    break  # остановили сами — stop() эмитит service_stopped
+                if rc == FENCED_EXIT_CODE:
+                    # Служба сама сообщила: её вытеснил другой экземпляр (для
+                    # бота это 409 от Telegram). Перезапускать её — значит
+                    # мешать тому, кто держит службу по праву; решение отдаём
+                    # аренде.
+                    log.warning("Служба %s вытеснена другим экземпляром — не перезапускаю",
+                                self.name)
+                    self._desired_running = False
+                    self._status = STOPPED
+                    await self._emit(EVENT_SERVICE_FENCED, {"name": self.name})
+                    if self._on_fenced is not None:
+                        self._on_fenced(self.name)
+                    break
+                log.warning("Служба %s завершилась (код %s) — перезапуск через %.0f с",
+                            self.name, rc, self._restart_delay)
+                self._status = RESTARTING
+                self.restarts += 1
+                await self._emit(
+                    EVENT_SERVICE_FAILED, {"name": self.name, "exit_code": rc}
+                )
+            except Exception:
+                log.exception(
+                    "Служба %s: необработанная ошибка в цикле наблюдения — "
+                    "считаю падением, перезапуск через %.0f с",
+                    self.name, self._restart_delay,
+                )
+                self._proc = None
+                if not self._desired_running:
+                    break
+                self._status = RESTARTING
+                self.restarts += 1
+                with contextlib.suppress(Exception):
+                    await self._emit(
+                        EVENT_SERVICE_FAILED,
+                        {"name": self.name, "error": "supervisor_internal_error"},
+                    )
+
             await asyncio.sleep(self._restart_delay)
 
 
@@ -242,11 +290,13 @@ class Supervisor:
         restart_delay_s: float = 5.0,
         stop_timeout_s: float = 90.0,
         on_fenced: Callable[[str], None] | None = None,
+        on_spawned: Callable[[str], None] | None = None,
     ) -> None:
         self.services: dict[str, SupervisedService] = {}
         self._config_path = config_path
         self._emit = emit
         self._on_fenced = on_fenced
+        self._on_spawned = on_spawned
         self._restart_delay_s = restart_delay_s
         self._stop_timeout_s = stop_timeout_s
         for item in assignments:
@@ -289,6 +339,7 @@ class Supervisor:
             stop_timeout_s=self._stop_timeout_s,
             assignment=assignment,
             on_fenced=self._on_fenced,
+            on_spawned=self._on_spawned,
         )
 
     async def start_all(self) -> None:

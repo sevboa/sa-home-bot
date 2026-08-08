@@ -1,6 +1,8 @@
 """Супервизия: старт, падение → рестарт → события, ручной стоп, рестарт-команда."""
 
 import asyncio
+import contextlib
+import logging
 
 import pytest
 
@@ -121,6 +123,70 @@ async def test_sigkill_after_stop_timeout():
     async with asyncio.timeout(10):
         await svc.stop()
     assert svc.status == STOPPED
+
+
+# --- устойчивость цикла наблюдения к исключениям (фикс 2026-08-08) ---
+
+
+async def test_service_restarts_even_if_emit_raises():
+    """Падение самого emit (например broadcast упавшему клиенту в момент
+    нестабильной сети) не должно убивать наблюдающую задачу навсегда —
+    иначе служба остаётся «ничьей» без единого следа в логе (живой инцидент:
+    telegram-bot@alfred провисел без перезапуска ~20 минут)."""
+
+    async def raising_emit(event_type: str, data: dict) -> None:
+        raise RuntimeError("нода недоступна прямо сейчас")
+
+    svc = SupervisedService(
+        "fake", ["-c", "import sys; sys.exit(3)"],
+        emit=raising_emit, restart_delay_s=0.02,
+    )
+    await svc.start()
+
+    async with asyncio.timeout(10):
+        while svc.restarts < 3:
+            await asyncio.sleep(0.02)
+
+    assert svc.restarts >= 3  # продолжает падать/перезапускаться, а не молчит
+    # stop() эмитит EVENT_SERVICE_STOPPED сам, вне цикла наблюдения — не
+    # предмет этого теста (тот же raising_emit уронит и его, это ожидаемо).
+    with contextlib.suppress(RuntimeError):
+        await svc.stop()
+
+
+async def test_on_spawned_called_on_every_spawn():
+    events = Events()
+    spawned: list[str] = []
+    svc = SupervisedService(
+        "fake", ["-c", "import sys; sys.exit(3)"],
+        emit=events.emit, restart_delay_s=0.02, on_spawned=spawned.append,
+    )
+    await svc.start()
+    async with asyncio.timeout(10):
+        while len(spawned) < 3:
+            await asyncio.sleep(0.02)
+    assert spawned == ["fake"] * len(spawned)
+    await svc.stop()
+
+
+async def test_on_task_done_logs_unhandled_exception(caplog):
+    """Диагностическая страховка: если _run() всё же умрёт необработанной —
+    это не должно теряться молча (в реальном инциденте не нашлось даже
+    "Task exception was never retrieved" — self._task держит ссылку и
+    не даёт задаче собраться GC)."""
+    events = Events()
+    svc = SupervisedService("fake", ["-c", "pass"], emit=events.emit)
+
+    async def boom() -> None:
+        raise RuntimeError("наблюдающая задача упала")
+
+    task = asyncio.create_task(boom())
+    with contextlib.suppress(RuntimeError):
+        await task
+
+    with caplog.at_level(logging.ERROR):
+        svc._on_task_done(task)
+    assert "необработанным исключением" in caplog.text
 
 
 async def test_supervisor_skips_unknown_assignment():
