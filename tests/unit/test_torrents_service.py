@@ -421,6 +421,23 @@ async def test_search_returns_narrow_slice_sorted_by_seeders(fake_qbittorrent):
     assert fake_qbittorrent.deleted == [7]
 
 
+async def test_search_reports_total_when_more_than_shown(fake_qbittorrent):
+    """qBittorrent отдаёт total независимо от limit — если находок больше,
+    чем поместилось в выдачу, модель должна об этом узнать."""
+    fake_qbittorrent.found = list(_FOUND)
+    result = await TorrentsService(_settings()).run_command(
+        "search", {"query": "задача трёх тел", "limit": 1}
+    )
+    assert result["count"] == 1
+    assert result["total"] == 2
+
+
+async def test_search_omits_total_when_nothing_more(fake_qbittorrent):
+    fake_qbittorrent.found = list(_FOUND)
+    result = await TorrentsService(_settings()).run_command("search", {"query": "задача трёх тел"})
+    assert "total" not in result
+
+
 async def test_search_without_plugins_says_so(fake_qbittorrent):
     fake_qbittorrent.plugins = []
     with pytest.raises(ProtoError) as excinfo:
@@ -552,7 +569,8 @@ async def test_search_retries_shorter_when_nothing_found(fake_qbittorrent):
 
     def only_short_query_finds(self, client, pattern, limit):
         tried.append(pattern)
-        return list(_FOUND) if pattern == "Задача трёх тел" else []
+        found = list(_FOUND) if pattern == "Задача трёх тел" else []
+        return found, len(found)
 
     original = TorrentsService._run_search_job
     try:

@@ -99,10 +99,12 @@ ACTION_SEARCH = "search"
 ACTION_DETAILS = "details"
 
 # Сколько находок отдавать. Их читает модель и выбирает одну — на десятке
-# строк выбор по сидам/размеру делается не хуже, чем на полусотне. Было 10 —
-# уменьшено 2026-07-29: вместе с декларациями тулов выдача выбивала окно
-# модели (8k токенов), и ответ приходил пустым или обрывался на полуслове.
-SEARCH_LIMIT = 6
+# строк выбор по сидам/размеру делается не хуже, чем на полусотне. Было 10,
+# уменьшено до 6 2026-07-29: вместе с декларациями тулов выдача выбивала окно
+# модели (num_ctx=8192 на тот момент), ответ приходил пустым или обрывался на
+# полуслове. С 2026-07-25 num_ctx поднят до 24576 (см. память
+# llm-model-upgrade) — бюджета снова хватает, вернули 10.
+SEARCH_LIMIT = 10
 # Плагин ходит на живой трекер (логин + страница выдачи) — это секунды, но
 # не мгновение; ждём завершения задания, а не первой пустой выдачи.
 SEARCH_WAIT_S = 45.0
@@ -421,8 +423,16 @@ class TorrentsService:
         finally:
             path.unlink(missing_ok=True)
 
-    def _run_search_job(self, client: Any, pattern: str, limit: int) -> list[dict[str, Any]]:
-        """Одно задание поиска: старт → ожидание → результаты → уборка."""
+    def _run_search_job(
+        self, client: Any, pattern: str, limit: int
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Одно задание поиска: старт → ожидание → результаты → уборка.
+
+        Возвращает находки (уже урезанные до `limit`) и `total` — сколько
+        всего нашли плагины по этому запросу независимо от `limit` (так
+        отдаёт сам qBittorrent Web API): по нему видно, что выдача обрезана,
+        не выловив это из числа строк в ответе.
+        """
         job = client.search_start(pattern=pattern, plugins="enabled", category="all")
         search_id = job["id"]
         try:
@@ -437,7 +447,8 @@ class TorrentsService:
             # Задание живёт в qBittorrent, пока его не удалят: без этого
             # каждый вопрос Альфреда оставлял бы за собой мусор.
             client.search_delete(search_id=search_id)
-        return list(raw.get("results", []))
+        results = list(raw.get("results", []))
+        return results, int(raw.get("total", len(results)) or 0)
 
     def _details_sync(self, page: str) -> dict[str, Any]:
         """Карточка раздачи со страницы трекера.
@@ -494,9 +505,10 @@ class TorrentsService:
             attempts = _query_ladder(query)
             usable: list[dict[str, Any]] = []
             broken: list[dict[str, Any]] = []
+            total = 0
             used_query = attempts[0]
             for attempt in attempts:
-                raw = self._run_search_job(client, attempt, limit)
+                raw, total = self._run_search_job(client, attempt, limit)
                 # Сбой плагина приезжает НЕ ошибкой, а фальшивой «находкой»:
                 # имя вида «[запрос][Error]: …», ссылка «<сайт>/error», 100
                 # сидов и терабайт размера (так плагины показывают проблему в
@@ -533,11 +545,19 @@ class TorrentsService:
         # Сортировка по сидам — то, по чему выбирают раздачу в первую очередь;
         # qBittorrent отдаёт результаты в порядке прихода от плагинов.
         results.sort(key=lambda r: r["seeders"], reverse=True)
+        shown = results[:limit]
         payload: dict[str, Any] = {
-            "results": results[:limit],
-            "count": len(results[:limit]),
+            "results": shown,
+            "count": len(shown),
             "query": query,
         }
+        if total > len(shown):
+            # Реальных «страниц» нет — задание поиска удаляется сразу после
+            # чтения результатов (см. _run_search_job), просить следующую
+            # порцию не у чего. Отдаём общее число находок, чтобы модель
+            # честно сказала человеку «показал N из total», а не выдала
+            # верхушку за всю выдачу.
+            payload["total"] = total
         if used_query != query.strip():
             # Модель должна знать, что искали не совсем то, о чём её просили:
             # выдача шире запрошенного, и год/качество надо проверять глазами
