@@ -1630,6 +1630,7 @@ TORRENTS_ACTION_ADD = "add"
 TORRENTS_ACTION_PAUSE = "pause"
 TORRENTS_ACTION_RESUME = "resume"
 TORRENTS_ACTION_SEARCH = "search"
+TORRENTS_ACTION_SEARCH_SMART = "search_smart"
 TORRENTS_ACTION_DETAILS = "details"
 
 # Что тул принимает как источник раздачи: magnet-ссылку — от человека, либо
@@ -1677,7 +1678,7 @@ def _torrents_args(action: str, args: dict[str, Any]) -> dict[str, Any] | str:
                 "скопированная дословно"
             )
         return {"page": page}
-    if action == TORRENTS_ACTION_SEARCH:
+    if action in (TORRENTS_ACTION_SEARCH, TORRENTS_ACTION_SEARCH_SMART):
         query = str(args.get("query") or "").strip()
         if not query:
             return "ошибка: не указано, что искать (query)"
@@ -1760,6 +1761,11 @@ _TORRENTS_VARIANTS = VariantRights(
         (TORRENTS_ACTION_LIST, ActionRight(TORRENTS_ACTION_LIST, TORRENTS_SERVICE)),
         (TORRENTS_ACTION_SPACE, ActionRight(TORRENTS_ACTION_SPACE, TORRENTS_SERVICE)),
         (TORRENTS_ACTION_SEARCH, ActionRight(TORRENTS_ACTION_SEARCH, TORRENTS_SERVICE)),
+        # search_smart — тот же поиск по трекерам, другим способом добытый
+        # (torrents/service.py). Отдельного права под него не заводим: это не
+        # новая возможность, а альтернативный путь к search, тот же login и
+        # те же трекеры — делить их разными правами гостю нечем.
+        (TORRENTS_ACTION_SEARCH_SMART, ActionRight(TORRENTS_ACTION_SEARCH, TORRENTS_SERVICE)),
         (TORRENTS_ACTION_DETAILS, ActionRight(TORRENTS_ACTION_DETAILS, TORRENTS_SERVICE)),
         (TORRENTS_ACTION_ADD, ActionRight(TORRENTS_ACTION_ADD, TORRENTS_SERVICE)),
         (TORRENTS_ACTION_PAUSE, ActionRight(TORRENTS_ACTION_PAUSE, TORRENTS_SERVICE)),
@@ -1787,11 +1793,14 @@ _DECL_TORRENTS: dict[str, Any] = {
             "качество, состав) — когда выбор неочевиден или спрашивают про "
             "качество.\n"
             "used_query в ответе = твой запрос ничего не дал, искали шире: "
-            "сверь имена находок с просьбой. total в ответе search — на "
-            "трекере нашлось больше, чем count показанных: скажи человеку, "
+            "сверь имена находок с просьбой. total в ответе search/search_smart "
+            "— на трекере нашлось больше, чем count показанных: скажи человеку, "
             "сколько всего нашлось, и предложи уточнить название/год/сезон, "
             "чтобы сузить — «пролистать» дальше эту же выдачу нельзя, только "
-            "новый поиск точнее. Мало места — скажи, не добавляй "
+            "новый поиск точнее. search пуст, а название могло стоять в "
+            "другом порядке слов или с доп. словом внутри — попробуй "
+            "search_smart тем же query: она найдёт по одному слову и сама "
+            "сверит остальные, в любом порядке. Мало места — скажи, не добавляй "
             "молча; размер раздачи по magnet заранее не знает никто. "
             "pause/resume — по имени из list («все» — сразу все); подошло "
             "несколько — переспроси.\n"
@@ -1810,19 +1819,23 @@ _DECL_TORRENTS: dict[str, Any] = {
                     "enum": [v for v, _ in _TORRENTS_VARIANTS.rights],
                     "description": (
                         "list — что качается; space — куда сохранять и сколько "
-                        "места; search — найти на трекерах; details — карточка "
-                        "одной находки; add — поставить на закачку; "
-                        "pause/resume — остановить/продолжить"
+                        "места; search — найти на трекерах; search_smart — "
+                        "запасной поиск, когда search ничего не нашёл; "
+                        "details — карточка одной находки; add — поставить на "
+                        "закачку; pause/resume — остановить/продолжить"
                     ),
                 },
                 "query": {
                     "type": "string",
                     "description": (
-                        "search: ТОЛЬКО название, как на афише. Без года, "
-                        "качества, сезона, слова «сериал» и релизера, даже "
-                        "если человек их назвал: трекер ищет строку целиком в "
-                        "заголовке, лишнее слово обнуляет выдачу. Качество и "
-                        "год выбирай потом, по именам находок."
+                        "search/search_smart: ТОЛЬКО название, как на афише. "
+                        "Без года, качества, сезона, слова «сериал» и "
+                        "релизера, даже если человек их назвал: search ищет "
+                        "строку целиком в заголовке, лишнее слово обнуляет "
+                        "выдачу (search_smart переживает лишние слова и "
+                        "другой их порядок, но не помогает, если название "
+                        "просто не то). Качество и год выбирай потом, по "
+                        "именам находок."
                     ),
                 },
                 "page": {

@@ -116,9 +116,11 @@
   процесс — рестарт делает человек через `restart_node`, см. `node/update.py`.
 - `list@torrents` — read-only список того, что качается; `space@torrents` —
   свободное место в директориях сохранения; `search@torrents` — поиск по
-  трекерам движком qBittorrent; `details@torrents` — карточка найденной
-  раздачи со страницы трекера; `add@torrents` — добавить раздачу;
-  `pause@torrents`/`resume@torrents` — остановить/снова запустить раздачу;
+  трекерам движком qBittorrent (действия `search` и `search_smart` в туле
+  torrents делят это одно право — второе лишь другой способ поиска, не
+  отдельное умение); `details@torrents` — карточка найденной раздачи со
+  страницы трекера; `add@torrents` — добавить раздачу; `pause@torrents`/
+  `resume@torrents` — остановить/снова запустить раздачу;
 - `search@net` — веб-поиск через локальный SearXNG;
 - `recall@memory`, `remember@memory`, `forget@memory` — долгая память Альфреда
   о чате (служба memory).

@@ -1470,8 +1470,14 @@ def test_torrents_enum_is_per_action_right():
     assert _tor_enum(_sub("list@torrents")) == ["list"]
     assert _tor_enum(_sub("list@torrents", "pause@torrents")) == ["list", "pause"]
     assert _tor_enum(ADMIN) == [
-        "list", "space", "search", "details", "add", "pause", "resume",
+        "list", "space", "search", "search_smart", "details", "add", "pause", "resume",
     ]
+
+
+def test_torrents_search_right_also_unlocks_search_smart():
+    """search_smart — не отдельное умение, а другой способ добыть тот же
+    search: одного права search@torrents достаточно на оба значения enum."""
+    assert _tor_enum(_sub("search@torrents")) == ["search", "search_smart"]
 
 
 def test_torrents_hidden_without_any_torrent_right():
@@ -1482,7 +1488,7 @@ def test_torrents_hidden_without_any_torrent_right():
 def test_torrents_group_right_covers_all_actions():
     """«*@torrents» — новое умение службы доступно сразу, без правки конфига."""
     assert _tor_enum(_sub("*@torrents")) == [
-        "list", "space", "search", "details", "add", "pause", "resume",
+        "list", "space", "search", "search_smart", "details", "add", "pause", "resume",
     ]
 
 
@@ -1561,6 +1567,17 @@ async def test_torrents_search_sends_query(store):
     )
     assert json.loads(raw)["count"] == 1
     assert link.commands[0][0] == "search"
+    assert link.sent_args[0] == {"query": "задача трёх тел"}
+
+
+async def test_torrents_search_smart_sends_query(store):
+    link = _swarm_link(command_result={"results": [{"name": "Foo", "seeders": 10}], "count": 1})
+    raw = await tools.tool_torrents(
+        _ctx(store, node_link=link, subscription=ADMIN),
+        {"action": "search_smart", "query": "задача трёх тел"},
+    )
+    assert json.loads(raw)["count"] == 1
+    assert link.commands[0][0] == "search_smart"
     assert link.sent_args[0] == {"query": "задача трёх тел"}
 
 
