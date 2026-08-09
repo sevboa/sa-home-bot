@@ -82,7 +82,7 @@ from sa_home_bot.bot.notifier import (  # noqa: F401 — реэкспорт, с�
 from sa_home_bot.bot.rich_stream import RichStreamSession
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.tool_debug import ToolCalls
-from sa_home_bot.config import PersonConfig, Settings
+from sa_home_bot.config import PersonConfig, Settings, resolve_think
 from sa_home_bot.db.store import Store
 from sa_home_bot.llm.prompt import ROUTE_OK, THINK_MARKER
 from sa_home_bot.llm_chat import run_chat_loop
@@ -540,6 +540,20 @@ async def _build_context_note(
             "помнишь: память могла устареть или подвести. Признаться в "
             "незнании — не стыдно, соврать — стыдно."
         )
+    # Живая находка 2026-08-10: инструмент честно вернул отказ (например,
+    # get_weather — "не удалось определить координаты города") ДВАЖДЫ, а
+    # модель после этого всё равно ответила конкретной температурой и
+    # ветром — выдумала данные вместо того, чтобы сказать «не получилось».
+    # Та же логика, что у строк про часовой пояс/интернет выше: не молчаливо
+    # надеяться, что модель сама поймёт, а сказать прямо и безусловно (не
+    # завязано на конкретный тул — иначе на каждый новый тул пришлось бы
+    # заводить свою копию).
+    lines.append(
+        "Если инструмент вернул отказ или ошибку (например, «не удалось», "
+        "«недоступен», «не настроено») — это финальный ответ на твой запрос "
+        "к нему, не повод придумать правдоподобные цифры/факты взамен. "
+        "Скажи собеседнику как есть: не получилось, и почему (если сказано)."
+    )
     alfred_now = datetime.now(ZoneInfo(ALFRED_TIMEZONE))
     lines.append(
         f"Отдельно: ТВОЁ (Альфреда) личное время сейчас — там, где ты живёшь: "
@@ -853,13 +867,13 @@ async def request_alfred(
 
         if needs_think:
             await message.answer(THINKING_TEXT)
-        # Чем выражается «надо думать» — LlmConfig.think_style. "implicit":
-        # флаг не шлём вовсе, и модель уходит в размышление сама (её
-        # поведение по умолчанию) — для тех, кто на явный think=true отвечает
-        # 400, но think=false понимает. "flag" — прежний явный булев think.
-        persona_think: bool | None = needs_think
-        if needs_think and settings.llm.think_style == "implicit":
-            persona_think = None
+        # Чем выражается «надо думать» — config.resolve_think/LlmConfig.
+        # think_style. Общая функция, не вручную здесь: живая находка
+        # 2026-08-10 — та же логика, списанная вручную и в bot/tools.py
+        # (срабатывание напоминания), при заведении think_style была
+        # поправлена только тут, и напоминания продолжили слать явный
+        # true, ловя тот же 400 на моделях со style="implicit".
+        persona_think = resolve_think(settings.llm, needs_think=needs_think)
         # Живая находка 2026-07-25 (полный круг): сначала думали, что
         # think=None ("не слать флаг вообще") даст qwen3.5/3.6 самим решать
         # адаптивно — оказалось, без явного флага модель генерирует от 2 до

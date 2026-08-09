@@ -60,7 +60,7 @@ from sa_home_bot import wake_core
 from sa_home_bot.bot import commands, invites, recipients
 from sa_home_bot.bot.monitor_state import parse_disk_summary, parse_health_state
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
-from sa_home_bot.config import Settings
+from sa_home_bot.config import Settings, resolve_think
 from sa_home_bot.memory import protocol as memory_protocol
 from sa_home_bot.net import protocol as net_protocol
 from sa_home_bot.node.kind import traits_for
@@ -892,12 +892,23 @@ async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
     # тула, модель его никогда не передаёт.
     history = _close_pending_tool_calls(ctx.history, self_result=args.get("_self_result"))
     # Живой баг 2026-08-05: think=True здесь слепо посылался даже для
-    # mode="single_call" (модель без thinking вовсе, напр. Gemma на
-    # mycraft) — на срабатывании Ollama падала 400 "does not support
-    # thinking". Та же логика, что у живого /ai (bot/ai_flow.py::
-    # request_alfred): для single_call think не передаём вовсе (None), а
-    # не False — присутствие ключа само по себе ломает такую модель.
-    think = None if ctx.settings.llm.mode == "single_call" else ctx.settings.llm.think_chat
+    # mode="single_call" — на срабатывании Ollama падала 400 "does not
+    # support thinking". Для single_call think берём single_call_think
+    # (per-node настройка, см. LlmConfig) — не жёсткий None, той же логики,
+    # что и у живого /ai (bot/ai_flow.py::request_alfred).
+    #
+    # Живой баг 2026-08-10: для остальных режимов здесь стоял голый
+    # think_chat (default True) в обход think_style — на срабатывании
+    # напоминания получали ЯВНЫЙ true и тот же самый 400 на моделях со
+    # style="implicit" (gemma), хотя обычный /ai этой же модели уже был
+    # пофикшен. Теперь оба места (и этот, и ai_flow.py) идут через один
+    # config.resolve_think — см. его докстринг.
+    llm_cfg = ctx.settings.llm
+    think = (
+        llm_cfg.single_call_think
+        if llm_cfg.mode == "single_call"
+        else resolve_think(llm_cfg, needs_think=llm_cfg.think_chat)
+    )
     task_args = {
         "messages": [*history, {"role": "user", "content": directive}],
         "think": think,

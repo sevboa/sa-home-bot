@@ -846,6 +846,16 @@ async def test_context_note_includes_alfred_own_time_always(store):
     assert "ТВОЁ (Альфреда) личное время" in note
 
 
+async def test_context_note_warns_against_fabricating_after_tool_failure(store):
+    # Живая находка 2026-08-10: get_weather дважды честно вернул отказ
+    # («не удалось определить координаты»), а модель всё равно ответила
+    # конкретной температурой — выдумала. Инструкция безусловная (не
+    # привязана к конкретному тулу), как и предупреждение про интернет.
+    message = NoteMessage(1, "private", None)
+    note = await ai_flow._build_context_note(message, store, dialogue_id=1)
+    assert "не повод придумать" in note
+
+
 async def test_context_note_private_chat_only_mentions_sender(store):
     message = NoteMessage(1, "private", FakeUser("Иван", username="ivan"))
     note = await ai_flow._build_context_note(message, store, dialogue_id=1)

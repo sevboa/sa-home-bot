@@ -476,6 +476,28 @@ class LlmConfig(BaseModel):
     speech_therapy_pinned_chat_ids: list[int] = Field(default_factory=list)
 
 
+def resolve_think(llm: LlmConfig, *, needs_think: bool) -> bool | None:
+    """Единая точка, чем ``needs_think`` (хочет ли вызывающий рассуждение)
+    выражается в поле ``think`` запроса к Ollama — см. ``LlmConfig.think_style``.
+
+    Живая находка 2026-08-10 (вторая тем же заходом): эта логика раньше была
+    списана вручную в трёх местах (bot/ai_flow.py::request_alfred — оба
+    прохода; bot/tools.py::tool_remind — срабатывание отложенного
+    напоминания), и когда завели ``think_style`` для устранения скрытого
+    thinking у gemma, поправили только ai_flow.py — bot/tools.py остался со
+    старой формулой (``think_chat`` напрямую, без оглядки на style) и
+    продолжил слать явный ``true`` на срабатывании каждого напоминания,
+    ловя тот же самый 400 "does not support thinking", который весь этот
+    механизм и должен был устранить. Одна функция вместо трёх копий —
+    единственный способ не разъезжаться так снова.
+
+    Не покрывает ``mode="single_call"`` — там нет решения "нужно/не нужно",
+    вызывающие берут ``single_call_think`` напрямую (см. LlmConfig)."""
+    if not needs_think:
+        return False
+    return None if llm.think_style == "implicit" else True
+
+
 class VpnConfig(BaseModel):
     """Служба vpn (`sa-home-bot --service vpn`) — AmneziaWG-доступ на jeeves,
     выдаваемый и учитываемый через бота (Этап 33 IMPLEMENTATION_PLAN.md).

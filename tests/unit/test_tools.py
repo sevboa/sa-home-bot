@@ -870,6 +870,23 @@ async def test_remind_keeps_explicit_think_for_router_think_mode(store):
     assert link.calls[0][1]["args"]["think"] is True
 
 
+async def test_remind_omits_think_for_implicit_style(store):
+    # Живой баг 2026-08-10: на срабатывании напоминания думать-стиль
+    # "implicit" (gemma-4 на mycraft — 400 на явный think=true) не
+    # учитывался вовсе, сюда по-прежнему уходил голый think_chat=True —
+    # напоминание падало с той же ошибкой 400, которую think_style должен
+    # был устранить (пофикшено было только в bot/ai_flow.py, не здесь).
+    link = _FakeNodeLink()
+    when = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    settings = Settings(
+        llm=LlmConfig(mode="router_think", think_chat=True, think_style="implicit")
+    )
+    await tools.tool_remind(
+        _ctx(store, settings=settings, node_link=link), {"when": when, "text": "x"}
+    )
+    assert link.calls[0][1]["args"]["think"] is None
+
+
 async def test_remind_when_still_works_without_after_event(store):
     # Обратная совместимость: обычный remind по времени не задет.
     link = _FakeNodeLink()
