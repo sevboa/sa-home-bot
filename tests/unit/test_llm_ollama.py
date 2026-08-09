@@ -315,6 +315,139 @@ async def test_chat_does_not_retry_real_http_error_response(monkeypatch):
     assert calls["n"] == 1  # ни одного ретрая
 
 
+# --- chat_stream (этап 34, Фаза 2 — Rich-стрим ответов) ---
+
+
+class FakeStreamResp:
+    """Файлоподобный итератор строк NDJSON — то, что реально отдаёт
+    urllib.request.urlopen() при stream=True (по строке на чанк)."""
+
+    def __init__(self, lines: list[bytes]) -> None:
+        self._lines = lines
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def __iter__(self):
+        return iter(self._lines)
+
+
+def test_post_json_stream_sync_accumulates_chunks_and_calls_on_chunk(monkeypatch):
+    lines = [
+        b'{"message": {"content": "\xd0\x9f\xd1\x80\xd0\xb8"}, "done": false}\n',
+        b'{"message": {"content": "\xd0\xb2\xd0\xb5\xd1\x82"}, "done": false}\n',
+        b'{"message": {"role": "assistant", "content": ""}, "done": true, "eval_count": 5}\n',
+    ]
+    monkeypatch.setattr(
+        ollama.urllib.request, "urlopen", lambda req, timeout=None: FakeStreamResp(lines)
+    )
+    seen: list[str] = []
+
+    result = ollama._post_json_stream_sync(
+        "http://127.0.0.1:11434/api/chat", {"messages": []}, 5.0, seen.append
+    )
+
+    assert seen == ["При", "Привет"]  # накопленный текст на каждый тик, не дельта
+    assert result["message"]["content"] == "Привет"
+    assert result["eval_count"] == 5
+
+
+def test_post_json_stream_sync_skips_blank_lines(monkeypatch):
+    lines = [b"\n", b'{"message": {"content": "ok"}, "done": true}\n']
+    monkeypatch.setattr(
+        ollama.urllib.request, "urlopen", lambda req, timeout=None: FakeStreamResp(lines)
+    )
+    result = ollama._post_json_stream_sync("http://x/api/chat", {}, 5.0, lambda t: None)
+    assert result["message"]["content"] == "ok"
+
+
+async def test_chat_stream_prepends_system_message_and_sets_stream_true(monkeypatch):
+    monkeypatch.setattr(ollama, "ensure_running", _noop)
+    posted = {}
+
+    def fake_post_stream(url, payload, timeout, on_chunk):
+        posted["url"] = url
+        posted["payload"] = payload
+        on_chunk("Добрый")
+        on_chunk("Добрый день")
+        return {"message": {"content": "Добрый день"}}
+
+    monkeypatch.setattr(ollama, "_post_json_stream_sync", fake_post_stream)
+    seen: list[str] = []
+    result = await ollama.chat_stream(
+        _cfg(), [{"role": "user", "content": "привет"}], "system-prompt", seen.append
+    )
+
+    assert result == {"message": {"content": "Добрый день"}}
+    assert seen == ["Добрый", "Добрый день"]
+    assert posted["url"].endswith("/api/chat")
+    assert posted["payload"]["stream"] is True
+    assert posted["payload"]["messages"][0] == {"role": "system", "content": "system-prompt"}
+    assert posted["payload"]["messages"][1] == {"role": "user", "content": "привет"}
+
+
+async def test_chat_stream_does_not_retry_once_a_chunk_already_arrived(monkeypatch):
+    # Стрим уже начался и виден в буфере частичной генерации (llm/service.py)
+    # — повтор с нуля задвоил бы текст, а не просто потратил время.
+    monkeypatch.setattr(ollama, "ensure_running", _noop)
+    calls = {"n": 0}
+
+    def fake_post_stream(url, payload, timeout, on_chunk):
+        calls["n"] += 1
+        on_chunk("часть")
+        raise urllib.error.URLError("connection reset")
+
+    monkeypatch.setattr(ollama, "_post_json_stream_sync", fake_post_stream)
+    with pytest.raises(ProtoError) as excinfo:
+        await ollama.chat_stream(
+            _cfg(), [{"role": "user", "content": "1"}], "system", lambda t: None
+        )
+
+    assert excinfo.value.code == ERR_INTERNAL
+    assert calls["n"] == 1
+
+
+async def test_chat_stream_retries_when_no_chunk_arrived_yet(monkeypatch):
+    monkeypatch.setattr(ollama, "ensure_running", _noop)
+    calls = {"n": 0}
+
+    def fake_post_stream(url, payload, timeout, on_chunk):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.URLError("Remote end closed connection without response")
+        on_chunk("ответ")
+        return {"message": {"content": "ответ"}}
+
+    monkeypatch.setattr(ollama, "_post_json_stream_sync", fake_post_stream)
+    result = await ollama.chat_stream(
+        _cfg(), [{"role": "user", "content": "1"}], "system", lambda t: None
+    )
+
+    assert result == {"message": {"content": "ответ"}}
+    assert calls["n"] == 2
+
+
+async def test_chat_stream_does_not_retry_real_http_error_response(monkeypatch):
+    monkeypatch.setattr(ollama, "ensure_running", _noop)
+    calls = {"n": 0}
+
+    def fake_post_stream(url, payload, timeout, on_chunk):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(url, 404, "model not found", None, None)
+
+    monkeypatch.setattr(ollama, "_post_json_stream_sync", fake_post_stream)
+    with pytest.raises(ProtoError) as excinfo:
+        await ollama.chat_stream(
+            _cfg(), [{"role": "user", "content": "1"}], "system", lambda t: None
+        )
+
+    assert excinfo.value.code == ERR_INTERNAL
+    assert calls["n"] == 1
+
+
 class FakeKeepaliveProc:
     def __init__(self) -> None:
         self.terminated = False

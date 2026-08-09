@@ -13,17 +13,30 @@ aiogram (см. докстринг ToolContext), поэтому служба task
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from sa_home_bot.bot import tools as ai_tools
-from sa_home_bot.bot.service_link import ServiceLink
+from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.proto.messages import ERR_INTERNAL, Address, ProtoError
 
 log = logging.getLogger(__name__)
 
 ACTION_CHAT = "chat"
+# Дублирует llm/service.py::ACTION_CHAT_PROGRESS — тот же приём, что и с
+# ACTION_CHAT выше: этот модуль намеренно не импортирует llm/service.py
+# (используется службой tasks, у которой нет тяжёлых зависимостей LLM-
+# службы, только клиентский ServiceLink).
+ACTION_CHAT_PROGRESS = "chat_progress"
+# Опрос буфера частичной генерации (этап 34, Фаза 2 — Rich-стрим ответов):
+# раз в ~1с, короткий таймаут на сам round-trip (не путать с общим timeout
+# на весь ответ модели, который ждёт вызывающий).
+_POLL_INTERVAL_S = 1.0
+_POLL_TIMEOUT_S = 3.0
 
 # Сколько раз подряд можно уйти в tool_calls, прежде чем модель обязана дать
 # финальный текстовый ответ — защита от зацикливания (LLM_INTEGRATION_
@@ -49,6 +62,49 @@ ToolCallSink = Callable[[str, dict[str, Any], str], Awaitable[None]]
 # ломано отформатированным — см. bot/ai_flow.py::request_alfred).
 SpeechRemarkSink = Callable[[str], Awaitable[None]]
 
+# Кусок накопленного (не дельта) текста текущего раунда + флаг "раунд
+# завершён" — этап 34, Фаза 2. Вызывается на каждый тик опроса
+# chat_progress, ПОКА идёт конкретный раунд tool-calling; раунд, который
+# оказался tool-calling-раундом (не финальным), просто не попадёт в
+# персистентный rich-ответ — это решает вызывающий (bot/rich_stream.py),
+# не этот модуль.
+PartialSink = Callable[[str, bool], Awaitable[None]]
+
+
+async def _poll_partial(
+    node_link: ServiceLink,
+    dst: Address,
+    request_id: str,
+    on_partial: PartialSink,
+) -> None:
+    """Раз в ~1с опрашивать llm.chat_progress, пока раунд не завершится —
+    тот же паттерн опроса, что wake_core.py::wait_for_service/fetch_state,
+    только вместо get_state зовём command с параметром: get_state параметров
+    не принимает (PROTOCOL.md), а Альфред может вести несколько диалогов
+    одновременно (разные чаты семьи) — частичный текст держится по
+    request_id, не одним полем состояния службы.
+
+    Финальный текст ответа вызывающий всё равно берёт из результата
+    основного ``command(ACTION_CHAT, ...)``, не отсюда — сбой опроса не
+    критичен, в худшем случае превью отстаёт от реальной генерации на
+    несколько тиков. Останавливается сама на ``done=True`` от службы или по
+    отмене задачи вызывающим (когда основной command() уже резолвился)."""
+    while True:
+        await asyncio.sleep(_POLL_INTERVAL_S)
+        try:
+            state = await node_link.command(
+                ACTION_CHAT_PROGRESS,
+                {"request_id": request_id},
+                dst=dst,
+                timeout=_POLL_TIMEOUT_S,
+            )
+        except (ServiceUnavailableError, ProtoError, TimeoutError):
+            continue
+        done = bool(state.get("done"))
+        await on_partial(state.get("partial", ""), done)
+        if done:
+            return
+
 
 async def run_chat_loop(
     node_link: ServiceLink,
@@ -62,6 +118,7 @@ async def run_chat_loop(
     on_tool_call: ToolCallSink | None = None,
     on_speech_remark: SpeechRemarkSink | None = None,
     role: str | None = None,
+    on_partial: PartialSink | None = None,
 ) -> str:
     """Один проход диалога с моделью: раунды tool-calling (до
     MAX_TOOL_ROUNDS), пока не придёт финальный текст.
@@ -87,7 +144,14 @@ async def run_chat_loop(
     решение пользователя): на qwen3.5/3.6 принудительный think=false
     ломал качество ответа (несуществующие даты, проигнорированный верный
     результат тула) — у этих моделей своя адаптивная логика "думать/не
-    думать", не мешать ей явным флагом. См. llm/ollama.py::chat()."""
+    думать", не мешать ей явным флагом. См. llm/ollama.py::chat().
+
+    ``on_partial`` — этап 34, Фаза 2 (Rich-стрим ответов): не передан —
+    поведение не меняется вовсе (обычный блокирующий command(), так вызывает
+    служба tasks). Передан — каждый раунд идёт со своим request_id и
+    параллельным опросом chat_progress (см. _poll_partial выше), колбэк
+    зовётся на каждый тик текущего раунда; какой из раундов в итоге
+    персистится как настоящий ответ — решает вызывающий, не этот цикл."""
     tool_ctx.history = messages
     # Комплект собирается ОДИН раз на проход и по правам собеседника: тула, на
     # который у него нет прав, модель не видит вовсе (см. bot/tools.py::
@@ -111,9 +175,25 @@ async def run_chat_loop(
         if remark and on_speech_remark is not None:
             await on_speech_remark(remark)
 
+    async def _call_chat(args: dict[str, Any]) -> dict[str, Any]:
+        """Один раунд chat: без on_partial — просто command(), как раньше.
+        С on_partial — плюс параллельная задача опроса chat_progress на
+        время этого конкретного раунда (см. _poll_partial)."""
+        if on_partial is None:
+            return await node_link.command(ACTION_CHAT, args, dst=dst, timeout=timeout)
+        request_id = uuid.uuid4().hex
+        streamed_args = {**args, "request_id": request_id}
+        poll_task = asyncio.create_task(_poll_partial(node_link, dst, request_id, on_partial))
+        try:
+            return await node_link.command(ACTION_CHAT, streamed_args, dst=dst, timeout=timeout)
+        finally:
+            poll_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await poll_task
+
     for _round in range(MAX_TOOL_ROUNDS):
         args = _chat_args(toolkit.declarations)
-        result = await node_link.command(ACTION_CHAT, args, dst=dst, timeout=timeout)
+        result = await _call_chat(args)
         tool_calls = result.get("tool_calls")
         if not tool_calls:
             await _maybe_send_remark(result)
@@ -161,7 +241,7 @@ async def run_chat_loop(
         MAX_TOOL_ROUNDS,
         log_chat_id,
     )
-    result = await node_link.command(ACTION_CHAT, _chat_args([]), dst=dst, timeout=timeout)
+    result = await _call_chat(_chat_args([]))
     response = result.get("response", "")
     if response:
         await _maybe_send_remark(result)

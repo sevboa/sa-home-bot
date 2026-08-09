@@ -5,12 +5,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Awaitable, Callable
+from typing import TypeVar
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, ReplyParameters
 
 from sa_home_bot.subscriptions.models import WILDCARD
+
+_T = TypeVar("_T")
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +62,39 @@ async def typing_action(bot: Bot, chat_id: int, message_thread_id: int | None = 
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+async def send_with_retry(
+    chat_id: int,
+    action: str,
+    call: Callable[[], Awaitable[_T]],
+) -> _T | None:
+    """Общий цикл ретраев на 429/ошибки Telegram (MAX_RETRIES попыток,
+    полноценный sleep(retry_after+1) на TelegramRetryAfter) — вынесен для
+    bot/rich_stream.py (этап 34, Фаза 2), чтобы не копировать цикл
+    ``Notifier._send_one`` под sendRichMessage. ``action`` — короткое
+    описание для логов ("rich-сообщение" и т.п.). ``Notifier._send_one``/
+    ``send_document``/``send_photo`` были написаны раньше и на этот хелпер
+    не переведены — рефакторинг их не входит в эту задачу."""
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return await call()
+        except TelegramRetryAfter as exc:
+            wait = exc.retry_after + 1
+            log.warning("429 от Telegram (chat=%s, %s), жду %ss", chat_id, action, wait)
+            await asyncio.sleep(wait)
+        except TelegramAPIError as exc:
+            log.warning(
+                "Не удалось отправить %s в chat=%s (попытка %s/%s): %s",
+                action,
+                chat_id,
+                attempt,
+                MAX_RETRIES,
+                exc,
+            )
+            return None
+    log.error("Исчерпаны ретраи отправки %s в chat=%s", action, chat_id)
+    return None
 
 
 def chunk_text(text: str, limit: int = MAX_LEN) -> list[str]:

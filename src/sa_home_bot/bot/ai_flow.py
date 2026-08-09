@@ -79,6 +79,7 @@ from sa_home_bot.bot.notifier import (  # noqa: F401 — реэкспорт, с�
     notify_admins,
     typing_action,
 )
+from sa_home_bot.bot.rich_stream import RichStreamSession
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import PersonConfig, Settings
@@ -687,6 +688,7 @@ async def request_alfred(
     dismissal: ai_tools.DismissalBox | None = None,
     tool_calls: ToolCalls | None = None,
     speech_remark: SpeechRemarkBox | None = None,
+    rich_session: RichStreamSession | None = None,
 ) -> str | None:
     """Сходить в llm.chat с presence/wake-сценарием.
 
@@ -697,6 +699,12 @@ async def request_alfred(
     ``dismissal`` — ячейка под «меня отпустили» (тул dismiss): заполняется
     здесь, а исполняется вызывающим после отправки ответа (см.
     perform_dismissal). Без неё тул честно скажет, что сейчас не умеет.
+
+    ``rich_session`` — этап 34, Фаза 2 (Rich-стрим ответов): не передан —
+    поведение не меняется. Передан — его ``on_partial`` идёт ТОЛЬКО в
+    персонажные проходы run_chat_loop ниже (тот же набор вызовов, что уже
+    получает ``on_speech_remark``), не в router-проход — вывод роутера и
+    сегодня не показывается пользователю, стримить нечего.
     """
     dst = Address(node=LLM_NODE, service=LLM_SERVICE)
     timeout = settings.llm.request_timeout_s
@@ -814,6 +822,7 @@ async def request_alfred(
                 log_chat_id=chat_id,
                 on_tool_call=_record_tool_call,
                 on_speech_remark=_record_speech_remark,
+                on_partial=rich_session.on_partial if rich_session is not None else None,
             )
 
         # Вариативное рассуждение (см. комментарий выше про THINK_MARKER):
@@ -868,6 +877,7 @@ async def request_alfred(
             log_chat_id=chat_id,
             on_tool_call=_record_tool_call,
             on_speech_remark=_record_speech_remark,
+            on_partial=rich_session.on_partial if rich_session is not None else None,
         )
 
     # Узнать заранее, не спит ли модель (idle-таймер llm/service.py) — если

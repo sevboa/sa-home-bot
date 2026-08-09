@@ -47,6 +47,13 @@ SERVICE_NAME = "llm"
 
 ACTION_ASK = "ask"
 ACTION_CHAT = "chat"
+# Экшн-представление (см. PROTOCOL.md, прецедент "downtime" службы monitor)
+# под чтение буфера частичной генерации — этап 34, Фаза 2 (Rich-стрим
+# ответов). get_state() параметров не принимает (PROTOCOL.md), а Альфред
+# может вести несколько диалогов одновременно (разные чаты семьи), поэтому
+# частичный текст не кладём одним полем в get_state, а раздаём по
+# request_id через обычный command.
+ACTION_CHAT_PROGRESS = "chat_progress"
 ACTION_SLEEP = "sleep"
 # Прогреть контейнер БЕЗ генерации — для службы tasks (tasks/service.py),
 # которая будит цель заранее (prewake_loop, за PREWAKE_LEAD_S до due_at) и
@@ -73,6 +80,12 @@ EVENT_WENT_IDLE = "llm_went_idle"
 EVENT_SPEECH_CURED = "llm_speech_cured"
 
 _IDLE_CHECK_INTERVAL_S = 60.0
+# Буфер частичной генерации (этап 34, Фаза 2) переживает завершённый ответ
+# на этот срок — чтобы опрашивающий бот успел забрать последний "done"-тик,
+# даже если он чуть отстал от реального завершения command(). После этого
+# запись подметается в idle_loop — иначе self._streaming растёт без предела,
+# если бот упал/переподключился посреди опроса и так и не дочитал ответ.
+_STREAMING_ENTRY_TTL_S = 120.0
 
 EventEmitter = Callable[[str, dict[str, Any]], Awaitable[None]]
 
@@ -119,6 +132,9 @@ class LlmService:
         self._speech = SpeechTherapist(
             self._cfg, **({"rand": speech_rand} if speech_rand is not None else {})
         )
+        # request_id -> {"partial": str, "done": bool, "done_at": datetime | None}
+        # (этап 34, Фаза 2 — см. ACTION_CHAT_PROGRESS выше).
+        self._streaming: dict[str, dict[str, Any]] = {}
 
     def describe(self) -> ServiceDescription:
         return ServiceDescription(
@@ -169,6 +185,29 @@ class LlmService:
                                 "(по умолчанию, Альфред) или 'router' (служебный "
                                 "триаж без персонажа, см. llm/prompt.py)"
                             ),
+                        ),
+                        ActionParam(
+                            name="request_id",
+                            type="string",
+                            required=False,
+                            title=(
+                                "Не передан — обычный блокирующий вызов, как раньше. "
+                                "Передан — идём через Ollama-стрим, накопленный текст "
+                                "доступен через chat_progress с этим же id (этап 34, "
+                                "Фаза 2)"
+                            ),
+                        ),
+                    ),
+                ),
+                ActionSpec(
+                    id=ACTION_CHAT_PROGRESS,
+                    title="Прочитать буфер частичной генерации",
+                    params=(
+                        ActionParam(
+                            name="request_id",
+                            type="string",
+                            required=True,
+                            title="request_id, переданный в chat при запуске стрима",
                         ),
                     ),
                 ),
@@ -238,7 +277,17 @@ class LlmService:
             system = ROUTER_SYSTEM_PROMPT if role == "router" else self._persona_prompt
             chat_id = args.get("chat_id")
             await self._touch(chat_id)
-            result = await ollama.chat(self._cfg, messages, system, tools=tools, think=think)
+            request_id = args.get("request_id")
+            if request_id is not None and (
+                not isinstance(request_id, str) or not request_id
+            ):
+                raise ProtoError(ERR_BAD_REQUEST, "request_id должен быть непустой строкой")
+            if request_id:
+                result = await self._chat_streamed(
+                    request_id, messages, system, tools=tools, think=think
+                )
+            else:
+                result = await ollama.chat(self._cfg, messages, system, tools=tools, think=think)
             message = result.get("message", {})
             # Модель попросила вызвать инструмент(ы) — служба llm сама по рою
             # не ходит (нет ServiceLink к соседям, только к своей Ollama), это
@@ -256,6 +305,16 @@ class LlmService:
             if remark is not None:
                 out["speech_remark"] = remark
             return out
+        if action == ACTION_CHAT_PROGRESS:
+            request_id = args.get("request_id")
+            if not isinstance(request_id, str) or not request_id:
+                raise ProtoError(ERR_BAD_REQUEST, "request_id должен быть непустой строкой")
+            entry = self._streaming.get(request_id)
+            if entry is None:
+                # Гонка первого опроса (бот уже спрашивает, а стрим ещё не
+                # успел завести запись) — не ошибка, просто пока пусто.
+                return {"partial": "", "done": False}
+            return {"partial": entry["partial"], "done": entry["done"]}
         if action == ACTION_SLEEP:
             await self._sleep_now(quiet=bool(args.get("quiet")))
             return {"asleep": True}
@@ -271,6 +330,49 @@ class LlmService:
             return {"asleep": False}
         # Сервер валидирует action по describe — сюда неизвестное не доходит.
         raise ValueError(f"необъявленное действие: {action}")
+
+    async def _chat_streamed(
+        self,
+        request_id: str,
+        messages: list[dict[str, Any]],
+        system: str,
+        *,
+        tools: list[dict[str, Any]] | None,
+        think: bool | None,
+    ) -> dict[str, Any]:
+        """Обёртка вокруг ollama.chat_stream: заводит запись в self._streaming
+        на время генерации (читает её ACTION_CHAT_PROGRESS), закрывает её
+        (done=True, done_at) в finally — даже если Ollama упала, опрашивающий
+        бот должен увидеть завершение, а не крутиться до собственного
+        таймаута."""
+        self._streaming[request_id] = {"partial": "", "done": False, "done_at": None}
+
+        def _on_chunk(text: str) -> None:
+            entry = self._streaming.get(request_id)
+            if entry is not None:
+                entry["partial"] = text
+
+        try:
+            return await ollama.chat_stream(
+                self._cfg, messages, system, _on_chunk, tools=tools, think=think
+            )
+        finally:
+            entry = self._streaming.get(request_id)
+            if entry is not None:
+                entry["done"] = True
+                entry["done_at"] = datetime.now(tz=UTC)
+
+    def _sweep_streaming(self) -> None:
+        now = datetime.now(tz=UTC)
+        stale = [
+            rid
+            for rid, entry in self._streaming.items()
+            if entry["done"]
+            and entry["done_at"] is not None
+            and (now - entry["done_at"]).total_seconds() >= _STREAMING_ENTRY_TTL_S
+        ]
+        for rid in stale:
+            del self._streaming[rid]
 
     async def _emit_speech_cured(self) -> None:
         try:
@@ -338,3 +440,4 @@ class LlmService:
         while True:
             await asyncio.sleep(_IDLE_CHECK_INTERVAL_S)
             await self._maybe_sleep_idle()
+            self._sweep_streaming()

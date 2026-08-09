@@ -44,7 +44,13 @@ def test_describe_declares_ask_chat_sleep_warmup():
     desc = LlmService(_settings()).describe()
     assert desc.info.service == "llm"
     assert desc.capabilities == ("qwen2.5:7b",)
-    assert [a.id for a in desc.actions] == ["ask", "chat", "sleep", "warmup"]
+    assert [a.id for a in desc.actions] == [
+        "ask",
+        "chat",
+        "chat_progress",
+        "sleep",
+        "warmup",
+    ]
     assert desc.find_action("ask").params[0].name == "prompt"
     assert desc.find_action("chat").params[0].name == "messages"
     quiet = desc.find_action("sleep").params[0]
@@ -231,6 +237,133 @@ async def test_chat_rejects_unknown_role():
             "chat", {"messages": [{"role": "user", "content": "1"}], "role": "admin"}
         )
     assert excinfo.value.code == ERR_BAD_REQUEST
+
+
+# --- request_id / chat_progress (этап 34, Фаза 2 — Rich-стрим ответов) ---
+
+
+async def test_chat_with_request_id_goes_through_chat_stream_not_chat(monkeypatch):
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
+        raise AssertionError("без request_id ожидался chat_stream, а не chat")
+
+    async def fake_chat_stream(cfg, messages, system, on_chunk, tools=None, think=None):
+        on_chunk("При")
+        on_chunk("Привет")
+        return {"message": {"content": "Привет"}}
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    monkeypatch.setattr(llm_service.ollama, "chat_stream", fake_chat_stream)
+    svc = LlmService(_settings(), speech_rand=lambda: 0.5)
+    result = await svc.run_command(
+        "chat",
+        {"messages": [{"role": "user", "content": "1"}], "request_id": "req-1"},
+    )
+    assert result == {"response": "Пгивет", "model": "qwen2.5:7b"}
+
+
+async def test_chat_stream_fills_streaming_buffer_and_marks_done(monkeypatch):
+    seen_partials = []
+
+    async def fake_chat_stream(cfg, messages, system, on_chunk, tools=None, think=None):
+        on_chunk("Доб")
+        seen_partials.append(svc._streaming["req-2"]["partial"])
+        on_chunk("Добрый день")
+        seen_partials.append(svc._streaming["req-2"]["partial"])
+        assert svc._streaming["req-2"]["done"] is False  # ещё не завершили
+        return {"message": {"content": "Добрый день"}}
+
+    monkeypatch.setattr(llm_service.ollama, "chat_stream", fake_chat_stream)
+    svc = LlmService(_settings())
+    await svc.run_command(
+        "chat", {"messages": [{"role": "user", "content": "1"}], "request_id": "req-2"}
+    )
+    assert seen_partials == ["Доб", "Добрый день"]
+    # После завершения запись остаётся (для последнего опроса бота), но
+    # помечена done — см. также тест на подметание ниже.
+    assert svc._streaming["req-2"]["done"] is True
+    assert svc._streaming["req-2"]["done_at"] is not None
+
+
+async def test_chat_stream_marks_done_even_on_ollama_failure(monkeypatch):
+    # Опрашивающий бот не должен крутиться до собственного таймаута, если
+    # Ollama упала посреди генерации — finally в _chat_streamed закрывает
+    # запись независимо от исхода.
+    async def fake_chat_stream(cfg, messages, system, on_chunk, tools=None, think=None):
+        on_chunk("часть")
+        raise RuntimeError("Ollama оборвалась")
+
+    monkeypatch.setattr(llm_service.ollama, "chat_stream", fake_chat_stream)
+    svc = LlmService(_settings())
+    with pytest.raises(RuntimeError):
+        await svc.run_command(
+            "chat", {"messages": [{"role": "user", "content": "1"}], "request_id": "req-3"}
+        )
+    assert svc._streaming["req-3"] == {
+        "partial": "часть",
+        "done": True,
+        "done_at": svc._streaming["req-3"]["done_at"],
+    }
+    assert svc._streaming["req-3"]["done_at"] is not None
+
+
+async def test_chat_progress_reflects_current_buffer(monkeypatch):
+    async def fake_chat_stream(cfg, messages, system, on_chunk, tools=None, think=None):
+        on_chunk("текст")
+        progress = await svc.run_command("chat_progress", {"request_id": "req-4"})
+        assert progress == {"partial": "текст", "done": False}
+        return {"message": {"content": "текст"}}
+
+    monkeypatch.setattr(llm_service.ollama, "chat_stream", fake_chat_stream)
+    svc = LlmService(_settings())
+    await svc.run_command(
+        "chat", {"messages": [{"role": "user", "content": "1"}], "request_id": "req-4"}
+    )
+    final = await svc.run_command("chat_progress", {"request_id": "req-4"})
+    assert final == {"partial": "текст", "done": True}
+
+
+async def test_chat_progress_unknown_request_id_is_not_an_error():
+    # Гонка первого опроса: бот уже спрашивает, а запись ещё не заведена
+    # (или уже подметена, см. sweep-тест ниже) — не bad_request, просто пусто.
+    svc = LlmService(_settings())
+    result = await svc.run_command("chat_progress", {"request_id": "никогда-не-было"})
+    assert result == {"partial": "", "done": False}
+
+
+async def test_chat_progress_requires_request_id():
+    svc = LlmService(_settings())
+    with pytest.raises(ProtoError) as excinfo:
+        await svc.run_command("chat_progress", {})
+    assert excinfo.value.code == ERR_BAD_REQUEST
+
+
+async def test_chat_rejects_non_string_request_id():
+    svc = LlmService(_settings())
+    with pytest.raises(ProtoError) as excinfo:
+        await svc.run_command(
+            "chat", {"messages": [{"role": "user", "content": "1"}], "request_id": 123}
+        )
+    assert excinfo.value.code == ERR_BAD_REQUEST
+
+
+async def test_sweep_streaming_evicts_only_stale_done_entries():
+    svc = LlmService(_settings())
+    now = datetime.now(tz=UTC)
+    svc._streaming["stale"] = {
+        "partial": "старое",
+        "done": True,
+        "done_at": now - timedelta(seconds=llm_service._STREAMING_ENTRY_TTL_S + 1),
+    }
+    svc._streaming["fresh_done"] = {
+        "partial": "недавнее",
+        "done": True,
+        "done_at": now - timedelta(seconds=1),
+    }
+    svc._streaming["still_running"] = {"partial": "идёт", "done": False, "done_at": None}
+
+    svc._sweep_streaming()
+
+    assert set(svc._streaming) == {"fresh_done", "still_running"}
 
 
 async def test_sleep_action_stops_ollama_and_marks_asleep(monkeypatch):

@@ -406,6 +406,25 @@ class LlmConfig(BaseModel):
     # per-node/per-model в config.toml, а не константой в коде — думающие
     # модели (qwen3.6 и т.п.) остаются на router_think.
     mode: Literal["router_think", "single_call"] = "router_think"
+    # Как отправлять ответ Альфреда пользователю (этап 34, Фаза 2 —
+    # IMPLEMENTATION_PLAN.md). ``"rich"`` (дефолт, решение пользователя
+    # 2026-08-09) — Telegram Bot API 10.1/10.2 Rich Messages: в приватных
+    # чатах (основной сценарий — Private Chat Topics) текст стримится
+    # черновиком (sendRichMessageDraft, живая анимация) и в конце
+    # персистится sendRichMessage; в группах/супергруппах streaming-черновик
+    # платформенно недоступен (Bot API ограничивает sendRichMessageDraft
+    # приватным чатом) — там один цельный sendRichMessage без анимации, но
+    # с тем же форматированием (таблицы, код, списки). Никакого смешивания
+    # с обычным editMessageText внутри одного ответа — решение пользователя.
+    # ``"typing_plain"`` — прежнее поведение (typing-индикатор + обычный
+    # HTML-текст с чанкованием по 4096, bot/notifier.py) — путь отката на
+    # случай проблем с рендером у конкретного клиента: известный живой баг
+    # платформы на момент написания — Telegram Desktop не показывает
+    # sendRichMessageDraft-стрим (iOS/Android — нормально), Telegram Web
+    # вообще не рендерит sendRichMessage. Переключается per-node в
+    # config.toml, не глобальная константа — семья может сидеть на разных
+    # клиентах.
+    response_mode: Literal["rich", "typing_plain"] = "rich"
     # Живая находка 2026-07-25: текст персонажа (тон, характер, конкретные
     # реплики) намеренно НЕ в репозитории — слишком личный/объёмный для
     # config.toml. На практике заполняется не здесь напрямую, а отдельным

@@ -22,6 +22,17 @@ from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 
 
+def _plain_settings() -> Settings:
+    """Этот файл тестирует именно "typing_plain"-путь (chunk_text, HTML-
+    escape, message.reply/answer) — presence/wake уже покрыт test_ai_flow.py.
+    Rich-путь (этап 34, Фаза 2, дефолт LlmConfig.response_mode с 2026-08-09)
+    — отдельно, см. test_ai_handler_rich.py; FakeBot здесь не реализует
+    send_rich_message/send_rich_message_draft."""
+    settings = Settings()
+    settings.llm.response_mode = "typing_plain"
+    return settings
+
+
 class FakeBot:
     def __init__(self) -> None:
         self.typing_chats: list[int] = []
@@ -117,7 +128,7 @@ async def test_cmd_ai_without_text_asks_model_for_greeting(store, monkeypatch):
 
     async def fake_request(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         seen_history.append(history)
         return "Да, сэг? Слушаю вас"
@@ -126,7 +137,7 @@ async def test_cmd_ai_without_text_asks_model_for_greeting(store, monkeypatch):
     message = FakeMessage(1, text="/alfred")
 
     await ai_handler.cmd_ai(
-        message, node_link=None, store=store, config=Settings(),
+        message, node_link=None, store=store, config=_plain_settings(),
         book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(),
     )
@@ -143,7 +154,7 @@ async def test_cmd_ai_without_text_asks_model_for_greeting(store, monkeypatch):
 async def test_cmd_ai_without_text_unavailable_records_nothing(store, monkeypatch):
     async def fake_unavailable(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         return None  # ai_flow уже сообщил пользователю сама
 
@@ -151,7 +162,7 @@ async def test_cmd_ai_without_text_unavailable_records_nothing(store, monkeypatc
     message = FakeMessage(1, text="/alfred")
 
     await ai_handler.cmd_ai(
-        message, node_link=None, store=store, config=Settings(),
+        message, node_link=None, store=store, config=_plain_settings(),
         book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(),
     )
@@ -165,7 +176,7 @@ async def test_cmd_ai_with_text_calls_ai_flow_and_records_both_turns(store, monk
 
     async def fake_request(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         seen_history.append(history)
         return "Добгый день, сэ"
@@ -174,7 +185,7 @@ async def test_cmd_ai_with_text_calls_ai_flow_and_records_both_turns(store, monk
     message = FakeMessage(1, text="/ai привет")  # алиас — работает так же, как /alfred
 
     await ai_handler.cmd_ai(
-        message, node_link=None, store=store, config=Settings(),
+        message, node_link=None, store=store, config=_plain_settings(),
         book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(),
     )
@@ -196,7 +207,7 @@ async def test_cmd_ai_long_response_is_split_across_telegram_messages(store, mon
 
     async def fake_request(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         return long_answer
 
@@ -204,7 +215,7 @@ async def test_cmd_ai_long_response_is_split_across_telegram_messages(store, mon
     message = FakeMessage(1, text="/alfred расскажи историю")
 
     await ai_handler.cmd_ai(
-        message, node_link=None, store=store, config=Settings(),
+        message, node_link=None, store=store, config=_plain_settings(),
         book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(),
     )
@@ -221,7 +232,7 @@ async def test_cmd_ai_long_response_is_split_across_telegram_messages(store, mon
 async def test_cmd_ai_returns_none_from_ai_flow_sends_nothing_extra(store, monkeypatch):
     async def fake_unavailable(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         return None  # ai_flow уже сообщил пользователю сама (не тестируем тут)
 
@@ -229,7 +240,7 @@ async def test_cmd_ai_returns_none_from_ai_flow_sends_nothing_extra(store, monke
     message = FakeMessage(1, text="/alfred привет")
 
     await ai_handler.cmd_ai(
-        message, node_link=None, store=store, config=Settings(),
+        message, node_link=None, store=store, config=_plain_settings(),
         book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(),
     )
@@ -242,7 +253,7 @@ async def test_cmd_ai_returns_none_from_ai_flow_sends_nothing_extra(store, monke
 async def test_cmd_ai_unhandled_exception_apologizes_and_notifies_admin(store, monkeypatch):
     async def boom(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         raise RuntimeError("что-то сломалось")
 
@@ -251,7 +262,7 @@ async def test_cmd_ai_unhandled_exception_apologizes_and_notifies_admin(store, m
     notifier = FakeNotifier()
 
     await ai_handler.cmd_ai(
-        message, node_link=None, store=store, config=Settings(),
+        message, node_link=None, store=store, config=_plain_settings(),
         book=_admin_book(), notifier=notifier, active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(),
     )
@@ -278,7 +289,7 @@ async def test_ask_and_reply_registers_chat_while_request_in_flight(store, monke
 
     async def fake_request(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         seen_snapshot.append(active_ai_chats.snapshot())
         return "ответ"
@@ -287,7 +298,7 @@ async def test_ask_and_reply_registers_chat_while_request_in_flight(store, monke
     message = FakeMessage(1, text="/alfred привет")
 
     await ai_handler.cmd_ai(
-        message, node_link=None, store=store, config=Settings(),
+        message, node_link=None, store=store, config=_plain_settings(),
         book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=active_ai_chats,
         tool_calls=ToolCalls(),
     )
@@ -301,7 +312,7 @@ async def test_ask_and_reply_unregisters_chat_even_on_exception(store, monkeypat
 
     async def boom(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         raise RuntimeError("бум")
 
@@ -309,7 +320,7 @@ async def test_ask_and_reply_unregisters_chat_even_on_exception(store, monkeypat
     message = FakeMessage(1, text="/alfred привет")
 
     await ai_handler.cmd_ai(
-        message, node_link=None, store=store, config=Settings(),
+        message, node_link=None, store=store, config=_plain_settings(),
         book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=active_ai_chats,
         tool_calls=ToolCalls(),
     )
@@ -348,7 +359,7 @@ async def test_on_ai_reply_denied_without_right(store):
         ai_dialogue_id=500,
         node_link=None,
         store=store,
-        config=Settings(),
+        config=_plain_settings(),
         book=_admin_book(),
         notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(),
@@ -368,7 +379,7 @@ async def test_on_ai_reply_appends_history_and_answers(store, monkeypatch):
 
     async def fake_request(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         seen_history.append(history)
         return "втогой ответ"
@@ -381,7 +392,7 @@ async def test_on_ai_reply_appends_history_and_answers(store, monkeypatch):
         ai_dialogue_id=500,
         node_link=None,
         store=store,
-        config=Settings(),
+        config=_plain_settings(),
         book=_admin_book(),
         notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(),
@@ -408,7 +419,7 @@ async def test_on_ai_reply_without_text_still_asks_model(store, monkeypatch):
 
     async def fake_request(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         seen_history.append(history)
         return "Простите, не расслышал, сэр"
@@ -421,7 +432,7 @@ async def test_on_ai_reply_without_text_still_asks_model(store, monkeypatch):
         ai_dialogue_id=500,
         node_link=None,
         store=store,
-        config=Settings(),
+        config=_plain_settings(),
         book=_admin_book(),
         notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(),
@@ -495,7 +506,7 @@ async def test_on_private_message_starts_new_dialogue_when_none_exists(store, mo
 
     async def fake_request(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         seen_history.append(history)
         return "Здгавствуйте, сэ"
@@ -504,7 +515,7 @@ async def test_on_private_message_starts_new_dialogue_when_none_exists(store, mo
     message = FakeMessage(1, text="добрый вечер", chat_type="private")
 
     await ai_handler.on_private_message(
-        message, node_link=None, store=store, config=Settings(),
+        message, node_link=None, store=store, config=_plain_settings(),
         book=_admin_book(), notifier=FakeNotifier(),
         active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
@@ -529,7 +540,7 @@ async def test_on_private_message_always_starts_new_dialogue_even_with_prior_his
 
     async def fake_request(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         seen_history.append(history)
         return "втогой ответ"
@@ -538,7 +549,7 @@ async def test_on_private_message_always_starts_new_dialogue_even_with_prior_his
     message = FakeMessage(1, text="а что насчёт этого?", chat_type="private")
 
     await ai_handler.on_private_message(
-        message, node_link=None, store=store, config=Settings(),
+        message, node_link=None, store=store, config=_plain_settings(),
         book=_admin_book(), notifier=FakeNotifier(),
         active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
@@ -555,7 +566,7 @@ async def test_on_private_message_denied_without_right(store):
     message = FakeMessage(1, text="привет", chat_type="private")
 
     await ai_handler.on_private_message(
-        message, node_link=None, store=store, config=Settings(),
+        message, node_link=None, store=store, config=_plain_settings(),
         book=_admin_book(), notifier=FakeNotifier(),
         active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(), subscription=_sub(),
@@ -571,7 +582,7 @@ async def test_on_group_mention_with_text_starts_fresh_dialogue(store, monkeypat
 
     async def fake_request(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         seen_history.append(history)
         return "Слушаю, сэ"
@@ -581,7 +592,7 @@ async def test_on_group_mention_with_text_starts_fresh_dialogue(store, monkeypat
 
     await ai_handler.on_group_mention(
         message, mention_prompt="какая погода?", node_link=None, store=store,
-        config=Settings(), book=_admin_book(), notifier=FakeNotifier(),
+        config=_plain_settings(), book=_admin_book(), notifier=FakeNotifier(),
         active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
     )
@@ -595,7 +606,7 @@ async def test_on_group_mention_without_text_asks_model_for_greeting(store, monk
 
     async def fake_request(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         seen_history.append(history)
         return "Да, сэг?"
@@ -605,7 +616,7 @@ async def test_on_group_mention_without_text_asks_model_for_greeting(store, monk
 
     await ai_handler.on_group_mention(
         message, mention_prompt="", node_link=None, store=store,
-        config=Settings(), book=_admin_book(), notifier=FakeNotifier(),
+        config=_plain_settings(), book=_admin_book(), notifier=FakeNotifier(),
         active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
     )
@@ -621,7 +632,7 @@ async def test_on_group_mention_denied_without_right(store):
 
     await ai_handler.on_group_mention(
         message, mention_prompt="привет", node_link=None, store=store,
-        config=Settings(), book=_admin_book(), notifier=FakeNotifier(),
+        config=_plain_settings(), book=_admin_book(), notifier=FakeNotifier(),
         active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(), subscription=_sub(),
     )
@@ -637,7 +648,7 @@ async def test_dismissal_runs_after_the_farewell_is_sent(store, monkeypatch):
 
     async def fake_request(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         dismissal.mode = "off"
         return "Всего добгого, сэг"
@@ -652,7 +663,7 @@ async def test_dismissal_runs_after_the_farewell_is_sent(store, monkeypatch):
     dialogue_id = message.message_id
 
     await ai_handler.cmd_ai(
-        message, node_link=None, store=store, config=Settings(),
+        message, node_link=None, store=store, config=_plain_settings(),
         book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(),
     )
@@ -671,7 +682,7 @@ async def test_no_dismissal_when_alfred_never_answered(store, monkeypatch):
 
     async def fake_request(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         dismissal.mode = "off"
         return None
@@ -684,7 +695,7 @@ async def test_no_dismissal_when_alfred_never_answered(store, monkeypatch):
     message = FakeMessage(1, text="/alfred свободен")
 
     await ai_handler.cmd_ai(
-        message, node_link=None, store=store, config=Settings(),
+        message, node_link=None, store=store, config=_plain_settings(),
         book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(),
     )
@@ -699,7 +710,7 @@ async def test_no_dismissal_when_alfred_never_answered(store, monkeypatch):
 async def test_cmd_ai_in_topic_dialogue_id_is_the_topic_not_the_message(store, monkeypatch):
     async def fake_request(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         return "ответ"
 
@@ -707,7 +718,7 @@ async def test_cmd_ai_in_topic_dialogue_id_is_the_topic_not_the_message(store, m
     message = FakeMessage(1, text="/alfred привет", message_thread_id=777)
 
     await ai_handler.cmd_ai(
-        message, node_link=None, store=store, config=Settings(),
+        message, node_link=None, store=store, config=_plain_settings(),
         book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(),
     )
@@ -727,7 +738,7 @@ async def test_cmd_ai_in_topic_continues_existing_topic_history(store, monkeypat
 
     async def fake_request(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         seen_history.append(history)
         return "втогой ответ"
@@ -738,7 +749,7 @@ async def test_cmd_ai_in_topic_continues_existing_topic_history(store, monkeypat
     message = FakeMessage(1, text="/alfred а что насчёт этого?", message_thread_id=777)
 
     await ai_handler.cmd_ai(
-        message, node_link=None, store=store, config=Settings(),
+        message, node_link=None, store=store, config=_plain_settings(),
         book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(),
     )
@@ -760,7 +771,7 @@ async def test_cmd_ai_in_topic_without_text_continues_with_opening_prompt(store,
 
     async def fake_request(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         seen_history.append(history)
         return "Да, сэг?"
@@ -769,7 +780,7 @@ async def test_cmd_ai_in_topic_without_text_continues_with_opening_prompt(store,
     message = FakeMessage(1, text="/alfred", message_thread_id=777)
 
     await ai_handler.cmd_ai(
-        message, node_link=None, store=store, config=Settings(),
+        message, node_link=None, store=store, config=_plain_settings(),
         book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(),
     )
@@ -790,7 +801,7 @@ async def test_cmd_ai_in_fresh_topic_without_text_is_same_as_outside_topic(store
 
     async def fake_request(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         seen_history.append(history)
         return "Да, сэг?"
@@ -799,7 +810,7 @@ async def test_cmd_ai_in_fresh_topic_without_text_is_same_as_outside_topic(store
     message = FakeMessage(1, text="/alfred", message_thread_id=777)
 
     await ai_handler.cmd_ai(
-        message, node_link=None, store=store, config=Settings(),
+        message, node_link=None, store=store, config=_plain_settings(),
         book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(),
     )
@@ -815,7 +826,7 @@ async def test_on_private_message_in_topic_continues_same_topic_without_reply(st
 
     async def fake_request(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         seen_history.append(history)
         return f"ответ {len(seen_history)}"
@@ -824,7 +835,7 @@ async def test_on_private_message_in_topic_continues_same_topic_without_reply(st
 
     first = FakeMessage(1, text="первое сообщение", chat_type="private", message_thread_id=777)
     await ai_handler.on_private_message(
-        first, node_link=None, store=store, config=Settings(),
+        first, node_link=None, store=store, config=_plain_settings(),
         book=_admin_book(), notifier=FakeNotifier(),
         active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
@@ -832,7 +843,7 @@ async def test_on_private_message_in_topic_continues_same_topic_without_reply(st
 
     second = FakeMessage(1, text="второе сообщение", chat_type="private", message_thread_id=777)
     await ai_handler.on_private_message(
-        second, node_link=None, store=store, config=Settings(),
+        second, node_link=None, store=store, config=_plain_settings(),
         book=_admin_book(), notifier=FakeNotifier(),
         active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
@@ -861,7 +872,7 @@ async def test_empty_model_answer_is_not_sent_as_a_bare_prefix(store, monkeypatc
 
     async def fake_empty(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
-        tool_calls=None, speech_remark=None
+        tool_calls=None, speech_remark=None, rich_session=None
     ):
         return "   "
 
@@ -870,7 +881,7 @@ async def test_empty_model_answer_is_not_sent_as_a_bare_prefix(store, monkeypatc
     notifier = FakeNotifier()
 
     await ai_handler.cmd_ai(
-        message, node_link=None, store=store, config=Settings(),
+        message, node_link=None, store=store, config=_plain_settings(),
         book=_admin_book(), notifier=notifier, active_ai_chats=ai_flow.ActiveAiChats(),
         tool_calls=ToolCalls(),
     )

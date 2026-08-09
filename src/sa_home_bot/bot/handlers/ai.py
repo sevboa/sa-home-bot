@@ -36,6 +36,7 @@ from aiogram.types import Message
 from sa_home_bot.bot import ai_flow, commands
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.notifier import Notifier, chunk_text
+from sa_home_bot.bot.rich_stream import RichStreamSession
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import Settings
@@ -77,6 +78,22 @@ EMPTY_REPLY_PROMPT = (
 
 def _format_answer(raw: str) -> str:
     return ALFRED_PREFIX + html.escape(raw.strip())
+
+
+def _rich_session_for(message: Message, config: Settings) -> RichStreamSession | None:
+    """Этап 34, Фаза 2 (Rich-стрим ответов): response_mode != "rich" (резерв
+    LlmConfig.response_mode, config.py) — None, дальше всё идёт по старому
+    пути. "rich" — сессия заводится ВСЕГДА (нужна для finalize() что в
+    приватном чате, что в группе); стрим-черновики (on_partial) вызывающий
+    (_do_ask_and_reply) подключает только для приватных чатов — Bot API
+    ограничивает sendRichMessageDraft приватным чатом (см. докстринг
+    bot/rich_stream.py), в группах та же сессия просто не получает
+    on_partial-тиков и в конце шлёт один цельный sendRichMessage."""
+    if config.llm.response_mode != "rich" or message.chat is None or message.bot is None:
+        return None
+    return RichStreamSession(
+        message.bot, message.chat.id, message_thread_id=message.message_thread_id
+    )
 
 
 def _dialogue_id_for(message: Message) -> int:
@@ -432,10 +449,17 @@ async def _do_ask_and_reply(
     # запроса, но отправляется отдельным сообщением ПОСЛЕ основного ответа
     # ниже — см. ai_flow.SpeechRemarkBox про то, почему не сразу.
     speech_remark = ai_flow.SpeechRemarkBox()
+    # Этап 34, Фаза 2: rich_session — не None только при response_mode="rich"
+    # (config.llm), используется ниже для финальной отправки в любом чате.
+    # Стрим-черновики (on_partial в request_alfred) — только в приватных
+    # чатах, см. _rich_session_for.
+    rich_session = _rich_session_for(message, config)
+    is_private = message.chat is not None and message.chat.type == "private"
     try:
         raw = await ai_flow.request_alfred(
             message, node_link, store, config, history, dialogue_id, book, notifier, dismissal,
             tool_calls, speech_remark,
+            rich_session if is_private else None,
         )
     except Exception as exc:  # noqa: BLE001 — страховка: баг тут не должен быть молчаливым
         log.exception("ai: необработанная ошибка в диалоге chat=%s", message.chat.id)
@@ -460,7 +484,16 @@ async def _do_ask_and_reply(
             book, notifier, f"⚠️ /ai (chat={message.chat.id}): модель вернула пустой ответ"
         )
         return None
-    sent = await _send_alfred_reply(message, raw)
+    if rich_session is not None:
+        sent = await _send_alfred_reply_rich(message, raw, rich_session)
+        if sent is None:
+            log.error("ai: не удалось отправить rich-ответ (chat=%s)", message.chat.id)
+            await ai_flow.notify_admins(
+                book, notifier, f"⚠️ /ai (chat={message.chat.id}): не удалось отправить rich-ответ"
+            )
+            return None
+    else:
+        sent = await _send_alfred_reply(message, raw)
     await store.record_ai_turn(
         message.chat.id, sent.message_id, dialogue_id, "assistant", raw, datetime.now(tz=UTC)
     )
@@ -492,3 +525,14 @@ async def _send_alfred_reply(message: Message, raw: str) -> Message:
     for chunk in chunks[1:]:
         sent = await message.answer(chunk)
     return sent
+
+
+async def _send_alfred_reply_rich(
+    message: Message, raw: str, session: RichStreamSession
+) -> Message | None:
+    """Rich-эквивалент _send_alfred_reply (этап 34, Фаза 2) — без
+    chunk_text/MAX_LEN: лимит Rich Message значительно выше (см.
+    IMPLEMENTATION_PLAN.md, этап 34); session.finalize сама делает
+    ретраи на 429 (bot/notifier.py::send_with_retry) и возвращает None
+    только при полном исчерпании попыток."""
+    return await session.finalize(raw, reply_to_message_id=message.message_id)

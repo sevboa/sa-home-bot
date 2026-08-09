@@ -14,6 +14,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from typing import Any
 
 from sa_home_bot.config import LlmConfig
@@ -67,6 +68,54 @@ def _post_json_sync(url: str, payload: dict[str, Any], timeout: float) -> dict[s
 def _get_json_sync(url: str, timeout: float) -> dict[str, Any]:
     with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 — только localhost
         return json.loads(resp.read())
+
+
+def _post_json_stream_sync(
+    url: str,
+    payload: dict[str, Any],
+    timeout: float,
+    on_chunk: Callable[[str], None],
+) -> dict[str, Any]:
+    """Как _post_json_sync, но для запросов со `"stream": True` — Ollama
+    отдаёт NDJSON (по строке на чанк вместо одного JSON-документа),
+    ``on_chunk`` зовётся на каждую строку с уже НАКОПЛЕННЫМ (не дельта)
+    текстом — тот же контракт, что ждёт LlmService.run_command (этап 34,
+    Фаза 2). Возвращает dict в том же формате, что и chat() без стрима:
+    финальный чанк Ollama (``done: true``) несёт tool_calls/метаданные, сюда
+    же подставляется полный склеенный текст в message.content."""
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    content_parts: list[str] = []
+    final: dict[str, Any] = {}
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — только localhost
+            for raw_line in resp:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                chunk = json.loads(line)
+                piece = (chunk.get("message") or {}).get("content", "")
+                if piece:
+                    content_parts.append(piece)
+                    on_chunk("".join(content_parts))
+                if chunk.get("done"):
+                    final = chunk
+    except urllib.error.HTTPError as exc:
+        # См. _post_json_sync — то же дописывание тела ответа в exc.msg.
+        detail = exc.read().decode("utf-8", "replace").strip()
+        with contextlib.suppress(ValueError):
+            parsed = json.loads(detail)
+            if isinstance(parsed, dict) and parsed.get("error"):
+                detail = str(parsed["error"])
+        if detail:
+            exc.msg = f"{exc.msg}: {detail}"
+        raise
+    final_message = dict(final.get("message") or {})
+    final_message["content"] = "".join(content_parts)
+    final["message"] = final_message
+    return final
 
 
 async def ollama_version(
@@ -266,6 +315,61 @@ async def _post_with_retry(cfg: LlmConfig, url: str, payload: dict[str, Any]) ->
     raise ProtoError(ERR_INTERNAL, f"{url}: {last_exc}")
 
 
+async def _post_stream_with_retry(
+    cfg: LlmConfig,
+    url: str,
+    payload: dict[str, Any],
+    on_chunk: Callable[[str], None],
+) -> dict[str, Any]:
+    """Как _post_with_retry, но для потокового /api/chat (этап 34, Фаза 2).
+
+    Ретраится только попытка, в которой не пришло НИ ОДНОГО чанка — если
+    стрим уже начался и оборвался, накопленный текст уже ушёл в on_chunk
+    (буфер частичной генерации, llm/service.py) и виден пользователю в
+    Rich-черновике; повторять запрос с нуля означало бы задвоение текста в
+    буфере на следующий заход, не только трату времени."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + cfg.request_timeout_s
+    last_exc: Exception | None = None
+    for attempt in range(1, _POST_RETRY_ATTEMPTS + 1):
+        await ensure_running(cfg)
+        left = deadline - loop.time()
+        if left <= 0:
+            break
+        sent_any = False
+
+        def _on_chunk(text: str) -> None:
+            nonlocal sent_any
+            sent_any = True
+            on_chunk(text)
+
+        try:
+            return await asyncio.to_thread(_post_json_stream_sync, url, payload, left, _on_chunk)
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            last_exc = exc
+            if sent_any or attempt >= _POST_RETRY_ATTEMPTS or not _is_transient_connection_error(
+                exc
+            ):
+                break
+            if deadline - loop.time() <= _POST_RETRY_DELAY_S:
+                break
+            log.warning(
+                "llm: %s (стрим) оборвался сразу после прогрева (%s) — повтор через %.0fс "
+                "(попытка %d/%d)",
+                url,
+                exc,
+                _POST_RETRY_DELAY_S,
+                attempt,
+                _POST_RETRY_ATTEMPTS,
+            )
+            await asyncio.sleep(_POST_RETRY_DELAY_S)
+    if last_exc is None:
+        raise ProtoError(
+            ERR_INTERNAL, f"{url}: бюджет {cfg.request_timeout_s:.0f}с истёк на прогреве"
+        )
+    raise ProtoError(ERR_INTERNAL, f"{url}: {last_exc}")
+
+
 # Живая находка 2026-07-24: без явного "keep_alive" в запросе Ollama сама
 # выгружает модель из памяти через 5 минут после последнего ответа — это
 # ПОЛНОСТЬЮ отдельный от cfg.idle_sleep_after_s таймер (тот управляет только
@@ -336,3 +440,33 @@ async def chat(
     if tools:
         payload["tools"] = tools
     return await _post_with_retry(cfg, f"{cfg.ollama_url}/api/chat", payload)
+
+
+async def chat_stream(
+    cfg: LlmConfig,
+    messages: list[dict[str, Any]],
+    system: str,
+    on_chunk: Callable[[str], None],
+    tools: list[dict[str, Any]] | None = None,
+    think: bool | None = None,
+) -> dict[str, Any]:
+    """Как chat(), но потоково (этап 34, Фаза 2 — Rich-стрим ответов).
+
+    ``on_chunk`` зовётся синхронно (функция сама выполняется в
+    ``asyncio.to_thread``, как и обычный ``chat()``) на каждый кусок текста
+    от Ollama, с уже НАКОПЛЕННЫМ содержимым — вызывающий (LlmService,
+    llm/service.py) просто кладёт его в буфер частичной генерации как есть,
+    без собственной конкатенации дельт. Возвращает тот же формат dict, что
+    и ``chat()`` — вызывающему без разницы, каким путём получен ответ."""
+    full_messages = [{"role": "system", "content": system}, *messages]
+    payload: dict[str, Any] = {
+        "model": cfg.model,
+        "messages": full_messages,
+        "stream": True,
+        **_keep_alive_options(cfg),
+    }
+    if think is not None:
+        payload["think"] = think
+    if tools:
+        payload["tools"] = tools
+    return await _post_stream_with_retry(cfg, f"{cfg.ollama_url}/api/chat", payload, on_chunk)
