@@ -152,7 +152,7 @@ save_dirs = [
 
 # Служба llm (Альфред, `sa-home-bot --service llm`) — на GPU-ноде Windows
 # (winpc, container_backend="wsl-docker") или на постоянной Linux-ноде с
-# нативной Ollama (mycraft, container_backend="native", CPU-only — с
+# нативной Ollama (mycraft, container_backend="native", GPU Tesla V100 — с
 # 2026-08-02). Секция описывается в схеме статично, иначе --check-config на
 # других нодах не увидит поля. ollama_url — loopback-адрес Ollama на ТОЙ ЖЕ
 # машине, наружу не смотрит (LLM_INTEGRATION_PLAN.md §0).
@@ -187,10 +187,21 @@ idle_sleep_after_s = 1800.0
 think_chat = true
 # Режим request_alfred: "router_think" (дефолт) — лёгкий router-проход
 # решает, нужно ли думать, затем персонажный проход с уже известным think.
-# "single_call" — для моделей без поддержки thinking (например, некоторые
-# gemma-сборки на Ollama отвечают 400 "does not support thinking" на любой
-# think=true) — один персонажный проход сразу, без router и без think.
+# "single_call" — один персонажный проход сразу, без router.
 mode = "router_think"
+# think для единственного прохода в режиме "single_call". Не задано — флаг
+# не шлётся вовсе. ВНИМАНИЕ (замер 2026-08-10): «не слать флаг» ≠ «не
+# думать» — модель может размышлять по умолчанию, и тогда даже «Привет!»
+# стоит сотен невидимых токенов и десятков секунд. Если ответы необъяснимо
+# медленные при быстром prefill — ставьте false и сверьтесь с логами службы
+# (строка «llm: chat/... — промпт ... thinking ... симв.»).
+# single_call_think = false
+# Чем в режиме "router_think" выражается решение «надо думать»: "flag"
+# (дефолт) — явный think=true; "implicit" — флаг не шлётся вовсе, и модель
+# уходит в размышление сама. "implicit" — для моделей, которые на явный
+# think=true отвечают 400 (некоторые gemma-сборки на Ollama), но think=false
+# понимают: именно так им возвращается вариативное рассуждение.
+think_style = "flag"
 # Как отправлять ответ Альфреда пользователю (этап 34, Фаза 2): "rich"
 # (дефолт) — Telegram Rich Messages, стрим-черновик в приватных чатах,
 # одиночный форматированный ответ в группах. "typing_plain" — прежнее

@@ -45,6 +45,42 @@ log = logging.getLogger(__name__)
 
 SERVICE_NAME = "llm"
 
+
+def _log_ollama_timings(what: str, result: dict[str, Any]) -> None:
+    """Тайминги ответа Ollama в лог одной строкой.
+
+    Живая находка 2026-08-10: без этого разбор «почему Альфред отвечает 20
+    секунд» упирался в гадание — служба брала из ответа только текст, а
+    prompt_eval_*/eval_* молча выбрасывала. Настоящая причина оказалась в
+    невидимых токенах размышления (message.thinking): на «Привет!» модель
+    писала 222 токена ради ответа из пяти слов, и это выглядело как
+    «медленно читает контекст», хотя prefill шёл больше 1000 ток/с. Здесь
+    видно и то, и другое — сколько токенов промпта и с какой скоростью,
+    сколько сгенерировано и сколько из этого ушло в thinking.
+    """
+
+    def _speed(count: Any, duration_ns: Any) -> str:
+        if not isinstance(count, int) or not isinstance(duration_ns, int) or duration_ns <= 0:
+            return "?"
+        return f"{count / (duration_ns / 1e9):.0f} ток/с"
+
+    thinking = (result.get("message") or {}).get("thinking") or ""
+    load_ns = result.get("load_duration")
+    log.info(
+        "llm: %s — промпт %s ток (%s), генерация %s ток (%s), thinking %d симв., "
+        "загрузка модели %s, всего %s",
+        what,
+        result.get("prompt_eval_count", "?"),
+        _speed(result.get("prompt_eval_count"), result.get("prompt_eval_duration")),
+        result.get("eval_count", "?"),
+        _speed(result.get("eval_count"), result.get("eval_duration")),
+        len(thinking),
+        f"{load_ns / 1e9:.1f}с" if isinstance(load_ns, int) else "?",
+        f"{result['total_duration'] / 1e9:.1f}с"
+        if isinstance(result.get("total_duration"), int)
+        else "?",
+    )
+
 ACTION_ASK = "ask"
 ACTION_CHAT = "chat"
 # Экшн-представление (см. PROTOCOL.md, прецедент "downtime" службы monitor)
@@ -255,6 +291,7 @@ class LlmService:
             chat_id = args.get("chat_id")
             await self._touch(chat_id)
             result = await ollama.generate(self._cfg, prompt, self._persona_prompt)
+            _log_ollama_timings("ask", result)
             cleaned = strip_math_notation(result.get("response", ""))
             response, remark, just_cured = self._speech.process(cleaned, chat_id)
             if just_cured:
@@ -274,7 +311,22 @@ class LlmService:
             role = args.get("role") or "persona"
             if role not in ("persona", "router"):
                 raise ProtoError(ERR_BAD_REQUEST, f"неизвестная role: {role!r}")
-            system = ROUTER_SYSTEM_PROMPT if role == "router" else self._persona_prompt
+            # Общий префикс для обеих ролей (2026-08-10): system[0] всегда
+            # персонаж, а служебная инструкция роутера уезжает ПОСЛЕДНИМ
+            # системным сообщением в хвост. Раньше роли брали разный
+            # system[0] — то есть два непересекающихся с нулевого токена
+            # префикса, и KV-кэш роутерного прохода не годился персонажному
+            # (а на SWA-моделях вроде gemma-4 это ещё и рушило кэш целиком:
+            # "forcing full prompt re-processing ... likely due to SWA" в
+            # логах Ollama). Теперь роутерный проход прогревает кэш для
+            # персонажного, и тот платит только за хвост. Триажу это не
+            # мешает: его инструкция стоит вплотную к точке генерации, а
+            # конкурировать с персонажем за внимание модели она начинала
+            # именно когда лежала В ОДНОМ system-блоке с ним (живая находка
+            # 2026-07-25, llm/prompt.py) — отдельным сообщением этого нет.
+            system = self._persona_prompt
+            if role == "router":
+                messages = [*messages, {"role": "system", "content": ROUTER_SYSTEM_PROMPT}]
             chat_id = args.get("chat_id")
             await self._touch(chat_id)
             request_id = args.get("request_id")
@@ -288,6 +340,7 @@ class LlmService:
                 )
             else:
                 result = await ollama.chat(self._cfg, messages, system, tools=tools, think=think)
+            _log_ollama_timings(f"chat/{role}", result)
             message = result.get("message", {})
             # Модель попросила вызвать инструмент(ы) — служба llm сама по рою
             # не ходит (нет ServiceLink к соседям, только к своей Ollama), это

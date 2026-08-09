@@ -203,6 +203,7 @@ async def test_chat_role_router_uses_router_prompt_not_persona(monkeypatch):
 
     async def fake_chat(cfg, messages, system, tools=None, think=None):
         seen["system"] = system
+        seen["messages"] = messages
         return {"message": {"content": "OK"}}
 
     monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
@@ -210,8 +211,15 @@ async def test_chat_role_router_uses_router_prompt_not_persona(monkeypatch):
     await svc.run_command(
         "chat", {"messages": [{"role": "user", "content": "1"}], "role": "router"}
     )
-    assert seen["system"] == llm_service.ROUTER_SYSTEM_PROMPT
-    assert seen["system"] != PERSONA
+    # Общий с персонажным проходом префикс (2026-08-10): system[0] у роутера
+    # ТОТ ЖЕ, что у персонажа, — иначе KV-кэш одного прохода не годится
+    # другому. Сама инструкция триажа уезжает последним системным сообщением.
+    assert seen["system"] == PERSONA
+    assert seen["messages"][-1] == {
+        "role": "system",
+        "content": llm_service.ROUTER_SYSTEM_PROMPT,
+    }
+    assert seen["messages"][0] == {"role": "user", "content": "1"}
 
 
 async def test_chat_role_absent_or_persona_uses_persona_prompt(monkeypatch):

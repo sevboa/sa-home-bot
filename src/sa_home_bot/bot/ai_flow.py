@@ -802,22 +802,22 @@ async def request_alfred(
                 speech_remark.text = remark
 
         if settings.llm.mode == "single_call":
-            # Режимы работы с моделью — LlmConfig.mode (config.py). Модели
-            # без поддержки thinking (живая находка 2026-08-02: gemma-4-26B-
-            # A4B на mycraft — 400 "does not support thinking" на любой
-            # think=true) роутеру нечего решать — думать всё равно нельзя,
-            # второй вызов на каждое сообщение был бы чистым расходом. Один
-            # персонажный проход сразу; think не передаём вовсе (та же
-            # логика "не мешать своей адаптивностью", что и think=None у
-            # qwen3.5/3.6 — см. комментарий ниже), а не False: False — тоже
-            # явный флаг, и не факт, что каждая такая модель его стерпит.
+            # Режимы работы с моделью — LlmConfig.mode (config.py). Роутеру
+            # нечего решать, если у модели выбор "думать/не думать" всё равно
+            # недоступен — один персонажный проход сразу.
+            #
+            # think берём из настройки, а не зашиваем None: живая находка
+            # 2026-08-10 — «не слать флаг» у gemma-4 означает «думать над
+            # каждым приветствием» (222 токена на пять слов ответа, 23 с в
+            # проде), и лечится это ровно явным think=false. Подробности и
+            # цифры — LlmConfig.single_call_think.
             return await run_chat_loop(
                 node_link,
                 dst,
                 timeout,
                 list(base_messages),
                 tool_ctx,
-                think=None,
+                think=settings.llm.single_call_think,
                 telegram_chat_id=telegram_chat_id,
                 log_chat_id=chat_id,
                 on_tool_call=_record_tool_call,
@@ -853,6 +853,13 @@ async def request_alfred(
 
         if needs_think:
             await message.answer(THINKING_TEXT)
+        # Чем выражается «надо думать» — LlmConfig.think_style. "implicit":
+        # флаг не шлём вовсе, и модель уходит в размышление сама (её
+        # поведение по умолчанию) — для тех, кто на явный think=true отвечает
+        # 400, но think=false понимает. "flag" — прежний явный булев think.
+        persona_think: bool | None = needs_think
+        if needs_think and settings.llm.think_style == "implicit":
+            persona_think = None
         # Живая находка 2026-07-25 (полный круг): сначала думали, что
         # think=None ("не слать флаг вообще") даст qwen3.5/3.6 самим решать
         # адаптивно — оказалось, без явного флага модель генерирует от 2 до
@@ -872,7 +879,7 @@ async def request_alfred(
             timeout,
             router_messages,
             tool_ctx,
-            think=needs_think,
+            think=persona_think,
             telegram_chat_id=telegram_chat_id,
             log_chat_id=chat_id,
             on_tool_call=_record_tool_call,

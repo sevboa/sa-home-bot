@@ -239,10 +239,33 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
     assert "Точное время сейчас" in router_args["messages"][0]["content"]
 
 
+async def test_single_call_think_false_is_sent_explicitly(store):
+    # Живая находка 2026-08-10: «не слать флаг think» ≠ «модель не думает» —
+    # gemma-4 размышляла по умолчанию над каждым приветствием (сотни
+    # невидимых токенов, 23 с в проде). Настройка single_call_think должна
+    # доезжать до запроса ЯВНЫМ False, а не теряться по дороге.
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[{"response": "Добгый день, сэг"}],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+    )
+    settings = Settings(
+        llm=LlmConfig(request_timeout_s=5.0, mode="single_call", single_call_think=False)
+    )
+
+    await ai_flow.request_alfred(
+        message, link, store, settings,
+        [{"role": "user", "content": "привет"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    _, args, _ = link.command_calls[0]
+    assert args["think"] is False
+
+
 async def test_single_call_mode_skips_router(store):
-    # LlmConfig.mode="single_call" (живая находка 2026-08-02: gemma-4-26B-A4B
-    # на mycraft отвечает 400 "does not support thinking" на любой
-    # think=true) — ни router-прохода, ни поля think в запросе вовсе, один
+    # LlmConfig.mode="single_call" — ни router-прохода, ни поля think в
+    # запросе (single_call_think не задан — прежнее поведение), один
     # персонажный вызов сразу.
     message = FakeMessage()
     link = FakeNodeLink(
@@ -495,9 +518,35 @@ async def test_escalates_to_thinking_when_marker_returned(store):
     assert "role" not in persona_args
     assert persona_args["think"] is True
     # Персонажный проход видит ту же историю, что и router (никакой
-    # отдельной триаж-инструкции/маркера в сообщениях не остаётся).
+    # отдельной триаж-инструкции/маркера в сообщениях не остаётся: её
+    # дописывает служба llm у себя, см. llm/service.py — так у обоих
+    # проходов общий префикс и общий KV-кэш).
     assert persona_args["messages"] == router_args["messages"]
     assert persona_args["messages"][-1] == {"role": "user", "content": "сложный вопрос"}
+
+
+async def test_implicit_think_style_omits_flag_instead_of_true(store):
+    # think_style="implicit" (LlmConfig): моделям, которые на явный
+    # think=true отвечают 400, «думать» выражается ОТСУТСТВИЕМ флага — они
+    # уходят в размышление сами. Роутер при этом по-прежнему получает
+    # явный False: его задача — скорость, и его такие модели принимают.
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[
+            {"response": f"кое-что... {ai_flow.THINK_MARKER}"},
+            {"response": "Точный ответ после раздумий"},
+        ],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+    )
+    settings = Settings(llm=LlmConfig(request_timeout_s=5.0, think_style="implicit"))
+
+    await ai_flow.request_alfred(
+        message, link, store, settings, [{"role": "user", "content": "сложный вопрос"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert link.command_calls[0][1]["think"] is False  # роутер — явный False
+    assert "think" not in link.command_calls[1][1]  # персонаж — флага нет вовсе
 
 
 async def test_asleep_model_shows_steps_but_no_wake(store):
