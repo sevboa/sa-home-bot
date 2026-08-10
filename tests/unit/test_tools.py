@@ -1587,21 +1587,40 @@ async def test_torrents_search_sends_query(store):
     assert link.sent_args[0] == {"query": "задача трёх тел"}
 
 
-async def test_torrents_search_smart_sends_query(store):
+async def test_torrents_search_smart_sends_phrase_and_words(store):
     link = _swarm_link(command_result={"results": [{"name": "Foo", "seeders": 10}], "count": 1})
     raw = await tools.tool_torrents(
         _ctx(store, node_link=link, subscription=ADMIN),
-        {"action": "search_smart", "query": "задача трёх тел"},
+        {"action": "search_smart", "phrase": "задача трёх тел", "words": "2024 1080p"},
     )
     assert json.loads(raw)["count"] == 1
     assert link.commands[0][0] == "search_smart"
-    assert link.sent_args[0] == {"query": "задача трёх тел"}
+    assert link.sent_args[0] == {"phrase": "задача трёх тел", "words": "2024 1080p"}
+
+
+async def test_torrents_search_smart_without_words_omits_the_key(store):
+    link = _swarm_link(command_result={"results": [], "count": 0})
+    await tools.tool_torrents(
+        _ctx(store, node_link=link, subscription=ADMIN),
+        {"action": "search_smart", "phrase": "задача трёх тел"},
+    )
+    assert link.sent_args[0] == {"phrase": "задача трёх тел"}
 
 
 async def test_torrents_search_without_query_asks_for_it(store):
     link = _swarm_link()
     result = await tools.tool_torrents(
         _ctx(store, node_link=link, subscription=ADMIN), {"action": "search"}
+    )
+    assert result.startswith("ошибка")
+    assert link.commands == []
+
+
+async def test_torrents_search_smart_without_phrase_asks_for_it(store):
+    link = _swarm_link()
+    result = await tools.tool_torrents(
+        _ctx(store, node_link=link, subscription=ADMIN),
+        {"action": "search_smart", "words": "2024"},
     )
     assert result.startswith("ошибка")
     assert link.commands == []

@@ -32,16 +32,21 @@ magnet живёт ВНУТРИ темы трекера, часто ещё и п�
 поля (имя, размер, сиды), по которым уже можно выбирать осмысленно.
 
 `search_smart` — та же выдача, но по-другому добытая: заведено 2026-08-09,
-потому что обычный `search` (и его лестница `_query_ladder`) всё равно шлёт
-трекеру НЕПРЕРЫВНУЮ фразу — если реальное название на трекере записано в
-другом порядке слов («Дюна: Часть вторая» вместо «Дюна Часть 2») или с
-доп. словом ПОСЕРЕДИНЕ (не в начале/конце, где его срезает лестница), обычный
-поиск находит ноль. `search_smart` шлёт трекеру только САМОЕ длинное слово
-запроса (обычно самое редкое/различимое — не «фильм», не «сериал»), тянет
-большой сырой пул (`SEARCH_SMART_FETCH_LIMIT`) с одного задания поиска и уже
-в Python требует, чтобы ВСЕ значимые слова запроса встречались в имени
-находки — в любом порядке, любой раскладке. Ответ модели по-прежнему видит
-только верхушку (`SEARCH_LIMIT`) — расширяется только внутренний пул для
+переписано под явные `phrase`+`words` 2026-08-10. Обычный `search` (и его
+лестница `_query_ladder`) всё равно шлёт трекеру НЕПРЕРЫВНУЮ фразу — если
+реальное название на трекере записано в другом порядке слов («Дюна: Часть
+вторая» вместо «Дюна Часть 2») или с доп. словом ПОСЕРЕДИНЕ (не в начале/
+конце, где его срезает лестница), обычный поиск находит ноль. `search_smart`
+принимает `phrase` — ту же непрерывную подстрочную фразу, что и `search`
+(отправляется трекеру как pattern тем же способом, но в большой сырой пул
+`SEARCH_SMART_FETCH_LIMIT` с одного задания поиска) — и опциональный `words`:
+набор дополнительных слов (год, качество, сезон, что угодно ещё), каждое из
+которых должно встречаться в имени находки в любом порядке — AND-фильтр уже
+в Python, поверх сырой выдачи по `phrase`. Модель сама решает, что кладёт в
+`phrase` (устойчивая часть названия), а что — в `words` (то, что могло стоять
+в другом порядке или не рядом с названием); никакой автоматической разборки
+свободного текста здесь больше нет. Ответ модели по-прежнему видит только
+верхушку (`SEARCH_LIMIT`) — расширяется только внутренний пул для
 фильтрации, а не то, что уезжает в контекст.
 
 Ссылка из результатов поиска — это НЕ magnet, а `dl.php?t=…`, который
@@ -328,8 +333,16 @@ class TorrentsService:
                 ),
                 ActionSpec(
                     id=ACTION_SEARCH_SMART,
-                    title="🧠 Умный поиск (по словам)",
-                    params=(ActionParam(name="query", type="string", title="Что ищем"),),
+                    title="🧠 Умный поиск (фраза + слова)",
+                    params=(
+                        ActionParam(name="phrase", type="string", title="Точная фраза (название)"),
+                        ActionParam(
+                            name="words",
+                            type="string",
+                            required=False,
+                            title="Доп. слова через пробел (год, качество…)",
+                        ),
+                    ),
                 ),
                 ActionSpec(
                     id=ACTION_DETAILS,
@@ -591,7 +604,9 @@ class TorrentsService:
             payload["used_query"] = used_query
         return payload
 
-    def _search_smart_sync(self, query: str, limit: int) -> dict[str, Any]:
+    def _search_smart_sync(
+        self, phrase: str, words: list[str], limit: int
+    ) -> dict[str, Any]:
         client = self._client()
         try:
             client.auth_log_in()
@@ -601,16 +616,7 @@ class TorrentsService:
                     "поиск по трекерам не настроен: в qBittorrent нет ни одного "
                     "включённого поискового плагина",
                 )
-            words = _clean_query(query).split()
-            if not words:
-                raise ProtoError(
-                    ERR_BAD_REQUEST, "нечего искать — в запросе не осталось значимых слов"
-                )
-            # Самое длинное слово обычно и самое различимое (имя, а не общее
-            # «фильм»/«сериал») — им трекер даёт наименее случайную выборку
-            # для последующей фильтрации по остальным словам.
-            anchor = max(words, key=len)
-            raw, _total = self._run_search_job(client, anchor, SEARCH_SMART_FETCH_LIMIT)
+            raw, _total = self._run_search_job(client, phrase, SEARCH_SMART_FETCH_LIMIT)
         except qbittorrentapi.APIError as exc:
             raise ProtoError(ERR_INTERNAL, f"qBittorrent отклонил запрос: {exc}") from exc
         finally:
@@ -621,8 +627,10 @@ class TorrentsService:
         if broken and not usable:
             raise ProtoError(ERR_INTERNAL, f"поиск не отработал: {_engine_error_text(broken[0])}")
 
-        # AND по всем значимым словам, в любом порядке — то, ради чего вообще
-        # завели этот метод: обычный search требует их НЕПРЕРЫВНОЙ фразой.
+        # phrase уже отфильтровала трекер (pattern ищется как непрерывная
+        # фраза — то же доверие движку, что и в search). words — доп.
+        # AND-фильтр ПОВЕРХ найденного, каждое слово в любом порядке,
+        # casefold-подстрока.
         needles = [w.casefold() for w in words]
         matched = [
             r for r in usable if all(n in str(r.get("fileName", "")).casefold() for n in needles)
@@ -634,12 +642,10 @@ class TorrentsService:
         payload: dict[str, Any] = {
             "results": shown,
             "count": len(shown),
-            "query": query,
-            # В отличие от search, трекеру ушло не название целиком, а одно
-            # слово — модель должна понимать, что именно искали, чтобы не
-            # удивляться широте сырой выдачи до Python-фильтра.
-            "anchor": anchor,
+            "phrase": phrase,
         }
+        if words:
+            payload["words"] = words
         if len(results) > len(shown):
             payload["total"] = len(results)
         return payload
@@ -819,11 +825,12 @@ class TorrentsService:
             limit = min(int(args.get("limit") or SEARCH_LIMIT), SEARCH_LIMIT)
             return await asyncio.to_thread(self._search_sync, query, limit)
         if action == ACTION_SEARCH_SMART:
-            query = str(args.get("query") or "").strip()
-            if not query:
-                raise ProtoError(ERR_BAD_REQUEST, "не указан поисковый запрос (query)")
+            phrase = str(args.get("phrase") or "").strip()
+            if not phrase:
+                raise ProtoError(ERR_BAD_REQUEST, "не указана точная фраза для поиска (phrase)")
+            words = str(args.get("words") or "").split()
             limit = min(int(args.get("limit") or SEARCH_LIMIT), SEARCH_LIMIT)
-            return await asyncio.to_thread(self._search_smart_sync, query, limit)
+            return await asyncio.to_thread(self._search_smart_sync, phrase, words, limit)
         if action in (ACTION_PAUSE, ACTION_RESUME):
             selector = str(args.get("name") or "").strip()
             if not selector:

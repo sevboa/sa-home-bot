@@ -492,50 +492,99 @@ _SCATTERED = [
 ]
 
 
-async def test_search_smart_matches_scattered_words_and_ignores_the_rest(fake_qbittorrent):
+def test_describe_declares_search_smart_with_phrase_and_words():
+    desc = TorrentsService(_settings()).describe()
+    action = desc.find_action("search_smart")
+    names = [p.name for p in action.params]
+    assert names == ["phrase", "words"]
+    words_param = next(p for p in action.params if p.name == "words")
+    assert words_param.required is False
+
+
+async def test_search_smart_sends_phrase_as_pattern_and_filters_by_words(fake_qbittorrent):
     fake_qbittorrent.found = list(_SCATTERED)
     result = await TorrentsService(_settings()).run_command(
-        "search_smart", {"query": "3 body problem"}
+        "search_smart", {"phrase": "problem", "words": "3 body"}
     )
     assert [r["name"] for r in result["results"]] == [
         "Body Problem, 3: Extended Cut S01 1080p",  # больше сидов — первым
         "3, Body Problem — Recut S01 720p",
     ]
     assert result["count"] == 2
-    # Якорь — самое длинное слово запроса, им и искали на трекере.
-    assert result["anchor"] == "problem"
+    assert result["phrase"] == "problem"
+    assert result["words"] == ["3", "body"]
     assert fake_qbittorrent.search_kwargs["pattern"] == "problem"
     assert fake_qbittorrent.results_limit == torrents_service.SEARCH_SMART_FETCH_LIMIT
+
+
+_PHRASE_HITS = [
+    {
+        "fileName": "3 Body Problem S01 1080p",
+        "fileSize": 60 * GIB,
+        "nbSeeders": 50,
+        "nbLeechers": 2,
+        "fileUrl": "https://rutracker.org/forum/dl.php?t=1",
+        "descrLink": "https://rutracker.org/forum/viewtopic.php?t=1",
+    },
+    {
+        # phrase совпала, но нет слова "2160p" из words — должна отсеяться,
+        # несмотря на рекордные сиды.
+        "fileName": "3 Body Problem S01 720p",
+        "fileSize": 30 * GIB,
+        "nbSeeders": 999,
+        "nbLeechers": 999,
+        "fileUrl": "https://rutracker.org/forum/dl.php?t=2",
+        "descrLink": "https://rutracker.org/forum/viewtopic.php?t=2",
+    },
+]
+
+
+async def test_search_smart_words_filters_on_top_of_phrase_hits(fake_qbittorrent):
+    fake_qbittorrent.found = list(_PHRASE_HITS)
+    result = await TorrentsService(_settings()).run_command(
+        "search_smart", {"phrase": "3 Body Problem", "words": "2160p"}
+    )
+    assert result["results"] == []
+    assert result["count"] == 0
+
+
+async def test_search_smart_without_words_keeps_all_phrase_hits(fake_qbittorrent):
+    fake_qbittorrent.found = list(_PHRASE_HITS)
+    result = await TorrentsService(_settings()).run_command(
+        "search_smart", {"phrase": "3 Body Problem"}
+    )
+    assert result["count"] == 2
+    assert "words" not in result
 
 
 async def test_search_smart_reports_total_when_more_than_shown(fake_qbittorrent):
     fake_qbittorrent.found = list(_SCATTERED)
     result = await TorrentsService(_settings()).run_command(
-        "search_smart", {"query": "3 body problem", "limit": 1}
+        "search_smart", {"phrase": "problem", "words": "3 body", "limit": 1}
     )
     assert result["count"] == 1
     assert result["total"] == 2
 
 
-async def test_search_smart_without_significant_words_is_bad_request(fake_qbittorrent):
+async def test_search_smart_without_phrase_is_bad_request(fake_qbittorrent):
     with pytest.raises(ProtoError) as excinfo:
-        await TorrentsService(_settings()).run_command("search_smart", {"query": "2024 1080p"})
+        await TorrentsService(_settings()).run_command("search_smart", {"words": "2024 1080p"})
     assert excinfo.value.code == ERR_BAD_REQUEST
     assert fake_qbittorrent.search_kwargs == {}  # до трекера дело не дошло
+
+
+async def test_search_smart_without_args_is_bad_request():
+    with pytest.raises(ProtoError) as excinfo:
+        await TorrentsService(_settings()).run_command("search_smart", {})
+    assert excinfo.value.code == ERR_BAD_REQUEST
 
 
 async def test_search_smart_without_plugins_says_so(fake_qbittorrent):
     fake_qbittorrent.plugins = []
     with pytest.raises(ProtoError) as excinfo:
-        await TorrentsService(_settings()).run_command("search_smart", {"query": "что-нибудь"})
+        await TorrentsService(_settings()).run_command("search_smart", {"phrase": "что-нибудь"})
     assert excinfo.value.code == ERR_BAD_REQUEST
     assert "плагин" in excinfo.value.message
-
-
-async def test_search_smart_without_query_is_bad_request():
-    with pytest.raises(ProtoError) as excinfo:
-        await TorrentsService(_settings()).run_command("search_smart", {})
-    assert excinfo.value.code == ERR_BAD_REQUEST
 
 
 async def test_search_smart_turns_plugin_failure_into_a_real_error(fake_qbittorrent):
@@ -551,7 +600,7 @@ async def test_search_smart_turns_plugin_failure_into_a_real_error(fake_qbittorr
     ]
     with pytest.raises(ProtoError) as excinfo:
         await TorrentsService(_settings()).run_command(
-            "search_smart", {"query": "3 Body Problem"}
+            "search_smart", {"phrase": "3 Body Problem"}
         )
     assert excinfo.value.code == ERR_INTERNAL
     assert "403" in excinfo.value.message
