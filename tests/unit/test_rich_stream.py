@@ -4,11 +4,14 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from aiogram.types import InputRichBlockThinking
 
 from sa_home_bot.bot import notifier as notifier_module
+from sa_home_bot.bot import rich_stream as rich_stream_module
 from sa_home_bot.bot.rich_stream import ALFRED_PREFIX_MD, RichStreamSession
 
 
@@ -242,3 +245,88 @@ async def test_finalize_status_resets_dedup_so_next_status_is_not_swallowed():
         [InputRichBlockThinking(text="шаги")],
         [InputRichBlockThinking(text="шаги")],
     ]
+
+
+# --- keep-alive: живая находка 2026-08-11 — sendRichMessageDraft эфемерен,
+# 30-секундный TTL (докстринг aiogram), а долгие ожидания (wake_core.py:
+# WAKE_POLL_TIMEOUT_S=180с, WARMUP_TIMEOUT_S=360с) на порядок больше — без
+# периодической переотправки черновик гас сам по себе задолго до
+# finalize()/finalize_status(). fast_retry_sleep (autouse, см. выше) патчит
+# ОБЩИЙ asyncio-модуль (notifier_module.asyncio is rich_stream_module.asyncio
+# — один и тот же объект), так что _KEEPALIVE_INTERVAL_S здесь тоже мгновенен
+# без отдельного патча; _KEEPALIVE_MAX_TICKS патчится маленьким числом, чтобы
+# цикл сам конечно завершался и его можно было дождаться await'ом.
+
+
+async def test_keepalive_resends_active_draft_until_max_ticks(monkeypatch):
+    monkeypatch.setattr(rich_stream_module, "_KEEPALIVE_MAX_TICKS", 2)
+    bot = FakeBot()
+    session = RichStreamSession(bot, chat_id=1)
+
+    await session.push_status("шаги")
+    assert session._keepalive_task is not None
+    await session._keepalive_task  # даём циклу дойти до предела (2 тика)
+
+    assert len(bot.drafts) == 3  # исходный push + 2 переотправки
+    assert all(d["blocks"] == [InputRichBlockThinking(text="шаги")] for d in bot.drafts)
+
+
+async def test_keepalive_resends_latest_content_not_stale_one(monkeypatch):
+    # Живой сценарий: между тиками keep-alive пришёл новый реальный push
+    # (например, вызов другого тула) — переотправлять должен уже ЕГО, а не
+    # то, что было на момент запуска цикла.
+    monkeypatch.setattr(rich_stream_module, "_KEEPALIVE_MAX_TICKS", 1)
+    bot = FakeBot()
+    session = RichStreamSession(bot, chat_id=1)
+
+    await session.push_status("шаги")
+    await session.push_status("сёрфит интернет")  # тот же цикл, свежее содержимое
+    await session._keepalive_task
+
+    assert [d["blocks"] for d in bot.drafts] == [
+        [InputRichBlockThinking(text="шаги")],
+        [InputRichBlockThinking(text="сёрфит интернет")],
+        [InputRichBlockThinking(text="сёрфит интернет")],  # переотправка keep-alive
+    ]
+
+
+async def test_finalize_stops_keepalive():
+    bot = FakeBot()
+    session = RichStreamSession(bot, chat_id=1)
+
+    await session.push_status("шаги")
+    task = session._keepalive_task
+    assert task is not None
+
+    await session.finalize("ответ")
+    # asyncio.sleep(0) здесь не сработал бы как yield — он тоже под
+    # патчем fast_retry_sleep (общий asyncio-модуль, см. коммент выше) и
+    # не делает реального обращения к планировщику. Дожидаемся именно
+    # отменённой задачи — это настоящая синхронизация с циклом событий.
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert session._keepalive_task is None
+    assert session._active_message is None
+    assert task.cancelled() or task.done()
+
+
+async def test_finalize_status_stops_keepalive():
+    bot = FakeBot()
+    session = RichStreamSession(bot, chat_id=1)
+
+    await session.push_status("шаги")
+    task = session._keepalive_task
+
+    await session.finalize_status("**Агнольд:** Сейчас Альфред подойдёт")
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert session._keepalive_task is None
+    assert session._active_message is None
+    assert task.cancelled() or task.done()
+
+
+async def test_keepalive_not_started_before_first_push():
+    bot = FakeBot()
+    session = RichStreamSession(bot, chat_id=1)
+
+    assert session._keepalive_task is None

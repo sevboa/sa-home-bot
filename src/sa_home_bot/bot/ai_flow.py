@@ -144,6 +144,14 @@ ALBERT_ASLEEP_MD = "**Альбегт:** Альфред, кажется, усну
 # зная точной причины, подаём это тем же персонажем — Альфред как будто на
 # секунду отвлёкся, просим повторить.
 ALBERT_HICCUP = "<b>Альбегт:</b> Прошу прощения, Альфред на секунду отвлёкся — повторите, сэр/мадам"
+# Markdown-вариант — та же пара, что и у ALBERT_ASLEEP_MD/ALBERT_UNAVAILABLE_MD
+# выше (см. их комментарий), для rich_session.finalize_status() в самом
+# request_alfred ниже (живая находка 2026-08-11: без этого «Альбегт» уходил
+# голым message.answer() мимо активной rich-сессии, оставляя её черновик
+# незакрытым — см. _announce_albert).
+ALBERT_HICCUP_MD = (
+    "**Альбегт:** Прошу прощения, Альфред на секунду отвлёкся — повторите, сэр/мадам"
+)
 # Закрытие треда, когда служба llm сама гасит контейнер по простою
 # (llm/service.py::EVENT_IDLE_SLEEP) — не отсюда, а из bot/node_events.py
 # (событие прилетает не в ответ на сообщение пользователя), но текст —
@@ -985,6 +993,20 @@ async def request_alfred(
         else:
             await message.answer(STEPS_TEXT)
 
+    async def _announce_albert(text_html: str, text_md: str) -> None:
+        # Живая находка 2026-08-11: пять точек ниже (ALBERT_ASLEEP/HICCUP/
+        # UNAVAILABLE) раньше слали голый message.answer() даже при активной
+        # rich-сессии — «шаги»/«задумчивость» оставались незакрытым
+        # черновиком, который никто не финализирует (см. keep-alive в
+        # rich_stream.py — без finalize_status() крутился бы до защитного
+        # потолка). Тот же приём, что и _announce_steps() выше и
+        # node_events.py::TaskRichSessions — единственная точка выхода из
+        # rich-сессии для «Альбегта».
+        if rich_session is not None:
+            await rich_session.finalize_status(text_md)
+        else:
+            await message.answer(text_html)
+
     # Узнать заранее, не спит ли модель (idle-таймер llm/service.py) — если
     # да, предупредить о прогреве СРАЗУ, а не оставлять пользователя молча
     # ждать до request_timeout_s без всякой обратной связи. Узел при этом
@@ -1018,7 +1040,10 @@ async def request_alfred(
                 # «шагов»: Альбегт, а не голое извинение Альфреда. Если же
                 # прогрев не при чём (просто дал сбой сам chat-запрос,
                 # см. ALBERT_HICCUP) — тоже персонаж, а не голая техника.
-                await message.answer(ALBERT_ASLEEP if asleep_warmup else ALBERT_HICCUP)
+                if asleep_warmup:
+                    await _announce_albert(ALBERT_ASLEEP, ALBERT_ASLEEP_MD)
+                else:
+                    await _announce_albert(ALBERT_HICCUP, ALBERT_HICCUP_MD)
                 await notify_admins(
                     book, notifier, f"⚠️ /ai (chat={chat_id}): {exc.code} — {exc.message}"
                 )
@@ -1033,7 +1058,7 @@ async def request_alfred(
         node_link, LLM_NODE, LLM_SERVICE, WAKE_POLL_TIMEOUT_S, WAKE_POLL_INTERVAL_S
     )
     if not became_available:
-        await message.answer(ALBERT_UNAVAILABLE)
+        await _announce_albert(ALBERT_UNAVAILABLE, ALBERT_UNAVAILABLE_MD)
         return None
 
     # Живая находка 2026-08-10 (третий заход): Агнольд — отдельный персонаж
@@ -1061,13 +1086,13 @@ async def request_alfred(
         async with _typing_while_asking(message):
             return await _ask()
     except ServiceUnavailableError:
-        await message.answer(ALBERT_UNAVAILABLE)
+        await _announce_albert(ALBERT_UNAVAILABLE, ALBERT_UNAVAILABLE_MD)
         return None
     except ProtoError as exc:
         if _is_unavailable(exc):
-            await message.answer(ALBERT_UNAVAILABLE)
+            await _announce_albert(ALBERT_UNAVAILABLE, ALBERT_UNAVAILABLE_MD)
         else:
-            await message.answer(ALBERT_ASLEEP)
+            await _announce_albert(ALBERT_ASLEEP, ALBERT_ASLEEP_MD)
             await notify_admins(
                 book, notifier, f"⚠️ /ai (chat={chat_id}, после wake): {exc.code} — {exc.message}"
             )

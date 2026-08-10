@@ -659,6 +659,31 @@ async def test_asleep_warmup_fails_answers_as_albert_not_generic_error(store):
     assert len(notifier.sent) == 1  # админ всё равно узнаёт о сбое
 
 
+async def test_asleep_warmup_fails_uses_rich_finalize_status_not_plain_answer(store):
+    # Живая находка 2026-08-11: раньше «Альбегт» уходил голым message.answer()
+    # даже при активной rich-сессии — черновик «шагов» оставался незакрытым
+    # (см. keep-alive в rich_stream.py, который иначе крутился бы до
+    # защитного потолка). _announce_albert должен закрывать сессию тем же
+    # finalize_status, что и «Агнольд».
+    message = FakeMessage()
+    rich_session = FakeRichSession()
+    link = FakeNodeLink(
+        chat_results=[ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева")],
+        get_state_routes={"mycraft:llm": {"asleep": True}},
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
+        _admin_book(), FakeNotifier(),
+        rich_session=rich_session,
+    )
+
+    assert raw is None
+    assert message.answers == []
+    assert rich_session.statuses == [ai_flow.STEPS_TEXT_PLAIN]
+    assert rich_session.finalized_statuses == [ai_flow.ALBERT_ASLEEP_MD]
+
+
 async def test_unavailable_then_woken_within_30s(store, monkeypatch):
     await wake_state.remember(store, "mycraft", MYCRAFT_WAKE)
     monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
@@ -739,6 +764,30 @@ async def test_unavailable_and_no_wake_data_gives_up_immediately(store, monkeypa
     assert link.command_calls == []  # chat вообще не пытались звать
 
 
+async def test_unavailable_gives_up_uses_rich_finalize_status_not_plain_answer(
+    store, monkeypatch
+):
+    # Тот же сценарий, что test_unavailable_and_no_wake_data_gives_up_
+    # immediately, но с rich_session — «Альбегт» должен подменить черновик
+    # «шагов» finalize_status'ом, а не уйти отдельным message.answer().
+    monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(ai_flow, "WAKE_POLL_TIMEOUT_S", 0.05)
+    message = FakeMessage()
+    rich_session = FakeRichSession()
+    link = FakeNodeLink()
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
+        _admin_book(), FakeNotifier(),
+        rich_session=rich_session,
+    )
+
+    assert raw is None
+    assert message.answers == []
+    assert rich_session.statuses == [ai_flow.STEPS_TEXT_PLAIN]
+    assert rich_session.finalized_statuses == [ai_flow.ALBERT_UNAVAILABLE_MD]
+
+
 async def test_unavailable_wake_sent_but_still_unreachable_after_30s(store, monkeypatch):
     await wake_state.remember(store, "mycraft", MYCRAFT_WAKE)
     monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
@@ -811,6 +860,32 @@ async def test_internal_error_on_first_try_answers_user_and_notifies_admin(store
     assert admin_chat_id == 999
     assert "internal" in admin_text
     assert "Ollama не поднялась после прогрева" in admin_text
+
+
+async def test_internal_error_uses_rich_finalize_status_not_plain_answer(store):
+    # Тот же сценарий, что test_internal_error_on_first_try_answers_user_
+    # and_notifies_admin, но с rich_session — «Альбегт» (ALBERT_HICCUP)
+    # должен уйти через finalize_status, а не голым message.answer(),
+    # закрывая rich-сессию (иначе черновик — тут, правда, ещё не показанный,
+    # presence не сообщал о сне — просто не откроется вовсе).
+    message = FakeMessage()
+    notifier = FakeNotifier()
+    rich_session = FakeRichSession()
+    link = FakeNodeLink(
+        chat_results=[ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева")],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
+        _admin_book(), notifier,
+        rich_session=rich_session,
+    )
+
+    assert raw is None
+    assert message.answers == []
+    assert rich_session.statuses == []  # presence не сообщал о сне — «шагов» не было
+    assert rich_session.finalized_statuses == [ai_flow.ALBERT_HICCUP_MD]
 
 
 async def test_internal_error_after_wake_answers_user_and_notifies_admin(store, monkeypatch):

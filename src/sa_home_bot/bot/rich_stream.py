@@ -20,6 +20,7 @@ chat") — это ограничение Bot API, не наш выбор. В г�
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 
@@ -32,6 +33,26 @@ from sa_home_bot.bot.notifier import send_with_retry
 log = logging.getLogger(__name__)
 
 ALFRED_PREFIX_MD = "**Альфред:** "
+
+# Живая находка 2026-08-11: докстринг aiogram (SendRichMessageDraft) — "the
+# streamed draft is ephemeral and acts as a temporary 30-second preview".
+# Долгие ожидания (wake_core.py: WAKE_POLL_TIMEOUT_S=180с на подъём машины,
+# WARMUP_TIMEOUT_S=360с на прогрев модели) на порядок превышают этот TTL, а
+# push_status/on_partial до сих пор шлют статус ОДИН раз и не освежают —
+# черновик гас сам по себе задолго до персистентной реплики (Агнольд/финал
+# ответа), из-за чего в чате был заметный разрыв, а следующий push_status
+# после уже погасшего черновика читался пользователем как отдельное, не
+# связанное с первым, новое сообщение. Интервал — тот же приём, что и
+# TYPING_KEEPALIVE_INTERVAL_S в bot/notifier.py (Telegram сам гасит typing
+# indicator, мы его периодически освежаем) — с запасом под 30-секундный TTL.
+_KEEPALIVE_INTERVAL_S = 20.0
+# Защитный потолок — не механизм по умолчанию (сессия должна всегда дойти
+# до finalize()/finalize_status(), см. bot/ai_flow.py/bot/node_events.py),
+# а подстраховка на случай, если когда-нибудь сессию всё же бросят, не
+# закрыв: 90 тиков * 20с = 30 минут, с большим запасом покрывает самое
+# долгое легитимное ожидание (WARMUP_TIMEOUT_S=360с), но не даёт фоновой
+# задаче крутиться вечно на брошенной сессии.
+_KEEPALIVE_MAX_TICKS = 90
 
 
 class RichStreamSession:
@@ -60,6 +81,12 @@ class RichStreamSession:
         # thinking-путь шлют структурно разные пейлоады (blocks vs markdown),
         # совпадение сырого текста между ними не должно гасить обновление.
         self._last_sent: tuple[str, str] | None = None
+        # Последний реально отправленный ЧЕРНОВИК (не сигнатура выше) — то,
+        # что keep-alive пересылает повторно, пока идёт долгое ожидание
+        # (см. _KEEPALIVE_INTERVAL_S). None — активного черновика нет
+        # (сессия только создана или уже финализирована persисted-сообщением).
+        self._active_message: InputRichMessage | None = None
+        self._keepalive_task: asyncio.Task | None = None
 
     async def _send_draft(self, rich_message: InputRichMessage) -> None:
         try:
@@ -76,6 +103,28 @@ class RichStreamSession:
             log.debug(
                 "rich_stream: не удалось обновить черновик (chat=%s): %s", self._chat_id, exc
             )
+        # Вне зависимости от успеха — это теперь то, что (предположительно)
+        # на экране; keep-alive пересылает именно это, включая свои
+        # собственные повторы (см. _keepalive_loop) — сбой одного тика не
+        # должен прерывать цикл, следующий тик попробует снова.
+        self._active_message = rich_message
+
+    def _ensure_keepalive(self) -> None:
+        if self._keepalive_task is None or self._keepalive_task.done():
+            self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+
+    async def _keepalive_loop(self) -> None:
+        for _ in range(_KEEPALIVE_MAX_TICKS):
+            await asyncio.sleep(_KEEPALIVE_INTERVAL_S)
+            if self._active_message is None:
+                return  # финализировано (finalize/finalize_status) — черновика больше нет
+            await self._send_draft(self._active_message)
+
+    def _stop_keepalive(self) -> None:
+        if self._keepalive_task is not None:
+            self._keepalive_task.cancel()
+            self._keepalive_task = None
+        self._active_message = None
 
     async def _push_markdown(self, markdown_body: str, *, with_prefix: bool = True) -> None:
         """Черновик настоящего текста ответа (on_partial) — дедуп по
@@ -94,6 +143,7 @@ class RichStreamSession:
         self._last_sent = signature
         markdown = ALFRED_PREFIX_MD + markdown_body if with_prefix else markdown_body
         await self._send_draft(InputRichMessage(markdown=markdown))
+        self._ensure_keepalive()
 
     async def _push_thinking(self, text: str) -> None:
         signature = ("think", text)
@@ -101,6 +151,7 @@ class RichStreamSession:
             return
         self._last_sent = signature
         await self._send_draft(InputRichMessage(blocks=[InputRichBlockThinking(text=text)]))
+        self._ensure_keepalive()
 
     async def on_partial(self, text: str, done: bool) -> None:
         """Колбэк для llm_chat.py::run_chat_loop(on_partial=...).
@@ -155,6 +206,9 @@ class RichStreamSession:
         # последнего показанного черновика больше не отражает экран:
         # следующий push_status/on_partial не должен считать её актуальной.
         self._last_sent = None
+        # Черновика больше нет — keep-alive (см. _KEEPALIVE_INTERVAL_S)
+        # больше нечего пересылать, останавливаем фоновую задачу.
+        self._stop_keepalive()
         return sent
 
     async def finalize(self, raw: str, reply_to_message_id: int | None = None) -> Message | None:
