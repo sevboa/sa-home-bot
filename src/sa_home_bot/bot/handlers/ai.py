@@ -126,6 +126,12 @@ STICKER_PROMPT_NO_IMAGE = (
 # скачивание thumbnail — доли секунды, отдельное persist-сообщение в
 # typing_plain было бы просто мельканием перед самим ответом.
 STICKER_LOOKING_TEXT_PLAIN = "Альфред разглядывает стикер"
+# Тот же плейсхолдер, но для фото (решение пользователя 2026-08-11: у
+# стикера теперь есть, а у фото молчание — непоследовательно). Раньше фото
+# отвечало без единого визуального сигнала, что картинка вообще дошла до
+# обработки, — на скачивании оригинала (крупнее thumbnail стикера) это
+# заметнее, чем на стикере.
+PHOTO_LOOKING_TEXT_PLAIN = "Альфред разглядывает фото"
 
 
 def _format_answer(raw: str) -> str:
@@ -321,7 +327,9 @@ async def on_ai_reply(
         # у фото-сообщения всегда None (подпись — message.caption), поэтому
         # такой ход проваливался в ветку EMPTY_REPLY_PROMPT ниже, как будто
         # подписи не было вовсе.
-        history = await _handle_photo_message(message, store, config, ai_dialogue_id)
+        history = await _handle_photo_message(
+            message, store, config, ai_dialogue_id, rich_session
+        )
         if history is None:
             await message.answer(PHOTO_TOO_LARGE_TEXT)
             return
@@ -439,14 +447,18 @@ async def on_private_photo(
     # Та же логика нового треда, что у on_private_message: без топика и без
     # reply — всегда новый тред, продолжить можно реплаем (AiReplyContinuation).
     dialogue_id = _dialogue_id_for(message)
-    history = await _handle_photo_message(message, store, config, dialogue_id)
+    # Одна сессия на весь ход — статус "разглядывает" на время скачивания и
+    # финальный ответ Альфреда делят один и тот же черновик (та же механика,
+    # что у on_private_sticker/on_private_voice).
+    rich_session = _rich_session_for(message, config)
+    history = await _handle_photo_message(message, store, config, dialogue_id, rich_session)
     if history is None:
         await message.answer(PHOTO_TOO_LARGE_TEXT)
         return
 
     await _ask_and_reply(
         message, node_link, store, config, book, notifier, dialogue_id, history,
-        active_ai_chats, tool_calls, _rich_session_for(message, config),
+        active_ai_chats, tool_calls, rich_session,
     )
 
 
@@ -598,7 +610,11 @@ async def start_dialogue(
 
 
 async def _handle_photo_message(
-    message: Message, store: Store, config: Settings, dialogue_id: int
+    message: Message,
+    store: Store,
+    config: Settings,
+    dialogue_id: int,
+    rich_session: RichStreamSession | None,
 ) -> list[dict[str, Any]] | None:
     """Скачать фото пользователя (наибольшее разрешение, message.photo[-1]),
     записать плейсхолдер + photo_path в ai_turns, собрать history с
@@ -610,7 +626,14 @@ async def _handle_photo_message(
     None — фото не влезает в протокольный лимит (см. _MAX_RAW_IMAGE_B64_BYTES):
     ничего не записано, вызывающий должен показать вежливый отказ
     (PHOTO_TOO_LARGE_TEXT) и не звать модель вовсе.
+
+    ``rich_session`` — та же сессия, что пойдёт в финальный ответ Альфреда
+    (см. вызывающих и _handle_sticker_message): статус
+    PHOTO_LOOKING_TEXT_PLAIN на время скачивания сменится либо реальным
+    ответом, либо следующим статусом.
     """
+    if rich_session is not None:
+        await rich_session.push_status(PHOTO_LOOKING_TEXT_PLAIN)
     photo = message.photo[-1]
     buf = await message.bot.download(photo)
     raw = buf.read()

@@ -843,6 +843,15 @@ async def test_on_private_photo_too_large_declines_without_asking_model(store, m
     assert rows == []  # ничего не записано — как в плане
 
 
+async def test_handle_photo_message_pushes_looking_status_when_rich(store):
+    rich_session = FakeRichSession()
+    message = FakeMessage(1, photo=["size1"], chat_type="private")
+
+    await ai_handler._handle_photo_message(message, store, _plain_settings(), 999, rich_session)
+
+    assert rich_session.statuses == [ai_handler.PHOTO_LOOKING_TEXT_PLAIN]
+
+
 async def test_on_private_photo_denied_without_right(store):
     message = FakeMessage(1, photo=["size1"], chat_type="private")
 
