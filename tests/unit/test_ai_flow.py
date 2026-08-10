@@ -686,6 +686,7 @@ async def test_unavailable_then_woken_within_30s_via_rich_status(store, monkeypa
     # заменяет предыдущий статус, а не добавляется вторым сообщением.
     await wake_state.remember(store, "mycraft", MYCRAFT_WAKE)
     monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(ai_flow, "ARNOLD_WAKING_DISPLAY_S", 0)
     message = FakeMessage()
     rich_session = FakeRichSession()
     link = FakeNodeLink(
