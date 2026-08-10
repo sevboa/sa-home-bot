@@ -47,6 +47,7 @@ def test_describe_declares_ask_chat_sleep_warmup():
     assert [a.id for a in desc.actions] == [
         "ask",
         "chat",
+        "look_at_photo",
         "chat_progress",
         "sleep",
         "warmup",
@@ -245,6 +246,123 @@ async def test_chat_rejects_unknown_role():
             "chat", {"messages": [{"role": "user", "content": "1"}], "role": "admin"}
         )
     assert excinfo.value.code == ERR_BAD_REQUEST
+
+
+# --- фото (мультимодальный /ai, 2026-08-10 — ресайз/хранение на стороне
+# этой службы, alfred шлёт raw_image как есть, см. llm/vision.py) ---
+
+
+def _tiny_jpeg_b64() -> str:
+    import base64
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (32, 32), (200, 30, 30)).save(buf, format="JPEG", quality=80)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+async def test_chat_with_raw_image_resizes_and_stores(monkeypatch):
+    seen = {}
+
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
+        seen["messages"] = messages
+        return {"message": {"content": "вижу картинку"}}
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    svc = LlmService(_settings(), speech_rand=lambda: 1.0)
+    result = await svc.run_command(
+        "chat",
+        {
+            "messages": [
+                {"role": "user", "content": "что тут?", "raw_image": _tiny_jpeg_b64()}
+            ],
+            "photo_key": "chat1_msg1",
+        },
+    )
+    assert result["response"] == "вижу картинку"
+    sent = seen["messages"][-1]
+    assert "raw_image" not in sent
+    assert len(sent["images"]) == 1
+    stored = svc._cfg.photos_dir / "chat1_msg1.jpg"
+    assert stored.is_file()
+
+
+async def test_chat_raw_image_requires_photo_key():
+    svc = LlmService(_settings())
+    with pytest.raises(ProtoError) as excinfo:
+        await svc.run_command(
+            "chat",
+            {"messages": [{"role": "user", "content": "?", "raw_image": _tiny_jpeg_b64()}]},
+        )
+    assert excinfo.value.code == ERR_BAD_REQUEST
+
+
+async def test_chat_raw_image_bad_base64_returns_apology_without_calling_ollama(monkeypatch):
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
+        raise AssertionError("сломанное фото не должно доходить до ollama.chat")
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    svc = LlmService(_settings())
+    result = await svc.run_command(
+        "chat",
+        {
+            "messages": [
+                {"role": "user", "content": "?", "raw_image": "не-base64!!!"}
+            ],
+            "photo_key": "chat1_msg2",
+        },
+    )
+    assert result["response"] == llm_service.PHOTO_PROCESS_FAILED_TEXT
+
+
+async def test_look_at_photo_loads_stored_and_returns_response(monkeypatch):
+    seen = {}
+
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
+        seen["messages"] = messages
+        seen["tools"] = tools
+        seen["think"] = think
+        return {"message": {"content": "на фото круг"}}
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    svc = LlmService(_settings(), speech_rand=lambda: 1.0)
+    await svc.run_command(
+        "chat",
+        {
+            "messages": [
+                {"role": "user", "content": "что тут?", "raw_image": _tiny_jpeg_b64()}
+            ],
+            "photo_key": "chat1_msg1",
+        },
+    )
+
+    result = await svc.run_command(
+        "look_at_photo", {"photo_key": "chat1_msg1", "question": "какого цвета?"}
+    )
+    assert result["response"] == "на фото круг"
+    assert seen["tools"] is None
+    assert seen["think"] is False
+    assert seen["messages"] == [
+        {"role": "user", "content": "какого цвета?", "images": seen["messages"][0]["images"]}
+    ]
+
+
+async def test_look_at_photo_missing_file_returns_apology():
+    svc = LlmService(_settings())
+    result = await svc.run_command(
+        "look_at_photo", {"photo_key": "нет-такого", "question": "что там?"}
+    )
+    assert result["response"] == llm_service.PHOTO_NOT_FOUND_TEXT
+
+
+async def test_look_at_photo_rejects_missing_args():
+    svc = LlmService(_settings())
+    with pytest.raises(ProtoError):
+        await svc.run_command("look_at_photo", {"question": "что там?"})
+    with pytest.raises(ProtoError):
+        await svc.run_command("look_at_photo", {"photo_key": "x"})
 
 
 # --- request_id / chat_progress (этап 34, Фаза 2 — Rich-стрим ответов) ---

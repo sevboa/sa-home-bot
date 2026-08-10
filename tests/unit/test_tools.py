@@ -503,6 +503,93 @@ async def test_get_time_rejects_malformed_at(store):
     assert result.startswith("ошибка")
 
 
+# --- look_at_photo (мультимодальный /ai, 2026-08-10) ---
+
+
+class _FakeLookNodeLink:
+    """Двойник ServiceLink для look_at_photo — свой (не _FakeNodeLink ниже:
+    той нужен фиксированный {"task_id": 1}, а тут нужен настраиваемый
+    {"response": ...})."""
+
+    def __init__(self, *, response: str = "ответ", raises: Exception | None = None) -> None:
+        self.calls: list[tuple[str, dict, object]] = []
+        self._response = response
+        self._raises = raises
+
+    async def command(self, action, args=None, dst=None, *, timeout=None):
+        self.calls.append((action, args or {}, dst))
+        if self._raises is not None:
+            raise self._raises
+        return {"response": self._response}
+
+
+async def test_look_at_photo_requires_question(store):
+    result = await tools.tool_look_at_photo(_ctx(store, node_link=_FakeLookNodeLink()), {})
+    assert "question" in result
+
+
+async def test_look_at_photo_no_turn_found_is_honest_not_a_crash(store):
+    result = await tools.tool_look_at_photo(
+        _ctx(store, node_link=_FakeLookNodeLink()), {"question": "что там?"}
+    )
+    assert "не найдено" in result
+
+
+async def test_look_at_photo_no_node_link_returns_error(store):
+    await store.record_ai_turn(
+        CHAT_ID, 1, 1, "user", "[фото]", datetime.now(tz=UTC), photo_path="key1"
+    )
+    result = await tools.tool_look_at_photo(
+        _ctx(store, node_link=None), {"question": "что там?"}
+    )
+    assert "ошибка" in result
+
+
+async def test_look_at_photo_success_calls_service_with_stored_key(store):
+    await store.record_ai_turn(
+        CHAT_ID, 1, 1, "user", "[фото]", datetime.now(tz=UTC), photo_path="111_1"
+    )
+    link = _FakeLookNodeLink(response="на фото рыжий кот")
+
+    result = await tools.tool_look_at_photo(
+        _ctx(store, node_link=link), {"question": "какого цвета кот?"}
+    )
+
+    assert result == "на фото рыжий кот"
+    assert len(link.calls) == 1
+    action, args, dst = link.calls[0]
+    assert action == tools.ACTION_LOOK_AT_PHOTO
+    assert args == {"photo_key": "111_1", "question": "какого цвета кот?", "chat_id": CHAT_ID}
+    assert dst.node == tools.LLM_NODE
+    assert dst.service == tools.LLM_SERVICE
+
+
+async def test_look_at_photo_picks_latest_photo_turn_in_dialogue(store):
+    await store.record_ai_turn(
+        CHAT_ID, 1, 1, "user", "[фото]", datetime.now(tz=UTC), photo_path="111_1"
+    )
+    await store.record_ai_turn(
+        CHAT_ID, 2, 1, "user", "[фото]", datetime.now(tz=UTC), photo_path="111_2"
+    )
+    link = _FakeLookNodeLink()
+
+    await tools.tool_look_at_photo(_ctx(store, node_link=link), {"question": "?"})
+
+    assert link.calls[0][1]["photo_key"] == "111_2"
+
+
+async def test_look_at_photo_unavailable_returns_apology_not_exception(store):
+    await store.record_ai_turn(
+        CHAT_ID, 1, 1, "user", "[фото]", datetime.now(tz=UTC), photo_path="111_1"
+    )
+    link = _FakeLookNodeLink(raises=TimeoutError("узел не отвечает"))
+
+    result = await tools.tool_look_at_photo(
+        _ctx(store, node_link=link), {"question": "что там?"}
+    )
+    assert "не получилось" in result
+
+
 # --- _close_pending_tool_calls: снимок для remind из середины раунда ---
 
 

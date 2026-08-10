@@ -37,10 +37,17 @@ class FakeBot:
     def __init__(self) -> None:
         self.typing_chats: list[int] = []
         self.typing_threads: list[int | None] = []
+        self.downloaded: list[object] = []
 
     async def send_chat_action(self, chat_id, action, message_thread_id=None):
         self.typing_chats.append(chat_id)
         self.typing_threads.append(message_thread_id)
+
+    async def download(self, file):
+        import io
+
+        self.downloaded.append(file)
+        return io.BytesIO(b"\xff\xd8\xff-fake-jpeg-bytes")
 
 
 @dataclass
@@ -61,13 +68,14 @@ class FakeMessage:
 
     def __init__(
         self, chat_id, text=None, reply_to=None, chat_type="private", entities=None,
-        message_thread_id=None,
+        message_thread_id=None, photo=None, caption=None,
     ):
         self.chat = FakeChat(chat_id, type=chat_type)
         self.message_id = FakeMessage._next_id
         FakeMessage._next_id += 1
         self.text = text
-        self.caption = None
+        self.caption = caption
+        self.photo = photo
         self.reply_to_message = reply_to
         self.entities = entities
         self.message_thread_id = message_thread_id
@@ -476,6 +484,24 @@ async def test_private_chat_text_filter_ignores_empty_text():
     assert await filt(msg) is False
 
 
+async def test_private_chat_photo_filter_matches_photo():
+    filt = ai_handler.PrivateChatPhoto()
+    msg = FakeMessage(1, photo=["size1"], chat_type="private")
+    assert await filt(msg) is True
+
+
+async def test_private_chat_photo_filter_ignores_text_only():
+    filt = ai_handler.PrivateChatPhoto()
+    msg = FakeMessage(1, text="привет", chat_type="private")
+    assert await filt(msg) is False
+
+
+async def test_private_chat_photo_filter_ignores_groups():
+    filt = ai_handler.PrivateChatPhoto()
+    msg = FakeMessage(1, photo=["size1"], chat_type="group")
+    assert await filt(msg) is False
+
+
 async def test_group_mention_filter_matches_and_strips_mention():
     filt = ai_handler.GroupMention()
     text = "@alfredbot как погода?"
@@ -575,6 +601,139 @@ async def test_on_private_message_denied_without_right(store):
     assert message.sent == []
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert rows == []
+
+
+async def test_on_private_photo_with_caption_sends_raw_image_and_persists_photo_path(
+    store, monkeypatch
+):
+    seen_history = []
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None, speech_remark=None, rich_session=None
+    ):
+        seen_history.append(history)
+        return "вижу собаку"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, photo=["size1"], caption="что тут?", chat_type="private")
+
+    await ai_handler.on_private_photo(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
+    )
+
+    assert message.bot.downloaded == ["size1"]
+    assert len(seen_history) == 1 and len(seen_history[0]) == 1
+    turn = seen_history[0][0]
+    assert turn["role"] == "user"
+    assert turn["content"] == "что тут?"
+    assert isinstance(turn["raw_image"], str) and turn["raw_image"]
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    user_row = next(r for r in rows if r["role"] == "user")
+    assert user_row["content"] == "[фото] что тут?"
+    assert user_row["photo_path"] == ai_flow.photo_key_for(message)
+
+
+async def test_on_private_photo_without_caption_uses_default_prompt(store, monkeypatch):
+    seen_history = []
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None, speech_remark=None, rich_session=None
+    ):
+        seen_history.append(history)
+        return "ответ"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, photo=["size1"], chat_type="private")
+
+    await ai_handler.on_private_photo(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
+    )
+
+    assert seen_history[0][-1]["content"] == ai_handler.PHOTO_NO_CAPTION_PROMPT
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    user_row = next(r for r in rows if r["role"] == "user")
+    assert user_row["content"] == ai_handler.PHOTO_MARKER
+
+
+async def test_on_private_photo_too_large_declines_without_asking_model(store, monkeypatch):
+    async def fail_request(*args, **kwargs):
+        raise AssertionError("слишком большое фото не должно уходить в request_alfred")
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fail_request)
+    monkeypatch.setattr(ai_handler, "_MAX_RAW_IMAGE_B64_BYTES", 4)
+    message = FakeMessage(1, photo=["size1"], chat_type="private")
+
+    await ai_handler.on_private_photo(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
+    )
+
+    assert message.sent == [ai_handler.PHOTO_TOO_LARGE_TEXT]
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    assert rows == []  # ничего не записано — как в плане
+
+
+async def test_on_private_photo_denied_without_right(store):
+    message = FakeMessage(1, photo=["size1"], chat_type="private")
+
+    await ai_handler.on_private_photo(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), subscription=_sub(),
+    )
+
+    assert message.sent == []
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    assert rows == []
+
+
+async def test_on_ai_reply_with_photo_caption_is_not_lost_as_empty_reply(store, monkeypatch):
+    # Живая находка 2026-08-10: фото-реплай в уже идущем треде раньше молча
+    # терял подпись (message.text у фото всегда None) и проваливался в
+    # EMPTY_REPLY_PROMPT, как будто подписи не было вовсе.
+    await store.record_ai_turn(1, 500, 500, "assistant", "начало треда", _now())
+    seen_history = []
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None, speech_remark=None, rich_session=None
+    ):
+        seen_history.append(history)
+        return "вижу кота"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, photo=["size1"], caption="а это что?")
+
+    await ai_handler.on_ai_reply(
+        message,
+        ai_dialogue_id=500,
+        node_link=None,
+        store=store,
+        config=_plain_settings(),
+        book=_admin_book(),
+        notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(),
+        subscription=_sub("chat@llm"),
+    )
+
+    assert seen_history[0][-1]["content"] == "а это что?"
+    assert "raw_image" in seen_history[0][-1]
+    rows = await store.ai_turns_for_dialogue(1, 500)
+    user_row = next(
+        r for r in rows if r["role"] == "user" and r["message_id"] == message.message_id
+    )
+    assert user_row["content"] == "[фото] а это что?"
 
 
 async def test_on_group_mention_with_text_starts_fresh_dialogue(store, monkeypatch):

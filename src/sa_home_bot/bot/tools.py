@@ -91,6 +91,10 @@ WEEKDAYS_RU = (
 # сам импортирует этот модуль (bot.tools) — обратный импорт был бы циклом.
 LLM_NODE = "mycraft"
 LLM_SERVICE = "llm"
+# Литерал, не импорт из llm/service.py — тот же приём, что и выше: этот
+# модуль намеренно не тянет тяжёлую LLM-службу (Ollama/WSL-обвязку), только
+# клиентский ServiceLink (см. докстринг модуля про службу tasks).
+ACTION_LOOK_AT_PHOTO = "look_at_photo"
 
 # Литералы, не импорт из node/service.py (та же причина, что у
 # wake_core.py::_CHECK_UPDATE_ACTION — тот модуль тяжёлый, тянет
@@ -1090,6 +1094,62 @@ _DECL_TIME: dict[str, Any] = {
         },
     },
 }
+
+# --- look_at_photo: мультимодальный /ai, 2026-08-10 — точечный повторный
+# просмотр УЖЕ сохранённого фото из этого же треда. Файл лежит на mycraft
+# (там же, где Ollama — ресайз/хранение делает служба llm, см.
+# llm/vision.py), этот тул только передаёт ключ и вопрос; ничего не
+# скачивает и не пересылает заново.
+
+_DECL_LOOK_AT_PHOTO: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "look_at_photo",
+        "description": (
+            "Ещё раз посмотреть на фотографию, которую собеседник прислал "
+            "РАНЕЕ в этом же разговоре. Фото из ТЕКУЩЕГО сообщения ты и так "
+            "уже видишь без этого тула — вызывай его, только если спрашивают "
+            "про снимок из более раннего хода (детали, которых нет в твоём "
+            "прежнем словесном описании: 'а какого цвета там...', 'посчитай "
+            "сколько...', 'что написано на...'). Если в этом разговоре фото "
+            "не присылали — не зови тул, а честно скажи, что фото не было."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "Что именно нужно рассмотреть или уточнить на фото",
+                }
+            },
+            "required": ["question"],
+        },
+    },
+}
+
+
+async def tool_look_at_photo(ctx: ToolContext, args: dict[str, Any]) -> str:
+    question = args.get("question")
+    if not isinstance(question, str) or not question.strip():
+        return "ошибка: не указан вопрос про фото (question)"
+    if ctx.store is None or ctx.chat_id is None or ctx.dialogue_id is None:
+        return "ошибка: сейчас не могу вернуться к фото (нет доступа к истории треда)"
+    turn = await ctx.store.latest_photo_turn(ctx.chat_id, ctx.dialogue_id)
+    if turn is None:
+        return "в этом разговоре фото не найдено — переспроси, если оно точно было"
+    if ctx.node_link is None:
+        return "ошибка: сейчас не могу связаться с Альфредом, чтобы посмотреть на фото"
+    try:
+        result = await ctx.node_link.command(
+            ACTION_LOOK_AT_PHOTO,
+            {"photo_key": turn["photo_path"], "question": question, "chat_id": ctx.chat_id},
+            dst=Address(node=LLM_NODE, service=LLM_SERVICE),
+            timeout=ctx.settings.llm.request_timeout_s,
+        )
+    except (ServiceUnavailableError, ProtoError, TimeoutError) as exc:
+        return f"не получилось рассмотреть фото ещё раз: {exc}"
+    return str(result.get("response", "")) or "не удалось разглядеть — возможно, стоит переспросить"
+
 
 # --- swarm_status: read-only состояние роя (LLM_INTEGRATION_PLAN.md §8.3) ---
 #
@@ -3176,6 +3236,7 @@ TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec(name="get_weather", handler=tool_get_weather, declaration=_DECL_WEATHER),
     ToolSpec(name="convert_currency", handler=tool_convert_currency, declaration=_DECL_CURRENCY),
     ToolSpec(name="get_time", handler=tool_get_time, declaration=_DECL_TIME),
+    ToolSpec(name="look_at_photo", handler=tool_look_at_photo, declaration=_DECL_LOOK_AT_PHOTO),
     ToolSpec(
         name="swarm_status",
         handler=tool_swarm_status,

@@ -75,9 +75,16 @@ CREATE TABLE IF NOT EXISTS health_notifications (
 -- user_id/user_name — отправитель хода (только role='user'; для 'assistant'
 -- NULL, это сам Альфред). Нужны, чтобы промпт LLM знал, кто именно пишет,
 -- кто начал тред и кто ещё обращался к Альфреду в этом чате (см.
--- bot/ai_flow.py::_build_context_note). На уже существующих БД эти колонки
--- добавляются миграцией ALTER TABLE (db/migrations.py) — CREATE TABLE IF NOT
--- EXISTS их бы не подхватил.
+-- bot/ai_flow.py::_build_context_note). photo_path — NULL для ходов без
+-- фото; для фото — непрозрачный ключ файла на диске УЗЛА, где физически
+-- крутится служба llm (сейчас mycraft), а не путь на этой машине (alfred)
+-- — сам бот этот файл не читает и не пишет, только хранит ключ и
+-- передаёт его обратно тулу look_at_photo. Сама картинка в content НЕ
+-- попадает (там только текстовый плейсхолдер "[фото] ...") — иначе она
+-- заново уезжала бы по сети роя в КАЖДОМ будущем ходе этого треда
+-- (history пересобирается из ai_turns целиком на каждый запрос). На уже
+-- существующих БД эти колонки добавляются миграцией ALTER TABLE
+-- (db/migrations.py) — CREATE TABLE IF NOT EXISTS их бы не подхватил.
 CREATE TABLE IF NOT EXISTS ai_turns (
     chat_id       INTEGER NOT NULL,
     message_id    INTEGER NOT NULL,   -- id именно этого сообщения (юзера или бота)
@@ -87,6 +94,7 @@ CREATE TABLE IF NOT EXISTS ai_turns (
     created_at    TEXT NOT NULL,
     user_id       INTEGER,            -- telegram user id отправителя (role='user')
     user_name     TEXT,               -- отображаемое имя отправителя (role='user')
+    photo_path    TEXT,               -- ключ уменьшенного фото на диске службы llm
     PRIMARY KEY (chat_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_ai_turns_dialogue ON ai_turns(chat_id, dialogue_id, message_id);

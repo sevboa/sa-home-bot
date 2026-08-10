@@ -283,6 +283,7 @@ TOOL_STATUS_TEXT: dict[str, str] = {
     "get_weather": "Альфред выглядывает в окно, прикидывая погоду",
     "convert_currency": "Альфред листает вчерашние котировки",
     "get_time": "Альфред сверяется с карманными часами",
+    "look_at_photo": "Альфред снова вглядывается в фотографию",
     "remind": "Альфред делает пометку в своём блокноте",
     "swarm_status": "Альфред обходит дозором домашние машины",
     "swarm_events": "Альфред листает журнал происшествий",
@@ -394,6 +395,16 @@ def _is_unavailable(exc: Exception) -> bool:
     if isinstance(exc, ServiceUnavailableError):
         return True
     return isinstance(exc, ProtoError) and exc.code in (ERR_UNAVAILABLE, ERR_UNKNOWN_DST)
+
+
+def photo_key_for(message: Message) -> str:
+    """Детерминированный ключ фото на диске службы llm (см. LlmConfig.photos_dir,
+    llm/vision.py) — тот же, что bot/handlers/ai.py::_handle_photo_message
+    пишет в ``ai_turns.photo_path``. Вычисляется заново здесь (без похода в
+    БД) для исходящего ``raw_image`` этого хода в _ask() ниже — тот же
+    ``message``, что вызвал текущий проход диалога, и есть фото-сообщение,
+    если оно вообще было (см. photo_key на history[-1].get("raw_image"))."""
+    return f"{message.chat.id}_{message.message_id}"
 
 
 def display_name(user: User | None) -> str | None:
@@ -755,7 +766,7 @@ async def request_alfred(
     node_link: ServiceLink,
     store: Store,
     settings: Settings,
-    history: list[dict[str, str]],
+    history: list[dict[str, Any]],
     dialogue_id: int,
     book: SubscriptionBook,
     notifier: Notifier,
@@ -824,6 +835,17 @@ async def request_alfred(
             ]
         else:
             base_messages = list(history)
+        # Мультимодальный /ai (2026-08-10): history[-1] несёт raw_image,
+        # только если этот ход — свежее фото (bot/handlers/ai.py::
+        # _handle_photo_message). photo_key передаётся на оба прохода
+        # (router + persona) одинаково — служба llm сама разберётся, где
+        # он реально нужен (см. llm_chat.run_chat_loop про photo_key).
+        current_turn = history[-1] if history else None
+        photo_key = (
+            photo_key_for(message)
+            if isinstance(current_turn, dict) and "raw_image" in current_turn
+            else None
+        )
         tool_ctx = ai_tools.ToolContext(
             chat_id=message.chat.id if message.chat else None,
             dialogue_id=dialogue_id,
@@ -914,6 +936,7 @@ async def request_alfred(
                 on_speech_remark=_record_speech_remark,
                 on_partial=rich_session.on_partial if rich_session is not None else None,
                 on_tool_start=_announce_tool_start,
+                photo_key=photo_key,
             )
 
         # Вариативное рассуждение (см. комментарий выше про THINK_MARKER):
@@ -935,6 +958,7 @@ async def request_alfred(
             on_tool_call=_record_tool_call,
             on_tool_start=_announce_tool_start,
             role="router",
+            photo_key=photo_key,
         )
         needs_think = THINK_MARKER in route_decision
         log.info(
@@ -981,6 +1005,7 @@ async def request_alfred(
             on_speech_remark=_record_speech_remark,
             on_partial=rich_session.on_partial if rich_session is not None else None,
             on_tool_start=_announce_tool_start,
+            photo_key=photo_key,
         )
 
     async def _announce_steps() -> None:

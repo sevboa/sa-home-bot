@@ -128,6 +128,7 @@ async def run_chat_loop(
     role: str | None = None,
     on_partial: PartialSink | None = None,
     on_tool_start: ToolStartSink | None = None,
+    photo_key: str | None = None,
 ) -> str:
     """Один проход диалога с моделью: раунды tool-calling (до
     MAX_TOOL_ROUNDS), пока не придёт финальный текст.
@@ -165,7 +166,15 @@ async def run_chat_loop(
     ``on_tool_start`` — уведомление ДО выполнения тула (имя, аргументы),
     в отличие от ``on_tool_call`` (после, с результатом — durable-запись).
     Чистый side-effect, ничего не блокирует и не меняет; не зовётся для
-    неизвестного модели тула (там и выполнять нечего)."""
+    неизвестного модели тула (там и выполнять нечего).
+
+    ``photo_key`` — мультимодальный /ai (2026-08-10): передан на КАЖДЫЙ
+    раунд как есть (не только на первый), но реально используется службой
+    llm только если ПОСЛЕДНИЙ элемент ``messages`` в этом конкретном
+    раунде несёт ``raw_image`` (см. llm/service.py::run_command) — на
+    раундах после tool-calling, где последний элемент уже не фото-ход, он
+    просто игнорируется. Само значение вычисляет bot/ai_flow.py::
+    photo_key_for(message) — детерминированно, без похода в БД."""
     tool_ctx.history = messages
     # Комплект собирается ОДИН раз на проход и по правам собеседника: тула, на
     # который у него нет прав, модель не видит вовсе (см. bot/tools.py::
@@ -182,6 +191,8 @@ async def run_chat_loop(
             args["chat_id"] = telegram_chat_id
         if role is not None:
             args["role"] = role
+        if photo_key is not None:
+            args["photo_key"] = photo_key
         return args
 
     async def _maybe_send_remark(result: dict[str, Any]) -> None:

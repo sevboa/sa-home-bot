@@ -418,12 +418,23 @@ class Store:
         at: datetime,
         user_id: int | None = None,
         user_name: str | None = None,
+        photo_path: str | None = None,
     ) -> None:
         async with self.db.transaction() as conn:
             await conn.execute(
                 "INSERT INTO ai_turns(chat_id, message_id, dialogue_id, role, content, "
-                "created_at, user_id, user_name) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
-                (chat_id, message_id, dialogue_id, role, content, _iso(at), user_id, user_name),
+                "created_at, user_id, user_name, photo_path) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    chat_id,
+                    message_id,
+                    dialogue_id,
+                    role,
+                    content,
+                    _iso(at),
+                    user_id,
+                    user_name,
+                    photo_path,
+                ),
             )
 
     async def ai_turn(self, chat_id: int, message_id: int) -> dict | None:
@@ -441,6 +452,18 @@ class Store:
         )
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
+
+    async def latest_photo_turn(self, chat_id: int, dialogue_id: int) -> dict | None:
+        """Последний ход этого треда с прикреплённым фото — для тула
+        look_at_photo (bot/tools.py), который просит службу llm ещё раз
+        взглянуть на уже сохранённую (на её стороне) уменьшенную копию."""
+        cur = await self.db.conn.execute(
+            "SELECT * FROM ai_turns WHERE chat_id=? AND dialogue_id=? AND photo_path IS NOT NULL "
+            "ORDER BY message_id DESC LIMIT 1",
+            (chat_id, dialogue_id),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
 
     async def chat_participants(self, chat_id: int) -> list[dict]:
         """Различные пользователи (role='user'), кто когда-либо обращался к

@@ -17,6 +17,7 @@ restart) — событие `llm_service_restart`, другой текст в б
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import socket
 from collections.abc import Awaitable, Callable
@@ -25,7 +26,7 @@ from typing import Any
 
 from sa_home_bot import __version__
 from sa_home_bot.config import LlmConfig, Settings
-from sa_home_bot.llm import ollama
+from sa_home_bot.llm import ollama, vision
 from sa_home_bot.llm.prompt import (
     DEFAULT_PERSONA_PROMPT,
     ROUTER_SYSTEM_PROMPT,
@@ -97,6 +98,24 @@ ACTION_SLEEP = "sleep"
 # 2026-07-24: ensure_running и так вызывается лениво внутри ask/chat, но
 # тогда прогрев занял бы ПЕРВЫЙ реальный запрос, а не время заранее).
 ACTION_WARMUP = "warmup"
+# Мультимодальный /ai (2026-08-10): alfred присылает сырое (необработанное)
+# фото ключом "raw_image" внутри последнего элемента messages в ACTION_CHAT
+# (см. run_command) — эта служба сама делает ресайз/хранение (llm/vision.py,
+# сильнее CPU, уже рядом с Ollama) и возвращает photo_key для ai_turns.
+# ACTION_LOOK_AT_PHOTO — повторный точечный просмотр УЖЕ сохранённого фото
+# по этому ключу (bot/tools.py::tool_look_at_photo), без похода через
+# ресайз заново и без пересылки байт между узлами — файл уже здесь.
+ACTION_LOOK_AT_PHOTO = "look_at_photo"
+
+# Отказы фото-путей намеренно возвращаются как обычный {"response": ...}, а
+# не отдельным полем-ошибкой: для ACTION_CHAT это просто ложится в ai_turns
+# как обычная реплика Альфреда (ai.py не должен знать про фото-специфику),
+# для ACTION_LOOK_AT_PHOTO — как обычный текст результата тула, который
+# модель сама естественно перескажет пользователю (bot/tools.py).
+PHOTO_PROCESS_FAILED_TEXT = (
+    "Не получилось обработать фото — возможно, файл повреждён. Пришлите его ещё раз, сэр."
+)
+PHOTO_NOT_FOUND_TEXT = "Не нахожу это фото — похоже, сохранённая копия уже устарела."
 
 EVENT_IDLE_SLEEP = "llm_idle_sleep"
 EVENT_SERVICE_RESTART = "llm_service_restart"
@@ -233,6 +252,39 @@ class LlmService:
                                 "Фаза 2)"
                             ),
                         ),
+                        ActionParam(
+                            name="photo_key",
+                            type="string",
+                            required=False,
+                            title=(
+                                "Ключ для сохранения фото на диске — обязателен, если "
+                                "последнее сообщение messages несёт raw_image"
+                            ),
+                        ),
+                    ),
+                ),
+                ActionSpec(
+                    id=ACTION_LOOK_AT_PHOTO,
+                    title="Ещё раз посмотреть на ранее присланное фото",
+                    params=(
+                        ActionParam(
+                            name="photo_key",
+                            type="string",
+                            required=True,
+                            title="Ключ уже сохранённого фото (см. ACTION_CHAT.photo_key)",
+                        ),
+                        ActionParam(
+                            name="question",
+                            type="string",
+                            required=True,
+                            title="Что нужно рассмотреть/уточнить на фото",
+                        ),
+                        ActionParam(
+                            name="chat_id",
+                            type="int",
+                            required=False,
+                            title="Chat, откуда пришёл запрос (для логопеда/llm_idle_sleep)",
+                        ),
                     ),
                 ),
                 ActionSpec(
@@ -325,6 +377,34 @@ class LlmService:
             # именно когда лежала В ОДНОМ system-блоке с ним (живая находка
             # 2026-07-25, llm/prompt.py) — отдельным сообщением этого нет.
             system = self._persona_prompt
+            # raw_image ищем именно в ПОСЛЕДНЕМ элементе — это текущий ход
+            # пользователя (см. bot/ai_flow.py::request_alfred, history[-1]
+            # всегда текущий ход). Известное ограничение v1: если router-
+            # проход (mode="router_think") на ЭТОМ же ходу вызовет тул,
+            # messages вырастет и фото-сообщение перестанет быть последним
+            # до персонажного прохода — картинка потеряется для финального
+            # ответа. Редкий составной случай (фото + вопрос, требующий
+            # ещё и отдельного тула в том же ходу), не решается в этой
+            # итерации (см. план — чанкованная загрузка/групповые фото
+            # тоже отложены).
+            last = messages[-1] if isinstance(messages[-1], dict) else None
+            if last is not None and "raw_image" in last:
+                raw_image = last.pop("raw_image")
+                photo_key = args.get("photo_key")
+                if not isinstance(raw_image, str) or not raw_image:
+                    raise ProtoError(ERR_BAD_REQUEST, "raw_image должен быть непустой строкой")
+                if not isinstance(photo_key, str) or not photo_key:
+                    raise ProtoError(ERR_BAD_REQUEST, "photo_key обязателен вместе с raw_image")
+                try:
+                    raw_bytes = base64.b64decode(raw_image, validate=True)
+                    resized_b64 = await asyncio.to_thread(
+                        vision.resize_and_store, raw_bytes, photo_key, self._cfg
+                    )
+                except Exception:
+                    log.warning("vision: не удалось обработать фото %s", photo_key, exc_info=True)
+                    return {"response": PHOTO_PROCESS_FAILED_TEXT, "model": self._cfg.model}
+                last["images"] = [resized_b64]
+                await asyncio.to_thread(vision.maybe_sweep_sync, self._cfg)
             if role == "router":
                 messages = [*messages, {"role": "system", "content": ROUTER_SYSTEM_PROMPT}]
             chat_id = args.get("chat_id")
@@ -355,6 +435,38 @@ class LlmService:
             if just_cured:
                 await self._emit_speech_cured()
             out: dict[str, Any] = {"response": reply, "model": self._cfg.model}
+            if remark is not None:
+                out["speech_remark"] = remark
+            return out
+        if action == ACTION_LOOK_AT_PHOTO:
+            photo_key = args.get("photo_key")
+            question = args.get("question")
+            if not isinstance(photo_key, str) or not photo_key:
+                raise ProtoError(ERR_BAD_REQUEST, "photo_key должен быть непустой строкой")
+            if not isinstance(question, str) or not question:
+                raise ProtoError(ERR_BAD_REQUEST, "question должен быть непустой строкой")
+            chat_id = args.get("chat_id")
+            await self._touch(chat_id)
+            stored_b64 = await asyncio.to_thread(vision.load_stored, photo_key, self._cfg)
+            if stored_b64 is None:
+                return {"response": PHOTO_NOT_FOUND_TEXT, "model": self._cfg.model}
+            # Без tools (узкий вопрос про изображение не требует рекурсивного
+            # tool-calling) и с явным think=False (см. комментарий про
+            # think_style в config.py — явный True на gemma-4 даёт 400).
+            result = await ollama.chat(
+                self._cfg,
+                [{"role": "user", "content": question, "images": [stored_b64]}],
+                self._persona_prompt,
+                tools=None,
+                think=False,
+            )
+            _log_ollama_timings("look_at_photo", result)
+            message = result.get("message", {})
+            cleaned = strip_math_notation(message.get("content", ""))
+            reply, remark, just_cured = self._speech.process(cleaned, chat_id)
+            if just_cured:
+                await self._emit_speech_cured()
+            out = {"response": reply, "model": self._cfg.model}
             if remark is not None:
                 out["speech_remark"] = remark
             return out

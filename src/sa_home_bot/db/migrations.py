@@ -33,5 +33,7 @@ async def apply_migrations(db: Database) -> None:
     # ai_turns.user_id/user_name — добавлены 2026-07-24 (см. schema.sql).
     await _add_column_if_missing(db, "ai_turns", "user_id", "INTEGER")
     await _add_column_if_missing(db, "ai_turns", "user_name", "TEXT")
+    # ai_turns.photo_path — добавлена 2026-08-10, мультимодальный /ai (см. schema.sql).
+    await _add_column_if_missing(db, "ai_turns", "photo_path", "TEXT")
     await db.conn.commit()
     log.info("Схема БД применена")

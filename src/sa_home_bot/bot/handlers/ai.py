@@ -25,9 +25,11 @@ API 10.0, которую ловили другие проекты (`sendMessage`
 from __future__ import annotations
 
 import asyncio
+import base64
 import html
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 from aiogram import Router
 from aiogram.filters import Command, Filter
@@ -74,6 +76,26 @@ EMPTY_REPLY_PROMPT = (
     "(например, стикером или фото без подписи). Отреагируй коротко, в "
     "характере — переспроси или отметь, что не расслышал."
 )
+# Мультимодальный /ai (2026-08-10) — bot/handlers/ai.py::_handle_photo_message.
+# PHOTO_MARKER — плейсхолдер в ai_turns.content: сама картинка туда не
+# попадает (см. photo_path), иначе история диалога, которая целиком
+# пересобирается и гонится по сети роя на каждый ход, распухала бы с
+# каждым фото в треде.
+PHOTO_MARKER = "[фото]"
+PHOTO_NO_CAPTION_PROMPT = (
+    "Пользователь прислал фото без подписи. Посмотри на изображение и "
+    "опиши, что видишь, или мягко уточни, что именно интересует."
+)
+PHOTO_TOO_LARGE_TEXT = (
+    "<b>Альфред:</b> Простите, это фото слишком тяжёлое — пришлите, "
+    "пожалуйста, поменьше или сожмите перед отправкой."
+)
+# Запас от proto/messages.py::MAX_MESSAGE_BYTES (1 МиБ, лимит на весь
+# конверт протокола роя) — под декларации тулов, текст истории и служебные
+# поля запроса; base64 сам по себе раздувает байты на треть. Фото уже сжато
+# Telegram'ом (это message.photo, не message.document) — на практике порог
+# срабатывает редко.
+_MAX_RAW_IMAGE_B64_BYTES = 800_000
 
 
 def _format_answer(raw: str) -> str:
@@ -131,6 +153,18 @@ class PrivateChatText(Filter):
             and bool(message.text)
             and not message.text.startswith("/")
         )
+
+
+class PrivateChatPhoto(Filter):
+    """Фото (с подписью или без) первым сообщением в личке — как
+    PrivateChatText, но для message.photo. Не конфликтует с ним: у фото
+    message.text всегда None (подпись — отдельное поле message.caption).
+    Реплай в уже начатый тред фото сюда не попадает — тот перехватывается
+    AiReplyContinuation (router регистрируется раньше catchall_router, см.
+    setup.py)."""
+
+    async def __call__(self, message: Message) -> bool:
+        return message.chat is not None and message.chat.type == "private" and bool(message.photo)
 
 
 class GroupMention(Filter):
@@ -229,7 +263,17 @@ async def on_ai_reply(
         return
     text = (message.text or "").strip()
 
-    if text:
+    if message.photo:
+        # Живая находка 2026-08-10 (мультимодальный /ai): раньше фото-реплай
+        # с подписью в уже идущем треде молча терял подпись — message.text
+        # у фото-сообщения всегда None (подпись — message.caption), поэтому
+        # такой ход проваливался в ветку EMPTY_REPLY_PROMPT ниже, как будто
+        # подписи не было вовсе.
+        history = await _handle_photo_message(message, store, config, ai_dialogue_id)
+        if history is None:
+            await message.answer(PHOTO_TOO_LARGE_TEXT)
+            return
+    elif text:
         now = datetime.now(tz=UTC)
         sender = message.from_user
         await store.record_ai_turn(
@@ -302,6 +346,36 @@ async def on_private_message(
     )
     history_rows = await store.ai_turns_for_dialogue(message.chat.id, dialogue_id)
     history = [{"role": r["role"], "content": r["content"]} for r in history_rows if r["content"]]
+
+    await _ask_and_reply(
+        message, node_link, store, config, book, notifier, dialogue_id, history,
+        active_ai_chats, tool_calls,
+    )
+
+
+@catchall_router.message(PrivateChatPhoto())
+async def on_private_photo(
+    message: Message,
+    node_link: ServiceLink,
+    store: Store,
+    config: Settings,
+    book: SubscriptionBook,
+    notifier: Notifier,
+    active_ai_chats: ai_flow.ActiveAiChats,
+    tool_calls: ToolCalls,
+    subscription: Subscription | None = None,
+) -> None:
+    right = commands.required_right(commands.ALFRED.name)
+    if subscription is None or not subscription.allows_command(right):
+        return
+
+    # Та же логика нового треда, что у on_private_message: без топика и без
+    # reply — всегда новый тред, продолжить можно реплаем (AiReplyContinuation).
+    dialogue_id = _dialogue_id_for(message)
+    history = await _handle_photo_message(message, store, config, dialogue_id)
+    if history is None:
+        await message.answer(PHOTO_TOO_LARGE_TEXT)
+        return
 
     await _ask_and_reply(
         message, node_link, store, config, book, notifier, dialogue_id, history,
@@ -387,6 +461,56 @@ async def start_dialogue(
     )
 
 
+async def _handle_photo_message(
+    message: Message, store: Store, config: Settings, dialogue_id: int
+) -> list[dict[str, Any]] | None:
+    """Скачать фото пользователя (наибольшее разрешение, message.photo[-1]),
+    записать плейсхолдер + photo_path в ai_turns, собрать history с
+    ``raw_image`` на последнем (текущем) ходе — ресайз и хранение делает
+    служба llm (см. llm/vision.py, llm/service.py::run_command), не эта
+    машина (alfred и так несёт на себе бота, cron, tailscale и т.п. на
+    слабом CPU — решение пользователя 2026-08-10).
+
+    None — фото не влезает в протокольный лимит (см. _MAX_RAW_IMAGE_B64_BYTES):
+    ничего не записано, вызывающий должен показать вежливый отказ
+    (PHOTO_TOO_LARGE_TEXT) и не звать модель вовсе.
+    """
+    photo = message.photo[-1]
+    buf = await message.bot.download(photo)
+    raw = buf.read()
+    photo_b64 = base64.b64encode(raw).decode()
+    if len(photo_b64) > _MAX_RAW_IMAGE_B64_BYTES:
+        return None
+
+    photo_key = ai_flow.photo_key_for(message)
+    caption = (message.caption or "").strip()
+    persisted = f"{PHOTO_MARKER} {caption}".strip() if caption else PHOTO_MARKER
+    now = datetime.now(tz=UTC)
+    sender = message.from_user
+    await store.record_ai_turn(
+        message.chat.id,
+        message.message_id,
+        dialogue_id,
+        "user",
+        persisted,
+        now,
+        user_id=sender.id if sender else None,
+        user_name=ai_flow.display_name(sender),
+        photo_path=photo_key,
+    )
+    history_rows = await store.ai_turns_for_dialogue(message.chat.id, dialogue_id)
+    history: list[dict[str, Any]] = [
+        {"role": r["role"], "content": r["content"]} for r in history_rows if r["content"]
+    ]
+    if history:
+        history[-1] = {
+            "role": "user",
+            "content": caption or PHOTO_NO_CAPTION_PROMPT,
+            "raw_image": photo_b64,
+        }
+    return history
+
+
 async def _ask_and_reply(
     message: Message,
     node_link: ServiceLink,
@@ -395,7 +519,7 @@ async def _ask_and_reply(
     book: SubscriptionBook,
     notifier: Notifier,
     dialogue_id: int,
-    history: list[dict[str, str]],
+    history: list[dict[str, Any]],
     active_ai_chats: ai_flow.ActiveAiChats,
     tool_calls: ToolCalls,
 ) -> str | None:
@@ -432,7 +556,7 @@ async def _do_ask_and_reply(
     book: SubscriptionBook,
     notifier: Notifier,
     dialogue_id: int,
-    history: list[dict[str, str]],
+    history: list[dict[str, Any]],
     tool_calls: ToolCalls,
 ) -> str | None:
     # typing-индикатор (keep-alive, пока модель реально готовит ответ) —
