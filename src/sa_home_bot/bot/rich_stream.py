@@ -131,20 +131,16 @@ class RichStreamSession:
         сама (см. _push_markdown про дубль имени у markdown-пути)."""
         await self._push_thinking(text)
 
-    async def finalize(self, raw: str, reply_to_message_id: int | None = None) -> Message | None:
-        """Персистит настоящий ответ Альфреда — с ретраем на 429
-        (bot/notifier.py::send_with_retry), как и обычная отправка
-        сообщений. Работает одинаково для приватных чатов (после серии
-        on_partial) и для групп (единственный вызов, без единого
-        on_partial до этого) — группам streaming-черновик недоступен
-        платформенно, не по нашему выбору (см. докстринг модуля)."""
+    async def _send_persisted(
+        self, markdown: str, *, reply_to_message_id: int | None = None
+    ) -> Message | None:
         reply = (
             ReplyParameters(message_id=reply_to_message_id, allow_sending_without_reply=True)
             if reply_to_message_id is not None
             else None
         )
-        rich_message = InputRichMessage(markdown=ALFRED_PREFIX_MD + raw.strip())
-        return await send_with_retry(
+        rich_message = InputRichMessage(markdown=markdown)
+        sent = await send_with_retry(
             self._chat_id,
             "rich-сообщение",
             lambda: self._bot.send_rich_message(
@@ -154,3 +150,38 @@ class RichStreamSession:
                 message_thread_id=self._message_thread_id,
             ),
         )
+        # Реальное сообщение вытесняет активный черновик той же сессии
+        # (платформенная семантика — см. push_status), поэтому сигнатура
+        # последнего показанного черновика больше не отражает экран:
+        # следующий push_status/on_partial не должен считать её актуальной.
+        self._last_sent = None
+        return sent
+
+    async def finalize(self, raw: str, reply_to_message_id: int | None = None) -> Message | None:
+        """Персистит настоящий ответ Альфреда — с ретраем на 429
+        (bot/notifier.py::send_with_retry), как и обычная отправка
+        сообщений. Работает одинаково для приватных чатов (после серии
+        on_partial) и для групп (единственный вызов, без единого
+        on_partial до этого) — группам streaming-черновик недоступен
+        платформенно, не по нашему выбору (см. докстринг модуля)."""
+        return await self._send_persisted(
+            ALFRED_PREFIX_MD + raw.strip(), reply_to_message_id=reply_to_message_id
+        )
+
+    async def finalize_status(self, markdown: str) -> Message | None:
+        """Персистит реплику ДРУГОГО персонажа, не Альфреда (например
+        Агнольда при пробуждении узла — bot/ai_flow.py) — без
+        ALFRED_PREFIX_MD (текст сам называет говорящего) и без
+        reply_parameters (не ответ на конкретное сообщение пользователя,
+        отдельная сюжетная реплика).
+
+        Живая находка 2026-08-10 (третий заход): раньше такая реплика шла
+        через message.answer() — совсем отдельный от rich-механики Bot API
+        метод (обычный sendMessage). Активный черновик ("шаги") от этого
+        никак не менялся — просто истекал сам по себе через несколько
+        секунд, а реплика всплывала отдельным сообщением с заметным
+        разрывом между ними. sendRichMessage (та же механика, что и
+        finalize()) вытесняет черновик той же сессии напрямую — без
+        зазора, статус буквально подменяется репликой, при этом реплика
+        остаётся в истории чата насовсем (в отличие от push_status)."""
+        return await self._send_persisted(markdown)

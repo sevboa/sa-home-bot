@@ -208,3 +208,37 @@ async def test_finalize_gives_up_after_exhausting_retries():
 
     assert sent is None
     assert bot.sent == []
+
+
+async def test_finalize_status_sends_without_prefix_or_reply():
+    # Реплика другого персонажа (Агнольда) — не Альфреда: без
+    # ALFRED_PREFIX_MD и без привязки к конкретному сообщению пользователя.
+    bot = FakeBot()
+    session = RichStreamSession(bot, chat_id=42, message_thread_id=9)
+
+    sent = await session.finalize_status("**Агнольд:** Сейчас Альфред подойдёт")
+
+    assert sent is not None
+    assert bot.sent[0]["chat_id"] == 42
+    assert bot.sent[0]["message_thread_id"] == 9
+    assert bot.sent[0]["markdown"] == "**Агнольд:** Сейчас Альфред подойдёт"
+    assert bot.sent[0]["reply_parameters"] is None
+
+
+async def test_finalize_status_resets_dedup_so_next_status_is_not_swallowed():
+    # Живая находка 2026-08-10 (третий заход): finalize_status вытесняет
+    # активный черновик реальным сообщением — следующий push_status с ТЕМ ЖЕ
+    # текстом, что был в черновике до неё, должен всё равно уйти, а не молча
+    # пропасть из-за дедупа (черновик, к которому относился дедуп, уже не
+    # тот, что на экране).
+    bot = FakeBot()
+    session = RichStreamSession(bot, chat_id=1)
+
+    await session.push_status("шаги")
+    await session.finalize_status("**Агнольд:** ...")
+    await session.push_status("шаги")
+
+    assert [d["blocks"] for d in bot.drafts] == [
+        [InputRichBlockThinking(text="шаги")],
+        [InputRichBlockThinking(text="шаги")],
+    ]

@@ -185,17 +185,22 @@ class FakeNodeLink:
 
 class FakeRichSession:
     """Двойник bot/rich_stream.py::RichStreamSession — только то, что видит
-    ai_flow.py (push_status/on_partial), без реального draft/Bot API."""
+    ai_flow.py (push_status/on_partial/finalize_status), без реального
+    draft/Bot API."""
 
     def __init__(self) -> None:
         self.statuses: list[str] = []
         self.partials: list[tuple[str, bool]] = []
+        self.finalized_statuses: list[str] = []
 
     async def push_status(self, text: str) -> None:
         self.statuses.append(text)
 
     async def on_partial(self, text: str, done: bool) -> None:
         self.partials.append((text, done))
+
+    async def finalize_status(self, markdown: str) -> None:
+        self.finalized_statuses.append(markdown)
 
 
 def _settings() -> Settings:
@@ -682,10 +687,11 @@ async def test_unavailable_then_woken_within_30s(store, monkeypatch):
 async def test_unavailable_then_woken_within_30s_via_rich_status(store, monkeypatch):
     # Тот же сценарий, что test_unavailable_then_woken_within_30s, но с
     # rich_session: «шаги» (до и после wake) идут эфемерными статусами в
-    # черновик (push_status), а реплика Агнольда — своя персистентная
-    # message.answer, как и в фолбэк-пути (живая находка 2026-08-10: Агнольд
-    # отдельный персонаж, его реплика должна остаться в чате, не перекрываясь
-    # ни «шагами», ни финальным ответом Альфреда).
+    # черновик (push_status), а реплика Агнольда — через finalize_status
+    # (персистентный sendRichMessage, вытесняет черновик той же сессии
+    # напрямую — живая находка 2026-08-10, третий заход: message.answer
+    # создавала заметный разрыв между исчезновением «шагов» и появлением
+    # реплики, т.к. это отдельный от rich-механики Bot API метод).
     await wake_state.remember(store, "mycraft", MYCRAFT_WAKE)
     monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
     message = FakeMessage()
@@ -706,8 +712,9 @@ async def test_unavailable_then_woken_within_30s_via_rich_status(store, monkeypa
     )
 
     assert raw == "Сейчас подойду"
-    assert message.answers == [ai_flow.ARNOLD_WAKING]
+    assert message.answers == []
     assert rich_session.statuses == [ai_flow.STEPS_TEXT_PLAIN, ai_flow.STEPS_TEXT_PLAIN]
+    assert rich_session.finalized_statuses == [ai_flow.ARNOLD_WAKING_MD]
     assert link.wol_sent == [{"mac": MYCRAFT_WAKE["mac"]}]  # разбудили молча
 
 
