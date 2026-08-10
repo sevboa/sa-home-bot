@@ -24,9 +24,9 @@ class _FakeXttsModel:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    def tts_to_file(self, *, text, language, speaker_wav, file_path):
+    def tts_to_file(self, *, text, language, speaker, file_path):
         self.calls.append(
-            {"text": text, "language": language, "speaker_wav": speaker_wav, "file_path": file_path}
+            {"text": text, "language": language, "speaker": speaker, "file_path": file_path}
         )
         Path(file_path).write_bytes(b"fake-wav-bytes")
 
@@ -66,7 +66,7 @@ async def test_synthesize_speech_calls_model_and_cleans_temp_files(tmp_path, mon
     call = model.calls[0]
     assert call["text"] == "Добрый вечер, сэр."
     assert call["language"] == cfg.tts_language
-    assert call["speaker_wav"] == str(cfg.tts_reference_voice_path)
+    assert call["speaker"] == llm_tts._SPEAKER_ID
     # Временные wav/ogg удалены после синтеза — каталог остался пустым.
     assert list(cfg.tts_tmp_dir.iterdir()) == []
 

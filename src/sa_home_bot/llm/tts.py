@@ -13,6 +13,26 @@ tts_reference_voice_path``), не набор фиксированных дикт
 не нужно уметь имитировать дефект речи: он просто прочитает уже
 подменённые буквы.
 
+Живая находка 2026-08-11 (при деплое, по логам с mycraft): наивный вызов
+``tts_to_file(..., speaker_wav=путь)`` пересчитывает conditioning latents
+(проход через референс-энкодер) ЗАНОВО НА КАЖДОЕ ПРЕДЛОЖЕНИЕ входного текста
+(coqui-tts бьёт текст на предложения и синтезирует их по одному) — для
+ответа из 5 предложений это давало 58 из 77 секунд общего времени чисто на
+повторный пересчёт одного и того же голоса. Латенты считаются РОВНО ОДИН РАЗ
+при загрузке модели (``_load_model_sync``) и кладутся в самодельный
+``speaker_manager.speakers[_SPEAKER_ID]`` — тот же приём, которым XTTS сам
+кэширует пачку встроенных дикторов (``TTS.tts.layers.xtts.xtts_manager.
+SpeakerManager``, тривиальный класс-обёртка над словарём). Дальше
+``tts_to_file`` зовётся с ``speaker=_SPEAKER_ID`` вместо ``speaker_wav`` —
+``synthesize()`` внутри XTTS видит имя в ``speaker_manager.speakers`` и берёт
+латенты из памяти, не трогая референсный WAV вовсе.
+
+Плата за это: смена референсного голоса (замена файла по
+``tts_reference_voice_path``) больше НЕ подхватывается на лету — латенты
+закэшированы в резидентной модели на весь срок жизни процесса, нужен
+перезапуск службы ``llm``, как и для любого другого конфига, читаемого один
+раз при старте.
+
 XTTS v2 отдаёт только WAV — прямого OGG/Opus-выхода у Coqui нет, а Telegram
 ``sendVoice`` требует именно OGG/Opus. Конвертация — внешним процессом
 ``ffmpeg`` (тот же класс интеграции, что и у остальных системных утилит в
@@ -46,12 +66,30 @@ from sa_home_bot.config import LlmConfig
 log = logging.getLogger(__name__)
 
 _MODEL_NAME = "tts_models/multilingual/multi-dataset/xtts_v2"
+# Единственный голос, который у нас вообще есть (voice cloning по одному
+# референсу, не выбор из набора) — имя чисто техническое, ключ в кэше
+# латентов, никогда не показывается пользователю.
+_SPEAKER_ID = "alfred"
 
 # Модель резидентна в RAM с первого запроса до конца жизни процесса — как и
 # faster-whisper в llm/stt.py, никакой конкуренции за VRAM и незачем
-# выгружать/перезагружать между запросами.
+# выгружать/перезагружать между запросами. Латенты голоса (см. докстринг
+# модуля) закэшированы ВНУТРИ этого же объекта (model.synthesizer.tts_model.
+# speaker_manager) — не отдельная переменная, чтобы не рассинхронизироваться
+# с тем, для какого файла они посчитаны.
 _model: Any = None
 _model_lock = asyncio.Lock()
+
+
+class _VoiceCache:
+    """Подмена TTS.tts.layers.xtts.xtts_manager.SpeakerManager — та же форма
+    (``.speakers`` — словарь имя → {gpt_conditioning_latents,
+    speaker_embedding}), но без чтения ``speakers_xtts.pth`` с диска: нам
+    нужен ровно один голос, посчитанный из своего референса, а не набор
+    встроенных."""
+
+    def __init__(self, speakers: dict[str, dict[str, Any]]) -> None:
+        self.speakers = speakers
 
 
 def _load_model_sync(cfg: LlmConfig) -> Any:
@@ -66,6 +104,26 @@ def _load_model_sync(cfg: LlmConfig) -> Any:
         model_path=str(model_path), config_path=str(config_path), progress_bar=False, gpu=False
     )
     log.info("tts: модель XTTS v2 загружена")
+
+    log.info("tts: расчёт латентов голоса из референса (один раз за процесс)...")
+    xtts_model = model.synthesizer.tts_model
+    xtts_cfg = xtts_model.config
+    gpt_cond_latent, speaker_embedding = xtts_model.get_conditioning_latents(
+        audio_path=str(cfg.tts_reference_voice_path),
+        gpt_cond_len=xtts_cfg["gpt_cond_len"],
+        gpt_cond_chunk_len=xtts_cfg["gpt_cond_chunk_len"],
+        max_ref_length=xtts_cfg["max_ref_len"],
+        sound_norm_refs=xtts_cfg["sound_norm_refs"],
+    )
+    xtts_model.speaker_manager = _VoiceCache(
+        {
+            _SPEAKER_ID: {
+                "gpt_conditioning_latents": gpt_cond_latent,
+                "speaker_embedding": speaker_embedding,
+            }
+        }
+    )
+    log.info("tts: латенты голоса закэшированы")
     return model
 
 
@@ -84,7 +142,7 @@ def _synthesize_wav_sync(model: Any, text: str, cfg: LlmConfig) -> Path:
     model.tts_to_file(
         text=text,
         language=cfg.tts_language,
-        speaker_wav=str(cfg.tts_reference_voice_path),
+        speaker=_SPEAKER_ID,
         file_path=str(wav_path),
     )
     return wav_path
