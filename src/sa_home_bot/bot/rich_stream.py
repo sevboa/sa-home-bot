@@ -57,19 +57,27 @@ class RichStreamSession:
         self._draft_id = random.randint(1, 2**31 - 1)
         self._last_sent: str | None = None
 
-    async def _push_draft(self, markdown_body: str) -> None:
+    async def _push_draft(self, markdown_body: str, *, with_prefix: bool = True) -> None:
         """Общая отправка черновика — дедуп по последнему отправленному
         (не важно, статус это был или кусок настоящего ответа: одинаковый
         текст дважды подряд не стоит второго round-trip'а), best-effort
-        (см. on_partial про то, почему потеря одного тика не критична)."""
+        (см. on_partial про то, почему потеря одного тика не критична).
+
+        ``with_prefix=False`` — живой баг 2026-08-10: статусные фразы
+        (TOOL_STATUS_TEXT/STEPS_TEXT_PLAIN/THINKING_TEXT_PLAIN, bot/ai_flow.py)
+        сами называют Альфреда в третьем лице ("Альфред сёрфит...") —
+        с ALFRED_PREFIX_MD получалось видимое дублирование "Альфред:
+        Альфред сёрфит...". Настоящий ответ модели (on_partial) имени не
+        содержит — ему префикс по-прежнему нужен."""
         if not markdown_body or markdown_body == self._last_sent:
             return
         self._last_sent = markdown_body
+        markdown = ALFRED_PREFIX_MD + markdown_body if with_prefix else markdown_body
         try:
             await self._bot.send_rich_message_draft(
                 chat_id=self._chat_id,
                 draft_id=self._draft_id,
-                rich_message=InputRichMessage(markdown=ALFRED_PREFIX_MD + markdown_body),
+                rich_message=InputRichMessage(markdown=markdown),
                 message_thread_id=self._message_thread_id,
             )
         except TelegramAPIError as exc:
@@ -100,8 +108,10 @@ class RichStreamSession:
         "заменяется сообщением" бесплатно, без отдельной логики очистки.
 
         ``text`` — обычный текст без разметки, курсив оборачивается
-        здесь же (единая точка форматирования, не на стороне вызывающего)."""
-        await self._push_draft(f"_{text}_")
+        здесь же (единая точка форматирования, не на стороне вызывающего).
+        Без ALFRED_PREFIX_MD — фраза уже называет Альфреда сама (см.
+        _push_draft про дубль имени)."""
+        await self._push_draft(f"_{text}_", with_prefix=False)
 
     async def finalize(self, raw: str, reply_to_message_id: int | None = None) -> Message | None:
         """Персистит настоящий ответ Альфреда — с ретраем на 429

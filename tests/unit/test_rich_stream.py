@@ -105,13 +105,15 @@ async def test_on_partial_swallows_telegram_errors():
     assert bot.drafts == []
 
 
-async def test_push_status_wraps_in_italics():
+async def test_push_status_wraps_in_italics_without_alfred_prefix():
+    # Живой баг 2026-08-10: фраза сама называет Альфреда в третьем лице —
+    # ALFRED_PREFIX_MD дублировал бы имя ("Альфред: Альфред сёрфит...").
     bot = FakeBot()
     session = RichStreamSession(bot, chat_id=1)
 
     await session.push_status("Альфред проверяет погоду")
 
-    assert bot.drafts[0]["markdown"] == ALFRED_PREFIX_MD + "_Альфред проверяет погоду_"
+    assert bot.drafts[0]["markdown"] == "_Альфред проверяет погоду_"
 
 
 async def test_push_status_dedups_consecutive_identical_status():
@@ -123,8 +125,8 @@ async def test_push_status_dedups_consecutive_identical_status():
     await session.push_status("Альфред сёрфит")
 
     assert [d["markdown"] for d in bot.drafts] == [
-        ALFRED_PREFIX_MD + "_Альфред думает_",
-        ALFRED_PREFIX_MD + "_Альфред сёрфит_",
+        "_Альфред думает_",
+        "_Альфред сёрфит_",
     ]
 
 
@@ -132,11 +134,11 @@ async def test_push_status_and_on_partial_share_dedup_state():
     bot = FakeBot()
     session = RichStreamSession(bot, chat_id=1)
 
-    await session.push_status("текст")  # обёрнуто в _текст_
+    await session.push_status("текст")  # обёрнуто в _текст_, без префикса
     await session.on_partial("текст", done=False)  # другая обёртка — не дедупится
 
     assert [d["markdown"] for d in bot.drafts] == [
-        ALFRED_PREFIX_MD + "_текст_",
+        "_текст_",
         ALFRED_PREFIX_MD + "текст",
     ]
 
