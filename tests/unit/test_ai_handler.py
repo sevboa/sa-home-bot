@@ -702,7 +702,7 @@ async def test_on_private_photo_denied_without_right(store):
 async def test_on_private_voice_records_transcript_and_calls_ai_flow(store, monkeypatch):
     seen_history = []
 
-    async def fake_transcribe(message, node_link, store_, config):
+    async def fake_transcribe(message, node_link, store_, config, rich_session):
         return "привет альфред, как дела"
 
     async def fake_request(
@@ -730,7 +730,7 @@ async def test_on_private_voice_records_transcript_and_calls_ai_flow(store, monk
 
 
 async def test_on_private_voice_none_transcript_declines_without_asking_model(store, monkeypatch):
-    async def fake_transcribe(message, node_link, store_, config):
+    async def fake_transcribe(message, node_link, store_, config, rich_session):
         # voice_stt уже отправила пользователю вежливый текст сама.
         return None
 
@@ -772,7 +772,7 @@ async def test_on_ai_reply_with_voice_calls_ai_flow_with_transcript(store, monke
     reply_to = FakeMessage(1, chat_type="private")
     reply_to.message_id = 500
 
-    async def fake_transcribe(message, node_link, store_, config):
+    async def fake_transcribe(message, node_link, store_, config, rich_session):
         return "продолжаю голосом"
 
     seen_history = []
@@ -803,7 +803,7 @@ async def test_on_ai_reply_with_voice_none_transcript_sends_nothing_extra(store,
     reply_to = FakeMessage(1, chat_type="private")
     reply_to.message_id = 500
 
-    async def fake_transcribe(message, node_link, store_, config):
+    async def fake_transcribe(message, node_link, store_, config, rich_session):
         return None
 
     async def fail_request(*args, **kwargs):

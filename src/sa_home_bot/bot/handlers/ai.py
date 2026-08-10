@@ -247,7 +247,7 @@ async def cmd_ai(
 
     await _ask_and_reply(
         message, node_link, store, config, book, notifier, dialogue_id, history,
-        active_ai_chats, tool_calls,
+        active_ai_chats, tool_calls, _rich_session_for(message, config),
     )
 
 
@@ -271,6 +271,10 @@ async def on_ai_reply(
     if subscription is None or not subscription.allows_command(right):
         return
     text = (message.text or "").strip()
+    # Считается один раз на весь ход и делится между голосовым статусом
+    # (см. _handle_voice_message) и финальным ответом Альфреда ниже — общий
+    # черновик, не два независимых (см. докстринг _ask_and_reply).
+    rich_session = _rich_session_for(message, config)
 
     if message.photo:
         # Живая находка 2026-08-10 (мультимодальный /ai): раньше фото-реплай
@@ -286,7 +290,9 @@ async def on_ai_reply(
         # Голосовой ответ в уже начатом треде — voice_stt сама шлёт вежливый
         # текст на любой отказ (слишком длинное/недоступно/не расслышал), в
         # отличие от фото-ветки выше здесь не нужен отдельный текст на месте.
-        history = await _handle_voice_message(message, store, config, node_link, ai_dialogue_id)
+        history = await _handle_voice_message(
+            message, store, config, node_link, ai_dialogue_id, rich_session
+        )
         if history is None:
             return
     elif text:
@@ -317,7 +323,7 @@ async def on_ai_reply(
 
     await _ask_and_reply(
         message, node_link, store, config, book, notifier, ai_dialogue_id, history,
-        active_ai_chats, tool_calls,
+        active_ai_chats, tool_calls, rich_session,
     )
 
 
@@ -365,7 +371,7 @@ async def on_private_message(
 
     await _ask_and_reply(
         message, node_link, store, config, book, notifier, dialogue_id, history,
-        active_ai_chats, tool_calls,
+        active_ai_chats, tool_calls, _rich_session_for(message, config),
     )
 
 
@@ -395,7 +401,7 @@ async def on_private_photo(
 
     await _ask_and_reply(
         message, node_link, store, config, book, notifier, dialogue_id, history,
-        active_ai_chats, tool_calls,
+        active_ai_chats, tool_calls, _rich_session_for(message, config),
     )
 
 
@@ -419,13 +425,19 @@ async def on_private_voice(
     # без топика и без reply — всегда новый тред, продолжить можно реплаем
     # (AiReplyContinuation).
     dialogue_id = _dialogue_id_for(message)
-    history = await _handle_voice_message(message, store, config, node_link, dialogue_id)
+    # Одна сессия на весь ход — статус "слушаю" во время распознавания и
+    # финальный ответ Альфреда делят один и тот же черновик (см. докстринг
+    # _ask_and_reply).
+    rich_session = _rich_session_for(message, config)
+    history = await _handle_voice_message(
+        message, store, config, node_link, dialogue_id, rich_session
+    )
     if history is None:
         return
 
     await _ask_and_reply(
         message, node_link, store, config, book, notifier, dialogue_id, history,
-        active_ai_chats, tool_calls,
+        active_ai_chats, tool_calls, rich_session,
     )
 
 
@@ -467,7 +479,7 @@ async def on_group_mention(
 
     await _ask_and_reply(
         message, node_link, store, config, book, notifier, dialogue_id, history,
-        active_ai_chats, tool_calls,
+        active_ai_chats, tool_calls, _rich_session_for(message, config),
     )
 
 
@@ -504,6 +516,7 @@ async def start_dialogue(
         [{"role": "user", "content": prompt}],
         active_ai_chats,
         tool_calls,
+        _rich_session_for(message, config),
     )
 
 
@@ -563,6 +576,7 @@ async def _handle_voice_message(
     config: Settings,
     node_link: ServiceLink,
     dialogue_id: int,
+    rich_session: RichStreamSession | None,
 ) -> list[dict[str, Any]] | None:
     """Распознать голосовое (voice_stt.transcribe_voice_message), записать
     транскрипт как обычную user-реплику в ai_turns, собрать history.
@@ -571,10 +585,16 @@ async def _handle_voice_message(
     транскрипт УЖЕ обычный текст, отдельного маркера/поля в ai_turns не
     нужно (в отличие от PHOTO_MARKER/photo_path).
 
+    ``rich_session`` — та же сессия, что пойдёт в финальный ``_ask_and_reply``
+    (см. вызывающих): статус "слушаю" во время распознавания и финальный
+    ответ Альфреда должны делить один и тот же черновик.
+
     ``None`` — voice_stt уже отправила пользователю вежливый текст (слишком
     длинное/недоступно/не расслышал), вызывающий не должен звать модель.
     """
-    transcript = await voice_stt.transcribe_voice_message(message, node_link, store, config)
+    transcript = await voice_stt.transcribe_voice_message(
+        message, node_link, store, config, rich_session
+    )
     if transcript is None:
         return None
 
@@ -605,6 +625,7 @@ async def _ask_and_reply(
     history: list[dict[str, Any]],
     active_ai_chats: ai_flow.ActiveAiChats,
     tool_calls: ToolCalls,
+    rich_session: RichStreamSession | None,
 ) -> str | None:
     """Текст ответа Альфреда, если он реально уехал в чат, иначе None.
 
@@ -613,6 +634,13 @@ async def _ask_and_reply(
     надо убедиться, что в приветствии есть обещанная подсказка про меню.
     Обычным путям (/alfred, реплай, личка) результат не нужен, они его
     игнорируют.
+
+    ``rich_session`` — уже разрешённая вызывающим (``_rich_session_for``)
+    сессия (``None`` вне rich-режима). Голосовым путям (см.
+    ``_handle_voice_message``) нужна ОДНА сессия на весь ход: статус
+    "слушаю" во время распознавания и финальный ответ Альфреда должны
+    делить один и тот же черновик, а не создавать два независимых —
+    поэтому сессия резолвится у вызывающего, а не здесь заново.
     """
     # Регистрация задачи (не просто chat_id — см. докстринг ActiveAiChats,
     # второй заход) на время запроса: bot/app.py::_shutdown() перед разрывом
@@ -625,7 +653,8 @@ async def _ask_and_reply(
     active_ai_chats.register(chat_id, task)
     try:
         return await _do_ask_and_reply(
-            message, node_link, store, config, book, notifier, dialogue_id, history, tool_calls
+            message, node_link, store, config, book, notifier, dialogue_id, history, tool_calls,
+            rich_session,
         )
     finally:
         active_ai_chats.unregister(chat_id, task)
@@ -641,6 +670,7 @@ async def _do_ask_and_reply(
     dialogue_id: int,
     history: list[dict[str, Any]],
     tool_calls: ToolCalls,
+    rich_session: RichStreamSession | None,
 ) -> str | None:
     # typing-индикатор (keep-alive, пока модель реально готовит ответ) —
     # внутри ai_flow.request_alfred, вокруг самого вызова модели (не здесь и
@@ -657,10 +687,10 @@ async def _do_ask_and_reply(
     # ниже — см. ai_flow.SpeechRemarkBox про то, почему не сразу.
     speech_remark = ai_flow.SpeechRemarkBox()
     # Этап 34, Фаза 2: rich_session — не None только при response_mode="rich"
-    # (config.llm), используется ниже для финальной отправки в любом чате.
+    # (config.llm) — используется ниже для финальной отправки в любом чате;
+    # уже разрешена вызывающим (см. докстринг _ask_and_reply про почему).
     # Стрим-черновики (on_partial в request_alfred) — только в приватных
     # чатах, см. _rich_session_for.
-    rich_session = _rich_session_for(message, config)
     is_private = message.chat is not None and message.chat.type == "private"
     try:
         raw = await ai_flow.request_alfred(
