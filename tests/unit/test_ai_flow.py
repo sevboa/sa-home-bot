@@ -12,6 +12,7 @@ import pytest_asyncio
 
 from sa_home_bot import llm_chat
 from sa_home_bot.bot import ai_flow, wake_state
+from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.config import LlmConfig, PersonConfig, Settings
 from sa_home_bot.db.connection import Database
@@ -180,6 +181,21 @@ class FakeNodeLink:
         if isinstance(result, Exception):
             raise result
         return result
+
+
+class FakeRichSession:
+    """Двойник bot/rich_stream.py::RichStreamSession — только то, что видит
+    ai_flow.py (push_status/on_partial), без реального draft/Bot API."""
+
+    def __init__(self) -> None:
+        self.statuses: list[str] = []
+        self.partials: list[tuple[str, bool]] = []
+
+    async def push_status(self, text: str) -> None:
+        self.statuses.append(text)
+
+    async def on_partial(self, text: str, done: bool) -> None:
+        self.partials.append((text, done))
 
 
 def _settings() -> Settings:
@@ -525,6 +541,31 @@ async def test_escalates_to_thinking_when_marker_returned(store):
     assert persona_args["messages"][-1] == {"role": "user", "content": "сложный вопрос"}
 
 
+async def test_escalates_to_thinking_uses_rich_status_not_plain_message(store):
+    # rich_session передан (приватный чат + response_mode="rich") — THINKING_
+    # TEXT идёт курсивной строкой в тот же черновик, а не отдельным
+    # сообщением (см. ai_flow.py::THINKING_TEXT_PLAIN).
+    message = FakeMessage()
+    rich_session = FakeRichSession()
+    link = FakeNodeLink(
+        chat_results=[
+            {"response": f"кое-что... {ai_flow.THINK_MARKER}"},
+            {"response": "Точный ответ после раздумий"},
+        ],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "сложный вопрос"}], 1,
+        _admin_book(), FakeNotifier(),
+        rich_session=rich_session,
+    )
+
+    assert raw == "Точный ответ после раздумий"
+    assert message.answers == []
+    assert rich_session.statuses == [ai_flow.THINKING_TEXT_PLAIN]
+
+
 async def test_implicit_think_style_omits_flag_instead_of_true(store):
     # think_style="implicit" (LlmConfig): моделям, которые на явный
     # think=true отвечают 400, «думать» выражается ОТСУТСТВИЕМ флага — они
@@ -567,6 +608,28 @@ async def test_asleep_model_shows_steps_but_no_wake(store):
     assert raw == "Секунду, сэг"
     assert message.answers == [ai_flow.STEPS_TEXT]
     assert link.wol_sent == []  # узел был доступен — будить не нужно
+
+
+async def test_asleep_model_shows_steps_via_rich_status_not_plain_message(store):
+    # Тот же сценарий, что test_asleep_model_shows_steps_but_no_wake, но с
+    # rich_session — STEPS_TEXT идёт в черновик курсивом (push_status), а не
+    # отдельным message.answer (см. ai_flow.py::_announce_steps).
+    message = FakeMessage()
+    rich_session = FakeRichSession()
+    link = FakeNodeLink(
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Секунду, сэг"}],
+        get_state_routes={"mycraft:llm": {"asleep": True}},
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
+        _admin_book(), FakeNotifier(),
+        rich_session=rich_session,
+    )
+
+    assert raw == "Секунду, сэг"
+    assert message.answers == []
+    assert rich_session.statuses == [ai_flow.STEPS_TEXT_PLAIN]
 
 
 async def test_asleep_warmup_fails_answers_as_albert_not_generic_error(store):
@@ -1162,6 +1225,75 @@ async def test_other_tools_do_not_announce_surfing(store):
     )
 
     assert ai_flow.SURFING_TEXT not in message.answers
+
+
+# --- курсивная "бегущая строка" на каждый тул в rich-пути (2026-08-10):
+# в отличие от SURFING_TEXT выше (фолбэк, один раз за запрос, только
+# web_search), это для ВСЕХ тулов, без гейтинга, до выполнения тула ---
+
+
+async def test_tool_status_pushed_for_every_call_when_rich_session_present(store):
+    """rich-путь: статус пушится в черновик на КАЖДЫЙ вызов тула, не
+    отдельным сообщением (RichStreamSession._last_sent сам дедупит
+    одинаковые подряд — см. ai_flow.py::_announce_tool_start)."""
+    message = FakeMessage()
+    rich_session = FakeRichSession()
+    link = FakeNodeLink(
+        chat_results=[
+            {"tool_calls": [_search_call("первый")]},
+            {"response": ai_flow.ROUTE_OK},
+            {"tool_calls": [_search_call("второй")]},
+            {"response": "Вот что нашёл, сэг"},
+        ],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "что нового?"}], 1,
+        _admin_book(), FakeNotifier(),
+        rich_session=rich_session,
+    )
+
+    assert raw == "Вот что нашёл, сэг"
+    assert ai_flow.SURFING_TEXT not in message.answers  # фолбэк-путь не сработал
+    assert rich_session.statuses == [ai_flow.TOOL_STATUS_TEXT["web_search"]] * 2
+
+
+async def test_tool_status_uses_per_tool_phrase(store):
+    message = FakeMessage()
+    rich_session = FakeRichSession()
+    link = FakeNodeLink(
+        chat_results=[
+            {"tool_calls": [{"function": {"name": "calc", "arguments": {"expression": "2+2"}}}]},
+            {"response": ai_flow.ROUTE_OK},
+            {"response": "Четыге"},
+        ],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+    )
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "2+2"}], 1,
+        _admin_book(), FakeNotifier(),
+        rich_session=rich_session,
+    )
+
+    assert rich_session.statuses == [ai_flow.TOOL_STATUS_TEXT["calc"]]
+
+
+def test_tool_status_default_fallback_for_unmapped_tool():
+    assert (
+        ai_flow.TOOL_STATUS_TEXT.get("future_tool", ai_flow.TOOL_STATUS_DEFAULT)
+        == ai_flow.TOOL_STATUS_DEFAULT
+    )
+
+
+def test_tool_status_covers_every_registered_tool():
+    # Защита от будущего тула, который забудут дописать в TOOL_STATUS_TEXT —
+    # не упадёт (TOOL_STATUS_DEFAULT), но лучше поймать на тесте, чем в проде.
+    admin = Subscription(chat_id=1, name="admin", allowed_commands=frozenset({"*"}))
+    toolkit = ai_tools.tools_for(admin)
+    missing = set(toolkit.handlers) - set(ai_flow.TOOL_STATUS_TEXT)
+    assert missing == set()
 
 
 # --- нет права на поиск => прямое указание не выдумывать (2026-07-27) ---

@@ -57,23 +57,19 @@ class RichStreamSession:
         self._draft_id = random.randint(1, 2**31 - 1)
         self._last_sent: str | None = None
 
-    async def on_partial(self, text: str, done: bool) -> None:
-        """Колбэк для llm_chat.py::run_chat_loop(on_partial=...).
-
-        ``done`` игнорируется здесь: финализация идёт отдельным вызовом
-        finalize() с уже постобработанным текстом (strip_math_notation +
-        SpeechTherapist, llm/service.py), не с последним куском стрима —
-        превью может чуть разойтись с финальным текстом в последний
-        момент, это не проблема (черновик эфемерен, реальный текст в чат
-        уходит один раз через finalize)."""
-        if not text or text == self._last_sent:
+    async def _push_draft(self, markdown_body: str) -> None:
+        """Общая отправка черновика — дедуп по последнему отправленному
+        (не важно, статус это был или кусок настоящего ответа: одинаковый
+        текст дважды подряд не стоит второго round-trip'а), best-effort
+        (см. on_partial про то, почему потеря одного тика не критична)."""
+        if not markdown_body or markdown_body == self._last_sent:
             return
-        self._last_sent = text
+        self._last_sent = markdown_body
         try:
             await self._bot.send_rich_message_draft(
                 chat_id=self._chat_id,
                 draft_id=self._draft_id,
-                rich_message=InputRichMessage(markdown=ALFRED_PREFIX_MD + text),
+                rich_message=InputRichMessage(markdown=ALFRED_PREFIX_MD + markdown_body),
                 message_thread_id=self._message_thread_id,
             )
         except TelegramAPIError as exc:
@@ -83,6 +79,29 @@ class RichStreamSession:
             log.debug(
                 "rich_stream: не удалось обновить черновик (chat=%s): %s", self._chat_id, exc
             )
+
+    async def on_partial(self, text: str, done: bool) -> None:
+        """Колбэк для llm_chat.py::run_chat_loop(on_partial=...).
+
+        ``done`` игнорируется здесь: финализация идёт отдельным вызовом
+        finalize() с уже постобработанным текстом (strip_math_notation +
+        SpeechTherapist, llm/service.py), не с последним куском стрима —
+        превью может чуть разойтись с финальным текстом в последний
+        момент, это не проблема (черновик эфемерен, реальный текст в чат
+        уходит один раз через finalize)."""
+        await self._push_draft(text)
+
+    async def push_status(self, text: str) -> None:
+        """Курсивная "бегущая строка" (мышление/шаги/тул — bot/ai_flow.py)
+        в тот же черновик, что on_partial: эфемерная реплика, которую
+        сменит либо следующий статус, либо начало настоящего текста
+        ответа, либо finalize() — платформенная семантика черновика
+        (30-секундный превью, вытесняемый sendRichMessage) уже даёт
+        "заменяется сообщением" бесплатно, без отдельной логики очистки.
+
+        ``text`` — обычный текст без разметки, курсив оборачивается
+        здесь же (единая точка форматирования, не на стороне вызывающего)."""
+        await self._push_draft(f"_{text}_")
 
     async def finalize(self, raw: str, reply_to_message_id: int | None = None) -> Message | None:
         """Персистит настоящий ответ Альфреда — с ретраем на 429

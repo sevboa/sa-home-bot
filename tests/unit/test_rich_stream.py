@@ -105,6 +105,52 @@ async def test_on_partial_swallows_telegram_errors():
     assert bot.drafts == []
 
 
+async def test_push_status_wraps_in_italics():
+    bot = FakeBot()
+    session = RichStreamSession(bot, chat_id=1)
+
+    await session.push_status("Альфред проверяет погоду")
+
+    assert bot.drafts[0]["markdown"] == ALFRED_PREFIX_MD + "_Альфред проверяет погоду_"
+
+
+async def test_push_status_dedups_consecutive_identical_status():
+    bot = FakeBot()
+    session = RichStreamSession(bot, chat_id=1)
+
+    await session.push_status("Альфред думает")
+    await session.push_status("Альфред думает")  # не изменилось — пропуск
+    await session.push_status("Альфред сёрфит")
+
+    assert [d["markdown"] for d in bot.drafts] == [
+        ALFRED_PREFIX_MD + "_Альфред думает_",
+        ALFRED_PREFIX_MD + "_Альфред сёрфит_",
+    ]
+
+
+async def test_push_status_and_on_partial_share_dedup_state():
+    bot = FakeBot()
+    session = RichStreamSession(bot, chat_id=1)
+
+    await session.push_status("текст")  # обёрнуто в _текст_
+    await session.on_partial("текст", done=False)  # другая обёртка — не дедупится
+
+    assert [d["markdown"] for d in bot.drafts] == [
+        ALFRED_PREFIX_MD + "_текст_",
+        ALFRED_PREFIX_MD + "текст",
+    ]
+
+
+async def test_push_status_swallows_telegram_errors():
+    bot = FakeBot()
+    bot.draft_fails_times = 1
+    session = RichStreamSession(bot, chat_id=1)
+
+    await session.push_status("статус")  # не бросает
+
+    assert bot.drafts == []
+
+
 async def test_two_sessions_get_different_draft_ids():
     bot = FakeBot()
     a = RichStreamSession(bot, chat_id=1)

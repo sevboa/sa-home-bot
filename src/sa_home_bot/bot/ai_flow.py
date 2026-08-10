@@ -115,6 +115,11 @@ LLM_SERVICE = "llm"
 ALFRED_TIMEZONE = "Europe/Bucharest"
 
 STEPS_TEXT = "<i>Вы слышите приближающиеся шаги...</i>"
+# Тот же текст без HTML — для курсивной "бегущей строки" в rich-черновике
+# (bot/rich_stream.py::push_status оборачивает сам). Две строки рядом, не
+# общий html→markdown хелпер — риск расхождения виден с одного взгляда
+# (в отличие от think_style, разъехавшегося по трём разным файлам).
+STEPS_TEXT_PLAIN = "Вы слышите приближающиеся шаги..."
 ARNOLD_WAKING = "<b>Агнольд:</b> Сейчас Альфред подойдёт"
 ALBERT_UNAVAILABLE = (
     "<b>Альбегт:</b> К сожалению Альфреда нет на месте, попробуйте позже, сэр/мадам"
@@ -230,14 +235,47 @@ _PRESENCE_CHECK_TIMEOUT_S = wake_core.PRESENCE_TIMEOUT_S
 # пользователь явно попросил лаконичную реплику в духе персонажа, не
 # техническое "думаю...".
 THINKING_TEXT = "<i>На лице Альфреда проступает задумчивость</i>"
+THINKING_TEXT_PLAIN = "На лице Альфреда проступает задумчивость"
 # Поход в интернет (тул web_search) — самый долгий из инструментов не сам по
 # себе (SearXNG отвечает за ~1.5 с), а потому что модель делает несколько
 # поисков подряд, переформулируя запрос, и между ними думает: живой замер
 # 2026-07-27 — три минуты от вопроса до ответа. Без этой строки такая пауза
 # читается как зависший бот. Шлётся ОДИН раз за запрос, по первому же
 # web_search (см. _record_tool_call), а не на каждый поиск.
+#
+# Это — фолбэк-путь (группы, response_mode="typing_plain"): плейсхолдер
+# persist-ится обычным сообщением, поэтому его нельзя слать на каждый вызов
+# тула — заспамит чат. В rich-пути (см. TOOL_STATUS_TEXT/_announce_tool_start
+# ниже) ограничение другое: черновик эфемерен, и дедуп уже в
+# RichStreamSession._last_sent — гейтинг "один раз за запрос" там не нужен.
 SURFING_TEXT = "<i>Альфред увлечённо сёрфит интернет...</i>"
 SURFING_TOOL = "web_search"
+
+# Курсивная "бегущая строка" в rich-черновике на каждый вызов тула (этап 34,
+# живая находка 2026-08-10) — в отличие от SURFING_TEXT выше, это работает
+# для ВСЕХ тулов сразу, не только web_search, и показывается ДО выполнения
+# (см. llm_chat.py::ToolStartSink), а не после. TOOL_STATUS_DEFAULT — на
+# случай, если тул добавят и забудут дописать сюда фразу.
+TOOL_STATUS_TEXT: dict[str, str] = {
+    "calc": "Альфред мысленно щёлкает костяшками счётов",
+    "get_weather": "Альфред выглядывает в окно, прикидывая погоду",
+    "convert_currency": "Альфред листает вчерашние котировки",
+    "get_time": "Альфред сверяется с карманными часами",
+    "remind": "Альфред делает пометку в своём блокноте",
+    "swarm_status": "Альфред обходит дозором домашние машины",
+    "swarm_events": "Альфред листает журнал происшествий",
+    "node_manage": "Альфред возится с рычагами в подсобке",
+    "torrents": "Альфред заглядывает в качалку",
+    "dismiss": "Альфред неспешно собирается",
+    "memory": "Альфред роется в своих записях",
+    "vpn": "Альфред готовит потайной ход",
+    "web_search": "Альфред увлечённо сёрфит интернет",
+    "tell": "Альфред отправляется с поручением",
+    "notify_persona": "Альфред выбирает, от чьего имени говорить",
+    "notify_guest": "Альфред составляет официальное объявление",
+    "guests_list": "Альфред сверяется со списком гостей",
+}
+TOOL_STATUS_DEFAULT = "Альфред что-то мастерит за кулисами"
 
 # --- роспуск («ты свободен», тул dismiss) ---------------------------------
 #
@@ -792,11 +830,16 @@ async def request_alfred(
             await notify_tool_call(
                 book, notifier, name, args=call_args, result=result, debug=tool_calls
             )
-            if name == SURFING_TOOL and not surfing_announced:
+            if rich_session is None and name == SURFING_TOOL and not surfing_announced:
                 # Флаг — в области request_alfred, а не _ask: пересборка
                 # ответа после пробуждения ноды не должна слать вставку
                 # повторно. Колбэк общий для router- и персонажного прохода,
                 # поэтому без флага строк было бы несколько на один запрос.
+                #
+                # Только фолбэк (rich_session is None): в rich-пути статус
+                # тула уже показан заранее через _announce_tool_start ниже
+                # (до выполнения, для всех тулов, без гейтинга — см.
+                # TOOL_STATUS_TEXT про то, почему там гейтинг не нужен).
                 surfing_announced.append(True)
                 await message.answer(SURFING_TEXT)
             if telegram_chat_id is None:
@@ -814,6 +857,17 @@ async def request_alfred(
         async def _record_speech_remark(remark: str) -> None:
             if speech_remark is not None:
                 speech_remark.text = remark
+
+        async def _announce_tool_start(name: str, call_args: dict[str, Any]) -> None:
+            # Только rich-путь — фолбэк (группы/typing_plain) продолжает
+            # получать SURFING_TEXT постфактум через _record_tool_call выше,
+            # без изменений. Здесь гейтинг "один раз за запрос" не нужен:
+            # RichStreamSession._last_sent сам гасит подряд идущие
+            # одинаковые статусы, а разные тулы подряд должны показать обе
+            # фразы по очереди — это и есть след рассуждения.
+            if rich_session is None:
+                return
+            await rich_session.push_status(TOOL_STATUS_TEXT.get(name, TOOL_STATUS_DEFAULT))
 
         if settings.llm.mode == "single_call":
             # Режимы работы с моделью — LlmConfig.mode (config.py). Роутеру
@@ -837,6 +891,7 @@ async def request_alfred(
                 on_tool_call=_record_tool_call,
                 on_speech_remark=_record_speech_remark,
                 on_partial=rich_session.on_partial if rich_session is not None else None,
+                on_tool_start=_announce_tool_start,
             )
 
         # Вариативное рассуждение (см. комментарий выше про THINK_MARKER):
@@ -856,6 +911,7 @@ async def request_alfred(
             telegram_chat_id=telegram_chat_id,
             log_chat_id=chat_id,
             on_tool_call=_record_tool_call,
+            on_tool_start=_announce_tool_start,
             role="router",
         )
         needs_think = THINK_MARKER in route_decision
@@ -866,7 +922,10 @@ async def request_alfred(
         )
 
         if needs_think:
-            await message.answer(THINKING_TEXT)
+            if rich_session is not None:
+                await rich_session.push_status(THINKING_TEXT_PLAIN)
+            else:
+                await message.answer(THINKING_TEXT)
         # Чем выражается «надо думать» — config.resolve_think/LlmConfig.
         # think_style. Общая функция, не вручную здесь: живая находка
         # 2026-08-10 — та же логика, списанная вручную и в bot/tools.py
@@ -899,7 +958,18 @@ async def request_alfred(
             on_tool_call=_record_tool_call,
             on_speech_remark=_record_speech_remark,
             on_partial=rich_session.on_partial if rich_session is not None else None,
+            on_tool_start=_announce_tool_start,
         )
+
+    async def _announce_steps() -> None:
+        # Три точки вызова ниже — presence-проверка, молчаливый wake,
+        # пробуждение контейнера — общий хелпер, чтобы rich/фолбэк-ветка не
+        # разъехалась по трём копиям (тот же класс бага, что think_style,
+        # разошедшийся по трём файлам — см. живую находку 2026-08-10 выше).
+        if rich_session is not None:
+            await rich_session.push_status(STEPS_TEXT_PLAIN)
+        else:
+            await message.answer(STEPS_TEXT)
 
     # Узнать заранее, не спит ли модель (idle-таймер llm/service.py) — если
     # да, предупредить о прогреве СРАЗУ, а не оставлять пользователя молча
@@ -916,7 +986,7 @@ async def request_alfred(
         state = None
         known_unavailable = True  # презумпция: раз даже get_state не достучался — недоступна
     if state is not None and state.get("asleep"):
-        await message.answer(STEPS_TEXT)
+        await _announce_steps()
         steps_shown = True
         asleep_warmup = True
 
@@ -943,7 +1013,7 @@ async def request_alfred(
     # --- недоступна: шаги (если ещё не показали) -> молчаливый wake -> poll
     # до WAKE_POLL_TIMEOUT_S -> Агнольд/Альбегт ---
     if not steps_shown:
-        await message.answer(STEPS_TEXT)
+        await _announce_steps()
     outcome = await wake_swarm_node_core(node_link, store, LLM_NODE)
     became_available = outcome.ok and await swarm_view.wait_for_service(
         node_link, LLM_NODE, LLM_SERVICE, WAKE_POLL_TIMEOUT_S, WAKE_POLL_INTERVAL_S
@@ -958,7 +1028,7 @@ async def request_alfred(
     # провалится — это уже шаги Альбегта (см. ALBERT_ASLEEP ниже), не
     # переиспользуем первое сообщение, чтобы сюжетно оба провала были у
     # разных персонажей, а успех — молча «оказывается, шёл Агнольд».
-    await message.answer(STEPS_TEXT)
+    await _announce_steps()
     try:
         async with _typing_while_asking(message):
             return await _ask()

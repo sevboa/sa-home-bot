@@ -55,6 +55,14 @@ MAX_TOOL_ROUNDS = 5
 # передаёт — см. schema.sql::ai_tool_calls).
 ToolCallSink = Callable[[str, dict[str, Any], str], Awaitable[None]]
 
+# (имя тула, аргументы) — вызывается ПЕРЕД хендлером тула (в отличие от
+# ToolCallSink выше, который зовётся после, с результатом — для durable-
+# записи). Живая находка 2026-08-10: пользователь захотел, чтобы статусная
+# фраза ("Альфред проверяет погоду...") появлялась, пока тул реально
+# выполняется, а не постфактум — для медленных тулов (web_search, torrents)
+# постфактум-уведомление не даёт ощущения "происходит прямо сейчас".
+ToolStartSink = Callable[[str, dict[str, Any]], Awaitable[None]]
+
 # Ремарка «Логопеда» (llm/speech_therapy.py) на финальный текстовый ответ —
 # отдельно от response, чтобы вызывающий мог отправить её отдельным
 # сообщением ПОСЛЕ ответа Альфреда (решение пользователя 2026-08-03: раньше
@@ -119,6 +127,7 @@ async def run_chat_loop(
     on_speech_remark: SpeechRemarkSink | None = None,
     role: str | None = None,
     on_partial: PartialSink | None = None,
+    on_tool_start: ToolStartSink | None = None,
 ) -> str:
     """Один проход диалога с моделью: раунды tool-calling (до
     MAX_TOOL_ROUNDS), пока не придёт финальный текст.
@@ -151,7 +160,12 @@ async def run_chat_loop(
     служба tasks). Передан — каждый раунд идёт со своим request_id и
     параллельным опросом chat_progress (см. _poll_partial выше), колбэк
     зовётся на каждый тик текущего раунда; какой из раундов в итоге
-    персистится как настоящий ответ — решает вызывающий, не этот цикл."""
+    персистится как настоящий ответ — решает вызывающий, не этот цикл.
+
+    ``on_tool_start`` — уведомление ДО выполнения тула (имя, аргументы),
+    в отличие от ``on_tool_call`` (после, с результатом — durable-запись).
+    Чистый side-effect, ничего не блокирует и не меняет; не зовётся для
+    неизвестного модели тула (там и выполнять нечего)."""
     tool_ctx.history = messages
     # Комплект собирается ОДИН раз на проход и по правам собеседника: тула, на
     # который у него нет прав, модель не видит вовсе (см. bot/tools.py::
@@ -210,6 +224,8 @@ async def run_chat_loop(
             if handler is None:
                 tool_result = f"неизвестный инструмент: {name}"
             else:
+                if on_tool_start is not None:
+                    await on_tool_start(name, call_args)
                 try:
                     tool_result = await handler(tool_ctx, call_args)
                 except Exception as exc:  # noqa: BLE001 — сбой тула не должен ронять диалог
