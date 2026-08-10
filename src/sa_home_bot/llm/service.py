@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import logging
 import socket
 from collections.abc import Awaitable, Callable
@@ -26,7 +27,7 @@ from typing import Any
 
 from sa_home_bot import __version__
 from sa_home_bot.config import LlmConfig, Settings
-from sa_home_bot.llm import ollama, vision
+from sa_home_bot.llm import ollama, stt, vision
 from sa_home_bot.llm.prompt import (
     DEFAULT_PERSONA_PROMPT,
     ROUTER_SYSTEM_PROMPT,
@@ -107,6 +108,18 @@ ACTION_WARMUP = "warmup"
 # ресайз заново и без пересылки байт между узлами — файл уже здесь.
 ACTION_LOOK_AT_PHOTO = "look_at_photo"
 
+# Голосовые сообщения /ai (см. llm/stt.py) — тот же принцип, что у фото:
+# alfred шлёт сырые байты, эта нода их обрабатывает (faster-whisper на CPU,
+# не Ollama/Gemma). ACTION_TRANSCRIBE_VOICE — основной путь: голосовое
+# целиком одним base64-блобом в args (короткие сообщения). Для длинных
+# голосовых, которые после base64 не влезают в протокольный лимит, сначала
+# идут чанки ACTION_STT_UPLOAD_CHUNK (bot/voice_stt.py::_upload_chunked, по
+# образцу vpn/service.py::ACTION_APK_CHUNK, но в обратном направлении —
+# push, не pull), потом сам ACTION_TRANSCRIBE_VOICE уже без audio_b64, с
+# session_id вместо него.
+ACTION_TRANSCRIBE_VOICE = "transcribe_voice"
+ACTION_STT_UPLOAD_CHUNK = "stt_chunk"
+
 # Отказы фото-путей намеренно возвращаются как обычный {"response": ...}, а
 # не отдельным полем-ошибкой: для ACTION_CHAT это просто ложится в ai_turns
 # как обычная реплика Альфреда (ai.py не должен знать про фото-специфику),
@@ -141,6 +154,12 @@ _IDLE_CHECK_INTERVAL_S = 60.0
 # запись подметается в idle_loop — иначе self._streaming растёт без предела,
 # если бот упал/переподключился посреди опроса и так и не дочитал ответ.
 _STREAMING_ENTRY_TTL_S = 120.0
+# Осиротевшие сессии чанкованной загрузки голосового (клиент прервался
+# посреди отправки — упал, потерял связь) — иначе self._stt_uploads растёт
+# без предела. Короче _STREAMING_ENTRY_TTL_S: там довершённый ответ ждёт
+# отставшего опроса бота, здесь — недовершённая загрузка, которую всё равно
+# нечем продолжить (offset начался бы заново).
+_STT_UPLOAD_TTL_S = 300.0
 
 EventEmitter = Callable[[str, dict[str, Any]], Awaitable[None]]
 
@@ -190,6 +209,11 @@ class LlmService:
         # request_id -> {"partial": str, "done": bool, "done_at": datetime | None}
         # (этап 34, Фаза 2 — см. ACTION_CHAT_PROGRESS выше).
         self._streaming: dict[str, dict[str, Any]] = {}
+        # session_id -> накопленные байты чанкованной загрузки голосового
+        # (см. ACTION_STT_UPLOAD_CHUNK/ACTION_TRANSCRIBE_VOICE выше) и время
+        # последнего чанка (для TTL-очистки осиротевших сессий, idle_loop).
+        self._stt_uploads: dict[str, bytearray] = {}
+        self._stt_upload_touched: dict[str, datetime] = {}
 
     def describe(self) -> ServiceDescription:
         return ServiceDescription(
@@ -284,6 +308,69 @@ class LlmService:
                             type="int",
                             required=False,
                             title="Chat, откуда пришёл запрос (для логопеда/llm_idle_sleep)",
+                        ),
+                    ),
+                ),
+                ActionSpec(
+                    id=ACTION_TRANSCRIBE_VOICE,
+                    title="Распознать голосовое сообщение",
+                    params=(
+                        ActionParam(
+                            name="audio_b64",
+                            type="string",
+                            required=False,
+                            title="Аудио целиком, base64 (короткие сообщения)",
+                        ),
+                        ActionParam(
+                            name="session_id",
+                            type="string",
+                            required=False,
+                            title=(
+                                "Сессия чанкованной загрузки (длинные сообщения) — "
+                                "вместо audio_b64, см. ACTION_STT_UPLOAD_CHUNK"
+                            ),
+                        ),
+                        ActionParam(
+                            name="expected_size",
+                            type="int",
+                            required=False,
+                            title="Ожидаемый размер байт (проверка чанкованной загрузки)",
+                        ),
+                        ActionParam(
+                            name="expected_sha256",
+                            type="string",
+                            required=False,
+                            title="sha256 байт (проверка чанкованной загрузки)",
+                        ),
+                        ActionParam(
+                            name="chat_id",
+                            type="int",
+                            required=False,
+                            title="Chat, откуда пришёл запрос",
+                        ),
+                    ),
+                ),
+                ActionSpec(
+                    id=ACTION_STT_UPLOAD_CHUNK,
+                    title="Загрузить кусок голосового сообщения (для длинных)",
+                    params=(
+                        ActionParam(
+                            name="session_id",
+                            type="string",
+                            required=True,
+                            title="Идентификатор сессии загрузки",
+                        ),
+                        ActionParam(
+                            name="offset",
+                            type="int",
+                            required=True,
+                            title="Смещение куска в байтах (текущая длина буфера)",
+                        ),
+                        ActionParam(
+                            name="data_b64",
+                            type="string",
+                            required=True,
+                            title="Кусок аудио, base64",
                         ),
                     ),
                 ),
@@ -470,6 +557,70 @@ class LlmService:
             if remark is not None:
                 out["speech_remark"] = remark
             return out
+        if action == ACTION_STT_UPLOAD_CHUNK:
+            session_id = args.get("session_id")
+            offset = args.get("offset")
+            data_b64 = args.get("data_b64")
+            if not isinstance(session_id, str) or not session_id:
+                raise ProtoError(ERR_BAD_REQUEST, "session_id должен быть непустой строкой")
+            if not isinstance(offset, int) or isinstance(offset, bool):
+                raise ProtoError(ERR_BAD_REQUEST, "offset должен быть целым числом")
+            if not isinstance(data_b64, str):
+                raise ProtoError(ERR_BAD_REQUEST, "data_b64 должен быть строкой")
+            buf = self._stt_uploads.setdefault(session_id, bytearray())
+            if offset != len(buf):
+                raise ProtoError(
+                    ERR_BAD_REQUEST, f"неожиданный offset: {offset}, ожидался {len(buf)}"
+                )
+            try:
+                chunk = base64.b64decode(data_b64, validate=True)
+            except Exception as exc:
+                raise ProtoError(ERR_BAD_REQUEST, "data_b64 не является валидным base64") from exc
+            buf.extend(chunk)
+            self._stt_upload_touched[session_id] = datetime.now(tz=UTC)
+            return {"received": len(buf)}
+        if action == ACTION_TRANSCRIBE_VOICE:
+            audio_b64 = args.get("audio_b64")
+            session_id = args.get("session_id")
+            if isinstance(audio_b64, str) and audio_b64:
+                try:
+                    raw_bytes = base64.b64decode(audio_b64, validate=True)
+                except Exception as exc:
+                    raise ProtoError(
+                        ERR_BAD_REQUEST, "audio_b64 не является валидным base64"
+                    ) from exc
+            elif isinstance(session_id, str) and session_id:
+                buf = self._stt_uploads.pop(session_id, None)
+                self._stt_upload_touched.pop(session_id, None)
+                if buf is None:
+                    raise ProtoError(
+                        ERR_BAD_REQUEST, f"неизвестная сессия загрузки: {session_id}"
+                    )
+                raw_bytes = bytes(buf)
+                expected_size = args.get("expected_size")
+                if isinstance(expected_size, int) and expected_size != len(raw_bytes):
+                    raise ProtoError(
+                        ERR_BAD_REQUEST,
+                        f"размер не совпал: получено {len(raw_bytes)}, ожидалось {expected_size}",
+                    )
+                expected_sha256 = args.get("expected_sha256")
+                if isinstance(expected_sha256, str) and expected_sha256:
+                    if hashlib.sha256(raw_bytes).hexdigest() != expected_sha256:
+                        raise ProtoError(
+                            ERR_BAD_REQUEST, "загруженные данные не прошли проверку sha256"
+                        )
+            else:
+                raise ProtoError(ERR_BAD_REQUEST, "нужен либо audio_b64, либо session_id")
+            if not raw_bytes:
+                raise ProtoError(ERR_BAD_REQUEST, "пустое аудио")
+            chat_id = args.get("chat_id")
+            await self._touch(chat_id)
+            try:
+                transcript = await stt.transcribe_voice(raw_bytes, self._cfg)
+            except Exception:
+                log.warning("stt: не удалось распознать голосовое сообщение", exc_info=True)
+                transcript = ""
+            return {"transcript": transcript}
         if action == ACTION_CHAT_PROGRESS:
             request_id = args.get("request_id")
             if not isinstance(request_id, str) or not request_id:
@@ -539,6 +690,17 @@ class LlmService:
         for rid in stale:
             del self._streaming[rid]
 
+    def _sweep_stt_uploads(self) -> None:
+        now = datetime.now(tz=UTC)
+        stale = [
+            sid
+            for sid, touched in self._stt_upload_touched.items()
+            if (now - touched).total_seconds() >= _STT_UPLOAD_TTL_S
+        ]
+        for sid in stale:
+            self._stt_uploads.pop(sid, None)
+            self._stt_upload_touched.pop(sid, None)
+
     async def _emit_speech_cured(self) -> None:
         try:
             await self._emit(EVENT_SPEECH_CURED, {})
@@ -606,3 +768,4 @@ class LlmService:
             await asyncio.sleep(_IDLE_CHECK_INTERVAL_S)
             await self._maybe_sleep_idle()
             self._sweep_streaming()
+            self._sweep_stt_uploads()

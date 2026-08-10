@@ -68,7 +68,7 @@ class FakeMessage:
 
     def __init__(
         self, chat_id, text=None, reply_to=None, chat_type="private", entities=None,
-        message_thread_id=None, photo=None, caption=None,
+        message_thread_id=None, photo=None, caption=None, voice=None,
     ):
         self.chat = FakeChat(chat_id, type=chat_type)
         self.message_id = FakeMessage._next_id
@@ -76,6 +76,7 @@ class FakeMessage:
         self.text = text
         self.caption = caption
         self.photo = photo
+        self.voice = voice
         self.reply_to_message = reply_to
         self.entities = entities
         self.message_thread_id = message_thread_id
@@ -696,6 +697,131 @@ async def test_on_private_photo_denied_without_right(store):
     assert message.sent == []
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert rows == []
+
+
+async def test_on_private_voice_records_transcript_and_calls_ai_flow(store, monkeypatch):
+    seen_history = []
+
+    async def fake_transcribe(message, node_link, store_, config):
+        return "привет альфред, как дела"
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None, speech_remark=None, rich_session=None
+    ):
+        seen_history.append(history)
+        return "Добрый день, сэр"
+
+    monkeypatch.setattr(ai_handler.voice_stt, "transcribe_voice_message", fake_transcribe)
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, voice="voice-obj", chat_type="private")
+
+    await ai_handler.on_private_voice(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
+    )
+
+    assert seen_history == [[{"role": "user", "content": "привет альфред, как дела"}]]
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    assert [r["role"] for r in rows] == ["user", "assistant"]
+    assert rows[0]["content"] == "привет альфред, как дела"
+
+
+async def test_on_private_voice_none_transcript_declines_without_asking_model(store, monkeypatch):
+    async def fake_transcribe(message, node_link, store_, config):
+        # voice_stt уже отправила пользователю вежливый текст сама.
+        return None
+
+    async def fail_request(*args, **kwargs):
+        raise AssertionError("без транскрипта не должно уходить в request_alfred")
+
+    monkeypatch.setattr(ai_handler.voice_stt, "transcribe_voice_message", fake_transcribe)
+    monkeypatch.setattr(ai_flow, "request_alfred", fail_request)
+    message = FakeMessage(1, voice="voice-obj", chat_type="private")
+
+    await ai_handler.on_private_voice(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
+    )
+
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    assert rows == []  # ничего не записано — как у фото при отказе
+
+
+async def test_on_private_voice_denied_without_right(store):
+    message = FakeMessage(1, voice="voice-obj", chat_type="private")
+
+    await ai_handler.on_private_voice(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), subscription=_sub(),
+    )
+
+    assert message.sent == []
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    assert rows == []
+
+
+async def test_on_ai_reply_with_voice_calls_ai_flow_with_transcript(store, monkeypatch):
+    await store.record_ai_turn(1, 500, 500, "assistant", "начало треда", _now())
+    reply_to = FakeMessage(1, chat_type="private")
+    reply_to.message_id = 500
+
+    async def fake_transcribe(message, node_link, store_, config):
+        return "продолжаю голосом"
+
+    seen_history = []
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None, speech_remark=None, rich_session=None
+    ):
+        seen_history.append(history)
+        return "Слушаю, сэр"
+
+    monkeypatch.setattr(ai_handler.voice_stt, "transcribe_voice_message", fake_transcribe)
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, voice="voice-obj", reply_to=reply_to, chat_type="private")
+
+    await ai_handler.on_ai_reply(
+        message, ai_dialogue_id=500, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
+    )
+
+    assert seen_history[0][-1] == {"role": "user", "content": "продолжаю голосом"}
+
+
+async def test_on_ai_reply_with_voice_none_transcript_sends_nothing_extra(store, monkeypatch):
+    await store.record_ai_turn(1, 500, 500, "assistant", "начало треда", _now())
+    reply_to = FakeMessage(1, chat_type="private")
+    reply_to.message_id = 500
+
+    async def fake_transcribe(message, node_link, store_, config):
+        return None
+
+    async def fail_request(*args, **kwargs):
+        raise AssertionError("без транскрипта не должно уходить в request_alfred")
+
+    monkeypatch.setattr(ai_handler.voice_stt, "transcribe_voice_message", fake_transcribe)
+    monkeypatch.setattr(ai_flow, "request_alfred", fail_request)
+    message = FakeMessage(1, voice="voice-obj", reply_to=reply_to, chat_type="private")
+
+    await ai_handler.on_ai_reply(
+        message, ai_dialogue_id=500, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
+    )
+
+    rows = await store.ai_turns_for_dialogue(1, 500)
+    assert [r["role"] for r in rows] == ["assistant"]  # только затравка, ничего не добавилось
 
 
 async def test_on_ai_reply_with_photo_caption_is_not_lost_as_empty_reply(store, monkeypatch):

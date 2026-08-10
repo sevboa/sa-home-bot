@@ -35,7 +35,7 @@ from aiogram import Router
 from aiogram.filters import Command, Filter
 from aiogram.types import Message
 
-from sa_home_bot.bot import ai_flow, commands
+from sa_home_bot.bot import ai_flow, commands, voice_stt
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.notifier import Notifier, chunk_text
 from sa_home_bot.bot.rich_stream import RichStreamSession
@@ -167,6 +167,15 @@ class PrivateChatPhoto(Filter):
         return message.chat is not None and message.chat.type == "private" and bool(message.photo)
 
 
+class PrivateChatVoice(Filter):
+    """Голосовое сообщение первым сообщением в личке — как PrivateChatPhoto,
+    но для message.voice. Реплай в уже начатый тред голосовым сюда не
+    попадает — тот перехватывается AiReplyContinuation."""
+
+    async def __call__(self, message: Message) -> bool:
+        return message.chat is not None and message.chat.type == "private" and bool(message.voice)
+
+
 class GroupMention(Filter):
     """Упоминание бота через @username в группе — единственный неявный
     триггер там (в отличие от личек группа шумная, отвечать на каждое
@@ -273,6 +282,13 @@ async def on_ai_reply(
         if history is None:
             await message.answer(PHOTO_TOO_LARGE_TEXT)
             return
+    elif message.voice:
+        # Голосовой ответ в уже начатом треде — voice_stt сама шлёт вежливый
+        # текст на любой отказ (слишком длинное/недоступно/не расслышал), в
+        # отличие от фото-ветки выше здесь не нужен отдельный текст на месте.
+        history = await _handle_voice_message(message, store, config, node_link, ai_dialogue_id)
+        if history is None:
+            return
     elif text:
         now = datetime.now(tz=UTC)
         sender = message.from_user
@@ -375,6 +391,36 @@ async def on_private_photo(
     history = await _handle_photo_message(message, store, config, dialogue_id)
     if history is None:
         await message.answer(PHOTO_TOO_LARGE_TEXT)
+        return
+
+    await _ask_and_reply(
+        message, node_link, store, config, book, notifier, dialogue_id, history,
+        active_ai_chats, tool_calls,
+    )
+
+
+@catchall_router.message(PrivateChatVoice())
+async def on_private_voice(
+    message: Message,
+    node_link: ServiceLink,
+    store: Store,
+    config: Settings,
+    book: SubscriptionBook,
+    notifier: Notifier,
+    active_ai_chats: ai_flow.ActiveAiChats,
+    tool_calls: ToolCalls,
+    subscription: Subscription | None = None,
+) -> None:
+    right = commands.required_right(commands.ALFRED.name)
+    if subscription is None or not subscription.allows_command(right):
+        return
+
+    # Та же логика нового треда, что у on_private_message/on_private_photo:
+    # без топика и без reply — всегда новый тред, продолжить можно реплаем
+    # (AiReplyContinuation).
+    dialogue_id = _dialogue_id_for(message)
+    history = await _handle_voice_message(message, store, config, node_link, dialogue_id)
+    if history is None:
         return
 
     await _ask_and_reply(
@@ -509,6 +555,43 @@ async def _handle_photo_message(
             "raw_image": photo_b64,
         }
     return history
+
+
+async def _handle_voice_message(
+    message: Message,
+    store: Store,
+    config: Settings,
+    node_link: ServiceLink,
+    dialogue_id: int,
+) -> list[dict[str, Any]] | None:
+    """Распознать голосовое (voice_stt.transcribe_voice_message), записать
+    транскрипт как обычную user-реплику в ai_turns, собрать history.
+
+    В отличие от ``_handle_photo_message``, картинка тут ни при чём —
+    транскрипт УЖЕ обычный текст, отдельного маркера/поля в ai_turns не
+    нужно (в отличие от PHOTO_MARKER/photo_path).
+
+    ``None`` — voice_stt уже отправила пользователю вежливый текст (слишком
+    длинное/недоступно/не расслышал), вызывающий не должен звать модель.
+    """
+    transcript = await voice_stt.transcribe_voice_message(message, node_link, store, config)
+    if transcript is None:
+        return None
+
+    now = datetime.now(tz=UTC)
+    sender = message.from_user
+    await store.record_ai_turn(
+        message.chat.id,
+        message.message_id,
+        dialogue_id,
+        "user",
+        transcript,
+        now,
+        user_id=sender.id if sender else None,
+        user_name=ai_flow.display_name(sender),
+    )
+    history_rows = await store.ai_turns_for_dialogue(message.chat.id, dialogue_id)
+    return [{"role": r["role"], "content": r["content"]} for r in history_rows if r["content"]]
 
 
 async def _ask_and_reply(

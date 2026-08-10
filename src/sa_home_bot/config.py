@@ -492,6 +492,23 @@ class LlmConfig(BaseModel):
     # запускается не чаще раза в сутки при сохранении нового фото, отдельный
     # периодический планировщик под это заводить избыточно.
     photo_ttl_days: int = Field(default=30, gt=0)
+    # Голосовые сообщения /ai: распознавание тоже на стороне службы llm (не
+    # бота), как и фото, но CPU-движком faster-whisper — не Ollama/Gemma:
+    # аудио-вход Gemma 4 через Ollama на практике сломан (галлюцинации,
+    # минуты обработки секунд аудио — живая находка при выборе архитектуры
+    # 2026-08-10). CPU, не GPU: V100 занята основной моделью почти под
+    # завязку (15.4 из 16.4 ГБ при загрузке), второй модели там просто нет
+    # места без выгрузки первой — а Xeon E5-2678 v3 (12 ядер/24 потока)
+    # справляется сам, не трогая VRAM вовсе. См. llm/stt.py.
+    stt_model_size: str = "medium"  # tiny/base/small/medium/large-v3/distil-large-v3
+    stt_compute_type: str = "int8"  # квантизация CPU-инференса faster-whisper
+    stt_cpu_threads: int = Field(default=8, gt=0)
+    stt_language: str = "ru"
+    # Длиннее — вежливый отказ ДО скачивания и похода в рой (bot/voice_stt.py).
+    stt_max_duration_s: float = Field(default=600.0, gt=0)
+    stt_request_timeout_s: float = Field(default=300.0, gt=0)
+    stt_tmp_dir: Path = Path("./data/stt-tmp")
+    stt_model_dir: Path = Path("./data/stt-models")
 
 
 def resolve_think(llm: LlmConfig, *, needs_think: bool) -> bool | None:

@@ -225,6 +225,21 @@ photo_max_edge_px = 896
 photo_jpeg_quality = 80
 photo_ttl_days = 30
 
+# Голосовые сообщения /ai: распознавание — faster-whisper на CPU этой же
+# ноды (не Ollama/Gemma, см. LlmConfig в config.py), устанавливается extras-
+# группой "stt" (pipx install "sa-home-bot[stt] @ ..."). Актуально только
+# там, где физически запущена служба llm с сильным CPU (сейчас mycraft,
+# Xeon E5-2678 v3, 12 ядер/24 потока) — на слабых нодах (alfred) секция
+# просто не используется, служба llm там не назначена.
+stt_model_size = "medium"
+stt_compute_type = "int8"
+stt_cpu_threads = 8
+stt_language = "ru"
+stt_max_duration_s = 600.0
+stt_request_timeout_s = 300.0
+stt_tmp_dir = "./data/stt-tmp"
+stt_model_dir = "./data/stt-models"
+
 # Текст персонажа — намеренно НЕ в этом файле и не в config.toml: слишком
 # личный/объёмный, чтобы жить среди обычных настроек. Заполняется отдельным
 # локальным файлом llm-prompt.toml РЯДОМ с config.toml (тот же каталог) —

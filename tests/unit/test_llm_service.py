@@ -48,6 +48,8 @@ def test_describe_declares_ask_chat_sleep_warmup():
         "ask",
         "chat",
         "look_at_photo",
+        "transcribe_voice",
+        "stt_chunk",
         "chat_progress",
         "sleep",
         "warmup",
@@ -363,6 +365,176 @@ async def test_look_at_photo_rejects_missing_args():
         await svc.run_command("look_at_photo", {"question": "что там?"})
     with pytest.raises(ProtoError):
         await svc.run_command("look_at_photo", {"photo_key": "x"})
+
+
+# --- голосовые сообщения /ai (распознавание — faster-whisper на CPU,
+# см. llm/stt.py; здесь stt.transcribe_voice замокан целиком — своя логика
+# проверяется отдельно в test_llm_stt.py, здесь только обвязка протокола) ---
+
+
+def _b64(raw: bytes) -> str:
+    import base64
+
+    return base64.b64encode(raw).decode()
+
+
+def _sha256_hex(raw: bytes) -> str:
+    import hashlib
+
+    return hashlib.sha256(raw).hexdigest()
+
+
+async def test_transcribe_voice_inline_calls_stt_and_returns_transcript(monkeypatch):
+    seen = {}
+
+    async def fake_transcribe(raw_bytes, cfg):
+        seen["raw_bytes"] = raw_bytes
+        return "привет альфред"
+
+    monkeypatch.setattr(llm_service.stt, "transcribe_voice", fake_transcribe)
+    svc = LlmService(_settings())
+    result = await svc.run_command(
+        "transcribe_voice", {"audio_b64": _b64(b"raw-ogg-bytes"), "chat_id": 1}
+    )
+    assert result == {"transcript": "привет альфред"}
+    assert seen["raw_bytes"] == b"raw-ogg-bytes"
+
+
+async def test_transcribe_voice_requires_audio_or_session():
+    svc = LlmService(_settings())
+    with pytest.raises(ProtoError) as excinfo:
+        await svc.run_command("transcribe_voice", {})
+    assert excinfo.value.code == ERR_BAD_REQUEST
+
+
+async def test_transcribe_voice_rejects_bad_base64():
+    svc = LlmService(_settings())
+    with pytest.raises(ProtoError) as excinfo:
+        await svc.run_command("transcribe_voice", {"audio_b64": "не-base64!!!"})
+    assert excinfo.value.code == ERR_BAD_REQUEST
+
+
+async def test_transcribe_voice_rejects_empty_audio():
+    svc = LlmService(_settings())
+    with pytest.raises(ProtoError) as excinfo:
+        await svc.run_command("transcribe_voice", {"audio_b64": _b64(b"")})
+    assert excinfo.value.code == ERR_BAD_REQUEST
+
+
+async def test_transcribe_voice_swallows_stt_exception_returns_empty_transcript(monkeypatch):
+    async def fake_transcribe(raw_bytes, cfg):
+        raise RuntimeError("модель упала")
+
+    monkeypatch.setattr(llm_service.stt, "transcribe_voice", fake_transcribe)
+    svc = LlmService(_settings())
+    result = await svc.run_command("transcribe_voice", {"audio_b64": _b64(b"x")})
+    assert result == {"transcript": ""}
+
+
+async def test_stt_upload_chunk_appends_and_returns_received_length():
+    svc = LlmService(_settings())
+    result = await svc.run_command(
+        "stt_chunk", {"session_id": "s1", "offset": 0, "data_b64": _b64(b"part1")}
+    )
+    assert result == {"received": 5}
+    result = await svc.run_command(
+        "stt_chunk", {"session_id": "s1", "offset": 5, "data_b64": _b64(b"part2")}
+    )
+    assert result == {"received": 10}
+    assert bytes(svc._stt_uploads["s1"]) == b"part1part2"
+
+
+async def test_stt_upload_chunk_rejects_wrong_offset():
+    svc = LlmService(_settings())
+    await svc.run_command(
+        "stt_chunk", {"session_id": "s1", "offset": 0, "data_b64": _b64(b"part1")}
+    )
+    with pytest.raises(ProtoError) as excinfo:
+        await svc.run_command(
+            "stt_chunk", {"session_id": "s1", "offset": 999, "data_b64": _b64(b"x")}
+        )
+    assert excinfo.value.code == ERR_BAD_REQUEST
+
+
+async def test_stt_upload_chunk_rejects_bad_base64():
+    svc = LlmService(_settings())
+    with pytest.raises(ProtoError):
+        await svc.run_command(
+            "stt_chunk", {"session_id": "s1", "offset": 0, "data_b64": "не-base64!!!"}
+        )
+
+
+async def test_transcribe_voice_from_chunked_session_verifies_integrity(monkeypatch):
+    seen = {}
+
+    async def fake_transcribe(raw_bytes, cfg):
+        seen["raw_bytes"] = raw_bytes
+        return "длинное голосовое"
+
+    monkeypatch.setattr(llm_service.stt, "transcribe_voice", fake_transcribe)
+    svc = LlmService(_settings())
+    raw = b"chast1chast2"
+    await svc.run_command(
+        "stt_chunk", {"session_id": "s1", "offset": 0, "data_b64": _b64(b"chast1")}
+    )
+    await svc.run_command(
+        "stt_chunk", {"session_id": "s1", "offset": len(b"chast1"), "data_b64": _b64(b"chast2")}
+    )
+    result = await svc.run_command(
+        "transcribe_voice",
+        {
+            "session_id": "s1",
+            "expected_size": len(raw),
+            "expected_sha256": _sha256_hex(raw),
+        },
+    )
+    assert result == {"transcript": "длинное голосовое"}
+    assert seen["raw_bytes"] == raw
+    # Сессия одноразовая — использована и убрана из буфера.
+    assert "s1" not in svc._stt_uploads
+
+
+async def test_transcribe_voice_session_size_mismatch_rejected():
+    svc = LlmService(_settings())
+    await svc.run_command("stt_chunk", {"session_id": "s1", "offset": 0, "data_b64": _b64(b"abc")})
+    with pytest.raises(ProtoError) as excinfo:
+        await svc.run_command(
+            "transcribe_voice", {"session_id": "s1", "expected_size": 999}
+        )
+    assert excinfo.value.code == ERR_BAD_REQUEST
+
+
+async def test_transcribe_voice_session_sha256_mismatch_rejected():
+    svc = LlmService(_settings())
+    await svc.run_command("stt_chunk", {"session_id": "s1", "offset": 0, "data_b64": _b64(b"abc")})
+    with pytest.raises(ProtoError) as excinfo:
+        await svc.run_command(
+            "transcribe_voice", {"session_id": "s1", "expected_sha256": "0" * 64}
+        )
+    assert excinfo.value.code == ERR_BAD_REQUEST
+
+
+async def test_transcribe_voice_unknown_session_rejected():
+    svc = LlmService(_settings())
+    with pytest.raises(ProtoError) as excinfo:
+        await svc.run_command("transcribe_voice", {"session_id": "нет-такой"})
+    assert excinfo.value.code == ERR_BAD_REQUEST
+
+
+async def test_sweep_stt_uploads_evicts_only_stale_sessions():
+    svc = LlmService(_settings())
+    now = datetime.now(tz=UTC)
+    svc._stt_uploads["stale"] = bytearray(b"old")
+    svc._stt_upload_touched["stale"] = now - timedelta(
+        seconds=llm_service._STT_UPLOAD_TTL_S + 1
+    )
+    svc._stt_uploads["fresh"] = bytearray(b"new")
+    svc._stt_upload_touched["fresh"] = now - timedelta(seconds=1)
+
+    svc._sweep_stt_uploads()
+
+    assert set(svc._stt_uploads) == {"fresh"}
+    assert set(svc._stt_upload_touched) == {"fresh"}
 
 
 # --- request_id / chat_progress (этап 34, Фаза 2 — Rich-стрим ответов) ---
