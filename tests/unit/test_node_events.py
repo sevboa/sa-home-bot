@@ -8,14 +8,21 @@ event_types opt-in — Логопед долечил Альфреда, долж�
 
 from unittest.mock import ANY
 
+from aiogram.types import InputRichBlockThinking
+
 from sa_home_bot.bot.ai_flow import (
     ALBERT_ASLEEP,
+    ALBERT_ASLEEP_MD,
     ALBERT_TASK_MISSED,
+    ALBERT_TASK_MISSED_MD,
     ALBERT_UNAVAILABLE,
+    ALBERT_UNAVAILABLE_MD,
     ARNOLD_WAKING,
+    ARNOLD_WAKING_MD,
     CLOSING_TEXT,
     RESTART_TEXT,
     STEPS_TEXT,
+    STEPS_TEXT_PLAIN,
 )
 from sa_home_bot.bot.node_events import (
     EVENT_RESTART_APPLIED,
@@ -29,22 +36,65 @@ from sa_home_bot.bot.node_events import (
     render_speech_cured,
     render_update_finished,
 )
+from sa_home_bot.bot.rich_stream import ALFRED_PREFIX_MD
 from sa_home_bot.bot.tool_debug import ToolCalls
-from sa_home_bot.config import SubscriptionConfig
+from sa_home_bot.config import Settings, SubscriptionConfig
 from sa_home_bot.proto.messages import Address, make_event
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.tasks import protocol as task_protocol
 
 
-class FakeNotifier:
+class FakeBot:
+    """Тот же двойник, что и tests/unit/test_rich_stream.py::FakeBot —
+    свой экземпляр здесь, чтобы не тянуть тестовый модуль как зависимость."""
+
     def __init__(self) -> None:
+        self.drafts: list[dict] = []
+        self.sent: list[dict] = []
+        self._next_id = 1
+
+    async def send_rich_message_draft(
+        self, *, chat_id, draft_id, rich_message, message_thread_id=None
+    ):
+        self.drafts.append(
+            {
+                "chat_id": chat_id,
+                "draft_id": draft_id,
+                "markdown": rich_message.markdown,
+                "blocks": rich_message.blocks,
+                "message_thread_id": message_thread_id,
+            }
+        )
+        return True
+
+    async def send_rich_message(
+        self, *, chat_id, rich_message, reply_parameters=None, message_thread_id=None
+    ):
+        self.sent.append(
+            {
+                "chat_id": chat_id,
+                "markdown": rich_message.markdown,
+                "reply_parameters": reply_parameters,
+                "message_thread_id": message_thread_id,
+            }
+        )
+        msg_id = self._next_id
+        self._next_id += 1
+        return type("FakeSentMessage", (), {"message_id": msg_id})()
+
+
+class FakeNotifier:
+    def __init__(self, bot: FakeBot | None = None) -> None:
         self.sent: list[tuple[int, str]] = []
         # Отдельно — с reply_to_message_id/message_thread_id, для тестов
         # task_prewake/task_result (остальные тесты этого файла ими не
         # пользуются).
         self.sent_full: list[tuple[int, str, int | None, int | None]] = []
         self.reply_markups: list[object] = []
+        # Только для rich-тестов task_prewake/task_result (TaskRichSessions
+        # читает .bot) — остальные тесты этого файла его не трогают.
+        self.bot = bot
 
     async def send_direct(
         self,
@@ -533,6 +583,179 @@ async def test_task_result_ignores_non_llm_chat_kind():
     await handler(env)
 
     assert notifier.sent == []
+    assert store.recorded_turns == []
+
+
+# --- task_prewake/task_result: rich-путь (TaskRichSessions, живая находка
+# 2026-08-10, четвёртый заход) — та же RichStreamSession-механика, что у
+# живого /ai, а не отдельный plain-поток notifier.send_direct вперемешку с
+# ним. Тесты выше (без config=Settings()) проверяют, что старый
+# plain-фолбэк не тронут; здесь — что при rich включённом «шаги»/«Агнольд»/
+# «Альбегт»/итоговый ответ этой же задачи используют ОДИН и тот же
+# draft_id/сессию, без отдельных персистентных «шагов» и без второго
+# «Агнольда».
+
+
+async def test_task_prewake_waking_uses_rich_thinking_block_when_rich():
+    book, store = _book(), FakeStore()
+    bot = FakeBot()
+    notifier = FakeNotifier(bot)
+    handler = build_node_event_handler(book, notifier, store, config=Settings())
+    env = make_event(
+        task_protocol.EVENT_TASK_PREWAKE,
+        {"task_id": 1, "meta": _LLM_CHAT_META, "status": "waking"},
+        src=Address(node="alfred", service="tasks"),
+    )
+    await handler(env)
+
+    assert notifier.sent == []  # plain-путь не тронут
+    assert bot.drafts == [
+        {
+            "chat_id": 7,
+            "draft_id": ANY,
+            "markdown": None,
+            "blocks": [InputRichBlockThinking(text=STEPS_TEXT_PLAIN)],
+            "message_thread_id": None,
+        }
+    ]
+
+
+async def test_task_prewake_ready_replaces_same_draft_with_agnold():
+    book, store = _book(), FakeStore()
+    bot = FakeBot()
+    notifier = FakeNotifier(bot)
+    handler = build_node_event_handler(book, notifier, store, config=Settings())
+
+    for status in ("waking", "ready"):
+        await handler(
+            make_event(
+                task_protocol.EVENT_TASK_PREWAKE,
+                {"task_id": 1, "meta": _LLM_CHAT_META, "status": status},
+                src=Address(node="alfred", service="tasks"),
+            )
+        )
+
+    assert notifier.sent == []
+    assert len(bot.drafts) == 1  # ровно один черновик «шаги», не подменённый вторым
+    assert bot.sent == [
+        {
+            "chat_id": 7,
+            "markdown": ARNOLD_WAKING_MD,
+            "reply_parameters": None,
+            "message_thread_id": None,
+        }
+    ]
+
+
+async def test_task_prewake_failed_unreachable_uses_albert_unavailable_rich():
+    book, store = _book(), FakeStore()
+    bot = FakeBot()
+    notifier = FakeNotifier(bot)
+    handler = build_node_event_handler(book, notifier, store, config=Settings())
+
+    await handler(
+        make_event(
+            task_protocol.EVENT_TASK_PREWAKE,
+            {"task_id": 1, "meta": _LLM_CHAT_META, "status": "waking"},
+            src=Address(node="alfred", service="tasks"),
+        )
+    )
+    await handler(
+        make_event(
+            task_protocol.EVENT_TASK_PREWAKE,
+            {"task_id": 1, "meta": _LLM_CHAT_META, "status": "failed", "reason": "unreachable"},
+            src=Address(node="alfred", service="tasks"),
+        )
+    )
+
+    assert notifier.sent == []
+    assert bot.sent[0]["markdown"] == ALBERT_UNAVAILABLE_MD
+
+
+async def test_task_prewake_failed_warmup_uses_albert_asleep_rich():
+    book, store = _book(), FakeStore()
+    bot = FakeBot()
+    notifier = FakeNotifier(bot)
+    handler = build_node_event_handler(book, notifier, store, config=Settings())
+
+    await handler(
+        make_event(
+            task_protocol.EVENT_TASK_PREWAKE,
+            {"task_id": 1, "meta": _LLM_CHAT_META, "status": "waking"},
+            src=Address(node="alfred", service="tasks"),
+        )
+    )
+    await handler(
+        make_event(
+            task_protocol.EVENT_TASK_PREWAKE,
+            {"task_id": 1, "meta": _LLM_CHAT_META, "status": "failed", "reason": "warmup_failed"},
+            src=Address(node="alfred", service="tasks"),
+        )
+    )
+
+    assert notifier.sent == []
+    assert bot.sent[0]["markdown"] == ALBERT_ASLEEP_MD
+
+
+async def test_task_result_success_reuses_session_started_by_prewake():
+    # Живой сценарий (13:59 UTC, 2026-08-10): задача прогрелась и стала
+    # «ready» задолго до срока, «Агнольд» уже персистентен — итоговый ответ
+    # на самом сроке не должен снова показывать «шаги»/второго «Агнольда»,
+    # просто продолжает ту же сессию своим собственным персистентным
+    # сообщением.
+    book, store = _book(), FakeStore()
+    bot = FakeBot()
+    notifier = FakeNotifier(bot)
+    handler = build_node_event_handler(book, notifier, store, config=Settings())
+
+    for status in ("waking", "ready"):
+        await handler(
+            make_event(
+                task_protocol.EVENT_TASK_PREWAKE,
+                {"task_id": 1, "meta": _LLM_CHAT_META, "status": status},
+                src=Address(node="alfred", service="tasks"),
+            )
+        )
+    await handler(
+        make_event(
+            task_protocol.EVENT_TASK_RESULT,
+            {
+                "task_id": 1,
+                "meta": _LLM_CHAT_META,
+                "ok": True,
+                "result": {"response": "Полил цветы, сэр"},
+            },
+            src=Address(node="alfred", service="tasks"),
+        )
+    )
+
+    assert notifier.sent == []
+    assert len(bot.drafts) == 1  # ни одного лишнего черновика «шаги»
+    assert [s["markdown"] for s in bot.sent] == [
+        ARNOLD_WAKING_MD,
+        ALFRED_PREFIX_MD + "Полил цветы, сэр",
+    ]
+    assert bot.sent[1]["reply_parameters"].message_id == 501
+    assert len(store.recorded_turns) == 1
+
+
+async def test_task_result_failure_uses_albert_task_missed_rich_with_reply():
+    book, store = _book(), FakeStore()
+    bot = FakeBot()
+    notifier = FakeNotifier(bot)
+    handler = build_node_event_handler(book, notifier, store, config=Settings())
+
+    await handler(
+        make_event(
+            task_protocol.EVENT_TASK_RESULT,
+            {"task_id": 1, "meta": _LLM_CHAT_META, "ok": False, "error": "not warm"},
+            src=Address(node="alfred", service="tasks"),
+        )
+    )
+
+    assert notifier.sent == []
+    assert bot.sent[0]["markdown"] == ALBERT_TASK_MISSED_MD
+    assert bot.sent[0]["reply_parameters"].message_id == 501
     assert store.recorded_turns == []
 
 

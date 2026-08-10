@@ -168,12 +168,19 @@ class RichStreamSession:
             ALFRED_PREFIX_MD + raw.strip(), reply_to_message_id=reply_to_message_id
         )
 
-    async def finalize_status(self, markdown: str) -> Message | None:
+    async def finalize_status(
+        self, markdown: str, *, reply_to_message_id: int | None = None
+    ) -> Message | None:
         """Персистит реплику ДРУГОГО персонажа, не Альфреда (например
         Агнольда при пробуждении узла — bot/ai_flow.py) — без
-        ALFRED_PREFIX_MD (текст сам называет говорящего) и без
-        reply_parameters (не ответ на конкретное сообщение пользователя,
-        отдельная сюжетная реплика).
+        ALFRED_PREFIX_MD (текст сам называет говорящего). ``reply_to_
+        message_id`` по умолчанию не задан (не ответ на конкретное
+        сообщение, отдельная сюжетная реплика) — но служба tasks
+        (bot/node_events.py) передаёт его для «Альбегта» при провале
+        отложенной задачи: там реплика как раз ссылается на исходную
+        просьбу, которая могла прозвучать давно (задача самоплан на потом),
+        и явная стрелка-реплай в Telegram — единственная подсказка, к чему
+        она относится.
 
         Живая находка 2026-08-10 (третий заход): раньше такая реплика шла
         через message.answer() — совсем отдельный от rich-механики Bot API
@@ -184,4 +191,4 @@ class RichStreamSession:
         finalize()) вытесняет черновик той же сессии напрямую — без
         зазора, статус буквально подменяется репликой, при этом реплика
         остаётся в истории чата насовсем (в отличие от push_status)."""
-        return await self._send_persisted(markdown)
+        return await self._send_persisted(markdown, reply_to_message_id=reply_to_message_id)

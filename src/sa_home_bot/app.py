@@ -156,7 +156,12 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
         token=settings.swarm.token,
         display_name="нода",
         on_event=build_node_event_handler(
-            book, notifier, store, get_node_link=_get_node_link, tool_calls=tool_calls
+            book,
+            notifier,
+            store,
+            get_node_link=_get_node_link,
+            tool_calls=tool_calls,
+            config=settings,
         ),
         on_connected=_report_bot_ready,
     )

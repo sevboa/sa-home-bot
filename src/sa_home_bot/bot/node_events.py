@@ -57,18 +57,25 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sa_home_bot.bot import commands
 from sa_home_bot.bot.ai_flow import (
     ALBERT_ASLEEP,
+    ALBERT_ASLEEP_MD,
     ALBERT_TASK_MISSED,
+    ALBERT_TASK_MISSED_MD,
     ALBERT_UNAVAILABLE,
+    ALBERT_UNAVAILABLE_MD,
     ARNOLD_WAKING,
+    ARNOLD_WAKING_MD,
     CLOSING_TEXT,
     RESTART_TEXT,
     STEPS_TEXT,
+    STEPS_TEXT_PLAIN,
 )
 from sa_home_bot.bot.handlers.vpn import resolve_request_callback
 from sa_home_bot.bot.lifecycle import broadcast_all, broadcast_system, notify_tool_call
 from sa_home_bot.bot.notifier import Notifier, notify_admins
+from sa_home_bot.bot.rich_stream import RichStreamSession
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.tool_debug import ToolCalls
+from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.proto.messages import Address, Envelope, ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
@@ -117,7 +124,50 @@ def _format_alfred_reply(raw: str) -> str:
     return f"<b>Альфред:</b> {html.escape(raw.strip())}"
 
 
-async def _handle_task_prewake(notifier: Notifier, data: dict) -> None:
+class TaskRichSessions:
+    """Per-``task_id`` ``RichStreamSession`` — живая находка 2026-08-10
+    (четвёртый заход): живой /ai (bot/ai_flow.py) уже показывает «шаги»/
+    «Агнольд» thinking-блоками через RichStreamSession, но служба tasks
+    (self-scheduled remind/прогрев) слала те же реплики напрямую через
+    ``notifier.send_direct`` — обычным sendMessage, в обход rich-механики.
+    Когда отложенная задача будит ТУ ЖЕ ноду, что и одновременный живой
+    запрос в том же чате (например, случайное совпадение по времени —
+    задача сработала как раз тогда, когда собеседник сам написал Альфреду),
+    в чат летели два независимых, визуально несовместимых потока: rich
+    thinking-блок от одного источника и обычное персистентное сообщение от
+    другого, и оба свои «Агнольд»/«шаги» — гонка, а не дубль одного и того
+    же кода.
+
+    Здесь та же RichStreamSession на все состояния ОДНОЙ задачи (waking ->
+    ready/failed -> итоговый ответ или «Альбегт» из _handle_task_result) —
+    черновик подменяется репликой без разрыва (та же механика, что и
+    finalize_status() у живого /ai), а не только внутри одного вызова.
+    ``get()`` возвращает None, если rich выключен (response_mode !=
+    "rich") или task_id не передан — вызывающий код падает на старый
+    plain-путь (notifier.send_direct), как было раньше."""
+
+    def __init__(self, notifier: Notifier, config: Settings | None) -> None:
+        self._notifier = notifier
+        self._config = config
+        self._sessions: dict[int, RichStreamSession] = {}
+
+    def get(
+        self, task_id: int | None, chat_id: int, thread_id: int | None
+    ) -> RichStreamSession | None:
+        if task_id is None or self._config is None or self._config.llm.response_mode != "rich":
+            return None
+        session = self._sessions.get(task_id)
+        if session is None:
+            session = RichStreamSession(self._notifier.bot, chat_id, message_thread_id=thread_id)
+            self._sessions[task_id] = session
+        return session
+
+    def pop(self, task_id: int | None) -> None:
+        if task_id is not None:
+            self._sessions.pop(task_id, None)
+
+
+async def _handle_task_prewake(notifier: Notifier, data: dict, sessions: TaskRichSessions) -> None:
     meta = data.get("meta") or {}
     if meta.get("kind") != task_protocol.TASK_KIND_LLM_CHAT:
         return  # незнакомый вид задачи — доставлять/показывать нечего
@@ -129,14 +179,33 @@ async def _handle_task_prewake(notifier: Notifier, data: dict) -> None:
     # переписка (см. tool_remind — meta несёт message_thread_id, докстринг
     # Notifier.send_direct). None вне топика — как и было.
     thread_id = meta.get("message_thread_id")
+    task_id = data.get("task_id")
     status = data.get("status")
+    session = sessions.get(task_id, chat_id, thread_id)
     if status == "waking":
-        await notifier.send_direct(chat_id, STEPS_TEXT, message_thread_id=thread_id)
+        if session is not None:
+            await session.push_status(STEPS_TEXT_PLAIN)
+        else:
+            await notifier.send_direct(chat_id, STEPS_TEXT, message_thread_id=thread_id)
     elif status == "ready":
-        await notifier.send_direct(chat_id, ARNOLD_WAKING, message_thread_id=thread_id)
+        # Сессия НЕ закрывается здесь: тот же черновик/draft_id доедет и до
+        # итогового ответа задачи (или «Альбегта» при провале) в
+        # _handle_task_result ниже — единая нить статусов одной задачи, без
+        # промежуточных персистентных сообщений там, где следом сразу же
+        # приходит настоящий ответ.
+        if session is not None:
+            await session.finalize_status(ARNOLD_WAKING_MD)
+        else:
+            await notifier.send_direct(chat_id, ARNOLD_WAKING, message_thread_id=thread_id)
     elif status == "failed":
-        text = ALBERT_UNAVAILABLE if data.get("reason") == "unreachable" else ALBERT_ASLEEP
-        await notifier.send_direct(chat_id, text, message_thread_id=thread_id)
+        unreachable = data.get("reason") == "unreachable"
+        if session is not None:
+            md_text = ALBERT_UNAVAILABLE_MD if unreachable else ALBERT_ASLEEP_MD
+            await session.finalize_status(md_text)
+            sessions.pop(task_id)
+        else:
+            text = ALBERT_UNAVAILABLE if unreachable else ALBERT_ASLEEP
+            await notifier.send_direct(chat_id, text, message_thread_id=thread_id)
 
 
 async def _handle_deliver_message(notifier: Notifier, store: Store, data: dict) -> None:
@@ -185,7 +254,11 @@ async def _maybe_fire_event_waiter(get_node_link, node_id: str, event_type: str)
 
 
 async def _handle_task_result(
-    notifier: Notifier, store: Store, data: dict, book: SubscriptionBook | None = None
+    notifier: Notifier,
+    store: Store,
+    data: dict,
+    sessions: TaskRichSessions,
+    book: SubscriptionBook | None = None,
 ) -> None:
     # Очистка event_waiters (если была) — забота самой службы tasks
     # (tasks/service.py::_fire_one/_fire_now), не бота: у бота больше нет
@@ -201,13 +274,27 @@ async def _handle_task_result(
     # личного чата, а не в тот, откуда пришёл исходный запрос (см.
     # tool_remind — meta несёт message_thread_id).
     thread_id = meta.get("message_thread_id")
+    task_id = data.get("task_id")
+    # Та же сессия, что и у «шаги»/«Агнольд» этой задачи (TaskRichSessions,
+    # см. её докстринг) — если задача добралась досюда через rich-прогрев,
+    # итоговый ответ/«Альбегт» подменяет тот же черновик напрямую, без
+    # разрыва; get() создаст новую сессию, если досюда дошли без прогрева
+    # (нода не спала — see tasks/service.py::_prewake_one, "цель уже
+    # тёплая").
+    session = sessions.get(task_id, chat_id, thread_id)
     if not data.get("ok"):
-        await notifier.send_direct(
-            chat_id,
-            ALBERT_TASK_MISSED,
-            reply_to_message_id=trigger_message_id,
-            message_thread_id=thread_id,
-        )
+        if session is not None:
+            await session.finalize_status(
+                ALBERT_TASK_MISSED_MD, reply_to_message_id=trigger_message_id
+            )
+        else:
+            await notifier.send_direct(
+                chat_id,
+                ALBERT_TASK_MISSED,
+                reply_to_message_id=trigger_message_id,
+                message_thread_id=thread_id,
+            )
+        sessions.pop(task_id)
         # Пользователю — персонаж, админу — причина. Живой сбой 2026-07-30:
         # «Альбегт» был единственным следом провалившейся задачи, и разбор
         # свёлся к чтению логов трёх машин, включая Windows-службу.
@@ -220,12 +307,17 @@ async def _handle_task_result(
             )
         return
     raw = (data.get("result") or {}).get("response", "")
-    sent_id = await notifier.send_direct(
-        chat_id,
-        _format_alfred_reply(raw),
-        reply_to_message_id=trigger_message_id,
-        message_thread_id=thread_id,
-    )
+    if session is not None:
+        sent = await session.finalize(raw, reply_to_message_id=trigger_message_id)
+        sent_id = sent.message_id if sent is not None else None
+    else:
+        sent_id = await notifier.send_direct(
+            chat_id,
+            _format_alfred_reply(raw),
+            reply_to_message_id=trigger_message_id,
+            message_thread_id=thread_id,
+        )
+    sessions.pop(task_id)
     dialogue_id = meta.get("dialogue_id")
     if sent_id is not None and dialogue_id is not None:
         await store.record_ai_turn(
@@ -339,6 +431,7 @@ def build_node_event_handler(
     store: Store,
     get_node_link: Callable[[], ServiceLink | None] | None = None,
     tool_calls: ToolCalls | None = None,
+    config: Settings | None = None,
 ):
     """Callback для ServiceLink(node).on_event.
 
@@ -353,16 +446,24 @@ def build_node_event_handler(
     же процесс-локальный склад входа/выхода, что и у живого диалога — сама
     служба tasks Telegram не видит и кнопку нарисовать не может (живой баг
     2026-08-05, см. tasks/protocol.py::EVENT_TOOL_CALL).
+
+    ``config`` — нужен только «шагам»/«Агнольду»/«Альбегту» службы tasks
+    (TaskRichSessions выше, живая находка 2026-08-10, четвёртый заход):
+    без него (``None`` — как в большинстве тестов этого модуля, которым
+    rich не нужен) TaskRichSessions.get() всегда возвращает None, и код
+    падает на старый plain-путь (notifier.send_direct) — поведение не
+    меняется. Прод (app.py) всегда передаёт настоящий Settings.
     """
+    task_sessions = TaskRichSessions(notifier, config)
 
     async def handle(env: Envelope) -> None:
         name = env.payload.get("event")
         data = env.payload.get("data", {})
         if name == task_protocol.EVENT_TASK_PREWAKE:
-            await _handle_task_prewake(notifier, data)
+            await _handle_task_prewake(notifier, data, task_sessions)
             return
         if name == task_protocol.EVENT_TASK_RESULT:
-            await _handle_task_result(notifier, store, data, book)
+            await _handle_task_result(notifier, store, data, task_sessions, book)
             return
         if name == task_protocol.EVENT_DELIVER_MESSAGE:
             await _handle_deliver_message(notifier, store, data)

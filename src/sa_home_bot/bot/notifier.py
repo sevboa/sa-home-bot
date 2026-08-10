@@ -135,6 +135,15 @@ class Notifier:
     def __init__(self, bot: Bot) -> None:
         self._bot = bot
 
+    @property
+    def bot(self) -> Bot:
+        """Экземпляр aiogram Bot — нужен местам, которым нужна не сама
+        отправка обычного sendMessage (send_direct ниже), а другая механика
+        Bot API поверх того же бота (RichStreamSession, bot/rich_stream.py —
+        см. bot/node_events.py::_handle_task_prewake, где служба tasks шлёт
+        «шаги»/«Агнольд» тем же rich-путём, что и живой /ai)."""
+        return self._bot
+
     async def send_direct(
         self,
         chat_id: int,
