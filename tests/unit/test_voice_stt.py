@@ -35,10 +35,14 @@ class FakeBot:
     def __init__(self, payload: bytes) -> None:
         self.payload = payload
         self.download_calls = 0
+        self.typing_actions: list[int] = []
 
     async def download(self, voice: FakeVoice) -> io.BytesIO:
         self.download_calls += 1
         return io.BytesIO(self.payload)
+
+    async def send_chat_action(self, chat_id, action, message_thread_id=None) -> None:
+        self.typing_actions.append(chat_id)
 
 
 class FakeMessage:
@@ -46,6 +50,7 @@ class FakeMessage:
         self.voice = voice
         self.chat = FakeChat()
         self.bot = FakeBot(payload)
+        self.message_thread_id = None
         self.sent: list[str] = []
 
     async def answer(self, text: str, **kwargs) -> None:

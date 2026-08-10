@@ -19,6 +19,7 @@ import uuid
 from aiogram.types import Message
 
 from sa_home_bot import wake_core
+from sa_home_bot.bot.notifier import typing_action
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
@@ -93,15 +94,23 @@ async def transcribe_voice_message(
         await message.answer(VOICE_UNAVAILABLE_TEXT)
         return None
 
-    buf = await message.bot.download(voice)
-    raw = buf.read()
+    # "печатает..." на всё время скачивания+распознавания — та же индикация,
+    # что и для текстового ответа (bot/notifier.py::typing_action), иначе
+    # между "скачали голосовое" и готовым ответом пользователь не видит
+    # вообще никакой реакции, если mycraft уже не спала (VOICE_WAITING_TEXT
+    # выше показывается только на сам wake-сценарий).
+    async with typing_action(
+        message.bot, message.chat.id, message_thread_id=message.message_thread_id
+    ):
+        buf = await message.bot.download(voice)
+        raw = buf.read()
 
-    try:
-        transcript = await _transcribe(node_link, raw, message.chat.id, config)
-    except (ProtoError, ServiceUnavailableError, TimeoutError) as exc:
-        log.warning("voice_stt: не удалось распознать голосовое: %s", exc)
-        await message.answer(VOICE_UNAVAILABLE_TEXT)
-        return None
+        try:
+            transcript = await _transcribe(node_link, raw, message.chat.id, config)
+        except (ProtoError, ServiceUnavailableError, TimeoutError) as exc:
+            log.warning("voice_stt: не удалось распознать голосовое: %s", exc)
+            await message.answer(VOICE_UNAVAILABLE_TEXT)
+            return None
 
     if not transcript.strip():
         await message.answer(VOICE_RECOGNITION_FAILED_TEXT)
