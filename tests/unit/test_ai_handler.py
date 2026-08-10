@@ -104,6 +104,17 @@ class FakeMessage:
         return await self.answer(text)
 
 
+class FakeRichSession:
+    """Заглушка RichStreamSession — только push_status, для проверки
+    STICKER_LOOKING_TEXT_PLAIN (_handle_sticker_message)."""
+
+    def __init__(self) -> None:
+        self.statuses: list[str] = []
+
+    async def push_status(self, text: str) -> None:
+        self.statuses.append(text)
+
+
 class FakeNotifier:
     def __init__(self, *, send_voice_result: int | None = 42424) -> None:
         self.sent: list[tuple[int, str]] = []
@@ -964,6 +975,26 @@ async def test_on_private_sticker_without_emoji_uses_marker_only(store, monkeypa
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     user_row = next(r for r in rows if r["role"] == "user")
     assert user_row["content"] == ai_handler.STICKER_MARKER
+
+
+async def test_handle_sticker_message_pushes_looking_status_when_rich(store):
+    rich_session = FakeRichSession()
+    message = FakeMessage(
+        1, sticker=FakeSticker(emoji="😂", thumbnail="thumb1"), chat_type="private"
+    )
+
+    await ai_handler._handle_sticker_message(message, store, _plain_settings(), 999, rich_session)
+
+    assert rich_session.statuses == [ai_handler.STICKER_LOOKING_TEXT_PLAIN]
+
+
+async def test_handle_sticker_message_no_status_without_thumbnail(store):
+    rich_session = FakeRichSession()
+    message = FakeMessage(1, sticker=FakeSticker(emoji="😂", thumbnail=None), chat_type="private")
+
+    await ai_handler._handle_sticker_message(message, store, _plain_settings(), 999, rich_session)
+
+    assert rich_session.statuses == []
 
 
 async def test_on_private_sticker_denied_without_right(store):

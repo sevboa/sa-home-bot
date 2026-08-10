@@ -119,6 +119,13 @@ STICKER_PROMPT_NO_IMAGE = (
     "недоступна. Отреагируй на сам факт стикера с этим эмодзи — коротко, "
     "в характере, не выдумывай, что на нём изображено."
 )
+# Дешёвый статус-плейсхолдер (не настоящее размышление модели — то
+# зависит от роутера, THINK_MARKER, llm/prompt.py, и с картинками никак не
+# связано, проверено по логам mycraft 2026-08-11). Только rich-режим, как у
+# статусов тулов (ai_flow.py::_announce_tool_start) — без plain-фолбэка:
+# скачивание thumbnail — доли секунды, отдельное persist-сообщение в
+# typing_plain было бы просто мельканием перед самим ответом.
+STICKER_LOOKING_TEXT_PLAIN = "Альфред разглядывает стикер"
 
 
 def _format_answer(raw: str) -> str:
@@ -330,7 +337,9 @@ async def on_ai_reply(
     elif message.sticker:
         # В отличие от фото/голоса — тотальная функция, без отказа: у
         # стикера есть emoji-тег, есть на что реагировать даже без превью.
-        history = await _handle_sticker_message(message, store, config, ai_dialogue_id)
+        history = await _handle_sticker_message(
+            message, store, config, ai_dialogue_id, rich_session
+        )
     elif text:
         now = datetime.now(tz=UTC)
         sender = message.from_user
@@ -497,11 +506,15 @@ async def on_private_sticker(
     # без топика и без reply — всегда новый тред, продолжить можно реплаем
     # (AiReplyContinuation).
     dialogue_id = _dialogue_id_for(message)
-    history = await _handle_sticker_message(message, store, config, dialogue_id)
+    # Одна сессия на весь ход — статус "разглядывает" на время скачивания
+    # thumbnail и финальный ответ Альфреда делят один и тот же черновик
+    # (та же механика, что у on_private_voice).
+    rich_session = _rich_session_for(message, config)
+    history = await _handle_sticker_message(message, store, config, dialogue_id, rich_session)
 
     await _ask_and_reply(
         message, node_link, store, config, book, notifier, dialogue_id, history,
-        active_ai_chats, tool_calls, _rich_session_for(message, config),
+        active_ai_chats, tool_calls, rich_session,
     )
 
 
@@ -635,7 +648,11 @@ async def _handle_photo_message(
 
 
 async def _handle_sticker_message(
-    message: Message, store: Store, config: Settings, dialogue_id: int
+    message: Message,
+    store: Store,
+    config: Settings,
+    dialogue_id: int,
+    rich_session: RichStreamSession | None,
 ) -> list[dict[str, Any]]:
     """Скачать статичный thumbnail стикера (Telegram генерирует его для
     любого типа — статичный/анимированный/видео), записать плейсхолдер +
@@ -646,6 +663,11 @@ async def _handle_sticker_message(
     thumbnail или он не влезает в протокольный лимит — просто идём без
     raw_image (STICKER_PROMPT_NO_IMAGE), не отказываем в ответе вовсе.
     У стикера есть emoji-тег, есть на что реагировать даже без картинки.
+
+    ``rich_session`` — та же сессия, что пойдёт в финальный ответ Альфреда
+    (см. вызывающих): статус STICKER_LOOKING_TEXT_PLAIN на время скачивания
+    thumbnail сменится либо реальным ответом, либо следующим статусом —
+    та же механика, что у voice_stt.VOICE_LISTENING_TEXT.
     """
     sticker = message.sticker
     emoji = sticker.emoji
@@ -653,6 +675,8 @@ async def _handle_sticker_message(
     photo_key: str | None = None
 
     if sticker.thumbnail is not None:
+        if rich_session is not None:
+            await rich_session.push_status(STICKER_LOOKING_TEXT_PLAIN)
         buf = await message.bot.download(sticker.thumbnail)
         raw = buf.read()
         candidate = base64.b64encode(raw).decode()
