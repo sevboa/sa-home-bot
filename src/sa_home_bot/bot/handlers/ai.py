@@ -67,14 +67,15 @@ OPENING_PROMPT = (
     "Тебя только что позвали, без конкретного вопроса. Поприветствуй "
     "коротко, в характере — дай понять, что ты здесь и готов слушать."
 )
-# Реплай в тред без текста (стикер/фото/голосовое без подписи и т.п.) — тоже
-# не молчим (раньше просто игнорировали, диалог как будто не реагировал),
+# Реплай в тред без текста (фото без подписи, геолокация, документ и т.п.) —
+# тоже не молчим (раньше просто игнорировали, диалог как будто не реагировал),
 # а сообщаем модели, что ход был пустым — та же логика, что и OPENING_PROMPT:
-# директива не сохраняется как ход диалога, только ответ на неё.
+# директива не сохраняется как ход диалога, только ответ на неё. Стикер сюда
+# больше не попадает — у него своя ветка, см. STICKER_PROMPT.
 EMPTY_REPLY_PROMPT = (
     "Пользователь ответил в этом треде, не написав никакого текста "
-    "(например, стикером или фото без подписи). Отреагируй коротко, в "
-    "характере — переспроси или отметь, что не расслышал."
+    "(например, геолокацией или документом без подписи). Отреагируй коротко, "
+    "в характере — переспроси или отметь, что не расслышал."
 )
 # Мультимодальный /ai (2026-08-10) — bot/handlers/ai.py::_handle_photo_message.
 # PHOTO_MARKER — плейсхолдер в ai_turns.content: сама картинка туда не
@@ -96,6 +97,26 @@ PHOTO_TOO_LARGE_TEXT = (
 # Telegram'ом (это message.photo, не message.document) — на практике порог
 # срабатывает редко.
 _MAX_RAW_IMAGE_B64_BYTES = 800_000
+# Стикеры (2026-08-11) — bot/handlers/ai.py::_handle_sticker_message.
+# Telegram генерирует статичный thumbnail (JPEG/WEBP, ~320×320) для ЛЮБОГО
+# стикера, включая анимированные (.tgs) и видео (.webm) — этого достаточно,
+# декодировать Lottie/webm не нужно. Переиспользует тот же pipeline, что и
+# фото (raw_image/photo_path, llm/vision.py), т.к. Pillow сам распознаёт
+# формат по байтам. В отличие от фото — не хард-отказ при проблеме с
+# картинкой (см. _handle_sticker_message): у стикера есть emoji-тег, есть
+# на что реагировать даже без превью.
+STICKER_MARKER = "[стикер]"
+STICKER_PROMPT = (
+    "Пользователь прислал стикер (эмодзи-тег: {emoji}). Это не фото, а "
+    "стикер — реплика без слов, как жест или реакция в переписке. Восприми "
+    "его так, как обычно воспринимают стикер в чате (эмоция, шутка, "
+    "реакция), а не описывай картинку дословно. Ответь коротко, в характере."
+)
+STICKER_PROMPT_NO_IMAGE = (
+    "Пользователь прислал стикер (эмодзи-тег: {emoji}), но превью-картинка "
+    "недоступна. Отреагируй на сам факт стикера с этим эмодзи — коротко, "
+    "в характере, не выдумывай, что на нём изображено."
+)
 
 
 def _format_answer(raw: str) -> str:
@@ -174,6 +195,15 @@ class PrivateChatVoice(Filter):
 
     async def __call__(self, message: Message) -> bool:
         return message.chat is not None and message.chat.type == "private" and bool(message.voice)
+
+
+class PrivateChatSticker(Filter):
+    """Стикер первым сообщением в личке — как PrivateChatPhoto, но для
+    message.sticker. Реплай в уже начатый тред стикером сюда не попадает —
+    тот перехватывается AiReplyContinuation."""
+
+    async def __call__(self, message: Message) -> bool:
+        return message.chat is not None and message.chat.type == "private" and bool(message.sticker)
 
 
 class GroupMention(Filter):
@@ -295,6 +325,10 @@ async def on_ai_reply(
         )
         if history is None:
             return
+    elif message.sticker:
+        # В отличие от фото/голоса — тотальная функция, без отказа: у
+        # стикера есть emoji-тег, есть на что реагировать даже без превью.
+        history = await _handle_sticker_message(message, store, config, ai_dialogue_id)
     elif text:
         now = datetime.now(tz=UTC)
         sender = message.from_user
@@ -441,6 +475,34 @@ async def on_private_voice(
     )
 
 
+@catchall_router.message(PrivateChatSticker())
+async def on_private_sticker(
+    message: Message,
+    node_link: ServiceLink,
+    store: Store,
+    config: Settings,
+    book: SubscriptionBook,
+    notifier: Notifier,
+    active_ai_chats: ai_flow.ActiveAiChats,
+    tool_calls: ToolCalls,
+    subscription: Subscription | None = None,
+) -> None:
+    right = commands.required_right(commands.ALFRED.name)
+    if subscription is None or not subscription.allows_command(right):
+        return
+
+    # Та же логика нового треда, что у on_private_message/on_private_photo:
+    # без топика и без reply — всегда новый тред, продолжить можно реплаем
+    # (AiReplyContinuation).
+    dialogue_id = _dialogue_id_for(message)
+    history = await _handle_sticker_message(message, store, config, dialogue_id)
+
+    await _ask_and_reply(
+        message, node_link, store, config, book, notifier, dialogue_id, history,
+        active_ai_chats, tool_calls, _rich_session_for(message, config),
+    )
+
+
 @catchall_router.message(GroupMention())
 async def on_group_mention(
     message: Message,
@@ -567,6 +629,65 @@ async def _handle_photo_message(
             "content": caption or PHOTO_NO_CAPTION_PROMPT,
             "raw_image": photo_b64,
         }
+    return history
+
+
+async def _handle_sticker_message(
+    message: Message, store: Store, config: Settings, dialogue_id: int
+) -> list[dict[str, Any]]:
+    """Скачать статичный thumbnail стикера (Telegram генерирует его для
+    любого типа — статичный/анимированный/видео), записать плейсхолдер +
+    photo_path в ai_turns, собрать history с ``raw_image`` на последнем ходе
+    — тот же pipeline, что у фото (см. _handle_photo_message).
+
+    В отличие от фото — тотальная функция, всегда возвращает history: нет
+    thumbnail или он не влезает в протокольный лимит — просто идём без
+    raw_image (STICKER_PROMPT_NO_IMAGE), не отказываем в ответе вовсе.
+    У стикера есть emoji-тег, есть на что реагировать даже без картинки.
+    """
+    sticker = message.sticker
+    emoji = sticker.emoji
+    thumb_b64: str | None = None
+    photo_key: str | None = None
+
+    if sticker.thumbnail is not None:
+        buf = await message.bot.download(sticker.thumbnail)
+        raw = buf.read()
+        candidate = base64.b64encode(raw).decode()
+        if len(candidate) <= _MAX_RAW_IMAGE_B64_BYTES:
+            thumb_b64 = candidate
+            photo_key = ai_flow.photo_key_for(message)
+
+    persisted = f"{STICKER_MARKER} {emoji}".strip() if emoji else STICKER_MARKER
+    now = datetime.now(tz=UTC)
+    sender = message.from_user
+    await store.record_ai_turn(
+        message.chat.id,
+        message.message_id,
+        dialogue_id,
+        "user",
+        persisted,
+        now,
+        user_id=sender.id if sender else None,
+        user_name=ai_flow.display_name(sender),
+        photo_path=photo_key,
+    )
+    history_rows = await store.ai_turns_for_dialogue(message.chat.id, dialogue_id)
+    history: list[dict[str, Any]] = [
+        {"role": r["role"], "content": r["content"]} for r in history_rows if r["content"]
+    ]
+    if history:
+        if thumb_b64:
+            history[-1] = {
+                "role": "user",
+                "content": STICKER_PROMPT.format(emoji=emoji or "не указан"),
+                "raw_image": thumb_b64,
+            }
+        else:
+            history[-1] = {
+                "role": "user",
+                "content": STICKER_PROMPT_NO_IMAGE.format(emoji=emoji or "не указан"),
+            }
     return history
 
 

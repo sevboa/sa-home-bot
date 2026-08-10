@@ -63,12 +63,18 @@ class FakeEntity:
     length: int
 
 
+@dataclass
+class FakeSticker:
+    emoji: str | None = "😂"
+    thumbnail: object | None = "thumb1"
+
+
 class FakeMessage:
     _next_id = 1000
 
     def __init__(
         self, chat_id, text=None, reply_to=None, chat_type="private", entities=None,
-        message_thread_id=None, photo=None, caption=None, voice=None,
+        message_thread_id=None, photo=None, caption=None, voice=None, sticker=None,
     ):
         self.chat = FakeChat(chat_id, type=chat_type)
         self.message_id = FakeMessage._next_id
@@ -77,6 +83,7 @@ class FakeMessage:
         self.caption = caption
         self.photo = photo
         self.voice = voice
+        self.sticker = sticker
         self.reply_to_message = reply_to
         self.entities = entities
         self.message_thread_id = message_thread_id
@@ -626,6 +633,24 @@ async def test_private_chat_photo_filter_ignores_groups():
     assert await filt(msg) is False
 
 
+async def test_private_chat_sticker_filter_matches_sticker():
+    filt = ai_handler.PrivateChatSticker()
+    msg = FakeMessage(1, sticker=FakeSticker(), chat_type="private")
+    assert await filt(msg) is True
+
+
+async def test_private_chat_sticker_filter_ignores_text_only():
+    filt = ai_handler.PrivateChatSticker()
+    msg = FakeMessage(1, text="привет", chat_type="private")
+    assert await filt(msg) is False
+
+
+async def test_private_chat_sticker_filter_ignores_groups():
+    filt = ai_handler.PrivateChatSticker()
+    msg = FakeMessage(1, sticker=FakeSticker(), chat_type="group")
+    assert await filt(msg) is False
+
+
 async def test_group_mention_filter_matches_and_strips_mention():
     filt = ai_handler.GroupMention()
     text = "@alfredbot как погода?"
@@ -822,6 +847,140 @@ async def test_on_private_photo_denied_without_right(store):
     assert rows == []
 
 
+async def test_on_private_sticker_with_emoji_sends_raw_image_and_persists_photo_path(
+    store, monkeypatch
+):
+    seen_history = []
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None, speech_remark=None, rich_session=None
+    ):
+        seen_history.append(history)
+        return "ору"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(
+        1, sticker=FakeSticker(emoji="😂", thumbnail="thumb1"), chat_type="private"
+    )
+
+    await ai_handler.on_private_sticker(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
+    )
+
+    assert message.bot.downloaded == ["thumb1"]
+    assert len(seen_history) == 1 and len(seen_history[0]) == 1
+    turn = seen_history[0][0]
+    assert turn["role"] == "user"
+    assert turn["content"] == ai_handler.STICKER_PROMPT.format(emoji="😂")
+    assert isinstance(turn["raw_image"], str) and turn["raw_image"]
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    user_row = next(r for r in rows if r["role"] == "user")
+    assert user_row["content"] == "[стикер] 😂"
+    assert user_row["photo_path"] == ai_flow.photo_key_for(message)
+
+
+async def test_on_private_sticker_without_thumbnail_falls_back_to_text_only(store, monkeypatch):
+    seen_history = []
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None, speech_remark=None, rich_session=None
+    ):
+        seen_history.append(history)
+        return "ответ"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, sticker=FakeSticker(emoji="😂", thumbnail=None), chat_type="private")
+
+    await ai_handler.on_private_sticker(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
+    )
+
+    assert message.bot.downloaded == []
+    turn = seen_history[0][0]
+    assert "raw_image" not in turn
+    assert turn["content"] == ai_handler.STICKER_PROMPT_NO_IMAGE.format(emoji="😂")
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    user_row = next(r for r in rows if r["role"] == "user")
+    assert user_row["content"] == "[стикер] 😂"
+    assert user_row["photo_path"] is None
+
+
+async def test_on_private_sticker_too_large_falls_back_to_text_only(store, monkeypatch):
+    seen_history = []
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None, speech_remark=None, rich_session=None
+    ):
+        seen_history.append(history)
+        return "ответ"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    monkeypatch.setattr(ai_handler, "_MAX_RAW_IMAGE_B64_BYTES", 4)
+    message = FakeMessage(
+        1, sticker=FakeSticker(emoji="😂", thumbnail="thumb1"), chat_type="private"
+    )
+
+    await ai_handler.on_private_sticker(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
+    )
+
+    # Не отказываем, как у фото, — просто идём без картинки (см. план).
+    turn = seen_history[0][0]
+    assert "raw_image" not in turn
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    user_row = next(r for r in rows if r["role"] == "user")
+    assert user_row["photo_path"] is None
+
+
+async def test_on_private_sticker_without_emoji_uses_marker_only(store, monkeypatch):
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None, speech_remark=None, rich_session=None
+    ):
+        return "ответ"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, sticker=FakeSticker(emoji=None, thumbnail=None), chat_type="private")
+
+    await ai_handler.on_private_sticker(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
+    )
+
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    user_row = next(r for r in rows if r["role"] == "user")
+    assert user_row["content"] == ai_handler.STICKER_MARKER
+
+
+async def test_on_private_sticker_denied_without_right(store):
+    message = FakeMessage(1, sticker=FakeSticker(), chat_type="private")
+
+    await ai_handler.on_private_sticker(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), subscription=_sub(),
+    )
+
+    assert message.sent == []
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    assert rows == []
+
+
 async def test_on_private_voice_records_transcript_and_calls_ai_flow(store, monkeypatch):
     seen_history = []
 
@@ -945,6 +1104,38 @@ async def test_on_ai_reply_with_voice_none_transcript_sends_nothing_extra(store,
 
     rows = await store.ai_turns_for_dialogue(1, 500)
     assert [r["role"] for r in rows] == ["assistant"]  # только затравка, ничего не добавилось
+
+
+async def test_on_ai_reply_with_sticker_calls_ai_flow_with_image(store, monkeypatch):
+    await store.record_ai_turn(1, 500, 500, "assistant", "начало треда", _now())
+    reply_to = FakeMessage(1, chat_type="private")
+    reply_to.message_id = 500
+
+    seen_history = []
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None, speech_remark=None, rich_session=None
+    ):
+        seen_history.append(history)
+        return "ору, сэр"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(
+        1, sticker=FakeSticker(emoji="😂", thumbnail="thumb1"), reply_to=reply_to,
+        chat_type="private",
+    )
+
+    await ai_handler.on_ai_reply(
+        message, ai_dialogue_id=500, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
+    )
+
+    turn = seen_history[0][-1]
+    assert turn["content"] == ai_handler.STICKER_PROMPT.format(emoji="😂")
+    assert isinstance(turn["raw_image"], str) and turn["raw_image"]
 
 
 async def test_on_ai_reply_with_photo_caption_is_not_lost_as_empty_reply(store, monkeypatch):
