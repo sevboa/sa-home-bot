@@ -6,9 +6,9 @@ Rich как основной режим ответа (config.py::LlmConfig.respo
 plain ``editMessageText`` внутри одного ответа: только
 ``sendRichMessageDraft`` (пока идёт генерация) и ``sendRichMessage`` (когда
 текст окончательный, единственная точка, которая реально персистит
-сообщение в историю чата). ``InputRichMessage`` принимает готовый markdown
-целиком — модель и так генерирует markdown (llm/prompt.py), собирать
-rich-блоки (RichBlockParagraph/RichBlockTable/...) вручную не нужно.
+сообщение в историю чата). Настоящий текст ответа — готовый markdown целиком
+(модель и так генерирует markdown, llm/prompt.py); статусные фразы (шаги/тул/
+пробуждение) — блок ``InputRichBlockThinking`` (см. push_status ниже).
 
 ``sendRichMessageDraft`` платформенно ограничен приватным чатом (докстринг
 ``chat_id`` в aiogram/methods/send_rich_message_draft.py: "target private
@@ -25,7 +25,7 @@ import random
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import InputRichMessage, Message, ReplyParameters
+from aiogram.types import InputRichBlockThinking, InputRichMessage, Message, ReplyParameters
 
 from sa_home_bot.bot.notifier import send_with_retry
 
@@ -55,29 +55,18 @@ class RichStreamSession:
         self._chat_id = chat_id
         self._message_thread_id = message_thread_id
         self._draft_id = random.randint(1, 2**31 - 1)
-        self._last_sent: str | None = None
+        # Сигнатура последнего отправленного контента — ("md", markdown) или
+        # ("think", text). Пара, не голая строка: markdown-путь и
+        # thinking-путь шлют структурно разные пейлоады (blocks vs markdown),
+        # совпадение сырого текста между ними не должно гасить обновление.
+        self._last_sent: tuple[str, str] | None = None
 
-    async def _push_draft(self, markdown_body: str, *, with_prefix: bool = True) -> None:
-        """Общая отправка черновика — дедуп по последнему отправленному
-        (не важно, статус это был или кусок настоящего ответа: одинаковый
-        текст дважды подряд не стоит второго round-trip'а), best-effort
-        (см. on_partial про то, почему потеря одного тика не критична).
-
-        ``with_prefix=False`` — живой баг 2026-08-10: статусные фразы
-        (TOOL_STATUS_TEXT/STEPS_TEXT_PLAIN/THINKING_TEXT_PLAIN, bot/ai_flow.py)
-        сами называют Альфреда в третьем лице ("Альфред сёрфит...") —
-        с ALFRED_PREFIX_MD получалось видимое дублирование "Альфред:
-        Альфред сёрфит...". Настоящий ответ модели (on_partial) имени не
-        содержит — ему префикс по-прежнему нужен."""
-        if not markdown_body or markdown_body == self._last_sent:
-            return
-        self._last_sent = markdown_body
-        markdown = ALFRED_PREFIX_MD + markdown_body if with_prefix else markdown_body
+    async def _send_draft(self, rich_message: InputRichMessage) -> None:
         try:
             await self._bot.send_rich_message_draft(
                 chat_id=self._chat_id,
                 draft_id=self._draft_id,
-                rich_message=InputRichMessage(markdown=markdown),
+                rich_message=rich_message,
                 message_thread_id=self._message_thread_id,
             )
         except TelegramAPIError as exc:
@@ -88,6 +77,31 @@ class RichStreamSession:
                 "rich_stream: не удалось обновить черновик (chat=%s): %s", self._chat_id, exc
             )
 
+    async def _push_markdown(self, markdown_body: str, *, with_prefix: bool = True) -> None:
+        """Черновик настоящего текста ответа (on_partial) — дедуп по
+        последнему отправленному, best-effort (см. _send_draft).
+
+        ``with_prefix=False`` — живой баг 2026-08-10: статусные фразы
+        сами называли Альфреда в третьем лице ("Альфред сёрфит...") —
+        с ALFRED_PREFIX_MD получалось видимое дублирование "Альфред:
+        Альфред сёрфит...". Настоящий ответ модели (on_partial) имени не
+        содержит — ему префикс по-прежнему нужен. Параметр остался только
+        для on_partial: статусы теперь идут через _push_thinking, где
+        такой проблемы нет вовсе (thinking-блок — не markdown)."""
+        signature = ("md", markdown_body)
+        if not markdown_body or signature == self._last_sent:
+            return
+        self._last_sent = signature
+        markdown = ALFRED_PREFIX_MD + markdown_body if with_prefix else markdown_body
+        await self._send_draft(InputRichMessage(markdown=markdown))
+
+    async def _push_thinking(self, text: str) -> None:
+        signature = ("think", text)
+        if not text or signature == self._last_sent:
+            return
+        self._last_sent = signature
+        await self._send_draft(InputRichMessage(blocks=[InputRichBlockThinking(text=text)]))
+
     async def on_partial(self, text: str, done: bool) -> None:
         """Колбэк для llm_chat.py::run_chat_loop(on_partial=...).
 
@@ -97,21 +111,25 @@ class RichStreamSession:
         превью может чуть разойтись с финальным текстом в последний
         момент, это не проблема (черновик эфемерен, реальный текст в чат
         уходит один раз через finalize)."""
-        await self._push_draft(text)
+        await self._push_markdown(text)
 
     async def push_status(self, text: str) -> None:
-        """Курсивная "бегущая строка" (мышление/шаги/тул — bot/ai_flow.py)
-        в тот же черновик, что on_partial: эфемерная реплика, которую
-        сменит либо следующий статус, либо начало настоящего текста
-        ответа, либо finalize() — платформенная семантика черновика
-        (30-секундный превью, вытесняемый sendRichMessage) уже даёт
-        "заменяется сообщением" бесплатно, без отдельной логики очистки.
+        """Статус (мышление/шаги/тул/пробуждение узла — bot/ai_flow.py) —
+        блок ``InputRichBlockThinking`` в тот же черновик, что on_partial:
+        Telegram сам рисует серую анимацию "печатает мысль" для этого типа
+        блока (нативный примитив Bot API, не наше форматирование).
+        Эфемерная реплика: её сменит либо следующий статус, либо начало
+        настоящего текста ответа (on_partial), либо finalize() —
+        платформенная семантика черновика уже даёт "заменяется" бесплатно,
+        без отдельной логики очистки.
 
-        ``text`` — обычный текст без разметки, курсив оборачивается
-        здесь же (единая точка форматирования, не на стороне вызывающего).
-        Без ALFRED_PREFIX_MD — фраза уже называет Альфреда сама (см.
-        _push_draft про дубль имени)."""
-        await self._push_draft(f"_{text}_", with_prefix=False)
+        ``InputRichBlockThinking`` допустим ТОЛЬКО в sendRichMessageDraft
+        (докстринг aiogram: "can't be received in messages") — в finalize()
+        поэтому по-прежнему обычный markdown, не блоки.
+
+        ``text`` — обычный текст без разметки, фраза уже называет Альфреда
+        сама (см. _push_markdown про дубль имени у markdown-пути)."""
+        await self._push_thinking(text)
 
     async def finalize(self, raw: str, reply_to_message_id: int | None = None) -> Message | None:
         """Персистит настоящий ответ Альфреда — с ретраем на 429

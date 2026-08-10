@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sa-home-bot"
-version = "0.83.1"
+version = "0.84.0"
 description = "Рой домашних машин: нода-супервизор, службы (мониторинг, приложения) и Telegram-бот"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "sevboa", email = "sevboa@gmail.com" }]
 dependencies = [
-    "aiogram>=3.4,<4",
+    "aiogram>=3.30,<4",
     "apscheduler>=3.10,<4",
     "aiosqlite>=0.19",
     "pydantic-settings>=2.2",

@@ -679,6 +679,40 @@ async def test_unavailable_then_woken_within_30s(store, monkeypatch):
     assert link.wol_sent == [{"mac": MYCRAFT_WAKE["mac"]}]  # разбудили молча
 
 
+async def test_unavailable_then_woken_within_30s_via_rich_status(store, monkeypatch):
+    # Тот же сценарий, что test_unavailable_then_woken_within_30s, но с
+    # rich_session: «шаги» и «Агнольд» идут статусами в один черновик
+    # (push_status), а не отдельными персистентными сообщениями — Агнольд
+    # заменяет предыдущий статус, а не добавляется вторым сообщением.
+    await wake_state.remember(store, "mycraft", MYCRAFT_WAKE)
+    monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
+    message = FakeMessage()
+    rich_session = FakeRichSession()
+    link = FakeNodeLink(
+        chat_results=[
+            ProtoError(ERR_UNAVAILABLE, "нода недоступна"),
+            {"response": ai_flow.ROUTE_OK},
+            {"response": "Сейчас подойду"},
+        ],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
+        _admin_book(), FakeNotifier(),
+        rich_session=rich_session,
+    )
+
+    assert raw == "Сейчас подойду"
+    assert message.answers == []
+    assert rich_session.statuses == [
+        ai_flow.STEPS_TEXT_PLAIN,
+        ai_flow.ARNOLD_WAKING_PLAIN,
+        ai_flow.STEPS_TEXT_PLAIN,
+    ]
+    assert link.wol_sent == [{"mac": MYCRAFT_WAKE["mac"]}]  # разбудили молча
+
+
 async def test_unavailable_and_no_wake_data_gives_up_immediately(store, monkeypatch):
     # get_state_routes пуст — presence-проверка сама уже "недоступна",
     # полноценный _ask() с этим же исходом не запускается вовсе (живая

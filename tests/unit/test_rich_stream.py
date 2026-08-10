@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import pytest
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
+from aiogram.types import InputRichBlockThinking
 
 from sa_home_bot.bot import notifier as notifier_module
 from sa_home_bot.bot.rich_stream import ALFRED_PREFIX_MD, RichStreamSession
@@ -35,6 +36,7 @@ class FakeBot:
                 "chat_id": chat_id,
                 "draft_id": draft_id,
                 "markdown": rich_message.markdown,
+                "blocks": rich_message.blocks,
                 "message_thread_id": message_thread_id,
             }
         )
@@ -105,15 +107,17 @@ async def test_on_partial_swallows_telegram_errors():
     assert bot.drafts == []
 
 
-async def test_push_status_wraps_in_italics_without_alfred_prefix():
-    # Живой баг 2026-08-10: фраза сама называет Альфреда в третьем лице —
-    # ALFRED_PREFIX_MD дублировал бы имя ("Альфред: Альфред сёрфит...").
+async def test_push_status_sends_thinking_block():
+    # Blocks вместо markdown — Telegram сам рисует серую анимацию для
+    # InputRichBlockThinking, оборачивать текст самим (курсив и т.п.) не
+    # нужно и нельзя (это отдельный тип блока, не markdown-разметка).
     bot = FakeBot()
     session = RichStreamSession(bot, chat_id=1)
 
     await session.push_status("Альфред проверяет погоду")
 
-    assert bot.drafts[0]["markdown"] == "_Альфред проверяет погоду_"
+    assert bot.drafts[0]["markdown"] is None
+    assert bot.drafts[0]["blocks"] == [InputRichBlockThinking(text="Альфред проверяет погоду")]
 
 
 async def test_push_status_dedups_consecutive_identical_status():
@@ -124,23 +128,23 @@ async def test_push_status_dedups_consecutive_identical_status():
     await session.push_status("Альфред думает")  # не изменилось — пропуск
     await session.push_status("Альфред сёрфит")
 
-    assert [d["markdown"] for d in bot.drafts] == [
-        "_Альфред думает_",
-        "_Альфред сёрфит_",
+    assert [d["blocks"] for d in bot.drafts] == [
+        [InputRichBlockThinking(text="Альфред думает")],
+        [InputRichBlockThinking(text="Альфред сёрфит")],
     ]
 
 
 async def test_push_status_and_on_partial_share_dedup_state():
+    # Общий self._last_sent между двумя путями (md vs think) — но сигнатуры
+    # разного вида, поэтому одинаковый сырой текст не гасит второй вызов.
     bot = FakeBot()
     session = RichStreamSession(bot, chat_id=1)
 
-    await session.push_status("текст")  # обёрнуто в _текст_, без префикса
-    await session.on_partial("текст", done=False)  # другая обёртка — не дедупится
+    await session.push_status("текст")  # thinking-блок
+    await session.on_partial("текст", done=False)  # markdown — не дедупится
 
-    assert [d["markdown"] for d in bot.drafts] == [
-        "_текст_",
-        ALFRED_PREFIX_MD + "текст",
-    ]
+    assert bot.drafts[0]["blocks"] == [InputRichBlockThinking(text="текст")]
+    assert bot.drafts[1]["markdown"] == ALFRED_PREFIX_MD + "текст"
 
 
 async def test_push_status_swallows_telegram_errors():
