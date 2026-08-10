@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sa-home-bot"
-version = "0.87.0"
+version = "0.87.1"
 description = "Рой домашних машин: нода-супервизор, службы (мониторинг, приложения) и Telegram-бот"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -50,9 +50,21 @@ stt = [
 #   3. референсный голос — WAV-файл 6-10с чистой речи по пути
 #      settings.llm.tts_reference_voice_path (см. config.py), кладётся
 #      вручную, не входит в репозиторий.
+# transformers/torch — явные пины, не расчёт на резолвер: coqui-tts 0.27.5
+# объявляет только "transformers>=4.57" и "torch>=2.2" без верхних границ
+# (живая находка при деплое 2026-08-11) — pip тянет transformers 5.x (убрал
+# isin_mps_friendly из pytorch_utils, ломает импорт TTS.api) и torch>=2.9
+# (требует отдельно доустанавливать torchcodec для audio I/O — а тот, в свою
+# очередь, на Debian trixie не совместим с системным ffmpeg 7.1/libavutil59:
+# нет собранного бэкенда под эту версию). torch<2.9 обходит torchcodec
+# целиком — coqui-tts грузит референсный WAV через классический
+# torchaudio-бэкенд, никакого codec-экстра не нужно.
 # Установка: pipx install "sa-home-bot[tts] @ git+...@vX.Y.Z"
 tts = [
     "coqui-tts[cpu]>=0.27",
+    "transformers>=4.57,<5",
+    "torch>=2.2,<2.9",
+    "torchaudio>=2.2,<2.9",
 ]
 
 [project.scripts]
