@@ -35,7 +35,7 @@ from aiogram import Router
 from aiogram.filters import Command, Filter
 from aiogram.types import Message
 
-from sa_home_bot.bot import ai_flow, commands, voice_stt
+from sa_home_bot.bot import ai_flow, commands, voice_mode, voice_stt, voice_tts
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.notifier import Notifier, chunk_text
 from sa_home_bot.bot.rich_stream import RichStreamSession
@@ -721,18 +721,46 @@ async def _do_ask_and_reply(
             book, notifier, f"⚠️ /ai (chat={message.chat.id}): модель вернула пустой ответ"
         )
         return None
-    if rich_session is not None:
-        sent = await _send_alfred_reply_rich(message, raw, rich_session)
-        if sent is None:
-            log.error("ai: не удалось отправить rich-ответ (chat=%s)", message.chat.id)
-            await ai_flow.notify_admins(
-                book, notifier, f"⚠️ /ai (chat={message.chat.id}): не удалось отправить rich-ответ"
-            )
-            return None
-    else:
-        sent = await _send_alfred_reply(message, raw)
+    # Голосовой режим (тумблер per-chat, тул voice_mode) — голос ВМЕСТО
+    # текста, не вместе: при успехе текстовое сообщение с полным ответом в
+    # чат не идёт вовсе (решение пользователя 2026-08-11). Любой сбой
+    # синтеза/отправки — тихий откат на обычный текстовый путь ниже, raw всё
+    # равно пишется в ai_turns целиком независимо от способа доставки.
+    audio_bytes: bytes | None = None
+    if message.chat is not None and await voice_mode.is_enabled(store, message.chat.id):
+        audio_bytes = await voice_tts.synthesize_voice_reply(
+            message, node_link, store, config, rich_session, raw
+        )
+    if audio_bytes is not None:
+        voice_message_id = await notifier.send_voice(
+            message.chat.id,
+            audio_bytes,
+            filename="alfred.ogg",
+            message_thread_id=message.message_thread_id,
+        )
+        if voice_message_id is not None:
+            if rich_session is not None:
+                await rich_session.finalize_status(voice_tts.VOICE_REPLY_SENT_MD)
+            sent_message_id = voice_message_id
+        else:
+            audio_bytes = None
+    if audio_bytes is None:
+        if rich_session is not None:
+            sent = await _send_alfred_reply_rich(message, raw, rich_session)
+            if sent is None:
+                log.error("ai: не удалось отправить rich-ответ (chat=%s)", message.chat.id)
+                await ai_flow.notify_admins(
+                    book,
+                    notifier,
+                    f"⚠️ /ai (chat={message.chat.id}): не удалось отправить rich-ответ",
+                )
+                return None
+            sent_message_id = sent.message_id
+        else:
+            sent = await _send_alfred_reply(message, raw)
+            sent_message_id = sent.message_id
     await store.record_ai_turn(
-        message.chat.id, sent.message_id, dialogue_id, "assistant", raw, datetime.now(tz=UTC)
+        message.chat.id, sent_message_id, dialogue_id, "assistant", raw, datetime.now(tz=UTC)
     )
     if speech_remark.text is not None:
         # Отдельным сообщением, БЕЗ html.escape (см. _format_answer) —

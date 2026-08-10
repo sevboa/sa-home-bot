@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 
 import pytest_asyncio
 
-from sa_home_bot.bot import ai_flow
+from sa_home_bot.bot import ai_flow, voice_mode
 from sa_home_bot.bot.handlers import ai as ai_handler
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import Settings
@@ -98,12 +98,19 @@ class FakeMessage:
 
 
 class FakeNotifier:
-    def __init__(self) -> None:
+    def __init__(self, *, send_voice_result: int | None = 42424) -> None:
         self.sent: list[tuple[int, str]] = []
+        self.sent_voices: list[tuple[int, bytes]] = []
+        self._send_voice_result = send_voice_result
 
     async def send_direct(self, chat_id, text, reply_to_message_id=None, reply_markup=None):
         self.sent.append((chat_id, text))
         return 1
+
+    async def send_voice(self, chat_id, voice, *, filename=None, caption=None,
+                          message_thread_id=None):
+        self.sent_voices.append((chat_id, voice))
+        return self._send_voice_result
 
 
 @pytest_asyncio.fixture
@@ -257,6 +264,122 @@ async def test_cmd_ai_returns_none_from_ai_flow_sends_nothing_extra(store, monke
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert len(rows) == 1  # только реплика юзера, ответ ассистента не записан
     assert rows[0]["role"] == "user"
+
+
+# --- голосовой режим ответа (тумблер voice_mode, п.5 плана: голос ВМЕСТО
+# текста) — synthesize_voice_reply замокан целиком, своя логика проверяется
+# отдельно в test_voice_tts.py, здесь только оркестрация ai.py ---
+
+
+def _fake_request_returns(text: str):
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None, speech_remark=None, rich_session=None
+    ):
+        return text
+
+    return fake_request
+
+
+async def test_cmd_ai_voice_mode_enabled_sends_voice_instead_of_text(store, monkeypatch):
+    await voice_mode.set_enabled(store, 1, True)
+
+    async def fake_synthesize(message, node_link, store_, config, rich_session, text):
+        assert text == "Добрый вечер, сэр."
+        return b"fake-ogg-bytes"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", _fake_request_returns("Добрый вечер, сэр."))
+    monkeypatch.setattr(ai_handler.voice_tts, "synthesize_voice_reply", fake_synthesize)
+    message = FakeMessage(1, text="/alfred привет")
+    notifier = FakeNotifier()
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=notifier, active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(),
+    )
+
+    assert message.sent == []  # текст не ушёл вовсе — голос вместо текста
+    assert notifier.sent_voices == [(1, b"fake-ogg-bytes")]
+
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    assert [r["role"] for r in rows] == ["user", "assistant"]
+    # raw-текст всё равно пишется в ai_turns целиком, независимо от способа
+    # доставки (решение из плана, п.9) — история для следующих ходов модели
+    # не зависит от голосового режима.
+    assert rows[1]["content"] == "Добрый вечер, сэр."
+
+
+async def test_cmd_ai_voice_mode_enabled_synthesis_fails_falls_back_to_text(store, monkeypatch):
+    await voice_mode.set_enabled(store, 1, True)
+
+    async def fake_synthesize_fails(message, node_link, store_, config, rich_session, text):
+        return None  # служба недоступна / ffmpeg упал / что угодно
+
+    monkeypatch.setattr(ai_flow, "request_alfred", _fake_request_returns("Добрый вечер, сэр."))
+    monkeypatch.setattr(ai_handler.voice_tts, "synthesize_voice_reply", fake_synthesize_fails)
+    message = FakeMessage(1, text="/alfred привет")
+    notifier = FakeNotifier()
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=notifier, active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(),
+    )
+
+    assert notifier.sent_voices == []
+    # Тихий откат на обычный текстовый путь — пользователь не остаётся без ответа.
+    assert message.sent == [ai_handler._format_answer("Добрый вечер, сэр.")]
+
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    assert rows[1]["content"] == "Добрый вечер, сэр."
+
+
+async def test_cmd_ai_voice_mode_enabled_but_telegram_rejects_voice_falls_back_to_text(
+    store, monkeypatch
+):
+    await voice_mode.set_enabled(store, 1, True)
+
+    async def fake_synthesize(message, node_link, store_, config, rich_session, text):
+        return b"fake-ogg-bytes"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", _fake_request_returns("Добрый вечер, сэр."))
+    monkeypatch.setattr(ai_handler.voice_tts, "synthesize_voice_reply", fake_synthesize)
+    message = FakeMessage(1, text="/alfred привет")
+    notifier = FakeNotifier(send_voice_result=None)  # Telegram отверг файл
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=notifier, active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(),
+    )
+
+    assert notifier.sent_voices == [(1, b"fake-ogg-bytes")]
+    assert message.sent == [ai_handler._format_answer("Добрый вечер, сэр.")]
+
+
+async def test_cmd_ai_voice_mode_disabled_never_calls_synthesize(store, monkeypatch):
+    called = False
+
+    async def fake_synthesize(*args, **kwargs):
+        nonlocal called
+        called = True
+        return b"should-not-be-called"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", _fake_request_returns("Добрый вечер, сэр."))
+    monkeypatch.setattr(ai_handler.voice_tts, "synthesize_voice_reply", fake_synthesize)
+    message = FakeMessage(1, text="/alfred привет")
+    notifier = FakeNotifier()
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=notifier, active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(),
+    )
+
+    assert called is False
+    assert notifier.sent_voices == []
+    assert message.sent == [ai_handler._format_answer("Добрый вечер, сэр.")]
 
 
 async def test_cmd_ai_unhandled_exception_apologizes_and_notifies_admin(store, monkeypatch):

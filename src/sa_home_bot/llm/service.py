@@ -21,13 +21,14 @@ import base64
 import hashlib
 import logging
 import socket
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
 from sa_home_bot import __version__
 from sa_home_bot.config import LlmConfig, Settings
-from sa_home_bot.llm import ollama, stt, vision
+from sa_home_bot.llm import ollama, stt, tts, vision
 from sa_home_bot.llm.prompt import (
     DEFAULT_PERSONA_PROMPT,
     ROUTER_SYSTEM_PROMPT,
@@ -36,6 +37,7 @@ from sa_home_bot.llm.prompt import (
 from sa_home_bot.llm.speech_therapy import SpeechTherapist
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
+    ERR_INTERNAL,
     ActionParam,
     ActionSpec,
     ProtoError,
@@ -120,6 +122,16 @@ ACTION_LOOK_AT_PHOTO = "look_at_photo"
 ACTION_TRANSCRIBE_VOICE = "transcribe_voice"
 ACTION_STT_UPLOAD_CHUNK = "stt_chunk"
 
+# Синтез голосовых ответов /ai (см. llm/tts.py) — Coqui XTTS v2, тоже CPU,
+# тоже эта служба (не бот, не Ollama/Gemma) — тот же принцип, что у STT, но
+# данные текут в обратную сторону: alfred просит синтезировать текст
+# (ACTION_SYNTHESIZE_SPEECH), готовое аудио едет назад инлайном (короткие
+# ответы) либо чанками (ACTION_TTS_DOWNLOAD_CHUNK) — pull-паттерн по образцу
+# vpn/service.py::ACTION_APK_CHUNK + bot/vpn_apk.py::_download_chunks, не
+# push, как у STT-загрузки: тут служба, а не alfred, готовит данные.
+ACTION_SYNTHESIZE_SPEECH = "synthesize_speech"
+ACTION_TTS_DOWNLOAD_CHUNK = "tts_chunk"
+
 # Отказы фото-путей намеренно возвращаются как обычный {"response": ...}, а
 # не отдельным полем-ошибкой: для ACTION_CHAT это просто ложится в ai_turns
 # как обычная реплика Альфреда (ai.py не должен знать про фото-специфику),
@@ -160,6 +172,14 @@ _STREAMING_ENTRY_TTL_S = 120.0
 # отставшего опроса бота, здесь — недовершённая загрузка, которую всё равно
 # нечем продолжить (offset начался бы заново).
 _STT_UPLOAD_TTL_S = 300.0
+# Инлайн/чанки готового синтеза — те же величины, что у voice_stt.py на
+# приёмной стороне (запас от MAX_MESSAGE_BYTES, base64 раздувает на треть).
+# Осиротевшие сессии синтеза (бот не успел/не смог их дочитать чанками) —
+# сама причина осиротения другая, чем у _stt_uploads (там недовершённая
+# ЗАГРУЗКА, тут неполученный ГОТОВЫЙ результат), TTL взят тем же порядком.
+_INLINE_TTS_B64_BYTES = 800_000
+_TTS_CHUNK_BYTES = 700 * 1024
+_TTS_SESSION_TTL_S = 300.0
 
 EventEmitter = Callable[[str, dict[str, Any]], Awaitable[None]]
 
@@ -214,6 +234,11 @@ class LlmService:
         # последнего чанка (для TTL-очистки осиротевших сессий, idle_loop).
         self._stt_uploads: dict[str, bytearray] = {}
         self._stt_upload_touched: dict[str, datetime] = {}
+        # session_id -> готовый синтезированный OGG/Opus (см.
+        # ACTION_SYNTHESIZE_SPEECH/ACTION_TTS_DOWNLOAD_CHUNK выше) и время
+        # последнего обращения (TTL-очистка осиротевших сессий, idle_loop).
+        self._tts_sessions: dict[str, bytes] = {}
+        self._tts_session_touched: dict[str, datetime] = {}
 
     def describe(self) -> ServiceDescription:
         return ServiceDescription(
@@ -371,6 +396,45 @@ class LlmService:
                             type="string",
                             required=True,
                             title="Кусок аудио, base64",
+                        ),
+                    ),
+                ),
+                ActionSpec(
+                    id=ACTION_SYNTHESIZE_SPEECH,
+                    title="Синтезировать голосовой ответ",
+                    params=(
+                        ActionParam(
+                            name="text", type="string", required=True, title="Текст для озвучки"
+                        ),
+                        ActionParam(
+                            name="chat_id",
+                            type="int",
+                            required=False,
+                            title="Chat, откуда пришёл запрос",
+                        ),
+                    ),
+                ),
+                ActionSpec(
+                    id=ACTION_TTS_DOWNLOAD_CHUNK,
+                    title="Скачать кусок синтезированного аудио",
+                    params=(
+                        ActionParam(
+                            name="session_id",
+                            type="string",
+                            required=True,
+                            title="Идентификатор сессии синтеза",
+                        ),
+                        ActionParam(
+                            name="offset",
+                            type="int",
+                            required=True,
+                            title="Смещение куска в байтах",
+                        ),
+                        ActionParam(
+                            name="length",
+                            type="int",
+                            required=False,
+                            title="Размер куска в байтах",
                         ),
                     ),
                 ),
@@ -621,6 +685,49 @@ class LlmService:
                 log.warning("stt: не удалось распознать голосовое сообщение", exc_info=True)
                 transcript = ""
             return {"transcript": transcript}
+        if action == ACTION_SYNTHESIZE_SPEECH:
+            text = args.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise ProtoError(ERR_BAD_REQUEST, "text должен быть непустой строкой")
+            if len(text) > self._cfg.tts_max_text_chars:
+                text = text[: self._cfg.tts_max_text_chars]
+            chat_id = args.get("chat_id")
+            await self._touch(chat_id)
+            try:
+                audio_bytes = await tts.synthesize_speech(text, self._cfg)
+            except Exception:
+                log.warning("tts: не удалось синтезировать речь", exc_info=True)
+                raise ProtoError(ERR_INTERNAL, "не удалось синтезировать речь") from None
+            audio_b64 = base64.b64encode(audio_bytes).decode()
+            if len(audio_b64) <= _INLINE_TTS_B64_BYTES:
+                return {"audio_b64": audio_b64, "format": "ogg"}
+            session_id = uuid.uuid4().hex
+            self._tts_sessions[session_id] = audio_bytes
+            self._tts_session_touched[session_id] = datetime.now(tz=UTC)
+            return {
+                "session_id": session_id,
+                "size": len(audio_bytes),
+                "sha256": hashlib.sha256(audio_bytes).hexdigest(),
+                "format": "ogg",
+            }
+        if action == ACTION_TTS_DOWNLOAD_CHUNK:
+            session_id = args.get("session_id")
+            offset = args.get("offset")
+            length = args.get("length") or _TTS_CHUNK_BYTES
+            if not isinstance(session_id, str) or not session_id:
+                raise ProtoError(ERR_BAD_REQUEST, "session_id должен быть непустой строкой")
+            if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+                raise ProtoError(ERR_BAD_REQUEST, "offset должен быть неотрицательным целым числом")
+            data = self._tts_sessions.get(session_id)
+            if data is None:
+                raise ProtoError(ERR_BAD_REQUEST, f"неизвестная сессия синтеза: {session_id}")
+            chunk = data[offset : offset + int(length)]
+            eof = offset + len(chunk) >= len(data)
+            self._tts_session_touched[session_id] = datetime.now(tz=UTC)
+            if eof:
+                self._tts_sessions.pop(session_id, None)
+                self._tts_session_touched.pop(session_id, None)
+            return {"data_b64": base64.b64encode(chunk).decode(), "offset": offset, "eof": eof}
         if action == ACTION_CHAT_PROGRESS:
             request_id = args.get("request_id")
             if not isinstance(request_id, str) or not request_id:
@@ -701,6 +808,17 @@ class LlmService:
             self._stt_uploads.pop(sid, None)
             self._stt_upload_touched.pop(sid, None)
 
+    def _sweep_tts_sessions(self) -> None:
+        now = datetime.now(tz=UTC)
+        stale = [
+            sid
+            for sid, touched in self._tts_session_touched.items()
+            if (now - touched).total_seconds() >= _TTS_SESSION_TTL_S
+        ]
+        for sid in stale:
+            self._tts_sessions.pop(sid, None)
+            self._tts_session_touched.pop(sid, None)
+
     async def _emit_speech_cured(self) -> None:
         try:
             await self._emit(EVENT_SPEECH_CURED, {})
@@ -769,3 +887,4 @@ class LlmService:
             await self._maybe_sleep_idle()
             self._sweep_streaming()
             self._sweep_stt_uploads()
+            self._sweep_tts_sessions()

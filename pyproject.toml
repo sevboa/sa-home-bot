@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sa-home-bot"
-version = "0.86.2"
+version = "0.87.0"
 description = "Рой домашних машин: нода-супервизор, службы (мониторинг, приложения) и Telegram-бот"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -37,6 +37,22 @@ windows = [
 # Установка: pipx install "sa-home-bot[stt] @ git+...@vX.Y.Z"
 stt = [
     "faster-whisper>=1.0",
+]
+# Нода с синтезом голосовых ОТВЕТОВ /ai (сейчас mycraft, тот же CPU, что и
+# stt): Coqui XTTS v2, voice cloning по референсному клипу (см. llm/tts.py).
+# Требует ТРИ отдельных инфраструктурных шага помимо этого pip-пакета, ни
+# один из них не покрывается extras-группой:
+#   1. системный ffmpeg (apt install ffmpeg) — конвертация WAV -> OGG/Opus
+#      для Telegram sendVoice, вызывается как внешний процесс, не биндинг;
+#   2. переменная окружения COQUI_TOS_AGREED=1 в юните службы llm — иначе
+#      первая загрузка весов XTTS v2 (лицензия CPML, некоммерческая)
+#      зависнет на input() в неинтерактивном процессе;
+#   3. референсный голос — WAV-файл 6-10с чистой речи по пути
+#      settings.llm.tts_reference_voice_path (см. config.py), кладётся
+#      вручную, не входит в репозиторий.
+# Установка: pipx install "sa-home-bot[tts] @ git+...@vX.Y.Z"
+tts = [
+    "coqui-tts[cpu]>=0.27",
 ]
 
 [project.scripts]

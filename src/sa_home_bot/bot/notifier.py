@@ -23,45 +23,83 @@ MAX_RETRIES = 3
 # Telegram сам гасит typing-action примерно через 5с — повторяем чуть чаще,
 # чтобы индикатор не мигал видимым образом.
 TYPING_KEEPALIVE_INTERVAL_S = 4.0
+# Защитный потолок для TypingIndicator.start() без последующего stop() —
+# тот же приём, что и _KEEPALIVE_MAX_TICKS в rich_stream.py: сессия должна
+# всегда дойти до места, которое останавливает индикатор (push_status/
+# finalize/finalize_status), это подстраховка на случай, если её всё же
+# бросят, не закрыв. 450 тиков * 4с = 30 минут — тот же запас, что и у
+# keep-alive черновика.
+TYPING_MAX_TICKS = 450
+
+
+class TypingIndicator:
+    """Индикатор «печатает» с независимыми start()/stop() — для мест, где
+    его нужно включать/выключать по ходу дела, а не одним блоком на весь
+    запрос (см. typing_action() ниже про такой блок).
+
+    Решение пользователя 2026-08-11: индикатор должен гореть ровно пока
+    в чат реально льётся текст ответа, а не пока модель «думает» или «идёт»
+    (router-проход, статусы тулов, ожидание пробуждения, распознавание
+    голосового) — там уже есть свой thinking-блок со статусом
+    (RichStreamSession.push_status), дублировать typing поверх него не
+    нужно. RichStreamSession включает этот индикатор из _push_markdown
+    (реальный кусок текста) и выключает из _push_thinking/_send_persisted
+    (статус или финал)."""
+
+    def __init__(self, bot: Bot, chat_id: int, message_thread_id: int | None = None) -> None:
+        self._bot = bot
+        self._chat_id = chat_id
+        self._message_thread_id = message_thread_id
+        self._task: asyncio.Task | None = None
+
+    async def _send(self) -> None:
+        try:
+            await self._bot.send_chat_action(
+                self._chat_id, "typing", message_thread_id=self._message_thread_id
+            )
+        except TelegramAPIError:
+            pass  # не критично — просто не обновится в этот раз
+
+    async def _loop(self) -> None:
+        for _ in range(TYPING_MAX_TICKS):
+            await asyncio.sleep(TYPING_KEEPALIVE_INTERVAL_S)
+            await self._send()
+
+    async def start(self) -> None:
+        """No-op, если уже горит — вызывающие (RichStreamSession) зовут это
+        на каждый кусок текста, не только на первый."""
+        if self._task is not None and not self._task.done():
+            return
+        # Первый вызов — сразу и синхронно, не через create_task: если
+        # дальнейший код ни разу по-настоящему не приостановится (нет
+        # реального I/O-ожидания на своём пути), фоновая задача рискует не
+        # получить ни одного шанса выполниться до stop() — индикатор не
+        # загорелся бы вовсе. Цикл-повтор ниже нужен только чтобы Telegram
+        # не погасил его сам примерно через 5с.
+        await self._send()
+        self._task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        if self._task is None:
+            return
+        self._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._task
+        self._task = None
 
 
 @contextlib.asynccontextmanager
 async def typing_action(bot: Bot, chat_id: int, message_thread_id: int | None = None):
-    """Держать индикатор «печатает» в чате, пока не выйдем из блока.
-
-    Решение пользователя 2026-08-01: индикатор должен гореть не с момента,
-    как человек написал, а именно пока модель готовит ответ — во время
-    presence-проверки и прогрева контейнера/машины (wake-сценарий,
-    bot/ai_flow.py::request_alfred) у пользователя уже есть свои текстовые
-    «шаги»/«Агнольд», дублировать typing поверх них не нужно. Поэтому этим
-    контекст-менеджером оборачивают именно вызов модели (``_ask()``), а не
-    весь хендлер целиком."""
-
-    async def _send() -> None:
-        try:
-            await bot.send_chat_action(chat_id, "typing", message_thread_id=message_thread_id)
-        except TelegramAPIError:
-            pass  # не критично — просто не обновится в этот раз
-
-    async def _loop() -> None:
-        while True:
-            await asyncio.sleep(TYPING_KEEPALIVE_INTERVAL_S)
-            await _send()
-
-    # Первый вызов — сразу и синхронно (внутри __aenter__), не через
-    # create_task: если запрос к модели ни разу по-настоящему не
-    # приостановится (нет реального I/O-ожидания на своём пути), фоновая
-    # задача рискует не получить ни одного шанса выполниться до отмены в
-    # finally — индикатор не загорелся бы вовсе. Цикл-повтор ниже нужен
-    # только чтобы Telegram не погасил его сам примерно через 5с.
-    await _send()
-    task = asyncio.create_task(_loop())
+    """Держать индикатор «печатает» в чате на весь блок — для путей без
+    покускового стрима (группы/фолбэк без rich-сессии), где нет отдельного
+    сигнала "текст реально льётся" и лучшее приближение — вся генерация
+    ответа целиком (см. bot/ai_flow.py::_typing_while_asking)."""
+    indicator = TypingIndicator(bot, chat_id, message_thread_id)
+    await indicator.start()
     try:
         yield
     finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        await indicator.stop()
 
 
 async def send_with_retry(
@@ -296,6 +334,39 @@ class Notifier:
                 )
                 return None
         log.error("Исчерпаны ретраи отправки фото в chat=%s", chat_id)
+        return None
+
+    async def send_voice(
+        self,
+        chat_id: int,
+        voice: BufferedInputFile | bytes,
+        *,
+        filename: str | None = None,
+        caption: str | None = None,
+        message_thread_id: int | None = None,
+    ) -> int | None:
+        if isinstance(voice, bytes):
+            voice = BufferedInputFile(voice, filename=filename or "voice.ogg")
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                msg = await self._bot.send_voice(
+                    chat_id, voice, caption=caption, message_thread_id=message_thread_id
+                )
+                return msg.message_id
+            except TelegramRetryAfter as exc:
+                wait = exc.retry_after + 1
+                log.warning("429 от Telegram (chat=%s), жду %ss", chat_id, wait)
+                await asyncio.sleep(wait)
+            except TelegramAPIError as exc:
+                log.warning(
+                    "Не удалось отправить голосовое в chat=%s (попытка %s/%s): %s",
+                    chat_id,
+                    attempt,
+                    MAX_RETRIES,
+                    exc,
+                )
+                return None
+        log.error("Исчерпаны ретраи отправки голосового в chat=%s", chat_id)
         return None
 
     async def delete_message(self, chat_id: int, message_id: int) -> None:

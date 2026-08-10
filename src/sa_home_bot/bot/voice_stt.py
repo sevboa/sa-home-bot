@@ -33,7 +33,6 @@ from aiogram.types import Message
 
 from sa_home_bot import wake_core
 from sa_home_bot.bot import ai_flow
-from sa_home_bot.bot.notifier import typing_action
 from sa_home_bot.bot.rich_stream import RichStreamSession
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
@@ -150,22 +149,22 @@ async def transcribe_voice_message(
         return None
 
     await _push_status(message, rich_session, VOICE_LISTENING_TEXT_PLAIN, VOICE_LISTENING_TEXT)
-    # "печатает..." поверх thinking-блока — тот же двойной индикатор, что и
-    # у текстового ответа (_typing_while_asking + push_status в ai_flow.py).
-    async with typing_action(
-        message.bot, message.chat.id, message_thread_id=message.message_thread_id
-    ):
-        buf = await message.bot.download(voice)
-        raw = buf.read()
+    # Решение пользователя 2026-08-11: typing («печатает») больше НЕ горит
+    # здесь — распознавание голосового не пишет текст ответа, за пользователя
+    # уже говорит статус "слушаю" выше (thinking-блок/plain-фолбэк). Раньше
+    # оба индикатора горели одновременно ("двойной индикатор") — typing
+    # обещал печатающийся текст, которого в этой фазе ещё нет.
+    buf = await message.bot.download(voice)
+    raw = buf.read()
 
-        try:
-            transcript = await _transcribe(node_link, raw, message.chat.id, config)
-        except (ProtoError, ServiceUnavailableError, TimeoutError) as exc:
-            log.warning("voice_stt: не удалось распознать голосовое: %s", exc)
-            await _finalize_status(
-                message, rich_session, ai_flow.ALBERT_HICCUP_MD, ai_flow.ALBERT_HICCUP
-            )
-            return None
+    try:
+        transcript = await _transcribe(node_link, raw, message.chat.id, config)
+    except (ProtoError, ServiceUnavailableError, TimeoutError) as exc:
+        log.warning("voice_stt: не удалось распознать голосовое: %s", exc)
+        await _finalize_status(
+            message, rich_session, ai_flow.ALBERT_HICCUP_MD, ai_flow.ALBERT_HICCUP
+        )
+        return None
 
     if not transcript.strip():
         await _finalize_status(

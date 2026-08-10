@@ -6,6 +6,7 @@ Ollama/WSL не трогаем (monkeypatch sa_home_bot.llm.service.ollama) — 
 
 from __future__ import annotations
 
+import base64
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -13,7 +14,7 @@ import pytest
 from sa_home_bot.config import LlmConfig, Settings
 from sa_home_bot.llm import service as llm_service
 from sa_home_bot.llm.service import LlmService
-from sa_home_bot.proto.messages import ERR_BAD_REQUEST, ProtoError
+from sa_home_bot.proto.messages import ERR_BAD_REQUEST, ERR_INTERNAL, ProtoError
 
 PERSONA = "ТЕСТОВЫЙ ПЕРСОНАЖ (persona_prompt в тестовом конфиге)"
 
@@ -50,6 +51,8 @@ def test_describe_declares_ask_chat_sleep_warmup():
         "look_at_photo",
         "transcribe_voice",
         "stt_chunk",
+        "synthesize_speech",
+        "tts_chunk",
         "chat_progress",
         "sleep",
         "warmup",
@@ -535,6 +538,127 @@ async def test_sweep_stt_uploads_evicts_only_stale_sessions():
 
     assert set(svc._stt_uploads) == {"fresh"}
     assert set(svc._stt_upload_touched) == {"fresh"}
+
+
+# --- голосовые ОТВЕТЫ /ai (синтез — Coqui XTTS v2 на CPU, см. llm/tts.py;
+# здесь tts.synthesize_speech замокан целиком — своя логика проверяется
+# отдельно в test_llm_tts.py, здесь только обвязка протокола) ---
+
+
+async def test_synthesize_speech_inline_calls_tts_and_returns_audio(monkeypatch):
+    seen = {}
+
+    async def fake_synthesize(text, cfg):
+        seen["text"] = text
+        return b"fake-ogg-bytes"
+
+    monkeypatch.setattr(llm_service.tts, "synthesize_speech", fake_synthesize)
+    svc = LlmService(_settings())
+    result = await svc.run_command("synthesize_speech", {"text": "привет, сэр", "chat_id": 1})
+    assert result == {"audio_b64": _b64(b"fake-ogg-bytes"), "format": "ogg"}
+    assert seen["text"] == "привет, сэр"
+
+
+async def test_synthesize_speech_rejects_empty_text():
+    svc = LlmService(_settings())
+    with pytest.raises(ProtoError) as excinfo:
+        await svc.run_command("synthesize_speech", {"text": "   "})
+    assert excinfo.value.code == ERR_BAD_REQUEST
+
+
+async def test_synthesize_speech_truncates_long_text(monkeypatch):
+    seen = {}
+
+    async def fake_synthesize(text, cfg):
+        seen["text"] = text
+        return b"x"
+
+    monkeypatch.setattr(llm_service.tts, "synthesize_speech", fake_synthesize)
+    svc = LlmService(_settings(tts_max_text_chars=5))
+    await svc.run_command("synthesize_speech", {"text": "0123456789"})
+    assert seen["text"] == "01234"
+
+
+async def test_synthesize_speech_wraps_exception_as_internal_proto_error(monkeypatch):
+    async def fake_synthesize(text, cfg):
+        raise RuntimeError("модель упала")
+
+    monkeypatch.setattr(llm_service.tts, "synthesize_speech", fake_synthesize)
+    svc = LlmService(_settings())
+    with pytest.raises(ProtoError) as excinfo:
+        await svc.run_command("synthesize_speech", {"text": "привет"})
+    assert excinfo.value.code == ERR_INTERNAL
+
+
+async def test_synthesize_speech_large_payload_returns_session(monkeypatch):
+    payload = b"x" * (llm_service._INLINE_TTS_B64_BYTES + 1000)
+
+    async def fake_synthesize(text, cfg):
+        return payload
+
+    monkeypatch.setattr(llm_service.tts, "synthesize_speech", fake_synthesize)
+    svc = LlmService(_settings())
+    result = await svc.run_command("synthesize_speech", {"text": "длинный ответ"})
+    assert "audio_b64" not in result
+    assert result["size"] == len(payload)
+    assert result["sha256"] == _sha256_hex(payload)
+    session_id = result["session_id"]
+    assert svc._tts_sessions[session_id] == payload
+
+
+async def test_tts_download_chunk_returns_data_and_eof(monkeypatch):
+    async def fake_synthesize(text, cfg):
+        return b"x" * (llm_service._INLINE_TTS_B64_BYTES + 1000)
+
+    monkeypatch.setattr(llm_service.tts, "synthesize_speech", fake_synthesize)
+    svc = LlmService(_settings())
+    started = await svc.run_command("synthesize_speech", {"text": "текст"})
+    session_id = started["session_id"]
+
+    first = await svc.run_command(
+        "tts_chunk", {"session_id": session_id, "offset": 0, "length": 500}
+    )
+    assert first["eof"] is False
+    assert len(base64.b64decode(first["data_b64"])) == 500
+
+    # Дочитываем остаток одним куском большего размера, чем осталось данных.
+    rest = await svc.run_command(
+        "tts_chunk", {"session_id": session_id, "offset": 500, "length": 10_000_000}
+    )
+    assert rest["eof"] is True
+    # Сессия одноразовая — вычищена после eof.
+    assert session_id not in svc._tts_sessions
+
+
+async def test_tts_download_chunk_unknown_session_rejected():
+    svc = LlmService(_settings())
+    with pytest.raises(ProtoError) as excinfo:
+        await svc.run_command("tts_chunk", {"session_id": "нет-такой", "offset": 0})
+    assert excinfo.value.code == ERR_BAD_REQUEST
+
+
+async def test_tts_download_chunk_rejects_negative_offset():
+    svc = LlmService(_settings())
+    svc._tts_sessions["s1"] = b"data"
+    with pytest.raises(ProtoError) as excinfo:
+        await svc.run_command("tts_chunk", {"session_id": "s1", "offset": -1})
+    assert excinfo.value.code == ERR_BAD_REQUEST
+
+
+async def test_sweep_tts_sessions_evicts_only_stale_sessions():
+    svc = LlmService(_settings())
+    now = datetime.now(tz=UTC)
+    svc._tts_sessions["stale"] = b"old"
+    svc._tts_session_touched["stale"] = now - timedelta(
+        seconds=llm_service._TTS_SESSION_TTL_S + 1
+    )
+    svc._tts_sessions["fresh"] = b"new"
+    svc._tts_session_touched["fresh"] = now - timedelta(seconds=1)
+
+    svc._sweep_tts_sessions()
+
+    assert set(svc._tts_sessions) == {"fresh"}
+    assert set(svc._tts_session_touched) == {"fresh"}
 
 
 # --- request_id / chat_progress (этап 34, Фаза 2 — Rich-стрим ответов) ---

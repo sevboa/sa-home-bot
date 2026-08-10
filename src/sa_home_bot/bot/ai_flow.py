@@ -290,6 +290,7 @@ TOOL_STATUS_TEXT: dict[str, str] = {
     "node_manage": "Альфред возится с рычагами в подсобке",
     "torrents": "Альфред заглядывает в качалку",
     "dismiss": "Альфред неспешно собирается",
+    "voice_mode": "Альфред щёлкает тумблером на пульте",
     "memory": "Альфред роется в своих записях",
     "vpn": "Альфред готовит потайной ход",
     "web_search": "Альфред увлечённо сёрфит интернет",
@@ -913,6 +914,21 @@ async def request_alfred(
                 return
             await rich_session.push_status(TOOL_STATUS_TEXT.get(name, TOOL_STATUS_DEFAULT))
 
+        async def _generate(*args: Any, **kwargs: Any) -> str:
+            # typing («печатает») — решение пользователя 2026-08-11: только
+            # вокруг вызова, который реально пишет ответ (не роутер, не
+            # ожидание пробуждения). С rich_session индикатором управляет
+            # сама сессия по факту прихода текста (RichStreamSession.
+            # _push_markdown/_push_thinking) — обёртка тут была бы вторым,
+            # несинхронным источником того же send_chat_action и держала бы
+            # typing горящим и во время статусов/тулов, что мы и убираем.
+            # Без rich_session (группы/фолбэк) отдельного сигнала "текст
+            # реально льётся" нет — вся генерация целиком лучшее приближение.
+            if rich_session is not None:
+                return await run_chat_loop(*args, **kwargs)
+            async with _typing_while_asking(message):
+                return await run_chat_loop(*args, **kwargs)
+
         if settings.llm.mode == "single_call":
             # Режимы работы с моделью — LlmConfig.mode (config.py). Роутеру
             # нечего решать, если у модели выбор "думать/не думать" всё равно
@@ -923,7 +939,7 @@ async def request_alfred(
             # каждым приветствием» (222 токена на пять слов ответа, 23 с в
             # проде), и лечится это ровно явным think=false. Подробности и
             # цифры — LlmConfig.single_call_think.
-            return await run_chat_loop(
+            return await _generate(
                 node_link,
                 dst,
                 timeout,
@@ -992,7 +1008,7 @@ async def request_alfred(
         # пользователя: вернуть явный булев think, как и было, роутер
         # решает за персонажа предсказуемо, а не полагаться на то, умеет
         # ли рендерер сам решать.
-        return await run_chat_loop(
+        return await _generate(
             node_link,
             dst,
             timeout,
@@ -1053,8 +1069,7 @@ async def request_alfred(
 
     if not known_unavailable:
         try:
-            async with _typing_while_asking(message):
-                return await _ask()
+            return await _ask()
         except ServiceUnavailableError:
             pass
         except ProtoError as exc:
@@ -1108,8 +1123,7 @@ async def request_alfred(
     # друг друга.
     await _announce_steps()
     try:
-        async with _typing_while_asking(message):
-            return await _ask()
+        return await _ask()
     except ServiceUnavailableError:
         await _announce_albert(ALBERT_UNAVAILABLE, ALBERT_UNAVAILABLE_MD)
         return None

@@ -27,6 +27,7 @@ class FakeBot:
         self.draft_fails_times = 0
         self.retry_after_times = 0
         self._next_id = 1
+        self.typing_actions: list[int] = []
 
     async def send_rich_message_draft(
         self, *, chat_id, draft_id, rich_message, message_thread_id=None
@@ -62,6 +63,9 @@ class FakeBot:
         msg = FakeSentMessage(self._next_id)
         self._next_id += 1
         return msg
+
+    async def send_chat_action(self, chat_id, action, message_thread_id=None) -> None:
+        self.typing_actions.append(chat_id)
 
 
 @pytest.fixture(autouse=True)

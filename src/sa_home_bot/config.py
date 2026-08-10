@@ -509,6 +509,25 @@ class LlmConfig(BaseModel):
     stt_request_timeout_s: float = Field(default=300.0, gt=0)
     stt_tmp_dir: Path = Path("./data/stt-tmp")
     stt_model_dir: Path = Path("./data/stt-models")
+    # Голосовые ОТВЕТЫ /ai (синтез, llm/tts.py) — тоже на стороне службы llm,
+    # тот же CPU-принцип, что у STT, но другая модель: Coqui XTTS v2 (voice
+    # cloning по референсному клипу), не faster-whisper. Голос Альфреда — не
+    # выбор из готового набора дикторов, а один референсный WAV-образец
+    # (6-10с чистой речи, без дефектов в самой записи — картавость персонажа
+    # добавляется отдельно через подмену букв в тексте, см.
+    # llm/speech_therapy.py, синтезатору она не нужна). Решение пользователя
+    # 2026-08-11: пока финальный голос не выбран — временный референс в духе
+    # Володарского/Гаврилова. Смена референса — просто замена файла по этому
+    # пути, без перезапуска модели (speaker_wav передаётся при каждом вызове).
+    tts_language: str = "ru"
+    tts_reference_voice_path: Path = Path("./data/tts-voice-ref/alfred.wav")
+    tts_max_text_chars: int = Field(default=2000, gt=0)
+    # XTTS v2 на CPU заметно медленнее faster-whisper (RTF примерно 1-2 даже
+    # на серверном Xeon) — таймаут кратно больше stt_request_timeout_s.
+    tts_request_timeout_s: float = Field(default=240.0, gt=0)
+    tts_tmp_dir: Path = Path("./data/tts-tmp")
+    tts_model_dir: Path = Path("./data/tts-models")
+    tts_opus_bitrate: str = "32k"
 
 
 def resolve_think(llm: LlmConfig, *, needs_think: bool) -> bool | None:

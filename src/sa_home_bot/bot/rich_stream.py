@@ -28,7 +28,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import InputRichBlockThinking, InputRichMessage, Message, ReplyParameters
 
-from sa_home_bot.bot.notifier import send_with_retry
+from sa_home_bot.bot.notifier import TypingIndicator, send_with_retry
 
 log = logging.getLogger(__name__)
 
@@ -87,6 +87,10 @@ class RichStreamSession:
         # (сессия только создана или уже финализирована persисted-сообщением).
         self._active_message: InputRichMessage | None = None
         self._keepalive_task: asyncio.Task | None = None
+        # Решение пользователя 2026-08-11: typing («печатает») горит только
+        # пока реально льётся текст ответа (_push_markdown), не во время
+        # статусов/мышления/тулов (_push_thinking) — см. TypingIndicator.
+        self._typing = TypingIndicator(bot, chat_id, message_thread_id)
 
     async def _send_draft(self, rich_message: InputRichMessage) -> None:
         try:
@@ -141,6 +145,7 @@ class RichStreamSession:
         if not markdown_body or signature == self._last_sent:
             return
         self._last_sent = signature
+        await self._typing.start()
         markdown = ALFRED_PREFIX_MD + markdown_body if with_prefix else markdown_body
         await self._send_draft(InputRichMessage(markdown=markdown))
         self._ensure_keepalive()
@@ -150,6 +155,9 @@ class RichStreamSession:
         if not text or signature == self._last_sent:
             return
         self._last_sent = signature
+        # Статус — не набор текста: "печатает" тут неправда, за пользователя
+        # уже говорит сам thinking-блок (серая анимация "печатает мысль").
+        await self._typing.stop()
         await self._send_draft(InputRichMessage(blocks=[InputRichBlockThinking(text=text)]))
         self._ensure_keepalive()
 
@@ -207,8 +215,10 @@ class RichStreamSession:
         # следующий push_status/on_partial не должен считать её актуальной.
         self._last_sent = None
         # Черновика больше нет — keep-alive (см. _KEEPALIVE_INTERVAL_S)
-        # больше нечего пересылать, останавливаем фоновую задачу.
+        # больше нечего пересылать, останавливаем фоновую задачу. typing
+        # тоже: реплика уже дошла до чата, ответ более не "печатается".
         self._stop_keepalive()
+        await self._typing.stop()
         return sent
 
     async def finalize(self, raw: str, reply_to_message_id: int | None = None) -> Message | None:

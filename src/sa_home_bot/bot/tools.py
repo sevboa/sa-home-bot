@@ -57,7 +57,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sa_home_bot import wake_core
-from sa_home_bot.bot import commands, invites, recipients
+from sa_home_bot.bot import commands, invites, recipients, voice_mode
 from sa_home_bot.bot.monitor_state import parse_disk_summary, parse_health_state
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings, resolve_think
@@ -2048,6 +2048,57 @@ _DECL_DISMISS: dict[str, Any] = {
 }
 
 
+# --- voice_mode: тумблер голосовых ответов в этом чате ---
+#
+# Личная настройка формата ОТВЕТА, не системная операция — requires=None,
+# как у calc/get_weather: ничего про систему не раскрывает, доступна без
+# подписки. Состояние — per-chat в app_state (bot/voice_mode.py), эффект
+# немедленный (в отличие от dismiss, тут не нужна отложенная исполнение
+# после текущего ответа — сам этот ответ ещё может уйти текстом, следующий
+# уже будет голосом).
+
+
+async def tool_voice_mode(ctx: ToolContext, args: dict[str, Any]) -> str:
+    if ctx.store is None or ctx.chat_id is None:
+        return "недоступно: голосовой режим привязан к разговору, а его сейчас нет"
+    mode = str(args.get("mode") or "").strip()
+    if mode not in ("voice", "text"):
+        return f"не умею: {mode or 'без уточнения'}"
+    await voice_mode.set_enabled(ctx.store, ctx.chat_id, mode == "voice")
+    return (
+        "принято: теперь отвечаю голосовыми, пока не попросишь вернуть текст"
+        if mode == "voice"
+        else "принято: возвращаюсь к обычным текстовым ответам"
+    )
+
+
+_DECL_VOICE_MODE: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "voice_mode",
+        "description": (
+            "Переключить формат твоих ответов В ЭТОМ ЧАТЕ: текстом или "
+            "голосовым сообщением. Вызывай по прямой просьбе собеседника — "
+            "«отвечай голосом», «давай голосовыми», «переходи на войсы» "
+            "(mode=voice), либо «вернись к тексту», «хватит войсов», «пиши "
+            "текстом» (mode=text). Это переключатель на весь разговор до "
+            "следующей такой просьбы, не разовое действие на одно сообщение."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["voice", "text"],
+                    "description": "voice — отвечать голосом; text — отвечать текстом",
+                },
+            },
+            "required": ["mode"],
+        },
+    },
+}
+
+
 # --- memory: долгая память о чате (служба memory) ---
 #
 # Модель не выбирает, чью память трогать: chat_id проставляет бот из
@@ -3279,6 +3330,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         declaration=_DECL_DISMISS,
         variants=_DISMISS_VARIANTS,
     ),
+    ToolSpec(name="voice_mode", handler=tool_voice_mode, declaration=_DECL_VOICE_MODE),
     ToolSpec(
         name="web_search",
         handler=tool_web_search,
