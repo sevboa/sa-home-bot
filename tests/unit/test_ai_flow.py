@@ -681,12 +681,13 @@ async def test_unavailable_then_woken_within_30s(store, monkeypatch):
 
 async def test_unavailable_then_woken_within_30s_via_rich_status(store, monkeypatch):
     # Тот же сценарий, что test_unavailable_then_woken_within_30s, но с
-    # rich_session: «шаги» и «Агнольд» идут статусами в один черновик
-    # (push_status), а не отдельными персистентными сообщениями — Агнольд
-    # заменяет предыдущий статус, а не добавляется вторым сообщением.
+    # rich_session: «шаги» (до и после wake) идут эфемерными статусами в
+    # черновик (push_status), а реплика Агнольда — своя персистентная
+    # message.answer, как и в фолбэк-пути (живая находка 2026-08-10: Агнольд
+    # отдельный персонаж, его реплика должна остаться в чате, не перекрываясь
+    # ни «шагами», ни финальным ответом Альфреда).
     await wake_state.remember(store, "mycraft", MYCRAFT_WAKE)
     monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
-    monkeypatch.setattr(ai_flow, "ARNOLD_WAKING_DISPLAY_S", 0)
     message = FakeMessage()
     rich_session = FakeRichSession()
     link = FakeNodeLink(
@@ -705,12 +706,8 @@ async def test_unavailable_then_woken_within_30s_via_rich_status(store, monkeypa
     )
 
     assert raw == "Сейчас подойду"
-    assert message.answers == []
-    assert rich_session.statuses == [
-        ai_flow.STEPS_TEXT_PLAIN,
-        ai_flow.ARNOLD_WAKING_PLAIN,
-        ai_flow.STEPS_TEXT_PLAIN,
-    ]
+    assert message.answers == [ai_flow.ARNOLD_WAKING]
+    assert rich_session.statuses == [ai_flow.STEPS_TEXT_PLAIN, ai_flow.STEPS_TEXT_PLAIN]
     assert link.wol_sent == [{"mac": MYCRAFT_WAKE["mac"]}]  # разбудили молча
 
 
