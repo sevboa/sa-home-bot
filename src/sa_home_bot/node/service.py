@@ -23,7 +23,7 @@ from sa_home_bot.node import assignments as assignments_mod
 from sa_home_bot.node import kind as node_kinds
 from sa_home_bot.node import update as node_update
 from sa_home_bot.node.lease import LeaseManager
-from sa_home_bot.node.peers import NodeRouter, PeerLink
+from sa_home_bot.node.peers import LOCAL_HEARTBEAT_TIMEOUT_S, NodeRouter, PeerLink
 from sa_home_bot.node.replication import (
     ACTION_GET_INSTANCE_CONFIG,
     ACTION_LIST_INSTANCES,
@@ -245,7 +245,9 @@ class NodeService:
             lambda pid, ep: PeerLink(pid, ep, token=swarm_token, self_node=self._node)
         )
         self._make_local_link = make_local_link or (
-            lambda name, ep: PeerLink(name, ep, token=swarm_token)
+            lambda name, ep: PeerLink(
+                name, ep, token=swarm_token, heartbeat_timeout=LOCAL_HEARTBEAT_TIMEOUT_S
+            )
         )
         # swarm_join: без своего TCP-адреса нечего давать соседям для обратной
         # связи — действие объявляется только когда есть куда стучаться.

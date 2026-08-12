@@ -66,6 +66,15 @@ HEARTBEAT_TIMEOUT_S = 4.0
 # не повод рвать рабочий линк, два подряд — уже отказ.
 HEARTBEAT_MISSES = 2
 
+# Локальным службам (тот же хост, линк node -> своя же служба, см.
+# node/app.py::make_link_factories) 4 секунд мало: CPU-тяжёлая работа внутри
+# службы (например XTTS-синтез в llm/tts.py) может ненадолго не пускать её
+# event loop ответить на hello(), и линк рвётся посреди уже летящего
+# запроса — тот теряется вместе с соединением, хотя служба на самом деле
+# жива и просто занята. Сетевым пирам такой запас не нужен: там сама суть
+# heartbeat — поймать зависший процесс/обрыв сети быстро.
+LOCAL_HEARTBEAT_TIMEOUT_S = 20.0
+
 # Инкарнация процесса: новая на каждый запуск ноды. Сосед по ней отличает
 # «я перезагрузился» от «я просто переподключился».
 #
@@ -145,8 +154,10 @@ class PeerLink:
         on_endpoints: Callable[[str, list[str]], None] | None = None,
         reconnect_delay: float = RECONNECT_DELAY_S,
         self_node: str = "",
+        heartbeat_timeout: float = HEARTBEAT_TIMEOUT_S,
     ) -> None:
         self.name = name
+        self._heartbeat_timeout = heartbeat_timeout
         raw = [endpoint] if isinstance(endpoint, (str, Path, Endpoint)) else list(endpoint)
         parsed = _parse_all(raw)
         if not parsed:
@@ -327,7 +338,7 @@ class PeerLink:
         while True:
             await asyncio.sleep(HEARTBEAT_INTERVAL_S)
             try:
-                await asyncio.wait_for(client.hello(), timeout=HEARTBEAT_TIMEOUT_S)
+                await asyncio.wait_for(client.hello(), timeout=self._heartbeat_timeout)
                 misses = 0
             except (ConnectionError, OSError, TimeoutError, ProtoError) as exc:
                 misses += 1

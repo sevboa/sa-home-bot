@@ -25,7 +25,7 @@ from sa_home_bot.node import update as node_update
 from sa_home_bot.node.discovery import SwarmDiscovery
 from sa_home_bot.node.instances import InstanceStore, instances_dir
 from sa_home_bot.node.lease import LeaseManager
-from sa_home_bot.node.peers import NodeRouter, PeerLink
+from sa_home_bot.node.peers import LOCAL_HEARTBEAT_TIMEOUT_S, NodeRouter, PeerLink
 from sa_home_bot.node.replication import (
     EVENT_INSTANCE_CONFIG_CHANGED,
     ConfigReplicator,
@@ -170,7 +170,13 @@ def make_link_factories(
         # локальные службы (llm — llm_idle_sleep, tasks — task_result и
         # т.п.) тоже могут эмитить события, которые нужно довезти до бота
         # через ту же ретрансляцию, что уже работает для событий пиров.
-        return PeerLink(service, endpoint, token=settings.swarm.token, on_event=on_local_event)
+        return PeerLink(
+            service,
+            endpoint,
+            token=settings.swarm.token,
+            on_event=on_local_event,
+            heartbeat_timeout=LOCAL_HEARTBEAT_TIMEOUT_S,
+        )
 
     return make_peer_link, make_local_link
 
