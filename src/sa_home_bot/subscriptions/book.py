@@ -13,6 +13,7 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from sa_home_bot.bot.telegram_retry import REQUEST_TIMEOUT_S, call_with_network_retry
 from sa_home_bot.config import GuestSubscriptionConfig, SubscriptionConfig
 from sa_home_bot.subscriptions.models import SOURCE_GUEST, Subscription
 
@@ -115,11 +116,23 @@ class SubscriptionBook:
         self._subs = [broken if s.chat_id == chat_id else s for s in self._subs]
 
     async def validate_on_startup(self, bot) -> list[ValidationIssue]:
-        """Проверить доступность чатов через bot.get_chat; недоступные → broken."""
+        """Проверить доступность чатов через bot.get_chat; недоступные → broken.
+
+        get_chat идёт через bounded retry (bot/telegram_retry.py, короткий
+        бюджет — сеть здесь уже подтверждена предыдущим успешным get_me()):
+        транзиентный сетевой блип не должен молча запирать владельца broken-
+        подпиской до следующего рестарта бота (живой инцидент 2026-08-12).
+        После исчерпания попыток broken по-прежнему означает "недоступен".
+        """
         issues: list[ValidationIssue] = []
         for sub in list(self._subs):
             try:
-                await bot.get_chat(sub.chat_id)
+                await call_with_network_retry(
+                    lambda sub=sub: bot.get_chat(sub.chat_id, request_timeout=REQUEST_TIMEOUT_S),
+                    what=f"get_chat({sub.chat_id})",
+                    attempts=2,
+                    delay_s=3.0,
+                )
             except Exception as exc:  # noqa: BLE001
                 self._mark_broken(sub.chat_id)
                 issue = ValidationIssue(sub.chat_id, sub.name, str(exc))

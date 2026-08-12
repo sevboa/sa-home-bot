@@ -1,3 +1,5 @@
+from aiogram.exceptions import TelegramNetworkError
+
 from sa_home_bot.config import SubscriptionConfig
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
@@ -97,7 +99,7 @@ async def test_validate_on_startup_marks_broken():
     book = _book()
 
     class FakeBot:
-        async def get_chat(self, chat_id):
+        async def get_chat(self, chat_id, request_timeout=None):
             if chat_id == 2:
                 raise RuntimeError("chat not found")
             return object()
@@ -106,3 +108,30 @@ async def test_validate_on_startup_marks_broken():
     assert [i.chat_id for i in issues] == [2]
     assert book.for_chat(2).broken is True
     assert book.for_chat(1).broken is False
+
+
+async def test_validate_on_startup_survives_a_transient_network_blip(monkeypatch):
+    """Живой инцидент 2026-08-12: сеть моргнула ровно во время validate_on_
+    startup — один транзиентный TelegramNetworkError не должен молча запирать
+    владельца broken-подпиской до следующего рестарта бота, раз get_chat
+    ретраится (bot/telegram_retry.py)."""
+    import asyncio
+
+    async def _no_delay(_seconds):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", _no_delay)
+    book = _book()
+    calls = {"n": 0}
+
+    class FlakyBot:
+        async def get_chat(self, chat_id, request_timeout=None):
+            calls["n"] += 1
+            if chat_id == 1 and calls["n"] == 1:
+                raise TelegramNetworkError(method=None, message="timeout")
+            return object()
+
+    issues = await book.validate_on_startup(FlakyBot())
+    assert issues == []
+    assert book.for_chat(1).broken is False
+    assert book.for_chat(2).broken is False

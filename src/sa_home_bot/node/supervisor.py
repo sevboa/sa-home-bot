@@ -117,6 +117,16 @@ class SupervisedService:
     def pid(self) -> int | None:
         return self._proc.pid if self._proc is not None else None
 
+    @property
+    def process_alive(self) -> bool:
+        """Реально ли жив процесс прямо сейчас — не то же самое, что
+        status==RUNNING (тот обновится в RESTARTING/STOPPED только когда
+        _run() САМА успеет обработать выход). LeaseManager обязан проверять
+        именно этот флаг перед stop(), не status — живой инцидент
+        2026-08-12: гонка теряла падение процесса под видом штатной
+        остановки (см. node/lease.py::_decide)."""
+        return self._proc is not None and self._proc.returncode is None
+
     def to_dict(self) -> dict:
         return {
             "name": self.name,
@@ -237,7 +247,18 @@ class SupervisedService:
                 self._proc = None
                 self.last_exit_code = rc
                 if not self._desired_running:
-                    break  # остановили сами — stop() эмитит service_stopped
+                    # Кто-то (stop()/restart() или LeaseManager через них)
+                    # уже снял desired_running к этому моменту — раньше эта
+                    # ветка была абсолютно немой и именно отсутствие лога
+                    # было единственной уликой живого инцидента 2026-08-12,
+                    # когда падение процесса маскировалось под штатную
+                    # остановку. stop() сам эмитит service_stopped.
+                    log.info(
+                        "Служба %s: процесс завершился (код %s) во время "
+                        "остановки (desired_running уже снят) — не перезапускаю",
+                        self.name, rc,
+                    )
+                    break
                 if rc == FENCED_EXIT_CODE:
                     # Служба сама сообщила: её вытеснил другой экземпляр (для
                     # бота это 409 от Telegram). Перезапускать её — значит

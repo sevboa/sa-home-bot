@@ -26,10 +26,10 @@ class FakeBot:
 
         self.session = SimpleNamespace(middleware=lambda m: None, close=_close)
 
-    async def get_chat(self, chat_id):
+    async def get_chat(self, chat_id, request_timeout=None):
         return object()
 
-    async def get_me(self):
+    async def get_me(self, request_timeout=None):
         return SimpleNamespace(username="fakebot")
 
     async def set_my_commands(self, commands, scope=None):

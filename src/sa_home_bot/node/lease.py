@@ -67,6 +67,18 @@ STARTUP_SETTLE_S = 15.0
 # без бота надолго, если старший процесс явно не поднимается.
 SUPERIOR_READY_TIMEOUT_S = 45.0
 
+# Живой инцидент 2026-08-12: другой вариант той же немоты, что и в комментарии
+# выше про 2026-08-08 — на этот раз _decide() сама (не супервизор) теряла
+# падение процесса под видом штатной уступки (гонка между proc.wait() в
+# node/supervisor.py и slot.stop() отсюда, см. process_alive-проверку ниже).
+# Слот застревал в STOPPED на десятки минут/часы без единой строчки в логе.
+# Этот таймер не устраняет причину — он подстраховка "по духу": если слот
+# всё-таки не работает аномально долго, об этом должен быть виден WARNING,
+# независимо от конкретного механизма. Больше SUPERIOR_READY_TIMEOUT_S=45,
+# FAILOVER_GRACE_S=120 и FENCED_HOLDOFF_S=300, чтобы не шуметь на штатных
+# ожиданиях.
+STUCK_WARN_S = 600.0
+
 EVENT_SINGLETON_ACTIVATED = "singleton_activated"
 EVENT_SINGLETON_YIELDED = "singleton_yielded"
 
@@ -112,6 +124,7 @@ class LeaseManager:
         poll_interval_s: float = POLL_INTERVAL_S,
         settle_s: float = STARTUP_SETTLE_S,
         ready_timeout_s: float = SUPERIOR_READY_TIMEOUT_S,
+        stuck_warn_s: float = STUCK_WARN_S,
     ) -> None:
         self._settle_s = settle_s
         self._node_id = node_id
@@ -123,6 +136,7 @@ class LeaseManager:
         self._holdoff_s = holdoff_s
         self._poll_interval_s = poll_interval_s
         self._ready_timeout_s = ready_timeout_s
+        self._stuck_warn_s = stuck_warn_s
         # Мы объявили притязание на слот и ждём, пока младший уступит.
         self._claiming: set[str] = set()
         # С какого момента слот никем не занят (monotonic) — база отсчёта grace.
@@ -137,6 +151,11 @@ class LeaseManager:
         # С какого момента мы уступили слот старшему (monotonic) — база
         # отсчёта ready_timeout_s (см. _decide).
         self._yielded_since: dict[str, float] = {}
+        # С какого момента слот не в статусе RUNNING (monotonic) — база
+        # отсчёта stuck_warn_s; какие слоты уже прошли порог (не долбить
+        # WARNING на каждом тике) — см. _decide.
+        self._not_running_since: dict[str, float] = {}
+        self._stuck_warned: set[str] = set()
         self._task: asyncio.Task | None = None
 
     # --- наши слоты ---------------------------------------------------------
@@ -228,7 +247,26 @@ class LeaseManager:
 
         if slot.status == RUNNING:
             self._claiming.discard(slot.name)
+            self._not_running_since.pop(slot.name, None)
+            self._stuck_warned.discard(slot.name)
             if superior_holds:
+                if not slot.process_alive:
+                    # Процесс уже упал сам (см. bot/telegram_retry.py — даже
+                    # с bounded retry старт может не пережить долгую
+                    # недоступность сети), но SupervisedService._run() ещё не
+                    # успел это обработать — status снаружи всё ещё RUNNING.
+                    # Раньше stop() отсюда синхронно снимал desired_running
+                    # ДО того, как _run() дойдёт до проверки rc, и падение
+                    # тихо терялось под видом штатной уступки (живой инцидент
+                    # 2026-08-12). Ничего не делаем — даём _run() самому
+                    # обработать падение через обычный restart-loop.
+                    log.warning(
+                        "Аренда %s: старшая нода вернулась, но процесс уже "
+                        "упал сам — оставляю обычный перезапуск супервизора "
+                        "разбираться",
+                        slot.name,
+                    )
+                    return
                 log.info(
                     "Аренда %s: старшая нода вернулась — уступаю", slot.name
                 )
@@ -242,6 +280,17 @@ class LeaseManager:
 
         if self._fenced_until.get(slot.name, 0.0) > now:
             return  # 409 уже был: лезть снова — значит мешать тому, кто прав
+
+        since_stuck = self._not_running_since.setdefault(slot.name, now)
+        if now - since_stuck >= self._stuck_warn_s and slot.name not in self._stuck_warned:
+            self._stuck_warned.add(slot.name)
+            log.warning(
+                "Аренда %s: слот не работает уже %.0fс без перезапуска "
+                "(superior_holds=%s, claiming=%s, ready=%s) — проверьте "
+                "сеть/состояние процесса на нодах, держащих эту службу",
+                slot.name, now - since_stuck, superior_holds,
+                slot.name in self._claiming, self._ready.get(slot.name, False),
+            )
 
         if superior_holds:
             self._claiming.discard(slot.name)

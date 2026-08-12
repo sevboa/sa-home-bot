@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 
 from sa_home_bot.node.assignments import parse
@@ -43,10 +44,11 @@ class FakePeer:
 class FakeSlot:
     """Слот супервизора с управляемым статусом и записью команд."""
 
-    def __init__(self, assignment: str, status: str = STOPPED):
+    def __init__(self, assignment: str, status: str = STOPPED, *, process_alive: bool = True):
         self.assignment = parse(assignment)
         self.name = self.assignment.key
         self.status = status
+        self.process_alive = process_alive
         self.calls: list[str] = []
 
     async def start(self) -> None:
@@ -60,7 +62,7 @@ class FakeSlot:
 
 def _lease(
     node_id: str, node_kind: str, slot: FakeSlot, *peers,
-    grace_s: float = 120.0, ready_timeout_s: float = 9999.0,
+    grace_s: float = 120.0, ready_timeout_s: float = 9999.0, stuck_warn_s: float = 9999.0,
 ):
     events: list[tuple[str, dict]] = []
 
@@ -72,7 +74,7 @@ def _lease(
     router = NodeRouter(node_id, peers={p.name: p for p in peers})
     manager = LeaseManager(
         node_id, node_kind, supervisor, router=router, emit=emit,
-        grace_s=grace_s, ready_timeout_s=ready_timeout_s,
+        grace_s=grace_s, ready_timeout_s=ready_timeout_s, stuck_warn_s=stuck_warn_s,
     )
     return manager, events
 
@@ -289,6 +291,60 @@ async def test_yielded_since_resets_between_episodes():
     peer.down_since = None
     await lease.tick()
     assert slot.calls == ["stop"]  # всё ещё без "start"
+
+
+# --- гонка LeaseManager/SupervisedService (живой инцидент 2026-08-12) -------
+
+
+async def test_returning_superior_does_not_steal_a_self_inflicted_crash(caplog):
+    """Старшая нода "вернулась" (claiming), но наш процесс уже упал сам (по
+    причине, не связанной с ареndой, например TelegramNetworkError на
+    старте) — SupervisedService._run() ещё не успел обработать выход
+    (status снаружи всё ещё RUNNING). Раньше stop() отсюда синхронно снимал
+    desired_running ДО того, как _run() дойдёт до проверки rc, и падение
+    тихо терялось под видом штатной уступки. Теперь process_alive=False
+    останавливает эту ветку — обычный restart-loop сам разберётся."""
+    peer = FakePeer("alfred", {SLOT: _entry("alfred", claiming=True)})
+    slot = FakeSlot("telegram-bot@alfred:standby", status=RUNNING, process_alive=False)
+    lease, events = _lease("jeeves", KIND_VPS, slot, peer, grace_s=0.0)
+    with caplog.at_level(logging.WARNING, logger="sa_home_bot.node.lease"):
+        await lease.tick()
+    assert slot.calls == []  # stop() НЕ вызван
+    assert events == []  # EVENT_SINGLETON_YIELDED не эмитится
+    assert lease.local_state()[SLOT]["claiming"] is False
+    assert any("процесс уже" in r.message for r in caplog.records)
+
+
+async def test_stuck_slot_warns_once_past_threshold(caplog):
+    """Слот, который долго не работает (не RUNNING), должен быть виден в
+    логе хотя бы через WARNING — раньше этот класс инцидентов был совсем
+    немым (единственной уликой было отсутствие ожидаемых строк)."""
+    slot = FakeSlot("telegram-bot@alfred:standby")  # STOPPED, без пиров
+    lease, _ = _lease("jeeves", KIND_VPS, slot, grace_s=999.0, stuck_warn_s=0.0)
+    with caplog.at_level(logging.WARNING, logger="sa_home_bot.node.lease"):
+        await lease.tick()
+    assert slot.calls == []  # grace ещё не истёк — не должен запускаться
+    assert any("не работает" in r.message for r in caplog.records)
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="sa_home_bot.node.lease"):
+        await lease.tick()  # второй тик — не долбить WARNING на каждом тике
+    assert not any("не работает" in r.message for r in caplog.records)
+
+
+async def test_stuck_tracker_resets_once_the_slot_runs_again():
+    """Слот снова RUNNING — счётчик "не работает" не должен пережить это и
+    ошибочно сработать в следующем, уже не связанном эпизоде."""
+    slot = FakeSlot("telegram-bot@alfred")
+    lease, _ = _lease("alfred", KIND_SERVER, slot, stuck_warn_s=0.0)
+    await lease.tick()  # свободна — берёт сразу (активная роль, grace=0);
+    assert slot.calls == ["start"]  # тут же и регистрирует "не работает"
+    assert SLOT in lease._not_running_since  # (со статусом STOPPED на входе)
+
+    await lease.tick()  # на этот раз status уже RUNNING — сброс
+    assert slot.calls == ["start"]
+    assert SLOT not in lease._not_running_since
+    assert SLOT not in lease._stuck_warned
 
 
 # --- fencing ----------------------------------------------------------------

@@ -29,6 +29,7 @@ from sa_home_bot.bot.node_events import build_node_event_handler
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.bot.setup import build_bot, build_dispatcher, set_bot_commands
+from sa_home_bot.bot.telegram_retry import REQUEST_TIMEOUT_S, call_with_network_retry
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.bot.torrent_pending import PendingTorrents
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
@@ -74,7 +75,15 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
     # 4. Bot + Notifier + watchdog связи.
     bot = build_bot(settings.telegram.token)
     notifier = Notifier(bot)
-    bot_username = (await bot.get_me()).username
+    # Первый сетевой вызов Bot API на старте — после ребута сеть бывает
+    # частично поднята (DNS уже резолвится, HTTP до Telegram ещё нет), см.
+    # bounded retry ниже по причине живого инцидента 2026-08-12.
+    bot_username = (
+        await call_with_network_retry(
+            lambda: bot.get_me(request_timeout=REQUEST_TIMEOUT_S),
+            what="get_me() при старте бота",
+        )
+    ).username
 
     async def on_reconnect(downtime: float) -> None:
         await broadcast_system(book, notifier, render_link_restored(downtime))
@@ -138,7 +147,13 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
     async def _report_bot_ready() -> None:
         # bot.get_me() (шаг 4 выше) уже подтвердил живую сеть/DNS/Telegram —
         # это лучшее доказательство готовности, которое у нас вообще есть, и
-        # именно там падал процесс в живом инциденте 2026-08-08. Отчёт —
+        # именно там падал процесс в живых инцидентах 2026-08-08 и 2026-08-12.
+        # С 2026-08-12 get_me() обёрнут в bounded retry (bot/telegram_retry.
+        # py) — короткие сетевые блипы сразу после ребута он переживает сам;
+        # если сеть не ожила и после ретраев, процесс всё равно падает
+        # намеренно, и восстановлением занимается restart-loop супервизора
+        # (node/supervisor.py) вместе с фиксом гонки в node/lease.py, из-за
+        # которой раньше падение синглтон-службы иногда терялось. Отчёт —
         # best-effort: сбой здесь не должен ронять бота (get_me() уже прошёл,
         # это важнее), а node_link сам вызовет этот хук заново при каждом
         # следующем переподключении к ноде (см. bot/service_link.py
