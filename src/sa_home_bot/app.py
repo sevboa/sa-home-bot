@@ -73,7 +73,7 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
     book = SubscriptionBook.from_config(settings.subscriptions, settings.guest_subscriptions)
 
     # 4. Bot + Notifier + watchdog связи.
-    bot = build_bot(settings.telegram.token)
+    bot = build_bot(settings.telegram.token, settings.telegram.proxy)
     notifier = Notifier(bot)
     # Первый сетевой вызов Bot API на старте — после ребута сеть бывает
     # частично поднята (DNS уже резолвится, HTTP до Telegram ещё нет), см.

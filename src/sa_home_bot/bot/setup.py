@@ -11,6 +11,7 @@ import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 
 from sa_home_bot.bot.handlers import (
@@ -46,8 +47,11 @@ from sa_home_bot.subscriptions.book import SubscriptionBook
 log = logging.getLogger(__name__)
 
 
-def build_bot(token: str) -> Bot:
-    return Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+def build_bot(token: str, proxy: str = "") -> Bot:
+    session = AiohttpSession(proxy=proxy) if proxy else None
+    return Bot(
+        token, session=session, default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+    )
 
 
 def build_dispatcher(book: SubscriptionBook, gate: Gatekeeper) -> Dispatcher:

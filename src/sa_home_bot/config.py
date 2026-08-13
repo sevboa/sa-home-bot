@@ -66,6 +66,10 @@ def unknown_config_keys(
 
 class TelegramConfig(BaseModel):
     token: str = ""
+    # Прокси для исходящих вызовов Bot API (aiogram/aiohttp-socks), напр.
+    # "socks5://100.111.4.42:1080" — на случай блокировки api.telegram.org
+    # с этой ноды напрямую. Пусто — соединение без прокси (по умолчанию).
+    proxy: str = ""
 
 
 class DatabaseConfig(BaseModel):
