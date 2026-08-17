@@ -645,6 +645,31 @@ def build_node_event_handler(
             await store.record_event(name, None, issued_text, datetime.now(tz=UTC))
             await notify_admins(book, notifier, issued_text)
             return
+        elif name == vpn_protocol.EVENT_VPN_CHECK_FAILED:
+            node, target = data.get("node"), data.get("target")
+            if not node or not target:
+                return
+            consecutive = data.get("consecutive")
+            failed_text = (
+                f"⚠️ VPN: нода <code>{html.escape(str(node))}</code> — "
+                f"{html.escape(str(target))} недоступен через туннель"
+                + (f" ({consecutive} проверок подряд)" if consecutive else "")
+                + "."
+            )
+            await store.record_event(name, node, failed_text, datetime.now(tz=UTC))
+            await notify_admins(book, notifier, failed_text)
+            return
+        elif name == vpn_protocol.EVENT_VPN_CHECK_RECOVERED:
+            node, target = data.get("node"), data.get("target")
+            if not node or not target:
+                return
+            recovered_text = (
+                f"✅ VPN: нода <code>{html.escape(str(node))}</code> — "
+                f"{html.escape(str(target))} снова доступен через туннель."
+            )
+            await store.record_event(name, node, recovered_text, datetime.now(tz=UTC))
+            await notify_admins(book, notifier, recovered_text)
+            return
         else:
             return
         await store.record_event(name, event_node_id, text, datetime.now(tz=UTC))

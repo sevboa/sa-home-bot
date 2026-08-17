@@ -127,6 +127,10 @@ def main(argv: list[str] | None = None) -> int:
         from sa_home_bot.vpn.app import run_vpn
 
         coro = run_vpn(settings)
+    elif args.service == "vpn_check":
+        from sa_home_bot.vpn_check.app import run_vpn_check
+
+        coro = run_vpn_check(settings)
     else:
         from sa_home_bot.app import run
 

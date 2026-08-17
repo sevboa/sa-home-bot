@@ -34,13 +34,22 @@ from pathlib import Path
 from typing import Any
 
 from sa_home_bot import __version__
+from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
+from sa_home_bot.domain.vpn_check import (
+    ALERTING as CHECK_ALERTING,
+)
+from sa_home_bot.domain.vpn_check import (
+    OK as CHECK_OK,
+)
+from sa_home_bot.domain.vpn_check import CheckResult, KnownCheckState, reconcile_vpn_check
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     ERR_INTERNAL,
     ActionParam,
     ActionSpec,
+    Address,
     ProtoError,
     ServiceDescription,
     ServiceInfo,
@@ -51,10 +60,13 @@ from sa_home_bot.vpn.protocol import (
     ACTION_APK_CHUNK,
     ACTION_APK_INFO,
     ACTION_APK_SET_FILE_ID,
+    ACTION_CHECK_NOW,
+    ACTION_CHECK_STATUS,
     ACTION_GRANT_EXTRA,
     ACTION_ISSUE,
     ACTION_PEERS,
     ACTION_REISSUE,
+    ACTION_REPORT_CHECK,
     ACTION_REQUEST_EXTRA,
     ACTION_RESOLVE_REQUEST,
     ACTION_REVOKE,
@@ -62,6 +74,8 @@ from sa_home_bot.vpn.protocol import (
     ACTION_USAGE,
     ERR_QUOTA_CEILING,
     EVENT_VPN_ACCESS_RESTORED,
+    EVENT_VPN_CHECK_FAILED,
+    EVENT_VPN_CHECK_RECOVERED,
     EVENT_VPN_EXTRA_REQUESTED,
     EVENT_VPN_EXTRA_RESOLVED,
     EVENT_VPN_NODE_QUOTA_WARNING,
@@ -71,6 +85,7 @@ from sa_home_bot.vpn.protocol import (
     EVENT_VPN_QUOTA_WARNING,
     SERVICE_NAME,
 )
+from sa_home_bot.vpn_check import protocol as vpn_check_protocol
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +97,14 @@ GB = 1_000_000_000
 # таблицах, что и учёт по чатам (vpn_quota_state) — реальный Telegram
 # chat_id никогда не бывает 0, коллизии не будет.
 NODE_SENTINEL_CHAT_ID = 0
+
+# Локальные копии констант сервиса node (node/service.py::SERVICE_NAME,
+# ACTION_TRIGGER_PEERS) — тот же приём, что уже используют node/peers.py,
+# node/lease.py, wake_core.py и др. (свой NODE_SERVICE = "node" в каждом),
+# чтобы не тянуть в лёгкую службу vpn тяжёлые зависимости node/service.py
+# (Supervisor, LeaseManager и т.п.) ради двух строковых констант.
+NODE_SERVICE = "node"
+ACTION_TRIGGER_PEERS = "trigger_peers"
 
 # Имя устройства (решение пользователя 2026-08-04) больше не вводит ни
 # человек, ни модель — служба сама выбирает случайное слово из этого пула
@@ -174,7 +197,13 @@ def _render_qr_png_b64(text: str) -> str:
 
 class VpnService:
     def __init__(
-        self, settings: Settings, db: Database, backend: AwgBackend, emit: EmitFn
+        self,
+        settings: Settings,
+        db: Database,
+        backend: AwgBackend,
+        emit: EmitFn,
+        *,
+        node_link: ServiceLink | None = None,
     ) -> None:
         self._cfg = settings.vpn
         self._db = db
@@ -183,6 +212,11 @@ class VpnService:
         self._node = socket.gethostname()
         self._server_pubkey: str | None = None
         self._apk_checked_at: datetime | None = None
+        # Клиент к своей же локальной ноде — для рассылки проверок
+        # доступности VPN (см. check_loop/_dispatch_checks). None в тестах,
+        # которые конструируют службу напрямую — тогда рассылка тихо
+        # логирует предупреждение и ничего не делает.
+        self._node_link = node_link
 
     def describe(self) -> ServiceDescription:
         chat_id_param = ActionParam(name="chat_id", type="int", title="Чей это гость")
@@ -200,6 +234,8 @@ class VpnService:
                 ACTION_REQUEST_EXTRA,
                 ACTION_RESOLVE_REQUEST,
                 ACTION_APK_INFO,
+                ACTION_CHECK_NOW,
+                ACTION_CHECK_STATUS,
             ),
             actions=(
                 ActionSpec(id=ACTION_PEERS, title="🔌 Все пиры"),
@@ -264,6 +300,17 @@ class VpnService:
                     title="🆔 Запомнить file_id",
                     params=(ActionParam(name="telegram_file_id", type="string", title="file_id"),),
                 ),
+                # Служебное — зовёт только сама служба vpn_check, не для UI.
+                ActionSpec(
+                    id=ACTION_REPORT_CHECK,
+                    title="📡 Отчёт проверки VPN",
+                    params=(
+                        ActionParam(name="node", type="string", title="Нода"),
+                        ActionParam(name="results", title="Результаты"),
+                    ),
+                ),
+                ActionSpec(id=ACTION_CHECK_NOW, title="🛰 Проверить сеть сейчас"),
+                ActionSpec(id=ACTION_CHECK_STATUS, title="🛰 Статус проверок сети"),
             ),
         )
 
@@ -776,6 +823,186 @@ class VpnService:
             except Exception:  # noqa: BLE001 — сбой одного тика не должен ронять цикл
                 log.exception("vpn: сбой сэмплера трафика")
 
+    # --- мониторинг доступности (vpn_check) ---
+    #
+    # Pull/push, а не синхронный сбор ответов (решение пользователя
+    # 2026-08-17): эта служба только РАССЫЛАЕТ команду "проверь" через
+    # generic fan-out node-сервиса (node/service.py::ACTION_TRIGGER_PEERS)
+    # и не ждёт результатов синхронно — каждая vpn_check-служба на своей
+    # ноде сама, отдельным вызовом, пушит результат обратно сюда
+    # (ACTION_REPORT_CHECK). Мут повторных алертов даёт не отдельный
+    # флаг, а сама гистерезис-функция domain/vpn_check.py::reconcile_vpn_check
+    # — событие эмитится только на переходе статуса, не на каждый неуспешный
+    # тик (см. её докстринг).
+
+    async def _dispatch_checks(self) -> dict[str, Any]:
+        if self._node_link is None:
+            log.warning("vpn: node_link не настроен — проверки доступности не разосланы")
+            return {"dispatched_to": [], "unreachable": [], "skipped": []}
+        try:
+            result = await self._node_link.command(
+                ACTION_TRIGGER_PEERS,
+                {
+                    "service": vpn_check_protocol.SERVICE_NAME,
+                    "action": vpn_check_protocol.ACTION_CHECK,
+                    "args": {"targets": list(self._cfg.check_targets)},
+                    "timeout_s": self._cfg.check_dispatch_timeout_s,
+                },
+                dst=Address(node=self._node, service=NODE_SERVICE),
+                timeout=self._cfg.check_dispatch_timeout_s + 3.0,
+            )
+        except (ServiceUnavailableError, ProtoError, TimeoutError) as exc:
+            log.warning("vpn: не удалось разослать проверки доступности: %s", exc)
+            return {"dispatched_to": [], "unreachable": [], "skipped": [], "error": str(exc)}
+        return {
+            "dispatched_to": result.get("dispatched", []),
+            "unreachable": result.get("unreachable", []),
+            "skipped": result.get("skipped", []),
+        }
+
+    async def check_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._cfg.check_interval_s)
+            try:
+                await self._dispatch_checks()
+            except Exception:  # noqa: BLE001 — сбой одного тика не должен ронять цикл
+                log.exception("vpn: сбой цикла проверок доступности")
+
+    async def _report_check(self, args: dict[str, Any]) -> dict[str, Any]:
+        node = str(args.get("node", "")).strip()
+        results = args.get("results")
+        if not node or not isinstance(results, dict) or not results:
+            raise ProtoError(ERR_BAD_REQUEST, "нужны node и непустой results")
+        now = _now()
+        for target, raw in results.items():
+            if not isinstance(raw, dict):
+                continue
+            ms_raw = raw.get("ms")
+            ms = int(ms_raw) if isinstance(ms_raw, int | float) else None
+            error_raw = raw.get("error")
+            await self._apply_check_result(
+                node,
+                str(target),
+                bool(raw.get("ok")),
+                ms,
+                str(error_raw) if error_raw else None,
+                now,
+            )
+        return {"accepted": True}
+
+    async def _apply_check_result(
+        self,
+        node: str,
+        target: str,
+        ok: bool,
+        latency_ms: int | None,
+        error: str | None,
+        now: datetime,
+    ) -> None:
+        cur = await self._db.conn.execute(
+            "SELECT status, consecutive_count, alerting_since, first_seen_at, "
+            "notified_alert_at, notified_cleared_at FROM vpn_check_states "
+            "WHERE node = ? AND target = ?",
+            (node, target),
+        )
+        row = await cur.fetchone()
+        known = None
+        notified_alert_at = None
+        notified_cleared_at = None
+        first_seen_at = now.isoformat()
+        if row is not None:
+            alerting_since = (
+                datetime.fromisoformat(row["alerting_since"]) if row["alerting_since"] else None
+            )
+            known = KnownCheckState(
+                status=row["status"],
+                consecutive_count=row["consecutive_count"],
+                alerting_since=alerting_since,
+            )
+            notified_alert_at = row["notified_alert_at"]
+            notified_cleared_at = row["notified_cleared_at"]
+            first_seen_at = row["first_seen_at"]
+
+        result = CheckResult(node=node, target=target, ok=ok, latency_ms=latency_ms, error=error)
+        state, transition = reconcile_vpn_check(
+            result,
+            known,
+            now,
+            fail_threshold=self._cfg.check_fail_threshold,
+            clear_threshold=self._cfg.check_clear_threshold,
+        )
+        if transition is not None and transition.to_status == CHECK_ALERTING:
+            notified_alert_at, notified_cleared_at = now.isoformat(), None
+        elif transition is not None and transition.to_status == CHECK_OK:
+            notified_cleared_at = now.isoformat()
+
+        await self._db.conn.execute(
+            "INSERT INTO vpn_check_states ("
+            "node, target, status, last_ok, last_latency_ms, last_error, "
+            "consecutive_count, alerting_since, first_seen_at, last_seen_at, "
+            "notified_alert_at, notified_cleared_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(node, target) DO UPDATE SET "
+            "status = excluded.status, last_ok = excluded.last_ok, "
+            "last_latency_ms = excluded.last_latency_ms, last_error = excluded.last_error, "
+            "consecutive_count = excluded.consecutive_count, "
+            "alerting_since = excluded.alerting_since, last_seen_at = excluded.last_seen_at, "
+            "notified_alert_at = excluded.notified_alert_at, "
+            "notified_cleared_at = excluded.notified_cleared_at",
+            (
+                node,
+                target,
+                state.status,
+                int(state.last_ok),
+                state.last_latency_ms,
+                state.last_error,
+                state.consecutive_count,
+                state.alerting_since.isoformat() if state.alerting_since else None,
+                first_seen_at,
+                now.isoformat(),
+                notified_alert_at,
+                notified_cleared_at,
+            ),
+        )
+        await self._db.conn.commit()
+
+        if transition is not None and transition.to_status == CHECK_ALERTING:
+            await self._emit(
+                EVENT_VPN_CHECK_FAILED,
+                {
+                    "node": node,
+                    "target": target,
+                    "consecutive": self._cfg.check_fail_threshold,
+                    "error": error,
+                },
+            )
+        elif transition is not None and transition.to_status == CHECK_OK:
+            await self._emit(EVENT_VPN_CHECK_RECOVERED, {"node": node, "target": target})
+
+    async def _check_status(self) -> dict[str, Any]:
+        cur = await self._db.conn.execute(
+            "SELECT node, target, status, last_ok, last_latency_ms, last_error, "
+            "consecutive_count, alerting_since, last_seen_at FROM vpn_check_states "
+            "ORDER BY node, target"
+        )
+        rows = await cur.fetchall()
+        return {
+            "states": [
+                {
+                    "node": r["node"],
+                    "target": r["target"],
+                    "status": r["status"],
+                    "last_ok": bool(r["last_ok"]),
+                    "last_latency_ms": r["last_latency_ms"],
+                    "last_error": r["last_error"],
+                    "consecutive_count": r["consecutive_count"],
+                    "alerting_since": r["alerting_since"],
+                    "last_seen_at": r["last_seen_at"],
+                }
+                for r in rows
+            ]
+        }
+
     # --- APK ---
 
     async def _apk_row(self) -> dict[str, Any] | None:
@@ -922,5 +1149,11 @@ class VpnService:
             return await self._apk_chunk(args)
         if action == ACTION_APK_SET_FILE_ID:
             return await self._apk_set_file_id(args)
+        if action == ACTION_REPORT_CHECK:
+            return await self._report_check(args)
+        if action == ACTION_CHECK_NOW:
+            return await self._dispatch_checks()
+        if action == ACTION_CHECK_STATUS:
+            return await self._check_status()
         # Сервер валидирует action по describe — сюда неизвестное не доходит.
         raise ValueError(f"необъявленное действие: {action}")

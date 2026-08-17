@@ -32,6 +32,12 @@ ACTION_APK_INFO = "apk_info"  # метаданные текущего кэша A
 ACTION_APK_CHUNK = "apk_chunk"  # {offset, length} — кусок файла для передачи через рой
 ACTION_APK_SET_FILE_ID = "apk_set_file_id"  # бот сообщает id уже загруженного в Telegram файла
 
+# Мониторинг доступности VPN (найдена нужда 2026-08-17 — см.
+# vpn_check/protocol.py и domain/vpn_check.py).
+ACTION_REPORT_CHECK = "report_check"  # vpn_check пушит {node, results: {target: {ok, ms, error}}}
+ACTION_CHECK_NOW = "check_now"  # админ/nodectl: разослать проверки внеочередно, без ожидания тика
+ACTION_CHECK_STATUS = "check_status"  # текущее состояние по всем (node, target)
+
 # --- События ---
 EVENT_VPN_PEER_ISSUED = "vpn_peer_issued"
 EVENT_VPN_QUOTA_WARNING = "vpn_quota_warning"
@@ -43,6 +49,11 @@ EVENT_VPN_EXTRA_RESOLVED = "vpn_extra_resolved"
 # Общий канал VDS приближается к лимиту тарифа (см. [vpn].node_limit_gb) —
 # адресуется не гостю, а админам.
 EVENT_VPN_NODE_QUOTA_WARNING = "vpn_node_quota_warning"
+# Переход (node, target) в/из alerting — эмитится только на самом переходе
+# (гистерезис domain/vpn_check.py), не на каждый неуспешный тик, это и есть
+# "мут" повторных оповещений об одной и той же проблеме.
+EVENT_VPN_CHECK_FAILED = "vpn_check_failed"
+EVENT_VPN_CHECK_RECOVERED = "vpn_check_recovered"
 
 # Код ошибки ProtoError: гость упёрся в потолок самообслуживания
 # (self_ceiling_gb) — бот на этот код сам оформляет request_extra вместо

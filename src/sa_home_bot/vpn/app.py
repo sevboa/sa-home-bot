@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import logging
 
+from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
@@ -33,13 +34,21 @@ async def run_vpn(settings: Settings) -> None:
 
     backend = RealAwgBackend(settings.vpn.interface)
 
+    # Клиент к своей же локальной ноде — для рассылки проверок доступности
+    # (vpn/service.py::_dispatch_checks → node/service.py::ACTION_TRIGGER_PEERS
+    # → vpn_check на нодах из [vpn].check_nodes).
+    node_link = ServiceLink(
+        settings.node.socket, token=settings.swarm.token, display_name="нода (vpn)"
+    )
+    await node_link.start()
+
     server: ProtoServer | None = None
 
     async def emit(event_type: str, data: dict) -> None:
         if server is not None:
             await server.broadcast_event(event_type, data)
 
-    service = VpnService(settings, db, backend, emit)
+    service = VpnService(settings, db, backend, emit, node_link=node_link)
     server = ProtoServer(settings.vpn.socket, service, token=settings.swarm.token)
     # Обработчики сигналов — до start(): он ждёт появления своего адреса
     # (см. proto/server.py), и всё это время остановка иначе не обрабатывалась бы.
@@ -51,6 +60,7 @@ async def run_vpn(settings: Settings) -> None:
         await service.reconcile()
 
     usage_task = asyncio.create_task(service.usage_loop(), name="vpn-usage-loop")
+    check_task = asyncio.create_task(service.check_loop(), name="vpn-check-loop")
     log.info(
         "Служба vpn запущена: интерфейс %s, сокет %s", settings.vpn.interface, settings.vpn.socket
     )
@@ -60,8 +70,11 @@ async def run_vpn(settings: Settings) -> None:
     finally:
         log.info("Останов службы vpn...")
         usage_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await usage_task
+        check_task.cancel()
+        for task in (usage_task, check_task):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         await server.stop()
+        await node_link.stop()
         await db.close()
         log.info("Служба vpn остановлена чисто")

@@ -274,6 +274,27 @@ CREATE TABLE IF NOT EXISTS vpn_requests (
     decided_at  TEXT
 );
 
+-- Состояние проверок доступности VPN-туннеля с нескольких нод (служба
+-- vpn_check) — по образцу health_states, но булев результат (ok/fail)
+-- вместо числовой полосы. PK составной: одна нода может проверять
+-- несколько целей (сайтов), гистерезис/мут ведутся отдельно по каждой
+-- паре node+target (domain/vpn_check.py::reconcile_vpn_check).
+CREATE TABLE IF NOT EXISTS vpn_check_states (
+    node                 TEXT NOT NULL,
+    target               TEXT NOT NULL,
+    status               TEXT NOT NULL,   -- ok / alerting
+    last_ok              INTEGER,
+    last_latency_ms      INTEGER,
+    last_error           TEXT,
+    consecutive_count    INTEGER NOT NULL DEFAULT 0,
+    alerting_since       TEXT,
+    first_seen_at        TEXT NOT NULL,
+    last_seen_at         TEXT NOT NULL,
+    notified_alert_at    TEXT,
+    notified_cleared_at  TEXT,
+    PRIMARY KEY (node, target)
+);
+
 -- Журнал системных/админских событий роя (node_down/up/leaving/returned/
 -- joined, singleton, update_finished, admin-алерты VPN/idle_power_blocked —
 -- bot/node_events.py) — тот же текст, что уходит в рассылку, только ещё и

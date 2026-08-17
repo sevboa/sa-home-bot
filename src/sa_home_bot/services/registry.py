@@ -111,6 +111,10 @@ _SPECS: tuple[ServiceSpec, ...] = (
     # vpn — AmneziaWG-доступ на jeeves (Этап 33 IMPLEMENTATION_PLAN.md):
     # единственная нода с белым IP, только там служба имеет смысл.
     ServiceSpec(name="vpn", cli_name="vpn", endpoint_attr="vpn.socket"),
+    # vpn_check — исполнитель пробных запросов через VPN (мониторинг
+    # доступности, см. VpnConfig.check_nodes выше): деплоится на нескольких
+    # нодах сразу (jeeves, alfred, ...), в отличие от самой vpn.
+    ServiceSpec(name="vpn_check", cli_name="vpn_check", endpoint_attr="vpn_check.socket"),
 )
 
 SERVICES: dict[str, ServiceSpec] = {s.name: s for s in _SPECS}

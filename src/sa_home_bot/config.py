@@ -639,6 +639,39 @@ class VpnConfig(BaseModel):
     official_download_url: str = "https://amnezia.org/downloads"
     config_message_ttl_s: float = Field(default=600.0, gt=0)
 
+    # --- Мониторинг доступности VPN (служба vpn_check, найдена нужда
+    # 2026-08-17: NAT-правило на jeeves тихо пропало на 4 дня, узнали только
+    # когда понадобился доступ из Казахстана). check_targets — что проверять
+    # (нейтральный сайт + api.telegram.org, т.к. это то, что реально нужно
+    # пользователю и что блокируется избирательно); check_nodes — с каких
+    # нод (jeeves — локальный сигнал «сервер вообще жив», alfred — реальная
+    # точка в Казахстане; список расширяется без правки кода). Пороги
+    # гистерезиса — см. domain/vpn_check.py::reconcile_vpn_check.
+    check_targets: list[str] = Field(
+        default_factory=lambda: ["https://1.1.1.1", "https://api.telegram.org"]
+    )
+    check_nodes: list[str] = Field(default_factory=lambda: ["jeeves", "alfred"])
+    check_interval_s: float = Field(default=300.0, gt=0)
+    check_fail_threshold: int = Field(default=2, ge=1)
+    check_clear_threshold: int = Field(default=1, ge=1)
+    check_dispatch_timeout_s: float = Field(default=5.0, gt=0)
+
+
+class VpnCheckConfig(BaseModel):
+    """Служба vpn_check (`sa-home-bot --service vpn_check`) — исполнитель
+    пробных запросов через VPN на конкретной ноде (jeeves, alfred, ...),
+    см. ``VpnConfig.check_nodes`` выше и vpn_check/service.py.
+
+    ``netns`` — сетевой неймспейс с уже поднятым (отдельным деплой-скриптом,
+    вне этого кода) клиентским туннелем AmneziaWG: изоляция нужна, чтобы
+    основная маршрутизация ноды не менялась независимо от того, какие IP
+    отдаёт DNS для проверяемых целей (например api.telegram.org).
+    """
+
+    socket: str = "./data/vpn_check.sock"
+    netns: str = "vpn-probe"
+    check_timeout_s: float = Field(default=8.0, gt=0)
+
 
 class WeatherConfig(BaseModel):
     """Город дома для тула ``get_weather`` (/ai, LLM_INTEGRATION_PLAN.md
@@ -993,6 +1026,7 @@ class Settings(BaseSettings):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     net: NetConfig = Field(default_factory=NetConfig)
     vpn: VpnConfig = Field(default_factory=VpnConfig)
+    vpn_check: VpnCheckConfig = Field(default_factory=VpnCheckConfig)
     weather: WeatherConfig = Field(default_factory=WeatherConfig)
     node: NodeConfig = Field(default_factory=NodeConfig)
     swarm: SwarmConfig = Field(default_factory=SwarmConfig)

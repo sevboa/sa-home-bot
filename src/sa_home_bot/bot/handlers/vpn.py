@@ -182,7 +182,13 @@ def _card_keyboard(
                 InlineKeyboardButton(
                     text="👥 Все гости",
                     callback_data=commands.action_callback("usage_all", service=SERVICE),
-                )
+                ),
+                InlineKeyboardButton(
+                    text="🛰 Проверка сети",
+                    callback_data=commands.action_callback(
+                        vpn_protocol.ACTION_CHECK_STATUS, service=SERVICE
+                    ),
+                ),
             ]
         )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -192,6 +198,40 @@ def _card_keyboard(
 # 2026-08-04, "на аппстор обе и на гугл плей обе" — по магазину, а не по
 # приложению, чтобы у AmneziaWG остался явный официальный путь на iOS
 # (сайдлоада там нет вовсе).
+def _check_status_text(states: list[dict]) -> str:
+    lines = ["🛰 <b>VPN — проверка доступности</b>"]
+    if not states:
+        lines.append("")
+        lines.append("Пока нет ни одной проверки — нажмите «Проверить сейчас».")
+        return "\n".join(lines)
+    lines.append("")
+    for row in sorted(states, key=lambda r: (r["node"], r["target"])):
+        icon = "🔴" if row["status"] == "alerting" else "🟢"
+        latency = row.get("last_latency_ms")
+        latency_note = f", {latency} мс" if latency is not None else ""
+        error_note = f" — {html.escape(str(row['last_error']))}" if row.get("last_error") else ""
+        lines.append(
+            f"{icon} <code>{html.escape(row['node'])}</code> — "
+            f"{html.escape(row['target'])}{latency_note}{error_note}"
+        )
+    return "\n".join(lines)
+
+
+def _check_status_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔄 Проверить сейчас",
+                    callback_data=commands.action_callback(
+                        vpn_protocol.ACTION_CHECK_NOW, service=SERVICE
+                    ),
+                )
+            ]
+        ]
+    )
+
+
 def _store_row(emoji: str, store: str, vpn_url: str, wg_url: str) -> str:
     return (
         f'{emoji} {store}: <a href="{html.escape(vpn_url)}">AmneziaVPN</a> · '
@@ -573,6 +613,42 @@ async def handle_action(
             return
         await callback.answer()
         await callback.message.answer(_summary_text(summary))
+        return
+
+    if action_id == vpn_protocol.ACTION_CHECK_STATUS:
+        try:
+            result = await node_link.command(vpn_protocol.ACTION_CHECK_STATUS, {}, dst=_DST)
+        except ProtoError as exc:
+            await callback.answer(f"⚠️ {exc.message}", show_alert=True)
+            return
+        except ServiceUnavailableError:
+            await callback.answer("⚠️ Служба VPN недоступна.", show_alert=True)
+            return
+        await callback.answer()
+        await callback.message.answer(
+            _check_status_text(result.get("states") or []),
+            reply_markup=_check_status_keyboard(),
+        )
+        return
+
+    if action_id == vpn_protocol.ACTION_CHECK_NOW:
+        try:
+            result = await node_link.command(vpn_protocol.ACTION_CHECK_NOW, {}, dst=_DST)
+        except ProtoError as exc:
+            await callback.answer(f"⚠️ {exc.message}", show_alert=True)
+            return
+        except ServiceUnavailableError:
+            await callback.answer("⚠️ Служба VPN недоступна.", show_alert=True)
+            return
+        dispatched = result.get("dispatched_to") or []
+        await callback.answer(
+            f"Запущено на: {', '.join(dispatched)}" if dispatched else "Разослать не удалось",
+            show_alert=not dispatched,
+        )
+        await callback.message.answer(
+            "🔄 Проверка запущена — результат появится через несколько секунд, "
+            "откройте «🛰 Проверка сети» ещё раз."
+        )
         return
 
     if action_id == vpn_protocol.ACTION_RESOLVE_REQUEST:

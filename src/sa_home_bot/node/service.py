@@ -36,11 +36,15 @@ from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     ERR_INTERNAL,
     ERR_UNAVAILABLE,
+    ERR_UNKNOWN_DST,
+    MSG_COMMAND,
     ActionParam,
     ActionSpec,
+    Address,
     ProtoError,
     ServiceDescription,
     ServiceInfo,
+    make_request,
 )
 from sa_home_bot.runtime import Runtime
 from sa_home_bot.services import registry
@@ -103,6 +107,15 @@ ACTION_SEND_WOL = "send_wol"  # рой просит ЭТУ ноду разбуд
 # LeaseManager.set_ready()/local_state()["ready"] — на нём строит решение
 # LeaseManager._decide() соседей (node/lease.py, SUPERIOR_READY_TIMEOUT_S).
 ACTION_REPORT_READY = "report_ready"
+
+# Generic fan-out: разослать команду именованной службе на себе + всех
+# живых пирах, где она поднята (сейчас единственный такой примитив в рое —
+# остальные действия строго "один запрос — один узел"). Не ждёт результата
+# самой работы дольше timeout_s — только подтверждение доставки; вызываемая
+# служба либо отвечает мгновенно (ack), либо сама асинхронно шлёт результат
+# отдельным вызовом инициатору (см. vpn_check → vpn/report_check).
+# Служебное действие (как report_ready) — без choices, не для UI.
+ACTION_TRIGGER_PEERS = "trigger_peers"
 
 RESTART_NODE_TITLE = "🔄 Перезапустить ноду"
 SWARM_JOIN_TITLE = "🤝 Присоединить ноду"
@@ -333,6 +346,14 @@ class NodeService:
                         ActionParam(name="ready", type="bool", required=True, title="Готова"),
                     ),
                 ),
+                ActionSpec(
+                    id=ACTION_TRIGGER_PEERS,
+                    title="📡 Разослать команду службе на всех нодах",
+                    params=(
+                        ActionParam(name="service", required=True, title="Служба"),
+                        ActionParam(name="action", required=True, title="Действие"),
+                    ),
+                ),
                 *(
                     (
                         ActionSpec(
@@ -523,6 +544,8 @@ class NodeService:
             return self._get_instance_config(args)
         if action == ACTION_REPORT_READY:
             return self._report_ready(args)
+        if action == ACTION_TRIGGER_PEERS:
+            return await self._trigger_peers(args)
         name = str(args.get("name", ""))
         if action == ACTION_ASSIGN:
             return await self._assign(name)
@@ -635,6 +658,52 @@ class NodeService:
         if self._lease is not None:
             self._lease.set_ready(name, ready)
         return {"name": name, "ready": ready}
+
+    async def _trigger_peers(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Fan-out — см. ACTION_TRIGGER_PEERS. Пробует себя (по своему же
+        node_id, роутер сам разрулит "локальная служба") + всех живых
+        пиров; для каждого отдельно ловит "нет такой службы" (пропустить
+        молча, не у всех нод она поднята) и "недоступна" (сеть/таймаут —
+        не валит всю операцию). Возвращает только сводку доставки, не
+        результат самой команды — тот, если нужен, вызываемая служба
+        репортит отдельно инициатору сама."""
+        service = str(args.get("service", ""))
+        if not service:
+            raise ProtoError(ERR_BAD_REQUEST, "не передан service")
+        action = str(args.get("action", ""))
+        if not action:
+            raise ProtoError(ERR_BAD_REQUEST, "не передан action")
+        call_args = args.get("args") or {}
+        if not isinstance(call_args, dict):
+            raise ProtoError(ERR_BAD_REQUEST, "args должен быть объектом")
+        timeout_s = float(args.get("timeout_s") or 5.0)
+
+        node_ids = [self._node]
+        if self._router is not None:
+            node_ids += [p["id"] for p in self._router.peers_state() if p["alive"]]
+
+        async def dispatch_one(node_id: str) -> tuple[str, str]:
+            if self._router is None:
+                return node_id, "unreachable"
+            env = make_request(
+                MSG_COMMAND,
+                {"action": action, "args": call_args},
+                dst=Address(node=node_id, service=service),
+                timeout_s=timeout_s,
+            )
+            try:
+                response = await self._router.route(env)
+            except ProtoError as exc:
+                return node_id, "skipped" if exc.code == ERR_UNKNOWN_DST else "unreachable"
+            if response is None or response.ok is False:
+                code = response.error_code() if response is not None else None
+                return node_id, "skipped" if code == ERR_UNKNOWN_DST else "unreachable"
+            return node_id, "dispatched"
+
+        outcome: dict[str, list[str]] = {"dispatched": [], "skipped": [], "unreachable": []}
+        for node_id, status in await asyncio.gather(*(dispatch_one(n) for n in node_ids)):
+            outcome[status].append(node_id)
+        return outcome
 
     def _send_wol(self, args: dict[str, Any]) -> dict[str, Any]:
         """Разослать magic packet в СВОЙ LAN-сегмент — вызывается пиром роя,
