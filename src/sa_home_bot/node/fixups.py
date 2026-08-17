@@ -870,6 +870,22 @@ def _vpn_probe_tunnel_check(settings: Settings) -> bool:
         and _privileged_exists(VPN_PROBE_UNIT_FILE)
     ):
         return False
+    # Сверяем содержимое юнита, не только факт его существования — живой
+    # застрявший апгрейд 2026-08-17: старый netns-юнит был технически
+    # "active (exited)" (успешно стартовал когда-то со старым содержимым),
+    # проверка по одному только is-active сочла бы его «уже применённым» и
+    # apply() с новым содержимым не вызвался бы вовсе.
+    awg_quick_path = _which("awg-quick")
+    ip_path = _which("ip")
+    if awg_quick_path is None or ip_path is None:
+        return False
+    expected_unit = vpn_probe_unit_content(VPN_PROBE_IFACE, ip_path, awg_quick_path)
+    try:
+        current_unit = _read_privileged(VPN_PROBE_UNIT_FILE)
+    except FixupError:
+        return False
+    if current_unit != expected_unit:
+        return False
     return (
         subprocess.run(["systemctl", "is-active", "--quiet", VPN_PROBE_UNIT_FILE.name]).returncode
         == 0
@@ -1275,6 +1291,20 @@ def build_fixups(settings: Settings) -> list[Fixup]:
     return [f for f in fixups if f.needed(settings)]
 
 
+def _check_or_false(fixup: Fixup) -> bool:
+    """``fixup.check()``, терпимый к тому, что сама проверка не может
+    исполниться (напр. ``_read_privileged`` внутри check() упёрлась в sudo
+    без TTY/кэша — живой краш 2026-08-17: check() кидал FixupError,
+    run_fixups его не ловил и падал целиком, останавливая ВСЕ оставшиеся
+    фиксы, не только этот один). Раз проверка не смогла подтвердить «уже
+    применено» — считаем, что не применено, и пробуем apply()."""
+    try:
+        return fixup.check()
+    except FixupError as exc:
+        print(f"  ⚠️ {fixup.title}: проверка не удалась ({exc}) — пробую применить")
+        return False
+
+
 def run_fixups(fixups: list[Fixup]) -> list[str]:
     """Применить фиксы по одному (идемпотентно), печатая прогресс.
 
@@ -1284,7 +1314,7 @@ def run_fixups(fixups: list[Fixup]) -> list[str]:
     """
     failed: list[str] = []
     for fixup in fixups:
-        if fixup.check():
+        if _check_or_false(fixup):
             print(f"  ✅ {fixup.title} — уже применено")
             continue
         print(f"  ⏳ {fixup.title} — применяю (может спросить пароль sudo)...")
@@ -1294,7 +1324,7 @@ def run_fixups(fixups: list[Fixup]) -> list[str]:
             print(f"  ❌ {fixup.title}: {exc}")
             failed.append(fixup.id)
             continue
-        if fixup.check():
+        if _check_or_false(fixup):
             print(f"  ✅ {fixup.title} — применено")
         else:
             print(f"  ⚠️ {fixup.title}: команда прошла, но проверка всё ещё отрицательна")

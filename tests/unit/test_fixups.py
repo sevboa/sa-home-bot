@@ -328,6 +328,41 @@ def test_build_fixups_excludes_vpn_probe_fixups_without_vpn_check():
     assert "vpn-check-probe-sudoers" not in ids
 
 
+def test_vpn_probe_tunnel_check_false_when_unit_content_is_stale(monkeypatch):
+    """Живой застрявший апгрейд 2026-08-17: юнит существует и active, но с
+    ДРУГИМ (старым, netns-версии) содержимым — check() обязан это заметить,
+    иначе apply() с новым содержимым не позовётся вовсе."""
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
+    monkeypatch.setattr(fixups_module, "_which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(fixups_module, "_read_privileged", lambda path: "stale old content\n")
+    called_is_active = []
+    monkeypatch.setattr(
+        fixups_module.subprocess,
+        "run",
+        lambda *a, **k: called_is_active.append(True) or type("R", (), {"returncode": 0})(),
+    )
+    settings = _settings(["vpn_check"])
+    assert fixups_module._vpn_probe_tunnel_check(settings) is False
+    assert not called_is_active  # содержимое не совпало — до is-active дело не дошло
+
+
+def test_vpn_probe_tunnel_check_true_when_content_matches_and_active(monkeypatch):
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
+    monkeypatch.setattr(fixups_module, "_which", lambda name: f"/usr/bin/{name}")
+
+    def fake_read(path):
+        return fixups_module.vpn_probe_unit_content(
+            fixups_module.VPN_PROBE_IFACE, "/usr/bin/ip", "/usr/bin/awg-quick"
+        )
+
+    monkeypatch.setattr(fixups_module, "_read_privileged", fake_read)
+    monkeypatch.setattr(
+        fixups_module.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 0})()
+    )
+    settings = _settings(["vpn_check"])
+    assert fixups_module._vpn_probe_tunnel_check(settings) is True
+
+
 def test_vpn_probe_unit_content_runs_awg_quick_directly_no_netns():
     content = vpn_probe_unit_content("awg-probe0", "/usr/sbin/ip", "/usr/bin/awg-quick")
     assert "ExecStart=/usr/bin/awg-quick up awg-probe0\n" in content
@@ -364,3 +399,62 @@ def test_prepare_probe_conf_does_not_duplicate_existing_table_line():
     raw = "[Interface]\nPrivateKey = SECRET\nTable = off\n\n[Peer]\nPublicKey = PUB\n"
     prepared = fixups_module._prepare_probe_conf(raw)
     assert prepared.count("Table") == 1
+
+
+def test_run_fixups_survives_check_raising_and_still_applies_it():
+    """Живой краш 2026-08-17: check() кинул FixupError (sudo без TTY/кэша)
+    и уронил весь run_fixups, оставив ВСЕ фиксы после него непроверенными —
+    не только тот, что упал."""
+    applied = []
+    calls = {"n": 0}
+
+    def flaky_check() -> bool:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise fixups_module.FixupError("sudo без TTY")
+        return True  # после apply() проверка снова доступна и подтверждает успех
+
+    flaky = fixups_module.Fixup(
+        id="flaky",
+        title="Проверка иногда падает",
+        needed=lambda settings: True,
+        check=flaky_check,
+        apply=lambda: applied.append("flaky"),
+    )
+    after = fixups_module.Fixup(
+        id="after",
+        title="Идёт следующим",
+        needed=lambda settings: True,
+        check=lambda: True,
+        apply=lambda: applied.append("after"),
+    )
+    failed = fixups_module.run_fixups([flaky, after])
+    assert failed == []
+    assert applied == ["flaky"]  # apply() всё же вызван, несмотря на упавшую первую проверку
+
+
+def test_run_fixups_survives_check_raising_after_apply_too():
+    """check() падает и до, и после apply() — фикс уходит в failed, но
+    следующий за ним фикс в списке всё равно проверяется (не крашится весь run)."""
+    after_checked = []
+
+    def always_raises() -> bool:
+        raise fixups_module.FixupError("недоступно")
+
+    flaky = fixups_module.Fixup(
+        id="flaky",
+        title="Всегда падает",
+        needed=lambda settings: True,
+        check=always_raises,
+        apply=lambda: None,
+    )
+    after = fixups_module.Fixup(
+        id="after",
+        title="Идёт следующим",
+        needed=lambda settings: True,
+        check=lambda: after_checked.append(True) or True,
+        apply=lambda: None,
+    )
+    failed = fixups_module.run_fixups([flaky, after])
+    assert failed == ["flaky"]
+    assert after_checked  # run не упал целиком — до "after" дошли
