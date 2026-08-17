@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -76,6 +77,35 @@ def _sudo(argv: list[str]) -> None:
         raise FixupError(f"не удалось запустить sudo {' '.join(argv)}: {exc}") from exc
     if result.returncode != 0:
         raise FixupError(f"sudo {' '.join(argv)} завершился кодом {result.returncode}")
+
+
+def _run(argv: list[str], **kwargs: object) -> None:
+    """Непривилегированный подпроцесс (git/go/make) с диагнозом в FixupError."""
+    try:
+        result = subprocess.run(argv, **kwargs)
+    except OSError as exc:
+        raise FixupError(f"не удалось запустить {' '.join(argv)}: {exc}") from exc
+    if result.returncode != 0:
+        raise FixupError(f"{' '.join(argv)} завершился кодом {result.returncode}")
+
+
+def _privileged_exists(path: Path) -> bool:
+    """``Path.exists()``, терпимый к каталогам без прав на просмотр обычным
+    пользователем (напр. ``/etc/amnezia/amneziawg`` — ``setup-awg-jeeves.sh``
+    создаёт его под ``umask 077``, т.е. 0700 root:root, и это ломает голый
+    ``stat`` даже для ФАЙЛА, которого там ещё нет). PermissionError здесь —
+    не «файла нет», а «не видно» — переспрашиваем через sudo, а не отвечаем
+    вслепую, иначе ``apply()`` решит, что конфига нет, и выпросит у vpn@jeeves
+    новый поверх уже рабочего."""
+    try:
+        return path.exists()
+    except PermissionError:
+        pass
+    try:
+        result = subprocess.run(["sudo", "test", "-e", str(path)])
+    except OSError as exc:
+        raise FixupError(f"не удалось проверить {path} через sudo: {exc}") from exc
+    return result.returncode == 0
 
 
 def _install_sudoers_snippet(name: str, content: str) -> None:
@@ -676,22 +706,110 @@ async def _fetch_probe_config(settings: Settings) -> str:
     return str(config_text)
 
 
+# amneziawg-tools/amneziawg-go нет апт-пакетом ни в одном стандартном
+# репозитории Debian (проверено на alfred 2026-08-17 — `apt-get install
+# amneziawg-tools` падает "Unable to find package") и апстрим не публикует
+# свой apt-репозиторий (README amneziawg-tools описывает только `make &&
+# make install`). Единственный рабочий путь — собрать из исходников, тем же
+# способом, каким `deploy/setup-awg-jeeves.sh` вручную поднял сервер на
+# jeeves: официальный тарбол Go (системный слишком старый — go.mod требует
+# go 1.25+) + `git clone`/`make install` в /usr/local/bin. awg-quick сам
+# находит amneziawg-go в PATH как userspace-фолбэк, когда нет kernel-модуля
+# (src/wg-quick/linux.bash::add_if — `command -v amneziawg-go`), отдельный
+# env var не нужен.
+
+_GO_MIN_VERSION = (1, 25)
+_AMNEZIAWG_GO_REPO = "https://github.com/amnezia-vpn/amneziawg-go"
+_AMNEZIAWG_TOOLS_REPO = "https://github.com/amnezia-vpn/amneziawg-tools"
+
+
+def _go_version_ok(go_bin: str) -> bool:
+    try:
+        result = subprocess.run([go_bin, "version"], capture_output=True, text=True)
+    except OSError:
+        return False
+    match = re.search(r"go(\d+)\.(\d+)", result.stdout)
+    if match is None:
+        return False
+    return (int(match.group(1)), int(match.group(2))) >= _GO_MIN_VERSION
+
+
+def _ensure_go(build_dir: Path) -> str:
+    """Путь к go: системный, если версии хватает, иначе — официальный тарбол
+    во временный каталог (системный Go не трогаем, как и оригинальный
+    bash-скрипт — незачем менять то, чем может пользоваться остальная ОС)."""
+    system_go = _which("go")
+    if system_go is not None and _go_version_ok(system_go):
+        return system_go
+    version_probe = subprocess.run(
+        ["curl", "-fsSL", "https://go.dev/VERSION?m=text"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if version_probe.returncode != 0 or not version_probe.stdout.strip():
+        raise FixupError(
+            f"не удалось узнать актуальную версию Go: {version_probe.stderr.strip()}"
+        )
+    go_version = version_probe.stdout.splitlines()[0].strip()
+    tarball = build_dir / "go.tar.gz"
+    _run(
+        ["curl", "-fsSL", f"https://go.dev/dl/{go_version}.linux-amd64.tar.gz", "-o", str(tarball)],
+        timeout=180,
+    )
+    _run(["tar", "-C", str(build_dir), "-xzf", str(tarball)])
+    return str(build_dir / "go" / "bin" / "go")
+
+
+def _build_amneziawg_tools() -> None:
+    """Собрать и поставить amneziawg-go + amneziawg-tools (awg, awg-quick) из
+    исходников в /usr/local/bin. Идемпотентно: пропускает то, что уже есть в
+    PATH."""
+    for prog in ("git", "curl", "tar"):
+        if _which(prog) is None:
+            raise FixupError(f"{prog} не найден — установите вручную и повторите nodectl fix")
+    if _which("gcc") is None or _which("make") is None:
+        argv = install_argv("build-essential")
+        if argv is None:
+            raise FixupError(
+                "gcc/make не найдены и неизвестен пакетный менеджер для build-essential"
+            )
+        _sudo(argv)
+
+    with tempfile.TemporaryDirectory(prefix="sa-home-awg-build-") as build_dir_str:
+        build_dir = Path(build_dir_str)
+        go_bin = _ensure_go(build_dir)
+        env = dict(os.environ)
+        env["PATH"] = f"{Path(go_bin).parent}:{env.get('PATH', '')}"
+
+        if _which("amneziawg-go") is None:
+            src = build_dir / "amneziawg-go"
+            _run(["git", "clone", "--depth", "1", _AMNEZIAWG_GO_REPO, str(src)])
+            _run(["make", "-C", str(src)], env=env)
+            _sudo(
+                ["install", "-m", "0755", str(src / "amneziawg-go"), "/usr/local/bin/amneziawg-go"]
+            )
+
+        if _which("awg") is None:
+            src = build_dir / "amneziawg-tools"
+            _run(["git", "clone", "--depth", "1", _AMNEZIAWG_TOOLS_REPO, str(src)])
+            _run(["make", "-C", str(src / "src")], env=env)
+            _sudo(["make", "-C", str(src / "src"), "install"])
+
+
 def _vpn_probe_tunnel_check(settings: Settings) -> bool:
-    return _vpn_probe_conf_path(settings).exists() and VPN_PROBE_UNIT_FILE.exists()
+    return _privileged_exists(_vpn_probe_conf_path(settings)) and _privileged_exists(
+        VPN_PROBE_UNIT_FILE
+    )
 
 
 def _vpn_probe_tunnel_apply(settings: Settings) -> None:
     awg_quick_path = _which("awg-quick")
     if awg_quick_path is None:
-        argv = install_argv("amneziawg-tools")
-        if argv is None:
-            raise FixupError(
-                "awg-quick не найден и неизвестен пакетный менеджер для amneziawg-tools"
-            )
-        _sudo(argv)
+        _build_amneziawg_tools()
         awg_quick_path = _which("awg-quick")
         if awg_quick_path is None:
-            raise FixupError("awg-quick не нашёлся после установки amneziawg-tools")
+            raise FixupError("awg-quick не нашёлся после сборки amneziawg-tools")
     ip_path = _which("ip")
     if ip_path is None:
         raise FixupError("ip (iproute2) не найден в PATH")
@@ -701,7 +819,7 @@ def _vpn_probe_tunnel_apply(settings: Settings) -> None:
         _sudo([ip_path, "netns", "add", netns])
 
     conf_path = _vpn_probe_conf_path(settings)
-    if not conf_path.exists():
+    if not _privileged_exists(conf_path):
         try:
             config_text = asyncio.run(_fetch_probe_config(settings))
         except Exception as exc:  # noqa: BLE001 — сеть/протокол сведены к одному диагнозу
@@ -730,7 +848,7 @@ def _vpn_probe_tunnel_apply(settings: Settings) -> None:
         finally:
             tmp_path.unlink(missing_ok=True)
 
-    if not VPN_PROBE_UNIT_FILE.exists():
+    if not _privileged_exists(VPN_PROBE_UNIT_FILE):
         content = vpn_probe_unit_content(netns, VPN_PROBE_IFACE, ip_path, awg_quick_path)
         with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as tmp:
             tmp.write(content)
