@@ -38,6 +38,22 @@ ACTION_REPORT_CHECK = "report_check"  # vpn_check пушит {node, results: {ta
 ACTION_CHECK_NOW = "check_now"  # админ/nodectl: разослать проверки внеочередно, без ожидания тика
 ACTION_CHECK_STATUS = "check_status"  # текущее состояние по всем (node, target)
 
+# Прокси на jeeves (mtg — MTProto, microsocks — SOCKS5), 2026-08-17. Общий
+# секрет/ссылка на всех — не per-guest (mtg принципиально не умеет
+# несколько секретов в одном процессе), трафик агрегатный.
+ACTION_PROXY_LINK = "proxy_link"  # tg://proxy + t.me ссылка, host/port/secret, SOCKS5-адрес
+ACTION_PROXY_ROTATE_SECRET = "proxy_rotate_secret"  # админ: новый secret mtg, рестарт демона
+ACTION_PROXY_USAGE = "proxy_usage"  # админ: агрегатный расход прокси этот месяц + node_limit_gb
+
+# Секрет, развёрнутый вручную на jeeves 2026-08-13 (см. память
+# telegram-bot-api-proxy-2026-08-13) — общий "бутстрап"-литерал для
+# vpn/service.py::_proxy_secret (сидирует БД при первом старте после
+# деплоя этого кода) И node/fixups.py::make_proxy_units_fixup (пишет тот
+# же секрет в юнит mtg, если файла ещё нет) — гарантирует, что оба места
+# сойдутся на одном и том же значении без похода друг к другу. Меняется
+# только через proxy_rotate_secret, который правит и БД, и юнит разом.
+PROXY_SECRET_SEED = "7p98I6xlxrC7ea7ysIxHCnR3d3cubWljcm9zb2Z0LmNvbQ"
+
 # --- События ---
 EVENT_VPN_PEER_ISSUED = "vpn_peer_issued"
 EVENT_VPN_QUOTA_WARNING = "vpn_quota_warning"

@@ -2447,6 +2447,14 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
         if not is_admin:
             return "недоступно: сводка по всем гостям — только у админа"
         payload = {}
+    elif action in (
+        vpn_protocol.ACTION_PROXY_LINK,
+        vpn_protocol.ACTION_PROXY_ROTATE_SECRET,
+        vpn_protocol.ACTION_PROXY_USAGE,
+    ):
+        # Общая ссылка на всех, не привязана к конкретному разговору —
+        # chat_id тут не при чём (см. vpn/protocol.py про per-guest).
+        payload = {}
     else:
         if ctx.chat_id is None:
             return "недоступно: VPN привязан к разговору, а его сейчас нет"
@@ -2491,6 +2499,18 @@ _VPN_VARIANTS = VariantRights(
             vpn_protocol.ACTION_RESOLVE_REQUEST,
             ActionRight(vpn_protocol.ACTION_RESOLVE_REQUEST, _VPN_SERVICE),
         ),
+        (
+            vpn_protocol.ACTION_PROXY_LINK,
+            ActionRight(vpn_protocol.ACTION_PROXY_LINK, _VPN_SERVICE),
+        ),
+        (
+            vpn_protocol.ACTION_PROXY_ROTATE_SECRET,
+            ActionRight(vpn_protocol.ACTION_PROXY_ROTATE_SECRET, _VPN_SERVICE),
+        ),
+        (
+            vpn_protocol.ACTION_PROXY_USAGE,
+            ActionRight(vpn_protocol.ACTION_PROXY_USAGE, _VPN_SERVICE),
+        ),
     ),
 )
 
@@ -2521,7 +2541,14 @@ _DECL_VPN: dict[str, Any] = {
             "(тогда используй request_extra — заявка админу, необязательный "
             "gb — сколько ГБ); apk — прислать ссылки на официальное "
             "приложение AmneziaWG (App Store, Google Play, сайт) и, если "
-            "файл .apk уже кэширован, сразу сам файл.\n"
+            "файл .apk уже кэширован, сразу сам файл; proxy_link — ссылка на "
+            "прокси Telegram (mtg, один общий секрет для всех — НЕ VPN, "
+            "только сам Telegram, ставится прямо в его настройках без "
+            "стороннего приложения) плюс SOCKS5-адрес для ботов; "
+            "proxy_rotate_secret — сменить секрет прокси (старая ссылка "
+            "сразу перестаёт работать у ВСЕХ, кто её получил — используй, "
+            "только если явно попросили сменить/отозвать); proxy_usage — "
+            "расход трафика прокси за месяц.\n"
             "issue/reissue БЕЗ recipient — всегда себе, в ТЕКУЩИЙ разговор. "
             "«Выдай/перевыпусти доступ Наташе» (просьба выдать ДРУГОМУ "
             "человеку, не тому, кто сейчас пишет) — это recipient=«Наташа», "

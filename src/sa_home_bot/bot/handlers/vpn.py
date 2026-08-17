@@ -191,6 +191,16 @@ def _card_keyboard(
                 ),
             ]
         )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🌐 Прокси",
+                    callback_data=commands.action_callback(
+                        vpn_protocol.ACTION_PROXY_LINK, service=SERVICE
+                    ),
+                ),
+            ]
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -198,23 +208,36 @@ def _card_keyboard(
 # 2026-08-04, "на аппстор обе и на гугл плей обе" — по магазину, а не по
 # приложению, чтобы у AmneziaWG остался явный официальный путь на iOS
 # (сайдлоада там нет вовсе).
-def _check_status_text(states: list[dict]) -> str:
+def _check_status_text(states: list[dict], *, pending: bool = False) -> str:
     lines = ["🛰 <b>VPN — проверка доступности</b>"]
     if not states:
         lines.append("")
-        lines.append("Пока нет ни одной проверки — нажмите «Проверить сейчас».")
-        return "\n".join(lines)
-    lines.append("")
-    for row in sorted(states, key=lambda r: (r["node"], r["target"])):
-        icon = "🔴" if row["status"] == "alerting" else "🟢"
-        latency = row.get("last_latency_ms")
-        latency_note = f", {latency} мс" if latency is not None else ""
-        error_note = f" — {html.escape(str(row['last_error']))}" if row.get("last_error") else ""
+        lines.append("Пока нет ни одной проверки — нажмите «Запустить проверку».")
+    else:
+        lines.append("")
+        for row in sorted(states, key=lambda r: (r["node"], r["target"])):
+            icon = "🔴" if row["status"] == "alerting" else "🟢"
+            latency = row.get("last_latency_ms")
+            latency_note = f", {latency} мс" if latency is not None else ""
+            error_note = (
+                f" — {html.escape(str(row['last_error']))}" if row.get("last_error") else ""
+            )
+            lines.append(
+                f"{icon} <code>{html.escape(row['node'])}</code> — "
+                f"{html.escape(row['target'])}{latency_note}{error_note}"
+            )
+    if pending:
+        lines.append("")
         lines.append(
-            f"{icon} <code>{html.escape(row['node'])}</code> — "
-            f"{html.escape(row['target'])}{latency_note}{error_note}"
+            "⏳ Проверка запущена — жмите «↻ Обновить», пока не увидите свежий результат."
         )
     return "\n".join(lines)
+
+
+# Своя локальная кнопка «назад», без RPC к службе (см. _redraw_card) — не
+# заводим отдельный ACTION_* в vpn/protocol.py, как и «usage_all» рядом:
+# право проверяется middleware по тому же принципу («действие@vpn»).
+_ACTION_VPN_CARD = "vpn_card"
 
 
 def _check_status_keyboard() -> InlineKeyboardMarkup:
@@ -222,9 +245,49 @@ def _check_status_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🔄 Проверить сейчас",
+                    text="🔄 Запустить проверку",
                     callback_data=commands.action_callback(
                         vpn_protocol.ACTION_CHECK_NOW, service=SERVICE
+                    ),
+                ),
+                InlineKeyboardButton(
+                    text="↻ Обновить",
+                    callback_data=commands.action_callback(
+                        vpn_protocol.ACTION_CHECK_STATUS, service=SERVICE
+                    ),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=commands.action_callback(_ACTION_VPN_CARD, service=SERVICE),
+                )
+            ],
+        ]
+    )
+
+
+def _proxy_text(result: dict) -> str:
+    return (
+        "🌐 <b>Прокси Telegram (mtg)</b> — общая ссылка, один секрет на всех.\n"
+        f"Ссылка: {html.escape(result['tg_link'])}\n"
+        f"t.me: {html.escape(result['t_me_link'])}\n\n"
+        f"Сервер: <code>{html.escape(str(result['host']))}</code>\n"
+        f"Порт: <code>{result['port']}</code>\n"
+        f"Секрет: <code>{html.escape(result['secret'])}</code>\n\n"
+        "🧦 SOCKS5 для ботов (доступен только внутри tailnet):\n"
+        f"<code>{html.escape(str(result['socks_host']))}:{result['socks_port']}</code>"
+    )
+
+
+def _proxy_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔁 Сменить секрет (старая ссылка перестанет работать)",
+                    callback_data=commands.action_callback(
+                        vpn_protocol.ACTION_PROXY_ROTATE_SECRET, service=SERVICE
                     ),
                 )
             ]
@@ -648,6 +711,44 @@ async def handle_action(
         await callback.message.answer(
             "🔄 Проверка запущена — результат появится через несколько секунд, "
             "откройте «🛰 Проверка сети» ещё раз."
+        )
+        return
+
+    if action_id == vpn_protocol.ACTION_PROXY_LINK:
+        try:
+            result = await node_link.command(vpn_protocol.ACTION_PROXY_LINK, {}, dst=_DST)
+        except ProtoError as exc:
+            await callback.answer(f"⚠️ {exc.message}", show_alert=True)
+            return
+        except ServiceUnavailableError:
+            await callback.answer("⚠️ Служба VPN недоступна.", show_alert=True)
+            return
+        await callback.answer()
+        qr_b64 = result.get("qr_png_b64")
+        if qr_b64:
+            await notifier.send_photo(
+                chat_id,
+                base64.b64decode(qr_b64),
+                filename="proxy-qr.png",
+                caption="🌐 QR прокси Telegram — отсканируйте в приложении.",
+                message_thread_id=callback.message.message_thread_id,
+            )
+        await callback.message.answer(_proxy_text(result), reply_markup=_proxy_keyboard())
+        return
+
+    if action_id == vpn_protocol.ACTION_PROXY_ROTATE_SECRET:
+        try:
+            result = await node_link.command(vpn_protocol.ACTION_PROXY_ROTATE_SECRET, {}, dst=_DST)
+        except ProtoError as exc:
+            await callback.answer(f"⚠️ {exc.message}", show_alert=True)
+            return
+        except ServiceUnavailableError:
+            await callback.answer("⚠️ Служба VPN недоступна.", show_alert=True)
+            return
+        await callback.answer("Секрет сменён")
+        await callback.message.answer(
+            "🔁 Старая ссылка перестала работать.\n\n" + _proxy_text(result),
+            reply_markup=_proxy_keyboard(),
         )
         return
 

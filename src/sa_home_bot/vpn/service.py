@@ -65,6 +65,9 @@ from sa_home_bot.vpn.protocol import (
     ACTION_GRANT_EXTRA,
     ACTION_ISSUE,
     ACTION_PEERS,
+    ACTION_PROXY_LINK,
+    ACTION_PROXY_ROTATE_SECRET,
+    ACTION_PROXY_USAGE,
     ACTION_REISSUE,
     ACTION_REPORT_CHECK,
     ACTION_REQUEST_EXTRA,
@@ -83,8 +86,10 @@ from sa_home_bot.vpn.protocol import (
     EVENT_VPN_PEER_ISSUED,
     EVENT_VPN_QUOTA_EXCEEDED,
     EVENT_VPN_QUOTA_WARNING,
+    PROXY_SECRET_SEED,
     SERVICE_NAME,
 )
+from sa_home_bot.vpn.proxy_backend import ProxyBackend, RealProxyBackend
 from sa_home_bot.vpn_check import protocol as vpn_check_protocol
 
 log = logging.getLogger(__name__)
@@ -204,10 +209,12 @@ class VpnService:
         emit: EmitFn,
         *,
         node_link: ServiceLink | None = None,
+        proxy_backend: ProxyBackend | None = None,
     ) -> None:
         self._cfg = settings.vpn
         self._db = db
         self._backend = backend
+        self._proxy_backend = proxy_backend or RealProxyBackend()
         self._emit = emit
         self._node = socket.gethostname()
         self._server_pubkey: str | None = None
@@ -236,6 +243,9 @@ class VpnService:
                 ACTION_APK_INFO,
                 ACTION_CHECK_NOW,
                 ACTION_CHECK_STATUS,
+                ACTION_PROXY_LINK,
+                ACTION_PROXY_ROTATE_SECRET,
+                ACTION_PROXY_USAGE,
             ),
             actions=(
                 ActionSpec(id=ACTION_PEERS, title="🔌 Все пиры"),
@@ -311,6 +321,9 @@ class VpnService:
                 ),
                 ActionSpec(id=ACTION_CHECK_NOW, title="🛰 Проверить сеть сейчас"),
                 ActionSpec(id=ACTION_CHECK_STATUS, title="🛰 Статус проверок сети"),
+                ActionSpec(id=ACTION_PROXY_LINK, title="🌐 Ссылка прокси"),
+                ActionSpec(id=ACTION_PROXY_ROTATE_SECRET, title="🔁 Сменить секрет прокси"),
+                ActionSpec(id=ACTION_PROXY_USAGE, title="📊 Расход прокси"),
             ),
         )
 
@@ -757,6 +770,118 @@ class VpnService:
             EVENT_VPN_NODE_QUOTA_WARNING, {"used_bytes": total, "limit_bytes": limit}
         )
 
+    # --- прокси (mtg/microsocks на jeeves) ---
+    #
+    # Общий секрет/ссылка на всех гостей — не per-guest (см. vpn/protocol.py
+    # для обоснования). Байты считаются тем же дельта-механизмом, что и у
+    # awg-пиров (vpn_counters по псевдо-ключам, vpn_peer_usage по
+    # отрицательным peer_id — реальные пиры получают id из AUTOINCREMENT,
+    # он всегда положителен, коллизии не будет), и попадают в ТОТ ЖЕ
+    # общий счётчик node_limit_gb без единой правки _check_node_limit.
+
+    PROXY_PEER_IDS = {"mtg": -1, "socks": -2}
+
+    async def _proxy_secret(self) -> str:
+        cur = await self._db.conn.execute("SELECT mtg_secret FROM proxy_state WHERE id = 1")
+        row = await cur.fetchone()
+        if row is not None:
+            return str(row["mtg_secret"])
+        # Первый запуск после деплоя — сидируем тем же бутстрап-секретом,
+        # что и node/fixups.py::make_proxy_units_fixup пишет в юнит mtg,
+        # если тот ещё не создан (см. PROXY_SECRET_SEED), чтобы оба места
+        # сошлись без похода друг к другу.
+        await self._set_proxy_secret(PROXY_SECRET_SEED)
+        return PROXY_SECRET_SEED
+
+    async def _set_proxy_secret(self, secret: str) -> None:
+        await self._db.conn.execute(
+            "INSERT INTO proxy_state (id, mtg_secret, updated_at) VALUES (1, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET mtg_secret = excluded.mtg_secret, "
+            "updated_at = excluded.updated_at",
+            (secret, _now().isoformat()),
+        )
+        await self._db.conn.commit()
+
+    async def _proxy_link(self, args: dict[str, Any]) -> dict[str, Any]:
+        if not self._cfg.mtg_public_host:
+            raise ProtoError(
+                ERR_BAD_REQUEST,
+                "не настроен [vpn].mtg_public_host — впишите публичный IP/домен jeeves",
+            )
+        secret = await self._proxy_secret()
+        query = f"server={self._cfg.mtg_public_host}&port={self._cfg.mtg_port}&secret={secret}"
+        tg_link = f"tg://proxy?{query}"
+        return {
+            "tg_link": tg_link,
+            "t_me_link": f"https://t.me/proxy?{query}",
+            "qr_png_b64": _render_qr_png_b64(tg_link),
+            "host": self._cfg.mtg_public_host,
+            "port": self._cfg.mtg_port,
+            "secret": secret,
+            "socks_host": self._cfg.socks_host,
+            "socks_port": self._cfg.socks_port,
+        }
+
+    async def _proxy_rotate_secret(self, args: dict[str, Any]) -> dict[str, Any]:
+        new_secret = await self._proxy_backend.generate_secret(self._cfg.mtg_domain)
+        await self._proxy_backend.rotate_secret(new_secret)
+        await self._set_proxy_secret(new_secret)
+        return await self._proxy_link(args)
+
+    async def _proxy_usage(self, args: dict[str, Any]) -> dict[str, Any]:
+        month = _month_key(_now())
+        used: dict[str, int] = {}
+        for key, peer_id in self.PROXY_PEER_IDS.items():
+            cur = await self._db.conn.execute(
+                "SELECT used_bytes FROM vpn_peer_usage WHERE peer_id = ? AND month = ?",
+                (peer_id, month),
+            )
+            row = await cur.fetchone()
+            used[key] = int(row["used_bytes"]) if row else 0
+        cur = await self._db.conn.execute(
+            "SELECT COALESCE(SUM(used_bytes), 0) AS total FROM vpn_peer_usage WHERE month = ?",
+            (month,),
+        )
+        row = await cur.fetchone()
+        return {
+            "mtg_bytes": used["mtg"],
+            "socks_bytes": used["socks"],
+            "node_used_bytes": int(row["total"] or 0),
+            "node_limit_bytes": self._cfg.node_limit_gb * GB,
+        }
+
+    async def _sample_proxy(self, month: str) -> None:
+        try:
+            counters = await self._proxy_backend.counters()
+        except ProtoError:
+            # sudoers ещё не поставлен (nodectl fix не прогнан) — не рушим
+            # остальной тик сэмплера ради этого, просто пропускаем прокси.
+            return
+        now_iso = _now().isoformat()
+        for key, total in counters.items():
+            pubkey = f"proxy-{key}"
+            peer_id = self.PROXY_PEER_IDS[key]
+            cur = await self._db.conn.execute(
+                "SELECT last_rx FROM vpn_counters WHERE public_key = ?", (pubkey,)
+            )
+            prev = await cur.fetchone()
+            delta = total if prev is None else max(total - prev["last_rx"], 0)
+            if delta:
+                await self._db.conn.execute(
+                    "INSERT INTO vpn_peer_usage (peer_id, month, used_bytes) VALUES (?, ?, ?) "
+                    "ON CONFLICT(peer_id, month) DO UPDATE SET "
+                    "used_bytes = used_bytes + excluded.used_bytes",
+                    (peer_id, month, delta),
+                )
+            await self._db.conn.execute(
+                "INSERT INTO vpn_counters (public_key, last_rx, last_tx, updated_at) "
+                "VALUES (?, ?, 0, ?) "
+                "ON CONFLICT(public_key) DO UPDATE SET "
+                "last_rx = excluded.last_rx, updated_at = excluded.updated_at",
+                (pubkey, total, now_iso),
+            )
+        await self._db.conn.commit()
+
     # --- сэмплер ---
 
     async def sample_once(self) -> None:
@@ -810,6 +935,7 @@ class VpnService:
                     (datetime.fromtimestamp(handshake_ts, tz=UTC).isoformat(), row["id"]),
                 )
         await self._db.conn.commit()
+        await self._sample_proxy(month)
         for chat_id in touched_chats:
             await self._check_thresholds(chat_id, month)
         await self._check_node_limit(month)
@@ -1155,5 +1281,11 @@ class VpnService:
             return await self._dispatch_checks()
         if action == ACTION_CHECK_STATUS:
             return await self._check_status()
+        if action == ACTION_PROXY_LINK:
+            return await self._proxy_link(args)
+        if action == ACTION_PROXY_ROTATE_SECRET:
+            return await self._proxy_rotate_secret(args)
+        if action == ACTION_PROXY_USAGE:
+            return await self._proxy_usage(args)
         # Сервер валидирует action по describe — сюда неизвестное не доходит.
         raise ValueError(f"необъявленное действие: {action}")

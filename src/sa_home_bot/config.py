@@ -651,6 +651,17 @@ class VpnConfig(BaseModel):
         default_factory=lambda: ["https://1.1.1.1", "https://api.telegram.org"]
     )
     check_nodes: list[str] = Field(default_factory=lambda: ["jeeves", "alfred"])
+
+    # --- Прокси на jeeves (mtg — MTProto, microsocks — SOCKS5), 2026-08-17.
+    # Секрет mtg НЕ здесь — он в БД (proxy_state, см. vpn/service.py), чтобы
+    # rotate_secret не требовал правки TOML. Трафик обоих демонов идёт через
+    # тот же канал, что и AmneziaWG — учитывается в том же node_limit_gb
+    # (решение пользователя 2026-08-17: не заводить отдельный бюджет).
+    mtg_domain: str = "www.microsoft.com"  # fake-TLS фронт
+    mtg_port: int = Field(default=443, ge=1, le=65535)
+    mtg_public_host: str = ""  # публичный IP/домен jeeves; пусто — proxy_link откажет с подсказкой
+    socks_port: int = Field(default=1080, ge=1, le=65535)
+    socks_host: str = ""  # tailscale-адрес jeeves; пусто — proxy_link откажет с подсказкой
     check_interval_s: float = Field(default=300.0, gt=0)
     check_fail_threshold: int = Field(default=2, ge=1)
     check_clear_threshold: int = Field(default=1, ge=1)

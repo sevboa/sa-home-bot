@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import re
@@ -797,9 +799,85 @@ def _build_amneziawg_tools() -> None:
             _sudo(["make", "-C", str(src / "src"), "install"])
 
 
+def _probe_resolv_conf_path(netns: str) -> Path:
+    return Path("/etc/netns") / netns / "resolv.conf"
+
+
+def _read_privileged(path: Path) -> str:
+    result = subprocess.run(["sudo", "cat", str(path)], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise FixupError(f"не удалось прочитать {path} через sudo: {result.stderr.strip()}")
+    return result.stdout
+
+
+def _extract_dns(config_text: str) -> str | None:
+    match = re.search(r"^DNS\s*=\s*(.+)$", config_text, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
+def _strip_dns_line(config_text: str) -> str:
+    """Без этой строки — awg-quick сам зовёт ``resolvconf`` (см.
+    ``_install_probe_conf``), которого нет на Debian; DNS решаем отдельно
+    приватным resolv.conf netns (``_install_probe_resolv_conf``)."""
+    lines = [
+        line for line in config_text.splitlines() if not line.strip().startswith("DNS ")
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _install_probe_conf(conf_path: Path, config_text: str) -> None:
+    filtered = _strip_dns_line(config_text)
+    with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as tmp:
+        tmp.write(filtered)
+        tmp_path = Path(tmp.name)
+    try:
+        _sudo(
+            [
+                "install",
+                "-D",
+                "-m",
+                "0600",
+                "-o",
+                "root",
+                "-g",
+                "root",
+                str(tmp_path),
+                str(conf_path),
+            ]
+        )
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _install_probe_resolv_conf(netns: str, dns_server: str) -> None:
+    """``/etc/netns/<netns>/resolv.conf`` — ``ip netns exec`` бинд-монтирует
+    его поверх ``/etc/resolv.conf`` ТОЛЬКО для процессов внутри этого netns
+    (см. ip-netns(8)), хостовый файл не трогается. Без него DNS внутри netns
+    не работал бы вовсе: обычный ``/etc/resolv.conf`` этой машины указывает
+    на Tailscale MagicDNS (100.100.100.100 — см. CLAUDE.md), а этот адрес
+    живёт на tailscale0 в родном netns, изолированному netns пробника он не
+    виден в принципе."""
+    resolv_path = _probe_resolv_conf_path(netns)
+    with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as tmp:
+        tmp.write(f"nameserver {dns_server}\n")
+        tmp_path = Path(tmp.name)
+    try:
+        _sudo(["install", "-D", "-m", "0644", str(tmp_path), str(resolv_path)])
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
 def _vpn_probe_tunnel_check(settings: Settings) -> bool:
-    return _privileged_exists(_vpn_probe_conf_path(settings)) and _privileged_exists(
-        VPN_PROBE_UNIT_FILE
+    netns = settings.vpn_check.netns
+    if not (
+        _privileged_exists(_vpn_probe_conf_path(settings))
+        and _privileged_exists(VPN_PROBE_UNIT_FILE)
+        and _privileged_exists(_probe_resolv_conf_path(netns))
+    ):
+        return False
+    return (
+        subprocess.run(["systemctl", "is-active", "--quiet", VPN_PROBE_UNIT_FILE.name]).returncode
+        == 0
     )
 
 
@@ -819,34 +897,25 @@ def _vpn_probe_tunnel_apply(settings: Settings) -> None:
         _sudo([ip_path, "netns", "add", netns])
 
     conf_path = _vpn_probe_conf_path(settings)
-    if not _privileged_exists(conf_path):
+    if _privileged_exists(conf_path):
+        # Конфиг уже выдан jeeves раньше — чиним на месте (сносим строку DNS,
+        # заводим приватный resolv.conf netns), не выпрашивая новый пир
+        # заново (лишний пир в БД vpn@jeeves нам не нужен).
+        raw_config_text = _read_privileged(conf_path)
+    else:
         try:
-            config_text = asyncio.run(_fetch_probe_config(settings))
+            raw_config_text = asyncio.run(_fetch_probe_config(settings))
         except Exception as exc:  # noqa: BLE001 — сеть/протокол сведены к одному диагнозу
             raise FixupError(
                 f"не удалось получить конфиг у vpn@jeeves ({exc}) — "
                 "проверьте, что jeeves доступен и служба vpn запущена"
             ) from exc
-        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as tmp:
-            tmp.write(config_text)
-            tmp_path = Path(tmp.name)
-        try:
-            _sudo(
-                [
-                    "install",
-                    "-D",
-                    "-m",
-                    "0600",
-                    "-o",
-                    "root",
-                    "-g",
-                    "root",
-                    str(tmp_path),
-                    str(conf_path),
-                ]
-            )
-        finally:
-            tmp_path.unlink(missing_ok=True)
+
+    dns_server = _extract_dns(raw_config_text)
+    if dns_server is None:
+        raise FixupError(f"в конфиге пробника нет строки DNS — {conf_path} повреждён")
+    _install_probe_resolv_conf(netns, dns_server)
+    _install_probe_conf(conf_path, raw_config_text)
 
     if not _privileged_exists(VPN_PROBE_UNIT_FILE):
         content = vpn_probe_unit_content(netns, VPN_PROBE_IFACE, ip_path, awg_quick_path)
@@ -905,6 +974,286 @@ def make_vpn_probe_sudoers_fixup(settings: Settings) -> Fixup:
     )
 
 
+# --- proxy: mtg (MTProto) + microsocks (SOCKS5) на jeeves, 2026-08-17 ---
+#
+# Кодифицирует то, что раньше было поднято вручную по SSH 2026-08-13 (см.
+# память telegram-bot-api-proxy-2026-08-13) — ссылку/секрет/учёт трафика
+# отдаёт бот через службу vpn (vpn/service.py::_proxy_link и т.д.), здесь
+# только воспроизводимая установка демонов и firewall. needed — тот же
+# предикат, что у awg-фиксапов (только jeeves), отдельного флага не заводим.
+
+_MTG_VERSION = "2.2.8"
+_MTG_SHA256 = "7ef19d079d85f4e00d4f8334ec1f3f3c8718e3d0ed1f3109ea9a8673138a2102"
+_MTG_URL = (
+    f"https://github.com/9seconds/mtg/releases/download/v{_MTG_VERSION}/"
+    f"mtg-{_MTG_VERSION}-linux-amd64.tar.gz"
+)
+MTG_BIN_PATH = Path("/usr/local/bin/mtg")
+PROXY_UNITS_DIR = Path.home() / ".config" / "systemd" / "user"
+MTG_UNIT_PATH = PROXY_UNITS_DIR / "mtg.service"
+MICROSOCKS_UNIT_PATH = PROXY_UNITS_DIR / "microsocks.service"
+PROXY_FIREWALL_SUDOERS_FILE = "50-sa-home-node-proxy-nft"
+NFTABLES_CONF_PATH = Path("/etc/nftables.conf")
+
+
+def mtg_unit_content(port: int, secret: str) -> str:
+    return (
+        "[Unit]\n"
+        "Description=mtg (MTProto proxy for Telegram)\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"ExecStart={MTG_BIN_PATH} simple-run 0.0.0.0:{port} {secret}\n"
+        "Restart=on-failure\n"
+        "RestartSec=5\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=default.target\n"
+    )
+
+
+def microsocks_unit_content(bind_host: str, port: int, microsocks_path: str) -> str:
+    return (
+        "[Unit]\n"
+        "Description=microsocks (SOCKS5 proxy for sa-home-bot Telegram egress)\n"
+        "After=network-online.target tailscaled.service\n"
+        "Wants=network-online.target\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"ExecStart={microsocks_path} -i {bind_host} -p {port}\n"
+        "Restart=on-failure\n"
+        "RestartSec=5\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=default.target\n"
+    )
+
+
+def _systemctl_user_is_active(unit: str) -> bool:
+    return subprocess.run(["systemctl", "--user", "is-active", "--quiet", unit]).returncode == 0
+
+
+def _proxy_units_check() -> bool:
+    return (
+        MTG_BIN_PATH.is_file()
+        and MTG_UNIT_PATH.exists()
+        and MICROSOCKS_UNIT_PATH.exists()
+        and _systemctl_user_is_active("mtg.service")
+        and _systemctl_user_is_active("microsocks.service")
+    )
+
+
+def _install_mtg() -> None:
+    if MTG_BIN_PATH.is_file():
+        return
+    with tempfile.TemporaryDirectory(prefix="sa-home-mtg-") as build_dir_str:
+        build_dir = Path(build_dir_str)
+        tarball = build_dir / "mtg.tar.gz"
+        _run(["curl", "-fsSL", _MTG_URL, "-o", str(tarball)], timeout=60)
+        digest = hashlib.sha256(tarball.read_bytes()).hexdigest()
+        if digest != _MTG_SHA256:
+            raise FixupError(
+                f"mtg-{_MTG_VERSION}-linux-amd64.tar.gz: sha256 не совпал "
+                f"(ждали {_MTG_SHA256}, получили {digest}) — установка прервана"
+            )
+        _run(["tar", "-C", str(build_dir), "-xzf", str(tarball)])
+        extracted = build_dir / f"mtg-{_MTG_VERSION}-linux-amd64" / "mtg"
+        if not extracted.is_file():
+            raise FixupError(f"после распаковки не нашёлся бинарь mtg ({extracted})")
+        _sudo(["install", "-m", "0755", str(extracted), str(MTG_BIN_PATH)])
+    setcap = _which("setcap")
+    if setcap is None:
+        raise FixupError("setcap не найден (пакет libcap2-bin)")
+    _sudo([setcap, "cap_net_bind_service=+ep", str(MTG_BIN_PATH)])
+
+
+def _install_microsocks() -> None:
+    if _which("microsocks") is not None:
+        return
+    argv = install_argv("microsocks")
+    if argv is None:
+        raise FixupError("не найден известный пакетный менеджер для microsocks")
+    _sudo(argv)
+
+
+def _proxy_units_apply(settings: Settings) -> None:
+    _install_mtg()
+    _install_microsocks()
+    if not settings.vpn.socks_host:
+        raise FixupError(
+            "не настроен [vpn].socks_host — впишите tailscale-адрес jeeves и повторите nodectl fix"
+        )
+    PROXY_UNITS_DIR.mkdir(parents=True, exist_ok=True)
+    if not MTG_UNIT_PATH.exists():
+        # Секрет — PROXY_SECRET_SEED (см. vpn/protocol.py): тот же литерал,
+        # которым vpn/service.py::_proxy_secret сидирует БД при первом
+        # старте — оба места сходятся без похода друг к другу. Дальнейшая
+        # смена — только через proxy_rotate_secret (правит и БД, и юнит).
+        MTG_UNIT_PATH.write_text(
+            mtg_unit_content(settings.vpn.mtg_port, vpn_protocol.PROXY_SECRET_SEED),
+            encoding="utf-8",
+        )
+    if not MICROSOCKS_UNIT_PATH.exists():
+        microsocks_path = _which("microsocks") or "/usr/bin/microsocks"
+        MICROSOCKS_UNIT_PATH.write_text(
+            microsocks_unit_content(
+                settings.vpn.socks_host, settings.vpn.socks_port, microsocks_path
+            ),
+            encoding="utf-8",
+        )
+    _run(["systemctl", "--user", "daemon-reload"])
+    _run(["systemctl", "--user", "enable", "--now", "mtg.service", "microsocks.service"])
+
+
+def make_proxy_units_fixup(settings: Settings) -> Fixup:
+    return Fixup(
+        id="proxy-units",
+        title="Поднять mtg (MTProto) + microsocks (SOCKS5) на jeeves",
+        needed=_vpn_needed,
+        check=_proxy_units_check,
+        apply=lambda: _proxy_units_apply(settings),
+    )
+
+
+# --- proxy: именованные nft-счётчики трафика, точечно (НЕ nft -f) ---
+#
+# Живой инцидент 2026-08-17 (vpn-jeeves-nat-wiped-by-nftables-reload):
+# полный `nft -f /etc/nftables.conf` стирает ВСЕ таблицы, включая
+# iptables-nft таблицы, которые awg-quick добавляет себе через PostUp —
+# NAT/FORWARD у AmneziaWG пропадают без единой ошибки, VPN хендшейкается,
+# но не даёт интернета. Здесь — ТОЛЬКО точечные `nft add`/`insert`.
+
+
+def _nft_output(argv: list[str]) -> str | None:
+    result = subprocess.run(["sudo", "-n", "nft", *argv], capture_output=True, text=True)
+    return result.stdout if result.returncode == 0 else None
+
+
+def _existing_counter_names() -> set[str]:
+    output = _nft_output(["-j", "list", "table", "inet", "filter"])
+    if output is None:
+        return set()
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        return set()
+    return {
+        counter["name"]
+        for item in data.get("nftables", [])
+        if (counter := item.get("counter")) is not None
+    }
+
+
+def _proxy_firewall_check() -> bool:
+    return {"mtg_bytes", "socks_bytes"} <= _existing_counter_names()
+
+
+def _append_nftables_conf_counters(settings: Settings) -> None:
+    """Дописать счётчики в ПЕРСИСТЕНТНЫЙ /etc/nftables.conf — этот файл
+    применяется только при бутстрапе systemd (следующий чистый бут), сам
+    файл переписать безопасно; недопустимо только ПРИМЕНЯТЬ его целиком на
+    живой ноде (`nft -f`/`systemctl restart nftables`) — этого здесь нет и
+    не будет, см. предупреждение выше."""
+    result = subprocess.run(
+        ["sudo", "cat", str(NFTABLES_CONF_PATH)], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        raise FixupError(f"не удалось прочитать {NFTABLES_CONF_PATH}: {result.stderr.strip()}")
+    content = result.stdout
+    if "counter mtg_bytes" in content:
+        return
+    marker = "chain input {\n"
+    idx = content.find(marker)
+    if idx == -1:
+        raise FixupError(
+            f"{NFTABLES_CONF_PATH}: не нашёл 'chain input {{' — структура файла "
+            "отличается от ожидаемой, допишите счётчики вручную (см. node/fixups.py "
+            "mtg_unit_content/_append_nftables_conf_counters) и повторите nodectl fix"
+        )
+    insert_at = idx + len(marker)
+    addition = (
+        "    counter mtg_bytes { }\n"
+        "    counter socks_bytes { }\n"
+        f"    tcp dport {settings.vpn.mtg_port} counter name mtg_bytes accept\n"
+        f'    iifname "tailscale0" tcp dport {settings.vpn.socks_port} '
+        "counter name socks_bytes accept\n"
+    )
+    new_content = content[:insert_at] + addition + content[insert_at:]
+    with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as tmp:
+        tmp.write(new_content)
+        tmp_path = Path(tmp.name)
+    try:
+        _sudo(
+            [
+                "install", "-m", "0755", "-o", "root", "-g", "root",
+                str(tmp_path), str(NFTABLES_CONF_PATH),
+            ]
+        )
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _apply_proxy_firewall_live(settings: Settings) -> None:
+    """Точечно в живой ruleset. ``nft insert rule`` БЕЗ явной позиции
+    добавляет правило В НАЧАЛО цепочки (проверено эмпирически на jeeves
+    2026-08-17 в изолированной тестовой таблице) — новое правило со
+    счётчиком получает пакет первым и отрабатывает раньше старого голого
+    ``tcp dport 443 accept``/блочного ``iifname "tailscale0" accept``.
+    Старые правила НЕ трогаем и не удаляем — они просто становятся
+    недостижимы для этих портов, что безопаснее, чем trying to delete by
+    handle."""
+    existing = _existing_counter_names()
+    if "mtg_bytes" not in existing:
+        _sudo(["nft", "add", "counter", "inet", "filter", "mtg_bytes"])
+    if "socks_bytes" not in existing:
+        _sudo(["nft", "add", "counter", "inet", "filter", "socks_bytes"])
+    if _proxy_firewall_check():
+        return
+    _sudo(
+        [
+            "nft", "insert", "rule", "inet", "filter", "input",
+            "tcp", "dport", str(settings.vpn.mtg_port),
+            "counter", "name", "mtg_bytes", "accept",
+        ]
+    )
+    _sudo(
+        [
+            "nft", "insert", "rule", "inet", "filter", "input",
+            "iifname", "tailscale0", "tcp", "dport", str(settings.vpn.socks_port),
+            "counter", "name", "socks_bytes", "accept",
+        ]
+    )
+
+
+def proxy_firewall_sudoers_content(nft_path: str, user: str) -> str:
+    return (
+        f"{user} ALL=(root) NOPASSWD: {nft_path} -j list counter inet filter mtg_bytes, "
+        f"{nft_path} -j list counter inet filter socks_bytes\n"
+    )
+
+
+def _proxy_firewall_apply(settings: Settings) -> None:
+    _append_nftables_conf_counters(settings)
+    _apply_proxy_firewall_live(settings)
+    nft_path = _which("nft") or "/usr/sbin/nft"
+    _install_sudoers_snippet(
+        PROXY_FIREWALL_SUDOERS_FILE, proxy_firewall_sudoers_content(nft_path, getuser())
+    )
+
+
+def make_proxy_firewall_fixup(settings: Settings) -> Fixup:
+    return Fixup(
+        id="proxy-firewall",
+        title="Счётчики трафика прокси в firewall (точечно, без полного reload)",
+        needed=_vpn_needed,
+        check=_proxy_firewall_check,
+        apply=lambda: _proxy_firewall_apply(settings),
+    )
+
+
 def build_fixups(settings: Settings) -> list[Fixup]:
     """Известные фиксы, актуальные для текущих назначений ноды (``needed``)."""
     fixups = [
@@ -917,6 +1266,8 @@ def build_fixups(settings: Settings) -> list[Fixup]:
         make_awg_sudoers_fixup(settings),
         make_vpn_probe_tunnel_fixup(settings),
         make_vpn_probe_sudoers_fixup(settings),
+        make_proxy_units_fixup(settings),
+        make_proxy_firewall_fixup(settings),
         *(make_apps_unit_fixup(app) for app in settings.apps.items),
     ]
     return [f for f in fixups if f.needed(settings)]

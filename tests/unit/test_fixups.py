@@ -19,7 +19,10 @@ from sa_home_bot.node.fixups import (
     make_awg_sudoers_fixup,
     make_vpn_probe_sudoers_fixup,
     make_vpn_probe_tunnel_fixup,
+    microsocks_unit_content,
+    mtg_unit_content,
     power_polkit_rule_content,
+    proxy_firewall_sudoers_content,
     rewrite_unit_path_line,
     smartctl_sudoers_content,
     smartctl_wrapper_content,
@@ -186,6 +189,30 @@ def test_awg_sudoers_content_pins_absolute_path_and_interface():
     # Не разрешаем изменение приватного ключа/порта интерфейса — только пиров.
     assert "private-key" not in content
     assert "awg-quick" not in content
+
+
+def test_mtg_unit_content_embeds_port_and_secret():
+    content = mtg_unit_content(443, "sekret")
+    assert "simple-run 0.0.0.0:443 sekret" in content
+    assert "/usr/local/bin/mtg" in content
+
+
+def test_microsocks_unit_content_binds_given_host_and_port():
+    content = microsocks_unit_content("100.111.4.42", 1080, "/usr/bin/microsocks")
+    assert "/usr/bin/microsocks -i 100.111.4.42 -p 1080" in content
+
+
+def test_proxy_firewall_sudoers_content_only_two_named_counters():
+    content = proxy_firewall_sudoers_content("/usr/sbin/nft", "sevboa")
+    assert "/usr/sbin/nft -j list counter inet filter mtg_bytes" in content
+    assert "/usr/sbin/nft -j list counter inet filter socks_bytes" in content
+    # Не весь nft — иначе это было бы равносильно root на firewall.
+    assert content.count("NOPASSWD:") == 1
+
+
+def test_build_fixups_includes_proxy_fixups_when_vpn_assigned():
+    ids = {f.id for f in build_fixups(_settings(["vpn"]))}
+    assert {"proxy-units", "proxy-firewall"} <= ids
 
 
 def test_apps_unit_sudoers_content_only_start_stop_restart_of_this_unit():

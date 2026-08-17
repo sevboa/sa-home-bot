@@ -232,6 +232,18 @@ CREATE TABLE IF NOT EXISTS vpn_peer_usage (
     PRIMARY KEY (peer_id, month)
 );
 
+-- Секрет mtg (MTProto-прокси на jeeves) — единственная строка (id=1).
+-- Трафик mtg/microsocks считается тем же способом, что и у пиров awg
+-- (дельты в vpn_counters по псевдо-ключам "proxy-mtg"/"proxy-socks",
+-- накопление в vpn_peer_usage по отрицательным peer_id — см.
+-- vpn/service.py::PROXY_MTG_PEER_ID/PROXY_SOCKS_PEER_ID), отдельной
+-- таблицы для байтов не нужно.
+CREATE TABLE IF NOT EXISTS proxy_state (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    mtg_secret  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
 -- Гистерезис уведомлений о лимите за месяц: warned_limit_bytes — при каком
 -- лимите последний раз слали "осталось N ГБ" (сравнение с ТЕКУЩИМ лимитом
 -- решает, слать ли повторно после гранта); blocked_at — когда лимит был

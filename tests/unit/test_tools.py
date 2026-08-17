@@ -2027,7 +2027,7 @@ def test_vpn_enum_is_per_action_right():
     assert _vpn_enum(_sub("usage@vpn")) == ["usage"]
     assert _vpn_enum(ADMIN) == [
         "usage", "issue", "reissue", "grant_extra", "request_extra", "apk", "peers",
-        "resolve_request",
+        "resolve_request", "proxy_link", "proxy_rotate_secret", "proxy_usage",
     ]
 
 
