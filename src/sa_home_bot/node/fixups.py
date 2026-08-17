@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import shutil
@@ -24,8 +25,12 @@ from sa_home_bot import wol
 from sa_home_bot.config import AppConfig, Settings
 from sa_home_bot.node import assignments
 from sa_home_bot.node import kind as node_kinds
+from sa_home_bot.proto.client import ProtoClient
+from sa_home_bot.proto.endpoints import resolve_endpoint
+from sa_home_bot.proto.messages import Address
 from sa_home_bot.sensors.disks import SMARTCTL_REQUIREMENT
 from sa_home_bot.utils.requirements import install_argv
+from sa_home_bot.vpn import protocol as vpn_protocol
 
 log = logging.getLogger(__name__)
 
@@ -575,6 +580,213 @@ def make_awg_sudoers_fixup(settings: Settings) -> Fixup:
     )
 
 
+# --- vpn_check: клиентский туннель-пробник (netns + awg-quick) ---
+#
+# Служба vpn_check (vpn_check/service.py) сама awg-quick не поднимает и root
+# не получает (тот же инвариант «долгоживущий процесс сам sudo не зовёт», что
+# у остальных служб) — готовый туннель ей нужен заранее, поднятый этим
+# фиксом. Конфиг (приватный ключ) получаем ровно тем же способом, каким его
+# получил бы обычный гость: зовём action "issue" службы vpn на jeeves с
+# chat_id=0 (см. vpn/service.py::NODE_SENTINEL_CHAT_ID — уже зарезервирован
+# под "не гостя, а саму ноду"; отдельного "системного" действия в VpnService
+# заводить не понадобилось, решение пользователя 2026-08-17: `_issue()` не
+# проверяет принадлежность chat_id реальному чату, это просто ключ учёта в
+# БД). Интерфейс живёт ВНУТРИ отдельного network namespace
+# (``settings.vpn_check.netns``) — весь трафик из этого namespace идёт через
+# туннель, а основная маршрутизация ноды не трогается вообще (не нужны
+# статические маршруты под меняющиеся IP целей вроде api.telegram.org).
+
+VPN_PROBE_IFACE = "awg-probe0"
+VPN_PROBE_CONF_DIR = Path("/etc/amnezia/amneziawg")
+VPN_PROBE_UNIT_FILE = Path("/etc/systemd/system/sa-home-vpn-probe.service")
+VPN_PROBE_SUDOERS_FILE = "50-sa-home-node-vpn-probe"
+# vpn/service.py::NODE_SENTINEL_CHAT_ID — не импортируем службу целиком
+# (тяжёлые зависимости: БД, awg-бэкенд) ради одной константы, тот же приём,
+# что уже используют node/peers.py и другие (свой NODE_SERVICE = "node").
+VPN_PROBE_CHAT_ID = 0
+
+
+def _vpn_check_needed(settings: Settings) -> bool:
+    return assignments.has_service(settings.node.assignments, "vpn_check")
+
+
+def _vpn_probe_conf_path(settings: Settings) -> Path:
+    return VPN_PROBE_CONF_DIR / f"{VPN_PROBE_IFACE}.conf"
+
+
+def _netns_exists(name: str) -> bool:
+    try:
+        result = subprocess.run(["ip", "netns", "list"], capture_output=True, text=True)
+    except OSError:
+        return False
+    return any(line.split()[0] == name for line in result.stdout.splitlines() if line.strip())
+
+
+def vpn_probe_unit_content(netns: str, iface: str, ip_path: str, awg_quick_path: str) -> str:
+    """systemd-юнит: весь awg-quick исполняется ВНУТРИ netns (``ip netns
+    exec`` меняет сетевое пространство имён дочернего процесса) — сам
+    интерфейс, который создаст awg-quick, окажется уже там, без отдельного
+    ``ip link set netns``."""
+    return (
+        "[Unit]\n"
+        "Description=sa-home-bot: VPN-пробник для мониторинга доступности "
+        f"({iface} в netns {netns})\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "RemainAfterExit=yes\n"
+        f"ExecStart={ip_path} netns exec {netns} {awg_quick_path} up {iface}\n"
+        f"ExecStop={ip_path} netns exec {netns} {awg_quick_path} down {iface}\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+
+
+def vpn_probe_sudoers_content(ip_path: str, netns: str, user: str) -> str:
+    """NOPASSWD только на ``ip netns exec <netns> curl *`` — не голый ``ip``
+    (равносилен root: умеет менять маршруты/интерфейсы где угодно) и не
+    произвольная команда внутри netns, только curl (см. vpn_check/service.py,
+    единственный вызов рантайма). ``curl`` литералом, не резолвленным путём —
+    он не прямая цель sudo, а аргумент вложенного ``ip netns exec``."""
+    return f"{user} ALL=(root) NOPASSWD: {ip_path} netns exec {netns} curl *\n"
+
+
+async def _fetch_probe_config(settings: Settings) -> str:
+    """Выпросить конфиг пробника у vpn@jeeves — тонкий разовый ProtoClient к
+    своей же локальной ноде, та маршрутизирует дальше (см.
+    node/peers.py::NodeRouter.route), тем же путём, каким ходит nodectl."""
+    endpoint = resolve_endpoint(settings.node.socket)
+    client = ProtoClient(endpoint, token=settings.swarm.token)
+    try:
+        await client.connect()
+        result = await client.command(
+            vpn_protocol.ACTION_ISSUE,
+            {"chat_id": VPN_PROBE_CHAT_ID},
+            dst=Address(node=vpn_protocol.NODE_ID, service=vpn_protocol.SERVICE_NAME),
+            timeout=20.0,
+        )
+    finally:
+        await client.close()
+    config_text = result.get("config_text")
+    if not config_text:
+        raise FixupError("vpn@jeeves не вернул config_text")
+    return str(config_text)
+
+
+def _vpn_probe_tunnel_check(settings: Settings) -> bool:
+    return _vpn_probe_conf_path(settings).exists() and VPN_PROBE_UNIT_FILE.exists()
+
+
+def _vpn_probe_tunnel_apply(settings: Settings) -> None:
+    awg_quick_path = _which("awg-quick")
+    if awg_quick_path is None:
+        argv = install_argv("amneziawg-tools")
+        if argv is None:
+            raise FixupError(
+                "awg-quick не найден и неизвестен пакетный менеджер для amneziawg-tools"
+            )
+        _sudo(argv)
+        awg_quick_path = _which("awg-quick")
+        if awg_quick_path is None:
+            raise FixupError("awg-quick не нашёлся после установки amneziawg-tools")
+    ip_path = _which("ip")
+    if ip_path is None:
+        raise FixupError("ip (iproute2) не найден в PATH")
+
+    netns = settings.vpn_check.netns
+    if not _netns_exists(netns):
+        _sudo([ip_path, "netns", "add", netns])
+
+    conf_path = _vpn_probe_conf_path(settings)
+    if not conf_path.exists():
+        try:
+            config_text = asyncio.run(_fetch_probe_config(settings))
+        except Exception as exc:  # noqa: BLE001 — сеть/протокол сведены к одному диагнозу
+            raise FixupError(
+                f"не удалось получить конфиг у vpn@jeeves ({exc}) — "
+                "проверьте, что jeeves доступен и служба vpn запущена"
+            ) from exc
+        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as tmp:
+            tmp.write(config_text)
+            tmp_path = Path(tmp.name)
+        try:
+            _sudo(
+                [
+                    "install",
+                    "-D",
+                    "-m",
+                    "0600",
+                    "-o",
+                    "root",
+                    "-g",
+                    "root",
+                    str(tmp_path),
+                    str(conf_path),
+                ]
+            )
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    if not VPN_PROBE_UNIT_FILE.exists():
+        content = vpn_probe_unit_content(netns, VPN_PROBE_IFACE, ip_path, awg_quick_path)
+        with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
+        try:
+            _sudo(
+                [
+                    "install",
+                    "-m",
+                    "0644",
+                    "-o",
+                    "root",
+                    "-g",
+                    "root",
+                    str(tmp_path),
+                    str(VPN_PROBE_UNIT_FILE),
+                ]
+            )
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        _sudo(["systemctl", "daemon-reload"])
+    _sudo(["systemctl", "enable", "--now", VPN_PROBE_UNIT_FILE.name])
+
+
+def make_vpn_probe_tunnel_fixup(settings: Settings) -> Fixup:
+    return Fixup(
+        id="vpn-check-probe-tunnel",
+        title="Поднять VPN-туннель пробника (netns + awg-quick)",
+        needed=_vpn_check_needed,
+        check=lambda: _vpn_probe_tunnel_check(settings),
+        apply=lambda: _vpn_probe_tunnel_apply(settings),
+    )
+
+
+def _vpn_probe_sudoers_check() -> bool:
+    return (SUDOERS_DIR / VPN_PROBE_SUDOERS_FILE).exists()
+
+
+def _vpn_probe_sudoers_apply(settings: Settings) -> None:
+    ip_path = _which("ip")
+    if ip_path is None:
+        raise FixupError("ip (iproute2) не найден в PATH")
+    content = vpn_probe_sudoers_content(ip_path, settings.vpn_check.netns, getuser())
+    _install_sudoers_snippet(VPN_PROBE_SUDOERS_FILE, content)
+
+
+def make_vpn_probe_sudoers_fixup(settings: Settings) -> Fixup:
+    return Fixup(
+        id="vpn-check-probe-sudoers",
+        title="Разрешить vpn_check делать curl внутри netns пробника без пароля",
+        needed=_vpn_check_needed,
+        check=_vpn_probe_sudoers_check,
+        apply=lambda: _vpn_probe_sudoers_apply(settings),
+    )
+
+
 def build_fixups(settings: Settings) -> list[Fixup]:
     """Известные фиксы, актуальные для текущих назначений ноды (``needed``)."""
     fixups = [
@@ -585,6 +797,8 @@ def build_fixups(settings: Settings) -> list[Fixup]:
         POWER_CONTROL_POLKIT,
         WOL_ENABLE,
         make_awg_sudoers_fixup(settings),
+        make_vpn_probe_tunnel_fixup(settings),
+        make_vpn_probe_sudoers_fixup(settings),
         *(make_apps_unit_fixup(app) for app in settings.apps.items),
     ]
     return [f for f in fixups if f.needed(settings)]

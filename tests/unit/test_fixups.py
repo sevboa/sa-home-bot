@@ -17,10 +17,14 @@ from sa_home_bot.node.fixups import (
     build_fixups,
     make_apps_unit_fixup,
     make_awg_sudoers_fixup,
+    make_vpn_probe_sudoers_fixup,
+    make_vpn_probe_tunnel_fixup,
     power_polkit_rule_content,
     rewrite_unit_path_line,
     smartctl_sudoers_content,
     smartctl_wrapper_content,
+    vpn_probe_sudoers_content,
+    vpn_probe_unit_content,
     wol_unit_content,
 )
 
@@ -271,3 +275,46 @@ def test_wol_unit_content_runs_ethtool_wol_g_on_given_iface():
     content = wol_unit_content("/usr/sbin/ethtool", "enp1s0")
     assert "ExecStart=/usr/sbin/ethtool -s enp1s0 wol g\n" in content
     assert "Type=oneshot" in content
+
+
+def test_vpn_probe_needed_only_when_vpn_check_assigned():
+    fixup = make_vpn_probe_tunnel_fixup(_settings(["vpn_check"]))
+    assert fixup.needed(_settings(["vpn_check"]))
+    assert not fixup.needed(_settings(["vpn"]))
+
+
+def test_vpn_probe_sudoers_shares_needed_with_tunnel():
+    settings = _settings(["vpn_check"])
+    assert make_vpn_probe_sudoers_fixup(settings).needed(
+        settings
+    ) == make_vpn_probe_tunnel_fixup(settings).needed(settings)
+
+
+def test_build_fixups_includes_vpn_probe_fixups_when_vpn_check_assigned():
+    ids = {f.id for f in build_fixups(_settings(["vpn_check"]))}
+    assert {"vpn-check-probe-tunnel", "vpn-check-probe-sudoers"} <= ids
+
+
+def test_build_fixups_excludes_vpn_probe_fixups_without_vpn_check():
+    ids = {f.id for f in build_fixups(_settings(["vpn"]))}
+    assert "vpn-check-probe-tunnel" not in ids
+    assert "vpn-check-probe-sudoers" not in ids
+
+
+def test_vpn_probe_unit_content_runs_awg_quick_inside_netns():
+    content = vpn_probe_unit_content(
+        "vpn-probe", "awg-probe0", "/usr/sbin/ip", "/usr/bin/awg-quick"
+    )
+    assert (
+        "ExecStart=/usr/sbin/ip netns exec vpn-probe /usr/bin/awg-quick up awg-probe0\n" in content
+    )
+    assert (
+        "ExecStop=/usr/sbin/ip netns exec vpn-probe /usr/bin/awg-quick down awg-probe0\n"
+        in content
+    )
+    assert "RemainAfterExit=yes" in content
+
+
+def test_vpn_probe_sudoers_content_pins_ip_path_and_netns_curl_wildcard():
+    content = vpn_probe_sudoers_content("/usr/sbin/ip", "vpn-probe", "sevboa")
+    assert content == "sevboa ALL=(root) NOPASSWD: /usr/sbin/ip netns exec vpn-probe curl *\n"

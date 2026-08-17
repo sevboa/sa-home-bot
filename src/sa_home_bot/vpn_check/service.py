@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import socket
 import time
 from typing import Any
@@ -40,6 +41,7 @@ from sa_home_bot.proto.messages import (
     ServiceDescription,
     ServiceInfo,
 )
+from sa_home_bot.utils.requirements import looks_like_permission_error
 from sa_home_bot.vpn import protocol as vpn_protocol
 from sa_home_bot.vpn_check.protocol import ACTION_CHECK, SERVICE_NAME
 
@@ -95,8 +97,18 @@ class VpnCheckService:
 
     async def _check_one(self, target: str) -> dict[str, Any]:
         timeout_s = self._cfg.check_timeout_s
+        # Заход в чужой netns требует root — узкий sudoers-снипет ставит
+        # nodectl fix (node/fixups.py::make_vpn_probe_sudoers_fixup), тот же
+        # приём («резолвим путь при каждом вызове, не кэшируем, чтобы fix,
+        # применённый после старта службы, подхватился без рестарта»), что
+        # уже использует vpn/awg.py::RealAwgBackend._sudo_awg. Резолвим
+        # только `ip` (прямая цель sudo) — "curl" внутри netns exec остаётся
+        # литералом, ровно как в самом sudoers-правиле.
+        ip_path = shutil.which("ip") or "ip"
         cmd = [
-            "ip",
+            "sudo",
+            "-n",
+            ip_path,
             "netns",
             "exec",
             self._cfg.netns,
@@ -123,6 +135,8 @@ class VpnCheckService:
         latency_ms = int((time.monotonic() - started) * 1000)
         if proc.returncode != 0:
             err = stderr.decode(errors="replace").strip() or f"curl exit {proc.returncode}"
+            if looks_like_permission_error(err) or "a password is required" in err.lower():
+                err = "нет прав на netns пробника — выполните: nodectl fix"
             return {"ok": False, "ms": latency_ms, "error": err}
         code = stdout.decode(errors="replace").strip()
         ok = code.startswith(("2", "3"))
