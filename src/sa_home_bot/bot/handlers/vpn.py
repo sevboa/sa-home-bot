@@ -678,6 +678,11 @@ async def handle_action(
         await callback.message.answer(_summary_text(summary))
         return
 
+    if action_id == _ACTION_VPN_CARD:
+        await callback.answer()
+        await _redraw_card(callback, node_link, subscription, config)
+        return
+
     if action_id == vpn_protocol.ACTION_CHECK_STATUS:
         try:
             result = await node_link.command(vpn_protocol.ACTION_CHECK_STATUS, {}, dst=_DST)
@@ -688,10 +693,11 @@ async def handle_action(
             await callback.answer("⚠️ Служба VPN недоступна.", show_alert=True)
             return
         await callback.answer()
-        await callback.message.answer(
-            _check_status_text(result.get("states") or []),
-            reply_markup=_check_status_keyboard(),
-        )
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.edit_text(
+                _check_status_text(result.get("states") or []),
+                reply_markup=_check_status_keyboard(),
+            )
         return
 
     if action_id == vpn_protocol.ACTION_CHECK_NOW:
@@ -708,10 +714,21 @@ async def handle_action(
             f"Запущено на: {', '.join(dispatched)}" if dispatched else "Разослать не удалось",
             show_alert=not dispatched,
         )
-        await callback.message.answer(
-            "🔄 Проверка запущена — результат появится через несколько секунд, "
-            "откройте «🛰 Проверка сети» ещё раз."
-        )
+        # Тот же экран, что и «↻ Обновить», редактируется на месте — вместо
+        # отдельного сообщения «откройте проверку ещё раз» (решение
+        # пользователя 2026-08-17): check_now не возвращает states сам
+        # (только dispatched_to/unreachable/skipped), поэтому берём их
+        # отдельным вызовом и помечаем текст как «в процессе» — результаты
+        # ещё старые, до следующего нажатия «↻ Обновить».
+        states: list[dict] = []
+        with contextlib.suppress(ProtoError, ServiceUnavailableError):
+            status = await node_link.command(vpn_protocol.ACTION_CHECK_STATUS, {}, dst=_DST)
+            states = status.get("states") or []
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.edit_text(
+                _check_status_text(states, pending=True),
+                reply_markup=_check_status_keyboard(),
+            )
         return
 
     if action_id == vpn_protocol.ACTION_PROXY_LINK:

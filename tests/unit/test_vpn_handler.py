@@ -344,6 +344,61 @@ async def test_issue_secret_cleans_up_after_ttl_without_click():
     assert len(notifier.deleted) == 2  # сообщение с секретом и сообщение с кнопкой
 
 
+async def test_check_status_edits_card_in_place():
+    link = FakeNodeLink(
+        result={"states": [{"node": "alfred", "target": "1.1.1.1", "status": "ok"}]}
+    )
+    callback = FakeCallback("act:vpn:check_status", chat_id=1)
+    await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), ADMIN, _pending())
+    assert callback.message.answers == []  # не новое сообщение — редактирование на месте
+    assert callback.message.edits and "alfred" in callback.message.edits[0]
+
+
+def test_check_status_keyboard_has_back_and_refresh_buttons():
+    keyboard = vpn_handlers._check_status_keyboard()
+    texts = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert any("Назад" in t for t in texts)
+    assert any("Обновить" in t for t in texts)
+    assert any("Запустить проверку" in t for t in texts)
+
+
+def test_check_status_text_pending_hint():
+    text = vpn_handlers._check_status_text([], pending=True)
+    assert "⏳" in text
+    assert "Обновить" in text
+    assert "⏳" not in vpn_handlers._check_status_text([], pending=False)
+
+
+async def test_check_now_edits_message_with_pending_hint_not_new_message():
+    class TwoStepLink(FakeNodeLink):
+        async def command(self, action, args=None, dst=None, *, timeout=None):
+            self.calls.append((action, args or {}))
+            if action == vpn_protocol.ACTION_CHECK_NOW:
+                return {"dispatched_to": ["alfred", "jeeves"]}
+            return {"states": [{"node": "alfred", "target": "1.1.1.1", "status": "alerting"}]}
+
+    link = TwoStepLink()
+    callback = FakeCallback("act:vpn:check_now", chat_id=1)
+    await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), ADMIN, _pending())
+    actions = [c[0] for c in link.calls]
+    assert vpn_protocol.ACTION_CHECK_NOW in actions
+    assert vpn_protocol.ACTION_CHECK_STATUS in actions  # свежие states подтянуты следом
+    assert callback.message.answers == []  # никакого «откройте проверку ещё раз» новым сообщением
+    assert callback.message.edits
+    assert "⏳" in callback.message.edits[0]
+    assert "Обновить" in callback.message.edits[0]
+
+
+async def test_vpn_card_back_button_redraws_card():
+    link = FakeNodeLink(result={"used_bytes": 0, "limit_bytes": 1, "remaining_bytes": 1})
+    callback = FakeCallback("act:vpn:vpn_card", chat_id=1)
+    await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), ADMIN, _pending())
+    actions = [c[0] for c in link.calls]
+    assert vpn_protocol.ACTION_USAGE in actions
+    assert callback.message.edits  # карточка вернулась редактированием того же сообщения
+    assert callback.message.answers == []
+
+
 async def test_resolve_request_approve(monkeypatch):
     link = FakeNodeLink(result={"request_id": 7, "status": "approved"})
     callback = FakeCallback("act:vpn:resolve_request:7_approve", chat_id=1)
