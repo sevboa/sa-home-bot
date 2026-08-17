@@ -12,12 +12,15 @@ dst=Address(node=vpn_protocol.NODE_ID, service=vpn_protocol.SERVICE_NAME))``
 — vpn/service.py не ждёт синхронно ответа на исходный fan-out, только
 копит то, что приходит.
 
-Сам туннель — вне этого процесса: отдельный network namespace
-(``settings.vpn_check.netns``), поднятый деплой-скриптом отдельно от
-sa-home-bot (см. план — этап vpn_check в IMPLEMENTATION_PLAN.md). Эта
-служба его не создаёт и не поднимает, только пользуется им, вызывая curl
-внутри него — так основная маршрутизация ноды не трогается, независимо от
-того, какие IP отдаёт DNS для проверяемых целей.
+Сам туннель — вне этого процесса: интерфейс ``settings.vpn_check.probe_iface``,
+поднятый node/fixups.py::make_vpn_probe_tunnel_fixup (``nodectl fix``). Эта
+служба его не создаёт и не поднимает, только пользуется им, явно пришпиливая
+curl к интерфейсу через ``--interface`` (SO_BINDTODEVICE) — так основная
+маршрутизация ноды не трогается, независимо от того, какие IP отдаёт DNS для
+проверяемых целей. Живая находка 2026-08-17: раньше интерфейс жил в
+отдельном network namespace ради той же изоляции, но там не было пути в
+интернет для самого WireGuard-хендшейка (только loopback) — namespace убрали
+(см. большой комментарий в node/fixups.py).
 """
 
 from __future__ import annotations
@@ -68,7 +71,7 @@ class VpnCheckService:
         )
 
     async def get_state(self) -> dict[str, Any]:
-        return {"node": self._node, "service": SERVICE_NAME, "netns": self._cfg.netns}
+        return {"node": self._node, "service": SERVICE_NAME, "probe_iface": self._cfg.probe_iface}
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if action != ACTION_CHECK:
@@ -97,22 +100,18 @@ class VpnCheckService:
 
     async def _check_one(self, target: str) -> dict[str, Any]:
         timeout_s = self._cfg.check_timeout_s
-        # Заход в чужой netns требует root — узкий sudoers-снипет ставит
-        # nodectl fix (node/fixups.py::make_vpn_probe_sudoers_fixup), тот же
-        # приём («резолвим путь при каждом вызове, не кэшируем, чтобы fix,
-        # применённый после старта службы, подхватился без рестарта»), что
-        # уже использует vpn/awg.py::RealAwgBackend._sudo_awg. Резолвим
-        # только `ip` (прямая цель sudo) — "curl" внутри netns exec остаётся
-        # литералом, ровно как в самом sudoers-правиле.
-        ip_path = shutil.which("ip") or "ip"
+        # --interface (SO_BINDTODEVICE) требует root — узкий sudoers-снипет
+        # ставит nodectl fix (node/fixups.py::make_vpn_probe_sudoers_fixup),
+        # тот же приём («резолвим путь при каждом вызове, не кэшируем, чтобы
+        # fix, применённый после старта службы, подхватился без рестарта»),
+        # что уже использует vpn/awg.py::RealAwgBackend._sudo_awg.
+        curl_path = shutil.which("curl") or "curl"
         cmd = [
             "sudo",
             "-n",
-            ip_path,
-            "netns",
-            "exec",
-            self._cfg.netns,
-            "curl",
+            curl_path,
+            "--interface",
+            self._cfg.probe_iface,
             "-s",
             "-m",
             str(timeout_s),
@@ -136,7 +135,7 @@ class VpnCheckService:
         if proc.returncode != 0:
             err = stderr.decode(errors="replace").strip() or f"curl exit {proc.returncode}"
             if looks_like_permission_error(err) or "a password is required" in err.lower():
-                err = "нет прав на netns пробника — выполните: nodectl fix"
+                err = "нет прав на интерфейс пробника — выполните: nodectl fix"
             return {"ok": False, "ms": latency_ms, "error": err}
         code = stdout.decode(errors="replace").strip()
         ok = code.startswith(("2", "3"))

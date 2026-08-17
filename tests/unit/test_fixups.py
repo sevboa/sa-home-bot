@@ -328,20 +328,39 @@ def test_build_fixups_excludes_vpn_probe_fixups_without_vpn_check():
     assert "vpn-check-probe-sudoers" not in ids
 
 
-def test_vpn_probe_unit_content_runs_awg_quick_inside_netns():
-    content = vpn_probe_unit_content(
-        "vpn-probe", "awg-probe0", "/usr/sbin/ip", "/usr/bin/awg-quick"
-    )
-    assert (
-        "ExecStart=/usr/sbin/ip netns exec vpn-probe /usr/bin/awg-quick up awg-probe0\n" in content
-    )
-    assert (
-        "ExecStop=/usr/sbin/ip netns exec vpn-probe /usr/bin/awg-quick down awg-probe0\n"
-        in content
-    )
+def test_vpn_probe_unit_content_runs_awg_quick_directly_no_netns():
+    content = vpn_probe_unit_content("awg-probe0", "/usr/sbin/ip", "/usr/bin/awg-quick")
+    assert "ExecStart=/usr/bin/awg-quick up awg-probe0\n" in content
+    assert "ExecStop=/usr/bin/awg-quick down awg-probe0\n" in content
+    assert "netns" not in content  # живая находка 2026-08-17: netns без пути в интернет
+    # Маршрут — только для curl пробника (--interface), не основной трафик хоста.
+    assert "ExecStartPost=/usr/sbin/ip route add default dev awg-probe0 metric 10000\n" in content
     assert "RemainAfterExit=yes" in content
 
 
-def test_vpn_probe_sudoers_content_pins_ip_path_and_netns_curl_wildcard():
-    content = vpn_probe_sudoers_content("/usr/sbin/ip", "vpn-probe", "sevboa")
-    assert content == "sevboa ALL=(root) NOPASSWD: /usr/sbin/ip netns exec vpn-probe curl *\n"
+def test_vpn_probe_sudoers_content_pins_curl_path_and_interface_wildcard():
+    content = vpn_probe_sudoers_content("/usr/bin/curl", "awg-probe0", "sevboa")
+    assert content == "sevboa ALL=(root) NOPASSWD: /usr/bin/curl --interface awg-probe0 *\n"
+
+
+def test_prepare_probe_conf_strips_dns_and_adds_table_off():
+    raw = (
+        "[Interface]\n"
+        "PrivateKey = SECRET\n"
+        "Address = 10.9.0.15/32\n"
+        "DNS = 1.1.1.1\n"
+        "\n"
+        "[Peer]\n"
+        "PublicKey = PUB\n"
+    )
+    prepared = fixups_module._prepare_probe_conf(raw)
+    assert "DNS" not in prepared  # иначе awg-quick зовёт отсутствующий resolvconf
+    assert "Table = off" in prepared  # иначе awg-quick лезет в основную маршрутизацию хоста
+    assert "PrivateKey = SECRET" in prepared
+    assert "[Peer]" in prepared
+
+
+def test_prepare_probe_conf_does_not_duplicate_existing_table_line():
+    raw = "[Interface]\nPrivateKey = SECRET\nTable = off\n\n[Peer]\nPublicKey = PUB\n"
+    prepared = fixups_module._prepare_probe_conf(raw)
+    assert prepared.count("Table") == 1

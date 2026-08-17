@@ -612,7 +612,7 @@ def make_awg_sudoers_fixup(settings: Settings) -> Fixup:
     )
 
 
-# --- vpn_check: клиентский туннель-пробник (netns + awg-quick) ---
+# --- vpn_check: клиентский туннель-пробник (awg-quick, Table=off) ---
 #
 # Служба vpn_check (vpn_check/service.py) сама awg-quick не поднимает и root
 # не получает (тот же инвариант «долгоживущий процесс сам sudo не зовёт», что
@@ -623,10 +623,27 @@ def make_awg_sudoers_fixup(settings: Settings) -> Fixup:
 # под "не гостя, а саму ноду"; отдельного "системного" действия в VpnService
 # заводить не понадобилось, решение пользователя 2026-08-17: `_issue()` не
 # проверяет принадлежность chat_id реальному чату, это просто ключ учёта в
-# БД). Интерфейс живёт ВНУТРИ отдельного network namespace
-# (``settings.vpn_check.netns``) — весь трафик из этого namespace идёт через
-# туннель, а основная маршрутизация ноды не трогается вообще (не нужны
-# статические маршруты под меняющиеся IP целей вроде api.telegram.org).
+# БД).
+#
+# Живая находка 2026-08-17: интерфейс сначала жил в отдельном network
+# namespace (``ip netns add``) ради изоляции от основной маршрутизации —
+# но у такого netns нет НИ ОДНОГО физического интерфейса, поэтому самому
+# WireGuard-хендшейку (обычный, не туннелируемый UDP до эндпоинта jeeves)
+# было решительно некуда уйти в интернет: `ip route show` внутри netns был
+# пуст, `awg show` не показывал ни одного хендшейка, все проверки висели по
+# таймауту (curl exit 28) на обеих нодах разом. Правильно чинить это можно
+# было бы veth-парой + NAT в root netns, но это лишний ход в firewall двух
+# продакшен-машин (решение пользователя 2026-08-17: не стоит той цены).
+#
+# Вместо netns — `Table = off` в конфиге пробника (см. _prepare_probe_conf):
+# awg-quick поднимает интерфейс и адрес, но НЕ трогает основную
+# маршрутизацию хоста вообще (ни фейкового default route, ни fwmark/ip
+# rule — обычный трафик ноды идёт как шёл). Свой маршрут добавляем сами,
+# ExecStartPost в vpn_probe_unit_content, с высоким metric — обычный
+# трафик хоста его никогда не выберет. Единственный, кто им пользуется —
+# curl самого пробника, явно пришпиленный к интерфейсу через
+# `--interface awg-probe0` (SO_BINDTODEVICE, vpn_check/service.py), которому
+# для этого route нужен ХОТЬ КАКОЙ-то, пусть и с огромным metric.
 
 VPN_PROBE_IFACE = "awg-probe0"
 VPN_PROBE_CONF_DIR = Path("/etc/amnezia/amneziawg")
@@ -646,44 +663,39 @@ def _vpn_probe_conf_path(settings: Settings) -> Path:
     return VPN_PROBE_CONF_DIR / f"{VPN_PROBE_IFACE}.conf"
 
 
-def _netns_exists(name: str) -> bool:
-    try:
-        result = subprocess.run(["ip", "netns", "list"], capture_output=True, text=True)
-    except OSError:
-        return False
-    return any(line.split()[0] == name for line in result.stdout.splitlines() if line.strip())
-
-
-def vpn_probe_unit_content(netns: str, iface: str, ip_path: str, awg_quick_path: str) -> str:
-    """systemd-юнит: весь awg-quick исполняется ВНУТРИ netns (``ip netns
-    exec`` меняет сетевое пространство имён дочернего процесса) — сам
-    интерфейс, который создаст awg-quick, окажется уже там, без отдельного
-    ``ip link set netns``."""
+def vpn_probe_unit_content(iface: str, ip_path: str, awg_quick_path: str) -> str:
+    """systemd-юнит: awg-quick поднимает интерфейс в обычном (root) netns —
+    ``Table = off`` в самом конфиге (см. ``_prepare_probe_conf``) не даёт ему
+    тронуть основную маршрутизацию хоста. ``ExecStartPost`` добавляет
+    единственный маршрут, которым пользуется только curl пробника, явно
+    пришпиленный к интерфейсу (``--interface``, см. vpn_check/service.py) —
+    высокий metric гарантирует, что обычный трафик хоста его не подхватит."""
     return (
         "[Unit]\n"
         "Description=sa-home-bot: VPN-пробник для мониторинга доступности "
-        f"({iface} в netns {netns})\n"
+        f"({iface})\n"
         "After=network-online.target\n"
         "Wants=network-online.target\n"
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
         "RemainAfterExit=yes\n"
-        f"ExecStart={ip_path} netns exec {netns} {awg_quick_path} up {iface}\n"
-        f"ExecStop={ip_path} netns exec {netns} {awg_quick_path} down {iface}\n"
+        f"ExecStart={awg_quick_path} up {iface}\n"
+        f"ExecStartPost={ip_path} route add default dev {iface} metric 10000\n"
+        f"ExecStop={awg_quick_path} down {iface}\n"
         "\n"
         "[Install]\n"
         "WantedBy=multi-user.target\n"
     )
 
 
-def vpn_probe_sudoers_content(ip_path: str, netns: str, user: str) -> str:
-    """NOPASSWD только на ``ip netns exec <netns> curl *`` — не голый ``ip``
-    (равносилен root: умеет менять маршруты/интерфейсы где угодно) и не
-    произвольная команда внутри netns, только curl (см. vpn_check/service.py,
-    единственный вызов рантайма). ``curl`` литералом, не резолвленным путём —
-    он не прямая цель sudo, а аргумент вложенного ``ip netns exec``."""
-    return f"{user} ALL=(root) NOPASSWD: {ip_path} netns exec {netns} curl *\n"
+def vpn_probe_sudoers_content(curl_path: str, iface: str, user: str) -> str:
+    """NOPASSWD только на ``curl --interface awg-probe0 *`` (единственный
+    вызов рантайма, см. vpn_check/service.py) — ``--interface`` (не голый
+    ``curl *``) не даёт этим правом дотянуться до чего-то за пределами
+    трафика пробника; SO_BINDTODEVICE, которым занимается ``--interface``,
+    и есть причина, почему вызов вообще требует root."""
+    return f"{user} ALL=(root) NOPASSWD: {curl_path} --interface {iface} *\n"
 
 
 async def _fetch_probe_config(settings: Settings) -> str:
@@ -799,10 +811,6 @@ def _build_amneziawg_tools() -> None:
             _sudo(["make", "-C", str(src / "src"), "install"])
 
 
-def _probe_resolv_conf_path(netns: str) -> Path:
-    return Path("/etc/netns") / netns / "resolv.conf"
-
-
 def _read_privileged(path: Path) -> str:
     result = subprocess.run(["sudo", "cat", str(path)], capture_output=True, text=True)
     if result.returncode != 0:
@@ -810,25 +818,32 @@ def _read_privileged(path: Path) -> str:
     return result.stdout
 
 
-def _extract_dns(config_text: str) -> str | None:
-    match = re.search(r"^DNS\s*=\s*(.+)$", config_text, re.MULTILINE)
-    return match.group(1).strip() if match else None
+def _prepare_probe_conf(config_text: str) -> str:
+    """Две правки конфига, выданного vpn@jeeves как обычному гостю:
 
-
-def _strip_dns_line(config_text: str) -> str:
-    """Без этой строки — awg-quick сам зовёт ``resolvconf`` (см.
-    ``_install_probe_conf``), которого нет на Debian; DNS решаем отдельно
-    приватным resolv.conf netns (``_install_probe_resolv_conf``)."""
-    lines = [
-        line for line in config_text.splitlines() if not line.strip().startswith("DNS ")
-    ]
+    - без строки ``DNS =`` — awg-quick иначе сам зовёт ``resolvconf``,
+      которого нет на Debian, и весь скрипт падает (живая находка
+      2026-08-17). DNS пробнику отдельно решать не нужно: интерфейс живёт в
+      обычном (root) netns, где host resolv.conf и так работает — см.
+      ``vpn_check/service.py`` (curl резолвит имя как обычно, только сама
+      TCP/TLS-сессия пришпилена к интерфейсу через ``--interface``).
+    - добавляет ``Table = off``, если такой строки ещё нет — без неё
+      awg-quick попробует стать основным default route хоста (см. большой
+      комментарий выше про netns/veth)."""
+    lines = [line for line in config_text.splitlines() if not line.strip().startswith("DNS ")]
+    if not any(line.strip().startswith("Table") for line in lines):
+        try:
+            insert_at = lines.index("[Interface]") + 1
+        except ValueError:
+            insert_at = 0
+        lines.insert(insert_at, "Table = off")
     return "\n".join(lines) + "\n"
 
 
 def _install_probe_conf(conf_path: Path, config_text: str) -> None:
-    filtered = _strip_dns_line(config_text)
+    prepared = _prepare_probe_conf(config_text)
     with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as tmp:
-        tmp.write(filtered)
+        tmp.write(prepared)
         tmp_path = Path(tmp.name)
     try:
         _sudo(
@@ -849,30 +864,10 @@ def _install_probe_conf(conf_path: Path, config_text: str) -> None:
         tmp_path.unlink(missing_ok=True)
 
 
-def _install_probe_resolv_conf(netns: str, dns_server: str) -> None:
-    """``/etc/netns/<netns>/resolv.conf`` — ``ip netns exec`` бинд-монтирует
-    его поверх ``/etc/resolv.conf`` ТОЛЬКО для процессов внутри этого netns
-    (см. ip-netns(8)), хостовый файл не трогается. Без него DNS внутри netns
-    не работал бы вовсе: обычный ``/etc/resolv.conf`` этой машины указывает
-    на Tailscale MagicDNS (100.100.100.100 — см. CLAUDE.md), а этот адрес
-    живёт на tailscale0 в родном netns, изолированному netns пробника он не
-    виден в принципе."""
-    resolv_path = _probe_resolv_conf_path(netns)
-    with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as tmp:
-        tmp.write(f"nameserver {dns_server}\n")
-        tmp_path = Path(tmp.name)
-    try:
-        _sudo(["install", "-D", "-m", "0644", str(tmp_path), str(resolv_path)])
-    finally:
-        tmp_path.unlink(missing_ok=True)
-
-
 def _vpn_probe_tunnel_check(settings: Settings) -> bool:
-    netns = settings.vpn_check.netns
     if not (
         _privileged_exists(_vpn_probe_conf_path(settings))
         and _privileged_exists(VPN_PROBE_UNIT_FILE)
-        and _privileged_exists(_probe_resolv_conf_path(netns))
     ):
         return False
     return (
@@ -892,15 +887,11 @@ def _vpn_probe_tunnel_apply(settings: Settings) -> None:
     if ip_path is None:
         raise FixupError("ip (iproute2) не найден в PATH")
 
-    netns = settings.vpn_check.netns
-    if not _netns_exists(netns):
-        _sudo([ip_path, "netns", "add", netns])
-
     conf_path = _vpn_probe_conf_path(settings)
     if _privileged_exists(conf_path):
-        # Конфиг уже выдан jeeves раньше — чиним на месте (сносим строку DNS,
-        # заводим приватный resolv.conf netns), не выпрашивая новый пир
-        # заново (лишний пир в БД vpn@jeeves нам не нужен).
+        # Конфиг уже выдан jeeves раньше — чиним на месте (сносим DNS,
+        # добавляем Table=off), не выпрашивая новый пир заново (лишний пир в
+        # БД vpn@jeeves нам не нужен).
         raw_config_text = _read_privileged(conf_path)
     else:
         try:
@@ -910,17 +901,18 @@ def _vpn_probe_tunnel_apply(settings: Settings) -> None:
                 f"не удалось получить конфиг у vpn@jeeves ({exc}) — "
                 "проверьте, что jeeves доступен и служба vpn запущена"
             ) from exc
-
-    dns_server = _extract_dns(raw_config_text)
-    if dns_server is None:
-        raise FixupError(f"в конфиге пробника нет строки DNS — {conf_path} повреждён")
-    _install_probe_resolv_conf(netns, dns_server)
     _install_probe_conf(conf_path, raw_config_text)
 
-    if not _privileged_exists(VPN_PROBE_UNIT_FILE):
-        content = vpn_probe_unit_content(netns, VPN_PROBE_IFACE, ip_path, awg_quick_path)
+    # Всегда сверяем содержимое, не только факт существования файла — живой
+    # апгрейд 2026-08-17 (старый юнит гонял awg-quick внутри netns, которого
+    # больше нет) иначе застрял бы со старым ExecStart навсегда.
+    unit_content = vpn_probe_unit_content(VPN_PROBE_IFACE, ip_path, awg_quick_path)
+    current_unit = (
+        _read_privileged(VPN_PROBE_UNIT_FILE) if _privileged_exists(VPN_PROBE_UNIT_FILE) else None
+    )
+    if current_unit != unit_content:
         with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as tmp:
-            tmp.write(content)
+            tmp.write(unit_content)
             tmp_path = Path(tmp.name)
         try:
             _sudo(
@@ -945,7 +937,7 @@ def _vpn_probe_tunnel_apply(settings: Settings) -> None:
 def make_vpn_probe_tunnel_fixup(settings: Settings) -> Fixup:
     return Fixup(
         id="vpn-check-probe-tunnel",
-        title="Поднять VPN-туннель пробника (netns + awg-quick)",
+        title="Поднять VPN-туннель пробника (awg-quick, Table=off)",
         needed=_vpn_check_needed,
         check=lambda: _vpn_probe_tunnel_check(settings),
         apply=lambda: _vpn_probe_tunnel_apply(settings),
@@ -953,21 +945,31 @@ def make_vpn_probe_tunnel_fixup(settings: Settings) -> Fixup:
 
 
 def _vpn_probe_sudoers_check() -> bool:
-    return (SUDOERS_DIR / VPN_PROBE_SUDOERS_FILE).exists()
+    path = SUDOERS_DIR / VPN_PROBE_SUDOERS_FILE
+    if not _privileged_exists(path):
+        return False
+    curl_path = _which("curl")
+    if curl_path is None:
+        return False
+    # Сверяем содержимое, не только факт существования — старый снипет
+    # (`ip netns exec vpn-probe curl *`) больше не даёт вызвать реальную
+    # команду (netns убрали), апгрейд иначе застрял бы с бесполезным правом.
+    expected = vpn_probe_sudoers_content(curl_path, VPN_PROBE_IFACE, getuser())
+    return _read_privileged(path) == expected
 
 
 def _vpn_probe_sudoers_apply(settings: Settings) -> None:
-    ip_path = _which("ip")
-    if ip_path is None:
-        raise FixupError("ip (iproute2) не найден в PATH")
-    content = vpn_probe_sudoers_content(ip_path, settings.vpn_check.netns, getuser())
+    curl_path = _which("curl")
+    if curl_path is None:
+        raise FixupError("curl не найден в PATH")
+    content = vpn_probe_sudoers_content(curl_path, VPN_PROBE_IFACE, getuser())
     _install_sudoers_snippet(VPN_PROBE_SUDOERS_FILE, content)
 
 
 def make_vpn_probe_sudoers_fixup(settings: Settings) -> Fixup:
     return Fixup(
         id="vpn-check-probe-sudoers",
-        title="Разрешить vpn_check делать curl внутри netns пробника без пароля",
+        title="Разрешить vpn_check делать curl через интерфейс пробника без пароля",
         needed=_vpn_check_needed,
         check=_vpn_probe_sudoers_check,
         apply=lambda: _vpn_probe_sudoers_apply(settings),

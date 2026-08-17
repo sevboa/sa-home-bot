@@ -673,14 +673,17 @@ class VpnCheckConfig(BaseModel):
     пробных запросов через VPN на конкретной ноде (jeeves, alfred, ...),
     см. ``VpnConfig.check_nodes`` выше и vpn_check/service.py.
 
-    ``netns`` — сетевой неймспейс с уже поднятым (отдельным деплой-скриптом,
-    вне этого кода) клиентским туннелем AmneziaWG: изоляция нужна, чтобы
-    основная маршрутизация ноды не менялась независимо от того, какие IP
-    отдаёт DNS для проверяемых целей (например api.telegram.org).
+    ``probe_iface`` — интерфейс клиентского туннеля AmneziaWG, поднятого
+    node/fixups.py::make_vpn_probe_tunnel_fixup (``Table = off`` в его
+    конфиге — основная маршрутизация ноды не трогается; curl пробника явно
+    пришпилен к этому интерфейсу через ``--interface``, SO_BINDTODEVICE).
+    Живая находка 2026-08-17: раньше интерфейс жил в отдельном network
+    namespace для той же изоляции, но там не было пути в интернет для
+    самого WireGuard-хендшейка — namespace убрали, см. fixups.py.
     """
 
     socket: str = "./data/vpn_check.sock"
-    netns: str = "vpn-probe"
+    probe_iface: str = "awg-probe0"
     check_timeout_s: float = Field(default=8.0, gt=0)
 
 
