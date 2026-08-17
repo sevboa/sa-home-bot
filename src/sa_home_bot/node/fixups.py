@@ -927,6 +927,13 @@ def _vpn_probe_tunnel_apply(settings: Settings) -> None:
         _read_privileged(VPN_PROBE_UNIT_FILE) if _privileged_exists(VPN_PROBE_UNIT_FILE) else None
     )
     if current_unit != unit_content:
+        if current_unit is not None:
+            # Юнит уже active со старым содержимым (живой застрявший апгрейд
+            # 2026-08-17: netns-версия) — гасим по СТАРОМУ ExecStop ДО
+            # перезаписи файла и daemon-reload. Иначе systemd продолжит
+            # считать его active, а `enable --now` ниже не перезапустит уже
+            # активный юнит с новым ExecStart сам по себе.
+            _sudo(["systemctl", "stop", VPN_PROBE_UNIT_FILE.name])
         with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as tmp:
             tmp.write(unit_content)
             tmp_path = Path(tmp.name)
