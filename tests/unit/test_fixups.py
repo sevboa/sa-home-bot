@@ -459,6 +459,34 @@ def test_probe_forwarding_check_false_when_absent(monkeypatch):
     assert fixups_module._probe_forwarding_check() is False
 
 
+def test_probe_forwarding_apply_installs_nft_when_missing(monkeypatch):
+    """Живая находка 2026-08-21: на alfred nftables не был установлен вообще
+    (в отличие от jeeves) — без него ЛЮБОЙ ``nft`` тихо проваливается,
+    forward/NAT для veth-подсети не появляется, и симптом неотличим от
+    таймаута соединения."""
+    monkeypatch.setattr(fixups_module, "_probe_forwarding_check", lambda: False)
+    monkeypatch.setattr(fixups_module, "_which", lambda name: None)
+    sudo_calls = []
+    monkeypatch.setattr(
+        fixups_module, "install_argv", lambda pkg: ["apt-get", "install", "-y", pkg]
+    )
+    monkeypatch.setattr(fixups_module, "_sudo", lambda argv: sudo_calls.append(argv))
+    monkeypatch.setattr(fixups_module, "_find_base_chain", lambda hook, kind: None)
+    fixups_module._probe_forwarding_apply()
+    assert sudo_calls[0] == ["apt-get", "install", "-y", "nftables"]
+    assert any(call[:3] == ["nft", "add", "table"] for call in sudo_calls[1:])
+
+
+def test_probe_forwarding_apply_skips_install_when_nft_present(monkeypatch):
+    monkeypatch.setattr(fixups_module, "_probe_forwarding_check", lambda: False)
+    monkeypatch.setattr(fixups_module, "_which", lambda name: f"/usr/sbin/{name}")
+    sudo_calls = []
+    monkeypatch.setattr(fixups_module, "_sudo", lambda argv: sudo_calls.append(argv))
+    monkeypatch.setattr(fixups_module, "_find_base_chain", lambda hook, kind: None)
+    fixups_module._probe_forwarding_apply()
+    assert all("apt-get" not in call for call in sudo_calls)
+
+
 def test_prepare_probe_conf_strips_dns_line():
     raw = (
         "[Interface]\n"

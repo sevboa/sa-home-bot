@@ -1121,6 +1121,19 @@ def _probe_forwarding_apply() -> None:
     if _probe_forwarding_check():
         return
 
+    if _which("nft") is None:
+        # Живая находка 2026-08-21: на alfred nftables не установлен вообще
+        # (в отличие от jeeves, где он уже был для другого firewall-контура)
+        # — без него ЛЮБОЙ `nft ...` тихо проваливается (returncode != 0,
+        # ``_nft_json_ruleset``/``_nft_ruleset_text`` трактуют это как
+        # «пустой ruleset»), forward/NAT для veth-подсети не появляется, и
+        # ничего (ни хендшейк, ни данные) не может выйти из изолированного
+        # netns наружу — симптом неотличим от таймаута (curl exit 28).
+        argv = install_argv("nftables")
+        if argv is None:
+            raise FixupError("nft не найден и неизвестен пакетный менеджер для nftables")
+        _sudo(argv)
+
     forward_target = _find_base_chain("forward", "filter")
     if forward_target is None:
         _sudo(["nft", "add", "table", "inet", VPN_PROBE_NFT_TABLE])
