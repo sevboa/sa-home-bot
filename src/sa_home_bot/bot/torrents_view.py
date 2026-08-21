@@ -75,10 +75,15 @@ _STATE_LABELS = {
 }
 
 
-def _is_active(state: str) -> bool:
-    """Реально идёт передача (качается/раздаёт) — только тогда есть смысл
-    показывать скорость; у остановленной/в очереди/ошибочной она всегда 0."""
-    return state in _DOWNLOADING_STATES or state in _SEEDING_STATES
+def _speed_line(state: str, dlspeed_bytes_s: int, upspeed_bytes_s: int) -> str | None:
+    """Скорость по направлению, которое реально сейчас идёт — download при
+    скачке, upload при раздаче (None — в остальных статусах: у остановленной/
+    в очереди/ошибочной раздачи скорость всегда 0 и ничего не говорит)."""
+    if state in _DOWNLOADING_STATES:
+        return f"↓{_speed_text(dlspeed_bytes_s)}"
+    if state in _SEEDING_STATES:
+        return f"↑{_speed_text(upspeed_bytes_s)}"
+    return None
 
 
 def _lamp(state: str, progress_pct: int) -> str:
@@ -110,6 +115,23 @@ def _speed_text(bytes_s: int) -> str:
     if mb >= 1:
         return f"{mb:.1f} МБ/с"
     return f"{bytes_s / 1024:.0f} КБ/с"
+
+
+# Прогресс в строке списка — луной, а не числом: компактнее (освобождает
+# бюджет ширины под имя раздачи) и читается на глаз без арифметики. Точный
+# процент остаётся на карточке — там уже есть место для обоих. Границы —
+# решение пользователя: 0 и 100 — свои отдельные фазы (только-только начата
+# / гарантированно докачана), середина делится пополам на 33.
+def _moon_phase(progress_pct: int) -> str:
+    if progress_pct <= 0:
+        return "🌑"
+    if progress_pct >= 100:
+        return "🌕"
+    if progress_pct < 33:
+        return "🌒"
+    if progress_pct <= 66:
+        return "🌓"
+    return "🌔"
 
 
 # --- Ширина строки в пропорциональном шрифте (эвристика) --------------------
@@ -206,11 +228,12 @@ def build_list_view(result: dict[str, Any], offset: int) -> tuple[str, InlineKey
         state = t.get("state", "")
         progress = int(t.get("progress_pct", 0))
         lamp = _lamp(state, progress)
-        suffix = f"{progress}%"
-        # Скорость — только пока реально идёт передача: у остановленной/в
-        # очереди/ошибочной раздачи она всегда 0 и не несёт информации.
-        if _is_active(state):
-            suffix += f" · ↓{_speed_text(int(t.get('dlspeed_bytes_s', 0)))}"
+        suffix = _moon_phase(progress)
+        speed = _speed_line(
+            state, int(t.get("dlspeed_bytes_s", 0)), int(t.get("upspeed_bytes_s", 0))
+        )
+        if speed:
+            suffix += f" · {speed}"
         prefix, sep = f"{lamp} ", " — "
         budget = _LIST_LINE_WIDTH_BUDGET - _text_width(prefix) - _text_width(sep) - _text_width(
             suffix
@@ -237,11 +260,30 @@ def build_list_view(result: dict[str, Any], offset: int) -> tuple[str, InlineKey
     buttons.append(
         [
             InlineKeyboardButton(
+                text="🧲 qBittorrent", callback_data=_cb(commands.TORRENT_APP_CODE)
+            )
+        ]
+    )
+    buttons.append(
+        [
+            InlineKeyboardButton(
                 text="🔄 Обновить", callback_data=_cb(commands.TORRENTS_LIST_CODE, offset)
             )
         ]
     )
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def build_app_view(text: str) -> tuple[str, InlineKeyboardMarkup]:
+    """Карточка apps/qbittorrent внутри панели — только «Обновить»/«Назад»,
+    без кнопок управления юнитом (start/stop/restart, которые обычно строит
+    apps_view.run_app_skill): это не отдельная точка входа со своими правами
+    apps, а справочный экран внутри /torrents (см. apps_view.HIDDEN_MENU_APP_IDS)."""
+    buttons = [
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data=_cb(commands.TORRENT_APP_CODE))],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=_cb(commands.TORRENTS_LIST_CODE, 0))],
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def build_card_view(torrent: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
@@ -253,12 +295,15 @@ def build_card_view(torrent: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]
         f"🧲 <b>{escape(torrent.get('name', '?'))}</b>",
         "",
         f"Статус: {_lamp(state, progress)} {_state_label(state)}",
-        f"Прогресс: {progress}%",
+        f"Прогресс: {_moon_phase(progress)} {progress}%",
     ]
-    # Скорость — только пока реально идёт передача (см. build_list_view):
+    # Скорость по направлению, которое реально сейчас идёт (см. build_list_view):
     # у остановленной/в очереди/ошибочной раздачи она всегда 0.
-    if _is_active(state):
-        lines.append(f"Скорость: ↓ {_speed_text(int(torrent.get('dlspeed_bytes_s', 0)))}")
+    speed = _speed_line(
+        state, int(torrent.get("dlspeed_bytes_s", 0)), int(torrent.get("upspeed_bytes_s", 0))
+    )
+    if speed:
+        lines.append(f"Скорость: {speed}")
     lines.append(f"Пиры: {torrent.get('seeds', 0)} сидов, {torrent.get('peers', 0)} личей")
     lines.append(f"Осталось: {format_duration(eta_s) if eta_s is not None else 'неизвестно'}")
     toggle_text = "▶️ Запустить" if torrent.get("paused") else "⏸ Остановить"

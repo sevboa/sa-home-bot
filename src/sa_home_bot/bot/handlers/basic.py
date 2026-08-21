@@ -30,6 +30,7 @@ def build_help(
         # Параметризованные (start/stop/restart) — только кнопки на карточке
         # конкретного приложения, не голые команды (см. bot/setup.py).
         if not action.params
+        and action.id not in apps_view.HIDDEN_MENU_APP_IDS
         and subscription is not None
         and subscription.allows_action(action.id, apps_view.APPS_SERVICE)
     ]

@@ -232,6 +232,7 @@ async def test_list_returns_narrow_slice_without_paths(fake_qbittorrent):
             "state": "downloading",
             "progress_pct": 42,
             "dlspeed_bytes_s": 1048576,
+            "upspeed_bytes_s": 0,
             "paused": False,
             "eta_s": 3600,
             "seeds": 0,

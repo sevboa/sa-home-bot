@@ -18,6 +18,16 @@ from sa_home_bot.subscriptions.models import Subscription
 
 APPS_SERVICE = "apps"
 
+QBITTORRENT_APP_ID = "qbittorrent"
+
+# Приложения, скрытые из общих списков умений (меню бота, /start) и из
+# прямого вызова голой командой (bot/handlers/apps.py) — карточка доступна
+# только специализированным путём. qbittorrent теперь открывается кнопкой
+# внутри /torrents (bot/torrents_view.py::build_app_view) — отдельная
+# команда/пункт меню только дублировала бы вход и путала (два места на одно
+# и то же, а из /torrents кнопка ведёт на карточку без кнопок управления).
+HIDDEN_MENU_APP_IDS = frozenset({QBITTORRENT_APP_ID})
+
 # Статус systemd-юнита приложения → человеку.
 _APP_STATUS = {
     "active": "✅ работает",

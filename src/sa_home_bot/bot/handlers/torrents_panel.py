@@ -12,6 +12,13 @@ torrents/service.py::_list_sync): нужен только этому экран�
 стабильный идентификатор для callback_data, модели он не виден. Право на всю
 панель — одно, `list@torrents` (commands.TORRENTS), как у /guests и /swarm:
 CallbackAuthorizationMiddleware уже проверила его до вызова этих хендлеров.
+
+Кнопка «🧲 qBittorrent» (``t_app``) — карточка службы apps того же
+приложения (юнит qbittorrent-nox, состояние + ссылка на веб-морду), но без
+кнопок управления юнитом: это единственный вход к ней (голая команда
+/qbittorrent и пункт меню убраны, см. apps_view.HIDDEN_MENU_APP_IDS), и
+отдельного права apps `qbittorrent@apps` здесь не спрашивают — кто открыл
+/torrents, тому естественно видеть карточку и самого клиента.
 """
 
 from __future__ import annotations
@@ -24,7 +31,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from sa_home_bot.bot import commands, torrents_view
+from sa_home_bot.bot import apps_view, commands, torrents_view
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.proto.messages import ProtoError
 
@@ -74,9 +81,24 @@ async def cmd_torrents(message: Message, torrents_link: ServiceLink) -> None:
 
 
 @router.callback_query(F.data.startswith(f"{commands.CALLBACK_PREFIX}:t_"))
-async def on_torrents_screen(callback: CallbackQuery, torrents_link: ServiceLink) -> None:
+async def on_torrents_screen(
+    callback: CallbackQuery, torrents_link: ServiceLink, apps_link: ServiceLink
+) -> None:
     parts = (callback.data or "").split(":")
     code = parts[1] if len(parts) > 1 else ""
+
+    if code == commands.TORRENT_APP_CODE:
+        # subscription=None — карточка apps/qbittorrent открывается без
+        # кнопок управления (build_app_view их не строит вовсе), а run_app_skill
+        # использует subscription только для них; своя клавиатура строится
+        # ниже независимо от того, что вернул бы run_app_skill.
+        text, _ignored_keyboard = await apps_view.run_app_skill(
+            apps_link, None, apps_view.QBITTORRENT_APP_ID
+        )
+        text, keyboard = torrents_view.build_app_view(text)
+        await _redraw(callback, text, keyboard)
+        await callback.answer()
+        return
 
     if code == commands.TORRENTS_LIST_CODE:
         offset = _parse_int(parts[2] if len(parts) > 2 else None)

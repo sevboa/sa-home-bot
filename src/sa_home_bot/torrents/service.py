@@ -746,6 +746,7 @@ class TorrentsService:
                 # и модель, а округление до целых убирает шум вида 0.9999.
                 "progress_pct": round(float(t.get("progress", 0.0)) * 100),
                 "dlspeed_bytes_s": int(t.get("dlspeed", 0)),
+                "upspeed_bytes_s": int(t.get("upspeed", 0)),
                 # Сырое state — внутренние строки qBittorrent («stalledUP»,
                 # «stoppedDL»), по которым не человеку, не модели не очевидно,
                 # стоит раздача или нет; а решение «ставить на паузу или,

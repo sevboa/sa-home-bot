@@ -48,7 +48,9 @@ def build_menu_commands(
         # (apps_view.run_app_skill), не голые команды меню — живой баг
         # 2026-07-18: /start/stop/restart лезли в меню без указания, какое
         # приложение, и падали "нет такого приложения: ''".
-        if not action.params and subscription.allows_action(action.id, apps_view.APPS_SERVICE)
+        if not action.params
+        and action.id not in apps_view.HIDDEN_MENU_APP_IDS
+        and subscription.allows_action(action.id, apps_view.APPS_SERVICE)
     ]
     menu += [
         _to_bot_command(c)

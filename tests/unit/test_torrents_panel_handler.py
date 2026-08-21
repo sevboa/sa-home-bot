@@ -97,6 +97,30 @@ class FakeTorrentsLink:
         raise AssertionError(f"unexpected action: {action}")
 
 
+class FakeAppsLink:
+    display_name = "apps"
+    connected = True
+
+    def __init__(self, result=None):
+        self._result = result or {
+            "id": "qbittorrent",
+            "title": "🧲 qBittorrent",
+            "unit": "qbittorrent-nox.service",
+            "status": "active",
+            "urls": ["http://192.168.0.100:8080"],
+        }
+        self.calls: list[tuple[str, dict]] = []
+
+    async def actions(self):
+        from sa_home_bot.proto.messages import ActionSpec
+
+        return [ActionSpec(id="qbittorrent", title="🧲 qBittorrent")]
+
+    async def command(self, action, args=None):
+        self.calls.append((action, args or {}))
+        return self._result
+
+
 def _codes(kb) -> list[str]:
     return [b.callback_data for row in kb.inline_keyboard for b in row] if kb else []
 
@@ -125,7 +149,7 @@ async def test_cmd_torrents_reports_unavailable_service():
 async def test_t_list_redraws_in_place():
     callback = FakeCallback(f"st:{commands.TORRENTS_LIST_CODE}:0")
     link = FakeTorrentsLink(torrents=[_torrent()])
-    await on_torrents_screen(callback, torrents_link=link)
+    await on_torrents_screen(callback, torrents_link=link, apps_link=FakeAppsLink())
     assert len(callback.message.edits) == 1
     assert callback.message.answers == []
 
@@ -136,7 +160,7 @@ async def test_t_list_redraws_in_place():
 async def test_t_card_shows_torrent_details():
     callback = FakeCallback(f"st:{commands.TORRENT_CARD_CODE}:abc123")
     link = FakeTorrentsLink(torrents=[_torrent(hash="abc123", seeds=9, peers=4)])
-    await on_torrents_screen(callback, torrents_link=link)
+    await on_torrents_screen(callback, torrents_link=link, apps_link=FakeAppsLink())
     assert "Foo.S01" in callback.message.edits[0]
     assert "9 сидов, 4 личей" in callback.message.edits[0]
 
@@ -144,7 +168,7 @@ async def test_t_card_shows_torrent_details():
 async def test_t_card_missing_hash_shows_alert():
     callback = FakeCallback(f"st:{commands.TORRENT_CARD_CODE}:gone")
     link = FakeTorrentsLink(torrents=[_torrent(hash="abc123")])
-    await on_torrents_screen(callback, torrents_link=link)
+    await on_torrents_screen(callback, torrents_link=link, apps_link=FakeAppsLink())
     assert callback.message.edits == []
     assert callback.answered[0][1].get("show_alert") is True
 
@@ -155,7 +179,7 @@ async def test_t_card_missing_hash_shows_alert():
 async def test_t_toggle_pauses_running_torrent_and_redraws_card():
     callback = FakeCallback(f"st:{commands.TORRENT_TOGGLE_CODE}:abc123")
     link = FakeTorrentsLink(torrents=[_torrent(hash="abc123", paused=False)])
-    await on_torrents_screen(callback, torrents_link=link)
+    await on_torrents_screen(callback, torrents_link=link, apps_link=FakeAppsLink())
     assert ("pause", {"name": "abc123"}) in link.commands
     texts = [b.text for row in callback.message.edit_keyboards[-1].inline_keyboard for b in row]
     assert any("Запустить" in t for t in texts)
@@ -164,7 +188,7 @@ async def test_t_toggle_pauses_running_torrent_and_redraws_card():
 async def test_t_toggle_resumes_paused_torrent():
     callback = FakeCallback(f"st:{commands.TORRENT_TOGGLE_CODE}:abc123")
     link = FakeTorrentsLink(torrents=[_torrent(hash="abc123", paused=True)])
-    await on_torrents_screen(callback, torrents_link=link)
+    await on_torrents_screen(callback, torrents_link=link, apps_link=FakeAppsLink())
     assert ("resume", {"name": "abc123"}) in link.commands
     texts = [b.text for row in callback.message.edit_keyboards[-1].inline_keyboard for b in row]
     assert any("Остановить" in t for t in texts)
@@ -175,7 +199,7 @@ async def test_t_toggle_reports_proto_error():
     link = FakeTorrentsLink(
         torrents=[_torrent(hash="abc123")], fail_with=ProtoError(ERR_BAD_REQUEST, "нет такой")
     )
-    await on_torrents_screen(callback, torrents_link=link)
+    await on_torrents_screen(callback, torrents_link=link, apps_link=FakeAppsLink())
     assert callback.answered[0][1].get("show_alert") is True
 
 
@@ -188,8 +212,26 @@ async def test_t_speed_applies_limit_and_keeps_offset():
     many = [_torrent(name=f"T{i}", hash=f"h{i}") for i in range(TORRENTS_PAGE_SIZE + 2)]
     callback = FakeCallback(f"st:{commands.TORRENT_SPEED_CODE}:2:8")
     link = FakeTorrentsLink(torrents=many, speed_limit_mbps=0)
-    await on_torrents_screen(callback, torrents_link=link)
+    await on_torrents_screen(callback, torrents_link=link, apps_link=FakeAppsLink())
     assert ("speed_limit", {"mbps": 2}) in link.commands
     assert "2 МБ/с" in callback.message.edits[-1]
     codes = _codes(callback.message.edit_keyboards[-1])
     assert "st:t_speed:5:8" in codes  # пресеты сохранили offset страницы
+
+
+# --- t_app ---------------------------------------------------------------
+
+
+async def test_t_app_shows_qbittorrent_card_without_manage_buttons():
+    callback = FakeCallback(f"st:{commands.TORRENT_APP_CODE}")
+    apps_link = FakeAppsLink()
+    await on_torrents_screen(
+        callback, torrents_link=FakeTorrentsLink(), apps_link=apps_link
+    )
+    assert apps_link.calls == [("qbittorrent", {})]
+    assert "🧲 qBittorrent" in callback.message.edits[-1]
+    kb = callback.message.edit_keyboards[-1]
+    texts = [b.text for row in kb.inline_keyboard for b in row]
+    codes = _codes(kb)
+    assert texts == ["🔄 Обновить", "⬅️ Назад"]  # без start/stop/restart
+    assert codes == ["st:t_app", "st:t_list:0"]

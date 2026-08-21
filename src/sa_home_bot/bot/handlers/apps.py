@@ -1,10 +1,14 @@
-"""Динамические команды-скилы из describe службы apps (/qbittorrent, …).
+"""Динамические команды-скилы из describe службы apps (/jellyfin, …).
 
 Имена команд не захардкожены: сообщение с командой сверяется с актуальным
 describe (кэш линка). Роутер включается ПОСЛЕДНИМ — все статические команды
 уже разобраны раньше, чужие/неизвестные команды молча игнорируются (как и
 до этого). Права: `<id>@apps` (authorization-middleware реестровых команд
 про них не знает, поэтому проверка здесь).
+
+Приложения из ``apps_view.HIDDEN_MENU_APP_IDS`` (сейчас — qbittorrent)
+голой командой не открываются вовсе — у них своя специализированная панель
+(/torrents), голый вызов игнорируется так же, как и незнакомая команда.
 """
 
 from __future__ import annotations
@@ -33,6 +37,8 @@ async def cmd_app_skill(
     command = extract_command(message.text)
     if command is None:
         return
+    if command in apps_view.HIDDEN_MENU_APP_IDS:
+        return  # доступно только через свою панель (см. HIDDEN_MENU_APP_IDS)
     action = next(
         (a for a in await apps_link.actions() if a.id == command), None
     )

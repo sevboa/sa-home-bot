@@ -47,11 +47,23 @@ def test_menu_skills_first_then_universal():
     # /swarm (право «nodes») теперь панель-раздел вроде /guests, /status —
     # в меню не попадает (menu=False), хотя команда рабочая. /ping тоже
     # скрыт (menu=False) — универсальных команд в меню сейчас нет.
+    # qbittorrent — в HIDDEN_MENU_APP_IDS (см. test_menu_hides_qbittorrent_
+    # even_with_right): своей команды/пункта меню больше нет, доступ — только
+    # кнопкой внутри /torrents.
     menu = build_menu_commands(
         _sub("nodes", "qbittorrent@apps", "jellyfin@apps"), _app_actions()
     )
     names = [c.command for c in menu]
-    assert names == ["qbittorrent", "jellyfin"]
+    assert names == ["jellyfin"]
+
+
+def test_menu_hides_qbittorrent_even_with_right():
+    """qbittorrent — теперь только кнопка внутри /torrents (bot/torrents_view.py
+    ::build_app_view), не отдельная команда/пункт меню — иначе два входа на
+    одну и ту же карточку, один из которых ведёт в никуда (голая команда
+    заблокирована, см. bot/handlers/apps.py::cmd_app_skill)."""
+    menu = build_menu_commands(_sub("qbittorrent@apps"), _app_actions())
+    assert menu == []
 
 
 def test_menu_filters_skills_by_rights():
@@ -61,9 +73,9 @@ def test_menu_filters_skills_by_rights():
 
 
 def test_help_lists_allowed_skills_and_about():
-    text = build_help(_sub("nodes", "qbittorrent@apps"), _app_actions())
-    assert "/qbittorrent — 🧲 qBittorrent" in text
-    assert "/jellyfin" not in text  # нет права
+    text = build_help(_sub("nodes", "qbittorrent@apps", "jellyfin@apps"), _app_actions())
+    assert "/qbittorrent" not in text  # скрыт из списков, см. HIDDEN_MENU_APP_IDS
+    assert "/jellyfin — 🎬 Jellyfin" in text
     assert "/swarm" not in text  # раздел-панель, скрыт из списка (menu=False)
     assert f"sa-home-bot v{__version__}" in text
 

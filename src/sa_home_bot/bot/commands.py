@@ -222,6 +222,9 @@ TORRENTS_LIST_CODE = "t_list"  # «st:t_list:<offset>» — список зак�
 TORRENT_CARD_CODE = "t_card"  # «st:t_card:<hash>» — карточка раздачи
 TORRENT_TOGGLE_CODE = "t_toggle"  # «st:t_toggle:<hash>» — пауза/старт
 TORRENT_SPEED_CODE = "t_speed"  # «st:t_speed:<mbps>:<offset>» — лимит скорости
+# «st:t_app» — карточка apps/qbittorrent (без кнопок управления, только
+# обновить/назад) — единственный вход к ней (см. apps_view.HIDDEN_MENU_APP_IDS).
+TORRENT_APP_CODE = "t_app"
 
 _ALL_CALLBACK_ACTIONS: dict[str, Command] = {
     **STATUS_ACTIONS,
@@ -254,6 +257,7 @@ _ALL_CALLBACK_ACTIONS: dict[str, Command] = {
     TORRENT_CARD_CODE: TORRENTS,
     TORRENT_TOGGLE_CODE: TORRENTS,
     TORRENT_SPEED_CODE: TORRENTS,
+    TORRENT_APP_CODE: TORRENTS,
 }
 
 _BY_NAME = {c.name: c for c in ALL_COMMANDS}

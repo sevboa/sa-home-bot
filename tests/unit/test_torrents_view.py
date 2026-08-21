@@ -1,10 +1,13 @@
 """Панель /torrents: список закачек (кружки статусов, обрезка имён, пагинация,
 пресеты лимита скорости) и карточка раздачи (bot/torrents_view.py)."""
 
+import pytest
+
 from sa_home_bot.bot.torrents_view import (
     _LIST_LINE_WIDTH_BUDGET,
     TORRENTS_PAGE_SIZE,
     _text_width,
+    build_app_view,
     build_card_view,
     build_list_view,
 )
@@ -16,6 +19,7 @@ def _torrent(**overrides):
         "state": "downloading",
         "progress_pct": 42,
         "dlspeed_bytes_s": 1048576,
+        "upspeed_bytes_s": 0,
         "paused": False,
         "eta_s": 3600,
         "seeds": 5,
@@ -34,7 +38,9 @@ def test_list_view_renders_lamp_progress_and_speed():
     text, kb = build_list_view(result, 0)
     assert "🧲 <b>Закачки</b> (1)" in text
     # downloading — активная скачка, лампа жёлтая, скорость показана.
-    assert "🟡" in text and "42%" in text and "1.0 МБ/с" in text
+    # Прогресс в строке списка — луной (33-66% → 🌓), не числом; точный
+    # процент остаётся на карточке (см. test_card_view_shows_moon_and_percent).
+    assert "🟡" in text and "🌓" in text and "1.0 МБ/с" in text
     assert "Лимит скорости: без ограничения" in text
 
 
@@ -83,6 +89,24 @@ def test_lamp_stopped_complete_is_brown():
 
 def test_speed_hidden_when_not_actively_transferring():
     text, _ = build_list_view({"torrents": [_torrent(state="queuedDL")]}, 0)
+    assert "↓" not in text and "↑" not in text
+
+
+def test_downloading_shows_download_speed_not_upload():
+    torrent = _torrent(
+        state="downloading", dlspeed_bytes_s=2 * 1024**2, upspeed_bytes_s=999 * 1024**2
+    )
+    text, _ = build_list_view({"torrents": [torrent]}, 0)
+    assert "↓2.0 МБ/с" in text
+    assert "↑" not in text
+
+
+def test_seeding_shows_upload_speed_not_download():
+    torrent = _torrent(
+        state="uploading", dlspeed_bytes_s=999 * 1024**2, upspeed_bytes_s=3 * 1024**2
+    )
+    text, _ = build_list_view({"torrents": [torrent]}, 0)
+    assert "↑3.0 МБ/с" in text
     assert "↓" not in text
 
 
@@ -92,8 +116,13 @@ def test_card_speed_hidden_when_stopped():
 
 
 def test_card_speed_shown_when_seeding():
-    text, _ = build_card_view(_torrent(state="uploading"))
-    assert "Скорость" in text
+    text, _ = build_card_view(_torrent(state="uploading", upspeed_bytes_s=3 * 1024**2))
+    assert "Скорость: ↑3.0 МБ/с" in text
+
+
+def test_card_speed_shown_when_downloading():
+    text, _ = build_card_view(_torrent(state="downloading", dlspeed_bytes_s=2 * 1024**2))
+    assert "Скорость: ↓2.0 МБ/с" in text
 
 
 def test_list_line_never_exceeds_reference_width_budget():
@@ -105,6 +134,13 @@ def test_list_line_never_exceeds_reference_width_budget():
     text, _ = build_list_view(result, 0)
     line = next(line for line in text.splitlines() if "🟡" in line)
     assert _text_width(line) <= _LIST_LINE_WIDTH_BUDGET + 0.01
+
+
+def test_list_view_has_qbittorrent_app_button():
+    result = {"torrents": [], "speed_limit_mbps": 0}
+    _, kb = build_list_view(result, 0)
+    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert "st:t_app" in codes
 
 
 def test_list_view_button_opens_card_by_hash():
@@ -160,6 +196,24 @@ def test_card_view_shows_seeds_and_peers():
     assert "9 сидов, 4 личей" in text
 
 
+def test_card_view_shows_moon_and_exact_percent():
+    text, _ = build_card_view(_torrent(progress_pct=42))
+    assert "🌓 42%" in text
+
+
+# --- Фазы луны (прогресс в строке списка) ------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("progress_pct", "phase"),
+    [(0, "🌑"), (1, "🌒"), (32, "🌒"), (33, "🌓"), (50, "🌓"), (66, "🌓"),
+     (67, "🌔"), (99, "🌔"), (100, "🌕")],
+)
+def test_moon_phase_buckets_match_progress(progress_pct, phase):
+    text, _ = build_list_view({"torrents": [_torrent(progress_pct=progress_pct)]}, 0)
+    assert phase in text
+
+
 def test_card_view_running_offers_stop_button():
     _, kb = build_card_view(_torrent(paused=False, hash="h1"))
     texts = [b.text for row in kb.inline_keyboard for b in row]
@@ -187,3 +241,19 @@ def test_card_view_back_goes_to_list_first_page():
 def test_card_view_unknown_eta_says_so():
     text, _ = build_card_view(_torrent(eta_s=None))
     assert "Осталось: неизвестно" in text
+
+
+# --- Карточка apps/qbittorrent внутри панели ---------------------------------
+
+
+def test_app_view_keeps_original_text():
+    text, _ = build_app_view("🧲 qBittorrent — ✅ работает")
+    assert text == "🧲 qBittorrent — ✅ работает"
+
+
+def test_app_view_has_only_refresh_and_back_no_manage_buttons():
+    _, kb = build_app_view("любой текст")
+    texts = [b.text for row in kb.inline_keyboard for b in row]
+    codes = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert texts == ["🔄 Обновить", "⬅️ Назад"]
+    assert codes == ["st:t_app", "st:t_list:0"]

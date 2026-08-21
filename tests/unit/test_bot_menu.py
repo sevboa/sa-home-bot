@@ -15,10 +15,10 @@ from sa_home_bot.bot.setup import build_menu_commands
 from sa_home_bot.proto.messages import ActionParam, ActionSpec
 from sa_home_bot.subscriptions.models import Subscription
 
-_NAME_PARAM = ActionParam(name="name", type="string", required=True, choices=("qbittorrent",))
+_NAME_PARAM = ActionParam(name="name", type="string", required=True, choices=("jellyfin",))
 
 _APP_ACTIONS = [
-    ActionSpec(id="qbittorrent", title="🧲 qBittorrent"),
+    ActionSpec(id="jellyfin", title="🎬 Jellyfin"),
     ActionSpec(id="start", title="▶️ Запустить", params=(_NAME_PARAM,)),
     ActionSpec(id="stop", title="⏹ Остановить", params=(_NAME_PARAM,)),
     ActionSpec(id="restart", title="🔄 Перезапустить", params=(_NAME_PARAM,)),
@@ -30,7 +30,7 @@ def _sub() -> Subscription:
         chat_id=1,
         name="me",
         allowed_commands=frozenset(
-            {"qbittorrent@apps", "start@apps", "stop@apps", "restart@apps"}
+            {"jellyfin@apps", "start@apps", "stop@apps", "restart@apps"}
         ),
     )
 
@@ -38,12 +38,12 @@ def _sub() -> Subscription:
 def test_menu_commands_skip_parameterized_app_actions():
     menu = build_menu_commands(_sub(), _APP_ACTIONS)
     names = {c.command for c in menu}
-    assert "qbittorrent" in names
+    assert "jellyfin" in names
     assert names.isdisjoint({"start", "stop", "restart"})
 
 
 def test_help_skips_parameterized_app_actions():
     text = build_help(_sub(), _APP_ACTIONS)
-    assert "/qbittorrent" in text
+    assert "/jellyfin" in text
     for bare in ("/start —", "/stop —", "/restart —"):
         assert bare not in text
