@@ -33,7 +33,7 @@ class _FakeNodeLink:
 
 
 def _settings(**kwargs) -> Settings:
-    return Settings(vpn_check=VpnCheckConfig(probe_iface="awg-probe0", **kwargs))
+    return Settings(vpn_check=VpnCheckConfig(netns="vpn-probe", **kwargs))
 
 
 def _patch_curl(monkeypatch, results: dict[str, tuple[bytes, bytes, int]]) -> None:
@@ -110,14 +110,15 @@ async def test_run_and_report_marks_curl_failure(monkeypatch):
     assert "connection refused" in results["https://1.1.1.1"]["error"]
 
 
-async def test_check_binds_curl_to_probe_interface_not_netns(monkeypatch):
+async def test_check_runs_curl_inside_probe_netns(monkeypatch):
     calls = _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
     service = VpnCheckService(_settings(), _FakeNodeLink())
     await service._run_and_report(["https://1.1.1.1"])
     cmd = calls[0]
-    assert "--interface" in cmd
-    assert cmd[cmd.index("--interface") + 1] == "awg-probe0"
-    assert "netns" not in cmd  # живая находка 2026-08-17: netns без пути в интернет
+    assert "netns" in cmd
+    assert cmd[cmd.index("netns") + 1] == "exec"
+    assert cmd[cmd.index("netns") + 2] == "vpn-probe"
+    assert "curl" in cmd
 
 
 async def test_run_and_report_multiple_targets(monkeypatch):

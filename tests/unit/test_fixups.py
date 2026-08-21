@@ -17,6 +17,7 @@ from sa_home_bot.node.fixups import (
     build_fixups,
     make_apps_unit_fixup,
     make_awg_sudoers_fixup,
+    make_vpn_probe_forwarding_fixup,
     make_vpn_probe_sudoers_fixup,
     make_vpn_probe_tunnel_fixup,
     microsocks_unit_content,
@@ -352,7 +353,7 @@ def test_vpn_probe_tunnel_check_true_when_content_matches_and_active(monkeypatch
 
     def fake_read(path):
         return fixups_module.vpn_probe_unit_content(
-            fixups_module.VPN_PROBE_IFACE, "/usr/bin/ip", "/usr/bin/awg-quick"
+            "vpn-probe", fixups_module.VPN_PROBE_IFACE, "/usr/bin/ip", "/usr/bin/awg-quick"
         )
 
     monkeypatch.setattr(fixups_module, "_read_privileged", fake_read)
@@ -363,22 +364,102 @@ def test_vpn_probe_tunnel_check_true_when_content_matches_and_active(monkeypatch
     assert fixups_module._vpn_probe_tunnel_check(settings) is True
 
 
-def test_vpn_probe_unit_content_runs_awg_quick_directly_no_netns():
-    content = vpn_probe_unit_content("awg-probe0", "/usr/sbin/ip", "/usr/bin/awg-quick")
-    assert "ExecStart=/usr/bin/awg-quick up awg-probe0\n" in content
-    assert "ExecStop=/usr/bin/awg-quick down awg-probe0\n" in content
-    assert "netns" not in content  # живая находка 2026-08-17: netns без пути в интернет
-    # Маршрут — только для curl пробника (--interface), не основной трафик хоста.
-    assert "ExecStartPost=/usr/sbin/ip route add default dev awg-probe0 metric 10000\n" in content
+def test_vpn_probe_unit_content_runs_awg_quick_inside_netns():
+    content = vpn_probe_unit_content(
+        "vpn-probe", "awg-probe0", "/usr/sbin/ip", "/usr/bin/awg-quick"
+    )
+    assert (
+        "ExecStart=/usr/sbin/ip netns exec vpn-probe /usr/bin/awg-quick up awg-probe0\n" in content
+    )
+    assert (
+        "ExecStop=/usr/sbin/ip netns exec vpn-probe /usr/bin/awg-quick down awg-probe0\n"
+        in content
+    )
     assert "RemainAfterExit=yes" in content
 
 
-def test_vpn_probe_sudoers_content_pins_curl_path_and_interface_wildcard():
-    content = vpn_probe_sudoers_content("/usr/bin/curl", "awg-probe0", "sevboa")
-    assert content == "sevboa ALL=(root) NOPASSWD: /usr/bin/curl --interface awg-probe0 *\n"
+def test_vpn_probe_unit_content_pre_steps_setup_netns_and_veth_idempotently():
+    content = vpn_probe_unit_content(
+        "vpn-probe", "awg-probe0", "/usr/sbin/ip", "/usr/bin/awg-quick"
+    )
+    # Ведущий "-" — не валить юнит, если шаг уже применён (повторный `add`
+    # уже существующего netns/veth просто вернёт ошибку, которую игнорируем).
+    assert "ExecStartPre=-/usr/sbin/ip netns add vpn-probe\n" in content
+    assert (
+        "ExecStartPre=-/usr/sbin/ip link add vprobe-veth0 type veth peer name vprobe-veth1\n"
+        in content
+    )
+    assert "ExecStartPre=-/usr/sbin/ip link set vprobe-veth1 netns vpn-probe\n" in content
+    # "set ... up" идемпотентно само по себе — без ведущего "-".
+    assert "ExecStartPre=/usr/sbin/ip link set vprobe-veth0 up\n" in content
+    assert (
+        "ExecStartPre=-/usr/sbin/ip netns exec vpn-probe /usr/sbin/ip route add default "
+        "via 10.200.200.1\n" in content
+    )
 
 
-def test_prepare_probe_conf_strips_dns_and_adds_table_off():
+def test_vpn_probe_sudoers_content_pins_ip_path_and_netns_curl_wildcard():
+    content = vpn_probe_sudoers_content("/usr/sbin/ip", "vpn-probe", "sevboa")
+    assert content == "sevboa ALL=(root) NOPASSWD: /usr/sbin/ip netns exec vpn-probe curl *\n"
+
+
+def test_vpn_probe_forwarding_needed_same_as_tunnel():
+    settings = _settings(["vpn_check"])
+    forwarding = make_vpn_probe_forwarding_fixup(settings)
+    tunnel = make_vpn_probe_tunnel_fixup(settings)
+    assert forwarding.needed(settings) == tunnel.needed(settings)
+
+
+def test_find_base_chain_returns_none_without_matching_hook(monkeypatch):
+    monkeypatch.setattr(
+        fixups_module,
+        "_nft_json_ruleset",
+        lambda: [
+            {
+                "chain": {
+                    "hook": "input", "type": "filter", "family": "inet",
+                    "table": "filter", "name": "input",
+                }
+            }
+        ],
+    )
+    assert fixups_module._find_base_chain("forward", "filter") is None
+
+
+def test_find_base_chain_finds_existing_forward_chain(monkeypatch):
+    ruleset = [
+        {
+            "chain": {
+                "hook": "input", "type": "filter", "family": "inet",
+                "table": "filter", "name": "input",
+            }
+        },
+        {
+            "chain": {
+                "hook": "forward", "type": "filter", "family": "inet",
+                "table": "filter", "name": "forward",
+            }
+        },
+    ]
+    monkeypatch.setattr(fixups_module, "_nft_json_ruleset", lambda: ruleset)
+    assert fixups_module._find_base_chain("forward", "filter") == ("inet", "filter", "forward")
+
+
+def test_probe_forwarding_check_looks_for_veth_name_and_subnet(monkeypatch):
+    monkeypatch.setattr(
+        fixups_module,
+        "_nft_ruleset_text",
+        lambda: 'iifname "vprobe-veth0" accept\nip saddr 10.200.200.0/30 masquerade\n',
+    )
+    assert fixups_module._probe_forwarding_check() is True
+
+
+def test_probe_forwarding_check_false_when_absent(monkeypatch):
+    monkeypatch.setattr(fixups_module, "_nft_ruleset_text", lambda: "")
+    assert fixups_module._probe_forwarding_check() is False
+
+
+def test_prepare_probe_conf_strips_dns_line():
     raw = (
         "[Interface]\n"
         "PrivateKey = SECRET\n"
@@ -390,15 +471,8 @@ def test_prepare_probe_conf_strips_dns_and_adds_table_off():
     )
     prepared = fixups_module._prepare_probe_conf(raw)
     assert "DNS" not in prepared  # иначе awg-quick зовёт отсутствующий resolvconf
-    assert "Table = off" in prepared  # иначе awg-quick лезет в основную маршрутизацию хоста
     assert "PrivateKey = SECRET" in prepared
     assert "[Peer]" in prepared
-
-
-def test_prepare_probe_conf_does_not_duplicate_existing_table_line():
-    raw = "[Interface]\nPrivateKey = SECRET\nTable = off\n\n[Peer]\nPublicKey = PUB\n"
-    prepared = fixups_module._prepare_probe_conf(raw)
-    assert prepared.count("Table") == 1
 
 
 def test_run_fixups_survives_check_raising_and_still_applies_it():

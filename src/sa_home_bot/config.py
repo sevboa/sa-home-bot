@@ -673,17 +673,22 @@ class VpnCheckConfig(BaseModel):
     пробных запросов через VPN на конкретной ноде (jeeves, alfred, ...),
     см. ``VpnConfig.check_nodes`` выше и vpn_check/service.py.
 
-    ``probe_iface`` — интерфейс клиентского туннеля AmneziaWG, поднятого
-    node/fixups.py::make_vpn_probe_tunnel_fixup (``Table = off`` в его
-    конфиге — основная маршрутизация ноды не трогается; curl пробника явно
-    пришпилен к этому интерфейсу через ``--interface``, SO_BINDTODEVICE).
-    Живая находка 2026-08-17: раньше интерфейс жил в отдельном network
-    namespace для той же изоляции, но там не было пути в интернет для
-    самого WireGuard-хендшейка — namespace убрали, см. fixups.py.
+    ``netns`` — сетевой неймспейс с уже поднятым клиентским туннелем
+    AmneziaWG (node/fixups.py::make_vpn_probe_tunnel_fixup): изоляция от
+    основной маршрутизации ноды — не нужны статические маршруты под
+    меняющиеся IP целей (api.telegram.org) и туннель не трогает обычный
+    трафик ноды. Путь наружу у netns — своя veth-пара + NAT на хосте (см.
+    большой комментарий в fixups.py: без него в netns нет ни одного
+    физического интерфейса, WireGuard-хендшейку решительно некуда уйти —
+    живая находка 2026-08-17). Одна и та же схема работает единообразно на
+    любой ноде, включая ноду, где крутится сам VPN-сервер (jeeves) — там же
+    без veth-изоляции адрес клиента-пробника совпал бы с локальным адресом
+    сервера на этой машине, и ядро отвергало бы пересылку как martian
+    source (fib_validate_source), причём независимо от rp_filter.
     """
 
     socket: str = "./data/vpn_check.sock"
-    probe_iface: str = "awg-probe0"
+    netns: str = "vpn-probe"
     check_timeout_s: float = Field(default=8.0, gt=0)
 
 
