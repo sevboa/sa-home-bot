@@ -446,6 +446,7 @@ def test_find_base_chain_finds_existing_forward_chain(monkeypatch):
 
 
 def test_probe_forwarding_check_looks_for_veth_name_and_subnet(monkeypatch):
+    monkeypatch.setattr(fixups_module, "_ip_forward_enabled", lambda: True)
     monkeypatch.setattr(
         fixups_module,
         "_nft_ruleset_text",
@@ -455,8 +456,41 @@ def test_probe_forwarding_check_looks_for_veth_name_and_subnet(monkeypatch):
 
 
 def test_probe_forwarding_check_false_when_absent(monkeypatch):
+    monkeypatch.setattr(fixups_module, "_ip_forward_enabled", lambda: True)
     monkeypatch.setattr(fixups_module, "_nft_ruleset_text", lambda: "")
     assert fixups_module._probe_forwarding_check() is False
+
+
+def test_probe_forwarding_check_false_when_ip_forward_disabled(monkeypatch):
+    """Живая находка 2026-08-21: на alfred net.ipv4.ip_forward=0 — veth
+    работал (ping до хоста проходил), а до реального интернета пакеты не
+    доходили вообще, ядро дропало их ДО netfilter независимо от nft-правил.
+    check() обязан замечать это, даже если nft-правила уже на месте."""
+    monkeypatch.setattr(fixups_module, "_ip_forward_enabled", lambda: False)
+    monkeypatch.setattr(
+        fixups_module,
+        "_nft_ruleset_text",
+        lambda: 'iifname "vprobe-veth0" accept\nip saddr 10.200.200.0/30 masquerade\n',
+    )
+    assert fixups_module._probe_forwarding_check() is False
+
+
+def test_ensure_ip_forward_noop_when_already_enabled(monkeypatch):
+    monkeypatch.setattr(fixups_module, "_ip_forward_enabled", lambda: True)
+    sudo_calls = []
+    monkeypatch.setattr(fixups_module, "_sudo", lambda argv: sudo_calls.append(argv))
+    fixups_module._ensure_ip_forward()
+    assert sudo_calls == []
+
+
+def test_ensure_ip_forward_writes_sysctl_and_applies_live(monkeypatch):
+    monkeypatch.setattr(fixups_module, "_ip_forward_enabled", lambda: False)
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: False)
+    sudo_calls = []
+    monkeypatch.setattr(fixups_module, "_sudo", lambda argv: sudo_calls.append(argv))
+    fixups_module._ensure_ip_forward()
+    assert any(call[:2] == ["install", "-m"] for call in sudo_calls)
+    assert ["sysctl", "-w", "net.ipv4.ip_forward=1"] in sudo_calls
 
 
 def test_probe_forwarding_apply_installs_nft_when_missing(monkeypatch):
@@ -464,6 +498,7 @@ def test_probe_forwarding_apply_installs_nft_when_missing(monkeypatch):
     (в отличие от jeeves) — без него ЛЮБОЙ ``nft`` тихо проваливается,
     forward/NAT для veth-подсети не появляется, и симптом неотличим от
     таймаута соединения."""
+    monkeypatch.setattr(fixups_module, "_ensure_ip_forward", lambda: None)
     monkeypatch.setattr(fixups_module, "_probe_forwarding_check", lambda: False)
     monkeypatch.setattr(fixups_module, "_which", lambda name: None)
     sudo_calls = []
@@ -478,6 +513,7 @@ def test_probe_forwarding_apply_installs_nft_when_missing(monkeypatch):
 
 
 def test_probe_forwarding_apply_skips_install_when_nft_present(monkeypatch):
+    monkeypatch.setattr(fixups_module, "_ensure_ip_forward", lambda: None)
     monkeypatch.setattr(fixups_module, "_probe_forwarding_check", lambda: False)
     monkeypatch.setattr(fixups_module, "_which", lambda name: f"/usr/sbin/{name}")
     sudo_calls = []
@@ -501,6 +537,26 @@ def test_prepare_probe_conf_strips_dns_line():
     assert "DNS" not in prepared  # иначе awg-quick зовёт отсутствующий resolvconf
     assert "PrivateKey = SECRET" in prepared
     assert "[Peer]" in prepared
+
+
+def test_prepare_probe_conf_strips_stale_table_line():
+    """Живая находка 2026-08-21: на уже развёрнутых нодах строка ``Table =
+    off`` (заведённая версиями v0.92.2-v0.92.4, до возврата к netns)
+    переживала апгрейд, потому что apply() читает и переписывает УЖЕ
+    установленный файл — awg-quick продолжал не заводить маршрут через сам
+    туннель, и curl внутри netns уходил бы мимо VPN обычным путём."""
+    raw = (
+        "[Interface]\n"
+        "PrivateKey = SECRET\n"
+        "Table = off\n"
+        "Address = 10.9.0.15/32\n"
+        "\n"
+        "[Peer]\n"
+        "PublicKey = PUB\n"
+    )
+    prepared = fixups_module._prepare_probe_conf(raw)
+    assert "Table" not in prepared
+    assert "PrivateKey = SECRET" in prepared
 
 
 def test_run_fixups_survives_check_raising_and_still_applies_it():

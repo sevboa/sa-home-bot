@@ -887,15 +887,33 @@ def _read_privileged(path: Path) -> str:
 
 
 def _prepare_probe_conf(config_text: str) -> str:
-    """Без строки ``DNS =`` — awg-quick иначе сам зовёт ``resolvconf``,
-    которого нет на Debian, и весь скрипт падает (живая находка 2026-08-17).
-    DNS пробнику отдельно решать не нужно: интерфейс живёт в СВОЁМ netns,
-    но resolv.conf там — тот же, что на хосте (``ip netns exec`` не подменяет
-    его без ``/etc/netns/<netns>/resolv.conf``, которого мы не заводим), а
-    хостовый DNS достижим через veth+forward — проверено живьём на jeeves
-    2026-08-18 (Tailscale MagicDNS 100.100.100.100 резолвит api.telegram.org
-    из netns пробника без какого-либо дополнительного шиминга)."""
-    lines = [line for line in config_text.splitlines() if not line.strip().startswith("DNS ")]
+    """Две правки конфига, выданного vpn@jeeves как обычному гостю:
+
+    - без строки ``DNS =`` — awg-quick иначе сам зовёт ``resolvconf``,
+      которого нет на Debian, и весь скрипт падает (живая находка
+      2026-08-17). DNS пробнику отдельно решать не нужно: интерфейс живёт в
+      СВОЁМ netns, но resolv.conf там — тот же, что на хосте (``ip netns
+      exec`` не подменяет его без ``/etc/netns/<netns>/resolv.conf``,
+      которого мы не заводим), а хостовый DNS достижим через veth+forward —
+      проверено живьём на jeeves 2026-08-18 (Tailscale MagicDNS
+      100.100.100.100 резолвит api.telegram.org из netns пробника без
+      какого-либо дополнительного шиминга).
+    - без строки ``Table`` (в любом виде — раньше сюда осознанно писали
+      ``Table = off``, версии v0.92.2–v0.92.4, пока пробник ещё жил без
+      netns) — живая находка 2026-08-21: на уже развёрнутых нодах эта
+      строка переживала апгрейд (мы читаем и переписываем УЖЕ
+      установленный файл, см. ``_vpn_probe_tunnel_apply``), и awg-quick
+      продолжал НЕ заводить маршрут через сам туннель — curl внутри netns
+      уходил бы обычным (не туннелируемым, plaintext) путём через veth,
+      что подменяет собой саму суть проверки VPN. Сейчас netns изолирован
+      (см. большой комментарий выше), поэтому awg-quick волен управлять
+      маршрутизацией ПОЛНОСТЬЮ внутри него как обычно (Table=auto,
+      значение по умолчанию) — это ничему не мешает."""
+    lines = [
+        line
+        for line in config_text.splitlines()
+        if not line.strip().startswith("DNS ") and not line.strip().startswith("Table")
+    ]
     return "\n".join(lines) + "\n"
 
 
@@ -1112,12 +1130,52 @@ def _nft_ruleset_text() -> str:
     return result.stdout if result.returncode == 0 else ""
 
 
+VPN_PROBE_IP_FORWARD_SYSCTL_PATH = Path("/etc/sysctl.d/99-sa-home-vpn-probe-forward.conf")
+
+
+def _ip_forward_enabled() -> bool:
+    try:
+        return Path("/proc/sys/net/ipv4/ip_forward").read_text().strip() == "1"
+    except OSError:
+        return False
+
+
 def _probe_forwarding_check() -> bool:
+    if not _ip_forward_enabled():
+        return False
     text = _nft_ruleset_text()
     return VPN_PROBE_VETH_HOST in text and VPN_PROBE_VETH_SUBNET in text
 
 
+def _ensure_ip_forward() -> None:
+    """``net.ipv4.ip_forward`` — без него ядро дропает пересылаемые пакеты
+    ДО netfilter, независимо от того, что говорят nft-правила (живая
+    находка 2026-08-21: veth-пара работала — ``ping`` до хоста проходил, а
+    до реального интернета — нет, conntrack не показывал вообще ни одной
+    записи, даже неудачной). На jeeves он уже был включён ради самого
+    VPN-сервера (setup-awg-jeeves.sh), на обычных нодах вроде alfred —
+    по умолчанию выключен, здесь включаем его так же явно и одинаково для
+    любой ноды с vpn_check."""
+    if _ip_forward_enabled():
+        return
+    if not _privileged_exists(VPN_PROBE_IP_FORWARD_SYSCTL_PATH):
+        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as tmp:
+            tmp.write("net.ipv4.ip_forward = 1\n")
+            tmp_path = Path(tmp.name)
+        try:
+            _sudo(
+                [
+                    "install", "-m", "0644", "-o", "root", "-g", "root",
+                    str(tmp_path), str(VPN_PROBE_IP_FORWARD_SYSCTL_PATH),
+                ]
+            )
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    _sudo(["sysctl", "-w", "net.ipv4.ip_forward=1"])
+
+
 def _probe_forwarding_apply() -> None:
+    _ensure_ip_forward()
     if _probe_forwarding_check():
         return
 
@@ -1172,7 +1230,7 @@ def _probe_forwarding_apply() -> None:
 def make_vpn_probe_forwarding_fixup(settings: Settings) -> Fixup:
     return Fixup(
         id="vpn-check-probe-forwarding",
-        title="Пропустить трафик veth-пары пробника наружу (forward + NAT, точечно)",
+        title="Пропустить трафик veth-пары пробника наружу (ip_forward + forward + NAT)",
         needed=_vpn_check_needed,
         check=_probe_forwarding_check,
         apply=_probe_forwarding_apply,
