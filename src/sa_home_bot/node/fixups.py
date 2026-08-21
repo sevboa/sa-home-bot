@@ -1395,14 +1395,20 @@ def _nft_output(argv: list[str]) -> str | None:
     return result.stdout if result.returncode == 0 else None
 
 
-def _existing_counter_names() -> set[str]:
+def _filter_table_json() -> dict:
     output = _nft_output(["-j", "list", "table", "inet", "filter"])
     if output is None:
-        return set()
+        return {}
     try:
-        data = json.loads(output)
+        return json.loads(output)
     except json.JSONDecodeError:
-        return set()
+        return {}
+
+
+def _existing_counter_names(data: dict) -> set[str]:
+    """Именованные счётчики, СОЗДАННЫЕ (``nft add counter``) — не значит, что
+    на них ссылается хоть одно правило. См. ``_rule_counter_names`` для
+    проверки того, что реально считает трафик."""
     return {
         counter["name"]
         for item in data.get("nftables", [])
@@ -1410,8 +1416,29 @@ def _existing_counter_names() -> set[str]:
     }
 
 
+def _rule_counter_names(data: dict) -> set[str]:
+    """Именованные счётчики, на которые ссылается хотя бы одно ПРАВИЛО в
+    chain input — только это реально считает трафик. Живой баг 2026-08-17
+    (найден 2026-08-21): ``_proxy_firewall_check`` раньше проверял только
+    существование счётчика-объекта (``nft add counter``) и после его
+    создания считал фикс уже применённым, из-за чего строки ``nft insert
+    rule ...`` из ``_apply_proxy_firewall_live`` ниже никогда не
+    выполнялись — счётчики существовали, но ни разу не увеличивались
+    (`bytes: 0` навсегда), а `check()` при этом врал, что всё готово."""
+    names: set[str] = set()
+    for item in data.get("nftables", []):
+        rule = item.get("rule")
+        if rule is None or rule.get("chain") != "input":
+            continue
+        for expr in rule.get("expr", []):
+            counter = expr.get("counter")
+            if counter is not None and counter.get("name"):
+                names.add(counter["name"])
+    return names
+
+
 def _proxy_firewall_check() -> bool:
-    return {"mtg_bytes", "socks_bytes"} <= _existing_counter_names()
+    return {"mtg_bytes", "socks_bytes"} <= _rule_counter_names(_filter_table_json())
 
 
 def _append_nftables_conf_counters(settings: Settings) -> None:
@@ -1468,12 +1495,17 @@ def _apply_proxy_firewall_live(settings: Settings) -> None:
     Старые правила НЕ трогаем и не удаляем — они просто становятся
     недостижимы для этих портов, что безопаснее, чем trying to delete by
     handle."""
-    existing = _existing_counter_names()
-    if "mtg_bytes" not in existing:
+    data = _filter_table_json()
+    existing_counters = _existing_counter_names(data)
+    if "mtg_bytes" not in existing_counters:
         _sudo(["nft", "add", "counter", "inet", "filter", "mtg_bytes"])
-    if "socks_bytes" not in existing:
+    if "socks_bytes" not in existing_counters:
         _sudo(["nft", "add", "counter", "inet", "filter", "socks_bytes"])
-    if _proxy_firewall_check():
+    # Проверяем именно ПРАВИЛА (не факт существования счётчиков — см.
+    # докстринг _rule_counter_names про баг 2026-08-17/2026-08-21), иначе
+    # только что созданные строкой выше счётчики без единого правила на
+    # них дадут ложное «уже готово» и insert ниже никогда не выполнится.
+    if {"mtg_bytes", "socks_bytes"} <= _rule_counter_names(data):
         return
     _sudo(
         [

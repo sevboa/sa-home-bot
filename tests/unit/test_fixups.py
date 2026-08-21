@@ -1,6 +1,7 @@
 """node/fixups.py — только чистая логика (needed(), генерация sudoers-снипетов,
 build_fixups). apply()/check() реальный sudo/файлы не трогаются в тестах."""
 
+import json
 import stat
 
 from sa_home_bot.config import AppConfig, AppsConfig, NodeConfig, Settings, TelegramConfig
@@ -214,6 +215,42 @@ def test_proxy_firewall_sudoers_content_only_two_named_counters():
 def test_build_fixups_includes_proxy_fixups_when_vpn_assigned():
     ids = {f.id for f in build_fixups(_settings(["vpn"]))}
     assert {"proxy-units", "proxy-firewall"} <= ids
+
+
+# Живой баг 2026-08-17/найден 2026-08-21: check() раньше считал фикс
+# применённым, как только СУЩЕСТВОВАЛИ счётчики-объекты (`nft add counter`),
+# не проверяя, ссылается ли на них хоть одно правило — из-за этого
+# `_apply_proxy_firewall_live` создавал счётчики и сразу решал, что готово,
+# ни разу не выполнив `nft insert rule`. Трафик молча не считался неделю.
+
+
+def _nft_json(*, counters_only: bool) -> str:
+    counter_objects = [
+        {"counter": {"family": "inet", "table": "filter", "name": n, "packets": 0, "bytes": 0}}
+        for n in ("mtg_bytes", "socks_bytes")
+    ]
+    if counters_only:
+        return json.dumps({"nftables": counter_objects})
+    rules = [
+        {
+            "rule": {
+                "family": "inet", "table": "filter", "chain": "input",
+                "expr": [{"counter": {"name": n}}, {"accept": None}],
+            }
+        }
+        for n in ("mtg_bytes", "socks_bytes")
+    ]
+    return json.dumps({"nftables": counter_objects + rules})
+
+
+def test_proxy_firewall_check_false_when_counters_exist_without_rules(monkeypatch):
+    monkeypatch.setattr(fixups_module, "_nft_output", lambda argv: _nft_json(counters_only=True))
+    assert not fixups_module._proxy_firewall_check()
+
+
+def test_proxy_firewall_check_true_when_rules_reference_counters(monkeypatch):
+    monkeypatch.setattr(fixups_module, "_nft_output", lambda argv: _nft_json(counters_only=False))
+    assert fixups_module._proxy_firewall_check()
 
 
 def test_apps_unit_sudoers_content_only_start_stop_restart_of_this_unit():
