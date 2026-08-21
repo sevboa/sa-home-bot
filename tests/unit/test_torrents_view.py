@@ -44,6 +44,25 @@ def test_list_view_renders_lamp_progress_and_speed():
     assert "Лимит скорости: без ограничения" in text
 
 
+def test_list_view_moon_sits_right_next_to_lamp():
+    """Луна — рядом с лампой статуса (оба про состояние раздачи), не в
+    хвосте строки рядом со скоростью."""
+    text, _ = build_list_view({"torrents": [_torrent(state="downloading")]}, 0)
+    line = next(line for line in text.splitlines() if "🟡" in line)
+    assert "🟡🌓" in line
+
+
+def test_list_view_line_has_safety_margin_below_reference():
+    """Реальный клиент переносил строки даже в рамках расчётного бюджета —
+    эффективный бюджет должен быть заметно меньше «сырой» ширины примера."""
+    long_name = "Marvels.Daredevil.Born.Again.S01.2160p.WEB-DL.DDP5.1.Atmos.HEVC"
+    result = {"torrents": [_torrent(name=long_name, state="downloading", dlspeed_bytes_s=0)]}
+    text, _ = build_list_view(result, 0)
+    line = next(line for line in text.splitlines() if "🟡" in line)
+    raw_reference = _text_width("🔵 Marvels.Daredevil.S01.1080p.L.N.B.J — 100% · ↓0")
+    assert _text_width(line) < raw_reference * 0.9
+
+
 # --- Кружки статусов ---------------------------------------------------------
 
 

@@ -165,9 +165,16 @@ def _text_width(s: str) -> float:
     return sum(_char_width(c) for c in s)
 
 
-# Бюджет ширины строки списка — той же меркой, что и заданный пользователем
-# пример: «🔵 Marvels.Daredevil.S01.1080p.L.N.B.J — 100% · ↓0».
-_LIST_LINE_WIDTH_BUDGET = _text_width("🔵 Marvels.Daredevil.S01.1080p.L.N.B.J — 100% · ↓0")
+# Бюджет ширины строки списка — калибровка по заданному пользователем
+# примеру длины: «🔵 Marvels.Daredevil.S01.1080p.L.N.B.J — 100% · ↓0» (сам
+# формат строки с тех пор изменился — луна переехала к лампе, — но общая
+# длина ориентир остаётся тем же). SAFETY_MARGIN — запас на неточность
+# эвристики (живая находка: без запаса часть строк всё равно переносилась на
+# реальном клиенте) — лучше обрезать чуть короче, чем упустить перенос.
+_SAFETY_MARGIN = 0.85
+_LIST_LINE_WIDTH_BUDGET = (
+    _text_width("🔵 Marvels.Daredevil.S01.1080p.L.N.B.J — 100% · ↓0") * _SAFETY_MARGIN
+)
 _ELLIPSIS_WIDTH = _text_width("…")
 
 
@@ -227,24 +234,22 @@ def build_list_view(result: dict[str, Any], offset: int) -> tuple[str, InlineKey
     for t in page:
         state = t.get("state", "")
         progress = int(t.get("progress_pct", 0))
-        lamp = _lamp(state, progress)
-        suffix = _moon_phase(progress)
+        # Луна — сразу рядом с лампой статуса (оба про «в каком состоянии
+        # раздача», а не про скорость), не в хвосте строки.
+        prefix = f"{_lamp(state, progress)}{_moon_phase(progress)} "
         speed = _speed_line(
             state, int(t.get("dlspeed_bytes_s", 0)), int(t.get("upspeed_bytes_s", 0))
         )
-        if speed:
-            suffix += f" · {speed}"
-        prefix, sep = f"{lamp} ", " — "
-        budget = _LIST_LINE_WIDTH_BUDGET - _text_width(prefix) - _text_width(sep) - _text_width(
-            suffix
-        )
+        suffix = f" — {speed}" if speed else ""
+        budget = _LIST_LINE_WIDTH_BUDGET - _text_width(prefix) - _text_width(suffix)
         name = _fit_name(t.get("name", "?"), budget)
-        lines.append(f"{prefix}{escape(name)}{sep}{suffix}")
+        lines.append(f"{prefix}{escape(name)}{suffix}")
 
     buttons = [
         [
             InlineKeyboardButton(
-                text=f"{_lamp(t.get('state', ''), int(t.get('progress_pct', 0)))} "
+                text=f"{_lamp(t.get('state', ''), int(t.get('progress_pct', 0)))}"
+                f"{_moon_phase(int(t.get('progress_pct', 0)))} "
                 f"{_short_name(t.get('name', '?'))}",
                 callback_data=_cb(commands.TORRENT_CARD_CODE, t.get("hash", "")),
             )
