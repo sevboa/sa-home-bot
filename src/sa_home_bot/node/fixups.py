@@ -1432,7 +1432,15 @@ def _rule_counter_names(data: dict) -> set[str]:
             continue
         for expr in rule.get("expr", []):
             counter = expr.get("counter")
-            if counter is not None and counter.get("name"):
+            # Ссылка на ИМЕНОВАННЫЙ счётчик в expr правила — голая строка
+            # (`{"counter": "mtg_bytes"}`), не объект с "name" (тот вид —
+            # только у самого ОПРЕДЕЛЕНИЯ счётчика, отдельным top-level
+            # элементом "nftables"). Проверено эмпирически на jeeves
+            # 2026-08-21 в изолированной scratch-таблице — реальный `nft -j`
+            # так и вернул, объектную форму ждали ошибочно.
+            if isinstance(counter, str):
+                names.add(counter)
+            elif isinstance(counter, dict) and counter.get("name"):
                 names.add(counter["name"])
     return names
 

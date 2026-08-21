@@ -235,7 +235,9 @@ def _nft_json(*, counters_only: bool) -> str:
         {
             "rule": {
                 "family": "inet", "table": "filter", "chain": "input",
-                "expr": [{"counter": {"name": n}}, {"accept": None}],
+                # Ссылка на именованный счётчик в expr — голая строка, не
+                # объект (проверено вживую на jeeves, см. _rule_counter_names).
+                "expr": [{"counter": n}, {"accept": None}],
             }
         }
         for n in ("mtg_bytes", "socks_bytes")
