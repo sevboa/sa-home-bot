@@ -194,7 +194,7 @@ def _card_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="🌐 Прокси",
+                    text="✈️ Прокси Telegram",
                     callback_data=commands.action_callback(
                         vpn_protocol.ACTION_PROXY_LINK, service=SERVICE
                     ),
@@ -269,7 +269,7 @@ def _check_status_keyboard() -> InlineKeyboardMarkup:
 
 def _proxy_text(result: dict) -> str:
     return (
-        "🌐 <b>Прокси Telegram (mtg)</b> — общая ссылка, один секрет на всех.\n"
+        "✈️ <b>Прокси Telegram (mtg)</b> — общая ссылка, один секрет на всех.\n"
         f"Ссылка: {html.escape(result['tg_link'])}\n"
         f"t.me: {html.escape(result['t_me_link'])}\n\n"
         f"Сервер: <code>{html.escape(str(result['host']))}</code>\n"
@@ -747,7 +747,7 @@ async def handle_action(
                 chat_id,
                 base64.b64decode(qr_b64),
                 filename="proxy-qr.png",
-                caption="🌐 QR прокси Telegram — отсканируйте в приложении.",
+                caption="✈️ QR прокси Telegram — отсканируйте в приложении.",
                 message_thread_id=callback.message.message_thread_id,
             )
         await callback.message.answer(_proxy_text(result), reply_markup=_proxy_keyboard())
