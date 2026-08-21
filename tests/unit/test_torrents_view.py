@@ -2,7 +2,9 @@
 пресеты лимита скорости) и карточка раздачи (bot/torrents_view.py)."""
 
 from sa_home_bot.bot.torrents_view import (
+    _LIST_LINE_WIDTH_BUDGET,
     TORRENTS_PAGE_SIZE,
+    _text_width,
     build_card_view,
     build_list_view,
 )
@@ -31,8 +33,78 @@ def test_list_view_renders_lamp_progress_and_speed():
     result = {"torrents": [_torrent()], "speed_limit_mbps": 0}
     text, kb = build_list_view(result, 0)
     assert "🧲 <b>Закачки</b> (1)" in text
-    assert "🟢" in text and "42%" in text and "1.0 МБ/с" in text
+    # downloading — активная скачка, лампа жёлтая, скорость показана.
+    assert "🟡" in text and "42%" in text and "1.0 МБ/с" in text
     assert "Лимит скорости: без ограничения" in text
+
+
+# --- Кружки статусов ---------------------------------------------------------
+
+
+def test_lamp_downloading_is_yellow():
+    text, _ = build_list_view({"torrents": [_torrent(state="downloading")]}, 0)
+    assert "🟡" in text
+
+
+def test_lamp_metadata_is_orange_not_yellow():
+    """Получение метаданных magnet-ссылки — не передача данных, ожидание."""
+    text, _ = build_list_view({"torrents": [_torrent(state="metaDL")]}, 0)
+    assert "🟠" in text and "🟡" not in text
+
+
+def test_lamp_seeding_is_green():
+    text, _ = build_list_view({"torrents": [_torrent(state="uploading")]}, 0)
+    assert "🟢" in text
+
+
+def test_lamp_waiting_is_orange():
+    text, _ = build_list_view({"torrents": [_torrent(state="stalledDL")]}, 0)
+    assert "🟠" in text
+
+
+def test_lamp_error_is_red():
+    text, _ = build_list_view({"torrents": [_torrent(state="error")]}, 0)
+    assert "🔴" in text
+
+
+def test_lamp_stopped_incomplete_is_white():
+    text, _ = build_list_view(
+        {"torrents": [_torrent(state="pausedDL", progress_pct=50)]}, 0
+    )
+    assert "⚪" in text
+
+
+def test_lamp_stopped_complete_is_brown():
+    text, _ = build_list_view(
+        {"torrents": [_torrent(state="pausedUP", progress_pct=100)]}, 0
+    )
+    assert "🟤" in text
+
+
+def test_speed_hidden_when_not_actively_transferring():
+    text, _ = build_list_view({"torrents": [_torrent(state="queuedDL")]}, 0)
+    assert "↓" not in text
+
+
+def test_card_speed_hidden_when_stopped():
+    text, _ = build_card_view(_torrent(state="pausedDL", progress_pct=50))
+    assert "Скорость" not in text
+
+
+def test_card_speed_shown_when_seeding():
+    text, _ = build_card_view(_torrent(state="uploading"))
+    assert "Скорость" in text
+
+
+def test_list_line_never_exceeds_reference_width_budget():
+    """Пример пользователя: «🔵 Marvels.Daredevil.S01.1080p.L.N.B.J — 100% ·
+    ↓0» задаёт бюджет ширины строки — длинное имя должно ужиматься под него
+    вместе с суффиксом (прогресс + скорость), а не просто под число символов."""
+    long_name = "Marvels.Daredevil.Born.Again.S01.2160p.WEB-DL.DDP5.1.Atmos.HEVC"
+    result = {"torrents": [_torrent(name=long_name, state="downloading", dlspeed_bytes_s=0)]}
+    text, _ = build_list_view(result, 0)
+    line = next(line for line in text.splitlines() if "🟡" in line)
+    assert _text_width(line) <= _LIST_LINE_WIDTH_BUDGET + 0.01
 
 
 def test_list_view_button_opens_card_by_hash():

@@ -31,21 +31,26 @@ UNAVAILABLE_TEXT = "⚠️ Служба «закачки» недоступна 
 # пользователь ограничивать и не просил.
 SPEED_PRESETS: tuple[int, ...] = (0, 1, 2, 5)
 
-LAMP_DOWNLOADING = "🟢"
-LAMP_SEEDING = "🔵"
-LAMP_WAITING = "🟠"
-LAMP_STOPPED = "🔴"
-LAMP_OTHER = "⚪"
+LAMP_DOWNLOADING = "🟡"  # активная скачка
+LAMP_SEEDING = "🟢"  # докачана и раздаёт
+LAMP_WAITING = "🟠"  # ждёт/в очереди/получает метаданные
+LAMP_ERROR = "🔴"
+LAMP_STOPPED_DONE = "🟤"  # остановлена, но докачана полностью
+LAMP_STOPPED = "⚪"  # остановлена, докачана не до конца
+LAMP_OTHER = "⚫"  # прочее/неизвестное состояние (moving, unknown)
 
-# Сырые строки состояния qBittorrent — префиксов два (qBittorrent 5
-# переименовал paused*/pausedUP в stopped*), то же соглашение, что уже
-# применено к полю "paused" в torrents/service.py.
+# Сырые строки состояния qBittorrent — префиксов два у "стоп"-группы
+# (qBittorrent 5 переименовал paused*/pausedUP в stopped*), то же
+# соглашение, что уже применено к полю "paused" в torrents/service.py.
+# metaDL (получение метаданных magnet-ссылки) — не передача данных, лежит в
+# "ожидании", а не в активной скачке.
 _DOWNLOADING_STATES = frozenset(
-    {"downloading", "forcedDL", "metaDL", "allocating", "checkingDL", "checkingResumeData"}
+    {"downloading", "forcedDL", "allocating", "checkingDL", "checkingResumeData"}
 )
 _SEEDING_STATES = frozenset({"uploading", "forcedUP", "checkingUP"})
-_WAITING_STATES = frozenset({"stalledDL", "stalledUP", "queuedDL", "queuedUP"})
+_WAITING_STATES = frozenset({"stalledDL", "stalledUP", "queuedDL", "queuedUP", "metaDL"})
 _STOPPED_STATES = frozenset({"pausedDL", "pausedUP", "stoppedDL", "stoppedUP"})
+_ERROR_STATES = frozenset({"error", "missingFiles"})
 
 _STATE_LABELS = {
     "downloading": "качается",
@@ -65,10 +70,20 @@ _STATE_LABELS = {
     "pausedUP": "остановлена",
     "stoppedDL": "остановлена",
     "stoppedUP": "остановлена",
+    "error": "ошибка",
+    "missingFiles": "не найдены файлы",
 }
 
 
-def _lamp(state: str) -> str:
+def _is_active(state: str) -> bool:
+    """Реально идёт передача (качается/раздаёт) — только тогда есть смысл
+    показывать скорость; у остановленной/в очереди/ошибочной она всегда 0."""
+    return state in _DOWNLOADING_STATES or state in _SEEDING_STATES
+
+
+def _lamp(state: str, progress_pct: int) -> str:
+    if state in _ERROR_STATES:
+        return LAMP_ERROR
     if state in _DOWNLOADING_STATES:
         return LAMP_DOWNLOADING
     if state in _SEEDING_STATES:
@@ -76,7 +91,7 @@ def _lamp(state: str) -> str:
     if state in _WAITING_STATES:
         return LAMP_WAITING
     if state in _STOPPED_STATES:
-        return LAMP_STOPPED
+        return LAMP_STOPPED_DONE if progress_pct >= 100 else LAMP_STOPPED
     return LAMP_OTHER
 
 
@@ -95,6 +110,61 @@ def _speed_text(bytes_s: int) -> str:
     if mb >= 1:
         return f"{mb:.1f} МБ/с"
     return f"{bytes_s / 1024:.0f} КБ/с"
+
+
+# --- Ширина строки в пропорциональном шрифте (эвристика) --------------------
+#
+# Точных метрик шрифта клиента Telegram нет и не может быть — Android/iOS/
+# desktop/web рисуют разными системными шрифтами. Категориальная оценка
+# ширины символа в условных единицах (1.0 ≈ обычная строчная латинская
+# буква) даёт результат того же порядка точности, что и рендер через Pillow
+# каким-нибудь системным .ttf, но без файла шрифта и без риска, что он
+# однажды пропадёт с ноды. Кириллица идёт тем же правилом, что и латиница —
+# str.isupper()/islower() юникод-aware, отдельная ветка не нужна.
+_NARROW_CHARS = frozenset(" .,:;!'\"-·…|")
+_WIDE_CHAR_THRESHOLD = 0x2000  # эмодзи, стрелки и прочие широкие символы
+
+
+def _char_width(ch: str) -> float:
+    if ch in _NARROW_CHARS:
+        return 0.5
+    if ch.isdigit():
+        return 0.55
+    if ch.isupper():
+        return 0.72
+    if ch.islower():
+        return 0.5
+    if ord(ch) > _WIDE_CHAR_THRESHOLD:
+        return 1.8
+    return 0.6
+
+
+def _text_width(s: str) -> float:
+    return sum(_char_width(c) for c in s)
+
+
+# Бюджет ширины строки списка — той же меркой, что и заданный пользователем
+# пример: «🔵 Marvels.Daredevil.S01.1080p.L.N.B.J — 100% · ↓0».
+_LIST_LINE_WIDTH_BUDGET = _text_width("🔵 Marvels.Daredevil.S01.1080p.L.N.B.J — 100% · ↓0")
+_ELLIPSIS_WIDTH = _text_width("…")
+
+
+def _fit_name(name: str, budget: float) -> str:
+    """Обрезать имя под остаток бюджета ширины строки (после лампы и
+    суффикса — прогресс/скорость) — по ширине символов, а не по их числу:
+    «Marvels» и «MMMMMMM» одной длины на глаз занимают разную ширину."""
+    if _text_width(name) <= budget:
+        return name
+    budget -= _ELLIPSIS_WIDTH
+    out: list[str] = []
+    width = 0.0
+    for ch in name:
+        w = _char_width(ch)
+        if width + w > budget:
+            break
+        out.append(ch)
+        width += w
+    return "".join(out).rstrip() + "…"
 
 
 def _speed_limit_text(mbps: int) -> str:
@@ -133,15 +203,26 @@ def build_list_view(result: dict[str, Any], offset: int) -> tuple[str, InlineKey
         lines.append("Пока ничего не качается.")
     page = torrents[offset : offset + TORRENTS_PAGE_SIZE]
     for t in page:
-        lines.append(
-            f"{_lamp(t.get('state', ''))} {escape(_short_name(t.get('name', '?')))} — "
-            f"{t.get('progress_pct', 0)}% · ↓{_speed_text(int(t.get('dlspeed_bytes_s', 0)))}"
+        state = t.get("state", "")
+        progress = int(t.get("progress_pct", 0))
+        lamp = _lamp(state, progress)
+        suffix = f"{progress}%"
+        # Скорость — только пока реально идёт передача: у остановленной/в
+        # очереди/ошибочной раздачи она всегда 0 и не несёт информации.
+        if _is_active(state):
+            suffix += f" · ↓{_speed_text(int(t.get('dlspeed_bytes_s', 0)))}"
+        prefix, sep = f"{lamp} ", " — "
+        budget = _LIST_LINE_WIDTH_BUDGET - _text_width(prefix) - _text_width(sep) - _text_width(
+            suffix
         )
+        name = _fit_name(t.get("name", "?"), budget)
+        lines.append(f"{prefix}{escape(name)}{sep}{suffix}")
 
     buttons = [
         [
             InlineKeyboardButton(
-                text=f"{_lamp(t.get('state', ''))} {_short_name(t.get('name', '?'))}",
+                text=f"{_lamp(t.get('state', ''), int(t.get('progress_pct', 0)))} "
+                f"{_short_name(t.get('name', '?'))}",
                 callback_data=_cb(commands.TORRENT_CARD_CODE, t.get("hash", "")),
             )
         ]
@@ -167,15 +248,19 @@ def build_card_view(torrent: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]
     state = torrent.get("state", "")
     thash = torrent.get("hash", "")
     eta_s = torrent.get("eta_s")
+    progress = int(torrent.get("progress_pct", 0))
     lines = [
         f"🧲 <b>{escape(torrent.get('name', '?'))}</b>",
         "",
-        f"Статус: {_lamp(state)} {_state_label(state)}",
-        f"Прогресс: {torrent.get('progress_pct', 0)}%",
-        f"Скорость: ↓ {_speed_text(int(torrent.get('dlspeed_bytes_s', 0)))}",
-        f"Пиры: {torrent.get('seeds', 0)} сидов, {torrent.get('peers', 0)} личей",
-        f"Осталось: {format_duration(eta_s) if eta_s is not None else 'неизвестно'}",
+        f"Статус: {_lamp(state, progress)} {_state_label(state)}",
+        f"Прогресс: {progress}%",
     ]
+    # Скорость — только пока реально идёт передача (см. build_list_view):
+    # у остановленной/в очереди/ошибочной раздачи она всегда 0.
+    if _is_active(state):
+        lines.append(f"Скорость: ↓ {_speed_text(int(torrent.get('dlspeed_bytes_s', 0)))}")
+    lines.append(f"Пиры: {torrent.get('seeds', 0)} сидов, {torrent.get('peers', 0)} личей")
+    lines.append(f"Осталось: {format_duration(eta_s) if eta_s is not None else 'неизвестно'}")
     toggle_text = "▶️ Запустить" if torrent.get("paused") else "⏸ Остановить"
     buttons = [
         [
