@@ -116,6 +116,11 @@ ACTION_SPACE = "space"
 ACTION_SEARCH = "search"
 ACTION_SEARCH_SMART = "search_smart"
 ACTION_DETAILS = "details"
+ACTION_SPEED_LIMIT = "speed_limit"
+
+# Потолок общего лимита скорости (download+upload разом) из бот-панели —
+# домашний канал слабый, выше пользователь ограничивать и не просил.
+MAX_SPEED_LIMIT_MBPS = 5
 
 # Сколько находок отдавать. Их читает модель и выбирает одну — на десятке
 # строк выбор по сидам/размеру делается не хуже, чем на полусотне. Было 10,
@@ -320,6 +325,7 @@ class TorrentsService:
                 ACTION_SEARCH,
                 ACTION_SEARCH_SMART,
                 ACTION_DETAILS,
+                ACTION_SPEED_LIMIT,
             ),
             actions=(
                 ActionSpec(
@@ -352,6 +358,20 @@ class TorrentsService:
                 ActionSpec(
                     id=ACTION_SPACE,
                     title="💾 Сколько места",
+                ),
+                ActionSpec(
+                    id=ACTION_SPEED_LIMIT,
+                    title="🐢 Ограничить скорость",
+                    params=(
+                        ActionParam(
+                            name="mbps",
+                            type="int",
+                            title=(
+                                "Лимит, МБ/с (0 — без ограничения, "
+                                f"максимум {MAX_SPEED_LIMIT_MBPS})"
+                            ),
+                        ),
+                    ),
                 ),
                 ActionSpec(
                     id=ACTION_PAUSE,
@@ -696,19 +716,30 @@ class TorrentsService:
             client.auth_log_out()
         return free
 
-    def _list_sync(self) -> list[dict[str, Any]]:
+    def _list_sync(self, *, with_hash: bool = False) -> tuple[list[dict[str, Any]], int]:
+        """Раздачи + текущий общий лимит скорости (в одной qBittorrent-сессии).
+
+        ``with_hash`` — хэш раздачи по умолчанию наружу не уезжает (см.
+        докстринг модуля: сорокасимвольный хэш ничего не даёт модели, только
+        раздувает контекст). Ставит его только бот-панель (bot/torrents_view)
+        — напрямую через ``args``, а не через объявленный ``ActionParam``
+        действия ``list``, так что вызвать это модель не может: тул строит
+        схему из ``describe()``, где такого параметра нет.
+        """
         client = self._client()
         try:
             client.auth_log_in()
             # sort/limit делает сам qBittorrent — тащить сотню раздач по сети,
             # чтобы выбросить хвост здесь, незачем.
             raw = client.torrents_info(sort="dlspeed", reverse=True, limit=LIST_LIMIT)
+            limit_bytes = client.transfer_download_limit()
         except qbittorrentapi.APIError as exc:
             raise ProtoError(ERR_INTERNAL, f"qBittorrent отклонил запрос: {exc}") from exc
         finally:
             client.auth_log_out()
-        return [
-            {
+        torrents = []
+        for t in raw:
+            item: dict[str, Any] = {
                 "name": t.get("name", "?"),
                 "state": t.get("state", "?"),
                 # progress приходит долей 0..1 — в процентах читают и человек,
@@ -725,9 +756,31 @@ class TorrentsService:
                 # (раздача стоит или сидируется) — отдаём None, чтобы модель не
                 # пересказывала 8640000 секунд как реальную оценку.
                 "eta_s": _eta_or_none(t.get("eta")),
+                # Подключённые пиры (не размер всего роя — то, что реально
+                # качает/раздаёт эту раздачу прямо сейчас).
+                "seeds": max(0, int(t.get("num_seeds", 0) or 0)),
+                "peers": max(0, int(t.get("num_leechs", 0) or 0)),
             }
-            for t in raw
-        ]
+            if with_hash:
+                item["hash"] = str(t.get("hash", ""))
+            torrents.append(item)
+        # 0 — общесистемное соглашение qBittorrent для «без ограничения».
+        limit_mbps = int(limit_bytes) // (1024 * 1024) if limit_bytes else 0
+        return torrents, limit_mbps
+
+    def _set_speed_limit_sync(self, mbps: int) -> None:
+        """Общий лимит (download И upload разом, одним значением — отдельных
+        направлений пользователь не просил) — см. докстринг модуля."""
+        limit_bytes = mbps * 1024 * 1024
+        client = self._client()
+        try:
+            client.auth_log_in()
+            client.transfer_set_download_limit(limit=limit_bytes)
+            client.transfer_set_upload_limit(limit=limit_bytes)
+        except qbittorrentapi.APIError as exc:
+            raise ProtoError(ERR_INTERNAL, f"qBittorrent отклонил запрос: {exc}") from exc
+        finally:
+            client.auth_log_out()
 
     @staticmethod
     def _select(raw: list[Any], selector: str) -> list[dict[str, Any]]:
@@ -809,8 +862,24 @@ class TorrentsService:
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if action == ACTION_LIST:
-            torrents = await asyncio.to_thread(self._list_sync)
-            return {"torrents": torrents, "count": len(torrents), "limit": LIST_LIMIT}
+            torrents, limit_mbps = await asyncio.to_thread(
+                self._list_sync, with_hash=bool(args.get("with_hash"))
+            )
+            return {
+                "torrents": torrents,
+                "count": len(torrents),
+                "limit": LIST_LIMIT,
+                "speed_limit_mbps": limit_mbps,
+            }
+        if action == ACTION_SPEED_LIMIT:
+            mbps = int(args.get("mbps") or 0)
+            if not 0 <= mbps <= MAX_SPEED_LIMIT_MBPS:
+                raise ProtoError(
+                    ERR_BAD_REQUEST,
+                    f"лимит — от 0 (без ограничения) до {MAX_SPEED_LIMIT_MBPS} МБ/с",
+                )
+            await asyncio.to_thread(self._set_speed_limit_sync, mbps)
+            return {"speed_limit_mbps": mbps}
         if action == ACTION_SPACE:
             return await asyncio.to_thread(self._space_sync)
         if action == ACTION_DETAILS:

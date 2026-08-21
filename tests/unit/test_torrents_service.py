@@ -58,6 +58,21 @@ class FakeClient:
         FakeClient.info_kwargs = kwargs
         return FakeClient.info
 
+    def transfer_download_limit(self):
+        if FakeClient.fail_with is not None:
+            raise FakeClient.fail_with
+        return FakeClient.dl_limit
+
+    def transfer_set_download_limit(self, limit=None):
+        if FakeClient.fail_with is not None:
+            raise FakeClient.fail_with
+        FakeClient.set_limits.append(("download", limit))
+
+    def transfer_set_upload_limit(self, limit=None):
+        if FakeClient.fail_with is not None:
+            raise FakeClient.fail_with
+        FakeClient.set_limits.append(("upload", limit))
+
     def torrents_pause(self, **kwargs):
         if FakeClient.fail_with is not None:
             raise FakeClient.fail_with
@@ -95,6 +110,8 @@ def fake_qbittorrent(monkeypatch):
     FakeClient.logged_out = False
     FakeClient.info = []
     FakeClient.info_kwargs = {}
+    FakeClient.dl_limit = 0
+    FakeClient.set_limits = []
     FakeClient.plugins = [{"name": "rutracker", "enabled": True, "url": "https://rutracker.org/forum/"}]
     FakeClient.found = []
     FakeClient.deleted = []
@@ -119,6 +136,7 @@ def test_describe_declares_add_action_with_save_path_choices():
     assert desc.info.service == "torrents"
     assert desc.capabilities == (
         "add", "list", "pause", "resume", "space", "search", "search_smart", "details",
+        "speed_limit",
     )
     action = desc.find_action("add")
     names = [p.name for p in action.params]
@@ -207,6 +225,7 @@ async def test_list_returns_narrow_slice_without_paths(fake_qbittorrent):
     ]
     result = await TorrentsService(_settings()).run_command("list", {})
     assert result["count"] == 1
+    assert result["speed_limit_mbps"] == 0
     assert result["torrents"] == [
         {
             "name": "Foo.S01",
@@ -215,11 +234,81 @@ async def test_list_returns_narrow_slice_without_paths(fake_qbittorrent):
             "dlspeed_bytes_s": 1048576,
             "paused": False,
             "eta_s": 3600,
+            "seeds": 0,
+            "peers": 0,
         }
     ]
     # Путь на диске и хэш наружу не уезжают — см. докстринг службы.
     assert "save_path" not in result["torrents"][0]
     assert "hash" not in result["torrents"][0]
+
+
+async def test_list_reports_connected_seeds_and_peers(fake_qbittorrent):
+    fake_qbittorrent.info = [
+        {
+            "name": "Foo",
+            "state": "downloading",
+            "progress": 0.5,
+            "dlspeed": 0,
+            "eta": -1,
+            "num_seeds": 12,
+            "num_leechs": 3,
+        }
+    ]
+    result = await TorrentsService(_settings()).run_command("list", {})
+    assert result["torrents"][0]["seeds"] == 12
+    assert result["torrents"][0]["peers"] == 3
+
+
+async def test_list_reports_current_speed_limit(fake_qbittorrent):
+    fake_qbittorrent.dl_limit = 2 * 1024 * 1024
+    result = await TorrentsService(_settings()).run_command("list", {})
+    assert result["speed_limit_mbps"] == 2
+
+
+async def test_list_with_hash_flag_exposes_hash_for_bot_ui(fake_qbittorrent):
+    """with_hash — не объявленный ActionParam действия list, модель дать его
+    не может (тул строит схему из describe); только бот-панель вызывает
+    команду с этим флагом напрямую."""
+    fake_qbittorrent.info = [
+        {"name": "Foo", "state": "downloading", "progress": 0.5, "dlspeed": 0, "hash": "abc123"}
+    ]
+    result = await TorrentsService(_settings()).run_command("list", {"with_hash": True})
+    assert result["torrents"][0]["hash"] == "abc123"
+
+
+async def test_speed_limit_sets_both_directions_in_bytes(fake_qbittorrent):
+    result = await TorrentsService(_settings()).run_command("speed_limit", {"mbps": 2})
+    assert result == {"speed_limit_mbps": 2}
+    assert fake_qbittorrent.set_limits == [
+        ("download", 2 * 1024 * 1024),
+        ("upload", 2 * 1024 * 1024),
+    ]
+
+
+async def test_speed_limit_zero_means_unlimited(fake_qbittorrent):
+    await TorrentsService(_settings()).run_command("speed_limit", {"mbps": 0})
+    assert fake_qbittorrent.set_limits == [("download", 0), ("upload", 0)]
+
+
+async def test_speed_limit_above_ceiling_is_bad_request():
+    with pytest.raises(ProtoError) as excinfo:
+        await TorrentsService(_settings()).run_command("speed_limit", {"mbps": 6})
+    assert excinfo.value.code == ERR_BAD_REQUEST
+
+
+async def test_speed_limit_negative_is_bad_request():
+    with pytest.raises(ProtoError) as excinfo:
+        await TorrentsService(_settings()).run_command("speed_limit", {"mbps": -1})
+    assert excinfo.value.code == ERR_BAD_REQUEST
+
+
+async def test_speed_limit_api_error_becomes_internal(fake_qbittorrent):
+    fake_qbittorrent.fail_with = qbittorrentapi.APIConnectionError("down")
+    with pytest.raises(ProtoError) as excinfo:
+        await TorrentsService(_settings()).run_command("speed_limit", {"mbps": 1})
+    assert excinfo.value.code == ERR_INTERNAL
+    assert fake_qbittorrent.logged_out
 
 
 async def test_list_limits_and_sorts_on_qbittorrent_side(fake_qbittorrent):

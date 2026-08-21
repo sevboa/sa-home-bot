@@ -28,6 +28,7 @@ from sa_home_bot.bot.handlers import (
     swarm_panel,
     tool_debug,
     torrents,
+    torrents_panel,
     vpn,
     wake,
 )
@@ -76,6 +77,7 @@ def build_dispatcher(book: SubscriptionBook, gate: Gatekeeper) -> Dispatcher:
     # точечные, а on_status_action ловит весь префикс «st:».
     dp.include_router(wake.router)
     dp.include_router(swarm_panel.router)
+    dp.include_router(torrents_panel.router)
     dp.include_router(status.router)
     dp.include_router(stats.router)
     dp.include_router(control.router)

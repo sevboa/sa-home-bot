@@ -8,16 +8,16 @@ from sa_home_bot.proto.messages import ActionParam, ActionSpec
 from sa_home_bot.subscriptions.models import Subscription
 
 
-def test_menu_has_only_alfred_and_vpn_skills():
-    # В меню из реестра — «/alfred» и «/vpn» (гостю нужно найти доступ без
-    # подсказки); /ai — скрытый алиас (как /swarm↔/nodes), в меню/списке
-    # умений не должен светиться (сознательно — чтобы в общем чате не так
-    # явно читалось как ИИ). /swarm — теперь раздел-панель (как /status,
-    # /guests): рабочая команда, но не первого уровня, поэтому тоже скрыт
-    # (menu=False). Остальные скилы первого уровня динамические (из describe
-    # apps, build_menu_commands).
+def test_menu_has_only_alfred_vpn_and_torrents_skills():
+    # В меню из реестра — «/alfred», «/vpn» и «/torrents» (гостю нужно найти
+    # доступ без подсказки); /ai — скрытый алиас (как /swarm↔/nodes), в
+    # меню/списке умений не должен светиться (сознательно — чтобы в общем
+    # чате не так явно читалось как ИИ). /swarm — теперь раздел-панель (как
+    # /status, /guests): рабочая команда, но не первого уровня, поэтому тоже
+    # скрыт (menu=False). Остальные скилы первого уровня динамические (из
+    # describe apps, build_menu_commands).
     menu_names = {c.name for c in commands.MENU_CONTROL_COMMANDS}
-    assert menu_names == {"alfred", "vpn"}
+    assert menu_names == {"alfred", "vpn", "torrents"}
     for name in (
         "swarm", "nodes", "status", "status_full", "stats", "scan_now", "downtime", "wake", "ai",
     ):

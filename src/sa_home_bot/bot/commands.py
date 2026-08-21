@@ -65,6 +65,17 @@ GUESTS = Command("guests", "приглашённые и открытые код�
 # usage службы: команда и кнопка под ней проверяются одним правилом
 # (действие@служба), как и у остальных скилов роя.
 VPN = Command("vpn", "доступ к VPN", universal=False, menu=True, right="usage@vpn")
+# Панель закачек qBittorrent (bot/handlers/torrents_panel.py) — как /guests и
+# /swarm, одно право на весь раздел (список, карточка раздачи, пауза/старт,
+# общий лимит скорости): `list@torrents`, то же имя действия, что и у самого
+# read-only списка службы torrents.
+TORRENTS = Command(
+    "torrents",
+    "закачки: список, пауза/старт, лимит скорости",
+    universal=False,
+    menu=True,
+    right="list@torrents",
+)
 
 ALL_COMMANDS: list[Command] = [
     PING,
@@ -81,6 +92,7 @@ ALL_COMMANDS: list[Command] = [
     INVITE,
     GUESTS,
     VPN,
+    TORRENTS,
 ]
 
 UNIVERSAL_COMMANDS: list[Command] = [c for c in ALL_COMMANDS if c.universal]
@@ -201,6 +213,16 @@ SWARM_SVCS_CODE = "sw_svcs"  # «st:sw_svcs:<node_id_or_->:<offset>» — спи
 SWARM_SVC_CODE = "sw_svc"  # «st:sw_svc:<node_id_or_->:<имя>» — карточка службы
 SWARM_UPDATE_CODE = "sw_update"  # «st:sw_update» — проверка обновлений по рою
 
+# Иерархия /torrents — все коды с префиксом «t_», единая точка входа
+# bot/handlers/torrents_panel.py::on_torrents_screen (bot/torrents_view.py
+# строит текст и клавиатуру каждого экрана). Право у всех одно — TORRENTS
+# (`list@torrents`), как и у /guests/`invite`: кто может открыть панель, тот
+# и управляет закачками из неё.
+TORRENTS_LIST_CODE = "t_list"  # «st:t_list:<offset>» — список закачек
+TORRENT_CARD_CODE = "t_card"  # «st:t_card:<hash>» — карточка раздачи
+TORRENT_TOGGLE_CODE = "t_toggle"  # «st:t_toggle:<hash>» — пауза/старт
+TORRENT_SPEED_CODE = "t_speed"  # «st:t_speed:<mbps>:<offset>» — лимит скорости
+
 _ALL_CALLBACK_ACTIONS: dict[str, Command] = {
     **STATUS_ACTIONS,
     DOWNTIME_PAGE_CODE: DOWNTIME,
@@ -228,6 +250,10 @@ _ALL_CALLBACK_ACTIONS: dict[str, Command] = {
     SWARM_SVCS_CODE: NODES,  # как /svc_<node>_<svc> — право `nodes`
     SWARM_SVC_CODE: NODES,
     SWARM_UPDATE_CODE: SWARM,
+    TORRENTS_LIST_CODE: TORRENTS,
+    TORRENT_CARD_CODE: TORRENTS,
+    TORRENT_TOGGLE_CODE: TORRENTS,
+    TORRENT_SPEED_CODE: TORRENTS,
 }
 
 _BY_NAME = {c.name: c for c in ALL_COMMANDS}
