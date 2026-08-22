@@ -140,6 +140,7 @@ save_dirs = [
     "/mnt/scratch/pr",
     "/mnt/data/movies",
     "/mnt/data/serials",
+    "/mnt/data/audiobooks",
     "/mnt/scratch/movies",
     "/mnt/scratch/serials",
 ]
