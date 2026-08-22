@@ -43,12 +43,15 @@ LAMP_OTHER = "⚫"  # прочее/неизвестное состояние (mo
 # (qBittorrent 5 переименовал paused*/pausedUP в stopped*), то же
 # соглашение, что уже применено к полю "paused" в torrents/service.py.
 # metaDL (получение метаданных magnet-ссылки) — не передача данных, лежит в
-# "ожидании", а не в активной скачке.
+# "ожидании", а не в активной скачке. stalledUP — раздача БЕЗ активных
+# запросов (нет желающих качать прямо сейчас) — это не проблема, а нормальный
+# режим сидирования: живая находка пользователя 2026-08-22 — с ней в одной
+# группе с "ждёт" она читалась как «что-то не так», хотя раздача идёт штатно.
 _DOWNLOADING_STATES = frozenset(
     {"downloading", "forcedDL", "allocating", "checkingDL", "checkingResumeData"}
 )
-_SEEDING_STATES = frozenset({"uploading", "forcedUP", "checkingUP"})
-_WAITING_STATES = frozenset({"stalledDL", "stalledUP", "queuedDL", "queuedUP", "metaDL"})
+_SEEDING_STATES = frozenset({"uploading", "forcedUP", "checkingUP", "stalledUP"})
+_WAITING_STATES = frozenset({"stalledDL", "queuedDL", "queuedUP", "metaDL"})
 _STOPPED_STATES = frozenset({"pausedDL", "pausedUP", "stoppedDL", "stoppedUP"})
 _ERROR_STATES = frozenset({"error", "missingFiles"})
 
@@ -63,9 +66,9 @@ _STATE_LABELS = {
     "forcedUP": "раздаёт (принудительно)",
     "checkingUP": "проверяется",
     "stalledDL": "ждёт источников",
-    "stalledUP": "ждёт получателей",
+    "stalledUP": "раздаёт (нет запросов)",
     "queuedDL": "в очереди",
-    "queuedUP": "в очереди",
+    "queuedUP": "в очереди на раздачу",
     "pausedDL": "остановлена",
     "pausedUP": "остановлена",
     "stoppedDL": "остановлена",
@@ -102,6 +105,39 @@ def _lamp(state: str, progress_pct: int) -> str:
 
 def _state_label(state: str) -> str:
     return _STATE_LABELS.get(state, state or "?")
+
+
+# Порядок групп в списке (решение пользователя 2026-08-22): проблемные —
+# первыми (их стоит заметить и разобраться), дальше по убыванию
+# «активности», раздача без доп. занятого слота — последней (наименее
+# срочная). Внутри группы — новые сверху (по added_on).
+_RANK_PROBLEM = 0  # ошибка + ищет источников (stalledDL)
+_RANK_DOWNLOADING = 1  # качается (+ метаданные/очередь на скачивание)
+_RANK_PAUSED_INCOMPLETE = 2  # на паузе, не докачана
+_RANK_SEEDING = 3  # раздаётся
+_RANK_QUEUED_UPLOAD = 4  # докачана, в очереди на раздачу
+_RANK_PAUSED_COMPLETE = 5  # докачана, раздача выключена
+_RANK_OTHER = 6
+
+
+def _sort_rank(state: str, progress_pct: int) -> int:
+    if state in _ERROR_STATES or state == "stalledDL":
+        return _RANK_PROBLEM
+    if state in _DOWNLOADING_STATES or state in ("metaDL", "queuedDL"):
+        return _RANK_DOWNLOADING
+    if state in _STOPPED_STATES:
+        return _RANK_PAUSED_COMPLETE if progress_pct >= 100 else _RANK_PAUSED_INCOMPLETE
+    if state in _SEEDING_STATES:
+        return _RANK_SEEDING
+    if state == "queuedUP":
+        return _RANK_QUEUED_UPLOAD
+    return _RANK_OTHER
+
+
+def _sort_key(t: dict[str, Any]) -> tuple[int, int]:
+    rank = _sort_rank(t.get("state", ""), int(t.get("progress_pct", 0)))
+    # Новые сверху внутри группы — минус для сортировки по возрастанию.
+    return rank, -int(t.get("added_on", 0) or 0)
 
 
 def _short_name(name: str, limit: int = _MAX_NAME_LEN) -> str:
@@ -219,7 +255,10 @@ def _speed_buttons(current_mbps: int, offset: int) -> list[InlineKeyboardButton]
 
 
 def build_list_view(result: dict[str, Any], offset: int) -> tuple[str, InlineKeyboardMarkup]:
-    torrents: Sequence[dict[str, Any]] = result.get("torrents", ())
+    # Группами по статусу (проблемные впереди), внутри группы — новые сверху
+    # (см. _sort_key). Служба уже отдаёт не больше LIST_LIMIT раздач — сорти-
+    # ровать в Python здесь дёшево, второй сети не нужно.
+    torrents: Sequence[dict[str, Any]] = sorted(result.get("torrents", ()), key=_sort_key)
     limit_mbps = int(result.get("speed_limit_mbps") or 0)
     offset = clamp_offset(offset, TORRENTS_PAGE_SIZE, len(torrents))
 
@@ -235,8 +274,9 @@ def build_list_view(result: dict[str, Any], offset: int) -> tuple[str, InlineKey
         state = t.get("state", "")
         progress = int(t.get("progress_pct", 0))
         # Луна — сразу рядом с лампой статуса (оба про «в каком состоянии
-        # раздача», а не про скорость), не в хвосте строки.
-        prefix = f"{_lamp(state, progress)}{_moon_phase(progress)} "
+        # раздача», а не про скорость), не в хвосте строки; пробел между
+        # ними — иначе два круглых эмодзи подряд читаются как один значок.
+        prefix = f"{_lamp(state, progress)} {_moon_phase(progress)} "
         speed = _speed_line(
             state, int(t.get("dlspeed_bytes_s", 0)), int(t.get("upspeed_bytes_s", 0))
         )
@@ -248,7 +288,7 @@ def build_list_view(result: dict[str, Any], offset: int) -> tuple[str, InlineKey
     buttons = [
         [
             InlineKeyboardButton(
-                text=f"{_lamp(t.get('state', ''), int(t.get('progress_pct', 0)))}"
+                text=f"{_lamp(t.get('state', ''), int(t.get('progress_pct', 0)))} "
                 f"{_moon_phase(int(t.get('progress_pct', 0)))} "
                 f"{_short_name(t.get('name', '?'))}",
                 callback_data=_cb(commands.TORRENT_CARD_CODE, t.get("hash", "")),

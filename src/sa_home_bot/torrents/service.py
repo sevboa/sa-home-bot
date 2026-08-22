@@ -761,6 +761,10 @@ class TorrentsService:
                 # качает/раздаёт эту раздачу прямо сейчас).
                 "seeds": max(0, int(t.get("num_seeds", 0) or 0)),
                 "peers": max(0, int(t.get("num_leechs", 0) or 0)),
+                # Unix-время добавления — бот сортирует список по нему внутри
+                # групп статуса (bot/torrents_view.py::_sort_key); человеку и
+                # модели просто число, страшного в нём нет.
+                "added_on": int(t.get("added_on", 0) or 0),
             }
             if with_hash:
                 item["hash"] = str(t.get("hash", ""))

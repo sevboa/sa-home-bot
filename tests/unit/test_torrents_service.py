@@ -237,6 +237,7 @@ async def test_list_returns_narrow_slice_without_paths(fake_qbittorrent):
             "eta_s": 3600,
             "seeds": 0,
             "peers": 0,
+            "added_on": 0,
         }
     ]
     # Путь на диске и хэш наружу не уезжают — см. докстринг службы.
@@ -259,6 +260,20 @@ async def test_list_reports_connected_seeds_and_peers(fake_qbittorrent):
     result = await TorrentsService(_settings()).run_command("list", {})
     assert result["torrents"][0]["seeds"] == 12
     assert result["torrents"][0]["peers"] == 3
+
+
+async def test_list_reports_added_on(fake_qbittorrent):
+    fake_qbittorrent.info = [
+        {
+            "name": "Foo",
+            "state": "downloading",
+            "progress": 0.5,
+            "dlspeed": 0,
+            "added_on": 1700000000,
+        }
+    ]
+    result = await TorrentsService(_settings()).run_command("list", {})
+    assert result["torrents"][0]["added_on"] == 1700000000
 
 
 async def test_list_reports_current_speed_limit(fake_qbittorrent):

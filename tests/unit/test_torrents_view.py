@@ -46,10 +46,11 @@ def test_list_view_renders_lamp_progress_and_speed():
 
 def test_list_view_moon_sits_right_next_to_lamp():
     """Луна — рядом с лампой статуса (оба про состояние раздачи), не в
-    хвосте строки рядом со скоростью."""
+    хвосте строки рядом со скоростью; между ними — пробел (иначе два
+    круглых эмодзи подряд читаются как один значок)."""
     text, _ = build_list_view({"torrents": [_torrent(state="downloading")]}, 0)
     line = next(line for line in text.splitlines() if "🟡" in line)
-    assert "🟡🌓" in line
+    assert "🟡 🌓 " in line
 
 
 def test_list_view_line_has_safety_margin_below_reference():
@@ -85,6 +86,13 @@ def test_lamp_seeding_is_green():
 def test_lamp_waiting_is_orange():
     text, _ = build_list_view({"torrents": [_torrent(state="stalledDL")]}, 0)
     assert "🟠" in text
+
+
+def test_lamp_stalled_up_is_green_not_orange():
+    """Раздача без активных запросов — не проблема, а штатное сидирование:
+    живая находка пользователя 2026-08-22, раньше читалось как «ждёт»."""
+    text, _ = build_list_view({"torrents": [_torrent(state="stalledUP", progress_pct=100)]}, 0)
+    assert "🟢" in text and "🟠" not in text
 
 
 def test_lamp_error_is_red():
@@ -205,6 +213,44 @@ def test_list_view_speed_buttons_carry_offset():
     _, kb = build_list_view(result, TORRENTS_PAGE_SIZE)
     codes = [b.callback_data for row in kb.inline_keyboard for b in row]
     assert f"st:t_speed:5:{TORRENTS_PAGE_SIZE}" in codes
+
+
+# --- Сортировка: группы статусов, внутри группы — новые сверху --------------
+
+
+def test_list_view_orders_by_status_group():
+    """Решение пользователя 2026-08-22: ошибка/ищет источники → качаются →
+    на паузе (не докачаны) → раздаются → докачаны, в очереди на раздачу →
+    докачаны, раздача выключена."""
+    torrents = [
+        _torrent(name="Paused100", hash="h1", state="pausedUP", progress_pct=100, added_on=1),
+        _torrent(name="QueuedUp", hash="h2", state="queuedUP", progress_pct=100, added_on=1),
+        _torrent(name="Seeding", hash="h3", state="uploading", progress_pct=100, added_on=1),
+        _torrent(name="Paused50", hash="h4", state="pausedDL", progress_pct=50, added_on=1),
+        _torrent(name="Downloading", hash="h5", state="downloading", progress_pct=10, added_on=1),
+        _torrent(name="Error", hash="h6", state="error", progress_pct=0, added_on=1),
+    ]
+    result = {"torrents": torrents, "speed_limit_mbps": 0}
+    text, _ = build_list_view(result, 0)
+    names_in_order = [line for line in text.splitlines() if "🟡" in line or "🟢" in line
+                       or "🟠" in line or "🔴" in line or "🟤" in line or "⚪" in line]
+    order = [
+        next(i for i, n in enumerate(
+            ["Error", "Downloading", "Paused50", "Seeding", "QueuedUp", "Paused100"]
+        ) if n in line)
+        for line in names_in_order
+    ]
+    assert order == sorted(order)
+
+
+def test_list_view_sorts_newest_first_within_group():
+    torrents = [
+        _torrent(name="Older", hash="h1", state="downloading", added_on=100),
+        _torrent(name="Newer", hash="h2", state="downloading", added_on=200),
+    ]
+    result = {"torrents": torrents, "speed_limit_mbps": 0}
+    text, _ = build_list_view(result, 0)
+    assert text.index("Newer") < text.index("Older")
 
 
 # --- Карточка -----------------------------------------------------------------
