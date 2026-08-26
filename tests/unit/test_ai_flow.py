@@ -131,7 +131,14 @@ class FakeNodeLink:
     display_name = "нода"
 
     def __init__(
-        self, own=None, chat_results=(), get_state_routes=None, wol_sent=None, memory_facts=()
+        self,
+        own=None,
+        chat_results=(),
+        get_state_routes=None,
+        get_state_sequences=None,
+        wol_sent=None,
+        memory_facts=(),
+        warmup_result=None,
     ):
         self.memory_facts = list(memory_facts)
         self.recall_calls: list[dict] = []
@@ -141,15 +148,36 @@ class FakeNodeLink:
         # затем доступна после wake".
         self._chat_results = list(chat_results)
         self._get_state_routes = get_state_routes or {}
+        # get_state_sequences — то же самое, но по одному значению НА ВЫЗОВ
+        # (в отличие от routes — статичного ответа навсегда): нужно, чтобы
+        # честно смоделировать реальный WoL-сценарий — сначала presence не
+        # отвечает (None), затем, после отправки magic packet, начинает
+        # отвечать (wake_core.wait_for_service опрашивает по кругу). ``None``
+        # в списке — "недоступна в этот раз" (как отсутствие в routes).
+        self._get_state_sequences = {k: list(v) for k, v in (get_state_sequences or {}).items()}
         self.wol_sent = wol_sent if wol_sent is not None else []
         self.command_calls: list[tuple[str, dict, str | None]] = []
         self.get_state_calls: list[str] = []
+        # Прогрев (wake_core.try_warmup, теперь звучит из ensure_service_ready
+        # безусловно на "спящей"/только что разбуженной ветке — живая находка
+        # при аудите 2026-08-26) — по умолчанию мгновенно успешен (как в
+        # реальной службе llm, ACTION_WARMUP почти всегда поддержан и удачен);
+        # исключение — сконфигурировать сбой прогрева отдельно от chat_results.
+        self._warmup_result = warmup_result
 
     async def get_state(self, dst=None):
         key = f"{dst.node}:{dst.service}" if dst is not None else "own"
         self.get_state_calls.append(key)
         if key == "own":
             return self._own
+        sequence = self._get_state_sequences.get(key)
+        if sequence:
+            result = sequence.pop(0)
+            if result is None:
+                raise ServiceUnavailableError("нет связи")
+            if isinstance(result, Exception):
+                raise result
+            return result
         if key in self._get_state_routes:
             result = self._get_state_routes[key]
             if isinstance(result, Exception):
@@ -176,6 +204,10 @@ class FakeNodeLink:
                 "results": [{"title": "T", "url": "u"}],
                 "count": 1,
             }
+        if action == "warmup":
+            if isinstance(self._warmup_result, Exception):
+                raise self._warmup_result
+            return self._warmup_result or {"asleep": False}
         assert action == "chat"
         result = self._chat_results.pop(0)
         if isinstance(result, Exception):
@@ -640,12 +672,14 @@ async def test_asleep_model_shows_steps_via_rich_status_not_plain_message(store)
 async def test_asleep_warmup_fails_answers_as_albert_not_generic_error(store):
     # Прогрев не уложился (Ollama не поднялась) — раз мы уже знали, что
     # модель спит, это подаётся как «Альфред, кажется, уснул» (Альбегт),
-    # а не безликое «Прошу прощения, не вышло» от самого Альфреда.
+    # а не безликое «Прошу прощения, не вышло» от самого Альфреда. Сбой
+    # теперь моделируется через warmup_result (ensure_service_ready сама
+    # решает прогрев/сон — chat вообще не должен вызываться, см. ниже).
     message = FakeMessage()
     notifier = FakeNotifier()
     link = FakeNodeLink(
-        chat_results=[ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева")],
         get_state_routes={"mycraft:llm": {"asleep": True}},
+        warmup_result=ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева"),
     )
 
     raw = await ai_flow.request_alfred(
@@ -656,6 +690,7 @@ async def test_asleep_warmup_fails_answers_as_albert_not_generic_error(store):
     assert raw is None
     assert message.answers == [ai_flow.STEPS_TEXT, ai_flow.ALBERT_ASLEEP]
     assert link.wol_sent == []  # узел был доступен — будить не нужно
+    assert link.command_calls == [("warmup", {}, "mycraft")]  # chat не вызывался вовсе
     assert len(notifier.sent) == 1  # админ всё равно узнаёт о сбое
 
 
@@ -668,8 +703,8 @@ async def test_asleep_warmup_fails_uses_rich_finalize_status_not_plain_answer(st
     message = FakeMessage()
     rich_session = FakeRichSession()
     link = FakeNodeLink(
-        chat_results=[ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева")],
         get_state_routes={"mycraft:llm": {"asleep": True}},
+        warmup_result=ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева"),
     )
 
     raw = await ai_flow.request_alfred(
@@ -685,16 +720,17 @@ async def test_asleep_warmup_fails_uses_rich_finalize_status_not_plain_answer(st
 
 
 async def test_unavailable_then_woken_within_30s(store, monkeypatch):
+    # Настоящий холодный старт: presence не отвечает вовсе (None) -> молчаливый
+    # WoL -> опрос (wake_core.wait_for_service) снова застаёт службу на связи
+    # -> Агнольд -> прогрев -> единственный проход _ask(). get_state_sequences
+    # моделирует "сначала недоступна, потом отвечает" честно, по вызовам, а
+    # не статичным ответом навсегда (см. FakeNodeLink про разницу с routes).
     await wake_state.remember(store, "mycraft", MYCRAFT_WAKE)
     monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
     message = FakeMessage()
     link = FakeNodeLink(
-        chat_results=[
-            ProtoError(ERR_UNAVAILABLE, "нода недоступна"),
-            {"response": ai_flow.ROUTE_OK},
-            {"response": "Сейчас подойду"},
-        ],
-        get_state_routes={"mycraft:llm": {"asleep": False}},
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Сейчас подойду"}],
+        get_state_sequences={"mycraft:llm": [None, {"asleep": True}]},
     )
 
     raw = await ai_flow.request_alfred(
@@ -703,10 +739,12 @@ async def test_unavailable_then_woken_within_30s(store, monkeypatch):
     )
 
     assert raw == "Сейчас подойду"
-    # Второе «шаги» — про поднятие контейнера (отдельная неопределённость
-    # от самого wake); успех не добавляет отдельного сообщения персонажа.
+    # Второе «шаги» — про прогрев модели (отдельная неопределённость от
+    # самого подъёма машины); успех не добавляет отдельного сообщения
+    # персонажа, это тот же самый ЕДИНСТВЕННЫЙ проход _ask().
     assert message.answers == [ai_flow.STEPS_TEXT, ai_flow.ARNOLD_WAKING, ai_flow.STEPS_TEXT]
     assert link.wol_sent == [{"mac": MYCRAFT_WAKE["mac"]}]  # разбудили молча
+    assert ("warmup", {}, "mycraft") in link.command_calls
 
 
 async def test_unavailable_then_woken_within_30s_via_rich_status(store, monkeypatch):
@@ -722,12 +760,8 @@ async def test_unavailable_then_woken_within_30s_via_rich_status(store, monkeypa
     message = FakeMessage()
     rich_session = FakeRichSession()
     link = FakeNodeLink(
-        chat_results=[
-            ProtoError(ERR_UNAVAILABLE, "нода недоступна"),
-            {"response": ai_flow.ROUTE_OK},
-            {"response": "Сейчас подойду"},
-        ],
-        get_state_routes={"mycraft:llm": {"asleep": False}},
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Сейчас подойду"}],
+        get_state_sequences={"mycraft:llm": [None, {"asleep": True}]},
     )
 
     raw = await ai_flow.request_alfred(
@@ -805,15 +839,19 @@ async def test_unavailable_wake_sent_but_still_unreachable_after_30s(store, monk
     assert link.wol_sent == [{"mac": MYCRAFT_WAKE["mac"]}]  # будили, но не помогло
 
 
-async def test_woken_but_retry_call_still_fails(store, monkeypatch):
-    await wake_state.remember(store, "mycraft", MYCRAFT_WAKE)
-    monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
+async def test_ask_discovers_unavailable_despite_fresh_presence_reports_immediately(store):
+    # Живая находка при аудите механизма пробуждения (2026-08-26): раньше
+    # такой сбой (presence свежий и говорит "не сплю", но сам chat всё равно
+    # ловит ERR_UNAVAILABLE — редкая гонка) запускал полноценный повторный
+    # сценарий wake (молчаливый WoL + вторая, почти дословно дублирующая
+    # попытка _ask()) — см. Приложение 2.Б плана механизма готовности.
+    # Единственная точка готовности (wake_core.ensure_service_ready) уже
+    # сказала READY по presence — если сам запрос всё равно словил
+    # "недоступна", это разовая гонка: репортим сразу, без второй попытки
+    # и без WoL живой машине.
     message = FakeMessage()
     link = FakeNodeLink(
-        chat_results=[
-            ProtoError(ERR_UNAVAILABLE, "нода недоступна"),
-            ProtoError(ERR_UNAVAILABLE, "опять недоступна"),
-        ],
+        chat_results=[ProtoError(ERR_UNAVAILABLE, "нода недоступна")],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
@@ -823,12 +861,8 @@ async def test_woken_but_retry_call_still_fails(store, monkeypatch):
     )
 
     assert raw is None
-    assert message.answers == [
-        ai_flow.STEPS_TEXT,
-        ai_flow.ARNOLD_WAKING,
-        ai_flow.STEPS_TEXT,
-        ai_flow.ALBERT_UNAVAILABLE,
-    ]
+    assert message.answers == [ai_flow.ALBERT_UNAVAILABLE]
+    assert link.wol_sent == []  # presence был свежим — второй попытки/wake нет
 
 
 async def test_internal_error_on_first_try_answers_user_and_notifies_admin(store):
@@ -888,17 +922,18 @@ async def test_internal_error_uses_rich_finalize_status_not_plain_answer(store):
     assert rich_session.finalized_statuses == [ai_flow.ALBERT_HICCUP_MD]
 
 
-async def test_internal_error_after_wake_answers_user_and_notifies_admin(store, monkeypatch):
+async def test_wake_succeeds_but_warmup_fails_after_wake(store, monkeypatch):
+    # Настоящий холодный старт: machine поднялась по WoL (Агнольд успел
+    # сказать своё), но сам прогрев модели не задался — это шаги уже
+    # Альбегта, не безликое извинение Альфреда. chat вообще не вызывается —
+    # ensure_service_ready решает всё до request_alfred::_ask().
     await wake_state.remember(store, "mycraft", MYCRAFT_WAKE)
     monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
     message = FakeMessage()
     notifier = FakeNotifier()
     link = FakeNodeLink(
-        chat_results=[
-            ProtoError(ERR_UNAVAILABLE, "нода недоступна"),
-            ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева"),
-        ],
-        get_state_routes={"mycraft:llm": {"asleep": False}},
+        get_state_sequences={"mycraft:llm": [None, {"asleep": True}]},
+        warmup_result=ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева"),
     )
 
     raw = await ai_flow.request_alfred(
@@ -907,16 +942,41 @@ async def test_internal_error_after_wake_answers_user_and_notifies_admin(store, 
     )
 
     assert raw is None
-    # Провал именно после успешного wake (контейнер не поднялся) — это
-    # шаги уже Альбегта, не безликое извинение Альфреда: Агнольд успешно
-    # разбудил машину, а дальше не задалось у того, кто пошёл за Альфредом.
     assert message.answers == [
         ai_flow.STEPS_TEXT,
         ai_flow.ARNOLD_WAKING,
         ai_flow.STEPS_TEXT,
         ai_flow.ALBERT_ASLEEP,
     ]
+    assert link.command_calls[-1] == ("warmup", {}, "mycraft")  # chat не вызывался вовсе
     assert len(notifier.sent) == 1
+
+
+async def test_node_alive_but_service_down_skips_wake_reports_crashed(store):
+    # Живая находка при аудите механизма пробуждения (2026-08-26): раньше
+    # "не отвечает" был один исход что на "машина спит", что на "машина
+    # жива, но именно служба llm упала/зависла" — magic packet слался
+    # вслепую живой машине, и код ждал до WAKE_POLL_TIMEOUT_S впустую.
+    # ensure_service_ready теперь различает их дешёвой доп.проверкой
+    # присутствия ноды (служба node, отдельная от llm) ПЕРЕД тем, как
+    # решать будить или нет.
+    message = FakeMessage()
+    notifier = FakeNotifier()
+    link = FakeNodeLink(get_state_routes={"mycraft:node": {"kind": "workstation"}})
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
+        _admin_book(), notifier,
+    )
+
+    assert raw is None
+    assert message.answers == [ai_flow.ALBERT_UNAVAILABLE]
+    assert link.wol_sent == []  # машина жива — будить нечего
+    assert link.command_calls == []  # chat/warmup вообще не пытались звать
+    assert len(notifier.sent) == 1
+    admin_chat_id, admin_text = notifier.sent[0]
+    assert admin_chat_id == 999
+    assert "WoL" in admin_text
 
 
 # --- display_name / _build_context_note (2026-07-24: "кто пишет", "кто

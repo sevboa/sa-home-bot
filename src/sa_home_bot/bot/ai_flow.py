@@ -71,7 +71,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from aiogram.types import Message, User
 
 from sa_home_bot import wake_core
-from sa_home_bot.bot import swarm_view
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.lifecycle import notify_tool_call
 from sa_home_bot.bot.notifier import (  # noqa: F401 — реэкспорт, см. ниже
@@ -94,7 +93,6 @@ from sa_home_bot.proto.messages import (
     ProtoError,
 )
 from sa_home_bot.subscriptions.book import SubscriptionBook
-from sa_home_bot.wake_core import wake_swarm_node_core
 
 log = logging.getLogger(__name__)
 
@@ -1048,80 +1046,68 @@ async def request_alfred(
         else:
             await message.answer(text_html)
 
-    # Узнать заранее, не спит ли модель (idle-таймер llm/service.py) — если
-    # да, предупредить о прогреве СРАЗУ, а не оставлять пользователя молча
-    # ждать до request_timeout_s без всякой обратной связи. Узел при этом
-    # доступен (просто отвечает не сразу) — это не сценарий wake ниже.
-    # Короткий таймаут (см. _PRESENCE_CHECK_TIMEOUT_S) — это только быстрая
-    # проверка, не повод ждать так же долго, как за настоящим ответом.
-    steps_shown = False
-    asleep_warmup = False
-    known_unavailable = False
-    try:
-        state = await asyncio.wait_for(node_link.get_state(dst=dst), _PRESENCE_CHECK_TIMEOUT_S)
-    except (ServiceUnavailableError, ProtoError, TimeoutError):
-        state = None
-        known_unavailable = True  # презумпция: раз даже get_state не достучался — недоступна
-    if state is not None and state.get("asleep"):
-        await _announce_steps()
-        steps_shown = True
-        asleep_warmup = True
+    # Единая точка готовности LLM-сервиса — wake_core.ensure_service_ready,
+    # общая для текста/фото/стикера/голоса (голос отдельно зовёт её же перед
+    # STT, см. bot/voice_stt.py — та же функция, не своя копия) и для службы
+    # tasks. Раньше здесь жила собственная, менее строгая последовательность
+    # (presence -> первая попытка _ask() -> wake -> почти дословно
+    # дублирующая вторая попытка _ask()) — по итогам аудита 2026-08-26
+    # (Приложения 2-4 плана механизма готовности) она удалена целиком: одна
+    # функция сама решает presence/сон/аварию/прогрев, колбэк ниже лишь
+    # переводит её фазы в персонажные реплики Альфреда, не дублируя логику.
+    async def _on_phase_change(phase: str) -> None:
+        if phase == wake_core.PHASE_WOKEN:
+            # Агнольд — отдельный персонаж со своей репликой, не эфемерный
+            # статус (живая находка 2026-08-10, третий заход): его сообщение
+            # должно ОСТАТЬСЯ в чате, не перекрываясь ни «шагами», ни ответом
+            # самого Альфреда — finalize_status() вытесняет активный
+            # черновик той же сессии напрямую, без зазора (см. rich_stream.py).
+            if rich_session is not None:
+                await rich_session.finalize_status(ARNOLD_WAKING_MD)
+            else:
+                await message.answer(ARNOLD_WAKING)
+        else:
+            # PHASE_WAKING (шлём WoL) и PHASE_WARMING (грузим модель) —
+            # один и тот же статус-текст «шаги», что и раньше: разный повод,
+            # одна и та же ремарка (см. _announce_steps).
+            await _announce_steps()
 
-    if not known_unavailable:
-        try:
-            return await _ask()
-        except ServiceUnavailableError:
-            pass
-        except ProtoError as exc:
-            if not _is_unavailable(exc):
-                # Узел был доступен и мы знали, что модель спит (прогрев) —
-                # если именно прогрев и не уложился, это не «внутренняя
-                # ошибка» в глазах пользователя, а прямое продолжение
-                # «шагов»: Альбегт, а не голое извинение Альфреда. Если же
-                # прогрев не при чём (просто дал сбой сам chat-запрос,
-                # см. ALBERT_HICCUP) — тоже персонаж, а не голая техника.
-                if asleep_warmup:
-                    await _announce_albert(ALBERT_ASLEEP, ALBERT_ASLEEP_MD)
-                else:
-                    await _announce_albert(ALBERT_HICCUP, ALBERT_HICCUP_MD)
-                await notify_admins(
-                    book, notifier, f"⚠️ /ai (chat={chat_id}): {exc.code} — {exc.message}"
-                )
-                return None
-
-    # --- недоступна: шаги (если ещё не показали) -> молчаливый wake -> poll
-    # до WAKE_POLL_TIMEOUT_S -> Агнольд/Альбегт ---
-    if not steps_shown:
-        await _announce_steps()
-    outcome = await wake_swarm_node_core(node_link, store, LLM_NODE)
-    became_available = outcome.ok and await swarm_view.wait_for_service(
-        node_link, LLM_NODE, LLM_SERVICE, WAKE_POLL_TIMEOUT_S, WAKE_POLL_INTERVAL_S
+    outcome = await wake_core.ensure_service_ready(
+        node_link,
+        store,
+        LLM_NODE,
+        LLM_SERVICE,
+        wake_timeout_s=WAKE_POLL_TIMEOUT_S,
+        wake_poll_interval_s=WAKE_POLL_INTERVAL_S,
+        warmup_timeout_s=settings.llm.warmup_timeout_s,
+        on_phase_change=_on_phase_change,
     )
-    if not became_available:
+    if outcome == wake_core.CRASHED:
+        # Нода жива, но сама служба llm не отвечает — WoL тут не поможет
+        # (ensure_service_ready уже это проверил и НЕ будил машину зря, см.
+        # Приложение 3/5 плана). Это более тревожный случай, чем обычный
+        # сон — стоит явно предупредить админов, а не молчать, как при
+        # обычной недоступности спящей машины.
+        await _announce_albert(ALBERT_UNAVAILABLE, ALBERT_UNAVAILABLE_MD)
+        await notify_admins(
+            book, notifier,
+            f"🔥 /ai (chat={chat_id}): нода «{LLM_NODE}» жива, служба «{LLM_SERVICE}» "
+            "не отвечает — WoL не поможет, нужен ручной перезапуск службы",
+        )
+        return None
+    if outcome == wake_core.UNREACHABLE:
         await _announce_albert(ALBERT_UNAVAILABLE, ALBERT_UNAVAILABLE_MD)
         return None
+    if outcome == wake_core.WARMUP_FAILED:
+        await _announce_albert(ALBERT_ASLEEP, ALBERT_ASLEEP_MD)
+        await notify_admins(
+            book, notifier,
+            f"⚠️ /ai (chat={chat_id}): прогрев {LLM_NODE}/{LLM_SERVICE} не подтверждён",
+        )
+        return None
 
-    # Живая находка 2026-08-10 (третий заход): Агнольд — отдельный персонаж
-    # со своей репликой, не эфемерный статус — его сообщение должно
-    # ОСТАТЬСЯ в чате, не перекрываясь ни «шагами», ни ответом самого
-    # Альфреда. Но и просто message.answer() (второй заход этого фикса) не
-    # подходит — это отдельный от rich-механики Bot API метод, черновик
-    # «шаги» истекал сам по себе, а реплика всплывала отдельно, с
-    # заметным разрывом. rich_session.finalize_status() — та же механика,
-    # что и финал настоящего ответа (sendRichMessage): вытесняет активный
-    # черновик той же сессии напрямую, статус подменяется репликой без
-    # зазора, а сама реплика персистентна (см. rich_stream.py про детали).
-    if rich_session is not None:
-        await rich_session.finalize_status(ARNOLD_WAKING_MD)
-    else:
-        await message.answer(ARNOLD_WAKING)
-    # Второе «шаги»: машина проснулась (реплика была Агнольда), но контейнер
-    # с моделью — отдельное, тоже не гарантированное ожидание. Если оно
-    # провалится — это уже шаги Альбегта (см. ALBERT_ASLEEP ниже), отдельным
-    # сообщением/статусом — не переиспользуем реплику Агнольда, чтобы
-    # сюжетно все провалы/реплики были у разных персонажей и не перекрывали
-    # друг друга.
-    await _announce_steps()
+    # outcome == READY — служба готова (и это заземлено на реальный ответ
+    # Ollama, не только на самоотчёт), один вызов вместо прежних двух попыток.
     try:
         return await _ask()
     except ServiceUnavailableError:
@@ -1131,8 +1117,8 @@ async def request_alfred(
         if _is_unavailable(exc):
             await _announce_albert(ALBERT_UNAVAILABLE, ALBERT_UNAVAILABLE_MD)
         else:
-            await _announce_albert(ALBERT_ASLEEP, ALBERT_ASLEEP_MD)
+            await _announce_albert(ALBERT_HICCUP, ALBERT_HICCUP_MD)
             await notify_admins(
-                book, notifier, f"⚠️ /ai (chat={chat_id}, после wake): {exc.code} — {exc.message}"
+                book, notifier, f"⚠️ /ai (chat={chat_id}): {exc.code} — {exc.message}"
             )
         return None

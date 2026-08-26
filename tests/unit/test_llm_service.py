@@ -873,6 +873,13 @@ async def test_idle_check_sleeps_after_threshold(monkeypatch):
 
     monkeypatch.setattr(llm_service.ollama, "stop", fake_stop)
     svc = LlmService(_settings(idle_sleep_after_s=60.0))
+    # Живая находка при аудите механизма пробуждения (2026-08-26):
+    # get_state()["asleep"] теперь учитывает и _warmup_confirmed (см.
+    # LlmService.__init__/_touch) — тест эмулирует службу, которая реально
+    # была активна недавно (а не свежесозданный, ни разу не тронутый
+    # процесс), поэтому явно подтверждаем прогрев, как это сделал бы
+    # настоящий _touch().
+    svc._warmup_confirmed = True
     svc._last_activity = datetime.now(tz=UTC) - timedelta(seconds=61)
 
     await svc._maybe_sleep_idle()
@@ -889,6 +896,9 @@ async def test_idle_check_no_sleep_before_threshold(monkeypatch):
 
     monkeypatch.setattr(llm_service.ollama, "stop", fake_stop)
     svc = LlmService(_settings(idle_sleep_after_s=60.0))
+    # См. комментарий в test_idle_check_sleeps_after_threshold выше про
+    # _warmup_confirmed.
+    svc._warmup_confirmed = True
     svc._last_activity = datetime.now(tz=UTC) - timedelta(seconds=5)
 
     await svc._maybe_sleep_idle()

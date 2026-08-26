@@ -861,89 +861,107 @@ async def _do_ask_and_reply(
     # уже разрешена вызывающим (см. докстринг _ask_and_reply про почему).
     # Стрим-черновики (on_partial в request_alfred) — только в приватных
     # чатах, см. _rich_session_for.
+    #
+    # Живая находка при аудите механизма пробуждения (2026-08-26,
+    # Приложение 5 плана): очистка rich_session (finalize/finalize_status)
+    # раньше была разбросана по конкретным веткам ниже — необработанное
+    # исключение, пустой ответ модели или отмена задачи хендлера (рестарт
+    # бота) молча оставляли активный черновик тикать через keep-alive до
+    # 30-минутного защитного потолка (rich_stream.py::_KEEPALIVE_MAX_TICKS),
+    # пользователь видел протухший статус вместо/помимо реального сообщения
+    # об ошибке. try/finally ниже — единая гарантия: ЛЮБОЙ выход из этой
+    # функции (успех, ожидаемая ошибка, баг, CancelledError) останавливает
+    # keep-alive; если сессия уже штатно финализирована ниже, aclose() —
+    # no-op (см. её докстринг).
     is_private = message.chat is not None and message.chat.type == "private"
     try:
-        raw = await ai_flow.request_alfred(
-            message, node_link, store, config, history, dialogue_id, book, notifier, dismissal,
-            tool_calls, speech_remark,
-            rich_session if is_private else None,
-        )
-    except Exception as exc:  # noqa: BLE001 — страховка: баг тут не должен быть молчаливым
-        log.exception("ai: необработанная ошибка в диалоге chat=%s", message.chat.id)
-        await message.answer("<b>Альфред:</b> Прошу прощения, что-то пошло не так, сэр.")
-        await ai_flow.notify_admins(
-            book,
-            notifier,
-            f"🔥 /ai (chat={message.chat.id}): необработанное исключение {exc!r}",
-        )
-        return None
-    if raw is None:
-        return None  # недоступность/ошибка уже сообщена пользователю (ai_flow)
-    if not raw.strip():
-        # Живая находка 2026-07-29: модель может вернуть пустой текст (у неё
-        # кончилось окно контекста — декларации тулов плюс выдача поиска), и
-        # пользователь получал сообщение из одного префикса «Альфред:».
-        # Пустая реплика не ход диалога: в ai_turns не пишем, отвечаем тем же
-        # персонажем, что и на сбой генерации, а подробности — админу.
-        log.warning("ai: пустой ответ модели (chat=%s)", message.chat.id)
-        await message.answer(ai_flow.ALBERT_HICCUP)
-        await ai_flow.notify_admins(
-            book, notifier, f"⚠️ /ai (chat={message.chat.id}): модель вернула пустой ответ"
-        )
-        return None
-    # Голосовой режим (тумблер per-chat, тул voice_mode) — голос ВМЕСТО
-    # текста, не вместе: при успехе текстовое сообщение с полным ответом в
-    # чат не идёт вовсе (решение пользователя 2026-08-11). Любой сбой
-    # синтеза/отправки — тихий откат на обычный текстовый путь ниже, raw всё
-    # равно пишется в ai_turns целиком независимо от способа доставки.
-    audio_bytes: bytes | None = None
-    if message.chat is not None and await voice_mode.is_enabled(store, message.chat.id):
-        audio_bytes = await voice_tts.synthesize_voice_reply(
-            message, node_link, store, config, rich_session, raw
-        )
-    if audio_bytes is not None:
-        voice_message_id = await notifier.send_voice(
-            message.chat.id,
-            audio_bytes,
-            filename="alfred.ogg",
-            message_thread_id=message.message_thread_id,
-        )
-        if voice_message_id is not None:
+        try:
+            raw = await ai_flow.request_alfred(
+                message, node_link, store, config, history, dialogue_id, book, notifier,
+                dismissal, tool_calls, speech_remark,
+                rich_session if is_private else None,
+            )
+        except Exception as exc:  # noqa: BLE001 — страховка: баг тут не должен быть молчаливым
+            log.exception("ai: необработанная ошибка в диалоге chat=%s", message.chat.id)
+            await message.answer("<b>Альфред:</b> Прошу прощения, что-то пошло не так, сэр.")
+            await ai_flow.notify_admins(
+                book,
+                notifier,
+                f"🔥 /ai (chat={message.chat.id}): необработанное исключение {exc!r}",
+            )
+            return None
+        if raw is None:
+            return None  # недоступность/ошибка уже сообщена пользователю (ai_flow)
+        if not raw.strip():
+            # Живая находка 2026-07-29: модель может вернуть пустой текст (у
+            # неё кончилось окно контекста — декларации тулов плюс выдача
+            # поиска), и пользователь получал сообщение из одного префикса
+            # «Альфред:». Пустая реплика не ход диалога: в ai_turns не
+            # пишем, отвечаем тем же персонажем, что и на сбой генерации, а
+            # подробности — админу.
+            log.warning("ai: пустой ответ модели (chat=%s)", message.chat.id)
+            await message.answer(ai_flow.ALBERT_HICCUP)
+            await ai_flow.notify_admins(
+                book, notifier, f"⚠️ /ai (chat={message.chat.id}): модель вернула пустой ответ"
+            )
+            return None
+        # Голосовой режим (тумблер per-chat, тул voice_mode) — голос ВМЕСТО
+        # текста, не вместе: при успехе текстовое сообщение с полным ответом
+        # в чат не идёт вовсе (решение пользователя 2026-08-11). Любой сбой
+        # синтеза/отправки — тихий откат на обычный текстовый путь ниже, raw
+        # всё равно пишется в ai_turns целиком независимо от способа доставки.
+        audio_bytes: bytes | None = None
+        if message.chat is not None and await voice_mode.is_enabled(store, message.chat.id):
+            audio_bytes = await voice_tts.synthesize_voice_reply(
+                message, node_link, store, config, rich_session, raw
+            )
+        if audio_bytes is not None:
+            voice_message_id = await notifier.send_voice(
+                message.chat.id,
+                audio_bytes,
+                filename="alfred.ogg",
+                message_thread_id=message.message_thread_id,
+            )
+            if voice_message_id is not None:
+                if rich_session is not None:
+                    await rich_session.finalize_status(voice_tts.VOICE_REPLY_SENT_MD)
+                sent_message_id = voice_message_id
+            else:
+                audio_bytes = None
+        if audio_bytes is None:
             if rich_session is not None:
-                await rich_session.finalize_status(voice_tts.VOICE_REPLY_SENT_MD)
-            sent_message_id = voice_message_id
-        else:
-            audio_bytes = None
-    if audio_bytes is None:
+                sent = await _send_alfred_reply_rich(message, raw, rich_session)
+                if sent is None:
+                    log.error("ai: не удалось отправить rich-ответ (chat=%s)", message.chat.id)
+                    await ai_flow.notify_admins(
+                        book,
+                        notifier,
+                        f"⚠️ /ai (chat={message.chat.id}): не удалось отправить rich-ответ",
+                    )
+                    return None
+                sent_message_id = sent.message_id
+            else:
+                sent = await _send_alfred_reply(message, raw)
+                sent_message_id = sent.message_id
+        await store.record_ai_turn(
+            message.chat.id, sent_message_id, dialogue_id, "assistant", raw, datetime.now(tz=UTC)
+        )
+        if speech_remark.text is not None:
+            # Отдельным сообщением, БЕЗ html.escape (см. _format_answer) —
+            # ремарка сама генерирует безопасный HTML (llm/speech_therapy.py:
+            # слова-подстановки берутся из regex [А-Яа-яЁё]+, спецсимволов не
+            # бывает), экранировать её как обычный текст модели — снова
+            # сломать <i>-тег буквально в тег текста.
+            await message.answer(speech_remark.text)
+        if dismissal.mode is not None:
+            # Ход диалога уже записан: если машину выключат, а тред потом
+            # продолжат реплаем — история не потеряется, Альфреда просто
+            # разбудят.
+            await ai_flow.perform_dismissal(message, node_link, dismissal.mode, book, notifier)
+        return raw
+    finally:
         if rich_session is not None:
-            sent = await _send_alfred_reply_rich(message, raw, rich_session)
-            if sent is None:
-                log.error("ai: не удалось отправить rich-ответ (chat=%s)", message.chat.id)
-                await ai_flow.notify_admins(
-                    book,
-                    notifier,
-                    f"⚠️ /ai (chat={message.chat.id}): не удалось отправить rich-ответ",
-                )
-                return None
-            sent_message_id = sent.message_id
-        else:
-            sent = await _send_alfred_reply(message, raw)
-            sent_message_id = sent.message_id
-    await store.record_ai_turn(
-        message.chat.id, sent_message_id, dialogue_id, "assistant", raw, datetime.now(tz=UTC)
-    )
-    if speech_remark.text is not None:
-        # Отдельным сообщением, БЕЗ html.escape (см. _format_answer) —
-        # ремарка сама генерирует безопасный HTML (llm/speech_therapy.py:
-        # слова-подстановки берутся из regex [А-Яа-яЁё]+, спецсимволов не
-        # бывает), экранировать её как обычный текст модели — снова сломать
-        # <i>-тег буквально в тег текста.
-        await message.answer(speech_remark.text)
-    if dismissal.mode is not None:
-        # Ход диалога уже записан: если машину выключат, а тред потом
-        # продолжат реплаем — история не потеряется, Альфреда просто разбудят.
-        await ai_flow.perform_dismissal(message, node_link, dismissal.mode, book, notifier)
-    return raw
+            await rich_session.aclose()
 
 
 async def _send_alfred_reply(message: Message, raw: str) -> Message:

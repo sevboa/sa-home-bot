@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
@@ -61,6 +62,24 @@ WARMUP_TIMEOUT_S = 360.0
 READY = "ready"
 UNREACHABLE = "unreachable"
 WARMUP_FAILED = "warmup_failed"
+# Живая находка при аудите механизма пробуждения (2026-08-26): раньше
+# "не отвечает" был один исход на два разных случая — "машина спит" (WoL
+# поможет) и "машина жива, но именно эта служба упала/зависла" (WoL
+# бесполезен, magic packet некому будить). ensure_service_ready теперь
+# различает их сам (см. ниже) через дешёвую доп.проверку присутствия ноды
+# (служба NODE_SERVICE) ПЕРЕД тем, как посылать WoL.
+CRASHED = "crashed"
+
+# Фазы долгого ожидания внутри ensure_service_ready — передаются в
+# необязательный ``on_phase_change`` колбэк ДО того, как начинается
+# соответствующее ожидание (не после), чтобы вызывающий успел показать
+# статус пользователю раньше, а не постфактум (та же причина, по которой
+# bot/ai_flow.py::_announce_steps звался вручную перед wake_swarm_node_core
+# до этого рефакторинга — см. Приложение план про живучесть статусов).
+PHASE_WAKING = "waking"  # служба не отвечает вовсе — отправляем WoL и ждём
+PHASE_WOKEN = "woken"  # WoL сработал, нода снова на связи (перед прогревом)
+PHASE_WARMING = "warming"  # служба отвечает, но себя считает уснувшей —
+# либо только что проснулась после WAKING — прогреваем модель
 
 
 # Имена служб, к которым ходит обзорный сбор. Литералами, а не импортом из
@@ -265,42 +284,109 @@ async def ensure_service_ready(
     service: str,
     *,
     wake_timeout_s: float | None = None,
+    wake_poll_interval_s: float = WAKE_POLL_INTERVAL_S,
     warmup_timeout_s: float = WARMUP_TIMEOUT_S,
+    on_phase_change: Callable[[str], Awaitable[None]] | None = None,
 ) -> str:
     """Довести службу на (возможно спящей) ноде до готовности отвечать.
 
-    Один сценарий на всех: presence -> при необходимости WoL и ожидание
-    подъёма -> прогрев. Раньше он был руками продублирован в bot/ai_flow.py
-    и tasks/service.py с расходящимися константами.
+    Один сценарий на всех: presence -> (если нужно) различить сон/аварию ->
+    при необходимости WoL и ожидание подъёма -> прогрев, заземлённый на
+    реальный ответ Ollama, а не на самоотчёт службы. Раньше был руками
+    продублирован в bot/ai_flow.py (собственная, менее строгая версия) и
+    tasks/service.py — единственная функция теперь используется отовсюду,
+    включая bot/ai_flow.py::request_alfred (после аудита 2026-08-26,
+    Приложения 2-4 плана механизма готовности LLM).
 
-    Возвращает ``READY`` / ``UNREACHABLE`` (машину не удалось поднять) /
-    ``WARMUP_FAILED`` (нода на связи, но служба не прогрелась).
+    Возвращает:
+    - ``READY`` — служба готова принять запрос прямо сейчас;
+    - ``UNREACHABLE`` — машину не удалось поднять (или не удалось поднять
+      службу на ней за ``wake_timeout_s`` после WoL);
+    - ``CRASHED`` — нода жива (ответила на presence NODE_SERVICE), но именно
+      эта служба не отвечает вовсе: WoL здесь бесполезен, машину будить не
+      нужно (см. CRASHED выше про живую находку 2026-08-26 — раньше это
+      неотличимо смешивалось с UNREACHABLE, и код всё равно слал magic
+      packet и ждал до ``wake_timeout_s`` машине, которая и не думала спать);
+    - ``WARMUP_FAILED`` — служба на связи, но прогрев (заземление на Ollama)
+      не подтверждён.
+
+    ``on_phase_change`` — необязательный колбэк ``async def(phase: str)``,
+    вызывается ДО начала соответствующего долгого ожидания (``PHASE_WAKING``/
+    ``PHASE_WOKEN``/``PHASE_WARMING`` выше) — вызывающий может показать
+    статус пользователю заранее, а не после того, как ожидание уже прошло.
+    Не зовётся вовсе на "уже тёплом" пути (служба ответила и не считает себя
+    спящей) — там заземляющий прогрев (см. ниже) ожидается быстрым, отдельный
+    статус не нужен (сохраняет прежнее поведение вызывающих).
+
+    ``wake_poll_interval_s`` — интервал опроса между попытками в
+    ``wait_for_service`` (параметризован, а не жёстко ``WAKE_POLL_INTERVAL_S``,
+    чтобы тесты могли ускорить поллинг, не трогая реальный дефолт).
     """
     if wake_timeout_s is None:
         wake_timeout_s = WAKE_POLL_TIMEOUT_S
     dst = Address(node=node_id, service=service)
+
+    async def _finish_warmup() -> str:
+        if await try_warmup(node_link, dst, warmup_timeout_s):
+            return READY
+        log.warning("wake: прогрев %s/%s не удался", node_id, service)
+        return WARMUP_FAILED
+
     state = await fetch_state(node_link, dst, timeout_s=PRESENCE_TIMEOUT_S)
-    if state is not None and not state.get("asleep"):
-        return READY
 
     if state is None:
+        # Служба не отвечает вовсе — прежде чем слать WoL, дёшево проверяем,
+        # жива ли сама нода (служба node): если да, будить нечего и незачем —
+        # magic packet тут не поможет, а 180с поллинга только тянут время
+        # зря (см. CRASHED выше).
+        node_alive = service != NODE_SERVICE and (
+            await fetch_state(
+                node_link, Address(node=node_id, service=NODE_SERVICE), timeout_s=PRESENCE_TIMEOUT_S
+            )
+            is not None
+        )
+        if node_alive:
+            log.warning(
+                "wake: нода «%s» жива, но служба %s не отвечает — WoL тут бесполезен",
+                node_id, service,
+            )
+            return CRASHED
+        if on_phase_change is not None:
+            await on_phase_change(PHASE_WAKING)
         outcome = await wake_swarm_node_core(node_link, store, node_id)
         if not outcome.ok:
             log.warning("wake: не удалось разбудить «%s»: %s", node_id, outcome.detail)
             return UNREACHABLE
         log.info("wake: «%s» разбужена, ждём %s до %.0f с", node_id, service, wake_timeout_s)
         if not await wait_for_service(
-            node_link, node_id, service, wake_timeout_s, WAKE_POLL_INTERVAL_S
+            node_link, node_id, service, wake_timeout_s, wake_poll_interval_s
         ):
             log.warning(
                 "wake: «%s» не подняла службу %s за %.0f с", node_id, service, wake_timeout_s
             )
             return UNREACHABLE
+        if on_phase_change is not None:
+            await on_phase_change(PHASE_WOKEN)
+            await on_phase_change(PHASE_WARMING)
+        return await _finish_warmup()
 
-    if await try_warmup(node_link, dst, warmup_timeout_s):
-        return READY
-    log.warning("wake: прогрев %s/%s не удался", node_id, service)
-    return WARMUP_FAILED
+    if state.get("asleep"):
+        if on_phase_change is not None:
+            await on_phase_change(PHASE_WARMING)
+        return await _finish_warmup()
+
+    # Служба сама отвечает "не сплю" — самоотчёт (self._asleep в
+    # llm/service.py), не проверенный против Ollama напрямую на каждый
+    # запрос (это добавило бы сетевой круг ожидания в самый частый, уже
+    # тёплый путь). Заземление против рассинхрона после рестарта процесса
+    # службы сделано у источника: llm/service.py инициализирует _asleep=True
+    # при старте (а не False), так что именно ПЕРВЫЙ запрос после рестарта
+    # честно пройдёт через ветку выше и настоящий прогрев — см. Приложение 3
+    # плана про живую находку 2026-08-26. Внешнее выгружение модели самой
+    # Ollama (не через _sleep_now службы) сюда не заземлено и остаётся
+    # известным, задокументированным пробелом — не решаем его ценой сетевого
+    # вызова на КАЖДЫЙ запрос.
+    return READY
 
 
 @dataclass(frozen=True)

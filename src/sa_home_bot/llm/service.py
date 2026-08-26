@@ -213,6 +213,23 @@ class LlmService:
         self._emit = emit
         self._last_activity = datetime.now(tz=UTC)
         self._asleep = False
+        # Живая находка при аудите механизма пробуждения (2026-08-26): после
+        # рестарта/деплоя ЭТОГО процесса (не Ollama) presence-проверка
+        # (wake_core.ensure_service_ready) читала только self._asleep и
+        # честно, но неверно докладывала "не сплю" — хотя модель в VRAM у
+        # Ollama на самом деле не загружена (свежий процесс её ещё не
+        # трогал). Первый чат-запрос после рестарта молча платил за холодную
+        # загрузку (~200с) внутри своего таймаута, без единой реплики
+        # персонажа о прогреве. _warmup_confirmed — отдельный от _asleep
+        # флаг: True только после РЕАЛЬНОГО успешного обращения к Ollama
+        # (_touch/ACTION_WARMUP), False сразу после старта процесса и после
+        # каждого сна (см. _sleep_now). get_state() ниже репортит "asleep"
+        # как ``self._asleep or not self._warmup_confirmed`` — не трогая
+        # сам _asleep и его роль в idle-таймере (_maybe_sleep_idle),
+        # который должен продолжать работать и для машины, которую ни разу
+        # не трогали (см. EVENT_WENT_IDLE/автовыключение, живая находка
+        # 2026-08-03 — заводить для этого отдельный флаг было бы неверно).
+        self._warmup_confirmed = False
         self._active_chat_ids: set[int] = set()
         # Живая находка 2026-07-23: короткоживущие вызовы wsl.exe (прогрев,
         # ретраи в llm/ollama.py) сами по себе не держат WSL2-VM живой — она
@@ -471,13 +488,16 @@ class LlmService:
             "node": self._node,
             "service": SERVICE_NAME,
             "model": self._cfg.model,
-            "asleep": self._asleep,
+            # "не подтверждено, что модель реально в VRAM" — тоже "сплю" с
+            # точки зрения presence-проверки (см. _warmup_confirmed выше).
+            "asleep": self._asleep or not self._warmup_confirmed,
             "speech_therapy": self._speech.snapshot(),
         }
 
     async def _touch(self, chat_id: Any = None) -> None:
         self._last_activity = datetime.now(tz=UTC)
         self._asleep = False
+        self._warmup_confirmed = True
         if isinstance(chat_id, int):
             self._active_chat_ids.add(chat_id)
         # Keepalive держит живой WSL2-VM — актуально только для
@@ -840,6 +860,7 @@ class LlmService:
         if self._cfg.container_backend == "wsl-docker":
             await self._keepalive.stop()
         self._asleep = True
+        self._warmup_confirmed = False
         if quiet:
             self._active_chat_ids.clear()
             return

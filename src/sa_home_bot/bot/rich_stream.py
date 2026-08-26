@@ -21,6 +21,7 @@ chat") — это ограничение Bot API, не наш выбор. В г�
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import random
 
@@ -129,6 +130,28 @@ class RichStreamSession:
             self._keepalive_task.cancel()
             self._keepalive_task = None
         self._active_message = None
+
+    async def aclose(self) -> None:
+        """Гарантированная очистка на случай, что сессию бросили, не дойдя ни
+        до finalize()/finalize_status(), ни до другого штатного выхода —
+        необработанное исключение или отмена задачи хендлера (живая находка
+        при аудите механизма пробуждения 2026-08-26, Приложение 5 плана:
+        раньше keep-alive в таких случаях просто тикал сам по себе до
+        защитного потолка _KEEPALIVE_MAX_TICKS — до получаса устаревшего
+        статуса в чате после того, как ход уже фактически завершился с
+        ошибкой где-то ещё).
+
+        Не шлёт никакого сообщения — вызывающий (см. bot/handlers/ai.py::
+        _do_ask_and_reply) уже отправил или отправит своё собственное
+        объяснение сбоя; здесь только останавливаем keep-alive/typing.
+        Идемпотентна — безопасно звать даже если сессия уже штатно
+        финализирована (тогда это no-op)."""
+        task = self._keepalive_task
+        self._stop_keepalive()
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await self._typing.stop()
 
     async def _push_markdown(self, markdown_body: str, *, with_prefix: bool = True) -> None:
         """Черновик настоящего текста ответа (on_partial) — дедуп по
