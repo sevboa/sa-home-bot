@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, ReplyParameters
 
 from sa_home_bot.subscriptions.models import WILDCARD
@@ -57,8 +57,12 @@ class TypingIndicator:
             await self._bot.send_chat_action(
                 self._chat_id, "typing", message_thread_id=self._message_thread_id
             )
-        except TelegramAPIError:
-            pass  # не критично — просто не обновится в этот раз
+        except Exception:  # noqa: BLE001 — не критично, просто не обновится в этот раз
+            # Живая находка 2026-08-29 (см. rich_stream.py::_send_draft):
+            # сетевые сбои вроде aiohttp_socks.ProxyTimeoutError не
+            # подклассы TelegramAPIError и раньше улетали наверх, хотя
+            # индикатор — некритичный побочный эффект, не сам ответ.
+            pass
 
     async def _loop(self) -> None:
         for _ in range(TYPING_MAX_TICKS):
@@ -121,7 +125,12 @@ async def send_with_retry(
             wait = exc.retry_after + 1
             log.warning("429 от Telegram (chat=%s, %s), жду %ss", chat_id, action, wait)
             await asyncio.sleep(wait)
-        except TelegramAPIError as exc:
+        except Exception as exc:  # noqa: BLE001 — см. живую находку 2026-08-29 ниже
+            # Сетевые сбои (напр. aiohttp_socks.ProxyTimeoutError зависшего
+            # SOCKS-прокси до Telegram) — не подклассы TelegramAPIError и
+            # раньше улетали наверх мимо этого же ретрай-цикла, задуманного
+            # именно чтобы не ронять вызывающего на временных сбоях связи
+            # (см. rich_stream.py::_send_draft, тот же класс бага).
             log.warning(
                 "Не удалось отправить %s в chat=%s (попытка %s/%s): %s",
                 action,
@@ -244,7 +253,7 @@ class Notifier:
                 wait = exc.retry_after + 1
                 log.warning("429 от Telegram (chat=%s), жду %ss", chat_id, wait)
                 await asyncio.sleep(wait)
-            except TelegramAPIError as exc:
+            except Exception as exc:  # noqa: BLE001 — см. send_with_retry про сетевые сбои
                 log.warning(
                     "Не удалось отправить в chat=%s (попытка %s/%s): %s",
                     chat_id,
@@ -291,7 +300,7 @@ class Notifier:
                 wait = exc.retry_after + 1
                 log.warning("429 от Telegram (chat=%s), жду %ss", chat_id, wait)
                 await asyncio.sleep(wait)
-            except TelegramAPIError as exc:
+            except Exception as exc:  # noqa: BLE001 — см. send_with_retry про сетевые сбои
                 log.warning(
                     "Не удалось отправить документ в chat=%s (попытка %s/%s): %s",
                     chat_id,
@@ -324,7 +333,7 @@ class Notifier:
                 wait = exc.retry_after + 1
                 log.warning("429 от Telegram (chat=%s), жду %ss", chat_id, wait)
                 await asyncio.sleep(wait)
-            except TelegramAPIError as exc:
+            except Exception as exc:  # noqa: BLE001 — см. send_with_retry про сетевые сбои
                 log.warning(
                     "Не удалось отправить фото в chat=%s (попытка %s/%s): %s",
                     chat_id,
@@ -357,7 +366,7 @@ class Notifier:
                 wait = exc.retry_after + 1
                 log.warning("429 от Telegram (chat=%s), жду %ss", chat_id, wait)
                 await asyncio.sleep(wait)
-            except TelegramAPIError as exc:
+            except Exception as exc:  # noqa: BLE001 — см. send_with_retry про сетевые сбои
                 log.warning(
                     "Не удалось отправить голосовое в chat=%s (попытка %s/%s): %s",
                     chat_id,
@@ -370,5 +379,5 @@ class Notifier:
         return None
 
     async def delete_message(self, chat_id: int, message_id: int) -> None:
-        with contextlib.suppress(TelegramAPIError):
+        with contextlib.suppress(Exception):  # noqa: BLE001 — необязательная уборка
             await self._bot.delete_message(chat_id, message_id)

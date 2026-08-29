@@ -25,6 +25,7 @@ class FakeBot:
         self.drafts: list[dict] = []
         self.sent: list[dict] = []
         self.draft_fails_times = 0
+        self.draft_fail_exception: Exception = TelegramAPIError(None, "draft недоступен")
         self.retry_after_times = 0
         self._next_id = 1
         self.typing_actions: list[int] = []
@@ -34,7 +35,7 @@ class FakeBot:
     ):
         if self.draft_fails_times > 0:
             self.draft_fails_times -= 1
-            raise TelegramAPIError(None, "draft недоступен")
+            raise self.draft_fail_exception
         self.drafts.append(
             {
                 "chat_id": chat_id,
@@ -114,6 +115,21 @@ async def test_on_partial_swallows_telegram_errors():
     assert bot.drafts == []
 
 
+async def test_on_partial_swallows_network_errors():
+    # Живая находка 2026-08-29: реальный сбой в проде был не TelegramAPIError,
+    # а aiohttp_socks.ProxyTimeoutError (зависший SOCKS-прокси до Telegram) —
+    # обычный Exception без общего предка с TelegramAPIError. Раньше он
+    # улетал наверх и ронял весь /ai-ответ ещё до обращения к модели.
+    bot = FakeBot()
+    bot.draft_fails_times = 1
+    bot.draft_fail_exception = ConnectionError("proxy timed out: 60")
+    session = RichStreamSession(bot, chat_id=1)
+
+    await session.on_partial("текст", done=False)  # не бросает
+
+    assert bot.drafts == []
+
+
 async def test_push_status_sends_thinking_block():
     # Blocks вместо markdown — Telegram сам рисует серую анимацию для
     # InputRichBlockThinking, оборачивать текст самим (курсив и т.п.) не
@@ -157,6 +173,20 @@ async def test_push_status_and_on_partial_share_dedup_state():
 async def test_push_status_swallows_telegram_errors():
     bot = FakeBot()
     bot.draft_fails_times = 1
+    session = RichStreamSession(bot, chat_id=1)
+
+    await session.push_status("статус")  # не бросает
+
+    assert bot.drafts == []
+
+
+async def test_push_status_swallows_network_errors():
+    # См. test_on_partial_swallows_network_errors — тот же класс бага: это
+    # именно тот путь (ai_flow.py::_announce_steps/_on_phase_change), который
+    # реально падал в проде до статуса ответа модели.
+    bot = FakeBot()
+    bot.draft_fails_times = 1
+    bot.draft_fail_exception = ConnectionError("proxy timed out: 60")
     session = RichStreamSession(bot, chat_id=1)
 
     await session.push_status("статус")  # не бросает

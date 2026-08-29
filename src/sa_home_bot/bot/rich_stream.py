@@ -26,7 +26,6 @@ import logging
 import random
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError
 from aiogram.types import InputRichBlockThinking, InputRichMessage, Message, ReplyParameters
 
 from sa_home_bot.bot.notifier import TypingIndicator, send_with_retry
@@ -101,10 +100,19 @@ class RichStreamSession:
                 rich_message=rich_message,
                 message_thread_id=self._message_thread_id,
             )
-        except TelegramAPIError as exc:
-            # Best-effort: черновик — превью, не критично потерять один
-            # тик, следующий подтянет уже более свежий текст (в отличие от
-            # finalize() ниже, где потерять сообщение молча нельзя).
+        except Exception as exc:  # noqa: BLE001 — best-effort по докстрингу метода
+            # Живая находка 2026-08-29: ловили только TelegramAPIError, но
+            # реальный сбой (зависший SOCKS-прокси до Telegram, см. память
+            # telegram-bot-api-proxy) приходит как aiohttp_socks.
+            # ProxyTimeoutError — обычный Exception, не подкласс
+            # TelegramAPIError. Черновик — превью, не критично потерять
+            # один тик, следующий подтянет уже более свежий текст (в
+            # отличие от finalize() ниже, где потерять сообщение молча
+            # нельзя) — но ПРЕЖДЕ эта ошибка улетала наверх и рушила весь
+            # /ai-ответ ещё до обращения к модели (ai_flow.py::
+            # _on_phase_change/_announce_steps зовут push_status ДО
+            # генерации). asyncio.CancelledError не Exception с 3.8 —
+            # отмена задачи хендлера по-прежнему проходит сквозь этот except.
             log.debug(
                 "rich_stream: не удалось обновить черновик (chat=%s): %s", self._chat_id, exc
             )
