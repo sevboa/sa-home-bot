@@ -1174,23 +1174,29 @@ def _ensure_ip_forward() -> None:
     _sudo(["sysctl", "-w", "net.ipv4.ip_forward=1"])
 
 
-def _probe_forwarding_apply() -> None:
-    _ensure_ip_forward()
-    if _probe_forwarding_check():
+def _ensure_nft_installed() -> None:
+    if _which("nft") is not None:
         return
+    # Живая находка 2026-08-21: на alfred nftables не установлен вообще
+    # (в отличие от jeeves, где он уже был для другого firewall-контура)
+    # — без него ЛЮБОЙ `nft ...` тихо проваливается (returncode != 0,
+    # ``_nft_json_ruleset``/``_nft_ruleset_text`` трактуют это как
+    # «пустой ruleset»), forward/NAT для veth-подсети не появляется, и
+    # ничего (ни хендшейк, ни данные) не может выйти из изолированного
+    # netns наружу — симптом неотличим от таймаута (curl exit 28).
+    argv = install_argv("nftables")
+    if argv is None:
+        raise FixupError("nft не найден и неизвестен пакетный менеджер для nftables")
+    _sudo(argv)
 
-    if _which("nft") is None:
-        # Живая находка 2026-08-21: на alfred nftables не установлен вообще
-        # (в отличие от jeeves, где он уже был для другого firewall-контура)
-        # — без него ЛЮБОЙ `nft ...` тихо проваливается (returncode != 0,
-        # ``_nft_json_ruleset``/``_nft_ruleset_text`` трактуют это как
-        # «пустой ruleset»), forward/NAT для veth-подсети не появляется, и
-        # ничего (ни хендшейк, ни данные) не может выйти из изолированного
-        # netns наружу — симптом неотличим от таймаута (curl exit 28).
-        argv = install_argv("nftables")
-        if argv is None:
-            raise FixupError("nft не найден и неизвестен пакетный менеджер для nftables")
-        _sudo(argv)
+
+def _resolve_probe_forward_targets() -> tuple[tuple[str, str, str], tuple[str, str, str]]:
+    """Найти (или завести собственную) forward/postrouting-цепочку для
+    трафика veth-подсети пробника. Вынесено из ``_probe_forwarding_apply``,
+    чтобы ``_vpn_probe_forwarding_persist_apply`` (см. ниже) могла запечь ТЕ
+    ЖЕ family/table/chain в скрипт, переживающий ребут, а не изобретать
+    решение заново."""
+    _ensure_nft_installed()
 
     forward_target = _find_base_chain("forward", "filter")
     if forward_target is None:
@@ -1203,9 +1209,6 @@ def _probe_forwarding_apply() -> None:
             ]
         )
         forward_target = ("inet", VPN_PROBE_NFT_TABLE, "forward")
-    family, table, chain = forward_target
-    _sudo(["nft", "insert", "rule", family, table, chain, "iifname", VPN_PROBE_VETH_HOST, "accept"])
-    _sudo(["nft", "insert", "rule", family, table, chain, "oifname", VPN_PROBE_VETH_HOST, "accept"])
 
     nat_target = _find_base_chain("postrouting", "nat")
     if nat_target is None:
@@ -1218,6 +1221,21 @@ def _probe_forwarding_apply() -> None:
             ]
         )
         nat_target = ("ip", VPN_PROBE_NFT_TABLE, "postrouting")
+
+    return forward_target, nat_target
+
+
+def _probe_forwarding_apply() -> None:
+    _ensure_ip_forward()
+    if _probe_forwarding_check():
+        return
+
+    forward_target, nat_target = _resolve_probe_forward_targets()
+
+    family, table, chain = forward_target
+    _sudo(["nft", "insert", "rule", family, table, chain, "iifname", VPN_PROBE_VETH_HOST, "accept"])
+    _sudo(["nft", "insert", "rule", family, table, chain, "oifname", VPN_PROBE_VETH_HOST, "accept"])
+
     family, table, chain = nat_target
     _sudo(
         [
@@ -1234,6 +1252,178 @@ def make_vpn_probe_forwarding_fixup(settings: Settings) -> Fixup:
         needed=_vpn_check_needed,
         check=_probe_forwarding_check,
         apply=_probe_forwarding_apply,
+    )
+
+
+# --- vpn_check: forward/NAT пробника переживает ребут (systemd, 2026-08-24) ---
+#
+# Живой инцидент 2026-08-24: alfred потерял питание, после старта
+# ``vpn-check-probe-tunnel`` поднялся сам (его юнит переигрывает
+# netns+veth+awg-quick при каждой загрузке, см. ``vpn_probe_unit_content``),
+# а ``vpn-check-probe-forwarding`` — нет: ``nodectl fix`` кладёт nft-правила
+# ПРЯМО В ЖИВОЙ ruleset интерактивным sudo и никуда их не сохраняет, а ядро
+# ruleset между перезагрузками не хранит. После ребута форвардинг снова
+# отсутствовал, помогло только повторное ручное ``nodectl fix``.
+#
+# Фикс — тот же приём, что уже применён для туннеля: systemd-юнит, который
+# сам (от root, без пароля — не interactive sudo) переигрывает нужные
+# nft-правила при каждом старте. Family/table/chain берутся ИЗ ТОГО ЖЕ
+# ``_resolve_probe_forward_targets()``, каким пользуется живой apply() —
+# на jeeves это переиспользование уже существующих цепочек firewall,
+# на alfred — собственная маленькая таблица ``VPN_PROBE_NFT_TABLE``.
+# Идемпотентность каждого шага — через ``grep -qF`` по ``nft list`` (голый
+# повторный ``nft insert rule`` иначе плодил бы дубликаты при каждом
+# рестарте юнита, не только при чистом буте).
+
+VPN_PROBE_FORWARD_SCRIPT_PATH = Path("/usr/local/lib/sa-home-bot/vpn-probe-forward-reapply.sh")
+VPN_PROBE_FORWARD_UNIT_FILE = Path("/etc/systemd/system/sa-home-vpn-probe-forward.service")
+
+
+def _vpn_probe_forward_script_content(
+    forward_target: tuple[str, str, str], nat_target: tuple[str, str, str]
+) -> str:
+    ff, ft, fc = forward_target
+    nf, nt, nc = nat_target
+    lines = [
+        "#!/bin/sh",
+        "# sa-home-bot: сгенерировано nodectl fix — не редактировать руками,",
+        "# перезапишется при следующем nodectl fix.",
+        "set -e",
+    ]
+
+    def ensure_chain(family: str, table: str, chain: str, chain_def: str) -> None:
+        # Свою таблицу могли не найти после чистого бута (она тоже не
+        # переживает ребут) — досоздаём её тем же способом, каким её завёл
+        # бы ``_resolve_probe_forward_targets()``. Чужие таблицы (найденные
+        # уже существующими на момент ``nodectl fix``, напр. firewall
+        # jeeves) не трогаем — их персистентность не в ведении этого фикса.
+        if table != VPN_PROBE_NFT_TABLE:
+            return
+        lines.append(
+            f"nft list table {family} {table} >/dev/null 2>&1 || {{ "
+            f"nft add table {family} {table}; "
+            f"nft add chain {family} {table} {chain} '{chain_def}'; }}"
+        )
+
+    ensure_chain(ff, ft, fc, "{ type filter hook forward priority filter ; policy accept ; }")
+    ensure_chain(nf, nt, nc, "{ type nat hook postrouting priority srcnat ; policy accept ; }")
+
+    def ensure_rule(family: str, table: str, chain: str, match: str, rule: str) -> None:
+        lines.append(
+            f"nft list chain {family} {table} {chain} 2>/dev/null | grep -qF '{match}' || "
+            f"nft insert rule {family} {table} {chain} {rule}"
+        )
+
+    ensure_rule(
+        ff, ft, fc,
+        f'iifname "{VPN_PROBE_VETH_HOST}" accept',
+        f"iifname {VPN_PROBE_VETH_HOST} accept",
+    )
+    ensure_rule(
+        ff, ft, fc,
+        f'oifname "{VPN_PROBE_VETH_HOST}" accept',
+        f"oifname {VPN_PROBE_VETH_HOST} accept",
+    )
+    ensure_rule(
+        nf, nt, nc,
+        f"ip saddr {VPN_PROBE_VETH_SUBNET} masquerade",
+        f"ip saddr {VPN_PROBE_VETH_SUBNET} masquerade",
+    )
+
+    return "\n".join(lines) + "\n"
+
+
+def vpn_probe_forward_unit_content(script_path: Path) -> str:
+    return (
+        "[Unit]\n"
+        "Description=sa-home-bot: forward/NAT для veth-пары VPN-пробника "
+        "(переживает ребут)\n"
+        f"After=network-online.target {VPN_PROBE_UNIT_FILE.name}\n"
+        "Wants=network-online.target\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "RemainAfterExit=yes\n"
+        f"ExecStart=/bin/sh {script_path}\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+
+
+def _vpn_probe_forwarding_persist_check() -> bool:
+    if not (
+        _privileged_exists(VPN_PROBE_FORWARD_SCRIPT_PATH)
+        and _privileged_exists(VPN_PROBE_FORWARD_UNIT_FILE)
+    ):
+        return False
+    # Сверяем содержимое юнита, не только факт существования файла — тот же
+    # инвариант, что у ``_vpn_probe_tunnel_check`` (см. комментарий там):
+    # застрявший старый юнит технически active со старым содержимым check
+    # по одному is-active счёл бы «уже применённым».
+    expected_unit = vpn_probe_forward_unit_content(VPN_PROBE_FORWARD_SCRIPT_PATH)
+    try:
+        current_unit = _read_privileged(VPN_PROBE_FORWARD_UNIT_FILE)
+    except FixupError:
+        return False
+    if current_unit != expected_unit:
+        return False
+    return (
+        subprocess.run(
+            ["systemctl", "is-active", "--quiet", VPN_PROBE_FORWARD_UNIT_FILE.name]
+        ).returncode
+        == 0
+    )
+
+
+def _vpn_probe_forwarding_persist_apply() -> None:
+    _ensure_ip_forward()
+    forward_target, nat_target = _resolve_probe_forward_targets()
+    script_content = _vpn_probe_forward_script_content(forward_target, nat_target)
+
+    current_script = (
+        _read_privileged(VPN_PROBE_FORWARD_SCRIPT_PATH)
+        if _privileged_exists(VPN_PROBE_FORWARD_SCRIPT_PATH)
+        else None
+    )
+    if current_script != script_content:
+        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as tmp:
+            tmp.write(script_content)
+            tmp_path = Path(tmp.name)
+        try:
+            _sudo(["install", "-D", "-m", "0755", "-o", "root", "-g", "root",
+                   str(tmp_path), str(VPN_PROBE_FORWARD_SCRIPT_PATH)])
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    unit_content = vpn_probe_forward_unit_content(VPN_PROBE_FORWARD_SCRIPT_PATH)
+    current_unit = (
+        _read_privileged(VPN_PROBE_FORWARD_UNIT_FILE)
+        if _privileged_exists(VPN_PROBE_FORWARD_UNIT_FILE)
+        else None
+    )
+    if current_unit != unit_content:
+        if current_unit is not None:
+            _sudo(["systemctl", "stop", VPN_PROBE_FORWARD_UNIT_FILE.name])
+        with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as tmp:
+            tmp.write(unit_content)
+            tmp_path = Path(tmp.name)
+        try:
+            _sudo(["install", "-m", "0644", "-o", "root", "-g", "root",
+                   str(tmp_path), str(VPN_PROBE_FORWARD_UNIT_FILE)])
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        _sudo(["systemctl", "daemon-reload"])
+    _sudo(["systemctl", "enable", "--now", VPN_PROBE_FORWARD_UNIT_FILE.name])
+
+
+def make_vpn_probe_forwarding_persist_fixup(settings: Settings) -> Fixup:
+    return Fixup(
+        id="vpn-check-probe-forwarding-persist",
+        title="Пережить перезагрузку: nft forward/NAT пробника переигрываются systemd-юнитом",
+        needed=_vpn_check_needed,
+        check=_vpn_probe_forwarding_persist_check,
+        apply=_vpn_probe_forwarding_persist_apply,
     )
 
 
@@ -1568,6 +1758,7 @@ def build_fixups(settings: Settings) -> list[Fixup]:
         WOL_ENABLE,
         make_awg_sudoers_fixup(settings),
         make_vpn_probe_forwarding_fixup(settings),
+        make_vpn_probe_forwarding_persist_fixup(settings),
         make_vpn_probe_tunnel_fixup(settings),
         make_vpn_probe_sudoers_fixup(settings),
         make_proxy_units_fixup(settings),

@@ -19,6 +19,7 @@ from sa_home_bot.node.fixups import (
     make_apps_unit_fixup,
     make_awg_sudoers_fixup,
     make_vpn_probe_forwarding_fixup,
+    make_vpn_probe_forwarding_persist_fixup,
     make_vpn_probe_sudoers_fixup,
     make_vpn_probe_tunnel_fixup,
     microsocks_unit_content,
@@ -28,6 +29,7 @@ from sa_home_bot.node.fixups import (
     rewrite_unit_path_line,
     smartctl_sudoers_content,
     smartctl_wrapper_content,
+    vpn_probe_forward_unit_content,
     vpn_probe_sudoers_content,
     vpn_probe_unit_content,
     wol_unit_content,
@@ -359,13 +361,20 @@ def test_vpn_probe_sudoers_shares_needed_with_tunnel():
 
 def test_build_fixups_includes_vpn_probe_fixups_when_vpn_check_assigned():
     ids = {f.id for f in build_fixups(_settings(["vpn_check"]))}
-    assert {"vpn-check-probe-tunnel", "vpn-check-probe-sudoers"} <= ids
+    assert {
+        "vpn-check-probe-tunnel",
+        "vpn-check-probe-sudoers",
+        "vpn-check-probe-forwarding",
+        "vpn-check-probe-forwarding-persist",
+    } <= ids
 
 
 def test_build_fixups_excludes_vpn_probe_fixups_without_vpn_check():
     ids = {f.id for f in build_fixups(_settings(["vpn"]))}
     assert "vpn-check-probe-tunnel" not in ids
     assert "vpn-check-probe-sudoers" not in ids
+    assert "vpn-check-probe-forwarding" not in ids
+    assert "vpn-check-probe-forwarding-persist" not in ids
 
 
 def test_vpn_probe_tunnel_check_false_when_unit_content_is_stale(monkeypatch):
@@ -560,6 +569,94 @@ def test_probe_forwarding_apply_skips_install_when_nft_present(monkeypatch):
     monkeypatch.setattr(fixups_module, "_find_base_chain", lambda hook, kind: None)
     fixups_module._probe_forwarding_apply()
     assert all("apt-get" not in call for call in sudo_calls)
+
+
+def test_vpn_probe_forwarding_persist_needed_same_as_tunnel():
+    settings = _settings(["vpn_check"])
+    persist = make_vpn_probe_forwarding_persist_fixup(settings)
+    tunnel = make_vpn_probe_tunnel_fixup(settings)
+    assert persist.needed(settings) == tunnel.needed(settings)
+
+
+def test_forward_script_content_creates_own_table_when_missing(monkeypatch):
+    """На alfred форвардинг-фикс заводит СВОЮ таблицу ``sa_vpn_probe``, если
+    подходящей чужой не нашлось — эта таблица тоже не переживает ребут,
+    поэтому скрипт обязан уметь досоздать её саму, не только правила."""
+    forward_target = ("inet", fixups_module.VPN_PROBE_NFT_TABLE, "forward")
+    nat_target = ("ip", fixups_module.VPN_PROBE_NFT_TABLE, "postrouting")
+    content = fixups_module._vpn_probe_forward_script_content(forward_target, nat_target)
+    assert content.startswith("#!/bin/sh\n")
+    assert "set -e" in content
+    assert f"nft list table inet {fixups_module.VPN_PROBE_NFT_TABLE}" in content
+    assert "type filter hook forward" in content
+    assert f"nft list table ip {fixups_module.VPN_PROBE_NFT_TABLE}" in content
+    assert "type nat hook postrouting" in content
+    assert 'iifname "vprobe-veth0" accept' in content
+    assert 'oifname "vprobe-veth0" accept' in content
+    assert "ip saddr 10.200.200.0/30 masquerade" in content
+
+
+def test_forward_script_content_skips_table_creation_for_foreign_chain():
+    """На jeeves форвардинг-фикс переиспользует уже существующие цепочки
+    firewall (не наши) — скрипт не должен пытаться их пересоздавать, только
+    idempotent-добавлять в них правила."""
+    forward_target = ("inet", "filter", "forward")
+    nat_target = ("ip", "nat", "postrouting")
+    content = fixups_module._vpn_probe_forward_script_content(forward_target, nat_target)
+    assert "nft list table" not in content
+    assert "nft add table" not in content
+    assert "nft list chain inet filter forward" in content
+    assert "nft list chain ip nat postrouting" in content
+
+
+def test_forward_unit_content_runs_after_tunnel_and_executes_script():
+    content = vpn_probe_forward_unit_content(fixups_module.VPN_PROBE_FORWARD_SCRIPT_PATH)
+    assert fixups_module.VPN_PROBE_UNIT_FILE.name in content
+    assert f"ExecStart=/bin/sh {fixups_module.VPN_PROBE_FORWARD_SCRIPT_PATH}\n" in content
+    assert "Type=oneshot" in content
+    assert "RemainAfterExit=yes" in content
+    assert "WantedBy=multi-user.target" in content
+
+
+def test_forwarding_persist_check_false_when_files_missing(monkeypatch):
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: False)
+    assert fixups_module._vpn_probe_forwarding_persist_check() is False
+
+
+def test_forwarding_persist_check_false_when_unit_content_stale(monkeypatch):
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
+    monkeypatch.setattr(fixups_module, "_read_privileged", lambda path: "old content\n")
+    assert fixups_module._vpn_probe_forwarding_persist_check() is False
+
+
+def test_forwarding_persist_check_true_when_matching_and_active(monkeypatch):
+    expected = vpn_probe_forward_unit_content(fixups_module.VPN_PROBE_FORWARD_SCRIPT_PATH)
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
+    monkeypatch.setattr(fixups_module, "_read_privileged", lambda path: expected)
+    monkeypatch.setattr(
+        fixups_module.subprocess,
+        "run",
+        lambda argv, **kwargs: type("R", (), {"returncode": 0})(),
+    )
+    assert fixups_module._vpn_probe_forwarding_persist_check() is True
+
+
+def test_forwarding_persist_apply_reuses_resolved_targets_and_enables_unit(monkeypatch, tmp_path):
+    forward_target = ("inet", "filter", "forward")
+    nat_target = ("ip", "nat", "postrouting")
+    monkeypatch.setattr(fixups_module, "_ensure_ip_forward", lambda: None)
+    monkeypatch.setattr(
+        fixups_module, "_resolve_probe_forward_targets", lambda: (forward_target, nat_target)
+    )
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: False)
+    sudo_calls = []
+    monkeypatch.setattr(fixups_module, "_sudo", lambda argv: sudo_calls.append(argv))
+    fixups_module._vpn_probe_forwarding_persist_apply()
+    assert any(call[:2] == ["install", "-D"] for call in sudo_calls)
+    assert ["systemctl", "daemon-reload"] in sudo_calls
+    assert ["systemctl", "enable", "--now", fixups_module.VPN_PROBE_FORWARD_UNIT_FILE.name] in (
+        sudo_calls
+    )
 
 
 def test_prepare_probe_conf_strips_dns_line():
