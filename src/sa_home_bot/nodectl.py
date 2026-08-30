@@ -345,7 +345,7 @@ async def _llm_probe(client: ProtoClient, dst: Address, timeout: float) -> None:
         )
     else:
         print("Профиль: служба не сообщает (старая версия?)")
-    messages = json.dumps([{"role": "user", "content": "Привет"}], ensure_ascii=False)
+    messages = [{"role": "user", "content": "Привет"}]
     for reason in ("off", "high"):
         started = time.monotonic()
         try:
