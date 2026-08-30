@@ -176,7 +176,7 @@ async def test_chat_passes_explicit_think_through_to_ollama(monkeypatch):
     assert seen["think"] is False
 
 
-async def test_chat_without_think_arg_defers_to_ollama_default(monkeypatch):
+async def test_chat_without_reason_defaults_to_off(monkeypatch):
     seen = {}
 
     async def fake_chat(cfg, messages, system, tools=None, think=None):
@@ -184,9 +184,36 @@ async def test_chat_without_think_arg_defers_to_ollama_default(monkeypatch):
         return {"message": {"content": "ответ"}}
 
     monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
-    svc = LlmService(_settings())
+    svc = LlmService(_settings())  # qwen2.5:7b → профиль _default (think_control=flag)
     await svc.run_command("chat", {"messages": [{"role": "user", "content": "1"}]})
-    assert seen["think"] is None  # ollama.chat сам подставит cfg.think_chat
+    assert seen["think"] is False  # нет намерения → быстрый проход
+
+
+async def test_chat_reason_level_translated_via_profile(monkeypatch):
+    seen = {}
+
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
+        seen["think"] = think
+        return {"message": {"content": "ответ"}}
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    svc = LlmService(_settings())  # _default: think_control=flag → любой уровень >0 = True
+    await svc.run_command(
+        "chat", {"messages": [{"role": "user", "content": "1"}], "reason": "medium"}
+    )
+    assert seen["think"] is True
+    await svc.run_command(
+        "chat", {"messages": [{"role": "user", "content": "1"}], "reason": "off"}
+    )
+    assert seen["think"] is False
+
+
+async def test_describe_carries_model_profile_summary():
+    svc = LlmService(_settings())
+    desc = svc.describe()
+    assert desc.model_profile is not None
+    assert desc.model_profile["router"] is True
+    assert "num_ctx" in desc.model_profile
 
 
 async def test_chat_rejects_non_bool_think():

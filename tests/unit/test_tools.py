@@ -934,44 +934,39 @@ async def test_remind_after_event_works_without_store():
     assert args["await_event"] == {"node": "arch-t480", "event_type": "restart_applied"}
 
 
-async def test_remind_omits_think_for_single_call_mode(store):
-    # Живой баг 2026-08-05: think=True слепо шёл в задачу даже когда модель
-    # (mode="single_call", напр. Gemma без thinking) падала на нём 400
-    # "does not support thinking". Для single_call think не передаём вовсе.
+async def test_remind_sends_reason_not_think(store):
+    # С v0.97.0 напоминание кладёт в задачу намерение-уровень reason
+    # (перевод в параметр Ollama — профиль модели на стороне службы llm),
+    # а не булев think — отсюда и ушли прежние баги с 400 на gemma.
     link = _FakeNodeLink()
     when = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
-    settings = Settings(llm=LlmConfig(mode="single_call"))
+    settings = Settings(llm=LlmConfig(think_chat=True))
     await tools.tool_remind(
         _ctx(store, settings=settings, node_link=link), {"when": when, "text": "x"}
     )
-    assert link.calls[0][1]["args"]["think"] is None
+    args = link.calls[0][1]["args"]
+    assert args["reason"] == "high"
+    assert "think" not in args
 
 
-async def test_remind_keeps_explicit_think_for_router_think_mode(store):
+async def test_remind_reason_off_when_think_chat_disabled(store):
     link = _FakeNodeLink()
     when = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
-    settings = Settings(llm=LlmConfig(mode="router_think", think_chat=True))
+    settings = Settings(llm=LlmConfig(think_chat=False))
     await tools.tool_remind(
         _ctx(store, settings=settings, node_link=link), {"when": when, "text": "x"}
     )
-    assert link.calls[0][1]["args"]["think"] is True
+    assert link.calls[0][1]["args"]["reason"] == "off"
 
 
-async def test_remind_omits_think_for_implicit_style(store):
-    # Живой баг 2026-08-10: на срабатывании напоминания думать-стиль
-    # "implicit" (gemma-4 на mycraft — 400 на явный think=true) не
-    # учитывался вовсе, сюда по-прежнему уходил голый think_chat=True —
-    # напоминание падало с той же ошибкой 400, которую think_style должен
-    # был устранить (пофикшено было только в bot/ai_flow.py, не здесь).
+async def test_remind_reason_off_for_single_call_think_false(store):
     link = _FakeNodeLink()
     when = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
-    settings = Settings(
-        llm=LlmConfig(mode="router_think", think_chat=True, think_style="implicit")
-    )
+    settings = Settings(llm=LlmConfig(mode="single_call", single_call_think=False))
     await tools.tool_remind(
         _ctx(store, settings=settings, node_link=link), {"when": when, "text": "x"}
     )
-    assert link.calls[0][1]["args"]["think"] is None
+    assert link.calls[0][1]["args"]["reason"] == "off"
 
 
 async def test_remind_when_still_works_without_after_event(store):

@@ -416,7 +416,7 @@ async def chat(
     messages: list[dict[str, Any]],
     system: str,
     tools: list[dict[str, Any]] | None = None,
-    think: bool | None = None,
+    think: bool | str | None = None,
 ) -> dict[str, Any]:
     full_messages = [{"role": "system", "content": system}, *messages]
     payload: dict[str, Any] = {
@@ -425,16 +425,12 @@ async def chat(
         "stream": False,
         **_keep_alive_options(cfg),
     }
-    # think=None — не отправлять ключ "think" вообще, а не подставлять
-    # свой дефолт (было cfg.think_chat). Живая находка 2026-07-25: на
-    # qwen3.5/3.6 (новый renderer/parser, см. llm/prompt.py) принудительный
-    # think=false на персонажном проходе давал галлюцинации (несуществующие
-    # даты, проигнорированный верный результат тула) — решение пользователя:
-    # раз у этих моделей есть собственная адаптивная логика "думать/не
-    # думать", не мешать ей явным флагом, когда роутер сам не настаивает на
-    # think=true. Роутер по-прежнему передаёт think=false ЯВНО (ему нужна
-    # гарантированная скорость, не адаптивность) — это единственный
-    # оставшийся потребитель именно False.
+    # think: bool | str | None. None — ключ не отправлять вовсе (не то же, что
+    # False: у моделей вроде gemma-4 явный False глушит скрытое рассуждение, а
+    # отсутствие флага — нет). Строка ("low"/"medium"/"high") — уровень
+    # reasoning для effort-моделей (gpt-oss и т.п.). Чем выразить намерение
+    # для конкретной модели решает её профиль (llm/model_profiles.py), сюда
+    # приходит уже готовое значение.
     if think is not None:
         payload["think"] = think
     if tools:
@@ -448,7 +444,7 @@ async def chat_stream(
     system: str,
     on_chunk: Callable[[str], None],
     tools: list[dict[str, Any]] | None = None,
-    think: bool | None = None,
+    think: bool | str | None = None,
 ) -> dict[str, Any]:
     """Как chat(), но потоково (этап 34, Фаза 2 — Rich-стрим ответов).
 

@@ -401,15 +401,14 @@ async def test_fire_now_fires_pending_task_before_due_at(store, monkeypatch):
     assert await store.due_tasks(datetime.now(tz=UTC)) == []
 
 
-async def test_fire_chat_loop_passes_think_none_through_json_roundtrip(store, monkeypatch):
-    # Живой баг 2026-08-05: bool(task_args.get("think", True)) давил
-    # think=None (mode="single_call", модель без thinking) в явный False —
-    # Ollama падала 400 "does not support thinking" на любом присутствии
-    # ключа, не только на true. think должен пройти JSON-круг как None.
+async def test_fire_chat_loop_passes_reason_from_task_args(store, monkeypatch):
+    # С v0.97.0 задача хранит намерение-уровень reason (перевод в параметр
+    # Ollama — профиль модели на стороне службы llm). Оно должно пройти
+    # JSON-круг и доехать до run_chat_loop как есть.
     captured: dict = {}
 
-    async def fake_chat_loop(*args, think=None, **kwargs):
-        captured["think"] = think
+    async def fake_chat_loop(node_link, dst, timeout, messages, tool_ctx, reason, **kwargs):
+        captured["reason"] = reason
         return "готово"
 
     monkeypatch.setattr(tasks_service, "run_chat_loop", fake_chat_loop)
@@ -418,11 +417,33 @@ async def test_fire_chat_loop_passes_think_none_through_json_roundtrip(store, mo
 
     row = _chat_row()
     row["args_json"] = json.dumps(
-        {"messages": [{"role": "user", "content": "блины"}], "think": None}
+        {"messages": [{"role": "user", "content": "блины"}], "reason": "off"}
     )
     await svc._fire_one(row)
 
-    assert captured["think"] is None
+    assert captured["reason"] == "off"
+
+
+async def test_fire_chat_loop_maps_legacy_think_to_reason(store, monkeypatch):
+    # Задачи, сохранённые до v0.97.0, несут булев think — маппим для
+    # совместимости: False → "off", всё прочее → "high".
+    captured: dict = {}
+
+    async def fake_chat_loop(node_link, dst, timeout, messages, tool_ctx, reason, **kwargs):
+        captured["reason"] = reason
+        return "готово"
+
+    monkeypatch.setattr(tasks_service, "run_chat_loop", fake_chat_loop)
+    link = FakeNodeLink(OWN_STATE, routes={"winpc:llm": {"asleep": False}})
+    svc = _service(store, link, FakeEmitter())
+
+    row = _chat_row()
+    row["args_json"] = json.dumps(
+        {"messages": [{"role": "user", "content": "блины"}], "think": False}
+    )
+    await svc._fire_one(row)
+
+    assert captured["reason"] == "off"
 
 
 async def test_fire_chat_loop_retries_transient_unavailable_then_succeeds(store, monkeypatch):
@@ -518,21 +539,21 @@ async def test_fire_chat_loop_retries_on_unavailable_proto_error_code(store, mon
     assert emitter.results()[0]["ok"] is True
 
 
-async def test_fire_chat_loop_coerces_truthy_think_to_bool(store, monkeypatch):
+async def test_fire_chat_loop_defaults_reason_high_when_task_args_bare(store, monkeypatch):
     captured: dict = {}
 
-    async def fake_chat_loop(*args, think=None, **kwargs):
-        captured["think"] = think
+    async def fake_chat_loop(node_link, dst, timeout, messages, tool_ctx, reason, **kwargs):
+        captured["reason"] = reason
         return "готово"
 
     monkeypatch.setattr(tasks_service, "run_chat_loop", fake_chat_loop)
     link = FakeNodeLink(OWN_STATE, routes={"winpc:llm": {"asleep": False}})
     svc = _service(store, link, FakeEmitter())
 
-    row = _chat_row()  # args_json без "think" — дефолт True
+    row = _chat_row()  # args_json без reason/think — дефолт "high"
     await svc._fire_one(row)
 
-    assert captured["think"] is True
+    assert captured["reason"] == "high"
 
 
 async def test_fire_now_on_unknown_task_reports_not_fired(store):

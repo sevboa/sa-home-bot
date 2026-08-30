@@ -80,7 +80,7 @@ async def test_on_tool_start_fires_before_handler_and_on_tool_call_after():
         5.0,
         [],
         _ctx(),
-        think=None,
+        reason="off",
         telegram_chat_id=None,
         log_chat_id="test",
         on_tool_call=on_call,
@@ -110,7 +110,7 @@ async def test_on_tool_start_not_called_for_unknown_tool():
         5.0,
         [],
         _ctx(),
-        think=None,
+        reason="off",
         telegram_chat_id=None,
         log_chat_id="test",
         on_tool_start=on_start,
@@ -131,7 +131,7 @@ async def test_on_tool_start_none_is_backward_compatible():
     )
 
     result = await llm_chat.run_chat_loop(
-        link, DST, 5.0, [], _ctx(), think=None, telegram_chat_id=None, log_chat_id="test"
+        link, DST, 5.0, [], _ctx(), reason="off", telegram_chat_id=None, log_chat_id="test"
     )
 
     assert result == "финальный ответ"

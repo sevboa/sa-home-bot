@@ -64,6 +64,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from datetime import UTC, date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -81,9 +82,14 @@ from sa_home_bot.bot.notifier import (  # noqa: F401 — реэкспорт, с�
 from sa_home_bot.bot.rich_stream import RichStreamSession
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.tool_debug import ToolCalls
-from sa_home_bot.config import PersonConfig, Settings, resolve_think
+from sa_home_bot.config import PersonConfig, Settings
 from sa_home_bot.db.store import Store
-from sa_home_bot.llm.prompt import ROUTE_OK, THINK_MARKER
+from sa_home_bot.llm.model_profiles import REASON_LEVELS, ModelProfileSummary
+from sa_home_bot.llm.prompt import (
+    ROUTE_OK,  # noqa: F401  — реэкспорт для тестов и обратной совместимости
+    THINK_MARKER,  # noqa: F401
+    parse_router_level,
+)
 from sa_home_bot.llm_chat import run_chat_loop
 from sa_home_bot.memory import protocol as memory_protocol
 from sa_home_bot.proto.messages import (
@@ -224,6 +230,43 @@ WAKE_POLL_TIMEOUT_S = wake_core.WAKE_POLL_TIMEOUT_S
 WAKE_POLL_INTERVAL_S = wake_core.WAKE_POLL_INTERVAL_S
 _PRESENCE_CHECK_TIMEOUT_S = wake_core.PRESENCE_TIMEOUT_S
 
+# Профиль модели, объявляемый службой llm через describe() — боту от него
+# нужно ровно одно: нужен ли двухпроходный router-триаж (router=False →
+# один персонажный проход сразу). Кэш на 5 минут: describe — сетевой вызов
+# к чужой ноде, а профиль меняется только при рестарте службы llm.
+_PROFILE_TTL_S = 300.0
+_profile_cache: dict[str, tuple[float, ModelProfileSummary | None]] = {}
+
+
+async def _llm_profile(node_link: ServiceLink, dst: Address) -> ModelProfileSummary | None:
+    key = f"{dst.node}/{dst.service}"
+    now = time.monotonic()
+    hit = _profile_cache.get(key)
+    if hit is not None and now - hit[0] < _PROFILE_TTL_S:
+        return hit[1]
+    summary: ModelProfileSummary | None = None
+    try:
+        desc = await node_link.describe(dst)
+        if desc is not None and desc.model_profile:
+            summary = ModelProfileSummary.from_payload(desc.model_profile)
+    except (TimeoutError, ServiceUnavailableError, ProtoError, OSError):
+        summary = None
+    _profile_cache[key] = (now, summary)
+    return summary
+
+
+async def _use_router(settings: Settings, node_link: ServiceLink, dst: Address) -> bool:
+    """Двухпроходный router-триаж? Явный ``[llm].mode`` в config.toml
+    побеждает (legacy-override); иначе решает профиль модели (describe);
+    без профиля — прежний дефолт (router_think)."""
+    if "mode" in settings.llm.model_fields_set:
+        return settings.llm.mode == "router_think"
+    profile = await _llm_profile(node_link, dst)
+    if profile is not None:
+        return profile.router
+    return True
+
+
 # Вариативное рассуждение (LLM_INTEGRATION_PLAN.md §7, живая находка
 # 2026-07-24): включать think=true на КАЖДЫЙ запрос надёжно для расчётов,
 # но раздувает даже "привет" до 30-40с. Вместо этого — сначала лёгкий
@@ -244,12 +287,12 @@ _PRESENCE_CHECK_TIMEOUT_S = wake_core.PRESENCE_TIMEOUT_S
 # самой задачи классификации. Дороже (гарантированный второй вызов модели
 # на КАЖДОЕ сообщение, не только на сложные — явное решение пользователя,
 # готового к этому ради надёжности), но проверено дешевле, чем always-on
-# think=true (роутер сам всегда think=false и с коротким ответом).
+# think=true (роутер сам всегда reason="off" и с коротким ответом).
 #
-# THINK_MARKER/ROUTE_OK (использованы ниже) живут в llm/prompt.py (не
-# здесь, см. импорт в шапке файла) — это часть протокола между текстом
-# ROUTER_SYSTEM_PROMPT и сравнением ниже, уместнее рядом с промптом,
-# который их порождает.
+# Роутер оценивает вопрос по шкале 0..3 (llm/prompt.py::parse_router_level,
+# ROUTER_SYSTEM_PROMPT) — не бинарно. Уровень → намерение reason
+# (REASON_LEVELS), а его перевод в параметр модели делает профиль на стороне
+# службы llm (llm/model_profiles.py).
 
 # Показывается перед персонажным проходом, если роутер попросил think —
 # пользователь явно попросил лаконичную реплику в духе персонажа, не
@@ -927,23 +970,20 @@ async def request_alfred(
             async with _typing_while_asking(message):
                 return await run_chat_loop(*args, **kwargs)
 
-        if settings.llm.mode == "single_call":
-            # Режимы работы с моделью — LlmConfig.mode (config.py). Роутеру
-            # нечего решать, если у модели выбор "думать/не думать" всё равно
-            # недоступен — один персонажный проход сразу.
-            #
-            # think берём из настройки, а не зашиваем None: живая находка
-            # 2026-08-10 — «не слать флаг» у gemma-4 означает «думать над
-            # каждым приветствием» (222 токена на пять слов ответа, 23 с в
-            # проде), и лечится это ровно явным think=false. Подробности и
-            # цифры — LlmConfig.single_call_think.
+        if not await _use_router(settings, node_link, dst):
+            # Роутеру нечего решать, если у модели выбора «думать/не думать»
+            # всё равно нет (profile.router=False) — один персонажный проход
+            # сразу. Уровень рассуждения — из legacy-настройки single_call_think
+            # (False → off, иначе high); перевод в параметр Ollama делает
+            # профиль модели на стороне службы llm.
+            single_reason = "high" if settings.llm.single_call_think else "off"
             return await _generate(
                 node_link,
                 dst,
                 timeout,
                 list(base_messages),
                 tool_ctx,
-                think=settings.llm.single_call_think,
+                single_reason,
                 telegram_chat_id=telegram_chat_id,
                 log_chat_id=chat_id,
                 on_tool_call=_record_tool_call,
@@ -953,12 +993,11 @@ async def request_alfred(
                 photo_key=photo_key,
             )
 
-        # Вариативное рассуждение (см. комментарий выше про THINK_MARKER):
-        # сначала лёгкий router-проход (без персонажа, ROUTER_SYSTEM_PROMPT),
-        # который решает think и/или вызывает нужный тул — router_messages
-        # мутируется run_chat_loop (дописываются tool_calls/результаты) и
-        # этот же список идёт дальше в персонажный проход, чтобы Альфред
-        # видел, что именно вернул тул, а не гадал заново.
+        # Вариативное рассуждение: сначала лёгкий router-проход (без персонажа,
+        # ROUTER_SYSTEM_PROMPT), который оценивает вопрос по шкале 0..3 и/или
+        # вызывает нужный тул — router_messages мутируется run_chat_loop
+        # (дописываются tool_calls/результаты) и этот же список идёт дальше в
+        # персонажный проход, чтобы Альфред видел, что вернул тул.
         router_messages = list(base_messages)
         route_decision = await run_chat_loop(
             node_link,
@@ -966,7 +1005,7 @@ async def request_alfred(
             timeout,
             router_messages,
             tool_ctx,
-            think=False,
+            "off",
             telegram_chat_id=telegram_chat_id,
             log_chat_id=chat_id,
             on_tool_call=_record_tool_call,
@@ -974,45 +1013,29 @@ async def request_alfred(
             role="router",
             photo_key=photo_key,
         )
-        needs_think = THINK_MARKER in route_decision
-        log.info(
-            "ai_flow: router -> %s (chat=%s)",
-            THINK_MARKER if needs_think else ROUTE_OK,
-            chat_id,
-        )
+        level = parse_router_level(route_decision)
+        needs_think = level >= 1
+        log.info("ai_flow: router -> THINK:%d (chat=%s)", level, chat_id)
 
         if needs_think:
             if rich_session is not None:
                 await rich_session.push_status(THINKING_TEXT_PLAIN)
             else:
                 await message.answer(THINKING_TEXT)
-        # Чем выражается «надо думать» — config.resolve_think/LlmConfig.
-        # think_style. Общая функция, не вручную здесь: живая находка
-        # 2026-08-10 — та же логика, списанная вручную и в bot/tools.py
-        # (срабатывание напоминания), при заведении think_style была
-        # поправлена только тут, и напоминания продолжили слать явный
-        # true, ловя тот же 400 на моделях со style="implicit".
-        persona_think = resolve_think(settings.llm, needs_think=needs_think)
-        # Живая находка 2026-07-25 (полный круг): сначала думали, что
-        # think=None ("не слать флаг вообще") даст qwen3.5/3.6 самим решать
-        # адаптивно — оказалось, без явного флага модель генерирует от 2 до
-        # 1400+ невидимых токенов "размышления" совершенно непредсказуемо
-        # (подтверждено логами Ollama на живых запросах). Отдельно
-        # выяснилось, что настоящая причина прежних галлюцинаций была не в
-        # think вовсе, а в нехватке памяти WSL2 (своп при инференсе, см.
-        # память winpc-wsl-docker-instability) — почин. Прямой тест
-        # ``think: false`` на исправленной среде подтвердил: параметр
-        # РЕАЛЬНО работает (ответ без единого токена thinking) — решение
-        # пользователя: вернуть явный булев think, как и было, роутер
-        # решает за персонажа предсказуемо, а не полагаться на то, умеет
-        # ли рендерер сам решать.
+        # Уровень едет в персонажный проход намерением-строкой; как он станет
+        # параметром Ollama (булев тумблер / reasoning-уровень / отсутствие
+        # флага) — решает профиль модели на стороне службы llm
+        # (llm/model_profiles.py). Раньше эта развилка была списана вручную
+        # тут и в bot/tools.py и регулярно разъезжалась (живая находка
+        # 2026-08-10 про think_style).
+        persona_reason = REASON_LEVELS[level]
         return await _generate(
             node_link,
             dst,
             timeout,
             router_messages,
             tool_ctx,
-            think=persona_think,
+            persona_reason,
             telegram_chat_id=telegram_chat_id,
             log_chat_id=chat_id,
             on_tool_call=_record_tool_call,

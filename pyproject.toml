@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sa-home-bot"
-version = "0.96.1"
+version = "0.97.0"
 description = "Рой домашних машин: нода-супервизор, службы (мониторинг, приложения) и Telegram-бот"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -76,7 +76,7 @@ nodectl = "sa_home_bot.nodectl:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-sa_home_bot = ["db/schema.sql"]
+sa_home_bot = ["db/schema.sql", "llm/model-profiles.toml"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

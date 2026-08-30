@@ -120,7 +120,7 @@ async def run_chat_loop(
     timeout: float,
     messages: list[dict[str, Any]],
     tool_ctx: ai_tools.ToolContext,
-    think: bool | None,
+    reason: str,
     telegram_chat_id: int | None,
     log_chat_id: Any,
     on_tool_call: ToolCallSink | None = None,
@@ -150,11 +150,12 @@ async def run_chat_loop(
     персонажа (живая находка 2026-07-25: см. llm/prompt.py::
     ROUTER_SYSTEM_PROMPT про то, почему триаж выделен в отдельный вызов).
 
-    ``think=None`` — не слать поле think вообще (живая находка 2026-07-25,
-    решение пользователя): на qwen3.5/3.6 принудительный think=false
-    ломал качество ответа (несуществующие даты, проигнорированный верный
-    результат тула) — у этих моделей своя адаптивная логика "думать/не
-    думать", не мешать ей явным флагом. См. llm/ollama.py::chat().
+    ``reason`` — намерение-уровень рассуждения: ``off`` / ``low`` / ``medium``
+    / ``high`` (индекс = уровень, который выдал router-проход, см.
+    llm/prompt.py::parse_router_level). Как этот уровень превратится в
+    конкретный параметр Ollama — решает профиль модели на стороне службы llm
+    (llm/model_profiles.py), сюда знание про механизм не течёт. Router-проход
+    всегда шлёт ``off``.
 
     ``on_partial`` — этап 34, Фаза 2 (Rich-стрим ответов): не передан —
     поведение не меняется вовсе (обычный блокирующий command(), так вызывает
@@ -182,9 +183,7 @@ async def run_chat_loop(
     toolkit = ai_tools.tools_for(tool_ctx.subscription)
 
     def _chat_args(tools: list[dict[str, Any]]) -> dict[str, Any]:
-        args: dict[str, Any] = {"messages": messages, "tools": tools}
-        if think is not None:
-            args["think"] = think
+        args: dict[str, Any] = {"messages": messages, "tools": tools, "reason": reason}
         if telegram_chat_id is not None:
             # chat_id — не для маршрутизации (та по dst), а чтобы служба
             # llm знала, какие чаты уведомлять при llm_idle_sleep.

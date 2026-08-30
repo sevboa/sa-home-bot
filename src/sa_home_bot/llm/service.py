@@ -29,6 +29,7 @@ from typing import Any
 from sa_home_bot import __version__
 from sa_home_bot.config import LlmConfig, Settings
 from sa_home_bot.llm import ollama, stt, tts, vision
+from sa_home_bot.llm.model_profiles import REASON_LEVELS, ModelProfile, load_profiles
 from sa_home_bot.llm.prompt import (
     DEFAULT_PERSONA_PROMPT,
     ROUTER_SYSTEM_PROMPT,
@@ -209,6 +210,25 @@ class LlmService:
                 "settings.llm.persona_prompt пуст — используется безликая заглушка "
                 "DEFAULT_PERSONA_PROMPT вместо характера персонажа"
             )
+        # Профиль модели — контракт рассуждения, подключаемый вместе с моделью
+        # (llm/model_profiles.py). Резолвится один раз по имени модели.
+        registry = load_profiles(self._cfg.model_profiles_path)
+        self._profile: ModelProfile
+        self._profile, matched = registry.resolve(self._cfg.model)
+        # num_ctx: явное значение в config.toml побеждает, иначе — дефолт профиля.
+        if "num_ctx" not in self._cfg.model_fields_set:
+            self._cfg.num_ctx = self._profile.num_ctx
+        (log.warning if not matched else log.info)(
+            "llm: model %s → профиль %s (control=%s, router=%s, num_ctx=%s, "
+            "thinking_hidden=%s)%s",
+            self._cfg.model,
+            self._profile.name,
+            self._profile.think_control,
+            self._profile.router,
+            self._cfg.num_ctx,
+            self._profile.thinking_hidden,
+            "" if matched else " — своего профиля для модели нет, взят _default",
+        )
         self._node = socket.gethostname()
         self._emit = emit
         self._last_activity = datetime.now(tz=UTC)
@@ -261,6 +281,7 @@ class LlmService:
         return ServiceDescription(
             info=ServiceInfo(node=self._node, service=SERVICE_NAME, version=__version__),
             capabilities=(self._cfg.model,),
+            model_profile=self._profile.summary().to_payload(),
             actions=(
                 ActionSpec(
                     id=ACTION_ASK,
@@ -292,10 +313,21 @@ class LlmService:
                             title="Декларации инструментов (tool-calling, план §7)",
                         ),
                         ActionParam(
+                            name="reason",
+                            type="string",
+                            required=False,
+                            title=(
+                                "Уровень рассуждения: off|low|medium|high (выдаёт "
+                                "router-проход). Перевод в параметр Ollama делает "
+                                "профиль модели (llm/model_profiles.py)"
+                            ),
+                            choices=tuple(REASON_LEVELS),
+                        ),
+                        ActionParam(
                             name="think",
                             type="bool",
                             required=False,
-                            title="Режим рассуждения qwen3 (не передан — модель решает сама)",
+                            title="УСТАРЕЛО, используйте reason (True→high, False→off)",
                         ),
                         ActionParam(
                             name="role",
@@ -494,6 +526,22 @@ class LlmService:
             "speech_therapy": self._speech.snapshot(),
         }
 
+    def _think_arg(self, args: dict[str, Any]) -> bool | str | None:
+        """Из args действия chat → значение поля ``think`` запроса к Ollama.
+
+        Приоритет: ``reason`` (off|low|medium|high, новый протокол) → голый
+        ``think`` (устаревший булев: True→high, False→off) → дефолт ``off``
+        (нет намерения — быстрый проход). Перевод уровня в конкретный параметр
+        делает профиль модели (llm/model_profiles.py).
+        """
+        reason = args.get("reason")
+        if not isinstance(reason, str) or reason not in REASON_LEVELS:
+            think = args.get("think")
+            if think is not None and not isinstance(think, bool):
+                raise ProtoError(ERR_BAD_REQUEST, "think должен быть булевым значением")
+            reason = "high" if think is True else "off"
+        return self._profile.think_arg(reason)
+
     async def _touch(self, chat_id: Any = None) -> None:
         self._last_activity = datetime.now(tz=UTC)
         self._asleep = False
@@ -528,12 +576,12 @@ class LlmService:
             if not isinstance(messages, list) or not messages:
                 raise ProtoError(ERR_BAD_REQUEST, "messages должен быть непустым списком")
             tools = args.get("tools") or None
-            think = args.get("think")
-            if think is not None and not isinstance(think, bool):
-                raise ProtoError(ERR_BAD_REQUEST, "think должен быть булевым значением")
             role = args.get("role") or "persona"
             if role not in ("persona", "router"):
                 raise ProtoError(ERR_BAD_REQUEST, f"неизвестная role: {role!r}")
+            # Намерение-уровень рассуждения (off|low|medium|high) от бота, и его
+            # перевод в параметр Ollama `think` через профиль этой модели.
+            think = self._think_arg(args)
             # Общий префикс для обеих ролей (2026-08-10): system[0] всегда
             # персонаж, а служебная инструкция роутера уезжает ПОСЛЕДНИМ
             # системным сообщением в хвост. Раньше роли брали разный
@@ -622,14 +670,14 @@ class LlmService:
             if stored_b64 is None:
                 return {"response": PHOTO_NOT_FOUND_TEXT, "model": self._cfg.model}
             # Без tools (узкий вопрос про изображение не требует рекурсивного
-            # tool-calling) и с явным think=False (см. комментарий про
-            # think_style в config.py — явный True на gemma-4 даёт 400).
+            # tool-calling) и без рассуждения — перевод «off» через профиль
+            # модели (у gemma-4 это явный think=False; явный True даёт 400).
             result = await ollama.chat(
                 self._cfg,
                 [{"role": "user", "content": question, "images": [stored_b64]}],
                 self._persona_prompt,
                 tools=None,
-                think=False,
+                think=self._profile.think_arg("off"),
             )
             _log_ollama_timings("look_at_photo", result)
             message = result.get("message", {})
@@ -781,7 +829,7 @@ class LlmService:
         system: str,
         *,
         tools: list[dict[str, Any]] | None,
-        think: bool | None,
+        think: bool | str | None,
     ) -> dict[str, Any]:
         """Обёртка вокруг ollama.chat_stream: заводит запись в self._streaming
         на время генерации (читает её ACTION_CHAT_PROGRESS), закрывает её

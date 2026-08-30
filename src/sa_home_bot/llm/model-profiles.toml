@@ -1,0 +1,60 @@
+# Профили моделей: контракт рассуждения подключается ВМЕСТЕ с моделью.
+#
+# Разные семейства моделей включают рассуждение по-разному, и раньше это
+# знание приходилось руками разносить по четырём связанным полям [llm] в
+# конфиге БОТА (mode / think_style / single_call_think / think_chat), хотя
+# описывают они модель на другой машине. Теперь достаточно поменять
+# `model = ...` в конфиге ноды со службой llm — нужный профиль подтянется по
+# подстроке из имени модели, а его перевод «уровень рассуждения → параметр
+# Ollama» делает сама служба (llm/model_profiles.py, llm/service.py).
+#
+# Router-проход (llm/prompt.py::ROUTER_SYSTEM_PROMPT) оценивает вопрос по
+# шкале 0..3 → бот шлёт reason = off|low|medium|high → служба переводит его
+# через think_control профиля.
+#
+# think_control:
+#   flag             — think: true / think: false            (обычные модели)
+#   flag_implicit_on — think: false для «не думать», иначе флаг НЕ слать
+#                      (модель думает сама; явный think=true даёт 400 —
+#                       некоторые сборки gemma на Ollama)
+#   effort           — think: "low"|"medium"|"high" как есть, off → think: false
+#                      (gpt-oss, qwen3.8, GLM 5.x — reasoning-level модели)
+#   none             — переключать нечем, флаг не слать никогда
+#
+# router          — нужен ли двухпроходный router-триаж (false → один
+#                   персонажный проход сразу, mode=single_call)
+# num_ctx         — дефолт окна контекста, если в [llm] не задан num_ctx явно
+# thinking_hidden — модель уводит рассуждение в невидимый message.thinking
+#                   (для UX: «задумался», см. bot/ai_flow.py)
+#
+# Первый профиль, чья любая match-подстрока (регистронезависимо) входит в имя
+# модели. Локальный model-profiles.toml рядом с config.toml дополняет/
+# перекрывает этот файл (запись с тем же name заменяет пакетную).
+#
+# Старые семейства (qwen3.5/3.6, legacy qwen3 с /think-токенами) намеренно без
+# профилей — попадут в _default (flag), для них это рабочий вариант.
+
+[[profile]]
+name = "gemma-4"
+match = ["gemma-4", "gemma4"]
+think_control = "flag_implicit_on"
+router = true
+num_ctx = 14336
+thinking_hidden = true
+notes = "явный think=true → HTTP 400; думает без флага; think=false реально глушит (замеры 2026-08-10, mycraft/Tesla V100)"
+
+[[profile]]
+name = "reasoning-effort"
+match = ["gpt-oss", "qwen3.8", "qwen3-next", "glm-5", "glm-4.6"]
+think_control = "effort"
+router = true
+num_ctx = 16384
+notes = "reasoning-level модели: Ollama think принимает строку low/medium/high"
+
+[[profile]]
+name = "_default"
+match = []
+think_control = "flag"
+router = true
+num_ctx = 8192
+notes = "фоллбэк для модели без своего профиля — в лог уходит WARNING"

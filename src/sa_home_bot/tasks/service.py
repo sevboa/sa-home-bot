@@ -552,15 +552,14 @@ class TasksService:
                 protocol.EVENT_TOOL_CALL, {"name": name, "args": call_args, "result": result}
             )
 
-        # Живой баг 2026-08-05: bool(...) на "think" из args_json давило
-        # None ("не слать флаг вообще" — для моделей вроде Gemma без
-        # поддержки thinking, см. bot/ai_flow.py::request_alfred про
-        # mode="single_call") в явный False. Явный False — тоже флаг, и
-        # Ollama на такой модели одинаково падает 400 "does not support
-        # thinking" и на true, и на false — реагировать нужно на САМ факт
-        # присутствия ключа, не на его значение.
-        think_raw = task_args.get("think", True)
-        think = bool(think_raw) if think_raw is not None else None
+        # Уровень рассуждения намерением-строкой (off|low|medium|high); как он
+        # станет параметром Ollama — решает профиль модели на стороне службы
+        # llm (llm/model_profiles.py). Старые задачи в БД могли сохранить
+        # булев "think" (до v0.97.0) — маппим для совместимости.
+        reason = task_args.get("reason")
+        if not isinstance(reason, str):
+            legacy = task_args.get("think", True)
+            reason = "off" if legacy is False else "high"
         # Повтор в рамках того же deadline, что уже отведён на побудку выше
         # (решение пользователя 2026-08-05): "модель недоступна прямо
         # сейчас" — не повод сразу сдаваться честным "не нашли Альфреда",
@@ -575,7 +574,7 @@ class TasksService:
                     row["timeout_s"],
                     messages,
                     tool_ctx,
-                    think=think,
+                    reason,
                     telegram_chat_id=task_args.get("chat_id"),
                     log_chat_id=row["id"],
                     on_tool_call=_emit_tool_call,

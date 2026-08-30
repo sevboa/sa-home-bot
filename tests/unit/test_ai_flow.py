@@ -139,7 +139,10 @@ class FakeNodeLink:
         wol_sent=None,
         memory_facts=(),
         warmup_result=None,
+        model_profile=None,
     ):
+        self._model_profile = model_profile
+        self.describe_calls: list[str | None] = []
         self.memory_facts = list(memory_facts)
         self.recall_calls: list[dict] = []
         self._own = own or OWN_STATE
@@ -164,6 +167,12 @@ class FakeNodeLink:
         # реальной службе llm, ACTION_WARMUP почти всегда поддержан и удачен);
         # исключение — сконфигурировать сбой прогрева отдельно от chat_results.
         self._warmup_result = warmup_result
+
+    async def describe(self, dst=None):
+        self.describe_calls.append(dst.node if dst is not None else None)
+        if self._model_profile is None:
+            return None
+        return SimpleNamespace(model_profile=self._model_profile)
 
     async def get_state(self, dst=None):
         key = f"{dst.node}:{dst.service}" if dst is not None else "own"
@@ -243,6 +252,13 @@ def _single_call_settings() -> Settings:
     return Settings(llm=LlmConfig(request_timeout_s=5.0, mode="single_call"))
 
 
+@pytest_asyncio.fixture(autouse=True)
+def _clear_profile_cache():
+    ai_flow._profile_cache.clear()
+    yield
+    ai_flow._profile_cache.clear()
+
+
 @pytest_asyncio.fixture
 async def store(tmp_path):
     db = Database(tmp_path / "test.sqlite")
@@ -273,7 +289,7 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
     action, router_args, node = link.command_calls[0]
     assert (action, node) == ("chat", "mycraft")
     assert router_args["chat_id"] == 1
-    assert router_args["think"] is False
+    assert router_args["reason"] == "off"
     # Комплект собран под права собеседника, а не глобальный список.
     assert (
         router_args["tools"]
@@ -282,7 +298,7 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
     assert router_args["role"] == "router"
     persona_args = link.command_calls[1][1]
     assert "role" not in persona_args
-    assert persona_args["think"] is False
+    assert persona_args["reason"] == "off"
     # Router и персонажный проход видят ОДНУ и ту же историю — никакой
     # отдельной триаж-инструкции больше не вставляется в сообщения.
     assert router_args["messages"] == persona_args["messages"]
@@ -292,18 +308,17 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
     assert "Точное время сейчас" in router_args["messages"][0]["content"]
 
 
-async def test_single_call_think_false_is_sent_explicitly(store):
-    # Живая находка 2026-08-10: «не слать флаг think» ≠ «модель не думает» —
-    # gemma-4 размышляла по умолчанию над каждым приветствием (сотни
-    # невидимых токенов, 23 с в проде). Настройка single_call_think должна
-    # доезжать до запроса ЯВНЫМ False, а не теряться по дороге.
+async def test_single_call_think_true_sends_high_reason(store):
+    # single_call_think=True (legacy-override) — единственный проход просит
+    # рассуждение уровнем "high"; как это станет параметром Ollama, решает
+    # профиль модели на стороне службы llm.
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[{"response": "Добгый день, сэг"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
     settings = Settings(
-        llm=LlmConfig(request_timeout_s=5.0, mode="single_call", single_call_think=False)
+        llm=LlmConfig(request_timeout_s=5.0, mode="single_call", single_call_think=True)
     )
 
     await ai_flow.request_alfred(
@@ -313,13 +328,14 @@ async def test_single_call_think_false_is_sent_explicitly(store):
     )
 
     _, args, _ = link.command_calls[0]
-    assert args["think"] is False
+    assert args["reason"] == "high"
+    assert "think" not in args
 
 
 async def test_single_call_mode_skips_router(store):
-    # LlmConfig.mode="single_call" — ни router-прохода, ни поля think в
-    # запросе (single_call_think не задан — прежнее поведение), один
-    # персонажный вызов сразу.
+    # LlmConfig.mode="single_call" (явный legacy-override) — ни router-прохода,
+    # ни поля think; один персонажный вызов сразу с reason="off"
+    # (single_call_think не задан).
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[{"response": "Добгый день, сэ"}],
@@ -337,6 +353,7 @@ async def test_single_call_mode_skips_router(store):
     assert len(link.command_calls) == 1
     action, args, node = link.command_calls[0]
     assert (action, node) == ("chat", "mycraft")
+    assert args["reason"] == "off"
     assert "think" not in args
     assert "role" not in args
 
@@ -542,8 +559,8 @@ async def test_fast_path_no_thinking_when_marker_absent(store):
     assert raw == "Добгый день, сэ"
     assert message.answers == []  # THINKING_TEXT не показывался — думать не понадобилось
     assert len(link.command_calls) == 2
-    assert link.command_calls[0][1]["think"] is False
-    assert link.command_calls[1][1]["think"] is False
+    assert link.command_calls[0][1]["reason"] == "off"
+    assert link.command_calls[1][1]["reason"] == "off"
 
 
 async def test_escalates_to_thinking_when_marker_returned(store):
@@ -567,9 +584,9 @@ async def test_escalates_to_thinking_when_marker_returned(store):
     router_args = link.command_calls[0][1]
     persona_args = link.command_calls[1][1]
     assert router_args["role"] == "router"
-    assert router_args["think"] is False
+    assert router_args["reason"] == "off"
     assert "role" not in persona_args
-    assert persona_args["think"] is True
+    assert persona_args["reason"] == "high"  # THINK_MARKER → уровень 3
     # Персонажный проход видит ту же историю, что и router (никакой
     # отдельной триаж-инструкции/маркера в сообщениях не остаётся: её
     # дописывает служба llm у себя, см. llm/service.py — так у обоих
@@ -603,28 +620,47 @@ async def test_escalates_to_thinking_uses_rich_status_not_plain_message(store):
     assert rich_session.statuses == [ai_flow.THINKING_TEXT_PLAIN]
 
 
-async def test_implicit_think_style_omits_flag_instead_of_true(store):
-    # think_style="implicit" (LlmConfig): моделям, которые на явный
-    # think=true отвечают 400, «думать» выражается ОТСУТСТВИЕМ флага — они
-    # уходят в размышление сами. Роутер при этом по-прежнему получает
-    # явный False: его задача — скорость, и его такие модели принимают.
+async def test_router_level_maps_to_reason(store):
+    # Роутер вернул THINK:2 → персонажный проход просит reason="medium".
+    # Перевод уровня в параметр модели (флаг/effort/отсутствие флага) —
+    # уже на стороне службы llm по профилю модели, бот шлёт только намерение.
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[
-            {"response": f"кое-что... {ai_flow.THINK_MARKER}"},
-            {"response": "Точный ответ после раздумий"},
+            {"response": "THINK:2"},
+            {"response": "Ответ"},
         ],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
-    settings = Settings(llm=LlmConfig(request_timeout_s=5.0, think_style="implicit"))
 
     await ai_flow.request_alfred(
-        message, link, store, settings, [{"role": "user", "content": "сложный вопрос"}], 1,
+        message, link, store, _settings(), [{"role": "user", "content": "задачка"}], 1,
         _admin_book(), FakeNotifier(),
     )
 
-    assert link.command_calls[0][1]["think"] is False  # роутер — явный False
-    assert "think" not in link.command_calls[1][1]  # персонаж — флага нет вовсе
+    assert link.command_calls[0][1]["reason"] == "off"  # роутер сам не думает
+    assert link.command_calls[1][1]["reason"] == "medium"
+    assert "think" not in link.command_calls[1][1]
+    assert message.answers == [ai_flow.THINKING_TEXT]  # уровень >= 1 → «задумчивость»
+
+
+async def test_router_uses_describe_profile_when_mode_not_pinned(store):
+    # [llm].mode не задан явно → бот берёт router из профиля модели (describe).
+    # profile.router=False → один персонажный проход без router.
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[{"response": "Ответ"}],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+        model_profile={"name": "solo", "router": False, "thinking_hidden": False, "num_ctx": 8192},
+    )
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert len(link.command_calls) == 1
+    assert "role" not in link.command_calls[0][1]
 
 
 async def test_asleep_model_shows_steps_but_no_wake(store):

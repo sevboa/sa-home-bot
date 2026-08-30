@@ -343,17 +343,21 @@ class LlmConfig(BaseModel):
     чаты с запросами, эмитит событие `llm_idle_sleep` со списком их
     chat_id — бот (bot/node_events.py) шлёт туда закрывающее сообщение.
 
-    ``think_chat`` — ДЕФОЛТ thinking-режима qwen3 для действия `chat`, когда
-    вызывающий не указал `args["think"]` явно. Живая находка 2026-07-24:
-    сначала стоял False ради скорости, затем True — на формуле (площадь
-    цилиндра) без рассуждения модель путалась в арифметике; но включать
-    его на КАЖДЫЙ запрос оказалось расточительно (даже "привет" занимал
-    30-40с). Решение — вариативное рассуждение (см. bot/ai_flow.py):
-    сначала быстрый проход с think=false и явной инструкцией модели самой
-    попросить подумать (маркер), если вопрос того требует; думающий проход
-    — только тогда, think=true. bot/ai_flow.py теперь всегда передаёт
-    `think` явно на каждый вызов chat — этот конфиг остаётся чистым
-    фоллбэком на случай вызова chat без явного think (см. llm/ollama.py).
+    LEGACY-ПЕРЕОПРЕДЕЛЕНИЯ ПРОФИЛЯ РАССУЖДЕНИЯ. С v0.97.0 контракт рассуждения
+    (как модель включает reasoning, нужен ли router-проход, дефолт num_ctx)
+    описывается ПРОФИЛЕМ модели — служба llm по имени модели подтягивает его из
+    ``model-profiles.toml`` (llm/model_profiles.py). Router оценивает вопрос по
+    шкале 0..3 и бот шлёт службе намерение-уровень (``reason``), а не механизм.
+    Поля ниже остались ручным переопределением профиля: заданы явно в
+    config.toml → побеждают, иначе не нужны.
+
+    ``think_chat`` — рассуждать ли при СРАБАТЫВАНИИ отложенного напоминания
+    (router-прохода там нет; см. ``config.reminder_reason``): True → уровень
+    ``high``, False → ``off``.
+    ``mode`` — ``"single_call"`` форсит один персонажный проход без router.
+    ``single_call_think`` — уровень для single_call: falsy → ``off``, иначе ``high``.
+    ``think_style`` — исторический тумблер flag/implicit, полностью заменён
+    профилем (``think_control``), больше ни на что не влияет.
 
     ``num_ctx`` — окно контекста Ollama, явно фиксированное (живая находка
     2026-07-24): раньше нигде не передавалось, работал дефолт модели/Ollama,
@@ -394,6 +398,13 @@ class LlmConfig(BaseModel):
     warmup_timeout_s: float = Field(default=360.0, gt=0)
     think_chat: bool = True
     num_ctx: int = Field(default=8192, gt=0)
+    # Путь к локальному model-profiles.toml (рядом с config.toml) —
+    # выставляется в load(), не из TOML. None — конфиг не файловый.
+    # Служба llm грузит по нему профиль своей модели (llm/model_profiles.py):
+    # контракт рассуждения теперь описывается профилем, а не полями
+    # mode/think_style/single_call_think ниже — они остаются РУЧНЫМ
+    # ПЕРЕОПРЕДЕЛЕНИЕМ профиля (заданы явно в config.toml → побеждают).
+    model_profiles_path: Path | None = None
     # Режим работы bot/ai_flow.py::request_alfred с моделью — разные модели
     # умеют разное, гонять их через одну и ту же схему нельзя.
     # ``"router_think"`` (дефолт, как было всегда) — два прохода: лёгкий
@@ -534,26 +545,21 @@ class LlmConfig(BaseModel):
     tts_opus_bitrate: str = "32k"
 
 
-def resolve_think(llm: LlmConfig, *, needs_think: bool) -> bool | None:
-    """Единая точка, чем ``needs_think`` (хочет ли вызывающий рассуждение)
-    выражается в поле ``think`` запроса к Ollama — см. ``LlmConfig.think_style``.
+def reminder_reason(llm: LlmConfig) -> str:
+    """Уровень рассуждения (``off``/``low``/``medium``/``high``) для СРАБАТЫВАНИЯ
+    отложенного напоминания (bot/tools.py::tool_remind → tasks-служба).
 
-    Живая находка 2026-08-10 (вторая тем же заходом): эта логика раньше была
-    списана вручную в трёх местах (bot/ai_flow.py::request_alfred — оба
-    прохода; bot/tools.py::tool_remind — срабатывание отложенного
-    напоминания), и когда завели ``think_style`` для устранения скрытого
-    thinking у gemma, поправили только ai_flow.py — bot/tools.py остался со
-    старой формулой (``think_chat`` напрямую, без оглядки на style) и
-    продолжил слать явный ``true`` на срабатывании каждого напоминания,
-    ловя тот же самый 400 "does not support thinking", который весь этот
-    механизм и должен был устранить. Одна функция вместо трёх копий —
-    единственный способ не разъезжаться так снова.
+    Router-прохода в этот момент нет — вопрос уже задан когда-то раньше, — так
+    что берём фиксированную политику: думать (``high``), если исторически
+    ``think_chat`` включён, иначе не думать. Перевод уровня в конкретный
+    параметр Ollama делает профиль модели на стороне службы llm
+    (llm/model_profiles.py) — здесь про механизм знать не нужно.
 
-    Не покрывает ``mode="single_call"`` — там нет решения "нужно/не нужно",
-    вызывающие берут ``single_call_think`` напрямую (см. LlmConfig)."""
-    if not needs_think:
-        return False
-    return None if llm.think_style == "implicit" else True
+    ``single_call_think = false`` (legacy-override, config) читается как явное
+    «на этой ноде рассуждение при срабатывании отключено»."""
+    if llm.mode == "single_call" and llm.single_call_think is False:
+        return "off"
+    return "high" if llm.think_chat else "off"
 
 
 class VpnConfig(BaseModel):
@@ -1143,4 +1149,8 @@ class Settings(BaseSettings):
             for key in unknown_config_keys(raw, cls):
                 log.warning("Конфиг %s: неизвестное поле %r — опечатка? Игнорируется", path, key)
             _load_persona_prompt(path.parent / "llm-prompt.toml", settings)
+            # Локальный model-profiles.toml (может не быть — тогда служба llm
+            # обходится пакетными профилями). Сам разбор — на стороне службы
+            # (llm/model_profiles.py::load_profiles), здесь только путь.
+            settings.llm.model_profiles_path = path.parent / "model-profiles.toml"
         return settings

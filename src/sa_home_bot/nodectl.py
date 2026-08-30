@@ -35,6 +35,7 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -128,6 +129,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p = sub.add_parser("describe", help="какие умения объявляет служба и с какими параметрами")
     p.add_argument("service", help="имя службы")
+    p = sub.add_parser(
+        "llm-probe",
+        help="проверить модель службы llm: профиль + пробный chat с рассуждением вкл/выкл",
+    )
+    p.add_argument(
+        "--timeout",
+        type=float,
+        default=180.0,
+        metavar="СЕК",
+        help="таймаут одного пробного вызова (дефолт 180 — модель может грузиться с диска)",
+    )
     sub.add_parser("check_update", help="сверить работающую/установленную/доступную версии")
     sub.add_parser(
         "update", help="pipx install --force до последнего тега (без рестарта процесса)"
@@ -317,6 +329,37 @@ def render_describe(desc: ServiceDescription) -> str:
     return "\n".join(lines)
 
 
+async def _llm_probe(client: ProtoClient, dst: Address, timeout: float) -> None:
+    """Быстрая проверка модели службы llm: какой профиль подтянулся и
+    отвечает ли модель на chat с рассуждением выкл/вкл (ловит 400 «does not
+    support thinking» и подобное). Сделано командой, чтобы не повторять руками
+    тот же тест при каждой смене модели."""
+    desc = await client.describe(dst=dst)
+    model = desc.capabilities[0] if desc.capabilities else "?"
+    prof = desc.model_profile or {}
+    print(f"Модель:  {model}")
+    if prof:
+        print(
+            f"Профиль: {prof.get('name')} (router={prof.get('router')}, "
+            f"num_ctx={prof.get('num_ctx')}, thinking_hidden={prof.get('thinking_hidden')})"
+        )
+    else:
+        print("Профиль: служба не сообщает (старая версия?)")
+    messages = json.dumps([{"role": "user", "content": "Привет"}], ensure_ascii=False)
+    for reason in ("off", "high"):
+        started = time.monotonic()
+        try:
+            res = await client.command(
+                "chat", {"messages": messages, "reason": reason}, dst=dst, timeout=timeout
+            )
+            dt = time.monotonic() - started
+            text = (res.get("response") or "").replace("\n", " ")
+            print(f"  reason={reason:4} → {dt:5.1f}s  ok: {text[:70]}")
+        except ProtoError as exc:
+            dt = time.monotonic() - started
+            print(f"  reason={reason:4} → {dt:5.1f}s  ОШИБКА {exc.code}: {exc}")
+
+
 async def _run(args: argparse.Namespace) -> int:
     endpoint, token = _resolve_endpoint(args)
     # -n/--node: адресат в конверте, пересылку делает своя нода (§11 п. 2).
@@ -361,6 +404,8 @@ async def _run(args: argparse.Namespace) -> int:
         elif args.command == "describe":
             desc = await client.describe(dst=_service_dst(args))
             print(render_describe(desc))
+        elif args.command == "llm-probe":
+            await _llm_probe(client, Address(node=args.node, service="llm"), args.timeout)
         elif args.command == "check_update":
             print(render_check_update(await client.command("check_update", dst=dst)))
         elif args.command == "update":

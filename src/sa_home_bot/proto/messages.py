@@ -354,25 +354,36 @@ class ActionSpec:
 
 @dataclass(frozen=True)
 class ServiceDescription:
-    """Ответ на describe: кто ты + capabilities + список действий."""
+    """Ответ на describe: кто ты + capabilities + список действий.
+
+    ``model_profile`` — необязательная сводка профиля модели (служба llm,
+    llm/model_profiles.py::ModelProfileSummary): нужен ли router-проход и
+    уводит ли модель рассуждение в невидимый буфер. Здесь — сырым dict, чтобы
+    proto не зависел от llm-слоя; разбирает его вызывающий.
+    """
 
     info: ServiceInfo
     capabilities: tuple[str, ...] = ()
     actions: tuple[ActionSpec, ...] = ()
+    model_profile: dict[str, Any] | None = None
 
     def to_payload(self) -> dict[str, Any]:
         payload = self.info.to_payload()
         payload["capabilities"] = list(self.capabilities)
         payload["actions"] = [a.to_dict() for a in self.actions]
+        if self.model_profile is not None:
+            payload["model_profile"] = self.model_profile
         return payload
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> ServiceDescription:
         try:
+            profile = payload.get("model_profile")
             return cls(
                 info=ServiceInfo.from_payload(payload),
                 capabilities=tuple(str(c) for c in payload.get("capabilities", [])),
                 actions=tuple(ActionSpec.from_dict(a) for a in payload.get("actions", [])),
+                model_profile=dict(profile) if isinstance(profile, dict) else None,
             )
         except (KeyError, TypeError) as exc:
             raise ProtoError(ERR_BAD_REQUEST, f"невалидный describe: {exc}") from exc
