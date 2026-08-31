@@ -481,21 +481,99 @@ def test_vpn_probe_tunnel_check_false_when_unit_content_is_stale(monkeypatch):
     assert not called_is_active  # содержимое не совпало — до is-active дело не дошло
 
 
+def _fake_run_result(returncode=0, stdout="", stderr=""):
+    return type("R", (), {"returncode": returncode, "stdout": stdout, "stderr": stderr})()
+
+
 def test_vpn_probe_tunnel_check_true_when_content_matches_and_active(monkeypatch):
     monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
     monkeypatch.setattr(fixups_module, "_which", lambda name: f"/usr/bin/{name}")
 
     def fake_read(path):
+        if str(path).endswith(".conf"):
+            return "[Interface]\nAddress = 10.9.0.14/32\n[Peer]\nAllowedIPs = 0.0.0.0/0\n"
         return fixups_module.vpn_probe_unit_content(
             "vpn-probe", fixups_module.VPN_PROBE_IFACE, "/usr/bin/ip", "/usr/bin/awg-quick"
         )
 
     monkeypatch.setattr(fixups_module, "_read_privileged", fake_read)
-    monkeypatch.setattr(
-        fixups_module.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 0})()
-    )
+
+    def fake_run(cmd, *a, **k):
+        if "route" in cmd and "get" in cmd:  # ip route get — маршрут через туннель
+            return _fake_run_result(stdout=f"1.1.1.1 dev {fixups_module.VPN_PROBE_IFACE} src ...\n")
+        return _fake_run_result()  # systemctl is-active
+
+    monkeypatch.setattr(fixups_module.subprocess, "run", fake_run)
     settings = _settings(["vpn_check"])
     assert fixups_module._vpn_probe_tunnel_check(settings) is True
+
+
+def test_vpn_probe_tunnel_check_false_when_conf_still_has_table_line(monkeypatch):
+    """Застрявший ``Table = off`` — awg-quick не строит маршрут в туннель,
+    curl уходит мимо VPN (инцидент 2026-08-31). check() обязан это увидеть
+    и заставить apply() переписать конфиг."""
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
+    monkeypatch.setattr(fixups_module, "_which", lambda name: f"/usr/bin/{name}")
+
+    def fake_read(path):
+        if str(path).endswith(".conf"):
+            return "[Interface]\nTable = off\nAddress = 10.9.0.14/32\n"
+        return fixups_module.vpn_probe_unit_content(
+            "vpn-probe", fixups_module.VPN_PROBE_IFACE, "/usr/bin/ip", "/usr/bin/awg-quick"
+        )
+
+    monkeypatch.setattr(fixups_module, "_read_privileged", fake_read)
+    monkeypatch.setattr(fixups_module.subprocess, "run", lambda *a, **k: _fake_run_result())
+    assert fixups_module._vpn_probe_tunnel_check(_settings(["vpn_check"])) is False
+
+
+def test_vpn_probe_tunnel_check_false_when_route_bypasses_tunnel(monkeypatch):
+    """Юнит и конфиг в порядке, но живой маршрут из netns идёт мимо
+    туннеля (через veth) — check() валит фикс."""
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
+    monkeypatch.setattr(fixups_module, "_which", lambda name: f"/usr/bin/{name}")
+
+    def fake_read(path):
+        if str(path).endswith(".conf"):
+            return "[Interface]\nAddress = 10.9.0.14/32\n"
+        return fixups_module.vpn_probe_unit_content(
+            "vpn-probe", fixups_module.VPN_PROBE_IFACE, "/usr/bin/ip", "/usr/bin/awg-quick"
+        )
+
+    monkeypatch.setattr(fixups_module, "_read_privileged", fake_read)
+
+    def fake_run(cmd, *a, **k):
+        if "route" in cmd and "get" in cmd:
+            return _fake_run_result(stdout="1.1.1.1 via 10.200.200.1 dev vprobe-veth1 src ...\n")
+        return _fake_run_result()
+
+    monkeypatch.setattr(fixups_module.subprocess, "run", fake_run)
+    assert fixups_module._vpn_probe_tunnel_check(_settings(["vpn_check"])) is False
+
+
+def test_vpn_probe_tunnel_check_tolerates_missing_route_sudoers(monkeypatch):
+    """Право на ``ip netns exec ... ip route get`` ставит соседний фикс
+    vpn-check-probe-sudoers — пока его нет, маршрутную сверку пропускаем
+    (не валим фикс из-за отсутствующего права)."""
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
+    monkeypatch.setattr(fixups_module, "_which", lambda name: f"/usr/bin/{name}")
+
+    def fake_read(path):
+        if str(path).endswith(".conf"):
+            return "[Interface]\nAddress = 10.9.0.14/32\n"
+        return fixups_module.vpn_probe_unit_content(
+            "vpn-probe", fixups_module.VPN_PROBE_IFACE, "/usr/bin/ip", "/usr/bin/awg-quick"
+        )
+
+    monkeypatch.setattr(fixups_module, "_read_privileged", fake_read)
+
+    def fake_run(cmd, *a, **k):
+        if "route" in cmd and "get" in cmd:
+            return _fake_run_result(returncode=1, stderr="sudo: a password is required\n")
+        return _fake_run_result()
+
+    monkeypatch.setattr(fixups_module.subprocess, "run", fake_run)
+    assert fixups_module._vpn_probe_tunnel_check(_settings(["vpn_check"])) is True
 
 
 def test_vpn_probe_unit_content_runs_awg_quick_inside_netns():
@@ -510,6 +588,11 @@ def test_vpn_probe_unit_content_runs_awg_quick_inside_netns():
         in content
     )
     assert "RemainAfterExit=yes" in content
+    # ExecStartPost — громкая проверка, что маршрут наружу идёт через туннель.
+    assert (
+        'ExecStartPost=/bin/sh -c "/usr/sbin/ip netns exec vpn-probe /usr/sbin/ip route get '
+        "1.1.1.1 | grep -q 'dev awg-probe0'\"\n" in content
+    )
 
 
 def test_vpn_probe_unit_content_pre_steps_setup_netns_and_veth_idempotently():
@@ -534,7 +617,11 @@ def test_vpn_probe_unit_content_pre_steps_setup_netns_and_veth_idempotently():
 
 def test_vpn_probe_sudoers_content_pins_ip_path_and_netns_curl_wildcard():
     content = vpn_probe_sudoers_content("/usr/sbin/ip", "vpn-probe", "sevboa")
-    assert content == "sevboa ALL=(root) NOPASSWD: /usr/sbin/ip netns exec vpn-probe curl *\n"
+    assert content == (
+        "sevboa ALL=(root) NOPASSWD: "
+        "/usr/sbin/ip netns exec vpn-probe curl *, "
+        "/usr/sbin/ip netns exec vpn-probe /usr/sbin/ip route get *\n"
+    )
 
 
 def test_vpn_probe_forwarding_needed_same_as_tunnel():

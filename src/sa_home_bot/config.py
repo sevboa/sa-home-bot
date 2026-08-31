@@ -695,6 +695,17 @@ class VpnCheckConfig(BaseModel):
 
     socket: str = "./data/vpn_check.sock"
     netns: str = "vpn-probe"
+    # Интерфейс клиентского туннеля внутри netns. vpn_check перед каждой
+    # пачкой проверок убеждается, что маршрут наружу из netns идёт именно
+    # через него (`ip route get`), иначе curl уходил бы мимо VPN и проверка
+    # тихо зеленела бы (инцидент 2026-08-31: `Table = off` в конфиге
+    # пробника → awg-quick не строил маршрут в туннель).
+    iface: str = "awg-probe0"
+    # URL «покажи мой внешний IP» — vpn_check дёргает его из netns и из
+    # root-namespace хоста и сравнивает. Совпали, и это НЕ сама VPN-нода
+    # (без назначения "vpn") → трафик идёт мимо туннеля. Пусто — сверку
+    # пропустить.
+    ip_echo_url: str = "https://api.ipify.org"
     check_timeout_s: float = Field(default=8.0, gt=0)
 
 

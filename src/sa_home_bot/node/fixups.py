@@ -673,6 +673,10 @@ def make_awg_sudoers_fixup(settings: Settings) -> Fixup:
 # hairpin-приём, каким сама нода достаёт себя по 100.100.100.100).
 
 VPN_PROBE_IFACE = "awg-probe0"
+# Куда пробуем `ip route get`, чтобы убедиться, что дефолтный путь из netns
+# идёт через сам туннель, а не мимо (через veth на хост). Тот же литерал
+# использует рантайм-гейт vpn_check/service.py::_check_route.
+VPN_PROBE_ROUTE_SENTINEL = "1.1.1.1"
 VPN_PROBE_CONF_DIR = Path("/etc/amnezia/amneziawg")
 VPN_PROBE_UNIT_FILE = Path("/etc/systemd/system/sa-home-vpn-probe.service")
 VPN_PROBE_SUDOERS_FILE = "50-sa-home-node-vpn-probe"
@@ -723,8 +727,18 @@ def vpn_probe_unit_content(netns: str, iface: str, ip_path: str, awg_quick_path:
     исполняет сам awg-quick УЖЕ ВНУТРИ netns (``ip netns exec`` меняет
     сетевое пространство имён дочернего процесса) — интерфейс, который
     создаст awg-quick, окажется уже там, без отдельного ``ip link set
-    netns``."""
+    netns``.
+
+    ``ExecStartPost`` — громкая проверка: после ``awg-quick up`` дефолтный
+    маршрут из netns ОБЯЗАН идти через сам туннель (``dev <iface>``). Если
+    awg-quick его не построил (застрявший ``Table = off`` в конфиге,
+    инцидент 2026-08-31) — юнит падает в ``failed``, а не тихо пропускает
+    трафик мимо VPN, изображая рабочую проверку."""
     host_addr_only = VPN_PROBE_VETH_HOST_ADDR.split("/")[0]
+    route_assert = (
+        f"{ip_path} netns exec {netns} {ip_path} route get "
+        f"{VPN_PROBE_ROUTE_SENTINEL} | grep -q 'dev {iface}'"
+    )
     pre_steps = [
         f"-{ip_path} netns add {netns}",
         f"-{ip_path} link add {VPN_PROBE_VETH_HOST} type veth peer name {VPN_PROBE_VETH_NS}",
@@ -750,6 +764,7 @@ def vpn_probe_unit_content(netns: str, iface: str, ip_path: str, awg_quick_path:
         "RemainAfterExit=yes\n"
         f"{pre_lines}"
         f"ExecStart={ip_path} netns exec {netns} {awg_quick_path} up {iface}\n"
+        f'ExecStartPost=/bin/sh -c "{route_assert}"\n'
         f"ExecStop={ip_path} netns exec {netns} {awg_quick_path} down {iface}\n"
         "\n"
         "[Install]\n"
@@ -758,12 +773,19 @@ def vpn_probe_unit_content(netns: str, iface: str, ip_path: str, awg_quick_path:
 
 
 def vpn_probe_sudoers_content(ip_path: str, netns: str, user: str) -> str:
-    """NOPASSWD только на ``ip netns exec <netns> curl *`` — не голый ``ip``
-    (равносилен root: умеет менять маршруты/интерфейсы где угодно) и не
-    произвольная команда внутри netns, только curl (см. vpn_check/service.py,
-    единственный вызов рантайма). ``curl`` литералом, не резолвленным путём —
-    он не прямая цель sudo, а аргумент вложенного ``ip netns exec``."""
-    return f"{user} ALL=(root) NOPASSWD: {ip_path} netns exec {netns} curl *\n"
+    """NOPASSWD ровно на два вызова внутри netns пробника (см.
+    vpn_check/service.py): ``curl *`` (сами проверки + запрос внешнего IP) и
+    ``ip route get *`` (гейт «пробник реально в туннеле» перед каждой
+    пачкой). Не голый ``ip`` (равносилен root — умеет менять
+    маршруты/интерфейсы где угодно): ``route get`` только читает таблицу
+    маршрутизации. ``curl`` литералом — он не прямая цель sudo, а аргумент
+    вложенного ``ip netns exec``; вложенный ``ip`` — резолвленным путём,
+    ровно как его зовёт служба."""
+    return (
+        f"{user} ALL=(root) NOPASSWD: "
+        f"{ip_path} netns exec {netns} curl *, "
+        f"{ip_path} netns exec {netns} {ip_path} route get *\n"
+    )
 
 
 async def _fetch_probe_config(settings: Settings) -> str:
@@ -961,14 +983,43 @@ def _vpn_probe_tunnel_check(settings: Settings) -> bool:
     )
     try:
         current_unit = _read_privileged(VPN_PROBE_UNIT_FILE)
+        current_conf = _read_privileged(_vpn_probe_conf_path(settings))
     except FixupError:
         return False
     if current_unit != expected_unit:
         return False
-    return (
-        subprocess.run(["systemctl", "is-active", "--quiet", VPN_PROBE_UNIT_FILE.name]).returncode
-        == 0
+    # Застрявшая строка ``Table`` в конфиге (обычно ``Table = off`` из
+    # старых версий, v0.92.2–v0.92.4) заставляет awg-quick НЕ строить
+    # маршрут через туннель — curl из netns уходит plaintext мимо VPN,
+    # подменяя собой суть проверки (инцидент 2026-08-31). ``_prepare_probe_
+    # conf`` её вырезает — но раньше сюда не смотрели, и апгрейд её не
+    # трогал. Теперь несоответствие → apply() перепишет конфиг.
+    if any(ln.strip().startswith("Table") for ln in current_conf.splitlines()):
+        return False
+    if (
+        subprocess.run(
+            ["systemctl", "is-active", "--quiet", VPN_PROBE_UNIT_FILE.name]
+        ).returncode
+        != 0
+    ):
+        return False
+    # Финальная сверка живого состояния: маршрут из netns реально идёт
+    # через туннель. Терпимо к отсутствию sudoers-права (ставит соседний
+    # фикс vpn-check-probe-sudoers) — тогда проверку пропускаем, ``Table``
+    # выше уже ловит основную поломку.
+    route = subprocess.run(
+        [
+            "sudo", "-n", ip_path, "netns", "exec", settings.vpn_check.netns,
+            ip_path, "route", "get", VPN_PROBE_ROUTE_SENTINEL,
+        ],
+        capture_output=True,
+        text=True,
     )
+    if route.returncode != 0 and (
+        "a password is required" in route.stderr.lower() or "sudo:" in route.stderr.lower()
+    ):
+        return True
+    return route.returncode == 0 and f"dev {VPN_PROBE_IFACE}" in route.stdout
 
 
 def _vpn_probe_tunnel_apply(settings: Settings) -> None:
