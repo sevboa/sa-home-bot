@@ -257,6 +257,92 @@ def test_proxy_firewall_check_true_when_rules_reference_counters(monkeypatch):
     assert fixups_module._proxy_firewall_check()
 
 
+# Инцидент 2026-08-31 (vpn-jeeves-nftables-conf-broken): _append_nftables_conf_
+# counters писал `counter mtg_bytes { }` ВНУТРЬ `chain input` и правило со
+# счётчиком ДО строки `type filter hook input ...`. Оба — синтаксическая
+# ошибка nft: `nft -f /etc/nftables.conf` падал, nftables.service не стартовал
+# на следующем ребуте, awg0 поднимался без NAT (`ip saddr 10.9.0.0/24 ...
+# masquerade` из этого же файла), VPN хендшейкался, но не роутил наружу.
+# Ни один check() и ни один тест этого не ловили — проверялся только ЖИВОЙ
+# ruleset, не валидность персистентного файла.
+_WORKING_NFTABLES_CONF = (
+    "#!/usr/sbin/nft -f\n"
+    "flush ruleset\n"
+    "table inet filter {\n"
+    "  chain input {\n"
+    "    type filter hook input priority 0; policy drop;\n"
+    "    ct state established,related accept\n"
+    "    iifname \"tailscale0\" accept\n"
+    "    tcp dport 443 accept\n"
+    "  }\n"
+    "  chain forward {\n"
+    "    type filter hook forward priority 0; policy drop;\n"
+    "    iifname \"awg0\" accept\n"
+    "  }\n"
+    "}\n"
+    "table ip nat {\n"
+    "  chain postrouting {\n"
+    "    type nat hook postrouting priority 100;\n"
+    "    ip saddr 10.9.0.0/24 oifname \"eth0\" masquerade\n"
+    "  }\n"
+    "}\n"
+)
+
+
+def test_append_nftables_conf_counters_keeps_file_loadable(monkeypatch):
+    monkeypatch.setattr(
+        fixups_module.subprocess,
+        "run",
+        lambda *a, **k: type("R", (), {"returncode": 0, "stdout": _WORKING_NFTABLES_CONF})(),
+    )
+    seen: dict[str, str] = {}
+    monkeypatch.setattr(
+        fixups_module,
+        "_nft_check_file",
+        lambda p: seen.__setitem__("checked", fixups_module.Path(p).read_text()),
+    )
+    monkeypatch.setattr(
+        fixups_module,
+        "_sudo",
+        lambda argv: seen.__setitem__("installed", fixups_module.Path(argv[-2]).read_text()),
+    )
+
+    fixups_module._append_nftables_conf_counters(_settings(["vpn"]))
+
+    out = seen["installed"]
+    assert seen["checked"] == out  # прогнали nft -c ровно по тому, что ставим
+    body = out.splitlines()
+    table_i = body.index("table inet filter {")
+    chain_i = body.index("  chain input {")
+    hook_i = next(i for i, s in enumerate(body) if s.lstrip().startswith("type filter hook input"))
+    obj_i = next(i for i, s in enumerate(body) if "counter mtg_bytes { }" in s)
+    rule_i = next(i for i, s in enumerate(body) if "counter name mtg_bytes accept" in s)
+    # counter-объект — на уровне таблицы (между 'table {' и 'chain input {')
+    assert table_i < obj_i < chain_i
+    assert "counter socks_bytes { }" in out
+    # правило со счётчиком — ПОСЛЕ hook-строки, внутри chain input
+    assert hook_i < rule_i
+    assert 'iifname "tailscale0" tcp dport 1080 counter name socks_bytes accept' in out
+
+
+def test_append_nftables_conf_counters_idempotent(monkeypatch):
+    already = _WORKING_NFTABLES_CONF.replace(
+        "  chain input {\n", "  counter mtg_bytes { }\n  chain input {\n"
+    )
+    monkeypatch.setattr(
+        fixups_module.subprocess,
+        "run",
+        lambda *a, **k: type("R", (), {"returncode": 0, "stdout": already})(),
+    )
+    called: list[str] = []
+    monkeypatch.setattr(fixups_module, "_nft_check_file", lambda p: called.append("check"))
+    monkeypatch.setattr(fixups_module, "_sudo", lambda argv: called.append("sudo"))
+
+    fixups_module._append_nftables_conf_counters(_settings(["vpn"]))
+
+    assert called == []  # уже дописано — ничего не трогаем
+
+
 def test_apps_unit_sudoers_content_only_start_stop_restart_of_this_unit():
     app = AppConfig(id="jellyfin", title="Jellyfin", unit="jellyfin.service")
     content = apps_unit_sudoers_content(app, "/usr/bin/systemctl", "sevboa")

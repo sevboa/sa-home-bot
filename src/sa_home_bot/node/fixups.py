@@ -1639,12 +1639,39 @@ def _proxy_firewall_check() -> bool:
     return {"mtg_bytes", "socks_bytes"} <= _rule_counter_names(_filter_table_json())
 
 
+def _nft_check_file(path: Path) -> None:
+    """`nft -c -f` — разбор ruleset БЕЗ применения к ядру. Ловит ровно тот
+    класс поломки, что положил /etc/nftables.conf в инциденте 2026-08-31:
+    counter-ОБЪЕКТ объявили внутри `chain` (а не на уровне таблицы) и
+    правило вставили ДО строки `type ... hook ...` — глазами читается,
+    `nft -f` при следующем ребуте падает, nftables.service не стартует,
+    VPN остаётся без NAT. Интерактивный sudo (как и остальной apply());
+    ошибки nft печатает прямо в терминал."""
+    nft = _which("nft") or "nft"
+    try:
+        result = subprocess.run(["sudo", nft, "-c", "-f", str(path)])
+    except OSError as exc:
+        raise FixupError(f"не удалось запустить nft -c: {exc}") from exc
+    if result.returncode != 0:
+        raise FixupError(
+            f"сгенерированный {NFTABLES_CONF_PATH} не проходит `nft -c` "
+            "(ошибку см. выше) — файл НЕ изменён"
+        )
+
+
 def _append_nftables_conf_counters(settings: Settings) -> None:
     """Дописать счётчики в ПЕРСИСТЕНТНЫЙ /etc/nftables.conf — этот файл
     применяется только при бутстрапе systemd (следующий чистый бут), сам
     файл переписать безопасно; недопустимо только ПРИМЕНЯТЬ его целиком на
     живой ноде (`nft -f`/`systemctl restart nftables`) — этого здесь нет и
-    не будет, см. предупреждение выше."""
+    не будет, см. предупреждение выше.
+
+    Именованные counter-ОБЪЕКТЫ объявляются на уровне ТАБЛИЦЫ (не внутри
+    chain), а строка `type ... hook ... priority ...` обязана быть первой
+    в цепочке — правила со счётчиками вставляем ПОСЛЕ неё. Нарушение того
+    и другого сломало конфиг в инциденте 2026-08-31 (`nft -f` падал на
+    следующем ребуте). Результат прогоняем через `nft -c` ДО install —
+    кривой файл в /etc/nftables.conf не попадёт."""
     result = subprocess.run(
         ["sudo", "cat", str(NFTABLES_CONF_PATH)], capture_output=True, text=True
     )
@@ -1653,27 +1680,56 @@ def _append_nftables_conf_counters(settings: Settings) -> None:
     content = result.stdout
     if "counter mtg_bytes" in content:
         return
-    marker = "chain input {\n"
-    idx = content.find(marker)
-    if idx == -1:
+
+    lines = content.splitlines(keepends=True)
+
+    def _find(pred: Callable[[str], bool], start: int = 0) -> int | None:
+        return next((i for i in range(start, len(lines)) if pred(lines[i])), None)
+
+    def _indent(line: str) -> str:
+        return line[: len(line) - len(line.lstrip())]
+
+    table_i = _find(lambda s: s.strip() == "table inet filter {")
+    chain_i = (
+        _find(lambda s: s.strip() == "chain input {", table_i + 1)
+        if table_i is not None
+        else None
+    )
+    hook_i = (
+        _find(lambda s: s.lstrip().startswith("type filter hook input"), chain_i + 1)
+        if chain_i is not None
+        else None
+    )
+    if table_i is None or chain_i is None or hook_i is None:
         raise FixupError(
-            f"{NFTABLES_CONF_PATH}: не нашёл 'chain input {{' — структура файла "
-            "отличается от ожидаемой, допишите счётчики вручную (см. node/fixups.py "
-            "mtg_unit_content/_append_nftables_conf_counters) и повторите nodectl fix"
+            f"{NFTABLES_CONF_PATH}: не нашёл 'table inet filter {{' / 'chain input {{' / "
+            "строку 'type filter hook input' — структура файла не та, что ожидалась; "
+            "допишите счётчики вручную (см. node/fixups.py::_append_nftables_conf_counters) "
+            "и повторите nodectl fix"
         )
-    insert_at = idx + len(marker)
-    addition = (
-        "    counter mtg_bytes { }\n"
-        "    counter socks_bytes { }\n"
-        f"    tcp dport {settings.vpn.mtg_port} counter name mtg_bytes accept\n"
-        f'    iifname "tailscale0" tcp dport {settings.vpn.socks_port} '
+
+    obj_indent = _indent(lines[chain_i])
+    rule_indent = _indent(lines[hook_i])
+    counter_objs = (
+        f"{obj_indent}counter mtg_bytes {{ }}\n"
+        f"{obj_indent}counter socks_bytes {{ }}\n"
+    )
+    counter_rules = (
+        f"{rule_indent}tcp dport {settings.vpn.mtg_port} counter name mtg_bytes accept\n"
+        f'{rule_indent}iifname "tailscale0" tcp dport {settings.vpn.socks_port} '
         "counter name socks_bytes accept\n"
     )
-    new_content = content[:insert_at] + addition + content[insert_at:]
+    # Сначала нижняя вставка (hook_i), потом верхняя (table_i) — иначе
+    # индексы разъезжаются.
+    lines.insert(hook_i + 1, counter_rules)
+    lines.insert(table_i + 1, counter_objs)
+    new_content = "".join(lines)
+
     with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as tmp:
         tmp.write(new_content)
         tmp_path = Path(tmp.name)
     try:
+        _nft_check_file(tmp_path)
         _sudo(
             [
                 "install", "-m", "0755", "-o", "root", "-g", "root",
