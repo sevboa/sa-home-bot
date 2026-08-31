@@ -1989,10 +1989,15 @@ oom_kills`. `[sensors.host].enabled` авто-`True` на `node.kind == "vps"`, 
 (`📊 steal 0% · load 0.2 · RAM своб. 34% · диск / 8%`, ⚠️ + детали при alert).
 `monitor` больше не `needs_hardware_sensors` — предлагается и на vps.
 
-**Деплой 2026-09-01:** v0.99.0 раскатана на alfred, jeeves, wooster (`nodectl update`
-+ `restart_node`); `monitor` добавлен в `[node].assignments` jeeves и wooster. Проверено:
-на обоих VPS `host_metric_states` наполняется всеми 10 метриками (все `ok`), на alfred
-(`kind=server`) host-метрик нет, термо/SMART работают как раньше.
+**Деплой 2026-09-01:** v0.99.2 раскатана на alfred, jeeves, wooster (`nodectl update`
++ `restart_node`); `monitor` добавлен в `[node].assignments` jeeves и wooster. Правки
+по итогам ревью пользователя: (1) на vps авто-правило гасит и `[sensors.disks]` (не
+только cpu) — монитор больше не жалуется на отсутствующий smartctl; (2) карточка ноды
+рендерит host-метрики пунктами под «📊 Хост VPS», а не одной строкой; PSI/OOM в карточке
+только при alerting; (3) метрика диска переименована в «диск / заполнен» (% занятого
+места, не нагрузка). Проверено: на обоих VPS `host_metric_states` наполняется всеми 10
+метриками (все `ok`), disk-кэш затёрт, на alfred (`kind=server`) host-метрик нет,
+термо/SMART работают как раньше.
 
 Запрос пользователя 2026-09-01 (после ввода wooster — второй VPS, RackNerd,
 США). Два VPS (jeeves NL, wooster US), оба несут VPN-фейловер, но `monitor`
