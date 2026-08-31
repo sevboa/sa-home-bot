@@ -217,6 +217,21 @@ async def test_gate_reports_missing_sudoers_hint(monkeypatch):
     assert "nodectl fix" in res["error"]
 
 
+async def test_gate_detects_localized_sudo_password_prompt(monkeypatch):
+    # Русская локаль ноды: `sudo -n` пишет «sudo: требуется указать пароль».
+    async def ru_locale(*cmd, stdout=None, stderr=None):
+        if "route" in cmd and "get" in cmd:
+            return _FakeProc(b"", "sudo: требуется указать пароль".encode(), 1)
+        raise AssertionError("гейт не должен идти дальше маршрута")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", ru_locale)
+    node_link = _FakeNodeLink()
+    await VpnCheckService(_settings(), node_link)._run_and_report(["https://1.1.1.1"])
+    res = node_link.calls[0]["args"]["results"]["https://1.1.1.1"]
+    assert res["ok"] is False
+    assert "nodectl fix" in res["error"] and "нет прав" in res["error"]
+
+
 async def test_run_and_report_multiple_targets(monkeypatch):
     _patch_curl(
         monkeypatch,

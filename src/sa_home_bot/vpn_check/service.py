@@ -59,8 +59,11 @@ _ROUTE_SENTINEL = "1.1.1.1"
 
 
 def _looks_like_needs_password(err: str) -> bool:
-    low = err.lower()
-    return looks_like_permission_error(err) or "a password is required" in low
+    low = err.strip().lower()
+    # ``sudo -n`` без права печатает локализованное сообщение («a password is
+    # required» / «требуется указать пароль» / …) — но всегда с префиксом
+    # ``sudo:``. На него и опираемся, чтобы не зависеть от локали ноды.
+    return looks_like_permission_error(err) or low.startswith("sudo:")
 
 
 async def _run(*cmd: str, timeout: float) -> tuple[int, str, str]:
