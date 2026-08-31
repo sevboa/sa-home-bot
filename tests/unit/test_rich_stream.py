@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import InputRichBlockThinking
 
 from sa_home_bot.bot import notifier as notifier_module
@@ -27,6 +27,9 @@ class FakeBot:
         self.draft_fails_times = 0
         self.draft_fail_exception: Exception = TelegramAPIError(None, "draft недоступен")
         self.retry_after_times = 0
+        self.rich_fails_times = 0
+        self.rich_fail_exception: Exception = ConnectionError("proxy timed out: 60")
+        self.rich_calls = 0
         self._next_id = 1
         self.typing_actions: list[int] = []
 
@@ -50,9 +53,13 @@ class FakeBot:
     async def send_rich_message(
         self, *, chat_id, rich_message, reply_parameters=None, message_thread_id=None
     ):
+        self.rich_calls += 1
         if self.retry_after_times > 0:
             self.retry_after_times -= 1
             raise TelegramRetryAfter(None, "flood", retry_after=0)
+        if self.rich_fails_times > 0:
+            self.rich_fails_times -= 1
+            raise self.rich_fail_exception
         self.sent.append(
             {
                 "chat_id": chat_id,
@@ -245,6 +252,50 @@ async def test_finalize_gives_up_after_exhausting_retries():
 
     assert sent is None
     assert bot.sent == []
+
+
+async def test_finalize_retries_transient_network_error_then_succeeds():
+    # Живая находка 2026-08-30: транзиентный сбой связи до Telegram (не 429,
+    # напр. зависший SOCKS-прокси — ConnectionError) раньше давал None с
+    # первой попытки и молча терял готовый ответ модели. Теперь ретраится.
+    bot = FakeBot()
+    bot.rich_fail_exception = ConnectionError("proxy timed out: 60")
+    bot.rich_fails_times = 2  # два обрыва, третья попытка проходит
+    session = RichStreamSession(bot, chat_id=1)
+
+    sent = await session.finalize("ответ")
+
+    assert sent is not None
+    assert len(bot.sent) == 1
+    assert bot.rich_calls == 3
+
+
+async def test_finalize_gives_up_after_exhausting_transient_retries():
+    bot = FakeBot()
+    bot.rich_fail_exception = ConnectionError("proxy timed out: 60")
+    bot.rich_fails_times = 99  # ни одна попытка не пройдёт
+    session = RichStreamSession(bot, chat_id=1)
+
+    sent = await session.finalize("ответ")
+
+    assert sent is None
+    assert bot.sent == []
+    assert bot.rich_calls == notifier_module.MAX_RETRIES
+
+
+async def test_finalize_does_not_retry_permanent_bad_request():
+    # Bot API отверг саму rich-разметку — повтор того же payload не поможет,
+    # сдаёмся сразу (вызывающий деградирует формат, см. ai.py::
+    # _send_alfred_reply_rich).
+    bot = FakeBot()
+    bot.rich_fail_exception = TelegramBadRequest(method=None, message="can't parse entities")
+    bot.rich_fails_times = 1
+    session = RichStreamSession(bot, chat_id=1)
+
+    sent = await session.finalize("ответ")
+
+    assert sent is None
+    assert bot.rich_calls == 1
 
 
 async def test_finalize_status_sends_without_prefix_or_reply():

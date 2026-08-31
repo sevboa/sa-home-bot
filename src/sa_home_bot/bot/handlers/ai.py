@@ -930,16 +930,31 @@ async def _do_ask_and_reply(
                 audio_bytes = None
         if audio_bytes is None:
             if rich_session is not None:
-                sent = await _send_alfred_reply_rich(message, raw, rich_session)
-                if sent is None:
-                    log.error("ai: не удалось отправить rich-ответ (chat=%s)", message.chat.id)
+                sent_message_id = await _send_alfred_reply_rich(
+                    message, raw, rich_session, notifier
+                )
+                if sent_message_id is None:
+                    # Не прошла ни rich-отправка, ни плейн-фолбэк внутри
+                    # _send_alfred_reply_rich. Готовый ответ модели терять
+                    # молча нельзя — кладём его целиком в лог узла (этап A,
+                    # 2026-08-30: раньше на этом пути raw не логировался
+                    # нигде и содержимое ответа пропадало бесследно), а
+                    # админу — начало текста (полностью может не влезть и
+                    # само упереться в тот же сбой доставки).
+                    log.error(
+                        "ai: ответ не доставлен ни rich, ни обычным текстом (chat=%s).\n"
+                        "Полный текст ответа Альфреда:\n%s",
+                        message.chat.id,
+                        raw,
+                    )
                     await ai_flow.notify_admins(
                         book,
                         notifier,
-                        f"⚠️ /ai (chat={message.chat.id}): не удалось отправить rich-ответ",
+                        f"⚠️ /ai (chat={message.chat.id}): ответ Альфреда не доставлен "
+                        f"(rich и текстовый фолбэк оба не прошли). Полный текст — в логе "
+                        f"узла. Начало:\n\n{html.escape(raw[:1500])}",
                     )
                     return None
-                sent_message_id = sent.message_id
             else:
                 sent = await _send_alfred_reply(message, raw)
                 sent_message_id = sent.message_id
@@ -981,11 +996,29 @@ async def _send_alfred_reply(message: Message, raw: str) -> Message:
 
 
 async def _send_alfred_reply_rich(
-    message: Message, raw: str, session: RichStreamSession
-) -> Message | None:
+    message: Message, raw: str, session: RichStreamSession, notifier: Notifier
+) -> int | None:
     """Rich-эквивалент _send_alfred_reply (этап 34, Фаза 2) — без
     chunk_text/MAX_LEN: лимит Rich Message значительно выше (см.
-    IMPLEMENTATION_PLAN.md, этап 34); session.finalize сама делает
-    ретраи на 429 (bot/notifier.py::send_with_retry) и возвращает None
-    только при полном исчерпании попыток."""
-    return await session.finalize(raw, reply_to_message_id=message.message_id)
+    IMPLEMENTATION_PLAN.md, этап 34). session.finalize сама делает ретраи
+    транзиентных сбоёв доставки (bot/notifier.py::send_with_retry) и
+    возвращает None только когда rich-отправка так и не прошла: либо связь
+    до Telegram не поднялась за все попытки, либо Bot API отверг саму
+    rich-разметку (TelegramBadRequest — is_permanent_send_error).
+
+    Этап A (2026-08-30): в обоих случаях терять готовый ответ модели
+    нельзя — откатываемся на обычный sendMessage (Notifier.send_direct →
+    _send_one, те же ретраи), плейн-HTML вместо rich-разметки, поэтому
+    content-ошибка rich его не заденет. Возвращает message_id
+    доставленного сообщения (rich или фолбэк) либо None, если не прошло
+    вообще ничего."""
+    sent = await session.finalize(raw, reply_to_message_id=message.message_id)
+    if sent is not None:
+        return sent.message_id
+    log.warning("ai: rich-ответ не ушёл — откат на обычный текст (chat=%s)", message.chat.id)
+    return await notifier.send_direct(
+        message.chat.id,
+        _format_answer(raw),
+        reply_to_message_id=message.message_id,
+        message_thread_id=message.message_thread_id,
+    )

@@ -9,7 +9,12 @@ from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramNotFound,
+    TelegramRetryAfter,
+)
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, ReplyParameters
 
 from sa_home_bot.subscriptions.models import WILDCARD
@@ -20,6 +25,12 @@ log = logging.getLogger(__name__)
 
 MAX_LEN = 4096
 MAX_RETRIES = 3
+# Пауза перед повтором ТРАНЗИЕНТНОГО сбоя доставки, по номеру попытки
+# (сек). Короткая экспонента: цель — пережить моргание SOCKS-прокси до
+# Telegram (память telegram-bot-api-proxy) или краткий 5xx, а не ждать
+# минутами — пользователь смотрит на «печатает». 429 сюда не относится,
+# у него свой sleep(retry_after+1).
+_TRANSIENT_BACKOFF_S = (0.0, 2.0, 5.0)
 # Telegram сам гасит typing-action примерно через 5с — повторяем чуть чаще,
 # чтобы индикатор не мигал видимым образом.
 TYPING_KEEPALIVE_INTERVAL_S = 4.0
@@ -106,18 +117,70 @@ async def typing_action(bot: Bot, chat_id: int, message_thread_id: int | None = 
         await indicator.stop()
 
 
+def is_permanent_send_error(exc: BaseException) -> bool:
+    """Сбой доставки, который повтором ТОГО ЖЕ payload не лечится — ретраить
+    его бессмысленно, вызывающий должен деградировать формат или сообщить
+    об отказе:
+
+    - ``TelegramBadRequest`` — Bot API отверг сам запрос: битая разметка
+      rich/HTML, «message is too long», нерезолвимый reply и т.п.;
+    - ``TelegramForbiddenError`` — бот заблокирован/удалён из чата;
+    - ``TelegramNotFound`` — чат или сообщение не существует.
+
+    Всё остальное считаем транзиентным и повторяем: сетевые таймауты и
+    обрывы, в т.ч. ``aiohttp_socks.ProxyError``/``ProxyTimeoutError``
+    зависшего прокси до Telegram (обычные ``Exception``, не подклассы
+    ``TelegramAPIError`` — живая находка 2026-08-29), 5xx от Telegram.
+    На «терять нельзя» путях (rich_stream.finalize) лучше зря сделать пару
+    лишних попыток и всё равно сдаться, чем сдаться на первом же моргании
+    связи (живая находка 2026-08-30: первый же не-429 сбой давал
+    ``return None`` — молча терялся готовый ответ модели)."""
+    return isinstance(exc, (TelegramBadRequest, TelegramForbiddenError, TelegramNotFound))
+
+
+async def _after_send_failure(
+    exc: BaseException, action: str, chat_id: int, attempt: int
+) -> bool:
+    """Разобрать неудачную попытку отправки (не 429). Вернуть ``True`` —
+    сбой транзиентный и попытки ещё есть, стоит повторить (пауза уже
+    выждана здесь); ``False`` — сдаться (перманентный сбой либо попытки
+    кончились). Общий хвост для всех циклов отправки ниже."""
+    if is_permanent_send_error(exc):
+        log.warning(
+            "Не удалось отправить %s в chat=%s (перманентный сбой, без ретрая): %s",
+            action, chat_id, exc,
+        )
+        return False
+    log.warning(
+        "Не удалось отправить %s в chat=%s (попытка %s/%s): %s",
+        action, chat_id, attempt, MAX_RETRIES, exc,
+    )
+    if attempt >= MAX_RETRIES:
+        return False
+    await asyncio.sleep(_TRANSIENT_BACKOFF_S[min(attempt - 1, len(_TRANSIENT_BACKOFF_S) - 1)])
+    return True
+
+
 async def send_with_retry(
     chat_id: int,
     action: str,
     call: Callable[[], Awaitable[_T]],
 ) -> _T | None:
-    """Общий цикл ретраев на 429/ошибки Telegram (MAX_RETRIES попыток,
-    полноценный sleep(retry_after+1) на TelegramRetryAfter) — вынесен для
+    """Общий цикл ретраев отправки (MAX_RETRIES попыток) — вынесен для
     bot/rich_stream.py (этап 34, Фаза 2), чтобы не копировать цикл
     ``Notifier._send_one`` под sendRichMessage. ``action`` — короткое
-    описание для логов ("rich-сообщение" и т.п.). ``Notifier._send_one``/
-    ``send_document``/``send_photo`` были написаны раньше и на этот хелпер
-    не переведены — рефакторинг их не входит в эту задачу."""
+    описание для логов ("rich-сообщение" и т.п.).
+
+    - ``TelegramRetryAfter`` (429): полноценный sleep(retry_after+1),
+      повтор, попытка НЕ расходуется (лимит — не наш сбой);
+    - транзиентный сетевой сбой (обрыв/таймаут связи, зависший SOCKS-
+      прокси до Telegram, 5xx): пауза по ``_TRANSIENT_BACKOFF_S``, повтор.
+      Живая находка 2026-08-30: раньше первый же такой сбой давал
+      ``return None`` — на ``rich_stream.finalize()`` это молча теряло уже
+      готовый ответ модели;
+    - перманентный сбой (``is_permanent_send_error``: битая разметка,
+      бот заблокирован, чат не найден): ``return None`` сразу, повтор
+      бессмыслен — вызывающий деградирует формат/сообщает об отказе."""
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             return await call()
@@ -125,21 +188,9 @@ async def send_with_retry(
             wait = exc.retry_after + 1
             log.warning("429 от Telegram (chat=%s, %s), жду %ss", chat_id, action, wait)
             await asyncio.sleep(wait)
-        except Exception as exc:  # noqa: BLE001 — см. живую находку 2026-08-29 ниже
-            # Сетевые сбои (напр. aiohttp_socks.ProxyTimeoutError зависшего
-            # SOCKS-прокси до Telegram) — не подклассы TelegramAPIError и
-            # раньше улетали наверх мимо этого же ретрай-цикла, задуманного
-            # именно чтобы не ронять вызывающего на временных сбоях связи
-            # (см. rich_stream.py::_send_draft, тот же класс бага).
-            log.warning(
-                "Не удалось отправить %s в chat=%s (попытка %s/%s): %s",
-                action,
-                chat_id,
-                attempt,
-                MAX_RETRIES,
-                exc,
-            )
-            return None
+        except Exception as exc:  # noqa: BLE001 — CancelledError не Exception, проходит мимо
+            if not await _after_send_failure(exc, action, chat_id, attempt):
+                return None
     log.error("Исчерпаны ретраи отправки %s в chat=%s", action, chat_id)
     return None
 
@@ -239,31 +290,18 @@ class Notifier:
         reply_markup: InlineKeyboardMarkup | None = None,
         message_thread_id: int | None = None,
     ) -> int | None:
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                msg = await self._bot.send_message(
-                    chat_id,
-                    text,
-                    reply_parameters=reply,
-                    reply_markup=reply_markup,
-                    message_thread_id=message_thread_id,
-                )
-                return msg.message_id
-            except TelegramRetryAfter as exc:
-                wait = exc.retry_after + 1
-                log.warning("429 от Telegram (chat=%s), жду %ss", chat_id, wait)
-                await asyncio.sleep(wait)
-            except Exception as exc:  # noqa: BLE001 — см. send_with_retry про сетевые сбои
-                log.warning(
-                    "Не удалось отправить в chat=%s (попытка %s/%s): %s",
-                    chat_id,
-                    attempt,
-                    MAX_RETRIES,
-                    exc,
-                )
-                return None
-        log.error("Исчерпаны ретраи отправки в chat=%s", chat_id)
-        return None
+        msg = await send_with_retry(
+            chat_id,
+            "сообщение",
+            lambda: self._bot.send_message(
+                chat_id,
+                text,
+                reply_parameters=reply,
+                reply_markup=reply_markup,
+                message_thread_id=message_thread_id,
+            ),
+        )
+        return msg.message_id if msg is not None else None
 
     async def send_document(
         self,
@@ -300,15 +338,9 @@ class Notifier:
                 wait = exc.retry_after + 1
                 log.warning("429 от Telegram (chat=%s), жду %ss", chat_id, wait)
                 await asyncio.sleep(wait)
-            except Exception as exc:  # noqa: BLE001 — см. send_with_retry про сетевые сбои
-                log.warning(
-                    "Не удалось отправить документ в chat=%s (попытка %s/%s): %s",
-                    chat_id,
-                    attempt,
-                    MAX_RETRIES,
-                    exc,
-                )
-                return None
+            except Exception as exc:  # noqa: BLE001 — CancelledError не Exception, проходит мимо
+                if not await _after_send_failure(exc, "документ", chat_id, attempt):
+                    return None
         log.error("Исчерпаны ретраи отправки документа в chat=%s", chat_id)
         return None
 
@@ -333,15 +365,9 @@ class Notifier:
                 wait = exc.retry_after + 1
                 log.warning("429 от Telegram (chat=%s), жду %ss", chat_id, wait)
                 await asyncio.sleep(wait)
-            except Exception as exc:  # noqa: BLE001 — см. send_with_retry про сетевые сбои
-                log.warning(
-                    "Не удалось отправить фото в chat=%s (попытка %s/%s): %s",
-                    chat_id,
-                    attempt,
-                    MAX_RETRIES,
-                    exc,
-                )
-                return None
+            except Exception as exc:  # noqa: BLE001 — CancelledError не Exception, проходит мимо
+                if not await _after_send_failure(exc, "фото", chat_id, attempt):
+                    return None
         log.error("Исчерпаны ретраи отправки фото в chat=%s", chat_id)
         return None
 
@@ -366,15 +392,9 @@ class Notifier:
                 wait = exc.retry_after + 1
                 log.warning("429 от Telegram (chat=%s), жду %ss", chat_id, wait)
                 await asyncio.sleep(wait)
-            except Exception as exc:  # noqa: BLE001 — см. send_with_retry про сетевые сбои
-                log.warning(
-                    "Не удалось отправить голосовое в chat=%s (попытка %s/%s): %s",
-                    chat_id,
-                    attempt,
-                    MAX_RETRIES,
-                    exc,
-                )
-                return None
+            except Exception as exc:  # noqa: BLE001 — CancelledError не Exception, проходит мимо
+                if not await _after_send_failure(exc, "голосовое", chat_id, attempt):
+                    return None
         log.error("Исчерпаны ретраи отправки голосового в chat=%s", chat_id)
         return None
 

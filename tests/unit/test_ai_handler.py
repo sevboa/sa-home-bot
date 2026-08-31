@@ -116,14 +116,18 @@ class FakeRichSession:
 
 
 class FakeNotifier:
-    def __init__(self, *, send_voice_result: int | None = 42424) -> None:
+    def __init__(
+        self, *, send_voice_result: int | None = 42424, send_direct_result: int | None = 1
+    ) -> None:
         self.sent: list[tuple[int, str]] = []
         self.sent_voices: list[tuple[int, bytes]] = []
         self._send_voice_result = send_voice_result
+        self._send_direct_result = send_direct_result
 
-    async def send_direct(self, chat_id, text, reply_to_message_id=None, reply_markup=None):
+    async def send_direct(self, chat_id, text, reply_to_message_id=None, reply_markup=None,
+                          message_thread_id=None):
         self.sent.append((chat_id, text))
-        return 1
+        return self._send_direct_result
 
     async def send_voice(self, chat_id, voice, *, filename=None, caption=None,
                           message_thread_id=None):
@@ -1530,3 +1534,56 @@ async def test_empty_model_answer_is_not_sent_as_a_bare_prefix(store, monkeypatc
     # Пустая реплика — не ход диалога: в истории её нет.
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert [r["role"] for r in rows] == ["user"]
+
+
+# --- _send_alfred_reply_rich: фолбэк на обычный текст (этап A, 2026-08-30) ---
+
+
+class _FakeFinalizeSession:
+    """Заглушка RichStreamSession только под _send_alfred_reply_rich —
+    fake из test_rich_stream.py покрывает саму механику finalize()."""
+
+    def __init__(self, finalize_result) -> None:
+        self._finalize_result = finalize_result
+        self.finalize_calls = 0
+
+    async def finalize(self, raw, reply_to_message_id=None):
+        self.finalize_calls += 1
+        self.raw = raw
+        return self._finalize_result
+
+
+async def test_send_alfred_reply_rich_returns_message_id_on_success():
+    message = FakeMessage(1, text="/alfred привет")
+    session = _FakeFinalizeSession(FakeMessage(1))
+    notifier = FakeNotifier()
+
+    result = await ai_handler._send_alfred_reply_rich(message, "ответ", session, notifier)
+
+    assert result == session._finalize_result.message_id
+    assert notifier.sent == []  # фолбэк не понадобился
+
+
+async def test_send_alfred_reply_rich_falls_back_to_plain_when_rich_fails():
+    # finalize вернул None (rich не прошёл — связь либо разметка). Готовый
+    # ответ терять нельзя: уходит обычным текстом через send_direct.
+    message = FakeMessage(1, text="/alfred привет")
+    session = _FakeFinalizeSession(None)
+    notifier = FakeNotifier(send_direct_result=777)
+
+    result = await ai_handler._send_alfred_reply_rich(
+        message, "ответ модели", session, notifier
+    )
+
+    assert result == 777
+    assert notifier.sent == [(1, ai_handler._format_answer("ответ модели"))]
+
+
+async def test_send_alfred_reply_rich_returns_none_when_both_paths_fail():
+    message = FakeMessage(1, text="/alfred привет")
+    session = _FakeFinalizeSession(None)
+    notifier = FakeNotifier(send_direct_result=None)
+
+    result = await ai_handler._send_alfred_reply_rich(message, "ответ", session, notifier)
+
+    assert result is None

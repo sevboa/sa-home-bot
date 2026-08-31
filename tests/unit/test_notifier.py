@@ -10,7 +10,7 @@ Telegram, aiohttp_socks.ProxyTimeoutError) — обычный Exception без �
 from __future__ import annotations
 
 import pytest
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 
 from sa_home_bot.bot import notifier as notifier_module
 from sa_home_bot.bot.notifier import MAX_RETRIES, Notifier, TypingIndicator
@@ -23,6 +23,7 @@ class FakeBot:
         self.deleted: list[tuple[int, int]] = []
         self.fail_times = 0
         self.fail_exception: Exception = ConnectionError("proxy timed out: 60")
+        self.send_message_calls = 0
 
     async def send_chat_action(self, chat_id, action, message_thread_id=None) -> None:
         self.typing_calls += 1
@@ -32,6 +33,7 @@ class FakeBot:
 
     async def send_message(self, chat_id, text, reply_parameters=None, reply_markup=None,
                             message_thread_id=None):
+        self.send_message_calls += 1
         if self.fail_times > 0:
             self.fail_times -= 1
             raise self.fail_exception
@@ -80,6 +82,23 @@ async def test_send_direct_retries_on_429_then_succeeds():
     assert bot.sent == [{"chat_id": 1, "text": "привет"}]
 
 
+async def test_send_direct_retries_transient_network_error_then_succeeds():
+    # Живая находка 2026-08-30: раньше первый же не-429 сбой (моргнувший
+    # SOCKS-прокси до Telegram) давал return None без повтора — на пути
+    # финальной отправки ответа это молча его теряло. Теперь транзиентный
+    # сбой ретраится, как и 429.
+    bot = FakeBot()
+    bot.fail_exception = ConnectionError("proxy timed out: 60")
+    bot.fail_times = 2  # два обрыва, третья попытка проходит
+    notifier = Notifier(bot)
+
+    message_id = await notifier.send_direct(1, "привет")
+
+    assert message_id == 1
+    assert bot.sent == [{"chat_id": 1, "text": "привет"}]
+    assert bot.send_message_calls == 3
+
+
 async def test_send_direct_swallows_network_error_and_returns_none():
     bot = FakeBot()
     bot.fail_times = MAX_RETRIES  # ни одна попытка не пройдёт
@@ -89,6 +108,21 @@ async def test_send_direct_swallows_network_error_and_returns_none():
 
     assert message_id is None
     assert bot.sent == []
+    assert bot.send_message_calls == MAX_RETRIES  # все попытки израсходованы
+
+
+async def test_send_direct_does_not_retry_permanent_bad_request():
+    # TelegramBadRequest (битая разметка / слишком длинно) повтором того же
+    # payload не лечится — сдаёмся сразу, попытки не тратим.
+    bot = FakeBot()
+    bot.fail_exception = TelegramBadRequest(method=None, message="can't parse entities")
+    bot.fail_times = 1
+    notifier = Notifier(bot)
+
+    message_id = await notifier.send_direct(1, "<b>кривой")
+
+    assert message_id is None
+    assert bot.send_message_calls == 1
 
 
 async def test_delete_message_swallows_network_errors():
