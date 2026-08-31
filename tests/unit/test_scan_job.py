@@ -275,3 +275,16 @@ async def test_host_scan_alerts_and_recovers(host_ctx):
 
     trend = await context.store.host_trend("steal_pct", 24, BASE_TIME + timedelta(hours=1))
     assert sum(b["samples"] for b in trend) == 6  # история пишется всегда
+
+
+async def test_disabled_disks_clears_stale_summary_cache(ctx):
+    """vps: датчик дисков выключен — старый кэш DiskSummary затирается, чтобы
+    в карточке ноды не висел призрачный диск."""
+    context, _ = ctx
+    await context.store.save_disk_summaries(
+        [DiskSummary("HDD", None, None, 1, 2, None, "hdd")]
+    )
+    context.config.sensors.disks.enabled = False
+    context.sensors = FakeSensors([40])
+    await SensorScanJob().run(context)
+    assert await context.store.get_disk_summaries() == []

@@ -211,7 +211,10 @@ class SensorScanJob:
         `Store.get_disk_summaries`).
         """
         if not ctx.config.sensors.disks.enabled:
-            return  # vps: физических дисков со SMART нет, не опрашиваем
+            # vps: физических дисков со SMART нет, не опрашиваем; заодно
+            # затираем кэш, если он остался с тех пор, когда датчик был включён.
+            await ctx.store.save_disk_summaries([])
+            return
         health_overrides = await ctx.store.get_smart_health_map()
         disks = await ctx.sensors.read_disk_summaries(health_overrides)
         await ctx.store.save_disk_summaries(disks)
