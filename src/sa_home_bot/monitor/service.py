@@ -16,6 +16,7 @@ from typing import Any
 from sa_home_bot import __version__
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
+from sa_home_bot.domain.host import METRICS, HostMetricState
 from sa_home_bot.domain.models import HealthState, PowerEvent
 from sa_home_bot.jobs.scan import SensorScanJob
 from sa_home_bot.jobs.smart import SmartScanJob
@@ -41,6 +42,11 @@ SERVICE_NAME = "monitor"
 
 ACTION_SCAN_NOW = "scan_now"
 ACTION_DOWNTIME = "downtime"
+ACTION_HOST_TREND = "host_trend"
+
+# Границы окна тренда host-метрик.
+HOST_TREND_DEFAULT_HOURS = 24
+HOST_TREND_MAX_HOURS = 24 * 14
 
 # Границы страницы истории отключений (защита от абсурдных запросов).
 DOWNTIME_DEFAULT_LIMIT = 10
@@ -54,6 +60,18 @@ def _health_dict(state: HealthState) -> dict[str, Any]:
         "label": state.label,
         "status": state.status,
         "temperature_c": state.temperature_c,
+        "alerting_since": state.alerting_since.isoformat() if state.alerting_since else None,
+    }
+
+
+def _host_state_dict(state: HostMetricState) -> dict[str, Any]:
+    return {
+        "component_id": state.component_id,
+        "metric": state.metric,
+        "label": state.label,
+        "unit": state.unit,
+        "status": state.status,
+        "value": state.value,
         "alerting_since": state.alerting_since.isoformat() if state.alerting_since else None,
     }
 
@@ -84,7 +102,7 @@ class MonitorService:
         # не рисуют её кнопкой (у неё есть params), а зовут сами с offset/limit.
         return ServiceDescription(
             info=ServiceInfo(node=self._node, service=SERVICE_NAME, version=__version__),
-            capabilities=("temperature", "smart", "power"),
+            capabilities=("temperature", "smart", "power", "host"),
             actions=(
                 ActionSpec(id=ACTION_SCAN_NOW, title="🔄 Скан датчиков"),
                 ActionSpec(
@@ -95,12 +113,21 @@ class MonitorService:
                         ActionParam(name="limit", type="int", required=False),
                     ),
                 ),
+                ActionSpec(
+                    id=ACTION_HOST_TREND,
+                    title="📊 Тренд host-метрики",
+                    params=(
+                        ActionParam(name="metric", type="string", required=True),
+                        ActionParam(name="hours", type="int", required=False),
+                    ),
+                ),
             ),
         )
 
     async def get_state(self) -> dict[str, Any]:
         loop = asyncio.get_running_loop()
         states = await self._store.get_all_states()
+        host_states = await self._store.get_all_host_states()
         # Диски — кэш SensorScanJob (см. Store.save_disk_summaries), не
         # живой опрос: smartctl/LHM на каждый запрос бота делали /status и
         # особенно веерный /swarm заметно медленными (живой баг 2026-07-18).
@@ -146,6 +173,7 @@ class MonitorService:
             "now": datetime.now(tz=UTC).isoformat(),
             "uptime_s": uptime.total_seconds() if uptime is not None else None,
             "health": [_health_dict(s) for s in states],
+            "host_health": [_host_state_dict(s) for s in host_states],
             "disks": [asdict(d) for d in disks],
             "last_outage": _outage_dict(outages[0] if outages else None),
             "job_counts": await self._store.job_run_counts(),
@@ -155,8 +183,22 @@ class MonitorService:
                 "gpu": {"warn_c": gpu_cfg.warn_c, "crit_c": gpu_cfg.crit_c},
                 "disk": {"warn_c": disk_cfg.warn_c, "crit_c": disk_cfg.crit_c},
             },
+            "host_thresholds": self._host_thresholds(),
             "requirements": requirements,
         }
+
+    def _host_thresholds(self) -> dict[str, dict[str, Any]]:
+        """Эффективные пороги host-метрик (дефолты METRICS + перекрытия конфига)."""
+        overrides = self._settings.sensors.host.thresholds
+        out: dict[str, dict[str, Any]] = {}
+        for name, spec in METRICS.items():
+            ov = overrides.get(name)
+            out[name] = {
+                "warn": ov.warn if ov else spec.warn,
+                "crit": ov.crit if ov else spec.crit,
+                "direction": spec.direction,
+            }
+        return out
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if action == ACTION_SCAN_NOW:
@@ -165,8 +207,23 @@ class MonitorService:
             return {"sensor_queued": sensor_queued, "smart_queued": smart_queued}
         if action == ACTION_DOWNTIME:
             return await self._downtime_page(args)
+        if action == ACTION_HOST_TREND:
+            return await self._host_trend_page(args)
         # Сервер валидирует action по describe — сюда неизвестное не доходит.
         raise ValueError(f"необъявленное действие: {action}")
+
+    async def _host_trend_page(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Тренд одной host-метрики по 10-минуткам (ловит «steal подрос за неделю»)."""
+        metric = str(args.get("metric", "")).strip()
+        if metric not in METRICS:
+            return {"error": "unknown_metric", "metric": metric, "known": sorted(METRICS)}
+        try:
+            hours = int(args.get("hours", HOST_TREND_DEFAULT_HOURS))
+        except (TypeError, ValueError):
+            hours = HOST_TREND_DEFAULT_HOURS
+        hours = max(1, min(hours, HOST_TREND_MAX_HOURS))
+        buckets = await self._store.host_trend(metric, hours, datetime.now(tz=UTC))
+        return {"metric": metric, "hours": hours, "buckets": buckets}
 
     async def _downtime_page(self, args: dict[str, Any]) -> dict[str, Any]:
         """Страница истории отключений ЭТОЙ машины (`last`+`journalctl`).

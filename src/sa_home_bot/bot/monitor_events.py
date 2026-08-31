@@ -11,7 +11,12 @@ from __future__ import annotations
 import logging
 
 from sa_home_bot.bot.dispatch import TelegramEventDispatcher
-from sa_home_bot.bot.monitor_state import parse_overheat_event, parse_smart_change
+from sa_home_bot.bot.monitor_state import (
+    parse_host_event,
+    parse_overheat_event,
+    parse_smart_change,
+)
+from sa_home_bot.domain.host import EVENT_HOST_DEGRADED, EVENT_HOST_RECOVERED
 from sa_home_bot.domain.models import (
     EVENT_OVERHEAT_CLEARED,
     EVENT_OVERHEAT_STARTED,
@@ -36,6 +41,10 @@ def build_event_handler(dispatcher: TelegramEventDispatcher):
                 await dispatcher.dispatch_clear(parse_overheat_event(name, data))
             elif name in (EVENT_SMART_DEGRADED, EVENT_SMART_RECOVERED):
                 await dispatcher.dispatch_smart(parse_smart_change(name, data))
+            elif name == EVENT_HOST_DEGRADED:
+                await dispatcher.dispatch_host_alert(parse_host_event(name, data))
+            elif name == EVENT_HOST_RECOVERED:
+                await dispatcher.dispatch_host_clear(parse_host_event(name, data))
             else:
                 log.info("Событие монитора без обработчика: %s", name)
         except (KeyError, ValueError, TypeError) as exc:

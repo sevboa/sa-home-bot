@@ -82,6 +82,21 @@ baseline_min_std_c = 3.0
 # eMMC (/dev/mmcblk*) и подобные без SMART пропускаются автоматически.
 devices = []
 
+# [sensors.host] — здоровье VPS по /proc вместо термозон: CPU steal (переподписка
+# провайдером), iowait, load/ядро, свободная память, swap, заполнение диска /,
+# PSI, OOM-kill. enabled по умолчанию не задан и выводится из [node].kind:
+# True на "vps", False на server/workstation. На vps этим же правилом гасится
+# [sensors.cpu] (coretemp виртуалки бессмыслен). Явное значение перекрывает.
+#[sensors.host]
+#enabled = true
+#sample_window_s = 10.0             # окно между двумя снимками /proc для дельт steal/iowait
+#consecutive_to_alert = 3
+#consecutive_to_clear = 3
+# Перекрытие дефолтных порогов по имени метрики (см. domain/host.py::METRICS):
+#[sensors.host.thresholds.steal_pct]
+#warn = 10.0
+#crit = 25.0
+
 # [sensors.lhm] — только для Windows-ноды: температуры CPU/дисков читаются
 # через LibreHardwareMonitorLib.dll (pythonnet). На Linux секция игнорируется.
 # Полный пример Windows-конфига — deploy/config-windows.example.toml.

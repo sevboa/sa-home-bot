@@ -13,7 +13,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, ClassVar, Literal, get_args
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -148,10 +148,35 @@ class LhmSensorConfig(BaseModel):
     dll_path: str = ""
 
 
+class HostMetricThreshold(BaseModel):
+    warn: float
+    crit: float
+
+
+class HostSensorConfig(BaseModel):
+    """Host-метрики VPS (steal/iowait/load/память/диск/PSI) — см. `sensors/host.py`.
+
+    ``enabled`` по умолчанию ``None`` — выводится из типа ноды: ``True`` на
+    ``kind="vps"`` (термозон нет, эти метрики — единственный индикатор
+    деградации), ``False`` на server/workstation (там steal ≈ 0, полезнее термо).
+    Явное значение в конфиге ноды перекрывает авто-правило.
+
+    ``thresholds`` — перекрытие дефолтных порогов (`domain/host.METRICS`) по имени
+    метрики: ``[sensors.host.thresholds.steal_pct] warn = 8, crit = 20``.
+    """
+
+    enabled: bool | None = None
+    sample_window_s: float = Field(default=10.0, gt=0)
+    consecutive_to_alert: int = Field(default=3, ge=1)
+    consecutive_to_clear: int = Field(default=3, ge=1)
+    thresholds: dict[str, HostMetricThreshold] = Field(default_factory=dict)
+
+
 class SensorsConfig(BaseModel):
     cpu: CpuSensorConfig = Field(default_factory=CpuSensorConfig)
     gpu: GpuSensorConfig = Field(default_factory=GpuSensorConfig)
     disks: DiskSensorConfig = Field(default_factory=DiskSensorConfig)
+    host: HostSensorConfig = Field(default_factory=HostSensorConfig)
     lhm: LhmSensorConfig = Field(default_factory=LhmSensorConfig)
 
 
@@ -1077,6 +1102,21 @@ class Settings(BaseSettings):
     # нужен (subscriptions/guests.py). None — конфиг не файловый или инстанс
     # не задан: гостей принимать некуда, инвайты просто не работают.
     guests_path: Path | None = None
+
+    @model_validator(mode="after")
+    def _derive_sensors_from_node_kind(self) -> Settings:
+        """VPS: host-метрики вместо термозон.
+
+        ``sensors.host.enabled`` не задан явно → включаем на ``kind="vps"``.
+        На vps дополнительно гасим ``sensors.cpu`` (coretemp виртуалки
+        бессмыслен), если оператор не выставил его сам.
+        """
+        is_vps = self.node.kind == "vps"
+        if self.sensors.host.enabled is None:
+            self.sensors.host.enabled = is_vps
+        if is_vps and "enabled" not in self.sensors.cpu.model_fields_set:
+            self.sensors.cpu.enabled = False
+        return self
 
     @classmethod
     def settings_customise_sources(

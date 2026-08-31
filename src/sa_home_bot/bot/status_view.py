@@ -19,12 +19,14 @@ from sa_home_bot.bot import commands
 from sa_home_bot.bot.monitor_state import (
     parse_disk_summary,
     parse_health_state,
+    parse_host_metric_state,
     parse_outage,
 )
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.domain.models import KIND_CPU, KIND_GPU
 from sa_home_bot.domain.render import (
     render_downtime,
+    render_host_block,
     render_stats,
     render_status_full,
     render_status_summary,
@@ -136,6 +138,10 @@ async def build_summary_text(link: ServiceLink, dst: Address | None = None) -> s
         disk_warn_c=disk_th.get("warn_c", 0.0),
         disk_crit_c=disk_th.get("crit_c", 0.0),
     )
+    host_states = [parse_host_metric_state(h) for h in state.get("host_health", [])]
+    host_block = render_host_block(host_states)
+    if host_block:
+        text += "\n\n" + host_block
     problems = state.get("requirements") or []
     if problems:
         text += "\n" + "\n".join(f"⚠️ {p['hint']}" for p in problems)

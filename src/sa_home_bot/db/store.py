@@ -11,11 +11,16 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from math import sqrt
 from typing import Any
 
 from sa_home_bot.db.connection import Database
+from sa_home_bot.domain.host import (
+    HostHealthDiff,
+    HostMetricReading,
+    HostMetricState,
+)
 from sa_home_bot.domain.models import (
     ALERTING,
     OK,
@@ -54,6 +59,19 @@ def _row_to_state(row) -> HealthState:
         label=row["label"],
         status=row["status"],
         temperature_c=row["last_temperature_c"],
+        consecutive_count=row["consecutive_count"],
+        alerting_since=_parse(row["alerting_since"]),
+    )
+
+
+def _row_to_host_state(row) -> HostMetricState:
+    return HostMetricState(
+        component_id=row["component_id"],
+        metric=row["metric"],
+        label=row["label"],
+        value=row["last_value"],
+        unit=row["unit"],
+        status=row["status"],
         consecutive_count=row["consecutive_count"],
         alerting_since=_parse(row["alerting_since"]),
     )
@@ -312,6 +330,176 @@ class Store:
         )
         row = await cur.fetchone()
         return row["message_id"] if row else None
+
+    # --- host_metric_states (здоровье VPS: steal/iowait/load/...) ---
+
+    async def get_known_host_states(self) -> dict[str, KnownState]:
+        cur = await self.db.conn.execute(
+            "SELECT component_id, status, consecutive_count, alerting_since "
+            "FROM host_metric_states"
+        )
+        rows = await cur.fetchall()
+        return {
+            r["component_id"]: KnownState(
+                component_id=r["component_id"],
+                status=r["status"],
+                consecutive_count=r["consecutive_count"],
+                alerting_since=_parse(r["alerting_since"]),
+            )
+            for r in rows
+        }
+
+    async def get_all_host_states(self) -> list[HostMetricState]:
+        cur = await self.db.conn.execute(
+            "SELECT * FROM host_metric_states ORDER BY component_id"
+        )
+        return [_row_to_host_state(r) for r in await cur.fetchall()]
+
+    async def apply_host_diff(self, diff: HostHealthDiff, now: datetime) -> None:
+        """Записать срез host-состояний и сбросить флаги доставки по переходам."""
+        if not diff.states:
+            return
+        now_s = _iso(now)
+        started = {t.component_id for t in diff.transitions if t.to_status == ALERTING}
+        cleared = {t.component_id for t in diff.transitions if t.to_status == OK}
+        current_ids = {st.component_id for st in diff.states}
+
+        async with self.db.transaction() as conn:
+            for st in diff.states:
+                since_s = _iso(st.alerting_since)
+                cur = await conn.execute(
+                    "SELECT 1 FROM host_metric_states WHERE component_id=?",
+                    (st.component_id,),
+                )
+                if await cur.fetchone() is None:
+                    await conn.execute(
+                        "INSERT INTO host_metric_states("
+                        "component_id, metric, label, unit, status, last_value, "
+                        "consecutive_count, alerting_since, first_seen_at, last_seen_at) "
+                        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            st.component_id, st.metric, st.label, st.unit, st.status,
+                            st.value, st.consecutive_count, since_s, now_s, now_s,
+                        ),
+                    )
+                elif st.component_id in started:
+                    await conn.execute(
+                        "UPDATE host_metric_states SET status=?, label=?, unit=?, "
+                        "last_value=?, consecutive_count=?, alerting_since=?, last_seen_at=?, "
+                        "notified_alert_at=NULL, notified_cleared_at=NULL WHERE component_id=?",
+                        (
+                            st.status, st.label, st.unit, st.value, st.consecutive_count,
+                            now_s, now_s, st.component_id,
+                        ),
+                    )
+                elif st.component_id in cleared:
+                    await conn.execute(
+                        "UPDATE host_metric_states SET status=?, label=?, unit=?, "
+                        "last_value=?, consecutive_count=?, alerting_since=NULL, last_seen_at=?, "
+                        "notified_cleared_at=NULL WHERE component_id=?",
+                        (
+                            st.status, st.label, st.unit, st.value, st.consecutive_count,
+                            now_s, st.component_id,
+                        ),
+                    )
+                else:
+                    await conn.execute(
+                        "UPDATE host_metric_states SET status=?, label=?, unit=?, "
+                        "last_value=?, consecutive_count=?, alerting_since=?, last_seen_at=? "
+                        "WHERE component_id=?",
+                        (
+                            st.status, st.label, st.unit, st.value, st.consecutive_count,
+                            since_s, now_s, st.component_id,
+                        ),
+                    )
+
+            # Метрика пропала из среза (ядро без PSI после апгрейда и т.п.) —
+            # не держим призрака в карточке ноды.
+            id_ph = ",".join("?" for _ in current_ids)
+            await conn.execute(
+                f"DELETE FROM host_metric_states WHERE component_id NOT IN ({id_ph})",
+                tuple(current_ids),
+            )
+
+    async def pending_host_alerts(self) -> list[HostMetricState]:
+        cur = await self.db.conn.execute(
+            "SELECT * FROM host_metric_states "
+            "WHERE status='alerting' AND notified_alert_at IS NULL"
+        )
+        return [_row_to_host_state(r) for r in await cur.fetchall()]
+
+    async def pending_host_clears(self) -> list[HostMetricState]:
+        cur = await self.db.conn.execute(
+            "SELECT * FROM host_metric_states WHERE status='ok' "
+            "AND notified_alert_at IS NOT NULL AND notified_cleared_at IS NULL"
+        )
+        return [_row_to_host_state(r) for r in await cur.fetchall()]
+
+    async def mark_host_alert_notified(self, component_id: str, at: datetime) -> None:
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "UPDATE host_metric_states SET notified_alert_at=? WHERE component_id=?",
+                (_iso(at), component_id),
+            )
+
+    async def mark_host_cleared_notified(self, component_id: str, at: datetime) -> None:
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "UPDATE host_metric_states SET notified_cleared_at=? WHERE component_id=?",
+                (_iso(at), component_id),
+            )
+
+    async def record_host_readings(self, readings: list[HostMetricReading]) -> None:
+        """Записать срез host-показаний в историю (для monitor.host_trend)."""
+        if not readings:
+            return
+        async with self.db.transaction() as conn:
+            await conn.executemany(
+                "INSERT INTO host_readings(component_id, metric, value, taken_at) "
+                "VALUES(?, ?, ?, ?)",
+                [(r.component_id, r.metric, r.value, _iso(r.taken_at)) for r in readings],
+            )
+
+    async def host_trend(self, metric: str, hours: int, now: datetime) -> list[dict]:
+        """Средние host-метрики по 10-минуткам за последние ``hours`` часов.
+
+        Бакет — час + десятка минут (00/10/.../50); ``taken_at`` хранится как
+        ``datetime.isoformat()`` (с ``T``), поэтому и порог считаем в Python в том
+        же формате — строковое сравнение тогда корректно.
+        """
+        cutoff = (now - timedelta(hours=int(hours))).isoformat()
+        cur = await self.db.conn.execute(
+            "SELECT substr(taken_at, 1, 13) || ':' || "
+            "  printf('%02d', (CAST(substr(taken_at, 15, 2) AS INTEGER) / 10) * 10) AS bucket, "
+            "  AVG(value) AS avg_value, MAX(value) AS max_value, COUNT(*) AS n "
+            "FROM host_readings "
+            "WHERE component_id = ? AND taken_at >= ? "
+            "GROUP BY bucket ORDER BY bucket",
+            (f"host:{metric}", cutoff),
+        )
+        return [
+            {
+                "bucket": r["bucket"],
+                "avg": round(r["avg_value"], 2),
+                "max": round(r["max_value"], 2),
+                "samples": r["n"],
+            }
+            for r in await cur.fetchall()
+        ]
+
+    async def prune_host_readings(self, keep_per_component: int) -> int:
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                "DELETE FROM host_readings WHERE id IN ("
+                "  SELECT id FROM ("
+                "    SELECT id, ROW_NUMBER() OVER ("
+                "      PARTITION BY component_id ORDER BY id DESC"
+                "    ) AS rn FROM host_readings"
+                "  ) WHERE rn > ?"
+                ")",
+                (keep_per_component,),
+            )
+            return cur.rowcount
 
     # --- readings (история для BaselinePolicy) ---
 

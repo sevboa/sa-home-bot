@@ -12,8 +12,9 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from sa_home_bot.db.store import NOTIF_ALERT, NOTIF_CLEARED, Store
+from sa_home_bot.domain.host import HostEvent
 from sa_home_bot.domain.models import Event, SmartChange
-from sa_home_bot.domain.render import render_event, render_smart_change
+from sa_home_bot.domain.render import render_event, render_host_event, render_smart_change
 from sa_home_bot.jobs.base import DispatchResult
 from sa_home_bot.subscriptions.book import SubscriptionBook
 
@@ -69,6 +70,24 @@ class TelegramEventDispatcher:
                     event.component_id, sub.chat_id, NOTIF_CLEARED, message_id, now
                 )
         return DispatchResult(delivered=delivered, handled=True)
+
+    async def _dispatch_host(self, event: HostEvent) -> DispatchResult:
+        """Host-события VPS (steal/iowait/…) — без reply-цепочки: их немного, а
+        component_id host-метрики нет в health_states (FK health_notifications)."""
+        text = render_host_event(event)
+        subs = self._subscriptions.accepting(event.type)
+        delivered = False
+        for sub in subs:
+            message_id = await self._notifier.send_direct(sub.chat_id, text)
+            if message_id is not None:
+                delivered = True
+        return DispatchResult(delivered=delivered, handled=delivered or not subs)
+
+    async def dispatch_host_alert(self, event: HostEvent) -> DispatchResult:
+        return await self._dispatch_host(event)
+
+    async def dispatch_host_clear(self, event: HostEvent) -> DispatchResult:
+        return await self._dispatch_host(event)
 
     async def dispatch_smart(self, change: SmartChange) -> DispatchResult:
         text = render_smart_change(change)

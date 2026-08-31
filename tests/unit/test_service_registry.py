@@ -82,9 +82,9 @@ def test_telegram_bot_is_the_singleton_with_its_own_config_package():
     assert registry.singleton_names() == ("telegram-bot",)
 
 
-def test_monitor_needs_hardware_sensors():
-    """На VDS нет термозон и SMART — monitor туда предлагать бессмысленно."""
-    assert registry.SERVICES["monitor"].needs_hardware_sensors
+def test_monitor_no_longer_requires_hardware_sensors():
+    """Этап 38: monitor работает и на VDS (host-метрики из /proc), флаг снят."""
+    assert not registry.SERVICES["monitor"].needs_hardware_sensors
     assert not registry.SERVICES["apps"].needs_hardware_sensors
 
 

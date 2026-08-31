@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 
+from sa_home_bot.domain.hysteresis import reconcile_band
 from sa_home_bot.domain.models import (
     ALERTING,
     EVENT_OVERHEAT_CLEARED,
@@ -22,7 +23,7 @@ from sa_home_bot.domain.models import (
     SensorReading,
     Transition,
 )
-from sa_home_bot.domain.policy import BAND_OVER, BAND_UNDER, ComponentPolicy
+from sa_home_bot.domain.policy import ComponentPolicy
 
 PolicyResolver = Callable[[SensorReading], ComponentPolicy]
 
@@ -35,57 +36,39 @@ def _reconcile_one(
 ) -> tuple[HealthState, Transition | None]:
     band = cpolicy.policy.band(reading)
     prev_status = known.status if known else OK
-    prev_count = known.consecutive_count if known else 0
-    alerting_since = known.alerting_since if known else None
     temp = reading.temperature_c
 
-    def state(status: str, count: int, since: datetime | None) -> HealthState:
-        return HealthState(
+    res = reconcile_band(
+        band,
+        prev_status=prev_status,
+        prev_count=known.consecutive_count if known else 0,
+        alerting_since=known.alerting_since if known else None,
+        consecutive_to_alert=cpolicy.consecutive_to_alert,
+        consecutive_to_clear=cpolicy.consecutive_to_clear,
+        now=now,
+    )
+
+    new_state = HealthState(
+        component_id=reading.component_id,
+        kind=reading.kind,
+        label=reading.label,
+        status=res.status,
+        temperature_c=temp,
+        consecutive_count=res.consecutive_count,
+        alerting_since=res.alerting_since,
+    )
+    transition: Transition | None = None
+    if res.transitioned_to is not None:
+        transition = Transition(
             component_id=reading.component_id,
             kind=reading.kind,
             label=reading.label,
-            status=status,
+            from_status=prev_status,
+            to_status=res.transitioned_to,
             temperature_c=temp,
-            consecutive_count=count,
-            alerting_since=since,
+            at=now,
         )
-
-    if prev_status == OK:
-        # Счётчик копит подряд идущие OVER-срезы.
-        if band == BAND_OVER:
-            count = prev_count + 1
-            if count >= cpolicy.consecutive_to_alert:
-                transition = Transition(
-                    component_id=reading.component_id,
-                    kind=reading.kind,
-                    label=reading.label,
-                    from_status=OK,
-                    to_status=ALERTING,
-                    temperature_c=temp,
-                    at=now,
-                )
-                return state(ALERTING, 0, now), transition
-            return state(OK, count, None), None
-        # MID или UNDER — серия прервалась.
-        return state(OK, 0, None), None
-
-    # prev_status == ALERTING: счётчик копит подряд идущие UNDER-срезы.
-    if band == BAND_UNDER:
-        count = prev_count + 1
-        if count >= cpolicy.consecutive_to_clear:
-            transition = Transition(
-                component_id=reading.component_id,
-                kind=reading.kind,
-                label=reading.label,
-                from_status=ALERTING,
-                to_status=OK,
-                temperature_c=temp,
-                at=now,
-            )
-            return state(OK, 0, None), transition
-        return state(ALERTING, count, alerting_since), None
-    # OVER или MID — остаёмся в alerting, серия остывания прервалась.
-    return state(ALERTING, 0, alerting_since), None
+    return new_state, transition
 
 
 def compute_health_diff(

@@ -88,10 +88,11 @@ def _assign_choices(kind: str) -> tuple[str, ...]:
     return action.params[0].choices
 
 
-def test_monitor_is_not_offered_on_a_machine_without_sensors():
+def test_monitor_is_offered_on_a_vps_too():
+    # Этап 38: на VDS monitor мерит host-метрики из /proc (steal/iowait/память/
+    # диск), а не температуры — поэтому его туда назначать осмысленно.
     assert "monitor" in _assign_choices(KIND_SERVER)
-    assert "monitor" not in _assign_choices(KIND_VPS)
-    # Остальные службы на VDS предлагаются как обычно.
+    assert "monitor" in _assign_choices(KIND_VPS)
     assert "telegram-bot" in _assign_choices(KIND_VPS)
 
 

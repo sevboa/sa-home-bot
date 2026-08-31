@@ -1971,7 +1971,26 @@ tests/unit/test_ai_flow.py); `guests_list` — видимость по прав�
 фильтра, пустая выдача, недоступность без `ctx.book`
 (tests/unit/test_tool_guests_list.py).
 
-### Этап 38. СРОЧНО. Мониторинг VPS: steal/pressure/диск вместо термодатчиков — служба monitor на jeeves и wooster
+### Этап 38. СРОЧНО. Мониторинг VPS: steal/pressure/диск вместо термодатчиков — служба monitor на jeeves и wooster — ✅ код v0.99.0 (2026-09-01)
+
+**Сделано.** Отдельная доменная модель `HostMetricReading`/`HostMetricState`
+(`domain/host.py`) — значение это %/load/счётчик, не °C; гистерезисный КА вынесен
+в общее ядро `domain/hysteresis.py` (переиспользуют и температуры, и host-метрики).
+Адаптер `sensors/host.py` читает `/proc/{stat,meminfo,loadavg,vmstat,pressure/*}` +
+`statvfs('/')` (два снимка stat/vmstat с паузой `sample_window_s` для дельт
+steal/iowait/oom). Метрики: `steal_pct, iowait_pct, load_per_core,
+mem_available_pct (порог «снизу»), swap_used_pct, disk_used_pct, psi_{cpu,memory,io},
+oom_kills`. `[sensors.host].enabled` авто-`True` на `node.kind == "vps"`, тем же
+правилом на vps гасится `[sensors.cpu]` (валидатор `Settings`). Пайплайн скана —
+второй проход в `SensorScanJob` (`_scan_host`), события `host_degraded/host_recovered`
+идут существующим диспетчером → бот (`bot/monitor_events.py`). Тренд:
+`host_readings` пишется всегда, `Store.host_trend(metric, hours)` + действие
+`host_trend` монитора (10-мин бакеты). UI: `render_host_block` в карточке ноды
+(`📊 steal 0% · load 0.2 · RAM своб. 34% · диск / 8%`, ⚠️ + детали при alert).
+`monitor` больше не `needs_hardware_sensors` — предлагается и на vps.
+
+**Осталось:** деплой на wooster и jeeves (см. ниже) — код ноды обновить, добавить
+`monitor` в `[node].assignments`, проверить `kind = "vps"`.
 
 Запрос пользователя 2026-09-01 (после ввода wooster — второй VPS, RackNerd,
 США). Два VPS (jeeves NL, wooster US), оба несут VPN-фейловер, но `monitor`

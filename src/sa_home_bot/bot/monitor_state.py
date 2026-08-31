@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from sa_home_bot.domain.host import HostEvent, HostMetricState
 from sa_home_bot.domain.models import (
     DiskSummary,
     Event,
@@ -33,6 +34,32 @@ def parse_health_state(raw: dict[str, Any]) -> HealthState:
         temperature_c=raw["temperature_c"],
         consecutive_count=0,  # деталь гистерезиса, наружу монитор её не отдаёт
         alerting_since=_dt(raw.get("alerting_since")),
+    )
+
+
+def parse_host_metric_state(raw: dict[str, Any]) -> HostMetricState:
+    return HostMetricState(
+        component_id=raw["component_id"],
+        metric=raw["metric"],
+        label=raw["label"],
+        value=raw["value"],
+        unit=raw.get("unit", ""),
+        status=raw["status"],
+        consecutive_count=0,  # деталь гистерезиса, монитор её наружу не отдаёт
+        alerting_since=_dt(raw.get("alerting_since")),
+    )
+
+
+def parse_host_event(event_type: str, data: dict[str, Any]) -> HostEvent:
+    return HostEvent(
+        type=event_type,
+        component_id=data["component_id"],
+        metric=data["metric"],
+        label=data["label"],
+        value=data["value"],
+        unit=data.get("unit", ""),
+        hint=data.get("hint", ""),
+        at=_dt(data["at"]),
     )
 
 

@@ -197,3 +197,60 @@ def test_render_stats_counts_and_runs():
 
 def test_render_stats_empty():
     assert "не было" in render_stats({}, [])
+
+
+# --- host-метрики VPS (этап 38) ---
+
+
+def _host_state(metric, value, unit, status=OK, since=None):
+    from sa_home_bot.domain.host import HostMetricState
+
+    return HostMetricState(f"host:{metric}", metric, metric, value, unit, status, 0, since)
+
+
+def test_render_host_event_degraded_carries_hint():
+    from sa_home_bot.domain.host import EVENT_HOST_DEGRADED, HostEvent
+    from sa_home_bot.domain.render import render_host_event
+
+    ev = HostEvent(
+        EVENT_HOST_DEGRADED, "host:steal_pct", "steal_pct", "CPU steal", 32.0, "%",
+        "вероятна переподписка ноды провайдером", BASE_TIME,
+    )
+    text = render_host_event(ev)
+    assert "CPU steal: 32%" in text
+    assert "переподписка" in text
+
+
+def test_render_host_event_recovered():
+    from sa_home_bot.domain.host import EVENT_HOST_RECOVERED, HostEvent
+    from sa_home_bot.domain.render import render_host_event
+
+    ev = HostEvent(
+        EVENT_HOST_RECOVERED, "host:steal_pct", "steal_pct", "CPU steal", 3.0, "%", "", BASE_TIME
+    )
+    assert "вернулся к норме" in render_host_event(ev)
+
+
+def test_render_host_block_one_liner_and_alert_detail():
+    from sa_home_bot.domain.render import render_host_block
+
+    states = [
+        _host_state("steal_pct", 0.0, "%"),
+        _host_state("load_per_core", 0.2, ""),
+        _host_state("mem_available_pct", 34.0, "%"),
+        _host_state("disk_used_pct", 8.0, "%"),
+    ]
+    block = render_host_block(states)
+    assert block.startswith("📊")
+    assert "steal 0%" in block and "load 0.2" in block and "диск / 8%" in block
+
+    states[0] = _host_state("steal_pct", 32.0, "%", status=ALERTING, since=BASE_TIME)
+    hot = render_host_block(states)
+    assert hot.startswith("⚠️")
+    assert "steal: <b>32%</b>" in hot
+
+
+def test_render_host_block_empty_is_blank():
+    from sa_home_bot.domain.render import render_host_block
+
+    assert render_host_block([]) == ""

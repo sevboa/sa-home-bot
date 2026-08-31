@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from sa_home_bot.config import Settings
     from sa_home_bot.db.store import Store
+    from sa_home_bot.domain.host import HostEvent
     from sa_home_bot.domain.models import Event, SmartChange
     from sa_home_bot.sensors.source import SensorSource
 
@@ -39,6 +40,10 @@ class EventDispatcher(Protocol):
     async def dispatch_clear(self, event: Event) -> DispatchResult: ...
 
     async def dispatch_smart(self, change: SmartChange) -> DispatchResult: ...
+
+    async def dispatch_host_alert(self, event: HostEvent) -> DispatchResult: ...
+
+    async def dispatch_host_clear(self, event: HostEvent) -> DispatchResult: ...
 
 
 @dataclass

@@ -1,5 +1,7 @@
 """Интеграция SensorScanJob: норма → перегрев → норма через реальную БД."""
 
+from datetime import timedelta
+
 import pytest_asyncio
 
 from sa_home_bot.bot.dispatch import TelegramEventDispatcher
@@ -20,7 +22,7 @@ from sa_home_bot.jobs.base import JobContext
 from sa_home_bot.jobs.scan import SensorScanJob
 from sa_home_bot.subscriptions.book import SubscriptionBook
 
-from .conftest import make_reading
+from .conftest import BASE_TIME, make_reading
 
 
 class FakeSensors:
@@ -33,6 +35,9 @@ class FakeSensors:
         temp = self._temps[min(self._i, len(self._temps) - 1)]
         self._i += 1
         return [make_reading(temp)]
+
+    async def read_host(self):
+        return []
 
     async def read_disk_summaries(self, health_overrides):
         return self._disks
@@ -149,6 +154,9 @@ class FakeGpuSensors:
         self._i += 1
         return [make_reading(temp, component_id="gpu:0", kind=KIND_GPU, label="Tesla V100")]
 
+    async def read_host(self):
+        return []
+
     async def read_disk_summaries(self, health_overrides):
         return []
 
@@ -198,3 +206,72 @@ async def test_gpu_reading_uses_gpu_thresholds_not_disk(gpu_ctx):
     alert_sends = [s for s in notifier.sent if "Перегрев" in s[1]]
     assert len(alert_sends) == 1
     assert "GPU" in alert_sends[0][1]
+
+
+class FakeHostSensors:
+    """Отдаёт host-метрики VPS (kind=host) — проверить отдельный пайплайн скана."""
+
+    def __init__(self, steal_seq: list[float]) -> None:
+        self._seq = steal_seq
+        self._i = 0
+
+    async def read_all(self):
+        return []
+
+    async def read_host(self):
+        from sa_home_bot.domain.host import METRICS, HostMetricReading
+
+        v = self._seq[min(self._i, len(self._seq) - 1)]
+        self._i += 1
+        label = METRICS["steal_pct"].label
+        return [
+            HostMetricReading("host:steal_pct", "steal_pct", label, v, "%", BASE_TIME)
+        ]
+
+    async def read_disk_summaries(self, health_overrides):
+        return []
+
+
+@pytest_asyncio.fixture
+async def host_ctx(tmp_path):
+    from sa_home_bot.config import HostSensorConfig
+
+    db = Database(tmp_path / "scan_host.sqlite")
+    await db.open()
+    await apply_migrations(db)
+    book = SubscriptionBook.from_config(
+        [SubscriptionConfig(name="me", chat_id=1, event_types=["*"], allowed_commands=[])]
+    )
+    notifier = FakeNotifier()
+    store = Store(db)
+    settings = _settings()
+    settings.sensors.host = HostSensorConfig(
+        enabled=True, consecutive_to_alert=2, consecutive_to_clear=2
+    )
+    context = JobContext(
+        store=store,
+        sensors=FakeHostSensors([30.0, 30.0, 30.0, 1.0, 1.0, 1.0]),
+        dispatcher=TelegramEventDispatcher(notifier, book, store),
+        config=settings,
+    )
+    yield context, notifier
+    await db.close()
+
+
+async def test_host_scan_alerts_and_recovers(host_ctx):
+    context, notifier = host_ctx
+    job = SensorScanJob()
+    results = [await job.run(context) for _ in range(6)]
+
+    assert sum(r.alerts_sent for r in results) == 1
+    assert sum(r.clears_sent for r in results) == 1
+    texts = [s[1] for s in notifier.sent]
+    assert any("CPU steal: 30%" in t and "переподписка" in t for t in texts)
+    assert any("вернулся к норме" in t for t in texts)
+
+    states = {s.component_id: s for s in await context.store.get_all_host_states()}
+    assert states["host:steal_pct"].status == "ok"
+    assert await context.store.pending_host_alerts() == []
+
+    trend = await context.store.host_trend("steal_pct", 24, BASE_TIME + timedelta(hours=1))
+    assert sum(b["samples"] for b in trend) == 6  # история пишется всегда

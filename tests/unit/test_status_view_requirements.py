@@ -37,3 +37,28 @@ async def test_summary_appends_privilege_warning():
 async def test_summary_quiet_without_requirement_problems():
     text = await build_summary_text(FakeMonitorLink([]))
     assert "⚠️" not in text
+
+
+async def test_summary_renders_host_block_for_vps_node():
+    link = FakeMonitorLink([])
+
+    async def get_state(dst=None):
+        return {
+            "uptime_s": 60.0,
+            "health": [],
+            "disks": [],
+            "last_outage": None,
+            "thresholds": {},
+            "requirements": [],
+            "host_health": [
+                {"component_id": "host:steal_pct", "metric": "steal_pct", "label": "CPU steal",
+                 "unit": "%", "status": "ok", "value": 0.0, "alerting_since": None},
+                {"component_id": "host:disk_used_pct", "metric": "disk_used_pct",
+                 "label": "диск /", "unit": "%", "status": "ok", "value": 8.0,
+                 "alerting_since": None},
+            ],
+        }
+
+    link.get_state = get_state
+    text = await build_summary_text(link)
+    assert "📊" in text and "steal 0%" in text and "диск / 8%" in text

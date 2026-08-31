@@ -238,3 +238,48 @@ async def test_downtime_clamps_bad_args(service):
 
     assert calls[0] == (0, 50)  # отрицательный offset → 0, limit → максимум
     assert calls[1] == (0, 10)  # непарсибельные значения → дефолты
+
+
+# --- host-метрики VPS (этап 38) ---
+
+
+def test_describe_declares_host_capability_and_trend(service):
+    from sa_home_bot.monitor.service import ACTION_HOST_TREND
+
+    svc, _, _ = service
+    desc = svc.describe()
+    assert "host" in desc.capabilities
+    trend = desc.find_action(ACTION_HOST_TREND)
+    assert trend is not None
+    assert {p.name for p in trend.params} == {"metric", "hours"}
+
+
+async def test_get_state_carries_host_health_and_thresholds(service):
+    from sa_home_bot.domain.host import HostHealthDiff, HostMetricState
+
+    svc, store, _ = service
+    now = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    st = HostMetricState("host:steal_pct", "steal_pct", "CPU steal", 32.0, "%", "alerting", 0, now)
+    await store.apply_host_diff(HostHealthDiff(states=[st], transitions=[]), now)
+
+    with (
+        patch("sa_home_bot.monitor.service.read_uptime_sync", return_value=None),
+        patch("sa_home_bot.monitor.service.read_power_events_sync", return_value=([], False)),
+    ):
+        state = await svc.get_state()
+
+    assert state["host_health"][0]["metric"] == "steal_pct"
+    assert state["host_health"][0]["value"] == 32.0
+    assert state["host_thresholds"]["steal_pct"]["warn"] == 10.0
+    assert state["host_thresholds"]["mem_available_pct"]["direction"] == "below"
+
+
+async def test_host_trend_action_rejects_unknown_metric(service):
+    svc, _, _ = service
+    from sa_home_bot.monitor.service import ACTION_HOST_TREND
+
+    res = await svc.run_command(ACTION_HOST_TREND, {"metric": "nonsense"})
+    assert res["error"] == "unknown_metric"
+
+    ok = await svc.run_command(ACTION_HOST_TREND, {"metric": "steal_pct", "hours": 3})
+    assert ok["metric"] == "steal_pct" and ok["hours"] == 3 and ok["buckets"] == []

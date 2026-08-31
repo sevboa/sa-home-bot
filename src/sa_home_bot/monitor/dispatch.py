@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
+from sa_home_bot.domain.host import HostEvent
 from sa_home_bot.domain.models import Event, SmartChange
 from sa_home_bot.jobs.base import DispatchResult
 from sa_home_bot.proto.server import ProtoServer
@@ -20,6 +21,18 @@ def event_payload(event: Event) -> dict:
         "kind": event.kind,
         "label": event.label,
         "temperature_c": event.temperature_c,
+        "at": event.at.isoformat(),
+    }
+
+
+def host_event_payload(event: HostEvent) -> dict:
+    return {
+        "component_id": event.component_id,
+        "metric": event.metric,
+        "label": event.label,
+        "value": event.value,
+        "unit": event.unit,
+        "hint": event.hint,
         "at": event.at.isoformat(),
     }
 
@@ -47,6 +60,12 @@ class ProtoEventDispatcher:
 
     async def dispatch_smart(self, change: SmartChange) -> DispatchResult:
         return await self._broadcast(change.event_type, smart_change_payload(change))
+
+    async def dispatch_host_alert(self, event: HostEvent) -> DispatchResult:
+        return await self._broadcast(event.type, host_event_payload(event))
+
+    async def dispatch_host_clear(self, event: HostEvent) -> DispatchResult:
+        return await self._broadcast(event.type, host_event_payload(event))
 
     async def _broadcast(self, event_type: str, data: dict) -> DispatchResult:
         delivered = await self._server.broadcast_event(event_type, data)

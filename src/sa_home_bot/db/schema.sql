@@ -45,6 +45,35 @@ CREATE TABLE IF NOT EXISTS readings (
 -- Скользящее окно берётся по последним id в рамках component_id.
 CREATE INDEX IF NOT EXISTS idx_readings_component ON readings(component_id, id);
 
+-- Текущее состояние host-метрики VPS (steal/iowait/load/память/диск/PSI —
+-- sensors/host.py, domain/host.py). Отдельно от health_states: значение это
+-- %/load/счётчик, не °C. Гистерезис — тот же (domain/hysteresis.py).
+CREATE TABLE IF NOT EXISTS host_metric_states (
+    component_id         TEXT PRIMARY KEY,   -- "host:steal_pct"
+    metric               TEXT NOT NULL,      -- steal_pct / iowait_pct / ...
+    label                TEXT NOT NULL,
+    unit                 TEXT NOT NULL DEFAULT '',
+    status               TEXT NOT NULL,      -- ok / alerting
+    last_value           REAL,
+    consecutive_count    INTEGER NOT NULL DEFAULT 0,
+    alerting_since       TEXT,
+    first_seen_at        TEXT NOT NULL,
+    last_seen_at         TEXT NOT NULL,
+    notified_alert_at    TEXT,
+    notified_cleared_at  TEXT
+);
+
+-- История host-показаний VPS для тренда (monitor.host_trend). Пишется всегда
+-- при активном [sensors.host]; агрегируется по 10-минуткам на запрос.
+CREATE TABLE IF NOT EXISTS host_readings (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    component_id  TEXT NOT NULL,             -- "host:steal_pct"
+    metric        TEXT NOT NULL,
+    value         REAL NOT NULL,
+    taken_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_host_readings_metric ON host_readings(component_id, taken_at);
+
 -- Последний SMART-снимок диска (baseline для дельты деградации).
 -- Одна строка на диск; обновляется нечастым SmartScanJob. attrs_json —
 -- сырые raw-значения отслеживаемых атрибутов: {"5": 31, "197": 0, ...}.

@@ -13,6 +13,16 @@ import logging
 from datetime import UTC, datetime
 
 from sa_home_bot.domain.health import compute_health_diff
+from sa_home_bot.domain.host import (
+    EVENT_HOST_DEGRADED,
+    EVENT_HOST_RECOVERED,
+    METRICS,
+    HostEvent,
+    HostMetricPolicy,
+    HostMetricReading,
+    HostMetricState,
+    compute_host_diff,
+)
 from sa_home_bot.domain.models import (
     EVENT_OVERHEAT_CLEARED,
     EVENT_OVERHEAT_STARTED,
@@ -115,14 +125,60 @@ class SensorScanJob:
         alerts_sent = await self._dispatch_alerts(ctx, now)
         clears_sent = await self._dispatch_clears(ctx, now)
 
+        host_scanned, host_transitions, host_alerts, host_clears = await self._scan_host(ctx, now)
+
         await self._refresh_disk_summaries(ctx)
 
         return JobResult(
-            components_scanned=len(readings),
-            transitions=len(diff.transitions),
-            alerts_sent=alerts_sent,
-            clears_sent=clears_sent,
+            components_scanned=len(readings) + host_scanned,
+            transitions=len(diff.transitions) + host_transitions,
+            alerts_sent=alerts_sent + host_alerts,
+            clears_sent=clears_sent + host_clears,
         )
+
+    def _host_resolver(self, config):
+        host_cfg = config.sensors.host
+
+        def resolve(reading: HostMetricReading) -> HostMetricPolicy:
+            spec = METRICS[reading.metric]
+            override = host_cfg.thresholds.get(reading.metric)
+            if override is not None:
+                spec = spec.with_thresholds(override.warn, override.crit)
+            return HostMetricPolicy(
+                spec=spec,
+                consecutive_to_alert=host_cfg.consecutive_to_alert,
+                consecutive_to_clear=host_cfg.consecutive_to_clear,
+            )
+
+        return resolve
+
+    async def _scan_host(self, ctx: JobContext, now: datetime) -> tuple[int, int, int, int]:
+        """Срез host-метрик VPS (пусто на server/workstation — [sensors.host] выключен)."""
+        readings = await ctx.sensors.read_host()
+        if not readings:
+            return 0, 0, 0, 0
+        known = await ctx.store.get_known_host_states()
+        diff = compute_host_diff(readings, known, self._host_resolver(ctx.config), now)
+        await ctx.store.apply_host_diff(diff, now)
+        await ctx.store.record_host_readings(readings)
+
+        alerts = 0
+        for state in await ctx.store.pending_host_alerts():
+            event = _host_event_from_state(state, EVENT_HOST_DEGRADED, now)
+            result = await ctx.dispatcher.dispatch_host_alert(event)
+            if result.handled:
+                await ctx.store.mark_host_alert_notified(state.component_id, now)
+            if result.delivered:
+                alerts += 1
+        clears = 0
+        for state in await ctx.store.pending_host_clears():
+            event = _host_event_from_state(state, EVENT_HOST_RECOVERED, now)
+            result = await ctx.dispatcher.dispatch_host_clear(event)
+            if result.handled:
+                await ctx.store.mark_host_cleared_notified(state.component_id, now)
+            if result.delivered:
+                clears += 1
+        return len(readings), len(diff.transitions), alerts, clears
 
     async def _dispatch_alerts(self, ctx: JobContext, now: datetime) -> int:
         sent = 0
@@ -157,6 +213,22 @@ class SensorScanJob:
         health_overrides = await ctx.store.get_smart_health_map()
         disks = await ctx.sensors.read_disk_summaries(health_overrides)
         await ctx.store.save_disk_summaries(disks)
+
+
+def _host_event_from_state(
+    state: HostMetricState, event_type: str, now: datetime
+) -> HostEvent:
+    use_alert_time = event_type == EVENT_HOST_DEGRADED and state.alerting_since is not None
+    return HostEvent(
+        type=event_type,
+        component_id=state.component_id,
+        metric=state.metric,
+        label=state.label,
+        value=state.value,
+        unit=state.unit,
+        hint=METRICS[state.metric].hint if state.metric in METRICS else "",
+        at=state.alerting_since if use_alert_time else now,
+    )
 
 
 def _event_from_state(state: HealthState, event_type: str, now: datetime) -> Event:

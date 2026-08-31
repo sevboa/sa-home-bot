@@ -422,3 +422,63 @@ async def test_pop_event_waiter_removes_by_task_id_regardless_of_event(store):
     assert await store.pop_event_waiter_for("arch-t480", "restart_applied") is None
 
 
+
+
+# --- host-метрики VPS (domain/host.py, этап 38) ---
+
+
+def _host_diff(status, value, metric="steal_pct", since=None, count=0):
+    from sa_home_bot.domain.host import HostHealthDiff, HostMetricState, HostTransition
+
+    st = HostMetricState(f"host:{metric}", metric, "CPU steal", value, "%", status, count, since)
+    trs = []
+    if status == ALERTING and since is not None and count == 0:
+        trs = [
+            HostTransition(
+                f"host:{metric}", metric, "CPU steal", value, "%", "", OK, ALERTING, since
+            )
+        ]
+    return HostHealthDiff(states=[st], transitions=trs)
+
+
+async def test_host_state_roundtrip_and_pending_alert(store):
+    now = BASE_TIME
+    await store.apply_host_diff(_host_diff(ALERTING, 32.0, since=now), now)
+    states = await store.get_all_host_states()
+    assert len(states) == 1
+    assert states[0].metric == "steal_pct" and states[0].value == 32.0
+
+    pending = await store.pending_host_alerts()
+    assert [p.component_id for p in pending] == ["host:steal_pct"]
+    await store.mark_host_alert_notified("host:steal_pct", now)
+    assert await store.pending_host_alerts() == []
+
+
+async def test_host_trend_buckets_by_ten_minutes(store):
+    from sa_home_bot.domain.host import HostMetricReading
+
+    for i in range(15):  # 15 срезов по минуте — два 10-минутных бакета
+        at = BASE_TIME + timedelta(minutes=i)
+        await store.record_host_readings(
+            [HostMetricReading("host:steal_pct", "steal_pct", "CPU steal", float(i), "%", at)]
+        )
+
+    trend = await store.host_trend("steal_pct", hours=24, now=BASE_TIME + timedelta(minutes=20))
+    assert len(trend) == 2  # минуты 0..9 и 10..14 (BASE_TIME на :00)
+    assert trend[0]["samples"] == 10
+    assert trend[0]["avg"] == pytest.approx(4.5)
+    assert trend[1]["samples"] == 5
+
+
+async def test_prune_host_readings_keeps_last_n(store):
+    from sa_home_bot.domain.host import HostMetricReading
+
+    for i in range(10):
+        at = BASE_TIME + timedelta(minutes=i)
+        await store.record_host_readings(
+            [HostMetricReading("host:steal_pct", "steal_pct", "CPU steal", float(i), "%", at)]
+        )
+    removed = await store.prune_host_readings(4)
+    assert removed == 6
+    trend = await store.host_trend("steal_pct", hours=999, now=BASE_TIME + timedelta(hours=1))
+    assert sum(b["samples"] for b in trend) == 4

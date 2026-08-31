@@ -46,6 +46,8 @@ class ServiceSpec:
 
     ``needs_hardware_sensors`` — службе нужны термозоны/SMART реальной
     машины; на ноде без них (vps) она бессмысленна и не предлагается.
+    С этапа 38 у monitor этот флаг снят: на vps он мерит host-метрики
+    из /proc (steal/iowait/память/диск), а не температуры.
     """
 
     name: str
@@ -70,7 +72,6 @@ _SPECS: tuple[ServiceSpec, ...] = (
         name="monitor",
         cli_name="monitor",
         endpoint_attr="monitor.socket",
-        needs_hardware_sensors=True,
     ),
     ServiceSpec(
         name="telegram-bot",

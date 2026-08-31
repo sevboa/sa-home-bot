@@ -10,8 +10,9 @@ import asyncio
 from datetime import UTC, datetime
 
 from sa_home_bot.config import SensorsConfig
+from sa_home_bot.domain.host import HostMetricReading
 from sa_home_bot.domain.models import DiskSummary, SensorReading, SmartSnapshot
-from sa_home_bot.sensors import cpu, disks, gpu
+from sa_home_bot.sensors import cpu, disks, gpu, host
 
 
 def _now() -> datetime:
@@ -43,6 +44,15 @@ class SensorSource:
         devices = list(self._config.disks.devices)
         return await loop.run_in_executor(
             None, disks.read_disks_sync, devices, _now(), self._config.lhm.dll_path
+        )
+
+    async def read_host(self) -> list[HostMetricReading]:
+        """Host-метрики VPS (/proc). Пусто, если датчик выключен (не-vps по дефолту)."""
+        if not self._config.host.enabled:
+            return []
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, host.read_host_sync, _now(), self._config.host.sample_window_s
         )
 
     async def read_all(self) -> list[SensorReading]:
