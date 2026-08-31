@@ -1971,7 +1971,7 @@ tests/unit/test_ai_flow.py); `guests_list` — видимость по прав�
 фильтра, пустая выдача, недоступность без `ctx.book`
 (tests/unit/test_tool_guests_list.py).
 
-### Этап 38. СРОЧНО. Мониторинг VPS: steal/pressure/диск вместо термодатчиков — служба monitor на jeeves и wooster — ✅ код v0.99.0 (2026-09-01)
+### Этап 38. СРОЧНО. Мониторинг VPS: steal/pressure/диск вместо термодатчиков — служба monitor на jeeves и wooster — ✅ v0.99.0 (2026-09-01), задеплоено на alfred+jeeves+wooster
 
 **Сделано.** Отдельная доменная модель `HostMetricReading`/`HostMetricState`
 (`domain/host.py`) — значение это %/load/счётчик, не °C; гистерезисный КА вынесен
@@ -1989,8 +1989,10 @@ oom_kills`. `[sensors.host].enabled` авто-`True` на `node.kind == "vps"`, 
 (`📊 steal 0% · load 0.2 · RAM своб. 34% · диск / 8%`, ⚠️ + детали при alert).
 `monitor` больше не `needs_hardware_sensors` — предлагается и на vps.
 
-**Осталось:** деплой на wooster и jeeves (см. ниже) — код ноды обновить, добавить
-`monitor` в `[node].assignments`, проверить `kind = "vps"`.
+**Деплой 2026-09-01:** v0.99.0 раскатана на alfred, jeeves, wooster (`nodectl update`
++ `restart_node`); `monitor` добавлен в `[node].assignments` jeeves и wooster. Проверено:
+на обоих VPS `host_metric_states` наполняется всеми 10 метриками (все `ok`), на alfred
+(`kind=server`) host-метрик нет, термо/SMART работают как раньше.
 
 Запрос пользователя 2026-09-01 (после ввода wooster — второй VPS, RackNerd,
 США). Два VPS (jeeves NL, wooster US), оба несут VPN-фейловер, но `monitor`
