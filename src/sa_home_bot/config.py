@@ -1105,17 +1105,21 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _derive_sensors_from_node_kind(self) -> Settings:
-        """VPS: host-метрики вместо термозон.
+        """VPS: host-метрики из /proc вместо термозон и SMART.
 
         ``sensors.host.enabled`` не задан явно → включаем на ``kind="vps"``.
-        На vps дополнительно гасим ``sensors.cpu`` (coretemp виртуалки
-        бессмыслен), если оператор не выставил его сам.
+        На vps тем же правилом гасятся ``sensors.cpu`` и ``sensors.disks``
+        (coretemp виртуалки бессмыслен, SMART у виртуального диска нет —
+        иначе монитор зря жалуется на отсутствующий smartctl), если оператор
+        не выставил флаги сам.
         """
         is_vps = self.node.kind == "vps"
         if self.sensors.host.enabled is None:
             self.sensors.host.enabled = is_vps
-        if is_vps and "enabled" not in self.sensors.cpu.model_fields_set:
-            self.sensors.cpu.enabled = False
+        if is_vps:
+            for sensor in (self.sensors.cpu, self.sensors.disks):
+                if "enabled" not in sensor.model_fields_set:
+                    sensor.enabled = False
         return self
 
     @classmethod

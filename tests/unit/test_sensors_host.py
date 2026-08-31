@@ -123,6 +123,7 @@ def test_host_sensor_auto_enabled_on_vps(tmp_path):
     s = Settings.load(cfg)
     assert s.sensors.host.enabled is True
     assert s.sensors.cpu.enabled is False  # coretemp виртуалки — бесполезен
+    assert s.sensors.disks.enabled is False  # SMART у виртуального диска нет
 
 
 def test_host_sensor_off_by_default_on_server(tmp_path):
@@ -137,12 +138,13 @@ def test_explicit_host_and_cpu_flags_win_on_vps(tmp_path):
     cfg = tmp_path / "config.toml"
     cfg.write_text(
         '[node]\nkind = "vps"\n[sensors.host]\nenabled = false\n'
-        "[sensors.cpu]\nenabled = true\n",
+        "[sensors.cpu]\nenabled = true\n[sensors.disks]\nenabled = true\n",
         encoding="utf-8",
     )
     s = Settings.load(cfg)
     assert s.sensors.host.enabled is False
     assert s.sensors.cpu.enabled is True
+    assert s.sensors.disks.enabled is True
 
 
 def test_host_threshold_override_in_config(tmp_path):

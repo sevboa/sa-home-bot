@@ -231,7 +231,7 @@ def test_render_host_event_recovered():
     assert "вернулся к норме" in render_host_event(ev)
 
 
-def test_render_host_block_one_liner_and_alert_detail():
+def test_render_host_block_bullets_and_alert_mark():
     from sa_home_bot.domain.render import render_host_block
 
     states = [
@@ -241,13 +241,27 @@ def test_render_host_block_one_liner_and_alert_detail():
         _host_state("disk_used_pct", 8.0, "%"),
     ]
     block = render_host_block(states)
-    assert block.startswith("📊")
-    assert "steal 0%" in block and "load 0.2" in block and "диск / 8%" in block
+    lines = block.splitlines()
+    assert lines[0] == "📊 <b>Хост VPS</b>"
+    assert " • CPU steal: <b>0%</b>" in lines
+    assert " • load / ядро: <b>0.2</b>" in lines
+    assert " • диск / заполнен: <b>8%</b>" in lines
 
     states[0] = _host_state("steal_pct", 32.0, "%", status=ALERTING, since=BASE_TIME)
     hot = render_host_block(states)
     assert hot.startswith("⚠️")
-    assert "steal: <b>32%</b>" in hot
+    assert " • ⚠️ CPU steal: <b>32%</b>" in hot
+
+
+def test_render_host_block_psi_shown_only_when_alerting():
+    from sa_home_bot.domain.render import render_host_block
+
+    calm = render_host_block([_host_state("steal_pct", 0.0, "%"), _host_state("psi_io", 5.0, "%")])
+    assert "PSI io" not in calm
+    hot = render_host_block(
+        [_host_state("steal_pct", 0.0, "%"), _host_state("psi_io", 70.0, "%", status=ALERTING)]
+    )
+    assert "PSI io" in hot
 
 
 def test_render_host_block_empty_is_blank():

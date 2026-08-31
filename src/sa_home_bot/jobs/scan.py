@@ -210,6 +210,8 @@ class SensorScanJob:
         фон на кадансе scan_cron, а бот читает готовый кэш (см.
         `Store.get_disk_summaries`).
         """
+        if not ctx.config.sensors.disks.enabled:
+            return  # vps: физических дисков со SMART нет, не опрашиваем
         health_overrides = await ctx.store.get_smart_health_map()
         disks = await ctx.sensors.read_disk_summaries(health_overrides)
         await ctx.store.save_disk_summaries(disks)

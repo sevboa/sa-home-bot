@@ -61,4 +61,6 @@ async def test_summary_renders_host_block_for_vps_node():
 
     link.get_state = get_state
     text = await build_summary_text(link)
-    assert "📊" in text and "steal 0%" in text and "диск / 8%" in text
+    assert "📊 <b>Хост VPS</b>" in text
+    assert " • CPU steal: <b>0%</b>" in text
+    assert " • диск / заполнен: <b>8%</b>" in text

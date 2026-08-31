@@ -90,7 +90,7 @@ METRICS: dict[str, HostMetricSpec] = {
         "активный своппинг — памяти не хватает",
     ),
     "disk_used_pct": HostMetricSpec(
-        "disk_used_pct", "диск /", "%", DIR_ABOVE, 80.0, 92.0, 3.0,
+        "disk_used_pct", "диск / заполнен", "%", DIR_ABOVE, 80.0, 92.0, 3.0,
         "мало места на корневом разделе",
     ),
     "psi_cpu": HostMetricSpec(

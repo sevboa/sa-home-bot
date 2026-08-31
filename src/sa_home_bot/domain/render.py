@@ -61,49 +61,60 @@ def render_host_event(event: HostEvent) -> str:
     return f"✅ <b>{label}</b> вернулся к норме ({val})\nВремя: {when}"
 
 
-# Метрики короткой строки карточки VPS-ноды (в этом порядке).
-_HOST_SUMMARY_METRICS = ("steal_pct", "load_per_core", "mem_available_pct", "disk_used_pct")
+# Метрики карточки VPS-ноды (в этом порядке, по пунктам).
+_HOST_CARD_METRICS = (
+    "steal_pct",
+    "iowait_pct",
+    "load_per_core",
+    "mem_available_pct",
+    "swap_used_pct",
+    "disk_used_pct",
+)
 _HOST_SHORT_LABEL = {
-    "steal_pct": "steal",
-    "load_per_core": "load",
-    "mem_available_pct": "RAM своб.",
-    "disk_used_pct": "диск /",
-    "iowait_pct": "iowait",
-    "swap_used_pct": "swap",
+    "steal_pct": "CPU steal",
+    "iowait_pct": "iowait (нагрузка на диск)",
+    "load_per_core": "load / ядро",
+    "mem_available_pct": "RAM свободно",
+    "swap_used_pct": "swap занято",
+    "disk_used_pct": "диск / заполнен",
+    "psi_cpu": "PSI cpu",
+    "psi_memory": "PSI mem",
+    "psi_io": "PSI io",
+    "oom_kills": "OOM-kill",
 }
 
 
 def render_host_line(state: HostMetricState) -> str:
-    """Одна строка host-метрики для подробного вида."""
-    icon = "⚠️" if state.status == ALERTING else "✅"
+    """Один пункт host-метрики в карточке ноды."""
+    mark = "⚠️ " if state.status == ALERTING else ""
     short = _HOST_SHORT_LABEL.get(state.metric, state.label)
     val = fmt_host_value(state.value, state.unit)
     suffix = ""
     if state.status == ALERTING and state.alerting_since is not None:
-        suffix = f" с {state.alerting_since.astimezone().strftime('%H:%M:%S')}"
-    return f"{icon} {short}: <b>{val}</b>{suffix}"
+        suffix = f" (с {state.alerting_since.astimezone().strftime('%H:%M')})"
+    return f" • {mark}{short}: <b>{val}</b>{suffix}"
 
 
 def render_host_block(states: list[HostMetricState]) -> str:
-    """Короткая строка здоровья VPS для карточки ноды:
+    """Здоровье VPS для карточки ноды — заголовок + метрики пунктами.
 
-    «📊 steal 0% · load 0.2 · RAM своб. 34% · диск / 8%». Если хоть одна метрика
-    в alerting — ведущий значок ⚠️ и отдельная строка с подробностями."""
+    Заголовок ⚠️ вместо 📊, если хоть одна метрика в alerting. PSI/OOM в карточке
+    показываются только когда сами в alerting (иначе шумно)."""
     if not states:
         return ""
     by_metric = {s.metric: s for s in states}
-    parts: list[str] = []
-    for metric in _HOST_SUMMARY_METRICS:
-        st = by_metric.get(metric)
-        if st is None:
-            continue
-        parts.append(f"{_HOST_SHORT_LABEL[metric]} {fmt_host_value(st.value, st.unit)}")
     alerting = [s for s in states if s.status == ALERTING]
-    head = "⚠️" if alerting else "📊"
-    line = f"{head} " + " · ".join(parts) if parts else head
-    if alerting:
-        line += "\n" + "\n".join(render_host_line(s) for s in alerting)
-    return line
+    lines = [f"{'⚠️' if alerting else '📊'} <b>Хост VPS</b>"]
+    shown: set[str] = set()
+    for metric in _HOST_CARD_METRICS:
+        st = by_metric.get(metric)
+        if st is not None:
+            lines.append(render_host_line(st))
+            shown.add(metric)
+    for st in alerting:  # алертящие метрики вне основного списка (psi/oom)
+        if st.metric not in shown:
+            lines.append(render_host_line(st))
+    return "\n".join(lines)
 
 
 _HEALTH_WORD = {DISK_OK: "норма", DISK_WARN: "предупреждение", DISK_FAIL: "СБОЙ"}

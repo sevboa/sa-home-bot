@@ -85,8 +85,10 @@ devices = []
 # [sensors.host] — здоровье VPS по /proc вместо термозон: CPU steal (переподписка
 # провайдером), iowait, load/ядро, свободная память, swap, заполнение диска /,
 # PSI, OOM-kill. enabled по умолчанию не задан и выводится из [node].kind:
-# True на "vps", False на server/workstation. На vps этим же правилом гасится
-# [sensors.cpu] (coretemp виртуалки бессмыслен). Явное значение перекрывает.
+# True на "vps", False на server/workstation. На vps этим же правилом гасятся
+# [sensors.cpu] и [sensors.disks] (coretemp виртуалки бессмыслен, SMART у
+# виртуального диска нет — иначе монитор зря жалуется на отсутствие smartctl).
+# Любой явный enabled в конфиге перекрывает авто-правило.
 #[sensors.host]
 #enabled = true
 #sample_window_s = 10.0             # окно между двумя снимками /proc для дельт steal/iowait
