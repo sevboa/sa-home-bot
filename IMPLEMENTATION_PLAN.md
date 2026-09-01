@@ -2134,6 +2134,77 @@ REST, re-assert при drift, мок HTTP; `_render_client_conf` пишет до
 активный маркер (tests/unit/test_vpn_view.py); самопроверка NAT ловит
 отсутствие правила; кнопка «переключить на резерв» — только владельцу.
 
+### Этап 40. Мониторинг VPS, добавка: conntrack, ошибки NIC, залипания ядра
+
+Запрос пользователя 2026-09-01, продолжение этапа 38. Текущий набор host-метрик
+(`domain/host.py::METRICS`) закрывает переподписку и ресурсы, но **две дыры, через
+которые VPN отваливается молча, не покрыты**: сеть и кратковременные фризы VM
+гипервизором. Всё три — обычные host-метрики (`kind="host"`, `sensors/host.py`,
+пороги в `[sensors.host].thresholds`, тот же пайплайн `_scan_host` и события
+`host_degraded/host_recovered`), новых механизмов не нужно.
+
+**40.1. `conntrack_pct` — заполнение таблицы отслеживания соединений**
+`/proc/sys/net/netfilter/nf_conntrack_count` ÷ `nf_conntrack_max` × 100.
+Для NAT/VPN-бокса критично: таблица переполнилась → ядро молча дропает новые
+соединения, туннель «поднят», клиенты не ходят. `DIR_ABOVE`, дефолт warn 80 /
+crit 95, hint «таблица conntrack почти полна — новые соединения дропаются».
+Модуль `nf_conntrack` не загружен (нода без NAT) → файлов нет → метрику не
+эмитим (как PSI). Одно чтение, дельта не нужна.
+
+**40.2. `net_err_rate` — ошибки и дропы на интерфейсах**
+Два снимка `/proc/net/dev` с паузой `sample_window_s` (как у `steal_pct`), сумма
+дельт `rx_errs + rx_drop + tx_errs + tx_drop` по всем не-`lo` интерфейсам,
+нормировать в **событий/мин**. `DIR_ABOVE`, дефолт warn 1 / crit 10, hysteresis 1,
+hint «интерфейс теряет пакеты — `ip -s link`, проверь линк/драйвер virtio».
+Ловит тихую деградацию линка (класс «downshift до 100 Mbps / check cabling» из
+CLAUDE.md, но для VM). v1 — агрегат по всем интерфейсам (теряем, какой именно;
+hint отправляет смотреть руками). Возможная доработка: per-interface
+`component_id = "host:net_err:<iface>"` — но это ломает плоский `METRICS` (ключ =
+фиксированное имя), поэтому за пределами v1.
+
+**40.3. `kernel_stall_events` — залипания ядра/гипервизора за окно**
+Счётчик строк kernel-журнала с прошлого прогона, подходящих под паттерны стойл:
+`hung_task`, `rcu_(sched|preempt).*stall`, `clocksource.*(unstable|Marking)`,
+`soft lockup`, `BUG: soft`, `NETDEV WATCHDOG`, `TX timeout`,
+`blocked for more than \d+ seconds`. Это **ровно** документированный сценарий
+падения jeeves (`jeeves-vpn-hypervisor-stalls` — фризы VM гипервизором, которые
+`steal` ловит не всегда, а в dmesg они есть). Форма как у `oom_kills`: дельта,
+warn 1 / crit 1 (любое событие — повод), hint «ядро логировало стойла — вероятны
+фризы VM гипервизором».
+- **Источник:** `journalctl -k -S <last_scan> -U <now> -o cat` + grep паттернов.
+  `sensors/power.py` уже ходит в `journalctl` и регистрирует `JOURNALCTL_REQUIREMENT`
+  — переиспользовать. Для не-root доступа к kernel-журналу нужен `sevboa` в группе
+  `systemd-journal` (или `adm`); нет прав → метрику помечаем недоступной через
+  `requirements_registry` (как smartctl в этапе 38), в карточке ⚠️-подсказка
+  `usermod -aG systemd-journal sevboa && перелогин` либо строка в
+  `/etc/sudoers.d/10-diag`.
+- **Состояние «последний скан»:** ключ `app_state` (`Store.get_state/set_state`),
+  напр. `kernel_scan_at`; первый прогон — окно `now - sample_window_s` (не с
+  начала времён). `dmesg` не берём: `kernel.dmesg_restrict=1` по умолчанию на
+  Debian → нужен root/`CAP_SYSLOG`.
+
+**Общее:**
+- `sensors/host.py`: `parse_proc_net_dev` (чистая), `parse_conntrack`, скан ядра —
+  чистый разбор строк отдельно от подпроцесса; `read_host_sync` дополнить тремя
+  ветками, каждая молча пропускается при недоступности источника.
+- `domain/host.py::METRICS`: три записи. `config.example.toml` — упомянуть новые
+  ключи `[sensors.host.thresholds.{conntrack_pct,net_err_rate,kernel_stall_events}]`.
+- Карточка ноды: `net_err_rate` и `kernel_stall_events` — как PSI/OOM, показывать
+  только в alerting (не шуметь нулями); `conntrack_pct` в постоянный список
+  `_HOST_CARD_METRICS` рядом с диском.
+- **Применимость к `server`:** conntrack/NIC-ошибки/стойла осмысленны и на alfred
+  (не только vps), в отличие от `steal`. Пока оставляем host-датчик выключенным
+  на `server` (этап 38); отдельный тумблер «включить подмножество host-метрик на
+  server» — открытый вопрос, не v1.
+
+**Тесты:** `parse_proc_net_dev` дельта по двум снимкам с фикстурами (включая
+интерфейс down и `lo`); `parse_conntrack` (count/max, отсутствие файлов →
+пропуск); скан ядра — набор реальных строк journalctl под каждый паттерн +
+негатив; `kernel_scan_at` в `app_state` двигается и сужает окно; недоступный
+`journalctl` → метрика в `requirements`, не падение; карточка прячет нулевые
+`net_err_rate`/`kernel_stall_events` и показывает `conntrack_pct` всегда;
+`host_trend` по новым метрикам.
+
 ### Дальше (не детализируем)
 
 - **Топология событийной сети роя (Chord finger table)** — заменить текущий
