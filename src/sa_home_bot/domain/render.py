@@ -69,6 +69,7 @@ _HOST_CARD_METRICS = (
     "mem_available_pct",
     "swap_used_pct",
     "disk_used_pct",
+    "conntrack_pct",
 )
 _HOST_SHORT_LABEL = {
     "steal_pct": "CPU steal",
@@ -81,6 +82,9 @@ _HOST_SHORT_LABEL = {
     "psi_memory": "PSI mem",
     "psi_io": "PSI io",
     "oom_kills": "OOM-kill",
+    "conntrack_pct": "conntrack заполнен",
+    "net_err_rate": "ошибки/дропы NIC",
+    "kernel_stall_events": "стойла ядра",
 }
 
 

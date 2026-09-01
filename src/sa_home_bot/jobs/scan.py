@@ -39,6 +39,7 @@ from sa_home_bot.domain.policy import (
     FixedThresholdPolicy,
 )
 from sa_home_bot.jobs.base import JobContext, JobResult
+from sa_home_bot.sensors.host import KERNEL_SCAN_STATE_KEY
 
 log = logging.getLogger(__name__)
 
@@ -154,9 +155,20 @@ class SensorScanJob:
 
     async def _scan_host(self, ctx: JobContext, now: datetime) -> tuple[int, int, int, int]:
         """Срез host-метрик VPS (пусто на server/workstation — [sensors.host] выключен)."""
-        readings = await ctx.sensors.read_host()
+        kernel_since_raw = await ctx.store.get_state(KERNEL_SCAN_STATE_KEY)
+        kernel_since: datetime | None = None
+        if kernel_since_raw:
+            try:
+                kernel_since = datetime.fromisoformat(kernel_since_raw)
+            except ValueError:
+                kernel_since = None
+        readings = await ctx.sensors.read_host(kernel_since=kernel_since)
         if not readings:
             return 0, 0, 0, 0
+        # Курсор kernel-журнала двигаем сразу после успешного среза — окно
+        # следующего прогона начнётся отсюда (мелкое перекрытие безвредно:
+        # kernel_stall_events всё равно алертит при любом событии).
+        await ctx.store.set_state(KERNEL_SCAN_STATE_KEY, now.isoformat())
         known = await ctx.store.get_known_host_states()
         diff = compute_host_diff(readings, known, self._host_resolver(ctx.config), now)
         await ctx.store.apply_host_diff(diff, now)

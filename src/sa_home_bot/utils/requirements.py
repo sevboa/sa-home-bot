@@ -104,6 +104,8 @@ class Requirement:
     package: str = ""
     platforms: tuple[str, ...] | None = None
     note: str = ""
+    key: str | None = None  # явный ключ реестра, когда одна программа делится
+    #                         между несколькими Requirement с разными правами
 
     def diagnose(self) -> RequirementStatus:
         """Статический диагноз (без реального вызова): платформа/наличие в PATH.
@@ -154,10 +156,18 @@ class RequirementRegistry:
         self._entries: dict[str, _RegistryEntry] = {}
         self._lock = Lock()
 
+    @staticmethod
+    def _key(requirement: Requirement) -> str:
+        return (
+            requirement.key
+            or requirement.program
+            or requirement.note
+            or repr(requirement)
+        )
+
     def report(self, requirement: Requirement, status: RequirementStatus) -> None:
-        key = requirement.program or requirement.note or repr(requirement)
         with self._lock:
-            self._entries[key] = _RegistryEntry(requirement, status)
+            self._entries[self._key(requirement)] = _RegistryEntry(requirement, status)
 
     def status_for(self, requirement: Requirement) -> RequirementStatus:
         """Актуальный статус: живой статический диагноз, дополненный реестром.
@@ -171,9 +181,8 @@ class RequirementRegistry:
         static = requirement.diagnose()
         if static is not RequirementStatus.OK:
             return static
-        key = requirement.program or requirement.note or repr(requirement)
         with self._lock:
-            entry = self._entries.get(key)
+            entry = self._entries.get(self._key(requirement))
         if entry is not None and entry.status is RequirementStatus.NEEDS_PRIVILEGE:
             return RequirementStatus.NEEDS_PRIVILEGE
         return RequirementStatus.OK
@@ -188,7 +197,11 @@ class RequirementRegistry:
             if status is RequirementStatus.NEEDS_PRIVILEGE
             else requirement.install_hint()
         )
-        return {"id": requirement.program or requirement.note, "status": status.value, "hint": hint}
+        return {
+            "id": requirement.key or requirement.program or requirement.note,
+            "status": status.value,
+            "hint": hint,
+        }
 
     def reset(self) -> None:
         """Очистить реестр — используется в тестах для изоляции синглтона."""

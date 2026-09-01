@@ -28,6 +28,7 @@ from sa_home_bot.proto.messages import (
 )
 from sa_home_bot.sensors.disks import SMARTCTL_REQUIREMENT
 from sa_home_bot.sensors.gpu import NVIDIA_SMI_REQUIREMENT
+from sa_home_bot.sensors.host import KERNEL_JOURNAL_REQUIREMENT
 from sa_home_bot.sensors.lhm import lhm_problem
 from sa_home_bot.sensors.power import (
     JOURNALCTL_REQUIREMENT,
@@ -156,6 +157,13 @@ class MonitorService:
         journal_problem = (
             None if last_problem else requirements_registry.problem_for(JOURNALCTL_REQUIREMENT)
         )
+        # kernel-журнал (kernel_stall_events этапа 40) — только при включённом
+        # host-датчике: на server/workstation его никто не читает.
+        kernel_journal_problem = (
+            requirements_registry.problem_for(KERNEL_JOURNAL_REQUIREMENT)
+            if self._settings.sensors.host.enabled
+            else None
+        )
         requirements = [
             p
             for p in (
@@ -163,6 +171,7 @@ class MonitorService:
                 nvidia_smi_problem,
                 last_problem,
                 journal_problem,
+                kernel_journal_problem,
                 lhm_problem(self._settings.sensors.lhm.dll_path),
             )
             if p is not None

@@ -109,6 +109,18 @@ METRICS: dict[str, HostMetricSpec] = {
         "oom_kills", "OOM-kill", "/мин", DIR_ABOVE, 1.0, 1.0, 1.0,
         "ядро убивало процессы из-за нехватки памяти",
     ),
+    "conntrack_pct": HostMetricSpec(
+        "conntrack_pct", "conntrack", "%", DIR_ABOVE, 80.0, 95.0, 3.0,
+        "таблица conntrack почти полна — новые соединения дропаются",
+    ),
+    "net_err_rate": HostMetricSpec(
+        "net_err_rate", "ошибки NIC", "/мин", DIR_ABOVE, 1.0, 10.0, 1.0,
+        "интерфейс теряет пакеты — `ip -s link`, проверь линк/драйвер virtio",
+    ),
+    "kernel_stall_events": HostMetricSpec(
+        "kernel_stall_events", "стойла ядра", "/скан", DIR_ABOVE, 1.0, 1.0, 1.0,
+        "ядро логировало стойла — вероятны фризы VM гипервизором",
+    ),
 }
 
 

@@ -30,7 +30,7 @@ class FakeSensors:
         self._i += 1
         return [make_reading(temp)]
 
-    async def read_host(self):
+    async def read_host(self, kernel_since=None):
         return []
 
     async def read_disk_summaries(self, health_overrides):

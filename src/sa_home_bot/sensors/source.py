@@ -46,13 +46,23 @@ class SensorSource:
             None, disks.read_disks_sync, devices, _now(), self._config.lhm.dll_path
         )
 
-    async def read_host(self) -> list[HostMetricReading]:
-        """Host-метрики VPS (/proc). Пусто, если датчик выключен (не-vps по дефолту)."""
+    async def read_host(
+        self, kernel_since: datetime | None = None
+    ) -> list[HostMetricReading]:
+        """Host-метрики VPS (/proc). Пусто, если датчик выключен (не-vps по дефолту).
+
+        ``kernel_since`` — курсор окна kernel-журнала (``jobs/scan`` хранит его
+        в ``app_state`` и сдвигает после каждого среза).
+        """
         if not self._config.host.enabled:
             return []
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            None, host.read_host_sync, _now(), self._config.host.sample_window_s
+            None,
+            host.read_host_sync,
+            _now(),
+            self._config.host.sample_window_s,
+            kernel_since,
         )
 
     async def read_all(self) -> list[SensorReading]:

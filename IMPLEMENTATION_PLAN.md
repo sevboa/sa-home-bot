@@ -2134,7 +2134,28 @@ REST, re-assert при drift, мок HTTP; `_render_client_conf` пишет до
 активный маркер (tests/unit/test_vpn_view.py); самопроверка NAT ловит
 отсутствие правила; кнопка «переключить на резерв» — только владельцу.
 
-### Этап 40. Мониторинг VPS, добавка: conntrack, ошибки NIC, залипания ядра
+### Этап 40. Мониторинг VPS, добавка: conntrack, ошибки NIC, залипания ядра — ✅ v0.100.0 (2026-09-01)
+
+**Сделано:** три метрики добавлены в `domain/host.py::METRICS` (`conntrack_pct`
+warn 80/crit 95, `net_err_rate` warn 1/crit 10 в событий/мин, `kernel_stall_events`
+warn 1/crit 1 в событий/скан). `sensors/host.py`: чистые `parse_proc_net_dev` +
+`net_err_delta` (агрегат errs+drop rx/tx по не-`lo`, живым в обоих снимках —
+третий снимок в той же паузе, что steal), `parse_conntrack` (count/max из
+`/proc/sys/net/netfilter/nf_conntrack_{count,max}`, нет файлов → пропуск),
+`count_kernel_stalls` (regex по паттернам стойл) + `_read_kernel_stall_count`
+(`journalctl -k -S @ts -U @ts -o cat`; нет группы `systemd-journal`/`adm` →
+`KERNEL_JOURNAL_REQUIREMENT` = NEEDS_PRIVILEGE, метрика молча пропускается,
+подсказка в карточке = `nodectl fix` → существующий фикс `journalctl-group`).
+Курсор окна kernel-журнала — `app_state["host:kernel_scan_at"]`, читает/двигает
+`jobs/scan.py::_scan_host` (первый прогон — окно `now - sample_window_s`).
+`Requirement` получил поле `key` (одна программа `journalctl` делится с
+`power.py`, права разные). Карточка: `conntrack_pct` в `_HOST_CARD_METRICS`
+(всегда), `net_err_rate`/`kernel_stall_events` — только в alerting.
+`config.example.toml` — все ключи порогов. Тесты: `test_sensors_host.py`
+(парсеры + фикстуры journalctl), `test_scan_job.py` (курсор двигается),
+`test_render.py`, `test_monitor_service.py` (requirement под host.enabled).
+**Применимость к `server`** (alfred) — оставлена открытым вопросом, host-датчик
+на `server` по-прежнему выключен.
 
 Запрос пользователя 2026-09-01, продолжение этапа 38. Текущий набор host-метрик
 (`domain/host.py::METRICS`) закрывает переподписку и ресурсы, но **две дыры, через

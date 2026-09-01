@@ -84,20 +84,34 @@ devices = []
 
 # [sensors.host] — здоровье VPS по /proc вместо термозон: CPU steal (переподписка
 # провайдером), iowait, load/ядро, свободная память, swap, заполнение диска /,
-# PSI, OOM-kill. enabled по умолчанию не задан и выводится из [node].kind:
+# PSI, OOM-kill, conntrack (заполнение таблицы NAT), ошибки/дропы NIC, стойла
+# ядра/гипервизора (journalctl -k — нужна группа systemd-journal, ставит
+# `nodectl fix`). enabled по умолчанию не задан и выводится из [node].kind:
 # True на "vps", False на server/workstation. На vps этим же правилом гасятся
 # [sensors.cpu] и [sensors.disks] (coretemp виртуалки бессмыслен, SMART у
 # виртуального диска нет — иначе монитор зря жалуется на отсутствие smartctl).
 # Любой явный enabled в конфиге перекрывает авто-правило.
 #[sensors.host]
 #enabled = true
-#sample_window_s = 10.0             # окно между двумя снимками /proc для дельт steal/iowait
+#sample_window_s = 10.0             # окно между двумя снимками /proc для дельт steal/iowait/NIC
 #consecutive_to_alert = 3
 #consecutive_to_clear = 3
 # Перекрытие дефолтных порогов по имени метрики (см. domain/host.py::METRICS):
+# steal_pct, iowait_pct, load_per_core, mem_available_pct, swap_used_pct,
+# disk_used_pct, psi_cpu, psi_memory, psi_io, oom_kills, conntrack_pct,
+# net_err_rate, kernel_stall_events.
 #[sensors.host.thresholds.steal_pct]
 #warn = 10.0
 #crit = 25.0
+#[sensors.host.thresholds.conntrack_pct]
+#warn = 80.0
+#crit = 95.0
+#[sensors.host.thresholds.net_err_rate]
+#warn = 1.0
+#crit = 10.0
+#[sensors.host.thresholds.kernel_stall_events]
+#warn = 1.0
+#crit = 1.0
 
 # [sensors.lhm] — только для Windows-ноды: температуры CPU/дисков читаются
 # через LibreHardwareMonitorLib.dll (pythonnet). На Linux секция игнорируется.

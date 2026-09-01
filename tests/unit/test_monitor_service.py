@@ -1,5 +1,6 @@
 """MonitorService: describe, get_state, scan_now (без реального железа)."""
 
+import sys
 from datetime import UTC, datetime
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ import pytest_asyncio
 from sa_home_bot.config import (
     DiskSensorConfig,
     GpuSensorConfig,
+    HostSensorConfig,
     SensorsConfig,
     Settings,
     TelegramConfig,
@@ -125,6 +127,68 @@ async def test_get_state_quiet_when_disks_disabled(tmp_path, monkeypatch):
     await db.close()
 
     assert state["requirements"] == []  # диски выключены — не шумим
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="kernel-журнал только на Linux")
+async def test_get_state_surfaces_kernel_journal_requirement_when_host_enabled(
+    tmp_path, monkeypatch
+):
+    from sa_home_bot.sensors.host import KERNEL_JOURNAL_REQUIREMENT
+    from sa_home_bot.utils.requirements import RequirementStatus
+
+    db = Database(tmp_path / "monitor.sqlite")
+    await db.open()
+    await apply_migrations(db)
+    store = Store(db)
+    settings = Settings(
+        telegram=TelegramConfig(token="x"),
+        sensors=SensorsConfig(
+            host=HostSensorConfig(enabled=True), disks=DiskSensorConfig(enabled=False)
+        ),
+        subscriptions=[],
+    )
+    svc = MonitorService(settings, store, DedupQueue())
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    requirements_registry.report(
+        KERNEL_JOURNAL_REQUIREMENT, RequirementStatus.NEEDS_PRIVILEGE
+    )
+
+    with (
+        patch("sa_home_bot.monitor.service.read_uptime_sync", return_value=None),
+        patch("sa_home_bot.monitor.service.read_power_events_sync", return_value=([], False)),
+    ):
+        state = await svc.get_state()
+    await db.close()
+
+    kernel = [r for r in state["requirements"] if r["id"] == "journalctl-kernel"]
+    assert len(kernel) == 1
+    assert kernel[0]["status"] == "needs_privilege"
+    assert "systemd-journal" in kernel[0]["hint"]
+
+
+async def test_get_state_quiet_kernel_journal_when_host_disabled(tmp_path, monkeypatch):
+    from sa_home_bot.sensors.host import KERNEL_JOURNAL_REQUIREMENT
+    from sa_home_bot.utils.requirements import RequirementStatus
+
+    db = Database(tmp_path / "monitor.sqlite")
+    await db.open()
+    await apply_migrations(db)
+    store = Store(db)
+    settings = Settings(telegram=TelegramConfig(token="x"), subscriptions=[])
+    svc = MonitorService(settings, store, DedupQueue())
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    requirements_registry.report(
+        KERNEL_JOURNAL_REQUIREMENT, RequirementStatus.NEEDS_PRIVILEGE
+    )
+
+    with (
+        patch("sa_home_bot.monitor.service.read_uptime_sync", return_value=None),
+        patch("sa_home_bot.monitor.service.read_power_events_sync", return_value=([], False)),
+    ):
+        state = await svc.get_state()
+    await db.close()
+
+    assert state["requirements"] == []  # host-датчик выключен — kernel-журнал никто не читает
 
 
 async def test_get_state_quiet_when_gpu_disabled_by_default(tmp_path, monkeypatch):

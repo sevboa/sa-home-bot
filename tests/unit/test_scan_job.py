@@ -1,6 +1,6 @@
 """Интеграция SensorScanJob: норма → перегрев → норма через реальную БД."""
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest_asyncio
 
@@ -36,7 +36,7 @@ class FakeSensors:
         self._i += 1
         return [make_reading(temp)]
 
-    async def read_host(self):
+    async def read_host(self, kernel_since=None):
         return []
 
     async def read_disk_summaries(self, health_overrides):
@@ -154,7 +154,7 @@ class FakeGpuSensors:
         self._i += 1
         return [make_reading(temp, component_id="gpu:0", kind=KIND_GPU, label="Tesla V100")]
 
-    async def read_host(self):
+    async def read_host(self, kernel_since=None):
         return []
 
     async def read_disk_summaries(self, health_overrides):
@@ -214,13 +214,15 @@ class FakeHostSensors:
     def __init__(self, steal_seq: list[float]) -> None:
         self._seq = steal_seq
         self._i = 0
+        self.kernel_since_calls: list[object] = []
 
     async def read_all(self):
         return []
 
-    async def read_host(self):
+    async def read_host(self, kernel_since=None):
         from sa_home_bot.domain.host import METRICS, HostMetricReading
 
+        self.kernel_since_calls.append(kernel_since)
         v = self._seq[min(self._i, len(self._seq) - 1)]
         self._i += 1
         label = METRICS["steal_pct"].label
@@ -275,6 +277,22 @@ async def test_host_scan_alerts_and_recovers(host_ctx):
 
     trend = await context.store.host_trend("steal_pct", 24, BASE_TIME + timedelta(hours=1))
     assert sum(b["samples"] for b in trend) == 6  # история пишется всегда
+
+
+async def test_host_scan_advances_kernel_journal_cursor(host_ctx):
+    from sa_home_bot.sensors.host import KERNEL_SCAN_STATE_KEY
+
+    context, _ = host_ctx
+    job = SensorScanJob()
+
+    await job.run(context)
+    cursor_after_first = await context.store.get_state(KERNEL_SCAN_STATE_KEY)
+    assert cursor_after_first is not None  # курсор проставлен
+
+    await job.run(context)
+    # первый прогон — окно без курсора, второй — получил сохранённый курсор
+    assert context.sensors.kernel_since_calls[0] is None
+    assert context.sensors.kernel_since_calls[1] == datetime.fromisoformat(cursor_after_first)
 
 
 async def test_disabled_disks_clears_stale_summary_cache(ctx):

@@ -268,3 +268,28 @@ def test_render_host_block_empty_is_blank():
     from sa_home_bot.domain.render import render_host_block
 
     assert render_host_block([]) == ""
+
+
+def test_render_host_block_conntrack_always_net_and_stalls_only_when_alerting():
+    from sa_home_bot.domain.render import render_host_block
+
+    calm = render_host_block(
+        [
+            _host_state("steal_pct", 0.0, "%"),
+            _host_state("conntrack_pct", 12.0, "%"),
+            _host_state("net_err_rate", 0.0, "/мин"),
+            _host_state("kernel_stall_events", 0.0, "/скан"),
+        ]
+    )
+    assert "conntrack заполнен: <b>12%</b>" in calm  # постоянно в карточке
+    assert "NIC" not in calm  # нулевой net_err_rate не шумит
+    assert "стойла ядра" not in calm
+
+    hot = render_host_block(
+        [
+            _host_state("steal_pct", 0.0, "%"),
+            _host_state("kernel_stall_events", 2.0, "/скан", status=ALERTING),
+        ]
+    )
+    assert hot.startswith("⚠️")
+    assert " • ⚠️ стойла ядра: <b>2/скан</b>" in hot
