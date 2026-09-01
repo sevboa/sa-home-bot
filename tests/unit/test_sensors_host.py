@@ -110,11 +110,17 @@ def test_parse_proc_net_dev_skips_lo_and_headers():
     assert parsed["eth0"] == (3, 1, 0, 2)  # rx_errs, rx_drop, tx_errs, tx_drop
 
 
-def test_net_err_delta_sums_live_interfaces_only():
+def test_net_err_delta_counts_errs_only_not_drops():
     prev = parse_proc_net_dev(_NETDEV_1)
     cur = parse_proc_net_dev(_NETDEV_2)
-    # eth0: (5-3)+(2-1)+(3-0)+(2-2) = 6; eth1 исчез — не считаем
-    assert net_err_delta(prev, cur) == 6
+    # eth0: rx_errs (5-3)=2 + tx_errs (3-0)=3 = 5; drop (rx+1) не считаем; eth1 исчез
+    assert net_err_delta(prev, cur) == 5
+
+
+def test_net_err_delta_ignores_pure_drop_growth():
+    prev = {"eth0": (0, 100, 0, 5)}
+    cur = {"eth0": (0, 900, 0, 40)}  # растут только дропы — это шум, не сбой
+    assert net_err_delta(prev, cur) == 0
 
 
 def test_net_err_delta_ignores_counter_reset():
@@ -243,7 +249,7 @@ def test_read_host_sync_emits_net_conntrack_and_kernel_stalls(monkeypatch):
 
     by_metric = {r.metric: r for r in read_host_sync(NOW, 60.0)}
     assert by_metric["conntrack_pct"].value == pytest.approx(25.0)
-    assert by_metric["net_err_rate"].value == pytest.approx(6.0)  # 6 ошибок за 60с окно
+    assert by_metric["net_err_rate"].value == pytest.approx(5.0)  # rx+tx errs за 60с окно
     assert by_metric["kernel_stall_events"].value == pytest.approx(2.0)
     assert by_metric["kernel_stall_events"].unit == "/скан"
 

@@ -2134,13 +2134,16 @@ REST, re-assert при drift, мок HTTP; `_render_client_conf` пишет до
 активный маркер (tests/unit/test_vpn_view.py); самопроверка NAT ловит
 отсутствие правила; кнопка «переключить на резерв» — только владельцу.
 
-### Этап 40. Мониторинг VPS, добавка: conntrack, ошибки NIC, залипания ядра — ✅ v0.100.0 (2026-09-01)
+### Этап 40. Мониторинг VPS, добавка: conntrack, ошибки NIC, залипания ядра — ✅ v0.100.0 (2026-09-01), фикс net_err v0.100.1
 
 **Сделано:** три метрики добавлены в `domain/host.py::METRICS` (`conntrack_pct`
 warn 80/crit 95, `net_err_rate` warn 1/crit 10 в событий/мин, `kernel_stall_events`
 warn 1/crit 1 в событий/скан). `sensors/host.py`: чистые `parse_proc_net_dev` +
-`net_err_delta` (агрегат errs+drop rx/tx по не-`lo`, живым в обоих снимках —
-третий снимок в той же паузе, что steal), `parse_conntrack` (count/max из
+`net_err_delta` (агрегат **только rx_errs+tx_errs** по не-`lo`, живым в обоих
+снимках — третий снимок в той же паузе, что steal; drop исключён после
+v0.100.1 — на virtio/cloud NIC `rx_drop` ненулевой на здоровой машине,
+давал ложную тревогу «30/мин» на wooster сразу после выката),
+`parse_conntrack` (count/max из
 `/proc/sys/net/netfilter/nf_conntrack_{count,max}`, нет файлов → пропуск),
 `count_kernel_stalls` (regex по паттернам стойл) + `_read_kernel_stall_count`
 (`journalctl -k -S @ts -U @ts -o cat`; нет группы `systemd-journal`/`adm` →

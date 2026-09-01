@@ -180,13 +180,22 @@ def net_err_delta(
     prev: dict[str, tuple[int, int, int, int]],
     cur: dict[str, tuple[int, int, int, int]],
 ) -> int:
-    """Суммарный прирост errs+drop (rx+tx) по интерфейсам, живым в обоих снимках."""
+    """Суммарный прирост rx_errs + tx_errs по интерфейсам, живым в обоих снимках.
+
+    Только ошибки, НЕ drop: на виртуальном NIC (virtio, cloud) `rx_drop` почти
+    целиком — шум виртуального свитча гипервизора (пакеты не нам, ARP-флуд),
+    он ненулевой на здоровой машине и даёт ложную тревогу; `tx_drop` —
+    переполнение qdisc/нероутируемое на туннелях, тоже не признак сбоя железа.
+    Настоящую деградацию линка (класс «downshift/битый драйвер») видно именно
+    по errs.
+    """
     total = 0
-    for iface, cur_vals in cur.items():
+    for iface, (rx_errs, _rx_drop, tx_errs, _tx_drop) in cur.items():
         prev_vals = prev.get(iface)
         if prev_vals is None:
             continue  # интерфейс появился между снимками — дельту не считаем
-        total += sum(max(0, c - p) for c, p in zip(cur_vals, prev_vals, strict=True))
+        p_rx_errs, _, p_tx_errs, _ = prev_vals
+        total += max(0, rx_errs - p_rx_errs) + max(0, tx_errs - p_tx_errs)
     return total
 
 
