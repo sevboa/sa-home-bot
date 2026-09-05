@@ -91,6 +91,35 @@ def _temp_max(monitor: dict, kind: str) -> float | None:
     return max(temps) if temps else None
 
 
+def _health_bucket(report: _NodeReport) -> int:
+    """Куда поставить ноду в списке сводки: 0 — требует внимания, 1 — в строю
+    и здорова, 2 — штатно не в сети (спит / выключена нарочно).
+
+    Порядок «проблемные → активные → неактивные»: то, из-за чего открывают
+    /swarm, стоит сверху, штатно спящие машины не оттесняют его вниз.
+    Сортировка стабильна — внутри группы сохраняется порядок роя (своя
+    нода первой, см. wake_core.collect_reports).
+    """
+    if not report.alive:
+        if report.left:
+            return 2  # предупредила об уходе — выключена нарочно
+        # Сервер/VDS, обязанный быть в сети, пропал — это авария.
+        return 0 if traits_for(report.kind).always_on else 2
+    if report.state is None:
+        return 0  # "не отвечает"
+    services = report.state.get("services", [])
+    if any(s.get("status") != "running" for s in services):
+        return 0  # часть служб не поднялась
+    monitor = report.monitor
+    if monitor is None:
+        return 0  # "монитор не отвечает"
+    if any(h.get("status") == "alerting" for h in monitor.get("health", [])):
+        return 0  # 🔔 датчик в тревоге
+    if monitor.get("requirements"):
+        return 0  # ⚠️ незакрытые требования
+    return 1
+
+
 def node_line(report: _NodeReport) -> str:
     name = node_links.node_command(report.node_id) or f"<b>{report.node_id}</b>"
     if not report.alive:
@@ -140,7 +169,7 @@ def render_swarm(
         if extra:
             lines.append(extra)
     lines.append("")
-    lines.extend(node_line(r) for r in reports)
+    lines.extend(node_line(r) for r in sorted(reports, key=_health_bucket))
     if wake is not None and wake.mac:
         lines.append(REMOTE_STUB_TEXT)
     return "\n".join(lines)

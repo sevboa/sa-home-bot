@@ -201,6 +201,26 @@ def peer_candidates(
     return out
 
 
+def peer_kinds(
+    nodes: Sequence[SwarmNodeConfig], extra: Sequence[SwarmNodeConfig]
+) -> dict[str, str]:
+    """Тип каждого пира, известный ещё до его первого hello: из персистентного
+    состояния (там его пишет PresenceWatcher, узнав из hello) либо из TOML.
+
+    Нужен ровно тогда, когда соседа не спросить: после рестарта своей ноды
+    ``PeerLink`` создаётся с пустым ``node_kind``, и до тех пор пока
+    недоступный сосед не пришлёт hello, сводка роя не может отличить
+    «пропал сервер/VDS» (авария) от «уснула рабочая станция» (норма). hello
+    потом уточнит (``PeerLink`` перезапишет). Состояние идёт первым, как и в
+    ``peer_candidates``.
+    """
+    out: dict[str, str] = {}
+    for cfg in (*extra, *nodes):
+        if cfg.kind and cfg.id not in out:
+            out[cfg.id] = cfg.kind
+    return out
+
+
 def build_router(
     settings: Settings,
     node_id: str,
@@ -221,6 +241,14 @@ def build_router(
         for pid, candidates in peer_candidates(settings.swarm.nodes, extra_peers).items()
         if pid != node_id  # свой id в списке — не пир
     }
+    # Тип соседа из состояния/конфига — чтобы недоступная нода не выглядела
+    # «спящей» до своего первого hello (иначе сводка роя путает пропавший
+    # сервер с уснувшей рабочей станцией). hello потом уточнит — PeerLink
+    # перезапишет node_kind по confirmed-ответу.
+    for pid, node_kind in peer_kinds(settings.swarm.nodes, extra_peers).items():
+        link = peers.get(pid)
+        if link is not None and not link.node_kind:
+            link.node_kind = node_kind
     # Маршрут строится по ИМЕНИ СЛУЖБЫ, а не по строке назначения целиком:
     # "telegram-bot@alfred:standby" — это всё та же служба telegram-bot.
     assigned_services = {a.service for a in _safe_parse_all(assignments)}

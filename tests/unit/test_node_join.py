@@ -6,12 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from sa_home_bot.config import Settings
+from sa_home_bot.config import Settings, SwarmNodeConfig
 from sa_home_bot.node.app import (
     SeenEvents,
     _relay_peer_event,
     build_router,
     make_link_factories,
+    peer_kinds,
 )
 from sa_home_bot.node.peers import NodeRouter, PeerLink
 from sa_home_bot.node.service import NodeService
@@ -279,6 +280,30 @@ async def test_build_router_wires_local_services_to_on_local_event():
     assert "tasks" in router.local_services
     assert router.local_services["tasks"]._on_event is on_local_event
     assert router.local_services["tasks"]._on_event is not on_peer_event
+
+
+def test_peer_kinds_state_wins_over_toml():
+    nodes = [SwarmNodeConfig(id="jeeves", endpoint="tcp://a:8710", kind="server")]
+    extra = [SwarmNodeConfig(id="jeeves", endpoint="tcp://a:8710", kind="vps")]
+    assert peer_kinds(nodes, extra) == {"jeeves": "vps"}
+    # пустой тип не попадает в карту — фолбэка нет, будить неоткуда
+    assert peer_kinds([SwarmNodeConfig(id="x", endpoint="tcp://b:8710")], []) == {}
+
+
+async def test_build_router_seeds_peer_kind_from_persistent_state():
+    """Тип недоступного соседа известен сразу после рестарта своей ноды —
+    из персистентного состояния (его туда пишет PresenceWatcher). Без этого
+    сводка роя путает пропавший сервер/VDS с уснувшей рабочей станцией,
+    пока сосед не пришлёт hello."""
+    settings = Settings()
+    make_peer_link, make_local_link = make_link_factories(
+        settings, "alfred", lambda e: None, lambda e: None
+    )
+    extra = [SwarmNodeConfig(id="jeeves", endpoint="tcp://z:8710", kind="vps")]
+    router = build_router(settings, "alfred", [], extra, make_peer_link, make_local_link)
+    assert router.peers["jeeves"].node_kind == "vps"
+    # тот же тип виден в presence-срезе, который читает бот через get_state
+    assert router.peers_state()[0]["kind"] == "vps"
 
 
 async def test_link_factories_wire_events_and_identity():

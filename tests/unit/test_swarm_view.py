@@ -159,6 +159,26 @@ async def test_swarm_offline_always_on_node_is_an_alarm():
     assert "🔴 /node_jeeves — не в сети" in text
 
 
+async def test_swarm_orders_problem_active_asleep():
+    """Список нод: сперва требующие внимания (пропавший сервер, алерты),
+    потом здоровые в строю, штатно спящие — в самом низу."""
+    own = {
+        **OWN_STATE,
+        "peers": [
+            {"id": "arch-t480", "endpoint": "tcp://x:8710", "alive": True, "kind": "workstation"},
+            {"id": "winpc", "endpoint": "tcp://y:8710", "alive": False, "kind": "workstation"},
+            {"id": "jeeves", "endpoint": "tcp://z:8710", "alive": False, "kind": "vps"},
+        ],
+    }
+    link = FakeNodeLink(own=own, routes=_routes())
+    text, _ = await build_swarm_view(link, _sub("nodes"))
+    lines = [ln for ln in text.splitlines() if ln[:1] in {"🟢", "🔴", "⚪"}]
+    # проблемные — arch-t480 (🔔 + ⚠️) и jeeves (пропавший VDS) — впереди
+    assert {ln.split()[1] for ln in lines[:2]} == {"/node_arch_t480", "/node_jeeves"}
+    assert lines[2].startswith("🟢 /node_alfred")  # здоров, в строю
+    assert lines[3].startswith("⚪ /node_winpc")  # спит — последний
+
+
 async def test_swarm_dead_peer_gets_no_requests():
     link = FakeNodeLink(routes=_routes())
     await build_swarm_view(link, _sub("nodes"))
