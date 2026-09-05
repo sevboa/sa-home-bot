@@ -48,6 +48,38 @@ _POLL_TIMEOUT_S = 3.0
 # в 4 едва хватало.
 MAX_TOOL_ROUNDS = 5
 
+# Живая находка 2026-09-04: web_search (и в принципе любой тул) может
+# вернуть результат, который сам по себе не гигантский, но несколько таких
+# подряд в одном раунде tool-calling (см. MAX_TOOL_ROUNDS выше — модель
+# переформулирует запрос и ищет по несколько раз) добивают контекст модели
+# до предела (num_ctx профиля, llm/model-profiles.toml) — модель тогда
+# возвращает пустую строку без единой ошибки (bot/handlers/ai.py:
+# "пустой ответ модели"). Результаты длиннее лимита в messages не кладём
+# целиком: сохраняем полный текст в tool_ctx.tool_result_cache и даём
+# модели укороченный превью с id — если деталей не хватит, модель сама
+# зовёт recall_tool_result(id) (см. bot/tools.py) и получает полный текст
+# вторым раундом, вместо того чтобы всегда таскать его в каждом сообщении.
+_TOOL_RESULT_INLINE_LIMIT = 1000
+_TOOL_RESULT_PREVIEW_CHARS = 600
+
+
+def _inline_or_cache(tool_ctx: ai_tools.ToolContext, tool_result: str) -> str:
+    """Результат тула как он идёт в ``messages`` — целиком, если короткий,
+    иначе укороченное превью + id для recall_tool_result (см. константы
+    выше). Полный текст остаётся доступен через ``tool_ctx.tool_result_cache``
+    независимо от того, что здесь возвращено — вызывающий (on_tool_call)
+    пишет в durable-трассу (ai_tool_calls) именно его, не это превью."""
+    if len(tool_result) <= _TOOL_RESULT_INLINE_LIMIT:
+        return tool_result
+    recall_id = uuid.uuid4().hex[:8]
+    tool_ctx.tool_result_cache[recall_id] = tool_result
+    return (
+        f"{tool_result[:_TOOL_RESULT_PREVIEW_CHARS]}\n"
+        f"…[сокращено для экономии контекста, всего {len(tool_result)} симв.; "
+        f'если этого превью не хватает — вызови recall_tool_result(id="{recall_id}")]'
+    )
+
+
 # (имя тула, аргументы, результат) — вызывается после каждого тула. Этот
 # модуль сам БД не трогает (см. докстринг модуля — им пользуется и служба
 # tasks, у которой БД бота нет вовсе); колбэк передаёт вызывающий (живой
@@ -251,7 +283,8 @@ async def run_chat_loop(
             )
             if on_tool_call is not None:
                 await on_tool_call(name, call_args, tool_result)
-            messages.append({"role": "tool", "content": tool_result, "name": name})
+            inline_result = _inline_or_cache(tool_ctx, tool_result)
+            messages.append({"role": "tool", "content": inline_result, "name": name})
     # Лимит раундов исчерпан. Раньше здесь был ProtoError → пользователь
     # получал ALBERT_HICCUP («Альфред отвлёкся, повторите») после того, как
     # прождал несколько минут, — и это при том, что результаты инструментов

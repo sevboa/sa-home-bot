@@ -200,6 +200,14 @@ class ToolContext:
     # None у живого /ai — там доставка идёт напрямую через notifier, мост не
     # нужен.
     emit: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None
+    # Полные тексты тул-результатов, укороченных в контексте модели (см.
+    # llm_chat.py::_inline_or_cache) — ключ - тот самый id, что уходит
+    # модели в пометке «сокращено». Живёт только в памяти ЭТОГО прохода
+    # run_chat_loop (один вызов request_alfred/tasks-срабатывание), не в БД:
+    # recall_tool_result нужен лишь для того, чтобы модель могла дозвать
+    # детали в том же раунде tool-calling, где результат был обрезан, — тем
+    # же способом, каким remind() читает ctx.history (см. его докстринг).
+    tool_result_cache: dict[str, str] = field(default_factory=dict)
 
 
 ToolHandler = Callable[["ToolContext", dict[str, Any]], Awaitable[str]]
@@ -2669,6 +2677,53 @@ _DECL_WEB_SEARCH: dict[str, Any] = {
 }
 
 
+# --- recall_tool_result: полный текст сокращённого результата тула ---
+#
+# Живая находка 2026-09-04: длинные результаты тулов (в первую очередь
+# web_search) сокращаются перед тем, как уйти модели (см. llm_chat.py::
+# _inline_or_cache) — иначе несколько таких подряд в одном раунде
+# tool-calling добивали окно контекста модели (num_ctx в llm/model-
+# profiles.toml) и она возвращала пустой ответ. Полный текст никуда не
+# девается — лежит в ctx.tool_result_cache под тем же id, что указан в
+# пометке «сокращено»; этот тул — единственный способ модели его достать,
+# если превью не хватило для ответа.
+
+
+async def tool_recall_tool_result(ctx: ToolContext, args: dict[str, Any]) -> str:
+    recall_id = args.get("id")
+    if not isinstance(recall_id, str) or not recall_id.strip():
+        return "ошибка: не указан id (он есть в пометке «сокращено» у результата инструмента)"
+    full = ctx.tool_result_cache.get(recall_id.strip())
+    if full is None:
+        return "ошибка: под этим id ничего не сохранено — неверный id или он из более раннего хода"
+    return full
+
+
+_DECL_RECALL_TOOL_RESULT: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "recall_tool_result",
+        "description": (
+            "Получить ПОЛНЫЙ, несокращённый результат инструмента, который "
+            "был вызван раньше в этом же разговоре и пришёл с пометкой "
+            "«сокращено для экономии контекста». Зови, только если для "
+            "ответа не хватило деталей из превью — id бери прямо из этой "
+            "пометки, не выдумывай его."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "id из пометки «сокращено» у более раннего результата тула",
+                }
+            },
+            "required": ["id"],
+        },
+    },
+}
+
+
 # --- tell: передать человеку личное сообщение (IMPLEMENTATION_PLAN.md этап 28) ---
 
 # Право — «действие@служба» на ту же службу llm, что и сам разговор
@@ -3358,6 +3413,14 @@ TOOLS: tuple[ToolSpec, ...] = (
         handler=tool_web_search,
         declaration=_DECL_WEB_SEARCH,
         requires=ActionRight(net_protocol.ACTION_SEARCH, net_protocol.SERVICE_NAME),
+    ),
+    # Без requires: не самостоятельное умение, а способ дочитать то, что
+    # модели уже показали (в сокращённом виде) в этом же разговоре — прав
+    # раскрывает не больше, чем тул, который результат породил.
+    ToolSpec(
+        name="recall_tool_result",
+        handler=tool_recall_tool_result,
+        declaration=_DECL_RECALL_TOOL_RESULT,
     ),
     # tell — право в форме «действие@служба» на ту же службу llm, что и сам
     # разговор: проверяется через allows_command, как chat@llm у /alfred (см.

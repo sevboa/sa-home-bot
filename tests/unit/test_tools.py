@@ -1899,6 +1899,34 @@ async def test_web_search_without_query(store):
     assert result.startswith("ошибка")
 
 
+# --- recall_tool_result: полный текст сокращённого результата тула ---
+# (см. llm_chat.py::_inline_or_cache — там результаты длиннее лимита
+# кладутся в ctx.tool_result_cache, этот тул их оттуда достаёт)
+
+
+async def test_recall_tool_result_returns_cached_full_text(store):
+    ctx = _ctx(store, subscription=ADMIN)
+    ctx.tool_result_cache["abc123"] = "полный несокращённый текст результата"
+    result = await tools.tool_recall_tool_result(ctx, {"id": "abc123"})
+    assert result == "полный несокращённый текст результата"
+
+
+async def test_recall_tool_result_unknown_id_is_honest(store):
+    result = await tools.tool_recall_tool_result(_ctx(store, subscription=ADMIN), {"id": "нет-такого"})
+    assert result.startswith("ошибка")
+
+
+async def test_recall_tool_result_without_id(store):
+    result = await tools.tool_recall_tool_result(_ctx(store, subscription=ADMIN), {})
+    assert result.startswith("ошибка")
+
+
+async def test_recall_tool_result_always_available():
+    # Не самостоятельное умение — доступен без специальных прав (см.
+    # ToolSpec в TOOLS: requires не задан).
+    assert "recall_tool_result" in _names(_sub())
+
+
 # --- memory: долгая память о чате ---
 
 
