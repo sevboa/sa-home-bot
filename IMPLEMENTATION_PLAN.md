@@ -2214,6 +2214,9 @@ server, target)` (`domain/vpn_check.py::reconcile_vpn_check`,
   локациям 39.0.7. Тесты: `test_vpn_nodes.py` (8), `test_vpn_handler.py`
   (маршрутизация по `server`, фолбэк, «VPN нигде нет»), правки фейков в
   `test_tools.py` / `test_vpn_recipient.py`.
+  **Задеплоено 2026-09-06** (тег `v0.101.0`): alfred + wooster —
+  `nodectl update` → `restart_node`, обе на v0.101.0, бот здоров. jeeves
+  offline — обновится по возвращении.
   **Осознанно НЕ здесь** (уходит в 39.0.5): фанаут+merge списка подключений
   и usage по всем локациям — сейчас `_card`, `issue`, агрегатные и
   proxy/health-действия бьют на ОДНУ (первую живую) ноду с `vpn`. Пока
