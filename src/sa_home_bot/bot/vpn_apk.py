@@ -26,17 +26,18 @@ from sa_home_bot.vpn import protocol as vpn_protocol
 log = logging.getLogger(__name__)
 
 _CHUNK_BYTES = 700 * 1024
-_DST = Address(node=vpn_protocol.NODE_ID, service=vpn_protocol.SERVICE_NAME)
 
 
-async def _download_chunks(node_link: ServiceLink, expected_sha256: str | None) -> bytes:
+async def _download_chunks(
+    node_link: ServiceLink, dst: Address, expected_sha256: str | None
+) -> bytes:
     parts: list[bytes] = []
     offset = 0
     while True:
         chunk = await node_link.command(
             vpn_protocol.ACTION_APK_CHUNK,
             {"offset": offset, "length": _CHUNK_BYTES},
-            dst=_DST,
+            dst=dst,
         )
         data = base64.b64decode(chunk["data_b64"])
         if not data:
@@ -55,17 +56,21 @@ async def deliver_apk(
     node_link: ServiceLink,
     notifier: Notifier,
     chat_id: int,
+    dst: Address,
     message_thread_id: int | None = None,
 ) -> str:
     """Отправить актуальный APK гостю в личку. Возвращает текст результата
     (пригоден и как ответ хендлера, и как ответ LLM-тула).
+
+    ``dst`` — адрес службы ``vpn`` (ноду выбирает bot/vpn_nodes.py; у
+    каждого VPN-сервера свой кэш APK).
 
     ``message_thread_id`` — топик, откуда пришёл запрос (Private Chat
     Topics): без него документ уезжает в общий топик чата, а не туда, где
     пользователь реально смотрит переписку (живой баг 2026-08-03 — файл
     реально отправлялся и получал file_id, но был не виден в топике)."""
     try:
-        info = await node_link.command(vpn_protocol.ACTION_APK_INFO, {}, dst=_DST)
+        info = await node_link.command(vpn_protocol.ACTION_APK_INFO, {}, dst=dst)
     except ProtoError as exc:
         return f"не вышло: {exc.message}"
     except (ServiceUnavailableError, TimeoutError) as exc:
@@ -86,7 +91,7 @@ async def deliver_apk(
         log.info("vpn: file_id APK устарел, качаю заново через рой")
 
     try:
-        payload = await _download_chunks(node_link, info.get("sha256"))
+        payload = await _download_chunks(node_link, dst, info.get("sha256"))
     except (ProtoError, ServiceUnavailableError, TimeoutError) as exc:
         return f"недоступно: не удалось скачать APK ({exc})"
     except ValueError as exc:
@@ -103,6 +108,6 @@ async def deliver_apk(
     if new_file_id:
         with contextlib.suppress(ProtoError, ServiceUnavailableError, TimeoutError):
             await node_link.command(
-                vpn_protocol.ACTION_APK_SET_FILE_ID, {"telegram_file_id": new_file_id}, dst=_DST
+                vpn_protocol.ACTION_APK_SET_FILE_ID, {"telegram_file_id": new_file_id}, dst=dst
             )
     return "📱 Приложение отправлено."

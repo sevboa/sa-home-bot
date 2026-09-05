@@ -38,11 +38,23 @@ def _book() -> SubscriptionBook:
 
 
 class _FakeLink:
+    # Рой из одной ноды jeeves со службой vpn — bot/vpn_nodes.resolve_vpn_dst
+    # найдёт её как адресата (этап 39: адрес больше не захардкожен).
+    _STATE = {
+        "node": "jeeves",
+        "kind": "vps",
+        "peers": [],
+        "services": [{"name": "vpn", "service": "vpn", "status": "running"}],
+    }
+
     def __init__(self, result=None) -> None:
         self._result = result if result is not None else {
             "config_text": "[Interface]\nPrivateKey = SECRET"
         }
         self.calls: list[tuple[str, dict]] = []
+
+    async def get_state(self, dst=None):
+        return self._STATE
 
     async def command(self, action, args=None, dst=None, *, timeout=None):
         self.calls.append((action, args or {}))

@@ -61,13 +61,27 @@ class FakeCallback:
 
 
 class FakeNodeLink:
+    # По умолчанию рой из одной ноды `jeeves` с запущенной службой vpn —
+    # bot/vpn_nodes.resolve_vpn_dst найдёт её и вернёт как адресата.
+    state: dict = {
+        "node": "jeeves",
+        "kind": "vps",
+        "peers": [],
+        "services": [{"name": "vpn", "service": "vpn", "status": "running"}],
+    }
+
     def __init__(self, result=None, raises=None) -> None:
         self._result = result if result is not None else {}
         self._raises = raises
         self.calls: list[tuple[str, dict]] = []
+        self.dsts: list[object] = []
+
+    async def get_state(self, dst=None):
+        return self.state
 
     async def command(self, action, args=None, dst=None, *, timeout=None):
         self.calls.append((action, args or {}))
+        self.dsts.append(dst)
         if self._raises is not None:
             raise self._raises
         return self._result
@@ -172,6 +186,62 @@ async def test_card_keyboard_offers_revoke_button_per_device():
     texts = [button.text for button in device_row]
     assert any("Отозвать" in text for text in texts)
     assert any("Перевыпустить" in text for text in texts)
+
+
+class MultiVpnLink(FakeNodeLink):
+    """Рой jeeves + wooster, оба держат vpn (get_state отдаёт одно и то же
+    состояние — collect_reports берёт node_id из id пира, не из state)."""
+
+    state: dict = {
+        "node": "jeeves",
+        "kind": "vps",
+        "peers": [{"id": "wooster", "alive": True, "kind": "vps"}],
+        "services": [{"name": "vpn", "service": "vpn", "status": "running"}],
+    }
+
+
+async def test_card_keyboard_pins_connection_server_into_callback():
+    keyboard = vpn_handlers._card_keyboard(
+        [{"device_label": "Rose", "server": "wooster"}], is_admin=False, can_self_serve=False
+    )
+    reissue, revoke = keyboard.inline_keyboard[1]
+    assert reissue.callback_data == "act:vpn:reissue:Rose:wooster"
+    assert revoke.callback_data == "act:vpn:revoke:Rose:wooster"
+
+
+async def test_reissue_button_routes_to_connection_server():
+    link = MultiVpnLink(
+        result={"config_text": "[Interface]", "device_label": "Rose", "prior_device_count": 1}
+    )
+    callback = FakeCallback("act:vpn:reissue:Rose:wooster", chat_id=777)
+    await vpn_handlers.handle_action(
+        callback, link, FakeNotifier(), _config(ttl_s=0.01), GUEST, _pending()
+    )
+    assert link.calls[0][0] == vpn_protocol.ACTION_REISSUE
+    assert link.dsts[0].node == "wooster"  # ушло на ноду-держателя подключения
+    await asyncio.sleep(0.02)  # дать таймеру очистки секрета завершиться
+
+
+async def test_revoke_falls_back_to_first_vpn_node_when_server_gone():
+    link = MultiVpnLink(result={"used_bytes": 0, "limit_bytes": 1, "remaining_bytes": 1})
+    # Подключение помечено server=archnode, которого в рое с vpn нет.
+    callback = FakeCallback("act:vpn:revoke:Rose:archnode", chat_id=777)
+    await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), GUEST, _pending())
+    assert link.calls[0][0] == vpn_protocol.ACTION_REVOKE
+    assert link.dsts[0].node == "jeeves"  # первая живая нода с vpn
+
+
+async def test_card_reports_unavailable_when_no_vpn_in_swarm():
+    class NoVpn(FakeNodeLink):
+        state: dict = {
+            "node": "alfred",
+            "peers": [],
+            "services": [{"name": "monitor", "service": "monitor", "status": "running"}],
+        }
+
+    error, usage = await vpn_handlers._card(NoVpn(), 777)
+    assert usage is None
+    assert "недоступна" in error
 
 
 async def test_apk_first_click_shows_links_not_file():

@@ -2030,10 +2030,26 @@ def test_vpn_hidden_without_any_right():
     assert "vpn" not in _names(_sub("status", "nodes"))
 
 
+# Этап 39: tool_vpn ищет ноду с vpn динамически (bot/vpn_nodes) — двойнику
+# нужно отдать состояние роя, где служба vpn где-то запущена.
+_VPN_OWN_STATE = {
+    "node": "jeeves",
+    "kind": "vps",
+    "peers": [],
+    "services": [{"name": "vpn", "service": "vpn", "status": "running"}],
+}
+
+
+def _vpn_link(**kwargs):
+    states = {"own": _VPN_OWN_STATE}
+    states.update(kwargs.pop("states", {}))
+    return _FakeSwarmLink(states=states, **kwargs)
+
+
 async def test_vpn_issue_sends_secret_via_notifier_not_to_model(store):
     """Приватный ключ никогда не должен попасть в текст, который видит
     модель, — только в личное сообщение через ctx.notifier."""
-    link = _FakeSwarmLink(
+    link = _vpn_link(
         command_result={"config_text": "[Interface]\nPrivateKey = SECRET", "device_label": "тел"}
     )
     notifier = _FakeNotifier()
@@ -2046,12 +2062,12 @@ async def test_vpn_issue_sends_secret_via_notifier_not_to_model(store):
     assert b"SECRET" in notifier.sent_documents[0][1]
     assert notifier.sent_documents[0][0] == 777
     action, dst = link.commands[0]
-    assert (action, dst.node, dst.service) == ("issue", vpn_protocol.NODE_ID, "vpn")
+    assert (action, dst.node, dst.service) == ("issue", "jeeves", "vpn")
     assert link.sent_args[0]["chat_id"] == 777  # свой чат, не подсунутый моделью
 
 
 async def test_vpn_issue_refuses_outside_private_chat(store):
-    link = _FakeSwarmLink()
+    link = _vpn_link()
     result = await tools.tool_vpn(
         _ctx(store, node_link=link, subscription=ADMIN, notifier=_FakeNotifier(), chat_id=-100123),
         {"action": "issue", "device_label": "тел"},
@@ -2062,7 +2078,7 @@ async def test_vpn_issue_refuses_outside_private_chat(store):
 
 async def test_vpn_ceiling_error_tells_model_to_request_extra(store):
     error = tools.ProtoError(vpn_protocol.ERR_QUOTA_CEILING, "потолок")
-    link = _FakeSwarmLink(command_raises=error)
+    link = _vpn_link(command_raises=error)
     result = await tools.tool_vpn(
         _ctx(store, node_link=link, subscription=ADMIN), {"action": "grant_extra"}
     )
@@ -2070,7 +2086,7 @@ async def test_vpn_ceiling_error_tells_model_to_request_extra(store):
 
 
 async def test_vpn_reissue_without_confirm_asks_before_acting(store):
-    link = _FakeSwarmLink()
+    link = _vpn_link()
     result = await tools.tool_vpn(
         _ctx(store, node_link=link, subscription=ADMIN, notifier=_FakeNotifier(), chat_id=777),
         {"action": "reissue", "device_label": "тел"},
@@ -2080,7 +2096,7 @@ async def test_vpn_reissue_without_confirm_asks_before_acting(store):
 
 
 async def test_vpn_reissue_with_confirm_proceeds(store):
-    link = _FakeSwarmLink(
+    link = _vpn_link(
         command_result={"config_text": "[Interface]\nPrivateKey = SECRET", "device_label": "тел"}
     )
     notifier = _FakeNotifier()
@@ -2090,11 +2106,11 @@ async def test_vpn_reissue_with_confirm_proceeds(store):
     )
     assert "готово" in result
     action, dst = link.commands[0]
-    assert (action, dst.node, dst.service) == ("reissue", vpn_protocol.NODE_ID, "vpn")
+    assert (action, dst.node, dst.service) == ("reissue", "jeeves", "vpn")
 
 
 async def test_vpn_usage_all_guests_requires_admin_right(store):
-    link = _FakeSwarmLink(command_result={"chats": [], "node": {"free_bytes": 1}})
+    link = _vpn_link(command_result={"chats": [], "node": {"free_bytes": 1}})
     guest = _sub("usage@vpn")
     result = await tools.tool_vpn(
         _ctx(store, node_link=link, subscription=guest, chat_id=777),
@@ -2105,19 +2121,19 @@ async def test_vpn_usage_all_guests_requires_admin_right(store):
 
 
 async def test_vpn_usage_all_guests_admin_gets_node_wide_summary(store):
-    link = _FakeSwarmLink(command_result={"chats": [{"chat_id": 777}], "node": {"free_bytes": 1}})
+    link = _vpn_link(command_result={"chats": [{"chat_id": 777}], "node": {"free_bytes": 1}})
     result = await tools.tool_vpn(
         _ctx(store, node_link=link, subscription=ADMIN, chat_id=1),
         {"action": "usage", "all_guests": True},
     )
     assert "free_bytes" in result
     action, dst = link.commands[0]
-    assert (action, dst.node, dst.service) == ("usage", vpn_protocol.NODE_ID, "vpn")
+    assert (action, dst.node, dst.service) == ("usage", "jeeves", "vpn")
     assert link.sent_args[0] == {}  # без chat_id — сводка по всем, не по своему чату
 
 
 async def test_vpn_apk_sends_by_cached_file_id(store):
-    link = _FakeSwarmLink(command_result={"telegram_file_id": "cached-id", "version": "2.0.1"})
+    link = _vpn_link(command_result={"telegram_file_id": "cached-id", "version": "2.0.1"})
     notifier = _FakeNotifier()
     result = await tools.tool_vpn(
         _ctx(store, node_link=link, subscription=ADMIN, notifier=notifier, chat_id=777),
@@ -2128,7 +2144,7 @@ async def test_vpn_apk_sends_by_cached_file_id(store):
 
 
 async def test_vpn_apk_without_cache_tells_to_use_bot_ui(store):
-    link = _FakeSwarmLink(command_result={"telegram_file_id": None, "version": "2.0.1"})
+    link = _vpn_link(command_result={"telegram_file_id": None, "version": "2.0.1"})
     result = await tools.tool_vpn(
         _ctx(store, node_link=link, subscription=ADMIN, notifier=_FakeNotifier(), chat_id=777),
         {"action": "apk"},

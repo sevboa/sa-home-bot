@@ -2198,19 +2198,32 @@ server, target)` (`domain/vpn_check.py::reconcile_vpn_check`,
   флаг/название делает бот. `_reissue`/`_revoke` не трогали (пир находится
   в БД своей ноды, `server` при перевыпуске остаётся прежним, т.к. запрос
   придёт на ту же ноду).
-- ⬜ **39.0.2 (следующее)** — `NODE_ID = "jeeves"` в `vpn/protocol.py`
-  используется в `bot/handlers/vpn.py` (`_DST`), `bot/tools.py:2244`,
-  `bot/vpn_apk.py:29`. Как бот находит ноды со службой: `node.get_state()`
-  → `peers` (`wake_core.collect_reports`), плюс `services` своей +
-  `Address(node=<peer>, service="node").get_state()` каждой — там
-  `services` и `singletons`. Точный способ «кто несёт `vpn`» ещё не
-  дочитан: смотреть `node/service.py::_services_state` (стр. 452) и
-  `node/peers.py::peers_state` (стр. 589) — несёт ли peer-запись список
-  назначений. Образец фанаута — `monitor` в `/nodes` (`bot/node_view.py`,
-  `bot/swarm_view.py`, `wake_core.collect_reports(with_monitor=True)`).
-- ⬜ **39.0.5** — UI выбора локации (после 39.0.2).
+- ✅ **39.0.2, 2026-09-06** — бот больше не адресует `Address(node="jeeves")`.
+  Новый `bot/vpn_nodes.py`: `live_vpn_nodes()` перечисляет ноды с
+  запущенной службой `vpn` из `state["services"]` (`wake_core.collect_reports`,
+  как фанаут `monitor` в `/nodes`), `resolve_vpn_dst(server=…)` выбирает
+  адресата — предпочтительную ноду-держателя подключения (`vpn_peers.server`
+  в callback как `node_id`) либо первую живую. `bot/handlers/vpn.py`:
+  `_DST` убран, каждая ветка `handle_action` резолвит адрес по требованию
+  (`_need_dst`) — выдача уже готового секрета (`f_…`) и ссылки на
+  приложение не падают из-за отвала VPN; кнопки перевыпуска/отзыва несут
+  `node_id` подключения. `bot/tools.py::tool_vpn` и `bot/vpn_apk.deliver_apk`
+  — то же. `vpn/protocol.py::NODE_ID` оставлен как легаси только для двух
+  внутренних потоков probe/health (`vpn_check/service.py` — куда пушить
+  `report_check`; `node/fixups.py::_fetch_probe_config`) — их разводит по
+  локациям 39.0.7. Тесты: `test_vpn_nodes.py` (8), `test_vpn_handler.py`
+  (маршрутизация по `server`, фолбэк, «VPN нигде нет»), правки фейков в
+  `test_tools.py` / `test_vpn_recipient.py`.
+  **Осознанно НЕ здесь** (уходит в 39.0.5): фанаут+merge списка подключений
+  и usage по всем локациям — сейчас `_card`, `issue`, агрегатные и
+  proxy/health-действия бьют на ОДНУ (первую живую) ноду с `vpn`. Пока
+  сервер один (jeeves), поведение не отличается от прежнего. `resolve_request`
+  из уведомления не несёт `node_id` — тоже на первую живую (заявка живёт в
+  БD одной ноды; довести в 39.0.5/6).
+- ⬜ **39.0.5 (следующее)** — UI выбора локации в `/vpn` + фанаут/merge
+  списка и usage по живым `vpn` (см. «Осознанно НЕ здесь» выше).
 - ⬜ **39.0.3 / 39.0.7** — требуют живого jeeves как эталон конфига awg
-  (на 2026-09-05 jeeves offline > 1 сут).
+  (на 2026-09-06 jeeves offline > 2 сут).
 
 ---
 

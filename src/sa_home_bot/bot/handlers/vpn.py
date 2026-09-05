@@ -51,7 +51,7 @@ from aiogram.types import (
     Message,
 )
 
-from sa_home_bot.bot import commands
+from sa_home_bot.bot import commands, vpn_nodes
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.vpn_apk import deliver_apk
@@ -66,7 +66,8 @@ log = logging.getLogger(__name__)
 router = Router(name="vpn")
 
 SERVICE = vpn_protocol.SERVICE_NAME
-_DST = Address(node=vpn_protocol.NODE_ID, service=SERVICE)
+
+_VPN_UNAVAILABLE = "⚠️ Служба VPN недоступна — попробуйте позже."
 
 
 def _is_private(chat_id: int) -> bool:
@@ -148,18 +149,21 @@ def _card_keyboard(
     rows: list[list[InlineKeyboardButton]] = [top_row]
     for device in devices:
         label = device["device_label"]
+        # node_id подключения (vpn_peers.server) — перевыпуск и отзыв идут
+        # ровно на ту ноду, где пир заведён (этап 39: серверов несколько).
+        server = device.get("server")
         rows.append(
             [
                 InlineKeyboardButton(
                     text=f"🔄 Перевыпустить «{label}»",
                     callback_data=commands.action_callback(
-                        vpn_protocol.ACTION_REISSUE, label, service=SERVICE
+                        vpn_protocol.ACTION_REISSUE, label, service=SERVICE, node_id=server
                     ),
                 ),
                 InlineKeyboardButton(
                     text=f"🗑 Отозвать «{label}»",
                     callback_data=commands.action_callback(
-                        vpn_protocol.ACTION_REVOKE, label, service=SERVICE
+                        vpn_protocol.ACTION_REVOKE, label, service=SERVICE, node_id=server
                     ),
                 ),
             ]
@@ -348,12 +352,15 @@ async def usage_text(node_link: ServiceLink, chat_id: int) -> str:
 
 
 async def _card(node_link: ServiceLink, chat_id: int) -> tuple[str, dict] | tuple[None, None]:
+    dst = await vpn_nodes.resolve_vpn_dst(node_link)
+    if dst is None:
+        return _VPN_UNAVAILABLE, None
     try:
         usage = await node_link.command(
-            vpn_protocol.ACTION_USAGE, {"chat_id": chat_id}, dst=_DST
+            vpn_protocol.ACTION_USAGE, {"chat_id": chat_id}, dst=dst
         )
     except ServiceUnavailableError:
-        return "⚠️ Служба VPN недоступна — попробуйте позже.", None
+        return _VPN_UNAVAILABLE, None
     except ProtoError as exc:
         return f"⚠️ Ошибка: {exc.message}", None
     return None, usage
@@ -536,8 +543,18 @@ async def handle_action(
     if parsed is None or callback.message is None:
         await callback.answer()
         return
-    _service, action_id, value, _node_id = parsed
+    _service, action_id, value, node_id = parsed
     chat_id = callback.message.chat.id
+
+    async def _need_dst() -> Address | None:
+        """Адрес ноды с ``vpn`` (держатель подключения из callback, иначе
+        первая живая). None + алерт пользователю — VPN в рое нет. Резолвим
+        по требованию, а не в начале: выдача уже готового секрета (кнопка
+        ``f_…``) и ссылки на приложение не должны падать из-за отвала VPN."""
+        dst = await vpn_nodes.resolve_vpn_dst(node_link, server=node_id)
+        if dst is None:
+            await callback.answer("⚠️ Служба VPN недоступна.", show_alert=True)
+        return dst
 
     if action_id == "apk":
         if not _is_private(chat_id):
@@ -549,9 +566,16 @@ async def handle_action(
             # пользователя 2026-08-04 — на iOS сайдлоада нет вовсе, апстор
             # надёжнее любого .apk). Кнопка прячется — второй раз файл не
             # переспросить с того же сообщения по ошибке.
+            dst = await _need_dst()
+            if dst is None:
+                return
             await callback.answer("Отправляю…")
             text = await deliver_apk(
-                node_link, notifier, chat_id, message_thread_id=callback.message.message_thread_id
+                node_link,
+                notifier,
+                chat_id,
+                dst,
+                message_thread_id=callback.message.message_thread_id,
             )
             await callback.message.answer(text)
             with contextlib.suppress(TelegramBadRequest):
@@ -562,12 +586,15 @@ async def handle_action(
         return
 
     if action_id == vpn_protocol.ACTION_GRANT_EXTRA:
+        dst = await _need_dst()
+        if dst is None:
+            return
         try:
-            await node_link.command(vpn_protocol.ACTION_GRANT_EXTRA, {"chat_id": chat_id}, dst=_DST)
+            await node_link.command(vpn_protocol.ACTION_GRANT_EXTRA, {"chat_id": chat_id}, dst=dst)
         except ProtoError as exc:
             if exc.code == vpn_protocol.ERR_QUOTA_CEILING:
                 result = await node_link.command(
-                    vpn_protocol.ACTION_REQUEST_EXTRA, {"chat_id": chat_id}, dst=_DST
+                    vpn_protocol.ACTION_REQUEST_EXTRA, {"chat_id": chat_id}, dst=dst
                 )
                 await callback.answer()
                 await callback.message.answer(
@@ -623,12 +650,15 @@ async def handle_action(
         if action_id == vpn_protocol.ACTION_REISSUE and not value:
             await callback.answer()
             return
+        dst = await _need_dst()
+        if dst is None:
+            return
         await callback.answer("Выпускаю…")
         payload = {"chat_id": chat_id}
         if value:
             payload["device_label"] = value
         try:
-            result = await node_link.command(action_id, payload, dst=_DST)
+            result = await node_link.command(action_id, payload, dst=dst)
         except ProtoError as exc:
             await callback.message.answer(f"⚠️ {exc.message}")
             return
@@ -651,9 +681,12 @@ async def handle_action(
         if not value:
             await callback.answer()
             return
+        dst = await _need_dst()
+        if dst is None:
+            return
         try:
             await node_link.command(
-                vpn_protocol.ACTION_REVOKE, {"chat_id": chat_id, "device_label": value}, dst=_DST
+                vpn_protocol.ACTION_REVOKE, {"chat_id": chat_id, "device_label": value}, dst=dst
             )
         except ProtoError as exc:
             await callback.answer(f"⚠️ {exc.message}", show_alert=True)
@@ -666,8 +699,11 @@ async def handle_action(
         return
 
     if action_id == "usage_all":
+        dst = await _need_dst()
+        if dst is None:
+            return
         try:
-            summary = await node_link.command(vpn_protocol.ACTION_USAGE, {}, dst=_DST)
+            summary = await node_link.command(vpn_protocol.ACTION_USAGE, {}, dst=dst)
         except ProtoError as exc:
             await callback.answer(f"⚠️ {exc.message}", show_alert=True)
             return
@@ -684,8 +720,11 @@ async def handle_action(
         return
 
     if action_id == vpn_protocol.ACTION_CHECK_STATUS:
+        dst = await _need_dst()
+        if dst is None:
+            return
         try:
-            result = await node_link.command(vpn_protocol.ACTION_CHECK_STATUS, {}, dst=_DST)
+            result = await node_link.command(vpn_protocol.ACTION_CHECK_STATUS, {}, dst=dst)
         except ProtoError as exc:
             await callback.answer(f"⚠️ {exc.message}", show_alert=True)
             return
@@ -701,8 +740,11 @@ async def handle_action(
         return
 
     if action_id == vpn_protocol.ACTION_CHECK_NOW:
+        dst = await _need_dst()
+        if dst is None:
+            return
         try:
-            result = await node_link.command(vpn_protocol.ACTION_CHECK_NOW, {}, dst=_DST)
+            result = await node_link.command(vpn_protocol.ACTION_CHECK_NOW, {}, dst=dst)
         except ProtoError as exc:
             await callback.answer(f"⚠️ {exc.message}", show_alert=True)
             return
@@ -722,7 +764,7 @@ async def handle_action(
         # ещё старые, до следующего нажатия «↻ Обновить».
         states: list[dict] = []
         with contextlib.suppress(ProtoError, ServiceUnavailableError):
-            status = await node_link.command(vpn_protocol.ACTION_CHECK_STATUS, {}, dst=_DST)
+            status = await node_link.command(vpn_protocol.ACTION_CHECK_STATUS, {}, dst=dst)
             states = status.get("states") or []
         with contextlib.suppress(TelegramBadRequest):
             await callback.message.edit_text(
@@ -732,8 +774,11 @@ async def handle_action(
         return
 
     if action_id == vpn_protocol.ACTION_PROXY_LINK:
+        dst = await _need_dst()
+        if dst is None:
+            return
         try:
-            result = await node_link.command(vpn_protocol.ACTION_PROXY_LINK, {}, dst=_DST)
+            result = await node_link.command(vpn_protocol.ACTION_PROXY_LINK, {}, dst=dst)
         except ProtoError as exc:
             await callback.answer(f"⚠️ {exc.message}", show_alert=True)
             return
@@ -754,8 +799,11 @@ async def handle_action(
         return
 
     if action_id == vpn_protocol.ACTION_PROXY_ROTATE_SECRET:
+        dst = await _need_dst()
+        if dst is None:
+            return
         try:
-            result = await node_link.command(vpn_protocol.ACTION_PROXY_ROTATE_SECRET, {}, dst=_DST)
+            result = await node_link.command(vpn_protocol.ACTION_PROXY_ROTATE_SECRET, {}, dst=dst)
         except ProtoError as exc:
             await callback.answer(f"⚠️ {exc.message}", show_alert=True)
             return
@@ -775,11 +823,14 @@ async def handle_action(
             return
         raw_id, _, decision = value.partition("_")
         approve = decision == "approve"
+        dst = await _need_dst()
+        if dst is None:
+            return
         try:
             result = await node_link.command(
                 vpn_protocol.ACTION_RESOLVE_REQUEST,
                 {"request_id": int(raw_id), "approve": approve},
-                dst=_DST,
+                dst=dst,
             )
         except (ProtoError, ServiceUnavailableError, ValueError) as exc:
             await callback.answer(f"⚠️ {exc}", show_alert=True)

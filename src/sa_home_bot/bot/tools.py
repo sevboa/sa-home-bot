@@ -57,7 +57,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sa_home_bot import wake_core
-from sa_home_bot.bot import commands, invites, recipients, voice_mode
+from sa_home_bot.bot import commands, invites, recipients, voice_mode, vpn_nodes
 from sa_home_bot.bot.monitor_state import parse_disk_summary, parse_health_state
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings, reminder_reason
@@ -2241,7 +2241,14 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
     allowed = _VPN_VARIANTS.allowed_values(ctx.subscription) if ctx.subscription else []
     if action not in allowed:
         return f"не умею: {action or 'без уточнения'}"
-    dst = Address(node=vpn_protocol.NODE_ID, service=vpn_protocol.SERVICE_NAME)
+    # Ноду с vpn ищем динамически (этап 39: серверов несколько). ``server``
+    # в args — подсказка от модели, какую локацию хочет пользователь;
+    # выбор локации при issue штатно приедет в 39.0.5, пока — первая живая.
+    dst = await vpn_nodes.resolve_vpn_dst(
+        ctx.node_link, server=str(args.get("server") or "") or None
+    )
+    if dst is None:
+        return "недоступно: VPN сейчас не поднят ни на одной ноде роя"
 
     if action in (vpn_protocol.ACTION_ISSUE, vpn_protocol.ACTION_REISSUE):
         # issue не принимает имя устройства вовсе (решение пользователя
