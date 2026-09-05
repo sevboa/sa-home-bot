@@ -2223,10 +2223,41 @@ server, target)` (`domain/vpn_check.py::reconcile_vpn_check`,
   сервер один (jeeves), поведение не отличается от прежнего. `resolve_request`
   из уведомления не несёт `node_id` — тоже на первую живую (заявка живёт в
   БD одной ноды; довести в 39.0.5/6).
+- ✅ **39.0.3 (wooster как VPN-сервер), 2026-09-06** — поднят независимый
+  AmneziaWG-сервер на wooster (модель B). Делалось вручную по
+  `deploy/setup-awg-jeeves.sh` (скрипт параметризован, jeeves как эталон
+  НЕ понадобился — конфиг awg известен из скрипта). Итог на wooster:
+  - `awg0` (10.9.0.1/24, ListenPort 51820, свой keypair
+    `rHeSgFQNasiPpqBjiVLYwi3g0KT4K5mfjmsncnD05Tw=`, обфускация
+    jc=8/s1=67/s2=107/h1..h4=1010918.. — в `[vpn]` config wooster);
+    подсеть та же 10.9.0.0/24 что у jeeves — пулы независимы, пиров нет
+    пересечений;
+  - `amneziawg-go`/`awg` уже были (ставились под vpn_check) — сборка
+    пропущена; awg-quick в userspace-режиме (kernel-модуля нет);
+  - **правки поверх скрипта, которых он не делает** (ufw + nft-бэкенд, в
+    отличие от чистого jeeves): `ufw allow 51820/udp`; forward+NAT
+    (`iifname/oifname awg0 accept` в `ip filter FORWARD`, `ip saddr
+    10.9.0.0/24 oifname eth0 masquerade` в `ip nat POSTROUTING`) вынесены
+    из PostUp awg0.conf в systemd-юнит `sa-home-awg0-forward.service`
+    (переживает ребут; PostUp/PostDown из awg0.conf удалены);
+  - awg-sudoers сниппет `50-sa-home-node-awg` поставлен вручную (НЕ через
+    `nodectl fix` — тот при `vpn` в assignments тянет ещё proxy-фиксапы
+    mtg/microsocks, не нужные на wooster);
+  - `[vpn].endpoint_host = 172.245.159.221`, `vpn` в `[node].assignments`,
+    нода перезапущена → служба `vpn` 🟢 на wooster (v0.101.0).
+  Проверено: `live_vpn_nodes()` с alfred → `['wooster']`; issue/revoke
+  end-to-end, пир реально появляется/уходит на awg0, `server="wooster"`
+  проставляется. Актуального клиента (телефон) не тестировали — за
+  пользователем. **TODO:** кодифицировать ufw/persist-шаги в фиксап
+  (сейчас только вручную); `node_limit_gb` на wooster дефолтный 10 ТБ —
+  уточнить лимит тарифа RackNerd.
 - ⬜ **39.0.5 (следующее)** — UI выбора локации в `/vpn` + фанаут/merge
-  списка и usage по живым `vpn` (см. «Осознанно НЕ здесь» выше).
-- ⬜ **39.0.3 / 39.0.7** — требуют живого jeeves как эталон конфига awg
-  (на 2026-09-06 jeeves offline > 2 сут).
+  списка и usage по живым `vpn` (см. «Осознанно НЕ здесь» выше). Теперь
+  разблокировано: есть живой второй сервер.
+- ⬜ **39.0.7** — probe-туннель на каждый сервер, ключ `vpn_check_states`
+  → `(node, server, target)`. Требует живого jeeves как второй эндпоинт
+  (на 2026-09-06 jeeves offline > 2 сут — чинить через веб-консоль
+  Chunkserve).
 
 ---
 
