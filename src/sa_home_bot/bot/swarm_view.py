@@ -120,6 +120,15 @@ def _health_bucket(report: _NodeReport) -> int:
     return 1
 
 
+def order_by_health(reports: Sequence[_NodeReport]) -> list[_NodeReport]:
+    """Порядок для любого списка нод: проблемные → активные → штатно не в
+    сети. Стабильно — внутри группы сохраняется порядок роя (своя нода
+    первой, см. wake_core.collect_reports). Общий для /swarm и панели
+    «🖥 Ноды», в панели — ДО пагинации, чтобы проблемные не утекли на 2-ю
+    страницу."""
+    return sorted(reports, key=_health_bucket)
+
+
 def node_line(report: _NodeReport) -> str:
     name = node_links.node_command(report.node_id) or f"<b>{report.node_id}</b>"
     if not report.alive:
@@ -169,7 +178,7 @@ def render_swarm(
         if extra:
             lines.append(extra)
     lines.append("")
-    lines.extend(node_line(r) for r in sorted(reports, key=_health_bucket))
+    lines.extend(node_line(r) for r in order_by_health(reports))
     if wake is not None and wake.mac:
         lines.append(REMOTE_STUB_TEXT)
     return "\n".join(lines)

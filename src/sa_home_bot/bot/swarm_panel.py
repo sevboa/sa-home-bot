@@ -187,7 +187,10 @@ def build_nodes_list_view(
     плюс точечная кнопка будильника у спящих нод с известными реквизитами
     (``wakeable_ids`` — swarm_view.offline_wakeable_ids)."""
     lines = [f"🖥 <b>Ноды</b> ({len(reports)})", ""]
-    page = reports[offset : offset + NODES_PAGE_SIZE]
+    # Порядок «проблемные → активные → неактивные» ДО среза страницы: иначе
+    # пропавший сервер утекает на 2-ю страницу мимо глаз (swarm_view.order_by_health).
+    ordered = swarm_view.order_by_health(reports)
+    page = ordered[offset : offset + NODES_PAGE_SIZE]
     lines.extend(swarm_view.node_line(r) for r in page)
     wakeable = set(wakeable_ids)
 

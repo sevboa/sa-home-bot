@@ -164,6 +164,45 @@ def test_nodes_list_shows_wake_button_only_for_wakeable():
     assert not any(c.startswith("st:wake:alfred") for c in callbacks)
 
 
+def test_nodes_list_orders_problem_then_healthy_then_asleep():
+    """Список нод панели: пропавший сервер/VDS впереди, штатно спящая —
+    в хвосте, даже если в порядке роя они шли иначе."""
+    healthy = NodeReport(
+        node_id="alfred",
+        alive=True,
+        state={
+            "node": "alfred",
+            "version": "1",
+            "services": [{"name": "m", "status": "running"}],
+        },
+        monitor={"health": [], "requirements": []},
+        kind="server",
+    )
+    down_vps = NodeReport(node_id="jeeves", alive=False, kind="vps")
+    asleep = NodeReport(node_id="winpc", alive=False, kind="workstation")
+    text, _ = swarm_panel.build_nodes_list_view(
+        [healthy, asleep, down_vps], 0, [], own_node_id="alfred"
+    )
+    lines = [ln for ln in text.splitlines() if ln[:1] in {"🟢", "🔴", "⚪"}]
+    assert lines[0].startswith("🔴 /node_jeeves")
+    assert lines[1].startswith("🟢 /node_alfred")
+    assert lines[2].startswith("⚪ /node_winpc")
+
+
+def test_nodes_list_problem_node_pulled_onto_first_page():
+    """Проблемная нода, стоящая в рое за пределами первой страницы,
+    всплывает на неё — сортировка идёт ДО среза."""
+    healthy = [_report(f"node{i}", "1", ["m"]) for i in range(5)]
+    for r in healthy:
+        r.state["services"] = [{"name": "m", "status": "running"}]
+        r.monitor = {"health": [], "requirements": []}
+    down_vps = NodeReport(node_id="jeeves", alive=False, kind="vps")
+    text, _ = swarm_panel.build_nodes_list_view(
+        [*healthy, down_vps], 0, [], own_node_id="node0"
+    )
+    assert "🔴 /node_jeeves" in text
+
+
 def test_nodes_list_paginates_and_refreshes():
     reports = [_report(f"node{i}", "0.70.0", []) for i in range(7)]
     text, kb = swarm_panel.build_nodes_list_view(reports, 0, [], own_node_id="node0")
