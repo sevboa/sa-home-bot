@@ -465,3 +465,43 @@ async def test_set_quota_admin_sets_absolute_limit(env):
     )
     usage = await svc.run_command(vpn_protocol.ACTION_USAGE, {"chat_id": CHAT})
     assert usage["limit_bytes"] == 5 * GB
+
+
+async def test_issue_stamps_own_server(env):
+    """Этап 39: каждый инстанс vpn помечает выданный пир своим [node].id —
+    по этому полю бот раскладывает подключения по локациям."""
+    svc, _backend, _events = env
+    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
+    cur = await svc._db.conn.execute("SELECT server FROM vpn_peers")
+    assert (await cur.fetchone())["server"] == svc._node
+
+
+async def test_usage_and_peers_report_server(env):
+    svc, _backend, _events = env
+    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
+    usage = await svc.run_command(vpn_protocol.ACTION_USAGE, {"chat_id": CHAT})
+    assert usage["devices"][0]["server"] == svc._node
+    peers = await svc.run_command(vpn_protocol.ACTION_PEERS, {})
+    assert peers["peers"][0]["server"] == svc._node
+
+
+async def test_backfill_server_fills_pre_stage39_peers(env):
+    """Пиры без server (выданы до этапа 39) — все на этой ноде, разово
+    проставляются её именем; уже заполненные не трогаются."""
+    svc, _backend, _events = env
+    await svc._db.conn.execute(
+        "INSERT INTO vpn_peers (chat_id, device_label, public_key, address, status, "
+        "created_at, server) VALUES (?, 'old', 'pk-old', '10.9.0.2', 'active', '2026-01-01', NULL)",
+        (CHAT,),
+    )
+    await svc._db.conn.execute(
+        "INSERT INTO vpn_peers (chat_id, device_label, public_key, address, status, "
+        "created_at, server) VALUES (?, 'kept', 'pk-kept', '10.9.0.3', 'active', "
+        "'2026-01-01', 'wooster')",
+        (OTHER_CHAT,),
+    )
+    await svc._db.conn.commit()
+    await svc.backfill_server()
+    cur = await svc._db.conn.execute("SELECT public_key, server FROM vpn_peers ORDER BY public_key")
+    got = {row["public_key"]: row["server"] for row in await cur.fetchall()}
+    assert got == {"pk-old": svc._node, "pk-kept": "wooster"}

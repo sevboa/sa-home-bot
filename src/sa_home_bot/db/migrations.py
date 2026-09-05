@@ -35,5 +35,9 @@ async def apply_migrations(db: Database) -> None:
     await _add_column_if_missing(db, "ai_turns", "user_name", "TEXT")
     # ai_turns.photo_path — добавлена 2026-08-10, мультимодальный /ai (см. schema.sql).
     await _add_column_if_missing(db, "ai_turns", "photo_path", "TEXT")
+    # vpn_peers.server — добавлена 2026-09-05, два VPN-сервера (этап 39). Бэкфилл
+    # NULL → имя своей ноды делает vpn/service.py::backfill_server (там есть
+    # [node].id; в общей миграции хардкодить "jeeves" не хочется).
+    await _add_column_if_missing(db, "vpn_peers", "server", "TEXT")
     await db.conn.commit()
     log.info("Схема БД применена")

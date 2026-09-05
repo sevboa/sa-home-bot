@@ -49,6 +49,7 @@ async def run_vpn(settings: Settings) -> None:
             await server.broadcast_event(event_type, data)
 
     service = VpnService(settings, db, backend, emit, node_link=node_link)
+    await service.backfill_server()
     server = ProtoServer(settings.vpn.socket, service, token=settings.swarm.token)
     # Обработчики сигналов — до start(): он ждёт появления своего адреса
     # (см. proto/server.py), и всё это время остановка иначе не обрабатывалась бы.

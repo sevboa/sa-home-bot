@@ -228,6 +228,13 @@ CREATE INDEX IF NOT EXISTS idx_invites_open ON invites(expires_at)
 -- сохраняется за старым peer_id; revoked — отозван вручную.
 -- Приватный ключ НИКОГДА не пишется в БД (только публичный) — секрет живёт
 -- только в конфиге, который получает гость, см. vpn/service.py::_issue.
+-- server — на каком VPN-сервере роя живёт это подключение (этап 39, модель B:
+-- у каждого VPS свой awg-сервер, свой keypair, свой пул адресов). Значение =
+-- [node].id ноды, выдавшей пир (каждый инстанс vpn стамповит своё имя в
+-- _issue). NULL — пиры, выданные до этапа 39 (все на jeeves); заполняются
+-- один раз при старте службы (vpn/service.py::_backfill_server). Колонка
+-- добавляется миграцией (db/migrations.py) — CREATE TABLE IF NOT EXISTS её
+-- на существующей таблице не подхватит.
 CREATE TABLE IF NOT EXISTS vpn_peers (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id            INTEGER NOT NULL,
@@ -237,7 +244,8 @@ CREATE TABLE IF NOT EXISTS vpn_peers (
     status             TEXT NOT NULL DEFAULT 'active',
     created_at         TEXT NOT NULL,
     revoked_at         TEXT,
-    last_handshake_at  TEXT
+    last_handshake_at  TEXT,
+    server             TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_vpn_peers_chat ON vpn_peers(chat_id);
 

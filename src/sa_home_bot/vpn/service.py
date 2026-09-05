@@ -429,7 +429,7 @@ class VpnService:
 
     async def _peers_for_chat(self, chat_id: int) -> list[dict[str, Any]]:
         cur = await self._db.conn.execute(
-            "SELECT device_label, status, created_at, last_handshake_at FROM vpn_peers "
+            "SELECT device_label, status, created_at, last_handshake_at, server FROM vpn_peers "
             "WHERE chat_id = ? AND status = 'active' ORDER BY created_at",
             (chat_id,),
         )
@@ -439,9 +439,23 @@ class VpnService:
                 "status": row["status"],
                 "created_at": row["created_at"],
                 "last_handshake_at": row["last_handshake_at"],
+                "server": row["server"] or self._node,
             }
             for row in await cur.fetchall()
         ]
+
+    # --- миграция данных ---
+
+    async def backfill_server(self) -> None:
+        """Пиры, выданные до этапа 39, не знают своего сервера — все они на
+        этой ноде (единственной с `vpn` до появления второго сервера).
+        Проставляем `[node].id` разово; на нодах со свежей БД строк нет."""
+        cur = await self._db.conn.execute(
+            "UPDATE vpn_peers SET server = ? WHERE server IS NULL", (self._node,)
+        )
+        if cur.rowcount:
+            await self._db.conn.commit()
+            log.info("vpn: проставлен server=%s у %d старых пиров", self._node, cur.rowcount)
 
     # --- reconciler ---
 
@@ -491,8 +505,8 @@ class VpnService:
         now = _now().isoformat()
         await self._db.conn.execute(
             "INSERT INTO vpn_peers (chat_id, device_label, public_key, address, status, "
-            "created_at) VALUES (?, ?, ?, ?, 'active', ?)",
-            (chat_id, device_label, public_key, address, now),
+            "created_at, server) VALUES (?, ?, ?, ?, 'active', ?, ?)",
+            (chat_id, device_label, public_key, address, now, self._node),
         )
         await self._db.conn.commit()
         await self._backend.add_peer(public_key, address)
@@ -555,7 +569,7 @@ class VpnService:
 
     async def _peers(self, _args: dict[str, Any]) -> dict[str, Any]:
         cur = await self._db.conn.execute(
-            "SELECT chat_id, device_label, address, status, created_at, last_handshake_at "
+            "SELECT chat_id, device_label, address, status, created_at, last_handshake_at, server "
             "FROM vpn_peers ORDER BY chat_id, created_at"
         )
         peers = [
@@ -566,6 +580,7 @@ class VpnService:
                 "status": row["status"],
                 "created_at": row["created_at"],
                 "last_handshake_at": row["last_handshake_at"],
+                "server": row["server"] or self._node,
             }
             for row in await cur.fetchall()
         ]
