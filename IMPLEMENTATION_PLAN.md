@@ -2250,6 +2250,20 @@ server, target)` (`domain/vpn_check.py::reconcile_vpn_check`,
   проставляется. Тестового клиента не гоняли, но 2026-09-06 гость
   188548043 уже выпустил рабочий конфиг с wooster (`server="wooster"`).
   **TODO:** кодифицировать ufw/persist-шаги в фиксап (сейчас вручную).
+  - ✅ **MTU/MSS-фикс, 2026-09-06 (v0.101.3)** — жалоба из РФ (гость
+    348284076, конфиг `dahlia`): хендшейк с wooster проходит, а сайты не
+    грузятся; из КЗ тот же сервер работает. Причина — path MTU: `awg0` был
+    1420 без MSS-clamp, из РФ (мобильный CGNAT) большие TCP-пакеты в
+    туннеле молча дропались. Сделано: `_render_client_conf` теперь пишет
+    `MTU = {cfg.mtu}` (новый параметр `[vpn].mtu`, дефолт 1280);
+    `deploy/setup-awg-jeeves.sh` пишет `MTU = 1280` в `[Interface]` и
+    MSS-clamp (`--set-mss 1240`, обе стороны) в PostUp/PostDown. На живом
+    wooster вручную: `ip link set awg0 mtu 1280` + строка `MTU = 1280` в
+    `awg0.conf`; MSS-clamp `1240` для `iif/oifname awg0` в `ip filter
+    FORWARD` + в `awg0-forward-reapply.sh` (переживает ребут). Старым
+    клиентам достаточно `/reissue` (или руками добавить `MTU = 1280`).
+    Осталось: раскатать v0.101.3 на wooster (`pipx`), при возврате jeeves —
+    те же правки там.
   - **Лимит трафика — per-server, уже так по дизайну.** `[vpn].node_limit_gb`
     читается из config.toml КАЖДОЙ ноды своим инстансом `vpn`
     (`_check_node_limit` → `self._cfg.node_limit_gb`); алерт

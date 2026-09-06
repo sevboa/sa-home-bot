@@ -599,6 +599,13 @@ class VpnConfig(BaseModel):
     совпадать с тем, что реально прописано в серверном ``awg0.conf`` (их
     подбирают один раз при установке, не на лету).
 
+    ``mtu`` — MTU интерфейса в клиентском ``.conf`` (по умолчанию 1280).
+    Диагностика 2026-09-06: без явной строки клиент AmneziaWG берёт 1420,
+    и на мобильных сетях РФ (CGNAT, урезанный path MTU) большие пакеты
+    молча дропаются — хендшейк проходит, а сайты не грузятся. 1280 (мин.
+    IPv6) проходит почти всегда; серверный ``awg0`` тоже опущен до 1280 и
+    на forward-пути включён MSS-clamp (см. node/fixups.py).
+
     ``base_quota_gb`` — базовая месячная квота гостя; ``extra_step_gb`` —
     шаг самостоятельной докупки кнопкой «+100 ГБ»; ``self_ceiling_gb`` —
     потолок самообслуживания (решение пользователя 2026-08-03: до этого
@@ -644,6 +651,7 @@ class VpnConfig(BaseModel):
     endpoint_host: str = ""
     endpoint_port: int = Field(default=51820, ge=1, le=65535)
     dns: str = "1.1.1.1"
+    mtu: int = Field(default=1280, ge=1280, le=1420)
     jc: int = Field(default=5, ge=1)
     jmin: int = Field(default=40, ge=0)
     jmax: int = Field(default=70, ge=0)

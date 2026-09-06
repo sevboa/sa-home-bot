@@ -173,6 +173,7 @@ def _render_client_conf(cfg: Any, private_key: str, address: str, server_public_
         f"PrivateKey = {private_key}\n"
         f"Address = {address}/32\n"
         f"DNS = {cfg.dns}\n"
+        f"MTU = {cfg.mtu}\n"
         f"Jc = {cfg.jc}\n"
         f"Jmin = {cfg.jmin}\n"
         f"Jmax = {cfg.jmax}\n"

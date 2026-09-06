@@ -125,6 +125,11 @@ cat > "$AWG_CONF" <<EOF
 Address = ${SERVER_ADDR}
 ListenPort = ${LISTEN_PORT}
 PrivateKey = ${SERVER_PRIVATE_KEY}
+# MTU 1280 (мин. IPv6) — диагностика 2026-09-06: на 1420 (дефолт) из РФ
+# (мобильный CGNAT, урезанный path MTU) большие пакеты в туннеле молча
+# дропались, хендшейк проходил, а сайты не грузились. Держать в паре с
+# mtu=1280 в [vpn] config.toml и с MSS-clamp в PostUp ниже.
+MTU = 1280
 Jc = ${JC}
 Jmin = ${JMIN}
 Jmax = ${JMAX}
@@ -134,8 +139,8 @@ H1 = ${H1}
 H2 = ${H2}
 H3 = ${H3}
 H4 = ${H4}
-PostUp = iptables -A FORWARD -i ${WG_IFACE} -j ACCEPT; iptables -A FORWARD -o ${WG_IFACE} -j ACCEPT; iptables -t nat -A POSTROUTING -s ${SUBNET} -o ${IFACE} -j MASQUERADE
-PostDown = iptables -D FORWARD -i ${WG_IFACE} -j ACCEPT; iptables -D FORWARD -o ${WG_IFACE} -j ACCEPT; iptables -t nat -D POSTROUTING -s ${SUBNET} -o ${IFACE} -j MASQUERADE
+PostUp = iptables -A FORWARD -i ${WG_IFACE} -j ACCEPT; iptables -A FORWARD -o ${WG_IFACE} -j ACCEPT; iptables -t nat -A POSTROUTING -s ${SUBNET} -o ${IFACE} -j MASQUERADE; iptables -t mangle -A FORWARD -o ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240; iptables -t mangle -A FORWARD -i ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240
+PostDown = iptables -D FORWARD -i ${WG_IFACE} -j ACCEPT; iptables -D FORWARD -o ${WG_IFACE} -j ACCEPT; iptables -t nat -D POSTROUTING -s ${SUBNET} -o ${IFACE} -j MASQUERADE; iptables -t mangle -D FORWARD -o ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240; iptables -t mangle -D FORWARD -i ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240
 EOF
 chmod 600 "$AWG_CONF"
 
@@ -160,6 +165,7 @@ cat <<EOF
   subnet = "${SUBNET}"
   endpoint_host = "<белый IP jeeves>"
   endpoint_port = ${LISTEN_PORT}
+  mtu = 1280
   jc = ${JC}
   jmin = ${JMIN}
   jmax = ${JMAX}
