@@ -2271,6 +2271,44 @@ server, target)` (`domain/vpn_check.py::reconcile_vpn_check`,
     2026-09-06: wooster `node_limit_gb = 3000` (RackNerd 3 ТБ → алерт на
     2900 ГБ); jeeves — на своём значении. Единый агрегат по локациям в
     фазе 0 не делаем (открытый вопрос 39.0.6).
+  - ✅❌ **Обфускация AmneziaWG 3.x (РФ-троттлинг wooster) — проверено, НЕ
+    помогает. Вывод: нужен TCP-транспорт.** 2026-09-06/07: AmneziaWG на
+    wooster из РФ даёт хендшейк, но объёмный трафик режется в ноль; mtg
+    (TCP/443) на том же IP из РФ работает. Эксперимент 2026-09-07 (стенд из
+    3 awg-интерфейсов на wooster, полная 3.1-обфускация :51820/:53/:8443):
+    ~час работало, затем отложенный скоринг ТСПУ по IP — response сервера до
+    клиента не доходит ни на одном варианте. **UDP-VPN на США из РФ мёртв
+    как транспорт**, независимо от порта и маскировки. Стенд свёрнут,
+    wooster вычищен. Код 3.x-полей `VpnConfig`/`_render_client_conf` +
+    `setup-awg-server.sh` — в git stash ветки `stage39-two-vpn-servers`
+    (`AmneziaWG 3.1 experiment`), не влит (память `vpn-two-servers-stage39`).
+  - 🚧 **VLESS+Reality — подэтап 39.0.x, ветка `stage39-reality`.**
+    Единственный транспорт, проходящий ТСПУ (TCP/443, Reality = настоящий
+    TLS-хендшейк к чужому SNI). Полный дизайн службы роя `reality` —
+    `~/.claude/plans/functional-imagining-otter.md`; порядок работ Фазы A —
+    `~/.claude/plans/linear-brewing-cherny.md`. **Фаза A (готово в коде,
+    2026-09-07):** `src/sa_home_bot/reality/{routing,client_config}.py`
+    (чистые: генератор sing-box-конфига для Hiddify, `vless://`, deep-link,
+    сплит-туннель по `itdoginfo/allow-domains` + inline always-direct для
+    банков/госуслуг) с тестами `tests/unit/test_reality_client_config.py`;
+    `deploy/setup-reality-server.sh` (xray-core v26.3.27, user-owned конфиг,
+    порт 8443/tcp, `dest=www.google.com:443` — у Reality лимит буфера
+    рукопожатия 8192 Б, `www.microsoft.com` за Akamai его превышает
+    Certificate-сообщением ~8.3 КБ, проверено 2026-09-07),
+    `deploy/reality-add-client.sh`, `deploy/reality-client.py`,
+    `deploy/reality-smoke.sh` (локальный тест туннеля без телефона).
+    **Сервер поднят на wooster** (`172.245.159.221:8443`, xray v26.3.27,
+    user-юнит `xray.service`, ключи `/etc/sa-home-reality/reality.env`,
+    ufw `8443/tcp`; тестовые клиенты `phone-test`, `guest-348284076`).
+    Туннель проверен с alfred (КЗ): `curl` через SOCKS→Reality отдаёт IP
+    wooster, ~23 Мбит/с. `openssl s_client` снаружи видит настоящий серт
+    `www.google.com`. Параметры сервера — `~/.config/sa-home-reality-client.env`
+    на alfred (дефолты для `reality-client.py`).
+    **Фаза A по существу (руками, вне сессии):** раздать конфиги 2-3 гостям
+    в РФ, подтвердить: (1) Hiddify уважает импортированный sing-box
+    `route`/remote `rule_set`; (2) из РФ YouTube/Instagram через wooster,
+    банки напрямую; (3) стабильность > суток, ТСПУ не скорит.
+    Дальше — Фаза B (служба `reality` в рое).
 - ⬜ **39.0.5 (следующее)** — UI выбора локации в `/vpn` + фанаут/merge
   списка и usage по живым `vpn` (см. «Осознанно НЕ здесь» выше). Теперь
   разблокировано: есть живой второй сервер.
