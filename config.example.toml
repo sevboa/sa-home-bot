@@ -366,6 +366,34 @@ amneziavpn_google_play_url = "https://play.google.com/store/apps/details?id=org.
 official_download_url = "https://amnezia.org/downloads"
 config_message_ttl_s = 600.0
 
+# Служба reality (`sa-home-bot --service reality`) — VLESS+Reality через
+# xray-core: единственный транспорт, проходящий ТСПУ из РФ на зарубежный
+# сервер. Как vpn, назначается ноде с белым IP (wooster), но мультинодовая.
+# endpoint_host/port/server_public_key/short_id/sni/flow — из вывода
+# ops-скрипта deploy/setup-reality-server.sh (он печатает готовый блок).
+# api_addr — локальный gRPC API xray (управление юзерами и учёт трафика без
+# рестарта и без sudo). Квоты — те же имена/смысл, что у [vpn]; на wooster
+# node_limit_gb = 3000 (тариф 3 ТБ).
+[reality]
+socket = "./data/reality.sock"
+db_path = "./data/reality.sqlite"
+endpoint_host = ""
+port = 8443
+server_public_key = ""
+short_id = ""
+sni = "www.google.com"
+flow = "xtls-rprx-vision"
+api_addr = "127.0.0.1:10085"
+inbound_tag = "reality-in"
+base_quota_gb = 500
+extra_step_gb = 100
+self_ceiling_gb = 1000
+warn_remaining_gb = 100
+node_limit_gb = 10000
+sample_interval_s = 180.0
+config_message_ttl_s = 600.0
+hiddify_apk_repo = "hiddify/hiddify-app"
+
 # Сервис ноды (супервизор: `sa-home-bot --service node`, консоль — nodectl).
 # Нода запускает назначенные службы дочерними процессами и рестартит упавшие.
 # id — имя ноды в рое (пусто = hostname). Умения питания (poweroff/reboot/

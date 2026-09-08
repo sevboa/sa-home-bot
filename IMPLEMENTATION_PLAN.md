@@ -2308,7 +2308,21 @@ server, target)` (`domain/vpn_check.py::reconcile_vpn_check`,
     в РФ, подтвердить: (1) Hiddify уважает импортированный sing-box
     `route`/remote `rule_set`; (2) из РФ YouTube/Instagram через wooster,
     банки напрямую; (3) стабильность > суток, ТСПУ не скорит.
-    Дальше — Фаза B (служба `reality` в рое).
+    На 2026-09-08: гость 348284076 реально прокачал ~1.5 ГБ из РФ через
+    wooster, хендшейков-ошибок в журнале xray после запуска нет.
+    **Фаза B — бэкенд службы (готово в коде, 2026-09-08):** пакет
+    `src/sa_home_bot/reality/{protocol,xray,service,app}.py` — миррор
+    `vpn/` минус прокси/APK/vpn_check. `RealityService` (issue/reissue/
+    revoke/usage/квоты/заявки, реконсайлер, сэмплер трафика из
+    `xray api statsquery`), `RealXrayBackend` (управление юзерами через
+    `xray api adu/rmu/inbounduser` на `127.0.0.1:10085` — без sudo, без
+    рестарта), таблицы `reality_*` в `schema.sql`, `RealityConfig`, ветка
+    `--service reality` в `cli.py`, `ServiceSpec("reality")` в реестре.
+    Тесты `tests/unit/test_reality_service.py` (30, зелёные). **Не
+    задеплоено** — reconcile при старте снял бы ручных тестовых клиентов
+    Фазы A; деплой после её завершения. Осталось в Фазе B: бот-UI
+    (`bot/reality_nodes.py`, карточка `/vpn`, `EVENT_REALITY_*`,
+    `guest_rights`, `tool_reality`).
 - ⬜ **39.0.5 (следующее)** — UI выбора локации в `/vpn` + фанаут/merge
   списка и usage по живым `vpn` (см. «Осознанно НЕ здесь» выше). Теперь
   разблокировано: есть живой второй сервер.

@@ -116,6 +116,10 @@ _SPECS: tuple[ServiceSpec, ...] = (
     # доступности, см. VpnConfig.check_nodes выше): деплоится на нескольких
     # нодах сразу (jeeves, alfred, ...), в отличие от самой vpn.
     ServiceSpec(name="vpn_check", cli_name="vpn_check", endpoint_attr="vpn_check.socket"),
+    # reality — VLESS+Reality через xray-core (подэтап 39.0.x): как vpn,
+    # имеет смысл только на ноде с белым IP (сейчас wooster), но
+    # мультинодовая с рождения (бот ищет держателя по списку служб).
+    ServiceSpec(name="reality", cli_name="reality", endpoint_attr="reality.socket"),
 )
 
 SERVICES: dict[str, ServiceSpec] = {s.name: s for s in _SPECS}
