@@ -83,9 +83,16 @@ def _parse_clients(payload: str) -> set[str]:
 class RealXrayBackend:
     """Настоящая реализация — зовёт ``xray api ...`` на локальном gRPC-порту."""
 
-    def __init__(self, api_addr: str, inbound_tag: str) -> None:
+    def __init__(self, api_addr: str, inbound_tag: str, port: int) -> None:
         self._api = api_addr
         self._tag = inbound_tag
+        # ``xray api adu`` строит из сниппета ПОЛНЫЙ InboundDetour и валидирует
+        # его — а не просто дописывает клиента в живой inbound. Поэтому сниппет
+        # обязан пройти те же проверки, что и боевой конфиг: непустой ``port``
+        # (иначе «Listen on AnyIP but no Port(s) set») и ``decryption:"none"``
+        # в settings (иначе «please add/set "decryption":"none"»). Значения долж-
+        # ны совпадать с реальным inbound — xray матчит правку по ``tag``.
+        self._port = port
 
     def _bin(self) -> str:
         # Резолвим при каждом вызове (не кэшируем) — как node/fixups.py::_which:
@@ -116,8 +123,12 @@ class RealXrayBackend:
             "inbounds": [
                 {
                     "tag": self._tag,
+                    "port": self._port,
                     "protocol": "vless",
-                    "settings": {"clients": [{"id": client_uuid, "email": email, "flow": flow}]},
+                    "settings": {
+                        "decryption": "none",
+                        "clients": [{"id": client_uuid, "email": email, "flow": flow}],
+                    },
                 }
             ]
         }
@@ -125,9 +136,17 @@ class RealXrayBackend:
         tmp = Path(tempfile.mkstemp(prefix="reality-adu-", suffix=".json")[1])
         try:
             tmp.write_text(json.dumps(snippet), encoding="utf-8")
-            await self._run("adu", f"--server={self._api}", str(tmp))
+            out = await self._run("adu", f"--server={self._api}", str(tmp))
         finally:
             tmp.unlink(missing_ok=True)
+        # ``adu`` выходит с кодом 0 даже когда ничего не добавил (битый сниппет,
+        # «failed to build config») — ловим это по хвосту вывода, иначе служба
+        # выдаст гостю нерабочий конфиг, а пир осядет в БД как активный.
+        if "Added 0 user(s)" in out or "failed to build config" in out:
+            raise ProtoError(
+                ERR_INTERNAL,
+                f"xray api adu не добавил клиента {email}: {out.strip()}",
+            )
 
     async def remove_client(self, email: str) -> None:
         try:

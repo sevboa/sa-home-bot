@@ -50,7 +50,9 @@ async def run_vpn(settings: Settings) -> None:
             )
         else:
             reality_backend = RealXrayBackend(
-                settings.vpn.reality.api_addr, settings.vpn.reality.inbound_tag
+                settings.vpn.reality.api_addr,
+                settings.vpn.reality.inbound_tag,
+                settings.vpn.reality.port,
             )
 
     # Клиент к своей же локальной ноде — для рассылки проверок доступности
