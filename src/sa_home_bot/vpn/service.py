@@ -773,6 +773,9 @@ class VpnService:
                 "remaining_bytes": max(limit - used, 0),
                 "blocked": state["blocked_at"] is not None,
                 "devices": await self._peers_for_chat(chat_id),
+                # Транспорты этой ноды — карточка /vpn по ним решает, показывать
+                # ли выбор технологии при «➕ Новое устройство».
+                "transports": list(self._transports),
             }
         # Сводка для админа — только гости с ДЕЙСТВУЮЩИМ доступом (не
         # отозванным/просроченным): именно они «резервируют» трафик ноды,

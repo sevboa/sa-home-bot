@@ -2231,6 +2231,12 @@ def _vpn_conf_filename(device_label: str) -> str:
     return f"{slug[:budget]}_{stamp}.conf"
 
 
+def _vpn_reality_filename(device_label: str) -> str:
+    """Имя файла sing-box-конфига для Hiddify (транспорт reality) — <label>.json."""
+    slug = _VPN_UNSAFE_FILENAME.sub("", device_label.strip().lower()) or "vpn"
+    return f"{slug}.json"
+
+
 def _vpn_store_row(emoji: str, store: str, vpn_url: str, wg_url: str) -> str:
     """Строка «магазин: AmneziaVPN · AmneziaWG» — обе ссылки текстом, не
     длинным URL (решение пользователя 2026-08-04). Дублирует
@@ -2266,6 +2272,23 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
         device_label = str(args.get("device_label") or "").strip()
         if action == vpn_protocol.ACTION_REISSUE and not device_label:
             return "ошибка: не указано устройство (device_label) — какое перевыпустить"
+        # Транспорт (awg/reality) под общей квотой. issue на сервере с двумя
+        # транспортами обязан его указать; reissue сохраняет транспорт
+        # устройства сам (transport передавать не нужно).
+        transport = str(args.get("transport") or "").strip().lower()
+        if action == vpn_protocol.ACTION_ISSUE and not transport:
+            node_transports: list[str] = []
+            try:
+                state = await ctx.node_link.get_state(dst=dst)
+                node_transports = state.get("transports") or []
+            except (ServiceUnavailableError, ProtoError, TimeoutError):
+                node_transports = []
+            if len(node_transports) > 1:
+                return (
+                    f"уточни технологию: этот сервер даёт {', '.join(node_transports)} — "
+                    "вызови vpn ещё раз с transport='reality' (для России, маскируется "
+                    "под обычный HTTPS) или transport='awg' (быстрее вне России)"
+                )
         who = str(args.get("recipient") or "").strip()
         target_display: str | None = None
         if who:
@@ -2321,6 +2344,8 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
         payload: dict[str, Any] = {"chat_id": target_chat_id}
         if device_label:  # reissue — какое устройство; issue — служба выберет сама
             payload["device_label"] = device_label
+        if transport and action == vpn_protocol.ACTION_ISSUE:
+            payload["transport"] = transport
         try:
             result = await ctx.node_link.command(action, payload, dst=dst)
         except ProtoError as exc:
@@ -2335,20 +2360,35 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
         # что и у кнопок /vpn (bot/handlers/vpn.py::_send_secret, решение
         # пользователя 2026-08-04) — vpn/service.py::_issue::prior_device_count.
         file_first = int(result.get("prior_device_count") or 0) == 0
+        result_transport = str(result.get("transport") or vpn_protocol.TRANSPORT_AWG)
+        is_reality = result_transport == vpn_protocol.TRANSPORT_REALITY
         if ctx.notifier is not None:
             qr_b64 = result.get("qr_png_b64")
-            file_caption = (
-                f"🔐 Конфиг устройства «{escape(issued_label)}».\n"
-                "Нажми на файл → «Открыть с помощью» → AmneziaWG — тоннель "
-                "добавится сразу, без копирования."
-            )
-            qr_caption = f"📶 QR — устройство «{escape(issued_label)}»."
+            if is_reality:
+                file_caption = (
+                    f"🔐 Конфиг «{escape(issued_label)}» (VLESS).\n"
+                    "Hiddify → «+» → «Из файла» → выбери этот файл → «Подключить». "
+                    "Маршрутизация России уже внутри файла."
+                )
+                qr_caption = (
+                    f"📶 QR — «{escape(issued_label)}» (VLESS). "
+                    "Hiddify → «+» → «Сканировать QR»."
+                )
+                conf_filename = _vpn_reality_filename(issued_label)
+            else:
+                file_caption = (
+                    f"🔐 Конфиг устройства «{escape(issued_label)}».\n"
+                    "Нажми на файл → «Открыть с помощью» → AmneziaWG — тоннель "
+                    "добавится сразу, без копирования."
+                )
+                qr_caption = f"📶 QR — устройство «{escape(issued_label)}»."
+                conf_filename = _vpn_conf_filename(issued_label)
 
             async def _send_file() -> None:
                 await ctx.notifier.send_document(
                     target_chat_id,
                     str(result["config_text"]).encode("utf-8"),
-                    filename=_vpn_conf_filename(issued_label),
+                    filename=conf_filename,
                     caption=file_caption,
                     message_thread_id=target_thread_id,
                 )
@@ -2369,15 +2409,35 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
             else:
                 await _send_qr()
                 await _send_file()
+            if is_reality:
+                deep_link = str(result.get("deep_link") or "")
+                share_url = str(result.get("share_url") or "")
+                note_parts = []
+                if deep_link:
+                    note_parts.append(f"🔗 Импорт одним нажатием: <code>{escape(deep_link)}</code>")
+                if share_url:
+                    note_parts.append(f"Ссылка: <code>{escape(share_url)}</code>")
+                if note_parts:
+                    await ctx.notifier.send_direct(
+                        target_chat_id,
+                        "\n".join(note_parts),
+                        message_thread_id=target_thread_id,
+                    )
         who_note = f" {target_display}" if target_display else ""
-        recommendation = (
-            "для настройки удобнее конфиг-файл"
-            if file_first
-            else "если это другое устройство — удобнее QR, отсканировать его камерой из приложения"
-        )
+        if is_reality:
+            recommendation = (
+                "поставить Hiddify (action='apk'), импортировать файл и нажать «Подключить»"
+            )
+        elif file_first:
+            recommendation = "для настройки удобнее конфиг-файл"
+        else:
+            recommendation = (
+                "если это другое устройство — удобнее QR, отсканировать его камерой из приложения"
+            )
+        transport_note = " (VLESS/Reality)" if is_reality else ""
         return (
-            f"готово: устройство «{issued_label}», конфиг-файл (и QR) ушли{who_note} "
-            f"личным сообщением — {recommendation} (приватный ключ не показываю)"
+            f"готово: устройство «{issued_label}»{transport_note}, конфиг-файл (и QR) ушли"
+            f"{who_note} личным сообщением — {recommendation} (приватный ключ не показываю)"
         )
 
     if action == _VPN_ACTION_APK:
@@ -2532,7 +2592,9 @@ _DECL_VPN: dict[str, Any] = {
             "плюс сколько трафика ноды ещё свободно от резерва); issue — "
             "выдать доступ НОВОМУ устройству, имя ему сама служба выбирает "
             "случайно (не спрашивай, как назвать, и не передавай device_label — "
-            "он у issue игнорируется), число устройств не ограничено; "
+            "он у issue игнорируется), число устройств не ограничено; на "
+            "сервере с двумя технологиями укажи transport ('reality' для "
+            "России, 'awg' иначе) — тул подскажет, если надо уточнить; "
             "reissue — перевыпустить СУЩЕСТВУЮЩЕЕ устройство: device_label "
             "ОБЯЗАТЕЛЕН (какое из уже выданных, имя видно в usage), имя при "
             "перевыпуске не меняется, а старый ключ СРАЗУ перестаёт работать, "
@@ -2583,6 +2645,16 @@ _DECL_VPN: dict[str, Any] = {
                     "description": (
                         "reissue: ОБЯЗАТЕЛЕН — имя существующего устройства "
                         "(возьми из usage). issue его игнорирует — не передавай."
+                    ),
+                },
+                "transport": {
+                    "type": "string",
+                    "enum": ["awg", "reality"],
+                    "description": (
+                        "issue: технология под общей квотой — 'reality' (VLESS, "
+                        "работает из России) или 'awg' (AmneziaWG, быстрее вне "
+                        "России). Нужен, только если сервер даёт обе (тул сам "
+                        "скажет, если надо уточнить). reissue его игнорирует."
                     ),
                 },
                 "recipient": {

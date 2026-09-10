@@ -180,12 +180,26 @@ async def test_revoke_without_label_is_noop():
 
 async def test_card_keyboard_offers_revoke_button_per_device():
     keyboard = vpn_handlers._card_keyboard(
-        [{"device_label": "Rose"}], is_admin=False, can_self_serve=False
+        [{"device_label": "Rose"}], is_admin=False, can_self_serve=False, transports=["awg"]
     )
     device_row = keyboard.inline_keyboard[1]
     texts = [button.text for button in device_row]
     assert any("Отозвать" in text for text in texts)
     assert any("Перевыпустить" in text for text in texts)
+
+
+async def test_card_keyboard_hides_proxy_and_check_for_reality_only_node():
+    kb_awg = vpn_handlers._card_keyboard(
+        [], is_admin=True, can_self_serve=False, transports=["awg"]
+    )
+    kb_reality = vpn_handlers._card_keyboard(
+        [], is_admin=True, can_self_serve=False, transports=["reality"]
+    )
+    flat_awg = " ".join(b.text for row in kb_awg.inline_keyboard for b in row)
+    flat_reality = " ".join(b.text for row in kb_reality.inline_keyboard for b in row)
+    assert "Прокси Telegram" in flat_awg and "Проверка сети" in flat_awg
+    assert "Прокси Telegram" not in flat_reality and "Проверка сети" not in flat_reality
+    assert "Все гости" in flat_reality  # админская сводка остаётся
 
 
 class MultiVpnLink(FakeNodeLink):
@@ -202,7 +216,10 @@ class MultiVpnLink(FakeNodeLink):
 
 async def test_card_keyboard_pins_connection_server_into_callback():
     keyboard = vpn_handlers._card_keyboard(
-        [{"device_label": "Rose", "server": "wooster"}], is_admin=False, can_self_serve=False
+        [{"device_label": "Rose", "server": "wooster"}],
+        is_admin=False,
+        can_self_serve=False,
+        transports=["awg"],
     )
     reissue, revoke = keyboard.inline_keyboard[1]
     assert reissue.callback_data == "act:vpn:reissue:Rose:wooster"
@@ -486,6 +503,81 @@ async def test_resolve_request_deny(monkeypatch):
     action, args = link.calls[0]
     assert args == {"request_id": 7, "approve": False}
     assert any("отклонена" in text for text in callback.message.answers)
+
+
+# --- Второй транспорт: выбор технологии в /vpn + выдача VLESS-конфига ---
+
+
+class BothTransportsLink(FakeNodeLink):
+    """Служба vpn на ноде несёт оба транспорта — get_state(dst=vpn) отдаёт
+    transports, как настоящая VpnService.get_state()."""
+
+    def __init__(self, result=None, raises=None, transports=("awg", "reality")) -> None:
+        super().__init__(result=result, raises=raises)
+        self._transports = list(transports)
+
+    async def get_state(self, dst=None):
+        if dst is not None and getattr(dst, "service", None) == "vpn":
+            return {"node": "jeeves", "service": "vpn", "transports": self._transports}
+        return self.state
+
+
+async def test_issue_shows_transport_picker_when_node_carries_both():
+    link = BothTransportsLink()
+    callback = FakeCallback("act:vpn:issue", chat_id=777)
+    await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), GUEST, _pending())
+    assert callback.message.edits and "технолог" in callback.message.edits[0].lower()
+    assert [c[0] for c in link.calls] == []  # issue в службу ещё не ушёл
+
+
+async def test_single_transport_node_skips_picker():
+    link = BothTransportsLink(
+        result={
+            "config_text": "[Interface]\nPrivateKey = S",
+            "qr_png_b64": "cXI=",
+            "device_label": "Rose",
+            "prior_device_count": 1,
+        },
+        transports=("awg",),
+    )
+    callback = FakeCallback("act:vpn:issue", chat_id=777)
+    await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), GUEST, _pending())
+    issue = [c for c in link.calls if c[0] == vpn_protocol.ACTION_ISSUE]
+    assert issue and "transport" not in issue[0][1]
+
+
+async def test_picked_reality_transport_issues_and_sends_singbox_json():
+    link = BothTransportsLink(
+        result={
+            "transport": "reality",
+            "config_text": '{"outbounds": []}',
+            "share_url": "vless://uuid@1.2.3.4:8443?type=tcp#Rose",
+            "deep_link": "hiddify://import/vless://uuid@1.2.3.4:8443?type=tcp#Rose",
+            "qr_png_b64": "cXI=",
+            "device_label": "Rose",
+            "prior_device_count": 0,  # первое устройство → файл
+        }
+    )
+    notifier = FakeNotifier()
+    callback = FakeCallback("act:vpn:issue:t_reality", chat_id=777)
+    await vpn_handlers.handle_action(callback, link, notifier, _config(), GUEST, _pending())
+
+    issue = [c for c in link.calls if c[0] == vpn_protocol.ACTION_ISSUE]
+    assert issue and issue[0][1].get("transport") == "reality"
+    # первое устройство: .json-файл sing-box, подпись про Hiddify/VLESS
+    assert notifier.sent_documents and notifier.sent_documents[0][0] == 777
+    assert b'"outbounds"' in notifier.sent_documents[0][1]
+    assert "VLESS" in (notifier.sent_documents[0][2] or "")
+    # deep-link — в тексте кнопочного сообщения
+    assert any("hiddify://import" in text for _, text in notifier.sent_direct)
+
+
+async def test_app_links_text_is_hiddify_for_reality_only_node():
+    cfg = Settings(vpn=VpnConfig())
+    reality = vpn_handlers._app_links_text(cfg, ["reality"])
+    awg = vpn_handlers._app_links_text(cfg, ["awg"])
+    assert "Hiddify" in reality and "AmneziaWG" not in reality
+    assert "AmneziaWG" in awg and "Hiddify" not in awg
 
 
 @pytest_asyncio.fixture(autouse=True)

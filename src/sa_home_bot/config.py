@@ -708,6 +708,15 @@ class VpnConfig(BaseModel):
     official_download_url: str = "https://amnezia.org/downloads"
     config_message_ttl_s: float = Field(default=600.0, gt=0)
 
+    # --- Клиент для транспорта reality — Hiddify (кросс-платформенный, импорт
+    # по ссылке/файлу, встроенные пресеты обхода РФ). Кнопка «📱 Приложение»
+    # в /vpn показывает эти ссылки, когда нода несёт транспорт reality. APK
+    # ботом в MVP не раздаём — только ссылки.
+    hiddify_site_url: str = "https://hiddify.com"
+    hiddify_google_play_url: str = "https://play.google.com/store/apps/details?id=app.hiddify.com"
+    hiddify_ios_app_store_url: str = "https://apps.apple.com/app/hiddify-proxy-vpn/id6596777532"
+    hiddify_releases_url: str = "https://github.com/hiddify/hiddify-app/releases/latest"
+
     # --- Мониторинг доступности VPN (служба vpn_check, найдена нужда
     # 2026-08-17: NAT-правило на jeeves тихо пропало на 4 дня, узнали только
     # когда понадобился доступ из Казахстана). check_targets — что проверять

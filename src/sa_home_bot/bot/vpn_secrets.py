@@ -28,6 +28,11 @@ class PendingVpnSecret:
     device_label: str
     qr_png_b64: str | None
     reveal: str  # "file" | "qr" — что отдать по кнопке
+    transport: str = "awg"  # awg | reality — какой способ вручения (см. bot/handlers/vpn.py)
+    # Только для reality: vless://-ссылка и Hiddify deep-link (у awg их нет —
+    # весь конфиг в .conf-файле).
+    share_url: str | None = None
+    deep_link: str | None = None
 
 
 class PendingVpnSecrets:
@@ -45,10 +50,22 @@ class PendingVpnSecrets:
         qr_png_b64: str | None,
         reveal: str,
         ttl_s: float,
+        *,
+        transport: str = "awg",
+        share_url: str | None = None,
+        deep_link: str | None = None,
     ) -> str:
         token = secrets.token_urlsafe(6)
         self._items[token] = (
-            PendingVpnSecret(config_text, device_label, qr_png_b64, reveal),
+            PendingVpnSecret(
+                config_text,
+                device_label,
+                qr_png_b64,
+                reveal,
+                transport=transport,
+                share_url=share_url,
+                deep_link=deep_link,
+            ),
             time.monotonic() + ttl_s,
         )
         return token

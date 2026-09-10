@@ -55,7 +55,7 @@ from sa_home_bot.bot import commands, vpn_nodes
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.vpn_apk import deliver_apk
-from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
+from sa_home_bot.bot.vpn_secrets import PendingVpnSecret, PendingVpnSecrets
 from sa_home_bot.config import Settings
 from sa_home_bot.proto.messages import Address, ProtoError
 from sa_home_bot.subscriptions.models import Subscription
@@ -68,6 +68,16 @@ router = Router(name="vpn")
 SERVICE = vpn_protocol.SERVICE_NAME
 
 _VPN_UNAVAILABLE = "⚠️ Служба VPN недоступна — попробуйте позже."
+
+# Человеческие названия транспортов (vpn_peers.transport) для карточки и
+# кнопок выбора «➕ Новое устройство».
+_TRANSPORT_LABEL = {
+    vpn_protocol.TRANSPORT_AWG: "AmneziaWG",
+    vpn_protocol.TRANSPORT_REALITY: "VLESS (Reality)",
+}
+# Префикс значения кнопки выбора транспорта: act:vpn:issue:t_<transport>.
+# Отличает её и от голого issue (value=None), и от «забрать выданное» (f_<токен>).
+_TRANSPORT_PICK_PREFIX = "t_"
 
 
 def _is_private(chat_id: int) -> bool:
@@ -96,7 +106,9 @@ def _usage_text(usage: dict) -> str:
                 if handshake
                 else ", ещё не подключалось"
             )
-            lines.append(f"• {html.escape(device['device_label'])}{seen}")
+            transport = device.get("transport")
+            tag = f" · {_TRANSPORT_LABEL.get(transport, transport)}" if transport else ""
+            lines.append(f"• {html.escape(device['device_label'])}{tag}{seen}")
     return "\n".join(lines)
 
 
@@ -127,7 +139,11 @@ def _summary_text(summary: dict) -> str:
 
 
 def _card_keyboard(
-    devices: list[dict], *, is_admin: bool, can_self_serve: bool
+    devices: list[dict],
+    *,
+    is_admin: bool,
+    can_self_serve: bool,
+    transports: list[str],
 ) -> InlineKeyboardMarkup:
     top_row = [
         InlineKeyboardButton(
@@ -181,30 +197,35 @@ def _card_keyboard(
         ]
     )
     if is_admin:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="👥 Все гости",
-                    callback_data=commands.action_callback("usage_all", service=SERVICE),
-                ),
+        admin_row = [
+            InlineKeyboardButton(
+                text="👥 Все гости",
+                callback_data=commands.action_callback("usage_all", service=SERVICE),
+            )
+        ]
+        # Проверка сети и прокси Telegram — только у ноды с транспортом awg
+        # (у reality-only ноды нет ни netns-пробника, ни mtg).
+        if vpn_protocol.TRANSPORT_AWG in transports:
+            admin_row.append(
                 InlineKeyboardButton(
                     text="🛰 Проверка сети",
                     callback_data=commands.action_callback(
                         vpn_protocol.ACTION_CHECK_STATUS, service=SERVICE
                     ),
-                ),
-            ]
-        )
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="✈️ Прокси Telegram",
-                    callback_data=commands.action_callback(
-                        vpn_protocol.ACTION_PROXY_LINK, service=SERVICE
+                )
+            )
+        rows.append(admin_row)
+        if vpn_protocol.TRANSPORT_AWG in transports:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="✈️ Прокси Telegram",
+                        callback_data=commands.action_callback(
+                            vpn_protocol.ACTION_PROXY_LINK, service=SERVICE
+                        ),
                     ),
-                ),
-            ]
-        )
+                ]
+            )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -336,6 +357,68 @@ def _apk_links_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def _hiddify_links_text(config: Settings) -> str:
+    cfg = config.vpn
+    return (
+        "🌐 Для <b>VLESS</b> — приложение <b>Hiddify</b> (все платформы):\n"
+        f'🍎 App Store: <a href="{html.escape(cfg.hiddify_ios_app_store_url)}">Hiddify</a>\n'
+        f'🤖 Google Play: <a href="{html.escape(cfg.hiddify_google_play_url)}">Hiddify</a>\n'
+        f"🖥 Windows / macOS / Linux / APK: {html.escape(cfg.hiddify_releases_url)}\n"
+        f"🌐 Официальный сайт: {html.escape(cfg.hiddify_site_url)}"
+    )
+
+
+def _app_links_text(config: Settings, transports: list[str]) -> str:
+    """Ссылки на клиенты под транспорты этой ноды: Hiddify для reality,
+    AmneziaVPN/WG для awg (оба блока, если нода несёт оба)."""
+    blocks: list[str] = []
+    if vpn_protocol.TRANSPORT_REALITY in transports:
+        blocks.append(_hiddify_links_text(config))
+    if vpn_protocol.TRANSPORT_AWG in transports or not blocks:
+        blocks.append(_apk_links_text(config))
+    return "\n\n".join(blocks)
+
+
+# Выбор технологии перед выдачей нового устройства — только когда нода несёт
+# оба транспорта. Порядок: VLESS первым (нужен гостям в РФ).
+_PICK_TRANSPORT_TEXT = (
+    "Какой технологией выдать новое устройство?\n\n"
+    "• <b>VLESS (Reality)</b> — работает из России (для DPI неотличимо от "
+    "обычного HTTPS).\n"
+    "• <b>AmneziaWG</b> — быстрее там, где не блокируют (не Россия)."
+)
+
+
+def _transport_picker_keyboard(transports: list[str]) -> InlineKeyboardMarkup:
+    order = [vpn_protocol.TRANSPORT_REALITY, vpn_protocol.TRANSPORT_AWG]
+    rows: list[list[InlineKeyboardButton]] = []
+    for transport in order:
+        if transport not in transports:
+            continue
+        hint = " — для РФ" if transport == vpn_protocol.TRANSPORT_REALITY else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{_TRANSPORT_LABEL[transport]}{hint}",
+                    callback_data=commands.action_callback(
+                        vpn_protocol.ACTION_ISSUE,
+                        f"{_TRANSPORT_PICK_PREFIX}{transport}",
+                        service=SERVICE,
+                    ),
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=commands.action_callback(_ACTION_VPN_CARD, service=SERVICE),
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _is_admin(subscription: Subscription) -> bool:
     return subscription.allows_action(vpn_protocol.ACTION_PEERS, SERVICE)
 
@@ -384,7 +467,10 @@ async def cmd_vpn(
         return
     is_admin = subscription is not None and _is_admin(subscription)
     keyboard = _card_keyboard(
-        usage.get("devices") or [], is_admin=is_admin, can_self_serve=_can_self_serve(usage, config)
+        usage.get("devices") or [],
+        is_admin=is_admin,
+        can_self_serve=_can_self_serve(usage, config),
+        transports=usage.get("transports") or [],
     )
     await message.answer(_usage_text(usage), reply_markup=keyboard)
 
@@ -399,6 +485,7 @@ async def _redraw_card(
         usage.get("devices") or [],
         is_admin=_is_admin(subscription),
         can_self_serve=_can_self_serve(usage, config),
+        transports=usage.get("transports") or [],
     )
     with contextlib.suppress(TelegramBadRequest):
         await callback.message.edit_text(_usage_text(usage), reply_markup=keyboard)
@@ -439,6 +526,62 @@ def _qr_caption(label_escaped: str) -> str:
     )
 
 
+def _reality_filename(device_label: str) -> str:
+    """Имя файла sing-box-конфига для Hiddify — <label>.json (label = слово
+    из фиксированного пула, транслитерация не нужна)."""
+    slug = _UNSAFE_FILENAME.sub("", device_label.strip().lower()) or "vpn"
+    return f"{slug}.json"
+
+
+def _reality_file_caption(label_escaped: str) -> str:
+    return (
+        f"🔐 Конфиг «{label_escaped}» (VLESS).\n"
+        "Hiddify → «+» (Новый профиль) → «Из файла» → выберите этот файл, "
+        "затем «Подключить». Маршрутизация РФ уже внутри файла."
+    )
+
+
+def _reality_qr_caption(label_escaped: str) -> str:
+    return (
+        f"📶 QR — «{label_escaped}» (VLESS). Hiddify → «+» → «Сканировать QR» "
+        "(удобно для настройки с ДРУГОГО устройства)."
+    )
+
+
+def _secret_filename(transport: str, device_label: str) -> str:
+    if transport == vpn_protocol.TRANSPORT_REALITY:
+        return _reality_filename(device_label)
+    return _conf_filename(device_label)
+
+
+def _secret_file_caption(transport: str, label_escaped: str) -> str:
+    if transport == vpn_protocol.TRANSPORT_REALITY:
+        return _reality_file_caption(label_escaped)
+    return _file_caption(label_escaped)
+
+
+def _secret_qr_caption(transport: str, label_escaped: str) -> str:
+    if transport == vpn_protocol.TRANSPORT_REALITY:
+        return _reality_qr_caption(label_escaped)
+    return _qr_caption(label_escaped)
+
+
+def _reality_links_note(result_or_secret: dict | PendingVpnSecret) -> str:
+    """Строка сообщения с deep-link и vless://-ссылкой (только reality) —
+    tap-to-copy, дополняет основной способ (файл/QR)."""
+    if isinstance(result_or_secret, PendingVpnSecret):
+        deep_link, share_url = result_or_secret.deep_link, result_or_secret.share_url
+    else:
+        deep_link = result_or_secret.get("deep_link")
+        share_url = result_or_secret.get("share_url")
+    parts: list[str] = []
+    if deep_link:
+        parts.append(f"🔗 Импорт одним нажатием: <code>{html.escape(str(deep_link))}</code>")
+    if share_url:
+        parts.append(f"Ссылка: <code>{html.escape(str(share_url))}</code>")
+    return ("\n\n" + "\n".join(parts)) if parts else ""
+
+
 async def _send_secret(
     notifier: Notifier,
     pending: PendingVpnSecrets,
@@ -452,6 +595,12 @@ async def _send_secret(
     label_escaped = html.escape(device_label)
     config_text = str(result.get("config_text") or "")
     qr_b64 = result.get("qr_png_b64")
+    transport = str(result.get("transport") or vpn_protocol.TRANSPORT_AWG)
+    # reality: deep-link и vless://-ссылка (tap-to-copy) — всегда в тексте
+    # сообщения, независимо от того, каким способом ушёл основной артефакт.
+    links_note = (
+        _reality_links_note(result) if transport == vpn_protocol.TRANSPORT_REALITY else ""
+    )
 
     # Первое устройство чата — почти наверняка настраивается прямо с этого
     # телефона (файл удобнее), второе и далее — обычно для другого устройства
@@ -464,8 +613,8 @@ async def _send_secret(
         sent = await notifier.send_document(
             chat_id,
             config_text.encode("utf-8"),
-            filename=_conf_filename(device_label),
-            caption=_file_caption(label_escaped),
+            filename=_secret_filename(transport, device_label),
+            caption=_secret_file_caption(transport, label_escaped),
             message_thread_id=message_thread_id,
         )
         primary_id = sent[0] if sent is not None else None
@@ -482,7 +631,7 @@ async def _send_secret(
                 chat_id,
                 base64.b64decode(qr_b64),
                 filename="vpn-qr.png",
-                caption=_qr_caption(label_escaped),
+                caption=_secret_qr_caption(transport, label_escaped),
                 message_thread_id=message_thread_id,
             )
         reveal = "file"
@@ -492,10 +641,19 @@ async def _send_secret(
         )
         button_text = "📄 Дать файл конфига"
 
-    token = pending.put(config_text, device_label, qr_b64, reveal, ttl_s)
+    token = pending.put(
+        config_text,
+        device_label,
+        qr_b64,
+        reveal,
+        ttl_s,
+        transport=transport,
+        share_url=result.get("share_url"),
+        deep_link=result.get("deep_link"),
+    )
     button_id = await notifier.send_direct(
         chat_id,
-        prompt,
+        prompt + links_note,
         reply_markup=_get_config_keyboard(action_id, token, button_text),
         message_thread_id=message_thread_id,
     )
@@ -581,8 +739,25 @@ async def handle_action(
             with contextlib.suppress(TelegramBadRequest):
                 await callback.message.edit_reply_markup(reply_markup=None)
             return
+        # Ссылки на клиенты под транспорты ноды-держателя (Hiddify для VLESS,
+        # AmneziaVPN/WG для awg). Определяем best-effort — на VPN-дауне
+        # показываем awg-блок (исходное поведение), не падаем.
+        transports: list[str] = []
+        links_dst = await vpn_nodes.resolve_vpn_dst(node_link, server=node_id)
+        if links_dst is not None:
+            with contextlib.suppress(ServiceUnavailableError, ProtoError):
+                state = await node_link.get_state(dst=links_dst)
+                transports = state.get("transports") or []
         await callback.answer()
-        await callback.message.answer(_apk_links_text(config), reply_markup=_apk_links_keyboard())
+        await callback.message.answer(
+            _app_links_text(config, transports),
+            reply_markup=(
+                _apk_links_keyboard()
+                if vpn_protocol.TRANSPORT_AWG in transports or not transports
+                else None
+            ),
+            disable_web_page_preview=True,
+        )
         return
 
     if action_id == vpn_protocol.ACTION_GRANT_EXTRA:
@@ -633,30 +808,57 @@ async def handle_action(
                     chat_id,
                     base64.b64decode(secret.qr_png_b64),
                     filename="vpn-qr.png",
-                    caption=_qr_caption(label_escaped),
+                    caption=_secret_qr_caption(secret.transport, label_escaped),
                     message_thread_id=callback.message.message_thread_id,
                 )
             else:
                 await notifier.send_document(
                     chat_id,
                     secret.config_text.encode("utf-8"),
-                    filename=_conf_filename(secret.device_label),
-                    caption=_file_caption(label_escaped),
+                    filename=_secret_filename(secret.transport, secret.device_label),
+                    caption=_secret_file_caption(secret.transport, label_escaped),
                     message_thread_id=callback.message.message_thread_id,
                 )
             with contextlib.suppress(TelegramBadRequest):
                 await callback.message.edit_reply_markup(reply_markup=None)
             return
+
+        # Выбор транспорта из пикера: act:vpn:issue:t_<transport> — дальше как
+        # обычный issue, транспорт уходит в payload.
+        chosen_transport: str | None = None
+        if value and value.startswith(_TRANSPORT_PICK_PREFIX):
+            chosen_transport = value[len(_TRANSPORT_PICK_PREFIX) :]
+            value = None
+
         if action_id == vpn_protocol.ACTION_REISSUE and not value:
             await callback.answer()
             return
         dst = await _need_dst()
         if dst is None:
             return
+
+        # Голый issue на ноде с двумя транспортами — сперва показать выбор
+        # технологии (reissue сохраняет транспорт устройства, ему пикер не нужен).
+        if action_id == vpn_protocol.ACTION_ISSUE and chosen_transport is None and not value:
+            node_transports: list[str] = []
+            with contextlib.suppress(ServiceUnavailableError, ProtoError):
+                state = await node_link.get_state(dst=dst)
+                node_transports = state.get("transports") or []
+            if len(node_transports) > 1:
+                await callback.answer()
+                with contextlib.suppress(TelegramBadRequest):
+                    await callback.message.edit_text(
+                        _PICK_TRANSPORT_TEXT,
+                        reply_markup=_transport_picker_keyboard(node_transports),
+                    )
+                return
+
         await callback.answer("Выпускаю…")
-        payload = {"chat_id": chat_id}
+        payload: dict[str, object] = {"chat_id": chat_id}
         if value:
             payload["device_label"] = value
+        if chosen_transport:
+            payload["transport"] = chosen_transport
         try:
             result = await node_link.command(action_id, payload, dst=dst)
         except ProtoError as exc:
