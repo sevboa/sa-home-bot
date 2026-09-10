@@ -39,5 +39,11 @@ async def apply_migrations(db: Database) -> None:
     # NULL → имя своей ноды делает vpn/service.py::backfill_server (там есть
     # [node].id; в общей миграции хардкодить "jeeves" не хочется).
     await _add_column_if_missing(db, "vpn_peers", "server", "TEXT")
+    # vpn_peers.transport — добавлена 2026-09-10, второй транспорт службы vpn
+    # (VLESS+Reality). DEFAULT 'awg' верно бэкфиллит все существующие пиры
+    # (до этого транспорт был только один — AmneziaWG). См. schema.sql.
+    await _add_column_if_missing(
+        db, "vpn_peers", "transport", "TEXT NOT NULL DEFAULT 'awg'"
+    )
     await db.conn.commit()
     log.info("Схема БД применена")

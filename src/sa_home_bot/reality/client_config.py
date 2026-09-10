@@ -1,9 +1,9 @@
 """Генерация клиентских артефактов VLESS+Reality: полный sing-box конфиг
 (основной артефакт для Hiddify), ``vless://``-ссылка и Hiddify deep-link.
 
-Ноль зависимостей — только stdlib. QR тут НЕ рисуем (как в ``vpn/`` — рендер
-QR живёт в вызывающем коде: ``deploy/reality-client.py`` в Фазе A,
-``reality/service.py`` в Фазе B).
+Ноль зависимостей — только stdlib. QR тут НЕ рисуем — рендер QR живёт в
+вызывающем коде (``deploy/reality-client.py`` для ручной раздачи,
+``vpn/service.py`` для reality-транспорта в рое).
 
 Формат конфига — sing-box (Hiddify его понимает). Правила маршрутизации зашиты
 в файл (см. ``reality/routing.py``), клиент сам обновляет remote rule-set с
@@ -31,7 +31,7 @@ _TAG_INSIDE = "ru-inside"
 
 @dataclass(frozen=True)
 class RealityParams:
-    """Параметры сервера Reality. В Фазе B ``config.RealityConfig`` несёт те же
+    """Параметры сервера Reality. ``config.RealityTransportConfig`` несёт те же
     имена полей → ``render_*`` принимают его по duck-typing без изменений."""
 
     endpoint_host: str

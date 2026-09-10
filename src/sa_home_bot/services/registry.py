@@ -109,17 +109,15 @@ _SPECS: tuple[ServiceSpec, ...] = (
         assignable=False,
         externally_managed=True,
     ),
-    # vpn — AmneziaWG-доступ на jeeves (Этап 33 IMPLEMENTATION_PLAN.md):
-    # единственная нода с белым IP, только там служба имеет смысл.
+    # vpn — доступ к обходу на ноде с белым IP (Этап 33 + подэтап 39.0.x):
+    # два транспорта под общей квотой — AmneziaWG (UDP) и VLESS+Reality
+    # (TCP/443, xray-core; [vpn].transports + [vpn.reality]). Мультинодовая
+    # (jeeves + wooster), бот ищет держателя по списку служб.
     ServiceSpec(name="vpn", cli_name="vpn", endpoint_attr="vpn.socket"),
     # vpn_check — исполнитель пробных запросов через VPN (мониторинг
     # доступности, см. VpnConfig.check_nodes выше): деплоится на нескольких
     # нодах сразу (jeeves, alfred, ...), в отличие от самой vpn.
     ServiceSpec(name="vpn_check", cli_name="vpn_check", endpoint_attr="vpn_check.socket"),
-    # reality — VLESS+Reality через xray-core (подэтап 39.0.x): как vpn,
-    # имеет смысл только на ноде с белым IP (сейчас wooster), но
-    # мультинодовая с рождения (бот ищет держателя по списку служб).
-    ServiceSpec(name="reality", cli_name="reality", endpoint_attr="reality.socket"),
 )
 
 SERVICES: dict[str, ServiceSpec] = {s.name: s for s in _SPECS}

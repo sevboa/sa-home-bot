@@ -26,7 +26,6 @@ def test_known_services():
         "llm",
         "vpn",
         "vpn_check",
-        "reality",
     }
 
 

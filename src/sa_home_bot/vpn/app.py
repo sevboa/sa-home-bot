@@ -20,8 +20,10 @@ from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.proto.server import ProtoServer
+from sa_home_bot.reality.xray import RealXrayBackend
 from sa_home_bot.utils.lifespan import Lifespan
 from sa_home_bot.vpn.awg import RealAwgBackend
+from sa_home_bot.vpn.protocol import TRANSPORT_AWG, TRANSPORT_REALITY
 from sa_home_bot.vpn.service import VpnService
 
 log = logging.getLogger(__name__)
@@ -32,7 +34,24 @@ async def run_vpn(settings: Settings) -> None:
     await db.open()
     await apply_migrations(db)
 
+    transports = settings.vpn.transports or [TRANSPORT_AWG]
+    awg_on = TRANSPORT_AWG in transports
+
+    # AwgBackend конструируется без побочных эффектов (хранит имя интерфейса);
+    # реально к `awg` служба ходит только когда awg среди транспортов ноды.
     backend = RealAwgBackend(settings.vpn.interface)
+
+    reality_backend = None
+    if TRANSPORT_REALITY in transports:
+        if settings.vpn.reality is None:
+            log.warning(
+                "vpn: транспорт 'reality' в [vpn].transports, но нет секции "
+                "[vpn.reality] — транспорт отключён"
+            )
+        else:
+            reality_backend = RealXrayBackend(
+                settings.vpn.reality.api_addr, settings.vpn.reality.inbound_tag
+            )
 
     # Клиент к своей же локальной ноде — для рассылки проверок доступности
     # (vpn/service.py::_dispatch_checks → node/service.py::ACTION_TRIGGER_PEERS
@@ -48,7 +67,9 @@ async def run_vpn(settings: Settings) -> None:
         if server is not None:
             await server.broadcast_event(event_type, data)
 
-    service = VpnService(settings, db, backend, emit, node_link=node_link)
+    service = VpnService(
+        settings, db, backend, emit, node_link=node_link, reality_backend=reality_backend
+    )
     await service.backfill_server()
     server = ProtoServer(settings.vpn.socket, service, token=settings.swarm.token)
     # Обработчики сигналов — до start(): он ждёт появления своего адреса
@@ -61,18 +82,24 @@ async def run_vpn(settings: Settings) -> None:
         await service.reconcile()
 
     usage_task = asyncio.create_task(service.usage_loop(), name="vpn-usage-loop")
-    check_task = asyncio.create_task(service.check_loop(), name="vpn-check-loop")
+    # Проверки доступности (vpn_check) — только для awg-нод: у reality-only
+    # ноды нет netns-пробника AmneziaWG.
+    tasks = [usage_task]
+    if awg_on:
+        tasks.append(asyncio.create_task(service.check_loop(), name="vpn-check-loop"))
     log.info(
-        "Служба vpn запущена: интерфейс %s, сокет %s", settings.vpn.interface, settings.vpn.socket
+        "Служба vpn запущена: транспорты %s, сокет %s",
+        ",".join(transports),
+        settings.vpn.socket,
     )
 
     try:
         await lifespan.wait()
     finally:
         log.info("Останов службы vpn...")
-        usage_task.cancel()
-        check_task.cancel()
-        for task in (usage_task, check_task):
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         await server.stop()

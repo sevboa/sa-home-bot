@@ -6,11 +6,12 @@ from __future__ import annotations
 import pytest
 import pytest_asyncio
 
-from sa_home_bot.config import Settings, VpnConfig
+from sa_home_bot.config import RealityTransportConfig, Settings, VpnConfig
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.proto.messages import ERR_BAD_REQUEST, ProtoError
 from sa_home_bot.vpn import protocol as vpn_protocol
+from sa_home_bot.vpn.protocol import TRANSPORT_AWG, TRANSPORT_REALITY
 from sa_home_bot.vpn.service import _FLOWER_NAMES, GB, VpnService, _random_device_label
 
 CHAT = 111
@@ -505,3 +506,242 @@ async def test_backfill_server_fills_pre_stage39_peers(env):
     cur = await svc._db.conn.execute("SELECT public_key, server FROM vpn_peers ORDER BY public_key")
     got = {row["public_key"]: row["server"] for row in await cur.fetchall()}
     assert got == {"pk-old": svc._node, "pk-kept": "wooster"}
+
+
+# ---------------------------------------------------------------------------
+# Второй транспорт — VLESS+Reality через xray (подэтап 39.0.x). Общая квота с
+# AmneziaWG: трафик обоих транспортов гостя суммируется против одного лимита.
+# ---------------------------------------------------------------------------
+
+
+class FakeXray:
+    """XrayBackend в памяти: email → uuid (кто в inbound) + email → (up, down)."""
+
+    def __init__(self) -> None:
+        self.clients: dict[str, str] = {}
+        self.traffic: dict[str, tuple[int, int]] = {}
+
+    async def add_client(self, client_uuid: str, email: str, flow: str) -> None:
+        self.clients[email] = client_uuid
+        self.traffic.setdefault(email, (0, 0))
+
+    async def remove_client(self, email: str) -> None:
+        self.clients.pop(email, None)
+
+    async def list_clients(self) -> set[str]:
+        return set(self.clients)
+
+    async def stats(self) -> dict[str, tuple[int, int]]:
+        return {email: self.traffic.get(email, (0, 0)) for email in self.clients}
+
+    def set_traffic(self, email: str, up: int, down: int) -> None:
+        self.traffic[email] = (up, down)
+
+
+@pytest_asyncio.fixture
+async def env_both(tmp_path):
+    """Нода с ОБОИМИ транспортами (awg + reality)."""
+    db = Database(tmp_path / "vpn.sqlite")
+    await db.open()
+    await apply_migrations(db)
+    awg = FakeAwg()
+    xray = FakeXray()
+    events: list[tuple[str, dict]] = []
+
+    async def emit(event_type: str, data: dict) -> None:
+        events.append((event_type, data))
+
+    cfg = VpnConfig(
+        subnet="10.9.0.0/29",
+        base_quota_gb=1,
+        extra_step_gb=1,
+        self_ceiling_gb=3,
+        warn_remaining_gb=0,
+        endpoint_host="203.0.113.9",
+        transports=[TRANSPORT_AWG, TRANSPORT_REALITY],
+        reality=RealityTransportConfig(
+            endpoint_host="198.51.100.7",
+            server_public_key="SRV_PUB",
+            short_id="abcd1234",
+            sni="www.google.com",
+        ),
+    )
+    svc = VpnService(Settings(vpn=cfg), db, awg, emit, reality_backend=xray)
+    yield svc, awg, xray, events
+    await db.close()
+
+
+async def _issue_reality(svc, chat_id=CHAT):
+    return await svc.run_command(
+        vpn_protocol.ACTION_ISSUE, {"chat_id": chat_id, "transport": TRANSPORT_REALITY}
+    )
+
+
+async def test_reality_issue_creates_peer_and_singbox_artifacts(env_both):
+    svc, _awg, xray, events = env_both
+    result = await _issue_reality(svc)
+    assert result["transport"] == TRANSPORT_REALITY
+    assert '"type": "vless"' in result["config_text"]
+    assert "SRV_PUB" in result["config_text"]
+    assert result["share_url"].startswith("vless://")
+    assert "198.51.100.7:8443" in result["share_url"]
+    assert result["deep_link"].startswith("hiddify://import/")
+    assert result["qr_png_b64"]
+    assert xray.clients  # реально добавлен в inbound
+    cur = await svc._db.conn.execute(
+        "SELECT transport, public_key, address FROM vpn_peers WHERE chat_id = ?", (CHAT,)
+    )
+    row = await cur.fetchone()
+    assert row["transport"] == TRANSPORT_REALITY
+    assert row["address"] == f"c{CHAT}-{result['device_label']}"  # email в колонке address
+    assert row["public_key"] == list(xray.clients.values())[0]  # uuid
+
+
+async def test_transport_must_be_specified_when_node_carries_both(env_both):
+    svc, _awg, _xray, _events = env_both
+    with pytest.raises(ProtoError) as exc:
+        await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
+    assert exc.value.code == ERR_BAD_REQUEST
+
+
+async def test_unknown_transport_is_rejected(env_both):
+    svc, _awg, _xray, _events = env_both
+    with pytest.raises(ProtoError) as exc:
+        await svc.run_command(
+            vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "transport": "wireguard"}
+        )
+    assert exc.value.code == ERR_BAD_REQUEST
+
+
+async def test_single_transport_node_needs_no_transport_arg(env):
+    """awg-only нода (дефолтный env) — transport можно не указывать."""
+    svc, _backend, _events = env
+    result = await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
+    assert result["transport"] == TRANSPORT_AWG
+
+
+async def test_reality_only_node_hides_awg_actions_in_describe(tmp_path):
+    db = Database(tmp_path / "vpn.sqlite")
+    await db.open()
+    await apply_migrations(db)
+
+    async def emit(*_a):
+        return None
+
+    cfg = VpnConfig(
+        transports=[TRANSPORT_REALITY],
+        reality=RealityTransportConfig(server_public_key="P", short_id="s", endpoint_host="h"),
+    )
+    svc = VpnService(Settings(vpn=cfg), db, FakeAwg(), emit, reality_backend=FakeXray())
+    caps = set(svc.describe().capabilities)
+    assert vpn_protocol.ACTION_ISSUE in caps
+    assert vpn_protocol.ACTION_PROXY_LINK not in caps
+    assert vpn_protocol.ACTION_APK_INFO not in caps
+    assert svc.describe().info  # smoke
+    state = await svc.get_state()
+    assert state["transports"] == [TRANSPORT_REALITY]
+    await db.close()
+
+
+async def test_reality_transport_missing_config_is_disabled(tmp_path):
+    """transport reality в списке, но нет секции [vpn.reality] → недоступен."""
+    db = Database(tmp_path / "vpn.sqlite")
+    await db.open()
+    await apply_migrations(db)
+
+    async def emit(*_a):
+        return None
+
+    cfg = VpnConfig(transports=[TRANSPORT_REALITY])  # reality=None
+    svc = VpnService(Settings(vpn=cfg), db, FakeAwg(), emit, reality_backend=None)
+    assert (await svc.get_state())["transports"] == []
+    with pytest.raises(ProtoError):
+        await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
+    await db.close()
+
+
+async def test_reality_reconcile_adds_missing_and_removes_stray(env_both):
+    svc, _awg, xray, _events = env_both
+    result = await _issue_reality(svc)
+    email = f"c{CHAT}-{result['device_label']}"
+    # xray потерял юзера (рестарт) + завёлся лишний вручную
+    xray.clients.clear()
+    xray.clients["stray@x"] = "u-stray"
+    await svc.reconcile()
+    assert set(xray.clients) == {email}
+
+
+async def test_reality_sampler_counts_into_shared_quota(env_both):
+    svc, awg, xray, _events = env_both
+    # awg-устройство
+    awg_res = await svc.run_command(
+        vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "transport": TRANSPORT_AWG}
+    )
+    awg_pk = next(iter(awg.peers))
+    awg.set_traffic(awg_pk, 200_000_000, 100_000_000)  # 0.3 ГБ
+    # reality-устройство того же гостя
+    r_res = await _issue_reality(svc)
+    email = f"c{CHAT}-{r_res['device_label']}"
+    xray.set_traffic(email, 250_000_000, 150_000_000)  # 0.4 ГБ
+
+    await svc.sample_once()
+
+    usage = await svc.run_command(vpn_protocol.ACTION_USAGE, {"chat_id": CHAT})
+    assert usage["used_bytes"] == 700_000_000  # 0.3 + 0.4 против ОДНОГО лимита
+    assert usage["limit_bytes"] == GB
+    labels = {d["device_label"]: d["transport"] for d in usage["devices"]}
+    assert labels == {
+        awg_res["device_label"]: TRANSPORT_AWG,
+        r_res["device_label"]: TRANSPORT_REALITY,
+    }
+
+
+async def test_reality_reissue_keeps_transport_and_swaps_client(env_both):
+    svc, _awg, xray, _events = env_both
+    first = await _issue_reality(svc)
+    label = first["device_label"]
+    old_email = f"c{CHAT}-{label}"
+    old_uuid = xray.clients[old_email]
+
+    second = await svc.run_command(
+        vpn_protocol.ACTION_REISSUE, {"chat_id": CHAT, "device_label": label}
+    )
+    assert second["transport"] == TRANSPORT_REALITY
+    assert second["device_label"] == label
+    # тот же email (label не меняется), но новый uuid; старый снят
+    assert set(xray.clients) == {old_email}
+    assert xray.clients[old_email] != old_uuid
+    cur = await svc._db.conn.execute(
+        "SELECT status FROM vpn_peers WHERE public_key = ?", (old_uuid,)
+    )
+    assert (await cur.fetchone())["status"] == "expired"
+
+
+async def test_reality_revoke_removes_client_from_xray(env_both):
+    svc, _awg, xray, _events = env_both
+    result = await _issue_reality(svc)
+    label = result["device_label"]
+    await svc.run_command(vpn_protocol.ACTION_REVOKE, {"chat_id": CHAT, "device_label": label})
+    assert xray.clients == {}
+    cur = await svc._db.conn.execute(
+        "SELECT status FROM vpn_peers WHERE chat_id = ? AND device_label = ?", (CHAT, label)
+    )
+    assert (await cur.fetchone())["status"] == "revoked"
+
+
+async def test_reality_quota_block_reconciles_both_transports(env_both):
+    svc, awg, xray, events = env_both
+    awg_res = await svc.run_command(
+        vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "transport": TRANSPORT_AWG}
+    )
+    await _issue_reality(svc)
+    awg_pk = next(iter(awg.peers))
+    awg.set_traffic(awg_pk, GB, 0)  # ровно лимит 1 ГБ awg-трафиком
+
+    await svc.sample_once()
+
+    # оба транспорта гостя сняты с серверов (общая блокировка по квоте)
+    assert xray.clients == {}
+    assert awg.peers == {}
+    assert any(n == vpn_protocol.EVENT_VPN_QUOTA_EXCEEDED for n, _ in events)
+    _ = awg_res

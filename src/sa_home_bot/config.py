@@ -587,6 +587,36 @@ def reminder_reason(llm: LlmConfig) -> str:
     return "high" if llm.think_chat else "off"
 
 
+class RealityTransportConfig(BaseModel):
+    """Параметры серверного inbound VLESS+Reality (xray-core) — второй
+    транспорт службы `vpn` (подэтап 39.0.x, см.
+    ``~/.claude/plans/functional-imagining-otter.md``).
+
+    Reality делает настоящий TLS-хендшейк к чужому ``sni``/``dest``, для DPI
+    неотличимо от обычного HTTPS — единственный транспорт, реально проходящий
+    ТСПУ из РФ на зарубежный сервер.
+
+    Значения ``endpoint_host``/``port``/``server_public_key``/``short_id``/
+    ``sni``/``flow`` печатает ops-скрипт ``deploy/setup-reality-server.sh``.
+    Имена полей совпадают с ``reality/client_config.py::RealityParams`` —
+    генераторы клиентского конфига берут этот объект по duck-typing.
+    ``api_addr``/``inbound_tag`` — локальный gRPC API xray, через который
+    служба добавляет/снимает юзеров и читает трафик БЕЗ рестарта и БЕЗ sudo.
+
+    Квоты и учёт — ОБЩИЕ с AmneziaWG (поля ``base_quota_gb`` и т.д. на
+    ``VpnConfig``): одна квота на гостя на сервер, независимо от транспорта.
+    """
+
+    endpoint_host: str = ""
+    port: int = Field(default=8443, ge=1, le=65535)
+    server_public_key: str = ""
+    short_id: str = ""
+    sni: str = "www.google.com"
+    flow: str = "xtls-rprx-vision"
+    api_addr: str = "127.0.0.1:10085"
+    inbound_tag: str = "reality-in"
+
+
 class VpnConfig(BaseModel):
     """Служба vpn (`sa-home-bot --service vpn`) — AmneziaWG-доступ на jeeves,
     выдаваемый и учитываемый через бота (Этап 33 IMPLEMENTATION_PLAN.md).
@@ -706,6 +736,14 @@ class VpnConfig(BaseModel):
     check_clear_threshold: int = Field(default=1, ge=1)
     check_dispatch_timeout_s: float = Field(default=5.0, gt=0)
 
+    # --- Транспорты (подэтап 39.0.x). Какие транспорты держит служба vpn на
+    # ЭТОЙ ноде: "awg" (AmneziaWG, нужен интерфейс + sudoers + прокси-фиксапы),
+    # "reality" (VLESS+Reality через xray, секция [vpn.reality] обязательна).
+    # jeeves — ["awg"]; wooster — ["reality"]; нода может нести оба. Квота и
+    # учёт трафика общие для всех транспортов (одна квота на гостя на сервер).
+    transports: list[str] = Field(default_factory=lambda: ["awg"])
+    reality: RealityTransportConfig | None = None
+
 
 class VpnCheckConfig(BaseModel):
     """Служба vpn_check (`sa-home-bot --service vpn_check`) — исполнитель
@@ -740,52 +778,6 @@ class VpnCheckConfig(BaseModel):
     # пропустить.
     ip_echo_url: str = "https://api.ipify.org"
     check_timeout_s: float = Field(default=8.0, gt=0)
-
-
-class RealityConfig(BaseModel):
-    """Служба reality (`sa-home-bot --service reality`) — VLESS+Reality доступ
-    через xray-core на ноде роя с белым IP (подэтап 39.0.x, см.
-    ``~/.claude/plans/functional-imagining-otter.md``).
-
-    Единственный транспорт, реально проходящий ТСПУ из РФ на зарубежный
-    сервер: Reality делает настоящий TLS-хендшейк к чужому ``sni``/``dest``,
-    для DPI неотличимо от захода на обычный HTTPS-сайт.
-
-    ``endpoint_host``/``port``/``server_public_key``/``short_id``/``sni``/
-    ``flow`` — параметры серверного inbound, поднятого ops-скриптом
-    ``deploy/setup-reality-server.sh`` (печатает готовый ``[reality]``-блок).
-    Имена полей совпадают с ``reality/client_config.py::RealityParams`` — так
-    генераторы клиентского конфига берут этот объект по duck-typing.
-    ``api_addr``/``inbound_tag`` — локальный gRPC API xray, через который
-    служба добавляет/снимает юзеров и читает трафик БЕЗ рестарта и БЕЗ sudo.
-
-    Квоты (``base_quota_gb``/``extra_step_gb``/``self_ceiling_gb``/
-    ``warn_remaining_gb``/``node_limit_gb``) — те же имена и смысл, что у
-    ``VpnConfig`` (см. её докстринг). У ноды wooster тариф 3 ТБ →
-    ``node_limit_gb = 3000`` задаётся в её ``config.toml``.
-
-    ``hiddify_apk_repo`` — репозиторий GitHub Releases клиента Hiddify (для
-    раздачи APK ботом; в MVP бот даёт только ссылки на магазины).
-    """
-
-    socket: str = "./data/reality.sock"
-    db_path: Path = Path("./data/reality.sqlite")
-    endpoint_host: str = ""
-    port: int = Field(default=8443, ge=1, le=65535)
-    server_public_key: str = ""
-    short_id: str = ""
-    sni: str = "www.google.com"
-    flow: str = "xtls-rprx-vision"
-    api_addr: str = "127.0.0.1:10085"
-    inbound_tag: str = "reality-in"
-    base_quota_gb: int = Field(default=500, ge=0)
-    extra_step_gb: int = Field(default=100, gt=0)
-    self_ceiling_gb: int = Field(default=1000, ge=0)
-    warn_remaining_gb: int = Field(default=100, ge=0)
-    node_limit_gb: int = Field(default=10000, ge=0)
-    sample_interval_s: float = Field(default=180.0, gt=0)
-    config_message_ttl_s: float = Field(default=600.0, gt=0)
-    hiddify_apk_repo: str = "hiddify/hiddify-app"
 
 
 class WeatherConfig(BaseModel):
@@ -1142,7 +1134,6 @@ class Settings(BaseSettings):
     net: NetConfig = Field(default_factory=NetConfig)
     vpn: VpnConfig = Field(default_factory=VpnConfig)
     vpn_check: VpnCheckConfig = Field(default_factory=VpnCheckConfig)
-    reality: RealityConfig = Field(default_factory=RealityConfig)
     weather: WeatherConfig = Field(default_factory=WeatherConfig)
     node: NodeConfig = Field(default_factory=NodeConfig)
     swarm: SwarmConfig = Field(default_factory=SwarmConfig)

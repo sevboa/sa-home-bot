@@ -18,6 +18,16 @@ from __future__ import annotations
 
 SERVICE_NAME = "vpn"
 
+# --- Транспорты (подэтап 39.0.x) ---
+# У пира vpn один из двух транспортов; учёт трафика и месячная квота — ОБЩИЕ
+# (одна квота на гостя на сервер, независимо от транспорта — решение
+# пользователя 2026-09-10). Значение хранится в vpn_peers.transport.
+# Reality-пир переиспользует колонки: public_key = UUID клиента xray,
+# address = его email ("c<chat_id>-<устройство>").
+TRANSPORT_AWG = "awg"  # AmneziaWG (UDP + обфускация) — исходный транспорт
+TRANSPORT_REALITY = "reality"  # VLESS+Reality через xray-core (TCP/443) — для РФ
+TRANSPORTS = (TRANSPORT_AWG, TRANSPORT_REALITY)
+
 # Легаси-адрес «первого» VPN-сервера. Остался у двух внутренних потоков
 # probe/health, которые ещё не разведены по локациям (этап 39.0.7):
 #   - vpn_check/service.py — куда пушить report_check;

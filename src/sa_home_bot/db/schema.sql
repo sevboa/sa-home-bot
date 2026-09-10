@@ -235,10 +235,17 @@ CREATE INDEX IF NOT EXISTS idx_invites_open ON invites(expires_at)
 -- один раз при старте службы (vpn/service.py::_backfill_server). Колонка
 -- добавляется миграцией (db/migrations.py) — CREATE TABLE IF NOT EXISTS её
 -- на существующей таблице не подхватит.
+-- transport — awg (AmneziaWG) либо reality (VLESS+Reality через xray-core),
+-- подэтап 39.0.x. Квота и учёт трафика ОБЩИЕ для обоих (одна квота на гостя
+-- на сервер). Reality-пир переиспользует колонки: public_key = UUID клиента
+-- xray, address = его email ("c<chat_id>-<устройство>", ключ statsquery на
+-- сервере). Колонка добавляется миграцией (db/migrations.py) с DEFAULT 'awg'
+-- — старые пиры на jeeves все awg.
 CREATE TABLE IF NOT EXISTS vpn_peers (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id            INTEGER NOT NULL,
     device_label       TEXT NOT NULL,
+    transport          TEXT NOT NULL DEFAULT 'awg',
     public_key         TEXT NOT NULL UNIQUE,
     address            TEXT NOT NULL,
     status             TEXT NOT NULL DEFAULT 'active',
@@ -323,74 +330,9 @@ CREATE TABLE IF NOT EXISTS vpn_requests (
     decided_at  TEXT
 );
 
--- === Служба reality (VLESS+Reality через xray-core, подэтап 39.0.x) ===
--- Своя sqlite (settings.reality.db_path), свои таблицы — конвенция проекта
--- (таблица на службу). Структура — копия vpn_* с заменой транспорта:
--- ключ WireGuard + адрес в подсети → UUID клиента xray + его email
--- (человекочитаемый ярлык "c<chat_id>-<устройство>" для statsquery на
--- сервере). Все таблицы новые → миграций ALTER не нужно.
-
-CREATE TABLE IF NOT EXISTS reality_peers (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id       INTEGER NOT NULL,
-    device_label  TEXT NOT NULL,
-    uuid          TEXT NOT NULL UNIQUE,
-    email         TEXT NOT NULL,
-    status        TEXT NOT NULL DEFAULT 'active',
-    created_at    TEXT NOT NULL,
-    revoked_at    TEXT,
-    last_seen_at  TEXT,
-    server        TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_reality_peers_chat ON reality_peers(chat_id);
-
--- Последние снятые счётчики `xray api statsquery` по юзеру (uplink/downlink
--- с момента старта xray, не с начала месяца) — по ним дельта на следующем
--- тике. total < prev = xray переподняли, дельта от нуля
--- (reality/service.py::sample_once). Ключ — email (совпадает с ключом
--- statsquery), не uuid.
-CREATE TABLE IF NOT EXISTS reality_counters (
-    email       TEXT PRIMARY KEY,
-    last_up     INTEGER NOT NULL DEFAULT 0,
-    last_down   INTEGER NOT NULL DEFAULT 0,
-    updated_at  TEXT
-);
-
-CREATE TABLE IF NOT EXISTS reality_peer_usage (
-    peer_id     INTEGER NOT NULL,
-    month       TEXT NOT NULL,
-    used_bytes  INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (peer_id, month)
-);
-
-CREATE TABLE IF NOT EXISTS reality_quota_state (
-    chat_id             INTEGER NOT NULL,
-    month               TEXT NOT NULL,
-    warned_limit_bytes  INTEGER,
-    blocked_at          TEXT,
-    PRIMARY KEY (chat_id, month)
-);
-
-CREATE TABLE IF NOT EXISTS reality_quota_grants (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id     INTEGER NOT NULL,
-    month       TEXT NOT NULL,
-    bytes       INTEGER NOT NULL,
-    source      TEXT NOT NULL,
-    request_id  INTEGER,
-    created_at  TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_reality_quota_grants_chat_month
-    ON reality_quota_grants(chat_id, month);
-
-CREATE TABLE IF NOT EXISTS reality_requests (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id     INTEGER NOT NULL,
-    bytes       INTEGER NOT NULL,
-    status      TEXT NOT NULL DEFAULT 'pending',
-    created_at  TEXT NOT NULL,
-    decided_at  TEXT
-);
+-- (VLESS+Reality — не отдельная служба со своими таблицами, а второй
+-- транспорт службы vpn: см. vpn_peers.transport выше. Учёт и квота общие,
+-- поэтому reality-пиры живут в vpn_peers / vpn_counters / vpn_peer_usage.)
 
 -- Состояние проверок доступности VPN-туннеля с нескольких нод (служба
 -- vpn_check) — по образцу health_states, но булев результат (ok/fail)

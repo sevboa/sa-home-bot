@@ -2318,11 +2318,19 @@ server, target)` (`domain/vpn_check.py::reconcile_vpn_check`,
     `xray api adu/rmu/inbounduser` на `127.0.0.1:10085` — без sudo, без
     рестарта), таблицы `reality_*` в `schema.sql`, `RealityConfig`, ветка
     `--service reality` в `cli.py`, `ServiceSpec("reality")` в реестре.
-    Тесты `tests/unit/test_reality_service.py` (30, зелёные). **Не
-    задеплоено** — reconcile при старте снял бы ручных тестовых клиентов
-    Фазы A; деплой после её завершения. Осталось в Фазе B: бот-UI
-    (`bot/reality_nodes.py`, карточка `/vpn`, `EVENT_REALITY_*`,
-    `guest_rights`, `tool_reality`).
+    Тесты `tests/unit/test_reality_service.py` (30, зелёные).
+    **ПЕРЕСМОТР АРХИТЕКТУРЫ 2026-09-10 (решение пользователя):** на одном
+    сервере у гостя — ОДНА квота, независимо от транспорта (AmneziaWG /
+    VLESS). Отдельная служба `reality` со своей квотой этому противоречит →
+    `reality` сливается в службу `vpn` **вторым транспортом**
+    (`vpn_peers.transport`), квота/гранты/заявки — общие `vpn_*`. Помимо
+    этого `/vpn` даёт выбор транспорта под каждое устройство (несколько
+    разных под одной квотой). Удаляются `reality/{app,protocol,service}.py`,
+    `RealityConfig`, `ServiceSpec("reality")`, `--service reality`, таблицы
+    `reality_*`; остаются helper-модули `reality/{xray,client_config,
+    routing}.py`. Полный план (3 коммита) — `functional-imagining-otter.md`.
+    **Не задеплоено** — reconcile при старте снял бы ручных тестовых
+    клиентов Фазы A; деплой после её завершения (стабильность > суток).
 - ⬜ **39.0.5 (следующее)** — UI выбора локации в `/vpn` + фанаут/merge
   списка и usage по живым `vpn` (см. «Осознанно НЕ здесь» выше). Теперь
   разблокировано: есть живой второй сервер.

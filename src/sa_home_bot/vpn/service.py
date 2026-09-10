@@ -1,15 +1,27 @@
-"""VpnService — ServiceHandler службы vpn (AmneziaWG-доступ на jeeves,
-выдаваемый и учитываемый через бота).
+"""VpnService — ServiceHandler службы vpn: доступ к обходу на ноде роя с
+белым IP, выдаваемый и учитываемый через бота.
+
+Два транспорта под ОБЩЕЙ квотой (подэтап 39.0.x, решение пользователя
+2026-09-10 — одна квота на гостя на сервер, независимо от транспорта):
+
+* ``awg`` — AmneziaWG (UDP + обфускация), исходный (Этап 33). Пир = ключ
+  WireGuard + адрес в подсети, учёт из ``awg show <iface> transfer``.
+* ``reality`` — VLESS+Reality через xray-core (TCP/443), для РФ. Пир = UUID
+  клиента xray + его email (переиспользуют колонки ``public_key``/``address``
+  в ``vpn_peers``), учёт из ``xray api statsquery``, бэкенд —
+  ``reality/xray.py`` (без sudo и без рестарта).
+
+Какие транспорты держит нода — ``[vpn].transports`` (+ секция ``[vpn.reality]``
+для второго). jeeves: ``["awg"]``; wooster: ``["reality"]``; можно оба.
 
 Реконсайлер, а не разрозненные add/remove (решение из плана этапа 33):
-``_reconcile_peers`` сравнивает желаемое состояние интерфейса (активные
-пиры незаблокированных чатов — из БД, БД источник истины) с фактическим
-(``awg show <iface> transfer``, он же список пиров на интерфейсе). Лишних
-снимает, недостающих добавляет. Вызывается при старте (после рестарта jeeves
-интерфейс пуст, БД помнит всех) и на каждом тике сэмплера — тем же ходом
-закрывает и месячную разблокировку 1-го числа (новый месяц = чат не в списке
-заблокированных), и снятие пира при блокировке, и самовосстановление после
-ручных правок на сервере.
+``reconcile`` сравнивает желаемое состояние сервера (активные пиры
+незаблокированных чатов — из БД, БД источник истины) с фактическим — по
+каждому транспорту отдельно. Лишних снимает, недостающих добавляет.
+Вызывается при старте (после рестарта сервера список пиров/юзеров пуст, БД
+помнит всех) и на каждом тике сэмплера — тем же ходом закрывает и месячную
+разблокировку 1-го числа, и снятие пира при блокировке по квоте, и
+самовосстановление после ручных правок на сервере.
 
 Приватность (решение плана): служба хранит только объёмы и время последнего
 хендшейка. Ни адресов назначения, ни DNS-запросов, ни логов соединений —
@@ -28,6 +40,7 @@ import ipaddress
 import logging
 import random
 import socket
+import uuid as uuidlib
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -54,6 +67,12 @@ from sa_home_bot.proto.messages import (
     ServiceDescription,
     ServiceInfo,
 )
+from sa_home_bot.reality.client_config import (
+    render_deep_link,
+    render_singbox_config,
+    render_vless_url,
+)
+from sa_home_bot.reality.xray import XrayBackend
 from sa_home_bot.vpn import apk as apk_client
 from sa_home_bot.vpn.awg import AwgBackend
 from sa_home_bot.vpn.protocol import (
@@ -88,6 +107,8 @@ from sa_home_bot.vpn.protocol import (
     EVENT_VPN_QUOTA_WARNING,
     PROXY_SECRET_SEED,
     SERVICE_NAME,
+    TRANSPORT_AWG,
+    TRANSPORT_REALITY,
 )
 from sa_home_bot.vpn.proxy_backend import ProxyBackend, RealProxyBackend
 from sa_home_bot.vpn_check import protocol as vpn_check_protocol
@@ -192,6 +213,14 @@ def _render_client_conf(cfg: Any, private_key: str, address: str, server_public_
     )
 
 
+def _reality_email(chat_id: int, device_label: str) -> str:
+    """email клиента xray — человекочитаемый ярлык для ``statsquery`` на
+    сервере, уникальный среди активных (у чата не бывает двух активных
+    устройств с одним именем). Для reality-пиров хранится в
+    ``vpn_peers.address`` (у awg-пиров там IP подсети)."""
+    return f"c{chat_id}-{device_label}"
+
+
 def _render_qr_png_b64(text: str) -> str:
     import segno
 
@@ -211,10 +240,22 @@ class VpnService:
         *,
         node_link: ServiceLink | None = None,
         proxy_backend: ProxyBackend | None = None,
+        reality_backend: XrayBackend | None = None,
     ) -> None:
         self._cfg = settings.vpn
         self._db = db
         self._backend = backend
+        self._reality = reality_backend
+        self._reality_cfg = settings.vpn.reality
+        # Транспорты, реально доступные на этой ноде: из [vpn].transports, но
+        # reality — только если бэкенд xray собран (есть секция [vpn.reality]).
+        # awg доступен всегда (бэкенд конструируется без побочных эффектов).
+        wanted = list(settings.vpn.transports or [TRANSPORT_AWG])
+        self._transports: tuple[str, ...] = tuple(
+            t
+            for t in wanted
+            if t == TRANSPORT_AWG or (t == TRANSPORT_REALITY and reality_backend is not None)
+        )
         self._proxy_backend = proxy_backend or RealProxyBackend()
         self._emit = emit
         self._node = socket.gethostname()
@@ -226,77 +267,92 @@ class VpnService:
         # логирует предупреждение и ничего не делает.
         self._node_link = node_link
 
+    def _has(self, transport: str) -> bool:
+        return transport in self._transports
+
     def describe(self) -> ServiceDescription:
         chat_id_param = ActionParam(name="chat_id", type="int", title="Чей это гость")
         device_param = ActionParam(name="device_label", type="string", title="Устройство")
-        return ServiceDescription(
-            info=ServiceInfo(node=self._node, service=SERVICE_NAME, version=__version__),
-            capabilities=(
-                ACTION_PEERS,
-                ACTION_ISSUE,
-                ACTION_REISSUE,
-                ACTION_REVOKE,
-                ACTION_USAGE,
-                ACTION_SET_QUOTA,
-                ACTION_GRANT_EXTRA,
-                ACTION_REQUEST_EXTRA,
-                ACTION_RESOLVE_REQUEST,
+        # transport необязателен: если нода несёт один транспорт — берётся он;
+        # если оба (awg + reality) — бот/модель указывают, какой под устройство.
+        transport_param = ActionParam(
+            name="transport", type="string", required=False, title="Транспорт (awg/reality)"
+        )
+
+        capabilities: list[str] = [
+            ACTION_PEERS,
+            ACTION_ISSUE,
+            ACTION_REISSUE,
+            ACTION_REVOKE,
+            ACTION_USAGE,
+            ACTION_SET_QUOTA,
+            ACTION_GRANT_EXTRA,
+            ACTION_REQUEST_EXTRA,
+            ACTION_RESOLVE_REQUEST,
+        ]
+        actions: list[ActionSpec] = [
+            ActionSpec(id=ACTION_PEERS, title="🔌 Все пиры"),
+            ActionSpec(
+                id=ACTION_ISSUE,
+                # Имя устройства служба выбирает сама (случайный цветок,
+                # решение пользователя 2026-08-04) — device_param тут не нужен,
+                # в отличие от reissue/revoke, которым он указывает, КАКОЕ
+                # существующее устройство трогать.
+                title="➕ Выдать доступ",
+                params=(chat_id_param, transport_param),
+            ),
+            ActionSpec(
+                id=ACTION_REISSUE,
+                title="🔄 Перевыпустить",
+                params=(chat_id_param, device_param),
+            ),
+            ActionSpec(
+                id=ACTION_REVOKE, title="🚫 Отозвать", params=(chat_id_param, device_param)
+            ),
+            ActionSpec(
+                id=ACTION_USAGE,
+                title="📊 Расход",
+                params=(ActionParam(name="chat_id", type="int", required=False, title="Чей"),),
+            ),
+            ActionSpec(
+                id=ACTION_SET_QUOTA,
+                title="🎚 Задать квоту",
+                params=(
+                    chat_id_param,
+                    ActionParam(name="bytes", type="int", title="Лимит месяца, байт"),
+                ),
+            ),
+            ActionSpec(id=ACTION_GRANT_EXTRA, title="➕100 ГБ", params=(chat_id_param,)),
+            ActionSpec(
+                id=ACTION_REQUEST_EXTRA,
+                title="✋ Заявка на трафик",
+                params=(
+                    chat_id_param,
+                    ActionParam(name="bytes", type="int", required=False, title="Сколько"),
+                ),
+            ),
+            ActionSpec(
+                id=ACTION_RESOLVE_REQUEST,
+                title="✅ Решить заявку",
+                params=(
+                    ActionParam(name="request_id", type="int", title="Номер заявки"),
+                    ActionParam(name="approve", type="bool", title="Одобрить"),
+                ),
+            ),
+        ]
+        # APK AmneziaWG, прокси Telegram (mtg) и проверки доступности —
+        # только на нодах с транспортом awg (у reality-only ноды нет ни
+        # интерфейса, ни mtg, ни клиента AmneziaWG для раздачи).
+        if self._has(TRANSPORT_AWG):
+            capabilities += [
                 ACTION_APK_INFO,
                 ACTION_CHECK_NOW,
                 ACTION_CHECK_STATUS,
                 ACTION_PROXY_LINK,
                 ACTION_PROXY_ROTATE_SECRET,
                 ACTION_PROXY_USAGE,
-            ),
-            actions=(
-                ActionSpec(id=ACTION_PEERS, title="🔌 Все пиры"),
-                ActionSpec(
-                    id=ACTION_ISSUE,
-                    # Имя устройства служба выбирает сама (случайный цветок,
-                    # решение пользователя 2026-08-04) — device_param тут
-                    # больше не нужен, в отличие от reissue/revoke, которым
-                    # он указывает, КАКОЕ существующее устройство трогать.
-                    title="➕ Выдать доступ",
-                    params=(chat_id_param,),
-                ),
-                ActionSpec(
-                    id=ACTION_REISSUE,
-                    title="🔄 Перевыпустить",
-                    params=(chat_id_param, device_param),
-                ),
-                ActionSpec(
-                    id=ACTION_REVOKE, title="🚫 Отозвать", params=(chat_id_param, device_param)
-                ),
-                ActionSpec(
-                    id=ACTION_USAGE,
-                    title="📊 Расход",
-                    params=(ActionParam(name="chat_id", type="int", required=False, title="Чей"),),
-                ),
-                ActionSpec(
-                    id=ACTION_SET_QUOTA,
-                    title="🎚 Задать квоту",
-                    params=(
-                        chat_id_param,
-                        ActionParam(name="bytes", type="int", title="Лимит месяца, байт"),
-                    ),
-                ),
-                ActionSpec(id=ACTION_GRANT_EXTRA, title="➕100 ГБ", params=(chat_id_param,)),
-                ActionSpec(
-                    id=ACTION_REQUEST_EXTRA,
-                    title="✋ Заявка на трафик",
-                    params=(
-                        chat_id_param,
-                        ActionParam(name="bytes", type="int", required=False, title="Сколько"),
-                    ),
-                ),
-                ActionSpec(
-                    id=ACTION_RESOLVE_REQUEST,
-                    title="✅ Решить заявку",
-                    params=(
-                        ActionParam(name="request_id", type="int", title="Номер заявки"),
-                        ActionParam(name="approve", type="bool", title="Одобрить"),
-                    ),
-                ),
+            ]
+            actions += [
                 ActionSpec(id=ACTION_APK_INFO, title="📱 Приложение"),
                 ActionSpec(
                     id=ACTION_APK_CHUNK,
@@ -309,7 +365,9 @@ class VpnService:
                 ActionSpec(
                     id=ACTION_APK_SET_FILE_ID,
                     title="🆔 Запомнить file_id",
-                    params=(ActionParam(name="telegram_file_id", type="string", title="file_id"),),
+                    params=(
+                        ActionParam(name="telegram_file_id", type="string", title="file_id"),
+                    ),
                 ),
                 # Служебное — зовёт только сама служба vpn_check, не для UI.
                 ActionSpec(
@@ -325,7 +383,11 @@ class VpnService:
                 ActionSpec(id=ACTION_PROXY_LINK, title="🌐 Ссылка прокси"),
                 ActionSpec(id=ACTION_PROXY_ROTATE_SECRET, title="🔁 Сменить секрет прокси"),
                 ActionSpec(id=ACTION_PROXY_USAGE, title="📊 Расход прокси"),
-            ),
+            ]
+        return ServiceDescription(
+            info=ServiceInfo(node=self._node, service=SERVICE_NAME, version=__version__),
+            capabilities=tuple(capabilities),
+            actions=tuple(actions),
         )
 
     async def get_state(self) -> dict[str, Any]:
@@ -337,6 +399,9 @@ class VpnService:
             "node": self._node,
             "service": SERVICE_NAME,
             "active_peers": row["n"] if row else 0,
+            # Транспорты этой ноды — бот по ним решает, предлагать ли выбор
+            # (awg/reality) в карточке «➕ Новое устройство».
+            "transports": list(self._transports),
         }
 
     # --- вспомогательное ---
@@ -357,7 +422,12 @@ class VpnService:
         return self._server_pubkey
 
     async def _active_addresses(self) -> set[str]:
-        cur = await self._db.conn.execute("SELECT address FROM vpn_peers WHERE status = 'active'")
+        # Только awg-пиры: у reality-пира в колонке address лежит email
+        # ("c<chat>-<label>"), а не IP подсети — в пул адресов он не входит.
+        cur = await self._db.conn.execute(
+            "SELECT address FROM vpn_peers WHERE status = 'active' AND transport = ?",
+            (TRANSPORT_AWG,),
+        )
         return {row["address"] for row in await cur.fetchall()}
 
     async def _blocked_chats(self, month: str) -> set[int]:
@@ -430,13 +500,14 @@ class VpnService:
 
     async def _peers_for_chat(self, chat_id: int) -> list[dict[str, Any]]:
         cur = await self._db.conn.execute(
-            "SELECT device_label, status, created_at, last_handshake_at, server FROM vpn_peers "
-            "WHERE chat_id = ? AND status = 'active' ORDER BY created_at",
+            "SELECT device_label, transport, status, created_at, last_handshake_at, server "
+            "FROM vpn_peers WHERE chat_id = ? AND status = 'active' ORDER BY created_at",
             (chat_id,),
         )
         return [
             {
                 "device_label": row["device_label"],
+                "transport": row["transport"] or TRANSPORT_AWG,
                 "status": row["status"],
                 "created_at": row["created_at"],
                 "last_handshake_at": row["last_handshake_at"],
@@ -464,18 +535,38 @@ class VpnService:
         month = _month_key(_now())
         blocked = await self._blocked_chats(month)
         cur = await self._db.conn.execute(
-            "SELECT chat_id, public_key, address FROM vpn_peers WHERE status = 'active'"
+            "SELECT chat_id, transport, public_key, address FROM vpn_peers WHERE status = 'active'"
         )
         rows = await cur.fetchall()
-        desired = {
-            row["public_key"]: row["address"] for row in rows if row["chat_id"] not in blocked
-        }
-        current = set((await self._backend.transfer()).keys())
-        for pubkey in current - desired.keys():
-            await self._backend.remove_peer(pubkey)
-        for pubkey, address in desired.items():
-            if pubkey not in current:
-                await self._backend.add_peer(pubkey, address)
+        active = [row for row in rows if row["chat_id"] not in blocked]
+
+        if self._has(TRANSPORT_AWG):
+            desired = {
+                row["public_key"]: row["address"]
+                for row in active
+                if (row["transport"] or TRANSPORT_AWG) == TRANSPORT_AWG
+            }
+            current = set((await self._backend.transfer()).keys())
+            for pubkey in current - desired.keys():
+                await self._backend.remove_peer(pubkey)
+            for pubkey, address in desired.items():
+                if pubkey not in current:
+                    await self._backend.add_peer(pubkey, address)
+
+        if self._reality is not None and self._reality_cfg is not None:
+            # reality: ключ — email (совпадает с ключом list_clients/statsquery
+            # на сервере), значение — UUID клиента xray (колонка public_key).
+            desired_r = {
+                row["address"]: row["public_key"]
+                for row in active
+                if row["transport"] == TRANSPORT_REALITY
+            }
+            current_r = await self._reality.list_clients()
+            for email in current_r - desired_r.keys():
+                await self._reality.remove_client(email)
+            for email, client_uuid in desired_r.items():
+                if email not in current_r:
+                    await self._reality.add_client(client_uuid, email, self._reality_cfg.flow)
 
     # --- issue/reissue/revoke ---
 
@@ -486,10 +577,40 @@ class VpnService:
         )
         return {row["device_label"] for row in await cur.fetchall()}
 
+    def _resolve_transport(self, args: dict[str, Any]) -> str:
+        """Какой транспорт выдавать. Явный ``transport`` в args валидируется
+        против списка этой ноды; без него — единственный транспорт ноды, а
+        если их несколько — ошибка «уточните transport»."""
+        raw = str(args.get("transport") or "").strip().lower()
+        if raw:
+            if raw not in self._transports:
+                raise ProtoError(
+                    ERR_BAD_REQUEST,
+                    f"транспорт {raw!r} на сервере {self._node} недоступен "
+                    f"(есть: {', '.join(self._transports) or '—'})",
+                )
+            return raw
+        if len(self._transports) == 1:
+            return self._transports[0]
+        if not self._transports:
+            raise ProtoError(
+                ERR_BAD_REQUEST, f"на сервере {self._node} нет ни одного транспорта VPN"
+            )
+        raise ProtoError(
+            ERR_BAD_REQUEST,
+            f"сервер {self._node} несёт несколько транспортов "
+            f"({', '.join(self._transports)}) — укажите transport",
+        )
+
     async def _issue(
-        self, args: dict[str, Any], *, forced_label: str | None = None
+        self,
+        args: dict[str, Any],
+        *,
+        forced_label: str | None = None,
+        forced_transport: str | None = None,
     ) -> dict[str, Any]:
         chat_id = self._chat_id(args)
+        transport = forced_transport or self._resolve_transport(args)
         # Число устройств на гостя намеренно не ограничено (решение
         # пользователя 2026-08-03) — реальный потолок стоимости уже задаёт
         # трафик (base_quota_gb/self_ceiling_gb), отдельный счётчик устройств
@@ -501,25 +622,56 @@ class VpnService:
         # устройства имя не меняется при перевыпуске ключа.
         existing_labels = await self._active_labels(chat_id)
         device_label = forced_label or _random_device_label(existing_labels)
-        private_key, public_key = await self._backend.generate_keypair()
-        address = _allocate_address(self._cfg.subnet, await self._active_addresses())
         now = _now().isoformat()
-        await self._db.conn.execute(
-            "INSERT INTO vpn_peers (chat_id, device_label, public_key, address, status, "
-            "created_at, server) VALUES (?, ?, ?, ?, 'active', ?, ?)",
-            (chat_id, device_label, public_key, address, now, self._node),
-        )
-        await self._db.conn.commit()
-        await self._backend.add_peer(public_key, address)
-        server_pub = await self._server_public_key()
-        conf = _render_client_conf(self._cfg, private_key, address, server_pub)
+
+        if transport == TRANSPORT_AWG:
+            private_key, public_key = await self._backend.generate_keypair()
+            address = _allocate_address(self._cfg.subnet, await self._active_addresses())
+            await self._db.conn.execute(
+                "INSERT INTO vpn_peers (chat_id, device_label, transport, public_key, address, "
+                "status, created_at, server) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)",
+                (chat_id, device_label, TRANSPORT_AWG, public_key, address, now, self._node),
+            )
+            await self._db.conn.commit()
+            await self._backend.add_peer(public_key, address)
+            server_pub = await self._server_public_key()
+            conf = _render_client_conf(self._cfg, private_key, address, server_pub)
+            artifacts: dict[str, Any] = {
+                "config_text": conf,
+                "qr_png_b64": _render_qr_png_b64(conf),
+                "address": address,
+            }
+        else:  # TRANSPORT_REALITY
+            assert self._reality is not None and self._reality_cfg is not None
+            client_uuid = str(uuidlib.uuid4())
+            email = _reality_email(chat_id, device_label)
+            await self._db.conn.execute(
+                "INSERT INTO vpn_peers (chat_id, device_label, transport, public_key, address, "
+                "status, created_at, server) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)",
+                (chat_id, device_label, TRANSPORT_REALITY, client_uuid, email, now, self._node),
+            )
+            await self._db.conn.commit()
+            await self._reality.add_client(client_uuid, email, self._reality_cfg.flow)
+            # sing-box-конфиг несёт все правила маршрутизации (Hiddify),
+            # vless://-ссылка — только быстрый импорт/QR. self._reality_cfg
+            # (RealityTransportConfig) несёт поля с теми же именами, что
+            # client_config.RealityParams — render_* берут его по duck-typing.
+            config_text = render_singbox_config(self._reality_cfg, client_uuid)
+            share_url = render_vless_url(self._reality_cfg, client_uuid, device_label)
+            artifacts = {
+                "config_text": config_text,
+                "share_url": share_url,
+                "deep_link": render_deep_link(share_url),
+                "qr_png_b64": _render_qr_png_b64(share_url),
+            }
+
         await self._emit(
-            EVENT_VPN_PEER_ISSUED, {"chat_id": chat_id, "device_label": device_label}
+            EVENT_VPN_PEER_ISSUED,
+            {"chat_id": chat_id, "device_label": device_label, "transport": transport},
         )
         return {
-            "config_text": conf,
-            "qr_png_b64": _render_qr_png_b64(conf),
-            "address": address,
+            **artifacts,
+            "transport": transport,
             "device_label": device_label,
             # Число устройств чата ДО этой выдачи — bot/handlers/vpn.py и
             # bot/tools.py::tool_vpn выбирают по нему, что показать первым
@@ -529,32 +681,44 @@ class VpnService:
             "prior_device_count": len(existing_labels),
         }
 
+    async def _remove_from_backend(self, transport: str, public_key: str, address: str) -> None:
+        """Снять пир с сервера нужным транспортом: awg — по pubkey, reality —
+        по email (в колонке address)."""
+        if transport == TRANSPORT_REALITY:
+            if self._reality is not None:
+                await self._reality.remove_client(address)
+        else:
+            await self._backend.remove_peer(public_key)
+
     async def _reissue(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)
         device_label = str(args.get("device_label") or "").strip()
         if not device_label:
             raise ProtoError(ERR_BAD_REQUEST, "не указано устройство (device_label)")
         cur = await self._db.conn.execute(
-            "SELECT public_key FROM vpn_peers WHERE chat_id = ? AND device_label = ? "
-            "AND status = 'active'",
+            "SELECT public_key, address, transport FROM vpn_peers "
+            "WHERE chat_id = ? AND device_label = ? AND status = 'active'",
             (chat_id, device_label),
         )
         row = await cur.fetchone()
+        transport = row["transport"] or TRANSPORT_AWG if row is not None else None
         if row is not None:
             await self._db.conn.execute(
                 "UPDATE vpn_peers SET status = 'expired', revoked_at = ? WHERE public_key = ?",
                 (_now().isoformat(), row["public_key"]),
             )
             await self._db.conn.commit()
-            await self._backend.remove_peer(row["public_key"])
-        return await self._issue(args, forced_label=device_label)
+            await self._remove_from_backend(transport, row["public_key"], row["address"])
+        # Перевыпуск сохраняет транспорт устройства (если пир нашёлся); нового
+        # пира без исходного — как обычный issue (транспорт из args/дефолт).
+        return await self._issue(args, forced_label=device_label, forced_transport=transport)
 
     async def _revoke(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)
         device_label = str(args.get("device_label") or "").strip()
         cur = await self._db.conn.execute(
-            "SELECT public_key FROM vpn_peers WHERE chat_id = ? AND device_label = ? "
-            "AND status = 'active'",
+            "SELECT public_key, address, transport FROM vpn_peers "
+            "WHERE chat_id = ? AND device_label = ? AND status = 'active'",
             (chat_id, device_label),
         )
         row = await cur.fetchone()
@@ -565,18 +729,22 @@ class VpnService:
             (_now().isoformat(), row["public_key"]),
         )
         await self._db.conn.commit()
-        await self._backend.remove_peer(row["public_key"])
+        await self._remove_from_backend(
+            row["transport"] or TRANSPORT_AWG, row["public_key"], row["address"]
+        )
         return {"revoked": True, "device_label": device_label}
 
     async def _peers(self, _args: dict[str, Any]) -> dict[str, Any]:
         cur = await self._db.conn.execute(
-            "SELECT chat_id, device_label, address, status, created_at, last_handshake_at, server "
-            "FROM vpn_peers ORDER BY chat_id, created_at"
+            "SELECT chat_id, device_label, transport, address, status, created_at, "
+            "last_handshake_at, server FROM vpn_peers ORDER BY chat_id, created_at"
         )
         peers = [
             {
                 "chat_id": row["chat_id"],
                 "device_label": row["device_label"],
+                "transport": row["transport"] or TRANSPORT_AWG,
+                # awg — IP в подсети; reality — email клиента xray.
                 "address": row["address"],
                 "status": row["status"],
                 "created_at": row["created_at"],
@@ -901,29 +1069,46 @@ class VpnService:
     # --- сэмплер ---
 
     async def sample_once(self) -> None:
-        transfer = await self._backend.transfer()
-        handshakes = await self._backend.latest_handshakes()
         now = _now()
         month = _month_key(now)
+        # awg: (rx, tx) с момента поднятия интерфейса + unix-ts хендшейков.
+        transfer = await self._backend.transfer() if self._has(TRANSPORT_AWG) else {}
+        handshakes = (
+            await self._backend.latest_handshakes() if self._has(TRANSPORT_AWG) else {}
+        )
+        # reality: email → (uplink, downlink) с момента старта xray.
+        reality_stats = await self._reality.stats() if self._reality is not None else {}
+
         cur = await self._db.conn.execute(
-            "SELECT id, chat_id, public_key FROM vpn_peers WHERE status = 'active'"
+            "SELECT id, chat_id, transport, public_key, address FROM vpn_peers "
+            "WHERE status = 'active'"
         )
         rows = await cur.fetchall()
         touched_chats: set[int] = set()
         for row in rows:
-            pubkey = row["public_key"]
-            if pubkey not in transfer:
-                continue
-            rx, tx = transfer[pubkey]
-            total = rx + tx
+            transport = row["transport"] or TRANSPORT_AWG
+            # counter_key — по чему ведём вчерашний срез в vpn_counters:
+            # для обоих транспортов это public_key (awg-pubkey либо xray-UUID).
+            counter_key = row["public_key"]
+            handshake_ts = 0
+            if transport == TRANSPORT_AWG:
+                if row["public_key"] not in transfer:
+                    continue
+                a, b = transfer[row["public_key"]]  # rx, tx
+                handshake_ts = handshakes.get(row["public_key"], 0)
+            else:  # reality — ключ статистики xray это email (колонка address)
+                if row["address"] not in reality_stats:
+                    continue
+                a, b = reality_stats[row["address"]]  # uplink, downlink
+            total = a + b
             cur2 = await self._db.conn.execute(
-                "SELECT last_rx, last_tx FROM vpn_counters WHERE public_key = ?", (pubkey,)
+                "SELECT last_rx, last_tx FROM vpn_counters WHERE public_key = ?", (counter_key,)
             )
             prev = await cur2.fetchone()
             if prev is None:
                 # Первое наблюдение этого пира: он либо только что выдан
-                # (интерфейс стартует с нуля), либо это первый тик сэмплера
-                # после его появления — в обоих случаях верная база 0.
+                # (счётчики сервера стартуют с нуля), либо это первый тик
+                # сэмплера после его появления — в обоих случаях база 0.
                 delta = total
             else:
                 prev_total = prev["last_rx"] + prev["last_tx"]
@@ -936,22 +1121,29 @@ class VpnService:
                     (row["id"], month, delta),
                 )
                 touched_chats.add(row["chat_id"])
+                if transport == TRANSPORT_REALITY:
+                    # У reality нет отдельного «хендшейка» — «было на связи»
+                    # ведём по факту прироста трафика (как reality/service.py).
+                    await self._db.conn.execute(
+                        "UPDATE vpn_peers SET last_handshake_at = ? WHERE id = ?",
+                        (now.isoformat(), row["id"]),
+                    )
             await self._db.conn.execute(
                 "INSERT INTO vpn_counters (public_key, last_rx, last_tx, updated_at) "
                 "VALUES (?, ?, ?, ?) "
                 "ON CONFLICT(public_key) DO UPDATE SET "
                 "last_rx = excluded.last_rx, last_tx = excluded.last_tx, "
                 "updated_at = excluded.updated_at",
-                (pubkey, rx, tx, now.isoformat()),
+                (counter_key, a, b, now.isoformat()),
             )
-            handshake_ts = handshakes.get(pubkey, 0)
             if handshake_ts:
                 await self._db.conn.execute(
                     "UPDATE vpn_peers SET last_handshake_at = ? WHERE id = ?",
                     (datetime.fromtimestamp(handshake_ts, tz=UTC).isoformat(), row["id"]),
                 )
         await self._db.conn.commit()
-        await self._sample_proxy(month)
+        if self._has(TRANSPORT_AWG):
+            await self._sample_proxy(month)
         for chat_id in touched_chats:
             await self._check_thresholds(chat_id, month)
         await self._check_node_limit(month)
