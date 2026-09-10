@@ -580,6 +580,17 @@ def _vpn_needed(settings: Settings) -> bool:
     return assignments.has_service(settings.node.assignments, "vpn")
 
 
+def _vpn_awg_needed(settings: Settings) -> bool:
+    """Служба vpn с транспортом AmneziaWG на этой ноде — только тогда нужны
+    awg-sudoers и прокси-демоны (mtg/microsocks). Нода с одним лишь
+    транспортом reality (VLESS через xray) их не касается: xray ходит по
+    своему gRPC API без sudo, а прокси Telegram там не разворачивается
+    (подэтап 39.0.x)."""
+    return _vpn_needed(settings) and (
+        vpn_protocol.TRANSPORT_AWG in (settings.vpn.transports or [vpn_protocol.TRANSPORT_AWG])
+    )
+
+
 def awg_sudoers_content(awg_path: str, interface: str, user: str) -> str:
     return (
         f"{user} ALL=(root) NOPASSWD: {awg_path} show *, "
@@ -606,7 +617,7 @@ def make_awg_sudoers_fixup(settings: Settings) -> Fixup:
     return Fixup(
         id="awg-sudoers",
         title="Разрешить управление awg без пароля (sudoers, только show/set peer)",
-        needed=_vpn_needed,
+        needed=_vpn_awg_needed,
         check=_awg_sudoers_check,
         apply=lambda: _awg_sudoers_apply(settings),
     )
@@ -1616,7 +1627,7 @@ def make_proxy_units_fixup(settings: Settings) -> Fixup:
     return Fixup(
         id="proxy-units",
         title="Поднять mtg (MTProto) + microsocks (SOCKS5) на jeeves",
-        needed=_vpn_needed,
+        needed=_vpn_awg_needed,
         check=_proxy_units_check,
         apply=lambda: _proxy_units_apply(settings),
     )
@@ -1848,7 +1859,7 @@ def make_proxy_firewall_fixup(settings: Settings) -> Fixup:
     return Fixup(
         id="proxy-firewall",
         title="Счётчики трафика прокси в firewall (точечно, без полного reload)",
-        needed=_vpn_needed,
+        needed=_vpn_awg_needed,
         check=_proxy_firewall_check,
         apply=lambda: _proxy_firewall_apply(settings),
     )

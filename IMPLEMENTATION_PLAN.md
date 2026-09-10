@@ -2328,9 +2328,20 @@ server, target)` (`domain/vpn_check.py::reconcile_vpn_check`,
     разных под одной квотой). Удаляются `reality/{app,protocol,service}.py`,
     `RealityConfig`, `ServiceSpec("reality")`, `--service reality`, таблицы
     `reality_*`; остаются helper-модули `reality/{xray,client_config,
-    routing}.py`. Полный план (3 коммита) — `functional-imagining-otter.md`.
+    routing}.py`. Полный план — `functional-imagining-otter.md`.
+    **Мёрж выполнен в коде (`stage39-reality`, 2026-09-10):**
+    коммит 1 `refactor(vpn): reality — второй транспорт` (схема +
+    `vpn_peers.transport`, миграция, `VpnConfig.transports` +
+    `RealityTransportConfig`, `VpnService` с `XrayBackend`, удаление
+    `reality/{app,protocol,service}.py`, тесты `test_vpn_service.py` +13);
+    коммит 2 `feat(vpn): выбор транспорта в /vpn` (пикер технологии,
+    `_send_secret` для sing-box/Hiddify, `PendingVpnSecret` +
+    share_url/deep_link, `tool_vpn` transport, `test_vpn_handler.py` +5);
+    коммит 3 — деплой-гейтинг фиксапов (`_vpn_awg_needed`) + docs.
     **Не задеплоено** — reconcile при старте снял бы ручных тестовых
     клиентов Фазы A; деплой после её завершения (стабильность > суток).
+    Деплой wooster: служба `vpn` с `[vpn].transports=["reality"]` +
+    `[vpn.reality]`-блок, `node_limit_gb=3000`, `xray` уже стоит руками.
 - ⬜ **39.0.5 (следующее)** — UI выбора локации в `/vpn` + фанаут/merge
   списка и usage по живым `vpn` (см. «Осознанно НЕ здесь» выше). Теперь
   разблокировано: есть живой второй сервер.
