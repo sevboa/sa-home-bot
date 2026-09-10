@@ -2338,10 +2338,27 @@ server, target)` (`domain/vpn_check.py::reconcile_vpn_check`,
     `_send_secret` для sing-box/Hiddify, `PendingVpnSecret` +
     share_url/deep_link, `tool_vpn` transport, `test_vpn_handler.py` +5);
     коммит 3 — деплой-гейтинг фиксапов (`_vpn_awg_needed`) + docs.
-    **Не задеплоено** — reconcile при старте снял бы ручных тестовых
-    клиентов Фазы A; деплой после её завершения (стабильность > суток).
-    Деплой wooster: служба `vpn` с `[vpn].transports=["reality"]` +
-    `[vpn.reality]`-блок, `node_limit_gb=3000`, `xray` уже стоит руками.
+    **✅ ЗАДЕПЛОЕНО 2026-09-10 (v0.102.1, master):** мёрж `stage39-reality`
+    → `master` (v0.102.0), `nodectl update`+`restart_node` на alfred +
+    wooster. На wooster в `[vpn]`: `transports=["reality"]` + `[vpn.reality]`
+    (endpoint_host/port 8443/pubkey/sid/sni `www.google.com`/flow/api
+    `127.0.0.1:10085`/tag `reality-in`), бэкап конфига
+    `config.toml.bak-pre-reality-*`. `reconcile()` при старте снял 4 ручных
+    xray-клиента Фазы A (`phone-test`/`guest-348284076`/`guest-7136623771`/
+    `sevboa`) — **гости перевыпускают конфиг через `/vpn` в боте**.
+    **Хотфикс v0.102.1:** `RealXrayBackend.add_client` слал в `xray api adu`
+    сниппет без `port` и `settings.decryption="none"` — xray 26.3.x
+    отвергал сборку InboundDetour, но `adu` выходил с кодом 0 («Added 0
+    user(s)») → гость получал конфиг с несуществующим в xray UUID
+    (smoke-тест: `TLS unexpected eof`). Сниппет теперь несёт `port` (из
+    `[vpn.reality].port`, прокинут в `__init__`) + `decryption:"none"`;
+    `add_client` бросает `ProtoError` на «Added 0 user(s)». Тест
+    `tests/unit/test_reality_xray.py`. Проверено на wooster: `issue` →
+    клиент реально в inbound (`inbounduser -tag` показывает), локальный
+    туннель через Reality работает, `revoke`/`rmu` штатно.
+    **Осталось:** гостевой перевыпуск; awg-пир `Sedum` (chat 188548043) на
+    wooster осиротел — awg-транспорта там больше нет, при случае revoke;
+    arch-t480 на v0.101.1 (только `monitor`, обновить не срочно).
 - ⬜ **39.0.5 (следующее)** — UI выбора локации в `/vpn` + фанаут/merge
   списка и usage по живым `vpn` (см. «Осознанно НЕ здесь» выше). Теперь
   разблокировано: есть живой второй сервер.
