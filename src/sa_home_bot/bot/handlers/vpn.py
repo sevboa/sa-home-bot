@@ -364,7 +364,18 @@ def _hiddify_links_text(config: Settings) -> str:
         f'🍎 App Store: <a href="{html.escape(cfg.hiddify_ios_app_store_url)}">Hiddify</a>\n'
         f'🤖 Google Play: <a href="{html.escape(cfg.hiddify_google_play_url)}">Hiddify</a>\n'
         f"🖥 Windows / macOS / Linux / APK: {html.escape(cfg.hiddify_releases_url)}\n"
-        f"🌐 Официальный сайт: {html.escape(cfg.hiddify_site_url)}"
+        f"🌐 Официальный сайт: {html.escape(cfg.hiddify_site_url)}\n\n"
+        "📋 <b>Как подключиться:</b>\n"
+        "1. Установите приложение по одной из ссылок выше.\n"
+        "2. В /vpn нажмите «➕ Новое устройство».\n"
+        "3. Придёт файл настроек (JSON) — импортируйте его: Hiddify → ⚙️ → "
+        "«⋮» (три точки справа вверху) → «Импорт» → «Импортировать настройки "
+        "из файла» → выберите скачанный файл. Это только маршруты/DNS, само "
+        "подключение здесь ещё не появится.\n"
+        "4. Следом придёт ссылка «vless://» — скопируйте её, вернитесь на "
+        "главный экран Hiddify → «+» (справа вверху) → «Буфер обмена». "
+        "Профиль подключения появится в списке.\n"
+        "5. Нажмите на профиль — «Нажмите для подключения»."
     )
 
 
