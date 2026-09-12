@@ -535,16 +535,22 @@ def _reality_filename(device_label: str) -> str:
 
 def _reality_file_caption(label_escaped: str) -> str:
     return (
-        f"🔐 Конфиг «{label_escaped}» (VLESS).\n"
-        "Hiddify → «+» (Новый профиль) → «Из файла» → выберите этот файл, "
-        "затем «Подключить». Маршрутизация РФ уже внутри файла."
+        f"⚙️ Настройки маршрутизации «{label_escaped}» (VLESS) — файл.\n"
+        "Hiddify → «+» → «Из файла» → выберите этот файл, «Импортировать». "
+        "Это НЕ подключение, а РФ-маршруты/DNS — импортируйте один раз при "
+        "первой установке приложения на устройстве. Само подключение "
+        "добавьте отдельно — ссылкой или QR ниже, без этого шага профиля "
+        "не будет."
     )
 
 
 def _reality_qr_caption(label_escaped: str) -> str:
     return (
-        f"📶 QR — «{label_escaped}» (VLESS). Hiddify → «+» → «Сканировать QR» "
-        "(удобно для настройки с ДРУГОГО устройства)."
+        f"📶 QR — «{label_escaped}» (VLESS), подключение. Hiddify → «+» → "
+        "«Сканировать QR» (удобно для настройки с ДРУГОГО устройства). "
+        "Если на этом устройстве Hiddify ставится впервые — один раз "
+        "импортируйте ещё и файл настроек маршрутизации (см. предыдущие "
+        "сообщения/ссылку ниже)."
     )
 
 
@@ -567,8 +573,10 @@ def _secret_qr_caption(transport: str, label_escaped: str) -> str:
 
 
 def _reality_links_note(result_or_secret: dict | PendingVpnSecret) -> str:
-    """Строка сообщения с deep-link и vless://-ссылкой (только reality) —
-    tap-to-copy, дополняет основной способ (файл/QR)."""
+    """Строка сообщения с deep-link и vless://-ссылкой (только reality) — это
+    и есть само подключение (tap-to-copy); файл/QR из _reality_file_caption —
+    только РФ-маршруты/DNS, нужны один раз при первой установке приложения на
+    устройстве, подключение они не создают."""
     if isinstance(result_or_secret, PendingVpnSecret):
         deep_link, share_url = result_or_secret.deep_link, result_or_secret.share_url
     else:
@@ -579,7 +587,9 @@ def _reality_links_note(result_or_secret: dict | PendingVpnSecret) -> str:
         parts.append(f"🔗 Импорт одним нажатием: <code>{html.escape(str(deep_link))}</code>")
     if share_url:
         parts.append(f"Ссылка: <code>{html.escape(str(share_url))}</code>")
-    return ("\n\n" + "\n".join(parts)) if parts else ""
+    if not parts:
+        return ""
+    return "\n\n📲 Это и есть подключение (нужно для каждого устройства):\n" + "\n".join(parts)
 
 
 async def _send_secret(
