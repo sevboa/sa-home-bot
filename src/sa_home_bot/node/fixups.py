@@ -25,12 +25,12 @@ from getpass import getuser
 from pathlib import Path
 
 from sa_home_bot import wol
+from sa_home_bot.bot import vpn_nodes
 from sa_home_bot.config import AppConfig, Settings
 from sa_home_bot.node import assignments
 from sa_home_bot.node import kind as node_kinds
 from sa_home_bot.proto.client import ProtoClient
 from sa_home_bot.proto.endpoints import resolve_endpoint
-from sa_home_bot.proto.messages import Address
 from sa_home_bot.sensors.disks import SMARTCTL_REQUIREMENT
 from sa_home_bot.utils.requirements import install_argv
 from sa_home_bot.vpn import protocol as vpn_protocol
@@ -800,24 +800,30 @@ def vpn_probe_sudoers_content(ip_path: str, netns: str, user: str) -> str:
 
 
 async def _fetch_probe_config(settings: Settings) -> str:
-    """Выпросить конфиг пробника у vpn@jeeves — тонкий разовый ProtoClient к
-    своей же локальной ноде, та маршрутизирует дальше (см.
-    node/peers.py::NodeRouter.route), тем же путём, каким ходит nodectl."""
+    """Выпросить конфиг пробника у живого VPN-сервера — тонкий разовый
+    ProtoClient к своей же локальной ноде, та маршрутизирует дальше (см.
+    node/peers.py::NodeRouter.route), тем же путём, каким ходит nodectl.
+
+    Сервер ищется по рою (``bot/vpn_nodes``), а не берётся хардкодом: с этапа
+    39 их несколько, и привязка к jeeves ломала fix, пока тот лежал."""
     endpoint = resolve_endpoint(settings.node.socket)
     client = ProtoClient(endpoint, token=settings.swarm.token)
     try:
         await client.connect()
+        dst = await vpn_nodes.resolve_vpn_dst(client)
+        if dst is None:
+            raise FixupError("VPN сейчас не держит ни одна нода — конфиг пробника взять негде")
         result = await client.command(
             vpn_protocol.ACTION_ISSUE,
             {"chat_id": VPN_PROBE_CHAT_ID},
-            dst=Address(node=vpn_protocol.NODE_ID, service=vpn_protocol.SERVICE_NAME),
+            dst=dst,
             timeout=20.0,
         )
     finally:
         await client.close()
     config_text = result.get("config_text")
     if not config_text:
-        raise FixupError("vpn@jeeves не вернул config_text")
+        raise FixupError(f"vpn@{dst.node} не вернул config_text")
     return str(config_text)
 
 

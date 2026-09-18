@@ -24,8 +24,20 @@ class _FakeProc:
 
 
 class _FakeNodeLink:
+    # Своя нода держит vpn — отчёт пробника уходит ей же (адресата ищет
+    # vpn_nodes.resolve_vpn_dst, хардкода на jeeves больше нет).
+    state: dict = {
+        "node": "wooster",
+        "kind": "vps",
+        "peers": [],
+        "services": [{"name": "vpn", "service": "vpn", "status": "running"}],
+    }
+
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
+
+    async def get_state(self, dst=None):
+        return self.state
 
     async def command(self, action, args=None, dst=None, *, timeout=None):
         self.calls.append({"action": action, "args": args, "dst": dst, "timeout": timeout})
@@ -104,6 +116,23 @@ async def test_check_without_targets_is_bad_request():
 async def test_unknown_action_raises_value_error():
     with pytest.raises(ValueError):
         await VpnCheckService(_settings(), _FakeNodeLink()).run_command("fetch", {})
+
+
+async def test_report_goes_to_live_vpn_node_not_hardcoded_jeeves(monkeypatch):
+    """Регрессия 2026-09: адресат брался из vpn_protocol.NODE_ID ("jeeves"),
+    и пока тот лежал, проверки всего роя молча выбрасывались."""
+    _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
+    node_link = _FakeNodeLink()
+    await VpnCheckService(_settings(), node_link)._run_and_report(["https://1.1.1.1"])
+    assert node_link.calls[0]["dst"].node == "wooster"
+
+
+async def test_report_is_dropped_when_no_vpn_in_swarm(monkeypatch):
+    _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
+    node_link = _FakeNodeLink()
+    node_link.state = {"node": "alfred", "peers": [], "services": []}
+    await VpnCheckService(_settings(), node_link)._run_and_report(["https://1.1.1.1"])
+    assert node_link.calls == []  # некому слать — и не пытаемся
 
 
 async def test_run_and_report_pushes_ok_result(monkeypatch):

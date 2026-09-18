@@ -96,6 +96,43 @@ async def test_proxy_link_requires_public_host(tmp_path):
     await db.close()
 
 
+async def test_proxy_declared_on_reality_only_node(tmp_path):
+    """Прокси живёт на VPS сам по себе: reality-only нода (wooster) всё равно
+    объявляет его умения, если mtg настроен. Раньше гейт шёл по awg — и кнопка
+    пропадала из бота вместе с переводом ноды на reality."""
+    db = Database(tmp_path / "vpn.sqlite")
+    await db.open()
+    await apply_migrations(db)
+
+    async def emit(event_type: str, data: dict) -> None:
+        pass
+
+    cfg = VpnConfig(transports=["reality"], mtg_public_host="203.0.113.9")
+    svc = VpnService(Settings(vpn=cfg), db, DummyAwg(), emit, proxy_backend=FakeProxyBackend())
+    caps = svc.describe().capabilities
+    assert vpn_protocol.ACTION_PROXY_LINK in caps
+    # Проверки сети тоже не про awg: служба лишь копит отчёты пробников,
+    # туннель поднимает vpn_check. А вот APK без awg раздавать нечего.
+    assert vpn_protocol.ACTION_CHECK_STATUS in caps
+    assert vpn_protocol.ACTION_APK_INFO not in caps
+    await db.close()
+
+
+async def test_proxy_not_declared_without_mtg_host(tmp_path):
+    db = Database(tmp_path / "vpn.sqlite")
+    await db.open()
+    await apply_migrations(db)
+
+    async def emit(event_type: str, data: dict) -> None:
+        pass
+
+    svc = VpnService(
+        Settings(vpn=VpnConfig()), db, DummyAwg(), emit, proxy_backend=FakeProxyBackend()
+    )
+    assert vpn_protocol.ACTION_PROXY_LINK not in svc.describe().capabilities
+    await db.close()
+
+
 async def test_proxy_link_seeds_and_reuses_secret(env):
     svc, _proxy, _events = env
     first = await svc.run_command(vpn_protocol.ACTION_PROXY_LINK, {})

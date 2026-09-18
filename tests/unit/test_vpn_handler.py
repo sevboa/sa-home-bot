@@ -8,6 +8,7 @@ import asyncio
 import pytest_asyncio
 
 from sa_home_bot.bot.handlers import vpn as vpn_handlers
+from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings, VpnConfig
 from sa_home_bot.proto.messages import ProtoError
@@ -35,6 +36,7 @@ class FakeMessage:
         self.answers: list[str] = []
         self.answer_markups: list[object] = []
         self.edits: list[str] = []
+        self.edit_markups: list[object] = []
         self.message_thread_id: int | None = None
         self.reply_markup_cleared = False
 
@@ -42,8 +44,9 @@ class FakeMessage:
         self.answers.append(text)
         self.answer_markups.append(reply_markup)
 
-    async def edit_text(self, text, **kwargs):
+    async def edit_text(self, text, reply_markup=None, **kwargs):
         self.edits.append(text)
+        self.edit_markups.append(reply_markup)
 
     async def edit_reply_markup(self, reply_markup=None, **kwargs):
         if reply_markup is None:
@@ -178,9 +181,23 @@ async def test_revoke_without_label_is_noop():
     assert callback.answered
 
 
+def _server(**over) -> dict:
+    """Один ответ usage@vpn — как его отдаёт живой сервер роя."""
+    return {
+        "node": "jeeves",
+        "label": "",
+        "used_bytes": 0,
+        "limit_bytes": 500 * 10**9,
+        "remaining_bytes": 500 * 10**9,
+        "devices": [],
+        "transports": ["awg"],
+        "proxy_available": True,
+    } | over
+
+
 async def test_card_keyboard_offers_revoke_button_per_device():
     keyboard = vpn_handlers._card_keyboard(
-        [{"device_label": "Rose"}], is_admin=False, can_self_serve=False, transports=["awg"]
+        [_server(devices=[{"device_label": "Rose"}])], is_admin=False, self_serve_nodes=[]
     )
     device_row = keyboard.inline_keyboard[1]
     texts = [button.text for button in device_row]
@@ -188,18 +205,28 @@ async def test_card_keyboard_offers_revoke_button_per_device():
     assert any("Перевыпустить" in text for text in texts)
 
 
-async def test_card_keyboard_hides_proxy_and_check_for_reality_only_node():
-    kb_awg = vpn_handlers._card_keyboard(
-        [], is_admin=True, can_self_serve=False, transports=["awg"]
+async def test_card_keyboard_shows_proxy_on_reality_only_node_with_proxy():
+    """Прокси Telegram живёт на VPS сам по себе: на reality-only ноде он есть
+    (wooster, 2026-09-06), а вот проверка сети без awg-туннеля невозможна."""
+    keyboard = vpn_handlers._card_keyboard(
+        [_server(transports=["reality"], proxy_available=True)],
+        is_admin=True,
+        self_serve_nodes=[],
     )
-    kb_reality = vpn_handlers._card_keyboard(
-        [], is_admin=True, can_self_serve=False, transports=["reality"]
+    flat = " ".join(b.text for row in keyboard.inline_keyboard for b in row)
+    assert "Прокси Telegram" in flat
+    assert "Проверка сети" not in flat
+    assert "Все гости" in flat
+
+
+async def test_card_keyboard_hides_proxy_when_not_configured():
+    keyboard = vpn_handlers._card_keyboard(
+        [_server(transports=["reality"], proxy_available=False)],
+        is_admin=True,
+        self_serve_nodes=[],
     )
-    flat_awg = " ".join(b.text for row in kb_awg.inline_keyboard for b in row)
-    flat_reality = " ".join(b.text for row in kb_reality.inline_keyboard for b in row)
-    assert "Прокси Telegram" in flat_awg and "Проверка сети" in flat_awg
-    assert "Прокси Telegram" not in flat_reality and "Проверка сети" not in flat_reality
-    assert "Все гости" in flat_reality  # админская сводка остаётся
+    flat = " ".join(b.text for row in keyboard.inline_keyboard for b in row)
+    assert "Прокси Telegram" not in flat
 
 
 class MultiVpnLink(FakeNodeLink):
@@ -214,16 +241,157 @@ class MultiVpnLink(FakeNodeLink):
     }
 
 
+class TwoServersLink(MultiVpnLink):
+    """Два живых VPN-сервера, отвечающих по-разному: jeeves несёт оба
+    транспорта и прокси, wooster — только reality. dst.service различает
+    опрос ноды (collect_reports, service="node") и опрос службы vpn."""
+
+    vpn_states: dict = {
+        "jeeves": {"label": "🇳🇱 Нидерланды", "transports": ["awg", "reality"]},
+        "wooster": {"label": "🇺🇸 США", "transports": ["reality"]},
+    }
+    usages: dict = {
+        "jeeves": {
+            "node": "jeeves",
+            "label": "🇳🇱 Нидерланды",
+            "used_bytes": 12 * 10**9,
+            "limit_bytes": 500 * 10**9,
+            "remaining_bytes": 488 * 10**9,
+            "devices": [{"device_label": "Ромашка", "transport": "awg", "server": "jeeves"}],
+            "transports": ["awg", "reality"],
+            "proxy_available": True,
+        },
+        "wooster": {
+            "node": "wooster",
+            "label": "🇺🇸 США",
+            "used_bytes": 3 * 10**9,
+            "limit_bytes": 500 * 10**9,
+            "remaining_bytes": 497 * 10**9,
+            "devices": [{"device_label": "Лютик", "transport": "reality", "server": "wooster"}],
+            "transports": ["reality"],
+            "proxy_available": True,
+        },
+    }
+    dead: str | None = None  # нода, которая отвечает отказом
+
+    async def get_state(self, dst=None):
+        if dst is not None and getattr(dst, "service", "") == "vpn":
+            if dst.node == self.dead:
+                raise ServiceUnavailableError("нода недоступна")
+            return self.vpn_states[dst.node]
+        return self.state
+
+    async def command(self, action, args=None, dst=None, *, timeout=None):
+        self.calls.append((action, args or {}))
+        self.dsts.append(dst)
+        if dst is not None and dst.node == self.dead:
+            raise ServiceUnavailableError("нода недоступна")
+        if action == vpn_protocol.ACTION_USAGE and dst is not None:
+            return self.usages[dst.node]
+        return self._result
+
+
 async def test_card_keyboard_pins_connection_server_into_callback():
     keyboard = vpn_handlers._card_keyboard(
-        [{"device_label": "Rose", "server": "wooster"}],
+        [_server(devices=[{"device_label": "Rose", "server": "wooster"}])],
         is_admin=False,
-        can_self_serve=False,
-        transports=["awg"],
+        self_serve_nodes=[],
     )
     reissue, revoke = keyboard.inline_keyboard[1]
     assert reissue.callback_data == "act:vpn:reissue:Rose:wooster"
     assert revoke.callback_data == "act:vpn:revoke:Rose:wooster"
+
+
+async def test_card_merges_devices_from_both_servers():
+    error, servers = await vpn_handlers._card(TwoServersLink(), 777)
+    assert error is None
+    assert [s["node"] for s in servers] == ["jeeves", "wooster"]
+    text = vpn_handlers._usage_text(servers)
+    assert "Ромашка" in text and "Лютик" in text
+    assert "🇳🇱 Нидерланды" in text and "🇺🇸 США" in text
+
+
+async def test_card_keeps_quota_per_server_without_summing():
+    _error, servers = await vpn_handlers._card(TwoServersLink(), 777)
+    text = vpn_handlers._usage_text(servers)
+    # Две раздельные квоты по 500 ГБ, а не одна на 1000 — счёт за трафик у
+    # каждого VPS свой (решение владельца 2026-09-18).
+    assert text.count("/ 500 ГБ") == 2
+    assert "1000 ГБ" not in text
+
+
+async def test_card_survives_dead_second_server():
+    link = TwoServersLink()
+    link.dead = "wooster"
+    error, servers = await vpn_handlers._card(link, 777)
+    assert error is None
+    assert [s["node"] for s in servers] == ["jeeves"]
+    assert "Ромашка" in vpn_handlers._usage_text(servers)
+
+
+async def test_grant_extra_button_per_server_near_limit():
+    servers = [
+        _server(node="jeeves", label="🇳🇱 Нидерланды", remaining_bytes=10 * 10**9),
+        _server(node="wooster", label="🇺🇸 США", remaining_bytes=400 * 10**9),
+    ]
+    keyboard = vpn_handlers._card_keyboard(
+        servers, is_admin=False, self_serve_nodes=["jeeves"]
+    )
+    top_row = keyboard.inline_keyboard[0]
+    grant = [b for b in top_row if "100 ГБ" in b.text]
+    assert len(grant) == 1
+    assert "Нидерланды" in grant[0].text
+    assert grant[0].callback_data.endswith(":jeeves")
+
+
+async def test_issue_asks_for_server_when_two_are_alive():
+    link = TwoServersLink()
+    callback = FakeCallback("act:vpn:issue", chat_id=777)
+    await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), GUEST, _pending())
+    assert callback.message.edits and "Где завести" in callback.message.edits[0]
+    buttons = [
+        b
+        for row in callback.message.edit_markups[0].inline_keyboard
+        for b in row
+        if "Назад" not in b.text
+    ]
+    assert [b.text for b in buttons] == ["🇳🇱 Нидерланды", "🇺🇸 США"]
+    assert [b.callback_data for b in buttons] == [
+        "act:vpn:issue::jeeves",
+        "act:vpn:issue::wooster",
+    ]
+    assert [c[0] for c in link.calls] == []  # issue в службу ещё не ушёл
+
+
+async def test_issue_skips_server_picker_when_single_node():
+    link = BothTransportsLink()  # рой из одной ноды
+    callback = FakeCallback("act:vpn:issue", chat_id=777)
+    await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), GUEST, _pending())
+    # Сразу шаг «технология», локацию не спрашиваем — выбирать не из чего.
+    assert "технолог" in callback.message.edits[0].lower()
+
+
+async def test_chosen_server_survives_into_transport_picker():
+    link = TwoServersLink()
+    callback = FakeCallback("act:vpn:issue::jeeves", chat_id=777)
+    await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), GUEST, _pending())
+    assert "технолог" in callback.message.edits[0].lower()
+    picks = [
+        b.callback_data
+        for row in callback.message.edit_markups[0].inline_keyboard
+        for b in row
+        if "Назад" not in b.text
+    ]
+    assert picks == ["act:vpn:issue:t_reality:jeeves", "act:vpn:issue:t_awg:jeeves"]
+
+
+async def test_issue_on_chosen_server_goes_to_that_node():
+    link = TwoServersLink()
+    callback = FakeCallback("act:vpn:issue:t_reality:wooster", chat_id=777)
+    await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), GUEST, _pending())
+    issue = next(c for c in link.calls if c[0] == vpn_protocol.ACTION_ISSUE)
+    assert issue[1]["transport"] == "reality"
+    assert link.dsts[link.calls.index(issue)].node == "wooster"
 
 
 async def test_reissue_button_routes_to_connection_server():
@@ -256,8 +424,8 @@ async def test_card_reports_unavailable_when_no_vpn_in_swarm():
             "services": [{"name": "monitor", "service": "monitor", "status": "running"}],
         }
 
-    error, usage = await vpn_handlers._card(NoVpn(), 777)
-    assert usage is None
+    error, servers = await vpn_handlers._card(NoVpn(), 777)
+    assert servers == []
     assert "недоступна" in error
 
 

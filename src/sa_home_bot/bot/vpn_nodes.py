@@ -9,13 +9,15 @@ AmneziaWG может быть больше одного. Бот перестаё
 Модуль намеренно без импорта aiogram: его тянет и bot/tools.py, а тот —
 служба tasks (см. докстринг wake_core про тот же запрет).
 
-Фанаут/merge по всем локациям (список подключений и usage с двух серверов)
-— это следующий шаг 39.0.5; здесь только выбор ОДНОЙ ноды-адресата:
-предпочтительной (держатель конкретного подключения, ``vpn_peers.server``)
-либо первой живой.
+``resolve_vpn_dst`` выбирает ОДНУ ноду-адресата (держателя конкретного
+подключения, ``vpn_peers.server``, либо первую живую), а ``fanout`` (39.0.5)
+собирает ответы со ВСЕХ живых серверов — карточка ``/vpn`` показывает
+подключения и квоту каждой локации отдельно.
 """
 
 from __future__ import annotations
+
+import asyncio
 
 from sa_home_bot import wake_core
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
@@ -59,3 +61,47 @@ async def resolve_vpn_dst(
         return None
     chosen = server if server in nodes else nodes[0]
     return Address(node=chosen, service=SERVICE_NAME)
+
+
+async def live_vpn_servers(node_link: ServiceLink) -> list[dict]:
+    """``[{node, label, transports}]`` по всем живым VPN-серверам — дёшево
+    (``get_state`` службы), чтобы нарисовать выбор локации перед выдачей."""
+    nodes = await live_vpn_nodes(node_link)
+    if not nodes:
+        return []
+
+    async def _one(node_id: str) -> dict | None:
+        try:
+            state = await node_link.get_state(dst=Address(node=node_id, service=SERVICE_NAME))
+        except (ServiceUnavailableError, ProtoError):
+            return None
+        return {
+            "node": node_id,
+            "label": state.get("label") or "",
+            "transports": state.get("transports") or [],
+        }
+
+    states = await asyncio.gather(*(_one(node_id) for node_id in nodes))
+    return [state for state in states if state is not None]
+
+
+async def fanout(node_link: ServiceLink, action: str, args: dict) -> list[dict]:
+    """Позвать ``action`` на всех живых vpn-нодах, вернуть ответы ответивших.
+
+    Нода, отвалившаяся между опросом живых и самим вызовом, просто выпадает из
+    результата: карточка с одним живым сервером полезнее отказа целиком. Пустой
+    список — VPN в рое не держит никто (или рой недоступен)."""
+    targets = await live_vpn_nodes(node_link)
+    if not targets:
+        return []
+
+    async def _one(node_id: str) -> dict | None:
+        try:
+            return await node_link.command(
+                action, args, dst=Address(node=node_id, service=SERVICE_NAME)
+            )
+        except (ServiceUnavailableError, ProtoError):
+            return None
+
+    results = await asyncio.gather(*(_one(node_id) for node_id in targets))
+    return [result for result in results if result is not None]

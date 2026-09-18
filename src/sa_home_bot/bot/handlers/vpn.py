@@ -88,27 +88,46 @@ def _gb(bytes_: int) -> float:
     return bytes_ / 1_000_000_000
 
 
-def _usage_text(usage: dict) -> str:
-    used = _gb(usage.get("used_bytes", 0))
-    limit = _gb(usage.get("limit_bytes", 0))
-    remaining = _gb(usage.get("remaining_bytes", 0))
-    lines = [f"📶 <b>VPN</b>: {used:.1f} / {limit:.0f} ГБ (осталось {remaining:.1f} ГБ)"]
-    if usage.get("blocked"):
-        lines.append("⛔️ Доступ приостановлен — лимит месяца исчерпан.")
-    devices = usage.get("devices") or []
-    if devices:
-        lines.append("")
-        lines.append("Устройства:")
-        for device in devices:
-            handshake = device.get("last_handshake_at")
-            seen = (
-                f", было на связи {handshake[:16].replace('T', ' ')}"
-                if handshake
-                else ", ещё не подключалось"
-            )
-            transport = device.get("transport")
-            tag = f" · {_TRANSPORT_LABEL.get(transport, transport)}" if transport else ""
-            lines.append(f"• {html.escape(device['device_label'])}{tag}{seen}")
+def _server_label(server: dict) -> str:
+    """Как назвать сервер человеку: «🇳🇱 Нидерланды» из [vpn].location ноды,
+    иначе — её голый id (нода со старым конфигом)."""
+    return server.get("label") or server.get("node") or "сервер"
+
+
+def _device_line(device: dict) -> str:
+    handshake = device.get("last_handshake_at")
+    seen = (
+        f", было на связи {handshake[:16].replace('T', ' ')}"
+        if handshake
+        else ", ещё не подключалось"
+    )
+    transport = device.get("transport")
+    tag = f" · {_TRANSPORT_LABEL.get(transport, transport)}" if transport else ""
+    return f"• {html.escape(device['device_label'])}{tag}{seen}"
+
+
+def _usage_text(servers: list[dict]) -> str:
+    """Карточка расхода. Квота у каждого сервера своя (счёт за трафик у VPS
+    раздельный) — лимиты НЕ суммируются, каждая локация идёт своим блоком."""
+    multi = len(servers) > 1
+    lines: list[str] = ["📶 <b>VPN</b>"] if multi else []
+    for server in servers:
+        used = _gb(server.get("used_bytes", 0))
+        limit = _gb(server.get("limit_bytes", 0))
+        remaining = _gb(server.get("remaining_bytes", 0))
+        quota = f"{used:.1f} / {limit:.0f} ГБ (осталось {remaining:.1f} ГБ)"
+        if multi:
+            lines.append("")
+            lines.append(f"<b>{html.escape(_server_label(server))}</b>: {quota}")
+        else:
+            lines.append(f"📶 <b>VPN</b>: {quota}")
+        if server.get("blocked"):
+            lines.append("⛔️ Доступ приостановлен — лимит месяца исчерпан.")
+        devices = server.get("devices") or []
+        if devices and not multi:
+            lines.append("")
+            lines.append("Устройства:")
+        lines.extend(_device_line(device) for device in devices)
     return "\n".join(lines)
 
 
@@ -139,27 +158,35 @@ def _summary_text(summary: dict) -> str:
 
 
 def _card_keyboard(
-    devices: list[dict],
+    servers: list[dict],
     *,
     is_admin: bool,
-    can_self_serve: bool,
-    transports: list[str],
+    self_serve_nodes: list[str],
 ) -> InlineKeyboardMarkup:
+    multi = len(servers) > 1
+    devices = [device for server in servers for device in (server.get("devices") or [])]
     top_row = [
         InlineKeyboardButton(
             text="📱 Приложение",
             callback_data=commands.action_callback("apk", service=SERVICE),
         ),
     ]
-    if can_self_serve:
-        # Кнопка появляется, только когда самообслуживание реально доступно
-        # (см. vpn/service.py::_grant_extra) — иначе гость с почти полной
-        # квотой жал бы её впустую и получал отказ вместо понятной картины.
+    # Кнопка появляется, только когда самообслуживание реально доступно
+    # (см. vpn/service.py::_grant_extra) — иначе гость с почти полной
+    # квотой жал бы её впустую и получал отказ вместо понятной картины.
+    # Квота у каждого сервера своя, поэтому кнопка — на каждый нуждающийся,
+    # с явным node_id: иначе непонятно, где именно доливать.
+    for server in servers:
+        if server.get("node") not in self_serve_nodes:
+            continue
+        suffix = f" ({_server_label(server)})" if multi else ""
         top_row.insert(
             0,
             InlineKeyboardButton(
-                text="➕ 100 ГБ",
-                callback_data=commands.action_callback("grant_extra", service=SERVICE),
+                text=f"➕ 100 ГБ{suffix}",
+                callback_data=commands.action_callback(
+                    "grant_extra", service=SERVICE, node_id=server.get("node")
+                ),
             ),
         )
     rows: list[list[InlineKeyboardButton]] = [top_row]
@@ -203,25 +230,39 @@ def _card_keyboard(
                 callback_data=commands.action_callback("usage_all", service=SERVICE),
             )
         ]
-        # Проверка сети и прокси Telegram — только у ноды с транспортом awg
-        # (у reality-only ноды нет ни netns-пробника, ни mtg).
-        if vpn_protocol.TRANSPORT_AWG in transports:
+        # Проверка сети — только там, где есть awg: пробник ходит через
+        # awg-туннель в netns (vpn_check/service.py).
+        check_node = next(
+            (
+                server.get("node")
+                for server in servers
+                if vpn_protocol.TRANSPORT_AWG in (server.get("transports") or [])
+            ),
+            None,
+        )
+        if check_node is not None:
             admin_row.append(
                 InlineKeyboardButton(
                     text="🛰 Проверка сети",
                     callback_data=commands.action_callback(
-                        vpn_protocol.ACTION_CHECK_STATUS, service=SERVICE
+                        vpn_protocol.ACTION_CHECK_STATUS, service=SERVICE, node_id=check_node
                     ),
                 )
             )
         rows.append(admin_row)
-        if vpn_protocol.TRANSPORT_AWG in transports:
+        # Прокси Telegram от VPN-транспорта не зависит — он живёт на том же
+        # VPS сам по себе (на wooster поднят при reality-only раскладке).
+        proxy_node = next(
+            (server.get("node") for server in servers if server.get("proxy_available")),
+            None,
+        )
+        if proxy_node is not None:
             rows.append(
                 [
                     InlineKeyboardButton(
                         text="✈️ Прокси Telegram",
                         callback_data=commands.action_callback(
-                            vpn_protocol.ACTION_PROXY_LINK, service=SERVICE
+                            vpn_protocol.ACTION_PROXY_LINK, service=SERVICE, node_id=proxy_node
                         ),
                     ),
                 ]
@@ -390,6 +431,9 @@ def _app_links_text(config: Settings, transports: list[str]) -> str:
     return "\n\n".join(blocks)
 
 
+# Шаг 1 выдачи — только когда живых серверов несколько (этап 39.0.5).
+_PICK_SERVER_TEXT = "Где завести новое устройство?"
+
 # Выбор технологии перед выдачей нового устройства — только когда нода несёт
 # оба транспорта. Порядок: VLESS первым (нужен гостям в РФ).
 _PICK_TRANSPORT_TEXT = (
@@ -400,7 +444,34 @@ _PICK_TRANSPORT_TEXT = (
 )
 
 
-def _transport_picker_keyboard(transports: list[str]) -> InlineKeyboardMarkup:
+def _server_picker_keyboard(servers: list[dict]) -> InlineKeyboardMarkup:
+    """Шаг 1 выдачи: где завести устройство. Выбранный сервер уезжает в
+    node_id callback'а — дальше его подхватывает _need_dst()."""
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=_server_label(server),
+                callback_data=commands.action_callback(
+                    vpn_protocol.ACTION_ISSUE, service=SERVICE, node_id=server["node"]
+                ),
+            )
+        ]
+        for server in servers
+    ]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=commands.action_callback(_ACTION_VPN_CARD, service=SERVICE),
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _transport_picker_keyboard(
+    transports: list[str], node_id: str | None = None
+) -> InlineKeyboardMarkup:
     order = [vpn_protocol.TRANSPORT_REALITY, vpn_protocol.TRANSPORT_AWG]
     rows: list[list[InlineKeyboardButton]] = []
     for transport in order:
@@ -415,6 +486,7 @@ def _transport_picker_keyboard(transports: list[str]) -> InlineKeyboardMarkup:
                         vpn_protocol.ACTION_ISSUE,
                         f"{_TRANSPORT_PICK_PREFIX}{transport}",
                         service=SERVICE,
+                        node_id=node_id,
                     ),
                 )
             ]
@@ -441,28 +513,30 @@ async def usage_text(node_link: ServiceLink, chat_id: int) -> str:
     та же служба и то же действие usage@vpn, что и у команды /vpn, только для
     чужого chat_id — админ имеет право знать расход того, кем управляет.
     """
-    error, usage = await _card(node_link, chat_id)
-    return error if error is not None else _usage_text(usage)
+    error, servers = await _card(node_link, chat_id)
+    return error if error is not None else _usage_text(servers)
 
 
-async def _card(node_link: ServiceLink, chat_id: int) -> tuple[str, dict] | tuple[None, None]:
-    dst = await vpn_nodes.resolve_vpn_dst(node_link)
-    if dst is None:
-        return _VPN_UNAVAILABLE, None
-    try:
-        usage = await node_link.command(
-            vpn_protocol.ACTION_USAGE, {"chat_id": chat_id}, dst=dst
-        )
-    except ServiceUnavailableError:
-        return _VPN_UNAVAILABLE, None
-    except ProtoError as exc:
-        return f"⚠️ Ошибка: {exc.message}", None
-    return None, usage
+async def _card(
+    node_link: ServiceLink, chat_id: int
+) -> tuple[str, list[dict]] | tuple[None, list[dict]]:
+    """Расход гостя со ВСЕХ живых VPN-серверов. Мёртвая нода просто выпадает
+    из списка (vpn_nodes.fanout) — карточка с одной локацией полезнее отказа."""
+    servers = await vpn_nodes.fanout(node_link, vpn_protocol.ACTION_USAGE, {"chat_id": chat_id})
+    if not servers:
+        return _VPN_UNAVAILABLE, []
+    return None, servers
 
 
-def _can_self_serve(usage: dict, config: Settings) -> bool:
+def _self_serve_nodes(servers: list[dict], config: Settings) -> list[str]:
+    """Ноды, где гость уже у порога своей квоты — там и предлагаем «+100 ГБ».
+    Квоты раздельные, поэтому проверяем каждый сервер сам по себе."""
     threshold = config.vpn.warn_remaining_gb * 1_000_000_000
-    return usage.get("remaining_bytes", 0) <= threshold
+    return [
+        server["node"]
+        for server in servers
+        if server.get("node") and server.get("remaining_bytes", 0) <= threshold
+    ]
 
 
 @router.message(Command(commands.VPN.name))
@@ -472,34 +546,32 @@ async def cmd_vpn(
     config: Settings,
     subscription: Subscription | None = None,
 ) -> None:
-    error, usage = await _card(node_link, message.chat.id)
+    error, servers = await _card(node_link, message.chat.id)
     if error is not None:
         await message.answer(error)
         return
     is_admin = subscription is not None and _is_admin(subscription)
     keyboard = _card_keyboard(
-        usage.get("devices") or [],
+        servers,
         is_admin=is_admin,
-        can_self_serve=_can_self_serve(usage, config),
-        transports=usage.get("transports") or [],
+        self_serve_nodes=_self_serve_nodes(servers, config),
     )
-    await message.answer(_usage_text(usage), reply_markup=keyboard)
+    await message.answer(_usage_text(servers), reply_markup=keyboard)
 
 
 async def _redraw_card(
     callback: CallbackQuery, node_link: ServiceLink, subscription: Subscription, config: Settings
 ) -> None:
-    error, usage = await _card(node_link, callback.message.chat.id)
+    error, servers = await _card(node_link, callback.message.chat.id)
     if error is not None:
         return
     keyboard = _card_keyboard(
-        usage.get("devices") or [],
+        servers,
         is_admin=_is_admin(subscription),
-        can_self_serve=_can_self_serve(usage, config),
-        transports=usage.get("transports") or [],
+        self_serve_nodes=_self_serve_nodes(servers, config),
     )
     with contextlib.suppress(TelegramBadRequest):
-        await callback.message.edit_text(_usage_text(usage), reply_markup=keyboard)
+        await callback.message.edit_text(_usage_text(servers), reply_markup=keyboard)
 
 
 _UNSAFE_FILENAME = re.compile(r"[^a-z0-9]+")
@@ -854,12 +926,30 @@ async def handle_action(
         if action_id == vpn_protocol.ACTION_REISSUE and not value:
             await callback.answer()
             return
+
+        # Шаг 1 голой выдачи: если живых серверов несколько — сперва спросить
+        # локацию (reissue идёт на ноду своего устройства, ему пикер не нужен).
+        if (
+            action_id == vpn_protocol.ACTION_ISSUE
+            and chosen_transport is None
+            and not value
+            and not node_id
+        ):
+            live = await vpn_nodes.live_vpn_servers(node_link)
+            if len(live) > 1:
+                await callback.answer()
+                with contextlib.suppress(TelegramBadRequest):
+                    await callback.message.edit_text(
+                        _PICK_SERVER_TEXT,
+                        reply_markup=_server_picker_keyboard(live),
+                    )
+                return
+
         dst = await _need_dst()
         if dst is None:
             return
 
-        # Голый issue на ноде с двумя транспортами — сперва показать выбор
-        # технологии (reissue сохраняет транспорт устройства, ему пикер не нужен).
+        # Шаг 2: у выбранной ноды два транспорта — показать выбор технологии.
         if action_id == vpn_protocol.ACTION_ISSUE and chosen_transport is None and not value:
             node_transports: list[str] = []
             with contextlib.suppress(ServiceUnavailableError, ProtoError):
@@ -870,7 +960,7 @@ async def handle_action(
                 with contextlib.suppress(TelegramBadRequest):
                     await callback.message.edit_text(
                         _PICK_TRANSPORT_TEXT,
-                        reply_markup=_transport_picker_keyboard(node_transports),
+                        reply_markup=_transport_picker_keyboard(node_transports, dst.node),
                     )
                 return
 

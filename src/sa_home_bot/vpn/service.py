@@ -340,18 +340,10 @@ class VpnService:
                 ),
             ),
         ]
-        # APK AmneziaWG, прокси Telegram (mtg) и проверки доступности —
-        # только на нодах с транспортом awg (у reality-only ноды нет ни
-        # интерфейса, ни mtg, ни клиента AmneziaWG для раздачи).
+        # APK AmneziaWG — только там, где awg раздают: без него файл клиента
+        # гостю не нужен.
         if self._has(TRANSPORT_AWG):
-            capabilities += [
-                ACTION_APK_INFO,
-                ACTION_CHECK_NOW,
-                ACTION_CHECK_STATUS,
-                ACTION_PROXY_LINK,
-                ACTION_PROXY_ROTATE_SECRET,
-                ACTION_PROXY_USAGE,
-            ]
+            capabilities += [ACTION_APK_INFO]
             actions += [
                 ActionSpec(id=ACTION_APK_INFO, title="📱 Приложение"),
                 ActionSpec(
@@ -369,17 +361,35 @@ class VpnService:
                         ActionParam(name="telegram_file_id", type="string", title="file_id"),
                     ),
                 ),
-                # Служебное — зовёт только сама служба vpn_check, не для UI.
-                ActionSpec(
-                    id=ACTION_REPORT_CHECK,
-                    title="📡 Отчёт проверки VPN",
-                    params=(
-                        ActionParam(name="node", type="string", title="Нода"),
-                        ActionParam(name="results", title="Результаты"),
-                    ),
+            ]
+        # Проверки доступности — на любой ноде со службой vpn: сама служба тут
+        # только принимает и отдаёт строки vpn_check_states, туннель поднимает
+        # пробник (vpn_check). Раньше висело на awg-гейте — и reality-only
+        # нода не могла принять отчёт даже собственного пробника.
+        capabilities += [ACTION_CHECK_NOW, ACTION_CHECK_STATUS]
+        actions += [
+            # Служебное — зовёт только сама служба vpn_check, не для UI.
+            ActionSpec(
+                id=ACTION_REPORT_CHECK,
+                title="📡 Отчёт проверки VPN",
+                params=(
+                    ActionParam(name="node", type="string", title="Нода"),
+                    ActionParam(name="results", title="Результаты"),
                 ),
-                ActionSpec(id=ACTION_CHECK_NOW, title="🛰 Проверить сеть сейчас"),
-                ActionSpec(id=ACTION_CHECK_STATUS, title="🛰 Статус проверок сети"),
+            ),
+            ActionSpec(id=ACTION_CHECK_NOW, title="🛰 Проверить сеть сейчас"),
+            ActionSpec(id=ACTION_CHECK_STATUS, title="🛰 Статус проверок сети"),
+        ]
+        # Прокси Telegram (mtg/microsocks) живёт на VPS сам по себе и от
+        # VPN-транспорта не зависит: на wooster он поднят при reality-only
+        # раскладке (2026-09-06). Гейт — по факту настройки, как и в _proxy_link.
+        if self._cfg.mtg_public_host:
+            capabilities += [
+                ACTION_PROXY_LINK,
+                ACTION_PROXY_ROTATE_SECRET,
+                ACTION_PROXY_USAGE,
+            ]
+            actions += [
                 ActionSpec(id=ACTION_PROXY_LINK, title="🌐 Ссылка прокси"),
                 ActionSpec(id=ACTION_PROXY_ROTATE_SECRET, title="🔁 Сменить секрет прокси"),
                 ActionSpec(id=ACTION_PROXY_USAGE, title="📊 Расход прокси"),
@@ -399,6 +409,7 @@ class VpnService:
             "node": self._node,
             "service": SERVICE_NAME,
             "active_peers": row["n"] if row else 0,
+            "label": self._cfg.location,
             # Транспорты этой ноды — бот по ним решает, предлагать ли выбор
             # (awg/reality) в карточке «➕ Новое устройство».
             "transports": list(self._transports),
@@ -768,6 +779,10 @@ class VpnService:
             return {
                 "chat_id": chat_id,
                 "month": month,
+                "node": self._node,
+                # Как назвать этот сервер человеку в карточке /vpn, когда их
+                # несколько. Пусто — бот покажет голый id ноды.
+                "label": self._cfg.location,
                 "used_bytes": used,
                 "limit_bytes": limit,
                 "remaining_bytes": max(limit - used, 0),
@@ -776,6 +791,7 @@ class VpnService:
                 # Транспорты этой ноды — карточка /vpn по ним решает, показывать
                 # ли выбор технологии при «➕ Новое устройство».
                 "transports": list(self._transports),
+                "proxy_available": bool(self._cfg.mtg_public_host),
             }
         # Сводка для админа — только гости с ДЕЙСТВУЮЩИМ доступом (не
         # отозванным/просроченным): именно они «резервируют» трафик ноды,
@@ -1145,7 +1161,7 @@ class VpnService:
                     (datetime.fromtimestamp(handshake_ts, tz=UTC).isoformat(), row["id"]),
                 )
         await self._db.conn.commit()
-        if self._has(TRANSPORT_AWG):
+        if self._cfg.mtg_public_host:
             await self._sample_proxy(month)
         for chat_id in touched_chats:
             await self._check_thresholds(chat_id, month)

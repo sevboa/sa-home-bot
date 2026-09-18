@@ -146,6 +146,16 @@ async def test_issue_has_no_device_cap(env):
     assert len(result["devices"]) == 5
 
 
+async def test_usage_reports_node_identity_for_multi_server_card(env):
+    """Карточка /vpn собирает ответы с нескольких серверов — каждый должен
+    сказать, кто он и есть ли у него прокси (этап 39.0.5)."""
+    svc, _backend, _events = env
+    usage = await svc.run_command(vpn_protocol.ACTION_USAGE, {"chat_id": CHAT})
+    assert usage["node"] == svc.describe().info.node
+    assert "label" in usage  # пусто в фикстуре — бот подставит id ноды
+    assert usage["proxy_available"] is False  # mtg в фикстуре не настроен
+
+
 async def test_reissue_expires_old_peer_and_keeps_label(env):
     svc, backend, _events = env
     first = await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})

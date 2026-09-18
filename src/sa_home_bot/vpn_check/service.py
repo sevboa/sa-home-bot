@@ -7,10 +7,12 @@
 на jeeves раз в ``[vpn].check_interval_s`` или по ``check_now``). Сама
 проверка идёт в фоне (не блокирует ответ на команду — на несколько целей
 с таймаутами это может занять секунды), а результат служба сама пушит
-обратно в vpn отдельным вызовом: ``node_link.command("report_check", ...,
-dst=Address(node=vpn_protocol.NODE_ID, service=vpn_protocol.SERVICE_NAME))``
-— vpn/service.py не ждёт синхронно ответа на исходный fan-out, только
-копит то, что приходит.
+обратно в vpn отдельным вызовом ``report_check`` — vpn/service.py не ждёт
+синхронно ответа на исходный fan-out, только копит то, что приходит.
+Адресат ищется живым (``bot/vpn_nodes.resolve_vpn_dst``: своя нода, если
+держит vpn, иначе первая живая), а не берётся из ``vpn_protocol.NODE_ID``:
+серверов с этапа 39 несколько, и с хардкодом на jeeves отчёты всего роя
+пропадали, пока тот лежал (2026-09).
 
 Сам туннель — вне этого процесса: отдельный network namespace
 (``settings.vpn_check.netns``), поднятый node/fixups.py::
@@ -34,6 +36,7 @@ import time
 from typing import Any
 
 from sa_home_bot import __version__
+from sa_home_bot.bot import vpn_nodes
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
 from sa_home_bot.node import assignments
@@ -41,13 +44,11 @@ from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     ActionParam,
     ActionSpec,
-    Address,
     ProtoError,
     ServiceDescription,
     ServiceInfo,
 )
 from sa_home_bot.utils.requirements import looks_like_permission_error
-from sa_home_bot.vpn import protocol as vpn_protocol
 from sa_home_bot.vpn_check.protocol import ACTION_CHECK, SERVICE_NAME
 
 log = logging.getLogger(__name__)
@@ -129,10 +130,14 @@ class VpnCheckService:
             else:
                 results[target] = await self._check_one(target)
         try:
+            dst = await vpn_nodes.resolve_vpn_dst(self._node_link)
+            if dst is None:
+                log.warning("vpn_check: результат некуда деть — vpn в рое сейчас не держит никто")
+                return
             await self._node_link.command(
                 "report_check",
                 {"node": self._node, "results": results},
-                dst=Address(node=vpn_protocol.NODE_ID, service=vpn_protocol.SERVICE_NAME),
+                dst=dst,
                 timeout=10.0,
             )
         except (ServiceUnavailableError, ProtoError, TimeoutError) as exc:

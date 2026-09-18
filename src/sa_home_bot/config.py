@@ -696,6 +696,9 @@ class VpnConfig(BaseModel):
     self_ceiling_gb: int = Field(default=1000, ge=0)
     warn_remaining_gb: int = Field(default=100, ge=0)
     node_limit_gb: int = Field(default=10000, ge=0)
+    # Как звать этот сервер в карточке /vpn, когда серверов несколько
+    # («🇳🇱 Нидерланды»). Пусто — бот покажет id ноды.
+    location: str = ""
     sample_interval_s: float = Field(default=180.0, gt=0)
     apk_repo: str = "amnezia-vpn/amneziawg-android"
     apk_cache_dir: Path = Path("./data/vpn-apk")

@@ -9,9 +9,9 @@ tasks/protocol.py.
 Служба выдаёт и учитывает доступ к AmneziaWG на ноде роя с белым IP — см.
 «Этап 33» в IMPLEMENTATION_PLAN.md для дизайна в целом.
 
-Этап 39: серверов может быть несколько (jeeves + wooster). Бот ноду-адресата
-находит динамически по списку служб (bot/vpn_nodes.py) — ``NODE_ID`` он
-больше не использует.
+Этап 39: серверов может быть несколько (jeeves + wooster), поэтому адреса
+ноды-держателя тут нет вовсе — все потоки ищут живую через
+``bot/vpn_nodes.py`` (``resolve_vpn_dst``/``fanout``).
 """
 
 from __future__ import annotations
@@ -27,14 +27,6 @@ SERVICE_NAME = "vpn"
 TRANSPORT_AWG = "awg"  # AmneziaWG (UDP + обфускация) — исходный транспорт
 TRANSPORT_REALITY = "reality"  # VLESS+Reality через xray-core (TCP/443) — для РФ
 TRANSPORTS = (TRANSPORT_AWG, TRANSPORT_REALITY)
-
-# Легаси-адрес «первого» VPN-сервера. Остался у двух внутренних потоков
-# probe/health, которые ещё не разведены по локациям (этап 39.0.7):
-#   - vpn_check/service.py — куда пушить report_check;
-#   - node/fixups.py::_fetch_probe_config — у кого просить конфиг пробника.
-# Бот (bot/) им НЕ пользуется. Убрать вместе с 39.0.7 (per-server пробники,
-# ключ vpn_check_states → (node, server, target)).
-NODE_ID = "jeeves"
 
 # --- Действия ---
 ACTION_PEERS = "peers"  # админ: все пиры всех гостей
