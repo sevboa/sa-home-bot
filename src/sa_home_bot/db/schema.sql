@@ -339,8 +339,16 @@ CREATE TABLE IF NOT EXISTS vpn_requests (
 -- вместо числовой полосы. PK составной: одна нода может проверять
 -- несколько целей (сайтов), гистерезис/мут ведутся отдельно по каждой
 -- паре node+target (domain/vpn_check.py::reconcile_vpn_check).
+-- node — наблюдатель (кто проверял), server — кого проверяли (id ноды-
+-- держателя VPN), transport — каким транспортом (awg/reality). Ключ расширен
+-- этапом 39.0.7 (несколько VPN-серверов и транспортов, 2026-09-18) — было
+-- PRIMARY KEY (node, target), когда сервер и транспорт были всегда одни и
+-- те же (jeeves, awg). См. db/migrations.py — старая форма таблицы не
+-- совместима, пересоздаётся с нуля (оперативные данные проверки, не жалко).
 CREATE TABLE IF NOT EXISTS vpn_check_states (
     node                 TEXT NOT NULL,
+    server               TEXT NOT NULL,
+    transport            TEXT NOT NULL,
     target               TEXT NOT NULL,
     status               TEXT NOT NULL,   -- ok / alerting
     last_ok              INTEGER,
@@ -352,7 +360,7 @@ CREATE TABLE IF NOT EXISTS vpn_check_states (
     last_seen_at         TEXT NOT NULL,
     notified_alert_at    TEXT,
     notified_cleared_at  TEXT,
-    PRIMARY KEY (node, target)
+    PRIMARY KEY (node, server, transport, target)
 );
 
 -- Журнал системных/админских событий роя (node_down/up/leaving/returned/

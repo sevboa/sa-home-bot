@@ -790,6 +790,21 @@ class VpnCheckConfig(BaseModel):
     # пропустить.
     ip_echo_url: str = "https://api.ipify.org"
     check_timeout_s: float = Field(default=8.0, gt=0)
+    # Какой (server, transport) сейчас реально настроен на единственном
+    # локальном тоннеле — этап 39.0.7 (2026-09-18): диспетчер (vpn/service.py)
+    # теперь просит проверить конкретный сервер, и служба обязана знать, тот
+    # ли это сервер, к которому у неё физически поднят туннель — иначе она
+    # бы слепо тестировала ЧЕЙ-ТО туннель и подписывала результат чужим
+    # именем. Пусто — сознательно НЕ настроено: служба ничего не проверяет и
+    # не репортит, пока владелец не впишет вручную (безопасный дефолт —
+    # молчание лучше неверных данных). Автообнаружение (fixup сам пишет,
+    # откуда взял конфиг, служба читает) — отдельный подэтап 39.0.7(d),
+    # намеренно не в этом инкременте: требует правки node/fixups.py
+    # (провижининг живых netns/awg-quick), которую нельзя проверить без
+    # реального root/сети на живых нодах — риск тронуть уже работающий
+    # пробник. См. IMPLEMENTATION_PLAN.md, этап 39.0.7.
+    probe_server: str = ""
+    probe_transport: str = "awg"
 
 
 class WeatherConfig(BaseModel):
@@ -1090,7 +1105,9 @@ def _warn_on_shadowed_sections(config_path: Path, instance_path: Path) -> None:
         log.warning(
             "Конфиг %s: секции %s теперь живут в пакете инстанса %s и берутся оттуда — "
             "перенесите правки туда и удалите их из общего конфига",
-            config_path, ", ".join(f"[{s}]" for s in shadowed), instance_path.name,
+            config_path,
+            ", ".join(f"[{s}]" for s in shadowed),
+            instance_path.name,
         )
 
 
@@ -1239,9 +1256,7 @@ class Settings(BaseSettings):
                 / f"{instance_service}.{instance}{PACKAGE_SUFFIX}"
             )
             if not instance_path.exists():
-                raise FileNotFoundError(
-                    f"Пакет настроек инстанса не найден: {instance_path}"
-                )
+                raise FileNotFoundError(f"Пакет настроек инстанса не найден: {instance_path}")
             # Гостевого пакета может ещё не быть (никого не приглашали) —
             # это не ошибка, в отличие от отсутствия основного.
             guests_path = guests_package_path(instance_path)

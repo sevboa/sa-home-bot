@@ -56,7 +56,12 @@ from sa_home_bot.domain.vpn_check import (
 from sa_home_bot.domain.vpn_check import (
     OK as CHECK_OK,
 )
-from sa_home_bot.domain.vpn_check import CheckResult, KnownCheckState, reconcile_vpn_check
+from sa_home_bot.domain.vpn_check import (
+    CheckResult,
+    KnownCheckState,
+    reconcile_vpn_check,
+    rollup_status,
+)
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     ERR_INTERNAL,
@@ -140,11 +145,36 @@ ACTION_TRIGGER_PEERS = "trigger_peers"
 # имени тоннеля wireguard-android (NAME_PATTERN, см. bot/handlers/vpn.py и
 # bot/tools.py, где имя файла реально собирается).
 _FLOWER_NAMES = (
-    "Rose", "Lily", "Iris", "Aster", "Poppy", "Daisy", "Tulip", "Lotus",
-    "Phlox", "Pansy", "Sedum", "Canna", "Hosta", "Orchid", "Violet",
-    "Dahlia", "Azalea", "Camellia", "Jasmine", "Lilac", "Peony", "Zinnia",
-    "Yarrow", "Crocus", "Freesia", "Begonia", "Petunia", "Gerbera",
-    "Mallow", "Cosmos",
+    "Rose",
+    "Lily",
+    "Iris",
+    "Aster",
+    "Poppy",
+    "Daisy",
+    "Tulip",
+    "Lotus",
+    "Phlox",
+    "Pansy",
+    "Sedum",
+    "Canna",
+    "Hosta",
+    "Orchid",
+    "Violet",
+    "Dahlia",
+    "Azalea",
+    "Camellia",
+    "Jasmine",
+    "Lilac",
+    "Peony",
+    "Zinnia",
+    "Yarrow",
+    "Crocus",
+    "Freesia",
+    "Begonia",
+    "Petunia",
+    "Gerbera",
+    "Mallow",
+    "Cosmos",
 )
 
 
@@ -154,6 +184,7 @@ def _random_device_label(used: set[str]) -> str:
     путал одинаковыми именами; настоящая уникальность пира — public_key)."""
     pool = [name for name in _FLOWER_NAMES if name not in used] or list(_FLOWER_NAMES)
     return random.choice(pool)
+
 
 # Сколько держать ответ apk_info без повторного похода на GitHub — гость,
 # нажавший кнопку дважды подряд, не должен провоцировать два запроса к API.
@@ -307,9 +338,7 @@ class VpnService:
                 title="🔄 Перевыпустить",
                 params=(chat_id_param, device_param),
             ),
-            ActionSpec(
-                id=ACTION_REVOKE, title="🚫 Отозвать", params=(chat_id_param, device_param)
-            ),
+            ActionSpec(id=ACTION_REVOKE, title="🚫 Отозвать", params=(chat_id_param, device_param)),
             ActionSpec(
                 id=ACTION_USAGE,
                 title="📊 Расход",
@@ -358,9 +387,7 @@ class VpnService:
                 ActionSpec(
                     id=ACTION_APK_SET_FILE_ID,
                     title="🆔 Запомнить file_id",
-                    params=(
-                        ActionParam(name="telegram_file_id", type="string", title="file_id"),
-                    ),
+                    params=(ActionParam(name="telegram_file_id", type="string", title="file_id"),),
                 ),
             ]
         # Проверки доступности — на любой ноде со службой vpn: сама служба тут
@@ -977,9 +1004,7 @@ class VpnService:
         if state["warned_limit_bytes"] == limit:
             return
         await self._set_quota_state(NODE_SENTINEL_CHAT_ID, month, warned_limit_bytes=limit)
-        await self._emit(
-            EVENT_VPN_NODE_QUOTA_WARNING, {"used_bytes": total, "limit_bytes": limit}
-        )
+        await self._emit(EVENT_VPN_NODE_QUOTA_WARNING, {"used_bytes": total, "limit_bytes": limit})
 
     # --- прокси (mtg/microsocks на jeeves) ---
     #
@@ -1100,9 +1125,7 @@ class VpnService:
         month = _month_key(now)
         # awg: (rx, tx) с момента поднятия интерфейса + unix-ts хендшейков.
         transfer = await self._backend.transfer() if self._has(TRANSPORT_AWG) else {}
-        handshakes = (
-            await self._backend.latest_handshakes() if self._has(TRANSPORT_AWG) else {}
-        )
+        handshakes = await self._backend.latest_handshakes() if self._has(TRANSPORT_AWG) else {}
         # reality: email → (uplink, downlink) с момента старта xray.
         reality_stats = await self._reality.stats() if self._reality is not None else {}
 
@@ -1197,6 +1220,18 @@ class VpnService:
     # тик (см. её докстринг).
 
     async def _dispatch_checks(self) -> dict[str, Any]:
+        # 39.0.7 (2026-09-18): каждый инстанс vpn просит проверить ТОЛЬКО
+        # себя (``server=self._node``), не общий плоский список целей на
+        # всю матрицу серверов — иначе при N живых серверах дублируется
+        # диспетчеризация N раз за интервал (было так, пока сервер был
+        # один — не бросалось в глаза). Заодно это даёт бесплатный
+        # heartbeat: если этот инстанс vpn целиком упал, его check_loop не
+        # бежит, и «проверьте меня» просто не уходит — лишних попыток
+        # дёргать мёртвую цель нет. Смерть хоста как таковая не теряется:
+        # её отдельно и мгновенно видно через live_vpn_nodes()/monitor —
+        # vpn_check отвечает за более узкий вопрос («сервер жив на уровне
+        # роя, но реально ли через него идёт трафик именно этого
+        # транспорта именно оттуда»), не за то же самое дважды.
         if self._node_link is None:
             log.warning("vpn: node_link не настроен — проверки доступности не разосланы")
             return {"dispatched_to": [], "unreachable": [], "skipped": []}
@@ -1206,7 +1241,7 @@ class VpnService:
                 {
                     "service": vpn_check_protocol.SERVICE_NAME,
                     "action": vpn_check_protocol.ACTION_CHECK,
-                    "args": {"targets": list(self._cfg.check_targets)},
+                    "args": {"server": self._node, "targets": list(self._cfg.check_targets)},
                     "timeout_s": self._cfg.check_dispatch_timeout_s,
                 },
                 dst=Address(node=self._node, service=NODE_SERVICE),
@@ -1232,28 +1267,49 @@ class VpnService:
     async def _report_check(self, args: dict[str, Any]) -> dict[str, Any]:
         node = str(args.get("node", "")).strip()
         results = args.get("results")
-        if not node or not isinstance(results, dict) or not results:
-            raise ProtoError(ERR_BAD_REQUEST, "нужны node и непустой results")
+        if not node or not isinstance(results, list) or not results:
+            raise ProtoError(ERR_BAD_REQUEST, "нужны node и непустой список results")
         now = _now()
-        for target, raw in results.items():
+        for raw in results:
             if not isinstance(raw, dict):
+                continue
+            server = str(raw.get("server", "")).strip()
+            transport = str(raw.get("transport", "")).strip()
+            target = raw.get("target")
+            if not server or not transport or not target:
                 continue
             ms_raw = raw.get("ms")
             ms = int(ms_raw) if isinstance(ms_raw, int | float) else None
             error_raw = raw.get("error")
             await self._apply_check_result(
                 node,
+                server,
+                transport,
                 str(target),
                 bool(raw.get("ok")),
                 ms,
                 str(error_raw) if error_raw else None,
                 now,
             )
+        # Пробник сам фанаутит report_check на все живые vpn-инстансы (не
+        # только на одну ноду через resolve_vpn_dst) — см.
+        # vpn_check/service.py::_run_and_report. Эта служба здесь просто
+        # применяет то, что до неё долетело; повторного вещания дальше не
+        # делает (иначе легко словить каскад). Из-за этого каждый инстанс
+        # прогоняет reconcile_vpn_check по СВОЕЙ копии данных, независимо —
+        # если один инстанс на миг пропустил отчёт (был недоступен),
+        # его гистерезис-счётчик может на 1-2 тика разойтись с другими;
+        # самовыравнивается за пару циклов. Ценой этого может задвоиться
+        # событие EVENT_VPN_CHECK_FAILED/RECOVERED (два инстанса перейдут
+        # порог не в один и тот же тик) — принято осознанно: дешевле, чем
+        # городить координацию «кто один имеет право эмитить».
         return {"accepted": True}
 
     async def _apply_check_result(
         self,
         node: str,
+        server: str,
+        transport: str,
         target: str,
         ok: bool,
         latency_ms: int | None,
@@ -1263,8 +1319,8 @@ class VpnService:
         cur = await self._db.conn.execute(
             "SELECT status, consecutive_count, alerting_since, first_seen_at, "
             "notified_alert_at, notified_cleared_at FROM vpn_check_states "
-            "WHERE node = ? AND target = ?",
-            (node, target),
+            "WHERE node = ? AND server = ? AND transport = ? AND target = ?",
+            (node, server, transport, target),
         )
         row = await cur.fetchone()
         known = None
@@ -1284,7 +1340,15 @@ class VpnService:
             notified_cleared_at = row["notified_cleared_at"]
             first_seen_at = row["first_seen_at"]
 
-        result = CheckResult(node=node, target=target, ok=ok, latency_ms=latency_ms, error=error)
+        result = CheckResult(
+            node=node,
+            server=server,
+            transport=transport,
+            target=target,
+            ok=ok,
+            latency_ms=latency_ms,
+            error=error,
+        )
         state, transition = reconcile_vpn_check(
             result,
             known,
@@ -1299,11 +1363,11 @@ class VpnService:
 
         await self._db.conn.execute(
             "INSERT INTO vpn_check_states ("
-            "node, target, status, last_ok, last_latency_ms, last_error, "
+            "node, server, transport, target, status, last_ok, last_latency_ms, last_error, "
             "consecutive_count, alerting_since, first_seen_at, last_seen_at, "
             "notified_alert_at, notified_cleared_at"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(node, target) DO UPDATE SET "
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(node, server, transport, target) DO UPDATE SET "
             "status = excluded.status, last_ok = excluded.last_ok, "
             "last_latency_ms = excluded.last_latency_ms, last_error = excluded.last_error, "
             "consecutive_count = excluded.consecutive_count, "
@@ -1312,6 +1376,8 @@ class VpnService:
             "notified_cleared_at = excluded.notified_cleared_at",
             (
                 node,
+                server,
+                transport,
                 target,
                 state.status,
                 int(state.last_ok),
@@ -1332,37 +1398,55 @@ class VpnService:
                 EVENT_VPN_CHECK_FAILED,
                 {
                     "node": node,
+                    "server": server,
+                    "transport": transport,
                     "target": target,
                     "consecutive": self._cfg.check_fail_threshold,
                     "error": error,
                 },
             )
         elif transition is not None and transition.to_status == CHECK_OK:
-            await self._emit(EVENT_VPN_CHECK_RECOVERED, {"node": node, "target": target})
+            await self._emit(
+                EVENT_VPN_CHECK_RECOVERED,
+                {"node": node, "server": server, "transport": transport, "target": target},
+            )
 
     async def _check_status(self) -> dict[str, Any]:
+        # Не фанаутим на чтение: запись уже фанаутится на все живые
+        # vpn-инстансы (vpn_check/service.py::_run_and_report), так что
+        # любой живой инстанс, включая этот, уже держит (почти) полную
+        # картину сам по себе — второй фанаут на чтение был бы двойной
+        # работой ради того же результата. См. 39.0.7 в IMPLEMENTATION_PLAN.md.
         cur = await self._db.conn.execute(
-            "SELECT node, target, status, last_ok, last_latency_ms, last_error, "
-            "consecutive_count, alerting_since, last_seen_at FROM vpn_check_states "
-            "ORDER BY node, target"
+            "SELECT node, server, transport, target, status, last_ok, last_latency_ms, "
+            "last_error, consecutive_count, alerting_since, last_seen_at FROM vpn_check_states "
+            "ORDER BY server, transport, node, target"
         )
         rows = await cur.fetchall()
-        return {
-            "states": [
-                {
-                    "node": r["node"],
-                    "target": r["target"],
-                    "status": r["status"],
-                    "last_ok": bool(r["last_ok"]),
-                    "last_latency_ms": r["last_latency_ms"],
-                    "last_error": r["last_error"],
-                    "consecutive_count": r["consecutive_count"],
-                    "alerting_since": r["alerting_since"],
-                    "last_seen_at": r["last_seen_at"],
-                }
-                for r in rows
-            ]
-        }
+        states = [
+            {
+                "node": r["node"],
+                "server": r["server"],
+                "transport": r["transport"],
+                "target": r["target"],
+                "status": r["status"],
+                "last_ok": bool(r["last_ok"]),
+                "last_latency_ms": r["last_latency_ms"],
+                "last_error": r["last_error"],
+                "consecutive_count": r["consecutive_count"],
+                "alerting_since": r["alerting_since"],
+                "last_seen_at": r["last_seen_at"],
+            }
+            for r in rows
+        ]
+        by_pair: dict[tuple[str, str], list[str]] = {}
+        for s in states:
+            by_pair.setdefault((s["server"], s["transport"]), []).append(s["status"])
+        rollup = [
+            {"server": server, "transport": transport, "status": rollup_status(statuses)}
+            for (server, transport), statuses in by_pair.items()
+        ]
+        return {"states": states, "rollup": rollup}
 
     # --- APK ---
 

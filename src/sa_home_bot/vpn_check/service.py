@@ -114,32 +114,55 @@ class VpnCheckService:
         if not isinstance(targets, list) or not targets:
             raise ProtoError(ERR_BAD_REQUEST, "targets должен быть непустым списком URL")
         targets = [str(t) for t in targets]
-        asyncio.create_task(self._run_and_report(targets), name="vpn-check-run")
-        return {"accepted": True, "targets": targets}
+        server = str(args.get("server", "")).strip()
+        if not server:
+            raise ProtoError(ERR_BAD_REQUEST, "нужен server — кого проверяем")
+        # Self-check исключён (39.0.7, решение владельца 2026-09-18): сервер
+        # не проверяет сам себя через собственный туннель — это не даёт
+        # сигнала о видимости извне, а видимость извне и есть смысл всей
+        # этой службы. Здоровье собственного процесса и так видно через
+        # monitor/get_state.
+        if server == self._node:
+            return {"accepted": True, "server": server, "skipped": "self-check исключён"}
+        # Локальный тоннель этой ноды ведёт к КОНКРЕТНОМУ серверу
+        # (``probe_server`` — пока настраивается вручную, см. VpnCheckConfig,
+        # автообнаружение это подэтап 39.0.7(d)). Если дispatch просит
+        # проверить кого-то другого — нам нечем, молча пропускаем (не
+        # curl'им мимо кассы и не подписываем чужой результат своим именем).
+        if not self._cfg.probe_server or self._cfg.probe_server != server:
+            return {
+                "accepted": True,
+                "server": server,
+                "skipped": "нет локально настроенного тоннеля к этому серверу",
+            }
+        asyncio.create_task(self._run_and_report(server, targets), name="vpn-check-run")
+        return {"accepted": True, "server": server, "targets": targets}
 
-    async def _run_and_report(self, targets: list[str]) -> None:
+    async def _run_and_report(self, server: str, targets: list[str]) -> None:
         # Сначала убеждаемся, что пробник ВООБЩЕ ходит через туннель —
         # иначе curl к целям может успешно отвечать мимо VPN, и проверка
         # тихо зеленеет (инцидент 2026-08-31). Провал гейта → все цели
         # помечаем одной и той же внятной ошибкой, а не ложным ok.
         gate = await self._egress_gate()
-        results: dict[str, dict[str, Any]] = {}
+        transport = self._cfg.probe_transport
+        results: list[dict[str, Any]] = []
         for target in targets:
-            if gate is not None:
-                results[target] = {"ok": False, "ms": None, "error": gate}
-            else:
-                results[target] = await self._check_one(target)
-        try:
-            dst = await vpn_nodes.resolve_vpn_dst(self._node_link)
-            if dst is None:
-                log.warning("vpn_check: результат некуда деть — vpn в рое сейчас не держит никто")
-                return
-            await self._node_link.command(
-                "report_check",
-                {"node": self._node, "results": results},
-                dst=dst,
-                timeout=10.0,
+            one = (
+                {"ok": False, "ms": None, "error": gate}
+                if gate is not None
+                else (await self._check_one(target))
             )
+            results.append({"server": server, "transport": transport, "target": target, **one})
+        try:
+            # Фанаут на ВСЕ живые vpn-инстансы, не в одну через
+            # resolve_vpn_dst — иначе результат оседает в БД ровно одной
+            # ноды, а не той, что живёт дольше (обнаружено 2026-09-18,
+            # см. IMPLEMENTATION_PLAN.md 39.0.7 «Репликация записи/чтения»).
+            reports = await vpn_nodes.fanout(
+                self._node_link, "report_check", {"node": self._node, "results": results}
+            )
+            if not reports:
+                log.warning("vpn_check: результат некуда деть — vpn в рое сейчас не держит никто")
         except (ServiceUnavailableError, ProtoError, TimeoutError) as exc:
             log.warning("vpn_check: не удалось отправить результат в vpn: %s", exc)
 
@@ -203,8 +226,16 @@ class VpnCheckService:
     async def _check_route(self) -> str | None:
         ip_path = shutil.which("ip") or "ip"
         code, out, err = await _run(
-            "sudo", "-n", ip_path, "netns", "exec", self._cfg.netns,
-            ip_path, "route", "get", _ROUTE_SENTINEL,
+            "sudo",
+            "-n",
+            ip_path,
+            "netns",
+            "exec",
+            self._cfg.netns,
+            ip_path,
+            "route",
+            "get",
+            _ROUTE_SENTINEL,
             timeout=self._cfg.check_timeout_s + 3.0,
         )
         if code != 0:

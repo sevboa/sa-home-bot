@@ -12,6 +12,8 @@ from sa_home_bot.config import Settings, VpnCheckConfig
 from sa_home_bot.proto.messages import ERR_BAD_REQUEST, ProtoError
 from sa_home_bot.vpn_check.service import VpnCheckService
 
+PROBE_SERVER = "jeeves"
+
 
 class _FakeProc:
     def __init__(self, stdout: bytes, stderr: bytes, returncode: int) -> None:
@@ -24,8 +26,9 @@ class _FakeProc:
 
 
 class _FakeNodeLink:
-    # Своя нода держит vpn — отчёт пробника уходит ей же (адресата ищет
-    # vpn_nodes.resolve_vpn_dst, хардкода на jeeves больше нет).
+    # Своя нода не держит vpn (пробник живёт на alfred) — отчёт фанаутится
+    # на живые vpn-инстансы роя (vpn_nodes.fanout), не в одну через
+    # resolve_vpn_dst.
     state: dict = {
         "node": "wooster",
         "kind": "vps",
@@ -48,6 +51,7 @@ def _settings(**kwargs) -> Settings:
     from sa_home_bot.config import NodeConfig
 
     node = kwargs.pop("node", NodeConfig(assignments=[]))
+    kwargs.setdefault("probe_server", PROBE_SERVER)
     return Settings(node=node, vpn_check=VpnCheckConfig(netns="vpn-probe", **kwargs))
 
 
@@ -87,10 +91,13 @@ def _patch_curl(
 def _target_curl_calls(calls: list[tuple]) -> list[tuple]:
     """Только вызовы curl к целям проверки — без гейта (route get / ip-echo)."""
     return [
-        c
-        for c in calls
-        if "curl" in c and c[-1] != _IP_ECHO and not ("route" in c and "get" in c)
+        c for c in calls if "curl" in c and c[-1] != _IP_ECHO and not ("route" in c and "get" in c)
     ]
+
+
+def _result_for(node_link: _FakeNodeLink, target: str, *, call_index: int = 0) -> dict:
+    results = node_link.calls[call_index]["args"]["results"]
+    return next(r for r in results if r["target"] == target)
 
 
 def test_describe_declares_check_action():
@@ -102,14 +109,23 @@ def test_describe_declares_check_action():
 async def test_check_accepts_and_returns_immediately(monkeypatch):
     _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
     service = VpnCheckService(_settings(), _FakeNodeLink())
-    result = await service.run_command("check", {"targets": ["https://1.1.1.1"]})
-    assert result == {"accepted": True, "targets": ["https://1.1.1.1"]}
+    result = await service.run_command(
+        "check", {"server": PROBE_SERVER, "targets": ["https://1.1.1.1"]}
+    )
+    assert result == {"accepted": True, "server": PROBE_SERVER, "targets": ["https://1.1.1.1"]}
 
 
 async def test_check_without_targets_is_bad_request():
     service = VpnCheckService(_settings(), _FakeNodeLink())
     with pytest.raises(ProtoError) as excinfo:
-        await service.run_command("check", {})
+        await service.run_command("check", {"server": PROBE_SERVER})
+    assert excinfo.value.code == ERR_BAD_REQUEST
+
+
+async def test_check_without_server_is_bad_request():
+    service = VpnCheckService(_settings(), _FakeNodeLink())
+    with pytest.raises(ProtoError) as excinfo:
+        await service.run_command("check", {"targets": ["https://1.1.1.1"]})
     assert excinfo.value.code == ERR_BAD_REQUEST
 
 
@@ -118,12 +134,46 @@ async def test_unknown_action_raises_value_error():
         await VpnCheckService(_settings(), _FakeNodeLink()).run_command("fetch", {})
 
 
-async def test_report_goes_to_live_vpn_node_not_hardcoded_jeeves(monkeypatch):
-    """Регрессия 2026-09: адресат брался из vpn_protocol.NODE_ID ("jeeves"),
-    и пока тот лежал, проверки всего роя молча выбрасывались."""
+async def test_self_check_is_excluded(monkeypatch):
+    calls = _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
+    node_link = _FakeNodeLink()
+    service = VpnCheckService(_settings(), node_link)
+    # Своя нода (socket.gethostname()) совпадает с проверяемым сервером.
+    result = await service.run_command(
+        "check", {"server": service._node, "targets": ["https://1.1.1.1"]}
+    )
+    assert result["skipped"] == "self-check исключён"
+    assert node_link.calls == []
+    assert calls == []
+
+
+async def test_check_for_server_without_local_tunnel_is_skipped(monkeypatch):
+    calls = _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
+    node_link = _FakeNodeLink()
+    service = VpnCheckService(_settings(probe_server="wooster"), node_link)
+    result = await service.run_command(
+        "check", {"server": "jeeves", "targets": ["https://1.1.1.1"]}
+    )
+    assert "нет локально настроенного тоннеля" in result["skipped"]
+    assert node_link.calls == []
+    assert calls == []
+
+
+async def test_check_skipped_when_probe_server_not_configured(monkeypatch):
+    calls = _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
+    node_link = _FakeNodeLink()
+    service = VpnCheckService(_settings(probe_server=""), node_link)
+    result = await service.run_command(
+        "check", {"server": "jeeves", "targets": ["https://1.1.1.1"]}
+    )
+    assert "нет локально настроенного тоннеля" in result["skipped"]
+    assert calls == []
+
+
+async def test_report_fans_out_to_all_live_vpn_nodes(monkeypatch):
     _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
     node_link = _FakeNodeLink()
-    await VpnCheckService(_settings(), node_link)._run_and_report(["https://1.1.1.1"])
+    await VpnCheckService(_settings(), node_link)._run_and_report(PROBE_SERVER, ["https://1.1.1.1"])
     assert node_link.calls[0]["dst"].node == "wooster"
 
 
@@ -131,7 +181,7 @@ async def test_report_is_dropped_when_no_vpn_in_swarm(monkeypatch):
     _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
     node_link = _FakeNodeLink()
     node_link.state = {"node": "alfred", "peers": [], "services": []}
-    await VpnCheckService(_settings(), node_link)._run_and_report(["https://1.1.1.1"])
+    await VpnCheckService(_settings(), node_link)._run_and_report(PROBE_SERVER, ["https://1.1.1.1"])
     assert node_link.calls == []  # некому слать — и не пытаемся
 
 
@@ -139,41 +189,43 @@ async def test_run_and_report_pushes_ok_result(monkeypatch):
     _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
     node_link = _FakeNodeLink()
     service = VpnCheckService(_settings(), node_link)
-    await service._run_and_report(["https://1.1.1.1"])
+    await service._run_and_report(PROBE_SERVER, ["https://1.1.1.1"])
     assert len(node_link.calls) == 1
     call = node_link.calls[0]
     assert call["action"] == "report_check"
     assert call["args"]["node"]
-    results = call["args"]["results"]
-    assert results["https://1.1.1.1"]["ok"] is True
-    assert results["https://1.1.1.1"]["error"] is None
-    assert isinstance(results["https://1.1.1.1"]["ms"], int)
+    res = _result_for(node_link, "https://1.1.1.1")
+    assert res["server"] == PROBE_SERVER
+    assert res["transport"] == "awg"
+    assert res["ok"] is True
+    assert res["error"] is None
+    assert isinstance(res["ms"], int)
 
 
 async def test_run_and_report_marks_http_error_as_failed(monkeypatch):
     _patch_curl(monkeypatch, {"https://1.1.1.1": (b"503", b"", 0)})
     node_link = _FakeNodeLink()
     service = VpnCheckService(_settings(), node_link)
-    await service._run_and_report(["https://1.1.1.1"])
-    results = node_link.calls[0]["args"]["results"]
-    assert results["https://1.1.1.1"]["ok"] is False
-    assert "503" in results["https://1.1.1.1"]["error"]
+    await service._run_and_report(PROBE_SERVER, ["https://1.1.1.1"])
+    res = _result_for(node_link, "https://1.1.1.1")
+    assert res["ok"] is False
+    assert "503" in res["error"]
 
 
 async def test_run_and_report_marks_curl_failure(monkeypatch):
     _patch_curl(monkeypatch, {"https://1.1.1.1": (b"", b"connection refused", 7)})
     node_link = _FakeNodeLink()
     service = VpnCheckService(_settings(), node_link)
-    await service._run_and_report(["https://1.1.1.1"])
-    results = node_link.calls[0]["args"]["results"]
-    assert results["https://1.1.1.1"]["ok"] is False
-    assert "connection refused" in results["https://1.1.1.1"]["error"]
+    await service._run_and_report(PROBE_SERVER, ["https://1.1.1.1"])
+    res = _result_for(node_link, "https://1.1.1.1")
+    assert res["ok"] is False
+    assert "connection refused" in res["error"]
 
 
 async def test_check_runs_curl_inside_probe_netns(monkeypatch):
     calls = _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
     service = VpnCheckService(_settings(), _FakeNodeLink())
-    await service._run_and_report(["https://1.1.1.1"])
+    await service._run_and_report(PROBE_SERVER, ["https://1.1.1.1"])
     cmd = _target_curl_calls(calls)[0]
     assert "netns" in cmd
     assert cmd[cmd.index("netns") + 1] == "exec"
@@ -188,8 +240,8 @@ async def test_gate_fails_all_targets_when_route_bypasses_tunnel(monkeypatch):
         monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)}, route_dev="vprobe-veth1"
     )
     node_link = _FakeNodeLink()
-    await VpnCheckService(_settings(), node_link)._run_and_report(["https://1.1.1.1"])
-    res = node_link.calls[0]["args"]["results"]["https://1.1.1.1"]
+    await VpnCheckService(_settings(), node_link)._run_and_report(PROBE_SERVER, ["https://1.1.1.1"])
+    res = _result_for(node_link, "https://1.1.1.1")
     assert res["ok"] is False
     assert "не в туннеле" in res["error"]
     assert _target_curl_calls(calls) == []
@@ -205,8 +257,8 @@ async def test_gate_fails_when_exit_ip_equals_host_ip(monkeypatch):
         host_ip="198.51.100.9",
     )
     node_link = _FakeNodeLink()
-    await VpnCheckService(_settings(), node_link)._run_and_report(["https://1.1.1.1"])
-    res = node_link.calls[0]["args"]["results"]["https://1.1.1.1"]
+    await VpnCheckService(_settings(), node_link)._run_and_report(PROBE_SERVER, ["https://1.1.1.1"])
+    res = _result_for(node_link, "https://1.1.1.1")
     assert res["ok"] is False
     assert "мимо VPN" in res["error"]
     assert _target_curl_calls(calls) == []
@@ -225,8 +277,8 @@ async def test_gate_skips_exit_ip_check_on_vpn_exit_node(monkeypatch):
     )
     node_link = _FakeNodeLink()
     settings = _settings(node=NodeConfig(assignments=["vpn", "vpn_check"]))
-    await VpnCheckService(settings, node_link)._run_and_report(["https://1.1.1.1"])
-    res = node_link.calls[0]["args"]["results"]["https://1.1.1.1"]
+    await VpnCheckService(settings, node_link)._run_and_report(PROBE_SERVER, ["https://1.1.1.1"])
+    res = _result_for(node_link, "https://1.1.1.1")
     assert res["ok"] is True
 
 
@@ -240,8 +292,8 @@ async def test_gate_reports_missing_sudoers_hint(monkeypatch):
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fail_perm)
     node_link = _FakeNodeLink()
-    await VpnCheckService(_settings(), node_link)._run_and_report(["https://1.1.1.1"])
-    res = node_link.calls[0]["args"]["results"]["https://1.1.1.1"]
+    await VpnCheckService(_settings(), node_link)._run_and_report(PROBE_SERVER, ["https://1.1.1.1"])
+    res = _result_for(node_link, "https://1.1.1.1")
     assert res["ok"] is False
     assert "nodectl fix" in res["error"]
 
@@ -255,8 +307,8 @@ async def test_gate_detects_localized_sudo_password_prompt(monkeypatch):
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", ru_locale)
     node_link = _FakeNodeLink()
-    await VpnCheckService(_settings(), node_link)._run_and_report(["https://1.1.1.1"])
-    res = node_link.calls[0]["args"]["results"]["https://1.1.1.1"]
+    await VpnCheckService(_settings(), node_link)._run_and_report(PROBE_SERVER, ["https://1.1.1.1"])
+    res = _result_for(node_link, "https://1.1.1.1")
     assert res["ok"] is False
     assert "nodectl fix" in res["error"] and "нет прав" in res["error"]
 
@@ -271,7 +323,6 @@ async def test_run_and_report_multiple_targets(monkeypatch):
     )
     node_link = _FakeNodeLink()
     service = VpnCheckService(_settings(), node_link)
-    await service._run_and_report(["https://1.1.1.1", "https://api.telegram.org"])
-    results = node_link.calls[0]["args"]["results"]
-    assert results["https://1.1.1.1"]["ok"] is True
-    assert results["https://api.telegram.org"]["ok"] is False
+    await service._run_and_report(PROBE_SERVER, ["https://1.1.1.1", "https://api.telegram.org"])
+    assert _result_for(node_link, "https://1.1.1.1")["ok"] is True
+    assert _result_for(node_link, "https://api.telegram.org")["ok"] is False

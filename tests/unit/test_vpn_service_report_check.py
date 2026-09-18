@@ -62,10 +62,30 @@ async def env(tmp_path):
     await db.close()
 
 
-async def _report(svc, node: str, ok: bool, error: str | None = None):
+async def _report(
+    svc,
+    node: str,
+    ok: bool,
+    error: str | None = None,
+    *,
+    server: str = "jeeves",
+    transport: str = "awg",
+):
     return await svc.run_command(
         vpn_protocol.ACTION_REPORT_CHECK,
-        {"node": node, "results": {TARGET: {"ok": ok, "ms": 12, "error": error}}},
+        {
+            "node": node,
+            "results": [
+                {
+                    "server": server,
+                    "transport": transport,
+                    "target": TARGET,
+                    "ok": ok,
+                    "ms": 12,
+                    "error": error,
+                }
+            ],
+        },
     )
 
 
@@ -98,7 +118,12 @@ async def test_recovery_emits_once(env):
     await _report(svc, "jeeves", True)
     recovered = [d for name, d in events if name == vpn_protocol.EVENT_VPN_CHECK_RECOVERED]
     assert len(recovered) == 1
-    assert recovered[0] == {"node": "jeeves", "target": TARGET}
+    assert recovered[0] == {
+        "node": "jeeves",
+        "server": "jeeves",
+        "transport": "awg",
+        "target": TARGET,
+    }
 
 
 async def test_independent_nodes_do_not_interfere(env):
@@ -117,9 +142,23 @@ async def test_check_status_reflects_latest_state(env):
     states = status["states"]
     assert len(states) == 1
     assert states[0]["node"] == "jeeves"
+    assert states[0]["server"] == "jeeves"
+    assert states[0]["transport"] == "awg"
     assert states[0]["target"] == TARGET
     assert states[0]["status"] == "alerting"
     assert states[0]["consecutive_count"] == 0  # сброс на самом переходе
+    assert status["rollup"] == [{"server": "jeeves", "transport": "awg", "status": "alerting"}]
+
+
+async def test_check_status_rollup_partial_when_observers_disagree(env):
+    svc, _, _ = env
+    # Один и тот же (server, transport), но два разных наблюдателя (node) —
+    # один видит ok, другой alerting → роллап «partial».
+    await _report(svc, "jeeves", True, server="wooster", transport="reality")
+    await _report(svc, "alfred", False, "blocked", server="wooster", transport="reality")
+    await _report(svc, "alfred", False, "blocked", server="wooster", transport="reality")
+    status = await svc.run_command(vpn_protocol.ACTION_CHECK_STATUS, {})
+    assert status["rollup"] == [{"server": "wooster", "transport": "reality", "status": "partial"}]
 
 
 async def test_check_now_dispatches_via_node_link(env):
@@ -132,6 +171,7 @@ async def test_check_now_dispatches_via_node_link(env):
     assert call["args"]["service"] == "vpn_check"
     assert call["args"]["action"] == "check"
     assert call["args"]["args"]["targets"] == [TARGET]
+    assert call["args"]["args"]["server"] == svc._node
     assert call["dst"] == Address(node=svc._node, service="node")
 
 

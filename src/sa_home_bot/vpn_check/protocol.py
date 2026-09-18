@@ -11,7 +11,11 @@ from __future__ import annotations
 
 SERVICE_NAME = "vpn_check"
 
-# {"targets": ["https://...", ...]} — проверить каждую цель через локальный
-# VPN-клиентский туннель и запушить результат в vpn/report_check на jeeves
-# (см. vpn_check/service.py, vpn/protocol.py::ACTION_REPORT_CHECK).
+# {"server": "<кого проверяем>", "targets": ["https://...", ...]} —
+# проверить каждую цель через локальный VPN-клиентский туннель, если он
+# ведёт именно к этому server (см. VpnCheckConfig.probe_server,
+# self-exclude при server == своя нода), и запушить результат фанаутом на
+# все живые vpn-инстансы (vpn_check/service.py, vpn/protocol.py::
+# ACTION_REPORT_CHECK). server — этап 39.0.7 (2026-09-18): раньше
+# проверялся один статичный список целей без привязки к серверу.
 ACTION_CHECK = "check"
