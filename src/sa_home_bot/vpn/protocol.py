@@ -16,6 +16,9 @@ tasks/protocol.py.
 
 from __future__ import annotations
 
+import re as _re
+import time as _time
+
 SERVICE_NAME = "vpn"
 
 # --- Транспорты (подэтап 39.0.x) ---
@@ -27,6 +30,71 @@ SERVICE_NAME = "vpn"
 TRANSPORT_AWG = "awg"  # AmneziaWG (UDP + обфускация) — исходный транспорт
 TRANSPORT_REALITY = "reality"  # VLESS+Reality через xray-core (TCP/443) — для РФ
 TRANSPORTS = (TRANSPORT_AWG, TRANSPORT_REALITY)
+
+# Трёхбуквенные коды для имён выдаваемых файлов (гость держит конфиги с
+# нескольких серверов сразу и по имени должен понимать, что откуда).
+TRANSPORT_FILE_CODE = {TRANSPORT_AWG: "awg", TRANSPORT_REALITY: "vls"}
+
+# --- Страна сервера ---
+# Флаг-эмодзи состоит из двух regional indicator symbols, которые однозначно
+# мапятся на буквы: 🇳🇱 = U+1F1F3 U+1F1F1 = "NL". Поэтому отдельного поля с
+# кодом страны в конфиге ноды не нужно — хватает [vpn].location.
+_FLAG_FIRST = 0x1F1E6
+_FLAG_LAST = 0x1F1FF
+
+
+def country_code(location: str) -> str:
+    """«🇳🇱 Нидерланды» → «NL». Пусто, если флага в строке нет."""
+    letters = [
+        chr(ord(c) - _FLAG_FIRST + ord("A"))
+        for c in location
+        if _FLAG_FIRST <= ord(c) <= _FLAG_LAST
+    ]
+    return "".join(letters[:2])
+
+
+def country_flag(location: str) -> str:
+    """«🇳🇱 Нидерланды» → «🇳🇱». Пусто, если флага нет."""
+    flag = [c for c in location if _FLAG_FIRST <= ord(c) <= _FLAG_LAST]
+    return "".join(flag[:2])
+
+
+# --- Имена выдаваемых гостю файлов ---
+# Живут здесь, а не в bot/handlers/vpn.py: те же имена нужны tool_vpn
+# (bot/tools.py), а он не может импортировать обработчик — тот тянет aiogram,
+# а tools.py крутится ещё и в службе tasks.
+_UNSAFE_FILENAME = _re.compile(r"[^a-z0-9]+")
+_MAX_TUNNEL_NAME = 15  # NAME_PATTERN wireguard-android: [a-zA-Z0-9_=+.-]{1,15}
+
+
+def _name_prefix(transport: str, location: str) -> str:
+    """«awg_nl_» — тип настроек и страна сервера в начале имени файла: у гостя
+    конфиги с нескольких серверов сразу, и по имени должно быть видно, что
+    откуда (решение пользователя 2026-09-18). Без флага в ``[vpn].location``
+    остаётся только тип."""
+    code = TRANSPORT_FILE_CODE.get(transport, transport[:3])
+    country = country_code(location).lower()
+    return f"{code}_{country}_" if country else f"{code}_"
+
+
+def secret_filename(transport: str, device_label: str, location: str = "") -> str:
+    """Имя файла конфига для гостя: «awg_nl_rose_123.conf» / «vls_nl_orchid.json».
+
+    У awg имя файла без расширения становится именем тоннеля в приложении и
+    обязано влезть в 15 символов (NAME_PATTERN wireguard-android), поэтому
+    вместе с префиксом метка времени режется до трёх цифр, а имя устройства —
+    до остатка. Метка отличает разные выпуски одного устройства друг от друга
+    (решение пользователя 2026-08-04). У sing-box-конфига для Hiddify такого
+    лимита нет — там имя устройства не режем.
+    """
+    prefix = _name_prefix(transport, location)
+    if transport == TRANSPORT_REALITY:
+        slug = _UNSAFE_FILENAME.sub("", device_label.strip().lower()) or "vpn"
+        return f"{prefix}{slug}.json"
+    slug = _UNSAFE_FILENAME.sub("", device_label.strip().lower()) or "device"
+    stamp = str(int(_time.time()))[-3:]
+    budget = _MAX_TUNNEL_NAME - len(prefix) - len(stamp) - 1  # "_" перед меткой
+    return f"{prefix}{slug[:budget]}_{stamp}.conf"
 
 # --- Действия ---
 ACTION_PEERS = "peers"  # админ: все пиры всех гостей

@@ -44,7 +44,6 @@ import logging
 import math
 import operator
 import random
-import re
 import time
 import urllib.error
 import urllib.parse
@@ -2214,27 +2213,14 @@ _DECL_MEMORY: dict[str, Any] = {
 # chat_id, как и у memory, подставляет бот из ToolContext, не модель.
 
 _VPN_ACTION_APK = "apk"  # виртуальное действие бота (apk_info+доставка), не команда службы
-_VPN_UNSAFE_FILENAME = re.compile(r"[^a-z0-9]+")
-_VPN_MAX_TUNNEL_NAME = 15  # NAME_PATTERN wireguard-android: [a-zA-Z0-9_=+.-]{1,15}
 
 
-def _vpn_conf_filename(device_label: str) -> str:
-    """Имя тоннеля в .conf = имя файла без расширения — приложения на базе
-    wireguard-android валидируют его по ``[a-zA-Z0-9_=+.-]{1,15}``. Имя
-    устройства теперь всегда английское слово из фиксированного пула
-    (vpn/service.py::_random_device_label, решение пользователя 2026-08-04)
-    — транслитерация больше не нужна, только метка времени на конце
-    (отличает разные выпуски одного и того же имени друг от друга)."""
-    slug = _VPN_UNSAFE_FILENAME.sub("", device_label.strip().lower()) or "device"
-    stamp = str(int(time.time()))[-6:]
-    budget = _VPN_MAX_TUNNEL_NAME - len(stamp) - 1
-    return f"{slug[:budget]}_{stamp}.conf"
+def _vpn_conf_filename(device_label: str, location: str = "") -> str:
+    return vpn_protocol.secret_filename(vpn_protocol.TRANSPORT_AWG, device_label, location)
 
 
-def _vpn_reality_filename(device_label: str) -> str:
-    """Имя файла sing-box-конфига для Hiddify (транспорт reality) — <label>.json."""
-    slug = _VPN_UNSAFE_FILENAME.sub("", device_label.strip().lower()) or "vpn"
-    return f"{slug}.json"
+def _vpn_reality_filename(device_label: str, location: str = "") -> str:
+    return vpn_protocol.secret_filename(vpn_protocol.TRANSPORT_REALITY, device_label, location)
 
 
 def _vpn_store_row(emoji: str, store: str, vpn_url: str, wg_url: str) -> str:
@@ -2353,6 +2339,7 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
         except (ServiceUnavailableError, TimeoutError) as exc:
             return f"недоступно: VPN-служба не отвечает ({exc})"
         issued_label = str(result.get("device_label") or device_label or "устройство")
+        issued_location = str(result.get("location") or "")
         # Первое устройство чата — почти наверняка настраивается прямо с
         # этого телефона (рекомендуем файл: «Открыть с помощью» → AmneziaWG
         # импортирует тоннель без копирования), второе и далее — обычно для
@@ -2374,7 +2361,7 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
                     f"📶 QR — «{escape(issued_label)}» (VLESS). "
                     "Hiddify → «+» → «Сканировать QR»."
                 )
-                conf_filename = _vpn_reality_filename(issued_label)
+                conf_filename = _vpn_reality_filename(issued_label, issued_location)
             else:
                 file_caption = (
                     f"🔐 Конфиг устройства «{escape(issued_label)}».\n"
@@ -2382,7 +2369,7 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
                     "добавится сразу, без копирования."
                 )
                 qr_caption = f"📶 QR — устройство «{escape(issued_label)}»."
-                conf_filename = _vpn_conf_filename(issued_label)
+                conf_filename = _vpn_conf_filename(issued_label, issued_location)
 
             async def _send_file() -> None:
                 await ctx.notifier.send_document(

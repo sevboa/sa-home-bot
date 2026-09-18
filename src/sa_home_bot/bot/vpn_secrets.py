@@ -33,6 +33,9 @@ class PendingVpnSecret:
     # весь конфиг в .conf-файле).
     share_url: str | None = None
     deep_link: str | None = None
+    # Локация сервера-держателя («🇳🇱 Нидерланды») — чтобы отложенная выдача
+    # назвала файл так же, как немедленная (bot/handlers/vpn.py::_name_prefix).
+    location: str = ""
 
 
 class PendingVpnSecrets:
@@ -54,6 +57,7 @@ class PendingVpnSecrets:
         transport: str = "awg",
         share_url: str | None = None,
         deep_link: str | None = None,
+        location: str = "",
     ) -> str:
         token = secrets.token_urlsafe(6)
         self._items[token] = (
@@ -65,6 +69,7 @@ class PendingVpnSecrets:
                 transport=transport,
                 share_url=share_url,
                 deep_link=deep_link,
+                location=location,
             ),
             time.monotonic() + ttl_s,
         )

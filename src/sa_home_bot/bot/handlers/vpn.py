@@ -38,8 +38,6 @@ import base64
 import contextlib
 import html
 import logging
-import re
-import time
 
 from aiogram import Router
 from aiogram.exceptions import TelegramBadRequest
@@ -574,23 +572,8 @@ async def _redraw_card(
         await callback.message.edit_text(_usage_text(servers), reply_markup=keyboard)
 
 
-_UNSAFE_FILENAME = re.compile(r"[^a-z0-9]+")
-_MAX_TUNNEL_NAME = 15  # NAME_PATTERN wireguard-android: [a-zA-Z0-9_=+.-]{1,15}
-
-
-def _conf_filename(device_label: str) -> str:
-    """Имя тоннеля в .conf = имя файла без расширения — приложения на базе
-    wireguard-android валидируют его по ``[a-zA-Z0-9_=+.-]{1,15}`` (см.
-    NAME_PATTERN в исходниках). device_label теперь всегда английское слово
-    из фиксированного пула (vpn/service.py::_random_device_label) —
-    транслитерация больше не нужна, только нормализация регистра и знак
-    подчёркивания перед меткой времени (решение пользователя 2026-08-04:
-    только английские символы и "_", метка времени в конце — отличает
-    разные выпуски одного и того же имени друг от друга)."""
-    slug = _UNSAFE_FILENAME.sub("", device_label.strip().lower()) or "device"
-    stamp = str(int(time.time()))[-6:]
-    budget = _MAX_TUNNEL_NAME - len(stamp) - 1  # "_" между слагом и меткой
-    return f"{slug[:budget]}_{stamp}.conf"
+def _conf_filename(device_label: str, location: str = "") -> str:
+    return vpn_protocol.secret_filename(vpn_protocol.TRANSPORT_AWG, device_label, location)
 
 
 def _file_caption(label_escaped: str) -> str:
@@ -609,11 +592,8 @@ def _qr_caption(label_escaped: str) -> str:
     )
 
 
-def _reality_filename(device_label: str) -> str:
-    """Имя файла sing-box-конфига для Hiddify — <label>.json (label = слово
-    из фиксированного пула, транслитерация не нужна)."""
-    slug = _UNSAFE_FILENAME.sub("", device_label.strip().lower()) or "vpn"
-    return f"{slug}.json"
+def _reality_filename(device_label: str, location: str = "") -> str:
+    return vpn_protocol.secret_filename(vpn_protocol.TRANSPORT_REALITY, device_label, location)
 
 
 def _reality_file_caption(label_escaped: str) -> str:
@@ -637,10 +617,8 @@ def _reality_qr_caption(label_escaped: str) -> str:
     )
 
 
-def _secret_filename(transport: str, device_label: str) -> str:
-    if transport == vpn_protocol.TRANSPORT_REALITY:
-        return _reality_filename(device_label)
-    return _conf_filename(device_label)
+def _secret_filename(transport: str, device_label: str, location: str = "") -> str:
+    return vpn_protocol.secret_filename(transport, device_label, location)
 
 
 def _secret_file_caption(transport: str, label_escaped: str) -> str:
@@ -689,6 +667,7 @@ async def _send_secret(
     config_text = str(result.get("config_text") or "")
     qr_b64 = result.get("qr_png_b64")
     transport = str(result.get("transport") or vpn_protocol.TRANSPORT_AWG)
+    location = str(result.get("location") or "")
     # reality: deep-link и vless://-ссылка (tap-to-copy) — всегда в тексте
     # сообщения, независимо от того, каким способом ушёл основной артефакт.
     links_note = (
@@ -706,7 +685,7 @@ async def _send_secret(
         sent = await notifier.send_document(
             chat_id,
             config_text.encode("utf-8"),
-            filename=_secret_filename(transport, device_label),
+            filename=_secret_filename(transport, device_label, location),
             caption=_secret_file_caption(transport, label_escaped),
             message_thread_id=message_thread_id,
         )
@@ -743,6 +722,7 @@ async def _send_secret(
         transport=transport,
         share_url=result.get("share_url"),
         deep_link=result.get("deep_link"),
+        location=location,
     )
     button_id = await notifier.send_direct(
         chat_id,
@@ -908,7 +888,9 @@ async def handle_action(
                 await notifier.send_document(
                     chat_id,
                     secret.config_text.encode("utf-8"),
-                    filename=_secret_filename(secret.transport, secret.device_label),
+                    filename=_secret_filename(
+                        secret.transport, secret.device_label, secret.location
+                    ),
                     caption=_secret_file_caption(secret.transport, label_escaped),
                     message_thread_id=callback.message.message_thread_id,
                 )

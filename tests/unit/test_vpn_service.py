@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 import pytest
 import pytest_asyncio
 
@@ -585,6 +587,25 @@ async def _issue_reality(svc, chat_id=CHAT):
     return await svc.run_command(
         vpn_protocol.ACTION_ISSUE, {"chat_id": chat_id, "transport": TRANSPORT_REALITY}
     )
+
+
+async def test_reality_profile_name_carries_country_flag(env_both):
+    """Имя профиля в Hiddify («…#🇳🇱 Rose») — то, что гость видит в списке; со
+    страной, иначе два сервера в списке не отличить (решение 2026-09-18)."""
+    svc, _awg, _xray, _events = env_both
+    svc._cfg = svc._cfg.model_copy(update={"location": "🇳🇱 Нидерланды"})
+    result = await _issue_reality(svc)
+    label = result["device_label"]
+    assert result["share_url"].endswith(quote(f"🇳🇱 {label}", safe=""))
+    # Бот берёт локацию из ответа, чтобы поставить страну в имя файла.
+    assert result["location"] == "🇳🇱 Нидерланды"
+
+
+async def test_reality_profile_name_without_location_is_bare_label(env_both):
+    svc, _awg, _xray, _events = env_both
+    result = await _issue_reality(svc)
+    assert result["share_url"].endswith(result["device_label"])
+    assert result["location"] == ""
 
 
 async def test_reality_issue_creates_peer_and_singbox_artifacts(env_both):

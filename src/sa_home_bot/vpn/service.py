@@ -109,6 +109,7 @@ from sa_home_bot.vpn.protocol import (
     SERVICE_NAME,
     TRANSPORT_AWG,
     TRANSPORT_REALITY,
+    country_flag,
 )
 from sa_home_bot.vpn.proxy_backend import ProxyBackend, RealProxyBackend
 from sa_home_bot.vpn_check import protocol as vpn_check_protocol
@@ -668,7 +669,11 @@ class VpnService:
             # (RealityTransportConfig) несёт поля с теми же именами, что
             # client_config.RealityParams — render_* берут его по duck-typing.
             config_text = render_singbox_config(self._reality_cfg, client_uuid)
-            share_url = render_vless_url(self._reality_cfg, client_uuid, device_label)
+            # Имя профиля в Hiddify — то, что видит гость в списке подключений.
+            # Со страной, иначе два сервера в списке не отличить друг от друга.
+            flag = country_flag(self._cfg.location)
+            profile_label = f"{flag} {device_label}" if flag else device_label
+            share_url = render_vless_url(self._reality_cfg, client_uuid, profile_label)
             artifacts = {
                 "config_text": config_text,
                 "share_url": share_url,
@@ -684,6 +689,9 @@ class VpnService:
             **artifacts,
             "transport": transport,
             "device_label": device_label,
+            # Откуда конфиг — бот ставит страну в имя файла, чтобы гость с
+            # несколькими серверами не путал, какой откуда.
+            "location": self._cfg.location,
             # Число устройств чата ДО этой выдачи — bot/handlers/vpn.py и
             # bot/tools.py::tool_vpn выбирают по нему, что показать первым
             # (решение пользователя 2026-08-04): 0 — это первое устройство
