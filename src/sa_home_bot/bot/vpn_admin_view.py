@@ -22,7 +22,7 @@ from html import escape
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from sa_home_bot.bot import commands
+from sa_home_bot.bot import commands, guest_rights
 from sa_home_bot.bot.pagination import nav_row
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.vpn import protocol as vpn_protocol
@@ -43,6 +43,9 @@ _GB = 1_000_000_000
 # под него не заводим, право то же, что у списка пиров: `peers@vpn`.
 _SCREEN = vpn_protocol.ACTION_PEERS
 _GUEST_PREFIX = "g"  # act:vpn:peers:g<chat_id>[_<нода>]
+
+# Группа прав, по которой список сортируется (bot/guest_rights.py).
+_VPN_GROUP_KEY = "vpn"
 
 
 def guests_cb(offset: int = 0) -> str:
@@ -93,12 +96,41 @@ def _gb(value: int) -> float:
     return value / _GB
 
 
-def _server_name(server: dict) -> str:
-    return str(server.get("label") or server.get("node") or "?")
+def server_name(server: dict) -> str:
+    """Как назвать локацию на этих экранах — флагом, если он в метке есть.
+
+    `[vpn].location` — это «🇳🇱 Нидерланды», и слово рядом с флагом ничего не
+    добавляет: флаг уже называет страну (решение владельца 2026-09-19).
+    Метка без флага (или её отсутствие) показывается как есть — там сокращать
+    нечего.
+    """
+    label = str(server.get("label") or "")
+    return vpn_protocol.country_flag(label) or label or str(server.get("node") or "?")
 
 
 def _access_mark(server: dict) -> str:
     return "✅" if server.get("allowed") else "⬜"
+
+
+def in_vpn_group(sub: Subscription) -> bool:
+    """Выдана ли чату группа «📶 VPN» (хоть одно право из неё).
+
+    Хоть одно, а не весь набор: группу могли доправить руками в конфиге или
+    снять одно право — человек всё равно «по VPN». Проверка идёт через
+    ``allows_action``, поэтому `*` и `*@vpn` тоже считаются.
+    """
+    group = guest_rights.group(_VPN_GROUP_KEY)
+    if group is None:
+        return False
+    return any(sub.allows_action(right.split("@", 1)[0], SERVICE) for right in group.rights)
+
+
+def sort_guests(guests: Sequence[Subscription]) -> list[Subscription]:
+    """Сначала те, кому группа VPN выдана — с ними тут и работают; остальные
+    ниже, но видны (кому-то из них доступ как раз и собираются открыть).
+    Сортировка устойчивая, внутри половин порядок книги подписок не меняется.
+    """
+    return sorted(guests, key=lambda sub: not in_vpn_group(sub))
 
 
 # --- список гостей ---------------------------------------------------------
@@ -110,8 +142,10 @@ def build_guests_view(
     """``access`` — ответы usage по каждому гостю, по одному на локацию.
 
     Список берётся из подписок бота, а не из сводки службы: иначе не видно
-    того, кому ещё ничего не выдавали, — а именно ему и надо выдать.
+    того, кому ещё ничего не выдавали, — а именно ему и надо выдать. Порядок
+    задаёт ``sort_guests``: сверху те, кому группа «📶 VPN» уже выдана.
     """
+    guests = sort_guests(guests)
     lines = [f"👥 <b>Гости VPN</b> ({len(guests)})", ""]
     if not guests:
         lines.append("Гостей нет.")
@@ -121,7 +155,7 @@ def build_guests_view(
         opened = [s for s in servers if s.get("allowed")]
         if opened:
             where = ", ".join(
-                f"{_server_name(s)} {_gb(s.get('used_bytes', 0)):.0f}/"
+                f"{server_name(s)} {_gb(s.get('used_bytes', 0)):.0f}/"
                 f"{_gb(s.get('limit_bytes', 0)):.0f} ГБ"
                 for s in opened
             )
@@ -167,15 +201,15 @@ def build_guest_view(
             base = _gb(server.get("base_limit_bytes", 0))
             personal = " (личная)" if server.get("personal_base") else " (общая)"
             lines.append(
-                f"{_access_mark(server)} <b>{escape(_server_name(server))}</b>: "
+                f"{_access_mark(server)} <b>{escape(server_name(server))}</b>: "
                 f"{used:.1f} / {limit:.0f} ГБ, база {base:.0f} ГБ{personal}"
             )
         else:
-            lines.append(f"{_access_mark(server)} <b>{escape(_server_name(server))}</b>: закрыт")
+            lines.append(f"{_access_mark(server)} <b>{escape(server_name(server))}</b>: закрыт")
     buttons = [
         [
             InlineKeyboardButton(
-                text=f"{_access_mark(server)} {_server_name(server)}"[:_MAX_NAME_LEN],
+                text=f"{_access_mark(server)} {server_name(server)}"[:_MAX_NAME_LEN],
                 callback_data=location_cb(guest.chat_id, str(server.get("node"))),
             )
         ]
@@ -195,7 +229,7 @@ def build_location_view(guest: Subscription, server: dict) -> tuple[str, InlineK
     allowed = bool(server.get("allowed"))
     base_gb = _gb(server.get("base_limit_bytes", 0))
     lines = [
-        f"📶 <b>{escape(_server_name(server))}</b> — {escape(guest.name)}",
+        f"📶 <b>{escape(server_name(server))}</b> — {escape(guest.name)}",
         "",
         "Доступ: " + ("✅ открыт" if allowed else "⬜ закрыт"),
         f"База: {base_gb:.0f} ГБ в месяц"

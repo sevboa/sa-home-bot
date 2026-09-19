@@ -1329,7 +1329,9 @@ async def _handle_set_access(
 
 
 def _access_toast(server: dict) -> str:
-    where = server.get("label") or server.get("node") or "локация"
+    # Тот же короткий вид, что и на экранах выдачи (флаг без названия страны):
+    # тост всплывает прямо над ними.
+    where = vpn_admin_view.server_name(server)
     if not server.get("allowed"):
         return f"{where}: доступ закрыт"
     base_gb = server.get("base_limit_bytes", 0) / 1_000_000_000

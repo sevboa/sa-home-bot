@@ -2,14 +2,23 @@
 открыт доступ и на сколько ГБ. Чистые функции из готовых данных (сеть и запись
 — в bot/handlers/vpn.py, они проверяются в test_vpn_handler.py)."""
 
-from sa_home_bot.bot import vpn_admin_view
+from sa_home_bot.bot import guest_rights, vpn_admin_view
 from sa_home_bot.subscriptions.models import SOURCE_GUEST, Subscription
 
 GB = 1_000_000_000
 
 
-def _guest(chat_id: int, name: str = "Аня") -> Subscription:
-    return Subscription(name=name, chat_id=chat_id, source=SOURCE_GUEST)
+def _guest(chat_id: int, name: str = "Аня", rights: frozenset[str] = frozenset()) -> Subscription:
+    return Subscription(
+        name=name, chat_id=chat_id, source=SOURCE_GUEST, allowed_commands=rights
+    )
+
+
+def _vpn_guest(chat_id: int, name: str = "Аня") -> Subscription:
+    """Гость, которому в /guests выдали группу «📶 VPN»."""
+    group = guest_rights.group("vpn")
+    assert group is not None
+    return _guest(chat_id, name, rights=group.rights)
 
 
 def _server(node: str = "jeeves", **over) -> dict:
@@ -39,7 +48,7 @@ def test_guests_view_shows_where_each_guest_is_open():
     guests = [_guest(11), _guest(22, "Борис")]
     access = {11: [_server()], 22: [_server(allowed=False)]}
     text, kb = vpn_admin_view.build_guests_view(guests, access, 0)
-    assert "🇳🇱 Нидерланды 2/200 ГБ" in text
+    assert "🇳🇱 2/200 ГБ" in text
     assert "доступа нет" in text
     assert vpn_admin_view.guest_cb(11) in _callbacks(kb)
 
@@ -52,6 +61,33 @@ def test_guests_view_lists_guest_with_no_locations_at_all():
     assert vpn_admin_view.guest_cb(11) in _callbacks(kb)
 
 
+def test_guests_view_puts_vpn_group_first():
+    """Сверху те, с кем тут работают, — кому группа «📶 VPN» уже выдана."""
+    guests = [_guest(11, "Без VPN"), _vpn_guest(22, "С VPN"), _guest(33, "Тоже без")]
+    text, kb = vpn_admin_view.build_guests_view(guests, {}, 0)
+    assert _callbacks(kb)[0] == vpn_admin_view.guest_cb(22)
+    assert text.index("С VPN") < text.index("Без VPN")
+
+
+def test_sort_guests_keeps_order_inside_halves():
+    """Сортировка устойчивая: внутри половин порядок книги подписок не меняется."""
+    guests = [_guest(11, "б"), _vpn_guest(22, "в"), _guest(33, "а"), _vpn_guest(44, "г")]
+    assert [g.chat_id for g in vpn_admin_view.sort_guests(guests)] == [22, 44, 11, 33]
+
+
+def test_in_vpn_group_counts_partial_and_wildcards():
+    group = guest_rights.group("vpn")
+    assert vpn_admin_view.in_vpn_group(_vpn_guest(1))
+    # Одного права хватает: группу могли доправить руками или снять лишнее.
+    assert vpn_admin_view.in_vpn_group(_guest(2, rights=frozenset({"usage@vpn"})))
+    # Групповые формы из конфига тоже считаются.
+    assert vpn_admin_view.in_vpn_group(_guest(3, rights=frozenset({"*@vpn"})))
+    assert vpn_admin_view.in_vpn_group(_guest(4, rights=frozenset({"*"})))
+    assert not vpn_admin_view.in_vpn_group(_guest(5, rights=frozenset({"chat@llm"})))
+    assert not vpn_admin_view.in_vpn_group(_guest(6))
+    assert group is not None  # каталог на месте — иначе тест бессмысленен
+
+
 def test_guests_view_paginates():
     guests = [_guest(i) for i in range(1, 20)]
     _text, kb = vpn_admin_view.build_guests_view(guests, {}, 0)
@@ -61,11 +97,25 @@ def test_guests_view_paginates():
 # --- карточка гостя --------------------------------------------------------
 
 
+def test_server_name_is_flag_alone_when_label_has_one():
+    """Флаг уже называет страну — слово рядом с ним ничего не добавляет."""
+    assert vpn_admin_view.server_name(_server()) == "🇳🇱"
+    assert vpn_admin_view.server_name(_server(label="🇺🇸 США")) == "🇺🇸"
+
+
+def test_server_name_keeps_label_without_flag():
+    # Сокращать нечего — показываем как есть; совсем без метки остаётся id ноды.
+    assert vpn_admin_view.server_name(_server(label="Дача")) == "Дача"
+    assert vpn_admin_view.server_name(_server(label="")) == "jeeves"
+
+
 def test_guest_view_marks_open_and_closed_locations():
     guest = _guest(11)
     servers = [_server(), _server("wooster", label="🇺🇸 США", allowed=False)]
     text, kb = vpn_admin_view.build_guest_view(guest, servers)
     assert "✅" in text and "⬜" in text
+    assert "Нидерланды" not in text and "США" not in text
+    assert "🇳🇱" in text and "🇺🇸" in text
     assert "база 200 ГБ (личная)" in text
     assert vpn_admin_view.location_cb(11, "jeeves") in _callbacks(kb)
     assert vpn_admin_view.location_cb(11, "wooster") in _callbacks(kb)

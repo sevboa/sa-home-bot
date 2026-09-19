@@ -869,7 +869,9 @@ async def test_admin_location_screen_opens_from_guest_card():
     await vpn_handlers.handle_action(
         callback, link, FakeNotifier(), _config(), ADMIN, _pending(), _book(ANYA)
     )
-    assert "🇺🇸 США" in callback.message.edits[0]
+    # На экранах выдачи локация зовётся флагом, без названия страны.
+    assert "🇺🇸" in callback.message.edits[0]
+    assert "США" not in callback.message.edits[0]
 
 
 async def test_set_access_grants_quota_and_tells_the_guest():
