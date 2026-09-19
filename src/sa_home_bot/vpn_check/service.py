@@ -1,28 +1,37 @@
 """VpnCheckService — ServiceHandler службы vpn_check: пробные запросы через
-локальный VPN-клиентский туннель. Минимальная служба без БД и планировщика
+локальные VPN-клиентские туннели. Минимальная служба без БД и планировщика
 (по образцу net/service.py) — реактивная, не таймерная.
 
 Команда ``ACTION_CHECK`` приходит через fan-out от node-сервиса
 (``node/service.py::ACTION_TRIGGER_PEERS``, инициируется ``vpn/service.py``
-на jeeves раз в ``[vpn].check_interval_s`` или по ``check_now``). Сама
-проверка идёт в фоне (не блокирует ответ на команду — на несколько целей
-с таймаутами это может занять секунды), а результат служба сама пушит
-обратно в vpn отдельным вызовом ``report_check`` — vpn/service.py не ждёт
-синхронно ответа на исходный fan-out, только копит то, что приходит.
-Адресат ищется живым (``bot/vpn_nodes.resolve_vpn_dst``: своя нода, если
-держит vpn, иначе первая живая), а не берётся из ``vpn_protocol.NODE_ID``:
-серверов с этапа 39 несколько, и с хардкодом на jeeves отчёты всего роя
-пропадали, пока тот лежал (2026-09).
+на каждой vpn-ноде раз в ``[vpn].check_interval_s`` или по ``check_now``).
+Сама проверка идёт в фоне (не блокирует ответ на команду — на несколько
+целей с таймаутами это может занять секунды), а результат служба сама
+пушит обратно в vpn отдельным вызовом ``report_check`` — vpn/service.py не
+ждёт синхронно ответа на исходный fan-out, только копит то, что приходит.
+Фанаут идёт на ВСЕ живые vpn-инстансы (``bot/vpn_nodes.fanout``), не в
+один — иначе результат оседает в БД ровно одной ноды.
 
-Сам туннель — вне этого процесса: отдельный network namespace
-(``settings.vpn_check.netns``), поднятый node/fixups.py::
-make_vpn_probe_tunnel_fixup (``nodectl fix``, включая veth-пару + NAT на
-хосте — без них у netns нет ни одного физического интерфейса и WireGuard-
-хендшейку решительно некуда уйти, живая находка 2026-08-17). Эта служба
-netns не создаёт и не поднимает, только пользуется им, вызывая curl внутри
-него — так основная маршрутизация ноды не трогается, независимо от того,
-какие IP отдаёт DNS для проверяемых целей, и одна и та же схема работает
-единообразно на любой ноде роя (включая ноду, где крутится сам VPN-сервер).
+С 39.0.7(d) туннелей может быть НЕСКОЛЬКО — по одному на каждую пару
+(сервер, транспорт), которую эта нода реально проверяет
+(``node/vpn_probe_state.py::load()``, список пишет ``node/fixups.py`` при
+``nodectl fix`` — автообнаружение всех живых vpn-серверов кроме себя, см.
+``bot/vpn_nodes.py::probe_targets``). Диспетчер (``vpn/service.py``) шлёт
+запрос по ОДНОМУ имени сервера («проверьте jeeves»), не по паре — если у
+этой ноды к серверу настроено больше одного транспорта (awg И reality),
+проверяются ВСЕ, и в один ``report_check`` уходит по строке результата на
+каждую пару (сервер, транспорт, цель).
+
+Сам netns + veth-пара + NAT на хосте — вне этого процесса, заводит
+``node/fixups.py`` (``nodectl fix``), переживает ребут (без этого у netns
+нет ни одного физического интерфейса и WireGuard-хендшейку/xray решительно
+некуда уйти — живая находка 2026-08-17). А вот САМ туннель (awg-quick /
+xray-клиент) — эфемерный: эта служба поднимает его перед пачкой проверок
+конкретного слота и гасит сразу после (компромисс ради слабого железа —
+решение владельца 2026-09-18, «полная проверка, но не грузить машины
+вечно висящими процессами»). Одна и та же схема работает единообразно на
+любой ноде роя, включая ноду, где крутится сам VPN-сервер (self-check
+исключён отдельно, ниже).
 """
 
 from __future__ import annotations
@@ -39,7 +48,8 @@ from sa_home_bot import __version__
 from sa_home_bot.bot import vpn_nodes
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
-from sa_home_bot.node import assignments
+from sa_home_bot.node import assignments, vpn_probe_state
+from sa_home_bot.node.vpn_probe_state import ProbeSlot
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     ActionParam,
@@ -57,6 +67,14 @@ log = logging.getLogger(__name__)
 # пробника идёт через туннель, а не мимо (через veth на хост). Литерал, не
 # из целей проверки — цели могут резолвиться в разные IP.
 _ROUTE_SENTINEL = "1.1.1.1"
+
+# После `awg-quick up` хендшейк не всегда мгновенен (реальная сеть, не
+# localhost) — даём маршруту несколько попыток устояться, прежде чем
+# считать тоннель мёртвым. Общее время ожидания укладывается в
+# check_timeout_s с запасом, не превращая эфемерный подъём в вечное
+# ожидание при по-настоящему упавшем сервере.
+_TUNNEL_READY_ATTEMPTS = 3
+_TUNNEL_READY_DELAY_S = 1.0
 
 
 def _looks_like_needs_password(err: str) -> bool:
@@ -81,13 +99,25 @@ async def _run(*cmd: str, timeout: float) -> tuple[int, str, str]:
 
 
 class VpnCheckService:
-    def __init__(self, settings: Settings, node_link: ServiceLink) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        node_link: ServiceLink,
+        *,
+        slots: list[ProbeSlot] | None = None,
+    ) -> None:
         self._cfg = settings.vpn_check
         self._node_link = node_link
         self._node = socket.gethostname()
+        # Слоты — что из матрицы (сервер, транспорт) реально настроено на
+        # ЭТОЙ ноде (пишет node/fixups.py::make_vpn_probe_state_fixup).
+        # ``slots=`` явным аргументом — только для тестов; в проде всегда
+        # читается с диска (пусто — nodectl fix ещё не применялся ни разу,
+        # служба ничего не проверяет, безопасный дефолт).
+        self._slots = vpn_probe_state.load() if slots is None else slots
         # На самой VPN-ноде (есть назначение "vpn") внешний IP из туннеля
         # неизбежно совпадает с IP хоста — эндпоинт пробника это же железо.
-        # Сверку exit-IP там не делаем, опираемся только на маршрут.
+        # Сверку exit-IP там не делаем, опираемся только на маршрут/SOCKS.
         self._is_vpn_exit = assignments.has_service(settings.node.assignments, "vpn")
 
     def describe(self) -> ServiceDescription:
@@ -104,7 +134,11 @@ class VpnCheckService:
         )
 
     async def get_state(self) -> dict[str, Any]:
-        return {"node": self._node, "service": SERVICE_NAME, "netns": self._cfg.netns}
+        return {
+            "node": self._node,
+            "service": SERVICE_NAME,
+            "servers": sorted({slot.server for slot in self._slots}),
+        }
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if action != ACTION_CHECK:
@@ -124,40 +158,31 @@ class VpnCheckService:
         # monitor/get_state.
         if server == self._node:
             return {"accepted": True, "server": server, "skipped": "self-check исключён"}
-        # Локальный тоннель этой ноды ведёт к КОНКРЕТНОМУ серверу
-        # (``probe_server`` — пока настраивается вручную, см. VpnCheckConfig,
-        # автообнаружение это подэтап 39.0.7(d)). Если дispatch просит
-        # проверить кого-то другого — нам нечем, молча пропускаем (не
-        # curl'им мимо кассы и не подписываем чужой результат своим именем).
-        if not self._cfg.probe_server or self._cfg.probe_server != server:
+        # Локальные тоннели этой ноды к запрошенному серверу — может быть
+        # НОЛЬ (ничего не настроено, скипаем), ОДИН (типичный случай) или
+        # НЕСКОЛЬКО (сервер несёт оба транспорта, и оба тут провижинены) —
+        # проверяем каждый, репортим одним пакетом.
+        slots = [s for s in self._slots if s.server == server]
+        if not slots:
             return {
                 "accepted": True,
                 "server": server,
                 "skipped": "нет локально настроенного тоннеля к этому серверу",
             }
-        asyncio.create_task(self._run_and_report(server, targets), name="vpn-check-run")
+        asyncio.create_task(self._run_and_report(server, slots, targets), name="vpn-check-run")
         return {"accepted": True, "server": server, "targets": targets}
 
-    async def _run_and_report(self, server: str, targets: list[str]) -> None:
-        # Сначала убеждаемся, что пробник ВООБЩЕ ходит через туннель —
-        # иначе curl к целям может успешно отвечать мимо VPN, и проверка
-        # тихо зеленеет (инцидент 2026-08-31). Провал гейта → все цели
-        # помечаем одной и той же внятной ошибкой, а не ложным ok.
-        gate = await self._egress_gate()
-        transport = self._cfg.probe_transport
+    async def _run_and_report(
+        self, server: str, slots: list[ProbeSlot], targets: list[str]
+    ) -> None:
         results: list[dict[str, Any]] = []
-        for target in targets:
-            one = (
-                {"ok": False, "ms": None, "error": gate}
-                if gate is not None
-                else (await self._check_one(target))
-            )
-            results.append({"server": server, "transport": transport, "target": target, **one})
+        # Слоты одного сервера идут ПОСЛЕДОВАТЕЛЬНО, не параллельно —
+        # каждый эфемерный подъём уже сам по себе всплеск нагрузки, слабое
+        # железо не должно тянуть несколько сразу (решение владельца
+        # 2026-09-18 про «не грузить машины»).
+        for slot in slots:
+            results.extend(await self._check_slot(slot, targets))
         try:
-            # Фанаут на ВСЕ живые vpn-инстансы, не в одну через
-            # resolve_vpn_dst — иначе результат оседает в БД ровно одной
-            # ноды, а не той, что живёт дольше (обнаружено 2026-09-18,
-            # см. IMPLEMENTATION_PLAN.md 39.0.7 «Репликация записи/чтения»).
             reports = await vpn_nodes.fanout(
                 self._node_link, "report_check", {"node": self._node, "results": results}
             )
@@ -166,7 +191,91 @@ class VpnCheckService:
         except (ServiceUnavailableError, ProtoError, TimeoutError) as exc:
             log.warning("vpn_check: не удалось отправить результат в vpn: %s", exc)
 
-    async def _check_one(self, target: str) -> dict[str, Any]:
+    async def _check_slot(self, slot: ProbeSlot, targets: list[str]) -> list[dict[str, Any]]:
+        """Поднять эфемерный туннель под ОДИН слот, прогнать пачку целей,
+        погасить туннель — независимо от исхода (``finally``), чтобы
+        неудачный/зависший чек не оставлял процесс висеть до следующего
+        цикла."""
+        up_err = await self._tunnel_up(slot)
+        try:
+            # Сначала убеждаемся, что пробник ВООБЩЕ ходит через туннель —
+            # иначе curl к целям может успешно отвечать мимо VPN, и
+            # проверка тихо зеленеет (инцидент 2026-08-31). Провал гейта →
+            # все цели помечаем одной и той же внятной ошибкой, а не
+            # ложным ok.
+            gate = up_err if up_err is not None else await self._egress_gate(slot)
+            results: list[dict[str, Any]] = []
+            for target in targets:
+                one = (
+                    {"ok": False, "ms": None, "error": gate}
+                    if gate is not None
+                    else (await self._check_one(slot, target))
+                )
+                results.append(
+                    {"server": slot.server, "transport": slot.transport, "target": target, **one}
+                )
+            return results
+        finally:
+            await self._tunnel_down(slot)
+
+    async def _tunnel_up(self, slot: ProbeSlot) -> str | None:
+        """Поднять сам процесс туннеля (сеть/netns/veth уже подняты
+        node/fixups.py заранее, вечно). ``None`` — получилось (гейт решит
+        дальше, готов ли реально маршрут); строка — сразу ошибка, и гасить
+        нечего (``up`` не прошёл, ``_tunnel_down`` всё равно best-effort
+        вызывается вызывающим кодом — на случай частичного подъёма)."""
+        if slot.transport != "awg":
+            # Reality — 39.0.7(e).
+            return f"транспорт {slot.transport} пока не поддержан этим пробником"
+        ip_path = shutil.which("ip") or "ip"
+        awg_quick_path = shutil.which("awg-quick") or "awg-quick"
+        code, _out, err = await _run(
+            "sudo",
+            "-n",
+            ip_path,
+            "netns",
+            "exec",
+            slot.netns,
+            awg_quick_path,
+            "up",
+            str(slot.iface),
+            timeout=self._cfg.check_timeout_s + 5.0,
+        )
+        if code != 0:
+            if _looks_like_needs_password(err):
+                return "нет прав поднять туннель пробника — выполните: nodectl fix"
+            return f"awg-quick up {slot.iface} не отработал: {err.strip() or code}"
+        return None
+
+    async def _tunnel_down(self, slot: ProbeSlot) -> None:
+        """Best-effort — ошибки останова только логируем: висящий netns без
+        поднятого интерфейса безвреден (сам интерфейс уже мог не подняться
+        вовсе), а падать здесь незачем — вызывается из ``finally``."""
+        if slot.transport != "awg":
+            return
+        ip_path = shutil.which("ip") or "ip"
+        awg_quick_path = shutil.which("awg-quick") or "awg-quick"
+        code, _out, err = await _run(
+            "sudo",
+            "-n",
+            ip_path,
+            "netns",
+            "exec",
+            slot.netns,
+            awg_quick_path,
+            "down",
+            str(slot.iface),
+            timeout=self._cfg.check_timeout_s + 5.0,
+        )
+        if code != 0 and not _looks_like_needs_password(err):
+            log.warning(
+                "vpn_check: awg-quick down %s (netns %s) не отработал: %s",
+                slot.iface,
+                slot.netns,
+                err.strip() or code,
+            )
+
+    async def _check_one(self, slot: ProbeSlot, target: str) -> dict[str, Any]:
         timeout_s = self._cfg.check_timeout_s
         # Заход в чужой netns требует root — узкий sudoers-снипет ставит
         # nodectl fix (node/fixups.py::make_vpn_probe_sudoers_fixup), тот же
@@ -182,7 +291,7 @@ class VpnCheckService:
             ip_path,
             "netns",
             "exec",
-            self._cfg.netns,
+            slot.netns,
             "curl",
             "-s",
             "-m",
@@ -213,17 +322,29 @@ class VpnCheckService:
         ok = code.startswith(("2", "3"))
         return {"ok": ok, "ms": latency_ms, "error": None if ok else f"http {code or '?'}"}
 
-    async def _egress_gate(self) -> str | None:
+    async def _egress_gate(self, slot: ProbeSlot) -> str | None:
         """None — пробник реально гонит трафик через VPN-туннель. Иначе —
         строка-ошибка (ей помечаются все цели). Две независимые проверки:
-        1) дефолтный маршрут из netns идёт через `iface`; 2) внешний IP из
-        netns не совпадает с IP хоста (кроме самой VPN-ноды)."""
-        route_err = await self._check_route()
+        1) дефолтный маршрут из netns идёт через `iface` (с несколькими
+        попытками — хендшейк после ``awg-quick up`` не всегда мгновенен);
+        2) внешний IP из netns не совпадает с IP хоста (кроме самой
+        VPN-ноды)."""
+        route_err = await self._wait_for_route(slot)
         if route_err is not None:
             return route_err
-        return await self._check_exit_ip()
+        return await self._check_exit_ip(slot)
 
-    async def _check_route(self) -> str | None:
+    async def _wait_for_route(self, slot: ProbeSlot) -> str | None:
+        err: str | None = None
+        for attempt in range(_TUNNEL_READY_ATTEMPTS):
+            err = await self._check_route(slot)
+            if err is None:
+                return None
+            if attempt < _TUNNEL_READY_ATTEMPTS - 1:
+                await asyncio.sleep(_TUNNEL_READY_DELAY_S)
+        return err
+
+    async def _check_route(self, slot: ProbeSlot) -> str | None:
         ip_path = shutil.which("ip") or "ip"
         code, out, err = await _run(
             "sudo",
@@ -231,7 +352,7 @@ class VpnCheckService:
             ip_path,
             "netns",
             "exec",
-            self._cfg.netns,
+            slot.netns,
             ip_path,
             "route",
             "get",
@@ -241,25 +362,25 @@ class VpnCheckService:
         if code != 0:
             if _looks_like_needs_password(err):
                 return "нет прав на проверку маршрута netns — выполните: nodectl fix"
-            return f"netns {self._cfg.netns}: `ip route get` не отработал: {err.strip() or code}"
-        if f"dev {self._cfg.iface}" not in out:
+            return f"netns {slot.netns}: `ip route get` не отработал: {err.strip() or code}"
+        if f"dev {slot.iface}" not in out:
             first = next((ln.strip() for ln in out.splitlines() if ln.strip()), "(пусто)")
             return (
                 f"пробник не в туннеле: маршрут до {_ROUTE_SENTINEL} — «{first}», "
-                f"ожидался dev {self._cfg.iface}; выполните: nodectl fix"
+                f"ожидался dev {slot.iface}; выполните: nodectl fix"
             )
         return None
 
-    async def _check_exit_ip(self) -> str | None:
+    async def _check_exit_ip(self, slot: ProbeSlot) -> str | None:
         url = self._cfg.ip_echo_url
         if not url or self._is_vpn_exit:
             return None
-        netns_ip = await self._exit_ip(via_netns=True)
+        netns_ip = await self._exit_ip(slot, via_netns=True)
         if netns_ip is None:
             # Не смогли узнать — не тема этой проверки, реальные цели
             # покажут настоящий сбой.
             return None
-        host_ip = await self._exit_ip(via_netns=False)
+        host_ip = await self._exit_ip(slot, via_netns=False)
         if host_ip is not None and netns_ip == host_ip:
             return (
                 f"внешний IP из туннеля ({netns_ip}) совпал с IP хоста — "
@@ -267,12 +388,12 @@ class VpnCheckService:
             )
         return None
 
-    async def _exit_ip(self, *, via_netns: bool) -> str | None:
+    async def _exit_ip(self, slot: ProbeSlot, *, via_netns: bool) -> str | None:
         timeout_s = self._cfg.check_timeout_s
         curl = ["curl", "-s", "-m", str(timeout_s), self._cfg.ip_echo_url]
         if via_netns:
             ip_path = shutil.which("ip") or "ip"
-            cmd = ["sudo", "-n", ip_path, "netns", "exec", self._cfg.netns, *curl]
+            cmd = ["sudo", "-n", ip_path, "netns", "exec", slot.netns, *curl]
         else:
             cmd = curl
         code, out, _ = await _run(*cmd, timeout=timeout_s + 3.0)

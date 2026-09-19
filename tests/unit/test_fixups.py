@@ -3,9 +3,12 @@ build_fixups). apply()/check() реальный sudo/файлы не трога�
 
 import json
 import stat
+from pathlib import Path
 
+from sa_home_bot.bot.vpn_nodes import ProbeTarget
 from sa_home_bot.config import AppConfig, AppsConfig, NodeConfig, Settings, TelegramConfig
 from sa_home_bot.node import fixups as fixups_module
+from sa_home_bot.node import vpn_probe_state
 from sa_home_bot.node.fixups import (
     INSTALL_SMARTMONTOOLS,
     JOURNALCTL_GROUP,
@@ -20,8 +23,10 @@ from sa_home_bot.node.fixups import (
     make_awg_sudoers_fixup,
     make_vpn_probe_forwarding_fixup,
     make_vpn_probe_forwarding_persist_fixup,
+    make_vpn_probe_scaffold_fixup,
+    make_vpn_probe_state_fixup,
     make_vpn_probe_sudoers_fixup,
-    make_vpn_probe_tunnel_fixup,
+    make_vpn_probe_tunnel_conf_fixup,
     microsocks_unit_content,
     mtg_unit_content,
     power_polkit_rule_content,
@@ -30,10 +35,26 @@ from sa_home_bot.node.fixups import (
     smartctl_sudoers_content,
     smartctl_wrapper_content,
     vpn_probe_forward_unit_content,
+    vpn_probe_scaffold_unit_content,
     vpn_probe_sudoers_content,
-    vpn_probe_unit_content,
     wol_unit_content,
 )
+
+
+def _slot(**overrides) -> vpn_probe_state.ProbeSlot:
+    base = dict(
+        server="jeeves",
+        transport="awg",
+        netns="vpn-probe-jeeves-awg",
+        veth_host="vprobe0h0",
+        veth_ns="vprobe0n0",
+        veth_host_addr="10.200.200.1/30",
+        veth_ns_addr="10.200.200.2/30",
+        subnet="10.200.200.0/30",
+        iface="awg-probe0",
+    )
+    base.update(overrides)
+    return vpn_probe_state.ProbeSlot(**base)
 
 
 def _make_executable(path):
@@ -433,40 +454,81 @@ def test_wol_unit_content_runs_ethtool_wol_g_on_given_iface():
 
 
 def test_vpn_probe_needed_only_when_vpn_check_assigned():
-    fixup = make_vpn_probe_tunnel_fixup(_settings(["vpn_check"]))
+    fixup = make_vpn_probe_scaffold_fixup(_settings(["vpn_check"]), _slot())
     assert fixup.needed(_settings(["vpn_check"]))
     assert not fixup.needed(_settings(["vpn"]))
 
 
-def test_vpn_probe_sudoers_shares_needed_with_tunnel():
-    settings = _settings(["vpn_check"])
-    assert make_vpn_probe_sudoers_fixup(settings).needed(
-        settings
-    ) == make_vpn_probe_tunnel_fixup(settings).needed(settings)
+def test_probe_slot_from_target_awg_gets_iface_and_unique_veth():
+    slot = fixups_module._probe_slot_from_target(0, ProbeTarget(server="jeeves", transport="awg"))
+    assert slot.netns == "vpn-probe-jeeves-awg"
+    assert slot.iface == "awg-probe0"
+    assert slot.socks_port is None
+    assert slot.veth_host == "vprobe0h0" and slot.veth_ns == "vprobe0n0"
+    assert slot.subnet == "10.200.200.0/30"
+    assert len(slot.veth_host) <= 15 and len(slot.veth_ns) <= 15  # IFNAMSIZ
 
 
-def test_build_fixups_includes_vpn_probe_fixups_when_vpn_check_assigned():
-    ids = {f.id for f in build_fixups(_settings(["vpn_check"]))}
-    assert {
-        "vpn-check-probe-tunnel",
-        "vpn-check-probe-sudoers",
-        "vpn-check-probe-forwarding",
-        "vpn-check-probe-forwarding-persist",
-    } <= ids
+def test_probe_slot_from_target_reality_gets_socks_port_not_iface():
+    slot = fixups_module._probe_slot_from_target(
+        1, ProbeTarget(server="wooster", transport="reality")
+    )
+    assert slot.netns == "vpn-probe-wooster-reality"
+    assert slot.iface is None
+    assert slot.socks_port == 11081
 
 
-def test_build_fixups_excludes_vpn_probe_fixups_without_vpn_check():
-    ids = {f.id for f in build_fixups(_settings(["vpn"]))}
-    assert "vpn-check-probe-tunnel" not in ids
-    assert "vpn-check-probe-sudoers" not in ids
-    assert "vpn-check-probe-forwarding" not in ids
-    assert "vpn-check-probe-forwarding-persist" not in ids
+def test_probe_slot_from_target_indices_dont_collide():
+    slots = [
+        fixups_module._probe_slot_from_target(i, t)
+        for i, t in enumerate(
+            [
+                ProbeTarget(server="jeeves", transport="awg"),
+                ProbeTarget(server="jeeves", transport="reality"),
+                ProbeTarget(server="wooster", transport="reality"),
+            ]
+        )
+    ]
+    assert len({s.veth_host for s in slots}) == 3
+    assert len({s.veth_ns for s in slots}) == 3
+    assert len({s.subnet for s in slots}) == 3
+    assert len({s.netns for s in slots}) == 3
 
 
-def test_vpn_probe_tunnel_check_false_when_unit_content_is_stale(monkeypatch):
-    """Живой застрявший апгрейд 2026-08-17: юнит существует и active, но с
-    ДРУГИМ (старым, netns-версии) содержимым — check() обязан это заметить,
-    иначе apply() с новым содержимым не позовётся вовсе."""
+def test_discover_probe_slots_returns_empty_and_warns_on_network_failure(monkeypatch):
+    async def boom(settings):
+        raise ConnectionRefusedError("рой недоступен")
+
+    monkeypatch.setattr(fixups_module, "_fetch_probe_slots", boom)
+    assert fixups_module._discover_probe_slots(_settings(["vpn_check"])) == []
+
+
+def test_vpn_probe_scaffold_unit_content_has_no_permanent_tunnel_process():
+    # 39.0.7(d): скаффолд заводит только netns+veth+маршрут — сам туннель
+    # (awg-quick) больше НЕ часть этого юнита, служба поднимает его сама
+    # эфемерно вокруг каждого чек-цикла.
+    content = vpn_probe_scaffold_unit_content(_slot(), "/usr/sbin/ip")
+    assert "awg-quick" not in content
+    assert "ExecStart=/bin/true\n" in content
+    assert "RemainAfterExit=yes" in content
+
+
+def test_vpn_probe_scaffold_unit_content_pre_steps_setup_netns_and_veth_idempotently():
+    content = vpn_probe_scaffold_unit_content(_slot(), "/usr/sbin/ip")
+    assert "ExecStartPre=-/usr/sbin/ip netns add vpn-probe-jeeves-awg\n" in content
+    assert (
+        "ExecStartPre=-/usr/sbin/ip link add vprobe0h0 type veth peer name vprobe0n0\n" in content
+    )
+    assert "ExecStartPre=-/usr/sbin/ip link set vprobe0n0 netns vpn-probe-jeeves-awg\n" in content
+    # "set ... up" идемпотентно само по себе — без ведущего "-".
+    assert "ExecStartPre=/usr/sbin/ip link set vprobe0h0 up\n" in content
+    assert (
+        "ExecStartPre=-/usr/sbin/ip netns exec vpn-probe-jeeves-awg /usr/sbin/ip route add "
+        "default via 10.200.200.1\n" in content
+    )
+
+
+def test_probe_scaffold_check_false_when_unit_content_is_stale(monkeypatch):
     monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
     monkeypatch.setattr(fixups_module, "_which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(fixups_module, "_read_privileged", lambda path: "stale old content\n")
@@ -476,159 +538,158 @@ def test_vpn_probe_tunnel_check_false_when_unit_content_is_stale(monkeypatch):
         "run",
         lambda *a, **k: called_is_active.append(True) or type("R", (), {"returncode": 0})(),
     )
-    settings = _settings(["vpn_check"])
-    assert fixups_module._vpn_probe_tunnel_check(settings) is False
+    assert fixups_module._probe_scaffold_check(_slot()) is False
     assert not called_is_active  # содержимое не совпало — до is-active дело не дошло
 
 
-def _fake_run_result(returncode=0, stdout="", stderr=""):
-    return type("R", (), {"returncode": returncode, "stdout": stdout, "stderr": stderr})()
-
-
-def test_vpn_probe_tunnel_check_true_when_content_matches_and_active(monkeypatch):
+def test_probe_scaffold_check_true_when_content_matches_and_active(monkeypatch):
     monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
     monkeypatch.setattr(fixups_module, "_which", lambda name: f"/usr/bin/{name}")
-
-    def fake_read(path):
-        if str(path).endswith(".conf"):
-            return "[Interface]\nAddress = 10.9.0.14/32\n[Peer]\nAllowedIPs = 0.0.0.0/0\n"
-        return fixups_module.vpn_probe_unit_content(
-            "vpn-probe", fixups_module.VPN_PROBE_IFACE, "/usr/bin/ip", "/usr/bin/awg-quick"
-        )
-
-    monkeypatch.setattr(fixups_module, "_read_privileged", fake_read)
-
-    def fake_run(cmd, *a, **k):
-        if "route" in cmd and "get" in cmd:  # ip route get — маршрут через туннель
-            return _fake_run_result(stdout=f"1.1.1.1 dev {fixups_module.VPN_PROBE_IFACE} src ...\n")
-        return _fake_run_result()  # systemctl is-active
-
-    monkeypatch.setattr(fixups_module.subprocess, "run", fake_run)
-    settings = _settings(["vpn_check"])
-    assert fixups_module._vpn_probe_tunnel_check(settings) is True
+    monkeypatch.setattr(
+        fixups_module,
+        "_read_privileged",
+        lambda path: vpn_probe_scaffold_unit_content(_slot(), "/usr/bin/ip"),
+    )
+    monkeypatch.setattr(
+        fixups_module.subprocess,
+        "run",
+        lambda *a, **k: type("R", (), {"returncode": 0})(),
+    )
+    assert fixups_module._probe_scaffold_check(_slot()) is True
 
 
-def test_vpn_probe_tunnel_check_false_when_conf_still_has_table_line(monkeypatch):
+def test_probe_conf_check_false_when_missing(monkeypatch):
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: False)
+    assert fixups_module._probe_conf_check(_slot()) is False
+
+
+def test_probe_conf_check_false_when_conf_still_has_table_line(monkeypatch):
     """Застрявший ``Table = off`` — awg-quick не строит маршрут в туннель,
     curl уходит мимо VPN (инцидент 2026-08-31). check() обязан это увидеть
     и заставить apply() переписать конфиг."""
     monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
-    monkeypatch.setattr(fixups_module, "_which", lambda name: f"/usr/bin/{name}")
-
-    def fake_read(path):
-        if str(path).endswith(".conf"):
-            return "[Interface]\nTable = off\nAddress = 10.9.0.14/32\n"
-        return fixups_module.vpn_probe_unit_content(
-            "vpn-probe", fixups_module.VPN_PROBE_IFACE, "/usr/bin/ip", "/usr/bin/awg-quick"
-        )
-
-    monkeypatch.setattr(fixups_module, "_read_privileged", fake_read)
-    monkeypatch.setattr(fixups_module.subprocess, "run", lambda *a, **k: _fake_run_result())
-    assert fixups_module._vpn_probe_tunnel_check(_settings(["vpn_check"])) is False
+    monkeypatch.setattr(
+        fixups_module,
+        "_read_privileged",
+        lambda path: "[Interface]\nTable = off\nAddress = 10.9.0.14/32\n",
+    )
+    assert fixups_module._probe_conf_check(_slot()) is False
 
 
-def test_vpn_probe_tunnel_check_false_when_route_bypasses_tunnel(monkeypatch):
-    """Юнит и конфиг в порядке, но живой маршрут из netns идёт мимо
-    туннеля (через veth) — check() валит фикс."""
+def test_probe_conf_check_true_when_clean(monkeypatch):
     monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
-    monkeypatch.setattr(fixups_module, "_which", lambda name: f"/usr/bin/{name}")
-
-    def fake_read(path):
-        if str(path).endswith(".conf"):
-            return "[Interface]\nAddress = 10.9.0.14/32\n"
-        return fixups_module.vpn_probe_unit_content(
-            "vpn-probe", fixups_module.VPN_PROBE_IFACE, "/usr/bin/ip", "/usr/bin/awg-quick"
-        )
-
-    monkeypatch.setattr(fixups_module, "_read_privileged", fake_read)
-
-    def fake_run(cmd, *a, **k):
-        if "route" in cmd and "get" in cmd:
-            return _fake_run_result(stdout="1.1.1.1 via 10.200.200.1 dev vprobe-veth1 src ...\n")
-        return _fake_run_result()
-
-    monkeypatch.setattr(fixups_module.subprocess, "run", fake_run)
-    assert fixups_module._vpn_probe_tunnel_check(_settings(["vpn_check"])) is False
-
-
-def test_vpn_probe_tunnel_check_tolerates_missing_route_sudoers(monkeypatch):
-    """Право на ``ip netns exec ... ip route get`` ставит соседний фикс
-    vpn-check-probe-sudoers — пока его нет, маршрутную сверку пропускаем
-    (не валим фикс из-за отсутствующего права)."""
-    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
-    monkeypatch.setattr(fixups_module, "_which", lambda name: f"/usr/bin/{name}")
-
-    def fake_read(path):
-        if str(path).endswith(".conf"):
-            return "[Interface]\nAddress = 10.9.0.14/32\n"
-        return fixups_module.vpn_probe_unit_content(
-            "vpn-probe", fixups_module.VPN_PROBE_IFACE, "/usr/bin/ip", "/usr/bin/awg-quick"
-        )
-
-    monkeypatch.setattr(fixups_module, "_read_privileged", fake_read)
-
-    def fake_run(cmd, *a, **k):
-        if "route" in cmd and "get" in cmd:
-            return _fake_run_result(returncode=1, stderr="sudo: a password is required\n")
-        return _fake_run_result()
-
-    monkeypatch.setattr(fixups_module.subprocess, "run", fake_run)
-    assert fixups_module._vpn_probe_tunnel_check(_settings(["vpn_check"])) is True
-
-
-def test_vpn_probe_unit_content_runs_awg_quick_inside_netns():
-    content = vpn_probe_unit_content(
-        "vpn-probe", "awg-probe0", "/usr/sbin/ip", "/usr/bin/awg-quick"
+    monkeypatch.setattr(
+        fixups_module, "_read_privileged", lambda path: "[Interface]\nAddress = 10.9.0.14/32\n"
     )
-    assert (
-        "ExecStart=/usr/sbin/ip netns exec vpn-probe /usr/bin/awg-quick up awg-probe0\n" in content
-    )
-    assert (
-        "ExecStop=/usr/sbin/ip netns exec vpn-probe /usr/bin/awg-quick down awg-probe0\n"
-        in content
-    )
-    assert "RemainAfterExit=yes" in content
-    # ExecStartPost — громкая проверка, что маршрут наружу идёт через туннель.
-    assert (
-        'ExecStartPost=/bin/sh -c "/usr/sbin/ip netns exec vpn-probe /usr/sbin/ip route get '
-        "1.1.1.1 | grep -q 'dev awg-probe0'\"\n" in content
-    )
+    assert fixups_module._probe_conf_check(_slot()) is True
 
 
-def test_vpn_probe_unit_content_pre_steps_setup_netns_and_veth_idempotently():
-    content = vpn_probe_unit_content(
-        "vpn-probe", "awg-probe0", "/usr/sbin/ip", "/usr/bin/awg-quick"
+def test_vpn_probe_sudoers_content_pins_ip_path_netns_and_awg_up_down():
+    content = vpn_probe_sudoers_content(
+        [_slot()], "/usr/sbin/ip", "/usr/local/bin/awg-quick", "sevboa"
     )
-    # Ведущий "-" — не валить юнит, если шаг уже применён (повторный `add`
-    # уже существующего netns/veth просто вернёт ошибку, которую игнорируем).
-    assert "ExecStartPre=-/usr/sbin/ip netns add vpn-probe\n" in content
-    assert (
-        "ExecStartPre=-/usr/sbin/ip link add vprobe-veth0 type veth peer name vprobe-veth1\n"
-        in content
-    )
-    assert "ExecStartPre=-/usr/sbin/ip link set vprobe-veth1 netns vpn-probe\n" in content
-    # "set ... up" идемпотентно само по себе — без ведущего "-".
-    assert "ExecStartPre=/usr/sbin/ip link set vprobe-veth0 up\n" in content
-    assert (
-        "ExecStartPre=-/usr/sbin/ip netns exec vpn-probe /usr/sbin/ip route add default "
-        "via 10.200.200.1\n" in content
-    )
-
-
-def test_vpn_probe_sudoers_content_pins_ip_path_and_netns_curl_wildcard():
-    content = vpn_probe_sudoers_content("/usr/sbin/ip", "vpn-probe", "sevboa")
     assert content == (
         "sevboa ALL=(root) NOPASSWD: "
-        "/usr/sbin/ip netns exec vpn-probe curl *, "
-        "/usr/sbin/ip netns exec vpn-probe /usr/sbin/ip route get *\n"
+        "/usr/sbin/ip netns exec vpn-probe-jeeves-awg curl *, "
+        "/usr/sbin/ip netns exec vpn-probe-jeeves-awg /usr/sbin/ip route get *, "
+        "/usr/sbin/ip netns exec vpn-probe-jeeves-awg /usr/local/bin/awg-quick up awg-probe0, "
+        "/usr/sbin/ip netns exec vpn-probe-jeeves-awg /usr/local/bin/awg-quick down awg-probe0\n"
     )
 
 
-def test_vpn_probe_forwarding_needed_same_as_tunnel():
+def test_vpn_probe_sudoers_content_reality_slot_has_no_awg_quick_grant():
+    reality_slot = _slot(
+        server="wooster", transport="reality", netns="vpn-probe-wooster-reality",
+        iface=None, socks_port=11081,
+    )
+    content = vpn_probe_sudoers_content(
+        [reality_slot], "/usr/sbin/ip", "/usr/local/bin/awg-quick", "sevboa"
+    )
+    assert "awg-quick" not in content
+    assert "vpn-probe-wooster-reality curl *" in content
+
+
+def test_vpn_probe_sudoers_content_multiple_slots_are_comma_joined():
+    slots = [_slot(), _slot(server="wooster", netns="vpn-probe-wooster-awg", iface="awg-probe1")]
+    content = vpn_probe_sudoers_content(slots, "/usr/sbin/ip", "/usr/local/bin/awg-quick", "sevboa")
+    assert content.count("curl *") == 2
+    assert content.count("awg-quick up") == 2
+
+
+def test_vpn_probe_sudoers_shares_needed_with_scaffold():
     settings = _settings(["vpn_check"])
-    forwarding = make_vpn_probe_forwarding_fixup(settings)
-    tunnel = make_vpn_probe_tunnel_fixup(settings)
-    assert forwarding.needed(settings) == tunnel.needed(settings)
+    sudoers = make_vpn_probe_sudoers_fixup(settings, [])
+    scaffold = make_vpn_probe_scaffold_fixup(settings, _slot())
+    assert sudoers.needed(settings) == scaffold.needed(settings)
+
+
+def test_vpn_probe_tunnel_conf_fixup_id_and_needed():
+    settings = _settings(["vpn_check"])
+    fixup = make_vpn_probe_tunnel_conf_fixup(settings, _slot())
+    assert fixup.id == "vpn-probe-conf-jeeves-awg"
+    assert fixup.needed(settings)
+    assert not fixup.needed(_settings(["vpn"]))
+
+
+def test_vpn_probe_state_fixup_id_and_needed():
+    settings = _settings(["vpn_check"])
+    fixup = make_vpn_probe_state_fixup(settings, [_slot()])
+    assert fixup.id == "vpn-check-probe-state"
+    assert fixup.needed(settings)
+    assert not fixup.needed(_settings(["vpn"]))
+
+
+def test_build_fixups_includes_vpn_probe_fixups_when_vpn_check_assigned(monkeypatch):
+    monkeypatch.setattr(
+        fixups_module,
+        "_discover_probe_slots",
+        lambda settings: [_slot()],
+    )
+    ids = {f.id for f in build_fixups(_settings(["vpn_check"]))}
+    assert {
+        "vpn-probe-scaffold-jeeves-awg",
+        "vpn-probe-conf-jeeves-awg",
+        "vpn-check-probe-sudoers",
+        "vpn-check-probe-forwarding",
+        "vpn-check-probe-forwarding-persist",
+        "vpn-check-probe-state",
+    } <= ids
+
+
+def test_build_fixups_reality_slot_gets_state_but_no_scaffold(monkeypatch):
+    # 39.0.7(e) ещё не сделан — reality-слот попадает в vpn-check-probe-state
+    # (служба сможет мягко ответить «транспорт не поддержан»), но никакой
+    # scaffold/conf/awg-sudoers для него не заводится.
+    reality_slot = _slot(server="wooster", transport="reality", iface=None, socks_port=11080)
+    monkeypatch.setattr(fixups_module, "_discover_probe_slots", lambda settings: [reality_slot])
+    ids = {f.id for f in build_fixups(_settings(["vpn_check"]))}
+    assert "vpn-check-probe-state" in ids
+    assert not any(i.startswith("vpn-probe-scaffold-") for i in ids)
+    assert not any(i.startswith("vpn-probe-conf-") for i in ids)
+
+
+def test_build_fixups_excludes_vpn_probe_fixups_without_vpn_check(monkeypatch):
+    discover_called = []
+    monkeypatch.setattr(
+        fixups_module,
+        "_discover_probe_slots",
+        lambda settings: discover_called.append(True) or [],
+    )
+    ids = {f.id for f in build_fixups(_settings(["vpn"]))}
+    assert not any(i.startswith("vpn-probe-") for i in ids)
+    assert "vpn-check-probe-sudoers" not in ids
+    assert "vpn-check-probe-forwarding" not in ids
+    assert "vpn-check-probe-forwarding-persist" not in ids
+    assert "vpn-check-probe-state" not in ids
+    # Нода без vpn_check не должна вообще ходить в рой за списком целей.
+    assert discover_called == []
+
+
+def test_vpn_probe_forwarding_needed_same_as_scaffold():
+    settings = _settings(["vpn_check"])
+    forwarding = make_vpn_probe_forwarding_fixup(settings, [])
+    scaffold = make_vpn_probe_scaffold_fixup(settings, _slot())
+    assert forwarding.needed(settings) == scaffold.needed(settings)
 
 
 def test_find_base_chain_returns_none_without_matching_hook(monkeypatch):
@@ -666,20 +727,26 @@ def test_find_base_chain_finds_existing_forward_chain(monkeypatch):
     assert fixups_module._find_base_chain("forward", "filter") == ("inet", "filter", "forward")
 
 
+def test_probe_forwarding_check_true_when_no_slots():
+    # Ничего проверять не нужно — фикс не должен требовать forward/NAT под
+    # пустой список целей (например, эта нода единственный vpn-сервер роя).
+    assert fixups_module._probe_forwarding_check([]) is True
+
+
 def test_probe_forwarding_check_looks_for_veth_name_and_subnet(monkeypatch):
     monkeypatch.setattr(fixups_module, "_ip_forward_enabled", lambda: True)
     monkeypatch.setattr(
         fixups_module,
         "_nft_ruleset_text",
-        lambda: 'iifname "vprobe-veth0" accept\nip saddr 10.200.200.0/30 masquerade\n',
+        lambda: 'iifname "vprobe0h0" accept\nip saddr 10.200.200.0/30 masquerade\n',
     )
-    assert fixups_module._probe_forwarding_check() is True
+    assert fixups_module._probe_forwarding_check([_slot()]) is True
 
 
 def test_probe_forwarding_check_false_when_absent(monkeypatch):
     monkeypatch.setattr(fixups_module, "_ip_forward_enabled", lambda: True)
     monkeypatch.setattr(fixups_module, "_nft_ruleset_text", lambda: "")
-    assert fixups_module._probe_forwarding_check() is False
+    assert fixups_module._probe_forwarding_check([_slot()]) is False
 
 
 def test_probe_forwarding_check_false_when_ip_forward_disabled(monkeypatch):
@@ -691,9 +758,9 @@ def test_probe_forwarding_check_false_when_ip_forward_disabled(monkeypatch):
     monkeypatch.setattr(
         fixups_module,
         "_nft_ruleset_text",
-        lambda: 'iifname "vprobe-veth0" accept\nip saddr 10.200.200.0/30 masquerade\n',
+        lambda: 'iifname "vprobe0h0" accept\nip saddr 10.200.200.0/30 masquerade\n',
     )
-    assert fixups_module._probe_forwarding_check() is False
+    assert fixups_module._probe_forwarding_check([_slot()]) is False
 
 
 def test_ensure_ip_forward_noop_when_already_enabled(monkeypatch):
@@ -720,52 +787,78 @@ def test_probe_forwarding_apply_installs_nft_when_missing(monkeypatch):
     forward/NAT для veth-подсети не появляется, и симптом неотличим от
     таймаута соединения."""
     monkeypatch.setattr(fixups_module, "_ensure_ip_forward", lambda: None)
-    monkeypatch.setattr(fixups_module, "_probe_forwarding_check", lambda: False)
     monkeypatch.setattr(fixups_module, "_which", lambda name: None)
+    monkeypatch.setattr(fixups_module, "_nft_chain_text", lambda *a: "")
     sudo_calls = []
     monkeypatch.setattr(
         fixups_module, "install_argv", lambda pkg: ["apt-get", "install", "-y", pkg]
     )
     monkeypatch.setattr(fixups_module, "_sudo", lambda argv: sudo_calls.append(argv))
     monkeypatch.setattr(fixups_module, "_find_base_chain", lambda hook, kind: None)
-    fixups_module._probe_forwarding_apply()
+    fixups_module._probe_forwarding_apply([_slot()])
     assert sudo_calls[0] == ["apt-get", "install", "-y", "nftables"]
     assert any(call[:3] == ["nft", "add", "table"] for call in sudo_calls[1:])
 
 
 def test_probe_forwarding_apply_skips_install_when_nft_present(monkeypatch):
     monkeypatch.setattr(fixups_module, "_ensure_ip_forward", lambda: None)
-    monkeypatch.setattr(fixups_module, "_probe_forwarding_check", lambda: False)
     monkeypatch.setattr(fixups_module, "_which", lambda name: f"/usr/sbin/{name}")
+    monkeypatch.setattr(fixups_module, "_nft_chain_text", lambda *a: "")
     sudo_calls = []
     monkeypatch.setattr(fixups_module, "_sudo", lambda argv: sudo_calls.append(argv))
     monkeypatch.setattr(fixups_module, "_find_base_chain", lambda hook, kind: None)
-    fixups_module._probe_forwarding_apply()
+    fixups_module._probe_forwarding_apply([_slot()])
     assert all("apt-get" not in call for call in sudo_calls)
 
 
-def test_vpn_probe_forwarding_persist_needed_same_as_tunnel():
+def test_probe_forwarding_apply_skips_slot_whose_rules_already_present(monkeypatch):
+    # Смена состава целей: один слот уже настроен, второй — новый. apply()
+    # не должен дублировать правила уже настроенного слота.
+    monkeypatch.setattr(fixups_module, "_ensure_ip_forward", lambda: None)
+    monkeypatch.setattr(fixups_module, "_which", lambda name: f"/usr/sbin/{name}")
+    monkeypatch.setattr(fixups_module, "_find_base_chain", lambda hook, kind: None)
+    existing = _slot()
+    new = _slot(server="wooster", netns="vpn-probe-wooster-awg", veth_host="vprobe1h0",
+                veth_ns="vprobe1n0", subnet="10.200.200.4/30", iface="awg-probe1")
+
+    def fake_chain_text(family, table, chain):
+        if table != fixups_module.VPN_PROBE_NFT_TABLE:
+            return ""
+        if chain == "forward":
+            return "iifname vprobe0h0 accept\noifname vprobe0h0 accept\n"
+        return "ip saddr 10.200.200.0/30 masquerade\n"
+
+    monkeypatch.setattr(fixups_module, "_nft_chain_text", fake_chain_text)
+    sudo_calls = []
+    monkeypatch.setattr(fixups_module, "_sudo", lambda argv: sudo_calls.append(argv))
+    fixups_module._probe_forwarding_apply([existing, new])
+    rule_calls = [c for c in sudo_calls if c[:3] == ["nft", "insert", "rule"]]
+    assert not any("vprobe0h0" in c for c in rule_calls)
+    assert any("vprobe1h0" in c for c in rule_calls)
+
+
+def test_vpn_probe_forwarding_persist_needed_same_as_scaffold():
     settings = _settings(["vpn_check"])
-    persist = make_vpn_probe_forwarding_persist_fixup(settings)
-    tunnel = make_vpn_probe_tunnel_fixup(settings)
-    assert persist.needed(settings) == tunnel.needed(settings)
+    persist = make_vpn_probe_forwarding_persist_fixup(settings, [])
+    scaffold = make_vpn_probe_scaffold_fixup(settings, _slot())
+    assert persist.needed(settings) == scaffold.needed(settings)
 
 
-def test_forward_script_content_creates_own_table_when_missing(monkeypatch):
+def test_forward_script_content_creates_own_table_when_missing():
     """На alfred форвардинг-фикс заводит СВОЮ таблицу ``sa_vpn_probe``, если
     подходящей чужой не нашлось — эта таблица тоже не переживает ребут,
     поэтому скрипт обязан уметь досоздать её саму, не только правила."""
     forward_target = ("inet", fixups_module.VPN_PROBE_NFT_TABLE, "forward")
     nat_target = ("ip", fixups_module.VPN_PROBE_NFT_TABLE, "postrouting")
-    content = fixups_module._vpn_probe_forward_script_content(forward_target, nat_target)
+    content = fixups_module._vpn_probe_forward_script_content(forward_target, nat_target, [_slot()])
     assert content.startswith("#!/bin/sh\n")
     assert "set -e" in content
     assert f"nft list table inet {fixups_module.VPN_PROBE_NFT_TABLE}" in content
     assert "type filter hook forward" in content
     assert f"nft list table ip {fixups_module.VPN_PROBE_NFT_TABLE}" in content
     assert "type nat hook postrouting" in content
-    assert 'iifname "vprobe-veth0" accept' in content
-    assert 'oifname "vprobe-veth0" accept' in content
+    assert 'iifname "vprobe0h0" accept' in content
+    assert 'oifname "vprobe0h0" accept' in content
     assert "ip saddr 10.200.200.0/30 masquerade" in content
 
 
@@ -775,35 +868,54 @@ def test_forward_script_content_skips_table_creation_for_foreign_chain():
     idempotent-добавлять в них правила."""
     forward_target = ("inet", "filter", "forward")
     nat_target = ("ip", "nat", "postrouting")
-    content = fixups_module._vpn_probe_forward_script_content(forward_target, nat_target)
+    content = fixups_module._vpn_probe_forward_script_content(forward_target, nat_target, [_slot()])
     assert "nft list table" not in content
     assert "nft add table" not in content
     assert "nft list chain inet filter forward" in content
     assert "nft list chain ip nat postrouting" in content
 
 
-def test_forward_unit_content_runs_after_tunnel_and_executes_script():
-    content = vpn_probe_forward_unit_content(fixups_module.VPN_PROBE_FORWARD_SCRIPT_PATH)
-    assert fixups_module.VPN_PROBE_UNIT_FILE.name in content
+def test_forward_script_content_covers_every_slot():
+    forward_target = ("inet", "filter", "forward")
+    nat_target = ("ip", "nat", "postrouting")
+    slots = [_slot(), _slot(server="wooster", netns="vpn-probe-wooster-awg", veth_host="vprobe1h0",
+                    veth_ns="vprobe1n0", subnet="10.200.200.4/30", iface="awg-probe1")]
+    content = fixups_module._vpn_probe_forward_script_content(forward_target, nat_target, slots)
+    assert "ip saddr 10.200.200.0/30 masquerade" in content
+    assert "ip saddr 10.200.200.4/30 masquerade" in content
+    assert "vprobe0h0" in content and "vprobe1h0" in content
+
+
+def test_forward_unit_content_runs_after_every_scaffold_and_executes_script():
+    slots = [_slot(), _slot(server="wooster", netns="vpn-probe-wooster-awg", iface="awg-probe1")]
+    content = vpn_probe_forward_unit_content(fixups_module.VPN_PROBE_FORWARD_SCRIPT_PATH, slots)
+    for slot in slots:
+        assert fixups_module._probe_scaffold_unit_path(slot).name in content
     assert f"ExecStart=/bin/sh {fixups_module.VPN_PROBE_FORWARD_SCRIPT_PATH}\n" in content
     assert "Type=oneshot" in content
     assert "RemainAfterExit=yes" in content
     assert "WantedBy=multi-user.target" in content
 
 
+def test_forward_unit_content_with_no_slots_still_has_after_clause():
+    content = vpn_probe_forward_unit_content(fixups_module.VPN_PROBE_FORWARD_SCRIPT_PATH, [])
+    assert "After=network-online.target\n" in content
+
+
 def test_forwarding_persist_check_false_when_files_missing(monkeypatch):
     monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: False)
-    assert fixups_module._vpn_probe_forwarding_persist_check() is False
+    assert fixups_module._vpn_probe_forwarding_persist_check([_slot()]) is False
 
 
 def test_forwarding_persist_check_false_when_unit_content_stale(monkeypatch):
     monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
     monkeypatch.setattr(fixups_module, "_read_privileged", lambda path: "old content\n")
-    assert fixups_module._vpn_probe_forwarding_persist_check() is False
+    assert fixups_module._vpn_probe_forwarding_persist_check([_slot()]) is False
 
 
 def test_forwarding_persist_check_true_when_matching_and_active(monkeypatch):
-    expected = vpn_probe_forward_unit_content(fixups_module.VPN_PROBE_FORWARD_SCRIPT_PATH)
+    slots = [_slot()]
+    expected = vpn_probe_forward_unit_content(fixups_module.VPN_PROBE_FORWARD_SCRIPT_PATH, slots)
     monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
     monkeypatch.setattr(fixups_module, "_read_privileged", lambda path: expected)
     monkeypatch.setattr(
@@ -811,7 +923,7 @@ def test_forwarding_persist_check_true_when_matching_and_active(monkeypatch):
         "run",
         lambda argv, **kwargs: type("R", (), {"returncode": 0})(),
     )
-    assert fixups_module._vpn_probe_forwarding_persist_check() is True
+    assert fixups_module._vpn_probe_forwarding_persist_check(slots) is True
 
 
 def test_forwarding_persist_apply_reuses_resolved_targets_and_enables_unit(monkeypatch, tmp_path):
@@ -824,12 +936,44 @@ def test_forwarding_persist_apply_reuses_resolved_targets_and_enables_unit(monke
     monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: False)
     sudo_calls = []
     monkeypatch.setattr(fixups_module, "_sudo", lambda argv: sudo_calls.append(argv))
-    fixups_module._vpn_probe_forwarding_persist_apply()
+    fixups_module._vpn_probe_forwarding_persist_apply([_slot()])
     assert any(call[:2] == ["install", "-D"] for call in sudo_calls)
     assert ["systemctl", "daemon-reload"] in sudo_calls
     assert ["systemctl", "enable", "--now", fixups_module.VPN_PROBE_FORWARD_UNIT_FILE.name] in (
         sudo_calls
     )
+
+
+def test_vpn_probe_state_check_false_when_missing(monkeypatch):
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: False)
+    assert fixups_module._vpn_probe_state_check([_slot()]) is False
+
+
+def test_vpn_probe_state_check_true_when_content_matches(monkeypatch):
+    slots = [_slot()]
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
+    monkeypatch.setattr(
+        fixups_module, "_read_privileged", lambda path: vpn_probe_state.render(slots)
+    )
+    assert fixups_module._vpn_probe_state_check(slots) is True
+
+
+def test_vpn_probe_state_apply_installs_rendered_json(monkeypatch):
+    slots = [_slot()]
+    captured: dict = {}
+
+    def fake_sudo(argv):
+        if argv[0] == "install":
+            # Читаем СЕЙЧАС — apply() удаляет временный файл в своём finally
+            # сразу после (не дождавшись) настоящего sudo install.
+            captured["content"] = Path(argv[-2]).read_text()
+            captured["dest"] = argv[-1]
+
+    monkeypatch.setattr(fixups_module, "_sudo", fake_sudo)
+    fixups_module._vpn_probe_state_apply(slots)
+    assert captured["dest"] == str(vpn_probe_state.STATE_PATH)
+    assert vpn_probe_state.parse(captured["content"]) == slots
+
 
 
 def test_prepare_probe_conf_strips_dns_line():

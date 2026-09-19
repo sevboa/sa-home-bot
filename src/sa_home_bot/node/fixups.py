@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 from collections.abc import Callable
@@ -27,7 +28,7 @@ from pathlib import Path
 from sa_home_bot import wol
 from sa_home_bot.bot import vpn_nodes
 from sa_home_bot.config import AppConfig, Settings
-from sa_home_bot.node import assignments
+from sa_home_bot.node import assignments, vpn_probe_state
 from sa_home_bot.node import kind as node_kinds
 from sa_home_bot.proto.client import ProtoClient
 from sa_home_bot.proto.endpoints import resolve_endpoint
@@ -623,13 +624,16 @@ def make_awg_sudoers_fixup(settings: Settings) -> Fixup:
     )
 
 
-# --- vpn_check: клиентский туннель-пробник (netns + veth + NAT + awg-quick) ---
+# --- vpn_check: клиентские туннели-пробники (netns + veth + NAT, сам
+# туннель — эфемерно) ---
 #
-# Служба vpn_check (vpn_check/service.py) сама awg-quick не поднимает и root
-# не получает (тот же инвариант «долгоживущий процесс сам sudo не зовёт», что
-# у остальных служб) — готовый туннель ей нужен заранее, поднятый этим
-# фиксом. Конфиг (приватный ключ) получаем ровно тем же способом, каким его
-# получил бы обычный гость: зовём action "issue" службы vpn на jeeves с
+# Служба vpn_check (vpn_check/service.py) сама awg-quick/xray не поднимает
+# насовсем и root не получает (тот же инвариант «долгоживущий процесс сам
+# sudo не зовёт», что у остальных служб) — готовые netns+veth+NAT заводит
+# заранее этот фикс, а сам процесс туннеля служба поднимает/гасит вокруг
+# каждого чек-цикла (см. докстринг vpn_check/service.py). Конфиг (приватный
+# ключ) получаем ровно тем же способом, каким его получил бы обычный гость:
+# зовём action "issue" службы vpn на КОНКРЕТНОМ сервере slot.server с
 # chat_id=0 (см. vpn/service.py::NODE_SENTINEL_CHAT_ID — уже зарезервирован
 # под "не гостя, а саму ноду"; отдельного "системного" действия в VpnService
 # заводить не понадобилось, решение пользователя 2026-08-17: `_issue()` не
@@ -644,36 +648,45 @@ def make_awg_sudoers_fixup(settings: Settings) -> Fixup:
 # vpn_check/service.py всегда зовёт curl через ``ip netns exec``, без
 # исключений и без node-specific веток кода.
 #
+# С 39.0.7(d) список целей — не хардкод «jeeves/awg» и не ручной
+# ``[vpn_check] probe_server``, а автообнаружение (все живые vpn-серверы
+# роя кроме себя, ``bot/vpn_nodes.py::probe_targets``): у каждой пары
+# (сервер, транспорт) свой netns/veth/подсеть/интерфейс, имена выводятся
+# детерминированно из позиции пары в отсортированном списке (см.
+# ``_probe_slot_from_target``). Что реально настроено — записывает
+# ``node/vpn_probe_state.py`` (root пишет, обычный пользователь читает),
+# служба vpn_check сама сеть не провижинит, только пользуется готовым.
+#
 # Живые находки 2026-08-17/2026-08-18 про то, каким должен быть путь netns
 # наружу:
 #
 # 1) Голый ``ip netns add`` без ничего внутри не имеет НИ ОДНОГО физического
 #    интерфейса — WireGuard-хендшейку (обычный, не туннелируемый UDP до
-#    эндпоинта jeeves) решительно некуда уйти в интернет: `ip route show`
+#    эндпоинта сервера) решительно некуда уйти в интернет: `ip route show`
 #    внутри netns был пуст, `awg show` не показывал ни одного хендшейка, все
 #    проверки висели по таймауту (curl exit 28).
 #
-# 2) На jeeves (нода, где крутится сам VPN-сервер awg0) есть ДОПОЛНИТЕЛЬНАЯ
-#    причина, почему голый netns без выделенного пути наружу никогда не
-#    заработал бы: адрес клиента-пробника (из подсети VPN, напр. 10.9.0.14)
-#    неизбежно совпадает с адресом, который на этой же машине обслуживает
-#    сервер — то есть с точки зрения root netns он «свой». Когда awg0
-#    расшифровывает пакет пробника и пытается переслать его на внешний
-#    интерфейс, ядро видит source-адрес, совпадающий с локальным, и
-#    БЕЗУСЛОВНО отвергает пересылку (`fib_validate_source`, martian source —
-#    не зависит от rp_filter и не лечится sysctl `accept_local`: проверено
-#    вручную — `accept_local=1` чинит саму FIB-проверку (`ip route get ...
-#    iif awg0` перестаёт падать), но пакет всё равно не доходит до
+# 2) На ноде, где крутится сам VPN-сервер, есть ДОПОЛНИТЕЛЬНАЯ причина,
+#    почему голый netns без выделенного пути наружу никогда не заработал бы:
+#    адрес клиента-пробника (из подсети VPN, напр. 10.9.0.14) неизбежно
+#    совпадает с адресом, который на этой же машине обслуживает сервер —
+#    то есть с точки зрения root netns он «свой». Когда awg0 расшифровывает
+#    пакет пробника и пытается переслать его на внешний интерфейс, ядро
+#    видит source-адрес, совпадающий с локальным, и БЕЗУСЛОВНО отвергает
+#    пересылку (`fib_validate_source`, martian source — не зависит от
+#    rp_filter и не лечится sysctl `accept_local`: проверено вручную —
+#    `accept_local=1` чинит саму FIB-проверку (`ip route get ... iif awg0`
+#    перестаёт падать), но пакет всё равно не доходит до
 #    postrouting/NAT, экспериментально подтверждено трассировкой `nft
 #    monitor trace`). Единственный чистый способ снять это ограничение —
 #    сделать так, чтобы адрес пробника НЕ БЫЛ «своим» с точки зрения root
 #    netns вообще, т.е. изолировать его в другом netns.
 #
-# И (1), и (2) решаются ОДНИМ и тем же приёмом, одинаковым на любой ноде:
-# veth-пара между root netns и netns пробника + точечный NAT/forward на
-# хосте для маленькой технической подсети veth (см. _ensure_probe_veth,
-# _ensure_probe_forwarding). Внутри netns пробника adg-quick дальше работает
-# ПО УМОЛЧАНИЮ (без Table=off) — сам заводит fwmark/ip rule и объявляет себя
+# И (1), и (2) решаются ОДНИМ и тем же приёмом, одинаковым на любой ноде и
+# на любую пару (сервер, транспорт): veth-пара между root netns и netns
+# пробника + точечный NAT/forward на хосте (см. _resolve_probe_forward_
+# targets ниже). Внутри netns пробника awg-quick дальше работает ПО
+# УМОЛЧАНИЮ (без Table=off) — сам заводит fwmark/ip rule и объявляет себя
 # default route ВНУТРИ netns, это ничему не мешает, потому что весь netns и
 # так предназначен только для пробника. Живьём проверено на jeeves ручным
 # стендом (netns+veth+NAT, без правки прод-юнита) 2026-08-18: и 1.1.1.1, и
@@ -683,29 +696,22 @@ def make_awg_sudoers_fixup(settings: Settings) -> Fixup:
 # из /etc/resolv.conf прозрачно достижим через forward-правило veth — тот же
 # hairpin-приём, каким сама нода достаёт себя по 100.100.100.100).
 
-VPN_PROBE_IFACE = "awg-probe0"
-# Куда пробуем `ip route get`, чтобы убедиться, что дефолтный путь из netns
-# идёт через сам туннель, а не мимо (через veth на хост). Тот же литерал
-# использует рантайм-гейт vpn_check/service.py::_check_route.
 VPN_PROBE_ROUTE_SENTINEL = "1.1.1.1"
-VPN_PROBE_CONF_DIR = Path("/etc/amnezia/amneziawg")
-VPN_PROBE_UNIT_FILE = Path("/etc/systemd/system/sa-home-vpn-probe.service")
+VPN_PROBE_AWG_CONF_DIR = Path("/etc/amnezia/amneziawg")
+VPN_PROBE_SCAFFOLD_UNIT_DIR = Path("/etc/systemd/system")
 VPN_PROBE_SUDOERS_FILE = "50-sa-home-node-vpn-probe"
 # vpn/service.py::NODE_SENTINEL_CHAT_ID — не импортируем службу целиком
 # (тяжёлые зависимости: БД, awg-бэкенд) ради одной константы, тот же приём,
 # что уже используют node/peers.py и другие (свой NODE_SERVICE = "node").
 VPN_PROBE_CHAT_ID = 0
 
-# veth-пара — единственный путь наружу для изолированного netns пробника
-# (см. большой комментарий выше). Имена ≤15 символов (IFNAMSIZ). Подсеть
-# 10.200.200.0/30 выбрана так, чтобы не пересекаться ни с VPN 10.9.0.0/24,
-# ни с типичным домашним LAN 192.168.0.0/24, ни с Tailscale CGNAT
-# 100.64.0.0/10 — только эта пара адресов, только для трафика пробника.
-VPN_PROBE_VETH_HOST = "vprobe-veth0"
-VPN_PROBE_VETH_NS = "vprobe-veth1"
-VPN_PROBE_VETH_HOST_ADDR = "10.200.200.1/30"
-VPN_PROBE_VETH_NS_ADDR = "10.200.200.2/30"
-VPN_PROBE_VETH_SUBNET = "10.200.200.0/30"
+# veth-пары — единственный путь наружу для изолированных netns пробников
+# (см. большой комментарий выше). Имена ≤15 символов (IFNAMSIZ), выводятся
+# из индекса пары в отсортированном списке целей (``_probe_slot_from_
+# target``). Подсеть 10.200.200.0/24 нарезается на /30 по числу целей — не
+# пересекается ни с VPN 10.9.0.0/24, ни с типичным домашним LAN
+# 192.168.0.0/24, ни с Tailscale CGNAT 100.64.0.0/10.
+VPN_PROBE_SUBNET_BASE = "10.200.200"
 # Название нашей собственной nft-таблицы — заводим её, только если на ноде
 # не нашлось уже существующей форвардящей/nat-цепочки (см.
 # _find_base_chain) — на jeeves она есть (inet filter/ip nat, из инцидентов
@@ -719,54 +725,96 @@ def _vpn_check_needed(settings: Settings) -> bool:
     return assignments.has_service(settings.node.assignments, "vpn_check")
 
 
-def _vpn_probe_conf_path(settings: Settings) -> Path:
-    return VPN_PROBE_CONF_DIR / f"{VPN_PROBE_IFACE}.conf"
-
-
-def vpn_probe_unit_content(netns: str, iface: str, ip_path: str, awg_quick_path: str) -> str:
-    """systemd-юнит: ``ExecStartPre`` идемпотентно (ведущий ``-`` — не валить
-    юнит, если шаг уже применён; единственный «естественный» способ у
-    ``ip``/``ip netns``: повторный ``add`` уже существующего netns/veth
-    просто вернёт ошибку, которую здесь намеренно игнорируем) заводит netns
-    + veth-пару + маршрут внутри netns — единственный путь наружу для
-    изолированного netns (см. большой комментарий выше про то, почему без
-    этого нет интернета и, отдельно на jeeves, martian source). Шаги без
-    ``-`` (``... set ... up``) идемпотентны сами по себе — включить уже
-    включённый интерфейс не ошибка. Пересоздаётся на каждом чистом буте:
-    ядро не хранит netns/veth между перезагрузками, а ``RemainAfterExit``
-    здесь не спасает (это состояние ЮНИТА, не состояние ядра). ``ExecStart``
-    исполняет сам awg-quick УЖЕ ВНУТРИ netns (``ip netns exec`` меняет
-    сетевое пространство имён дочернего процесса) — интерфейс, который
-    создаст awg-quick, окажется уже там, без отдельного ``ip link set
-    netns``.
-
-    ``ExecStartPost`` — громкая проверка: после ``awg-quick up`` дефолтный
-    маршрут из netns ОБЯЗАН идти через сам туннель (``dev <iface>``). Если
-    awg-quick его не построил (застрявший ``Table = off`` в конфиге,
-    инцидент 2026-08-31) — юнит падает в ``failed``, а не тихо пропускает
-    трафик мимо VPN, изображая рабочую проверку."""
-    host_addr_only = VPN_PROBE_VETH_HOST_ADDR.split("/")[0]
-    route_assert = (
-        f"{ip_path} netns exec {netns} {ip_path} route get "
-        f"{VPN_PROBE_ROUTE_SENTINEL} | grep -q 'dev {iface}'"
+def _probe_slot_from_target(index: int, target: vpn_nodes.ProbeTarget) -> vpn_probe_state.ProbeSlot:
+    """Имена/подсеть детерминированы позицией пары в отсортированном списке
+    целей — стабильны между прогонами `nodectl fix`, пока состав целей не
+    меняется (см. IMPLEMENTATION_PLAN.md, 39.0.7(d)). Транспорты, которые
+    этот фикс ещё не умеет провижинить (reality — до 39.0.7(e)), тоже
+    получают слот (``iface``/``socks_port`` соответственно ``None``) —
+    номер слота остаётся зарезервирован и не съезжает у awg-пар, когда
+    reality-фиксы появятся."""
+    netns = f"vpn-probe-{target.server}-{target.transport}"
+    veth_host = f"vprobe{index}h0"
+    veth_ns = f"vprobe{index}n0"
+    base = index * 4
+    veth_host_addr = f"{VPN_PROBE_SUBNET_BASE}.{base + 1}/30"
+    veth_ns_addr = f"{VPN_PROBE_SUBNET_BASE}.{base + 2}/30"
+    subnet = f"{VPN_PROBE_SUBNET_BASE}.{base}/30"
+    iface = f"awg-probe{index}" if target.transport == "awg" else None
+    socks_port = None if target.transport == "awg" else 11080 + index
+    return vpn_probe_state.ProbeSlot(
+        server=target.server,
+        transport=target.transport,
+        netns=netns,
+        veth_host=veth_host,
+        veth_ns=veth_ns,
+        veth_host_addr=veth_host_addr,
+        veth_ns_addr=veth_ns_addr,
+        subnet=subnet,
+        iface=iface,
+        socks_port=socks_port,
     )
+
+
+async def _fetch_probe_slots(settings: Settings) -> list[vpn_probe_state.ProbeSlot]:
+    endpoint = resolve_endpoint(settings.node.socket)
+    client = ProtoClient(endpoint, token=settings.swarm.token)
+    try:
+        await client.connect()
+        targets = await vpn_nodes.probe_targets(client, exclude=socket.gethostname())
+    finally:
+        await client.close()
+    return [_probe_slot_from_target(i, t) for i, t in enumerate(targets)]
+
+
+def _discover_probe_slots(settings: Settings) -> list[vpn_probe_state.ProbeSlot]:
+    """Все (сервер, транспорт), которые эта нода должна проверять — все
+    живые vpn-серверы роя кроме себя. Синхронная обёртка (``nodectl fix`` —
+    короткоживущий процесс, не asyncio-приложение); сетевой сбой сведён к
+    пустому списку с предупреждением, а не падению всего `nodectl fix` —
+    фиксы, не связанные с VPN, не должны зависеть от доступности роя (тот
+    же принцип, что уже применялся к одиночному ``_fetch_probe_config``)."""
+    try:
+        return asyncio.run(_fetch_probe_slots(settings))
+    except Exception as exc:  # noqa: BLE001 — сеть/протокол сведены к одному диагнозу
+        log.warning("nodectl fix: не удалось обнаружить VPN-серверы для пробника: %s", exc)
+        return []
+
+
+def _probe_scaffold_unit_path(slot: vpn_probe_state.ProbeSlot) -> Path:
+    name = f"sa-home-vpn-probe-scaffold-{slot.server}-{slot.transport}.service"
+    return VPN_PROBE_SCAFFOLD_UNIT_DIR / name
+
+
+def vpn_probe_scaffold_unit_content(slot: vpn_probe_state.ProbeSlot, ip_path: str) -> str:
+    """Только «вечная» часть — netns + veth-пара + маршрут ВНУТРИ netns.
+    Сам туннель (awg-quick/xray) сюда сознательно не входит — служба
+    vpn_check поднимает и гасит его вокруг каждого чек-цикла (эфемерно,
+    компромисс ради слабого железа — решение владельца 2026-09-18).
+    ``ExecStartPre`` идемпотентно (ведущий ``-`` — не валить юнит, если шаг
+    уже применён: повторный ``add`` уже существующего netns/veth просто
+    вернёт ошибку, которую здесь намеренно игнорируем). Пересоздаётся на
+    каждом чистом буте: ядро не хранит netns/veth между перезагрузками, а
+    ``RemainAfterExit`` здесь не спасает (это состояние ЮНИТА, не состояние
+    ядра)."""
+    host_addr_only = slot.veth_host_addr.split("/")[0]
     pre_steps = [
-        f"-{ip_path} netns add {netns}",
-        f"-{ip_path} link add {VPN_PROBE_VETH_HOST} type veth peer name {VPN_PROBE_VETH_NS}",
-        f"-{ip_path} link set {VPN_PROBE_VETH_NS} netns {netns}",
-        f"-{ip_path} addr add {VPN_PROBE_VETH_HOST_ADDR} dev {VPN_PROBE_VETH_HOST}",
-        f"{ip_path} link set {VPN_PROBE_VETH_HOST} up",
-        f"-{ip_path} netns exec {netns} {ip_path} addr add {VPN_PROBE_VETH_NS_ADDR} "
-        f"dev {VPN_PROBE_VETH_NS}",
-        f"{ip_path} netns exec {netns} {ip_path} link set {VPN_PROBE_VETH_NS} up",
-        f"{ip_path} netns exec {netns} {ip_path} link set lo up",
-        f"-{ip_path} netns exec {netns} {ip_path} route add default via {host_addr_only}",
+        f"-{ip_path} netns add {slot.netns}",
+        f"-{ip_path} link add {slot.veth_host} type veth peer name {slot.veth_ns}",
+        f"-{ip_path} link set {slot.veth_ns} netns {slot.netns}",
+        f"-{ip_path} addr add {slot.veth_host_addr} dev {slot.veth_host}",
+        f"{ip_path} link set {slot.veth_host} up",
+        f"-{ip_path} netns exec {slot.netns} {ip_path} addr add {slot.veth_ns_addr} "
+        f"dev {slot.veth_ns}",
+        f"{ip_path} netns exec {slot.netns} {ip_path} link set {slot.veth_ns} up",
+        f"{ip_path} netns exec {slot.netns} {ip_path} link set lo up",
+        f"-{ip_path} netns exec {slot.netns} {ip_path} route add default via {host_addr_only}",
     ]
     pre_lines = "".join(f"ExecStartPre={step}\n" for step in pre_steps)
     return (
         "[Unit]\n"
-        "Description=sa-home-bot: VPN-пробник для мониторинга доступности "
-        f"({iface} в netns {netns})\n"
+        "Description=sa-home-bot: netns-скаффолд VPN-пробника "
+        f"({slot.server}/{slot.transport}, netns {slot.netns})\n"
         "After=network-online.target\n"
         "Wants=network-online.target\n"
         "\n"
@@ -774,57 +822,61 @@ def vpn_probe_unit_content(netns: str, iface: str, ip_path: str, awg_quick_path:
         "Type=oneshot\n"
         "RemainAfterExit=yes\n"
         f"{pre_lines}"
-        f"ExecStart={ip_path} netns exec {netns} {awg_quick_path} up {iface}\n"
-        f'ExecStartPost=/bin/sh -c "{route_assert}"\n'
-        f"ExecStop={ip_path} netns exec {netns} {awg_quick_path} down {iface}\n"
+        "ExecStart=/bin/true\n"
         "\n"
         "[Install]\n"
         "WantedBy=multi-user.target\n"
     )
 
 
-def vpn_probe_sudoers_content(ip_path: str, netns: str, user: str) -> str:
-    """NOPASSWD ровно на два вызова внутри netns пробника (см.
-    vpn_check/service.py): ``curl *`` (сами проверки + запрос внешнего IP) и
-    ``ip route get *`` (гейт «пробник реально в туннеле» перед каждой
-    пачкой). Не голый ``ip`` (равносилен root — умеет менять
-    маршруты/интерфейсы где угодно): ``route get`` только читает таблицу
-    маршрутизации. ``curl`` литералом — он не прямая цель sudo, а аргумент
-    вложенного ``ip netns exec``; вложенный ``ip`` — резолвленным путём,
-    ровно как его зовёт служба."""
-    return (
-        f"{user} ALL=(root) NOPASSWD: "
-        f"{ip_path} netns exec {netns} curl *, "
-        f"{ip_path} netns exec {netns} {ip_path} route get *\n"
-    )
-
-
-async def _fetch_probe_config(settings: Settings) -> str:
-    """Выпросить конфиг пробника у живого VPN-сервера — тонкий разовый
-    ProtoClient к своей же локальной ноде, та маршрутизирует дальше (см.
-    node/peers.py::NodeRouter.route), тем же путём, каким ходит nodectl.
-
-    Сервер ищется по рою (``bot/vpn_nodes``), а не берётся хардкодом: с этапа
-    39 их несколько, и привязка к jeeves ломала fix, пока тот лежал."""
-    endpoint = resolve_endpoint(settings.node.socket)
-    client = ProtoClient(endpoint, token=settings.swarm.token)
+def _probe_scaffold_check(slot: vpn_probe_state.ProbeSlot) -> bool:
+    unit_path = _probe_scaffold_unit_path(slot)
+    if not _privileged_exists(unit_path):
+        return False
+    ip_path = _which("ip")
+    if ip_path is None:
+        return False
+    expected = vpn_probe_scaffold_unit_content(slot, ip_path)
     try:
-        await client.connect()
-        dst = await vpn_nodes.resolve_vpn_dst(client)
-        if dst is None:
-            raise FixupError("VPN сейчас не держит ни одна нода — конфиг пробника взять негде")
-        result = await client.command(
-            vpn_protocol.ACTION_ISSUE,
-            {"chat_id": VPN_PROBE_CHAT_ID},
-            dst=dst,
-            timeout=20.0,
-        )
-    finally:
-        await client.close()
-    config_text = result.get("config_text")
-    if not config_text:
-        raise FixupError(f"vpn@{dst.node} не вернул config_text")
-    return str(config_text)
+        current = _read_privileged(unit_path)
+    except FixupError:
+        return False
+    if current != expected:
+        return False
+    return subprocess.run(["systemctl", "is-active", "--quiet", unit_path.name]).returncode == 0
+
+
+def _probe_scaffold_apply(slot: vpn_probe_state.ProbeSlot) -> None:
+    ip_path = _which("ip")
+    if ip_path is None:
+        raise FixupError("ip (iproute2) не найден в PATH")
+    unit_path = _probe_scaffold_unit_path(slot)
+    unit_content = vpn_probe_scaffold_unit_content(slot, ip_path)
+    current_unit = _read_privileged(unit_path) if _privileged_exists(unit_path) else None
+    if current_unit != unit_content:
+        if current_unit is not None:
+            _sudo(["systemctl", "stop", unit_path.name])
+        with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as tmp:
+            tmp.write(unit_content)
+            tmp_path = Path(tmp.name)
+        try:
+            _sudo(
+                ["install", "-m", "0644", "-o", "root", "-g", "root", str(tmp_path), str(unit_path)]
+            )
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        _sudo(["systemctl", "daemon-reload"])
+    _sudo(["systemctl", "enable", "--now", unit_path.name])
+
+
+def make_vpn_probe_scaffold_fixup(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> Fixup:
+    return Fixup(
+        id=f"vpn-probe-scaffold-{slot.server}-{slot.transport}",
+        title=f"Поднять netns-скаффолд пробника к {slot.server}/{slot.transport} (netns+veth)",
+        needed=_vpn_check_needed,
+        check=lambda: _probe_scaffold_check(slot),
+        apply=lambda: _probe_scaffold_apply(slot),
+    )
 
 
 # amneziawg-tools/amneziawg-go нет апт-пакетом ни в одном стандартном
@@ -926,7 +978,7 @@ def _read_privileged(path: Path) -> str:
 
 
 def _prepare_probe_conf(config_text: str) -> str:
-    """Две правки конфига, выданного vpn@jeeves как обычному гостю:
+    """Две правки конфига, выданного vpn@<сервер> как обычному гостю:
 
     - без строки ``DNS =`` — awg-quick иначе сам зовёт ``resolvconf``,
       которого нет на Debian, и весь скрипт падает (живая находка
@@ -941,7 +993,7 @@ def _prepare_probe_conf(config_text: str) -> str:
       ``Table = off``, версии v0.92.2–v0.92.4, пока пробник ещё жил без
       netns) — живая находка 2026-08-21: на уже развёрнутых нодах эта
       строка переживала апгрейд (мы читаем и переписываем УЖЕ
-      установленный файл, см. ``_vpn_probe_tunnel_apply``), и awg-quick
+      установленный файл, см. ``_probe_conf_apply``), и awg-quick
       продолжал НЕ заводить маршрут через сам туннель — curl внутри netns
       уходил бы обычным (не туннелируемым, plaintext) путём через veth,
       что подменяет собой саму суть проверки VPN. Сейчас netns изолирован
@@ -980,189 +1032,164 @@ def _install_probe_conf(conf_path: Path, config_text: str) -> None:
         tmp_path.unlink(missing_ok=True)
 
 
-def _vpn_probe_tunnel_check(settings: Settings) -> bool:
-    if not (
-        _privileged_exists(_vpn_probe_conf_path(settings))
-        and _privileged_exists(VPN_PROBE_UNIT_FILE)
-    ):
-        return False
-    # Сверяем содержимое юнита, не только факт его существования — живой
-    # застрявший апгрейд 2026-08-17: старый юнит был технически "active
-    # (exited)" (успешно стартовал когда-то со старым содержимым), проверка
-    # по одному только is-active сочла бы его «уже применённым» и apply() с
-    # новым содержимым не вызвался бы вовсе.
-    awg_quick_path = _which("awg-quick")
-    ip_path = _which("ip")
-    if awg_quick_path is None or ip_path is None:
-        return False
-    expected_unit = vpn_probe_unit_content(
-        settings.vpn_check.netns, VPN_PROBE_IFACE, ip_path, awg_quick_path
-    )
+def _probe_conf_path(slot: vpn_probe_state.ProbeSlot) -> Path:
+    return VPN_PROBE_AWG_CONF_DIR / f"{slot.iface}.conf"
+
+
+async def _fetch_probe_config(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> str:
+    """Выпросить awg-конфиг пробника у КОНКРЕТНОГО сервера ``slot.server``
+    (не «первая живая», как было при единственной ручной паре, — теперь
+    пробников несколько, и каждому нужен конфиг именно от своего сервера).
+    Тонкий разовый ProtoClient к своей же локальной ноде, та маршрутизирует
+    дальше (см. node/peers.py::NodeRouter.route), тем же путём, каким ходит
+    nodectl."""
+    endpoint = resolve_endpoint(settings.node.socket)
+    client = ProtoClient(endpoint, token=settings.swarm.token)
     try:
-        current_unit = _read_privileged(VPN_PROBE_UNIT_FILE)
-        current_conf = _read_privileged(_vpn_probe_conf_path(settings))
+        await client.connect()
+        dst = await vpn_nodes.resolve_vpn_dst(client, server=slot.server)
+        if dst is None or dst.node != slot.server:
+            raise FixupError(f"vpn@{slot.server} сейчас недоступна — конфиг пробника взять негде")
+        result = await client.command(
+            vpn_protocol.ACTION_ISSUE,
+            {"chat_id": VPN_PROBE_CHAT_ID},
+            dst=dst,
+            timeout=20.0,
+        )
+    finally:
+        await client.close()
+    config_text = result.get("config_text")
+    if not config_text:
+        raise FixupError(f"vpn@{slot.server} не вернул config_text")
+    return str(config_text)
+
+
+def _probe_conf_check(slot: vpn_probe_state.ProbeSlot) -> bool:
+    conf_path = _probe_conf_path(slot)
+    if not _privileged_exists(conf_path):
+        return False
+    try:
+        current_conf = _read_privileged(conf_path)
     except FixupError:
         return False
-    if current_unit != expected_unit:
-        return False
-    # Застрявшая строка ``Table`` в конфиге (обычно ``Table = off`` из
-    # старых версий, v0.92.2–v0.92.4) заставляет awg-quick НЕ строить
-    # маршрут через туннель — curl из netns уходит plaintext мимо VPN,
-    # подменяя собой суть проверки (инцидент 2026-08-31). ``_prepare_probe_
-    # conf`` её вырезает — но раньше сюда не смотрели, и апгрейд её не
-    # трогал. Теперь несоответствие → apply() перепишет конфиг.
-    if any(ln.strip().startswith("Table") for ln in current_conf.splitlines()):
-        return False
-    if (
-        subprocess.run(
-            ["systemctl", "is-active", "--quiet", VPN_PROBE_UNIT_FILE.name]
-        ).returncode
-        != 0
-    ):
-        return False
-    # Финальная сверка живого состояния: маршрут из netns реально идёт
-    # через туннель. Терпимо к отсутствию sudoers-права (ставит соседний
-    # фикс vpn-check-probe-sudoers) — тогда проверку пропускаем, ``Table``
-    # выше уже ловит основную поломку.
-    route = subprocess.run(
-        [
-            "sudo", "-n", ip_path, "netns", "exec", settings.vpn_check.netns,
-            ip_path, "route", "get", VPN_PROBE_ROUTE_SENTINEL,
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if route.returncode != 0 and (
-        "a password is required" in route.stderr.lower() or "sudo:" in route.stderr.lower()
-    ):
-        return True
-    return route.returncode == 0 and f"dev {VPN_PROBE_IFACE}" in route.stdout
+    # Застрявшая строка ``Table`` (обычно ``Table = off`` из старых версий,
+    # v0.92.2–v0.92.4) заставляет awg-quick НЕ строить маршрут через
+    # туннель — curl из netns уходил бы plaintext мимо VPN, подменяя собой
+    # суть проверки (инцидент 2026-08-31). ``_prepare_probe_conf`` её
+    # вырезает — но апгрейд с более старой версии её не трогал бы сам.
+    return not any(ln.strip().startswith("Table") for ln in current_conf.splitlines())
 
 
-def _vpn_probe_tunnel_apply(settings: Settings) -> None:
-    awg_quick_path = _which("awg-quick")
-    if awg_quick_path is None:
+def _probe_conf_apply(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> None:
+    if _which("awg-quick") is None:
         _build_amneziawg_tools()
-        awg_quick_path = _which("awg-quick")
-        if awg_quick_path is None:
+        if _which("awg-quick") is None:
             raise FixupError("awg-quick не нашёлся после сборки amneziawg-tools")
-    ip_path = _which("ip")
-    if ip_path is None:
-        raise FixupError("ip (iproute2) не найден в PATH")
-
-    conf_path = _vpn_probe_conf_path(settings)
+    conf_path = _probe_conf_path(slot)
     if _privileged_exists(conf_path):
-        # Конфиг уже выдан jeeves раньше — чиним на месте (сносим DNS), не
-        # выпрашивая новый пир заново (лишний пир в БД vpn@jeeves нам не
-        # нужен).
+        # Конфиг уже выдан этим сервером раньше — чиним на месте (сносим
+        # DNS/Table), не выпрашивая новый пир заново (лишний пир в БД
+        # vpn@<сервер> нам не нужен).
         raw_config_text = _read_privileged(conf_path)
     else:
         try:
-            raw_config_text = asyncio.run(_fetch_probe_config(settings))
+            raw_config_text = asyncio.run(_fetch_probe_config(settings, slot))
         except Exception as exc:  # noqa: BLE001 — сеть/протокол сведены к одному диагнозу
             raise FixupError(
-                f"не удалось получить конфиг у vpn@jeeves ({exc}) — "
-                "проверьте, что jeeves доступен и служба vpn запущена"
+                f"не удалось получить конфиг у vpn@{slot.server} ({exc}) — "
+                "проверьте, что сервер доступен и служба vpn запущена"
             ) from exc
     _install_probe_conf(conf_path, raw_config_text)
 
-    netns = settings.vpn_check.netns
-    # Всегда сверяем содержимое, не только факт существования файла — живой
-    # апгрейд 2026-08-17 (старый юнит гонял awg-quick с другим ExecStart)
-    # иначе застрял бы со старым содержимым навсегда.
-    unit_content = vpn_probe_unit_content(netns, VPN_PROBE_IFACE, ip_path, awg_quick_path)
-    current_unit = (
-        _read_privileged(VPN_PROBE_UNIT_FILE) if _privileged_exists(VPN_PROBE_UNIT_FILE) else None
-    )
-    if current_unit != unit_content:
-        if current_unit is not None:
-            # Юнит уже active со старым содержимым — гасим по СТАРОМУ
-            # ExecStop ДО перезаписи файла и daemon-reload. Иначе systemd
-            # продолжит считать его active, а `enable --now` ниже не
-            # перезапустит уже активный юнит с новым содержимым сам по себе.
-            _sudo(["systemctl", "stop", VPN_PROBE_UNIT_FILE.name])
-        with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as tmp:
-            tmp.write(unit_content)
-            tmp_path = Path(tmp.name)
-        try:
-            _sudo(
-                [
-                    "install",
-                    "-m",
-                    "0644",
-                    "-o",
-                    "root",
-                    "-g",
-                    "root",
-                    str(tmp_path),
-                    str(VPN_PROBE_UNIT_FILE),
-                ]
-            )
-        finally:
-            tmp_path.unlink(missing_ok=True)
-        _sudo(["systemctl", "daemon-reload"])
-    _sudo(["systemctl", "enable", "--now", VPN_PROBE_UNIT_FILE.name])
 
-
-def make_vpn_probe_tunnel_fixup(settings: Settings) -> Fixup:
+def make_vpn_probe_tunnel_conf_fixup(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> Fixup:
     return Fixup(
-        id="vpn-check-probe-tunnel",
-        title="Поднять VPN-туннель пробника (netns + veth + awg-quick)",
+        id=f"vpn-probe-conf-{slot.server}-{slot.transport}",
+        title=f"Получить и установить конфиг awg-пробника к {slot.server}",
         needed=_vpn_check_needed,
-        check=lambda: _vpn_probe_tunnel_check(settings),
-        apply=lambda: _vpn_probe_tunnel_apply(settings),
+        check=lambda: _probe_conf_check(slot),
+        apply=lambda: _probe_conf_apply(settings, slot),
     )
 
 
-def _vpn_probe_sudoers_check(settings: Settings) -> bool:
+def vpn_probe_sudoers_content(
+    slots: list[vpn_probe_state.ProbeSlot], ip_path: str, awg_quick_path: str, user: str
+) -> str:
+    """NOPASSWD ровно на нужные вызовы внутри netns каждого слота (см.
+    vpn_check/service.py): ``curl *`` (сами проверки + запрос внешнего IP),
+    ``ip route get *`` (гейт «пробник реально в туннеле» перед каждой
+    пачкой) и, для awg-слотов, ``awg-quick up/down <iface>`` (сама служба
+    поднимает/гасит туннель вокруг чек-цикла — эфемерно, 39.0.7(d)). Не
+    голый ``ip`` (равносилен root — умеет менять маршруты/интерфейсы где
+    угодно): ``route get`` только читает таблицу маршрутизации. ``curl``
+    литералом — он не прямая цель sudo, а аргумент вложенного ``ip netns
+    exec``; вложенный ``ip``/``awg-quick`` — резолвленным путём, ровно как
+    их зовёт служба. ``awg-quick up/down`` пришпилен к КОНКРЕТНОМУ iface
+    слота (не wildcard) — шире не нужно."""
+    cmds: list[str] = []
+    for slot in slots:
+        cmds.append(f"{ip_path} netns exec {slot.netns} curl *")
+        cmds.append(f"{ip_path} netns exec {slot.netns} {ip_path} route get *")
+        if slot.transport == "awg":
+            cmds.append(f"{ip_path} netns exec {slot.netns} {awg_quick_path} up {slot.iface}")
+            cmds.append(f"{ip_path} netns exec {slot.netns} {awg_quick_path} down {slot.iface}")
+    return f"{user} ALL=(root) NOPASSWD: " + ", ".join(cmds) + "\n"
+
+
+def _vpn_probe_sudoers_check(slots: list[vpn_probe_state.ProbeSlot]) -> bool:
     path = SUDOERS_DIR / VPN_PROBE_SUDOERS_FILE
     if not _privileged_exists(path):
         return False
     ip_path = _which("ip")
-    if ip_path is None:
+    awg_quick_path = _which("awg-quick")
+    if ip_path is None or awg_quick_path is None:
         return False
     # Сверяем содержимое, не только факт существования — старый снипет
-    # (другой netns/интерфейс) иначе оставлял бы бесполезное право после
-    # смены имени netns в конфиге.
-    expected = vpn_probe_sudoers_content(ip_path, settings.vpn_check.netns, getuser())
+    # (другой состав пар) иначе оставлял бы бесполезное/неполное право
+    # после изменения состава живых серверов.
+    expected = vpn_probe_sudoers_content(slots, ip_path, awg_quick_path, getuser())
     return _read_privileged(path) == expected
 
 
-def _vpn_probe_sudoers_apply(settings: Settings) -> None:
+def _vpn_probe_sudoers_apply(slots: list[vpn_probe_state.ProbeSlot]) -> None:
     ip_path = _which("ip")
     if ip_path is None:
         raise FixupError("ip (iproute2) не найден в PATH")
-    content = vpn_probe_sudoers_content(ip_path, settings.vpn_check.netns, getuser())
+    awg_quick_path = _which("awg-quick")
+    if awg_quick_path is None:
+        raise FixupError("awg-quick не найден — сначала должен пройти vpn-probe-conf-* фикс")
+    content = vpn_probe_sudoers_content(slots, ip_path, awg_quick_path, getuser())
     _install_sudoers_snippet(VPN_PROBE_SUDOERS_FILE, content)
 
 
-def make_vpn_probe_sudoers_fixup(settings: Settings) -> Fixup:
+def make_vpn_probe_sudoers_fixup(
+    settings: Settings, slots: list[vpn_probe_state.ProbeSlot]
+) -> Fixup:
     return Fixup(
         id="vpn-check-probe-sudoers",
-        title="Разрешить vpn_check делать curl внутри netns пробника без пароля",
+        title="Разрешить vpn_check ходить в netns пробников и поднимать/гасить awg без пароля",
         needed=_vpn_check_needed,
-        check=lambda: _vpn_probe_sudoers_check(settings),
-        apply=lambda: _vpn_probe_sudoers_apply(settings),
+        check=lambda: _vpn_probe_sudoers_check(slots),
+        apply=lambda: _vpn_probe_sudoers_apply(slots),
     )
 
 
-# --- vpn_check: forward/NAT для veth-подсети пробника, точечно (НЕ nft -f) ---
+# --- vpn_check: forward/NAT для veth-подсетей пробников, точечно (НЕ nft -f) ---
 #
-# ExecStartPre в vpn_probe_unit_content поднимает netns+veth на каждом
-# старте юнита (переживает ребут), но САМ ПО СЕБЕ этого недостаточно —
-# forward-разрешение и NAT для маленькой подсети veth (10.200.200.0/30)
-# нужно тем же способом, каким ноды в этом файле уже чинят firewall (см.
-# «proxy: именованные nft-счётчики трафика» ниже) — ТОЧЕЧНО, без единого
-# `nft -f`, чтобы не повторить инцидент 2026-08-17 (vpn-jeeves-nat-wiped-
-# by-nftables-reload). В отличие от той секции, которая ЗАВЕДОМО правит
-# существующие цепочки jeeves (``inet filter``/``ip nat``, известные
-# заранее — needed=vpn_needed, только сервер), этот фикс нужен НА ЛЮБОЙ
-# ноде с vpn_check (needed=vpn_check_needed) и не может полагаться на
-# конкретные имена таблиц — сам находит подходящую существующую
-# forward/postrouting-цепочку (см. _find_base_chain), а если такой нет
-# вовсе (типичный случай для ноды без своего firewall) — заводит
-# собственную маленькую таблицу с политикой accept, которая не меняет
-# поведение остального трафика ноды.
+# vpn_probe_scaffold_unit_content поднимает netns+veth на каждом старте
+# юнита (переживает ребут), но САМ ПО СЕБЕ этого недостаточно —
+# forward-разрешение и NAT для каждой подсети veth нужно тем же способом,
+# каким ноды в этом файле уже чинят firewall (см. «proxy: именованные
+# nft-счётчики трафика» ниже) — ТОЧЕЧНО, без единого `nft -f`, чтобы не
+# повторить инцидент 2026-08-17 (vpn-jeeves-nat-wiped-by-nftables-reload). В
+# отличие от той секции, которая ЗАВЕДОМО правит существующие цепочки
+# jeeves (``inet filter``/``ip nat``, известные заранее — needed=vpn_needed,
+# только сервер), этот фикс нужен НА ЛЮБОЙ ноде с vpn_check
+# (needed=vpn_check_needed) и не может полагаться на конкретные имена
+# таблиц — сам находит подходящую существующую forward/postrouting-цепочку
+# (см. _find_base_chain), а если такой нет вовсе (типичный случай для ноды
+# без своего firewall) — заводит собственную маленькую таблицу с политикой
+# accept, которая не меняет поведение остального трафика ноды.
 
 
 def _nft_json_ruleset() -> list[dict]:
@@ -1198,6 +1225,15 @@ def _nft_ruleset_text() -> str:
     return result.stdout if result.returncode == 0 else ""
 
 
+def _nft_chain_text(family: str, table: str, chain: str) -> str:
+    result = subprocess.run(
+        ["sudo", "-n", "nft", "list", "chain", family, table, chain],
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout if result.returncode == 0 else ""
+
+
 VPN_PROBE_IP_FORWARD_SYSCTL_PATH = Path("/etc/sysctl.d/99-sa-home-vpn-probe-forward.conf")
 
 
@@ -1208,11 +1244,13 @@ def _ip_forward_enabled() -> bool:
         return False
 
 
-def _probe_forwarding_check() -> bool:
+def _probe_forwarding_check(slots: list[vpn_probe_state.ProbeSlot]) -> bool:
     if not _ip_forward_enabled():
         return False
+    if not slots:
+        return True
     text = _nft_ruleset_text()
-    return VPN_PROBE_VETH_HOST in text and VPN_PROBE_VETH_SUBNET in text
+    return all(slot.veth_host in text and slot.subnet in text for slot in slots)
 
 
 def _ensure_ip_forward() -> None:
@@ -1260,7 +1298,7 @@ def _ensure_nft_installed() -> None:
 
 def _resolve_probe_forward_targets() -> tuple[tuple[str, str, str], tuple[str, str, str]]:
     """Найти (или завести собственную) forward/postrouting-цепочку для
-    трафика veth-подсети пробника. Вынесено из ``_probe_forwarding_apply``,
+    трафика veth-подсетей пробников. Вынесено из ``_probe_forwarding_apply``,
     чтобы ``_vpn_probe_forwarding_persist_apply`` (см. ниже) могла запечь ТЕ
     ЖЕ family/table/chain в скрипт, переживающий ребут, а не изобретать
     решение заново."""
@@ -1293,62 +1331,68 @@ def _resolve_probe_forward_targets() -> tuple[tuple[str, str, str], tuple[str, s
     return forward_target, nat_target
 
 
-def _probe_forwarding_apply() -> None:
+def _probe_forwarding_apply(slots: list[vpn_probe_state.ProbeSlot]) -> None:
     _ensure_ip_forward()
-    if _probe_forwarding_check():
+    if not slots:
         return
 
     forward_target, nat_target = _resolve_probe_forward_targets()
 
-    family, table, chain = forward_target
-    _sudo(["nft", "insert", "rule", family, table, chain, "iifname", VPN_PROBE_VETH_HOST, "accept"])
-    _sudo(["nft", "insert", "rule", family, table, chain, "oifname", VPN_PROBE_VETH_HOST, "accept"])
+    ff, ft, fc = forward_target
+    forward_text = _nft_chain_text(ff, ft, fc)
+    for slot in slots:
+        for rule in (f"iifname {slot.veth_host} accept", f"oifname {slot.veth_host} accept"):
+            if rule not in forward_text:
+                _sudo(["nft", "insert", "rule", ff, ft, fc, *rule.split()])
 
-    family, table, chain = nat_target
-    _sudo(
-        [
-            "nft", "insert", "rule", family, table, chain,
-            "ip", "saddr", VPN_PROBE_VETH_SUBNET, "masquerade",
-        ]
-    )
+    nf, nt, nc = nat_target
+    nat_text = _nft_chain_text(nf, nt, nc)
+    for slot in slots:
+        rule = f"ip saddr {slot.subnet} masquerade"
+        if rule not in nat_text:
+            _sudo(["nft", "insert", "rule", nf, nt, nc, *rule.split()])
 
 
-def make_vpn_probe_forwarding_fixup(settings: Settings) -> Fixup:
+def make_vpn_probe_forwarding_fixup(
+    settings: Settings, slots: list[vpn_probe_state.ProbeSlot]
+) -> Fixup:
     return Fixup(
         id="vpn-check-probe-forwarding",
-        title="Пропустить трафик veth-пары пробника наружу (ip_forward + forward + NAT)",
+        title="Пропустить трафик veth-пар пробников наружу (ip_forward + forward + NAT)",
         needed=_vpn_check_needed,
-        check=_probe_forwarding_check,
-        apply=_probe_forwarding_apply,
+        check=lambda: _probe_forwarding_check(slots),
+        apply=lambda: _probe_forwarding_apply(slots),
     )
 
 
-# --- vpn_check: forward/NAT пробника переживает ребут (systemd, 2026-08-24) ---
+# --- vpn_check: forward/NAT пробников переживает ребут (systemd, 2026-08-24) ---
 #
 # Живой инцидент 2026-08-24: alfred потерял питание, после старта
-# ``vpn-check-probe-tunnel`` поднялся сам (его юнит переигрывает
-# netns+veth+awg-quick при каждой загрузке, см. ``vpn_probe_unit_content``),
-# а ``vpn-check-probe-forwarding`` — нет: ``nodectl fix`` кладёт nft-правила
+# netns-скаффолд поднялся сам (его юнит переигрывает netns+veth при каждой
+# загрузке, см. ``vpn_probe_scaffold_unit_content``), а
+# ``vpn-check-probe-forwarding`` — нет: ``nodectl fix`` кладёт nft-правила
 # ПРЯМО В ЖИВОЙ ruleset интерактивным sudo и никуда их не сохраняет, а ядро
 # ruleset между перезагрузками не хранит. После ребута форвардинг снова
 # отсутствовал, помогло только повторное ручное ``nodectl fix``.
 #
-# Фикс — тот же приём, что уже применён для туннеля: systemd-юнит, который
-# сам (от root, без пароля — не interactive sudo) переигрывает нужные
-# nft-правила при каждом старте. Family/table/chain берутся ИЗ ТОГО ЖЕ
-# ``_resolve_probe_forward_targets()``, каким пользуется живой apply() —
-# на jeeves это переиспользование уже существующих цепочек firewall,
-# на alfred — собственная маленькая таблица ``VPN_PROBE_NFT_TABLE``.
-# Идемпотентность каждого шага — через ``grep -qF`` по ``nft list`` (голый
-# повторный ``nft insert rule`` иначе плодил бы дубликаты при каждом
-# рестарте юнита, не только при чистом буте).
+# Фикс — тот же приём, что уже применён для скаффолда: systemd-юнит,
+# который сам (от root, без пароля — не interactive sudo) переигрывает
+# нужные nft-правила при каждом старте, для ВСЕХ слотов разом. Family/
+# table/chain берутся ИЗ ТОГО ЖЕ ``_resolve_probe_forward_targets()``, каким
+# пользуется живой apply() — на jeeves это переиспользование уже
+# существующих цепочек firewall, на alfred — собственная маленькая таблица
+# ``VPN_PROBE_NFT_TABLE``. Идемпотентность каждого шага — через ``grep -qF``
+# по ``nft list`` (голый повторный ``nft insert rule`` иначе плодил бы
+# дубликаты при каждом рестарте юнита, не только при чистом буте).
 
 VPN_PROBE_FORWARD_SCRIPT_PATH = Path("/usr/local/lib/sa-home-bot/vpn-probe-forward-reapply.sh")
 VPN_PROBE_FORWARD_UNIT_FILE = Path("/etc/systemd/system/sa-home-vpn-probe-forward.service")
 
 
 def _vpn_probe_forward_script_content(
-    forward_target: tuple[str, str, str], nat_target: tuple[str, str, str]
+    forward_target: tuple[str, str, str],
+    nat_target: tuple[str, str, str],
+    slots: list[vpn_probe_state.ProbeSlot],
 ) -> str:
     ff, ft, fc = forward_target
     nf, nt, nc = nat_target
@@ -1382,31 +1426,36 @@ def _vpn_probe_forward_script_content(
             f"nft insert rule {family} {table} {chain} {rule}"
         )
 
-    ensure_rule(
-        ff, ft, fc,
-        f'iifname "{VPN_PROBE_VETH_HOST}" accept',
-        f"iifname {VPN_PROBE_VETH_HOST} accept",
-    )
-    ensure_rule(
-        ff, ft, fc,
-        f'oifname "{VPN_PROBE_VETH_HOST}" accept',
-        f"oifname {VPN_PROBE_VETH_HOST} accept",
-    )
-    ensure_rule(
-        nf, nt, nc,
-        f"ip saddr {VPN_PROBE_VETH_SUBNET} masquerade",
-        f"ip saddr {VPN_PROBE_VETH_SUBNET} masquerade",
-    )
+    for slot in slots:
+        ensure_rule(
+            ff, ft, fc,
+            f'iifname "{slot.veth_host}" accept',
+            f"iifname {slot.veth_host} accept",
+        )
+        ensure_rule(
+            ff, ft, fc,
+            f'oifname "{slot.veth_host}" accept',
+            f"oifname {slot.veth_host} accept",
+        )
+        ensure_rule(
+            nf, nt, nc,
+            f"ip saddr {slot.subnet} masquerade",
+            f"ip saddr {slot.subnet} masquerade",
+        )
 
     return "\n".join(lines) + "\n"
 
 
-def vpn_probe_forward_unit_content(script_path: Path) -> str:
+def vpn_probe_forward_unit_content(
+    script_path: Path, slots: list[vpn_probe_state.ProbeSlot]
+) -> str:
+    scaffold_units = " ".join(_probe_scaffold_unit_path(s).name for s in slots)
+    after = "network-online.target" + (f" {scaffold_units}" if scaffold_units else "")
     return (
         "[Unit]\n"
-        "Description=sa-home-bot: forward/NAT для veth-пары VPN-пробника "
+        "Description=sa-home-bot: forward/NAT для veth-пар VPN-пробников "
         "(переживает ребут)\n"
-        f"After=network-online.target {VPN_PROBE_UNIT_FILE.name}\n"
+        f"After={after}\n"
         "Wants=network-online.target\n"
         "\n"
         "[Service]\n"
@@ -1419,17 +1468,16 @@ def vpn_probe_forward_unit_content(script_path: Path) -> str:
     )
 
 
-def _vpn_probe_forwarding_persist_check() -> bool:
+def _vpn_probe_forwarding_persist_check(slots: list[vpn_probe_state.ProbeSlot]) -> bool:
     if not (
         _privileged_exists(VPN_PROBE_FORWARD_SCRIPT_PATH)
         and _privileged_exists(VPN_PROBE_FORWARD_UNIT_FILE)
     ):
         return False
-    # Сверяем содержимое юнита, не только факт существования файла — тот же
-    # инвариант, что у ``_vpn_probe_tunnel_check`` (см. комментарий там):
-    # застрявший старый юнит технически active со старым содержимым check
-    # по одному is-active счёл бы «уже применённым».
-    expected_unit = vpn_probe_forward_unit_content(VPN_PROBE_FORWARD_SCRIPT_PATH)
+    # Сверяем содержимое юнита, не только факт существования файла — живой
+    # апгрейд 2026-08-17 (старый юнит гонял awg-quick с другим ExecStart)
+    # иначе застрял бы со старым содержимым навсегда.
+    expected_unit = vpn_probe_forward_unit_content(VPN_PROBE_FORWARD_SCRIPT_PATH, slots)
     try:
         current_unit = _read_privileged(VPN_PROBE_FORWARD_UNIT_FILE)
     except FixupError:
@@ -1444,10 +1492,10 @@ def _vpn_probe_forwarding_persist_check() -> bool:
     )
 
 
-def _vpn_probe_forwarding_persist_apply() -> None:
+def _vpn_probe_forwarding_persist_apply(slots: list[vpn_probe_state.ProbeSlot]) -> None:
     _ensure_ip_forward()
     forward_target, nat_target = _resolve_probe_forward_targets()
-    script_content = _vpn_probe_forward_script_content(forward_target, nat_target)
+    script_content = _vpn_probe_forward_script_content(forward_target, nat_target, slots)
 
     current_script = (
         _read_privileged(VPN_PROBE_FORWARD_SCRIPT_PATH)
@@ -1464,7 +1512,7 @@ def _vpn_probe_forwarding_persist_apply() -> None:
         finally:
             tmp_path.unlink(missing_ok=True)
 
-    unit_content = vpn_probe_forward_unit_content(VPN_PROBE_FORWARD_SCRIPT_PATH)
+    unit_content = vpn_probe_forward_unit_content(VPN_PROBE_FORWARD_SCRIPT_PATH, slots)
     current_unit = (
         _read_privileged(VPN_PROBE_FORWARD_UNIT_FILE)
         if _privileged_exists(VPN_PROBE_FORWARD_UNIT_FILE)
@@ -1485,13 +1533,66 @@ def _vpn_probe_forwarding_persist_apply() -> None:
     _sudo(["systemctl", "enable", "--now", VPN_PROBE_FORWARD_UNIT_FILE.name])
 
 
-def make_vpn_probe_forwarding_persist_fixup(settings: Settings) -> Fixup:
+def make_vpn_probe_forwarding_persist_fixup(
+    settings: Settings, slots: list[vpn_probe_state.ProbeSlot]
+) -> Fixup:
     return Fixup(
         id="vpn-check-probe-forwarding-persist",
-        title="Пережить перезагрузку: nft forward/NAT пробника переигрываются systemd-юнитом",
+        title="Пережить перезагрузку: nft forward/NAT пробников переигрываются systemd-юнитом",
         needed=_vpn_check_needed,
-        check=_vpn_probe_forwarding_persist_check,
-        apply=_vpn_probe_forwarding_persist_apply,
+        check=lambda: _vpn_probe_forwarding_persist_check(slots),
+        apply=lambda: _vpn_probe_forwarding_persist_apply(slots),
+    )
+
+
+# --- vpn_check: состояние пробника — что реально настроено, fixup пишет,
+# служба читает (39.0.7(d)) ---
+#
+# До 39.0.7(d) единственная пара (сервер, транспорт) жила в
+# ``[vpn_check] probe_server``/``probe_transport`` config.toml, правилась
+# вручную. Список целей теперь автообнаруживается и может меняться без
+# участия человека — состояние, а не конфиг (см. докстринг
+# node/vpn_probe_state.py). Несёт ВСЕ обнаруженные пары, включая
+# транспорты, для которых scaffold/conf/sudoers ещё не заведены (reality —
+# до 39.0.7(e)) — vpn_check/service.py уже умеет отвечать на них мягкой
+# ошибкой «транспорт пока не поддержан», а не молчаливым пропуском, так что
+# после 39.0.7(e) они заработают без изменения формата файла.
+
+
+def _vpn_probe_state_check(slots: list[vpn_probe_state.ProbeSlot]) -> bool:
+    path = vpn_probe_state.STATE_PATH
+    if not _privileged_exists(path):
+        return False
+    try:
+        current = _read_privileged(path)
+    except FixupError:
+        return False
+    return current == vpn_probe_state.render(slots)
+
+
+def _vpn_probe_state_apply(slots: list[vpn_probe_state.ProbeSlot]) -> None:
+    content = vpn_probe_state.render(slots)
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = Path(tmp.name)
+    try:
+        _sudo(
+            [
+                "install", "-D", "-m", "0644", "-o", "root", "-g", "root",
+                str(tmp_path), str(vpn_probe_state.STATE_PATH),
+            ]
+        )
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def make_vpn_probe_state_fixup(settings: Settings, slots: list[vpn_probe_state.ProbeSlot]) -> Fixup:
+    return Fixup(
+        id="vpn-check-probe-state",
+        title="Записать список настроенных пробников (что реально проверяется с этой ноды)",
+        needed=_vpn_check_needed,
+        check=lambda: _vpn_probe_state_check(slots),
+        apply=lambda: _vpn_probe_state_apply(slots),
     )
 
 
@@ -1872,7 +1973,14 @@ def make_proxy_firewall_fixup(settings: Settings) -> Fixup:
 
 
 def build_fixups(settings: Settings) -> list[Fixup]:
-    """Известные фиксы, актуальные для текущих назначений ноды (``needed``)."""
+    """Известные фиксы, актуальные для текущих назначений ноды (``needed``).
+
+    Пробники VPN (39.0.7(d)) — единственные фиксы, чей СОСТАВ (не только
+    применимость) зависит от роя: список (сервер, транспорт) обнаруживается
+    один раз здесь (``_discover_probe_slots``), и на каждую awg-пару
+    заводится СВОЙ набор фиксов (scaffold+conf), по образцу
+    ``*(make_apps_unit_fixup(app) for app in settings.apps.items)`` ниже —
+    явной «фабрики-списка» в этом файле не было, только этот паттерн."""
     fixups = [
         INSTALL_SMARTMONTOOLS,
         SMARTCTL_SUDOERS,
@@ -1881,10 +1989,22 @@ def build_fixups(settings: Settings) -> list[Fixup]:
         POWER_CONTROL_POLKIT,
         WOL_ENABLE,
         make_awg_sudoers_fixup(settings),
-        make_vpn_probe_forwarding_fixup(settings),
-        make_vpn_probe_forwarding_persist_fixup(settings),
-        make_vpn_probe_tunnel_fixup(settings),
-        make_vpn_probe_sudoers_fixup(settings),
+    ]
+    if _vpn_check_needed(settings):
+        slots = _discover_probe_slots(settings)
+        # Reality пока не умеет ни scaffold, ни sudoers, ни conf-фикс
+        # (39.0.7(e)) — их слоты остаются только в vpn-check-probe-state,
+        # см. докстринг той секции.
+        awg_slots = [s for s in slots if s.transport == "awg"]
+        fixups += [
+            make_vpn_probe_forwarding_fixup(settings, awg_slots),
+            make_vpn_probe_forwarding_persist_fixup(settings, awg_slots),
+            *(make_vpn_probe_scaffold_fixup(settings, slot) for slot in awg_slots),
+            *(make_vpn_probe_tunnel_conf_fixup(settings, slot) for slot in awg_slots),
+            make_vpn_probe_sudoers_fixup(settings, awg_slots),
+            make_vpn_probe_state_fixup(settings, slots),
+        ]
+    fixups += [
         make_proxy_units_fixup(settings),
         make_proxy_firewall_fixup(settings),
         *(make_apps_unit_fixup(app) for app in settings.apps.items),

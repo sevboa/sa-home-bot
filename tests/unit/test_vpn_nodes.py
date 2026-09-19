@@ -227,3 +227,38 @@ async def test_live_vpn_servers_skips_unreachable_service():
         dead={"wooster"},
     )
     assert [s["node"] for s in await vpn_nodes.live_vpn_servers(link)] == ["jeeves"]
+
+
+async def test_probe_targets_excludes_self_and_flattens_transports():
+    link = ServiceStateLink(
+        _two_vpn_nodes(),
+        _VPN_PEERS,
+        {
+            "jeeves": {"label": "🇳🇱", "transports": ["awg", "reality"]},
+            "wooster": {"label": "🇺🇸", "transports": ["reality"]},
+        },
+    )
+    targets = await vpn_nodes.probe_targets(link, exclude="alfred")
+    assert targets == [
+        vpn_nodes.ProbeTarget(server="jeeves", transport="awg"),
+        vpn_nodes.ProbeTarget(server="jeeves", transport="reality"),
+        vpn_nodes.ProbeTarget(server="wooster", transport="reality"),
+    ]
+
+
+async def test_probe_targets_excludes_self_when_self_is_a_vpn_server():
+    link = ServiceStateLink(
+        _two_vpn_nodes(),
+        _VPN_PEERS,
+        {
+            "jeeves": {"label": "🇳🇱", "transports": ["awg"]},
+            "wooster": {"label": "🇺🇸", "transports": ["reality"]},
+        },
+    )
+    targets = await vpn_nodes.probe_targets(link, exclude="jeeves")
+    assert targets == [vpn_nodes.ProbeTarget(server="wooster", transport="reality")]
+
+
+async def test_probe_targets_empty_when_no_vpn_anywhere():
+    link = FakeLink(_node_state("alfred", [_svc("monitor")]))
+    assert await vpn_nodes.probe_targets(link, exclude="alfred") == []

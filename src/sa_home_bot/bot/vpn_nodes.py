@@ -18,6 +18,7 @@ AmneziaWG может быть больше одного. Бот перестаё
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 
 from sa_home_bot import wake_core
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
@@ -83,6 +84,33 @@ async def live_vpn_servers(node_link: ServiceLink) -> list[dict]:
 
     states = await asyncio.gather(*(_one(node_id) for node_id in nodes))
     return [state for state in states if state is not None]
+
+
+@dataclass(frozen=True, order=True)
+class ProbeTarget:
+    """Одна пара (сервер, транспорт), которую пробнику (39.0.7(d)) стоит
+    проверять — из чего именно строится netns/veth/имена, решает
+    node/fixups.py, здесь только сам список пар."""
+
+    server: str
+    transport: str
+
+
+async def probe_targets(node_link: ServiceLink, *, exclude: str) -> list[ProbeTarget]:
+    """Все живые (сервер, транспорт) кроме ``exclude`` (своя нода —
+    self-check исключён по решению владельца 2026-09-18, см.
+    vpn_check/service.py). Раскладывает ``live_vpn_servers()`` (по одной
+    записи на сервер) в плоский список пар — по одной на каждый транспорт
+    сервера. Отсортирован (детерминизм для node/fixups.py: индекс пары в
+    этом списке участвует в именовании netns/veth/подсетей)."""
+    servers = await live_vpn_servers(node_link)
+    targets = [
+        ProbeTarget(server=s["node"], transport=t)
+        for s in servers
+        if s["node"] != exclude
+        for t in s["transports"]
+    ]
+    return sorted(targets)
 
 
 async def fanout(node_link: ServiceLink, action: str, args: dict) -> list[dict]:
