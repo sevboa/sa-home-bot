@@ -18,7 +18,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, Filter
 from aiogram.types import CallbackQuery, Message
 
-from sa_home_bot.bot import ai_flow, commands, guests_view, invites
+from sa_home_bot.bot import ai_flow, commands, guest_rights, guests_view, invites
 from sa_home_bot.bot.handlers import ai as ai_handlers
 from sa_home_bot.bot.handlers import vpn as vpn_handlers
 from sa_home_bot.bot.handlers.basic import build_help
@@ -329,11 +329,7 @@ async def on_guest_screen(
             return
         await refresh_chat_menu(bot, chat_id, updated)
         await callback.answer("Право снято")
-        offset = guests_view.clamp_offset(
-            offset, guests_view.PERM_PAGE_SIZE, len(updated.allowed_commands)
-        )
-        text, keyboard = guests_view.build_perms_view(updated, offset)
-        await _redraw(callback, text, keyboard)
+        await _redraw_perms(callback, updated, offset)
         return
 
     if code == commands.GUEST_PERM_ADD_CODE:
@@ -349,7 +345,44 @@ async def on_guest_screen(
         await _redraw(callback, text, keyboard)
         return
 
+    # Группа прав (bot/guest_rights.py) — выдаётся и снимается целиком, ОДНОЙ
+    # перезаписью гостевого пакета: N вызовов add_guest_right переписали бы
+    # файл N раз и оставили бы гостя в промежуточных состояниях, если бы
+    # запись на середине сорвалась.
+    if code in (commands.GUEST_GROUP_ADD_CODE, commands.GUEST_GROUP_OFF_CODE):
+        chat_id = _parse_int(parts[2] if len(parts) > 2 else None, default=-1)
+        offset = _parse_int(parts[3] if len(parts) > 3 else None)
+        group = guest_rights.group(parts[4] if len(parts) > 4 else "")
+        sub = await _guest_or_redraw_list(callback, book, chat_id)
+        if sub is None:
+            return
+        if group is None:
+            await callback.answer()
+            return
+        adding = code == commands.GUEST_GROUP_ADD_CODE
+        rights = (
+            sub.allowed_commands | group.rights if adding else sub.allowed_commands - group.rights
+        )
+        updated = gate.set_guest_rights(chat_id, rights)
+        if updated is None:
+            await _guest_or_redraw_list(callback, book, chat_id)
+            return
+        await refresh_chat_menu(bot, chat_id, updated)
+        await callback.answer(f"{group.label}: {'выдано' if adding else 'снято'}")
+        await _redraw_perms(callback, updated, 0 if adding else offset)
+        return
+
     await callback.answer()
+
+
+async def _redraw_perms(callback: CallbackQuery, sub: Subscription, offset: int) -> None:
+    """Экран прав после правки: страница могла опустеть — отступ подтягивается
+    к последней существующей (та же логика, что у списка гостей)."""
+    offset = guests_view.clamp_offset(
+        offset, guests_view.PERM_PAGE_SIZE, guests_view.granted_rows(sub)
+    )
+    text, keyboard = guests_view.build_perms_view(sub, offset)
+    await _redraw(callback, text, keyboard)
 
 
 class CodeFromInsider(Filter):

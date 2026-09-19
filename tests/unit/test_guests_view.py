@@ -157,11 +157,75 @@ def test_perm_add_view_excludes_already_granted():
 
 
 def test_perm_add_view_all_granted_says_so():
-    sub = _guest(77, rights=frozenset(r.right for r in guest_rights.GUEST_RIGHTS))
+    sub = _guest(77, rights=guest_rights.CATALOG_RIGHTS)
     text, kb = guests_view.build_perm_add_view(sub, 0)
     assert "уже выданы" in text
     # Кроме «Назад», выдавать больше нечего.
     assert _callbacks(kb) == [f"st:{commands.GUEST_PERMS_CODE}:77:0"]
+
+
+# --- группы прав ---------------------------------------------------------
+
+
+def _vpn_group() -> guest_rights.RightGroup:
+    group = guest_rights.group("vpn")
+    assert group is not None
+    return group
+
+
+def test_perms_view_collapses_service_rights_into_one_group_row():
+    group = _vpn_group()
+    sub = _guest(77, rights=group.rights | {"chat@llm"})
+    text, kb = guests_view.build_perms_view(sub, 0)
+    callbacks = _callbacks(kb)
+    # Семь прав VPN — одна строка и одна кнопка снятия на всю группу.
+    assert text.count(group.label) == 1
+    assert f"st:{commands.GUEST_GROUP_OFF_CODE}:77:0:vpn" in callbacks
+    assert not any(c.endswith(":issue@vpn") for c in callbacks)
+    # Одиночное право осталось само по себе.
+    assert f"st:{commands.GUEST_PERM_OFF_CODE}:77:0:chat@llm" in callbacks
+
+
+def test_perms_view_shows_fraction_for_partial_group():
+    sub = _guest(77, rights=frozenset({"usage@vpn", "issue@vpn"}))
+    text, kb = guests_view.build_perms_view(sub, 0)
+    assert f"(2/{len(_vpn_group().rights)})" in text
+    # Снимается всё равно целиком.
+    assert f"st:{commands.GUEST_GROUP_OFF_CODE}:77:0:vpn" in _callbacks(kb)
+
+
+def test_perm_add_view_offers_group_and_hides_its_members():
+    sub = _guest(77)
+    text, kb = guests_view.build_perm_add_view(sub, 0)
+    callbacks = _callbacks(kb)
+    assert f"st:{commands.GUEST_GROUP_ADD_CODE}:77:0:vpn" in callbacks
+    assert not any(c.endswith(":usage@vpn") for c in callbacks)
+    # Подсказка ведёт туда, где настраиваются нюансы доступа.
+    assert "/vpn" in text
+
+
+def test_perm_add_view_still_offers_partially_granted_group():
+    sub = _guest(77, rights=frozenset({"usage@vpn"}))
+    assert f"st:{commands.GUEST_GROUP_ADD_CODE}:77:0:vpn" in _callbacks(
+        guests_view.build_perm_add_view(sub, 0)[1]
+    )
+
+
+def test_granted_rows_counts_group_as_one():
+    group = _vpn_group()
+    sub = _guest(77, rights=group.rights | {"chat@llm"})
+    assert guests_view.granted_rows(sub) == 2
+
+
+def test_group_of_finds_owning_group():
+    assert guest_rights.group_of("issue@vpn") is _vpn_group()
+    assert guest_rights.group_of("chat@llm") is None
+    assert guest_rights.group_of("peers@vpn") is None
+
+
+def test_group_member_label_carries_service_prefix():
+    # В общем списке прав «перевыпустить» без службы не читается.
+    assert guest_rights.label("reissue@vpn") == "📶 VPN: перевыпустить"
 
 
 # --- пагинация ---------------------------------------------------------
@@ -188,17 +252,28 @@ def test_guest_rights_catalog_has_unique_rights():
 
 def test_guest_rights_catalog_excludes_infrastructure_and_delegation():
     # Каталог осознанно не включает управление нодами/питанием, админские
-    # VPN-действия и invite/guests (AUTHORIZATION.md §10.4) — точечно гостю
-    # через кнопку такое не выдаётся.
-    rights = {r.right for r in guest_rights.GUEST_RIGHTS}
+    # VPN-действия и invite/guests (AUTHORIZATION.md §10.4) — ни точечно, ни
+    # группой такое гостю через кнопку не выдаётся.
     forbidden = (
         "restart@node",
         "poweroff@node",
         "peers@vpn",
         "resolve_request@vpn",
+        "set_quota@vpn",
+        "set_access@vpn",
         "invite",
         "guests",
         "*",
+        "*@vpn",
     )
     for right in forbidden:
-        assert right not in rights
+        assert right not in guest_rights.CATALOG_RIGHTS
+
+
+def test_guest_groups_do_not_overlap_with_single_rights():
+    singles = {r.right for r in guest_rights.GUEST_RIGHTS}
+    seen: set[str] = set()
+    for group in guest_rights.GUEST_GROUPS:
+        assert not group.rights & singles, f"{group.key} дублирует одиночное право"
+        assert not group.rights & seen, f"{group.key} пересекается с другой группой"
+        seen |= group.rights

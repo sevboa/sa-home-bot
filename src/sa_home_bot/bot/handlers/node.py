@@ -23,6 +23,7 @@ from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.proto.messages import Address, ProtoError
+from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.vpn import protocol as vpn_protocol
 
@@ -125,6 +126,7 @@ async def on_dynamic_action(
     notifier: Notifier,
     config: Settings,
     pending_vpn_secrets: PendingVpnSecrets,
+    book: SubscriptionBook,
     subscription: Subscription | None = None,
 ) -> None:
     parsed = commands.parse_action_callback(callback.data)
@@ -139,7 +141,7 @@ async def on_dynamic_action(
         # дойти (SilenceGate отсекает раньше).
         if subscription is not None:
             await vpn_handlers.handle_action(
-                callback, node_link, notifier, config, subscription, pending_vpn_secrets
+                callback, node_link, notifier, config, subscription, pending_vpn_secrets, book
             )
         else:
             await callback.answer()

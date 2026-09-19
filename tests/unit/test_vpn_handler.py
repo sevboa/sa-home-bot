@@ -7,12 +7,14 @@ import asyncio
 
 import pytest_asyncio
 
+from sa_home_bot.bot import commands, vpn_admin_view
 from sa_home_bot.bot.handlers import vpn as vpn_handlers
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings, VpnConfig
-from sa_home_bot.proto.messages import ProtoError
-from sa_home_bot.subscriptions.models import Subscription
+from sa_home_bot.proto.messages import ERR_UNKNOWN_ACTION, ProtoError
+from sa_home_bot.subscriptions.book import SubscriptionBook
+from sa_home_bot.subscriptions.models import SOURCE_GUEST, Subscription
 from sa_home_bot.vpn import protocol as vpn_protocol
 
 ADMIN = Subscription(chat_id=1, name="admin", allowed_commands=frozenset({"*"}))
@@ -189,6 +191,9 @@ def _server(**over) -> dict:
         "used_bytes": 0,
         "limit_bytes": 500 * 10**9,
         "remaining_bytes": 500 * 10**9,
+        "allowed": True,
+        "base_limit_bytes": 500 * 10**9,
+        "personal_base": False,
         "devices": [],
         "transports": ["awg"],
         "proxy_available": True,
@@ -257,6 +262,9 @@ class TwoServersLink(MultiVpnLink):
             "used_bytes": 12 * 10**9,
             "limit_bytes": 500 * 10**9,
             "remaining_bytes": 488 * 10**9,
+            "allowed": True,
+            "base_limit_bytes": 500 * 10**9,
+            "personal_base": False,
             "devices": [{"device_label": "Ромашка", "transport": "awg", "server": "jeeves"}],
             "transports": ["awg", "reality"],
             "proxy_available": True,
@@ -267,6 +275,9 @@ class TwoServersLink(MultiVpnLink):
             "used_bytes": 3 * 10**9,
             "limit_bytes": 500 * 10**9,
             "remaining_bytes": 497 * 10**9,
+            "allowed": True,
+            "base_limit_bytes": 500 * 10**9,
+            "personal_base": False,
             "devices": [{"device_label": "Лютик", "transport": "reality", "server": "wooster"}],
             "transports": ["reality"],
             "proxy_available": True,
@@ -300,6 +311,76 @@ async def test_card_keyboard_pins_connection_server_into_callback():
     reissue, revoke = keyboard.inline_keyboard[1]
     assert reissue.callback_data == "act:vpn:reissue:Rose:wooster"
     assert revoke.callback_data == "act:vpn:revoke:Rose:wooster"
+
+
+# --- допуск к локации (vpn_chat_access, 2026-09-18) ------------------------
+
+
+async def test_card_hides_location_without_access():
+    """Закрытую локацию гость не видит вовсе — не строкой «доступа нет»
+    (решение владельца 2026-09-19)."""
+    link = TwoServersLink()
+    link.usages = {
+        "jeeves": link.usages["jeeves"],
+        "wooster": link.usages["wooster"] | {"allowed": False},
+    }
+    error, servers = await vpn_handlers._card(link, 777)
+    assert error is None
+    assert [s["node"] for s in servers] == ["jeeves"]
+    text = vpn_handlers._usage_text(servers)
+    assert "🇺🇸 США" not in text and "Лютик" not in text
+
+
+async def test_card_says_access_not_granted_when_nothing_is_open():
+    link = TwoServersLink()
+    link.usages = {
+        node: usage | {"allowed": False} for node, usage in TwoServersLink.usages.items()
+    }
+    error, servers = await vpn_handlers._card(link, 777)
+    assert servers == []
+    assert "не выдан" in error
+    assert error != vpn_handlers._VPN_UNAVAILABLE  # это не сбой связи
+
+
+async def test_card_without_allowed_field_behaves_as_allowed():
+    """Старая служба поля не шлёт: на время раската гость не должен потерять
+    свою карточку (bot/handlers/vpn.py::_is_allowed)."""
+    server = {k: v for k, v in _server().items() if k != "allowed"}
+    assert vpn_handlers._allowed_servers([server]) == [server]
+
+
+async def test_self_serve_button_not_offered_for_closed_location():
+    config = _config()
+    config.vpn.warn_remaining_gb = 1000  # порог заведомо выше остатка
+    closed = _server(allowed=False, remaining_bytes=0)
+    assert vpn_handlers._self_serve_nodes([closed], config) == []
+
+
+async def test_server_picker_offers_only_open_locations():
+    link = TwoServersLink()
+    link.usages = {
+        "jeeves": link.usages["jeeves"] | {"allowed": False},
+        "wooster": link.usages["wooster"],
+    }
+    assert [s["node"] for s in await vpn_handlers._live_servers_for(link, 777)] == ["wooster"]
+
+
+async def test_single_open_location_is_pinned_instead_of_first_live():
+    """Открыта только вторая нода — issue должен уйти именно на неё, а не на
+    «первую живую», которая гостю закрыта."""
+    link = TwoServersLink()
+    link.usages = {
+        "jeeves": link.usages["jeeves"] | {"allowed": False},
+        "wooster": link.usages["wooster"],
+    }
+    callback = FakeCallback("act:vpn:issue", chat_id=777)
+    await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), GUEST, _pending())
+    issue_dsts = [
+        dst
+        for action, dst in zip([c[0] for c in link.calls], link.dsts, strict=True)
+        if action == vpn_protocol.ACTION_ISSUE
+    ]
+    assert [dst.node for dst in issue_dsts] == ["wooster"]
 
 
 async def test_card_merges_devices_from_both_servers():
@@ -360,7 +441,9 @@ async def test_issue_asks_for_server_when_two_are_alive():
         "act:vpn:issue::jeeves",
         "act:vpn:issue::wooster",
     ]
-    assert [c[0] for c in link.calls] == []  # issue в службу ещё не ушёл
+    # Сам issue в службу ещё не ушёл: usage допустим — им бот и узнаёт, какие
+    # локации гостю открыты (bot/handlers/vpn.py::_live_servers_for).
+    assert vpn_protocol.ACTION_ISSUE not in [c[0] for c in link.calls]
 
 
 async def test_issue_skips_server_picker_when_single_node():
@@ -695,7 +778,9 @@ async def test_issue_shows_transport_picker_when_node_carries_both():
     callback = FakeCallback("act:vpn:issue", chat_id=777)
     await vpn_handlers.handle_action(callback, link, FakeNotifier(), _config(), GUEST, _pending())
     assert callback.message.edits and "технолог" in callback.message.edits[0].lower()
-    assert [c[0] for c in link.calls] == []  # issue в службу ещё не ушёл
+    # Сам issue в службу ещё не ушёл: usage допустим — им бот и узнаёт, какие
+    # локации гостю открыты (bot/handlers/vpn.py::_live_servers_for).
+    assert vpn_protocol.ACTION_ISSUE not in [c[0] for c in link.calls]
 
 
 async def test_single_transport_node_skips_picker():
@@ -746,6 +831,102 @@ async def test_app_links_text_is_hiddify_for_reality_only_node():
     awg = vpn_handlers._app_links_text(cfg, ["awg"])
     assert "Hiddify" in reality and "AmneziaWG" not in reality
     assert "AmneziaWG" in awg and "Hiddify" not in awg
+
+
+# --- админский раздел «👥 Все гости» ---------------------------------------
+
+
+def _book(*guests: Subscription) -> SubscriptionBook:
+    return SubscriptionBook(list(guests))
+
+
+ANYA = Subscription(chat_id=777, name="Аня", source=SOURCE_GUEST)
+
+
+async def test_all_guests_button_leads_to_admin_screen():
+    """Кнопка рисуется по peers@vpn — под тем же правом должна и работать
+    (раньше слала usage_all и отказывала админу с точечным правом)."""
+    keyboard = vpn_handlers._card_keyboard([_server()], is_admin=True, self_serve_nodes=[])
+    flat = [b for row in keyboard.inline_keyboard for b in row]
+    button = next(b for b in flat if "Все гости" in b.text)
+    assert button.callback_data == vpn_admin_view.guests_cb(0)
+    assert commands.parse_action_callback(button.callback_data)[1] == vpn_protocol.ACTION_PEERS
+
+
+async def test_admin_screen_lists_guests():
+    link = TwoServersLink()
+    callback = FakeCallback(vpn_admin_view.guests_cb(0), chat_id=1)
+    await vpn_handlers.handle_action(
+        callback, link, FakeNotifier(), _config(), ADMIN, _pending(), _book(ANYA)
+    )
+    assert "Гости VPN" in callback.message.edits[0]
+    assert "Аня" in callback.message.edits[0]
+
+
+async def test_admin_location_screen_opens_from_guest_card():
+    link = TwoServersLink()
+    callback = FakeCallback(vpn_admin_view.location_cb(777, "wooster"), chat_id=1)
+    await vpn_handlers.handle_action(
+        callback, link, FakeNotifier(), _config(), ADMIN, _pending(), _book(ANYA)
+    )
+    assert "🇺🇸 США" in callback.message.edits[0]
+
+
+async def test_set_access_grants_quota_and_tells_the_guest():
+    link = TwoServersLink()
+    link._result = _server(node="wooster", label="🇺🇸 США", base_limit_bytes=200 * 10**9)
+    notifier = FakeNotifier()
+    callback = FakeCallback(
+        vpn_admin_view.set_access_cb(777, "wooster", "200"), chat_id=1
+    )
+    await vpn_handlers.handle_action(
+        callback, link, notifier, _config(), ADMIN, _pending(), _book(ANYA)
+    )
+    call = next(c for c in link.calls if c[0] == vpn_protocol.ACTION_SET_ACCESS)
+    assert call[1] == {"chat_id": 777, "base_gb": 200, "allowed": True}
+    assert link.dsts[-1].node == "wooster"
+    # Гость узнаёт о выдаче от бота: события протокола под это не заводим.
+    assert notifier.sent_direct and notifier.sent_direct[0][0] == 777
+    assert "200 ГБ" in notifier.sent_direct[0][1]
+
+
+async def test_closing_access_does_not_touch_the_quota():
+    """«Просто закрой» не должно стирать выданные гигабайты — вернут доступ, и
+    цифру не придётся вспоминать."""
+    link = TwoServersLink()
+    link._result = _server(node="wooster", allowed=False)
+    callback = FakeCallback(vpn_admin_view.set_access_cb(777, "wooster", "off"), chat_id=1)
+    await vpn_handlers.handle_action(
+        callback, link, FakeNotifier(), _config(), ADMIN, _pending(), _book(ANYA)
+    )
+    call = next(c for c in link.calls if c[0] == vpn_protocol.ACTION_SET_ACCESS)
+    assert call[1] == {"chat_id": 777, "allowed": False}
+
+
+async def test_set_access_on_stale_node_explains_instead_of_proto_error():
+    """Нода ещё не обновлена — это рассинхрон версий, а не отказ по существу."""
+
+    class StaleNodeLink(TwoServersLink):
+        async def command(self, action, args=None, dst=None, *, timeout=None):
+            if action == vpn_protocol.ACTION_SET_ACCESS:
+                raise ProtoError(ERR_UNKNOWN_ACTION, "unknown action")
+            return await super().command(action, args, dst, timeout=timeout)
+
+    link = StaleNodeLink()
+    callback = FakeCallback(vpn_admin_view.set_access_cb(777, "wooster", "on"), chat_id=1)
+    await vpn_handlers.handle_action(
+        callback, link, FakeNotifier(), _config(), ADMIN, _pending(), _book(ANYA)
+    )
+    said = " ".join(str(a) for a, _ in callback.answered)
+    assert "не умеет" in said and "обнов" in said
+
+
+async def test_admin_screen_without_book_says_so_instead_of_crashing():
+    callback = FakeCallback(vpn_admin_view.guests_cb(0), chat_id=1)
+    await vpn_handlers.handle_action(
+        callback, TwoServersLink(), FakeNotifier(), _config(), ADMIN, _pending(), None
+    )
+    assert callback.answered and not callback.message.edits
 
 
 @pytest_asyncio.fixture(autouse=True)

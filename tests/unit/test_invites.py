@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 
-from sa_home_bot.bot import invites
+from sa_home_bot.bot import guest_rights, invites
 from sa_home_bot.bot.middlewares import SilenceGate, invite_candidate
 from sa_home_bot.config import (
     GuestSubscriptionConfig,
@@ -264,6 +264,50 @@ def test_guest_right_on_unknown_chat_is_noop(store, tmp_path):
     gate = _gate(store, tmp_path)
     assert gate.add_guest_right(9999, "usage@vpn") is None
     assert gate.remove_guest_right(9999, "usage@vpn") is None
+
+
+# --- группы прав (решение 2026-09-18) -------------------------------------
+
+
+async def test_group_is_granted_in_one_package_rewrite(store, tmp_path):
+    """Группа выдаётся одной перезаписью гостевого пакета: N вызовов
+    add_guest_right переписали бы файл N раз и оставили бы гостя в
+    промежуточных состояниях, сорвись запись на середине."""
+    path = tmp_path / "telegram-bot.test.guests.toml"
+    gate = _gate(store, tmp_path, cfg=InvitesConfig(grant_commands=["chat@llm"]))
+    code, _ = await gate.issue(chat_id=1, user_id=None)
+    await gate.try_admit(77, code)
+
+    group = guest_rights.group("vpn")
+    sub = gate._book.for_chat(77)  # noqa: SLF001
+    updated = gate.set_guest_rights(77, sub.allowed_commands | group.rights)
+    assert updated is not None
+    assert group.rights <= updated.allowed_commands
+    assert updated.allows_command("chat@llm")  # прежние права на месте
+
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    assert set(data["guest_subscriptions"][0]["allowed_commands"]) == group.rights | {"chat@llm"}
+
+
+async def test_group_removal_leaves_other_rights_alone(store, tmp_path):
+    gate = _gate(store, tmp_path, cfg=InvitesConfig(grant_commands=["chat@llm", "search@net"]))
+    code, _ = await gate.issue(chat_id=1, user_id=None)
+    await gate.try_admit(77, code)
+
+    group = guest_rights.group("vpn")
+    gate.set_guest_rights(77, gate._book.for_chat(77).allowed_commands | group.rights)  # noqa: SLF001
+    updated = gate.set_guest_rights(
+        77,
+        gate._book.for_chat(77).allowed_commands - group.rights,  # noqa: SLF001
+    )
+    assert not (group.rights & updated.allowed_commands)
+    assert updated.allowed_commands == frozenset({"chat@llm", "search@net"})
+
+
+async def test_group_cannot_touch_owner_subscription(store, tmp_path):
+    gate = _gate(store, tmp_path)
+    group = guest_rights.group("vpn")
+    assert gate.set_guest_rights(1, group.rights) is None
 
 
 # --- флаг «семья» гостя (решение 2026-08-04) ------------------------------

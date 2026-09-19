@@ -197,6 +197,10 @@ GUEST_PERMS_CODE = "g_perms"  # «st:g_perms:<chat_id>:<offset>» — права
 GUEST_PERM_OFF_CODE = "g_poff"  # «st:g_poff:<chat_id>:<offset>:<право>»
 GUEST_PERM_ADD_LIST_CODE = "g_padd"  # «st:g_padd:<chat_id>:<offset>»
 GUEST_PERM_ADD_CODE = "g_pon"  # «st:g_pon:<chat_id>:<offset>:<право>»
+# Группы прав (bot/guest_rights.py) — выдаются и снимаются целиком, одной
+# перезаписью гостевого пакета: «st:g_gon:<chat_id>:<offset>:<группа>».
+GUEST_GROUP_ADD_CODE = "g_gon"
+GUEST_GROUP_OFF_CODE = "g_goff"
 
 # Иерархия /swarm — все коды с префиксом «sw_», единая точка входа
 # bot/handlers/swarm_panel.py::on_swarm_screen (bot/swarm_panel.py и
@@ -241,6 +245,8 @@ _ALL_CALLBACK_ACTIONS: dict[str, Command] = {
     GUEST_PERM_OFF_CODE: GUESTS,
     GUEST_PERM_ADD_LIST_CODE: GUESTS,
     GUEST_PERM_ADD_CODE: GUESTS,
+    GUEST_GROUP_ADD_CODE: GUESTS,
+    GUEST_GROUP_OFF_CODE: GUESTS,
     NODES_CODE: NODES,
     NODE_CARD_CODE: STATUS,  # карточка ноды = данные /status
     SERVICE_CARD_CODE: NODES,  # карточка службы — часть управления нодами

@@ -73,6 +73,9 @@ async def run_vpn(settings: Settings) -> None:
         settings, db, backend, emit, node_link=node_link, reality_backend=reality_backend
     )
     await service.backfill_server()
+    # Строго до reconcile ниже: иначе первый же реконсайл снял бы с интерфейса
+    # пиры всех, кому допуск ещё не проставлен.
+    await service.backfill_access()
     server = ProtoServer(settings.vpn.socket, service, token=settings.swarm.token)
     # Обработчики сигналов — до start(): он ждёт появления своего адреса
     # (см. proto/server.py), и всё это время остановка иначе не обрабатывалась бы.

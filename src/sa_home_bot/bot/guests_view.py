@@ -206,27 +206,56 @@ def build_back_to_card_view(
 # --- права гостя -------------------------------------------------------
 
 
+def _granted_entries(sub: Subscription) -> list[tuple[str, str, str]]:
+    """Что выдано гостю, строками экрана: (подпись, код снятия, аргумент).
+
+    Права одной службы схлопываются в одну строку-группу (guest_rights.py) —
+    иначе VPN занимает семь строк из шести на странице. Частично выданная
+    группа показывает дробь: владелец видит, что комплект неполный, но снимает
+    его всё равно целиком.
+    """
+    entries: list[tuple[str, str, str]] = []
+    grouped: set[str] = set()
+    for group in guest_rights.GUEST_GROUPS:
+        granted = group.rights & sub.allowed_commands
+        if not granted:
+            continue
+        grouped |= granted
+        total = len(group.rights)
+        suffix = "" if len(granted) == total else f" ({len(granted)}/{total})"
+        entries.append((f"{group.label}{suffix}", commands.GUEST_GROUP_OFF_CODE, group.key))
+    for right in sorted(sub.allowed_commands - grouped):
+        entries.append((guest_rights.label(right), commands.GUEST_PERM_OFF_CODE, right))
+    return entries
+
+
+def granted_rows(sub: Subscription) -> int:
+    """Сколько строк на экране прав — по ним считается пагинация, а не по
+    числу самих прав: группа занимает одну строку на всю службу."""
+    return len(_granted_entries(sub))
+
+
 def build_perms_view(sub: Subscription, offset: int) -> tuple[str, InlineKeyboardMarkup]:
-    rights = sorted(sub.allowed_commands)
-    lines = [f"🔐 <b>Права гостя {escape(sub.name)}</b> ({len(rights)})", ""]
-    if not rights:
+    entries = _granted_entries(sub)
+    lines = [f"🔐 <b>Права гостя {escape(sub.name)}</b> ({len(sub.allowed_commands)})", ""]
+    if not entries:
         lines.append("Прав нет.")
-    page = rights[offset : offset + PERM_PAGE_SIZE]
-    for right in page:
-        lines.append(f"• {escape(guest_rights.label(right))}")
+    page = entries[offset : offset + PERM_PAGE_SIZE]
+    for text, _code, _arg in page:
+        lines.append(f"• {escape(text)}")
     buttons = [
         [
             InlineKeyboardButton(
-                text=f"➖ {guest_rights.label(right)}"[:_MAX_NAME_LEN],
-                callback_data=_cb(commands.GUEST_PERM_OFF_CODE, sub.chat_id, offset, right),
+                text=f"➖ {text}"[:_MAX_NAME_LEN],
+                callback_data=_cb(code, sub.chat_id, offset, arg),
             )
         ]
-        for right in page
+        for text, code, arg in page
     ]
     nav = nav_row(
         offset,
         PERM_PAGE_SIZE,
-        len(rights),
+        len(entries),
         lambda o: _cb(commands.GUEST_PERMS_CODE, sub.chat_id, o),
     )
     if nav:
@@ -249,22 +278,45 @@ def build_perms_view(sub: Subscription, offset: int) -> tuple[str, InlineKeyboar
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def _addable_entries(sub: Subscription) -> list[tuple[str, str, str, str]]:
+    """Что ещё можно выдать: (подпись, код выдачи, аргумент, подсказка).
+
+    Группа предлагается, пока выдана не полностью — дожать неполный комплект
+    той же кнопкой проще, чем искать недостающие права по одному.
+    """
+    entries: list[tuple[str, str, str, str]] = [
+        (group.label, commands.GUEST_GROUP_ADD_CODE, group.key, group.note)
+        for group in guest_rights.GUEST_GROUPS
+        if not group.rights <= sub.allowed_commands
+    ]
+    entries += [
+        (item.label, commands.GUEST_PERM_ADD_CODE, item.right, "")
+        for item in guest_rights.GUEST_RIGHTS
+        if item.right not in sub.allowed_commands
+    ]
+    return entries
+
+
 def build_perm_add_view(sub: Subscription, offset: int) -> tuple[str, InlineKeyboardMarkup]:
-    addable = [r for r in guest_rights.GUEST_RIGHTS if r.right not in sub.allowed_commands]
+    addable = _addable_entries(sub)
     lines = [f"➕ <b>Добавить право — {escape(sub.name)}</b>", ""]
     if not addable:
         lines.append("Все известные права уже выданы.")
     else:
         lines.append("Право выдаётся сразу, без перезапуска.")
     page = addable[offset : offset + PERM_PAGE_SIZE]
+    for text, _code, _arg, note in page:
+        if note:
+            lines.append("")
+            lines.append(f"{escape(text)} — {escape(note)}")
     buttons = [
         [
             InlineKeyboardButton(
-                text=f"➕ {item.label}"[:_MAX_NAME_LEN],
-                callback_data=_cb(commands.GUEST_PERM_ADD_CODE, sub.chat_id, offset, item.right),
+                text=f"➕ {text}"[:_MAX_NAME_LEN],
+                callback_data=_cb(code, sub.chat_id, offset, arg),
             )
         ]
-        for item in page
+        for text, code, arg, _note in page
     ]
     nav = nav_row(
         offset,
