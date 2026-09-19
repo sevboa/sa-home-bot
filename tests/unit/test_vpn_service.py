@@ -715,6 +715,23 @@ async def test_get_state_advertises_access_control(env):
     assert (await svc.get_state())["access_control"] is True
 
 
+async def test_node_probe_needs_no_access_grant(env):
+    """Под chat_id=0 ходит не гость, а сама нода: пробник vpn_check выпускается
+    тем же issue (node/fixups.py::VPN_PROBE_CHAT_ID). На ноде, где пробника ещё
+    не заводили, строки допуска нет — и без исключения `nodectl fix` не смог бы
+    выпустить его вовсе."""
+    svc, backend, _events = env
+    from sa_home_bot.vpn.service import NODE_SENTINEL_CHAT_ID
+
+    result = await svc.run_command(
+        vpn_protocol.ACTION_ISSUE, {"chat_id": NODE_SENTINEL_CHAT_ID}
+    )
+    assert result["config_text"]
+    # И реконсайлер его не снимает, хотя в vpn_chat_access записи нет.
+    await svc.reconcile()
+    assert len(backend.peers) == 1
+
+
 async def test_backfill_access_admits_chats_with_active_peers(env):
     """Обновление службы не должно выставить за дверь тех, кто уже пользуется
     VPN: у кого есть живой пир — тот допущен де-факто."""
@@ -732,7 +749,9 @@ async def test_backfill_access_admits_chats_with_active_peers(env):
     )
     await svc._db.conn.commit()
     await svc.backfill_access()
-    assert await svc._allowed_chats() == {CHAT}
+    allowed = await svc._allowed_chats()
+    assert CHAT in allowed  # живой пир — допущен
+    assert OTHER_CHAT not in allowed  # только отозванные — нет
 
 
 async def test_backfill_access_does_not_resurrect_revoked_access(env):

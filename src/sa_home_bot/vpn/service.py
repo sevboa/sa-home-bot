@@ -500,7 +500,9 @@ class VpnService:
 
     async def _allowed_chats(self) -> set[int]:
         cur = await self._db.conn.execute("SELECT chat_id FROM vpn_chat_access WHERE allowed = 1")
-        return {row["chat_id"] for row in await cur.fetchall()}
+        # Сентинель ноды — всегда свой (см. _access): пробник vpn_check не
+        # гость, снимать его с интерфейса реконсайлером нельзя.
+        return {row["chat_id"] for row in await cur.fetchall()} | {NODE_SENTINEL_CHAT_ID}
 
     async def _quota_state(self, chat_id: int, month: str) -> dict[str, Any]:
         cur = await self._db.conn.execute(
@@ -552,7 +554,17 @@ class VpnService:
 
     async def _access(self, chat_id: int) -> tuple[bool, int | None]:
         """``(допущен, личная база в байтах)`` — нет строки значит «не допущен»
-        (fail-closed: новый гость закрыт, пока владелец не откроет локацию)."""
+        (fail-closed: новый гость закрыт, пока владелец не откроет локацию).
+
+        Сентинель ноды — исключение: под ``chat_id = 0`` ходит не гость, а сама
+        нода (пробник vpn_check, node/fixups.py::VPN_PROBE_CHAT_ID выпускает
+        его тем же ``issue``). Допуск — про людей, которых пускают на сервер;
+        закрывать им собственную диагностику незачем, а на ноде, где пробника
+        ещё не заводили, бэкфилл строки не создаст, и `nodectl fix` не смог бы
+        его выпустить вовсе.
+        """
+        if chat_id == NODE_SENTINEL_CHAT_ID:
+            return True, None
         cur = await self._db.conn.execute(
             "SELECT allowed, base_bytes FROM vpn_chat_access WHERE chat_id = ?", (chat_id,)
         )
