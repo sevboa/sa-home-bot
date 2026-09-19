@@ -37,6 +37,7 @@ xray-клиент) — эфемерный: эта служба поднимае�
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 import logging
 import shutil
@@ -75,6 +76,18 @@ _ROUTE_SENTINEL = "1.1.1.1"
 # ожидание при по-настоящему упавшем сервере.
 _TUNNEL_READY_ATTEMPTS = 3
 _TUNNEL_READY_DELAY_S = 1.0
+
+# Reality: xray-клиент — долгоживущий процесс (не oneshot вроде awg-quick),
+# запускается ФОНОМ на время чек-цикла. Пауза после спавна — дать SOCKS5-
+# инбаунду реально начать слушать порт, прежде чем curl по нему стучится
+# (первый прогон после деплоя может нуждаться в подстройке значения по
+# живым данным — оценка "сколько реально нужно" ещё не проверена вживую).
+_REALITY_STARTUP_DELAY_S = 0.5
+# Подстраховка на случай, если `sudo`/`timeout` не форвардят SIGTERM до
+# самого xray (не все реализации sudo одинаково прозрачны для сигналов) —
+# `timeout <окно>` внутри netns убьёт процесс сам, даже если наш terminate()
+# не пробьётся. Держим xray живым не дольше самой пачки проверок с запасом.
+_REALITY_STOP_GRACE_S = 5.0
 
 
 def _looks_like_needs_password(err: str) -> bool:
@@ -119,6 +132,10 @@ class VpnCheckService:
         # неизбежно совпадает с IP хоста — эндпоинт пробника это же железо.
         # Сверку exit-IP там не делаем, опираемся только на маршрут/SOCKS.
         self._is_vpn_exit = assignments.has_service(settings.node.assignments, "vpn")
+        # xray-клиенты reality, запущенные ФОНОМ на время текущего
+        # чек-цикла — по netns, чтобы _tunnel_down нашёл СВОЙ процесс (два
+        # слота разных серверов никогда не делят netns, см. node/fixups.py).
+        self._reality_procs: dict[str, asyncio.subprocess.Process] = {}
 
     def describe(self) -> ServiceDescription:
         return ServiceDescription(
@@ -221,12 +238,25 @@ class VpnCheckService:
     async def _tunnel_up(self, slot: ProbeSlot) -> str | None:
         """Поднять сам процесс туннеля (сеть/netns/veth уже подняты
         node/fixups.py заранее, вечно). ``None`` — получилось (гейт решит
-        дальше, готов ли реально маршрут); строка — сразу ошибка, и гасить
-        нечего (``up`` не прошёл, ``_tunnel_down`` всё равно best-effort
-        вызывается вызывающим кодом — на случай частичного подъёма)."""
-        if slot.transport != "awg":
-            # Reality — 39.0.7(e).
-            return f"транспорт {slot.transport} пока не поддержан этим пробником"
+        дальше, готов ли реально маршрут/SOCKS); строка — сразу ошибка, и
+        гасить нечего (``up`` не прошёл, ``_tunnel_down`` всё равно
+        best-effort вызывается вызывающим кодом — на случай частичного
+        подъёма)."""
+        if slot.transport == "awg":
+            return await self._awg_up(slot)
+        if slot.transport == "reality":
+            return await self._reality_up(slot)
+        return f"транспорт {slot.transport} пока не поддержан этим пробником"
+
+    async def _tunnel_down(self, slot: ProbeSlot) -> None:
+        """Best-effort — ошибки останова только логируем, вызывается из
+        ``finally`` и падать здесь незачем."""
+        if slot.transport == "awg":
+            await self._awg_down(slot)
+        elif slot.transport == "reality":
+            await self._reality_down(slot)
+
+    async def _awg_up(self, slot: ProbeSlot) -> str | None:
         ip_path = shutil.which("ip") or "ip"
         awg_quick_path = shutil.which("awg-quick") or "awg-quick"
         code, _out, err = await _run(
@@ -247,12 +277,9 @@ class VpnCheckService:
             return f"awg-quick up {slot.iface} не отработал: {err.strip() or code}"
         return None
 
-    async def _tunnel_down(self, slot: ProbeSlot) -> None:
-        """Best-effort — ошибки останова только логируем: висящий netns без
-        поднятого интерфейса безвреден (сам интерфейс уже мог не подняться
-        вовсе), а падать здесь незачем — вызывается из ``finally``."""
-        if slot.transport != "awg":
-            return
+    async def _awg_down(self, slot: ProbeSlot) -> None:
+        # Висящий netns без поднятого интерфейса безвреден (сам интерфейс
+        # уже мог не подняться вовсе) — ошибки останова только логируем.
         ip_path = shutil.which("ip") or "ip"
         awg_quick_path = shutil.which("awg-quick") or "awg-quick"
         code, _out, err = await _run(
@@ -275,33 +302,96 @@ class VpnCheckService:
                 err.strip() or code,
             )
 
+    async def _reality_up(self, slot: ProbeSlot) -> str | None:
+        """xray-клиент — долгоживущий процесс, не oneshot вроде awg-quick:
+        запускаем ФОНОМ (не await'им завершение) под ``timeout`` — подстраховка
+        от утечки, если ``terminate()`` в ``_reality_down`` не пробьётся через
+        sudo (см. комментарий у ``_REALITY_STOP_GRACE_S``). SOCKS-инбаунд
+        слушает ТОЛЬКО внутри netns (127.0.0.1 изолирован), curl достаёт его
+        оттуда же — см. ``_curl_argv``."""
+        ip_path = shutil.which("ip") or "ip"
+        xray_path = shutil.which("xray") or "xray"
+        conf_path = vpn_probe_state.reality_conf_path(slot)
+        # Запас над обычной длительностью чек-цикла — `timeout` не должен
+        # срубить xray раньше, чем `_reality_down` сама его остановит.
+        window = int(self._cfg.check_timeout_s) + 10
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "sudo",
+                "-n",
+                ip_path,
+                "netns",
+                "exec",
+                slot.netns,
+                "timeout",
+                str(window),
+                xray_path,
+                "run",
+                "-c",
+                str(conf_path),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as exc:
+            return f"не удалось запустить xray-пробник: {exc}"
+        self._reality_procs[slot.netns] = proc
+        await asyncio.sleep(_REALITY_STARTUP_DELAY_S)
+        if proc.returncode is not None:
+            # Умер мгновенно — обычно кривой конфиг или занятый порт.
+            stderr = b""
+            if proc.stderr is not None:
+                with contextlib.suppress(TimeoutError):
+                    stderr = await asyncio.wait_for(proc.stderr.read(), timeout=1.0)
+            del self._reality_procs[slot.netns]
+            err = stderr.decode(errors="replace").strip()
+            if _looks_like_needs_password(err):
+                return "нет прав поднять xray-пробник — выполните: nodectl fix"
+            return f"xray-пробник упал сразу после запуска: {err or proc.returncode}"
+        return None
+
+    async def _reality_down(self, slot: ProbeSlot) -> None:
+        proc = self._reality_procs.pop(slot.netns, None)
+        if proc is None:
+            return
+        with contextlib.suppress(ProcessLookupError):
+            proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=_REALITY_STOP_GRACE_S)
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            log.warning(
+                "vpn_check: xray-пробник (netns %s) не остановился по terminate() — kill()",
+                slot.netns,
+            )
+
+    def _curl_argv(self, slot: ProbeSlot, curl_args: list[str]) -> list[str]:
+        """``sudo -n ip netns exec <netns> curl ...`` — заход в чужой netns
+        требует root, узкий sudoers-снипет ставит nodectl fix
+        (node/fixups.py::make_vpn_probe_sudoers_fixup), тот же приём
+        («резолвим путь при каждом вызове, не кэшируем, чтобы fix,
+        применённый после старта службы, подхватился без рестарта»), что
+        уже использует vpn/awg.py::RealAwgBackend._sudo_awg. Резолвим
+        только `ip` (прямая цель sudo) — "curl" внутри netns exec остаётся
+        литералом, ровно как в самом sudoers-правиле.
+
+        Reality-слоты идут через ``--socks5`` на локальный порт xray-клиента
+        (запущенного в ЭТОМ ЖЕ netns) — маршрут не переписан (в отличие от
+        awg, где default route внутри netns строит сам awg-quick), см.
+        IMPLEMENTATION_PLAN.md 39.0.7 про ``_egress_gate`` для reality."""
+        ip_path = shutil.which("ip") or "ip"
+        curl = ["curl"]
+        if slot.transport == "reality":
+            curl += ["--socks5", f"127.0.0.1:{slot.socks_port}"]
+        curl += curl_args
+        return ["sudo", "-n", ip_path, "netns", "exec", slot.netns, *curl]
+
     async def _check_one(self, slot: ProbeSlot, target: str) -> dict[str, Any]:
         timeout_s = self._cfg.check_timeout_s
-        # Заход в чужой netns требует root — узкий sudoers-снипет ставит
-        # nodectl fix (node/fixups.py::make_vpn_probe_sudoers_fixup), тот же
-        # приём («резолвим путь при каждом вызове, не кэшируем, чтобы fix,
-        # применённый после старта службы, подхватился без рестарта»), что
-        # уже использует vpn/awg.py::RealAwgBackend._sudo_awg. Резолвим
-        # только `ip` (прямая цель sudo) — "curl" внутри netns exec остаётся
-        # литералом, ровно как в самом sudoers-правиле.
-        ip_path = shutil.which("ip") or "ip"
-        cmd = [
-            "sudo",
-            "-n",
-            ip_path,
-            "netns",
-            "exec",
-            slot.netns,
-            "curl",
-            "-s",
-            "-m",
-            str(timeout_s),
-            "-o",
-            "/dev/null",
-            "-w",
-            "%{http_code}",
-            target,
-        ]
+        cmd = self._curl_argv(
+            slot,
+            ["-s", "-m", str(timeout_s), "-o", "/dev/null", "-w", "%{http_code}", target],
+        )
         started = time.monotonic()
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -324,14 +414,20 @@ class VpnCheckService:
 
     async def _egress_gate(self, slot: ProbeSlot) -> str | None:
         """None — пробник реально гонит трафик через VPN-туннель. Иначе —
-        строка-ошибка (ей помечаются все цели). Две независимые проверки:
-        1) дефолтный маршрут из netns идёт через `iface` (с несколькими
-        попытками — хендшейк после ``awg-quick up`` не всегда мгновенен);
-        2) внешний IP из netns не совпадает с IP хоста (кроме самой
-        VPN-ноды)."""
-        route_err = await self._wait_for_route(slot)
-        if route_err is not None:
-            return route_err
+        строка-ошибка (ей помечаются все цели).
+
+        awg: две независимые проверки — 1) дефолтный маршрут из netns идёт
+        через `iface` (с несколькими попытками — хендшейк после
+        ``awg-quick up`` не всегда мгновенен); 2) внешний IP из netns не
+        совпадает с IP хоста (кроме самой VPN-ноды).
+
+        reality: маршрут не переписан (трафик идёт через явный
+        ``--socks5``, не через default route) — единственная проверка
+        такая же, как второй шаг у awg: сверка exit-IP через сам SOCKS."""
+        if slot.transport == "awg":
+            route_err = await self._wait_for_route(slot)
+            if route_err is not None:
+                return route_err
         return await self._check_exit_ip(slot)
 
     async def _wait_for_route(self, slot: ProbeSlot) -> str | None:
@@ -390,12 +486,10 @@ class VpnCheckService:
 
     async def _exit_ip(self, slot: ProbeSlot, *, via_netns: bool) -> str | None:
         timeout_s = self._cfg.check_timeout_s
-        curl = ["curl", "-s", "-m", str(timeout_s), self._cfg.ip_echo_url]
         if via_netns:
-            ip_path = shutil.which("ip") or "ip"
-            cmd = ["sudo", "-n", ip_path, "netns", "exec", slot.netns, *curl]
+            cmd = self._curl_argv(slot, ["-s", "-m", str(timeout_s), self._cfg.ip_echo_url])
         else:
-            cmd = curl
+            cmd = ["curl", "-s", "-m", str(timeout_s), self._cfg.ip_echo_url]
         code, out, _ = await _run(*cmd, timeout=timeout_s + 3.0)
         if code != 0:
             return None

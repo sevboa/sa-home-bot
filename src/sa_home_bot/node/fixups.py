@@ -32,6 +32,7 @@ from sa_home_bot.node import assignments, vpn_probe_state
 from sa_home_bot.node import kind as node_kinds
 from sa_home_bot.proto.client import ProtoClient
 from sa_home_bot.proto.endpoints import resolve_endpoint
+from sa_home_bot.reality import probe_client_config
 from sa_home_bot.sensors.disks import SMARTCTL_REQUIREMENT
 from sa_home_bot.utils.requirements import install_argv
 from sa_home_bot.vpn import protocol as vpn_protocol
@@ -970,6 +971,55 @@ def _build_amneziawg_tools() -> None:
             _sudo(["make", "-C", str(src / "src"), "install"])
 
 
+# xray-core (клиент для reality-пробника, 39.0.7(e)) публикует готовые
+# бинарники под каждый релиз — в отличие от amneziawg-tools, сборка из
+# исходников не нужна. Тот же приём верификации, что уже применяет
+# deploy/setup-reality-server.sh на СЕРВЕРНОЙ стороне (архив + `.dgst`
+# рядом, сверка sha256 до распаковки) — здесь тот же трюк для клиента,
+# который ставится на ЛЮБУЮ ноду с vpn_check, не только на VPN-серверы.
+
+_XRAY_VERSION = "v26.3.27"
+_XRAY_ZIP_URL = f"https://github.com/XTLS/Xray-core/releases/download/{_XRAY_VERSION}/Xray-linux-64.zip"
+
+
+def _xray_version_ok() -> bool:
+    xray_path = _which("xray")
+    if xray_path is None:
+        return False
+    result = subprocess.run([xray_path, "version"], capture_output=True, text=True)
+    return result.returncode == 0 and _XRAY_VERSION.lstrip("v") in result.stdout.splitlines()[:1][0]
+
+
+def _ensure_xray_binary() -> None:
+    """Скачать и поставить xray-core в /usr/local/bin/xray, если версии
+    ещё нет. Идемпотентно — пропускает, если версия уже верная."""
+    if _xray_version_ok():
+        return
+    if _which("unzip") is None:
+        argv = install_argv("unzip")
+        if argv is None:
+            raise FixupError("unzip не найден и неизвестен пакетный менеджер для его установки")
+        _sudo(argv)
+    with tempfile.TemporaryDirectory(prefix="sa-home-xray-build-") as build_dir_str:
+        build_dir = Path(build_dir_str)
+        zip_path = build_dir / "xray.zip"
+        dgst_path = build_dir / "xray.dgst"
+        _run(["curl", "-fsSL", _XRAY_ZIP_URL, "-o", str(zip_path)], timeout=180)
+        _run(["curl", "-fsSL", f"{_XRAY_ZIP_URL}.dgst", "-o", str(dgst_path)], timeout=30)
+        want = None
+        for line in dgst_path.read_text().splitlines():
+            if line.startswith("SHA2-256="):
+                want = line.split("=", 1)[1].strip()
+                break
+        if not want:
+            raise FixupError("не удалось прочитать SHA2-256 из .dgst xray-core")
+        got = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+        if want != got:
+            raise FixupError(f"sha256 архива xray-core не совпал: ждали {want}, получили {got}")
+        _run(["unzip", "-o", str(zip_path), "xray", "-d", str(build_dir)])
+        _sudo(["install", "-m", "0755", str(build_dir / "xray"), "/usr/local/bin/xray"])
+
+
 def _read_privileged(path: Path) -> str:
     result = subprocess.run(["sudo", "cat", str(path)], capture_output=True, text=True)
     if result.returncode != 0:
@@ -1033,16 +1083,20 @@ def _install_probe_conf(conf_path: Path, config_text: str) -> None:
 
 
 def _probe_conf_path(slot: vpn_probe_state.ProbeSlot) -> Path:
+    """Только awg — reality использует ``vpn_probe_state.reality_conf_path``
+    (другой каталог, другой формат: JSON xray, не WireGuard ``.conf``)."""
     return VPN_PROBE_AWG_CONF_DIR / f"{slot.iface}.conf"
 
 
 async def _fetch_probe_config(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> str:
-    """Выпросить awg-конфиг пробника у КОНКРЕТНОГО сервера ``slot.server``
-    (не «первая живая», как было при единственной ручной паре, — теперь
+    """Выпросить конфиг пробника у КОНКРЕТНОГО сервера ``slot.server`` (не
+    «первая живая», как было при единственной ручной паре, — теперь
     пробников несколько, и каждому нужен конфиг именно от своего сервера).
     Тонкий разовый ProtoClient к своей же локальной ноде, та маршрутизирует
     дальше (см. node/peers.py::NodeRouter.route), тем же путём, каким ходит
-    nodectl."""
+    nodectl. ``transport`` в args ОБЯЗАТЕЛЕН — без него ``_resolve_transport``
+    на сервере с несколькими транспортами отказывает («укажите transport»),
+    а сервер с 39.0.7 может нести оба сразу (jeeves — awg+reality)."""
     endpoint = resolve_endpoint(settings.node.socket)
     client = ProtoClient(endpoint, token=settings.swarm.token)
     try:
@@ -1052,60 +1106,119 @@ async def _fetch_probe_config(settings: Settings, slot: vpn_probe_state.ProbeSlo
             raise FixupError(f"vpn@{slot.server} сейчас недоступна — конфиг пробника взять негде")
         result = await client.command(
             vpn_protocol.ACTION_ISSUE,
-            {"chat_id": VPN_PROBE_CHAT_ID},
+            {"chat_id": VPN_PROBE_CHAT_ID, "transport": slot.transport},
             dst=dst,
             timeout=20.0,
         )
     finally:
         await client.close()
-    config_text = result.get("config_text")
-    if not config_text:
-        raise FixupError(f"vpn@{slot.server} не вернул config_text")
-    return str(config_text)
+    if slot.transport == "awg":
+        config_text = result.get("config_text")
+        if not config_text:
+            raise FixupError(f"vpn@{slot.server} не вернул config_text")
+        return str(config_text)
+    # reality: сервер отдаёт sing-box-конфиг + vless://-ссылку для гостя —
+    # пробнику из этого нужна только ссылка (несёт параметры Reality-сервера
+    # + UUID клиента), из неё строим СВОЙ xray-конфиг с SOCKS5-инбаундом
+    # (сервер не отдаёт готовый xray-клиентский конфиг — его не существует
+    # ни у кого, гости используют sing-box/Hiddify, не голый xray-core).
+    share_url = result.get("share_url")
+    if not share_url:
+        raise FixupError(f"vpn@{slot.server} не вернул share_url")
+    params, client_uuid = probe_client_config.parse_vless_url(str(share_url))
+    return probe_client_config.render_probe_client_config(
+        params, client_uuid, socks_port=slot.socks_port
+    )
 
 
 def _probe_conf_check(slot: vpn_probe_state.ProbeSlot) -> bool:
-    conf_path = _probe_conf_path(slot)
+    if slot.transport == "awg":
+        conf_path = _probe_conf_path(slot)
+        if not _privileged_exists(conf_path):
+            return False
+        try:
+            current_conf = _read_privileged(conf_path)
+        except FixupError:
+            return False
+        # Застрявшая строка ``Table`` (обычно ``Table = off`` из старых
+        # версий, v0.92.2–v0.92.4) заставляет awg-quick НЕ строить маршрут
+        # через туннель — curl из netns уходил бы plaintext мимо VPN,
+        # подменяя собой суть проверки (инцидент 2026-08-31).
+        # ``_prepare_probe_conf`` её вырезает — но апгрейд с более старой
+        # версии её не трогал бы сам.
+        return not any(ln.strip().startswith("Table") for ln in current_conf.splitlines())
+    # reality: UUID клиента фиксирован в момент выдачи (``_fetch_probe_
+    # config``) — тут только сверяем, что файл существует, валиден и несёт
+    # ОЖИДАЕМЫЙ socks_port (мог смениться при пересчёте индексов слотов).
+    conf_path = vpn_probe_state.reality_conf_path(slot)
     if not _privileged_exists(conf_path):
         return False
     try:
-        current_conf = _read_privileged(conf_path)
+        current = _read_privileged(conf_path)
     except FixupError:
         return False
-    # Застрявшая строка ``Table`` (обычно ``Table = off`` из старых версий,
-    # v0.92.2–v0.92.4) заставляет awg-quick НЕ строить маршрут через
-    # туннель — curl из netns уходил бы plaintext мимо VPN, подменяя собой
-    # суть проверки (инцидент 2026-08-31). ``_prepare_probe_conf`` её
-    # вырезает — но апгрейд с более старой версии её не трогал бы сам.
-    return not any(ln.strip().startswith("Table") for ln in current_conf.splitlines())
+    try:
+        data = json.loads(current)
+        return int(data["inbounds"][0]["port"]) == slot.socks_port
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError):
+        return False
 
 
 def _probe_conf_apply(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> None:
-    if _which("awg-quick") is None:
-        _build_amneziawg_tools()
+    if slot.transport == "awg":
         if _which("awg-quick") is None:
-            raise FixupError("awg-quick не нашёлся после сборки amneziawg-tools")
-    conf_path = _probe_conf_path(slot)
+            _build_amneziawg_tools()
+            if _which("awg-quick") is None:
+                raise FixupError("awg-quick не нашёлся после сборки amneziawg-tools")
+        conf_path = _probe_conf_path(slot)
+        if _privileged_exists(conf_path):
+            # Конфиг уже выдан этим сервером раньше — чиним на месте (сносим
+            # DNS/Table), не выпрашивая новый пир заново (лишний пир в БД
+            # vpn@<сервер> нам не нужен).
+            raw_config_text = _read_privileged(conf_path)
+        else:
+            try:
+                raw_config_text = asyncio.run(_fetch_probe_config(settings, slot))
+            except Exception as exc:  # noqa: BLE001 — сеть/протокол сведены к одному диагнозу
+                raise FixupError(
+                    f"не удалось получить конфиг у vpn@{slot.server} ({exc}) — "
+                    "проверьте, что сервер доступен и служба vpn запущена"
+                ) from exc
+        _install_probe_conf(conf_path, raw_config_text)
+        return
+    # reality
+    _ensure_xray_binary()
+    conf_path = vpn_probe_state.reality_conf_path(slot)
     if _privileged_exists(conf_path):
-        # Конфиг уже выдан этим сервером раньше — чиним на месте (сносим
-        # DNS/Table), не выпрашивая новый пир заново (лишний пир в БД
-        # vpn@<сервер> нам не нужен).
-        raw_config_text = _read_privileged(conf_path)
-    else:
-        try:
-            raw_config_text = asyncio.run(_fetch_probe_config(settings, slot))
-        except Exception as exc:  # noqa: BLE001 — сеть/протокол сведены к одному диагнозу
-            raise FixupError(
-                f"не удалось получить конфиг у vpn@{slot.server} ({exc}) — "
-                "проверьте, что сервер доступен и служба vpn запущена"
-            ) from exc
-    _install_probe_conf(conf_path, raw_config_text)
+        # Уже выдан этому слоту раньше (тот же socks_port, check() бы иначе
+        # уже провалился и apply() выпросил новый) — гость (пробник) у xray
+        # свой, лишний клиент в БД vpn@<сервер> нам не нужен.
+        return
+    try:
+        conf_text = asyncio.run(_fetch_probe_config(settings, slot))
+    except Exception as exc:  # noqa: BLE001 — сеть/протокол сведены к одному диагнозу
+        raise FixupError(
+            f"не удалось получить reality-конфиг у vpn@{slot.server} ({exc}) — "
+            "проверьте, что сервер доступен и служба vpn запущена"
+        ) from exc
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tmp:
+        tmp.write(conf_text)
+        tmp_path = Path(tmp.name)
+    try:
+        _sudo(
+            [
+                "install", "-D", "-m", "0600", "-o", "root", "-g", "root",
+                str(tmp_path), str(conf_path),
+            ]
+        )
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def make_vpn_probe_tunnel_conf_fixup(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> Fixup:
     return Fixup(
         id=f"vpn-probe-conf-{slot.server}-{slot.transport}",
-        title=f"Получить и установить конфиг awg-пробника к {slot.server}",
+        title=f"Получить и установить конфиг {slot.transport}-пробника к {slot.server}",
         needed=_vpn_check_needed,
         check=lambda: _probe_conf_check(slot),
         apply=lambda: _probe_conf_apply(settings, slot),
@@ -1113,26 +1226,38 @@ def make_vpn_probe_tunnel_conf_fixup(settings: Settings, slot: vpn_probe_state.P
 
 
 def vpn_probe_sudoers_content(
-    slots: list[vpn_probe_state.ProbeSlot], ip_path: str, awg_quick_path: str, user: str
+    slots: list[vpn_probe_state.ProbeSlot],
+    ip_path: str,
+    awg_quick_path: str,
+    xray_path: str,
+    user: str,
 ) -> str:
     """NOPASSWD ровно на нужные вызовы внутри netns каждого слота (см.
-    vpn_check/service.py): ``curl *`` (сами проверки + запрос внешнего IP),
-    ``ip route get *`` (гейт «пробник реально в туннеле» перед каждой
-    пачкой) и, для awg-слотов, ``awg-quick up/down <iface>`` (сама служба
-    поднимает/гасит туннель вокруг чек-цикла — эфемерно, 39.0.7(d)). Не
-    голый ``ip`` (равносилен root — умеет менять маршруты/интерфейсы где
-    угодно): ``route get`` только читает таблицу маршрутизации. ``curl``
-    литералом — он не прямая цель sudo, а аргумент вложенного ``ip netns
-    exec``; вложенный ``ip``/``awg-quick`` — резолвленным путём, ровно как
-    их зовёт служба. ``awg-quick up/down`` пришпилен к КОНКРЕТНОМУ iface
-    слота (не wildcard) — шире не нужно."""
+    vpn_check/service.py): ``curl *`` (сами проверки + запрос внешнего IP —
+    для reality несёт ``--socks5 …``, но это тот же литерал ``curl``,
+    отдельного правила не нужно); awg-слоты — ``ip route get *`` (гейт
+    «пробник реально в туннеле» перед каждой пачкой) и ``awg-quick up/down
+    <iface>`` (сама служба поднимает/гасит туннель вокруг чек-цикла —
+    эфемерно, 39.0.7(d)); reality-слоты — ``timeout * xray run -c <conf>``
+    (тоже эфемерно, 39.0.7(e); ``timeout`` — сама служба решает окно на
+    каждый вызов, отсюда wildcard, конфиг — конкретный путь, не wildcard).
+    Не голый ``ip`` (равносилен root — умеет менять маршруты/интерфейсы где
+    угодно): ``route get`` только читает таблицу маршрутизации. Резолвленные
+    пути (``ip``/``awg-quick``/``xray``) — ровно как их зовёт служба;
+    ``curl``/``timeout`` литералом — не прямая цель sudo, а аргумент
+    вложенного ``ip netns exec``."""
     cmds: list[str] = []
     for slot in slots:
         cmds.append(f"{ip_path} netns exec {slot.netns} curl *")
-        cmds.append(f"{ip_path} netns exec {slot.netns} {ip_path} route get *")
         if slot.transport == "awg":
+            cmds.append(f"{ip_path} netns exec {slot.netns} {ip_path} route get *")
             cmds.append(f"{ip_path} netns exec {slot.netns} {awg_quick_path} up {slot.iface}")
             cmds.append(f"{ip_path} netns exec {slot.netns} {awg_quick_path} down {slot.iface}")
+        elif slot.transport == "reality":
+            conf_path = vpn_probe_state.reality_conf_path(slot)
+            cmds.append(
+                f"{ip_path} netns exec {slot.netns} timeout * {xray_path} run -c {conf_path}"
+            )
     return f"{user} ALL=(root) NOPASSWD: " + ", ".join(cmds) + "\n"
 
 
@@ -1141,13 +1266,22 @@ def _vpn_probe_sudoers_check(slots: list[vpn_probe_state.ProbeSlot]) -> bool:
     if not _privileged_exists(path):
         return False
     ip_path = _which("ip")
-    awg_quick_path = _which("awg-quick")
-    if ip_path is None or awg_quick_path is None:
+    if ip_path is None:
+        return False
+    needs_awg = any(s.transport == "awg" for s in slots)
+    needs_reality = any(s.transport == "reality" for s in slots)
+    awg_quick_path = _which("awg-quick") if needs_awg else ""
+    if needs_awg and not awg_quick_path:
+        return False
+    xray_path = _which("xray") if needs_reality else ""
+    if needs_reality and not xray_path:
         return False
     # Сверяем содержимое, не только факт существования — старый снипет
     # (другой состав пар) иначе оставлял бы бесполезное/неполное право
     # после изменения состава живых серверов.
-    expected = vpn_probe_sudoers_content(slots, ip_path, awg_quick_path, getuser())
+    expected = vpn_probe_sudoers_content(
+        slots, ip_path, awg_quick_path or "", xray_path or "", getuser()
+    )
     return _read_privileged(path) == expected
 
 
@@ -1155,10 +1289,17 @@ def _vpn_probe_sudoers_apply(slots: list[vpn_probe_state.ProbeSlot]) -> None:
     ip_path = _which("ip")
     if ip_path is None:
         raise FixupError("ip (iproute2) не найден в PATH")
-    awg_quick_path = _which("awg-quick")
-    if awg_quick_path is None:
-        raise FixupError("awg-quick не найден — сначала должен пройти vpn-probe-conf-* фикс")
-    content = vpn_probe_sudoers_content(slots, ip_path, awg_quick_path, getuser())
+    awg_quick_path = ""
+    if any(s.transport == "awg" for s in slots):
+        awg_quick_path = _which("awg-quick") or ""
+        if not awg_quick_path:
+            raise FixupError("awg-quick не найден — сначала должен пройти vpn-probe-conf-* фикс")
+    xray_path = ""
+    if any(s.transport == "reality" for s in slots):
+        xray_path = _which("xray") or ""
+        if not xray_path:
+            raise FixupError("xray не найден — сначала должен пройти vpn-probe-conf-* фикс")
+    content = vpn_probe_sudoers_content(slots, ip_path, awg_quick_path, xray_path, getuser())
     _install_sudoers_snippet(VPN_PROBE_SUDOERS_FILE, content)
 
 
@@ -1972,15 +2113,19 @@ def make_proxy_firewall_fixup(settings: Settings) -> Fixup:
     )
 
 
+_SUPPORTED_PROBE_TRANSPORTS = ("awg", "reality")
+
+
 def build_fixups(settings: Settings) -> list[Fixup]:
     """Известные фиксы, актуальные для текущих назначений ноды (``needed``).
 
-    Пробники VPN (39.0.7(d)) — единственные фиксы, чей СОСТАВ (не только
-    применимость) зависит от роя: список (сервер, транспорт) обнаруживается
-    один раз здесь (``_discover_probe_slots``), и на каждую awg-пару
-    заводится СВОЙ набор фиксов (scaffold+conf), по образцу
-    ``*(make_apps_unit_fixup(app) for app in settings.apps.items)`` ниже —
-    явной «фабрики-списка» в этом файле не было, только этот паттерн."""
+    Пробники VPN (39.0.7(d)/(e)) — единственные фиксы, чей СОСТАВ (не
+    только применимость) зависит от роя: список (сервер, транспорт)
+    обнаруживается один раз здесь (``_discover_probe_slots``), и на каждую
+    поддерживаемую пару заводится СВОЙ набор фиксов (scaffold+conf), по
+    образцу ``*(make_apps_unit_fixup(app) for app in settings.apps.items)``
+    ниже — явной «фабрики-списка» в этом файле не было, только этот
+    паттерн."""
     fixups = [
         INSTALL_SMARTMONTOOLS,
         SMARTCTL_SUDOERS,
@@ -1992,16 +2137,18 @@ def build_fixups(settings: Settings) -> list[Fixup]:
     ]
     if _vpn_check_needed(settings):
         slots = _discover_probe_slots(settings)
-        # Reality пока не умеет ни scaffold, ни sudoers, ни conf-фикс
-        # (39.0.7(e)) — их слоты остаются только в vpn-check-probe-state,
-        # см. докстринг той секции.
-        awg_slots = [s for s in slots if s.transport == "awg"]
+        # Транспорты за пределами _SUPPORTED_PROBE_TRANSPORTS (пока таких
+        # нет — задел на будущее) остаются только в vpn-check-probe-state:
+        # scaffold в этом файле уже транспорт-агностичен (netns+veth+NAT
+        # одинаковы для awg и reality), но conf/sudoers специфичны и заведены
+        # только на то, что служба реально умеет поднимать.
+        supported_slots = [s for s in slots if s.transport in _SUPPORTED_PROBE_TRANSPORTS]
         fixups += [
-            make_vpn_probe_forwarding_fixup(settings, awg_slots),
-            make_vpn_probe_forwarding_persist_fixup(settings, awg_slots),
-            *(make_vpn_probe_scaffold_fixup(settings, slot) for slot in awg_slots),
-            *(make_vpn_probe_tunnel_conf_fixup(settings, slot) for slot in awg_slots),
-            make_vpn_probe_sudoers_fixup(settings, awg_slots),
+            make_vpn_probe_forwarding_fixup(settings, supported_slots),
+            make_vpn_probe_forwarding_persist_fixup(settings, supported_slots),
+            *(make_vpn_probe_scaffold_fixup(settings, slot) for slot in supported_slots),
+            *(make_vpn_probe_tunnel_conf_fixup(settings, slot) for slot in supported_slots),
+            make_vpn_probe_sudoers_fixup(settings, supported_slots),
             make_vpn_probe_state_fixup(settings, slots),
         ]
     fixups += [

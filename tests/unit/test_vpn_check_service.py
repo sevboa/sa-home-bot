@@ -37,14 +37,66 @@ def _slot(**overrides: Any) -> ProbeSlot:
     return ProbeSlot(**base)
 
 
+def _reality_slot(**overrides: Any) -> ProbeSlot:
+    base = dict(
+        server=PROBE_SERVER,
+        transport="reality",
+        netns="vpn-probe-jeeves-reality",
+        veth_host="vprobe1h0",
+        veth_ns="vprobe1n0",
+        veth_host_addr="10.200.200.5/30",
+        veth_ns_addr="10.200.200.6/30",
+        subnet="10.200.200.4/30",
+        iface=None,
+        socks_port=11081,
+    )
+    base.update(overrides)
+    return ProbeSlot(**base)
+
+
+class _FakeStderr:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    async def read(self) -> bytes:
+        return self._data
+
+
 class _FakeProc:
-    def __init__(self, stdout: bytes, stderr: bytes, returncode: int) -> None:
+    """Двойник asyncio.subprocess.Process. Два режима:
+
+    - «завершившийся» (``alive=False``, по умолчанию) — как раньше, только
+      ``communicate()`` (awg-quick up/down, curl, ip route get — все
+      короткоживущие команды через ``_run``).
+    - «живой» (``alive=True``) — для xray-пробника (39.0.7(e)): долгоживущий
+      процесс, ``returncode`` остаётся ``None`` пока не позвали
+      ``terminate()``/``kill()``, ``wait()`` возвращает управление сразу
+      после (в реальном asyncio она ждала бы фактического выхода, здесь
+      это ни к чему — событийный цикл в тестах никто не крутит отдельно)."""
+
+    def __init__(
+        self, stdout: bytes = b"", stderr: bytes = b"", returncode: int | None = 0, *, alive=False
+    ) -> None:
         self._stdout = stdout
-        self._stderr = stderr
-        self.returncode = returncode
+        self._stderr_bytes = stderr
+        self.returncode = None if alive else returncode
+        self.stderr = _FakeStderr(stderr)
+        self.terminated = False
+        self.killed = False
 
     async def communicate(self) -> tuple[bytes, bytes]:
-        return self._stdout, self._stderr
+        return self._stdout, self._stderr_bytes
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = 0
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+    async def wait(self) -> int:
+        return self.returncode
 
 
 class _FakeNodeLink:
@@ -92,13 +144,16 @@ def _patch_curl(
     host_ip: str = "198.51.100.9",
     tunnel_up_ok: bool = True,
     tunnel_up_err: bytes = b"",
+    reality_up_ok: bool = True,
+    reality_up_err: bytes = b"",
 ) -> list[tuple]:
     """``results``: target url -> (stdout, stderr, code) для curl к целям.
-    Гейт по умолчанию «здоровый»: ``awg-quick up`` проходит, маршрут из
-    netns идёт через ``route_dev`` (None → `ip route get` падает), внешний
-    IP из netns (``netns_ip``) отличается от IP хоста (``host_ip``).
-    ``asyncio.sleep`` замокан на no-op — иначе ретраи `_wait_for_route`
-    реально ждали бы секунды в каждом тесте."""
+    Гейт по умолчанию «здоровый»: ``awg-quick up``/xray-пробник проходят,
+    маршрут из netns идёт через ``route_dev`` (None → `ip route get`
+    падает, только для awg), внешний IP из netns (``netns_ip``) отличается
+    от IP хоста (``host_ip``). ``asyncio.sleep`` замокан на no-op — иначе
+    ретраи `_wait_for_route`/пауза после запуска xray реально ждали бы
+    секунды в каждом тесте."""
     calls: list[tuple] = []
 
     async def fake_create_subprocess_exec(*cmd, stdout=None, stderr=None):
@@ -111,6 +166,12 @@ def _patch_curl(
                     else _FakeProc(b"", tunnel_up_err, 1)
                 )
             return _FakeProc(b"", b"", 0)  # down — best-effort, всегда «ок» в тестах
+        if any("xray" in c for c in cmd):
+            return (
+                _FakeProc(alive=True)
+                if reality_up_ok
+                else _FakeProc(stderr=reality_up_err, returncode=1, alive=False)
+            )
         if "route" in cmd and "get" in cmd:
             if route_dev is None:
                 return _FakeProc(b"", route_err, 2)
@@ -141,6 +202,10 @@ def _target_curl_calls(calls: list[tuple]) -> list[tuple]:
 
 def _tunnel_calls(calls: list[tuple], verb: str) -> list[tuple]:
     return [c for c in calls if any("awg-quick" in tok for tok in c) and verb in c]
+
+
+def _xray_calls(calls: list[tuple]) -> list[tuple]:
+    return [c for c in calls if any("xray" in tok for tok in c)]
 
 
 def _result_for(node_link: _FakeNodeLink, target: str, *, call_index: int = 0) -> dict:
@@ -339,30 +404,105 @@ async def test_two_slots_for_same_server_are_both_checked(monkeypatch):
     # вернуть по строке результата на каждый.
     calls = _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
     node_link = _FakeNodeLink()
-    slots = [
-        _slot(transport="awg", netns="vpn-probe-jeeves-awg", iface="awg-probe0"),
-        # reality пока не поддержан _tunnel_up (39.0.7(e)) — тем не менее
-        # слот должен попасть в отчёт со своей ошибкой, не быть потерян.
-        _slot(
-            transport="reality",
-            netns="vpn-probe-jeeves-reality",
-            iface=None,
-            socks_port=11081,
-        ),
-    ]
+    slots = [_slot(), _reality_slot()]
     await _service(node_link, slots=slots)._run_and_report(
         PROBE_SERVER, slots, ["https://1.1.1.1"]
     )
     results = node_link.calls[0]["args"]["results"]
     transports = {r["transport"] for r in results}
     assert transports == {"awg", "reality"}
-    awg_res = next(r for r in results if r["transport"] == "awg")
-    reality_res = next(r for r in results if r["transport"] == "reality")
-    assert awg_res["ok"] is True
-    assert reality_res["ok"] is False
-    assert "reality" in reality_res["error"]
-    # awg-туннель всё равно поднимался/гасился независимо от reality-слота.
+    assert all(r["ok"] is True for r in results)
+    # Оба туннеля поднимались/гасились независимо друг от друга.
     assert len(_tunnel_calls(calls, "up")) == 1
+    assert len(_xray_calls(calls)) == 1
+
+
+async def test_unsupported_transport_reports_soft_error_without_crashing(monkeypatch):
+    # Задел на будущее: слот с транспортом, для которого ещё нет ни одной
+    # реализации в этой службе (ни awg, ни reality) — не должен ронять
+    # проверку соседних слотов, только сам себе как мягкая ошибка.
+    calls = _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
+    node_link = _FakeNodeLink()
+    unknown_slot = _slot(transport="openvpn", netns="vpn-probe-jeeves-openvpn", iface=None)
+    await _service(node_link, slots=[unknown_slot])._run_and_report(
+        PROBE_SERVER, [unknown_slot], ["https://1.1.1.1"]
+    )
+    res = _result_for(node_link, "https://1.1.1.1")
+    assert res["ok"] is False
+    assert "openvpn" in res["error"]
+    assert _target_curl_calls(calls) == []
+
+
+async def test_reality_tunnel_brought_up_and_torn_down_around_checks(monkeypatch):
+    calls = _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
+    node_link = _FakeNodeLink()
+    slot = _reality_slot()
+    await _service(node_link, slots=[slot])._run_and_report(
+        PROBE_SERVER, [slot], ["https://1.1.1.1"]
+    )
+    xray_calls = _xray_calls(calls)
+    assert len(xray_calls) == 1
+    assert "vpn-probe-jeeves-reality" in xray_calls[0]
+    target_calls = _target_curl_calls(calls)
+    assert len(target_calls) == 1
+    assert "--socks5" in target_calls[0]
+    assert f"127.0.0.1:{slot.socks_port}" in target_calls[0]
+    res = _result_for(node_link, "https://1.1.1.1")
+    assert res["ok"] is True
+
+
+async def test_reality_tunnel_up_failure_fails_targets_without_curling(monkeypatch):
+    calls = _patch_curl(
+        monkeypatch,
+        {"https://1.1.1.1": (b"200", b"", 0)},
+        reality_up_ok=False,
+        reality_up_err=b"xray: failed to parse config",
+    )
+    node_link = _FakeNodeLink()
+    slot = _reality_slot()
+    await _service(node_link, slots=[slot])._run_and_report(
+        PROBE_SERVER, [slot], ["https://1.1.1.1"]
+    )
+    res = _result_for(node_link, "https://1.1.1.1")
+    assert res["ok"] is False
+    assert "xray" in res["error"]
+    assert _target_curl_calls(calls) == []
+
+
+async def test_reality_tunnel_up_permission_error_hints_nodectl_fix(monkeypatch):
+    _patch_curl(
+        monkeypatch,
+        {"https://1.1.1.1": (b"200", b"", 0)},
+        reality_up_ok=False,
+        reality_up_err=b"sudo: a password is required",
+    )
+    node_link = _FakeNodeLink()
+    slot = _reality_slot()
+    await _service(node_link, slots=[slot])._run_and_report(
+        PROBE_SERVER, [slot], ["https://1.1.1.1"]
+    )
+    res = _result_for(node_link, "https://1.1.1.1")
+    assert "nodectl fix" in res["error"]
+
+
+async def test_reality_gate_uses_socks_exit_ip_not_route(monkeypatch):
+    # Reality не переписывает default route — гейт не должен дёргать
+    # `ip route get` вообще, только сверку exit-IP через сам SOCKS.
+    calls = _patch_curl(
+        monkeypatch,
+        {"https://1.1.1.1": (b"200", b"", 0)},
+        netns_ip="198.51.100.9",
+        host_ip="198.51.100.9",  # совпадает с хостом — трафик мимо VPN
+    )
+    node_link = _FakeNodeLink()
+    slot = _reality_slot()
+    await _service(node_link, slots=[slot])._run_and_report(
+        PROBE_SERVER, [slot], ["https://1.1.1.1"]
+    )
+    assert not any("route" in c and "get" in c for c in calls)
+    res = _result_for(node_link, "https://1.1.1.1")
+    assert res["ok"] is False
+    assert "мимо VPN" in res["error"]
 
 
 async def test_gate_fails_all_targets_when_route_bypasses_tunnel(monkeypatch):

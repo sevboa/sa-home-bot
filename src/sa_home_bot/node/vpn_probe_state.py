@@ -19,6 +19,11 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 STATE_PATH = Path("/etc/sa-home-bot/vpn-probe-state.json")
+# xray-клиентские конфиги пробников reality (39.0.7(e)) — несут UUID гостя
+# (тут: пробника) и параметры сервера, поэтому 0600, не 0644, как остальное
+# в этом модуле. Каталог, не файл: один JSON на слот, имя — по netns
+# (уникален как и сам слот).
+REALITY_CONF_DIR = Path("/etc/sa-home-bot/vpn-probe")
 
 
 class ProbeSlot(BaseModel):
@@ -41,6 +46,10 @@ class ProbeSlot(BaseModel):
 
 class ProbeState(BaseModel):
     slots: list[ProbeSlot] = Field(default_factory=list)
+
+
+def reality_conf_path(slot: ProbeSlot) -> Path:
+    return REALITY_CONF_DIR / f"{slot.netns}.json"
 
 
 def render(slots: list[ProbeSlot]) -> str:

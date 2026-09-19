@@ -39,6 +39,16 @@ from sa_home_bot.node.fixups import (
     vpn_probe_sudoers_content,
     wol_unit_content,
 )
+from sa_home_bot.reality import probe_client_config
+from sa_home_bot.reality.client_config import RealityParams
+
+_REALITY_PARAMS = RealityParams(
+    endpoint_host="172.245.159.221",
+    port=8443,
+    server_public_key="pta_VF3o7pvmIw_X3VDePlqIsgOuyWVGrFBvPxjA-wk",
+    short_id="51ccffcdddd273ab",
+    sni="www.google.com",
+)
 
 
 def _slot(**overrides) -> vpn_probe_state.ProbeSlot:
@@ -584,9 +594,90 @@ def test_probe_conf_check_true_when_clean(monkeypatch):
     assert fixups_module._probe_conf_check(_slot()) is True
 
 
+def _reality_slot(**overrides) -> vpn_probe_state.ProbeSlot:
+    return _slot(
+        server="wooster", transport="reality", netns="vpn-probe-wooster-reality",
+        veth_host="vprobe1h0", veth_ns="vprobe1n0", veth_host_addr="10.200.200.5/30",
+        veth_ns_addr="10.200.200.6/30", subnet="10.200.200.4/30", iface=None, socks_port=11081,
+        **overrides,
+    )
+
+
+def test_probe_conf_check_reality_false_when_missing(monkeypatch):
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: False)
+    assert fixups_module._probe_conf_check(_reality_slot()) is False
+
+
+def test_probe_conf_check_reality_true_when_port_matches(monkeypatch):
+    slot = _reality_slot()
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
+    content = probe_client_config.render_probe_client_config(
+        _REALITY_PARAMS, "uuid-1", socks_port=slot.socks_port
+    )
+    monkeypatch.setattr(fixups_module, "_read_privileged", lambda path: content)
+    assert fixups_module._probe_conf_check(slot) is True
+
+
+def test_probe_conf_check_reality_false_when_port_stale(monkeypatch):
+    # Слот пересчитал индекс (состав целей сменился) — старый файл несёт
+    # порт от ПРЕЖНЕГО индекса, check() обязан это заметить и заставить
+    # apply() выпросить новый клиент под актуальный порт.
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
+    monkeypatch.setattr(
+        fixups_module,
+        "_read_privileged",
+        lambda path: probe_client_config.render_probe_client_config(
+            _REALITY_PARAMS, "uuid-1", socks_port=9999
+        ),
+    )
+    assert fixups_module._probe_conf_check(_reality_slot()) is False
+
+
+def test_probe_conf_apply_reality_reuses_existing_file(monkeypatch):
+    # Уже выдан этому слоту раньше — apply() не должен переходить в сеть
+    # заново (лишний клиент у xray на сервере нам не нужен).
+    monkeypatch.setattr(fixups_module, "_ensure_xray_binary", lambda: None)
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
+
+    async def boom(settings, slot):
+        raise AssertionError("не должен ходить в сеть, файл уже есть")
+
+    monkeypatch.setattr(fixups_module, "_fetch_probe_config", boom)
+    sudo_calls = []
+    monkeypatch.setattr(fixups_module, "_sudo", lambda argv: sudo_calls.append(argv))
+    fixups_module._probe_conf_apply(_settings(["vpn_check"]), _reality_slot())
+    assert sudo_calls == []
+
+
+def test_probe_conf_apply_reality_fetches_and_installs_when_missing(monkeypatch):
+    monkeypatch.setattr(fixups_module, "_ensure_xray_binary", lambda: None)
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: False)
+
+    async def fake_fetch(settings, slot):
+        return probe_client_config.render_probe_client_config(
+            _REALITY_PARAMS, "uuid-1", socks_port=slot.socks_port
+        )
+
+    monkeypatch.setattr(fixups_module, "_fetch_probe_config", fake_fetch)
+    sudo_calls = []
+    monkeypatch.setattr(fixups_module, "_sudo", lambda argv: sudo_calls.append(argv))
+    fixups_module._probe_conf_apply(_settings(["vpn_check"]), _reality_slot())
+    install_call = next(c for c in sudo_calls if c[0] == "install")
+    assert install_call[-1] == str(vpn_probe_state.reality_conf_path(_reality_slot()))
+    assert "0600" in install_call
+
+
+def test_ensure_xray_binary_noop_when_version_matches(monkeypatch):
+    monkeypatch.setattr(fixups_module, "_xray_version_ok", lambda: True)
+    sudo_calls = []
+    monkeypatch.setattr(fixups_module, "_sudo", lambda argv: sudo_calls.append(argv))
+    fixups_module._ensure_xray_binary()
+    assert sudo_calls == []
+
+
 def test_vpn_probe_sudoers_content_pins_ip_path_netns_and_awg_up_down():
     content = vpn_probe_sudoers_content(
-        [_slot()], "/usr/sbin/ip", "/usr/local/bin/awg-quick", "sevboa"
+        [_slot()], "/usr/sbin/ip", "/usr/local/bin/awg-quick", "/usr/local/bin/xray", "sevboa"
     )
     assert content == (
         "sevboa ALL=(root) NOPASSWD: "
@@ -603,15 +694,32 @@ def test_vpn_probe_sudoers_content_reality_slot_has_no_awg_quick_grant():
         iface=None, socks_port=11081,
     )
     content = vpn_probe_sudoers_content(
-        [reality_slot], "/usr/sbin/ip", "/usr/local/bin/awg-quick", "sevboa"
+        [reality_slot], "/usr/sbin/ip", "/usr/local/bin/awg-quick", "/usr/local/bin/xray", "sevboa"
     )
     assert "awg-quick" not in content
     assert "vpn-probe-wooster-reality curl *" in content
 
 
+def test_vpn_probe_sudoers_content_reality_slot_grants_timeout_xray_run():
+    reality_slot = _slot(
+        server="wooster", transport="reality", netns="vpn-probe-wooster-reality",
+        iface=None, socks_port=11081,
+    )
+    content = vpn_probe_sudoers_content(
+        [reality_slot], "/usr/sbin/ip", "/usr/local/bin/awg-quick", "/usr/local/bin/xray", "sevboa"
+    )
+    assert (
+        "/usr/sbin/ip netns exec vpn-probe-wooster-reality timeout * /usr/local/bin/xray run -c "
+        in content
+    )
+    assert "route get" not in content  # reality не переписывает маршрут
+
+
 def test_vpn_probe_sudoers_content_multiple_slots_are_comma_joined():
     slots = [_slot(), _slot(server="wooster", netns="vpn-probe-wooster-awg", iface="awg-probe1")]
-    content = vpn_probe_sudoers_content(slots, "/usr/sbin/ip", "/usr/local/bin/awg-quick", "sevboa")
+    content = vpn_probe_sudoers_content(
+        slots, "/usr/sbin/ip", "/usr/local/bin/awg-quick", "/usr/local/bin/xray", "sevboa"
+    )
     assert content.count("curl *") == 2
     assert content.count("awg-quick up") == 2
 
@@ -656,12 +764,33 @@ def test_build_fixups_includes_vpn_probe_fixups_when_vpn_check_assigned(monkeypa
     } <= ids
 
 
-def test_build_fixups_reality_slot_gets_state_but_no_scaffold(monkeypatch):
-    # 39.0.7(e) ещё не сделан — reality-слот попадает в vpn-check-probe-state
-    # (служба сможет мягко ответить «транспорт не поддержан»), но никакой
-    # scaffold/conf/awg-sudoers для него не заводится.
-    reality_slot = _slot(server="wooster", transport="reality", iface=None, socks_port=11080)
+def test_build_fixups_reality_slot_gets_full_fixup_set(monkeypatch):
+    # 39.0.7(e): reality — полноправный транспорт, получает те же
+    # scaffold/conf/state/sudoers, что и awg (просто другой conf-фикс
+    # внутри — xray-клиент вместо awg-quick-конфига).
+    reality_slot = _slot(
+        server="wooster", transport="reality", netns="vpn-probe-wooster-reality",
+        iface=None, socks_port=11080,
+    )
     monkeypatch.setattr(fixups_module, "_discover_probe_slots", lambda settings: [reality_slot])
+    ids = {f.id for f in build_fixups(_settings(["vpn_check"]))}
+    assert {
+        "vpn-check-probe-state",
+        "vpn-probe-scaffold-wooster-reality",
+        "vpn-probe-conf-wooster-reality",
+        "vpn-check-probe-sudoers",
+        "vpn-check-probe-forwarding",
+        "vpn-check-probe-forwarding-persist",
+    } <= ids
+
+
+def test_build_fixups_unsupported_transport_gets_state_only(monkeypatch):
+    # Задел на будущее: транспорт, для которого ещё нет реализации ни в
+    # fixups.py, ни в vpn_check/service.py, попадает только в
+    # vpn-check-probe-state (служба сможет мягко ответить «не поддержан»),
+    # без scaffold/conf/sudoers.
+    unknown_slot = _slot(server="wooster", transport="openvpn", iface=None)
+    monkeypatch.setattr(fixups_module, "_discover_probe_slots", lambda settings: [unknown_slot])
     ids = {f.id for f in build_fixups(_settings(["vpn_check"]))}
     assert "vpn-check-probe-state" in ids
     assert not any(i.startswith("vpn-probe-scaffold-") for i in ids)
