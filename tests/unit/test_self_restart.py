@@ -20,6 +20,7 @@ from sa_home_bot.config import Settings, TelegramConfig
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
+from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 
 
@@ -99,6 +100,7 @@ async def _dispatch(callback, store, link):
         notifier=None,
         config=_settings(),
         pending_vpn_secrets=PendingVpnSecrets(),
+        book=SubscriptionBook([]),
         subscription=_sub(),
     )
 

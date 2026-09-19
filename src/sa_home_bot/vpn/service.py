@@ -97,6 +97,7 @@ from sa_home_bot.vpn.protocol import (
     ACTION_REQUEST_EXTRA,
     ACTION_RESOLVE_REQUEST,
     ACTION_REVOKE,
+    ACTION_SET_ACCESS,
     ACTION_SET_QUOTA,
     ACTION_USAGE,
     ERR_QUOTA_CEILING,
@@ -318,6 +319,7 @@ class VpnService:
             ACTION_REVOKE,
             ACTION_USAGE,
             ACTION_SET_QUOTA,
+            ACTION_SET_ACCESS,
             ACTION_GRANT_EXTRA,
             ACTION_REQUEST_EXTRA,
             ACTION_RESOLVE_REQUEST,
@@ -350,6 +352,20 @@ class VpnService:
                 params=(
                     chat_id_param,
                     ActionParam(name="bytes", type="int", title="Лимит месяца, байт"),
+                ),
+            ),
+            ActionSpec(
+                id=ACTION_SET_ACCESS,
+                title="🎟 Допуск на сервер",
+                params=(
+                    chat_id_param,
+                    ActionParam(name="allowed", type="bool", title="Допущен"),
+                    ActionParam(
+                        name="base_gb",
+                        type="int",
+                        required=False,
+                        title="Личная база, ГБ (пусто — общая)",
+                    ),
                 ),
             ),
             ActionSpec(id=ACTION_GRANT_EXTRA, title="➕100 ГБ", params=(chat_id_param,)),
@@ -441,6 +457,12 @@ class VpnService:
             # Транспорты этой ноды — бот по ним решает, предлагать ли выбор
             # (awg/reality) в карточке «➕ Новое устройство».
             "transports": list(self._transports),
+            # Умеет ли эта нода допуск (set_access). Флаг в get_state, а не
+            # в describe: бот и так дёргает состояние на каждый экран
+            # (bot/vpn_nodes.py::live_vpn_servers), а лишний describe ради
+            # одного признака гонять по рою незачем. Старая нода поля не
+            # шлёт — бот читает отсутствие как «допуск не ведёт, пущены все».
+            "access_control": True,
         }
 
     # --- вспомогательное ---
@@ -474,6 +496,10 @@ class VpnService:
             "SELECT chat_id FROM vpn_quota_state WHERE month = ? AND blocked_at IS NOT NULL",
             (month,),
         )
+        return {row["chat_id"] for row in await cur.fetchall()}
+
+    async def _allowed_chats(self) -> set[int]:
+        cur = await self._db.conn.execute("SELECT chat_id FROM vpn_chat_access WHERE allowed = 1")
         return {row["chat_id"] for row in await cur.fetchall()}
 
     async def _quota_state(self, chat_id: int, month: str) -> dict[str, Any]:
@@ -524,8 +550,36 @@ class VpnService:
         row = await cur.fetchone()
         return int(row["total"] or 0)
 
+    async def _access(self, chat_id: int) -> tuple[bool, int | None]:
+        """``(допущен, личная база в байтах)`` — нет строки значит «не допущен»
+        (fail-closed: новый гость закрыт, пока владелец не откроет локацию)."""
+        cur = await self._db.conn.execute(
+            "SELECT allowed, base_bytes FROM vpn_chat_access WHERE chat_id = ?", (chat_id,)
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return False, None
+        return bool(row["allowed"]), row["base_bytes"]
+
+    async def _base_bytes(self, chat_id: int) -> int:
+        """База месяца: личная, если задана, иначе общая из конфига."""
+        _allowed, base = await self._access(chat_id)
+        return self._cfg.base_quota_gb * GB if base is None else int(base)
+
+    async def _require_access(self, chat_id: int) -> None:
+        allowed, _base = await self._access(chat_id)
+        if allowed:
+            return
+        raise ProtoError(
+            ERR_BAD_REQUEST,
+            f"на сервере «{self._cfg.location or self._node}» доступ не открыт — "
+            "его выдаёт владелец в /vpn → «👥 Все гости»",
+        )
+
     async def _limit_bytes(self, chat_id: int, month: str) -> int:
-        return self._cfg.base_quota_gb * GB + await self._granted_bytes(chat_id, month)
+        # Недопущенному лимит НЕ обнуляем: допуск — отдельная ось, а нулевой
+        # лимит прочитался бы как «исчерпал квоту» (см. _check_thresholds).
+        return await self._base_bytes(chat_id) + await self._granted_bytes(chat_id, month)
 
     async def _add_grant(
         self, chat_id: int, month: str, bytes_: int, *, source: str, request_id: int | None = None
@@ -568,16 +622,52 @@ class VpnService:
             await self._db.conn.commit()
             log.info("vpn: проставлен server=%s у %d старых пиров", self._node, cur.rowcount)
 
+    async def backfill_access(self) -> None:
+        """Гости с живыми пирами были допущены де-факто — до vpn_chat_access
+        допуска не существовало вовсе. Проставляем им ``allowed = 1`` с общей
+        базой, чтобы обновление службы никого не выставило за дверь.
+
+        ``DO NOTHING``, а не upsert: рестарт не должен воскрешать допуск,
+        который владелец снял руками (пиры при снятии остаются ``active``,
+        см. reconcile — их просто не поднимают на интерфейсе).
+        """
+        cur = await self._db.conn.execute(
+            "INSERT INTO vpn_chat_access (chat_id, allowed, base_bytes, updated_at) "
+            "SELECT DISTINCT chat_id, 1, NULL, ? FROM vpn_peers WHERE status = 'active' "
+            "ON CONFLICT(chat_id) DO NOTHING",
+            (_now().isoformat(),),
+        )
+        if cur.rowcount:
+            await self._db.conn.commit()
+            log.info("vpn: допуск проставлен %d гостям с активными пирами", cur.rowcount)
+        # Гость, у которого все пиры отозваны, под бэкфилл не попадает и
+        # сам себе новый конфиг уже не выпустит. Это осознанно (новые —
+        # только по явной выдаче), но владельцу стоит знать, кого это
+        # задело: иначе он узнает об этом из жалобы.
+        cur = await self._db.conn.execute(
+            "SELECT DISTINCT chat_id FROM vpn_peers "
+            "WHERE chat_id NOT IN (SELECT chat_id FROM vpn_chat_access)"
+        )
+        orphans = [row["chat_id"] for row in await cur.fetchall()]
+        if orphans:
+            log.info("vpn: гости с историей, но без активных пиров — допуск не выдан: %s", orphans)
+
     # --- reconciler ---
 
     async def reconcile(self) -> None:
         month = _month_key(_now())
         blocked = await self._blocked_chats(month)
+        allowed = await self._allowed_chats()
         cur = await self._db.conn.execute(
             "SELECT chat_id, transport, public_key, address FROM vpn_peers WHERE status = 'active'"
         )
         rows = await cur.fetchall()
-        active = [row for row in rows if row["chat_id"] not in blocked]
+        # На интерфейс идут допущенные и не исчерпавшие квоту. Строки в БД не
+        # трогаем: пир остаётся `active`, поэтому возврат допуска не требует
+        # перевыпуска конфига у гостя — тот же ключ поднимется обратно.
+        active = [
+            row for row in rows if row["chat_id"] in allowed and row["chat_id"] not in blocked
+        ]
 
         if self._has(TRANSPORT_AWG):
             desired = {
@@ -650,6 +740,9 @@ class VpnService:
     ) -> dict[str, Any]:
         chat_id = self._chat_id(args)
         transport = forced_transport or self._resolve_transport(args)
+        # Проверка ДО генерации ключа и выделения адреса: у отказа не должно
+        # быть следов — ни пира в БД, ни занятого адреса в подсети.
+        await self._require_access(chat_id)
         # Число устройств на гостя намеренно не ограничено (решение
         # пользователя 2026-08-03) — реальный потолок стоимости уже задаёт
         # трафик (base_quota_gb/self_ceiling_gb), отдельный счётчик устройств
@@ -741,6 +834,9 @@ class VpnService:
         device_label = str(args.get("device_label") or "").strip()
         if not device_label:
             raise ProtoError(ERR_BAD_REQUEST, "не указано устройство (device_label)")
+        # Проверка здесь, а не только в _issue: перевыпуск снимает старый пир
+        # ДО выдачи нового, и недопущенный остался бы вообще без устройства.
+        await self._require_access(chat_id)
         cur = await self._db.conn.execute(
             "SELECT public_key, address, transport FROM vpn_peers "
             "WHERE chat_id = ? AND device_label = ? AND status = 'active'",
@@ -811,6 +907,7 @@ class VpnService:
             used = await self._used_bytes(chat_id, month)
             limit = await self._limit_bytes(chat_id, month)
             state = await self._quota_state(chat_id, month)
+            allowed, base_bytes = await self._access(chat_id)
             return {
                 "chat_id": chat_id,
                 "month": month,
@@ -821,29 +918,41 @@ class VpnService:
                 "used_bytes": used,
                 "limit_bytes": limit,
                 "remaining_bytes": max(limit - used, 0),
+                # `blocked` — строго про исчерпанную квоту, `allowed` — про
+                # допуск на эту локацию. Две разные причины, и бот показывает
+                # их по-разному: недопущенную локацию он просто не рисует.
                 "blocked": state["blocked_at"] is not None,
+                "allowed": allowed,
+                "base_limit_bytes": (
+                    self._cfg.base_quota_gb * GB if base_bytes is None else int(base_bytes)
+                ),
+                "personal_base": base_bytes is not None,
                 "devices": await self._peers_for_chat(chat_id),
                 # Транспорты этой ноды — карточка /vpn по ним решает, показывать
                 # ли выбор технологии при «➕ Новое устройство».
                 "transports": list(self._transports),
                 "proxy_available": bool(self._cfg.mtg_public_host),
             }
-        # Сводка для админа — только гости с ДЕЙСТВУЮЩИМ доступом (не
-        # отозванным/просроченным): именно они «резервируют» трафик ноды,
-        # revoked/expired ничего больше не стоят.
+        # Сводка для админа. «Резервируют» трафик ноды все допущенные — даже
+        # те, кто ещё не завёл ни одного устройства: обещание уже дано. Гость
+        # с активными пирами, у которого допуск сняли, тоже должен быть виден
+        # (иначе он молча исчезнет из сводки вместе со своим расходом).
         cur = await self._db.conn.execute(
-            "SELECT DISTINCT chat_id FROM vpn_peers WHERE status = 'active'"
+            "SELECT chat_id FROM vpn_peers WHERE status = 'active' "
+            "UNION SELECT chat_id FROM vpn_chat_access WHERE allowed = 1"
         )
         active_chat_ids = [row["chat_id"] for row in await cur.fetchall()]
         chats = []
         reserved_bytes = 0
         for cid in active_chat_ids:
             limit = await self._limit_bytes(cid, month)
+            allowed, _base = await self._access(cid)
             chats.append(
                 {
                     "chat_id": cid,
                     "used_bytes": await self._used_bytes(cid, month),
                     "limit_bytes": limit,
+                    "allowed": allowed,
                     "device_count": len(await self._peers_for_chat(cid)),
                 }
             )
@@ -852,10 +961,10 @@ class VpnService:
         return {
             "month": month,
             "chats": chats,
-            # "Резерв" — сумма ЛИМИТОВ (не факта потребления) активных
-            # гостей: сколько канала занято обещаниями, даже если реально
-            # ещё не потрачено — решение пользователя 2026-08-03, чтобы
-            # видеть риск перерасхода тарифа ДО того, как он случится.
+            # "Резерв" — сумма ЛИМИТОВ (не факта потребления) гостей из
+            # списка выше: сколько канала занято обещаниями, даже если
+            # реально ещё не потрачено — решение пользователя 2026-08-03,
+            # чтобы видеть риск перерасхода тарифа ДО того, как он случится.
             "node": {
                 "limit_bytes": node_limit_bytes,
                 "reserved_bytes": reserved_bytes,
@@ -875,6 +984,53 @@ class VpnService:
         if delta:
             await self._add_grant(chat_id, month, delta, source="admin")
         await self._check_thresholds(chat_id, month)
+        return await self._usage({"chat_id": chat_id})
+
+    async def _set_access(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Допуск гостя на ЭТОТ сервер и его постоянная личная база.
+
+        Отличие от ``set_quota``: тот задаёт целевой лимит ТЕКУЩЕГО месяца
+        компенсирующим грантом (1-го числа сбрасывается), а ``base_gb`` —
+        саму базу, с которой каждый месяц начинается заново.
+        """
+        chat_id = self._chat_id(args)
+        if "allowed" not in args:
+            raise ProtoError(ERR_BAD_REQUEST, "не указан allowed — допущен ли гость на сервер")
+        allowed = bool(args["allowed"])
+
+        # base_gb не передали — личную базу не трогаем (частый случай «просто
+        # открой/закрой доступ»); передали явный null — сбрасываем на общую.
+        _was_allowed, base_bytes = await self._access(chat_id)
+        if "base_gb" in args:
+            raw = args["base_gb"]
+            if raw is None:
+                base_bytes = None
+            else:
+                gb = int(raw)
+                if gb <= 0:
+                    raise ProtoError(
+                        ERR_BAD_REQUEST,
+                        "base_gb должен быть больше нуля — чтобы закрыть доступ, передайте "
+                        "allowed=false (нулевой лимит читался бы как исчерпанная квота и слал "
+                        "бы гостю ⛔️-уведомления)",
+                    )
+                base_bytes = gb * GB
+
+        await self._db.conn.execute(
+            "INSERT INTO vpn_chat_access (chat_id, allowed, base_bytes, updated_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET allowed = excluded.allowed, "
+            "base_bytes = excluded.base_bytes, updated_at = excluded.updated_at",
+            (chat_id, int(allowed), base_bytes, _now().isoformat()),
+        )
+        await self._db.conn.commit()
+
+        # Сначала пороги: вернувшийся допуск мог застать blocked_at от старой
+        # квоты — при поднятом лимите он сам снимется. Затем реконсайл уже на
+        # сам переключатель: пиры поднимаются/снимаются сразу, а не через тик
+        # сэмплера.
+        month = _month_key(_now())
+        await self._check_thresholds(chat_id, month)
+        await self.reconcile()
         return await self._usage({"chat_id": chat_id})
 
     async def _grant_extra(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -899,7 +1055,9 @@ class VpnService:
         self_granted = await self._granted_bytes(chat_id, month, source="self")
         step = self._cfg.extra_step_gb * GB
         ceiling = self._cfg.self_ceiling_gb * GB
-        base = self._cfg.base_quota_gb * GB
+        # База — личная, если владелец её задал: иначе гость с личными 50 ГБ
+        # доливал бы себе до потолка, посчитанного от чужих 500.
+        base = await self._base_bytes(chat_id)
         if base + self_granted + step > ceiling:
             raise ProtoError(
                 ERR_QUOTA_CEILING,
@@ -965,6 +1123,13 @@ class VpnService:
         return {"request_id": request_id, "status": status}
 
     async def _check_thresholds(self, chat_id: int, month: str) -> None:
+        allowed, _base = await self._access(chat_id)
+        if not allowed:
+            # Недопущенного квота не касается вовсе: трафика он не набирает
+            # (реконсайлер не поднимает его пиры), а blocked_at значит
+            # «исчерпал», а не «не пущен». Без этого возврата владелец, задав
+            # квоту до открытия доступа, слал бы гостю ⛔️ ни за что.
+            return
         used = await self._used_bytes(chat_id, month)
         limit = await self._limit_bytes(chat_id, month)
         remaining = limit - used
@@ -1582,6 +1747,8 @@ class VpnService:
             return await self._usage(args)
         if action == ACTION_SET_QUOTA:
             return await self._set_quota(args)
+        if action == ACTION_SET_ACCESS:
+            return await self._set_access(args)
         if action == ACTION_GRANT_EXTRA:
             return await self._grant_extra(args)
         if action == ACTION_REQUEST_EXTRA:

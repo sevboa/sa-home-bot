@@ -49,13 +49,15 @@ from aiogram.types import (
     Message,
 )
 
-from sa_home_bot.bot import commands, vpn_nodes
+from sa_home_bot.bot import commands, vpn_admin_view, vpn_nodes
 from sa_home_bot.bot.notifier import Notifier
+from sa_home_bot.bot.pagination import clamp_offset
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.vpn_apk import deliver_apk
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecret, PendingVpnSecrets
 from sa_home_bot.config import Settings
-from sa_home_bot.proto.messages import Address, ProtoError
+from sa_home_bot.proto.messages import ERR_UNKNOWN_ACTION, Address, ProtoError
+from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.vpn import protocol as vpn_protocol
 
@@ -66,6 +68,10 @@ router = Router(name="vpn")
 SERVICE = vpn_protocol.SERVICE_NAME
 
 _VPN_UNAVAILABLE = "⚠️ Служба VPN недоступна — попробуйте позже."
+# Локации гостю ещё не выдали: право `usage@vpn` у него есть (иначе он бы сюда
+# не дошёл), а допуск хоть на один сервер — нет. Это не ошибка, поэтому и текст
+# не про сбой.
+_NO_VPN_ACCESS = "📶 <b>VPN</b>\n\nДоступ пока не выдан — попросите владельца открыть вам локацию."
 
 # Человеческие названия транспортов (vpn_peers.transport) для карточки и
 # кнопок выбора «➕ Новое устройство».
@@ -104,9 +110,30 @@ def _device_line(device: dict) -> str:
     return f"• {html.escape(device['device_label'])}{tag}{seen}"
 
 
-def _usage_text(servers: list[dict]) -> str:
+def _is_allowed(server: dict) -> bool:
+    """Открыта ли гостю эта локация.
+
+    Отсутствие поля значит «служба допуск не ведёт» — нода ещё не обновлена
+    (vpn/service.py::get_state::access_control). Дефолт True намеренный:
+    инвертированный запер бы UI живым гостям на время раската.
+    """
+    return bool(server.get("allowed", True))
+
+
+def _allowed_servers(servers: list[dict]) -> list[dict]:
+    return [server for server in servers if _is_allowed(server)]
+
+
+def _usage_text(servers: list[dict], *, show_access: bool = False) -> str:
     """Карточка расхода. Квота у каждого сервера своя (счёт за трафик у VPS
-    раздельный) — лимиты НЕ суммируются, каждая локация идёт своим блоком."""
+    раздельный) — лимиты НЕ суммируются, каждая локация идёт своим блоком.
+
+    Гостю на вход идут только ДОПУЩЕННЫЕ локации: закрытая не показывается
+    вовсе, а не строкой «доступа нет» (решение владельца 2026-09-19) — он
+    видит то, что ему выдали, и не гадает, чего просить. ``show_access``
+    включает пометку закрытых — это для админских экранов, где смотрят чужой
+    расход и как раз надо понимать, где доступ открыт, а где нет.
+    """
     multi = len(servers) > 1
     lines: list[str] = ["📶 <b>VPN</b>"] if multi else []
     for server in servers:
@@ -119,6 +146,8 @@ def _usage_text(servers: list[dict]) -> str:
             lines.append(f"<b>{html.escape(_server_label(server))}</b>: {quota}")
         else:
             lines.append(f"📶 <b>VPN</b>: {quota}")
+        if show_access and not _is_allowed(server):
+            lines.append("🔒 Доступ на эту локацию не открыт.")
         if server.get("blocked"):
             lines.append("⛔️ Доступ приостановлен — лимит месяца исчерпан.")
         devices = server.get("devices") or []
@@ -225,7 +254,11 @@ def _card_keyboard(
         admin_row = [
             InlineKeyboardButton(
                 text="👥 Все гости",
-                callback_data=commands.action_callback("usage_all", service=SERVICE),
+                # Право кнопки (peers@vpn) теперь совпадает с признаком, по
+                # которому она рисуется (_is_admin) — раньше рисовалась по
+                # peers@vpn, а слала usage_all и отказывала админу с точечным
+                # правом.
+                callback_data=vpn_admin_view.guests_cb(0),
             )
         ]
         # Проверка сети — только там, где есть awg: пробник ходит через
@@ -511,19 +544,29 @@ async def usage_text(node_link: ServiceLink, chat_id: int) -> str:
     та же служба и то же действие usage@vpn, что и у команды /vpn, только для
     чужого chat_id — админ имеет право знать расход того, кем управляет.
     """
-    error, servers = await _card(node_link, chat_id)
-    return error if error is not None else _usage_text(servers)
+    servers = await vpn_nodes.fanout(node_link, vpn_protocol.ACTION_USAGE, {"chat_id": chat_id})
+    if not servers:
+        return _VPN_UNAVAILABLE
+    return _usage_text(servers, show_access=True)
 
 
 async def _card(
     node_link: ServiceLink, chat_id: int
 ) -> tuple[str, list[dict]] | tuple[None, list[dict]]:
-    """Расход гостя со ВСЕХ живых VPN-серверов. Мёртвая нода просто выпадает
-    из списка (vpn_nodes.fanout) — карточка с одной локацией полезнее отказа."""
+    """Расход гостя по его локациям. Мёртвая нода просто выпадает из списка
+    (vpn_nodes.fanout) — карточка с одной локацией полезнее отказа; локация,
+    куда гость не допущен, выпадает тоже, но по другой причине (этап D).
+
+    Пустой список после фильтра — не ошибка связи, а «доступ ещё не выдан»:
+    отличает их вызывающий по тому, пришло ли что-то от роя вообще.
+    """
     servers = await vpn_nodes.fanout(node_link, vpn_protocol.ACTION_USAGE, {"chat_id": chat_id})
     if not servers:
         return _VPN_UNAVAILABLE, []
-    return None, servers
+    allowed = _allowed_servers(servers)
+    if not allowed:
+        return _NO_VPN_ACCESS, []
+    return None, allowed
 
 
 def _self_serve_nodes(servers: list[dict], config: Settings) -> list[str]:
@@ -533,8 +576,27 @@ def _self_serve_nodes(servers: list[dict], config: Settings) -> list[str]:
     return [
         server["node"]
         for server in servers
-        if server.get("node") and server.get("remaining_bytes", 0) <= threshold
+        if server.get("node")
+        and _is_allowed(server)
+        and server.get("remaining_bytes", 0) <= threshold
     ]
+
+
+async def _live_servers_for(node_link: ServiceLink, chat_id: int) -> list[dict]:
+    """Локации для пикера «➕ Новое устройство» — только открытые этому гостю.
+
+    Транспорты приходят из ``live_vpn_servers`` (get_state ноды), допуск — из
+    ``usage`` с chat_id: про конкретного гостя get_state ничего не знает.
+    Сшиваем по ``node``.
+
+    Пустой результат вызывающий трактует как «сказать нечего» и идёт прежним
+    путём: решение о допуске принимает служба, здесь только выбор из того, что
+    гостю и так открыто.
+    """
+    live = await vpn_nodes.live_vpn_servers(node_link)
+    servers = await vpn_nodes.fanout(node_link, vpn_protocol.ACTION_USAGE, {"chat_id": chat_id})
+    allowed = {server.get("node") for server in servers if _is_allowed(server)}
+    return [item for item in live if item.get("node") in allowed]
 
 
 @router.message(Command(commands.VPN.name))
@@ -768,6 +830,7 @@ async def handle_action(
     config: Settings,
     subscription: Subscription,
     pending_vpn_secrets: PendingVpnSecrets,
+    book: SubscriptionBook | None = None,
 ) -> None:
     """Вызывается из bot/handlers/node.py::on_dynamic_action для service="vpn"."""
     parsed = commands.parse_action_callback(callback.data)
@@ -917,7 +980,7 @@ async def handle_action(
             and not value
             and not node_id
         ):
-            live = await vpn_nodes.live_vpn_servers(node_link)
+            live = await _live_servers_for(node_link, chat_id)
             if len(live) > 1:
                 await callback.answer()
                 with contextlib.suppress(TelegramBadRequest):
@@ -926,6 +989,14 @@ async def handle_action(
                         reply_markup=_server_picker_keyboard(live),
                     )
                 return
+            if len(live) == 1:
+                # Открытая локация одна — пикер не нужен, но адресовать надо
+                # именно её: «первая живая» могла бы оказаться закрытой.
+                node_id = live[0].get("node") or node_id
+            # Пусто — сюда бот не лезет: отказ выдаёт служба (_require_access),
+            # и её текст точнее. Своей проверкой здесь мы заперли бы гостя ещё
+            # и на случайном сбое фанаута, при том что настоящий барьер всё
+            # равно на той стороне.
 
         dst = await _need_dst()
         if dst is None:
@@ -1007,6 +1078,17 @@ async def handle_action(
             return
         await callback.answer()
         await callback.message.answer(_summary_text(summary))
+        return
+
+    # Админский раздел «👥 Все гости»: список → гость → локация. Экраны идут
+    # под правом peers@vpn (это чтение чужого доступа), сама правка — под
+    # set_access@vpn; оба проверены middleware до входа сюда.
+    if action_id == vpn_protocol.ACTION_PEERS:
+        await _handle_admin_screen(callback, node_link, book, value, node_id)
+        return
+
+    if action_id == vpn_protocol.ACTION_SET_ACCESS:
+        await _handle_set_access(callback, node_link, notifier, book, value, node_id)
         return
 
     if action_id == _ACTION_VPN_CARD:
@@ -1137,6 +1219,146 @@ async def handle_action(
         return
 
     await callback.answer()
+
+
+# --- админский раздел «👥 Все гости» ---------------------------------------
+
+
+async def _guest_servers(node_link: ServiceLink, chat_id: int) -> list[dict]:
+    """Все локации глазами конкретного гостя — включая закрытые: админ как раз
+    и решает, какие открыть."""
+    return await vpn_nodes.fanout(node_link, vpn_protocol.ACTION_USAGE, {"chat_id": chat_id})
+
+
+async def _redraw_screen(callback: CallbackQuery, text: str, keyboard) -> None:
+    with contextlib.suppress(TelegramBadRequest):
+        await callback.message.edit_text(text, reply_markup=keyboard)
+
+
+async def _handle_admin_screen(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    book: SubscriptionBook | None,
+    value: str | None,
+    node_id: str | None,
+) -> None:
+    if book is None:
+        await callback.answer("⚠️ Список гостей сейчас недоступен.", show_alert=True)
+        return
+    guests = book.guests()
+
+    chat_id = vpn_admin_view.parse_guest_value(value)
+    if chat_id is None:  # список гостей, value — номер страницы
+        offset = _parse_offset(value)
+        access = {guest.chat_id: await _guest_servers(node_link, guest.chat_id) for guest in guests}
+        offset = clamp_offset(offset, vpn_admin_view.GUEST_PAGE_SIZE, len(guests))
+        text, keyboard = vpn_admin_view.build_guests_view(guests, access, offset)
+        await callback.answer()
+        await _redraw_screen(callback, text, keyboard)
+        return
+
+    guest = next((g for g in guests if g.chat_id == chat_id), None)
+    if guest is None:
+        await callback.answer("Гость больше не в списке.", show_alert=True)
+        return
+    servers = await _guest_servers(node_link, chat_id)
+    if node_id is None:
+        text, keyboard = vpn_admin_view.build_guest_view(guest, servers)
+    else:
+        server = next((s for s in servers if s.get("node") == node_id), None)
+        if server is None:
+            await callback.answer("Эта нода сейчас не на связи.", show_alert=True)
+            return
+        text, keyboard = vpn_admin_view.build_location_view(guest, server)
+    await callback.answer()
+    await _redraw_screen(callback, text, keyboard)
+
+
+async def _handle_set_access(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    notifier: Notifier,
+    book: SubscriptionBook | None,
+    value: str | None,
+    node_id: str | None,
+) -> None:
+    parsed = vpn_admin_view.parse_set_access_value(value)
+    if parsed is None or node_id is None or book is None:
+        await callback.answer()
+        return
+    chat_id, arg = parsed
+    guest = next((g for g in book.guests() if g.chat_id == chat_id), None)
+    if guest is None:
+        await callback.answer("Гость больше не в списке.", show_alert=True)
+        return
+
+    # «on»/«off» — только тумблер (гигабайты не трогаем: вернут доступ, и цифру
+    # не придётся вспоминать); число — выдать столько ГБ и заодно открыть.
+    payload: dict[str, object] = {"chat_id": chat_id}
+    if arg in ("on", "off"):
+        payload["allowed"] = arg == "on"
+    else:
+        try:
+            payload["base_gb"] = int(arg)
+        except ValueError:
+            await callback.answer()
+            return
+        payload["allowed"] = True
+
+    dst = Address(node=node_id, service=SERVICE)
+    try:
+        server = await node_link.command(vpn_protocol.ACTION_SET_ACCESS, payload, dst=dst)
+    except ProtoError as exc:
+        # Старая нода про допуск не знает — это рассинхрон версий, а не отказ.
+        if exc.code == ERR_UNKNOWN_ACTION:
+            await callback.answer(
+                f"Нода «{node_id}» ещё не умеет выдавать доступ — обновите её.",
+                show_alert=True,
+            )
+        else:
+            await callback.answer(f"⚠️ {exc.message}", show_alert=True)
+        return
+    except ServiceUnavailableError:
+        await callback.answer("⚠️ Служба VPN недоступна.", show_alert=True)
+        return
+
+    await callback.answer(_access_toast(server))
+    await _notify_guest_access(notifier, chat_id, server, opened=bool(server.get("allowed")))
+    text, keyboard = vpn_admin_view.build_location_view(guest, server)
+    await _redraw_screen(callback, text, keyboard)
+
+
+def _access_toast(server: dict) -> str:
+    where = server.get("label") or server.get("node") or "локация"
+    if not server.get("allowed"):
+        return f"{where}: доступ закрыт"
+    base_gb = server.get("base_limit_bytes", 0) / 1_000_000_000
+    return f"{where}: открыт, {base_gb:.0f} ГБ"
+
+
+async def _notify_guest_access(
+    notifier: Notifier, chat_id: int, server: dict, *, opened: bool
+) -> None:
+    """Сказать гостю, что у него изменилось. Отдельного события протокола не
+    заводим: кнопку нажал человек в боте — бот и сообщает (события службы
+    ходят по другому поводу, см. bot/node_events.py)."""
+    if not _is_private(chat_id):
+        return
+    where = html.escape(str(server.get("label") or server.get("node") or "VPN"))
+    if opened:
+        base_gb = server.get("base_limit_bytes", 0) / 1_000_000_000
+        text = f"📶 VPN: вам открыт доступ — {where}, {base_gb:.0f} ГБ в месяц. Карточка: /vpn"
+    else:
+        text = f"📶 VPN: доступ к локации {where} закрыт."
+    with contextlib.suppress(Exception):
+        await notifier.send_direct(chat_id, text)
+
+
+def _parse_offset(value: str | None) -> int:
+    try:
+        return max(0, int(value)) if value else 0
+    except ValueError:
+        return 0
 
 
 def resolve_request_callback(request_id: int) -> InlineKeyboardMarkup:

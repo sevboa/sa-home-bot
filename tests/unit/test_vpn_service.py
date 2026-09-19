@@ -18,6 +18,20 @@ from sa_home_bot.vpn.service import _FLOWER_NAMES, GB, VpnService, _random_devic
 
 CHAT = 111
 OTHER_CHAT = 222
+STRANGER = 333  # никогда не допущен — для отказных путей
+
+
+async def allow(svc: VpnService, *chat_ids: int, base_gb: int | None = None) -> None:
+    """Открыть гостям доступ на сервер (vpn_chat_access).
+
+    Тестовые гости допущены по умолчанию — иначе каждый тест начинался бы с
+    трёх строк подготовки; отказной путь проверяется отдельно, на STRANGER.
+    """
+    for chat_id in chat_ids:
+        await svc.run_command(
+            vpn_protocol.ACTION_SET_ACCESS,
+            {"chat_id": chat_id, "allowed": True, "base_gb": base_gb},
+        )
 
 
 class FakeAwg:
@@ -74,6 +88,8 @@ async def env(tmp_path):
         endpoint_host="203.0.113.9",
     )
     svc = VpnService(Settings(vpn=cfg), db, backend, emit)
+    await allow(svc, CHAT, OTHER_CHAT)
+    events.clear()  # подготовка допуска — не часть сценария теста
     yield svc, backend, events
     await db.close()
 
@@ -388,15 +404,45 @@ async def test_usage_without_chat_id_includes_node_reserve_and_device_count(env)
     assert summary["node"]["free_bytes"] == 8 * GB
 
 
-async def test_usage_without_chat_id_excludes_revoked_guests_from_reserve(env):
+async def test_usage_without_chat_id_keeps_allowed_guest_without_devices(env):
+    """Резерв считается по ДОПУСКУ, а не по наличию пира: гость, отозвавший
+    своё единственное устройство, доступ не потерял — обещание трафика в силе,
+    и завтра он заведёт новое. То же и для того, кому доступ только открыли."""
     svc, _backend, _events = env
     issued = await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
     await svc.run_command(
         vpn_protocol.ACTION_REVOKE, {"chat_id": CHAT, "device_label": issued["device_label"]}
     )
     summary = await svc.run_command(vpn_protocol.ACTION_USAGE, {})
-    assert summary["chats"] == []
-    assert summary["node"]["reserved_bytes"] == 0
+    by_chat = {row["chat_id"]: row for row in summary["chats"]}
+    assert by_chat[CHAT]["device_count"] == 0
+    assert by_chat[CHAT]["allowed"] is True
+    # Оба гостя фикстуры допущены, по 1 ГБ базы на каждого.
+    assert summary["node"]["reserved_bytes"] == 2 * GB
+
+
+async def test_usage_without_chat_id_drops_guest_whose_access_was_revoked(env):
+    svc, _backend, _events = env
+    await svc.run_command(
+        vpn_protocol.ACTION_SET_ACCESS, {"chat_id": OTHER_CHAT, "allowed": False}
+    )
+    summary = await svc.run_command(vpn_protocol.ACTION_USAGE, {})
+    assert [row["chat_id"] for row in summary["chats"]] == [CHAT]
+    assert summary["node"]["reserved_bytes"] == GB
+
+
+async def test_usage_without_chat_id_still_shows_revoked_access_with_live_peers(env):
+    """Гостя с активными пирами, у которого сняли допуск, из сводки не прячем:
+    иначе он исчез бы вместе со своим расходом, и админ не понял бы, куда
+    делся трафик."""
+    svc, _backend, _events = env
+    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": OTHER_CHAT})
+    await svc.run_command(
+        vpn_protocol.ACTION_SET_ACCESS, {"chat_id": OTHER_CHAT, "allowed": False}
+    )
+    summary = await svc.run_command(vpn_protocol.ACTION_USAGE, {})
+    by_chat = {row["chat_id"]: row for row in summary["chats"]}
+    assert by_chat[OTHER_CHAT]["allowed"] is False
 
 
 async def test_resolve_request_approve_grants_quota(env):
@@ -521,6 +567,186 @@ async def test_backfill_server_fills_pre_stage39_peers(env):
 
 
 # ---------------------------------------------------------------------------
+# Допуск на сервер и постоянная личная квота (vpn_chat_access, 2026-09-18).
+# Таблица пер-серверная — у каждой ноды vpn своя БД, поэтому строка тут и
+# означает «гостю открыта эта локация на N ГБ».
+# ---------------------------------------------------------------------------
+
+
+async def test_issue_refused_without_access_leaves_no_trace(env):
+    """Отказ до генерации ключа: ни пира в БД, ни адреса из подсети, ни
+    ключа на интерфейсе — иначе реконсайлер снимал бы мусор через три минуты."""
+    svc, backend, _events = env
+    with pytest.raises(ProtoError) as exc:
+        await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": STRANGER})
+    assert exc.value.code == ERR_BAD_REQUEST
+    assert backend.peers == {}
+    cur = await svc._db.conn.execute(
+        "SELECT COUNT(*) AS n FROM vpn_peers WHERE chat_id = ?", (STRANGER,)
+    )
+    assert (await cur.fetchone())["n"] == 0
+
+
+async def test_reissue_refused_without_access_keeps_old_device(env):
+    """Перевыпуск снимает старый пир ДО выдачи нового — без проверки здесь
+    гость, которому закрыли доступ, остался бы вообще без устройства."""
+    svc, backend, _events = env
+    issued = await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
+    await svc.run_command(vpn_protocol.ACTION_SET_ACCESS, {"chat_id": CHAT, "allowed": False})
+    with pytest.raises(ProtoError):
+        await svc.run_command(
+            vpn_protocol.ACTION_REISSUE,
+            {"chat_id": CHAT, "device_label": issued["device_label"]},
+        )
+    cur = await svc._db.conn.execute(
+        "SELECT status FROM vpn_peers WHERE chat_id = ?", (CHAT,)
+    )
+    assert [row["status"] for row in await cur.fetchall()] == ["active"]
+    # На интерфейсе его сейчас нет (допуск снят), но ключ цел: вернут допуск —
+    # поднимется тот же, без перевыпуска конфига у гостя.
+    assert backend.peers == {}
+
+
+async def test_restored_access_brings_the_same_peer_back(env):
+    svc, backend, _events = env
+    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
+    pubkey = next(iter(backend.peers))
+    await svc.run_command(vpn_protocol.ACTION_SET_ACCESS, {"chat_id": CHAT, "allowed": False})
+    assert backend.peers == {}
+    await svc.run_command(vpn_protocol.ACTION_SET_ACCESS, {"chat_id": CHAT, "allowed": True})
+    assert list(backend.peers) == [pubkey]
+
+
+async def test_personal_base_overrides_config_quota(env):
+    svc, _backend, _events = env
+    await allow(svc, CHAT, base_gb=5)
+    usage = await svc.run_command(vpn_protocol.ACTION_USAGE, {"chat_id": CHAT})
+    assert usage["limit_bytes"] == 5 * GB
+    assert usage["base_limit_bytes"] == 5 * GB
+    assert usage["personal_base"] is True
+
+
+async def test_explicit_null_base_falls_back_to_config_quota(env):
+    svc, _backend, _events = env
+    await allow(svc, CHAT, base_gb=5)
+    await svc.run_command(
+        vpn_protocol.ACTION_SET_ACCESS, {"chat_id": CHAT, "allowed": True, "base_gb": None}
+    )
+    usage = await svc.run_command(vpn_protocol.ACTION_USAGE, {"chat_id": CHAT})
+    assert usage["limit_bytes"] == GB  # base_quota_gb фикстуры
+    assert usage["personal_base"] is False
+
+
+async def test_set_access_without_base_gb_keeps_personal_base(env):
+    """«Просто закрой доступ» не должно стирать выданные гигабайты — вернут
+    доступ, и цифру не придётся вспоминать."""
+    svc, _backend, _events = env
+    await allow(svc, CHAT, base_gb=5)
+    await svc.run_command(vpn_protocol.ACTION_SET_ACCESS, {"chat_id": CHAT, "allowed": False})
+    await svc.run_command(vpn_protocol.ACTION_SET_ACCESS, {"chat_id": CHAT, "allowed": True})
+    usage = await svc.run_command(vpn_protocol.ACTION_USAGE, {"chat_id": CHAT})
+    assert usage["limit_bytes"] == 5 * GB
+
+
+async def test_personal_base_adds_up_with_month_grants(env):
+    svc, _backend, _events = env
+    await allow(svc, CHAT, base_gb=5)
+    await svc.run_command(vpn_protocol.ACTION_SET_QUOTA, {"chat_id": CHAT, "bytes": 7 * GB})
+    usage = await svc.run_command(vpn_protocol.ACTION_USAGE, {"chat_id": CHAT})
+    # set_quota задаёт ИТОГ месяца компенсирующим грантом — поверх личной базы.
+    assert usage["limit_bytes"] == 7 * GB
+    assert usage["base_limit_bytes"] == 5 * GB
+
+
+async def test_grant_extra_ceiling_counts_from_personal_base(env):
+    """Потолок самообслуживания — от личной базы: иначе гость с 1 ГБ доливал
+    бы себе до потолка, посчитанного от общих 500."""
+    svc, _backend, _events = env
+    # warn_remaining_gb выше базы — окно самообслуживания открыто, проверяется
+    # именно потолок, а не «докупить можно только под конец квоты».
+    svc._cfg = svc._cfg.model_copy(
+        update={"self_ceiling_gb": 3, "extra_step_gb": 1, "warn_remaining_gb": 5}
+    )
+    await allow(svc, CHAT, base_gb=3)
+    with pytest.raises(ProtoError) as exc:
+        await svc.run_command(vpn_protocol.ACTION_GRANT_EXTRA, {"chat_id": CHAT})
+    assert exc.value.code == vpn_protocol.ERR_QUOTA_CEILING
+
+
+async def test_set_access_rejects_zero_base_gb(env):
+    svc, _backend, _events = env
+    with pytest.raises(ProtoError) as exc:
+        await svc.run_command(
+            vpn_protocol.ACTION_SET_ACCESS, {"chat_id": CHAT, "allowed": True, "base_gb": 0}
+        )
+    assert exc.value.code == ERR_BAD_REQUEST
+
+
+async def test_set_access_requires_allowed_flag(env):
+    svc, _backend, _events = env
+    with pytest.raises(ProtoError) as exc:
+        await svc.run_command(vpn_protocol.ACTION_SET_ACCESS, {"chat_id": CHAT})
+    assert exc.value.code == ERR_BAD_REQUEST
+
+
+async def test_no_quota_events_for_chat_without_access(env):
+    """Недопущенного квота не касается: blocked_at — это «исчерпал», а не «не
+    пущен». Иначе владелец, задав квоту до открытия доступа, слал бы ⛔️ ни за
+    что."""
+    svc, _backend, events = env
+    await svc.run_command(vpn_protocol.ACTION_SET_QUOTA, {"chat_id": STRANGER, "bytes": 0})
+    assert events == []
+    state = await svc._quota_state(STRANGER, "2026-09")
+    assert state["blocked_at"] is None
+
+
+async def test_describe_declares_set_access(env):
+    """Сервер валидирует action по describe — ветка в диспетчере без спеки
+    отвечала бы unknown_action."""
+    svc, _backend, _events = env
+    description = svc.describe()
+    assert vpn_protocol.ACTION_SET_ACCESS in description.capabilities
+    spec = next(a for a in description.actions if a.id == vpn_protocol.ACTION_SET_ACCESS)
+    assert {p.name for p in spec.params} == {"chat_id", "allowed", "base_gb"}
+
+
+async def test_get_state_advertises_access_control(env):
+    svc, _backend, _events = env
+    assert (await svc.get_state())["access_control"] is True
+
+
+async def test_backfill_access_admits_chats_with_active_peers(env):
+    """Обновление службы не должно выставить за дверь тех, кто уже пользуется
+    VPN: у кого есть живой пир — тот допущен де-факто."""
+    svc, _backend, _events = env
+    await svc._db.conn.execute("DELETE FROM vpn_chat_access")
+    await svc._db.conn.execute(
+        "INSERT INTO vpn_peers (chat_id, device_label, public_key, address, status, "
+        "created_at) VALUES (?, 'live', 'pk-live', '10.9.0.2', 'active', '2026-01-01')",
+        (CHAT,),
+    )
+    await svc._db.conn.execute(
+        "INSERT INTO vpn_peers (chat_id, device_label, public_key, address, status, "
+        "created_at) VALUES (?, 'gone', 'pk-gone', '10.9.0.3', 'revoked', '2026-01-01')",
+        (OTHER_CHAT,),
+    )
+    await svc._db.conn.commit()
+    await svc.backfill_access()
+    assert await svc._allowed_chats() == {CHAT}
+
+
+async def test_backfill_access_does_not_resurrect_revoked_access(env):
+    """Пиры при снятии допуска остаются active — бэкфилл не должен на
+    рестарте возвращать доступ, который владелец закрыл руками."""
+    svc, _backend, _events = env
+    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
+    await svc.run_command(vpn_protocol.ACTION_SET_ACCESS, {"chat_id": CHAT, "allowed": False})
+    await svc.backfill_access()
+    await svc.backfill_access()
+    assert CHAT not in await svc._allowed_chats()
+
+
+# ---------------------------------------------------------------------------
 # Второй транспорт — VLESS+Reality через xray (подэтап 39.0.x). Общая квота с
 # AmneziaWG: трафик обоих транспортов гостя суммируется против одного лимита.
 # ---------------------------------------------------------------------------
@@ -579,6 +805,8 @@ async def env_both(tmp_path):
         ),
     )
     svc = VpnService(Settings(vpn=cfg), db, awg, emit, reality_backend=xray)
+    await allow(svc, CHAT, OTHER_CHAT)
+    events.clear()
     yield svc, awg, xray, events
     await db.close()
 

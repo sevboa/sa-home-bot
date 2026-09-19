@@ -103,6 +103,10 @@ ACTION_REISSUE = "reissue"  # перевыпустить: старый пир с
 ACTION_REVOKE = "revoke"  # отозвать {chat_id, device_label}
 ACTION_USAGE = "usage"  # с chat_id — свой расход; без — сводка по всем (админ)
 ACTION_SET_QUOTA = "set_quota"  # админ: прямой грант месяца {chat_id, bytes}
+# Допуск на ЭТОТ сервер + постоянная личная база {chat_id, allowed, base_gb}.
+# Отличие от set_quota: тот задаёт целевой лимит ТЕКУЩЕГО месяца (1-го числа
+# сбрасывается на базу), а base_gb — саму базу, с которой месяц начинается.
+ACTION_SET_ACCESS = "set_access"
 ACTION_GRANT_EXTRA = "grant_extra"  # гость сам себе +extra_step_gb, пока не упёрся в потолок
 ACTION_REQUEST_EXTRA = "request_extra"  # заявка админу сверх потолка самообслуживания
 ACTION_RESOLVE_REQUEST = "resolve_request"  # админ: {request_id, approve}
