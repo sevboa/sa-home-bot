@@ -213,10 +213,34 @@ async def test_live_vpn_servers_reports_label_and_transports():
         },
     )
     assert await vpn_nodes.live_vpn_servers(link) == [
-        {"node": "jeeves", "label": "🇳🇱 Нидерланды", "transports": ["awg", "reality"]},
+        {
+            "node": "jeeves",
+            "label": "🇳🇱 Нидерланды",
+            "transports": ["awg", "reality"],
+            # Нода проверок не прислала (старая версия) — пустой список,
+            # пикер просто нарисует кнопку без индикатора.
+            "check": [],
+        },
         # label пуст — карточка подставит id ноды
-        {"node": "wooster", "label": "", "transports": ["reality"]},
+        {"node": "wooster", "label": "", "transports": ["reality"], "check": []},
     ]
+
+
+async def test_live_vpn_servers_passes_check_rollup_through():
+    """Индикатор доступности (39.0.7(f)) едет из get_state службы в пикер как
+    есть — bot/vpn_nodes ничего в нём не считает."""
+    rollup = [{"server": "jeeves", "transport": "awg", "status": "partial", "observers": 2}]
+    link = ServiceStateLink(
+        _two_vpn_nodes(),
+        _VPN_PEERS,
+        {
+            "jeeves": {"label": "🇳🇱", "transports": ["awg"], "check": rollup},
+            "wooster": {"label": "🇺🇸", "transports": ["reality"]},
+        },
+    )
+    servers = {s["node"]: s for s in await vpn_nodes.live_vpn_servers(link)}
+    assert servers["jeeves"]["check"] == rollup
+    assert servers["wooster"]["check"] == []
 
 
 async def test_live_vpn_servers_skips_unreachable_service():

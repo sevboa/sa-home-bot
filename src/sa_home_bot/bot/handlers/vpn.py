@@ -56,6 +56,7 @@ from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.vpn_apk import deliver_apk
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecret, PendingVpnSecrets
 from sa_home_bot.config import Settings
+from sa_home_bot.domain import vpn_check
 from sa_home_bot.proto.messages import ERR_UNKNOWN_ACTION, Address, ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
@@ -83,6 +84,26 @@ _TRANSPORT_LABEL = {
 # Отличает её и от голого issue (value=None), и от «забрать выданное» (f_<токен>).
 _TRANSPORT_PICK_PREFIX = "t_"
 
+# Порядок транспортов везде, где их перечисляют рядом (индикатор, пикер):
+# VLESS первым — он нужен гостям в РФ, с него и начинают выбирать.
+_TRANSPORT_ORDER = (vpn_protocol.TRANSPORT_REALITY, vpn_protocol.TRANSPORT_AWG)
+
+# Индикатор доступности по данным чекеров (39.0.7(f), vpn/service.py::
+# _check_rollup). Трёхцветный по решению владельца 2026-09-18: 🟢 — сервер
+# видят все наблюдатели, 🟠 — часть (для кого-то он уже заблокирован), 🔴 —
+# никто. Виден ВСЕМ гостям, а не только админу за «🛰 Проверка сети»:
+# «почему не подключается» — первый вопрос гостя, и ответ на него должен
+# быть на самой карточке.
+_CHECK_ICON = {
+    vpn_check.OK: "🟢",
+    vpn_check.PARTIAL: "🟠",
+    vpn_check.ALERTING: "🔴",
+}
+_CHECK_LEGEND = (
+    "🟠 — доступен не отовсюду (где-то уже блокируют), 🔴 — не отвечает ни "
+    "одному наблюдателю."
+)
+
 
 def _is_private(chat_id: int) -> bool:
     return chat_id > 0
@@ -108,6 +129,59 @@ def _device_line(device: dict) -> str:
     transport = device.get("transport")
     tag = f" · {_TRANSPORT_LABEL.get(transport, transport)}" if transport else ""
     return f"• {html.escape(device['device_label'])}{tag}{seen}"
+
+
+def _check_icons(server: dict) -> dict[str, str]:
+    """``transport → 🟢/🟠/🔴`` для одного сервера.
+
+    Пустой результат — проверок по нему нет (нода старая, пробники ещё не
+    отчитались или все отчёты протухли, см. vpn/service.py::CHECK_STALE_FACTOR).
+    Тогда индикатора нет вовсе: молчание честнее выдуманного зелёного.
+    """
+    return {
+        row["transport"]: _CHECK_ICON[row["status"]]
+        for row in (server.get("check") or [])
+        if row.get("status") in _CHECK_ICON and row.get("transport")
+    }
+
+
+def _sorted_transports(transports: list[str]) -> list[str]:
+    """Известные — в порядке _TRANSPORT_ORDER, незнакомые (нода новее бота) —
+    следом, как пришли: показать их всё равно лучше, чем потерять."""
+    known = [t for t in _TRANSPORT_ORDER if t in transports]
+    return known + [t for t in transports if t not in _TRANSPORT_ORDER]
+
+
+def _health_line(server: dict) -> str:
+    """Строка индикаторов сервера: «🛰 VLESS (Reality) 🟢 · AmneziaWG 🔴».
+    Пусто, если чекеры про этот сервер ещё ничего не сказали."""
+    icons = _check_icons(server)
+    if not icons:
+        return ""
+    transports = _sorted_transports(list(server.get("transports") or icons.keys()))
+    parts = [
+        f"{_TRANSPORT_LABEL.get(transport, transport)} {icons[transport]}"
+        for transport in transports
+        if transport in icons
+    ]
+    return f"🛰 {' · '.join(parts)}" if parts else ""
+
+
+def _suffix(icon: str) -> str:
+    """Индикатор хвостом к тексту кнопки — или ничего, когда его нет."""
+    return f" {icon}" if icon else ""
+
+
+def _server_icon(server: dict) -> str:
+    """Один индикатор на всю локацию — для кнопки пикера, где на разбивку по
+    транспортам места нет. Сводим те же значения тем же доменным правилом
+    (все ok → 🟢, все alerting → 🔴, вразнобой → 🟠), что и наблюдателей."""
+    statuses = [
+        row["status"] for row in (server.get("check") or []) if row.get("status") in _CHECK_ICON
+    ]
+    if not statuses:
+        return ""
+    return _CHECK_ICON[vpn_check.rollup_status(statuses)]
 
 
 def _is_allowed(server: dict) -> bool:
@@ -146,6 +220,12 @@ def _usage_text(servers: list[dict], *, show_access: bool = False) -> str:
             lines.append(f"<b>{html.escape(_server_label(server))}</b>: {quota}")
         else:
             lines.append(f"📶 <b>VPN</b>: {quota}")
+        # Доступность по чекерам (39.0.7(f)) — сразу под квотой локации:
+        # гость должен видеть «сервер жив, но из моей страны не виден» до
+        # того, как начнёт грешить на своё устройство.
+        health = _health_line(server)
+        if health:
+            lines.append(health)
         if show_access and not _is_allowed(server):
             lines.append("🔒 Доступ на эту локацию не открыт.")
         if server.get("blocked"):
@@ -155,6 +235,11 @@ def _usage_text(servers: list[dict], *, show_access: bool = False) -> str:
             lines.append("")
             lines.append("Устройства:")
         lines.extend(_device_line(device) for device in devices)
+    # Легенду показываем, только когда есть что объяснять: при всех зелёных
+    # она была бы шумом на каждой карточке.
+    if any(icon != _CHECK_ICON[vpn_check.OK] for s in servers for icon in _check_icons(s).values()):
+        lines.append("")
+        lines.append(_CHECK_LEGEND)
     return "\n".join(lines)
 
 
@@ -261,16 +346,13 @@ def _card_keyboard(
                 callback_data=vpn_admin_view.guests_cb(0),
             )
         ]
-        # Проверка сети — только там, где есть awg: пробник ходит через
-        # awg-туннель в netns (vpn_check/service.py).
-        check_node = next(
-            (
-                server.get("node")
-                for server in servers
-                if vpn_protocol.TRANSPORT_AWG in (server.get("transports") or [])
-            ),
-            None,
-        )
+        # Проверка сети — у любого живого vpn-инстанса (39.0.7(f)): состояние
+        # проверок реплицировано на все живые (vpn_check/service.py::
+        # _run_and_report фанаутит отчёт), а пробник умеет и reality, не только
+        # awg-туннель в netns. Старый гейт «нужен сервер с awg» прятал кнопку
+        # целиком, стоило упасть jeeves, хотя wooster жив и всё знает — тот же
+        # класс окаменевшего гейта, что уже чинили для кнопки прокси.
+        check_node = next((server.get("node") for server in servers if server.get("node")), None)
         if check_node is not None:
             admin_row.append(
                 InlineKeyboardButton(
@@ -301,28 +383,45 @@ def _card_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-# Обе ссылки в строке текстом (не длинным URL): решение пользователя
-# 2026-08-04, "на аппстор обе и на гугл плей обе" — по магазину, а не по
-# приложению, чтобы у AmneziaWG остался явный официальный путь на iOS
-# (сайдлоада там нет вовсе).
-def _check_status_text(states: list[dict], *, pending: bool = False) -> str:
+def _check_status_text(
+    states: list[dict], *, rollup: list[dict] | None = None, pending: bool = False
+) -> str:
+    """Админский экран проверок: сводный цвет пары (сервер, транспорт) и под
+    ним — что видит каждый наблюдатель по отдельности. Разбивка нужна ровно
+    затем, чтобы отличить блокировку в конкретной стране (кто-то видит, кто-то
+    нет) от настоящей смерти сервера (не видит никто)."""
     lines = ["🛰 <b>VPN — проверка доступности</b>"]
     if not states:
         lines.append("")
         lines.append("Пока нет ни одной проверки — нажмите «Запустить проверку».")
     else:
-        lines.append("")
-        for row in sorted(states, key=lambda r: (r["node"], r["target"])):
-            icon = "🔴" if row["status"] == "alerting" else "🟢"
-            latency = row.get("last_latency_ms")
-            latency_note = f", {latency} мс" if latency is not None else ""
-            error_note = (
-                f" — {html.escape(str(row['last_error']))}" if row.get("last_error") else ""
+        pair_status = {
+            (row.get("server"), row.get("transport")): row.get("status")
+            for row in (rollup or [])
+        }
+        grouped: dict[tuple[str, str], list[dict]] = {}
+        for row in states:
+            grouped.setdefault((row.get("server") or "?", row.get("transport") or "?"), []).append(
+                row
             )
+        for (server, transport), rows in sorted(grouped.items()):
+            lines.append("")
+            head_icon = _CHECK_ICON.get(pair_status.get((server, transport), ""), "")
+            label = _TRANSPORT_LABEL.get(transport, transport)
             lines.append(
-                f"{icon} <code>{html.escape(row['node'])}</code> — "
-                f"{html.escape(row['target'])}{latency_note}{error_note}"
+                f"<b>{html.escape(server)}</b> · {html.escape(label)}{_suffix(head_icon)}"
             )
+            for row in sorted(rows, key=lambda r: (r["node"], r["target"])):
+                icon = "🔴" if row["status"] == vpn_check.ALERTING else "🟢"
+                latency = row.get("last_latency_ms")
+                latency_note = f", {latency} мс" if latency is not None else ""
+                error_note = (
+                    f" — {html.escape(str(row['last_error']))}" if row.get("last_error") else ""
+                )
+                lines.append(
+                    f"{icon} <code>{html.escape(row['node'])}</code> — "
+                    f"{html.escape(row['target'])}{latency_note}{error_note}"
+                )
     if pending:
         lines.append("")
         lines.append(
@@ -399,6 +498,10 @@ def _store_row(emoji: str, store: str, vpn_url: str, wg_url: str) -> str:
     )
 
 
+# Обе ссылки в строке текстом (не длинным URL): решение пользователя
+# 2026-08-04, "на аппстор обе и на гугл плей обе" — по магазину, а не по
+# приложению, чтобы у AmneziaWG остался явный официальный путь на iOS
+# (сайдлоада там нет вовсе).
 def _apk_links_text(config: Settings) -> str:
     cfg = config.vpn
     return (
@@ -481,7 +584,11 @@ def _server_picker_keyboard(servers: list[dict]) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
-                text=_server_label(server),
+                # Индикатор прямо на кнопке (39.0.7(f)): выбор локации — это
+                # ровно тот момент, когда «а этот сервер вообще доступен?»
+                # решает дело; на кнопке места на разбивку по транспортам
+                # нет, поэтому один сводный цвет (_server_icon).
+                text=f"{_server_label(server)}{_suffix(_server_icon(server))}",
                 callback_data=commands.action_callback(
                     vpn_protocol.ACTION_ISSUE, service=SERVICE, node_id=server["node"]
                 ),
@@ -501,18 +608,20 @@ def _server_picker_keyboard(servers: list[dict]) -> InlineKeyboardMarkup:
 
 
 def _transport_picker_keyboard(
-    transports: list[str], node_id: str | None = None
+    transports: list[str], node_id: str | None = None, icons: dict[str, str] | None = None
 ) -> InlineKeyboardMarkup:
-    order = [vpn_protocol.TRANSPORT_REALITY, vpn_protocol.TRANSPORT_AWG]
+    """``icons`` — индикатор на транспорт (39.0.7(f)); без него кнопки те же,
+    просто без цвета: нода могла и не прислать `check` (старая версия)."""
+    icons = icons or {}
     rows: list[list[InlineKeyboardButton]] = []
-    for transport in order:
+    for transport in _TRANSPORT_ORDER:
         if transport not in transports:
             continue
         hint = " — для РФ" if transport == vpn_protocol.TRANSPORT_REALITY else ""
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{_TRANSPORT_LABEL[transport]}{hint}",
+                    text=f"{_TRANSPORT_LABEL[transport]}{hint}{_suffix(icons.get(transport, ''))}",
                     callback_data=commands.action_callback(
                         vpn_protocol.ACTION_ISSUE,
                         f"{_TRANSPORT_PICK_PREFIX}{transport}",
@@ -1005,15 +1114,19 @@ async def handle_action(
         # Шаг 2: у выбранной ноды два транспорта — показать выбор технологии.
         if action_id == vpn_protocol.ACTION_ISSUE and chosen_transport is None and not value:
             node_transports: list[str] = []
+            transport_icons: dict[str, str] = {}
             with contextlib.suppress(ServiceUnavailableError, ProtoError):
                 state = await node_link.get_state(dst=dst)
                 node_transports = state.get("transports") or []
+                transport_icons = _check_icons(state)
             if len(node_transports) > 1:
                 await callback.answer()
                 with contextlib.suppress(TelegramBadRequest):
                     await callback.message.edit_text(
                         _PICK_TRANSPORT_TEXT,
-                        reply_markup=_transport_picker_keyboard(node_transports, dst.node),
+                        reply_markup=_transport_picker_keyboard(
+                            node_transports, dst.node, transport_icons
+                        ),
                     )
                 return
 
@@ -1111,7 +1224,9 @@ async def handle_action(
         await callback.answer()
         with contextlib.suppress(TelegramBadRequest):
             await callback.message.edit_text(
-                _check_status_text(result.get("states") or []),
+                _check_status_text(
+                    result.get("states") or [], rollup=result.get("rollup") or []
+                ),
                 reply_markup=_check_status_keyboard(),
             )
         return
@@ -1140,12 +1255,14 @@ async def handle_action(
         # отдельным вызовом и помечаем текст как «в процессе» — результаты
         # ещё старые, до следующего нажатия «↻ Обновить».
         states: list[dict] = []
+        rollup: list[dict] = []
         with contextlib.suppress(ProtoError, ServiceUnavailableError):
             status = await node_link.command(vpn_protocol.ACTION_CHECK_STATUS, {}, dst=dst)
             states = status.get("states") or []
+            rollup = status.get("rollup") or []
         with contextlib.suppress(TelegramBadRequest):
             await callback.message.edit_text(
-                _check_status_text(states, pending=True),
+                _check_status_text(states, rollup=rollup, pending=True),
                 reply_markup=_check_status_keyboard(),
             )
         return

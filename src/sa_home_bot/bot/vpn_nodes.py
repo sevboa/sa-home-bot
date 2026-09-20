@@ -80,6 +80,10 @@ async def live_vpn_servers(node_link: ServiceLink) -> list[dict]:
             "node": node_id,
             "label": state.get("label") or "",
             "transports": state.get("transports") or [],
+            # Индикатор доступности по транспортам (39.0.7(f)) — пикеру
+            # локации есть что показать рядом с кнопкой. Старая нода поля не
+            # шлёт: пустой список читается как «проверок нет», без индикатора.
+            "check": state.get("check") or [],
         }
 
     states = await asyncio.gather(*(_one(node_id) for node_id in nodes))

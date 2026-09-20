@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest_asyncio
 
 from sa_home_bot.config import Settings, VpnConfig
@@ -11,7 +13,7 @@ from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.proto.messages import Address
 from sa_home_bot.vpn import protocol as vpn_protocol
-from sa_home_bot.vpn.service import VpnService
+from sa_home_bot.vpn.service import CHECK_STALE_FACTOR, VpnService
 
 TARGET = "https://1.1.1.1"
 
@@ -147,7 +149,9 @@ async def test_check_status_reflects_latest_state(env):
     assert states[0]["target"] == TARGET
     assert states[0]["status"] == "alerting"
     assert states[0]["consecutive_count"] == 0  # сброс на самом переходе
-    assert status["rollup"] == [{"server": "jeeves", "transport": "awg", "status": "alerting"}]
+    assert status["rollup"] == [
+        {"server": "jeeves", "transport": "awg", "status": "alerting", "observers": 1}
+    ]
 
 
 async def test_check_status_rollup_partial_when_observers_disagree(env):
@@ -158,7 +162,48 @@ async def test_check_status_rollup_partial_when_observers_disagree(env):
     await _report(svc, "alfred", False, "blocked", server="wooster", transport="reality")
     await _report(svc, "alfred", False, "blocked", server="wooster", transport="reality")
     status = await svc.run_command(vpn_protocol.ACTION_CHECK_STATUS, {})
-    assert status["rollup"] == [{"server": "wooster", "transport": "reality", "status": "partial"}]
+    assert status["rollup"] == [
+        {"server": "wooster", "transport": "reality", "status": "partial", "observers": 2}
+    ]
+
+
+async def test_usage_carries_own_check_rollup(env):
+    """Индикатор для карточки /vpn едет вместе с расходом (39.0.7(f)): своя
+    пара — в ответе, чужие — нет, про них спросят их собственный сервер."""
+    svc, _, _ = env
+    await _report(svc, "alfred", True, server=svc._node, transport="awg")
+    await _report(svc, "alfred", False, "blocked", server="wooster", transport="reality")
+    usage = await svc.run_command(vpn_protocol.ACTION_USAGE, {"chat_id": 42})
+    assert usage["check"] == [
+        {"server": svc._node, "transport": "awg", "status": "ok", "observers": 1}
+    ]
+
+
+async def test_get_state_carries_own_check_rollup(env):
+    """Пикер локации строится из get_state (bot/vpn_nodes.live_vpn_servers) —
+    индикатор должен быть и там, не только в usage."""
+    svc, _, _ = env
+    await _report(svc, "alfred", True, server=svc._node, transport="awg")
+    state = await svc.get_state()
+    assert state["check"] == [
+        {"server": svc._node, "transport": "awg", "status": "ok", "observers": 1}
+    ]
+
+
+async def test_stale_observer_drops_out_of_rollup(env):
+    """Наблюдатель замолчал (его нода умерла) — его последний «ok» не должен
+    вечно красить индикатор зелёным: строка старше CHECK_STALE_FACTOR циклов
+    из сводки выпадает. Сырые states при этом остаются — админу видно всё."""
+    svc, _, _ = env
+    await _report(svc, "alfred", True, server="jeeves", transport="awg")
+    stale = (
+        datetime.now(UTC) - timedelta(seconds=svc._cfg.check_interval_s * CHECK_STALE_FACTOR + 60)
+    ).isoformat()
+    await svc._db.conn.execute("UPDATE vpn_check_states SET last_seen_at = ?", (stale,))
+    await svc._db.conn.commit()
+    status = await svc.run_command(vpn_protocol.ACTION_CHECK_STATUS, {})
+    assert status["rollup"] == []
+    assert len(status["states"]) == 1
 
 
 async def test_check_now_dispatches_via_node_link(env):

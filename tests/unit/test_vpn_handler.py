@@ -212,7 +212,8 @@ async def test_card_keyboard_offers_revoke_button_per_device():
 
 async def test_card_keyboard_shows_proxy_on_reality_only_node_with_proxy():
     """Прокси Telegram живёт на VPS сам по себе: на reality-only ноде он есть
-    (wooster, 2026-09-06), а вот проверка сети без awg-туннеля невозможна."""
+    (wooster, 2026-09-06). Проверка сети там тоже есть — с 39.0.7 пробник
+    умеет reality, а состояние проверок реплицировано на все живые vpn."""
     keyboard = vpn_handlers._card_keyboard(
         [_server(transports=["reality"], proxy_available=True)],
         is_admin=True,
@@ -220,8 +221,113 @@ async def test_card_keyboard_shows_proxy_on_reality_only_node_with_proxy():
     )
     flat = " ".join(b.text for row in keyboard.inline_keyboard for b in row)
     assert "Прокси Telegram" in flat
-    assert "Проверка сети" not in flat
+    assert "Проверка сети" in flat
     assert "Все гости" in flat
+
+
+def _check(transport: str, status: str, *, server: str = "jeeves", observers: int = 2) -> dict:
+    return {"server": server, "transport": transport, "status": status, "observers": observers}
+
+
+def test_card_shows_transport_health_indicators():
+    """39.0.7(f): гость видит доступность по транспортам прямо в карточке —
+    VLESS первым, как и в пикере технологии."""
+    text = vpn_handlers._usage_text(
+        [
+            _server(
+                transports=["awg", "reality"],
+                check=[_check("awg", "alerting"), _check("reality", "ok")],
+            )
+        ]
+    )
+    assert "🛰 VLESS (Reality) 🟢 · AmneziaWG 🔴" in text
+
+
+def test_card_shows_partial_as_orange_with_legend():
+    text = vpn_handlers._usage_text(
+        [_server(transports=["reality"], check=[_check("reality", "partial")])]
+    )
+    assert "VLESS (Reality) 🟠" in text
+    assert "где-то уже блокируют" in text
+
+
+def test_card_omits_legend_when_everything_is_green():
+    text = vpn_handlers._usage_text(
+        [_server(transports=["reality"], check=[_check("reality", "ok")])]
+    )
+    assert "🟢" in text
+    assert "где-то уже блокируют" not in text
+
+
+def test_card_without_check_data_shows_no_indicator():
+    """Проверок ещё не было (или все протухли) — рисовать нечего: выдуманный
+    зелёный хуже отсутствия индикатора."""
+    text = vpn_handlers._usage_text([_server(transports=["awg"], check=[])])
+    assert "🛰" not in text
+    assert "🟢" not in text
+
+
+def test_server_picker_marks_location_with_worst_case_icon():
+    """На кнопке места на разбивку нет — один сводный цвет: один транспорт
+    видно, другой нет → 🟠 на всю локацию."""
+    keyboard = vpn_handlers._server_picker_keyboard(
+        [
+            {
+                "node": "jeeves",
+                "label": "🇳🇱 Нидерланды",
+                "transports": ["awg", "reality"],
+                "check": [_check("awg", "alerting"), _check("reality", "ok")],
+            },
+            {"node": "wooster", "label": "🇺🇸 США", "transports": ["reality"], "check": []},
+        ]
+    )
+    texts = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert "🇳🇱 Нидерланды 🟠" in texts
+    assert "🇺🇸 США" in texts  # без данных — без индикатора
+
+
+def test_transport_picker_marks_each_technology():
+    keyboard = vpn_handlers._transport_picker_keyboard(
+        ["awg", "reality"],
+        "jeeves",
+        {"awg": "🔴", "reality": "🟢"},
+    )
+    texts = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert texts[0] == "VLESS (Reality) — для РФ 🟢"
+    assert texts[1] == "AmneziaWG 🔴"
+
+
+def test_check_status_text_groups_observers_under_pair():
+    """Админский экран: сводный цвет пары (сервер, транспорт) и под ним — кто
+    именно видит проблему. Это и отличает блокировку в одной стране от смерти
+    сервера."""
+    states = [
+        {
+            "node": "alfred",
+            "server": "wooster",
+            "transport": "reality",
+            "target": "https://1.1.1.1",
+            "status": "alerting",
+            "last_latency_ms": None,
+            "last_error": "timeout",
+        },
+        {
+            "node": "jeeves",
+            "server": "wooster",
+            "transport": "reality",
+            "target": "https://1.1.1.1",
+            "status": "ok",
+            "last_latency_ms": 12,
+            "last_error": None,
+        },
+    ]
+    text = vpn_handlers._check_status_text(
+        states, rollup=[_check("reality", "partial", server="wooster")]
+    )
+    assert "<b>wooster</b> · VLESS (Reality) 🟠" in text
+    assert "🔴 <code>alfred</code>" in text
+    assert "🟢 <code>jeeves</code>" in text
+    assert "12 мс" in text
 
 
 async def test_card_keyboard_hides_proxy_when_not_configured():

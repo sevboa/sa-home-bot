@@ -42,7 +42,7 @@ import random
 import socket
 import uuid as uuidlib
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -138,6 +138,15 @@ NODE_SENTINEL_CHAT_ID = 0
 # (Supervisor, LeaseManager и т.п.) ради двух строковых констант.
 NODE_SERVICE = "node"
 ACTION_TRIGGER_PEERS = "trigger_peers"
+
+# Сколько циклов проверки строка vpn_check_states считается свежей (39.0.7(f)).
+# Наблюдатель может замолчать не сказав ни слова — его нода умерла, ушла из
+# роя или потеряла интернет; последняя запись при этом остаётся в таблице
+# навсегда. Держать её в индикаторе /vpn нельзя: зелёный от мертвеца хуже,
+# чем отсутствие индикатора. Три интервала, а не один: пропущенный тик —
+# обычный джиттер (пробник поднимает тоннель на время цикла), мигать из-за
+# него незачем.
+CHECK_STALE_FACTOR = 3
 
 # Имя устройства (решение пользователя 2026-08-04) больше не вводит ни
 # человек, ни модель — служба сама выбирает случайное слово из этого пула
@@ -457,6 +466,10 @@ class VpnService:
             # Транспорты этой ноды — бот по ним решает, предлагать ли выбор
             # (awg/reality) в карточке «➕ Новое устройство».
             "transports": list(self._transports),
+            # То же, что в usage: индикатор по транспортам (39.0.7(f)) — здесь
+            # он нужен пикерам локации/технологии, которые строятся из
+            # get_state (bot/vpn_nodes.py::live_vpn_servers), а не из usage.
+            "check": await self._check_rollup(server=self._node),
             # Умеет ли эта нода допуск (set_access). Флаг в get_state, а не
             # в describe: бот и так дёргает состояние на каждый экран
             # (bot/vpn_nodes.py::live_vpn_servers), а лишний describe ради
@@ -943,6 +956,14 @@ class VpnService:
                 # Транспорты этой ноды — карточка /vpn по ним решает, показывать
                 # ли выбор технологии при «➕ Новое устройство».
                 "transports": list(self._transports),
+                # Индикатор доступности этого сервера по транспортам
+                # (39.0.7(f)): едет вместе с расходом, чтобы карточка /vpn
+                # не делала ради него отдельный RPC — она и так фанаутит
+                # usage по всем живым серверам. Каждый сервер отчитывается
+                # про СЕБЯ: запись в vpn_check_states реплицирована на все
+                # живые инстансы, так что своя БД знает, как эту ноду видят
+                # чужие наблюдатели.
+                "check": await self._check_rollup(server=self._node),
                 "proxy_available": bool(self._cfg.mtg_public_host),
             }
         # Сводка для админа. «Резервируют» трафик ноды все допущенные — даже
@@ -1616,14 +1637,44 @@ class VpnService:
             }
             for r in rows
         ]
+        return {"states": states, "rollup": await self._check_rollup()}
+
+    async def _check_rollup(self, *, server: str | None = None) -> list[dict[str, Any]]:
+        """Сводка «как эти (сервер, транспорт) видят наблюдатели» — для
+        индикатора в /vpn (39.0.7(f)).
+
+        ``server`` сужает выборку до одной ноды: карточка спрашивает у
+        каждого живого сервера про него самого (поле ``check`` в ответах
+        ``usage``/``get_state``), и лишние чужие пары ей там ни к чему.
+
+        Протухшие строки отбрасываются (``CHECK_STALE_FACTOR``), поэтому
+        пара, про которую давно никто не отчитывался, из сводки просто
+        исчезает — бот покажет её без индикатора, а не выдуманным цветом.
+        """
+        stale_before = (
+            _now() - timedelta(seconds=self._cfg.check_interval_s * CHECK_STALE_FACTOR)
+        ).isoformat()
+        sql = "SELECT server, transport, status FROM vpn_check_states WHERE last_seen_at >= ?"
+        params: list[Any] = [stale_before]
+        if server is not None:
+            sql += " AND server = ?"
+            params.append(server)
+        cur = await self._db.conn.execute(sql, params)
         by_pair: dict[tuple[str, str], list[str]] = {}
-        for s in states:
-            by_pair.setdefault((s["server"], s["transport"]), []).append(s["status"])
-        rollup = [
-            {"server": server, "transport": transport, "status": rollup_status(statuses)}
-            for (server, transport), statuses in by_pair.items()
+        for row in await cur.fetchall():
+            by_pair.setdefault((row["server"], row["transport"]), []).append(row["status"])
+        return [
+            {
+                "server": pair_server,
+                "transport": transport,
+                "status": rollup_status(statuses),
+                # Сколько наблюдателей стоит за этим цветом — админской
+                # панели («🛰 Проверка сети») есть что показать подробно, а
+                # карточке хватает знать, что наблюдатель вообще не один.
+                "observers": len(statuses),
+            }
+            for (pair_server, transport), statuses in sorted(by_pair.items())
         ]
-        return {"states": states, "rollup": rollup}
 
     # --- APK ---
 
