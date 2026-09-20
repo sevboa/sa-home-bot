@@ -722,14 +722,24 @@ class VpnConfig(BaseModel):
 
     # --- Мониторинг доступности VPN (служба vpn_check, найдена нужда
     # 2026-08-17: NAT-правило на jeeves тихо пропало на 4 дня, узнали только
-    # когда понадобился доступ из Казахстана). check_targets — что проверять
-    # (нейтральный сайт + api.telegram.org, т.к. это то, что реально нужно
-    # пользователю и что блокируется избирательно); check_nodes — с каких
-    # нод (jeeves — локальный сигнал «сервер вообще жив», alfred — реальная
-    # точка в Казахстане; список расширяется без правки кода). Пороги
-    # гистерезиса — см. domain/vpn_check.py::reconcile_vpn_check.
+    # когда понадобился доступ из Казахстана). check_targets — что проверять:
+    # нейтральный сайт (1.1.1.1, живость самого туннеля) + категории,
+    # которые в РФ и похожих юрисдикциях блокируются избирательно и по-
+    # разному для разных транспортов (решение владельца 2026-09-20 — матрица
+    # должна показывать, что именно недоступно, а не только «сервер жив»);
+    # check_nodes — с каких нод (jeeves — локальный сигнал «сервер вообще
+    # жив», alfred — реальная точка в Казахстане; список расширяется без
+    # правки кода). Пороги гистерезиса — см.
+    # domain/vpn_check.py::reconcile_vpn_check.
     check_targets: list[str] = Field(
-        default_factory=lambda: ["https://1.1.1.1", "https://api.telegram.org"]
+        default_factory=lambda: [
+            "https://1.1.1.1",
+            "https://api.telegram.org",
+            "https://www.google.com",
+            "https://www.youtube.com",
+            "https://www.instagram.com",
+            "https://discord.com",
+        ]
     )
     check_nodes: list[str] = Field(default_factory=lambda: ["jeeves", "alfred"])
 

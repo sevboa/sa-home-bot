@@ -330,6 +330,62 @@ def test_check_status_text_groups_observers_under_pair():
     assert "12 мс" in text
 
 
+def test_check_status_text_collapses_multiple_targets_per_observer():
+    """Несколько целей на одного наблюдателя — одна строка, не строка на
+    каждую пару наблюдатель×цель (иначе матрица из 6 целей тонет в простыне)."""
+    states = [
+        {
+            "node": "alfred",
+            "server": "jeeves",
+            "transport": "awg",
+            "target": "https://1.1.1.1",
+            "status": "ok",
+            "last_latency_ms": 631,
+            "last_error": None,
+        },
+        {
+            "node": "alfred",
+            "server": "jeeves",
+            "transport": "awg",
+            "target": "https://api.telegram.org",
+            "status": "ok",
+            "last_latency_ms": 628,
+            "last_error": None,
+        },
+        {
+            "node": "alfred",
+            "server": "jeeves",
+            "transport": "awg",
+            "target": "https://www.youtube.com",
+            "status": "alerting",
+            "last_latency_ms": None,
+            "last_error": "curl exit 28",
+        },
+    ]
+    text = vpn_handlers._check_status_text(
+        states, rollup=[_check("awg", "alerting", server="jeeves")]
+    )
+    # Ровно одна строка на наблюдателя, а не три.
+    assert text.count("<code>alfred</code>") == 1
+    assert "1.1.1.1 631 мс" in text
+    assert "telegram 628 мс" in text
+    assert "youtube — таймаут" in text
+    # Хоть одна цель упала — иконка строки красная, несмотря на два зелёных ответа.
+    assert "🔴 <code>alfred</code>" in text
+
+
+def test_target_label_shortens_known_hosts():
+    assert vpn_handlers._target_label("https://1.1.1.1") == "1.1.1.1"
+    assert vpn_handlers._target_label("https://api.telegram.org") == "telegram"
+    assert vpn_handlers._target_label("https://www.youtube.com") == "youtube"
+
+
+def test_short_error_maps_curl_timeout():
+    assert vpn_handlers._short_error("curl exit 28") == "таймаут"
+    assert vpn_handlers._short_error("http 403") == "http 403"
+    assert vpn_handlers._short_error(None) == "ошибка"
+
+
 async def test_card_keyboard_hides_proxy_when_not_configured():
     keyboard = vpn_handlers._card_keyboard(
         [_server(transports=["reality"], proxy_available=False)],

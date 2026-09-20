@@ -383,13 +383,44 @@ def _card_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _target_label(url: str) -> str:
+    """Короткое имя цели для плотной строки: «api.telegram.org» → «telegram»,
+    «www.google.com» → «google», голый IP («1.1.1.1») — как есть. Выводится
+    из самого URL, а не из хардкод-словаря — список целей (``check_targets``)
+    растёт правкой конфига, без правки бота."""
+    host = url.split("://", 1)[-1].split("/", 1)[0]
+    host = host.removeprefix("www.")
+    parts = host.split(".")
+    if len(parts) >= 2 and not all(p.isdigit() for p in parts):
+        return parts[-2]
+    return host
+
+
+def _short_error(error: object) -> str:
+    """Однословный повод не грузить строку сырым выхлопом curl/системы —
+    подробности всё равно ушли в БД (``last_error``), сюда — только чтобы
+    отличить «не достучались» от «сервер ответил, но плохо»."""
+    text = str(error or "").strip()
+    if not text:
+        return "ошибка"
+    low = text.lower()
+    if "exit 28" in low or "timeout" in low or "timed out" in low:
+        return "таймаут"
+    if low.startswith("http "):
+        return text
+    first = text.splitlines()[0]
+    return first if len(first) <= 40 else first[:37] + "…"
+
+
 def _check_status_text(
     states: list[dict], *, rollup: list[dict] | None = None, pending: bool = False
 ) -> str:
     """Админский экран проверок: сводный цвет пары (сервер, транспорт) и под
-    ним — что видит каждый наблюдатель по отдельности. Разбивка нужна ровно
-    затем, чтобы отличить блокировку в конкретной стране (кто-то видит, кто-то
-    нет) от настоящей смерти сервера (не видит никто)."""
+    ним — одна строка на наблюдателя со всеми целями сразу (не строка на
+    каждую пару наблюдатель×цель — при матрице из нескольких целей это
+    быстро тонет). Разбивка по наблюдателю нужна ровно затем, чтобы отличить
+    блокировку в конкретной стране (кто-то видит, кто-то нет) от настоящей
+    смерти сервера (не видит никто)."""
     lines = ["🛰 <b>VPN — проверка доступности</b>"]
     if not states:
         lines.append("")
@@ -411,16 +442,28 @@ def _check_status_text(
             lines.append(
                 f"<b>{html.escape(server)}</b> · {html.escape(label)}{_suffix(head_icon)}"
             )
-            for row in sorted(rows, key=lambda r: (r["node"], r["target"])):
-                icon = "🔴" if row["status"] == vpn_check.ALERTING else "🟢"
-                latency = row.get("last_latency_ms")
-                latency_note = f", {latency} мс" if latency is not None else ""
-                error_note = (
-                    f" — {html.escape(str(row['last_error']))}" if row.get("last_error") else ""
+            by_node: dict[str, list[dict]] = {}
+            for row in rows:
+                by_node.setdefault(row["node"], []).append(row)
+            for node in sorted(by_node):
+                node_rows = sorted(by_node[node], key=lambda r: r["target"])
+                node_icon = (
+                    "🔴"
+                    if any(r["status"] == vpn_check.ALERTING for r in node_rows)
+                    else "🟢"
                 )
+                parts = []
+                for row in node_rows:
+                    target_label = html.escape(_target_label(row["target"]))
+                    if row["status"] == vpn_check.ALERTING:
+                        error = html.escape(_short_error(row.get("last_error")))
+                        parts.append(f"{target_label} — {error}")
+                    else:
+                        latency = row.get("last_latency_ms")
+                        latency_note = f" {latency} мс" if latency is not None else ""
+                        parts.append(f"{target_label}{latency_note}")
                 lines.append(
-                    f"{icon} <code>{html.escape(row['node'])}</code> — "
-                    f"{html.escape(row['target'])}{latency_note}{error_note}"
+                    f"  {node_icon} <code>{html.escape(node)}</code> — " + ", ".join(parts)
                 )
     if pending:
         lines.append("")
