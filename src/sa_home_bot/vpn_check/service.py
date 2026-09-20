@@ -387,11 +387,34 @@ class VpnCheckService:
         return ["sudo", "-n", ip_path, "netns", "exec", slot.netns, *curl]
 
     async def _check_one(self, slot: ProbeSlot, target: str) -> dict[str, Any]:
+        """Одна цель: HEAD, с откатом на GET там, где HEAD не принимают.
+
+        Проверке нужен только код ответа, а GET заставляет curl скачать тело
+        целиком (``-o /dev/null`` его выбрасывает, но принять обязан). Пока
+        целями были 1.1.1.1 и api.telegram.org — оба отдают пустой редирект —
+        это ничего не стоило; с добавлением google/youtube/instagram/discord
+        (2026-09-20) каждый слот потянул ~1.5 МБ за цикл. Замер тогда же:
+        youtube через туннель 1247 мс / 870 КБ на GET против 657 мс / 0 КБ на
+        HEAD, и это ×8 слотов ×12 циклов в час — порядка 100 ГБ в месяц
+        трафика ПО VPN-серверам, т.е. прямо в их лимит (`node_limit_gb`).
+        """
+        result = await self._curl_code(slot, target, head=True)
+        # 405/501 — «метод не поддержан»: цель жива, просто HEAD не умеет.
+        # Это не отказ сервиса, повторяем обычным GET (и платим за тело).
+        if result.get("http_code") in {"405", "501"}:
+            result = await self._curl_code(slot, target, head=False)
+        # http_code — сугубо внутренний признак для решения выше: запись
+        # отчёта (_check_slot) разворачивает этот словарь как есть, лишним
+        # ключам там делать нечего.
+        result.pop("http_code", None)
+        return result
+
+    async def _curl_code(self, slot: ProbeSlot, target: str, *, head: bool) -> dict[str, Any]:
         timeout_s = self._cfg.check_timeout_s
-        cmd = self._curl_argv(
-            slot,
-            ["-s", "-m", str(timeout_s), "-o", "/dev/null", "-w", "%{http_code}", target],
-        )
+        args = ["-s", "-m", str(timeout_s), "-o", "/dev/null", "-w", "%{http_code}"]
+        if head:
+            args.insert(0, "-I")
+        cmd = self._curl_argv(slot, [*args, target])
         started = time.monotonic()
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -410,7 +433,14 @@ class VpnCheckService:
             return {"ok": False, "ms": latency_ms, "error": err}
         code = stdout.decode(errors="replace").strip()
         ok = code.startswith(("2", "3"))
-        return {"ok": ok, "ms": latency_ms, "error": None if ok else f"http {code or '?'}"}
+        return {
+            "ok": ok,
+            "ms": latency_ms,
+            "error": None if ok else f"http {code or '?'}",
+            # Только для решения «откатиться ли на GET» — в отчёт не уходит
+            # (_check_slot собирает запись из фиксированных полей).
+            "http_code": code,
+        }
 
     async def _egress_gate(self, slot: ProbeSlot) -> str | None:
         """None — пробник реально гонит трафик через VPN-туннель. Иначе —

@@ -603,3 +603,44 @@ async def test_run_and_report_multiple_targets(monkeypatch):
     )
     assert _result_for(node_link, "https://1.1.1.1")["ok"] is True
     assert _result_for(node_link, "https://api.telegram.org")["ok"] is False
+
+
+# --- HEAD вместо GET: проверке нужен код ответа, не тело (2026-09-20) ---
+
+
+async def test_target_is_probed_with_head_not_get(monkeypatch):
+    """GET заставлял curl скачивать тело целиком — youtube.com это ~870 КБ на
+    каждый слот каждые 5 минут, прямо в лимит трафика VPN-сервера."""
+    calls = _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
+    node_link = _FakeNodeLink()
+    await _service(node_link)._run_and_report(PROBE_SERVER, [_slot()], ["https://1.1.1.1"])
+    curl_calls = _target_curl_calls(calls)
+    assert len(curl_calls) == 1
+    assert "-I" in curl_calls[0]
+    assert _result_for(node_link, "https://1.1.1.1")["ok"] is True
+
+
+async def test_head_rejected_falls_back_to_get(monkeypatch):
+    """405 — цель жива, просто не принимает HEAD: повторяем GET, иначе
+    получили бы ложный «недоступно» на ровном месте."""
+    codes = iter([b"405", b"200"])  # первый вызов (HEAD) → 405, второй (GET) → 200
+    calls = _patch_curl(monkeypatch, {"https://strict.example": (b"", b"", 0)})
+
+    async def _next_code(*cmd, stdout=None, stderr=None):
+        calls.append(cmd)
+        if "curl" in cmd and cmd[-1] == "https://strict.example":
+            return _FakeProc(next(codes), b"", 0)
+        if any("awg-quick" in c for c in cmd):
+            return _FakeProc(b"", b"", 0)
+        if "route" in cmd and "get" in cmd:
+            return _FakeProc(b"1.1.1.1 dev awg-probe0 src 10.9.0.14\n", b"", 0)
+        return _FakeProc(b"203.0.113.7" if "netns" in cmd else b"198.51.100.9", b"", 0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _next_code)
+    node_link = _FakeNodeLink()
+    await _service(node_link)._run_and_report(PROBE_SERVER, [_slot()], ["https://strict.example"])
+    curl_calls = _target_curl_calls(calls)
+    assert ["-I" in c for c in curl_calls] == [True, False]  # HEAD, затем откат на GET
+    result = _result_for(node_link, "https://strict.example")
+    assert result["ok"] is True
+    assert "http_code" not in result  # внутренний признак в отчёт не уходит
