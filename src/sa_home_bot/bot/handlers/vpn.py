@@ -365,17 +365,18 @@ def _card_keyboard(
         rows.append(admin_row)
         # Прокси Telegram от VPN-транспорта не зависит — он живёт на том же
         # VPS сам по себе (на wooster поднят при reality-only раскладке).
-        proxy_node = next(
-            (server.get("node") for server in servers if server.get("proxy_available")),
-            None,
-        )
-        if proxy_node is not None:
+        # Кнопка без node_id — обработчик фанаутит ACTION_PROXY_LINK по ВСЕМ
+        # живым серверам с прокси и присылает ссылку каждого (решение
+        # пользователя 2026-09-20: раньше показывался только один — первый
+        # живой сервер списка, — второй сервер приходилось выцарапывать
+        # отдельным запросом к ноде).
+        if any(server.get("proxy_available") for server in servers):
             rows.append(
                 [
                     InlineKeyboardButton(
                         text="✈️ Прокси Telegram",
                         callback_data=commands.action_callback(
-                            vpn_protocol.ACTION_PROXY_LINK, service=SERVICE, node_id=proxy_node
+                            vpn_protocol.ACTION_PROXY_LINK, service=SERVICE
                         ),
                     ),
                 ]
@@ -507,9 +508,14 @@ def _check_status_keyboard() -> InlineKeyboardMarkup:
 
 
 def _proxy_text(result: dict) -> str:
+    label = result.get("label")
+    heading = "✈️ <b>Прокси Telegram (mtg)</b>"
+    if label:
+        heading += f" · {html.escape(str(label))}"
+    heading += " — общая ссылка, один секрет на всех.\n"
     return (
-        "✈️ <b>Прокси Telegram (mtg)</b> — общая ссылка, один секрет на всех.\n"
-        f"Ссылка: {html.escape(result['tg_link'])}\n"
+        heading
+        + f"Ссылка: {html.escape(result['tg_link'])}\n"
         f"t.me: {html.escape(result['t_me_link'])}\n\n"
         f"Сервер: <code>{html.escape(str(result['host']))}</code>\n"
         f"Порт: <code>{result['port']}</code>\n"
@@ -519,14 +525,17 @@ def _proxy_text(result: dict) -> str:
     )
 
 
-def _proxy_keyboard() -> InlineKeyboardMarkup:
+def _proxy_keyboard(node_id: str | None = None) -> InlineKeyboardMarkup:
+    # node_id привязывает «Сменить секрет» к тому же серверу, чей результат
+    # выше — секрет хранится в vpn.sqlite каждой ноды по отдельности, без
+    # node_id кнопка ушла бы на первую живую ноду (не обязательно эту).
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="🔁 Сменить секрет (старая ссылка перестанет работать)",
                     callback_data=commands.action_callback(
-                        vpn_protocol.ACTION_PROXY_ROTATE_SECRET, service=SERVICE
+                        vpn_protocol.ACTION_PROXY_ROTATE_SECRET, service=SERVICE, node_id=node_id
                     ),
                 )
             ]
@@ -1311,28 +1320,52 @@ async def handle_action(
         return
 
     if action_id == vpn_protocol.ACTION_PROXY_LINK:
-        dst = await _need_dst()
-        if dst is None:
-            return
-        try:
-            result = await node_link.command(vpn_protocol.ACTION_PROXY_LINK, {}, dst=dst)
-        except ProtoError as exc:
-            await callback.answer(f"⚠️ {exc.message}", show_alert=True)
-            return
-        except ServiceUnavailableError:
-            await callback.answer("⚠️ Служба VPN недоступна.", show_alert=True)
-            return
+        # node_id из callback'а — только у старой кнопки/повторного действия
+        # после смены секрета (тогда бьём в конкретный сервер). Новая кнопка
+        # «✈️ Прокси Telegram» шлёт callback без node_id — фанаутим ACTION_
+        # PROXY_LINK по всем живым серверам с прокси и присылаем ссылку
+        # КАЖДОГО (решение пользователя 2026-09-20: раньше отвечал только
+        # первый живой сервер списка).
+        if node_id:
+            dst = await _need_dst()
+            if dst is None:
+                return
+            try:
+                result = await node_link.command(vpn_protocol.ACTION_PROXY_LINK, {}, dst=dst)
+            except ProtoError as exc:
+                await callback.answer(f"⚠️ {exc.message}", show_alert=True)
+                return
+            except ServiceUnavailableError:
+                await callback.answer("⚠️ Служба VPN недоступна.", show_alert=True)
+                return
+            results = [result]
+        else:
+            results = await vpn_nodes.fanout(node_link, vpn_protocol.ACTION_PROXY_LINK, {})
+            if not results:
+                await callback.answer(
+                    "⚠️ Прокси Telegram сейчас не настроен ни на одном сервере.",
+                    show_alert=True,
+                )
+                return
         await callback.answer()
-        qr_b64 = result.get("qr_png_b64")
-        if qr_b64:
-            await notifier.send_photo(
-                chat_id,
-                base64.b64decode(qr_b64),
-                filename="proxy-qr.png",
-                caption="✈️ QR прокси Telegram — отсканируйте в приложении.",
-                message_thread_id=callback.message.message_thread_id,
+        for result in results:
+            qr_b64 = result.get("qr_png_b64")
+            if qr_b64:
+                label = result.get("label")
+                caption = "✈️ QR прокси Telegram"
+                if label:
+                    caption += f" · {label}"
+                caption += " — отсканируйте в приложении."
+                await notifier.send_photo(
+                    chat_id,
+                    base64.b64decode(qr_b64),
+                    filename="proxy-qr.png",
+                    caption=caption,
+                    message_thread_id=callback.message.message_thread_id,
+                )
+            await callback.message.answer(
+                _proxy_text(result), reply_markup=_proxy_keyboard(result.get("node"))
             )
-        await callback.message.answer(_proxy_text(result), reply_markup=_proxy_keyboard())
         return
 
     if action_id == vpn_protocol.ACTION_PROXY_ROTATE_SECRET:
@@ -1350,7 +1383,7 @@ async def handle_action(
         await callback.answer("Секрет сменён")
         await callback.message.answer(
             "🔁 Старая ссылка перестала работать.\n\n" + _proxy_text(result),
-            reply_markup=_proxy_keyboard(),
+            reply_markup=_proxy_keyboard(result.get("node")),
         )
         return
 

@@ -2250,6 +2250,15 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
     if dst is None:
         return "недоступно: VPN сейчас не поднят ни на одной ноде роя"
 
+    if action == vpn_protocol.ACTION_PROXY_LINK and not args.get("server"):
+        # Без явного «server» отдаём ссылку СРАЗУ со всех серверов, где
+        # настроен прокси (решение пользователя 2026-09-20) — а не только с
+        # первой живой ноды, как выбрал бы resolve_vpn_dst выше.
+        results = await vpn_nodes.fanout(ctx.node_link, action, {})
+        if not results:
+            return "недоступно: прокси Telegram сейчас не настроен ни на одном сервере"
+        return json.dumps(results, ensure_ascii=False)
+
     if action in (vpn_protocol.ACTION_ISSUE, vpn_protocol.ACTION_REISSUE):
         # issue не принимает имя устройства вовсе (решение пользователя
         # 2026-08-04) — служба сама выбирает случайное английское слово
@@ -2593,10 +2602,11 @@ _DECL_VPN: dict[str, Any] = {
             "(тогда используй request_extra — заявка админу, необязательный "
             "gb — сколько ГБ); apk — прислать ссылки на официальное "
             "приложение AmneziaWG (App Store, Google Play, сайт) и, если "
-            "файл .apk уже кэширован, сразу сам файл; proxy_link — ссылка на "
-            "прокси Telegram (mtg, один общий секрет для всех — НЕ VPN, "
-            "только сам Telegram, ставится прямо в его настройках без "
-            "стороннего приложения) плюс SOCKS5-адрес для ботов; "
+            "файл .apk уже кэширован, сразу сам файл; proxy_link — ссылка(и) на "
+            "прокси Telegram (mtg — НЕ VPN, только сам Telegram, ставится "
+            "прямо в его настройках без стороннего приложения; без server "
+            "отдаёт список со всех серверов, где прокси настроен, — покажи "
+            "пользователю все) плюс SOCKS5-адрес для ботов; "
             "proxy_rotate_secret — сменить секрет прокси (старая ссылка "
             "сразу перестаёт работать у ВСЕХ, кто её получил — используй, "
             "только если явно попросили сменить/отозвать); proxy_usage — "

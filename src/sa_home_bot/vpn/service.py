@@ -1271,6 +1271,11 @@ class VpnService:
             "secret": secret,
             "socks_host": self._cfg.socks_host,
             "socks_port": self._cfg.socks_port,
+            # Нода/метка локации — чтобы вызывающий (fanout по нескольким
+            # серверам, bot/vpn_nodes.py) мог подписать, чей это прокси:
+            # секрет у каждой ноды свой (своя vpn.sqlite:proxy_state).
+            "node": self._node,
+            "label": self._cfg.location,
         }
 
     async def _proxy_rotate_secret(self, args: dict[str, Any]) -> dict[str, Any]:
