@@ -167,6 +167,35 @@ async def test_check_status_rollup_partial_when_observers_disagree(env):
     ]
 
 
+async def test_rollup_counts_observers_not_rows(env):
+    """observers — число НАБЛЮДАТЕЛЕЙ, а не строк: у каждого своя строка на
+    каждую цель из check_targets (живая находка на деплое 0.109.0)."""
+    svc, _, _ = env
+    for target in ("https://1.1.1.1", "https://api.telegram.org"):
+        for node in ("alfred", "wooster"):
+            await svc.run_command(
+                vpn_protocol.ACTION_REPORT_CHECK,
+                {
+                    "node": node,
+                    "results": [
+                        {
+                            "server": "jeeves",
+                            "transport": "awg",
+                            "target": target,
+                            "ok": True,
+                            "ms": 10,
+                            "error": None,
+                        }
+                    ],
+                },
+            )
+    status = await svc.run_command(vpn_protocol.ACTION_CHECK_STATUS, {})
+    assert len(status["states"]) == 4  # 2 наблюдателя × 2 цели
+    assert status["rollup"] == [
+        {"server": "jeeves", "transport": "awg", "status": "ok", "observers": 2}
+    ]
+
+
 async def test_usage_carries_own_check_rollup(env):
     """Индикатор для карточки /vpn едет вместе с расходом (39.0.7(f)): своя
     пара — в ответе, чужие — нет, про них спросят их собственный сервер."""

@@ -1654,26 +1654,34 @@ class VpnService:
         stale_before = (
             _now() - timedelta(seconds=self._cfg.check_interval_s * CHECK_STALE_FACTOR)
         ).isoformat()
-        sql = "SELECT server, transport, status FROM vpn_check_states WHERE last_seen_at >= ?"
+        sql = (
+            "SELECT node, server, transport, status FROM vpn_check_states WHERE last_seen_at >= ?"
+        )
         params: list[Any] = [stale_before]
         if server is not None:
             sql += " AND server = ?"
             params.append(server)
         cur = await self._db.conn.execute(sql, params)
-        by_pair: dict[tuple[str, str], list[str]] = {}
+        by_pair: dict[tuple[str, str], list[tuple[str, str]]] = {}
         for row in await cur.fetchall():
-            by_pair.setdefault((row["server"], row["transport"]), []).append(row["status"])
+            by_pair.setdefault((row["server"], row["transport"]), []).append(
+                (row["node"], row["status"])
+            )
         return [
             {
                 "server": pair_server,
                 "transport": transport,
-                "status": rollup_status(statuses),
-                # Сколько наблюдателей стоит за этим цветом — админской
-                # панели («🛰 Проверка сети») есть что показать подробно, а
-                # карточке хватает знать, что наблюдатель вообще не один.
-                "observers": len(statuses),
+                # Цвет — по ВСЕМ строкам пары: недостижимая цель у одного
+                # наблюдателя уже делает картину неоднородной (partial), даже
+                # если вторая цель у него же отвечает.
+                "status": rollup_status([status for _node, status in rows]),
+                # А вот считаем именно НАБЛЮДАТЕЛЕЙ, а не строки: у каждого их
+                # столько, сколько целей в check_targets, и «observers: 4» при
+                # двух живых наблюдателях (живая находка на деплое 0.109.0)
+                # вводит в заблуждение кого угодно, включая будущего себя.
+                "observers": len({node for node, _status in rows}),
             }
-            for (pair_server, transport), statuses in sorted(by_pair.items())
+            for (pair_server, transport), rows in sorted(by_pair.items())
         ]
 
     # --- APK ---
