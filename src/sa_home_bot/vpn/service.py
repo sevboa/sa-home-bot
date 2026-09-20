@@ -458,11 +458,28 @@ class VpnService:
             "SELECT COUNT(*) AS n FROM vpn_peers WHERE status = 'active'"
         )
         row = await cur.fetchone()
+        # Публичный ключ awg-сервера (кэширован, меняется только с
+        # пересборкой VPS). Не секрет — он и так лежит в конфиге каждого
+        # гостя; нужен пробникам, чтобы заметить, что их конфиг протух
+        # (node/fixups.py::_probe_conf_stale). Живой случай 2026-09-20:
+        # jeeves переустановили 18.09, конфиг пробника на wooster остался с
+        # 01.09 со старым ключом — фикс считал «файл на месте, всё применено»
+        # и не перевыпускал, а awg wooster→jeeves молча не поднимался месяц.
+        server_pubkey: str | None = None
+        if self._has(TRANSPORT_AWG):
+            # Ключ читается у живого интерфейса (awg show) — на ноде, где awg
+            # почему-то не поднят, это не повод валить весь get_state: его
+            # дёргает бот на каждый экран.
+            try:
+                server_pubkey = await self._server_public_key()
+            except Exception:  # noqa: BLE001 — любая беда с awg тут не фатальна
+                log.warning("vpn: не удалось прочитать публичный ключ awg-сервера", exc_info=True)
         return {
             "node": self._node,
             "service": SERVICE_NAME,
             "active_peers": row["n"] if row else 0,
             "label": self._cfg.location,
+            "server_public_key": server_pubkey,
             # Транспорты этой ноды — бот по ним решает, предлагать ли выбор
             # (awg/reality) в карточке «➕ Новое устройство».
             "transports": list(self._transports),

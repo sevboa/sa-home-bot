@@ -870,6 +870,64 @@ def _probe_scaffold_apply(slot: vpn_probe_state.ProbeSlot) -> None:
     _sudo(["systemctl", "enable", "--now", unit_path.name])
 
 
+# Одиночный пробник прежней схемы (до 39.0.7(d)): вечный awg-туннель в
+# единственном netns `vpn-probe` с veth `vprobe-veth0` на 10.200.200.1/30.
+# Новая схема нарезает подсети с начала диапазона, так что ПЕРВЫЙ её слот
+# получает тот же 10.200.200.1/30 — и на хосте оказывается два интерфейса с
+# одним адресом. Живой инцидент 2026-09-20: ядро выбирало старый (мёртвый)
+# `vprobe-veth0`, хендшейк уходил и сервер отвечал, но ответ утекал в
+# заброшенный netns — awg jeeves↔wooster «таймаутил» при исправном сервере,
+# конфиге и NAT. Reality-слот (вторая /30) при этом работал, что и сбивало
+# с толку. Поэтому legacy сносим явно, а не оставляем «пусть лежит».
+VPN_PROBE_LEGACY_UNIT = "sa-home-vpn-probe.service"
+VPN_PROBE_LEGACY_NETNS = "vpn-probe"
+VPN_PROBE_LEGACY_VETH = "vprobe-veth0"
+
+
+def _probe_legacy_present() -> bool:
+    if _privileged_exists(VPN_PROBE_SCAFFOLD_UNIT_DIR / VPN_PROBE_LEGACY_UNIT):
+        return True
+    netns = subprocess.run(["sudo", "-n", "ip", "netns", "list"], capture_output=True, text=True)
+    if netns.returncode == 0 and any(
+        line.split()[0] == VPN_PROBE_LEGACY_NETNS for line in netns.stdout.splitlines() if line
+    ):
+        return True
+    link = subprocess.run(
+        ["ip", "link", "show", VPN_PROBE_LEGACY_VETH], capture_output=True, text=True
+    )
+    return link.returncode == 0
+
+
+def _probe_legacy_cleanup() -> None:
+    unit_path = VPN_PROBE_SCAFFOLD_UNIT_DIR / VPN_PROBE_LEGACY_UNIT
+    if _privileged_exists(unit_path):
+        # disable гасит и сам туннель (ExecStop = awg-quick down), поэтому
+        # сначала он, и только потом снос netns.
+        _sudo(["systemctl", "disable", "--now", VPN_PROBE_LEGACY_UNIT])
+        _sudo(["rm", "-f", str(unit_path)])
+        _sudo(["systemctl", "daemon-reload"])
+    # Удаление netns уносит и ns-конец veth, а с ним хостовый (пара живёт
+    # целиком или никак). Оба вызова терпимы к отсутствию цели: часть могли
+    # снести руками раньше.
+    subprocess.run(["sudo", "ip", "netns", "del", VPN_PROBE_LEGACY_NETNS], capture_output=True)
+    subprocess.run(["sudo", "ip", "link", "del", VPN_PROBE_LEGACY_VETH], capture_output=True)
+    if _probe_legacy_present():
+        raise FixupError(
+            f"остатки старого пробника ({VPN_PROBE_LEGACY_NETNS}/{VPN_PROBE_LEGACY_VETH}) "
+            "не убрались — снесите вручную, иначе первый слот новой схемы будет глухим"
+        )
+
+
+def make_vpn_probe_legacy_cleanup_fixup() -> Fixup:
+    return Fixup(
+        id="vpn-probe-legacy-cleanup",
+        title="Снести одиночный пробник прежней схемы (netns vpn-probe, vprobe-veth0)",
+        needed=_vpn_check_needed,
+        check=lambda: not _probe_legacy_present(),
+        apply=_probe_legacy_cleanup,
+    )
+
+
 def make_vpn_probe_scaffold_fixup(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> Fixup:
     return Fixup(
         id=f"vpn-probe-scaffold-{slot.server}-{slot.transport}",
@@ -1131,7 +1189,64 @@ async def _fetch_probe_config(settings: Settings, slot: vpn_probe_state.ProbeSlo
     )
 
 
-def _probe_conf_check(slot: vpn_probe_state.ProbeSlot) -> bool:
+async def _fetch_server_public_key(
+    settings: Settings, slot: vpn_probe_state.ProbeSlot
+) -> str | None:
+    """Публичный ключ awg-сервера ``slot.server`` — из ``get_state`` его
+    службы (``vpn/service.py::get_state``). ``None`` — сервер недоступен,
+    поле не пришло (нода старее 39.0.7(f)) или ключ пуст: выяснить не
+    удалось, и вызывающий обязан считать конфиг валидным, а не протухшим."""
+    endpoint = resolve_endpoint(settings.node.socket)
+    client = ProtoClient(endpoint, token=settings.swarm.token)
+    try:
+        await client.connect()
+        dst = await vpn_nodes.resolve_vpn_dst(client, server=slot.server)
+        if dst is None or dst.node != slot.server:
+            return None
+        state = await client.get_state(dst=dst)
+    except Exception:  # noqa: BLE001 — сеть/протокол: не выяснили, и всё
+        return None
+    finally:
+        await client.close()
+    key = state.get("server_public_key")
+    return str(key) if key else None
+
+
+def _conf_peer_public_key(config_text: str) -> str | None:
+    for line in config_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("PublicKey"):
+            _, _, value = stripped.partition("=")
+            return value.strip() or None
+    return None
+
+
+def _probe_conf_stale(
+    settings: Settings, slot: vpn_probe_state.ProbeSlot, config_text: str
+) -> bool:
+    """Выдан ли конфиг пробника ДРУГИМ (прошлым) воплощением сервера.
+
+    Живой случай 2026-09-20: jeeves переустановили 18.09 — новый keypair и
+    новые параметры обфускации, — а ``awg-probe0.conf`` на wooster остался с
+    01.09. Хендшейк с таким конфигом сервер не узнаёт, awg wooster→jeeves
+    молча лежал, и ``nodectl fix`` его не чинил: файл на месте, ``Table`` нет
+    — «уже применено». Сверяем ``[Peer] PublicKey`` с тем, что сервер
+    отдаёт про себя сейчас.
+
+    Осторожно в одну сторону: любая неясность (сервер недоступен, поля нет,
+    ключ в файле не нашёлся) — НЕ протух. Иначе ``fix`` при лежащем сервере
+    снёс бы рабочий конфиг и остался без нового.
+    """
+    peer_key = _conf_peer_public_key(config_text)
+    if peer_key is None:
+        return False
+    server_key = asyncio.run(_fetch_server_public_key(settings, slot))
+    if server_key is None:
+        return False
+    return peer_key != server_key
+
+
+def _probe_conf_check(slot: vpn_probe_state.ProbeSlot, settings: Settings | None = None) -> bool:
     if slot.transport == "awg":
         conf_path = _probe_conf_path(slot)
         if not _privileged_exists(conf_path):
@@ -1146,7 +1261,12 @@ def _probe_conf_check(slot: vpn_probe_state.ProbeSlot) -> bool:
         # подменяя собой суть проверки (инцидент 2026-08-31).
         # ``_prepare_probe_conf`` её вырезает — но апгрейд с более старой
         # версии её не трогал бы сам.
-        return not any(ln.strip().startswith("Table") for ln in current_conf.splitlines())
+        if any(ln.strip().startswith("Table") for ln in current_conf.splitlines()):
+            return False
+        # Конфиг от прошлого воплощения сервера (пересобрали VPS — сменился
+        # keypair) внешне безупречен, но хендшейк с ним не проходит. Сеть тут
+        # уместна: check() зовёт только явный `nodectl fix`, не старт ноды.
+        return not (settings is not None and _probe_conf_stale(settings, slot, current_conf))
     # reality: UUID клиента фиксирован в момент выдачи (``_fetch_probe_
     # config``) — тут только сверяем, что файл существует, валиден и несёт
     # ОЖИДАЕМЫЙ socks_port (мог смениться при пересчёте индексов слотов).
@@ -1171,12 +1291,15 @@ def _probe_conf_apply(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> No
             if _which("awg-quick") is None:
                 raise FixupError("awg-quick не нашёлся после сборки amneziawg-tools")
         conf_path = _probe_conf_path(slot)
-        if _privileged_exists(conf_path):
-            # Конфиг уже выдан этим сервером раньше — чиним на месте (сносим
-            # DNS/Table), не выпрашивая новый пир заново (лишний пир в БД
-            # vpn@<сервер> нам не нужен).
-            raw_config_text = _read_privileged(conf_path)
+        existing = _read_privileged(conf_path) if _privileged_exists(conf_path) else None
+        if existing is not None and not _probe_conf_stale(settings, slot, existing):
+            # Конфиг уже выдан ЭТИМ ЖЕ воплощением сервера — чиним на месте
+            # (сносим DNS/Table), не выпрашивая новый пир заново (лишний пир в
+            # БД vpn@<сервер> нам не нужен).
+            raw_config_text = existing
         else:
+            # Файла нет, либо он от прошлого воплощения сервера (пересобрали
+            # VPS) — просим новый, старый перезапишется.
             try:
                 raw_config_text = asyncio.run(_fetch_probe_config(settings, slot))
             except Exception as exc:  # noqa: BLE001 — сеть/протокол сведены к одному диагнозу
@@ -1220,7 +1343,7 @@ def make_vpn_probe_tunnel_conf_fixup(settings: Settings, slot: vpn_probe_state.P
         id=f"vpn-probe-conf-{slot.server}-{slot.transport}",
         title=f"Получить и установить конфиг {slot.transport}-пробника к {slot.server}",
         needed=_vpn_check_needed,
-        check=lambda: _probe_conf_check(slot),
+        check=lambda: _probe_conf_check(slot, settings),
         apply=lambda: _probe_conf_apply(settings, slot),
     )
 
@@ -2144,6 +2267,9 @@ def build_fixups(settings: Settings) -> list[Fixup]:
         # только на то, что служба реально умеет поднимать.
         supported_slots = [s for s in slots if s.transport in _SUPPORTED_PROBE_TRANSPORTS]
         fixups += [
+            # Первым: пока legacy-netns жив, он держит ту же /30, что и первый
+            # слот новой схемы, и глушит его (см. VPN_PROBE_LEGACY_UNIT).
+            make_vpn_probe_legacy_cleanup_fixup(),
             make_vpn_probe_forwarding_fixup(settings, supported_slots),
             make_vpn_probe_forwarding_persist_fixup(settings, supported_slots),
             *(make_vpn_probe_scaffold_fixup(settings, slot) for slot in supported_slots),

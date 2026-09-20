@@ -1198,3 +1198,83 @@ def test_run_fixups_survives_check_raising_after_apply_too():
     failed = fixups_module.run_fixups([flaky, after])
     assert failed == ["flaky"]
     assert after_checked  # run не упал целиком — до "after" дошли
+
+
+# --- 39.0.7: протухший конфиг пробника и остатки старой схемы ---
+
+
+_AWG_PROBE_CONF = """[Interface]
+PrivateKey = cHJpdmF0ZS1rZXktZm9yLXRlc3RzLW5vdC1hLXJlYWwtMQ=
+Address = 10.9.0.20/32
+
+[Peer]
+PublicKey = c2VydmVyLWtleS1vbGQtaW5jYXJuYXRpb24tb2YtamVldmVz
+Endpoint = 78.31.250.224:51820
+AllowedIPs = 0.0.0.0/0
+"""
+
+
+def test_conf_peer_public_key_reads_peer_section():
+    assert (
+        fixups_module._conf_peer_public_key(_AWG_PROBE_CONF)
+        == "c2VydmVyLWtleS1vbGQtaW5jYXJuYXRpb24tb2YtamVldmVz"
+    )
+
+
+def test_conf_peer_public_key_none_without_peer():
+    assert fixups_module._conf_peer_public_key("[Interface]\nAddress = 10.9.0.20/32\n") is None
+
+
+def test_probe_conf_stale_when_server_rotated_its_key(monkeypatch):
+    """Живой случай 2026-09-20: VPS пересобрали, у сервера новый keypair, а
+    конфиг пробника остался с прошлым — хендшейк не проходит."""
+    monkeypatch.setattr(
+        fixups_module, "_fetch_server_public_key", _async_return("c2VydmVyLWtleS1ORVctamVldmVz")
+    )
+    stale = fixups_module._probe_conf_stale(_settings(["vpn_check"]), _slot(), _AWG_PROBE_CONF)
+    assert stale is True
+
+
+def test_probe_conf_not_stale_when_key_matches(monkeypatch):
+    monkeypatch.setattr(
+        fixups_module,
+        "_fetch_server_public_key",
+        _async_return("c2VydmVyLWtleS1vbGQtaW5jYXJuYXRpb24tb2YtamVldmVz"),
+    )
+    stale = fixups_module._probe_conf_stale(_settings(["vpn_check"]), _slot(), _AWG_PROBE_CONF)
+    assert stale is False
+
+
+def test_probe_conf_not_stale_when_server_unreachable(monkeypatch):
+    """Сервер лежит — ключ выяснить не у кого. Считать конфиг протухшим
+    нельзя: fix снёс бы рабочий файл и нового не получил."""
+    monkeypatch.setattr(fixups_module, "_fetch_server_public_key", _async_return(None))
+    stale = fixups_module._probe_conf_stale(_settings(["vpn_check"]), _slot(), _AWG_PROBE_CONF)
+    assert stale is False
+
+
+def _async_return(value):
+    async def _fake(settings, slot):
+        return value
+
+    return _fake
+
+
+def test_legacy_cleanup_fixup_is_satisfied_when_nothing_left(monkeypatch):
+    monkeypatch.setattr(fixups_module, "_probe_legacy_present", lambda: False)
+    assert fixups_module.make_vpn_probe_legacy_cleanup_fixup().check() is True
+
+
+def test_legacy_cleanup_fixup_demands_work_while_legacy_alive(monkeypatch):
+    monkeypatch.setattr(fixups_module, "_probe_legacy_present", lambda: True)
+    assert fixups_module.make_vpn_probe_legacy_cleanup_fixup().check() is False
+
+
+def test_legacy_cleanup_runs_before_scaffolds():
+    """Порядок важен: пока legacy-netns держит 10.200.200.0/30, первый слот
+    новой схемы глухой — ответы утекают в заброшенный netns."""
+    ids = [f.id for f in build_fixups(_settings(["vpn_check"]))]
+    assert "vpn-probe-legacy-cleanup" in ids
+    scaffolds = [i for i in ids if i.startswith("vpn-probe-scaffold-")]
+    if scaffolds:
+        assert ids.index("vpn-probe-legacy-cleanup") < ids.index(scaffolds[0])
