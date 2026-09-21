@@ -140,12 +140,7 @@ def power_commands() -> dict[str, list[str]]:
     return {
         ACTION_POWEROFF: ["systemctl", "poweroff"],
         ACTION_REBOOT: ["systemctl", "reboot"],
-        # hybrid-sleep, не голый suspend: пишет hibernate-образ на диск ПЕРЕД
-        # уходом в RAM-сон, поэтому реальная потеря питания во сне не роняет
-        # состояние — просто резюмится с диска при следующей загрузке.
-        # Требует resume= в кернел cmdline (см. GRUB) и своп не меньше
-        # используемой RAM — настроено на mycraft 2026-09-22.
-        ACTION_SUSPEND: ["systemctl", "hybrid-sleep"],
+        ACTION_SUSPEND: ["systemctl", "suspend"],
     }
 
 
@@ -1013,22 +1008,16 @@ class NodeService:
 
         Открытая SSH-сессия или живая tmux-сессия — вероятный признак того,
         что за машиной сейчас работают руками, не через Alfred
-        (config.py::NodeConfig.idle_poweroff).
-
-        Живая находка 2026-09-22: раньше здесь был ACTION_POWEROFF — машина
-        полностью выключалась и теряла состояние. Теперь ACTION_SUSPEND
-        (hybrid-sleep, см. power_commands()) — тот же эффект экономии
-        электричества, но с сохранностью на случай реального обрыва питания
-        во сне."""
+        (config.py::NodeConfig.idle_poweroff)."""
         if not self._idle_poweroff:
             return
         ssh, tmux = await self._blocking_sessions()
         if not ssh and not tmux:
-            self._schedule_power(ACTION_SUSPEND)
+            self._schedule_power(ACTION_POWEROFF)
             return
         descriptions = [s.describe() for s in ssh] + [f"tmux: {name}" for name in tmux]
         log.warning(
-            "%s: простой Alfred, но уход в сон отложен — %s",
+            "%s: простой Alfred, но выключение отложено — %s",
             self._node,
             ", ".join(descriptions),
         )
