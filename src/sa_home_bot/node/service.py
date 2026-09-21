@@ -1008,12 +1008,24 @@ class NodeService:
 
         Открытая SSH-сессия или живая tmux-сессия — вероятный признак того,
         что за машиной сейчас работают руками, не через Alfred
-        (config.py::NodeConfig.idle_poweroff)."""
+        (config.py::NodeConfig.idle_poweroff).
+
+        Живая находка 2026-09-22: было ACTION_POWEROFF. Пробовали заменить на
+        hybrid-sleep (пишет hibernate-образ на диск перед сном) — на mycraft
+        это стабильно роняло Tesla V100 с шины (nvidia-smi после пробуждения
+        отвечает "Unknown Error"), воспроизведено 5 из 5 раз, включая случаи
+        с полностью УСПЕШНОЙ записью образа — то есть ENOMEM/память были ни
+        при чём, ломает сам переход через глубокий ACPI S4. Обычный
+        ACTION_SUSPEND (s2idle) тот же прогон пережил 2 из 2 — используем
+        его: экономит электричество не хуже, быстрее будится, не пишет на
+        диск и не роняет GPU. Реальную потерю питания во сне это всё равно не
+        переживёт (ни один из режимов не пережил бы) — тут спасает только
+        ручной ребут, как и раньше."""
         if not self._idle_poweroff:
             return
         ssh, tmux = await self._blocking_sessions()
         if not ssh and not tmux:
-            self._schedule_power(ACTION_POWEROFF)
+            self._schedule_power(ACTION_SUSPEND)
             return
         descriptions = [s.describe() for s in ssh] + [f"tmux: {name}" for name in tmux]
         log.warning(
