@@ -858,7 +858,7 @@ async def test_maybe_auto_poweroff_idle_noop_when_disabled(monkeypatch):
     assert ran == []
 
 
-async def test_maybe_auto_poweroff_idle_powers_off_without_sessions(monkeypatch):
+async def test_maybe_auto_poweroff_idle_suspends_without_sessions(monkeypatch):
     import asyncio
 
     from sa_home_bot.node import service as service_module
@@ -885,7 +885,7 @@ async def test_maybe_auto_poweroff_idle_powers_off_without_sessions(monkeypatch)
     )
     await svc.maybe_auto_poweroff_idle()
     await asyncio.sleep(0.05)
-    assert ran == [["systemctl", "poweroff"]]
+    assert ran == [["systemctl", "hybrid-sleep"]]
     assert emitted == []
 
 
