@@ -529,6 +529,29 @@ def _person_age(person: PersonConfig, today: date) -> int | None:
     return today.year - birth.year - ((today.month, today.day) < (birth.month, birth.day))
 
 
+# Родительный падеж — та же форма, что уже используют факты memory
+# ("День рождения — 29 апреля", см. живые данные): "29 апреля", не "29 April"
+# и не "апрель 29". Только для _known_person_note ниже, отдельного модуля
+# под дату не заводим — используется в одном месте.
+_MONTHS_RU_GENITIVE = (
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+)
+
+
+def _person_birthday_ru(person: PersonConfig) -> str | None:
+    """«29 апреля» — день и месяц рождения (без года: год модель и так
+    получает как точный возраст через _person_age, а прямая дата рождения —
+    личные данные, которые не стоит подсвечивать лишний раз)."""
+    if not person.birth_date:
+        return None
+    try:
+        birth = date.fromisoformat(person.birth_date)
+    except ValueError:
+        return None
+    return f"{birth.day} {_MONTHS_RU_GENITIVE[birth.month - 1]}"
+
+
 # (субъект "он/она", предложный "у него/у неё", притяжательный "его/её" —
 # для "него"/"неё" совпадает с предложным только у мужского рода, поэтому
 # три отдельных формы, не выводим одну из другой).
@@ -563,6 +586,18 @@ def _known_person_note(person: PersonConfig) -> str | None:
     age = _person_age(person, date.today())
     if age is not None:
         parts.append(f"Точный возраст {subject} сейчас: {age} лет.")
+
+    # Живая находка 2026-09-23: возраст выше уже считался из birth_date, а
+    # сам день рождения (число и месяц) собеседнику не сообщался ни разу —
+    # на прямой вопрос «когда у меня день рождения» модель честно отвечала
+    # «не знаю», хотя дата всё это время лежала в конфиге. recall/граф тут
+    # не помогут в принципе: у ФИО-фактов в memory нет привязки «это ты,
+    # кто сейчас спрашивает» — а PersonConfig эту привязку уже делает через
+    # message.from_user (см. _find_known_person), это и есть источник
+    # истины для «моё»/«у меня».
+    birthday = _person_birthday_ru(person)
+    if birthday is not None:
+        parts.append(f"День рождения {subject}: {birthday}.")
 
     return " ".join(parts)
 

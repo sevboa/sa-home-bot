@@ -1105,12 +1105,24 @@ def test_known_person_note_includes_local_time_and_exact_age():
     assert "Москва" in note
     assert "часовой пояс" in note
     assert "лет" in note  # возраст посчитан, не None
+    assert "15 июня" in note  # живая находка 2026-09-23: сама дата, не только возраст
 
 
 def test_known_person_note_skips_age_line_when_birth_date_unknown():
     person = _person(birth_date="")
     note = ai_flow._known_person_note(person)
     assert "Точный возраст" not in note
+    assert "День рождения" not in note
+
+
+def test_person_birthday_ru_formats_day_and_month():
+    person = _person(birth_date="1990-04-29")
+    assert ai_flow._person_birthday_ru(person) == "29 апреля"
+
+
+def test_person_birthday_ru_none_when_birth_date_unknown():
+    person = _person(birth_date="")
+    assert ai_flow._person_birthday_ru(person) is None
 
 
 async def test_context_note_time_only_without_sender(store):
