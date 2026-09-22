@@ -308,8 +308,25 @@ class GraphMemoryConfig(BaseModel):
     ``extraction_model``/``embedding_model`` — модели Ollama
     (http://127.0.0.1:11434/v1, OpenAI-совместимый эндпойнт, без реального
     ключа OpenAI) для извлечения сущностей/рёбер и для эмбеддингов поиска.
-    Зафиксированы по факту пилота на mycraft (2026-09-22):
-    extraction_model="gpt-oss:20b", embedding_model="nomic-embed-text".
+
+    ``extraction_model`` НАМЕРЕННО = тот же тег, что и ``settings.llm.model``
+    (персонажная модель Альфреда) — решение пользователя 2026-09-22, после
+    живого измерения на mycraft: изначально стоял отдельный gpt-oss:20b, но
+    любая ВТОРАЯ модель на V100 16 ГБ либо целиком вытесняет gemma из VRAM
+    (16 ГБ < 14+12 ГБ), либо, если увести её на CPU, всё равно блокирует
+    живой чат — Ollama на этой машине обслуживает запросы ОДНОЙ общей
+    очередью вне зависимости от устройства (не настроен
+    OLLAMA_NUM_PARALLEL/OLLAMA_MAX_LOADED_MODELS), и медленный CPU-запрос
+    (~3-4 мин на короткий текст на этом железе) держит в очереди даже
+    GPU-запрос позади себя. Переиспользование ТОЙ ЖЕ модели снимает обе
+    проблемы разом: она и так уже в VRAM (без перезагрузки), а тексты
+    эпизодов короткие (MAX_EPISODE_CHARS=400 в graph_memory/service.py) —
+    генерация на GPU занимает секунды, так что даже если экстракция и живой
+    чат столкнутся в одной очереди, задержка мала. Если когда-нибудь
+    понадобится настоящая тяжёлая фоновая нейро-задача — ей нужен либо
+    OLLAMA_NUM_PARALLEL>1 (риск нехватки VRAM на две одновременные генерации),
+    либо отдельный процесс Ollama с CUDA_VISIBLE_DEVICES="" — не сделано,
+    т.к. пока не нужно.
     """
 
     socket: str = "./data/graph_memory.sock"
@@ -317,7 +334,10 @@ class GraphMemoryConfig(BaseModel):
     uri: str = "bolt://127.0.0.1:7687"
     user: str = "neo4j"
     password: str = ""
-    extraction_model: str = "gpt-oss:20b"
+    # Пусто = взять settings.llm.model (см. докстринг выше) — единственный
+    # источник правды про персонажную модель, чтобы графовая память не могла
+    # разъехаться с ней при апгрейде модели на mycraft.
+    extraction_model: str = ""
     embedding_model: str = "nomic-embed-text"
     ingest_timeout_s: float = 120.0
     search_timeout_s: float = 15.0

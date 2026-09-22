@@ -96,10 +96,21 @@ def _row_to_episode(row: Any) -> dict[str, Any]:
 class GraphMemoryService:
     def __init__(self, settings: Settings, db: Database) -> None:
         self._cfg = settings.graph_memory
+        # Полный Settings, не только graph_memory — нужен settings.llm.model
+        # для _extraction_model() (см. config.py::GraphMemoryConfig).
+        self._settings = settings
         self._db = db
         self._node = socket.gethostname()
         self._graphiti: Any = None
         self._graphiti_lock = asyncio.Lock()
+
+    def _extraction_model(self) -> str:
+        """Тег модели для экстракции/reranker'а — settings.llm.model, если
+        graph_memory.extraction_model не задан явно (см. докстринг
+        GraphMemoryConfig в config.py: намеренно ТА ЖЕ модель, что уже
+        держит в VRAM живой чат, а не отдельная — избегаем и вытеснения из
+        VRAM, и очереди Ollama позади медленной CPU-генерации)."""
+        return self._cfg.extraction_model or self._settings.llm.model
 
     def describe(self) -> ServiceDescription:
         return ServiceDescription(
@@ -147,6 +158,7 @@ class GraphMemoryService:
             "queue_failed": counts.get("failed", 0),
             "queue_done": counts.get("done", 0),
             "graphiti_ready": self._graphiti is not None,
+            "extraction_model": self._extraction_model(),
         }
 
     async def _get_graphiti(self) -> Any:
@@ -178,11 +190,12 @@ class GraphMemoryService:
         from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 
         base_url = "http://127.0.0.1:11434/v1"
+        model = self._extraction_model()
         llm_client = OpenAIGenericClient(
             config=LLMConfig(
                 api_key="ollama",
-                model=self._cfg.extraction_model,
-                small_model=self._cfg.extraction_model,
+                model=model,
+                small_model=model,
                 base_url=base_url,
             )
         )
@@ -194,11 +207,18 @@ class GraphMemoryService:
                 base_url=base_url,
             )
         )
+        # Reranker (cross-encoder) на практике не вызывается: search()
+        # (graph_memory/service.py::_search) использует EDGE_HYBRID_SEARCH_RRF
+        # — чистый Reciprocal Rank Fusion по BM25+cosine, без LLM. Держим
+        # клиент только чтобы конструктор Graphiti не завёл свой дефолтный
+        # OpenAIRerankerClient() без api_key (падает на
+        # "Missing credentials"). Та же модель — на случай, если граф когда-то
+        # перейдёт на search_() с cross-encoder ranking.
         reranker = OpenAIRerankerClient(
             config=LLMConfig(
                 api_key="ollama",
-                model=self._cfg.extraction_model,
-                small_model=self._cfg.extraction_model,
+                model=model,
+                small_model=model,
                 base_url=base_url,
             )
         )

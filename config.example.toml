@@ -309,16 +309,26 @@ family_chat_ids = []
 #     recall_graph_facts (bot/ai_flow.py) в этом случае молча отдаёт [].
 # (c) password — НЕ хранить в git: это значение только для примера, в
 #     боевом config.toml на mycraft впишите реальный пароль Neo4j.
-# extraction_model/embedding_model — модели Ollama
-# (http://127.0.0.1:11434/v1, без реального ключа OpenAI), зафиксированы по
-# факту пилота на mycraft 2026-09-22.
+# extraction_model — ПУСТО означает "взять [llm].model" (ту же персонажную
+# модель, что уже держит в VRAM живой чат) — решение пользователя 2026-09-22
+# после живого измерения: отдельная вторая модель (был gpt-oss:20b) либо
+# вытесняет чат-модель из VRAM V100 16 ГБ целиком, либо, если увести её на
+# CPU, всё равно блокирует живой чат — Ollama на mycraft обслуживает запросы
+# ОДНОЙ общей очередью независимо от устройства (не настроен
+# OLLAMA_NUM_PARALLEL/OLLAMA_MAX_LOADED_MODELS), и медленная CPU-генерация
+# (минуты) держит в очереди даже GPU-запрос позади себя. Переиспользование
+# ТОЙ ЖЕ модели снимает обе проблемы: она и так уже в VRAM, а тексты
+# эпизодов короткие — генерация на GPU занимает секунды. Задавайте явно,
+# только если хотите другую модель именно для графа.
+# embedding_model — отдельная маленькая модель (эмбеддинги ищут по-другому,
+# не тем же чат-моделью), не конфликтует по VRAM (300-400 МБ).
 [graph_memory]
 socket = "./data/graph_memory.sock"
 db_path = "./data/graph_memory.sqlite"
 uri = "bolt://127.0.0.1:7687"
 user = "neo4j"
 password = ""
-extraction_model = "gpt-oss:20b"
+extraction_model = ""
 embedding_model = "nomic-embed-text"
 ingest_timeout_s = 120.0
 search_timeout_s = 15.0
