@@ -1871,7 +1871,7 @@ async def test_web_search_calls_net_service(store):
     )
     assert json.loads(raw)["count"] == 1
     action, dst = link.commands[0]
-    assert (action, dst.node, dst.service) == ("search", "alfred", "net")
+    assert (action, dst.node, dst.service) == ("search", "mycraft", "net")
 
 
 async def test_web_search_empty_results_reads_as_plain_text(store):
@@ -1939,7 +1939,7 @@ async def test_memory_tool_never_lets_the_model_choose_whose_memory(store):
         {"action": "recall", "query": "куда качаем", "chat_id": 999},
     )
     action, dst = link.commands[0]
-    assert (action, dst.node, dst.service) == ("recall", "alfred", "memory")
+    assert (action, dst.node, dst.service) == ("recall", "mycraft", "memory")
     assert link.sent_args[0]["chat_id"] == 777  # свой чат, не подсунутый моделью
 
 
@@ -2019,7 +2019,7 @@ async def test_remember_piggybacks_a_graph_episode(store):
     remember_action, remember_dst = link.commands[0]
     assert (remember_action, remember_dst.node, remember_dst.service) == (
         "remember",
-        "alfred",
+        "mycraft",
         "memory",
     )
     episode_action, episode_dst = link.commands[1]
