@@ -60,6 +60,7 @@ from sa_home_bot.bot import commands, invites, recipients, voice_mode, vpn_nodes
 from sa_home_bot.bot.monitor_state import parse_disk_summary, parse_health_state
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings, reminder_reason
+from sa_home_bot.graph_memory import protocol as graph_memory_protocol
 from sa_home_bot.memory import protocol as memory_protocol
 from sa_home_bot.net import protocol as net_protocol
 from sa_home_bot.node.kind import traits_for
@@ -2142,9 +2143,38 @@ async def tool_memory(ctx: ToolContext, args: dict[str, Any]) -> str:
         return f"не вышло: {exc.message}"
     except (ServiceUnavailableError, TimeoutError) as exc:
         return f"недоступно: память не отвечает ({exc})"
+    if action == memory_protocol.ACTION_REMEMBER:
+        # Piggyback в графовую память (Этап 41) — best-effort ПОВЕРХ уже
+        # успешной записи в memory: недоступность graph_memory (mycraft
+        # спит) не должна портить основной remember, поэтому отдельный
+        # try/except, а не общий с ним.
+        await _piggyback_graph_episode(ctx, payload["text"], ctx.chat_id)
     if action == memory_protocol.ACTION_RECALL and not result.get("facts"):
         return "в памяти про это ничего нет"
     return json.dumps(result, ensure_ascii=False)
+
+
+async def _piggyback_graph_episode(ctx: ToolContext, text: str, chat_id: int) -> None:
+    """Best-effort копия только что записанного факта в графовую память
+    (см. graph_memory/protocol.py::NODE_ID — служба живёт на mycraft и штатно
+    недоступна, пока та спит). Короткий таймаут и полное подавление ошибок:
+    это дополнение поверх memory, а не часть контракта remember."""
+    if ctx.node_link is None:
+        return
+    dst = Address(node=graph_memory_protocol.NODE_ID, service=graph_memory_protocol.SERVICE_NAME)
+    try:
+        await ctx.node_link.command(
+            graph_memory_protocol.ACTION_ADD_EPISODE,
+            {
+                "text": text,
+                "chat_id": chat_id,
+                "source": graph_memory_protocol.EPISODE_SOURCE_MEMORY_FACT,
+            },
+            dst=dst,
+            timeout=2.0,
+        )
+    except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
+        log.debug("tool_memory: graph_memory недоступна, факт не задублирован: %s", exc)
 
 
 _MEMORY_VARIANTS = VariantRights(

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sa-home-bot"
-version = "0.110.6"
+version = "0.111.0"
 description = "Рой домашних машин: нода-супервизор, службы (мониторинг, приложения) и Telegram-бот"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -66,6 +66,26 @@ tts = [
     "transformers>=4.57,<5",
     "torch>=2.2,<2.9",
     "torchaudio>=2.2,<2.9",
+]
+# Служба graph_memory (Этап 41, графовая память Альфреда): только на mycraft,
+# там же живут Neo4j и Ollama. graphiti-core тянет за собой официальный
+# neo4j-driver (протокол bolt бинарный, urllib его не осилит) — единственное
+# осознанное исключение из принципа проекта "минимум зависимостей,
+# urllib+to_thread", по аналогии с уже принятыми исключениями
+# qbittorrent-api/pythonnet/coqui-tts (тяжёлая/специфичная зависимость,
+# только на нужной ноде). Версии зафиксированы по факту пилота на mycraft
+# 2026-09-22 (~/.venvs/graphiti): graphiti-core 0.30.2, neo4j 6.3.1.
+# Установка: pipx install "sa-home-bot[graph_memory] @ git+...@vX.Y.Z"
+# httpx — явный пин, не расчёт на резолвер: graphiti-core 0.30.2 сам
+# импортирует классический httpx (graphiti_core/llm_client/client.py), но в
+# своих метаданных его не объявляет (пакует только новый openai>=... который
+# тянет httpx2, форк-переименование от той же команды, а не совместимую
+# замену) — живая находка пилота 2026-09-22, без явного пина импорт падает
+# с ModuleNotFoundError.
+graph_memory = [
+    "graphiti-core>=0.30.2,<0.31",
+    "neo4j>=6.3.1,<7",
+    "httpx>=0.28,<1",
 ]
 
 [project.scripts]

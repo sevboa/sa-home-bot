@@ -84,6 +84,7 @@ from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import PersonConfig, Settings
 from sa_home_bot.db.store import Store
+from sa_home_bot.graph_memory import protocol as graph_memory_protocol
 from sa_home_bot.llm.model_profiles import REASON_LEVELS, ModelProfileSummary
 from sa_home_bot.llm.prompt import (
     ROUTE_OK,  # noqa: F401  — реэкспорт для тестов и обратной совместимости
@@ -434,6 +435,42 @@ async def recall_facts(
     return facts
 
 
+# Короче MEMORY_TIMEOUT_S: graph_memory живёт на mycraft, которая штатно
+# спит (ОСЛАБЛЕННЫЙ инвариант в отличие от memory — см.
+# graph_memory/protocol.py::NODE_ID), и недоступность не должна добавлять
+# заметную задержку ответа сверх собственного таймаута этого запроса.
+GRAPH_MEMORY_TIMEOUT_S = 3.0
+GRAPH_MEMORY_RECALL_LIMIT = 3
+GRAPH_MEMORY_FACT_CHARS = 160
+
+
+async def recall_graph_facts(node_link: ServiceLink, chat_id: int | None, text: str) -> list[str]:
+    """Реляционные факты из графовой памяти (Этап 41) под текущую реплику —
+    аналог recall_facts, но по графу сущностей/рёбер (Neo4j+Graphiti),
+    а не полнотекстовому поиску.
+
+    Любой сбой (mycraft спит, Neo4j/Ollama недоступны, служба не назначена)
+    — пустой список, а не ошибка: та же логика, что и у recall_facts —
+    разговор не должен падать из-за необязательной справки. Партиционировано
+    по chat_id так же, как memory — сказанное в одном разговоре не должно
+    всплыть в другом (см. graph_memory/service.py).
+    """
+    if chat_id is None or not text.strip():
+        return []
+    dst = Address(node=graph_memory_protocol.NODE_ID, service=graph_memory_protocol.SERVICE_NAME)
+    try:
+        result = await node_link.command(
+            graph_memory_protocol.ACTION_SEARCH,
+            {"query": text, "chat_id": chat_id, "limit": GRAPH_MEMORY_RECALL_LIMIT},
+            dst=dst,
+            timeout=GRAPH_MEMORY_TIMEOUT_S,
+        )
+    except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
+        log.debug("ai_flow: графовая память не ответила: %s", exc)
+        return []
+    return [str(fact)[:GRAPH_MEMORY_FACT_CHARS] for fact in result.get("facts", []) if fact]
+
+
 def _is_unavailable(exc: Exception) -> bool:
     if isinstance(exc, ServiceUnavailableError):
         return True
@@ -605,6 +642,7 @@ async def _build_context_note(
     *,
     has_web_search: bool = True,
     memory_facts: list[str] | None = None,
+    graph_facts: list[str] | None = None,
 ) -> str:
     """Служебная заметка для модели (не для пользователя): точное время
     сейчас (§8.1 плана — маленькие локальные модели плохо знают "сейчас", а
@@ -719,6 +757,19 @@ async def _build_context_note(
             + "; ".join(memory_facts)
             + ". Пользуйся, если к месту, но не зачитывай списком и не "
             "объявляй, что «сверился с памятью»."
+        )
+    if graph_facts:
+        # Отдельный блок, не смешанный с memory_facts выше: источник менее
+        # надёжный (графовая память — Этап 41, MVP, экстракция локальной
+        # LLM на mycraft может ошибаться со склонениями/связями), и это
+        # честно сказано модели, а не выдано за то же самое, что «ты сам
+        # помнишь» — см. graph_memory/service.py.
+        lines.append(
+            "Дополнительно — связи, которые ты мог уловить между людьми и "
+            "вещами (может быть неполным или устаревшим, используй как "
+            "подсказку, а не как точный факт): "
+            + "; ".join(graph_facts)
+            + "."
         )
 
     lines.extend(await _reply_context_lines(message, store, dialogue_id))
@@ -842,11 +893,18 @@ async def request_alfred(
     # раз — комплект нужен и заметке (знает ли он про интернет), и tool_ctx.
     subscription = book.for_chat(message.chat.id) if message.chat else None
     has_web_search = SURFING_TOOL in ai_tools.tools_for(subscription).handlers
-    memory_facts = await recall_facts(
-        node_link,
-        message.chat.id if message.chat else None,
-        message.text or "",
-        guest_family=bool(subscription and subscription.family),
+    memory_facts, graph_facts = await asyncio.gather(
+        recall_facts(
+            node_link,
+            message.chat.id if message.chat else None,
+            message.text or "",
+            guest_family=bool(subscription and subscription.family),
+        ),
+        recall_graph_facts(
+            node_link,
+            message.chat.id if message.chat else None,
+            message.text or "",
+        ),
     )
     context_note = await _build_context_note(
         message,
@@ -855,6 +913,7 @@ async def request_alfred(
         settings,
         has_web_search=has_web_search,
         memory_facts=memory_facts,
+        graph_facts=graph_facts,
     )
     # Список как изменяемая ячейка: _record_tool_call — вложенная функция, а
     # nonlocal через два уровня вложенности (_ask → колбэк) читается хуже.

@@ -138,13 +138,16 @@ class FakeNodeLink:
         get_state_sequences=None,
         wol_sent=None,
         memory_facts=(),
+        graph_facts=(),
         warmup_result=None,
         model_profile=None,
     ):
         self._model_profile = model_profile
         self.describe_calls: list[str | None] = []
         self.memory_facts = list(memory_facts)
+        self.graph_facts = list(graph_facts)
         self.recall_calls: list[dict] = []
+        self.graph_recall_calls: list[dict] = []
         self._own = own or OWN_STATE
         # chat_results — список результатов/исключений, по одному на каждый
         # вызов command("chat", ...) (по порядку) — эмулирует "недоступна,
@@ -202,6 +205,14 @@ class FakeNodeLink:
             # память пуста: заметка остаётся ровно такой, как была раньше.
             self.recall_calls.append(args)
             return {"facts": list(self.memory_facts), "count": len(self.memory_facts)}
+        if action == "search" and dst is not None and dst.service == "graph_memory":
+            # Графовая память (Этап 41, recall_graph_facts) спрашивается
+            # перед КАЖДЫМ запросом ровно как memory выше — та же причина не
+            # писать в command_calls. Совпадение имени действия с net.search
+            # (web_search) не проблема в проде (маршрутизация по dst), здесь
+            # разводим тем же полем.
+            self.graph_recall_calls.append(args)
+            return {"facts": list(self.graph_facts), "count": len(self.graph_facts)}
         self.command_calls.append((action, args, dst.node if dst else None))
         if action == "send_wol":
             self.wol_sent.append(args)

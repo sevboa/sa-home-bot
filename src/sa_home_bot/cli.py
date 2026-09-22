@@ -123,6 +123,10 @@ def main(argv: list[str] | None = None) -> int:
         from sa_home_bot.memory.app import run_memory
 
         coro = run_memory(settings)
+    elif args.service == "graph_memory":
+        from sa_home_bot.graph_memory.app import run_graph_memory
+
+        coro = run_graph_memory(settings)
     elif args.service == "vpn":
         from sa_home_bot.vpn.app import run_vpn
 

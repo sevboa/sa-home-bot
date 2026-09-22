@@ -22,6 +22,7 @@ def test_known_services():
         "apps",
         "torrents",
         "tasks", "memory",
+        "graph_memory",
         "net",
         "llm",
         "vpn",

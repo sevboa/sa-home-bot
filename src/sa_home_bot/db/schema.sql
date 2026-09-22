@@ -196,6 +196,29 @@ CREATE VIRTUAL TABLE IF NOT EXISTS facts USING fts5(
     tokenize='trigram'
 );
 
+-- Очередь эпизодов графовой памяти (служба graph_memory,
+-- sa_home_bot/graph_memory/). Экстракция сущностей/рёбер через LLM (Ollama на
+-- mycraft) небыстрая (секунды) и не должна блокировать вызывающего —
+-- ACTION_ADD_EPISODE сразу пишет строку сюда со status='pending' и отвечает,
+-- а фоновый _ingest_loop (graph_memory/service.py) обрабатывает очередь
+-- последовательно, двигая status pending -> processing -> done/failed (с
+-- ретраями до MAX_ATTEMPTS). Персистентно в SQLite (не в памяти процесса) —
+-- рестарт службы подбирает необработанный хвост, а не теряет его.
+-- source — сейчас только 'memory_fact' (см. protocol.py); задел под будущие
+-- источники (web_search, история диалогов), чтобы не путать их между собой.
+CREATE TABLE IF NOT EXISTS graph_episodes (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id      INTEGER NOT NULL,
+    text         TEXT NOT NULL,
+    source       TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    error        TEXT,
+    created_at   TEXT NOT NULL,
+    processed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_graph_episodes_status ON graph_episodes(status);
+
 -- Инвайт-коды приватного входа (бот, sa_home_bot/bot/invites.py). Эфемерная
 -- часть механизма: сама выданная подписка живёт в гостевом ПАКЕТЕ и потому
 -- переживает переезд бота на резервную ноду (subscriptions/guests.py), а

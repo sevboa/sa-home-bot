@@ -93,6 +93,11 @@ _SPECS: tuple[ServiceSpec, ...] = (
     # круглосуточная (см. memory/protocol.py::NODE_ID): вспоминать должно
     # получаться всегда, а не только когда проснулась машина с моделью.
     ServiceSpec(name="memory", cli_name="memory", endpoint_attr="memory.socket"),
+    # graph_memory — графовая память Альфреда (Neo4j+Graphiti, Этап 41):
+    # дополнение к memory, не замена. В отличие от memory/net, пинуется на
+    # mycraft (там Neo4j и Ollama), а не на всегда-включённой ноде — её
+    # недоступность во время сна mycraft штатна (см. graph_memory/protocol.py).
+    ServiceSpec(name="graph_memory", cli_name="graph_memory", endpoint_attr="graph_memory.socket"),
     # Живая находка 2026-07-23: служба llm на Windows-ноде дёргает wsl.exe, а
     # тот из-под Session-0 (Windows-служба sa-home-node, LocalSystem) вообще
     # не запускается (exit code -1) — WSL2 требует интерактивную сессию.

@@ -297,6 +297,32 @@ socket = "./data/memory.sock"
 db_path = "./data/memory.sqlite"
 family_chat_ids = []
 
+# Служба graph_memory (`sa-home-bot --service graph_memory`, Этап 41) —
+# графовая память Альфреда: реляционные связи между сущностями (Neo4j +
+# Graphiti), а не отдельные факты, как у memory.
+# (a) ДОПОЛНЕНИЕ к memory, не замена: memory не меняется вообще, ноль риска
+#     регресса для того, что уже работает всегда.
+# (b) Пинуется на mycraft (там живут Neo4j и Ollama), а не на
+#     всегда-включённой ноде, как memory/net. mycraft штатно уходит в
+#     suspend при простое GPU — недоступность graph_memory в это время
+#     ШТАТНАЯ деградация (см. graph_memory/protocol.py::NODE_ID), не авария:
+#     recall_graph_facts (bot/ai_flow.py) в этом случае молча отдаёт [].
+# (c) password — НЕ хранить в git: это значение только для примера, в
+#     боевом config.toml на mycraft впишите реальный пароль Neo4j.
+# extraction_model/embedding_model — модели Ollama
+# (http://127.0.0.1:11434/v1, без реального ключа OpenAI), зафиксированы по
+# факту пилота на mycraft 2026-09-22.
+[graph_memory]
+socket = "./data/graph_memory.sock"
+db_path = "./data/graph_memory.sqlite"
+uri = "bolt://127.0.0.1:7687"
+user = "neo4j"
+password = ""
+extraction_model = "gpt-oss:20b"
+embedding_model = "nomic-embed-text"
+ingest_timeout_s = 120.0
+search_timeout_s = 15.0
+
 [tasks]
 socket = "./data/tasks.sock"
 db_path = "./data/tasks.sqlite"

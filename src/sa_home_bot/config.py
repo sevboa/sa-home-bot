@@ -288,6 +288,41 @@ class MemoryConfig(BaseModel):
     family_chat_ids: list[int] = Field(default_factory=list)
 
 
+class GraphMemoryConfig(BaseModel):
+    """Служба graph_memory (`sa-home-bot --service graph_memory`) —
+    графовая память Альфреда (Neo4j + Graphiti, Этап 41): реляционные связи
+    между сущностями ("Наташа — жена Алексея"), а не отдельные факты, как у
+    `memory`.
+
+    ДОПОЛНЕНИЕ к `memory`, не замена: `memory` не меняется вообще. Пинуется
+    на mycraft (там живут Neo4j и Ollama) — в отличие от `memory.NODE_ID`,
+    этот NODE_ID (graph_memory/protocol.py) ОСЛАБЛЕННЫЙ инвариант: mycraft
+    штатно уходит в suspend при простое GPU, и недоступность graph_memory в
+    это время — предусмотренная деградация, не авария (см. protocol.py).
+
+    ``uri``/``user``/``password`` — реквизиты локального Neo4j
+    (bolt://127.0.0.1:7687, слушает только localhost на той же машине, где
+    работает служба — сетевой доступ снаружи не нужен). Пароль не хранить в
+    git — только в боевом config.toml на mycraft.
+
+    ``extraction_model``/``embedding_model`` — модели Ollama
+    (http://127.0.0.1:11434/v1, OpenAI-совместимый эндпойнт, без реального
+    ключа OpenAI) для извлечения сущностей/рёбер и для эмбеддингов поиска.
+    Зафиксированы по факту пилота на mycraft (2026-09-22):
+    extraction_model="gpt-oss:20b", embedding_model="nomic-embed-text".
+    """
+
+    socket: str = "./data/graph_memory.sock"
+    db_path: Path = Path("./data/graph_memory.sqlite")
+    uri: str = "bolt://127.0.0.1:7687"
+    user: str = "neo4j"
+    password: str = ""
+    extraction_model: str = "gpt-oss:20b"
+    embedding_model: str = "nomic-embed-text"
+    ingest_timeout_s: float = 120.0
+    search_timeout_s: float = 15.0
+
+
 class TasksConfig(BaseModel):
     """Служба tasks (`sa-home-bot --service tasks`) — генерализованные
     отложенные задачи роя (замена старого тула remind, писавшего прямо в
@@ -1156,6 +1191,7 @@ class Settings(BaseSettings):
     llm: LlmConfig = Field(default_factory=LlmConfig)
     tasks: TasksConfig = Field(default_factory=TasksConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    graph_memory: GraphMemoryConfig = Field(default_factory=GraphMemoryConfig)
     net: NetConfig = Field(default_factory=NetConfig)
     vpn: VpnConfig = Field(default_factory=VpnConfig)
     vpn_check: VpnCheckConfig = Field(default_factory=VpnCheckConfig)
