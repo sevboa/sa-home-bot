@@ -1999,6 +1999,57 @@ async def test_memory_outside_a_dialogue_is_honest(store):
     assert result.startswith("недоступно")
 
 
+async def test_remember_piggybacks_a_graph_episode(store):
+    """Этап 41: успешный remember дублирует факт в graph_memory (mycraft)
+    как ACTION_ADD_EPISODE — best-effort ПОВЕРХ основной записи."""
+    link = _FakeSwarmLink(
+        command_result={
+            "id": 1,
+            "text": "Наташа — жена Алексея",
+            "scope": "chat",
+            "sensitive": False,
+        }
+    )
+    result = await tools.tool_memory(
+        _ctx(store, node_link=link, subscription=ADMIN, chat_id=777),
+        {"action": "remember", "text": "Наташа — жена Алексея"},
+    )
+    assert json.loads(result)["id"] == 1
+    assert len(link.commands) == 2
+    remember_action, remember_dst = link.commands[0]
+    assert (remember_action, remember_dst.node, remember_dst.service) == (
+        "remember",
+        "alfred",
+        "memory",
+    )
+    episode_action, episode_dst = link.commands[1]
+    assert (episode_action, episode_dst.node, episode_dst.service) == (
+        "add_episode",
+        "mycraft",
+        "graph_memory",
+    )
+    assert link.sent_args[1]["text"] == "Наташа — жена Алексея"
+    assert link.sent_args[1]["chat_id"] == 777
+
+
+async def test_remember_survives_graph_memory_being_asleep(store):
+    """mycraft штатно спит (ОСЛАБЛЕННЫЙ инвариант, в отличие от memory) —
+    сбой piggyback не должен портить уже успешный remember."""
+
+    class FlakyLink(_FakeSwarmLink):
+        async def command(self, action, args=None, dst=None, *, timeout=None):
+            if action == "add_episode":
+                raise tools.ServiceUnavailableError("mycraft спит")
+            return await super().command(action, args=args, dst=dst, timeout=timeout)
+
+    link = FlakyLink(command_result={"id": 1, "text": "факт", "scope": "chat", "sensitive": False})
+    result = await tools.tool_memory(
+        _ctx(store, node_link=link, subscription=ADMIN, chat_id=777),
+        {"action": "remember", "text": "факт"},
+    )
+    assert json.loads(result)["id"] == 1
+
+
 # --- vpn: доступ к AmneziaWG на jeeves (Этап 33 IMPLEMENTATION_PLAN.md) ---
 
 

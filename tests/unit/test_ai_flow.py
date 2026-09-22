@@ -1772,6 +1772,34 @@ async def test_recall_facts_forwards_guest_family_flag():
     assert link.recall_calls[1]["guest_family"] is False
 
 
+async def test_graph_facts_land_in_the_context_note(store):
+    """Этап 41: recall_graph_facts подмешивается в заметку ОТДЕЛЬНЫМ блоком
+    от memory_facts — источник менее надёжный (см. _build_context_note)."""
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Как скажете"}],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+        graph_facts=["Наташа — жена Алексея"],
+    )
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "кто жена Алексея?"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert link.graph_recall_calls[0]["chat_id"] == 1
+    note = _note_msg(link.command_calls[0][1]["messages"])
+    assert "Наташа — жена Алексея" in note
+    assert "Дополнительно — связи" in note
+
+
+async def test_broken_graph_memory_does_not_break_the_conversation():
+    """graph_memory штатно спит вместе с mycraft — сбой не должен ронять
+    разговор (тот же принцип, что и у recall_facts)."""
+    facts = await ai_flow.recall_graph_facts(FakeNodeLink(chat_results=[]), 1, "привет")
+    assert facts == []
+
+
 async def test_ask_passes_guest_family_from_subscription(store):
     """Флаг «семья» гостя (Subscription.family, /guests) должен доехать до
     memory тем же путём, что и chat_id — бот его проставляет, не модель."""
