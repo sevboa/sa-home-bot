@@ -3182,16 +3182,38 @@ MVP-объём: (a) параллельный авто-recall в контекст
   `tests/unit/test_ai_handler.py` (хук реально зовётся из `cmd_ai` с
   персистентным текстом хода, не зовётся на `OPENING_PROMPT`).
 
-**42.3. Поиск: автопайплайн `web_search` → граф + качество SearXNG.**
+**42.3. Поиск: автопайплайн `web_search` → граф + качество SearXNG — ✅ v0.111.9 (2026-09-23).**
 - (a) После успешного `ACTION_SEARCH` (`bot/tools.py::tool_web_search`) —
   piggyback `add_episode` в `graph_memory` с новым `EPISODE_SOURCE_WEB_SEARCH`
   — то самое «раскладывать сырые данные поиска в граф», ради чего изначально
   и затевалась графовая память (см. память сессии `graphiti-neo4j-plan`).
-- (b) Ревизия движков SearXNG (`settings.yml`) — Google в SearXNG быстро
-  упирается в капчу (LLM_INTEGRATION_PLAN.md §9), рассмотреть Brave/
-  Startpage/Mojeek как основные источники; делать после переустановки
-  SearXNG на mycraft (42.1), чтобы не тюнинговать инстанс, который скоро
-  снесут.
+  Текст эпизода — `bot/tools.py::_web_search_episode_text` (запрос +
+  заголовки/выдержки), обрезка лимитом `_GRAPH_EPISODE_MAX_CHARS` делается
+  тем же общим `_piggyback_graph_episode`, что у `remember`/`look_at_photo`.
+  Piggyback пропускается, если `ctx.chat_id is None` или выдача пустая (в
+  последнем случае тул и так отвечает «ничего не нашлось», эпизод от пустой
+  выдачи не несёт ценности). Тесты по образцу `look_at_photo`:
+  `tests/unit/test_tools.py::test_web_search_piggybacks_a_graph_episode`,
+  `..._empty_results_skips_piggyback`, `..._survives_graph_memory_being_asleep`.
+- (b) Ревизия движков SearXNG — при живой проверке (`curl .../search?...
+  &format=json` на mycraft, несколько разноязычных запросов) выяснилось, что
+  пункт уже закрыт побочным эффектом переустановки 42.1: активный
+  `~/searxng/settings.yml` на mycraft — прямая копия конфига alfred, где
+  `keep_only: [duckduckgo, brave, mojeek, wikipedia]` — Google уже выключен
+  (капкан капчи, LLM_INTEGRATION_PLAN.md §9), Startpage и wikidata уже убраны
+  (были опробованы 2026-07-27 на alfred: `parsing error`/HTTP 403 на init).
+  Brave и Mojeek — уже штатные основные источники, как и предполагал план.
+  Живые запросы (`python asyncio best practices`, `курс доллара сегодня`,
+  `закон Кулона формула`, `Наполеон Бонапарт`) — 28–33 релевантных
+  результата, без капчи и ошибок движков (`unresponsive_engines: []`).
+  Проверено по отдельности: mojeek сам по себе тоже отдаёт полную выдачу —
+  в смешанных результатах его результаты просто дублируются под соседним
+  движком при слиянии (обычное поведение SearXNG, не баг); wikipedia — это
+  не полнотекстовый поиск, а lookup по заголовку статьи (движок опроса
+  Wikipedia в SearXNG всегда так работает), поэтому на многословных запросах
+  часто отдаёт 0 — ожидаемое ограничение самого движка, не повод убирать его
+  (на точных заголовках/значениях отрабатывает). Правок в `settings.yml` не
+  требовалось.
 
 **42.4. MCP-обёртка над `bot/tools.py`.**
 - Оформить существующие тулы бота (`memory`, VPN, торренты, `graph_memory`
