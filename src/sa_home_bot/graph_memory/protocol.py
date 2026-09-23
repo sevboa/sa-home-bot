@@ -40,3 +40,7 @@ EPISODE_SOURCE_LOOK_AT_PHOTO = "look_at_photo"
 # что и EPISODE_SOURCE_DIALOGUE_TURN, но отдельным эпизодом/source, чтобы
 # граф впоследствии мог отвечать "что мы обсуждали по этой ссылке".
 EPISODE_SOURCE_LINK = "link"
+# Этап 42.3: успешный web_search (bot/tools.py::tool_web_search) — сырая
+# выдача SearXNG (запрос + заголовки/выдержки), ради чего изначально и
+# затевалась графовая память (IMPLEMENTATION_PLAN.md, Этап 42.3).
+EPISODE_SOURCE_WEB_SEARCH = "web_search"

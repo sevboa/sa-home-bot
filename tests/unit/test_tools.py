@@ -1941,6 +1941,59 @@ async def test_web_search_without_query(store):
     assert result.startswith("ошибка")
 
 
+async def test_web_search_piggybacks_a_graph_episode(store):
+    """Этап 42.3: успешный поиск дублируется в graph_memory как
+    ACTION_ADD_EPISODE с source=web_search — тем же best-effort приёмом,
+    что и remember/look_at_photo (тесты выше в модуле)."""
+    link = _FakeSwarmLink(
+        command_result={
+            "query": "погода",
+            "results": [{"title": "Погода в городе", "url": "u", "snippet": "ясно, +20"}],
+            "count": 1,
+        }
+    )
+    await tools.tool_web_search(
+        _ctx(store, node_link=link, subscription=ADMIN), {"query": "погода"}
+    )
+
+    assert len(link.commands) == 2
+    episode_action, episode_dst = link.commands[1]
+    assert episode_action == "add_episode"
+    assert episode_dst.node == "mycraft"
+    assert episode_dst.service == "graph_memory"
+    episode_args = link.sent_args[1]
+    assert episode_args["chat_id"] == CHAT_ID
+    assert episode_args["source"] == "web_search"
+    assert "Погода в городе" in episode_args["text"]
+    assert "ясно, +20" in episode_args["text"]
+
+
+async def test_web_search_empty_results_skips_piggyback(store):
+    link = _FakeSwarmLink(command_result={"query": "чепуха", "results": [], "count": 0})
+    await tools.tool_web_search(
+        _ctx(store, node_link=link, subscription=ADMIN), {"query": "чепуха"}
+    )
+    assert len(link.commands) == 1
+
+
+async def test_web_search_survives_graph_memory_being_asleep(store):
+    """Этап 42.3: сбой piggyback не должен портить уже успешный ответ."""
+
+    class FlakyLink(_FakeSwarmLink):
+        async def command(self, action, args=None, dst=None, *, timeout=None):
+            if action == "add_episode":
+                raise tools.ServiceUnavailableError("mycraft спит")
+            return await super().command(action, args=args, dst=dst, timeout=timeout)
+
+    link = FlakyLink(
+        command_result={"query": "погода", "results": [{"title": "T"}], "count": 1}
+    )
+    result = await tools.tool_web_search(
+        _ctx(store, node_link=link, subscription=ADMIN), {"query": "погода"}
+    )
+    assert json.loads(result)["count"] == 1
+
+
 # --- recall_tool_result: полный текст сокращённого результата тула ---
 # (см. llm_chat.py::_inline_or_cache — там результаты длиннее лимита
 # кладутся в ctx.tool_result_cache, этот тул их оттуда достаёт)

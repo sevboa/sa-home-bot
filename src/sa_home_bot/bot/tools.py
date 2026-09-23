@@ -2752,6 +2752,20 @@ _DECL_VPN: dict[str, Any] = {
 # --- web_search: интернет через свой SearXNG (LLM_INTEGRATION_PLAN.md §9) ---
 
 
+def _web_search_episode_text(query: str, results: list[dict[str, Any]]) -> str:
+    """Заголовки+выдержки в один текст эпизода — конечную обрезку до
+    _GRAPH_EPISODE_MAX_CHARS делает сам _piggyback_graph_episode."""
+    parts = [f"Поиск «{query}»:"]
+    for item in results:
+        title = str(item.get("title") or "").strip()
+        snippet = str(item.get("snippet") or "").strip()
+        if title and snippet:
+            parts.append(f"{title} — {snippet}")
+        elif title:
+            parts.append(title)
+    return " ".join(parts)
+
+
 async def tool_web_search(ctx: ToolContext, args: dict[str, Any]) -> str:
     if ctx.node_link is None:
         return "недоступно: нет связи с роем"
@@ -2767,8 +2781,18 @@ async def tool_web_search(ctx: ToolContext, args: dict[str, Any]) -> str:
         # §7.3: недоступный поисковик — обычный результат тула, персонаж сам
         # решит, как об этом сказать; цикл tool-calling не роняем.
         return f"недоступно: поиск не работает ({exc})"
-    if not result.get("results"):
+    results = result.get("results") or []
+    if not results:
         return f"по запросу «{query}» ничего не нашлось"
+    if ctx.chat_id is not None:
+        # Этап 42.3: сырая выдача поиска — тоже эпизод графа, тем же
+        # best-effort приёмом, что у remember/look_at_photo выше.
+        await _piggyback_graph_episode(
+            ctx,
+            _web_search_episode_text(query, results),
+            ctx.chat_id,
+            source=graph_memory_protocol.EPISODE_SOURCE_WEB_SEARCH,
+        )
     return json.dumps(result, ensure_ascii=False)
 
 
