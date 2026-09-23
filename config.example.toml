@@ -638,6 +638,16 @@ grant_events = []                  # алерты о температуре ди
 # "usage@vpn, issue@vpn, reissue@vpn, revoke@vpn, grant_extra@vpn,
 # request_extra@vpn, apk@vpn".
 
+# MCP-сервер над тулами бота (Этап 42.4) — даёт внешним MCP-клиентам
+# (Claude Desktop/Code и т.п.) тот же набор инструментов, что видит
+# собеседник в Telegram, под правом "mcp" (/mcp_token его выдаёт).
+# Выключен по умолчанию; host — loopback, для доступа с других машин
+# укажите tailscale-адрес этой ноды (100.x) явно.
+[mcp]
+enabled = false
+host = "127.0.0.1"
+port = 8765
+
 [[subscriptions]]
 name = "family_room"
 chat_id = -1009999999

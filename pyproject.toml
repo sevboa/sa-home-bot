@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sa-home-bot"
-version = "0.111.9"
+version = "0.111.10"
 description = "Рой домашних машин: нода-супервизор, службы (мониторинг, приложения) и Telegram-бот"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -86,6 +86,21 @@ graph_memory = [
     "graphiti-core>=0.30.2,<0.31",
     "neo4j>=6.3.1,<7",
     "httpx>=0.28,<1",
+]
+# MCP-сервер над тулами бота (Этап 42.4, bot/mcp_server.py): переносимость
+# инструментов между моделями/клиентами без самодельного протокола роя.
+# Ставится только на ноду с telegram-bot (сейчас alfred) — MCP-сервер живёт
+# ВНУТРИ процесса бота (нужны живые notifier/store/book, см. докстринг
+# bot/mcp_server.py), больше нигде не запускается. Официальный SDK, не
+# самописный JSON-RPC — второе осознанное исключение из принципа
+# "минимум зависимостей" после graphiti-core выше: пользователь явно выбрал
+# его вместо ручной реализации streamable-HTTP (решение 2026-09-23). Тянет
+# starlette/uvicorn/anyio/pydantic/opentelemetry-api/pyjwt/jsonschema —
+# используем только низкоуровневый Server (mcp.server.lowlevel), не
+# MCPServer/OAuth-слой (см. докстринг bot/mcp_server.py почему).
+# Установка: pipx install "sa-home-bot[mcp] @ git+...@vX.Y.Z"
+mcp = [
+    "mcp>=2.2,<3",
 ]
 
 [project.scripts]

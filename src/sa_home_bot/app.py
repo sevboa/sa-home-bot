@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 
 from aiogram.exceptions import TelegramConflictError
 
@@ -43,6 +44,9 @@ from sa_home_bot.sensors.power import read_power_events_sync
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.guests import GuestStore
 from sa_home_bot.utils.lifespan import Lifespan
+
+if TYPE_CHECKING:  # pragma: no cover — импорт mcp_server реальный только при [mcp].enabled
+    from sa_home_bot.bot.mcp_server import McpServer
 
 log = logging.getLogger(__name__)
 
@@ -213,6 +217,26 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
     # время бота вполне могут перезапустить деплоем).
     active_ai_chats = ActiveAiChats()
 
+    # 9b. MCP-сервер (Этап 42.4, bot/mcp_server.py) — опционален и тяжёлый
+    # (тянет starlette/uvicorn/pydantic, см. extras "mcp" в pyproject.toml),
+    # поэтому импорт локальный и только когда реально включён: ноды без
+    # этого extra (и с [mcp].enabled=false по умолчанию) не должны падать на
+    # импорте бота.
+    mcp_server = None
+    if settings.mcp.enabled:
+        from sa_home_bot.bot.mcp_server import McpServer
+
+        mcp_server = McpServer(
+            settings=settings,
+            book=book,
+            notifier=notifier,
+            store=store,
+            node_link=node_link,
+            host=settings.mcp.host,
+            port=settings.mcp.port,
+        )
+        await mcp_server.start()
+
     # 10. Polling.
     polling_task = asyncio.create_task(
         dp.start_polling(
@@ -267,6 +291,7 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
             dp=dp,
             polling_task=polling_task,
             active_ai_chats=active_ai_chats,
+            mcp_server=mcp_server,
             link=link,
             node_link=node_link,
             apps_link=apps_link,
@@ -285,6 +310,7 @@ async def _shutdown(
     dp,
     polling_task: asyncio.Task,
     active_ai_chats: ActiveAiChats,
+    mcp_server: McpServer | None,
     link: ServiceLink,
     node_link: ServiceLink,
     apps_link: ServiceLink,
@@ -296,6 +322,13 @@ async def _shutdown(
     db: Database,
 ) -> None:
     log.info("Останов приложения...")
+
+    # MCP-клиенты — раньше, чем оборвутся node_link/notifier/store: сервер
+    # перестаёт принимать новые запросы и ждёт in-flight тул-вызовы (у них
+    # тот же uvicorn graceful shutdown, что и у обычного HTTP-сервера), а
+    # сами тулы всё ещё могут сходить в рой, пока связи ниже живы.
+    if mcp_server is not None:
+        await mcp_server.stop()
 
     # Живая находка 2026-07-24 (второй заход, живой баг на проде): раньше
     # это шло ПОСЛЕ link.stop()/node_link.stop() — осиротевшая задача
