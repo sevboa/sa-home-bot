@@ -1665,6 +1665,23 @@ def _vpn_probe_forward_script_content(
         "# sa-home-bot: сгенерировано nodectl fix — не редактировать руками,",
         "# перезапишется при следующем nodectl fix.",
         "set -e",
+        "",
+        "# Чужую таблицу (напр. ip filter, которую заводит tailscaled) на чистой",
+        "# загрузке можно застать ещё не созданной — юнит стартует раньше её",
+        "# владельца. Живой инцидент на alfred 2026-09-23: ребут → юнит упал с",
+        "# \"Could not process rule: No such file or directory\" на первом же",
+        "# insert, set -e прибил остальное, и forward/NAT пробников не появились",
+        "# ВООБЩЕ — все проверки с этой ноды молча таймаутили до ручного",
+        "# nodectl fix. Поэтому ждём появления таблицы, а не падаем сразу.",
+        "wait_table() {",
+        "  i=0",
+        "  while [ $i -lt 60 ]; do",
+        "    nft list table \"$1\" \"$2\" >/dev/null 2>&1 && return 0",
+        "    i=$((i + 1))",
+        "    sleep 1",
+        "  done",
+        "  return 1",
+        "}",
     ]
 
     def ensure_chain(family: str, table: str, chain: str, chain_def: str) -> None:
@@ -1674,6 +1691,13 @@ def _vpn_probe_forward_script_content(
         # уже существующими на момент ``nodectl fix``, напр. firewall
         # jeeves) не трогаем — их персистентность не в ведении этого фикса.
         if table != VPN_PROBE_NFT_TABLE:
+            # Чужая таблица: создавать её за владельца нельзя (структура и
+            # политики — его дело), но дождаться появления — можно и нужно.
+            lines.append(
+                f"wait_table {family} {table} || {{ "
+                f'echo "нет таблицы {family} {table} — некуда ставить правила пробников" >&2; '
+                f"exit 1; }}"
+            )
             return
         lines.append(
             f"nft list table {family} {table} >/dev/null 2>&1 || {{ "
@@ -1714,7 +1738,14 @@ def vpn_probe_forward_unit_content(
     script_path: Path, slots: list[vpn_probe_state.ProbeSlot]
 ) -> str:
     scaffold_units = " ".join(_probe_scaffold_unit_path(s).name for s in slots)
-    after = "network-online.target" + (f" {scaffold_units}" if scaffold_units else "")
+    # tailscaled — владелец таблиц `ip filter`/`ip nat` на нодах роя: правила
+    # пробников ставятся в них, значит стартовать раньше него бессмысленно.
+    # After= на отсутствующий юнит systemd просто игнорирует, так что строка
+    # безвредна и там, где tailscale не стоит. Гонку это лишь сужает —
+    # окончательно её закрывает wait_table в самом скрипте.
+    after = "network-online.target tailscaled.service" + (
+        f" {scaffold_units}" if scaffold_units else ""
+    )
     return (
         "[Unit]\n"
         "Description=sa-home-bot: forward/NAT для veth-пар VPN-пробников "
@@ -1725,6 +1756,10 @@ def vpn_probe_forward_unit_content(
         "[Service]\n"
         "Type=oneshot\n"
         "RemainAfterExit=yes\n"
+        # Разовый промах (таблицы не дождались, нода грузилась дольше минуты)
+        # не должен оставлять пробники без forward/NAT до ручного вмешательства.
+        "Restart=on-failure\n"
+        "RestartSec=30\n"
         f"ExecStart=/bin/sh {script_path}\n"
         "\n"
         "[Install]\n"

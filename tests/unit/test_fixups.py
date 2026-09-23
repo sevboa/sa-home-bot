@@ -998,10 +998,13 @@ def test_forward_script_content_skips_table_creation_for_foreign_chain():
     forward_target = ("inet", "filter", "forward")
     nat_target = ("ip", "nat", "postrouting")
     content = fixups_module._vpn_probe_forward_script_content(forward_target, nat_target, [_slot()])
-    assert "nft list table" not in content
-    assert "nft add table" not in content
+    assert "nft add table" not in content  # чужую таблицу не создаём за владельца
     assert "nft list chain inet filter forward" in content
     assert "nft list chain ip nat postrouting" in content
+    # …но дожидаемся её появления: на чистой загрузке владелец (tailscaled)
+    # может стартовать позже нас — инцидент на alfred 2026-09-23.
+    assert "wait_table inet filter" in content
+    assert "wait_table ip nat" in content
 
 
 def test_forward_script_content_covers_every_slot():
@@ -1028,7 +1031,16 @@ def test_forward_unit_content_runs_after_every_scaffold_and_executes_script():
 
 def test_forward_unit_content_with_no_slots_still_has_after_clause():
     content = vpn_probe_forward_unit_content(fixups_module.VPN_PROBE_FORWARD_SCRIPT_PATH, [])
-    assert "After=network-online.target\n" in content
+    assert "After=network-online.target tailscaled.service\n" in content
+
+
+def test_forward_unit_waits_for_tailscaled_and_retries():
+    """Юнит ставит правила в таблицы, которые заводит tailscaled: стартовать
+    раньше него незачем, а разовый промах не должен оставлять пробники без
+    forward/NAT до ручного nodectl fix (инцидент на alfred 2026-09-23)."""
+    content = vpn_probe_forward_unit_content(fixups_module.VPN_PROBE_FORWARD_SCRIPT_PATH, [_slot()])
+    assert "tailscaled.service" in content
+    assert "Restart=on-failure" in content
 
 
 def test_forwarding_persist_check_false_when_files_missing(monkeypatch):
