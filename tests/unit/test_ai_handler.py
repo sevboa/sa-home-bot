@@ -237,6 +237,60 @@ async def test_cmd_ai_with_text_calls_ai_flow_and_records_both_turns(store, monk
     assert rows[1]["content"] == "Добгый день, сэ"
 
 
+async def test_cmd_ai_with_text_piggybacks_a_dialogue_episode(store, monkeypatch):
+    """Этап 42.2: по завершении хода Альфреда ai_flow.piggyback_dialogue_
+    episode зовётся с персистентным текстом обоих ходов."""
+    seen_episodes = []
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None, speech_remark=None, rich_session=None
+    ):
+        return "Добгый день, сэ"
+
+    async def fake_piggyback(node_link, chat_id, user_text, assistant_text):
+        seen_episodes.append((chat_id, user_text, assistant_text))
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    monkeypatch.setattr(ai_flow, "piggyback_dialogue_episode", fake_piggyback)
+    message = FakeMessage(1, text="/ai привет")
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(),
+    )
+
+    assert seen_episodes == [(1, "привет", "Добгый день, сэ")]
+
+
+async def test_cmd_ai_without_text_does_not_piggyback_the_opening_prompt(store, monkeypatch):
+    """OPENING_PROMPT — директива, не реальный ход собеседника (см. докстринг
+    ai_handler.cmd_ai) — не должна порождать эпизод графа."""
+    seen_episodes = []
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None, speech_remark=None, rich_session=None
+    ):
+        return "Здравствуйте, сэр."
+
+    async def fake_piggyback(node_link, chat_id, user_text, assistant_text):
+        seen_episodes.append((chat_id, user_text, assistant_text))
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    monkeypatch.setattr(ai_flow, "piggyback_dialogue_episode", fake_piggyback)
+    message = FakeMessage(1, text="/ai")
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(),
+    )
+
+    assert seen_episodes == []
+
+
 async def test_cmd_ai_long_response_is_split_across_telegram_messages(store, monkeypatch):
     # Промпт (llm/prompt.py) просит модель уложиться в ~3500 знаков — но это
     # не гарантия, а Telegram режёт на 4096. Без чанкования в

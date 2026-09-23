@@ -1144,7 +1144,17 @@ async def tool_look_at_photo(ctx: ToolContext, args: dict[str, Any]) -> str:
         )
     except (ServiceUnavailableError, ProtoError, TimeoutError) as exc:
         return f"не получилось рассмотреть фото ещё раз: {exc}"
-    return str(result.get("response", "")) or "не удалось разглядеть — возможно, стоит переспросить"
+    response = str(result.get("response", "")).strip()
+    if response:
+        # Этап 42.2: повторное распознавание фото — тоже эпизод графа
+        # (best-effort, по образцу piggyback у remember выше).
+        await _piggyback_graph_episode(
+            ctx,
+            f"Фото, вопрос «{question}»: {response}",
+            ctx.chat_id,
+            source=graph_memory_protocol.EPISODE_SOURCE_LOOK_AT_PHOTO,
+        )
+    return response or "не удалось разглядеть — возможно, стоит переспросить"
 
 
 # --- swarm_status: read-only состояние роя (LLM_INTEGRATION_PLAN.md §8.3) ---
@@ -2148,33 +2158,46 @@ async def tool_memory(ctx: ToolContext, args: dict[str, Any]) -> str:
         # успешной записи в memory: недоступность graph_memory (mycraft
         # спит) не должна портить основной remember, поэтому отдельный
         # try/except, а не общий с ним.
-        await _piggyback_graph_episode(ctx, payload["text"], ctx.chat_id)
+        await _piggyback_graph_episode(
+            ctx,
+            payload["text"],
+            ctx.chat_id,
+            source=graph_memory_protocol.EPISODE_SOURCE_MEMORY_FACT,
+        )
     if action == memory_protocol.ACTION_RECALL and not result.get("facts"):
         return "в памяти про это ничего нет"
     return json.dumps(result, ensure_ascii=False)
 
 
-async def _piggyback_graph_episode(ctx: ToolContext, text: str, chat_id: int) -> None:
-    """Best-effort копия только что записанного факта в графовую память
-    (см. graph_memory/protocol.py::NODE_ID — служба живёт на mycraft и штатно
+# Как graph_memory/service.py::MAX_EPISODE_CHARS — держим тот же лимит на
+# стороне вызывающего, чтобы не терять эпизод молча: служба отклоняет текст
+# длиннее этого ProtoError'ом (ERR_BAD_REQUEST), а piggyback ниже все ошибки
+# проглатывает.
+_GRAPH_EPISODE_MAX_CHARS = 400
+
+
+async def _piggyback_graph_episode(
+    ctx: ToolContext, text: str, chat_id: int, *, source: str
+) -> None:
+    """Best-effort копия текста в графовую память (Этап 41, Этап 42.2 — см.
+    graph_memory/protocol.py::NODE_ID: служба живёт на mycraft и штатно
     недоступна, пока та спит). Короткий таймаут и полное подавление ошибок:
-    это дополнение поверх memory, а не часть контракта remember."""
+    это дополнение поверх основного действия (remember/look_at_photo), а не
+    часть его контракта."""
     if ctx.node_link is None:
         return
+    if len(text) > _GRAPH_EPISODE_MAX_CHARS:
+        text = text[: _GRAPH_EPISODE_MAX_CHARS - 1] + "…"
     dst = Address(node=graph_memory_protocol.NODE_ID, service=graph_memory_protocol.SERVICE_NAME)
     try:
         await ctx.node_link.command(
             graph_memory_protocol.ACTION_ADD_EPISODE,
-            {
-                "text": text,
-                "chat_id": chat_id,
-                "source": graph_memory_protocol.EPISODE_SOURCE_MEMORY_FACT,
-            },
+            {"text": text, "chat_id": chat_id, "source": source},
             dst=dst,
             timeout=2.0,
         )
     except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
-        log.debug("tool_memory: graph_memory недоступна, факт не задублирован: %s", exc)
+        log.debug("graph_memory недоступна, эпизод (%s) не задублирован: %s", source, exc)
 
 
 _MEMORY_VARIANTS = VariantRights(

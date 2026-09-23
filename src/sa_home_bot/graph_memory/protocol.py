@@ -25,8 +25,18 @@ ACTION_ADD_EPISODE = "add_episode"
 ACTION_SEARCH = "search"
 ACTION_QUEUE_STATUS = "queue_status"
 
-# Источник эпизода — на этой итерации единственный: piggyback поверх
-# memory.ACTION_REMEMBER (см. bot/tools.py::tool_memory). Раздельные
-# источники — чтобы следующий этап (web_search/история диалогов) не путал
-# свои эпизоды под тем же source.
+# Источник эпизода — раздельные константы, чтобы разные piggyback-пути
+# (bot/tools.py, bot/ai_flow.py) не путали свои эпизоды под одним source и
+# чтобы будущий фильтр по episode_source (IMPLEMENTATION_PLAN.md, Этап 42.2,
+# "при необходимости") мог их различить.
 EPISODE_SOURCE_MEMORY_FACT = "memory_fact"
+# Этап 42.2: piggyback поверх завершённого хода /ai (bot/ai_flow.py::
+# piggyback_dialogue_episode) — реплика собеседника + ответ Альфреда.
+EPISODE_SOURCE_DIALOGUE_TURN = "dialogue_turn"
+# Этап 42.2: повторный просмотр фото (bot/tools.py::tool_look_at_photo) —
+# по образцу EPISODE_SOURCE_MEMORY_FACT.
+EPISODE_SOURCE_LOOK_AT_PHOTO = "look_at_photo"
+# Этап 42.2: ссылка (URL), упомянутая в ходе диалога — тот же текст хода,
+# что и EPISODE_SOURCE_DIALOGUE_TURN, но отдельным эпизодом/source, чтобы
+# граф впоследствии мог отвечать "что мы обсуждали по этой ссылке".
+EPISODE_SOURCE_LINK = "link"

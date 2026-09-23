@@ -961,6 +961,21 @@ async def _do_ask_and_reply(
         await store.record_ai_turn(
             message.chat.id, sent_message_id, dialogue_id, "assistant", raw, datetime.now(tz=UTC)
         )
+        # Этап 42.2: ход диалога → эпизод графа, best-effort ПОСЛЕ доставки
+        # ответа (см. ai_flow.piggyback_dialogue_episode). Ход пользователя
+        # берём из ai_turns тем же message_id, каким его туда записал
+        # соответствующий обработчик выше (cmd_ai/on_private_message/
+        # _handle_photo_message и т.д.) — так эпизод несёт персистентный
+        # текст хода (с PHOTO_MARKER/STICKER_MARKER и т.п.), а не служебный
+        # промпт для модели (STICKER_PROMPT/PHOTO_NO_CAPTION_PROMPT), который
+        # в history подменяет его для мультимодальных ходов. Директивы без
+        # сохранённого хода (OPENING_PROMPT/EMPTY_REPLY_PROMPT) — user_turn
+        # тут None, пропускаем: это не реальная реплика собеседника.
+        user_turn = await store.ai_turn(message.chat.id, message.message_id)
+        if user_turn is not None:
+            await ai_flow.piggyback_dialogue_episode(
+                node_link, message.chat.id, str(user_turn["content"]), raw
+            )
         if speech_remark.text is not None:
             # Отдельным сообщением, БЕЗ html.escape (см. _format_answer) —
             # ремарка сама генерирует безопасный HTML (llm/speech_therapy.py:

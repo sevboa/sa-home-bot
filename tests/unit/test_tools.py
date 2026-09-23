@@ -556,12 +556,54 @@ async def test_look_at_photo_success_calls_service_with_stored_key(store):
     )
 
     assert result == "на фото рыжий кот"
-    assert len(link.calls) == 1
+    # Этап 42.2: второй вызов — piggyback в graph_memory (см. тест ниже).
+    assert len(link.calls) == 2
     action, args, dst = link.calls[0]
     assert action == tools.ACTION_LOOK_AT_PHOTO
     assert args == {"photo_key": "111_1", "question": "какого цвета кот?", "chat_id": CHAT_ID}
     assert dst.node == tools.LLM_NODE
     assert dst.service == tools.LLM_SERVICE
+
+
+async def test_look_at_photo_piggybacks_a_graph_episode(store):
+    """Этап 42.2: успешное повторное распознавание фото дублируется в
+    graph_memory как ACTION_ADD_EPISODE с source=look_at_photo — тем же
+    best-effort приёмом, что и remember (тест выше в модуле)."""
+    await store.record_ai_turn(
+        CHAT_ID, 1, 1, "user", "[фото]", datetime.now(tz=UTC), photo_path="111_1"
+    )
+    link = _FakeLookNodeLink(response="на фото рыжий кот")
+
+    await tools.tool_look_at_photo(
+        _ctx(store, node_link=link), {"question": "какого цвета кот?"}
+    )
+
+    episode_action, episode_args, episode_dst = link.calls[1]
+    assert episode_action == "add_episode"
+    assert episode_dst.node == "mycraft"
+    assert episode_dst.service == "graph_memory"
+    assert episode_args["chat_id"] == CHAT_ID
+    assert episode_args["source"] == "look_at_photo"
+    assert "на фото рыжий кот" in episode_args["text"]
+
+
+async def test_look_at_photo_survives_graph_memory_being_asleep(store):
+    """Этап 42.2: сбой piggyback не должен портить уже успешный ответ."""
+    await store.record_ai_turn(
+        CHAT_ID, 1, 1, "user", "[фото]", datetime.now(tz=UTC), photo_path="111_1"
+    )
+
+    class FlakyLink(_FakeLookNodeLink):
+        async def command(self, action, args=None, dst=None, *, timeout=None):
+            if action == "add_episode":
+                raise tools.ServiceUnavailableError("mycraft спит")
+            return await super().command(action, args=args, dst=dst, timeout=timeout)
+
+    link = FlakyLink(response="на фото рыжий кот")
+    result = await tools.tool_look_at_photo(
+        _ctx(store, node_link=link), {"question": "какого цвета кот?"}
+    )
+    assert result == "на фото рыжий кот"
 
 
 async def test_look_at_photo_picks_latest_photo_turn_in_dialogue(store):

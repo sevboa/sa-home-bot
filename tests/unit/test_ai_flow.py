@@ -1812,6 +1812,76 @@ async def test_broken_graph_memory_does_not_break_the_conversation():
     assert facts == []
 
 
+class _FakeEpisodeLink:
+    """Двойник ServiceLink только для ACTION_ADD_EPISODE — piggyback_dialogue_
+    episode (Этап 42.2) не ходит ни за что другое, полный FakeNodeLink с его
+    заточенным под request_alfred command() тут не подходит."""
+
+    def __init__(self, *, raises: Exception | None = None) -> None:
+        self.calls: list[tuple[str, dict, object]] = []
+        self._raises = raises
+
+    async def command(self, action, args=None, dst=None, *, timeout=None):
+        self.calls.append((action, args or {}, dst))
+        if self._raises is not None:
+            raise self._raises
+        return {"queued": True, "id": 1}
+
+
+async def test_piggyback_dialogue_episode_writes_the_turn(store):
+    """Этап 42.2: ход диалога (реплика + ответ) пишется в graph_memory как
+    ACTION_ADD_EPISODE с source=dialogue_turn."""
+    link = _FakeEpisodeLink()
+
+    await ai_flow.piggyback_dialogue_episode(link, 777, "какая погода в Москве?", "Прохладно, сэр.")
+
+    action, args, dst = link.calls[0]
+    assert action == "add_episode"
+    assert dst.node == "mycraft"
+    assert dst.service == "graph_memory"
+    assert args["chat_id"] == 777
+    assert args["source"] == "dialogue_turn"
+    assert "какая погода в Москве?" in args["text"]
+    assert "Прохладно, сэр." in args["text"]
+
+
+async def test_piggyback_dialogue_episode_extracts_links_separately():
+    """Этап 42.2: URL в ходе диалога — дополнительный эпизод с
+    source=link (поверх основного dialogue_turn)."""
+    link = _FakeEpisodeLink()
+
+    await ai_flow.piggyback_dialogue_episode(
+        link, 777, "глянь https://example.com/article", "Посмотрел, сэр."
+    )
+
+    assert len(link.calls) == 2
+    sources = [call[1]["source"] for call in link.calls]
+    assert sources == ["dialogue_turn", "link"]
+
+
+async def test_piggyback_dialogue_episode_survives_graph_memory_being_asleep():
+    """graph_memory штатно спит вместе с mycraft — сбой не должен всплыть
+    наружу (тот же принцип, что и у recall_graph_facts)."""
+    link = _FakeEpisodeLink(raises=ServiceUnavailableError("mycraft спит"))
+    await ai_flow.piggyback_dialogue_episode(link, 777, "привет", "Здравствуйте, сэр.")
+
+
+async def test_piggyback_dialogue_episode_skips_without_node_link_or_chat():
+    link = _FakeEpisodeLink()
+    await ai_flow.piggyback_dialogue_episode(None, 777, "привет", "Здравствуйте, сэр.")
+    await ai_flow.piggyback_dialogue_episode(link, None, "привет", "Здравствуйте, сэр.")
+    assert link.calls == []
+
+
+async def test_piggyback_dialogue_episode_skips_empty_turns():
+    """Директивы без реального хода (OPENING_PROMPT/EMPTY_REPLY_PROMPT) не
+    должны порождать пустые/бессмысленные эпизоды."""
+    link = _FakeEpisodeLink()
+    await ai_flow.piggyback_dialogue_episode(link, 777, "", "Здравствуйте, сэр.")
+    await ai_flow.piggyback_dialogue_episode(link, 777, "привет", "")
+    assert link.calls == []
+
+
 async def test_ask_passes_guest_family_from_subscription(store):
     """Флаг «семья» гостя (Subscription.family, /guests) должен доехать до
     memory тем же путём, что и chat_id — бот его проставляет, не модель."""

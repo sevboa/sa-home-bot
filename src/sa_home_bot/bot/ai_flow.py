@@ -64,6 +64,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import time
 from datetime import UTC, date, datetime
 from typing import Any
@@ -469,6 +470,69 @@ async def recall_graph_facts(node_link: ServiceLink, chat_id: int | None, text: 
         log.debug("ai_flow: графовая память не ответила: %s", exc)
         return []
     return [str(fact)[:GRAPH_MEMORY_FACT_CHARS] for fact in result.get("facts", []) if fact]
+
+
+# Этап 42.2: ход диалога (реплика собеседника + ответ Альфреда) → эпизод
+# графа, best-effort ПОСЛЕ того, как ответ уже доставлен пользователю (см.
+# вызывающего — bot/handlers/ai.py::_do_ask_and_reply, вызов идёт после
+# store.record_ai_turn для хода assistant). Триггер — по завершении хода
+# ответа, а не по таймауту неактивности треда: решение принято при
+# реализации — фоновый таймер ради этого не заводим (простота на слабом
+# CPU alfred, см. CLAUDE.md), а "не блокировать основной /ai-ответ" и так
+# соблюдено — ответ к этому моменту уже отправлен в Telegram.
+DIALOGUE_EPISODE_TIMEOUT_S = 2.0
+# Как graph_memory/service.py::MAX_EPISODE_CHARS — тот же приём, что и у
+# bot/tools.py::_GRAPH_EPISODE_MAX_CHARS (не терять эпизод молча).
+DIALOGUE_EPISODE_MAX_CHARS = 400
+_URL_RE = re.compile(r"https?://\S+")
+
+
+async def _add_graph_episode(
+    node_link: ServiceLink, chat_id: int, text: str, source: str
+) -> None:
+    if len(text) > DIALOGUE_EPISODE_MAX_CHARS:
+        text = text[: DIALOGUE_EPISODE_MAX_CHARS - 1] + "…"
+    dst = Address(node=graph_memory_protocol.NODE_ID, service=graph_memory_protocol.SERVICE_NAME)
+    try:
+        await node_link.command(
+            graph_memory_protocol.ACTION_ADD_EPISODE,
+            {"text": text, "chat_id": chat_id, "source": source},
+            dst=dst,
+            timeout=DIALOGUE_EPISODE_TIMEOUT_S,
+        )
+    except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
+        log.debug("ai_flow: графовая память не приняла эпизод (%s): %s", source, exc)
+
+
+async def piggyback_dialogue_episode(
+    node_link: ServiceLink | None, chat_id: int | None, user_text: str, assistant_text: str
+) -> None:
+    """История диалога → граф (Этап 42.2), тем же best-effort приёмом, что и
+    bot/tools.py::_piggyback_graph_episode у remember: недоступность
+    graph_memory (mycraft штатно спит) молча проглатывается — ai_turns
+    (SQLite) и так хранит полную историю, граф — дополнительный источник, не
+    единственный.
+
+    Ссылки (URL) в ходе — отдельные эпизоды с source=EPISODE_SOURCE_LINK
+    (тем же текстом хода, что и основной эпизод, только под своим source),
+    чтобы граф впоследствии мог отвечать "что мы обсуждали по этой ссылке"
+    (см. IMPLEMENTATION_PLAN.md, Этап 42.2).
+    """
+    if node_link is None or chat_id is None:
+        return
+    user_text = user_text.strip()
+    assistant_text = assistant_text.strip()
+    if not user_text or not assistant_text:
+        return
+    text = f"{user_text} → {assistant_text}"
+    await _add_graph_episode(
+        node_link, chat_id, text, graph_memory_protocol.EPISODE_SOURCE_DIALOGUE_TURN
+    )
+    urls = dict.fromkeys(_URL_RE.findall(user_text) + _URL_RE.findall(assistant_text))
+    for _url in urls:
+        await _add_graph_episode(
+            node_link, chat_id, text, graph_memory_protocol.EPISODE_SOURCE_LINK
+        )
 
 
 def _is_unavailable(exc: Exception) -> bool:
