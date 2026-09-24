@@ -174,6 +174,7 @@ async def test_pipx_reinstall_success(monkeypatch):
         return _FakeProc(0, b"installed sa-home-bot 0.22.0\n")
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(update, "_installed_extras", lambda: None)
     ok, output = await update.pipx_reinstall("https://x/repo.git", "v0.22.0")
 
     assert ok is True
@@ -189,6 +190,51 @@ async def test_pipx_reinstall_success(monkeypatch):
     # LocalSystem-служба) ставит пакет мимо реально работающего venv'а
     # (живой баг 2026-07-17, см. _pipx_home).
     assert kwargs["env"]["PIPX_HOME"] == update._pipx_home()
+
+
+async def test_pipx_reinstall_keeps_installed_extras(monkeypatch):
+    # Живая находка 2026-09-24: голый git+… терял экстры (tts и её пин
+    # numpy<2.5) — спецификация должна нести экстры текущей установки.
+    calls = []
+
+    async def fake_exec(*args, **kwargs):
+        calls.append(args)
+        return _FakeProc(0, b"ok\n")
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(update, "_installed_extras", lambda: "tts,stt")
+    ok, _ = await update.pipx_reinstall("https://x/repo.git", "v0.22.0")
+
+    assert ok is True
+    assert calls[0][-1] == "sa-home-bot[tts,stt] @ git+https://x/repo.git@v0.22.0"
+
+
+def _write_meta(tmp_path, monkeypatch, package_or_url):
+    venv = tmp_path / "venvs" / "sa-home-bot"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pipx_metadata.json").write_text(
+        json.dumps({"main_package": {"package_or_url": package_or_url}})
+    )
+    monkeypatch.setattr(update.sys, "executable", str(venv / "bin" / "python"))
+
+
+def test_installed_extras_from_pipx_metadata(tmp_path, monkeypatch):
+    _write_meta(
+        tmp_path,
+        monkeypatch,
+        "sa-home-bot[tts, stt,graph_memory]@ git+https://x/repo.git@v0.1.0",
+    )
+    assert update._installed_extras() == "tts,stt,graph_memory"
+
+
+def test_installed_extras_none_without_extras(tmp_path, monkeypatch):
+    _write_meta(tmp_path, monkeypatch, "git+https://x/repo.git@v0.1.0")
+    assert update._installed_extras() is None
+
+
+def test_installed_extras_none_without_metadata(tmp_path, monkeypatch):
+    monkeypatch.setattr(update.sys, "executable", str(tmp_path / "bin" / "python"))
+    assert update._installed_extras() is None
 
 
 def test_pipx_home_derived_from_running_interpreter(monkeypatch):

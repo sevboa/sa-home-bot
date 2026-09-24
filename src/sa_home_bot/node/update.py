@@ -132,13 +132,43 @@ def _pipx_home() -> str:
     return str(Path(sys.executable).parents[3])
 
 
+_EXTRAS_RE = re.compile(r"\s*" + re.escape(PACKAGE_NAME) + r"\s*\[([^\]]*)\]")
+
+
+def _installed_extras() -> str | None:
+    """Экстры, с которыми пакет стоит сейчас, — из pipx_metadata.json
+    работающего venv'а (``main_package.package_or_url``), напр. "stt,tts".
+
+    Живая находка 2026-09-24: update ставил голый ``git+<repo>@<ref>`` —
+    экстры (tts/stt/graph_memory…) выпадали из спецификации и из metadata,
+    их пины (numpy<2.5 у tts) переставали учитываться, и `--force-reinstall`
+    молча притащил numpy 2.5.3, сломав импорт TTS.api. None — metadata нет
+    (не pipx) или экстр не было.
+    """
+    meta = Path(sys.executable).parents[1] / "pipx_metadata.json"
+    try:
+        data = json.loads(meta.read_text(encoding="utf-8"))
+        spec = data["main_package"]["package_or_url"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    m = _EXTRAS_RE.match(spec) if isinstance(spec, str) else None
+    if not m:
+        return None
+    extras = ",".join(e.strip() for e in m.group(1).split(",") if e.strip())
+    return extras or None
+
+
 async def pipx_reinstall(repo_url: str, ref: str) -> tuple[bool, str]:
-    """`pipx install --force git+<repo_url>@<ref>` — без sudo, без TTY.
+    """`pipx install --force [sa-home-bot[<extras>] @ ]git+<repo_url>@<ref>` —
+    без sudo, без TTY. Экстры текущей установки сохраняются (_installed_extras).
 
     Возвращает (успех, хвост вывода для диагностики). Не бросает исключений
     наружу — вызывающий код (фоновая задача) сам решает, что делать с провалом.
     """
     spec = f"git+{repo_url}@{ref}"
+    extras = _installed_extras()
+    if extras:
+        spec = f"{PACKAGE_NAME}[{extras}] @ {spec}"
     env = {**os.environ, "PIPX_HOME": _pipx_home()}
     try:
         proc = await asyncio.create_subprocess_exec(

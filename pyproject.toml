@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sa-home-bot"
-version = "0.112.0"
+version = "0.112.1"
 description = "Рой домашних машин: нода-супервизор, службы (мониторинг, приложения) и Telegram-бот"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -66,6 +66,11 @@ tts = [
     "transformers>=4.57,<5",
     "torch>=2.2,<2.9",
     "torchaudio>=2.2,<2.9",
+    # numpy — тоже явный пин: numba 0.66 (XTTS → librosa → numba) требует
+    # numpy<2.5, а numpy 2.5.3 молча приехал в venv при переустановке и
+    # сломал импорт TTS.api (живая находка 2026-09-24, "Numba needs NumPy
+    # 2.4 or less").
+    "numpy<2.5",
 ]
 # Служба graph_memory (Этап 41, графовая память Альфреда): только на mycraft,
 # там же живут Neo4j и Ollama. graphiti-core тянет за собой официальный
