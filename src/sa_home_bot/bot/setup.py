@@ -20,7 +20,6 @@ from sa_home_bot.bot.handlers import (
     basic,
     control,
     invites,
-    mcp,
     node,
     node_links,
     power,
@@ -66,7 +65,6 @@ def build_dispatcher(book: SubscriptionBook, gate: Gatekeeper) -> Dispatcher:
     # invites рано: ловит /invite, /guests и то единственное сообщение, каким
     # чужой чат стал своим (JustAdmitted) — до всех широких фильтров.
     dp.include_router(invites.router)
-    dp.include_router(mcp.router)
     dp.include_router(basic.router)
     # tool_debug: единственный обработчик своего callback-префикса, к
     # сообщениям и командам не относится вовсе.

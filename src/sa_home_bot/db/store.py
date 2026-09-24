@@ -9,9 +9,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import secrets
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from math import sqrt
@@ -952,43 +950,6 @@ class Store:
         _handle_task_result), повторно её ждать незачем."""
         async with self.db.transaction() as conn:
             await conn.execute("DELETE FROM event_waiters WHERE task_id=?", (task_id,))
-
-    # --- mcp_tokens (Этап 42.4, bot/mcp_server.py) ---
-
-    @staticmethod
-    def _hash_mcp_token(token: str) -> str:
-        return hashlib.sha256(token.encode()).hexdigest()
-
-    async def issue_mcp_token(self, chat_id: int, at: datetime) -> str:
-        """Выпустить новый токен для chat_id, затерев прежний (PRIMARY KEY —
-        см. schema.sql). Plaintext возвращается ОДИН раз — в БД остаётся
-        только его хеш, повторно посмотреть токен нельзя, только перевыпустить."""
-        token = secrets.token_urlsafe(32)
-        async with self.db.transaction() as conn:
-            await conn.execute(
-                "INSERT OR REPLACE INTO mcp_tokens(chat_id, token_hash, created_at) "
-                "VALUES(?, ?, ?)",
-                (chat_id, self._hash_mcp_token(token), _iso(at)),
-            )
-        return token
-
-    async def revoke_mcp_token(self, chat_id: int) -> bool:
-        """False — токена для этого chat_id и так не было."""
-        async with self.db.transaction() as conn:
-            cur = await conn.execute("DELETE FROM mcp_tokens WHERE chat_id=?", (chat_id,))
-            return cur.rowcount > 0
-
-    async def resolve_mcp_token(self, token: str) -> int | None:
-        """Bearer-токен → chat_id подписки, от чьего имени он действует.
-        None — токен неизвестен (в т.ч. пустая строка/мусор в заголовке)."""
-        if not token:
-            return None
-        cur = await self.db.conn.execute(
-            "SELECT chat_id FROM mcp_tokens WHERE token_hash=?",
-            (self._hash_mcp_token(token),),
-        )
-        row = await cur.fetchone()
-        return row["chat_id"] if row else None
 
     # --- housekeeping ---
 

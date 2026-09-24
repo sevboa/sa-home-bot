@@ -76,18 +76,6 @@ TORRENTS = Command(
     menu=True,
     right="list@torrents",
 )
-# MCP-сервер над тулами бота (Этап 42.4, bot/mcp_server.py) — свой токен, а
-# не совместное право с чем-то ещё: кто угодно с доступом к чату Альфреда не
-# должен автоматически получать возможность дёргать его тулы вне Telegram.
-# Скрытые (как /invite) — административный инструмент, не скилл роя.
-MCP_TOKEN = Command(
-    "mcp_token", "выпустить MCP-токен для внешних клиентов", universal=False,
-    menu=False, right="mcp",
-)
-MCP_REVOKE = Command(
-    "mcp_revoke", "отозвать свой MCP-токен", universal=False, menu=False, right="mcp"
-)
-
 ALL_COMMANDS: list[Command] = [
     PING,
     SWARM,
@@ -104,8 +92,6 @@ ALL_COMMANDS: list[Command] = [
     GUESTS,
     VPN,
     TORRENTS,
-    MCP_TOKEN,
-    MCP_REVOKE,
 ]
 
 UNIVERSAL_COMMANDS: list[Command] = [c for c in ALL_COMMANDS if c.universal]

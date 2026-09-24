@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sa-home-bot"
-version = "0.111.10"
+version = "0.111.11"
 description = "Рой домашних машин: нода-супервизор, службы (мониторинг, приложения) и Telegram-бот"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -87,17 +87,19 @@ graph_memory = [
     "neo4j>=6.3.1,<7",
     "httpx>=0.28,<1",
 ]
-# MCP-сервер над тулами бота (Этап 42.4, bot/mcp_server.py): переносимость
-# инструментов между моделями/клиентами без самодельного протокола роя.
-# Ставится только на ноду с telegram-bot (сейчас alfred) — MCP-сервер живёт
-# ВНУТРИ процесса бота (нужны живые notifier/store/book, см. докстринг
-# bot/mcp_server.py), больше нигде не запускается. Официальный SDK, не
+# MCP-сервер умений роя для будущего агента (Этап 42.4, вторая попытка —
+# первая версия жила на alfred как HTTP+bearer-токены, неправильная форма,
+# см. IMPLEMENTATION_PLAN.md; src/sa_home_bot/agent/mcp_tools.py): базовая
+# инфраструктура под агент-фреймворк (Phase 2 плана vast-skipping-crane.md),
+# ещё не сам агент. Ставится на ноду, где будет жить агент — сейчас mycraft
+# (там же Ollama), НЕ alfred: bot.tools переиспользуется как чистый Python
+# через собственный node_link процесса, живые Telegram-объекты бота (notifier/
+# store) не нужны вовсе, см. докстринг agent/mcp_tools.py. Официальный SDK, не
 # самописный JSON-RPC — второе осознанное исключение из принципа
-# "минимум зависимостей" после graphiti-core выше: пользователь явно выбрал
-# его вместо ручной реализации streamable-HTTP (решение 2026-09-23). Тянет
-# starlette/uvicorn/anyio/pydantic/opentelemetry-api/pyjwt/jsonschema —
-# используем только низкоуровневый Server (mcp.server.lowlevel), не
-# MCPServer/OAuth-слой (см. докстринг bot/mcp_server.py почему).
+# "минимум зависимостей" после graphiti-core выше (пользователь явно выбрал
+# официальный SDK вместо ручной реализации, решение 2026-09-23). Транспорт —
+# stdio (mcp.server.stdio), не HTTP: агент и этот процесс — одна машина,
+# доверие = общий процесс/оператор, сети и auth-слоя не нужно.
 # Установка: pipx install "sa-home-bot[mcp] @ git+...@vX.Y.Z"
 mcp = [
     "mcp>=2.2,<3",

@@ -464,19 +464,3 @@ CREATE TABLE IF NOT EXISTS vpn_apk (
     checked_at         TEXT,
     updated_at         TEXT
 );
-
--- MCP-токены (Этап 42.4, bot/mcp_server.py) — bearer-секрет, по которому
--- внешний MCP-клиент действует от имени конкретной подписки (chat_id), с
--- ровно её правами (tools_for(subscription), как и в живом /ai).
--- token_hash — sha256(токен), НЕ сам токен: в отличие от invites выше
--- (короткий TTL, одноразовые, rate-limit на подбор), это долгоживущий
--- bearer-секрет — утечка бэкапа БД не должна сразу давать рабочий доступ.
--- Plaintext виден человеку ровно один раз, в ответе /mcp_token.
--- chat_id — PRIMARY KEY: один активный токен на подписку, перевыпуск
--- (/mcp_token повторно) молча заменяет старый — проще, чем вести список
--- токенов с ручным отзывом конкретного среди нескольких.
-CREATE TABLE IF NOT EXISTS mcp_tokens (
-    chat_id      INTEGER PRIMARY KEY,
-    token_hash   TEXT NOT NULL UNIQUE,
-    created_at   TEXT NOT NULL
-);

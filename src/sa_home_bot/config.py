@@ -1111,24 +1111,6 @@ class InvitesConfig(BaseModel):
     max_attempts_per_hour: int = Field(default=5, gt=0)
 
 
-class McpConfig(BaseModel):
-    """MCP-сервер над тулами бота (Этап 42.4, bot/mcp_server.py) — даёт
-    внешним MCP-клиентам (не только модели самого /ai) тот же набор
-    инструментов, что видит собеседник в Telegram, под тем же правом
-    (см. модель авторизации в bot/mcp_server.py: токен на подписку, не
-    отдельная схема прав).
-
-    ``host`` дефолтится на loopback умышленно — НЕ ``0.0.0.0``: доступ с
-    других машин/клиентов оператор включает явно, указав tailscale-адрес
-    (100.x) в конфиге инстанса, а не получает случайную экспозицию в LAN по
-    умолчанию просто включив ``enabled``.
-    """
-
-    enabled: bool = False
-    host: str = "127.0.0.1"
-    port: int = Field(default=8765, ge=1, le=65535)
-
-
 class PersonConfig(BaseModel):
     """Один известный собеседник /ai — bot/ai_flow.py сопоставляет с ним
     отправителя сообщения (по telegram_username, а для тех, у кого username
@@ -1239,7 +1221,6 @@ class Settings(BaseSettings):
     wake: WakeConfig = Field(default_factory=WakeConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     invites: InvitesConfig = Field(default_factory=InvitesConfig)
-    mcp: McpConfig = Field(default_factory=McpConfig)
     subscriptions: list[SubscriptionConfig] = Field(default_factory=list)
     guest_subscriptions: list[GuestSubscriptionConfig] = Field(default_factory=list)
     people: list[PersonConfig] = Field(default_factory=list)

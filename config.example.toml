@@ -638,15 +638,21 @@ grant_events = []                  # алерты о температуре ди
 # "usage@vpn, issue@vpn, reissue@vpn, revoke@vpn, grant_extra@vpn,
 # request_extra@vpn, apk@vpn".
 
-# MCP-сервер над тулами бота (Этап 42.4) — даёт внешним MCP-клиентам
-# (Claude Desktop/Code и т.п.) тот же набор инструментов, что видит
-# собеседник в Telegram, под правом "mcp" (/mcp_token его выдаёт).
-# Выключен по умолчанию; host — loopback, для доступа с других машин
-# укажите tailscale-адрес этой ноды (100.x) явно.
-[mcp]
-enabled = false
-host = "127.0.0.1"
-port = 8765
+# Подписка агента (Этап 42.4, src/sa_home_bot/agent/mcp_tools.py) — НЕ
+# Telegram-чат, а системный участник роя: MCP stdio-сервер на mycraft
+# резолвит эту подписку по chat_id при старте и выставляет будущему
+# агенту (Phase 2 плана vast-skipping-crane.md) ровно те тулы, на которые
+# у неё есть право (tools_for(subscription), тот же код, что и у /ai).
+# chat_id — зарезервированный сентинел agent.mcp_tools.AGENT_SENTINEL_CHAT_ID,
+# НЕ настоящий Telegram id — держите его равным константе в коде, если
+# меняете. Ниже — заведомо консервативный, только read-only пример: решите
+# САМИ, какие права реально давать агенту, прежде чем пускать его в бою
+# (ничего write/деструктивного — update@node, restart_node@node, add@torrents,
+# issue@vpn и т.п. — не выдавайте не подумав).
+[[subscriptions]]
+name = "agent"
+chat_id = -1
+allowed_commands = ["nodes", "recall@memory", "search@net"]
 
 [[subscriptions]]
 name = "family_room"
