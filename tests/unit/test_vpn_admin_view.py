@@ -122,9 +122,11 @@ def test_guest_view_marks_open_and_closed_locations():
 
 
 def test_guest_view_survives_dead_swarm():
+    """Локаций нет — но умения гостя правятся и без связи с роем: они живут
+    в подписке бота, а не в службе."""
     text, kb = vpn_admin_view.build_guest_view(_guest(11), [])
     assert "не на связи" in text
-    assert _callbacks(kb) == [vpn_admin_view.guests_cb(0)]
+    assert _callbacks(kb) == [vpn_admin_view.rights_cb(11), vpn_admin_view.guests_cb(0)]
 
 
 # --- экран локации ---------------------------------------------------------
@@ -191,3 +193,82 @@ def test_callbacks_fit_telegram_limit():
     """Лимит callback_data — 64 байта; chat_id бывает длинным."""
     longest = vpn_admin_view.set_access_cb(-1001234567890, "wooster", "1000")
     assert len(longest.encode()) <= 64
+
+
+# --- экран умений гостя (тонкие права, 2026-09-24) --------------------------
+
+
+def test_rights_view_marks_full_partial_and_empty():
+    """Три состояния тумблера. Неполный набор — не выдумка: гости, впущенные
+    до появления `vpn_card@vpn` в группе, живут с одним `usage@vpn`."""
+    guest = _guest(11, rights=frozenset({"usage@vpn"}))
+    _text, kb = vpn_admin_view.build_rights_view(guest)
+    marks = {text.split(" ", 1)[0] for text in _texts(kb) if text[0] in "✅🔸⬜"}
+    assert marks == {"🔸", "⬜"}  # «видеть карточку» неполон, остальное пусто
+
+
+def test_rights_view_shows_owner_wildcard_as_enabled():
+    """Владельцу с `*` экран показывает выданным всё, а не пустые квадратики."""
+    owner = Subscription(chat_id=1, name="admin", allowed_commands=frozenset({"*"}))
+    for toggle in vpn_admin_view.VPN_TOGGLES:
+        assert vpn_admin_view.toggle_state(owner, toggle)
+
+
+def test_toggle_fills_incomplete_set_before_removing_it():
+    """Неполный комплект дожимается, а не снимается (как «Добавить право» в
+    /guests): половина умения — это поломка, её чинят, а не добивают."""
+    toggle = vpn_admin_view.toggle_by_key("dev")
+    assert toggle is not None
+    partial = _guest(11, rights=frozenset({"issue@vpn"}))
+    filled = vpn_admin_view.toggle_rights(partial, toggle)
+    assert toggle.rights <= filled
+
+    full = _guest(11, rights=filled)
+    assert vpn_admin_view.toggle_state(full, toggle)
+    assert not (vpn_admin_view.toggle_rights(full, toggle) & toggle.rights)
+
+
+def test_toggle_touches_only_its_own_rights():
+    """Тумблер VPN не должен задевать права других служб."""
+    toggle = vpn_admin_view.toggle_by_key("proxy")
+    assert toggle is not None
+    guest = _guest(11, rights=frozenset({"chat@llm", "proxy_link@vpn"}))
+    assert vpn_admin_view.toggle_rights(guest, toggle) == frozenset({"chat@llm"})
+
+
+def test_proxy_toggle_is_not_part_of_the_vpn_group():
+    """Прокси — не VPN: выдача группы «📶 VPN» в /guests его не приносит,
+    он открывается точечно здесь (решение пользователя 2026-09-24)."""
+    group = guest_rights.group("vpn")
+    assert group is not None
+    assert "proxy_link@vpn" not in group.rights
+    toggle = vpn_admin_view.toggle_by_key("proxy")
+    assert toggle is not None
+    assert not vpn_admin_view.toggle_state(_vpn_guest(11), toggle)
+
+
+def test_guest_card_links_to_rights_screen():
+    _text, kb = vpn_admin_view.build_guest_view(_vpn_guest(11), [_server()])
+    assert vpn_admin_view.rights_cb(11) in _callbacks(kb)
+
+
+def test_guest_card_lists_enabled_skills():
+    text, _kb = vpn_admin_view.build_guest_view(_vpn_guest(11), [_server()])
+    assert "Умения:" in text
+    assert "Прокси Telegram" not in text  # группа его не даёт
+
+
+def test_parse_rights_value():
+    assert vpn_admin_view.parse_rights_value("r42") == 42
+    assert vpn_admin_view.parse_rights_value("r-100500") == -100500
+    assert vpn_admin_view.parse_rights_value("g42") is None
+    assert vpn_admin_view.parse_rights_value(None) is None
+
+
+def test_rights_callbacks_fit_telegram_limit():
+    longest = max(
+        vpn_admin_view.toggle_cb(-1001234567890, toggle.key)
+        for toggle in vpn_admin_view.VPN_TOGGLES
+    )
+    assert len(longest.encode()) <= 64
+    assert len(vpn_admin_view.rights_cb(-1001234567890).encode()) <= 64

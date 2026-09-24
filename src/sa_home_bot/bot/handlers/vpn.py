@@ -39,7 +39,7 @@ import contextlib
 import html
 import logging
 
-from aiogram import Router
+from aiogram import Bot, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import (
@@ -50,6 +50,8 @@ from aiogram.types import (
 )
 
 from sa_home_bot.bot import commands, vpn_admin_view, vpn_nodes
+from sa_home_bot.bot.invites import Gatekeeper
+from sa_home_bot.bot.menu import refresh_chat_menu
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.pagination import clamp_offset
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
@@ -73,6 +75,19 @@ _VPN_UNAVAILABLE = "⚠️ Служба VPN недоступна — попро�
 # не дошёл), а допуск хоть на один сервер — нет. Это не ошибка, поэтому и текст
 # не про сбой.
 _NO_VPN_ACCESS = "📶 <b>VPN</b>\n\nДоступ пока не выдан — попросите владельца открыть вам локацию."
+# То же самое, но у гостя открыт прокси Telegram. Прокси от локаций не зависит
+# вовсе (mtg живёт на том же VPS сам по себе), поэтому отказ «доступа нет» тут
+# был бы неправдой: одно умение у человека есть, просто не VPN.
+_PROXY_ONLY_CARD = (
+    "📶 <b>VPN</b>\n\n"
+    "✈️ Прокси Telegram вам открыт.\n"
+    "VPN-доступ к локациям пока не выдан — попросите владельца, если он нужен."
+)
+
+# Имя действия «прислать приложение»: в отличие от остальных, живёт не в
+# vpn/protocol.py (служба про него не знает — ссылки на магазины и .apk отдаёт
+# сам бот, bot/vpn_apk.py), но право у него обычное — `apk@vpn`.
+_ACTION_APK = "apk"
 
 # Человеческие названия транспортов (vpn_peers.transport) для карточки и
 # кнопок выбора «➕ Новое устройство».
@@ -269,27 +284,48 @@ def _summary_text(summary: dict) -> str:
     return "\n".join(lines)
 
 
+def _allows(subscription: Subscription | None, action_id: str) -> bool:
+    """Есть ли у чата право на действие VPN. Нет подписки — нет и права
+    (fail-closed): сюда без неё не дойти (SilenceGate отсекает раньше), но
+    догадываться за неизвестного мы не станем."""
+    return subscription is not None and subscription.allows_action(action_id, SERVICE)
+
+
 def _card_keyboard(
     servers: list[dict],
     *,
-    is_admin: bool,
+    subscription: Subscription | None,
     self_serve_nodes: list[str],
 ) -> InlineKeyboardMarkup:
+    """Клавиатура карточки — строго по правам чата.
+
+    Раньше кнопки «Приложение», «Новое устройство», «Перевыпустить» и
+    «Отозвать» рисовались безусловно, а право проверялось уже при нажатии
+    (CallbackAuthorizationMiddleware). Для владельца разницы не было — у него
+    весь комплект, — но с тонкой настройкой прав (bot/vpn_admin_view.py::
+    VPN_TOGGLES) появился гость, которому открыли, скажем, только прокси: он
+    видел четыре кнопки и на каждой получал «⛔️ Недоступно». Показываем то,
+    что человек и правда может.
+    """
+    is_admin = _is_admin(subscription) if subscription is not None else False
     multi = len(servers) > 1
     devices = [device for server in servers for device in (server.get("devices") or [])]
-    top_row = [
-        InlineKeyboardButton(
-            text="📱 Приложение",
-            callback_data=commands.action_callback("apk", service=SERVICE),
-        ),
-    ]
+    top_row: list[InlineKeyboardButton] = []
+    if _allows(subscription, _ACTION_APK):
+        top_row.append(
+            InlineKeyboardButton(
+                text="📱 Приложение",
+                callback_data=commands.action_callback("apk", service=SERVICE),
+            )
+        )
     # Кнопка появляется, только когда самообслуживание реально доступно
     # (см. vpn/service.py::_grant_extra) — иначе гость с почти полной
     # квотой жал бы её впустую и получал отказ вместо понятной картины.
     # Квота у каждого сервера своя, поэтому кнопка — на каждый нуждающийся,
     # с явным node_id: иначе непонятно, где именно доливать.
+    needy = self_serve_nodes if _allows(subscription, vpn_protocol.ACTION_GRANT_EXTRA) else []
     for server in servers:
-        if server.get("node") not in self_serve_nodes:
+        if server.get("node") not in needy:
             continue
         suffix = f" ({_server_label(server)})" if multi else ""
         top_row.insert(
@@ -301,40 +337,50 @@ def _card_keyboard(
                 ),
             ),
         )
-    rows: list[list[InlineKeyboardButton]] = [top_row]
+    rows: list[list[InlineKeyboardButton]] = [top_row] if top_row else []
+    can_reissue = _allows(subscription, vpn_protocol.ACTION_REISSUE)
+    can_revoke = _allows(subscription, vpn_protocol.ACTION_REVOKE)
     for device in devices:
         label = device["device_label"]
         # node_id подключения (vpn_peers.server) — перевыпуск и отзыв идут
         # ровно на ту ноду, где пир заведён (этап 39: серверов несколько).
         server = device.get("server")
-        rows.append(
-            [
+        device_row: list[InlineKeyboardButton] = []
+        if can_reissue:
+            device_row.append(
                 InlineKeyboardButton(
                     text=f"🔄 Перевыпустить «{label}»",
                     callback_data=commands.action_callback(
                         vpn_protocol.ACTION_REISSUE, label, service=SERVICE, node_id=server
                     ),
-                ),
+                )
+            )
+        if can_revoke:
+            device_row.append(
                 InlineKeyboardButton(
                     text=f"🗑 Отозвать «{label}»",
                     callback_data=commands.action_callback(
                         vpn_protocol.ACTION_REVOKE, label, service=SERVICE, node_id=server
                     ),
-                ),
-            ]
-        )
+                )
+            )
+        if device_row:
+            rows.append(device_row)
     # Имя устройства служба выбирает сама — случайный цветок (решение
     # пользователя 2026-08-04, см. vpn/service.py::_random_device_label) —
-    # кнопке больше нечего предлагать заранее, число устройств не
-    # ограничено, поэтому она всего одна и всегда доступна.
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="➕ Новое устройство",
-                callback_data=commands.action_callback(vpn_protocol.ACTION_ISSUE, service=SERVICE),
-            )
-        ]
-    )
+    # кнопке больше нечего предлагать заранее, а число устройств не
+    # ограничено, поэтому она всего одна.
+    if _allows(subscription, vpn_protocol.ACTION_ISSUE):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="➕ Новое устройство",
+                    callback_data=commands.action_callback(
+                        vpn_protocol.ACTION_ISSUE, service=SERVICE
+                    ),
+                )
+            ]
+        )
     if is_admin:
         admin_row = [
             InlineKeyboardButton(
@@ -363,24 +409,31 @@ def _card_keyboard(
                 )
             )
         rows.append(admin_row)
-        # Прокси Telegram от VPN-транспорта не зависит — он живёт на том же
-        # VPS сам по себе (на wooster поднят при reality-only раскладке).
-        # Кнопка без node_id — обработчик фанаутит ACTION_PROXY_LINK по ВСЕМ
-        # живым серверам с прокси и присылает ссылку каждого (решение
-        # пользователя 2026-09-20: раньше показывался только один — первый
-        # живой сервер списка, — второй сервер приходилось выцарапывать
-        # отдельным запросом к ноде).
-        if any(server.get("proxy_available") for server in servers):
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        text="✈️ Прокси Telegram",
-                        callback_data=commands.action_callback(
-                            vpn_protocol.ACTION_PROXY_LINK, service=SERVICE
-                        ),
+    # Прокси Telegram от VPN-транспорта не зависит — он живёт на том же
+    # VPS сам по себе (на wooster поднят при reality-only раскладке).
+    # Кнопка без node_id — обработчик фанаутит ACTION_PROXY_LINK по ВСЕМ
+    # живым серверам с прокси и присылает ссылку каждого (решение
+    # пользователя 2026-09-20: раньше показывался только один — первый
+    # живой сервер списка, — второй сервер приходилось выцарапывать
+    # отдельным запросом к ноде).
+    #
+    # Гейт — право `proxy_link@vpn`, а не админство (решение пользователя
+    # 2026-09-24). Раньше кнопка жила внутри `if is_admin`, и прокси нельзя
+    # было открыть гостю в принципе: право существовало, но ни выдать его
+    # (в каталоге /guests его не было), ни нажать (кнопки гость не видел).
+    if _allows(subscription, vpn_protocol.ACTION_PROXY_LINK) and any(
+        server.get("proxy_available") for server in servers
+    ):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="✈️ Прокси Telegram",
+                    callback_data=commands.action_callback(
+                        vpn_protocol.ACTION_PROXY_LINK, service=SERVICE
                     ),
-                ]
-            )
+                ),
+            ]
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -507,25 +560,61 @@ def _check_status_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def _proxy_text(result: dict) -> str:
+def _proxy_text(result: dict, *, admin: bool) -> str:
+    """Карточка прокси. Гостю — только то, чем он пользуется.
+
+    SOCKS5-адрес (решение пользователя 2026-09-24) — служебный вход для ботов
+    внутри tailnet, а не второй способ подключить Telegram: гостю он бесполезен
+    (в tailnet его нет), а знать внутренний адрес ноды ему незачем.
+    """
     label = result.get("label")
     heading = "✈️ <b>Прокси Telegram (mtg)</b>"
     if label:
         heading += f" · {html.escape(str(label))}"
     heading += " — общая ссылка, один секрет на всех.\n"
-    return (
+    text = (
         heading
         + f"Ссылка: {html.escape(result['tg_link'])}\n"
         f"t.me: {html.escape(result['t_me_link'])}\n\n"
         f"Сервер: <code>{html.escape(str(result['host']))}</code>\n"
         f"Порт: <code>{result['port']}</code>\n"
-        f"Секрет: <code>{html.escape(result['secret'])}</code>\n\n"
-        "🧦 SOCKS5 для ботов (доступен только внутри tailnet):\n"
-        f"<code>{html.escape(str(result['socks_host']))}:{result['socks_port']}</code>"
+        f"Секрет: <code>{html.escape(result['secret'])}</code>"
+    )
+    if admin:
+        text += (
+            "\n\n🧦 SOCKS5 для ботов (доступен только внутри tailnet):\n"
+            f"<code>{html.escape(str(result['socks_host']))}:{result['socks_port']}</code>"
+        )
+    return text
+
+
+def _proxy_only_keyboard() -> InlineKeyboardMarkup:
+    """Мини-карточка гостя, которому открыли прокси, но не VPN."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✈️ Прокси Telegram",
+                    callback_data=commands.action_callback(
+                        vpn_protocol.ACTION_PROXY_LINK, service=SERVICE
+                    ),
+                )
+            ]
+        ]
     )
 
 
-def _proxy_keyboard(node_id: str | None = None) -> InlineKeyboardMarkup:
+def _proxy_keyboard(
+    node_id: str | None = None, *, can_rotate: bool = True
+) -> InlineKeyboardMarkup | None:
+    """None — кнопок нет вовсе (гость без `proxy_rotate_secret@vpn`).
+
+    Смена секрета рвёт ссылку у ВСЕХ, кто её получил, — такую кнопку нельзя
+    показывать рядом с гостевой ссылкой даже в виде «⛔️ Недоступно» при
+    нажатии: промахнуться по ней стоит слишком дорого.
+    """
+    if not can_rotate:
+        return None
     # node_id привязывает «Сменить секрет» к тому же серверу, чей результат
     # выше — секрет хранится в vpn.sqlite каждой ноды по отдельности, без
     # node_id кнопка ушла бы на первую живую ноду (не обязательно эту).
@@ -769,12 +858,18 @@ async def cmd_vpn(
 ) -> None:
     error, servers = await _card(node_link, message.chat.id)
     if error is not None:
+        # «Локаций нет» — ещё не повод закрыть дверь: прокси Telegram живёт
+        # отдельно от VPN и допуска к локации не требует. Гостю, которому
+        # открыли только его, показываем мини-карточку с одной кнопкой вместо
+        # отказа (решение пользователя 2026-09-24).
+        if error is _NO_VPN_ACCESS and _allows(subscription, vpn_protocol.ACTION_PROXY_LINK):
+            await message.answer(_PROXY_ONLY_CARD, reply_markup=_proxy_only_keyboard())
+            return
         await message.answer(error)
         return
-    is_admin = subscription is not None and _is_admin(subscription)
     keyboard = _card_keyboard(
         servers,
-        is_admin=is_admin,
+        subscription=subscription,
         self_serve_nodes=_self_serve_nodes(servers, config),
     )
     await message.answer(_usage_text(servers), reply_markup=keyboard)
@@ -785,10 +880,15 @@ async def _redraw_card(
 ) -> None:
     error, servers = await _card(node_link, callback.message.chat.id)
     if error is not None:
+        if error is _NO_VPN_ACCESS and _allows(subscription, vpn_protocol.ACTION_PROXY_LINK):
+            with contextlib.suppress(TelegramBadRequest):
+                await callback.message.edit_text(
+                    _PROXY_ONLY_CARD, reply_markup=_proxy_only_keyboard()
+                )
         return
     keyboard = _card_keyboard(
         servers,
-        is_admin=_is_admin(subscription),
+        subscription=subscription,
         self_serve_nodes=_self_serve_nodes(servers, config),
     )
     with contextlib.suppress(TelegramBadRequest):
@@ -992,6 +1092,8 @@ async def handle_action(
     subscription: Subscription,
     pending_vpn_secrets: PendingVpnSecrets,
     book: SubscriptionBook | None = None,
+    gate: Gatekeeper | None = None,
+    bot: Bot | None = None,
 ) -> None:
     """Вызывается из bot/handlers/node.py::on_dynamic_action для service="vpn"."""
     parsed = commands.parse_action_callback(callback.data)
@@ -1256,6 +1358,10 @@ async def handle_action(
         await _handle_set_access(callback, node_link, notifier, book, value, node_id)
         return
 
+    if action_id == vpn_admin_view.ACTION_SET_RIGHTS:
+        await _handle_set_rights(callback, book, gate, bot, value)
+        return
+
     if action_id == _ACTION_VPN_CARD:
         await callback.answer()
         await _redraw_card(callback, node_link, subscription, config)
@@ -1348,6 +1454,7 @@ async def handle_action(
                 )
                 return
         await callback.answer()
+        can_rotate = _allows(subscription, vpn_protocol.ACTION_PROXY_ROTATE_SECRET)
         for result in results:
             qr_b64 = result.get("qr_png_b64")
             if qr_b64:
@@ -1364,7 +1471,8 @@ async def handle_action(
                     message_thread_id=callback.message.message_thread_id,
                 )
             await callback.message.answer(
-                _proxy_text(result), reply_markup=_proxy_keyboard(result.get("node"))
+                _proxy_text(result, admin=can_rotate),
+                reply_markup=_proxy_keyboard(result.get("node"), can_rotate=can_rotate),
             )
         return
 
@@ -1381,8 +1489,10 @@ async def handle_action(
             await callback.answer("⚠️ Служба VPN недоступна.", show_alert=True)
             return
         await callback.answer("Секрет сменён")
+        # Сюда доходит только тот, у кого есть proxy_rotate_secret@vpn
+        # (право проверено CallbackAuthorizationMiddleware), — значит админ.
         await callback.message.answer(
-            "🔁 Старая ссылка перестала работать.\n\n" + _proxy_text(result),
+            "🔁 Старая ссылка перестала работать.\n\n" + _proxy_text(result, admin=True),
             reply_markup=_proxy_keyboard(result.get("node")),
         )
         return
@@ -1440,6 +1550,17 @@ async def _handle_admin_screen(
         return
     guests = book.guests()
 
+    rights_chat_id = vpn_admin_view.parse_rights_value(value)
+    if rights_chat_id is not None:  # экран умений гостя
+        guest = next((g for g in guests if g.chat_id == rights_chat_id), None)
+        if guest is None:
+            await callback.answer("Гость больше не в списке.", show_alert=True)
+            return
+        text, keyboard = vpn_admin_view.build_rights_view(guest)
+        await callback.answer()
+        await _redraw_screen(callback, text, keyboard)
+        return
+
     chat_id = vpn_admin_view.parse_guest_value(value)
     if chat_id is None:  # список гостей, value — номер страницы
         offset = _parse_offset(value)
@@ -1464,6 +1585,42 @@ async def _handle_admin_screen(
             return
         text, keyboard = vpn_admin_view.build_location_view(guest, server)
     await callback.answer()
+    await _redraw_screen(callback, text, keyboard)
+
+
+async def _handle_set_rights(
+    callback: CallbackQuery,
+    book: SubscriptionBook | None,
+    gate: Gatekeeper | None,
+    bot: Bot | None,
+    value: str | None,
+) -> None:
+    """Тумблер умения гостя (bot/vpn_admin_view.py::VPN_TOGGLES).
+
+    Меняется гостевая подписка, а не состояние службы — сети тут нет вовсе.
+    """
+    parsed = vpn_admin_view.parse_set_access_value(value)  # тот же «<chat_id>_<арг>»
+    if parsed is None or book is None or gate is None:
+        await callback.answer("⚠️ Список гостей сейчас недоступен.", show_alert=True)
+        return
+    chat_id, key = parsed
+    toggle = vpn_admin_view.toggle_by_key(key)
+    guest = next((g for g in book.guests() if g.chat_id == chat_id), None)
+    if toggle is None or guest is None:
+        await callback.answer("Гость больше не в списке.", show_alert=True)
+        return
+    updated = gate.set_guest_rights(chat_id, vpn_admin_view.toggle_rights(guest, toggle))
+    if updated is None:
+        # Гостя отозвали, пока экран был открыт (между отрисовкой и нажатием).
+        await callback.answer("Гость больше не в списке.", show_alert=True)
+        return
+    was_on = vpn_admin_view.toggle_state(guest, toggle)
+    # Меню Telegram у гостя перестраивается сразу: сняли «Видеть карточку» —
+    # /vpn должна пропасть из его списка команд, а не молча отказывать.
+    if bot is not None:
+        await refresh_chat_menu(bot, chat_id, updated)
+    await callback.answer(f"{toggle.label}: {'снято' if was_on else 'выдано'}")
+    text, keyboard = vpn_admin_view.build_rights_view(updated)
     await _redraw_screen(callback, text, keyboard)
 
 

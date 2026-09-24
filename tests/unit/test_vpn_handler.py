@@ -25,6 +25,14 @@ GUEST = Subscription(
         {"usage@vpn", "issue@vpn", "reissue@vpn", "grant_extra@vpn", "request_extra@vpn"}
     ),
 )
+# Гость с полным комплектом VPN-прав, но без админских: клавиатура карточки
+# рисуется строго по правам (2026-09-24), поэтому «какой-то не-админ» для
+# проверки кнопок устройств больше не годится — нужен тот, у кого они есть.
+GUEST_FULL = Subscription(
+    chat_id=778,
+    name="guest-full",
+    allowed_commands=frozenset({"*@vpn"}),
+)
 
 
 class FakeChat:
@@ -202,7 +210,9 @@ def _server(**over) -> dict:
 
 async def test_card_keyboard_offers_revoke_button_per_device():
     keyboard = vpn_handlers._card_keyboard(
-        [_server(devices=[{"device_label": "Rose"}])], is_admin=False, self_serve_nodes=[]
+        [_server(devices=[{"device_label": "Rose"}])],
+        subscription=GUEST_FULL,
+        self_serve_nodes=[],
     )
     device_row = keyboard.inline_keyboard[1]
     texts = [button.text for button in device_row]
@@ -216,7 +226,7 @@ async def test_card_keyboard_shows_proxy_on_reality_only_node_with_proxy():
     умеет reality, а состояние проверок реплицировано на все живые vpn."""
     keyboard = vpn_handlers._card_keyboard(
         [_server(transports=["reality"], proxy_available=True)],
-        is_admin=True,
+        subscription=ADMIN,
         self_serve_nodes=[],
     )
     flat = " ".join(b.text for row in keyboard.inline_keyboard for b in row)
@@ -389,7 +399,7 @@ def test_short_error_maps_curl_timeout():
 async def test_card_keyboard_hides_proxy_when_not_configured():
     keyboard = vpn_handlers._card_keyboard(
         [_server(transports=["reality"], proxy_available=False)],
-        is_admin=True,
+        subscription=ADMIN,
         self_serve_nodes=[],
     )
     flat = " ".join(b.text for row in keyboard.inline_keyboard for b in row)
@@ -467,7 +477,7 @@ class TwoServersLink(MultiVpnLink):
 async def test_card_keyboard_pins_connection_server_into_callback():
     keyboard = vpn_handlers._card_keyboard(
         [_server(devices=[{"device_label": "Rose", "server": "wooster"}])],
-        is_admin=False,
+        subscription=GUEST_FULL,
         self_serve_nodes=[],
     )
     reissue, revoke = keyboard.inline_keyboard[1]
@@ -578,7 +588,7 @@ async def test_grant_extra_button_per_server_near_limit():
         _server(node="wooster", label="🇺🇸 США", remaining_bytes=400 * 10**9),
     ]
     keyboard = vpn_handlers._card_keyboard(
-        servers, is_admin=False, self_serve_nodes=["jeeves"]
+        servers, subscription=GUEST_FULL, self_serve_nodes=["jeeves"]
     )
     top_row = keyboard.inline_keyboard[0]
     grant = [b for b in top_row if "100 ГБ" in b.text]
@@ -1008,7 +1018,9 @@ ANYA = Subscription(chat_id=777, name="Аня", source=SOURCE_GUEST)
 async def test_all_guests_button_leads_to_admin_screen():
     """Кнопка рисуется по peers@vpn — под тем же правом должна и работать
     (раньше слала usage_all и отказывала админу с точечным правом)."""
-    keyboard = vpn_handlers._card_keyboard([_server()], is_admin=True, self_serve_nodes=[])
+    keyboard = vpn_handlers._card_keyboard(
+        [_server()], subscription=ADMIN, self_serve_nodes=[]
+    )
     flat = [b for row in keyboard.inline_keyboard for b in row]
     button = next(b for b in flat if "Все гости" in b.text)
     assert button.callback_data == vpn_admin_view.guests_cb(0)
@@ -1101,3 +1113,201 @@ async def _drain_pending_tasks():
     pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
     for task in pending:
         task.cancel()
+
+
+# --- прокси Telegram гостю + права на кнопках карточки (2026-09-24) ---------
+
+PROXY_GUEST = Subscription(
+    chat_id=779,
+    name="proxy-guest",
+    allowed_commands=frozenset({"usage@vpn", "vpn_card@vpn", "proxy_link@vpn"}),
+)
+
+
+async def test_proxy_button_is_gated_by_right_not_by_admin():
+    """Раньше кнопка жила внутри `if is_admin` — прокси нельзя было открыть
+    гостю в принципе. Теперь гейт — право `proxy_link@vpn`."""
+    keyboard = vpn_handlers._card_keyboard(
+        [_server(proxy_available=True)], subscription=PROXY_GUEST, self_serve_nodes=[]
+    )
+    flat = " ".join(b.text for row in keyboard.inline_keyboard for b in row)
+    assert "Прокси Telegram" in flat
+    assert "Все гости" not in flat  # админским он от этого не стал
+
+
+async def test_proxy_button_hidden_without_the_right():
+    """GUEST — обычный комплект VPN без прокси: кнопки быть не должно."""
+    keyboard = vpn_handlers._card_keyboard(
+        [_server(proxy_available=True)], subscription=GUEST, self_serve_nodes=[]
+    )
+    flat = " ".join(b.text for row in keyboard.inline_keyboard for b in row)
+    assert "Прокси Telegram" not in flat
+
+
+async def test_card_shows_only_buttons_the_guest_may_press():
+    """Гостю-«только прокси» незачем видеть четыре кнопки, каждая из которых
+    ответит «⛔️ Недоступно»."""
+    keyboard = vpn_handlers._card_keyboard(
+        [_server(proxy_available=True, devices=[{"device_label": "Rose"}])],
+        subscription=PROXY_GUEST,
+        self_serve_nodes=["jeeves"],
+    )
+    flat = " ".join(b.text for row in keyboard.inline_keyboard for b in row)
+    assert "Новое устройство" not in flat
+    assert "Перевыпустить" not in flat
+    assert "Отозвать" not in flat
+    assert "Приложение" not in flat
+    assert "100 ГБ" not in flat
+    assert all(row for row in keyboard.inline_keyboard)  # пустых рядов нет
+
+
+async def test_vpn_card_falls_back_to_proxy_when_no_location_is_open():
+    """Прокси от локаций не зависит: «доступа нет» тут было бы неправдой."""
+    link = TwoServersLink()
+    link.usages = {
+        node: usage | {"allowed": False} for node, usage in TwoServersLink.usages.items()
+    }
+    message = FakeMessage(779)
+    await vpn_handlers.cmd_vpn(message, link, _config(), PROXY_GUEST)
+    assert "Прокси Telegram вам открыт" in message.answers[0]
+    flat = [b.text for row in message.answer_markups[0].inline_keyboard for b in row]
+    assert flat == ["✈️ Прокси Telegram"]
+
+
+async def test_vpn_card_still_refuses_guest_without_proxy():
+    link = TwoServersLink()
+    link.usages = {
+        node: usage | {"allowed": False} for node, usage in TwoServersLink.usages.items()
+    }
+    message = FakeMessage(777)
+    await vpn_handlers.cmd_vpn(message, link, _config(), GUEST)
+    assert "не выдан" in message.answers[0]
+
+
+def _proxy_result() -> dict:
+    return {
+        "tg_link": "tg://proxy?server=1.2.3.4&port=443&secret=deadbeef",
+        "t_me_link": "https://t.me/proxy?server=1.2.3.4&port=443&secret=deadbeef",
+        "host": "1.2.3.4",
+        "port": 443,
+        "secret": "deadbeef",
+        "socks_host": "100.109.139.95",
+        "socks_port": 1080,
+        "node": "jeeves",
+        "label": "🇳🇱 Нидерланды",
+    }
+
+
+def test_proxy_text_keeps_socks_address_for_admin_only():
+    """SOCKS5 — служебный вход для ботов внутри tailnet: гостю бесполезен, а
+    внутренний адрес ноды ему знать незачем."""
+    result = _proxy_result()
+    assert "100.109.139.95" in vpn_handlers._proxy_text(result, admin=True)
+    guest_text = vpn_handlers._proxy_text(result, admin=False)
+    assert "100.109.139.95" not in guest_text
+    assert "SOCKS5" not in guest_text
+    # Само подключение гость получает полностью.
+    assert "tg://proxy" in guest_text and "deadbeef" in guest_text
+
+
+def test_proxy_keyboard_has_no_rotate_button_for_guest():
+    """Смена секрета рвёт ссылку у всех — такую кнопку гостю не показываем
+    даже с отказом по нажатию."""
+    assert vpn_handlers._proxy_keyboard("jeeves", can_rotate=False) is None
+    admin_kb = vpn_handlers._proxy_keyboard("jeeves", can_rotate=True)
+    assert admin_kb is not None
+    assert "Сменить секрет" in admin_kb.inline_keyboard[0][0].text
+
+
+# --- тонкая правка умений гостя из /vpn (2026-09-24) ------------------------
+
+
+class FakeGate:
+    """Только то, чем пользуется экран умений. Настоящий Gatekeeper пишет
+    гостевой пакет на диск — здесь это лишнее."""
+
+    def __init__(self, book: SubscriptionBook, guest_only: bool = True) -> None:
+        self._book = book
+        self._guest_only = guest_only
+        self.saved: list[tuple[int, frozenset[str]]] = []
+
+    def set_guest_rights(self, chat_id: int, rights: frozenset[str]):
+        sub = self._book.for_chat(chat_id)
+        if sub is None or (self._guest_only and not sub.is_guest):
+            return None
+        self.saved.append((chat_id, rights))
+        updated = sub.with_allowed_commands(rights)
+        self._book.add(updated)
+        return updated
+
+
+async def test_rights_screen_opens_from_guest_card():
+    book = _book(ANYA)
+    callback = FakeCallback(vpn_admin_view.rights_cb(777), chat_id=1)
+    await vpn_handlers.handle_action(
+        callback, TwoServersLink(), FakeNotifier(), _config(), ADMIN, _pending(), book
+    )
+    assert "Права VPN" in callback.message.edits[0]
+
+
+async def test_toggle_grants_the_whole_skill_at_once():
+    book = _book(ANYA)
+    gate = FakeGate(book)
+    callback = FakeCallback(vpn_admin_view.toggle_cb(777, "proxy"), chat_id=1)
+    await vpn_handlers.handle_action(
+        callback,
+        TwoServersLink(),
+        FakeNotifier(),
+        _config(),
+        ADMIN,
+        _pending(),
+        book,
+        gate,
+        None,
+    )
+    assert gate.saved == [(777, frozenset({"proxy_link@vpn"}))]
+    # Экран перерисован уже по новому состоянию.
+    assert "✅" in callback.message.edits[0]
+
+
+async def test_toggle_is_idempotent_pair():
+    """Второе нажатие снимает то же, что выдало первое, и ничего сверх."""
+    book = _book(ANYA)
+    gate = FakeGate(book)
+    for _ in range(2):
+        callback = FakeCallback(vpn_admin_view.toggle_cb(777, "dev"), chat_id=1)
+        await vpn_handlers.handle_action(
+            callback,
+            TwoServersLink(),
+            FakeNotifier(),
+            _config(),
+            ADMIN,
+            _pending(),
+            book,
+            gate,
+            None,
+        )
+    assert gate.saved[-1] == frozenset() or gate.saved[-1][1] == frozenset()
+    assert book.for_chat(777).allowed_commands == frozenset()
+
+
+async def test_toggle_refuses_subscription_outside_the_guest_list():
+    """Экран открывается только из списка гостей, и владельческая подписка в
+    него не попадает: её права по-прежнему правятся конфигом и рестартом."""
+    owner = Subscription(chat_id=1, name="admin", allowed_commands=frozenset({"*"}))
+    book = _book(owner)
+    gate = FakeGate(book)
+    callback = FakeCallback(vpn_admin_view.toggle_cb(1, "proxy"), chat_id=1)
+    await vpn_handlers.handle_action(
+        callback,
+        TwoServersLink(),
+        FakeNotifier(),
+        _config(),
+        ADMIN,
+        _pending(),
+        book,
+        gate,
+        None,
+    )
+    assert gate.saved == []
+    assert "больше не в списке" in str(callback.answered[-1])

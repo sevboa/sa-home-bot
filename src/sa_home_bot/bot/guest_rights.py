@@ -28,9 +28,12 @@ Group`, а страница оперирует группой целиком: «
 поимённый список (инвариант AUTHORIZATION.md §9), поэтому новое умение службы
 гостю сама собой не достаётся.
 
-Нюансы внутри группы настраиваются там, где им место: для VPN это допуск к
-конкретной локации и её лимит в ГБ — в /vpn (bot/vpn_admin_view.py), а не
-правами.
+Нюансы внутри группы настраиваются там, где им место: для VPN это /vpn →
+«👥 Все гости» → гость (bot/vpn_admin_view.py) — и допуск к конкретной локации
+с её лимитом в ГБ, и тонкие тумблеры прав внутри группы. Разделение
+сознательное (решение пользователя 2026-09-24): /guests отвечает на вопрос
+«пускаем ли вообще в VPN» одной кнопкой, /vpn — на вопрос «что именно ему там
+можно», не заставляя листать восемь прав поштучно.
 """
 
 from __future__ import annotations
@@ -77,7 +80,7 @@ GUEST_GROUPS: list[RightGroup] = [
             GuestRight("request_extra@vpn", "заявка сверх лимита"),
             GuestRight("apk@vpn", "приложение"),
         ),
-        note="Локации и лимит ГБ выдаются отдельно — в /vpn → «👥 Все гости».",
+        note="Локации, лимит ГБ и тонкая настройка прав — в /vpn → «👥 Все гости».",
     ),
     RightGroup(
         key="torrents",
@@ -117,18 +120,41 @@ GUEST_RIGHTS: list[GuestRight] = [
     GuestRight("wake", "🔌 Разбудить ПК"),
 ]
 
+# Права, которые кнопкой в /guests НЕ выдаются, потому что настраиваются
+# тоньше и в другом месте (решение пользователя 2026-09-24). Здесь они ради
+# человеческой подписи: право может стоять у гостя, и перечень выданных не
+# должен показывать голую строку `proxy_link@vpn`.
+#
+# `proxy_link@vpn` сознательно НЕ член группы «📶 VPN»: прокси Telegram — не
+# VPN (mtg живёт на том же VPS сам по себе, не требует допуска к локации и не
+# ест квоту в ГБ), и получать его автоматом вместе с группой не должен никто.
+# Открывается точечно: /vpn → «👥 Все гости» → гость → «🔐 Права VPN»
+# (bot/vpn_admin_view.py::VPN_TOGGLES).
+FINE_RIGHTS: list[GuestRight] = [
+    GuestRight("proxy_link@vpn", "📶 VPN: прокси Telegram"),
+]
+
 _BY_GROUP = {group.key: group for group in GUEST_GROUPS}
 # Метки членов группы короткие («перевыпустить»), поэтому в общем справочнике
 # они живут с префиксом группы: строка права одна и та же и в списке группы, и
 # в перечне прав, выданных руками в config.toml.
-_BY_RIGHT = {r.right: r for r in GUEST_RIGHTS} | {
-    member.right: GuestRight(member.right, f"{group.label}: {member.label}")
-    for group in GUEST_GROUPS
-    for member in group.members
-}
+_BY_RIGHT = (
+    {r.right: r for r in GUEST_RIGHTS}
+    | {
+        member.right: GuestRight(member.right, f"{group.label}: {member.label}")
+        for group in GUEST_GROUPS
+        for member in group.members
+    }
+    | {r.right: r for r in FINE_RIGHTS}
+)
 
-# Все права, которые вообще можно выдать кнопкой — одиночные плюс члены групп.
-CATALOG_RIGHTS: frozenset[str] = frozenset(_BY_RIGHT)
+# Все права, которые вообще можно выдать кнопкой ЗДЕСЬ — одиночные плюс члены
+# групп. Тонкие (FINE_RIGHTS) не входят: их страница «Добавить право» не
+# предлагает, они живут на своём экране.
+CATALOG_RIGHTS: frozenset[str] = frozenset(
+    [r.right for r in GUEST_RIGHTS]
+    + [member.right for group in GUEST_GROUPS for member in group.members]
+)
 
 
 def label(right: str) -> str:

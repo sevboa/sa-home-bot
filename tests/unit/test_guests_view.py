@@ -277,3 +277,23 @@ def test_guest_groups_do_not_overlap_with_single_rights():
         assert not group.rights & singles, f"{group.key} дублирует одиночное право"
         assert not group.rights & seen, f"{group.key} пересекается с другой группой"
         seen |= group.rights
+
+
+# --- тонкие права: кнопкой здесь не выдаются (2026-09-24) -------------------
+
+
+def test_fine_rights_are_not_offered_on_the_add_page():
+    """`proxy_link@vpn` открывается в /vpn → «👥 Все гости» → «🔐 Права VPN»:
+    /guests отвечает только на вопрос «пускаем ли вообще в VPN»."""
+    sub = _guest(77, rights=guest_rights.CATALOG_RIGHTS)
+    _text, kb = guests_view.build_perm_add_view(sub, 0)
+    assert not any("proxy" in c for c in _callbacks(kb))
+
+
+def test_fine_rights_still_have_a_human_label():
+    """Выданное в /vpn право видно в перечне /guests — и не голой строкой."""
+    assert guest_rights.label("proxy_link@vpn") != "proxy_link@vpn"
+    sub = _guest(77, rights=frozenset({"proxy_link@vpn"}))
+    text, _kb = guests_view.build_perms_view(sub, 0)
+    assert "proxy_link@vpn" not in text
+    assert "прокси" in text.lower()

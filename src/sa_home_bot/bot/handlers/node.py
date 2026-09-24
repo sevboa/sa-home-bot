@@ -11,12 +11,13 @@ from __future__ import annotations
 import contextlib
 import logging
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery
 
 from sa_home_bot.bot import actions, apps_view, commands, node_view
 from sa_home_bot.bot.handlers import vpn as vpn_handlers
+from sa_home_bot.bot.invites import Gatekeeper
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
@@ -127,6 +128,11 @@ async def on_dynamic_action(
     config: Settings,
     pending_vpn_secrets: PendingVpnSecrets,
     book: SubscriptionBook,
+    # Оба приходят из workflow_data (app.py) — необязательны здесь только ради
+    # тестов, которые зовут хендлер напрямую и до правки гостевых прав не
+    # доходят; без них экран умений честно скажет, что недоступен.
+    gate: Gatekeeper | None = None,
+    bot: Bot | None = None,
     subscription: Subscription | None = None,
 ) -> None:
     parsed = commands.parse_action_callback(callback.data)
@@ -141,7 +147,15 @@ async def on_dynamic_action(
         # дойти (SilenceGate отсекает раньше).
         if subscription is not None:
             await vpn_handlers.handle_action(
-                callback, node_link, notifier, config, subscription, pending_vpn_secrets, book
+                callback,
+                node_link,
+                notifier,
+                config,
+                subscription,
+                pending_vpn_secrets,
+                book,
+                gate,
+                bot,
             )
         else:
             await callback.answer()
