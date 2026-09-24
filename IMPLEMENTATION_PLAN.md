@@ -3298,6 +3298,35 @@ Ollama; mycraft спит ради экономии энергии, будитс�
   работает `agent/mcp_tools.py`, теперь это mycraft, не alfred), докстринг
   переписан под новое расположение.
 
+**Phase 2 (та же задача vast-skipping-crane.md) — интерактивный агент на Pydantic
+AI поверх этого MCP-сервера — ✅ v0.111.12 (2026-09-24).**
+- `src/sa_home_bot/agent/chat.py` (новый) — `Agent` (Pydantic AI) с моделью
+  `OpenAIChatModel`/`OllamaProvider` (Ollama через OpenAI-совместимый эндпоинт,
+  `settings.llm.model`/`settings.llm.ollama_url`) и `toolsets=[MCPToolset(...)]`,
+  спавнящий `python -m sa_home_bot.agent.mcp_tools --config ...` дочерним
+  процессом через `fastmcp.client.transports.StdioTransport`. Персонажный
+  промпт — `settings.llm.persona_prompt` (тот же, что у живого `/ai`), с лёгким
+  фоллбэком, если пуст. Два режима: интерактивный REPL (история между
+  репликами через `result.new_messages()`) и `--once TEXT` для разового
+  неинтерактивного прогона. Не подключён к Telegram, живой `/ai`
+  (`bot/ai_flow.py`/`llm_chat.py`/`tasks/service.py`/`llm/service.py`) не
+  тронут вообще.
+- pyproject.toml extras `agent` (новая группа): `pydantic-ai-slim[mcp,openai]`.
+  Версия зафиксирована по факту реальной проверки на день реализации
+  (`pydantic-ai-slim` 2.48.0, тянет тот же `mcp==2.2.0`, что и extras `mcp`, и
+  `fastmcp-slim` как MCP-клиентский транспорт) — актуальный API модуля
+  `pydantic_ai.mcp` на этой версии другой, чем в старых примерах в интернете
+  (`MCPToolset(client)` + `fastmcp.client.Client`/`StdioTransport`, не
+  `MCPServerStdio`) — живая находка, проверено `inspect.signature` в
+  scratch-venv перед тем, как писать код, а не по памяти.
+- **Проверка — реальный прогон на mycraft**, не мок: `--once "384759 * 2837"`
+  → модель реально вызвала MCP-тул `calc` (`ToolCallPart`/`ToolReturnPart` в
+  `result.new_messages()`), получила `1091561283`, ответила в персонажном тоне
+  — подтверждён весь путь Pydantic AI → Ollama → MCP stdio → `bot.tools`
+  end-to-end.
+- Не решено (сознательно, вне скоупа): как агент запускается по-настоящему
+  (постоянная служба роя vs по требованию/спавн другим процессом) — Phase 3.
+
 **42.5. Собираемый по собеседнику первый промпт (имя+обращение) вместо статичного списка семьи в `llm-prompt.toml` — ЗАПЛАНИРОВАНО, разговор 2026-09-23, реализация не начата.**
 
 Повод: разбор персонажного промпта (`~/.config/sa-home-bot/llm-prompt.toml` на
