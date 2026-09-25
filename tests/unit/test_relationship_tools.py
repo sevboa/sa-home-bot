@@ -361,6 +361,25 @@ async def test_propose_relationship_creates_pending_and_dispatches_dialogue(stor
     assert f"relationship_id={row['id']}" in directive
 
 
+async def test_propose_relationship_directive_clarifies_alfred_is_not_a_party(store):
+    # Живая находка 2026-09-26: старая формулировка директивы ("...установить
+    # с тобой связь...") модель читала так, будто СВЯЗЬ ЗАВОДИТСЯ С НЕЙ САМОЙ
+    # (Альфредом) — пользователь получил "мне предложили стать моим
+    # супругом" вместо "Алексей предлагает связь с вами". Директива обязана
+    # явно называть Альфреда курьером, а не стороной связи.
+    book = _book()
+    node_link = FakeNodeLink()
+    ctx = _ctx(store, chat_id=GUEST_A, book=book, node_link=node_link)
+
+    await ai_tools.tool_propose_relationship(ctx, {"target_chat_id": GUEST_B, "relation": "spouse"})
+
+    directive = node_link.calls[0][1]["args"]["messages"][0]["content"]
+    assert "Альфред" in directive
+    assert "НЕ участник" in directive
+    assert "не с тобой" in directive
+    assert "Вася" in directive  # сторона связи — инициатор, назван по имени
+
+
 async def test_propose_relationship_duplicate_pending_does_not_redispatch(store):
     book = _book()
     node_link = FakeNodeLink()
