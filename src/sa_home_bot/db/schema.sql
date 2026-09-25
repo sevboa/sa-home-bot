@@ -148,17 +148,21 @@ CREATE TABLE IF NOT EXISTS ai_tool_calls (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_tool_calls_dialogue ON ai_tool_calls(chat_id, dialogue_id);
 
--- Связи между гостями (relationship ACL, Этап 42.6.1). Семья сюда НЕ
--- попадает — она уже есть как Subscription.family (config.py), пара
--- считается роднёй как A.family and B.family на лету. Эта таблица — только
--- friend/acquaintance, с жизненным циклом подтверждения (pending →
--- confirmed/rejected обеими сторонами). Без канонического упорядочивания
--- guest_a/guest_b — запросы по паре идут по OR на обе колонки (Store).
+-- Связи между гостями (relationship ACL, Этап 42.6.1; 'family' добавлена
+-- 42.6.5, 2026-09-26). Групповой флаг Subscription.family (config.py)
+-- остаётся отдельным, автоматическим источником "семья по умолчанию" — пара
+-- с этим флагом у обоих считается роднёй на лету (A.family and B.family), без
+-- отдельной записи здесь. 'family' в этой таблице — ТОЧЕЧНОЕ объявление
+-- семейной связи между конкретной парой гостей (не обязательно оба с
+-- групповым флагом), с тем же жизненным циклом подтверждения, что и
+-- friend/acquaintance (pending → confirmed/rejected обеими сторонами). Без
+-- канонического упорядочивания guest_a/guest_b — запросы по паре идут по OR
+-- на обе колонки (Store).
 CREATE TABLE IF NOT EXISTS guest_relationships (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     guest_a       INTEGER NOT NULL,   -- chat_id инициатора (proposed_by)
     guest_b       INTEGER NOT NULL,   -- chat_id адресата
-    relation      TEXT NOT NULL CHECK (relation IN ('friend', 'acquaintance')),
+    relation      TEXT NOT NULL CHECK (relation IN ('friend', 'acquaintance', 'family')),
     status        TEXT NOT NULL CHECK (status IN ('pending', 'confirmed', 'rejected')),
     proposed_by   INTEGER NOT NULL,
     created_at    TEXT NOT NULL,

@@ -58,5 +58,30 @@ async def apply_migrations(db: Database) -> None:
         log.info(
             "Миграция: vpn_check_states пересоздана под ключ (node, server, transport, target)"
         )
+    await _migrate_guest_relationships_family(db, schema)
     await db.conn.commit()
     log.info("Схема БД применена")
+
+
+async def _migrate_guest_relationships_family(db: Database, schema: str) -> None:
+    """CHECK(relation IN ('friend','acquaintance')) — заводился 42.6.1, до
+    'family' (42.6.5, 2026-09-26). SQLite не умеет ALTER CHECK — таблица уже
+    хранит реальные подтверждённые связи (в отличие от vpn_check_states выше,
+    это не жалко-оперативные данные), поэтому не дропаем, а пересоздаём с
+    переносом строк."""
+    cur = await db.conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='guest_relationships'"
+    )
+    row = await cur.fetchone()
+    if row is None or "'family'" in row["sql"]:
+        return
+    await db.conn.execute("ALTER TABLE guest_relationships RENAME TO guest_relationships_old_426")
+    await db.conn.executescript(schema)
+    await db.conn.execute(
+        "INSERT INTO guest_relationships "
+        "(id, guest_a, guest_b, relation, status, proposed_by, created_at, confirmed_at) "
+        "SELECT id, guest_a, guest_b, relation, status, proposed_by, created_at, confirmed_at "
+        "FROM guest_relationships_old_426"
+    )
+    await db.conn.execute("DROP TABLE guest_relationships_old_426")
+    log.info("Миграция: guest_relationships — CHECK(relation) расширен до 'family'")

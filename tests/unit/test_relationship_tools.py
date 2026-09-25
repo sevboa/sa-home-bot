@@ -136,6 +136,61 @@ async def test_propose_relationship_already_family(store):
     assert "родня" in result
 
 
+async def test_propose_relationship_already_family_blocks_family_type_too(store):
+    # Групповой флаг делает пару роднёй автоматически — точечное предложение
+    # 'family' между теми же двумя гостями избыточно, тул должен это сказать,
+    # а не создать дублирующую запись в guest_relationships.
+    book = _book(a_family=True, b_family=True)
+    ctx = _ctx(store, chat_id=GUEST_A, book=book, node_link=FakeNodeLink())
+    result = await ai_tools.tool_propose_relationship(
+        ctx, {"target_chat_id": GUEST_B, "relation": "family"}
+    )
+    assert "родня" in result
+    assert await store.pending_relationship_for(GUEST_B) is None
+
+
+async def test_propose_relationship_family_between_non_flagged_guests(store):
+    # 42.6.5: 'family' — точечная связь конкретной пары, НЕ требует группового
+    # флага Subscription.family ни у одного из двоих.
+    book = _book()  # оба family=False
+    node_link = FakeNodeLink()
+    ctx = _ctx(store, chat_id=GUEST_A, book=book, node_link=node_link)
+
+    result = await ai_tools.tool_propose_relationship(
+        ctx, {"target_chat_id": GUEST_B, "relation": "family"}
+    )
+
+    assert "Настя" in result
+    row = await store.pending_relationship_for(GUEST_B)
+    assert row is not None
+    assert row["relation"] == "family"
+    directive = node_link.calls[0][1]["args"]["messages"][0]["content"]
+    assert "семья" in directive
+
+
+async def test_propose_relationship_family_one_sided_flag(store):
+    # Один из двоих уже с групповым флагом, другой — нет: точечное 'family'
+    # всё равно должно быть доступно (не то же самое, что групповая родня).
+    book = _book(a_family=True, b_family=False)
+    node_link = FakeNodeLink()
+    ctx = _ctx(store, chat_id=GUEST_A, book=book, node_link=node_link)
+
+    result = await ai_tools.tool_propose_relationship(
+        ctx, {"target_chat_id": GUEST_B, "relation": "family"}
+    )
+
+    assert "Настя" in result
+    assert await store.pending_relationship_for(GUEST_B) is not None
+
+
+async def test_my_relationships_pairwise_family(store):
+    row = await store.propose_relationship(GUEST_A, GUEST_B, "family", datetime.now(tz=UTC))
+    await store.respond_relationship(row["id"], True, datetime.now(tz=UTC))
+    ctx = _ctx(store, chat_id=GUEST_A, book=_book())
+    result = await ai_tools.tool_my_relationships(ctx, {})
+    assert "Настя" in result and "семья" in result
+
+
 async def test_propose_relationship_creates_pending_and_dispatches_dialogue(store):
     book = _book()
     node_link = FakeNodeLink()
