@@ -107,9 +107,7 @@ class Store:
             return []
 
     async def set_action_ticks(self, action_key: str, ticks: list[datetime]) -> None:
-        await self.set_state(
-            ACTION_TICKS_PREFIX + action_key, json.dumps([_iso(t) for t in ticks])
-        )
+        await self.set_state(ACTION_TICKS_PREFIX + action_key, json.dumps([_iso(t) for t in ticks]))
 
     # --- job_runs ---
 
@@ -167,9 +165,7 @@ class Store:
         }
 
     async def get_all_states(self) -> list[HealthState]:
-        cur = await self.db.conn.execute(
-            "SELECT * FROM health_states ORDER BY kind, component_id"
-        )
+        cur = await self.db.conn.execute("SELECT * FROM health_states ORDER BY kind, component_id")
         rows = await cur.fetchall()
         return [_row_to_state(r) for r in rows]
 
@@ -335,8 +331,7 @@ class Store:
 
     async def get_known_host_states(self) -> dict[str, KnownState]:
         cur = await self.db.conn.execute(
-            "SELECT component_id, status, consecutive_count, alerting_since "
-            "FROM host_metric_states"
+            "SELECT component_id, status, consecutive_count, alerting_since FROM host_metric_states"
         )
         rows = await cur.fetchall()
         return {
@@ -350,9 +345,7 @@ class Store:
         }
 
     async def get_all_host_states(self) -> list[HostMetricState]:
-        cur = await self.db.conn.execute(
-            "SELECT * FROM host_metric_states ORDER BY component_id"
-        )
+        cur = await self.db.conn.execute("SELECT * FROM host_metric_states ORDER BY component_id")
         return [_row_to_host_state(r) for r in await cur.fetchall()]
 
     async def apply_host_diff(self, diff: HostHealthDiff, now: datetime) -> None:
@@ -378,8 +371,16 @@ class Store:
                         "consecutive_count, alerting_since, first_seen_at, last_seen_at) "
                         "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
-                            st.component_id, st.metric, st.label, st.unit, st.status,
-                            st.value, st.consecutive_count, since_s, now_s, now_s,
+                            st.component_id,
+                            st.metric,
+                            st.label,
+                            st.unit,
+                            st.status,
+                            st.value,
+                            st.consecutive_count,
+                            since_s,
+                            now_s,
+                            now_s,
                         ),
                     )
                 elif st.component_id in started:
@@ -388,8 +389,14 @@ class Store:
                         "last_value=?, consecutive_count=?, alerting_since=?, last_seen_at=?, "
                         "notified_alert_at=NULL, notified_cleared_at=NULL WHERE component_id=?",
                         (
-                            st.status, st.label, st.unit, st.value, st.consecutive_count,
-                            now_s, now_s, st.component_id,
+                            st.status,
+                            st.label,
+                            st.unit,
+                            st.value,
+                            st.consecutive_count,
+                            now_s,
+                            now_s,
+                            st.component_id,
                         ),
                     )
                 elif st.component_id in cleared:
@@ -398,8 +405,13 @@ class Store:
                         "last_value=?, consecutive_count=?, alerting_since=NULL, last_seen_at=?, "
                         "notified_cleared_at=NULL WHERE component_id=?",
                         (
-                            st.status, st.label, st.unit, st.value, st.consecutive_count,
-                            now_s, st.component_id,
+                            st.status,
+                            st.label,
+                            st.unit,
+                            st.value,
+                            st.consecutive_count,
+                            now_s,
+                            st.component_id,
                         ),
                     )
                 else:
@@ -408,8 +420,14 @@ class Store:
                         "last_value=?, consecutive_count=?, alerting_since=?, last_seen_at=? "
                         "WHERE component_id=?",
                         (
-                            st.status, st.label, st.unit, st.value, st.consecutive_count,
-                            since_s, now_s, st.component_id,
+                            st.status,
+                            st.label,
+                            st.unit,
+                            st.value,
+                            st.consecutive_count,
+                            since_s,
+                            now_s,
+                            st.component_id,
                         ),
                     )
 
@@ -423,8 +441,7 @@ class Store:
 
     async def pending_host_alerts(self) -> list[HostMetricState]:
         cur = await self.db.conn.execute(
-            "SELECT * FROM host_metric_states "
-            "WHERE status='alerting' AND notified_alert_at IS NULL"
+            "SELECT * FROM host_metric_states WHERE status='alerting' AND notified_alert_at IS NULL"
         )
         return [_row_to_host_state(r) for r in await cur.fetchall()]
 
@@ -714,6 +731,85 @@ class Store:
         row = await cur.fetchone()
         return row["dialogue_id"] if row else None
 
+    # --- guest_relationships (Этап 42.6.1, связи между гостями) ---
+
+    async def propose_relationship(
+        self, guest_a: int, guest_b: int, relation: str, now: datetime
+    ) -> dict:
+        """Предложение связи. Если между этой парой (в любом порядке) уже
+        есть активная запись (pending/confirmed) — не дублировать, вернуть
+        её как есть: повторное предложение того же самого не должно плодить
+        параллельные заявки."""
+        existing = await self._active_relationship(guest_a, guest_b)
+        if existing is not None:
+            return existing
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                "INSERT INTO guest_relationships(guest_a, guest_b, relation, status, "
+                "proposed_by, created_at) VALUES(?, ?, ?, 'pending', ?, ?)",
+                (guest_a, guest_b, relation, guest_a, _iso(now)),
+            )
+            row_id = cur.lastrowid
+        row = await self.get_relationship(row_id)
+        assert row is not None
+        return row
+
+    async def _active_relationship(self, guest_a: int, guest_b: int) -> dict | None:
+        cur = await self.db.conn.execute(
+            "SELECT * FROM guest_relationships WHERE status IN ('pending', 'confirmed') "
+            "AND ((guest_a=? AND guest_b=?) OR (guest_a=? AND guest_b=?))",
+            (guest_a, guest_b, guest_b, guest_a),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def respond_relationship(
+        self, relationship_id: int, accepted: bool, now: datetime
+    ) -> dict | None:
+        """B отвечает на предложение — переводит pending в confirmed/rejected.
+        Возвращает None, если записи нет или она уже не pending (двойной
+        ответ/устаревшая ссылка), а не тихо переписывает решённое."""
+        row = await self.get_relationship(relationship_id)
+        if row is None or row["status"] != "pending":
+            return None
+        new_status = "confirmed" if accepted else "rejected"
+        confirmed_at = _iso(now) if accepted else None
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "UPDATE guest_relationships SET status=?, confirmed_at=? WHERE id=?",
+                (new_status, confirmed_at, relationship_id),
+            )
+        return await self.get_relationship(relationship_id)
+
+    async def get_relationship(self, relationship_id: int) -> dict | None:
+        cur = await self.db.conn.execute(
+            "SELECT * FROM guest_relationships WHERE id=?", (relationship_id,)
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def relationships_for(self, chat_id: int, status: str = "confirmed") -> list[dict]:
+        """Связи chat_id в любой из двух ролей (guest_a или guest_b)."""
+        cur = await self.db.conn.execute(
+            "SELECT * FROM guest_relationships WHERE status=? AND (guest_a=? OR guest_b=?) "
+            "ORDER BY id",
+            (status, chat_id, chat_id),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def pending_relationship_for(self, guest_b: int) -> dict | None:
+        """Необработанное предложение, адресованное guest_b прямо сейчас —
+        для контроля прав в confirm_relationship/reject_relationship (42.6.2):
+        отвечать может только тот, кому реально адресовано."""
+        cur = await self.db.conn.execute(
+            "SELECT * FROM guest_relationships WHERE status='pending' AND guest_b=? "
+            "ORDER BY id DESC LIMIT 1",
+            (guest_b,),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
     # --- tasks (служба tasks, отложенные задачи роя, sa_home_bot/tasks/) ---
 
     async def create_task(
@@ -861,9 +957,7 @@ class Store:
     async def prune_invites(self, older_than: datetime) -> int:
         """Убрать давно истёкшие/погашенные коды — их след уже в подписках."""
         async with self.db.transaction() as conn:
-            cur = await conn.execute(
-                "DELETE FROM invites WHERE expires_at<?", (_iso(older_than),)
-            )
+            cur = await conn.execute("DELETE FROM invites WHERE expires_at<?", (_iso(older_than),))
             return cur.rowcount
 
     # --- swarm_events (журнал системных/админских событий, bot/node_events.py) ---
@@ -876,8 +970,7 @@ class Store:
         (тот же приём, что job_runs/invites), не на каждой записи."""
         async with self.db.transaction() as conn:
             await conn.execute(
-                "INSERT INTO swarm_events(event_type, node, text, created_at) "
-                "VALUES(?, ?, ?, ?)",
+                "INSERT INTO swarm_events(event_type, node, text, created_at) VALUES(?, ?, ?, ?)",
                 (event_type, node, text, _iso(at)),
             )
 

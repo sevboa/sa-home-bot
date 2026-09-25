@@ -3514,7 +3514,7 @@ pending). Решать по факту использования, не зара
 
 **Декомпозиция (разговор 2026-09-26, по аналогии с Этапом 44):**
 
-**42.6.1. Схема + `Store`.** Миграция: таблица `guest_relationships`
+**42.6.1. Схема + `Store` — ✅ v0.112.9 (2026-09-26).** Миграция: таблица `guest_relationships`
 (`id`, `guest_a` chat_id — инициатор, `guest_b` chat_id — адресат, `relation`
 ∈ {`friend`, `acquaintance`}, `status` ∈ {`pending`, `confirmed`, `rejected`},
 `proposed_by`, `created_at`, `confirmed_at` NULL). Без канонического

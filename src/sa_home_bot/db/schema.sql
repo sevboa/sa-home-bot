@@ -148,6 +148,25 @@ CREATE TABLE IF NOT EXISTS ai_tool_calls (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_tool_calls_dialogue ON ai_tool_calls(chat_id, dialogue_id);
 
+-- Связи между гостями (relationship ACL, Этап 42.6.1). Семья сюда НЕ
+-- попадает — она уже есть как Subscription.family (config.py), пара
+-- считается роднёй как A.family and B.family на лету. Эта таблица — только
+-- friend/acquaintance, с жизненным циклом подтверждения (pending →
+-- confirmed/rejected обеими сторонами). Без канонического упорядочивания
+-- guest_a/guest_b — запросы по паре идут по OR на обе колонки (Store).
+CREATE TABLE IF NOT EXISTS guest_relationships (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    guest_a       INTEGER NOT NULL,   -- chat_id инициатора (proposed_by)
+    guest_b       INTEGER NOT NULL,   -- chat_id адресата
+    relation      TEXT NOT NULL CHECK (relation IN ('friend', 'acquaintance')),
+    status        TEXT NOT NULL CHECK (status IN ('pending', 'confirmed', 'rejected')),
+    proposed_by   INTEGER NOT NULL,
+    created_at    TEXT NOT NULL,
+    confirmed_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_guest_relationships_a ON guest_relationships(guest_a);
+CREATE INDEX IF NOT EXISTS idx_guest_relationships_b ON guest_relationships(guest_b);
+
 -- Отложенные задачи роя — служба tasks (`sa-home-bot --service tasks`,
 -- sa_home_bot/tasks/), собственная таблица этой службы (не бота — эта
 -- схема общая для всех служб проекта, см. db/migrations.py). Замена

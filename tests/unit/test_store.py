@@ -183,9 +183,7 @@ async def test_recent_events_filters_by_node(store):
 
 async def test_recent_events_filters_by_since(store):
     await store.record_event("node_down", "mycraft", "старое", BASE_TIME)
-    await store.record_event(
-        "node_up", "mycraft", "свежее", BASE_TIME + timedelta(hours=2)
-    )
+    await store.record_event("node_up", "mycraft", "свежее", BASE_TIME + timedelta(hours=2))
     events = await store.recent_events(since=BASE_TIME + timedelta(hours=1), limit=10)
     assert [e["text"] for e in events] == ["свежее"]
 
@@ -251,8 +249,10 @@ async def test_baseline_stats_isolated_per_component(store):
 async def test_prune_readings_keeps_last_per_component(store):
     for t in range(10):
         await store.record_readings(
-            [make_reading(float(t), component_id="cpu:pkg"),
-             make_reading(float(t), component_id="disk:/dev/sda")]
+            [
+                make_reading(float(t), component_id="cpu:pkg"),
+                make_reading(float(t), component_id="disk:/dev/sda"),
+            ]
         )
     deleted = await store.prune_readings(keep_per_component=3)
     assert deleted == 14  # (10 - 3) на каждый из двух компонентов
@@ -333,6 +333,108 @@ async def test_tool_calls_for_dialogue_ordered_and_isolated(store):
     await store.record_tool_call(CHAT_ID, 600, 1, "calc", {}, "9", BASE_TIME)
     rows = await store.tool_calls_for_dialogue(CHAT_ID, 500)
     assert [r["tool_name"] for r in rows] == ["calc", "get_time"]
+
+
+# --- guest_relationships (Этап 42.6.1, связи между гостями) ---
+
+GUEST_A = 111
+GUEST_B = 222
+GUEST_C = 333
+
+
+async def test_propose_relationship_creates_pending(store):
+    row = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
+    assert row["guest_a"] == GUEST_A
+    assert row["guest_b"] == GUEST_B
+    assert row["relation"] == "friend"
+    assert row["status"] == "pending"
+    assert row["proposed_by"] == GUEST_A
+    assert row["confirmed_at"] is None
+
+
+async def test_propose_relationship_does_not_duplicate_active_pair(store):
+    first = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
+    again = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
+    assert again["id"] == first["id"]
+    # И в обратном порядке пары — та же активная запись, не новая заявка.
+    reverse = await store.propose_relationship(GUEST_B, GUEST_A, "friend", BASE_TIME)
+    assert reverse["id"] == first["id"]
+    rows = await store.relationships_for(GUEST_A, status="pending")
+    assert len(rows) == 1
+
+
+async def test_propose_relationship_after_rejected_creates_new(store):
+    first = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
+    await store.respond_relationship(first["id"], accepted=False, now=BASE_TIME)
+    again = await store.propose_relationship(GUEST_A, GUEST_B, "acquaintance", BASE_TIME)
+    assert again["id"] != first["id"]
+    assert again["status"] == "pending"
+
+
+async def test_respond_relationship_accepted_sets_confirmed(store):
+    row = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
+    updated = await store.respond_relationship(
+        row["id"], accepted=True, now=BASE_TIME + timedelta(seconds=1)
+    )
+    assert updated["status"] == "confirmed"
+    assert updated["confirmed_at"] is not None
+
+
+async def test_respond_relationship_rejected_sets_rejected_without_confirmed_at(store):
+    row = await store.propose_relationship(GUEST_A, GUEST_B, "acquaintance", BASE_TIME)
+    updated = await store.respond_relationship(row["id"], accepted=False, now=BASE_TIME)
+    assert updated["status"] == "rejected"
+    assert updated["confirmed_at"] is None
+
+
+async def test_respond_relationship_unknown_id_returns_none(store):
+    assert await store.respond_relationship(999, accepted=True, now=BASE_TIME) is None
+
+
+async def test_respond_relationship_twice_second_call_returns_none(store):
+    row = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
+    await store.respond_relationship(row["id"], accepted=True, now=BASE_TIME)
+    assert await store.respond_relationship(row["id"], accepted=False, now=BASE_TIME) is None
+
+
+async def test_get_relationship_roundtrip(store):
+    row = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
+    assert await store.get_relationship(row["id"]) == row
+    assert await store.get_relationship(999) is None
+
+
+async def test_relationships_for_finds_both_roles(store):
+    row = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
+    await store.respond_relationship(row["id"], accepted=True, now=BASE_TIME)
+    assert [r["id"] for r in await store.relationships_for(GUEST_A)] == [row["id"]]
+    assert [r["id"] for r in await store.relationships_for(GUEST_B)] == [row["id"]]
+    assert await store.relationships_for(GUEST_C) == []
+
+
+async def test_relationships_for_filters_by_status(store):
+    confirmed = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
+    await store.respond_relationship(confirmed["id"], accepted=True, now=BASE_TIME)
+    pending = await store.propose_relationship(GUEST_A, GUEST_C, "acquaintance", BASE_TIME)
+    assert [r["id"] for r in await store.relationships_for(GUEST_A, status="confirmed")] == [
+        confirmed["id"]
+    ]
+    assert [r["id"] for r in await store.relationships_for(GUEST_A, status="pending")] == [
+        pending["id"]
+    ]
+
+
+async def test_pending_relationship_for_finds_addressee_only(store):
+    assert await store.pending_relationship_for(GUEST_B) is None
+    row = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
+    assert (await store.pending_relationship_for(GUEST_B))["id"] == row["id"]
+    # Инициатор — не адресат, для него pending_relationship_for пуст.
+    assert await store.pending_relationship_for(GUEST_A) is None
+
+
+async def test_pending_relationship_for_none_after_response(store):
+    row = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
+    await store.respond_relationship(row["id"], accepted=True, now=BASE_TIME)
+    assert await store.pending_relationship_for(GUEST_B) is None
 
 
 # --- tasks (служба tasks, отложенные задачи роя) ---
@@ -420,8 +522,6 @@ async def test_pop_event_waiter_removes_by_task_id_regardless_of_event(store):
     await store.add_event_waiter(1, "arch-t480", "restart_applied", BASE_TIME)
     await store.pop_event_waiter(1)
     assert await store.pop_event_waiter_for("arch-t480", "restart_applied") is None
-
-
 
 
 # --- host-метрики VPS (domain/host.py, этап 38) ---
