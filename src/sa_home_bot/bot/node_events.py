@@ -17,6 +17,10 @@ ai_turns делаются здесь, по meta, которую сама слу�
 chat_loop-задачи — своего Notifier у службы tasks нет, получателя и текст
 она уже подготовила сама, отправляет и пишет ai_turn здесь, см.
 tasks/protocol.py::EVENT_DELIVER_MESSAGE и bot/tools.py::ToolContext.emit).
+``respond_relationship`` (Этап 42.6.2 — тот же мост, что и deliver_message,
+но для confirm_relationship/reject_relationship: пишет guest_relationships и
+уведомляет инициатора, см. tasks/protocol.py::EVENT_RESPOND_RELATIONSHIP и
+_handle_respond_relationship ниже).
 ``idle_power_blocked`` (node/service.py::maybe_auto_poweroff_idle — простой
 Alfred дошёл до автовыключения ноды, но открыта SSH-сессия, выключение
 отложено) — адресно админам (notify_admins), с кнопкой «закрыть сессии и
@@ -55,6 +59,7 @@ from datetime import UTC, datetime
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sa_home_bot.bot import commands
+from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.ai_flow import (
     ALBERT_ASLEEP,
     ALBERT_ASLEEP_MD,
@@ -229,6 +234,49 @@ async def _handle_deliver_message(notifier: Notifier, store: Store, data: dict) 
     await store.record_ai_turn(
         chat_id, message_id, message_id, "assistant", plain_text, datetime.now(tz=UTC)
     )
+
+
+async def _handle_respond_relationship(
+    notifier: Notifier, store: Store, book: SubscriptionBook, data: dict
+) -> None:
+    """confirm_relationship/reject_relationship, вызванные ВНУТРИ проактивной
+    сессии агента установки связи (Этап 42.6.2, schedule_agent_dialogue —
+    служба tasks): своего Store/Notifier там нет (см. tasks/protocol.py::
+    EVENT_RESPOND_RELATIONSHIP и bot/tools.py::_respond_relationship) —
+    статус пишем и инициатора уведомляем здесь, где они настоящие.
+
+    ``responder_chat_id`` — серверный (взят из ctx.chat_id ТОЙ сессии, не от
+    модели), но запись всё равно сверяем перед записью (гонка/устаревшая
+    ссылка/повторный ответ) — тихо игнорируем несовпадение, тот же приём,
+    что и у остальных fire-and-forget мостов этого модуля."""
+    relationship_id = data.get("relationship_id")
+    accepted = data.get("accepted")
+    responder_chat_id = data.get("responder_chat_id")
+    if (
+        not isinstance(relationship_id, int)
+        or not isinstance(accepted, bool)
+        or not isinstance(responder_chat_id, int)
+    ):
+        return
+    row = await store.get_relationship(relationship_id)
+    if row is None or row["status"] != "pending" or row["guest_b"] != responder_chat_id:
+        log.warning(
+            "respond_relationship: заявка id=%s не найдена/не адресована chat=%s",
+            relationship_id,
+            responder_chat_id,
+        )
+        return
+    now = datetime.now(tz=UTC)
+    updated = await store.respond_relationship(relationship_id, accepted, now)
+    if updated is None:
+        return
+    responder = book.for_chat(responder_chat_id)
+    text = ai_tools.render_relationship_response_notice(
+        responder.name if responder is not None else "гость", updated["relation"], accepted
+    )
+    message_id = await notifier.send_direct(row["guest_a"], text)
+    if message_id is not None:
+        await store.record_ai_turn(row["guest_a"], message_id, message_id, "assistant", text, now)
 
 
 async def _maybe_fire_event_waiter(get_node_link, node_id: str, event_type: str) -> None:
@@ -474,6 +522,9 @@ def build_node_event_handler(
             return
         if name == task_protocol.EVENT_DELIVER_MESSAGE:
             await _handle_deliver_message(notifier, store, data)
+            return
+        if name == task_protocol.EVENT_RESPOND_RELATIONSHIP:
+            await _handle_respond_relationship(notifier, store, book, data)
             return
         if name == task_protocol.EVENT_TOOL_CALL:
             await notify_tool_call(

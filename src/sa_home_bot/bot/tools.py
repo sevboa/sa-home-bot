@@ -1003,6 +1003,156 @@ async def schedule_agent_dialogue(
     return await node_link.command(task_protocol.ACTION_CREATE, create_args, dst=dst)
 
 
+# --- связи между гостями (Этап 42.6.2, relationship ACL) ---
+#
+# Семья сюда не входит — она уже есть как Subscription.family (см.
+# IMPLEMENTATION_PLAN.md §42.6, "Семья — не через эту таблицу вообще").
+# relation — плоский набор для v1 (решение пользователя 2026-09-26, не
+# лестница), список открытых вопросов (отзыв связи, таймаут pending) — в
+# плане, не блокируют этот подэтап.
+RELATION_TYPES = ("friend", "acquaintance")
+_RELATION_LABELS_RU = {"friend": "друг", "acquaintance": "знакомый"}
+
+
+def _relation_label(relation: str) -> str:
+    return _RELATION_LABELS_RU.get(relation, relation)
+
+
+def render_relationship_response_notice(responder_name: str, relation: str, accepted: bool) -> str:
+    """Текст уведомления инициатору (A) об ответе адресата (B). Общая с
+    bot/node_events.py::_handle_respond_relationship (там — мост для ответа,
+    данного ВНУТРИ проактивной сессии, см. докстринг _respond_relationship
+    ниже) — один текст, не дублировать формулировку в двух модулях."""
+    verb = "подтвердил(а)" if accepted else "отклонил(а)"
+    return f"{responder_name} {verb} предложение связи «{_relation_label(relation)}»."
+
+
+async def tool_propose_relationship(ctx: ToolContext, args: dict[str, Any]) -> str:
+    if ctx.chat_id is None or ctx.book is None or ctx.store is None:
+        return "недоступно: сейчас не могу предложить связь"
+    if ctx.node_link is None:
+        return "ошибка: служба задач недоступна"
+    try:
+        target_chat_id = int(args.get("target_chat_id"))
+    except (TypeError, ValueError):
+        return "ошибка: target_chat_id должен быть числом (chat_id из guests_list)"
+    relation = str(args.get("relation") or "").strip().lower()
+    if relation not in RELATION_TYPES:
+        return f"ошибка: relation должен быть одним из: {', '.join(RELATION_TYPES)}"
+    if target_chat_id == ctx.chat_id:
+        return "ошибка: нельзя предложить связь самому себе"
+    proposer = ctx.book.for_chat(ctx.chat_id)
+    target = ctx.book.for_chat(target_chat_id)
+    if proposer is None or target is None:
+        return "ошибка: гость не найден — сверься с guests_list, не угадывай chat_id"
+    if proposer.family and target.family:
+        return f"{target.name} и так родня — отдельно подтверждать не нужно"
+
+    # Проверяем ДО записи, была ли уже активная связь — иначе не отличить
+    # "только что создали pending" от "она уже висела" и рискуем повторно
+    # рассылать директиву B на каждый повторный вызов того же предложения.
+    already_pending = await ctx.store.pending_relationship_for(target_chat_id)
+    if already_pending is not None and {
+        already_pending["guest_a"],
+        already_pending["guest_b"],
+    } == {ctx.chat_id, target_chat_id}:
+        return f"предложение уже отправлено {target.name}, жду ответа"
+    confirmed = await ctx.store.relationships_for(ctx.chat_id, status="confirmed")
+    if any({r["guest_a"], r["guest_b"]} == {ctx.chat_id, target_chat_id} for r in confirmed):
+        return f"с {target.name} уже подтверждённая связь"
+
+    now = datetime.now(tz=UTC)
+    row = await ctx.store.propose_relationship(ctx.chat_id, target_chat_id, relation, now)
+    directive = (
+        f"Гость «{proposer.name}» предложил(а) установить с тобой связь "
+        f"«{_relation_label(relation)}». Расскажи об этом от своего имени, ответь "
+        "на уточняющие вопросы, если будут, и дождись явного согласия или "
+        "отказа собеседника — не делай вывод сам. Как только он(а) явно "
+        f"ответит, вызови confirm_relationship(relationship_id={row['id']}) при "
+        f"согласии или reject_relationship(relationship_id={row['id']}) при отказе."
+    )
+    try:
+        await schedule_agent_dialogue(
+            ctx.node_link,
+            target_chat_id,
+            [{"role": "user", "content": directive}],
+            reminder_reason(ctx.settings.llm),
+            ctx.settings.llm.request_timeout_s,
+        )
+    except (ServiceUnavailableError, ProtoError) as exc:
+        return f"не удалось отправить предложение {target.name}: {exc}"
+    return f"предложение отправлено {target.name}, жду ответа"
+
+
+async def _respond_relationship(ctx: ToolContext, args: dict[str, Any], accepted: bool) -> str:
+    """Общая реализация confirm_relationship/reject_relationship.
+
+    Два разных пути в зависимости от того, ГДЕ исполняется этот тул (тот же
+    приём, что у tool_tell/_deliver_personal_message):
+    - живой /ai (ctx.store/ctx.notifier есть) — читаем и пишем
+      guest_relationships напрямую, права проверяем здесь же.
+    - проактивная сессия агента установки связи (Этап 44, служба tasks —
+      ctx.store там нет, см. докстринг ToolContext.emit) — своей БД у tasks
+      нет, поэтому мост-событие EVENT_RESPOND_RELATIONSHIP просит бота
+      (единственного, у кого есть настоящий Store) сделать то же самое (см.
+      bot/node_events.py::_handle_respond_relationship). Права там всё равно
+      проверяются — по responder_chat_id=ctx.chat_id этой сессии, а он
+      серверный (сессия создана schedule_agent_dialogue именно под этого
+      гостя), не то, что может подделать модель — тихий отказ на бот-стороне
+      при несовпадении/устаревшей ссылке, как и у остальных fire-and-forget
+      мостов этого файла.
+    """
+    if ctx.chat_id is None:
+        return "недоступно: непонятно, от чьего имени отвечать"
+    try:
+        relationship_id = int(args.get("relationship_id"))
+    except (TypeError, ValueError):
+        return "ошибка: relationship_id должен быть числом"
+
+    if ctx.notifier is not None and ctx.store is not None:
+        row = await ctx.store.get_relationship(relationship_id)
+        if row is None or row["status"] != "pending":
+            return "ошибка: нет такого предложения, либо на него уже ответили"
+        if row["guest_b"] != ctx.chat_id:
+            return "ошибка: это предложение адресовано не тебе"
+        now = datetime.now(tz=UTC)
+        updated = await ctx.store.respond_relationship(relationship_id, accepted, now)
+        assert updated is not None
+        responder = ctx.book.for_chat(ctx.chat_id) if ctx.book is not None else None
+        text = render_relationship_response_notice(
+            responder.name if responder is not None else "гость", updated["relation"], accepted
+        )
+        message_id = await ctx.notifier.send_direct(row["guest_a"], text)
+        if message_id is not None:
+            await ctx.store.record_ai_turn(
+                row["guest_a"], message_id, message_id, "assistant", text, now
+            )
+        return "принято: согласие записано" if accepted else "принято: отказ записан"
+
+    assert ctx.emit is not None  # гарантировано вызывающим (tool_confirm/reject_relationship)
+    await ctx.emit(
+        task_protocol.EVENT_RESPOND_RELATIONSHIP,
+        {
+            "relationship_id": relationship_id,
+            "accepted": accepted,
+            "responder_chat_id": ctx.chat_id,
+        },
+    )
+    return "принято: согласие отправлено" if accepted else "принято: отказ отправлен"
+
+
+async def tool_confirm_relationship(ctx: ToolContext, args: dict[str, Any]) -> str:
+    if ctx.notifier is None and ctx.emit is None:
+        return "недоступно: сейчас не могу ответить на предложение"
+    return await _respond_relationship(ctx, args, accepted=True)
+
+
+async def tool_reject_relationship(ctx: ToolContext, args: dict[str, Any]) -> str:
+    if ctx.notifier is None and ctx.emit is None:
+        return "недоступно: сейчас не могу ответить на предложение"
+    return await _respond_relationship(ctx, args, accepted=False)
+
+
 _DECL_CALC: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -3556,6 +3706,83 @@ _DECL_REMIND: dict[str, Any] = {
 }
 
 
+_DECL_PROPOSE_RELATIONSHIP: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "propose_relationship",
+        "description": (
+            "Предложить связь ('друг' или 'знакомый') с другим гостем — "
+            "используй, когда собеседник говорит о ком-то как о друге/знакомом "
+            "и хочет, чтобы это стало известно системе ('Вася — мой друг'). "
+            "ПЕРЕД вызовом обязательно уточни у собеседника личность точным "
+            "поиском (guests_list — по имени/chat_id, НЕ угадывай) и явно "
+            "переспроси, полным именем и логином, что он имеет в виду именно "
+            "этого гостя — только после явного согласия вызывай этот тул. "
+            "Семью через этот тул не предлагай — родство уже известно системе "
+            "само."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target_chat_id": {
+                    "type": "integer",
+                    "description": "chat_id гостя, которому предлагается связь (из guests_list)",
+                },
+                "relation": {
+                    "type": "string",
+                    "enum": list(RELATION_TYPES),
+                    "description": "friend — друг, acquaintance — знакомый",
+                },
+            },
+            "required": ["target_chat_id", "relation"],
+        },
+    },
+}
+
+_DECL_CONFIRM_RELATIONSHIP: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "confirm_relationship",
+        "description": (
+            "Подтвердить предложенную ДРУГИМ гостем связь — вызывай ТОЛЬКО "
+            "после явного, недвусмысленного согласия собеседника, которому "
+            "адресовано предложение. Не делай вывод о согласии сам."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "relationship_id": {
+                    "type": "integer",
+                    "description": "id предложения — его назвали в директиве об этом предложении",
+                },
+            },
+            "required": ["relationship_id"],
+        },
+    },
+}
+
+_DECL_REJECT_RELATIONSHIP: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "reject_relationship",
+        "description": (
+            "Отклонить предложенную ДРУГИМ гостем связь — вызывай ТОЛЬКО "
+            "после явного отказа собеседника, которому адресовано предложение."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "relationship_id": {
+                    "type": "integer",
+                    "description": "id предложения — его назвали в директиве об этом предложении",
+                },
+            },
+            "required": ["relationship_id"],
+        },
+    },
+}
+
+
 # Порядок задаёт порядок деклараций в контексте модели.
 TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec(name="calc", handler=tool_calc, declaration=_DECL_CALC),
@@ -3654,4 +3881,27 @@ TOOLS: tuple[ToolSpec, ...] = (
     # умение у тех, кому его никто не запрещал. Долг: завести под него право
     # create@tasks, когда будет повод трогать подписки в проде.
     ToolSpec(name="remind", handler=tool_remind, declaration=_DECL_REMIND),
+    # Связи между гостями (Этап 42.6.2) — без requires, как remind: открыто
+    # любому подписанному гостю, не только владельцу. Сама видимость целей
+    # ограничена внутри тулов (ctx.book, только известные гости), права
+    # ответа — chat_id адресата (см. _respond_relationship). Разведочный
+    # момент, отмечен как открытый в IMPLEMENTATION_PLAN.md §42.6: чтобы
+    # УЗНАТЬ chat_id незнакомого гостя, нужен guests_list, а тот сейчас
+    # доступен только владельцу — гость-инициатор не из владельцев сможет
+    # предложить связь лишь тому, чей chat_id уже всплыл в разговоре иначе.
+    ToolSpec(
+        name="propose_relationship",
+        handler=tool_propose_relationship,
+        declaration=_DECL_PROPOSE_RELATIONSHIP,
+    ),
+    ToolSpec(
+        name="confirm_relationship",
+        handler=tool_confirm_relationship,
+        declaration=_DECL_CONFIRM_RELATIONSHIP,
+    ),
+    ToolSpec(
+        name="reject_relationship",
+        handler=tool_reject_relationship,
+        declaration=_DECL_REJECT_RELATIONSHIP,
+    ),
 )

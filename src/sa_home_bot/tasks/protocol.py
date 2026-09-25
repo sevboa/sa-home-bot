@@ -92,3 +92,17 @@ TASK_KIND_LLM_CHAT = "llm_chat"
 # поэтому тул отвечает моделью "передано" оптимистично, не дожидаясь
 # реального ухода сообщения.
 EVENT_DELIVER_MESSAGE = "deliver_message"
+
+# respond_relationship: {relationship_id, accepted: bool, responder_chat_id} —
+# тот же мост, что EVENT_DELIVER_MESSAGE, но для записи guest_relationships
+# (Этап 42.6.2), а не отправки сообщения. confirm_relationship/
+# reject_relationship, вызванные ВНУТРИ проактивной сессии агента установки
+# связи (schedule_agent_dialogue — Этап 44, служба tasks), не имеют доступа
+# ни к Store бота (guest_relationships там же, где ai_turns — не в БД tasks),
+# ни к Notifier — прочитать/записать статус и уведомить инициатора умеет
+# только бот, см. bot/node_events.py::_handle_respond_relationship.
+# responder_chat_id — серверный (ctx.chat_id этой сессии, не аргумент модели)
+# — бот-сторона всё равно сверяет его с guest_b записи перед записью, но
+# доверие к нему уже установлено тем, что сессию создал schedule_agent_dialogue
+# именно под этого гостя (см. bot/tools.py::_respond_relationship).
+EVENT_RESPOND_RELATIONSHIP = "respond_relationship"
