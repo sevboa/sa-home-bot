@@ -1032,11 +1032,19 @@ def render_relationship_response_notice(responder_name: str, relation: str, acce
     return f"{responder_name} {verb} предложение связи «{_relation_label(relation)}»."
 
 
-async def tool_propose_relationship(ctx: ToolContext, args: dict[str, Any]) -> str:
+async def _resolve_propose_relationship(
+    ctx: ToolContext, args: dict[str, Any]
+) -> str | tuple[int, str, Any, Any]:
+    """Общая проверка preview_relationship/propose_relationship: разбор
+    аргументов, поиск гостей, семейное короткое замыкание, дубликаты
+    (pending/confirmed). При ошибке или раннем терминальном ответе (ошибка
+    ввода, "и так родня", "уже отправлено"/"уже подтверждена") возвращает
+    готовую строку — вызывающий тул отдаёт её как есть, без побочных
+    эффектов. При успехе возвращает данные для превью/реальной отправки, но
+    САМ НИЧЕГО не пишет в store и не дозванивается никуда — побочные эффекты
+    только в tool_propose_relationship (42.6.6: preview обязан быть чистым)."""
     if ctx.chat_id is None or ctx.book is None or ctx.store is None:
         return "недоступно: сейчас не могу предложить связь"
-    if ctx.node_link is None:
-        return "ошибка: служба задач недоступна"
     try:
         target_chat_id = int(args.get("target_chat_id"))
     except (TypeError, ValueError):
@@ -1065,6 +1073,42 @@ async def tool_propose_relationship(ctx: ToolContext, args: dict[str, Any]) -> s
     confirmed = await ctx.store.relationships_for(ctx.chat_id, status="confirmed")
     if any({r["guest_a"], r["guest_b"]} == {ctx.chat_id, target_chat_id} for r in confirmed):
         return f"с {target.name} уже подтверждённая связь"
+    return target_chat_id, relation, proposer, target
+
+
+async def tool_preview_relationship(ctx: ToolContext, args: dict[str, Any]) -> str:
+    """Показать инициатору (A), что именно будет отправлено, БЕЗ побочных
+    эффектов (42.6.6, живая находка: A попросил связь 'знакомый', модель
+    вызвала propose_relationship сразу с 'friend' — заявка ушла адресату без
+    предупреждения). Ничего не пишет в store, никуда не дозванивается —
+    только показывает точный предпросмотр и явно требует, чтобы модель
+    получила согласие именно A (не выдумывала его) перед реальным
+    propose_relationship."""
+    resolved = await _resolve_propose_relationship(ctx, args)
+    if isinstance(resolved, str):
+        return resolved
+    target_chat_id, relation, proposer, target = resolved
+    return (
+        f"Предпросмотр (ничего ещё не отправлено): {proposer.name} предложит "
+        f"{target.name} связь «{_relation_label(relation)}». Дословно покажи "
+        f"это {proposer.name} — кому именно и какой именно тип связи — и "
+        "дождись его явного согласия. Только после этого вызови "
+        f"propose_relationship(target_chat_id={target_chat_id}, "
+        f'relation="{relation}"), чтобы реально отправить {target.name} '
+        "предложение. Если он передумает или назовёт другой тип — вызови "
+        "preview_relationship заново с новыми аргументами, не подгоняй "
+        "текущее предложение."
+    )
+
+
+async def tool_propose_relationship(ctx: ToolContext, args: dict[str, Any]) -> str:
+    if ctx.node_link is None:
+        return "ошибка: служба задач недоступна"
+    resolved = await _resolve_propose_relationship(ctx, args)
+    if isinstance(resolved, str):
+        return resolved
+    target_chat_id, relation, proposer, target = resolved
+    assert ctx.store is not None  # гарантировано _resolve_propose_relationship
 
     now = datetime.now(tz=UTC)
     row = await ctx.store.propose_relationship(ctx.chat_id, target_chat_id, relation, now)
@@ -3744,23 +3788,56 @@ _DECL_REMIND: dict[str, Any] = {
 }
 
 
+_DECL_PREVIEW_RELATIONSHIP: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "preview_relationship",
+        "description": (
+            "ОБЯЗАТЕЛЬНЫЙ первый шаг перед propose_relationship — ничего не "
+            "отправляет и не сохраняет, только возвращает точный текст "
+            "предпросмотра ('кому' и 'какая именно связь'). Вызывай, когда "
+            "собеседник говорит о ком-то как о друге/знакомом/родственнике и "
+            "хочет, чтобы это стало известно системе ('Вася — мой друг', "
+            "'Настя — моя сестра'). ПЕРЕД вызовом уточни личность точным "
+            "поиском (guests_list — по имени/chat_id, НЕ угадывай). После "
+            "вызова покажи вернувшийся текст собеседнику ДОСЛОВНО и дождись "
+            "его явного согласия — только тогда вызывай propose_relationship "
+            "с ТЕМИ ЖЕ target_chat_id/relation, что и здесь; не меняй "
+            "relation по своему усмотрению, если собеседник сказал "
+            "'знакомый' — это не 'друг'."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target_chat_id": {
+                    "type": "integer",
+                    "description": "chat_id гостя, которому предлагается связь (из guests_list)",
+                },
+                "relation": {
+                    "type": "string",
+                    "enum": list(RELATION_TYPES),
+                    "description": "friend — друг, acquaintance — знакомый, family — семья",
+                },
+            },
+            "required": ["target_chat_id", "relation"],
+        },
+    },
+}
+
 _DECL_PROPOSE_RELATIONSHIP: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "propose_relationship",
         "description": (
-            "Предложить связь ('друг', 'знакомый' или 'семья') с другим "
-            "гостем — используй, когда собеседник говорит о ком-то как о "
-            "друге/знакомом/родственнике и хочет, чтобы это стало известно "
-            "системе ('Вася — мой друг', 'Настя — моя сестра'). ПЕРЕД вызовом "
-            "обязательно уточни у собеседника личность точным поиском "
-            "(guests_list — по имени/chat_id, НЕ угадывай) и явно переспроси, "
-            "полным именем и логином, что он имеет в виду именно этого гостя, "
-            "а также каким ИМЕННО из трёх типов связи ('друг'/'знакомый'/"
-            "'семья') — только после явного согласия вызывай этот тул, "
-            "передай ровно тот тип, который назвал собеседник, не заменяй его "
-            "своим суждением. Если у обоих собеседников уже стоит групповой "
-            "флаг «семья» — тул сам ответит, что подтверждать не нужно."
+            "Реально отправить предложение связи ('друг', 'знакомый' или "
+            "'семья') другому гостю — вызывай ТОЛЬКО после "
+            "preview_relationship с ТЕМИ ЖЕ аргументами и явного, "
+            "недвусмысленного согласия собеседника-инициатора на то, что "
+            "показал preview_relationship. Не вызывай напрямую, минуя "
+            "preview_relationship — инициатор должен сам увидеть, кому и "
+            "какая именно связь уйдёт, прежде чем она реально уйдёт. Если у "
+            "обоих собеседников уже стоит групповой флаг «семья» — тул сам "
+            "ответит, что подтверждать не нужно."
         ),
         "parameters": {
             "type": "object",
@@ -3946,6 +4023,11 @@ TOOLS: tuple[ToolSpec, ...] = (
     # УЗНАТЬ chat_id незнакомого гостя, нужен guests_list, а тот сейчас
     # доступен только владельцу — гость-инициатор не из владельцев сможет
     # предложить связь лишь тому, чей chat_id уже всплыл в разговоре иначе.
+    ToolSpec(
+        name="preview_relationship",
+        handler=tool_preview_relationship,
+        declaration=_DECL_PREVIEW_RELATIONSHIP,
+    ),
     ToolSpec(
         name="propose_relationship",
         handler=tool_propose_relationship,

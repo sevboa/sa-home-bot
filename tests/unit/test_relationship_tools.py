@@ -100,6 +100,82 @@ def _ctx(store, *, chat_id, book, node_link=None, notifier=None, emit=None):
     )
 
 
+# --- preview_relationship (42.6.6: обязательный первый шаг, без побочных
+# эффектов — инициатор должен сам увидеть, что будет отправлено, прежде чем
+# это реально уйдёт адресату) ---
+
+
+async def test_preview_relationship_no_side_effects(store):
+    book = _book()
+    node_link = FakeNodeLink()
+    ctx = _ctx(store, chat_id=GUEST_A, book=book, node_link=node_link)
+
+    result = await ai_tools.tool_preview_relationship(
+        ctx, {"target_chat_id": GUEST_B, "relation": "acquaintance"}
+    )
+
+    assert "Вася" in result and "Настя" in result and "знакомый" in result
+    assert "propose_relationship" in result
+    assert str(GUEST_B) in result
+    # Ничего не записано и никуда не дозвонились — это только предпросмотр.
+    assert await store.pending_relationship_for(GUEST_B) is None
+    assert len(node_link.calls) == 0
+
+
+async def test_preview_relationship_unknown_target(store):
+    ctx = _ctx(store, chat_id=GUEST_A, book=_book())
+    result = await ai_tools.tool_preview_relationship(
+        ctx, {"target_chat_id": STRANGER_CHAT, "relation": "friend"}
+    )
+    assert "не найден" in result
+
+
+async def test_preview_relationship_invalid_relation(store):
+    ctx = _ctx(store, chat_id=GUEST_A, book=_book())
+    result = await ai_tools.tool_preview_relationship(
+        ctx, {"target_chat_id": GUEST_B, "relation": "bestie"}
+    )
+    assert "friend" in result and "acquaintance" in result
+
+
+async def test_preview_relationship_already_family(store):
+    book = _book(a_family=True, b_family=True)
+    ctx = _ctx(store, chat_id=GUEST_A, book=book)
+    result = await ai_tools.tool_preview_relationship(
+        ctx, {"target_chat_id": GUEST_B, "relation": "friend"}
+    )
+    assert "родня" in result
+
+
+async def test_preview_relationship_does_not_need_node_link(store):
+    # Предпросмотр ничего не рассылает, поэтому доступен даже без node_link.
+    ctx = _ctx(store, chat_id=GUEST_A, book=_book())
+    result = await ai_tools.tool_preview_relationship(
+        ctx, {"target_chat_id": GUEST_B, "relation": "family"}
+    )
+    assert "Настя" in result and "семья" in result
+
+
+async def test_preview_then_propose_same_args_matches(store):
+    # Ровно сценарий из директивы preview: те же target_chat_id/relation.
+    book = _book()
+    node_link = FakeNodeLink()
+    ctx = _ctx(store, chat_id=GUEST_A, book=book, node_link=node_link)
+
+    preview = await ai_tools.tool_preview_relationship(
+        ctx, {"target_chat_id": GUEST_B, "relation": "acquaintance"}
+    )
+    assert f"target_chat_id={GUEST_B}" in preview
+    assert 'relation="acquaintance"' in preview
+
+    result = await ai_tools.tool_propose_relationship(
+        ctx, {"target_chat_id": GUEST_B, "relation": "acquaintance"}
+    )
+    assert "Настя" in result
+    row = await store.pending_relationship_for(GUEST_B)
+    assert row is not None and row["relation"] == "acquaintance"
+
+
 # --- propose_relationship ---
 
 
