@@ -1153,6 +1153,39 @@ async def tool_reject_relationship(ctx: ToolContext, args: dict[str, Any]) -> st
     return await _respond_relationship(ctx, args, accepted=False)
 
 
+async def tool_my_relationships(ctx: ToolContext, _args: dict[str, Any]) -> str:
+    """Только подтверждённые связи (42.6, шаг 4 сценария) — про pending/
+    rejected, в том числе про собственные неотвеченные заявки, молчим
+    намеренно, не переусложняем v1 (см. IMPLEMENTATION_PLAN.md §42.6.3).
+    ``ctx.store`` нет в проактивной сессии агента установки связи (Этап 44 —
+    у службы tasks нет своего Store, см. докстринг ToolContext выше) — там
+    честный отказ, а не частичный (только семья) ответ: молчание об
+    ограничении хуже, чем явное "недоступно сейчас"."""
+    if ctx.chat_id is None or ctx.book is None or ctx.store is None:
+        return "недоступно: сейчас не вижу свои связи"
+    me = ctx.book.for_chat(ctx.chat_id)
+    if me is None:
+        return "недоступно: тебя нет в списке гостей"
+
+    lines: list[str] = []
+    if me.family:
+        lines.extend(
+            f"🏠 {g.name} — семья"
+            for g in ctx.book.guests()
+            if g.chat_id != ctx.chat_id and g.family
+        )
+    confirmed = await ctx.store.relationships_for(ctx.chat_id, status="confirmed")
+    for row in confirmed:
+        other_chat_id = row["guest_b"] if row["guest_a"] == ctx.chat_id else row["guest_a"]
+        other = ctx.book.for_chat(other_chat_id)
+        name = other.name if other is not None else f"chat_id {other_chat_id}"
+        lines.append(f"🤝 {name} — {_relation_label(row['relation'])}")
+
+    if not lines:
+        return "подтверждённых связей нет"
+    return "\n".join(lines)
+
+
 _DECL_CALC: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -3782,6 +3815,22 @@ _DECL_REJECT_RELATIONSHIP: dict[str, Any] = {
     },
 }
 
+_DECL_MY_RELATIONSHIPS: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "my_relationships",
+        "description": (
+            "Узнать, с кем из гостей у собеседника уже ПОДТВЕРЖДЁННАЯ связь "
+            "(семья или друг/знакомый) — используй, когда спрашивают о своих "
+            "отношениях/связях ('с кем я связан', 'кто у меня в друзьях'). "
+            "Про предложения без ответа или отклонённые тул молчит — не "
+            "спойлери их, если спросят прямо, отвечай только тем, что тут "
+            "вернулось."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+}
+
 
 # Порядок задаёт порядок деклараций в контексте модели.
 TOOLS: tuple[ToolSpec, ...] = (
@@ -3903,5 +3952,10 @@ TOOLS: tuple[ToolSpec, ...] = (
         name="reject_relationship",
         handler=tool_reject_relationship,
         declaration=_DECL_REJECT_RELATIONSHIP,
+    ),
+    ToolSpec(
+        name="my_relationships",
+        handler=tool_my_relationships,
+        declaration=_DECL_MY_RELATIONSHIPS,
     ),
 )

@@ -345,6 +345,7 @@ TOOL_STATUS_TEXT: dict[str, str] = {
     "propose_relationship": "Альфред набрасывает деликатное письмо-предложение",
     "confirm_relationship": "Альфред заносит новое знакомство в свою книгу",
     "reject_relationship": "Альфред вежливо откладывает письмо в сторону",
+    "my_relationships": "Альфред пролистывает свою адресную книгу",
 }
 TOOL_STATUS_DEFAULT = "Альфред что-то мастерит за кулисами"
 

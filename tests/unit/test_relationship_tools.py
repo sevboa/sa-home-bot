@@ -313,3 +313,121 @@ async def test_confirm_relationship_unavailable_without_store_or_emit():
     )
     result = await ai_tools.tool_confirm_relationship(ctx, {"relationship_id": 1})
     assert "недоступно" in result
+
+
+# --- my_relationships (42.6.3) ---
+
+GUEST_C = 303  # третий гость — для проверки "семья + friend одновременно"
+
+
+def _book_with_third(*, a_family: bool, c_family: bool) -> SubscriptionBook:
+    return SubscriptionBook.from_config(
+        [SubscriptionConfig(name="owner", chat_id=OWNER_CHAT, allowed_commands=["*"])],
+        [
+            GuestSubscriptionConfig(
+                name="Вася",
+                chat_id=GUEST_A,
+                allowed_commands=["chat@llm"],
+                invited_user="Вася",
+                family=a_family,
+            ),
+            GuestSubscriptionConfig(
+                name="Настя",
+                chat_id=GUEST_B,
+                allowed_commands=["chat@llm"],
+                invited_user="Настя",
+                family=False,
+            ),
+            GuestSubscriptionConfig(
+                name="Игорь",
+                chat_id=GUEST_C,
+                allowed_commands=["chat@llm"],
+                invited_user="Игорь",
+                family=c_family,
+            ),
+        ],
+    )
+
+
+async def test_my_relationships_no_store():
+    ctx = ai_tools.ToolContext(
+        chat_id=GUEST_A,
+        dialogue_id=None,
+        trigger_message_id=None,
+        settings=Settings(),
+        book=_book(),
+    )
+    result = await ai_tools.tool_my_relationships(ctx, {})
+    assert "недоступно" in result
+
+
+async def test_my_relationships_caller_unknown(store):
+    ctx = _ctx(store, chat_id=STRANGER_CHAT, book=_book())
+    result = await ai_tools.tool_my_relationships(ctx, {})
+    assert "недоступно" in result
+
+
+async def test_my_relationships_empty(store):
+    ctx = _ctx(store, chat_id=GUEST_A, book=_book())
+    result = await ai_tools.tool_my_relationships(ctx, {})
+    assert result == "подтверждённых связей нет"
+
+
+async def test_my_relationships_only_family(store):
+    book = _book_with_third(a_family=True, c_family=True)
+    ctx = _ctx(store, chat_id=GUEST_A, book=book)
+    result = await ai_tools.tool_my_relationships(ctx, {})
+    assert "Игорь" in result and "семья" in result
+    assert "Настя" not in result  # Настя не семья
+
+
+async def test_my_relationships_not_family_no_family_leak(store):
+    # A не семья — даже если где-то в системе есть другие семейные пары,
+    # A их не должен видеть в списке своей семьи.
+    book = _book_with_third(a_family=False, c_family=True)
+    ctx = _ctx(store, chat_id=GUEST_A, book=book)
+    result = await ai_tools.tool_my_relationships(ctx, {})
+    assert "Игорь" not in result
+
+
+async def test_my_relationships_only_friend(store):
+    row = await store.propose_relationship(GUEST_A, GUEST_B, "friend", datetime.now(tz=UTC))
+    await store.respond_relationship(row["id"], True, datetime.now(tz=UTC))
+    ctx = _ctx(store, chat_id=GUEST_A, book=_book())
+    result = await ai_tools.tool_my_relationships(ctx, {})
+    assert "Настя" in result and "друг" in result
+
+
+async def test_my_relationships_symmetry_other_role(store):
+    # A здесь guest_b строки (предложение шло от B к A) — должен всё равно
+    # увидеть Настю как знакомую.
+    row = await store.propose_relationship(GUEST_B, GUEST_A, "acquaintance", datetime.now(tz=UTC))
+    await store.respond_relationship(row["id"], True, datetime.now(tz=UTC))
+    ctx = _ctx(store, chat_id=GUEST_A, book=_book())
+    result = await ai_tools.tool_my_relationships(ctx, {})
+    assert "Настя" in result and "знакомый" in result
+
+
+async def test_my_relationships_family_and_friend_together(store):
+    book = _book_with_third(a_family=True, c_family=True)
+    row = await store.propose_relationship(GUEST_A, GUEST_B, "friend", datetime.now(tz=UTC))
+    await store.respond_relationship(row["id"], True, datetime.now(tz=UTC))
+    ctx = _ctx(store, chat_id=GUEST_A, book=book)
+    result = await ai_tools.tool_my_relationships(ctx, {})
+    assert "Игорь" in result and "семья" in result
+    assert "Настя" in result and "друг" in result
+
+
+async def test_my_relationships_silent_about_pending(store):
+    await store.propose_relationship(GUEST_A, GUEST_B, "friend", datetime.now(tz=UTC))
+    ctx = _ctx(store, chat_id=GUEST_A, book=_book())
+    result = await ai_tools.tool_my_relationships(ctx, {})
+    assert result == "подтверждённых связей нет"
+
+
+async def test_my_relationships_silent_about_rejected(store):
+    row = await store.propose_relationship(GUEST_A, GUEST_B, "friend", datetime.now(tz=UTC))
+    await store.respond_relationship(row["id"], False, datetime.now(tz=UTC))
+    ctx = _ctx(store, chat_id=GUEST_A, book=_book())
+    result = await ai_tools.tool_my_relationships(ctx, {})
+    assert result == "подтверждённых связей нет"
