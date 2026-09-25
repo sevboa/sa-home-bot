@@ -886,7 +886,9 @@ async def test_unavailable_wake_sent_but_still_unreachable_after_30s(store, monk
     assert link.wol_sent == [{"mac": MYCRAFT_WAKE["mac"]}]  # будили, но не помогло
 
 
-async def test_ask_discovers_unavailable_despite_fresh_presence_reports_immediately(store):
+async def test_ask_discovers_unavailable_despite_fresh_presence_reports_immediately(
+    store, monkeypatch
+):
     # Живая находка при аудите механизма пробуждения (2026-08-26): раньше
     # такой сбой (presence свежий и говорит "не сплю", но сам chat всё равно
     # ловит ERR_UNAVAILABLE — редкая гонка) запускал полноценный повторный
@@ -894,11 +896,13 @@ async def test_ask_discovers_unavailable_despite_fresh_presence_reports_immediat
     # попытка _ask()) — см. Приложение 2.Б плана механизма готовности.
     # Единственная точка готовности (wake_core.ensure_service_ready) уже
     # сказала READY по presence — если сам запрос всё равно словил
-    # "недоступна", это разовая гонка: репортим сразу, без второй попытки
-    # и без WoL живой машине.
+    # "недоступна", это гонка: без второго сценария wake и без WoL живой
+    # машине. С 2026-09-25 сам раунд chat коротко повторяется на обрыв связи
+    # (llm_chat.py::CHAT_RETRY_DELAYS_S) — здесь связь так и не вернулась.
+    monkeypatch.setattr(llm_chat, "CHAT_RETRY_DELAYS_S", (0.0, 0.0))
     message = FakeMessage()
     link = FakeNodeLink(
-        chat_results=[ProtoError(ERR_UNAVAILABLE, "нода недоступна")],
+        chat_results=[ProtoError(ERR_UNAVAILABLE, "нода недоступна")] * 3,
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 

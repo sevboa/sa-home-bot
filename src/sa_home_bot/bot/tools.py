@@ -2766,6 +2766,11 @@ def _web_search_episode_text(query: str, results: list[dict[str, Any]]) -> str:
     return " ".join(parts)
 
 
+# Запас сверх net.request_timeout_s на дорогу alfred ↔ mycraft и разбор
+# выдачи — чтобы ответ службы успел доехать, а не упасть в таймаут у финиша.
+_WEB_SEARCH_TIMEOUT_MARGIN_S = 5.0
+
+
 async def tool_web_search(ctx: ToolContext, args: dict[str, Any]) -> str:
     if ctx.node_link is None:
         return "недоступно: нет связи с роем"
@@ -2774,8 +2779,14 @@ async def tool_web_search(ctx: ToolContext, args: dict[str, Any]) -> str:
         return "ошибка: не указан поисковый запрос"
     dst = Address(node=net_protocol.NODE_ID, service=net_protocol.SERVICE_NAME)
     try:
+        # Ждём дольше, чем net сам ждёт SearXNG: без явного таймаута
+        # действовали 10 с ProtoClient по умолчанию, а поиску отведено 20
+        # (живая находка 2026-09-25 — медленный brave обрывал ответ целиком).
         result = await ctx.node_link.command(
-            net_protocol.ACTION_SEARCH, {"query": query}, dst=dst
+            net_protocol.ACTION_SEARCH,
+            {"query": query},
+            dst=dst,
+            timeout=ctx.settings.net.request_timeout_s + _WEB_SEARCH_TIMEOUT_MARGIN_S,
         )
     except (ServiceUnavailableError, ProtoError, TimeoutError) as exc:
         # §7.3: недоступный поисковик — обычный результат тула, персонаж сам

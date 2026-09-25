@@ -34,6 +34,7 @@ ERR_UNKNOWN_ACTION = "unknown_action"
 ERR_UNAUTHORIZED = "unauthorized"  # TCP без/до auth или неверный токен; соединение закрывается
 ERR_UNKNOWN_DST = "unknown_dst"  # dst указывает на неизвестную ноду/службу
 ERR_UNAVAILABLE = "unavailable"  # нода/служба известна, но сейчас нет соединения
+ERR_TIMEOUT = "timeout"  # соединение живо, но ответа на ЭТОТ запрос не дождались
 ERR_INTERNAL = "internal"
 ERR_NEEDS_PRIVILEGE = "needs_privilege"  # действию не хватает прав; см. `nodectl fix`
 

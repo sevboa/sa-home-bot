@@ -10,8 +10,15 @@ import pytest
 
 from sa_home_bot import llm_chat
 from sa_home_bot.bot import tools as ai_tools
+from sa_home_bot.bot.service_link import ServiceTimeoutError, ServiceUnavailableError
 from sa_home_bot.config import LlmConfig, Settings
-from sa_home_bot.proto.messages import Address
+from sa_home_bot.proto.messages import (
+    ERR_INTERNAL,
+    ERR_TIMEOUT,
+    ERR_UNAVAILABLE,
+    Address,
+    ProtoError,
+)
 
 DST = Address(node="mycraft", service="llm")
 
@@ -221,3 +228,59 @@ async def test_short_tool_result_is_not_cached(monkeypatch):
     tool_message = next(m for m in messages if m.get("role") == "tool")
     assert tool_message["content"] == "короткий результат"
     assert ctx.tool_result_cache == {}
+
+
+# --- повтор раунда chat на кратковременный обрыв связи (живая находка
+# 2026-09-25, см. llm_chat.py::CHAT_RETRY_DELAYS_S): линк до mycraft
+# переподключился посреди хода — раунд после тула не должен сразу
+# превращаться в «Альфреда нет на месте». ---
+
+
+@pytest.fixture
+def no_retry_sleep(monkeypatch):
+    monkeypatch.setattr(llm_chat, "CHAT_RETRY_DELAYS_S", (0.0, 0.0))
+
+
+async def _run(link):
+    return await llm_chat.run_chat_loop(
+        link, DST, 5.0, [], _ctx(), reason="off", telegram_chat_id=None, log_chat_id="test"
+    )
+
+
+async def test_раунд_после_тула_переживает_обрыв_связи(no_retry_sleep):
+    link = FakeNodeLink(
+        chat_results=[
+            {"tool_calls": [_tool_call("known_tool")]},
+            ProtoError(ERR_UNAVAILABLE, "mycraft: переподключение"),
+            ServiceUnavailableError("нет соединения"),
+            {"response": "финальный ответ"},
+        ]
+    )
+
+    assert await _run(link) == "финальный ответ"
+
+
+async def test_повторы_конечны(no_retry_sleep):
+    link = FakeNodeLink(
+        chat_results=[ProtoError(ERR_UNAVAILABLE, "нет связи")] * 3 + [{"response": "поздно"}]
+    )
+
+    with pytest.raises(ProtoError):
+        await _run(link)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ServiceTimeoutError("нет ответа"),
+        ProtoError(ERR_TIMEOUT, "mycraft: нет ответа"),
+        ProtoError(ERR_INTERNAL, "сбой"),
+    ],
+)
+async def test_таймаут_и_сбои_не_повторяются(no_retry_sleep, error):
+    # Таймаут значит, что модель уже думала весь бюджет, — повтор только
+    # удвоил бы ожидание гостя; прочие ошибки повтор не лечит.
+    link = FakeNodeLink(chat_results=[error, {"response": "не должно дойти"}])
+
+    with pytest.raises(type(error)):
+        await _run(link)

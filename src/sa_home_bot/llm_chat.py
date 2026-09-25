@@ -21,8 +21,12 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from sa_home_bot.bot import tools as ai_tools
-from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
-from sa_home_bot.proto.messages import ERR_INTERNAL, Address, ProtoError
+from sa_home_bot.bot.service_link import (
+    ServiceLink,
+    ServiceTimeoutError,
+    ServiceUnavailableError,
+)
+from sa_home_bot.proto.messages import ERR_INTERNAL, ERR_UNAVAILABLE, Address, ProtoError
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +41,25 @@ ACTION_CHAT_PROGRESS = "chat_progress"
 # на весь ответ модели, который ждёт вызывающий).
 _POLL_INTERVAL_S = 1.0
 _POLL_TIMEOUT_S = 3.0
+
+# Паузы перед повторами одного раунда chat, если до службы llm в моменте
+# нет связи (решение пользователя 2026-09-25). Живая находка: линк
+# alfred → mycraft переподключился посреди хода (~5 с без связи), раунд после
+# тула упал в unavailable — и гость вместо ответа, для которого всё уже было
+# собрано, получил «Альфреда нет на месте». Паузы покрывают переподключение
+# PeerLink/ServiceLink (RECONNECT_DELAY_S = 5 с у обоих). Повторяем ТОЛЬКО
+# «нет связи»: таймаут значит, что модель уже думала весь бюджет, повтор
+# лишь удвоит ожидание; остальные ошибки детерминированы.
+CHAT_RETRY_DELAYS_S: tuple[float, ...] = (3.0, 6.0)
+
+
+def _is_link_gap(exc: Exception) -> bool:
+    if isinstance(exc, ServiceTimeoutError):
+        return False
+    if isinstance(exc, ServiceUnavailableError):
+        return True
+    return isinstance(exc, ProtoError) and exc.code == ERR_UNAVAILABLE
+
 
 # Сколько раз подряд можно уйти в tool_calls, прежде чем модель обязана дать
 # финальный текстовый ответ — защита от зацикливания (LLM_INTEGRATION_
@@ -247,9 +270,28 @@ async def run_chat_loop(
             with contextlib.suppress(asyncio.CancelledError):
                 await poll_task
 
+    async def _call_chat_with_retry(args: dict[str, Any]) -> dict[str, Any]:
+        """Раунд chat с повторами на кратковременный обрыв связи (см.
+        CHAT_RETRY_DELAYS_S). Раунд идемпотентен: служба llm только
+        генерирует, тулы исполняются здесь, после ответа."""
+        for delay in CHAT_RETRY_DELAYS_S:
+            try:
+                return await _call_chat(args)
+            except (ServiceUnavailableError, ProtoError) as exc:
+                if not _is_link_gap(exc):
+                    raise
+                log.warning(
+                    "llm_chat: нет связи со службой llm (%s), повтор через %.0f с (chat=%s)",
+                    exc,
+                    delay,
+                    log_chat_id,
+                )
+            await asyncio.sleep(delay)
+        return await _call_chat(args)
+
     for _round in range(MAX_TOOL_ROUNDS):
         args = _chat_args(toolkit.declarations)
-        result = await _call_chat(args)
+        result = await _call_chat_with_retry(args)
         tool_calls = result.get("tool_calls")
         if not tool_calls:
             await _maybe_send_remark(result)
@@ -300,7 +342,7 @@ async def run_chat_loop(
         MAX_TOOL_ROUNDS,
         log_chat_id,
     )
-    result = await _call_chat(_chat_args([]))
+    result = await _call_chat_with_retry(_chat_args([]))
     response = result.get("response", "")
     if response:
         await _maybe_send_remark(result)

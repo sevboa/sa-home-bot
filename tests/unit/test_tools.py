@@ -1115,6 +1115,7 @@ class _FakeSwarmLink:
         self._command_raises = command_raises
         self.commands: list[tuple[str, object]] = []
         self.sent_args: list[dict] = []
+        self.timeouts: list[float | None] = []
 
     async def get_state(self, dst=None):
         key = "own" if dst is None else f"{dst.node}:{dst.service}"
@@ -1125,6 +1126,7 @@ class _FakeSwarmLink:
     async def command(self, action, args=None, dst=None, *, timeout=None):
         self.commands.append((action, dst))
         self.sent_args.append(args or {})
+        self.timeouts.append(timeout)
         if self._command_raises is not None:
             raise self._command_raises
         return self._command_result
@@ -1914,6 +1916,16 @@ async def test_web_search_calls_net_service(store):
     assert json.loads(raw)["count"] == 1
     action, dst = link.commands[0]
     assert (action, dst.node, dst.service) == ("search", "mycraft", "net")
+
+
+async def test_web_search_waits_longer_than_net_itself(store):
+    """Живая находка 2026-09-25: без явного таймаута действовали 10 с
+    ProtoClient по умолчанию, а net ждёт SearXNG 20 с — медленный движок
+    обрывал поиск у бота раньше, чем у самой службы."""
+    link = _FakeSwarmLink(command_result={"query": "q", "results": [], "count": 0})
+    ctx = _ctx(store, node_link=link, subscription=ADMIN)
+    await tools.tool_web_search(ctx, {"query": "q"})
+    assert link.timeouts[0] > ctx.settings.net.request_timeout_s
 
 
 async def test_web_search_empty_results_reads_as_plain_text(store):

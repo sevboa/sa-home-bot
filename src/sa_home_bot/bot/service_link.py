@@ -30,6 +30,15 @@ class ServiceUnavailableError(RuntimeError):
     """Нет живого соединения со службой."""
 
 
+class ServiceTimeoutError(ServiceUnavailableError):
+    """Соединение есть, но ответа на запрос не дождались.
+
+    Подкласс — чтобы все, кто ловит ServiceUnavailableError, вели себя как
+    раньше; отдельно его различает только тот, кому важно, что повтор
+    запроса тут не поможет (см. llm_chat.py::_call_chat_with_retry).
+    """
+
+
 class ServiceLink:
     def __init__(
         self,
@@ -94,7 +103,9 @@ class ServiceLink:
         client = self._require_client()
         try:
             return await client.command(action, args, dst=dst, timeout=timeout)
-        except (ConnectionError, OSError, TimeoutError) as exc:
+        except TimeoutError as exc:
+            raise ServiceTimeoutError(str(exc) or "нет ответа") from exc
+        except (ConnectionError, OSError) as exc:
             raise ServiceUnavailableError(str(exc)) from exc
 
     async def describe(self, dst: Address | None = None) -> ServiceDescription | None:

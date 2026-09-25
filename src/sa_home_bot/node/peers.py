@@ -28,6 +28,7 @@ from sa_home_bot.proto.endpoints import (
     parse_endpoint,
 )
 from sa_home_bot.proto.messages import (
+    ERR_TIMEOUT,
     ERR_UNAVAILABLE,
     ERR_UNKNOWN_DST,
     Address,
@@ -290,7 +291,17 @@ class PeerLink:
             raise ProtoError(ERR_UNAVAILABLE, f"{self.name} сейчас недоступна")
         try:
             return await client.forward(env)
-        except (ConnectionError, OSError, TimeoutError) as exc:
+        except TimeoutError as exc:
+            # Живая находка 2026-09-25: SearXNG думал ~10 с, web_search
+            # упёрся в таймаут запроса — и здесь это считалось «линк
+            # подозрителен»: reconnect_now ронял ВСЁ соединение с mycraft на
+            # ~5 с, следующий раунд chat туда же получал unavailable, и гость
+            # вместо ответа видел «Альфреда нет на месте». Таймаут ОДНОГО
+            # запроса говорит о медленной службе, не о мёртвом линке: трупы
+            # (сон, зависший процесс, обрыв) ловит heartbeat за ≤~15 с, не
+            # трогая чужие запросы, которые летят по тому же соединению.
+            raise ProtoError(ERR_TIMEOUT, f"{self.name}: нет ответа ({exc})") from exc
+        except (ConnectionError, OSError) as exc:
             # Запрос ушёл в никуда — линк подозрителен, переустанавливаем его
             # сразу, а не ждём, пока это заметит heartbeat: иначе следующий
             # запрос повторит ту же минуту ожидания.

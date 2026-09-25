@@ -21,9 +21,13 @@ from sa_home_bot.node.peers import PeerLink
 from sa_home_bot.proto.client import ProtoClient
 from sa_home_bot.proto.endpoints import TcpEndpoint
 from sa_home_bot.proto.messages import (
+    ERR_TIMEOUT,
+    MSG_COMMAND,
     ActionSpec,
+    ProtoError,
     ServiceDescription,
     ServiceInfo,
+    make_request,
 )
 from sa_home_bot.proto.server import ProtoServer
 
@@ -365,5 +369,40 @@ async def test_цикл_переподключения_переживает_лю
             "линк умер на непредвиденной ошибке вместо повторной попытки"
         )
     finally:
+        await link.stop()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_медленный_запрос_не_рвёт_линк(sock_dir):
+    """Живая находка 2026-09-25: SearXNG думал дольше таймаута web_search —
+    forward() ронял всё соединение, и следующий раунд chat по тому же линку
+    получал «недоступно». Таймаут одного запроса — это медленная служба, а не
+    мёртвый линк: запрос получает ошибку timeout, линк остаётся жив."""
+    service = FakePeerService()
+    release = asyncio.Event()
+
+    async def slow_command(action: str, args: dict) -> dict:
+        await release.wait()
+        return {"accepted": True}
+
+    service.run_command = slow_command  # type: ignore[method-assign]
+    endpoint = f"unix://{sock_dir / 'peer.sock'}"
+    server = ProtoServer(endpoint, service)
+    await server.start()
+
+    link = PeerLink("winpc", endpoint, reconnect_delay=60.0)
+    await link.start()
+    try:
+        assert await _wait_for(lambda: link.alive)
+        env = make_request(
+            MSG_COMMAND, {"action": "noop", "args": {}}, src=None, dst=None, timeout_s=0.1
+        )
+        with pytest.raises(ProtoError) as info:
+            await link.forward(env)
+        assert info.value.code == ERR_TIMEOUT
+        assert link.alive, "таймаут одного запроса уронил линк"
+    finally:
+        release.set()
         await link.stop()
         await server.stop()
