@@ -79,6 +79,19 @@ IDLE_POLL_S = 5.0
 RETRY_BACKOFF_S = 15.0
 DEFAULT_SEARCH_RESULTS = 5
 MAX_SEARCH_RESULTS = 10
+# Параметры LLM-экстракции Graphiti (замер 2026-09-25 на mycraft, gemma через
+# /v1): без них эпизод шёл 30-110 с и держал общую очередь Ollama, в которой
+# стоит живой чат (см. _ExtractionClient).
+# - Через OpenAI-совместимый /v1 Ollama по умолчанию ВКЛЮЧАЕТ thinking у gemma
+#   (нативный /api/chat бота — нет): ~60% токенов ответа уходило в рассуждение
+#   перед JSON. "none" выключает его, JSON не хуже.
+EXTRACTION_REASONING_EFFORT = "none"
+# Дефолт Graphiti — 16384, а extract_edges передаёт свой лимит в обход
+# LLMConfig. Отдельные ответы убегали до 3-4 тыс. токенов и обрывались по
+# таймауту (500 от Ollama, эпизод failed) — режем в _generate_response.
+EXTRACTION_MAX_TOKENS = 4096
+# Экстракции нужна детерминированность, а не разнообразие (дефолт — 1.0).
+EXTRACTION_TEMPERATURE = 0.0
 
 
 def _row_to_episode(row: Any) -> dict[str, Any]:
@@ -189,15 +202,51 @@ class GraphMemoryService:
         from graphiti_core.llm_client import LLMConfig
         from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 
+        class _ExtractionClient(OpenAIGenericClient):
+            """OpenAIGenericClient с выключенным thinking и потолком
+            max_tokens — см. EXTRACTION_* выше. Graphiti не даёт передать
+            свои параметры запроса, поэтому reasoning_effort вшиваем в
+            create() клиента openai, а потолок — в _generate_response (туда
+            приходит и лимит, который extract_edges задаёт сам)."""
+
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                completions = self.client.chat.completions
+                create = completions.create
+
+                async def create_no_thinking(**params: Any) -> Any:
+                    params.setdefault("reasoning_effort", EXTRACTION_REASONING_EFFORT)
+                    return await create(**params)
+
+                completions.create = create_no_thinking
+
+            async def _generate_response(
+                self,
+                messages: Any,
+                response_model: Any = None,
+                max_tokens: int = EXTRACTION_MAX_TOKENS,
+                *args: Any,
+                **kwargs: Any,
+            ) -> dict[str, Any]:
+                return await super()._generate_response(
+                    messages,
+                    response_model,
+                    min(max_tokens, EXTRACTION_MAX_TOKENS),
+                    *args,
+                    **kwargs,
+                )
+
         base_url = "http://127.0.0.1:11434/v1"
         model = self._extraction_model()
-        llm_client = OpenAIGenericClient(
+        llm_client = _ExtractionClient(
             config=LLMConfig(
                 api_key="ollama",
                 model=model,
                 small_model=model,
                 base_url=base_url,
-            )
+                temperature=EXTRACTION_TEMPERATURE,
+            ),
+            max_tokens=EXTRACTION_MAX_TOKENS,
         )
         embedder = OpenAIEmbedder(
             config=OpenAIEmbedderConfig(
