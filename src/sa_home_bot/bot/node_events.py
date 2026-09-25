@@ -319,6 +319,13 @@ async def _handle_task_result(
         )
     sessions.pop(task_id)
     dialogue_id = meta.get("dialogue_id")
+    if dialogue_id is None:
+        # Проактивный агент (bot/tools.py::schedule_agent_dialogue, Этап
+        # 44.1) — chat_id получает первое сообщение без готового треда.
+        # Рождаем dialogue_id так же, как его рождает обычный /ai: message_id
+        # сообщения, начавшего тред (schema.sql) — только тут стартовое
+        # сообщение отправил сам Альфред, а не гость (Этап 44.2).
+        dialogue_id = sent_id
     if sent_id is not None and dialogue_id is not None:
         await store.record_ai_turn(
             chat_id, sent_id, dialogue_id, "assistant", raw, datetime.now(tz=UTC)

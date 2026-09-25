@@ -558,6 +558,38 @@ async def test_task_result_success_replies_into_the_right_topic():
     assert notifier.sent_full == [(7, "<b>Альфред:</b> Готово", 501, 42)]
 
 
+async def test_task_result_without_dialogue_id_spawns_new_thread_from_sent_id():
+    # Этап 44.2: проактивный агент (bot/tools.py::schedule_agent_dialogue,
+    # 44.1) ставит задачу без dialogue_id/trigger_message_id — первое
+    # сообщение чужому собеседнику, готового треда ещё нет. Рождённый
+    # dialogue_id должен совпасть с message_id только что отправленного
+    # сообщения (та же схема, что у обычного /ai).
+    book, notifier, store = _book(), FakeNotifier(), FakeStore()
+    handler = build_node_event_handler(book, notifier, store)
+    meta = {"kind": task_protocol.TASK_KIND_LLM_CHAT, "chat_id": 7}
+    env = make_event(
+        task_protocol.EVENT_TASK_RESULT,
+        {
+            "task_id": 1,
+            "meta": meta,
+            "ok": True,
+            "result": {"response": "Здравствуйте, разрешите представиться"},
+        },
+        src=Address(node="alfred", service="tasks"),
+    )
+    await handler(env)
+
+    assert notifier.sent_full == [
+        (7, "<b>Альфред:</b> Здравствуйте, разрешите представиться", None, None)
+    ]
+    assert len(store.recorded_turns) == 1
+    args, _kwargs = store.recorded_turns[0]
+    # 99 — message_id, вернул FakeNotifier; dialogue_id должен стать тем же
+    # значением (новый тред рождён из sent_id), а не остаться None.
+    assert args[:4] == (7, 99, 99, "assistant")
+    assert args[4] == "Здравствуйте, разрешите представиться"
+
+
 async def test_task_result_failure_sends_albert_task_missed_as_reply():
     book, notifier, store = _book(), FakeNotifier(), FakeStore()
     handler = build_node_event_handler(book, notifier, store)

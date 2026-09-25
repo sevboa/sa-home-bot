@@ -3610,7 +3610,7 @@ restart_node` на alfred, все службы поднялись на 0.112.0. 
   (`self._book.for_chat(chat_id)`, `tasks/service.py:521`) — агент видит
   только то, что можно B, никакого нового «суперправа» не заводим.
 
-**44.2. `bot/node_events.py::_handle_task_result` — рождение нового треда.**
+**44.2. `bot/node_events.py::_handle_task_result` — рождение нового треда — ✅ v0.112.7 (2026-09-26).**
 - Если `meta.dialogue_id` отсутствует: после отправки первого сообщения
   (`sent_id`) считать именно его новым `dialogue_id` — та же схема, что у
   обычного `/ai` (`dialogue_id` = `message_id` команды, начавшей тред,
