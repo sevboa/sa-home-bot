@@ -1119,6 +1119,23 @@ def test_known_person_note_skips_age_line_when_birth_date_unknown():
     assert "День рождения" not in note
 
 
+# Этап 42.5(a): титул обращения детерминированно из gender, не догадка LLM.
+def test_known_person_note_title_for_male():
+    person = _person(gender="m")
+    note = ai_flow._known_person_note(person)
+    assert "«сэр»" in note
+    assert "к нему" in note
+    assert "«мадам»" not in note
+
+
+def test_known_person_note_title_for_female():
+    person = _person(gender="f")
+    note = ai_flow._known_person_note(person)
+    assert "«мадам»" in note
+    assert "к ней" in note
+    assert "«сэр»" not in note
+
+
 def test_person_birthday_ru_formats_day_and_month():
     person = _person(birth_date="1990-04-29")
     assert ai_flow._person_birthday_ru(person) == "29 апреля"
