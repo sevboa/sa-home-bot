@@ -1003,20 +1003,31 @@ async def schedule_agent_dialogue(
     return await node_link.command(task_protocol.ACTION_CREATE, create_args, dst=dst)
 
 
-# --- связи между гостями (Этап 42.6.2, relationship ACL; 'family' — 42.6.5) ---
+# --- связи между гостями (Этап 42.6.2, relationship ACL; 'family'/'родство'
+# — 42.6.5; отказ от группового флага + 'spouse'/'супруги' — 42.6.7) ---
 #
-# Групповой флаг Subscription.family (см. IMPLEMENTATION_PLAN.md §42.6)
-# остаётся отдельным, автоматическим источником "семья по умолчанию": пара, у
-# которой этот флаг стоит с ОБЕИХ сторон, — родня без отдельного
-# подтверждения (см. короткое замыкание в tool_propose_relationship ниже).
-# 'family' в RELATION_TYPES — точечное объявление семейной связи КОНКРЕТНОЙ
-# паре через обычный propose/confirm, независимо от группового флага (по
-# просьбе пользователя 2026-09-26 — до этого дня такой возможности не было
-# вовсе, только groupовый флаг). relation — плоский набор для v1 (решение
-# пользователя 2026-09-26, не лестница), список открытых вопросов (отзыв
-# связи, таймаут pending) — в плане, не блокируют этот подэтап.
-RELATION_TYPES = ("friend", "acquaintance", "family")
-_RELATION_LABELS_RU = {"friend": "друг", "acquaintance": "знакомый", "family": "семья"}
+# Групповой флаг Subscription.family БОЛЬШЕ НЕ управляет отношениями между
+# гостями (решение пользователя 2026-09-26, живая находка: флаг делал ВСЕХ
+# флагованных гостей взаимно роднёй, а реальное родство не таково — у части
+# пары флаг совпадал, но родства не было). Кто кому родня/супруг/друг/
+# знакомый — теперь ИСКЛЮЧИТЕЛЬНО явные пары в guest_relationships, тем же
+# propose/confirm/reject flow, что и всегда. Флаг Subscription.family
+# остаётся в конфиге/UI (`/guests`) как отдельная, самостоятельная ось —
+# просто больше НЕ читается нигде в этом файле.
+# 'family' (label "родство") — общая точечная связь родства КОНКРЕТНОЙ паре.
+# 'spouse' (label "супруг(а)") — то же самое, но с исключительностью:
+# подтверждённая супружеская связь может быть только одна с каждой стороны
+# одновременно (см. проверку в _resolve_propose_relationship). relation —
+# плоский набор для v1 (решение пользователя 2026-09-26, не лестница),
+# список открытых вопросов (отзыв связи, таймаут pending) — в плане, не
+# блокируют этот подэтап.
+RELATION_TYPES = ("friend", "acquaintance", "family", "spouse")
+_RELATION_LABELS_RU = {
+    "friend": "друг",
+    "acquaintance": "знакомый",
+    "family": "родство",
+    "spouse": "супруг(а)",
+}
 
 
 def _relation_label(relation: str) -> str:
@@ -1036,13 +1047,13 @@ async def _resolve_propose_relationship(
     ctx: ToolContext, args: dict[str, Any]
 ) -> str | tuple[int, str, Any, Any]:
     """Общая проверка preview_relationship/propose_relationship: разбор
-    аргументов, поиск гостей, семейное короткое замыкание, дубликаты
-    (pending/confirmed). При ошибке или раннем терминальном ответе (ошибка
-    ввода, "и так родня", "уже отправлено"/"уже подтверждена") возвращает
-    готовую строку — вызывающий тул отдаёт её как есть, без побочных
-    эффектов. При успехе возвращает данные для превью/реальной отправки, но
-    САМ НИЧЕГО не пишет в store и не дозванивается никуда — побочные эффекты
-    только в tool_propose_relationship (42.6.6: preview обязан быть чистым)."""
+    аргументов, поиск гостей, дубликаты (pending/confirmed), исключительность
+    'spouse'. При ошибке или раннем терминальном ответе (ошибка ввода, "уже
+    отправлено"/"уже подтверждена"/"уже есть супруг(а)") возвращает готовую
+    строку — вызывающий тул отдаёт её как есть, без побочных эффектов. При
+    успехе возвращает данные для превью/реальной отправки, но САМ НИЧЕГО не
+    пишет в store и не дозванивается никуда — побочные эффекты только в
+    tool_propose_relationship (42.6.6: preview обязан быть чистым)."""
     if ctx.chat_id is None or ctx.book is None or ctx.store is None:
         return "недоступно: сейчас не могу предложить связь"
     try:
@@ -1058,8 +1069,6 @@ async def _resolve_propose_relationship(
     target = ctx.book.for_chat(target_chat_id)
     if proposer is None or target is None:
         return "ошибка: гость не найден — сверься с guests_list, не угадывай chat_id"
-    if proposer.family and target.family:
-        return f"{target.name} и так родня — отдельно подтверждать не нужно"
 
     # Проверяем ДО записи, была ли уже активная связь — иначе не отличить
     # "только что создали pending" от "она уже висела" и рискуем повторно
@@ -1070,9 +1079,20 @@ async def _resolve_propose_relationship(
         already_pending["guest_b"],
     } == {ctx.chat_id, target_chat_id}:
         return f"предложение уже отправлено {target.name}, жду ответа"
-    confirmed = await ctx.store.relationships_for(ctx.chat_id, status="confirmed")
-    if any({r["guest_a"], r["guest_b"]} == {ctx.chat_id, target_chat_id} for r in confirmed):
+    proposer_confirmed = await ctx.store.relationships_for(ctx.chat_id, status="confirmed")
+    pair = {ctx.chat_id, target_chat_id}
+    if any({r["guest_a"], r["guest_b"]} == pair for r in proposer_confirmed):
         return f"с {target.name} уже подтверждённая связь"
+
+    if relation == "spouse":
+        # Супружеская связь исключительна — только одна подтверждённая с
+        # каждой стороны одновременно (решение пользователя 2026-09-26).
+        if any(r["relation"] == "spouse" for r in proposer_confirmed):
+            return f"{proposer.name} уже состоит в супружеской связи — сначала её нужно разорвать"
+        target_confirmed = await ctx.store.relationships_for(target_chat_id, status="confirmed")
+        if any(r["relation"] == "spouse" for r in target_confirmed):
+            return f"у {target.name} уже есть супруг(а) — сначала эта связь должна быть расторгнута"
+
     return target_chat_id, relation, proposer, target
 
 
@@ -1202,14 +1222,19 @@ async def tool_reject_relationship(ctx: ToolContext, args: dict[str, Any]) -> st
     return await _respond_relationship(ctx, args, accepted=False)
 
 
+_RELATION_EMOJI = {"family": "🏠", "spouse": "💍"}
+_RELATION_EMOJI_DEFAULT = "🤝"
+
+
 async def tool_my_relationships(ctx: ToolContext, _args: dict[str, Any]) -> str:
     """Только подтверждённые связи (42.6, шаг 4 сценария) — про pending/
     rejected, в том числе про собственные неотвеченные заявки, молчим
     намеренно, не переусложняем v1 (см. IMPLEMENTATION_PLAN.md §42.6.3).
-    ``ctx.store`` нет в проактивной сессии агента установки связи (Этап 44 —
-    у службы tasks нет своего Store, см. докстринг ToolContext выше) — там
-    честный отказ, а не частичный (только семья) ответ: молчание об
-    ограничении хуже, чем явное "недоступно сейчас"."""
+    Родство/супружество — ТАКИЕ ЖЕ явные пары в guest_relationships, как
+    друг/знакомый (42.6.7) — групповой флаг Subscription.family здесь больше
+    не читается вовсе. ``ctx.store`` нет в проактивной сессии агента
+    установки связи (Этап 44 — у службы tasks нет своего Store, см. докстринг
+    ToolContext выше) — там честный отказ, не молчание."""
     if ctx.chat_id is None or ctx.book is None or ctx.store is None:
         return "недоступно: сейчас не вижу свои связи"
     me = ctx.book.for_chat(ctx.chat_id)
@@ -1217,18 +1242,13 @@ async def tool_my_relationships(ctx: ToolContext, _args: dict[str, Any]) -> str:
         return "недоступно: тебя нет в списке гостей"
 
     lines: list[str] = []
-    if me.family:
-        lines.extend(
-            f"🏠 {g.name} — семья"
-            for g in ctx.book.guests()
-            if g.chat_id != ctx.chat_id and g.family
-        )
     confirmed = await ctx.store.relationships_for(ctx.chat_id, status="confirmed")
     for row in confirmed:
         other_chat_id = row["guest_b"] if row["guest_a"] == ctx.chat_id else row["guest_a"]
         other = ctx.book.for_chat(other_chat_id)
         name = other.name if other is not None else f"chat_id {other_chat_id}"
-        lines.append(f"🤝 {name} — {_relation_label(row['relation'])}")
+        emoji = _RELATION_EMOJI.get(row["relation"], _RELATION_EMOJI_DEFAULT)
+        lines.append(f"{emoji} {name} — {_relation_label(row['relation'])}")
 
     if not lines:
         return "подтверждённых связей нет"
@@ -3796,15 +3816,18 @@ _DECL_PREVIEW_RELATIONSHIP: dict[str, Any] = {
             "ОБЯЗАТЕЛЬНЫЙ первый шаг перед propose_relationship — ничего не "
             "отправляет и не сохраняет, только возвращает точный текст "
             "предпросмотра ('кому' и 'какая именно связь'). Вызывай, когда "
-            "собеседник говорит о ком-то как о друге/знакомом/родственнике и "
-            "хочет, чтобы это стало известно системе ('Вася — мой друг', "
-            "'Настя — моя сестра'). ПЕРЕД вызовом уточни личность точным "
-            "поиском (guests_list — по имени/chat_id, НЕ угадывай). После "
-            "вызова покажи вернувшийся текст собеседнику ДОСЛОВНО и дождись "
-            "его явного согласия — только тогда вызывай propose_relationship "
-            "с ТЕМИ ЖЕ target_chat_id/relation, что и здесь; не меняй "
-            "relation по своему усмотрению, если собеседник сказал "
-            "'знакомый' — это не 'друг'."
+            "собеседник говорит о ком-то как о друге/знакомом/родственнике/"
+            "супруге и хочет, чтобы это стало известно системе ('Вася — мой "
+            "друг', 'Настя — моя сестра', 'Игорь — мой муж'). ПЕРЕД вызовом "
+            "уточни личность точным поиском (guests_list — по имени/chat_id, "
+            "НЕ угадывай). После вызова покажи вернувшийся текст собеседнику "
+            "ДОСЛОВНО и дождись его явного согласия — только тогда вызывай "
+            "propose_relationship с ТЕМИ ЖЕ target_chat_id/relation, что и "
+            "здесь; не меняй relation по своему усмотрению, если собеседник "
+            "сказал 'знакомый' — это не 'друг'. 'spouse' (супруг(а)) — "
+            "особая связь: подтверждённой может быть только одна с каждой "
+            "стороны одновременно, тул сам откажет, если у кого-то из двоих "
+            "уже есть супруг(а)."
         ),
         "parameters": {
             "type": "object",
@@ -3816,7 +3839,10 @@ _DECL_PREVIEW_RELATIONSHIP: dict[str, Any] = {
                 "relation": {
                     "type": "string",
                     "enum": list(RELATION_TYPES),
-                    "description": "friend — друг, acquaintance — знакомый, family — семья",
+                    "description": (
+                        "friend — друг, acquaintance — знакомый, family — родство, "
+                        "spouse — супруг(а)"
+                    ),
                 },
             },
             "required": ["target_chat_id", "relation"],
@@ -3829,15 +3855,13 @@ _DECL_PROPOSE_RELATIONSHIP: dict[str, Any] = {
     "function": {
         "name": "propose_relationship",
         "description": (
-            "Реально отправить предложение связи ('друг', 'знакомый' или "
-            "'семья') другому гостю — вызывай ТОЛЬКО после "
+            "Реально отправить предложение связи ('друг', 'знакомый', "
+            "'родство' или 'супруг(а)') другому гостю — вызывай ТОЛЬКО после "
             "preview_relationship с ТЕМИ ЖЕ аргументами и явного, "
             "недвусмысленного согласия собеседника-инициатора на то, что "
             "показал preview_relationship. Не вызывай напрямую, минуя "
             "preview_relationship — инициатор должен сам увидеть, кому и "
-            "какая именно связь уйдёт, прежде чем она реально уйдёт. Если у "
-            "обоих собеседников уже стоит групповой флаг «семья» — тул сам "
-            "ответит, что подтверждать не нужно."
+            "какая именно связь уйдёт, прежде чем она реально уйдёт."
         ),
         "parameters": {
             "type": "object",
@@ -3849,7 +3873,10 @@ _DECL_PROPOSE_RELATIONSHIP: dict[str, Any] = {
                 "relation": {
                     "type": "string",
                     "enum": list(RELATION_TYPES),
-                    "description": "friend — друг, acquaintance — знакомый, family — семья",
+                    "description": (
+                        "friend — друг, acquaintance — знакомый, family — родство, "
+                        "spouse — супруг(а)"
+                    ),
                 },
             },
             "required": ["target_chat_id", "relation"],
@@ -3906,8 +3933,9 @@ _DECL_MY_RELATIONSHIPS: dict[str, Any] = {
         "name": "my_relationships",
         "description": (
             "Узнать, с кем из гостей у собеседника уже ПОДТВЕРЖДЁННАЯ связь "
-            "(семья или друг/знакомый) — используй, когда спрашивают о своих "
-            "отношениях/связях ('с кем я связан', 'кто у меня в друзьях'). "
+            "(родство/супруг(а)/друг/знакомый) — используй, когда спрашивают "
+            "о своих отношениях/связях ('с кем я связан', 'кто у меня в "
+            "друзьях'). "
             "Про предложения без ответа или отклонённые тул молчит — не "
             "спойлери их, если спросят прямо, отвечай только тем, что тут "
             "вернулось."

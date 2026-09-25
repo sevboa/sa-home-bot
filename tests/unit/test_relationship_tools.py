@@ -138,13 +138,16 @@ async def test_preview_relationship_invalid_relation(store):
     assert "friend" in result and "acquaintance" in result
 
 
-async def test_preview_relationship_already_family(store):
+async def test_preview_relationship_family_flag_no_longer_matters(store):
+    # 42.6.7: групповой флаг Subscription.family больше НЕ блокирует и не
+    # заменяет предложение связи — он тут вообще не читается.
     book = _book(a_family=True, b_family=True)
     ctx = _ctx(store, chat_id=GUEST_A, book=book)
     result = await ai_tools.tool_preview_relationship(
         ctx, {"target_chat_id": GUEST_B, "relation": "friend"}
     )
-    assert "родня" in result
+    assert "Настя" in result and "друг" in result
+    assert "родня" not in result
 
 
 async def test_preview_relationship_does_not_need_node_link(store):
@@ -153,7 +156,17 @@ async def test_preview_relationship_does_not_need_node_link(store):
     result = await ai_tools.tool_preview_relationship(
         ctx, {"target_chat_id": GUEST_B, "relation": "family"}
     )
-    assert "Настя" in result and "семья" in result
+    assert "Настя" in result and "родство" in result
+
+
+async def test_preview_relationship_spouse_exclusivity(store):
+    row = await store.propose_relationship(GUEST_A, GUEST_C, "spouse", datetime.now(tz=UTC))
+    await store.respond_relationship(row["id"], True, datetime.now(tz=UTC))
+    ctx = _ctx(store, chat_id=GUEST_A, book=_book_with_third(a_family=False, c_family=False))
+    result = await ai_tools.tool_preview_relationship(
+        ctx, {"target_chat_id": GUEST_B, "relation": "spouse"}
+    )
+    assert "уже состоит в супружеской связи" in result
 
 
 async def test_preview_then_propose_same_args_matches(store):
@@ -203,32 +216,23 @@ async def test_propose_relationship_self(store):
     assert "самому себе" in result
 
 
-async def test_propose_relationship_already_family(store):
+async def test_propose_relationship_family_flag_does_not_block(store):
+    # 42.6.7: групповой флаг больше не блокирует и не заменяет предложение
+    # ('family' в guest_relationships — единственный источник родства теперь).
     book = _book(a_family=True, b_family=True)
-    ctx = _ctx(store, chat_id=GUEST_A, book=book, node_link=FakeNodeLink())
+    node_link = FakeNodeLink()
+    ctx = _ctx(store, chat_id=GUEST_A, book=book, node_link=node_link)
     result = await ai_tools.tool_propose_relationship(
         ctx, {"target_chat_id": GUEST_B, "relation": "friend"}
     )
-    assert "родня" in result
+    assert "Настя" in result
+    assert await store.pending_relationship_for(GUEST_B) is not None
 
 
-async def test_propose_relationship_already_family_blocks_family_type_too(store):
-    # Групповой флаг делает пару роднёй автоматически — точечное предложение
-    # 'family' между теми же двумя гостями избыточно, тул должен это сказать,
-    # а не создать дублирующую запись в guest_relationships.
-    book = _book(a_family=True, b_family=True)
-    ctx = _ctx(store, chat_id=GUEST_A, book=book, node_link=FakeNodeLink())
-    result = await ai_tools.tool_propose_relationship(
-        ctx, {"target_chat_id": GUEST_B, "relation": "family"}
-    )
-    assert "родня" in result
-    assert await store.pending_relationship_for(GUEST_B) is None
-
-
-async def test_propose_relationship_family_between_non_flagged_guests(store):
-    # 42.6.5: 'family' — точечная связь конкретной пары, НЕ требует группового
-    # флага Subscription.family ни у одного из двоих.
-    book = _book()  # оба family=False
+async def test_propose_relationship_family_creates_pending(store):
+    # 42.6.5/42.6.7: 'family' — точечная связь конкретной пары, флаг
+    # Subscription.family вообще не участвует ни в проверке, ни в тексте.
+    book = _book()
     node_link = FakeNodeLink()
     ctx = _ctx(store, chat_id=GUEST_A, book=book, node_link=node_link)
 
@@ -241,18 +245,73 @@ async def test_propose_relationship_family_between_non_flagged_guests(store):
     assert row is not None
     assert row["relation"] == "family"
     directive = node_link.calls[0][1]["args"]["messages"][0]["content"]
-    assert "семья" in directive
+    assert "родство" in directive
 
 
-async def test_propose_relationship_family_one_sided_flag(store):
-    # Один из двоих уже с групповым флагом, другой — нет: точечное 'family'
-    # всё равно должно быть доступно (не то же самое, что групповая родня).
-    book = _book(a_family=True, b_family=False)
+async def test_propose_relationship_spouse_creates_pending(store):
+    book = _book()
     node_link = FakeNodeLink()
     ctx = _ctx(store, chat_id=GUEST_A, book=book, node_link=node_link)
 
     result = await ai_tools.tool_propose_relationship(
-        ctx, {"target_chat_id": GUEST_B, "relation": "family"}
+        ctx, {"target_chat_id": GUEST_B, "relation": "spouse"}
+    )
+
+    assert "Настя" in result
+    row = await store.pending_relationship_for(GUEST_B)
+    assert row is not None and row["relation"] == "spouse"
+
+
+async def test_propose_relationship_spouse_blocked_if_proposer_already_married(store):
+    row = await store.propose_relationship(GUEST_A, GUEST_C, "spouse", datetime.now(tz=UTC))
+    await store.respond_relationship(row["id"], True, datetime.now(tz=UTC))
+    ctx = _ctx(
+        store,
+        chat_id=GUEST_A,
+        book=_book_with_third(a_family=False, c_family=False),
+        node_link=FakeNodeLink(),
+    )
+
+    result = await ai_tools.tool_propose_relationship(
+        ctx, {"target_chat_id": GUEST_B, "relation": "spouse"}
+    )
+
+    assert "уже состоит в супружеской связи" in result
+    assert await store.pending_relationship_for(GUEST_B) is None
+
+
+async def test_propose_relationship_spouse_blocked_if_target_already_married(store):
+    row = await store.propose_relationship(GUEST_B, GUEST_C, "spouse", datetime.now(tz=UTC))
+    await store.respond_relationship(row["id"], True, datetime.now(tz=UTC))
+    ctx = _ctx(
+        store,
+        chat_id=GUEST_A,
+        book=_book_with_third(a_family=False, c_family=False),
+        node_link=FakeNodeLink(),
+    )
+
+    result = await ai_tools.tool_propose_relationship(
+        ctx, {"target_chat_id": GUEST_B, "relation": "spouse"}
+    )
+
+    assert "уже есть супруг(а)" in result
+    assert await store.pending_relationship_for(GUEST_B) is None
+
+
+async def test_propose_relationship_spouse_pending_does_not_block_other_target(store):
+    # Исключительность проверяется по ПОДТВЕРЖДЁННЫМ связям — висящая заявка
+    # (ещё не confirmed) не должна мешать предложить спор другому.
+    node_link = FakeNodeLink()
+    ctx = _ctx(
+        store,
+        chat_id=GUEST_A,
+        book=_book_with_third(a_family=False, c_family=False),
+        node_link=node_link,
+    )
+    await store.propose_relationship(GUEST_A, GUEST_C, "spouse", datetime.now(tz=UTC))
+
+    result = await ai_tools.tool_propose_relationship(
+        ctx, {"target_chat_id": GUEST_B, "relation": "spouse"}
     )
 
     assert "Настя" in result
@@ -264,7 +323,15 @@ async def test_my_relationships_pairwise_family(store):
     await store.respond_relationship(row["id"], True, datetime.now(tz=UTC))
     ctx = _ctx(store, chat_id=GUEST_A, book=_book())
     result = await ai_tools.tool_my_relationships(ctx, {})
-    assert "Настя" in result and "семья" in result
+    assert "Настя" in result and "родство" in result
+
+
+async def test_my_relationships_pairwise_spouse(store):
+    row = await store.propose_relationship(GUEST_A, GUEST_B, "spouse", datetime.now(tz=UTC))
+    await store.respond_relationship(row["id"], True, datetime.now(tz=UTC))
+    ctx = _ctx(store, chat_id=GUEST_A, book=_book())
+    result = await ai_tools.tool_my_relationships(ctx, {})
+    assert "Настя" in result and "супруг(а)" in result
 
 
 async def test_propose_relationship_creates_pending_and_dispatches_dialogue(store):
@@ -504,23 +571,6 @@ async def test_my_relationships_empty(store):
     assert result == "подтверждённых связей нет"
 
 
-async def test_my_relationships_only_family(store):
-    book = _book_with_third(a_family=True, c_family=True)
-    ctx = _ctx(store, chat_id=GUEST_A, book=book)
-    result = await ai_tools.tool_my_relationships(ctx, {})
-    assert "Игорь" in result and "семья" in result
-    assert "Настя" not in result  # Настя не семья
-
-
-async def test_my_relationships_not_family_no_family_leak(store):
-    # A не семья — даже если где-то в системе есть другие семейные пары,
-    # A их не должен видеть в списке своей семьи.
-    book = _book_with_third(a_family=False, c_family=True)
-    ctx = _ctx(store, chat_id=GUEST_A, book=book)
-    result = await ai_tools.tool_my_relationships(ctx, {})
-    assert "Игорь" not in result
-
-
 async def test_my_relationships_only_friend(store):
     row = await store.propose_relationship(GUEST_A, GUEST_B, "friend", datetime.now(tz=UTC))
     await store.respond_relationship(row["id"], True, datetime.now(tz=UTC))
@@ -540,12 +590,16 @@ async def test_my_relationships_symmetry_other_role(store):
 
 
 async def test_my_relationships_family_and_friend_together(store):
-    book = _book_with_third(a_family=True, c_family=True)
-    row = await store.propose_relationship(GUEST_A, GUEST_B, "friend", datetime.now(tz=UTC))
-    await store.respond_relationship(row["id"], True, datetime.now(tz=UTC))
+    # 42.6.7: родство — такая же явная пара в guest_relationships, как и
+    # друг/знакомый; флаг Subscription.family здесь ни при чём.
+    book = _book_with_third(a_family=False, c_family=False)
+    row_family = await store.propose_relationship(GUEST_A, GUEST_C, "family", datetime.now(tz=UTC))
+    await store.respond_relationship(row_family["id"], True, datetime.now(tz=UTC))
+    row_friend = await store.propose_relationship(GUEST_A, GUEST_B, "friend", datetime.now(tz=UTC))
+    await store.respond_relationship(row_friend["id"], True, datetime.now(tz=UTC))
     ctx = _ctx(store, chat_id=GUEST_A, book=book)
     result = await ai_tools.tool_my_relationships(ctx, {})
-    assert "Игорь" in result and "семья" in result
+    assert "Игорь" in result and "родство" in result
     assert "Настя" in result and "друг" in result
 
 

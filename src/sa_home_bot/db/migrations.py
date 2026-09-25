@@ -58,22 +58,29 @@ async def apply_migrations(db: Database) -> None:
         log.info(
             "Миграция: vpn_check_states пересоздана под ключ (node, server, transport, target)"
         )
-    await _migrate_guest_relationships_family(db, schema)
+    await _migrate_guest_relationships_check(db, schema)
     await db.conn.commit()
     log.info("Схема БД применена")
 
 
-async def _migrate_guest_relationships_family(db: Database, schema: str) -> None:
-    """CHECK(relation IN ('friend','acquaintance')) — заводился 42.6.1, до
-    'family' (42.6.5, 2026-09-26). SQLite не умеет ALTER CHECK — таблица уже
-    хранит реальные подтверждённые связи (в отличие от vpn_check_states выше,
-    это не жалко-оперативные данные), поэтому не дропаем, а пересоздаём с
-    переносом строк."""
+# Полный набор relation, ожидаемый ТЕКУЩЕЙ схемой (bot/tools.py::RELATION_TYPES
+# зеркалит этот же список) — растёт по мере добавления типов связи ('family'
+# — 42.6.5, 'spouse' — 42.6.7). Миграция ниже сверяет CHECK живой таблицы с
+# этим списком и пересоздаёт её, если чего-то не хватает — держать в шаге с
+# schema.sql вручную, тестами не проверяется автоматически.
+_GUEST_RELATIONSHIP_TYPES = ("friend", "acquaintance", "family", "spouse")
+
+
+async def _migrate_guest_relationships_check(db: Database, schema: str) -> None:
+    """CHECK(relation IN (...)) растёт по мере добавления новых типов связи.
+    SQLite не умеет ALTER CHECK — таблица уже хранит реальные подтверждённые
+    связи (в отличие от vpn_check_states выше, это не жалко-оперативные
+    данные), поэтому не дропаем, а пересоздаём с переносом строк."""
     cur = await db.conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='guest_relationships'"
     )
     row = await cur.fetchone()
-    if row is None or "'family'" in row["sql"]:
+    if row is None or all(f"'{r}'" in row["sql"] for r in _GUEST_RELATIONSHIP_TYPES):
         return
     await db.conn.execute("ALTER TABLE guest_relationships RENAME TO guest_relationships_old_426")
     await db.conn.executescript(schema)
@@ -84,4 +91,7 @@ async def _migrate_guest_relationships_family(db: Database, schema: str) -> None
         "FROM guest_relationships_old_426"
     )
     await db.conn.execute("DROP TABLE guest_relationships_old_426")
-    log.info("Миграция: guest_relationships — CHECK(relation) расширен до 'family'")
+    log.info(
+        "Миграция: guest_relationships — CHECK(relation) обновлён до %s",
+        ", ".join(_GUEST_RELATIONSHIP_TYPES),
+    )
