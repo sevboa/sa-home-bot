@@ -1833,6 +1833,71 @@ async def test_broken_graph_memory_does_not_break_the_conversation():
     assert facts == []
 
 
+async def test_guest_first_turn_queries_graph_for_identity(store):
+    """Этап 42.5(b): гость (не в settings.people) на первом ходе треда —
+    ВТОРОЙ, отдельный запрос в graph_memory про личность самого
+    собеседника, поверх обычного запроса по теме реплики."""
+    message = FakeMessage()
+    message.from_user = FakeUser("Гусь", username="goose", id=777)
+    link = FakeNodeLink(
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Как скажете"}],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+    )
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert len(link.graph_recall_calls) == 2
+    identity_call = link.graph_recall_calls[1]
+    assert identity_call["chat_id"] == 1
+    assert "Гусь" in identity_call["query"]
+
+
+async def test_guest_second_turn_does_not_requery_identity(store):
+    """Один раз на тред (решение пользователя 2026-09-25) — если в history
+    уже есть прошлый обмен репликами, второй graph-запрос не шлётся."""
+    message = FakeMessage()
+    message.from_user = FakeUser("Гусь", username="goose", id=777)
+    link = FakeNodeLink(
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Как скажете"}],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+    )
+    history = [
+        {"role": "user", "content": "привет"},
+        {"role": "assistant", "content": "Здравствуйте"},
+    ]
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), history, 1, _admin_book(), FakeNotifier(),
+    )
+
+    assert len(link.graph_recall_calls) == 1
+
+
+async def test_known_family_member_does_not_query_guest_identity(store):
+    """Собеседник из settings.people — уже есть _known_person_note, второй
+    graph-запрос про личность ему не нужен, даже на первом ходе треда."""
+    message = FakeMessage()
+    message.from_user = FakeUser("Иван", username="ivan", id=777)
+    link = FakeNodeLink(
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Как скажете"}],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+    )
+    settings = Settings(
+        llm=LlmConfig(request_timeout_s=5.0),
+        people=[PersonConfig(telegram_username="ivan", full_name="Иван Иванов", gender="m")],
+    )
+
+    await ai_flow.request_alfred(
+        message, link, store, settings, [{"role": "user", "content": "привет"}], 1,
+        _admin_book(), FakeNotifier(),
+    )
+
+    assert len(link.graph_recall_calls) == 1
+
+
 class _FakeEpisodeLink:
     """Двойник ServiceLink только для ACTION_ADD_EPISODE — piggyback_dialogue_
     episode (Этап 42.2) не ходит ни за что другое, полный FakeNodeLink с его

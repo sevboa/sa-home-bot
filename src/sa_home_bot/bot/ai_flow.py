@@ -770,6 +770,12 @@ async def _build_context_note(
     начал этот тред, кто ещё обращался к Альфреду в этом чате, и что за
     сообщение цитируют/на что отвечают (см. _reply_context_lines).
 
+    ``graph_facts`` — вызывающий (request_alfred) может смешать в один
+    список результаты ДВУХ разных запросов в graph_memory: обычный поиск по
+    теме текущей реплики и, для гостей на первом ходе треда, поиск про
+    личность самого собеседника (Этап 42.5b) — оба одинаково "может быть
+    неполным/устаревшим", разделять их по тону здесь не нужно.
+
     Пункты про тред/участников — только для групп: в личке собеседник
     всегда один и тот же, уточнять нечего. Строится заново на каждый запрос
     (не хранится в ai_turns) — участники чата могут появляться по ходу дела,
@@ -1010,7 +1016,7 @@ async def request_alfred(
     # раз — комплект нужен и заметке (знает ли он про интернет), и tool_ctx.
     subscription = book.for_chat(message.chat.id) if message.chat else None
     has_web_search = SURFING_TOOL in ai_tools.tools_for(subscription).handlers
-    memory_facts, graph_facts = await asyncio.gather(
+    recall_calls = [
         recall_facts(
             node_link,
             message.chat.id if message.chat else None,
@@ -1022,7 +1028,35 @@ async def request_alfred(
             message.chat.id if message.chat else None,
             message.text or "",
         ),
-    )
+    ]
+    # Этап 42.5(b): у гостя (не в settings.people, см. _find_known_person) нет
+    # структурного профиля вообще — только то, что накопилось в graph_memory
+    # через обычные реплики (piggyback_dialogue_episode, Этап 42.2, пишет
+    # КАЖДЫЙ ход в граф уже сегодня — заводить отдельный путь записи под
+    # "представиться" не нужно). Решение пользователя: НЕ структурная таблица
+    # под профиль гостя — гендер/обращение/прозвище такого человека это
+    # нечёткое накопленное знание, ему место в графе, не в БД. Не хватало
+    # только чтения: recall_graph_facts выше ищет по теме текущей реплики, не
+    # по личности собеседника — здесь тот же вызов с другим text.
+    # Один раз на тред (решение пользователя 2026-09-25), не на каждый ход —
+    # опрашивать спящий mycraft на каждую реплику ради того же самого лишнее.
+    # "Первый ход треда" — без новой БД-выборки: history (из ai_turns этого
+    # dialogue_id, см. bot/handlers/ai.py) длиннее одного элемента только
+    # если в треде уже был обмен репликами; синтетический первый промпт
+    # (OPENING_PROMPT/текст команды) — всегда ровно один элемент.
+    if _find_known_person(settings, message.from_user) is None and len(history) <= 1:
+        sender_name = display_name(message.from_user)
+        if sender_name:
+            recall_calls.append(
+                recall_graph_facts(
+                    node_link,
+                    message.chat.id if message.chat else None,
+                    f"Кто такой(-ая) {sender_name} и как к нему/ней обращаться?",
+                )
+            )
+    recall_results = await asyncio.gather(*recall_calls)
+    memory_facts = recall_results[0]
+    graph_facts = recall_results[1] + (recall_results[2] if len(recall_results) > 2 else [])
     context_note = await _build_context_note(
         message,
         store,
