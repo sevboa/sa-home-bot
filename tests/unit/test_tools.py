@@ -1022,6 +1022,51 @@ async def test_remind_when_still_works_without_after_event(store):
     assert "await_event" not in link.calls[0][1]
 
 
+# --- schedule_agent_dialogue: проактивный chat_loop без готового треда
+# (Этап 44.1, задел под агента установки связи 42.6) ---
+
+
+async def test_schedule_agent_dialogue_creates_chat_loop_task_without_dialogue_id(store):
+    link = _FakeNodeLink()
+    messages = [{"role": "user", "content": "скажи гостю B привет от A"}]
+    other_chat_id = 222
+    result = await tools.schedule_agent_dialogue(link, other_chat_id, messages, "high", 60.0)
+    assert result == {"task_id": 1}
+    assert len(link.calls) == 1
+    action, args, dst = link.calls[0]
+    assert action == tools.task_protocol.ACTION_CREATE
+    assert dst.node == tools.task_protocol.NODE_ID
+    assert dst.service == tools.task_protocol.SERVICE_NAME
+    assert args["dst_node"] == tools.LLM_NODE
+    assert args["dst_service"] == tools.LLM_SERVICE
+    assert args["action"] == tools.task_protocol.ACTION_CHAT_LOOP
+    assert args["args"] == {"messages": messages, "reason": "high", "chat_id": other_chat_id}
+    assert args["timeout_s"] == 60.0
+    # Ключевое отличие от tool_remind: никакого dialogue_id/trigger_message_id/
+    # message_thread_id — их рождение отдано bot/node_events.py (Этап 44.2).
+    assert args["meta"] == {
+        "kind": tools.task_protocol.TASK_KIND_LLM_CHAT,
+        "chat_id": other_chat_id,
+    }
+
+
+async def test_schedule_agent_dialogue_due_at_is_now(store):
+    link = _FakeNodeLink()
+    before = datetime.now(UTC)
+    await tools.schedule_agent_dialogue(link, 222, [{"role": "user", "content": "x"}], "off", 30.0)
+    after = datetime.now(UTC)
+    due_at = datetime.fromisoformat(link.calls[0][1]["due_at"])
+    assert before <= due_at <= after
+
+
+async def test_schedule_agent_dialogue_propagates_service_errors(store):
+    link = _FakeNodeLink(raises=tools.ServiceUnavailableError("служба задач недоступна"))
+    with pytest.raises(tools.ServiceUnavailableError):
+        await tools.schedule_agent_dialogue(
+            link, 222, [{"role": "user", "content": "x"}], "off", 30.0
+        )
+
+
 # --- права: комплект тулов собирается под подписку собеседника ---
 
 

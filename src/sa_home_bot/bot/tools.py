@@ -962,6 +962,47 @@ async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
     return f"задача поставлена на {due_at.strftime('%Y-%m-%d %H:%M')} (местное время)"
 
 
+async def schedule_agent_dialogue(
+    node_link: ServiceLink,
+    chat_id: int,
+    messages: list[dict[str, Any]],
+    reason: str,
+    timeout_s: float,
+) -> dict[str, Any]:
+    """Поставить chat_loop-задачу, которая на срабатывании начинает НОВЫЙ
+    тред у произвольного собеседника — не продолжает свой, как tool_remind
+    (тот всегда self-scheduled: несёт ctx.dialogue_id/trigger_message_id/
+    message_thread_id, смысл — "напомни МНЕ в ЭТОМ треде"). Здесь meta
+    заведомо не содержит dialogue_id/trigger_message_id/message_thread_id —
+    рождение нового dialogue_id при доставке первого сообщения делает
+    bot/node_events.py::_handle_task_result (Этап 44.2, отдельный подэтап).
+
+    НЕ публичный ToolSpec — модель в живом /ai её вызвать не может, это
+    внутренняя инфраструктура для будущего кода 42.6 (агент установки связи
+    между гостями сам, по собственной инициативе, пишет чужому собеседнику,
+    не отвечая на его сообщение).
+
+    due_at = сейчас, не await_event: триггер уже наступил на стороне
+    вызывающего кода (например, гость A подтвердил предложение связи) —
+    ждать больше нечего, обычный fire-loop (tasks/service.py::_fire_due)
+    подхватит задачу на ближайшем тике. Ошибки (ServiceUnavailableError/
+    ProtoError) не проглатываются, как у tool_remind (там — русский текст
+    для модели) — это не тул, а функция для кода, вызывающая сторона решает
+    сама, как сообщить о сбое."""
+    due_at_utc = datetime.now(tz=UTC)
+    dst = Address(node=task_protocol.NODE_ID, service=task_protocol.SERVICE_NAME)
+    create_args: dict[str, Any] = {
+        "due_at": due_at_utc.isoformat(),
+        "dst_node": LLM_NODE,
+        "dst_service": LLM_SERVICE,
+        "action": task_protocol.ACTION_CHAT_LOOP,
+        "args": {"messages": messages, "reason": reason, "chat_id": chat_id},
+        "timeout_s": timeout_s,
+        "meta": {"kind": task_protocol.TASK_KIND_LLM_CHAT, "chat_id": chat_id},
+    }
+    return await node_link.command(task_protocol.ACTION_CREATE, create_args, dst=dst)
+
+
 _DECL_CALC: dict[str, Any] = {
     "type": "function",
     "function": {
