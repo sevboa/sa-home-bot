@@ -114,7 +114,11 @@ async def test_preview_relationship_no_side_effects(store):
         ctx, {"target_chat_id": GUEST_B, "relation": "acquaintance"}
     )
 
-    assert "Вася" in result and "Настя" in result and "знакомый" in result
+    # "Вася" (инициатор) больше не называется по имени в тексте, адресованном
+    # ему самому (см. test_preview_relationship_owner_never_named_in_third_person) —
+    # только адресат ("Настя") и тип связи.
+    assert "Вася" not in result
+    assert "Настя" in result and "знакомый" in result
     assert "propose_relationship" in result
     assert str(GUEST_B) in result
     # Ничего не записано и никуда не дозвонились — это только предпросмотр.
@@ -166,7 +170,50 @@ async def test_preview_relationship_spouse_exclusivity(store):
     result = await ai_tools.tool_preview_relationship(
         ctx, {"target_chat_id": GUEST_B, "relation": "spouse"}
     )
-    assert "уже состоит в супружеской связи" in result
+    assert "у вас уже есть супруг(а)" in result
+
+
+async def test_preview_relationship_owner_never_named_in_third_person(store):
+    # Живая находка 2026-09-26 (второй заход, после фикса "me"): preview
+    # всегда о САМОМ вызывающем — proposer_name из _guest_facing_name (его
+    # настоящее ФИО) в тексте, адресованном ЕМУ САМОМУ, читалось буквально
+    # ("Дословно покажи это Алексей Александрович Севбо (@asevbo)") —
+    # Gemma озвучивала это слово в слово. Предпросмотр не должен называть
+    # инициатора по имени вовсе, только обращаться на "вы".
+    book = SubscriptionBook.from_config(
+        [SubscriptionConfig(name="me", chat_id=OWNER_CHAT, allowed_commands=["*"])],
+        [
+            GuestSubscriptionConfig(
+                name="Настя", chat_id=GUEST_B, allowed_commands=["chat@llm"], invited_user="Настя"
+            )
+        ],
+    )
+    settings = Settings(
+        people=[
+            PersonConfig(
+                telegram_id=OWNER_CHAT,
+                telegram_username="asevbo",
+                full_name="Алексей Александрович Севбо",
+                gender="m",
+            )
+        ]
+    )
+    ctx = ai_tools.ToolContext(
+        chat_id=OWNER_CHAT,
+        dialogue_id=1,
+        trigger_message_id=1,
+        settings=settings,
+        book=book,
+        store=store,
+    )
+
+    result = await ai_tools.tool_preview_relationship(
+        ctx, {"target_chat_id": GUEST_B, "relation": "spouse"}
+    )
+
+    assert "Алексей Александрович Севбо" not in result
+    assert "asevbo" not in result
+    assert "вы" in result.lower()
 
 
 async def test_preview_then_propose_same_args_matches(store):
@@ -276,7 +323,7 @@ async def test_propose_relationship_spouse_blocked_if_proposer_already_married(s
         ctx, {"target_chat_id": GUEST_B, "relation": "spouse"}
     )
 
-    assert "уже состоит в супружеской связи" in result
+    assert "у вас уже есть супруг(а)" in result
     assert await store.pending_relationship_for(GUEST_B) is None
 
 
@@ -463,6 +510,44 @@ async def test_propose_relationship_reports_task_service_error(store):
     )
     assert "не удалось отправить предложение" in result
     assert await store.pending_relationship_for(GUEST_B) is not None  # запись уже создана
+
+
+async def test_propose_relationship_target_full_name_not_declined_bare(store):
+    # Живая находка 2026-09-26 (второй заход): full_name из settings.people
+    # лежит в именительном падеже ("Наташа Сорокина"), а старый код вставлял
+    # его прямо в падежные позиции — "отправлено Наташа Сорокина" вместо
+    # "Наташе Сорокиной". Теперь падеж держит служебное слово ("адресату"),
+    # а имя — нейтральный лейбл в скобках; проверяем ровно это обёртывание.
+    book = _book()
+    node_link = FakeNodeLink()
+    settings = Settings(
+        people=[
+            PersonConfig(telegram_id=GUEST_B, full_name="Наташа Сорокина", gender="f"),
+        ]
+    )
+    ctx = ai_tools.ToolContext(
+        chat_id=GUEST_A,
+        dialogue_id=1,
+        trigger_message_id=1,
+        settings=settings,
+        node_link=node_link,
+        book=book,
+        store=store,
+    )
+
+    result = await ai_tools.tool_propose_relationship(
+        ctx, {"target_chat_id": GUEST_B, "relation": "friend"}
+    )
+
+    assert "отправлено адресату (Наташа Сорокина)" in result
+    assert "отправлено Наташа Сорокина" not in result
+
+    # Повторный вызов -> ветка "уже отправлено" в _resolve_propose_relationship,
+    # та же обёртка должна держаться и там.
+    dup = await ai_tools.tool_propose_relationship(
+        ctx, {"target_chat_id": GUEST_B, "relation": "friend"}
+    )
+    assert "адресату (Наташа Сорокина)" in dup
 
 
 # --- confirm_relationship / reject_relationship: прямой путь (живой /ai) ---

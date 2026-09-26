@@ -1044,7 +1044,16 @@ def _guest_facing_name(settings: Settings, chat_id: int, fallback: str) -> str:
     которые видит СОБЕСЕДНИК, а не сам владелец. Там, где найдётся
     settings.people (config.py::PersonConfig) с этим chat_id — берём
     настоящее full_name(+@username); обычному гостю там взяться нечему,
-    Subscription.name у него и так человекочитаемое имя — fallback."""
+    Subscription.name у него и так человекочитаемое имя — fallback.
+
+    ВАЖНО (живая находка того же дня, второй заход): full_name лежит в
+    конфиге строго в именительном падеже. НЕ вставлять результат прямо в
+    предложение, где по-русски нужен другой падеж (дательный "кому",
+    родительный "у кого", творительный "с кем" и т.п.) — ломается
+    грамматика ("у Наташа Сорокина", "отправлено Наташа Сорокина"). Падеж
+    держать на служебном слове ("адресату (…)", "с адресатом (…)"), а имя —
+    именительным лейблом в скобках. И ни в каком падеже не называть по
+    имени в третьем лице самого адресата текста (см. tool_preview_relationship)."""
     for person in settings.people:
         if person.telegram_id and person.telegram_id == chat_id:
             return (
@@ -1098,25 +1107,39 @@ async def _resolve_propose_relationship(
     # Проверяем ДО записи, была ли уже активная связь — иначе не отличить
     # "только что создали pending" от "она уже висела" и рискуем повторно
     # рассылать директиву B на каждый повторный вызов того же предложения.
+    #
+    # Живая находка 2026-09-26 (после фикса "me" тем же днём): все строки
+    # ниже видит ТОЛЬКО сам инициатор (preview/propose вызывает он о себе),
+    # а _guest_facing_name отдаёт full_name из settings.people строго в
+    # именительном падеже. Вставленное в русское предложение с управлением
+    # другим падежом (дательный "отправлено кому", родительный "у кого",
+    # творительный "с кем"...) оно ломает грамматику — реальный пример из
+    # прода: "у Наташа Сорокина уже есть супруг(а)" вместо "у Наташи...".
+    # Чтобы не тащить морфологию (pymorphy2 и т.п. — лишняя зависимость),
+    # падеж держим на служебном слове ("адресата"/"вас"), а само имя —
+    # именительным лейблом в скобках, где падеж не нужен.
     already_pending = await ctx.store.pending_relationship_for(target_chat_id)
     if already_pending is not None and {
         already_pending["guest_a"],
         already_pending["guest_b"],
     } == {ctx.chat_id, target_chat_id}:
-        return f"предложение уже отправлено {target_name}, жду ответа"
+        return f"предложение уже отправлено адресату ({target_name}), жду ответа"
     proposer_confirmed = await ctx.store.relationships_for(ctx.chat_id, status="confirmed")
     pair = {ctx.chat_id, target_chat_id}
     if any({r["guest_a"], r["guest_b"]} == pair for r in proposer_confirmed):
-        return f"с {target_name} уже подтверждённая связь"
+        return f"с адресатом ({target_name}) уже подтверждённая связь"
 
     if relation == "spouse":
         # Супружеская связь исключительна — только одна подтверждённая с
         # каждой стороны одновременно (решение пользователя 2026-09-26).
         if any(r["relation"] == "spouse" for r in proposer_confirmed):
-            return f"{proposer_name} уже состоит в супружеской связи — сначала её нужно разорвать"
+            return "у вас уже есть супруг(а) — сначала эту связь нужно разорвать"
         target_confirmed = await ctx.store.relationships_for(target_chat_id, status="confirmed")
         if any(r["relation"] == "spouse" for r in target_confirmed):
-            return f"у {target_name} уже есть супруг(а) — сначала эта связь должна быть расторгнута"
+            return (
+                f"у адресата ({target_name}) уже есть супруг(а) — "
+                "сначала эта связь должна быть расторгнута"
+            )
 
     return target_chat_id, relation, proposer_name, target_name
 
@@ -1132,17 +1155,27 @@ async def tool_preview_relationship(ctx: ToolContext, args: dict[str, Any]) -> s
     resolved = await _resolve_propose_relationship(ctx, args)
     if isinstance(resolved, str):
         return resolved
-    target_chat_id, relation, proposer_name, target_name = resolved
+    target_chat_id, relation, _, target_name = resolved
+    # Живая находка 2026-09-26: инициатор — это ВСЕГДА сам собеседник в
+    # этом чате (preview/propose вызывает только он о себе), поэтому в
+    # тексте, адресованном ЕМУ, нельзя называть его по имени в третьем
+    # лице — Gemma читала это буквально ("Алексей Александрович Севбо
+    # (@asevbo) предложит... Дословно покажи это Алексей Александрович
+    # Севбо") и озвучивала слово в слово. proposer_name здесь не нужен —
+    # только адресат (target_name), причём падеж держим на слове
+    # "адресату", а не на самом имени (см. _resolve_propose_relationship).
     return (
-        f"Предпросмотр (ничего ещё не отправлено): {proposer_name} предложит "
-        f"{target_name} связь «{_relation_label(relation)}». Дословно покажи "
-        f"это {proposer_name} — кому именно и какой именно тип связи — и "
-        "дождись его явного согласия. Только после этого вызови "
-        f"propose_relationship(target_chat_id={target_chat_id}, "
-        f'relation="{relation}"), чтобы реально отправить {target_name} '
-        "предложение. Если он передумает или назовёт другой тип — вызови "
-        "preview_relationship заново с новыми аргументами, не подгоняй "
-        "текущее предложение."
+        "Предпросмотр (ничего ещё не отправлено). Собеседник в этом чате — "
+        "сам инициатор; обращайся к нему на «вы» и никогда не называй его "
+        f"по имени в третьем лице. Адресат — {target_name}, тип связи — "
+        f"«{_relation_label(relation)}». Скажи собеседнику своими словами, "
+        "кому именно и какой именно тип связи предлагается, и дождись его "
+        "явного согласия — не делай вывод сам. Только после согласия "
+        f"вызови propose_relationship(target_chat_id={target_chat_id}, "
+        f'relation="{relation}"), чтобы реально отправить предложение '
+        f"адресату ({target_name}). Если он передумает или назовёт другой "
+        "тип — вызови preview_relationship заново с новыми аргументами, "
+        "не подгоняй текущее предложение."
     )
 
 
@@ -1164,12 +1197,15 @@ async def tool_propose_relationship(ctx: ToolContext, args: dict[str, Any]) -> s
     # "ты"/"тобой" там неизбежно читается с точки зрения persona, отвечающей
     # ЗА АЛЬФРЕДА этому собеседнику — поэтому теперь явно и многословно
     # разводим роли: Альфред только курьер, сторона связи — proposer.
+    # Убрано повторное "между «X» и твоим собеседником" — это творительный
+    # падеж на вставленном имени (та же живая находка про падежи, см.
+    # _resolve_propose_relationship); первого упоминания в именительном
+    # падеже ("Гость «X» предложил...") достаточно, роли и так однозначны.
     directive = (
         f"Тебе, Альфреду, нужно передать весть — ты сам НЕ участник этой "
         f"связи. Гость «{proposer_name}» предложил(а) установить связь "
         f"«{_relation_label(relation)}» С ЧЕЛОВЕКОМ, С КОТОРЫМ ТЫ СЕЙЧАС "
-        f"РАЗГОВАРИВАЕШЬ (не с тобой, не с Альфредом) — то есть между "
-        f"«{proposer_name}» и твоим текущим собеседником. Расскажи об этом "
+        "РАЗГОВАРИВАЕШЬ (не с тобой, не с Альфредом). Расскажи об этом "
         "собеседнику своими словами, как курьер, ответь на уточняющие "
         "вопросы, если будут, и дождись явного согласия или отказа именно "
         "от него — не делай вывод сам. Как только он(а) явно ответит, "
@@ -1185,8 +1221,8 @@ async def tool_propose_relationship(ctx: ToolContext, args: dict[str, Any]) -> s
             ctx.settings.llm.request_timeout_s,
         )
     except (ServiceUnavailableError, ProtoError) as exc:
-        return f"не удалось отправить предложение {target_name}: {exc}"
-    return f"предложение отправлено {target_name}, жду ответа"
+        return f"не удалось отправить предложение адресату ({target_name}): {exc}"
+    return f"предложение отправлено адресату ({target_name}), жду ответа"
 
 
 async def _respond_relationship(ctx: ToolContext, args: dict[str, Any], accepted: bool) -> str:
