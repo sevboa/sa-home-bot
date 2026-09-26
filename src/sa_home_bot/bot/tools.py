@@ -1034,6 +1034,27 @@ def _relation_label(relation: str) -> str:
     return _RELATION_LABELS_RU.get(relation, relation)
 
 
+def _guest_facing_name(settings: Settings, chat_id: int, fallback: str) -> str:
+    """Имя для текста, который увидит ДРУГОЙ человек, не сам этот chat_id.
+
+    Живая находка 2026-09-26: Subscription.name у владельца в проде технически
+    "me" — умышленно (subscriptions/book.py, tests/test_recipients.py:
+    гость не должен подобрать владельца по имени через recipients.py), но это
+    же значение утекает в сообщения о связях ("Гость «me» предложил..."),
+    которые видит СОБЕСЕДНИК, а не сам владелец. Там, где найдётся
+    settings.people (config.py::PersonConfig) с этим chat_id — берём
+    настоящее full_name(+@username); обычному гостю там взяться нечему,
+    Subscription.name у него и так человекочитаемое имя — fallback."""
+    for person in settings.people:
+        if person.telegram_id and person.telegram_id == chat_id:
+            return (
+                f"{person.full_name} (@{person.telegram_username})"
+                if person.telegram_username
+                else person.full_name
+            )
+    return fallback
+
+
 def render_relationship_response_notice(responder_name: str, relation: str, accepted: bool) -> str:
     """Текст уведомления инициатору (A) об ответе адресата (B). Общая с
     bot/node_events.py::_handle_respond_relationship (там — мост для ответа,
@@ -1045,7 +1066,7 @@ def render_relationship_response_notice(responder_name: str, relation: str, acce
 
 async def _resolve_propose_relationship(
     ctx: ToolContext, args: dict[str, Any]
-) -> str | tuple[int, str, Any, Any]:
+) -> str | tuple[int, str, str, str]:
     """Общая проверка preview_relationship/propose_relationship: разбор
     аргументов, поиск гостей, дубликаты (pending/confirmed), исключительность
     'spouse'. При ошибке или раннем терминальном ответе (ошибка ввода, "уже
@@ -1069,6 +1090,10 @@ async def _resolve_propose_relationship(
     target = ctx.book.for_chat(target_chat_id)
     if proposer is None or target is None:
         return "ошибка: гость не найден — сверься с guests_list, не угадывай chat_id"
+    # Имена для ЧУЖОГО текста — не Subscription.name напрямую, см.
+    # _guest_facing_name (владельческое "me" технически, не для показа).
+    proposer_name = _guest_facing_name(ctx.settings, ctx.chat_id, proposer.name)
+    target_name = _guest_facing_name(ctx.settings, target_chat_id, target.name)
 
     # Проверяем ДО записи, была ли уже активная связь — иначе не отличить
     # "только что создали pending" от "она уже висела" и рискуем повторно
@@ -1078,22 +1103,22 @@ async def _resolve_propose_relationship(
         already_pending["guest_a"],
         already_pending["guest_b"],
     } == {ctx.chat_id, target_chat_id}:
-        return f"предложение уже отправлено {target.name}, жду ответа"
+        return f"предложение уже отправлено {target_name}, жду ответа"
     proposer_confirmed = await ctx.store.relationships_for(ctx.chat_id, status="confirmed")
     pair = {ctx.chat_id, target_chat_id}
     if any({r["guest_a"], r["guest_b"]} == pair for r in proposer_confirmed):
-        return f"с {target.name} уже подтверждённая связь"
+        return f"с {target_name} уже подтверждённая связь"
 
     if relation == "spouse":
         # Супружеская связь исключительна — только одна подтверждённая с
         # каждой стороны одновременно (решение пользователя 2026-09-26).
         if any(r["relation"] == "spouse" for r in proposer_confirmed):
-            return f"{proposer.name} уже состоит в супружеской связи — сначала её нужно разорвать"
+            return f"{proposer_name} уже состоит в супружеской связи — сначала её нужно разорвать"
         target_confirmed = await ctx.store.relationships_for(target_chat_id, status="confirmed")
         if any(r["relation"] == "spouse" for r in target_confirmed):
-            return f"у {target.name} уже есть супруг(а) — сначала эта связь должна быть расторгнута"
+            return f"у {target_name} уже есть супруг(а) — сначала эта связь должна быть расторгнута"
 
-    return target_chat_id, relation, proposer, target
+    return target_chat_id, relation, proposer_name, target_name
 
 
 async def tool_preview_relationship(ctx: ToolContext, args: dict[str, Any]) -> str:
@@ -1107,14 +1132,14 @@ async def tool_preview_relationship(ctx: ToolContext, args: dict[str, Any]) -> s
     resolved = await _resolve_propose_relationship(ctx, args)
     if isinstance(resolved, str):
         return resolved
-    target_chat_id, relation, proposer, target = resolved
+    target_chat_id, relation, proposer_name, target_name = resolved
     return (
-        f"Предпросмотр (ничего ещё не отправлено): {proposer.name} предложит "
-        f"{target.name} связь «{_relation_label(relation)}». Дословно покажи "
-        f"это {proposer.name} — кому именно и какой именно тип связи — и "
+        f"Предпросмотр (ничего ещё не отправлено): {proposer_name} предложит "
+        f"{target_name} связь «{_relation_label(relation)}». Дословно покажи "
+        f"это {proposer_name} — кому именно и какой именно тип связи — и "
         "дождись его явного согласия. Только после этого вызови "
         f"propose_relationship(target_chat_id={target_chat_id}, "
-        f'relation="{relation}"), чтобы реально отправить {target.name} '
+        f'relation="{relation}"), чтобы реально отправить {target_name} '
         "предложение. Если он передумает или назовёт другой тип — вызови "
         "preview_relationship заново с новыми аргументами, не подгоняй "
         "текущее предложение."
@@ -1127,7 +1152,7 @@ async def tool_propose_relationship(ctx: ToolContext, args: dict[str, Any]) -> s
     resolved = await _resolve_propose_relationship(ctx, args)
     if isinstance(resolved, str):
         return resolved
-    target_chat_id, relation, proposer, target = resolved
+    target_chat_id, relation, proposer_name, target_name = resolved
     assert ctx.store is not None  # гарантировано _resolve_propose_relationship
 
     now = datetime.now(tz=UTC)
@@ -1141,10 +1166,10 @@ async def tool_propose_relationship(ctx: ToolContext, args: dict[str, Any]) -> s
     # разводим роли: Альфред только курьер, сторона связи — proposer.
     directive = (
         f"Тебе, Альфреду, нужно передать весть — ты сам НЕ участник этой "
-        f"связи. Гость «{proposer.name}» предложил(а) установить связь "
+        f"связи. Гость «{proposer_name}» предложил(а) установить связь "
         f"«{_relation_label(relation)}» С ЧЕЛОВЕКОМ, С КОТОРЫМ ТЫ СЕЙЧАС "
         f"РАЗГОВАРИВАЕШЬ (не с тобой, не с Альфредом) — то есть между "
-        f"«{proposer.name}» и твоим текущим собеседником. Расскажи об этом "
+        f"«{proposer_name}» и твоим текущим собеседником. Расскажи об этом "
         "собеседнику своими словами, как курьер, ответь на уточняющие "
         "вопросы, если будут, и дождись явного согласия или отказа именно "
         "от него — не делай вывод сам. Как только он(а) явно ответит, "
@@ -1160,8 +1185,8 @@ async def tool_propose_relationship(ctx: ToolContext, args: dict[str, Any]) -> s
             ctx.settings.llm.request_timeout_s,
         )
     except (ServiceUnavailableError, ProtoError) as exc:
-        return f"не удалось отправить предложение {target.name}: {exc}"
-    return f"предложение отправлено {target.name}, жду ответа"
+        return f"не удалось отправить предложение {target_name}: {exc}"
+    return f"предложение отправлено {target_name}, жду ответа"
 
 
 async def _respond_relationship(ctx: ToolContext, args: dict[str, Any], accepted: bool) -> str:
@@ -1199,9 +1224,12 @@ async def _respond_relationship(ctx: ToolContext, args: dict[str, Any], accepted
         updated = await ctx.store.respond_relationship(relationship_id, accepted, now)
         assert updated is not None
         responder = ctx.book.for_chat(ctx.chat_id) if ctx.book is not None else None
-        text = render_relationship_response_notice(
-            responder.name if responder is not None else "гость", updated["relation"], accepted
+        responder_name = (
+            _guest_facing_name(ctx.settings, ctx.chat_id, responder.name)
+            if responder is not None
+            else "гость"
         )
+        text = render_relationship_response_notice(responder_name, updated["relation"], accepted)
         message_id = await ctx.notifier.send_direct(row["guest_a"], text)
         if message_id is not None:
             await ctx.store.record_ai_turn(

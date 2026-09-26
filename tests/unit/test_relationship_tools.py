@@ -11,7 +11,7 @@ import pytest_asyncio
 
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.service_link import ServiceUnavailableError
-from sa_home_bot.config import GuestSubscriptionConfig, Settings, SubscriptionConfig
+from sa_home_bot.config import GuestSubscriptionConfig, PersonConfig, Settings, SubscriptionConfig
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
@@ -378,6 +378,48 @@ async def test_propose_relationship_directive_clarifies_alfred_is_not_a_party(st
     assert "НЕ участник" in directive
     assert "не с тобой" in directive
     assert "Вася" in directive  # сторона связи — инициатор, назван по имени
+
+
+async def test_propose_relationship_owner_proposer_uses_real_name_not_me(store):
+    # Живая находка 2026-09-26: Subscription.name владельца в проде технически
+    # "me" (намеренно — гость не должен подобрать владельца по имени через
+    # recipients.py), но это же значение утекало в директиву адресату:
+    # "Гость «me» предложил(а)...". Там, где владелец известен в
+    # settings.people, директива обязана называть его настоящим именем.
+    book = SubscriptionBook.from_config(
+        [SubscriptionConfig(name="me", chat_id=OWNER_CHAT, allowed_commands=["*"])],
+        [
+            GuestSubscriptionConfig(
+                name="Настя", chat_id=GUEST_B, allowed_commands=["chat@llm"], invited_user="Настя"
+            )
+        ],
+    )
+    node_link = FakeNodeLink()
+    settings = Settings(
+        people=[
+            PersonConfig(
+                telegram_id=OWNER_CHAT, full_name="Алексей Александрович Севбо", gender="m"
+            )
+        ]
+    )
+    ctx = ai_tools.ToolContext(
+        chat_id=OWNER_CHAT,
+        dialogue_id=1,
+        trigger_message_id=1,
+        settings=settings,
+        node_link=node_link,
+        book=book,
+        store=store,
+    )
+
+    result = await ai_tools.tool_propose_relationship(
+        ctx, {"target_chat_id": GUEST_B, "relation": "friend"}
+    )
+
+    assert "me" not in result
+    directive = node_link.calls[0][1]["args"]["messages"][0]["content"]
+    assert "Алексей Александрович Севбо" in directive
+    assert "«me»" not in directive
 
 
 async def test_propose_relationship_duplicate_pending_does_not_redispatch(store):
