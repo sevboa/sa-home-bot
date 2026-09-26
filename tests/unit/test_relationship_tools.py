@@ -276,6 +276,24 @@ async def test_propose_relationship_family_flag_does_not_block(store):
     assert await store.pending_relationship_for(GUEST_B) is not None
 
 
+async def test_propose_relationship_directive_forbids_acknowledging_as_own_order(store):
+    # Живая находка 2026-09-26 (третий заход): директива уходит role="user"
+    # первым сообщением НОВОГО треда адресата — с точки зрения модели это
+    # неотличимо от речи самого собеседника, поэтому Альфред открывал ответ
+    # подтверждением ЧУЖОГО распоряжения ("Пгинято. Я исполню ваше
+    # погучение..."), как будто это сама Наташа ему велела. Директива
+    # обязана явно это запрещать словами.
+    book = _book()
+    node_link = FakeNodeLink()
+    ctx = _ctx(store, chat_id=GUEST_A, book=book, node_link=node_link)
+
+    await ai_tools.tool_propose_relationship(ctx, {"target_chat_id": GUEST_B, "relation": "friend"})
+
+    directive = node_link.calls[0][1]["args"]["messages"][0]["content"]
+    assert "поручение" in directive.lower()
+    assert "Принято" in directive  # запрет упоминает именно эту фразу
+
+
 async def test_propose_relationship_family_creates_pending(store):
     # 42.6.5/42.6.7: 'family' — точечная связь конкретной пары, флаг
     # Subscription.family вообще не участвует ни в проверке, ни в тексте.
