@@ -333,6 +333,10 @@ class TasksService:
     async def _prewake_due(self) -> None:
         deadline = datetime.now(tz=UTC) + timedelta(seconds=PREWAKE_LEAD_S)
         for row in await self._store.tasks_needing_prewake(deadline):
+            if row["action"] == protocol.ACTION_TIMER:
+                # Будильнику будить некого (см. protocol.ACTION_TIMER).
+                await self._store.mark_task_prewake_done(row["id"])
+                continue
             # Сразу помечаем — иначе следующий тик (через 30с) попробует
             # снова, пока предыдущая попытка (прогрев может занять минуты)
             # ещё идёт.
@@ -438,6 +442,14 @@ class TasksService:
 
         if row["action"] == protocol.ACTION_CHAT_LOOP:
             await self._fire_chat_loop(row, dst, meta)
+            return
+        if row["action"] == protocol.ACTION_TIMER:
+            # Чистый будильник — исполнять нечего, dst не трогаем (см.
+            # protocol.ACTION_TIMER).
+            await self._emit(
+                protocol.EVENT_TASK_RESULT,
+                {"task_id": row["id"], "meta": meta, "ok": True, "result": {}},
+            )
             return
 
         task_args = json.loads(row["args_json"])

@@ -3905,7 +3905,27 @@ restart_node` на alfred, все службы поднялись на 0.112.0. 
 инфраструктуры, отдельная задача.
 
 ### Этап 45. Детерминированные формы подтверждения: Альфред — помощник, решает человек
-— спроектировано, не начато (разговор 2026-09-26)
+— 45.1–45.4 реализованы в v0.113.0 (2026-09-27), НЕ задеплоены; 45.5 —
+тесты есть, решение по висящим legacy-заявкам #2/#5 за владельцем.
+
+**Как реализовано (2026-09-27).** `bot/pending_actions.py` — ядро
+(`PendingActions`: переходы, `ActionBus` с событиями `action_*`, реакции,
+таймеры, `recover()` на старте); `bot/handlers/pending_actions.py` — кнопки
+«pa:<id>:<s|c|a|r>»; таблица `pending_actions` (db/schema.sql, отдельные
+`draft_message_id`/`offer_message_id`/`notice_message_id` вместо одного
+`message_id` — у записи до трёх сообщений); будильник экспирации —
+новое действие службы tasks `timer` (`tasks/protocol.py::ACTION_TIMER`),
+при недоступной службе — таймер в памяти + `recover()`. Модель видит
+один тул `request_relationship_form`; preview/propose/confirm/reject и мост
+`EVENT_RESPOND_RELATIONSHIP` удалены. Форма черновика уходит после ответа
+`/ai` (`bot/handlers/ai.py`, `flush_drafts` в `finally`); речь адресату/
+инициатору — chat_loop с `meta.pending_action_id/stage`, порядок и
+заглушку держит `bot/node_events.py::_handle_action_speech`; страховка —
+таймер `FIRE_GRACE_S + request_timeout_s + 60 с`. События `action_*` пока
+внутрипроцессные (бот — единственный писатель); в рой/`remind after_event`
+не выведены — это следующий шаг, когда появится второй подписчик вне бота.
+Legacy `pending` в `guest_relationships` новой логикой игнорируются
+(не блокируют новые формы), миграция их НЕ трогает.
 
 **Живая находка 2026-09-26.** Запрос связи #5 (Алексей → Наталья, `spouse`)
 навсегда завис в `pending`: Наталья ответила «Не хочу», Альфред сказал «ваше

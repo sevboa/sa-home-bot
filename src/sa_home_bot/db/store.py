@@ -52,6 +52,12 @@ def _parse(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
+def _pending_action_row(row) -> dict:
+    data = dict(row)
+    data["payload"] = json.loads(data.pop("payload_json") or "{}")
+    return data
+
+
 def _row_to_state(row) -> HealthState:
     return HealthState(
         component_id=row["component_id"],
@@ -733,54 +739,6 @@ class Store:
 
     # --- guest_relationships (Этап 42.6.1, связи между гостями) ---
 
-    async def propose_relationship(
-        self, guest_a: int, guest_b: int, relation: str, now: datetime
-    ) -> dict:
-        """Предложение связи. Если между этой парой (в любом порядке) уже
-        есть активная запись (pending/confirmed) — не дублировать, вернуть
-        её как есть: повторное предложение того же самого не должно плодить
-        параллельные заявки."""
-        existing = await self._active_relationship(guest_a, guest_b)
-        if existing is not None:
-            return existing
-        async with self.db.transaction() as conn:
-            cur = await conn.execute(
-                "INSERT INTO guest_relationships(guest_a, guest_b, relation, status, "
-                "proposed_by, created_at) VALUES(?, ?, ?, 'pending', ?, ?)",
-                (guest_a, guest_b, relation, guest_a, _iso(now)),
-            )
-            row_id = cur.lastrowid
-        row = await self.get_relationship(row_id)
-        assert row is not None
-        return row
-
-    async def _active_relationship(self, guest_a: int, guest_b: int) -> dict | None:
-        cur = await self.db.conn.execute(
-            "SELECT * FROM guest_relationships WHERE status IN ('pending', 'confirmed') "
-            "AND ((guest_a=? AND guest_b=?) OR (guest_a=? AND guest_b=?))",
-            (guest_a, guest_b, guest_b, guest_a),
-        )
-        row = await cur.fetchone()
-        return dict(row) if row else None
-
-    async def respond_relationship(
-        self, relationship_id: int, accepted: bool, now: datetime
-    ) -> dict | None:
-        """B отвечает на предложение — переводит pending в confirmed/rejected.
-        Возвращает None, если записи нет или она уже не pending (двойной
-        ответ/устаревшая ссылка), а не тихо переписывает решённое."""
-        row = await self.get_relationship(relationship_id)
-        if row is None or row["status"] != "pending":
-            return None
-        new_status = "confirmed" if accepted else "rejected"
-        confirmed_at = _iso(now) if accepted else None
-        async with self.db.transaction() as conn:
-            await conn.execute(
-                "UPDATE guest_relationships SET status=?, confirmed_at=? WHERE id=?",
-                (new_status, confirmed_at, relationship_id),
-            )
-        return await self.get_relationship(relationship_id)
-
     async def get_relationship(self, relationship_id: int) -> dict | None:
         cur = await self.db.conn.execute(
             "SELECT * FROM guest_relationships WHERE id=?", (relationship_id,)
@@ -798,17 +756,132 @@ class Store:
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
-    async def pending_relationship_for(self, guest_b: int) -> dict | None:
-        """Необработанное предложение, адресованное guest_b прямо сейчас —
-        для контроля прав в confirm_relationship/reject_relationship (42.6.2):
-        отвечать может только тот, кому реально адресовано."""
-        cur = await self.db.conn.execute(
-            "SELECT * FROM guest_relationships WHERE status='pending' AND guest_b=? "
-            "ORDER BY id DESC LIMIT 1",
-            (guest_b,),
-        )
+    async def add_confirmed_relationship(
+        self, guest_a: int, guest_b: int, relation: str, created_at: datetime, now: datetime
+    ) -> dict:
+        """Записать уже подтверждённую связь (Этап 45: решение принято
+        кнопкой формы, жизненный цикл запроса жил в pending_actions)."""
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                "INSERT INTO guest_relationships(guest_a, guest_b, relation, status, "
+                "proposed_by, created_at, confirmed_at) VALUES(?, ?, ?, 'confirmed', ?, ?, ?)",
+                (guest_a, guest_b, relation, guest_a, _iso(created_at), _iso(now)),
+            )
+            row_id = cur.lastrowid
+        row = await self.get_relationship(row_id)
+        assert row is not None
+        return row
+
+    # --- pending_actions (Этап 45, детерминированные формы подтверждения) ---
+
+    async def create_pending_action(
+        self,
+        kind: str,
+        initiator: int,
+        addressee: int | None,
+        payload: dict,
+        expires_at: datetime,
+        now: datetime,
+    ) -> dict:
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                "INSERT INTO pending_actions(kind, initiator, addressee, payload_json, status, "
+                "expires_at, created_at) VALUES(?, ?, ?, ?, 'draft', ?, ?)",
+                (
+                    kind,
+                    initiator,
+                    addressee,
+                    json.dumps(payload, ensure_ascii=False),
+                    _iso(expires_at),
+                    _iso(now),
+                ),
+            )
+            row_id = cur.lastrowid
+        row = await self.get_pending_action(row_id)
+        assert row is not None
+        return row
+
+    async def get_pending_action(self, action_id: int) -> dict | None:
+        cur = await self.db.conn.execute("SELECT * FROM pending_actions WHERE id=?", (action_id,))
         row = await cur.fetchone()
-        return dict(row) if row else None
+        return _pending_action_row(row) if row else None
+
+    async def transition_pending_action(
+        self,
+        action_id: int,
+        from_statuses: tuple[str, ...],
+        to_status: str,
+        now: datetime,
+        *,
+        expires_at: datetime | None = None,
+        decided_by: int | None = None,
+        reason: str | None = None,
+    ) -> dict | None:
+        """Атомарный переход статуса. None — строка не в ожидаемом статусе
+        (уже решено, двойное нажатие, гонка с экспирацией): вызывающий
+        ничего не публикует и не шлёт, решение уже принято кем-то раньше."""
+        placeholders = ", ".join("?" for _ in from_statuses)
+        sets = ["status=?"]
+        params: list[Any] = [to_status]
+        if to_status == "pending":
+            sets += ["submitted_at=?", "expires_at=?"]
+            params += [_iso(now), _iso(expires_at)]
+        else:
+            sets += ["decided_at=?", "decided_by=?", "reason=?"]
+            params += [_iso(now), decided_by, reason]
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                f"UPDATE pending_actions SET {', '.join(sets)} "
+                f"WHERE id=? AND status IN ({placeholders})",
+                (*params, action_id, *from_statuses),
+            )
+            changed = cur.rowcount
+        if changed != 1:
+            return None
+        return await self.get_pending_action(action_id)
+
+    async def set_pending_action_message(
+        self, action_id: int, column: str, message_id: int
+    ) -> None:
+        if column not in ("draft_message_id", "offer_message_id", "notice_message_id"):
+            raise ValueError(f"не колонка сообщения формы: {column}")
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                f"UPDATE pending_actions SET {column}=? WHERE id=?", (message_id, action_id)
+            )
+
+    async def open_pending_actions(
+        self, kind: str | None = None, chat_id: int | None = None
+    ) -> list[dict]:
+        """Открытые (draft/pending) запросы — все, либо касающиеся chat_id в
+        любой роли. draft касается только инициатора: адресат о черновике
+        ещё ничего не знает."""
+        sql = "SELECT * FROM pending_actions WHERE status IN ('draft', 'pending')"
+        params: list[Any] = []
+        if kind is not None:
+            sql += " AND kind=?"
+            params.append(kind)
+        if chat_id is not None:
+            sql += " AND (initiator=? OR (status='pending' AND addressee=?))"
+            params += [chat_id, chat_id]
+        cur = await self.db.conn.execute(sql + " ORDER BY id", params)
+        return [_pending_action_row(r) for r in await cur.fetchall()]
+
+    async def pending_actions_needing_delivery(self) -> list[dict]:
+        """То, что должно было уйти в чат, но не ушло (рестарт бота посреди
+        сценария): отправленный адресату запрос без формы у адресата, либо
+        решённый без итогового оповещения инициатору (кроме отмены самим
+        инициатором — ему оповещать нечего, он сам и нажал; истёкший
+        черновик — оповещаем, см. bot/pending_actions.py)."""
+        cur = await self.db.conn.execute(
+            "SELECT * FROM pending_actions WHERE "
+            "(status='pending' AND offer_message_id IS NULL) OR "
+            "(status IN ('accepted', 'rejected', 'expired', 'cancelled') "
+            " AND notice_message_id IS NULL "
+            " AND NOT (status='cancelled' AND decided_by=initiator)) "
+            "ORDER BY id"
+        )
+        return [_pending_action_row(r) for r in await cur.fetchall()]
 
     # --- tasks (служба tasks, отложенные задачи роя, sa_home_bot/tasks/) ---
 

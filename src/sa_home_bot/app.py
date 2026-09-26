@@ -27,6 +27,7 @@ from sa_home_bot.bot.link_watch import LinkWatchMiddleware
 from sa_home_bot.bot.monitor_events import build_event_handler
 from sa_home_bot.bot.node_events import build_node_event_handler
 from sa_home_bot.bot.notifier import Notifier
+from sa_home_bot.bot.pending_actions import PendingActions
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.bot.setup import build_bot, build_dispatcher, set_bot_commands
 from sa_home_bot.bot.telegram_retry import REQUEST_TIMEOUT_S, call_with_network_retry
@@ -144,6 +145,11 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
     # см. build_node_event_handler), не только на живом /ai.
     tool_calls = ToolCalls()
 
+    # Формы подтверждения (Этап 45): до node_link — обработчику его событий
+    # нужен уже готовый сервис (будильники экспирации и речь Альфреда перед
+    # формой приходят task_result'ом), связь с нодой — геттером.
+    pending_actions = PendingActions(store, notifier, settings, _get_node_link)
+
     async def _report_bot_ready() -> None:
         # bot.get_me() (шаг 4 выше) уже подтвердил живую сеть/DNS/Telegram —
         # это лучшее доказательство готовности, которое у нас вообще есть, и
@@ -177,10 +183,17 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
             get_node_link=_get_node_link,
             tool_calls=tool_calls,
             config=settings,
+            pending_actions=pending_actions,
         ),
         on_connected=_report_bot_ready,
     )
     await node_link.start()
+    # Досылка недоставленного и таймеры после рестарта — node_link уже есть
+    # (будильники tasks), но сбой здесь не должен мешать запуску бота.
+    try:
+        await pending_actions.recover()
+    except Exception:  # noqa: BLE001
+        log.exception("pending_actions: восстановление на старте не удалось")
 
     async def refresh_menu() -> None:
         # Скилы-приложения появились/изменились — перестроить меню команд.
@@ -224,6 +237,7 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
             torrents_link=torrents_link,
             pending_torrents=pending_torrents,
             tool_calls=tool_calls,
+            pending_actions=pending_actions,
             pending_vpn_secrets=pending_vpn_secrets,
             runtime=runtime,
             config=settings,
@@ -267,6 +281,7 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
             dp=dp,
             polling_task=polling_task,
             active_ai_chats=active_ai_chats,
+            pending_actions=pending_actions,
             link=link,
             node_link=node_link,
             apps_link=apps_link,
@@ -285,6 +300,7 @@ async def _shutdown(
     dp,
     polling_task: asyncio.Task,
     active_ai_chats: ActiveAiChats,
+    pending_actions: PendingActions,
     link: ServiceLink,
     node_link: ServiceLink,
     apps_link: ServiceLink,
@@ -319,6 +335,10 @@ async def _shutdown(
             pass
         except Exception:  # noqa: BLE001 — сбой одной /ai-задачи не должен рвать shutdown
             log.warning("/ai-задача chat=%s упала при остановке", chat_id, exc_info=True)
+
+    # Таймеры форм в памяти — снять: будильники в tasks и recover() на
+    # следующем старте их заменят.
+    await pending_actions.aclose()
 
     # Стоп связи со службами (новые события не принимаются).
     await link.stop()

@@ -17,10 +17,11 @@ ai_turns делаются здесь, по meta, которую сама слу�
 chat_loop-задачи — своего Notifier у службы tasks нет, получателя и текст
 она уже подготовила сама, отправляет и пишет ai_turn здесь, см.
 tasks/protocol.py::EVENT_DELIVER_MESSAGE и bot/tools.py::ToolContext.emit).
-``respond_relationship`` (Этап 42.6.2 — тот же мост, что и deliver_message,
-но для confirm_relationship/reject_relationship: пишет guest_relationships и
-уведомляет инициатора, см. tasks/protocol.py::EVENT_RESPOND_RELATIONSHIP и
-_handle_respond_relationship ниже).
+Формы подтверждения (Этап 45, bot/pending_actions.py) приходят сюда же
+через ``task_result``: будильник экспирации (meta.kind
+``pending_action_expire``) и речь Альфреда перед формой/оповещением
+(chat_loop с meta.pending_action_id) — после речи бот сам шлёт
+детерминированную форму, а при сбое LLM — заглушку и форму.
 ``idle_power_blocked`` (node/service.py::maybe_auto_poweroff_idle — простой
 Alfred дошёл до автовыключения ноды, но открыта SSH-сессия, выключение
 отложено) — адресно админам (notify_admins), с кнопкой «закрыть сессии и
@@ -59,7 +60,6 @@ from datetime import UTC, datetime
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sa_home_bot.bot import commands
-from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.ai_flow import (
     ALBERT_ASLEEP,
     ALBERT_ASLEEP_MD,
@@ -77,6 +77,7 @@ from sa_home_bot.bot.ai_flow import (
 from sa_home_bot.bot.handlers.vpn import resolve_request_callback
 from sa_home_bot.bot.lifecycle import broadcast_all, broadcast_system, notify_tool_call
 from sa_home_bot.bot.notifier import Notifier, notify_admins
+from sa_home_bot.bot.pending_actions import PendingActions
 from sa_home_bot.bot.rich_stream import RichStreamSession
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.tool_debug import ToolCalls
@@ -236,49 +237,6 @@ async def _handle_deliver_message(notifier: Notifier, store: Store, data: dict) 
     )
 
 
-async def _handle_respond_relationship(
-    notifier: Notifier, store: Store, book: SubscriptionBook, data: dict
-) -> None:
-    """confirm_relationship/reject_relationship, вызванные ВНУТРИ проактивной
-    сессии агента установки связи (Этап 42.6.2, schedule_agent_dialogue —
-    служба tasks): своего Store/Notifier там нет (см. tasks/protocol.py::
-    EVENT_RESPOND_RELATIONSHIP и bot/tools.py::_respond_relationship) —
-    статус пишем и инициатора уведомляем здесь, где они настоящие.
-
-    ``responder_chat_id`` — серверный (взят из ctx.chat_id ТОЙ сессии, не от
-    модели), но запись всё равно сверяем перед записью (гонка/устаревшая
-    ссылка/повторный ответ) — тихо игнорируем несовпадение, тот же приём,
-    что и у остальных fire-and-forget мостов этого модуля."""
-    relationship_id = data.get("relationship_id")
-    accepted = data.get("accepted")
-    responder_chat_id = data.get("responder_chat_id")
-    if (
-        not isinstance(relationship_id, int)
-        or not isinstance(accepted, bool)
-        or not isinstance(responder_chat_id, int)
-    ):
-        return
-    row = await store.get_relationship(relationship_id)
-    if row is None or row["status"] != "pending" or row["guest_b"] != responder_chat_id:
-        log.warning(
-            "respond_relationship: заявка id=%s не найдена/не адресована chat=%s",
-            relationship_id,
-            responder_chat_id,
-        )
-        return
-    now = datetime.now(tz=UTC)
-    updated = await store.respond_relationship(relationship_id, accepted, now)
-    if updated is None:
-        return
-    responder = book.for_chat(responder_chat_id)
-    text = ai_tools.render_relationship_response_notice(
-        responder.name if responder is not None else "гость", updated["relation"], accepted
-    )
-    message_id = await notifier.send_direct(row["guest_a"], text)
-    if message_id is not None:
-        await store.record_ai_turn(row["guest_a"], message_id, message_id, "assistant", text, now)
-
-
 async def _maybe_fire_event_waiter(get_node_link, node_id: str, event_type: str) -> None:
     """Сверить событие роя с ожидающими задачами службы tasks — та сама
     хранит ожидания и решает, срабатывать ли (см. tasks/protocol.py::
@@ -307,11 +265,19 @@ async def _handle_task_result(
     data: dict,
     sessions: TaskRichSessions,
     book: SubscriptionBook | None = None,
+    pending_actions: PendingActions | None = None,
 ) -> None:
     # Очистка event_waiters (если была) — забота самой службы tasks
     # (tasks/service.py::_fire_one/_fire_now), не бота: у бота больше нет
     # доступа к этой таблице (см. _maybe_fire_event_waiter выше).
     meta = data.get("meta") or {}
+    if meta.get("kind") == task_protocol.TASK_KIND_PENDING_ACTION_EXPIRE:
+        # Будильник формы подтверждения (Этап 45) — истекла ли она на самом
+        # деле, решает PendingActions.expire по своей БД, идемпотентно.
+        action_id = meta.get("pending_action_id")
+        if pending_actions is not None and isinstance(action_id, int):
+            await pending_actions.expire(action_id)
+        return
     if meta.get("kind") != task_protocol.TASK_KIND_LLM_CHAT:
         return
     chat_id = meta.get("chat_id")
@@ -330,6 +296,15 @@ async def _handle_task_result(
     # (нода не спала — see tasks/service.py::_prewake_one, "цель уже
     # тёплая").
     session = sessions.get(task_id, chat_id, thread_id)
+    # Речь Альфреда перед формой/оповещением (Этап 45): после неё бот ОБЯЗАН
+    # прислать детерминированное сообщение, даже если LLM не справилась.
+    action_id = meta.get("pending_action_id")
+    action_stage = meta.get("pending_action_stage")
+    if pending_actions is not None and isinstance(action_id, int) and action_stage:
+        await _handle_action_speech(
+            notifier, store, data, sessions, pending_actions, action_id, action_stage, book
+        )
+        return
     if not data.get("ok"):
         if session is not None:
             await session.finalize_status(
@@ -378,6 +353,54 @@ async def _handle_task_result(
         await store.record_ai_turn(
             chat_id, sent_id, dialogue_id, "assistant", raw, datetime.now(tz=UTC)
         )
+
+
+async def _handle_action_speech(
+    notifier: Notifier,
+    store: Store,
+    data: dict,
+    sessions: TaskRichSessions,
+    pending_actions: PendingActions,
+    action_id: int,
+    stage: str,
+    book: SubscriptionBook | None,
+) -> None:
+    """Порядок «сначала Альфред, потом форма» держится здесь: речь уходит
+    первой, форма/оповещение — следом (PendingActions.on_speech_result).
+    LLM не справилась — вместо речи заглушка «У Альфреда нет слов», форма
+    всё равно уходит. Страховочный таймер успел раньше (форма уже в чате) —
+    опоздавшую речь не шлём вовсе, иначе она встанет после формы."""
+    meta = data.get("meta") or {}
+    chat_id = meta["chat_id"]
+    task_id = data.get("task_id")
+    session = sessions.get(task_id, chat_id, None)
+    raw = (data.get("result") or {}).get("response", "") if data.get("ok") else ""
+    claimed = await pending_actions.claim_speech(action_id, stage)
+    if not data.get("ok") or not raw.strip() or not claimed:
+        if session is not None:
+            await session.aclose()
+        sessions.pop(task_id)
+        if not data.get("ok") and book is not None:
+            await notify_admins(
+                book,
+                notifier,
+                f"⚠️ Речь Альфреда к форме #{action_id} (chat={chat_id}) не удалась: "
+                f"{html.escape(str(data.get('error') or 'пустой ответ'))} — ушла заглушка",
+            )
+        if claimed:
+            await pending_actions.on_speech_result(action_id, stage, None)
+        return
+    if session is not None:
+        sent = await session.finalize(raw)
+        sent_id = sent.message_id if sent is not None else None
+    else:
+        sent_id = await notifier.send_direct(chat_id, _format_alfred_reply(raw))
+    sessions.pop(task_id)
+    if sent_id is not None:
+        await store.record_ai_turn(
+            chat_id, sent_id, sent_id, "assistant", raw, datetime.now(tz=UTC)
+        )
+    await pending_actions.on_speech_result(action_id, stage, sent_id)
 
 
 def render_node_joined(node_id: str, endpoint: str) -> str:
@@ -487,6 +510,7 @@ def build_node_event_handler(
     get_node_link: Callable[[], ServiceLink | None] | None = None,
     tool_calls: ToolCalls | None = None,
     config: Settings | None = None,
+    pending_actions: PendingActions | None = None,
 ):
     """Callback для ServiceLink(node).on_event.
 
@@ -518,13 +542,10 @@ def build_node_event_handler(
             await _handle_task_prewake(notifier, data, task_sessions)
             return
         if name == task_protocol.EVENT_TASK_RESULT:
-            await _handle_task_result(notifier, store, data, task_sessions, book)
+            await _handle_task_result(notifier, store, data, task_sessions, book, pending_actions)
             return
         if name == task_protocol.EVENT_DELIVER_MESSAGE:
             await _handle_deliver_message(notifier, store, data)
-            return
-        if name == task_protocol.EVENT_RESPOND_RELATIONSHIP:
-            await _handle_respond_relationship(notifier, store, book, data)
             return
         if name == task_protocol.EVENT_TOOL_CALL:
             await notify_tool_call(

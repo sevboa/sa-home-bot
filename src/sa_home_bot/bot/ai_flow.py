@@ -80,6 +80,7 @@ from sa_home_bot.bot.notifier import (  # noqa: F401 — реэкспорт, с�
     notify_admins,
     typing_action,
 )
+from sa_home_bot.bot.pending_actions import open_forms_note
 from sa_home_bot.bot.rich_stream import RichStreamSession
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.tool_debug import ToolCalls
@@ -342,10 +343,7 @@ TOOL_STATUS_TEXT: dict[str, str] = {
     "notify_persona": "Альфред выбирает, от чьего имени говорить",
     "notify_guest": "Альфред составляет официальное объявление",
     "guests_list": "Альфред сверяется со списком гостей",
-    "preview_relationship": "Альфред набрасывает черновик, ещё не запечатанный",
-    "propose_relationship": "Альфред запечатывает и отправляет письмо-предложение",
-    "confirm_relationship": "Альфред заносит новое знакомство в свою книгу",
-    "reject_relationship": "Альфред вежливо откладывает письмо в сторону",
+    "request_relationship_form": "Альфред готовит бланк предложения",
     "my_relationships": "Альфред пролистывает свою адресную книгу",
 }
 TOOL_STATUS_DEFAULT = "Альфред что-то мастерит за кулисами"
@@ -996,6 +994,8 @@ async def request_alfred(
     tool_calls: ToolCalls | None = None,
     speech_remark: SpeechRemarkBox | None = None,
     rich_session: RichStreamSession | None = None,
+    *,
+    pending_actions: Any | None = None,
 ) -> str | None:
     """Сходить в llm.chat с presence/wake-сценарием.
 
@@ -1071,6 +1071,16 @@ async def request_alfred(
         memory_facts=memory_facts,
         graph_facts=graph_facts,
     )
+    if pending_actions is not None and message.chat is not None:
+        # Этап 45.4: открытые формы подтверждения собеседника — скрытой
+        # строкой, чтобы на текстовое «да/не хочу» Альфред отправил к
+        # кнопкам, а не делал вид, что решение принято (живая находка
+        # 2026-09-26, заявка #5).
+        forms_note = open_forms_note(
+            await store.open_pending_actions(chat_id=message.chat.id), message.chat.id
+        )
+        if forms_note:
+            context_note = f"{context_note} {forms_note}" if context_note else forms_note
     # Список как изменяемая ячейка: _record_tool_call — вложенная функция, а
     # nonlocal через два уровня вложенности (_ask → колбэк) читается хуже.
     # Непустой = вставка «сёрфит» за этот запрос уже отправлена.
@@ -1120,6 +1130,7 @@ async def request_alfred(
             notifier=notifier,
             store=store,
             author=display_name(message.from_user),
+            pending_actions=pending_actions,
         )
         telegram_chat_id = message.chat.id if message.chat is not None else None
 

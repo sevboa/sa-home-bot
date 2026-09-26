@@ -173,6 +173,41 @@ CREATE TABLE IF NOT EXISTS guest_relationships (
 CREATE INDEX IF NOT EXISTS idx_guest_relationships_a ON guest_relationships(guest_a);
 CREATE INDEX IF NOT EXISTS idx_guest_relationships_b ON guest_relationships(guest_b);
 
+-- Детерминированные формы подтверждения (Этап 45, bot/pending_actions.py):
+-- жизненный цикл ЗАПРОСА на действие от имени человека, решение — только
+-- нажатием кнопки на отдельном сообщении-форме, не текстом, который
+-- распознаёт LLM (живая находка 2026-09-26: заявка связи #5 зависла в
+-- pending навсегда — модель «приняла» отказ словами, но тул не вызвала).
+-- draft — ждёт «Отправить»/«Отмена» от initiator (срок 1 ч), pending — ждёт
+-- «Принять»/«Отклонить» от addressee (срок 72 ч с момента отправки).
+-- Итог связи (confirmed) по-прежнему пишется в guest_relationships —
+-- реестр связей, здесь только запрос. Писатель статуса один — бот; каждый
+-- переход атомарен (UPDATE ... WHERE status IN (...)), повторное нажатие/
+-- гонка с экспирацией просто не находят строку в ожидаемом статусе.
+-- *_message_id — какие сообщения уже ушли (идемпотентность: форма/
+-- оповещение никогда не уходят дважды): draft_message_id — форма у
+-- инициатора, offer_message_id — форма у адресата, notice_message_id —
+-- итоговое оповещение инициатору.
+CREATE TABLE IF NOT EXISTS pending_actions (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind               TEXT NOT NULL,
+    initiator          INTEGER NOT NULL,
+    addressee          INTEGER,
+    payload_json       TEXT NOT NULL,
+    status             TEXT NOT NULL CHECK (status IN (
+                           'draft', 'pending', 'accepted', 'rejected', 'cancelled', 'expired')),
+    expires_at         TEXT NOT NULL,
+    draft_message_id   INTEGER,
+    offer_message_id   INTEGER,
+    notice_message_id  INTEGER,
+    created_at         TEXT NOT NULL,
+    submitted_at       TEXT,
+    decided_at         TEXT,
+    decided_by         INTEGER,
+    reason             TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pending_actions_status ON pending_actions(status);
+
 -- Отложенные задачи роя — служба tasks (`sa-home-bot --service tasks`,
 -- sa_home_bot/tasks/), собственная таблица этой службы (не бота — эта
 -- схема общая для всех служб проекта, см. db/migrations.py). Замена

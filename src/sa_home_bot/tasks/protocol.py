@@ -35,6 +35,14 @@ ACTION_CHAT_LOOP = "chat_loop"
 # читает и не интерпретирует (см. докстринг tasks/service.py), только хранит
 # и возвращает целиком.
 
+# Чистый будильник (Этап 45): задача ничего не исполняет — на сроке служба
+# сразу отдаёт task_result {ok: true, result: {}} с meta заказчика. Нужен
+# экспирации форм подтверждения (bot/pending_actions.py): срок живёт здесь,
+# в персистентной очереди (переживает рестарт бота), а решение «истекло ли
+# на самом деле» принимает бот, идемпотентно, по своей БД. dst_node/
+# dst_service у такой задачи — формальность (не читаются, не будятся).
+ACTION_TIMER = "timer"
+
 # Разбудить задачу РАНЬШЕ due_at — по её id, а не по будильнику. Внутренний
 # примитив: используется match_event (ниже), а не вызывается напрямую
 # извне — оставлен отдельным действием, потому что match_event поверх него
@@ -74,6 +82,9 @@ EVENT_TOOL_CALL = "tool_call"
 # node_events.py) вид задачи: результат/неудачу нужно доставить в Telegram
 # как ответ Альфреда, продолжающий диалог meta.dialogue_id.
 TASK_KIND_LLM_CHAT = "llm_chat"
+# meta.kind будильника экспирации формы подтверждения (ACTION_TIMER выше,
+# Этап 45) — meta.pending_action_id — id записи pending_actions бота.
+TASK_KIND_PENDING_ACTION_EXPIRE = "pending_action_expire"
 
 # deliver_message: {chat_id, html: str, plain: str, message_thread_id?} —
 # служба tasks не умеет говорить с Telegram напрямую (см. докстринг модуля
@@ -92,17 +103,3 @@ TASK_KIND_LLM_CHAT = "llm_chat"
 # поэтому тул отвечает моделью "передано" оптимистично, не дожидаясь
 # реального ухода сообщения.
 EVENT_DELIVER_MESSAGE = "deliver_message"
-
-# respond_relationship: {relationship_id, accepted: bool, responder_chat_id} —
-# тот же мост, что EVENT_DELIVER_MESSAGE, но для записи guest_relationships
-# (Этап 42.6.2), а не отправки сообщения. confirm_relationship/
-# reject_relationship, вызванные ВНУТРИ проактивной сессии агента установки
-# связи (schedule_agent_dialogue — Этап 44, служба tasks), не имеют доступа
-# ни к Store бота (guest_relationships там же, где ai_turns — не в БД tasks),
-# ни к Notifier — прочитать/записать статус и уведомить инициатора умеет
-# только бот, см. bot/node_events.py::_handle_respond_relationship.
-# responder_chat_id — серверный (ctx.chat_id этой сессии, не аргумент модели)
-# — бот-сторона всё равно сверяет его с guest_b записи перед записью, но
-# доверие к нему уже установлено тем, что сессию создал schedule_agent_dialogue
-# именно под этого гостя (см. bot/tools.py::_respond_relationship).
-EVENT_RESPOND_RELATIONSHIP = "respond_relationship"

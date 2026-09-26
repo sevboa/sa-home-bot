@@ -768,3 +768,26 @@ async def test_fire_due_cleans_up_leftover_waiter_on_timeout(store, monkeypatch)
         await asyncio.sleep(0)
 
     assert await store.pop_event_waiter_for("arch-t480", "update_finished") is None
+
+
+# --- timer: чистый будильник (Этап 45, экспирация форм подтверждения) ---
+
+
+async def test_timer_fires_result_without_touching_dst(store):
+    link = FakeNodeLink(OWN_STATE)
+    emitter = FakeEmitter()
+    svc = _service(store, link, emitter)
+    meta = {"kind": protocol.TASK_KIND_PENDING_ACTION_EXPIRE, "pending_action_id": 5}
+    now = datetime.now(tz=UTC)
+    task_id = await store.create_task(
+        protocol.NODE_ID, protocol.SERVICE_NAME, protocol.ACTION_TIMER, {}, 60.0, meta, now, now
+    )
+
+    await svc._prewake_due()
+    await svc._fire_due()
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert emitter.results() == [{"task_id": task_id, "meta": meta, "ok": True, "result": {}}]
+    assert emitter.statuses() == []  # будильнику будить некого
+    assert link.commands == []

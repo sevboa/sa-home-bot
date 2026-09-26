@@ -1,5 +1,5 @@
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -342,99 +342,105 @@ GUEST_B = 222
 GUEST_C = 333
 
 
-async def test_propose_relationship_creates_pending(store):
-    row = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
+async def test_add_confirmed_relationship(store):
+    row = await store.add_confirmed_relationship(
+        GUEST_A, GUEST_B, "friend", BASE_TIME, BASE_TIME + timedelta(hours=1)
+    )
     assert row["guest_a"] == GUEST_A
     assert row["guest_b"] == GUEST_B
     assert row["relation"] == "friend"
-    assert row["status"] == "pending"
+    assert row["status"] == "confirmed"
     assert row["proposed_by"] == GUEST_A
-    assert row["confirmed_at"] is None
-
-
-async def test_propose_relationship_does_not_duplicate_active_pair(store):
-    first = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
-    again = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
-    assert again["id"] == first["id"]
-    # И в обратном порядке пары — та же активная запись, не новая заявка.
-    reverse = await store.propose_relationship(GUEST_B, GUEST_A, "friend", BASE_TIME)
-    assert reverse["id"] == first["id"]
-    rows = await store.relationships_for(GUEST_A, status="pending")
-    assert len(rows) == 1
-
-
-async def test_propose_relationship_after_rejected_creates_new(store):
-    first = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
-    await store.respond_relationship(first["id"], accepted=False, now=BASE_TIME)
-    again = await store.propose_relationship(GUEST_A, GUEST_B, "acquaintance", BASE_TIME)
-    assert again["id"] != first["id"]
-    assert again["status"] == "pending"
-
-
-async def test_respond_relationship_accepted_sets_confirmed(store):
-    row = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
-    updated = await store.respond_relationship(
-        row["id"], accepted=True, now=BASE_TIME + timedelta(seconds=1)
-    )
-    assert updated["status"] == "confirmed"
-    assert updated["confirmed_at"] is not None
-
-
-async def test_respond_relationship_rejected_sets_rejected_without_confirmed_at(store):
-    row = await store.propose_relationship(GUEST_A, GUEST_B, "acquaintance", BASE_TIME)
-    updated = await store.respond_relationship(row["id"], accepted=False, now=BASE_TIME)
-    assert updated["status"] == "rejected"
-    assert updated["confirmed_at"] is None
-
-
-async def test_respond_relationship_unknown_id_returns_none(store):
-    assert await store.respond_relationship(999, accepted=True, now=BASE_TIME) is None
-
-
-async def test_respond_relationship_twice_second_call_returns_none(store):
-    row = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
-    await store.respond_relationship(row["id"], accepted=True, now=BASE_TIME)
-    assert await store.respond_relationship(row["id"], accepted=False, now=BASE_TIME) is None
-
-
-async def test_get_relationship_roundtrip(store):
-    row = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
+    assert row["confirmed_at"] is not None
     assert await store.get_relationship(row["id"]) == row
     assert await store.get_relationship(999) is None
 
 
 async def test_relationships_for_finds_both_roles(store):
-    row = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
-    await store.respond_relationship(row["id"], accepted=True, now=BASE_TIME)
+    row = await store.add_confirmed_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME, BASE_TIME)
     assert [r["id"] for r in await store.relationships_for(GUEST_A)] == [row["id"]]
     assert [r["id"] for r in await store.relationships_for(GUEST_B)] == [row["id"]]
     assert await store.relationships_for(GUEST_C) == []
 
 
-async def test_relationships_for_filters_by_status(store):
-    confirmed = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
-    await store.respond_relationship(confirmed["id"], accepted=True, now=BASE_TIME)
-    pending = await store.propose_relationship(GUEST_A, GUEST_C, "acquaintance", BASE_TIME)
-    assert [r["id"] for r in await store.relationships_for(GUEST_A, status="confirmed")] == [
-        confirmed["id"]
-    ]
-    assert [r["id"] for r in await store.relationships_for(GUEST_A, status="pending")] == [
-        pending["id"]
-    ]
+# --- pending_actions (Этап 45, формы подтверждения) ---
 
 
-async def test_pending_relationship_for_finds_addressee_only(store):
-    assert await store.pending_relationship_for(GUEST_B) is None
-    row = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
-    assert (await store.pending_relationship_for(GUEST_B))["id"] == row["id"]
-    # Инициатор — не адресат, для него pending_relationship_for пуст.
-    assert await store.pending_relationship_for(GUEST_A) is None
+async def _draft(store, initiator=GUEST_A, addressee=GUEST_B):
+    return await store.create_pending_action(
+        "relationship",
+        initiator,
+        addressee,
+        {"relation": "friend"},
+        BASE_TIME + timedelta(hours=1),
+        BASE_TIME,
+    )
 
 
-async def test_pending_relationship_for_none_after_response(store):
-    row = await store.propose_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME)
-    await store.respond_relationship(row["id"], accepted=True, now=BASE_TIME)
-    assert await store.pending_relationship_for(GUEST_B) is None
+async def test_create_pending_action_is_draft_with_payload(store):
+    row = await _draft(store)
+    assert row["status"] == "draft"
+    assert row["payload"] == {"relation": "friend"}
+    assert row["draft_message_id"] is None
+    assert await store.get_pending_action(row["id"]) == row
+
+
+async def test_transition_pending_action_is_atomic_and_single_shot(store):
+    row = await _draft(store)
+    later = BASE_TIME + timedelta(minutes=5)
+    submitted = await store.transition_pending_action(
+        row["id"], ("draft",), "pending", later, expires_at=later + timedelta(hours=72)
+    )
+    assert submitted["status"] == "pending"
+    assert submitted["submitted_at"] is not None
+    assert datetime.fromisoformat(submitted["expires_at"]) == later + timedelta(hours=72)
+    # Второй «Отправить» — строка уже не draft.
+    assert (
+        await store.transition_pending_action(
+            row["id"], ("draft",), "pending", later, expires_at=later
+        )
+        is None
+    )
+    decided = await store.transition_pending_action(
+        row["id"], ("draft", "pending"), "rejected", later, decided_by=GUEST_B
+    )
+    assert decided["status"] == "rejected"
+    assert decided["decided_by"] == GUEST_B
+    # Экспирация после решения — no-op.
+    assert (
+        await store.transition_pending_action(row["id"], ("draft", "pending"), "expired", later)
+        is None
+    )
+
+
+async def test_open_pending_actions_draft_visible_only_to_initiator(store):
+    row = await _draft(store)
+    assert [r["id"] for r in await store.open_pending_actions(chat_id=GUEST_A)] == [row["id"]]
+    assert await store.open_pending_actions(chat_id=GUEST_B) == []
+    await store.transition_pending_action(
+        row["id"], ("draft",), "pending", BASE_TIME, expires_at=BASE_TIME + timedelta(hours=72)
+    )
+    assert [r["id"] for r in await store.open_pending_actions(chat_id=GUEST_B)] == [row["id"]]
+    await store.transition_pending_action(row["id"], ("pending",), "accepted", BASE_TIME)
+    assert await store.open_pending_actions() == []
+
+
+async def test_pending_actions_needing_delivery(store):
+    offer = await _draft(store)
+    await store.transition_pending_action(
+        offer["id"], ("draft",), "pending", BASE_TIME, expires_at=BASE_TIME + timedelta(hours=72)
+    )
+    own_cancel = await _draft(store, addressee=GUEST_C)
+    await store.transition_pending_action(
+        own_cancel["id"], ("draft",), "cancelled", BASE_TIME, decided_by=GUEST_A
+    )
+    expired_draft = await _draft(store, addressee=GUEST_C)
+    await store.transition_pending_action(expired_draft["id"], ("draft",), "expired", BASE_TIME)
+    ids = [r["id"] for r in await store.pending_actions_needing_delivery()]
+    assert ids == [offer["id"], expired_draft["id"]]
+    await store.set_pending_action_message(offer["id"], "offer_message_id", 10)
+    await store.set_pending_action_message(expired_draft["id"], "notice_message_id", 11)
+    assert await store.pending_actions_needing_delivery() == []
 
 
 # --- tasks (служба tasks, отложенные задачи роя) ---

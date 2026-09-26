@@ -303,6 +303,26 @@ class Notifier:
         )
         return msg.message_id if msg is not None else None
 
+    async def edit_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> bool:
+        """Переписать уже отправленное сообщение (форма подтверждения после
+        решения, Этап 45 — bot/pending_actions.py). Без reply_markup кнопки
+        убираются. False — не удалось (сообщение удалено, «not modified» и
+        т.п.): для вызывающих это не ошибка, итог уже записан в БД."""
+        msg = await send_with_retry(
+            chat_id,
+            "правка сообщения",
+            lambda: self._bot.edit_message_text(
+                text=text, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup
+            ),
+        )
+        return msg is not None
+
     async def send_document(
         self,
         chat_id: int,

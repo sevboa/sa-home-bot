@@ -208,6 +208,9 @@ class ToolContext:
     # детали в том же раунде tool-calling, где результат был обрезан, — тем
     # же способом, каким remind() читает ctx.history (см. его докстринг).
     tool_result_cache: dict[str, str] = field(default_factory=dict)
+    # Формы подтверждения (Этап 45, bot/pending_actions.py::PendingActions) —
+    # только у живого /ai; у службы tasks формы показать некому.
+    pending_actions: Any | None = None
 
 
 ToolHandler = Callable[["ToolContext", dict[str, Any]], Awaitable[str]]
@@ -968,6 +971,8 @@ async def schedule_agent_dialogue(
     messages: list[dict[str, Any]],
     reason: str,
     timeout_s: float,
+    *,
+    meta_extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Поставить chat_loop-задачу, которая на срабатывании начинает НОВЫЙ
     тред у произвольного собеседника — не продолжает свой, как tool_remind
@@ -978,9 +983,9 @@ async def schedule_agent_dialogue(
     bot/node_events.py::_handle_task_result (Этап 44.2, отдельный подэтап).
 
     НЕ публичный ToolSpec — модель в живом /ai её вызвать не может, это
-    внутренняя инфраструктура для будущего кода 42.6 (агент установки связи
-    между гостями сам, по собственной инициативе, пишет чужому собеседнику,
-    не отвечая на его сообщение).
+    внутренняя инфраструктура: речь Альфреда перед формой подтверждения
+    адресату и перед оповещением инициатору об итоге (Этап 45, bot/
+    pending_actions.py — ``meta_extra`` несёт pending_action_id/stage).
 
     due_at = сейчас, не await_event: триггер уже наступил на стороне
     вызывающего кода (например, гость A подтвердил предложение связи) —
@@ -998,7 +1003,14 @@ async def schedule_agent_dialogue(
         "action": task_protocol.ACTION_CHAT_LOOP,
         "args": {"messages": messages, "reason": reason, "chat_id": chat_id},
         "timeout_s": timeout_s,
-        "meta": {"kind": task_protocol.TASK_KIND_LLM_CHAT, "chat_id": chat_id},
+        "meta": {
+            "kind": task_protocol.TASK_KIND_LLM_CHAT,
+            "chat_id": chat_id,
+            # Этап 45: pending_action_id/pending_action_stage — речь,
+            # после которой бот обязан прислать форму/оповещение (см.
+            # bot/node_events.py::_handle_task_result).
+            **(meta_extra or {}),
+        },
     }
     return await node_link.command(task_protocol.ACTION_CREATE, create_args, dst=dst)
 
@@ -1010,17 +1022,19 @@ async def schedule_agent_dialogue(
 # гостями (решение пользователя 2026-09-26, живая находка: флаг делал ВСЕХ
 # флагованных гостей взаимно роднёй, а реальное родство не таково — у части
 # пары флаг совпадал, но родства не было). Кто кому родня/супруг/друг/
-# знакомый — теперь ИСКЛЮЧИТЕЛЬНО явные пары в guest_relationships, тем же
-# propose/confirm/reject flow, что и всегда. Флаг Subscription.family
+# знакомый — теперь ИСКЛЮЧИТЕЛЬНО явные пары в guest_relationships.
+# Запрос связи с Этапа 45 живёт в pending_actions и решается кнопками форм
+# (bot/pending_actions.py), в guest_relationships пишется только итог
+# (confirmed). Флаг Subscription.family
 # остаётся в конфиге/UI (`/guests`) как отдельная, самостоятельная ось —
 # просто больше НЕ читается нигде в этом файле.
 # 'family' (label "родство") — общая точечная связь родства КОНКРЕТНОЙ паре.
 # 'spouse' (label "супруг(а)") — то же самое, но с исключительностью:
 # подтверждённая супружеская связь может быть только одна с каждой стороны
-# одновременно (см. проверку в _resolve_propose_relationship). relation —
+# одновременно (см. проверку в relationship_conflict). relation —
 # плоский набор для v1 (решение пользователя 2026-09-26, не лестница),
-# список открытых вопросов (отзыв связи, таймаут pending) — в плане, не
-# блокируют этот подэтап.
+# отзыв связи — открытый вопрос в плане; срок ожидания ответа — Этап 45
+# (72 ч, bot/pending_actions.py::OFFER_TTL).
 RELATION_TYPES = ("friend", "acquaintance", "family", "spouse")
 _RELATION_LABELS_RU = {
     "friend": "друг",
@@ -1030,7 +1044,7 @@ _RELATION_LABELS_RU = {
 }
 
 
-def _relation_label(relation: str) -> str:
+def relation_label(relation: str) -> str:
     return _RELATION_LABELS_RU.get(relation, relation)
 
 
@@ -1053,7 +1067,7 @@ def _guest_facing_name(settings: Settings, chat_id: int, fallback: str) -> str:
     грамматика ("у Наташа Сорокина", "отправлено Наташа Сорокина"). Падеж
     держать на служебном слове ("адресату (…)", "с адресатом (…)"), а имя —
     именительным лейблом в скобках. И ни в каком падеже не называть по
-    имени в третьем лице самого адресата текста (см. tool_preview_relationship)."""
+    имени в третьем лице самого адресата текста (см. tool_request_relationship_form)."""
     for person in settings.people:
         if person.telegram_id and person.telegram_id == chat_id:
             return (
@@ -1064,28 +1078,70 @@ def _guest_facing_name(settings: Settings, chat_id: int, fallback: str) -> str:
     return fallback
 
 
-def render_relationship_response_notice(responder_name: str, relation: str, accepted: bool) -> str:
-    """Текст уведомления инициатору (A) об ответе адресата (B). Общая с
-    bot/node_events.py::_handle_respond_relationship (там — мост для ответа,
-    данного ВНУТРИ проактивной сессии, см. докстринг _respond_relationship
-    ниже) — один текст, не дублировать формулировку в двух модулях."""
-    verb = "подтвердил(а)" if accepted else "отклонил(а)"
-    return f"{responder_name} {verb} предложение связи «{_relation_label(relation)}»."
+async def relationship_conflict(
+    store: Any,
+    initiator: int,
+    target: int,
+    relation: str,
+    target_name: str,
+    *,
+    ignore_action_id: int | None = None,
+) -> str | None:
+    """Почему эту связь сейчас нельзя предложить/принять — None, если
+    можно. Проверяется на открытии формы (request_relationship_form) И
+    повторно на «Отправить»/«Принять» (bot/pending_actions.py, Этап 45.2 п.4):
+    за час/трое суток ожидания могла появиться другая заявка или супруг(а).
+    ``ignore_action_id`` — сама проверяемая форма, она не конфликт себе.
+
+    Живая находка 2026-09-26 (падежи): full_name из settings.people строго в
+    именительном падеже, вставленное в предложение с другим падежом ломает
+    грамматику ("у Наташа Сорокина"). Падеж держим на служебном слове
+    ("адресата"/"вас"), имя — именительным лейблом в скобках."""
+    pair = {initiator, target}
+    for row in await store.open_pending_actions("relationship", initiator):
+        if row["id"] == ignore_action_id or {row["initiator"], row["addressee"]} != pair:
+            continue
+        if row["status"] == "draft":
+            return (
+                f"форма предложения адресату ({target_name}) уже открыта — "
+                "ждёт кнопки «Отправить» или «Отмена»"
+            )
+        return f"предложение уже отправлено адресату ({target_name}), ждём ответа"
+    initiator_confirmed = await store.relationships_for(initiator, status="confirmed")
+    if any({r["guest_a"], r["guest_b"]} == pair for r in initiator_confirmed):
+        return f"с адресатом ({target_name}) уже подтверждённая связь"
+    if relation == "spouse":
+        # Супружеская связь исключительна — только одна подтверждённая с
+        # каждой стороны одновременно (решение пользователя 2026-09-26).
+        if any(r["relation"] == "spouse" for r in initiator_confirmed):
+            return "у инициатора уже есть супруг(а) — сначала эту связь нужно разорвать"
+        target_confirmed = await store.relationships_for(target, status="confirmed")
+        if any(r["relation"] == "spouse" for r in target_confirmed):
+            return (
+                f"у адресата ({target_name}) уже есть супруг(а) — "
+                "сначала эта связь должна быть расторгнута"
+            )
+    return None
 
 
-async def _resolve_propose_relationship(
-    ctx: ToolContext, args: dict[str, Any]
-) -> str | tuple[int, str, str, str]:
-    """Общая проверка preview_relationship/propose_relationship: разбор
-    аргументов, поиск гостей, дубликаты (pending/confirmed), исключительность
-    'spouse'. При ошибке или раннем терминальном ответе (ошибка ввода, "уже
-    отправлено"/"уже подтверждена"/"уже есть супруг(а)") возвращает готовую
-    строку — вызывающий тул отдаёт её как есть, без побочных эффектов. При
-    успехе возвращает данные для превью/реальной отправки, но САМ НИЧЕГО не
-    пишет в store и не дозванивается никуда — побочные эффекты только в
-    tool_propose_relationship (42.6.6: preview обязан быть чистым)."""
-    if ctx.chat_id is None or ctx.book is None or ctx.store is None:
-        return "недоступно: сейчас не могу предложить связь"
+async def tool_request_relationship_form(ctx: ToolContext, args: dict[str, Any]) -> str:
+    """Открыть инициатору форму предложения связи (Этап 45.2). Модель
+    больше НЕ отправляет предложение и НЕ принимает ответ: тул создаёт
+    черновик (bot/pending_actions.py, срок 1 ч), а форму с кнопками
+    «Отправить»/«Отмена» бот пришлёт отдельным сообщением ПОСЛЕ ответа
+    Альфреда (bot/handlers/ai.py → PendingActions.flush_drafts). Дальше всё
+    решают кнопки: адресат получит речь Альфреда и свою форму «Принять»/
+    «Отклонить», инициатор — речь и детерминированное оповещение об итоге.
+
+    Только живой /ai: в службе tasks (ctx.pending_actions там нет) формы
+    некому показать — честный отказ."""
+    if (
+        ctx.chat_id is None
+        or ctx.book is None
+        or ctx.store is None
+        or ctx.pending_actions is None
+    ):
+        return "недоступно: форму связи можно открыть только в живом разговоре"
     try:
         target_chat_id = int(args.get("target_chat_id"))
     except (TypeError, ValueError):
@@ -1104,216 +1160,27 @@ async def _resolve_propose_relationship(
     proposer_name = _guest_facing_name(ctx.settings, ctx.chat_id, proposer.name)
     target_name = _guest_facing_name(ctx.settings, target_chat_id, target.name)
 
-    # Проверяем ДО записи, была ли уже активная связь — иначе не отличить
-    # "только что создали pending" от "она уже висела" и рискуем повторно
-    # рассылать директиву B на каждый повторный вызов того же предложения.
-    #
-    # Живая находка 2026-09-26 (после фикса "me" тем же днём): все строки
-    # ниже видит ТОЛЬКО сам инициатор (preview/propose вызывает он о себе),
-    # а _guest_facing_name отдаёт full_name из settings.people строго в
-    # именительном падеже. Вставленное в русское предложение с управлением
-    # другим падежом (дательный "отправлено кому", родительный "у кого",
-    # творительный "с кем"...) оно ломает грамматику — реальный пример из
-    # прода: "у Наташа Сорокина уже есть супруг(а)" вместо "у Наташи...".
-    # Чтобы не тащить морфологию (pymorphy2 и т.п. — лишняя зависимость),
-    # падеж держим на служебном слове ("адресата"/"вас"), а само имя —
-    # именительным лейблом в скобках, где падеж не нужен.
-    already_pending = await ctx.store.pending_relationship_for(target_chat_id)
-    if already_pending is not None and {
-        already_pending["guest_a"],
-        already_pending["guest_b"],
-    } == {ctx.chat_id, target_chat_id}:
-        return f"предложение уже отправлено адресату ({target_name}), жду ответа"
-    proposer_confirmed = await ctx.store.relationships_for(ctx.chat_id, status="confirmed")
-    pair = {ctx.chat_id, target_chat_id}
-    if any({r["guest_a"], r["guest_b"]} == pair for r in proposer_confirmed):
-        return f"с адресатом ({target_name}) уже подтверждённая связь"
-
-    if relation == "spouse":
-        # Супружеская связь исключительна — только одна подтверждённая с
-        # каждой стороны одновременно (решение пользователя 2026-09-26).
-        if any(r["relation"] == "spouse" for r in proposer_confirmed):
-            return "у вас уже есть супруг(а) — сначала эту связь нужно разорвать"
-        target_confirmed = await ctx.store.relationships_for(target_chat_id, status="confirmed")
-        if any(r["relation"] == "spouse" for r in target_confirmed):
-            return (
-                f"у адресата ({target_name}) уже есть супруг(а) — "
-                "сначала эта связь должна быть расторгнута"
-            )
-
-    return target_chat_id, relation, proposer_name, target_name
-
-
-async def tool_preview_relationship(ctx: ToolContext, args: dict[str, Any]) -> str:
-    """Показать инициатору (A), что именно будет отправлено, БЕЗ побочных
-    эффектов (42.6.6, живая находка: A попросил связь 'знакомый', модель
-    вызвала propose_relationship сразу с 'friend' — заявка ушла адресату без
-    предупреждения). Ничего не пишет в store, никуда не дозванивается —
-    только показывает точный предпросмотр и явно требует, чтобы модель
-    получила согласие именно A (не выдумывала его) перед реальным
-    propose_relationship."""
-    resolved = await _resolve_propose_relationship(ctx, args)
-    if isinstance(resolved, str):
-        return resolved
-    target_chat_id, relation, _, target_name = resolved
+    conflict = await relationship_conflict(
+        ctx.store, ctx.chat_id, target_chat_id, relation, target_name
+    )
+    if conflict is not None:
+        return conflict
+    await ctx.pending_actions.create_relationship_draft(
+        ctx.chat_id, target_chat_id, relation, proposer_name, target_name
+    )
     # Живая находка 2026-09-26: инициатор — это ВСЕГДА сам собеседник в
-    # этом чате (preview/propose вызывает только он о себе), поэтому в
-    # тексте, адресованном ЕМУ, нельзя называть его по имени в третьем
-    # лице — Gemma читала это буквально ("Алексей Александрович Севбо
-    # (@asevbo) предложит... Дословно покажи это Алексей Александрович
-    # Севбо") и озвучивала слово в слово. proposer_name здесь не нужен —
-    # только адресат (target_name), причём падеж держим на слове
-    # "адресату", а не на самом имени (см. _resolve_propose_relationship).
+    # этом чате, в тексте, адресованном ЕМУ, не называть его по имени в
+    # третьем лице (Gemma озвучивала такое слово в слово).
     return (
-        "Предпросмотр (ничего ещё не отправлено). Собеседник в этом чате — "
-        "сам инициатор; обращайся к нему на «вы» и никогда не называй его "
-        f"по имени в третьем лице. Адресат — {target_name}, тип связи — "
-        f"«{_relation_label(relation)}». Скажи собеседнику своими словами, "
-        "кому именно и какой именно тип связи предлагается, и дождись его "
-        "явного согласия — не делай вывод сам. Только после согласия "
-        f"вызови propose_relationship(target_chat_id={target_chat_id}, "
-        f'relation="{relation}"), чтобы реально отправить предложение '
-        f"адресату ({target_name}). Если он передумает или назовёт другой "
-        "тип — вызови preview_relationship заново с новыми аргументами, "
-        "не подгоняй текущее предложение."
+        "Форма открыта, адресату пока НИЧЕГО не отправлено. Сразу после твоего "
+        "ответа собеседник получит отдельное сообщение-форму: адресат — "
+        f"{target_name}, связь «{relation_label(relation)}», кнопки «Отправить» и "
+        "«Отмена», форма действует 1 час. Собеседник в этом чате — сам "
+        "инициатор; обращайся к нему на «вы» и не называй его по имени в "
+        "третьем лице. Коротко скажи своими словами, что форма ниже и что "
+        "отправит предложение он сам кнопкой. Не говори, что уже отправил, и "
+        "не проси подтвердить текстом."
     )
-
-
-async def tool_propose_relationship(ctx: ToolContext, args: dict[str, Any]) -> str:
-    if ctx.node_link is None:
-        return "ошибка: служба задач недоступна"
-    resolved = await _resolve_propose_relationship(ctx, args)
-    if isinstance(resolved, str):
-        return resolved
-    target_chat_id, relation, proposer_name, target_name = resolved
-    assert ctx.store is not None  # гарантировано _resolve_propose_relationship
-
-    now = datetime.now(tz=UTC)
-    row = await ctx.store.propose_relationship(ctx.chat_id, target_chat_id, relation, now)
-    # Живая находка 2026-09-26: старая формулировка ("...установить с тобой
-    # связь...") модель читала так, будто СВЯЗЬ ЗАВОДИТСЯ С НЕЙ САМОЙ
-    # (Альфредом) — ушло сообщение вида "мне предложили стать моим
-    # супругом". Директива приходит role="user" в НОВЫЙ тред адресата, и
-    # "ты"/"тобой" там неизбежно читается с точки зрения persona, отвечающей
-    # ЗА АЛЬФРЕДА этому собеседнику — поэтому теперь явно и многословно
-    # разводим роли: Альфред только курьер, сторона связи — proposer.
-    # Убрано повторное "между «X» и твоим собеседником" — это творительный
-    # падеж на вставленном имени (та же живая находка про падежи, см.
-    # _resolve_propose_relationship); первого упоминания в именительном
-    # падеже ("Гость «X» предложил...") достаточно, роли и так однозначны.
-    #
-    # Живая находка 2026-09-26 (третий заход): эта директива уходит role="user"
-    # ПЕРВЫМ сообщением совсем нового треда (schedule_agent_dialogue,
-    # см. докстринг выше — не self-scheduled продолжение, как у tool_remind).
-    # llm/ollama.py::chat() клеит персонажный system-промпт ПЕРЕД messages и
-    # шлёт как есть — с точки зрения модели этот текст структурно неотличим
-    # от того, что только что сказал сам собеседник. Персонаж-дворецкий
-    # рефлекторно открывал ответ подтверждением ЧУЖОГО распоряжения:
-    # "Пгинято. Я исполню ваше погучение с должным достоинством" — как будто
-    # это САМА Наташа велела Альфреду что-то передать. Явно запрещаем эту
-    # рамку словами, а не архитектурой: сменить role на "system" нельзя
-    # безопасно проверить — обработка ролей внутри chat-шаблона Ollama/Gemma
-    # вне репозитория, код сам их не различает (см. tasks/service.py,
-    # llm/service.py, llm/ollama.py — просто конкатенируют список как есть).
-    directive = (
-        f"Тебе, Альфреду, нужно передать весть — ты сам НЕ участник этой "
-        f"связи. Гость «{proposer_name}» предложил(а) установить связь "
-        f"«{_relation_label(relation)}» С ЧЕЛОВЕКОМ, С КОТОРЫМ ТЫ СЕЙЧАС "
-        "РАЗГОВАРИВАЕШЬ (не с тобой, не с Альфредом). Это НЕ поручение и "
-        "не просьба от твоего текущего собеседника — он тебе только что "
-        "ничего не говорил, весть идёт ОТ ТРЕТЬЕГО ЛИЦА через тебя. НЕ "
-        "начинай ответ фразами вида «Принято» / «исполню ваше "
-        "поручение» — это будет читаться так, будто собеседник САМ "
-        "распорядился, а это не так. Сразу переходи к сути новости "
-        "своими словами, как курьер. Ответь на уточняющие вопросы, если "
-        "будут, и дождись явного согласия или отказа именно от него — не "
-        "делай вывод сам. Как только он(а) явно ответит, вызови "
-        f"confirm_relationship(relationship_id={row['id']}) при согласии "
-        f"или reject_relationship(relationship_id={row['id']}) при отказе."
-    )
-    try:
-        await schedule_agent_dialogue(
-            ctx.node_link,
-            target_chat_id,
-            [{"role": "user", "content": directive}],
-            reminder_reason(ctx.settings.llm),
-            ctx.settings.llm.request_timeout_s,
-        )
-    except (ServiceUnavailableError, ProtoError) as exc:
-        return f"не удалось отправить предложение адресату ({target_name}): {exc}"
-    return f"предложение отправлено адресату ({target_name}), жду ответа"
-
-
-async def _respond_relationship(ctx: ToolContext, args: dict[str, Any], accepted: bool) -> str:
-    """Общая реализация confirm_relationship/reject_relationship.
-
-    Два разных пути в зависимости от того, ГДЕ исполняется этот тул (тот же
-    приём, что у tool_tell/_deliver_personal_message):
-    - живой /ai (ctx.store/ctx.notifier есть) — читаем и пишем
-      guest_relationships напрямую, права проверяем здесь же.
-    - проактивная сессия агента установки связи (Этап 44, служба tasks —
-      ctx.store там нет, см. докстринг ToolContext.emit) — своей БД у tasks
-      нет, поэтому мост-событие EVENT_RESPOND_RELATIONSHIP просит бота
-      (единственного, у кого есть настоящий Store) сделать то же самое (см.
-      bot/node_events.py::_handle_respond_relationship). Права там всё равно
-      проверяются — по responder_chat_id=ctx.chat_id этой сессии, а он
-      серверный (сессия создана schedule_agent_dialogue именно под этого
-      гостя), не то, что может подделать модель — тихий отказ на бот-стороне
-      при несовпадении/устаревшей ссылке, как и у остальных fire-and-forget
-      мостов этого файла.
-    """
-    if ctx.chat_id is None:
-        return "недоступно: непонятно, от чьего имени отвечать"
-    try:
-        relationship_id = int(args.get("relationship_id"))
-    except (TypeError, ValueError):
-        return "ошибка: relationship_id должен быть числом"
-
-    if ctx.notifier is not None and ctx.store is not None:
-        row = await ctx.store.get_relationship(relationship_id)
-        if row is None or row["status"] != "pending":
-            return "ошибка: нет такого предложения, либо на него уже ответили"
-        if row["guest_b"] != ctx.chat_id:
-            return "ошибка: это предложение адресовано не тебе"
-        now = datetime.now(tz=UTC)
-        updated = await ctx.store.respond_relationship(relationship_id, accepted, now)
-        assert updated is not None
-        responder = ctx.book.for_chat(ctx.chat_id) if ctx.book is not None else None
-        responder_name = (
-            _guest_facing_name(ctx.settings, ctx.chat_id, responder.name)
-            if responder is not None
-            else "гость"
-        )
-        text = render_relationship_response_notice(responder_name, updated["relation"], accepted)
-        message_id = await ctx.notifier.send_direct(row["guest_a"], text)
-        if message_id is not None:
-            await ctx.store.record_ai_turn(
-                row["guest_a"], message_id, message_id, "assistant", text, now
-            )
-        return "принято: согласие записано" if accepted else "принято: отказ записан"
-
-    assert ctx.emit is not None  # гарантировано вызывающим (tool_confirm/reject_relationship)
-    await ctx.emit(
-        task_protocol.EVENT_RESPOND_RELATIONSHIP,
-        {
-            "relationship_id": relationship_id,
-            "accepted": accepted,
-            "responder_chat_id": ctx.chat_id,
-        },
-    )
-    return "принято: согласие отправлено" if accepted else "принято: отказ отправлен"
-
-
-async def tool_confirm_relationship(ctx: ToolContext, args: dict[str, Any]) -> str:
-    if ctx.notifier is None and ctx.emit is None:
-        return "недоступно: сейчас не могу ответить на предложение"
-    return await _respond_relationship(ctx, args, accepted=True)
-
-
-async def tool_reject_relationship(ctx: ToolContext, args: dict[str, Any]) -> str:
-    if ctx.notifier is None and ctx.emit is None:
-        return "недоступно: сейчас не могу ответить на предложение"
-    return await _respond_relationship(ctx, args, accepted=False)
 
 
 _RELATION_EMOJI = {"family": "🏠", "spouse": "💍"}
@@ -1342,7 +1209,7 @@ async def tool_my_relationships(ctx: ToolContext, _args: dict[str, Any]) -> str:
         other = ctx.book.for_chat(other_chat_id)
         name = other.name if other is not None else f"chat_id {other_chat_id}"
         emoji = _RELATION_EMOJI.get(row["relation"], _RELATION_EMOJI_DEFAULT)
-        lines.append(f"{emoji} {name} — {_relation_label(row['relation'])}")
+        lines.append(f"{emoji} {name} — {relation_label(row['relation'])}")
 
     if not lines:
         return "подтверждённых связей нет"
@@ -3902,26 +3769,23 @@ _DECL_REMIND: dict[str, Any] = {
 }
 
 
-_DECL_PREVIEW_RELATIONSHIP: dict[str, Any] = {
+_DECL_REQUEST_RELATIONSHIP_FORM: dict[str, Any] = {
     "type": "function",
     "function": {
-        "name": "preview_relationship",
+        "name": "request_relationship_form",
         "description": (
-            "ОБЯЗАТЕЛЬНЫЙ первый шаг перед propose_relationship — ничего не "
-            "отправляет и не сохраняет, только возвращает точный текст "
-            "предпросмотра ('кому' и 'какая именно связь'). Вызывай, когда "
-            "собеседник говорит о ком-то как о друге/знакомом/родственнике/"
-            "супруге и хочет, чтобы это стало известно системе ('Вася — мой "
-            "друг', 'Настя — моя сестра', 'Игорь — мой муж'). ПЕРЕД вызовом "
-            "уточни личность точным поиском (guests_list — по имени/chat_id, "
-            "НЕ угадывай). После вызова покажи вернувшийся текст собеседнику "
-            "ДОСЛОВНО и дождись его явного согласия — только тогда вызывай "
-            "propose_relationship с ТЕМИ ЖЕ target_chat_id/relation, что и "
-            "здесь; не меняй relation по своему усмотрению, если собеседник "
-            "сказал 'знакомый' — это не 'друг'. 'spouse' (супруг(а)) — "
-            "особая связь: подтверждённой может быть только одна с каждой "
-            "стороны одновременно, тул сам откажет, если у кого-то из двоих "
-            "уже есть супруг(а)."
+            "Открыть собеседнику форму предложения связи ('друг', 'знакомый', "
+            "'родство' или 'супруг(а)') с другим гостем. Вызывай, когда "
+            "собеседник хочет, чтобы система знала о его связи с кем-то ('Вася "
+            "— мой друг', 'Настя — моя сестра', 'предложи Игорю стать моим "
+            "мужем'). ПЕРЕД вызовом уточни личность точным поиском "
+            "(guests_list — по имени/chat_id, НЕ угадывай) и тип связи со слов "
+            "собеседника: 'знакомый' — это не 'друг'. Тул ничего не отправляет "
+            "адресату: собеседник получит отдельную форму с кнопками "
+            "«Отправить»/«Отмена» и решит сам. Ответы адресата тоже приходят "
+            "только кнопками — сам ты предложения не отправляешь, не "
+            "принимаешь и не отклоняешь. 'spouse' — исключительная связь: тул "
+            "откажет, если у кого-то из двоих уже есть супруг(а)."
         ),
         "parameters": {
             "type": "object",
@@ -3940,83 +3804,6 @@ _DECL_PREVIEW_RELATIONSHIP: dict[str, Any] = {
                 },
             },
             "required": ["target_chat_id", "relation"],
-        },
-    },
-}
-
-_DECL_PROPOSE_RELATIONSHIP: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "propose_relationship",
-        "description": (
-            "Реально отправить предложение связи ('друг', 'знакомый', "
-            "'родство' или 'супруг(а)') другому гостю — вызывай ТОЛЬКО после "
-            "preview_relationship с ТЕМИ ЖЕ аргументами и явного, "
-            "недвусмысленного согласия собеседника-инициатора на то, что "
-            "показал preview_relationship. Не вызывай напрямую, минуя "
-            "preview_relationship — инициатор должен сам увидеть, кому и "
-            "какая именно связь уйдёт, прежде чем она реально уйдёт."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "target_chat_id": {
-                    "type": "integer",
-                    "description": "chat_id гостя, которому предлагается связь (из guests_list)",
-                },
-                "relation": {
-                    "type": "string",
-                    "enum": list(RELATION_TYPES),
-                    "description": (
-                        "friend — друг, acquaintance — знакомый, family — родство, "
-                        "spouse — супруг(а)"
-                    ),
-                },
-            },
-            "required": ["target_chat_id", "relation"],
-        },
-    },
-}
-
-_DECL_CONFIRM_RELATIONSHIP: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "confirm_relationship",
-        "description": (
-            "Подтвердить предложенную ДРУГИМ гостем связь — вызывай ТОЛЬКО "
-            "после явного, недвусмысленного согласия собеседника, которому "
-            "адресовано предложение. Не делай вывод о согласии сам."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "relationship_id": {
-                    "type": "integer",
-                    "description": "id предложения — его назвали в директиве об этом предложении",
-                },
-            },
-            "required": ["relationship_id"],
-        },
-    },
-}
-
-_DECL_REJECT_RELATIONSHIP: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "reject_relationship",
-        "description": (
-            "Отклонить предложенную ДРУГИМ гостем связь — вызывай ТОЛЬКО "
-            "после явного отказа собеседника, которому адресовано предложение."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "relationship_id": {
-                    "type": "integer",
-                    "description": "id предложения — его назвали в директиве об этом предложении",
-                },
-            },
-            "required": ["relationship_id"],
         },
     },
 }
@@ -4139,31 +3926,17 @@ TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec(name="remind", handler=tool_remind, declaration=_DECL_REMIND),
     # Связи между гостями (Этап 42.6.2) — без requires, как remind: открыто
     # любому подписанному гостю, не только владельцу. Сама видимость целей
-    # ограничена внутри тулов (ctx.book, только известные гости), права
-    # ответа — chat_id адресата (см. _respond_relationship). Разведочный
+    # ограничена внутри тулов (ctx.book, только известные гости). Ответ
+    # адресата — только кнопкой формы (Этап 45, bot/pending_actions.py),
+    # у модели тулов confirm/reject больше нет. Разведочный
     # момент, отмечен как открытый в IMPLEMENTATION_PLAN.md §42.6: чтобы
     # УЗНАТЬ chat_id незнакомого гостя, нужен guests_list, а тот сейчас
     # доступен только владельцу — гость-инициатор не из владельцев сможет
     # предложить связь лишь тому, чей chat_id уже всплыл в разговоре иначе.
     ToolSpec(
-        name="preview_relationship",
-        handler=tool_preview_relationship,
-        declaration=_DECL_PREVIEW_RELATIONSHIP,
-    ),
-    ToolSpec(
-        name="propose_relationship",
-        handler=tool_propose_relationship,
-        declaration=_DECL_PROPOSE_RELATIONSHIP,
-    ),
-    ToolSpec(
-        name="confirm_relationship",
-        handler=tool_confirm_relationship,
-        declaration=_DECL_CONFIRM_RELATIONSHIP,
-    ),
-    ToolSpec(
-        name="reject_relationship",
-        handler=tool_reject_relationship,
-        declaration=_DECL_REJECT_RELATIONSHIP,
+        name="request_relationship_form",
+        handler=tool_request_relationship_form,
+        declaration=_DECL_REQUEST_RELATIONSHIP_FORM,
     ),
     ToolSpec(
         name="my_relationships",
