@@ -85,8 +85,11 @@ class Run:
     finale_form_sent: bool = False
     directive: str | None = None
     last_effect: str | None = None
+    # Событие от Ведущего, которое Альфред ещё не пересказал гостю (Ведущий
+    # гостю не виден — рассказывает сам Альфред на следующем ходу).
+    pending_effect: str | None = None
     notes: list[str] = field(default_factory=list)
-    # Журнал сцены: «Гость: …», «Альфред: …», «Ведущий: …». В личке каждое
+    # Журнал сцены: «Гость: …», «Альфред: …», «Событие: …». В личке каждое
     # сообщение без реплая — новый тред /ai (bot/handlers/ai.py::
     # _dialogue_id_for), и история треда сцену не держит — держит журнал.
     transcript: list[str] = field(default_factory=list)

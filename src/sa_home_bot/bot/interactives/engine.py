@@ -4,11 +4,15 @@
 
 1. ``before_turn`` — ДО запроса к модели: решает, идёт ли сцена, нужна ли
    форма согласия, и собирает скрытую заметку Альфреду (рамка сцены +
-   подсказка стадии + директива Ведущего + журнал). Заодно отдаёт
-   ``speech_clear`` гостя — он едет в каждый запрос к службе llm.
+   подсказка стадии + директива Ведущего + что произошло после прошлого
+   действия Альфреда + журнал). Заодно отдаёт ``speech_clear`` гостя — он
+   едет в каждый запрос к службе llm.
 2. Альфред отвечает как обычно, ответ сразу уходит гостю.
-3. ``after_turn`` — ПОСЛЕ ответа: журнал, вызов Ведущего, рамки темпа,
-   сообщение рассказчика (🎬) с кнопкой выхода.
+3. ``after_turn`` — ПОСЛЕ ответа: журнал, вызов Ведущего, рамки темпа.
+   Ведущий гостю НЕ виден (решение пользователя 2026-09-27: всё должно
+   выглядеть как обычный диалог с Альфредом): его ``effect`` копится в
+   ``Run.pending_effect`` и на следующем ходу уходит Альфреду скрытой
+   подсказкой — о случившемся рассказывает сам Альфред.
 4. ``flush_forms`` — последним шагом хода: формы (согласие, смена
    передатчика), которые попросили тул или финал. Форма, посланная
    посреди генерации, обогнала бы речь Альфреда (тот же приём, что
@@ -17,8 +21,9 @@
 Согласие: сцена сначала ``offered`` — невзначай заданный вопрос сценария
 («исправить проблему с коммуникацией?») с «Да»/«Нет», без намёка на игру.
 «Да» — сцена стартует; «Нет» — запрет интерактивов в этой переписке
-(снимается скрытой командой /interactives); без ответа час — кулдаун. Сцены — только в личке: в
-общем чате рассказчик и подсказки мешали бы остальным. Эффект и
+(снимается скрытой командой /interactives); без ответа час — кулдаун.
+Сцены — только в личке: в общем чате подсказки сцены сбивали бы Альфреда
+в разговоре с остальными. Эффект и
 завершённость — на гостя глобально (base.py), так что переключатель после
 завершения работает в любом чате.
 """
@@ -71,7 +76,6 @@ DECLINE_COOLDOWN = timedelta(hours=24)
 NOTES_KEEP = 6
 NOTE_TRANSCRIPT_LINES = 8
 
-NARRATOR_PREFIX = "🎬 Ведущий:"
 _TAG_RE = re.compile(r"<[^>]+>")
 
 # callback_data «ia:<сценарий>:<кнопка>» — всё остальное в app_state.
@@ -98,10 +102,12 @@ FORM_REINSTALL = "reinstall"
 OFFER_YES_SUFFIX = "\n<i>— Да</i>"
 OFFER_NO_SUFFIX = "\n<i>— Нет</i>"
 OFFER_EXPIRED_SUFFIX = "\n<i>— Вопрос уже неактуален</i>"
-EXIT_ALERT = "Вы вышли из сценки. Вернуться можно, снова пожаловавшись на связь."
+# Кнопка выхода была под сообщениями рассказчика до v0.115.3 — рассказчика
+# больше нет, обработка оставлена для уже разосланных сообщений.
+EXIT_ALERT = "Хорошо."
 
-OPT_IN_TEXT = "🎬 Сценки в этом чате снова включены."
-OPT_OUT_TEXT = "🚫 Сценки в этом чате выключены. Включить — /interactives on."
+OPT_IN_TEXT = "Интерактивы в этом чате включены."
+OPT_OUT_TEXT = "Интерактивы в этом чате выключены. Включить — /interactives on."
 
 
 def parse_callback(data: str | None) -> tuple[str, str] | None:
@@ -135,12 +141,8 @@ def offer_keyboard(scenario: str) -> InlineKeyboardMarkup:
     )
 
 
-def exit_keyboard(scenario: str) -> InlineKeyboardMarkup:
-    return _keyboard(scenario, [[("⏹ Выйти из сценки", BTN_EXIT)]])
-
-
 def swap_keyboard(scenario: str) -> InlineKeyboardMarkup:
-    return _keyboard(scenario, [[("📻 Заменить", BTN_SWAP), ("Оставить старый", BTN_KEEP)]])
+    return _keyboard(scenario, [[("Заменить", BTN_SWAP), ("Оставить старое", BTN_KEEP)]])
 
 
 def toggle_keyboard(scenario: str, button: str, label: str) -> InlineKeyboardMarkup:
@@ -220,6 +222,13 @@ def build_scene_note(scenario: Scenario, run: Run) -> str:
         parts.append("Сейчас: " + scenario.ladder[min(run.stage, scenario.last_stage)])
     if run.directive:
         parts.append("Подсказка на этот ход: " + run.directive)
+    if run.pending_effect:
+        parts.append(
+            "После твоего прошлого действия произошло вот что: "
+            f"{run.pending_effect}\nРасскажи об этом собеседнику в этом ответе "
+            "сам, своими словами — как то, что ты сейчас увидел, услышал или "
+            "почувствовал. Не говори, что тебе это подсказали."
+        )
     if run.transcript:
         lines = "\n".join(run.transcript[-NOTE_TRANSCRIPT_LINES:])
         parts.append("Что уже было в сцене (журнал):\n" + lines)
@@ -372,13 +381,14 @@ class Interactives:
             return
         run.log("Гость", plan.user_text)
         run.log("Альфред", reply)
+        # Прошлое событие Альфред уже пересказал этим ответом.
+        run.pending_effect = None
         decision = await self._ask_director(scenario, run)
         effect = apply_decision(scenario, run, decision, choose=self._choose)
         if effect:
-            run.log("Ведущий", effect)
+            run.log("Событие", effect)
+            run.pending_effect = effect
         await self._state.save_run(run)
-        if effect and run.status == STATUS_ACTIVE:
-            await self._send_narrator(run, effect, dialogue_id, message_thread_id)
 
     async def _ask_director(self, scenario: Scenario, run: Run) -> DirectorDecision | None:
         node_link = self._get_node_link()
@@ -391,29 +401,6 @@ class Interactives:
             scenario,
             run,
             finale_allowed=finale_allowed(scenario, run),
-        )
-
-    async def _send_narrator(
-        self, run: Run, effect: str, dialogue_id: int | None, message_thread_id: int | None
-    ) -> None:
-        text = f"🎬 <b>Ведущий:</b> <i>{html.escape(effect)}</i>"
-        message_id = await self._notifier.send_direct(
-            run.chat_id,
-            text,
-            reply_markup=exit_keyboard(run.scenario),
-            message_thread_id=message_thread_id,
-        )
-        if message_id is None:
-            return
-        # Как формы Этапа 45: реплика рассказчика — ход треда, чтобы реплай
-        # на неё продолжал тот же диалог.
-        await self._store.record_ai_turn(
-            run.chat_id,
-            message_id,
-            dialogue_id if dialogue_id is not None else message_id,
-            "assistant",
-            f"{NARRATOR_PREFIX} {effect}",
-            self._now(),
         )
 
     # --- формы ---
@@ -474,10 +461,10 @@ class Interactives:
             return radio.SWAP_FORM_TEXT, swap_keyboard(scenario_id)
         if form == FORM_RETURN:
             return radio.RETURN_FORM_TEXT, toggle_keyboard(
-                scenario_id, BTN_RETURN_OLD, "📻 Вернуть старый"
+                scenario_id, BTN_RETURN_OLD, "Вернуть"
             )
         return radio.REINSTALL_FORM_TEXT, toggle_keyboard(
-            scenario_id, BTN_INSTALL_NEW, "📻 Поставить новый"
+            scenario_id, BTN_INSTALL_NEW, "Поставить"
         )
 
     # --- тул swap_radio ---
@@ -539,18 +526,18 @@ class Interactives:
             if run.status != STATUS_ACTIVE or not run.finale:
                 return "Уже решено.", None, True
             if button == BTN_KEEP:
-                return "Оставили старый.", radio.SWAP_KEPT_TEXT, True
+                return "Хорошо.", radio.SWAP_KEPT_TEXT, True
             await self._set_clear(chat_id, user_id, True)
             await self._state.mark_completed(scenario.id, user_id)
             run.status = STATUS_DONE
             await self._state.save_run(run)
             await self._speak(chat_id, radio.AFTER_SWAP_DIRECTIVE)
-            return "Передатчик заменён!", radio.SWAP_ACCEPTED_TEXT, True
+            return "Готово.", radio.SWAP_ACCEPTED_TEXT, True
         if button in (BTN_RETURN_OLD, BTN_INSTALL_NEW, BTN_TOGGLE_KEEP):
             if not await self._state.is_completed(scenario.id, user_id):
                 return "Эта форма не для вас.", None, False
             if button == BTN_TOGGLE_KEEP:
-                return "Оставили как есть.", radio.TOGGLE_KEPT_TEXT, True
+                return "Оставили как есть.", None, True
             target = button == BTN_INSTALL_NEW
             if await self.speech_clear(user_id) == target:
                 return "Уже так.", None, True

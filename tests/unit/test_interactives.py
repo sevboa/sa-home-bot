@@ -250,22 +250,44 @@ async def test_exit_button_pauses_and_next_complaint_asks_again(store):
 # --- ход сцены и Ведущий ---
 
 
-async def test_director_effect_goes_to_guest_with_exit_button(store):
+async def test_director_is_invisible_and_alfred_retells_the_effect(store):
+    # Ведущий гостю не виден: никаких отдельных сообщений — событие уходит
+    # Альфреду скрытой подсказкой на следующий ход, и рассказывает он сам.
     svc, notifier, link = _make(store)
     await _play(svc, store)
+    sent_before = len(notifier.sent)
     link.director_replies = [_director(effect="Из динамика пахнет болотом.", directive="Понюхай")]
     await _turn(svc, "Проверь антенну", "Проверяю антенну")
-    sent_chat, text, markup = notifier.sent[-1]
-    assert text == "🎬 <b>Ведущий:</b> <i>Из динамика пахнет болотом.</i>"
-    assert markup.inline_keyboard[0][0].callback_data == "ia:radio:x"
+    assert len(notifier.sent) == sent_before
     run = await _run(store)
     assert run.transcript[-3:] == [
         "Гость: Проверь антенну",
         "Альфред: Проверяю антенну",
-        "Ведущий: Из динамика пахнет болотом.",
+        "Событие: Из динамика пахнет болотом.",
     ]
     plan = await svc.before_turn(GUEST, GUEST, "ну?", is_private=True)
     assert "Подсказка на этот ход: Понюхай" in plan.note
+    assert "произошло вот что: Из динамика пахнет болотом." in plan.note
+    # Пересказал — на следующем ходу событие уже не подсказывается.
+    link.director_replies = [_director()]
+    await svc.after_turn(plan, "Фу, болотом тянет!", dialogue_id=77)
+    plan = await svc.before_turn(GUEST, GUEST, "и?", is_private=True)
+    assert "произошло вот что" not in plan.note
+
+
+async def test_nothing_the_guest_sees_has_emoji_or_game_words(store):
+    svc, notifier, link = _make(store)
+    await _reach_finale(svc, store, link)
+    await _turn(svc, "что там?")
+    texts = [text for _, text, _ in notifier.sent]
+    labels = [
+        b.text for _, _, markup in notifier.sent if markup for row in markup.inline_keyboard
+        for b in row
+    ]
+    for shown in texts + labels:
+        assert shown.isascii() or all(ord(ch) < 0x2000 for ch in shown), shown
+        for word in ("сценк", "игр", "ведущ"):
+            assert word not in shown.lower(), shown
 
 
 async def test_director_topic_change_makes_scene_idle_and_complaint_resumes_silently(store):

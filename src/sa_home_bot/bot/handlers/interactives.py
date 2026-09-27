@@ -70,7 +70,7 @@ async def cmd_interactives(
     if arg in ("", "on", "вкл", "да"):
         if arg == "" and not await interactives.is_opted_out(chat_id):
             await message.answer(
-                "🎬 Сценки в этом чате включены. Выключить — /interactives off."
+                "Интерактивы в этом чате включены. Выключить — /interactives off."
             )
             return
         await interactives.set_opted_out(chat_id, False)
