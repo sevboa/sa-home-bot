@@ -184,6 +184,8 @@ async def run_chat_loop(
     on_partial: PartialSink | None = None,
     on_tool_start: ToolStartSink | None = None,
     photo_key: str | None = None,
+    speech_user_id: int | None = None,
+    speech_clear: bool | None = None,
 ) -> str:
     """Один проход диалога с моделью: раунды tool-calling (до
     MAX_TOOL_ROUNDS), пока не придёт финальный текст.
@@ -230,7 +232,12 @@ async def run_chat_loop(
     раунде несёт ``raw_image`` (см. llm/service.py::run_command) — на
     раундах после tool-calling, где последний элемент уже не фото-ход, он
     просто игнорируется. Само значение вычисляет bot/ai_flow.py::
-    photo_key_for(message) — детерминированно, без похода в БД."""
+    photo_key_for(message) — детерминированно, без похода в БД.
+
+    ``speech_user_id``/``speech_clear`` — Этап 47: кому адресован ответ и
+    выключена ли у него картавость (БД бота, bot/interactives). Служба llm
+    применяет их к Логопеду и заодно чинит своё зеркало (llm/service.py::
+    _speech_target). Служба tasks их не передаёт — там chat_id."""
     tool_ctx.history = messages
     # Комплект собирается ОДИН раз на проход и по правам собеседника: тула, на
     # который у него нет прав, модель не видит вовсе (см. bot/tools.py::
@@ -247,6 +254,10 @@ async def run_chat_loop(
             args["role"] = role
         if photo_key is not None:
             args["photo_key"] = photo_key
+        if speech_user_id is not None:
+            args["user_id"] = speech_user_id
+            if speech_clear is not None:
+                args["speech_clear"] = speech_clear
         return args
 
     async def _maybe_send_remark(result: dict[str, Any]) -> None:

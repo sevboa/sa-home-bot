@@ -57,6 +57,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sa_home_bot import wake_core
 from sa_home_bot.bot import commands, invites, recipients, voice_mode, vpn_nodes
+from sa_home_bot.bot.interactives import radio as interactive_radio
 from sa_home_bot.bot.monitor_state import parse_disk_summary, parse_health_state
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings, reminder_reason
@@ -212,6 +213,12 @@ class ToolContext:
     # Формы подтверждения (Этап 45, bot/pending_actions.py::PendingActions) —
     # только у живого /ai; у службы tasks формы показать некому.
     pending_actions: Any | None = None
+    # Интерактивы (Этап 47, bot/interactives/engine.py::Interactives) —
+    # только у живого /ai. ``user_id`` — кто говорит (в общем чате это не
+    # chat_id), ``is_private`` — сцены идут только в личке.
+    interactives: Any | None = None
+    user_id: int | None = None
+    is_private: bool = False
 
 
 ToolHandler = Callable[["ToolContext", dict[str, Any]], Awaitable[str]]
@@ -1172,6 +1179,19 @@ async def tool_request_acquaintance(ctx: ToolContext, args: dict[str, Any]) -> s
         "предложение он сам кнопкой, а после согласия адресата ты сможешь "
         "передавать сообщения между ними. Не говори, что уже отправил, и не "
         "проси подтвердить текстом."
+    )
+
+
+async def tool_swap_radio(ctx: ToolContext, _args: dict[str, Any]) -> str:
+    """Устройство связи Альфреда (Этап 47, bot/interactives/radio.py). Один
+    тул на обе стороны: до завершения интерактива «Проклятый передатчик»
+    он лишь запускает/продвигает сцену (в финале — форма замены), после —
+    переключатель старый/новый передатчик. Решает кнопка формы, не модель.
+    Службе tasks формы показать некому — честный отказ."""
+    if ctx.interactives is None:
+        return interactive_radio.TOOL_UNAVAILABLE
+    return await ctx.interactives.tool_swap_radio(
+        ctx.chat_id, ctx.user_id, is_private=ctx.is_private
     )
 
 
@@ -3918,5 +3938,12 @@ TOOLS: tuple[ToolSpec, ...] = (
         name="my_acquaintances",
         handler=tool_my_acquaintances,
         declaration=_DECL_MY_ACQUAINTANCES,
+    ),
+    # Интерактив «Проклятый передатчик» (Этап 47) — без requires: смена
+    # «устройства связи» касается только самого собеседника.
+    ToolSpec(
+        name="swap_radio",
+        handler=tool_swap_radio,
+        declaration=interactive_radio.SWAP_RADIO_DECLARATION,
     ),
 )

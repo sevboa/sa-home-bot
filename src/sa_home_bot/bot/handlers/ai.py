@@ -37,6 +37,7 @@ from aiogram.types import Message
 
 from sa_home_bot.bot import ai_flow, commands, voice_mode, voice_stt, voice_tts
 from sa_home_bot.bot import tools as ai_tools
+from sa_home_bot.bot.interactives.engine import Interactives
 from sa_home_bot.bot.notifier import Notifier, chunk_text
 from sa_home_bot.bot.pending_actions import PendingActions
 from sa_home_bot.bot.rich_stream import RichStreamSession
@@ -254,6 +255,7 @@ async def cmd_ai(
     active_ai_chats: ai_flow.ActiveAiChats,
     tool_calls: ToolCalls,
     pending_actions: PendingActions | None = None,
+    interactives: Interactives | None = None,
 ) -> None:
     dialogue_id = _dialogue_id_for(message)
     in_topic = message.message_thread_id is not None
@@ -296,6 +298,7 @@ async def cmd_ai(
         message, node_link, store, config, book, notifier, dialogue_id, history,
         active_ai_chats, tool_calls, _rich_session_for(message, config),
         pending_actions=pending_actions,
+        interactives=interactives,
     )
 
 
@@ -312,6 +315,7 @@ async def on_ai_reply(
     tool_calls: ToolCalls,
     subscription: Subscription | None = None,
     pending_actions: PendingActions | None = None,
+    interactives: Interactives | None = None,
 ) -> None:
     # AuthorizationMiddleware не проверяет права на не-командные сообщения —
     # проверяем право сами (защита от продолжения треда в чате, у которого
@@ -382,6 +386,7 @@ async def on_ai_reply(
         message, node_link, store, config, book, notifier, ai_dialogue_id, history,
         active_ai_chats, tool_calls, rich_session,
         pending_actions=pending_actions,
+        interactives=interactives,
     )
 
 
@@ -397,6 +402,7 @@ async def on_private_message(
     tool_calls: ToolCalls,
     subscription: Subscription | None = None,
     pending_actions: PendingActions | None = None,
+    interactives: Interactives | None = None,
 ) -> None:
     # Не команда — AuthorizationMiddleware её не проверяла, права смотрим сами
     # (как в on_ai_reply); в неавторизованной личке просто молчим.
@@ -432,6 +438,7 @@ async def on_private_message(
         message, node_link, store, config, book, notifier, dialogue_id, history,
         active_ai_chats, tool_calls, _rich_session_for(message, config),
         pending_actions=pending_actions,
+        interactives=interactives,
     )
 
 
@@ -447,6 +454,7 @@ async def on_private_photo(
     tool_calls: ToolCalls,
     subscription: Subscription | None = None,
     pending_actions: PendingActions | None = None,
+    interactives: Interactives | None = None,
 ) -> None:
     right = commands.required_right(commands.ALFRED.name)
     if subscription is None or not subscription.allows_command(right):
@@ -468,6 +476,7 @@ async def on_private_photo(
         message, node_link, store, config, book, notifier, dialogue_id, history,
         active_ai_chats, tool_calls, rich_session,
         pending_actions=pending_actions,
+        interactives=interactives,
     )
 
 
@@ -483,6 +492,7 @@ async def on_private_voice(
     tool_calls: ToolCalls,
     subscription: Subscription | None = None,
     pending_actions: PendingActions | None = None,
+    interactives: Interactives | None = None,
 ) -> None:
     right = commands.required_right(commands.ALFRED.name)
     if subscription is None or not subscription.allows_command(right):
@@ -506,6 +516,7 @@ async def on_private_voice(
         message, node_link, store, config, book, notifier, dialogue_id, history,
         active_ai_chats, tool_calls, rich_session,
         pending_actions=pending_actions,
+        interactives=interactives,
     )
 
 
@@ -521,6 +532,7 @@ async def on_private_sticker(
     tool_calls: ToolCalls,
     subscription: Subscription | None = None,
     pending_actions: PendingActions | None = None,
+    interactives: Interactives | None = None,
 ) -> None:
     right = commands.required_right(commands.ALFRED.name)
     if subscription is None or not subscription.allows_command(right):
@@ -540,6 +552,7 @@ async def on_private_sticker(
         message, node_link, store, config, book, notifier, dialogue_id, history,
         active_ai_chats, tool_calls, rich_session,
         pending_actions=pending_actions,
+        interactives=interactives,
     )
 
 
@@ -556,6 +569,7 @@ async def on_group_mention(
     tool_calls: ToolCalls,
     subscription: Subscription | None = None,
     pending_actions: PendingActions | None = None,
+    interactives: Interactives | None = None,
 ) -> None:
     right = commands.required_right(commands.ALFRED.name)
     if subscription is None or not subscription.allows_command(right):
@@ -584,6 +598,7 @@ async def on_group_mention(
         message, node_link, store, config, book, notifier, dialogue_id, history,
         active_ai_chats, tool_calls, _rich_session_for(message, config),
         pending_actions=pending_actions,
+        interactives=interactives,
     )
 
 
@@ -599,6 +614,7 @@ async def start_dialogue(
     active_ai_chats: ai_flow.ActiveAiChats,
     tool_calls: ToolCalls,
     pending_actions: PendingActions | None = None,
+    interactives: Interactives | None = None,
 ) -> str | None:
     """Начать тред директивой, как голый /alfred, — но не по команде человека.
 
@@ -623,6 +639,7 @@ async def start_dialogue(
         tool_calls,
         _rich_session_for(message, config),
         pending_actions=pending_actions,
+        interactives=interactives,
     )
 
 
@@ -815,6 +832,7 @@ async def _ask_and_reply(
     rich_session: RichStreamSession | None,
     *,
     pending_actions: PendingActions | None = None,
+    interactives: Interactives | None = None,
 ) -> str | None:
     """Текст ответа Альфреда, если он реально уехал в чат, иначе None.
 
@@ -843,7 +861,7 @@ async def _ask_and_reply(
     try:
         return await _do_ask_and_reply(
             message, node_link, store, config, book, notifier, dialogue_id, history, tool_calls,
-            rich_session, pending_actions=pending_actions,
+            rich_session, pending_actions=pending_actions, interactives=interactives,
         )
     finally:
         active_ai_chats.unregister(chat_id, task)
@@ -862,6 +880,7 @@ async def _do_ask_and_reply(
     rich_session: RichStreamSession | None,
     *,
     pending_actions: PendingActions | None = None,
+    interactives: Interactives | None = None,
 ) -> str | None:
     # typing-индикатор (keep-alive, пока модель реально готовит ответ) —
     # внутри ai_flow.request_alfred, вокруг самого вызова модели (не здесь и
@@ -895,6 +914,26 @@ async def _do_ask_and_reply(
     # keep-alive; если сессия уже штатно финализирована ниже, aclose() —
     # no-op (см. её докстринг).
     is_private = message.chat is not None and message.chat.type == "private"
+    # Этап 47: интерактивы — сцена/согласие/«чистая речь» собеседника
+    # решаются ДО запроса к модели (bot/interactives/engine.py). Сбой здесь
+    # не должен ронять обычный ход — тогда просто без сцены.
+    turn_plan = None
+    if interactives is not None and message.chat is not None:
+        current_turn = history[-1] if history else None
+        user_text = (
+            current_turn["content"]
+            if isinstance(current_turn, dict) and isinstance(current_turn.get("content"), str)
+            else ""
+        )
+        try:
+            turn_plan = await interactives.before_turn(
+                message.chat.id,
+                message.from_user.id if message.from_user else None,
+                user_text,
+                is_private=is_private,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("ai: интерактивы — before_turn упал (chat=%s)", message.chat.id)
     try:
         try:
             raw = await ai_flow.request_alfred(
@@ -904,6 +943,11 @@ async def _do_ask_and_reply(
                 # Только если сервис есть (прод, app.py) — подмены
                 # request_alfred в тестах этого ключа не знают.
                 **({"pending_actions": pending_actions} if pending_actions is not None else {}),
+                **(
+                    {"interactive_turn": turn_plan, "interactives": interactives}
+                    if interactives is not None
+                    else {}
+                ),
             )
         except Exception as exc:  # noqa: BLE001 — страховка: баг тут не должен быть молчаливым
             log.exception("ai: необработанная ошибка в диалоге chat=%s", message.chat.id)
@@ -1007,6 +1051,17 @@ async def _do_ask_and_reply(
             # бывает), экранировать её как обычный текст модели — снова
             # сломать <i>-тег буквально в тег текста.
             await message.answer(speech_remark.text)
+        if turn_plan is not None and interactives is not None:
+            # Ведущий — ПОСЛЕ ответа Альфреда: ответ его не ждёт.
+            try:
+                await interactives.after_turn(
+                    turn_plan,
+                    raw,
+                    dialogue_id=dialogue_id,
+                    message_thread_id=message.message_thread_id,
+                )
+            except Exception:  # noqa: BLE001 — сбой сцены не должен ронять ход
+                log.exception("ai: интерактивы — after_turn упал (chat=%s)", message.chat.id)
         if dismissal.mode is not None:
             # Ход диалога уже записан: если машину выключат, а тред потом
             # продолжат реплаем — история не потеряется, Альфреда просто
@@ -1032,6 +1087,21 @@ async def _do_ask_and_reply(
                 )
             except Exception:  # noqa: BLE001 — сбой формы не должен ронять ход
                 log.exception("ai: не удалось отправить формы (chat=%s)", message.chat.id)
+        # Формы интерактивов (Этап 47) — тем же правилом: после речи, не
+        # при отмене задачи (тогда очередь в памяти просто сбрасывается).
+        if interactives is not None and message.chat is not None:
+            if current is not None and current.cancelling():
+                interactives.discard_forms(message.chat.id)
+            else:
+                try:
+                    await interactives.flush_forms(
+                        message.chat.id,
+                        turn_plan,
+                        dialogue_id=dialogue_id,
+                        message_thread_id=message.message_thread_id,
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception("ai: не удалось отправить формы сцены (chat=%s)", message.chat.id)
 
 
 async def _send_alfred_reply(message: Message, raw: str) -> Message:

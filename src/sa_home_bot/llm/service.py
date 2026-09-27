@@ -133,6 +133,17 @@ ACTION_STT_UPLOAD_CHUNK = "stt_chunk"
 ACTION_SYNTHESIZE_SPEECH = "synthesize_speech"
 ACTION_TTS_DOWNLOAD_CHUNK = "tts_chunk"
 
+# Этап 47: «чистая речь» гостя (llm/speech_therapy.py::clear_user_ids) —
+# бот переключает её, когда гость меняет «устройство связи» в интерактиве
+# «Проклятый передатчик» (bot/interactives/radio.py).
+ACTION_SET_SPEECH_CLEAR = "set_speech_clear"
+
+# Роль chat для Ведущего интерактивов (bot/interactives/director.py): system
+# приходит от бота (не персонаж Альфреда), ответ — JSON, без тулов, без
+# рассуждения и БЕЗ Логопеда: это служебные данные сцены, не реплика
+# Альфреда (картавость испортила бы и JSON, и текст рассказчика).
+ROLE_DIRECTOR = "director"
+
 # Отказы фото-путей намеренно возвращаются как обычный {"response": ...}, а
 # не отдельным полем-ошибкой: для ACTION_CHAT это просто ложится в ai_turns
 # как обычная реплика Альфреда (ai.py не должен знать про фото-специфику),
@@ -335,9 +346,29 @@ class LlmService:
                             required=False,
                             title=(
                                 "Какой системный промпт использовать: 'persona' "
-                                "(по умолчанию, Альфред) или 'router' (служебный "
-                                "триаж без персонажа, см. llm/prompt.py)"
+                                "(по умолчанию, Альфред), 'router' (служебный "
+                                "триаж без персонажа, см. llm/prompt.py) или "
+                                "'director' (Ведущий интерактивов: system из "
+                                "аргумента system, ответ JSON)"
                             ),
+                        ),
+                        ActionParam(
+                            name="system",
+                            type="string",
+                            required=False,
+                            title="Системный промпт для role=director",
+                        ),
+                        ActionParam(
+                            name="user_id",
+                            type="int",
+                            required=False,
+                            title="Кому адресован ответ (для «чистой речи», Этап 47)",
+                        ),
+                        ActionParam(
+                            name="speech_clear",
+                            type="bool",
+                            required=False,
+                            title="Чистая речь для user_id (зеркало БД бота, Этап 47)",
                         ),
                         ActionParam(
                             name="request_id",
@@ -512,6 +543,16 @@ class LlmService:
                     ),
                 ),
                 ActionSpec(id=ACTION_WARMUP, title="Прогреть модель заранее (без ответа)"),
+                ActionSpec(
+                    id=ACTION_SET_SPEECH_CLEAR,
+                    title="Включить/выключить картавость для гостя (Этап 47)",
+                    params=(
+                        ActionParam(name="user_id", type="int", required=True, title="Гость"),
+                        ActionParam(
+                            name="clear", type="bool", required=True, title="Чистая речь"
+                        ),
+                    ),
+                ),
             ),
         )
 
@@ -554,7 +595,29 @@ class LlmService:
         if self._cfg.container_backend == "wsl-docker" and not self._keepalive.alive:
             await self._keepalive.start()
 
+    def _speech_target(self, args: dict[str, Any]) -> int | None:
+        """Адресат ответа для Логопеда (Этап 47) + самовосстановление
+        зеркала «чистой речи»: бот шлёт user_id и speech_clear из своей БД в
+        каждом живом запросе, так что потерянное/устаревшее состояние здесь
+        чинится первым же ходом гостя."""
+        user_id = args.get("user_id")
+        if not isinstance(user_id, int) or isinstance(user_id, bool):
+            return None
+        clear = args.get("speech_clear")
+        if isinstance(clear, bool):
+            self._speech.set_clear(user_id, clear)
+        return user_id
+
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
+        if action == ACTION_SET_SPEECH_CLEAR:
+            user_id = args.get("user_id")
+            clear = args.get("clear")
+            if not isinstance(user_id, int) or isinstance(user_id, bool):
+                raise ProtoError(ERR_BAD_REQUEST, "user_id должен быть целым числом")
+            if not isinstance(clear, bool):
+                raise ProtoError(ERR_BAD_REQUEST, "clear должен быть булевым значением")
+            changed = self._speech.set_clear(user_id, clear)
+            return {"user_id": user_id, "clear": clear, "changed": changed}
         if action == ACTION_ASK:
             prompt = args.get("prompt")
             if not isinstance(prompt, str) or not prompt:
@@ -564,7 +627,9 @@ class LlmService:
             result = await ollama.generate(self._cfg, prompt, self._persona_prompt)
             _log_ollama_timings("ask", result)
             cleaned = strip_math_notation(result.get("response", ""))
-            response, remark, just_cured = self._speech.process(cleaned, chat_id)
+            response, remark, just_cured = self._speech.process(
+                cleaned, chat_id, self._speech_target(args)
+            )
             if just_cured:
                 await self._emit_speech_cured()
             out: dict[str, Any] = {"response": response, "model": self._cfg.model}
@@ -577,8 +642,10 @@ class LlmService:
                 raise ProtoError(ERR_BAD_REQUEST, "messages должен быть непустым списком")
             tools = args.get("tools") or None
             role = args.get("role") or "persona"
-            if role not in ("persona", "router"):
+            if role not in ("persona", "router", ROLE_DIRECTOR):
                 raise ProtoError(ERR_BAD_REQUEST, f"неизвестная role: {role!r}")
+            if role == ROLE_DIRECTOR:
+                return await self._director_chat(messages, args)
             # Намерение-уровень рассуждения (off|low|medium|high) от бота, и его
             # перевод в параметр Ollama `think` через профиль этой модели.
             think = self._think_arg(args)
@@ -650,7 +717,9 @@ class LlmService:
             if tool_calls:
                 return {"tool_calls": tool_calls, "model": self._cfg.model}
             cleaned = strip_math_notation(message.get("content", ""))
-            reply, remark, just_cured = self._speech.process(cleaned, chat_id)
+            reply, remark, just_cured = self._speech.process(
+                cleaned, chat_id, self._speech_target(args)
+            )
             if just_cured:
                 await self._emit_speech_cured()
             out: dict[str, Any] = {"response": reply, "model": self._cfg.model}
@@ -682,7 +751,9 @@ class LlmService:
             _log_ollama_timings("look_at_photo", result)
             message = result.get("message", {})
             cleaned = strip_math_notation(message.get("content", ""))
-            reply, remark, just_cured = self._speech.process(cleaned, chat_id)
+            reply, remark, just_cured = self._speech.process(
+                cleaned, chat_id, self._speech_target(args)
+            )
             if just_cured:
                 await self._emit_speech_cured()
             out = {"response": reply, "model": self._cfg.model}
@@ -886,6 +957,29 @@ class LlmService:
         for sid in stale:
             self._tts_sessions.pop(sid, None)
             self._tts_session_touched.pop(sid, None)
+
+    async def _director_chat(
+        self, messages: list[Any], args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Ведущий интерактивов (Этап 47): свой system от бота, JSON-ответ,
+        ни тулов, ни рассуждения, ни Логопеда."""
+        system = args.get("system")
+        if not isinstance(system, str) or not system:
+            raise ProtoError(ERR_BAD_REQUEST, "для role=director нужен непустой system")
+        await self._touch(args.get("chat_id"))
+        result = await ollama.chat(
+            self._cfg,
+            messages,
+            system,
+            tools=None,
+            think=self._profile.think_arg("off"),
+            response_format="json",
+        )
+        _log_ollama_timings("chat/director", result)
+        return {
+            "response": result.get("message", {}).get("content", ""),
+            "model": self._cfg.model,
+        }
 
     async def _emit_speech_cured(self) -> None:
         try:

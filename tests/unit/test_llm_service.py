@@ -56,6 +56,7 @@ def test_describe_declares_ask_chat_sleep_warmup():
         "chat_progress",
         "sleep",
         "warmup",
+        "set_speech_clear",
     ]
     assert desc.find_action("ask").params[0].name == "prompt"
     assert desc.find_action("chat").params[0].name == "messages"
@@ -70,6 +71,7 @@ async def test_get_state_includes_speech_therapy_snapshot():
         "error_probability": 1.0,
         "corrections_total": 0,
         "cured": False,
+        "clear_users": 0,
     }
 
 
@@ -1236,3 +1238,79 @@ async def test_notify_restart_failure_is_swallowed(monkeypatch):
         "chat", {"messages": [{"role": "user", "content": "привет"}], "chat_id": 1}
     )
     await svc.notify_restart()  # не должно бросить исключение наружу
+
+
+# --- Этап 47: чистая речь гостя и Ведущий интерактивов ---
+
+
+async def test_chat_speech_clear_hint_disables_lisp_and_heals_mirror(monkeypatch):
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
+        return {"message": {"role": "assistant", "content": "Добрый день"}}
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    svc = LlmService(_settings(), speech_rand=lambda: 0.5)
+    msgs = [{"role": "user", "content": "привет"}]
+    result = await svc.run_command(
+        "chat", {"messages": msgs, "chat_id": 42, "user_id": 42, "speech_clear": True}
+    )
+    assert result["response"] == "Добрый день"
+    # Зеркало запомнило: задача tasks без user_id (только chat_id) тоже чистая.
+    result = await svc.run_command("chat", {"messages": msgs, "chat_id": 42})
+    assert result["response"] == "Добрый день"
+    # Бот сказал «картавость снова включена» — зеркало обновилось.
+    result = await svc.run_command(
+        "chat", {"messages": msgs, "chat_id": 42, "user_id": 42, "speech_clear": False}
+    )
+    assert result["response"] == "Добгый день"
+
+
+async def test_set_speech_clear_action(monkeypatch):
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
+        return {"message": {"role": "assistant", "content": "пора"}}
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    svc = LlmService(_settings(), speech_rand=lambda: 0.5)
+    assert await svc.run_command("set_speech_clear", {"user_id": 5, "clear": True}) == {
+        "user_id": 5,
+        "clear": True,
+        "changed": True,
+    }
+    result = await svc.run_command(
+        "chat", {"messages": [{"role": "user", "content": "?"}], "chat_id": 5}
+    )
+    assert result["response"] == "пора"
+    with pytest.raises(ProtoError):
+        await svc.run_command("set_speech_clear", {"user_id": "5", "clear": True})
+    with pytest.raises(ProtoError):
+        await svc.run_command("set_speech_clear", {"user_id": 5, "clear": "да"})
+
+
+async def test_director_role_uses_own_system_json_and_no_lisp(monkeypatch):
+    seen = {}
+
+    async def fake_chat(cfg, messages, system, tools=None, think=None, response_format=None):
+        seen.update(system=system, tools=tools, response_format=response_format)
+        return {"message": {"role": "assistant", "content": '{"effect": "Шорох в эфире"}'}}
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    svc = LlmService(_settings(), speech_rand=lambda: 0.0)
+    result = await svc.run_command(
+        "chat",
+        {
+            "messages": [{"role": "user", "content": "ход"}],
+            "role": "director",
+            "system": "ТЫ ВЕДУЩИЙ",
+            "chat_id": 42,
+        },
+    )
+    assert result["response"] == '{"effect": "Шорох в эфире"}'  # без р→г и ремарок
+    assert "speech_remark" not in result
+    assert seen == {"system": "ТЫ ВЕДУЩИЙ", "tools": None, "response_format": "json"}
+
+
+async def test_director_role_requires_system():
+    svc = LlmService(_settings())
+    with pytest.raises(ProtoError):
+        await svc.run_command(
+            "chat", {"messages": [{"role": "user", "content": "ход"}], "role": "director"}
+        )

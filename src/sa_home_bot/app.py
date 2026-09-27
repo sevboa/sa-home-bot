@@ -16,6 +16,7 @@ from aiogram.exceptions import TelegramConflictError
 
 from sa_home_bot.bot.ai_flow import RESTART_TEXT, ActiveAiChats
 from sa_home_bot.bot.dispatch import TelegramEventDispatcher
+from sa_home_bot.bot.interactives.engine import Interactives
 from sa_home_bot.bot.invites import Gatekeeper
 from sa_home_bot.bot.lifecycle import (
     broadcast_system,
@@ -149,6 +150,9 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
     # нужен уже готовый сервис (будильники экспирации и речь Альфреда перед
     # формой приходят task_result'ом), связь с нодой — геттером.
     pending_actions = PendingActions(store, notifier, settings, _get_node_link)
+    # Интерактивы (Этап 47): сцены с Ведущим, формы согласия и смены
+    # «устройства связи»; связь с нодой — тем же геттером.
+    interactives = Interactives(store, notifier, settings, _get_node_link)
 
     async def _report_bot_ready() -> None:
         # bot.get_me() (шаг 4 выше) уже подтвердил живую сеть/DNS/Telegram —
@@ -238,6 +242,7 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
             pending_torrents=pending_torrents,
             tool_calls=tool_calls,
             pending_actions=pending_actions,
+            interactives=interactives,
             pending_vpn_secrets=pending_vpn_secrets,
             runtime=runtime,
             config=settings,

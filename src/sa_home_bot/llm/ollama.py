@@ -417,6 +417,7 @@ async def chat(
     system: str,
     tools: list[dict[str, Any]] | None = None,
     think: bool | str | None = None,
+    response_format: str | None = None,
 ) -> dict[str, Any]:
     full_messages = [{"role": "system", "content": system}, *messages]
     payload: dict[str, Any] = {
@@ -425,6 +426,9 @@ async def chat(
         "stream": False,
         **_keep_alive_options(cfg),
     }
+    # "json" — структурный ответ (Ведущий интерактивов, Этап 47).
+    if response_format is not None:
+        payload["format"] = response_format
     # think: bool | str | None. None — ключ не отправлять вовсе (не то же, что
     # False: у моделей вроде gemma-4 явный False глушит скрытое рассуждение, а
     # отсутствие флага — нет). Строка ("low"/"medium"/"high") — уровень

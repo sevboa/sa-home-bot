@@ -76,8 +76,15 @@ TORRENTS = Command(
     menu=True,
     right="list@torrents",
 )
+# Сценки-интерактивы (Этап 47, bot/interactives): тумблер запрета в этой
+# переписке. Универсальная и скрытая — касается только своего чата, а
+# подсказку о ней гость получает в тексте формы «Больше не предлагать».
+INTERACTIVES = Command(
+    "interactives", "сценки в этом чате: on/off", universal=True, menu=False
+)
 ALL_COMMANDS: list[Command] = [
     PING,
+    INTERACTIVES,
     SWARM,
     NODES,
     STATUS,

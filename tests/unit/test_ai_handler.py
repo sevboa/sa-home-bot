@@ -1641,3 +1641,56 @@ async def test_send_alfred_reply_rich_returns_none_when_both_paths_fail():
     result = await ai_handler._send_alfred_reply_rich(message, "ответ", session, notifier)
 
     assert result is None
+
+
+# --- интерактивы (Этап 47): план хода ДО запроса, Ведущий и формы ПОСЛЕ ---
+
+
+class FakeInteractives:
+    def __init__(self, log: list) -> None:
+        self.log = log
+        self.plan = object()
+
+    async def before_turn(self, chat_id, user_id, user_text, *, is_private):
+        self.log.append(("before", chat_id, user_text, is_private))
+        return self.plan
+
+    async def after_turn(self, plan, reply, *, dialogue_id, message_thread_id=None):
+        assert plan is self.plan
+        self.log.append(("after", reply))
+
+    async def flush_forms(self, chat_id, plan=None, *, dialogue_id=None, message_thread_id=None):
+        self.log.append(("forms", chat_id))
+
+    def discard_forms(self, chat_id):
+        self.log.append(("discard", chat_id))
+
+
+async def test_interactives_wrap_the_turn_in_order(store, monkeypatch):
+    log: list = []
+    interactives = FakeInteractives(log)
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None, speech_remark=None, rich_session=None, *, interactive_turn=None,
+        interactives=None,
+    ):
+        assert interactive_turn is interactives.plan
+        log.append(("alfred",))
+        return "Я говогю чисто"
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, text="/alfred ты картавишь")
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), interactives=interactives,
+    )
+
+    assert log == [
+        ("before", 1, "ты картавишь", True),
+        ("alfred",),
+        ("after", "Я говогю чисто"),
+        ("forms", 1),
+    ]

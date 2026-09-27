@@ -21,7 +21,17 @@
 Закреплённые (pinned) чаты (`LlmConfig.speech_therapy_pinned_chat_ids`) —
 искажают ВСЕ слова с «р» всегда, включая уже исключённые глобально; не
 участвуют в общем прогрессе лечения и не читают/не пишут `excluded_words`/
-`error_probability`/`cured`."""
+`error_probability`/`cured`.
+
+«Чистая речь» гостя (``clear_user_ids``, Этап 47) — гость прошёл интерактив
+«Проклятый передатчик» (bot/interactives/radio.py) и сменил устройство связи:
+для него Альфред не картавит и Логопед не приходит, во всех его чатах.
+Источник правды — БД бота (app_state), здесь зеркало: бот передаёт флаг
+``speech_clear`` в каждом живом запросе (самовосстановление после сна/
+рестартов mycraft) и отдельным действием ``set_speech_clear`` на
+переключении. Зеркало нужно путям без бота — задачам службы tasks, которые
+знают только chat_id (в личке он совпадает с user_id). Pinned-чаты сильнее:
+там картавость всегда."""
 
 from __future__ import annotations
 
@@ -109,6 +119,7 @@ class SpeechTherapyState(BaseModel):
     corrections_total: int = 0
     excluded_words: list[str] = Field(default_factory=list)
     cured: bool = False
+    clear_user_ids: list[int] = Field(default_factory=list)
 
     @classmethod
     def load(cls, path: str | Path) -> SpeechTherapyState:
@@ -143,9 +154,26 @@ class SpeechTherapist:
             "error_probability": self._state.error_probability,
             "corrections_total": self._state.corrections_total,
             "cured": self._state.cured,
+            "clear_users": len(self._state.clear_user_ids),
         }
 
-    def process(self, text: str, chat_id: int | None) -> tuple[str, str | None, bool]:
+    def is_clear(self, user_id: int) -> bool:
+        return user_id in self._state.clear_user_ids
+
+    def set_clear(self, user_id: int, clear: bool) -> bool:
+        """Идемпотентно; True — состояние изменилось (и сохранено)."""
+        if clear == self.is_clear(user_id):
+            return False
+        if clear:
+            self._state.clear_user_ids.append(user_id)
+        else:
+            self._state.clear_user_ids.remove(user_id)
+        self._state.save(self._cfg.speech_therapy_state_path)
+        return True
+
+    def process(
+        self, text: str, chat_id: int | None, user_id: int | None = None
+    ) -> tuple[str, str | None, bool]:
         """Синхронно (см. докстринг модуля — никакого await внутри, это
         инвариант атомарности между параллельными вызовами run_command).
 
@@ -159,6 +187,11 @@ class SpeechTherapist:
         отдельной реплики (решение пользователя 2026-08-03)."""
         pinned = chat_id is not None and chat_id in self._cfg.speech_therapy_pinned_chat_ids
         if not pinned and self._state.cured:
+            return text, None, False
+        # Чей это ответ: адресат (user_id от бота), без него — chat_id (в
+        # личке это тот же человек; задачи tasks передают только chat_id).
+        speaker = user_id if user_id is not None else chat_id
+        if not pinned and speaker is not None and self.is_clear(speaker):
             return text, None, False
 
         result = list(text)

@@ -202,3 +202,51 @@ def test_text_without_r_words_is_untouched_and_state_not_saved(tmp_path):
     assert remark is None
     assert just_cured is False
     assert not path.exists()
+
+
+# --- Этап 47: «чистая речь» гостя после смены передатчика ---
+
+
+def test_clear_user_gets_clean_text_and_no_remark(tmp_path):
+    therapist = SpeechTherapist(_cfg(tmp_path), rand=lambda: _ALWAYS)
+    therapist.set_clear(42, True)
+    assert therapist.process("программа работает", chat_id=-100, user_id=42) == (
+        "программа работает",
+        None,
+        False,
+    )
+    # Прогресс лечения не тронут — чистая речь не «лечит» Альфреда.
+    assert therapist.snapshot()["corrections_total"] == 0
+
+
+def test_clear_falls_back_to_chat_id_without_user_id(tmp_path):
+    # Задачи службы tasks знают только chat_id — в личке он и есть гость.
+    therapist = SpeechTherapist(_cfg(tmp_path), rand=lambda: _CORRUPT_ONLY)
+    therapist.set_clear(42, True)
+    assert therapist.process("пора", chat_id=42)[0] == "пора"
+    assert therapist.process("пора", chat_id=7)[0] == "пога"
+
+
+def test_clear_is_per_user_in_group_chat(tmp_path):
+    therapist = SpeechTherapist(_cfg(tmp_path), rand=lambda: _CORRUPT_ONLY)
+    therapist.set_clear(42, True)
+    assert therapist.process("пора", chat_id=-100, user_id=42)[0] == "пора"
+    assert therapist.process("пора", chat_id=-100, user_id=7)[0] == "пога"
+
+
+def test_pinned_chat_beats_clear_user(tmp_path):
+    therapist = SpeechTherapist(
+        _cfg(tmp_path, speech_therapy_pinned_chat_ids=[42]), rand=lambda: _NEVER
+    )
+    therapist.set_clear(42, True)
+    assert therapist.process("пора", chat_id=42, user_id=42)[0] == "пога"
+
+
+def test_set_clear_is_idempotent_and_persisted(tmp_path):
+    cfg = _cfg(tmp_path)
+    therapist = SpeechTherapist(cfg)
+    assert therapist.set_clear(42, True) is True
+    assert therapist.set_clear(42, True) is False
+    assert SpeechTherapist(cfg).is_clear(42) is True
+    assert therapist.set_clear(42, False) is True
+    assert SpeechTherapist(cfg).is_clear(42) is False

@@ -19,6 +19,7 @@ from sa_home_bot.bot.handlers import (
     apps,
     basic,
     control,
+    interactives,
     invites,
     node,
     node_links,
@@ -72,6 +73,8 @@ def build_dispatcher(book: SubscriptionBook, gate: Gatekeeper) -> Dispatcher:
     dp.include_router(tool_debug.router)
     # pending_actions: кнопки форм подтверждения (Этап 45), свой префикс «pa:».
     dp.include_router(pending_actions.router)
+    # interactives: кнопки сценок (Этап 47), свой префикс «ia:», и /interactives.
+    dp.include_router(interactives.router)
     # ai: команда /ai + узкий фильтр реплаев на свои же диалоги (резолвится
     # по ai_turns, не по дереву Telegram-реплаев) — не пересекается с другими
     # роутерами, но пусть проверяется рано.

@@ -284,3 +284,39 @@ async def test_таймаут_и_сбои_не_повторяются(no_retry_s
 
     with pytest.raises(type(error)):
         await _run(link)
+
+
+async def test_speech_user_and_clear_flag_ride_every_round():
+    # Этап 47: адресат и «чистая речь» из БД бота — в каждом раунде chat, в
+    # т.ч. после tool-calling (служба llm применяет их к Логопеду).
+    seen: list[dict] = []
+
+    class RecordingLink(FakeNodeLink):
+        async def command(self, action, args=None, dst=None, timeout=None):
+            seen.append(dict(args))
+            return await super().command(action, args, dst=dst, timeout=timeout)
+
+    link = RecordingLink(
+        chat_results=[{"tool_calls": [_tool_call("known_tool")]}, {"response": "ответ"}]
+    )
+    await llm_chat.run_chat_loop(
+        link, DST, 10.0, [{"role": "user", "content": "hi"}], _ctx(), "off",
+        telegram_chat_id=-100, log_chat_id=-100, speech_user_id=42, speech_clear=True,
+    )
+    assert [(a["user_id"], a["speech_clear"]) for a in seen] == [(42, True), (42, True)]
+
+
+async def test_no_speech_user_means_no_speech_args():
+    seen: list[dict] = []
+
+    class RecordingLink(FakeNodeLink):
+        async def command(self, action, args=None, dst=None, timeout=None):
+            seen.append(dict(args))
+            return await super().command(action, args, dst=dst, timeout=timeout)
+
+    await llm_chat.run_chat_loop(
+        RecordingLink(chat_results=[{"response": "ответ"}]), DST, 10.0,
+        [{"role": "user", "content": "hi"}], _ctx(), "off",
+        telegram_chat_id=1, log_chat_id=1,
+    )
+    assert "user_id" not in seen[0] and "speech_clear" not in seen[0]

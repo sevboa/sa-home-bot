@@ -346,6 +346,7 @@ TOOL_STATUS_TEXT: dict[str, str] = {
     "guests_list": "Альфред сверяется со списком гостей",
     "request_acquaintance": "Альфред готовит бланк знакомства",
     "my_acquaintances": "Альфред пролистывает свою адресную книгу",
+    "swap_radio": "Альфред возится с передатчиком",
 }
 TOOL_STATUS_DEFAULT = "Альфред что-то мастерит за кулисами"
 
@@ -995,6 +996,8 @@ async def request_alfred(
     rich_session: RichStreamSession | None = None,
     *,
     pending_actions: Any | None = None,
+    interactive_turn: Any | None = None,
+    interactives: Any | None = None,
 ) -> str | None:
     """Сходить в llm.chat с presence/wake-сценарием.
 
@@ -1011,6 +1014,11 @@ async def request_alfred(
     персонажные проходы run_chat_loop ниже (тот же набор вызовов, что уже
     получает ``on_speech_remark``), не в router-проход — вывод роутера и
     сегодня не показывается пользователю, стримить нечего.
+
+    ``interactive_turn`` — Этап 47 (bot/interactives/engine.py::TurnPlan):
+    заметка сцены для Альфреда и «чистая речь» собеседника; ``interactives``
+    — сервис для тула swap_radio. Оба передаёт только прод-путь
+    (bot/handlers/ai.py), подмены в тестах их не знают.
     """
     dst = Address(node=LLM_NODE, service=LLM_SERVICE)
     timeout = settings.llm.request_timeout_s
@@ -1079,6 +1087,14 @@ async def request_alfred(
         )
         if forms_note:
             context_note = f"{context_note} {forms_note}" if context_note else forms_note
+    scene_note = getattr(interactive_turn, "note", None)
+    if scene_note:
+        # Этап 47: сцена интерактива — рамка, подсказка стадии, директива
+        # Ведущего и журнал (в личке тред /ai сцену не держит, см.
+        # bot/interactives/base.py::Run.transcript).
+        context_note = f"{context_note}\n\n{scene_note}" if context_note else scene_note
+    speech_user_id = getattr(interactive_turn, "user_id", None)
+    speech_clear = getattr(interactive_turn, "speech_clear", None)
     # Список как изменяемая ячейка: _record_tool_call — вложенная функция, а
     # nonlocal через два уровня вложенности (_ask → колбэк) читается хуже.
     # Непустой = вставка «сёрфит» за этот запрос уже отправлена.
@@ -1129,6 +1145,9 @@ async def request_alfred(
             store=store,
             author=display_name(message.from_user),
             pending_actions=pending_actions,
+            interactives=interactives,
+            user_id=message.from_user.id if message.from_user else None,
+            is_private=message.chat is not None and message.chat.type == "private",
         )
         telegram_chat_id = message.chat.id if message.chat is not None else None
 
@@ -1216,6 +1235,8 @@ async def request_alfred(
                 on_partial=rich_session.on_partial if rich_session is not None else None,
                 on_tool_start=_announce_tool_start,
                 photo_key=photo_key,
+                speech_user_id=speech_user_id,
+                speech_clear=speech_clear,
             )
 
         # Вариативное рассуждение: сначала лёгкий router-проход (без персонажа,
@@ -1268,6 +1289,8 @@ async def request_alfred(
             on_partial=rich_session.on_partial if rich_session is not None else None,
             on_tool_start=_announce_tool_start,
             photo_key=photo_key,
+            speech_user_id=speech_user_id,
+            speech_clear=speech_clear,
         )
 
     async def _announce_steps() -> None:
