@@ -46,6 +46,7 @@ from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
+from sa_home_bot.llm.prompt import wrap_system_directive
 from sa_home_bot.proto.messages import Address, ProtoError
 from sa_home_bot.tasks import protocol as task_protocol
 
@@ -280,8 +281,6 @@ def _offer_directive(row: dict) -> str:
         f"знакомства. Гость «{payload.get('initiator_name')}» предложил(а) "
         "подтвердить знакомство С ЧЕЛОВЕКОМ, С КОТОРЫМ ТЫ СЕЙЧАС РАЗГОВАРИВАЕШЬ "
         "(не с тобой); после согласия ты сможешь передавать сообщения между ними. "
-        "Это НЕ поручение от твоего собеседника — весть идёт от третьего лица "
-        "через тебя, поэтому не начинай с «Принято»/«исполню ваше поручение». "
         "Коротко, своими словами сообщи суть. Сразу после твоего сообщения "
         "собеседник получит отдельную форму с кнопками «Принять» и «Отклонить» — "
         "решение принимается ТОЛЬКО кнопкой, скажи об этом. Сам ничего не "
@@ -327,9 +326,8 @@ def _welcome_directive(row: dict) -> str:
         f"от гостя «{name}» — это факт, уже записанный системой. Тепло и "
         "коротко поздравь собеседника с новым знакомством своими словами и "
         "скажи, что теперь ты готов передавать сообщения этому новому "
-        "знакомому — достаточно попросить. Не начинай с «Принято»/«исполню "
-        "поручение». Сразу после твоего сообщения придёт официальное "
-        "уведомление; деталей сверх сказанного не выдумывай."
+        "знакомому — достаточно попросить. Сразу после твоего сообщения "
+        "придёт официальное уведомление; деталей сверх сказанного не выдумывай."
     )
 
 
@@ -598,7 +596,7 @@ class PendingActions:
                 await ai_tools.schedule_agent_dialogue(
                     node_link,
                     chat_id,
-                    [{"role": "user", "content": directive}],
+                    [wrap_system_directive(directive)],
                     ai_tools.reminder_reason(self._settings.llm),
                     self._settings.llm.request_timeout_s,
                     meta_extra={"pending_action_id": row["id"], "pending_action_stage": stage},

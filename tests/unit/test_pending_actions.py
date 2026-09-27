@@ -22,6 +22,7 @@ from sa_home_bot.config import GuestSubscriptionConfig, Settings, SubscriptionCo
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
+from sa_home_bot.llm import prompt
 from sa_home_bot.proto.messages import Address, make_event
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.tasks import protocol as task_protocol
@@ -460,6 +461,30 @@ async def test_recover_delivers_missing_forms(store):
     assert (await store.get_pending_action(accepted))["welcome_message_id"] is not None
     assert "знакомство подтверждено" in h2.notifier.sent_to(OWNER)[-1]
     await h2.pa.aclose()
+
+
+async def test_all_stage_directives_wrapped_as_system_directive(store):
+    """Регрессия 2026-09-26: все три речи (offer/outcome/welcome) обязаны
+    идти через wrap_system_directive — иначе Альфред открывает чужую весть
+    как поручение ТЕКУЩЕГО собеседника («Принято, исполню ваше поручение»),
+    хотя тот ещё ничего не говорил. Проверяем role/content-маркер на
+    фактическом сообщении, отправленном в schedule_agent_dialogue, для
+    каждой из трёх стадий."""
+    h = Harness(store)
+    action_id = await h.draft()
+    await h.pa.handle_click(action_id, pa.BUTTON_SUBMIT, ALICE)
+    await h.speak()  # offer -> адресату
+    assert await h.pa.handle_click(action_id, pa.BUTTON_ACCEPT, BOB) == "Принято."
+    await h.speak(-2)  # outcome -> инициатору
+    await h.speak(-1)  # welcome -> адресату
+
+    speeches = h.node_link.speeches()
+    stages = {s["meta"]["pending_action_stage"]: s for s in speeches}
+    assert set(stages) == {pa.STAGE_OFFER, pa.STAGE_OUTCOME, pa.STAGE_WELCOME}
+    for stage, task in stages.items():
+        message = task["args"]["messages"][0]
+        assert message["role"] == prompt._DIRECTIVE_ROLE, stage
+        assert message["content"].startswith(prompt._DIRECTIVE_MARKER), stage
 
 
 async def test_open_forms_note_tells_model_to_point_at_buttons(store):
