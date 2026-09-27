@@ -229,6 +229,19 @@ async def test_scene_alternates_acting_and_asking_for_advice(store):
     assert radio.RADIO.nudges[1] in second.note
 
 
+def test_transmitter_is_not_blamed_early():
+    """Альфред не кидается сразу на передатчик (пользователь 2026-09-28):
+    первые стадии и «действие» через ход о передатчике не говорят."""
+    r = radio.RADIO
+    for text in (r.ladder[0], r.ladder[1]):
+        assert "кроме передатчика" in text or "вне подозрений" in text
+    assert "передатчик" not in r.nudges[0]
+    assert "не вини передатчик" in radio.AFTER_AGREE_DIRECTIVE
+    assert "в полном порядке" in radio.TOOL_NOT_YET
+    assert "вне подозрений" in r.scene_frame
+    assert "стадиях 0 и 1 передатчик вне подозрений" in r.director_prompt
+
+
 def test_alfred_is_never_told_to_mention_buttons():
     """Альфред не ломает четвёртую стену: «нажмите Заменить» — только в форме,
     не в его речи (пользователь 2026-09-28)."""
