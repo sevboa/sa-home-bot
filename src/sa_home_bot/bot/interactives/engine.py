@@ -14,9 +14,10 @@
    посреди генерации, обогнала бы речь Альфреда (тот же приём, что
    PendingActions.flush_drafts, Этап 45).
 
-Согласие: сцена сначала ``offered`` и стартует только кнопкой «Играть».
-«Не сейчас» — кулдаун, «Больше не предлагать» — запрет интерактивов в этой
-переписке (снимается командой /interactives). Сцены — только в личке: в
+Согласие: сцена сначала ``offered`` — невзначай заданный вопрос сценария
+(«исправить проблему с коммуникацией?») с «Да»/«Нет», без намёка на игру.
+«Да» — сцена стартует; «Нет» — запрет интерактивов в этой переписке
+(снимается скрытой командой /interactives); без ответа час — кулдаун. Сцены — только в личке: в
 общем чате рассказчик и подсказки мешали бы остальным. Эффект и
 завершённость — на гостя глобально (base.py), так что переключатель после
 завершения работает в любом чате.
@@ -90,17 +91,13 @@ FORM_SWAP = "swap"
 FORM_RETURN = "return"
 FORM_REINSTALL = "reinstall"
 
-OFFER_PLAY_TEXT = (
-    "🎬 <b>Сценка началась!</b>\n"
-    "<i>Рассказывайте Альфреду, что не так со связью. Выйти — кнопкой под "
-    "сообщениями Ведущего.</i>"
-)
-OFFER_LATER_TEXT = "🎬 <i>Хорошо, в другой раз.</i>"
-OFFER_NEVER_TEXT = (
-    "🚫 <i>Больше не буду предлагать сценки в этом чате. Вернуть — командой "
-    "/interactives.</i>"
-)
-OFFER_EXPIRED_TEXT = "🎬 <i>Предложение устарело.</i>"
+# Форма согласия нарочно не выдаёт, что это игра (решение пользователя
+# 2026-09-27): невзначай заданный вопрос сценария и «Да»/«Нет». После
+# ответа форма лишь фиксирует его — тоже без слов «сценка»/«игра».
+# «Нет» — сценок в этом чате больше не будет (снять — скрытая /interactives).
+OFFER_YES_SUFFIX = "\n<i>— Да</i>"
+OFFER_NO_SUFFIX = "\n<i>— Нет</i>"
+OFFER_EXPIRED_SUFFIX = "\n<i>— Вопрос уже неактуален</i>"
 EXIT_ALERT = "Вы вышли из сценки. Вернуться можно, снова пожаловавшись на связь."
 
 OPT_IN_TEXT = "🎬 Сценки в этом чате снова включены."
@@ -133,8 +130,7 @@ def offer_keyboard(scenario: str) -> InlineKeyboardMarkup:
     return _keyboard(
         scenario,
         [
-            [("▶️ Играть", BTN_PLAY), ("Не сейчас", BTN_LATER)],
-            [("🚫 Больше не предлагать в этом чате", BTN_NEVER)],
+            [("Да", BTN_PLAY), ("Нет", BTN_NEVER)],
         ],
     )
 
@@ -573,20 +569,21 @@ class Interactives:
             return "Эта форма не для вас.", None, False
         if run.status != STATUS_OFFERED:
             return "Уже решено.", None, True
+        offer_text = REGISTRY[run.scenario].offer_text
         run = await self._expire_offer(run)
         if run is None or run.status != STATUS_OFFERED:
-            return "Срок предложения истёк.", OFFER_EXPIRED_TEXT, True
+            return "Вопрос уже неактуален.", offer_text + OFFER_EXPIRED_SUFFIX, True
         if button == BTN_PLAY:
             run.status = STATUS_ACTIVE
             await self._state.save_run(run)
-            return "Играем!", OFFER_PLAY_TEXT, True
+            return "Хорошо.", offer_text + OFFER_YES_SUFFIX, True
         run.status = STATUS_DECLINED
         run.declined_until = iso(self._now() + DECLINE_COOLDOWN)
         await self._state.save_run(run)
         if button == BTN_NEVER:
             await self._state.set_opted_out(run.chat_id, True)
-            return "Больше не предложу.", OFFER_NEVER_TEXT, True
-        return "Хорошо.", OFFER_LATER_TEXT, True
+        # BTN_LATER — только у форм, разосланных до v0.115.2 («Не сейчас»).
+        return "Хорошо.", offer_text + OFFER_NO_SUFFIX, True
 
     async def _set_clear(self, chat_id: int, user_id: int, clear: bool) -> None:
         """Источник правды — БД бота, пишется сразу. Служба llm — зеркало:

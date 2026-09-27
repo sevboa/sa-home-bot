@@ -98,10 +98,7 @@ _FALLBACK_FAULTS = (
 RADIO = Scenario(
     id=SCENARIO_ID,
     title="Проклятый передатчик",
-    offer_text=(
-        "🎬 <b>Кажется, начинается интерактивная сценка…</b>\n"
-        "<i>Похоже, со связью что-то не так. Разберётесь с Альфредом вместе?</i>"
-    ),
+    offer_text="📡 Вы хотели бы исправить проблему с коммуникацией?",
     trigger_re=_TRIGGER_RE,
     scene_frame=_SCENE_FRAME,
     ladder=_LADDER,

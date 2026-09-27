@@ -136,13 +136,23 @@ async def _run(store, chat=GUEST) -> Run:
 async def _play(svc, store):
     await _turn(svc, COMPLAINT)
     assert await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_PLAY) == (
-        "Играем!",
-        engine.OFFER_PLAY_TEXT,
+        "Хорошо.",
+        radio.RADIO.offer_text + engine.OFFER_YES_SUFFIX,
         True,
     )
 
 
 # --- согласие ---
+
+
+async def test_offer_form_does_not_reveal_a_game(store):
+    svc, notifier, _ = _make(store)
+    await _turn(svc, COMPLAINT)
+    _, text, markup = notifier.sent[-1]
+    labels = [b.text for row in markup.inline_keyboard for b in row]
+    assert labels == ["Да", "Нет"]
+    for word in ("сценк", "игр", "Ведущ"):
+        assert word not in text.lower()
 
 
 async def test_complaint_offers_scene_but_does_not_start_it(store):
@@ -194,7 +204,7 @@ async def test_never_opts_chat_out_of_all_scenes(store):
     svc, notifier, _ = _make(store)
     await _turn(svc, COMPLAINT)
     answer, text, _ = await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_NEVER)
-    assert text == engine.OFFER_NEVER_TEXT
+    assert text == radio.RADIO.offer_text + engine.OFFER_NO_SUFFIX
     assert await svc.is_opted_out(GUEST)
     await _turn(svc, COMPLAINT)
     assert await ai_tools.tool_swap_radio(_ctx(svc), {}) == radio.TOOL_OPTED_OUT
@@ -210,8 +220,8 @@ async def test_offer_expires_after_ttl(store):
     await _turn(svc, COMPLAINT)
     clock.now += timedelta(hours=2)
     assert await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_PLAY) == (
-        "Срок предложения истёк.",
-        engine.OFFER_EXPIRED_TEXT,
+        "Вопрос уже неактуален.",
+        radio.RADIO.offer_text + engine.OFFER_EXPIRED_SUFFIX,
         True,
     )
     assert (await _run(store)).status == STATUS_DECLINED
