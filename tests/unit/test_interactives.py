@@ -187,6 +187,24 @@ async def test_play_starts_scene_with_note_for_alfred(store):
     assert f"Гость: {COMPLAINT}" in plan.note  # журнал держит начало сцены
 
 
+async def test_yes_makes_alfred_react_with_conversation_context(store):
+    svc, _, link = _make(store)
+    await _turn(svc, COMPLAINT, reply="Я говогю безупгечно.")
+    await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_PLAY)
+    created = [args for action, args in link.calls if action == task_protocol.ACTION_CREATE]
+    assert len(created) == 1
+    directive = created[0]["args"]["messages"][0]["content"]
+    assert f"Гость: {COMPLAINT}" in directive
+    assert "что-то не так" in directive
+
+
+async def test_no_keeps_alfred_silent(store):
+    svc, _, link = _make(store)
+    await _turn(svc, COMPLAINT)
+    await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_NEVER)
+    assert task_protocol.ACTION_CREATE not in link.actions()
+
+
 async def test_later_gives_cooldown_then_offers_again(store):
     clock = Clock()
     svc, notifier, _ = _make(store, clock=clock)
@@ -281,7 +299,10 @@ async def test_nothing_the_guest_sees_has_emoji_or_game_words(store):
     await _turn(svc, "что там?")
     texts = [text for _, text, _ in notifier.sent]
     labels = [
-        b.text for _, _, markup in notifier.sent if markup for row in markup.inline_keyboard
+        b.text
+        for _, _, markup in notifier.sent
+        if markup
+        for row in markup.inline_keyboard
         for b in row
     ]
     for shown in texts + labels:
@@ -475,8 +496,9 @@ async def test_progress_is_per_chat(store):
 
 
 async def test_tool_without_service_refuses_honestly():
-    ctx = ai_tools.ToolContext(chat_id=GUEST, dialogue_id=None, trigger_message_id=None,
-                               settings=Settings())
+    ctx = ai_tools.ToolContext(
+        chat_id=GUEST, dialogue_id=None, trigger_message_id=None, settings=Settings()
+    )
     assert await ai_tools.tool_swap_radio(ctx, {}) == radio.TOOL_UNAVAILABLE
 
 

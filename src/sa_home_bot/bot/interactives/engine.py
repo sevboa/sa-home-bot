@@ -460,12 +460,8 @@ class Interactives:
         if form == FORM_SWAP:
             return radio.SWAP_FORM_TEXT, swap_keyboard(scenario_id)
         if form == FORM_RETURN:
-            return radio.RETURN_FORM_TEXT, toggle_keyboard(
-                scenario_id, BTN_RETURN_OLD, "Вернуть"
-            )
-        return radio.REINSTALL_FORM_TEXT, toggle_keyboard(
-            scenario_id, BTN_INSTALL_NEW, "Поставить"
-        )
+            return radio.RETURN_FORM_TEXT, toggle_keyboard(scenario_id, BTN_RETURN_OLD, "Вернуть")
+        return radio.REINSTALL_FORM_TEXT, toggle_keyboard(scenario_id, BTN_INSTALL_NEW, "Поставить")
 
     # --- тул swap_radio ---
 
@@ -563,6 +559,10 @@ class Interactives:
         if button == BTN_PLAY:
             run.status = STATUS_ACTIVE
             await self._state.save_run(run)
+            transcript = "\n".join(run.transcript[-NOTE_TRANSCRIPT_LINES:]) or "—"
+            await self._speak(
+                run.chat_id, radio.AFTER_AGREE_DIRECTIVE.format(transcript=transcript)
+            )
             return "Хорошо.", offer_text + OFFER_YES_SUFFIX, True
         run.status = STATUS_DECLINED
         run.declined_until = iso(self._now() + DECLINE_COOLDOWN)
