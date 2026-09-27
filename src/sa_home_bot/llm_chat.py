@@ -185,7 +185,7 @@ async def run_chat_loop(
     on_tool_start: ToolStartSink | None = None,
     photo_key: str | None = None,
     speech_user_id: int | None = None,
-    speech_clear: bool | None = None,
+    speech_clear: bool | Callable[[], Awaitable[bool]] | None = None,
 ) -> str:
     """Один проход диалога с моделью: раунды tool-calling (до
     MAX_TOOL_ROUNDS), пока не придёт финальный текст.
@@ -237,14 +237,17 @@ async def run_chat_loop(
     ``speech_user_id``/``speech_clear`` — Этап 47: кому адресован ответ и
     выключена ли у него картавость (БД бота, bot/interactives). Служба llm
     применяет их к Логопеду и заодно чинит своё зеркало (llm/service.py::
-    _speech_target). Служба tasks их не передаёт — там chat_id."""
+    _speech_target). Служба tasks их не передаёт — там chat_id.
+    ``speech_clear`` может быть функцией — тогда флаг перечитывается перед
+    каждым раундом: гость мог сменить передатчик кнопкой посреди хода, и
+    старое значение затёрло бы смену (живой баг 2026-09-28)."""
     tool_ctx.history = messages
     # Комплект собирается ОДИН раз на проход и по правам собеседника: тула, на
     # который у него нет прав, модель не видит вовсе (см. bot/tools.py::
     # tools_for — требование "Альфред не отказывает, а не умеет").
     toolkit = ai_tools.tools_for(tool_ctx.subscription)
 
-    def _chat_args(tools: list[dict[str, Any]]) -> dict[str, Any]:
+    async def _chat_args(tools: list[dict[str, Any]]) -> dict[str, Any]:
         args: dict[str, Any] = {"messages": messages, "tools": tools, "reason": reason}
         if telegram_chat_id is not None:
             # chat_id — не для маршрутизации (та по dst), а чтобы служба
@@ -256,8 +259,11 @@ async def run_chat_loop(
             args["photo_key"] = photo_key
         if speech_user_id is not None:
             args["user_id"] = speech_user_id
-            if speech_clear is not None:
-                args["speech_clear"] = speech_clear
+            clear = speech_clear() if callable(speech_clear) else speech_clear
+            if isinstance(clear, Awaitable):
+                clear = await clear
+            if clear is not None:
+                args["speech_clear"] = clear
         return args
 
     async def _maybe_send_remark(result: dict[str, Any]) -> None:
@@ -301,7 +307,7 @@ async def run_chat_loop(
         return await _call_chat(args)
 
     for _round in range(MAX_TOOL_ROUNDS):
-        args = _chat_args(toolkit.declarations)
+        args = await _chat_args(toolkit.declarations)
         result = await _call_chat_with_retry(args)
         tool_calls = result.get("tool_calls")
         if not tool_calls:
@@ -353,7 +359,7 @@ async def run_chat_loop(
         MAX_TOOL_ROUNDS,
         log_chat_id,
     )
-    result = await _call_chat_with_retry(_chat_args([]))
+    result = await _call_chat_with_retry(await _chat_args([]))
     response = result.get("response", "")
     if response:
         await _maybe_send_remark(result)

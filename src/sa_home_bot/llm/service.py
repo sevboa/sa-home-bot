@@ -599,7 +599,8 @@ class LlmService:
         """Адресат ответа для Логопеда (Этап 47) + самовосстановление
         зеркала «чистой речи»: бот шлёт user_id и speech_clear из своей БД в
         каждом живом запросе, так что потерянное/устаревшее состояние здесь
-        чинится первым же ходом гостя."""
+        чинится первым же ходом гостя. Звать при получении запроса: флаг
+        прочитан ботом перед самой отправкой."""
         user_id = args.get("user_id")
         if not isinstance(user_id, int) or isinstance(user_id, bool):
             return None
@@ -624,11 +625,15 @@ class LlmService:
                 raise ProtoError(ERR_BAD_REQUEST, "prompt должен быть непустой строкой")
             chat_id = args.get("chat_id")
             await self._touch(chat_id)
+            # Флаг «чистой речи» — на входе, а не после генерации: запрос,
+            # отправленный до смены передатчика, иначе затёр бы её (живой
+            # баг 2026-09-28, генерация в очереди Ollama шла ~3 минуты).
+            speaker = self._speech_target(args)
             result = await ollama.generate(self._cfg, prompt, self._persona_prompt)
             _log_ollama_timings("ask", result)
             cleaned = strip_math_notation(result.get("response", ""))
             response, remark, just_cured = self._speech.process(
-                cleaned, chat_id, self._speech_target(args)
+                cleaned, chat_id, speaker
             )
             if just_cured:
                 await self._emit_speech_cured()
@@ -695,6 +700,10 @@ class LlmService:
                 messages = [*messages, {"role": "system", "content": ROUTER_SYSTEM_PROMPT}]
             chat_id = args.get("chat_id")
             await self._touch(chat_id)
+            # Флаг «чистой речи» — на входе, а не после генерации: запрос,
+            # отправленный до смены передатчика, иначе затёр бы её (живой
+            # баг 2026-09-28, генерация в очереди Ollama шла ~3 минуты).
+            speaker = self._speech_target(args)
             request_id = args.get("request_id")
             if request_id is not None and (
                 not isinstance(request_id, str) or not request_id
@@ -718,7 +727,7 @@ class LlmService:
                 return {"tool_calls": tool_calls, "model": self._cfg.model}
             cleaned = strip_math_notation(message.get("content", ""))
             reply, remark, just_cured = self._speech.process(
-                cleaned, chat_id, self._speech_target(args)
+                cleaned, chat_id, speaker
             )
             if just_cured:
                 await self._emit_speech_cured()
@@ -735,6 +744,10 @@ class LlmService:
                 raise ProtoError(ERR_BAD_REQUEST, "question должен быть непустой строкой")
             chat_id = args.get("chat_id")
             await self._touch(chat_id)
+            # Флаг «чистой речи» — на входе, а не после генерации: запрос,
+            # отправленный до смены передатчика, иначе затёр бы её (живой
+            # баг 2026-09-28, генерация в очереди Ollama шла ~3 минуты).
+            speaker = self._speech_target(args)
             stored_b64 = await asyncio.to_thread(vision.load_stored, photo_key, self._cfg)
             if stored_b64 is None:
                 return {"response": PHOTO_NOT_FOUND_TEXT, "model": self._cfg.model}
@@ -752,7 +765,7 @@ class LlmService:
             message = result.get("message", {})
             cleaned = strip_math_notation(message.get("content", ""))
             reply, remark, just_cured = self._speech.process(
-                cleaned, chat_id, self._speech_target(args)
+                cleaned, chat_id, speaker
             )
             if just_cured:
                 await self._emit_speech_cured()

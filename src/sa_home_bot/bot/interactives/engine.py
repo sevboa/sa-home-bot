@@ -30,11 +30,12 @@
 
 from __future__ import annotations
 
+import functools
 import html
 import logging
 import random
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -243,6 +244,9 @@ class TurnPlan:
     user_id: int | None
     user_text: str
     speech_clear: bool
+    # Свежий флаг для каждого раунда запроса к llm (llm_chat.py): гость мог
+    # сменить передатчик кнопкой, пока ход ещё идёт.
+    speech_clear_now: Callable[[], Awaitable[bool]] | None = None
     note: str | None = None
     scenario: str | None = None
     scene: bool = False  # ход сцены: после ответа — Ведущий
@@ -297,6 +301,7 @@ class Interactives:
             user_id=user_id,
             user_text=user_text,
             speech_clear=await self.speech_clear(user_id),
+            speech_clear_now=functools.partial(self.speech_clear, user_id),
         )
         if not is_private or user_id is None or self._pinned(chat_id):
             return plan

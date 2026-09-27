@@ -306,6 +306,30 @@ async def test_speech_user_and_clear_flag_ride_every_round():
     assert [(a["user_id"], a["speech_clear"]) for a in seen] == [(42, True), (42, True)]
 
 
+async def test_speech_clear_getter_is_reread_every_round():
+    # Живой баг 2026-09-28: гость сменил передатчик кнопкой посреди хода, а
+    # следующий раунд вёз флаг, прочитанный в начале хода, и затирал смену.
+    seen: list[dict] = []
+    flags = iter([False, True])
+
+    async def fresh() -> bool:
+        return next(flags)
+
+    class RecordingLink(FakeNodeLink):
+        async def command(self, action, args=None, dst=None, timeout=None):
+            seen.append(dict(args))
+            return await super().command(action, args, dst=dst, timeout=timeout)
+
+    link = RecordingLink(
+        chat_results=[{"tool_calls": [_tool_call("known_tool")]}, {"response": "ответ"}]
+    )
+    await llm_chat.run_chat_loop(
+        link, DST, 10.0, [{"role": "user", "content": "hi"}], _ctx(), "off",
+        telegram_chat_id=-100, log_chat_id=-100, speech_user_id=42, speech_clear=fresh,
+    )
+    assert [a["speech_clear"] for a in seen] == [False, True]
+
+
 async def test_no_speech_user_means_no_speech_args():
     seen: list[dict] = []
 

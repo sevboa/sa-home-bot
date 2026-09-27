@@ -242,19 +242,35 @@ def test_transmitter_is_not_blamed_early():
     assert "стадиях 0 и 1 передатчик вне подозрений" in r.director_prompt
 
 
-def test_alfred_is_never_told_to_mention_buttons():
-    """Альфред не ломает четвёртую стену: «нажмите Заменить» — только в форме,
-    не в его речи (пользователь 2026-09-28)."""
+def test_alfred_does_not_know_about_forms_at_all():
+    """Альфред не ломает четвёртую стену: о формах и кнопках он не знает
+    вовсе — даже запрет их упоминать наводит на них (пользователь 2026-09-28)."""
     to_alfred = [
+        radio.RADIO.scene_frame,
+        radio.RADIO.finale_directive,
+        *radio.RADIO.ladder,
+        *radio.RADIO.nudges,
+        radio.AFTER_AGREE_DIRECTIVE,
+        radio.AFTER_SWAP_DIRECTIVE,
+        radio.AFTER_RETURN_DIRECTIVE,
+        radio.TOOL_NOT_YET,
+        radio.TOOL_OFFER,
+        radio.TOOL_OPTED_OUT,
         radio.TOOL_SWAP_FORM,
         radio.TOOL_RETURN_FORM,
         radio.TOOL_REINSTALL_FORM,
-        radio.RADIO.finale_directive,
+        radio.TOOL_PINNED,
+        radio.SWAP_RADIO_DECLARATION["function"]["description"],
     ]
     for text in to_alfred:
-        assert "«Заменить»" not in text and "кнопкой" not in text
-        assert "предложи нажать" not in text
-    assert "не указывай собеседнику, что ему нажать" in radio.RADIO.scene_frame
+        low = text.lower()
+        for word in ("кноп", "форм", "нажм", "нажа", "уведомлен"):
+            assert word not in low, (word, text)
+
+
+def test_swap_tool_is_not_for_plain_requests_to_recite():
+    desc = radio.SWAP_RADIO_DECLARATION["function"]["description"]
+    assert "прямо просит вернуть" in desc and "Не вызывай" in desc
 
 
 def test_closing_line_after_swap_does_not_announce_the_change():

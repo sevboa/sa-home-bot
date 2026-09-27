@@ -1264,6 +1264,25 @@ async def test_chat_speech_clear_hint_disables_lisp_and_heals_mirror(monkeypatch
     assert result["response"] == "Добгый день"
 
 
+async def test_stale_request_does_not_undo_swap_made_during_generation(monkeypatch):
+    # Живой баг 2026-09-28: запрос ушёл с speech_clear=False, пока он ~3 мин
+    # ждал Ollama, гость сменил передатчик (set_speech_clear) — флаг
+    # применяется на входе, а не после генерации, и смену не затирает.
+    svc = LlmService(_settings(), speech_rand=lambda: 0.5)
+
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
+        await svc.run_command("set_speech_clear", {"user_id": 42, "clear": True})
+        return {"message": {"role": "assistant", "content": "Добрый день"}}
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    msgs = [{"role": "user", "content": "привет"}]
+    result = await svc.run_command(
+        "chat", {"messages": msgs, "chat_id": 42, "user_id": 42, "speech_clear": False}
+    )
+    assert result["response"] == "Добрый день"
+    assert svc._speech.is_clear(42)
+
+
 async def test_set_speech_clear_action(monkeypatch):
     async def fake_chat(cfg, messages, system, tools=None, think=None):
         return {"message": {"role": "assistant", "content": "пора"}}

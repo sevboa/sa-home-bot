@@ -1094,7 +1094,9 @@ async def request_alfred(
         # bot/interactives/base.py::Run.transcript).
         context_note = f"{context_note}\n\n{scene_note}" if context_note else scene_note
     speech_user_id = getattr(interactive_turn, "user_id", None)
-    speech_clear = getattr(interactive_turn, "speech_clear", None)
+    speech_clear = getattr(interactive_turn, "speech_clear_now", None) or getattr(
+        interactive_turn, "speech_clear", None
+    )
     # Список как изменяемая ячейка: _record_tool_call — вложенная функция, а
     # nonlocal через два уровня вложенности (_ask → колбэк) читается хуже.
     # Непустой = вставка «сёрфит» за этот запрос уже отправлена.
