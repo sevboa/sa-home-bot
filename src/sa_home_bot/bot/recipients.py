@@ -173,6 +173,14 @@ def find_recipients(
         if _is_private(chat_id) and book.for_chat(chat_id) is not None:
             found.setdefault(chat_id, Recipient(chat_id, display, source))
 
+    # Роль — первой: "передай владельцу" обязано дать SOURCE_OWNER_ROLE, даже
+    # если подписка владельца случайно названа тем же словом ("owner"), —
+    # tell пускает к владельцу без знакомства только по роли.
+    if _is_owner_role_reference(wanted):
+        for sub in book.all():
+            if sub.is_owner:
+                remember(sub.chat_id, sub.invited_user or sub.name, SOURCE_OWNER_ROLE)
+
     for person in people:
         if _matches(wanted, person.telegram_username) or _matches(wanted, person.full_name):
             for person_chat_id in _person_chat_ids(person, book):
@@ -181,11 +189,6 @@ def find_recipients(
     for sub in book.all():
         if _matches(wanted, sub.name) or _matches(wanted, sub.invited_user):
             remember(sub.chat_id, sub.invited_user or sub.name, SOURCE_SUBSCRIPTION)
-
-    if _is_owner_role_reference(wanted):
-        for sub in book.all():
-            if sub.is_owner:
-                remember(sub.chat_id, sub.invited_user or sub.name, SOURCE_OWNER_ROLE)
 
     return list(found.values())
 

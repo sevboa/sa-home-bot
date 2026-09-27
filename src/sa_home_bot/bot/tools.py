@@ -3186,6 +3186,9 @@ async def _deliver_personal_message(
     guard: Callable[[recipients.Recipient], Awaitable[str | None]] | None = None,
     allow_self: bool = False,
     emit_extra: Callable[[recipients.Recipient], dict[str, Any]] | None = None,
+    narrow: (
+        Callable[[list[recipients.Recipient]], Awaitable[list[recipients.Recipient]]] | None
+    ) = None,
 ) -> str:
     """Общая доставка личного сообщения — резолвинг получателя, лимит,
     отправка, запись хода диалога. Права (если нужны) проверяет ``guard``:
@@ -3203,8 +3206,15 @@ async def _deliver_personal_message(
     ``emit_extra`` — доп. поля события доставки через мост службы tasks:
     проверки, которые там сделать нечем (нет Store), бот доделает сам перед
     отправкой (bot/node_events.py::_handle_deliver_message).
+
+    ``narrow`` — сужение, когда под имя подошли несколько: оставить тех, кому
+    писать вообще можно (у tell — знакомых). Остался один — ему и пишем;
+    несколько — всё равно переспрашиваем; никого — переспрашиваем по
+    исходному списку.
     """
     found = recipients.find_recipients(who, ctx.book, ctx.settings.people)
+    if len(found) > 1 and narrow is not None:
+        found = await narrow(found) or found
     if not found:
         return (
             f"не получилось: «{who}» я не знаю — писать я могу только тем, кто "
@@ -3284,8 +3294,23 @@ async def tool_tell(ctx: ToolContext, args: dict[str, Any]) -> str:
     if not text:
         return "ошибка: не сказано, что передать (text)"
 
+    # Владелец по РОЛИ ("передай хозяину/владельцу/админу") доступен всем
+    # всегда. По личному имени ("передай Алексею") владелец — такой же
+    # человек, как все: нужно знакомство (решение 2026-09-27).
+    def _to_owner_role(target: recipients.Recipient) -> bool:
+        return target.source == recipients.SOURCE_OWNER_ROLE
+
+    async def narrow(found: list[recipients.Recipient]) -> list[recipients.Recipient]:
+        if ctx.store is None:
+            return []
+        return [
+            r
+            for r in found
+            if _to_owner_role(r) or await are_acquainted(ctx.store, ctx.chat_id, r.chat_id)
+        ]
+
     async def guard(target: recipients.Recipient) -> str | None:
-        if _is_owner_chat(target.chat_id):
+        if _to_owner_role(target):
             return None
         if ctx.store is None and ctx.notifier is None:
             # Служба tasks: Store нет — знакомство проверит бот перед
@@ -3300,13 +3325,10 @@ async def tool_tell(ctx: ToolContext, args: dict[str, Any]) -> str:
         )
         return (
             f"не умею: вы с {target.display} ещё не знакомы через меня — лично передавать "
-            "сообщения я могу владельцу и тем, с кем знакомство подтверждено; могу "
+            "сообщения я могу только тем, с кем знакомство подтверждено (и владельцу, "
+            "если просят передать именно «владельцу»/«хозяину»); могу "
             f"предложить знакомство (request_acquaintance){owner_hint}"
         )
-
-    def _is_owner_chat(chat_id: int) -> bool:
-        sub = ctx.book.for_chat(chat_id)
-        return sub is not None and sub.is_owner
 
     def render(target: recipients.Recipient) -> str:
         return render_tell(
@@ -3314,12 +3336,12 @@ async def tool_tell(ctx: ToolContext, args: dict[str, Any]) -> str:
         )
 
     def emit_extra(target: recipients.Recipient) -> dict[str, Any]:
-        if _is_owner_chat(target.chat_id):
+        if _to_owner_role(target):
             return {}
         return {"require_acquaintance": [ctx.chat_id, target.chat_id]}
 
     return await _deliver_personal_message(
-        ctx, who, text, render, guard=guard, emit_extra=emit_extra
+        ctx, who, text, render, guard=guard, emit_extra=emit_extra, narrow=narrow
     )
 
 
@@ -3333,9 +3355,11 @@ _DECL_TELL: dict[str, Any] = {
             "сообщить, передать, спросить или напомнить ('скажи Андрею, что…', "
             "'спроси у Наташи…'). Текст сообщения придумываешь ТЫ: перескажи "
             "просьбу своими словами, в своей манере, и упомяни, от кого она — "
-            "это не пересылка дословной цитаты. Писать можно владельцу и тем, "
-            "с кем у собеседника подтверждено знакомство (request_acquaintance); "
-            "если человека не нашлось или подходит сразу несколько — тул "
+            "это не пересылка дословной цитаты. Писать можно тем, с кем у "
+            "собеседника подтверждено знакомство (request_acquaintance), и "
+            "владельцу, если просят передать именно «владельцу»/«хозяину»/"
+            "«админу»; по личному имени владелец — такой же человек, как все. "
+            "Если человека не нашлось или подходит сразу несколько — тул "
             "скажет об этом, тогда переспроси у собеседника, а не угадывай. "
             "Получателя ищет САМ ИНСТРУМЕНТ — не "
             "пытайся заранее выяснить, кто это (поиском в интернете, памятью "
