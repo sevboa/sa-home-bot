@@ -85,8 +85,23 @@ def _matches(query: str, candidate: str) -> bool:
     # без разбора скобки/"@" слово "(@username)" не начинается с "username",
     # и голый юзернейм-запрос никогда не находит человека, только имя (живой
     # баг 2026-08-01: "nava40a" не находил Наташу, "наташа" — находил).
-    words = candidate_norm.replace("(", " ").replace(")", " ").split()
-    return any(word.lstrip("@").startswith(query) for word in words)
+    words = [w.lstrip("@") for w in candidate_norm.replace("(", " ").replace(")", " ").split()]
+    if any(word.startswith(query) for word in words):
+        return True
+    # Несколько слов ("Алексей Севбо" при "Алексей Александрович Севбо") —
+    # живой баг 2026-09-27: весь запрос целиком не начало ни одного слова.
+    # Каждое слово запроса обязано быть началом СВОЕГО слова кандидата,
+    # порядок не важен (фамилия может стоять первой).
+    query_words = query.replace("(", " ").replace(")", " ").split()
+    if len(query_words) < 2:
+        return False
+    free = list(words)
+    for qw in query_words:
+        hit = next((w for w in free if w.startswith(qw.lstrip("@"))), None)
+        if hit is None:
+            return False
+        free.remove(hit)
+    return True
 
 
 # "@ник" внутри запроса. Модель любит передавать адресата целым лейблом —
@@ -160,8 +175,8 @@ def find_recipients(
 
     for person in people:
         if _matches(wanted, person.telegram_username) or _matches(wanted, person.full_name):
-            if person.telegram_id:
-                remember(person.telegram_id, person.full_name, SOURCE_PEOPLE)
+            for person_chat_id in _person_chat_ids(person, book):
+                remember(person_chat_id, person.full_name, SOURCE_PEOPLE)
 
     for sub in book.all():
         if _matches(wanted, sub.name) or _matches(wanted, sub.invited_user):
@@ -173,6 +188,22 @@ def find_recipients(
                 remember(sub.chat_id, sub.invited_user or sub.name, SOURCE_OWNER_ROLE)
 
     return list(found.values())
+
+
+def _person_chat_ids(person: PersonConfig, book: SubscriptionBook) -> list[int]:
+    """chat_id человека из [[people]]. Нет telegram_id — ищем его подписку по
+    нику: гость входит как "Имя (@ник)" (живой баг 2026-09-27: "Наталья
+    Вадимовна" без telegram_id не находилась, хотя гостья с её ником есть)."""
+    if person.telegram_id:
+        return [person.telegram_id]
+    handle = _norm(person.telegram_username or "")
+    if not handle:
+        return []
+    return [
+        sub.chat_id
+        for sub in book.all()
+        if _has_handle(handle, sub.name) or _has_handle(handle, sub.invited_user)
+    ]
 
 
 def _find_by_handle(

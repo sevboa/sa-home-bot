@@ -192,3 +192,37 @@ def test_find_recipients_by_chat_id_in_query():
     assert [r.chat_id for r in find_recipients("1243270013", book)] == [1243270013]
     # Чужой id — не подписчик: к имени не откатываемся, писать некому.
     assert find_recipients("Наталья (id 99999999)", book) == []
+
+
+# --- живые находки 2026-09-27: имя+фамилия без отчества, people без id ---
+
+
+def test_matches_multiword_query_skips_middle_name():
+    assert _matches("алексей севбо", "Алексей Александрович Севбо")
+    assert _matches("севбо алексей", "Алексей Александрович Севбо")
+    assert _matches("алекс севб", "Алексей Александрович Севбо")
+    assert not _matches("павел севбо", "Алексей Александрович Севбо")
+    # Одно слово кандидата не закрывает два слова запроса.
+    assert not _matches("алексей алексей", "Алексей Александрович Севбо")
+
+
+def test_find_recipients_owner_by_first_and_last_name():
+    book = SubscriptionBook([_guest("me", 188548043, invited_user="")])
+    people = [
+        PersonConfig(
+            telegram_id=188548043,
+            telegram_username="asevbo",
+            full_name="Алексей Александрович Севбо",
+            gender="m",
+        ),
+        PersonConfig(telegram_id=518571647, full_name="Андрей Александрович Севбо", gender="m"),
+    ]
+    assert [r.chat_id for r in find_recipients("Алексей Севбо", book, people)] == [188548043]
+
+
+def test_find_recipients_people_without_id_resolved_by_username():
+    book = SubscriptionBook([_guest("Наташа Сорокина (@nava40a)", 1243270013)])
+    people = [PersonConfig(telegram_username="nava40a", full_name="Наталья Вадимовна", gender="f")]
+    found = find_recipients("Наталья Вадимовна", book, people)
+    assert [r.chat_id for r in found] == [1243270013]
+    assert [r.chat_id for r in find_recipients("Наталья", book, people)] == [1243270013]
