@@ -502,14 +502,26 @@ class Interactives:
     # --- кнопки ---
 
     async def handle_click(
-        self, chat_id: int, user_id: int, scenario_id: str, button: str
+        self,
+        chat_id: int,
+        user_id: int,
+        scenario_id: str,
+        button: str,
+        *,
+        message_id: int | None = None,
+        message_thread_id: int | None = None,
     ) -> tuple[str, str | None, bool]:
         """Нажатие кнопки. Возвращает (текст для callback.answer, новый текст
-        формы или None — не править, убрать ли клавиатуру)."""
+        формы или None — не править, убрать ли клавиатуру).
+
+        ``message_id``/``message_thread_id`` — сообщение с формой: реплика
+        Альфреда после кнопки уходит в тот же тред и тот же диалог (живой баг
+        2026-09-28: без них ответ улетал в общий топик лички)."""
         scenario = REGISTRY[scenario_id]
         run = await self._state.load_run(chat_id, scenario_id)
+        where = await self._where(chat_id, message_id, message_thread_id)
         if button in (BTN_PLAY, BTN_LATER, BTN_NEVER):
-            return await self._click_offer(run, user_id, button)
+            return await self._click_offer(run, user_id, button, where)
         if button == BTN_EXIT:
             if run is None or run.user_id != user_id:
                 return "Эта кнопка не для вас.", None, False
@@ -529,7 +541,7 @@ class Interactives:
             await self._state.mark_completed(scenario.id, user_id)
             run.status = STATUS_DONE
             await self._state.save_run(run)
-            await self._speak(chat_id, radio.AFTER_SWAP_DIRECTIVE)
+            await self._speak(chat_id, radio.AFTER_SWAP_DIRECTIVE, where)
             return "Готово.", radio.SWAP_ACCEPTED_TEXT, True
         if button in (BTN_RETURN_OLD, BTN_INSTALL_NEW, BTN_TOGGLE_KEEP):
             if not await self._state.is_completed(scenario.id, user_id):
@@ -541,14 +553,32 @@ class Interactives:
                 return "Уже так.", None, True
             await self._set_clear(chat_id, user_id, target)
             await self._speak(
-                chat_id, radio.AFTER_SWAP_DIRECTIVE if target else radio.AFTER_RETURN_DIRECTIVE
+                chat_id,
+                radio.AFTER_SWAP_DIRECTIVE if target else radio.AFTER_RETURN_DIRECTIVE,
+                where,
             )
             done_text = radio.REINSTALL_ACCEPTED_TEXT if target else radio.RETURN_ACCEPTED_TEXT
             return "Готово.", done_text, True
         return "Неизвестная кнопка.", None, False
 
+    async def _where(
+        self, chat_id: int, message_id: int | None, message_thread_id: int | None
+    ) -> dict[str, Any]:
+        """meta задачи tasks: куда доставить реплику Альфреда после кнопки
+        (bot/node_events.py::_handle_task_result, как у tool_remind)."""
+        dialogue_id = None
+        if message_id is not None:
+            turn = await self._store.ai_turn(chat_id, message_id)
+            if turn is not None:
+                dialogue_id = turn.get("dialogue_id")
+        return {
+            "dialogue_id": dialogue_id,
+            "trigger_message_id": message_id,
+            "message_thread_id": message_thread_id,
+        }
+
     async def _click_offer(
-        self, run: Run | None, user_id: int, button: str
+        self, run: Run | None, user_id: int, button: str, where: dict[str, Any]
     ) -> tuple[str, str | None, bool]:
         if run is None or run.user_id != user_id:
             return "Эта форма не для вас.", None, False
@@ -563,7 +593,7 @@ class Interactives:
             await self._state.save_run(run)
             transcript = "\n".join(run.transcript[-NOTE_TRANSCRIPT_LINES:]) or "—"
             await self._speak(
-                run.chat_id, radio.AFTER_AGREE_DIRECTIVE.format(transcript=transcript)
+                run.chat_id, radio.AFTER_AGREE_DIRECTIVE.format(transcript=transcript), where
             )
             return "Хорошо.", offer_text + OFFER_YES_SUFFIX, True
         run.status = STATUS_DECLINED
@@ -593,7 +623,7 @@ class Interactives:
         except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
             log.info("interactives: зеркало речи не обновлено сразу (chat=%s): %s", chat_id, exc)
 
-    async def _speak(self, chat_id: int, directive: str) -> None:
+    async def _speak(self, chat_id: int, directive: str, where: dict[str, Any]) -> None:
         """Реплика Альфреда после кнопки — задачей службы tasks (как речь
         форм Этапа 45). Best-effort: не вышло — форма уже сказала главное."""
         node_link = self._get_node_link()
@@ -609,6 +639,7 @@ class Interactives:
                 [wrap_system_directive(directive)],
                 reminder_reason(self._settings.llm),
                 self._settings.llm.request_timeout_s,
+                meta_extra=where,
             )
         except (ServiceUnavailableError, ProtoError) as exc:
             log.info("interactives: реплика после смены не поставлена (chat=%s): %s", chat_id, exc)

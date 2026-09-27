@@ -24,9 +24,7 @@ router = Router(name="interactives")
 
 
 @router.callback_query(F.data.startswith(f"{engine.CALLBACK_PREFIX}:"))
-async def cb_interactive(
-    callback: CallbackQuery, interactives: Interactives | None = None
-) -> None:
+async def cb_interactive(callback: CallbackQuery, interactives: Interactives | None = None) -> None:
     parsed = engine.parse_callback(callback.data)
     message = callback.message
     if (
@@ -40,7 +38,12 @@ async def cb_interactive(
         return
     scenario_id, button = parsed
     answer, new_text, drop_keyboard = await interactives.handle_click(
-        message.chat.id, callback.from_user.id, scenario_id, button
+        message.chat.id,
+        callback.from_user.id,
+        scenario_id,
+        button,
+        message_id=message.message_id,
+        message_thread_id=getattr(message, "message_thread_id", None),
     )
     alert = button == engine.BTN_EXIT
     await callback.answer(answer, show_alert=alert)
@@ -69,9 +72,7 @@ async def cmd_interactives(
         return
     if arg in ("", "on", "вкл", "да"):
         if arg == "" and not await interactives.is_opted_out(chat_id):
-            await message.answer(
-                "Интерактивы в этом чате включены. Выключить — /interactives off."
-            )
+            await message.answer("Интерактивы в этом чате включены. Выключить — /interactives off.")
             return
         await interactives.set_opted_out(chat_id, False)
         await message.answer(engine.OPT_IN_TEXT)

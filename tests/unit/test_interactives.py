@@ -198,6 +198,20 @@ async def test_yes_makes_alfred_react_with_conversation_context(store):
     assert "что-то не так" in directive
 
 
+async def test_yes_reply_goes_to_the_forms_thread_and_dialogue(store):
+    """Живой баг 2026-09-28: реакция на «Да» уходила в общий топик лички."""
+    svc, notifier, link = _make(store)
+    await _turn(svc, COMPLAINT)
+    form_id = notifier._next  # форма согласия записана в диалог 77
+    await svc.handle_click(
+        GUEST, GUEST, "radio", engine.BTN_PLAY, message_id=form_id, message_thread_id=42
+    )
+    meta = next(a for act, a in link.calls if act == task_protocol.ACTION_CREATE)["meta"]
+    assert meta["message_thread_id"] == 42
+    assert meta["trigger_message_id"] == form_id
+    assert meta["dialogue_id"] == 77
+
+
 async def test_no_keeps_alfred_silent(store):
     svc, _, link = _make(store)
     await _turn(svc, COMPLAINT)
