@@ -74,6 +74,8 @@ async def test_guest_family_arg_no_longer_grants_family_scope(svc):
             "remember",
             {"text": "x", "chat_id": PRIVATE, "scope": "family", "guest_family": True},
         )
+
+
 async def test_sensitive_fact_can_never_be_common(svc):
     with pytest.raises(ProtoError) as excinfo:
         await svc.run_command(

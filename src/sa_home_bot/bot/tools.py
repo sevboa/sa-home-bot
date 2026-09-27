@@ -3116,19 +3116,15 @@ _DECL_RECALL_TOOL_RESULT: dict[str, Any] = {
 
 # Право — «действие@служба» на ту же службу llm, что и сам разговор
 # (`chat@llm`): передача сообщений — это умение Альфреда, а не отдельная
-# команда бота. TELL_RIGHT даёт только «дозваться до владельца» — владелец
-# (allows_command("*")) всегда получает сообщение от любого, у кого есть тул.
-# Писать ДРУГИМ гостям без TELL_GUESTS_RIGHT нельзя, даже имея TELL_RIGHT —
-# решение 2026-08-04 (этап 36 IMPLEMENTATION_PLAN.md), после живого бага
-# этапа 33 п. 7 (секрет VPN ушёл не тому получателю). Исключение —
-# подтверждённое знакомство (Этап 46, request_acquaintance): знакомым
-# TELL_GUESTS_RIGHT не нужен, в обе стороны. Групповой флаг «семья»,
-# раньше дававший то же, убран 2026-09-27.
+# команда бота. TELL_RIGHT даёт «дозваться до владельца» — владелец всегда
+# получает сообщение от любого, у кого есть тул. ДРУГИМ гостям личная
+# передача — только при подтверждённом знакомстве (Этап 46,
+# request_acquaintance), в обе стороны и для ВСЕХ, включая самого владельца
+# (решение пользователя 2026-09-27: владелец через «*» писал гостю, с
+# которым знакомства не было). Обходов больше нет: право tell_guests@llm
+# (этап 36) и групповой флаг «семья» убраны. Официально написать любому
+# гостю владелец может через notify_guest.
 TELL_RIGHT = "tell@llm"
-
-# Право писать другим гостям (не владельцу). Точечное, не выдаётся по
-# умолчанию вместе с TELL_RIGHT — см. комментарий выше.
-TELL_GUESTS_RIGHT = "tell_guests@llm"
 
 # Живая находка 2026-08-06: раньше был один лимит на автора (10/час) —
 # рассылка ОДНОГО notify_guest десятерым разным гостям тратила его целиком
@@ -3168,6 +3164,7 @@ async def _deliver_personal_message(
     render: Callable[[recipients.Recipient], str],
     guard: Callable[[recipients.Recipient], Awaitable[str | None]] | None = None,
     allow_self: bool = False,
+    emit_extra: Callable[[recipients.Recipient], dict[str, Any]] | None = None,
 ) -> str:
     """Общая доставка личного сообщения — резолвинг получателя, лимит,
     отправка, запись хода диалога. Права (если нужны) проверяет ``guard``:
@@ -3181,6 +3178,10 @@ async def _deliver_personal_message(
     нужно: это тот же чат"), а вот у notify_guest смысл есть: владелец может
     попросить стилизованное уведомление себе самому — например, как
     self-напоминание через remind ("напомни мне как граф, что пора спать").
+
+    ``emit_extra`` — доп. поля события доставки через мост службы tasks:
+    проверки, которые там сделать нечем (нет Store), бот доделает сам перед
+    отправкой (bot/node_events.py::_handle_deliver_message).
     """
     found = recipients.find_recipients(who, ctx.book, ctx.settings.people)
     if not found:
@@ -3240,6 +3241,7 @@ async def _deliver_personal_message(
             "html": rendered,
             "plain": text,
             "message_thread_id": None,
+            **(emit_extra(target) if emit_extra is not None else {}),
         },
     )
     log.info(
@@ -3262,27 +3264,42 @@ async def tool_tell(ctx: ToolContext, args: dict[str, Any]) -> str:
         return "ошибка: не сказано, что передать (text)"
 
     async def guard(target: recipients.Recipient) -> str | None:
-        target_subscription = ctx.book.for_chat(target.chat_id)
-        is_owner = target_subscription is not None and target_subscription.is_owner
-        has_tell_guests = ctx.subscription is not None and ctx.subscription.allows_command(
-            TELL_GUESTS_RIGHT
-        )
-        if is_owner or has_tell_guests:
+        if _is_owner_chat(target.chat_id):
+            return None
+        if ctx.store is None and ctx.notifier is None:
+            # Служба tasks: Store нет — знакомство проверит бот перед
+            # отправкой (emit_extra ниже → require_acquaintance).
             return None
         if ctx.store is not None and await are_acquainted(ctx.store, ctx.chat_id, target.chat_id):
             return None
-        return (
-            f"не умею: вы с {target.display} ещё не знакомы через меня — передавать "
-            "сообщения я могу владельцу и тем, с кем знакомство подтверждено; могу "
-            "предложить знакомство (request_acquaintance)"
+        owner_hint = (
+            " (официальное уведомление от владельца — notify_guest)"
+            if ctx.subscription is not None and ctx.subscription.is_owner
+            else ""
         )
+        return (
+            f"не умею: вы с {target.display} ещё не знакомы через меня — лично передавать "
+            "сообщения я могу владельцу и тем, с кем знакомство подтверждено; могу "
+            f"предложить знакомство (request_acquaintance){owner_hint}"
+        )
+
+    def _is_owner_chat(chat_id: int) -> bool:
+        sub = ctx.book.for_chat(chat_id)
+        return sub is not None and sub.is_owner
 
     def render(target: recipients.Recipient) -> str:
         return render_tell(
             text, ctx.author, to_owner_role=target.source == recipients.SOURCE_OWNER_ROLE
         )
 
-    return await _deliver_personal_message(ctx, who, text, render, guard=guard)
+    def emit_extra(target: recipients.Recipient) -> dict[str, Any]:
+        if _is_owner_chat(target.chat_id):
+            return {}
+        return {"require_acquaintance": [ctx.chat_id, target.chat_id]}
+
+    return await _deliver_personal_message(
+        ctx, who, text, render, guard=guard, emit_extra=emit_extra
+    )
 
 
 _DECL_TELL: dict[str, Any] = {
@@ -3295,10 +3312,11 @@ _DECL_TELL: dict[str, Any] = {
             "сообщить, передать, спросить или напомнить ('скажи Андрею, что…', "
             "'спроси у Наташи…'). Текст сообщения придумываешь ТЫ: перескажи "
             "просьбу своими словами, в своей манере, и упомяни, от кого она — "
-            "это не пересылка дословной цитаты. Писать можно только тем, кто "
-            "уже принят и говорит с тобой лично; если человека не нашлось или "
-            "подходит сразу несколько — тул скажет об этом, тогда переспроси у "
-            "собеседника, а не угадывай. Получателя ищет САМ ИНСТРУМЕНТ — не "
+            "это не пересылка дословной цитаты. Писать можно владельцу и тем, "
+            "с кем у собеседника подтверждено знакомство (request_acquaintance); "
+            "если человека не нашлось или подходит сразу несколько — тул "
+            "скажет об этом, тогда переспроси у собеседника, а не угадывай. "
+            "Получателя ищет САМ ИНСТРУМЕНТ — не "
             "пытайся заранее выяснить, кто это (поиском в интернете, памятью "
             "или иначе): просто вызови tell с именем/ником ровно как назвал "
             "собеседник. НЕ СОЧИНЯЙ @username сам, даже если тебе кажется, "

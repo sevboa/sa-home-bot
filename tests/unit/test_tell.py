@@ -65,7 +65,10 @@ class FakeNotifier:
 
 
 class FakeStore:
-    def __init__(self, acquainted: tuple[tuple[int, int], ...] = ()) -> None:
+    # По умолчанию владелец (chat 1) знаком с Андреем: механика доставки
+    # (лимиты, запись хода, мост tasks) проверяется на законной паре; права —
+    # в разделе «этап 36/46» ниже, на _permission_book.
+    def __init__(self, acquainted: tuple[tuple[int, int], ...] = ((1, ANDREY_CHAT),)) -> None:
         self.turns: list[tuple] = []
         # Подтверждённые знакомства (Этап 46) — пары chat_id.
         self._acquainted = acquainted
@@ -260,6 +263,8 @@ async def test_tell_delivers_via_emit_bridge_when_no_notifier(monkeypatch):
     assert data["chat_id"] == ANDREY_CHAT
     assert "Ужин в семь" in data["html"]
     assert data["plain"] == "Ужин в семь"
+    # Store в tasks нет — знакомство проверит бот перед отправкой.
+    assert data["require_acquaintance"] == [1, ANDREY_CHAT]
 
 
 async def test_tell_still_unavailable_without_book_even_with_emit():
@@ -319,7 +324,8 @@ async def test_tell_broadcast_to_many_recipients_not_blocked_by_per_recipient_li
         ],
     )
     notifier = FakeNotifier()
-    ctx = _ctx(book=book, notifier=notifier, settings=Settings())
+    store = FakeStore(acquainted=tuple((1, 1000 + i) for i in range(5)))
+    ctx = _ctx(book=book, notifier=notifier, store=store, settings=Settings())
     for i in range(5):
         result = await ai_tools.tool_tell(ctx, {"recipient": f"Гость{i}", "text": "привет"})
         assert "передано" in result
@@ -349,7 +355,8 @@ async def test_tell_broadcast_total_limit_stops_mass_send(monkeypatch):
         ],
     )
     notifier = FakeNotifier()
-    ctx = _ctx(book=book, notifier=notifier, settings=Settings())
+    store = FakeStore(acquainted=tuple((1, 1000 + i) for i in range(3)))
+    ctx = _ctx(book=book, notifier=notifier, store=store, settings=Settings())
     for i in range(2):
         assert "передано" in await ai_tools.tool_tell(
             ctx, {"recipient": f"Гость{i}", "text": "привет"}
@@ -391,7 +398,7 @@ OWNER_CHAT = 1
 PLAIN_GUEST_CHAT = 600  # tell@llm — может писать только владельцу
 FAMILY_A_CHAT = 601  # tell@llm, знаком с Б (в тестах, где передан store)
 FAMILY_B_CHAT = 602  # tell@llm
-PRIVILEGED_GUEST_CHAT = 603  # tell@llm + tell_guests@llm
+PRIVILEGED_GUEST_CHAT = 603  # tell@llm + упразднённое tell_guests@llm
 
 
 def _permission_book() -> SubscriptionBook:
@@ -446,10 +453,14 @@ async def test_tell_guest_cannot_reach_another_guest_without_right_or_acquaintan
     assert "не знакомы" in result
     assert "request_acquaintance" in result
     assert notifier.sent == []
+
+
 @pytest.mark.parametrize(
     ("sender", "recipient", "target"),
     [(FAMILY_A_CHAT, "Семья Б", FAMILY_B_CHAT), (FAMILY_B_CHAT, "Семья А", FAMILY_A_CHAT)],
 )
+
+
 async def test_tell_acquaintances_reach_each_other_both_ways(sender, recipient, target):
     """Этап 46: подтверждённое знакомство открывает tell в обе стороны без
     tell_guests@llm, независимо от того, кто предлагал (guest_a/guest_b)."""
@@ -460,6 +471,8 @@ async def test_tell_acquaintances_reach_each_other_both_ways(sender, recipient, 
     result = await ai_tools.tool_tell(ctx, {"recipient": recipient, "text": "привет"})
     assert "передано" in result
     assert notifier.sent[0][0] == target
+
+
 async def test_tell_acquaintance_opens_only_that_pair():
     """Знакомство — точечное: знакомый с Б не может писать третьему гостю."""
     book = _permission_book()
@@ -482,31 +495,65 @@ async def test_tell_without_store_refuses_non_acquainted_guest():
     ctx = _ctx(chat_id=FAMILY_A_CHAT, book=book, notifier=notifier, store=None, settings=Settings())
     result = await ai_tools.tool_tell(ctx, {"recipient": "Семья Б", "text": "привет"})
     assert "не умею" in result
-async def test_tell_guests_right_opens_arbitrary_guest():
+
+
+async def test_retired_tell_guests_right_no_longer_opens_strangers():
+    """Этап 46 (решение 2026-09-27): обходов знакомства больше нет —
+    tell_guests@llm упразднено и снимается с гостя при загрузке пакета."""
     book = _permission_book()
+    assert "tell_guests@llm" not in book.for_chat(PRIVILEGED_GUEST_CHAT).allowed_commands
     notifier = FakeNotifier()
     ctx = _ctx(
-        chat_id=PRIVILEGED_GUEST_CHAT, book=book, notifier=notifier, settings=Settings()
+        chat_id=PRIVILEGED_GUEST_CHAT,
+        book=book,
+        notifier=notifier,
+        store=FakeStore(acquainted=()),
+        settings=Settings(),
     )
     result = await ai_tools.tool_tell(
         ctx, {"recipient": "Гость Плоский", "text": "привет"}
     )
-    assert "передано" in result
-    assert notifier.sent[0][0] == PLAIN_GUEST_CHAT
+    assert "не знакомы" in result
+    assert notifier.sent == []
 
 
-async def test_tell_guests_right_does_not_bypass_owner_check_twice():
-    """tell_guests@llm тоже открывает владельца — просто это уже разрешено
-    и без него (is_owner), проверяем, что права не конфликтуют."""
+async def test_owner_needs_acquaintance_too_and_is_pointed_to_notify_guest():
+    """Владелец лично (tell) — такой же гость: незнакомому не передаёт, но
+    получает подсказку про официальный notify_guest."""
     book = _permission_book()
     notifier = FakeNotifier()
     ctx = _ctx(
-        chat_id=PRIVILEGED_GUEST_CHAT, book=book, notifier=notifier, settings=Settings()
+        chat_id=OWNER_CHAT, book=book, notifier=notifier, store=FakeStore(acquainted=()),
+        settings=Settings(),
+    )
+    result = await ai_tools.tool_tell(ctx, {"recipient": "Гость Плоский", "text": "привет"})
+    assert "не знакомы" in result and "notify_guest" in result
+    assert notifier.sent == []
+
+    ctx = _ctx(
+        chat_id=OWNER_CHAT,
+        book=book,
+        notifier=notifier,
+        store=FakeStore(acquainted=((PLAIN_GUEST_CHAT, OWNER_CHAT),)),
+        settings=Settings(),
+    )
+    assert "передано" in await ai_tools.tool_tell(
+        ctx, {"recipient": "Гость Плоский", "text": "привет"}
+    )
+
+
+async def test_any_guest_reaches_owner_without_acquaintance():
+    book = _permission_book()
+    notifier = FakeNotifier()
+    ctx = _ctx(
+        chat_id=PRIVILEGED_GUEST_CHAT,
+        book=book,
+        notifier=notifier,
+        store=FakeStore(acquainted=()),
+        settings=Settings(),
     )
     result = await ai_tools.tool_tell(ctx, {"recipient": "owner", "text": "привет"})
     assert "передано" in result
-
-
 # --- обращение к владельцу по роли, а не по личному имени -----------------
 #
 # _book() (в отличие от _permission_book()) называет владельческую подписку

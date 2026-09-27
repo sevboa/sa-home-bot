@@ -99,6 +99,8 @@ def test_card_view_has_no_family_toggle():
     text, kb = guests_view.build_card_view(_guest(77))
     assert "Семья" not in text
     assert not any("семь" in t for t in _button_texts(kb))
+
+
 def test_kick_confirm_view_asks_before_final_callback():
     sub = _guest(77)
     text, kb = guests_view.build_kick_confirm_view(sub)

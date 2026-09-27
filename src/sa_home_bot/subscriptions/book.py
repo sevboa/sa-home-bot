@@ -27,13 +27,19 @@ class ValidationIssue:
     reason: str
 
 
+# Права, которых больше нет: снимаются с гостя при загрузке пакета (и
+# пропадают из файла при следующей его перезаписи ботом). tell_guests@llm —
+# обход знакомства в tell, убран 2026-09-27 (Этап 46).
+RETIRED_RIGHTS = frozenset({"tell_guests@llm"})
+
+
 def guest_subscription(cfg: GuestSubscriptionConfig) -> Subscription:
     """Гостевая запись пакета → подписка (одно место сборки на все пути)."""
     return Subscription(
         name=cfg.name,
         chat_id=cfg.chat_id,
         event_types=frozenset(cfg.event_types),
-        allowed_commands=frozenset(cfg.allowed_commands),
+        allowed_commands=frozenset(cfg.allowed_commands) - RETIRED_RIGHTS,
         source=SOURCE_GUEST,
         invited_by_chat_id=cfg.invited_by_chat_id,
         invited_at=cfg.invited_at,

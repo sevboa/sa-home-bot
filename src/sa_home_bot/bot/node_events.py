@@ -60,6 +60,7 @@ from datetime import UTC, datetime
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sa_home_bot.bot import commands
+from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.ai_flow import (
     ALBERT_ASLEEP,
     ALBERT_ASLEEP_MD,
@@ -227,6 +228,22 @@ async def _handle_deliver_message(notifier: Notifier, store: Store, data: dict) 
     html_text = data.get("html")
     if chat_id is None or not html_text:
         return
+    # tell из службы tasks: знакомство там проверить нечем (нет Store) —
+    # проверяем здесь, до отправки (Этап 46, bot/tools.py::tool_tell).
+    pair = data.get("require_acquaintance")
+    if pair is not None:
+        try:
+            sender, target = (int(x) for x in pair)
+        except (TypeError, ValueError):
+            log.warning("deliver_message: битый require_acquaintance=%r — не шлём", pair)
+            return
+        if not await ai_tools.are_acquainted(store, sender, target):
+            log.warning(
+                "deliver_message: chat=%s не знаком с chat=%s — сообщение из tasks не отправлено",
+                sender,
+                target,
+            )
+            return
     thread_id = data.get("message_thread_id")
     message_id = await notifier.send_direct(chat_id, html_text, message_thread_id=thread_id)
     if message_id is None:

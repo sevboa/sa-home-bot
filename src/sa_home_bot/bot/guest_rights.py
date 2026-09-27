@@ -110,7 +110,6 @@ GUEST_GROUPS: list[RightGroup] = [
 GUEST_RIGHTS: list[GuestRight] = [
     GuestRight("chat@llm", "💬 Разговор с Альфредом"),
     GuestRight("tell@llm", "📨 Написать владельцу"),
-    GuestRight("tell_guests@llm", "📨 Писать другим гостям"),
     GuestRight("search@net", "🔎 Веб-поиск"),
     GuestRight("nodes", "🕸 Сводка роя"),
     GuestRight("status", "📟 Карточка ноды"),

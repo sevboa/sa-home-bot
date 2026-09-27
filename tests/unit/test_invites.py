@@ -72,6 +72,8 @@ def test_generated_code_is_in_alphabet():
     "raw",
     ["ABCD1234", "abcd1234", "ABCD-1234", "  abcd 1234 ", "ABCD_1234"],
 )
+
+
 def test_normalize_accepts_human_variants(raw):
     assert invites.normalize(raw) == "ABCD1234"
 
@@ -589,6 +591,8 @@ async def test_welcome_prompt_without_memory_is_the_plain_directive(store, tmp_p
     ("seconds", "expected"),
     [(3600, "60 минут"), (60, "1 минута"), (180, "3 минуты"), (720, "12 минут"), (0, "0 минут")],
 )
+
+
 def test_expiry_is_spelled_in_minutes(seconds, expected):
     from datetime import UTC, datetime, timedelta
 
@@ -602,6 +606,8 @@ def test_expiry_is_spelled_in_minutes(seconds, expected):
     ("hours", "expected"),
     [(2, "2 часа"), (5, "5 часов"), (47, "47 часов")],
 )
+
+
 def test_expiry_is_spelled_in_hours_beyond_90_minutes(hours, expected):
     from datetime import UTC, datetime, timedelta
 
@@ -615,6 +621,8 @@ def test_expiry_is_spelled_in_hours_beyond_90_minutes(hours, expected):
     ("hours", "expected"),
     [(48, "2 дня"), (24 * 5, "5 дней"), (24 * 30, "30 дней")],
 )
+
+
 def test_expiry_is_spelled_in_days_beyond_48_hours(hours, expected):
     from datetime import UTC, datetime, timedelta
 

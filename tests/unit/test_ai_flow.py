@@ -1120,6 +1120,8 @@ def test_known_person_note_skips_age_line_when_birth_date_unknown():
 
 
 # Этап 42.5(a): титул обращения детерминированно из gender, не догадка LLM.
+
+
 def test_known_person_note_title_for_male():
     person = _person(gender="m")
     note = ai_flow._known_person_note(person)

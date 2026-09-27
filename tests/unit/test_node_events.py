@@ -111,9 +111,15 @@ class FakeNotifier:
 
 
 class FakeStore:
-    def __init__(self) -> None:
+    def __init__(self, acquainted: tuple[tuple[int, int], ...] = ()) -> None:
         self.recorded_turns: list[tuple] = []
         self.recorded_events: list[tuple] = []
+        self._acquainted = acquainted
+
+    async def relationships_for(self, chat_id, status="confirmed"):
+        return [
+            {"guest_a": a, "guest_b": b} for a, b in self._acquainted if chat_id in (a, b)
+        ]
 
     async def record_ai_turn(self, *args, **kwargs):
         self.recorded_turns.append((args, kwargs))
@@ -910,6 +916,25 @@ async def test_deliver_message_does_not_record_turn_on_failed_send():
     await handler(env)
 
     assert store.recorded_turns == []
+
+
+async def test_deliver_message_checks_acquaintance_for_tasks_tell():
+    """Этап 46: tell из службы tasks не может проверить знакомство сам (нет
+    Store) — бот проверяет перед отправкой и молча не шлёт незнакомому."""
+    data = {"chat_id": 7, "html": "текст", "plain": "текст", "require_acquaintance": [5, 7]}
+    src = Address(node="alfred", service="tasks")
+
+    notifier, store = FakeNotifier(), FakeStore()
+    await build_node_event_handler(_book(), notifier, store)(
+        make_event(task_protocol.EVENT_DELIVER_MESSAGE, data, src=src)
+    )
+    assert notifier.sent == [] and store.recorded_turns == []
+
+    notifier, store = FakeNotifier(), FakeStore(acquainted=((7, 5),))
+    await build_node_event_handler(_book(), notifier, store)(
+        make_event(task_protocol.EVENT_DELIVER_MESSAGE, data, src=src)
+    )
+    assert [s[0] for s in notifier.sent_full] == [7]
 
 
 async def test_handler_broadcasts_on_node_leaving_and_returned():
