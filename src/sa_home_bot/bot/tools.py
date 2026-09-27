@@ -61,6 +61,7 @@ from sa_home_bot.bot.monitor_state import parse_disk_summary, parse_health_state
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings, reminder_reason
 from sa_home_bot.graph_memory import protocol as graph_memory_protocol
+from sa_home_bot.llm.prompt import wrap_system_directive
 from sa_home_bot.memory import protocol as memory_protocol
 from sa_home_bot.net import protocol as net_protocol
 from sa_home_bot.node.kind import traits_for
@@ -913,7 +914,7 @@ async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
     # (llm/model_profiles.py) — здесь про механизм знать не нужно, поэтому и
     # ушли прежние баги с явным think=true → 400 на gemma (2026-08-05/08-10).
     task_args = {
-        "messages": [*history, {"role": "user", "content": directive}],
+        "messages": [*history, wrap_system_directive(directive)],
         "reason": reminder_reason(ctx.settings.llm),
         "chat_id": ctx.chat_id,
     }

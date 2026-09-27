@@ -17,6 +17,7 @@ from sa_home_bot.config import LlmConfig, Settings, WeatherConfig
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
+from sa_home_bot.llm import prompt
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.vpn import protocol as vpn_protocol
 
@@ -795,7 +796,8 @@ async def test_remind_closes_dangling_tool_calls_in_snapshot(store):
         "content": "(результат не сохранён)",
         "name": "get_weather",
     }
-    assert messages[4]["role"] == "user"
+    assert messages[4]["role"] == prompt._DIRECTIVE_ROLE
+    assert messages[4]["content"].startswith(prompt._DIRECTIVE_MARKER)
     # Исходный (живой, мутируемый другими вызовами того же раунда) history
     # не тронут — правится только копия, уходящая в задачу.
     assert history == [
