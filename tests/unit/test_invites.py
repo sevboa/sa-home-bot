@@ -313,37 +313,6 @@ async def test_group_cannot_touch_owner_subscription(store, tmp_path):
 # --- флаг «семья» гостя (решение 2026-08-04) ------------------------------
 
 
-async def test_set_guest_family_updates_book_and_package(store, tmp_path):
-    path = tmp_path / "telegram-bot.test.guests.toml"
-    gate = _gate(store, tmp_path)
-    code, _ = await gate.issue(chat_id=1, user_id=None)
-    await gate.try_admit(77, code)
-
-    updated = gate.set_guest_family(77, True)
-    assert updated is not None
-    assert updated.family is True
-    assert gate._book.for_chat(77).family is True  # noqa: SLF001
-
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
-    assert data["guest_subscriptions"][0]["family"] is True
-
-    reverted = gate.set_guest_family(77, False)
-    assert reverted is not None
-    assert reverted.family is False
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
-    assert data["guest_subscriptions"][0]["family"] is False
-
-
-async def test_set_guest_family_cannot_touch_owner_subscription(store, tmp_path):
-    gate = _gate(store, tmp_path)
-    assert gate.set_guest_family(1, True) is None
-
-
-def test_set_guest_family_on_unknown_chat_is_noop(store, tmp_path):
-    gate = _gate(store, tmp_path)
-    assert gate.set_guest_family(9999, True) is None
-
-
 # --- гостевой пакет ------------------------------------------------------
 
 
@@ -377,13 +346,15 @@ def test_render_escapes_quotes():
     assert data["guest_subscriptions"][0]["name"] == 'Гость "кавычки"'
 
 
-def test_render_round_trips_family_flag():
-    guest = Subscription(name="Наташа", chat_id=6, family=True)
-    data = tomllib.loads(render([guest]).decode("utf-8"))
+def test_old_package_with_family_line_still_loads():
+    """Пакеты до 2026-09-27 содержат `family = ...` — флаг убран, строка
+    должна молча игнорироваться, а не ронять загрузку гостей."""
+    data = tomllib.loads(
+        '[[guest_subscriptions]]\nname = "Наташа"\nchat_id = 6\nfamily = true\n'
+    )
     cfg = GuestSubscriptionConfig(**data["guest_subscriptions"][0])
-    assert cfg.family is True
-
-
+    assert cfg.chat_id == 6
+    assert "family" not in render([Subscription(name="Наташа", chat_id=6)]).decode("utf-8")
 # --- книга подписок ------------------------------------------------------
 
 

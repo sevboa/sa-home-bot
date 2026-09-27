@@ -65,8 +65,17 @@ class FakeNotifier:
 
 
 class FakeStore:
-    def __init__(self) -> None:
+    def __init__(self, acquainted: tuple[tuple[int, int], ...] = ()) -> None:
         self.turns: list[tuple] = []
+        # Подтверждённые знакомства (Этап 46) — пары chat_id.
+        self._acquainted = acquainted
+
+    async def relationships_for(self, chat_id, status="confirmed"):
+        return [
+            {"guest_a": a, "guest_b": b, "relation": "acquaintance"}
+            for a, b in self._acquainted
+            if chat_id in (a, b)
+        ]
 
     async def record_ai_turn(self, chat_id, message_id, dialogue_id, role, content, at, **kw):
         self.turns.append((chat_id, message_id, dialogue_id, role, content))
@@ -376,12 +385,12 @@ def test_rendered_message_escapes_html():
     assert "Алексей &amp; Co" in rendered
 
 
-# --- этап 36: владелец всегда доступен, «семья» — своя группа -----------
+# --- этап 36: владелец всегда доступен; этап 46: знакомые — друг другу ----
 
 OWNER_CHAT = 1
 PLAIN_GUEST_CHAT = 600  # tell@llm — может писать только владельцу
-FAMILY_A_CHAT = 601  # tell@llm + family
-FAMILY_B_CHAT = 602  # tell@llm + family
+FAMILY_A_CHAT = 601  # tell@llm, знаком с Б (в тестах, где передан store)
+FAMILY_B_CHAT = 602  # tell@llm
 PRIVILEGED_GUEST_CHAT = 603  # tell@llm + tell_guests@llm
 
 
@@ -400,14 +409,12 @@ def _permission_book() -> SubscriptionBook:
                 chat_id=FAMILY_A_CHAT,
                 allowed_commands=["chat@llm", "tell@llm"],
                 invited_user="Семья А",
-                family=True,
             ),
             GuestSubscriptionConfig(
                 name="Семья Б",
                 chat_id=FAMILY_B_CHAT,
                 allowed_commands=["chat@llm", "tell@llm"],
                 invited_user="Семья Б",
-                family=True,
             ),
             GuestSubscriptionConfig(
                 name="Привилегированный",
@@ -428,7 +435,7 @@ async def test_tell_guest_always_reaches_owner_without_tell_guests_right():
     assert notifier.sent[0][0] == OWNER_CHAT
 
 
-async def test_tell_guest_cannot_reach_another_guest_without_right_or_family():
+async def test_tell_guest_cannot_reach_another_guest_without_right_or_acquaintance():
     book = _permission_book()
     notifier = FakeNotifier()
     ctx = _ctx(chat_id=PLAIN_GUEST_CHAT, book=book, notifier=notifier, settings=Settings())
@@ -436,26 +443,31 @@ async def test_tell_guest_cannot_reach_another_guest_without_right_or_family():
         ctx, {"recipient": "Семья А", "text": "привет"}
     )
     assert "не умею" in result
+    assert "не знакомы" in result
+    assert "request_acquaintance" in result
     assert notifier.sent == []
-
-
-async def test_tell_family_members_reach_each_other_without_tell_guests_right():
+@pytest.mark.parametrize(
+    ("sender", "recipient", "target"),
+    [(FAMILY_A_CHAT, "Семья Б", FAMILY_B_CHAT), (FAMILY_B_CHAT, "Семья А", FAMILY_A_CHAT)],
+)
+async def test_tell_acquaintances_reach_each_other_both_ways(sender, recipient, target):
+    """Этап 46: подтверждённое знакомство открывает tell в обе стороны без
+    tell_guests@llm, независимо от того, кто предлагал (guest_a/guest_b)."""
     book = _permission_book()
     notifier = FakeNotifier()
-    ctx = _ctx(chat_id=FAMILY_A_CHAT, book=book, notifier=notifier, settings=Settings())
-    result = await ai_tools.tool_tell(
-        ctx, {"recipient": "Семья Б", "text": "привет"}
-    )
+    store = FakeStore(acquainted=((FAMILY_A_CHAT, FAMILY_B_CHAT),))
+    ctx = _ctx(chat_id=sender, book=book, notifier=notifier, store=store, settings=Settings())
+    result = await ai_tools.tool_tell(ctx, {"recipient": recipient, "text": "привет"})
     assert "передано" in result
-    assert notifier.sent[0][0] == FAMILY_B_CHAT
-
-
-async def test_tell_family_flag_alone_does_not_open_non_family_guest():
-    """family — обход права tell_guests@llm, а не альтернатива ему: гость
-    без family по-прежнему недоступен, даже когда пишущий сам — семья."""
+    assert notifier.sent[0][0] == target
+async def test_tell_acquaintance_opens_only_that_pair():
+    """Знакомство — точечное: знакомый с Б не может писать третьему гостю."""
     book = _permission_book()
     notifier = FakeNotifier()
-    ctx = _ctx(chat_id=FAMILY_A_CHAT, book=book, notifier=notifier, settings=Settings())
+    store = FakeStore(acquainted=((FAMILY_A_CHAT, FAMILY_B_CHAT),))
+    ctx = _ctx(
+        chat_id=FAMILY_A_CHAT, book=book, notifier=notifier, store=store, settings=Settings()
+    )
     result = await ai_tools.tool_tell(
         ctx, {"recipient": "Гость Плоский", "text": "привет"}
     )
@@ -463,6 +475,13 @@ async def test_tell_family_flag_alone_does_not_open_non_family_guest():
     assert notifier.sent == []
 
 
+async def test_tell_without_store_refuses_non_acquainted_guest():
+    """В службе tasks Store нет — знакомство не проверить, честный отказ."""
+    book = _permission_book()
+    notifier = FakeNotifier()
+    ctx = _ctx(chat_id=FAMILY_A_CHAT, book=book, notifier=notifier, store=None, settings=Settings())
+    result = await ai_tools.tool_tell(ctx, {"recipient": "Семья Б", "text": "привет"})
+    assert "не умею" in result
 async def test_tell_guests_right_opens_arbitrary_guest():
     book = _permission_book()
     notifier = FakeNotifier()

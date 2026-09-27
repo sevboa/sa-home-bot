@@ -843,7 +843,12 @@ class Store:
     async def set_pending_action_message(
         self, action_id: int, column: str, message_id: int
     ) -> None:
-        if column not in ("draft_message_id", "offer_message_id", "notice_message_id"):
+        if column not in (
+            "draft_message_id",
+            "offer_message_id",
+            "notice_message_id",
+            "welcome_message_id",
+        ):
             raise ValueError(f"не колонка сообщения формы: {column}")
         async with self.db.transaction() as conn:
             await conn.execute(
@@ -869,16 +874,19 @@ class Store:
 
     async def pending_actions_needing_delivery(self) -> list[dict]:
         """То, что должно было уйти в чат, но не ушло (рестарт бота посреди
-        сценария): отправленный адресату запрос без формы у адресата, либо
+        сценария): отправленный адресату запрос без формы у адресата,
         решённый без итогового оповещения инициатору (кроме отмены самим
         инициатором — ему оповещать нечего, он сам и нажал; истёкший
-        черновик — оповещаем, см. bot/pending_actions.py)."""
+        черновик — оповещаем, см. bot/pending_actions.py), либо принятый без
+        поздравления адресату. Какие именно стадии — решает
+        bot/pending_actions.py::_undelivered_stages."""
         cur = await self.db.conn.execute(
             "SELECT * FROM pending_actions WHERE "
             "(status='pending' AND offer_message_id IS NULL) OR "
             "(status IN ('accepted', 'rejected', 'expired', 'cancelled') "
             " AND notice_message_id IS NULL "
-            " AND NOT (status='cancelled' AND decided_by=initiator)) "
+            " AND NOT (status='cancelled' AND decided_by=initiator)) OR "
+            "(status='accepted' AND welcome_message_id IS NULL) "
             "ORDER BY id"
         )
         return [_pending_action_row(r) for r in await cur.fetchall()]

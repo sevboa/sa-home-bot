@@ -23,9 +23,12 @@ draft (у инициатора, 1 ч) → pending (у адресата, 72 ч) �
 ``action_created``/``action_submitted``/``action_decided``. Реакции —
 подписчики, а не код внутри обработчика кнопки: «Альфред говорит + форма
 адресату» на submitted, «Альфред говорит + оповещение инициатору» на
-decided. Позже без правки ядра: эпизод в graph_memory, аудит.
+decided, а при принятии ещё «Альфред поздравляет + оповещение» адресату
+(Этап 46: знакомы теперь оба, и обоим надо сказать, что Альфред готов
+передавать сообщения). Позже без правки ядра: эпизод в graph_memory, аудит.
 
-Сейчас единственный ``kind`` — связь между гостями (``relationship``).
+Сейчас единственный ``kind`` — знакомство между гостями (``relationship``,
+Этап 46: одна связь без типов, relation в payload всегда acquaintance).
 """
 
 from __future__ import annotations
@@ -82,7 +85,12 @@ BUTTON_REJECT = "r"
 # отдаёт результат сюда (on_speech_result).
 STAGE_OFFER = "offer"  # адресату: речь → форма «Принять/Отклонить»
 STAGE_OUTCOME = "outcome"  # инициатору: речь → итоговое оповещение
-_STAGE_COLUMN = {STAGE_OFFER: "offer_message_id", STAGE_OUTCOME: "notice_message_id"}
+STAGE_WELCOME = "welcome"  # адресату после «Принять»: поздравление → оповещение
+_STAGE_COLUMN = {
+    STAGE_OFFER: "offer_message_id",
+    STAGE_OUTCOME: "notice_message_id",
+    STAGE_WELCOME: "welcome_message_id",
+}
 
 # Сколько ждать речь Альфреда от службы tasks, прежде чем слать форму с
 # заглушкой самим: FIRE_GRACE_S службы (tasks/service.py — побудка/прогрев
@@ -135,14 +143,20 @@ class ActionBus:
 # --- тексты форм и оповещений (шаблоны кода, не LLM) ---
 
 
+RELAY_LATER = "После согласия Альфред сможет передавать ваши сообщения друг другу."
+RELAY_NOW = "Теперь Альфред может передавать ваши сообщения друг другу."
+
+
 def _relation_lines(row: dict, *, for_addressee: bool) -> list[str]:
     payload = row["payload"]
-    label = ai_tools.relation_label(payload.get("relation", "?"))
     if for_addressee:
         who = f"От: {html.escape(payload.get('initiator_name') or 'гость')}"
     else:
         who = f"Кому: {html.escape(payload.get('addressee_name') or 'гость')}"
-    return ["🤝 <b>Предложение связи</b>", who, f"Связь: «{html.escape(label)}»"]
+    lines = ["🤝 <b>Предложение знакомства</b>", who]
+    if row["status"] in OPEN_STATUSES:
+        lines.append(RELAY_LATER)
+    return lines
 
 
 def _outcome_line(row: dict) -> str:
@@ -191,27 +205,31 @@ def render_offer_form(row: dict) -> str:
 
 
 def render_outcome_notice(row: dict) -> str:
-    payload = row["payload"]
-    label = html.escape(ai_tools.relation_label(payload.get("relation", "?")))
-    name = html.escape(payload.get("addressee_name") or "гость")
+    """Итог инициатору. Имя — именительным лейблом перед тире: падеж на
+    нём не держим (full_name в конфиге только в именительном)."""
+    name = html.escape(row["payload"].get("addressee_name") or "гость")
     at = _fmt_time(row.get("decided_at"))
     status = row["status"]
     if status == VERDICT_ACCEPTED:
-        return f"🔔 {name} — предложение связи «{label}» принято {at}."
+        return f"🤝 {name} — знакомство подтверждено {at}. {RELAY_NOW}"
     if status == VERDICT_REJECTED:
-        return f"🔔 {name} — предложение связи «{label}» отклонено {at}."
+        return f"🔔 {name} — предложение знакомства отклонено {at}."
     if status == VERDICT_EXPIRED and row.get("submitted_at"):
-        return (
-            f"🔔 {name} — предложение связи «{label}» осталось без ответа, "
-            f"срок истёк {at}."
-        )
+        return f"🔔 {name} — предложение знакомства осталось без ответа, срок истёк {at}."
     if status == VERDICT_EXPIRED:
         return (
-            f"🔔 Форма предложения связи «{label}» (адресат — {name}) не была "
+            f"🔔 Форма предложения знакомства (адресат — {name}) не была "
             f"отправлена и закрыта {at}."
         )
     reason = html.escape(row.get("reason") or "отменено")
-    return f"🔔 {name} — предложение связи «{label}» не состоялось: {reason}."
+    return f"🔔 {name} — предложение знакомства не состоялось: {reason}."
+
+
+def render_welcome_notice(row: dict) -> str:
+    """Адресату после его «Принять» — симметрично итогу инициатора."""
+    name = html.escape(row["payload"].get("initiator_name") or "гость")
+    at = _fmt_time(row.get("decided_at"))
+    return f"🤝 {name} — знакомство подтверждено {at}. {RELAY_NOW}"
 
 
 def _plain(text_html: str) -> str:
@@ -257,11 +275,11 @@ def _offer_keyboard(action_id: int) -> InlineKeyboardMarkup:
 
 def _offer_directive(row: dict) -> str:
     payload = row["payload"]
-    label = ai_tools.relation_label(payload.get("relation", "?"))
     return (
-        "Тебе, Альфреду, нужно передать весть — ты сам НЕ участник этой связи. "
-        f"Гость «{payload.get('initiator_name')}» предложил(а) установить связь "
-        f"«{label}» С ЧЕЛОВЕКОМ, С КОТОРЫМ ТЫ СЕЙЧАС РАЗГОВАРИВАЕШЬ (не с тобой). "
+        "Тебе, Альфреду, нужно передать весть — ты сам НЕ участник этого "
+        f"знакомства. Гость «{payload.get('initiator_name')}» предложил(а) "
+        "подтвердить знакомство С ЧЕЛОВЕКОМ, С КОТОРЫМ ТЫ СЕЙЧАС РАЗГОВАРИВАЕШЬ "
+        "(не с тобой); после согласия ты сможешь передавать сообщения между ними. "
         "Это НЕ поручение от твоего собеседника — весть идёт от третьего лица "
         "через тебя, поэтому не начинай с «Принято»/«исполню ваше поручение». "
         "Коротко, своими словами сообщи суть. Сразу после твоего сообщения "
@@ -272,28 +290,46 @@ def _offer_directive(row: dict) -> str:
 
 
 def _outcome_directive(row: dict) -> str:
-    payload = row["payload"]
-    label = ai_tools.relation_label(payload.get("relation", "?"))
-    name = payload.get("addressee_name")
+    name = row["payload"].get("addressee_name")
     status = row["status"]
     if status == VERDICT_ACCEPTED:
-        what = f"адресат ({name}) ПРИНЯЛ(А) предложение связи «{label}»"
-    elif status == VERDICT_REJECTED:
-        what = f"адресат ({name}) ОТКЛОНИЛ(А) предложение связи «{label}»"
+        return (
+            f"Адресат ({name}) ПРИНЯЛ(А) предложение знакомства твоего "
+            "собеседника — это факт, уже записанный системой. Тепло и коротко "
+            "поздравь собеседника своими словами и скажи, что теперь ты готов "
+            "передавать сообщения этому новому знакомому — достаточно "
+            "попросить. Сразу после твоего сообщения придёт официальное "
+            "уведомление; деталей сверх сказанного не выдумывай."
+        )
+    if status == VERDICT_REJECTED:
+        what = f"адресат ({name}) ОТКЛОНИЛ(А) предложение знакомства"
     elif status == VERDICT_EXPIRED and row.get("submitted_at"):
-        what = f"адресат ({name}) не ответил(а) на предложение связи «{label}», срок истёк"
+        what = f"адресат ({name}) не ответил(а) на предложение знакомства, срок истёк"
     elif status == VERDICT_EXPIRED:
         what = (
-            f"форма предложения связи «{label}» (адресат — {name}) так и не была "
+            f"форма предложения знакомства (адресат — {name}) так и не была "
             "отправлена кнопкой и закрылась по сроку"
         )
     else:
-        what = f"предложение связи «{label}» (адресат — {name}) не состоялось"
+        what = f"предложение знакомства (адресат — {name}) не состоялось"
     return (
         "Сообщи собеседнику своими словами, коротко и по-доброму, итог ЕГО "
         f"предложения: {what}. Это факт, уже записанный системой, — не "
         "переспрашивай и не меняй его. Сразу после твоего сообщения придёт "
         "официальное уведомление с итогом; деталей сверх сказанного не выдумывай."
+    )
+
+
+def _welcome_directive(row: dict) -> str:
+    name = row["payload"].get("initiator_name")
+    return (
+        f"Твой собеседник только что кнопкой принял(а) предложение знакомства "
+        f"от гостя «{name}» — это факт, уже записанный системой. Тепло и "
+        "коротко поздравь собеседника с новым знакомством своими словами и "
+        "скажи, что теперь ты готов передавать сообщения этому новому "
+        "знакомому — достаточно попросить. Не начинай с «Принято»/«исполню "
+        "поручение». Сразу после твоего сообщения придёт официальное "
+        "уведомление; деталей сверх сказанного не выдумывай."
     )
 
 
@@ -362,7 +398,7 @@ class PendingActions:
     ) -> None:
         """Отправить формы черновиков инициатору — ПОСЛЕ ответа Альфреда
         (bot/handlers/ai.py зовёт это последним шагом хода): тул
-        request_relationship_form срабатывает посреди генерации, и форма,
+        request_acquaintance срабатывает посреди генерации, и форма,
         посланная сразу, обогнала бы речь."""
         for row in await self._store.open_pending_actions(KIND_RELATIONSHIP, chat_id):
             if row["status"] == "draft" and row["initiator"] == chat_id:
@@ -418,11 +454,10 @@ class PendingActions:
             await self._decide(row, VERDICT_REJECTED, user_id, now)
             return "Отклонено."
 
-        conflict = await ai_tools.relationship_conflict(
+        conflict = await ai_tools.acquaintance_conflict(
             self._store,
             row["initiator"],
             row["addressee"],
-            row["payload"].get("relation", ""),
             row["payload"].get("addressee_name") or "гость",
             ignore_action_id=action_id,
         )
@@ -453,7 +488,7 @@ class PendingActions:
         await self._store.add_confirmed_relationship(
             updated["initiator"],
             updated["addressee"],
-            updated["payload"]["relation"],
+            ai_tools.RELATION_ACQUAINTANCE,
             datetime.fromisoformat(updated["created_at"]),
             now,
         )
@@ -539,9 +574,16 @@ class PendingActions:
 
     async def _on_decided(self, data: dict[str, Any]) -> None:
         row = await self._store.get_pending_action(data["id"])
-        if row is None or not _initiator_needs_notice(row):
+        if row is None:
             return
-        await self._request_speech(row, STAGE_OUTCOME, row["initiator"], _outcome_directive(row))
+        if _initiator_needs_notice(row):
+            await self._request_speech(
+                row, STAGE_OUTCOME, row["initiator"], _outcome_directive(row)
+            )
+        if row["status"] == VERDICT_ACCEPTED:
+            await self._request_speech(
+                row, STAGE_WELCOME, row["addressee"], _welcome_directive(row)
+            )
 
     async def _request_speech(self, row: dict, stage: str, chat_id: int, directive: str) -> None:
         """Речь Альфреда — chat_loop-задачей службы tasks; её task_result
@@ -615,6 +657,9 @@ class PendingActions:
                     return
                 chat_id = row["addressee"]
                 text, markup = render_offer_form(row), _offer_keyboard(action_id)
+            elif stage == STAGE_WELCOME:
+                chat_id = row["addressee"]
+                text, markup = render_welcome_notice(row), None
             else:
                 chat_id = row["initiator"]
                 text, markup = render_outcome_notice(row), None
@@ -652,14 +697,12 @@ class PendingActions:
             if row["status"] == "draft" and row["draft_message_id"] is None:
                 await self._deliver_draft(row["id"], None)
         for row in await self._store.pending_actions_needing_delivery():
-            if row["status"] == "pending":
-                stage, since = STAGE_OFFER, row["submitted_at"]
-            else:
-                stage, since = STAGE_OUTCOME, row["decided_at"]
-            elapsed = (now - datetime.fromisoformat(since)).total_seconds() if since else 0.0
-            self._arm_speech_fallback(
-                row["id"], stage, max(self._speech_fallback_s - elapsed, 0.0)
-            )
+            for stage in _undelivered_stages(row):
+                since = row["submitted_at"] if stage == STAGE_OFFER else row["decided_at"]
+                elapsed = (now - datetime.fromisoformat(since)).total_seconds() if since else 0.0
+                self._arm_speech_fallback(
+                    row["id"], stage, max(self._speech_fallback_s - elapsed, 0.0)
+                )
 
     async def aclose(self) -> None:
         for task in list(self._timers):
@@ -718,6 +761,20 @@ def _initiator_needs_notice(row: dict) -> bool:
     return not (row["status"] == VERDICT_CANCELLED and row["decided_by"] == row["initiator"])
 
 
+def _undelivered_stages(row: dict) -> list[str]:
+    """Какие речь+сообщения по записи должны были уйти, но не ушли."""
+    if row["status"] == "pending":
+        return [STAGE_OFFER] if row["offer_message_id"] is None else []
+    if row["status"] in OPEN_STATUSES:
+        return []
+    stages: list[str] = []
+    if row["notice_message_id"] is None and _initiator_needs_notice(row):
+        stages.append(STAGE_OUTCOME)
+    if row["status"] == VERDICT_ACCEPTED and row.get("welcome_message_id") is None:
+        stages.append(STAGE_WELCOME)
+    return stages
+
+
 def _event(row: dict) -> dict[str, Any]:
     data: dict[str, Any] = {"id": row["id"], "kind": row["kind"], "status": row["status"]}
     if row["status"] not in OPEN_STATUSES:
@@ -733,20 +790,19 @@ def open_forms_note(rows: list[dict], chat_id: int) -> str | None:
     items: list[str] = []
     for row in rows:
         payload = row["payload"]
-        label = ai_tools.relation_label(payload.get("relation", "?"))
         if row["status"] == "draft" and row["initiator"] == chat_id:
             items.append(
-                f"черновик предложения связи «{label}» адресату "
+                "черновик предложения знакомства адресату "
                 f"({payload.get('addressee_name')}) — ждёт кнопки «Отправить»/«Отмена»"
             )
         elif row["status"] == "pending" and row["addressee"] == chat_id:
             items.append(
-                f"входящее предложение связи «{label}» от "
+                "входящее предложение знакомства от "
                 f"«{payload.get('initiator_name')}» — ждёт кнопки «Принять»/«Отклонить»"
             )
         elif row["status"] == "pending":
             items.append(
-                f"отправленное предложение связи «{label}» адресату "
+                "отправленное предложение знакомства адресату "
                 f"({payload.get('addressee_name')}) — ждём ответа адресата"
             )
     if not items:

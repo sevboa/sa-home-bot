@@ -21,13 +21,11 @@ def _book() -> SubscriptionBook:
                 name="Наташа",
                 chat_id=NATASHA_CHAT,
                 allowed_commands=["chat@llm", "recall@memory"],
-                family=True,
             ),
             GuestSubscriptionConfig(
                 name="Игорь",
                 chat_id=IGOR_CHAT,
                 allowed_commands=["chat@llm"],
-                family=False,
             ),
         ],
     )
@@ -100,18 +98,6 @@ async def test_guests_list_bare_service_name_still_honours_exact_right():
     result = await ai_tools.tool_guests_list(_ctx(), {"right": "recall@memory"})
     assert "Наташа" in result
     assert "Игорь" not in result
-
-
-async def test_guests_list_filters_by_family_yes():
-    result = await ai_tools.tool_guests_list(_ctx(), {"family": "yes"})
-    assert "Наташа" in result
-    assert "Игорь" not in result
-
-
-async def test_guests_list_filters_by_family_no():
-    result = await ai_tools.tool_guests_list(_ctx(), {"family": "no"})
-    assert "Игорь" in result
-    assert "Наташа" not in result
 
 
 async def test_guests_list_empty_after_filter_says_so():

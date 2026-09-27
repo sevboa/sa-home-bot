@@ -19,12 +19,15 @@ def _load_schema() -> str:
     return resources.files("sa_home_bot.db").joinpath("schema.sql").read_text(encoding="utf-8")
 
 
-async def _add_column_if_missing(db: Database, table: str, column: str, decl: str) -> None:
+async def _add_column_if_missing(db: Database, table: str, column: str, decl: str) -> bool:
+    """True — колонку только что добавили (можно бэкфиллить)."""
     cur = await db.conn.execute(f"PRAGMA table_info({table})")
     existing = {row["name"] for row in await cur.fetchall()}
-    if column not in existing:
-        await db.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
-        log.info("Миграция: %s.%s добавлена", table, column)
+    if column in existing:
+        return False
+    await db.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    log.info("Миграция: %s.%s добавлена", table, column)
+    return True
 
 
 async def apply_migrations(db: Database) -> None:
@@ -58,40 +61,45 @@ async def apply_migrations(db: Database) -> None:
         log.info(
             "Миграция: vpn_check_states пересоздана под ключ (node, server, transport, target)"
         )
+    # pending_actions.welcome_message_id — добавлена 2026-09-27, поздравление
+    # адресату после «Принять» (Этап 46, см. schema.sql). Принятые ДО этого
+    # формы поздравления не предполагали — помечаем 0 («не положено»), иначе
+    # recover() дослал бы адресату заглушку и оповещение спустя часы.
+    if await _add_column_if_missing(db, "pending_actions", "welcome_message_id", "INTEGER"):
+        await db.conn.execute(
+            "UPDATE pending_actions SET welcome_message_id=0 WHERE status='accepted'"
+        )
     await _migrate_guest_relationships_check(db, schema)
     await db.conn.commit()
     log.info("Схема БД применена")
 
 
-# Полный набор relation, ожидаемый ТЕКУЩЕЙ схемой (bot/tools.py::RELATION_TYPES
-# зеркалит этот же список) — растёт по мере добавления типов связи ('family'
-# — 42.6.5, 'spouse' — 42.6.7). Миграция ниже сверяет CHECK живой таблицы с
-# этим списком и пересоздаёт её, если чего-то не хватает — держать в шаге с
-# schema.sql вручную, тестами не проверяется автоматически.
-_GUEST_RELATIONSHIP_TYPES = ("friend", "acquaintance", "family", "spouse")
+# Типы связи, которых больше нет (Этап 46, 2026-09-27: связь одна —
+# знакомство). Их присутствие в CHECK живой таблицы значит «схема до
+# этапа 46» — миграция ниже пересоздаёт таблицу с CHECK только на
+# 'acquaintance' и переписывает старые строки в знакомство.
+_LEGACY_RELATION_TYPES = ("friend", "family", "spouse")
 
 
 async def _migrate_guest_relationships_check(db: Database, schema: str) -> None:
-    """CHECK(relation IN (...)) растёт по мере добавления новых типов связи.
-    SQLite не умеет ALTER CHECK — таблица уже хранит реальные подтверждённые
-    связи (в отличие от vpn_check_states выше, это не жалко-оперативные
-    данные), поэтому не дропаем, а пересоздаём с переносом строк."""
+    """SQLite не умеет ALTER CHECK — таблица хранит реальные подтверждённые
+    связи (в отличие от vpn_check_states выше, это не оперативные данные),
+    поэтому не дропаем, а пересоздаём с переносом строк. Любая прежняя
+    связь (друг/знакомый/родство/супруг(а), в том числе самая первая схема
+    42.6.1) становится знакомством: знали друг друга — значит знакомы."""
     cur = await db.conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='guest_relationships'"
     )
     row = await cur.fetchone()
-    if row is None or all(f"'{r}'" in row["sql"] for r in _GUEST_RELATIONSHIP_TYPES):
+    if row is None or not any(f"'{r}'" in row["sql"] for r in _LEGACY_RELATION_TYPES):
         return
-    await db.conn.execute("ALTER TABLE guest_relationships RENAME TO guest_relationships_old_426")
+    await db.conn.execute("ALTER TABLE guest_relationships RENAME TO guest_relationships_old_46")
     await db.conn.executescript(schema)
     await db.conn.execute(
         "INSERT INTO guest_relationships "
         "(id, guest_a, guest_b, relation, status, proposed_by, created_at, confirmed_at) "
-        "SELECT id, guest_a, guest_b, relation, status, proposed_by, created_at, confirmed_at "
-        "FROM guest_relationships_old_426"
+        "SELECT id, guest_a, guest_b, 'acquaintance', status, proposed_by, created_at, "
+        "confirmed_at FROM guest_relationships_old_46"
     )
-    await db.conn.execute("DROP TABLE guest_relationships_old_426")
-    log.info(
-        "Миграция: guest_relationships — CHECK(relation) обновлён до %s",
-        ", ".join(_GUEST_RELATIONSHIP_TYPES),
-    )
+    await db.conn.execute("DROP TABLE guest_relationships_old_46")
+    log.info("Миграция: guest_relationships — все связи переведены в знакомство")

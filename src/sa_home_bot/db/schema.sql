@@ -148,23 +148,20 @@ CREATE TABLE IF NOT EXISTS ai_tool_calls (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_tool_calls_dialogue ON ai_tool_calls(chat_id, dialogue_id);
 
--- Связи между гостями (relationship ACL, Этап 42.6.1; 'family' добавлена
--- 42.6.5; 'spouse' + отказ от группового флага Subscription.family — 42.6.7,
--- 2026-09-26). Кто кому родня/супруг/друг/знакомый — ИСКЛЮЧИТЕЛЬНО явные
--- пары здесь, никакого автоматического вывода из Subscription.family больше
--- нет (живая находка: групповой флаг делал ВСЕХ флагованных гостей взаимно
--- роднёй, что не отражало реальность). 'family' — точечное родство,
--- 'spouse' — то же самое, но исключительно (см. проверку в bot/tools.py::
--- _resolve_propose_relationship — подтверждённая супружеская связь может
--- быть только одна с каждой стороны одновременно). Все четыре типа — один
--- и тот же жизненный цикл подтверждения (pending → confirmed/rejected
--- обеими сторонами). Без канонического упорядочивания guest_a/guest_b —
--- запросы по паре идут по OR на обе колонки (Store).
+-- Связи между гостями (Этап 42.6.1 → 46). С 2026-09-27 связь одна —
+-- подтверждённое знакомство ('acquaintance'), взаимное, без степеней:
+-- типы друг/родство/супруг(а) и групповой флаг Subscription.family убраны
+-- (выбор типа сталкивал людей лбами; кто хочет переписываться через
+-- Альфреда — знакомятся). Знакомство открывает tell в обе стороны
+-- (bot/tools.py::tool_tell). Строки старых типов db/migrations.py
+-- переписал в 'acquaintance'. Запрос живёт в pending_actions, здесь только
+-- итог. Без канонического упорядочивания guest_a/guest_b — запросы по паре
+-- идут по OR на обе колонки (Store).
 CREATE TABLE IF NOT EXISTS guest_relationships (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     guest_a       INTEGER NOT NULL,   -- chat_id инициатора (proposed_by)
     guest_b       INTEGER NOT NULL,   -- chat_id адресата
-    relation      TEXT NOT NULL CHECK (relation IN ('friend', 'acquaintance', 'family', 'spouse')),
+    relation      TEXT NOT NULL CHECK (relation IN ('acquaintance')),
     status        TEXT NOT NULL CHECK (status IN ('pending', 'confirmed', 'rejected')),
     proposed_by   INTEGER NOT NULL,
     created_at    TEXT NOT NULL,
@@ -187,7 +184,8 @@ CREATE INDEX IF NOT EXISTS idx_guest_relationships_b ON guest_relationships(gues
 -- *_message_id — какие сообщения уже ушли (идемпотентность: форма/
 -- оповещение никогда не уходят дважды): draft_message_id — форма у
 -- инициатора, offer_message_id — форма у адресата, notice_message_id —
--- итоговое оповещение инициатору.
+-- итоговое оповещение инициатору, welcome_message_id — поздравление
+-- адресату после «Принять» (Этап 46).
 CREATE TABLE IF NOT EXISTS pending_actions (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
     kind               TEXT NOT NULL,
@@ -200,6 +198,7 @@ CREATE TABLE IF NOT EXISTS pending_actions (
     draft_message_id   INTEGER,
     offer_message_id   INTEGER,
     notice_message_id  INTEGER,
+    welcome_message_id INTEGER,
     created_at         TEXT NOT NULL,
     submitted_at       TEXT,
     decided_at         TEXT,

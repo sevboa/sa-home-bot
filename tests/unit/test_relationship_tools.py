@@ -1,8 +1,8 @@
-"""Тулы связей между гостями: request_relationship_form (Этап 45 —
-заменил preview/propose/confirm/reject: модель только открывает форму,
-решают кнопки), общая проверка relationship_conflict и my_relationships.
-Сам жизненный цикл формы (кнопки, экспирация, речь + форма) — в
-test_pending_actions.py."""
+"""Тулы знакомства между гостями (Этап 46: связь одна — знакомство):
+request_acquaintance (модель только открывает форму, решают кнопки), общая
+проверка acquaintance_conflict и my_acquaintances. Сам жизненный цикл
+формы (кнопки, экспирация, речь + форма) — в test_pending_actions.py,
+передача сообщений знакомым — в test_tell.py."""
 
 from __future__ import annotations
 
@@ -34,24 +34,16 @@ async def store(tmp_path):
     await db.close()
 
 
-def _guest(name: str, chat_id: int, *, family: bool = False) -> GuestSubscriptionConfig:
+def _guest(name: str, chat_id: int) -> GuestSubscriptionConfig:
     return GuestSubscriptionConfig(
-        name=name,
-        chat_id=chat_id,
-        allowed_commands=["chat@llm"],
-        invited_user=name,
-        family=family,
+        name=name, chat_id=chat_id, allowed_commands=["chat@llm"], invited_user=name
     )
 
 
-def _book(*, a_family: bool = False, b_family: bool = False) -> SubscriptionBook:
+def _book() -> SubscriptionBook:
     return SubscriptionBook.from_config(
         [SubscriptionConfig(name="owner", chat_id=OWNER_CHAT, allowed_commands=["*"])],
-        [
-            _guest("Вася", GUEST_A, family=a_family),
-            _guest("Настя", GUEST_B, family=b_family),
-            _guest("Игорь", GUEST_C),
-        ],
+        [_guest("Вася", GUEST_A), _guest("Настя", GUEST_B), _guest("Игорь", GUEST_C)],
     )
 
 
@@ -97,26 +89,30 @@ def _ctx(store, *, chat_id, book, settings=None, with_forms=True):
     return ctx, notifier, node_link
 
 
-async def _confirmed(store, a, b, relation):
+async def _acquainted(store, a, b):
     now = datetime.now(tz=UTC)
-    return await store.add_confirmed_relationship(a, b, relation, now, now)
+    return await store.add_confirmed_relationship(a, b, "acquaintance", now, now)
 
 
-# --- request_relationship_form ---
+async def _request(ctx, recipient):
+    return await ai_tools.tool_request_acquaintance(ctx, {"recipient": recipient})
+
+
+# --- request_acquaintance ---
 
 
 async def test_form_creates_draft_but_sends_nothing_yet(store):
     ctx, notifier, node_link = _ctx(store, chat_id=GUEST_A, book=_book())
 
-    result = await ai_tools.tool_request_relationship_form(
-        ctx, {"target_chat_id": GUEST_B, "relation": "acquaintance"}
-    )
+    result = await _request(ctx, "Настя")
 
     assert "НИЧЕГО не отправлено" in result
-    assert "Настя" in result and "знакомый" in result
+    assert "знакомства" in result and "адресат — Настя" in result
+    assert "передавать сообщения" in result
     rows = await store.open_pending_actions(chat_id=GUEST_A)
     assert len(rows) == 1
     assert rows[0]["status"] == "draft"
+    assert rows[0]["addressee"] == GUEST_B
     assert rows[0]["payload"]["relation"] == "acquaintance"
     # Форма уходит ПОСЛЕ ответа Альфреда (flush_drafts), не из тула; адресат
     # о черновике не знает вовсе.
@@ -126,81 +122,52 @@ async def test_form_creates_draft_but_sends_nothing_yet(store):
     assert [c[1]["action"] for c in node_link.calls] == ["timer"]
 
 
+def test_declaration_has_no_relation_type():
+    """Этап 46: тип связи модель больше не выбирает — только адресата."""
+    params = ai_tools._DECL_REQUEST_ACQUAINTANCE["function"]["parameters"]  # noqa: SLF001
+    assert set(params["properties"]) == {"recipient"}
+    names = {spec.name for spec in ai_tools.TOOLS}
+    assert {"request_acquaintance", "my_acquaintances"} <= names
+    assert not names & {"request_relationship_form", "my_relationships"}
+
+
 async def test_form_unavailable_without_pending_actions(store):
     # Служба tasks (chat_loop) — форм там показать некому.
     ctx, _, _ = _ctx(store, chat_id=GUEST_A, book=_book(), with_forms=False)
-    result = await ai_tools.tool_request_relationship_form(
-        ctx, {"target_chat_id": GUEST_B, "relation": "friend"}
-    )
-    assert "недоступно" in result
+    assert "недоступно" in await _request(ctx, "Настя")
     assert await store.open_pending_actions() == []
 
 
 async def test_form_input_errors(store):
     ctx, _, _ = _ctx(store, chat_id=GUEST_A, book=_book())
-    unknown = await ai_tools.tool_request_relationship_form(
-        ctx, {"target_chat_id": STRANGER_CHAT, "relation": "friend"}
-    )
-    bad_relation = await ai_tools.tool_request_relationship_form(
-        ctx, {"target_chat_id": GUEST_B, "relation": "enemy"}
-    )
-    self_target = await ai_tools.tool_request_relationship_form(
-        ctx, {"target_chat_id": GUEST_A, "relation": "friend"}
-    )
-    assert "гость не найден" in unknown
-    assert "relation должен быть" in bad_relation
-    assert "самому себе" in self_target
+    assert "не сказано" in await ai_tools.tool_request_acquaintance(ctx, {})
+    assert "не знаю" in await _request(ctx, "Никодим")
+    assert "самому себе" in await _request(ctx, "Вася")
     assert await store.open_pending_actions() == []
 
 
-async def test_form_family_flag_no_longer_matters(store):
-    ctx, _, _ = _ctx(store, chat_id=GUEST_A, book=_book(a_family=True, b_family=True))
-    result = await ai_tools.tool_request_relationship_form(
-        ctx, {"target_chat_id": GUEST_B, "relation": "family"}
+async def test_form_ambiguous_recipient_asks_to_clarify(store):
+    book = SubscriptionBook.from_config(
+        [SubscriptionConfig(name="owner", chat_id=OWNER_CHAT, allowed_commands=["*"])],
+        [_guest("Вася", GUEST_A), _guest("Настя", GUEST_B), _guest("Настя", GUEST_C)],
     )
-    assert "Форма открыта" in result
+    ctx, _, _ = _ctx(store, chat_id=GUEST_A, book=book)
+    assert "уточни" in await _request(ctx, "Настя")
+    assert await store.open_pending_actions() == []
 
 
 async def test_form_duplicate_open_draft_is_refused(store):
     ctx, _, _ = _ctx(store, chat_id=GUEST_A, book=_book())
-    await ai_tools.tool_request_relationship_form(
-        ctx, {"target_chat_id": GUEST_B, "relation": "friend"}
-    )
-    again = await ai_tools.tool_request_relationship_form(
-        ctx, {"target_chat_id": GUEST_B, "relation": "friend"}
-    )
-    assert "уже открыта" in again
+    await _request(ctx, "Настя")
+    assert "уже открыта" in await _request(ctx, "Настя")
     assert len(await store.open_pending_actions()) == 1
 
 
-async def test_form_already_confirmed_relation(store):
-    await _confirmed(store, GUEST_A, GUEST_B, "friend")
+async def test_form_already_acquainted_either_direction(store):
+    await _acquainted(store, GUEST_B, GUEST_A)
     ctx, _, _ = _ctx(store, chat_id=GUEST_A, book=_book())
-    result = await ai_tools.tool_request_relationship_form(
-        ctx, {"target_chat_id": GUEST_B, "relation": "friend"}
-    )
-    assert "уже подтверждённая связь" in result
+    assert "уже знакомы" in await _request(ctx, "Настя")
     assert await store.open_pending_actions() == []
-
-
-async def test_form_spouse_exclusivity(store):
-    await _confirmed(store, GUEST_B, GUEST_C, "spouse")
-    ctx, _, _ = _ctx(store, chat_id=GUEST_A, book=_book())
-    target_married = await ai_tools.tool_request_relationship_form(
-        ctx, {"target_chat_id": GUEST_B, "relation": "spouse"}
-    )
-    assert "у адресата (Настя) уже есть супруг(а)" in target_married
-
-    ctx_c, _, _ = _ctx(store, chat_id=GUEST_C, book=_book())
-    initiator_married = await ai_tools.tool_request_relationship_form(
-        ctx_c, {"target_chat_id": GUEST_A, "relation": "spouse"}
-    )
-    assert "у инициатора уже есть супруг(а)" in initiator_married
-    # Не супружеская связь с тем же человеком — можно.
-    friend = await ai_tools.tool_request_relationship_form(
-        ctx, {"target_chat_id": GUEST_B, "relation": "friend"}
-    )
-    assert "Форма открыта" in friend
 
 
 async def test_form_owner_never_named_in_third_person_and_not_me(store):
@@ -225,9 +192,7 @@ async def test_form_owner_never_named_in_third_person_and_not_me(store):
     )
     ctx, _, _ = _ctx(store, chat_id=OWNER_CHAT, book=book, settings=settings)
 
-    result = await ai_tools.tool_request_relationship_form(
-        ctx, {"target_chat_id": GUEST_B, "relation": "spouse"}
-    )
+    result = await _request(ctx, "Настя")
 
     assert "Алексей Александрович Севбо" not in result
     assert "asevbo" not in result
@@ -239,41 +204,47 @@ async def test_form_owner_never_named_in_third_person_and_not_me(store):
     assert payload["addressee_name"] == "Наташа Сорокина"
 
 
-# --- relationship_conflict (повторная проверка на «Отправить»/«Принять») ---
+# --- acquaintance_conflict (повторная проверка на «Отправить»/«Принять») ---
 
 
 async def test_conflict_ignores_the_form_itself(store):
     ctx, _, _ = _ctx(store, chat_id=GUEST_A, book=_book())
-    await ai_tools.tool_request_relationship_form(
-        ctx, {"target_chat_id": GUEST_B, "relation": "friend"}
-    )
+    await _request(ctx, "Настя")
     row = (await store.open_pending_actions())[0]
     assert (
-        await ai_tools.relationship_conflict(
-            store, GUEST_A, GUEST_B, "friend", "Настя", ignore_action_id=row["id"]
+        await ai_tools.acquaintance_conflict(
+            store, GUEST_A, GUEST_B, "Настя", ignore_action_id=row["id"]
         )
         is None
     )
-    assert "уже открыта" in await ai_tools.relationship_conflict(
-        store, GUEST_A, GUEST_B, "friend", "Настя"
+    assert "уже открыта" in await ai_tools.acquaintance_conflict(
+        store, GUEST_A, GUEST_B, "Настя"
     )
 
 
-async def test_conflict_pending_in_reverse_direction(store):
-    # Встречная заявка B → A уже отправлена — A не может слать свою.
+async def test_conflict_counter_offer_points_to_its_form(store):
+    # Встречное предложение B → A уже отправлено — A надо лишь нажать
+    # «Принять» в форме B, а не слать своё.
     now = datetime.now(tz=UTC)
     row = await store.create_pending_action(
-        "relationship", GUEST_B, GUEST_A, {"relation": "friend"}, now, now
+        "relationship", GUEST_B, GUEST_A, {"relation": "acquaintance"}, now, now
     )
     await store.transition_pending_action(row["id"], ("draft",), "pending", now, expires_at=now)
-    result = await ai_tools.relationship_conflict(store, GUEST_A, GUEST_B, "friend", "Настя")
-    assert "уже отправлено адресату (Настя)" in result
+    result = await ai_tools.acquaintance_conflict(store, GUEST_A, GUEST_B, "Настя")
+    assert "уже сам предложил вам знакомство" in result and "Принять" in result
 
 
-# --- my_relationships ---
+async def test_are_acquainted_is_symmetric_and_pairwise(store):
+    await _acquainted(store, GUEST_A, GUEST_B)
+    assert await ai_tools.are_acquainted(store, GUEST_A, GUEST_B)
+    assert await ai_tools.are_acquainted(store, GUEST_B, GUEST_A)
+    assert not await ai_tools.are_acquainted(store, GUEST_A, GUEST_C)
 
 
-async def test_my_relationships_no_store():
+# --- my_acquaintances ---
+
+
+async def test_my_acquaintances_no_store():
     ctx = ai_tools.ToolContext(
         chat_id=GUEST_A,
         dialogue_id=None,
@@ -281,38 +252,29 @@ async def test_my_relationships_no_store():
         settings=Settings(),
         book=_book(),
     )
-    assert "недоступно" in await ai_tools.tool_my_relationships(ctx, {})
+    assert "недоступно" in await ai_tools.tool_my_acquaintances(ctx, {})
 
 
-async def test_my_relationships_caller_unknown(store):
+async def test_my_acquaintances_caller_unknown(store):
     ctx, _, _ = _ctx(store, chat_id=STRANGER_CHAT, book=_book())
-    assert "недоступно" in await ai_tools.tool_my_relationships(ctx, {})
+    assert "недоступно" in await ai_tools.tool_my_acquaintances(ctx, {})
 
 
-async def test_my_relationships_empty(store):
+async def test_my_acquaintances_empty(store):
     ctx, _, _ = _ctx(store, chat_id=GUEST_A, book=_book())
-    assert await ai_tools.tool_my_relationships(ctx, {}) == "подтверждённых связей нет"
+    assert await ai_tools.tool_my_acquaintances(ctx, {}) == "подтверждённых знакомств нет"
 
 
-async def test_my_relationships_both_roles_and_types(store):
-    await _confirmed(store, GUEST_B, GUEST_A, "acquaintance")
-    await _confirmed(store, GUEST_A, GUEST_C, "family")
+async def test_my_acquaintances_both_roles(store):
+    await _acquainted(store, GUEST_B, GUEST_A)
+    await _acquainted(store, GUEST_A, GUEST_C)
     ctx, _, _ = _ctx(store, chat_id=GUEST_A, book=_book())
-    result = await ai_tools.tool_my_relationships(ctx, {})
-    assert "Настя" in result and "знакомый" in result
-    assert "Игорь" in result and "родство" in result
+    result = await ai_tools.tool_my_acquaintances(ctx, {})
+    assert "Настя" in result and "Игорь" in result
+    assert "передавать сообщения" in result
 
 
-async def test_my_relationships_pairwise_spouse(store):
-    await _confirmed(store, GUEST_A, GUEST_B, "spouse")
-    ctx, _, _ = _ctx(store, chat_id=GUEST_B, book=_book())
-    result = await ai_tools.tool_my_relationships(ctx, {})
-    assert "Вася" in result and "супруг(а)" in result
-
-
-async def test_my_relationships_silent_about_open_forms(store):
+async def test_my_acquaintances_silent_about_open_forms(store):
     ctx, _, _ = _ctx(store, chat_id=GUEST_A, book=_book())
-    await ai_tools.tool_request_relationship_form(
-        ctx, {"target_chat_id": GUEST_B, "relation": "friend"}
-    )
-    assert await ai_tools.tool_my_relationships(ctx, {}) == "подтверждённых связей нет"
+    await _request(ctx, "Настя")
+    assert await ai_tools.tool_my_acquaintances(ctx, {}) == "подтверждённых знакомств нет"

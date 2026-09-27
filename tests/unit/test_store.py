@@ -344,11 +344,11 @@ GUEST_C = 333
 
 async def test_add_confirmed_relationship(store):
     row = await store.add_confirmed_relationship(
-        GUEST_A, GUEST_B, "friend", BASE_TIME, BASE_TIME + timedelta(hours=1)
+        GUEST_A, GUEST_B, "acquaintance", BASE_TIME, BASE_TIME + timedelta(hours=1)
     )
     assert row["guest_a"] == GUEST_A
     assert row["guest_b"] == GUEST_B
-    assert row["relation"] == "friend"
+    assert row["relation"] == "acquaintance"
     assert row["status"] == "confirmed"
     assert row["proposed_by"] == GUEST_A
     assert row["confirmed_at"] is not None
@@ -357,7 +357,9 @@ async def test_add_confirmed_relationship(store):
 
 
 async def test_relationships_for_finds_both_roles(store):
-    row = await store.add_confirmed_relationship(GUEST_A, GUEST_B, "friend", BASE_TIME, BASE_TIME)
+    row = await store.add_confirmed_relationship(
+        GUEST_A, GUEST_B, "acquaintance", BASE_TIME, BASE_TIME
+    )
     assert [r["id"] for r in await store.relationships_for(GUEST_A)] == [row["id"]]
     assert [r["id"] for r in await store.relationships_for(GUEST_B)] == [row["id"]]
     assert await store.relationships_for(GUEST_C) == []
@@ -371,7 +373,7 @@ async def _draft(store, initiator=GUEST_A, addressee=GUEST_B):
         "relationship",
         initiator,
         addressee,
-        {"relation": "friend"},
+        {"relation": "acquaintance"},
         BASE_TIME + timedelta(hours=1),
         BASE_TIME,
     )
@@ -380,7 +382,7 @@ async def _draft(store, initiator=GUEST_A, addressee=GUEST_B):
 async def test_create_pending_action_is_draft_with_payload(store):
     row = await _draft(store)
     assert row["status"] == "draft"
-    assert row["payload"] == {"relation": "friend"}
+    assert row["payload"] == {"relation": "acquaintance"}
     assert row["draft_message_id"] is None
     assert await store.get_pending_action(row["id"]) == row
 
@@ -440,6 +442,15 @@ async def test_pending_actions_needing_delivery(store):
     assert ids == [offer["id"], expired_draft["id"]]
     await store.set_pending_action_message(offer["id"], "offer_message_id", 10)
     await store.set_pending_action_message(expired_draft["id"], "notice_message_id", 11)
+    assert await store.pending_actions_needing_delivery() == []
+
+    # Этап 46: принятое ждёт ещё и поздравления адресату.
+    await store.transition_pending_action(
+        offer["id"], ("pending",), "accepted", BASE_TIME, decided_by=GUEST_B
+    )
+    await store.set_pending_action_message(offer["id"], "notice_message_id", 12)
+    assert [r["id"] for r in await store.pending_actions_needing_delivery()] == [offer["id"]]
+    await store.set_pending_action_message(offer["id"], "welcome_message_id", 13)
     assert await store.pending_actions_needing_delivery() == []
 
 

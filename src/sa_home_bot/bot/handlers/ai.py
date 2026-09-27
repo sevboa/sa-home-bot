@@ -1017,7 +1017,7 @@ async def _do_ask_and_reply(
         if rich_session is not None:
             await rich_session.aclose()
         # Формы подтверждения, открытые тулом за этот ход (Этап 45,
-        # request_relationship_form), — строго ПОСЛЕ речи Альфреда, при
+        # request_acquaintance), — строго ПОСЛЕ речи Альфреда, при
         # любом её исходе (ответ, «Альбегт», сбой). Не при отмене задачи
         # (рестарт бота): тогда форму дошлёт PendingActions.recover().
         current = asyncio.current_task()

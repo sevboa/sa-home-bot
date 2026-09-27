@@ -274,13 +274,10 @@ class MemoryConfig(BaseModel):
     руками (как и сам scope="family" — тул модели его не даёт, см.
     memory/service.py, по аналогии с common).
 
-    С решением 2026-08-04 этот список — не единственный источник доступа:
-    гость с флагом ``family`` (``/guests``, ``Subscription.family``,
-    ``bot/invites.py::Gatekeeper.set_guest_family``) получает тот же доступ
-    к scope="family", не будучи вписан сюда руками — служба memory узнаёт об
-    этом флагом ``guest_family`` в каждом запросе (см.
-    ``memory/service.py::_is_family_chat``, служба-процесс своего доступа к
-    гостевым подпискам не имеет).
+    Это единственный источник доступа к scope="family": гостевой флаг
+    «семья» (решение 2026-08-04) убран 2026-09-27 вместе со связями
+    родства — отношения между гостями теперь только подтверждённое
+    знакомство, и к памяти оно доступа не даёт.
     """
 
     socket: str = "./data/memory.sock"
@@ -1055,7 +1052,10 @@ class SubscriptionConfig(BaseModel):
     chat_id: int
     event_types: list[str] = Field(default_factory=lambda: ["*"])
     allowed_commands: list[str] = Field(default_factory=list)
-    family: bool = False  # свой человек — доступ к memory scope=family, см. MemoryConfig
+    # Флага family больше нет (2026-09-27): переписку между гостями
+    # открывает подтверждённое знакомство (guest_relationships), семейную
+    # память — только [memory].family_chat_ids. Старые пакеты со строкой
+    # `family = ...` читаются без ошибок — pydantic лишнее поле игнорирует.
 
 
 class GuestSubscriptionConfig(SubscriptionConfig):

@@ -1015,37 +1015,21 @@ async def schedule_agent_dialogue(
     return await node_link.command(task_protocol.ACTION_CREATE, create_args, dst=dst)
 
 
-# --- связи между гостями (Этап 42.6.2, relationship ACL; 'family'/'родство'
-# — 42.6.5; отказ от группового флага + 'spouse'/'супруги' — 42.6.7) ---
+# --- знакомство между гостями (Этап 42.6 → 45 → 46) ---
 #
-# Групповой флаг Subscription.family БОЛЬШЕ НЕ управляет отношениями между
-# гостями (решение пользователя 2026-09-26, живая находка: флаг делал ВСЕХ
-# флагованных гостей взаимно роднёй, а реальное родство не таково — у части
-# пары флаг совпадал, но родства не было). Кто кому родня/супруг/друг/
-# знакомый — теперь ИСКЛЮЧИТЕЛЬНО явные пары в guest_relationships.
-# Запрос связи с Этапа 45 живёт в pending_actions и решается кнопками форм
-# (bot/pending_actions.py), в guest_relationships пишется только итог
-# (confirmed). Флаг Subscription.family
-# остаётся в конфиге/UI (`/guests`) как отдельная, самостоятельная ось —
-# просто больше НЕ читается нигде в этом файле.
-# 'family' (label "родство") — общая точечная связь родства КОНКРЕТНОЙ паре.
-# 'spouse' (label "супруг(а)") — то же самое, но с исключительностью:
-# подтверждённая супружеская связь может быть только одна с каждой стороны
-# одновременно (см. проверку в relationship_conflict). relation —
-# плоский набор для v1 (решение пользователя 2026-09-26, не лестница),
-# отзыв связи — открытый вопрос в плане; срок ожидания ответа — Этап 45
-# (72 ч, bot/pending_actions.py::OFFER_TTL).
-RELATION_TYPES = ("friend", "acquaintance", "family", "spouse")
-_RELATION_LABELS_RU = {
-    "friend": "друг",
-    "acquaintance": "знакомый",
-    "family": "родство",
-    "spouse": "супруг(а)",
-}
-
-
-def relation_label(relation: str) -> str:
-    return _RELATION_LABELS_RU.get(relation, relation)
+# Решение пользователя 2026-09-27: связь между гостями ОДНА — факт
+# знакомства, взаимный и без степеней. Типы друг/знакомый/родство/супруг(а)
+# (42.6.x) убраны: выбор типа сталкивал лбами людей, не определившихся
+# между собой, а «дружбу» каждый понимает по-своему. Что бы собеседник ни
+# сказал об отношениях («мой друг», «моя жена»), Альфред предлагает
+# установить знакомство. Групповой флаг «семья» (Subscription.family)
+# убран тогда же: кто хочет переписываться через Альфреда — знакомы и
+# запросят знакомство. Подтверждённое знакомство открывает tell в обе
+# стороны (см. tool_tell). Запрос живёт в pending_actions и решается
+# кнопками форм (bot/pending_actions.py), в guest_relationships пишется
+# только итог (confirmed). Отзыв знакомства — пока не нужен (решение того
+# же дня).
+RELATION_ACQUAINTANCE = "acquaintance"
 
 
 def _guest_facing_name(settings: Settings, chat_id: int, fallback: str) -> str:
@@ -1067,7 +1051,7 @@ def _guest_facing_name(settings: Settings, chat_id: int, fallback: str) -> str:
     грамматика ("у Наташа Сорокина", "отправлено Наташа Сорокина"). Падеж
     держать на служебном слове ("адресату (…)", "с адресатом (…)"), а имя —
     именительным лейблом в скобках. И ни в каком падеже не называть по
-    имени в третьем лице самого адресата текста (см. tool_request_relationship_form)."""
+    имени в третьем лице самого адресата текста (см. tool_request_acquaintance)."""
     for person in settings.people:
         if person.telegram_id and person.telegram_id == chat_id:
             return (
@@ -1078,60 +1062,62 @@ def _guest_facing_name(settings: Settings, chat_id: int, fallback: str) -> str:
     return fallback
 
 
-async def relationship_conflict(
+async def are_acquainted(store: Any, a: int, b: int) -> bool:
+    """Подтверждённое знакомство пары — в любом направлении (guest_a/guest_b
+    не упорядочены). Старые строки других типов (до 2026-09-27) миграция
+    переписала в acquaintance, поэтому тип не сверяем."""
+    return any({r["guest_a"], r["guest_b"]} == {a, b} for r in await store.relationships_for(a))
+
+
+async def acquaintance_conflict(
     store: Any,
     initiator: int,
     target: int,
-    relation: str,
     target_name: str,
     *,
     ignore_action_id: int | None = None,
 ) -> str | None:
-    """Почему эту связь сейчас нельзя предложить/принять — None, если
-    можно. Проверяется на открытии формы (request_relationship_form) И
-    повторно на «Отправить»/«Принять» (bot/pending_actions.py, Этап 45.2 п.4):
-    за час/трое суток ожидания могла появиться другая заявка или супруг(а).
+    """Почему знакомство сейчас нельзя предложить/принять — None, если
+    можно. Проверяется на открытии формы (request_acquaintance) И повторно
+    на «Отправить»/«Принять» (bot/pending_actions.py): за час/трое суток
+    ожидания могли познакомиться иначе или прийти встречное предложение.
     ``ignore_action_id`` — сама проверяемая форма, она не конфликт себе.
 
-    Живая находка 2026-09-26 (падежи): full_name из settings.people строго в
-    именительном падеже, вставленное в предложение с другим падежом ломает
-    грамматику ("у Наташа Сорокина"). Падеж держим на служебном слове
-    ("адресата"/"вас"), имя — именительным лейблом в скобках."""
+    Падеж держим на служебном слове («адресату (…)»), имя — именительным
+    лейблом в скобках: full_name из settings.people строго в именительном
+    (живая находка 2026-09-26, «у Наташа Сорокина»)."""
     pair = {initiator, target}
     for row in await store.open_pending_actions("relationship", initiator):
         if row["id"] == ignore_action_id or {row["initiator"], row["addressee"]} != pair:
             continue
+        if row["initiator"] != initiator:
+            # Встречное: адресат уже сам предложил знакомство инициатору.
+            return (
+                f"адресат ({target_name}) уже сам предложил вам знакомство — "
+                "ответьте кнопкой «Принять» в его форме"
+            )
         if row["status"] == "draft":
             return (
-                f"форма предложения адресату ({target_name}) уже открыта — "
+                f"форма предложения знакомства адресату ({target_name}) уже открыта — "
                 "ждёт кнопки «Отправить» или «Отмена»"
             )
-        return f"предложение уже отправлено адресату ({target_name}), ждём ответа"
-    initiator_confirmed = await store.relationships_for(initiator, status="confirmed")
-    if any({r["guest_a"], r["guest_b"]} == pair for r in initiator_confirmed):
-        return f"с адресатом ({target_name}) уже подтверждённая связь"
-    if relation == "spouse":
-        # Супружеская связь исключительна — только одна подтверждённая с
-        # каждой стороны одновременно (решение пользователя 2026-09-26).
-        if any(r["relation"] == "spouse" for r in initiator_confirmed):
-            return "у инициатора уже есть супруг(а) — сначала эту связь нужно разорвать"
-        target_confirmed = await store.relationships_for(target, status="confirmed")
-        if any(r["relation"] == "spouse" for r in target_confirmed):
-            return (
-                f"у адресата ({target_name}) уже есть супруг(а) — "
-                "сначала эта связь должна быть расторгнута"
-            )
+        return f"предложение знакомства уже отправлено адресату ({target_name}), ждём ответа"
+    if await are_acquainted(store, initiator, target):
+        return f"вы с адресатом ({target_name}) уже знакомы"
     return None
 
 
-async def tool_request_relationship_form(ctx: ToolContext, args: dict[str, Any]) -> str:
-    """Открыть инициатору форму предложения связи (Этап 45.2). Модель
-    больше НЕ отправляет предложение и НЕ принимает ответ: тул создаёт
-    черновик (bot/pending_actions.py, срок 1 ч), а форму с кнопками
-    «Отправить»/«Отмена» бот пришлёт отдельным сообщением ПОСЛЕ ответа
-    Альфреда (bot/handlers/ai.py → PendingActions.flush_drafts). Дальше всё
-    решают кнопки: адресат получит речь Альфреда и свою форму «Принять»/
-    «Отклонить», инициатор — речь и детерминированное оповещение об итоге.
+async def tool_request_acquaintance(ctx: ToolContext, args: dict[str, Any]) -> str:
+    """Открыть инициатору форму предложения знакомства. Модель НЕ
+    отправляет предложение и НЕ принимает ответ: тул создаёт черновик
+    (bot/pending_actions.py, срок 1 ч), а форму с кнопками «Отправить»/
+    «Отмена» бот пришлёт отдельным сообщением ПОСЛЕ ответа Альфреда
+    (bot/handlers/ai.py → PendingActions.flush_drafts). Дальше всё решают
+    кнопки.
+
+    Адресата ищет тот же резолвер, что у tell (bot/recipients.py), — по
+    имени/@username, а не по chat_id: guests_list виден только владельцу, и
+    гость раньше не мог узнать chat_id того, с кем хочет связаться.
 
     Только живой /ai: в службе tasks (ctx.pending_actions там нет) формы
     некому показать — честный отказ."""
@@ -1141,79 +1127,73 @@ async def tool_request_relationship_form(ctx: ToolContext, args: dict[str, Any])
         or ctx.store is None
         or ctx.pending_actions is None
     ):
-        return "недоступно: форму связи можно открыть только в живом разговоре"
-    try:
-        target_chat_id = int(args.get("target_chat_id"))
-    except (TypeError, ValueError):
-        return "ошибка: target_chat_id должен быть числом (chat_id из guests_list)"
-    relation = str(args.get("relation") or "").strip().lower()
-    if relation not in RELATION_TYPES:
-        return f"ошибка: relation должен быть одним из: {', '.join(RELATION_TYPES)}"
+        return "недоступно: форму знакомства можно открыть только в живом разговоре"
+    who = str(args.get("recipient") or "").strip()
+    if not who:
+        return "ошибка: не сказано, с кем познакомить (recipient)"
+    found = recipients.find_recipients(who, ctx.book, ctx.settings.people)
+    if not found:
+        return (
+            f"не получилось: «{who}» я не знаю — познакомить могу только с тем, "
+            "кто уже принял приглашение и говорит со мной в личном чате"
+        )
+    if len(found) > 1:
+        names = ", ".join(r.display for r in found)
+        return f"уточни, с кем именно: под «{who}» подходят {names}"
+    target_chat_id = found[0].chat_id
     if target_chat_id == ctx.chat_id:
-        return "ошибка: нельзя предложить связь самому себе"
+        return "ошибка: нельзя предложить знакомство самому себе"
     proposer = ctx.book.for_chat(ctx.chat_id)
     target = ctx.book.for_chat(target_chat_id)
     if proposer is None or target is None:
-        return "ошибка: гость не найден — сверься с guests_list, не угадывай chat_id"
+        return "недоступно: знакомиться через меня могут только приглашённые гости"
     # Имена для ЧУЖОГО текста — не Subscription.name напрямую, см.
     # _guest_facing_name (владельческое "me" технически, не для показа).
     proposer_name = _guest_facing_name(ctx.settings, ctx.chat_id, proposer.name)
     target_name = _guest_facing_name(ctx.settings, target_chat_id, target.name)
 
-    conflict = await relationship_conflict(
-        ctx.store, ctx.chat_id, target_chat_id, relation, target_name
-    )
+    conflict = await acquaintance_conflict(ctx.store, ctx.chat_id, target_chat_id, target_name)
     if conflict is not None:
         return conflict
     await ctx.pending_actions.create_relationship_draft(
-        ctx.chat_id, target_chat_id, relation, proposer_name, target_name
+        ctx.chat_id, target_chat_id, RELATION_ACQUAINTANCE, proposer_name, target_name
     )
     # Живая находка 2026-09-26: инициатор — это ВСЕГДА сам собеседник в
     # этом чате, в тексте, адресованном ЕМУ, не называть его по имени в
     # третьем лице (Gemma озвучивала такое слово в слово).
     return (
         "Форма открыта, адресату пока НИЧЕГО не отправлено. Сразу после твоего "
-        "ответа собеседник получит отдельное сообщение-форму: адресат — "
-        f"{target_name}, связь «{relation_label(relation)}», кнопки «Отправить» и "
-        "«Отмена», форма действует 1 час. Собеседник в этом чате — сам "
-        "инициатор; обращайся к нему на «вы» и не называй его по имени в "
-        "третьем лице. Коротко скажи своими словами, что форма ниже и что "
-        "отправит предложение он сам кнопкой. Не говори, что уже отправил, и "
-        "не проси подтвердить текстом."
+        "ответа собеседник получит отдельное сообщение-форму: предложение "
+        f"знакомства, адресат — {target_name}, кнопки «Отправить» и «Отмена», "
+        "форма действует 1 час. Собеседник в этом чате — сам инициатор; "
+        "обращайся к нему на «вы» и не называй его по имени в третьем лице. "
+        "Коротко скажи своими словами, что форма ниже и что отправит "
+        "предложение он сам кнопкой, а после согласия адресата ты сможешь "
+        "передавать сообщения между ними. Не говори, что уже отправил, и не "
+        "проси подтвердить текстом."
     )
 
 
-_RELATION_EMOJI = {"family": "🏠", "spouse": "💍"}
-_RELATION_EMOJI_DEFAULT = "🤝"
-
-
-async def tool_my_relationships(ctx: ToolContext, _args: dict[str, Any]) -> str:
-    """Только подтверждённые связи (42.6, шаг 4 сценария) — про pending/
-    rejected, в том числе про собственные неотвеченные заявки, молчим
-    намеренно, не переусложняем v1 (см. IMPLEMENTATION_PLAN.md §42.6.3).
-    Родство/супружество — ТАКИЕ ЖЕ явные пары в guest_relationships, как
-    друг/знакомый (42.6.7) — групповой флаг Subscription.family здесь больше
-    не читается вовсе. ``ctx.store`` нет в проактивной сессии агента
-    установки связи (Этап 44 — у службы tasks нет своего Store, см. докстринг
-    ToolContext выше) — там честный отказ, не молчание."""
+async def tool_my_acquaintances(ctx: ToolContext, _args: dict[str, Any]) -> str:
+    """Только подтверждённые знакомства — про неотвеченные/отклонённые
+    предложения молчим намеренно (IMPLEMENTATION_PLAN.md §42.6.3).
+    ``ctx.store`` нет в службе tasks — там честный отказ, не молчание."""
     if ctx.chat_id is None or ctx.book is None or ctx.store is None:
-        return "недоступно: сейчас не вижу свои связи"
+        return "недоступно: сейчас не вижу своих знакомых"
     me = ctx.book.for_chat(ctx.chat_id)
     if me is None:
         return "недоступно: тебя нет в списке гостей"
 
     lines: list[str] = []
-    confirmed = await ctx.store.relationships_for(ctx.chat_id, status="confirmed")
-    for row in confirmed:
+    for row in await ctx.store.relationships_for(ctx.chat_id, status="confirmed"):
         other_chat_id = row["guest_b"] if row["guest_a"] == ctx.chat_id else row["guest_a"]
         other = ctx.book.for_chat(other_chat_id)
         name = other.name if other is not None else f"chat_id {other_chat_id}"
-        emoji = _RELATION_EMOJI.get(row["relation"], _RELATION_EMOJI_DEFAULT)
-        lines.append(f"{emoji} {name} — {relation_label(row['relation'])}")
+        lines.append(f"🤝 {name}")
 
     if not lines:
-        return "подтверждённых связей нет"
-    return "\n".join(lines)
+        return "подтверждённых знакомств нет"
+    return "Знакомы (могу передавать сообщения):\n" + "\n".join(lines)
 
 
 _DECL_CALC: dict[str, Any] = {
@@ -2380,10 +2360,7 @@ async def tool_memory(ctx: ToolContext, args: dict[str, Any]) -> str:
     if action not in allowed:
         return f"не умею: {action or 'без уточнения'}"
 
-    payload: dict[str, Any] = {
-        "chat_id": ctx.chat_id,
-        "guest_family": bool(ctx.subscription and ctx.subscription.family),
-    }
+    payload: dict[str, Any] = {"chat_id": ctx.chat_id}
     if action == memory_protocol.ACTION_REMEMBER:
         text = str(args.get("text") or "").strip()
         if not text:
@@ -3143,9 +3120,10 @@ _DECL_RECALL_TOOL_RESULT: dict[str, Any] = {
 # (allows_command("*")) всегда получает сообщение от любого, у кого есть тул.
 # Писать ДРУГИМ гостям без TELL_GUESTS_RIGHT нельзя, даже имея TELL_RIGHT —
 # решение 2026-08-04 (этап 36 IMPLEMENTATION_PLAN.md), после живого бага
-# этапа 33 п. 7 (секрет VPN ушёл не тому получателю). Члены «семьи»
-# (Subscription.family) — исключение, им TELL_GUESTS_RIGHT не нужен, если
-# оба конца — семья.
+# этапа 33 п. 7 (секрет VPN ушёл не тому получателю). Исключение —
+# подтверждённое знакомство (Этап 46, request_acquaintance): знакомым
+# TELL_GUESTS_RIGHT не нужен, в обе стороны. Групповой флаг «семья»,
+# раньше дававший то же, убран 2026-09-27.
 TELL_RIGHT = "tell@llm"
 
 # Право писать другим гостям (не владельцу). Точечное, не выдаётся по
@@ -3188,7 +3166,7 @@ async def _deliver_personal_message(
     who: str,
     text: str,
     render: Callable[[recipients.Recipient], str],
-    guard: Callable[[recipients.Recipient], str | None] | None = None,
+    guard: Callable[[recipients.Recipient], Awaitable[str | None]] | None = None,
     allow_self: bool = False,
 ) -> str:
     """Общая доставка личного сообщения — резолвинг получателя, лимит,
@@ -3218,7 +3196,7 @@ async def _deliver_personal_message(
         return "не нужно: это тот же чат, просто скажи это здесь"
 
     if guard is not None:
-        refusal = guard(target)
+        refusal = await guard(target)
         if refusal is not None:
             return refusal
 
@@ -3283,21 +3261,21 @@ async def tool_tell(ctx: ToolContext, args: dict[str, Any]) -> str:
     if not text:
         return "ошибка: не сказано, что передать (text)"
 
-    def guard(target: recipients.Recipient) -> str | None:
+    async def guard(target: recipients.Recipient) -> str | None:
         target_subscription = ctx.book.for_chat(target.chat_id)
         is_owner = target_subscription is not None and target_subscription.is_owner
-        same_family = (
-            ctx.subscription is not None
-            and ctx.subscription.family
-            and target_subscription is not None
-            and target_subscription.family
-        )
         has_tell_guests = ctx.subscription is not None and ctx.subscription.allows_command(
             TELL_GUESTS_RIGHT
         )
-        if is_owner or same_family or has_tell_guests:
+        if is_owner or has_tell_guests:
             return None
-        return f"не умею: писать могу только владельцу, {target.display} — не он"
+        if ctx.store is not None and await are_acquainted(ctx.store, ctx.chat_id, target.chat_id):
+            return None
+        return (
+            f"не умею: вы с {target.display} ещё не знакомы через меня — передавать "
+            "сообщения я могу владельцу и тем, с кем знакомство подтверждено; могу "
+            "предложить знакомство (request_acquaintance)"
+        )
 
     def render(target: recipients.Recipient) -> str:
         return render_tell(
@@ -3596,11 +3574,6 @@ async def tool_guests_list(ctx: ToolContext, args: dict[str, Any]) -> str:
                 for g in guests
                 if g.allows_command("*") or any(c.endswith(suffix) for c in g.allowed_commands)
             ]
-    family = str(args.get("family") or "any").strip().lower()
-    if family == "yes":
-        guests = [g for g in guests if g.family]
-    elif family == "no":
-        guests = [g for g in guests if not g.family]
     if not guests:
         return "гостей с такими условиями нет"
 
@@ -3632,8 +3605,7 @@ async def tool_guests_list(ctx: ToolContext, args: dict[str, Any]) -> str:
         return "\n".join(lines)
     lines[0] += f", показаны {offset + 1}-{offset + len(page)}"
     for g in page:
-        mark = "🏠 семья" if g.family else "не семья"
-        lines.append(f"• {g.name} (chat_id {g.chat_id}) — {mark} — прав: {len(g.allowed_commands)}")
+        lines.append(f"• {g.name} (chat_id {g.chat_id}) — прав: {len(g.allowed_commands)}")
     next_offset = offset + len(page)
     if next_offset < len(guests):
         lines.append(
@@ -3648,17 +3620,16 @@ _DECL_GUESTS_LIST: dict[str, Any] = {
     "function": {
         "name": "guests_list",
         "description": (
-            "Твой личный справочник приглашённых гостей: имя, chat_id, число "
-            "выданных прав и состоит ли человек в семье (сами права поимённо "
-            "список не показывает — это фильтр, а не перечень). Доступен "
+            "Твой личный справочник приглашённых гостей: имя, chat_id и число "
+            "выданных прав (сами права поимённо список не показывает — это "
+            "фильтр, а не перечень). Доступен "
             "только владельцу — если тул тебе виден, значит спрашивает "
             "именно он; не пересказывай этот справочник в чужом чате. "
             "right — точная строка права (например 'chat@llm', "
             "'recall@memory') — если задано, оставляет только гостей с этим "
             "правом (узнать, у кого есть конкретное право); можно передать и "
             "голое имя службы без действия (например 'vpn') — тогда "
-            "оставляет гостей хоть с каким-то правом на эту службу. family — 'yes' "
-            "только семья, 'no' только не семья, 'any' (по умолчанию) — все. "
+            "оставляет гостей хоть с каким-то правом на эту службу. "
             "За один вызов отдаёт страницу (по умолчанию до 30 гостей) — "
             "перечисли в ответе ВСЕХ, кто попал в страницу, не выбирай сам "
             "часть из них. Если в конце результата есть строка «Это не "
@@ -3677,11 +3648,6 @@ _DECL_GUESTS_LIST: dict[str, Any] = {
                         "(например 'chat@llm') или голое имя службы без "
                         "действия (например 'vpn' — любое право на VPN)"
                     ),
-                },
-                "family": {
-                    "type": "string",
-                    "enum": ["any", "yes", "no"],
-                    "description": "Фильтр по флагу «семья»: any/yes/no",
                 },
                 "offset": {
                     "type": "integer",
@@ -3769,57 +3735,53 @@ _DECL_REMIND: dict[str, Any] = {
 }
 
 
-_DECL_REQUEST_RELATIONSHIP_FORM: dict[str, Any] = {
+_DECL_REQUEST_ACQUAINTANCE: dict[str, Any] = {
     "type": "function",
     "function": {
-        "name": "request_relationship_form",
+        "name": "request_acquaintance",
         "description": (
-            "Открыть собеседнику форму предложения связи ('друг', 'знакомый', "
-            "'родство' или 'супруг(а)') с другим гостем. Вызывай, когда "
-            "собеседник хочет, чтобы система знала о его связи с кем-то ('Вася "
-            "— мой друг', 'Настя — моя сестра', 'предложи Игорю стать моим "
-            "мужем'). ПЕРЕД вызовом уточни личность точным поиском "
-            "(guests_list — по имени/chat_id, НЕ угадывай) и тип связи со слов "
-            "собеседника: 'знакомый' — это не 'друг'. Тул ничего не отправляет "
-            "адресату: собеседник получит отдельную форму с кнопками "
-            "«Отправить»/«Отмена» и решит сам. Ответы адресата тоже приходят "
-            "только кнопками — сам ты предложения не отправляешь, не "
-            "принимаешь и не отклоняешь. 'spouse' — исключительная связь: тул "
-            "откажет, если у кого-то из двоих уже есть супруг(а)."
+            "Открыть собеседнику форму предложения знакомства с другим гостем. "
+            "Знакомство — единственная связь между гостями: после согласия "
+            "обеих сторон ты сможешь передавать сообщения между ними (tell). "
+            "Вызывай, когда собеседник говорит о своих отношениях с кем-то "
+            "('Вася — мой друг', 'Настя — моя сестра', 'это моя жена', "
+            "'познакомь меня с Игорем') или хочет, чтобы ты передавал "
+            "сообщения человеку, а tell отказал. Какие бы слова об отношениях "
+            "он ни выбрал — предлагай именно знакомство, не спорь о словах и "
+            "не уточняй степень близости: система хранит только сам факт "
+            "знакомства. Тул ничего не отправляет адресату: собеседник "
+            "получит отдельную форму с кнопками «Отправить»/«Отмена» и решит "
+            "сам. Ответ адресата тоже приходит только кнопкой — сам ты "
+            "предложения не отправляешь, не принимаешь и не отклоняешь. Если "
+            "тул вернул отказ — перескажи причину из его ответа как есть."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "target_chat_id": {
-                    "type": "integer",
-                    "description": "chat_id гостя, которому предлагается связь (из guests_list)",
-                },
-                "relation": {
+                "recipient": {
                     "type": "string",
-                    "enum": list(RELATION_TYPES),
                     "description": (
-                        "friend — друг, acquaintance — знакомый, family — родство, "
-                        "spouse — супруг(а)"
+                        "Имя или @username человека, как его назвал собеседник "
+                        "(дословно, не сочиняй @username сам)"
                     ),
                 },
             },
-            "required": ["target_chat_id", "relation"],
+            "required": ["recipient"],
         },
     },
 }
 
-_DECL_MY_RELATIONSHIPS: dict[str, Any] = {
+_DECL_MY_ACQUAINTANCES: dict[str, Any] = {
     "type": "function",
     "function": {
-        "name": "my_relationships",
+        "name": "my_acquaintances",
         "description": (
-            "Узнать, с кем из гостей у собеседника уже ПОДТВЕРЖДЁННАЯ связь "
-            "(родство/супруг(а)/друг/знакомый) — используй, когда спрашивают "
-            "о своих отношениях/связях ('с кем я связан', 'кто у меня в "
-            "друзьях'). "
-            "Про предложения без ответа или отклонённые тул молчит — не "
-            "спойлери их, если спросят прямо, отвечай только тем, что тут "
-            "вернулось."
+            "Узнать, с кем из гостей у собеседника подтверждённое знакомство "
+            "(им ты можешь передавать сообщения) — используй, когда "
+            "спрашивают о своих связях/знакомых/друзьях ('с кем я связан', "
+            "'кому ты можешь от меня передать'). Про предложения без ответа "
+            "или отклонённые тул молчит — не спойлери их, если спросят "
+            "прямо, отвечай только тем, что тут вернулось."
         ),
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
@@ -3924,23 +3886,18 @@ TOOLS: tuple[ToolSpec, ...] = (
     # умение у тех, кому его никто не запрещал. Долг: завести под него право
     # create@tasks, когда будет повод трогать подписки в проде.
     ToolSpec(name="remind", handler=tool_remind, declaration=_DECL_REMIND),
-    # Связи между гостями (Этап 42.6.2) — без requires, как remind: открыто
-    # любому подписанному гостю, не только владельцу. Сама видимость целей
-    # ограничена внутри тулов (ctx.book, только известные гости). Ответ
-    # адресата — только кнопкой формы (Этап 45, bot/pending_actions.py),
-    # у модели тулов confirm/reject больше нет. Разведочный
-    # момент, отмечен как открытый в IMPLEMENTATION_PLAN.md §42.6: чтобы
-    # УЗНАТЬ chat_id незнакомого гостя, нужен guests_list, а тот сейчас
-    # доступен только владельцу — гость-инициатор не из владельцев сможет
-    # предложить связь лишь тому, чей chat_id уже всплыл в разговоре иначе.
+    # Знакомство между гостями (Этап 46) — без requires, как remind:
+    # открыто любому подписанному гостю, не только владельцу. Адресат —
+    # только известный гость (тот же резолвер, что у tell). Ответ адресата —
+    # только кнопкой формы (bot/pending_actions.py).
     ToolSpec(
-        name="request_relationship_form",
-        handler=tool_request_relationship_form,
-        declaration=_DECL_REQUEST_RELATIONSHIP_FORM,
+        name="request_acquaintance",
+        handler=tool_request_acquaintance,
+        declaration=_DECL_REQUEST_ACQUAINTANCE,
     ),
     ToolSpec(
-        name="my_relationships",
-        handler=tool_my_relationships,
-        declaration=_DECL_MY_RELATIONSHIPS,
+        name="my_acquaintances",
+        handler=tool_my_acquaintances,
+        declaration=_DECL_MY_ACQUAINTANCES,
     ),
 )

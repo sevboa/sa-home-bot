@@ -1,5 +1,6 @@
-"""Формы подтверждения (Этап 45, bot/pending_actions.py) на настоящем Store:
-права нажатия, двойное нажатие, оба срока, порядок «речь Альфреда → форма»,
+"""Формы подтверждения (Этап 45/46, bot/pending_actions.py) на настоящем
+Store: права нажатия, двойное нажатие, оба срока, порядок «речь Альфреда →
+форма», поздравление обоим при принятии знакомства,
 заглушка «У Альфреда нет слов» при упавшей LLM и при лежащей службе tasks,
 досылка после рестарта, ровно одно событие action_* на переход.
 
@@ -113,9 +114,9 @@ class Harness:
 
         return _record
 
-    async def draft(self, relation="friend", initiator=ALICE, addressee=BOB) -> int:
+    async def draft(self, initiator=ALICE, addressee=BOB) -> int:
         row = await self.pa.create_relationship_draft(
-            initiator, addressee, relation, "Алиса", "Боб"
+            initiator, addressee, "acquaintance", "Алиса", "Боб"
         )
         await self.pa.flush_drafts(initiator, dialogue_id=7)
         return row["id"]
@@ -140,7 +141,8 @@ async def test_full_accept_flow_keeps_speech_before_form(store):
 
     # Форма инициатору — отдельным сообщением, с кнопками, в ai_turns треда.
     [draft_form] = h.notifier.sent_to(ALICE)
-    assert "Кому: Боб" in draft_form and "«друг»" in draft_form
+    assert "Кому: Боб" in draft_form and "Предложение знакомства" in draft_form
+    assert "передавать ваши сообщения" in draft_form
     row = await store.get_pending_action(action_id)
     turn = await store.ai_turn(ALICE, row["draft_message_id"])
     assert turn["dialogue_id"] == 7
@@ -161,19 +163,32 @@ async def test_full_accept_flow_keeps_speech_before_form(store):
 
     assert await h.pa.handle_click(action_id, pa.BUTTON_ACCEPT, BOB) == "Принято."
     [rel] = await store.relationships_for(ALICE)
-    assert rel["relation"] == "friend" and rel["guest_b"] == BOB
+    assert rel["relation"] == "acquaintance" and rel["guest_b"] == BOB
     # Форма адресата переписана под итог, кнопок нет.
     edits = [e for e in h.notifier.log if e[0] == "edit" and e[1] == BOB]
     assert "✅ Принято" in edits[-1][2]
+    assert "После согласия" not in edits[-1][2]
 
-    # Итог инициатору: сначала речь, потом детерминированное оповещение.
-    assert h.node_link.speeches()[-1]["meta"]["pending_action_stage"] == pa.STAGE_OUTCOME
-    await h.speak(response="Поздравляю!")
-    assert h.notifier.sent_to(ALICE)[-2:] == [
-        "<b>Альфред:</b> Поздравляю!",
-        h.notifier.sent_to(ALICE)[-1],
-    ]
-    assert "принято" in h.notifier.sent_to(ALICE)[-1]
+    # Этап 46: поздравление ОБОИМ — инициатору итог, адресату welcome, у
+    # каждого сначала речь, потом детерминированное оповещение.
+    outcome, welcome = h.node_link.speeches()[-2:]
+    assert outcome["meta"]["pending_action_stage"] == pa.STAGE_OUTCOME
+    assert outcome["meta"]["chat_id"] == ALICE
+    assert welcome["meta"]["pending_action_stage"] == pa.STAGE_WELCOME
+    assert welcome["meta"]["chat_id"] == BOB
+    for speech in (outcome, welcome):
+        assert "передавать сообщения" in speech["args"]["messages"][0]["content"]
+
+    await h.speak(-2, response="Поздравляю!")
+    assert h.notifier.sent_to(ALICE)[-2] == "<b>Альфред:</b> Поздравляю!"
+    notice = h.notifier.sent_to(ALICE)[-1]
+    assert "Боб — знакомство подтверждено" in notice and "передавать" in notice
+
+    await h.speak(-1, response="С новым знакомством!")
+    assert h.notifier.sent_to(BOB)[-2] == "<b>Альфред:</b> С новым знакомством!"
+    welcome_notice = h.notifier.sent_to(BOB)[-1]
+    assert "Алиса — знакомство подтверждено" in welcome_notice
+    assert await store.pending_actions_needing_delivery() == []
 
     assert [name for name, _ in h.events] == [
         pa.EVENT_ACTION_CREATED,
@@ -193,6 +208,10 @@ async def test_reject_notifies_initiator(store):
     await h.speak()
     assert "отклонено" in h.notifier.sent_to(ALICE)[-1]
     assert await store.relationships_for(ALICE) == []
+    # Отказ — адресату поздравлять не с чем.
+    assert all(
+        s["meta"]["pending_action_stage"] != pa.STAGE_WELCOME for s in h.node_link.speeches()
+    )
 
 
 # --- права и идемпотентность ---
@@ -244,26 +263,37 @@ async def test_unknown_form_and_garbage_callback(store):
 # --- повторные проверки на кнопках ---
 
 
-async def test_accept_rechecks_spouse_exclusivity(store):
+async def test_accept_rechecks_existing_acquaintance(store):
     h = Harness(store)
-    action_id = await h.draft(relation="spouse")
+    action_id = await h.draft()
     await h.pa.handle_click(action_id, pa.BUTTON_SUBMIT, ALICE)
     await h.speak()
-    # Пока Боб думал, у него появилась подтверждённая супружеская связь.
+    # Пока Боб думал, знакомство уже подтвердилось (гонка двух форм).
     now = datetime.now(tz=UTC)
-    await store.add_confirmed_relationship(CAROL, BOB, "spouse", now, now)
+    await store.add_confirmed_relationship(BOB, ALICE, "acquaintance", now, now)
 
     answer = await h.pa.handle_click(action_id, pa.BUTTON_ACCEPT, BOB)
 
     assert "Не получилось" in answer
     row = await store.get_pending_action(action_id)
-    assert row["status"] == "cancelled" and "супруг" in row["reason"]
-    assert [r["guest_a"] for r in await store.relationships_for(BOB)] == [CAROL]
+    assert row["status"] == "cancelled" and "уже знакомы" in row["reason"]
+    assert len(await store.relationships_for(BOB)) == 1
     # Отменил не инициатор — ему итог положен.
     await h.speak()
     assert "не состоялось" in h.notifier.sent_to(ALICE)[-1]
 
 
+async def test_submit_cancelled_by_counter_offer(store):
+    """Встречные черновики: Боб отправил первым — «Отправить» Алисы не
+    создаёт второе предложение, а отсылает к форме Боба."""
+    h = Harness(store)
+    alice_draft = await h.draft()
+    bob_draft = await h.draft(initiator=BOB, addressee=ALICE)
+    await h.pa.handle_click(bob_draft, pa.BUTTON_SUBMIT, BOB)
+
+    assert "Не получилось" in await h.pa.handle_click(alice_draft, pa.BUTTON_SUBMIT, ALICE)
+    row = await store.get_pending_action(alice_draft)
+    assert row["status"] == "cancelled" and "уже сам предложил" in row["reason"]
 # --- сроки ---
 
 
@@ -375,6 +405,18 @@ async def test_tasks_down_sends_placeholder_and_form_immediately(store):
     await h.pa.aclose()
 
 
+async def test_tasks_down_accept_still_congratulates_both(store):
+    h = Harness(store, fail_tasks=True)
+    action_id = await h.draft()
+    await h.pa.handle_click(action_id, pa.BUTTON_SUBMIT, ALICE)
+    await h.pa.handle_click(action_id, pa.BUTTON_ACCEPT, BOB)
+    assert h.notifier.sent_to(ALICE)[-2] == pa.NO_WORDS_TEXT
+    assert "знакомство подтверждено" in h.notifier.sent_to(ALICE)[-1]
+    assert h.notifier.sent_to(BOB)[-2] == pa.NO_WORDS_TEXT
+    assert "знакомство подтверждено" in h.notifier.sent_to(BOB)[-1]
+    await h.pa.aclose()
+
+
 async def test_speech_fallback_timer_then_late_speech_dropped(store):
     h = Harness(store, speech_fallback_s=0.01)
     action_id = await h.draft()
@@ -395,11 +437,17 @@ async def test_speech_fallback_timer_then_late_speech_dropped(store):
 
 async def test_recover_delivers_missing_forms(store):
     h = Harness(store)
-    row = await h.pa.create_relationship_draft(ALICE, BOB, "friend", "Алиса", "Боб")
+    row = await h.pa.create_relationship_draft(ALICE, BOB, "acquaintance", "Алиса", "Боб")
     submitted = await h.draft(addressee=CAROL)
     await h.pa.handle_click(submitted, pa.BUTTON_SUBMIT, ALICE)
-    overdue = await h.draft(relation="family", addressee=OWNER)
+    overdue = await h.draft(addressee=OWNER)
     await _age(store, overdue, seconds=1)
+    # Принято, итог инициатору ушёл, а поздравление адресату — нет.
+    accepted = await h.draft(initiator=CAROL, addressee=OWNER)
+    await h.pa.handle_click(accepted, pa.BUTTON_SUBMIT, CAROL)
+    await h.speak()
+    await h.pa.handle_click(accepted, pa.BUTTON_ACCEPT, OWNER)
+    await h.speak(-2)
 
     # Новый процесс: речь адресату так и не пришла, форма черновика не ушла.
     h2 = Harness(store, speech_fallback_s=0.01)
@@ -409,6 +457,8 @@ async def test_recover_delivers_missing_forms(store):
     assert (await store.get_pending_action(row["id"]))["draft_message_id"] is not None
     assert h2.notifier.sent_to(CAROL)[0] == pa.NO_WORDS_TEXT
     assert (await store.get_pending_action(overdue))["status"] == "expired"
+    assert (await store.get_pending_action(accepted))["welcome_message_id"] is not None
+    assert "знакомство подтверждено" in h2.notifier.sent_to(OWNER)[-1]
     await h2.pa.aclose()
 
 

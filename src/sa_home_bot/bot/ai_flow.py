@@ -343,8 +343,8 @@ TOOL_STATUS_TEXT: dict[str, str] = {
     "notify_persona": "Альфред выбирает, от чьего имени говорить",
     "notify_guest": "Альфред составляет официальное объявление",
     "guests_list": "Альфред сверяется со списком гостей",
-    "request_relationship_form": "Альфред готовит бланк предложения",
-    "my_relationships": "Альфред пролистывает свою адресную книгу",
+    "request_acquaintance": "Альфред готовит бланк знакомства",
+    "my_acquaintances": "Альфред пролистывает свою адресную книгу",
 }
 TOOL_STATUS_DEFAULT = "Альфред что-то мастерит за кулисами"
 
@@ -392,16 +392,15 @@ MEMORY_TIMEOUT_S = 5.0
 
 
 async def recall_facts(
-    node_link: ServiceLink, chat_id: int | None, text: str, *, guest_family: bool = False
+    node_link: ServiceLink, chat_id: int | None, text: str
 ) -> list[str]:
     """Факты из памяти чата под текущую реплику; пусто — память молчит.
 
     Права здесь сознательно НЕ проверяются, хотя тул `memory` ими гейтится:
     сюда приходит только память САМОГО этого чата, общее знание дома
     (scope=common — кто такой Альфред, как выглядит) и, если чат в
-    `[memory].family_chat_ids` или это гость с флагом `family`
-    (`guest_family`, см. Subscription.family), семейное знание
-    (scope=family) — ничего, на что у собеседника не было бы права. Гейтить
+    `[memory].family_chat_ids`, семейное знание (scope=family) — ничего, на
+    что у собеседника не было бы права. Гейтить
     пришлось бы ровно наоборот:
     справочник о персонаже нужен всем, кому вообще разрешено с ним говорить.
 
@@ -418,7 +417,6 @@ async def recall_facts(
                 "query": text,
                 "chat_id": chat_id,
                 "limit": MEMORY_RECALL_LIMIT,
-                "guest_family": guest_family,
             },
             dst=dst,
             timeout=MEMORY_TIMEOUT_S,
@@ -1026,7 +1024,6 @@ async def request_alfred(
             node_link,
             message.chat.id if message.chat else None,
             message.text or "",
-            guest_family=bool(subscription and subscription.family),
         ),
         recall_graph_facts(
             node_link,

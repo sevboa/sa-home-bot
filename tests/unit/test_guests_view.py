@@ -10,7 +10,6 @@ def _guest(
     chat_id: int,
     name: str = "Гость",
     rights: frozenset[str] = frozenset(),
-    family: bool = False,
 ) -> Subscription:
     return Subscription(
         name=name,
@@ -18,7 +17,6 @@ def _guest(
         allowed_commands=rights,
         source=SOURCE_GUEST,
         invited_at="2026-08-01T10:00:00+00:00",
-        family=family,
     )
 
 
@@ -96,20 +94,11 @@ def _button_texts(kb) -> list[str]:
     return [b.text for row in kb.inline_keyboard for b in row]
 
 
-def test_card_view_shows_family_toggle():
-    not_family = _guest(77, family=False)
-    text, kb = guests_view.build_card_view(not_family)
-    callbacks = _callbacks(kb)
-    assert f"st:{commands.GUEST_FAMILY_CODE}:77" in callbacks
-    assert "Семья: нет" in text
-    assert any("Сделать членом семьи" in t for t in _button_texts(kb))
-
-    in_family = _guest(77, family=True)
-    text, kb = guests_view.build_card_view(in_family)
-    assert "Семья: да" in text
-    assert any("Исключить из семьи" in t for t in _button_texts(kb))
-
-
+def test_card_view_has_no_family_toggle():
+    """Флаг «семья» убран 2026-09-27 (Этап 46) — ни строки, ни кнопки."""
+    text, kb = guests_view.build_card_view(_guest(77))
+    assert "Семья" not in text
+    assert not any("семь" in t for t in _button_texts(kb))
 def test_kick_confirm_view_asks_before_final_callback():
     sub = _guest(77)
     text, kb = guests_view.build_kick_confirm_view(sub)
