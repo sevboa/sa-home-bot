@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -88,6 +89,40 @@ def _matches(query: str, candidate: str) -> bool:
     return any(word.lstrip("@").startswith(query) for word in words)
 
 
+# "@ник" внутри запроса. Модель любит передавать адресата целым лейблом —
+# "Наталья (@nava40a)", — где имя она уже успела переиначить (живой баг
+# 2026-09-27: гостья вошла как "Наташа Сорокина (@nava40a)"). Юзернейм же
+# уникален и не склоняется — если он назван, ищем только по нему.
+_HANDLE_RE = re.compile(r"@([A-Za-z0-9_]{3,})")
+
+
+def _query_handle(query: str) -> str | None:
+    stripped = query.strip()
+    match = _HANDLE_RE.search(stripped)
+    if match is None:
+        # Голый "@ник" без имени — обычный путь _matches и так справится.
+        return None
+    if stripped.lstrip("@") == match.group(1):
+        return None
+    return match.group(1).casefold()
+
+
+# Telegram user_id внутри запроса ("Наташа (id 1243270013)"). Короче пяти
+# цифр — это уже не id, а, скорее, номер/год в имени.
+_CHAT_ID_RE = re.compile(r"(?<![\w@])(\d{5,})(?!\w)")
+
+
+def _query_chat_id(query: str) -> int | None:
+    match = _CHAT_ID_RE.search(query)
+    return int(match.group(1)) if match else None
+
+
+def _has_handle(handle: str, candidate: str | None) -> bool:
+    """Точное совпадение юзернейма — как поля, так и слова "(@ник)" в лейбле."""
+    words = _norm(candidate or "").replace("(", " ").replace(")", " ").split()
+    return any(word.lstrip("@") == handle for word in words)
+
+
 def _is_private(chat_id: int) -> bool:
     return chat_id > 0
 
@@ -98,6 +133,19 @@ def find_recipients(
     people: Sequence[PersonConfig] = (),
 ) -> list[Recipient]:
     """Кандидаты под то, как человека назвали. Пусто — писать некому."""
+    # Точные ключи сильнее имени: id и "@ник" уникальны, не склоняются и
+    # не переиначиваются моделью. Названы — ищем только по ним.
+    chat_id = _query_chat_id(query)
+    if chat_id is not None:
+        return _find_by_chat_id(chat_id, book, people)
+    handle = _query_handle(query)
+    if handle is not None:
+        by_handle = _find_by_handle(handle, book, people)
+        if by_handle:
+            return by_handle
+        # Юзернейм не наш (сменил ник?) — пробуем имя без скобки с ником.
+        query = _HANDLE_RE.sub(" ", query).replace("(", " ").replace(")", " ")
+        query = " ".join(query.split())
     wanted = _norm(query)
     if not wanted:
         return []
@@ -125,3 +173,36 @@ def find_recipients(
                 remember(sub.chat_id, sub.invited_user or sub.name, SOURCE_OWNER_ROLE)
 
     return list(found.values())
+
+
+def _find_by_handle(
+    handle: str, book: SubscriptionBook, people: Sequence[PersonConfig]
+) -> list[Recipient]:
+    found: dict[int, Recipient] = {}
+    for person in people:
+        if person.telegram_id and _has_handle(handle, person.telegram_username):
+            chat_id = person.telegram_id
+            if _is_private(chat_id) and book.for_chat(chat_id) is not None:
+                found.setdefault(chat_id, Recipient(chat_id, person.full_name, SOURCE_PEOPLE))
+    for sub in book.all():
+        if _has_handle(handle, sub.name) or _has_handle(handle, sub.invited_user):
+            if _is_private(sub.chat_id):
+                found.setdefault(
+                    sub.chat_id,
+                    Recipient(sub.chat_id, sub.invited_user or sub.name, SOURCE_SUBSCRIPTION),
+                )
+    return list(found.values())
+
+
+def _find_by_chat_id(
+    chat_id: int, book: SubscriptionBook, people: Sequence[PersonConfig]
+) -> list[Recipient]:
+    if not _is_private(chat_id):
+        return []
+    sub = book.for_chat(chat_id)
+    if sub is None:
+        return []
+    for person in people:
+        if person.telegram_id == chat_id:
+            return [Recipient(chat_id, person.full_name, SOURCE_PEOPLE)]
+    return [Recipient(chat_id, sub.invited_user or sub.name, SOURCE_SUBSCRIPTION)]

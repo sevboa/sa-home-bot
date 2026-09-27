@@ -103,13 +103,26 @@ def _owner(chat_id: int = 188548043) -> Subscription:
 @pytest.mark.parametrize(
     "query",
     [
-        "хозяину", "хозяин", "хозяина", "хозяином",
-        "владельцу", "владелец", "владельца", "владельцем",
-        "админу", "админ", "администратору", "администратор",
-        "графу", "граф",
-        "собственнику", "собственник",
-        "admin", "owner",
-        "ХОЗЯИНУ", "Owner",  # регистр не важен
+        "хозяину",
+        "хозяин",
+        "хозяина",
+        "хозяином",
+        "владельцу",
+        "владелец",
+        "владельца",
+        "владельцем",
+        "админу",
+        "админ",
+        "администратору",
+        "администратор",
+        "графу",
+        "граф",
+        "собственнику",
+        "собственник",
+        "admin",
+        "owner",
+        "ХОЗЯИНУ",
+        "Owner",  # регистр не важен
     ],
 )
 def test_find_recipients_by_owner_role(query):
@@ -133,3 +146,49 @@ def test_owner_role_reference_does_not_shadow_ordinary_guest_names():
     book = SubscriptionBook([_owner(), _guest("Максим", 601)])
     found = find_recipients("максим", book, [])
     assert [r.chat_id for r in found] == [601]
+
+
+# --- лейбл "Имя (@ник)" с чужим именем: ищем по нику ---
+
+
+def test_find_recipients_label_with_misnamed_person_uses_handle():
+    # Живой баг 2026-09-27: модель передала "Наталья (@nava40a)", гостья
+    # вошла как "Наташа Сорокина (@nava40a)" — имя не совпало, ник совпал.
+    book = SubscriptionBook(
+        [
+            _guest("Наташа Сорокина (@nava40a)", 1243270013),
+            _guest("Наталья Петрова (@other_nat)", 555),
+        ]
+    )
+    assert [r.chat_id for r in find_recipients("Наталья (@nava40a)", book)] == [1243270013]
+
+
+def test_find_recipients_label_handle_via_people_username():
+    book = SubscriptionBook([_guest("Наташа", 1243270013)])
+    people = [
+        PersonConfig(
+            telegram_id=1243270013, telegram_username="nava40a", full_name="Н. В.", gender="f"
+        )
+    ]
+    assert [r.chat_id for r in find_recipients("Наталья (@nava40a)", book, people)] == [1243270013]
+
+
+def test_find_recipients_label_unknown_handle_falls_back_to_name():
+    book = SubscriptionBook([_guest("Наташа Сорокина (@nava40a)", 1243270013)])
+    assert [r.chat_id for r in find_recipients("Наташа (@gone_nick)", book)] == [1243270013]
+    assert find_recipients("Никодим (@gone_nick)", book) == []
+
+
+def test_find_recipients_handle_is_exact_not_prefix():
+    book = SubscriptionBook([_guest("Наташа Сорокина (@nava40a)", 1243270013)])
+    assert find_recipients("Наталья (@nava)", book) == []
+
+
+def test_find_recipients_by_chat_id_in_query():
+    book = SubscriptionBook(
+        [_guest("Наташа Сорокина (@nava40a)", 1243270013), _guest("Наталья", 555555)]
+    )
+    assert [r.chat_id for r in find_recipients("Наталья (id 1243270013)", book)] == [1243270013]
+    assert [r.chat_id for r in find_recipients("1243270013", book)] == [1243270013]
+    # Чужой id — не подписчик: к имени не откатываемся, писать некому.
+    assert find_recipients("Наталья (id 99999999)", book) == []
