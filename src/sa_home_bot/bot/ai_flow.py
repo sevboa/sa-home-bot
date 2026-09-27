@@ -92,6 +92,7 @@ from sa_home_bot.llm.prompt import (
     ROUTE_OK,  # noqa: F401  — реэкспорт для тестов и обратной совместимости
     THINK_MARKER,  # noqa: F401
     parse_router_level,
+    wrap_context_note,
 )
 from sa_home_bot.llm_chat import run_chat_loop
 from sa_home_bot.memory import protocol as memory_protocol
@@ -1095,7 +1096,7 @@ async def request_alfred(
             # собирается с ним последним).
             base_messages: list[dict[str, Any]] = [
                 *history[:-1],
-                {"role": "system", "content": context_note},
+                wrap_context_note(context_note),
                 history[-1],
             ]
         else:
