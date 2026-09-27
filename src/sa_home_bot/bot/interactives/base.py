@@ -62,6 +62,9 @@ class Scenario:
     fallback_faults: tuple[str, ...]
     min_turns_before_finale: int = 4
     stage_soft_cap: int = 3
+    # Подталкивание гостя к следующей реплике, по кругу от хода сцены: чтобы
+    # разговор не повисал (пользователь 2026-09-27 — «через раз» совет).
+    nudges: tuple[str, ...] = ()
 
     @property
     def last_stage(self) -> int:

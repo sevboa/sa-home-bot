@@ -205,6 +205,16 @@ async def test_no_keeps_alfred_silent(store):
     assert task_protocol.ACTION_CREATE not in link.actions()
 
 
+async def test_scene_alternates_acting_and_asking_for_advice(store):
+    svc, _, link = _make(store)
+    await _play(svc, store)
+    link.director_replies = [_director(), _director()]
+    first = await _turn(svc, "Слышу «пгивет»")
+    second = await _turn(svc, "Всё ещё «г»")
+    assert radio.RADIO.nudges[0] in first.note
+    assert radio.RADIO.nudges[1] in second.note
+
+
 async def test_later_gives_cooldown_then_offers_again(store):
     clock = Clock()
     svc, notifier, _ = _make(store, clock=clock)

@@ -220,6 +220,8 @@ def build_scene_note(scenario: Scenario, run: Run) -> str:
         parts.append(scenario.finale_directive.format(fault=run.finale_fault))
     else:
         parts.append("Сейчас: " + scenario.ladder[min(run.stage, scenario.last_stage)])
+        if scenario.nudges:
+            parts.append(scenario.nudges[run.turns_total % len(scenario.nudges)])
     if run.directive:
         parts.append("Подсказка на этот ход: " + run.directive)
     if run.pending_effect:
