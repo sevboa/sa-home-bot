@@ -215,6 +215,28 @@ async def test_scene_alternates_acting_and_asking_for_advice(store):
     assert radio.RADIO.nudges[1] in second.note
 
 
+def test_alfred_is_never_told_to_mention_buttons():
+    """Альфред не ломает четвёртую стену: «нажмите Заменить» — только в форме,
+    не в его речи (пользователь 2026-09-28)."""
+    to_alfred = [
+        radio.TOOL_SWAP_FORM,
+        radio.TOOL_RETURN_FORM,
+        radio.TOOL_REINSTALL_FORM,
+        radio.RADIO.finale_directive,
+    ]
+    for text in to_alfred:
+        assert "«Заменить»" not in text and "кнопкой" not in text
+        assert "предложи нажать" not in text
+    assert "не указывай собеседнику, что ему нажать" in radio.RADIO.scene_frame
+
+
+def test_closing_line_after_swap_does_not_announce_the_change():
+    """Что речь стала чистой, гость заметит сам (пользователь 2026-09-28)."""
+    text = radio.AFTER_SWAP_DIRECTIVE
+    assert "Не говори" in text
+    assert "как прекрасно теперь слышно" not in text
+
+
 async def test_later_gives_cooldown_then_offers_again(store):
     clock = Clock()
     svc, notifier, _ = _make(store, clock=clock)
