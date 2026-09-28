@@ -227,11 +227,12 @@ async def test_generate_daily_limit_blocks_and_is_per_chat(store):
     assert "отправлена" in await image_tools.generate(other, GEN_ARGS, Remember())
 
 
-async def test_generate_zero_daily_limit_disables(store):
+async def test_generate_zero_daily_limit_means_unlimited(store):
     link = FakeNodeLink()
     ctx = _ctx(store, node_link=link, imagegen_daily_limit=0)
-    assert (await image_tools.generate(ctx, GEN_ARGS, Remember())).startswith("отказ")
-    assert link.calls == []
+    for _ in range(3):
+        assert "отправлена" in await image_tools.generate(ctx, GEN_ARGS, Remember())
+    assert len(link.calls) == 3
 
 
 async def test_generate_telegram_refused_keeps_image_without_file_id(store):

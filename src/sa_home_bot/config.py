@@ -655,9 +655,10 @@ class LlmConfig(BaseModel):
     imagegen_model_dir: Path = Path("./data/imagegen-models")
     # Сторона бота (тулы generate_image/find_image): до какого размера
     # растягивать картинку при отправке (nearest-neighbor, целым множителем —
-    # пиксели остаются чёткими) и сколько новых картинок в сутки на чат.
+    # пиксели остаются чёткими) и сколько новых картинок в сутки на чат
+    # (0 — без лимита).
     imagegen_display_px: int = Field(default=512, ge=64, le=2048)
-    imagegen_daily_limit: int = Field(default=30, ge=0)
+    imagegen_daily_limit: int = Field(default=0, ge=0)
 
 
 def reminder_reason(llm: LlmConfig) -> str:

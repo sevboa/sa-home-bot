@@ -166,12 +166,15 @@ async def generate(ctx: Any, args: dict[str, Any], remember: Remember) -> str:
         return "ошибка: нет связи с мастерской, где рисуются картинки"
     cfg = ctx.settings.llm
     now = datetime.now(tz=UTC)
-    drawn_today = await ctx.store.count_images_since(ctx.chat_id, now - timedelta(days=1))
-    if drawn_today >= cfg.imagegen_daily_limit:
-        return (
-            f"отказ: лимит {cfg.imagegen_daily_limit} картинок в сутки для этого чата "
-            "исчерпан — скажи собеседнику, что краски кончились до завтра"
+    if cfg.imagegen_daily_limit:
+        drawn_today = await ctx.store.count_images_since(
+            ctx.chat_id, now - timedelta(days=1)
         )
+        if drawn_today >= cfg.imagegen_daily_limit:
+            return (
+                f"отказ: лимит {cfg.imagegen_daily_limit} картинок в сутки для этого "
+                "чата исчерпан — скажи собеседнику, что краски кончились до завтра"
+            )
     try:
         result = await ctx.node_link.command(
             ACTION_GENERATE_IMAGE,

@@ -4172,7 +4172,7 @@ Legacy `pending` в `guest_relationships` новой логикой игнори
   запоминается заново).
 - **Тулы** (`bot/image_tools.py`, в `bot/tools.py` — тонкие обёртки):
   `generate_image` — право `generate_image@llm` + дневной лимит на чат
-  (`imagegen_daily_limit`); `find_image` — без права, ищет только в картинках
+  (`imagegen_daily_limit`, по умолчанию 0 — без лимита); `find_image` — без права, ищет только в картинках
   своего чата. Нарисованная картинка — эпизод в графовую память (Этап 41).
 - **Настройки** `imagegen_*` в `LlmConfig` (`config.py`) и
   `config.example.toml`; `imagegen_enabled = false` по умолчанию — на нодах
