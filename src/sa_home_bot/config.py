@@ -629,7 +629,18 @@ class LlmConfig(BaseModel):
     # не зависит, так что размер/палитру можно крутить без миграций.
     imagegen_enabled: bool = False
     imagegen_model: str = "Lykon/dreamshaper-8"
+    # Вариант весов на HF: "fp16" — вдвое меньше качать (есть не у всех
+    # репозиториев), "" — основные веса. Считается всё равно в fp32.
+    imagegen_variant: str = "fp16"
     imagegen_lcm_lora: str = "latent-consistency/lcm-lora-sdv1-5"
+    # Стиль — дело конфига, не модели-персонажа: gemma пишет только суть
+    # (объект, приметы, фон), а служба собирает из неё промпт по шаблону под
+    # конкретную SD-модель — слово-триггер стилевой модели первым, стилевые
+    # ключи после. {prompt} — место для сути. Негатив стиля — к негативу.
+    # Решение пользователя 2026-09-28: пиксель-арт, запросы собирать
+    # специфически под модель.
+    imagegen_prompt_template: str = "{prompt}"
+    imagegen_style_negative: str = ""
     imagegen_steps: int = Field(default=4, ge=1, le=12)
     imagegen_size: int = Field(default=128, ge=16, le=512)
     # 0 — без квантования палитры, иначе число цветов (Pillow quantize).

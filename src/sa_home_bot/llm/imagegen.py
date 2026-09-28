@@ -52,13 +52,13 @@ def _load_pipeline_sync(cfg: LlmConfig) -> Any:
     cfg.imagegen_model_dir.mkdir(parents=True, exist_ok=True)
     log.info("imagegen: загрузка %s + %s (CPU)...", cfg.imagegen_model, cfg.imagegen_lcm_lora)
     started = time.monotonic()
-    # variant="fp16" — вдвое меньше скачивать; на CPU считаем в fp32
+    # variant="fp16" (imagegen_variant) — вдвое меньше скачивать; на CPU считаем в fp32
     # (half на CPU медленнее и местами не поддержан), веса апкастятся при
     # загрузке. safety_checker выключен: право generate_image@llm выдаётся
     # владельцем вручную, а сам чекер — ещё ~1 ГБ и лишний проход.
     pipe = StableDiffusionPipeline.from_pretrained(
         cfg.imagegen_model,
-        variant="fp16",
+        variant=cfg.imagegen_variant or None,
         torch_dtype=torch.float32,
         cache_dir=str(cfg.imagegen_model_dir),
         safety_checker=None,
@@ -101,6 +101,23 @@ def shrink_to_png(image: Image.Image, size: int, colors: int) -> tuple[bytes, in
     return buf.getvalue(), image.width, image.height
 
 
+def apply_style(prompt: str, negative: str, cfg: LlmConfig) -> tuple[str, str]:
+    """Собрать промпт по шаблону из конфига (``imagegen_prompt_template``,
+    ``{prompt}`` — суть от модели-персонажа). Слово-триггер стилевой модели
+    в шаблоне стоит первым: CLIP сильнее всего слушает начало и режет всё
+    после 77 токенов. Шаблон без ``{prompt}`` — суть дописывается в конец,
+    чтобы опечатка в конфиге не превращала все картинки в одну и ту же."""
+    template = cfg.imagegen_prompt_template.strip() or "{prompt}"
+    if "{prompt}" in template:
+        prompt = template.replace("{prompt}", prompt)
+    else:
+        prompt = f"{template}, {prompt}"
+    style_negative = cfg.imagegen_style_negative.strip()
+    if style_negative:
+        negative = f"{negative}, {style_negative}" if negative else style_negative
+    return prompt, negative
+
+
 def _generate_sync(pipe: Any, prompt: str, negative: str, cfg: LlmConfig) -> Image.Image:
     return pipe(
         prompt,
@@ -118,6 +135,7 @@ async def generate_image(prompt: str, negative: str, cfg: LlmConfig) -> dict[str
     """Сгенерировать картинку. Результат: ``png`` (байты), ``width``,
     ``height``, ``seconds`` (время самой генерации, без ожидания лока)."""
     pipe = await _get_pipeline(cfg)
+    prompt, negative = apply_style(prompt, negative, cfg)
     async with _generate_lock:
         started = time.monotonic()
         image = await asyncio.to_thread(_generate_sync, pipe, prompt, negative, cfg)

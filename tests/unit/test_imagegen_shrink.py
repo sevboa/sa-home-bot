@@ -94,3 +94,34 @@ def test_upscale_keeps_palette_mode():
     big = _open(upscale_png(small, 256))
     assert big.size == (256, 256)
     assert big.mode == "P"
+
+
+# --- apply_style: сборка промпта по шаблону из конфига ---
+
+from sa_home_bot.config import LlmConfig  # noqa: E402
+from sa_home_bot.llm.imagegen import apply_style  # noqa: E402
+
+
+def test_style_default_template_keeps_prompt():
+    assert apply_style("a cat", "blurry", LlmConfig()) == ("a cat", "blurry")
+
+
+def test_style_template_wraps_prompt_and_extends_negative():
+    cfg = LlmConfig(
+        imagegen_prompt_template="pixelsprite, {prompt}, pixel art",
+        imagegen_style_negative="photorealistic",
+    )
+    assert apply_style("a cat", "blurry", cfg) == (
+        "pixelsprite, a cat, pixel art",
+        "blurry, photorealistic",
+    )
+
+
+def test_style_template_without_placeholder_appends_prompt():
+    cfg = LlmConfig(imagegen_prompt_template="pixelsprite")
+    assert apply_style("a cat", "", cfg)[0] == "pixelsprite, a cat"
+
+
+def test_style_negative_alone_when_no_base_negative():
+    cfg = LlmConfig(imagegen_style_negative="photo")
+    assert apply_style("a cat", "", cfg)[1] == "photo"

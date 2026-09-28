@@ -271,7 +271,14 @@ stt_model_dir = "./data/stt-models"
 # Нужна экстра [imagegen] на ноде службы llm. Право тула — generate_image@llm.
 imagegen_enabled = false
 imagegen_model = "Lykon/dreamshaper-8"
+imagegen_variant = "fp16"       # "" — если у репозитория нет fp16-варианта
 imagegen_lcm_lora = "latent-consistency/lcm-lora-sdv1-5"
+# Стиль: промпт собирается по шаблону, {prompt} — суть от Альфреда. Пиксель-арт:
+# imagegen_model = "PublicPrompts/All-In-One-Pixel-Model", imagegen_variant = "",
+# imagegen_prompt_template = "pixelsprite, {prompt}, pixel art, 16-bit sprite, flat colors",
+# imagegen_style_negative = "photorealistic, realistic, photo, 3d render, blurry, gradient"
+imagegen_prompt_template = "{prompt}"
+imagegen_style_negative = ""
 imagegen_steps = 4
 imagegen_size = 128            # хранимый размер (рисуется всегда 512)
 imagegen_colors = 0            # 0 — без квантования палитры
