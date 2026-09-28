@@ -279,6 +279,7 @@ imagegen_lcm_lora = "latent-consistency/lcm-lora-sdv1-5"
 # imagegen_style_negative = "photorealistic, realistic, photo, 3d render, blurry, gradient"
 imagegen_prompt_template = "{prompt}"
 imagegen_style_negative = ""
+imagegen_prompt_agent = true   # gemma выжимает из описания Альфреда SD-промпт
 imagegen_steps = 4
 imagegen_guidance = 1.0       # 1.2-2.0 — послушнее к промпту, шаг вдвое дольше
 imagegen_size = 128            # хранимый размер (рисуется всегда 512)

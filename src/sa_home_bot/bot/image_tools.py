@@ -48,25 +48,20 @@ GENERATE_IMAGE_DECLARATION: dict[str, Any] = {
             "Нарисовать НОВУЮ картинку по просьбе собеседника («нарисуй», "
             "«сгенерируй картинку», «покажи как выглядел бы…»). Картинка сама "
             "уйдёт собеседнику в чат — не описывай её словами заново и не "
-            "вставляй ссылок. Рисуется ~15-30 секунд. Если просят показать "
+            "вставляй ссылок. Рисуется ~30-40 секунд. Если просят показать "
             "картинку, которую ты УЖЕ рисовал раньше, — это find_image, не этот тул."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "prompt_en": {
+                "description": {
                     "type": "string",
                     "description": (
-                        "Описание для художника-нейросети СТРОГО ПО-АНГЛИЙСКИ, "
-                        "10-30 слов через запятые: главный объект с цветом и "
-                        "приметами, где он, освещение и настроение (например: 'a "
-                        "glowing green potion bottle on a wooden crate, dark stone "
-                        "basement, dim candle light'). Стиль и качество НЕ указывай "
-                        "(«pixel art», «realistic», «high quality») — стиль "
-                        "добавляется сам. Сложные позы и действия («машет лапой», "
-                        "«стоит на задних лапах») художник не вытянет — опускай их; "
-                        "редких животных дополняй узнаваемыми приметами (alpaca → "
-                        "'alpaca, long neck, woolly llama')."
+                        "Что нарисовать — своими словами, на любом языке, сколько "
+                        "нужно: главный объект с цветом и приметами, что рядом, "
+                        "где он, освещение и настроение. Промпт для художника-"
+                        "нейросети из этого составят сами, стиль тоже добавится "
+                        "сам — «реалистично», «кинематографично» и т.п. не пиши."
                     ),
                 },
                 "prompt_ru": {
@@ -86,7 +81,7 @@ GENERATE_IMAGE_DECLARATION: dict[str, Any] = {
                     ),
                 },
             },
-            "required": ["prompt_en", "prompt_ru", "caption"],
+            "required": ["description", "prompt_ru", "caption"],
         },
     },
 }
@@ -153,11 +148,13 @@ async def _send(ctx: Any, photo: bytes | str, caption: str) -> tuple[int, str] |
 
 
 async def generate(ctx: Any, args: dict[str, Any], remember: Remember) -> str:
-    prompt_en = _str_arg(args, "prompt_en")
+    # prompt_en — имя параметра до v0.117.0: модель может вспомнить его по
+    # старым тул-вызовам в истории чата.
+    description = _str_arg(args, "description") or _str_arg(args, "prompt_en")
     prompt_ru = _str_arg(args, "prompt_ru")
     caption = _str_arg(args, "caption") or prompt_ru[:60]
-    if not prompt_en:
-        return "ошибка: нет описания картинки по-английски (prompt_en)"
+    if not description:
+        return "ошибка: нет описания картинки (description)"
     if not prompt_ru:
         prompt_ru = caption
     if not _can_deliver(ctx):
@@ -179,7 +176,7 @@ async def generate(ctx: Any, args: dict[str, Any], remember: Remember) -> str:
         result = await ctx.node_link.command(
             ACTION_GENERATE_IMAGE,
             {
-                "prompt": prompt_en,
+                "description": description,
                 "negative": _str_arg(args, "negative_en"),
                 "chat_id": ctx.chat_id,
             },
@@ -193,7 +190,7 @@ async def generate(ctx: Any, args: dict[str, Any], remember: Remember) -> str:
         chat_id=ctx.chat_id,
         author=ctx.author,
         prompt_ru=prompt_ru,
-        prompt_en=prompt_en,
+        prompt_en=str(result.get("prompt") or description),
         caption=caption,
         width=int(result["width"]),
         height=int(result["height"]),

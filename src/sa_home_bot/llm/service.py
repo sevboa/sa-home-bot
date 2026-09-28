@@ -21,6 +21,7 @@ import base64
 import hashlib
 import logging
 import socket
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -28,7 +29,7 @@ from typing import Any
 
 from sa_home_bot import __version__
 from sa_home_bot.config import LlmConfig, Settings
-from sa_home_bot.llm import imagegen, ollama, stt, tts, vision
+from sa_home_bot.llm import image_prompt, imagegen, ollama, stt, tts, vision
 from sa_home_bot.llm.model_profiles import REASON_LEVELS, ModelProfile, load_profiles
 from sa_home_bot.llm.prompt import (
     DEFAULT_PERSONA_PROMPT,
@@ -506,10 +507,16 @@ class LlmService:
                     title="Нарисовать картинку",
                     params=(
                         ActionParam(
+                            name="description",
+                            type="string",
+                            required=False,
+                            title="Что нарисовать — свободно, любой язык и длина",
+                        ),
+                        ActionParam(
                             name="prompt",
                             type="string",
-                            required=True,
-                            title="Описание картинки по-английски",
+                            required=False,
+                            title="Готовый промпт по-английски (если нет description)",
                         ),
                         ActionParam(
                             name="negative",
@@ -896,15 +903,38 @@ class LlmService:
         if action == ACTION_GENERATE_IMAGE:
             if not self._cfg.imagegen_enabled:
                 raise ProtoError(ERR_BAD_REQUEST, "генерация картинок на этой ноде выключена")
+            # description — свободное описание от Альфреда, его переводит в
+            # промпт художник-промптер (llm/image_prompt.py); prompt — готовый
+            # английский промпт (боты до v0.117.0), идёт как есть.
+            description = args.get("description")
             prompt = args.get("prompt")
-            if not isinstance(prompt, str) or not prompt.strip():
-                raise ProtoError(ERR_BAD_REQUEST, "prompt должен быть непустой строкой")
+            if isinstance(description, str) and description.strip():
+                source = description.strip()
+            elif isinstance(prompt, str) and prompt.strip():
+                source = None
+            else:
+                raise ProtoError(ERR_BAD_REQUEST, "нужно непустое description или prompt")
             negative = args.get("negative")
-            if not isinstance(negative, str) or not negative.strip():
-                negative = self._cfg.imagegen_negative
+            negative = negative.strip() if isinstance(negative, str) else ""
             await self._touch(args.get("chat_id"))
+            prompt_seconds = 0.0
+            if source is not None:
+                if self._cfg.imagegen_prompt_agent:
+                    started = time.monotonic()
+                    prompt, agent_negative = await image_prompt.compose(
+                        source, self._cfg, think=self._profile.think_arg("off")
+                    )
+                    prompt_seconds = time.monotonic() - started
+                    negative = negative or agent_negative
+                    log.info(
+                        "imagegen: промптер за %.1fс: %r -> %r", prompt_seconds, source, prompt
+                    )
+                else:
+                    prompt = image_prompt.strip_style_tags(source)
             try:
-                result = await imagegen.generate_image(prompt.strip(), negative, self._cfg)
+                result = await imagegen.generate_image(
+                    prompt.strip(), negative or self._cfg.imagegen_negative, self._cfg
+                )
             except Exception:
                 log.warning("imagegen: не удалось сгенерировать картинку", exc_info=True)
                 raise ProtoError(ERR_INTERNAL, "не удалось нарисовать картинку") from None
@@ -913,6 +943,8 @@ class LlmService:
                 "width": result["width"],
                 "height": result["height"],
                 "seconds": round(result["seconds"], 1),
+                "prompt": result.get("prompt", prompt.strip()),
+                "prompt_seconds": round(prompt_seconds, 1),
             }
         if action == ACTION_TTS_DOWNLOAD_CHUNK:
             session_id = args.get("session_id")

@@ -132,6 +132,8 @@ async def test_generate_image_returns_png_b64(monkeypatch):
         "width": 128,
         "height": 96,
         "seconds": 12.3,
+        "prompt": "a cat",
+        "prompt_seconds": 0.0,
     }
     assert seen == {"prompt": "a cat", "negative": "text"}
 
@@ -184,3 +186,42 @@ def test_generate_sync_passes_guidance_from_config():
     assert seen["guidance_scale"] == 1.5
     assert seen["num_inference_steps"] == 6
     assert seen["negative_prompt"] is None
+
+
+async def test_generate_image_description_goes_through_prompt_agent(monkeypatch):
+    seen = {}
+
+    async def fake_compose(description, cfg, think=None):
+        seen["description"] = description
+        return "red dragon, old castle", "people"
+
+    async def fake_generate(prompt, negative, cfg):
+        seen.update(prompt=prompt, negative=negative)
+        return {"png": b"x", "width": 1, "height": 1, "seconds": 1.0, "prompt": prompt}
+
+    monkeypatch.setattr(llm_service.image_prompt, "compose", fake_compose)
+    monkeypatch.setattr(llm_service.imagegen, "generate_image", fake_generate)
+    result = await _svc(imagegen_enabled=True).run_command(
+        "generate_image", {"description": " дракон над замком ", "chat_id": 1}
+    )
+    assert seen == {
+        "description": "дракон над замком",
+        "prompt": "red dragon, old castle",
+        "negative": "people",
+    }
+    assert result["prompt"] == "red dragon, old castle"
+
+
+async def test_generate_image_prompt_agent_off_strips_style(monkeypatch):
+    seen = {}
+
+    async def fake_generate(prompt, negative, cfg):
+        seen["prompt"] = prompt
+        return {"png": b"x", "width": 1, "height": 1, "seconds": 1.0}
+
+    monkeypatch.setattr(llm_service.imagegen, "generate_image", fake_generate)
+    svc = _svc(imagegen_enabled=True, imagegen_prompt_agent=False)
+    await svc.run_command(
+        "generate_image", {"description": "a red dragon, castle, cinematic lighting, 8k"}
+    )
+    assert seen["prompt"] == "a red dragon, castle"

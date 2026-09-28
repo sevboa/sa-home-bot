@@ -31,6 +31,7 @@ from typing import Any
 from PIL import Image
 
 from sa_home_bot.config import LlmConfig
+from sa_home_bot.llm import image_prompt
 
 log = logging.getLogger(__name__)
 
@@ -133,8 +134,17 @@ def _generate_sync(pipe: Any, prompt: str, negative: str, cfg: LlmConfig) -> Ima
 
 async def generate_image(prompt: str, negative: str, cfg: LlmConfig) -> dict[str, Any]:
     """Сгенерировать картинку. Результат: ``png`` (байты), ``width``,
-    ``height``, ``seconds`` (время самой генерации, без ожидания лока)."""
+    ``height``, ``seconds`` (время самой генерации, без ожидания лока),
+    ``prompt`` (суть, как она ушла в модель — после подгонки под CLIP)."""
     pipe = await _get_pipeline(cfg)
+    # Суть + стилевой шаблон должны влезть в 77 токенов CLIP, иначе он молча
+    # отрежет хвост — а там как раз стиль (см. llm/image_prompt.py).
+    prompt = image_prompt.fit_prompt(
+        prompt,
+        cfg.imagegen_prompt_template,
+        lambda text: len(pipe.tokenizer(text).input_ids) - 2,
+    )
+    subject = prompt
     prompt, negative = apply_style(prompt, negative, cfg)
     async with _generate_lock:
         started = time.monotonic()
@@ -145,4 +155,4 @@ async def generate_image(prompt: str, negative: str, cfg: LlmConfig) -> dict[str
         "imagegen: %dx%d, %d цв., %d байт за %.1fс",
         width, height, cfg.imagegen_colors, len(png), seconds,
     )
-    return {"png": png, "width": width, "height": height, "seconds": seconds}
+    return {"png": png, "width": width, "height": height, "seconds": seconds, "prompt": subject}

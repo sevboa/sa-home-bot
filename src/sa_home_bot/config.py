@@ -640,6 +640,11 @@ class LlmConfig(BaseModel):
     # Решение пользователя 2026-09-28: пиксель-арт, запросы собирать
     # специфически под модель.
     imagegen_prompt_template: str = "{prompt}"
+    # Художник-промптер (llm/image_prompt.py): Альфред описывает картинку
+    # свободно, отдельный служебный вызов gemma выжимает из описания суть
+    # под SD — без стилевых слов, в пределах 77 токенов CLIP. False —
+    # описание идёт в модель как есть, только без стилевых тегов.
+    imagegen_prompt_agent: bool = True
     imagegen_style_negative: str = ""
     imagegen_steps: int = Field(default=4, ge=1, le=12)
     # Насколько строго следовать промпту. LCM рассчитан на 1.0 (без

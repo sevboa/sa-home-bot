@@ -49,6 +49,7 @@ class FakeNodeLink:
             "width": 16,
             "height": 16,
             "seconds": 12.3,
+            "prompt": "red dragon, old castle, sunset",
         }
 
 
@@ -104,7 +105,7 @@ def _ctx(store, *, notifier=None, node_link=None, chat_id=CHAT, **llm):
 
 
 GEN_ARGS = {
-    "prompt_en": "a red dragon over a castle",
+    "description": "огромный красный дракон кружит над старым замком на закате",
     "prompt_ru": "дракон над замком",
     "caption": "Красный дракон",
 }
@@ -133,7 +134,9 @@ async def test_generate_saves_sends_stores_file_id_and_remembers(store):
     assert len(link.calls) == 1
     call = link.calls[0]
     assert call["action"] == "generate_image"
-    assert call["args"] == {"prompt": GEN_ARGS["prompt_en"], "negative": "text", "chat_id": CHAT}
+    assert call["args"] == {
+        "description": GEN_ARGS["description"], "negative": "text", "chat_id": CHAT,
+    }
     assert (call["dst"].node, call["dst"].service) == ("mycraft", "llm")
 
     [sent] = notifier.sent
@@ -147,6 +150,8 @@ async def test_generate_saves_sends_stores_file_id_and_remembers(store):
     image = await store.get_image(CHAT, row["id"])
     assert image["png"] == link.png
     assert image["prompt_ru"] == "дракон над замком"
+    # в БД — промпт, который реально ушёл в модель (после промптера)
+    assert image["prompt_en"] == "red dragon, old castle, sunset"
     assert image["author"] == "Сева"
     assert image["telegram_file_id"] == "file-501"
     assert image["message_id"] == 501
@@ -156,7 +161,7 @@ async def test_generate_saves_sends_stores_file_id_and_remembers(store):
     assert f"#{row['id']}" in result and "отправлена" in result
 
 
-async def test_generate_without_prompt_en_is_error_and_no_call(store):
+async def test_generate_without_description_is_error_and_no_call(store):
     link = FakeNodeLink()
     result = await image_tools.generate(
         _ctx(store, node_link=link), {"prompt_ru": "кот", "caption": "кот"}, Remember()
@@ -167,7 +172,7 @@ async def test_generate_without_prompt_en_is_error_and_no_call(store):
 
 async def test_generate_caption_falls_back_to_prompt_ru(store):
     notifier = FakeNotifier()
-    args = {"prompt_en": "a cat", "prompt_ru": "рыжий кот"}
+    args = {"description": "рыжий кот", "prompt_ru": "рыжий кот"}
     await image_tools.generate(_ctx(store, notifier=notifier), args, Remember())
     assert notifier.sent[0]["caption"] == "рыжий кот"
 
@@ -344,3 +349,10 @@ async def test_find_without_notifier_refuses(store):
     ctx = _ctx(store)
     ctx.notifier = None
     assert (await image_tools.find(ctx, {"query": "дракон"})).startswith("недоступно")
+
+
+async def test_generate_accepts_legacy_prompt_en(store):
+    link = FakeNodeLink()
+    args = {"prompt_en": "a ginger cat", "prompt_ru": "рыжий кот", "caption": "Кот"}
+    await image_tools.generate(_ctx(store, node_link=link), args, Remember())
+    assert link.calls[0]["args"]["description"] == "a ginger cat"
