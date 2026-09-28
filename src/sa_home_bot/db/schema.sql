@@ -523,3 +523,33 @@ CREATE TABLE IF NOT EXISTS vpn_apk (
     checked_at         TEXT,
     updated_at         TEXT
 );
+
+-- Картинки, нарисованные Альфредом по просьбе собеседника (Этап 48, тулы
+-- generate_image/find_image в bot/image_tools.py). Хранятся здесь, на ноде
+-- бота, а не на mycraft, где их рисует служба llm: mycraft штатно спит, а
+-- «покажи ту картинку» не должно её будить. png — уменьшенная копия
+-- (imagegen_size, десятки КБ максимум), размеры и палитра — в строке, так
+-- что смена настроек генерации не ломает старые записи. telegram_file_id —
+-- уже загруженное в Telegram фото: повторный показ шлёт его, без байтов.
+CREATE TABLE IF NOT EXISTS images (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id            INTEGER NOT NULL,
+    author             TEXT,
+    prompt_ru          TEXT NOT NULL,
+    prompt_en          TEXT NOT NULL,
+    caption            TEXT NOT NULL,
+    width              INTEGER NOT NULL,
+    height             INTEGER NOT NULL,
+    colors             INTEGER NOT NULL DEFAULT 0,
+    png                BLOB NOT NULL,
+    telegram_file_id   TEXT,
+    message_id         INTEGER,
+    created_at         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_images_chat ON images(chat_id, created_at);
+
+-- Полнотекстовый поиск для find_image: rowid = images.id. unicode61 без
+-- стемминга — русские окончания ловим префиксным запросом (Store.search_images).
+CREATE VIRTUAL TABLE IF NOT EXISTS images_fts USING fts5(
+    caption, prompt_ru, prompt_en, tokenize = 'unicode61 remove_diacritics 2'
+);

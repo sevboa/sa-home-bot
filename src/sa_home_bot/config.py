@@ -621,6 +621,28 @@ class LlmConfig(BaseModel):
     tts_tmp_dir: Path = Path("./data/tts-tmp")
     tts_model_dir: Path = Path("./data/tts-models")
     tts_opus_bitrate: str = "32k"
+    # Этап 48: генерация картинок по просьбе собеседника (llm/imagegen.py) —
+    # тоже CPU и тоже эта служба, по той же причине, что STT/TTS: VRAM V100
+    # занята gemma. SD1.5-чекпоинт + LCM-LoRA: 4 шага вместо 25-50. Модель
+    # рисует всегда в родном 512×512, а хранится/отдаётся уменьшенная копия
+    # imagegen_size — формат хранения (PNG + размеры в строке БД бота) от него
+    # не зависит, так что размер/палитру можно крутить без миграций.
+    imagegen_enabled: bool = False
+    imagegen_model: str = "Lykon/dreamshaper-8"
+    imagegen_lcm_lora: str = "latent-consistency/lcm-lora-sdv1-5"
+    imagegen_steps: int = Field(default=4, ge=1, le=12)
+    imagegen_size: int = Field(default=128, ge=16, le=512)
+    # 0 — без квантования палитры, иначе число цветов (Pillow quantize).
+    imagegen_colors: int = Field(default=0, ge=0, le=256)
+    imagegen_threads: int = Field(default=10, gt=0)
+    imagegen_negative: str = "blurry, lowres, watermark, text, signature, deformed"
+    imagegen_request_timeout_s: float = Field(default=180.0, gt=0)
+    imagegen_model_dir: Path = Path("./data/imagegen-models")
+    # Сторона бота (тулы generate_image/find_image): до какого размера
+    # растягивать картинку при отправке (nearest-neighbor, целым множителем —
+    # пиксели остаются чёткими) и сколько новых картинок в сутки на чат.
+    imagegen_display_px: int = Field(default=512, ge=64, le=2048)
+    imagegen_daily_limit: int = Field(default=30, ge=0)
 
 
 def reminder_reason(llm: LlmConfig) -> str:

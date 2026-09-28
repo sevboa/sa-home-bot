@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sa-home-bot"
-version = "0.115.10"
+version = "0.116.0"
 description = "Рой домашних машин: нода-супервизор, службы (мониторинг, приложения) и Telegram-бот"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -108,6 +108,34 @@ graph_memory = [
 # Установка: pipx install "sa-home-bot[mcp] @ git+...@vX.Y.Z"
 mcp = [
     "mcp>=2.2,<3",
+]
+
+# Нода с генерацией картинок /ai (Этап 48, сейчас mycraft — тот же CPU, что
+# у stt/tts): Stable Diffusion 1.5 (Lykon/dreamshaper-8) + LCM-LoRA
+# (latent-consistency/lcm-lora-sdv1-5), 4 шага на CPU в fp32, см.
+# llm/imagegen.py. Не V100 и не Ollama — обоснование в IMPLEMENTATION_PLAN.md,
+# Этап 48. peft — загрузчик LoRA в diffusers (load_lora_weights без него
+# падает), accelerate — low_cpu_mem_usage при загрузке весов.
+# Живет в ТОМ ЖЕ pipx-venv, что и экстра tts, поэтому torch/transformers/numpy
+# повторяют её пины один в один: иначе резолвер при установке [imagegen]
+# вместе с [tts] мог бы поднять torch>=2.9 (torchcodec, несовместим с
+# системным ffmpeg 7.1 на trixie), transformers 5.x (ломает импорт TTS.api)
+# или numpy 2.5 (ломает numba у XTTS) — подробности в комментарии к tts.
+# Версии diffusers/peft/accelerate — по факту живой установки на mycraft
+# 2026-09-28 поверх текущего venv (diffusers 0.35.2, peft 0.17.1,
+# accelerate 1.15.0 при torch 2.8.0, transformers 4.57.6, numpy 2.4.6);
+# верхние границы — чтобы следующий минор diffusers/peft с новыми
+# требованиями к torch/transformers не приехал молча при переустановке.
+# Веса (~2.2 ГБ) качаются с Hugging Face при первой загрузке пайплайна в
+# settings.llm.imagegen_model_dir, в репозиторий не входят.
+# Установка: pipx install "sa-home-bot[imagegen] @ git+...@vX.Y.Z"
+imagegen = [
+    "diffusers>=0.35,<0.36",
+    "peft>=0.17,<0.18",
+    "accelerate>=1.10,<2",
+    "torch>=2.2,<2.9",
+    "transformers>=4.57,<5",
+    "numpy<2.5",
 ]
 
 [project.scripts]

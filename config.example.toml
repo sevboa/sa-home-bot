@@ -267,6 +267,17 @@ stt_max_duration_s = 600.0
 stt_request_timeout_s = 300.0
 stt_tmp_dir = "./data/stt-tmp"
 stt_model_dir = "./data/stt-models"
+# Генерация картинок (этап 48, llm/imagegen.py): CPU, SD1.5 + LCM-LoRA.
+# Нужна экстра [imagegen] на ноде службы llm. Право тула — generate_image@llm.
+imagegen_enabled = false
+imagegen_model = "Lykon/dreamshaper-8"
+imagegen_lcm_lora = "latent-consistency/lcm-lora-sdv1-5"
+imagegen_steps = 4
+imagegen_size = 128            # хранимый размер (рисуется всегда 512)
+imagegen_colors = 0            # 0 — без квантования палитры
+imagegen_threads = 10
+imagegen_display_px = 512      # растяжка при отправке в Telegram
+imagegen_daily_limit = 30      # новых картинок в сутки на чат
 
 # Текст персонажа — намеренно НЕ в этом файле и не в config.toml: слишком
 # личный/объёмный, чтобы жить среди обычных настроек. Заполняется отдельным

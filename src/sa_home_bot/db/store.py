@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from math import sqrt
@@ -1124,6 +1125,91 @@ class Store:
         _handle_task_result), повторно её ждать незачем."""
         async with self.db.transaction() as conn:
             await conn.execute("DELETE FROM event_waiters WHERE task_id=?", (task_id,))
+
+    # --- images (Этап 48, bot/image_tools.py) ---
+
+    async def add_image(
+        self,
+        *,
+        chat_id: int,
+        author: str | None,
+        prompt_ru: str,
+        prompt_en: str,
+        caption: str,
+        width: int,
+        height: int,
+        colors: int,
+        png: bytes,
+        now: datetime,
+    ) -> int:
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                "INSERT INTO images (chat_id, author, prompt_ru, prompt_en, caption, "
+                "width, height, colors, png, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (chat_id, author, prompt_ru, prompt_en, caption, width, height, colors,
+                 png, _iso(now)),
+            )
+            image_id = cur.lastrowid
+            await conn.execute(
+                "INSERT INTO images_fts (rowid, caption, prompt_ru, prompt_en) VALUES (?,?,?,?)",
+                (image_id, caption, prompt_ru, prompt_en),
+            )
+            return int(image_id)
+
+    async def set_image_sent(
+        self, image_id: int, telegram_file_id: str | None, message_id: int | None
+    ) -> None:
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "UPDATE images SET telegram_file_id=?, message_id=COALESCE(?, message_id) "
+                "WHERE id=?",
+                (telegram_file_id, message_id, image_id),
+            )
+
+    async def get_image(self, chat_id: int, image_id: int) -> dict | None:
+        """Только картинка ЭТОГО чата — чужую по номеру не достать."""
+        cur = await self.db.conn.execute(
+            "SELECT * FROM images WHERE id=? AND chat_id=?", (image_id, chat_id)
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def search_images(self, chat_id: int, query: str, limit: int = 5) -> list[dict]:
+        """Картинки этого чата по смыслу запроса, лучшие первыми. Стемминга у
+        FTS5 нет — у слова длиннее 4 букв отрезаем две последние и ищем
+        префиксом («драконом» → «драко*», «шляпе» → «шля*»), слова через OR,
+        порядок — bm25. Без png: байты нужны только выбранной картинке."""
+        terms = []
+        for word in re.findall(r"\w+", query.lower()):
+            if len(word) < 3:
+                continue
+            stem = word[: max(3, len(word) - 2)] if len(word) > 4 else word
+            terms.append(f'"{stem}"*')
+        if not terms:
+            return []
+        cur = await self.db.conn.execute(
+            "SELECT i.id, i.caption, i.prompt_ru, i.created_at, i.telegram_file_id "
+            "FROM images_fts f JOIN images i ON i.id = f.rowid "
+            "WHERE images_fts MATCH ? AND i.chat_id=? ORDER BY bm25(images_fts) LIMIT ?",
+            (" OR ".join(terms), chat_id, limit),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def recent_images(self, chat_id: int, limit: int = 5) -> list[dict]:
+        cur = await self.db.conn.execute(
+            "SELECT id, caption, prompt_ru, created_at, telegram_file_id FROM images "
+            "WHERE chat_id=? ORDER BY id DESC LIMIT ?",
+            (chat_id, limit),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def count_images_since(self, chat_id: int, since: datetime) -> int:
+        cur = await self.db.conn.execute(
+            "SELECT COUNT(*) AS n FROM images WHERE chat_id=? AND created_at>=?",
+            (chat_id, _iso(since)),
+        )
+        row = await cur.fetchone()
+        return int(row["n"])
 
     # --- housekeeping ---
 

@@ -391,6 +391,43 @@ class Notifier:
         log.error("Исчерпаны ретраи отправки фото в chat=%s", chat_id)
         return None
 
+    async def send_photo_ex(
+        self,
+        chat_id: int,
+        photo: bytes | str,
+        *,
+        filename: str = "image.png",
+        caption: str | None = None,
+        message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
+        has_spoiler: bool = False,
+    ) -> tuple[int, str] | None:
+        """Фото байтами ИЛИ уже загруженное в Telegram (``str`` — file_id).
+        Возвращает (message_id, file_id самого крупного размера) — вызывающий
+        сохраняет file_id, чтобы повторная отправка не гоняла байты
+        (Этап 48, bot/image_tools.py). ``None`` — не отправилось."""
+        media = BufferedInputFile(photo, filename=filename) if isinstance(photo, bytes) else photo
+        reply = (
+            ReplyParameters(message_id=reply_to_message_id, allow_sending_without_reply=True)
+            if reply_to_message_id is not None
+            else None
+        )
+        msg = await send_with_retry(
+            chat_id,
+            "фото",
+            lambda: self._bot.send_photo(
+                chat_id,
+                media,
+                caption=caption,
+                message_thread_id=message_thread_id,
+                reply_parameters=reply,
+                has_spoiler=has_spoiler,
+            ),
+        )
+        if msg is None or not msg.photo:
+            return None
+        return msg.message_id, msg.photo[-1].file_id
+
     async def send_voice(
         self,
         chat_id: int,

@@ -44,3 +44,7 @@ EPISODE_SOURCE_LINK = "link"
 # выдача SearXNG (запрос + заголовки/выдержки), ради чего изначально и
 # затевалась графовая память (IMPLEMENTATION_PLAN.md, Этап 42.3).
 EPISODE_SOURCE_WEB_SEARCH = "web_search"
+# Этап 48: нарисованная картинка (bot/tools.py::tool_generate_image →
+# bot/image_tools.py::generate) — просьба собеседника и подпись, чтобы граф
+# помнил «что мы рисовали» и отвечал на это без таблицы images.
+EPISODE_SOURCE_IMAGE = "image"

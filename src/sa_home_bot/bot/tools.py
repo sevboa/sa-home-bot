@@ -56,7 +56,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sa_home_bot import wake_core
-from sa_home_bot.bot import commands, invites, recipients, voice_mode, vpn_nodes
+from sa_home_bot.bot import commands, image_tools, invites, recipients, voice_mode, vpn_nodes
 from sa_home_bot.bot.interactives import radio as interactive_radio
 from sa_home_bot.bot.monitor_state import parse_disk_summary, parse_health_state
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
@@ -1193,6 +1193,32 @@ async def tool_swap_radio(ctx: ToolContext, _args: dict[str, Any]) -> str:
     return await ctx.interactives.tool_swap_radio(
         ctx.chat_id, ctx.user_id, is_private=ctx.is_private
     )
+
+
+async def tool_generate_image(ctx: ToolContext, args: dict[str, Any]) -> str:
+    """Нарисовать картинку (Этап 48) — тонкая обёртка над
+    bot/image_tools.py::generate, как tool_swap_radio над интерактивом.
+    Эпизод графа передаётся колбэком: image_tools не импортирует bot.tools
+    (иначе цикл), а _piggyback_graph_episode живёт здесь."""
+
+    async def remember(text: str) -> None:
+        # generate зовёт remember только после доставки картинки в чат, а
+        # доставка без chat_id невозможна (_can_deliver) — но колбэк не
+        # должен полагаться на порядок вызовов чужого модуля: без чата
+        # эпизоду не к чему привязаться, молча пропускаем.
+        if ctx.chat_id is None:
+            return
+        await _piggyback_graph_episode(
+            ctx, text, ctx.chat_id, source=graph_memory_protocol.EPISODE_SOURCE_IMAGE
+        )
+
+    return await image_tools.generate(ctx, args, remember=remember)
+
+
+async def tool_find_image(ctx: ToolContext, args: dict[str, Any]) -> str:
+    """Показать ранее нарисованную картинку (Этап 48) — поиск и отправка
+    целиком в bot/image_tools.py::find, только по картинкам своего чата."""
+    return await image_tools.find(ctx, args)
 
 
 async def tool_my_acquaintances(ctx: ToolContext, _args: dict[str, Any]) -> str:
@@ -3969,5 +3995,26 @@ TOOLS: tuple[ToolSpec, ...] = (
         name="swap_radio",
         handler=tool_swap_radio,
         declaration=interactive_radio.SWAP_RADIO_DECLARATION,
+    ),
+    # Картинки (Этап 48). generate_image — право generate_image@llm в форме
+    # «действие@служба» на ту же службу llm, что рисует (llm/imagegen.py на
+    # mycraft): генерация будит mycraft и ~15 с грузит CPU, поэтому это
+    # отдельное право, а не часть chat@llm — впустить поговорить не значит
+    # разрешить гонять художника. Групповые *@llm и голый * работают как
+    # обычно (Subscription.allows_action).
+    ToolSpec(
+        name="generate_image",
+        handler=tool_generate_image,
+        declaration=image_tools.GENERATE_IMAGE_DECLARATION,
+        requires=ActionRight(image_tools.ACTION_GENERATE_IMAGE, image_tools.LLM_SERVICE),
+    ),
+    # find_image — без requires: ищет только по картинкам СВОЕГО чата (из
+    # таблицы images бота, mycraft не будит), то есть не раскрывает ничего,
+    # чего собеседник уже не видел. Картинки появляются в чате только через
+    # generate_image, так что без того права тул просто ничего не найдёт.
+    ToolSpec(
+        name="find_image",
+        handler=tool_find_image,
+        declaration=image_tools.FIND_IMAGE_DECLARATION,
     ),
 )

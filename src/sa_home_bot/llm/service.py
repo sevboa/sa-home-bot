@@ -28,7 +28,7 @@ from typing import Any
 
 from sa_home_bot import __version__
 from sa_home_bot.config import LlmConfig, Settings
-from sa_home_bot.llm import ollama, stt, tts, vision
+from sa_home_bot.llm import imagegen, ollama, stt, tts, vision
 from sa_home_bot.llm.model_profiles import REASON_LEVELS, ModelProfile, load_profiles
 from sa_home_bot.llm.prompt import (
     DEFAULT_PERSONA_PROMPT,
@@ -132,6 +132,13 @@ ACTION_STT_UPLOAD_CHUNK = "stt_chunk"
 # push, как у STT-загрузки: тут служба, а не alfred, готовит данные.
 ACTION_SYNTHESIZE_SPEECH = "synthesize_speech"
 ACTION_TTS_DOWNLOAD_CHUNK = "tts_chunk"
+
+# Этап 48: картинка по просьбе собеседника (llm/imagegen.py) — тоже CPU и
+# тоже эта служба. Готовый PNG (≤512², уменьшенный до imagegen_size) едет
+# назад инлайном: даже 512² PNG укладывается в протокольный лимит, чанки не
+# нужны. Хранит картинку бот (БД на alfred), не эта нода: mycraft штатно
+# спит, а повторный показ не должен её будить.
+ACTION_GENERATE_IMAGE = "generate_image"
 
 # Этап 47: «чистая речь» гостя (llm/speech_therapy.py::clear_user_ids) —
 # бот переключает её, когда гость меняет «устройство связи» в интерактиве
@@ -485,6 +492,30 @@ class LlmService:
                     params=(
                         ActionParam(
                             name="text", type="string", required=True, title="Текст для озвучки"
+                        ),
+                        ActionParam(
+                            name="chat_id",
+                            type="int",
+                            required=False,
+                            title="Chat, откуда пришёл запрос",
+                        ),
+                    ),
+                ),
+                ActionSpec(
+                    id=ACTION_GENERATE_IMAGE,
+                    title="Нарисовать картинку",
+                    params=(
+                        ActionParam(
+                            name="prompt",
+                            type="string",
+                            required=True,
+                            title="Описание картинки по-английски",
+                        ),
+                        ActionParam(
+                            name="negative",
+                            type="string",
+                            required=False,
+                            title="Чего на картинке быть не должно (по-английски)",
                         ),
                         ActionParam(
                             name="chat_id",
@@ -861,6 +892,27 @@ class LlmService:
                 "size": len(audio_bytes),
                 "sha256": hashlib.sha256(audio_bytes).hexdigest(),
                 "format": "ogg",
+            }
+        if action == ACTION_GENERATE_IMAGE:
+            if not self._cfg.imagegen_enabled:
+                raise ProtoError(ERR_BAD_REQUEST, "генерация картинок на этой ноде выключена")
+            prompt = args.get("prompt")
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise ProtoError(ERR_BAD_REQUEST, "prompt должен быть непустой строкой")
+            negative = args.get("negative")
+            if not isinstance(negative, str) or not negative.strip():
+                negative = self._cfg.imagegen_negative
+            await self._touch(args.get("chat_id"))
+            try:
+                result = await imagegen.generate_image(prompt.strip(), negative, self._cfg)
+            except Exception:
+                log.warning("imagegen: не удалось сгенерировать картинку", exc_info=True)
+                raise ProtoError(ERR_INTERNAL, "не удалось нарисовать картинку") from None
+            return {
+                "png_b64": base64.b64encode(result["png"]).decode(),
+                "width": result["width"],
+                "height": result["height"],
+                "seconds": round(result["seconds"], 1),
             }
         if action == ACTION_TTS_DOWNLOAD_CHUNK:
             session_id = args.get("session_id")
