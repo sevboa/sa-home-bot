@@ -163,3 +163,24 @@ async def test_generate_image_generator_failure_is_internal(monkeypatch):
     with pytest.raises(ProtoError) as excinfo:
         await _svc(imagegen_enabled=True).run_command("generate_image", {"prompt": "a cat"})
     assert excinfo.value.code == ERR_INTERNAL
+
+
+def test_generate_sync_passes_guidance_from_config():
+    from sa_home_bot.llm import imagegen
+
+    seen = {}
+
+    class _Pipe:
+        def __call__(self, prompt, **kw):
+            seen.update(kw)
+
+            class _R:
+                images = ["img"]
+
+            return _R()
+
+    cfg = LlmConfig(model="qwen2.5:7b", imagegen_guidance=1.5, imagegen_steps=6)
+    assert imagegen._generate_sync(_Pipe(), "a cat", "", cfg) == "img"
+    assert seen["guidance_scale"] == 1.5
+    assert seen["num_inference_steps"] == 6
+    assert seen["negative_prompt"] is None

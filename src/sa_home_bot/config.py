@@ -642,6 +642,10 @@ class LlmConfig(BaseModel):
     imagegen_prompt_template: str = "{prompt}"
     imagegen_style_negative: str = ""
     imagegen_steps: int = Field(default=4, ge=1, le=12)
+    # Насколько строго следовать промпту. LCM рассчитан на 1.0 (без
+    # classifier-free guidance, вдвое быстрее); 1.2-2.0 заметно послушнее
+    # к промпту ценой примерно двойного времени шага. Выше 2 — пересвет.
+    imagegen_guidance: float = Field(default=1.0, ge=1.0, le=3.0)
     imagegen_size: int = Field(default=128, ge=16, le=512)
     # 0 — без квантования палитры, иначе число цветов (Pillow quantize).
     imagegen_colors: int = Field(default=0, ge=0, le=256)

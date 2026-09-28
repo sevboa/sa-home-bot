@@ -123,9 +123,9 @@ def _generate_sync(pipe: Any, prompt: str, negative: str, cfg: LlmConfig) -> Ima
         prompt,
         negative_prompt=negative or None,
         num_inference_steps=cfg.imagegen_steps,
-        # LCM работает без classifier-free guidance: 1.0 = выключен, иначе
-        # картинка пересвечивается, а время удваивается.
-        guidance_scale=1.0,
+        # LCM рассчитан на 1.0 (guidance выключен); чуть выше — послушнее
+        # к промпту, но шаг вдвое дороже (см. LlmConfig.imagegen_guidance).
+        guidance_scale=cfg.imagegen_guidance,
         width=_NATIVE_PX,
         height=_NATIVE_PX,
     ).images[0]

@@ -280,6 +280,7 @@ imagegen_lcm_lora = "latent-consistency/lcm-lora-sdv1-5"
 imagegen_prompt_template = "{prompt}"
 imagegen_style_negative = ""
 imagegen_steps = 4
+imagegen_guidance = 1.0       # 1.2-2.0 — послушнее к промпту, шаг вдвое дольше
 imagegen_size = 128            # хранимый размер (рисуется всегда 512)
 imagegen_colors = 0            # 0 — без квантования палитры
 imagegen_threads = 10
