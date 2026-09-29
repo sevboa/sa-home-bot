@@ -117,3 +117,39 @@ async def test_count_images_since_counts_only_window_and_chat(store):
     await _add(store, chat_id=OTHER_CHAT, now=BASE_TIME)
     assert await store.count_images_since(CHAT, BASE_TIME - timedelta(days=1)) == 2
     assert await store.count_images_since(OTHER_CHAT, BASE_TIME - timedelta(days=1)) == 1
+
+
+# --- Этап 49: отладочный /draw — purpose='debug'/'ref' не видны разговору ---
+
+
+async def _add_debug(store: Store, purpose: str = "debug") -> int:
+    return await store.add_image(
+        chat_id=CHAT, author="Сева", prompt_ru="рыжий кот", prompt_en="a ginger cat",
+        caption="Рыжий кот", width=64, height=64, colors=32, png=b"PNG", now=BASE_TIME,
+        purpose=purpose, params='{"mode": "item"}',
+    )
+
+
+async def test_debug_images_hidden_from_chat_lookups(store):
+    debug_id = await _add_debug(store)
+    ref_id = await _add_debug(store, "ref")
+    assert await store.get_image(CHAT, debug_id) is None
+    assert await store.search_images(CHAT, "кот") == []
+    assert await store.recent_images(CHAT) == []
+    assert await store.count_images_since(CHAT, BASE_TIME - timedelta(days=1)) == 0
+    # а сам /draw видит любую — по номеру и по сообщению
+    assert (await store.image_by_id(ref_id))["purpose"] == "ref"
+    await store.set_image_sent(debug_id, "file-1", 77)
+    assert (await store.image_by_message(CHAT, 77))["id"] == debug_id
+
+
+async def test_clean_deletes_only_debug(store):
+    chat_id = await _add(store)
+    await _add_debug(store)
+    keep_id = await _add_debug(store)
+    assert await store.set_image_purpose(keep_id, "ref")
+    assert await store.count_images_by_purpose("debug") == 1
+    assert await store.delete_images_by_purpose("debug") == 1
+    assert await store.count_images_by_purpose("debug") == 0
+    assert await store.image_by_id(keep_id) is not None
+    assert [r["id"] for r in await store.search_images(CHAT, "кот")] == [chat_id]

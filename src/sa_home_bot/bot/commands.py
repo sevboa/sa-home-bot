@@ -82,6 +82,10 @@ TORRENTS = Command(
 INTERACTIVES = Command(
     "interactives", "сценки в этом чате: on/off", universal=True, menu=False
 )
+# Отладка режимов генерации картинок (Этап 49, bot/draw_debug.py): владелец
+# подбирает архетипы предметов и настройки сцен. Скрыта — памятка по
+# «/draw» без аргументов или «/draw help».
+DRAW = Command("draw", "отладка генерации картинок", universal=False, menu=False)
 ALL_COMMANDS: list[Command] = [
     PING,
     INTERACTIVES,
@@ -99,6 +103,7 @@ ALL_COMMANDS: list[Command] = [
     GUESTS,
     VPN,
     TORRENTS,
+    DRAW,
 ]
 
 UNIVERSAL_COMMANDS: list[Command] = [c for c in ALL_COMMANDS if c.universal]

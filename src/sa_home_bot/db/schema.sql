@@ -531,6 +531,10 @@ CREATE TABLE IF NOT EXISTS vpn_apk (
 -- (imagegen_size, десятки КБ максимум), размеры и палитра — в строке, так
 -- что смена настроек генерации не ломает старые записи. telegram_file_id —
 -- уже загруженное в Telegram фото: повторный показ шлёт его, без байтов.
+-- purpose (Этап 49): 'chat' — нарисовано в разговоре (только их видит
+-- find_image и считает дневной лимит), 'debug' — отладочный /draw (чистится
+-- «/draw clean»), 'ref' — отладочная, оставленная образцом («/draw keep»).
+-- params — JSON ключей /draw (режим, seed, образец…), чтобы повторить.
 CREATE TABLE IF NOT EXISTS images (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id            INTEGER NOT NULL,
@@ -544,7 +548,9 @@ CREATE TABLE IF NOT EXISTS images (
     png                BLOB NOT NULL,
     telegram_file_id   TEXT,
     message_id         INTEGER,
-    created_at         TEXT NOT NULL
+    created_at         TEXT NOT NULL,
+    purpose            TEXT NOT NULL DEFAULT 'chat',
+    params             TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_images_chat ON images(chat_id, created_at);
 

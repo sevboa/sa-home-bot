@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import random
 import time
 from typing import Any
 
@@ -37,12 +38,30 @@ log = logging.getLogger(__name__)
 
 _NATIVE_PX = 512
 
+# Этап 49, отладочный /draw: генерация по образцу. Константы, а не конфиг —
+# пока подбираем; после выбора переедут в LlmConfig. Замер 2026-09-29
+# (IMPLEMENTATION_PLAN, 49.0): variant (img2img) рабочий на strength
+# 0.5-0.65; для сцены с образцом годится только light-адаптер, scale 0.3-0.5
+# (полный топит сцену в образце).
+MODES = ("free", "item", "variant", "scene")
+DEFAULT_STRENGTH = 0.55
+DEFAULT_IP_SCALE = 0.4
+_IP_REPO = "h94/IP-Adapter"
+_IP_WEIGHT = "ip-adapter_sd15_light.bin"
+
 # Пайплайн резидентен в RAM (~4 ГБ fp32) с первого запроса до конца жизни
 # процесса — как XTTS в llm/tts.py. Лок генерации отдельно от лока загрузки:
 # две генерации одновременно на одном CPU только мешали бы друг другу.
 _pipeline: Any = None
 _load_lock = asyncio.Lock()
 _generate_lock = asyncio.Lock()
+# img2img — тот же набор весов (from_pipe, без второй копии в RAM).
+# IP-Adapter (~+2.5 ГБ) грузится при первой сцене с образцом и держится, пока
+# идут такие сцены: с ним в UNet обычная генерация без образца падает,
+# поэтому перед любой другой генерацией он выгружается. Оба — только под
+# _generate_lock.
+_img2img: Any = None
+_ip_loaded = False
 
 
 def _load_pipeline_sync(cfg: LlmConfig) -> Any:
@@ -119,40 +138,119 @@ def apply_style(prompt: str, negative: str, cfg: LlmConfig) -> tuple[str, str]:
     return prompt, negative
 
 
-def _generate_sync(pipe: Any, prompt: str, negative: str, cfg: LlmConfig) -> Image.Image:
-    return pipe(
-        prompt,
-        negative_prompt=negative or None,
-        num_inference_steps=cfg.imagegen_steps,
+def _fit_ref(ref: Image.Image) -> Image.Image:
+    """Образец → 512² RGB. Маленькие (наши 64px из БД) растягиваются гладко:
+    img2img и IP-Adapter ждут «обычную» картинку, а не лесенку пикселей."""
+    from PIL import ImageOps
+
+    return ImageOps.fit(ref.convert("RGB"), (_NATIVE_PX, _NATIVE_PX), Image.Resampling.LANCZOS)
+
+
+def _generate_sync(pipe: Any, prompt: str, negative: str, cfg: LlmConfig, job: dict) -> Image.Image:
+    global _img2img, _ip_loaded
+    ip_scale = job.get("ip_scale")
+    ref = job.get("ref")
+    wants_ip = ref is not None and ip_scale is not None
+    if _ip_loaded and not wants_ip:
+        pipe.unload_ip_adapter()
+        _ip_loaded = False
+    common = {
+        "negative_prompt": negative or None,
         # LCM рассчитан на 1.0 (guidance выключен); чуть выше — послушнее
         # к промпту, но шаг вдвое дороже (см. LlmConfig.imagegen_guidance).
-        guidance_scale=cfg.imagegen_guidance,
-        width=_NATIVE_PX,
-        height=_NATIVE_PX,
+        "guidance_scale": job["guidance"],
+        "generator": job.get("generator"),
+    }
+    if ref is not None and not wants_ip:
+        if _img2img is None:
+            from diffusers import StableDiffusionImg2ImgPipeline
+
+            _img2img = StableDiffusionImg2ImgPipeline.from_pipe(pipe)
+        return _img2img(
+            prompt, image=ref, strength=job["strength"],
+            num_inference_steps=job["steps"], **common,
+        ).images[0]
+    if wants_ip:
+        if not _ip_loaded:
+            started = time.monotonic()
+            pipe.load_ip_adapter(
+                _IP_REPO, subfolder="models", weight_name=_IP_WEIGHT,
+                cache_dir=str(cfg.imagegen_model_dir),
+            )
+            _ip_loaded = True
+            log.info("imagegen: IP-Adapter загружен за %.1fс", time.monotonic() - started)
+        pipe.set_ip_adapter_scale(ip_scale)
+        common["ip_adapter_image"] = ref
+    return pipe(
+        prompt, num_inference_steps=job["steps"], width=_NATIVE_PX, height=_NATIVE_PX, **common,
     ).images[0]
 
 
-async def generate_image(prompt: str, negative: str, cfg: LlmConfig) -> dict[str, Any]:
+async def generate_image(
+    prompt: str,
+    negative: str,
+    cfg: LlmConfig,
+    *,
+    seed: int | None = None,
+    ref: Image.Image | None = None,
+    strength: float | None = None,
+    ip_scale: float | None = None,
+    steps: int | None = None,
+    guidance: float | None = None,
+    style: bool = True,
+    fit: bool = True,
+) -> dict[str, Any]:
     """Сгенерировать картинку. Результат: ``png`` (байты), ``width``,
     ``height``, ``seconds`` (время самой генерации, без ожидания лока),
-    ``prompt`` (суть, как она ушла в модель — после подгонки под CLIP)."""
+    ``prompt`` (суть, как она ушла в модель — после подгонки под CLIP),
+    ``full_prompt``/``full_negative`` (с шаблоном стиля), ``tokens``,
+    ``seed``, ``steps``.
+
+    Без ключевых аргументов — эталон C (Этап 48). ``ref`` + ``ip_scale`` —
+    сцена с образцом (IP-Adapter), ``ref`` без ``ip_scale`` — вариант
+    образца (img2img, ``strength``). ``style=False`` — без стилевого
+    шаблона, ``fit=False`` — промпт не подрезается под 77 токенов CLIP."""
     pipe = await _get_pipeline(cfg)
+
+    def count_tokens(text: str) -> int:
+        return len(pipe.tokenizer(text).input_ids) - 2
+
+    template = cfg.imagegen_prompt_template if style else "{prompt}"
     # Суть + стилевой шаблон должны влезть в 77 токенов CLIP, иначе он молча
     # отрежет хвост — а там как раз стиль (см. llm/image_prompt.py).
-    prompt = image_prompt.fit_prompt(
-        prompt,
-        cfg.imagegen_prompt_template,
-        lambda text: len(pipe.tokenizer(text).input_ids) - 2,
-    )
+    if fit:
+        prompt = image_prompt.fit_prompt(prompt, template, count_tokens)
     subject = prompt
-    prompt, negative = apply_style(prompt, negative, cfg)
+    if style:
+        prompt, negative = apply_style(prompt, negative, cfg)
+    if seed is None:
+        seed = random.randrange(2**32)
+    steps = steps or cfg.imagegen_steps
+    if ref is not None:
+        ref = _fit_ref(ref)
+    if ref is not None and ip_scale is None:
+        strength = strength or DEFAULT_STRENGTH
+        # LCM в img2img делает int(steps*strength) шагов — держим столько же
+        # реальных, сколько без образца.
+        steps = max(steps, round(steps / strength))
+    import torch
+
+    job = {
+        "generator": torch.Generator().manual_seed(seed),
+        "ref": ref, "strength": strength, "ip_scale": ip_scale, "steps": steps,
+        "guidance": guidance or cfg.imagegen_guidance,
+    }
     async with _generate_lock:
         started = time.monotonic()
-        image = await asyncio.to_thread(_generate_sync, pipe, prompt, negative, cfg)
+        image = await asyncio.to_thread(_generate_sync, pipe, prompt, negative, cfg, job)
         seconds = time.monotonic() - started
     png, width, height = shrink_to_png(image, cfg.imagegen_size, cfg.imagegen_colors)
     log.info(
         "imagegen: %dx%d, %d цв., %d байт за %.1fс",
         width, height, cfg.imagegen_colors, len(png), seconds,
     )
-    return {"png": png, "width": width, "height": height, "seconds": seconds, "prompt": subject}
+    return {
+        "png": png, "width": width, "height": height, "seconds": seconds, "prompt": subject,
+        "full_prompt": prompt, "full_negative": negative, "tokens": count_tokens(prompt),
+        "seed": seed, "steps": steps,
+    }

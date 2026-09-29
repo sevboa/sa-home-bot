@@ -105,7 +105,7 @@ def _svc(**llm) -> LlmService:
 async def test_generate_image_disabled_is_bad_request(monkeypatch):
     called = []
 
-    async def fake_generate(prompt, negative, cfg):
+    async def fake_generate(prompt, negative, cfg, **kwargs):
         called.append(prompt)
         return {}
 
@@ -119,7 +119,7 @@ async def test_generate_image_disabled_is_bad_request(monkeypatch):
 async def test_generate_image_returns_png_b64(monkeypatch):
     seen = {}
 
-    async def fake_generate(prompt, negative, cfg):
+    async def fake_generate(prompt, negative, cfg, **kwargs):
         seen.update(prompt=prompt, negative=negative)
         return {"png": b"\x89PNG-fake", "width": 128, "height": 96, "seconds": 12.345}
 
@@ -134,6 +134,12 @@ async def test_generate_image_returns_png_b64(monkeypatch):
         "seconds": 12.3,
         "prompt": "a cat",
         "prompt_seconds": 0.0,
+        # Этап 49 (/draw): генератор-заглушка их не вернул.
+        "full_prompt": None,
+        "full_negative": None,
+        "tokens": None,
+        "seed": None,
+        "steps": None,
     }
     assert seen == {"prompt": "a cat", "negative": "text"}
 
@@ -141,7 +147,7 @@ async def test_generate_image_returns_png_b64(monkeypatch):
 async def test_generate_image_empty_negative_uses_config_default(monkeypatch):
     seen = {}
 
-    async def fake_generate(prompt, negative, cfg):
+    async def fake_generate(prompt, negative, cfg, **kwargs):
         seen["negative"] = negative
         return {"png": b"x", "width": 1, "height": 1, "seconds": 0.0}
 
@@ -182,7 +188,9 @@ def test_generate_sync_passes_guidance_from_config():
             return _R()
 
     cfg = LlmConfig(model="qwen2.5:7b", imagegen_guidance=1.5, imagegen_steps=6)
-    assert imagegen._generate_sync(_Pipe(), "a cat", "", cfg) == "img"
+    # generate_image собирает job из конфига (steps/guidance по умолчанию).
+    job = {"ref": None, "steps": cfg.imagegen_steps, "guidance": cfg.imagegen_guidance}
+    assert imagegen._generate_sync(_Pipe(), "a cat", "", cfg, job) == "img"
     assert seen["guidance_scale"] == 1.5
     assert seen["num_inference_steps"] == 6
     assert seen["negative_prompt"] is None
@@ -195,7 +203,7 @@ async def test_generate_image_description_goes_through_prompt_agent(monkeypatch)
         seen["description"] = description
         return "red dragon, old castle", "people"
 
-    async def fake_generate(prompt, negative, cfg):
+    async def fake_generate(prompt, negative, cfg, **kwargs):
         seen.update(prompt=prompt, negative=negative)
         return {"png": b"x", "width": 1, "height": 1, "seconds": 1.0, "prompt": prompt}
 
@@ -215,7 +223,7 @@ async def test_generate_image_description_goes_through_prompt_agent(monkeypatch)
 async def test_generate_image_prompt_agent_off_strips_style(monkeypatch):
     seen = {}
 
-    async def fake_generate(prompt, negative, cfg):
+    async def fake_generate(prompt, negative, cfg, **kwargs):
         seen["prompt"] = prompt
         return {"png": b"x", "width": 1, "height": 1, "seconds": 1.0}
 
@@ -225,3 +233,95 @@ async def test_generate_image_prompt_agent_off_strips_style(monkeypatch):
         "generate_image", {"description": "a red dragon, castle, cinematic lighting, 8k"}
     )
     assert seen["prompt"] == "a red dragon, castle"
+
+
+# --- Этап 49: ключи отладочного /draw в generate_image ---
+
+
+async def test_generate_image_raw_skips_prompt_agent_and_passes_options(monkeypatch):
+    seen = {}
+
+    async def fake_compose(description, cfg, think=None):
+        raise AssertionError("raw не должен ходить в промптер")
+
+    async def fake_generate(prompt, negative, cfg, **kwargs):
+        seen.update(prompt=prompt, negative=negative, **kwargs)
+        return {"png": b"x", "width": 1, "height": 1, "seconds": 1.0, "seed": 5}
+
+    monkeypatch.setattr(llm_service.image_prompt, "compose", fake_compose)
+    monkeypatch.setattr(llm_service.imagegen, "generate_image", fake_generate)
+    result = await _svc(imagegen_enabled=True, imagegen_negative="blurry").run_command(
+        "generate_image",
+        {"description": "old radio, white background", "mode": "item", "raw": True,
+         "seed": 5, "steps": 8, "style": False},
+    )
+    assert seen["prompt"] == "old radio, white background"
+    assert seen["negative"] == ""  # raw — без негатива по умолчанию
+    assert seen["seed"] == 5 and seen["steps"] == 8
+    assert seen["style"] is False and seen["fit"] is False
+    assert seen["ref"] is None and seen["ip_scale"] is None
+    assert result["seed"] == 5
+
+
+async def test_generate_image_mode_hint_and_context_reach_prompt_agent(monkeypatch):
+    seen = {}
+
+    async def fake_compose(description, cfg, think=None):
+        seen["request"] = description
+        return "butler, attic", ""
+
+    async def fake_generate(prompt, negative, cfg, **kwargs):
+        return {"png": b"x", "width": 1, "height": 1, "seconds": 1.0}
+
+    monkeypatch.setattr(llm_service.image_prompt, "compose", fake_compose)
+    monkeypatch.setattr(llm_service.imagegen, "generate_image", fake_generate)
+    await _svc(imagegen_enabled=True).run_command(
+        "generate_image",
+        {"description": "Альфред держит передатчик", "mode": "scene",
+         "context": "чердак, дверь забита досками"},
+    )
+    assert "elderly butler" in seen["request"]
+    assert "чердак, дверь забита досками" in seen["request"]
+    assert seen["request"].endswith("Picture: Альфред держит передатчик")
+
+
+def _png_b64() -> str:
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), "red").save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+async def test_generate_image_scene_with_ref_defaults_ip_scale(monkeypatch):
+    seen = {}
+
+    async def fake_generate(prompt, negative, cfg, **kwargs):
+        seen.update(kwargs)
+        return {"png": b"x", "width": 1, "height": 1, "seconds": 1.0}
+
+    monkeypatch.setattr(llm_service.imagegen, "generate_image", fake_generate)
+    svc = _svc(imagegen_enabled=True, imagegen_prompt_agent=False)
+    await svc.run_command(
+        "generate_image", {"description": "butler", "mode": "scene", "ref_png_b64": _png_b64()}
+    )
+    assert seen["ip_scale"] == llm_service.imagegen.DEFAULT_IP_SCALE
+    assert seen["ref"].size == (8, 8)
+
+
+async def test_generate_image_bad_mode_and_ref_rules(monkeypatch):
+    svc = _svc(imagegen_enabled=True, imagegen_prompt_agent=False)
+    bad = [
+        {"description": "x", "mode": "nope"},
+        {"description": "x", "mode": "variant"},  # без образца
+        {"description": "x", "mode": "item", "ref_png_b64": _png_b64()},
+        {"description": "x", "seed": -1},
+        {"description": "x", "ref_png_b64": base64.b64encode(b"junk").decode(),
+         "mode": "variant"},
+    ]
+    for args in bad:
+        with pytest.raises(ProtoError) as excinfo:
+            await svc.run_command("generate_image", args)
+        assert excinfo.value.code == ERR_BAD_REQUEST, args

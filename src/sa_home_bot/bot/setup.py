@@ -19,6 +19,7 @@ from sa_home_bot.bot.handlers import (
     apps,
     basic,
     control,
+    draw,
     interactives,
     invites,
     node,
@@ -75,6 +76,9 @@ def build_dispatcher(book: SubscriptionBook, gate: Gatekeeper) -> Dispatcher:
     dp.include_router(pending_actions.router)
     # interactives: кнопки сценок (Этап 47), свой префикс «ia:», и /interactives.
     dp.include_router(interactives.router)
+    # draw: отладочный /draw (Этап 49) и его кнопки «draw:» — до ai, чтобы
+    # /draw ответом на картинку Альфреда не ушёл в диалог.
+    dp.include_router(draw.router)
     # ai: команда /ai + узкий фильтр реплаев на свои же диалоги (резолвится
     # по ai_turns, не по дереву Telegram-реплаев) — не пересекается с другими
     # роутерами, но пусть проверяется рано.

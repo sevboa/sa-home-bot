@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import io
 import logging
 import socket
 import time
@@ -26,6 +27,8 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
+
+from PIL import Image
 
 from sa_home_bot import __version__
 from sa_home_bot.config import LlmConfig, Settings
@@ -207,6 +210,54 @@ EventEmitter = Callable[[str, dict[str, Any]], Awaitable[None]]
 async def _noop_emit(event_type: str, data: dict[str, Any]) -> None:
     pass
 
+
+
+def _num(args: dict[str, Any], key: str, kind: type, lo: float, hi: float) -> Any:
+    value = args.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ProtoError(ERR_BAD_REQUEST, f"{key} должен быть числом")
+    if not lo <= value <= hi:
+        raise ProtoError(ERR_BAD_REQUEST, f"{key} вне диапазона {lo}..{hi}")
+    return kind(value)
+
+
+def _imagegen_options(args: dict[str, Any]) -> dict[str, Any]:
+    """Необязательные ключи generate_image (Этап 49, /draw). Образец —
+    ``ref_png_b64``; с ``ip_scale`` он идёт в IP-Adapter (сцена), без —
+    в img2img (вариант предмета)."""
+    mode = args.get("mode") or "free"
+    if mode not in imagegen.MODES:
+        raise ProtoError(ERR_BAD_REQUEST, f"неизвестный режим {mode!r}")
+    context = args.get("context")
+    ref = None
+    ref_b64 = args.get("ref_png_b64")
+    if ref_b64:
+        try:
+            ref = Image.open(io.BytesIO(base64.b64decode(ref_b64)))
+            ref.load()
+        except Exception:
+            raise ProtoError(ERR_BAD_REQUEST, "образец не читается как картинка") from None
+    ip_scale = _num(args, "ip_scale", float, 0.0, 1.5)
+    if ref is not None and mode == "scene" and ip_scale is None:
+        ip_scale = imagegen.DEFAULT_IP_SCALE
+    if mode == "variant" and ref is None:
+        raise ProtoError(ERR_BAD_REQUEST, "для variant нужен образец")
+    if ref is not None and mode not in ("variant", "scene"):
+        raise ProtoError(ERR_BAD_REQUEST, "образец нужен только в variant и scene")
+    return {
+        "mode": mode,
+        "context": context.strip() if isinstance(context, str) else "",
+        "raw": bool(args.get("raw")),
+        "style": args.get("style", True) is not False,
+        "seed": _num(args, "seed", int, 0, 2**32 - 1),
+        "strength": _num(args, "strength", float, 0.05, 1.0),
+        "ip_scale": ip_scale if mode == "scene" else None,
+        "steps": _num(args, "steps", int, 1, 30),
+        "guidance": _num(args, "guidance", float, 1.0, 10.0),
+        "ref": ref,
+    }
 
 class LlmService:
     def __init__(
@@ -916,24 +967,44 @@ class LlmService:
                 raise ProtoError(ERR_BAD_REQUEST, "нужно непустое description или prompt")
             negative = args.get("negative")
             negative = negative.strip() if isinstance(negative, str) else ""
+            # Этап 49, отладочный /draw: режим, образец и ручные ручки. Чат
+            # (tool generate_image) их не шлёт — там всё как было.
+            options = _imagegen_options(args)
             await self._touch(args.get("chat_id"))
             prompt_seconds = 0.0
             if source is not None:
-                if self._cfg.imagegen_prompt_agent:
+                if options["raw"]:
+                    prompt = source
+                elif self._cfg.imagegen_prompt_agent:
+                    request = image_prompt.build_request(
+                        source, options["mode"], options["context"]
+                    )
                     started = time.monotonic()
                     prompt, agent_negative = await image_prompt.compose(
-                        source, self._cfg, think=self._profile.think_arg("off")
+                        request, self._cfg, think=self._profile.think_arg("off")
                     )
                     prompt_seconds = time.monotonic() - started
                     negative = negative or agent_negative
                     log.info(
-                        "imagegen: промптер за %.1fс: %r -> %r", prompt_seconds, source, prompt
+                        "imagegen: промптер за %.1fс: %r -> %r", prompt_seconds, request, prompt
                     )
                 else:
                     prompt = image_prompt.strip_style_tags(source)
+            if not options["raw"]:
+                negative = negative or self._cfg.imagegen_negative
             try:
                 result = await imagegen.generate_image(
-                    prompt.strip(), negative or self._cfg.imagegen_negative, self._cfg
+                    prompt.strip(),
+                    negative,
+                    self._cfg,
+                    seed=options["seed"],
+                    ref=options["ref"],
+                    strength=options["strength"],
+                    ip_scale=options["ip_scale"],
+                    steps=options["steps"],
+                    guidance=options["guidance"],
+                    style=options["style"],
+                    fit=not options["raw"],
                 )
             except Exception:
                 log.warning("imagegen: не удалось сгенерировать картинку", exc_info=True)
@@ -945,6 +1016,11 @@ class LlmService:
                 "seconds": round(result["seconds"], 1),
                 "prompt": result.get("prompt", prompt.strip()),
                 "prompt_seconds": round(prompt_seconds, 1),
+                "full_prompt": result.get("full_prompt"),
+                "full_negative": result.get("full_negative"),
+                "tokens": result.get("tokens"),
+                "seed": result.get("seed"),
+                "steps": result.get("steps"),
             }
         if action == ACTION_TTS_DOWNLOAD_CHUNK:
             session_id = args.get("session_id")

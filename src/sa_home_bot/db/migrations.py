@@ -70,6 +70,10 @@ async def apply_migrations(db: Database) -> None:
             "UPDATE pending_actions SET welcome_message_id=0 WHERE status='accepted'"
         )
     await _migrate_guest_relationships_check(db, schema)
+    # images.purpose/params — добавлены 2026-09-29, отладочный /draw (Этап 49).
+    # DEFAULT 'chat' верно бэкфиллит всё нарисованное до того (см. schema.sql).
+    await _add_column_if_missing(db, "images", "purpose", "TEXT NOT NULL DEFAULT 'chat'")
+    await _add_column_if_missing(db, "images", "params", "TEXT")
     await db.conn.commit()
     log.info("Схема БД применена")
 

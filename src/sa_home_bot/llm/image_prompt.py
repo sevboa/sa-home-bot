@@ -78,6 +78,41 @@ _STYLE_TAG = re.compile(
 )
 
 
+# Этап 49, отладочный /draw: что это за картинка — подсказка промптеру
+# перед описанием. Альфред в кадре — пожилой дворецкий: сама модель
+# «Альфреда» не знает.
+MODE_HINTS = {
+    "free": "",
+    "item": (
+        "This is a picture of ONE item alone. Keep it the only subject: "
+        "single <item>, centered, plain white background."
+    ),
+    "variant": (
+        "This is ONE item redrawn from a reference picture with the listed traits. "
+        "Name the item, then its distinctive traits; single object, plain white background."
+    ),
+    "scene": (
+        "This is what Alfred (an elderly butler in a black tailcoat) sees and "
+        "photographs right now. Main thing first, 8-15 words, the place in 2-3 words."
+    ),
+}
+
+
+def build_request(description: str, mode: str = "free", context: str = "") -> str:
+    """Текст для промптера: подсказка режима, контекст сцены от режиссёра,
+    потом само описание. Для «free» без контекста — описание как есть."""
+    parts = []
+    hint = MODE_HINTS.get(mode, "")
+    if hint:
+        parts.append(hint)
+    if context.strip():
+        parts.append(f"Scene context (use only what is visible now): {context.strip()}")
+    if not parts:
+        return description
+    parts.append(f"Picture: {description}")
+    return "\n\n".join(parts)
+
+
 def split_tags(prompt: str) -> list[str]:
     return [tag.strip() for tag in prompt.replace("\n", ",").split(",") if tag.strip()]
 

@@ -1141,13 +1141,16 @@ class Store:
         colors: int,
         png: bytes,
         now: datetime,
+        purpose: str = "chat",
+        params: str | None = None,
     ) -> int:
         async with self.db.transaction() as conn:
             cur = await conn.execute(
                 "INSERT INTO images (chat_id, author, prompt_ru, prompt_en, caption, "
-                "width, height, colors, png, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "width, height, colors, png, created_at, purpose, params) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (chat_id, author, prompt_ru, prompt_en, caption, width, height, colors,
-                 png, _iso(now)),
+                 png, _iso(now), purpose, params),
             )
             image_id = cur.lastrowid
             await conn.execute(
@@ -1167,9 +1170,11 @@ class Store:
             )
 
     async def get_image(self, chat_id: int, image_id: int) -> dict | None:
-        """Только картинка ЭТОГО чата — чужую по номеру не достать."""
+        """Только картинка ЭТОГО чата и из разговора — чужую и отладочную
+        (/draw) по номеру не достать."""
         cur = await self.db.conn.execute(
-            "SELECT * FROM images WHERE id=? AND chat_id=?", (image_id, chat_id)
+            "SELECT * FROM images WHERE id=? AND chat_id=? AND purpose='chat'",
+            (image_id, chat_id),
         )
         row = await cur.fetchone()
         return dict(row) if row else None
@@ -1190,7 +1195,8 @@ class Store:
         cur = await self.db.conn.execute(
             "SELECT i.id, i.caption, i.prompt_ru, i.created_at, i.telegram_file_id "
             "FROM images_fts f JOIN images i ON i.id = f.rowid "
-            "WHERE images_fts MATCH ? AND i.chat_id=? ORDER BY bm25(images_fts) LIMIT ?",
+            "WHERE images_fts MATCH ? AND i.chat_id=? AND i.purpose='chat' "
+            "ORDER BY bm25(images_fts) LIMIT ?",
             (" OR ".join(terms), chat_id, limit),
         )
         return [dict(r) for r in await cur.fetchall()]
@@ -1198,18 +1204,56 @@ class Store:
     async def recent_images(self, chat_id: int, limit: int = 5) -> list[dict]:
         cur = await self.db.conn.execute(
             "SELECT id, caption, prompt_ru, created_at, telegram_file_id FROM images "
-            "WHERE chat_id=? ORDER BY id DESC LIMIT ?",
+            "WHERE chat_id=? AND purpose='chat' ORDER BY id DESC LIMIT ?",
             (chat_id, limit),
         )
         return [dict(r) for r in await cur.fetchall()]
 
     async def count_images_since(self, chat_id: int, since: datetime) -> int:
         cur = await self.db.conn.execute(
-            "SELECT COUNT(*) AS n FROM images WHERE chat_id=? AND created_at>=?",
+            "SELECT COUNT(*) AS n FROM images WHERE chat_id=? AND created_at>=? "
+            "AND purpose='chat'",
             (chat_id, _iso(since)),
         )
         row = await cur.fetchone()
         return int(row["n"])
+
+    # Отладочный /draw (Этап 49, bot/draw_debug.py) — владелец, любой чат.
+
+    async def image_by_id(self, image_id: int) -> dict | None:
+        cur = await self.db.conn.execute("SELECT * FROM images WHERE id=?", (image_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def image_by_message(self, chat_id: int, message_id: int) -> dict | None:
+        cur = await self.db.conn.execute(
+            "SELECT * FROM images WHERE chat_id=? AND message_id=?", (chat_id, message_id)
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def set_image_purpose(self, image_id: int, purpose: str) -> bool:
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                "UPDATE images SET purpose=? WHERE id=?", (purpose, image_id)
+            )
+            return cur.rowcount > 0
+
+    async def count_images_by_purpose(self, purpose: str) -> int:
+        cur = await self.db.conn.execute(
+            "SELECT COUNT(*) AS n FROM images WHERE purpose=?", (purpose,)
+        )
+        row = await cur.fetchone()
+        return int(row["n"])
+
+    async def delete_images_by_purpose(self, purpose: str) -> int:
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "DELETE FROM images_fts WHERE rowid IN (SELECT id FROM images WHERE purpose=?)",
+                (purpose,),
+            )
+            cur = await conn.execute("DELETE FROM images WHERE purpose=?", (purpose,))
+            return cur.rowcount
 
     # --- housekeeping ---
 
