@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import html
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -46,7 +47,7 @@ HELP = """\
 <code>steps=6</code> <code>cfg=1.5</code> — шаги и guidance
 
 После <code>|</code> — контекст сцены для промптера (при raw не нужен).
-<code>| neg: …</code> — чего не рисовать.
+<code>neg: …</code> — чего не рисовать (и при raw тоже).
 
 <b>Примеры</b>
 <code>/draw item старый проклятый радиопередатчик с антенной</code>
@@ -71,6 +72,11 @@ _NUMERIC_KEYS: dict[str, tuple[str, type, float, float]] = {
     "ref": ("ref", int, 1, 2**63 - 1),
 }
 _FLAGS = ("raw", "nostyle")
+
+
+# «neg:» без «|» перед ним — тоже негатив: иначе он прилипал к описанию
+# («/draw scene raw girl neg: pants» уходило в генератор целиком).
+_NEG_MARK = re.compile(r"(?:\|\s*)?\b(?:neg|негатив):", re.IGNORECASE)
 
 
 class DrawSyntaxError(ValueError):
@@ -133,7 +139,7 @@ def _parse_number(key: str, value: str) -> tuple[str, Any]:
 
 def parse(args: str | None) -> DrawRequest | DrawCommand:
     """Текст после «/draw» → запрос на рисование или служебная команда."""
-    text = (args or "").strip()
+    text = _NEG_MARK.sub("| neg:", (args or "").strip())
     if not text:
         return DrawCommand("help")
     head, *segments = [part.strip() for part in text.split("|")]

@@ -1,4 +1,4 @@
-"""Художник-промптер (llm/image_prompt.py): чистка стилевых тегов, подгонка
+"""Художник-промптер (llm/image_prompt.py): подгонка
 под 77 токенов CLIP, разбор ответа модели и откат на описание при сбое."""
 
 from __future__ import annotations
@@ -13,26 +13,6 @@ TEMPLATE = "{prompt}, video game art, flat shading"
 
 def _words(text: str) -> int:
     return len(text.replace(",", " ").split())
-
-
-def test_strip_style_tags_drops_style_and_quality():
-    prompt = (
-        "colossal eldritch monster, massive tentacles, dark stormy sky, "
-        "cinematic lighting, epic scale, hyperrealism, oil painting style, 8k, "
-        "detailed skin texture"
-    )
-    assert image_prompt.strip_style_tags(prompt) == (
-        "colossal eldritch monster, massive tentacles, dark stormy sky"
-    )
-
-
-def test_strip_style_tags_keeps_painting_as_object():
-    prompt = "a painting of red poppies, ornate gold frame, gallery wall"
-    assert image_prompt.strip_style_tags(prompt) == prompt
-
-
-def test_strip_style_tags_all_style_returns_original():
-    assert image_prompt.strip_style_tags("cinematic, 8k") == "cinematic, 8k"
 
 
 def test_fit_prompt_drops_tail_tags_until_template_fits():
@@ -52,7 +32,7 @@ def test_fit_prompt_short_prompt_untouched():
     assert image_prompt.fit_prompt("cat, sofa", TEMPLATE, _words) == "cat, sofa"
 
 
-async def test_compose_parses_json_and_strips_style(monkeypatch):
+async def test_compose_parses_json_keeps_light_and_camera(monkeypatch):
     seen = {}
 
     async def fake_chat(cfg, messages, system, *, tools, think, response_format):
@@ -64,7 +44,7 @@ async def test_compose_parses_json_and_strips_style(monkeypatch):
 
     monkeypatch.setattr(image_prompt.ollama, "chat", fake_chat)
     result = await image_prompt.compose("рыжий кот на синем диване", LlmConfig(), think=False)
-    assert result == ("ginger cat, blue sofa", "dogs")
+    assert result == ("ginger cat, blue sofa, cinematic lighting", "dogs")
     assert seen["messages"] == [{"role": "user", "content": "рыжий кот на синем диване"}]
     assert seen["format"] == "json"
     assert seen["think"] is False
@@ -76,4 +56,4 @@ async def test_compose_falls_back_to_description_on_bad_answer(monkeypatch):
 
     monkeypatch.setattr(image_prompt.ollama, "chat", fake_chat)
     result = await image_prompt.compose("a cat, sofa, 8k", LlmConfig())
-    assert result == ("a cat, sofa", "")
+    assert result == ("a cat, sofa, 8k", "")

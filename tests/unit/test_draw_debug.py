@@ -92,3 +92,16 @@ def test_help_mentions_every_mode_and_key():
     for word in (*draw_debug.MODES, "raw", "nostyle", "seed=", "s=", "ip=", "ref=", "keep",
                  "clean", "neg:"):
         assert word in draw_debug.HELP
+
+
+def test_negative_without_pipe_is_not_glued_to_description():
+    req = draw_debug.parse("scene raw girl neg: pants")
+    assert req.description == "girl"
+    assert req.negative == "pants"
+    assert req.service_args()["negative"] == "pants"
+
+
+def test_negative_without_pipe_after_context():
+    req = draw_debug.parse("scene Альфред у окна | чердак негатив: люди, текст")
+    assert req.context == "чердак"
+    assert req.negative == "люди, текст"

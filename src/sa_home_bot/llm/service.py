@@ -989,7 +989,7 @@ class LlmService:
                         "imagegen: промптер за %.1fс: %r -> %r", prompt_seconds, request, prompt
                     )
                 else:
-                    prompt = image_prompt.strip_style_tags(source)
+                    prompt = source
             if not options["raw"]:
                 negative = negative or self._cfg.imagegen_negative
             try:

@@ -220,7 +220,7 @@ async def test_generate_image_description_goes_through_prompt_agent(monkeypatch)
     assert result["prompt"] == "red dragon, old castle"
 
 
-async def test_generate_image_prompt_agent_off_strips_style(monkeypatch):
+async def test_generate_image_prompt_agent_off_keeps_description(monkeypatch):
     seen = {}
 
     async def fake_generate(prompt, negative, cfg, **kwargs):
@@ -232,7 +232,7 @@ async def test_generate_image_prompt_agent_off_strips_style(monkeypatch):
     await svc.run_command(
         "generate_image", {"description": "a red dragon, castle, cinematic lighting, 8k"}
     )
-    assert seen["prompt"] == "a red dragon, castle"
+    assert seen["prompt"] == "a red dragon, castle, cinematic lighting, 8k"
 
 
 # --- Этап 49: ключи отладочного /draw в generate_image ---
