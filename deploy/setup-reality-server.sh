@@ -139,7 +139,7 @@ cat > "$BUILD_DIR/config.json" <<EOF
           "shortIds": ["${REALITY_SHORT_ID}"]
         }
       },
-      "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"] }
+      "sniffing": { "enabled": false }
     },
     {
       "tag": "api-in",
