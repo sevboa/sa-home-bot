@@ -272,6 +272,7 @@ async def test_my_acquaintances_both_roles(store):
     result = await ai_tools.tool_my_acquaintances(ctx, {})
     assert "Настя" in result and "Игорь" in result
     assert "передавать сообщения" in result
+    assert f"id {GUEST_B}" in result and f"id {GUEST_C}" in result
 
 
 async def test_my_acquaintances_silent_about_open_forms(store):

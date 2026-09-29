@@ -122,13 +122,15 @@ def _query_handle(query: str) -> str | None:
     return match.group(1).casefold()
 
 
-# Telegram user_id внутри запроса ("Наташа (id 1243270013)"). Короче пяти
-# цифр — это уже не id, а, скорее, номер/год в имени.
+# Telegram user_id внутри запроса ("Наташа (id 1243270013)"). С явным "id"
+# — любой длины (так его выдают my_acquaintances и подсказки tell); голое
+# число короче пяти цифр — это уже не id, а, скорее, номер/год в имени.
+_EXPLICIT_ID_RE = re.compile(r"(?<!\w)id\s*:?\s*(\d+)(?!\w)", re.IGNORECASE)
 _CHAT_ID_RE = re.compile(r"(?<![\w@])(\d{5,})(?!\w)")
 
 
 def _query_chat_id(query: str) -> int | None:
-    match = _CHAT_ID_RE.search(query)
+    match = _EXPLICIT_ID_RE.search(query) or _CHAT_ID_RE.search(query)
     return int(match.group(1)) if match else None
 
 

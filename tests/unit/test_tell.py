@@ -850,3 +850,43 @@ async def test_ambiguous_name_without_acquaintances_asks_to_clarify():
     )
     assert "уточни" in await ai_tools.tool_tell(ctx, {"recipient": "Милана", "text": "привет"})
     assert notifier.sent == []
+
+
+# --- живой баг 2026-09-28: «передай маме» → модель угадала не того -------
+
+
+async def test_refusal_lists_acquaintances_with_ids_and_id_resolves():
+    """Отказ/«не знаю» подсказывает знакомых с id; повтор по id — доходит."""
+    notifier = FakeNotifier()
+    ctx = _ctx(
+        chat_id=OWNER_CHAT,
+        book=_twins_book(),
+        notifier=notifier,
+        store=FakeStore(acquainted=((FAMILY_B_CHAT, OWNER_CHAT),)),
+        settings=Settings(),
+    )
+    refused = await ai_tools.tool_tell(ctx, {"recipient": "Гость Плоский", "text": "привет"})
+    assert "не знакомы" in refused
+    assert f"Милана (id {FAMILY_B_CHAT})" in refused
+
+    unknown = await ai_tools.tool_tell(ctx, {"recipient": "маме", "text": "привет"})
+    assert "не знаю" in unknown and f"id {FAMILY_B_CHAT}" in unknown
+    assert notifier.sent == []
+
+    result = await ai_tools.tool_tell(ctx, {"recipient": f"id {FAMILY_B_CHAT}", "text": "привет"})
+    assert "передано" in result
+    assert notifier.sent[0][0] == FAMILY_B_CHAT
+
+
+async def test_id_of_non_acquaintance_still_refused():
+    notifier = FakeNotifier()
+    ctx = _ctx(
+        chat_id=OWNER_CHAT,
+        book=_twins_book(),
+        notifier=notifier,
+        store=FakeStore(acquainted=()),
+        settings=Settings(),
+    )
+    result = await ai_tools.tool_tell(ctx, {"recipient": f"id {FAMILY_A_CHAT}", "text": "привет"})
+    assert "не знакомы" in result and "знакомых у собеседника нет" in result
+    assert notifier.sent == []

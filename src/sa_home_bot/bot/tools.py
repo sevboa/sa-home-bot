@@ -1231,16 +1231,42 @@ async def tool_my_acquaintances(ctx: ToolContext, _args: dict[str, Any]) -> str:
     if me is None:
         return "недоступно: тебя нет в списке гостей"
 
-    lines: list[str] = []
+    roster = await acquaintance_roster(ctx)
+    if not roster:
+        return "подтверждённых знакомств нет"
+    lines = [f"🤝 {name} — id {chat_id}" for chat_id, name in roster]
+    return (
+        "Знакомы (могу передавать сообщения; в tell можно указать recipient=\"id …\"):\n"
+        + "\n".join(lines)
+    )
+
+
+async def acquaintance_roster(ctx: ToolContext) -> list[tuple[int, str]]:
+    """Подтверждённые знакомые собеседника: (chat_id, имя). id — главное:
+    по нему tell находит человека точно, как бы модель ни переиначила имя
+    (живой баг 2026-09-28: «передай маме» ушло в «Наталья Вадимовна», хотя
+    знакома была Милана)."""
+    if ctx.chat_id is None or ctx.book is None or ctx.store is None:
+        return []
+    roster: list[tuple[int, str]] = []
     for row in await ctx.store.relationships_for(ctx.chat_id, status="confirmed"):
         other_chat_id = row["guest_b"] if row["guest_a"] == ctx.chat_id else row["guest_a"]
         other = ctx.book.for_chat(other_chat_id)
-        name = other.name if other is not None else f"chat_id {other_chat_id}"
-        lines.append(f"🤝 {name}")
+        name = (other.invited_user or other.name) if other is not None else "?"
+        roster.append((other_chat_id, name))
+    return roster
 
-    if not lines:
-        return "подтверждённых знакомств нет"
-    return "Знакомы (могу передавать сообщения):\n" + "\n".join(lines)
+
+async def _roster_hint(ctx: ToolContext) -> str:
+    roster = await acquaintance_roster(ctx)
+    if not roster:
+        return " Подтверждённых знакомых у собеседника нет."
+    names = ", ".join(f"{name} (id {chat_id})" for chat_id, name in roster)
+    return (
+        f" Знакомые собеседника: {names}. Если имелся в виду кто-то из них — "
+        "вызови tell ещё раз с recipient=\"id <число>\"; если неясно кто — "
+        "переспроси у собеседника, не угадывай."
+    )
 
 
 _DECL_CALC: dict[str, Any] = {
@@ -3215,6 +3241,7 @@ async def _deliver_personal_message(
     narrow: (
         Callable[[list[recipients.Recipient]], Awaitable[list[recipients.Recipient]]] | None
     ) = None,
+    hint: Callable[[], Awaitable[str]] | None = None,
 ) -> str:
     """Общая доставка личного сообщения — резолвинг получателя, лимит,
     отправка, запись хода диалога. Права (если нужны) проверяет ``guard``:
@@ -3237,6 +3264,9 @@ async def _deliver_personal_message(
     писать вообще можно (у tell — знакомых). Остался один — ему и пишем;
     несколько — всё равно переспрашиваем; никого — переспрашиваем по
     исходному списку.
+
+    ``hint`` — дописка к «не знаю такого»: кому писать МОЖНО (у tell — список
+    знакомых с id), чтобы модель повторила вызов точно, а не угадывала.
     """
     found = recipients.find_recipients(who, ctx.book, ctx.settings.people)
     if len(found) > 1 and narrow is not None:
@@ -3245,7 +3275,7 @@ async def _deliver_personal_message(
         return (
             f"не получилось: «{who}» я не знаю — писать я могу только тем, кто "
             "уже принял приглашение и говорит со мной в личном чате"
-        )
+        ) + (await hint() if hint is not None else "")
     if len(found) > 1:
         names = ", ".join(f"{r.display} ({r.chat_id})" for r in found)
         return f"уточни, кому именно: под «{who}» подходят {names}"
@@ -3353,8 +3383,8 @@ async def tool_tell(ctx: ToolContext, args: dict[str, Any]) -> str:
             f"не умею: вы с {target.display} ещё не знакомы через меня — лично передавать "
             "сообщения я могу только тем, с кем знакомство подтверждено (и владельцу, "
             "если просят передать именно «владельцу»/«хозяину»); могу "
-            f"предложить знакомство (request_acquaintance){owner_hint}"
-        )
+            f"предложить знакомство (request_acquaintance){owner_hint}."
+        ) + await _roster_hint(ctx)
 
     def render(target: recipients.Recipient) -> str:
         return render_tell(
@@ -3367,7 +3397,14 @@ async def tool_tell(ctx: ToolContext, args: dict[str, Any]) -> str:
         return {"require_acquaintance": [ctx.chat_id, target.chat_id]}
 
     return await _deliver_personal_message(
-        ctx, who, text, render, guard=guard, emit_extra=emit_extra, narrow=narrow
+        ctx,
+        who,
+        text,
+        render,
+        guard=guard,
+        emit_extra=emit_extra,
+        narrow=narrow,
+        hint=lambda: _roster_hint(ctx),
     )
 
 
@@ -3385,7 +3422,10 @@ _DECL_TELL: dict[str, Any] = {
             "собеседника подтверждено знакомство (request_acquaintance), и "
             "владельцу, если просят передать именно «владельцу»/«хозяину»/"
             "«админу»; по личному имени владелец — такой же человек, как все. "
-            "Если человека не нашлось или подходит сразу несколько — тул "
+            "Родственное слово («маме», «брату») — НЕ имя: не подставляй человека "
+            "из семейного древа, а сперва вызови my_acquaintances и шли по id "
+            "того знакомого, кто подходит, либо переспроси. Если человека не "
+            "нашлось, связи нет или подходит сразу несколько — тул "
             "скажет об этом, тогда переспроси у собеседника, а не угадывай. "
             "Получателя ищет САМ ИНСТРУМЕНТ — не "
             "пытайся заранее выяснить, кто это (поиском в интернете, памятью "
@@ -3407,14 +3447,16 @@ _DECL_TELL: dict[str, Any] = {
             "владелец, notify_guest) — спроси прямо: «сказать как лично от "
             "тебя или как официальное уведомление?», не выбирай сам. Если "
             "тул вернул отказ — перескажи ПРИЧИНУ ИЗ ЕГО ОТВЕТА как есть, не "
-            "выдумывай другую от себя."
+            "выдумывай другую от себя. Никогда не отказывай, не вызвав tell: "
+            "знакомство могло появиться с прошлого раза — проверяет только тул."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "recipient": {
                     "type": "string",
-                    "description": "Имя или @username получателя, как его назвал собеседник",
+                    "description": "Имя или @username получателя, как его назвал собеседник, "
+                    "либо \"id <число>\" из my_acquaintances / подсказки тула",
                 },
                 "text": {
                     "type": "string",
