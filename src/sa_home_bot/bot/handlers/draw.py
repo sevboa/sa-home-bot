@@ -60,12 +60,18 @@ def _ref_from_photo(data: bytes) -> bytes:
 async def _find_ref(
     message: Message, request: DrawRequest, store: Store
 ) -> tuple[bytes, str] | str | None:
-    """(png, подпись образца), текст ошибки или None (образца нет)."""
+    """(png, подпись образца), текст ошибки или None (образца нет).
+
+    Порядок: ``ref=ID``, картинка, приложенная к самой команде (команда в
+    подписи), картинка, на которую ответили."""
     if request.ref_id is not None:
         row = await store.image_by_id(request.ref_id)
         if row is None:
             return f"картинки #{request.ref_id} в базе нет"
         return row["png"], f"#{row['id']}"
+    if message.photo:
+        buf = await message.bot.download(message.photo[-1])
+        return _ref_from_photo(buf.getvalue()), "приложенное фото"
     replied = message.reply_to_message
     if replied is None or not replied.photo:
         return None
@@ -136,11 +142,13 @@ async def cmd_draw(
     if ref is not None and not draw_debug.accepts_ref(request):
         await message.answer(
             f"⚠️ образец нужен только в variant и scene, а тут {request.mode}. "
-            "Без образца — отправь не ответом на картинку."
+            "Без образца — отправь без картинки и не ответом на неё."
         )
         return
     if ref is None and draw_debug.needs_ref(request):
-        await message.answer("⚠️ variant рисуется по образцу: ответь на картинку или добавь ref=ID.")
+        await message.answer(
+            "⚠️ variant рисуется по образцу: приложи картинку, ответь на неё или добавь ref=ID."
+        )
         return
 
     args = request.service_args()
@@ -178,7 +186,12 @@ async def cmd_draw(
         now=datetime.now(tz=UTC),
         purpose="debug",
         params=json.dumps(
-            {**request.params(), "seed": result.get("seed"), "steps": result.get("steps")},
+            {
+                **request.params(),
+                **({"ref_from": ref_label} if ref_label else {}),
+                "seed": result.get("seed"),
+                "steps": result.get("steps"),
+            },
             ensure_ascii=False,
         ),
     )
