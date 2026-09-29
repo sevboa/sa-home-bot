@@ -181,7 +181,7 @@ async def cmd_draw(
         caption=f"отладка {request.mode}",
         width=int(result["width"]),
         height=int(result["height"]),
-        colors=cfg.imagegen_colors,
+        colors=int(result.get("colors") or 0),
         png=png,
         now=datetime.now(tz=UTC),
         purpose="debug",

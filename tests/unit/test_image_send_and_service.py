@@ -140,6 +140,7 @@ async def test_generate_image_returns_png_b64(monkeypatch):
         "tokens": None,
         "seed": None,
         "steps": None,
+        "colors": None,
     }
     assert seen == {"prompt": "a cat", "negative": "text"}
 
@@ -260,7 +261,26 @@ async def test_generate_image_raw_skips_prompt_agent_and_passes_options(monkeypa
     assert seen["seed"] == 5 and seen["steps"] == 8
     assert seen["style"] is False and seen["fit"] is False
     assert seen["ref"] is None and seen["ip_scale"] is None
+    assert seen["size"] is None and seen["colors"] is None  # по умолчанию — конфиг
     assert result["seed"] == 5
+
+
+async def test_generate_image_passes_output_size_and_palette(monkeypatch):
+    seen = {}
+
+    async def fake_generate(prompt, negative, cfg, **kwargs):
+        seen.update(kwargs)
+        return {"png": b"x", "width": 128, "height": 128, "seconds": 1.0, "colors": 0}
+
+    monkeypatch.setattr(llm_service.imagegen, "generate_image", fake_generate)
+    svc = _svc(imagegen_enabled=True, imagegen_prompt_agent=False)
+    result = await svc.run_command(
+        "generate_image", {"description": "castle", "size": 128, "colors": 0}
+    )
+    assert seen["size"] == 128 and seen["colors"] == 0
+    assert result["colors"] == 0
+    with pytest.raises(ProtoError):
+        await svc.run_command("generate_image", {"description": "castle", "size": 2048})
 
 
 async def test_generate_image_mode_hint_and_context_reach_prompt_agent(monkeypatch):

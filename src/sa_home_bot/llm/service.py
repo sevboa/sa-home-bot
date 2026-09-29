@@ -256,6 +256,8 @@ def _imagegen_options(args: dict[str, Any]) -> dict[str, Any]:
         "ip_scale": ip_scale if mode == "scene" else None,
         "steps": _num(args, "steps", int, 1, 30),
         "guidance": _num(args, "guidance", float, 1.0, 10.0),
+        "size": _num(args, "size", int, 16, 512),
+        "colors": _num(args, "colors", int, 0, 256),
         "ref": ref,
     }
 
@@ -1005,6 +1007,8 @@ class LlmService:
                     guidance=options["guidance"],
                     style=options["style"],
                     fit=not options["raw"],
+                    size=options["size"],
+                    colors=options["colors"],
                 )
             except Exception:
                 log.warning("imagegen: не удалось сгенерировать картинку", exc_info=True)
@@ -1021,6 +1025,7 @@ class LlmService:
                 "tokens": result.get("tokens"),
                 "seed": result.get("seed"),
                 "steps": result.get("steps"),
+                "colors": result.get("colors"),
             }
         if action == ACTION_TTS_DOWNLOAD_CHUNK:
             session_id = args.get("session_id")

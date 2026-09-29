@@ -90,7 +90,7 @@ def test_caption_fits_and_escapes():
 
 def test_help_mentions_every_mode_and_key():
     for word in (*draw_debug.MODES, "raw", "nostyle", "seed=", "s=", "ip=", "ref=", "keep",
-                 "clean", "neg:"):
+                 "clean", "neg:", "px=", "colors="):
         assert word in draw_debug.HELP
 
 
@@ -105,3 +105,19 @@ def test_negative_without_pipe_after_context():
     req = draw_debug.parse("scene Альфред у окна | чердак негатив: люди, текст")
     assert req.context == "чердак"
     assert req.negative == "люди, текст"
+
+
+def test_output_size_and_palette_keys():
+    req = draw_debug.parse("scene px=128 colors=0 замок под луной")
+    assert req.description == "замок под луной"
+    assert req.service_args()["size"] == 128 and req.service_args()["colors"] == 0
+    with pytest.raises(DrawSyntaxError):
+        draw_debug.parse("scene px=1024 замок")
+
+
+def test_caption_shows_output_size():
+    req = draw_debug.parse("free px=128 кот")
+    result = {"seed": 1, "steps": 6, "seconds": 30, "width": 128, "height": 128, "colors": 32}
+    assert "128×128, 32 цв." in draw_debug.caption(1, req, result, None)
+    result["colors"] = 0
+    assert "128×128 ·" in draw_debug.caption(1, req, result, None)

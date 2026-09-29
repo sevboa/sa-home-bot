@@ -45,6 +45,8 @@ HELP = """\
 <code>s=0.55</code> — сила изменений variant (рабочие 0.5–0.65)
 <code>ip=0.4</code> — сила образца в scene (рабочие 0.3–0.5)
 <code>steps=6</code> <code>cfg=1.5</code> — шаги и guidance
+<code>px=128</code> — итоговый размер (16–512, эталон 64; рисуется всё равно 512)
+<code>colors=0</code> — цветов палитры (0 — без палитры, эталон 32)
 
 После <code>|</code> — контекст сцены для промптера (при raw не нужен).
 <code>neg: …</code> — чего не рисовать (и при raw тоже).
@@ -70,6 +72,9 @@ _NUMERIC_KEYS: dict[str, tuple[str, type, float, float]] = {
     "cfg": ("guidance", float, 1.0, 10.0),
     "guidance": ("guidance", float, 1.0, 10.0),
     "ref": ("ref", int, 1, 2**63 - 1),
+    "px": ("size", int, 16, 512),
+    "size": ("size", int, 16, 512),
+    "colors": ("colors", int, 0, 256),
 }
 _FLAGS = ("raw", "nostyle")
 
@@ -218,6 +223,10 @@ def caption(
     if ref_label and request.mode == "scene":
         head.append(f"ip {request.numbers.get('ip_scale', 'по умолч.')}")
     head.append(f"шагов {result.get('steps', '?')}")
+    if result.get("width"):
+        colors = result.get("colors")
+        palette = f", {colors} цв." if colors else ""
+        head.append(f"{result['width']}×{result.get('height', '?')}{palette}")
     timing = f"{result.get('seconds', '?')} с"
     if result.get("prompt_seconds"):
         timing += f" (+промптер {result['prompt_seconds']} с)"

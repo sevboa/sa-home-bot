@@ -199,17 +199,21 @@ async def generate_image(
     guidance: float | None = None,
     style: bool = True,
     fit: bool = True,
+    size: int | None = None,
+    colors: int | None = None,
 ) -> dict[str, Any]:
     """Сгенерировать картинку. Результат: ``png`` (байты), ``width``,
     ``height``, ``seconds`` (время самой генерации, без ожидания лока),
     ``prompt`` (суть, как она ушла в модель — после подгонки под CLIP),
     ``full_prompt``/``full_negative`` (с шаблоном стиля), ``tokens``,
-    ``seed``, ``steps``.
+    ``seed``, ``steps``, ``colors``.
 
     Без ключевых аргументов — эталон C (Этап 48). ``ref`` + ``ip_scale`` —
     сцена с образцом (IP-Adapter), ``ref`` без ``ip_scale`` — вариант
     образца (img2img, ``strength``). ``style=False`` — без стилевого
-    шаблона, ``fit=False`` — промпт не подрезается под 77 токенов CLIP."""
+    шаблона, ``fit=False`` — промпт не подрезается под 77 токенов CLIP.
+    ``size``/``colors`` — итоговый размер и палитра вместо конфиговых
+    (рисуется всё равно 512², это только уменьшение после)."""
     pipe = await _get_pipeline(cfg)
 
     def count_tokens(text: str) -> int:
@@ -244,13 +248,15 @@ async def generate_image(
         started = time.monotonic()
         image = await asyncio.to_thread(_generate_sync, pipe, prompt, negative, cfg, job)
         seconds = time.monotonic() - started
-    png, width, height = shrink_to_png(image, cfg.imagegen_size, cfg.imagegen_colors)
+    size = size or cfg.imagegen_size
+    colors = cfg.imagegen_colors if colors is None else colors
+    png, width, height = shrink_to_png(image, size, colors)
     log.info(
         "imagegen: %dx%d, %d цв., %d байт за %.1fс",
-        width, height, cfg.imagegen_colors, len(png), seconds,
+        width, height, colors, len(png), seconds,
     )
     return {
         "png": png, "width": width, "height": height, "seconds": seconds, "prompt": subject,
         "full_prompt": prompt, "full_negative": negative, "tokens": count_tokens(prompt),
-        "seed": seed, "steps": steps,
+        "seed": seed, "steps": steps, "colors": colors,
     }
