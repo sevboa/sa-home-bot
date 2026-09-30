@@ -26,6 +26,7 @@ from sa_home_bot.bot.interactives.base import (
 )
 from sa_home_bot.bot.interactives.director import DirectorDecision, parse_decision
 from sa_home_bot.bot.interactives.engine import Interactives, apply_decision
+from sa_home_bot.bot.interactives.transylvania import Transylvania
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.config import LlmConfig, Settings
 from sa_home_bot.db.connection import Database
@@ -105,6 +106,10 @@ class Clock:
         return self.now
 
 
+async def _rainy() -> int:
+    return 61  # WMO: небольшой дождь
+
+
 def _make(store, *, clock=None):
     notifier = FakeNotifier()
     link = FakeNodeLink()
@@ -116,6 +121,7 @@ def _make(store, *, clock=None):
         lambda: link,
         now=clock or Clock(),
         choose=lambda options: options[0],
+        transylvania=Transylvania(fetch=_rainy),
     )
     return svc, notifier, link
 

@@ -31,6 +31,16 @@ ACTION_CHAT = "chat"
 
 EFFECT_MAX_CHARS = 600
 DIRECTIVE_MAX_CHARS = 600
+CABINET_ADD_MAX = 3
+
+# Особенности кабинета вне сцены (первый снимок до всякой сцены) — отдельный
+# маленький вызов той же роли. Нестрогий промпт: вариантов не перечисляем,
+# у каждого гостя кабинет свой (решение пользователя 2026-09-30).
+FEATURES_SYSTEM = (
+    "Ты — Ведущий: придумываешь обстановку мира, в котором живёт Альфред — "
+    "старый дворецкий в замке в Трансильвании. Пиши по-русски. Отвечай строго "
+    "одним JSON-объектом."
+)
 
 
 @dataclass(frozen=True)
@@ -42,6 +52,8 @@ class DirectorDecision:
     directive: str | None
     finale_fault: str | None
     note: str | None
+    # Новые устойчивые детали кабинета гостя (cabinet.py) — остаются после сцены.
+    cabinet_add: tuple[str, ...] = ()
 
 
 def _clean(value: Any, limit: int) -> str | None:
@@ -53,9 +65,9 @@ def _clean(value: Any, limit: int) -> str | None:
     return text[:limit]
 
 
-def parse_decision(raw: str, current_stage: int) -> DirectorDecision | None:
-    """JSON Ведущего → решение. Модель может обернуть JSON в ```-блок или
-    дописать текст вокруг — берём первый {...}."""
+def _json_object(raw: str) -> dict | None:
+    """Модель может обернуть JSON в ```-блок или дописать текст вокруг —
+    берём первый {...}."""
     start, end = raw.find("{"), raw.rfind("}")
     if start < 0 or end <= start:
         return None
@@ -63,7 +75,22 @@ def parse_decision(raw: str, current_stage: int) -> DirectorDecision | None:
         data = json.loads(raw[start : end + 1])
     except ValueError:
         return None
-    if not isinstance(data, dict):
+    return data if isinstance(data, dict) else None
+
+
+def _str_list(value: Any, limit: int) -> tuple[str, ...]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return ()
+    items = (_clean(v, EFFECT_MAX_CHARS) for v in value)
+    return tuple(v for v in items if v)[:limit]
+
+
+def parse_decision(raw: str, current_stage: int) -> DirectorDecision | None:
+    """JSON Ведущего → решение."""
+    data = _json_object(raw)
+    if data is None:
         return None
     stage = data.get("stage")
     if not isinstance(stage, int) or isinstance(stage, bool):
@@ -76,10 +103,46 @@ def parse_decision(raw: str, current_stage: int) -> DirectorDecision | None:
         directive=_clean(data.get("directive"), DIRECTIVE_MAX_CHARS),
         finale_fault=_clean(data.get("finale_fault"), EFFECT_MAX_CHARS),
         note=_clean(data.get("note"), 300),
+        cabinet_add=_str_list(data.get("cabinet_add"), CABINET_ADD_MAX),
     )
 
 
-def build_director_input(scenario: Scenario, run: Run, *, finale_allowed: bool) -> str:
+def _cabinet_block(place: str, outside: str, need: int) -> str:
+    """Где идёт сцена — кабинет гостя и что за окном. ``need`` > 0 — у
+    кабинета ещё нет особенностей, пусть Ведущий придумает первые."""
+    if need:
+        task = (
+            f"У этого кабинета ещё нет своих особенностей — придумай {need} в "
+            "cabinet_add: необычные, но уместные в кабинете старого дворецкого, "
+            "с лёгкой жутью или странностью, заметные глазу."
+        )
+    else:
+        task = (
+            "Если в этом ходе в кабинете появилось или обнаружилось что-то, что "
+            "останется надолго и видно глазу, — добавь это в cabinet_add (0–2 "
+            "пункта). Не повторяй и не противоречь уже известным особенностям "
+            "(не «холодно», если уже «жарко натоплено»)."
+        )
+    return f"Место сцены: {place}\nЗа окном сейчас: {outside}.\n{task}\n\n"
+
+
+def build_features_input(place: str, outside: str, count: int) -> str:
+    return (
+        _cabinet_block(place, outside, count)
+        + 'Ответь ОДНИМ JSON-объектом: {"cabinet_add": [str, ...]} — каждая '
+        "деталь одной короткой фразой."
+    )
+
+
+def build_director_input(
+    scenario: Scenario,
+    run: Run,
+    *,
+    finale_allowed: bool,
+    place: str | None = None,
+    outside: str | None = None,
+    need_features: int = 0,
+) -> str:
     ladder = "\n".join(f"  {i}. {hint}" for i, hint in enumerate(scenario.ladder))
     notes = "\n".join(f"- {n}" for n in run.notes) or "—"
     transcript = "\n".join(run.transcript) or "—"
@@ -93,6 +156,10 @@ def build_director_input(scenario: Scenario, run: Run, *, finale_allowed: bool) 
         finale_line = "Финал РАЗРЕШЁН: можешь поставить finale=true, если сцена созрела."
     else:
         finale_line = "Финал пока ЗАПРЕЩЁН (рано) — finale=false."
+    cabinet = _cabinet_block(place, outside or "неизвестно", need_features) if place else ""
+    cabinet_field = (
+        ',\n "cabinet_add": [str] — новые устойчивые детали кабинета (или [])' if place else ""
+    )
     return (
         f"Сценарий: {scenario.title}\n"
         f"Лестница подсказок Альфреду (стадии):\n{ladder}\n"
@@ -102,6 +169,7 @@ def build_director_input(scenario: Scenario, run: Run, *, finale_allowed: bool) 
         f"Твои заметки с прошлых ходов:\n{notes}\n\n"
         f"Журнал сцены (последняя реплика — только что сказанное Альфредом):\n"
         f"{transcript}\n\n"
+        f"{cabinet}"
         "Ответь ОДНИМ JSON-объектом с полями:\n"
         '{"active": bool — сцена продолжается (false, если гость явно ушёл '
         "в другую тему),\n"
@@ -114,7 +182,8 @@ def build_director_input(scenario: Scenario, run: Run, *, finale_allowed: bool) 
         ' "finale": bool,\n'
         ' "finale_fault": str|null — только при finale=true: смешная '
         "потусторонняя поломка передатчика,\n"
-        ' "note": str|null — короткая заметка себе на будущее}'
+        ' "note": str|null — короткая заметка себе на будущее'
+        f"{cabinet_field}}}"
     )
 
 
@@ -126,14 +195,20 @@ async def ask_director(
     run: Run,
     *,
     finale_allowed: bool,
+    place: str | None = None,
+    outside: str | None = None,
+    need_features: int = 0,
 ) -> DirectorDecision | None:
+    content = build_director_input(
+        scenario,
+        run,
+        finale_allowed=finale_allowed,
+        place=place,
+        outside=outside,
+        need_features=need_features,
+    )
     args: dict[str, Any] = {
-        "messages": [
-            {
-                "role": "user",
-                "content": build_director_input(scenario, run, finale_allowed=finale_allowed),
-            }
-        ],
+        "messages": [{"role": "user", "content": content}],
         "role": ROLE_DIRECTOR,
         "system": scenario.director_prompt,
         "chat_id": run.chat_id,
@@ -148,3 +223,33 @@ async def ask_director(
     if decision is None:
         log.warning("interactives: Ведущий вернул не JSON (chat=%s): %r", run.chat_id, raw[:300])
     return decision
+
+
+async def ask_features(
+    node_link: ServiceLink,
+    dst: Address,
+    timeout: float,
+    *,
+    chat_id: int,
+    place: str,
+    outside: str,
+    count: int,
+) -> tuple[str, ...]:
+    """Первые особенности кабинета вне сцены. Сбой — пусто: снимок и без них
+    получится, особенности допишутся в следующий раз."""
+    args: dict[str, Any] = {
+        "messages": [{"role": "user", "content": build_features_input(place, outside, count)}],
+        "role": ROLE_DIRECTOR,
+        "system": FEATURES_SYSTEM,
+        "chat_id": chat_id,
+    }
+    try:
+        result = await node_link.command(ACTION_CHAT, args, dst=dst, timeout=timeout)
+    except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
+        log.warning("interactives: Ведущий недоступен для кабинета (chat=%s): %s", chat_id, exc)
+        return ()
+    raw = result.get("response", "") if isinstance(result, dict) else ""
+    data = _json_object(raw)
+    if data is None:
+        return ()
+    return _str_list(data.get("cabinet_add"), count)

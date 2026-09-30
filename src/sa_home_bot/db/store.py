@@ -1285,11 +1285,13 @@ class Store:
         )
         return [dict(r) for r in await cur.fetchall()]
 
-    async def count_images_since(self, chat_id: int, since: datetime) -> int:
+    async def count_images_since(
+        self, chat_id: int, since: datetime, purpose: str = "chat"
+    ) -> int:
         cur = await self.db.conn.execute(
             "SELECT COUNT(*) AS n FROM images WHERE chat_id=? AND created_at>=? "
-            "AND purpose='chat'",
-            (chat_id, _iso(since)),
+            "AND purpose=?",
+            (chat_id, _iso(since), purpose),
         )
         row = await cur.fetchone()
         return int(row["n"])

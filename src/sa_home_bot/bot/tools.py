@@ -57,6 +57,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sa_home_bot import wake_core
 from sa_home_bot.bot import commands, image_tools, invites, recipients, voice_mode, vpn_nodes
+from sa_home_bot.bot.interactives import cabinet as interactive_cabinet
 from sa_home_bot.bot.interactives import radio as interactive_radio
 from sa_home_bot.bot.monitor_state import parse_disk_summary, parse_health_state
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
@@ -1192,6 +1193,21 @@ async def tool_swap_radio(ctx: ToolContext, _args: dict[str, Any]) -> str:
         return interactive_radio.TOOL_UNAVAILABLE
     return await ctx.interactives.tool_swap_radio(
         ctx.chat_id, ctx.user_id, is_private=ctx.is_private
+    )
+
+
+async def tool_take_photo(ctx: ToolContext, args: dict[str, Any]) -> str:
+    """Снимок кабинета Альфреда (Этап 49.2, bot/interactives/cabinet.py) —
+    вся логика в Interactives.tool_take_photo. Рисуется в фоне и приходит
+    сам; у службы tasks интерактивов нет — честный отказ."""
+    if ctx.interactives is None:
+        return interactive_cabinet.TOOL_PHOTO_UNAVAILABLE
+    return await ctx.interactives.tool_take_photo(
+        ctx.chat_id,
+        ctx.user_id,
+        args,
+        message_thread_id=ctx.message_thread_id,
+        trigger_message_id=ctx.trigger_message_id,
     )
 
 
@@ -4037,6 +4053,14 @@ TOOLS: tuple[ToolSpec, ...] = (
         name="swap_radio",
         handler=tool_swap_radio,
         declaration=interactive_radio.SWAP_RADIO_DECLARATION,
+    ),
+    # Снимок кабинета (Этап 49.2) — без requires, как swap_radio: это часть
+    # мира Альфреда для любого собеседника, а не художник по заказу; свой
+    # суточный потолок на чат (engine.PHOTO_DAILY_LIMIT).
+    ToolSpec(
+        name="take_photo",
+        handler=tool_take_photo,
+        declaration=interactive_cabinet.TAKE_PHOTO_DECLARATION,
     ),
     # Картинки (Этап 48). generate_image — право generate_image@llm в форме
     # «действие@служба» на ту же службу llm, что рисует (llm/imagegen.py на

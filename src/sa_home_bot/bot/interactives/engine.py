@@ -30,8 +30,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import functools
 import html
+import json
 import logging
 import random
 import re
@@ -42,6 +45,8 @@ from typing import Any
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from sa_home_bot.bot import image_tools
+from sa_home_bot.bot.interactives import cabinet as cabinet_mod
 from sa_home_bot.bot.interactives import radio
 from sa_home_bot.bot.interactives.base import (
     STATUS_ACTIVE,
@@ -56,7 +61,9 @@ from sa_home_bot.bot.interactives.base import (
     iso,
     parse_iso,
 )
-from sa_home_bot.bot.interactives.director import DirectorDecision, ask_director
+from sa_home_bot.bot.interactives.cabinet import Cabinet
+from sa_home_bot.bot.interactives.director import DirectorDecision, ask_director, ask_features
+from sa_home_bot.bot.interactives.transylvania import Outside, Transylvania
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings, reminder_reason
 from sa_home_bot.db.store import Store
@@ -106,6 +113,14 @@ OFFER_EXPIRED_SUFFIX = "\n<i>— Вопрос уже неактуален</i>"
 # Кнопка выхода была под сообщениями рассказчика до v0.115.3 — рассказчика
 # больше нет, обработка оставлена для уже разосланных сообщений.
 EXIT_ALERT = "Хорошо."
+
+# Снимки кабинета (Этап 49.2): рисует служба llm на mycraft, будит его и
+# ~30 с грузит CPU — поэтому свой суточный потолок на чат и не больше одного
+# снимка в чате одновременно.
+PHOTO_DAILY_LIMIT = 12
+PHOTO_PURPOSE = "photo"
+PHOTO_FEATURES_IN_FRAME = 4
+PHOTO_CAPTION = "Кабинет"
 
 OPT_IN_TEXT = "Интерактивы в этом чате включены."
 OPT_OUT_TEXT = "Интерактивы в этом чате выключены. Включить — /interactives on."
@@ -215,8 +230,10 @@ def apply_decision(
     return effect
 
 
-def build_scene_note(scenario: Scenario, run: Run) -> str:
+def build_scene_note(scenario: Scenario, run: Run, place: str | None = None) -> str:
     parts = [scenario.scene_frame]
+    if place:
+        parts.append(f"Где ты: {place}")
     if run.finale:
         parts.append(scenario.finale_directive.format(fault=run.finale_fault))
     else:
@@ -271,7 +288,11 @@ class Interactives:
         *,
         now: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
         choose: Callable[[tuple[str, ...]], str] = random.choice,
+        transylvania: Transylvania | None = None,
     ) -> None:
+        self._transylvania = transylvania or Transylvania()
+        self._photo_busy: set[int] = set()
+        self._photo_tasks: set[asyncio.Task] = set()
         self._store = store
         self._state = InteractiveStore(store)
         self._notifier = notifier
@@ -318,7 +339,10 @@ class Interactives:
         if run is not None and run.status == STATUS_ACTIVE:
             plan.scenario = scenario.id
             plan.scene = True
-            plan.note = build_scene_note(scenario, run)
+            cab = await cabinet_mod.load(self._store, user_id)
+            outside = await self._transylvania.outside(self._now())
+            place = f"{cab.describe_ru()} Сейчас {outside.ru()}."
+            plan.note = build_scene_note(scenario, run, place)
             plan.force_swap_form = run.finale and not run.finale_form_sent
             return plan
         if triggered and await self._may_offer(scenario, run, user_id):
@@ -390,17 +414,26 @@ class Interactives:
         run.log("Альфред", reply)
         # Прошлое событие Альфред уже пересказал этим ответом.
         run.pending_effect = None
-        decision = await self._ask_director(scenario, run)
+        cab = await cabinet_mod.load(self._store, run.user_id)
+        decision = await self._ask_director(scenario, run, cab)
+        if decision is not None and decision.cabinet_add:
+            # Перечитываем перед записью: снимок в фоне мог дописать своё.
+            cab = await cabinet_mod.load(self._store, run.user_id)
+            if cab.add(list(decision.cabinet_add)):
+                await cabinet_mod.save(self._store, cab)
         effect = apply_decision(scenario, run, decision, choose=self._choose)
         if effect:
             run.log("Событие", effect)
             run.pending_effect = effect
         await self._state.save_run(run)
 
-    async def _ask_director(self, scenario: Scenario, run: Run) -> DirectorDecision | None:
+    async def _ask_director(
+        self, scenario: Scenario, run: Run, cab: Cabinet
+    ) -> DirectorDecision | None:
         node_link = self._get_node_link()
         if node_link is None:
             return None
+        outside = await self._transylvania.outside(self._now())
         return await ask_director(
             node_link,
             Address(node=LLM_NODE, service=LLM_SERVICE),
@@ -408,6 +441,9 @@ class Interactives:
             scenario,
             run,
             finale_allowed=finale_allowed(scenario, run),
+            place=cab.describe_ru(),
+            outside=outside.ru(),
+            need_features=0 if cab.features else cabinet_mod.FIRST_FEATURES,
         )
 
     # --- формы ---
@@ -503,6 +539,188 @@ class Interactives:
             await self._offer(scenario, run, chat_id, user_id, None)
             return radio.TOOL_OFFER
         return radio.TOOL_NOT_YET
+
+    # --- тул take_photo: снимок кабинета (Этап 49.2) ---
+
+    async def tool_take_photo(
+        self,
+        chat_id: int | None,
+        user_id: int | None,
+        args: dict[str, Any],
+        *,
+        message_thread_id: int | None = None,
+        trigger_message_id: int | None = None,
+    ) -> str:
+        """Альфред снимает то, что видит у себя в кабинете. Снимок рисуется в
+        фоне (~30 с) и приходит сам — ответ Альфреда его не ждёт («сейчас
+        сниму»). Кабинет у каждого гостя свой (cabinet.py); без особенностей
+        первые придумывает Ведущий. Общий вид без изменений — повторный
+        показ прежнего снимка, mycraft не будим."""
+        if chat_id is None or user_id is None or not hasattr(self._notifier, "send_photo_ex"):
+            return cabinet_mod.TOOL_PHOTO_UNAVAILABLE
+        if chat_id in self._photo_busy:
+            return cabinet_mod.TOOL_PHOTO_BUSY
+        focus = args.get("focus") if isinstance(args.get("focus"), str) else ""
+        focus = " ".join(focus.split())
+        caption = args.get("caption") if isinstance(args.get("caption"), str) else ""
+        caption = caption.strip()[:80] or PHOTO_CAPTION
+        now = self._now()
+        outside = await self._transylvania.outside(now)
+        cab = await cabinet_mod.load(self._store, user_id)
+        run = await self._state.load_run(chat_id, radio.SCENARIO_ID)
+        happening = run.last_effect if run is not None and run.status == STATUS_ACTIVE else None
+        reuse_key = cab.state_key(outside.key) if cab.features else None
+        if not focus and not happening and reuse_key in cab.photos:
+            image = await self._store.image_by_id(cab.photos[reuse_key])
+            if image is not None and image["telegram_file_id"]:
+                sent = await self._notifier.send_photo_ex(
+                    chat_id,
+                    image["telegram_file_id"],
+                    caption=caption,
+                    message_thread_id=message_thread_id,
+                    reply_to_message_id=trigger_message_id,
+                )
+                if sent is not None:
+                    where = cab.describe_ru()
+                    return cabinet_mod.TOOL_PHOTO_SENT.format(where=where, now=outside.ru())
+        taken = await self._store.count_images_since(
+            chat_id, now - timedelta(days=1), PHOTO_PURPOSE
+        )
+        if taken >= PHOTO_DAILY_LIMIT:
+            return cabinet_mod.TOOL_PHOTO_LIMIT
+        if self._get_node_link() is None:
+            return cabinet_mod.TOOL_PHOTO_UNAVAILABLE
+        self._photo_busy.add(chat_id)
+        task = asyncio.create_task(
+            self._photo_job(
+                chat_id,
+                user_id,
+                focus=focus,
+                caption=caption,
+                happening=happening,
+                outside=outside,
+                message_thread_id=message_thread_id,
+                trigger_message_id=trigger_message_id,
+            )
+        )
+        self._photo_tasks.add(task)
+        task.add_done_callback(self._photo_tasks.discard)
+        return cabinet_mod.TOOL_PHOTO_STARTED.format(where=cab.describe_ru(), now=outside.ru())
+
+    async def _photo_job(
+        self,
+        chat_id: int,
+        user_id: int,
+        *,
+        focus: str,
+        caption: str,
+        happening: str | None,
+        outside: Outside,
+        message_thread_id: int | None,
+        trigger_message_id: int | None,
+    ) -> None:
+        try:
+            await self._photo(
+                chat_id,
+                user_id,
+                focus=focus,
+                caption=caption,
+                happening=happening,
+                outside=outside,
+                message_thread_id=message_thread_id,
+                trigger_message_id=trigger_message_id,
+            )
+        except Exception:
+            log.exception("interactives: снимок кабинета не удался (chat=%s)", chat_id)
+        finally:
+            self._photo_busy.discard(chat_id)
+
+    async def _photo(
+        self,
+        chat_id: int,
+        user_id: int,
+        *,
+        focus: str,
+        caption: str,
+        happening: str | None,
+        outside: Outside,
+        message_thread_id: int | None,
+        trigger_message_id: int | None,
+    ) -> None:
+        node_link = self._get_node_link()
+        if node_link is None:
+            return
+        dst = Address(node=LLM_NODE, service=LLM_SERVICE)
+        cfg = self._settings.llm
+        cab = await cabinet_mod.load(self._store, user_id)
+        if not cab.features:
+            new = await ask_features(
+                node_link,
+                dst,
+                cfg.request_timeout_s,
+                chat_id=chat_id,
+                place=cab.describe_ru(),
+                outside=outside.ru(),
+                count=cabinet_mod.FIRST_FEATURES,
+            )
+            if cab.add(list(new)):
+                await cabinet_mod.save(self._store, cab)
+        description, context = photo_description(cab, outside, focus, happening)
+        try:
+            result = await node_link.command(
+                image_tools.ACTION_GENERATE_IMAGE,
+                {
+                    "description": description,
+                    "mode": "scene" if focus else "free",
+                    "context": context,
+                    "chat_id": chat_id,
+                },
+                dst=dst,
+                timeout=cfg.imagegen_request_timeout_s,
+            )
+        except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
+            log.warning("interactives: снимок не нарисован (chat=%s): %s", chat_id, exc)
+            return
+        png = base64.b64decode(result["png_b64"])
+        state = cab.state_key(outside.key)
+        image_id = await self._store.add_image(
+            chat_id=chat_id,
+            author=None,
+            prompt_ru=f"{caption}: {focus or cab.describe_ru()}",
+            prompt_en=str(result.get("prompt") or description),
+            caption=caption,
+            width=int(result["width"]),
+            height=int(result["height"]),
+            colors=cfg.imagegen_colors,
+            png=png,
+            now=self._now(),
+            purpose=PHOTO_PURPOSE,
+            params=json.dumps(
+                {
+                    "location": cabinet_mod.LOCATION,
+                    "user_id": user_id,
+                    "state": state,
+                    "focus": focus,
+                    "seed": result.get("seed"),
+                },
+                ensure_ascii=False,
+            ),
+        )
+        sent = await self._notifier.send_photo_ex(
+            chat_id,
+            image_tools.upscale_png(png, cfg.imagegen_display_px),
+            caption=caption,
+            message_thread_id=message_thread_id,
+            reply_to_message_id=trigger_message_id,
+        )
+        if sent is None:
+            log.warning("interactives: снимок #%s не ушёл в чат %s", image_id, chat_id)
+            return
+        await self._store.set_image_sent(image_id, sent[1], sent[0])
+        if not focus and not happening:
+            cab = await cabinet_mod.load(self._store, user_id)
+            cab.remember_photo(cab.state_key(outside.key), image_id)
+            await cabinet_mod.save(self._store, cab)
 
     # --- кнопки ---
 
@@ -656,6 +874,30 @@ class Interactives:
 
     async def is_opted_out(self, chat_id: int) -> bool:
         return await self._state.is_opted_out(chat_id)
+
+
+def photo_description(
+    cab: Cabinet, outside: Outside, focus: str, happening: str | None
+) -> tuple[str, str]:
+    """Описание снимка для художника-промптера (llm/image_prompt.py) и
+    контекст сцены. Общий вид — особенности гостя первыми (самые свежие:
+    промпт ограничен 77 токенами), потом канон и свет; крупный план —
+    предмет, а кабинет со светом — контекстом."""
+    features = cab.features[-PHOTO_FEATURES_IN_FRAME:]
+    light = outside.en()
+    if focus:
+        context = f"{cabinet_mod.CANON_EN}; {'; '.join(features)}; {light}"
+        if happening:
+            context += f"; just happened: {happening}"
+        return focus, context
+    parts = []
+    if features:
+        parts.append("Clearly visible: " + "; ".join(features) + ".")
+    parts.append(f"Room: {cabinet_mod.CANON_EN}.")
+    parts.append(f"Light: {light}.")
+    if happening:
+        parts.append(f"Just happened: {happening}")
+    return " ".join(parts), ""
 
 
 def _plain(text_html: str) -> str:
