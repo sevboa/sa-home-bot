@@ -113,6 +113,13 @@ log = logging.getLogger(__name__)
 # вся LLM-обвязка этого модуля не нужна.
 
 LLM_NODE = "mycraft"
+# Скрытая строка о длине ответа — см. request_alfred (живая находка
+# 2026-09-30: ответы росли вместе с перепиской).
+LENGTH_NOTE = (
+    "Объём ответа соразмеряй с репликой собеседника, а не со своими прошлыми "
+    "ответами: на короткую реплику — одна-три фразы; развёрнуто — только если "
+    "об этом просят или без этого не обойтись."
+)
 LLM_SERVICE = "llm"
 
 # Личное место жительства Альфреда (не дома семьи — своё, персонажное; см.
@@ -1151,6 +1158,12 @@ async def request_alfred(
         # Ведущего и журнал (в личке тред /ai сцену не держит, см.
         # bot/interactives/base.py::Run.transcript).
         context_note = f"{context_note}\n\n{scene_note}" if context_note else scene_note
+    # Живая находка 2026-09-30 (пользователь: «чем больше переписка, тем
+    # длиннее ответы»): медиана ответа растёт с ~170 симв. в первых ходах до
+    # 700–1250 к 20–30-му — модель подстраивается под длину собственных
+    # прошлых ответов в истории. Скрытая строка на каждом ходу рядом с
+    # последней репликой — там её вес максимален.
+    context_note = f"{context_note}\n\n{LENGTH_NOTE}" if context_note else LENGTH_NOTE
     speech_user_id = getattr(interactive_turn, "user_id", None)
     speech_clear = getattr(interactive_turn, "speech_clear_now", None) or getattr(
         interactive_turn, "speech_clear", None

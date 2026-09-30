@@ -7,9 +7,11 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from datetime import UTC, datetime, timedelta
 
+import pytest
 import pytest_asyncio
 
 from sa_home_bot.bot import tools as ai_tools
@@ -33,6 +35,34 @@ from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
 from sa_home_bot.tasks import protocol as task_protocol
+
+# Боевой темп сцены (живая находка 2026-09-30: минимум 2 хода на стадию,
+# финал не раньше 10-го хода) проверяется отдельно — test_radio_pacing_*.
+# Механику движка тесты ниже гоняют на прежнем быстром темпе, чтобы не
+# прокручивать по десятку ходов в каждом.
+PROD_RADIO = radio.RADIO
+FAST_RADIO = dataclasses.replace(
+    PROD_RADIO, min_turns_on_stage=1, min_turns_before_finale=4, stage_soft_cap=3
+)
+
+
+@pytest.fixture(autouse=True)
+def _fast_radio(monkeypatch):
+    monkeypatch.setattr(radio, "RADIO", FAST_RADIO)
+    monkeypatch.setitem(engine.REGISTRY, FAST_RADIO.id, FAST_RADIO)
+
+
+def test_radio_pacing_stage_needs_two_turns_and_finale_not_before_tenth():
+    run = Run(scenario=PROD_RADIO.id, chat_id=1, user_id=1)
+    apply_decision(PROD_RADIO, run, _decision(stage=1))
+    assert run.stage == 0  # первый ход стадии — Ведущий ещё не может поднять
+    apply_decision(PROD_RADIO, run, _decision(stage=1))
+    assert run.stage == 1
+    for _ in range(20):
+        apply_decision(PROD_RADIO, run, _decision(stage=3, finale=True, finale_fault="слизь"))
+        if run.finale:
+            break
+    assert run.finale and run.turns_total >= 10
 
 GUEST = 501
 OTHER = 502

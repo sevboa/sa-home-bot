@@ -136,6 +136,12 @@ RADIO = Scenario(
     director_prompt=_DIRECTOR_PROMPT,
     fallback_faults=_FALLBACK_FAULTS,
     nudges=_NUDGES,
+    # Темп (пользователь 2026-09-30: «что-то быстро он сам предложил
+    # заменить передатчик»): каждая стадия — минимум 2 хода, финал не
+    # раньше 10-го хода.
+    min_turns_on_stage=2,
+    min_turns_before_finale=10,
+    stage_soft_cap=4,
 )
 
 # --- формы смены передатчика ---

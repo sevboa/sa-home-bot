@@ -205,6 +205,8 @@ def apply_decision(
         return effect
 
     wanted = decision.stage if decision is not None else run.stage
+    if run.turns_on_stage < scenario.min_turns_on_stage:
+        wanted = run.stage
     target = max(run.stage, min(wanted, run.stage + 1, scenario.last_stage))
     if (
         target == run.stage
