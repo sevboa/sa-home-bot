@@ -57,3 +57,12 @@ async def test_compose_falls_back_to_description_on_bad_answer(monkeypatch):
     monkeypatch.setattr(image_prompt.ollama, "chat", fake_chat)
     result = await image_prompt.compose("a cat, sofa, 8k", LlmConfig())
     assert result == ("a cat, sofa, 8k", "")
+
+
+def test_build_request_puts_retake_emphasis_before_the_picture():
+    text = image_prompt.build_request("меч на стене", "scene", "room", ["меч на стене"])
+    assert "FAILED to show: меч на стене" in text
+    assert text.index("FAILED") < text.index("Picture:")
+    assert "FAILED" not in image_prompt.build_request("меч", "scene", "room")
+    # free без контекста, но с упором — уже не «как есть».
+    assert image_prompt.build_request("кот", emphasize=["кот"]) != "кот"

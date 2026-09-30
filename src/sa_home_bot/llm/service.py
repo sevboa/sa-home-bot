@@ -313,9 +313,15 @@ def _imagegen_options(args: dict[str, Any]) -> dict[str, Any]:
         raise ProtoError(ERR_BAD_REQUEST, "для variant нужен образец")
     if ref is not None and mode not in ("variant", "scene"):
         raise ProtoError(ERR_BAD_REQUEST, "образец нужен только в variant и scene")
+    emphasize = args.get("emphasize")
+    if not isinstance(emphasize, list):
+        emphasize = []
     return {
         "mode": mode,
         "context": context.strip() if isinstance(context, str) else "",
+        "emphasize": [
+            " ".join(e.split())[:80] for e in emphasize if isinstance(e, str) and e.strip()
+        ][:5],
         "raw": bool(args.get("raw")),
         "style": args.get("style", True) is not False,
         "seed": _num(args, "seed", int, 0, 2**32 - 1),
@@ -1074,7 +1080,7 @@ class LlmService:
                     prompt = source
                 elif self._cfg.imagegen_prompt_agent:
                     request = image_prompt.build_request(
-                        source, options["mode"], options["context"]
+                        source, options["mode"], options["context"], options["emphasize"]
                     )
                     started = time.monotonic()
                     prompt, agent_negative = await image_prompt.compose(

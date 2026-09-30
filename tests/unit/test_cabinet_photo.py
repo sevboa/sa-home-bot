@@ -457,4 +457,15 @@ async def test_missing_subject_makes_alfred_offer_a_retake(store):
     await svc.tool_take_photo(GUEST, GUEST, args, dialogue_id=55)
     await _drain(svc)
     assert "капризн" in spoken[-1][0]
-    assert len(link.generated()) == 2
+    first, second = link.generated()
+    # Первый снимок — без упора, пересъёмка — с упором на пропущенное.
+    assert "emphasize" not in first
+    assert second["emphasize"] == ["собака у камина"]
+
+
+def test_retake_emphasis_matches_rephrased_items():
+    prev = {"missing": ["Собака у камина"]}
+    assert engine.retake_emphasis(prev, ["собака", "кресло"]) == ["собака"]
+    assert engine.retake_emphasis(prev, ["кресло"]) == []
+    assert engine.retake_emphasis(None, ["собака"]) == []
+    assert engine.retake_emphasis({"missing": []}, ["собака"]) == []

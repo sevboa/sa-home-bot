@@ -79,15 +79,33 @@ MODE_HINTS = {
 }
 
 
-def build_request(description: str, mode: str = "free", context: str = "") -> str:
+# Пересъёмка после промаха (Этап 49.2.1). Весов «(x:1.3)» пайплайн не
+# понимает (без compel это просто текст), поэтому упор — порядком: первый
+# тег fit_prompt не срезает никогда, и ключевое слово ещё раз ближе к концу.
+EMPHASIZE_HINT = (
+    "The previous picture FAILED to show: {items}. Now it must be the main "
+    "subject: put it as the very first tag, large and clearly visible, and "
+    "repeat its key noun once more later in the prompt."
+)
+
+
+def build_request(
+    description: str,
+    mode: str = "free",
+    context: str = "",
+    emphasize: list[str] | None = None,
+) -> str:
     """Текст для промптера: подсказка режима, контекст сцены от режиссёра,
-    потом само описание. Для «free» без контекста — описание как есть."""
+    упор пересъёмки, потом само описание. Для «free» без контекста и упора —
+    описание как есть."""
     parts = []
     hint = MODE_HINTS.get(mode, "")
     if hint:
         parts.append(hint)
     if context.strip():
         parts.append(f"Scene context (use only what is visible now): {context.strip()}")
+    if emphasize:
+        parts.append(EMPHASIZE_HINT.format(items="; ".join(emphasize)))
     if not parts:
         return description
     parts.append(f"Picture: {description}")

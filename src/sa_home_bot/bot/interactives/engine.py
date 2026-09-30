@@ -790,6 +790,12 @@ class Interactives:
             "keep_key": f"snap-{chat_id}-{uuid.uuid4().hex[:12]}",
             "expect": list(expect or []),
         }
+        # Пересъёмка после промаха: то, чего не было на прошлом снимке,
+        # промптер ставит главным (llm/image_prompt.py, emphasize).
+        emphasize = retake_emphasis(await self._last_photo(chat_id), list(expect or []))
+        if emphasize:
+            request["emphasize"] = emphasize
+            log.info("interactives: пересъёмка, упор на %s (chat=%s)", emphasize, chat_id)
         preset = MOOD_PRESETS.get(mood or "")
         if preset is not None:
             model, lora, weight = preset
@@ -1151,6 +1157,20 @@ def scene_photo_focus(
     if run.photo_turn is not None and run.turns_total - run.photo_turn < PHOTO_SCENE_GAP_TURNS:
         return None
     return wanted
+
+
+def retake_emphasis(prev: dict[str, Any] | None, expect: list[str]) -> list[str]:
+    """Что из ``expect`` не вышло на прошлом снимке чата — снимаем снова.
+    Модель при пересъёмке может перефразировать пункт, поэтому сверка без
+    регистра и по вхождению (как в llm/photo_check.parse)."""
+    if not prev or not expect:
+        return []
+    missed = [m.lower() for m in prev.get("missing") or [] if isinstance(m, str) and m.strip()]
+    return [
+        item
+        for item in expect
+        if any(m == item.lower() or m in item.lower() or item.lower() in m for m in missed)
+    ]
 
 
 def photo_description(
