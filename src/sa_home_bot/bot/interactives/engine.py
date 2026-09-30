@@ -115,9 +115,9 @@ OFFER_EXPIRED_SUFFIX = "\n<i>— Вопрос уже неактуален</i>"
 EXIT_ALERT = "Хорошо."
 
 # Снимки кабинета (Этап 49.2): рисует служба llm на mycraft, будит его и
-# ~30 с грузит CPU — поэтому свой суточный потолок на чат и не больше одного
-# снимка в чате одновременно.
-PHOTO_DAILY_LIMIT = 12
+# ~30 с грузит CPU — поэтому не больше одного снимка в чате одновременно.
+# Суточный потолок на чат; 0 — без лимита (снят по просьбе пользователя 2026-09-30).
+PHOTO_DAILY_LIMIT = 0
 PHOTO_PURPOSE = "photo"
 PHOTO_FEATURES_IN_FRAME = 4
 PHOTO_CAPTION = "Кабинет"
@@ -583,11 +583,12 @@ class Interactives:
                 if sent is not None:
                     where = cab.describe_ru()
                     return cabinet_mod.TOOL_PHOTO_SENT.format(where=where, now=outside.ru())
-        taken = await self._store.count_images_since(
-            chat_id, now - timedelta(days=1), PHOTO_PURPOSE
-        )
-        if taken >= PHOTO_DAILY_LIMIT:
-            return cabinet_mod.TOOL_PHOTO_LIMIT
+        if PHOTO_DAILY_LIMIT:
+            taken = await self._store.count_images_since(
+                chat_id, now - timedelta(days=1), PHOTO_PURPOSE
+            )
+            if taken >= PHOTO_DAILY_LIMIT:
+                return cabinet_mod.TOOL_PHOTO_LIMIT
         if self._get_node_link() is None:
             return cabinet_mod.TOOL_PHOTO_UNAVAILABLE
         self._photo_busy.add(chat_id)
