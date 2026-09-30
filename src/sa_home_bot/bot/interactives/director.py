@@ -32,6 +32,7 @@ ACTION_CHAT = "chat"
 EFFECT_MAX_CHARS = 600
 DIRECTIVE_MAX_CHARS = 600
 CABINET_ADD_MAX = 3
+PHOTO_FOCUS_MAX = 200
 
 # Особенности кабинета вне сцены (первый снимок до всякой сцены) — отдельный
 # маленький вызов той же роли. Нестрогий промпт: вариантов не перечисляем,
@@ -54,6 +55,8 @@ class DirectorDecision:
     note: str | None
     # Новые устойчивые детали кабинета гостя (cabinet.py) — остаются после сцены.
     cabinet_add: tuple[str, ...] = ()
+    # Кадр гостю в ключевой момент: что снять крупно; "" — общий вид; None — не надо.
+    photo: str | None = None
 
 
 def _clean(value: Any, limit: int) -> str | None:
@@ -87,6 +90,12 @@ def _str_list(value: Any, limit: int) -> tuple[str, ...]:
     return tuple(v for v in items if v)[:limit]
 
 
+def _photo(value: Any) -> str | None:
+    if value is True:
+        return ""
+    return _clean(value, PHOTO_FOCUS_MAX)
+
+
 def parse_decision(raw: str, current_stage: int) -> DirectorDecision | None:
     """JSON Ведущего → решение."""
     data = _json_object(raw)
@@ -104,6 +113,7 @@ def parse_decision(raw: str, current_stage: int) -> DirectorDecision | None:
         finale_fault=_clean(data.get("finale_fault"), EFFECT_MAX_CHARS),
         note=_clean(data.get("note"), 300),
         cabinet_add=_str_list(data.get("cabinet_add"), CABINET_ADD_MAX),
+        photo=_photo(data.get("photo")),
     )
 
 
@@ -114,14 +124,17 @@ def _cabinet_block(place: str, outside: str, need: int) -> str:
         task = (
             f"У этого кабинета ещё нет своих особенностей — придумай {need} в "
             "cabinet_add: необычные, но уместные в кабинете старого дворецкого, "
-            "с лёгкой жутью или странностью, заметные глазу."
+            "с лёгкой жутью или странностью, заметные глазу — предметы и то, "
+            "как они выглядят, без запахов и звуков."
         )
     else:
         task = (
             "Если в этом ходе в кабинете появилось или обнаружилось что-то, что "
-            "останется надолго и видно глазу, — добавь это в cabinet_add (0–2 "
-            "пункта). Не повторяй и не противоречь уже известным особенностям "
-            "(не «холодно», если уже «жарко натоплено»)."
+            "останется надолго и видно на фотографии, — добавь это в cabinet_add "
+            "(0–2 пункта). Только видимое и постоянное: предмет, след, пятно, "
+            "свечение. Не пиши запахи, звуки, температуру и мгновенные события "
+            "(«часы на миг остановились») — это для effect. Не повторяй и не "
+            "противоречь уже известным особенностям."
         )
     return f"Место сцены: {place}\nЗа окном сейчас: {outside}.\n{task}\n\n"
 
@@ -158,7 +171,15 @@ def build_director_input(
         finale_line = "Финал пока ЗАПРЕЩЁН (рано) — finale=false."
     cabinet = _cabinet_block(place, outside or "неизвестно", need_features) if place else ""
     cabinet_field = (
-        ',\n "cabinet_add": [str] — новые устойчивые детали кабинета (или [])' if place else ""
+        (
+            ',\n "cabinet_add": [str] — новые устойчивые видимые детали кабинета (или [])'
+            ',\n "photo": str|null — кадр гостю: что снять крупно, коротко по-русски '
+            '("" — общий вид кабинета). Только в ключевой момент сцены: впервые '
+            "видимая странность, заметная перемена в кабинете, переход на новую "
+            "стадию, финал. Обычно null."
+        )
+        if place
+        else ""
     )
     return (
         f"Сценарий: {scenario.title}\n"

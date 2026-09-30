@@ -92,6 +92,8 @@ class Run:
     # гостю не виден — рассказывает сам Альфред на следующем ходу).
     pending_effect: str | None = None
     notes: list[str] = field(default_factory=list)
+    # Ход (turns_total), на котором ушёл последний кадр Ведущего.
+    photo_turn: int | None = None
     # Журнал сцены: «Гость: …», «Альфред: …», «Событие: …». В личке каждое
     # сообщение без реплая — новый тред /ai (bot/handlers/ai.py::
     # _dialogue_id_for), и история треда сцену не держит — держит журнал.

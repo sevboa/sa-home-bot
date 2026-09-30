@@ -121,6 +121,10 @@ PHOTO_DAILY_LIMIT = 0
 PHOTO_PURPOSE = "photo"
 PHOTO_FEATURES_IN_FRAME = 4
 PHOTO_CAPTION = "Кабинет"
+# Кадры по ходу сцены (Ведущий, поле photo): переход стадии и финал снимаются
+# всегда, прочие — не чаще раза в PHOTO_SCENE_GAP_TURNS ходов.
+PHOTO_SCENE_GAP_TURNS = 3
+PHOTO_SCENE_CAPTION = "В кабинете"
 
 OPT_IN_TEXT = "Интерактивы в этом чате включены."
 OPT_OUT_TEXT = "Интерактивы в этом чате выключены. Включить — /interactives on."
@@ -416,6 +420,7 @@ class Interactives:
         run.pending_effect = None
         cab = await cabinet_mod.load(self._store, run.user_id)
         decision = await self._ask_director(scenario, run, cab)
+        stage_before, finale_before = run.stage, run.finale
         if decision is not None and decision.cabinet_add:
             # Перечитываем перед записью: снимок в фоне мог дописать своё.
             cab = await cabinet_mod.load(self._store, run.user_id)
@@ -425,6 +430,26 @@ class Interactives:
         if effect:
             run.log("Событие", effect)
             run.pending_effect = effect
+        focus = scene_photo_focus(
+            run, decision, key_moment=run.stage != stage_before or run.finale != finale_before
+        )
+        if (
+            focus is not None
+            and run.status == STATUS_ACTIVE
+            and not await self._photo_limit_reached(run.chat_id)
+        ):
+            started = await self._start_photo(
+                run.chat_id,
+                run.user_id,
+                focus=focus,
+                caption=PHOTO_SCENE_CAPTION,
+                happening=run.last_effect,
+                outside=await self._transylvania.outside(self._now()),
+                message_thread_id=message_thread_id,
+                trigger_message_id=None,
+            )
+            if started:
+                run.photo_turn = run.turns_total
         await self._state.save_run(run)
 
     async def _ask_director(
@@ -583,14 +608,46 @@ class Interactives:
                 if sent is not None:
                     where = cab.describe_ru()
                     return cabinet_mod.TOOL_PHOTO_SENT.format(where=where, now=outside.ru())
-        if PHOTO_DAILY_LIMIT:
-            taken = await self._store.count_images_since(
-                chat_id, now - timedelta(days=1), PHOTO_PURPOSE
-            )
-            if taken >= PHOTO_DAILY_LIMIT:
-                return cabinet_mod.TOOL_PHOTO_LIMIT
-        if self._get_node_link() is None:
+        if await self._photo_limit_reached(chat_id):
+            return cabinet_mod.TOOL_PHOTO_LIMIT
+        started = await self._start_photo(
+            chat_id,
+            user_id,
+            focus=focus,
+            caption=caption,
+            happening=happening,
+            outside=outside,
+            message_thread_id=message_thread_id,
+            trigger_message_id=trigger_message_id,
+        )
+        if not started:
             return cabinet_mod.TOOL_PHOTO_UNAVAILABLE
+        return cabinet_mod.TOOL_PHOTO_STARTED.format(where=cab.describe_ru(), now=outside.ru())
+
+    async def _photo_limit_reached(self, chat_id: int) -> bool:
+        if not PHOTO_DAILY_LIMIT:
+            return False
+        since = self._now() - timedelta(days=1)
+        taken = await self._store.count_images_since(chat_id, since, PHOTO_PURPOSE)
+        return taken >= PHOTO_DAILY_LIMIT
+
+    async def _start_photo(
+        self,
+        chat_id: int,
+        user_id: int,
+        *,
+        focus: str,
+        caption: str,
+        happening: str | None,
+        outside: Outside,
+        message_thread_id: int | None,
+        trigger_message_id: int | None,
+    ) -> bool:
+        """Снимок в фоне. False — не начат: уже идёт другой или нет связи."""
+        if chat_id in self._photo_busy or not hasattr(self._notifier, "send_photo_ex"):
+            return False
+        if self._get_node_link() is None:
+            return False
         self._photo_busy.add(chat_id)
         task = asyncio.create_task(
             self._photo_job(
@@ -606,7 +663,7 @@ class Interactives:
         )
         self._photo_tasks.add(task)
         task.add_done_callback(self._photo_tasks.discard)
-        return cabinet_mod.TOOL_PHOTO_STARTED.format(where=cab.describe_ru(), now=outside.ru())
+        return True
 
     async def _photo_job(
         self,
@@ -877,6 +934,22 @@ class Interactives:
         return await self._state.is_opted_out(chat_id)
 
 
+def scene_photo_focus(
+    run: Run, decision: DirectorDecision | None, *, key_moment: bool
+) -> str | None:
+    """Нужен ли кадр после хода сцены и что в нём крупно ("" — общий вид).
+    Переход стадии и финал снимаются всегда; по желанию Ведущего — не чаще
+    раза в PHOTO_SCENE_GAP_TURNS ходов."""
+    wanted = decision.photo if decision is not None else None
+    if key_moment:
+        return wanted or ""
+    if wanted is None:
+        return None
+    if run.photo_turn is not None and run.turns_total - run.photo_turn < PHOTO_SCENE_GAP_TURNS:
+        return None
+    return wanted
+
+
 def photo_description(
     cab: Cabinet, outside: Outside, focus: str, happening: str | None
 ) -> tuple[str, str]:
@@ -884,7 +957,7 @@ def photo_description(
     контекст сцены. Общий вид — особенности гостя первыми (самые свежие:
     промпт ограничен 77 токенами), потом канон и свет; крупный план —
     предмет, а кабинет со светом — контекстом."""
-    features = cab.features[-PHOTO_FEATURES_IN_FRAME:]
+    features = cab.visible_features()[-PHOTO_FEATURES_IN_FRAME:]
     light = outside.en()
     if focus:
         context = f"{cabinet_mod.CANON_EN}; {'; '.join(features)}; {light}"

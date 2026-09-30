@@ -263,6 +263,56 @@ def test_overview_puts_features_first():
     assert "f1" not in description and context == ""
 
 
+def test_smells_and_sounds_stay_out_of_cabinet_and_frame():
+    cab = cabinet.Cabinet(user_id=1)
+    assert cab.add(["Густой аромат лаванды", "за стеной хихиканье", "пятно сажи"]) == ["пятно сажи"]
+    # Уже записанные до фильтра — остаются для Альфреда, но не идут в кадр.
+    cab.features = ["сова", "пахнет полынью", "пятно сажи"]
+    outside = Outside(phase="night", weather=None, local_time="00:00")
+    description, _ = photo_description(cab, outside, "", None)
+    assert "полын" not in description and "сова; пятно сажи" in description
+
+
+def test_director_parses_photo():
+    assert parse_decision(json.dumps({"photo": "передатчик"}), 0).photo == "передатчик"
+    assert parse_decision(json.dumps({"photo": True}), 0).photo == ""
+    assert parse_decision(json.dumps({"photo": None}), 0).photo is None
+    assert parse_decision("{}", 0).photo is None
+    run = Run("radio", 1, 1)
+    text = build_director_input(radio.RADIO, run, finale_allowed=False, place="К", outside="ночь")
+    assert '"photo"' in text and "запахи" in text
+
+
+async def _scene_turn(svc, link, reply: dict) -> None:
+    plan = await svc.before_turn(GUEST, GUEST, "что там?", is_private=True)
+    link.director_replies = [json.dumps(reply)]
+    await svc.after_turn(plan, "Смотрю", dialogue_id=1)
+    await _drain(svc)
+
+
+async def test_director_frames_key_moments_not_too_often(store):
+    link = FakeLink()
+    svc, notifier = _make(store, link)
+    await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
+    await svc._state.save_run(Run("radio", GUEST, GUEST, status="active"))
+    # Ведущий просит кадр — снимаем крупно, с тем, что случилось.
+    await _scene_turn(svc, link, {"stage": 0, "effect": "лампа вспыхнула", "photo": "лампа"})
+    (gen,) = link.generated()
+    assert gen["mode"] == "scene" and gen["description"] == "лампа"
+    assert "лампа вспыхнула" in gen["context"]
+    assert notifier.photos[-1][2] == engine.PHOTO_SCENE_CAPTION
+    # Сразу ещё раз — рано, пропускаем.
+    await _scene_turn(svc, link, {"stage": 0, "photo": "камин"})
+    assert len(link.generated()) == 1
+    # Переход стадии — кадр обязателен, даже без просьбы: общий вид.
+    await _scene_turn(svc, link, {"stage": 1})
+    assert len(link.generated()) == 2
+    assert link.generated()[-1]["mode"] == "free"
+    # Обычный ход без просьбы — без кадра.
+    await _scene_turn(svc, link, {"stage": 1})
+    assert len(link.generated()) == 2
+
+
 @pytest.mark.parametrize("tool", ["take_photo"])
 def test_tool_is_registered(tool):
     from sa_home_bot.bot import tools

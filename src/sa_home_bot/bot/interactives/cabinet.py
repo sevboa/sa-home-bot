@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -41,6 +42,19 @@ CANON_RU = (
 # Для снимка: коротко, самое узнаваемое первым — промпт ограничен 77 токенами.
 CANON_EN = "old butler study in a transylvanian castle, wooden desk, stone fireplace, bookshelves"
 
+# Чего не снять фотоаппаратом: запахи и звуки. Такие особенности Ведущему
+# запрещены промптом, а уже записанные (и прорвавшиеся) не идут в кадр и в
+# новые особенности — место в 77 токенах промпта снимка дорого.
+_NON_VISUAL_RE = re.compile(
+    r"запах|аромат|пахн|пахл|\bвон[ьяи]|зловон|смрад|благоухан|\bдух\b|"
+    r"звук|звуч|звон|слыш|шёпот|шепот|шорох|хихик|скрип|тиши|стук|гул[ак]?\b",
+    re.IGNORECASE,
+)
+
+
+def visible(text: str) -> bool:
+    return not _NON_VISUAL_RE.search(text)
+
 
 @dataclass
 class Cabinet:
@@ -57,13 +71,16 @@ class Cabinet:
         added = []
         for raw in new:
             text = " ".join(str(raw).split())[:FEATURE_MAX_CHARS].rstrip(" .")
-            if not text or text.casefold() in known:
+            if not text or text.casefold() in known or not visible(text):
                 continue
             known.add(text.casefold())
             self.features.append(text)
             added.append(text)
         del self.features[:-FEATURES_MAX]
         return added
+
+    def visible_features(self) -> list[str]:
+        return [f for f in self.features if visible(f)]
 
     def describe_ru(self) -> str:
         if not self.features:
