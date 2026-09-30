@@ -33,7 +33,7 @@ from PIL import Image
 
 from sa_home_bot import __version__
 from sa_home_bot.config import LlmConfig, Settings
-from sa_home_bot.llm import image_prompt, imagegen, ollama, stt, tts, vision
+from sa_home_bot.llm import image_prompt, imagegen, ollama, photo_check, stt, tts, vision
 from sa_home_bot.llm.model_profiles import REASON_LEVELS, ModelProfile, load_profiles
 from sa_home_bot.llm.prompt import (
     DEFAULT_PERSONA_PROMPT,
@@ -659,6 +659,15 @@ class LlmService:
                             required=False,
                             title="Chat, откуда пришёл запрос",
                         ),
+                        ActionParam(
+                            name="keep_key",
+                            type="string",
+                            required=False,
+                            title=(
+                                "Снимок Альфреда: сохранить 512-оригинал под этим "
+                                "ключом и сверить его зрением (ответ — поле inspect)"
+                            ),
+                        ),
                     ),
                 ),
                 ActionSpec(
@@ -1106,7 +1115,9 @@ class LlmService:
             except Exception:
                 log.warning("imagegen: не удалось сгенерировать картинку", exc_info=True)
                 raise ProtoError(ERR_INTERNAL, "не удалось нарисовать картинку") from None
+            inspection = await self._inspect_snapshot(args, result.get("original"))
             return {
+                **({"inspect": inspection} if inspection is not None else {}),
                 "png_b64": base64.b64encode(result["png"]).decode(),
                 "width": result["width"],
                 "height": result["height"],
@@ -1165,6 +1176,37 @@ class LlmService:
             return {"asleep": False}
         # Сервер валидирует action по describe — сюда неизвестное не доходит.
         raise ValueError(f"необъявленное действие: {action}")
+
+    async def _inspect_snapshot(
+        self, args: dict[str, Any], original: Any
+    ) -> dict[str, Any] | None:
+        """Снимок Альфреда (Этап 49.2.1): ``keep_key`` — сохранить 512-оригинал
+        и посмотреть на него зрением gemma, сверив с ``expect`` (что Альфред
+        обещал в кадре). Без ``keep_key`` или при любом сбое — None: картинка
+        уходит как есть."""
+        keep_key = args.get("keep_key")
+        if original is None or not isinstance(keep_key, str) or not keep_key or "/" in keep_key:
+            return None
+        raw_expect = args.get("expect")
+        expect = [
+            " ".join(item.split())
+            for item in (raw_expect if isinstance(raw_expect, list) else [])
+            if isinstance(item, str) and item.strip()
+        ][:3]
+        try:
+            image_b64 = await asyncio.to_thread(
+                photo_check.save_original, original, keep_key, self._cfg
+            )
+        except Exception:
+            log.warning("photo_check: оригинал %s не сохранён", keep_key, exc_info=True)
+            return None
+        started = time.monotonic()
+        inspection = await photo_check.inspect(
+            image_b64, expect, self._cfg, think=self._profile.think_arg("off")
+        )
+        if inspection is not None:
+            log.info("photo_check: сверка %s за %.1fс", keep_key, time.monotonic() - started)
+        return inspection
 
     async def _chat_streamed(
         self,

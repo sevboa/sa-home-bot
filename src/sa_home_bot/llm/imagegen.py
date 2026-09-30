@@ -385,7 +385,8 @@ async def generate_image(
     ``height``, ``seconds`` (время самой генерации, без ожидания лока),
     ``prompt`` (суть, как она ушла в модель — после подгонки под CLIP),
     ``full_prompt``/``full_negative`` (с шаблоном стиля), ``tokens``,
-    ``seed``, ``steps``, ``colors``, ``model``, ``loras``.
+    ``seed``, ``steps``, ``colors``, ``model``, ``loras``, ``original`` —
+    сам 512²-кадр до уменьшения (PIL, для сверки снимка, Этап 49.2.1).
 
     Без ключевых аргументов — эталон C (Этап 48). ``ref`` + ``ip_scale`` —
     сцена с образцом (IP-Adapter), ``ref`` без ``ip_scale`` — вариант
@@ -453,6 +454,7 @@ async def generate_image(
     )
     return {
         "png": png, "width": width, "height": height, "seconds": seconds, "prompt": subject,
+        "original": image,
         "full_prompt": prompt, "full_negative": negative, "tokens": count_tokens(prompt),
         "seed": seed, "steps": steps, "colors": colors, "model": model,
         "loras": [f"{name}:{weight:g}" for name, weight in loras],

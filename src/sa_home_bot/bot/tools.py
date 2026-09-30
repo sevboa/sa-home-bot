@@ -1208,6 +1208,7 @@ async def tool_take_photo(ctx: ToolContext, args: dict[str, Any]) -> str:
         args,
         message_thread_id=ctx.message_thread_id,
         trigger_message_id=ctx.trigger_message_id,
+        dialogue_id=ctx.dialogue_id,
     )
 
 

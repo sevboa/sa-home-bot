@@ -66,6 +66,8 @@ class FakeLink:
         self.calls: list[tuple[str, dict]] = []
         self.director_replies: list[str] = []
 
+    inspect: dict | None = None
+
     async def command(self, action, args, dst=None, timeout=None):
         self.calls.append((action, args))
         if action == "chat" and args["system"] == FEATURES_SYSTEM:
@@ -80,6 +82,7 @@ class FakeLink:
                 "height": 8,
                 "prompt": "p",
                 "seed": 7,
+                **({"inspect": self.inspect} if self.inspect is not None else {}),
             }
         raise AssertionError(action)
 
@@ -204,7 +207,10 @@ async def test_scene_note_and_director_see_the_cabinet(store):
     director_input = link.calls[-1][1]["messages"][0]["content"]
     assert "жарко натоплено" in director_input
     cab = await cabinet.load(store, GUEST)
-    assert cab.features == ["жарко натоплено", "на ковре липкий след"]
+    # Добавленное по ходу сцены — след сцены, не постоянная особенность.
+    assert cab.features == ["жарко натоплено"]
+    assert cab.scene == ["на ковре липкий след"]
+    assert "на ковре липкий след" in cab.describe_ru()
 
 
 # --- снимок ---
@@ -244,7 +250,7 @@ async def test_focus_photo_is_always_new_and_uses_scene_mode(store):
     await _drain(svc)
     (gen,) = link.generated()
     assert gen["mode"] == "scene" and gen["description"] == "передатчик на столе"
-    assert "сова" in gen["context"]
+    assert "сова" not in gen["context"] and "fireplace" in gen["context"]
 
 
 async def test_one_photo_at_a_time_and_daily_limit(store, monkeypatch):
@@ -345,3 +351,90 @@ def test_tool_is_registered(tool):
     from sa_home_bot.bot import tools
 
     assert any(spec.name == tool for spec in tools.TOOLS)
+
+
+# --- следы сцены (живая находка 2026-09-30) ---
+
+
+async def test_scene_traces_leave_with_the_scene(store):
+    link = FakeLink()
+    svc, _ = _make(store, link)
+    cab = cabinet.Cabinet(user_id=GUEST, features=["сова на шкафу"])
+    cab.add(["туман у стола", "из динамика шёпот", "пепельные пальцы"], scene=True)
+    assert cab.scene == ["туман у стола", "пепельные пальцы"]  # звук — мимо
+    await cabinet.save(store, cab)
+    # Сцены нет (квест пройден) — снимок уже без её следов.
+    await svc._state.save_run(Run("radio", GUEST, GUEST, status="done"))
+    reply = await svc.tool_take_photo(GUEST, GUEST, {})
+    await _drain(svc)
+    assert "туман" not in reply and "сова на шкафу" in reply
+    assert (await cabinet.load(store, GUEST)).scene == []
+    (gen,) = link.generated()
+    assert "туман" not in gen["description"]
+
+
+def test_describe_shows_few_visible_features():
+    cab = cabinet.Cabinet(user_id=1, features=[f"деталь {i}" for i in range(10)])
+    cab.features.append("в воздухе запах полыни")
+    text = cab.describe_ru()
+    assert "полыни" not in text
+    assert text.count("деталь") == cabinet.DESCRIBE_MAX and "деталь 9" in text
+
+
+# --- сверка снимка (Этап 49.2.1) ---
+
+
+def test_photo_check_parse_keeps_only_expected_misses():
+    from sa_home_bot.llm import photo_check
+
+    raw = json.dumps(
+        {"description": "Стол, камин.", "missing": ["Собака", "кошка", 5]}, ensure_ascii=False
+    )
+    parsed = photo_check.parse(raw, ["собака у камина", "портрет"])
+    assert parsed == {"description": "Стол, камин.", "missing": ["собака у камина"]}
+    assert photo_check.parse("не json", ["x"]) is None
+    assert photo_check.parse(json.dumps({"description": ""}), []) is None
+
+
+async def test_matching_photo_becomes_alfreds_note_only(store):
+    link = FakeLink()
+    link.inspect = {"description": "Камин, у огня спит рыжая собака.", "missing": []}
+    svc, notifier = _make(store, link)
+    await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
+    await svc.tool_take_photo(GUEST, GUEST, {"focus": "собака", "expect": ["собака у камина"]})
+    await _drain(svc)
+    (gen,) = link.generated()
+    assert gen["expect"] == ["собака у камина"] and gen["keep_key"].startswith(f"snap-{GUEST}-")
+    assert len(notifier.photos) == 1
+    plan = await svc.before_turn(GUEST, GUEST, "а какого цвета собака?", is_private=True)
+    assert "рыжая собака" in plan.note
+    # Ведущему и кабинету — ничего.
+    cab = await cabinet.load(store, GUEST)
+    assert cab.features == ["сова"] and cab.scene == []
+
+
+async def test_missing_subject_makes_alfred_offer_a_retake(store):
+    link = FakeLink()
+    link.inspect = {"description": "Пустой камин, собаки нет.", "missing": ["собака у камина"]}
+    svc, notifier = _make(store, link)
+    spoken: list[tuple[str, dict]] = []
+
+    async def speak(chat_id, directive, where):
+        spoken.append((directive, where))
+
+    svc._speak = speak
+    await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
+    args = {"expect": ["собака у камина"]}
+    await svc.tool_take_photo(GUEST, GUEST, args, dialogue_id=55)
+    await _drain(svc)
+    assert len(notifier.photos) == 1  # снимок всё равно у гостя
+    (directive, where), = spoken
+    assert "собака у камина" in directive and "переснять" in directive
+    assert where["dialogue_id"] == 55 and where["trigger_message_id"] == 101
+    # Промах не становится общим видом кабинета.
+    assert (await cabinet.load(store, GUEST)).photos == {}
+    # Снова мимо — шутка про капризную плёнку, но переснять всё равно можно.
+    await svc.tool_take_photo(GUEST, GUEST, args, dialogue_id=55)
+    await _drain(svc)
+    assert "капризн" in spoken[-1][0]
+    assert len(link.generated()) == 2

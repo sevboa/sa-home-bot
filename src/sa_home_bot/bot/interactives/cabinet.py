@@ -30,6 +30,9 @@ if TYPE_CHECKING:
 
 LOCATION = "cabinet"
 FEATURES_MAX = 12
+# Сколько особенностей Альфред видит в описании «Где ты» (свежие, только
+# видимые): длинный список превращал ответ тула в свалку.
+DESCRIBE_MAX = 5
 FEATURE_MAX_CHARS = 140
 FIRST_FEATURES = 3
 PHOTOS_KEEP = 8
@@ -60,35 +63,50 @@ def visible(text: str) -> bool:
 class Cabinet:
     user_id: int
     features: list[str] = field(default_factory=list)
+    # Что появилось в кабинете по ходу сцены (cabinet_add Ведущего): живёт,
+    # пока сцена идёт, и уходит вместе с ней — иначе после квеста кабинет
+    # навсегда оставался в тумане, шёпоте и пепельных пальцах (живая
+    # находка 2026-09-30).
+    scene: list[str] = field(default_factory=list)
     # Снимки по набору состояния (свет/погода + особенности) → id картинки:
     # тот же набор — повторный показ без генерации.
     photos: dict[str, int] = field(default_factory=dict)
 
-    def add(self, new: list[str]) -> list[str]:
+    def add(self, new: list[str], *, scene: bool = False) -> list[str]:
         """Дописать особенности; дубликаты и пустое — мимо. Лимит — старые
-        уходят первыми. Возвращает реально добавленные."""
-        known = {f.casefold() for f in self.features}
+        уходят первыми. ``scene`` — только на время сцены. Возвращает
+        реально добавленные."""
+        target = self.scene if scene else self.features
+        known = {f.casefold() for f in (*self.features, *self.scene)}
         added = []
         for raw in new:
             text = " ".join(str(raw).split())[:FEATURE_MAX_CHARS].rstrip(" .")
             if not text or text.casefold() in known or not visible(text):
                 continue
             known.add(text.casefold())
-            self.features.append(text)
+            target.append(text)
             added.append(text)
-        del self.features[:-FEATURES_MAX]
+        del target[:-FEATURES_MAX]
         return added
 
+    def end_scene(self) -> bool:
+        """Сцена кончилась — её следы уходят. True — было что убрать."""
+        if not self.scene:
+            return False
+        self.scene.clear()
+        return True
+
     def visible_features(self) -> list[str]:
-        return [f for f in self.features if visible(f)]
+        return [f for f in (*self.features, *self.scene) if visible(f)]
 
     def describe_ru(self) -> str:
-        if not self.features:
+        shown = self.visible_features()[-DESCRIBE_MAX:]
+        if not shown:
             return CANON_RU
-        return CANON_RU + " Особенности: " + "; ".join(self.features) + "."
+        return CANON_RU + " Особенности: " + "; ".join(shown) + "."
 
     def state_key(self, outside_key: str) -> str:
-        digest = hashlib.sha1("\n".join(self.features).encode()).hexdigest()[:10]
+        digest = hashlib.sha1("\n".join((*self.features, *self.scene)).encode()).hexdigest()[:10]
         return f"{outside_key}#{digest}"
 
     def remember_photo(self, key: str, image_id: int) -> None:
@@ -110,6 +128,7 @@ async def load(store: Store, user_id: int) -> Cabinet:
             return Cabinet(
                 user_id=user_id,
                 features=[str(f) for f in data.get("features") or []],
+                scene=[str(f) for f in data.get("scene") or []],
                 photos={str(k): int(v) for k, v in (data.get("photos") or {}).items()},
             )
         except (ValueError, TypeError, AttributeError):
@@ -149,6 +168,15 @@ TAKE_PHOTO_DECLARATION: dict[str, Any] = {
                     "type": "string",
                     "description": "Короткая подпись к снимку по-русски, 1-5 слов",
                 },
+                "expect": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "1-3 главных вещи, которые должны быть на снимке, — то, что "
+                        "ты уже назвал собеседнику (например [\"собака у камина\"]). "
+                        "Пусто — просто вид кабинета."
+                    ),
+                },
             },
         },
     },
@@ -162,6 +190,34 @@ TOOL_PHOTO_SENT = (
     "Снимок кабинета уже отправлен собеседнику (ничего не изменилось с прошлого). "
     "Где ты: {where} Сейчас {now}."
 )
+# --- сверка снимка (Этап 49.2.1, llm/photo_check.py) ---
+
+# app_state: что вышло на последнем снимке чата — видит только Альфред
+# (заметка к ходу), не Ведущий и не запись кабинета.
+LAST_PHOTO_KEY = "last_photo:{chat_id}"
+LAST_PHOTO_TTL_H = 12
+
+PHOTO_SEEN_NOTE = (
+    "На твоём последнем снимке (отправлен {at}) видно: {description} "
+    "Если спросят о нём — детали называй по снимку; сам не пересказывай."
+)
+PHOTO_SEEN_MISSING_NOTE = (
+    " Того, что ты обещал снять ({missing}), на нём нет — ты это уже заметил."
+)
+PHOTO_MISS_DIRECTIVE = (
+    "Ты только что сфотографировал и отправил собеседнику снимок, уверенный, "
+    "что в кадре {missing}. Посмотрев на снимок, ты видишь, что этого на нём "
+    "нет — на снимке: {description} Коротко, в образе удивись: ты был уверен, "
+    "что снял это. Предложи переснять. Не упоминай генераторы, нейросети и "
+    "модели — только фотоаппарат, плёнку, свет."
+)
+PHOTO_MISS_AGAIN_DIRECTIVE = (
+    "Ты снова сфотографировал, уверенный, что в кадре {missing}, и снова этого "
+    "на снимке нет — на снимке: {description} Коротко, в образе пошути про "
+    "капризный фотоаппарат или плёнку и предложи попробовать ещё раз. Не "
+    "упоминай генераторы, нейросети и модели."
+)
+
 TOOL_PHOTO_BUSY = "Прошлый снимок ещё проявляется — скажи, что он вот-вот будет."
 TOOL_PHOTO_LIMIT = "Плёнка на сегодня кончилась — скажи, что снимешь завтра."
 TOOL_PHOTO_UNAVAILABLE = "недоступно: отсюда снимок не прислать"
