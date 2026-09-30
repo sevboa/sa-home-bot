@@ -47,7 +47,7 @@ from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.interactives.engine import Interactives
 from sa_home_bot.bot.notifier import Notifier, chunk_text
 from sa_home_bot.bot.pending_actions import PendingActions
-from sa_home_bot.bot.rich_stream import RichStreamSession
+from sa_home_bot.bot.rich_stream import RichDraftPolicy, RichStreamSession
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import Settings
@@ -158,8 +158,12 @@ def _rich_session_for(message: Message, config: Settings) -> RichStreamSession |
     on_partial-тиков и в конце шлёт один цельный sendRichMessage."""
     if config.llm.response_mode != "rich" or message.chat is None or message.bot is None:
         return None
+    # Этап 34.3: частота черновиков и режим без стрима — из конфига ноды.
     return RichStreamSession(
-        message.bot, message.chat.id, message_thread_id=message.message_thread_id
+        message.bot,
+        message.chat.id,
+        message_thread_id=message.message_thread_id,
+        policy=RichDraftPolicy.from_llm_config(config.llm),
     )
 
 
@@ -907,7 +911,7 @@ async def _do_ask_and_reply(
     # раньше была разбросана по конкретным веткам ниже — необработанное
     # исключение, пустой ответ модели или отмена задачи хендлера (рестарт
     # бота) молча оставляли активный черновик тикать через keep-alive до
-    # 30-минутного защитного потолка (rich_stream.py::_KEEPALIVE_MAX_TICKS),
+    # 30-минутного защитного потолка (rich_stream.py::_KEEPALIVE_MAX_IDLE_S),
     # пользователь видел протухший статус вместо/помимо реального сообщения
     # об ошибке. try/finally ниже — единая гарантия: ЛЮБОЙ выход из этой
     # функции (успех, ожидаемая ошибка, баг, CancelledError) останавливает

@@ -79,7 +79,7 @@ from sa_home_bot.bot.handlers.vpn import resolve_request_callback
 from sa_home_bot.bot.lifecycle import broadcast_all, broadcast_system, notify_tool_call
 from sa_home_bot.bot.notifier import Notifier, notify_admins
 from sa_home_bot.bot.pending_actions import PendingActions
-from sa_home_bot.bot.rich_stream import RichStreamSession
+from sa_home_bot.bot.rich_stream import RichDraftPolicy, RichStreamSession
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import Settings
@@ -165,7 +165,12 @@ class TaskRichSessions:
             return None
         session = self._sessions.get(task_id)
         if session is None:
-            session = RichStreamSession(self._notifier.bot, chat_id, message_thread_id=thread_id)
+            session = RichStreamSession(
+                self._notifier.bot,
+                chat_id,
+                message_thread_id=thread_id,
+                policy=RichDraftPolicy.from_llm_config(self._config.llm),
+            )
             self._sessions[task_id] = session
         return session
 
@@ -209,6 +214,9 @@ async def _handle_task_prewake(notifier: Notifier, data: dict, sessions: TaskRic
         if session is not None:
             md_text = ALBERT_UNAVAILABLE_MD if unreachable else ALBERT_ASLEEP_MD
             await session.finalize_status(md_text)
+            # Итоговая строка счётчиков сессии (этап 34.3) — задача
+            # закончилась здесь, до _handle_task_result дело не дойдёт.
+            await session.aclose()
             sessions.pop(task_id)
         else:
             text = ALBERT_UNAVAILABLE if unreachable else ALBERT_ASLEEP
@@ -313,63 +321,75 @@ async def _handle_task_result(
     # (нода не спала — see tasks/service.py::_prewake_one, "цель уже
     # тёплая").
     session = sessions.get(task_id, chat_id, thread_id)
-    # Речь Альфреда перед формой/оповещением (Этап 45): после неё бот ОБЯЗАН
-    # прислать детерминированное сообщение, даже если LLM не справилась.
-    action_id = meta.get("pending_action_id")
-    action_stage = meta.get("pending_action_stage")
-    if pending_actions is not None and isinstance(action_id, int) and action_stage:
-        await _handle_action_speech(
-            notifier, store, data, sessions, pending_actions, action_id, action_stage, book
-        )
-        return
-    if not data.get("ok"):
-        if session is not None:
-            await session.finalize_status(
-                ALBERT_TASK_MISSED_MD, reply_to_message_id=trigger_message_id
+    # Этап 34.3 (2026-09-30): страховка — что бы ни случилось ниже
+    # (исключение в finalize/record_ai_turn/уведомлении админа), сессия
+    # закрывается и забывается. Раньше падение до sessions.pop оставляло
+    # её фоновую задачу освежать черновик до получасового потолка
+    # (rich_stream.py::_KEEPALIVE_MAX_IDLE_S), а сам объект — в словаре.
+    # aclose() идемпотентна (после штатного finalize — только итоговая
+    # строка счётчиков в лог), pop — тоже.
+    try:
+        # Речь Альфреда перед формой/оповещением (Этап 45): после неё бот ОБЯЗАН
+        # прислать детерминированное сообщение, даже если LLM не справилась.
+        action_id = meta.get("pending_action_id")
+        action_stage = meta.get("pending_action_stage")
+        if pending_actions is not None and isinstance(action_id, int) and action_stage:
+            await _handle_action_speech(
+                notifier, store, data, sessions, pending_actions, action_id, action_stage, book
             )
+            return
+        if not data.get("ok"):
+            if session is not None:
+                await session.finalize_status(
+                    ALBERT_TASK_MISSED_MD, reply_to_message_id=trigger_message_id
+                )
+            else:
+                await notifier.send_direct(
+                    chat_id,
+                    ALBERT_TASK_MISSED,
+                    reply_to_message_id=trigger_message_id,
+                    message_thread_id=thread_id,
+                )
+            sessions.pop(task_id)
+            # Пользователю — персонаж, админу — причина. Живой сбой 2026-07-30:
+            # «Альбегт» был единственным следом провалившейся задачи, и разбор
+            # свёлся к чтению логов трёх машин, включая Windows-службу.
+            if book is not None:
+                await notify_admins(
+                    book,
+                    notifier,
+                    f"⚠️ Отложенная задача (chat={chat_id}) не выполнена: "
+                    f"{html.escape(str(data.get('error') or 'причина не указана'))}",
+                )
+            return
+        raw = (data.get("result") or {}).get("response", "")
+        if session is not None:
+            sent = await session.finalize(raw, reply_to_message_id=trigger_message_id)
+            sent_id = sent.message_id if sent is not None else None
         else:
-            await notifier.send_direct(
+            sent_id = await notifier.send_direct(
                 chat_id,
-                ALBERT_TASK_MISSED,
+                _format_alfred_reply(raw),
                 reply_to_message_id=trigger_message_id,
                 message_thread_id=thread_id,
             )
         sessions.pop(task_id)
-        # Пользователю — персонаж, админу — причина. Живой сбой 2026-07-30:
-        # «Альбегт» был единственным следом провалившейся задачи, и разбор
-        # свёлся к чтению логов трёх машин, включая Windows-службу.
-        if book is not None:
-            await notify_admins(
-                book,
-                notifier,
-                f"⚠️ Отложенная задача (chat={chat_id}) не выполнена: "
-                f"{html.escape(str(data.get('error') or 'причина не указана'))}",
+        dialogue_id = meta.get("dialogue_id")
+        if dialogue_id is None:
+            # Проактивный агент (bot/tools.py::schedule_agent_dialogue, Этап
+            # 44.1) — chat_id получает первое сообщение без готового треда.
+            # Рождаем dialogue_id так же, как его рождает обычный /ai: message_id
+            # сообщения, начавшего тред (schema.sql) — только тут стартовое
+            # сообщение отправил сам Альфред, а не гость (Этап 44.2).
+            dialogue_id = sent_id
+        if sent_id is not None and dialogue_id is not None:
+            await store.record_ai_turn(
+                chat_id, sent_id, dialogue_id, "assistant", raw, datetime.now(tz=UTC)
             )
-        return
-    raw = (data.get("result") or {}).get("response", "")
-    if session is not None:
-        sent = await session.finalize(raw, reply_to_message_id=trigger_message_id)
-        sent_id = sent.message_id if sent is not None else None
-    else:
-        sent_id = await notifier.send_direct(
-            chat_id,
-            _format_alfred_reply(raw),
-            reply_to_message_id=trigger_message_id,
-            message_thread_id=thread_id,
-        )
-    sessions.pop(task_id)
-    dialogue_id = meta.get("dialogue_id")
-    if dialogue_id is None:
-        # Проактивный агент (bot/tools.py::schedule_agent_dialogue, Этап
-        # 44.1) — chat_id получает первое сообщение без готового треда.
-        # Рождаем dialogue_id так же, как его рождает обычный /ai: message_id
-        # сообщения, начавшего тред (schema.sql) — только тут стартовое
-        # сообщение отправил сам Альфред, а не гость (Этап 44.2).
-        dialogue_id = sent_id
-    if sent_id is not None and dialogue_id is not None:
-        await store.record_ai_turn(
-            chat_id, sent_id, dialogue_id, "assistant", raw, datetime.now(tz=UTC)
-        )
+    finally:
+        if session is not None:
+            await session.aclose()
+        sessions.pop(task_id)
 
 
 async def _handle_action_speech(

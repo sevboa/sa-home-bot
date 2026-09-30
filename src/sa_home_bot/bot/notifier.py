@@ -35,7 +35,7 @@ _TRANSIENT_BACKOFF_S = (0.0, 2.0, 5.0)
 # чтобы индикатор не мигал видимым образом.
 TYPING_KEEPALIVE_INTERVAL_S = 4.0
 # Защитный потолок для TypingIndicator.start() без последующего stop() —
-# тот же приём, что и _KEEPALIVE_MAX_TICKS в rich_stream.py: сессия должна
+# тот же приём, что и _KEEPALIVE_MAX_IDLE_S в rich_stream.py: сессия должна
 # всегда дойти до места, которое останавливает индикатор (push_status/
 # finalize/finalize_status), это подстраховка на случай, если её всё же
 # бросят, не закрыв. 450 тиков * 4с = 30 минут — тот же запас, что и у
@@ -55,15 +55,26 @@ class TypingIndicator:
     (RichStreamSession.push_status), дублировать typing поверх него не
     нужно. RichStreamSession включает этот индикатор из _push_markdown
     (реальный кусок текста) и выключает из _push_thinking/_send_persisted
-    (статус или финал)."""
+    (статус или финал).
+
+    Этап 34.3 (2026-09-30): при стриме черновиком RichStreamSession этот
+    индикатор больше не включает вовсе — сам черновик и есть знак, что
+    ответ идёт, а параллельный send_chat_action раз в 4 с лишь добавлял
+    клиенту обновлений (Android подвисал). Индикатор остаётся для
+    rich-режима без черновика (LlmConfig.rich_draft_streaming=False) и для
+    фолбэк-путей (typing_action ниже)."""
 
     def __init__(self, bot: Bot, chat_id: int, message_thread_id: int | None = None) -> None:
         self._bot = bot
         self._chat_id = chat_id
         self._message_thread_id = message_thread_id
         self._task: asyncio.Task | None = None
+        # Сколько раз реально ушёл send_chat_action (с успехом или нет) —
+        # для итоговой строки сессии (RichStreamSession, этап 34.3).
+        self.sends = 0
 
     async def _send(self) -> None:
+        self.sends += 1
         try:
             await self._bot.send_chat_action(
                 self._chat_id, "typing", message_thread_id=self._message_thread_id

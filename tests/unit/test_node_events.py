@@ -8,6 +8,7 @@ event_types opt-in — Логопед долечил Альфреда, долж�
 
 from unittest.mock import ANY
 
+import pytest
 from aiogram.types import InputRichBlockThinking
 
 from sa_home_bot.bot.ai_flow import (
@@ -26,6 +27,8 @@ from sa_home_bot.bot.ai_flow import (
 )
 from sa_home_bot.bot.node_events import (
     EVENT_RESTART_APPLIED,
+    TaskRichSessions,
+    _handle_task_result,
     build_close_ssh_keyboard,
     build_node_event_handler,
     render_idle_power_blocked,
@@ -1041,3 +1044,27 @@ async def test_handler_does_not_notify_non_admin_chats_on_idle_power_blocked():
     )
 
     assert notifier.sent == []
+
+
+async def test_task_result_closes_and_forgets_session_even_if_delivery_fails():
+    # Этап 34.3 (2026-09-30): падение посреди _handle_task_result (здесь —
+    # запись хода в БД после финала) раньше оставляло сессию в словаре, а
+    # её фоновую задачу — освежать черновик до получасового потолка.
+    class BrokenStore(FakeStore):
+        async def record_ai_turn(self, *args, **kwargs):
+            raise RuntimeError("БД недоступна")
+
+    bot = FakeBot()
+    notifier = FakeNotifier(bot)
+    sessions = TaskRichSessions(notifier, Settings())
+    session = sessions.get(1, 7, None)
+    await session.push_status("шаги")
+    assert session._pump_task is not None
+
+    data = {"task_id": 1, "meta": _LLM_CHAT_META, "ok": True, "result": {"response": "Готово"}}
+    with pytest.raises(RuntimeError):
+        await _handle_task_result(notifier, BrokenStore(), data, sessions)
+
+    assert sessions._sessions == {}
+    assert session._pump_task is None
+    assert bot.sent[0]["markdown"] == ALFRED_PREFIX_MD + "Готово"
