@@ -1005,7 +1005,9 @@ class LlmService:
                     ip_scale=options["ip_scale"],
                     steps=options["steps"],
                     guidance=options["guidance"],
-                    style=options["style"],
+                    # raw — ровно то, что написал владелец: без промптера,
+                    # подрезки, стилевого шаблона и негативов из конфига.
+                    style=options["style"] and not options["raw"],
                     fit=not options["raw"],
                     size=options["size"],
                     colors=options["colors"],

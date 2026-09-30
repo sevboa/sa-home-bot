@@ -39,8 +39,8 @@ HELP = """\
 или ответь командой на картинку, или <code>ref=ID</code>.
 
 <b>Ключи</b> — сразу после режима:
-<code>raw</code> — описание в генератор как есть, без промптера и подрезки
-<code>nostyle</code> — без стилевого шаблона
+<code>raw</code> — описание в генератор как есть: без промптера, подрезки, стиля и негативов сверху
+<code>nostyle</code> — без стилевого шаблона (промптер остаётся)
 <code>seed=N</code> — повтор (без него случайный, будет в подписи)
 <code>s=0.55</code> — сила изменений variant (рабочие 0.5–0.65)
 <code>ip=0.4</code> — сила образца в scene (рабочие 0.3–0.5)
@@ -232,7 +232,7 @@ def caption(
         timing += f" (+промптер {result['prompt_seconds']} с)"
     head.append(timing)
     lines = [" · ".join(str(part) for part in head)]
-    flags = [name for name, on in (("raw", request.raw), ("nostyle", not request.style)) if on]
+    flags = [name for name, on in (("raw", request.raw), ("nostyle", not request.style and not request.raw)) if on]
     if ref_label:
         flags.append(f"образец {ref_label}")
     if flags:

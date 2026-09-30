@@ -254,12 +254,12 @@ async def test_generate_image_raw_skips_prompt_agent_and_passes_options(monkeypa
     result = await _svc(imagegen_enabled=True, imagegen_negative="blurry").run_command(
         "generate_image",
         {"description": "old radio, white background", "mode": "item", "raw": True,
-         "seed": 5, "steps": 8, "style": False},
+         "seed": 5, "steps": 8},
     )
     assert seen["prompt"] == "old radio, white background"
     assert seen["negative"] == ""  # raw — без негатива по умолчанию
     assert seen["seed"] == 5 and seen["steps"] == 8
-    assert seen["style"] is False and seen["fit"] is False
+    assert seen["style"] is False and seen["fit"] is False  # raw — и без стиля
     assert seen["ref"] is None and seen["ip_scale"] is None
     assert seen["size"] is None and seen["colors"] is None  # по умолчанию — конфиг
     assert result["seed"] == 5
