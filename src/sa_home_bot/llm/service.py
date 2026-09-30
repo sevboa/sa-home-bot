@@ -25,6 +25,7 @@ import socket
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -77,7 +78,7 @@ def _log_ollama_timings(what: str, result: dict[str, Any]) -> None:
     load_ns = result.get("load_duration")
     log.info(
         "llm: %s — промпт %s ток (%s), генерация %s ток (%s), thinking %d симв., "
-        "загрузка модели %s, всего %s",
+        "загрузка модели %s, всего %s, стоп: %s",
         what,
         result.get("prompt_eval_count", "?"),
         _speed(result.get("prompt_eval_count"), result.get("prompt_eval_duration")),
@@ -88,7 +89,33 @@ def _log_ollama_timings(what: str, result: dict[str, Any]) -> None:
         f"{result['total_duration'] / 1e9:.1f}с"
         if isinstance(result.get("total_duration"), int)
         else "?",
+        # Этап 50: length — окно кончилось посреди генерации (обрывок/пустой
+        # ответ), это и есть признак переполнения, см. _usage ниже.
+        result.get("done_reason", "?"),
     )
+
+def _usage(cfg: LlmConfig, result: dict[str, Any]) -> dict[str, Any]:
+    """Счётчики окна из ответа Ollama — наружу боту (Этап 50, 2026-09-30).
+
+    Раньше они жили только в логе (_log_ollama_timings выше), и бот не знал,
+    что промпт дорос до ~31.8k из 32768: модель уходила в thinking, окно
+    кончалось (done_reason=length) — и пользователь получал пустой ответ
+    («Альбегт») или обрывок на полуслове. Теперь бот видит: сколько токенов
+    занял промпт (prompt_eval_count), сколько сгенерировано (eval_count),
+    почему генерация остановилась (done_reason: stop / length) и какое окно
+    у модели на самом деле (num_ctx — действующее значение службы, а не
+    дефолт профиля). Отсутствующие у Ollama поля просто не кладём; нет
+    ни одного счётчика — нет и num_ctx (замерять нечего).
+    """
+    out: dict[str, Any] = {}
+    for key in ("prompt_eval_count", "eval_count", "done_reason"):
+        value = result.get(key)
+        if value is not None:
+            out[key] = value
+    if out:
+        out["num_ctx"] = cfg.num_ctx
+    return out
+
 
 ACTION_ASK = "ask"
 ACTION_CHAT = "chat"
@@ -154,6 +181,13 @@ ACTION_SET_SPEECH_CLEAR = "set_speech_clear"
 # рассуждения и БЕЗ Логопеда: это служебные данные сцены, не реплика
 # Альфреда (картавость испортила бы и JSON, и текст рассказчика).
 ROLE_DIRECTOR = "director"
+# Этап 50 (2026-09-30): сжатие истории /ai (bot/dialogue_context.py). Та же
+# схема, что у Ведущего: system от бота, без тулов, без рассуждения, без
+# Логопеда (краткое содержание — служебный текст для модели, не реплика
+# Альфреда), но ответ — обычный текст, temperature 0 (пересказ, а не
+# творчество) и потолок длины: пересказ не должен сам съесть окно.
+ROLE_SUMMARIZER = "summarizer"
+_SUMMARIZER_OPTIONS: dict[str, Any] = {"temperature": 0, "num_predict": 2048}
 
 # Отказы фото-путей намеренно возвращаются как обычный {"response": ...}, а
 # не отдельным полем-ошибкой: для ACTION_CHAT это просто ложится в ai_turns
@@ -388,7 +422,14 @@ class LlmService:
         return ServiceDescription(
             info=ServiceInfo(node=self._node, service=SERVICE_NAME, version=__version__),
             capabilities=(self._cfg.model,),
-            model_profile=self._profile.summary().to_payload(),
+            # num_ctx — ДЕЙСТВУЮЩЕЕ окно службы (явный [llm].num_ctx побеждает
+            # дефолт профиля, см. __init__), а не дефолт профиля: боту по нему
+            # считать заполненность истории (Этап 50, bot/dialogue_context.py).
+            # До 2026-09-30 сюда уезжал дефолт профиля (14336 у gemma-4), хотя
+            # на mycraft реально 32768.
+            model_profile=replace(
+                self._profile.summary(), num_ctx=self._cfg.num_ctx
+            ).to_payload(),
             actions=(
                 ActionSpec(
                     id=ACTION_ASK,
@@ -773,10 +814,12 @@ class LlmService:
                 raise ProtoError(ERR_BAD_REQUEST, "messages должен быть непустым списком")
             tools = args.get("tools") or None
             role = args.get("role") or "persona"
-            if role not in ("persona", "router", ROLE_DIRECTOR):
+            if role not in ("persona", "router", ROLE_DIRECTOR, ROLE_SUMMARIZER):
                 raise ProtoError(ERR_BAD_REQUEST, f"неизвестная role: {role!r}")
             if role == ROLE_DIRECTOR:
                 return await self._director_chat(messages, args)
+            if role == ROLE_SUMMARIZER:
+                return await self._summarizer_chat(messages, args)
             # Намерение-уровень рассуждения (off|low|medium|high) от бота, и его
             # перевод в параметр Ollama `think` через профиль этой модели.
             think = self._think_arg(args)
@@ -850,14 +893,22 @@ class LlmService:
             # текст персонажа, а служебные данные для цикла вызовов.
             tool_calls = message.get("tool_calls")
             if tool_calls:
-                return {"tool_calls": tool_calls, "model": self._cfg.model}
+                return {
+                    "tool_calls": tool_calls,
+                    "model": self._cfg.model,
+                    **_usage(self._cfg, result),
+                }
             cleaned = strip_math_notation(message.get("content", ""))
             reply, remark, just_cured = self._speech.process(
                 cleaned, chat_id, speaker
             )
             if just_cured:
                 await self._emit_speech_cured()
-            out: dict[str, Any] = {"response": reply, "model": self._cfg.model}
+            out: dict[str, Any] = {
+                "response": reply,
+                "model": self._cfg.model,
+                **_usage(self._cfg, result),
+            }
             if remark is not None:
                 out["speech_remark"] = remark
             return out
@@ -1201,6 +1252,30 @@ class LlmService:
         return {
             "response": result.get("message", {}).get("content", ""),
             "model": self._cfg.model,
+        }
+
+    async def _summarizer_chat(
+        self, messages: list[Any], args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Сжатие истории /ai (Этап 50, см. ROLE_SUMMARIZER): свой system от
+        бота, без тулов/рассуждения/Логопеда, temperature 0."""
+        system = args.get("system")
+        if not isinstance(system, str) or not system:
+            raise ProtoError(ERR_BAD_REQUEST, "для role=summarizer нужен непустой system")
+        await self._touch(args.get("chat_id"))
+        result = await ollama.chat(
+            self._cfg,
+            messages,
+            system,
+            tools=None,
+            think=self._profile.think_arg("off"),
+            options=_SUMMARIZER_OPTIONS,
+        )
+        _log_ollama_timings("chat/summarizer", result)
+        return {
+            "response": (result.get("message") or {}).get("content", ""),
+            "model": self._cfg.model,
+            **_usage(self._cfg, result),
         }
 
     async def _emit_speech_cured(self) -> None:

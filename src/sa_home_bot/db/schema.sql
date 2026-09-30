@@ -128,6 +128,67 @@ CREATE TABLE IF NOT EXISTS ai_turns (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_turns_dialogue ON ai_turns(chat_id, dialogue_id, message_id);
 
+-- Этап 50 (2026-09-30): сжатие истории /ai (bot/dialogue_context.py).
+-- ai_turns при сжатии НЕ меняется и не чистится — полный текст всех ходов
+-- остаётся. Модели вместо старых ходов уходит краткое содержание:
+-- ai_dialogue_summaries хранит его версиями, каждая покрывает ходы треда
+-- с message_id <= upto_message_id (новая версия включает в себя
+-- предыдущую — в LLM-запрос сжатия идёт прежнее содержание + следующие
+-- ходы). Действующая — с наибольшим upto_message_id; старые версии не
+-- удаляем — по ним видно, что и когда терялось при пересказе.
+CREATE TABLE IF NOT EXISTS ai_dialogue_summaries (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id          INTEGER NOT NULL,
+    dialogue_id      INTEGER NOT NULL,
+    upto_message_id  INTEGER NOT NULL,
+    summary          TEXT NOT NULL,
+    created_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ai_dialogue_summaries
+    ON ai_dialogue_summaries(chat_id, dialogue_id, upto_message_id);
+
+-- Последний замер окна по треду (Этап 50): prompt_eval_count первого
+-- раунда последнего хода и сколько символов бот тогда отправил — по ним
+-- следующий ход оценивает заполненность окна ДО генерации. num_ctx —
+-- действующее окно службы llm на тот момент, done_reason — как закончилась
+-- генерация (length = окно кончилось посреди ответа).
+CREATE TABLE IF NOT EXISTS ai_dialogue_context (
+    chat_id        INTEGER NOT NULL,
+    dialogue_id    INTEGER NOT NULL,
+    prompt_tokens  INTEGER NOT NULL,
+    sent_chars     INTEGER NOT NULL,
+    num_ctx        INTEGER,
+    done_reason    TEXT,
+    updated_at     TEXT NOT NULL,
+    PRIMARY KEY (chat_id, dialogue_id)
+);
+
+-- Дословный возврат деталей из сжатого начала разговора (Этап 50): поиск по
+-- ходам треда под текущую реплику. Отдельная FTS5-таблица с копией текста
+-- (как facts у службы memory), а не external content поверх ai_turns: у
+-- ai_turns составной ключ без INTEGER PRIMARY KEY, её rowid может смениться
+-- на VACUUM, и индекс молча разъехался бы с данными. Токенайзер trigram —
+-- поиск по подстроке, «медвед» находит и «медведь», и «медведя» (тот же
+-- приём, что у memory/service.py). Заполняется триггером при записи хода;
+-- ходы, записанные до этапа 50, дозаливает миграция (db/migrations.py).
+-- «ё» в индексе пишется как «е» (запрос нормализуется так же,
+-- bot/dialogue_context.py::fts_query): remove_diacritics у trigram есть
+-- только с SQLite 3.45, а резервные ноды бота могут стоять на более старом.
+CREATE VIRTUAL TABLE IF NOT EXISTS ai_turns_fts USING fts5(
+    content,
+    chat_id UNINDEXED,
+    dialogue_id UNINDEXED,
+    message_id UNINDEXED,
+    tokenize='trigram'
+);
+CREATE TRIGGER IF NOT EXISTS ai_turns_fts_insert AFTER INSERT ON ai_turns BEGIN
+    INSERT INTO ai_turns_fts(content, chat_id, dialogue_id, message_id)
+    VALUES (
+        replace(replace(new.content, 'ё', 'е'), 'Ё', 'Е'),
+        new.chat_id, new.dialogue_id, new.message_id
+    );
+END;
+
 -- Трасса вызовов тулов /ai (get_time, get_weather, calc, convert_currency,
 -- remind) — живая находка 2026-07-24: "шиза" с часовыми поясами (модель то
 -- врёт про место, которого нет в таблице get_time, то вообще не зовёт тул)

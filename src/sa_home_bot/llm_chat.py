@@ -18,6 +18,7 @@ import contextlib
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from sa_home_bot.bot import tools as ai_tools
@@ -125,6 +126,49 @@ ToolStartSink = Callable[[str, dict[str, Any]], Awaitable[None]]
 # ломано отформатированным — см. bot/ai_flow.py::request_alfred).
 SpeechRemarkSink = Callable[[str], Awaitable[None]]
 
+@dataclass
+class ChatStats:
+    """Счётчики окна за один ход /ai (Этап 50, 2026-09-30) — служба llm
+    отдаёт их в каждом раунде chat (llm/service.py::_usage), run_chat_loop
+    складывает сюда, если вызывающий передал ячейку.
+
+    ``first_prompt_tokens`` — промпт ПЕРВОГО раунда хода (история + заметка,
+    ещё без результатов тулов этого хода): по нему бот оценивает, сколько
+    места занимает сама история (bot/dialogue_context.py). ``max_prompt_tokens``
+    — самый большой промпт хода (с результатами тулов) — для лога и
+    страховки. ``done_reason`` — последнего раунда: ``length`` значит, что
+    окно кончилось посреди генерации (обрывок или пустой ответ).
+    """
+
+    first_prompt_tokens: int | None = None
+    max_prompt_tokens: int = 0
+    eval_tokens: int = 0
+    done_reason: str | None = None
+    num_ctx: int | None = None
+    rounds: int = 0
+
+    def absorb(self, result: dict[str, Any]) -> None:
+        self.rounds += 1
+        prompt = result.get("prompt_eval_count")
+        if isinstance(prompt, int) and not isinstance(prompt, bool):
+            if self.first_prompt_tokens is None:
+                self.first_prompt_tokens = prompt
+            self.max_prompt_tokens = max(self.max_prompt_tokens, prompt)
+        evals = result.get("eval_count")
+        if isinstance(evals, int) and not isinstance(evals, bool):
+            self.eval_tokens += evals
+        reason = result.get("done_reason")
+        if isinstance(reason, str):
+            self.done_reason = reason
+        num_ctx = result.get("num_ctx")
+        if isinstance(num_ctx, int) and not isinstance(num_ctx, bool) and num_ctx > 0:
+            self.num_ctx = num_ctx
+
+    @property
+    def truncated(self) -> bool:
+        return self.done_reason == "length"
+
+
 # Кусок накопленного (не дельта) текста текущего раунда + флаг "раунд
 # завершён" — этап 34, Фаза 2. Вызывается на каждый тик опроса
 # chat_progress, ПОКА идёт конкретный раунд tool-calling; раунд, который
@@ -186,6 +230,8 @@ async def run_chat_loop(
     photo_key: str | None = None,
     speech_user_id: int | None = None,
     speech_clear: bool | Callable[[], Awaitable[bool]] | None = None,
+    stats: ChatStats | None = None,
+    allow_tools: bool = True,
 ) -> str:
     """Один проход диалога с моделью: раунды tool-calling (до
     MAX_TOOL_ROUNDS), пока не придёт финальный текст.
@@ -240,7 +286,14 @@ async def run_chat_loop(
     _speech_target). Служба tasks их не передаёт — там chat_id.
     ``speech_clear`` может быть функцией — тогда флаг перечитывается перед
     каждым раундом: гость мог сменить передатчик кнопкой посреди хода, и
-    старое значение затёрло бы смену (живой баг 2026-09-28)."""
+    старое значение затёрло бы смену (живой баг 2026-09-28).
+
+    ``stats`` — Этап 50: ячейка под счётчики окна (см. ChatStats), общая на
+    все раунды (и на router- и персонажный проход, если вызывающий передаёт
+    одну и ту же). ``allow_tools=False`` — проход без деклараций тулов вовсе:
+    перегенерация ответа после переполнения окна (bot/ai_flow.py), когда
+    тулы этого хода уже отработали и повторять их побочные эффекты нельзя
+    (заодно промпт легче на все декларации)."""
     tool_ctx.history = messages
     # Комплект собирается ОДИН раз на проход и по правам собеседника: тула, на
     # который у него нет прав, модель не видит вовсе (см. bot/tools.py::
@@ -306,9 +359,12 @@ async def run_chat_loop(
             await asyncio.sleep(delay)
         return await _call_chat(args)
 
+    declarations = toolkit.declarations if allow_tools else []
     for _round in range(MAX_TOOL_ROUNDS):
-        args = await _chat_args(toolkit.declarations)
+        args = await _chat_args(declarations)
         result = await _call_chat_with_retry(args)
+        if stats is not None:
+            stats.absorb(result)
         tool_calls = result.get("tool_calls")
         if not tool_calls:
             await _maybe_send_remark(result)
@@ -321,7 +377,8 @@ async def run_chat_loop(
             # Тот же отфильтрованный комплект, что ушёл в декларации: если
             # модель выдумает имя тула, которого ей не давали, — сюда она не
             # пройдёт, права проверены один раз и в одном месте.
-            handler = toolkit.handlers.get(name)
+            # allow_tools=False: даже выдуманный моделью вызов не исполняем.
+            handler = toolkit.handlers.get(name) if allow_tools else None
             if handler is None:
                 tool_result = f"неизвестный инструмент: {name}"
             else:
@@ -360,6 +417,8 @@ async def run_chat_loop(
         log_chat_id,
     )
     result = await _call_chat_with_retry(await _chat_args([]))
+    if stats is not None:
+        stats.absorb(result)
     response = result.get("response", "")
     if response:
         await _maybe_send_remark(result)

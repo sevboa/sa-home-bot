@@ -88,6 +88,10 @@ def _post_json_stream_sync(
         url, data=body, headers={"Content-Type": "application/json"}, method="POST"
     )
     content_parts: list[str] = []
+    # Этап 50: thinking раньше выбрасывался целиком — лог (llm/service.py::
+    # _log_ollama_timings) не видел, сколько окна ушло в рассуждение. Копим
+    # только ради длины в логе, наружу боту он не едет.
+    thinking_parts: list[str] = []
     final: dict[str, Any] = {}
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — только localhost
@@ -96,6 +100,9 @@ def _post_json_stream_sync(
                 if not line:
                     continue
                 chunk = json.loads(line)
+                thought = (chunk.get("message") or {}).get("thinking", "")
+                if thought:
+                    thinking_parts.append(thought)
                 piece = (chunk.get("message") or {}).get("content", "")
                 if piece:
                     content_parts.append(piece)
@@ -114,6 +121,8 @@ def _post_json_stream_sync(
         raise
     final_message = dict(final.get("message") or {})
     final_message["content"] = "".join(content_parts)
+    if thinking_parts:
+        final_message["thinking"] = "".join(thinking_parts)
     final["message"] = final_message
     return final
 
@@ -418,6 +427,7 @@ async def chat(
     tools: list[dict[str, Any]] | None = None,
     think: bool | str | None = None,
     response_format: str | None = None,
+    options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     full_messages = [{"role": "system", "content": system}, *messages]
     payload: dict[str, Any] = {
@@ -426,6 +436,12 @@ async def chat(
         "stream": False,
         **_keep_alive_options(cfg),
     }
+    # Этап 50 (2026-09-30): сэмплинг служебного прохода (сжатие истории —
+    # temperature 0, потолок num_predict). Только параметры генерации, не
+    # загрузки: num_ctx остаётся из _keep_alive_options тем же, что у всех
+    # вызовов, — иначе Ollama пересоздала бы раннер (см. комментарий выше).
+    if options:
+        payload["options"] = {**options, **payload["options"]}
     # "json" — структурный ответ (Ведущий интерактивов, Этап 47).
     if response_format is not None:
         payload["format"] = response_format

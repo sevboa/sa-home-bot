@@ -1334,3 +1334,57 @@ async def test_director_role_requires_system():
         await svc.run_command(
             "chat", {"messages": [{"role": "user", "content": "ход"}], "role": "director"}
         )
+
+
+async def test_chat_returns_window_usage(monkeypatch):
+    """Этап 50: счётчики окна из ответа Ollama едут боту вместе с ответом."""
+
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
+        return {
+            "message": {"role": "assistant", "content": "Ок"},
+            "prompt_eval_count": 31800,
+            "eval_count": 968,
+            "done_reason": "length",
+        }
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    svc = LlmService(_settings(num_ctx=32768), speech_rand=lambda: 0.5)
+    result = await svc.run_command("chat", {"messages": [{"role": "user", "content": "?"}]})
+    assert result["prompt_eval_count"] == 31800
+    assert result["eval_count"] == 968
+    assert result["done_reason"] == "length"
+    assert result["num_ctx"] == 32768
+
+
+async def test_summarizer_role_own_system_temperature_zero_no_lisp(monkeypatch):
+    seen = {}
+
+    async def fake_chat(cfg, messages, system, tools=None, think=None, options=None):
+        seen.update(system=system, tools=tools, options=options)
+        return {
+            "message": {"role": "assistant", "content": "Говорили про медведя Тихона."},
+            "prompt_eval_count": 5000,
+            "done_reason": "stop",
+        }
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    svc = LlmService(_settings(), speech_rand=lambda: 0.0)
+    result = await svc.run_command(
+        "chat",
+        {
+            "messages": [{"role": "user", "content": "реплики"}],
+            "role": "summarizer",
+            "system": "СОЖМИ",
+            "chat_id": 42,
+        },
+    )
+    assert result["response"] == "Говорили про медведя Тихона."  # без р→г
+    assert "speech_remark" not in result
+    assert result["prompt_eval_count"] == 5000
+    assert seen["system"] == "СОЖМИ" and seen["tools"] is None
+    assert seen["options"]["temperature"] == 0
+
+
+async def test_describe_reports_effective_num_ctx():
+    svc = LlmService(_settings(num_ctx=32768))
+    assert svc.describe().model_profile["num_ctx"] == 32768

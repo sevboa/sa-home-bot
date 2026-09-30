@@ -476,6 +476,48 @@ class LlmConfig(BaseModel):
     warmup_timeout_s: float = Field(default=360.0, gt=0)
     think_chat: bool = True
     num_ctx: int = Field(default=8192, gt=0)
+    # --- Этап 50 (2026-09-30): сжатие истории /ai (bot/dialogue_context.py).
+    # Читает только БОТ (alfred); службе llm эти поля не нужны.
+    #
+    # Порог — доля окна, которую промпт может занять к НАЧАЛУ хода. Окно
+    # num_ctx берётся у службы llm (её ответ chat / describe), не отсюда:
+    # [llm].num_ctx на alfred — дефолт, реальное окно живёт на mycraft
+    # (32768). 0.70 при 32768 = ~22.9k токенов под промпт; остаток ~9.8k —
+    # результаты тулов этого же хода (web_search несколькими раундами,
+    # ~1–2k), thinking модели и сам ответ (6–8k). Живая поломка, от которой
+    # это защищает: промпт дорастал до ~31.8k, модель уходила в thinking,
+    # окно кончалось (done_reason=length) — пустой ответ или обрывок.
+    context_compression: bool = True
+    context_compress_ratio: float = Field(default=0.70, gt=0.2, lt=0.95)
+    # Постоянная часть промпта, которой бот не видит (персонаж ~5.6k, декларации
+    # тулов ~33k символов, роутер) — для оценки по символам, пока нет замера
+    # prompt_eval_count или если он занижен кэшем префикса Ollama.
+    context_base_tokens: int = Field(default=12000, ge=0)
+    # Русский текст у gemma — ~3.2–3.3 символа на токен (замер 2026-09-30);
+    # берём нижнюю границу — оценка выходит с запасом.
+    context_chars_per_token: float = Field(default=3.2, gt=0.5)
+    # Сколько последних ходов (сообщений user/assistant) остаются в истории
+    # дословно; всё раньше уходит в краткое содержание.
+    context_keep_recent_turns: int = Field(default=10, ge=2)
+    # Меньше стольких сжимаемых ходов — порог не срабатывает (сжимать нечего,
+    # а «отлучаться» Альфреду на каждом ходу незачем).
+    context_min_compress_turns: int = Field(default=4, ge=1)
+    # Целевой размер краткого содержания (~1–1.5k токенов).
+    context_summary_max_chars: int = Field(default=4500, ge=500)
+    # Сколько символов старых ходов уходит в один запрос сжатия: длинный
+    # хвост (первое сжатие давно идущего треда) сжимается по частям.
+    context_summary_chunk_chars: int = Field(default=36000, ge=2000)
+    # Бюджет дословного возврата старых сообщений под текущую реплику
+    # (~2.5k токенов).
+    context_recall_budget_chars: int = Field(default=8000, ge=0)
+    # Старые (не из последних context_keep_recent_turns) ответы Альфреда в
+    # истории для модели укорачиваются до стольких символов — детали при
+    # нужде вернёт дословный возврат. 0 — не укорачивать.
+    context_old_reply_max_chars: int = Field(default=600, ge=0)
+    # Сколько новый ход ждёт идущего сжатия своего же треда, прежде чем
+    # идти со старым кратким содержанием (оно всегда целостно — см.
+    # bot/dialogue_context.py::DialogueCompressor).
+    context_compress_wait_s: float = Field(default=120.0, ge=0)
     # Путь к локальному model-profiles.toml (рядом с config.toml) —
     # выставляется в load(), не из TOML. None — конфиг не файловый.
     # Служба llm грузит по нему профиль своей модели (llm/model_profiles.py):

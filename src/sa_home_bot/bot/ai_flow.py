@@ -73,6 +73,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from aiogram.types import Message, User
 
 from sa_home_bot import wake_core
+from sa_home_bot.bot import dialogue_context
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.lifecycle import notify_tool_call
 from sa_home_bot.bot.notifier import (  # noqa: F401 — реэкспорт, см. ниже
@@ -94,7 +95,7 @@ from sa_home_bot.llm.prompt import (
     parse_router_level,
     wrap_context_note,
 )
-from sa_home_bot.llm_chat import run_chat_loop
+from sa_home_bot.llm_chat import ChatStats, run_chat_loop
 from sa_home_bot.memory import protocol as memory_protocol
 from sa_home_bot.proto.messages import (
     ERR_UNAVAILABLE,
@@ -983,6 +984,60 @@ def _typing_while_asking(message: Message) -> contextlib.AbstractAsyncContextMan
     return typing_action(message.bot, message.chat.id, message.message_thread_id)
 
 
+def llm_address() -> Address:
+    """Адрес службы llm для /ai — хендлеру (фоновое сжатие истории, Этап 50)."""
+    return Address(node=LLM_NODE, service=LLM_SERVICE)
+
+
+# Действующее окно службы llm (num_ctx), как его сообщила сама служба в
+# последнем ответе chat (llm/service.py::_usage) — Этап 50.
+_seen_num_ctx: dict[str, int] = {}
+
+
+async def resolve_num_ctx(settings: Settings, store: Store, dst: Address) -> int:
+    """Окно модели для оценки заполненности: что служба сказала в последнем
+    ответе этому процессу → последний замер из БД (ai_dialogue_context) →
+    [llm].num_ctx из конфига бота (грубый фоллбэк: на alfred это дефолт,
+    реальное окно живёт на mycraft).
+
+    describe здесь намеренно не зовём: оценка идёт ДО пробуждения службы,
+    а неудачный describe спящей ноды закэшировал бы «профиля нет» на
+    _PROFILE_TTL_S и сбил бы выбор router-прохода (_use_router)."""
+    seen = _seen_num_ctx.get(f"{dst.node}/{dst.service}")
+    if seen:
+        return seen
+    known = await store.latest_known_num_ctx()
+    if known:
+        return known
+    return settings.llm.num_ctx
+
+
+async def _current_turn_text(store: Store, message: Message) -> str:
+    """Текст текущей реплики собеседника — как он записан в ai_turns (для
+    голосового — распознанный текст, для фото — подпись). Директивы без
+    записанного хода (OPENING_PROMPT и т.п.) — пустая строка: искать по
+    служебному тексту в истории нечего."""
+    if message.chat is None:
+        return ""
+    turn = await store.ai_turn(message.chat.id, message.message_id)
+    if turn is None or turn.get("role") != "user":
+        return ""
+    return str(turn.get("content") or "")
+
+
+def _tools_done_note(executed: list[tuple[str, dict[str, Any], str]]) -> str:
+    """Для перегенерации после переполнения (Этап 50): тулы этого хода уже
+    отработали — повторять их побочные эффекты (передать сообщение,
+    поставить напоминание) нельзя, а результаты модели нужны."""
+    lines = [
+        f"- {name}({args}) → {result[:600]}" for name, args, result in executed
+    ]
+    return (
+        "В этом ходе ты уже вызвал инструменты, повторно их не вызывай — вот "
+        "результаты:\n" + "\n".join(lines)
+    )
+
+
 async def request_alfred(
     message: Message,
     node_link: ServiceLink,
@@ -1103,30 +1158,131 @@ async def request_alfred(
     # nonlocal через два уровня вложенности (_ask → колбэк) читается хуже.
     # Непустой = вставка «сёрфит» за этот запрос уже отправлена.
     surfing_announced: list[bool] = []
+    # Этап 50: тулы, реально отработавшие за этот ход, — для перегенерации
+    # после переполнения окна (см. _tools_done_note).
+    executed_tools: list[tuple[str, dict[str, Any], str]] = []
 
-    async def _ask() -> str:
-        if context_note:
+    # --- Этап 50: окно контекста (bot/dialogue_context.py) ---
+    # Оценка заполненности окна ДО генерации, дословный возврат деталей из
+    # сжатого начала разговора и, при превышении порога, инструкция Альфреду
+    # «ответь и скажи, что ненадолго отлучишься». Только для истории,
+    # собранной load_history (у неё есть разметка сжатого) и при известном
+    # чате; синтетические вызовы (start_dialogue, тесты) идут как раньше.
+    dst_llm = dst
+    compress_cfg = settings.llm
+    chat_key = message.chat.id if message.chat is not None else None
+    dhistory = history if isinstance(history, dialogue_context.DialogueHistory) else None
+    managed = compress_cfg.context_compression and chat_key is not None
+    recall_note: str | None = None
+    step_away = False
+    num_ctx = compress_cfg.num_ctx
+    if managed and dhistory is not None:
+        recall_note, recalled = await dialogue_context.recall_verbatim(
+            store,
+            settings,
+            chat_key,
+            dialogue_id,
+            await _current_turn_text(store, message),
+            dhistory,
+        )
+        if recalled:
+            log.info(
+                "ai_flow: дословный возврат — %d сообщ. из начала разговора (chat=%s)",
+                recalled,
+                chat_id,
+            )
+        num_ctx = await resolve_num_ctx(settings, store, dst_llm)
+    extra_chars = len(context_note or "") + len(recall_note or "")
+    sent_chars = dialogue_context.content_chars(list(history)) + extra_chars
+    if managed and dhistory is not None:
+        state = await store.dialogue_context_state(chat_key, dialogue_id)
+        estimated = dialogue_context.estimate_prompt_tokens(settings, sent_chars, state)
+        limit_tokens = dialogue_context.threshold_tokens(settings, num_ctx)
+        if limit_tokens <= compress_cfg.context_base_tokens:
+            # Окно неизвестно (ни одного замера, фоллбэк [llm].num_ctx на
+            # alfred — дефолт 8192) или слишком мало для самой базы промпта —
+            # порог так сработал бы на каждом ходе. Не «отлучаемся»; от
+            # реального переполнения страхует _rescue по done_reason.
+            log.debug(
+                "ai_flow: окно %d слишком мало для порога (база %d) — пропуск (chat=%s)",
+                num_ctx,
+                compress_cfg.context_base_tokens,
+                chat_id,
+            )
+        elif (
+            estimated > limit_tokens
+            and dhistory.compressible >= compress_cfg.context_min_compress_turns
+            and not dialogue_context.COMPRESSOR.is_running(chat_key, dialogue_id)
+        ):
+            step_away = True
+            dhistory.compress_after = True
+            sent_chars += len(dialogue_context.STEP_AWAY_INSTRUCTION)
+            log.info(
+                "ai_flow: окно треда chat=%s dialogue=%s ~%d ток. из %d (порог %d, замер %s) "
+                "— Альфред отлучится, после ответа сожмём %d ходов",
+                chat_id,
+                dialogue_id,
+                estimated,
+                num_ctx,
+                limit_tokens,
+                state.get("prompt_tokens") if state else "нет",
+                dhistory.compressible,
+            )
+
+    def _notes(extra: tuple[str, ...] = ()) -> list[str]:
+        """Служебные вставки перед текущим ходом, по порядку: дословный
+        возврат (это содержание разговора — дальше от хода), заметка,
+        инструкции этого хода (ближе всего к точке генерации)."""
+        notes = [n for n in (recall_note, context_note) if n]
+        return notes + [n for n in extra if n]
+
+    async def _save_stats(stats: ChatStats, chars: int) -> None:
+        if stats.num_ctx:
+            _seen_num_ctx[f"{dst_llm.node}/{dst_llm.service}"] = stats.num_ctx
+        if chat_key is None or stats.first_prompt_tokens is None:
+            return
+        try:
+            await store.save_dialogue_context_state(
+                chat_key,
+                dialogue_id,
+                prompt_tokens=stats.first_prompt_tokens,
+                sent_chars=chars,
+                num_ctx=stats.num_ctx,
+                done_reason=stats.done_reason,
+                at=datetime.now(tz=UTC),
+            )
+        except Exception:  # noqa: BLE001 — замер вспомогательный, ход важнее
+            log.exception("ai_flow: не удалось сохранить замер окна (chat=%s)", chat_id)
+
+    async def _ask_once(
+        hist: list[dict[str, Any]],
+        stats: ChatStats,
+        notes: list[str],
+        *,
+        allow_tools: bool = True,
+    ) -> str:
+        if notes:
             # Живая находка 2026-07-24: заметка вставлялась ПЕРЕД всей
             # историей — далеко от текущего хода, если тред уже длинный.
             # Модель на практике хуже использует информацию, если она не
             # рядом с тем сообщением, к которому относится (проверено
             # вживую: цитата в заметке была верной, но модель ответила не
-            # тем словом). history[-1] — всегда текущий ход пользователя
+            # тем словом). hist[-1] — всегда текущий ход пользователя
             # (см. вызовы request_alfred в bot/handlers/ai.py — history
             # собирается с ним последним).
             base_messages: list[dict[str, Any]] = [
-                *history[:-1],
-                wrap_context_note(context_note),
-                history[-1],
+                *hist[:-1],
+                *(wrap_context_note(note) for note in notes),
+                hist[-1],
             ]
         else:
-            base_messages = list(history)
-        # Мультимодальный /ai (2026-08-10): history[-1] несёт raw_image,
+            base_messages = list(hist)
+        # Мультимодальный /ai (2026-08-10): hist[-1] несёт raw_image,
         # только если этот ход — свежее фото (bot/handlers/ai.py::
         # _handle_photo_message). photo_key передаётся на оба прохода
         # (router + persona) одинаково — служба llm сама разберётся, где
         # он реально нужен (см. llm_chat.run_chat_loop про photo_key).
-        current_turn = history[-1] if history else None
+        current_turn = hist[-1] if hist else None
         photo_key = (
             photo_key_for(message)
             if isinstance(current_turn, dict) and "raw_image" in current_turn
@@ -1161,6 +1317,7 @@ async def request_alfred(
             # ответа, не видно, звала ли модель тул вообще и что тот
             # вернул (см. schema.sql::ai_tool_calls). Пишет только живой
             # /ai — у него есть Store, у службы tasks его нет вовсе.
+            executed_tools.append((name, call_args, result))
             await notify_tool_call(
                 book, notifier, name, args=call_args, result=result, debug=tool_calls
             )
@@ -1241,6 +1398,8 @@ async def request_alfred(
                 photo_key=photo_key,
                 speech_user_id=speech_user_id,
                 speech_clear=speech_clear,
+                stats=stats,
+                allow_tools=allow_tools,
             )
 
         # Вариативное рассуждение: сначала лёгкий router-проход (без персонажа,
@@ -1262,6 +1421,8 @@ async def request_alfred(
             on_tool_start=_announce_tool_start,
             role="router",
             photo_key=photo_key,
+            stats=stats,
+            allow_tools=allow_tools,
         )
         level = parse_router_level(route_decision)
         needs_think = level >= 1
@@ -1295,7 +1456,129 @@ async def request_alfred(
             photo_key=photo_key,
             speech_user_id=speech_user_id,
             speech_clear=speech_clear,
+            stats=stats,
+            allow_tools=allow_tools,
         )
+
+    async def _announce_step_away() -> None:
+        # Страховка Этапа 50: Альфред «отлучился», пока история сжимается
+        # и ответ пишется заново. Через rich-сессию, как «Агнольд» (см.
+        # _on_phase_change): реплика остаётся в чате, черновик с обрывком
+        # первой попытки ею же и вытесняется.
+        html_line, md_line = dialogue_context.pick_step_away_line()
+        if rich_session is not None:
+            await rich_session.finalize_status(md_line)
+        else:
+            await message.answer(html_line)
+
+    async def _rescue(first: ChatStats) -> str:
+        """Страховка Этапа 50: ответ испорчен переполнением окна. Синхронно
+        сжать, сказать реплику в образе, перегенерировать; не помогло —
+        отрезать самые старые ходы по бюджету. Пустая строка на выходе —
+        вызывающий покажет обычного «Альбегта» (bot/handlers/ai.py)."""
+        nonlocal recall_note
+        assert chat_key is not None
+        log.warning(
+            "ai_flow: окно переполнено (chat=%s dialogue=%s, промпт %d из %s, стоп %s) — "
+            "сжимаем синхронно и перегенерируем",
+            chat_id,
+            dialogue_id,
+            first.max_prompt_tokens,
+            first.num_ctx or num_ctx,
+            first.done_reason,
+        )
+        started = time.monotonic()
+        await dialogue_context.COMPRESSOR.compress_now(
+            node_link,
+            store,
+            settings,
+            chat_key,
+            dialogue_id,
+            dst_llm,
+            num_ctx=first.num_ctx or num_ctx,
+            keep_recent=max(2, compress_cfg.context_keep_recent_turns // 2),
+        )
+        if dhistory is not None:
+            # Сжали уже здесь — фоновое после ответа не нужно.
+            dhistory.compress_after = False
+        await _announce_step_away()
+        prefix = await dialogue_context.load_history(
+            store, settings, chat_key, dialogue_id,
+            before_message_id=message.message_id, wait=False,
+        )
+        retry_hist = dialogue_context.DialogueHistory(
+            [*prefix, history[-1]],
+            summary_upto=prefix.summary_upto,
+            verbatim_ids=prefix.verbatim_ids,
+            max_hidden_id=prefix.max_hidden_id,
+        )
+        recall_note, recalled = await dialogue_context.recall_verbatim(
+            store, settings, chat_key, dialogue_id,
+            await _current_turn_text(store, message), retry_hist,
+        )
+        tools_ran = list(executed_tools)
+        extra = (_tools_done_note(tools_ran),) if tools_ran else ()
+        notes = _notes(extra)
+        retry_stats = ChatStats()
+        raw = await _ask_once(retry_hist, retry_stats, notes, allow_tools=not tools_ran)
+        await _save_stats(
+            retry_stats,
+            dialogue_context.content_chars(list(retry_hist)) + sum(map(len, notes)),
+        )
+        overflowed = dialogue_context.looks_overflowed(raw, retry_stats, num_ctx)
+        log.info(
+            "ai_flow: перегенерация после сжатия — %.1f с, промпт %d → %d ток., "
+            "возвращено дословно %d, %s (chat=%s)",
+            time.monotonic() - started,
+            first.max_prompt_tokens,
+            retry_stats.max_prompt_tokens,
+            recalled,
+            "снова переполнено" if overflowed else "ок",
+            chat_id,
+        )
+        if not overflowed:
+            return raw
+        # Крайняя мера: самые старые ходы прочь, пока история не влезет в
+        # бюджет порога (база промпта — вне бюджета).
+        budget_chars = max(
+            4000,
+            int(
+                (dialogue_context.threshold_tokens(settings, num_ctx)
+                 - compress_cfg.context_base_tokens)
+                * compress_cfg.context_chars_per_token
+            ) - sum(map(len, notes)),
+        )
+        trimmed = dialogue_context.trim_to_budget(list(retry_hist), budget_chars)
+        log.warning(
+            "ai_flow: и после сжатия переполнено — режем историю %d → %d сообщ. (chat=%s)",
+            len(retry_hist),
+            len(trimmed),
+            chat_id,
+        )
+        last_stats = ChatStats()
+        raw = await _ask_once(trimmed, last_stats, notes, allow_tools=not tools_ran)
+        await _save_stats(last_stats, dialogue_context.content_chars(trimmed))
+        if dialogue_context.looks_overflowed(raw, last_stats, num_ctx):
+            return ""
+        return raw
+
+    async def _ask() -> str:
+        extra = (dialogue_context.STEP_AWAY_INSTRUCTION,) if step_away else ()
+        stats = ChatStats()
+        try:
+            raw = await _ask_once(history, stats, _notes(extra))
+        except ProtoError:
+            await _save_stats(stats, sent_chars)
+            # Пустой ответ после лимита раундов (llm_chat.run_chat_loop) —
+            # если причина в окне, это случай страховки, а не «Альбегта».
+            if not (managed and stats.truncated):
+                raise
+            raw = ""
+        else:
+            await _save_stats(stats, sent_chars)
+        if managed and dialogue_context.looks_overflowed(raw, stats, num_ctx):
+            return await _rescue(stats)
+        return raw
 
     async def _announce_steps() -> None:
         # Три точки вызова ниже — presence-проверка, молчаливый wake,

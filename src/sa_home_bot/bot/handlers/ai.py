@@ -35,7 +35,14 @@ from aiogram import Router
 from aiogram.filters import Command, Filter
 from aiogram.types import Message
 
-from sa_home_bot.bot import ai_flow, commands, voice_mode, voice_stt, voice_tts
+from sa_home_bot.bot import (
+    ai_flow,
+    commands,
+    dialogue_context,
+    voice_mode,
+    voice_stt,
+    voice_tts,
+)
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.interactives.engine import Interactives
 from sa_home_bot.bot.notifier import Notifier, chunk_text
@@ -154,6 +161,16 @@ def _rich_session_for(message: Message, config: Settings) -> RichStreamSession |
     return RichStreamSession(
         message.bot, message.chat.id, message_thread_id=message.message_thread_id
     )
+
+
+async def _load_history(
+    store: Store, config: Settings, chat_id: int, dialogue_id: int
+) -> dialogue_context.DialogueHistory:
+    """История треда для модели — Этап 50: одна сборка вместо семи копий
+    ``[{role, content} for r in ai_turns]`` по хендлерам. Краткое содержание
+    сжатого начала, укорачивание старых ответов, ожидание идущего сжатия —
+    bot/dialogue_context.py::load_history."""
+    return await dialogue_context.load_history(store, config, chat_id, dialogue_id)
 
 
 def _dialogue_id_for(message: Message) -> int:
@@ -281,10 +298,7 @@ async def cmd_ai(
         # контекст (в отличие от /alfred вне топика, который всегда начинает
         # диалог заново), а продолжает то, что там уже накопилось — как
         # обычное сообщение в этом же топике (см. on_private_message).
-        history_rows = await store.ai_turns_for_dialogue(message.chat.id, dialogue_id)
-        history = [
-            {"role": r["role"], "content": r["content"]} for r in history_rows if r["content"]
-        ]
+        history = await _load_history(store, config, message.chat.id, dialogue_id)
         if not prompt:
             history.append({"role": "user", "content": OPENING_PROMPT})
     elif prompt:
@@ -369,17 +383,11 @@ async def on_ai_reply(
             user_id=sender.id if sender else None,
             user_name=ai_flow.display_name(sender),
         )
-        history_rows = await store.ai_turns_for_dialogue(message.chat.id, ai_dialogue_id)
-        history = [
-            {"role": r["role"], "content": r["content"]} for r in history_rows if r["content"]
-        ]
+        history = await _load_history(store, config, message.chat.id, ai_dialogue_id)
     else:
         # Пустой ход не пишем в ai_turns (как OPENING_PROMPT) — модель видит
         # директиву только в этом запросе, история треда её не запоминает.
-        history_rows = await store.ai_turns_for_dialogue(message.chat.id, ai_dialogue_id)
-        history = [
-            {"role": r["role"], "content": r["content"]} for r in history_rows if r["content"]
-        ]
+        history = await _load_history(store, config, message.chat.id, ai_dialogue_id)
         history.append({"role": "user", "content": EMPTY_REPLY_PROMPT})
 
     await _ask_and_reply(
@@ -431,8 +439,7 @@ async def on_private_message(
         user_id=sender.id if sender else None,
         user_name=ai_flow.display_name(sender),
     )
-    history_rows = await store.ai_turns_for_dialogue(message.chat.id, dialogue_id)
-    history = [{"role": r["role"], "content": r["content"]} for r in history_rows if r["content"]]
+    history = await _load_history(store, config, message.chat.id, dialogue_id)
 
     await _ask_and_reply(
         message, node_link, store, config, book, notifier, dialogue_id, history,
@@ -691,10 +698,7 @@ async def _handle_photo_message(
         user_name=ai_flow.display_name(sender),
         photo_path=photo_key,
     )
-    history_rows = await store.ai_turns_for_dialogue(message.chat.id, dialogue_id)
-    history: list[dict[str, Any]] = [
-        {"role": r["role"], "content": r["content"]} for r in history_rows if r["content"]
-    ]
+    history = await _load_history(store, config, message.chat.id, dialogue_id)
     if history:
         history[-1] = {
             "role": "user",
@@ -755,10 +759,7 @@ async def _handle_sticker_message(
         user_name=ai_flow.display_name(sender),
         photo_path=photo_key,
     )
-    history_rows = await store.ai_turns_for_dialogue(message.chat.id, dialogue_id)
-    history: list[dict[str, Any]] = [
-        {"role": r["role"], "content": r["content"]} for r in history_rows if r["content"]
-    ]
+    history = await _load_history(store, config, message.chat.id, dialogue_id)
     if history:
         if thumb_b64:
             history[-1] = {
@@ -814,8 +815,7 @@ async def _handle_voice_message(
         user_id=sender.id if sender else None,
         user_name=ai_flow.display_name(sender),
     )
-    history_rows = await store.ai_turns_for_dialogue(message.chat.id, dialogue_id)
-    return [{"role": r["role"], "content": r["content"]} for r in history_rows if r["content"]]
+    return await _load_history(store, config, message.chat.id, dialogue_id)
 
 
 async def _ask_and_reply(
@@ -1043,6 +1043,20 @@ async def _do_ask_and_reply(
         if user_turn is not None:
             await ai_flow.piggyback_dialogue_episode(
                 node_link, message.chat.id, str(user_turn["content"]), raw
+            )
+        if getattr(history, "compress_after", False) and message.chat is not None:
+            # Этап 50: порог окна сработал на этом ходе — Альфред уже сказал в
+            # ответе, что ненадолго отлучится (ai_flow.request_alfred). Сжатие
+            # старых ходов — фоном, ПОСЛЕ доставки ответа: ответ его не ждёт,
+            # а следующий ход треда дождётся (dialogue_context.load_history).
+            dialogue_context.COMPRESSOR.schedule(
+                node_link,
+                store,
+                config,
+                message.chat.id,
+                dialogue_id,
+                ai_flow.llm_address(),
+                num_ctx=await ai_flow.resolve_num_ctx(config, store, ai_flow.llm_address()),
             )
         if speech_remark.text is not None:
             # Отдельным сообщением, БЕЗ html.escape (см. _format_answer) —

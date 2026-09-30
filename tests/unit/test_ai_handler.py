@@ -1694,3 +1694,45 @@ async def test_interactives_wrap_the_turn_in_order(store, monkeypatch):
         ("after", "Я говогю чисто"),
         ("forms", 1),
     ]
+
+
+async def test_history_is_shared_builder_and_compression_scheduled_after_reply(
+    store, monkeypatch
+):
+    """Этап 50: история собирается dialogue_context.load_history (одна
+    сборка на все пути), а если request_alfred отметил срабатывание порога —
+    фоновое сжатие треда запускается ПОСЛЕ доставки ответа."""
+    from sa_home_bot.bot import dialogue_context
+
+    await store.record_ai_turn(1, 500, 77, "user", "первый вопрос", _now())
+    await store.record_ai_turn(1, 501, 77, "assistant", "первый ответ", _now())
+    events: list[str] = []
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None, speech_remark=None, rich_session=None
+    ):
+        assert isinstance(history, dialogue_context.DialogueHistory)
+        history.compress_after = True
+        events.append("request")
+        return "Отвечаю, и позвольте отлучиться"
+
+    def fake_schedule(node_link, store_, config, chat_id, dialogue_id, dst, *, num_ctx):
+        # Ответ к этому моменту уже записан в ai_turns — значит доставлен.
+        events.append(f"schedule:{chat_id}:{dialogue_id}")
+        return True
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    monkeypatch.setattr(dialogue_context.COMPRESSOR, "schedule", fake_schedule)
+    message = FakeMessage(1, text="а дальше?", chat_type="private", message_thread_id=77)
+
+    await ai_handler.on_private_message(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
+    )
+
+    assert events == ["request", "schedule:1:77"]
+    rows = await store.ai_turns_for_dialogue(1, 77)
+    assert rows[-1]["content"] == "Отвечаю, и позвольте отлучиться"

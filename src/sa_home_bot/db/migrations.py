@@ -74,6 +74,7 @@ async def apply_migrations(db: Database) -> None:
     # DEFAULT 'chat' верно бэкфиллит всё нарисованное до того (см. schema.sql).
     await _add_column_if_missing(db, "images", "purpose", "TEXT NOT NULL DEFAULT 'chat'")
     await _add_column_if_missing(db, "images", "params", "TEXT")
+    await _backfill_ai_turns_fts(db)
     await db.conn.commit()
     log.info("Схема БД применена")
 
@@ -107,3 +108,21 @@ async def _migrate_guest_relationships_check(db: Database, schema: str) -> None:
     )
     await db.conn.execute("DROP TABLE guest_relationships_old_46")
     log.info("Миграция: guest_relationships — все связи переведены в знакомство")
+
+
+async def _backfill_ai_turns_fts(db: Database) -> None:
+    """Этап 50 (2026-09-30): ходы /ai, записанные до появления ai_turns_fts,
+    в индекс не попали (триггер в schema.sql ловит только новые записи) —
+    заливаем их один раз (с той же заменой «ё» → «е», что и триггер).
+    Признак «ещё не заливали» — пустой индекс при непустой ai_turns: после
+    заливки и дальше триггер держит их вровень."""
+    cur = await db.conn.execute("SELECT 1 FROM ai_turns_fts LIMIT 1")
+    if await cur.fetchone() is not None:
+        return
+    cur = await db.conn.execute(
+        "INSERT INTO ai_turns_fts(content, chat_id, dialogue_id, message_id) "
+        "SELECT replace(replace(content, 'ё', 'е'), 'Ё', 'Е'), chat_id, dialogue_id, "
+        "message_id FROM ai_turns"
+    )
+    if cur.rowcount:
+        log.info("Миграция: ai_turns_fts — проиндексировано ходов /ai: %d", cur.rowcount)

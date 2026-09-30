@@ -344,3 +344,54 @@ async def test_no_speech_user_means_no_speech_args():
         telegram_chat_id=1, log_chat_id=1,
     )
     assert "user_id" not in seen[0] and "speech_clear" not in seen[0]
+
+
+async def test_stats_collect_window_counters_across_rounds():
+    """Этап 50: счётчики окна службы llm копятся в ChatStats — промпт первого
+    раунда, максимальный, done_reason последнего и действующий num_ctx."""
+    link = FakeNodeLink(
+        chat_results=[
+            {"tool_calls": [_tool_call("known_tool")], "prompt_eval_count": 1200,
+             "eval_count": 30, "done_reason": "stop", "num_ctx": 32768},
+            {"response": "обрыв", "prompt_eval_count": 1500, "eval_count": 900,
+             "done_reason": "length", "num_ctx": 32768},
+        ]
+    )
+    stats = llm_chat.ChatStats()
+
+    result = await llm_chat.run_chat_loop(
+        link, DST, 5.0, [], _ctx(), reason="off", telegram_chat_id=None,
+        log_chat_id="test", stats=stats,
+    )
+
+    assert result == "обрыв"
+    assert stats.first_prompt_tokens == 1200
+    assert stats.max_prompt_tokens == 1500
+    assert stats.eval_tokens == 930
+    assert stats.truncated and stats.num_ctx == 32768 and stats.rounds == 2
+
+
+async def test_allow_tools_false_sends_no_declarations_and_runs_no_tools():
+    """Этап 50: перегенерация после переполнения — без тулов вовсе, даже
+    выдуманный моделью вызов не исполняется."""
+    sent_tools: list = []
+    ran: list = []
+
+    class Link(FakeNodeLink):
+        async def command(self, action, args=None, dst=None, timeout=None):
+            sent_tools.append(args["tools"])
+            return await super().command(action, args, dst, timeout)
+
+    async def on_call(name, args, result):
+        ran.append(name)
+
+    link = Link(
+        chat_results=[{"tool_calls": [_tool_call("known_tool")]}, {"response": "ответ"}]
+    )
+    result = await llm_chat.run_chat_loop(
+        link, DST, 5.0, [], _ctx(), reason="off", telegram_chat_id=None,
+        log_chat_id="test", on_tool_call=on_call, allow_tools=False,
+    )
+    assert result == "ответ"
+    assert sent_tools == [[], []]
+    assert ran == ["known_tool"]  # записан как «неизвестный», но хендлер не звался

@@ -738,6 +738,82 @@ class Store:
         row = await cur.fetchone()
         return row["dialogue_id"] if row else None
 
+    # --- сжатие истории /ai (Этап 50, bot/dialogue_context.py) ---
+
+    async def latest_dialogue_summary(self, chat_id: int, dialogue_id: int) -> dict | None:
+        """Действующее краткое содержание треда — версия с наибольшим
+        upto_message_id (см. schema.sql::ai_dialogue_summaries)."""
+        cur = await self.db.conn.execute(
+            "SELECT * FROM ai_dialogue_summaries WHERE chat_id=? AND dialogue_id=? "
+            "ORDER BY upto_message_id DESC, id DESC LIMIT 1",
+            (chat_id, dialogue_id),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def add_dialogue_summary(
+        self, chat_id: int, dialogue_id: int, upto_message_id: int, summary: str, at: datetime
+    ) -> int:
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                "INSERT INTO ai_dialogue_summaries(chat_id, dialogue_id, upto_message_id, "
+                "summary, created_at) VALUES(?, ?, ?, ?, ?)",
+                (chat_id, dialogue_id, upto_message_id, summary, _iso(at)),
+            )
+            return cur.lastrowid
+
+    async def dialogue_context_state(self, chat_id: int, dialogue_id: int) -> dict | None:
+        cur = await self.db.conn.execute(
+            "SELECT * FROM ai_dialogue_context WHERE chat_id=? AND dialogue_id=?",
+            (chat_id, dialogue_id),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def save_dialogue_context_state(
+        self,
+        chat_id: int,
+        dialogue_id: int,
+        *,
+        prompt_tokens: int,
+        sent_chars: int,
+        num_ctx: int | None,
+        done_reason: str | None,
+        at: datetime,
+    ) -> None:
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "INSERT INTO ai_dialogue_context(chat_id, dialogue_id, prompt_tokens, "
+                "sent_chars, num_ctx, done_reason, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(chat_id, dialogue_id) DO UPDATE SET "
+                "prompt_tokens=excluded.prompt_tokens, sent_chars=excluded.sent_chars, "
+                "num_ctx=excluded.num_ctx, done_reason=excluded.done_reason, "
+                "updated_at=excluded.updated_at",
+                (chat_id, dialogue_id, prompt_tokens, sent_chars, num_ctx, done_reason, _iso(at)),
+            )
+
+    async def latest_known_num_ctx(self) -> int | None:
+        """Окно службы llm из самого свежего замера любого треда."""
+        cur = await self.db.conn.execute(
+            "SELECT num_ctx FROM ai_dialogue_context WHERE num_ctx IS NOT NULL "
+            "ORDER BY updated_at DESC LIMIT 1"
+        )
+        row = await cur.fetchone()
+        return int(row["num_ctx"]) if row else None
+
+    async def search_dialogue_turns(
+        self, chat_id: int, dialogue_id: int, match: str, *, max_message_id: int, limit: int
+    ) -> list[dict]:
+        """Ходы треда с message_id <= max_message_id под FTS5-выражение
+        ``match`` (ai_turns_fts, trigram), лучшие по bm25 первыми."""
+        cur = await self.db.conn.execute(
+            "SELECT CAST(message_id AS INTEGER) AS message_id, bm25(ai_turns_fts) AS score "
+            "FROM ai_turns_fts WHERE ai_turns_fts MATCH ? AND chat_id=? AND dialogue_id=? "
+            "AND message_id<=? ORDER BY score LIMIT ?",
+            (match, chat_id, dialogue_id, max_message_id, limit),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
     # --- guest_relationships (Этап 42.6.1, связи между гостями) ---
 
     async def get_relationship(self, relationship_id: int) -> dict | None:
