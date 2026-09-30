@@ -658,6 +658,9 @@ class LlmConfig(BaseModel):
     imagegen_negative: str = "blurry, lowres, watermark, text, signature, deformed"
     imagegen_request_timeout_s: float = Field(default=180.0, gt=0)
     imagegen_model_dir: Path = Path("./data/imagegen-models")
+    # API-токен Civitai (civitai.com → Account → API Keys): часть LoRA для
+    # /draw lora= без него не скачивается (401). Пусто — только открытые.
+    imagegen_civitai_token: str = ""
     # Сторона бота (тулы generate_image/find_image): до какого размера
     # растягивать картинку при отправке (nearest-neighbor, целым множителем —
     # пиксели остаются чёткими) и сколько новых картинок в сутки на чат

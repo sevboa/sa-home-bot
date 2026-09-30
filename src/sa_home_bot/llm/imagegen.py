@@ -29,6 +29,7 @@ import logging
 import random
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from PIL import Image
@@ -56,7 +57,7 @@ _IP_WEIGHT = "ip-adapter_sd15_light.bin"
 class ModelSpec:
     """Модель для ``/draw model=``. ``kind``: ``sd15`` — SD1.5-чекпоинт,
     ускоряется общей LCM-LoRA и умеет IP-Adapter; ``sdxl-turbo`` — свой
-    дистиллят на 1-4 шага, без LoRA и без IP-Adapter. ``steps``/``guidance``
+    дистиллят на 1-4 шага, без LCM и без IP-Adapter. ``steps``/``guidance``
     — умолчания модели вместо конфиговых (None — из конфига)."""
 
     repo: str
@@ -75,7 +76,89 @@ MODELS: dict[str, ModelSpec] = {
     "epic": ModelSpec("emilianJR/epiCRealism", None, "sd15"),
     # Turbo обучен без CFG: guidance ≤1 — CFG выключен, негатив не работает.
     "turbo": ModelSpec("stabilityai/sdxl-turbo", "fp16", "sdxl-turbo", steps=2, guidance=1.0),
+    # Мрачные SD1.5-чекпоинты (рекомендация владельца 2026-09-30). Зеркала
+    # на HF: с Civitai эти файлы без API-токена не отдаются (401).
+    "revanim": ModelSpec("Yntec/RevAnimatedV2Rebirth", "fp16", "sd15"),
+    "ghostmix": ModelSpec("digiplay/GhostMix", "fp16", "sd15"),
 }
+
+
+@dataclass(frozen=True)
+class LoraSpec:
+    """Стилевая LoRA с Civitai (``version`` — id версии файла). ``kind`` —
+    к каким моделям подходит: ``sd15`` или ``sdxl`` (SDXL-LoRA идут и на
+    SDXL-Turbo). ``trigger`` — слово, на которое её обучали: дописывается в
+    начало промпта, кроме raw."""
+
+    version: int
+    kind: str
+    trigger: str = ""
+
+
+# Этап 49: древние постройки, боди-хоррор, сплав органики с предметами и
+# зданиями. «World Morph» — перекраивает в свой материал весь кадр.
+LORAS: dict[str, LoraSpec] = {
+    "giger": LoraSpec(24810, "sd15", "hnsrdlf style"),
+    "gigerworld": LoraSpec(343533, "sd15", "gigerworld"),
+    "flesh": LoraSpec(246428, "sd15", "fleshmutant"),
+    "rottech": LoraSpec(308286, "sd15", "rottentech"),
+    "eldritch": LoraSpec(95774, "sd15", "eldritchtech"),
+    "ruins": LoraSpec(68719, "sd15"),
+    "gigerxl": LoraSpec(195028, "sdxl", "gigercraft"),
+    "fleshxl": LoraSpec(246708, "sdxl", "fleshmutant"),
+    "bonesxl": LoraSpec(676798, "sdxl", "boneswm"),
+    "wormsxl": LoraSpec(670786, "sdxl", "made of worms"),
+    "castlesxl": LoraSpec(1281424, "sdxl"),
+    "lovecraftxl": LoraSpec(205756, "sdxl", "hp_lovecraft_style"),
+    "biomechxl": LoraSpec(1613047, "sdxl"),
+}
+DEFAULT_LORA_WEIGHT = 0.8
+_CIVITAI_URL = "https://civitai.com/api/download/models/{version}"
+
+
+class ImagegenError(RuntimeError):
+    """Понятная владельцу причина, почему не нарисовалось (текст — как есть)."""
+
+
+def lora_fits(lora: LoraSpec, model: ModelSpec) -> bool:
+    return lora.kind == ("sd15" if model.kind == "sd15" else "sdxl")
+
+
+def _civitai_file(version: int, cfg: LlmConfig) -> Path:
+    """Скачать файл версии Civitai в кэш моделей (один раз). Синхронно —
+    зовётся из потоков загрузки/генерации."""
+    import shutil
+    import urllib.error
+    import urllib.request
+
+    folder = cfg.imagegen_model_dir / "civitai"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{version}.safetensors"
+    if path.exists():
+        return path
+    part = path.with_suffix(".part")
+    started = time.monotonic()
+    log.info("imagegen: скачиваю Civitai %d...", version)
+    headers = {"User-Agent": "sa-home-bot"}
+    if cfg.imagegen_civitai_token:
+        headers["Authorization"] = f"Bearer {cfg.imagegen_civitai_token}"
+    request = urllib.request.Request(_CIVITAI_URL.format(version=version), headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response, part.open("wb") as out:
+            shutil.copyfileobj(response, out, 1 << 20)
+    except urllib.error.HTTPError as exc:
+        part.unlink(missing_ok=True)
+        if exc.code in (401, 403):
+            raise ImagegenError(
+                f"Civitai не отдаёт файл {version} без входа — нужен imagegen_civitai_token"
+            ) from None
+        raise
+    part.rename(path)
+    log.info(
+        "imagegen: Civitai %d — %.0f МБ за %.0fс",
+        version, path.stat().st_size / 2**20, time.monotonic() - started,
+    )
+    return path
 # Сколько НЕ-эталонных моделей держать в RAM сразу (эталон — всегда).
 # SD1.5 в fp32 ~4 ГБ, SDXL ~10 ГБ; на mycraft 62 ГБ, gemma живёт в VRAM.
 _MAX_EXTRA_MODELS = 2
@@ -94,6 +177,7 @@ class _Loaded:
         self.spec = spec
         self.img2img: Any = None
         self.ip_loaded = False
+        self.loras: set[str] = set()
 
 
 # Пайплайны резидентны в RAM с первого запроса до конца жизни процесса —
@@ -148,6 +232,9 @@ def _load_pipeline_sync(spec: ModelSpec, cfg: LlmConfig) -> Any:
         pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
         pipe.load_lora_weights(cfg.imagegen_lcm_lora, cache_dir=str(cfg.imagegen_model_dir))
         pipe.fuse_lora()
+        # LCM остаётся вшитым в веса, а слой адаптера снимаем — иначе
+        # стилевые LoRA через set_adapters «распаивали» бы LCM обратно.
+        pipe.unload_lora_weights()
     pipe.set_progress_bar_config(disable=True)
     log.info("imagegen: %s загружен за %.1fс", spec.repo, time.monotonic() - started)
     return pipe
@@ -221,6 +308,20 @@ def _generate_sync(
     loaded: _Loaded, prompt: str, negative: str, cfg: LlmConfig, job: dict
 ) -> Image.Image:
     pipe = loaded.pipe
+    loras = job.get("loras") or []
+    for name, _ in loras:
+        if name not in loaded.loras:
+            started = time.monotonic()
+            pipe.load_lora_weights(
+                str(_civitai_file(LORAS[name].version, cfg)), adapter_name=name
+            )
+            loaded.loras.add(name)
+            log.info("imagegen: LoRA %s загружена за %.1fс", name, time.monotonic() - started)
+    if loras:
+        pipe.enable_lora()
+        pipe.set_adapters([name for name, _ in loras], [weight for _, weight in loras])
+    elif loaded.loras:
+        pipe.disable_lora()
     ip_scale = job.get("ip_scale")
     ref = job.get("ref")
     wants_ip = ref is not None and ip_scale is not None
@@ -278,12 +379,13 @@ async def generate_image(
     size: int | None = None,
     colors: int | None = None,
     model: str | None = None,
+    loras: list[tuple[str, float]] | None = None,
 ) -> dict[str, Any]:
     """Сгенерировать картинку. Результат: ``png`` (байты), ``width``,
     ``height``, ``seconds`` (время самой генерации, без ожидания лока),
     ``prompt`` (суть, как она ушла в модель — после подгонки под CLIP),
     ``full_prompt``/``full_negative`` (с шаблоном стиля), ``tokens``,
-    ``seed``, ``steps``, ``colors``, ``model``.
+    ``seed``, ``steps``, ``colors``, ``model``, ``loras``.
 
     Без ключевых аргументов — эталон C (Этап 48). ``ref`` + ``ip_scale`` —
     сцена с образцом (IP-Adapter), ``ref`` без ``ip_scale`` — вариант
@@ -291,10 +393,22 @@ async def generate_image(
     шаблона, ``fit=False`` — промпт не подрезается под 77 токенов CLIP.
     ``size``/``colors`` — итоговый размер и палитра вместо конфиговых
     (рисуется всё равно 512², это только уменьшение после). ``model`` —
-    короткое имя из ``MODELS`` вместо модели из конфига."""
+    короткое имя из ``MODELS`` вместо модели из конфига. ``loras`` —
+    [(имя из ``LORAS``, вес)]; их триггеры дописываются в начало промпта,
+    кроме ``fit=False`` (raw — ровно то, что написано)."""
     model, spec = resolve_model(model, cfg)
     if spec.kind != "sd15" and ref is not None and ip_scale is not None:
         raise ValueError(f"у {model} нет IP-Adapter — сцена с образцом только на SD1.5-моделях")
+    loras = list(loras or [])
+    for name, _ in loras:
+        if name not in LORAS:
+            raise ValueError(f"неизвестная LoRA {name!r}")
+        if not lora_fits(LORAS[name], spec):
+            raise ValueError(f"LoRA {name} ({LORAS[name].kind}) не подходит к {model}")
+    if fit:
+        triggers = [LORAS[name].trigger for name, _ in loras if LORAS[name].trigger]
+        if triggers:
+            prompt = ", ".join([*triggers, prompt])
     loaded = await _get_pipeline(spec, cfg)
     pipe = loaded.pipe
 
@@ -323,7 +437,7 @@ async def generate_image(
 
     job = {
         "generator": torch.Generator().manual_seed(seed),
-        "ref": ref, "strength": strength, "ip_scale": ip_scale, "steps": steps,
+        "ref": ref, "strength": strength, "ip_scale": ip_scale, "steps": steps, "loras": loras,
         "guidance": guidance or spec.guidance or cfg.imagegen_guidance,
     }
     async with _generate_lock:
@@ -341,4 +455,5 @@ async def generate_image(
         "png": png, "width": width, "height": height, "seconds": seconds, "prompt": subject,
         "full_prompt": prompt, "full_negative": negative, "tokens": count_tokens(prompt),
         "seed": seed, "steps": steps, "colors": colors, "model": model,
+        "loras": [f"{name}:{weight:g}" for name, weight in loras],
     }

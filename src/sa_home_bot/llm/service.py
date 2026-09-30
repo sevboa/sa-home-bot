@@ -254,6 +254,27 @@ def _imagegen_options(args: dict[str, Any]) -> dict[str, Any]:
         raise ProtoError(
             ERR_BAD_REQUEST, f"у {model} нет IP-Adapter — сцена с образцом только на SD1.5"
         )
+    spec = imagegen.MODELS.get(model) if model is not None else None
+    loras: list[tuple[str, float]] = []
+    for item in args.get("loras") or []:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            raise ProtoError(ERR_BAD_REQUEST, "loras — список пар [имя, вес]")
+        name, weight = item
+        if name not in imagegen.LORAS:
+            raise ProtoError(
+                ERR_BAD_REQUEST, f"неизвестная LoRA {name!r}, есть: {', '.join(imagegen.LORAS)}"
+            )
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not 0 < weight <= 2:
+            raise ProtoError(ERR_BAD_REQUEST, f"вес LoRA {name} — число 0..2")
+        # Без model= рисует эталон из конфига — это SD1.5.
+        lora = imagegen.LORAS[name]
+        fits = imagegen.lora_fits(lora, spec) if spec is not None else lora.kind == "sd15"
+        if not fits:
+            raise ProtoError(
+                ERR_BAD_REQUEST,
+                f"LoRA {name} — для {lora.kind}, а модель {model or 'эталон'}",
+            )
+        loras.append((name, float(weight)))
     if mode == "variant" and ref is None:
         raise ProtoError(ERR_BAD_REQUEST, "для variant нужен образец")
     if ref is not None and mode not in ("variant", "scene"):
@@ -271,6 +292,7 @@ def _imagegen_options(args: dict[str, Any]) -> dict[str, Any]:
         "size": _num(args, "size", int, 16, 512),
         "colors": _num(args, "colors", int, 0, 256),
         "model": model,
+        "loras": loras,
         "ref": ref,
     }
 
@@ -1025,7 +1047,11 @@ class LlmService:
                     size=options["size"],
                     colors=options["colors"],
                     model=options["model"],
+                    loras=options["loras"],
                 )
+            except imagegen.ImagegenError as exc:
+                log.warning("imagegen: %s", exc)
+                raise ProtoError(ERR_INTERNAL, str(exc)) from None
             except Exception:
                 log.warning("imagegen: не удалось сгенерировать картинку", exc_info=True)
                 raise ProtoError(ERR_INTERNAL, "не удалось нарисовать картинку") from None
@@ -1043,6 +1069,7 @@ class LlmService:
                 "steps": result.get("steps"),
                 "colors": result.get("colors"),
                 "model": result.get("model"),
+                "loras": result.get("loras"),
             }
         if action == ACTION_TTS_DOWNLOAD_CHUNK:
             session_id = args.get("session_id")

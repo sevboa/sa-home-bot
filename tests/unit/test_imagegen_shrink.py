@@ -141,3 +141,49 @@ def test_bot_knows_the_same_models():
     from sa_home_bot.bot import draw_debug
 
     assert set(draw_debug.MODELS) == set(MODELS)
+
+
+def test_every_lora_fits_some_model():
+    from sa_home_bot.llm.imagegen import LORAS, lora_fits
+
+    for name, lora in LORAS.items():
+        assert any(lora_fits(lora, spec) for spec in MODELS.values()), name
+
+
+async def test_generate_image_prepends_lora_triggers_except_raw(monkeypatch):
+    from sa_home_bot.llm import imagegen
+
+    class _Tok:
+        def __call__(self, text):
+            class _R:
+                input_ids = [0] * (len(text.split()) + 2)
+
+            return _R()
+
+    class _Pipe:
+        tokenizer = _Tok()
+
+    jobs = []
+
+    async def fake_get(spec, cfg):
+        return imagegen._Loaded(_Pipe(), spec)
+
+    def fake_sync(loaded, prompt, negative, cfg, job):
+        jobs.append((prompt, job["loras"]))
+        return Image.new("RGB", (512, 512))
+
+    class _Gen:
+        def manual_seed(self, seed):
+            return self
+
+    monkeypatch.setitem(sys.modules, "torch", type(sys)("torch"))
+    sys.modules["torch"].Generator = _Gen
+    monkeypatch.setattr(imagegen, "_get_pipeline", fake_get)
+    monkeypatch.setattr(imagegen, "_generate_sync", fake_sync)
+    cfg = LlmConfig()
+    await imagegen.generate_image("radio", "", cfg, style=False, loras=[("giger", 0.8)])
+    await imagegen.generate_image("radio", "", cfg, style=False, fit=False, loras=[("giger", 0.8)])
+    assert jobs[0] == ("hnsrdlf style, radio", [("giger", 0.8)])
+    assert jobs[1][0] == "radio"
+    with pytest.raises(ValueError):
+        await imagegen.generate_image("radio", "", cfg, model="turbo", loras=[("giger", 0.8)])

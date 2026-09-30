@@ -20,7 +20,7 @@ from typing import Any
 
 MODES = ("free", "item", "variant", "scene")
 # Короткие имена llm/imagegen.MODELS (бот llm-модули не импортирует).
-MODELS = ("dream", "rv", "epic", "turbo")
+MODELS = ("dream", "rv", "epic", "turbo", "revanim", "ghostmix")
 
 CALLBACK_PREFIX = "draw"
 CLEAN_YES = "clean"
@@ -48,13 +48,31 @@ HELP = """\
 
 <b>Модели</b> — <code>model=имя</code>, без ключа — эталон
 • <code>dream</code> — DreamShaper 8 (эталон): иллюстрации, окружение
-• <code>rv</code> — Realistic Vision 5.1: фотореализм, предметная съёмка
-• <code>epic</code> — epiCRealism: фотореализм
-• <code>turbo</code> — SDXL-Turbo: другое поколение, 2 шага, без CFG (neg: не работает),
-  без IP-Adapter
-dream/rv/epic — SD1.5 + ускоритель LCM-LoRA (6 шагов, cfg 1–2, выше — каша).
-Первая загрузка модели — скачивание, потом ~10–30 с; в памяти держится эталон и
-две последние.
+• <code>turbo</code> — SDXL-Turbo: лучший по предметам, 2 шага ~12 с, без CFG
+  (neg: не работает), без IP-Adapter
+• <code>revanim</code> — ReV Animated: дарк-фэнтези, глубокие тени
+• <code>ghostmix</code> — GhostMix: мрачное, сюрреалистичное
+• <code>rv</code>, <code>epic</code> — фотореализм (Realistic Vision, epiCRealism)
+Все, кроме turbo, — SD1.5 + ускоритель LCM (6 шагов, cfg 1–2, выше — каша).
+Первый вызов модели — скачивание (минуты), потом ~10–30 с загрузки; в памяти
+держится эталон и две последние.
+
+<b>LoRA</b> — дообучение поверх модели: <code>lora=giger</code>, <code>lora=giger:0.6,flesh</code>
+(вес 0–2, по умолч. 0.8). Слово-триггер дописывается в начало промпта сам, при raw —
+пиши его сам (в скобках).
+SD1.5 (dream, revanim, ghostmix, rv, epic):
+• <code>giger</code> (hnsrdlf style), <code>gigerworld</code>🔒 (gigerworld) — биомеханика Гигера
+• <code>flesh</code> (fleshmutant) — плоть, мутанты, сплав с железом
+• <code>rottech</code> (rottentech) — гниющая техника, весь кадр
+• <code>eldritch</code> (eldritchtech) — космическая жуть, весь кадр
+• <code>ruins</code> — руины и свет
+SDXL (turbo):
+• <code>gigerxl</code> (gigercraft), <code>biomechxl</code>🔒 — биомеханика
+• <code>fleshxl</code> (fleshmutant) — плоть
+• <code>bonesxl</code>🔒 (boneswm), <code>wormsxl</code> (made of worms) — всё из костей / червей
+• <code>castlesxl</code> — замки Dark Souls
+• <code>lovecraftxl</code> (hp_lovecraft_style) — Лавкрафт
+🔒 — Civitai отдаёт только с токеном (imagegen_civitai_token в конфиге mycraft)
 
 <b>Образец</b> — приложи картинку и напиши команду в подписи к ней (любую, можно свою),
 или ответь командой на картинку, или <code>ref=ID</code>.
@@ -62,7 +80,7 @@ dream/rv/epic — SD1.5 + ускоритель LCM-LoRA (6 шагов, cfg 1–2
 <b>Ключи</b> — сразу после режима:
 <code>raw</code> — описание в генератор как есть: без промптера, подрезки, стиля и негативов сверху
 <code>nostyle</code> — без стилевого шаблона (промптер остаётся)
-<code>model=rv</code> — модель (см. выше)
+<code>model=turbo</code> <code>lora=giger</code> — модель и LoRA (см. выше)
 <code>seed=N</code> — повтор (без него случайный, будет в подписи)
 <code>s=0.55</code> — сила изменений variant (рабочие 0.5–0.65)
 <code>ip=0.4</code> — сила образца в scene (рабочие 0.3–0.5)
@@ -76,7 +94,8 @@ dream/rv/epic — SD1.5 + ускоритель LCM-LoRA (6 шагов, cfg 1–2
 <b>Примеры</b>
 <code>/draw item старый проклятый радиопередатчик с антенной</code>
 <code>/draw item raw seed=42 old radio transmitter, single object, white background</code>
-<code>/draw item raw model=rv seed=42 vintage radio, product photo, white background</code>
+<code>/draw item model=turbo lora=fleshxl старый радиоприёмник, обросший плотью</code>
+<code>/draw scene model=revanim lora=ruins древний храм в джунглях</code>
 картинка с подписью: <code>/draw variant s=0.6 треснула лампа, светится зелёным</code>
 <code>/draw scene ref=12 Альфред держит передатчик | чердак, дверь забита досками</code>
 
@@ -100,6 +119,7 @@ _NUMERIC_KEYS: dict[str, tuple[str, type, float, float]] = {
     "colors": ("colors", int, 0, 256),
 }
 _FLAGS = ("raw", "nostyle")
+_DEFAULT_LORA_WEIGHT = 0.8  # = llm/imagegen.DEFAULT_LORA_WEIGHT
 
 
 # «neg:» без «|» перед ним — тоже негатив: иначе он прилипал к описанию
@@ -121,6 +141,7 @@ class DrawRequest:
     style: bool = True
     ref_id: int | None = None
     numbers: dict[str, Any] = field(default_factory=dict)
+    loras: list[tuple[str, float]] = field(default_factory=list)
 
     def service_args(self) -> dict[str, Any]:
         """Аргументы generate_image службы llm (без образца — его кладёт
@@ -135,6 +156,8 @@ class DrawRequest:
         if not self.style:
             args["style"] = False
         args.update(self.numbers)
+        if self.loras:
+            args["loras"] = [[name, weight] for name, weight in self.loras]
         return args
 
     def params(self) -> dict[str, Any]:
@@ -152,6 +175,20 @@ class DrawCommand:
 
     name: str
     image_id: int | None = None
+
+
+def _parse_lora(part: str) -> tuple[str, float]:
+    """«giger» или «giger:0.6». Имена проверяет служба — список там."""
+    name, _, weight = part.partition(":")
+    if not weight:
+        return name, _DEFAULT_LORA_WEIGHT
+    try:
+        value = float(weight)
+    except ValueError:
+        raise DrawSyntaxError(f"вес LoRA {name} — число, а не «{weight}»") from None
+    if not 0 < value <= 2:
+        raise DrawSyntaxError(f"вес LoRA {name} вне 0…2")
+    return name, value
 
 
 def _parse_number(key: str, value: str) -> tuple[str, Any]:
@@ -197,6 +234,10 @@ def parse(args: str | None) -> DrawRequest | DrawCommand:
                 request.raw = True
             else:
                 request.style = False
+        elif low.startswith("lora="):
+            for part in low.split("=", 1)[1].split(","):
+                if part:
+                    request.loras.append(_parse_lora(part))
         elif low.startswith("model="):
             if "model" in request.numbers:
                 break
@@ -271,6 +312,8 @@ def caption(
     flags = [name for name, on in (("raw", request.raw), ("nostyle", nostyle)) if on]
     if ref_label:
         flags.append(f"образец {ref_label}")
+    if result.get("loras"):
+        flags.append("lora " + ", ".join(result["loras"]))
     if flags:
         lines.append(", ".join(flags))
     tokens = result.get("tokens")

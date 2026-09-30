@@ -142,6 +142,7 @@ async def test_generate_image_returns_png_b64(monkeypatch):
         "steps": None,
         "colors": None,
         "model": None,
+        "loras": None,
     }
     assert seen == {"prompt": "a cat", "negative": "text"}
 
@@ -364,3 +365,41 @@ async def test_generate_image_passes_model(monkeypatch):
     assert seen["model"] is None  # чат — модель из конфига
     with pytest.raises(ProtoError):
         await svc.run_command("generate_image", {"description": "radio", "model": "sdxl"})
+
+
+async def test_generate_image_validates_loras(monkeypatch):
+    seen = {}
+
+    async def fake_generate(prompt, negative, cfg, **kwargs):
+        seen.update(kwargs)
+        return {"png": b"x", "width": 64, "height": 64, "seconds": 1.0, "loras": ["giger:0.8"]}
+
+    monkeypatch.setattr(llm_service.imagegen, "generate_image", fake_generate)
+    svc = _svc(imagegen_enabled=True, imagegen_prompt_agent=False)
+    result = await svc.run_command(
+        "generate_image", {"description": "radio", "loras": [["giger", 0.8]]}
+    )
+    assert seen["loras"] == [("giger", 0.8)] and result["loras"] == ["giger:0.8"]
+    await svc.run_command(
+        "generate_image", {"description": "radio", "model": "turbo", "loras": [["fleshxl", 1]]}
+    )
+    assert seen["loras"] == [("fleshxl", 1.0)]
+    for bad in (
+        {"loras": [["nope", 0.8]]},
+        {"loras": [["giger", 5]]},
+        {"loras": [["fleshxl", 0.8]]},  # SDXL-LoRA на эталоне SD1.5
+        {"model": "turbo", "loras": [["giger", 0.8]]},
+        {"loras": ["giger"]},
+    ):
+        with pytest.raises(ProtoError):
+            await svc.run_command("generate_image", {"description": "radio", **bad})
+
+
+async def test_generate_image_passes_imagegen_error_text(monkeypatch):
+    async def fake_generate(prompt, negative, cfg, **kwargs):
+        raise llm_service.imagegen.ImagegenError("нужен imagegen_civitai_token")
+
+    monkeypatch.setattr(llm_service.imagegen, "generate_image", fake_generate)
+    svc = _svc(imagegen_enabled=True, imagegen_prompt_agent=False)
+    with pytest.raises(ProtoError, match="civitai_token"):
+        await svc.run_command("generate_image", {"description": "radio"})

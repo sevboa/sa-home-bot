@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import html
+import re
+
 import pytest
 
 from sa_home_bot.bot import draw_debug
@@ -140,4 +143,30 @@ def test_caption_shows_model():
 
 
 def test_help_fits_one_message():
-    assert len(draw_debug.HELP) < 4096
+    # Лимит Telegram считается по тексту после разбора HTML.
+    visible = html.unescape(re.sub(r"<[^>]+>", "", draw_debug.HELP))
+    assert len(visible) < 4096
+
+
+def test_help_lists_every_model_and_lora():
+    from sa_home_bot.llm import imagegen
+
+    for name in (*imagegen.MODELS, *imagegen.LORAS):
+        assert f"<code>{name}</code>" in draw_debug.HELP, name
+
+
+def test_lora_key():
+    req = draw_debug.parse("item model=turbo lora=fleshxl,gigerxl:0.5 lora=bonesxl:1.2 радио")
+    assert req.description == "радио"
+    assert req.service_args()["loras"] == [["fleshxl", 0.8], ["gigerxl", 0.5], ["bonesxl", 1.2]]
+    assert req.params()["loras"] == req.service_args()["loras"]
+    with pytest.raises(DrawSyntaxError):
+        draw_debug.parse("item lora=giger:много радио")
+    with pytest.raises(DrawSyntaxError):
+        draw_debug.parse("item lora=giger:3 радио")
+
+
+def test_caption_shows_loras():
+    req = draw_debug.parse("item lora=giger радио")
+    result = {"seed": 1, "steps": 6, "seconds": 30, "loras": ["giger:0.8"]}
+    assert "lora giger:0.8" in draw_debug.caption(1, req, result, None)
