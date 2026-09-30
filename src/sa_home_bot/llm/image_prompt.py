@@ -74,7 +74,9 @@ MODE_HINTS = {
     ),
     "scene": (
         "This is what Alfred (an elderly butler in a black tailcoat) sees and "
-        "photographs right now. Main thing first, 8-15 words, the place in 2-3 words."
+        "photographs right now. Main thing first, 8-15 words, the place in 2-3 words. "
+        "He is indoors: never write castle, tower, palace or fortress — they draw "
+        "a building from outside; say room, study, hall instead."
     ),
 }
 

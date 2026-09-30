@@ -43,7 +43,9 @@ CANON_RU = (
     "книжные полки, высокое стрельчатое окно."
 )
 # Для снимка: коротко, самое узнаваемое первым — промпт ограничен 77 токенами.
-CANON_EN = "old butler study in a transylvanian castle, wooden desk, stone fireplace, bookshelves"
+# Без «castle»: промптер переносил его в промпт, и GhostMix+eldritch рисовал
+# замок снаружи вместо стола (живая находка 2026-10-01, A/B 3 из 3).
+CANON_EN = "old butler study room, gothic stone walls, wooden desk, stone fireplace, bookshelves"
 
 # Чего не снять фотоаппаратом: запахи и звуки. Такие особенности Ведущему
 # запрещены промптом, а уже записанные (и прорвавшиеся) не идут в кадр и в
