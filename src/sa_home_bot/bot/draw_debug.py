@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 MODES = ("free", "item", "variant", "scene")
+# Короткие имена llm/imagegen.MODELS (бот llm-модули не импортирует).
+MODELS = ("dream", "rv", "epic", "turbo")
 
 CALLBACK_PREFIX = "draw"
 CLEAN_YES = "clean"
@@ -29,11 +31,30 @@ HELP = """\
 
 <code>/draw режим [ключи] описание [| контекст сцены] [| neg: …]</code>
 
-<b>Режимы</b>
-• <code>free</code> — как «нарисуй» в чате (эталон)
-• <code>item</code> — один предмет на белом фоне
-• <code>variant</code> — тот же предмет по образцу, с изменениями
-• <code>scene</code> — что видит Альфред; с образцом — предмет в сцене
+<b>Как рисуется</b>
+Описание (рус.) → промптер gemma пишет англ. SD-промпт → сверху стилевой шаблон
+и негатив из конфига → модель рисует 512×512 → уменьшение до px и палитра colors.
+Модель читает не больше 75 токенов, начало весит больше конца.
+
+<b>Режимы</b> — разница в подсказке промптеру и в том, что делается с образцом
+• <code>free</code> — как «нарисуй» в чате (эталон): без подсказки, текст → картинка
+• <code>item</code> — подсказка «один предмет, по центру, белый фон»; текст → картинка
+• <code>variant</code> — нужен образец. img2img: образец зашумляется на долю s и
+  дорисовывается — композиция и цвета остаются, детали меняются
+• <code>scene</code> — подсказка «что видит Альфред, главное — первым». С образцом —
+  IP-Adapter: картинка с нуля, образец подмешан как вторая подсказка силой ip
+  (похоже по смыслу, но не копия)
+При raw подсказок нет — free и item рисуют одинаково.
+
+<b>Модели</b> — <code>model=имя</code>, без ключа — эталон
+• <code>dream</code> — DreamShaper 8 (эталон): иллюстрации, окружение
+• <code>rv</code> — Realistic Vision 5.1: фотореализм, предметная съёмка
+• <code>epic</code> — epiCRealism: фотореализм
+• <code>turbo</code> — SDXL-Turbo: другое поколение, 2 шага, без CFG (neg: не работает),
+  без IP-Adapter
+dream/rv/epic — SD1.5 + ускоритель LCM-LoRA (6 шагов, cfg 1–2, выше — каша).
+Первая загрузка модели — скачивание, потом ~10–30 с; в памяти держится эталон и
+две последние.
 
 <b>Образец</b> — приложи картинку и напиши команду в подписи к ней (любую, можно свою),
 или ответь командой на картинку, или <code>ref=ID</code>.
@@ -41,10 +62,11 @@ HELP = """\
 <b>Ключи</b> — сразу после режима:
 <code>raw</code> — описание в генератор как есть: без промптера, подрезки, стиля и негативов сверху
 <code>nostyle</code> — без стилевого шаблона (промптер остаётся)
+<code>model=rv</code> — модель (см. выше)
 <code>seed=N</code> — повтор (без него случайный, будет в подписи)
 <code>s=0.55</code> — сила изменений variant (рабочие 0.5–0.65)
 <code>ip=0.4</code> — сила образца в scene (рабочие 0.3–0.5)
-<code>steps=6</code> <code>cfg=1.5</code> — шаги и guidance
+<code>steps=6</code> <code>cfg=1.5</code> — шаги и guidance (cfg 1 — выключен, негатив не действует)
 <code>px=128</code> — итоговый размер (16–512, эталон 64; рисуется всё равно 512)
 <code>colors=0</code> — цветов палитры (0 — без палитры, эталон 32)
 
@@ -54,6 +76,7 @@ HELP = """\
 <b>Примеры</b>
 <code>/draw item старый проклятый радиопередатчик с антенной</code>
 <code>/draw item raw seed=42 old radio transmitter, single object, white background</code>
+<code>/draw item raw model=rv seed=42 vintage radio, product photo, white background</code>
 картинка с подписью: <code>/draw variant s=0.6 треснула лампа, светится зелёным</code>
 <code>/draw scene ref=12 Альфред держит передатчик | чердак, дверь забита досками</code>
 
@@ -174,6 +197,13 @@ def parse(args: str | None) -> DrawRequest | DrawCommand:
                 request.raw = True
             else:
                 request.style = False
+        elif low.startswith("model="):
+            if "model" in request.numbers:
+                break
+            name = low.split("=", 1)[1]
+            if name not in MODELS:
+                raise DrawSyntaxError(f"неизвестная модель «{name}», есть: {', '.join(MODELS)}")
+            request.numbers["model"] = name
         elif "=" in low and low.split("=", 1)[0] in _NUMERIC_KEYS:
             key, value = token.split("=", 1)
             name, number = _parse_number(key.lower(), value)
@@ -200,6 +230,8 @@ def parse(args: str | None) -> DrawRequest | DrawCommand:
             request.context = f"{request.context}; {segment}" if request.context else segment
     if request.mode == "variant" and "ip_scale" in request.numbers:
         raise DrawSyntaxError("ip= только для scene; у variant сила — s=")
+    if request.numbers.get("model") == "turbo" and request.mode == "scene" and request.ref_id:
+        raise DrawSyntaxError("у turbo нет IP-Adapter — сцена с образцом только на dream/rv/epic")
     if request.mode == "scene" and "strength" in request.numbers:
         raise DrawSyntaxError("s= только для variant; у scene сила образца — ip=")
     return request
@@ -217,7 +249,10 @@ def caption(
     image_id: int, request: DrawRequest, result: dict[str, Any], ref_label: str | None
 ) -> str:
     """Подпись к отладочной картинке (HTML, ≤1024 символов)."""
-    head = [f"#{image_id}", request.mode, f"seed {result.get('seed', '?')}"]
+    head = [f"#{image_id}", request.mode]
+    if result.get("model"):
+        head.append(str(result["model"]))
+    head.append(f"seed {result.get('seed', '?')}")
     if ref_label and request.mode == "variant":
         head.append(f"s {request.numbers.get('strength', 'по умолч.')}")
     if ref_label and request.mode == "scene":
@@ -232,7 +267,8 @@ def caption(
         timing += f" (+промптер {result['prompt_seconds']} с)"
     head.append(timing)
     lines = [" · ".join(str(part) for part in head)]
-    flags = [name for name, on in (("raw", request.raw), ("nostyle", not request.style and not request.raw)) if on]
+    nostyle = not request.style and not request.raw
+    flags = [name for name, on in (("raw", request.raw), ("nostyle", nostyle)) if on]
     if ref_label:
         flags.append(f"образец {ref_label}")
     if flags:

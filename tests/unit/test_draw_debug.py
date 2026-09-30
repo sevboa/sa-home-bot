@@ -90,7 +90,7 @@ def test_caption_fits_and_escapes():
 
 def test_help_mentions_every_mode_and_key():
     for word in (*draw_debug.MODES, "raw", "nostyle", "seed=", "s=", "ip=", "ref=", "keep",
-                 "clean", "neg:", "px=", "colors="):
+                 "clean", "neg:", "px=", "colors=", "model=", *draw_debug.MODELS):
         assert word in draw_debug.HELP
 
 
@@ -121,3 +121,23 @@ def test_caption_shows_output_size():
     assert "128×128, 32 цв." in draw_debug.caption(1, req, result, None)
     result["colors"] = 0
     assert "128×128 ·" in draw_debug.caption(1, req, result, None)
+
+
+def test_model_key():
+    req = draw_debug.parse("item raw model=RV радио")
+    assert req.description == "радио"
+    assert req.service_args()["model"] == "rv" and req.params()["model"] == "rv"
+    with pytest.raises(DrawSyntaxError):
+        draw_debug.parse("item model=sdxl радио")
+    with pytest.raises(DrawSyntaxError):
+        draw_debug.parse("scene model=turbo ref=3 радио на столе")
+
+
+def test_caption_shows_model():
+    req = draw_debug.parse("item model=rv радио")
+    result = {"seed": 1, "steps": 6, "seconds": 30, "model": "rv"}
+    assert "#1 · item · rv · seed 1" in draw_debug.caption(1, req, result, None)
+
+
+def test_help_fits_one_message():
+    assert len(draw_debug.HELP) < 4096

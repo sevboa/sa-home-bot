@@ -12,7 +12,8 @@ import pytest
 from PIL import Image
 
 from sa_home_bot.bot.image_tools import upscale_png
-from sa_home_bot.llm.imagegen import shrink_to_png
+from sa_home_bot.config import LlmConfig
+from sa_home_bot.llm.imagegen import MODELS, resolve_model, shrink_to_png
 
 
 def _gradient(width: int = 512, height: int = 512) -> Image.Image:
@@ -98,7 +99,6 @@ def test_upscale_keeps_palette_mode():
 
 # --- apply_style: сборка промпта по шаблону из конфига ---
 
-from sa_home_bot.config import LlmConfig  # noqa: E402
 from sa_home_bot.llm.imagegen import apply_style  # noqa: E402
 
 
@@ -125,3 +125,19 @@ def test_style_template_without_placeholder_appends_prompt():
 def test_style_negative_alone_when_no_base_negative():
     cfg = LlmConfig(imagegen_style_negative="photo")
     assert apply_style("a cat", "", cfg)[1] == "photo"
+
+
+def test_resolve_model_default_is_config_model():
+    cfg = LlmConfig(imagegen_model="Lykon/dreamshaper-8", imagegen_variant="fp16")
+    name, spec = resolve_model(None, cfg)
+    assert name == "dream" and spec.repo == cfg.imagegen_model and spec.kind == "sd15"
+    name, spec = resolve_model("turbo", cfg)
+    assert spec is MODELS["turbo"] and spec.kind == "sdxl-turbo"
+    with pytest.raises(ValueError):
+        resolve_model("sdxl", cfg)
+
+
+def test_bot_knows_the_same_models():
+    from sa_home_bot.bot import draw_debug
+
+    assert set(draw_debug.MODELS) == set(MODELS)

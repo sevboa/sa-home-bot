@@ -141,6 +141,7 @@ async def test_generate_image_returns_png_b64(monkeypatch):
         "seed": None,
         "steps": None,
         "colors": None,
+        "model": None,
     }
     assert seen == {"prompt": "a cat", "negative": "text"}
 
@@ -191,7 +192,8 @@ def test_generate_sync_passes_guidance_from_config():
     cfg = LlmConfig(model="qwen2.5:7b", imagegen_guidance=1.5, imagegen_steps=6)
     # generate_image собирает job из конфига (steps/guidance по умолчанию).
     job = {"ref": None, "steps": cfg.imagegen_steps, "guidance": cfg.imagegen_guidance}
-    assert imagegen._generate_sync(_Pipe(), "a cat", "", cfg, job) == "img"
+    loaded = imagegen._Loaded(_Pipe(), imagegen.MODELS["dream"])
+    assert imagegen._generate_sync(loaded, "a cat", "", cfg, job) == "img"
     assert seen["guidance_scale"] == 1.5
     assert seen["num_inference_steps"] == 6
     assert seen["negative_prompt"] is None
@@ -345,3 +347,20 @@ async def test_generate_image_bad_mode_and_ref_rules(monkeypatch):
         with pytest.raises(ProtoError) as excinfo:
             await svc.run_command("generate_image", args)
         assert excinfo.value.code == ERR_BAD_REQUEST, args
+
+
+async def test_generate_image_passes_model(monkeypatch):
+    seen = {}
+
+    async def fake_generate(prompt, negative, cfg, **kwargs):
+        seen.update(kwargs)
+        return {"png": b"x", "width": 64, "height": 64, "seconds": 1.0, "model": "rv"}
+
+    monkeypatch.setattr(llm_service.imagegen, "generate_image", fake_generate)
+    svc = _svc(imagegen_enabled=True, imagegen_prompt_agent=False)
+    result = await svc.run_command("generate_image", {"description": "radio", "model": "rv"})
+    assert seen["model"] == "rv" and result["model"] == "rv"
+    await svc.run_command("generate_image", {"description": "radio"})
+    assert seen["model"] is None  # чат — модель из конфига
+    with pytest.raises(ProtoError):
+        await svc.run_command("generate_image", {"description": "radio", "model": "sdxl"})

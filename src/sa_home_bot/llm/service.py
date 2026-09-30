@@ -242,6 +242,18 @@ def _imagegen_options(args: dict[str, Any]) -> dict[str, Any]:
     ip_scale = _num(args, "ip_scale", float, 0.0, 1.5)
     if ref is not None and mode == "scene" and ip_scale is None:
         ip_scale = imagegen.DEFAULT_IP_SCALE
+    model = args.get("model")
+    if model is not None and model not in imagegen.MODELS:
+        raise ProtoError(
+            ERR_BAD_REQUEST, f"неизвестная модель {model!r}, есть: {', '.join(imagegen.MODELS)}"
+        )
+    if (
+        model is not None and imagegen.MODELS[model].kind != "sd15"
+        and ref is not None and mode == "scene"
+    ):
+        raise ProtoError(
+            ERR_BAD_REQUEST, f"у {model} нет IP-Adapter — сцена с образцом только на SD1.5"
+        )
     if mode == "variant" and ref is None:
         raise ProtoError(ERR_BAD_REQUEST, "для variant нужен образец")
     if ref is not None and mode not in ("variant", "scene"):
@@ -258,6 +270,7 @@ def _imagegen_options(args: dict[str, Any]) -> dict[str, Any]:
         "guidance": _num(args, "guidance", float, 1.0, 10.0),
         "size": _num(args, "size", int, 16, 512),
         "colors": _num(args, "colors", int, 0, 256),
+        "model": model,
         "ref": ref,
     }
 
@@ -1011,6 +1024,7 @@ class LlmService:
                     fit=not options["raw"],
                     size=options["size"],
                     colors=options["colors"],
+                    model=options["model"],
                 )
             except Exception:
                 log.warning("imagegen: не удалось сгенерировать картинку", exc_info=True)
@@ -1028,6 +1042,7 @@ class LlmService:
                 "seed": result.get("seed"),
                 "steps": result.get("steps"),
                 "colors": result.get("colors"),
+                "model": result.get("model"),
             }
         if action == ACTION_TTS_DOWNLOAD_CHUNK:
             session_id = args.get("session_id")
