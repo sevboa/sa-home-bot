@@ -34,6 +34,16 @@ DIRECTIVE_MAX_CHARS = 600
 CABINET_ADD_MAX = 3
 PHOTO_FOCUS_MAX = 200
 
+# Настроение кадра — Ведущий выбирает, код переводит в модель и LoRA
+# (engine.MOOD_PRESETS). Русские слова — как их видит Ведущий.
+MOOD_PLAIN = "plain"
+MOODS = {
+    "обычно": MOOD_PLAIN,
+    "жуть": "horror",
+    "гниль": "rot",
+    "потустороннее": "eldritch",
+}
+
 # Особенности кабинета вне сцены (первый снимок до всякой сцены) — отдельный
 # маленький вызов той же роли. Нестрогий промпт: вариантов не перечисляем,
 # у каждого гостя кабинет свой (решение пользователя 2026-09-30).
@@ -57,6 +67,8 @@ class DirectorDecision:
     cabinet_add: tuple[str, ...] = ()
     # Кадр гостю в ключевой момент: что снять крупно; "" — общий вид; None — не надо.
     photo: str | None = None
+    # Настроение кадров сцены (MOODS); None — Ведущий не сказал, остаётся прежнее.
+    mood: str | None = None
 
 
 def _clean(value: Any, limit: int) -> str | None:
@@ -96,6 +108,15 @@ def _photo(value: Any) -> str | None:
     return _clean(value, PHOTO_FOCUS_MAX)
 
 
+def _mood(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip().casefold()
+    if text in MOODS.values():
+        return text
+    return MOODS.get(text)
+
+
 def parse_decision(raw: str, current_stage: int) -> DirectorDecision | None:
     """JSON Ведущего → решение."""
     data = _json_object(raw)
@@ -114,6 +135,7 @@ def parse_decision(raw: str, current_stage: int) -> DirectorDecision | None:
         note=_clean(data.get("note"), 300),
         cabinet_add=_str_list(data.get("cabinet_add"), CABINET_ADD_MAX),
         photo=_photo(data.get("photo")),
+        mood=_mood(data.get("mood")),
     )
 
 
@@ -177,6 +199,10 @@ def build_director_input(
             '("" — общий вид кабинета). Только в ключевой момент сцены: впервые '
             "видимая странность, заметная перемена в кабинете, переход на новую "
             "стадию, финал. Обычно null."
+            ',\n "mood": str — настроение кадров сейчас, одно из: «обычно», «жуть» '
+            "(кошмар, плоть сливается с техникой), «гниль» (плесень, тлен, "
+            "ржавчина), «потустороннее» (нездешнее, щупальца, иной мир). Держи "
+            "«обычно», пока в кабинете не творится действительно жуткое."
         )
         if place
         else ""

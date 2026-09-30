@@ -16,6 +16,8 @@ from sa_home_bot.bot.interactives import cabinet, engine, radio, transylvania
 from sa_home_bot.bot.interactives.base import Run
 from sa_home_bot.bot.interactives.director import (
     FEATURES_SYSTEM,
+    MOOD_PLAIN,
+    MOODS,
     build_director_input,
     parse_decision,
 )
@@ -259,8 +261,10 @@ def test_overview_puts_features_first():
     cab = cabinet.Cabinet(user_id=1, features=[f"f{i}" for i in range(6)])
     outside = Outside(phase="night", weather=None, local_time="00:00")
     description, context = photo_description(cab, outside, "", None)
-    assert description.startswith("Clearly visible: f2; f3; f4; f5.")
-    assert "f1" not in description and context == ""
+    assert description.startswith("Must be clearly visible: f4; f5.")
+    assert "f3" not in description and context == ""
+    description, _ = photo_description(cab, outside, "", "лампа вспыхнула")
+    assert description.startswith("Main subject, just happened: лампа вспыхнула")
 
 
 def test_smells_and_sounds_stay_out_of_cabinet_and_frame():
@@ -281,6 +285,29 @@ def test_director_parses_photo():
     run = Run("radio", 1, 1)
     text = build_director_input(radio.RADIO, run, finale_allowed=False, place="К", outside="ночь")
     assert '"photo"' in text and "запахи" in text
+
+
+def test_director_parses_mood():
+    assert parse_decision(json.dumps({"mood": "Жуть"}), 0).mood == "horror"
+    assert parse_decision(json.dumps({"mood": "rot"}), 0).mood == "rot"
+    assert parse_decision(json.dumps({"mood": "весело"}), 0).mood is None
+    assert set(engine.MOOD_PRESETS) == set(MOODS.values()) - {MOOD_PLAIN}
+
+
+async def test_mood_picks_model_and_lora_for_scene_frames(store):
+    link = FakeLink()
+    svc, _ = _make(store, link)
+    await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
+    await svc._state.save_run(Run("radio", GUEST, GUEST, status="active"))
+    await _scene_turn(svc, link, {"stage": 0, "mood": "гниль", "photo": "стол"})
+    gen = link.generated()[-1]
+    assert gen["model"] == "revanim" and gen["loras"] == [["rottech", 0.8]]
+    # Настроение держится, пока Ведущий его не сменит — и в снимках Альфреда.
+    await svc.tool_take_photo(GUEST, GUEST, {"focus": "камин"})
+    await _drain(svc)
+    assert link.generated()[-1]["model"] == "revanim"
+    await _scene_turn(svc, link, {"stage": 1, "mood": "обычно"})
+    assert "model" not in link.generated()[-1]
 
 
 async def _scene_turn(svc, link, reply: dict) -> None:

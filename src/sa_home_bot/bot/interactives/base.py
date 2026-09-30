@@ -98,6 +98,8 @@ class Run:
     notes: list[str] = field(default_factory=list)
     # Ход (turns_total), на котором ушёл последний кадр Ведущего.
     photo_turn: int | None = None
+    # Настроение кадров сцены от Ведущего (director.MOODS); None — обычное.
+    mood: str | None = None
     # Журнал сцены: «Гость: …», «Альфред: …», «Событие: …». В личке каждое
     # сообщение без реплая — новый тред /ai (bot/handlers/ai.py::
     # _dialogue_id_for), и история треда сцену не держит — держит журнал.

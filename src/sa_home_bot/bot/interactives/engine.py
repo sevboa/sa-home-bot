@@ -119,12 +119,21 @@ EXIT_ALERT = "Хорошо."
 # Суточный потолок на чат; 0 — без лимита (снят по просьбе пользователя 2026-09-30).
 PHOTO_DAILY_LIMIT = 0
 PHOTO_PURPOSE = "photo"
-PHOTO_FEATURES_IN_FRAME = 4
+# Больше двух особенностей промптер под 77 токенов CLIP не удерживает:
+# живые снимки 2026-09-30 из четырёх сохранили по две.
+PHOTO_FEATURES_IN_FRAME = 2
 PHOTO_CAPTION = "Кабинет"
 # Кадры по ходу сцены (Ведущий, поле photo): переход стадии и финал снимаются
 # всегда, прочие — не чаще раза в PHOTO_SCENE_GAP_TURNS ходов.
 PHOTO_SCENE_GAP_TURNS = 3
 PHOTO_SCENE_CAPTION = "В кабинете"
+# Настроение кадра (Ведущий, director.MOODS) → модель и LoRA службы рисования.
+# Связки и вес — стенд тем 2026-09-30, одобрен пользователем; «обычно» — эталон C.
+MOOD_PRESETS: dict[str, tuple[str, str, float]] = {
+    "horror": ("dream", "giger", 0.8),
+    "rot": ("revanim", "rottech", 0.8),
+    "eldritch": ("ghostmix", "eldritch", 0.8),
+}
 
 OPT_IN_TEXT = "Интерактивы в этом чате включены."
 OPT_OUT_TEXT = "Интерактивы в этом чате выключены. Включить — /interactives on."
@@ -200,6 +209,8 @@ def apply_decision(
         if decision.note:
             run.notes.append(decision.note)
             del run.notes[:-NOTES_KEEP]
+        if decision.mood:
+            run.mood = decision.mood
     if run.finale:
         run.last_effect = effect or run.last_effect
         return effect
@@ -446,6 +457,7 @@ class Interactives:
                 focus=focus,
                 caption=PHOTO_SCENE_CAPTION,
                 happening=run.last_effect,
+                mood=run.mood,
                 outside=await self._transylvania.outside(self._now()),
                 message_thread_id=message_thread_id,
                 trigger_message_id=None,
@@ -595,7 +607,9 @@ class Interactives:
         outside = await self._transylvania.outside(now)
         cab = await cabinet_mod.load(self._store, user_id)
         run = await self._state.load_run(chat_id, radio.SCENARIO_ID)
-        happening = run.last_effect if run is not None and run.status == STATUS_ACTIVE else None
+        in_scene = run is not None and run.status == STATUS_ACTIVE
+        happening = run.last_effect if in_scene else None
+        mood = run.mood if in_scene else None
         reuse_key = cab.state_key(outside.key) if cab.features else None
         if not focus and not happening and reuse_key in cab.photos:
             image = await self._store.image_by_id(cab.photos[reuse_key])
@@ -618,6 +632,7 @@ class Interactives:
             focus=focus,
             caption=caption,
             happening=happening,
+            mood=mood,
             outside=outside,
             message_thread_id=message_thread_id,
             trigger_message_id=trigger_message_id,
@@ -641,6 +656,7 @@ class Interactives:
         focus: str,
         caption: str,
         happening: str | None,
+        mood: str | None = None,
         outside: Outside,
         message_thread_id: int | None,
         trigger_message_id: int | None,
@@ -658,6 +674,7 @@ class Interactives:
                 focus=focus,
                 caption=caption,
                 happening=happening,
+                mood=mood,
                 outside=outside,
                 message_thread_id=message_thread_id,
                 trigger_message_id=trigger_message_id,
@@ -675,6 +692,7 @@ class Interactives:
         focus: str,
         caption: str,
         happening: str | None,
+        mood: str | None = None,
         outside: Outside,
         message_thread_id: int | None,
         trigger_message_id: int | None,
@@ -686,6 +704,7 @@ class Interactives:
                 focus=focus,
                 caption=caption,
                 happening=happening,
+                mood=mood,
                 outside=outside,
                 message_thread_id=message_thread_id,
                 trigger_message_id=trigger_message_id,
@@ -703,6 +722,7 @@ class Interactives:
         focus: str,
         caption: str,
         happening: str | None,
+        mood: str | None = None,
         outside: Outside,
         message_thread_id: int | None,
         trigger_message_id: int | None,
@@ -726,15 +746,21 @@ class Interactives:
             if cab.add(list(new)):
                 await cabinet_mod.save(self._store, cab)
         description, context = photo_description(cab, outside, focus, happening)
+        request: dict[str, Any] = {
+            "description": description,
+            "mode": "scene" if focus else "free",
+            "context": context,
+            "chat_id": chat_id,
+        }
+        preset = MOOD_PRESETS.get(mood or "")
+        if preset is not None:
+            model, lora, weight = preset
+            request["model"] = model
+            request["loras"] = [[lora, weight]]
         try:
             result = await node_link.command(
                 image_tools.ACTION_GENERATE_IMAGE,
-                {
-                    "description": description,
-                    "mode": "scene" if focus else "free",
-                    "context": context,
-                    "chat_id": chat_id,
-                },
+                request,
                 dst=dst,
                 timeout=cfg.imagegen_request_timeout_s,
             )
@@ -761,6 +787,7 @@ class Interactives:
                     "user_id": user_id,
                     "state": state,
                     "focus": focus,
+                    "mood": mood,
                     "seed": result.get("seed"),
                 },
                 ensure_ascii=False,
@@ -957,7 +984,8 @@ def photo_description(
 ) -> tuple[str, str]:
     """Описание снимка для художника-промптера (llm/image_prompt.py) и
     контекст сцены. Общий вид — особенности гостя первыми (самые свежие:
-    промпт ограничен 77 токенами), потом канон и свет; крупный план —
+    промпт ограничен 77 токенами; случившееся в сцене — ещё раньше), потом
+    канон и свет; крупный план —
     предмет, а кабинет со светом — контекстом."""
     features = cab.visible_features()[-PHOTO_FEATURES_IN_FRAME:]
     light = outside.en()
@@ -966,13 +994,15 @@ def photo_description(
         if happening:
             context += f"; just happened: {happening}"
         return focus, context
+    # Порядок — по важности: промптер ставит первое главным, а хвост
+    # срезается под 77 токенов CLIP.
     parts = []
+    if happening:
+        parts.append(f"Main subject, just happened: {happening}")
     if features:
-        parts.append("Clearly visible: " + "; ".join(features) + ".")
+        parts.append("Must be clearly visible: " + "; ".join(features) + ".")
     parts.append(f"Room: {cabinet_mod.CANON_EN}.")
     parts.append(f"Light: {light}.")
-    if happening:
-        parts.append(f"Just happened: {happening}")
     return " ".join(parts), ""
 
 
