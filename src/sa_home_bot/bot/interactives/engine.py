@@ -125,6 +125,8 @@ PHOTO_PURPOSE = "photo"
 # живые снимки 2026-09-30 из четырёх сохранили по две.
 PHOTO_FEATURES_IN_FRAME = 2
 PHOTO_CAPTION = "Кабинет"
+# Подпись про весь кабинет — общий вид, а не крупный план (tool_take_photo).
+GENERAL_VIEW_RE = re.compile(r"^((мой|наш|твой)\s+)?(кабинет\w*|общий вид.*|комнат\w*)$", re.I)
 # Кадры по ходу сцены (Ведущий, поле photo): переход стадии и финал снимаются
 # всегда, прочие — не чаще раза в PHOTO_SCENE_GAP_TURNS ходов.
 PHOTO_SCENE_GAP_TURNS = 3
@@ -610,8 +612,15 @@ class Interactives:
         focus = args.get("focus") if isinstance(args.get("focus"), str) else ""
         focus = " ".join(focus.split())
         caption = args.get("caption") if isinstance(args.get("caption"), str) else ""
-        caption = caption.strip()[:80] or PHOTO_CAPTION
-        expect = photo_expect(args.get("expect"))
+        caption = " ".join(caption.split())[:80]
+        # Модель не всегда заполняет focus/expect: «Вид из окна» только в
+        # подписи давал общий вид кабинета, а меч без expect — несверенную
+        # тарелку. Подпись о конкретном — это и есть focus, focus — то, что
+        # должно выйти на снимке.
+        if not focus and caption and not GENERAL_VIEW_RE.match(caption):
+            focus = caption
+        caption = caption or PHOTO_CAPTION
+        expect = photo_expect(args.get("expect")) or ([focus] if focus else [])
         now = self._now()
         outside = await self._transylvania.outside(now)
         cab = await cabinet_mod.load(self._store, user_id)

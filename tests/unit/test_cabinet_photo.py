@@ -253,6 +253,26 @@ async def test_focus_photo_is_always_new_and_uses_scene_mode(store):
     assert "сова" not in gen["context"] and "fireplace" in gen["context"]
 
 
+async def test_caption_names_the_subject_when_focus_is_empty(store):
+    link = FakeLink()
+    svc, _ = _make(store, link)
+    await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
+    # Подпись о конкретном — крупный план, и он же сверяется на снимке.
+    await svc.tool_take_photo(GUEST, GUEST, {"caption": "Вид из окна"})
+    await _drain(svc)
+    # Focus без expect — сверяем focus.
+    await svc.tool_take_photo(GUEST, GUEST, {"focus": "меч на стене"})
+    await _drain(svc)
+    # «Мой кабинет» — общий вид, как и раньше.
+    await svc.tool_take_photo(GUEST, GUEST, {"caption": "Мой кабинет"})
+    await _drain(svc)
+    window, sword, room = link.generated()
+    assert window["mode"] == "scene" and window["description"] == "Вид из окна"
+    assert window["expect"] == ["Вид из окна"]
+    assert sword["expect"] == ["меч на стене"]
+    assert room["mode"] != "scene" and room["expect"] == []
+
+
 async def test_one_photo_at_a_time_and_daily_limit(store, monkeypatch):
     link = FakeLink()
     svc, _ = _make(store, link)
@@ -428,7 +448,7 @@ async def test_missing_subject_makes_alfred_offer_a_retake(store):
     await svc.tool_take_photo(GUEST, GUEST, args, dialogue_id=55)
     await _drain(svc)
     assert len(notifier.photos) == 1  # снимок всё равно у гостя
-    (directive, where), = spoken
+    ((directive, where),) = spoken
     assert "собака у камина" in directive and "переснять" in directive
     assert where["dialogue_id"] == 55 and where["trigger_message_id"] == 101
     # Промах не становится общим видом кабинета.
