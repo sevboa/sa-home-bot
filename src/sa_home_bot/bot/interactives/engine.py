@@ -156,6 +156,7 @@ ITEM_CALLBACK_PREFIX = "it"
 # swap_radio, тогда надпись на старой карточке устарела бы.
 ITEM_BTN_PUT = "p"
 ITEM_BTN_REMOVE = "r"
+ITEM_BTN_CARD = "c"  # кнопка описи: принести карточку вещи
 ITEM_PURPOSE = "item"
 ACTION_ITEM_PORTRAIT = "item_portrait"
 ITEMS_SHOWN_MAX = 3
@@ -227,6 +228,36 @@ def item_keyboard(item_id: int, installed: bool) -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+def inventory_keyboard(items: list[dict[str, Any]]) -> InlineKeyboardMarkup | None:
+    """Опись: по кнопке на вещь — принести её карточку."""
+    rows = []
+    for item in items:
+        kind = items_mod.KINDS.get(item["type"])
+        if kind is not None:
+            data = f"{ITEM_CALLBACK_PREFIX}:{item['id']}:{ITEM_BTN_CARD}"
+            rows.append([InlineKeyboardButton(text=f"{kind.icon} {kind.name}", callback_data=data)])
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+
+def inventory_text(entries: list[tuple[items_mod.ItemKind, dict[str, Any], str]]) -> str:
+    """Опись вещей гостя: (вид, вещь, место) → текст в голосе Альфреда."""
+    if not entries:
+        return items_mod.INVENTORY_EMPTY
+    blocks = [items_mod.INVENTORY_TITLE]
+    for kind, item, place in entries:
+        line = items_mod.INVENTORY_LINE.format(
+            icon=kind.icon,
+            name=html.escape(kind.name),
+            where=items_mod.PLACE_RU.get(place, place),
+        )
+        traits = kind.traits_ru(item.get("traits") or [])
+        if traits:
+            line += "\n" + items_mod.INVENTORY_TRAITS.format(traits=html.escape("; ".join(traits)))
+        blocks.append(line)
+    blocks.append(items_mod.INVENTORY_HINT)
+    return "\n\n".join(blocks)
 
 
 def parse_item_callback(data: str | None) -> tuple[int, str] | None:
@@ -727,6 +758,7 @@ class Interactives:
             await self.tool_show_items(
                 chat_id,
                 user_id,
+                which=items_mod.RADIO.type,
                 message_thread_id=message_thread_id,
                 trigger_message_id=trigger_message_id,
             )
@@ -1532,40 +1564,101 @@ class Interactives:
         chat_id: int | None,
         user_id: int | None,
         *,
+        which: str = "",
         message_thread_id: int | None = None,
         trigger_message_id: int | None = None,
     ) -> str:
-        """Тул show_items: карточки предметов собеседника. Портрета ещё нет
-        (выдано задним числом) — рисуется в фоне, карточка придёт сама."""
+        """Тул show_items: ``which`` — какую вещь принести карточкой; пусто
+        или не нашлась — опись всех вещей с кнопками (Этап 49.3.5)."""
         if chat_id is None or user_id is None:
             return radio.TOOL_ITEMS_UNAVAILABLE
-        item = await self._owned_item(user_id, items_mod.RADIO)
-        owned = await self._store.items_of(user_id) if item is not None else []
+        await self._owned_item(user_id, items_mod.RADIO)  # ленивая выдача
+        owned = await self._store.items_of(user_id)
         if not owned:
             return radio.TOOL_ITEMS_NONE
+        kind = items_mod.find_kind(which)
+        chosen = [it for it in owned if kind is not None and it["type"] == kind.type]
+        if not chosen:
+            await self.send_inventory(
+                chat_id,
+                user_id,
+                message_thread_id=message_thread_id,
+                reply_to_message_id=trigger_message_id,
+            )
+            return radio.TOOL_ITEMS_LIST
         names, drawing = [], []
-        for it in owned[:ITEMS_SHOWN_MAX]:
-            kind = items_mod.KINDS.get(it["type"])
-            if kind is None:
-                continue
-            if it["image_id"]:
-                await self._send_item_card(
-                    chat_id,
-                    user_id,
-                    it,
-                    message_thread_id=message_thread_id,
-                    reply_to_message_id=trigger_message_id,
-                )
-                names.append(kind.name)
+        for it in chosen[:ITEMS_SHOWN_MAX]:
+            name = items_mod.KINDS[it["type"]].name
+            if await self._show_card(
+                chat_id, user_id, it, message_thread_id, reply_to_message_id=trigger_message_id
+            ):
+                names.append(name)
             else:
-                drawing.append(kind.name)
-                self._spawn(
-                    self._draw_and_send_card(chat_id, user_id, it, kind, message_thread_id),
-                    "карточка предмета",
-                )
+                drawing.append(name)
         if drawing and not names:
             return radio.TOOL_ITEMS_DRAWING.format(items=", ".join(drawing))
         return radio.TOOL_ITEMS_SENT.format(items=", ".join(names + drawing))
+
+    async def item_place(self, user_id: int, item: dict[str, Any]) -> str:
+        """Где вещь. У радио правда — речь Альфреда: старый передатчик стоит,
+        пока картавость не снята (speech_clear), иначе он в чулане."""
+        if item["type"] == items_mod.RADIO_TYPE and not await self.speech_clear(user_id):
+            return items_mod.PLACE_DESK
+        return items_mod.PLACE_STOREROOM
+
+    async def inventory(self, user_id: int) -> tuple[str, InlineKeyboardMarkup | None]:
+        """Опись вещей гостя (/items): текст и кнопки «принести карточку»."""
+        await self._owned_item(user_id, items_mod.RADIO)  # ленивая выдача
+        owned = [it for it in await self._store.items_of(user_id) if it["type"] in items_mod.KINDS]
+        entries = [
+            (items_mod.KINDS[it["type"]], it, await self.item_place(user_id, it)) for it in owned
+        ]
+        return inventory_text(entries), inventory_keyboard(owned)
+
+    async def send_inventory(
+        self,
+        chat_id: int,
+        user_id: int,
+        *,
+        message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> bool:
+        text, markup = await self.inventory(user_id)
+        sent = await self._notifier.send_direct(
+            chat_id,
+            text,
+            reply_to_message_id=reply_to_message_id,
+            reply_markup=markup,
+            message_thread_id=message_thread_id,
+        )
+        return sent is not None
+
+    async def _show_card(
+        self,
+        chat_id: int,
+        user_id: int,
+        item: dict[str, Any],
+        message_thread_id: int | None,
+        *,
+        reply_to_message_id: int | None = None,
+    ) -> bool:
+        """Карточка вещи; портрета ещё нет — рисуется в фоне, карточка придёт
+        сама (False)."""
+        kind = items_mod.KINDS[item["type"]]
+        if item["image_id"]:
+            await self._send_item_card(
+                chat_id,
+                user_id,
+                item,
+                message_thread_id=message_thread_id,
+                reply_to_message_id=reply_to_message_id,
+            )
+            return True
+        self._spawn(
+            self._draw_and_send_card(chat_id, user_id, item, kind, message_thread_id),
+            "карточка предмета",
+        )
+        return False
 
     async def _draw_and_send_card(
         self,
@@ -1594,6 +1687,9 @@ class Interactives:
         if item is None or int(item["owner_user_id"]) != user_id:
             return radio.ITEM_NOT_YOURS, None, None
         kind = items_mod.KINDS.get(item["type"])
+        if button == ITEM_BTN_CARD and kind is not None:
+            shown = await self._show_card(chat_id, user_id, item, message_thread_id)
+            return (radio.ITEM_CARD_SHOWN if shown else radio.ITEM_CARD_DRAWING), None, None
         if button not in (ITEM_BTN_PUT, ITEM_BTN_REMOVE) or kind is None:
             return "Неизвестная кнопка.", None, None
         if self._pinned(chat_id):

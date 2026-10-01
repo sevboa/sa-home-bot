@@ -46,7 +46,8 @@ def test_app_card_failed_without_urls():
 def test_menu_skills_first_then_universal():
     # /swarm (право «nodes») теперь панель-раздел вроде /guests, /status —
     # в меню не попадает (menu=False), хотя команда рабочая. /ping тоже
-    # скрыт (menu=False) — универсальных команд в меню сейчас нет.
+    # скрыт (menu=False); из универсальных в меню — только /items (опись
+    # вещей, Этап 49.3.5), после скилов.
     # qbittorrent — в HIDDEN_MENU_APP_IDS (см. test_menu_hides_qbittorrent_
     # even_with_right): своей команды/пункта меню больше нет, доступ — только
     # кнопкой внутри /torrents.
@@ -54,7 +55,7 @@ def test_menu_skills_first_then_universal():
         _sub("nodes", "qbittorrent@apps", "jellyfin@apps"), _app_actions()
     )
     names = [c.command for c in menu]
-    assert names == ["jellyfin"]
+    assert names == ["jellyfin", "items"]
 
 
 def test_menu_hides_qbittorrent_even_with_right():
@@ -63,13 +64,13 @@ def test_menu_hides_qbittorrent_even_with_right():
     одну и ту же карточку, один из которых ведёт в никуда (голая команда
     заблокирована, см. bot/handlers/apps.py::cmd_app_skill)."""
     menu = build_menu_commands(_sub("qbittorrent@apps"), _app_actions())
-    assert menu == []
+    assert [c.command for c in menu] == ["items"]  # только универсальная
 
 
 def test_menu_filters_skills_by_rights():
     menu = build_menu_commands(_sub("jellyfin@apps"), _app_actions())
     names = [c.command for c in menu]
-    assert names == ["jellyfin"]
+    assert names == ["jellyfin", "items"]
 
 
 def test_help_lists_allowed_skills_and_about():

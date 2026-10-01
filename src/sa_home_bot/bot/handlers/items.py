@@ -1,4 +1,5 @@
-"""Кнопка карточки сюжетного предмета (Этап 49.3, bot/interactives/items.py).
+"""Опись вещей (/items) и кнопки карточки сюжетного предмета (Этап 49.3,
+bot/interactives/items.py).
 
 callback_data «it:<id предмета>:<кнопка>»; права — Interactives.
 handle_item_click по from_user.id (кнопка работает только у владельца).
@@ -12,8 +13,10 @@ import logging
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import CallbackQuery
+from aiogram.filters import Command
+from aiogram.types import CallbackQuery, Message
 
+from sa_home_bot.bot import commands
 from sa_home_bot.bot.interactives import engine
 from sa_home_bot.bot.interactives.engine import Interactives
 
@@ -57,3 +60,11 @@ async def cb_item(callback: CallbackQuery, interactives: Interactives | None = N
     except TelegramBadRequest as exc:
         # Итог уже записан (речь переключена) — правка карточки лишь косметика.
         log.info("items: карточку не поправить (chat=%s): %s", message.chat.id, exc)
+
+
+@router.message(Command(commands.ITEMS.name))
+async def cmd_items(message: Message, interactives: Interactives | None = None) -> None:
+    if interactives is None or message.from_user is None:
+        return
+    text, markup = await interactives.inventory(message.from_user.id)
+    await message.answer(text, reply_markup=markup)

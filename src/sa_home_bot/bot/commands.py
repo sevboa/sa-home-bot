@@ -82,6 +82,9 @@ TORRENTS = Command(
 INTERACTIVES = Command(
     "interactives", "сценки в этом чате: on/off", universal=True, menu=False
 )
+# Опись сюжетных вещей гостя (Этап 49.3.5, bot/handlers/items.py): где
+# каждая лежит, кнопки «принести карточку». Своя у каждого — универсальная.
+ITEMS = Command("items", "ваши вещи", universal=True, menu=True)
 # Отладка режимов генерации картинок (Этап 49, bot/draw_debug.py): владелец
 # подбирает архетипы предметов и настройки сцен. Скрыта — памятка по
 # «/draw» без аргументов или «/draw help».
@@ -89,6 +92,7 @@ DRAW = Command("draw", "отладка генерации картинок", uni
 ALL_COMMANDS: list[Command] = [
     PING,
     INTERACTIVES,
+    ITEMS,
     SWARM,
     NODES,
     STATUS,

@@ -1196,14 +1196,16 @@ async def tool_swap_radio(ctx: ToolContext, _args: dict[str, Any]) -> str:
     )
 
 
-async def tool_show_items(ctx: ToolContext, _args: dict[str, Any]) -> str:
+async def tool_show_items(ctx: ToolContext, args: dict[str, Any]) -> str:
     """Особенные вещи собеседника (Этап 49.3, bot/interactives/items.py):
-    карточки с картинкой и кнопкой приходят сами, модели — что показано."""
+    опись или карточка вещи приходят сами, модели — что показано."""
     if ctx.interactives is None:
         return interactive_radio.TOOL_ITEMS_UNAVAILABLE
+    which = args.get("item")
     return await ctx.interactives.tool_show_items(
         ctx.chat_id,
         ctx.user_id,
+        which=which if isinstance(which, str) else "",
         message_thread_id=ctx.message_thread_id,
         trigger_message_id=ctx.trigger_message_id,
     )

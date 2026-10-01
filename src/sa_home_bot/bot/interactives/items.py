@@ -25,6 +25,19 @@ from dataclasses import dataclass
 
 RADIO_TYPE = "radio"
 
+# Где вещь (Этап 49.3.5). Стоит в кабинете — попадает в его снимки
+# (вставкой), в чулане — показывается карточкой.
+PLACE_DESK = "desk"
+PLACE_STOREROOM = "storeroom"
+PLACE_RU = {PLACE_DESK: "на столе в кабинете", PLACE_STOREROOM: "в чулане"}
+
+# Опись вещей гостя (/items, тул show_items без вещи) — голос Альфреда.
+INVENTORY_TITLE = "<b>Ваши вещи, сэр</b>"
+INVENTORY_LINE = "{icon} <b>{name}</b> — {where}."
+INVENTORY_TRAITS = "<i>Приметы: {traits}.</i>"
+INVENTORY_HINT = "Нажмите на вещь — принесу показать."
+INVENTORY_EMPTY = "Особенных вещей у вас пока нет, сэр."
+
 
 @dataclass(frozen=True)
 class Trait:
@@ -81,6 +94,7 @@ class ItemKind:
     curse: Curse | None = None
     # Просьба снять именно убранный экземпляр («проклятый», «со склада»).
     stored_re: re.Pattern[str] | None = None
+    icon: str = "📦"
 
     def portrait_prompt(self, traits: list[str]) -> str:
         """Промпт turbo с весами compel (служба llm, item_portrait)."""
@@ -131,6 +145,7 @@ RADIO_ARCHETYPE = (
 RADIO = ItemKind(
     type=RADIO_TYPE,
     name="Проклятое радио",
+    icon="📻",
     archetype=RADIO_ARCHETYPE,
     checks=(
         "old radio set :: a box-shaped receiver or transceiver with knobs and dials",
@@ -172,6 +187,17 @@ RADIO = ItemKind(
 )
 
 KINDS: dict[str, ItemKind] = {RADIO.type: RADIO}
+
+
+def find_kind(text: str) -> ItemKind | None:
+    """Вид по словам модели («радио», «старый передатчик», «radio»)."""
+    text = " ".join(text.split())
+    if not text:
+        return None
+    for kind in KINDS.values():
+        if text.lower() in (kind.type, kind.name.lower()) or kind.focus_re.search(text):
+            return kind
+    return None
 
 
 def new_cut_key(kind: ItemKind, user_id: int) -> str:

@@ -398,16 +398,49 @@ async def test_guest_who_finished_before_items_gets_radio_lazily(store):
     link = ItemLink()
     svc, notifier = _make(store, link)
     await InteractiveStore(store).mark_completed("radio", GUEST)
-    text = await svc.tool_show_items(GUEST, GUEST)
+    text = await svc.tool_show_items(GUEST, GUEST, which="радио")
     assert text == radio.TOOL_ITEMS_DRAWING.format(items="Проклятое радио")
     await _drain(svc)
     (owned,) = await store.items_of(GUEST)
     assert owned["origin"] == "radio_scene_before_items" and owned["traits"] == []
     assert len(link.portraits()) == 1 and notifier.photos
     # Портрет уже есть — карточка сразу.
-    text = await svc.tool_show_items(GUEST, GUEST)
+    text = await svc.tool_show_items(GUEST, GUEST, which="старый передатчик")
     assert text == radio.TOOL_ITEMS_SENT.format(items="Проклятое радио")
     assert len(link.portraits()) == 1
+
+
+async def test_inventory_lists_items_with_place_and_card_buttons(store):
+    """Этап 49.3.5: опись — где каждая вещь, кнопка приносит карточку."""
+    link = ItemLink()
+    svc, notifier = _make(store, link)
+    await _finale(store, svc, item_seed=9, item_traits=["пыль"], item_key="radio-601-a")
+    await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_SWAP)
+    await _drain(svc)
+    # Без вещи в запросе — опись, а не пачка карточек.
+    photos = len(notifier.photos)
+    assert await svc.tool_show_items(GUEST, GUEST) == radio.TOOL_ITEMS_LIST
+    (_, text) = notifier.sent[-1]
+    assert "📻 <b>Проклятое радио</b> — в чулане." in text and "покрыт пылью" in text
+    assert len(notifier.photos) == photos
+    (owned,) = await store.items_of(GUEST)
+    text, markup = await svc.inventory(GUEST)
+    button = markup.inline_keyboard[0][0]
+    assert button.text == "📻 Проклятое радио"
+    item_id, code = engine.parse_item_callback(button.callback_data)
+    answer, new_markup, _ = await svc.handle_item_click(GUEST, GUEST, item_id, code)
+    assert answer == radio.ITEM_CARD_SHOWN and new_markup is None
+    assert len(notifier.photos) == photos + 1
+    # Поставили — в описи «на столе».
+    await svc.handle_item_click(GUEST, GUEST, owned["id"], engine.ITEM_BTN_PUT)
+    text, _ = await svc.inventory(GUEST)
+    assert "на столе в кабинете" in text
+
+
+async def test_inventory_empty(store):
+    svc, _ = _make(store, ItemLink())
+    text, markup = await svc.inventory(GUEST)
+    assert text == items.INVENTORY_EMPTY and markup is None
 
 
 async def test_show_items_without_items(store):
