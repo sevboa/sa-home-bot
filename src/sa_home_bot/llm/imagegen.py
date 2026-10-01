@@ -198,12 +198,21 @@ def _prompt_kwargs(loaded: _Loaded, prompt: str, negative: str, job: dict) -> di
     import torch
 
     if loaded.compel is None:
-        from compel import CompelForSDXL
+        # compel 2.1: базовый Compel на оба энкодера SDXL (обёрток CompelFor*
+        # ещё нет, а 2.4 требует transformers 5).
+        from compel import Compel, ReturnedEmbeddingsType
 
-        loaded.compel = CompelForSDXL(loaded.pipe)
+        pipe = loaded.pipe
+        loaded.compel = Compel(
+            tokenizer=[pipe.tokenizer, pipe.tokenizer_2],
+            text_encoder=[pipe.text_encoder, pipe.text_encoder_2],
+            returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
+            requires_pooled=[False, True],
+            truncate_long_prompts=False,
+        )
     with torch.no_grad():
-        cond = loaded.compel(prompt)
-    return {"prompt_embeds": cond.embeds, "pooled_prompt_embeds": cond.pooled_embeds}
+        embeds, pooled = loaded.compel(prompt)
+    return {"prompt_embeds": embeds, "pooled_prompt_embeds": pooled}
 
 
 class PreviewRejected(Exception):
