@@ -1306,8 +1306,7 @@ class LlmService:
         path = item_paste.cut_path(self._cfg, paste["key"])
         cut = await asyncio.to_thread(lambda: Image.open(path).convert("RGBA"))
         where = item_paste.PLACEMENTS[paste["place"]]
-        if paste["place"] == "desk":
-            where = await self._desk_placement(scene["original"]) or where
+        where = await self._desk_placement(scene["original"], paste["place"]) or where
         if paste["width"] is not None:
             where = replace(where, width=paste["width"] * scene["original"].width)
         pasted, mask, box = await asyncio.to_thread(
@@ -1356,8 +1355,10 @@ class LlmService:
             "seconds": scene["seconds"] + harmonized["seconds"],
         }, box
 
-    async def _desk_placement(self, scene: Image.Image) -> item_paste.Placement | None:
-        """Где на общем виде столешница — спросить зрение. Сбой — None."""
+    async def _desk_placement(
+        self, scene: Image.Image, place: str
+    ) -> item_paste.Placement | None:
+        """Где в кадре столешница — спросить зрение. Сбой — None."""
         try:
             image_b64 = await asyncio.to_thread(_jpeg_b64, scene)
             result = await ollama.chat(
@@ -1374,7 +1375,7 @@ class LlmService:
             log.warning("imagegen: рамку стола не узнать", exc_info=True)
             return None
         box = data.get(item_paste.DESK_BOX_KEY) if isinstance(data, dict) else None
-        where = item_paste.desk_placement(box, scene.width)
+        where = item_paste.desk_placement(box, scene.width, place)
         log.info("imagegen: стол %s → %s", box, where)
         return where
 

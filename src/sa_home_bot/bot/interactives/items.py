@@ -79,6 +79,8 @@ class ItemKind:
     # одной черте рисует явнее, но 5 таких черт дают один глаз во весь кадр.
     trait_weight: float = 1.3
     curse: Curse | None = None
+    # Просьба снять именно убранный экземпляр («проклятый», «со склада»).
+    stored_re: re.Pattern[str] | None = None
 
     def portrait_prompt(self, traits: list[str]) -> str:
         """Промпт turbo с весами compel (служба llm, item_portrait)."""
@@ -154,7 +156,12 @@ RADIO = ItemKind(
     },
     ladder=("пыль", "трещина", "ржавчина", "дым", "копоть", "стрелка", "глаз"),
     paste_hint="vintage ham radio with needle meters and black handheld microphone on the desk",
-    focus_re=re.compile(r"передатчик|радио|раци|устройств\w* связи|микрофон", re.IGNORECASE),
+    # «Прибор», «шкала», «корпус» — так Альфред зовёт передатчик в сцене
+    # («треснувшее стекло прибора»); без них крупный план шёл без радио.
+    focus_re=re.compile(
+        r"передатчик|радио|раци|устройств\w* связи|микрофон|прибор|шкал|корпус", re.IGNORECASE
+    ),
+    stored_re=re.compile(r"прокля|стар\w+|склад|чулан|кладов", re.IGNORECASE),
     curse=Curse(
         model="revanim",
         lora="rottech",

@@ -126,8 +126,16 @@ PHOTO_PURPOSE = "photo"
 # живые снимки 2026-09-30 из четырёх сохранили по две.
 PHOTO_FEATURES_IN_FRAME = 2
 PHOTO_CAPTION = "Кабинет"
-# Подпись про весь кабинет — общий вид, а не крупный план (tool_take_photo).
-GENERAL_VIEW_RE = re.compile(r"^((мой|наш|твой)\s+)?(кабинет\w*|общий вид.*|комнат\w*)$", re.I)
+# Подпись или focus про весь кабинет — общий вид, а не крупный план
+# (tool_take_photo, _photo). Хвост не важен: «Вид кабинета после инцидента»,
+# «кабинет с корпусом передатчика на полу» — тоже общий вид; крупным планом
+# их снимали без радио на столе (живой прогон 2026-10-01).
+GENERAL_VIEW_RE = re.compile(
+    r"^(?:(?:мой|наш|твой|весь)\s+)?(?:общ\w+\s+(?:вид|план)\w*"
+    r"|(?:(?:общ\w+\s+)?(?:вид|план|снимок|фото)\w*\s+)?(?:(?:на|всего|мо\w+|тво\w+)\s+)*"
+    r"(?:кабинет|комнат)\w*)",
+    re.I,
+)
 # Кадры по ходу сцены (Ведущий, поле photo): переход стадии и финал снимаются
 # всегда, прочие — не чаще раза в PHOTO_SCENE_GAP_TURNS ходов.
 PHOTO_SCENE_GAP_TURNS = 3
@@ -710,9 +718,19 @@ class Interactives:
         # подписи давал общий вид кабинета, а меч без expect — несверенную
         # тарелку. Подпись о конкретном — это и есть focus, focus — то, что
         # должно выйти на снимке.
-        if not focus and caption and not GENERAL_VIEW_RE.match(caption):
+        if GENERAL_VIEW_RE.match(focus):
+            focus = ""
+        elif not focus and caption and not GENERAL_VIEW_RE.match(caption):
             focus = caption
         caption = caption or PHOTO_CAPTION
+        if await self._wants_stored_item(user_id, f"{focus} {caption}"):
+            await self.tool_show_items(
+                chat_id,
+                user_id,
+                message_thread_id=message_thread_id,
+                trigger_message_id=trigger_message_id,
+            )
+            return radio.TOOL_PHOTO_STORED_ITEM
         expect = photo_expect(args.get("expect")) or ([focus] if focus else [])
         now = self._now()
         outside = await self._transylvania.outside(now)
@@ -741,7 +759,7 @@ class Interactives:
                     seen = _image_params(image).get("seen")
                     if isinstance(seen, str) and seen:
                         await self._save_last_photo(chat_id, int(image["id"]), seen, [], [])
-                    where = cab.describe_ru()
+                    where = await self._where_ru(cab, user_id, in_scene=in_scene)
                     return cabinet_mod.TOOL_PHOTO_SENT.format(where=where, now=outside.ru())
         if await self._photo_limit_reached(chat_id):
             return cabinet_mod.TOOL_PHOTO_LIMIT
@@ -760,7 +778,32 @@ class Interactives:
         )
         if not started:
             return cabinet_mod.TOOL_PHOTO_UNAVAILABLE
-        return cabinet_mod.TOOL_PHOTO_STARTED.format(where=cab.describe_ru(), now=outside.ru())
+        where = await self._where_ru(cab, user_id, in_scene=in_scene)
+        return cabinet_mod.TOOL_PHOTO_STARTED.format(where=where, now=outside.ru())
+
+    async def _wants_stored_item(self, user_id: int, text: str) -> bool:
+        """Просят снять старое радио, а оно убрано в чулан — в кабинете его
+        нет, показать можно только карточкой (radio.TOOL_PHOTO_STORED_ITEM)."""
+        kind = items_mod.RADIO
+        if kind.stored_re is None or not kind.focus_re.search(text):
+            return False
+        if not kind.stored_re.search(text) or not await self.speech_clear(user_id):
+            return False
+        return bool(await self._store.items_of(user_id, kind.type))
+
+    async def _where_ru(self, cab: Cabinet, user_id: int, *, in_scene: bool) -> str:
+        """Кабинет словами для Альфреда, после сцены — и какой передатчик
+        стоит на столе (radio.RADIO_STATE_*)."""
+        where = cab.describe_ru()
+        if in_scene or not await self._state.is_completed(radio.SCENARIO_ID, user_id):
+            return where
+        if await self.speech_clear(user_id):
+            return f"{where} {radio.RADIO_STATE_NEW}"
+        owned = await self._store.items_of(user_id, items_mod.RADIO_TYPE)
+        traits = items_mod.RADIO.traits_ru(owned[0]["traits"] or []) if owned else []
+        return f"{where} " + radio.RADIO_STATE_OLD.format(
+            traits=radio.RADIO_STATE_TRAITS.format(traits="; ".join(traits)) if traits else ""
+        )
 
     async def _photo_limit_reached(self, chat_id: int) -> bool:
         if not PHOTO_DAILY_LIMIT:
@@ -861,6 +904,8 @@ class Interactives:
         node_link = self._get_node_link()
         if node_link is None:
             return
+        if GENERAL_VIEW_RE.match(focus):
+            focus = ""  # Ведущий тоже просит «общий план кабинета»
         dst = Address(node=LLM_NODE, service=LLM_SERVICE)
         cfg = self._settings.llm
         cab = await cabinet_mod.load(self._store, user_id)
@@ -897,6 +942,10 @@ class Interactives:
         # Пересъёмка после промаха: то, чего не было на прошлом снимке,
         # промптер ставит главным (llm/image_prompt.py, emphasize).
         emphasize = retake_emphasis(await self._last_photo(chat_id), list(expect or []))
+        if shot is not None:
+            # Предмет вставят пикселями — словами его промптер нарисует
+            # вторым, своим («пустой корпус передатчика», 2026-10-01).
+            emphasize = [e for e in emphasize if not shot.kind.focus_re.search(e)]
         if emphasize:
             request["emphasize"] = emphasize
             log.info("interactives: пересъёмка, упор на %s (chat=%s)", emphasize, chat_id)

@@ -61,7 +61,8 @@ class Placement:
 # Места вставки по умолчанию. ``desk`` — стенд 49.3.0 (2): общий вид «поверх
 # столешницы» (bot cabinet.CANON_EN_DESK) ставит стол в нижнюю треть; точнее
 # место даёт рамка столешницы от зрения (``desk_placement``), это — когда
-# рамки нет. ``closeup`` — крупно, по центру нижней половины.
+# рамки нет. ``closeup`` — крупно, по центру нижней половины (тоже когда
+# рамки нет).
 PLACEMENTS: dict[str, Placement] = {
     "desk": Placement(cx=256, bottom=0.86 * _NATIVE_PX, width=0.42 * _NATIVE_PX),
     "closeup": Placement(cx=256, bottom=0.92 * _NATIVE_PX, width=0.62 * _NATIVE_PX),
@@ -90,23 +91,28 @@ DESK_BOX_QUESTION = (
 DESK_BOX_KEY = "box_2d"
 _BOX_GRID = 1000
 # Годная столешница: не уже 20% кадра и не выше верхней трети (дальний
-# стол у окна — радио на нём вышло бы с напёрсток).
+# стол у окна — радио на нём вышло бы с напёрсток). На крупном плане стол
+# ближе и выше — там допускается от верхней пятой части.
 _DESK_MIN_WIDTH = 0.2
-_DESK_MIN_TOP = 0.35
+_DESK_MIN_TOP = {"desk": 0.35, "closeup": 0.2}
 
 
-def desk_placement(box: object, size: int = _NATIVE_PX) -> Placement | None:
+def desk_placement(
+    box: object, size: int = _NATIVE_PX, place: str = "desk"
+) -> Placement | None:
     """Рамка столешницы ``box_2d`` ([ymin, xmin, ymax, xmax], сетка 0..1000)
     → место предмета; None — рамки нет или она негодная (тогда
-    ``PLACEMENTS["desk"]``)."""
+    ``PLACEMENTS[place]``). Крупный план тоже ставится на стол: по центру
+    кадра радио висело над полом или свисало с края (живой прогон
+    2026-10-01)."""
     if not isinstance(box, list) or len(box) != 4:
         return None
     if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in box):
         return None
     y0, x0, y1, x1 = (min(max(float(v), 0.0), _BOX_GRID) * size / _BOX_GRID for v in box)
-    if x1 - x0 < size * _DESK_MIN_WIDTH or y0 < size * _DESK_MIN_TOP or y1 <= y0:
+    if x1 - x0 < size * _DESK_MIN_WIDTH or y0 < size * _DESK_MIN_TOP[place] or y1 <= y0:
         return None
-    width = min(PLACEMENTS["desk"].width * size / _NATIVE_PX, 0.8 * (x1 - x0))
+    width = min(PLACEMENTS[place].width * size / _NATIVE_PX, 0.8 * (x1 - x0))
     return Placement(cx=(x0 + x1) / 2, bottom=y0 + 0.6 * (y1 - y0), width=width)
 
 

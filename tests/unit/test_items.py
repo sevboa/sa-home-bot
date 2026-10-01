@@ -342,6 +342,58 @@ async def test_cabinet_general_view_shows_the_radio_that_stands(store):
     assert link.generated()[-1]["paste"]["key"] == "radio-601-a"
 
 
+async def test_general_view_by_words_puts_radio_on_desk_and_alfred_knows_it(store):
+    """Живой прогон 2026-10-01: «Вид кабинета», «общий план кабинета» шли
+    крупным планом без радио, а Альфред ждал «выпотрошенный корпус»."""
+    link = ItemLink()
+    svc, _ = _make(store, link)
+    await _finale(store, svc, item_seed=9, item_traits=["пыль"], item_key="radio-601-a")
+    await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_SWAP)
+    await _drain(svc)
+    (owned,) = await store.items_of(GUEST)
+    await svc.handle_item_click(GUEST, GUEST, owned["id"], "p")
+    text = await svc.tool_take_photo(
+        GUEST,
+        GUEST,
+        {"caption": "Вид кабинета после инцидента", "focus": "общий план кабинета"},
+    )
+    await _drain(svc)
+    gen = link.generated()[-1]
+    assert gen["mode"] != "scene" and gen["paste"]["place"] == "desk"
+    assert "старый, проклятый: целый" in text and "покрыт пылью" in text
+    # Крупно про передатчик: упор пересъёмки без слов о нём — его вставят.
+    miss = ["пустой корпус передатчика"]
+    await svc._save_last_photo(GUEST, 1, "стол", miss, miss)
+    await svc.tool_take_photo(GUEST, GUEST, {"focus": "пустой корпус передатчика"})
+    await _drain(svc)
+    gen = link.generated()[-1]
+    assert gen["paste"]["place"] == "closeup" and "emphasize" not in gen
+    await svc.handle_item_click(GUEST, GUEST, owned["id"], "r")
+    text = await svc.tool_take_photo(GUEST, GUEST, {"caption": "Кабинет"})
+    assert radio.RADIO_STATE_NEW in text
+
+
+async def test_photo_of_stored_cursed_radio_sends_its_card(store):
+    """Живой прогон 2026-10-01: «покажи проклятый радиоприёмник», когда он в
+    чулане, снимал кабинет с новым радио — и Альфред пенял на плёнку."""
+    link = ItemLink()
+    svc, notifier = _make(store, link)
+    await _finale(store, svc, item_seed=9, item_key="radio-601-a")
+    await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_SWAP)
+    await _drain(svc)
+    cards = len(notifier.photos)
+    shots = len(link.generated())
+    text = await svc.tool_take_photo(
+        GUEST, GUEST, {"caption": "Тот самый", "focus": "проклятый передатчик в чулане"}
+    )
+    assert text == radio.TOOL_PHOTO_STORED_ITEM
+    assert len(notifier.photos) == cards + 1 and len(link.generated()) == shots
+    # Новый на столе снимается как обычно.
+    text = await svc.tool_take_photo(GUEST, GUEST, {"focus": "новый передатчик крупно"})
+    await _drain(svc)
+    assert text != radio.TOOL_PHOTO_STORED_ITEM and len(link.generated()) == shots + 1
+
+
 async def test_guest_who_finished_before_items_gets_radio_lazily(store):
     link = ItemLink()
     svc, notifier = _make(store, link)

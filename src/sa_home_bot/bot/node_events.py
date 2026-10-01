@@ -485,7 +485,9 @@ def render_update_finished(node_id: str, ok: bool, version: str | None, error: s
             f"⬆️ Нода «{node_id}» обновлена до v{version} — "
             f"нужен перезапуск (nodectl restart_node)."
         )
-    return f"⚠️ Обновление ноды «{node_id}» не удалось: {error}"
+    # Текст pip бывает с «<» (numpy<2,…) — неэкранированный Telegram отвергал
+    # всё сообщение (2026-10-01).
+    return f"⚠️ Обновление ноды «{node_id}» не удалось: {html.escape(error or '')}"
 
 
 def render_restart_applied(node_id: str, from_version: str | None, to_version: str) -> str:

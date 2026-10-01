@@ -226,6 +226,11 @@ def test_render_update_finished_failure_shows_error():
     assert "не удалось" in text
 
 
+def test_render_update_finished_failure_escapes_pip_output():
+    text = render_update_finished("mycraft", False, None, "numpy<2,>=1.26 conflicts")
+    assert "numpy&lt;2,&gt;=1.26" in text
+
+
 async def test_handler_broadcasts_on_update_finished_success():
     book = _book()
     notifier = FakeNotifier()

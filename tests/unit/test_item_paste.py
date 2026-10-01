@@ -93,6 +93,15 @@ def test_desk_placement_from_gemma_box():
     assert item_paste.desk_placement(["a", 1, 2, 3]) is None
 
 
+def test_closeup_placement_on_tabletop():
+    # Крупный план: стол ближе — шире радио и допустим выше общего вида.
+    where = item_paste.desk_placement([250, 0, 1000, 1000], place="closeup")
+    assert where is not None
+    assert where.width == item_paste.PLACEMENTS["closeup"].width
+    assert where.bottom == 128 + 0.6 * 384
+    assert item_paste.desk_placement([250, 0, 1000, 1000]) is None
+
+
 def test_cut_path_rejects_bad_keys(tmp_path):
     cfg = LlmConfig(model="m", items_dir=tmp_path)
     assert item_paste.cut_path(cfg, "radio-5-ab12") == tmp_path / "radio-5-ab12.png"
