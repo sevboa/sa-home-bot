@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sa-home-bot"
-version = "0.120.1"
+version = "0.120.2"
 description = "Рой домашних машин: нода-супервизор, службы (мониторинг, приложения) и Telegram-бот"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -38,6 +38,10 @@ windows = [
 # Установка: pipx install "sa-home-bot[stt] @ git+...@vX.Y.Z"
 stt = [
     "faster-whisper>=1.0",
+    # av 19 убрал аргумент metadata_errors у av.open(), а faster-whisper 1.2.1
+    # его передаёт → TypeError на каждом голосовом. Приехал молча при
+    # переустановке v0.120.1; 18.1.0 проверен на стенде.
+    "av<19",
 ]
 # Нода с синтезом голосовых ОТВЕТОВ /ai (сейчас mycraft, тот же CPU, что и
 # stt): Coqui XTTS v2, voice cloning по референсному клипу (см. llm/tts.py).
