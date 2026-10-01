@@ -69,6 +69,9 @@ class Scenario:
     # Подталкивание гостя к следующей реплике, по кругу от хода сцены: чтобы
     # разговор не повисал (пользователь 2026-09-27 — «через раз» совет).
     nudges: tuple[str, ...] = ()
+    # Сюжетный предмет сцены (bot/interactives/items.py::KINDS): его облик
+    # копится по ходу сцены и в финале достаётся гостю (Этап 49.3).
+    item_kind: str | None = None
 
     @property
     def last_stage(self) -> int:
@@ -100,6 +103,13 @@ class Run:
     photo_turn: int | None = None
     # Настроение кадров сцены от Ведущего (director.MOODS); None — обычное.
     mood: str | None = None
+    # Предмет сцены (Этап 49.3): черты (ключи вида, по порядку появления),
+    # зерно портрета (одно на сцену — облик меняется чертами, а не
+    # зерном), ключ вырезки на ноде llm и черты, с которыми она нарисована.
+    item_traits: list[str] = field(default_factory=list)
+    item_seed: int | None = None
+    item_key: str | None = None
+    item_drawn: list[str] = field(default_factory=list)
     # Журнал сцены: «Гость: …», «Альфред: …», «Событие: …». В личке каждое
     # сообщение без реплая — новый тред /ai (bot/handlers/ai.py::
     # _dialogue_id_for), и история треда сцену не держит — держит журнал.

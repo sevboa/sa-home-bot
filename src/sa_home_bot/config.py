@@ -735,6 +735,19 @@ class LlmConfig(BaseModel):
     # (0 — без лимита).
     imagegen_display_px: int = Field(default=512, ge=64, le=2048)
     imagegen_daily_limit: int = Field(default=0, ge=0)
+    # Этап 49.3: сюжетные предметы. Вырезка портрета (RGBA 512) лежит на
+    # этой ноде в ``items_dir/{key}.png`` без чистки по TTL — бот держит
+    # картинку предмета у себя, а вырезка нужна, чтобы вставлять предмет в
+    # сцены. Вставка: img2img той же моделью силой ``item_harmonize_strength``,
+    # LoRA настроения на ``item_mood_lora_weight``, потом предмет по маске
+    # возвращается поверх (стенд 2026-10-01: DINO 0.80-0.90 против 0.27-0.63
+    # у простого img2img).
+    items_dir: Path = Path("./data/items")
+    item_harmonize_strength: float = Field(default=0.35, gt=0, le=1.0)
+    item_mood_lora_weight: float = Field(default=0.4, ge=0, le=2.0)
+    # Проверка портрета предмета зрением по черновику первого шага turbo
+    # (49.3.4) — до тех пор портрет проверяется готовым.
+    item_preview_check: bool = False
 
 
 def reminder_reason(llm: LlmConfig) -> str:

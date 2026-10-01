@@ -53,6 +53,7 @@ def test_describe_declares_ask_chat_sleep_warmup():
         "stt_chunk",
         "synthesize_speech",
         "generate_image",
+        "item_portrait",
         "tts_chunk",
         "chat_progress",
         "sleep",

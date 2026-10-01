@@ -412,12 +412,15 @@ class Notifier:
         message_thread_id: int | None = None,
         reply_to_message_id: int | None = None,
         has_spoiler: bool = False,
+        reply_markup: InlineKeyboardMarkup | None = None,
     ) -> tuple[int, str] | None:
         """Фото байтами ИЛИ уже загруженное в Telegram (``str`` — file_id).
         Возвращает (message_id, file_id самого крупного размера) — вызывающий
         сохраняет file_id, чтобы повторная отправка не гоняла байты
-        (Этап 48, bot/image_tools.py). ``None`` — не отправилось."""
+        (Этап 48, bot/image_tools.py). ``None`` — не отправилось.
+        ``reply_markup`` — кнопки под фото (карточка предмета, Этап 49.3)."""
         media = BufferedInputFile(photo, filename=filename) if isinstance(photo, bytes) else photo
+        extra = {"reply_markup": reply_markup} if reply_markup is not None else {}
         reply = (
             ReplyParameters(message_id=reply_to_message_id, allow_sending_without_reply=True)
             if reply_to_message_id is not None
@@ -433,6 +436,7 @@ class Notifier:
                 message_thread_id=message_thread_id,
                 reply_parameters=reply,
                 has_spoiler=has_spoiler,
+                **extra,
             ),
         )
         if msg is None or not msg.photo:

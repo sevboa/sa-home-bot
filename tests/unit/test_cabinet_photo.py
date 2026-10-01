@@ -84,7 +84,20 @@ class FakeLink:
                 "seed": 7,
                 **({"inspect": self.inspect} if self.inspect is not None else {}),
             }
+        if action == "item_portrait":
+            return {
+                "png_b64": base64.b64encode(_png()).decode(),
+                "width": 8,
+                "height": 8,
+                "seed": args["seed"],
+                "full_prompt": args["prompt"],
+                "seen": "Старое радио с микрофоном.",
+                "missing": [],
+            }
         raise AssertionError(action)
+
+    def portraits(self) -> list[dict]:
+        return [a for act, a in self.calls if act == "item_portrait"]
 
     def generated(self) -> list[dict]:
         return [a for act, a in self.calls if act == "generate_image"]
@@ -404,16 +417,33 @@ def test_describe_shows_few_visible_features():
 # --- сверка снимка (Этап 49.2.1) ---
 
 
-def test_photo_check_parse_keeps_only_expected_misses():
+def test_photo_check_parse_counts_misses_from_answers():
     from sa_home_bot.llm import photo_check
 
+    expect = ["собака у камина", "microphone :: a bare cable does NOT count", "портрет"]
     raw = json.dumps(
-        {"description": "Стол, камин.", "missing": ["Собака", "кошка", 5]}, ensure_ascii=False
+        {"description": "Стол,  камин.", "answers": {"1": "no", "2": "yes", "3": "maybe"}},
+        ensure_ascii=False,
     )
-    parsed = photo_check.parse(raw, ["собака у камина", "портрет"])
-    assert parsed == {"description": "Стол, камин.", "missing": ["собака у камина"]}
+    parsed = photo_check.parse(raw, expect)
+    # Пункт без внятного ответа промахом не считается; в missing — название
+    # без определения.
+    assert parsed == {
+        "description": "Стол, камин.",
+        "missing": ["собака у камина"],
+        "answers": {"собака у камина": False, "microphone": True},
+    }
+    raw = json.dumps({"description": "x", "answers": {"2": "no"}})
+    assert photo_check.parse(raw, expect)["missing"] == ["microphone"]
     assert photo_check.parse("не json", ["x"]) is None
     assert photo_check.parse(json.dumps({"description": ""}), []) is None
+
+
+def test_photo_check_question_numbers_items_with_definitions():
+    from sa_home_bot.llm import photo_check
+
+    q = photo_check.build_question(["radio", "mic :: a plug does NOT count"])
+    assert "1. radio" in q and "2. mic — a plug does NOT count" in q
 
 
 async def test_matching_photo_becomes_alfreds_note_only(store):

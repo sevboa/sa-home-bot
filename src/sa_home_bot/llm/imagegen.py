@@ -28,6 +28,7 @@ import io
 import logging
 import random
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,11 @@ _NATIVE_PX = 512
 MODES = ("free", "item", "variant", "scene")
 DEFAULT_STRENGTH = 0.55
 DEFAULT_IP_SCALE = 0.4
+# Этап 49.3.4: черновик turbo — x0-предсказание после 1-го шага того же
+# прогона, декодированное крошечным VAE (стенд 2026-10-01: DINO к финалу
+# 0.92 за ~41% времени). Не прошёл проверку — прогон прерывается до шага 2
+# и полного VAE.
+_TAESDXL_REPO = "madebyollin/taesdxl"
 _IP_REPO = "h94/IP-Adapter"
 _IP_WEIGHT = "ip-adapter_sd15_light.bin"
 
@@ -178,6 +184,90 @@ class _Loaded:
         self.img2img: Any = None
         self.ip_loaded = False
         self.loras: set[str] = set()
+        self.taesd: Any = None
+        self.compel: Any = None
+
+
+def _prompt_kwargs(loaded: _Loaded, prompt: str, negative: str, job: dict) -> dict[str, Any]:
+    """Промпт для пайплайна: строкой или, при ``weighted`` (Этап 49.3,
+    портрет предмета на turbo), эмбеддингами compel — веса «(черта)1.3» и
+    длина без обрезки по 77 токенам (truncate_long_prompts=False). Негатив
+    при весах не нужен: у turbo guidance выключен."""
+    if not job.get("weighted"):
+        return {"prompt": prompt, "negative_prompt": negative or None}
+    import torch
+
+    if loaded.compel is None:
+        from compel import CompelForSDXL
+
+        loaded.compel = CompelForSDXL(loaded.pipe)
+    with torch.no_grad():
+        cond = loaded.compel(prompt)
+    return {"prompt_embeds": cond.embeds, "pooled_prompt_embeds": cond.pooled_embeds}
+
+
+class PreviewRejected(Exception):
+    """Черновик turbo не прошёл проверку — прогон прерван (Этап 49.3.4)."""
+
+
+def _preview_sync(
+    loaded: _Loaded, prompt: str, negative: str, cfg: LlmConfig, job: dict
+) -> Image.Image:
+    """turbo с проверкой черновика: обёртка ``scheduler.step`` ловит x0 после
+    шага 1 (в callback_on_step_end его нет), TAESDXL декодирует, ``preview``
+    решает; «нет» — ``pipe._interrupt`` и PreviewRejected, «да» — шаг 2 и
+    полный VAE. Латенты пайплайн отдаёт сырыми (output_type="latent"), чтобы
+    прерванный прогон не платил за VAE."""
+    import torch
+
+    pipe = loaded.pipe
+    if loaded.loras:
+        pipe.disable_lora()
+    if loaded.taesd is None:
+        from diffusers import AutoencoderTiny
+
+        loaded.taesd = AutoencoderTiny.from_pretrained(
+            _TAESDXL_REPO, torch_dtype=torch.float32, cache_dir=str(cfg.imagegen_model_dir)
+        )
+    preview = job["preview"]
+    seen: dict[str, Any] = {"x0": None, "rejected": False}
+    original_step = pipe.scheduler.step
+
+    def step(*args: Any, **kwargs: Any) -> Any:
+        out = original_step(*args, **kwargs)
+        if seen["x0"] is None and isinstance(out, tuple) and len(out) > 1:
+            seen["x0"] = out[1]
+        return out
+
+    def on_step_end(pipe_: Any, index: int, _t: Any, kwargs: dict) -> dict:
+        if index == 0 and seen["x0"] is not None:
+            with torch.no_grad():
+                x = loaded.taesd.decode(seen["x0"]).sample[0]
+            x = ((x.clamp(-1, 1) + 1) * 127.5).round().byte().permute(1, 2, 0).numpy()
+            if not preview(Image.fromarray(x)):
+                seen["rejected"] = True
+                pipe_._interrupt = True
+        return kwargs
+
+    pipe.scheduler.step = step
+    try:
+        latents = pipe(
+            **_prompt_kwargs(loaded, prompt, negative, job),
+            num_inference_steps=job["steps"],
+            width=_NATIVE_PX,
+            height=_NATIVE_PX,
+            guidance_scale=job["guidance"],
+            generator=job.get("generator"),
+            output_type="latent",
+            callback_on_step_end=on_step_end,
+        ).images
+    finally:
+        pipe.scheduler.step = original_step
+    if seen["rejected"]:
+        raise PreviewRejected
+    with torch.no_grad():
+        image = pipe.vae.decode(latents / pipe.vae.config.scaling_factor).sample
+    return pipe.image_processor.postprocess(image, output_type="pil")[0]
 
 
 # Пайплайны резидентны в RAM с первого запроса до конца жизни процесса —
@@ -308,6 +398,8 @@ def _generate_sync(
     loaded: _Loaded, prompt: str, negative: str, cfg: LlmConfig, job: dict
 ) -> Image.Image:
     pipe = loaded.pipe
+    if job.get("preview") is not None:
+        return _preview_sync(loaded, prompt, negative, cfg, job)
     loras = job.get("loras") or []
     for name, _ in loras:
         if name not in loaded.loras:
@@ -358,6 +450,12 @@ def _generate_sync(
             log.info("imagegen: IP-Adapter загружен за %.1fс", time.monotonic() - started)
         pipe.set_ip_adapter_scale(ip_scale)
         common["ip_adapter_image"] = ref
+    if job.get("weighted"):
+        del common["negative_prompt"]
+        return pipe(
+            **_prompt_kwargs(loaded, prompt, negative, job),
+            num_inference_steps=job["steps"], width=_NATIVE_PX, height=_NATIVE_PX, **common,
+        ).images[0]
     return pipe(
         prompt, num_inference_steps=job["steps"], width=_NATIVE_PX, height=_NATIVE_PX, **common,
     ).images[0]
@@ -380,6 +478,8 @@ async def generate_image(
     colors: int | None = None,
     model: str | None = None,
     loras: list[tuple[str, float]] | None = None,
+    preview: Callable[[Image.Image], bool] | None = None,
+    weighted: bool = False,
 ) -> dict[str, Any]:
     """Сгенерировать картинку. Результат: ``png`` (байты), ``width``,
     ``height``, ``seconds`` (время самой генерации, без ожидания лока),
@@ -396,8 +496,18 @@ async def generate_image(
     (рисуется всё равно 512², это только уменьшение после). ``model`` —
     короткое имя из ``MODELS`` вместо модели из конфига. ``loras`` —
     [(имя из ``LORAS``, вес)]; их триггеры дописываются в начало промпта,
-    кроме ``fit=False`` (raw — ровно то, что написано)."""
+    кроме ``fit=False`` (raw — ровно то, что написано).
+
+    ``preview`` (Этап 49.3.4, только turbo без образца и LoRA) — проверка
+    черновика после 1-го шага, зовётся в потоке генерации; False — прогон
+    прерывается, ``PreviewRejected``. ``weighted`` — промпт с весами compel
+    «(слова)1.3» без обрезки по 77 токенам (тоже только turbo без образца
+    и LoRA; ``fit`` при этом не нужен)."""
     model, spec = resolve_model(model, cfg)
+    if (preview is not None or weighted) and (
+        spec.kind != "sdxl-turbo" or ref is not None or loras
+    ):
+        raise ValueError("черновик и веса compel — только turbo без образца и LoRA")
     if spec.kind != "sd15" and ref is not None and ip_scale is not None:
         raise ValueError(f"у {model} нет IP-Adapter — сцена с образцом только на SD1.5-моделях")
     loras = list(loras or [])
@@ -439,6 +549,7 @@ async def generate_image(
     job = {
         "generator": torch.Generator().manual_seed(seed),
         "ref": ref, "strength": strength, "ip_scale": ip_scale, "steps": steps, "loras": loras,
+        "preview": preview, "weighted": weighted,
         "guidance": guidance or spec.guidance or cfg.imagegen_guidance,
     }
     async with _generate_lock:

@@ -45,6 +45,16 @@ ACTION_TICKS_PREFIX = "action_ticks:"
 DISK_SUMMARIES_KEY = "disk_summaries_cache"
 
 
+def _item(row: Any) -> dict:
+    item = dict(row)
+    try:
+        traits = json.loads(item.get("traits") or "[]")
+    except json.JSONDecodeError:
+        traits = []
+    item["traits"] = [t for t in traits if isinstance(t, str)] if isinstance(traits, list) else []
+    return item
+
+
 def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt is not None else None
 
@@ -1332,6 +1342,80 @@ class Store:
             )
             cur = await conn.execute("DELETE FROM images WHERE purpose=?", (purpose,))
             return cur.rowcount
+
+    # --- items (Этап 49.3, bot/interactives/items.py) ---
+
+    async def add_item(
+        self,
+        *,
+        type: str,
+        owner_user_id: int,
+        traits: list[str],
+        image_id: int | None,
+        origin: str,
+        now: datetime,
+        note: str | None = None,
+    ) -> int:
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                "INSERT INTO items (type, owner_user_id, traits, image_id, origin, note, "
+                "created_at) VALUES (?,?,?,?,?,?,?)",
+                (type, owner_user_id, json.dumps(traits, ensure_ascii=False), image_id, origin,
+                 note, _iso(now)),
+            )
+            item_id = int(cur.lastrowid)
+            await conn.execute(
+                "INSERT INTO item_events (item_id, kind, user_id, data, created_at) "
+                "VALUES (?,?,?,?,?)",
+                (item_id, "created", owner_user_id, json.dumps({"origin": origin}), _iso(now)),
+            )
+            return item_id
+
+    async def item_by_id(self, item_id: int) -> dict | None:
+        cur = await self.db.conn.execute("SELECT * FROM items WHERE id=?", (item_id,))
+        row = await cur.fetchone()
+        return _item(row) if row else None
+
+    async def items_of(self, owner_user_id: int, type: str | None = None) -> list[dict]:
+        """Предметы гостя (кроме израсходованных), старые первыми."""
+        sql = "SELECT * FROM items WHERE owner_user_id=? AND status!='consumed'"
+        args: tuple = (owner_user_id,)
+        if type is not None:
+            sql += " AND type=?"
+            args += (type,)
+        cur = await self.db.conn.execute(sql + " ORDER BY id", args)
+        return [_item(r) for r in await cur.fetchall()]
+
+    async def set_item_image(self, item_id: int, image_id: int, traits: list[str]) -> None:
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "UPDATE items SET image_id=?, traits=? WHERE id=?",
+                (image_id, json.dumps(traits, ensure_ascii=False), item_id),
+            )
+
+    async def add_item_event(
+        self,
+        item_id: int,
+        kind: str,
+        *,
+        user_id: int | None,
+        chat_id: int | None,
+        data: dict | None,
+        now: datetime,
+    ) -> None:
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "INSERT INTO item_events (item_id, kind, user_id, chat_id, data, created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (item_id, kind, user_id, chat_id,
+                 json.dumps(data, ensure_ascii=False) if data is not None else None, _iso(now)),
+            )
+
+    async def item_events(self, item_id: int) -> list[dict]:
+        cur = await self.db.conn.execute(
+            "SELECT * FROM item_events WHERE item_id=? ORDER BY id", (item_id,)
+        )
+        return [dict(r) for r in await cur.fetchall()]
 
     # --- housekeeping ---
 

@@ -620,3 +620,37 @@ CREATE INDEX IF NOT EXISTS idx_images_chat ON images(chat_id, created_at);
 CREATE VIRTUAL TABLE IF NOT EXISTS images_fts USING fts5(
     caption, prompt_ru, prompt_en, tokenize = 'unicode61 remove_diacritics 2'
 );
+
+-- Сюжетные предметы гостей (Этап 49.3, bot/interactives/items.py). Вид
+-- (type) — запись реестра в коде, здесь — экземпляр у владельца. Источник
+-- правды о владении — эта таблица; создают и меняют предметы только
+-- сценарии, не модель. traits — JSON-список ключей черт вида, image_id —
+-- портрет (images.purpose='item'; вырезка для вставки в сцены лежит на ноде
+-- llm под ключом params.cut_key портрета). note — что о предмете известно
+-- (у радио — поломка из финала сцены). Состояние переключателя — не
+-- здесь: у радио правда о речи — app_state user_effect:speech_clear.
+CREATE TABLE IF NOT EXISTS items (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    type           TEXT NOT NULL,
+    owner_user_id  INTEGER NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'owned'
+                   CHECK (status IN ('owned', 'in_transit', 'consumed')),
+    traits         TEXT NOT NULL DEFAULT '[]',
+    image_id       INTEGER,
+    origin         TEXT,
+    note           TEXT,
+    created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_items_owner ON items(owner_user_id, type);
+
+-- Журнал предмета: выдан, переключён, перерисован…
+CREATE TABLE IF NOT EXISTS item_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id    INTEGER NOT NULL,
+    kind       TEXT NOT NULL,
+    user_id    INTEGER,
+    chat_id    INTEGER,
+    data       TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_item_events_item ON item_events(item_id, id);

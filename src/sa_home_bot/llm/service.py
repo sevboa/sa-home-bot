@@ -20,6 +20,7 @@ import asyncio
 import base64
 import hashlib
 import io
+import json
 import logging
 import socket
 import time
@@ -33,7 +34,16 @@ from PIL import Image
 
 from sa_home_bot import __version__
 from sa_home_bot.config import LlmConfig, Settings
-from sa_home_bot.llm import image_prompt, imagegen, ollama, photo_check, stt, tts, vision
+from sa_home_bot.llm import (
+    image_prompt,
+    imagegen,
+    item_paste,
+    ollama,
+    photo_check,
+    stt,
+    tts,
+    vision,
+)
 from sa_home_bot.llm.model_profiles import REASON_LEVELS, ModelProfile, load_profiles
 from sa_home_bot.llm.prompt import (
     DEFAULT_PERSONA_PROMPT,
@@ -170,6 +180,17 @@ ACTION_TTS_DOWNLOAD_CHUNK = "tts_chunk"
 # нужны. Хранит картинку бот (БД на alfred), не эта нода: mycraft штатно
 # спит, а повторный показ не должен её будить.
 ACTION_GENERATE_IMAGE = "generate_image"
+
+# Этап 49.3: портрет сюжетного предмета (llm/item_paste.py). turbo рисует
+# готовую строку-архетип на сером фоне, зрение сверяет ``checks`` (промах —
+# следующее зерно, не больше ``attempts`` раз), вырезка ложится в
+# ``items_dir/{key}.png`` — её потом вставляет generate_image с ``paste``.
+ACTION_ITEM_PORTRAIT = "item_portrait"
+ITEM_PORTRAIT_MODEL = "turbo"
+# Вес фона — стенд 49.3.0: черты с весом (пыль) иначе перекрашивают фон, и
+# rembg уже не отделяет предмет.
+ITEM_PORTRAIT_BACKGROUND = "(isolated on plain light grey background)1.3"
+_ITEM_ATTEMPTS_MAX = 4
 
 # Этап 47: «чистая речь» гостя (llm/speech_therapy.py::clear_user_ids) —
 # бот переключает её, когда гость меняет «устройство связи» в интерактиве
@@ -316,6 +337,7 @@ def _imagegen_options(args: dict[str, Any]) -> dict[str, Any]:
     emphasize = args.get("emphasize")
     if not isinstance(emphasize, list):
         emphasize = []
+    paste = _paste_option(args.get("paste"), ref)
     return {
         "mode": mode,
         "context": context.strip() if isinstance(context, str) else "",
@@ -334,7 +356,62 @@ def _imagegen_options(args: dict[str, Any]) -> dict[str, Any]:
         "model": model,
         "loras": loras,
         "ref": ref,
+        "paste": paste,
     }
+
+
+def _restyle_option(raw: Any) -> dict[str, Any] | None:
+    """``restyle`` item_portrait: {model, loras: [[имя, вес]], strength,
+    prompt?} — перекраска портрета img2img (уровень проклятия). Кривое —
+    ProtoError, как и у generate_image."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ProtoError(ERR_BAD_REQUEST, "restyle — объект {model, loras, strength}")
+    options = _imagegen_options(
+        {"model": raw.get("model"), "loras": raw.get("loras"), "mode": "free"}
+    )
+    strength = _num(raw, "strength", float, 0.05, 0.9)
+    if strength is None:
+        raise ProtoError(ERR_BAD_REQUEST, "restyle.strength — число 0.05..0.9")
+    prompt = raw.get("prompt")
+    return {
+        "model": options["model"],
+        "loras": options["loras"],
+        "strength": strength,
+        "prompt": " ".join(prompt.split()) if isinstance(prompt, str) else "",
+    }
+
+
+def _paste_option(raw: Any, ref: Image.Image | None) -> dict[str, Any] | None:
+    """``paste`` generate_image (Этап 49.3): {key, place, width?, hint?} —
+    вставить вырезку предмета ``key`` в готовую сцену (llm/item_paste.py)."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ProtoError(ERR_BAD_REQUEST, "paste — объект {key, place}")
+    if ref is not None:
+        raise ProtoError(ERR_BAD_REQUEST, "paste не сочетается с образцом")
+    key = raw.get("key")
+    if not isinstance(key, str) or not item_paste.KEY_RE.match(key):
+        raise ProtoError(ERR_BAD_REQUEST, "paste.key — [a-z0-9_-], до 64 знаков")
+    place = raw.get("place") or "desk"
+    if place not in item_paste.PLACES:
+        raise ProtoError(ERR_BAD_REQUEST, f"paste.place — одно из {', '.join(item_paste.PLACES)}")
+    width = _num(raw, "width", float, 0.1, 1.0)
+    hint = raw.get("hint")
+    return {
+        "key": key,
+        "place": place,
+        "width": width,
+        "hint": " ".join(hint.split())[:200] if isinstance(hint, str) else "",
+    }
+
+def _jpeg_b64(image: Image.Image) -> str:
+    buf = io.BytesIO()
+    image.convert("RGB").save(buf, format="JPEG", quality=90)
+    return base64.b64encode(buf.getvalue()).decode()
+
 
 class LlmService:
     def __init__(
@@ -673,6 +750,28 @@ class LlmService:
                                 "Снимок Альфреда: сохранить 512-оригинал под этим "
                                 "ключом и сверить его зрением (ответ — поле inspect)"
                             ),
+                        ),
+                    ),
+                ),
+                ActionSpec(
+                    id=ACTION_ITEM_PORTRAIT,
+                    title="Портрет сюжетного предмета + вырезка для вставки в сцены",
+                    params=(
+                        ActionParam(
+                            name="prompt",
+                            type="string",
+                            required=True,
+                            title="Архетип и черты по-английски, веса compel «(…)1.3»",
+                        ),
+                        ActionParam(
+                            name="key", type="string", required=True, title="Ключ вырезки"
+                        ),
+                        ActionParam(name="seed", type="int", required=False, title="Зерно"),
+                        ActionParam(
+                            name="attempts",
+                            type="int",
+                            required=False,
+                            title="Сколько зёрен пробовать при промахе проверки",
                         ),
                     ),
                 ),
@@ -1073,6 +1172,9 @@ class LlmService:
             # Этап 49, отладочный /draw: режим, образец и ручные ручки. Чат
             # (tool generate_image) их не шлёт — там всё как было.
             options = _imagegen_options(args)
+            paste = options["paste"]
+            if paste is not None and not item_paste.cut_path(self._cfg, paste["key"]).exists():
+                raise ProtoError(ERR_BAD_REQUEST, f"нет вырезки предмета {paste['key']!r}")
             await self._touch(args.get("chat_id"))
             prompt_seconds = 0.0
             if source is not None:
@@ -1095,6 +1197,8 @@ class LlmService:
                     prompt = source
             if not options["raw"]:
                 negative = negative or self._cfg.imagegen_negative
+                if paste is not None and paste["place"] == "desk":
+                    prompt = f"{item_paste.DESK_COMPOSITION}, {prompt.strip()}"
             try:
                 result = await imagegen.generate_image(
                     prompt.strip(),
@@ -1121,6 +1225,9 @@ class LlmService:
             except Exception:
                 log.warning("imagegen: не удалось сгенерировать картинку", exc_info=True)
                 raise ProtoError(ERR_INTERNAL, "не удалось нарисовать картинку") from None
+            item_box = None
+            if options["paste"] is not None:
+                result, item_box = await self._paste_item(result, options)
             inspection = await self._inspect_snapshot(args, result.get("original"))
             return {
                 **({"inspect": inspection} if inspection is not None else {}),
@@ -1138,7 +1245,12 @@ class LlmService:
                 "colors": result.get("colors"),
                 "model": result.get("model"),
                 "loras": result.get("loras"),
+                **({"item_box": list(item_box)} if item_box is not None else {}),
             }
+        if action == ACTION_ITEM_PORTRAIT:
+            if not self._cfg.imagegen_enabled:
+                raise ProtoError(ERR_BAD_REQUEST, "генерация картинок на этой ноде выключена")
+            return await self._item_portrait(args)
         if action == ACTION_TTS_DOWNLOAD_CHUNK:
             session_id = args.get("session_id")
             offset = args.get("offset")
@@ -1182,6 +1294,221 @@ class LlmService:
             return {"asleep": False}
         # Сервер валидирует action по describe — сюда неизвестное не доходит.
         raise ValueError(f"необъявленное действие: {action}")
+
+    async def _paste_item(
+        self, scene: dict[str, Any], options: dict[str, Any]
+    ) -> tuple[dict[str, Any], tuple[int, int, int, int]]:
+        """Готовая сцена → вставка вырезки предмета → img2img той же моделью
+        (LoRA настроения ослаблена до ``item_mood_lora_weight``) → предмет
+        по маске поверх (llm/item_paste.py). Возвращает результат
+        generate_image с подменёнными картинкой и временем и рамку предмета."""
+        paste = options["paste"]
+        path = item_paste.cut_path(self._cfg, paste["key"])
+        cut = await asyncio.to_thread(lambda: Image.open(path).convert("RGBA"))
+        where = item_paste.PLACEMENTS[paste["place"]]
+        if paste["place"] == "desk":
+            where = await self._desk_placement(scene["original"]) or where
+        if paste["width"] is not None:
+            where = replace(where, width=paste["width"] * scene["original"].width)
+        pasted, mask, box = await asyncio.to_thread(
+            item_paste.paste, scene["original"], cut, where
+        )
+        prompt = scene["prompt"]
+        if paste["hint"]:
+            prompt = f"{prompt}, {paste['hint']}"
+        weight = self._cfg.item_mood_lora_weight
+        try:
+            harmonized = await imagegen.generate_image(
+                prompt,
+                scene["full_negative"],
+                self._cfg,
+                seed=scene["seed"],
+                ref=pasted,
+                strength=self._cfg.item_harmonize_strength,
+                style=options["style"] and not options["raw"],
+                fit=not options["raw"],
+                size=options["size"],
+                colors=options["colors"],
+                model=options["model"],
+                loras=[(name, weight) for name, _ in options["loras"]] if weight > 0 else [],
+            )
+        except Exception:
+            log.warning("imagegen: вставка предмета не удалась", exc_info=True)
+            raise ProtoError(ERR_INTERNAL, "не удалось нарисовать картинку") from None
+        final = await asyncio.to_thread(
+            item_paste.restore, harmonized["original"], pasted, mask
+        )
+        png, width, height = imagegen.shrink_to_png(
+            final,
+            options["size"] or self._cfg.imagegen_size,
+            self._cfg.imagegen_colors if options["colors"] is None else options["colors"],
+        )
+        log.info(
+            "imagegen: предмет %s (%s) вставлен в %s за %.1fс",
+            paste["key"], paste["place"], box, harmonized["seconds"],
+        )
+        return {
+            **scene,
+            "png": png,
+            "width": width,
+            "height": height,
+            "original": final,
+            "seconds": scene["seconds"] + harmonized["seconds"],
+        }, box
+
+    async def _desk_placement(self, scene: Image.Image) -> item_paste.Placement | None:
+        """Где на общем виде столешница — спросить зрение. Сбой — None."""
+        try:
+            image_b64 = await asyncio.to_thread(_jpeg_b64, scene)
+            result = await ollama.chat(
+                self._cfg,
+                [{"role": "user", "content": item_paste.DESK_BOX_QUESTION, "images": [image_b64]}],
+                item_paste.DESK_BOX_SYSTEM,
+                tools=None,
+                think=self._profile.think_arg("off"),
+                response_format="json",
+                options={"temperature": 0, "num_predict": 128},
+            )
+            data = json.loads(result.get("message", {}).get("content", ""))
+        except Exception:
+            log.warning("imagegen: рамку стола не узнать", exc_info=True)
+            return None
+        box = data.get(item_paste.DESK_BOX_KEY) if isinstance(data, dict) else None
+        where = item_paste.desk_placement(box, scene.width)
+        log.info("imagegen: стол %s → %s", box, where)
+        return where
+
+    async def _item_portrait(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Портрет предмета: turbo на сером фоне, сверка ``checks`` зрением,
+        при промахе — следующее зерно; лучший кадр (меньше промахов) режется
+        rembg и ложится в ``items_dir/{key}.png``."""
+        prompt = args.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ProtoError(ERR_BAD_REQUEST, "нужен непустой prompt")
+        key = args.get("key")
+        if not isinstance(key, str) or not item_paste.KEY_RE.match(key):
+            raise ProtoError(ERR_BAD_REQUEST, "key — [a-z0-9_-], до 64 знаков")
+        seed = _num(args, "seed", int, 0, 2**32 - 1)
+        if seed is None:
+            seed = int.from_bytes(uuid.uuid4().bytes[:4], "big")
+        attempts = _num(args, "attempts", int, 1, _ITEM_ATTEMPTS_MAX) or 3
+        _restyle_option(args.get("restyle"))  # кривое — отказ до рисования
+        raw_checks = args.get("checks")
+        checks = [
+            " ".join(c.split())
+            for c in (raw_checks if isinstance(raw_checks, list) else [])
+            if isinstance(c, str) and c.strip()
+        ][:5]
+        await self._touch(args.get("chat_id"))
+        full = f"{' '.join(prompt.split())}, {ITEM_PORTRAIT_BACKGROUND}"
+        best: tuple[dict[str, Any], dict[str, Any] | None] | None = None
+        spent = 0.0
+        tried = 0
+        loop = asyncio.get_running_loop()
+        think = self._profile.think_arg("off")
+        for n in range(attempts):
+            tried = n + 1
+            # 49.3.4: черновик после 1-го шага turbo проверяется до шага 2 и
+            # VAE; последняя попытка рисуется целиком в любом случае.
+            preview_check = self._cfg.item_preview_check and bool(checks) and n < attempts - 1
+            verdict: dict[str, Any] = {}
+
+            def preview(image: Image.Image, verdict: dict[str, Any] = verdict) -> bool:
+                future = asyncio.run_coroutine_threadsafe(
+                    photo_check.inspect(_jpeg_b64(image), checks, self._cfg, think=think), loop
+                )
+                try:
+                    inspection = future.result(timeout=self._cfg.request_timeout_s)
+                except Exception:
+                    log.warning("imagegen: черновик %s не проверен", key, exc_info=True)
+                    return True
+                verdict["inspection"] = inspection
+                return not inspection or not inspection["missing"]
+
+            started = time.monotonic()
+            try:
+                # Архетип с чертами — проверенная строка с весами compel
+                # («(rust)1.3»), без подрезки под 77 токенов: подрезка по
+                # тегам срезала бы черты и фон, а без серого фона не вырезать.
+                result = await imagegen.generate_image(
+                    full,
+                    self._cfg.imagegen_negative,
+                    self._cfg,
+                    seed=(seed + n) % 2**32,
+                    model=ITEM_PORTRAIT_MODEL,
+                    fit=False,
+                    weighted=True,
+                    preview=preview if preview_check else None,
+                )
+            except imagegen.PreviewRejected:
+                spent += time.monotonic() - started
+                missing = (verdict.get("inspection") or {}).get("missing")
+                log.info("imagegen: черновик %s, зерно %s: нет %s", key, seed + n, missing)
+                continue
+            except Exception:
+                log.warning("imagegen: портрет предмета %s не нарисован", key, exc_info=True)
+                raise ProtoError(ERR_INTERNAL, "не удалось нарисовать предмет") from None
+            spent += result["seconds"]
+            inspection = verdict.get("inspection")
+            if checks and inspection is None:
+                image_b64 = await asyncio.to_thread(_jpeg_b64, result["original"])
+                inspection = await photo_check.inspect(image_b64, checks, self._cfg, think=think)
+            misses = len(inspection["missing"]) if inspection else 0
+            if best is None or misses < len(best[1]["missing"] if best[1] else []):
+                best = (result, inspection)
+            if misses == 0:
+                break
+            log.info("imagegen: портрет %s, зерно %s: нет %s", key, result["seed"],
+                     inspection["missing"] if inspection else [])
+        assert best is not None
+        result, inspection = best
+        restyle = _restyle_option(args.get("restyle"))
+        if restyle is not None:
+            # «Уровень проклятия» (стенд 49.3.0): тот же портрет перекрашивается
+            # img2img моделью с LoRA настроения — облик узнаваем, а гниль и
+            # свечение нарастают с силой. Проверка признаков — по исходному.
+            try:
+                cursed = await imagegen.generate_image(
+                    f"{restyle['prompt'] or prompt}, isolated on plain light grey background",
+                    self._cfg.imagegen_negative,
+                    self._cfg,
+                    seed=result["seed"],
+                    ref=result["original"],
+                    strength=restyle["strength"],
+                    model=restyle["model"],
+                    loras=restyle["loras"],
+                    fit=False,
+                )
+            except Exception:
+                log.warning("imagegen: перекраска предмета %s не удалась", key, exc_info=True)
+            else:
+                spent += cursed["seconds"]
+                result = {**cursed, "seed": result["seed"]}
+        path = item_paste.cut_path(self._cfg, key)
+
+        def _save() -> None:
+            cut = item_paste.cut_out(result["original"], self._cfg)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            cut.save(path, format="PNG")
+
+        try:
+            await asyncio.to_thread(_save)
+        except Exception:
+            log.warning("imagegen: вырезка предмета %s не удалась", key, exc_info=True)
+            raise ProtoError(ERR_INTERNAL, "не удалось вырезать предмет") from None
+        log.info("imagegen: портрет %s готов (%d попыток, %.1fс)", key, tried, spent)
+        return {
+            "png_b64": base64.b64encode(result["png"]).decode(),
+            "width": result["width"],
+            "height": result["height"],
+            "seed": result["seed"],
+            "attempts": tried,
+            "seconds": round(spent, 1),
+            "full_prompt": result.get("full_prompt"),
+            "seen": inspection["description"] if inspection else "",
+            "missing": inspection["missing"] if inspection else [],
+            "answers": inspection.get("answers", {}) if inspection else {},
+        }
 
     async def _inspect_snapshot(
         self, args: dict[str, Any], original: Any

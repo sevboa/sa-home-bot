@@ -1196,6 +1196,19 @@ async def tool_swap_radio(ctx: ToolContext, _args: dict[str, Any]) -> str:
     )
 
 
+async def tool_show_items(ctx: ToolContext, _args: dict[str, Any]) -> str:
+    """Особенные вещи собеседника (Этап 49.3, bot/interactives/items.py):
+    карточки с картинкой и кнопкой приходят сами, модели — что показано."""
+    if ctx.interactives is None:
+        return interactive_radio.TOOL_ITEMS_UNAVAILABLE
+    return await ctx.interactives.tool_show_items(
+        ctx.chat_id,
+        ctx.user_id,
+        message_thread_id=ctx.message_thread_id,
+        trigger_message_id=ctx.trigger_message_id,
+    )
+
+
 async def tool_take_photo(ctx: ToolContext, args: dict[str, Any]) -> str:
     """Снимок кабинета Альфреда (Этап 49.2, bot/interactives/cabinet.py) —
     вся логика в Interactives.tool_take_photo. Рисуется в фоне и приходит
@@ -4062,6 +4075,13 @@ TOOLS: tuple[ToolSpec, ...] = (
         name="take_photo",
         handler=tool_take_photo,
         declaration=interactive_cabinet.TAKE_PHOTO_DECLARATION,
+    ),
+    # Вещи собеседника (Этап 49.3) — без requires: показывает только его же
+    # предметы, выданные сценками.
+    ToolSpec(
+        name="show_items",
+        handler=tool_show_items,
+        declaration=interactive_radio.SHOW_ITEMS_DECLARATION,
     ),
     # Картинки (Этап 48). generate_image — право generate_image@llm в форме
     # «действие@служба» на ту же службу llm, что рисует (llm/imagegen.py на

@@ -48,6 +48,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sa_home_bot.bot import image_tools
 from sa_home_bot.bot.interactives import cabinet as cabinet_mod
+from sa_home_bot.bot.interactives import items as items_mod
 from sa_home_bot.bot.interactives import radio
 from sa_home_bot.bot.interactives.base import (
     STATUS_ACTIVE,
@@ -139,6 +140,27 @@ MOOD_PRESETS: dict[str, tuple[str, str, float]] = {
     "eldritch": ("ghostmix", "eldritch", 0.8),
 }
 
+# Сюжетные предметы (Этап 49.3, items.py). Карточка предмета — фото с
+# кнопкой «it:<id предмета>:<кнопка>»; портрет рисует служба llm
+# (item_portrait), в кадры он вставляется пикселями (generate_image, paste).
+ITEM_CALLBACK_PREFIX = "it"
+# Кнопка несёт намерение, а не «переключить»: речь можно сменить и формами
+# swap_radio, тогда надпись на старой карточке устарела бы.
+ITEM_BTN_PUT = "p"
+ITEM_BTN_REMOVE = "r"
+ITEM_PURPOSE = "item"
+ACTION_ITEM_PORTRAIT = "item_portrait"
+ITEMS_SHOWN_MAX = 3
+# Новый передатчик (после смены) — один на всех: обычный архетип без черт,
+# зерно из стенда (b1_33). Готовность вырезки — флаг в app_state.
+NEW_RADIO_CUT_KEY = "radio-new"
+NEW_RADIO_SEED = 33
+NEW_RADIO_READY_KEY = "item_cut_ready:radio-new"
+# Крупный план предмета: фон без предмета (его вставят) — иначе промптер
+# нарисует второй, свой передатчик.
+ITEM_CLOSEUP_RU = "Крупный план: пустая столешница старого письменного стола"
+ITEM_PENDING_TAG = "pending"
+
 OPT_IN_TEXT = "Интерактивы в этом чате включены."
 OPT_OUT_TEXT = "Интерактивы в этом чате выключены. Включить — /interactives on."
 
@@ -180,6 +202,53 @@ def swap_keyboard(scenario: str) -> InlineKeyboardMarkup:
 
 def toggle_keyboard(scenario: str, button: str, label: str) -> InlineKeyboardMarkup:
     return _keyboard(scenario, [[(label, button), ("Оставить как есть", BTN_TOGGLE_KEEP)]])
+
+
+def item_keyboard(item_id: int, installed: bool) -> InlineKeyboardMarkup:
+    label, button = (
+        (radio.ITEM_REMOVE_LABEL, ITEM_BTN_REMOVE)
+        if installed
+        else (radio.ITEM_PUT_LABEL, ITEM_BTN_PUT)
+    )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=label, callback_data=f"{ITEM_CALLBACK_PREFIX}:{item_id}:{button}"
+                )
+            ]
+        ]
+    )
+
+
+def parse_item_callback(data: str | None) -> tuple[int, str] | None:
+    if not data:
+        return None
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != ITEM_CALLBACK_PREFIX or not parts[1].isdigit():
+        return None
+    return int(parts[1]), parts[2]
+
+
+def grow_item(
+    kind: items_mod.ItemKind,
+    run: Run,
+    decision: DirectorDecision | None,
+    *,
+    key_moment: bool,
+) -> str | None:
+    """Новая черта предмета сцены за ход: от Ведущего (уже проверена по
+    словарю вида), а если он промолчал на переходе стадии или в финале —
+    следующая по лестнице. Не больше одной за ход. Возвращает добавленную."""
+    new = decision.item_trait if decision is not None else None
+    if new in run.item_traits:
+        new = None
+    if new is None and key_moment:
+        new = kind.next_trait(run.item_traits)
+    if new is None:
+        return None
+    run.item_traits.append(new)
+    return new
 
 
 def finale_allowed(scenario: Scenario, run: Run) -> bool:
@@ -255,6 +324,11 @@ def build_scene_note(scenario: Scenario, run: Run, place: str | None = None) -> 
     parts = [scenario.scene_frame]
     if place:
         parts.append(f"Где ты: {place}")
+    kind = items_mod.KINDS.get(scenario.item_kind or "")
+    if kind is not None and run.item_traits:
+        parts.append(
+            "Как сейчас выглядит передатчик: " + "; ".join(kind.traits_ru(run.item_traits)) + "."
+        )
     if run.finale:
         parts.append(scenario.finale_directive.format(fault=run.finale_fault))
     else:
@@ -295,6 +369,17 @@ class TurnPlan:
 @dataclass
 class _Queued:
     forms: list[tuple[str, str]] = field(default_factory=list)  # (сценарий, форма)
+
+
+@dataclass(frozen=True)
+class _ItemShot:
+    """Предмет в кадре: вырезка ``key`` на ноде llm, место ``place``,
+    ``tag`` — версия облика (для ключа повторного показа общего вида)."""
+
+    kind: items_mod.ItemKind
+    key: str
+    place: str
+    tag: str
 
 
 class Interactives:
@@ -451,9 +536,15 @@ class Interactives:
         if effect:
             run.log("Событие", effect)
             run.pending_effect = effect
-        focus = scene_photo_focus(
-            run, decision, key_moment=run.stage != stage_before or run.finale != finale_before
-        )
+        key_moment = run.stage != stage_before or run.finale != finale_before
+        kind = items_mod.KINDS.get(scenario.item_kind or "")
+        if kind is not None and run.status == STATUS_ACTIVE:
+            if run.item_seed is None:
+                run.item_seed = items_mod.new_seed()
+            trait = grow_item(kind, run, decision, key_moment=key_moment)
+            if trait is not None:
+                log.info("interactives: у передатчика новая черта %r (chat=%s)", trait, run.chat_id)
+        focus = scene_photo_focus(run, decision, key_moment=key_moment)
         if (
             focus is not None
             and run.status == STATUS_ACTIVE
@@ -565,6 +656,8 @@ class Interactives:
             return radio.TOOL_PINNED
         scenario = radio.RADIO
         if await self._state.is_completed(scenario.id, user_id):
+            # Прошедшим сцену до Этапа 49.3 — старое радио предметом.
+            await self._owned_item(user_id, items_mod.RADIO)
             if await self.speech_clear(user_id):
                 self._queue(chat_id, scenario.id, FORM_RETURN)
                 return radio.TOOL_RETURN_FORM
@@ -630,7 +723,10 @@ class Interactives:
             await cabinet_mod.save(self._store, cab)
         happening = run.last_effect if in_scene else None
         mood = run.mood if in_scene else None
-        reuse_key = cab.state_key(outside.key) if cab.features else None
+        reuse_key = None
+        if cab.features:
+            shot = await self._item_shot(chat_id, user_id, "", draw=False)
+            reuse_key = photo_state_key(cab, outside, shot)
         if not focus and not happening and not expect and reuse_key in cab.photos:
             image = await self._store.image_by_id(cab.photos[reuse_key])
             if image is not None and image["telegram_file_id"]:
@@ -780,7 +876,15 @@ class Interactives:
             )
             if cab.add(list(new)):
                 await cabinet_mod.save(self._store, cab)
-        description, context = photo_description(cab, outside, focus, happening)
+        shot = await self._item_shot(chat_id, user_id, focus, draw=True)
+        description, context = photo_description(
+            cab,
+            outside,
+            focus,
+            happening,
+            item=shot.kind if shot else None,
+            item_place=shot.place if shot else None,
+        )
         request: dict[str, Any] = {
             "description": description,
             "mode": "scene" if focus else "free",
@@ -801,6 +905,9 @@ class Interactives:
             model, lora, weight = preset
             request["model"] = model
             request["loras"] = [[lora, weight]]
+        if shot is not None:
+            # Этап 49.3: предмет — пикселями поверх готовой сцены.
+            request["paste"] = {"key": shot.key, "place": shot.place, "hint": shot.kind.paste_hint}
         try:
             result = await node_link.command(
                 image_tools.ACTION_GENERATE_IMAGE,
@@ -810,12 +917,16 @@ class Interactives:
             )
         except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
             log.warning("interactives: снимок не нарисован (chat=%s): %s", chat_id, exc)
+            if shot is not None and isinstance(exc, ProtoError):
+                # Вырезки могло не оказаться на ноде (сменили диск, почистили
+                # каталог) — следующий снимок нарисует портрет заново.
+                await self._forget_item_cut(chat_id, user_id, shot)
             return
         png = base64.b64decode(result["png_b64"])
         inspection = result.get("inspect") if isinstance(result.get("inspect"), dict) else None
         seen = str(inspection.get("description") or "") if inspection else ""
         missing = [m for m in (inspection or {}).get("missing") or [] if isinstance(m, str)]
-        state = cab.state_key(outside.key)
+        state = photo_state_key(cab, outside, shot)
         image_id = await self._store.add_image(
             chat_id=chat_id,
             author=None,
@@ -873,7 +984,7 @@ class Interactives:
                 return
         if not focus and not happening:
             cab = await cabinet_mod.load(self._store, user_id)
-            cab.remember_photo(cab.state_key(outside.key), image_id)
+            cab.remember_photo(photo_state_key(cab, outside, shot), image_id)
             await cabinet_mod.save(self._store, cab)
 
     async def _end_scene_in_cabinet(self, user_id: int) -> None:
@@ -1014,6 +1125,11 @@ class Interactives:
             await self._state.save_run(run)
             await self._end_scene_in_cabinet(user_id)
             await self._speak(chat_id, radio.AFTER_SWAP_DIRECTIVE, where)
+            if scenario.item_kind in items_mod.KINDS:
+                self._spawn(
+                    self._grant_item(chat_id, user_id, run, where.get("message_thread_id")),
+                    "выдача предмета",
+                )
             return "Готово.", radio.SWAP_ACCEPTED_TEXT, True
         if button in (BTN_RETURN_OLD, BTN_INSTALL_NEW, BTN_TOGGLE_KEEP):
             if not await self._state.is_completed(scenario.id, user_id):
@@ -1116,6 +1232,350 @@ class Interactives:
         except (ServiceUnavailableError, ProtoError) as exc:
             log.info("interactives: реплика после смены не поставлена (chat=%s): %s", chat_id, exc)
 
+    # --- сюжетные предметы (Этап 49.3) ---
+
+    def _spawn(self, coro: Awaitable[Any], what: str) -> None:
+        async def run() -> None:
+            try:
+                await coro
+            except Exception:
+                log.exception("interactives: %s не удалась", what)
+
+        task = asyncio.create_task(run())
+        self._photo_tasks.add(task)
+        task.add_done_callback(self._photo_tasks.discard)
+
+    async def _portrait(
+        self, chat_id: int, key: str, kind: items_mod.ItemKind, traits: list[str], seed: int
+    ) -> dict[str, Any] | None:
+        """Портрет предмета на ноде llm (item_portrait): рисунок + вырезка
+        для вставки. None — не вышло (кадры идут без предмета)."""
+        node_link = self._get_node_link()
+        if node_link is None:
+            return None
+        try:
+            result = await node_link.command(
+                ACTION_ITEM_PORTRAIT,
+                {
+                    "prompt": kind.portrait_prompt(traits),
+                    "key": key,
+                    "seed": seed,
+                    "checks": list(kind.checks),
+                    "chat_id": chat_id,
+                    **({"restyle": restyle} if (restyle := kind.restyle(traits)) else {}),
+                },
+                dst=Address(node=LLM_NODE, service=LLM_SERVICE),
+                timeout=self._settings.llm.imagegen_request_timeout_s,
+            )
+        except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
+            log.warning("interactives: портрет %s не нарисован (chat=%s): %s", key, chat_id, exc)
+            return None
+        if not isinstance(result, dict) or not result.get("png_b64"):
+            return None
+        log.info(
+            "interactives: портрет %s, зерно %s, черты %s, нет %s",
+            key, result.get("seed"), traits, result.get("missing"),
+        )
+        return result
+
+    async def _save_portrait(
+        self,
+        chat_id: int,
+        kind: items_mod.ItemKind,
+        key: str,
+        traits: list[str],
+        result: dict[str, Any],
+    ) -> int:
+        png = base64.b64decode(result["png_b64"])
+        return await self._store.add_image(
+            chat_id=chat_id,
+            author=None,
+            prompt_ru=" ".join([kind.name, *kind.traits_ru(traits)]),
+            prompt_en=str(result.get("full_prompt") or kind.portrait_prompt(traits)),
+            caption=kind.name,
+            width=int(result.get("width") or 0),
+            height=int(result.get("height") or 0),
+            colors=self._settings.llm.imagegen_colors,
+            png=png,
+            now=self._now(),
+            purpose=ITEM_PURPOSE,
+            params=json.dumps(
+                {
+                    "cut_key": key,
+                    "seed": result.get("seed"),
+                    "traits": traits,
+                    "seen": result.get("seen"),
+                    "missing": result.get("missing"),
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+    async def _owned_item(self, user_id: int, kind: items_mod.ItemKind) -> dict[str, Any] | None:
+        """Предмет вида у гостя. Прошедшим сцену до Этапа 49.3 он выдаётся
+        здесь же (ленивая выдача): обычное радио без черт, портрет — когда
+        понадобится."""
+        owned = await self._store.items_of(user_id, kind.type)
+        if owned:
+            return owned[0]
+        if kind.type != items_mod.RADIO_TYPE or not await self._state.is_completed(
+            radio.SCENARIO_ID, user_id
+        ):
+            return None
+        item_id = await self._store.add_item(
+            type=kind.type,
+            owner_user_id=user_id,
+            traits=[],
+            image_id=None,
+            origin="radio_scene_before_items",
+            now=self._now(),
+        )
+        log.info("interactives: гостю %s выдано радио задним числом (#%s)", user_id, item_id)
+        return await self._store.item_by_id(item_id)
+
+    async def _item_cut(
+        self, chat_id: int, item: dict[str, Any], kind: items_mod.ItemKind, *, draw: bool
+    ) -> tuple[str, int] | None:
+        """(ключ вырезки, id портрета) предмета; нет портрета — нарисовать
+        (``draw``), иначе None."""
+        if item.get("image_id"):
+            image = await self._store.image_by_id(int(item["image_id"]))
+            key = _image_params(image).get("cut_key") if image else None
+            if isinstance(key, str) and key:
+                return key, int(item["image_id"])
+        if not draw:
+            return None
+        key = items_mod.new_cut_key(kind, int(item["owner_user_id"]))
+        result = await self._portrait(chat_id, key, kind, item["traits"], items_mod.new_seed())
+        if result is None:
+            return None
+        image_id = await self._save_portrait(chat_id, kind, key, item["traits"], result)
+        await self._store.set_item_image(int(item["id"]), image_id, item["traits"])
+        item["image_id"] = image_id
+        return key, image_id
+
+    async def _item_shot(
+        self, chat_id: int, user_id: int, focus: str, *, draw: bool
+    ) -> _ItemShot | None:
+        """Какой предмет вставить в кадр кабинета. Общий вид — радио на
+        столе, кадр «про передатчик» — крупно; прочие крупные планы — без
+        предмета. Источник облика: идущая сцена (черты копятся), иначе
+        предмет гостя — старое радио, если стоит, или новое, если старое
+        убрано. ``draw=False`` — только узнать версию облика, ничего не
+        рисуя: портрета ещё нет — метка ``ITEM_PENDING_TAG`` (прежний
+        снимок без предмета повторно не покажется)."""
+        kind = items_mod.RADIO
+        if focus and not kind.focus_re.search(focus):
+            return None
+        place = "closeup" if focus else "desk"
+        run = await self._state.load_run(chat_id, radio.SCENARIO_ID)
+        if run is not None and run.status == STATUS_ACTIVE and run.item_seed is not None:
+            drawn = list(kind.drawn_key(run.item_traits))
+            if run.item_key is None or run.item_drawn != drawn:
+                if not draw:
+                    return _ItemShot(kind, "", place, ITEM_PENDING_TAG)
+                key = run.item_key or items_mod.new_cut_key(kind, user_id)
+                result = await self._portrait(chat_id, key, kind, run.item_traits, run.item_seed)
+                if result is None:
+                    return None
+                # Перечитываем: ход сцены мог сохранить Run, пока шёл портрет.
+                fresh = await self._state.load_run(chat_id, radio.SCENARIO_ID) or run
+                fresh.item_key, fresh.item_drawn = key, drawn
+                if isinstance(result.get("seed"), int):
+                    fresh.item_seed = result["seed"]
+                await self._state.save_run(fresh)
+                run = fresh
+            return _ItemShot(kind, str(run.item_key), place, f"{run.item_key}:{','.join(drawn)}")
+        item = await self._owned_item(user_id, kind)
+        if item is None:
+            return None
+        if await self.speech_clear(user_id):
+            # Старое радио убрано — на столе новый передатчик, один на всех.
+            if not await self._store.get_state(NEW_RADIO_READY_KEY):
+                if not draw:
+                    return _ItemShot(kind, "", place, ITEM_PENDING_TAG)
+                result = await self._portrait(chat_id, NEW_RADIO_CUT_KEY, kind, [], NEW_RADIO_SEED)
+                if result is None:
+                    return None
+                await self._store.set_state(NEW_RADIO_READY_KEY, iso(self._now()))
+            return _ItemShot(kind, NEW_RADIO_CUT_KEY, place, NEW_RADIO_CUT_KEY)
+        cut = await self._item_cut(chat_id, item, kind, draw=draw)
+        if cut is None:
+            return None if draw else _ItemShot(kind, "", place, ITEM_PENDING_TAG)
+        key, image_id = cut
+        return _ItemShot(kind, key, place, f"item{item['id']}:{image_id}")
+
+    async def _forget_item_cut(self, chat_id: int, user_id: int, shot: _ItemShot) -> None:
+        if shot.key == NEW_RADIO_CUT_KEY:
+            await self._store.set_state(NEW_RADIO_READY_KEY, "")
+            return
+        run = await self._state.load_run(chat_id, radio.SCENARIO_ID)
+        if run is not None and run.item_key == shot.key:
+            run.item_drawn = ["-"]  # не совпадёт ни с каким набором — перерисуем
+            await self._state.save_run(run)
+
+    async def _grant_item(
+        self, chat_id: int, user_id: int, run: Run, message_thread_id: int | None
+    ) -> None:
+        """Финал сцены: старый передатчик со всеми чертами — гостю, карточкой."""
+        kind = items_mod.KINDS[REGISTRY[run.scenario].item_kind or ""]
+        if await self._store.items_of(user_id, kind.type):
+            return  # уже выдан (повторная сцена в другом чате)
+        key = run.item_key or items_mod.new_cut_key(kind, user_id)
+        seed = run.item_seed if run.item_seed is not None else items_mod.new_seed()
+        result = await self._portrait(chat_id, key, kind, run.item_traits, seed)
+        image_id = None
+        if result is not None:
+            image_id = await self._save_portrait(chat_id, kind, key, run.item_traits, result)
+        item_id = await self._store.add_item(
+            type=kind.type,
+            owner_user_id=user_id,
+            traits=list(run.item_traits),
+            image_id=image_id,
+            origin="radio_scene",
+            now=self._now(),
+            note=run.finale_fault,
+        )
+        item = await self._store.item_by_id(item_id)
+        if item is not None:
+            await self._send_item_card(chat_id, user_id, item, message_thread_id=message_thread_id)
+
+    async def _send_item_card(
+        self,
+        chat_id: int,
+        user_id: int,
+        item: dict[str, Any],
+        *,
+        message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> bool:
+        kind = items_mod.KINDS.get(item["type"])
+        if kind is None:
+            return False
+        installed = not await self.speech_clear(user_id)
+        caption = item_caption(kind, item, installed)
+        markup = item_keyboard(int(item["id"]), installed)
+        image = await self._store.image_by_id(int(item["image_id"])) if item["image_id"] else None
+        if image is None or not hasattr(self._notifier, "send_photo_ex"):
+            message_id = await self._notifier.send_direct(
+                chat_id, caption, reply_markup=markup, message_thread_id=message_thread_id
+            )
+            return message_id is not None
+        photo: bytes | str = image["telegram_file_id"] or image_tools.upscale_png(
+            image["png"], self._settings.llm.imagegen_display_px
+        )
+        sent = await self._notifier.send_photo_ex(
+            chat_id,
+            photo,
+            caption=caption,
+            message_thread_id=message_thread_id,
+            reply_to_message_id=reply_to_message_id,
+            reply_markup=markup,
+        )
+        if sent is None:
+            return False
+        if not image["telegram_file_id"]:
+            await self._store.set_image_sent(int(image["id"]), sent[1], sent[0])
+        return True
+
+    async def tool_show_items(
+        self,
+        chat_id: int | None,
+        user_id: int | None,
+        *,
+        message_thread_id: int | None = None,
+        trigger_message_id: int | None = None,
+    ) -> str:
+        """Тул show_items: карточки предметов собеседника. Портрета ещё нет
+        (выдано задним числом) — рисуется в фоне, карточка придёт сама."""
+        if chat_id is None or user_id is None:
+            return radio.TOOL_ITEMS_UNAVAILABLE
+        item = await self._owned_item(user_id, items_mod.RADIO)
+        owned = await self._store.items_of(user_id) if item is not None else []
+        if not owned:
+            return radio.TOOL_ITEMS_NONE
+        names, drawing = [], []
+        for it in owned[:ITEMS_SHOWN_MAX]:
+            kind = items_mod.KINDS.get(it["type"])
+            if kind is None:
+                continue
+            if it["image_id"]:
+                await self._send_item_card(
+                    chat_id,
+                    user_id,
+                    it,
+                    message_thread_id=message_thread_id,
+                    reply_to_message_id=trigger_message_id,
+                )
+                names.append(kind.name)
+            else:
+                drawing.append(kind.name)
+                self._spawn(
+                    self._draw_and_send_card(chat_id, user_id, it, kind, message_thread_id),
+                    "карточка предмета",
+                )
+        if drawing and not names:
+            return radio.TOOL_ITEMS_DRAWING.format(items=", ".join(drawing))
+        return radio.TOOL_ITEMS_SENT.format(items=", ".join(names + drawing))
+
+    async def _draw_and_send_card(
+        self,
+        chat_id: int,
+        user_id: int,
+        item: dict[str, Any],
+        kind: items_mod.ItemKind,
+        message_thread_id: int | None,
+    ) -> None:
+        await self._item_cut(chat_id, item, kind, draw=True)
+        await self._send_item_card(chat_id, user_id, item, message_thread_id=message_thread_id)
+
+    async def handle_item_click(
+        self,
+        chat_id: int,
+        user_id: int,
+        item_id: int,
+        button: str,
+        *,
+        message_id: int | None = None,
+        message_thread_id: int | None = None,
+    ) -> tuple[str, InlineKeyboardMarkup | None, str | None]:
+        """Кнопка карточки предмета. Возвращает (текст для callback.answer,
+        новая клавиатура, новая подпись) — None: не трогать."""
+        item = await self._store.item_by_id(item_id)
+        if item is None or int(item["owner_user_id"]) != user_id:
+            return radio.ITEM_NOT_YOURS, None, None
+        kind = items_mod.KINDS.get(item["type"])
+        if button not in (ITEM_BTN_PUT, ITEM_BTN_REMOVE) or kind is None:
+            return "Неизвестная кнопка.", None, None
+        if self._pinned(chat_id):
+            return radio.ITEM_PINNED, None, None
+        # Предмет — старый, проклятый передатчик: стоит он — картавость
+        # есть (speech_clear выключен). Кнопка ставит его или убирает.
+        installed = button == ITEM_BTN_PUT
+        if installed == (not await self.speech_clear(user_id)):
+            caption = item_caption(kind, item, installed)
+            return "Уже так.", item_keyboard(item_id, installed), caption
+        await self._set_clear(chat_id, user_id, not installed)
+        await self._store.add_item_event(
+            item_id,
+            "installed" if installed else "removed",
+            user_id=user_id,
+            chat_id=chat_id,
+            data=None,
+            now=self._now(),
+        )
+        where = await self._where(chat_id, message_id, message_thread_id)
+        await self._speak(
+            chat_id,
+            radio.AFTER_RETURN_DIRECTIVE if installed else radio.AFTER_SWAP_DIRECTIVE,
+            where,
+        )
+        return (
+            "Поставлено." if installed else "Убрано.",
+            item_keyboard(item_id, installed),
+            item_caption(kind, item, installed),
+        )
+
     # --- запрет в переписке ---
 
     async def set_opted_out(self, chat_id: int, opted_out: bool) -> None:
@@ -1123,6 +1583,28 @@ class Interactives:
 
     async def is_opted_out(self, chat_id: int) -> bool:
         return await self._state.is_opted_out(chat_id)
+
+
+def photo_state_key(cab: Cabinet, outside: Outside, shot: _ItemShot | None) -> str:
+    """Ключ повторного показа общего вида: обстановка и свет, а если на стол
+    вставляется предмет — ещё и версия его облика (Этап 49.3)."""
+    key = cab.state_key(outside.key)
+    if shot is not None and shot.place == "desk":
+        key += f"#{shot.tag}"
+    return key
+
+
+def item_caption(kind: items_mod.ItemKind, item: dict[str, Any], installed: bool) -> str:
+    traits = kind.traits_ru(item.get("traits") or [])
+    note = item.get("note")
+    return radio.ITEM_CARD_CAPTION.format(
+        name=html.escape(kind.name),
+        traits=radio.ITEM_CARD_TRAITS.format(traits=html.escape("; ".join(traits)))
+        if traits
+        else "",
+        fault=radio.ITEM_CARD_FAULT.format(fault=html.escape(note.rstrip(". "))) if note else "",
+        where=radio.ITEM_CARD_INSTALLED if installed else radio.ITEM_CARD_STORED,
+    )
 
 
 def photo_expect(raw: Any) -> list[str]:
@@ -1174,14 +1656,31 @@ def retake_emphasis(prev: dict[str, Any] | None, expect: list[str]) -> list[str]
 
 
 def photo_description(
-    cab: Cabinet, outside: Outside, focus: str, happening: str | None
+    cab: Cabinet,
+    outside: Outside,
+    focus: str,
+    happening: str | None,
+    *,
+    item: items_mod.ItemKind | None = None,
+    item_place: str | None = None,
 ) -> tuple[str, str]:
     """Описание снимка для художника-промптера (llm/image_prompt.py) и
     контекст сцены. Общий вид — особенности гостя первыми (самые свежие:
     промпт ограничен 77 токенами; случившееся в сцене — ещё раньше), потом
     канон и свет; крупный план —
-    предмет, а кабинет со светом — контекстом."""
-    features = cab.visible_features()[-PHOTO_FEATURES_IN_FRAME:]
+    предмет, а кабинет со светом — контекстом.
+
+    ``item_place`` (Этап 49.3) — в кадр вставят предмет ``item`` пикселями
+    (``desk`` — на стол общего вида, ``closeup`` — крупно): словами его в
+    описании быть не должно, иначе промптер нарисует второй, свой."""
+    visible_features = cab.visible_features()
+    if item is not None and item_place is not None:
+        visible_features = [f for f in visible_features if not item.focus_re.search(f)]
+        if happening and item.focus_re.search(happening):
+            happening = None
+        if item_place == "closeup":
+            focus = ITEM_CLOSEUP_RU
+    features = visible_features[-PHOTO_FEATURES_IN_FRAME:]
     light = outside.en()
     if focus:
         # Крупный план — только предмет, комната и свет: особенности кабинета
@@ -1198,6 +1697,8 @@ def photo_description(
         parts.append(f"Main subject, just happened: {happening}")
     if features:
         parts.append("Must be clearly visible: " + "; ".join(features) + ".")
+    # Композицию «стол в нижней трети» под вставку дописывает служба llm
+    # (item_paste.DESK_COMPOSITION) — промптер её пересказывал и терял.
     parts.append(f"Room: {cabinet_mod.CANON_EN}.")
     parts.append(f"Light: {light}.")
     return " ".join(parts), ""

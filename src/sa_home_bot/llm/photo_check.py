@@ -28,22 +28,31 @@ log = logging.getLogger(__name__)
 _JPEG_QUALITY = 90
 _OPTIONS: dict[str, Any] = {"temperature": 0, "num_predict": 512}
 
+# Этап 49.3 (стенд 2026-10-01, «Стенд предметов», раздел vlm): «да/нет по
+# каждому признаку» по-английски и на целом 512-кадре — ложные «да» 8%,
+# ложные «нет» 14%; прежний список «missing» от модели промахивался на 13/22.
+# Поэтому промах считает код по ответам, а не модель.
 SYSTEM_PROMPT = """\
-Ты внимательно смотришь на картинку и честно говоришь, что на ней видно.
-Картинка — стилизованный снимок комнаты или предмета, мелкие детали могут
-быть условными. Не додумывай то, чего не видно.
+You look at a picture and report only what is actually visible. The picture is
+a stylized illustration of a room or an object; small details may be simplified.
+Do not guess or assume things that are not drawn. Reply with strict JSON only:
+{"description": "...", "answers": {"1": "yes|no", ...}}
 
-Ответ — строго JSON без пояснений:
-{"description": "...", "missing": ["...", ...]}
-
-- description — 2-4 коротких фразы по-русски: что в кадре, где, какого цвета,
-  какой свет. Только видимое.
-- missing — что из списка «Должно быть в кадре» на картинке НЕ видно или
-  нельзя узнать. Пункт считается на месте, если его можно узнать хотя бы
-  приблизительно (стилизация, другой ракурс, другой оттенок — не промах).
-  Пишешь пункты теми же словами, что в списке. Всё на месте или списка
-  нет — пустой список.
+- description: 2-4 short phrases IN RUSSIAN: what is in the picture, where,
+  what colors, what light. Only what is visible.
+- answers: for every numbered item, "yes" if it can be recognized in the
+  picture at least roughly (stylization, another angle or shade is still
+  "yes"), otherwise "no". Respect the "does NOT count" notes of an item.
 """
+
+# Пункт ``expect`` может нести определение после ``DEFINITION_SEP``:
+# «separate handheld microphone :: a bare cable does NOT count». Модель видит
+# пункт целиком, в ``missing`` уходит только название (до разделителя).
+DEFINITION_SEP = " :: "
+
+
+def label(item: str) -> str:
+    return item.split(DEFINITION_SEP, 1)[0].strip()
 
 
 def save_original(image: Image.Image, photo_key: str, cfg: LlmConfig) -> str:
@@ -59,15 +68,30 @@ def save_original(image: Image.Image, photo_key: str, cfg: LlmConfig) -> str:
 
 def build_question(expect: list[str]) -> str:
     if not expect:
-        return "Что на картинке? Должно быть в кадре: (списка нет)."
-    items = "\n".join(f"- {item}" for item in expect)
-    return f"Что на картинке? Должно быть в кадре:\n{items}"
+        return 'What is in the picture? No items to check: "answers" is {}.'
+    items = "\n".join(
+        f"{n}. {item.replace(DEFINITION_SEP, ' — ')}" for n, item in enumerate(expect, 1)
+    )
+    return f"What is in the picture? Is each item visible?\n{items}"
+
+
+def _yes(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        value = value.strip().lower()
+        if value in ("yes", "да", "true"):
+            return True
+        if value in ("no", "нет", "false"):
+            return False
+    return None
 
 
 def parse(content: str, expect: list[str]) -> dict[str, Any] | None:
-    """JSON модели → {"description", "missing"}; None — ответ не разобрать.
-    В ``missing`` остаются только пункты из ``expect`` (модель могла
-    перефразировать — сверяем без регистра и по вхождению)."""
+    """JSON модели → {"description", "missing", "answers"}; None — ответ не
+    разобрать. ``missing`` — названия пунктов с ответом «нет»; пункт без
+    ответа промахом не считается (лучше пропустить промах, чем зря
+    огорчить Альфреда). ``answers`` — {название: True/False}."""
     try:
         data = json.loads(content)
     except (json.JSONDecodeError, TypeError):
@@ -77,16 +101,20 @@ def parse(content: str, expect: list[str]) -> dict[str, Any] | None:
     description = data.get("description")
     if not isinstance(description, str) or not description.strip():
         return None
-    raw_missing = data.get("missing")
-    if not isinstance(raw_missing, list):
-        raw_missing = []
-    said = [m.strip().lower() for m in raw_missing if isinstance(m, str) and m.strip()]
-    missing = [
-        item
-        for item in expect
-        if any(m == item.lower() or m in item.lower() or item.lower() in m for m in said)
-    ]
-    return {"description": " ".join(description.split()), "missing": missing}
+    raw = data.get("answers")
+    if not isinstance(raw, dict):
+        raw = {}
+    answers: dict[str, bool] = {}
+    for n, item in enumerate(expect, 1):
+        said = _yes(raw.get(str(n)))
+        if said is not None:
+            answers[label(item)] = said
+    missing = [name for name, seen in answers.items() if not seen]
+    return {
+        "description": " ".join(description.split()),
+        "missing": missing,
+        "answers": answers,
+    }
 
 
 async def inspect(

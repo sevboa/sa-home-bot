@@ -22,6 +22,7 @@ from sa_home_bot.bot.handlers import (
     draw,
     interactives,
     invites,
+    items,
     node,
     node_links,
     pending_actions,
@@ -76,6 +77,8 @@ def build_dispatcher(book: SubscriptionBook, gate: Gatekeeper) -> Dispatcher:
     dp.include_router(pending_actions.router)
     # interactives: кнопки сценок (Этап 47), свой префикс «ia:», и /interactives.
     dp.include_router(interactives.router)
+    # items: кнопки карточек предметов (Этап 49.3), свой префикс «it:».
+    dp.include_router(items.router)
     # draw: отладочный /draw (Этап 49) и его кнопки «draw:» — до ai, чтобы
     # /draw ответом на картинку Альфреда не ушёл в диалог.
     dp.include_router(draw.router)

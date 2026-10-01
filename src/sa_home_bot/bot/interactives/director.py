@@ -20,6 +20,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from sa_home_bot.bot.interactives import items as items_mod
 from sa_home_bot.bot.interactives.base import Run, Scenario
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.proto.messages import Address, ProtoError
@@ -69,6 +70,8 @@ class DirectorDecision:
     photo: str | None = None
     # Настроение кадров сцены (MOODS); None — Ведущий не сказал, остаётся прежнее.
     mood: str | None = None
+    # Новая черта предмета сцены (ключ из items.ItemKind.traits) или None.
+    item_trait: str | None = None
 
 
 def _clean(value: Any, limit: int) -> str | None:
@@ -117,8 +120,18 @@ def _mood(value: Any) -> str | None:
     return MOODS.get(text)
 
 
-def parse_decision(raw: str, current_stage: int) -> DirectorDecision | None:
-    """JSON Ведущего → решение."""
+def _item_trait(value: Any, keys: tuple[str, ...]) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip().strip("«»\"'").casefold()
+    return text if text in keys else None
+
+
+def parse_decision(
+    raw: str, current_stage: int, trait_keys: tuple[str, ...] = ()
+) -> DirectorDecision | None:
+    """JSON Ведущего → решение. ``trait_keys`` — допустимые черты предмета
+    сцены: прочее (придуманное Ведущим) отбрасывается."""
     data = _json_object(raw)
     if data is None:
         return None
@@ -136,6 +149,7 @@ def parse_decision(raw: str, current_stage: int) -> DirectorDecision | None:
         cabinet_add=_str_list(data.get("cabinet_add"), CABINET_ADD_MAX),
         photo=_photo(data.get("photo")),
         mood=_mood(data.get("mood")),
+        item_trait=_item_trait(data.get("item_trait"), trait_keys),
     )
 
 
@@ -211,6 +225,7 @@ def build_director_input(
         if place
         else ""
     )
+    item_block, item_field = _item_block(scenario, run)
     return (
         f"Сценарий: {scenario.title}\n"
         f"Лестница подсказок Альфреду (стадии):\n{ladder}\n"
@@ -221,6 +236,7 @@ def build_director_input(
         f"Журнал сцены (последняя реплика — только что сказанное Альфредом):\n"
         f"{transcript}\n\n"
         f"{cabinet}"
+        f"{item_block}"
         "Ответь ОДНИМ JSON-объектом с полями:\n"
         '{"active": bool — сцена продолжается (false, если гость явно ушёл '
         "в другую тему),\n"
@@ -234,8 +250,31 @@ def build_director_input(
         ' "finale_fault": str|null — только при finale=true: смешная '
         "потусторонняя поломка передатчика,\n"
         ' "note": str|null — короткая заметка себе на будущее'
-        f"{cabinet_field}}}"
+        f"{cabinet_field}{item_field}}}"
     )
+
+
+def _item_block(scenario: Scenario, run: Run) -> tuple[str, str]:
+    """Облик предмета сцены (Этап 49.3): какие черты уже есть и какие можно
+    добавить — только из списка, по одной."""
+    kind = items_mod.KINDS.get(scenario.item_kind or "")
+    if kind is None:
+        return "", ""
+    have = "; ".join(kind.traits_ru(run.item_traits)) or "пока ничего особенного"
+    free = [k for k in kind.traits if k not in run.item_traits]
+    if not free:
+        return f"Как выглядит передатчик: {have}.\n\n", ""
+    options = "; ".join(f"«{k}» — {kind.traits[k].ru}" for k in free)
+    block = (
+        f"Как выглядит передатчик: {have}.\n"
+        f"Чем его облик может обрасти по ходу сцены (ключ — что видно): {options}.\n\n"
+    )
+    field_text = (
+        ',\n "item_trait": str|null — ключ ОДНОЙ новой черты облика передатчика из '
+        "списка, если в этом ходе она проявилась (опиши её и в effect); обычно null. "
+        "На стадиях 0 и 1 — только неприметное (пыль, трещина)"
+    )
+    return block, field_text
 
 
 async def ask_director(
@@ -270,7 +309,8 @@ async def ask_director(
         log.warning("interactives: Ведущий недоступен (chat=%s): %s", run.chat_id, exc)
         return None
     raw = result.get("response", "") if isinstance(result, dict) else ""
-    decision = parse_decision(raw, run.stage)
+    kind = items_mod.KINDS.get(scenario.item_kind or "")
+    decision = parse_decision(raw, run.stage, tuple(kind.traits) if kind else ())
     if decision is None:
         log.warning("interactives: Ведущий вернул не JSON (chat=%s): %r", run.chat_id, raw[:300])
     return decision
