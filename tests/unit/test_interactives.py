@@ -348,18 +348,20 @@ async def test_later_gives_cooldown_then_offers_again(store):
     assert len(notifier.texts(GUEST)) == 2
 
 
-async def test_never_opts_chat_out_of_all_scenes(store):
-    svc, notifier, _ = _make(store)
+async def test_no_is_only_a_pause_not_an_opt_out(store):
+    """Решение пользователя 2026-10-02: «Нет» — пауза, не запрет насовсем
+    (Александр отказался и потом сам спрашивал про дефект речи)."""
+    clock = Clock()
+    svc, notifier, _ = _make(store, clock=clock)
     await _turn(svc, COMPLAINT)
     answer, text, _ = await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_NEVER)
     assert text == radio.RADIO.offer_text + engine.OFFER_NO_SUFFIX
-    assert await svc.is_opted_out(GUEST)
+    assert not await svc.is_opted_out(GUEST)
     await _turn(svc, COMPLAINT)
-    assert await ai_tools.tool_swap_radio(_ctx(svc), {}) == radio.TOOL_OPTED_OUT
-    assert len(notifier.texts(GUEST)) == 1
-    await svc.set_opted_out(GUEST, False)  # /interactives on
+    assert len(notifier.texts(GUEST)) == 1  # пауза — не предлагаем
+    clock.now += timedelta(hours=25)
     await _turn(svc, COMPLAINT)
-    assert (await _run(store)).status == STATUS_DECLINED  # кулдаун «не сейчас» всё ещё в силе
+    assert len(notifier.texts(GUEST)) == 2
 
 
 async def test_offer_expires_after_ttl(store):

@@ -1689,12 +1689,13 @@ class Interactives:
                 run.chat_id, radio.AFTER_AGREE_DIRECTIVE.format(transcript=transcript), where
             )
             return "Хорошо.", offer_text + OFFER_YES_SUFFIX, True
+        # «Нет» — только пауза (DECLINE_COOLDOWN), не запрет насовсем: гость,
+        # раз отказавшись, сам не знал про /interactives on (решение
+        # пользователя 2026-10-02). Запрет — только командой /interactives off.
+        # BTN_LATER — у форм, разосланных до v0.115.2 («Не сейчас»).
         run.status = STATUS_DECLINED
         run.declined_until = iso(self._now() + DECLINE_COOLDOWN)
         await self._state.save_run(run)
-        if button == BTN_NEVER:
-            await self._state.set_opted_out(run.chat_id, True)
-        # BTN_LATER — только у форм, разосланных до v0.115.2 («Не сейчас»).
         return "Хорошо.", offer_text + OFFER_NO_SUFFIX, True
 
     async def _set_clear(self, chat_id: int, user_id: int, clear: bool) -> None:
