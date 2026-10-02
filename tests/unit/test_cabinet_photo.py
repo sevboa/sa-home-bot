@@ -455,6 +455,7 @@ async def test_matching_photo_becomes_alfreds_note_only(store):
     await _drain(svc)
     (gen,) = link.generated()
     assert gen["expect"] == ["собака у камина"] and gen["keep_key"].startswith(f"snap-{GUEST}-")
+    assert gen["negative_extra"] == cabinet.PHOTO_NEGATIVE_EN
     assert len(notifier.photos) == 1
     plan = await svc.before_turn(GUEST, GUEST, "а какого цвета собака?", is_private=True)
     assert "рыжая собака" in plan.note

@@ -45,7 +45,17 @@ CANON_RU = (
 # Для снимка: коротко, самое узнаваемое первым — промпт ограничен 77 токенами.
 # Без «castle»: промптер переносил его в промпт, и GhostMix+eldritch рисовал
 # замок снаружи вместо стола (живая находка 2026-10-01, A/B 3 из 3).
-CANON_EN = "old butler study room, gothic stone walls, wooden desk, stone fireplace, bookshelves"
+# Цвета мебели — до камня: «black candlestick» + «gothic stone walls» в дневном
+# свете давали почти серый кадр (кадр 286, 2026-10-02); «vibrant colors» из
+# шаблона стоит в хвосте и не перевешивает. Стенд ~/refbench/grey на mycraft:
+# насыщенность 0.13 → 0.39-0.86. Без «golden light» — он перебивал время суток.
+CANON_EN = (
+    "old butler study room, warm brown wooden desk, deep red carpet, "
+    "gothic stone walls, stone fireplace, bookshelves"
+)
+# Снимкам кабинета — к негативу (служба дописывает к своему). При guidance 1.5
+# негатив весит мало, но не мешает.
+PHOTO_NEGATIVE_EN = "monochrome, grayscale"
 
 # Чего не снять фотоаппаратом: запахи и звуки. Такие особенности Ведущему
 # запрещены промптом, а уже записанные (и прорвавшиеся) не идут в кадр и в

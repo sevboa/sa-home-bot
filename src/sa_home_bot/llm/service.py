@@ -1197,6 +1197,11 @@ class LlmService:
                     prompt = source
             if not options["raw"]:
                 negative = negative or self._cfg.imagegen_negative
+                # Добавка вызывающего поверх любого негатива (снимки кабинета:
+                # «monochrome, grayscale»), а не вместо него.
+                extra = args.get("negative_extra")
+                if isinstance(extra, str) and extra.strip():
+                    negative = f"{negative}, {extra.strip()}" if negative else extra.strip()
                 if paste is not None and paste["place"] == "desk":
                     prompt = f"{item_paste.DESK_COMPOSITION}, {prompt.strip()}"
             try:

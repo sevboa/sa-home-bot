@@ -160,6 +160,22 @@ async def test_generate_image_empty_negative_uses_config_default(monkeypatch):
     assert seen["negative"] == "blurry"
 
 
+async def test_generate_image_negative_extra_is_appended(monkeypatch):
+    seen = []
+
+    async def fake_generate(prompt, negative, cfg, **kwargs):
+        seen.append(negative)
+        return {"png": b"x", "width": 1, "height": 1, "seconds": 0.0}
+
+    monkeypatch.setattr(llm_service.imagegen, "generate_image", fake_generate)
+    svc = _svc(imagegen_enabled=True, imagegen_negative="blurry")
+    extra = {"negative_extra": "monochrome"}
+    await svc.run_command("generate_image", {"prompt": "a cat", **extra})
+    await svc.run_command("generate_image", {"prompt": "a cat", "negative": "text", **extra})
+    await svc.run_command("generate_image", {"prompt": "a cat", "raw": True, **extra})
+    assert seen == ["blurry, monochrome", "text, monochrome", ""]
+
+
 async def test_generate_image_empty_prompt_is_bad_request():
     with pytest.raises(ProtoError) as excinfo:
         await _svc(imagegen_enabled=True).run_command("generate_image", {"prompt": "  "})

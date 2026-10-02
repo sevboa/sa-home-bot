@@ -970,6 +970,7 @@ class Interactives:
             # Этап 49.2.1: mycraft сохранит 512-оригинал и сверит его зрением.
             "keep_key": f"snap-{chat_id}-{uuid.uuid4().hex[:12]}",
             "expect": list(expect or []),
+            "negative_extra": cabinet_mod.PHOTO_NEGATIVE_EN,
         }
         # Пересъёмка после промаха: то, чего не было на прошлом снимке,
         # промптер ставит главным (llm/image_prompt.py, emphasize).
