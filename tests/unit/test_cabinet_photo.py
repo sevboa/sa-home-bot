@@ -87,6 +87,8 @@ class FakeLink:
                 "seed": 7,
                 **({"inspect": self.inspect} if self.inspect is not None else {}),
             }
+        if action == "chat_progress":
+            return {"partial": "draw", "done": False}
         if action == "item_portrait":
             return {
                 "png_b64": base64.b64encode(_png()).decode(),
@@ -510,6 +512,37 @@ async def test_alfred_line_comes_with_the_photo_as_its_caption(store):
     turns = await store.ai_turns_for_dialogue(GUEST, 55)
     assert [(t["role"], t["content"]) for t in turns] == [("assistant", "Готово, сэр.")]
     assert svc.spoken == []
+
+
+async def test_take_photo_joins_the_scene_photo_and_speaks_with_it(store):
+    """Живая находка 2026-10-02: снимок сцены (Ведущий, в фоне) уже шёл, а
+    take_photo отвечал «занято» — Альфред говорил до снимка и звал тул
+    снова. Теперь ход присоединяется: реплика — подписью к снимку сцены."""
+    link = FakeLink()
+    svc, notifier = _make(store, link)
+    await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
+    started = await svc._start_photo(
+        GUEST,
+        GUEST,
+        focus="передатчик",
+        caption=engine.PHOTO_SCENE_CAPTION,
+        happening="по корпусу прошла рябь",
+        outside=Outside(phase="night", weather=None, local_time="00:00"),
+        message_thread_id=None,
+        trigger_message_id=None,
+    )
+    assert started
+    reply = await svc.tool_take_photo(GUEST, GUEST, {"caption": "Рябь"}, dialogue_id=56)
+    assert reply == cabinet.TOOL_PHOTO_STARTED
+    # Второй ход к тому же снимку уже не присоединится.
+    assert await svc.tool_take_photo(GUEST, GUEST, {}) == cabinet.TOOL_PHOTO_BUSY
+    await svc.wait_photo(GUEST)
+    await _drain(svc)
+    assert len(link.generated()) == 1
+    ((_, _, caption),) = notifier.photos
+    assert caption == "<b>Альфред:</b> Готово, сэр."
+    turns = await store.ai_turns_for_dialogue(GUEST, 56)
+    assert [(t["role"], t["content"]) for t in turns] == [("assistant", "Готово, сэр.")]
 
 
 async def test_without_photo_check_alfred_tells_what_he_shot(store):

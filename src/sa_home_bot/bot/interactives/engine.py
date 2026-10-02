@@ -518,6 +518,11 @@ class Interactives:
         # и куда показывать его статусы, пока ход ждёт.
         self._photo_jobs: dict[int, asyncio.Task] = {}
         self._photo_status: dict[int, Callable[[str], Awaitable[None]]] = {}
+        # Фоновый снимок (сцены), к которому присоединился ход с take_photo:
+        # реплику к нему скажет Альфред этого хода (describe, dialogue_id,
+        # trigger_message_id) — ответ приходит со снимком, а не до него.
+        self._photo_join: dict[int, dict[str, Any]] = {}
+        self._photo_described: set[int] = set()
         self._photo_tasks: set[asyncio.Task] = set()
         self._store = store
         self._state = InteractiveStore(store)
@@ -921,7 +926,7 @@ class Interactives:
         if chat_id is None or user_id is None or not hasattr(self._notifier, "send_photo_ex"):
             return cabinet_mod.TOOL_PHOTO_UNAVAILABLE
         if chat_id in self._photo_busy:
-            return cabinet_mod.TOOL_PHOTO_BUSY
+            return await self._join_photo(chat_id, user_id, trigger_message_id, dialogue_id)
         focus = args.get("focus") if isinstance(args.get("focus"), str) else ""
         focus = " ".join(focus.split())
         caption = args.get("caption") if isinstance(args.get("caption"), str) else ""
@@ -999,6 +1004,35 @@ class Interactives:
             return cabinet_mod.TOOL_PHOTO_UNAVAILABLE
         return cabinet_mod.TOOL_PHOTO_STARTED
 
+    async def _join_photo(
+        self,
+        chat_id: int,
+        user_id: int,
+        trigger_message_id: int | None,
+        dialogue_id: int | None,
+    ) -> str:
+        """Камера занята снимком сцены (его начал Ведущий в фоне) — ход
+        присоединяется к нему: ждёт со статусами и говорит реплику подписью
+        (живая находка 2026-10-02: Альфред отвечал до снимка и пять раз
+        подряд звал take_photo). Снимок, у которого реплика уже есть, — занят."""
+        task = self._photo_jobs.get(chat_id)
+        if (
+            task is None
+            or task.done()
+            or chat_id in self._photo_described
+            or chat_id in self._photo_join
+        ):
+            return cabinet_mod.TOOL_PHOTO_BUSY
+        cab = await cabinet_mod.load(self._store, user_id)
+        run = await self._state.load_run(chat_id, radio.SCENARIO_ID)
+        in_scene = run is not None and run.status == STATUS_ACTIVE
+        self._photo_join[chat_id] = {
+            "describe": await self._where_ru(cab, user_id, in_scene=in_scene),
+            "dialogue_id": dialogue_id,
+            "trigger_message_id": trigger_message_id,
+        }
+        return cabinet_mod.TOOL_PHOTO_STARTED
+
     async def _wants_stored_item(self, user_id: int, text: str) -> bool:
         """Просят снять старое радио, а оно убрано в чулан — в кабинете его
         нет, показать можно только карточкой (radio.TOOL_PHOTO_STORED_ITEM)."""
@@ -1070,9 +1104,12 @@ class Interactives:
         )
         self._photo_tasks.add(task)
         task.add_done_callback(self._photo_tasks.discard)
+        # Любой снимок — задача на чат: к фоновому (сцены) может
+        # присоединиться ход с take_photo (_join_photo).
+        self._photo_jobs[chat_id] = task
+        task.add_done_callback(lambda _t: self._photo_jobs.pop(chat_id, None))
         if describe is not None:
-            self._photo_jobs[chat_id] = task
-            task.add_done_callback(lambda _t: self._photo_jobs.pop(chat_id, None))
+            self._photo_described.add(chat_id)
         return True
 
     async def wait_photo(
@@ -1160,6 +1197,8 @@ class Interactives:
             log.exception("interactives: снимок кабинета не удался (chat=%s)", chat_id)
         finally:
             self._photo_busy.discard(chat_id)
+            self._photo_described.discard(chat_id)
+            self._photo_join.pop(chat_id, None)
 
     async def _photo(
         self,
@@ -1234,12 +1273,11 @@ class Interactives:
         if shot is not None:
             # Этап 49.3: предмет — пикселями поверх готовой сцены.
             request["paste"] = {"key": shot.key, "place": shot.place, "hint": shot.kind.paste_hint}
-        phases = None
-        if describe is not None:
-            request["request_id"] = uuid.uuid4().hex
-            phases = asyncio.create_task(
-                self._follow_photo_phases(node_link, dst, chat_id, request["request_id"])
-            )
+        # Фазы — статусами хода, который ждёт снимок (свой или присоединился).
+        request["request_id"] = uuid.uuid4().hex
+        phases = asyncio.create_task(
+            self._follow_photo_phases(node_link, dst, chat_id, request["request_id"])
+        )
         try:
             result = await node_link.command(
                 image_tools.ACTION_GENERATE_IMAGE,
@@ -1255,8 +1293,7 @@ class Interactives:
                 await self._forget_item_cut(chat_id, user_id, shot)
             return
         finally:
-            if phases is not None:
-                phases.cancel()
+            phases.cancel()
         png = base64.b64decode(result["png_b64"])
         inspection = result.get("inspect") if isinstance(result.get("inspect"), dict) else None
         seen = str(inspection.get("description") or "") if inspection else ""
@@ -1294,6 +1331,11 @@ class Interactives:
             misses = await self._save_last_photo(
                 chat_id, image_id, seen, list(expect or []), missing
             )
+        join = self._photo_join.pop(chat_id, None) if describe is None else None
+        if join is not None:
+            describe = join["describe"]
+            dialogue_id = join["dialogue_id"]
+            trigger_message_id = join["trigger_message_id"] or trigger_message_id
         line = ""
         if describe is not None:
             # Реплика — на то, что вышло на снимке, и сразу с ним.
