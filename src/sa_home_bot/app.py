@@ -198,6 +198,10 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
         await pending_actions.recover()
     except Exception:  # noqa: BLE001
         log.exception("pending_actions: восстановление на старте не удалось")
+    try:
+        await interactives.recover()
+    except Exception:  # noqa: BLE001
+        log.exception("interactives: восстановление на старте не удалось")
 
     async def refresh_menu() -> None:
         # Скилы-приложения появились/изменились — перестроить меню команд.

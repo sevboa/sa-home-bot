@@ -664,3 +664,49 @@ def test_retake_emphasis_matches_rephrased_items():
     assert engine.retake_emphasis(prev, ["кресло"]) == []
     assert engine.retake_emphasis(None, ["собака"]) == []
     assert engine.retake_emphasis({"missing": []}, ["собака"]) == []
+
+
+async def test_lost_photo_is_announced_not_silent(store):
+    """Живая находка 2026-10-02: mycraft перезапустили посреди съёмки —
+    Альфред «снял», а снимка нет и ни слова. Теперь гостю говорят."""
+    from sa_home_bot.proto.messages import ProtoError
+
+    class DeadLink(FakeLink):
+        async def command(self, action, args, dst=None, timeout=None):
+            if action == "generate_image":
+                raise ProtoError("unavailable", "mycraft: соединение закрыто")
+            return await super().command(action, args, dst, timeout)
+
+    svc, notifier = _make(store, DeadLink())
+    await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
+    await svc.tool_take_photo(GUEST, GUEST, {"focus": "камин"})
+    await _drain(svc)
+    assert notifier.photos == []
+    ((chat, text),) = notifier.sent
+    assert chat == GUEST and text in cabinet.PHOTO_LOST_TEXTS
+    assert await store.get_state(cabinet.PHOTO_PENDING_KEY) == "{}"
+    # Снова можно снимать — камера не «занята» пропавшим снимком.
+    assert await svc.tool_take_photo(GUEST, GUEST, {}) == cabinet.TOOL_PHOTO_STARTED
+    await _drain(svc)
+
+
+async def test_photo_cut_by_restart_is_announced_on_start(store):
+    link = FakeLink()
+    svc, notifier = _make(store, link)
+    await svc._mark_photo_pending(GUEST, None, 77)
+    # Бот перезапущен: новая служба находит недоснятый снимок.
+    fresh, fresh_notifier = _make(store, link)
+    await fresh.recover()
+    assert [c for c, _ in fresh_notifier.sent] == [GUEST]
+    assert fresh_notifier.sent[0][1] in cabinet.PHOTO_LOST_TEXTS
+    await fresh.recover()
+    assert len(fresh_notifier.sent) == 1
+
+
+async def test_delivered_photo_leaves_nothing_pending(store):
+    svc, notifier = _make(store, FakeLink())
+    await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
+    await svc.tool_take_photo(GUEST, GUEST, {"focus": "камин"})
+    await _drain(svc)
+    assert len(notifier.photos) == 1 and notifier.sent == []
+    assert await store.get_state(cabinet.PHOTO_PENDING_KEY) == "{}"

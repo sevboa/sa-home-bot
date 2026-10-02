@@ -1178,8 +1178,11 @@ class Interactives:
         dialogue_id: int | None = None,
         describe: str | None = None,
     ) -> None:
+        delivered = False
+        if describe is not None:
+            await self._mark_photo_pending(chat_id, message_thread_id, trigger_message_id)
         try:
-            await self._photo(
+            delivered = await self._photo(
                 chat_id,
                 user_id,
                 focus=focus,
@@ -1198,7 +1201,59 @@ class Interactives:
         finally:
             self._photo_busy.discard(chat_id)
             self._photo_described.discard(chat_id)
-            self._photo_join.pop(chat_id, None)
+            join = self._photo_join.pop(chat_id, None)
+            # Снимок обещан ходу (свой take_photo или присоединившийся к кадру
+            # сцены), но не дошёл — сказать, а не молчать.
+            if not delivered and (describe is not None or join is not None):
+                reply_to = (join or {}).get("trigger_message_id") or trigger_message_id
+                await self._photo_lost(chat_id, message_thread_id, reply_to)
+            await self._clear_photo_pending(chat_id)
+
+    async def _photo_lost(
+        self, chat_id: int, message_thread_id: int | None, reply_to: int | None
+    ) -> None:
+        log.warning("interactives: обещанный снимок не дошёл (chat=%s)", chat_id)
+        try:
+            await self._notifier.send_direct(
+                chat_id,
+                self._choose(cabinet_mod.PHOTO_LOST_TEXTS),
+                reply_to_message_id=reply_to,
+                message_thread_id=message_thread_id,
+            )
+        except Exception:  # noqa: BLE001 — сообщение вспомогательное
+            log.exception("interactives: не сказал о пропавшем снимке (chat=%s)", chat_id)
+
+    async def _photo_pending(self) -> dict[str, Any]:
+        raw = await self._store.get_state(cabinet_mod.PHOTO_PENDING_KEY)
+        try:
+            data = json.loads(raw) if raw else {}
+        except ValueError:
+            data = {}
+        return data if isinstance(data, dict) else {}
+
+    async def _mark_photo_pending(
+        self, chat_id: int, message_thread_id: int | None, reply_to: int | None
+    ) -> None:
+        pending = await self._photo_pending()
+        pending[str(chat_id)] = {"thread": message_thread_id, "reply_to": reply_to}
+        await self._store.set_state(cabinet_mod.PHOTO_PENDING_KEY, json.dumps(pending))
+
+    async def _clear_photo_pending(self, chat_id: int) -> None:
+        pending = await self._photo_pending()
+        if pending.pop(str(chat_id), None) is not None:
+            await self._store.set_state(cabinet_mod.PHOTO_PENDING_KEY, json.dumps(pending))
+
+    async def recover(self) -> None:
+        """Старт бота: снимки, оборванные рестартом посреди съёмки, — сказать
+        гостю, что не вышло (живая находка 2026-10-02: деплой во время снимка,
+        и Альфред «снял», а снимка нет)."""
+        pending = await self._photo_pending()
+        if not pending:
+            return
+        await self._store.set_state(cabinet_mod.PHOTO_PENDING_KEY, "{}")
+        for chat, where in pending.items():
+            where = where if isinstance(where, dict) else {}
+            await self._photo_lost(int(chat), where.get("thread"), where.get("reply_to"))
 
     async def _photo(
         self,
@@ -1215,10 +1270,11 @@ class Interactives:
         expect: list[str] | None = None,
         dialogue_id: int | None = None,
         describe: str | None = None,
-    ) -> None:
+    ) -> bool:
+        """Снимок нарисован и отправлен — True."""
         node_link = self._get_node_link()
         if node_link is None:
-            return
+            return False
         if GENERAL_VIEW_RE.match(focus):
             focus = ""  # Ведущий тоже просит «общий план кабинета»
         dst = Address(node=LLM_NODE, service=LLM_SERVICE)
@@ -1291,7 +1347,7 @@ class Interactives:
                 # Вырезки могло не оказаться на ноде (сменили диск, почистили
                 # каталог) — следующий снимок нарисует портрет заново.
                 await self._forget_item_cut(chat_id, user_id, shot)
-            return
+            return False
         finally:
             phases.cancel()
         png = base64.b64decode(result["png_b64"])
@@ -1360,7 +1416,7 @@ class Interactives:
         )
         if sent is None:
             log.warning("interactives: снимок #%s не ушёл в чат %s", image_id, chat_id)
-            return
+            return False
         await self._store.set_image_sent(image_id, sent[1], sent[0])
         if line and dialogue_id is not None:
             # Подпись — ход Альфреда в треде: на неё можно ответить.
@@ -1380,11 +1436,12 @@ class Interactives:
                     dialogue_id=dialogue_id,
                 )
             # Промах — не общий вид кабинета: повторно его не показываем.
-            return
+            return True
         if not focus and not happening:
             cab = await cabinet_mod.load(self._store, user_id)
             cab.remember_photo(photo_state_key(cab, outside, shot), image_id)
             await cabinet_mod.save(self._store, cab)
+        return True
 
     async def _photo_line(self, chat_id: int, user_id: int, directive: str) -> str:
         """Короткая реплика Альфреда к снимку — персонажем службы llm, с той

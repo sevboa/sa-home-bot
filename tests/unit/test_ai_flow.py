@@ -451,6 +451,35 @@ async def test_photo_tool_ends_the_turn_without_a_reply(store):
     assert len(link.command_calls) == 1
 
 
+async def test_photo_claimed_without_the_tool_is_asked_again(store):
+    """Живая находка 2026-10-02: «Сейчас сделаю снимок… *На снимке…*» без
+    take_photo — снимка нет. Такой ход переспрашивается с заметкой."""
+
+    class Photos:
+        async def tool_take_photo(self, *_a, **_kw):
+            raise AssertionError("не звали")
+
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[
+            {"response": ai_flow.ROUTE_OK},
+            {"response": "Сейчас сделаю снимок, сэр. *На снимке запечатлён кабинет*"},
+            {"response": ai_flow.ROUTE_OK},
+            {"response": "Кабинет в порядке, сэр."},
+        ],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "как там кабинет"}], 1,
+        _admin_book(), FakeNotifier(), interactives=Photos(),
+    )
+
+    assert raw == "Кабинет в порядке, сэр."
+    retry = link.command_calls[-1][1]["messages"]
+    assert any(ai_flow.PHOTO_CLAIM_NOTE in str(m.get("content")) for m in retry)
+
+
 async def test_tool_call_is_recorded_in_store(store):
     # Живая находка 2026-07-24: "шиза" с часовыми поясами была
     # недиагностируема — ai_turns хранит только финальный текст ответа, не
