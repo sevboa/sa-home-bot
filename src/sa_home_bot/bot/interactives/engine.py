@@ -1671,7 +1671,9 @@ class Interactives:
                     **({"restyle": restyle} if (restyle := kind.restyle(traits)) else {}),
                 },
                 dst=Address(node=LLM_NODE, service=LLM_SERVICE),
-                timeout=self._settings.llm.imagegen_request_timeout_s,
+                # До трёх попыток turbo плюс очередь GPU за чужими картинками:
+                # 2026-10-02 портрет пришёл через 193 с, бот бросил его на 180.
+                timeout=self._settings.llm.imagegen_request_timeout_s * 2,
             )
         except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
             log.warning("interactives: портрет %s не нарисован (chat=%s): %s", key, chat_id, exc)
