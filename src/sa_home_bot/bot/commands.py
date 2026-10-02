@@ -84,7 +84,7 @@ INTERACTIVES = Command(
 )
 # Опись сюжетных вещей гостя (Этап 49.3.5, bot/handlers/items.py): где
 # каждая лежит, кнопки «принести карточку». Своя у каждого — универсальная.
-ITEMS = Command("items", "ваши вещи", universal=True, menu=True)
+ITEMS = Command("items", "особенные вещи поместья", universal=True, menu=True)
 # Отладка режимов генерации картинок (Этап 49, bot/draw_debug.py): владелец
 # подбирает архетипы предметов и настройки сцен. Скрыта — памятка по
 # «/draw» без аргументов или «/draw help».
