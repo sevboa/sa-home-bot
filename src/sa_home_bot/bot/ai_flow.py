@@ -123,21 +123,6 @@ LENGTH_NOTE = (
 )
 LLM_SERVICE = "llm"
 
-# Альфред «снимает» словами, не позвав take_photo (живая находка 2026-10-02:
-# «Сейчас сделаю снимок… *На снимке запечатлён…*» — модель повторяла свои
-# прошлые ответы из истории, а снимка не было). Ход без единого тула с такой
-# фразой переспрашивается один раз с этой заметкой.
-PHOTO_CLAIM_RE = re.compile(
-    r"(сейчас|вот)\b[^.!?\n]{0,40}\b(снимок|снимк|фото)"
-    r"|сделаю снимок|\bсниму\b|снимок готов|на (этом |моём )?снимке запечатл",
-    re.IGNORECASE,
-)
-PHOTO_CLAIM_NOTE = (
-    "Снимок ты сейчас не делал: take_photo не вызван, и собеседник ничего не "
-    "получит. Если он просит снимок — вызови take_photo и ничего не пиши; "
-    "иначе ответь, не упоминая, что снимаешь или прислал снимок."
-)
-
 # Личное место жительства Альфреда (не дома семьи — своё, персонажное; см.
 # персонажный промпт, живая находка 2026-07-25) — Бран, Трансильвания,
 # Румыния (тот самый, у замка Дракулы). Часовой пояс — детерминированно в
@@ -1652,15 +1637,6 @@ async def request_alfred(
             return ""
         return raw
 
-    # Страховка «снимка на словах» (PHOTO_CLAIM_RE): только где take_photo
-    # вообще есть и ход — не фото собеседника (про его снимок говорить можно).
-    photo_tool_available = interactives is not None and "take_photo" in (
-        ai_tools.tools_for(subscription).handlers
-    )
-    current_is_photo = bool(history) and isinstance(history[-1], dict) and (
-        "raw_image" in history[-1]
-    )
-
     async def _ask() -> str:
         extra = (dialogue_context.STEP_AWAY_INSTRUCTION,) if step_away else ()
         stats = ChatStats()
@@ -1679,18 +1655,6 @@ async def request_alfred(
             return raw
         if managed and dialogue_context.looks_overflowed(raw, stats, num_ctx):
             return await _rescue(stats)
-        if (
-            not executed_tools
-            and photo_tool_available
-            and not current_is_photo
-            and PHOTO_CLAIM_RE.search(raw)
-        ):
-            log.info("ai_flow: снимок на словах без take_photo — переспрашиваем (chat=%s)", chat_id)
-            retry_stats = ChatStats()
-            again = await _ask_once(history, retry_stats, _notes((*extra, PHOTO_CLAIM_NOTE)))
-            await _save_stats(retry_stats, sent_chars)
-            if again.strip():
-                return again
         return raw
 
     async def _announce_steps() -> None:

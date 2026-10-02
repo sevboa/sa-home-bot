@@ -119,6 +119,34 @@ async def test_load_history_without_summary_is_full_dialogue(store):
     assert history.compressible == 0
 
 
+async def test_history_shows_photo_tool_rounds_after_the_request(store):
+    """Живая находка 2026-10-03: в истории были только тексты, и на «дай
+    фото кабинета» модель отвечала словами, как в прошлой подписи. Вызов
+    take_photo теперь виден в истории — как в живом раунде тулов."""
+    await _turn(store, 1, "user", "покажи кабинет")
+    await store.record_tool_call(
+        chat_id=CHAT, dialogue_id=DIALOGUE, trigger_message_id=1, tool_name="take_photo",
+        args={"caption": "Вид кабинета"}, result="Снимок делается." + "x" * 500, at=NOW,
+    )
+    await store.record_tool_call(
+        chat_id=CHAT, dialogue_id=DIALOGUE, trigger_message_id=1, tool_name="get_time",
+        args={}, result="12:00", at=NOW,
+    )
+    await _turn(store, 2, "assistant", "Вот, прошу.")
+    await _turn(store, 3, "user", "спасибо")
+    await _turn(store, 4, "assistant", "Пожалуйста.")
+    history = await dialogue_context.load_history(store, _settings(), CHAT, DIALOGUE)
+    roles = [m["role"] for m in history]
+    assert roles == ["user", "assistant", "tool", "assistant", "user", "assistant"]
+    call = history[1]["tool_calls"]
+    assert call == [{"function": {"name": "take_photo", "arguments": {"caption": "Вид кабинета"}}}]
+    assert history[2]["name"] == "take_photo"
+    assert len(history[2]["content"]) == dialogue_context.HISTORY_TOOL_RESULT_MAX
+    # Обрезка по бюджету не оставляет раунд тула без хода собеседника.
+    trimmed = dialogue_context.trim_to_budget(list(history)[1:], 10_000)
+    assert trimmed[0]["role"] == "assistant" and "tool_calls" not in trimmed[0]
+
+
 async def test_load_history_with_summary_and_short_old_replies(store):
     await _long_dialogue(store, 12, reply_len=900)  # message_id 1..24
     await store.add_dialogue_summary(CHAT, DIALOGUE, 8, "Говорили о пчёлах.", NOW)

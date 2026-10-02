@@ -50,6 +50,7 @@ bot/handlers/ai.py), промпт дорастал до ~31.8k из 32768 ток
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import random
@@ -233,6 +234,7 @@ async def load_history(
     old_count = max(0, len(tail) - cfg.context_keep_recent_turns)
     limit = cfg.context_old_reply_max_chars if cfg.context_compression else 0
 
+    calls = await _history_tool_calls(store, chat_id, dialogue_id)
     messages: list[dict[str, Any]] = []
     if summary:
         messages.append({"role": "system", "content": SUMMARY_PREFIX + summary["summary"]})
@@ -246,6 +248,8 @@ async def load_history(
         else:
             verbatim.add(row["message_id"])
         messages.append({"role": row["role"], "content": content})
+        if row["role"] == "user":
+            messages.extend(calls.get(row["message_id"], ()))
     return DialogueHistory(
         messages,
         summary_upto=upto,
@@ -253,6 +257,53 @@ async def load_history(
         max_hidden_id=max(hidden) if hidden else None,
         compressible=old_count,
     )
+
+
+# Тулы, чей след виден в истории: вызов и результат после хода собеседника.
+# Живая находка 2026-10-03: в истории были только тексты — «покажи кабинет»
+# → «Вот, прошу. Кажется, свет…» (подпись к снимку), — и на следующую такую
+# же просьбу модель отвечала тем же текстом, не вызывая take_photo: образец
+# в контексте говорил, что снимок — это слова. Только тулы, которые что-то
+# присылают в чат (снимок, картинка, карточка вещи): их не повторить словами.
+HISTORY_TOOLS = frozenset({"take_photo", "generate_image", "show_items"})
+HISTORY_TOOL_RESULT_MAX = 200
+
+
+async def _history_tool_calls(
+    store: Store, chat_id: int, dialogue_id: int
+) -> dict[int, list[dict[str, Any]]]:
+    """{message_id хода собеседника: [вызов тулов, результаты]} — в формате
+    раундов run_chat_loop (llm_chat.py)."""
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for call in await store.tool_calls_for_dialogue(chat_id, dialogue_id):
+        if call["tool_name"] not in HISTORY_TOOLS or call["trigger_message_id"] is None:
+            continue
+        try:
+            args = json.loads(call["args_json"] or "{}")
+        except ValueError:
+            args = {}
+        grouped.setdefault(int(call["trigger_message_id"]), []).append(
+            {**call, "args": args if isinstance(args, dict) else {}}
+        )
+    history: dict[int, list[dict[str, Any]]] = {}
+    for message_id, group in grouped.items():
+        history[message_id] = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"function": {"name": c["tool_name"], "arguments": c["args"]}} for c in group
+                ],
+            },
+            *(
+                {
+                    "role": "tool",
+                    "name": c["tool_name"],
+                    "content": str(c["result"] or "")[:HISTORY_TOOL_RESULT_MAX],
+                }
+                for c in group
+            ),
+        ]
+    return history
 
 
 # --- оценка окна ---
@@ -311,7 +362,11 @@ def trim_to_budget(messages: list[dict[str, Any]], max_chars: int) -> list[dict[
             break
         kept.append(msg)
         total += size
-    return head + list(reversed(kept))
+    kept.reverse()
+    # Отрезанное начало не должно оставить раунд тула без хода собеседника.
+    while kept[:-1] and (kept[0].get("role") == "tool" or "tool_calls" in kept[0]):
+        kept.pop(0)
+    return head + kept
 
 
 def pick_step_away_line() -> tuple[str, str]:
