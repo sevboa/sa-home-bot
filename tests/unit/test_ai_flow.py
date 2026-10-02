@@ -680,6 +680,30 @@ async def test_router_level_maps_to_reason(store):
     assert message.answers == [ai_flow.THINKING_TEXT]  # уровень >= 1 → «задумчивость»
 
 
+async def test_scene_turn_does_not_think(store):
+    # Сцена интерактива: ход ведёт Ведущий — Альфред отвечает без
+    # рассуждения, даже если роутер попросил думать (2026-10-02).
+    from types import SimpleNamespace
+
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[
+            {"response": "THINK:2"},
+            {"response": "Ответ"},
+        ],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+    )
+    turn = SimpleNamespace(scene=True, note=None, user_id=1, speech_clear=False)
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "щёлкаю тумблер"}], 1,
+        _admin_book(), FakeNotifier(), interactive_turn=turn,
+    )
+
+    assert link.command_calls[1][1]["reason"] == "off"
+    assert message.answers == []  # без «задумчивости»
+
+
 async def test_router_uses_describe_profile_when_mode_not_pinned(store):
     # [llm].mode не задан явно → бот берёт router из профиля модели (describe).
     # profile.router=False → один персонажный проход без router.

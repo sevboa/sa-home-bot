@@ -1407,6 +1407,8 @@ async def request_alfred(
             # (False → off, иначе high); перевод в параметр Ollama делает
             # профиль модели на стороне службы llm.
             single_reason = "high" if settings.llm.single_call_think else "off"
+            if getattr(interactive_turn, "scene", False):
+                single_reason = "off"  # сцена — без рассуждения (см. ниже)
             raw = await _generate(
                 node_link,
                 dst,
@@ -1453,6 +1455,11 @@ async def request_alfred(
         if tool_ctx.end_turn:
             return SILENT_REPLY
         level = parse_router_level(route_decision)
+        if getattr(interactive_turn, "scene", False):
+            # Ход сцены ведёт Ведущий (что случилось, черта, кадр) — Альфреду
+            # остаётся отыграть реплику; рассуждение стоило ~60 с на ход
+            # (живая находка 2026-10-02, router почти всегда давал THINK:1).
+            level = 0
         needs_think = level >= 1
         log.info("ai_flow: router -> THINK:%d (chat=%s)", level, chat_id)
 
