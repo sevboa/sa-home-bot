@@ -334,6 +334,42 @@ class Notifier:
         )
         return msg is not None
 
+    async def edit_markup(
+        self, chat_id: int, message_id: int, reply_markup: InlineKeyboardMarkup | None
+    ) -> bool:
+        """Сменить или снять (None) кнопки под сообщением — форма, которую
+        гость проигнорировал (bot/interactives/engine.py::dismiss_buttons)."""
+        msg = await send_with_retry(
+            chat_id,
+            "правка кнопок",
+            lambda: self._bot.edit_message_reply_markup(
+                chat_id=chat_id, message_id=message_id, reply_markup=reply_markup
+            ),
+        )
+        return msg is not None
+
+    async def edit_caption(
+        self,
+        chat_id: int,
+        message_id: int,
+        caption: str,
+        *,
+        reply_markup: InlineKeyboardMarkup | None = None,
+        photo: bool = True,
+    ) -> bool:
+        """Переписать подпись фото (``photo``) или текст сообщения вместе с
+        кнопками — карточка предмета, свёрнутая из перечня действий."""
+        if not photo:
+            return await self.edit_text(chat_id, message_id, caption, reply_markup=reply_markup)
+        msg = await send_with_retry(
+            chat_id,
+            "правка подписи",
+            lambda: self._bot.edit_message_caption(
+                chat_id=chat_id, message_id=message_id, caption=caption, reply_markup=reply_markup
+            ),
+        )
+        return msg is not None
+
     async def send_document(
         self,
         chat_id: int,

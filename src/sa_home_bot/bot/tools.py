@@ -1200,16 +1200,17 @@ async def tool_swap_radio(ctx: ToolContext, _args: dict[str, Any]) -> str:
     )
 
 
-async def tool_show_items(ctx: ToolContext, args: dict[str, Any]) -> str:
-    """Особенные вещи собеседника (Этап 49.3, bot/interactives/items.py):
-    опись или карточка вещи приходят сами, модели — что показано."""
+async def tool_manor_items(ctx: ToolContext, args: dict[str, Any]) -> str:
+    """Особенные вещи поместья (Этап 49.3.6, bot/interactives/items.py):
+    опись — модели, она отвечает своими словами; ``show`` — карточка вещи
+    уходит в чат сама."""
     if ctx.interactives is None:
         return interactive_radio.TOOL_ITEMS_UNAVAILABLE
-    which = args.get("item")
-    return await ctx.interactives.tool_show_items(
+    show = args.get("show")
+    return await ctx.interactives.tool_manor_items(
         ctx.chat_id,
         ctx.user_id,
-        which=which if isinstance(which, str) else "",
+        show=show if isinstance(show, str) else "",
         message_thread_id=ctx.message_thread_id,
         trigger_message_id=ctx.trigger_message_id,
     )
@@ -4087,12 +4088,12 @@ TOOLS: tuple[ToolSpec, ...] = (
         handler=tool_take_photo,
         declaration=interactive_cabinet.TAKE_PHOTO_DECLARATION,
     ),
-    # Вещи собеседника (Этап 49.3) — без requires: показывает только его же
-    # предметы, выданные сценками.
+    # Вещи поместья (Этап 49.3) — без requires: опись только тех вещей,
+    # что выданы сценками этому собеседнику.
     ToolSpec(
-        name="show_items",
-        handler=tool_show_items,
-        declaration=interactive_radio.SHOW_ITEMS_DECLARATION,
+        name="manor_items",
+        handler=tool_manor_items,
+        declaration=interactive_radio.MANOR_ITEMS_DECLARATION,
     ),
     # Картинки (Этап 48). generate_image — право generate_image@llm в форме
     # «действие@служба» на ту же службу llm, что рисует (llm/imagegen.py на

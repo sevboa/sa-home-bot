@@ -31,12 +31,13 @@ PLACE_DESK = "desk"
 PLACE_STOREROOM = "storeroom"
 PLACE_RU = {PLACE_DESK: "на столе в кабинете", PLACE_STOREROOM: "в чулане"}
 
-# Опись вещей гостя (/items, тул show_items без вещи) — голос Альфреда.
-INVENTORY_TITLE = "<b>Ваши вещи, сэр</b>"
+# Опись вещей поместья (/items) — голос Альфреда. Вещь заведена на гостя
+# (у каждого свой кабинет), но для него это вещи поместья, а не его карман.
+INVENTORY_TITLE = "<b>Особенные вещи поместья</b>"
 INVENTORY_LINE = "{icon} <b>{name}</b> — {where}."
 INVENTORY_TRAITS = "<i>Приметы: {traits}.</i>"
 INVENTORY_HINT = "Нажмите на вещь — принесу показать."
-INVENTORY_EMPTY = "Особенных вещей у вас пока нет, сэр."
+INVENTORY_EMPTY = "Особенных вещей в поместье пока нет, сэр."
 
 
 @dataclass(frozen=True)

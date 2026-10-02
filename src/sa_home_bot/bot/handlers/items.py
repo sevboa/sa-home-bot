@@ -3,8 +3,9 @@ bot/interactives/items.py).
 
 callback_data «it:<id предмета>:<кнопка>»; права — Interactives.
 handle_item_click по from_user.id (кнопка работает только у владельца).
-У «Проклятой радиостанции» кнопка ставит старую станцию или убирает её —
-это и есть переключатель картавости Альфреда.
+Под карточкой — «Действия»: сообщение сменяется перечнем действий с
+«Назад». У «Проклятой радиостанции» действие ставит старую станцию или
+убирает её — это и есть переключатель картавости Альфреда.
 """
 
 from __future__ import annotations
@@ -46,8 +47,9 @@ async def cb_item(callback: CallbackQuery, interactives: Interactives | None = N
         button,
         message_id=message.message_id,
         message_thread_id=getattr(message, "message_thread_id", None),
+        photo=bool(getattr(message, "photo", None)),
     )
-    await callback.answer(answer)
+    await callback.answer(answer or None)
     if markup is None:
         return
     try:

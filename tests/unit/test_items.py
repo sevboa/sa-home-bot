@@ -271,7 +271,9 @@ async def test_swap_grants_cursed_radio_card_with_toggle(store):
     assert len(await store.items_of(GUEST)) == 1
 
 
-async def test_item_button_toggles_speech_and_label(store):
+async def test_item_card_actions_menu_toggles_speech(store):
+    """Под карточкой — только «Действия»; перечень действий заменяет
+    карточку, действие или «Назад» возвращают её (пользователь 2026-10-02)."""
     link = ItemLink()
     svc, _ = _make(store, link)
     await _finale(store, svc, item_seed=9)
@@ -279,18 +281,32 @@ async def test_item_button_toggles_speech_and_label(store):
     await _drain(svc)
     (owned,) = await store.items_of(GUEST)
     assert await svc.speech_clear(GUEST) is True  # старое убрано — речь чистая
-    answer, markup, caption = await svc.handle_item_click(GUEST, GUEST, owned["id"], "p")
+    card = engine.item_keyboard(RADIO, owned["id"])
+    assert [b.text for row in card.inline_keyboard for b in row] == [radio.ITEM_ACTIONS_LABEL]
+    _, menu, caption = await svc.handle_item_click(
+        GUEST, GUEST, owned["id"], engine.ITEM_BTN_ACTIONS, message_id=50
+    )
+    assert [row[0].text for row in menu.inline_keyboard] == [
+        radio.ITEM_PUT_LABEL,
+        radio.ITEM_BACK_LABEL,
+    ]
+    assert radio.ITEM_PLACE_STORED in caption
+    _, back, caption = await svc.handle_item_click(
+        GUEST, GUEST, owned["id"], engine.ITEM_BTN_BACK, message_id=50
+    )
+    assert back == card and radio.ITEM_CARD_STORED in caption
+    answer, markup, caption = await svc.handle_item_click(
+        GUEST, GUEST, owned["id"], engine.ITEM_BTN_PUT, message_id=50
+    )
     assert answer == "Поставлено." and await svc.speech_clear(GUEST) is False
-    assert markup.inline_keyboard[0][0].text == radio.ITEM_REMOVE_LABEL
-    assert radio.ITEM_CARD_INSTALLED in caption
-    # Старая карточка с «Поставить» после смены формами — уже так, без
-    # переключения, надпись обновляется.
-    answer, stale, _ = await svc.handle_item_click(GUEST, GUEST, owned["id"], "p")
+    assert markup == card and radio.ITEM_CARD_INSTALLED in caption
+    _, menu, _ = await svc.handle_item_click(GUEST, GUEST, owned["id"], engine.ITEM_BTN_ACTIONS)
+    assert menu.inline_keyboard[0][0].text == radio.ITEM_REMOVE_LABEL
+    # Старая кнопка «Поставить» после смены формами — уже так, без переключения.
+    answer, _, _ = await svc.handle_item_click(GUEST, GUEST, owned["id"], "p")
     assert answer == "Уже так."
-    assert stale.inline_keyboard[0][0].text == radio.ITEM_REMOVE_LABEL
-    answer, markup, _ = await svc.handle_item_click(GUEST, GUEST, owned["id"], "r")
+    answer, _, _ = await svc.handle_item_click(GUEST, GUEST, owned["id"], "r")
     assert answer == "Убрано." and await svc.speech_clear(GUEST) is True
-    assert markup.inline_keyboard[0][0].text == radio.ITEM_PUT_LABEL
     assert [e["kind"] for e in await store.item_events(owned["id"])] == [
         "created",
         "installed",
@@ -298,10 +314,85 @@ async def test_item_button_toggles_speech_and_label(store):
     ]
     # Чужая кнопка ничего не меняет.
     assert (await svc.handle_item_click(GUEST, 999, owned["id"], "p"))[0] == radio.ITEM_NOT_YOURS
-    assert engine.parse_item_callback(markup.inline_keyboard[0][0].callback_data) == (
+    assert engine.parse_item_callback(menu.inline_keyboard[0][0].callback_data) == (
         owned["id"],
-        "p",
+        "r",
     )
+
+
+class EditNotifier:
+    """Notifier с правкой: что сняли и что свернули."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.markups: list[tuple[int, object]] = []
+        self.captions: list[tuple[int, str, object, bool]] = []
+        self.next_id = 700
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    async def send_direct(self, chat_id, text, **kw):
+        await self._inner.send_direct(chat_id, text, **kw)
+        self.next_id += 1
+        return self.next_id
+
+    async def edit_markup(self, chat_id, message_id, reply_markup):
+        self.markups.append((message_id, reply_markup))
+        return True
+
+    async def edit_caption(self, chat_id, message_id, caption, *, reply_markup=None, photo=True):
+        self.captions.append((message_id, caption, reply_markup, photo))
+        return True
+
+
+async def test_next_guest_message_dismisses_forms_and_folds_menu(store):
+    """Пользователь 2026-10-02: форма «заменить/оставить», присланная снова,
+    оставляла живыми кнопки прежней. Следующее сообщение гостя гасит все
+    формы, а раскрытый перечень действий сворачивает в карточку."""
+    link = ItemLink()
+    svc, inner = _make(store, link)
+    notifier = EditNotifier(inner)
+    svc._notifier = notifier
+    await InteractiveStore(store).mark_completed("radio", GUEST)
+    assert await svc.tool_swap_radio(GUEST, GUEST, is_private=True) == radio.TOOL_REINSTALL_FORM
+    await svc.flush_forms(GUEST)
+    form_id = notifier.next_id
+    (owned,) = await store.items_of(GUEST)
+    await svc.handle_item_click(
+        GUEST, GUEST, owned["id"], engine.ITEM_BTN_ACTIONS, message_id=555, photo=True
+    )
+    # Чужое сообщение в том же чате ничего не трогает.
+    assert await svc.dismiss_buttons(GUEST, 999) == 0
+    await svc.before_turn(GUEST, GUEST, "а что ещё есть в поместье?", is_private=True)
+    assert notifier.markups == [(form_id, None)]
+    ((menu_id, caption, markup, photo),) = notifier.captions
+    assert menu_id == 555 and photo and radio.ITEM_CARD_INSTALLED in caption
+    assert markup == engine.item_keyboard(RADIO, owned["id"])
+    # Погашено один раз: следующее сообщение уже ничего не правит.
+    assert await svc.dismiss_buttons(GUEST, GUEST) == 0
+    # Нажатая форма из живых уходит сама.
+    await svc.tool_swap_radio(GUEST, GUEST, is_private=True)
+    await svc.flush_forms(GUEST)
+    await svc.handle_click(
+        GUEST, GUEST, "radio", engine.BTN_TOGGLE_KEEP, message_id=notifier.next_id
+    )
+    assert await svc.dismiss_buttons(GUEST, GUEST) == 0
+
+
+async def test_ignored_offer_can_be_asked_again(store):
+    link = ItemLink()
+    svc, inner = _make(store, link)
+    notifier = EditNotifier(inner)
+    svc._notifier = notifier
+    plan = await svc.before_turn(GUEST, GUEST, "радиостанция хрипит", is_private=True)
+    assert plan.offered
+    await svc.flush_forms(GUEST, plan)
+    plan = await svc.before_turn(GUEST, GUEST, "ладно, неважно", is_private=True)
+    assert notifier.markups == [(notifier.next_id, None)] and not plan.offered
+    # Гость снова о радиостанции — согласие спрашивается снова, без кулдауна.
+    plan = await svc.before_turn(GUEST, GUEST, "радиостанция опять хрипит", is_private=True)
+    assert plan.offered
 
 
 async def test_cabinet_general_view_shows_the_radio_that_stands(store):
@@ -404,33 +495,51 @@ async def test_guest_who_finished_before_items_gets_radio_lazily(store):
     link = ItemLink()
     svc, notifier = _make(store, link)
     await InteractiveStore(store).mark_completed("radio", GUEST)
-    text = await svc.tool_show_items(GUEST, GUEST, which="радио")
+    text = await svc.tool_manor_items(GUEST, GUEST, show="радио")
     assert text == radio.TOOL_ITEMS_DRAWING.format(items="Проклятая радиостанция")
     await _drain(svc)
     (owned,) = await store.items_of(GUEST)
     assert owned["origin"] == "radio_scene_before_items" and owned["traits"] == []
     assert len(link.portraits()) == 1 and notifier.photos
     # Портрет уже есть — карточка сразу.
-    text = await svc.tool_show_items(GUEST, GUEST, which="старый передатчик")
+    text = await svc.tool_manor_items(GUEST, GUEST, show="старый передатчик")
     assert text == radio.TOOL_ITEMS_SENT.format(items="Проклятая радиостанция")
     assert len(link.portraits()) == 1
 
 
-async def test_inventory_lists_items_with_place_and_card_buttons(store):
-    """Этап 49.3.5: опись — где каждая вещь, кнопка приносит карточку."""
+async def test_manor_items_tells_alfred_not_the_chat(store):
+    """Пользователь 2026-10-02: опись — Альфреду, он отвечает своими словами;
+    в чат ничего не уходит. В описи — где вещь и что с ней можно сделать."""
     link = ItemLink()
     svc, notifier = _make(store, link)
     await _finale(store, svc, item_seed=9, item_traits=["пыль"], item_key="radio-601-a")
     await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_SWAP)
     await _drain(svc)
-    # Без вещи в запросе — опись, а не пачка карточек.
+    sent, photos = len(notifier.sent), len(notifier.photos)
+    text = await svc.tool_manor_items(GUEST, GUEST)
+    assert len(notifier.sent) == sent and len(notifier.photos) == photos
+    assert "Проклятая радиостанция — в чулане" in text and "покрыта пылью" in text
+    assert radio.RADIO_ACTION_PUT in text
+    (owned,) = await store.items_of(GUEST)
+    await svc.handle_item_click(GUEST, GUEST, owned["id"], engine.ITEM_BTN_PUT)
+    text = await svc.tool_manor_items(GUEST, GUEST)
+    assert "на столе в кабинете" in text and radio.RADIO_ACTION_REMOVE in text
+    # Незнакомую вещь показать нельзя — Альфред получает опись.
+    text = await svc.tool_manor_items(GUEST, GUEST, show="меч")
+    assert text.startswith("Такой вещи в поместье нет") and len(notifier.photos) == photos
+
+
+async def test_inventory_lists_items_with_place_and_card_buttons(store):
+    """Этап 49.3.5: опись /items — где каждая вещь, кнопка приносит карточку."""
+    link = ItemLink()
+    svc, notifier = _make(store, link)
+    await _finale(store, svc, item_seed=9, item_traits=["пыль"], item_key="radio-601-a")
+    await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_SWAP)
+    await _drain(svc)
     photos = len(notifier.photos)
-    assert await svc.tool_show_items(GUEST, GUEST) == radio.TOOL_ITEMS_LIST
-    (_, text) = notifier.sent[-1]
-    assert "📻 <b>Проклятая радиостанция</b> — в чулане." in text and "покрыта пылью" in text
-    assert len(notifier.photos) == photos
     (owned,) = await store.items_of(GUEST)
     text, markup = await svc.inventory(GUEST)
+    assert "📻 <b>Проклятая радиостанция</b> — в чулане." in text and "покрыта пылью" in text
     button = markup.inline_keyboard[0][0]
     assert button.text == "📻 Проклятая радиостанция"
     item_id, code = engine.parse_item_callback(button.callback_data)
@@ -449,9 +558,9 @@ async def test_inventory_empty(store):
     assert text == items.INVENTORY_EMPTY and markup is None
 
 
-async def test_show_items_without_items(store):
+async def test_manor_items_without_items(store):
     svc, _ = _make(store, ItemLink())
-    assert await svc.tool_show_items(GUEST, GUEST) == radio.TOOL_ITEMS_NONE
+    assert await svc.tool_manor_items(GUEST, GUEST) == radio.TOOL_ITEMS_NONE
 
 
 async def test_lazy_radio_is_drawn_instead_of_reshowing_old_general_view(store):
