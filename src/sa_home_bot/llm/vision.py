@@ -30,6 +30,24 @@ _SWEEP_MIN_INTERVAL_S = 24 * 3600.0
 _last_sweep_at = 0.0
 
 
+def _resized_jpeg(raw: bytes, cfg: LlmConfig) -> bytes:
+    img = Image.open(io.BytesIO(raw))
+    img = ImageOps.exif_transpose(img) or img
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    img.thumbnail(
+        (cfg.photo_max_edge_px, cfg.photo_max_edge_px), resample=Image.Resampling.LANCZOS
+    )
+    return _encode_with_degradation(img, cfg.photo_jpeg_quality)
+
+
+def prepare(raw: bytes, cfg: LlmConfig) -> str:
+    """Как ``resize_and_store``, но без сохранения: base64 для ``images``.
+    Своя картинка Альфреда (look_at_photo с raw_image) — её байты и так в
+    базе бота. CPU-bound — через ``asyncio.to_thread``."""
+    return base64.b64encode(_resized_jpeg(raw, cfg)).decode()
+
+
 def resize_and_store(raw: bytes, photo_key: str, cfg: LlmConfig) -> str:
     """EXIF-transpose + ресайз до ``cfg.photo_max_edge_px`` + JPEG-сжатие с
     деградацией качества, сохранить в ``cfg.photos_dir/{photo_key}.jpg``,
@@ -39,15 +57,7 @@ def resize_and_store(raw: bytes, photo_key: str, cfg: LlmConfig) -> str:
     делает для своего urllib-клиента), чтобы не блокировать событийный цикл
     службы на время генерации других чатов.
     """
-    img = Image.open(io.BytesIO(raw))
-    img = ImageOps.exif_transpose(img) or img
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-    img.thumbnail(
-        (cfg.photo_max_edge_px, cfg.photo_max_edge_px), resample=Image.Resampling.LANCZOS
-    )
-
-    encoded = _encode_with_degradation(img, cfg.photo_jpeg_quality)
+    encoded = _resized_jpeg(raw, cfg)
 
     cfg.photos_dir.mkdir(parents=True, exist_ok=True)
     path = cfg.photos_dir / f"{photo_key}.jpg"

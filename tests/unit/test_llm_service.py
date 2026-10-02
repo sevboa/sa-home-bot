@@ -385,6 +385,26 @@ async def test_look_at_photo_loads_stored_and_returns_response(monkeypatch):
     ]
 
 
+async def test_look_at_photo_takes_alfred_picture_inline(monkeypatch, tmp_path):
+    """Своя картинка Альфреда приходит байтами из базы бота — без файла на
+    диске, и на диск не сохраняется (2026-10-02)."""
+    seen = {}
+
+    async def fake_chat(cfg, messages, system, tools=None, think=None):
+        seen["messages"] = messages
+        return {"message": {"content": "на снимке камин"}}
+
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    svc = LlmService(_settings(), speech_rand=lambda: 1.0)
+    result = await svc.run_command(
+        "look_at_photo",
+        {"photo_key": "img-7", "question": "что там?", "raw_image": _tiny_jpeg_b64()},
+    )
+    assert result["response"] == "на снимке камин"
+    assert seen["messages"][0]["images"]
+    assert not list(svc._cfg.photos_dir.glob("img-7*"))
+
+
 async def test_look_at_photo_missing_file_returns_apology():
     svc = LlmService(_settings())
     result = await svc.run_command(

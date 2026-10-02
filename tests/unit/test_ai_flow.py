@@ -2109,3 +2109,33 @@ async def test_typing_keepalive_repeats_while_the_model_is_slow(store, monkeypat
     # обязан повториться хотя бы раз, не только зажечься единожды.
     assert len(message.bot.typing_chats) > 1
     assert set(message.bot.typing_chats) == {message.chat.id}
+
+
+async def test_reply_to_alfreds_picture_adds_a_note(store):
+    """Гость отвечает на картинку Альфреда — в ход подмешивается, что это
+    за картинка, что на ней видели и что смотреть её — look_at_photo."""
+    import json
+    from types import SimpleNamespace
+
+    image_id = await store.add_image(
+        chat_id=555,
+        author=None,
+        prompt_ru="кабинет",
+        prompt_en="study",
+        caption="Мой кабинет",
+        width=8,
+        height=8,
+        colors=32,
+        png=b"png",
+        now=datetime.now(tz=UTC),
+        purpose="photo",
+        params=json.dumps({"seen": "камин и сова"}, ensure_ascii=False),
+    )
+    await store.set_image_sent(image_id, "file-1", 900)
+    message = SimpleNamespace(
+        chat=SimpleNamespace(id=555), reply_to_message=SimpleNamespace(message_id=900)
+    )
+    note = await ai_flow._replied_picture_note(message, store)
+    assert f"#{image_id}" in note and "камин и сова" in note and "look_at_photo" in note
+    message.reply_to_message = SimpleNamespace(message_id=901)
+    assert await ai_flow._replied_picture_note(message, store) is None

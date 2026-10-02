@@ -633,6 +633,15 @@ class LlmService:
                             title="Что нужно рассмотреть/уточнить на фото",
                         ),
                         ActionParam(
+                            name="raw_image",
+                            type="string",
+                            required=False,
+                            title=(
+                                "Картинка base64 вместо файла по photo_key — своя "
+                                "картинка Альфреда из базы бота (не сохраняется)"
+                            ),
+                        ),
+                        ActionParam(
                             name="chat_id",
                             type="int",
                             required=False,
@@ -1043,7 +1052,19 @@ class LlmService:
             # отправленный до смены передатчика, иначе затёр бы её (живой
             # баг 2026-09-28, генерация в очереди Ollama шла ~3 минуты).
             speaker = self._speech_target(args)
-            stored_b64 = await asyncio.to_thread(vision.load_stored, photo_key, self._cfg)
+            raw_image = args.get("raw_image")
+            if isinstance(raw_image, str) and raw_image:
+                # Своя картинка Альфреда (снимок, generate_image): байты из
+                # базы бота — то, что видел гость; на диске не храним.
+                try:
+                    stored_b64 = await asyncio.to_thread(
+                        vision.prepare, base64.b64decode(raw_image, validate=True), self._cfg
+                    )
+                except Exception:
+                    log.warning("vision: картинка %s не разобрана", photo_key, exc_info=True)
+                    return {"response": PHOTO_NOT_FOUND_TEXT, "model": self._cfg.model}
+            else:
+                stored_b64 = await asyncio.to_thread(vision.load_stored, photo_key, self._cfg)
             if stored_b64 is None:
                 return {"response": PHOTO_NOT_FOUND_TEXT, "model": self._cfg.model}
             # Без tools (узкий вопрос про изображение не требует рекурсивного

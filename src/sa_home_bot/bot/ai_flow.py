@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import re
 import time
@@ -559,6 +560,34 @@ def _is_unavailable(exc: Exception) -> bool:
     if isinstance(exc, ServiceUnavailableError):
         return True
     return isinstance(exc, ProtoError) and exc.code in (ERR_UNAVAILABLE, ERR_UNKNOWN_DST)
+
+
+# Гость ответил на картинку Альфреда (снимок, рисунок, карточку): самой
+# картинки модель не видит — без подсказки она отвечала «по памяти»
+# (2026-10-02).
+REPLIED_PICTURE_NOTE = (
+    "Собеседник отвечает на твою картинку #{id} «{caption}». Ты её не видишь, "
+    "пока не посмотришь: о деталях — сначала look_at_photo (whose=mine).{seen}"
+)
+REPLIED_PICTURE_SEEN = " Когда ты её отправлял, на ней было видно: {seen}"
+
+
+async def _replied_picture_note(message: Message, store: Store | None) -> str | None:
+    if store is None or message.chat is None or message.reply_to_message is None:
+        return None
+    image = await store.alfred_image(
+        message.chat.id, message_id=message.reply_to_message.message_id
+    )
+    if image is None:
+        return None
+    seen = ""
+    try:
+        params = json.loads(image.get("params") or "{}")
+    except (TypeError, ValueError):
+        params = {}
+    if isinstance(params, dict) and isinstance(params.get("seen"), str) and params["seen"]:
+        seen = REPLIED_PICTURE_SEEN.format(seen=params["seen"])
+    return REPLIED_PICTURE_NOTE.format(id=image["id"], caption=image["caption"], seen=seen)
 
 
 def photo_key_for(message: Message) -> str:
@@ -1158,6 +1187,9 @@ async def request_alfred(
         )
         if forms_note:
             context_note = f"{context_note} {forms_note}" if context_note else forms_note
+    picture_note = await _replied_picture_note(message, store)
+    if picture_note:
+        context_note = f"{context_note}\n\n{picture_note}" if context_note else picture_note
     scene_note = getattr(interactive_turn, "note", None)
     if scene_note:
         # Этап 47: сцена интерактива — рамка, подсказка стадии, директива
@@ -1328,6 +1360,9 @@ async def request_alfred(
             interactives=interactives,
             user_id=message.from_user.id if message.from_user else None,
             is_private=message.chat is not None and message.chat.type == "private",
+            reply_to_message_id=(
+                message.reply_to_message.message_id if message.reply_to_message else None
+            ),
         )
         telegram_chat_id = message.chat.id if message.chat is not None else None
 

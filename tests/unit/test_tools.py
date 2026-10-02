@@ -566,6 +566,67 @@ async def test_look_at_photo_success_calls_service_with_stored_key(store):
     assert dst.service == tools.LLM_SERVICE
 
 
+async def _alfred_picture(store, *, purpose="photo", message_id=500):
+    image_id = await store.add_image(
+        chat_id=CHAT_ID,
+        author=None,
+        prompt_ru="кабинет",
+        prompt_en="study",
+        caption="Мой кабинет",
+        width=8,
+        height=8,
+        colors=32,
+        png=_tiny_png(),
+        now=datetime.now(tz=UTC),
+        purpose=purpose,
+    )
+    await store.set_image_sent(image_id, "file-1", message_id)
+    return image_id
+
+
+def _tiny_png() -> bytes:
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), (200, 100, 50)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+async def test_look_at_photo_sees_alfreds_own_snapshot(store):
+    """2026-10-02: Альфред не видел своих снимков. whose=mine — последняя
+    своя картинка, байтами из базы (как видел гость)."""
+    image_id = await _alfred_picture(store)
+    link = _FakeLookNodeLink(response="на снимке камин")
+    result = await tools.tool_look_at_photo(
+        _ctx(store, node_link=link), {"question": "что на снимке?", "whose": "mine"}
+    )
+    assert result == "на снимке камин"
+    _, args, _ = link.calls[0]
+    assert args["photo_key"] == f"img-{image_id}" and args["raw_image"]
+
+
+async def test_look_at_photo_reply_to_alfreds_picture_takes_it(store):
+    """Гость ответил на картинку Альфреда — тул берёт её, даже без whose."""
+    await store.record_ai_turn(
+        CHAT_ID, 1, 1, "user", "[фото]", datetime.now(tz=UTC), photo_path="111_1"
+    )
+    image_id = await _alfred_picture(store, purpose="chat", message_id=777)
+    ctx = _ctx(store, node_link=_FakeLookNodeLink())
+    ctx.reply_to_message_id = 777
+    await tools.tool_look_at_photo(ctx, {"question": "что там?"})
+    _, args, _ = ctx.node_link.calls[0]
+    assert args["photo_key"] == f"img-{image_id}"
+
+
+async def test_look_at_photo_mine_without_pictures_is_honest(store):
+    result = await tools.tool_look_at_photo(
+        _ctx(store, node_link=_FakeLookNodeLink()), {"question": "что?", "whose": "mine"}
+    )
+    assert "ничего не присылал" in result
+
+
 async def test_look_at_photo_piggybacks_a_graph_episode(store):
     """Этап 42.2: успешное повторное распознавание фото дублируется в
     graph_memory как ACTION_ADD_EPISODE с source=look_at_photo — тем же

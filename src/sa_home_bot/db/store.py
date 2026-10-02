@@ -1313,6 +1313,30 @@ class Store:
         row = await cur.fetchone()
         return dict(row) if row else None
 
+    # Картинки, которые Альфред сам прислал в чат: нарисованные, снимки
+    # кабинета, карточки вещей (отладочный /draw — нет).
+    ALFRED_IMAGE_PURPOSES = ("chat", "photo", "item")
+
+    async def alfred_image(
+        self, chat_id: int, *, image_id: int | None = None, message_id: int | None = None
+    ) -> dict | None:
+        """Своя картинка Альфреда в этом чате — по номеру, по сообщению или
+        последняя отправленная (look_at_photo, «посмотри на свой снимок»)."""
+        marks = ",".join("?" * len(self.ALFRED_IMAGE_PURPOSES))
+        sql = f"SELECT * FROM images WHERE chat_id=? AND purpose IN ({marks})"
+        params: list[object] = [chat_id, *self.ALFRED_IMAGE_PURPOSES]
+        if image_id is not None:
+            sql += " AND id=?"
+            params.append(image_id)
+        elif message_id is not None:
+            sql += " AND message_id=?"
+            params.append(message_id)
+        else:
+            sql += " AND message_id IS NOT NULL"
+        cur = await self.db.conn.execute(sql + " ORDER BY id DESC LIMIT 1", params)
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
     async def image_by_message(self, chat_id: int, message_id: int) -> dict | None:
         cur = await self.db.conn.execute(
             "SELECT * FROM images WHERE chat_id=? AND message_id=?", (chat_id, message_id)

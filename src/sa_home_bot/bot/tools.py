@@ -224,6 +224,9 @@ class ToolContext:
     # описание придёт вместе со снимком). run_chat_loop прекращает раунды,
     # ai_flow.request_alfred отдаёт SILENT_REPLY.
     end_turn: bool = False
+    # На какое сообщение ответил гость (Telegram reply) — look_at_photo:
+    # ответ на картинку Альфреда — значит, о ней и речь.
+    reply_to_message_id: int | None = None
 
 
 ToolHandler = Callable[["ToolContext", dict[str, Any]], Awaitable[str]]
@@ -1465,21 +1468,30 @@ _DECL_LOOK_AT_PHOTO: dict[str, Any] = {
     "function": {
         "name": "look_at_photo",
         "description": (
-            "Ещё раз посмотреть на фотографию, которую собеседник прислал "
-            "РАНЕЕ в этом же разговоре. Фото из ТЕКУЩЕГО сообщения ты и так "
-            "уже видишь без этого тула — вызывай его, только если спрашивают "
-            "про снимок из более раннего хода (детали, которых нет в твоём "
-            "прежнем словесном описании: 'а какого цвета там...', 'посчитай "
-            "сколько...', 'что написано на...'). Если в этом разговоре фото "
-            "не присылали — не зови тул, а честно скажи, что фото не было."
+            "Посмотреть на картинку: фото, которое собеседник прислал РАНЕЕ в "
+            "этом разговоре (whose=guest), или твою собственную — снимок кабинета, "
+            "нарисованную картинку, карточку вещи (whose=mine). Фото из ТЕКУЩЕГО "
+            "сообщения ты и так видишь. Своих картинок ты не видишь, пока не "
+            "посмотришь этим тулом: спрашивают, что на твоём снимке или "
+            "рисунке, — сначала посмотри, не выдумывай. Если собеседник ответил "
+            "на твою картинку, тул сам возьмёт её."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "question": {
                     "type": "string",
-                    "description": "Что именно нужно рассмотреть или уточнить на фото",
-                }
+                    "description": "Что именно нужно рассмотреть или уточнить на картинке",
+                },
+                "whose": {
+                    "type": "string",
+                    "enum": ["guest", "mine"],
+                    "description": "guest — фото собеседника (по умолчанию), mine — твоя картинка",
+                },
+                "image_id": {
+                    "type": "integer",
+                    "description": "Номер твоей картинки (#N), если речь о конкретной",
+                },
             },
             "required": ["question"],
         },
@@ -1487,21 +1499,60 @@ _DECL_LOOK_AT_PHOTO: dict[str, Any] = {
 }
 
 
+async def _own_picture(ctx: ToolContext, args: dict[str, Any]) -> dict | str | None:
+    """Своя картинка Альфреда для look_at_photo: ответ гостя на картинку,
+    номер или последняя. None — смотреть фото гостя; строка — отказ."""
+    assert ctx.store is not None and ctx.chat_id is not None
+    whose = args.get("whose")
+    image_id = args.get("image_id")
+    if isinstance(image_id, bool) or not isinstance(image_id, int):
+        image_id = None
+    if whose != "guest" and image_id is None and ctx.reply_to_message_id is not None:
+        replied = await ctx.store.alfred_image(ctx.chat_id, message_id=ctx.reply_to_message_id)
+        if replied is not None:
+            return replied
+    if whose != "mine" and image_id is None:
+        return None
+    found = await ctx.store.alfred_image(ctx.chat_id, image_id=image_id)
+    if found is None:
+        return (
+            f"картинки #{image_id} в этом чате нет"
+            if image_id is not None
+            else "ты ещё ничего не присылал в этот чат — смотреть не на что"
+        )
+    return found
+
+
 async def tool_look_at_photo(ctx: ToolContext, args: dict[str, Any]) -> str:
     question = args.get("question")
     if not isinstance(question, str) or not question.strip():
         return "ошибка: не указан вопрос про фото (question)"
-    if ctx.store is None or ctx.chat_id is None or ctx.dialogue_id is None:
+    if ctx.store is None or ctx.chat_id is None:
         return "ошибка: сейчас не могу вернуться к фото (нет доступа к истории треда)"
-    turn = await ctx.store.latest_photo_turn(ctx.chat_id, ctx.dialogue_id)
-    if turn is None:
-        return "в этом разговоре фото не найдено — переспроси, если оно точно было"
+    request: dict[str, Any] = {"question": question, "chat_id": ctx.chat_id}
+    mine = await _own_picture(ctx, args)
+    if isinstance(mine, str):
+        return mine
+    if mine is not None:
+        # Своя картинка — байты из базы, как их видел гость (служба llm её
+        # не хранит; 2026-10-02: Альфред не видел своих снимков).
+        request["photo_key"] = f"img-{mine['id']}"
+        request["raw_image"] = base64.b64encode(
+            image_tools.upscale_png(mine["png"], ctx.settings.llm.imagegen_display_px)
+        ).decode()
+    else:
+        if ctx.dialogue_id is None:
+            return "ошибка: сейчас не могу вернуться к фото (нет доступа к истории треда)"
+        turn = await ctx.store.latest_photo_turn(ctx.chat_id, ctx.dialogue_id)
+        if turn is None:
+            return "в этом разговоре фото не найдено — переспроси, если оно точно было"
+        request["photo_key"] = turn["photo_path"]
     if ctx.node_link is None:
         return "ошибка: сейчас не могу связаться с Альфредом, чтобы посмотреть на фото"
     try:
         result = await ctx.node_link.command(
             ACTION_LOOK_AT_PHOTO,
-            {"photo_key": turn["photo_path"], "question": question, "chat_id": ctx.chat_id},
+            request,
             dst=Address(node=LLM_NODE, service=LLM_SERVICE),
             timeout=ctx.settings.llm.request_timeout_s,
         )
