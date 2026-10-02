@@ -588,3 +588,99 @@ async def test_lazy_radio_is_drawn_instead_of_reshowing_old_general_view(store):
     await svc.tool_take_photo(-100, GUEST, {})
     await _drain(svc)
     assert len(link.generated()) == 2 and outside
+
+
+# --- действия объявляет вид (Этап 49.3.7) ---
+
+
+def test_kind_declares_actions_by_place():
+    """Карточка, перечень и опись строятся из ItemKind.actions, а не из типа."""
+    assert [a.name for a in RADIO.available(items.PLACE_DESK)] == ["remove"]
+    assert [a.name for a in RADIO.available(items.PLACE_STOREROOM)] == ["put"]
+    assert RADIO.action("p") is RADIO.action("put") and RADIO.action("x") is None
+    assert RADIO.transferable is False
+    plain = items.ItemKind(
+        type="cup", name="Чашка", archetype="", checks=(), traits={}, ladder=(),
+        paste_hint="", focus_re=items.re.compile("чашк"),
+    )  # fmt: skip
+    assert engine.item_keyboard(plain, 1) is None
+    menu = engine.item_actions_keyboard(RADIO, 7, items.PLACE_DESK, engine.ITEM_FROM_INVENTORY)
+    assert [row[0].callback_data for row in menu.inline_keyboard] == ["it:7:ir", "it:7:ib"]
+
+
+async def _swapped(store):
+    link = ItemLink()
+    svc, inner = _make(store, link)
+    notifier = EditNotifier(inner)
+    svc._notifier = notifier
+    await _finale(store, svc, item_seed=9, item_traits=["пыль"], item_key="radio-601-a")
+    await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_SWAP)
+    await _drain(svc)
+    (owned,) = await store.items_of(GUEST)
+    return svc, notifier, owned
+
+
+async def test_inventory_actions_return_to_inventory(store):
+    """Особенные вещи — действия всегда доступны прямо из /items."""
+    svc, notifier, owned = await _swapped(store)
+    _, markup = await svc.inventory(GUEST)
+    _, actions_btn = markup.inline_keyboard[0]
+    assert actions_btn.text == radio.ITEM_ACTIONS_LABEL
+    _, code = engine.parse_item_callback(actions_btn.callback_data)
+    _, menu, caption = await svc.handle_item_click(GUEST, GUEST, owned["id"], code, message_id=80)
+    assert radio.ITEM_PLACE_STORED in caption
+    assert [row[0].text for row in menu.inline_keyboard] == [
+        radio.ITEM_PUT_LABEL,
+        radio.ITEM_BACK_LABEL,
+    ]
+    _, put = engine.parse_item_callback(menu.inline_keyboard[0][0].callback_data)
+    answer, back, text = await svc.handle_item_click(
+        GUEST, GUEST, owned["id"], put, message_id=80
+    )
+    assert answer == "Поставлено." and await svc.speech_clear(GUEST) is False
+    assert text.startswith(items.INVENTORY_TITLE) and "на столе в кабинете" in text
+    assert back.inline_keyboard[0][1].text == radio.ITEM_ACTIONS_LABEL
+    # Перечень из описи, брошенный открытым, сворачивается обратно в опись.
+    await svc.handle_item_click(GUEST, GUEST, owned["id"], code, message_id=81)
+    await svc.dismiss_buttons(GUEST, GUEST)
+    ((menu_id, text, _, photo),) = notifier.captions
+    assert menu_id == 81 and not photo and text.startswith(items.INVENTORY_TITLE)
+    # «Назад» из описи — опись.
+    _, _, text = await svc.handle_item_click(GUEST, GUEST, owned["id"], "ib")
+    assert text.startswith(items.INVENTORY_TITLE)
+
+
+async def test_item_action_tool_sends_form_and_button_applies(store):
+    svc, notifier, owned = await _swapped(store)
+    text = await svc.tool_manor_items(GUEST, GUEST)
+    assert "(action=put)" in text
+    assert await svc.tool_item_action(GUEST, GUEST, item="радиостанция", action="remove") == (
+        radio.TOOL_ACTION_ALREADY.format(where="в чулане")
+    )
+    assert (await svc.tool_item_action(GUEST, GUEST, item="радио", action="съесть")).startswith(
+        "Так с этой вещью нельзя"
+    )
+    text = await svc.tool_item_action(GUEST, GUEST, item="радиостанция", action="put")
+    assert text == radio.TOOL_ACTION_FORM.format(form=radio.RETURN_FORM_TEXT)
+    await svc.flush_forms(GUEST)
+    form_id = notifier.next_id
+    assert notifier._inner.sent[-1] == (GUEST, radio.RETURN_FORM_TEXT)
+    # Форма — живые кнопки: следующее сообщение гостя её гасит.
+    await svc.dismiss_buttons(GUEST, GUEST)
+    assert notifier.markups == [(form_id, None)] and await svc.speech_clear(GUEST) is True
+    # Новая форма, на этот раз согласие.
+    await svc.tool_item_action(GUEST, GUEST, item="радиостанция", action="put")
+    await svc.flush_forms(GUEST)
+    answer, markup, done = await svc.handle_item_click(
+        GUEST, GUEST, owned["id"], "fp", message_id=notifier.next_id
+    )
+    assert answer == "Поставлено." and markup.inline_keyboard == []
+    assert done == radio.ITEM_FORM_DONE.format(form=radio.RETURN_FORM_TEXT, confirm="Вернуть")
+    assert await svc.speech_clear(GUEST) is False
+    assert await svc.dismiss_buttons(GUEST, GUEST) == 0  # нажатая форма ушла из живых
+    # «Оставить как есть» ничего не меняет.
+    await svc.tool_item_action(GUEST, GUEST, item="радиостанция", action="remove")
+    await svc.flush_forms(GUEST)
+    answer, _, kept = await svc.handle_item_click(GUEST, GUEST, owned["id"], "fkr")
+    assert kept == radio.ITEM_FORM_KEPT.format(form=radio.REINSTALL_FORM_TEXT)
+    assert await svc.speech_clear(GUEST) is False

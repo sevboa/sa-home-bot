@@ -110,6 +110,7 @@ FORM_OFFER = "offer"
 FORM_SWAP = "swap"
 FORM_RETURN = "return"
 FORM_REINSTALL = "reinstall"
+FORM_ITEM = "item"  # форма тула item_action (вещь поместья)
 
 # Форма согласия нарочно не выдаёт, что это игра (решение пользователя
 # 2026-09-27): невзначай заданный вопрос сценария и «Да»/«Нет». После
@@ -174,6 +175,12 @@ ITEM_BTN_REMOVE = "r"
 ITEM_BTN_CARD = "c"  # кнопка описи: принести карточку вещи
 ITEM_BTN_ACTIONS = "a"  # карточка → перечень действий
 ITEM_BTN_BACK = "b"  # перечень действий → карточка
+ITEM_BTN_KEEP = "k"  # форма тула: «Оставить как есть» (+ код действия)
+# Откуда нажата кнопка — префикс кода: из описи /items (перечень вернётся в
+# опись) или из формы тула item_action (форма закрывается итогом). Коды
+# действий вида поэтому не начинаются с этих букв.
+ITEM_FROM_INVENTORY = "i"
+ITEM_FROM_FORM = "f"
 ITEM_PURPOSE = "item"
 ACTION_ITEM_PORTRAIT = "item_portrait"
 ITEMS_SHOWN_MAX = 3
@@ -244,50 +251,67 @@ def _item_button(item_id: int, label: str, button: str) -> list[InlineKeyboardBu
     ]
 
 
-def item_has_actions(kind: items_mod.ItemKind) -> bool:
-    return kind.type == items_mod.RADIO_TYPE
-
-
 def item_keyboard(kind: items_mod.ItemKind, item_id: int) -> InlineKeyboardMarkup | None:
-    """Под карточкой — только «Действия», если с вещью что-то можно сделать."""
-    if not item_has_actions(kind):
+    """Под карточкой — только «Действия», если вид объявил действия."""
+    if not kind.actions:
         return None
     return InlineKeyboardMarkup(
         inline_keyboard=[_item_button(item_id, radio.ITEM_ACTIONS_LABEL, ITEM_BTN_ACTIONS)]
     )
 
 
-def item_actions_keyboard(item_id: int, installed: bool) -> InlineKeyboardMarkup:
-    """Перечень действий (заменяет карточку) и «Назад». Кнопка несёт
-    намерение, а не «переключить»: речь можно сменить и формами swap_radio."""
-    label, button = (
-        (radio.ITEM_REMOVE_LABEL, ITEM_BTN_REMOVE)
-        if installed
-        else (radio.ITEM_PUT_LABEL, ITEM_BTN_PUT)
+def item_actions_keyboard(
+    kind: items_mod.ItemKind, item_id: int, place: str, origin: str = ""
+) -> InlineKeyboardMarkup:
+    """Перечень действий (заменяет карточку или опись) и «Назад». Кнопка
+    несёт намерение, а не «переключить»: состояние можно сменить и формой.
+    ``origin`` — откуда открыт перечень (``ITEM_FROM_INVENTORY`` — из описи
+    /items: «Назад» и действие возвращают опись)."""
+    rows = [
+        _item_button(item_id, action.label, origin + action.code)
+        for action in kind.available(place)
+    ]
+    rows.append(_item_button(item_id, radio.ITEM_BACK_LABEL, origin + ITEM_BTN_BACK))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def item_actions_caption(kind: items_mod.ItemKind, place: str) -> str:
+    return radio.ITEM_ACTIONS_CAPTION.format(
+        name=html.escape(kind.name),
+        where=radio.ITEM_PLACE_INSTALLED
+        if place == items_mod.PLACE_DESK
+        else radio.ITEM_PLACE_STORED,
     )
+
+
+_NO_BUTTONS = InlineKeyboardMarkup(inline_keyboard=[])
+
+
+def item_form_keyboard(item_id: int, action: items_mod.ItemAction) -> InlineKeyboardMarkup:
+    """Форма тула item_action: согласие и «Оставить как есть»."""
+    keep = ITEM_FROM_FORM + ITEM_BTN_KEEP + action.code
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            _item_button(item_id, label, button),
-            _item_button(item_id, radio.ITEM_BACK_LABEL, ITEM_BTN_BACK),
+            _item_button(item_id, action.confirm, ITEM_FROM_FORM + action.code)
+            + _item_button(item_id, radio.ITEM_FORM_KEEP, keep)
         ]
     )
 
 
-def item_actions_caption(kind: items_mod.ItemKind, installed: bool) -> str:
-    return radio.ITEM_ACTIONS_CAPTION.format(
-        name=html.escape(kind.name),
-        where=radio.ITEM_PLACE_INSTALLED if installed else radio.ITEM_PLACE_STORED,
-    )
-
-
 def inventory_keyboard(items: list[dict[str, Any]]) -> InlineKeyboardMarkup | None:
-    """Опись: по кнопке на вещь — принести её карточку."""
+    """Опись: по строке на вещь — принести карточку и, если вид объявил
+    действия, «Действия» прямо из описи (особенные вещи — всегда)."""
     rows = []
     for item in items:
         kind = items_mod.KINDS.get(item["type"])
-        if kind is not None:
-            data = f"{ITEM_CALLBACK_PREFIX}:{item['id']}:{ITEM_BTN_CARD}"
-            rows.append([InlineKeyboardButton(text=f"{kind.icon} {kind.name}", callback_data=data)])
+        if kind is None:
+            continue
+        row = _item_button(int(item["id"]), f"{kind.icon} {kind.name}", ITEM_BTN_CARD)
+        if kind.actions:
+            row += _item_button(
+                int(item["id"]), radio.ITEM_ACTIONS_LABEL, ITEM_FROM_INVENTORY + ITEM_BTN_ACTIONS
+            )
+        rows.append(row)
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
@@ -459,6 +483,8 @@ class TurnPlan:
 class _Queued:
     forms: list[tuple[str, str]] = field(default_factory=list)  # (сценарий, форма)
     user_id: int | None = None  # чей ход: его следующее сообщение снимет кнопки
+    # Формы тула item_action: (id вещи, код действия).
+    items: list[tuple[int, str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -704,24 +730,27 @@ class Interactives:
         queued = self._queued.pop(chat_id, None)
         if queued is None:
             return
-        for scenario_id, form in queued.forms:
-            text, markup = self._render_form(scenario_id, form)
+        outgoing: list[tuple[str, InlineKeyboardMarkup, dict[str, Any]]] = [
+            (*self._render_form(scenario_id, form), {"scenario": scenario_id, "form": form})
+            for scenario_id, form in queued.forms
+        ]
+        for item_id, code in queued.items:
+            item = await self._store.item_by_id(item_id)
+            kind = items_mod.KINDS.get(item["type"]) if item is not None else None
+            action = kind.action(code) if kind is not None else None
+            if action is not None:
+                outgoing.append(
+                    (action.form, item_form_keyboard(item_id, action), {"form": FORM_ITEM})
+                )
+        for text, markup, extra in outgoing:
             message_id = await self._notifier.send_direct(
                 chat_id, text, reply_markup=markup, message_thread_id=message_thread_id
             )
             if message_id is None:
-                log.warning(
-                    "interactives: форма %s/%s не ушла (chat=%s)", scenario_id, form, chat_id
-                )
+                log.warning("interactives: форма %s не ушла (chat=%s)", extra, chat_id)
                 continue
-            await self._remember_buttons(
-                chat_id,
-                message_id,
-                queued.user_id,
-                LIVE_FORM,
-                scenario=scenario_id,
-                form=form,
-            )
+            await self._remember_buttons(chat_id, message_id, queued.user_id, LIVE_FORM, **extra)
+            scenario_id, form = extra.get("scenario", ""), extra["form"]
             if form == FORM_SWAP:
                 run = await self._state.load_run(chat_id, scenario_id)
                 if run is not None:
@@ -799,11 +828,18 @@ class Interactives:
             if item is None or kind is None:
                 await self._notifier.edit_markup(chat_id, message_id, None)
                 return
-            installed = not await self.speech_clear(int(item["owner_user_id"]))
+            owner = int(item["owner_user_id"])
+            if entry.get("inv"):
+                text, markup = await self.inventory(owner)
+                await self._notifier.edit_caption(
+                    chat_id, message_id, text, reply_markup=markup, photo=False
+                )
+                return
+            place = await self.item_place(owner, item)
             await self._notifier.edit_caption(
                 chat_id,
                 message_id,
-                item_caption(kind, item, installed),
+                item_caption(kind, item, place == items_mod.PLACE_DESK),
                 reply_markup=item_keyboard(kind, int(item["id"])),
                 photo=bool(entry.get("photo")),
             )
@@ -1887,21 +1923,18 @@ class Interactives:
         return radio.TOOL_ITEMS_SENT.format(items=", ".join(names + drawing))
 
     async def manor_lines(self, user_id: int, owned: list[dict[str, Any]]) -> str:
-        """Опись для Альфреда: где вещь, приметы, беда и что с ней можно."""
+        """Опись для Альфреда: где вещь, приметы, беда и что с ней можно —
+        из действий вида, доступных сейчас."""
         lines = []
         for item in owned:
             kind = items_mod.KINDS[item["type"]]
             place = await self.item_place(user_id, item)
             traits = kind.traits_ru(item.get("traits") or [])
             note = (item.get("note") or "").rstrip(". ")
-            if kind.type == items_mod.RADIO_TYPE:
-                actions = (
-                    radio.RADIO_ACTION_REMOVE
-                    if place == items_mod.PLACE_DESK
-                    else radio.RADIO_ACTION_PUT
-                )
-            else:
-                actions = radio.TOOL_ITEMS_NO_ACTIONS
+            actions = "; ".join(
+                radio.TOOL_ITEMS_ACTION.format(what=action.tool_ru, name=action.name)
+                for action in kind.available(place)
+            )
             lines.append(
                 radio.TOOL_ITEMS_LINE.format(
                     name=kind.name,
@@ -1910,10 +1943,41 @@ class Interactives:
                     if traits
                     else "",
                     fault=radio.TOOL_ITEMS_FAULT.format(fault=note) if note else "",
-                    actions=actions,
+                    actions=actions or radio.TOOL_ITEMS_NO_ACTIONS,
                 )
             )
         return "\n".join(lines)
+
+    async def tool_item_action(
+        self, chat_id: int | None, user_id: int | None, *, item: str, action: str
+    ) -> str:
+        """Тул item_action (Этап 49.3.7): гость просит сделать что-то с вещью
+        поместья — форма подтверждения из данных действия уходит после речи
+        Альфреда (flush_forms). Делает кнопка, не модель."""
+        if chat_id is None or user_id is None:
+            return radio.TOOL_ACTION_UNAVAILABLE
+        await self._owned_item(user_id, items_mod.RADIO)  # ленивая выдача
+        owned = [it for it in await self._store.items_of(user_id) if it["type"] in items_mod.KINDS]
+        if not owned:
+            return radio.TOOL_ITEMS_NONE
+        lines = await self.manor_lines(user_id, owned)
+        kind = items_mod.find_kind(item)
+        chosen = next((it for it in owned if kind is not None and it["type"] == kind.type), None)
+        if chosen is None or kind is None:
+            return radio.TOOL_ITEMS_UNKNOWN.format(lines=lines)
+        act = kind.action(action)
+        if act is None:
+            return radio.TOOL_ACTION_UNKNOWN.format(lines=lines)
+        if act.pinned_locked and self._pinned(chat_id):
+            return radio.TOOL_PINNED
+        place = await self.item_place(user_id, chosen)
+        if act not in kind.available(place):
+            return radio.TOOL_ACTION_ALREADY.format(where=items_mod.PLACE_RU.get(place, place))
+        queued = self._queued.setdefault(chat_id, _Queued())
+        queued.user_id = user_id
+        if (int(chosen["id"]), act.code) not in queued.items:
+            queued.items.append((int(chosen["id"]), act.code))
+        return radio.TOOL_ACTION_FORM.format(form=_plain(act.form))
 
     async def item_place(self, user_id: int, item: dict[str, Any]) -> str:
         """Где вещь. У радио правда — речь Альфреда: старый передатчик стоит,
@@ -1998,13 +2062,16 @@ class Interactives:
         message_thread_id: int | None = None,
         photo: bool = False,
     ) -> tuple[str, InlineKeyboardMarkup | None, str | None]:
-        """Кнопка карточки предмета. Возвращает (текст для callback.answer,
-        новая клавиатура, новая подпись) — None: не трогать.
+        """Кнопка карточки, описи или формы вещи. Возвращает (текст для
+        callback.answer, новая клавиатура, новая подпись/текст) — None: не
+        трогать.
 
-        Карточка: «Действия» → сообщение сменяется перечнем действий с
-        «Назад»; действие или «Назад» возвращают карточку. Раскрытый перечень
-        помнится живыми кнопками: следующее сообщение гостя его свернёт.
-        ``photo`` — карточка с картинкой (свернуть — правкой подписи)."""
+        Карточка: «Действия» → сообщение сменяется перечнем действий вида с
+        «Назад»; действие или «Назад» возвращают карточку. Из описи /items
+        (префикс ``ITEM_FROM_INVENTORY``) — то же, но возвращается опись.
+        Форма тула (префикс ``ITEM_FROM_FORM``) закрывается итогом. Раскрытый
+        перечень помнится живыми кнопками: следующее сообщение гостя его
+        свернёт. ``photo`` — карточка с картинкой (свернуть — правкой подписи)."""
         item = await self._store.item_by_id(item_id)
         if item is None or int(item["owner_user_id"]) != user_id:
             return radio.ITEM_NOT_YOURS, None, None
@@ -2012,53 +2079,92 @@ class Interactives:
         if button == ITEM_BTN_CARD and kind is not None:
             shown = await self._show_card(chat_id, user_id, item, message_thread_id)
             return (radio.ITEM_CARD_SHOWN if shown else radio.ITEM_CARD_DRAWING), None, None
-        if kind is None or not item_has_actions(kind):
+        if kind is None or not kind.actions:
             return "Неизвестная кнопка.", None, None
-        installed_now = not await self.speech_clear(user_id)
-        if button == ITEM_BTN_ACTIONS:
+        origin = ""
+        if len(button) > 1 and button[0] in (ITEM_FROM_INVENTORY, ITEM_FROM_FORM):
+            origin, button = button[0], button[1:]
+        place = await self.item_place(user_id, item)
+        if button == ITEM_BTN_ACTIONS and origin != ITEM_FROM_FORM:
             if message_id is not None:
                 await self._remember_buttons(
-                    chat_id, message_id, user_id, LIVE_MENU, item=item_id, photo=photo
+                    chat_id,
+                    message_id,
+                    user_id,
+                    LIVE_MENU,
+                    item=item_id,
+                    photo=photo,
+                    inv=origin == ITEM_FROM_INVENTORY,
                 )
             return (
                 "",
-                item_actions_keyboard(item_id, installed_now),
-                item_actions_caption(kind, installed_now),
+                item_actions_keyboard(kind, item_id, place, origin),
+                item_actions_caption(kind, place),
             )
-        card = item_keyboard(kind, item_id) or InlineKeyboardMarkup(inline_keyboard=[])
-        if button == ITEM_BTN_BACK:
+        if button == ITEM_BTN_BACK and origin != ITEM_FROM_FORM:
             await self._forget_buttons(chat_id, message_id)
-            return "", card, item_caption(kind, item, installed_now)
-        if button not in (ITEM_BTN_PUT, ITEM_BTN_REMOVE):
+            return ("", *await self._item_view(user_id, kind, item, origin, place))
+        if origin == ITEM_FROM_FORM and button.startswith(ITEM_BTN_KEEP):
+            kept = kind.action(button[len(ITEM_BTN_KEEP) :])
+            await self._forget_buttons(chat_id, message_id)
+            text = radio.ITEM_FORM_KEPT.format(form=kept.form) if kept is not None else None
+            return "Оставили как есть.", _NO_BUTTONS, text
+        action = kind.action(button)
+        if action is None:
             return "Неизвестная кнопка.", None, None
-        if self._pinned(chat_id):
+        if action.pinned_locked and self._pinned(chat_id):
             return radio.ITEM_PINNED, None, None
         await self._forget_buttons(chat_id, message_id)
-        # Предмет — старая, проклятая радиостанция: стоит она — картавость
-        # есть (speech_clear выключен). Кнопка ставит её или убирает.
-        installed = button == ITEM_BTN_PUT
-        if installed == installed_now:
-            return "Уже так.", card, item_caption(kind, item, installed)
-        await self._set_clear(chat_id, user_id, not installed)
-        await self._store.add_item_event(
-            item_id,
-            "installed" if installed else "removed",
-            user_id=user_id,
-            chat_id=chat_id,
-            data=None,
-            now=self._now(),
-        )
-        where = await self._where(chat_id, message_id, message_thread_id)
-        await self._speak(
-            chat_id,
-            radio.AFTER_RETURN_DIRECTIVE if installed else radio.AFTER_SWAP_DIRECTIVE,
-            where,
-        )
-        return (
-            "Поставлено." if installed else "Убрано.",
-            card,
-            item_caption(kind, item, installed),
-        )
+        answer = "Уже так."
+        if action in kind.available(place):
+            await getattr(self, self._ITEM_EFFECTS[action.effect])(chat_id, user_id, item, action)
+            if action.event:
+                await self._store.add_item_event(
+                    item_id,
+                    action.event,
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    data=None,
+                    now=self._now(),
+                )
+            if action.directive:
+                where = await self._where(chat_id, message_id, message_thread_id)
+                await self._speak(chat_id, action.directive, where)
+            answer = action.done
+            place = await self.item_place(user_id, item)
+        if origin == ITEM_FROM_FORM:
+            return (
+                answer,
+                _NO_BUTTONS,
+                radio.ITEM_FORM_DONE.format(form=action.form, confirm=action.confirm),
+            )
+        return (answer, *await self._item_view(user_id, kind, item, origin, place))
+
+    async def _item_view(
+        self,
+        user_id: int,
+        kind: items_mod.ItemKind,
+        item: dict[str, Any],
+        origin: str,
+        place: str,
+    ) -> tuple[InlineKeyboardMarkup, str]:
+        """Куда вернуться из перечня: опись /items или карточка вещи."""
+        if origin == ITEM_FROM_INVENTORY:
+            text, markup = await self.inventory(user_id)
+            return markup or _NO_BUTTONS, text
+        card = item_keyboard(kind, int(item["id"])) or _NO_BUTTONS
+        return card, item_caption(kind, item, place == items_mod.PLACE_DESK)
+
+    # Эффекты действий вещей (ItemAction.effect → метод). Новый рычаг —
+    # новый метод здесь и действие в данных вида (items.py).
+    _ITEM_EFFECTS = {"radio_desk": "_effect_radio_desk"}
+
+    async def _effect_radio_desk(
+        self, chat_id: int, user_id: int, item: dict[str, Any], action: items_mod.ItemAction
+    ) -> None:
+        """Старая, проклятая радиостанция на столе — картавость есть
+        (speech_clear выключен); убрана — речь чистая."""
+        await self._set_clear(chat_id, user_id, action.arg == "remove")
 
     # --- запрет в переписке ---
 

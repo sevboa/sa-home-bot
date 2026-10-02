@@ -15,13 +15,22 @@
 берёт следующую по лестнице). Рисуются только те, что прошли стенд
 49.3.0 (``Trait.en`` не пуст), остальные живут в тексте: Альфред о них
 знает и рассказывает, а на картинке радиостанция обычная.
+
+Действия (Этап 49.3.7) вид объявляет сам — ``ItemKind.actions``: из них
+строятся «Действия» под карточкой и в описи /items, опись для Альфреда и
+форма тула ``item_action``. Особенные вещи — рычаги поместья: их не
+передают (``transferable=False``), а действия доступны всегда — кнопкой
+из /items или просьбой Альфреду. Что действие делает — ``effect``:
+обработчик в engine.py (``Interactives._ITEM_EFFECTS``).
 """
 
 from __future__ import annotations
 
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from sa_home_bot.bot.interactives import radio
 
 RADIO_TYPE = "radio"
 
@@ -38,6 +47,36 @@ INVENTORY_LINE = "{icon} <b>{name}</b> — {where}."
 INVENTORY_TRAITS = "<i>Приметы: {traits}.</i>"
 INVENTORY_HINT = "Нажмите на вещь — принесу показать."
 INVENTORY_EMPTY = "Особенных вещей в поместье пока нет, сэр."
+
+
+@dataclass(frozen=True)
+class ItemAction:
+    """Действие с вещью — данные вида.
+
+    ``name`` — как его зовёт тул ``item_action``; ``code`` — callback-код
+    кнопки (``it:<id>:<code>``, у радиостанции ``p``/``r`` — со старых
+    карточек); ``label`` — кнопка в перечне «Действия»; ``when`` — где
+    должна быть вещь, чтобы действие имело смысл (``PLACE_*``; пусто —
+    всегда); ``effect``/``arg`` — обработчик в engine.py и его аргумент;
+    ``form``/``confirm`` — вопрос формы тула и кнопка согласия; ``tool_ru`` —
+    как действие видит Альфред в описи; ``done`` — ответ на нажатие;
+    ``event`` — запись в ``item_events``; ``directive`` — что сказать
+    Альфреду после; ``pinned_locked`` — в закреплённых чатах (речь
+    закреплена, llm.speech_therapy_pinned_chat_ids) недоступно."""
+
+    name: str
+    code: str
+    label: str
+    effect: str
+    form: str
+    confirm: str
+    tool_ru: str
+    arg: str = ""
+    when: str = ""
+    done: str = "Готово."
+    event: str = ""
+    directive: str = ""
+    pinned_locked: bool = False
 
 
 @dataclass(frozen=True)
@@ -96,6 +135,21 @@ class ItemKind:
     # Просьба снять именно убранный экземпляр («проклятый», «со склада»).
     stored_re: re.Pattern[str] | None = None
     icon: str = "📦"
+    actions: tuple[ItemAction, ...] = field(default_factory=tuple)
+    # Особенная вещь — рычаг поместья, не передаётся (49.4 «Передача»).
+    transferable: bool = False
+
+    def available(self, place: str) -> list[ItemAction]:
+        """Действия, которые сейчас имеют смысл (по месту вещи)."""
+        return [a for a in self.actions if not a.when or a.when == place]
+
+    def action(self, key: str) -> ItemAction | None:
+        """Действие по callback-коду или имени тула."""
+        key = key.strip().lower()
+        for action in self.actions:
+            if key in (action.code, action.name):
+                return action
+        return None
 
     def portrait_prompt(self, traits: list[str]) -> str:
         """Промпт turbo с весами compel (служба llm, item_portrait)."""
@@ -181,6 +235,39 @@ RADIO = ItemKind(
         re.IGNORECASE,
     ),
     stored_re=re.compile(r"прокля|стар\w+|склад|чулан|кладов", re.IGNORECASE),
+    # Стоит старая радиостанция — картавость (speech_clear выключен).
+    actions=(
+        ItemAction(
+            name="put",
+            code="p",
+            label=radio.ITEM_PUT_LABEL,
+            when=PLACE_STOREROOM,
+            effect="radio_desk",
+            arg="put",
+            form=radio.RETURN_FORM_TEXT,
+            confirm="Вернуть",
+            tool_ru=radio.RADIO_ACTION_PUT,
+            done="Поставлено.",
+            event="installed",
+            directive=radio.AFTER_RETURN_DIRECTIVE,
+            pinned_locked=True,
+        ),
+        ItemAction(
+            name="remove",
+            code="r",
+            label=radio.ITEM_REMOVE_LABEL,
+            when=PLACE_DESK,
+            effect="radio_desk",
+            arg="remove",
+            form=radio.REINSTALL_FORM_TEXT,
+            confirm="Поставить новую",
+            tool_ru=radio.RADIO_ACTION_REMOVE,
+            done="Убрано.",
+            event="removed",
+            directive=radio.AFTER_SWAP_DIRECTIVE,
+            pinned_locked=True,
+        ),
+    ),
     curse=Curse(
         model="revanim",
         lora="rottech",

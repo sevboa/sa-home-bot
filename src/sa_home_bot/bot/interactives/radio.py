@@ -282,16 +282,18 @@ TOOL_ITEMS_LIST = (
     "{lines}\n"
     "Ответь собеседнику своими словами, опираясь на опись: что есть, где "
     "стоит, как выглядит. Ничего с вещами не делай, пока собеседник сам не "
-    "попросит; на просьбу — тул из «можно», собеседнику придёт вопрос с "
-    "кнопками. Показать вещь картинкой — manor_items с show."
+    "попросит; на просьбу — тул item_action с вещью и действием из «можно», "
+    "собеседнику придёт вопрос с кнопками. Показать вещь картинкой — "
+    "manor_items с show."
 )
 TOOL_ITEMS_LINE = "- {name} — {where}.{traits}{fault} Можно: {actions}."
+TOOL_ITEMS_ACTION = "{what} (action={name})"
 TOOL_ITEMS_NO_ACTIONS = "только показать"
 TOOL_ITEMS_TRAITS = " Приметы: {traits}."
 TOOL_ITEMS_FAULT = " Беда с ней: {fault}."
-# Что можно сделать с радиостанцией — оба пути ведут в swap_radio (форма).
-RADIO_ACTION_REMOVE = "убрать её в чулан и поставить новую (тул swap_radio)"
-RADIO_ACTION_PUT = "поставить её обратно на стол вместо новой (тул swap_radio)"
+# Действия радиостанции глазами Альфреда (items.RADIO.actions).
+RADIO_ACTION_REMOVE = "убрать её в чулан и поставить новую"
+RADIO_ACTION_PUT = "поставить её обратно на стол вместо новой"
 TOOL_ITEMS_SENT = (
     "Карточка уже отправлена собеседнику: {items}. Коротко, своими словами "
     "прокомментируй, не пересказывая подпись."
@@ -305,6 +307,21 @@ TOOL_ITEMS_UNKNOWN = (
     "своими словами."
 )
 TOOL_ITEMS_UNAVAILABLE = "недоступно: отсюда опись поместья не достать"
+
+# Тул item_action (Этап 49.3.7): просьба гостя сделать что-то с вещью —
+# форма с кнопками из данных действия; решает кнопка, не модель.
+TOOL_ACTION_FORM = (
+    "Вопрос с кнопками уже у собеседника: «{form}». Коротко скажи, что "
+    "сделаешь, как только он подтвердит; сам пока ничего не делай."
+)
+TOOL_ACTION_ALREADY = "Уже так: {where}. Скажи собеседнику, ничего делать не нужно."
+TOOL_ACTION_UNKNOWN = (
+    "Так с этой вещью нельзя. Вот опись:\n{lines}\nСкажи собеседнику своими словами."
+)
+TOOL_ACTION_UNAVAILABLE = "недоступно: с вещами поместья — только в живом разговоре"
+ITEM_FORM_KEEP = "Оставить как есть"
+ITEM_FORM_DONE = "{form}\n<i>— {confirm}</i>"
+ITEM_FORM_KEPT = "{form}\n<i>— Оставить как есть</i>"
 
 SWAP_RADIO_DECLARATION = {
     "type": "function",
@@ -320,6 +337,32 @@ SWAP_RADIO_DECLARATION = {
             "спеть."
         ),
         "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+ITEM_ACTION_DECLARATION = {
+    "type": "function",
+    "function": {
+        "name": "item_action",
+        "description": (
+            "Сделать что-то с особенной вещью поместья — только когда собеседник "
+            "сам об этом просит. Что можно — в описи manor_items («можно», "
+            "action=…). Собеседнику придёт вопрос с кнопками; делает кнопка, не ты."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "item": {
+                    "type": "string",
+                    "description": "какая вещь, например «радиостанция»",
+                },
+                "action": {
+                    "type": "string",
+                    "description": "действие из описи — значение action=…",
+                },
+            },
+            "required": ["item", "action"],
+        },
     },
 }
 

@@ -1216,6 +1216,20 @@ async def tool_manor_items(ctx: ToolContext, args: dict[str, Any]) -> str:
     )
 
 
+async def tool_item_action(ctx: ToolContext, args: dict[str, Any]) -> str:
+    """Действие с особенной вещью поместья (Этап 49.3.7): форма с кнопками
+    из данных действия вида (bot/interactives/items.py); делает кнопка."""
+    if ctx.interactives is None:
+        return interactive_radio.TOOL_ACTION_UNAVAILABLE
+    item, action = args.get("item"), args.get("action")
+    return await ctx.interactives.tool_item_action(
+        ctx.chat_id,
+        ctx.user_id,
+        item=item if isinstance(item, str) else "",
+        action=action if isinstance(action, str) else "",
+    )
+
+
 async def tool_take_photo(ctx: ToolContext, args: dict[str, Any]) -> str:
     """Снимок кабинета Альфреда (Этап 49.2, bot/interactives/cabinet.py) —
     вся логика в Interactives.tool_take_photo. Рисуется в фоне и приходит
@@ -4094,6 +4108,12 @@ TOOLS: tuple[ToolSpec, ...] = (
         name="manor_items",
         handler=tool_manor_items,
         declaration=interactive_radio.MANOR_ITEMS_DECLARATION,
+    ),
+    # Действие с вещью поместья — форма; без requires, как manor_items.
+    ToolSpec(
+        name="item_action",
+        handler=tool_item_action,
+        declaration=interactive_radio.ITEM_ACTION_DECLARATION,
     ),
     # Картинки (Этап 48). generate_image — право generate_image@llm в форме
     # «действие@служба» на ту же службу llm, что рисует (llm/imagegen.py на
