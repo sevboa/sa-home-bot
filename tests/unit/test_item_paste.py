@@ -82,9 +82,12 @@ def test_restore_returns_object_inside_and_harmonized_outside():
 
 
 def test_desk_placement_from_gemma_box():
-    # box_2d: [ymin, xmin, ymax, xmax]
+    # box_2d: [ymin, xmin, ymax, xmax]; низ предмета — 75% глубины столешницы,
+    # ширина — треть столешницы (стенд ~/refbench/desk, 2026-10-02).
     where = item_paste.desk_placement([500, 250, 700, 750])
-    assert where == item_paste.Placement(cx=256, bottom=(256 + 0.6 * 102.4), width=0.8 * 256)
+    assert where is not None
+    assert where.cx == 256 and where.bottom == pytest.approx(256 + 0.75 * 102.4)
+    assert where.width == pytest.approx(256 / 3)
     # Узкая, высокая (дальний стол у окна), кривая — места нет.
     assert item_paste.desk_placement([500, 450, 700, 550]) is None
     assert item_paste.desk_placement([100, 100, 200, 900]) is None
@@ -93,13 +96,41 @@ def test_desk_placement_from_gemma_box():
     assert item_paste.desk_placement(["a", 1, 2, 3]) is None
 
 
+def test_desk_placement_rejects_floor_boxes():
+    # Живые снимки 2026-10-02: «вся нижняя половина» — в рамку попал пол.
+    assert item_paste.desk_placement([534, 0, 1000, 1000]) is None
+    assert item_paste.desk_placement([301, 107, 1000, 1000], place="closeup") is None
+    assert item_paste.desk_placement([263, 0, 875, 1000], place="closeup") is None
+    # А полоса на всю ширину у нижнего края — стол на переднем плане.
+    near = item_paste.desk_placement([738, 0, 1000, 976])
+    assert near is not None
+    assert near.width == pytest.approx(0.976 * 512 / 3)
+    assert near.bottom == pytest.approx((738 + 0.75 * 262) * 0.512)
+
+
+def test_desk_placement_far_desk_is_smaller():
+    # Дальний стол [583, 167, 674, 780] живого снимка: было 215 px — радио
+    # размером со стол. Перспектива: низ на 65% кадра → меньше половины
+    # предела 0.42 кадра.
+    far = item_paste.desk_placement([583, 167, 674, 780])
+    assert far is not None
+    bottom = far.bottom / 512
+    assert far.width == pytest.approx(0.42 * 512 * (bottom - 0.45) / 0.45)
+    assert far.width < 100
+    # Совсем далеко — не меньше четверти предела.
+    tiny = item_paste.desk_placement([380, 0, 420, 1000])
+    assert tiny is not None and tiny.width == pytest.approx(0.42 * 512 * 0.25)
+
+
 def test_closeup_placement_on_tabletop():
-    # Крупный план: стол ближе — шире радио и допустим выше общего вида.
-    where = item_paste.desk_placement([250, 0, 1000, 1000], place="closeup")
+    # Крупный план: половина столешницы, не больше 0.45 кадра; стол ближе —
+    # допустим выше общего вида.
+    where = item_paste.desk_placement([578, 0, 1000, 1000], place="closeup")
     assert where is not None
-    assert where.width == item_paste.PLACEMENTS["closeup"].width
-    assert where.bottom == 128 + 0.6 * 384
-    assert item_paste.desk_placement([250, 0, 1000, 1000]) is None
+    assert where.width == pytest.approx(0.45 * 512)
+    assert where.bottom == pytest.approx((578 + 0.75 * 422) * 0.512)
+    assert item_paste.desk_placement([250, 0, 550, 1000], place="closeup") is not None
+    assert item_paste.desk_placement([250, 0, 550, 1000]) is None
 
 
 def test_cut_path_rejects_bad_keys(tmp_path):
@@ -245,14 +276,88 @@ async def test_generate_image_paste_harmonizes_and_restores_item(tmp_path, monke
     assert result["seconds"] == 10.0
     assert asked == [item_paste.DESK_BOX_QUESTION]
     x0, y0, x1, y1 = result["item_box"]
-    # Низ предмета — 60% глубины столешницы: 600 + 0.6·200 → 720/1000 кадра.
-    assert y1 == int(0.72 * 512) and x1 - x0 == int(0.42 * 512)
+    # Низ предмета — 75% глубины столешницы: 600 + 0.75·200 → 750/1000 кадра;
+    # ширина — треть столешницы (800/1000 кадра).
+    assert y1 == int(0.75 * 512) and x1 - x0 == int(0.8 * 512 / 3)
     final = Image.open(io.BytesIO(base64.b64decode(result["png_b64"]))).convert("RGB")
     # Итог — уменьшенный кадр (не PNG первой генерации): центр предмета —
     # вставленный светлый предмет, угол — гармонизированный фон.
     w = final.width
     assert final.getpixel((w // 2, int(w * (y0 + y1) / 2 / 512)))[0] > 60
     assert final.getpixel((1, 1))[2] > 150
+
+
+async def test_generate_image_paste_redraws_scene_without_desk(tmp_path, monkeypatch):
+    """Зрение не нашло годной столешницы — фон перерисовывается другим зерном
+    (item_paste.DESK_REDRAWS), время сцен складывается."""
+    (tmp_path / "items").mkdir()
+    _cut().save(tmp_path / "items" / "radio-7-1.png")
+    calls = []
+
+    async def fake_generate(prompt, negative, cfg, **kw):
+        calls.append(kw)
+        return {
+            "png": _png(),
+            "width": 64,
+            "height": 64,
+            "seconds": 5.0,
+            "seed": 42 + len(calls),
+            "prompt": "dark study",
+            "full_negative": "blurry",
+            "original": Image.new("RGB", (512, 512), (30, 30, 30)),
+        }
+
+    boxes = iter(['{"box_2d": null}', '{"box_2d": [600, 100, 800, 900]}'])
+
+    async def fake_chat(cfg, messages, system, **kw):
+        return {"message": {"content": next(boxes)}}
+
+    monkeypatch.setattr(llm_service.imagegen, "generate_image", fake_generate)
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    result = await _svc(tmp_path).run_command(
+        "generate_image",
+        {"prompt": "dark study", "paste": {"key": "radio-7-1", "place": "desk"}},
+    )
+    first, redraw, harm = calls
+    assert first.get("ref") is None and redraw.get("ref") is None and redraw["seed"] is None
+    # Гармонизация — по перерисованному фону и его зерну.
+    assert harm["ref"] is not None and harm["seed"] == 44
+    assert result["seconds"] == 15.0
+    assert result["item_box"][3] == int(0.75 * 512)
+
+
+async def test_generate_image_paste_fixed_seed_keeps_scene(tmp_path, monkeypatch):
+    # Заданное зерно (отладочный /draw) — без перерисовки, место по умолчанию.
+    (tmp_path / "items").mkdir()
+    _cut().save(tmp_path / "items" / "radio-7-1.png")
+    calls = []
+
+    async def fake_generate(prompt, negative, cfg, **kw):
+        calls.append(kw)
+        return {
+            "png": _png(),
+            "width": 64,
+            "height": 64,
+            "seconds": 5.0,
+            "seed": kw["seed"],
+            "prompt": "dark study",
+            "full_negative": "blurry",
+            "original": Image.new("RGB", (512, 512), (30, 30, 30)),
+        }
+
+    async def fake_chat(cfg, messages, system, **kw):
+        return {"message": {"content": '{"box_2d": null}'}}
+
+    monkeypatch.setattr(llm_service.imagegen, "generate_image", fake_generate)
+    monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
+    result = await _svc(tmp_path).run_command(
+        "generate_image",
+        {"prompt": "dark study", "seed": 7, "paste": {"key": "radio-7-1", "place": "desk"}},
+    )
+    assert len(calls) == 2
+    x0, _, x1, y1 = result["item_box"]
+    default = item_paste.PLACEMENTS["desk"]
+    assert x1 - x0 == int(default.width) and y1 == int(default.bottom)
 
 
 async def test_generate_image_paste_validation(tmp_path):

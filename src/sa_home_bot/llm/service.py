@@ -1235,17 +1235,20 @@ class LlmService:
         raise ValueError(f"необъявленное действие: {action}")
 
     async def _paste_item(
-        self, scene: dict[str, Any], options: dict[str, Any]
+        self,
+        scene: dict[str, Any],
+        options: dict[str, Any],
+        where: item_paste.Placement | None,
     ) -> tuple[dict[str, Any], tuple[int, int, int, int]]:
         """Готовая сцена → вставка вырезки предмета → img2img той же моделью
         (LoRA настроения ослаблена до ``item_mood_lora_weight``) → предмет
-        по маске поверх (llm/item_paste.py). Возвращает результат
+        по маске поверх (llm/item_paste.py). ``where`` — место по столешнице
+        (``_desk_placement``), None — место по умолчанию. Возвращает результат
         generate_image с подменёнными картинкой и временем и рамку предмета."""
         paste = options["paste"]
         path = item_paste.cut_path(self._cfg, paste["key"])
         cut = await asyncio.to_thread(lambda: Image.open(path).convert("RGBA"))
-        where = item_paste.PLACEMENTS[paste["place"]]
-        where = await self._desk_placement(scene["original"], paste["place"]) or where
+        where = where or item_paste.PLACEMENTS[paste["place"]]
         if paste["width"] is not None:
             where = replace(where, width=paste["width"] * scene["original"].width)
         pasted, mask, box = await asyncio.to_thread(
@@ -1371,35 +1374,53 @@ class LlmService:
             if paste is not None and paste["place"] == "desk":
                 prompt = f"{item_paste.DESK_COMPOSITION}, {prompt.strip()}"
         self._image_phase(args.get("request_id"), IMAGE_PHASE_DRAW)
-        try:
-            result = await imagegen.generate_image(
-                prompt.strip(),
-                negative,
-                self._cfg,
-                seed=options["seed"],
-                ref=options["ref"],
-                strength=options["strength"],
-                ip_scale=options["ip_scale"],
-                steps=options["steps"],
-                guidance=options["guidance"],
-                # raw — ровно то, что написал владелец: без промптера,
-                # подрезки, стилевого шаблона и негативов из конфига.
-                style=options["style"] and not options["raw"],
-                fit=not options["raw"],
-                size=options["size"],
-                colors=options["colors"],
-                model=options["model"],
-                loras=options["loras"],
-            )
-        except imagegen.ImagegenError as exc:
-            log.warning("imagegen: %s", exc)
-            raise ProtoError(ERR_INTERNAL, str(exc)) from None
-        except Exception:
-            log.warning("imagegen: не удалось сгенерировать картинку", exc_info=True)
-            raise ProtoError(ERR_INTERNAL, "не удалось нарисовать картинку") from None
+
+        async def draw(seed: int | None) -> dict[str, Any]:
+            try:
+                return await imagegen.generate_image(
+                    prompt.strip(),
+                    negative,
+                    self._cfg,
+                    seed=seed,
+                    ref=options["ref"],
+                    strength=options["strength"],
+                    ip_scale=options["ip_scale"],
+                    steps=options["steps"],
+                    guidance=options["guidance"],
+                    # raw — ровно то, что написал владелец: без промптера,
+                    # подрезки, стилевого шаблона и негативов из конфига.
+                    style=options["style"] and not options["raw"],
+                    fit=not options["raw"],
+                    size=options["size"],
+                    colors=options["colors"],
+                    model=options["model"],
+                    loras=options["loras"],
+                )
+            except imagegen.ImagegenError as exc:
+                log.warning("imagegen: %s", exc)
+                raise ProtoError(ERR_INTERNAL, str(exc)) from None
+            except Exception:
+                log.warning("imagegen: не удалось сгенерировать картинку", exc_info=True)
+                raise ProtoError(ERR_INTERNAL, "не удалось нарисовать картинку") from None
+
+        result = await draw(options["seed"])
         item_box = None
-        if options["paste"] is not None:
-            result, item_box = await self._paste_item(result, options)
+        if paste is not None:
+            where = await self._desk_placement(result["original"], paste["place"])
+            # Годной столешницы нет (зрение не нашло стол, рамка — пол или
+            # дальний узкий стол) — фон другим зерном: наугад радио стояло на
+            # полу или висело в воздухе (стенд ~/refbench/desk, 2026-10-02).
+            # Заданное зерно (отладочный /draw) не трогаем — воспроизводимость.
+            redraws = item_paste.DESK_REDRAWS if options["seed"] is None else 0
+            for _ in range(redraws):
+                if where is not None:
+                    break
+                spent = result["seconds"]
+                result = await draw(None)
+                result["seconds"] += spent
+                where = await self._desk_placement(result["original"], paste["place"])
+                log.info("imagegen: фон перерисован под стол (seed %s)", result.get("seed"))
+            result, item_box = await self._paste_item(result, options, where)
         inspection = await self._inspect_snapshot(args, result.get("original"))
         return {
             **({"inspect": inspection} if inspection is not None else {}),

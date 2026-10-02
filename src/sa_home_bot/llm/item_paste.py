@@ -59,13 +59,14 @@ class Placement:
 
 
 # Места вставки по умолчанию. ``desk`` — стенд 49.3.0 (2): общий вид «поверх
-# столешницы» (bot cabinet.CANON_EN_DESK) ставит стол в нижнюю треть; точнее
+# столешницы» (``DESK_COMPOSITION``) ставит стол в нижнюю треть; точнее
 # место даёт рамка столешницы от зрения (``desk_placement``), это — когда
-# рамки нет. ``closeup`` — крупно, по центру нижней половины (тоже когда
-# рамки нет).
+# годной рамки нет и после перерисовки фона. ``closeup`` — крупно, по центру
+# нижней половины. Ширины — стенд ~/refbench/desk (2026-10-02): 0.42/0.62
+# давали радио размером со стол, наугад без стола — лучше поменьше.
 PLACEMENTS: dict[str, Placement] = {
-    "desk": Placement(cx=256, bottom=0.86 * _NATIVE_PX, width=0.42 * _NATIVE_PX),
-    "closeup": Placement(cx=256, bottom=0.92 * _NATIVE_PX, width=0.62 * _NATIVE_PX),
+    "desk": Placement(cx=256, bottom=0.86 * _NATIVE_PX, width=0.3 * _NATIVE_PX),
+    "closeup": Placement(cx=256, bottom=0.92 * _NATIVE_PX, width=0.45 * _NATIVE_PX),
 }
 
 # Композиция общего вида под вставку на стол (стенд 49.3.0 (2)): стол «на
@@ -78,42 +79,79 @@ DESK_COMPOSITION = "view across a big wooden desk top, the desk surface fills th
 # [ymin, xmin, ymax, xmax] в сетке 0..1000. Спросишь «[x0, y0, x1, y1]» без
 # пояснений — отвечает то так, то эдак (стенд 49.3.0: на одном кадре
 # [663, 0, 845, 542] и [0, 662, 543, 789]); в родном формате — стабильно.
+# Только поверхность, без ножек и передней панели (стенд ~/refbench/desk,
+# 2026-10-02): на дальнем столе рамка «стола» захватывала переднюю панель,
+# и низ радио по ней приходился ниже столешницы — радио висело перед столом.
 DESK_BOX_SYSTEM = (
     "You look at a picture and report only what is actually visible. "
     "Reply with strict JSON only."
 )
 DESK_BOX_QUESTION = (
-    "Detect the top surface of the desk or table (the tabletop where things can be put). "
+    "Detect the flat top surface of the desk or table nearest to the viewer: only the "
+    "horizontal wooden surface where an object could stand. Do not include the desk legs, "
+    "drawers, front panel, the floor or the carpet. "
     'Return its bounding box as "box_2d": [ymin, xmin, ymax, xmax] normalized to 0-1000. '
-    "If there is no desk or table, return null.\n"
+    "If no desk or table top is clearly visible, return null.\n"
     'JSON: {"box_2d": [ymin, xmin, ymax, xmax] or null}'
 )
 DESK_BOX_KEY = "box_2d"
 _BOX_GRID = 1000
-# Годная столешница: не уже 20% кадра и не выше верхней трети (дальний
-# стол у окна — радио на нём вышло бы с напёрсток). На крупном плане стол
-# ближе и выше — там допускается от верхней пятой части.
+# Годная столешница (стенд ~/refbench/desk, 2026-10-02: 56 кадров, годных
+# 36 по старым правилам → 53 по этим):
+# - не уже 20% кадра и не выше верхней трети (дальний стол у окна — радио на
+#   нём вышло бы с напёрсток); на крупном плане стол ближе — от верхней пятой;
+# - не глубже 45% кадра (крупный план — 60%): глубже — в рамку попал пол
+#   («вся нижняя половина» [534, 0, 1000, 1000] живых снимков — радио на полу
+#   или посреди кадра). Полоса на всю ширину у нижнего края при этом
+#   нормальна — это и есть стол на переднем плане.
 _DESK_MIN_WIDTH = 0.2
 _DESK_MIN_TOP = {"desk": 0.35, "closeup": 0.2}
+_DESK_MAX_DEPTH = {"desk": 0.45, "closeup": 0.6}
+# Низ предмета — ближе к переднему краю столешницы (60% глубины рамки
+# давало «парит над столом»).
+_DESK_ANCHOR = 0.75
+# Размер. Общий вид: треть ширины столешницы, и не больше 0.42 кадра с
+# поправкой на перспективу — низ предмета выше в кадре = стол дальше =
+# предмет меньше (полный размер — низ на 90% высоты, четверть — на 56%).
+# Крупный план: половина столешницы, не больше 0.45 кадра.
+_DESK_SHARE = {"desk": 1 / 3, "closeup": 0.5}
+_DESK_MAX_WIDTH = {"desk": 0.42, "closeup": 0.45}
+_PERSPECTIVE_FAR = 0.45
+_PERSPECTIVE_NEAR = 0.9
+_PERSPECTIVE_MIN = 0.25
+# Годной столешницы нет — фон перерисовывается другим зерном столько раз
+# (стенд: 9 из 10 таких кадров находили стол с первой перерисовки; вторая —
+# ещё ~30с к запросу, а бот ждёт картинку imagegen_request_timeout_s).
+DESK_REDRAWS = 1
 
 
 def desk_placement(
     box: object, size: int = _NATIVE_PX, place: str = "desk"
 ) -> Placement | None:
     """Рамка столешницы ``box_2d`` ([ymin, xmin, ymax, xmax], сетка 0..1000)
-    → место предмета; None — рамки нет или она негодная (тогда
-    ``PLACEMENTS[place]``). Крупный план тоже ставится на стол: по центру
-    кадра радио висело над полом или свисало с края (живой прогон
-    2026-10-01)."""
+    → место предмета; None — рамки нет или она негодная (тогда фон
+    перерисовывают, а потом — ``PLACEMENTS[place]``). Крупный план тоже
+    ставится на стол: по центру кадра радио висело над полом или свисало с
+    края (живой прогон 2026-10-01)."""
     if not isinstance(box, list) or len(box) != 4:
         return None
     if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in box):
         return None
     y0, x0, y1, x1 = (min(max(float(v), 0.0), _BOX_GRID) * size / _BOX_GRID for v in box)
-    if x1 - x0 < size * _DESK_MIN_WIDTH or y0 < size * _DESK_MIN_TOP[place] or y1 <= y0:
+    if (
+        x1 - x0 < size * _DESK_MIN_WIDTH
+        or y0 < size * _DESK_MIN_TOP[place]
+        or y1 <= y0
+        or y1 - y0 > size * _DESK_MAX_DEPTH[place]
+    ):
         return None
-    width = min(PLACEMENTS[place].width * size / _NATIVE_PX, 0.8 * (x1 - x0))
-    return Placement(cx=(x0 + x1) / 2, bottom=y0 + 0.6 * (y1 - y0), width=width)
+    bottom = y0 + _DESK_ANCHOR * (y1 - y0)
+    limit = _DESK_MAX_WIDTH[place] * size
+    if place == "desk":
+        near = (bottom / size - _PERSPECTIVE_FAR) / (_PERSPECTIVE_NEAR - _PERSPECTIVE_FAR)
+        limit *= min(max(near, _PERSPECTIVE_MIN), 1.0)
+    width = min(_DESK_SHARE[place] * (x1 - x0), limit)
+    return Placement(cx=(x0 + x1) / 2, bottom=bottom, width=width)
 
 
 def cut_path(cfg: LlmConfig, key: str) -> Path:
