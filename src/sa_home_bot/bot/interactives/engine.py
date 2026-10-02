@@ -354,7 +354,7 @@ def apply_decision(
             else choose(scenario.fallback_faults)
         )
         if not effect:
-            effect = f"Внутри передатчика обнаруживается страшное: {run.finale_fault}."
+            effect = f"Внутри радиостанции обнаруживается страшное: {run.finale_fault}."
     run.last_effect = effect or run.last_effect
     return effect
 
@@ -366,7 +366,7 @@ def build_scene_note(scenario: Scenario, run: Run, place: str | None = None) -> 
     kind = items_mod.KINDS.get(scenario.item_kind or "")
     if kind is not None and run.item_traits:
         parts.append(
-            "Как сейчас выглядит передатчик: " + "; ".join(kind.traits_ru(run.item_traits)) + "."
+            "Как сейчас выглядит радиостанция: " + "; ".join(kind.traits_ru(run.item_traits)) + "."
         )
     if run.finale:
         parts.append(scenario.finale_directive.format(fault=run.finale_fault))

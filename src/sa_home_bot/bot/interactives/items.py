@@ -14,7 +14,7 @@
 Черты копятся по ходу сцены (Ведущий, поле ``item_trait``; молчит — код
 берёт следующую по лестнице). Рисуются только те, что прошли стенд
 49.3.0 (``Trait.en`` не пуст), остальные живут в тексте: Альфред о них
-знает и рассказывает, а на картинке радио обычное.
+знает и рассказывает, а на картинке радиостанция обычная.
 """
 
 from __future__ import annotations
@@ -144,7 +144,7 @@ RADIO_ARCHETYPE = (
 
 RADIO = ItemKind(
     type=RADIO_TYPE,
-    name="Проклятое радио",
+    name="Проклятая радиостанция",
     icon="📻",
     archetype=RADIO_ARCHETYPE,
     checks=(
@@ -155,7 +155,7 @@ RADIO = ItemKind(
         "does NOT count",
     ),
     traits={
-        "пыль": Trait("покрыт пылью и паутиной", "dusty with cobwebs", drawn=True),
+        "пыль": Trait("покрыта пылью и паутиной", "dusty with cobwebs", drawn=True),
         "трещина": Trait("стекло стрелочного прибора треснуло", "cracked meter glass", drawn=True),
         "дым": Trait("из-под крышки сочится тонкая струйка дыма", "thin smoke"),
         "ржавчина": Trait(
@@ -171,10 +171,13 @@ RADIO = ItemKind(
     },
     ladder=("пыль", "трещина", "ржавчина", "дым", "копоть", "стрелка", "глаз"),
     paste_hint="vintage ham radio with needle meters and black handheld microphone on the desk",
-    # «Прибор», «шкала», «корпус» — так Альфред зовёт передатчик в сцене
+    # «Прибор», «шкала», «корпус» — так Альфред зовёт радиостанцию в сцене
     # («треснувшее стекло прибора»); без них крупный план шёл без радио.
+    # Старые имена («передатчик», «радио», «рация») — гость скажет как угодно.
     focus_re=re.compile(
-        r"передатчик|радио|раци|устройств\w* связи|микрофон|прибор|шкал|корпус", re.IGNORECASE
+        r"радиостанц|\bстанци|трансивер|передатчик|радио|раци|устройств\w* связи|"
+        r"микрофон|прибор|шкал|корпус",
+        re.IGNORECASE,
     ),
     stored_re=re.compile(r"прокля|стар\w+|склад|чулан|кладов", re.IGNORECASE),
     curse=Curse(
@@ -190,7 +193,7 @@ KINDS: dict[str, ItemKind] = {RADIO.type: RADIO}
 
 
 def find_kind(text: str) -> ItemKind | None:
-    """Вид по словам модели («радио», «старый передатчик», «radio»)."""
+    """Вид по словам модели («радиостанция», «старый передатчик», «radio»)."""
     text = " ".join(text.split())
     if not text:
         return None

@@ -266,16 +266,35 @@ async def test_scene_alternates_acting_and_asking_for_advice(store):
 
 
 def test_transmitter_is_not_blamed_early():
-    """Альфред не кидается сразу на передатчик (пользователь 2026-09-28):
-    первые стадии и «действие» через ход о передатчике не говорят."""
+    """Альфред не кидается сразу на радиостанцию (пользователь 2026-09-28):
+    первые стадии и «действие» через ход о ней не говорят."""
     r = radio.RADIO
     for text in (r.ladder[0], r.ladder[1]):
-        assert "кроме передатчика" in text or "вне подозрений" in text
-    assert "передатчик" not in r.nudges[0]
-    assert "не вини передатчик" in radio.AFTER_AGREE_DIRECTIVE
+        assert "кроме радиостанции" in text or "вне подозрений" in text
+    assert "радиостанц" not in r.nudges[0]
+    assert "не вини радиостанцию" in radio.AFTER_AGREE_DIRECTIVE
     assert "в полном порядке" in radio.TOOL_NOT_YET
     assert "вне подозрений" in r.scene_frame
-    assert "стадиях 0 и 1 передатчик вне подозрений" in r.director_prompt
+    assert "стадиях 0 и 1 радиостанция вне подозрений" in r.director_prompt
+
+
+def test_device_has_one_name():
+    """Одно имя устройства (пользователь 2026-10-02): в текстах для модели
+    и гостя — «радиостанция», не «передатчик» и не «устройство связи»."""
+    r = radio.RADIO
+    texts = [
+        r.title, r.scene_frame, r.director_prompt, r.finale_directive, *r.ladder,
+        *r.nudges, radio.ITEM_CARD_CAPTION, radio.RADIO_STATE_OLD, radio.RADIO_STATE_NEW,
+        radio.SWAP_FORM_TEXT, radio.RETURN_FORM_TEXT, radio.REINSTALL_FORM_TEXT,
+        radio.AFTER_AGREE_DIRECTIVE, radio.AFTER_SWAP_DIRECTIVE, radio.AFTER_RETURN_DIRECTIVE,
+        radio.TOOL_NOT_YET, radio.TOOL_SWAP_FORM, radio.TOOL_RETURN_FORM,
+        radio.ITEM_PUT_LABEL, radio.ITEM_REMOVE_LABEL,
+        radio.SWAP_RADIO_DECLARATION["function"]["description"],
+    ]
+    for text in texts:
+        assert "передатчик" not in text.lower() and "устройств" not in text, text
+    assert "трансивер" in r.scene_frame and "трансивер" in r.director_prompt
+    assert radio.RADIO.trigger_re.search("у тебя радиостанция барахлит")
 
 
 def test_alfred_does_not_know_about_forms_at_all():

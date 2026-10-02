@@ -248,7 +248,7 @@ def build_director_input(
         "(1–2 предложения),\n"
         ' "finale": bool,\n'
         ' "finale_fault": str|null — только при finale=true: смешная '
-        "потусторонняя поломка передатчика,\n"
+        "потусторонняя поломка радиостанции,\n"
         ' "note": str|null — короткая заметка себе на будущее'
         f"{cabinet_field}{item_field}}}"
     )
@@ -263,14 +263,14 @@ def _item_block(scenario: Scenario, run: Run) -> tuple[str, str]:
     have = "; ".join(kind.traits_ru(run.item_traits)) or "пока ничего особенного"
     free = [k for k in kind.traits if k not in run.item_traits]
     if not free:
-        return f"Как выглядит передатчик: {have}.\n\n", ""
+        return f"Как выглядит радиостанция: {have}.\n\n", ""
     options = "; ".join(f"«{k}» — {kind.traits[k].ru}" for k in free)
     block = (
-        f"Как выглядит передатчик: {have}.\n"
+        f"Как выглядит радиостанция: {have}.\n"
         f"Чем его облик может обрасти по ходу сцены (ключ — что видно): {options}.\n\n"
     )
     field_text = (
-        ',\n "item_trait": str|null — ключ ОДНОЙ новой черты облика передатчика из '
+        ',\n "item_trait": str|null — ключ ОДНОЙ новой черты облика радиостанции из '
         "списка, если в этом ходе она проявилась (опиши её и в effect); обычно null. "
         "На стадиях 0 и 1 — только неприметное (пыль, трещина)"
     )

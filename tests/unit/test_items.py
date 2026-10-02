@@ -1,4 +1,4 @@
-"""Этап 49.3: сюжетные предметы — «Проклятое радио».
+"""Этап 49.3: сюжетные предметы — «Проклятая радиостанция».
 
 Облик копится по ходу сцены (черты от Ведущего или по лестнице), портрет
 рисует служба llm (item_portrait), в кадры кабинета радио вставляется
@@ -126,7 +126,7 @@ def test_parse_decision_keeps_only_known_trait_keys():
 def test_director_sees_look_and_free_traits():
     run = Run(scenario="radio", chat_id=1, user_id=1, item_traits=["пыль"])
     text = build_director_input(radio.RADIO, run, finale_allowed=False)
-    assert "Как выглядит передатчик: покрыт пылью и паутиной." in text
+    assert "Как выглядит радиостанция: покрыта пылью и паутиной." in text
     assert "«трещина»" in text and "«пыль» —" not in text
     assert '"item_trait"' in text
 
@@ -134,7 +134,7 @@ def test_director_sees_look_and_free_traits():
 def test_scene_note_tells_alfred_how_the_radio_looks():
     run = Run(scenario="radio", chat_id=1, user_id=1, item_traits=["пыль", "глаз"])
     note = engine.build_scene_note(radio.RADIO, run)
-    assert "Как сейчас выглядит передатчик: покрыт пылью и паутиной; на шкале" in note
+    assert "Как сейчас выглядит радиостанция: покрыта пылью и паутиной; на шкале" in note
 
 
 # --- описание кадра с вставкой ---
@@ -263,7 +263,7 @@ async def test_swap_grants_cursed_radio_card_with_toggle(store):
     assert image["purpose"] == "item"
     assert json.loads(image["params"])["cut_key"] == "radio-601-a"
     (_, _, caption) = notifier.photos[-1]
-    assert "Проклятое радио" in caption and "жижа слизня" in caption and "чулане" in caption
+    assert "Проклятая радиостанция" in caption and "жижа слизня" in caption and "чулане" in caption
     # Повторный финал (другой чат) второй предмет не выдаёт.
     await svc._grant_item(
         GUEST, GUEST, await InteractiveStore(store).load_run(GUEST, "radio"), None
@@ -360,7 +360,7 @@ async def test_general_view_by_words_puts_radio_on_desk_and_alfred_knows_it(stor
     await _drain(svc)
     gen = link.generated()[-1]
     assert gen["mode"] != "scene" and gen["paste"]["place"] == "desk"
-    assert "старый, проклятый: целый" in text and "покрыт пылью" in text
+    assert "старая, проклятая: целая" in text and "покрыта пылью" in text
     # Крупно про передатчик: упор пересъёмки без слов о нём — его вставят.
     miss = ["пустой корпус передатчика"]
     await svc._save_last_photo(GUEST, 1, "стол", miss, miss)
@@ -399,14 +399,14 @@ async def test_guest_who_finished_before_items_gets_radio_lazily(store):
     svc, notifier = _make(store, link)
     await InteractiveStore(store).mark_completed("radio", GUEST)
     text = await svc.tool_show_items(GUEST, GUEST, which="радио")
-    assert text == radio.TOOL_ITEMS_DRAWING.format(items="Проклятое радио")
+    assert text == radio.TOOL_ITEMS_DRAWING.format(items="Проклятая радиостанция")
     await _drain(svc)
     (owned,) = await store.items_of(GUEST)
     assert owned["origin"] == "radio_scene_before_items" and owned["traits"] == []
     assert len(link.portraits()) == 1 and notifier.photos
     # Портрет уже есть — карточка сразу.
     text = await svc.tool_show_items(GUEST, GUEST, which="старый передатчик")
-    assert text == radio.TOOL_ITEMS_SENT.format(items="Проклятое радио")
+    assert text == radio.TOOL_ITEMS_SENT.format(items="Проклятая радиостанция")
     assert len(link.portraits()) == 1
 
 
@@ -421,12 +421,12 @@ async def test_inventory_lists_items_with_place_and_card_buttons(store):
     photos = len(notifier.photos)
     assert await svc.tool_show_items(GUEST, GUEST) == radio.TOOL_ITEMS_LIST
     (_, text) = notifier.sent[-1]
-    assert "📻 <b>Проклятое радио</b> — в чулане." in text and "покрыт пылью" in text
+    assert "📻 <b>Проклятая радиостанция</b> — в чулане." in text and "покрыта пылью" in text
     assert len(notifier.photos) == photos
     (owned,) = await store.items_of(GUEST)
     text, markup = await svc.inventory(GUEST)
     button = markup.inline_keyboard[0][0]
-    assert button.text == "📻 Проклятое радио"
+    assert button.text == "📻 Проклятая радиостанция"
     item_id, code = engine.parse_item_callback(button.callback_data)
     answer, new_markup, _ = await svc.handle_item_click(GUEST, GUEST, item_id, code)
     assert answer == radio.ITEM_CARD_SHOWN and new_markup is None

@@ -15,6 +15,10 @@ shot») в промпте разрешены (2026-09-30, по решению в
 Предохранитель в коде поверх модели — ``fit_prompt``: срезает хвостовые
 теги, пока промпт вместе со стилевым шаблоном не влезет в 77 токенов CLIP
 (иначе CLIP молча отрезал бы именно стиль — он в шаблоне после сути).
+
+Радиостанция Альфреда (2026-10-02) — домашний трансивер на столе; слово
+«radio station» SD понимает как здание или вышку вещания, поэтому в
+правилах явная замена на «vintage ham radio transceiver».
 """
 
 from __future__ import annotations
@@ -51,6 +55,10 @@ Output: JSON {"prompt": "...", "negative": "..."} and nothing else.
 - At most 2-3 separate figures; a crowd becomes "a crowd".
 - Rare animals or creatures: add recognizable features
   (alpaca -> "alpaca, long neck, woolly llama").
+- A home two-way radio set (радиостанция, трансивер, рация, передатчик,
+  radio transmitter) is "vintage ham radio transceiver"; never write
+  "radio station" or "transmitter" alone — they draw a broadcast building
+  or an antenna tower.
 - If the description asks for one item/object, keep it as the only subject:
   "single <item>, centered, plain background".
 - No artist names.
