@@ -168,6 +168,10 @@ ALBERT_HICCUP = "<b>Альбегт:</b> Прошу прощения, Альфр�
 ALBERT_HICCUP_MD = (
     "**Альбегт:** Прошу прощения, Альфред на секунду отвлёкся — повторите, сэр/мадам"
 )
+# Ход закончил тул (ToolContext.end_turn, take_photo): реплики нет и не
+# надо — Альфред заговорит, когда снимок будет готов. Отличается от пустого
+# ответа модели, который означает сбой («Альбегт»).
+SILENT_REPLY = "\x00silent"
 # Закрытие треда, когда служба llm сама гасит контейнер по простою
 # (llm/service.py::EVENT_IDLE_SLEEP) — не отсюда, а из bot/node_events.py
 # (событие прилетает не в ответ на сообщение пользователя), но текст —
@@ -1402,7 +1406,7 @@ async def request_alfred(
             # (False → off, иначе high); перевод в параметр Ollama делает
             # профиль модели на стороне службы llm.
             single_reason = "high" if settings.llm.single_call_think else "off"
-            return await _generate(
+            raw = await _generate(
                 node_link,
                 dst,
                 timeout,
@@ -1421,6 +1425,7 @@ async def request_alfred(
                 stats=stats,
                 allow_tools=allow_tools,
             )
+            return SILENT_REPLY if tool_ctx.end_turn else raw
 
         # Вариативное рассуждение: сначала лёгкий router-проход (без персонажа,
         # ROUTER_SYSTEM_PROMPT), который оценивает вопрос по шкале 0..3 и/или
@@ -1444,6 +1449,8 @@ async def request_alfred(
             stats=stats,
             allow_tools=allow_tools,
         )
+        if tool_ctx.end_turn:
+            return SILENT_REPLY
         level = parse_router_level(route_decision)
         needs_think = level >= 1
         log.info("ai_flow: router -> THINK:%d (chat=%s)", level, chat_id)
@@ -1460,7 +1467,7 @@ async def request_alfred(
         # тут и в bot/tools.py и регулярно разъезжалась (живая находка
         # 2026-08-10 про think_style).
         persona_reason = REASON_LEVELS[level]
-        return await _generate(
+        raw = await _generate(
             node_link,
             dst,
             timeout,
@@ -1479,6 +1486,7 @@ async def request_alfred(
             stats=stats,
             allow_tools=allow_tools,
         )
+        return SILENT_REPLY if tool_ctx.end_turn else raw
 
     async def _announce_step_away() -> None:
         # Страховка Этапа 50: Альфред «отлучился», пока история сжимается
@@ -1541,6 +1549,8 @@ async def request_alfred(
         notes = _notes(extra)
         retry_stats = ChatStats()
         raw = await _ask_once(retry_hist, retry_stats, notes, allow_tools=not tools_ran)
+        if raw == SILENT_REPLY:
+            return raw
         await _save_stats(
             retry_stats,
             dialogue_context.content_chars(list(retry_hist)) + sum(map(len, notes)),
@@ -1577,6 +1587,8 @@ async def request_alfred(
         )
         last_stats = ChatStats()
         raw = await _ask_once(trimmed, last_stats, notes, allow_tools=not tools_ran)
+        if raw == SILENT_REPLY:
+            return raw
         await _save_stats(last_stats, dialogue_context.content_chars(trimmed))
         if dialogue_context.looks_overflowed(raw, last_stats, num_ctx):
             return ""
@@ -1596,6 +1608,8 @@ async def request_alfred(
             raw = ""
         else:
             await _save_stats(stats, sent_chars)
+        if raw == SILENT_REPLY:
+            return raw
         if managed and dialogue_context.looks_overflowed(raw, stats, num_ctx):
             return await _rescue(stats)
         return raw

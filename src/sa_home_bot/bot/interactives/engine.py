@@ -64,7 +64,12 @@ from sa_home_bot.bot.interactives.base import (
     parse_iso,
 )
 from sa_home_bot.bot.interactives.cabinet import Cabinet
-from sa_home_bot.bot.interactives.director import DirectorDecision, ask_director, ask_features
+from sa_home_bot.bot.interactives.director import (
+    ACTION_CHAT,
+    DirectorDecision,
+    ask_director,
+    ask_features,
+)
 from sa_home_bot.bot.interactives.transylvania import TZ as TRANSYLVANIA_TZ
 from sa_home_bot.bot.interactives.transylvania import Outside, Transylvania
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
@@ -122,6 +127,16 @@ EXIT_ALERT = "Хорошо."
 # Суточный потолок на чат; 0 — без лимита (снят по просьбе пользователя 2026-09-30).
 PHOTO_DAILY_LIMIT = 0
 PHOTO_PURPOSE = "photo"
+# Фазы снимка — опросом chat_progress службы llm (llm/service.py::
+# IMAGE_PHASE_*), статусами хода /ai.
+ACTION_CHAT_PROGRESS = "chat_progress"
+PHOTO_PHASE_POLL_S = 1.0
+PHOTO_PHASE_STATUS = {
+    "compose": cabinet_mod.PHOTO_STATUS_AIMING,
+    "draw": cabinet_mod.PHOTO_STATUS_DEVELOPING,
+}
+# Подпись снимка — реплика Альфреда (как bot/handlers/ai.py::ALFRED_PREFIX).
+ALFRED_PHOTO_PREFIX = "<b>Альфред:</b> "
 # Больше двух особенностей промптер под 77 токенов CLIP не удерживает:
 # живые снимки 2026-09-30 из четырёх сохранили по две.
 PHOTO_FEATURES_IN_FRAME = 2
@@ -437,6 +452,10 @@ class Interactives:
     ) -> None:
         self._transylvania = transylvania or Transylvania()
         self._photo_busy: set[int] = set()
+        # Снимок по просьбе: задача на чат (ход /ai её дожидается, wait_photo)
+        # и куда показывать его статусы, пока ход ждёт.
+        self._photo_jobs: dict[int, asyncio.Task] = {}
+        self._photo_status: dict[int, Callable[[str], Awaitable[None]]] = {}
         self._photo_tasks: set[asyncio.Task] = set()
         self._store = store
         self._state = InteractiveStore(store)
@@ -779,7 +798,9 @@ class Interactives:
             reuse_key = photo_state_key(cab, outside, shot)
         if not focus and not happening and not expect and reuse_key in cab.photos:
             image = await self._store.image_by_id(cab.photos[reuse_key])
-            if image is not None and image["telegram_file_id"]:
+            # Тот же кадр в тот же чат второй раз — дубль: просят снова —
+            # снимаем заново (живая находка 2026-10-02).
+            if image is not None and image["telegram_file_id"] and image["chat_id"] != chat_id:
                 sent = await self._notifier.send_photo_ex(
                     chat_id,
                     image["telegram_file_id"],
@@ -789,10 +810,12 @@ class Interactives:
                 )
                 if sent is not None:
                     seen = _image_params(image).get("seen")
+                    where = await self._where_ru(cab, user_id, in_scene=in_scene)
+                    result = cabinet_mod.TOOL_PHOTO_SENT.format(where=where, now=outside.ru())
                     if isinstance(seen, str) and seen:
                         await self._save_last_photo(chat_id, int(image["id"]), seen, [], [])
-                    where = await self._where_ru(cab, user_id, in_scene=in_scene)
-                    return cabinet_mod.TOOL_PHOTO_SENT.format(where=where, now=outside.ru())
+                        result += cabinet_mod.TOOL_PHOTO_SENT_SEEN.format(description=seen)
+                    return result
         if await self._photo_limit_reached(chat_id):
             return cabinet_mod.TOOL_PHOTO_LIMIT
         started = await self._start_photo(
@@ -807,11 +830,12 @@ class Interactives:
             trigger_message_id=trigger_message_id,
             expect=expect,
             dialogue_id=dialogue_id,
+            # Где Альфред (и какой передатчик на столе) — к рассказу о снимке.
+            describe=await self._where_ru(cab, user_id, in_scene=in_scene),
         )
         if not started:
             return cabinet_mod.TOOL_PHOTO_UNAVAILABLE
-        where = await self._where_ru(cab, user_id, in_scene=in_scene)
-        return cabinet_mod.TOOL_PHOTO_STARTED.format(where=where, now=outside.ru())
+        return cabinet_mod.TOOL_PHOTO_STARTED
 
     async def _wants_stored_item(self, user_id: int, text: str) -> bool:
         """Просят снять старое радио, а оно убрано в чулан — в кабинете его
@@ -858,6 +882,7 @@ class Interactives:
         trigger_message_id: int | None,
         expect: list[str] | None = None,
         dialogue_id: int | None = None,
+        describe: str | None = None,
     ) -> bool:
         """Снимок в фоне. False — не начат: уже идёт другой или нет связи."""
         if chat_id in self._photo_busy or not hasattr(self._notifier, "send_photo_ex"):
@@ -878,11 +903,65 @@ class Interactives:
                 trigger_message_id=trigger_message_id,
                 expect=expect,
                 dialogue_id=dialogue_id,
+                describe=describe,
             )
         )
         self._photo_tasks.add(task)
         task.add_done_callback(self._photo_tasks.discard)
+        if describe is not None:
+            self._photo_jobs[chat_id] = task
+            task.add_done_callback(lambda _t: self._photo_jobs.pop(chat_id, None))
         return True
+
+    async def wait_photo(
+        self, chat_id: int, on_status: Callable[[str], Awaitable[None]] | None = None
+    ) -> None:
+        """Ход /ai, закончившийся снимком (take_photo), ждёт его здесь —
+        и показывает статусы съёмки (``on_status`` — черновик хода). Отмена
+        хода снимок не отменяет: он дойдёт сам."""
+        task = self._photo_jobs.get(chat_id)
+        if task is None or task.done():
+            return
+        if on_status is not None:
+            self._photo_status[chat_id] = on_status
+        cfg = self._settings.llm
+        try:
+            await asyncio.wait(
+                {task}, timeout=cfg.imagegen_request_timeout_s + cfg.request_timeout_s + 60
+            )
+        finally:
+            if self._photo_status.get(chat_id) is on_status:
+                self._photo_status.pop(chat_id, None)
+
+    async def _show_photo_status(self, chat_id: int, text: str) -> None:
+        on_status = self._photo_status.get(chat_id)
+        if on_status is None:
+            return
+        try:
+            await on_status(text)
+        except Exception:  # noqa: BLE001 — статус вспомогательный
+            log.debug("interactives: статус снимка не показан (chat=%s)", chat_id, exc_info=True)
+
+    async def _follow_photo_phases(
+        self, node_link: ServiceLink, dst: Address, chat_id: int, request_id: str
+    ) -> None:
+        """Фазы generate_image (llm/service.py::IMAGE_PHASE_*) — статусами
+        хода: промптер — «наводит фотоаппарат», рисование — «проявляет»."""
+        shown = None
+        while True:
+            await asyncio.sleep(PHOTO_PHASE_POLL_S)
+            try:
+                state = await node_link.command(
+                    ACTION_CHAT_PROGRESS, {"request_id": request_id}, dst=dst, timeout=10
+                )
+            except (ServiceUnavailableError, ProtoError, TimeoutError, OSError):
+                continue
+            text = PHOTO_PHASE_STATUS.get(str(state.get("partial") or ""))
+            if text is not None and text != shown:
+                shown = text
+                await self._show_photo_status(chat_id, text)
+            if state.get("done"):
+                return
 
     async def _photo_job(
         self,
@@ -898,6 +977,7 @@ class Interactives:
         trigger_message_id: int | None,
         expect: list[str] | None = None,
         dialogue_id: int | None = None,
+        describe: str | None = None,
     ) -> None:
         try:
             await self._photo(
@@ -912,6 +992,7 @@ class Interactives:
                 trigger_message_id=trigger_message_id,
                 expect=expect,
                 dialogue_id=dialogue_id,
+                describe=describe,
             )
         except Exception:
             log.exception("interactives: снимок кабинета не удался (chat=%s)", chat_id)
@@ -932,6 +1013,7 @@ class Interactives:
         trigger_message_id: int | None,
         expect: list[str] | None = None,
         dialogue_id: int | None = None,
+        describe: str | None = None,
     ) -> None:
         node_link = self._get_node_link()
         if node_link is None:
@@ -990,6 +1072,12 @@ class Interactives:
         if shot is not None:
             # Этап 49.3: предмет — пикселями поверх готовой сцены.
             request["paste"] = {"key": shot.key, "place": shot.place, "hint": shot.kind.paste_hint}
+        phases = None
+        if describe is not None:
+            request["request_id"] = uuid.uuid4().hex
+            phases = asyncio.create_task(
+                self._follow_photo_phases(node_link, dst, chat_id, request["request_id"])
+            )
         try:
             result = await node_link.command(
                 image_tools.ACTION_GENERATE_IMAGE,
@@ -1004,6 +1092,9 @@ class Interactives:
                 # каталог) — следующий снимок нарисует портрет заново.
                 await self._forget_item_cut(chat_id, user_id, shot)
             return
+        finally:
+            if phases is not None:
+                phases.cancel()
         png = base64.b64decode(result["png_b64"])
         inspection = result.get("inspect") if isinstance(result.get("inspect"), dict) else None
         seen = str(inspection.get("description") or "") if inspection else ""
@@ -1036,10 +1127,30 @@ class Interactives:
                 ensure_ascii=False,
             ),
         )
+        misses = 0
+        if seen:
+            misses = await self._save_last_photo(
+                chat_id, image_id, seen, list(expect or []), missing
+            )
+        line = ""
+        if describe is not None:
+            # Реплика — на то, что вышло на снимке, и сразу с ним.
+            await self._show_photo_status(chat_id, cabinet_mod.PHOTO_STATUS_DEVELOPING)
+            line = await self._photo_line(
+                chat_id,
+                user_id,
+                photo_line_directive(
+                    focus,
+                    seen or focus or cab.describe_ru(),
+                    describe,
+                    missing if seen else [],
+                    misses,
+                ),
+            )
         sent = await self._notifier.send_photo_ex(
             chat_id,
             image_tools.upscale_png(png, cfg.imagegen_display_px),
-            caption=caption,
+            caption=ALFRED_PHOTO_PREFIX + html.escape(line) if line else caption,
             message_thread_id=message_thread_id,
             reply_to_message_id=trigger_message_id,
         )
@@ -1047,11 +1158,13 @@ class Interactives:
             log.warning("interactives: снимок #%s не ушёл в чат %s", image_id, chat_id)
             return
         await self._store.set_image_sent(image_id, sent[1], sent[0])
-        if seen:
-            misses = await self._save_last_photo(
-                chat_id, image_id, seen, list(expect or []), missing
+        if line and dialogue_id is not None:
+            # Подпись — ход Альфреда в треде: на неё можно ответить.
+            await self._store.record_ai_turn(
+                chat_id, sent[0], dialogue_id, "assistant", line, self._now()
             )
-            if missing:
+        if seen and missing:
+            if describe is None:
                 await self._react_to_miss(
                     chat_id,
                     seen,
@@ -1062,12 +1175,39 @@ class Interactives:
                     trigger_message_id=trigger_message_id,
                     dialogue_id=dialogue_id,
                 )
-                # Промах — не общий вид кабинета: повторно его не показываем.
-                return
+            # Промах — не общий вид кабинета: повторно его не показываем.
+            return
         if not focus and not happening:
             cab = await cabinet_mod.load(self._store, user_id)
             cab.remember_photo(photo_state_key(cab, outside, shot), image_id)
             await cabinet_mod.save(self._store, cab)
+
+    async def _photo_line(self, chat_id: int, user_id: int, directive: str) -> str:
+        """Короткая реплика Альфреда к снимку — персонажем службы llm, с той
+        же картавостью, что в ходе. Пусто — не вышло (подпись без неё)."""
+        node_link = self._get_node_link()
+        if node_link is None:
+            return ""
+        args: dict[str, Any] = {
+            "messages": [wrap_system_directive(directive)],
+            "tools": [],
+            "reason": "off",
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "speech_clear": await self.speech_clear(user_id),
+        }
+        try:
+            result = await node_link.command(
+                ACTION_CHAT,
+                args,
+                dst=Address(node=LLM_NODE, service=LLM_SERVICE),
+                timeout=self._settings.llm.request_timeout_s,
+            )
+        except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
+            log.warning("interactives: подпись к снимку не вышла (chat=%s): %s", chat_id, exc)
+            return ""
+        line = str(result.get("response") or "").strip() if isinstance(result, dict) else ""
+        return line[: cabinet_mod.PHOTO_LINE_MAX]
 
     async def _end_scene_in_cabinet(self, user_id: int) -> None:
         cab = await cabinet_mod.load(self._store, user_id)
@@ -1750,6 +1890,23 @@ def item_caption(kind: items_mod.ItemKind, item: dict[str, Any], installed: bool
         else "",
         fault=radio.ITEM_CARD_FAULT.format(fault=html.escape(note.rstrip(". "))) if note else "",
         where=radio.ITEM_CARD_INSTALLED if installed else radio.ITEM_CARD_STORED,
+    )
+
+
+def photo_line_directive(
+    focus: str, description: str, where: str, missing: list[str], misses: int
+) -> str:
+    """Директива подписи к снимку: что вышло — или чего не вышло (промах)."""
+    template = cabinet_mod.PHOTO_READY_DIRECTIVE
+    if missing:
+        template = cabinet_mod.PHOTO_READY_MISS_DIRECTIVE
+        if misses > 1:
+            template = cabinet_mod.PHOTO_READY_MISS_AGAIN_DIRECTIVE
+    return template.format(
+        subject=focus or cabinet_mod.PHOTO_SUBJECT_ROOM,
+        description=description,
+        where=where,
+        missing=", ".join(missing),
     )
 
 

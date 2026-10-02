@@ -395,3 +395,22 @@ async def test_allow_tools_false_sends_no_declarations_and_runs_no_tools():
     assert result == "ответ"
     assert sent_tools == [[], []]
     assert ran == ["known_tool"]  # записан как «неизвестный», но хендлер не звался
+
+
+async def test_tool_can_end_the_turn():
+    """ToolContext.end_turn (take_photo): после такого тула моделей больше
+    не спрашиваем — реплики в этом ходе не будет."""
+
+    async def ending(ctx, args):
+        ctx.end_turn = True
+        return "снимок делается"
+
+    ai_tools.tools_for(None).handlers["known_tool"] = ending
+    link = FakeNodeLink(
+        chat_results=[{"tool_calls": [_tool_call("known_tool")]}, {"response": "лишнее"}]
+    )
+    result = await llm_chat.run_chat_loop(
+        link, DST, 5.0, [], _ctx(), reason="off", telegram_chat_id=None, log_chat_id="test"
+    )
+    assert result == ""
+    assert link._chat_results == [{"response": "лишнее"}]

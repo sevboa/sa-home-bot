@@ -220,6 +220,10 @@ class ToolContext:
     interactives: Any | None = None
     user_id: int | None = None
     is_private: bool = False
+    # Тул закончил ход сам — реплики Альфреда сейчас не будет (take_photo:
+    # описание придёт вместе со снимком). run_chat_loop прекращает раунды,
+    # ai_flow.request_alfred отдаёт SILENT_REPLY.
+    end_turn: bool = False
 
 
 ToolHandler = Callable[["ToolContext", dict[str, Any]], Awaitable[str]]
@@ -1217,7 +1221,7 @@ async def tool_take_photo(ctx: ToolContext, args: dict[str, Any]) -> str:
     сам; у службы tasks интерактивов нет — честный отказ."""
     if ctx.interactives is None:
         return interactive_cabinet.TOOL_PHOTO_UNAVAILABLE
-    return await ctx.interactives.tool_take_photo(
+    result = await ctx.interactives.tool_take_photo(
         ctx.chat_id,
         ctx.user_id,
         args,
@@ -1225,6 +1229,11 @@ async def tool_take_photo(ctx: ToolContext, args: dict[str, Any]) -> str:
         trigger_message_id=ctx.trigger_message_id,
         dialogue_id=ctx.dialogue_id,
     )
+    # Снимок пошёл рисоваться — Альфред молчит, пока он не готов: описание
+    # «до снимка» выходило выдуманным (живая находка 2026-10-02).
+    if result == interactive_cabinet.TOOL_PHOTO_STARTED:
+        ctx.end_turn = True
+    return result
 
 
 async def tool_generate_image(ctx: ToolContext, args: dict[str, Any]) -> str:

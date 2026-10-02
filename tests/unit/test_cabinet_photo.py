@@ -70,6 +70,9 @@ class FakeLink:
 
     async def command(self, action, args, dst=None, timeout=None):
         self.calls.append((action, args))
+        if action == "chat" and "system" not in args:
+            # Реплика Альфреда — подпись к снимку (engine._photo_line).
+            return {"response": "Готово, сэр."}
         if action == "chat" and args["system"] == FEATURES_SYSTEM:
             return {"response": json.dumps({"cabinet_add": self.features}, ensure_ascii=False)}
         if action == "chat":
@@ -102,6 +105,14 @@ class FakeLink:
     def generated(self) -> list[dict]:
         return [a for act, a in self.calls if act == "generate_image"]
 
+    def lines(self) -> list[str]:
+        """Директивы подписей к снимкам."""
+        return [
+            a["messages"][0]["content"]
+            for act, a in self.calls
+            if act == "chat" and "system" not in a
+        ]
+
 
 async def _night() -> int:
     return 3  # пасмурно
@@ -117,6 +128,13 @@ def _make(store, link):
         now=lambda: datetime(2026, 9, 30, 21, 0, tzinfo=UTC),  # 00:00 в Бухаресте
         transylvania=Transylvania(fetch=_night),
     )
+    # Реплики Альфреда (служба tasks) — в список: (директива, куда).
+    svc.spoken = []
+
+    async def speak(chat_id, directive, where):
+        svc.spoken.append((directive, where))
+
+    svc._speak = speak
     return svc, notifier
 
 
@@ -233,7 +251,7 @@ async def test_first_photo_invents_features_then_same_state_is_reused(store):
     link = FakeLink()
     svc, notifier = _make(store, link)
     reply = await svc.tool_take_photo(GUEST, GUEST, {})
-    assert "придёт" in reply
+    assert reply == cabinet.TOOL_PHOTO_STARTED
     await _drain(svc)
     cab = await cabinet.load(store, GUEST)
     assert cab.features == ["чучело совы на шкафу", "треснувший портрет"]
@@ -242,17 +260,23 @@ async def test_first_photo_invents_features_then_same_state_is_reused(store):
     assert len(notifier.photos) == 1 and isinstance(notifier.photos[0][1], bytes)
     image = await store.image_by_id(next(iter(cab.photos.values())))
     assert image["purpose"] == engine.PHOTO_PURPOSE
-    # Ничего не изменилось — тот же снимок по file_id, mycraft не трогаем.
-    reply = await svc.tool_take_photo(GUEST, GUEST, {})
-    assert "уже отправлен" in reply
-    assert len(link.generated()) == 1
-    assert notifier.photos[-1][1] == "file-1"
-    # Новая особенность — новый снимок.
-    cab.add(["на полу мокрые следы"])
-    await cabinet.save(store, cab)
-    await svc.tool_take_photo(GUEST, GUEST, {})
+    # Ничего не изменилось, но снимок уже в этом чате — второй раз тот же не
+    # шлём, снимаем заново (живая находка 2026-10-02).
+    assert await svc.tool_take_photo(GUEST, GUEST, {}) == cabinet.TOOL_PHOTO_STARTED
     await _drain(svc)
     assert len(link.generated()) == 2
+    # В другой чат — тот же снимок по file_id, mycraft не трогаем.
+    reply = await svc.tool_take_photo(-100, GUEST, {})
+    assert "уже отправлен" in reply
+    assert len(link.generated()) == 2
+    assert notifier.photos[-1][1] == "file-2"
+    # Новая особенность — новый снимок и в другом чате.
+    cab = await cabinet.load(store, GUEST)
+    cab.add(["на полу мокрые следы"])
+    await cabinet.save(store, cab)
+    await svc.tool_take_photo(-100, GUEST, {})
+    await _drain(svc)
+    assert len(link.generated()) == 3
 
 
 async def test_focus_photo_is_always_new_and_uses_scene_mode(store):
@@ -398,9 +422,10 @@ async def test_scene_traces_leave_with_the_scene(store):
     await cabinet.save(store, cab)
     # Сцены нет (квест пройден) — снимок уже без её следов.
     await svc._state.save_run(Run("radio", GUEST, GUEST, status="done"))
-    reply = await svc.tool_take_photo(GUEST, GUEST, {})
+    assert await svc.tool_take_photo(GUEST, GUEST, {}) == cabinet.TOOL_PHOTO_STARTED
     await _drain(svc)
-    assert "туман" not in reply and "сова на шкафу" in reply
+    (directive,) = link.lines()
+    assert "туман" not in directive and "сова на шкафу" in directive
     assert (await cabinet.load(store, GUEST)).scene == []
     (gen,) = link.generated()
     assert "туман" not in gen["description"]
@@ -464,34 +489,140 @@ async def test_matching_photo_becomes_alfreds_note_only(store):
     assert cab.features == ["сова"] and cab.scene == []
 
 
+async def test_alfred_line_comes_with_the_photo_as_its_caption(store):
+    """Живая находка 2026-10-02: Альфред описывал снимок до того, как он
+    был готов, а потом — длинно. Теперь тул молчит, а короткая реплика на
+    то, что вышло, — подписью к самому снимку и ходом треда."""
+    link = FakeLink()
+    link.inspect = {"description": "Камин, у огня спит рыжая собака.", "missing": []}
+    svc, notifier = _make(store, link)
+    await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
+    reply = await svc.tool_take_photo(
+        GUEST, GUEST, {"focus": "собака", "expect": ["собака"]}, dialogue_id=55
+    )
+    assert reply == cabinet.TOOL_PHOTO_STARTED
+    await _drain(svc)
+    (directive,) = link.lines()
+    assert "рыжая собака" in directive and "сфотографировал собака" in directive
+    assert "сова" in directive  # где Альфред — к реплике
+    ((_, _, caption),) = notifier.photos
+    assert caption == "<b>Альфред:</b> Готово, сэр."
+    turns = await store.ai_turns_for_dialogue(GUEST, 55)
+    assert [(t["role"], t["content"]) for t in turns] == [("assistant", "Готово, сэр.")]
+    assert svc.spoken == []
+
+
+async def test_without_photo_check_alfred_tells_what_he_shot(store):
+    link = FakeLink()
+    svc, _ = _make(store, link)
+    await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
+    await svc.tool_take_photo(GUEST, GUEST, {"focus": "меч на стене"})
+    await _drain(svc)
+    (directive,) = link.lines()
+    assert "На снимке: меч на стене" in directive
+
+
+async def test_scene_frames_are_not_narrated(store):
+    link = FakeLink()
+    svc, notifier = _make(store, link)
+    await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
+    await svc._start_photo(
+        GUEST,
+        GUEST,
+        focus="туман",
+        caption="кадр",
+        happening=None,
+        outside=await svc._transylvania.outside(svc._now()),
+        message_thread_id=None,
+        trigger_message_id=None,
+    )
+    await _drain(svc)
+    assert link.lines() == [] and notifier.photos[0][2] == "кадр"
+
+
+async def test_photo_statuses_follow_the_phases(store, monkeypatch):
+    """Ход ждёт снимок: промптер — «наводит фотоаппарат», рисование и
+    подпись — «проявляет снимок»."""
+    monkeypatch.setattr(engine, "PHOTO_PHASE_POLL_S", 0)
+    phases = ["compose", "compose", "draw"]
+    gate = asyncio.Event()
+
+    class PhasedLink(FakeLink):
+        async def command(self, action, args, dst=None, timeout=None):
+            if action == "chat_progress":
+                if phases:
+                    return {"partial": phases.pop(0), "done": False}
+                gate.set()
+                return {"partial": "draw", "done": True}
+            if action == "generate_image":
+                await gate.wait()
+            return await super().command(action, args, dst, timeout)
+
+    link = PhasedLink()
+    svc, notifier = _make(store, link)
+    await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
+    shown: list[str] = []
+
+    async def on_status(text):
+        shown.append(text)
+
+    await svc.tool_take_photo(GUEST, GUEST, {"focus": "камин"})
+    await svc.wait_photo(GUEST, on_status)
+    assert shown == [
+        cabinet.PHOTO_STATUS_AIMING,
+        cabinet.PHOTO_STATUS_DEVELOPING,
+        cabinet.PHOTO_STATUS_DEVELOPING,
+    ]
+    assert len(notifier.photos) == 1
+    # Снимка нет — ждать нечего.
+    await svc.wait_photo(GUEST, on_status)
+
+
 async def test_missing_subject_makes_alfred_offer_a_retake(store):
     link = FakeLink()
     link.inspect = {"description": "Пустой камин, собаки нет.", "missing": ["собака у камина"]}
     svc, notifier = _make(store, link)
-    spoken: list[tuple[str, dict]] = []
-
-    async def speak(chat_id, directive, where):
-        spoken.append((directive, where))
-
-    svc._speak = speak
     await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
     args = {"expect": ["собака у камина"]}
     await svc.tool_take_photo(GUEST, GUEST, args, dialogue_id=55)
     await _drain(svc)
     assert len(notifier.photos) == 1  # снимок всё равно у гостя
-    ((directive, where),) = spoken
+    # Удивление — подписью к тому же снимку, не отдельной репликой.
+    (directive,) = link.lines()
     assert "собака у камина" in directive and "переснять" in directive
-    assert where["dialogue_id"] == 55 and where["trigger_message_id"] == 101
+    assert svc.spoken == []
     # Промах не становится общим видом кабинета.
     assert (await cabinet.load(store, GUEST)).photos == {}
     # Снова мимо — шутка про капризную плёнку, но переснять всё равно можно.
     await svc.tool_take_photo(GUEST, GUEST, args, dialogue_id=55)
     await _drain(svc)
-    assert "капризн" in spoken[-1][0]
+    assert "капризн" in link.lines()[-1]
     first, second = link.generated()
     # Первый снимок — без упора, пересъёмка — с упором на пропущенное.
     assert "emphasize" not in first
     assert second["emphasize"] == ["собака у камина"]
+
+
+async def test_missing_subject_on_a_scene_frame_is_a_separate_line(store):
+    link = FakeLink()
+    link.inspect = {"description": "Пустой стол.", "missing": ["туман"]}
+    svc, _ = _make(store, link)
+    await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
+    await svc._start_photo(
+        GUEST,
+        GUEST,
+        focus="туман",
+        caption="кадр",
+        happening=None,
+        outside=await svc._transylvania.outside(svc._now()),
+        message_thread_id=None,
+        trigger_message_id=None,
+        expect=["туман"],
+        dialogue_id=55,
+    )
+    await _drain(svc)
+    ((directive, where),) = svc.spoken
+    assert "туман" in directive and where["trigger_message_id"] == 101
 
 
 def test_retake_emphasis_matches_rephrased_items():

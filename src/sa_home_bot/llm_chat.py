@@ -401,6 +401,9 @@ async def run_chat_loop(
                 await on_tool_call(name, call_args, tool_result)
             inline_result = _inline_or_cache(tool_ctx, tool_result)
             messages.append({"role": "tool", "content": inline_result, "name": name})
+        if tool_ctx.end_turn:
+            # Тул сам закончил ход (ToolContext.end_turn) — дальше не генерируем.
+            return ""
     # Лимит раундов исчерпан. Раньше здесь был ProtoError → пользователь
     # получал ALBERT_HICCUP («Альфред отвлёкся, повторите») после того, как
     # прождал несколько минут, — и это при том, что результаты инструментов

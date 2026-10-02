@@ -240,6 +240,44 @@ async def test_generate_image_description_goes_through_prompt_agent(monkeypatch)
     assert result["prompt"] == "red dragon, old castle"
 
 
+async def test_generate_image_reports_phases_through_chat_progress(monkeypatch):
+    """Снимок кабинета: request_id — фазы для chat_progress (промптер →
+    рисование → готово), и на сбое запись тоже закрывается."""
+    svc = _svc(imagegen_enabled=True)
+    phases = []
+
+    async def progress():
+        state = await svc.run_command("chat_progress", {"request_id": "r1"})
+        phases.append((state["partial"], state["done"]))
+
+    async def fake_compose(description, cfg, think=None):
+        await progress()
+        return "castle", ""
+
+    async def fake_generate(prompt, negative, cfg, **kwargs):
+        await progress()
+        return {"png": b"x", "width": 1, "height": 1, "seconds": 1.0, "prompt": prompt}
+
+    monkeypatch.setattr(llm_service.image_prompt, "compose", fake_compose)
+    monkeypatch.setattr(llm_service.imagegen, "generate_image", fake_generate)
+    await svc.run_command(
+        "generate_image", {"description": "замок", "chat_id": 1, "request_id": "r1"}
+    )
+    await progress()
+    assert phases == [("compose", False), ("draw", False), ("draw", True)]
+
+    async def broken(prompt, negative, cfg, **kwargs):
+        raise RuntimeError("cuda")
+
+    monkeypatch.setattr(llm_service.imagegen, "generate_image", broken)
+    with pytest.raises(ProtoError):
+        await svc.run_command(
+            "generate_image", {"description": "замок", "chat_id": 1, "request_id": "r2"}
+        )
+    state = await svc.run_command("chat_progress", {"request_id": "r2"})
+    assert state["done"] is True
+
+
 async def test_generate_image_prompt_agent_off_keeps_description(monkeypatch):
     seen = {}
 

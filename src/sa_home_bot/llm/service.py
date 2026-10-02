@@ -180,6 +180,10 @@ ACTION_TTS_DOWNLOAD_CHUNK = "tts_chunk"
 # нужны. Хранит картинку бот (БД на alfred), не эта нода: mycraft штатно
 # спит, а повторный показ не должен её будить.
 ACTION_GENERATE_IMAGE = "generate_image"
+# Фазы generate_image для опроса chat_progress по request_id (снимок кабинета,
+# bot/interactives/engine.py): промптер пишет запрос генератору, затем рисование.
+IMAGE_PHASE_COMPOSE = "compose"
+IMAGE_PHASE_DRAW = "draw"
 
 # Этап 49.3: портрет сюжетного предмета (llm/item_paste.py). turbo рисует
 # готовую строку-архетип на сером фоне, зрение сверяет ``checks`` (промах —
@@ -1154,104 +1158,13 @@ class LlmService:
                 "format": "ogg",
             }
         if action == ACTION_GENERATE_IMAGE:
-            if not self._cfg.imagegen_enabled:
-                raise ProtoError(ERR_BAD_REQUEST, "генерация картинок на этой ноде выключена")
-            # description — свободное описание от Альфреда, его переводит в
-            # промпт художник-промптер (llm/image_prompt.py); prompt — готовый
-            # английский промпт (боты до v0.117.0), идёт как есть.
-            description = args.get("description")
-            prompt = args.get("prompt")
-            if isinstance(description, str) and description.strip():
-                source = description.strip()
-            elif isinstance(prompt, str) and prompt.strip():
-                source = None
-            else:
-                raise ProtoError(ERR_BAD_REQUEST, "нужно непустое description или prompt")
-            negative = args.get("negative")
-            negative = negative.strip() if isinstance(negative, str) else ""
-            # Этап 49, отладочный /draw: режим, образец и ручные ручки. Чат
-            # (tool generate_image) их не шлёт — там всё как было.
-            options = _imagegen_options(args)
-            paste = options["paste"]
-            if paste is not None and not item_paste.cut_path(self._cfg, paste["key"]).exists():
-                raise ProtoError(ERR_BAD_REQUEST, f"нет вырезки предмета {paste['key']!r}")
-            await self._touch(args.get("chat_id"))
-            prompt_seconds = 0.0
-            if source is not None:
-                if options["raw"]:
-                    prompt = source
-                elif self._cfg.imagegen_prompt_agent:
-                    request = image_prompt.build_request(
-                        source, options["mode"], options["context"], options["emphasize"]
-                    )
-                    started = time.monotonic()
-                    prompt, agent_negative = await image_prompt.compose(
-                        request, self._cfg, think=self._profile.think_arg("off")
-                    )
-                    prompt_seconds = time.monotonic() - started
-                    negative = negative or agent_negative
-                    log.info(
-                        "imagegen: промптер за %.1fс: %r -> %r", prompt_seconds, request, prompt
-                    )
-                else:
-                    prompt = source
-            if not options["raw"]:
-                negative = negative or self._cfg.imagegen_negative
-                # Добавка вызывающего поверх любого негатива (снимки кабинета:
-                # «monochrome, grayscale»), а не вместо него.
-                extra = args.get("negative_extra")
-                if isinstance(extra, str) and extra.strip():
-                    negative = f"{negative}, {extra.strip()}" if negative else extra.strip()
-                if paste is not None and paste["place"] == "desk":
-                    prompt = f"{item_paste.DESK_COMPOSITION}, {prompt.strip()}"
+            # request_id — фаза снимка для опроса chat_progress (снимок кабинета:
+            # «наводит фотоаппарат» на промптере, «проявляет снимок» на рисовании).
+            request_id = args.get("request_id")
             try:
-                result = await imagegen.generate_image(
-                    prompt.strip(),
-                    negative,
-                    self._cfg,
-                    seed=options["seed"],
-                    ref=options["ref"],
-                    strength=options["strength"],
-                    ip_scale=options["ip_scale"],
-                    steps=options["steps"],
-                    guidance=options["guidance"],
-                    # raw — ровно то, что написал владелец: без промптера,
-                    # подрезки, стилевого шаблона и негативов из конфига.
-                    style=options["style"] and not options["raw"],
-                    fit=not options["raw"],
-                    size=options["size"],
-                    colors=options["colors"],
-                    model=options["model"],
-                    loras=options["loras"],
-                )
-            except imagegen.ImagegenError as exc:
-                log.warning("imagegen: %s", exc)
-                raise ProtoError(ERR_INTERNAL, str(exc)) from None
-            except Exception:
-                log.warning("imagegen: не удалось сгенерировать картинку", exc_info=True)
-                raise ProtoError(ERR_INTERNAL, "не удалось нарисовать картинку") from None
-            item_box = None
-            if options["paste"] is not None:
-                result, item_box = await self._paste_item(result, options)
-            inspection = await self._inspect_snapshot(args, result.get("original"))
-            return {
-                **({"inspect": inspection} if inspection is not None else {}),
-                "png_b64": base64.b64encode(result["png"]).decode(),
-                "width": result["width"],
-                "height": result["height"],
-                "seconds": round(result["seconds"], 1),
-                "prompt": result.get("prompt", prompt.strip()),
-                "prompt_seconds": round(prompt_seconds, 1),
-                "full_prompt": result.get("full_prompt"),
-                "full_negative": result.get("full_negative"),
-                "tokens": result.get("tokens"),
-                "seed": result.get("seed"),
-                "steps": result.get("steps"),
-                "colors": result.get("colors"),
-                "model": result.get("model"),
-                "loras": result.get("loras"),
-                **({"item_box": list(item_box)} if item_box is not None else {}),
-            }
+                return await self._generate_image(args)
+            finally:
+                self._image_phase(request_id, None)
         if action == ACTION_ITEM_PORTRAIT:
             if not self._cfg.imagegen_enabled:
                 raise ProtoError(ERR_BAD_REQUEST, "генерация картинок на этой ноде выключена")
@@ -1383,6 +1296,121 @@ class LlmService:
         where = item_paste.desk_placement(box, scene.width, place)
         log.info("imagegen: стол %s → %s", box, where)
         return where
+
+    async def _generate_image(self, args: dict[str, Any]) -> dict[str, Any]:
+        if not self._cfg.imagegen_enabled:
+            raise ProtoError(ERR_BAD_REQUEST, "генерация картинок на этой ноде выключена")
+        # description — свободное описание от Альфреда, его переводит в
+        # промпт художник-промптер (llm/image_prompt.py); prompt — готовый
+        # английский промпт (боты до v0.117.0), идёт как есть.
+        description = args.get("description")
+        prompt = args.get("prompt")
+        if isinstance(description, str) and description.strip():
+            source = description.strip()
+        elif isinstance(prompt, str) and prompt.strip():
+            source = None
+        else:
+            raise ProtoError(ERR_BAD_REQUEST, "нужно непустое description или prompt")
+        negative = args.get("negative")
+        negative = negative.strip() if isinstance(negative, str) else ""
+        # Этап 49, отладочный /draw: режим, образец и ручные ручки. Чат
+        # (tool generate_image) их не шлёт — там всё как было.
+        options = _imagegen_options(args)
+        paste = options["paste"]
+        if paste is not None and not item_paste.cut_path(self._cfg, paste["key"]).exists():
+            raise ProtoError(ERR_BAD_REQUEST, f"нет вырезки предмета {paste['key']!r}")
+        await self._touch(args.get("chat_id"))
+        prompt_seconds = 0.0
+        if source is not None:
+            if options["raw"]:
+                prompt = source
+            elif self._cfg.imagegen_prompt_agent:
+                self._image_phase(args.get("request_id"), IMAGE_PHASE_COMPOSE)
+                request = image_prompt.build_request(
+                    source, options["mode"], options["context"], options["emphasize"]
+                )
+                started = time.monotonic()
+                prompt, agent_negative = await image_prompt.compose(
+                    request, self._cfg, think=self._profile.think_arg("off")
+                )
+                prompt_seconds = time.monotonic() - started
+                negative = negative or agent_negative
+                log.info(
+                    "imagegen: промптер за %.1fс: %r -> %r", prompt_seconds, request, prompt
+                )
+            else:
+                prompt = source
+        if not options["raw"]:
+            negative = negative or self._cfg.imagegen_negative
+            # Добавка вызывающего поверх любого негатива (снимки кабинета:
+            # «monochrome, grayscale»), а не вместо него.
+            extra = args.get("negative_extra")
+            if isinstance(extra, str) and extra.strip():
+                negative = f"{negative}, {extra.strip()}" if negative else extra.strip()
+            if paste is not None and paste["place"] == "desk":
+                prompt = f"{item_paste.DESK_COMPOSITION}, {prompt.strip()}"
+        self._image_phase(args.get("request_id"), IMAGE_PHASE_DRAW)
+        try:
+            result = await imagegen.generate_image(
+                prompt.strip(),
+                negative,
+                self._cfg,
+                seed=options["seed"],
+                ref=options["ref"],
+                strength=options["strength"],
+                ip_scale=options["ip_scale"],
+                steps=options["steps"],
+                guidance=options["guidance"],
+                # raw — ровно то, что написал владелец: без промптера,
+                # подрезки, стилевого шаблона и негативов из конфига.
+                style=options["style"] and not options["raw"],
+                fit=not options["raw"],
+                size=options["size"],
+                colors=options["colors"],
+                model=options["model"],
+                loras=options["loras"],
+            )
+        except imagegen.ImagegenError as exc:
+            log.warning("imagegen: %s", exc)
+            raise ProtoError(ERR_INTERNAL, str(exc)) from None
+        except Exception:
+            log.warning("imagegen: не удалось сгенерировать картинку", exc_info=True)
+            raise ProtoError(ERR_INTERNAL, "не удалось нарисовать картинку") from None
+        item_box = None
+        if options["paste"] is not None:
+            result, item_box = await self._paste_item(result, options)
+        inspection = await self._inspect_snapshot(args, result.get("original"))
+        return {
+            **({"inspect": inspection} if inspection is not None else {}),
+            "png_b64": base64.b64encode(result["png"]).decode(),
+            "width": result["width"],
+            "height": result["height"],
+            "seconds": round(result["seconds"], 1),
+            "prompt": result.get("prompt", prompt.strip()),
+            "prompt_seconds": round(prompt_seconds, 1),
+            "full_prompt": result.get("full_prompt"),
+            "full_negative": result.get("full_negative"),
+            "tokens": result.get("tokens"),
+            "seed": result.get("seed"),
+            "steps": result.get("steps"),
+            "colors": result.get("colors"),
+            "model": result.get("model"),
+            "loras": result.get("loras"),
+            **({"item_box": list(item_box)} if item_box is not None else {}),
+        }
+
+    def _image_phase(self, request_id: Any, phase: str | None) -> None:
+        """Фаза generate_image в self._streaming (читает ACTION_CHAT_PROGRESS):
+        IMAGE_PHASE_* в partial; None — готово (done, подметёт idle_loop)."""
+        if not isinstance(request_id, str) or not request_id:
+            return
+        if phase is not None:
+            self._streaming[request_id] = {"partial": phase, "done": False, "done_at": None}
+            return
+        entry = self._streaming.get(request_id)
+        if entry is not None:
+            entry["done"] = True
+            entry["done_at"] = datetime.now(tz=UTC)
 
     async def _item_portrait(self, args: dict[str, Any]) -> dict[str, Any]:
         """Портрет предмета: turbo на сером фоне, сверка ``checks`` зрением,

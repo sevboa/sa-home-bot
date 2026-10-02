@@ -426,6 +426,31 @@ async def test_tool_call_round_trip_reaches_final_response(store):
     assert "role" not in link.command_calls[2][1]
 
 
+async def test_photo_tool_ends_the_turn_without_a_reply(store):
+    """Живая находка 2026-10-02: Альфред описывал снимок, которого ещё нет.
+    Снимок пошёл рисоваться — ход кончается без реплики и без персонажного
+    прохода; рассказ о снимке придёт вместе с ним (bot/interactives)."""
+    from sa_home_bot.bot.interactives import cabinet
+
+    class Photos:
+        async def tool_take_photo(self, chat_id, user_id, args, **_kw):
+            return cabinet.TOOL_PHOTO_STARTED
+
+    message = FakeMessage()
+    link = FakeNodeLink(
+        chat_results=[{"tool_calls": [{"function": {"name": "take_photo", "arguments": {}}}]}],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+    )
+
+    raw = await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "скинь фото"}], 1,
+        _admin_book(), FakeNotifier(), interactives=Photos(),
+    )
+
+    assert raw == ai_flow.SILENT_REPLY
+    assert len(link.command_calls) == 1
+
+
 async def test_tool_call_is_recorded_in_store(store):
     # Живая находка 2026-07-24: "шиза" с часовыми поясами была
     # недиагностируема — ai_turns хранит только финальный текст ответа, не

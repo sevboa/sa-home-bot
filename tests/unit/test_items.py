@@ -11,7 +11,7 @@ import json
 
 import pytest_asyncio
 
-from sa_home_bot.bot.interactives import engine, items, radio
+from sa_home_bot.bot.interactives import cabinet, engine, items, radio
 from sa_home_bot.bot.interactives.base import STATUS_ACTIVE, InteractiveStore, Run
 from sa_home_bot.bot.interactives.director import (
     DirectorDecision,
@@ -360,7 +360,10 @@ async def test_general_view_by_words_puts_radio_on_desk_and_alfred_knows_it(stor
     await _drain(svc)
     gen = link.generated()[-1]
     assert gen["mode"] != "scene" and gen["paste"]["place"] == "desk"
-    assert "старая, проклятая: целая" in text and "покрыта пылью" in text
+    # Какой передатчик на столе, Альфред узнаёт к рассказу о готовом снимке.
+    assert text == cabinet.TOOL_PHOTO_STARTED
+    directive = link.lines()[-1]
+    assert "старая, проклятая: целая" in directive and "покрыта пылью" in directive
     # Крупно про передатчик: упор пересъёмки без слов о нём — его вставят.
     miss = ["пустой корпус передатчика"]
     await svc._save_last_photo(GUEST, 1, "стол", miss, miss)
@@ -369,8 +372,11 @@ async def test_general_view_by_words_puts_radio_on_desk_and_alfred_knows_it(stor
     gen = link.generated()[-1]
     assert gen["paste"]["place"] == "closeup" and "emphasize" not in gen
     await svc.handle_item_click(GUEST, GUEST, owned["id"], "r")
-    text = await svc.tool_take_photo(GUEST, GUEST, {"caption": "Кабинет"})
-    assert radio.RADIO_STATE_NEW in text
+    assert await svc.tool_take_photo(GUEST, GUEST, {"caption": "Кабинет"}) == (
+        cabinet.TOOL_PHOTO_STARTED
+    )
+    await _drain(svc)
+    assert radio.RADIO_STATE_NEW in link.lines()[-1]
 
 
 async def test_photo_of_stored_cursed_radio_sends_its_card(store):
@@ -468,7 +474,8 @@ async def test_lazy_radio_is_drawn_instead_of_reshowing_old_general_view(store):
     cab = await cabinet_mod.load(store, GUEST)
     image_id = (await store.items_of(GUEST))[0]["image_id"]
     assert any(key.endswith(f":{image_id}") for key in cab.photos)
-    # Теперь облик тот же — повтор без генерации.
-    await svc.tool_take_photo(GUEST, GUEST, {})
+    # Теперь облик тот же — в другой чат повтор без генерации (в этот же —
+    # снимали бы заново: дубль в чате не шлём).
+    await svc.tool_take_photo(-100, GUEST, {})
     await _drain(svc)
     assert len(link.generated()) == 2 and outside

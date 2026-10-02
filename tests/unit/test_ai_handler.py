@@ -237,6 +237,62 @@ async def test_cmd_ai_with_text_calls_ai_flow_and_records_both_turns(store, monk
     assert rows[1]["content"] == "Добгый день, сэ"
 
 
+async def test_turn_ended_by_photo_tool_sends_nothing(store, monkeypatch):
+    """take_photo закончил ход: в чат ничего, в историю — только реплика
+    собеседника; Альфред заговорит вместе со снимком."""
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None, speech_remark=None, rich_session=None
+    ):
+        return ai_flow.SILENT_REPLY
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, text="/ai скинь фото")
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(),
+    )
+
+    assert message.sent == []
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    assert [r["role"] for r in rows] == ["user"]
+
+
+async def test_turn_ended_by_photo_tool_waits_for_the_photo(store, monkeypatch):
+    """Ход ждёт снимок (статусы съёмки — в черновике хода), реплика
+    Альфреда придёт подписью к нему."""
+
+    async def fake_request(*_args, **_kw):
+        return ai_flow.SILENT_REPLY
+
+    class Photos:
+        waited: list = []
+
+        async def before_turn(self, *_a, **_kw):
+            return None
+
+        async def wait_photo(self, chat_id, on_status=None):
+            self.waited.append(chat_id)
+
+        async def flush_forms(self, *_a, **_kw):
+            return None
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    message = FakeMessage(1, text="/ai скинь фото")
+    photos = Photos()
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), interactives=photos,
+    )
+
+    assert photos.waited == [1] and message.sent == []
+
+
 async def test_cmd_ai_with_text_piggybacks_a_dialogue_episode(store, monkeypatch):
     """Этап 42.2: по завершении хода Альфреда ai_flow.piggyback_dialogue_
     episode зовётся с персистентным текстом обоих ходов."""

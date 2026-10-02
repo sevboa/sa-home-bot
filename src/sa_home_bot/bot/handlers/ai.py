@@ -964,6 +964,16 @@ async def _do_ask_and_reply(
             return None
         if raw is None:
             return None  # недоступность/ошибка уже сообщена пользователю (ai_flow)
+        if raw == ai_flow.SILENT_REPLY:
+            # Тул закончил ход без реплики (take_photo): ход ждёт снимок —
+            # статусы съёмки в черновике, реплика Альфреда придёт подписью к
+            # нему. Черновик гасит finally ниже.
+            if interactives is not None and message.chat is not None:
+                on_status = (
+                    rich_session.push_status if rich_session is not None and is_private else None
+                )
+                await interactives.wait_photo(message.chat.id, on_status)
+            return None
         if not raw.strip():
             # Живая находка 2026-07-29: модель может вернуть пустой текст (у
             # неё кончилось окно контекста — декларации тулов плюс выдача
