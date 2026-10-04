@@ -26,6 +26,7 @@ from aiogram.types import (
 from PIL import Image
 
 from sa_home_bot.bot import commands, draw_debug
+from sa_home_bot.bot.away import KIND_SUMMON, AwayService
 from sa_home_bot.bot.draw_debug import DrawCommand, DrawRequest, DrawSyntaxError
 from sa_home_bot.bot.image_tools import (
     ACTION_GENERATE_IMAGE,
@@ -124,6 +125,7 @@ async def cmd_draw(
     node_link: ServiceLink,
     store: Store,
     config: Settings,
+    away: AwayService | None = None,
 ) -> None:
     try:
         parsed = draw_debug.parse(command.args)
@@ -134,6 +136,11 @@ async def cmd_draw(
         await _service(message, parsed, store)
         return
     request = parsed
+
+    # Этап 51: пока Альфред в городе, GPU не трогаем — рисование тоже ждёт
+    # (служебные подкоманды help/keep/clean выше работают).
+    if away is not None and await away.intercept(message, kind=KIND_SUMMON):
+        return
 
     ref = await _find_ref(message, request, store)
     if isinstance(ref, str):

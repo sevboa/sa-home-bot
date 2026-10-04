@@ -15,6 +15,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
 
 from sa_home_bot.bot import commands
+from sa_home_bot.bot.away import AwayService
 from sa_home_bot.bot.interactives import engine
 from sa_home_bot.bot.interactives.engine import Interactives
 
@@ -24,7 +25,17 @@ router = Router(name="interactives")
 
 
 @router.callback_query(F.data.startswith(f"{engine.CALLBACK_PREFIX}:"))
-async def cb_interactive(callback: CallbackQuery, interactives: Interactives | None = None) -> None:
+async def cb_interactive(
+    callback: CallbackQuery,
+    interactives: Interactives | None = None,
+    away: AwayService | None = None,
+) -> None:
+    # Этап 51: пока Альфред в городе, сцены не продолжаем (ведущий — это модель).
+    if away is not None:
+        note = await away.note_for_click()
+        if note is not None:
+            await callback.answer(note, show_alert=True)
+            return
     parsed = engine.parse_callback(callback.data)
     message = callback.message
     if (

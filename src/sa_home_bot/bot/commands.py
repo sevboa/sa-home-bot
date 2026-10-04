@@ -89,6 +89,12 @@ ITEMS = Command("items", "особенные вещи поместья", univers
 # подбирает архетипы предметов и настройки сцен. Скрыта — памятка по
 # «/draw» без аргументов или «/draw help».
 DRAW = Command("draw", "отладка генерации картинок", universal=False, menu=False)
+# «Альфред в городе» (Этап 51, bot/away.py): окно обслуживания mycraft. Только
+# владелец (`*`); /back — под тем же правом `away`. Скрытые из меню.
+AWAY = Command(
+    "away", "Альфред в городе: окно обслуживания", universal=False, menu=False, right="away"
+)
+BACK = Command("back", "вернуть Альфреда из города", universal=False, menu=False, right="away")
 ALL_COMMANDS: list[Command] = [
     PING,
     INTERACTIVES,
@@ -108,6 +114,8 @@ ALL_COMMANDS: list[Command] = [
     VPN,
     TORRENTS,
     DRAW,
+    AWAY,
+    BACK,
 ]
 
 UNIVERSAL_COMMANDS: list[Command] = [c for c in ALL_COMMANDS if c.universal]

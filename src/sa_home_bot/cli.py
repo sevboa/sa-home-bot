@@ -52,10 +52,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", "-V", action="version", version=f"sa-home-bot {__version__}")
 
+    from sa_home_bot.away_cli import add_away_subparser
     from sa_home_bot.setup_wizard import add_init_subparser
 
     subparsers = parser.add_subparsers(dest="command")
     add_init_subparser(subparsers)
+    add_away_subparser(subparsers)
     return parser
 
 
@@ -86,6 +88,9 @@ def main(argv: list[str] | None = None) -> int:
 
         print(json.dumps(_redacted(settings), ensure_ascii=False, indent=2))
         return 0
+
+    if getattr(args, "command", None) == "away":
+        return args._run(args, settings)
 
     configure_logging(settings.logging.level, settings.logging.format)
 

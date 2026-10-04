@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from math import sqrt
@@ -674,6 +675,94 @@ class Store:
         )
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
+
+    async def set_ai_turn_content(self, chat_id: int, message_id: int, content: str) -> None:
+        """Подменить текст хода (Этап 51: транскрипт вместо заглушки голосового).
+        Индекс ai_turns_fts триггер ловит только на вставке — правим его тут же
+        (та же замена «ё» → «е», что и в триггере)."""
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "UPDATE ai_turns SET content=? WHERE chat_id=? AND message_id=?",
+                (content, chat_id, message_id),
+            )
+            await conn.execute(
+                "UPDATE ai_turns_fts SET content=? WHERE chat_id=? AND message_id=?",
+                (content.replace("ё", "е").replace("Ё", "Е"), chat_id, message_id),
+            )
+
+    # --- «Альфред в городе» (Этап 51, bot/away.py) ---
+
+    async def update_state(self, key: str, fn: Callable[[str | None], str | None]) -> str | None:
+        """Атомарно «прочитать — изменить — записать» запись app_state.
+
+        Запись ``alfred_away`` правят два процесса — бот и CLI (``sa-home-bot
+        away``), — поэтому запись идёт сравнением с прочитанным значением
+        (compare-and-set): если за это время её успели изменить, ``fn``
+        вызывается заново на свежем значении. Поэтому ``fn`` — чистая функция
+        (побочные результаты — через замыкание, перезаписываемое на каждом
+        вызове). Явный BEGIN IMMEDIATE не годится: соединение общее с
+        остальными задачами бота, чужая незавершённая транзакция сломала бы его.
+
+        ``fn`` получает текущее значение (или None), возвращает новое; None —
+        удалить запись. Возвращает итоговое значение."""
+        for _ in range(8):
+            old = await self.get_state(key)
+            new = fn(old)
+            if new == old:
+                return new
+            async with self.db.transaction() as conn:
+                if old is None:
+                    cur = await conn.execute(
+                        "INSERT INTO app_state(key, value) VALUES(?, ?) "
+                        "ON CONFLICT(key) DO NOTHING",
+                        (key, new),
+                    )
+                elif new is None:
+                    cur = await conn.execute(
+                        "DELETE FROM app_state WHERE key=? AND value=?", (key, old)
+                    )
+                else:
+                    cur = await conn.execute(
+                        "UPDATE app_state SET value=? WHERE key=? AND value=?", (new, key, old)
+                    )
+                changed = cur.rowcount == 1
+            if changed:
+                return new
+        raise RuntimeError(f"app_state[{key}]: не удалось записать — слишком частые правки")
+
+    async def add_away_media(
+        self,
+        chat_id: int,
+        message_id: int,
+        kind: str,
+        path: str | None,
+        file_id: str | None,
+        duration_s: int,
+        at: datetime,
+    ) -> None:
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "INSERT OR REPLACE INTO away_media(chat_id, message_id, kind, path, file_id, "
+                "duration_s, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (chat_id, message_id, kind, path, file_id, duration_s, _iso(at)),
+            )
+
+    async def away_media_for_chat(self, chat_id: int) -> list[dict]:
+        """Ждущие распознавания файлы чата — по порядку сообщений."""
+        cur = await self.db.conn.execute(
+            "SELECT * FROM away_media WHERE chat_id=? ORDER BY message_id", (chat_id,)
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def all_away_media(self) -> list[dict]:
+        cur = await self.db.conn.execute("SELECT * FROM away_media ORDER BY chat_id, message_id")
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def delete_away_media(self, chat_id: int, message_id: int) -> None:
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "DELETE FROM away_media WHERE chat_id=? AND message_id=?", (chat_id, message_id)
+            )
 
     async def latest_photo_turn(self, chat_id: int, dialogue_id: int) -> dict | None:
         """Последний ход этого треда с прикреплённым фото — для тула

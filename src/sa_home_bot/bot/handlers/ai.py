@@ -44,6 +44,7 @@ from sa_home_bot.bot import (
     voice_tts,
 )
 from sa_home_bot.bot import tools as ai_tools
+from sa_home_bot.bot.away import KIND_SUMMON, KIND_TEXT, AwayService
 from sa_home_bot.bot.interactives.engine import Interactives
 from sa_home_bot.bot.notifier import Notifier, chunk_text
 from sa_home_bot.bot.pending_actions import PendingActions
@@ -244,6 +245,20 @@ class PrivateChatSticker(Filter):
         return message.chat is not None and message.chat.type == "private" and bool(message.sticker)
 
 
+class PrivateChatOtherMedia(Filter):
+    """Кружочек или аудиофайл в личке (не голосовое — у него свой путь).
+    Обычному режиму они не нужны (Альфред их не слушает), поэтому хендлер
+    ниже что-то делает только пока он в городе (Этап 51: файл копится и
+    распознаётся по возвращении)."""
+
+    async def __call__(self, message: Message) -> bool:
+        return (
+            message.chat is not None
+            and message.chat.type == "private"
+            and (bool(message.video_note) or bool(message.audio))
+        )
+
+
 class GroupMention(Filter):
     """Упоминание бота через @username в группе — единственный неявный
     триггер там (в отличие от личек группа шумная, отвечать на каждое
@@ -277,11 +292,18 @@ async def cmd_ai(
     tool_calls: ToolCalls,
     pending_actions: PendingActions | None = None,
     interactives: Interactives | None = None,
+    away: AwayService | None = None,
 ) -> None:
     dialogue_id = _dialogue_id_for(message)
     in_topic = message.message_thread_id is not None
     parts = (message.text or "").split(maxsplit=1)
     prompt = parts[1].strip() if len(parts) > 1 else ""
+
+    # Этап 51: Альфред в городе — записка вместо ответа (владельцу тоже).
+    if away is not None and await away.intercept(
+        message, kind=KIND_TEXT if prompt else KIND_SUMMON, text=prompt, dialogue_id=dialogue_id
+    ):
+        return
 
     if prompt:
         now = datetime.now(tz=UTC)
@@ -334,12 +356,18 @@ async def on_ai_reply(
     subscription: Subscription | None = None,
     pending_actions: PendingActions | None = None,
     interactives: Interactives | None = None,
+    away: AwayService | None = None,
 ) -> None:
     # AuthorizationMiddleware не проверяет права на не-командные сообщения —
     # проверяем право сами (защита от продолжения треда в чате, у которого
     # право chat@llm с тех пор отозвали).
     right = commands.required_right(commands.ALFRED.name)
     if subscription is None or not subscription.allows_command(right):
+        return
+    # Этап 51: Альфред в городе — до голоса/зрения, GPU не трогаем вовсе.
+    if away is not None and await away.intercept(
+        message, dialogue_id=ai_dialogue_id, continuing=True
+    ):
         return
     text = (message.text or "").strip()
     # Считается один раз на весь ход и делится между голосовым статусом
@@ -415,6 +443,7 @@ async def on_private_message(
     subscription: Subscription | None = None,
     pending_actions: PendingActions | None = None,
     interactives: Interactives | None = None,
+    away: AwayService | None = None,
 ) -> None:
     # Не команда — AuthorizationMiddleware её не проверяла, права смотрим сами
     # (как в on_ai_reply); в неавторизованной личке просто молчим.
@@ -423,6 +452,10 @@ async def on_private_message(
         return
 
     text = message.text.strip()
+    if away is not None and await away.intercept(
+        message, kind=KIND_TEXT, text=text, dialogue_id=_dialogue_id_for(message)
+    ):
+        return
     # Без топика и без reply — всегда новый тред (как /alfred), а не
     # продолжение самого свежего: иначе история в личке растёт бесконечно,
     # ничем не ограниченная (живой баг 2026-08-01). Продолжить такой тред
@@ -466,9 +499,13 @@ async def on_private_photo(
     subscription: Subscription | None = None,
     pending_actions: PendingActions | None = None,
     interactives: Interactives | None = None,
+    away: AwayService | None = None,
 ) -> None:
     right = commands.required_right(commands.ALFRED.name)
     if subscription is None or not subscription.allows_command(right):
+        return
+
+    if away is not None and await away.intercept(message, dialogue_id=_dialogue_id_for(message)):
         return
 
     # Та же логика нового треда, что у on_private_message: без топика и без
@@ -504,9 +541,13 @@ async def on_private_voice(
     subscription: Subscription | None = None,
     pending_actions: PendingActions | None = None,
     interactives: Interactives | None = None,
+    away: AwayService | None = None,
 ) -> None:
     right = commands.required_right(commands.ALFRED.name)
     if subscription is None or not subscription.allows_command(right):
+        return
+
+    if away is not None and await away.intercept(message, dialogue_id=_dialogue_id_for(message)):
         return
 
     # Та же логика нового треда, что у on_private_message/on_private_photo:
@@ -544,9 +585,13 @@ async def on_private_sticker(
     subscription: Subscription | None = None,
     pending_actions: PendingActions | None = None,
     interactives: Interactives | None = None,
+    away: AwayService | None = None,
 ) -> None:
     right = commands.required_right(commands.ALFRED.name)
     if subscription is None or not subscription.allows_command(right):
+        return
+
+    if away is not None and await away.intercept(message, dialogue_id=_dialogue_id_for(message)):
         return
 
     # Та же логика нового треда, что у on_private_message/on_private_photo:
@@ -567,6 +612,19 @@ async def on_private_sticker(
     )
 
 
+@catchall_router.message(PrivateChatOtherMedia())
+async def on_private_other_media(
+    message: Message,
+    away: AwayService | None = None,
+    subscription: Subscription | None = None,
+) -> None:
+    right = commands.required_right(commands.ALFRED.name)
+    if subscription is None or not subscription.allows_command(right):
+        return
+    if away is not None:
+        await away.intercept(message, dialogue_id=_dialogue_id_for(message))
+
+
 @catchall_router.message(GroupMention())
 async def on_group_mention(
     message: Message,
@@ -581,12 +639,20 @@ async def on_group_mention(
     subscription: Subscription | None = None,
     pending_actions: PendingActions | None = None,
     interactives: Interactives | None = None,
+    away: AwayService | None = None,
 ) -> None:
     right = commands.required_right(commands.ALFRED.name)
     if subscription is None or not subscription.allows_command(right):
         return
 
     dialogue_id = _dialogue_id_for(message)
+    if away is not None and await away.intercept(
+        message,
+        kind=KIND_TEXT if mention_prompt else KIND_SUMMON,
+        text=mention_prompt,
+        dialogue_id=dialogue_id,
+    ):
+        return
     if mention_prompt:
         now = datetime.now(tz=UTC)
         sender = message.from_user
@@ -626,6 +692,7 @@ async def start_dialogue(
     tool_calls: ToolCalls,
     pending_actions: PendingActions | None = None,
     interactives: Interactives | None = None,
+    away: AwayService | None = None,
 ) -> str | None:
     """Начать тред директивой, как голый /alfred, — но не по команде человека.
 
@@ -637,6 +704,8 @@ async def start_dialogue(
     пользователю уже ушло, но вызывающий может добавить своё, см. приветствие
     гостя).
     """
+    if away is not None and await away.intercept(message, kind=KIND_SUMMON):
+        return None
     return await _ask_and_reply(
         message,
         node_link,

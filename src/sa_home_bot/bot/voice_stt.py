@@ -177,6 +177,16 @@ async def transcribe_voice_message(
     return transcript.strip()
 
 
+async def transcribe_bytes(
+    node_link: ServiceLink, raw: bytes, chat_id: int, config: Settings
+) -> str:
+    """Распознать готовый файл (Этап 51: голосовые, накопленные за отъезд
+    Альфреда, bot/away_return.py) — без сообщения и статусов: пробуждение
+    службы вызывающий уже обеспечил. Пустая строка — ничего не расслышали;
+    ProtoError/ServiceUnavailableError/TimeoutError — службы нет."""
+    return (await _transcribe(node_link, raw, chat_id, config)).strip()
+
+
 async def _transcribe(
     node_link: ServiceLink, raw: bytes, chat_id: int, config: Settings
 ) -> str:

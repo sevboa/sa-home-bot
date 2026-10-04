@@ -19,6 +19,7 @@ from aiogram.filters import Command, CommandObject, Filter
 from aiogram.types import CallbackQuery, Message
 
 from sa_home_bot.bot import ai_flow, commands, guest_rights, guests_view, invites
+from sa_home_bot.bot.away import KIND_SUMMON, AwayService
 from sa_home_bot.bot.handlers import ai as ai_handlers
 from sa_home_bot.bot.handlers import vpn as vpn_handlers
 from sa_home_bot.bot.handlers.basic import build_help
@@ -434,6 +435,7 @@ async def on_admitted(
     notifier: Notifier,
     active_ai_chats: ai_flow.ActiveAiChats,
     tool_calls: ToolCalls,
+    away: AwayService | None = None,
 ) -> None:
     """Первое, что видит впущенный, — живого Альфреда, а не системный текст.
 
@@ -462,7 +464,14 @@ async def on_admitted(
 
     right = commands.required_right(commands.ALFRED.name)
     greeting = None
-    if subscription.allows_command(right):
+    # Этап 51: Альфред в городе — приветствовать некому, вместо модели записка
+    # (intercept её отправил), а гость получает обычное системное «принято».
+    in_city = (
+        subscription.allows_command(right)
+        and away is not None
+        and await away.intercept(message, kind=KIND_SUMMON)
+    )
+    if subscription.allows_command(right) and not in_city:
         greeting = await ai_handlers.start_dialogue(
             message,
             await _welcome_prompt(node_link, message, subscription),

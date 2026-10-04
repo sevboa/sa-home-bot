@@ -15,6 +15,8 @@ import logging
 from aiogram.exceptions import TelegramConflictError
 
 from sa_home_bot.bot.ai_flow import RESTART_TEXT, ActiveAiChats
+from sa_home_bot.bot.away import AwayService
+from sa_home_bot.bot.away_return import AwayReturn, AwayRunner
 from sa_home_bot.bot.dispatch import TelegramEventDispatcher
 from sa_home_bot.bot.interactives.engine import Interactives
 from sa_home_bot.bot.invites import Gatekeeper
@@ -234,6 +236,29 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
     # время бота вполне могут перезапустить деплоем).
     active_ai_chats = ActiveAiChats()
 
+    # «Альфред в городе» (Этап 51): состояние в app_state, проход раз в минуту —
+    # напоминание/потолок/разбор очереди после возвращения. Запускается после
+    # active_ai_chats: разбор очереди идёт тем же путём, что живой диалог.
+    away = AwayService(store, settings)
+    away_runner = AwayRunner(
+        away,
+        AwayReturn(
+            away,
+            get_node_link=_get_node_link,
+            store=store,
+            config=settings,
+            book=book,
+            notifier=notifier,
+            active_ai_chats=active_ai_chats,
+            tool_calls=tool_calls,
+            pending_actions=pending_actions,
+            interactives=interactives,
+        ),
+        book,
+        notifier,
+    )
+    away_task = asyncio.create_task(away_runner.run(), name="away")
+
     # 10. Polling.
     polling_task = asyncio.create_task(
         dp.start_polling(
@@ -255,6 +280,8 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
             gate=gate,
             bot_username=bot_username,
             active_ai_chats=active_ai_chats,
+            away=away,
+            away_runner=away_runner,
             handle_signals=False,
         ),
         name="polling",
@@ -290,6 +317,7 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
             dp=dp,
             polling_task=polling_task,
             active_ai_chats=active_ai_chats,
+            away_task=away_task,
             pending_actions=pending_actions,
             link=link,
             node_link=node_link,
@@ -319,6 +347,7 @@ async def _shutdown(
     store: Store,
     bot,
     db: Database,
+    away_task: asyncio.Task | None = None,
 ) -> None:
     log.info("Останов приложения...")
 
@@ -344,6 +373,19 @@ async def _shutdown(
             pass
         except Exception:  # noqa: BLE001 — сбой одной /ai-задачи не должен рвать shutdown
             log.warning("/ai-задача chat=%s упала при остановке", chat_id, exc_info=True)
+
+    # Проход «Альфред в городе» (Этап 51): если он как раз отвечал чату, его
+    # задачу выше уже отменили; иначе — останавливаем здесь. Состояние в БД,
+    # на следующем старте проход продолжит.
+    if away_task is not None:
+        if not away_task.done():
+            away_task.cancel()
+        try:
+            await away_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001
+            log.warning("away-задача упала при остановке", exc_info=True)
 
     # Таймеры форм в памяти — снять: будильники в tasks и recover() на
     # следующем старте их заменят.

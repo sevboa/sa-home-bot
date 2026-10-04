@@ -17,6 +17,7 @@ from aiogram.enums import ParseMode
 from sa_home_bot.bot.handlers import (
     ai,
     apps,
+    away,
     basic,
     control,
     draw,
@@ -70,6 +71,10 @@ def build_dispatcher(book: SubscriptionBook, gate: Gatekeeper) -> Dispatcher:
     # чужой чат стал своим (JustAdmitted) — до всех широких фильтров.
     dp.include_router(invites.router)
     dp.include_router(basic.router)
+    # away: /away, /back и кнопки напоминания (Этап 51) — служебные, работают
+    # и пока Альфред в городе; сам перехват ИИ-входов — в хендлерах ai/draw/
+    # interactives (bot/away.py).
+    dp.include_router(away.router)
     # tool_debug: единственный обработчик своего callback-префикса, к
     # сообщениям и командам не относится вовсе.
     dp.include_router(tool_debug.router)

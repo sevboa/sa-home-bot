@@ -128,6 +128,23 @@ CREATE TABLE IF NOT EXISTS ai_turns (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_turns_dialogue ON ai_turns(chat_id, dialogue_id, message_id);
 
+-- Этап 51 (2026-10-04): «Альфред в городе». Голосовые/кружочки/аудио, пришедшие
+-- за время отъезда: файл скачан на alfred сразу (путь), file_id — запасной
+-- путь, если скачать не вышло. В ai_turns на их месте стоит заглушка «ждёт
+-- распознавания»; строка живёт, пока вернувшийся Альфред не распознал файл и
+-- не подменил заглушку транскриптом (bot/away_return.py) — по ней же
+-- продолжается разбор после падения на середине.
+CREATE TABLE IF NOT EXISTS away_media (
+    chat_id      INTEGER NOT NULL,
+    message_id   INTEGER NOT NULL,   -- сообщение пользователя = строка ai_turns
+    kind         TEXT NOT NULL,      -- voice / video_note / audio
+    path         TEXT,               -- файл на диске alfred (NULL — не скачался)
+    file_id      TEXT,
+    duration_s   INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (chat_id, message_id)
+);
+
 -- Этап 50 (2026-09-30): сжатие истории /ai (bot/dialogue_context.py).
 -- ai_turns при сжатии НЕ меняется и не чистится — полный текст всех ходов
 -- остаётся. Модели вместо старых ходов уходит краткое содержание:
