@@ -496,7 +496,7 @@ async def test_card_hides_location_without_access():
         "jeeves": link.usages["jeeves"],
         "wooster": link.usages["wooster"] | {"allowed": False},
     }
-    error, servers = await vpn_handlers._card(link, 777)
+    error, servers, _down = await vpn_handlers._card(link, 777)
     assert error is None
     assert [s["node"] for s in servers] == ["jeeves"]
     text = vpn_handlers._usage_text(servers)
@@ -508,7 +508,7 @@ async def test_card_says_access_not_granted_when_nothing_is_open():
     link.usages = {
         node: usage | {"allowed": False} for node, usage in TwoServersLink.usages.items()
     }
-    error, servers = await vpn_handlers._card(link, 777)
+    error, servers, _down = await vpn_handlers._card(link, 777)
     assert servers == []
     assert "не выдан" in error
     assert error != vpn_handlers._VPN_UNAVAILABLE  # это не сбой связи
@@ -556,7 +556,7 @@ async def test_single_open_location_is_pinned_instead_of_first_live():
 
 
 async def test_card_merges_devices_from_both_servers():
-    error, servers = await vpn_handlers._card(TwoServersLink(), 777)
+    error, servers, _down = await vpn_handlers._card(TwoServersLink(), 777)
     assert error is None
     assert [s["node"] for s in servers] == ["jeeves", "wooster"]
     text = vpn_handlers._usage_text(servers)
@@ -565,7 +565,7 @@ async def test_card_merges_devices_from_both_servers():
 
 
 async def test_card_keeps_quota_per_server_without_summing():
-    _error, servers = await vpn_handlers._card(TwoServersLink(), 777)
+    _error, servers, _down = await vpn_handlers._card(TwoServersLink(), 777)
     text = vpn_handlers._usage_text(servers)
     # Две раздельные квоты по 500 ГБ, а не одна на 1000 — счёт за трафик у
     # каждого VPS свой (решение владельца 2026-09-18).
@@ -576,7 +576,7 @@ async def test_card_keeps_quota_per_server_without_summing():
 async def test_card_survives_dead_second_server():
     link = TwoServersLink()
     link.dead = "wooster"
-    error, servers = await vpn_handlers._card(link, 777)
+    error, servers, _down = await vpn_handlers._card(link, 777)
     assert error is None
     assert [s["node"] for s in servers] == ["jeeves"]
     assert "Ромашка" in vpn_handlers._usage_text(servers)
@@ -679,7 +679,7 @@ async def test_card_reports_unavailable_when_no_vpn_in_swarm():
             "services": [{"name": "monitor", "service": "monitor", "status": "running"}],
         }
 
-    error, servers = await vpn_handlers._card(NoVpn(), 777)
+    error, servers, _down = await vpn_handlers._card(NoVpn(), 777)
     assert servers == []
     assert "недоступна" in error
 
@@ -1311,3 +1311,28 @@ async def test_toggle_refuses_subscription_outside_the_guest_list():
     )
     assert gate.saved == []
     assert "больше не в списке" in str(callback.answered[-1])
+
+
+def test_usage_text_marks_unavailable_server():
+    text = vpn_handlers._usage_text(
+        [_server()],
+        unavailable=[{"node": "wooster", "label": "🇺🇸 США", "unavailable": True}],
+    )
+    assert "🇺🇸 США</b>: 🔌 Сервер недоступен" in text
+
+
+async def test_card_shows_unavailable_server_to_admin_only(monkeypatch):
+    """wooster раньше отвечал (запомнен), теперь молчит: админу — «недоступен»,
+    гостю — ничего (допуск гостя хранит сама лежащая нода)."""
+    vpn_handlers.vpn_nodes.remember_servers([{"node": "wooster", "label": "🇺🇸 США"}])
+
+    async def only_jeeves(*_args, **_kwargs):
+        return [_server(node="jeeves")]
+
+    monkeypatch.setattr(vpn_handlers.vpn_nodes, "fanout", only_jeeves)
+    admin = Subscription(name="o", chat_id=1, allowed_commands=frozenset({"*"}))
+    guest = Subscription(name="g", chat_id=2, source="guest")
+    _error, _servers, down = await vpn_handlers._card(object(), 777, admin)
+    assert [d["node"] for d in down] == ["wooster"]
+    _error, _servers, down = await vpn_handlers._card(object(), 777, guest)
+    assert down == []

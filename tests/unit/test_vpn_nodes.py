@@ -286,3 +286,14 @@ async def test_probe_targets_excludes_self_when_self_is_a_vpn_server():
 async def test_probe_targets_empty_when_no_vpn_anywhere():
     link = FakeLink(_node_state("alfred", [_svc("monitor")]))
     assert await vpn_nodes.probe_targets(link, exclude="alfred") == []
+
+
+def test_unavailable_servers_are_known_nodes_without_answer(tmp_path, monkeypatch):
+    monkeypatch.setattr(vpn_nodes, "KNOWN_SERVERS_PATH", tmp_path / "known.json")
+    vpn_nodes.remember_servers(
+        [{"node": "jeeves", "label": "🇳🇱 Нидерланды"}, {"node": "wooster", "label": "🇺🇸 США"}]
+    )
+    down = vpn_nodes.unavailable_servers([{"node": "jeeves", "label": "🇳🇱 Нидерланды"}])
+    assert down == [{"node": "wooster", "label": "🇺🇸 США", "unavailable": True}]
+    # Сервер, ни разу не отвечавший, неизвестен — выдумывать его нельзя.
+    assert vpn_nodes.unavailable_servers([]) != [] and len(vpn_nodes.unavailable_servers([])) == 2

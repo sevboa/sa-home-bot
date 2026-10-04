@@ -213,7 +213,9 @@ def _allowed_servers(servers: list[dict]) -> list[dict]:
     return [server for server in servers if _is_allowed(server)]
 
 
-def _usage_text(servers: list[dict], *, show_access: bool = False) -> str:
+def _usage_text(
+    servers: list[dict], *, show_access: bool = False, unavailable: list[dict] | None = None
+) -> str:
     """Карточка расхода. Квота у каждого сервера своя (счёт за трафик у VPS
     раздельный) — лимиты НЕ суммируются, каждая локация идёт своим блоком.
 
@@ -223,7 +225,8 @@ def _usage_text(servers: list[dict], *, show_access: bool = False) -> str:
     включает пометку закрытых — это для админских экранов, где смотрят чужой
     расход и как раз надо понимать, где доступ открыт, а где нет.
     """
-    multi = len(servers) > 1
+    unavailable = unavailable or []
+    multi = len(servers) + len(unavailable) > 1 or bool(unavailable)
     lines: list[str] = ["📶 <b>VPN</b>"] if multi else []
     for server in servers:
         used = _gb(server.get("used_bytes", 0))
@@ -250,6 +253,9 @@ def _usage_text(servers: list[dict], *, show_access: bool = False) -> str:
             lines.append("")
             lines.append("Устройства:")
         lines.extend(_device_line(device) for device in devices)
+    for server in unavailable:
+        lines.append("")
+        lines.append(f"<b>{html.escape(_server_label(server))}</b>: 🔌 Сервер недоступен")
     # Легенду показываем, только когда есть что объяснять: при всех зелёных
     # она была бы шумом на каждой карточке.
     if any(icon != _CHECK_ICON[vpn_check.OK] for s in servers for icon in _check_icons(s).values()):
@@ -801,22 +807,33 @@ async def usage_text(node_link: ServiceLink, chat_id: int) -> str:
 
 
 async def _card(
-    node_link: ServiceLink, chat_id: int
-) -> tuple[str, list[dict]] | tuple[None, list[dict]]:
-    """Расход гостя по его локациям. Мёртвая нода просто выпадает из списка
-    (vpn_nodes.fanout) — карточка с одной локацией полезнее отказа; локация,
-    куда гость не допущен, выпадает тоже, но по другой причине (этап D).
+    node_link: ServiceLink, chat_id: int, subscription: Subscription | None = None
+) -> tuple[str | None, list[dict], list[dict]]:
+    """Расход гостя по его локациям + недоступные серверы (``error, servers,
+    unavailable``). Мёртвая нода выпадает из ответа (vpn_nodes.fanout) — карточка
+    с одной локацией полезнее отказа; локация, куда гость не допущен, выпадает
+    тоже, но по другой причине (этап D).
+
+    Недоступные серверы (известные, но не ответившие) показываются только тем,
+    у кого есть админское право на VPN: допуск гостя к локации хранит сама
+    нода, и у лежащей про него не спросить — гостю «недоступен» было бы догадкой.
 
     Пустой список после фильтра — не ошибка связи, а «доступ ещё не выдан»:
     отличает их вызывающий по тому, пришло ли что-то от роя вообще.
     """
-    servers = await vpn_nodes.fanout(node_link, vpn_protocol.ACTION_USAGE, {"chat_id": chat_id})
-    if not servers:
-        return _VPN_UNAVAILABLE, []
-    allowed = _allowed_servers(servers)
-    if not allowed:
-        return _NO_VPN_ACCESS, []
-    return None, allowed
+    answered = await vpn_nodes.fanout(node_link, vpn_protocol.ACTION_USAGE, {"chat_id": chat_id})
+    vpn_nodes.remember_servers(answered)
+    down = (
+        vpn_nodes.unavailable_servers(answered)
+        if subscription is not None and _is_admin(subscription)
+        else []
+    )
+    if not answered and not down:
+        return _VPN_UNAVAILABLE, [], []
+    allowed = _allowed_servers(answered)
+    if not allowed and not down:
+        return _NO_VPN_ACCESS, [], []
+    return None, allowed, down
 
 
 def _self_serve_nodes(servers: list[dict], config: Settings) -> list[str]:
@@ -856,7 +873,7 @@ async def cmd_vpn(
     config: Settings,
     subscription: Subscription | None = None,
 ) -> None:
-    error, servers = await _card(node_link, message.chat.id)
+    error, servers, down = await _card(node_link, message.chat.id, subscription)
     if error is not None:
         # «Локаций нет» — ещё не повод закрыть дверь: прокси Telegram живёт
         # отдельно от VPN и допуска к локации не требует. Гостю, которому
@@ -872,13 +889,13 @@ async def cmd_vpn(
         subscription=subscription,
         self_serve_nodes=_self_serve_nodes(servers, config),
     )
-    await message.answer(_usage_text(servers), reply_markup=keyboard)
+    await message.answer(_usage_text(servers, unavailable=down), reply_markup=keyboard)
 
 
 async def _redraw_card(
     callback: CallbackQuery, node_link: ServiceLink, subscription: Subscription, config: Settings
 ) -> None:
-    error, servers = await _card(node_link, callback.message.chat.id)
+    error, servers, down = await _card(node_link, callback.message.chat.id, subscription)
     if error is not None:
         if error is _NO_VPN_ACCESS and _allows(subscription, vpn_protocol.ACTION_PROXY_LINK):
             with contextlib.suppress(TelegramBadRequest):
@@ -892,7 +909,9 @@ async def _redraw_card(
         self_serve_nodes=_self_serve_nodes(servers, config),
     )
     with contextlib.suppress(TelegramBadRequest):
-        await callback.message.edit_text(_usage_text(servers), reply_markup=keyboard)
+        await callback.message.edit_text(
+            _usage_text(servers, unavailable=down), reply_markup=keyboard
+        )
 
 
 def _conf_filename(device_label: str, location: str = "") -> str:

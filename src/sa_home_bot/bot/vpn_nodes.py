@@ -18,12 +18,22 @@ AmneziaWG может быть больше одного. Бот перестаё
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 from sa_home_bot import wake_core
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.proto.messages import Address, ProtoError
 from sa_home_bot.vpn.protocol import SERVICE_NAME
+
+log = logging.getLogger(__name__)
+
+# Память о серверах, которые хоть раз отвечали: мёртвая нода о себе ничего не
+# скажет (ни метки, ни службы), а админу в /vpn надо показать «Сервер
+# недоступен», а не молча потерять локацию. Файл переживает рестарт бота.
+KNOWN_SERVERS_PATH = Path("./data/vpn_known_servers.json")
 
 
 def _carries_vpn(state: dict) -> bool:
@@ -137,3 +147,40 @@ async def fanout(node_link: ServiceLink, action: str, args: dict) -> list[dict]:
 
     results = await asyncio.gather(*(_one(node_id) for node_id in targets))
     return [result for result in results if result is not None]
+
+
+def _load_known() -> dict[str, str]:
+    try:
+        raw = json.loads(KNOWN_SERVERS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+
+
+def remember_servers(answered: list[dict]) -> None:
+    """Запомнить ``node → label`` у ответивших серверов (usage-ответы несут оба
+    поля). Пишет файл только при изменении."""
+    known = _load_known()
+    updated = dict(known)
+    for server in answered:
+        node = server.get("node")
+        if node:
+            updated[node] = server.get("label") or updated.get(node, "")
+    if updated == known:
+        return
+    try:
+        KNOWN_SERVERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        KNOWN_SERVERS_PATH.write_text(json.dumps(updated, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        log.warning("vpn: не удалось сохранить список известных серверов", exc_info=True)
+
+
+def unavailable_servers(answered: list[dict]) -> list[dict]:
+    """Известные серверы, не попавшие в ``answered`` (нода лежит или служба
+    vpn на ней не отвечает): ``[{node, label, unavailable: True}]``."""
+    seen = {server.get("node") for server in answered}
+    return [
+        {"node": node, "label": label, "unavailable": True}
+        for node, label in sorted(_load_known().items())
+        if node not in seen
+    ]

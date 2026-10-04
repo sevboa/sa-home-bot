@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from sa_home_bot.domain.models import KIND_CPU, SensorReading
 from sa_home_bot.domain.policy import ComponentPolicy, FixedThresholdPolicy
 
@@ -38,3 +40,12 @@ def cpu_policy(
         consecutive_to_alert=to_alert,
         consecutive_to_clear=to_clear,
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_known_vpn_servers(tmp_path, monkeypatch):
+    """Память о VPN-серверах (bot/vpn_nodes.py) — файл в ./data; тесты не должны
+    ни писать в настоящий, ни читать оттуда."""
+    from sa_home_bot.bot import vpn_nodes
+
+    monkeypatch.setattr(vpn_nodes, "KNOWN_SERVERS_PATH", tmp_path / "vpn_known_servers.json")
