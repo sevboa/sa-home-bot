@@ -496,6 +496,18 @@ def test_finale_forced_by_soft_cap_uses_fallback_fault():
     assert run.finale and run.finale_fault == radio.RADIO.fallback_faults[1]
 
 
+def test_finale_keeps_preset_fault():
+    run = _fresh_run()
+    run.stage = radio.RADIO.last_stage
+    run.turns_total = 10
+    run.finale_fault = "Эфирный Слизень"
+    effect = apply_decision(
+        radio.RADIO, run, _decision(stage=3, finale=True, finale_fault="жижа", effect="Жижа!")
+    )
+    assert run.finale and run.finale_fault == "Эфирный Слизень"
+    assert "Эфирный Слизень" in effect
+
+
 def _decision(**fields) -> DirectorDecision:
     base = {
         "active": True,

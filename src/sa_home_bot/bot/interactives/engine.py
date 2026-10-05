@@ -422,12 +422,16 @@ def apply_decision(
     wants_finale = decision is not None and decision.finale
     if allowed and (wants_finale or run.turns_on_stage >= scenario.stage_soft_cap):
         run.finale = True
-        run.finale_fault = (
+        # Поломку можно задать заранее (вернуть гостю прежнюю после сброса
+        # сцены) — тогда она главнее выдумки Ведущего, а его эффект, писанный
+        # под свою поломку, заменяем шаблонным.
+        preset = run.finale_fault
+        run.finale_fault = preset or (
             decision.finale_fault
             if decision is not None and decision.finale_fault
             else choose(scenario.fallback_faults)
         )
-        if not effect:
+        if preset or not effect:
             effect = f"Внутри радиостанции обнаруживается страшное: {run.finale_fault}."
     run.last_effect = effect or run.last_effect
     return effect
