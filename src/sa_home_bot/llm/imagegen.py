@@ -99,6 +99,9 @@ class LoraSpec:
     version: int
     kind: str
     trigger: str = ""
+    # Своя LoRA (не с Civitai): путь внутри imagegen_model_dir, ``version``
+    # тогда не используется. Файл в git не лежит — кладётся на ноду руками.
+    file: str = ""
 
 
 # Этап 49: древние постройки, боди-хоррор, сплав органики с предметами и
@@ -117,6 +120,9 @@ LORAS: dict[str, LoraSpec] = {
     "castlesxl": LoraSpec(1281424, "sdxl"),
     "lovecraftxl": LoraSpec(205756, "sdxl", "hp_lovecraft_style"),
     "biomechxl": LoraSpec(1613047, "sdxl"),
+    # Облик Альфреда (2026-10-05): обучена на dreamshaper-8 по 104 кадрам
+    # Qwen-Image-Edit, стенд — /mnt/data/claude/alfred-bench/qwen на alfred.
+    "alfred": LoraSpec(0, "sd15", "alfredbutler", file="loras/alfred-v2.safetensors"),
 }
 DEFAULT_LORA_WEIGHT = 0.8
 _CIVITAI_URL = "https://civitai.com/api/download/models/{version}"
@@ -128,6 +134,18 @@ class ImagegenError(RuntimeError):
 
 def lora_fits(lora: LoraSpec, model: ModelSpec) -> bool:
     return lora.kind == ("sd15" if model.kind == "sd15" else "sdxl")
+
+
+def lora_file(name: str, cfg: LlmConfig) -> Path:
+    """Файл LoRA: своя — из кэша моделей (нет — понятная ошибка), с Civitai —
+    скачивается при первом обращении."""
+    spec = LORAS[name]
+    if not spec.file:
+        return _civitai_file(spec.version, cfg)
+    path = cfg.imagegen_model_dir / spec.file
+    if not path.exists():
+        raise ImagegenError(f"нет файла LoRA {name}: {path}")
+    return path
 
 
 def _civitai_file(version: int, cfg: LlmConfig) -> Path:
@@ -414,7 +432,7 @@ def _generate_sync(
         if name not in loaded.loras:
             started = time.monotonic()
             pipe.load_lora_weights(
-                str(_civitai_file(LORAS[name].version, cfg)), adapter_name=name
+                str(lora_file(name, cfg)), adapter_name=name
             )
             loaded.loras.add(name)
             log.info("imagegen: LoRA %s загружена за %.1fс", name, time.monotonic() - started)

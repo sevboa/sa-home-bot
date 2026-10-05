@@ -66,6 +66,7 @@ SD1.5 (dream, revanim, ghostmix, rv, epic):
 • <code>rottech</code> (rottentech) — гниющая техника, весь кадр
 • <code>eldritch</code> (eldritchtech) — космическая жуть, весь кадр
 • <code>ruins</code> — руины и свет
+• <code>alfred</code> (alfredbutler) — облик самого Альфреда, лучше 0.6–0.8
 SDXL (turbo):
 • <code>gigerxl</code> (gigercraft), <code>biomechxl</code>🔒 — биомеханика
 • <code>fleshxl</code> (fleshmutant) — плоть

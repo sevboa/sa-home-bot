@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest_asyncio
 
@@ -1792,3 +1793,42 @@ async def test_history_is_shared_builder_and_compression_scheduled_after_reply(
     assert events == ["request", "schedule:1:77"]
     rows = await store.ai_turns_for_dialogue(1, 77)
     assert rows[-1]["content"] == "Отвечаю, и позвольте отлучиться"
+
+
+async def test_bare_greeting_starts_alfreds_portrait_but_a_question_does_not(store, monkeypatch):
+    """Голое приветствие — следом портрет Альфреда в кабинете (2026-10-05);
+    вопрос — обычный ход, без портрета."""
+
+    async def fake_request(*_args, **_kw):
+        return "Слушаю, сэг."
+
+    class Portraits:
+        def __init__(self) -> None:
+            self.started: list = []
+
+        def start_greeting_portrait(self, chat_id, user_id, **kw):
+            self.started.append((chat_id, user_id, kw["trigger_message_id"]))
+            return True
+
+        async def before_turn(self, *_a, **_kw):
+            return None
+
+        async def wait_photo(self, *_a, **_kw):
+            return None
+
+        async def flush_forms(self, *_a, **_kw):
+            return None
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+    portraits = Portraits()
+    for text in ("/alfred", "/alfred который час?"):
+        message = FakeMessage(1, text=text)
+        message.from_user = SimpleNamespace(
+            id=7, full_name="Гость", first_name="Гость", last_name=None, username=None
+        )
+        await ai_handler.cmd_ai(
+            message, node_link=None, store=store, config=_plain_settings(),
+            book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+            tool_calls=ToolCalls(), interactives=portraits,
+        )
+    assert portraits.started == [(1, 7, portraits.started[0][2])]

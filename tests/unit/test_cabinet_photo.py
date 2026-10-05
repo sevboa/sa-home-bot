@@ -710,3 +710,44 @@ async def test_delivered_photo_leaves_nothing_pending(store):
     await _drain(svc)
     assert len(notifier.photos) == 1 and notifier.sent == []
     assert await store.get_state(cabinet.PHOTO_PENDING_KEY) == "{}"
+
+
+# --- портрет Альфреда к приветствию (2026-10-05) ---
+
+
+async def test_greeting_portrait_draws_alfred_in_guests_study_with_light(store):
+    link = FakeLink()
+    svc, notifier = _make(store, link)
+    assert svc.start_greeting_portrait(GUEST, GUEST, trigger_message_id=55)
+    # Пока рисуется — второй в тот же чат не начинаем.
+    assert not svc.start_greeting_portrait(GUEST, GUEST)
+    await _drain(svc)
+    (gen,) = link.generated()
+    assert gen["loras"] == [list(cabinet.ALFRED_LORA)]
+    assert gen["description"].startswith(cabinet.PORTRAIT_SUBJECT_EN)
+    # Свет — тот же, что у снимков кабинета (ночь, пасмурно); обстановка гостя.
+    assert "candlelight" in gen["description"] and "треснувший портрет" in gen["description"]
+    assert cabinet.CANON_EN in gen["description"]
+    (chat, photo, caption) = notifier.photos[0]
+    assert chat == GUEST and isinstance(photo, bytes) and caption is None
+    # Особенности кабинета придуманы и сохранены, как при первом снимке.
+    assert (await cabinet.load(store, GUEST)).features
+    # Портрет — не снимок кабинета: повторный показ снимков его не берёт.
+    assert not (await cabinet.load(store, GUEST)).photos
+    assert svc.start_greeting_portrait(GUEST, GUEST)
+    await _drain(svc)
+    assert len(link.generated()) == 2
+
+
+async def test_greeting_portrait_failure_is_silent(store):
+    class Down(FakeLink):
+        async def command(self, action, args, dst=None, timeout=None):
+            if action == "generate_image":
+                raise TimeoutError
+            return await super().command(action, args, dst, timeout)
+
+    svc, notifier = _make(store, Down())
+    assert svc.start_greeting_portrait(GUEST, GUEST)
+    await _drain(svc)
+    assert notifier.photos == [] and notifier.sent == []
+    assert svc.start_greeting_portrait(GUEST, GUEST)

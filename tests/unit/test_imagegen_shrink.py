@@ -187,3 +187,17 @@ async def test_generate_image_prepends_lora_triggers_except_raw(monkeypatch):
     assert jobs[1][0] == "radio"
     with pytest.raises(ValueError):
         await imagegen.generate_image("radio", "", cfg, model="turbo", loras=[("giger", 0.8)])
+
+
+from sa_home_bot.llm.imagegen import LORAS, ImagegenError, lora_file  # noqa: E402
+
+
+def test_alfred_lora_is_local_file(tmp_path):
+    cfg = LlmConfig(model="m", imagegen_model_dir=tmp_path)
+    with pytest.raises(ImagegenError, match="нет файла LoRA alfred"):
+        lora_file("alfred", cfg)
+    path = tmp_path / LORAS["alfred"].file
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"x")
+    assert lora_file("alfred", cfg) == path
+    assert LORAS["alfred"].trigger == "alfredbutler" and LORAS["alfred"].kind == "sd15"

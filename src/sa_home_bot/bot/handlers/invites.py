@@ -23,6 +23,7 @@ from sa_home_bot.bot.away import KIND_SUMMON, AwayService
 from sa_home_bot.bot.handlers import ai as ai_handlers
 from sa_home_bot.bot.handlers import vpn as vpn_handlers
 from sa_home_bot.bot.handlers.basic import build_help
+from sa_home_bot.bot.interactives.engine import Interactives
 from sa_home_bot.bot.invites import Admission, Gatekeeper
 from sa_home_bot.bot.menu import refresh_chat_menu
 from sa_home_bot.bot.notifier import Notifier
@@ -436,6 +437,7 @@ async def on_admitted(
     active_ai_chats: ai_flow.ActiveAiChats,
     tool_calls: ToolCalls,
     away: AwayService | None = None,
+    interactives: Interactives | None = None,
 ) -> None:
     """Первое, что видит впущенный, — живого Альфреда, а не системный текст.
 
@@ -482,6 +484,7 @@ async def on_admitted(
             notifier=notifier,
             active_ai_chats=active_ai_chats,
             tool_calls=tool_calls,
+            interactives=interactives,
         )
     if greeting is None:
         await message.answer(WELCOME_TEXT + "\n\n" + build_help(subscription, app_actions))

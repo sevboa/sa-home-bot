@@ -57,6 +57,16 @@ CANON_EN = (
 # негатив весит мало, но не мешает.
 PHOTO_NEGATIVE_EN = "monochrome, grayscale"
 
+# Портрет Альфреда к приветствию (2026-10-05): сам Альфред в своём кабинете —
+# LoRA облика (llm/imagegen.py, LORAS["alfred"]). Вес — стенд 2026-10-05:
+# 0.4 — лицо слабеет, 1.0 — всё тянет в крупный портрет и комната теряется.
+ALFRED_LORA = ("alfred", 0.7)
+PORTRAIT_SUBJECT_EN = (
+    "Main subject: Alfred, an elderly butler in a black tailcoat, waist-up, "
+    "standing in his study and greeting the viewer with a slight polite bow."
+)
+PORTRAIT_CAPTION = "Альфред в кабинете"
+
 # Чего не снять фотоаппаратом: запахи и звуки. Такие особенности Ведущему
 # запрещены промптом, а уже записанные (и прорвавшиеся) не идут в кадр и в
 # новые особенности — место в 77 токенах промпта снимка дорого.

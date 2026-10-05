@@ -77,6 +77,22 @@ OPENING_PROMPT = (
     "Тебя только что позвали, без конкретного вопроса. Поприветствуй "
     "коротко, в характере — дай понять, что ты здесь и готов слушать."
 )
+
+
+def _greeting_portrait(message: Message, interactives: Interactives | None) -> None:
+    """Приветствие без вопроса — следом портрет Альфреда в кабинете
+    (2026-10-05, Interactives.start_greeting_portrait): рисуется в фоне и
+    приходит после ответа, ответ его не ждёт."""
+    if interactives is None or message.chat is None or message.from_user is None:
+        return
+    interactives.start_greeting_portrait(
+        message.chat.id,
+        message.from_user.id,
+        message_thread_id=message.message_thread_id,
+        trigger_message_id=message.message_id,
+    )
+
+
 # Реплай в тред без текста (фото без подписи, геолокация, документ и т.п.) —
 # тоже не молчим (раньше просто игнорировали, диалог как будто не реагировал),
 # а сообщаем модели, что ход был пустым — та же логика, что и OPENING_PROMPT:
@@ -333,6 +349,8 @@ async def cmd_ai(
         # Директива-приветствие не сохраняется как ход диалога — только то,
         # что модель на неё ответит (см. OPENING_PROMPT выше).
         history = [{"role": "user", "content": OPENING_PROMPT}]
+    if not prompt:
+        _greeting_portrait(message, interactives)
 
     await _ask_and_reply(
         message, node_link, store, config, book, notifier, dialogue_id, history,
@@ -670,6 +688,7 @@ async def on_group_mention(
     else:
         # Позвали без текста — та же заглушка-директива, что и голый /alfred.
         history = [{"role": "user", "content": OPENING_PROMPT}]
+        _greeting_portrait(message, interactives)
 
     await _ask_and_reply(
         message, node_link, store, config, book, notifier, dialogue_id, history,
@@ -706,6 +725,7 @@ async def start_dialogue(
     """
     if away is not None and await away.intercept(message, kind=KIND_SUMMON):
         return None
+    _greeting_portrait(message, interactives)
     return await _ask_and_reply(
         message,
         node_link,

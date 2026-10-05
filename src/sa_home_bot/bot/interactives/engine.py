@@ -128,6 +128,7 @@ EXIT_ALERT = "Хорошо."
 # Суточный потолок на чат; 0 — без лимита (снят по просьбе пользователя 2026-09-30).
 PHOTO_DAILY_LIMIT = 0
 PHOTO_PURPOSE = "photo"
+PORTRAIT_PURPOSE = "portrait"
 # Фазы снимка — опросом chat_progress службы llm (llm/service.py::
 # IMAGE_PHASE_*), статусами хода /ai.
 ACTION_CHAT_PROGRESS = "chat_progress"
@@ -528,6 +529,8 @@ class Interactives:
         self._photo_join: dict[int, dict[str, Any]] = {}
         self._photo_described: set[int] = set()
         self._photo_tasks: set[asyncio.Task] = set()
+        # Портрет к приветствию (start_greeting_portrait): чаты, где рисуется.
+        self._portrait_busy: set[int] = set()
         self._store = store
         self._state = InteractiveStore(store)
         self._notifier = notifier
@@ -1212,6 +1215,116 @@ class Interactives:
                 reply_to = (join or {}).get("trigger_message_id") or trigger_message_id
                 await self._photo_lost(chat_id, message_thread_id, reply_to)
             await self._clear_photo_pending(chat_id)
+
+    # --- портрет Альфреда к приветствию (2026-10-05) ---
+
+    def start_greeting_portrait(
+        self,
+        chat_id: int,
+        user_id: int,
+        *,
+        message_thread_id: int | None = None,
+        trigger_message_id: int | None = None,
+    ) -> bool:
+        """Альфред поздоровался — следом его портрет в кабинете гостя, с тем
+        же временем суток и погодой, что у снимков кабинета. Рисуется в фоне
+        (~30 с), приветствие его не ждёт. False — не начат (уже рисуется в
+        этом чате или нет связи)."""
+        if chat_id in self._portrait_busy or not hasattr(self._notifier, "send_photo_ex"):
+            return False
+        if self._get_node_link() is None:
+            return False
+        self._portrait_busy.add(chat_id)
+        task = asyncio.create_task(
+            self._greeting_portrait(chat_id, user_id, message_thread_id, trigger_message_id)
+        )
+        self._photo_tasks.add(task)
+        task.add_done_callback(self._photo_tasks.discard)
+        task.add_done_callback(lambda _t: self._portrait_busy.discard(chat_id))
+        return True
+
+    async def _greeting_portrait(
+        self,
+        chat_id: int,
+        user_id: int,
+        message_thread_id: int | None,
+        trigger_message_id: int | None,
+    ) -> None:
+        node_link = self._get_node_link()
+        if node_link is None:
+            return
+        dst = Address(node=LLM_NODE, service=LLM_SERVICE)
+        cfg = self._settings.llm
+        try:
+            now = self._now()
+            outside = await self._transylvania.outside(now)
+            cab = await cabinet_mod.load(self._store, user_id)
+            if not cab.features:
+                new = await ask_features(
+                    node_link,
+                    dst,
+                    cfg.request_timeout_s,
+                    chat_id=chat_id,
+                    place=cab.describe_ru(),
+                    outside=outside.ru(),
+                    count=cabinet_mod.FIRST_FEATURES,
+                )
+                if cab.add(list(new)):
+                    await cabinet_mod.save(self._store, cab)
+            description = portrait_description(cab, outside)
+            result = await node_link.command(
+                image_tools.ACTION_GENERATE_IMAGE,
+                {
+                    "description": description,
+                    "mode": "free",
+                    "chat_id": chat_id,
+                    "negative_extra": cabinet_mod.PHOTO_NEGATIVE_EN,
+                    "loras": [list(cabinet_mod.ALFRED_LORA)],
+                },
+                dst=dst,
+                timeout=cfg.imagegen_request_timeout_s,
+            )
+            png = base64.b64decode(result["png_b64"])
+            image_id = await self._store.add_image(
+                chat_id=chat_id,
+                author=None,
+                prompt_ru=f"{cabinet_mod.PORTRAIT_CAPTION}: {outside.ru()}",
+                prompt_en=str(result.get("prompt") or description),
+                caption=cabinet_mod.PORTRAIT_CAPTION,
+                width=int(result["width"]),
+                height=int(result["height"]),
+                colors=cfg.imagegen_colors,
+                png=png,
+                now=now,
+                purpose=PORTRAIT_PURPOSE,
+                params=json.dumps(
+                    {
+                        "location": cabinet_mod.LOCATION,
+                        "user_id": user_id,
+                        "state": photo_state_key(cab, outside, None),
+                        "seed": result.get("seed"),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            sent = await self._notifier.send_photo_ex(
+                chat_id,
+                image_tools.upscale_png(png, cfg.imagegen_display_px),
+                message_thread_id=message_thread_id,
+                reply_to_message_id=trigger_message_id,
+            )
+        except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
+            log.warning(
+                "interactives: портрет к приветствию не нарисован (chat=%s): %s", chat_id, exc
+            )
+            return
+        except Exception:
+            log.exception("interactives: портрет к приветствию не удался (chat=%s)", chat_id)
+            return
+        if sent is None:
+            log.warning("interactives: портрет #%s не ушёл в чат %s", image_id, chat_id)
+            return
+        await self._store.set_image_sent(image_id, sent[1], sent[0])
 
     async def _photo_lost(
         self, chat_id: int, message_thread_id: int | None, reply_to: int | None
@@ -2415,6 +2528,19 @@ def photo_description(
     parts.append(f"Room: {cabinet_mod.CANON_EN}.")
     parts.append(f"Light: {light}.")
     return " ".join(parts), ""
+
+
+def portrait_description(cab: Cabinet, outside: Outside) -> str:
+    """Описание портрета к приветствию для промптера: сам Альфред первым,
+    потом свет (время суток и погода — как у снимков кабинета), потом
+    обстановка гостя. Особенностей — меньше, чем у снимка: место в 77
+    токенах CLIP занимает Альфред."""
+    parts = [cabinet_mod.PORTRAIT_SUBJECT_EN, f"Light: {outside.en()}."]
+    features = cab.visible_features()[-1:]
+    if features:
+        parts.append("Also visible: " + "; ".join(features) + ".")
+    parts.append(f"Room: {cabinet_mod.CANON_EN}.")
+    return " ".join(parts)
 
 
 def _plain(text_html: str) -> str:
