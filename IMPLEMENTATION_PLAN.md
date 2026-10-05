@@ -2958,6 +2958,19 @@ PublicKey = <ключ jeeves>` + `Endpoint = <IP jeeves>` — невалидно
   лишь публичный ключ получателя, приватный — только в конфиге alfred.
   Компрометация напарника не раскрывает бэкап; расшифровка при
   восстановлении идёт через alfred. Напарники: jeeves ↔ wooster.
+  - ✅ **(a) примитив шифрования, 2026-10-05.** `src/sa_home_bot/backup/sealed.py`:
+    `seal(recipient_public_key: bytes, plaintext) -> bytes`,
+    `open_sealed(private_key: bytes, blob) -> bytes` (ключи — сырые 32 байта),
+    `SealedError` (единственное исключение), `generate_keypair() -> (priv, pub)`,
+    `public_from_private`, `dump_key`/`load_key` (стандартный base64 <-> 32 байта),
+    `write_private_key(path, priv)` (0600, O_EXCL, не затирает), `read_private_key(path)`.
+    Формат: `b"SAHB1"` + epk(32) + nonce(12) + ChaCha20-Poly1305; ключ =
+    HKDF-SHA256(ECDH, salt=epk||recipient_pk, info=метка), AAD = магия+epk.
+    CLI: `sa-home-bot backup keygen [--out ~/.config/sa-home-bot/backup.key]`
+    (`backup_cli.py`, конфиг не нужен, печатает публичный ключ и строки для конфига).
+    Конфиг `[backup]` (`BackupConfig`, `Settings.backup`): `recipient_public_key`
+    (vpn-ноды, base64) и `private_key_file` (alfred, путь); пусто = выключено.
+    `cryptography>=42` в dependencies. Тесты: `tests/unit/test_backup_sealed.py`.
   Подэтапы (делаются последовательно, каждый — свой коммит с тестами):
   - ⬜ **(a) примитив шифрования** — `sealed`-модуль (seal/open, формат с
     версией), генерация пары ключей CLI-командой, конфиг: публичный ключ

@@ -604,6 +604,13 @@ wait_timeout_s = 120.0             # сколько ждать ответа на
 level = "INFO"
 format = "plain"                   # plain | json
 
+# Шифрование бэкапов identity vpn-серверов (Этап 39.0.8). Пусто = выключено.
+# Ключи делает `sa-home-bot backup keygen` на alfred. На vpn-нодах (jeeves/wooster)
+# задаётся только публичный ключ, на alfred — только путь к приватному.
+[backup]
+recipient_public_key = ""          # vpn-ноды: base64 публичного ключа получателя (alfred)
+private_key_file = ""              # alfred: путь к приватному ключу, права 0600
+
 # --- Подписки (тихих часов нет) ---
 
 # Типы событий: overheat_started, overheat_cleared (температура),

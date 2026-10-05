@@ -1177,6 +1177,17 @@ class SwarmConfig(BaseModel):
     discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
 
 
+class BackupConfig(BaseModel):
+    """Шифрование бэкапов identity vpn-серверов (Этап 39.0.8, backup/sealed.py).
+
+    Пусто = функция выключена. vpn-ноды (jeeves/wooster) знают только публичный
+    ключ получателя, приватный лежит файлом лишь у alfred.
+    """
+
+    recipient_public_key: str = ""  # base64, 32 байта; задаётся на vpn-нодах
+    private_key_file: str = ""  # путь к приватному ключу (0600); задаётся только на alfred
+
+
 class LoggingConfig(BaseModel):
     level: str = "INFO"
     format: str = "plain"  # plain | json
@@ -1355,6 +1366,7 @@ class Settings(BaseSettings):
     swarm: SwarmConfig = Field(default_factory=SwarmConfig)
     wake: WakeConfig = Field(default_factory=WakeConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    backup: BackupConfig = Field(default_factory=BackupConfig)
     invites: InvitesConfig = Field(default_factory=InvitesConfig)
     subscriptions: list[SubscriptionConfig] = Field(default_factory=list)
     guest_subscriptions: list[GuestSubscriptionConfig] = Field(default_factory=list)

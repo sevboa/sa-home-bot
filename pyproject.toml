@@ -20,6 +20,7 @@ dependencies = [
     "qbittorrent-api>=2024.1.58",
     "segno>=1.6",
     "pillow>=10.0",
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]

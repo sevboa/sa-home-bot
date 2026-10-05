@@ -53,11 +53,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", "-V", action="version", version=f"sa-home-bot {__version__}")
 
     from sa_home_bot.away_cli import add_away_subparser
+    from sa_home_bot.backup_cli import add_backup_subparser
     from sa_home_bot.setup_wizard import add_init_subparser
 
     subparsers = parser.add_subparsers(dest="command")
     add_init_subparser(subparsers)
     add_away_subparser(subparsers)
+    add_backup_subparser(subparsers)
     return parser
 
 
@@ -74,7 +76,7 @@ def _redacted(settings: Settings) -> dict:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
-    if getattr(args, "command", None) == "init":
+    if getattr(args, "command", None) in ("init", "backup"):
         return args._run(args)
 
     try:
