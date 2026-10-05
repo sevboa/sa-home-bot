@@ -5100,6 +5100,32 @@ extra_proxies = ["socks5://100.109.139.95:1080", "socks5://100.93.141.23:1080"]
   слабеет, 1.0 — сцена теряется). Фоном, после ответа, без подписи;
   `images.purpose = "portrait"`, повторный показ снимков кабинета его не берёт.
   Ошибка генерации — тихо в лог: приветствие уже ушло.
+- Эмоциональное селфи к ответу (`Interactives.mood_selfie`, врезка в
+  `handlers/ai.py::_do_ask_and_reply` перед отправкой текста). Реплика
+  Альфреда уходит подписью к его фото одним сообщением (reply на сообщение
+  гостя, тот же топик), а не отдельной картинкой после. Порядок:
+  1. гейты без GPU: ход без `take_photo`/`generate_image`
+     (`dialogue_context.HISTORY_TOOLS`), не голосовой режим, ответ не пуст и
+     влезает в подпись (`PHOTO_LINE_MAX=900`, вместе с «Альфред:» ≤ 1024),
+     есть нода llm и `send_photo_ex`, в чате не чаще 1 раза в
+     `SELFIE_MOOD_GAP_H=2` ч и `SELFIE_MOOD_DAILY=3` в сутки (счёт —
+     `count_images_since` по `purpose="selfie_mood"`); отлучку Альфреда
+     отсекает `away.intercept` до хода;
+  2. классификатор на llm (`chat`, `reason=off`, `SELFIE_MOOD_SYSTEM`) →
+     JSON `{emotion: anger|embarrassment|joy|support|about_him|none,
+     intensity 0..3, action (EN, 3-10 слов)}`; сбой/мусор — без селфи;
+  3. бросок: intensity ≤ 1 — нет, 2 → 0.25, 3 → 0.6 (`SELFIE_MOOD_CHANCE`;
+     rng инжектируется в `Interactives(rng=...)`);
+  4. кадр: путь `selfie_description` (кабинет гостя, свет и погода
+     Трансильвании, LoRA `alfred` 0.7, пресет настроения сцены); мимика по
+     эмоции — `SELFIE_EMOTION_FACE_EN` + `action`, мимика дублируется в
+     `emphasize` (промптер её не выкидывает); сверка зрением не включена.
+     Статусы черновика «наводит фотоаппарат» / «проявляет снимок»;
+  5. подпись — сам `raw` (html-экранирован, префикс `ALFRED_PHOTO_PREFIX`),
+     в `ai_turns` — message_id фото; картинка в `images`
+     (`purpose="selfie_mood"`, params: emotion/intensity/action/selfie).
+  Любой сбой (таймаут `imagegen_request_timeout_s`, отказ отправки) — тихо
+  обычный текстовый ответ тем же путём: ответ не теряется.
 
 - Альфред в кадрах событий сцены (решение владельца 2026-10-05): новое поле
   решения Ведущего `alfred: "back"|"side"|null` (мусор → None; не в каждом

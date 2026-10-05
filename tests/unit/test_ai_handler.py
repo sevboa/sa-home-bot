@@ -1832,3 +1832,78 @@ async def test_bare_greeting_starts_alfreds_portrait_but_a_question_does_not(sto
             tool_calls=ToolCalls(), interactives=portraits,
         )
     assert portraits.started == [(1, 7, portraits.started[0][2])]
+
+
+# --- эмоциональное селфи к ответу (2026-10-05) ---
+
+
+def _request_with_interactives(text: str):
+    async def fake_request(*_args, **_kw):
+        return text
+
+    return fake_request
+
+
+class SelfieInteractives(FakeInteractives):
+    def __init__(self, result) -> None:
+        super().__init__([])
+        self.result = result
+        self.calls: list = []
+
+    async def mood_selfie(self, chat_id, user_id, user_text, reply, **kw):
+        self.calls.append((chat_id, reply, kw))
+        return self.result
+
+
+async def test_mood_selfie_replaces_the_text_reply(store, monkeypatch):
+    monkeypatch.setattr(ai_flow, "request_alfred", _request_with_interactives("Какая дегзость!"))
+    interactives = SelfieInteractives(555)
+    message = FakeMessage(1, text="/alfred ты дугак")
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), interactives=interactives,
+    )
+
+    # Текст не ушёл, реплика — подпись к фото; ход записан с id фото.
+    assert message.sent == []
+    ((chat_id, reply, kw),) = interactives.calls
+    assert (chat_id, reply) == (1, "Какая дегзость!")
+    assert kw["trigger_message_id"] == message.message_id
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    assert ("assistant", 555) in [(r["role"], r["message_id"]) for r in rows]
+
+
+async def test_no_mood_selfie_sends_text_as_usual(store, monkeypatch):
+    monkeypatch.setattr(ai_flow, "request_alfred", _request_with_interactives("Добгый день"))
+    interactives = SelfieInteractives(None)
+    message = FakeMessage(1, text="/alfred привет")
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), interactives=interactives,
+    )
+
+    assert message.sent == [ai_handler._format_answer("Добгый день")]
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    assert rows[-1]["role"] == "assistant"
+
+
+async def test_mood_selfie_skipped_when_turn_already_sent_a_picture(store, monkeypatch):
+    monkeypatch.setattr(ai_flow, "request_alfred", _request_with_interactives("Вот, пгошу"))
+    interactives = SelfieInteractives(555)
+    message = FakeMessage(1, text="/alfred нагисуй")
+    await store.record_tool_call(
+        chat_id=1, dialogue_id=message.message_id, trigger_message_id=message.message_id,
+        tool_name="generate_image", args={}, result="ok", at=datetime.now(tz=UTC),
+    )
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), interactives=interactives,
+    )
+
+    assert interactives.calls == [] and message.sent == [ai_handler._format_answer("Вот, пгошу")]
