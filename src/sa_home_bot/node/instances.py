@@ -276,8 +276,12 @@ class InstanceStore:
 
     # --- приём реплики ------------------------------------------------------
 
-    def apply(self, meta: InstanceMeta, data: bytes) -> bool:
+    def apply(self, meta: InstanceMeta, data: bytes, *, force: bool = False) -> bool:
         """Принять пакет от соседа. False — своя версия не хуже, ничего не меняли.
+
+        ``force`` — не сверять ревизии (решение о приёме уже принято
+        вызывающим: см. ConfigReplicator, пассивные пакеты, где источник
+        авторитетен и после его пересборки ревизия начинается заново).
 
         Несовпадение хеша с содержимым — признак порчи в пути: такой пакет не
         применяется вовсе, лучше остаться на прежних настройках, чем поднять
@@ -291,7 +295,7 @@ class InstanceStore:
             )
             return False
         local = self.read_meta(meta.service, meta.instance)
-        if not meta.wins_over(local):
+        if not force and not meta.wins_over(local):
             return False
         if local is not None and local.rev == meta.rev and local.hash != meta.hash:
             log.warning(

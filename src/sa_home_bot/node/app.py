@@ -19,6 +19,7 @@ import socket
 from collections.abc import Awaitable, Callable, Sequence
 
 from sa_home_bot import __version__
+from sa_home_bot.backup.identity import replicator_hooks as identity_replicator_hooks
 from sa_home_bot.config import Settings, SwarmNodeConfig
 from sa_home_bot.node import assignments as assignments_mod
 from sa_home_bot.node import update as node_update
@@ -573,17 +574,22 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
     # Пакеты настроек лежат рядом с config.toml; без файлового конфига их
     # попросту негде держать — тогда репликации нет (и она не нужна).
     packages_dir = instances_dir(config_path)
-    replicator = (
-        ConfigReplicator(
+    replicator = None
+    if packages_dir is not None:
+        package_store = InstanceStore(packages_dir, node_id)
+        replicator = ConfigReplicator(
             node_id,
-            InstanceStore(packages_dir, node_id),
+            package_store,
             supervisor=supervisor,
             router=router,
             emit=emit,
+            # Бэкап identity vpn-сервера у напарника (39.0.8(b)); без
+            # [backup].partner — пустой набор, поведение прежнее.
+            **identity_replicator_hooks(
+                settings, package_store, node_id,
+                vpn_assigned=assignments_mod.has_service(effective_assignments, "vpn"),
+            ),
         )
-        if packages_dir is not None
-        else None
-    )
     lease = LeaseManager(
         node_id,
         settings.node.kind,

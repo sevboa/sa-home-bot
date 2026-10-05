@@ -2976,11 +2976,50 @@ PublicKey = <ключ jeeves>` + `Endpoint = <IP jeeves>` — невалидно
     версией), генерация пары ключей CLI-командой, конфиг: публичный ключ
     получателя у vpn-нод, приватный — у alfred; `cryptography` в явные
     зависимости.
-  - ⬜ **(b) статическая identity** — пакет `vpn.<node>`: приватный ключ awg
-    и параметры обфускации из `awg0.conf` `[Interface]`, Reality-ключи
-    xray, секции `[vpn]`/`[vpn.reality]`; запечатан до публикации,
-    реплицируется `ConfigReplicator` пассивно напарнику (без
-    active/standby-промоушена).
+  - ✅ **(b) статическая identity, 2026-10-05.** Пакет репликации
+    `vpn-identity.<нода>.toml` в `instances/` (служба `vpn-identity`, инстанс =
+    id ноды-источника; `IDENTITY_SERVICE`): TOML-конверт `format =
+    "sa-home-bot/vpn-identity/1"`, `source`, `sealed` (base64 блоба `sealed.seal`).
+    Открытый текст — канонический JSON (`canonical_bytes`): `awg` (`interface`,
+    `private_key` из `sudo -n awg show <iface> private-key` — укладывается в
+    существующий sudoers `awg show *`, новый метод `RealAwgBackend.server_private_key`;
+    `obfuscation` jc/jmin/jmax/s1/s2/h1-h4 из `[vpn]`), `reality` (`private_key`,
+    `short_ids` из xray-конфига, `[backup].xray_config`), `config` (`vpn` без
+    reality + `vpn_reality`). Пиры/клиенты xray НЕ входят (это (c)).
+    Код: `backup/identity.py` — `collect_identity`, `canonical_bytes`,
+    `render_package`/`parse_package(data) -> (source, blob)`,
+    `open_identity(priv, blob) -> dict` (для (d) на alfred), `IdentityPublisher.
+    publish_if_changed()`, `replicator_hooks(settings, store, node_id, vpn_assigned=)`
+    (подключается в `node/app.py`). Ревизия растёт только при смене открытого
+    текста: sha256 текста — в сайдкаре `vpn-identity.<нода>.src.json`, блоб не
+    пересобирается при том же тексте. Сбор упал (нет xray/sudo) — прежний пакет
+    остаётся, частичная identity не публикуется.
+    Конфиг: `[backup].partner` (id напарника; ставить на ОБЕИХ нодах пары,
+    jeeves->"wooster", wooster->"jeeves"; пусто = ни публикации, ни приёма),
+    `[backup].recipient_public_key` (публикация), `[backup].xray_config`
+    (по умолчанию `~/.config/xray/config.json`). Публикует нода, где назначена
+    служба `vpn` и заданы ключ+partner.
+    **Как ложится на `ConfigReplicator`:** три необязательных параметра
+    конструктора (без них поведение прежнее, тесты telegram-bot не менялись):
+    `passive(service, instance) -> bool` — «копия нужна, хотя инстанс не назначен»
+    (слота у службы нет => ни промоушена, ни рестарта; принимается только пакет
+    `vpn-identity.<partner>`); `before_announce()` — хук перед `refresh_all`, пишет
+    файл пакета, дальше стандартное объявление `instance_config_changed` (только
+    meta, секрет не в broadcast, пакет едет адресным `get_instance_config`);
+    `on_applied(meta, data)` — после приёма кладёт копию в `BackupStore`.
+    Для пассивных пакетов источник авторитетен: при `origin_node == instance`
+    приём решает не номер ревизии, а смена хеша + более свежий `updated_at`
+    (пересобранный jeeves начинает с rev 1 и всё равно должен перекрыть копию);
+    для этого `InstanceStore.apply(..., force=)`.
+    **Хранение у напарника** (`backup/store.py::BackupStore`, корень
+    `<каталог node-state.json>/backups` = `data/backups`, `backups_dir(state_path)`):
+    `<нода>/identity.sealed` (сырой блоб, 0600), `<нода>/identity.meta.json`
+    (`source, rev, hash, updated_at, stored_at`), `<нода>/history/identity.<stored_at>.sealed`
+    (+`.meta.json`, последние `HISTORY_KEEP`=5 — чтобы свежая identity пересобранного
+    сервера не затёрла копию, ради которой всё затевалось); `load_identity(node)
+    -> StoredIdentity(blob, meta)`. Сюда же (c) кладёт `<нода>/snapshots/…`.
+    Параллельно та же копия лежит в `instances/vpn-identity.<src>.toml` (носитель
+    репликации). Тесты: `tests/unit/test_backup_identity.py`.
   - ⬜ **(c) динамический снапшот** — дамп `vpn_peers`, `vpn_counters`,
     `vpn_peer_usage`, `vpn_chat_access`, `vpn_quota_*`, запечатан, адресно
     напарнику раз в час и после `issue`/`revoke`/`grant_extra`; у

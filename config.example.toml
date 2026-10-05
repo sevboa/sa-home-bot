@@ -610,6 +610,14 @@ format = "plain"                   # plain | json
 [backup]
 recipient_public_key = ""          # vpn-ноды: base64 публичного ключа получателя (alfred)
 private_key_file = ""              # alfred: путь к приватному ключу, права 0600
+# Бэкап identity vpn-сервера (39.0.8(b)). Нода со службой vpn, непустым
+# recipient_public_key и partner собирает приватный ключ awg + Reality-ключи +
+# секции [vpn]/[vpn.reality], запечатывает и реплицирует напарнику (пакет
+# `vpn-identity.<node>`, ConfigReplicator). Напарник лишь хранит копию в
+# <каталог node-state>/backups/<node>/identity.sealed — без применения/рестартов.
+# Прописывать на ОБЕИХ нодах пары: jeeves -> "wooster", wooster -> "jeeves".
+partner = ""
+xray_config = "~/.config/xray/config.json"   # откуда брать Reality privateKey/shortIds
 
 # --- Подписки (тихих часов нет) ---
 

@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Awaitable, Callable
 
 from sa_home_bot.node.assignments import Assignment
 from sa_home_bot.node.instances import (
@@ -83,6 +84,9 @@ class ConfigReplicator:
         router: NodeRouter | None,
         emit: EventEmitter,
         poll_interval_s: float = POLL_INTERVAL_S,
+        passive: Callable[[str, str], bool] | None = None,
+        before_announce: Callable[[], Awaitable[object]] | None = None,
+        on_applied: Callable[[InstanceMeta, bytes], None] | None = None,
     ) -> None:
         self._node_id = node_id
         self._store = store
@@ -91,6 +95,14 @@ class ConfigReplicator:
         self._emit = emit
         self._poll_interval_s = poll_interval_s
         self._task: asyncio.Task | None = None
+        # Пассивные пакеты (бэкап identity vpn-сервера, 39.0.8(b)): нам нужна
+        # копия, но инстанс нам НЕ назначен — ни промоушена, ни рестартов
+        # (слота у службы нет, _apply_to_running_service молчит). Источник
+        # такого пакета авторитетен: пересобранная нода начинает ревизии
+        # заново, и её свежий пакет обязан побеждать «старшую» копию у соседа.
+        self._passive = passive
+        self._before_announce = before_announce
+        self._on_applied = on_applied
 
     # --- что нас касается ---------------------------------------------------
 
@@ -106,8 +118,22 @@ class ConfigReplicator:
     def _cares_about(self, service: str, instance: str) -> bool:
         """Наш ли это пакет. Сателлит (``<инстанс>.guests``) принадлежит
         своему хозяину: назначен инстанс — значит нужны и его спутники."""
+        if self._passive is not None and self._passive(service, instance):
+            return True
         base = base_instance(instance)
         return any(a.service == service and a.instance == base for a in self._my_instances())
+
+    def _is_passive(self, service: str, instance: str) -> bool:
+        return self._passive is not None and self._passive(service, instance)
+
+    def _wins(self, meta: InstanceMeta, local: InstanceMeta | None) -> bool:
+        """Принимать ли ревизию соседа. Для пассивного пакета, присланного его
+        собственным источником, — по содержимому и времени, а не по номеру."""
+        if self._is_passive(meta.service, meta.instance) and meta.origin_node == meta.instance:
+            if local is None:
+                return True
+            return meta.hash != local.hash and meta.updated_at > local.updated_at
+        return meta.wins_over(local)
 
     def local_revisions(self) -> list[dict]:
         """Ревизии наших пакетов — этим нода отвечает на get_state."""
@@ -117,6 +143,11 @@ class ConfigReplicator:
 
     async def announce_local_changes(self) -> list[InstanceMeta]:
         """Заметить правки владельца и объявить их рою."""
+        if self._before_announce is not None:
+            try:
+                await self._before_announce()
+            except Exception:  # сбор бэкапа не должен ломать репликацию
+                log.exception("Репликация: ошибка подготовки локальных пакетов")
         changed = self._store.refresh_all()
         for meta in changed:
             await self._emit(EVENT_INSTANCE_CONFIG_CHANGED, meta.to_dict())
@@ -142,7 +173,7 @@ class ConfigReplicator:
         if not self._cares_about(meta.service, meta.instance):
             return
         local = self._store.read_meta(meta.service, meta.instance)
-        if not meta.wins_over(local):
+        if not self._wins(meta, local):
             return
         source = meta.origin_node or (env.src.node if env.src else "")
         if not source or source == self._node_id:
@@ -157,8 +188,7 @@ class ConfigReplicator:
         """
         if self._router is None:
             return
-        wanted = self._my_instances()
-        if not wanted:
+        if not self._my_instances() and self._passive is None:
             return
         for peer_id, link in list(self._router.peers.items()):
             if not link.alive:
@@ -171,7 +201,7 @@ class ConfigReplicator:
                 if not self._cares_about(meta.service, meta.instance):
                     continue
                 local = self._store.read_meta(meta.service, meta.instance)
-                if meta.wins_over(local):
+                if self._wins(meta, local):
                     await self._pull(meta, peer_id)
 
     async def _peer_state(self, peer_id: str, link) -> dict | None:
@@ -225,7 +255,17 @@ class ConfigReplicator:
         if not isinstance(content, str):
             return
         remote_meta = InstanceMeta.from_dict(payload.get("meta", meta.to_dict()))
-        if self._store.apply(remote_meta, _decode_package(content)):
+        data = _decode_package(content)
+        local = self._store.read_meta(remote_meta.service, remote_meta.instance)
+        force = self._is_passive(remote_meta.service, remote_meta.instance) and self._wins(
+            remote_meta, local
+        )
+        if self._store.apply(remote_meta, data, force=force):
+            if self._on_applied is not None:
+                try:
+                    self._on_applied(remote_meta, data)
+                except Exception:
+                    log.exception("Репликация: ошибка обработки принятого пакета")
             await self._apply_to_running_service(remote_meta)
 
     async def _apply_to_running_service(self, meta: InstanceMeta) -> None:

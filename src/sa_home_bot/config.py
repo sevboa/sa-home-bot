@@ -1186,6 +1186,12 @@ class BackupConfig(BaseModel):
 
     recipient_public_key: str = ""  # base64, 32 байта; задаётся на vpn-нодах
     private_key_file: str = ""  # путь к приватному ключу (0600); задаётся только на alfred
+    # Напарник по бэкапу (id ноды роя): jeeves -> "wooster" и наоборот. Симметрично:
+    # свою запечатанную identity нода публикует напарнику И пассивно хранит его.
+    # Пусто = бэкап identity не делается и чужой не принимается (39.0.8(b)).
+    partner: str = ""
+    # xray-конфиг этой ноды — оттуда берутся Reality privateKey/shortIds.
+    xray_config: str = "~/.config/xray/config.json"
 
 
 class LoggingConfig(BaseModel):

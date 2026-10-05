@@ -107,6 +107,11 @@ class RealAwgBackend:
     async def server_public_key(self) -> str:
         return (await self._sudo_awg("show", self._interface, "public-key")).strip()
 
+    async def server_private_key(self) -> str:
+        """Приватный ключ сервера — только для бэкапа identity (backup/identity.py).
+        Укладывается в существующий sudoers ``awg show *``."""
+        return (await self._sudo_awg("show", self._interface, "private-key")).strip()
+
     async def add_peer(self, public_key: str, address: str) -> None:
         await self._sudo_awg(
             "set", self._interface, "peer", public_key, "allowed-ips", f"{address}/32"
