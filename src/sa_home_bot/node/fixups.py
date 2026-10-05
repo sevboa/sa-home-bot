@@ -625,6 +625,233 @@ def make_awg_sudoers_fixup(settings: Settings) -> Fixup:
     )
 
 
+# --- awg-сервер на ноде с ufw (wooster, 39.0.8(f); раньше делалось руками,
+# см. 39.0.3) ---
+#
+# jeeves — чистый nftables без ufw: порт открыт в /etc/nftables.conf, а
+# forward/NAT поднимает PostUp awg0.conf (setup-awg-jeeves.sh). На wooster
+# firewall — ufw, а `ip filter`/`ip nat` принадлежат tailscaled/ufw, и
+# iptables-nft PostUp туда не пишет ("chain FORWARD is incompatible"), поэтому
+# нужны (1) правило ufw на UDP-порт и (2) systemd-юнит, переигрывающий
+# forward+NAT+MSS-clamp через nft при каждом старте. Оба фикса применимы
+# ТОЛЬКО при активном ufw — на jeeves (ufw нет) они не нужны и не трогают
+# ничего. nft-ловушка jeeves (policy-drop chain forward, restart tailscaled
+# стирает NAT) здесь не затрагивается: юнит правит только `ip filter`/`ip nat`.
+
+
+def _ufw_status_text() -> str | None:
+    """Вывод ``sudo -n ufw status``; ``None`` — ufw не установлен или статус не
+    прочитался (нет беспарольного sudo): не знаем."""
+    ufw = _which("ufw")
+    if ufw is None:
+        return None
+    try:
+        result = subprocess.run(["sudo", "-n", ufw, "status"], capture_output=True, text=True)
+    except OSError:
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def _ufw_active(text: str) -> bool | None:
+    """True/False по первой строке ``Status: active|inactive``; None — не разобрали."""
+    first = text.strip().splitlines()[0].lower() if text.strip() else ""
+    if "inactive" in first or "неактивен" in first:
+        return False
+    if "active" in first or "активен" in first:
+        return True
+    return None
+
+
+def _ufw_state() -> str | None:
+    """``"active"``/``"inactive"``; ``None`` — ufw нет или статус не прочитался."""
+    text = _ufw_status_text()
+    if text is None:
+        return None
+    active = _ufw_active(text)
+    return None if active is None else ("active" if active else "inactive")
+
+
+def _awg_ufw_needed(settings: Settings) -> bool:
+    """Нужен только там, где ufw есть и не выключен. Статус не прочитался, но
+    ufw установлен — считаем нужным (check скажет "не применено", apply
+    спросит sudo; ufw при этом НЕ включается)."""
+    if not _vpn_awg_needed(settings) or _which("ufw") is None:
+        return False
+    return _ufw_state() != "inactive"
+
+
+def _ufw_allows_udp_port(status_text: str, port: int) -> bool:
+    for line in status_text.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "ALLOW" and parts[0] in (f"{port}/udp", str(port)):
+            return True
+    return False
+
+
+def _awg_ufw_check(settings: Settings) -> bool:
+    text = _ufw_status_text()
+    if text is None or _ufw_active(text) is not True:
+        return False
+    return _ufw_allows_udp_port(text, settings.vpn.endpoint_port)
+
+
+def _awg_ufw_apply(settings: Settings) -> None:
+    ufw = _which("ufw")
+    if ufw is None:
+        raise FixupError("ufw не найден")
+    port = settings.vpn.endpoint_port
+    comment = f"amneziawg {settings.vpn.interface} server (sa-home vpn)"
+    _sudo([ufw, "allow", f"{port}/udp", "comment", comment])
+
+
+def make_awg_ufw_fixup(settings: Settings) -> Fixup:
+    return Fixup(
+        id="awg-ufw-port",
+        title=f"ufw: открыть UDP-порт awg-сервера ({settings.vpn.endpoint_port}/udp)",
+        needed=_awg_ufw_needed,
+        check=lambda: _awg_ufw_check(settings),
+        apply=lambda: _awg_ufw_apply(settings),
+    )
+
+
+def _awg_forward_names(interface: str) -> tuple[Path, Path]:
+    return (
+        Path(f"/usr/local/lib/sa-home-bot/{interface}-forward-reapply.sh"),
+        Path(f"/etc/systemd/system/sa-home-{interface}-forward.service"),
+    )
+
+
+def _default_route_iface() -> str | None:
+    """Внешний интерфейс — по маршруту по умолчанию (``ip -4 route show default``)."""
+    ip = _which("ip") or "ip"
+    try:
+        result = subprocess.run(
+            [ip, "-4", "route", "show", "default"], capture_output=True, text=True
+        )
+    except OSError:
+        return None
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if "dev" in parts and parts.index("dev") + 1 < len(parts):
+            return parts[parts.index("dev") + 1]
+    return None
+
+
+def awg_forward_script_content(interface: str, subnet: str, out_iface: str, mtu: int) -> str:
+    mss = mtu - 40  # MTU - 20 IP - 20 TCP
+    fwd = "nft list chain ip filter FORWARD 2>/dev/null"
+    nat = "nft list chain ip nat POSTROUTING 2>/dev/null"
+    return (
+        "#!/bin/sh\n"
+        "# sa-home-bot: сгенерировано nodectl fix (39.0.8(f)) — forward+NAT для\n"
+        f"# VPN-сервера {interface}; nft-правила ребут не переживают, переигрываем\n"
+        "# при каждом старте. Идемпотентно (grep перед add).\n"
+        "set -e\n"
+        "wait_table() {\n"
+        "  i=0\n"
+        "  while [ $i -lt 60 ]; do\n"
+        '    nft list table "$1" "$2" >/dev/null 2>&1 && return 0\n'
+        "    i=$((i + 1))\n"
+        "    sleep 1\n"
+        "  done\n"
+        "  return 1\n"
+        "}\n"
+        "wait_table ip filter\n"
+        "wait_table ip nat\n"
+        f'{fwd} | grep -qF "iifname \\"{interface}\\" accept" '
+        f"|| nft add rule ip filter FORWARD iifname {interface} accept\n"
+        f'{fwd} | grep -qF "oifname \\"{interface}\\" accept" '
+        f"|| nft add rule ip filter FORWARD oifname {interface} accept\n"
+        f'{nat} | grep -qF "ip saddr {subnet} oifname \\"{out_iface}\\" masquerade" '
+        f"|| nft add rule ip nat POSTROUTING ip saddr {subnet} "
+        f"oifname {out_iface} masquerade\n"
+        "# MSS-clamp (path MTU из РФ, см. 39.0.3); insert — до терминирующих accept.\n"
+        f'if ! {fwd} | grep -qF "maxseg size set {mss}"; then\n'
+        + "".join(
+            f"  nft insert rule ip filter FORWARD {d}ifname {interface} tcp flags syn / syn,rst "
+            f"tcp option maxseg size gt {mss} tcp option maxseg size set {mss}\n"
+            for d in ("o", "i")
+        )
+        + "fi\n"
+    )
+
+
+def awg_forward_unit_content(interface: str, script_path: Path) -> str:
+    return (
+        "[Unit]\n"
+        f"Description=sa-home-bot: forward/NAT для VPN-сервера {interface} (переживает ребут)\n"
+        f"After=network-online.target awg-quick@{interface}.service "
+        "ufw.service tailscaled.service\n"
+        "Wants=network-online.target\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "RemainAfterExit=yes\n"
+        f"ExecStart=/bin/sh {script_path}\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+
+
+def _awg_forward_needed(settings: Settings) -> bool:
+    """Только на ноде с АКТИВНЫМ ufw (там PostUp через iptables-nft не
+    работает). jeeves (nftables без ufw) и ноды без ufw — не наше дело."""
+    return _vpn_awg_needed(settings) and _ufw_state() == "active"
+
+
+def _awg_forward_check(settings: Settings) -> bool:
+    """Юнит есть и активен — признаём применённым, СОДЕРЖИМОЕ не сверяем: на
+    wooster он поставлен вручную (скрипт чуть отличается) и перезаписывать
+    рабочее ради косметики незачем."""
+    _, unit = _awg_forward_names(settings.vpn.interface)
+    if not _privileged_exists(unit):
+        return False
+    return subprocess.run(["systemctl", "is-active", "--quiet", unit.name]).returncode == 0
+
+
+def _awg_forward_apply(settings: Settings) -> None:
+    interface = settings.vpn.interface
+    script, unit = _awg_forward_names(interface)
+    out_iface = _default_route_iface()
+    if out_iface is None:
+        raise FixupError("не определён внешний интерфейс (нет маршрута по умолчанию)")
+    _ensure_ip_forward()
+    files = [
+        (
+            script,
+            awg_forward_script_content(interface, settings.vpn.subnet, out_iface, settings.vpn.mtu),
+            "0755",
+            ".sh",
+        ),
+        (unit, awg_forward_unit_content(interface, script), "0644", ".service"),
+    ]
+    for path, content, mode, suffix in files:
+        if _privileged_exists(path):
+            continue  # рабочий файл (в т.ч. поставленный руками) не перетираем
+        with tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
+        try:
+            _sudo(
+                ["install", "-D", "-m", mode, "-o", "root", "-g", "root", str(tmp_path), str(path)]
+            )
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    _sudo(["systemctl", "daemon-reload"])
+    _sudo(["systemctl", "enable", "--now", unit.name])
+
+
+def make_awg_forward_fixup(settings: Settings) -> Fixup:
+    return Fixup(
+        id="awg-forward-persist",
+        title=f"Пережить перезагрузку: nft forward/NAT для {settings.vpn.interface} (systemd-юнит)",
+        needed=_awg_forward_needed,
+        check=lambda: _awg_forward_check(settings),
+        apply=lambda: _awg_forward_apply(settings),
+    )
+
+
 # --- vpn_check: клиентские туннели-пробники (netns + veth + NAT, сам
 # туннель — эфемерно) ---
 #
@@ -2307,6 +2534,8 @@ def build_fixups(settings: Settings) -> list[Fixup]:
         POWER_CONTROL_POLKIT,
         WOL_ENABLE,
         make_awg_sudoers_fixup(settings),
+        make_awg_ufw_fixup(settings),
+        make_awg_forward_fixup(settings),
     ]
     if _vpn_check_needed(settings):
         slots = _discover_probe_slots(settings)

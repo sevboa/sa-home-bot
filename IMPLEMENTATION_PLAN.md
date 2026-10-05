@@ -2527,7 +2527,8 @@ PublicKey = <ключ jeeves>` + `Endpoint = <IP jeeves>` — невалидно
   end-to-end, пир реально появляется/уходит на awg0, `server="wooster"`
   проставляется. Тестового клиента не гоняли, но 2026-09-06 гость
   188548043 уже выпустил рабочий конфиг с wooster (`server="wooster"`).
-  **TODO:** кодифицировать ufw/persist-шаги в фиксап (сейчас вручную).
+  ✅ ufw/persist-шаги кодифицированы в фиксапы `awg-ufw-port` и
+  `awg-forward-persist` — см. 39.0.8(f).
   - ✅ **MTU/MSS-фикс, 2026-09-06 (v0.101.3)** — жалоба из РФ (гость
     348284076, конфиг `dahlia`): хендшейк с wooster проходит, а сайты не
     грузятся; из КЗ тот же сервер работает. Причина — path MTU: `awg0` был
@@ -3148,7 +3149,17 @@ PublicKey = <ключ jeeves>` + `Endpoint = <IP jeeves>` — невалидно
     недоступен»). Карточка `/vpn`: «• 🔧 «Rose» не отвечает — сервер его не помнит,
     перевыпустите»; кнопка «🔄 Перевыпустить» у устройства уже есть. Нужен деплой
     на vpn-ноды (миграция + поле `broken`); до раската бот просто не видит поле.
-  - ⬜ **(f) фиксап ufw/persist для wooster** — TODO из 39.0.3.
+  - ✅ **(f) фиксапы ufw/persist для awg, 2026-10-05** — TODO из 39.0.3 закрыт.
+    `node/fixups.py`: `awg-ufw-port` (`ufw allow <[vpn].endpoint_port>/udp`; check —
+    правило есть в `sudo -n ufw status`) и `awg-forward-persist` (скрипт
+    `/usr/local/lib/sa-home-bot/<iface>-forward-reapply.sh` + юнит
+    `sa-home-<iface>-forward.service`: forward, NAT подсети `[vpn].subnet` через
+    внешний интерфейс по маршруту по умолчанию, MSS-clamp от `[vpn].mtu`; check —
+    юнит есть и active, содержимое не сверяется, готовые файлы не перезаписываются).
+    Оба нужны только при `vpn` с транспортом awg И активном ufw; без ufw (jeeves,
+    чистый nftables) и при inactive ufw не появляются в списке вовсе. ufw не
+    включается. `awg-sudoers` менять не пришлось: на wooster mtg/microsocks теперь
+    есть, `nodectl fix` ставит его сам.
   - ⬜ **(g) деплой** jeeves → wooster → alfred (только после явного
     подтверждения владельца), проверка: бэкап виден у напарника, dry-run
     восстановления даёт тот же ключ сервера.

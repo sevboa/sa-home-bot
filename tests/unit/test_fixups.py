@@ -1309,3 +1309,116 @@ def test_proxy_firewall_needed_with_inet_filter_or_unreadable_nft(monkeypatch):
     assert fixups_module._proxy_firewall_needed(_settings(["vpn"]))
     monkeypatch.setattr(fixups_module, "_nft_output", lambda argv: None)
     assert fixups_module._proxy_firewall_needed(_settings(["vpn"]))
+
+
+# --- 39.0.8(f): ufw-порт и persist forward/NAT для awg на ноде с ufw ---
+
+_UFW_WOOSTER = (
+    "Status: active\n\nTo        Action      From\n--        ------      ----\n"
+    "41641/udp                  ALLOW       Anywhere                   # tailscale\n"
+    "443/udp                    ALLOW       Anywhere                   # awg\n"
+)
+_UFW_CLEAN = "Status: active\n\n41641/udp   ALLOW   Anywhere\n"
+
+
+def _awg_settings(port: int = 443) -> Settings:
+    s = _settings(["vpn"])
+    s.vpn.endpoint_port = port
+    return s
+
+
+def _patch_ufw(monkeypatch, text):
+    which = (lambda name: None) if text is None else (lambda name: f"/usr/sbin/{name}")
+    monkeypatch.setattr(fixups_module, "_which", which)
+    monkeypatch.setattr(fixups_module, "_ufw_status_text", lambda: text)
+
+
+def test_awg_ufw_check_true_on_wooster_like_state(monkeypatch):
+    _patch_ufw(monkeypatch, _UFW_WOOSTER)
+    fx = fixups_module.make_awg_ufw_fixup(_awg_settings(443))
+    assert fx.needed(_awg_settings(443)) and fx.check()
+
+
+def test_awg_ufw_apply_adds_rule_on_clean_ufw_node(monkeypatch):
+    _patch_ufw(monkeypatch, _UFW_CLEAN)
+    calls = []
+    monkeypatch.setattr(fixups_module, "_sudo", lambda argv: calls.append(argv))
+    settings = _awg_settings(51820)
+    fx = fixups_module.make_awg_ufw_fixup(settings)
+    assert fx.needed(settings) and not fx.check()
+    fx.apply()
+    assert calls[0][:3] == ["/usr/sbin/ufw", "allow", "51820/udp"]
+
+
+def test_awg_ufw_and_forward_not_needed_without_ufw_jeeves_like(monkeypatch):
+    _patch_ufw(monkeypatch, None)
+    settings = _awg_settings(51820)
+    assert not fixups_module.make_awg_ufw_fixup(settings).needed(settings)
+    assert not fixups_module.make_awg_forward_fixup(settings).needed(settings)
+    ids = {f.id for f in build_fixups(settings)}
+    assert "awg-ufw-port" not in ids and "awg-forward-persist" not in ids
+
+
+def test_awg_ufw_not_needed_when_ufw_inactive(monkeypatch):
+    _patch_ufw(monkeypatch, "Status: inactive\n")
+    settings = _awg_settings()
+    assert not fixups_module.make_awg_ufw_fixup(settings).needed(settings)
+    assert not fixups_module.make_awg_forward_fixup(settings).needed(settings)
+
+
+def test_awg_fixups_skip_node_without_awg(monkeypatch):
+    _patch_ufw(monkeypatch, _UFW_WOOSTER)
+    ids = {f.id for f in build_fixups(_settings([]))}
+    assert "awg-ufw-port" not in ids and "awg-forward-persist" not in ids
+    reality = _settings(["vpn"])
+    reality.vpn.transports = ["reality"]
+    ids = {f.id for f in build_fixups(reality)}
+    assert "awg-ufw-port" not in ids and "awg-forward-persist" not in ids
+
+
+def test_awg_forward_check_true_when_unit_present_and_active(monkeypatch):
+    _patch_ufw(monkeypatch, _UFW_WOOSTER)
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
+    monkeypatch.setattr(
+        fixups_module.subprocess, "run", lambda argv, **kw: type("R", (), {"returncode": 0})()
+    )
+    settings = _awg_settings()
+    fx = fixups_module.make_awg_forward_fixup(settings)
+    assert fx.needed(settings) and fx.check()
+
+
+def test_awg_forward_apply_installs_script_and_unit_on_clean_node(monkeypatch):
+    _patch_ufw(monkeypatch, _UFW_CLEAN)
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: False)
+    monkeypatch.setattr(fixups_module, "_default_route_iface", lambda: "eth0")
+    monkeypatch.setattr(fixups_module, "_ensure_ip_forward", lambda: None)
+    calls = []
+    monkeypatch.setattr(fixups_module, "_sudo", lambda argv: calls.append(argv))
+    settings = _awg_settings()
+    fx = fixups_module.make_awg_forward_fixup(settings)
+    assert not fx.check()
+    fx.apply()
+    installed = [c[-1] for c in calls if c[0] == "install"]
+    assert installed == [
+        "/usr/local/lib/sa-home-bot/awg0-forward-reapply.sh",
+        "/etc/systemd/system/sa-home-awg0-forward.service",
+    ]
+    assert ["systemctl", "enable", "--now", "sa-home-awg0-forward.service"] in calls
+
+
+def test_awg_forward_apply_does_not_overwrite_existing_files(monkeypatch):
+    _patch_ufw(monkeypatch, _UFW_WOOSTER)
+    monkeypatch.setattr(fixups_module, "_privileged_exists", lambda path: True)
+    monkeypatch.setattr(fixups_module, "_default_route_iface", lambda: "eth0")
+    monkeypatch.setattr(fixups_module, "_ensure_ip_forward", lambda: None)
+    calls = []
+    monkeypatch.setattr(fixups_module, "_sudo", lambda argv: calls.append(argv))
+    fixups_module.make_awg_forward_fixup(_awg_settings()).apply()
+    assert not [c for c in calls if c[0] == "install"]
+
+
+def test_awg_forward_script_content_rules():
+    text = fixups_module.awg_forward_script_content("awg0", "10.9.0.0/24", "eth0", 1280)
+    assert "nft add rule ip filter FORWARD iifname awg0 accept" in text
+    assert "ip saddr 10.9.0.0/24 oifname eth0 masquerade" in text
+    assert "maxseg size set 1240" in text
