@@ -3054,10 +3054,90 @@ PublicKey = <ключ jeeves>` + `Endpoint = <IP jeeves>` — невалидно
     `service.backup`, `start/stop`), `vpn/service.py` (атрибут `backup`, объявление
     действий в `describe`, `run_command` стал обёрткой над `_run_command`).
     Тесты: `tests/unit/test_backup_snapshot.py` (14).
-  - ⬜ **(d) восстановление** — `nodectl`-команда на alfred: забрать
-    бэкап у напарника, расшифровать, применить на пересобранной ноде (тот
-    же `node_id`/IP) ДО генерации нового keypair; dry-run в каталог;
-    процедура в README/плане.
+  - ✅ **(d) восстановление, 2026-10-05** (не задеплоено).
+    **Отдача копий напарником** (`backup/serve.py`, в службе `vpn` ноды-хранителя,
+    объявляется при `[backup].partner`, роутит `SnapshotBackup.handle`): действия
+    `backup_store_list {node}` → `{identity:[{label,meta}], snapshot:[{label,meta}]}`
+    и `backup_store_get {node, kind=identity|snapshot, label=latest}` →
+    `{kind, label, meta, sealed(base64)}`. Метки: identity — `latest` и штамп из
+    history; снапшот — `latest`, `last_nonempty`, штамп из history (метка сверяется
+    со списком файлов, путь из запроса не строится). Отдаётся только копия
+    `[backup].partner`. Звать может любой участник роя с токеном — допустимо:
+    блобы запечатаны на ключ alfred, открыты лишь метаданные. Отказы — читаемый
+    `ProtoError(bad_request)`. `BackupStore`: `identity_versions/snapshot_versions/
+    read_identity/read_snapshot`.
+    **Команды alfred** (`backup_cli.py`, `backup/restore.py`; нужен config alfred:
+    `[backup].private_key_file` + своя нода роя):
+    `sa-home-bot backup list <нода> [--holder X]` — версии у напарника (дата, число
+    пиров, `ПУСТОЙ`); `sa-home-bot backup restore <нода> --dry-run <каталог>` —
+    забрать, расшифровать, разложить `identity.json`/`snapshot.json`/`meta.json`/
+    `summary.txt` (каталог 0700, файлы 0600, непустой каталог — отказ; ноды не
+    трогаются; сводка печатает публичный ключ awg-сервера — сравнить с `PublicKey` в
+    гостевом конфиге — и отпечатки секретов, не сами секреты);
+    `sa-home-bot backup restore <нода> --apply [--snapshot last_nonempty|latest|<метка>]
+    [--identity <метка>] [--no-snapshot] [--ssh-host H] [--wipe-db] [--yes]`.
+    Выбор снапшота: по умолчанию `latest`, но пустой `latest` при наличии
+    `last_nonempty` — отказ с подсказкой (`pick_snapshot`). Хранитель по
+    умолчанию — первый живой пир с копией (`--holder` явно).
+    **Канал до цели — ssh** (а не команда по рою): расшифрованная identity — приватные
+    ключи сервера, а токен роя знает каждая нода; кроме того привилегированный шаг
+    (запись `awg0.conf` под root) в любом случае требует интерактивного sudo на самой
+    цели, как у `nodectl fix`, а это возможно только в ssh-сессии с tty. Два вызова:
+    `ssh H ~/.local/bin/nodectl restore-stage` (бандл со stdin → `<каталог node-state>/
+    restore-bundle.json`, 0600) и `ssh -t H nodectl restore-apply --yes`
+    (бандл удаляется после успеха). Вручную после `--dry-run`:
+    `nodectl restore-apply --bundle <каталог>` на цели.
+    **Применение на цели** (`backup/apply.py::apply_bundle`, `nodectl restore-apply
+    [--bundle P] [--yes] [--wipe-db]`): предусловия до первой записи (`[node].id` ==
+    бандл, БД пуста либо `--wipe-db`); (1) `awg0.conf` — `PrivateKey` + `Jc..H4` в
+    `[Interface]` на месте (файла нет — минимальный); (2) Reality — `/etc/sa-home-reality/
+    reality.env` + `privateKey/shortIds` в xray `config.json` (клиентов не трогаем);
+    (3) `config.toml`: таблицы `[vpn]`/`[vpn.reality]` заменяются (локальные
+    `socket/db_path/apk_cache_dir` остаются), прежний файл — `config.toml.pre-restore`;
+    (4) `vpn.sqlite`: миграции, `INSERT OR REPLACE` по именам колонок в одной
+    транзакции (неизвестные колонки пропускаются, `id` сохраняется), `vpn_counters` НЕ
+    вставляются; (5) рестарт уже запущенных `awg-quick@<iface>` (`sudo systemctl`) и
+    `xray.service` (user); службу vpn/ноду не трогаем; (6) маркер публикации.
+    **Как не перегенерировать ключи:** `nodectl fix` ключей сервера не создаёт вообще
+    (только sudoers/пакеты). Ключи рождают `deploy/setup-awg-jeeves.sh` и
+    `deploy/setup-reality-server.sh`, и оба УЖЕ сохраняют ключ/обфускацию из
+    существующих `awg0.conf` / `reality.env`. Поэтому restore можно делать как до
+    скриптов (они подхватят восстановленное), так и после (ключи заменятся на месте
+    + рестарт); скрипты не менялись.
+    **Sudo:** новых прав и sudoers-снипетов НЕ нужно — все привилегированные шаги
+    (`install -m0600 … /etc/…`, `cat`, `systemctl restart awg-quick@…`) идут через
+    интерактивный sudo в сессии `ssh -t`, как у `nodectl fix`; беспарольный sudo не
+    расширяется.
+    **Защита от затирания** (`backup/hold.py`): публикация идёт ТОЛЬКО при маркере
+    `backup-publish.ok` рядом с `node-state.json`. Нет маркера — `IdentityPublisher.
+    publish_if_changed` ничего не пишет (warning в лог), `backup_snapshot_get` отвечает
+    отказом; приём копий напарника работает. Маркер ставят `restore-apply` (после
+    успеха) и `nodectl backup-release` (новый сервер, которому нечего восстанавливать,
+    и ПЕРВЫЙ деплой бэкапа на живые jeeves/wooster). Выбрано вместо отказа напарника:
+    напарник не может расшифровать identity и сравнить ключи, а эвристика «ревизия
+    сбросилась» ненадёжна; маркер на цели работает без участия человека до первого
+    старта (на чистой ОС его просто нет).
+    **Процедура «VPS пересобран на том же IP»:**
+    1. Поставить sa-home-bot (pipx), `config.toml` с тем же `[node].id`, `[swarm]`,
+       `[backup].partner` и `recipient_public_key`; ноду НЕ запускать (маркера нет —
+       даже случайный старт ничего не опубликует). Сервисы awg/xray можно поставить
+       setup-скриптами до или после шага 3.
+    2. На alfred: `sa-home-bot backup list <нода>`, затем проверка без касания нод:
+       `sa-home-bot backup restore <нода> --dry-run ~/restore-check` (сверить число
+       пиров/ключ, потом `rm -r`).
+    3. `sa-home-bot backup restore <нода> --apply` (пустой `latest` → добавить
+       `--snapshot last_nonempty`), ввести пароль sudo на цели.
+    4. На цели: если ещё не ставили — `sudo ./setup-awg-jeeves.sh <iface> <порт>`
+       и/или `sudo ./setup-reality-server.sh` (ключи сохранятся), `nodectl fix`,
+       запустить ноду (`systemctl --user start sa-home-node`) — `reconcile()` вернёт
+       пиры awg и клиентов xray.
+    5. Проверка: `sudo awg show awg0 public-key` == публичный ключ из сводки;
+       `awg show` содержит пиры гостей; `/vpn` у гостя без перевыпуска; чекер vpn_check
+       зелёный; через цикл у напарника обновилась identity (маркер уже стоит).
+    Тесты: `tests/unit/test_backup_restore.py` (15): отдача и отказы, выбор снапшота,
+    dry-run (права, содержимое, нет секретов в сводке), применение к фейковым
+    `awg0.conf`/`config.json`/TOML/БД (id сохранён, counters нет), отказ чужой ноды и
+    непустой БД, защита от затирания, round-trip jeeves → хранилище wooster → restore.
   - ⬜ **(e) детектор сломанных устройств** — `/vpn` сверяет подключения
     гостя с живым списком пиров сервера и показывает «🔧 … —
     перевыпустите».

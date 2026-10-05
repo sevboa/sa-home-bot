@@ -203,6 +203,24 @@ WoL в BIOS/UEFI, «Wake on Magic Packet» в свойствах сетевог�
 выключен «быстрый запуск» (Fast Startup). Надёжно работает только по
 Ethernet-кабелю.
 
+### Восстановление vpn-сервера из бэкапа напарника
+
+jeeves и wooster хранят запечатанные копии друг друга (identity: ключ awg, обфускация,
+Reality; снапшот БД: пиры, квоты). Расшифровать их может только alfred. Если VPS
+пересобран на том же IP:
+
+1. Поставить sa-home-bot с тем же `[node].id`, ноду пока **не запускать** (до
+   восстановления она ничего не публикует: нет маркера `backup-publish.ok`).
+2. На alfred: `sa-home-bot backup list <нода>`; проверка без касания ноды —
+   `sa-home-bot backup restore <нода> --dry-run ~/restore-check`.
+3. `sa-home-bot backup restore <нода> --apply` (по ssh, пароль sudo — на цели; пустой
+   последний снапшот → `--snapshot last_nonempty`).
+4. На цели: `setup-awg-jeeves.sh`/`setup-reality-server.sh` (если ещё не ставили —
+   восстановленные ключи сохранятся), `nodectl fix`, запустить ноду.
+
+Новому серверу без истории публикацию включает `nodectl backup-release`. Подробно —
+IMPLEMENTATION_PLAN.md, этап 39.0.8(d).
+
 ## Права на SMART (диски)
 
 Чтение SMART требует root. Под пользовательской службой (`User=`, не root) есть
