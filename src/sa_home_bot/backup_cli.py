@@ -147,7 +147,12 @@ def _format_versions(listing: dict) -> str:
 async def _run_restore(args: argparse.Namespace) -> int:
     from sa_home_bot.backup import restore as rs
     from sa_home_bot.config import Settings
+    from sa_home_bot.nodectl import _default_config
 
+    # Без --config — конфиг по умолчанию, как у nodectl: иначе Settings.load(None)
+    # даёт дефолты (сокет ./data/node.sock, пустой [backup]) и связи с нодой нет.
+    if args.config is None:
+        args.config = _default_config()
     settings = Settings.load(args.config)
     client, ask, holder = await _open_ask(settings, args.config, args.holder, args.node)
     try:
