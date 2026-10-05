@@ -375,6 +375,56 @@ async def test_mood_picks_model_and_lora_for_scene_frames(store):
     assert "model" not in link.generated()[-1]
 
 
+def test_director_parses_alfred():
+    assert parse_decision(json.dumps({"alfred": "back"}), 0).alfred == "back"
+    assert parse_decision(json.dumps({"alfred": " Side "}), 0).alfred == "side"
+    for junk in ("front", "", 1, True, ["back"], None):
+        assert parse_decision(json.dumps({"alfred": junk}), 0).alfred is None
+    assert parse_decision("{}", 0).alfred is None
+    run = Run("radio", 1, 1)
+    text = build_director_input(radio.RADIO, run, finale_allowed=False, place="К", outside="ночь")
+    assert '"alfred"' in text
+
+
+def test_scene_description_with_alfred():
+    cab = cabinet.Cabinet(user_id=1, features=["f1", "f2", "f3"])
+    outside = Outside(phase="night", weather=None, local_time="00:00")
+    phrase = cabinet.SCENE_ALFRED_EN["back"]
+    description, _ = photo_description(cab, outside, "", "лампа вспыхнула", alfred="back")
+    # После главного, до особенностей; особенностей остаётся одна.
+    assert description.index("лампа вспыхнула") < description.index(phrase)
+    assert description.index(phrase) < description.index("f3")
+    assert "f2" not in description
+    description, _ = photo_description(cab, outside, "стол", None, alfred="side")
+    assert description.startswith("стол") and cabinet.SCENE_ALFRED_EN["side"] in description
+    description, _ = photo_description(cab, outside, "", "лампа вспыхнула", alfred="front")
+    assert "Alfred" not in description
+
+
+async def test_alfred_in_scene_frame(store):
+    link = FakeLink()
+    svc, _ = _make(store, link)
+    await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
+    await svc._state.save_run(Run("radio", GUEST, GUEST, status="active"))
+    await _scene_turn(
+        svc,
+        link,
+        {"stage": 0, "effect": "лампа вспыхнула", "mood": "гниль", "photo": True, "alfred": "back"},
+    )
+    gen = link.generated()[-1]
+    assert gen["loras"] == [["rottech", 0.8], list(cabinet.ALFRED_LORA)]
+    assert cabinet.SCENE_ALFRED_EN["back"] in gen["description"]
+    params = json.loads((await store.image_by_id(1))["params"])
+    assert params["alfred"] == "back"
+    cab = await cabinet.load(store, GUEST)
+    assert not cab.photos  # такие кадры в кэш повторного показа не идут
+    # Без поля — как раньше.
+    await _scene_turn(svc, link, {"stage": 1, "mood": "гниль", "photo": "стол"})
+    gen = link.generated()[-1]
+    assert gen["loras"] == [["rottech", 0.8]]
+    assert "Alfred" not in gen["description"] + gen["context"]
+
+
 async def _scene_turn(svc, link, reply: dict) -> None:
     plan = await svc.before_turn(GUEST, GUEST, "что там?", is_private=True)
     link.director_replies = [json.dumps(reply)]

@@ -691,6 +691,7 @@ class Interactives:
                 caption=PHOTO_SCENE_CAPTION,
                 happening=run.last_effect,
                 mood=run.mood,
+                alfred=decision.alfred if decision is not None else None,
                 outside=await self._transylvania.outside(self._now()),
                 message_thread_id=message_thread_id,
                 trigger_message_id=None,
@@ -1087,6 +1088,7 @@ class Interactives:
         caption: str,
         happening: str | None,
         mood: str | None = None,
+        alfred: str | None = None,
         outside: Outside,
         message_thread_id: int | None,
         trigger_message_id: int | None,
@@ -1109,6 +1111,7 @@ class Interactives:
                 caption=caption,
                 happening=happening,
                 mood=mood,
+                alfred=alfred,
                 outside=outside,
                 message_thread_id=message_thread_id,
                 trigger_message_id=trigger_message_id,
@@ -1187,6 +1190,7 @@ class Interactives:
         caption: str,
         happening: str | None,
         mood: str | None = None,
+        alfred: str | None = None,
         outside: Outside,
         message_thread_id: int | None,
         trigger_message_id: int | None,
@@ -1206,6 +1210,7 @@ class Interactives:
                 caption=caption,
                 happening=happening,
                 mood=mood,
+                alfred=alfred,
                 outside=outside,
                 message_thread_id=message_thread_id,
                 trigger_message_id=trigger_message_id,
@@ -1392,6 +1397,7 @@ class Interactives:
         caption: str,
         happening: str | None,
         mood: str | None = None,
+        alfred: str | None = None,
         outside: Outside,
         message_thread_id: int | None,
         trigger_message_id: int | None,
@@ -1434,6 +1440,7 @@ class Interactives:
                 happening,
                 item=shot.kind if shot else None,
                 item_place=shot.place if shot else None,
+                alfred=alfred,
             )
         request: dict[str, Any] = {
             "description": description,
@@ -1461,6 +1468,9 @@ class Interactives:
             model, lora, weight = preset
             request["model"] = model
             loras.append([lora, weight])
+        if alfred in cabinet_mod.SCENE_ALFRED_EN and not selfie:
+            # Альфред в кадре события — его LoRA облика рядом с LoRA настроения.
+            loras.append(list(cabinet_mod.ALFRED_LORA))
         if loras:
             request["loras"] = loras
         if shot is not None:
@@ -1512,6 +1522,7 @@ class Interactives:
                     "focus": focus,
                     "selfie": selfie,
                     "mood": mood,
+                    "alfred": alfred,
                     "seed": result.get("seed"),
                     "expect": list(expect or []),
                     "seen": seen,
@@ -1575,7 +1586,7 @@ class Interactives:
                 )
             # Промах — не общий вид кабинета: повторно его не показываем.
             return True
-        if not focus and not happening and not selfie:
+        if not focus and not happening and not selfie and not alfred:
             cab = await cabinet_mod.load(self._store, user_id)
             cab.remember_photo(photo_state_key(cab, outside, shot), image_id)
             await cabinet_mod.save(self._store, cab)
@@ -2510,6 +2521,7 @@ def photo_description(
     *,
     item: items_mod.ItemKind | None = None,
     item_place: str | None = None,
+    alfred: str | None = None,
 ) -> tuple[str, str]:
     """Описание снимка для художника-промптера (llm/image_prompt.py) и
     контекст сцены. Общий вид — особенности гостя первыми (самые свежие:
@@ -2527,7 +2539,10 @@ def photo_description(
             happening = None
         if item_place == "closeup":
             focus = ITEM_CLOSEUP_RU
-    features = visible_features[-PHOTO_FEATURES_IN_FRAME:]
+    # Альфред спиной/боком (кадр события сцены): его фраза идёт сразу после
+    # главного, а места ей даём, убрав особенности кабинета до одной.
+    alfred_en = cabinet_mod.SCENE_ALFRED_EN.get(alfred or "")
+    features = visible_features[-(1 if alfred_en else PHOTO_FEATURES_IN_FRAME) :]
     light = outside.en()
     if focus:
         # Крупный план — только предмет, комната и свет: особенности кабинета
@@ -2536,12 +2551,16 @@ def photo_description(
         context = f"{cabinet_mod.CANON_EN}; {light}"
         if happening:
             context += f"; just happened: {happening}"
+        if alfred_en:
+            focus = f"{focus}. Also in frame: {alfred_en}."
         return focus, context
     # Порядок — по важности: промптер ставит первое главным, а хвост
     # срезается под 77 токенов CLIP.
     parts = []
     if happening:
         parts.append(f"Main subject, just happened: {happening}")
+    if alfred_en:
+        parts.append(f"In frame: {alfred_en}.")
     if features:
         parts.append("Must be clearly visible: " + "; ".join(features) + ".")
     # Композицию «стол в нижней трети» под вставку дописывает служба llm
