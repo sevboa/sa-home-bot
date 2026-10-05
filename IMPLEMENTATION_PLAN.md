@@ -3160,9 +3160,21 @@ PublicKey = <ключ jeeves>` + `Endpoint = <IP jeeves>` — невалидно
     чистый nftables) и при inactive ufw не появляются в списке вовсе. ufw не
     включается. `awg-sudoers` менять не пришлось: на wooster mtg/microsocks теперь
     есть, `nodectl fix` ставит его сам.
-  - ⬜ **(g) деплой** jeeves → wooster → alfred (только после явного
-    подтверждения владельца), проверка: бэкап виден у напарника, dry-run
-    восстановления даёт тот же ключ сервера.
+  - 🟡 **(g) деплой — jeeves и wooster ✅ v0.124.1 (2026-10-05), alfred ещё
+    на 0.123.2.** Ключ бэкапа создан на alfred (`~/.config/sa-home-bot/backup.key`,
+    `[backup].private_key_file` в его config.toml); на VPS `[backup]` с
+    `recipient_public_key` и `partner` (jeeves↔wooster), `nodectl backup-release`.
+    Проверено: копии identity и снапшота у напарников (jeeves: 29 пиров,
+    wooster: 55), `backup restore --dry-run` с alfred даёт публичный ключ awg,
+    совпадающий с живым `awg show awg0 public-key` на обоих; `usage` по всем
+    гостям — 30 устройств, ложных `broken` нет; `nodectl fix` не гоняли
+    (новые фиксапы на wooster уже применены вручную, на jeeves не нужны).
+    Вскрылись и починены два бага путей: `nodectl backup-release`/`restore-*`
+    резолвили `./data` от каталога запуска (v0.124.1 — переход в рабочий
+    каталог ноды), `sa-home-bot backup list/restore` без `--config` грузил
+    дефолтные настройки (коммит 02f1997, едет с ближайшей версией).
+    **Осталось:** обновить alfred (🔧 в `/vpn` и команды `backup` в
+    установленном пакете); `--apply` вживую — только на тестовой пересборке.
 
 ---
 
