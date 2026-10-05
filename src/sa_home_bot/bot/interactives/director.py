@@ -70,6 +70,8 @@ class DirectorDecision:
     photo: str | None = None
     # Настроение кадров сцены (MOODS); None — Ведущий не сказал, остаётся прежнее.
     mood: str | None = None
+    # Альфред в кадре сцены участником: "back" (спиной) / "side" (боком) / None.
+    alfred: str | None = None
     # Новая черта предмета сцены (ключ из items.ItemKind.traits) или None.
     item_trait: str | None = None
 
@@ -120,6 +122,16 @@ def _mood(value: Any) -> str | None:
     return MOODS.get(text)
 
 
+ALFRED_POSES = ("back", "side")
+
+
+def _alfred(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip().casefold()
+    return text if text in ALFRED_POSES else None
+
+
 def _item_trait(value: Any, keys: tuple[str, ...]) -> str | None:
     if not isinstance(value, str):
         return None
@@ -149,6 +161,7 @@ def parse_decision(
         cabinet_add=_str_list(data.get("cabinet_add"), CABINET_ADD_MAX),
         photo=_photo(data.get("photo")),
         mood=_mood(data.get("mood")),
+        alfred=_alfred(data.get("alfred")),
         item_trait=_item_trait(data.get("item_trait"), trait_keys),
     )
 
@@ -221,6 +234,9 @@ def build_director_input(
             "(кошмар, плоть сливается с техникой), «гниль» (плесень, тлен, "
             "ржавчина), «потустороннее» (нездешнее, щупальца, иной мир). Держи "
             "«обычно», пока в кабинете не творится действительно жуткое."
+            ',\n "alfred": "back"|"side"|null — только вместе с photo: Альфред '
+            "в кадре спиной/боком, если сам участвует в происходящем (подошёл к "
+            "передатчику, держит фонарь, отшатнулся). Не в каждом кадре, обычно null."
         )
         if place
         else ""
