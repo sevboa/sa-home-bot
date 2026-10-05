@@ -2261,11 +2261,26 @@ def _proxy_firewall_apply(settings: Settings) -> None:
     )
 
 
+def _inet_filter_missing() -> bool:
+    """На ноде точно нет таблицы ``inet filter`` (firewall — ufw/iptables-nft,
+    как на wooster: там только ``ip filter``, который iptables-nft трогать не
+    велит). Если ``nft list tables`` не прочитался (нет sudo -n, нет nft) —
+    не знаем, считаем «не отсутствует», чтобы не прятать фикс от jeeves."""
+    output = _nft_output(["list", "tables"])
+    if output is None:
+        return False
+    return "table inet filter" not in output
+
+
+def _proxy_firewall_needed(settings: Settings) -> bool:
+    return _vpn_awg_needed(settings) and not _inet_filter_missing()
+
+
 def make_proxy_firewall_fixup(settings: Settings) -> Fixup:
     return Fixup(
         id="proxy-firewall",
         title="Счётчики трафика прокси в firewall (точечно, без полного reload)",
-        needed=_vpn_awg_needed,
+        needed=_proxy_firewall_needed,
         check=_proxy_firewall_check,
         apply=lambda: _proxy_firewall_apply(settings),
     )

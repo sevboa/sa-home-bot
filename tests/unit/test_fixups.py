@@ -1290,3 +1290,22 @@ def test_legacy_cleanup_runs_before_scaffolds():
     scaffolds = [i for i in ids if i.startswith("vpn-probe-scaffold-")]
     if scaffolds:
         assert ids.index("vpn-probe-legacy-cleanup") < ids.index(scaffolds[0])
+
+
+def test_proxy_firewall_not_needed_without_inet_filter_table(monkeypatch):
+    """wooster: ufw/iptables-nft, таблицы inet filter нет — фиксу там нечего делать."""
+    monkeypatch.setattr(fixups_module, "_vpn_awg_needed", lambda settings: True)
+    monkeypatch.setattr(
+        fixups_module, "_nft_output", lambda argv: "table ip filter\ntable ip nat\n"
+    )
+    assert not fixups_module._proxy_firewall_needed(_settings(["vpn"]))
+
+
+def test_proxy_firewall_needed_with_inet_filter_or_unreadable_nft(monkeypatch):
+    monkeypatch.setattr(fixups_module, "_vpn_awg_needed", lambda settings: True)
+    monkeypatch.setattr(
+        fixups_module, "_nft_output", lambda argv: "table inet filter\ntable ip nat\n"
+    )
+    assert fixups_module._proxy_firewall_needed(_settings(["vpn"]))
+    monkeypatch.setattr(fixups_module, "_nft_output", lambda argv: None)
+    assert fixups_module._proxy_firewall_needed(_settings(["vpn"]))
