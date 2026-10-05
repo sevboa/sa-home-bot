@@ -67,6 +67,24 @@ def _default_config() -> str | None:
             return str(path)
     return None
 
+# Рабочий каталог службы ноды (deploy/sa-home-node.service: WorkingDirectory).
+# Относительные пути конфига (`./data/node-state.json`, `[vpn].db_path`)
+# резолвятся от него — локальные команды, которые трогают данные ноды, обязаны
+# работать оттуда же, а не из каталога, где их запустили (иначе маркер
+# публикации бэкапа и бандл восстановления уезжают в ~/data).
+NODE_WORKDIR = "~/.local/share/sa-home-bot"
+
+
+def _enter_node_workdir(args: argparse.Namespace) -> None:
+    import os
+
+    if args.config is not None:  # относительный --config — от места запуска
+        args.config = str(Path(args.config).expanduser().resolve())
+    workdir = Path(NODE_WORKDIR).expanduser()
+    if workdir.is_dir():
+        os.chdir(workdir)
+
+
 _STATUS_ICON = {"running": "🟢", "restarting": "🟠", "stopped": "🔴"}
 
 # Действия без параметров, объявленные динамически (describe): нода может
@@ -307,6 +325,7 @@ def _run_restore_stage(args: argparse.Namespace) -> int:
     """``nodectl restore-stage`` — положить бандл (stdin) в каталог данных ноды, 0600."""
     import os
 
+    _enter_node_workdir(args)
     config_path = args.config if args.config is not None else _default_config()
     settings = Settings.load(config_path)
     data = sys.stdin.buffer.read()
@@ -327,6 +346,7 @@ def _run_restore_apply(args: argparse.Namespace) -> int:
     from sa_home_bot.backup import apply as backup_apply
     from sa_home_bot.backup import restore as backup_restore
 
+    _enter_node_workdir(args)
     config_path = args.config if args.config is not None else _default_config()
     if config_path is None:
         print("Нет config.toml ноды (укажите --config).", file=sys.stderr)
@@ -368,6 +388,7 @@ def _run_backup_release(args: argparse.Namespace) -> int:
     """``nodectl backup-release`` — явно разрешить публикацию бэкапа (backup/hold.py)."""
     from sa_home_bot.backup.hold import allow_publish
 
+    _enter_node_workdir(args)
     config_path = args.config if args.config is not None else _default_config()
     settings = Settings.load(config_path)
     path = allow_publish(settings, "backup-release")
