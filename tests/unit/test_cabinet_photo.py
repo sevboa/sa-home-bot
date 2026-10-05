@@ -6,7 +6,7 @@ import asyncio
 import base64
 import io
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -797,3 +797,160 @@ async def test_selfie_by_word_without_flag(store):
     for gen in link.generated():
         assert gen["loras"] == [list(cabinet.ALFRED_LORA)]
         assert gen["description"].startswith(cabinet.SELFIE_SUBJECT_EN)
+
+
+# --- эмоциональное селфи к ответу (2026-10-05) ---
+
+def _mood(emotion="anger", intensity=3, action="slamming a book shut") -> str:
+    return json.dumps({"emotion": emotion, "intensity": intensity, "action": action})
+
+
+async def _mood_svc(store, link, *, roll=0.0):
+    svc, notifier = _make(store, link)
+    svc._rng = lambda: roll
+    await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
+    return svc, notifier
+
+
+async def _selfie(svc, reply="Это возмутительно, сэр & всё такое.", **kw):
+    return await svc.mood_selfie(
+        GUEST, GUEST, "ты дурак", reply, message_thread_id=9, trigger_message_id=42, **kw
+    )
+
+
+async def test_mood_selfie_carries_the_reply_as_caption_with_face_emphasized(store):
+    link = FakeLink()
+    link.director_replies = [_mood()]
+    svc, notifier = await _mood_svc(store, link)
+    statuses: list[str] = []
+
+    async def on_status(text):
+        statuses.append(text)
+
+    sent_id = await _selfie(svc, on_status=on_status)
+    assert sent_id == 101
+    (gen,) = link.generated()
+    assert gen["loras"] == [list(cabinet.ALFRED_LORA)] and gen["mode"] == "free"
+    face = cabinet.SELFIE_EMOTION_FACE_EN["anger"]
+    assert gen["emphasize"] == [face]
+    assert gen["description"].startswith("Main subject: Alfred")
+    assert face in gen["description"] and "slamming a book shut" in gen["description"]
+    assert "candlelight" in gen["description"] and "сова" in gen["description"]
+    # Сверка зрением не включалась.
+    assert "expect" not in gen and "keep_key" not in gen
+    # Подпись — сам ответ (html-экранированный), а не новая реплика LLM.
+    (chat, _photo, caption) = notifier.photos[0]
+    assert chat == GUEST
+    assert caption == engine.ALFRED_PHOTO_PREFIX + "Это возмутительно, сэр &amp; всё такое."
+    assert link.lines() == []
+    assert statuses[0] == cabinet.PHOTO_STATUS_AIMING
+    image = await store.image_by_id(1)
+    assert image["purpose"] == cabinet.SELFIE_MOOD_PURPOSE and image["message_id"] == 101
+    params = json.loads(image["params"])
+    assert params["selfie"] is True and params["emotion"] == "anger"
+
+
+async def test_mood_selfie_about_him_uses_action_only_and_scene_mood(store):
+    link = FakeLink()
+    link.director_replies = [_mood("about_him", 2, "pointing at the old radio on his desk.")]
+    svc, _ = await _mood_svc(store, link, roll=0.1)
+    await svc._state.save_run(Run("radio", GUEST, GUEST, status="active", mood="rot"))
+    assert await _selfie(svc) is not None
+    (gen,) = link.generated()
+    assert gen["emphasize"] == ["pointing at the old radio on his desk"]
+    assert gen["model"] == "revanim"
+    assert gen["loras"] == [list(cabinet.ALFRED_LORA), ["rottech", 0.8]]
+
+
+@pytest.mark.parametrize(
+    ("reply", "roll"),
+    [
+        (_mood("none", 3), 0.0),
+        (_mood("anger", 1), 0.0),
+        (_mood("anger", 2), 0.3),  # шанс 0.25
+        (_mood("anger", 3), 0.6),  # шанс 0.6
+        (_mood("rage", 3), 0.0),
+        ("не json", 0.0),
+        ("{}", 0.0),
+    ],
+)
+async def test_mood_selfie_classifier_and_roll_decide(store, reply, roll):
+    link = FakeLink()
+    link.director_replies = [reply]
+    svc, notifier = await _mood_svc(store, link, roll=roll)
+    assert await _selfie(svc) is None
+    assert link.generated() == [] and notifier.photos == []
+
+
+@pytest.mark.parametrize(("intensity", "roll"), [(2, 0.24), (3, 0.59)])
+async def test_mood_selfie_roll_thresholds_pass(store, intensity, roll):
+    link = FakeLink()
+    link.director_replies = [_mood("joy", intensity)]
+    svc, notifier = await _mood_svc(store, link, roll=roll)
+    assert await _selfie(svc) is not None
+    assert len(notifier.photos) == 1
+
+
+async def test_mood_selfie_cooldown_daily_limit_and_length_without_gpu(store):
+    link = FakeLink()
+    link.director_replies = [_mood()] * 10
+    svc, notifier = await _mood_svc(store, link)
+    assert await _selfie(svc) is not None
+    # Сразу же — кулдаун: классификатор даже не спрашиваем.
+    asked = len(link.calls)
+    assert await _selfie(svc) is None
+    assert len(link.calls) == asked
+    # Через каждые 3 часа можно; всего — SELFIE_MOOD_DAILY в сутки (images
+    # пишутся по часам службы — двигаем их).
+    start = datetime(2026, 9, 30, 21, 0, tzinfo=UTC)
+    clock = {"now": start}
+    svc._now = lambda: clock["now"]
+    for _ in range(cabinet.SELFIE_MOOD_DAILY - 1):
+        clock["now"] += timedelta(hours=3)
+        assert await _selfie(svc) is not None
+    clock["now"] += timedelta(hours=3)
+    assert await _selfie(svc) is None
+    # Слишком длинная реплика не влезает в подпись.
+    clock["now"] += timedelta(days=2)
+    asked = len(link.calls)
+    assert await _selfie(svc, reply="а" * (cabinet.PHOTO_LINE_MAX + 1)) is None
+    assert len(link.calls) == asked
+
+
+async def test_mood_selfie_generation_failure_is_silent_and_not_counted(store):
+    class Down(FakeLink):
+        async def command(self, action, args, dst=None, timeout=None):
+            if action == "generate_image":
+                raise TimeoutError
+            return await super().command(action, args, dst, timeout)
+
+    link = Down()
+    link.director_replies = [_mood()]
+    svc, notifier = await _mood_svc(store, link)
+    assert await _selfie(svc) is None
+    assert notifier.photos == []
+    # Чат не залип «занятым»; неудача не съела кулдаун.
+    assert GUEST not in svc._photo_busy
+    assert await svc._mood_selfie_gated(GUEST, "Хорошо.")
+
+
+async def test_mood_selfie_send_failure_returns_none(store):
+    link = FakeLink()
+    link.director_replies = [_mood()]
+    svc, notifier = await _mood_svc(store, link)
+
+    async def refuse(*_a, **_kw):
+        return None
+
+    notifier.send_photo_ex = refuse
+    assert await _selfie(svc) is None
+
+
+async def test_mood_selfie_needs_node_and_photo_sending(store):
+    link = FakeLink()
+    svc, _ = await _mood_svc(store, link)
+    svc._get_node_link = lambda: None
+    assert await _selfie(svc) is None
+    svc2, _ = await _mood_svc(store, link)
+    svc2._notifier = object()
+    assert await _selfie(svc2) is None

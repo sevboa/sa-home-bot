@@ -960,6 +960,17 @@ async def _ask_and_reply(
         active_ai_chats.unregister(chat_id, task)
 
 
+async def _turn_sent_picture(store: Store, message: Message, dialogue_id: int) -> bool:
+    """В этом ходе Альфред уже снимал/рисовал (take_photo, generate_image) —
+    эмоциональное селфи к ответу не нужно."""
+    calls = await store.tool_calls_for_dialogue(message.chat.id, dialogue_id)
+    return any(
+        c["trigger_message_id"] == message.message_id
+        and c["tool_name"] in dialogue_context.HISTORY_TOOLS
+        for c in calls
+    )
+
+
 async def _do_ask_and_reply(
     message: Message,
     node_link: ServiceLink,
@@ -1082,7 +1093,32 @@ async def _do_ask_and_reply(
         # синтеза/отправки — тихий откат на обычный текстовый путь ниже, raw
         # всё равно пишется в ai_turns целиком независимо от способа доставки.
         audio_bytes: bytes | None = None
-        if message.chat is not None and await voice_mode.is_enabled(store, message.chat.id):
+        voice_on = message.chat is not None and await voice_mode.is_enabled(
+            store, message.chat.id
+        )
+        # Эмоциональное селфи (2026-10-05, Interactives.mood_selfie): в яркий
+        # момент реплика уходит подписью к снимку Альфреда ВМЕСТО текста. Не в
+        # голосовом режиме и не в ходе, где уже слали картинку; любой сбой —
+        # selfie_id None, и ответ идёт обычным путём ниже. Черновик гасит finally.
+        selfie_id: int | None = None
+        if interactives is not None and message.chat is not None and not voice_on:
+            try:
+                if not await _turn_sent_picture(store, message, dialogue_id):
+                    selfie_id = await interactives.mood_selfie(
+                        message.chat.id,
+                        message.from_user.id if message.from_user else None,
+                        getattr(turn_plan, "user_text", ""),
+                        raw,
+                        message_thread_id=message.message_thread_id,
+                        trigger_message_id=message.message_id,
+                        on_status=rich_session.push_status
+                        if rich_session is not None and is_private
+                        else None,
+                    )
+            except Exception:  # noqa: BLE001 — селфи не должно терять ответ
+                log.exception("ai: селфи к ответу упало (chat=%s)", message.chat.id)
+                selfie_id = None
+        if voice_on:
             audio_bytes = await voice_tts.synthesize_voice_reply(
                 message, node_link, store, config, rich_session, raw
             )
@@ -1099,7 +1135,9 @@ async def _do_ask_and_reply(
                 sent_message_id = voice_message_id
             else:
                 audio_bytes = None
-        if audio_bytes is None:
+        if selfie_id is not None:
+            sent_message_id = selfie_id
+        elif audio_bytes is None:
             if rich_session is not None:
                 sent_message_id = await _send_alfred_reply_rich(
                     message, raw, rich_session, notifier
