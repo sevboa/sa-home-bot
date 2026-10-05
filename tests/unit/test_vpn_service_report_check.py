@@ -104,7 +104,9 @@ async def test_alerts_only_once_after_threshold_then_mutes(env):
     failed = [d for name, d in events if name == vpn_protocol.EVENT_VPN_CHECK_FAILED]
     assert len(failed) == 1
     assert failed[0]["node"] == "jeeves"
-    assert failed[0]["target"] == TARGET
+    assert failed[0]["server"] == "jeeves" and failed[0]["transport"] == "awg"
+    assert failed[0]["targets"] == [{"target": TARGET, "error": "timeout"}]
+    assert failed[0]["all_failed"] is True and failed[0]["total"] == 1
 
     # Ещё несколько неуспешных тиков подряд — новых алертов быть не должно (мут).
     await _report(svc, "jeeves", False, "timeout")
@@ -124,8 +126,41 @@ async def test_recovery_emits_once(env):
         "node": "jeeves",
         "server": "jeeves",
         "transport": "awg",
-        "target": TARGET,
+        "total": 1,
+        "targets": [TARGET],
+        "all_ok": True,
     }
+
+
+async def _report_many(svc, node: str, outcome: dict[str, bool]):
+    return await svc.run_command(
+        vpn_protocol.ACTION_REPORT_CHECK,
+        {
+            "node": node,
+            "results": [
+                {
+                    "server": "wooster",
+                    "transport": "awg",
+                    "target": target,
+                    "ok": ok,
+                    "ms": 12,
+                    "error": None if ok else "timeout",
+                }
+                for target, ok in outcome.items()
+            ],
+        },
+    )
+
+
+async def test_one_run_alerts_as_one_batch(env):
+    svc, events, _ = env
+    sites = {"https://a": False, "https://b": False, "https://c": True}
+    await _report_many(svc, "jeeves", sites)
+    await _report_many(svc, "jeeves", sites)
+    failed = [d for name, d in events if name == vpn_protocol.EVENT_VPN_CHECK_FAILED]
+    assert len(failed) == 1
+    assert [t["target"] for t in failed[0]["targets"]] == ["https://a", "https://b"]
+    assert failed[0]["total"] == 3 and failed[0]["all_failed"] is False
 
 
 async def test_independent_nodes_do_not_interfere(env):

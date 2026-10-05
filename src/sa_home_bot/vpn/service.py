@@ -1499,6 +1499,10 @@ class VpnService:
         if not node or not isinstance(results, list) or not results:
             raise ProtoError(ERR_BAD_REQUEST, "нужны node и непустой список results")
         now = _now()
+        # Прогон списка сайтов через один туннель (сервер + транспорт) — одно
+        # событие на вид (упал/поднялся) со списком сайтов, а не событие на
+        # каждый сайт: общий сбой туннеля раньше сыпал сообщением на сайт.
+        runs: dict[tuple[str, str], dict[str, Any]] = {}
         for raw in results:
             if not isinstance(raw, dict):
                 continue
@@ -1510,16 +1514,37 @@ class VpnService:
             ms_raw = raw.get("ms")
             ms = int(ms_raw) if isinstance(ms_raw, int | float) else None
             error_raw = raw.get("error")
-            await self._apply_check_result(
-                node,
-                server,
-                transport,
-                str(target),
-                bool(raw.get("ok")),
-                ms,
-                str(error_raw) if error_raw else None,
-                now,
+            ok = bool(raw.get("ok"))
+            error = str(error_raw) if error_raw else None
+            run = runs.setdefault(
+                (server, transport), {"failed": [], "recovered": [], "total": 0, "bad": 0}
             )
+            run["total"] += 1
+            run["bad"] += not ok
+            to_status = await self._apply_check_result(
+                node, server, transport, str(target), ok, ms, error, now
+            )
+            if to_status == CHECK_ALERTING:
+                run["failed"].append({"target": str(target), "error": error})
+            elif to_status == CHECK_OK:
+                run["recovered"].append(str(target))
+        for (server, transport), run in runs.items():
+            base = {"node": node, "server": server, "transport": transport, "total": run["total"]}
+            if run["failed"]:
+                await self._emit(
+                    EVENT_VPN_CHECK_FAILED,
+                    {
+                        **base,
+                        "targets": run["failed"],
+                        "all_failed": run["bad"] == run["total"],
+                        "consecutive": self._cfg.check_fail_threshold,
+                    },
+                )
+            if run["recovered"]:
+                await self._emit(
+                    EVENT_VPN_CHECK_RECOVERED,
+                    {**base, "targets": run["recovered"], "all_ok": run["bad"] == 0},
+                )
         # Пробник сам фанаутит report_check на все живые vpn-инстансы (не
         # только на одну ноду через resolve_vpn_dst) — см.
         # vpn_check/service.py::_run_and_report. Эта служба здесь просто
@@ -1544,7 +1569,9 @@ class VpnService:
         latency_ms: int | None,
         error: str | None,
         now: datetime,
-    ) -> None:
+    ) -> str | None:
+        """Записать результат; вернуть статус, в который строка ПЕРЕШЛА
+        (``None`` — перехода не было). Событие шлёт вызывающий, пачкой."""
         cur = await self._db.conn.execute(
             "SELECT status, consecutive_count, alerting_since, first_seen_at, "
             "notified_alert_at, notified_cleared_at FROM vpn_check_states "
@@ -1621,24 +1648,7 @@ class VpnService:
             ),
         )
         await self._db.conn.commit()
-
-        if transition is not None and transition.to_status == CHECK_ALERTING:
-            await self._emit(
-                EVENT_VPN_CHECK_FAILED,
-                {
-                    "node": node,
-                    "server": server,
-                    "transport": transport,
-                    "target": target,
-                    "consecutive": self._cfg.check_fail_threshold,
-                    "error": error,
-                },
-            )
-        elif transition is not None and transition.to_status == CHECK_OK:
-            await self._emit(
-                EVENT_VPN_CHECK_RECOVERED,
-                {"node": node, "server": server, "transport": transport, "target": target},
-            )
+        return transition.to_status if transition is not None else None
 
     async def _check_status(self) -> dict[str, Any]:
         # Не фанаутим на чтение: запись уже фанаутится на все живые
@@ -1722,9 +1732,7 @@ class VpnService:
         stale_before = (
             _now() - timedelta(seconds=self._cfg.check_interval_s * CHECK_STALE_FACTOR)
         ).isoformat()
-        sql = (
-            "SELECT node, server, transport, status FROM vpn_check_states WHERE last_seen_at >= ?"
-        )
+        sql = "SELECT node, server, transport, status FROM vpn_check_states WHERE last_seen_at >= ?"
         params: list[Any] = [stale_before]
         if server is not None:
             sql += " AND server = ?"

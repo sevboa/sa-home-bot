@@ -485,8 +485,7 @@ def render_singleton_yielded(slot: str, node_id: str) -> str:
 def render_update_finished(node_id: str, ok: bool, version: str | None, error: str | None) -> str:
     if ok:
         return (
-            f"⬆️ Нода «{node_id}» обновлена до v{version} — "
-            f"нужен перезапуск (nodectl restart_node)."
+            f"⬆️ Нода «{node_id}» обновлена до v{version} — нужен перезапуск (nodectl restart_node)."
         )
     # Текст pip бывает с «<» (numpy<2,…) — неэкранированный Telegram отвергал
     # всё сообщение (2026-10-01).
@@ -513,6 +512,59 @@ def render_idle_power_blocked(node_id: str, sessions: list[str]) -> str:
         f"выключаюсь — открыта SSH-сессия:\n{lines}\n"
         "Возможно, кто-то работает за машиной."
     )
+
+
+_CHECK_ERROR_MAX = 120
+
+
+def _site(target: str) -> str:
+    """Адрес в <code> — иначе Telegram делает его ссылкой и лепит превью."""
+    return f"<code>{html.escape(target.removeprefix('https://'))}</code>"
+
+
+def _check_error(error: object) -> str:
+    text = str(error or "").strip() or "без подробностей"
+    if len(text) > _CHECK_ERROR_MAX:
+        text = text[: _CHECK_ERROR_MAX - 1] + "…"
+    return html.escape(text)
+
+
+def render_vpn_check(name: str, data: dict) -> str | None:
+    """Один прогон списка сайтов через один туннель — одним сообщением.
+    Старый формат (один сайт в ``target``) тоже понимаем — ноды
+    обновляются не одновременно."""
+    node = data.get("node")
+    failed = name == vpn_protocol.EVENT_VPN_CHECK_FAILED
+    targets = data.get("targets")
+    if targets is None and data.get("target"):
+        targets = [{"target": data["target"], "error": data.get("error")}]
+    if not node or not targets:
+        return None
+    if not failed:
+        targets = [t if isinstance(t, dict) else {"target": t} for t in targets]
+    total = data.get("total")
+    every = data.get("all_failed") if failed else data.get("all_ok")
+    whole = bool(every and total and len(targets) == total)
+    tunnel = ""
+    if data.get("server"):
+        tunnel = f" → <code>{html.escape(str(data['server']))}</code>"
+        if data.get("transport"):
+            tunnel += f" {html.escape(str(data['transport']))}"
+    head = f"VPN: пробник <code>{html.escape(str(node))}</code>{tunnel}"
+    if failed:
+        head = f"⚠️ {head} — недоступны " + ("все сайты" if whole else "сайты")
+        if data.get("consecutive"):
+            head += f" ({data['consecutive']} проверки подряд)"
+    else:
+        head = f"✅ {head} — снова доступны " + ("все сайты" if whole else "сайты")
+    lines = [head + ":"]
+    errors = {_check_error(t.get("error")) for t in targets} if failed else set()
+    if not failed or len(errors) == 1:
+        tail = f" — {errors.pop()}" if failed else ""
+        lines.append(", ".join(_site(str(t["target"])) for t in targets) + tail)
+    else:
+        lines += [f"• {_site(str(t['target']))} — {_check_error(t.get('error'))}" for t in targets]
+    return "\n".join(lines)
 
 
 def _vpn_grant_keyboard() -> InlineKeyboardMarkup:
@@ -766,30 +818,15 @@ def build_node_event_handler(
             await store.record_event(name, None, issued_text, datetime.now(tz=UTC))
             await notify_admins(book, notifier, issued_text)
             return
-        elif name == vpn_protocol.EVENT_VPN_CHECK_FAILED:
-            node, target = data.get("node"), data.get("target")
-            if not node or not target:
+        elif name in (
+            vpn_protocol.EVENT_VPN_CHECK_FAILED,
+            vpn_protocol.EVENT_VPN_CHECK_RECOVERED,
+        ):
+            check_text = render_vpn_check(name, data)
+            if check_text is None:
                 return
-            consecutive = data.get("consecutive")
-            failed_text = (
-                f"⚠️ VPN: нода <code>{html.escape(str(node))}</code> — "
-                f"{html.escape(str(target))} недоступен через туннель"
-                + (f" ({consecutive} проверок подряд)" if consecutive else "")
-                + "."
-            )
-            await store.record_event(name, node, failed_text, datetime.now(tz=UTC))
-            await notify_admins(book, notifier, failed_text)
-            return
-        elif name == vpn_protocol.EVENT_VPN_CHECK_RECOVERED:
-            node, target = data.get("node"), data.get("target")
-            if not node or not target:
-                return
-            recovered_text = (
-                f"✅ VPN: нода <code>{html.escape(str(node))}</code> — "
-                f"{html.escape(str(target))} снова доступен через туннель."
-            )
-            await store.record_event(name, node, recovered_text, datetime.now(tz=UTC))
-            await notify_admins(book, notifier, recovered_text)
+            await store.record_event(name, data.get("node"), check_text, datetime.now(tz=UTC))
+            await notify_admins(book, notifier, check_text)
             return
         else:
             return
