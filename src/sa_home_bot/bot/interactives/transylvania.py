@@ -52,7 +52,7 @@ _PHASE_TEXT = {
     PHASE_DAWN: ("раннее утро, за окном светает", "cold dawn light through the window"),
     PHASE_DAY: ("день", "daylight through the window"),
     PHASE_DUSK: ("сумерки, за окном закат", "orange sunset light, long shadows"),
-    PHASE_NIGHT: ("ночь, горят свечи", "night, candlelight, dark window"),
+    PHASE_NIGHT: ("ночь, горят свечи", "night, dark night window, moonlight, candlelight"),
 }
 _WEATHER_TEXT = {
     WEATHER_CLEAR: ("ясно", ""),

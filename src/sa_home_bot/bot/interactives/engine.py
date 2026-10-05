@@ -1300,6 +1300,7 @@ class Interactives:
                     "chat_id": chat_id,
                     "negative_extra": cabinet_mod.PHOTO_NEGATIVE_EN,
                     "loras": [list(cabinet_mod.ALFRED_LORA)],
+                    "light": outside.en(),
                 },
                 dst=dst,
                 timeout=cfg.imagegen_request_timeout_s,
@@ -1477,6 +1478,9 @@ class Interactives:
             loras.append(list(cabinet_mod.ALFRED_LORA))
         if loras:
             request["loras"] = loras
+        if list(cabinet_mod.ALFRED_LORA) in loras:
+            # Альфред в кадре: его LoRA тянет дневное окно — свет вшивает служба.
+            request["light"] = outside.en()
         if shot is not None:
             # Этап 49.3: предмет — пикселями поверх готовой сцены.
             request["paste"] = {"key": shot.key, "place": shot.place, "hint": shot.kind.paste_hint}
@@ -1772,6 +1776,7 @@ class Interactives:
                 request["model"] = model
                 loras.append([lora, weight])
             request["loras"] = loras
+            request["light"] = outside.en()
             request["request_id"] = uuid.uuid4().hex
             phases = asyncio.create_task(
                 self._follow_photo_phases(node_link, dst, chat_id, request["request_id"])

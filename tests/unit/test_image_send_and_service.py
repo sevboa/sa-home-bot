@@ -176,6 +176,36 @@ async def test_generate_image_negative_extra_is_appended(monkeypatch):
     assert seen == ["blurry, monochrome", "text, monochrome", ""]
 
 
+async def test_generate_image_light_goes_right_after_main_subject(monkeypatch):
+    """Свет снимка Альфреда (2026-10-06): промптер выкинул «night», и LoRA
+    нарисовала дневное окно — служба вшивает свет вторым тегом сама."""
+    seen = []
+
+    async def fake_generate(prompt, negative, cfg, **kwargs):
+        seen.append(prompt)
+        return {"png": b"x", "width": 1, "height": 1, "seconds": 0.0}
+
+    monkeypatch.setattr(llm_service.imagegen, "generate_image", fake_generate)
+    svc = _svc(imagegen_enabled=True)
+    light = {"light": "night, dark night window, candlelight"}
+    butler = "old butler, laughing, candlelight"
+    await svc.run_command("generate_image", {"prompt": butler, **light})
+    await svc.run_command("generate_image", {"prompt": "a cat", "raw": True, **light})
+    await svc.run_command("generate_image", {"prompt": "a cat"})
+    assert seen == [
+        "old butler, night, dark night window, laughing, candlelight",
+        "a cat",
+        "a cat",
+    ]
+
+
+def test_put_second_keeps_main_subject_first_and_skips_repeats():
+    from sa_home_bot.llm import image_prompt
+
+    assert image_prompt.put_second("cat, sofa", "Night, moon") == "cat, Night, moon, sofa"
+    assert image_prompt.put_second("cat, night", "night, moon") == "cat, moon, night"
+
+
 async def test_generate_image_empty_prompt_is_bad_request():
     with pytest.raises(ProtoError) as excinfo:
         await _svc(imagegen_enabled=True).run_command("generate_image", {"prompt": "  "})

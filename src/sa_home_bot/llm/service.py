@@ -342,6 +342,7 @@ def _imagegen_options(args: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(emphasize, list):
         emphasize = []
     paste = _paste_option(args.get("paste"), ref)
+    light = args.get("light")
     return {
         "mode": mode,
         "context": context.strip() if isinstance(context, str) else "",
@@ -361,6 +362,7 @@ def _imagegen_options(args: dict[str, Any]) -> dict[str, Any]:
         "loras": loras,
         "ref": ref,
         "paste": paste,
+        "light": " ".join(light.split())[:160] if isinstance(light, str) else "",
     }
 
 
@@ -1371,6 +1373,10 @@ class LlmService:
             extra = args.get("negative_extra")
             if isinstance(extra, str) and extra.strip():
                 negative = f"{negative}, {extra.strip()}" if negative else extra.strip()
+            if options["light"]:
+                # Свет снимка (время суток и погода) — мимо промптера: он
+                # выкидывал «night», и LoRA Альфреда рисовала дневное окно.
+                prompt = image_prompt.put_second(prompt, options["light"])
             if paste is not None and paste["place"] == "desk":
                 prompt = f"{item_paste.DESK_COMPOSITION}, {prompt.strip()}"
         self._image_phase(args.get("request_id"), IMAGE_PHASE_DRAW)

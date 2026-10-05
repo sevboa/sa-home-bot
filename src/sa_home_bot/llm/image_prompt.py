@@ -126,6 +126,15 @@ def split_tags(prompt: str) -> list[str]:
     return [tag.strip() for tag in prompt.replace("\n", ",").split(",") if tag.strip()]
 
 
+def put_second(prompt: str, extra: str) -> str:
+    """Теги ``extra`` — сразу за главным объектом: промптер их не выкинет, а
+    fit_prompt не срежет хвостом. Уже стоящие в промпте не повторяются."""
+    tags = split_tags(prompt)
+    have = {tag.lower() for tag in tags}
+    new = [tag for tag in split_tags(extra) if tag.lower() not in have]
+    return ", ".join([*tags[:1], *new, *tags[1:]])
+
+
 def fit_prompt(
     prompt: str, template: str, count_tokens: Callable[[str], int], limit: int = CLIP_MAX_TOKENS
 ) -> str:

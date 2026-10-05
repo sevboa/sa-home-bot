@@ -777,6 +777,8 @@ async def test_greeting_portrait_draws_alfred_in_guests_study_with_light(store):
     assert gen["description"].startswith(cabinet.PORTRAIT_SUBJECT_EN)
     # Свет — тот же, что у снимков кабинета (ночь, пасмурно); обстановка гостя.
     assert "candlelight" in gen["description"] and "треснувший портрет" in gen["description"]
+    # Свет — ещё и отдельно: служба вошьёт его в промпт мимо промптера.
+    assert "night" in gen["light"] and "moonlight" in gen["light"]
     assert cabinet.CANON_EN in gen["description"]
     (chat, photo, caption) = notifier.photos[0]
     assert chat == GUEST and isinstance(photo, bytes) and caption is None
@@ -818,6 +820,7 @@ async def test_selfie_puts_alfred_into_the_same_study_light_and_mood(store):
     assert gen["mode"] == "free" and gen["loras"] == [list(cabinet.ALFRED_LORA)]
     assert gen["description"].startswith("Main subject: Alfred")
     assert "у окна с бокалом вина" in gen["description"]
+    assert "night" in gen["light"]
     assert "candlelight" in gen["description"] and "сова" in gen["description"]
     (directive,) = link.lines()
     assert "сфотографировал себя" in directive
@@ -886,6 +889,7 @@ async def test_mood_selfie_carries_the_reply_as_caption_with_face_emphasized(sto
     assert gen["description"].startswith("Main subject: Alfred")
     assert face in gen["description"] and "slamming a book shut" in gen["description"]
     assert "candlelight" in gen["description"] and "сова" in gen["description"]
+    assert "night" in gen["light"]
     # Сверка зрением не включалась.
     assert "expect" not in gen and "keep_key" not in gen
     # Подпись — сам ответ (html-экранированный), а не новая реплика LLM.
