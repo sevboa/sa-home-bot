@@ -42,7 +42,7 @@ class FakeNotifier:
         self.sent: list[tuple[int, str, int | None]] = []
         self._id = 100
 
-    async def send_direct(self, chat_id, text, reply_to_message_id=None):
+    async def send_direct(self, chat_id, text, reply_to_message_id=None, **kwargs):
         self._id += 1
         self.sent.append((chat_id, text, reply_to_message_id))
         return self._id

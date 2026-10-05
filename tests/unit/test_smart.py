@@ -178,7 +178,7 @@ class FakeNotifier:
         self._id = 200
         self._fail = fail
 
-    async def send_direct(self, chat_id, text, reply_to_message_id=None):
+    async def send_direct(self, chat_id, text, reply_to_message_id=None, **kwargs):
         if self._fail:
             return None
         self._id += 1

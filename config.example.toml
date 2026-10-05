@@ -19,6 +19,13 @@
 # здесь копия проиграет пакету, и загрузка предупредит об этом в логе.
 [telegram]
 token = "PUT-YOUR-BOT-TOKEN-HERE"
+# Маршрут до Bot API (Этап 52). "fixed" — только proxy ниже (пусто = напрямую);
+# "auto" — бот сам выбирает direct ↔ SOCKS5 VPN-нод роя по замерам vpn_check
+# и оповещает админов о переключении.
+# proxy = "socks5://100.109.139.95:1080"
+# proxy_mode = "auto"
+# extra_proxies = ["socks5://100.109.139.95:1080", "socks5://100.93.141.23:1080"]
+# prefer_direct = true
 
 [database]
 path = "./data/sentinel.sqlite"

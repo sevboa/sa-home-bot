@@ -671,3 +671,22 @@ CREATE TABLE IF NOT EXISTS item_events (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_item_events_item ON item_events(item_id, id);
+
+-- Постоянная очередь исходящих (Этап 52, bot/outbox.py): текст, который
+-- Notifier не смог доставить из-за ТРАНЗИЕНТНОЙ ошибки (нет связи с Telegram).
+-- Флаш — по восстановлению выхода и тиком раз в минуту. created_at/expires_at —
+-- ISO в UTC с микросекундами (сравнение строк = сравнение времени).
+-- dedup_key: новая запись заменяет старую с тем же (chat_id, dedup_key).
+CREATE TABLE IF NOT EXISTS outbox (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id           INTEGER NOT NULL,
+    kind              TEXT NOT NULL,
+    payload_json      TEXT NOT NULL,
+    created_at        TEXT NOT NULL,
+    attempts          INTEGER NOT NULL DEFAULT 0,
+    dedup_key         TEXT,
+    expires_at        TEXT NOT NULL,
+    message_thread_id INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_created ON outbox(created_at, id);
+CREATE INDEX IF NOT EXISTS idx_outbox_dedup ON outbox(chat_id, dedup_key);

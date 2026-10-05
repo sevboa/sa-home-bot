@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 
 from aiogram.exceptions import TelegramConflictError
 
@@ -18,6 +19,14 @@ from sa_home_bot.bot.ai_flow import RESTART_TEXT, ActiveAiChats
 from sa_home_bot.bot.away import AwayService
 from sa_home_bot.bot.away_return import AwayReturn, AwayRunner
 from sa_home_bot.bot.dispatch import TelegramEventDispatcher
+from sa_home_bot.bot.egress import EgressManager, make_fetch_candidates
+from sa_home_bot.bot.egress_app import (
+    EGRESS_STATE_PATH,
+    OutboxFlusher,
+    SwitchNotices,
+    pick_startup_route,
+    startup_routes,
+)
 from sa_home_bot.bot.interactives.engine import Interactives
 from sa_home_bot.bot.invites import Gatekeeper
 from sa_home_bot.bot.lifecycle import (
@@ -78,7 +87,14 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
 
     # 4. Bot + Notifier + watchdog связи.
     bot = build_bot(settings.telegram.token, settings.telegram.proxy)
-    notifier = Notifier(bot)
+    # Outbox (Этап 52): недоставленное из-за сбоя связи ждёт в sentinel.sqlite.
+    notifier = Notifier(bot, outbox=store)
+    auto_egress = settings.telegram.proxy_mode == "auto"
+    if auto_egress:
+        # Этап 52: на старте перебираем известные локально маршруты (последний
+        # рабочий, proxy, direct, extra_proxies) — иначе заблокированный direct
+        # ронял бы get_me ниже ещё до того, как менеджер успеет что-то решить.
+        await pick_startup_route(bot, startup_routes(settings.telegram))
     # Первый сетевой вызов Bot API на старте — после ребута сеть бывает
     # частично поднята (DNS уже резолвится, HTTP до Telegram ещё нет), см.
     # bounded retry ниже по причине живого инцидента 2026-08-12.
@@ -194,6 +210,24 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
         on_connected=_report_bot_ready,
     )
     await node_link.start()
+
+    # Этап 52: автовыбор маршрута до Bot API (direct ↔ SOCKS vpn-нод роя по
+    # замерам vpn_check) + флаш outbox — раз в минуту и по восстановлению.
+    outbox_flusher = OutboxFlusher(notifier, store)
+    outbox_flusher.start()
+    egress: EgressManager | None = None
+    if auto_egress:
+        observer = settings.node.id or socket.gethostname()
+        egress = EgressManager(
+            bot,
+            settings.telegram,
+            make_fetch_candidates(node_link, observer),
+            observer,
+            state_path=EGRESS_STATE_PATH,
+        )
+        egress.on_switched = SwitchNotices(book, notifier).on_switched
+        egress.on_recovered = outbox_flusher.kick
+        egress.start()
     # Досылка недоставленного и таймеры после рестарта — node_link уже есть
     # (будильники tasks), но сбой здесь не должен мешать запуску бота.
     try:
@@ -318,6 +352,8 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
             polling_task=polling_task,
             active_ai_chats=active_ai_chats,
             away_task=away_task,
+            egress=egress,
+            outbox_flusher=outbox_flusher,
             pending_actions=pending_actions,
             link=link,
             node_link=node_link,
@@ -348,6 +384,8 @@ async def _shutdown(
     bot,
     db: Database,
     away_task: asyncio.Task | None = None,
+    egress: EgressManager | None = None,
+    outbox_flusher: OutboxFlusher | None = None,
 ) -> None:
     log.info("Останов приложения...")
 
@@ -377,6 +415,11 @@ async def _shutdown(
     # Проход «Альфред в городе» (Этап 51): если он как раз отвечал чату, его
     # задачу выше уже отменили; иначе — останавливаем здесь. Состояние в БД,
     # на следующем старте проход продолжит.
+    # Этап 52: менеджер маршрута и флаш outbox — до закрытия сессии бота.
+    if egress is not None:
+        await egress.stop()
+    if outbox_flusher is not None:
+        await outbox_flusher.stop()
     if away_task is not None:
         if not away_task.done():
             away_task.cancel()

@@ -99,6 +99,7 @@ from sa_home_bot.vpn.protocol import (
     ACTION_REVOKE,
     ACTION_SET_ACCESS,
     ACTION_SET_QUOTA,
+    ACTION_TELEGRAM_EGRESS,
     ACTION_USAGE,
     ERR_QUOTA_CEILING,
     EVENT_VPN_ACCESS_RESTORED,
@@ -113,6 +114,8 @@ from sa_home_bot.vpn.protocol import (
     EVENT_VPN_QUOTA_WARNING,
     PROXY_SECRET_SEED,
     SERVICE_NAME,
+    TELEGRAM_EGRESS_TARGET,
+    TELEGRAM_EGRESS_TRANSPORT,
     TRANSPORT_AWG,
     TRANSPORT_REALITY,
     country_flag,
@@ -419,7 +422,7 @@ class VpnService:
         # только принимает и отдаёт строки vpn_check_states, туннель поднимает
         # пробник (vpn_check). Раньше висело на awg-гейте — и reality-only
         # нода не могла принять отчёт даже собственного пробника.
-        capabilities += [ACTION_CHECK_NOW, ACTION_CHECK_STATUS]
+        capabilities += [ACTION_CHECK_NOW, ACTION_CHECK_STATUS, ACTION_TELEGRAM_EGRESS]
         actions += [
             # Служебное — зовёт только сама служба vpn_check, не для UI.
             ActionSpec(
@@ -432,6 +435,12 @@ class VpnService:
             ),
             ActionSpec(id=ACTION_CHECK_NOW, title="🛰 Проверить сеть сейчас"),
             ActionSpec(id=ACTION_CHECK_STATUS, title="🛰 Статус проверок сети"),
+            # Служебное чтение для бота (этап 52), не для UI.
+            ActionSpec(
+                id=ACTION_TELEGRAM_EGRESS,
+                title="📡 Маршрут до Telegram через эту ноду",
+                params=(ActionParam(name="observer", type="string", title="Нода бота"),),
+            ),
         ]
         # Прокси Telegram (mtg/microsocks) живёт на VPS сам по себе и от
         # VPN-транспорта не зависит: на wooster он поднят при reality-only
@@ -1661,6 +1670,43 @@ class VpnService:
         ]
         return {"states": states, "rollup": await self._check_rollup()}
 
+    async def _telegram_egress(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Кандидат на маршрут до Telegram Bot API для бота на ноде ``observer``
+        (этап 52): SOCKS5-адрес этой ноды и последняя проба api.telegram.org
+        через её reality-VLESS, снятая этим наблюдателем (``vpn_check``).
+
+        Только чтение, без QR. Протухшая по тому же правилу, что и в
+        ``_check_rollup``, строка не прячется, а помечается ``stale`` — решать,
+        что «неизвестно», будет бот. Нет строки — ``check`` = None.
+        """
+        observer = str(args.get("observer") or "").strip()
+        if not observer:
+            raise ProtoError(ERR_BAD_REQUEST, "не передан observer")
+        cur = await self._db.conn.execute(
+            "SELECT last_ok, last_latency_ms, last_seen_at FROM vpn_check_states "
+            "WHERE node = ? AND server = ? AND transport = ? AND target = ?",
+            (observer, self._node, TELEGRAM_EGRESS_TRANSPORT, TELEGRAM_EGRESS_TARGET),
+        )
+        row = await cur.fetchone()
+        check: dict[str, Any] | None = None
+        if row is not None:
+            stale_before = (
+                _now() - timedelta(seconds=self._cfg.check_interval_s * CHECK_STALE_FACTOR)
+            ).isoformat()
+            check = {
+                "ok": bool(row["last_ok"]),
+                "ms": row["last_latency_ms"],
+                "seen_at": row["last_seen_at"],
+                "stale": row["last_seen_at"] < stale_before,
+            }
+        socks_host = self._cfg.socks_host
+        return {
+            "node": self._node,
+            "label": self._cfg.location,
+            "socks": f"{socks_host}:{self._cfg.socks_port}" if socks_host else None,
+            "check": check,
+        }
+
     async def _check_rollup(self, *, server: str | None = None) -> list[dict[str, Any]]:
         """Сводка «как эти (сервер, транспорт) видят наблюдатели» — для
         индикатора в /vpn (39.0.7(f)).
@@ -1860,6 +1906,8 @@ class VpnService:
             return await self._dispatch_checks()
         if action == ACTION_CHECK_STATUS:
             return await self._check_status()
+        if action == ACTION_TELEGRAM_EGRESS:
+            return await self._telegram_egress(args)
         if action == ACTION_PROXY_LINK:
             return await self._proxy_link(args)
         if action == ACTION_PROXY_ROTATE_SECRET:

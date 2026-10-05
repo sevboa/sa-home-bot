@@ -6,7 +6,8 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TypeVar
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, TypeVar
 
 from aiogram import Bot
 from aiogram.exceptions import (
@@ -17,7 +18,11 @@ from aiogram.exceptions import (
 )
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, ReplyParameters
 
+from sa_home_bot.db.store import OUTBOX_KIND_INTERACTIVE
 from sa_home_bot.subscriptions.models import WILDCARD
+
+if TYPE_CHECKING:
+    from sa_home_bot.db.store import Store
 
 _T = TypeVar("_T")
 
@@ -176,6 +181,7 @@ async def send_with_retry(
     chat_id: int,
     action: str,
     call: Callable[[], Awaitable[_T]],
+    outcome: dict | None = None,
 ) -> _T | None:
     """Общий цикл ретраев отправки (MAX_RETRIES попыток) — вынесен для
     bot/rich_stream.py (этап 34, Фаза 2), чтобы не копировать цикл
@@ -191,7 +197,11 @@ async def send_with_retry(
       готовый ответ модели;
     - перманентный сбой (``is_permanent_send_error``: битая разметка,
       бот заблокирован, чат не найден): ``return None`` сразу, повтор
-      бессмыслен — вызывающий деградирует формат/сообщает об отказе."""
+      бессмыслен — вызывающий деградирует формат/сообщает об отказе.
+
+    ``outcome`` (необязательно, Этап 52) — словарь, куда пишется
+    ``transient=True``, если сдались из-за ТРАНЗИЕНТНОГО сбоя (кончились
+    попытки) — такое сообщение стоит поставить в outbox."""
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             return await call()
@@ -201,7 +211,11 @@ async def send_with_retry(
             await asyncio.sleep(wait)
         except Exception as exc:  # noqa: BLE001 — CancelledError не Exception, проходит мимо
             if not await _after_send_failure(exc, action, chat_id, attempt):
+                if outcome is not None and not is_permanent_send_error(exc):
+                    outcome["transient"] = True
                 return None
+    if outcome is not None:
+        outcome["transient"] = True
     log.error("Исчерпаны ретраи отправки %s в chat=%s", action, chat_id)
     return None
 
@@ -241,8 +255,12 @@ async def notify_admins(
 
 
 class Notifier:
-    def __init__(self, bot: Bot) -> None:
+    def __init__(self, bot: Bot, outbox: Store | None = None) -> None:
+        """``outbox`` — Store с таблицей outbox (Этап 52): текст, не
+        доставленный из-за транзиентного сбоя, ставится в постоянную очередь
+        (флаш — bot/outbox.py). None — прежнее поведение (потеря после ретраев)."""
         self._bot = bot
+        self._outbox = outbox
 
     @property
     def bot(self) -> Bot:
@@ -260,8 +278,14 @@ class Notifier:
         reply_to_message_id: int | None = None,
         reply_markup: InlineKeyboardMarkup | None = None,
         message_thread_id: int | None = None,
+        outbox_kind: str = OUTBOX_KIND_INTERACTIVE,
+        dedup_key: str | None = None,
     ) -> int | None:
         """Отправить сообщение. Вернуть message_id первого чанка или None при провале.
+
+        ``outbox_kind`` (OUTBOX_KIND_* из db/store.py) задаёт TTL очереди,
+        ``dedup_key`` — «свежее вытесняет старое»; обоим есть дело только
+        если у Notifier есть outbox и сбой транзиентный (Этап 52).
 
         ``reply_markup`` вешается на ПЕРВЫЙ чанк: кнопка относится к
         сообщению целиком, а не к его хвосту (у длинных текстов чанков
@@ -280,18 +304,64 @@ class Notifier:
                 if (i == 0 and reply_to_message_id is not None)
                 else None
             )
+            outcome: dict = {}
             message_id = await self._send_one(
                 chat_id,
                 chunk,
                 reply,
                 reply_markup if i == 0 else None,
                 message_thread_id=message_thread_id,
+                outcome=outcome,
             )
             if message_id is None:
+                if outcome.get("transient") and self._outbox is not None:
+                    await self._enqueue_rest(
+                        chat_id, chunks[i:], i == 0, reply_to_message_id,
+                        reply_markup if i == 0 else None, message_thread_id,
+                        outbox_kind, dedup_key, i,
+                    )
                 return first_message_id
             if first_message_id is None:
                 first_message_id = message_id
         return first_message_id
+
+    async def _enqueue_rest(
+        self,
+        chat_id: int,
+        chunks: list[str],
+        with_reply: bool,
+        reply_to_message_id: int | None,
+        reply_markup: InlineKeyboardMarkup | None,
+        message_thread_id: int | None,
+        kind: str,
+        dedup_key: str | None,
+        first_index: int,
+    ) -> None:
+        """Поставить недоставленные чанки в outbox по порядку. Любой сбой самой
+        очереди не должен ронять отправителя — только в лог."""
+        now = datetime.now(UTC)
+        try:
+            for n, chunk in enumerate(chunks):
+                payload: dict = {"text": chunk}
+                if n == 0 and with_reply and reply_to_message_id is not None:
+                    payload["reply_to_message_id"] = reply_to_message_id
+                if n == 0 and reply_markup is not None:
+                    payload["reply_markup"] = reply_markup.model_dump(
+                        mode="json", exclude_none=True
+                    )
+                key = dedup_key
+                if key is not None and (len(chunks) > 1 or first_index > 0):
+                    key = f"{dedup_key}#{first_index + n}"
+                await self._outbox.outbox_enqueue(
+                    chat_id, kind, payload, now=now, dedup_key=key,
+                    message_thread_id=message_thread_id,
+                )
+            log.warning(
+                "Сообщение для chat=%s поставлено в outbox (%s, чанков: %s)",
+                chat_id, kind, len(chunks),
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("Не удалось поставить сообщение в outbox (chat=%s)", chat_id)
 
     async def _send_one(
         self,
@@ -300,6 +370,7 @@ class Notifier:
         reply: ReplyParameters | None,
         reply_markup: InlineKeyboardMarkup | None = None,
         message_thread_id: int | None = None,
+        outcome: dict | None = None,
     ) -> int | None:
         msg = await send_with_retry(
             chat_id,
@@ -311,6 +382,7 @@ class Notifier:
                 reply_markup=reply_markup,
                 message_thread_id=message_thread_id,
             ),
+            outcome,
         )
         return msg.message_id if msg is not None else None
 

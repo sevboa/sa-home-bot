@@ -13,7 +13,7 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import asdict
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from math import sqrt
 from typing import Any
 
@@ -58,6 +58,31 @@ def _item(row: Any) -> dict:
 
 def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt is not None else None
+
+
+# Постоянная очередь исходящих (Этап 52, bot/outbox.py): виды и их TTL.
+# Протухшее не доставляем — «сервер упал 7 часов назад» уже не новость.
+OUTBOX_KIND_ALERT = "alert"  # алерты/события мониторинга
+OUTBOX_KIND_TASK = "task"  # результаты задач, напоминания
+OUTBOX_KIND_DELIVER = "deliver_message"
+OUTBOX_KIND_INTERACTIVE = "interactive"  # ответы /ai и прочее живое
+OUTBOX_TTL: dict[str, timedelta] = {
+    OUTBOX_KIND_ALERT: timedelta(hours=6),
+    OUTBOX_KIND_TASK: timedelta(hours=24),
+    OUTBOX_KIND_DELIVER: timedelta(hours=24),
+    OUTBOX_KIND_INTERACTIVE: timedelta(minutes=15),
+}
+
+
+def outbox_ttl(kind: str) -> timedelta:
+    """TTL вида; неизвестный вид — как интерактивный (самый короткий)."""
+    return OUTBOX_TTL.get(kind, OUTBOX_TTL[OUTBOX_KIND_INTERACTIVE])
+
+
+def _utc_iso(dt: datetime) -> str:
+    """ISO в UTC с микросекундами — строки outbox сравниваются как время.
+    Наивное время считаем локальным."""
+    return dt.astimezone(UTC).isoformat(timespec="microseconds")
 
 
 def _parse(value: str | None) -> datetime | None:
@@ -126,6 +151,77 @@ class Store:
 
     async def set_action_ticks(self, action_key: str, ticks: list[datetime]) -> None:
         await self.set_state(ACTION_TICKS_PREFIX + action_key, json.dumps([_iso(t) for t in ticks]))
+
+    # --- outbox (Этап 52) ---
+
+    async def outbox_enqueue(
+        self,
+        chat_id: int,
+        kind: str,
+        payload: dict,
+        *,
+        now: datetime,
+        dedup_key: str | None = None,
+        message_thread_id: int | None = None,
+    ) -> int:
+        """Поставить сообщение в очередь. TTL берётся по ``kind``. Запись с
+        тем же ``(chat_id, dedup_key)`` заменяется новой (свежий статус
+        вытесняет старый). Возвращает id."""
+        async with self.db.transaction() as conn:
+            if dedup_key is not None:
+                await conn.execute(
+                    "DELETE FROM outbox WHERE chat_id=? AND dedup_key=?", (chat_id, dedup_key)
+                )
+            cur = await conn.execute(
+                "INSERT INTO outbox(chat_id, kind, payload_json, created_at, dedup_key, "
+                "expires_at, message_thread_id) VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (
+                    chat_id,
+                    kind,
+                    json.dumps(payload, ensure_ascii=False),
+                    _utc_iso(now),
+                    dedup_key,
+                    _utc_iso(now + outbox_ttl(kind)),
+                    message_thread_id,
+                ),
+            )
+            return cur.lastrowid
+
+    async def outbox_due(self, now: datetime, limit: int = 100) -> list[dict]:
+        """Непросроченные записи по порядку постановки; ``payload`` — dict,
+        ``created_at`` — aware datetime (UTC)."""
+        cur = await self.db.conn.execute(
+            "SELECT * FROM outbox WHERE expires_at > ? ORDER BY created_at, id LIMIT ?",
+            (_utc_iso(now), limit),
+        )
+        rows = []
+        for row in await cur.fetchall():
+            data = dict(row)
+            data["payload"] = json.loads(data.pop("payload_json") or "{}")
+            data["created_at"] = datetime.fromisoformat(data["created_at"])
+            rows.append(data)
+        return rows
+
+    async def outbox_delete(self, outbox_id: int) -> None:
+        """Убрать запись (доставлена или перманентно не доставить)."""
+        async with self.db.transaction() as conn:
+            await conn.execute("DELETE FROM outbox WHERE id=?", (outbox_id,))
+
+    async def outbox_bump_attempts(self, outbox_id: int) -> None:
+        async with self.db.transaction() as conn:
+            await conn.execute("UPDATE outbox SET attempts=attempts+1 WHERE id=?", (outbox_id,))
+
+    async def outbox_expire(self, now: datetime) -> int:
+        """Удалить протухшее; вернуть сколько."""
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                "DELETE FROM outbox WHERE expires_at <= ?", (_utc_iso(now),)
+            )
+            return cur.rowcount
+
+    async def outbox_count(self) -> int:
+        cur = await self.db.conn.execute("SELECT COUNT(*) AS n FROM outbox")
+        return (await cur.fetchone())["n"]
 
     # --- job_runs ---
 

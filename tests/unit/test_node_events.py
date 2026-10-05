@@ -106,6 +106,7 @@ class FakeNotifier:
         reply_to_message_id=None,
         reply_markup=None,
         message_thread_id=None,
+        **kwargs,
     ):
         self.sent.append((chat_id, text))
         self.sent_full.append((chat_id, text, reply_to_message_id, message_thread_id))

@@ -83,7 +83,7 @@ from sa_home_bot.bot.rich_stream import RichDraftPolicy, RichStreamSession
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import Settings
-from sa_home_bot.db.store import Store
+from sa_home_bot.db.store import OUTBOX_KIND_DELIVER, OUTBOX_KIND_TASK, Store
 from sa_home_bot.proto.messages import Address, Envelope, ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.tasks import protocol as task_protocol
@@ -253,7 +253,9 @@ async def _handle_deliver_message(notifier: Notifier, store: Store, data: dict) 
             )
             return
     thread_id = data.get("message_thread_id")
-    message_id = await notifier.send_direct(chat_id, html_text, message_thread_id=thread_id)
+    message_id = await notifier.send_direct(
+        chat_id, html_text, message_thread_id=thread_id, outbox_kind=OUTBOX_KIND_DELIVER
+    )
     if message_id is None:
         return
     plain_text = data.get("plain") or html_text
@@ -372,6 +374,7 @@ async def _handle_task_result(
                 _format_alfred_reply(raw),
                 reply_to_message_id=trigger_message_id,
                 message_thread_id=thread_id,
+                outbox_kind=OUTBOX_KIND_TASK,
             )
         sessions.pop(task_id)
         dialogue_id = meta.get("dialogue_id")

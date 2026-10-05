@@ -37,6 +37,7 @@ class _FakeNotifier:
         reply_to_message_id=None,
         reply_markup=None,
         message_thread_id=None,
+        **kwargs,
     ):
         self.sent.append((chat_id, text))
         return 99  # message_id только что отправленного первого сообщения

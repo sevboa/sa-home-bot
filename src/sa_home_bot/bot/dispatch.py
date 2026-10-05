@@ -11,7 +11,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Protocol
 
-from sa_home_bot.db.store import NOTIF_ALERT, NOTIF_CLEARED, Store
+from sa_home_bot.db.store import NOTIF_ALERT, NOTIF_CLEARED, OUTBOX_KIND_ALERT, Store
 from sa_home_bot.domain.host import HostEvent
 from sa_home_bot.domain.models import Event, SmartChange
 from sa_home_bot.domain.render import render_event, render_host_event, render_smart_change
@@ -23,9 +23,16 @@ log = logging.getLogger(__name__)
 
 class NotifierProtocol(Protocol):
     async def send_direct(
-        self, chat_id: int, text: str, reply_to_message_id: int | None = None
+        self,
+        chat_id: int,
+        text: str,
+        reply_to_message_id: int | None = None,
+        *,
+        outbox_kind: str = OUTBOX_KIND_ALERT,
+        dedup_key: str | None = None,
     ) -> int | None:
-        """Отправить сообщение. Вернуть message_id при успехе, иначе None."""
+        """Отправить сообщение. Вернуть message_id при успехе, иначе None.
+        ``outbox_kind``/``dedup_key`` — очередь недоставленного (Этап 52)."""
         ...
 
 
@@ -45,7 +52,12 @@ class TelegramEventDispatcher:
         now = datetime.now(tz=UTC)
         delivered = False
         for sub in self._subscriptions.accepting(event.type):
-            message_id = await self._notifier.send_direct(sub.chat_id, text)
+            message_id = await self._notifier.send_direct(
+                sub.chat_id,
+                text,
+                outbox_kind=OUTBOX_KIND_ALERT,
+                dedup_key=f"health:{event.component_id}",
+            )
             if message_id is not None:
                 delivered = True
                 await self._store.record_notification(
@@ -61,8 +73,14 @@ class TelegramEventDispatcher:
         delivered = False
         for sub in self._subscriptions.accepting(event.type):
             reply_to = await self._store.get_alert_message_id(event.component_id, sub.chat_id)
+            # Тот же dedup_key, что у алерта: если алерт ещё ждёт в outbox,
+            # свежий статус «восстановлено» заменяет его, а не шлётся вдогонку.
             message_id = await self._notifier.send_direct(
-                sub.chat_id, text, reply_to_message_id=reply_to
+                sub.chat_id,
+                text,
+                reply_to_message_id=reply_to,
+                outbox_kind=OUTBOX_KIND_ALERT,
+                dedup_key=f"health:{event.component_id}",
             )
             if message_id is not None:
                 delivered = True
@@ -78,6 +96,7 @@ class TelegramEventDispatcher:
         subs = self._subscriptions.accepting(event.type)
         delivered = False
         for sub in subs:
+            # Без outbox: недоставленное монитор повторит сам (handled=False).
             message_id = await self._notifier.send_direct(sub.chat_id, text)
             if message_id is not None:
                 delivered = True
@@ -94,6 +113,7 @@ class TelegramEventDispatcher:
         subs = self._subscriptions.accepting(change.event_type)
         delivered = False
         for sub in subs:
+            # Без outbox: недоставленное монитор повторит сам (handled=False).
             message_id = await self._notifier.send_direct(sub.chat_id, text)
             if message_id is not None:
                 delivered = True

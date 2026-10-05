@@ -127,6 +127,15 @@ ACTION_PROXY_LINK = "proxy_link"  # tg://proxy + t.me ссылка, host/port/se
 ACTION_PROXY_ROTATE_SECRET = "proxy_rotate_secret"  # админ: новый secret mtg, рестарт демона
 ACTION_PROXY_USAGE = "proxy_usage"  # админ: агрегатный расход прокси этот месяц + node_limit_gb
 
+# Этап 52 (автовыбор маршрута до Telegram Bot API): лёгкое чтение для бота —
+# SOCKS5-адрес этой ноды + свежая проба api.telegram.org через её reality-VLESS
+# от лица ``observer`` (нода, где живёт бот). Без QR/секретов, только чтение.
+ACTION_TELEGRAM_EGRESS = "telegram_egress"  # {observer} → {node, label, socks, check}
+# Какая строка vpn_check_states считается «здоровьем маршрута до Telegram»:
+# одна пара (transport, target) на всех — и в службе, и в тестах/боте.
+TELEGRAM_EGRESS_TRANSPORT = "reality"
+TELEGRAM_EGRESS_TARGET = "https://api.telegram.org"
+
 # Секрет, развёрнутый вручную на jeeves 2026-08-13 (см. память
 # telegram-bot-api-proxy-2026-08-13) — общий "бутстрап"-литерал для
 # vpn/service.py::_proxy_secret (сидирует БД при первом старте после

@@ -70,6 +70,14 @@ class TelegramConfig(BaseModel):
     # "socks5://100.111.4.42:1080" — на случай блокировки api.telegram.org
     # с этой ноды напрямую. Пусто — соединение без прокси (по умолчанию).
     proxy: str = ""
+    # Этап 52: «fixed» — старое поведение (маршрут задаёт только ``proxy``);
+    # «auto» — бот сам выбирает direct ↔ SOCKS5 VPN-нод роя (bot/egress.py).
+    proxy_mode: Literal["fixed", "auto"] = "fixed"
+    # Ручные кандидаты для auto («socks5://host:port»), без замера пинга —
+    # идут после замеренных нод роя.
+    extra_proxies: list[str] = Field(default_factory=list)
+    # Возвращаться на прямое соединение, как только оно стабильно живо.
+    prefer_direct: bool = True
 
 
 class DatabaseConfig(BaseModel):
