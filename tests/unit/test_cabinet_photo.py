@@ -751,3 +751,49 @@ async def test_greeting_portrait_failure_is_silent(store):
     await _drain(svc)
     assert notifier.photos == [] and notifier.sent == []
     assert svc.start_greeting_portrait(GUEST, GUEST)
+
+
+async def test_selfie_puts_alfred_into_the_same_study_light_and_mood(store):
+    """«Сфоткай себя» (2026-10-05): тот же кабинет гостя, свет и настроение
+    сцены, что у снимка кабинета, но в кадре сам Альфред — LoRA облика."""
+    link = FakeLink()
+    svc, notifier = _make(store, link)
+    await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
+    reply = await svc.tool_take_photo(
+        GUEST, GUEST, {"selfie": True, "focus": "у окна с бокалом вина"}, dialogue_id=7
+    )
+    assert reply == cabinet.TOOL_PHOTO_STARTED
+    await _drain(svc)
+    (gen,) = link.generated()
+    assert gen["mode"] == "free" and gen["loras"] == [list(cabinet.ALFRED_LORA)]
+    assert gen["description"].startswith("Main subject: Alfred")
+    assert "у окна с бокалом вина" in gen["description"]
+    assert "candlelight" in gen["description"] and "сова" in gen["description"]
+    (directive,) = link.lines()
+    assert "сфотографировал себя" in directive
+    image = await store.image_by_id(1)
+    assert json.loads(image["params"])["selfie"] is True
+    # Снимок себя — не общий вид кабинета: повторным показом не станет.
+    assert not (await cabinet.load(store, GUEST)).photos
+    assert len(notifier.photos) == 1
+    # Настроение сцены — вторая LoRA к облику, модель — от настроения.
+    await svc._state.save_run(Run("radio", GUEST, GUEST, status="active", mood="rot"))
+    await svc.tool_take_photo(GUEST, GUEST, {"selfie": True})
+    await _drain(svc)
+    gen = link.generated()[-1]
+    assert gen["model"] == "revanim"
+    assert gen["loras"] == [list(cabinet.ALFRED_LORA), ["rottech", 0.8]]
+    assert gen["description"].startswith(cabinet.SELFIE_SUBJECT_EN)
+
+
+async def test_selfie_by_word_without_flag(store):
+    link = FakeLink()
+    svc, _ = _make(store, link)
+    await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
+    await svc.tool_take_photo(GUEST, GUEST, {"focus": "себя"})
+    await _drain(svc)
+    await svc.tool_take_photo(GUEST, GUEST, {"caption": "Селфи"})
+    await _drain(svc)
+    for gen in link.generated():
+        assert gen["loras"] == [list(cabinet.ALFRED_LORA)]
+        assert gen["description"].startswith(cabinet.SELFIE_SUBJECT_EN)

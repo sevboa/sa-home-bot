@@ -356,3 +356,19 @@ async def test_generate_accepts_legacy_prompt_en(store):
     args = {"prompt_en": "a ginger cat", "prompt_ru": "рыжий кот", "caption": "Кот"}
     await image_tools.generate(_ctx(store, node_link=link), args, Remember())
     assert link.calls[0]["args"]["description"] == "a ginger cat"
+
+
+async def test_generate_alfred_himself_adds_his_lora_and_subject(store):
+    """«Нарисуй себя» (2026-10-05): alfred=true — LoRA облика и Альфред
+    первым в описании; без флага — как раньше."""
+    link = FakeNodeLink()
+    ctx = _ctx(store, node_link=link)
+    args = {"description": "на пляже в шезлонге", "prompt_ru": "ты на пляже", "alfred": True}
+    await image_tools.generate(ctx, args, Remember())
+    call = link.calls[0]["args"]
+    assert call["loras"] == [["alfred", 0.7]]
+    assert call["description"] == (
+        "Main subject: Alfred, an elderly butler in a black tailcoat. на пляже в шезлонге"
+    )
+    await image_tools.generate(ctx, dict(args, alfred=False), Remember())
+    assert "loras" not in link.calls[1]["args"]

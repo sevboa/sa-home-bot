@@ -23,6 +23,7 @@ from typing import Any
 
 from PIL import Image
 
+from sa_home_bot.bot.interactives import cabinet as cabinet_mod
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.proto.messages import Address, ProtoError
 
@@ -38,6 +39,10 @@ ACTION_GENERATE_IMAGE = "generate_image"
 _CANDIDATES = 5
 
 Remember = Callable[[str], Awaitable[None]]
+
+# «Нарисуй себя» (2026-10-05): Альфред на картинке — LoRA облика и
+# короткая примета первой; что он делает и где — из description модели.
+ALFRED_IN_PICTURE_EN = "Main subject: Alfred, an elderly butler in a black tailcoat."
 
 
 GENERATE_IMAGE_DECLARATION: dict[str, Any] = {
@@ -79,6 +84,15 @@ GENERATE_IMAGE_DECLARATION: dict[str, Any] = {
                     "type": "string",
                     "description": (
                         "Необязательно: чего на картинке быть НЕ должно, по-английски"
+                    ),
+                },
+                "alfred": {
+                    "type": "boolean",
+                    "description": (
+                        "true — на картинке ты сам, Альфред: «нарисуй себя», «а как "
+                        "бы ты выглядел на пляже», ты в придуманной сцене. Твою "
+                        "внешность подставят сами — в description пиши, что ты "
+                        "делаешь, где и какое у тебя лицо."
                     ),
                 },
             },
@@ -162,6 +176,14 @@ async def generate(ctx: Any, args: dict[str, Any], remember: Remember) -> str:
         return "недоступно: отсюда не могу прислать картинку в чат"
     if ctx.node_link is None:
         return "ошибка: нет связи с мастерской, где рисуются картинки"
+    request: dict[str, Any] = {
+        "description": description,
+        "negative": _str_arg(args, "negative_en"),
+        "chat_id": ctx.chat_id,
+    }
+    if args.get("alfred") is True or str(args.get("alfred")).lower() == "true":
+        request["description"] = f"{ALFRED_IN_PICTURE_EN} {description}"
+        request["loras"] = [list(cabinet_mod.ALFRED_LORA)]
     cfg = ctx.settings.llm
     now = datetime.now(tz=UTC)
     if cfg.imagegen_daily_limit:
@@ -176,11 +198,7 @@ async def generate(ctx: Any, args: dict[str, Any], remember: Remember) -> str:
     try:
         result = await ctx.node_link.command(
             ACTION_GENERATE_IMAGE,
-            {
-                "description": description,
-                "negative": _str_arg(args, "negative_en"),
-                "chat_id": ctx.chat_id,
-            },
+            request,
             dst=Address(node=LLM_NODE, service=LLM_SERVICE),
             timeout=cfg.imagegen_request_timeout_s,
         )
@@ -191,7 +209,7 @@ async def generate(ctx: Any, args: dict[str, Any], remember: Remember) -> str:
         chat_id=ctx.chat_id,
         author=ctx.author,
         prompt_ru=prompt_ru,
-        prompt_en=str(result.get("prompt") or description),
+        prompt_en=str(result.get("prompt") or request["description"]),
         caption=caption,
         width=int(result["width"]),
         height=int(result["height"]),

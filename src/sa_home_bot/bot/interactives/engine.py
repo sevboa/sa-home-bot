@@ -938,16 +938,22 @@ class Interactives:
         focus = " ".join(focus.split())
         caption = args.get("caption") if isinstance(args.get("caption"), str) else ""
         caption = " ".join(caption.split())[:80]
+        selfie = args.get("selfie") is True or str(args.get("selfie")).lower() == "true"
+        # «Сними себя» словом в focus/caption без selfie — тоже снимок себя.
+        if cabinet_mod.SELFIE_FOCUS_RE.match(focus):
+            selfie, focus = True, ""
+        elif not focus and cabinet_mod.SELFIE_FOCUS_RE.match(caption):
+            selfie = True
         # Модель не всегда заполняет focus/expect: «Вид из окна» только в
         # подписи давал общий вид кабинета, а меч без expect — несверенную
         # тарелку. Подпись о конкретном — это и есть focus, focus — то, что
         # должно выйти на снимке.
         if GENERAL_VIEW_RE.match(focus):
             focus = ""
-        elif not focus and caption and not GENERAL_VIEW_RE.match(caption):
+        elif not focus and caption and not selfie and not GENERAL_VIEW_RE.match(caption):
             focus = caption
-        caption = caption or PHOTO_CAPTION
-        if await self._wants_stored_item(user_id, f"{focus} {caption}"):
+        caption = caption or (cabinet_mod.SELFIE_CAPTION if selfie else PHOTO_CAPTION)
+        if not selfie and await self._wants_stored_item(user_id, f"{focus} {caption}"):
             await self.tool_manor_items(
                 chat_id,
                 user_id,
@@ -970,7 +976,7 @@ class Interactives:
         if cab.features:
             shot = await self._item_shot(chat_id, user_id, "", draw=False)
             reuse_key = photo_state_key(cab, outside, shot)
-        if not focus and not happening and not expect and reuse_key in cab.photos:
+        if not selfie and not focus and not happening and not expect and reuse_key in cab.photos:
             image = await self._store.image_by_id(cab.photos[reuse_key])
             # Тот же кадр в тот же чат второй раз — дубль: просят снова —
             # снимаем заново (живая находка 2026-10-02).
@@ -1006,6 +1012,7 @@ class Interactives:
             dialogue_id=dialogue_id,
             # Где Альфред (и какой передатчик на столе) — к рассказу о снимке.
             describe=await self._where_ru(cab, user_id, in_scene=in_scene),
+            selfie=selfie,
         )
         if not started:
             return cabinet_mod.TOOL_PHOTO_UNAVAILABLE
@@ -1086,6 +1093,7 @@ class Interactives:
         expect: list[str] | None = None,
         dialogue_id: int | None = None,
         describe: str | None = None,
+        selfie: bool = False,
     ) -> bool:
         """Снимок в фоне. False — не начат: уже идёт другой или нет связи."""
         if chat_id in self._photo_busy or not hasattr(self._notifier, "send_photo_ex"):
@@ -1107,6 +1115,7 @@ class Interactives:
                 expect=expect,
                 dialogue_id=dialogue_id,
                 describe=describe,
+                selfie=selfie,
             )
         )
         self._photo_tasks.add(task)
@@ -1184,6 +1193,7 @@ class Interactives:
         expect: list[str] | None = None,
         dialogue_id: int | None = None,
         describe: str | None = None,
+        selfie: bool = False,
     ) -> None:
         delivered = False
         if describe is not None:
@@ -1202,6 +1212,7 @@ class Interactives:
                 expect=expect,
                 dialogue_id=dialogue_id,
                 describe=describe,
+                selfie=selfie,
             )
         except Exception:
             log.exception("interactives: снимок кабинета не удался (chat=%s)", chat_id)
@@ -1387,8 +1398,10 @@ class Interactives:
         expect: list[str] | None = None,
         dialogue_id: int | None = None,
         describe: str | None = None,
+        selfie: bool = False,
     ) -> bool:
-        """Снимок нарисован и отправлен — True."""
+        """Снимок нарисован и отправлен — True. ``selfie`` — в кадре сам
+        Альфред (LoRA облика) в том же кабинете, свете и сцене."""
         node_link = self._get_node_link()
         if node_link is None:
             return False
@@ -1409,18 +1422,22 @@ class Interactives:
             )
             if cab.add(list(new)):
                 await cabinet_mod.save(self._store, cab)
-        shot = await self._item_shot(chat_id, user_id, focus, draw=True)
-        description, context = photo_description(
-            cab,
-            outside,
-            focus,
-            happening,
-            item=shot.kind if shot else None,
-            item_place=shot.place if shot else None,
-        )
+        # Себя — без вставки предмета пикселями: место в кадре занимает Альфред.
+        shot = None if selfie else await self._item_shot(chat_id, user_id, focus, draw=True)
+        if selfie:
+            description, context = selfie_description(cab, outside, focus, happening), ""
+        else:
+            description, context = photo_description(
+                cab,
+                outside,
+                focus,
+                happening,
+                item=shot.kind if shot else None,
+                item_place=shot.place if shot else None,
+            )
         request: dict[str, Any] = {
             "description": description,
-            "mode": "scene" if focus else "free",
+            "mode": "scene" if focus and not selfie else "free",
             "context": context,
             "chat_id": chat_id,
             # Этап 49.2.1: mycraft сохранит 512-оригинал и сверит его зрением.
@@ -1438,11 +1455,14 @@ class Interactives:
         if emphasize:
             request["emphasize"] = emphasize
             log.info("interactives: пересъёмка, упор на %s (chat=%s)", emphasize, chat_id)
+        loras: list[list[Any]] = [list(cabinet_mod.ALFRED_LORA)] if selfie else []
         preset = MOOD_PRESETS.get(mood or "")
         if preset is not None:
             model, lora, weight = preset
             request["model"] = model
-            request["loras"] = [[lora, weight]]
+            loras.append([lora, weight])
+        if loras:
+            request["loras"] = loras
         if shot is not None:
             # Этап 49.3: предмет — пикселями поверх готовой сцены.
             request["paste"] = {"key": shot.key, "place": shot.place, "hint": shot.kind.paste_hint}
@@ -1490,6 +1510,7 @@ class Interactives:
                     "user_id": user_id,
                     "state": state,
                     "focus": focus,
+                    "selfie": selfie,
                     "mood": mood,
                     "seed": result.get("seed"),
                     "expect": list(expect or []),
@@ -1517,7 +1538,7 @@ class Interactives:
                 chat_id,
                 user_id,
                 photo_line_directive(
-                    focus,
+                    photo_subject(focus, selfie=selfie),
                     seen or focus or cab.describe_ru(),
                     describe,
                     missing if seen else [],
@@ -1554,7 +1575,7 @@ class Interactives:
                 )
             # Промах — не общий вид кабинета: повторно его не показываем.
             return True
-        if not focus and not happening:
+        if not focus and not happening and not selfie:
             cab = await cabinet_mod.load(self._store, user_id)
             cab.remember_photo(photo_state_key(cab, outside, shot), image_id)
             await cabinet_mod.save(self._store, cab)
@@ -2530,12 +2551,38 @@ def photo_description(
     return " ".join(parts), ""
 
 
-def portrait_description(cab: Cabinet, outside: Outside) -> str:
+def photo_subject(focus: str, *, selfie: bool) -> str:
+    """Что снято — словами для подписи (photo_line_directive)."""
+    if not selfie:
+        return focus
+    if focus:
+        return cabinet_mod.PHOTO_SUBJECT_SELF_DOING.format(focus=focus)
+    return cabinet_mod.PHOTO_SUBJECT_SELF
+
+
+def selfie_description(
+    cab: Cabinet, outside: Outside, focus: str, happening: str | None
+) -> str:
+    """Снимок себя (take_photo selfie): Альфред и что он делает — первым,
+    случившееся в сцене — следом, дальше как у портрета."""
+    subject = (
+        cabinet_mod.SELFIE_ACTION_EN.format(action=focus.rstrip(" ."))
+        if focus
+        else cabinet_mod.SELFIE_SUBJECT_EN
+    )
+    if happening:
+        subject += f" Just happened around him: {happening}."
+    return portrait_description(cab, outside, subject=subject)
+
+
+def portrait_description(
+    cab: Cabinet, outside: Outside, *, subject: str = cabinet_mod.PORTRAIT_SUBJECT_EN
+) -> str:
     """Описание портрета к приветствию для промптера: сам Альфред первым,
     потом свет (время суток и погода — как у снимков кабинета), потом
     обстановка гостя. Особенностей — меньше, чем у снимка: место в 77
     токенах CLIP занимает Альфред."""
-    parts = [cabinet_mod.PORTRAIT_SUBJECT_EN, f"Light: {outside.en()}."]
+    parts = [subject, f"Light: {outside.en()}."]
     features = cab.visible_features()[-1:]
     if features:
         parts.append("Also visible: " + "; ".join(features) + ".")
