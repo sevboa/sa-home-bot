@@ -11,7 +11,8 @@
   версии, не больше ``HISTORY_KEEP``. Нужны на случай пересборки источника:
   свежий пустой сервер сразу публикует НОВУЮ identity, и без истории она
   затёрла бы ровно ту копию, ради которой бэкап и существует;
-- подэтап (c) кладёт сюда же ``<нода>/snapshots/…`` (динамика ``vpn_peers``).
+- ``<нода>/snapshots/…`` — динамика ``vpn_peers`` и квоты (подэтап (c), см. константы
+  ниже и ``backup/snapshot.py``).
 
 Расшифровать это может только alfred (приватный ключ есть лишь у него).
 """
@@ -37,6 +38,31 @@ HISTORY_KEEP = 5
 
 _SAFE = re.compile(r"[^A-Za-z0-9._-]")
 
+# Снапшоты VPN-БД (39.0.8(c)): ``<нода>/snapshots/latest.sealed`` + ``latest.meta.json``
+# (rev, hash, taken_at, stored_at, rows по таблицам, empty), ``history/snapshot.<stored_at>
+# .sealed`` — предыдущие, не больше SNAPSHOT_HISTORY_KEEP; ``last_nonempty.sealed`` —
+# последний снапшот С пирами, его пустые не вытесняют: пересобранная нода с пустой БД
+# публикует пустой снапшот, и без этого он за SNAPSHOT_HISTORY_KEEP циклов выдавил бы
+# из истории ровно ту копию, ради которой бэкап и нужен.
+SNAPSHOTS_DIR = "snapshots"
+SNAPSHOT_FILE = "latest.sealed"
+SNAPSHOT_META_FILE = "latest.meta.json"
+SNAPSHOT_NONEMPTY_FILE = "last_nonempty.sealed"
+SNAPSHOT_NONEMPTY_META_FILE = "last_nonempty.meta.json"
+SNAPSHOT_HISTORY_KEEP = 24
+
+
+def snapshot_is_empty(meta: dict) -> bool:
+    """В снапшоте нет ни одной строки vpn_peers (по счётчикам в meta)."""
+    return int((meta.get("rows") or {}).get("vpn_peers", 0)) == 0
+
+
+def _read_meta(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
 
 def backups_dir(state_path: str | Path) -> Path:
     """Каталог бэкапов рядом с node-state.json (``./data/backups``)."""
@@ -45,6 +71,12 @@ def backups_dir(state_path: str | Path) -> Path:
 
 @dataclass(frozen=True)
 class StoredIdentity:
+    blob: bytes
+    meta: dict
+
+
+@dataclass(frozen=True)
+class StoredSnapshot:
     blob: bytes
     meta: dict
 
@@ -93,6 +125,58 @@ class BackupStore:
         """Архивные блобы, старые первыми."""
         hist = self.node_dir(node) / HISTORY_DIR
         return sorted(hist.glob("identity.*.sealed")) if hist.exists() else []
+
+    # --- снапшоты VPN-БД (39.0.8(c)) ---
+
+    def snapshots_dir(self, node: str) -> Path:
+        return self.node_dir(node) / SNAPSHOTS_DIR
+
+    def save_snapshot(self, node: str, blob: bytes, meta: dict) -> None:
+        """Принять снапшот; прежний — в историю; непустой — ещё и в last_nonempty."""
+        d = self.snapshots_dir(node)
+        cur, cur_meta = d / SNAPSHOT_FILE, d / SNAPSHOT_META_FILE
+        if cur.exists():
+            stamp = _SAFE.sub("_", _read_meta(cur_meta).get("stored_at", ""))
+            stamp = stamp or datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%S%f")
+            hist = d / HISTORY_DIR
+            atomic_write(hist / f"snapshot.{stamp}.sealed", cur.read_bytes())
+            if cur_meta.exists():
+                atomic_write(hist / f"snapshot.{stamp}.meta.json", cur_meta.read_bytes())
+            for old in self.snapshot_history(node)[:-SNAPSHOT_HISTORY_KEEP]:
+                old.unlink(missing_ok=True)
+                old.with_name(old.name[: -len(".sealed")] + ".meta.json").unlink(missing_ok=True)
+        empty = snapshot_is_empty(meta)
+        info = {**meta, "stored_at": datetime.now(tz=UTC).isoformat(), "empty": empty}
+        raw = json.dumps(info, ensure_ascii=False, indent=2).encode("utf-8")
+        atomic_write(cur, blob)
+        atomic_write(cur_meta, raw)
+        if not empty:
+            atomic_write(d / SNAPSHOT_NONEMPTY_FILE, blob)
+            atomic_write(d / SNAPSHOT_NONEMPTY_META_FILE, raw)
+        log.info(
+            "Бэкап снапшота БД ноды %s сохранён (ревизия %s, пиров %s)",
+            node, meta.get("rev"), (meta.get("rows") or {}).get("vpn_peers"),
+        )
+
+    def load_snapshot(self, node: str) -> StoredSnapshot | None:
+        d = self.snapshots_dir(node)
+        if not (d / SNAPSHOT_FILE).exists():
+            return None
+        return StoredSnapshot((d / SNAPSHOT_FILE).read_bytes(), _read_meta(d / SNAPSHOT_META_FILE))
+
+    def load_last_nonempty(self, node: str) -> StoredSnapshot | None:
+        d = self.snapshots_dir(node)
+        if not (d / SNAPSHOT_NONEMPTY_FILE).exists():
+            return None
+        return StoredSnapshot(
+            (d / SNAPSHOT_NONEMPTY_FILE).read_bytes(),
+            _read_meta(d / SNAPSHOT_NONEMPTY_META_FILE),
+        )
+
+    def snapshot_history(self, node: str) -> list[Path]:
+        """Архивные снапшоты, старые первыми."""
+        hist = self.snapshots_dir(node) / HISTORY_DIR
+        return sorted(hist.glob("snapshot.*.sealed")) if hist.exists() else []
 
     def _archive_current(self, node: str) -> None:
         cur, cur_meta = self.identity_path(node), self.meta_path(node)

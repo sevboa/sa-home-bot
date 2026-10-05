@@ -47,6 +47,8 @@ from pathlib import Path
 from typing import Any
 
 from sa_home_bot import __version__
+from sa_home_bot.backup.snapshot import TRIGGER_ACTIONS as SNAPSHOT_TRIGGER_ACTIONS
+from sa_home_bot.backup.snapshot import SnapshotBackup
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
@@ -311,6 +313,8 @@ class VpnService:
         # которые конструируют службу напрямую — тогда рассылка тихо
         # логирует предупреждение и ничего не делает.
         self._node_link = node_link
+        # Бэкап снапшота БД напарнику (39.0.8(c), backup/snapshot.py); ставит app.py.
+        self.backup: SnapshotBackup | None = None
 
     def _has(self, transport: str) -> bool:
         return transport in self._transports
@@ -456,6 +460,10 @@ class VpnService:
                 ActionSpec(id=ACTION_PROXY_ROTATE_SECRET, title="🔁 Сменить секрет прокси"),
                 ActionSpec(id=ACTION_PROXY_USAGE, title="📊 Расход прокси"),
             ]
+        if self.backup is not None:  # служебное, не для UI (backup/snapshot.py)
+            for spec in self.backup.action_specs():
+                capabilities.append(spec.id)
+                actions.append(spec)
         return ServiceDescription(
             info=ServiceInfo(node=self._node, service=SERVICE_NAME, version=__version__),
             capabilities=tuple(capabilities),
@@ -1882,6 +1890,16 @@ class VpnService:
     # --- диспетчер ---
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
+        if self.backup is not None:
+            own = await self.backup.handle(action, args)
+            if own is not None:
+                return own
+        result = await self._run_command(action, args)
+        if self.backup is not None and action in SNAPSHOT_TRIGGER_ACTIONS:
+            self.backup.touch()  # БД изменилась — снапшот напарнику вне очереди
+        return result
+
+    async def _run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if action == ACTION_PEERS:
             return await self._peers(args)
         if action == ACTION_ISSUE:

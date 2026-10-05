@@ -1192,6 +1192,12 @@ class BackupConfig(BaseModel):
     partner: str = ""
     # xray-конфиг этой ноды — оттуда берутся Reality privateKey/shortIds.
     xray_config: str = "~/.config/xray/config.json"
+    # Снапшот VPN-БД (39.0.8(c)): запечатанную копию пересобирать не чаще раза в
+    # snapshot_interval_s, после изменяющей команды (issue/revoke/…) — через debounce;
+    # напарник опрашивает источник раз в snapshot_poll_s (и сразу по poke).
+    snapshot_interval_s: float = 600.0
+    snapshot_debounce_s: float = 15.0
+    snapshot_poll_s: float = 300.0
 
 
 class LoggingConfig(BaseModel):

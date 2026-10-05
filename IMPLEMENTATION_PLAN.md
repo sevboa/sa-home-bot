@@ -3020,10 +3020,40 @@ PublicKey = <ключ jeeves>` + `Endpoint = <IP jeeves>` — невалидно
     -> StoredIdentity(blob, meta)`. Сюда же (c) кладёт `<нода>/snapshots/…`.
     Параллельно та же копия лежит в `instances/vpn-identity.<src>.toml` (носитель
     репликации). Тесты: `tests/unit/test_backup_identity.py`.
-  - ⬜ **(c) динамический снапшот** — дамп `vpn_peers`, `vpn_counters`,
-    `vpn_peer_usage`, `vpn_chat_access`, `vpn_quota_*`, запечатан, адресно
-    напарнику раз в час и после `issue`/`revoke`/`grant_extra`; у
-    напарника хранятся последние N копий.
+  - ✅ **(c) динамический снапшот VPN-БД** (не задеплоен). `backup/snapshot.py`:
+    `SNAPSHOT_FORMAT = "sa-home-bot/vpn-snapshot/1"`; документ
+    `{format, node, tables:{<таблица>:{columns:[…], rows:[[…]]}}}` (колонки = схема,
+    строки по PK; `canonical_bytes` → хеш `plain_hash`; затем zlib + `sealed.seal`;
+    `open_snapshot(priv, blob)` — обратно). `SNAPSHOT_TABLES`: `vpn_peers`,
+    `vpn_chat_access`, `vpn_counters`, `vpn_peer_usage`, `vpn_quota_state`,
+    `vpn_quota_grants`, `vpn_requests`, `proxy_state` (секрет mtg). НЕ берём
+    `vpn_check_states` (оперативное, пересоздаётся за цикл проверок) и `vpn_apk`
+    (кэш). **Пиры awg `[Peer]` и клиенты xray в снапшот не кладём:**
+    `VpnService.reconcile()` (при старте службы и каждом тике сэмплера) пересоздаёт
+    их из `vpn_peers` (active) ∩ `vpn_chat_access` (допуск) минус исчерпавшие
+    квоту — значит для восстановления нужна именно БД. Доставка — **pull
+    напарника** (устойчиво к пропущенным событиям, как у репликатора), действия
+    службы `vpn`: `backup_snapshot_get {have_hash}` → `{unchanged}` либо
+    `{hash, meta, sealed(base64)}` (объявляется при наличии ключа+partner) и
+    `backup_snapshot_poke` (у приёмника: «иди за новым», быстрый триггер).
+    Источник `SnapshotSource`: пересборка не чаще `[backup].snapshot_interval_s`
+    (600) и только при смене хеша открытого текста (иначе тот же блоб);
+    `touch()` после `issue/reissue/revoke/set_quota/set_access/grant_extra/
+    request_extra/resolve_request` (`TRIGGER_ACTIONS`) — через
+    `snapshot_debounce_s` (15) пересборка вне очереди + poke напарнику. Приёмник
+    `SnapshotReceiver` (нода с `[backup].partner`): опрос раз в
+    `snapshot_poll_s` (300) или по poke, принимает только от напарника
+    (`meta.source == partner`). Хранение: `BackupStore.save_snapshot/load_snapshot/
+    load_last_nonempty/snapshot_history`, `<нода>/snapshots/latest.sealed` +
+    `latest.meta.json` (`source, format, rev, hash, taken_at, stored_at, rows{таблица:
+    число, vpn_peers_active}, empty`), `history/snapshot.<stored_at>.sealed`
+    (+meta, последние `SNAPSHOT_HISTORY_KEEP`=24), 0600. **Защита от затирания:**
+    снапшот без пиров принимается (это правда о ноде), но
+    `last_nonempty.sealed`+`.meta.json` хранит последний снапшот С пирами и
+    пустыми не вытесняется. Подключение: `vpn/app.py` (`build_backup` →
+    `service.backup`, `start/stop`), `vpn/service.py` (атрибут `backup`, объявление
+    действий в `describe`, `run_command` стал обёрткой над `_run_command`).
+    Тесты: `tests/unit/test_backup_snapshot.py` (14).
   - ⬜ **(d) восстановление** — `nodectl`-команда на alfred: забрать
     бэкап у напарника, расшифровать, применить на пересобранной ноде (тот
     же `node_id`/IP) ДО генерации нового keypair; dry-run в каталог;

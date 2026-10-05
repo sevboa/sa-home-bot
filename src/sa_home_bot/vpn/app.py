@@ -15,15 +15,17 @@ import asyncio
 import contextlib
 import logging
 
+from sa_home_bot.backup.snapshot import build_backup
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
+from sa_home_bot.proto.messages import Address
 from sa_home_bot.proto.server import ProtoServer
 from sa_home_bot.reality.xray import RealXrayBackend
 from sa_home_bot.utils.lifespan import Lifespan
 from sa_home_bot.vpn.awg import RealAwgBackend
-from sa_home_bot.vpn.protocol import TRANSPORT_AWG, TRANSPORT_REALITY
+from sa_home_bot.vpn.protocol import SERVICE_NAME, TRANSPORT_AWG, TRANSPORT_REALITY
 from sa_home_bot.vpn.service import VpnService
 
 log = logging.getLogger(__name__)
@@ -72,6 +74,17 @@ async def run_vpn(settings: Settings) -> None:
     service = VpnService(
         settings, db, backend, emit, node_link=node_link, reality_backend=reality_backend
     )
+    # Бэкап снапшота БД у напарника (39.0.8(c)): выключен без [backup].partner.
+    partner = settings.backup.partner.strip()
+
+    async def ask_partner(action: str, args: dict) -> dict:
+        return await node_link.command(
+            action, args, dst=Address(node=partner, service=SERVICE_NAME), timeout=20.0
+        )
+
+    service.backup = build_backup(settings, lambda: db.conn, settings.node.id, ask_partner)
+    if service.backup is not None:
+        await service.backup.start()
     await service.backfill_server()
     # Строго до reconcile ниже: иначе первый же реконсайл снял бы с интерфейса
     # пиры всех, кому допуск ещё не проставлен.
@@ -107,6 +120,8 @@ async def run_vpn(settings: Settings) -> None:
         for task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        if service.backup is not None:
+            await service.backup.stop()
         await server.stop()
         await node_link.stop()
         await db.close()
