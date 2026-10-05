@@ -1336,3 +1336,27 @@ async def test_card_shows_unavailable_server_to_admin_only(monkeypatch):
     assert [d["node"] for d in down] == ["wooster"]
     _error, _servers, down = await vpn_handlers._card(object(), 777, guest)
     assert down == []
+
+
+# --- детектор сломанных устройств (39.0.8(e)) ---
+
+
+def test_card_marks_broken_device_with_wrench_and_reissue_hint():
+    server = _server(devices=[{"device_label": "Rose", "server": "jeeves", "broken": True}])
+    text = vpn_handlers._usage_text([server])
+    assert "🔧 «Rose» не отвечает" in text and "перевыпустите" in text
+
+
+def test_card_does_not_mark_healthy_or_old_node_device():
+    healthy = {"device_label": "Rose", "server": "jeeves", "broken": False}
+    old_node = {"device_label": "Lily", "server": "jeeves"}  # поля нет — нода старая
+    text = vpn_handlers._usage_text([_server(devices=[healthy, old_node])])
+    assert "🔧" not in text
+
+
+def test_card_unavailable_server_shows_no_wrench():
+    text = vpn_handlers._usage_text(
+        [_server(devices=[{"device_label": "Rose", "server": "jeeves", "broken": False}])],
+        unavailable=[{"node": "wooster", "label": "🇺🇸 США"}],
+    )
+    assert "🔌 Сервер недоступен" in text and "🔧" not in text

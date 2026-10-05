@@ -668,6 +668,53 @@ class VpnService:
             for row in await cur.fetchall()
         ]
 
+    async def _mark_broken(
+        self, chat_id: int, devices: list[dict[str, Any]], *, withheld: bool
+    ) -> list[dict[str, Any]]:
+        """``broken: True`` у устройств, которых реально нет на сервере (39.0.8(e)).
+
+        Сверка с ФАКТОМ (интерфейс awg / клиенты xray), а не с БД. ``withheld`` —
+        пиры гостя сняты за квоту или допуск: reconcile держит их вне интерфейса
+        намеренно, это не поломка. Любая неясность (сбой чтения, пир без
+        ключа) — не ломаем: ложное «перевыпустите» хуже молчания.
+        """
+        for device in devices:
+            device["broken"] = False
+        cur = await self._db.conn.execute(
+            "SELECT device_label, transport, public_key, address, server_pubkey "
+            "FROM vpn_peers WHERE chat_id = ? AND status = 'active'",
+            (chat_id,),
+        )
+        rows = {row["device_label"]: row for row in await cur.fetchall()}
+        try:
+            live_awg = (
+                set((await self._backend.transfer()).keys()) if self._has(TRANSPORT_AWG) else None
+            )
+            live_r = (
+                await self._reality.list_clients()
+                if self._reality is not None and self._reality_cfg is not None
+                else None
+            )
+            live_key = await self._server_public_key() if self._has(TRANSPORT_AWG) else None
+        except Exception:  # noqa: BLE001 — не смогли прочитать факт: не судим
+            log.warning("vpn: сверка пиров с сервером не удалась", exc_info=True)
+            return devices
+        for device in devices:
+            row = rows.get(device["device_label"])
+            if row is None:
+                continue
+            if (row["transport"] or TRANSPORT_AWG) == TRANSPORT_AWG:
+                if live_awg is None:
+                    continue
+                stale_key = bool(row["server_pubkey"] and live_key) and (
+                    row["server_pubkey"] != live_key
+                )
+                missing = not withheld and row["public_key"] not in live_awg
+                device["broken"] = bool(stale_key or missing)
+            elif live_r is not None and not withheld:
+                device["broken"] = row["address"] not in live_r
+        return devices
+
     # --- миграция данных ---
 
     async def backfill_server(self) -> None:
@@ -818,14 +865,24 @@ class VpnService:
         if transport == TRANSPORT_AWG:
             private_key, public_key = await self._backend.generate_keypair()
             address = _allocate_address(self._cfg.subnet, await self._active_addresses())
+            server_pub = await self._server_public_key()
             await self._db.conn.execute(
                 "INSERT INTO vpn_peers (chat_id, device_label, transport, public_key, address, "
-                "status, created_at, server) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)",
-                (chat_id, device_label, TRANSPORT_AWG, public_key, address, now, self._node),
+                "status, created_at, server, server_pubkey) "
+                "VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)",
+                (
+                    chat_id,
+                    device_label,
+                    TRANSPORT_AWG,
+                    public_key,
+                    address,
+                    now,
+                    self._node,
+                    server_pub,
+                ),
             )
             await self._db.conn.commit()
             await self._backend.add_peer(public_key, address)
-            server_pub = await self._server_public_key()
             conf = _render_client_conf(self._cfg, private_key, address, server_pub)
             artifacts: dict[str, Any] = {
                 "config_text": conf,
@@ -986,7 +1043,13 @@ class VpnService:
                     self._cfg.base_quota_gb * GB if base_bytes is None else int(base_bytes)
                 ),
                 "personal_base": base_bytes is not None,
-                "devices": await self._peers_for_chat(chat_id),
+                # `broken` — пира нет на живом сервере (39.0.8(e)); для
+                # снятого за квоту/допуск гостя не выставляется.
+                "devices": await self._mark_broken(
+                    chat_id,
+                    await self._peers_for_chat(chat_id),
+                    withheld=state["blocked_at"] is not None or not allowed,
+                ),
                 # Транспорты этой ноды — карточка /vpn по ним решает, показывать
                 # ли выбор технологии при «➕ Новое устройство».
                 "transports": list(self._transports),

@@ -135,6 +135,14 @@ def _server_label(server: dict) -> str:
 
 
 def _device_line(device: dict) -> str:
+    # Пира нет на живом сервере (vpn/service.py::_mark_broken, 39.0.8(e)):
+    # конфиг гостя уже не сработает, поможет только перевыпуск. Поле нет —
+    # нода старая, и «сломано» мы не утверждаем.
+    if device.get("broken"):
+        return (
+            f"• 🔧 «{html.escape(device['device_label'])}» не отвечает — "
+            "сервер его не помнит, перевыпустите"
+        )
     handshake = device.get("last_handshake_at")
     seen = (
         f", было на связи {handshake[:16].replace('T', ' ')}"

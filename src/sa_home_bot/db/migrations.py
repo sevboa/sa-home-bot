@@ -46,6 +46,9 @@ async def apply_migrations(db: Database) -> None:
     # (VLESS+Reality). DEFAULT 'awg' верно бэкфиллит все существующие пиры
     # (до этого транспорт был только один — AmneziaWG). См. schema.sql.
     await _add_column_if_missing(db, "vpn_peers", "transport", "TEXT NOT NULL DEFAULT 'awg'")
+    # vpn_peers.server_pubkey — добавлена 2026-10-05 (39.0.8(e)): ключ awg-сервера
+    # на момент выдачи, для детектора сломанных устройств. См. schema.sql.
+    await _add_column_if_missing(db, "vpn_peers", "server_pubkey", "TEXT")
     # vpn_check_states: PK (node, target) → (node, server, transport, target) —
     # этап 39.0.7, 2026-09-18 (несколько VPN-серверов и транспортов). Старую
     # форму таблицы (без server/transport) ALTER TABLE не спасает — PK не

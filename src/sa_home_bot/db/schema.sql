@@ -412,7 +412,10 @@ CREATE TABLE IF NOT EXISTS vpn_peers (
     created_at         TEXT NOT NULL,
     revoked_at         TEXT,
     last_handshake_at  TEXT,
-    server             TEXT
+    server             TEXT,
+    -- awg: публичный ключ сервера на момент выдачи (39.0.8(e)): ушедший
+    -- ключ значит, что гостевой конфиг протух. NULL — старый пир, не судим.
+    server_pubkey      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_vpn_peers_chat ON vpn_peers(chat_id);
 

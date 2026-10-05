@@ -1023,3 +1023,71 @@ async def test_reality_quota_block_reconciles_both_transports(env_both):
     assert awg.peers == {}
     assert any(n == vpn_protocol.EVENT_VPN_QUOTA_EXCEEDED for n, _ in events)
     _ = awg_res
+
+
+# --- детектор сломанных устройств (39.0.8(e)) ---
+
+
+async def _usage_devices(svc: VpnService) -> list[dict]:
+    result = await svc.run_command(vpn_protocol.ACTION_USAGE, {"chat_id": CHAT})
+    return result["devices"]
+
+
+async def test_usage_device_alive_on_interface_is_not_broken(env):
+    svc, _backend, _events = env
+    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
+    assert [d["broken"] for d in await _usage_devices(svc)] == [False]
+
+
+async def test_usage_device_missing_from_interface_is_broken(env):
+    svc, backend, _events = env
+    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
+    backend.peers.clear()  # интерфейс пуст, БД помнит
+    assert [d["broken"] for d in await _usage_devices(svc)] == [True]
+
+
+async def test_usage_device_withheld_for_access_is_not_broken(env):
+    svc, backend, _events = env
+    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
+    await svc.run_command(vpn_protocol.ACTION_SET_ACCESS, {"chat_id": CHAT, "allowed": False})
+    await svc.reconcile()  # допуск снят — пира сняли с интерфейса намеренно
+    assert backend.peers == {}
+    assert [d["broken"] for d in await _usage_devices(svc)] == [False]
+
+
+async def test_usage_device_withheld_for_quota_is_not_broken(env):
+    svc, backend, _events = env
+    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
+    backend.set_traffic(next(iter(backend.peers)), rx=GB, tx=0)
+    await svc.sample_once()  # квота исчерпана — реконсайлер снял пира
+    assert backend.peers == {}
+    assert [d["broken"] for d in await _usage_devices(svc)] == [False]
+
+
+async def test_usage_device_issued_under_old_server_key_is_broken(env):
+    svc, backend, _events = env
+    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
+    svc._server_pubkey = None
+    backend.server_pub = "new-server-pubkey"  # сервер пересобран с новым ключом
+    assert [d["broken"] for d in await _usage_devices(svc)] == [True]
+
+
+async def test_usage_old_peer_without_recorded_key_is_not_judged_by_key(env):
+    svc, backend, _events = env
+    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
+    await svc._db.conn.execute("UPDATE vpn_peers SET server_pubkey = NULL")
+    await svc._db.conn.commit()
+    svc._server_pubkey = None
+    backend.server_pub = "new-server-pubkey"
+    assert [d["broken"] for d in await _usage_devices(svc)] == [False]
+
+
+async def test_usage_unreadable_interface_is_not_broken(env):
+    svc, backend, _events = env
+    await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
+
+    async def boom():
+        raise RuntimeError("awg show упал")
+
+    backend.transfer = boom
+    assert [d["broken"] for d in await _usage_devices(svc)] == [False]
