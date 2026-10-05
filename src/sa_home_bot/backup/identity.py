@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from sa_home_bot.backup import sealed
+from sa_home_bot.backup.hold import HOLD_HINT, publish_allowed
 from sa_home_bot.config import Settings
 from sa_home_bot.node.instances import InstanceStore, atomic_write
 from sa_home_bot.vpn import protocol as vpn_protocol
@@ -160,6 +161,7 @@ class IdentityPublisher:
         self._read_awg = read_awg_private_key
         self._read_xray = read_xray or (lambda: read_xray_config(settings.backup.xray_config))
         self._recipient = sealed.load_key(settings.backup.recipient_public_key)
+        self._held_logged = False
 
     def _src_path(self) -> Path | None:
         pkg = self._store.package_path(IDENTITY_SERVICE, self._node_id)
@@ -171,8 +173,15 @@ class IdentityPublisher:
         Ревизию поднимает уже ``InstanceStore.refresh`` (его зовёт репликатор
         сразу после этого хука) — по смене содержимого файла. True — файл
         переписан. Ошибка сбора НЕ затирает прежний пакет: частичная identity
-        хуже прошлой полной.
+        хуже прошлой полной. Пока нет маркера «публикация разрешена»
+        (``backup/hold.py``) — не публикуем вовсе: пересобранная нода иначе
+        вытеснила бы у напарника копию, ради которой всё затевалось.
         """
+        if not publish_allowed(self._settings):
+            if not self._held_logged:
+                log.warning("Бэкап identity: %s", HOLD_HINT)
+                self._held_logged = True
+            return False
         awg_key = None
         transports = self._settings.vpn.transports or [vpn_protocol.TRANSPORT_AWG]
         try:

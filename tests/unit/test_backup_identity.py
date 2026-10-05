@@ -7,6 +7,7 @@ import json
 import pytest
 
 from sa_home_bot.backup import sealed
+from sa_home_bot.backup.hold import allow_publish
 from sa_home_bot.backup.identity import (
     IDENTITY_SERVICE,
     IdentityError,
@@ -39,7 +40,9 @@ XRAY = {
 }
 
 
-def _settings(tmp_path, *, node="jeeves", partner="wooster", pub=True, reality=True, jc=5):
+def _settings(
+    tmp_path, *, release=True, node="jeeves", partner="wooster", pub=True, reality=True, jc=5
+):
     vpn = VpnConfig(
         endpoint_host="1.2.3.4",
         jc=jc,
@@ -47,13 +50,16 @@ def _settings(tmp_path, *, node="jeeves", partner="wooster", pub=True, reality=T
         reality=RealityTransportConfig(server_public_key="PUBK", short_id="ab12")
         if reality else None,
     )
-    return Settings(
+    settings = Settings(
         vpn=vpn,
         backup=BackupConfig(
             recipient_public_key=sealed.dump_key(PUB) if pub else "", partner=partner
         ),
         node={"id": node, "state_path": str(tmp_path / node / "data" / "node-state.json")},
     )
+    if release:
+        allow_publish(settings, "test")
+    return settings
 
 
 class AwgKey:

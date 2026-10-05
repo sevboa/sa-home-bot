@@ -8,6 +8,7 @@ import pytest
 import pytest_asyncio
 
 from sa_home_bot.backup import sealed
+from sa_home_bot.backup.hold import allow_publish
 from sa_home_bot.backup.snapshot import (
     ACTION_GET_SNAPSHOT,
     ACTION_SNAPSHOT_POKE,
@@ -32,14 +33,17 @@ PRIV, PUB = sealed.generate_keypair()
 CHAT = 111
 
 
-def _settings(tmp_path, *, node="jeeves", partner="wooster", pub=True, **backup):
-    return Settings(
+def _settings(tmp_path, *, release=True, node="jeeves", partner="wooster", pub=True, **backup):
+    settings = Settings(
         vpn=VpnConfig(endpoint_host="203.0.113.9", subnet="10.9.0.0/29", base_quota_gb=1),
         backup=BackupConfig(
             recipient_public_key=sealed.dump_key(PUB) if pub else "", partner=partner, **backup
         ),
         node={"id": node, "state_path": str(tmp_path / node / "data" / "node-state.json")},
     )
+    if release:
+        allow_publish(settings, "test")
+    return settings
 
 
 @pytest_asyncio.fixture
@@ -235,9 +239,10 @@ async def test_disabled_without_partner_or_key(db, tmp_path):
     no_key = build_backup(_settings(tmp_path, pub=False), lambda: db.conn, "jeeves", ask)
     assert no_key is not None and no_key.source is None and no_key.receiver is not None
     ids = [s.id for s in no_key.action_specs()]
-    assert ids == [ACTION_SNAPSHOT_POKE]  # отдавать нечего — get не объявлен
+    # отдавать снапшот нечего — get не объявлен; выдача копий напарника (serve) — есть
+    assert ids == [ACTION_SNAPSHOT_POKE, "backup_store_list", "backup_store_get"]
     full = build_backup(_settings(tmp_path), lambda: db.conn, "jeeves", ask)
-    assert [s.id for s in full.action_specs()] == [ACTION_GET_SNAPSHOT, ACTION_SNAPSHOT_POKE]
+    assert [s.id for s in full.action_specs()][:2] == [ACTION_GET_SNAPSHOT, ACTION_SNAPSHOT_POKE]
 
 
 async def test_bad_recipient_key_disables_source(db, tmp_path):

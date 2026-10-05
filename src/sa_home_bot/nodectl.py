@@ -11,6 +11,9 @@
                                   # (интерактивный sudo, см. node/fixups.py) —
                                   # единственная команда, которая НЕ ходит по
                                   # протоколу к ноде, а работает локально
+    nodectl restore-stage|restore-apply|backup-release
+                                  # восстановление vpn-сервера из бэкапа напарника
+                                  # (39.0.8(d)); тоже локальные, см. run_restore_*
     nodectl check_update          # что в репозитории vs что работает/на диске
     nodectl update                # pipx install --force до последнего тега;
                                   # НЕ перезапускает процесс — только доустанавливает
@@ -105,6 +108,23 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "fix",
         help="доустановить программы/права на месте (интерактивный sudo, локально)",
+    )
+    sub.add_parser(
+        "restore-stage",
+        help="принять бандл восстановления со stdin (0600) — шлёт `sa-home-bot backup restore`",
+    )
+    p = sub.add_parser(
+        "restore-apply",
+        help="применить бандл восстановления vpn-сервера (интерактивный sudo, локально)",
+    )
+    p.add_argument("--bundle", default=None,
+                   help="файл бандла или каталог --dry-run (по умолчанию — принятый restore-stage)")
+    p.add_argument("--yes", "-y", action="store_true", help="без вопроса о подтверждении")
+    p.add_argument("--wipe-db", action="store_true",
+                   help="vpn.sqlite уже не пуст — очистить таблицы снапшота и залить заново")
+    sub.add_parser(
+        "backup-release",
+        help="разрешить этой ноде публиковать бэкап напарнику (новый сервер / первый деплой)",
     )
     p = sub.add_parser(
         "call", help="вызвать любое умение любой службы роя (то же, что делает Альфред)"
@@ -279,6 +299,82 @@ def _run_fix(args: argparse.Namespace) -> int:
     return 0
 
 
+def _staged_bundle_path(settings: Settings) -> Path:
+    return Path(settings.node.state_path).parent / "restore-bundle.json"
+
+
+def _run_restore_stage(args: argparse.Namespace) -> int:
+    """``nodectl restore-stage`` — положить бандл (stdin) в каталог данных ноды, 0600."""
+    import os
+
+    config_path = args.config if args.config is not None else _default_config()
+    settings = Settings.load(config_path)
+    data = sys.stdin.buffer.read()
+    if not data.strip():
+        print("Пустой ввод: бандл не получен.", file=sys.stderr)
+        return 1
+    path = _staged_bundle_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    print(f"Бандл принят: {path}")
+    return 0
+
+
+def _run_restore_apply(args: argparse.Namespace) -> int:
+    """``nodectl restore-apply`` — применить бандл локально (интерактивный sudo)."""
+    from sa_home_bot.backup import apply as backup_apply
+    from sa_home_bot.backup import restore as backup_restore
+
+    config_path = args.config if args.config is not None else _default_config()
+    if config_path is None:
+        print("Нет config.toml ноды (укажите --config).", file=sys.stderr)
+        return 2
+    settings = Settings.load(config_path)
+    bundle_path = Path(args.bundle) if args.bundle else _staged_bundle_path(settings)
+    try:
+        bundle = backup_restore.load_bundle(bundle_path)
+        backup_apply.check_bundle(bundle, settings)
+        print(backup_restore.summarize_bundle(bundle))
+        if not args.yes:
+            print("\nНода (служба vpn и sa-home-node) должна быть остановлена.")
+            if input("Применить на этой ноде? [y/N] ").strip().lower() not in ("y", "yes", "д"):
+                print("Отменено.")
+                return 1
+        asyncio.run(
+            backup_apply.apply_bundle(
+                bundle, settings, config_path=Path(config_path), io=backup_apply.SudoIO(),
+                wipe_db=args.wipe_db,
+            )
+        )
+    except (backup_restore.RestoreError, backup_apply.ApplyError) as exc:
+        print(f"Ошибка: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # FixupError от sudo и пр.
+        print(f"Не удалось применить: {exc}", file=sys.stderr)
+        return 1
+    if bundle_path.is_file() and bundle_path == _staged_bundle_path(settings):
+        bundle_path.unlink(missing_ok=True)  # на диске были приватные ключи
+    print(
+        "\nГотово. Дальше: если setup-скрипты ещё не запускали — deploy/setup-awg-jeeves.sh и/или "
+        "deploy/setup-reality-server.sh (ключи из восстановленных файлов сохранятся), затем "
+        "nodectl fix и запуск ноды: пиры вернёт reconcile()."
+    )
+    return 0
+
+
+def _run_backup_release(args: argparse.Namespace) -> int:
+    """``nodectl backup-release`` — явно разрешить публикацию бэкапа (backup/hold.py)."""
+    from sa_home_bot.backup.hold import allow_publish
+
+    config_path = args.config if args.config is not None else _default_config()
+    settings = Settings.load(config_path)
+    path = allow_publish(settings, "backup-release")
+    print(f"Публикация бэкапа разрешена: {path}")
+    return 0
+
+
 def _service_dst(args: argparse.Namespace) -> Address:
     """Адресат для call/describe: своя нода, если -n не задан.
 
@@ -435,6 +531,12 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "fix":
         return _run_fix(args)
+    if args.command == "restore-stage":
+        return _run_restore_stage(args)
+    if args.command == "restore-apply":
+        return _run_restore_apply(args)
+    if args.command == "backup-release":
+        return _run_backup_release(args)
     try:
         return asyncio.run(_run(args))
     except KeyboardInterrupt:

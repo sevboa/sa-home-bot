@@ -178,6 +178,60 @@ class BackupStore:
         hist = self.snapshots_dir(node) / HISTORY_DIR
         return sorted(hist.glob("snapshot.*.sealed")) if hist.exists() else []
 
+    # --- выдача версий для восстановления (39.0.8(d)) ---
+
+    @staticmethod
+    def _stamp(path: Path, prefix: str) -> str:
+        return path.name[len(prefix) + 1 : -len(".sealed")]
+
+    def identity_versions(self, node: str) -> list[dict]:
+        """Версии identity, новые первыми: ``{label, meta}``; ``latest`` — текущая."""
+        out: list[dict] = []
+        if self.identity_path(node).exists():
+            out.append({"label": "latest", "meta": _read_meta(self.meta_path(node))})
+        for path in reversed(self.history(node)):
+            meta = _read_meta(path.with_name(path.name[: -len(".sealed")] + ".meta.json"))
+            out.append({"label": self._stamp(path, "identity"), "meta": meta})
+        return out
+
+    def snapshot_versions(self, node: str) -> list[dict]:
+        """Версии снапшота: ``latest``, ``last_nonempty``, затем history (новые первыми)."""
+        d = self.snapshots_dir(node)
+        out: list[dict] = []
+        if (d / SNAPSHOT_FILE).exists():
+            out.append({"label": "latest", "meta": _read_meta(d / SNAPSHOT_META_FILE)})
+        if (d / SNAPSHOT_NONEMPTY_FILE).exists():
+            out.append(
+                {"label": "last_nonempty", "meta": _read_meta(d / SNAPSHOT_NONEMPTY_META_FILE)}
+            )
+        for path in reversed(self.snapshot_history(node)):
+            meta = _read_meta(path.with_name(path.name[: -len(".sealed")] + ".meta.json"))
+            meta.setdefault("empty", snapshot_is_empty(meta))
+            out.append({"label": self._stamp(path, "snapshot"), "meta": meta})
+        return out
+
+    def read_identity(self, node: str, label: str = "latest") -> StoredIdentity | None:
+        """Блоб по метке. Метка сверяется со списком файлов, а не склеивается в путь."""
+        if label == "latest":
+            return self.load_identity(node)
+        for path in self.history(node):
+            if self._stamp(path, "identity") == label:
+                meta = _read_meta(path.with_name(path.name[: -len(".sealed")] + ".meta.json"))
+                return StoredIdentity(path.read_bytes(), meta)
+        return None
+
+    def read_snapshot(self, node: str, label: str = "latest") -> StoredSnapshot | None:
+        if label == "latest":
+            return self.load_snapshot(node)
+        if label == "last_nonempty":
+            return self.load_last_nonempty(node)
+        for path in self.snapshot_history(node):
+            if self._stamp(path, "snapshot") == label:
+                meta = _read_meta(path.with_name(path.name[: -len(".sealed")] + ".meta.json"))
+                meta.setdefault("empty", snapshot_is_empty(meta))
+                return StoredSnapshot(path.read_bytes(), meta)
+        return None
+
     def _archive_current(self, node: str) -> None:
         cur, cur_meta = self.identity_path(node), self.meta_path(node)
         if not cur.exists():

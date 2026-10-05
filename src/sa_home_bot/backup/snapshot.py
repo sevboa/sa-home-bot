@@ -42,10 +42,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sa_home_bot.backup import sealed
+from sa_home_bot.backup import sealed, serve
+from sa_home_bot.backup.hold import HOLD_HINT, publish_allowed
 from sa_home_bot.backup.identity import canonical_bytes, plain_hash
 from sa_home_bot.config import Settings
-from sa_home_bot.proto.messages import ActionParam, ActionSpec
+from sa_home_bot.proto.messages import ERR_BAD_REQUEST, ActionParam, ActionSpec, ProtoError
 
 log = logging.getLogger(__name__)
 
@@ -171,6 +172,7 @@ class SnapshotSource:
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         b = settings.backup
+        self._settings = settings
         self._conn_getter = conn_getter
         self._node_id = node_id
         self._recipient = sealed.load_key(b.recipient_public_key)
@@ -241,6 +243,9 @@ class SnapshotSource:
                 log.debug("Бэкап снапшота vpn: напарник не уведомлён (%s)", exc)
 
     async def handle_get(self, args: dict[str, Any]) -> dict[str, Any]:
+        if not publish_allowed(self._settings):
+            # Пересобранная нода с пустой БД не должна вытеснить хорошую копию (hold.py).
+            raise SnapshotError(HOLD_HINT)
         snap = await self.current()
         if snap is None:
             raise SnapshotError("снапшот ещё не собран")
@@ -333,10 +338,18 @@ class SnapshotBackup:
     """То, что служба vpn держит для бэкапа БД: источник и/или приёмник."""
 
     def __init__(
-        self, source: SnapshotSource | None, receiver: SnapshotReceiver | None
+        self,
+        source: SnapshotSource | None,
+        receiver: SnapshotReceiver | None,
+        *,
+        store: Any = None,
+        partner: str = "",
     ) -> None:
         self.source = source
         self.receiver = receiver
+        # Хранилище чужих копий и id напарника — для отдачи при восстановлении (serve.py).
+        self.store = store
+        self.partner = partner
 
     def action_specs(self) -> list[ActionSpec]:
         specs: list[ActionSpec] = []
@@ -355,6 +368,8 @@ class SnapshotBackup:
             )
         if self.receiver is not None:
             specs.append(ActionSpec(id=ACTION_SNAPSHOT_POKE, title="💾 Есть новый снапшот"))
+        if self.store is not None:
+            specs.extend(serve.action_specs())
         return specs
 
     def touch(self) -> None:
@@ -362,12 +377,20 @@ class SnapshotBackup:
             self.source.touch()
 
     async def handle(self, action: str, args: dict[str, Any]) -> dict[str, Any] | None:
-        """None — действие не наше."""
+        """None — действие не наше. Отказы уходят вызывающему читаемой ошибкой протокола."""
+        try:
+            return await self._handle(action, args)
+        except (SnapshotError, serve.ServeError) as exc:
+            raise ProtoError(ERR_BAD_REQUEST, str(exc)) from exc
+
+    async def _handle(self, action: str, args: dict[str, Any]) -> dict[str, Any] | None:
         if action == ACTION_GET_SNAPSHOT and self.source is not None:
             return await self.source.handle_get(args)
         if action == ACTION_SNAPSHOT_POKE and self.receiver is not None:
             self.receiver.poke()
             return {"ok": True}
+        if self.store is not None:
+            return serve.handle(self.store, self.partner, action, args)
         return None
 
     async def start(self) -> None:
@@ -403,4 +426,9 @@ def build_backup(
         except sealed.SealedError as exc:
             log.warning("Бэкап снапшота выключен: [backup].recipient_public_key негоден (%s)", exc)
     store = BackupStore(backups_dir(settings.node.state_path))
-    return SnapshotBackup(source, SnapshotReceiver(settings, store, ask_partner))
+    return SnapshotBackup(
+        source,
+        SnapshotReceiver(settings, store, ask_partner),
+        store=store,
+        partner=settings.backup.partner.strip(),
+    )
