@@ -1478,9 +1478,9 @@ class Interactives:
             loras.append(list(cabinet_mod.ALFRED_LORA))
         if loras:
             request["loras"] = loras
-        if list(cabinet_mod.ALFRED_LORA) in loras:
-            # Альфред в кадре: его LoRA тянет дневное окно — свет вшивает служба.
-            request["light"] = outside.en()
+        # Свет вшивает служба вторым тегом: в хвосте промпта «dark window at
+        # night» не держал ночь — ни у LoRA Альфреда, ни у пустого кабинета.
+        request["light"] = outside.en()
         if shot is not None:
             # Этап 49.3: предмет — пикселями поверх готовой сцены.
             request["paste"] = {"key": shot.key, "place": shot.place, "hint": shot.kind.paste_hint}
