@@ -231,6 +231,18 @@ class VpnCheckService:
                 results.append(
                     {"server": slot.server, "transport": slot.transport, "target": target, **one}
                 )
+            failed = [r for r in results if not r["ok"]]
+            if failed:
+                # Одна строка на прогон туннеля — иначе разбирать сбой задним
+                # числом не по чему (в отчёт ошибка уходит, но в журнале её нет).
+                log.warning(
+                    "vpn_check: %s %s — не прошли %d из %d: %s",
+                    slot.server,
+                    slot.transport,
+                    len(failed),
+                    len(results),
+                    "; ".join(f"{r['target']}: {r.get('error') or '?'}" for r in failed),
+                )
             return results
         finally:
             await self._tunnel_down(slot)
@@ -375,14 +387,18 @@ class VpnCheckService:
         только `ip` (прямая цель sudo) — "curl" внутри netns exec остаётся
         литералом, ровно как в самом sudoers-правиле.
 
-        Reality-слоты идут через ``--socks5`` на локальный порт xray-клиента
-        (запущенного в ЭТОМ ЖЕ netns) — маршрут не переписан (в отличие от
-        awg, где default route внутри netns строит сам awg-quick), см.
-        IMPLEMENTATION_PLAN.md 39.0.7 про ``_egress_gate`` для reality."""
+        Reality-слоты идут через ``--socks5-hostname`` на локальный порт
+        xray-клиента (запущенного в ЭТОМ ЖЕ netns) — маршрут не переписан (в
+        отличие от awg, где default route внутри netns строит сам awg-quick),
+        см. IMPLEMENTATION_PLAN.md 39.0.7 про ``_egress_gate`` для reality.
+        Именно ``-hostname``: имя резолвит сервер, как у настоящих клиентов.
+        С голым ``--socks5`` curl резолвил локально, через DNS хоста мимо
+        туннеля — и сбой DNS/интернета провайдера наблюдателя (alfred,
+        2026-10-06 04:50–06:20) выглядел как падение reality на всех VPN."""
         ip_path = shutil.which("ip") or "ip"
         curl = ["curl"]
         if slot.transport == "reality":
-            curl += ["--socks5", f"127.0.0.1:{slot.socks_port}"]
+            curl += ["--socks5-hostname", f"127.0.0.1:{slot.socks_port}"]
         curl += curl_args
         return ["sudo", "-n", ip_path, "netns", "exec", slot.netns, *curl]
 

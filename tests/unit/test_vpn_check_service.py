@@ -445,7 +445,7 @@ async def test_reality_tunnel_brought_up_and_torn_down_around_checks(monkeypatch
     assert "vpn-probe-jeeves-reality" in xray_calls[0]
     target_calls = _target_curl_calls(calls)
     assert len(target_calls) == 1
-    assert "--socks5" in target_calls[0]
+    assert "--socks5-hostname" in target_calls[0]
     assert f"127.0.0.1:{slot.socks_port}" in target_calls[0]
     res = _result_for(node_link, "https://1.1.1.1")
     assert res["ok"] is True
