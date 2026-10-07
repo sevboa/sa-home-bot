@@ -166,3 +166,8 @@ async def test_person_claim_rejects_unknown_field(people_svc):
 
 async def test_person_cards_empty_ids_skip_neo4j(svc):
     assert await svc.run_command("person_cards", {"ids": ""}) == {"cards": {}}
+
+
+def test_person_ids_accept_single_int():
+    # nodectl call приводит «ids=7136623771» к int (живой баг 2026-10-08).
+    assert GraphMemoryService._person_ids({"ids": 7136623771}) == [7136623771]

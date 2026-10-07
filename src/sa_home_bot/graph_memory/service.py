@@ -388,6 +388,9 @@ class GraphMemoryService:
     @staticmethod
     def _person_ids(args: dict[str, Any]) -> list[int]:
         raw = args.get("ids")
+        # nodectl call приводит «ids=123» к числу — одиночный id тоже годится.
+        if isinstance(raw, int):
+            raw = str(raw)
         items = raw.split(",") if isinstance(raw, str) else list(raw or [])
         try:
             ids = sorted({int(str(item).strip()) for item in items if str(item).strip()})
