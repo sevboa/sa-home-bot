@@ -49,11 +49,20 @@ from typing import Any
 from sa_home_bot import __version__
 from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
+from sa_home_bot.graph_memory.people import (
+    ClaimError,
+    build_cards,
+    normalize_claim,
+    strength_for,
+)
 from sa_home_bot.graph_memory.protocol import (
     ACTION_ADD_EPISODE,
+    ACTION_PERSON_CARDS,
+    ACTION_PERSON_CLAIM,
     ACTION_QUEUE_STATUS,
     ACTION_SEARCH,
     EPISODE_SOURCE_MEMORY_FACT,
+    PEOPLE_GROUP_ID,
     SERVICE_NAME,
 )
 from sa_home_bot.proto.messages import (
@@ -79,6 +88,20 @@ IDLE_POLL_S = 5.0
 RETRY_BACKOFF_S = 15.0
 DEFAULT_SEARCH_RESULTS = 5
 MAX_SEARCH_RESULTS = 10
+# Карточек за один запрос: собеседник + участники группы + знакомые.
+MAX_PERSON_CARDS = 50
+# Этап 54: одно утверждение = один узел; повтор того же (кто, о ком, что,
+# какое значение) только освежает `at`, а не плодит узлы.
+_CYPHER_PERSON_CLAIM = (
+    "MERGE (c:PersonClaim {group_id: $group_id, subject_id: $subject_id, "
+    "field: $field, value: $value, by_id: $by_id}) "
+    "SET c.strength = $strength, c.at = $at"
+)
+_CYPHER_PERSON_CARDS = (
+    "MATCH (c:PersonClaim {group_id: $group_id}) WHERE c.subject_id IN $ids "
+    "RETURN c.subject_id AS subject_id, c.field AS field, c.value AS value, "
+    "c.by_id AS by_id, c.strength AS strength, c.at AS at"
+)
 # Параметры LLM-экстракции Graphiti (замер 2026-09-25 на mycraft, gemma через
 # /v1): без них эпизод шёл 30-110 с и держал общую очередь Ollama, в которой
 # стоит живой чат (см. _ExtractionClient).
@@ -128,7 +151,13 @@ class GraphMemoryService:
     def describe(self) -> ServiceDescription:
         return ServiceDescription(
             info=ServiceInfo(node=self._node, service=SERVICE_NAME, version=__version__),
-            capabilities=(ACTION_ADD_EPISODE, ACTION_SEARCH, ACTION_QUEUE_STATUS),
+            capabilities=(
+                ACTION_ADD_EPISODE,
+                ACTION_SEARCH,
+                ACTION_QUEUE_STATUS,
+                ACTION_PERSON_CLAIM,
+                ACTION_PERSON_CARDS,
+            ),
             actions=(
                 ActionSpec(
                     id=ACTION_ADD_EPISODE,
@@ -156,6 +185,23 @@ class GraphMemoryService:
                     ),
                 ),
                 ActionSpec(id=ACTION_QUEUE_STATUS, title="📊 Состояние очереди"),
+                ActionSpec(
+                    id=ACTION_PERSON_CLAIM,
+                    title="🪪 Утверждение о человеке",
+                    params=(
+                        ActionParam(name="subject_id", type="int", title="О ком (Telegram id)"),
+                        ActionParam(name="field", type="string", title="gender / name / alias"),
+                        ActionParam(name="value", type="string", title="Значение"),
+                        ActionParam(name="by_id", type="int", title="Кто сказал (Telegram id)"),
+                    ),
+                ),
+                ActionSpec(
+                    id=ACTION_PERSON_CARDS,
+                    title="🪪 Карточки людей",
+                    params=(
+                        ActionParam(name="ids", type="string", title="Telegram id через запятую"),
+                    ),
+                ),
             ),
         )
 
@@ -331,6 +377,72 @@ class GraphMemoryService:
         facts = [edge.fact for edge in edges]
         return {"facts": facts, "count": len(facts)}
 
+    @staticmethod
+    def _person_id(args: dict[str, Any], key: str) -> int:
+        raw = args.get(key)
+        try:
+            return int(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise ProtoError(ERR_BAD_REQUEST, f"{key} должен быть Telegram id: {raw!r}") from exc
+
+    @staticmethod
+    def _person_ids(args: dict[str, Any]) -> list[int]:
+        raw = args.get("ids")
+        items = raw.split(",") if isinstance(raw, str) else list(raw or [])
+        try:
+            ids = sorted({int(str(item).strip()) for item in items if str(item).strip()})
+        except ValueError as exc:
+            raise ProtoError(ERR_BAD_REQUEST, f"ids — Telegram id через запятую: {raw!r}") from exc
+        if len(ids) > MAX_PERSON_CARDS:
+            raise ProtoError(ERR_BAD_REQUEST, f"не больше {MAX_PERSON_CARDS} карточек за раз")
+        return ids
+
+    async def _people_query(self, cypher: str, params: dict[str, Any]) -> Any:
+        graphiti = await self._get_graphiti()
+        try:
+            return await asyncio.wait_for(
+                graphiti.driver.execute_query(
+                    cypher, params={"group_id": PEOPLE_GROUP_ID, **params}
+                ),
+                timeout=self._cfg.search_timeout_s,
+            )
+        except TimeoutError as exc:
+            raise ProtoError(ERR_UNAVAILABLE, "graph_memory: Neo4j не ответил вовремя") from exc
+        except Exception as exc:  # noqa: BLE001 — сбой Neo4j = недоступность
+            raise ProtoError(ERR_UNAVAILABLE, f"graph_memory: сбой Neo4j: {exc}") from exc
+
+    async def _person_claim(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Этап 54. Знакомство by_id с subject_id проверяет бот (у него
+        таблица знакомств), служба только выводит вес из равенства id."""
+        subject_id = self._person_id(args, "subject_id")
+        by_id = self._person_id(args, "by_id")
+        try:
+            field, value = normalize_claim(args.get("field"), args.get("value"))
+        except ClaimError as exc:
+            raise ProtoError(ERR_BAD_REQUEST, str(exc)) from exc
+        strength = strength_for(subject_id, by_id)
+        await self._people_query(
+            _CYPHER_PERSON_CLAIM,
+            {
+                "subject_id": subject_id,
+                "field": field,
+                "value": value,
+                "by_id": by_id,
+                "strength": strength,
+                "at": datetime.now(tz=UTC).isoformat(),
+            },
+        )
+        return {"saved": True, "field": field, "value": value, "strength": strength}
+
+    async def _person_cards(self, args: dict[str, Any]) -> dict[str, Any]:
+        ids = self._person_ids(args)
+        if not ids:
+            return {"cards": {}}
+        result = await self._people_query(_CYPHER_PERSON_CARDS, {"ids": ids})
+        claims = [dict(record) for record in result.records]
+        # Ключи — строки: ответ идёт по протоколу роя в JSON.
+        return {"cards": {str(k): v for k, v in build_cards(claims).items()}}
+
     async def _queue_status(self, _args: dict[str, Any]) -> dict[str, Any]:
         return await self.get_state()
 
@@ -341,6 +453,10 @@ class GraphMemoryService:
             return await self._search(args)
         if action == ACTION_QUEUE_STATUS:
             return await self._queue_status(args)
+        if action == ACTION_PERSON_CLAIM:
+            return await self._person_claim(args)
+        if action == ACTION_PERSON_CARDS:
+            return await self._person_cards(args)
         raise ValueError(f"необъявленное действие: {action}")
 
     # --- фоновая обработка очереди ---

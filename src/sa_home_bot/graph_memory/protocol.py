@@ -48,3 +48,22 @@ EPISODE_SOURCE_WEB_SEARCH = "web_search"
 # bot/image_tools.py::generate) — просьба собеседника и подпись, чтобы граф
 # помнил «что мы рисовали» и отвечал на это без таблицы images.
 EPISODE_SOURCE_IMAGE = "image"
+
+# Этап 54: карточки людей — пол, имя, прозвища по Telegram id. Отдельный
+# общий раздел графа (не str(chat_id)): пол собеседника, сказанный в одном
+# чате, обязан быть известен во всех. Пишутся прямым Cypher, без
+# LLM-экстракции — это утверждение, а не текст для разбора.
+ACTION_PERSON_CLAIM = "person_claim"
+ACTION_PERSON_CARDS = "person_cards"
+PEOPLE_GROUP_ID = "people"
+
+PERSON_FIELD_GENDER = "gender"
+PERSON_FIELD_NAME = "name"
+PERSON_FIELD_ALIAS = "alias"
+GENDER_MALE = "m"
+GENDER_FEMALE = "f"
+
+# Вес утверждения выводит служба из by_id == subject_id: «сам о себе» —
+# сильное, о другом (знакомство проверяет бот до вызова) — слабое.
+CLAIM_STRENGTH_SELF = "self"
+CLAIM_STRENGTH_ACQUAINTANCE = "acquaintance"

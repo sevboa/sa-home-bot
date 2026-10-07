@@ -100,3 +100,69 @@ async def test_reset_stuck_processing_on_restart_recovers_orphaned_episode(svc):
     row = await svc._next_pending()
     assert row is not None
     assert row["id"] == 1
+
+
+class _FakeResult:
+    def __init__(self, records):
+        self.records = records
+
+
+class _FakeDriver:
+    """Этап 54: карточки людей пишутся прямым Cypher — эмулируем MERGE по
+    ключу (subject_id, field, value, by_id) в списке."""
+
+    def __init__(self):
+        self.claims: list[dict] = []
+
+    async def execute_query(self, cypher, params):
+        assert params["group_id"] == "people"
+        if cypher.startswith("MERGE"):
+            key = ("subject_id", "field", "value", "by_id")
+            self.claims = [c for c in self.claims if any(c[k] != params[k] for k in key)]
+            self.claims.append({k: v for k, v in params.items() if k != "group_id"})
+            return _FakeResult([])
+        return _FakeResult([c for c in self.claims if c["subject_id"] in params["ids"]])
+
+
+class _FakeGraphiti:
+    def __init__(self):
+        self.driver = _FakeDriver()
+
+
+@pytest_asyncio.fixture
+async def people_svc(svc):
+    svc._graphiti = _FakeGraphiti()
+    return svc
+
+
+async def test_person_claim_derives_strength_from_ids(people_svc):
+    own = await people_svc.run_command(
+        "person_claim", {"subject_id": 101, "field": "gender", "value": "мужчина", "by_id": 101}
+    )
+    other = await people_svc.run_command(
+        "person_claim", {"subject_id": 101, "field": "gender", "value": "f", "by_id": 202}
+    )
+    assert (own["value"], own["strength"]) == ("m", "self")
+    assert other["strength"] == "acquaintance"
+    cards = (await people_svc.run_command("person_cards", {"ids": "101, 999"}))["cards"]
+    assert cards["101"]["gender"]["value"] == "m"
+    assert "999" not in cards
+
+
+async def test_person_claim_repeat_does_not_duplicate(people_svc):
+    args = {"subject_id": 101, "field": "alias", "value": "Лиля", "by_id": 202}
+    await people_svc.run_command("person_claim", args)
+    await people_svc.run_command("person_claim", args)
+    assert len(people_svc._graphiti.driver.claims) == 1
+
+
+async def test_person_claim_rejects_unknown_field(people_svc):
+    with pytest.raises(ProtoError) as exc_info:
+        await people_svc.run_command(
+            "person_claim", {"subject_id": 1, "field": "age", "value": "3", "by_id": 1}
+        )
+    assert exc_info.value.code == ERR_BAD_REQUEST
+
+
+async def test_person_cards_empty_ids_skip_neo4j(svc):
+    assert await svc.run_command("person_cards", {"ids": ""}) == {"cards": {}}
