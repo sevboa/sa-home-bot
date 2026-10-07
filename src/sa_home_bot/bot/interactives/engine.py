@@ -161,8 +161,9 @@ PHOTO_SCENE_GAP_TURNS = 3
 PHOTO_SCENE_CAPTION = "В кабинете"
 # Настроение кадра (Ведущий, director.MOODS) → модель и LoRA службы рисования.
 # Связки и вес — стенд тем 2026-09-30, одобрен пользователем; «обычно» — эталон C.
+# «Жуть» на giger убрана (пользователь 2026-10-08: рисует непрошеного
+# человекоподобного «чёрта» почти в каждом кадре и не нравится по виду).
 MOOD_PRESETS: dict[str, tuple[str, str, float]] = {
-    "horror": ("dream", "giger", 0.8),
     "rot": ("revanim", "rottech", 0.8),
     "eldritch": ("ghostmix", "eldritch", 0.8),
 }

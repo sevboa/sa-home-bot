@@ -353,7 +353,8 @@ def test_director_parses_photo():
 
 
 def test_director_parses_mood():
-    assert parse_decision(json.dumps({"mood": "Жуть"}), 0).mood == "horror"
+    assert parse_decision(json.dumps({"mood": "Гниль"}), 0).mood == "rot"
+    assert parse_decision(json.dumps({"mood": "жуть"}), 0).mood is None
     assert parse_decision(json.dumps({"mood": "rot"}), 0).mood == "rot"
     assert parse_decision(json.dumps({"mood": "весело"}), 0).mood is None
     assert set(engine.MOOD_PRESETS) == set(MOODS.values()) - {MOOD_PLAIN}
