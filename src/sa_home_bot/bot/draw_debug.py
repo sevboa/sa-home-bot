@@ -20,7 +20,9 @@ from typing import Any
 
 MODES = ("free", "item", "variant", "scene")
 # Короткие имена llm/imagegen.MODELS (бот llm-модули не импортирует).
-MODELS = ("dream", "rv", "epic", "turbo", "revanim", "ghostmix")
+MODELS = (
+    "dream", "rv", "epic", "turbo", "revanim", "ghostmix", "rv6", "cyber", "deliberate", "anything",
+)
 
 CALLBACK_PREFIX = "draw"
 CLEAN_YES = "clean"
@@ -53,6 +55,10 @@ HELP = """\
 • <code>revanim</code> — ReV Animated: дарк-фэнтези, глубокие тени
 • <code>ghostmix</code> — GhostMix: мрачное, сюрреалистичное
 • <code>rv</code>, <code>epic</code> — фотореализм (Realistic Vision, epiCRealism)
+• <code>rv6</code> — Realistic Vision 6: фотореализм, кожа и анатомия
+• <code>cyber</code> — CyberRealistic: фотореализм, сложный свет, детали лица
+• <code>deliberate</code> — Deliberate 2: полуреализм 2.5D, универсальная
+• <code>anything</code> — Anything V5: аниме 2D, понимает booru-теги (1girl, solo…)
 Все, кроме turbo, — SD1.5 + ускоритель LCM (6 шагов, cfg 1–2, выше — каша).
 Первый вызов модели — скачивание (минуты), потом ~10–30 с загрузки; в памяти
 держится эталон и две последние.
@@ -60,7 +66,7 @@ HELP = """\
 <b>LoRA</b> — дообучение поверх модели: <code>lora=giger</code>, <code>lora=giger:0.6,flesh</code>
 (вес 0–2, по умолч. 0.8). Слово-триггер дописывается в начало промпта сам, при raw —
 пиши его сам (в скобках).
-SD1.5 (dream, revanim, ghostmix, rv, epic):
+SD1.5 (все, кроме turbo):
 • <code>giger</code> (hnsrdlf style), <code>gigerworld</code>🔒 (gigerworld) — биомеханика Гигера
 • <code>flesh</code> (fleshmutant) — плоть, мутанты, сплав с железом
 • <code>rottech</code> (rottentech) — гниющая техника, весь кадр
@@ -273,7 +279,7 @@ def parse(args: str | None) -> DrawRequest | DrawCommand:
     if request.mode == "variant" and "ip_scale" in request.numbers:
         raise DrawSyntaxError("ip= только для scene; у variant сила — s=")
     if request.numbers.get("model") == "turbo" and request.mode == "scene" and request.ref_id:
-        raise DrawSyntaxError("у turbo нет IP-Adapter — сцена с образцом только на dream/rv/epic")
+        raise DrawSyntaxError("у turbo нет IP-Adapter — сцена с образцом только на SD1.5-моделях")
     if request.mode == "scene" and "strength" in request.numbers:
         raise DrawSyntaxError("s= только для variant; у scene сила образца — ip=")
     return request

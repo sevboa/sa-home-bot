@@ -64,13 +64,15 @@ class ModelSpec:
     """Модель для ``/draw model=``. ``kind``: ``sd15`` — SD1.5-чекпоинт,
     ускоряется общей LCM-LoRA и умеет IP-Adapter; ``sdxl-turbo`` — свой
     дистиллят на 1-4 шага, без LCM и без IP-Adapter. ``steps``/``guidance``
-    — умолчания модели вместо конфиговых (None — из конфига)."""
+    — умолчания модели вместо конфиговых (None — из конфига). ``file`` —
+    чекпоинт одним файлом в репо ``repo`` (не в формате diffusers)."""
 
     repo: str
     variant: str | None
     kind: str
     steps: int | None = None
     guidance: float | None = None
+    file: str = ""
 
 
 # Этап 49: подбор модели под предметы (dreamshaper хорош в окружении, но
@@ -86,6 +88,13 @@ MODELS: dict[str, ModelSpec] = {
     # на HF: с Civitai эти файлы без API-токена не отдаются (401).
     "revanim": ModelSpec("Yntec/RevAnimatedV2Rebirth", "fp16", "sd15"),
     "ghostmix": ModelSpec("digiplay/GhostMix", "fp16", "sd15"),
+    # Для опытов владельца в /draw (2026-10-08): фотореализм, 2.5D, аниме.
+    "rv6": ModelSpec("SG161222/Realistic_Vision_V6.0_B1_noVAE", None, "sd15"),
+    "cyber": ModelSpec(
+        "cyberdelia/CyberRealistic", None, "sd15", file="CyberRealistic_FINAL_FP16.safetensors"
+    ),
+    "deliberate": ModelSpec("Yntec/Deliberate2", "fp16", "sd15"),
+    "anything": ModelSpec("Yntec/AnythingV5", "fp16", "sd15"),
 }
 
 
@@ -343,9 +352,18 @@ def _load_pipeline_sync(spec: ModelSpec, cfg: LlmConfig) -> Any:
     else:
         from diffusers import LCMScheduler, StableDiffusionPipeline
 
-        pipe = StableDiffusionPipeline.from_pretrained(
-            spec.repo, safety_checker=None, requires_safety_checker=False, **common
-        )
+        if spec.file:
+            from huggingface_hub import hf_hub_download
+
+            path = hf_hub_download(spec.repo, spec.file, cache_dir=common["cache_dir"])
+            pipe = StableDiffusionPipeline.from_single_file(
+                path, torch_dtype=torch.float32, safety_checker=None,
+                requires_safety_checker=False,
+            )
+        else:
+            pipe = StableDiffusionPipeline.from_pretrained(
+                spec.repo, safety_checker=None, requires_safety_checker=False, **common
+            )
         pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
         pipe.load_lora_weights(cfg.imagegen_lcm_lora, cache_dir=str(cfg.imagegen_model_dir))
         pipe.fuse_lora()
