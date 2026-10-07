@@ -94,8 +94,8 @@ async def _acquainted(store, a, b):
     return await store.add_confirmed_relationship(a, b, "acquaintance", now, now)
 
 
-async def _request(ctx, recipient):
-    return await ai_tools.tool_request_acquaintance(ctx, {"recipient": recipient})
+async def _request(ctx, recipient_id):
+    return await ai_tools.tool_request_acquaintance(ctx, {"recipient_id": recipient_id})
 
 
 # --- request_acquaintance ---
@@ -104,7 +104,7 @@ async def _request(ctx, recipient):
 async def test_form_creates_draft_but_sends_nothing_yet(store):
     ctx, notifier, node_link = _ctx(store, chat_id=GUEST_A, book=_book())
 
-    result = await _request(ctx, "Настя")
+    result = await _request(ctx, GUEST_B)
 
     assert "НИЧЕГО не отправлено" in result
     assert "знакомства" in result and "адресат — Настя" in result
@@ -125,7 +125,7 @@ async def test_form_creates_draft_but_sends_nothing_yet(store):
 def test_declaration_has_no_relation_type():
     """Этап 46: тип связи модель больше не выбирает — только адресата."""
     params = ai_tools._DECL_REQUEST_ACQUAINTANCE["function"]["parameters"]  # noqa: SLF001
-    assert set(params["properties"]) == {"recipient"}
+    assert set(params["properties"]) == {"recipient_id"}
     names = {spec.name for spec in ai_tools.TOOLS}
     assert {"request_acquaintance", "my_acquaintances"} <= names
     assert not names & {"request_relationship_form", "my_relationships"}
@@ -134,39 +134,42 @@ def test_declaration_has_no_relation_type():
 async def test_form_unavailable_without_pending_actions(store):
     # Служба tasks (chat_loop) — форм там показать некому.
     ctx, _, _ = _ctx(store, chat_id=GUEST_A, book=_book(), with_forms=False)
-    assert "недоступно" in await _request(ctx, "Настя")
+    assert "недоступно" in await _request(ctx, GUEST_B)
     assert await store.open_pending_actions() == []
 
 
 async def test_form_input_errors(store):
     ctx, _, _ = _ctx(store, chat_id=GUEST_A, book=_book())
-    assert "не сказано" in await ai_tools.tool_request_acquaintance(ctx, {})
-    assert "не знаю" in await _request(ctx, "Никодим")
-    assert "самому себе" in await _request(ctx, "Вася")
+    assert "find_person" in await ai_tools.tool_request_acquaintance(ctx, {"recipient": "Настя"})
+    assert "не гость" in await _request(ctx, STRANGER_CHAT)
+    assert "самому себе" in await _request(ctx, GUEST_A)
     assert await store.open_pending_actions() == []
 
 
-async def test_form_ambiguous_recipient_asks_to_clarify(store):
+async def test_find_person_for_acquaintance_asks_between_namesakes(store):
     book = SubscriptionBook.from_config(
         [SubscriptionConfig(name="owner", chat_id=OWNER_CHAT, allowed_commands=["*"])],
         [_guest("Вася", GUEST_A), _guest("Настя", GUEST_B), _guest("Настя", GUEST_C)],
     )
     ctx, _, _ = _ctx(store, chat_id=GUEST_A, book=book)
-    assert "уточни" in await _request(ctx, "Настя")
-    assert await store.open_pending_actions() == []
+    result = await ai_tools.tool_find_person(
+        ctx, {"description": "Насте", "purpose": "acquaintance"}
+    )
+    assert "переспроси" in result
+    assert f"id {GUEST_B}" in result and f"id {GUEST_C}" in result
 
 
 async def test_form_duplicate_open_draft_is_refused(store):
     ctx, _, _ = _ctx(store, chat_id=GUEST_A, book=_book())
-    await _request(ctx, "Настя")
-    assert "уже открыта" in await _request(ctx, "Настя")
+    await _request(ctx, GUEST_B)
+    assert "уже открыта" in await _request(ctx, GUEST_B)
     assert len(await store.open_pending_actions()) == 1
 
 
 async def test_form_already_acquainted_either_direction(store):
     await _acquainted(store, GUEST_B, GUEST_A)
     ctx, _, _ = _ctx(store, chat_id=GUEST_A, book=_book())
-    assert "уже знакомы" in await _request(ctx, "Настя")
+    assert "уже знакомы" in await _request(ctx, GUEST_B)
     assert await store.open_pending_actions() == []
 
 
@@ -192,7 +195,7 @@ async def test_form_owner_never_named_in_third_person_and_not_me(store):
     )
     ctx, _, _ = _ctx(store, chat_id=OWNER_CHAT, book=book, settings=settings)
 
-    result = await _request(ctx, "Настя")
+    result = await _request(ctx, GUEST_B)
 
     assert "Алексей Александрович Севбо" not in result
     assert "asevbo" not in result
@@ -209,7 +212,7 @@ async def test_form_owner_never_named_in_third_person_and_not_me(store):
 
 async def test_conflict_ignores_the_form_itself(store):
     ctx, _, _ = _ctx(store, chat_id=GUEST_A, book=_book())
-    await _request(ctx, "Настя")
+    await _request(ctx, GUEST_B)
     row = (await store.open_pending_actions())[0]
     assert (
         await ai_tools.acquaintance_conflict(
@@ -277,5 +280,5 @@ async def test_my_acquaintances_both_roles(store):
 
 async def test_my_acquaintances_silent_about_open_forms(store):
     ctx, _, _ = _ctx(store, chat_id=GUEST_A, book=_book())
-    await _request(ctx, "Настя")
+    await _request(ctx, GUEST_B)
     assert await ai_tools.tool_my_acquaintances(ctx, {}) == "подтверждённых знакомств нет"

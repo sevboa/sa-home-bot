@@ -56,7 +56,15 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sa_home_bot import wake_core
-from sa_home_bot.bot import commands, image_tools, invites, recipients, voice_mode, vpn_nodes
+from sa_home_bot.bot import (
+    commands,
+    image_tools,
+    invites,
+    people_cards,
+    recipients,
+    voice_mode,
+    vpn_nodes,
+)
 from sa_home_bot.bot.interactives import cabinet as interactive_cabinet
 from sa_home_bot.bot.interactives import radio as interactive_radio
 from sa_home_bot.bot.monitor_state import parse_disk_summary, parse_health_state
@@ -1132,9 +1140,9 @@ async def tool_request_acquaintance(ctx: ToolContext, args: dict[str, Any]) -> s
     (bot/handlers/ai.py → PendingActions.flush_drafts). Дальше всё решают
     кнопки.
 
-    Адресата ищет тот же резолвер, что у tell (bot/recipients.py), — по
-    имени/@username, а не по chat_id: guests_list виден только владельцу, и
-    гость раньше не мог узнать chat_id того, с кем хочет связаться.
+    Адресат — по id (Этап 54.5): его находит find_person с
+    purpose="acquaintance" — среди всех гостей, но только по точному имени,
+    нику или прозвищу, без выдачи списка (guests_list гостю не виден).
 
     Только живой /ai: в службе tasks (ctx.pending_actions там нет) формы
     некому показать — честный отказ."""
@@ -1145,18 +1153,15 @@ async def tool_request_acquaintance(ctx: ToolContext, args: dict[str, Any]) -> s
         or ctx.pending_actions is None
     ):
         return "недоступно: форму знакомства можно открыть только в живом разговоре"
-    who = str(args.get("recipient") or "").strip()
-    if not who:
-        return "ошибка: не сказано, с кем познакомить (recipient)"
-    found = recipients.find_recipients(who, ctx.book, ctx.settings.people)
+    recipient_id = parse_recipient_id(args)
+    if recipient_id is None:
+        return NEED_RECIPIENT_ID.replace("find_person", 'find_person(purpose="acquaintance")')
+    found = recipients.find_by_chat_id(recipient_id, ctx.book, ctx.settings.people)
     if not found:
         return (
-            f"не получилось: «{who}» я не знаю — познакомить могу только с тем, "
-            "кто уже принял приглашение и говорит со мной в личном чате"
+            f"не получилось: id {recipient_id} — не гость с личным чатом; познакомить "
+            "могу только с тем, кто уже принял приглашение"
         )
-    if len(found) > 1:
-        names = ", ".join(r.display for r in found)
-        return f"уточни, с кем именно: под «{who}» подходят {names}"
     target_chat_id = found[0].chat_id
     if target_chat_id == ctx.chat_id:
         return "ошибка: нельзя предложить знакомство самому себе"
@@ -1370,6 +1375,180 @@ _DECL_NOTE_PERSON: dict[str, Any] = {
 }
 
 
+PURPOSE_MESSAGE = "message"
+PURPOSE_ACQUAINTANCE = "acquaintance"
+_GENDER_WORDS = {"m": "мужчина", "f": "женщина"}
+
+
+def _stem(word: str) -> str:
+    word = word.casefold().lstrip("@")
+    return word[:-1] if len(word) > 3 else word
+
+
+def _same_stems(query: str, candidate: str) -> bool:
+    """Падеж: «Миле» и «Мила», «Андрею» и «Андрей» — у каждого слова
+    запроса есть слово кандидата с той же основой (без последней буквы).
+    Строже, чем начало слова: «Миле» не находит «Милану»."""
+    words = [_stem(w) for w in candidate.replace("(", " ").replace(")", " ").split()]
+    query_words = [_stem(w) for w in query.split()]
+    return bool(query_words) and all(w in words for w in query_words)
+
+
+def _stem_query(query: str) -> str:
+    return " ".join(_stem(w) for w in query.split())
+
+
+async def tool_find_person(ctx: ToolContext, args: dict[str, Any]) -> str:
+    """Этап 54.4: найти id человека по описанию. Ищет только среди тех,
+    к кому собеседнику вообще можно обратиться:
+
+    - purpose="message" (tell, notify_guest): у гостя — подтверждённые
+      знакомые и роль владельца; у владельца — все гости в личке;
+    - purpose="acquaintance" (request_acquaintance): все гости, но если
+      никто не подошёл, список не выдаём — гостю он не положен.
+
+    Совпадения — по имени и @нику подписки, [[people]], имени и прозвищам из
+    карточек (graph_memory); вторым заходом — без последней буквы (падеж).
+    Несколько кандидатов — отдаём всех с отличиями, выбирает собеседник."""
+    if ctx.chat_id is None or ctx.book is None:
+        return "недоступно: сейчас не вижу, кому можно писать"
+    query = " ".join(str(args.get("description") or "").split())
+    if not query:
+        return "ошибка: опиши человека (description) — как его назвал собеседник"
+    purpose = str(args.get("purpose") or PURPOSE_MESSAGE).strip()
+    if purpose not in (PURPOSE_MESSAGE, PURPOSE_ACQUAINTANCE):
+        purpose = PURPOSE_MESSAGE
+    is_owner = ctx.subscription is not None and ctx.subscription.is_owner
+
+    private = {sub.chat_id: sub for sub in ctx.book.all() if sub.chat_id > 0}
+    if purpose == PURPOSE_ACQUAINTANCE or is_owner:
+        pool = set(private)
+    else:
+        pool = {chat_id for chat_id, _name in await acquaintance_roster(ctx)} & set(private)
+    if not (is_owner and purpose == PURPOSE_MESSAGE):
+        pool.discard(ctx.chat_id)
+
+    cards = await people_cards.fetch_person_cards(ctx.node_link, sorted(pool)[:50])
+    labels: dict[int, list[tuple[str, str]]] = {}
+    for chat_id in pool:
+        sub = private[chat_id]
+        own = [("имя", sub.name), ("имя", sub.invited_user or "")]
+        card = cards.get(chat_id) or {}
+        if isinstance(card.get("name"), dict):
+            own.append(("имя из карточки", card["name"]["value"]))
+        own += [("прозвище", a["value"]) for a in card.get("aliases") or []]
+        labels[chat_id] = own
+    for person in ctx.settings.people:
+        for chat_id in recipients.person_chat_ids(person, ctx.book):
+            if chat_id in labels:
+                labels[chat_id] += [("имя", person.full_name), ("ник", person.telegram_username)]
+
+    def display(chat_id: int) -> str:
+        found = recipients.find_by_chat_id(chat_id, ctx.book, ctx.settings.people)
+        return found[0].display if found else str(chat_id)
+
+    def gender_of(chat_id: int) -> str | None:
+        gender = people_cards.card_gender(cards.get(chat_id))
+        if gender:
+            return gender
+        for person in ctx.settings.people:
+            if chat_id in recipients.person_chat_ids(person, ctx.book):
+                return person.gender
+        return None
+
+    hits: dict[int, str] = {}
+    explicit = recipients.query_chat_id(query)
+    if explicit is not None and explicit in pool:
+        hits[explicit] = "по id"
+    if not hits and purpose == PURPOSE_MESSAGE and recipients.is_owner_role_reference(query):
+        for chat_id, sub in private.items():
+            if sub.is_owner and chat_id != ctx.chat_id:
+                hits[chat_id] = "роль владельца — передавай с to_owner_role=true"
+    # Три захода, от строгого к мягкому: как названо; та же основа
+    # (падеж); начало слова по основе. Следующий — только если пусто.
+    matchers = (
+        lambda label: recipients.matches(query, label),
+        lambda label: _same_stems(query, label),
+        lambda label: recipients.matches(_stem_query(query), label),
+    )
+    for matcher in matchers:
+        if hits:
+            break
+        for chat_id, own in labels.items():
+            for kind, label in own:
+                if label and matcher(label):
+                    hits.setdefault(chat_id, f"{kind} «{label}»")
+
+    if not hits:
+        if purpose == PURPOSE_ACQUAINTANCE:
+            return (
+                f"под «{query}» никого из гостей не нашёл — переспроси имя или ник; "
+                "познакомить можно только с тем, кто уже принял приглашение"
+            )
+        allowed = [
+            f"{display(c)} — id {c}" + (f" — {_GENDER_WORDS[g]}" if (g := gender_of(c)) else "")
+            for c in sorted(pool)
+        ]
+        tail = (
+            " Кому можно писать: " + "; ".join(allowed) + "."
+            if allowed
+            else " Подтверждённых знакомых у собеседника нет."
+        )
+        if not is_owner:
+            tail += " Владельцу можно писать по роли: «владельцу»/«хозяину»."
+        return (
+            f"под «{query}» никого не нашёл. Родственное слово («маме») — не имя: "
+            "если по списку ясно, кто это, бери его id, иначе переспроси." + tail
+        )
+
+    lines = []
+    for chat_id, reason in hits.items():
+        gender = gender_of(chat_id)
+        bits = [display(chat_id), f"id {chat_id}"]
+        if gender:
+            bits.append(_GENDER_WORDS[gender])
+        bits.append(f"совпало: {reason}")
+        lines.append(" — ".join(bits))
+    if len(lines) == 1:
+        return "Нашёл: " + lines[0]
+    return (
+        "Подходят несколько — переспроси собеседника, кого он имел в виду, "
+        "сам не выбирай:\n" + "\n".join(lines)
+    )
+
+
+_DECL_FIND_PERSON: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "find_person",
+        "description": (
+            "Найти Telegram id человека по описанию — для tell, notify_guest и "
+            "request_acquaintance, которые принимают адресата только по id. "
+            "Передай, как собеседник назвал человека: имя в любом падеже, "
+            "прозвище, @ник, «хозяину». Ищет только среди тех, кому собеседнику "
+            "можно писать (purpose=message), или среди всех гостей для "
+            "знакомства (purpose=acquaintance). Несколько кандидатов — "
+            "переспроси, никого — скажи как есть, не сочиняй id."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "как собеседник назвал или описал человека",
+                },
+                "purpose": {
+                    "type": "string",
+                    "enum": [PURPOSE_MESSAGE, PURPOSE_ACQUAINTANCE],
+                    "description": "message — чтобы написать; acquaintance — чтобы познакомить",
+                },
+            },
+            "required": ["description"],
+        },
+    },
+}
+
+
 async def tool_my_acquaintances(ctx: ToolContext, _args: dict[str, Any]) -> str:
     """Только подтверждённые знакомства — про неотвеченные/отклонённые
     предложения молчим намеренно (IMPLEMENTATION_PLAN.md §42.6.3).
@@ -1385,7 +1564,7 @@ async def tool_my_acquaintances(ctx: ToolContext, _args: dict[str, Any]) -> str:
         return "подтверждённых знакомств нет"
     lines = [f"🤝 {name} — id {chat_id}" for chat_id, name in roster]
     return (
-        "Знакомы (могу передавать сообщения; в tell можно указать recipient=\"id …\"):\n"
+        "Знакомы (могу передавать сообщения; в tell укажи recipient_id):\n"
         + "\n".join(lines)
     )
 
@@ -1413,7 +1592,7 @@ async def _roster_hint(ctx: ToolContext) -> str:
     names = ", ".join(f"{name} (id {chat_id})" for chat_id, name in roster)
     return (
         f" Знакомые собеседника: {names}. Если имелся в виду кто-то из них — "
-        "вызови tell ещё раз с recipient=\"id <число>\"; если неясно кто — "
+        "вызови tell ещё раз с его recipient_id; если неясно кто — "
         "переспроси у собеседника, не угадывай."
     )
 
@@ -3427,25 +3606,69 @@ def render_tell(text: str, author: str | None, to_owner_role: bool = False) -> s
     return f"📨 <b>Альфред{role}{who}:</b>\n\n{escape(text.strip())}"
 
 
+def parse_recipient_id(args: dict[str, Any]) -> int | None:
+    """recipient_id из аргументов тула: число, строка с числом или «id 123»."""
+    raw = args.get("recipient_id")
+    if isinstance(raw, bool) or raw in (None, ""):
+        return None
+    if isinstance(raw, int):
+        return raw
+    text = str(raw).strip()
+    if text.lstrip("-").isdigit():
+        return int(text)
+    return recipients.query_chat_id(text)
+
+
+NEED_RECIPIENT_ID = (
+    "ошибка: адресат указывается только по id (recipient_id). Сначала вызови "
+    "find_person с тем, как собеседник описал человека, и возьми id оттуда; "
+    "если подходят несколько — переспроси собеседника."
+)
+
+
+async def _person_gender(ctx: ToolContext, chat_id: int) -> str | None:
+    """Пол адресата для склонения ответа тула: карточка (Этап 54), иначе
+    settings.people. Спящий mycraft — None, тогда «получил(а)»."""
+    cards = await people_cards.fetch_person_cards(ctx.node_link, [chat_id])
+    gender = people_cards.card_gender(cards.get(chat_id))
+    if gender:
+        return gender
+    for person in ctx.settings.people:
+        if chat_id in recipients.person_chat_ids(person, ctx.book):
+            return person.gender
+    return None
+
+
+def _got_verb(gender: str | None, *, future: bool = False) -> str:
+    if future:
+        return "получит"
+    return {"m": "получил", "f": "получила"}.get(gender or "", "получил(а)")
+
+
 async def _deliver_personal_message(
     ctx: ToolContext,
-    who: str,
+    recipient_id: int,
     text: str,
     render: Callable[[recipients.Recipient], str],
     guard: Callable[[recipients.Recipient], Awaitable[str | None]] | None = None,
     allow_self: bool = False,
     emit_extra: Callable[[recipients.Recipient], dict[str, Any]] | None = None,
-    narrow: (
-        Callable[[list[recipients.Recipient]], Awaitable[list[recipients.Recipient]]] | None
-    ) = None,
     hint: Callable[[], Awaitable[str]] | None = None,
+    to_owner_role: bool = False,
 ) -> str:
-    """Общая доставка личного сообщения — резолвинг получателя, лимит,
+    """Общая доставка личного сообщения — поиск получателя по id, лимит,
     отправка, запись хода диалога. Права (если нужны) проверяет ``guard``:
     он получает найденного получателя и либо разрешает (``None``), либо
     возвращает готовый отказ. Без ``guard`` доставка разрешена всем, кто
     вообще видит вызывающий тул — так и должно быть у admin-only тулов,
     видимость которых уже гейтится декларацией (bot/tools.py:195-199).
+
+    Этап 54.5: только по id. Раньше адресата искали по имени, которое
+    придумала модель, и tell часто отвечал «такого нет» (14 неудач к
+    2026-10-08). Теперь id находит find_person, а здесь он лишь проверяется.
+
+    ``to_owner_role`` — гость назвал не имя владельца, а его роль; id при
+    этом обязан быть владельцем, иначе отказ.
 
     ``allow_self`` — отправка самому себе (тот же chat_id, что у ctx). Для
     tell это бессмысленно (собеседник и так читает этот же чат — см. "не
@@ -3457,26 +3680,26 @@ async def _deliver_personal_message(
     проверки, которые там сделать нечем (нет Store), бот доделает сам перед
     отправкой (bot/node_events.py::_handle_deliver_message).
 
-    ``narrow`` — сужение, когда под имя подошли несколько: оставить тех, кому
-    писать вообще можно (у tell — знакомых). Остался один — ему и пишем;
-    несколько — всё равно переспрашиваем; никого — переспрашиваем по
-    исходному списку.
-
     ``hint`` — дописка к «не знаю такого»: кому писать МОЖНО (у tell — список
     знакомых с id), чтобы модель повторила вызов точно, а не угадывала.
     """
-    found = recipients.find_recipients(who, ctx.book, ctx.settings.people)
-    if len(found) > 1 and narrow is not None:
-        found = await narrow(found) or found
+    found = recipients.find_by_chat_id(recipient_id, ctx.book, ctx.settings.people)
     if not found:
         return (
-            f"не получилось: «{who}» я не знаю — писать я могу только тем, кто "
-            "уже принял приглашение и говорит со мной в личном чате"
+            f"не получилось: id {recipient_id} — не гость с личным чатом у меня. "
+            "Найди адресата через find_person."
         ) + (await hint() if hint is not None else "")
-    if len(found) > 1:
-        names = ", ".join(f"{r.display} ({r.chat_id})" for r in found)
-        return f"уточни, кому именно: под «{who}» подходят {names}"
     target = found[0]
+    if to_owner_role:
+        sub = ctx.book.for_chat(target.chat_id)
+        if sub is None or not sub.is_owner:
+            return (
+                f"ошибка: to_owner_role только для владельца, а id {recipient_id} — "
+                f"{target.display}"
+            )
+        target = recipients.Recipient(
+            target.chat_id, target.display, recipients.SOURCE_OWNER_ROLE
+        )
     if not allow_self and target.chat_id == ctx.chat_id:
         return "не нужно: это тот же чат, просто скажи это здесь"
 
@@ -3510,7 +3733,8 @@ async def _deliver_personal_message(
             "tell: сообщение от chat=%s доставлено chat=%s (%s)",
             ctx.chat_id, target.chat_id, target.display,
         )
-        return f"передано: {target.display} получил сообщение"
+        verb = _got_verb(await _person_gender(ctx, target.chat_id))
+        return f"передано: {target.display} {verb} сообщение"
 
     # Служба tasks (self-scheduled remind, живая находка 2026-08-06): своего
     # notifier нет, но есть мост к боту — единственному, у кого он есть (см.
@@ -3540,10 +3764,10 @@ async def tool_tell(ctx: ToolContext, args: dict[str, Any]) -> str:
         return "недоступно: сейчас я не могу никому написать"
     if ctx.chat_id is None:
         return "недоступно: непонятно, от кого передавать"
-    who = str(args.get("recipient") or "").strip()
+    recipient_id = parse_recipient_id(args)
     text = str(args.get("text") or "").strip()
-    if not who:
-        return "ошибка: не сказано, кому передать (recipient)"
+    if recipient_id is None:
+        return NEED_RECIPIENT_ID
     if not text:
         return "ошибка: не сказано, что передать (text)"
 
@@ -3552,15 +3776,6 @@ async def tool_tell(ctx: ToolContext, args: dict[str, Any]) -> str:
     # человек, как все: нужно знакомство (решение 2026-09-27).
     def _to_owner_role(target: recipients.Recipient) -> bool:
         return target.source == recipients.SOURCE_OWNER_ROLE
-
-    async def narrow(found: list[recipients.Recipient]) -> list[recipients.Recipient]:
-        if ctx.store is None:
-            return []
-        return [
-            r
-            for r in found
-            if _to_owner_role(r) or await are_acquainted(ctx.store, ctx.chat_id, r.chat_id)
-        ]
 
     async def guard(target: recipients.Recipient) -> str | None:
         if _to_owner_role(target):
@@ -3595,13 +3810,13 @@ async def tool_tell(ctx: ToolContext, args: dict[str, Any]) -> str:
 
     return await _deliver_personal_message(
         ctx,
-        who,
+        recipient_id,
         text,
         render,
         guard=guard,
         emit_extra=emit_extra,
-        narrow=narrow,
         hint=lambda: _roster_hint(ctx),
+        to_owner_role=bool(args.get("to_owner_role")),
     )
 
 
@@ -3613,54 +3828,44 @@ _DECL_TELL: dict[str, Any] = {
             "Передать личное сообщение другому человеку в его личный чат с "
             "тобой. Используй, когда собеседник просит что-то кому-то "
             "сообщить, передать, спросить или напомнить ('скажи Андрею, что…', "
-            "'спроси у Наташи…'). Текст сообщения придумываешь ТЫ: перескажи "
-            "просьбу своими словами, в своей манере, и упомяни, от кого она — "
-            "это не пересылка дословной цитаты. Писать можно тем, с кем у "
-            "собеседника подтверждено знакомство (request_acquaintance), и "
-            "владельцу, если просят передать именно «владельцу»/«хозяину»/"
-            "«админу»; по личному имени владелец — такой же человек, как все. "
-            "Родственное слово («маме», «брату») — НЕ имя: не подставляй человека "
-            "из семейного древа, а сперва вызови my_acquaintances и шли по id "
-            "того знакомого, кто подходит, либо переспроси. Если человека не "
-            "нашлось, связи нет или подходит сразу несколько — тул "
-            "скажет об этом, тогда переспроси у собеседника, а не угадывай. "
-            "Получателя ищет САМ ИНСТРУМЕНТ — не "
-            "пытайся заранее выяснить, кто это (поиском в интернете, памятью "
-            "или иначе): просто вызови tell с именем/ником ровно как назвал "
-            "собеседник. НЕ СОЧИНЯЙ @username сам, даже если тебе кажется, "
-            "что ты его знаешь — передавай только то слово (имя, ник или "
-            "@username), которое произнёс сам собеседник, дословно; если он "
-            "вообще не назвал получателя по имени — переспроси, кому "
-            "передать, а не выдумывай похожий на правду username. Если "
-            "собеседник не знает личного имени владельца и "
-            "говорит «хозяину»/«владельцу»/«админу» — это ТОЖЕ валидный "
-            "recipient, передай его как есть, тул сам поймёт, что имеется в "
-            "виду владелец, не пытайся угадать за него настоящее имя. tell — "
-            "это ВСЕГДА личная передача (с пометкой «по просьбе X»), не "
-            "официальное уведомление — для того есть отдельный тул "
-            "notify_guest (виден только владельцу). Если с тобой говорит "
-            "владелец и из его слов неясно, хочет ли он передать что-то "
+            "'спроси у Наташи…'). Адресат — ТОЛЬКО по recipient_id: возьми его "
+            "из списка знакомых в справке или вызови find_person с тем, как "
+            "собеседник описал человека (имя, прозвище, «мама», «хозяину»). "
+            "Если find_person дал несколько кандидатов — переспроси, не выбирай "
+            "сам. Текст сообщения придумываешь ТЫ: перескажи просьбу своими "
+            "словами, в своей манере, и упомяни, от кого она — это не пересылка "
+            "дословной цитаты. Писать можно тем, с кем у собеседника "
+            "подтверждено знакомство (request_acquaintance), и владельцу, если "
+            "просят передать именно «владельцу»/«хозяину»/«админу» — тогда "
+            "to_owner_role=true (find_person так и подскажет); по личному имени "
+            "владелец — такой же человек, как все. tell — это ВСЕГДА личная "
+            "передача (с пометкой «по просьбе X»), не официальное уведомление — "
+            "для того есть notify_guest (виден только владельцу). Если с тобой "
+            "говорит владелец и из его слов неясно, хочет ли он передать что-то "
             "лично от себя (как Алексей, tell) или объявить официально (как "
-            "владелец, notify_guest) — спроси прямо: «сказать как лично от "
-            "тебя или как официальное уведомление?», не выбирай сам. Если "
-            "тул вернул отказ — перескажи ПРИЧИНУ ИЗ ЕГО ОТВЕТА как есть, не "
-            "выдумывай другую от себя. Никогда не отказывай, не вызвав tell: "
-            "знакомство могло появиться с прошлого раза — проверяет только тул."
+            "владелец, notify_guest) — спроси прямо: «сказать как лично от тебя "
+            "или как официальное уведомление?», не выбирай сам. Если тул вернул "
+            "отказ — перескажи ПРИЧИНУ ИЗ ЕГО ОТВЕТА как есть, не выдумывай "
+            "другую от себя. Никогда не отказывай, не вызвав tell: знакомство "
+            "могло появиться с прошлого раза — проверяет только тул."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "recipient": {
-                    "type": "string",
-                    "description": "Имя или @username получателя, как его назвал собеседник, "
-                    "либо \"id <число>\" из my_acquaintances / подсказки тула",
+                "recipient_id": {
+                    "type": "integer",
+                    "description": "Telegram id получателя — из find_person или списка знакомых",
                 },
                 "text": {
                     "type": "string",
                     "description": "Готовый текст сообщения — то, что получатель прочтёт",
                 },
+                "to_owner_role": {
+                    "type": "boolean",
+                    "description": "true, если передают «владельцу/хозяину/админу» как роли",
+                },
             },
-            "required": ["recipient", "text"],
+            "required": ["recipient_id", "text"],
         },
     },
 }
@@ -3802,11 +4007,11 @@ async def tool_notify_guest(ctx: ToolContext, args: dict[str, Any]) -> str:
         return "недоступно: сейчас я не могу никому написать"
     if ctx.chat_id is None:
         return "недоступно: непонятно, откуда уведомлять"
-    who = str(args.get("recipient") or "").strip()
+    recipient_id = parse_recipient_id(args)
     text = str(args.get("text") or "").strip()
     persona = _resolve_persona(str(args.get("persona") or ""))
-    if not who:
-        return "ошибка: не сказано, кому передать (recipient)"
+    if recipient_id is None:
+        return NEED_RECIPIENT_ID
     if not text:
         return "ошибка: не сказано, что передать (text)"
     if persona is None:
@@ -3815,7 +4020,7 @@ async def tool_notify_guest(ctx: ToolContext, args: dict[str, Any]) -> str:
     def render(_target: recipients.Recipient) -> str:
         return render_notify(persona, text)
 
-    return await _deliver_personal_message(ctx, who, text, render, allow_self=True)
+    return await _deliver_personal_message(ctx, recipient_id, text, render, allow_self=True)
 
 
 _DECL_NOTIFY_GUEST: dict[str, Any] = {
@@ -3833,9 +4038,9 @@ _DECL_NOTIFY_GUEST: dict[str, Any] = {
             "хочет ли владелец сказать лично от себя (как Алексей, tell) или "
             "объявить официально (как владелец, notify_guest) — спроси "
             "прямо: «сказать как лично от тебя или как официальное "
-            "уведомление?», не выбирай сам. Получателем может быть и сам "
-            "владелец (например self-напоминание в стиле персонажа) — "
-            "тогда используй его имя/ник как обычно, тул сам разберётся. "
+            "уведомление?», не выбирай сам. Получатель — по recipient_id из "
+            "find_person; им может быть и сам владелец (например "
+            "self-напоминание в стиле персонажа). "
             "persona ВСЕГДА случайный: ОБЯЗАТЕЛЬНО сначала вызови "
             "notify_persona (на каждого получателя заново) и напиши text в "
             "его стиле — persona здесь передай ровно тем же значением, что "
@@ -3844,9 +4049,9 @@ _DECL_NOTIFY_GUEST: dict[str, Any] = {
         "parameters": {
             "type": "object",
             "properties": {
-                "recipient": {
-                    "type": "string",
-                    "description": "Имя или @username получателя (может быть и сам владелец)",
+                "recipient_id": {
+                    "type": "integer",
+                    "description": "Telegram id из find_person (может быть и сам владелец)",
                 },
                 "persona": {
                     "type": "string",
@@ -3863,7 +4068,7 @@ _DECL_NOTIFY_GUEST: dict[str, Any] = {
                     ),
                 },
             },
-            "required": ["recipient", "persona", "text"],
+            "required": ["recipient_id", "persona", "text"],
         },
     },
 }
@@ -4080,21 +4285,20 @@ _DECL_REQUEST_ACQUAINTANCE: dict[str, Any] = {
             "знакомства. Тул ничего не отправляет адресату: собеседник "
             "получит отдельную форму с кнопками «Отправить»/«Отмена» и решит "
             "сам. Ответ адресата тоже приходит только кнопкой — сам ты "
-            "предложения не отправляешь, не принимаешь и не отклоняешь. Если "
+            "предложения не отправляешь, не принимаешь и не отклоняешь. "
+            "Адресат — по recipient_id: найди его через "
+            "find_person(purpose=\"acquaintance\"). Если "
             "тул вернул отказ — перескажи причину из его ответа как есть."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "recipient": {
-                    "type": "string",
-                    "description": (
-                        "Имя или @username человека, как его назвал собеседник "
-                        "(дословно, не сочиняй @username сам)"
-                    ),
+                "recipient_id": {
+                    "type": "integer",
+                    "description": "Telegram id человека из find_person(purpose=\"acquaintance\")",
                 },
             },
-            "required": ["recipient"],
+            "required": ["recipient_id"],
         },
     },
 }
@@ -4226,6 +4430,9 @@ TOOLS: tuple[ToolSpec, ...] = (
     # note_person (Этап 54.2) — без requires: о себе может сказать любой,
     # о другом — только его знакомый (проверяет сам обработчик).
     ToolSpec(name="note_person", handler=tool_note_person, declaration=_DECL_NOTE_PERSON),
+    # find_person (Этап 54.4) — без requires, как request_acquaintance: ищет
+    # только среди тех, к кому собеседнику и так можно обратиться.
+    ToolSpec(name="find_person", handler=tool_find_person, declaration=_DECL_FIND_PERSON),
     ToolSpec(
         name="my_acquaintances",
         handler=tool_my_acquaintances,

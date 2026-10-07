@@ -58,6 +58,11 @@ def _is_owner_role_reference(query: str) -> bool:
     return any(query.startswith(stem) for stem in _OWNER_ROLE_STEMS)
 
 
+def is_owner_role_reference(query: str) -> bool:
+    """Назван не человек, а роль владельца («хозяину», «админу»)."""
+    return _is_owner_role_reference(_norm(query))
+
+
 @dataclass(frozen=True)
 class Recipient:
     chat_id: int
@@ -102,6 +107,28 @@ def _matches(query: str, candidate: str) -> bool:
             return False
         free.remove(hit)
     return True
+
+
+def matches(query: str, candidate: str | None) -> bool:
+    """Публичная обёртка _matches для поиска по описанию (bot/tools.py::
+    tool_find_person) — та же строгость: целиком, по слову, по началу слова."""
+    return _matches(_norm(query), candidate or "")
+
+
+def query_chat_id(query: str) -> int | None:
+    return _query_chat_id(query)
+
+
+def person_chat_ids(person: PersonConfig, book: SubscriptionBook) -> list[int]:
+    return _person_chat_ids(person, book)
+
+
+def find_by_chat_id(
+    chat_id: int, book: SubscriptionBook, people: Sequence[PersonConfig] = ()
+) -> list[Recipient]:
+    """Получатель по id — так адресуют tell/notify_guest/request_acquaintance
+    с Этапа 54.5: id находит find_person, имя больше не угадывается."""
+    return _find_by_chat_id(chat_id, book, people)
 
 
 # "@ник" внутри запроса. Модель любит передавать адресата целым лейблом —
