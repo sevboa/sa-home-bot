@@ -468,6 +468,9 @@ async def test_general_view_by_words_puts_radio_on_desk_and_alfred_knows_it(stor
     )
     await _drain(svc)
     assert radio.RADIO_STATE_NEW in link.lines()[-1]
+    # Подпись — вызов без тулов: подсказка «позови тул» в нём рождала
+    # поддельный вызов dalle.text2im текстом (2026-10-07).
+    assert "manor_items" not in link.lines()[-1]
 
 
 async def test_photo_of_stored_cursed_radio_sends_its_card(store):

@@ -32,6 +32,10 @@ _OPTIONS: dict[str, Any] = {"temperature": 0, "num_predict": 512}
 # каждому признаку» по-английски и на целом 512-кадре — ложные «да» 8%,
 # ложные «нет» 14%; прежний список «missing» от модели промахивался на 13/22.
 # Поэтому промах считает код по ответам, а не модель.
+# Описание идёт Альфреду в подпись «ты сфотографировал…»: со словами
+# «стилизованная иллюстрация» gemma уходила в роль генератора картинок и
+# писала текстом поддельный вызов dalle.text2im (стенд 2026-10-08: 6-8 из 10,
+# без этих слов — 0 из 16).
 SYSTEM_PROMPT = """\
 You look at a picture and report only what is actually visible. The picture is
 a stylized illustration of a room or an object; small details may be simplified.
@@ -39,7 +43,9 @@ Do not guess or assume things that are not drawn. Reply with strict JSON only:
 {"description": "...", "answers": {"1": "yes|no", ...}}
 
 - description: 2-4 short phrases IN RUSSIAN: what is in the picture, where,
-  what colors, what light. Only what is visible.
+  what colors, what light. Only what is visible. Describe the scene itself, as
+  if it were a photo: never name the medium or style ("иллюстрация",
+  "рисунок", "стилизованный", "пиксельный").
 - answers: for every numbered item, "yes" if it can be recognized in the
   picture at least roughly (stylization, another angle or shade is still
   "yes"), otherwise "no". Respect the "does NOT count" notes of an item.

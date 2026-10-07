@@ -1016,7 +1016,7 @@ class Interactives:
             expect=expect,
             dialogue_id=dialogue_id,
             # Где Альфред (и какой передатчик на столе) — к рассказу о снимке.
-            describe=await self._where_ru(cab, user_id, in_scene=in_scene),
+            describe=await self._where_ru(cab, user_id, in_scene=in_scene, tools=False),
             selfie=selfie,
         )
         if not started:
@@ -1046,7 +1046,7 @@ class Interactives:
         run = await self._state.load_run(chat_id, radio.SCENARIO_ID)
         in_scene = run is not None and run.status == STATUS_ACTIVE
         self._photo_join[chat_id] = {
-            "describe": await self._where_ru(cab, user_id, in_scene=in_scene),
+            "describe": await self._where_ru(cab, user_id, in_scene=in_scene, tools=False),
             "dialogue_id": dialogue_id,
             "trigger_message_id": trigger_message_id,
         }
@@ -1062,14 +1062,18 @@ class Interactives:
             return False
         return bool(await self._store.items_of(user_id, kind.type))
 
-    async def _where_ru(self, cab: Cabinet, user_id: int, *, in_scene: bool) -> str:
+    async def _where_ru(
+        self, cab: Cabinet, user_id: int, *, in_scene: bool, tools: bool = True
+    ) -> str:
         """Кабинет словами для Альфреда, после сцены — и какой передатчик
-        стоит на столе (radio.RADIO_STATE_*)."""
+        стоит на столе (radio.RADIO_STATE_*). ``tools=False`` — для вызова
+        без тулов (подпись к снимку): без подсказок «позови тул»."""
         where = cab.describe_ru()
         if in_scene or not await self._state.is_completed(radio.SCENARIO_ID, user_id):
             return where
         if await self.speech_clear(user_id):
-            return f"{where} {radio.RADIO_STATE_NEW}"
+            hint = radio.RADIO_STATE_NEW_TOOL_HINT if tools else ""
+            return f"{where} {radio.RADIO_STATE_NEW}{hint}"
         owned = await self._store.items_of(user_id, items_mod.RADIO_TYPE)
         traits = items_mod.RADIO.traits_ru(owned[0]["traits"] or []) if owned else []
         return f"{where} " + radio.RADIO_STATE_OLD.format(
