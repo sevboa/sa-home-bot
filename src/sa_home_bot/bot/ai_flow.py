@@ -74,7 +74,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from aiogram.types import Message, User
 
 from sa_home_bot import wake_core
-from sa_home_bot.bot import dialogue_context
+from sa_home_bot.bot import dialogue_context, people_cards
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.lifecycle import notify_tool_call
 from sa_home_bot.bot.notifier import (  # noqa: F401 — реэкспорт, см. ниже
@@ -801,6 +801,80 @@ async def _reply_context_lines(message: Message, store: Store, dialogue_id: int)
     return lines
 
 
+async def _people_context_lines(
+    message: Message,
+    store: Store,
+    book: SubscriptionBook | None,
+    node_link: ServiceLink,
+    settings: Settings | None,
+) -> list[str]:
+    """Этап 54.3: карточки собеседника, участников группы и его знакомых
+    из graph_memory (раздел people) — пол и прозвища, общие для всех чатов.
+
+    Приоритет пола: settings.people (конфиг владельца) → карточка → догадка
+    модели по имени. Знакомые идут строкой «имя — id — пол» и без карточки:
+    по id их адресуют tell/request_acquaintance."""
+    user = message.from_user
+    if user is None:
+        return []
+    speaker_id = user.id
+    names: dict[int, str] = {}
+    sender_name = display_name(user)
+    if sender_name:
+        names[speaker_id] = sender_name
+    participants: list[int] = []
+    if message.chat is not None and message.chat.type in ("group", "supergroup"):
+        for row in await store.chat_participants(message.chat.id):
+            if row["user_id"] == speaker_id:
+                continue
+            participants.append(row["user_id"])
+            names.setdefault(row["user_id"], row["user_name"])
+    acquaintances: list[int] = []
+    for row in await store.relationships_for(speaker_id, status="confirmed"):
+        other = row["guest_b"] if row["guest_a"] == speaker_id else row["guest_a"]
+        acquaintances.append(other)
+        sub = book.for_chat(other) if book is not None else None
+        if sub is not None:
+            names.setdefault(other, sub.invited_user or sub.name)
+
+    cards = await people_cards.fetch_person_cards(
+        node_link, [speaker_id, *participants, *acquaintances]
+    )
+
+    def name_of(person_id: int) -> str | None:
+        if person_id in names:
+            return names[person_id]
+        sub = book.for_chat(person_id) if book is not None else None
+        return (sub.invited_user or sub.name) if sub is not None else None
+
+    lines: list[str] = []
+    known = _find_known_person(settings, user) if settings else None
+    note = people_cards.speaker_card_note(
+        cards.get(speaker_id), name_of, known_gender=known.gender if known else None
+    )
+    if note:
+        lines.append(note)
+    if participants:
+        lines.append(
+            "Участники этого чата: "
+            + "; ".join(
+                people_cards.roster_line(p, names.get(p) or "?", cards.get(p), name_of)
+                for p in participants
+            )
+            + "."
+        )
+    if acquaintances:
+        lines.append(
+            "Знакомые собеседника (им можно передавать сообщения, адресуй по id): "
+            + "; ".join(
+                people_cards.roster_line(a, name_of(a) or "?", cards.get(a), name_of)
+                for a in acquaintances
+            )
+            + "."
+        )
+    return lines
+
+
 async def _build_context_note(
     message: Message,
     store: Store,
@@ -810,6 +884,7 @@ async def _build_context_note(
     has_web_search: bool = True,
     memory_facts: list[str] | None = None,
     graph_facts: list[str] | None = None,
+    people_lines: list[str] | None = None,
 ) -> str:
     """Служебная заметка для модели (не для пользователя): точное время
     сейчас (§8.1 плана — маленькие локальные модели плохо знают "сейчас", а
@@ -897,6 +972,8 @@ async def _build_context_note(
         note = _known_person_note(known_person)
         if note:
             lines.append(note)
+    if people_lines:
+        lines.extend(people_lines)
     if sender_name is not None and is_group:
         starter = await store.ai_turn(message.chat.id, dialogue_id)
         starter_name = starter.get("user_name") if starter else None
@@ -1166,7 +1243,10 @@ async def request_alfred(
                     f"Кто такой(-ая) {sender_name} и как к нему/ней обращаться?",
                 )
             )
-    recall_results = await asyncio.gather(*recall_calls)
+    # Карточки людей (Этап 54.3) — в том же gather: mycraft спит → [] за
+    # тот же короткий таймаут, что и у графа, а не последовательно сверху.
+    people_task = _people_context_lines(message, store, book, node_link, settings)
+    *recall_results, people_lines = await asyncio.gather(*recall_calls, people_task)
     memory_facts = recall_results[0]
     graph_facts = recall_results[1] + (recall_results[2] if len(recall_results) > 2 else [])
     context_note = await _build_context_note(
@@ -1177,6 +1257,7 @@ async def request_alfred(
         has_web_search=has_web_search,
         memory_facts=memory_facts,
         graph_facts=graph_facts,
+        people_lines=people_lines,
     )
     if pending_actions is not None and message.chat is not None:
         # Этап 45.4: открытые формы подтверждения собеседника — скрытой

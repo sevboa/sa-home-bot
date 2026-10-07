@@ -141,8 +141,11 @@ class FakeNodeLink:
         graph_facts=(),
         warmup_result=None,
         model_profile=None,
+        person_cards=None,
     ):
         self._model_profile = model_profile
+        self.person_cards = dict(person_cards or {})
+        self.person_cards_calls: list[dict] = []
         self.describe_calls: list[str | None] = []
         self.memory_facts = list(memory_facts)
         self.graph_facts = list(graph_facts)
@@ -213,6 +216,11 @@ class FakeNodeLink:
             # разводим тем же полем.
             self.graph_recall_calls.append(args)
             return {"facts": list(self.graph_facts), "count": len(self.graph_facts)}
+        if action == "person_cards":
+            # Карточки людей (Этап 54.3) — тоже перед каждым ходом, та же
+            # причина не писать в command_calls.
+            self.person_cards_calls.append(args)
+            return {"cards": dict(self.person_cards)}
         self.command_calls.append((action, args, dst.node if dst else None))
         if action == "send_wol":
             self.wol_sent.append(args)
@@ -1417,6 +1425,61 @@ async def test_context_note_inserted_right_before_current_turn(store):
     assert sent_messages[-1] == {"role": "user", "content": "текущий вопрос"}
     assert sent_messages[-2]["role"] == "system"
     assert sent_messages[:-2] == history[:-1]
+
+
+async def test_person_cards_reach_the_context_note(store):
+    """Этап 54.3: пол собеседника из общей карточки (сказал сам) и знакомые
+    строкой «имя — id — пол» с источником слабого утверждения."""
+    now = datetime.now(tz=UTC)
+    await store.add_confirmed_relationship(10, 999, "acquaintance", now, now)
+    message = FakeMessage()
+    message.from_user = FakeUser("Лилиан", username="lilian", id=10)
+    link = FakeNodeLink(
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "ответ"}],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+        person_cards={
+            "10": {
+                "gender": {"value": "m", "by_id": 10, "strength": "self", "at": "1"},
+                "name": None,
+                "aliases": [{"value": "Лили", "by_id": 999, "strength": "acquaintance"}],
+            },
+            "999": {
+                "gender": {"value": "f", "by_id": 10, "strength": "acquaintance", "at": "1"},
+                "name": None,
+                "aliases": [],
+            },
+        },
+    )
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
+        500, _admin_book(), FakeNotifier(),
+    )
+
+    note = link.command_calls[0][1]["messages"][-2]["content"]
+    assert "Собеседник — мужчина: сказал это о себе сам" in note
+    assert "«сэр»" in note
+    assert "Его также зовут: Лили." in note
+    assert "admin — id 999 — женщина (так говорит Лилиан (@lilian))" in note
+    assert link.person_cards_calls == [{"ids": "10,999"}]
+
+
+async def test_person_cards_unavailable_leave_note_without_them(store):
+    message = FakeMessage()
+    message.from_user = FakeUser("Лилиан", username="lilian", id=10)
+    link = FakeNodeLink(
+        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "ответ"}],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+    )
+
+    await ai_flow.request_alfred(
+        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
+        500, _admin_book(), FakeNotifier(),
+    )
+
+    note = link.command_calls[0][1]["messages"][-2]["content"]
+    assert "Собеседник —" not in note
+    assert "Знакомые собеседника" not in note
 
 
 # --- ActiveAiChats (живая находка 2026-07-24: редеплой бота посреди
