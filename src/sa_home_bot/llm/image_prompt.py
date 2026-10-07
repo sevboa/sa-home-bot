@@ -49,6 +49,9 @@ Output: JSON {"prompt": "...", "negative": "..."} and nothing else.
   "dramatic lighting", "misty atmosphere", "wide shot", "highly detailed").
 - Concrete visible things only. Drop story, dialogue, emotions of the viewer,
   sounds, smells, anything the picture cannot show.
+- BUT a character's facial expression and emotion ARE visible: keep them as
+  1-3 words right after the subject ("terrified face, screaming", "angry scowl").
+- Keep the viewpoint when given: "side view", "seen from behind".
 - No complex poses or actions (waving, jumping, holding hands): keep a simple
   state (standing, sitting, lying, flying).
 - No text, letters, logos, numbers on the picture.
@@ -66,6 +69,10 @@ Output: JSON {"prompt": "...", "negative": "..."} and nothing else.
 "negative": English, 0-6 short phrases of things that must NOT appear,
 only when the description clearly says so; otherwise "".
 """
+
+# Руки — слабое место SD1.5 (на портретах Альфреда особенно): добавка к
+# любому негативу, кроме raw.
+HANDS_NEGATIVE = "bad hands, extra fingers, mutated hands, fused fingers"
 
 # Этап 49, отладочный /draw: что это за картинка — подсказка промптеру
 # перед описанием. Альфред в кадре — пожилой дворецкий: сама модель

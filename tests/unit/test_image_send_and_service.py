@@ -15,6 +15,7 @@ from sa_home_bot.bot import notifier as notifier_module
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.config import LlmConfig, Settings
 from sa_home_bot.llm import service as llm_service
+from sa_home_bot.llm.image_prompt import HANDS_NEGATIVE as HANDS
 from sa_home_bot.llm.service import LlmService
 from sa_home_bot.proto.messages import ERR_BAD_REQUEST, ERR_INTERNAL, ProtoError
 
@@ -144,7 +145,7 @@ async def test_generate_image_returns_png_b64(monkeypatch):
         "model": None,
         "loras": None,
     }
-    assert seen == {"prompt": "a cat", "negative": "text"}
+    assert seen == {"prompt": "a cat", "negative": f"text, {HANDS}"}
 
 
 async def test_generate_image_empty_negative_uses_config_default(monkeypatch):
@@ -157,7 +158,7 @@ async def test_generate_image_empty_negative_uses_config_default(monkeypatch):
     monkeypatch.setattr(llm_service.imagegen, "generate_image", fake_generate)
     svc = _svc(imagegen_enabled=True, imagegen_negative="blurry")
     await svc.run_command("generate_image", {"prompt": "a cat", "negative": " "})
-    assert seen["negative"] == "blurry"
+    assert seen["negative"] == f"blurry, {HANDS}"
 
 
 async def test_generate_image_negative_extra_is_appended(monkeypatch):
@@ -173,7 +174,29 @@ async def test_generate_image_negative_extra_is_appended(monkeypatch):
     await svc.run_command("generate_image", {"prompt": "a cat", **extra})
     await svc.run_command("generate_image", {"prompt": "a cat", "negative": "text", **extra})
     await svc.run_command("generate_image", {"prompt": "a cat", "raw": True, **extra})
-    assert seen == ["blurry, monochrome", "text, monochrome", ""]
+    assert seen == [f"blurry, monochrome, {HANDS}", f"text, monochrome, {HANDS}", ""]
+
+
+async def test_generate_image_hands_negative_once(monkeypatch):
+    """Руки — в негатив всегда (кроме raw), но без повтора, если уже есть."""
+    seen = []
+
+    async def fake_generate(prompt, negative, cfg, **kwargs):
+        seen.append(negative)
+        return {"png": b"x", "width": 1, "height": 1, "seconds": 0.0}
+
+    monkeypatch.setattr(llm_service.imagegen, "generate_image", fake_generate)
+    svc = _svc(imagegen_enabled=True, imagegen_negative="")
+    await svc.run_command("generate_image", {"prompt": "a cat"})
+    await svc.run_command("generate_image", {"prompt": "a cat", "negative": "bad hands"})
+    assert seen == [HANDS, "bad hands"]
+
+
+def test_prompter_keeps_facial_expression_and_viewpoint():
+    from sa_home_bot.llm import image_prompt
+
+    assert "facial expression" in image_prompt.SYSTEM_PROMPT
+    assert "seen from behind" in image_prompt.SYSTEM_PROMPT
 
 
 async def test_generate_image_light_goes_right_after_main_subject(monkeypatch):
@@ -265,7 +288,7 @@ async def test_generate_image_description_goes_through_prompt_agent(monkeypatch)
     assert seen == {
         "description": "дракон над замком",
         "prompt": "red dragon, old castle",
-        "negative": "people",
+        "negative": f"people, {HANDS}",
     }
     assert result["prompt"] == "red dragon, old castle"
 

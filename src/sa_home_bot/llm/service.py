@@ -1373,6 +1373,8 @@ class LlmService:
             extra = args.get("negative_extra")
             if isinstance(extra, str) and extra.strip():
                 negative = f"{negative}, {extra.strip()}" if negative else extra.strip()
+            if "bad hands" not in negative:
+                negative = ", ".join(x for x in (negative, image_prompt.HANDS_NEGATIVE) if x)
             if options["light"]:
                 # Свет снимка (время суток и погода) — мимо промптера: он
                 # выкидывал «night», и LoRA Альфреда рисовала дневное окно.
