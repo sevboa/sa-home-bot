@@ -2423,3 +2423,65 @@ async def test_vpn_apk_without_cache_tells_to_use_bot_ui(store):
         {"action": "apk"},
     )
     assert "/vpn" in result
+
+
+# --- note_person (Этап 54.2) ---
+
+SPEAKER = 501
+FRIEND = 502
+STRANGER = 503
+
+
+def _person_ctx(store, link, *, user_id=SPEAKER):
+    ctx = _ctx(store, node_link=link)
+    ctx.user_id = user_id
+    return ctx
+
+
+async def test_note_person_about_self_uses_speaker_id(store):
+    link = _FakeNodeLink()
+    result = await tools.tool_note_person(
+        _person_ctx(store, link), {"gender": "мужчина", "alias": ["Лили"]}
+    )
+    assert "со слов самого человека" in result
+    sent = [args for _action, args, _dst in link.calls]
+    assert sent == [
+        {"subject_id": SPEAKER, "field": "gender", "value": "m", "by_id": SPEAKER},
+        {"subject_id": SPEAKER, "field": "alias", "value": "Лили", "by_id": SPEAKER},
+    ]
+    assert link.calls[0][0] == "person_claim"
+
+
+async def test_note_person_about_acquaintance_is_weak(store):
+    now = datetime.now(tz=UTC)
+    await store.add_confirmed_relationship(FRIEND, SPEAKER, "acquaintance", now, now)
+    link = _FakeNodeLink()
+    result = await tools.tool_note_person(
+        _person_ctx(store, link), {"person_id": FRIEND, "name": "Милана"}
+    )
+    assert "знакомого" in result
+    assert link.calls[0][1]["by_id"] == SPEAKER
+    assert link.calls[0][1]["subject_id"] == FRIEND
+
+
+async def test_note_person_refuses_strangers(store):
+    link = _FakeNodeLink()
+    result = await tools.tool_note_person(
+        _person_ctx(store, link), {"person_id": STRANGER, "gender": "f"}
+    )
+    assert result.startswith("не записал")
+    assert link.calls == []
+
+
+async def test_note_person_rejects_bad_gender_before_calling_service(store):
+    link = _FakeNodeLink()
+    result = await tools.tool_note_person(_person_ctx(store, link), {"gender": "x"})
+    assert result.startswith("ошибка")
+    assert link.calls == []
+
+
+async def test_note_person_needs_known_speaker(store):
+    result = await tools.tool_note_person(
+        _person_ctx(store, _FakeNodeLink(), user_id=None), {"gender": "m"}
+    )
+    assert result.startswith("недоступно")

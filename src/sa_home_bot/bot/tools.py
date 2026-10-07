@@ -63,6 +63,7 @@ from sa_home_bot.bot.monitor_state import parse_disk_summary, parse_health_state
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings, reminder_reason
 from sa_home_bot.graph_memory import protocol as graph_memory_protocol
+from sa_home_bot.graph_memory.people import ClaimError, normalize_claim
 from sa_home_bot.llm.prompt import wrap_system_directive
 from sa_home_bot.memory import protocol as memory_protocol
 from sa_home_bot.net import protocol as net_protocol
@@ -1278,6 +1279,95 @@ async def tool_find_image(ctx: ToolContext, args: dict[str, Any]) -> str:
     """Показать ранее нарисованную картинку (Этап 48) — поиск и отправка
     целиком в bot/image_tools.py::find, только по картинкам своего чата."""
     return await image_tools.find(ctx, args)
+
+
+async def tool_note_person(ctx: ToolContext, args: dict[str, Any]) -> str:
+    """Этап 54.2: записать пол/имя/прозвище человека в общую карточку
+    (graph_memory, раздел people) — её видят все чаты, а не только этот.
+
+    Вес решает бот, не модель: говорящий о себе — сильное утверждение;
+    о знакомом — слабое; о постороннем — отказ. Знакомство проверяем тут,
+    потому что таблица знакомств живёт на alfred, а служба — на mycraft."""
+    if ctx.node_link is None:
+        return "недоступно: нет связи с роем"
+    by_id = ctx.user_id
+    if by_id is None:
+        return "недоступно: не знаю, кто сейчас говорит"
+    raw_subject = args.get("person_id")
+    try:
+        subject_id = by_id if raw_subject in (None, "") else int(raw_subject)
+    except (TypeError, ValueError):
+        return f"ошибка: person_id — это Telegram id числом, а не {raw_subject!r}"
+    if subject_id != by_id:
+        if ctx.store is None or not await are_acquainted(ctx.store, by_id, subject_id):
+            return (
+                "не записал: о других запоминаю только со слов их знакомых, "
+                "а собеседник с этим человеком не знаком"
+            )
+    claims: list[tuple[str, Any]] = []
+    for key in ("gender", "name"):
+        if args.get(key) not in (None, ""):
+            claims.append((key, args[key]))
+    aliases = args.get("alias")
+    for alias in [aliases] if isinstance(aliases, str) else list(aliases or []):
+        if str(alias).strip():
+            claims.append(("alias", alias))
+    if not claims:
+        return "ошибка: нечего записывать — укажи gender, name или alias"
+    try:
+        normalized = [normalize_claim(key, value) for key, value in claims]
+    except ClaimError as exc:
+        return f"ошибка: {exc}"
+
+    dst = Address(node=graph_memory_protocol.NODE_ID, service=graph_memory_protocol.SERVICE_NAME)
+    saved: list[str] = []
+    for key, value in normalized:
+        try:
+            await ctx.node_link.command(
+                graph_memory_protocol.ACTION_PERSON_CLAIM,
+                {"subject_id": subject_id, "field": key, "value": value, "by_id": by_id},
+                dst=dst,
+            )
+        except ProtoError as exc:
+            return f"не вышло: {exc.message}"
+        except (ServiceUnavailableError, TimeoutError) as exc:
+            return f"недоступно: память о людях не отвечает ({exc})"
+        saved.append(f"{key}={value}")
+    whose = "со слов самого человека" if subject_id == by_id else "со слов знакомого (слабее)"
+    return f"записал в карточку id {subject_id}, {whose}: " + ", ".join(saved)
+
+
+_DECL_NOTE_PERSON: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "note_person",
+        "description": (
+            "Запомнить навсегда и для всех разговоров пол, имя или прозвище "
+            "человека. Зови, когда собеседник прямо сказал это о себе "
+            "(«я парень», «зови меня Лилиан») или о знакомом ему госте — "
+            "и сразу, когда тебя поправили в обращении. По имени или "
+            "догадке не зови: только сказанное словами. О себе — "
+            "person_id не указывай."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "person_id": {
+                    "type": "integer",
+                    "description": "Telegram id знакомого, если речь о нём, а не о собеседнике",
+                },
+                "gender": {"type": "string", "enum": ["m", "f"]},
+                "name": {"type": "string", "description": "как человека зовут"},
+                "alias": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "прозвища и уменьшительные имена",
+                },
+            },
+            "required": [],
+        },
+    },
+}
 
 
 async def tool_my_acquaintances(ctx: ToolContext, _args: dict[str, Any]) -> str:
@@ -4133,6 +4223,9 @@ TOOLS: tuple[ToolSpec, ...] = (
         handler=tool_request_acquaintance,
         declaration=_DECL_REQUEST_ACQUAINTANCE,
     ),
+    # note_person (Этап 54.2) — без requires: о себе может сказать любой,
+    # о другом — только его знакомый (проверяет сам обработчик).
+    ToolSpec(name="note_person", handler=tool_note_person, declaration=_DECL_NOTE_PERSON),
     ToolSpec(
         name="my_acquaintances",
         handler=tool_my_acquaintances,
