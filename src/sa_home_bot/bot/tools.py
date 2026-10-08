@@ -50,12 +50,12 @@ import urllib.parse
 import urllib.request
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from html import escape
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sa_home_bot import wake_core
+from sa_home_bot import astro, wake_core
 from sa_home_bot.bot import (
     commands,
     image_tools,
@@ -473,25 +473,60 @@ def _get_json_sync(url: str, timeout: float) -> dict[str, Any]:
 _GEOCODE_CACHE: dict[str, tuple[float, float, str]] = {}
 
 
+# Геокодер Open-Meteo кириллицу ищет плохо (2026-10-09: «Мурманск» → посёлок
+# Мурманский, «Бран» → деревня во Франции, румынского Брана нет вовсе), а
+# латиницей находит. Поэтому ищем и как написано, и транслитом, и выбираем
+# сами: точное совпадение имени, страна из «Город, Страна», затем крупнее.
+_TRANSLIT = str.maketrans(
+    {
+        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+        "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+        "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+        "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch",
+        "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+    }
+)  # fmt: skip
+_FEATURE_RANK = {"PPLC": 4, "PPLA": 3, "PPLA2": 2, "PPLA3": 1}
+
+
+def _geocode_score(item: dict[str, Any], names: set[str], country: str) -> tuple:
+    own = str(item.get("name", "")).lower()
+    alt = {own, own.translate(_TRANSLIT)}
+    country_ok = not country or country in str(item.get("country", "")).lower()
+    return (
+        country_ok,
+        bool(alt & names),
+        str(item.get("feature_code", "")).startswith("PPL"),
+        _FEATURE_RANK.get(str(item.get("feature_code")), 0),
+        item.get("population") or 0,
+    )
+
+
 async def _resolve_city(city: str) -> tuple[float, float, str] | None:
     """(latitude, longitude, отображаемое название) или None — город не
     найден геокодером, либо сам геокодер недоступен."""
     key = city.strip().lower()
     if key in _GEOCODE_CACHE:
         return _GEOCODE_CACHE[key]
-    url = (
-        "https://geocoding-api.open-meteo.com/v1/search"
-        f"?name={urllib.parse.quote(city)}&count=1&language=ru&format=json"
-    )
-    try:
-        data = await asyncio.to_thread(_get_json_sync, url, _HTTP_TIMEOUT_S)
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-        log.warning("tool_get_weather: геокодирование «%s» не удалось: %s", city, exc)
+    raw_name, _, country = city.strip().partition(",")
+    name, country = raw_name.strip().lower(), country.strip().lower()
+    queries = list(dict.fromkeys([raw_name.strip(), raw_name.strip().lower().translate(_TRANSLIT)]))
+    candidates: list[dict[str, Any]] = []
+    for query in queries:
+        url = (
+            "https://geocoding-api.open-meteo.com/v1/search"
+            f"?name={urllib.parse.quote(query)}&count=10&language=ru&format=json"
+        )
+        try:
+            data = await asyncio.to_thread(_get_json_sync, url, _HTTP_TIMEOUT_S)
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            log.warning("tool_get_weather: геокодирование «%s» не удалось: %s", query, exc)
+            continue
+        candidates.extend(data.get("results") or [])
+    if not candidates:
         return None
-    results = data.get("results") or []
-    if not results:
-        return None
-    top = results[0]
+    names = {name, name.translate(_TRANSLIT)}
+    top = max(candidates, key=lambda item: _geocode_score(item, names, country))
     label = top.get("name", city)
     if top.get("country"):
         label = f"{label}, {top['country']}"
@@ -500,11 +535,89 @@ async def _resolve_city(city: str) -> tuple[float, float, str] | None:
     return resolved
 
 
+# WMO weather code → по-русски: модель сама коды не знает и гадала бы.
+_WMO_RU = {
+    0: "ясно",
+    1: "преимущественно ясно",
+    2: "переменная облачность",
+    3: "пасмурно",
+    45: "туман",
+    48: "туман с изморозью",
+    51: "слабая морось",
+    53: "морось",
+    55: "сильная морось",
+    56: "ледяная морось",
+    57: "сильная ледяная морось",
+    61: "небольшой дождь",
+    63: "дождь",
+    65: "сильный дождь",
+    66: "ледяной дождь",
+    67: "сильный ледяной дождь",
+    71: "небольшой снег",
+    73: "снег",
+    75: "сильный снег",
+    77: "снежная крупа",
+    80: "небольшой ливень",
+    81: "ливень",
+    82: "сильный ливень",
+    85: "снегопад",
+    86: "сильный снегопад",
+    95: "гроза",
+    96: "гроза с градом",
+    99: "сильная гроза с градом",
+}
+
+
+def _local_zone(data: dict[str, Any]) -> ZoneInfo | timezone:
+    """Пояс города из ответа прогноза (``timezone=auto``); незнакомое
+    системе имя — хотя бы смещение."""
+    name = data.get("timezone")
+    if isinstance(name, str) and name:
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    return timezone(timedelta(seconds=int(data.get("utc_offset_seconds") or 0)))
+
+
+def _hhmm(moment: datetime | None, zone: ZoneInfo | timezone) -> str | None:
+    return moment.astimezone(zone).strftime("%H:%M") if moment is not None else None
+
+
+def place_now(lat: float, lon: float, zone: ZoneInfo | timezone, now: datetime) -> dict[str, Any]:
+    """Время, время суток, солнце и луна в точке — без сети (``astro``)."""
+    local = now.astimezone(zone)
+    altitude, azimuth = astro.sun_position(lat, lon, now)
+    day = astro.sun_day(lat, lon, local.date())
+    moon = astro.moon(now)
+    return {
+        "local_time": local.strftime("%H:%M"),
+        "date": local.strftime("%Y-%m-%d"),
+        "weekday": WEEKDAYS_RU[local.weekday()],
+        "utc_offset": local.strftime("%z"),
+        "time_of_day": astro.LIGHT_RU[astro.light_phase(altitude, azimuth)],
+        "sun": {
+            "altitude_deg": round(altitude, 1),
+            "azimuth_deg": round(azimuth),
+            "sunrise": _hhmm(day.sunrise, zone),
+            "sunset": _hhmm(day.sunset, zone),
+            "solar_noon": _hhmm(day.noon, zone),
+        },
+        "moon": {
+            "phase": moon.phase_ru,
+            "illumination_pct": round(moon.illumination * 100),
+        },
+    }
+
+
 async def tool_get_weather(ctx: ToolContext, args: dict[str, Any]) -> str:
     # Живой баг 2026-07-24: декларация раньше не принимала город вообще
     # ("узнать погоду ДОМА") — модель на прямой вопрос про другой город
     # честно отказывала, а не молчаливо путала его с домом. args["city"] —
     # необязательный: без него — прежнее поведение (город из конфига).
+    # С 2026-10-09 тул — «что сейчас в городе» целиком: к погоде добавлены
+    # местное время, время суток, солнце и луна (всё считается локально по
+    # координатам и поясу из того же ответа Open-Meteo).
     requested_city = args.get("city")
     city = requested_city.strip() if isinstance(requested_city, str) else ""
     if not city:
@@ -518,8 +631,10 @@ async def tool_get_weather(ctx: ToolContext, args: dict[str, Any]) -> str:
     url = (
         "https://api.open-meteo.com/v1/forecast"
         f"?latitude={lat}&longitude={lon}"
-        "&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m"
-        "&timezone=auto"
+        "&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,"
+        "wind_gusts_10m,relative_humidity_2m,cloud_cover,precipitation"
+        "&daily=temperature_2m_min,temperature_2m_max,precipitation_probability_max"
+        "&forecast_days=1&wind_speed_unit=ms&timezone=auto"
     )
     try:
         data = await asyncio.to_thread(_get_json_sync, url, _HTTP_TIMEOUT_S)
@@ -527,16 +642,30 @@ async def tool_get_weather(ctx: ToolContext, args: dict[str, Any]) -> str:
         log.warning("tool_get_weather: %s", exc)
         return "не удалось получить погоду — сервис недоступен, повтори позже"
     current = data.get("current", {})
-    return json.dumps(
-        {
-            "location": label,
-            "temperature_c": current.get("temperature_2m"),
-            "feels_like_c": current.get("apparent_temperature"),
-            "wind_speed_kmh": current.get("wind_speed_10m"),
-            "weather_code": current.get("weather_code"),
-        },
-        ensure_ascii=False,
-    )
+    daily = data.get("daily", {})
+
+    def today(key: str) -> Any:
+        values = daily.get(key)
+        return values[0] if isinstance(values, list) and values else None
+
+    code = current.get("weather_code")
+    result: dict[str, Any] = {
+        "location": label,
+        "weather": _WMO_RU.get(code) if isinstance(code, int) else None,
+        "temperature_c": current.get("temperature_2m"),
+        "feels_like_c": current.get("apparent_temperature"),
+        "today_min_c": today("temperature_2m_min"),
+        "today_max_c": today("temperature_2m_max"),
+        "precipitation_chance_pct": today("precipitation_probability_max"),
+        "precipitation_mm": current.get("precipitation"),
+        "cloud_cover_pct": current.get("cloud_cover"),
+        "humidity_pct": current.get("relative_humidity_2m"),
+        "wind_ms": current.get("wind_speed_10m"),
+        "wind_gusts_ms": current.get("wind_gusts_10m"),
+        "weather_code": code,
+    }
+    result.update(place_now(lat, lon, _local_zone(data), datetime.now(UTC)))
+    return json.dumps(result, ensure_ascii=False)
 
 
 # --- convert_currency ---
@@ -1627,8 +1756,12 @@ _DECL_WEATHER: dict[str, Any] = {
     "function": {
         "name": "get_weather",
         "description": (
-            "Узнать текущую погоду (температура, ощущается как, ветер) в любом "
-            "городе мира — не только дома. Если пользователь называет город, "
+            "Что сейчас в любом городе мира (не только дома): погода словами, "
+            "температура (сейчас, ощущается, мин/макс за день), осадки, облачность, "
+            "ветер в м/с, а также местное время, день недели, время суток (ночь/"
+            "рассвет/день/закат), высота солнца, восход и закат, фаза луны. Не "
+            "считай время суток, восход или луну сам — бери из ответа. Если "
+            "пользователь называет город, "
             "передай его в city; если спрашивает просто 'какая погода' без "
             "уточнения — не передавай city вовсе, вернётся погода дома."
         ),
@@ -1637,7 +1770,10 @@ _DECL_WEATHER: dict[str, Any] = {
             "properties": {
                 "city": {
                     "type": "string",
-                    "description": "Город, если он назван явно (например: Алматы)",
+                    "description": (
+                        "Город, если он назван явно (например: Алматы); при "
+                        "неоднозначности — со страной через запятую: «Бран, Румыния»"
+                    ),
                 }
             },
         },

@@ -15,12 +15,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import time
 import urllib.request
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
+
+from sa_home_bot import astro
 
 log = logging.getLogger(__name__)
 
@@ -80,35 +81,10 @@ def _weather_kind(code: int) -> str:
 
 
 def sun_times(day: date) -> tuple[datetime, datetime]:
-    """Восход и закат (UTC) над Браном — упрощённое уравнение NOAA, точность
-    пара минут, нам хватает с запасом."""
-    n = day.timetuple().tm_yday
-    gamma = 2 * math.pi / 365 * (n - 1)
-    eqtime = 229.18 * (
-        0.000075
-        + 0.001868 * math.cos(gamma)
-        - 0.032077 * math.sin(gamma)
-        - 0.014615 * math.cos(2 * gamma)
-        - 0.040849 * math.sin(2 * gamma)
-    )
-    decl = (
-        0.006918
-        - 0.399912 * math.cos(gamma)
-        + 0.070257 * math.sin(gamma)
-        - 0.006758 * math.cos(2 * gamma)
-        + 0.000907 * math.sin(2 * gamma)
-        - 0.002697 * math.cos(3 * gamma)
-        + 0.00148 * math.sin(3 * gamma)
-    )
-    lat = math.radians(LAT)
-    cos_ha = math.cos(math.radians(90.833)) / (math.cos(lat) * math.cos(decl)) - math.tan(
-        lat
-    ) * math.tan(decl)
-    ha = math.degrees(math.acos(max(-1.0, min(1.0, cos_ha))))
-    midnight = datetime(day.year, day.month, day.day, tzinfo=UTC)
-    sunrise = midnight + timedelta(minutes=720 - 4 * (LON + ha) - eqtime)
-    sunset = midnight + timedelta(minutes=720 - 4 * (LON - ha) - eqtime)
-    return sunrise, sunset
+    """Восход и закат (UTC) над Браном (``astro``, NOAA, точность пара минут)."""
+    sd = astro.sun_day(LAT, LON, day)
+    # Широта Брана — полярных дня и ночи не бывает, полдень — только для типов.
+    return sd.sunrise or sd.noon, sd.sunset or sd.noon
 
 
 def phase_at(now: datetime) -> str:
@@ -130,6 +106,7 @@ class Outside:
     phase: str
     weather: str | None  # None — погоду узнать не удалось
     local_time: str  # «21:40» по Трансильвании
+    moon: str | None = None  # «растущий серп» — фаза луны, только по-русски
 
     @property
     def light(self) -> str:
@@ -146,6 +123,8 @@ class Outside:
         parts = [f"{self.local_time} по Трансильвании", _PHASE_TEXT[self.phase][0]]
         if self.weather:
             parts.append(_WEATHER_TEXT[self.weather][0])
+        if self.moon and self.phase == PHASE_NIGHT:
+            parts.append(f"луна: {self.moon}")
         return ", ".join(parts)
 
     def en(self) -> str:
@@ -186,4 +165,5 @@ class Transylvania:
             phase=phase_at(now),
             weather=await self.weather(),
             local_time=now.astimezone(TZ).strftime("%H:%M"),
+            moon=astro.moon(now).phase_ru,
         )
