@@ -1017,3 +1017,20 @@ async def test_id_of_non_acquaintance_still_refused():
     result = await ai_tools.tool_tell(ctx, {"recipient_id": FAMILY_A_CHAT, "text": "привет"})
     assert "не знакомы" in result and "знакомых у собеседника нет" in result
     assert notifier.sent == []
+
+
+async def test_guests_list_shows_config_name_and_nick():
+    """Живая находка 2026-10-09: брат владельца был в списке как «Kein»
+    без имени и ника из [[people]]."""
+    book = SubscriptionBook.from_config(
+        [SubscriptionConfig(name="me", chat_id=1, allowed_commands=["*"])],
+        [
+            GuestSubscriptionConfig(
+                name="Kein", chat_id=ANDREY_CHAT, allowed_commands=["chat@llm"]
+            )
+        ],
+    )
+    ctx = _ctx(book=book)
+    result = await ai_tools.tool_guests_list(ctx, {})
+    line = next(row for row in result.splitlines() if str(ANDREY_CHAT) in row)
+    assert "Kein" in line and "Андрей Иванов" in line and "@andrey" in line

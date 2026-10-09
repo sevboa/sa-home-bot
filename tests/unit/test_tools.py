@@ -13,11 +13,18 @@ import pytest
 import pytest_asyncio
 
 from sa_home_bot.bot import tools
-from sa_home_bot.config import LlmConfig, Settings, WeatherConfig
+from sa_home_bot.config import (
+    GuestSubscriptionConfig,
+    LlmConfig,
+    Settings,
+    SubscriptionConfig,
+    WeatherConfig,
+)
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
 from sa_home_bot.llm import prompt
+from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.vpn import protocol as vpn_protocol
 
@@ -2521,6 +2528,41 @@ async def test_note_person_refuses_strangers(store):
     assert f"request_acquaintance(recipient_id={STRANGER})" in result
     assert link.calls == []
 
+
+
+def _stranger_book():
+    return SubscriptionBook.from_config(
+        [SubscriptionConfig(name="me", chat_id=SPEAKER, allowed_commands=["*"])],
+        [
+            GuestSubscriptionConfig(
+                name="Александр (@ksytal_as)", chat_id=STRANGER, allowed_commands=["chat@llm"]
+            )
+        ],
+    )
+
+
+async def test_note_person_names_whose_id_it_is_when_name_differs(store):
+    """Живая находка 2026-10-09: «Я знаком с Андреем» — модель взяла из
+    истории id Александра; отказ должен сказать, чей он, и отправить в
+    find_person, а не открывать знакомство с Александром."""
+    link = _FakeNodeLink()
+    ctx = _person_ctx(store, link)
+    ctx.book = _stranger_book()
+    result = await tools.tool_note_person(ctx, {"person_id": STRANGER, "name": "Андрей"})
+    assert result.startswith("не записал")
+    assert "Александр (@ksytal_as)" in result and "а не «Андрей»" in result
+    assert "find_person" in result
+    assert "request_acquaintance" not in result
+    assert link.calls == []
+
+
+async def test_note_person_stranger_with_matching_name_points_to_acquaintance(store):
+    link = _FakeNodeLink()
+    ctx = _person_ctx(store, link)
+    ctx.book = _stranger_book()
+    result = await tools.tool_note_person(ctx, {"person_id": STRANGER, "name": "Александра"})
+    assert "Александр (@ksytal_as)" in result
+    assert f"request_acquaintance(recipient_id={STRANGER})" in result
 
 async def test_note_person_rejects_bad_gender_before_calling_service(store):
     link = _FakeNodeLink()

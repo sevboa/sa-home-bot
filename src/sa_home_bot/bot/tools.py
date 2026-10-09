@@ -48,7 +48,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
 from html import escape
@@ -1255,7 +1255,13 @@ async def acquaintance_conflict(
                 f"форма предложения знакомства адресату ({target_name}) уже открыта — "
                 "ждёт кнопки «Отправить» или «Отмена»"
             )
-        return f"предложение знакомства уже отправлено адресату ({target_name}), ждём ответа"
+        # Живая находка 2026-10-09: этот ответ про Александра модель
+        # пересказала как «отправил Андрею» — id был взят не тот.
+        return (
+            f"предложение знакомства уже отправлено адресату ({target_name}), ждём "
+            f"ответа. Если собеседник говорил не про {target_name} — id не тот: "
+            "найди нужного find_person и не говори, что ему уже отправлено"
+        )
     if await are_acquainted(store, initiator, target):
         return f"вы с адресатом ({target_name}) уже знакомы"
     return None
@@ -1416,6 +1422,36 @@ async def tool_find_image(ctx: ToolContext, args: dict[str, Any]) -> str:
     return await image_tools.find(ctx, args)
 
 
+def _note_person_stranger(ctx: ToolContext, subject_id: int, name: str) -> str:
+    """Отказ note_person о незнакомом — с тем, чей это id.
+
+    Живая находка 2026-10-09: «Я знаком с Андреем, это мой брат» — модель
+    без find_person взяла из истории id Александра, а безымянный отказ ещё и
+    подсказал открыть знакомство с ним же."""
+    if ctx.book is None:
+        who = "этот человек"
+    else:
+        own = _person_labels(ctx, [subject_id], {}).get(subject_id)
+        if own is None:
+            return (
+                f"не записал: id {subject_id} — ни один гость. id не придумывай: "
+                f'найди человека find_person(description="{name or "как его назвали"}")'
+            )
+        found = recipients.find_by_chat_id(subject_id, ctx.book, ctx.settings.people)
+        who = found[0].display if found else f"id {subject_id}"
+        if name.strip() and not _name_fits(name, own):
+            return (
+                f"не записал: id {subject_id} — это {who}, а не «{name}». id из прошлых "
+                f'разговоров не бери: найди нужного find_person(description="{name}", '
+                'purpose="acquaintance")'
+            )
+    return (
+        f"не записал: о других запоминаю только со слов их знакомых, а собеседник "
+        f"и {who} не знакомы через тебя; познакомить — "
+        f"request_acquaintance(recipient_id={subject_id})"
+    )
+
+
 async def tool_note_person(ctx: ToolContext, args: dict[str, Any]) -> str:
     """Этап 54.2: записать пол/имя/прозвище человека в общую карточку
     (graph_memory, раздел people) — её видят все чаты, а не только этот.
@@ -1435,11 +1471,7 @@ async def tool_note_person(ctx: ToolContext, args: dict[str, Any]) -> str:
         return f"ошибка: person_id — это Telegram id числом, а не {raw_subject!r}"
     if subject_id != by_id:
         if ctx.store is None or not await are_acquainted(ctx.store, by_id, subject_id):
-            return (
-                "не записал: о других запоминаю только со слов их знакомых, "
-                "а собеседник с этим человеком не знаком через тебя; "
-                f"познакомить — request_acquaintance(recipient_id={subject_id})"
-            )
+            return _note_person_stranger(ctx, subject_id, str(args.get("name") or ""))
     claims: list[tuple[str, Any]] = []
     for key in ("gender", "name"):
         if args.get(key) not in (None, ""):
@@ -1580,6 +1612,43 @@ def _match_by_words(
     }
 
 
+def _person_labels(
+    ctx: ToolContext, chat_ids: Iterable[int], cards: dict[int, Any]
+) -> dict[int, list[tuple[str, str]]]:
+    """Все имена, под которыми человек известен дому: подписка, карточка
+    graph_memory, [[people]] из конфига — с видом метки для причины совпадения."""
+    assert ctx.book is not None
+    labels: dict[int, list[tuple[str, str]]] = {}
+    for chat_id in chat_ids:
+        sub = ctx.book.for_chat(chat_id)
+        if sub is None:
+            continue
+        own = [("имя", sub.name), ("имя", sub.invited_user or "")]
+        card = cards.get(chat_id) or {}
+        if isinstance(card.get("name"), dict):
+            own.append(("имя из карточки", card["name"]["value"]))
+        own += [("прозвище", a["value"]) for a in card.get("aliases") or []]
+        labels[chat_id] = own
+    for person in ctx.settings.people:
+        for chat_id in recipients.person_chat_ids(person, ctx.book):
+            if chat_id in labels:
+                labels[chat_id] += [("имя", person.full_name), ("ник", person.telegram_username)]
+    return labels
+
+
+def _name_fits(name: str, own: list[tuple[str, str]]) -> bool:
+    """Подходит ли названное имя к меткам одного человека — те же заходы,
+    что у find_person, кроме id и роли."""
+    for _kind, label in own:
+        if label and (
+            recipients.matches(name, label)
+            or _same_stems(name, label)
+            or recipients.matches(_stem_query(name), label)
+        ):
+            return True
+    return bool(_match_by_words(name, {0: own}))
+
+
 async def tool_find_person(ctx: ToolContext, args: dict[str, Any]) -> str:
     """Этап 54.4: найти id человека по описанию. Ищет только среди тех,
     к кому собеседнику вообще можно обратиться:
@@ -1611,19 +1680,7 @@ async def tool_find_person(ctx: ToolContext, args: dict[str, Any]) -> str:
         pool.discard(ctx.chat_id)
 
     cards = await people_cards.fetch_person_cards(ctx.node_link, sorted(pool)[:50])
-    labels: dict[int, list[tuple[str, str]]] = {}
-    for chat_id in pool:
-        sub = private[chat_id]
-        own = [("имя", sub.name), ("имя", sub.invited_user or "")]
-        card = cards.get(chat_id) or {}
-        if isinstance(card.get("name"), dict):
-            own.append(("имя из карточки", card["name"]["value"]))
-        own += [("прозвище", a["value"]) for a in card.get("aliases") or []]
-        labels[chat_id] = own
-    for person in ctx.settings.people:
-        for chat_id in recipients.person_chat_ids(person, ctx.book):
-            if chat_id in labels:
-                labels[chat_id] += [("имя", person.full_name), ("ник", person.telegram_username)]
+    labels = _person_labels(ctx, pool, cards)
 
     def display(chat_id: int) -> str:
         found = recipients.find_by_chat_id(chat_id, ctx.book, ctx.settings.people)
@@ -4339,8 +4396,19 @@ async def tool_guests_list(ctx: ToolContext, args: dict[str, Any]) -> str:
         lines.append(f"offset {offset} за пределами списка — всего подходит {len(guests)}")
         return "\n".join(lines)
     lines[0] += f", показаны {offset + 1}-{offset + len(page)}"
+    # Живая находка 2026-10-09: брат владельца числился как «Kein» — имя и
+    # @ник из [[people]] знал только find_person, и модель решила, что их нет.
+    labels = _person_labels(ctx, [g.chat_id for g in page], {})
     for g in page:
-        lines.append(f"• {g.name} (chat_id {g.chat_id}) — прав: {len(g.allowed_commands)}")
+        aliases: list[str] = []
+        for kind, label in labels.get(g.chat_id, []):
+            label = f"@{label.lstrip('@')}" if kind == "ник" and label else label
+            if label and label not in aliases and label not in g.name:
+                aliases.append(label)
+        extra = f", ещё: {', '.join(aliases)}" if aliases else ""
+        lines.append(
+            f"• {g.name} (chat_id {g.chat_id}{extra}) — прав: {len(g.allowed_commands)}"
+        )
     next_offset = offset + len(page)
     if next_offset < len(guests):
         lines.append(
@@ -4356,7 +4424,9 @@ _DECL_GUESTS_LIST: dict[str, Any] = {
         "name": "guests_list",
         "description": (
             "Твой личный справочник приглашённых гостей: имя, chat_id и число "
-            "выданных прав (сами права поимённо список не показывает — это "
+            "выданных прав. Ищешь конкретного человека (по имени, нику, «мой "
+            "брат») — это find_person, а не этот список; справочник — чтобы "
+            "перечислить гостей (сами права поимённо он не показывает, right — "
             "фильтр, а не перечень). Доступен "
             "только владельцу — если тул тебе виден, значит спрашивает "
             "именно он; не пересказывай этот справочник в чужом чате. "
