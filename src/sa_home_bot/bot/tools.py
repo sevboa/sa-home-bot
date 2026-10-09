@@ -1288,8 +1288,9 @@ async def tool_request_acquaintance(ctx: ToolContext, args: dict[str, Any]) -> s
     found = recipients.find_by_chat_id(recipient_id, ctx.book, ctx.settings.people)
     if not found:
         return (
-            f"не получилось: id {recipient_id} — не гость с личным чатом; познакомить "
-            "могу только с тем, кто уже принял приглашение"
+            f"не получилось: id {recipient_id} — ни один гость. id не придумывай: "
+            'вызови find_person(purpose="acquaintance") с тем, как собеседник '
+            "назвал человека, и возьми id из ответа"
         )
     target_chat_id = found[0].chat_id
     if target_chat_id == ctx.chat_id:
@@ -1528,6 +1529,57 @@ def _stem_query(query: str) -> str:
     return " ".join(_stem(w) for w in query.split())
 
 
+# Слова описания, которые не имя: «Андрей который кейн», «это мой отец».
+_DESCRIPTION_FILLER = frozenset(
+    "который которая которое которые это этот эта мой моя моё мое мои твой "
+    "его её ее их есть такой такая как тот та кто зовут зовёт по нику ник "
+    "имени имя с со и или он она".split()
+)
+
+
+def _nick_spellings(word: str) -> set[str]:
+    """Кириллицей написанный ник латиницей: «кейн» → kein/keyn/kejn."""
+    base = word.translate(_TRANSLIT)
+    if base == word:
+        return set()
+    spellings = {base}
+    for cyr, lat in (("й", ("i", "j")), ("х", ("h",)), ("е", ("ye",))):
+        if cyr in word:
+            for alt in lat:
+                spellings.add(word.replace(cyr, alt).translate(_TRANSLIT))
+    return spellings
+
+
+def _match_by_words(
+    query: str, labels: dict[int, list[tuple[str, str]]]
+) -> dict[int, str]:
+    """Последний заход find_person: описание целиком не совпало ни с кем —
+    («Андрей который кейн», живая находка 2026-10-09) — ищем по отдельным
+    словам без служебных, и кириллицу ещё транслитом (ник «kein»). Берём
+    тех, у кого совпало больше всего слов; несколько — выберет собеседник."""
+    words = [
+        w
+        for w in (w.strip(".,!?«»\"'()").casefold() for w in query.split())
+        if len(w) >= 3 and w not in _DESCRIPTION_FILLER
+    ]
+    scores: dict[int, list[str]] = {}
+    for word in words:
+        variants = {word, _stem(word)} | _nick_spellings(word)
+        for chat_id, own in labels.items():
+            if any(
+                label and recipients.matches(v, label) for v in variants for _kind, label in own
+            ):
+                scores.setdefault(chat_id, []).append(word)
+    if not scores:
+        return {}
+    best = max(len(found) for found in scores.values())
+    return {
+        chat_id: "по словам «" + "», «".join(found) + "»"
+        for chat_id, found in scores.items()
+        if len(found) == best
+    }
+
+
 async def tool_find_person(ctx: ToolContext, args: dict[str, Any]) -> str:
     """Этап 54.4: найти id человека по описанию. Ищет только среди тех,
     к кому собеседнику вообще можно обратиться:
@@ -1615,6 +1667,8 @@ async def tool_find_person(ctx: ToolContext, args: dict[str, Any]) -> str:
             for kind, label in own:
                 if label and matcher(label):
                     hits.setdefault(chat_id, f"{kind} «{label}»")
+    if not hits:
+        hits = _match_by_words(query, labels)
 
     if not hits:
         if purpose == PURPOSE_ACQUAINTANCE:
@@ -3833,8 +3887,9 @@ async def _deliver_personal_message(
     found = recipients.find_by_chat_id(recipient_id, ctx.book, ctx.settings.people)
     if not found:
         return (
-            f"не получилось: id {recipient_id} — не гость с личным чатом у меня. "
-            "Найди адресата через find_person."
+            f"не получилось: id {recipient_id} — ни один гость. id не придумывай: "
+            "вызови find_person с тем, как собеседник назвал человека, и возьми id "
+            "из ответа."
         ) + (await hint() if hint is not None else "")
     target = found[0]
     if to_owner_role:

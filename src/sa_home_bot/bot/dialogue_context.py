@@ -265,8 +265,22 @@ async def load_history(
 # же просьбу модель отвечала тем же текстом, не вызывая take_photo: образец
 # в контексте говорил, что снимок — это слова. Только тулы, которые что-то
 # присылают в чат (снимок, картинка, карточка вещи): их не повторить словами.
-HISTORY_TOOLS = frozenset({"take_photo", "generate_image", "show_items"})
+# Живая находка 2026-10-09: тулы людей — id из find_person жил один ход;
+# на «да, хочу связь» модель звала request_acquaintance с выдуманным
+# 123456789. Их след тоже в истории, длиннее: id кандидатов не обрезать.
+PEOPLE_HISTORY_TOOLS = frozenset(
+    {
+        "find_person",
+        "my_acquaintances",
+        "note_person",
+        "request_acquaintance",
+        "tell",
+        "notify_guest",
+    }
+)
+HISTORY_TOOLS = frozenset({"take_photo", "generate_image", "show_items"}) | PEOPLE_HISTORY_TOOLS
 HISTORY_TOOL_RESULT_MAX = 200
+PEOPLE_HISTORY_TOOL_RESULT_MAX = 600
 
 
 async def _history_tool_calls(
@@ -298,7 +312,11 @@ async def _history_tool_calls(
                 {
                     "role": "tool",
                     "name": c["tool_name"],
-                    "content": str(c["result"] or "")[:HISTORY_TOOL_RESULT_MAX],
+                    "content": str(c["result"] or "")[
+                        : PEOPLE_HISTORY_TOOL_RESULT_MAX
+                        if c["tool_name"] in PEOPLE_HISTORY_TOOLS
+                        else HISTORY_TOOL_RESULT_MAX
+                    ],
                 }
                 for c in group
             ),

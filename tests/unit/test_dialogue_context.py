@@ -147,6 +147,23 @@ async def test_history_shows_photo_tool_rounds_after_the_request(store):
     assert trimmed[0]["role"] == "assistant" and "tool_calls" not in trimmed[0]
 
 
+async def test_history_keeps_person_id_from_find_person(store):
+    """Живая находка 2026-10-09: id из find_person жил один ход, и на «да,
+    хочу связь» модель выдумала recipient_id=123456789."""
+    found = "Нашёл: Андрей Александрович Севбо — id 518571647 — мужчина"
+    await _turn(store, 1, "user", "а как @kein есть такой?")
+    await store.record_tool_call(
+        chat_id=CHAT, dialogue_id=DIALOGUE, trigger_message_id=1, tool_name="find_person",
+        args={"description": "@kein"}, result=found + " " + "x" * 300, at=NOW,
+    )
+    await _turn(store, 2, "assistant", "Это Андрей Александрович.")
+    await _turn(store, 3, "user", "да хочу связь")
+    history = await dialogue_context.load_history(store, _settings(), CHAT, DIALOGUE)
+    assert [m["role"] for m in history] == ["user", "assistant", "tool", "assistant", "user"]
+    assert history[2]["content"].startswith(found)
+    assert len(history[2]["content"]) > dialogue_context.HISTORY_TOOL_RESULT_MAX
+
+
 async def test_load_history_with_summary_and_short_old_replies(store):
     await _long_dialogue(store, 12, reply_len=900)  # message_id 1..24
     await store.add_dialogue_summary(CHAT, DIALOGUE, 8, "Говорили о пчёлах.", NOW)

@@ -899,6 +899,31 @@ async def test_find_person_nick_wins_over_surrounding_words():
     assert result.startswith("Нашёл:") and f"id {FAMILY_A_CHAT}" in result
 
 
+async def test_find_person_by_words_and_cyrillic_nick():
+    """Живая находка 2026-10-09: «Андрей который кейн» — ни целиком, ни по
+    основам; по отдельным словам и транслиту «кейн» → @kein находится."""
+    book = SubscriptionBook.from_config(
+        [SubscriptionConfig(name="owner", chat_id=OWNER_CHAT, allowed_commands=["*"])],
+        [
+            GuestSubscriptionConfig(
+                name=name, chat_id=chat_id, allowed_commands=["chat@llm"], invited_user=name
+            )
+            for name, chat_id in (
+                ("Андрей Александрович Севбо (@kein)", FAMILY_A_CHAT),
+                ("Андрей Петров (@andy)", FAMILY_B_CHAT),
+            )
+        ],
+    )
+    ctx = _ctx(chat_id=OWNER_CHAT, book=book, store=FakeStore(), settings=Settings())
+    result = await ai_tools.tool_find_person(
+        ctx, {"description": "Андрей который кейн", "purpose": "acquaintance"}
+    )
+    assert result.startswith("Нашёл:") and f"id {FAMILY_A_CHAT}" in result
+    both = await ai_tools.tool_find_person(ctx, {"description": "Андрей который мой брат"})
+    assert "переспроси" in both
+    assert f"id {FAMILY_A_CHAT}" in both and f"id {FAMILY_B_CHAT}" in both
+
+
 async def test_find_person_for_acquaintance_points_to_request_acquaintance():
     ctx = _find_ctx(OWNER_CHAT, ())
     result = await ai_tools.tool_find_person(

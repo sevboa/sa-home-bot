@@ -141,7 +141,7 @@ async def test_form_unavailable_without_pending_actions(store):
 async def test_form_input_errors(store):
     ctx, _, _ = _ctx(store, chat_id=GUEST_A, book=_book())
     assert "find_person" in await ai_tools.tool_request_acquaintance(ctx, {"recipient": "Настя"})
-    assert "не гость" in await _request(ctx, STRANGER_CHAT)
+    assert "ни один гость" in await _request(ctx, STRANGER_CHAT)
     assert "самому себе" in await _request(ctx, GUEST_A)
     assert await store.open_pending_actions() == []
 
