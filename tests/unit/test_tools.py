@@ -2543,7 +2543,7 @@ def _stranger_book():
 
 async def test_note_person_names_whose_id_it_is_when_name_differs(store):
     """Живая находка 2026-10-09: «Я знаком с Андреем» — модель взяла из
-    истории id Александра; отказ должен сказать, чей он, и отправить в
+    фактов памяти id Александра; отказ должен сказать, чей он, и отправить в
     find_person, а не открывать знакомство с Александром."""
     link = _FakeNodeLink()
     ctx = _person_ctx(store, link)

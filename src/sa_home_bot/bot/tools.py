@@ -1426,8 +1426,9 @@ def _note_person_stranger(ctx: ToolContext, subject_id: int, name: str) -> str:
     """Отказ note_person о незнакомом — с тем, чей это id.
 
     Живая находка 2026-10-09: «Я знаком с Андреем, это мой брат» — модель
-    без find_person взяла из истории id Александра, а безымянный отказ ещё и
-    подсказал открыть знакомство с ним же."""
+    без find_person взяла id Александра — единственный id в семейных фактах
+    памяти (у Андрея там id нет), а безымянный отказ ещё и подсказал открыть
+    знакомство с ним же."""
     if ctx.book is None:
         who = "этот человек"
     else:
@@ -1441,8 +1442,8 @@ def _note_person_stranger(ctx: ToolContext, subject_id: int, name: str) -> str:
         who = found[0].display if found else f"id {subject_id}"
         if name.strip() and not _name_fits(name, own):
             return (
-                f"не записал: id {subject_id} — это {who}, а не «{name}». id из прошлых "
-                f'разговоров не бери: найди нужного find_person(description="{name}", '
+                f"не записал: id {subject_id} — это {who}, а не «{name}». id из памяти и "
+                f'прошлых разговоров не бери: найди нужного find_person(description="{name}", '
                 'purpose="acquaintance")'
             )
     return (
