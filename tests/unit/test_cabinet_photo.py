@@ -188,7 +188,11 @@ def test_night_window_shows_moon_phase_unless_clouds():
 
 
 def test_closeup_light_is_colour_only():
-    for phase in ("dawn", "day", "dusk", "night"):
+    # День — как у общего вида (без окна день не узнаётся), остальные фазы цветом.
+    assert Outside(phase="day", weather=None, local_time="12:00").en(closeup=True) == (
+        "daylight through the window"
+    )
+    for phase in ("dawn", "dusk", "night"):
         out = Outside(phase=phase, weather="rain", local_time="12:00", moon="полнолуние")
         light = out.en(closeup=True)
         assert "window" not in light and "candle" not in light and "rain" not in light

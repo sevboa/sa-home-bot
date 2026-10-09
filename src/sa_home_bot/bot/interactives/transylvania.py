@@ -66,9 +66,11 @@ _PHASE_TEXT = {
 # Крупный план — свет только цветом: окно и свечи в промпте рисовались
 # вместо предмета (стенд 2026-10-09, L3: главное 62/56/47% против 56/53/38%
 # у прода днём/на закате/ночью). Погоды и луны тут нет — они «за окном».
+# День — как у общего вида: без окна gemma узнавала день в 16–19% против
+# 72% у прода (кандидат «bright daylight, cold blue shadows» — ночь 3).
 _CLOSEUP_LIGHT = {
     PHASE_DAWN: "pale teal dawn light",
-    PHASE_DAY: "bright daylight, cold blue shadows",
+    PHASE_DAY: _PHASE_TEXT[PHASE_DAY][1],
     PHASE_DUSK: "warm orange sunset glow",
     PHASE_NIGHT: "night, cold blue moonlight, warm glow",
 }
