@@ -1485,7 +1485,8 @@ class Interactives:
             request["loras"] = loras
         # Свет вшивает служба вторым тегом: в хвосте промпта «dark window at
         # night» не держал ночь — ни у LoRA Альфреда, ни у пустого кабинета.
-        request["light"] = outside.en()
+        closeup = not selfie and bool(focus or (shot is not None and shot.place == "closeup"))
+        request["light"] = outside.en(closeup=closeup)
         if shot is not None:
             # Этап 49.3: предмет — пикселями поверх готовой сцены.
             request["paste"] = {"key": shot.key, "place": shot.place, "hint": shot.kind.paste_hint}
@@ -2792,7 +2793,7 @@ def photo_description(
     # главного, а места ей даём, убрав особенности кабинета до одной.
     alfred_en = cabinet_mod.SCENE_ALFRED_EN.get(alfred or "")
     features = visible_features[-(1 if alfred_en else PHOTO_FEATURES_IN_FRAME) :]
-    light = outside.en()
+    light = outside.en(closeup=bool(focus))
     if focus:
         # Крупный план — только предмет, комната и свет: особенности кабинета
         # в контексте промптер тащил в кадр (снимок картины с рунами и
@@ -2840,17 +2841,26 @@ def selfie_description(
     )
     if happening:
         subject += f" Just happened around him: {happening}."
-    return portrait_description(cab, outside, subject=subject)
+    pose = bool(focus) and bool(cabinet_mod.SELFIE_POSE_RE.search(focus))
+    return portrait_description(cab, outside, subject=subject, pose=pose)
 
 
 def portrait_description(
-    cab: Cabinet, outside: Outside, *, subject: str = cabinet_mod.PORTRAIT_SUBJECT_EN
+    cab: Cabinet,
+    outside: Outside,
+    *,
+    subject: str = cabinet_mod.PORTRAIT_SUBJECT_EN,
+    pose: bool = False,
 ) -> str:
     """Описание портрета к приветствию для промптера: сам Альфред первым,
     потом свет (время суток и погода — как у снимков кабинета), потом
     обстановка гостя. Особенностей — меньше, чем у снимка: место в 77
-    токенах CLIP занимает Альфред."""
+    токенах CLIP занимает Альфред. ``pose`` — селфи в ракурсе: голая
+    комната без особенностей (cabinet.SELFIE_POSE_RE)."""
     parts = [subject, f"Light: {outside.en()}."]
+    if pose:
+        parts.append(f"Room: {cabinet_mod.SELFIE_POSE_ROOM_EN}.")
+        return " ".join(parts)
     features = cab.visible_features()[-1:]
     if features:
         parts.append("Also visible: " + "; ".join(features) + ".")

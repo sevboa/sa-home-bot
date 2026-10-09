@@ -49,10 +49,10 @@ CANON_RU = (
 # свете давали почти серый кадр (кадр 286, 2026-10-02); «vibrant colors» из
 # шаблона стоит в хвосте и не перевешивает. Стенд ~/refbench/grey на mycraft:
 # насыщенность 0.13 → 0.39-0.86. Без «golden light» — он перебивал время суток.
-CANON_EN = (
-    "old butler study room, warm brown wooden desk, deep red carpet, "
-    "gothic stone walls, stone fireplace, bookshelves"
-)
+# Без «бурого дерева» и ковра (ночная лаборатория 2026-10-08): хвост канона
+# снижал colorfulness на 44%, «бурых» кадров 16% → 36%. Стол под вставку
+# предмета дописывает служба (item_paste.DESK_COMPOSITION).
+CANON_EN = "dark gothic study, stone fireplace, bookshelves"
 # Снимкам кабинета — к негативу (служба дописывает к своему). При guidance 1.5
 # негатив весит мало, но не мешает.
 PHOTO_NEGATIVE_EN = "monochrome, grayscale"
@@ -60,7 +60,9 @@ PHOTO_NEGATIVE_EN = "monochrome, grayscale"
 # Портрет Альфреда к приветствию (2026-10-05): сам Альфред в своём кабинете —
 # LoRA облика (llm/imagegen.py, LORAS["alfred"]). Вес — стенд 2026-10-05:
 # 0.4 — лицо слабеет, 1.0 — всё тянет в крупный портрет и комната теряется.
-ALFRED_LORA = ("alfred", 0.7)
+# 0.7 → 0.5 (ночная лаборатория 2026-10-09, 288 кадров): облик 93% против
+# 95%, «слишком тёмный» 40% против 56%; ракурсы от веса не зависят.
+ALFRED_LORA = ("alfred", 0.5)
 PORTRAIT_SUBJECT_EN = (
     "Main subject: Alfred, an elderly butler in a black tailcoat, waist-up, "
     "standing in his study and greeting the viewer with a slight polite bow."
@@ -77,6 +79,16 @@ SELFIE_ACTION_EN = (
     "Main subject: Alfred, an elderly butler in a black tailcoat, in his study: {action}."
 )
 SELFIE_CAPTION = "Альфред"
+# Селфи в ракурсе (спиной, в профиль, в полный рост, на ходу) — без
+# особенностей кабинета и с голой комнатой: стол и особенности тянули кадр к
+# «анфас по пояс за столом» (стенд 2026-10-09: спиной 4 из 4 против анфаса у
+# прода, профиль и полный рост выходят).
+SELFIE_POSE_RE = re.compile(
+    r"спин|сзади|профил|боком|сбоку|полный рост|во весь рост|в рост|ид[её]т|шага|"
+    r"from behind|\bback\b|profile|side view|full[- ]body|full[- ]length|walking",
+    re.IGNORECASE,
+)
+SELFIE_POSE_ROOM_EN = "dark gothic study"
 # «Сфоткай себя» модель иногда передаёт словом в focus/caption, без selfie.
 SELFIE_FOCUS_RE = re.compile(
     r"^\s*(?:себя|меня|сам(?:ого)?\s+себя|селфи|автопортрет|альфред(?:а)?|"

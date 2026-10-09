@@ -366,7 +366,7 @@ async def test_generate_alfred_himself_adds_his_lora_and_subject(store):
     args = {"description": "на пляже в шезлонге", "prompt_ru": "ты на пляже", "alfred": True}
     await image_tools.generate(ctx, args, Remember())
     call = link.calls[0]["args"]
-    assert call["loras"] == [["alfred", 0.7]]
+    assert call["loras"] == [["alfred", 0.5]]
     assert call["description"] == (
         "Main subject: Alfred, an elderly butler in a black tailcoat. на пляже в шезлонге"
     )

@@ -175,6 +175,34 @@ def test_rain_by_day_looks_like_evening():
     assert clear.light == "day" and clear.key != rainy.key
 
 
+def test_night_window_shows_moon_phase_unless_clouds():
+    night = lambda **kw: Outside(phase="night", weather="clear", local_time="01:00", **kw)  # noqa: E731
+    assert "full moon" in night(moon="полнолуние").en()
+    assert "crescent" in night(moon="растущий серп", cloud_cover=10).en()
+    assert "starry" in night(moon="новолуние").en() and "moon" not in night(moon="новолуние").en()
+    hidden = night(moon="полнолуние", cloud_cover=90).en()
+    assert "cloudy night sky" in hidden and "moon" not in hidden
+    assert "moonlight" in night().en()  # фаза неизвестна — просто лунный свет
+    day = Outside(phase="day", weather="clear", local_time="13:00", moon="полнолуние")
+    assert "moon" not in day.en()
+
+
+def test_closeup_light_is_colour_only():
+    for phase in ("dawn", "day", "dusk", "night"):
+        out = Outside(phase=phase, weather="rain", local_time="12:00", moon="полнолуние")
+        light = out.en(closeup=True)
+        assert "window" not in light and "candle" not in light and "rain" not in light
+
+
+async def test_cloud_cover_comes_with_weather():
+    async def fetch():
+        return 3, 95
+
+    out = await Transylvania(fetch=fetch).outside(datetime(2026, 9, 30, 21, 0, tzinfo=UTC))
+    assert out.weather == "cloudy" and out.cloud_cover == 95
+    assert "cloudy night sky" in out.en()
+
+
 async def test_weather_is_cached_and_failure_is_just_no_weather():
     calls = []
 
@@ -258,7 +286,7 @@ async def test_first_photo_invents_features_then_same_state_is_reused(store):
     cab = await cabinet.load(store, GUEST)
     assert cab.features == ["чучело совы на шкафу", "треснувший портрет"]
     (gen,) = link.generated()
-    assert "чучело совы" in gen["description"] and "candlelight" in gen["description"]
+    assert "чучело совы" in gen["description"] and "candlelit" in gen["description"]
     assert len(notifier.photos) == 1 and isinstance(notifier.photos[0][1], bytes)
     image = await store.image_by_id(next(iter(cab.photos.values())))
     assert image["purpose"] == engine.PHOTO_PURPOSE
@@ -779,9 +807,9 @@ async def test_greeting_portrait_draws_alfred_in_guests_study_with_light(store):
     assert gen["loras"] == [list(cabinet.ALFRED_LORA)]
     assert gen["description"].startswith(cabinet.PORTRAIT_SUBJECT_EN)
     # Свет — тот же, что у снимков кабинета (ночь, пасмурно); обстановка гостя.
-    assert "candlelight" in gen["description"] and "треснувший портрет" in gen["description"]
+    assert "candlelit" in gen["description"] and "треснувший портрет" in gen["description"]
     # Свет — ещё и отдельно: служба вошьёт его в промпт мимо промптера.
-    assert "night" in gen["light"] and "moonlight" in gen["light"]
+    assert "night" in gen["light"] and "cloudy night sky" in gen["light"]  # пасмурно — без луны
     assert cabinet.CANON_EN in gen["description"]
     (chat, photo, caption) = notifier.photos[0]
     assert chat == GUEST and isinstance(photo, bytes) and caption is None
@@ -824,7 +852,7 @@ async def test_selfie_puts_alfred_into_the_same_study_light_and_mood(store):
     assert gen["description"].startswith("Main subject: Alfred")
     assert "у окна с бокалом вина" in gen["description"]
     assert "night" in gen["light"]
-    assert "candlelight" in gen["description"] and "сова" in gen["description"]
+    assert "candlelit" in gen["description"] and "сова" in gen["description"]
     (directive,) = link.lines()
     assert "сфотографировал себя" in directive
     image = await store.image_by_id(1)
@@ -840,6 +868,29 @@ async def test_selfie_puts_alfred_into_the_same_study_light_and_mood(store):
     assert gen["model"] == "revanim"
     assert gen["loras"] == [list(cabinet.ALFRED_LORA), ["rottech", 0.8]]
     assert gen["description"].startswith(cabinet.SELFIE_SUBJECT_EN)
+
+
+def test_selfie_in_pose_gets_bare_room_without_features():
+    """Спиной/в профиль/в рост — без стола и особенностей: они тянули кадр в
+    «анфас за столом» (ночная лаборатория 2026-10-09)."""
+    cab = cabinet.Cabinet(user_id=GUEST, features=["сова"])
+    out = Outside(phase="night", weather="clear", local_time="01:00")
+    for focus in ("стоит спиной у окна", "в профиль с подсвечником", "идёт по коридору"):
+        desc = engine.selfie_description(cab, out, focus, None)
+        assert f"Room: {cabinet.SELFIE_POSE_ROOM_EN}." in desc and "сова" not in desc
+    desc = engine.selfie_description(cab, out, "за столом с бокалом вина", None)
+    assert cabinet.CANON_EN in desc and "сова" in desc
+
+
+async def test_closeup_photo_gets_colour_light(store):
+    link = FakeLink()
+    svc, _ = _make(store, link)
+    await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
+    await svc.tool_take_photo(GUEST, GUEST, {"focus": "чучело совы"})
+    await _drain(svc)
+    (gen,) = link.generated()
+    assert "window" not in gen["light"] and "candle" not in gen["light"]
+    assert "window" not in gen["context"]
 
 
 async def test_selfie_by_word_without_flag(store):
@@ -891,7 +942,7 @@ async def test_mood_selfie_carries_the_reply_as_caption_with_face_emphasized(sto
     assert gen["emphasize"] == [face]
     assert gen["description"].startswith("Main subject: Alfred")
     assert face in gen["description"] and "slamming a book shut" in gen["description"]
-    assert "candlelight" in gen["description"] and "сова" in gen["description"]
+    assert "candlelit" in gen["description"] and "сова" in gen["description"]
     assert "night" in gen["light"]
     # Сверка зрением не включалась.
     assert "expect" not in gen and "keep_key" not in gen
