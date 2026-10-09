@@ -452,7 +452,7 @@ async def test_tell_guest_cannot_reach_another_guest_without_right_or_acquaintan
     result = await ai_tools.tool_tell(ctx, {"recipient_id": FAMILY_A_CHAT, "text": "привет"})
     assert "не умею" in result
     assert "не знакомы" in result
-    assert "request_acquaintance" in result
+    assert f"request_acquaintance(recipient_id={FAMILY_A_CHAT})" in result
     assert notifier.sent == []
 
 
@@ -876,6 +876,35 @@ async def test_find_person_owner_sees_all_guests():
     ctx = _find_ctx(OWNER_CHAT, ())
     result = await ai_tools.tool_find_person(ctx, {"description": "Гостю Плоскому"})
     assert f"id {PLAIN_GUEST_CHAT}" in result
+
+
+async def test_find_person_nick_wins_over_surrounding_words():
+    """Живая находка 2026-10-09: «Александр Сергеевич Севбо @ksytal_as»
+    целиком не совпадал ни с одной меткой — @ник ищется отдельно."""
+    book = SubscriptionBook.from_config(
+        [SubscriptionConfig(name="owner", chat_id=OWNER_CHAT, allowed_commands=["*"])],
+        [
+            GuestSubscriptionConfig(
+                name="Александр (@ksytal_as)",
+                chat_id=FAMILY_A_CHAT,
+                allowed_commands=["chat@llm"],
+                invited_user="Александр (@ksytal_as)",
+            )
+        ],
+    )
+    ctx = _ctx(chat_id=OWNER_CHAT, book=book, store=FakeStore(), settings=Settings())
+    result = await ai_tools.tool_find_person(
+        ctx, {"description": "Александр Сергеевич Севбо @ksytal_as"}
+    )
+    assert result.startswith("Нашёл:") and f"id {FAMILY_A_CHAT}" in result
+
+
+async def test_find_person_for_acquaintance_points_to_request_acquaintance():
+    ctx = _find_ctx(OWNER_CHAT, ())
+    result = await ai_tools.tool_find_person(
+        ctx, {"description": "Гость Плоский", "purpose": "acquaintance"}
+    )
+    assert f"request_acquaintance(recipient_id={PLAIN_GUEST_CHAT})" in result
 
 
 class _CardsLink:

@@ -1436,7 +1436,8 @@ async def tool_note_person(ctx: ToolContext, args: dict[str, Any]) -> str:
         if ctx.store is None or not await are_acquainted(ctx.store, by_id, subject_id):
             return (
                 "не записал: о других запоминаю только со слов их знакомых, "
-                "а собеседник с этим человеком не знаком"
+                "а собеседник с этим человеком не знаком через тебя; "
+                f"познакомить — request_acquaintance(recipient_id={subject_id})"
             )
     claims: list[tuple[str, Any]] = []
     for key in ("gender", "name"):
@@ -1593,6 +1594,13 @@ async def tool_find_person(ctx: ToolContext, args: dict[str, Any]) -> str:
         for chat_id, sub in private.items():
             if sub.is_owner and chat_id != ctx.chat_id:
                 hits[chat_id] = "роль владельца — передавай с to_owner_role=true"
+    # @ник в описании точнее любого имени рядом с ним: «Александр
+    # Сергеевич Севбо @ksytal_as» целиком не совпадал ни с одной меткой
+    # (живая находка 2026-10-09).
+    for nick in (w for w in query.split() if w.startswith("@") and len(w) > 1):
+        for chat_id, own in labels.items():
+            if any(label and recipients.matches(nick, label) for _kind, label in own):
+                hits.setdefault(chat_id, f"ник «{nick}»")
     # Три захода, от строгого к мягкому: как названо; та же основа
     # (падеж); начало слова по основе. Следующий — только если пусто.
     matchers = (
@@ -1639,6 +1647,9 @@ async def tool_find_person(ctx: ToolContext, args: dict[str, Any]) -> str:
         bits.append(f"совпало: {reason}")
         lines.append(" — ".join(bits))
     if len(lines) == 1:
+        if purpose == PURPOSE_ACQUAINTANCE:
+            (chat_id,) = hits
+            return f"Нашёл: {lines[0]}; познакомить — request_acquaintance(recipient_id={chat_id})"
         return "Нашёл: " + lines[0]
     return (
         "Подходят несколько — переспроси собеседника, кого он имел в виду, "
@@ -3930,8 +3941,8 @@ async def tool_tell(ctx: ToolContext, args: dict[str, Any]) -> str:
         return (
             f"не умею: вы с {target.display} ещё не знакомы через меня — лично передавать "
             "сообщения я могу только тем, с кем знакомство подтверждено (и владельцу, "
-            "если просят передать именно «владельцу»/«хозяину»); могу "
-            f"предложить знакомство (request_acquaintance){owner_hint}."
+            "если просят передать именно «владельцу»/«хозяину»); познакомить — "
+            f"request_acquaintance(recipient_id={target.chat_id}){owner_hint}."
         ) + await _roster_hint(ctx)
 
     def render(target: recipients.Recipient) -> str:
@@ -4414,8 +4425,10 @@ _DECL_REQUEST_ACQUAINTANCE: dict[str, Any] = {
             "обеих сторон ты сможешь передавать сообщения между ними (tell). "
             "Вызывай, когда собеседник говорит о своих отношениях с кем-то "
             "('Вася — мой друг', 'Настя — моя сестра', 'это моя жена', "
-            "'познакомь меня с Игорем') или хочет, чтобы ты передавал "
-            "сообщения человеку, а tell отказал. Какие бы слова об отношениях "
+            "'я знаю Олега, это мой отец', 'познакомь меня с Игорем', "
+            "'установи между нами связь') или хочет, чтобы ты передавал "
+            "сообщения человеку, а tell отказал. Не переспрашивай и не "
+            "предлагай словами — сразу вызывай. Какие бы слова об отношениях "
             "он ни выбрал — предлагай именно знакомство, не спорь о словах и "
             "не уточняй степень близости: система хранит только сам факт "
             "знакомства. Тул ничего не отправляет адресату: собеседник "

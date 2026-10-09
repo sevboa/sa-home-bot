@@ -2518,6 +2518,7 @@ async def test_note_person_refuses_strangers(store):
         _person_ctx(store, link), {"person_id": STRANGER, "gender": "f"}
     )
     assert result.startswith("не записал")
+    assert f"request_acquaintance(recipient_id={STRANGER})" in result
     assert link.calls == []
 
 
