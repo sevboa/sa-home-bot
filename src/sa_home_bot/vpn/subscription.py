@@ -164,8 +164,10 @@ def render_headers(
 
 
 def deep_link(sub_url: str, device_label: str) -> str:
-    """``hiddify://import/<адрес подписки>#<имя профиля>`` (имя — в процентах)."""
-    return f"hiddify://import/{sub_url}#{quote(profile_title(device_label), safe='')}"
+    """``hiddify://import/<адрес подписки>`` без ``#имени``: Hiddify показывает
+    фрагмент как есть, не раскодируя проценты («VPN%20%C2%B7…»), а имя с
+    эмодзи и кириллицей берёт из заголовка ``profile-title`` (base64)."""
+    return f"hiddify://import/{sub_url}"
 
 
 def render_page(

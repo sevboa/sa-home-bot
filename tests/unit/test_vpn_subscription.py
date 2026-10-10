@@ -201,7 +201,7 @@ def test_page_has_button_copy_hint_qr_and_links():
         site_url="https://hiddify.com",
     )
     assert "Открыть в Hiddify" in page and "Скопировать ссылку" in page
-    assert 'href="hiddify://import/https://h:8444/sub/tok#' in page
+    assert 'href="hiddify://import/https://h:8444/sub/tok"' in page
     assert "Открыть в браузере" in page and "data:image/svg+xml" in page
     assert "🇳🇱 Нидерланды" in page and "apps.apple.com" in page and "play.google.com" in page
     assert "VPN · 📱 iPhone" in page
