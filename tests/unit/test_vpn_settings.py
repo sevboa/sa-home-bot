@@ -329,7 +329,10 @@ async def test_expert_choice_without_devices_opens_expert_home(_env):
     cb, _, _ = await _press("act:vpn:vpn_card:wx")
     text, markup = _last(cb)
     assert text.startswith("📶 <b>VPN</b>")
-    assert {"➕ Новое устройство", "⚙️ Управление"} <= set(_texts(markup))
+    flat = _texts(markup)
+    # устройств нет — первой идёт «Подключить по шагам», новое устройство — в «Управлении»
+    assert flat[0] == "📱 Подключить по шагам"
+    assert "⚙️ Управление устройствами" in flat and "➕ Новое устройство" not in flat
     # «Управление» при пустом списке — пустой список, а не мастер
     cb, _, _ = await _press("act:vpn:vpn_card:m")
     text, markup = _last(cb)

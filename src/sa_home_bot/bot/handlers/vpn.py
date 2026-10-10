@@ -533,22 +533,34 @@ def _new_device_button() -> InlineKeyboardButton:
 
 
 def _home_keyboard(
-    servers: list[dict], *, subscription: Subscription | None, self_serve_nodes: list[str]
+    servers: list[dict],
+    *,
+    subscription: Subscription | None,
+    self_serve_nodes: list[str],
+    has_devices: bool = True,
 ) -> InlineKeyboardMarkup:
-    """Новая главная (у человека есть устройства). Кнопки — строго по правам."""
+    """Новая главная. Кнопки — строго по правам. Устройств нет — первой идёт
+    «📱 Подключить по шагам»; есть — только «⚙️ Управление устройствами», новое
+    устройство подключается уже оттуда."""
     rows: list[list[InlineKeyboardButton]] = []
-    if _allows(subscription, vpn_protocol.ACTION_ISSUE):
-        rows.append([vpn_wizard.wizard_button(), _new_device_button()])
-    second: list[InlineKeyboardButton] = []
-    if _allows(subscription, _ACTION_APK):
-        second.append(
+    if not has_devices and _allows(subscription, vpn_protocol.ACTION_ISSUE):
+        rows.append([vpn_wizard.wizard_button()])
+    rows.append(
+        [
             InlineKeyboardButton(
-                text="❓ Помощь",
-                callback_data=commands.action_callback("apk", service=SERVICE),
+                text="⚙️ Управление устройствами", callback_data=_screen_cb(_SCREEN_LIST)
             )
+        ]
+    )
+    if _allows(subscription, _ACTION_APK):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="❓ Помощь",
+                    callback_data=commands.action_callback("apk", service=SERVICE),
+                )
+            ]
         )
-    second.append(InlineKeyboardButton(text="⚙️ Управление", callback_data=_screen_cb(_SCREEN_LIST)))
-    rows.append(second)
     proxy_row = _proxy_row(servers, subscription)
     if proxy_row is not None:
         rows.append(proxy_row)
@@ -1082,10 +1094,16 @@ def _render_main(
     после «Я разберусь сам» (``expert``) — та же новая главная с пустым списком
     (57.4); иначе прежняя карточка (группа, нет VLESS-сервера)."""
     self_serve = _self_serve_nodes(servers, config)
-    if vpn_devices.build_devices(servers) or (expert and _wizard_available(servers, subscription)):
+    has_devices = bool(vpn_devices.build_devices(servers))
+    if has_devices or (expert and _wizard_available(servers, subscription)):
         return (
             vpn_devices.home_text(servers, unavailable=down),
-            _home_keyboard(servers, subscription=subscription, self_serve_nodes=self_serve),
+            _home_keyboard(
+                servers,
+                subscription=subscription,
+                self_serve_nodes=self_serve,
+                has_devices=has_devices,
+            ),
         )
     if wizard and _wizard_available(servers, subscription):
         return vpn_wizard.INTRO_TEXT, vpn_wizard.intro_keyboard()

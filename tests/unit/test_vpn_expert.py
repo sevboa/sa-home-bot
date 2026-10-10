@@ -154,8 +154,9 @@ async def test_home_for_user_with_devices(_fanout):
     assert text.startswith("📶 <b>VPN</b>")
     assert "🇳🇱 Нидерланды: осталось 87 ГБ из 100 до " in text
     flat = _texts(markup)
-    assert "⚙️ Управление" in flat and "❓ Помощь" in flat and "➕ Новое устройство" in flat
-    assert "📱 Подключить по шагам" in flat
+    assert "⚙️ Управление устройствами" in flat and "❓ Помощь" in flat
+    # устройства есть — новое подключается из «Управления», не с главной
+    assert "➕ Новое устройство" not in flat and "📱 Подключить по шагам" not in flat
     assert "⚠️ Сообщить о проблеме" in flat
     assert not any("Перевыпустить" in t or "Отозвать" in t for t in flat)
 
@@ -285,10 +286,12 @@ async def test_reissue_menu_lists_only_issued_unchecked():
 async def test_new_device_and_help_buttons():
     cb, _, _ = await _press("act:vpn:vpn_card")
     buttons = {b.text: b.callback_data for b in _all_buttons(cb.message.edit_markups[-1])}
+    assert buttons["❓ Помощь"] == commands.action_callback("apk", service="vpn")
+    cb, _, _ = await _press("act:vpn:vpn_card:m")
+    buttons = {b.text: b.callback_data for b in _all_buttons(cb.message.edit_markups[-1])}
     assert buttons["➕ Новое устройство"] == commands.action_callback(
         "vpn_card", "n", service="vpn"
     )
-    assert buttons["❓ Помощь"] == commands.action_callback("apk", service="vpn")
 
 
 async def test_probe_chat_zero_never_requested(monkeypatch):

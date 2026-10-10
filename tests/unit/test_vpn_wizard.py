@@ -124,7 +124,7 @@ async def test_expert_choice_shows_old_card_and_is_not_remembered():
     cb, _, _ = await _press("act:vpn:vpn_card:wx")
     text, markup = _last(cb)
     assert "Подключим" not in text and "Устройств нет" not in "".join(_texts(markup))
-    assert "➕ Новое устройство" in _texts(markup) or "📱 Приложение" in _texts(markup)
+    assert "⚙️ Управление устройствами" in _texts(markup) or "📱 Приложение" in _texts(markup)
     cb, _, _ = await _press("act:vpn:vpn_card")
     assert "Подключим ваш телефон" in _last(cb)[0]
 
@@ -142,11 +142,12 @@ async def test_no_wizard_without_issue_right_or_reality_or_in_group(_env):
     assert "Подключим" not in _last(cb)[0]
 
 
-async def test_wizard_button_on_home_and_list(_env):
+async def test_wizard_button_in_list_not_on_home_when_devices_exist(_env):
     _env["servers"] = _with("📱 iPhone")
-    for data in ("act:vpn:vpn_card", "act:vpn:vpn_card:m"):
-        cb, _, _ = await _press(data)
-        assert "📱 Подключить по шагам" in _texts(cb.message.edit_markups[-1])
+    cb, _, _ = await _press("act:vpn:vpn_card")
+    assert "📱 Подключить по шагам" not in _texts(cb.message.edit_markups[-1])
+    cb, _, _ = await _press("act:vpn:vpn_card:m")
+    assert "📱 Подключить по шагам" in _texts(cb.message.edit_markups[-1])
 
 
 async def test_pick_screen():
