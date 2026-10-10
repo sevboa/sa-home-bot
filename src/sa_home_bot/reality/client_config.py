@@ -192,3 +192,46 @@ def render_deep_link(vless_url: str) -> str:
     импортирует профиль. Имя профиля Hiddify берёт из фрагмента ``#label``
     самой ``vless://``-ссылки."""
     return f"hiddify://import/{vless_url}"
+
+
+def render_singbox_multi(
+    servers: list[tuple[str, RealityParams, str]],
+    *,
+    all_proxy: bool = False,
+) -> str:
+    """sing-box конфиг подписки: несколько стран в одном профиле (57.10).
+
+    ``servers`` — ``[(имя, параметры сервера, uuid клиента)]``; имя — тег
+    outbound'а, то, что человек видит в списке («🇳🇱 Нидерланды»). Маршруты и DNS
+    — те же, что у ``render_singbox_config``; ``proxy`` становится selector'ом
+    (по умолчанию ``auto`` — urltest по всем странам), поэтому все правила
+    «в туннель» продолжают ссылаться на ``proxy``.
+    """
+    if not servers:
+        raise ValueError("нужна хотя бы одна страна")
+    _first_name, first_params, first_uuid = servers[0]
+    config = json.loads(render_singbox_config(first_params, first_uuid, all_proxy=all_proxy))
+    outbounds: list[dict] = []
+    for name, params, client_uuid in servers:
+        single = json.loads(render_singbox_config(params, client_uuid, all_proxy=all_proxy))
+        out = dict(single["outbounds"][0])
+        out["tag"] = name
+        outbounds.append(out)
+    names = [o["tag"] for o in outbounds]
+    outbounds.append(
+        {
+            "type": "urltest",
+            "tag": "auto",
+            "outbounds": names,
+            "url": "https://www.gstatic.com/generate_204",
+            "interval": "3m",
+            "tolerance": 100,
+        }
+    )
+    outbounds.append(
+        {"type": "selector", "tag": "proxy", "outbounds": ["auto", *names], "default": "auto"}
+    )
+    outbounds.append({"type": "direct", "tag": "direct"})
+    config["outbounds"] = outbounds
+    # DNS через туннель ходит по тегу proxy — selector его принимает как detour.
+    return json.dumps(config, indent=2, ensure_ascii=False) + "\n"

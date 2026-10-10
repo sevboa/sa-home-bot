@@ -40,6 +40,7 @@ import ipaddress
 import logging
 import random
 import socket
+import time
 import uuid as uuidlib
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
@@ -75,12 +76,14 @@ from sa_home_bot.proto.messages import (
     ServiceInfo,
 )
 from sa_home_bot.reality.client_config import (
+    RealityParams,
     render_deep_link,
     render_singbox_config,
     render_vless_url,
 )
 from sa_home_bot.reality.xray import XrayBackend
 from sa_home_bot.vpn import apk as apk_client
+from sa_home_bot.vpn import subscription as subs
 from sa_home_bot.vpn.awg import AwgBackend
 from sa_home_bot.vpn.protocol import (
     ACTION_APK_CHUNK,
@@ -88,6 +91,7 @@ from sa_home_bot.vpn.protocol import (
     ACTION_APK_SET_FILE_ID,
     ACTION_CHECK_NOW,
     ACTION_CHECK_STATUS,
+    ACTION_GET_SUBSCRIPTION,
     ACTION_GET_VLESS,
     ACTION_GRANT_EXTRA,
     ACTION_ISSUE,
@@ -102,6 +106,7 @@ from sa_home_bot.vpn.protocol import (
     ACTION_REVOKE,
     ACTION_SET_ACCESS,
     ACTION_SET_QUOTA,
+    ACTION_SUB_LINKS,
     ACTION_TELEGRAM_EGRESS,
     ACTION_USAGE,
     ERR_QUOTA_CEILING,
@@ -327,6 +332,14 @@ class VpnService:
         # базах с возможными дублями не создать), поэтому два параллельных
         # issue не должны проскочить мимо проверки друг друга.
         self._issue_lock = asyncio.Lock()
+        # Подписка Hiddify (57.10): ключ подписи токенов, веб-сервер (ставит
+        # app.py), кэши сборки и список соседних vpn-нод.
+        self._node_id = settings.node.id or socket.gethostname()
+        self._sub_secret = subs.derive_secret(self._cfg.sub_secret, settings.swarm.token)
+        self.sub_web: Any = None  # vpn.subweb.SubscriptionWeb
+        self._sub_cache: dict[str, tuple[float, subs.Subscription | None]] = {}
+        self._sub_stale: dict[tuple[str, str], list[subs.SubEntry]] = {}
+        self._peer_nodes_cache: tuple[float, list[str]] | None = None
 
     def _has(self, transport: str) -> bool:
         return transport in self._transports
@@ -428,6 +441,22 @@ class VpnService:
                     id=ACTION_GET_VLESS,
                     title="🔗 Ссылка VLESS",
                     params=(chat_id_param, device_param),
+                ),
+            ]
+        # Подписка Hiddify (57.10): get_subscription — для бота; sub_links —
+        # служебное между vpn-нодами (собрать VLESS устройства по токену).
+        if self._reality is not None and self._reality_cfg is not None:
+            capabilities += [ACTION_GET_SUBSCRIPTION, ACTION_SUB_LINKS]
+            actions += [
+                ActionSpec(
+                    id=ACTION_GET_SUBSCRIPTION,
+                    title="🔌 Подписка Hiddify",
+                    params=(chat_id_param, device_param),
+                ),
+                ActionSpec(
+                    id=ACTION_SUB_LINKS,
+                    title="🔗 VLESS по токену подписки",
+                    params=(ActionParam(name="token", type="string", title="Токен"),),
                 ),
             ]
         # APK AmneziaWG — только там, где awg раздают: без него файл клиента
@@ -1223,6 +1252,174 @@ class VpnService:
             "device_label": device_label,
             "location": self._cfg.location,
         }
+
+    # --- подписка Hiddify (57.10) ---
+
+    async def _get_subscription(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Адреса страницы и подписки устройства на ЭТОЙ ноде. Токен из них
+        годится на любой vpn-ноде; адрес привязан к ноде, ответившей боту."""
+        chat_id = self._chat_id(args)
+        device_label = str(args.get("device_label") or "").strip()
+        if not device_label:
+            raise ProtoError(ERR_BAD_REQUEST, "не указано устройство (device_label)")
+        if self._reality is None or self._reality_cfg is None:
+            raise ProtoError(ERR_BAD_REQUEST, f"на сервере {self._node} нет VLESS")
+        if self.sub_web is None or not self.sub_web.listening:
+            raise ProtoError(ERR_BAD_REQUEST, f"страница подписки на {self._node} не запущена")
+        await self._require_access(chat_id)
+        row = await self._active_row(chat_id, device_label, TRANSPORT_REALITY)
+        if row is None:
+            raise ProtoError(
+                ERR_BAD_REQUEST, f"у «{device_label}» нет активного VLESS-подключения"
+            )
+        token = subs.make_token(self._sub_secret, chat_id, device_label)
+        return {
+            "page_url": self.sub_web.page_url(token),
+            "sub_url": self.sub_web.sub_url(token),
+            "singbox_url": self.sub_web.sub_url(token) + "?format=singbox",
+            "device_label": device_label,
+            "node": self._node_id,
+            "https": bool(self.sub_web.tls),
+        }
+
+    def _reality_params(self) -> RealityParams:
+        assert self._reality_cfg is not None
+        cfg = self._reality_cfg
+        return RealityParams(
+            endpoint_host=cfg.endpoint_host,
+            port=cfg.port,
+            server_public_key=cfg.server_public_key,
+            short_id=cfg.short_id,
+            sni=cfg.sni,
+            flow=cfg.flow,
+        )
+
+    def _sub_entry_name(self) -> str:
+        return self._cfg.location or self._node_id
+
+    async def _sub_local(self, token: str) -> tuple[int, str, str] | None:
+        """``(chat_id, label, uuid)`` активного VLESS-ключа ЭТОЙ ноды с таким
+        токеном: токен пересчитывается по каждому ключу (их единицы), без хранилища."""
+        if self._reality is None or self._reality_cfg is None:
+            return None
+        cur = await self._db.conn.execute(
+            "SELECT chat_id, device_label, public_key FROM vpn_peers "
+            "WHERE status = 'active' AND COALESCE(transport, 'awg') = ? AND chat_id != ?",
+            (TRANSPORT_REALITY, NODE_SENTINEL_CHAT_ID),
+        )
+        for row in await cur.fetchall():
+            if subs.token_matches(self._sub_secret, token, row["chat_id"], row["device_label"]):
+                allowed, _base = await self._access(row["chat_id"])
+                if not allowed:
+                    return None
+                return row["chat_id"], row["device_label"], row["public_key"]
+        return None
+
+    async def _sub_links(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Служебное между vpn-нодами: есть ли здесь VLESS устройства с этим
+        токеном; если есть — сервер, UUID, расход и лимит гостя за месяц."""
+        token = str(args.get("token") or "")
+        if not subs.valid_token_shape(token):
+            return {"found": False}
+        found = await self._sub_local(token)
+        if found is None:
+            return {"found": False}
+        chat_id, label, client_uuid = found
+        month = _month_key(_now())
+        entry = subs.SubEntry(
+            node=self._node_id,
+            name=self._sub_entry_name(),
+            uuid=client_uuid,
+            params=self._reality_params(),
+        )
+        return {
+            "found": True,
+            "device_label": label,
+            "entry": entry.to_wire(),
+            "used_bytes": await self._used_bytes(chat_id, month),
+            "limit_bytes": await self._limit_bytes(chat_id, month),
+        }
+
+    async def _sub_peer_nodes(self) -> list[str]:
+        """Остальные живые vpn-ноды роя (кэш на минуту)."""
+        if self._node_link is None:
+            return []
+        now = time.monotonic()
+        if self._peer_nodes_cache and now - self._peer_nodes_cache[0] < 60:
+            return self._peer_nodes_cache[1]
+        from sa_home_bot.bot import vpn_nodes
+
+        nodes = [n for n in await vpn_nodes.live_vpn_nodes(self._node_link) if n != self._node_id]
+        self._peer_nodes_cache = (now, nodes)
+        return nodes
+
+    async def _sub_ask_peer(self, node: str, token: str) -> dict[str, Any] | None:
+        """Ответ соседа или ``None``, если он недоступен (тогда берём старое
+        из ``_sub_stale``: страна не должна пропадать из подписки на время сбоя)."""
+        assert self._node_link is not None
+        try:
+            return await self._node_link.command(
+                ACTION_SUB_LINKS,
+                {"token": token},
+                dst=Address(node=node, service=SERVICE_NAME),
+                timeout=6.0,
+            )
+        except ServiceUnavailableError:
+            return None
+        except (ProtoError, TimeoutError, OSError):
+            return {"found": False}
+
+    async def resolve_subscription(self, token: str) -> subs.Subscription | None:
+        """Подписка по токену со всех нод; ``None`` — токен неизвестен или
+        устройство отозвано везде (веб отвечает 404)."""
+        if not subs.valid_token_shape(token):
+            return None
+        now = time.monotonic()
+        cached = self._sub_cache.get(token)
+        if cached is not None and now - cached[0] < (20 if cached[1] else 30):
+            return cached[1]
+        entries: list[subs.SubEntry] = []
+        label = ""
+        used = total = 0
+        local = await self._sub_links({"token": token})
+        answers: list[tuple[str, dict[str, Any] | None]] = [(self._node_id, local)]
+        peers = await self._sub_peer_nodes()
+        if peers:
+            replies = await asyncio.gather(*(self._sub_ask_peer(n, token) for n in peers))
+            answers += list(zip(peers, replies, strict=True))
+        for node, reply in answers:
+            if reply is None:  # нода не ответила: держим последнюю известную страну
+                entries += self._sub_stale.get((token, node), [])
+                continue
+            if not reply.get("found"):
+                self._sub_stale.pop((token, node), None)
+                continue
+            try:
+                entry = subs.SubEntry.from_wire(reply["entry"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            entries.append(entry)
+            self._sub_stale[(token, node)] = [entry]
+            label = label or str(reply.get("device_label") or "")
+            used += int(reply.get("used_bytes") or 0)
+            total += int(reply.get("limit_bytes") or 0)
+        result: subs.Subscription | None = None
+        if entries:
+            if not label:
+                label = "устройство"
+            nxt = _now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            nxt = (nxt + timedelta(days=32)).replace(day=1)
+            result = subs.Subscription(
+                device_label=label,
+                entries=tuple(subs.sort_entries(entries)),
+                used_bytes=used,
+                total_bytes=total,
+                expire_ts=int(nxt.timestamp()),
+            )
+        if len(self._sub_cache) > 2000:
+            self._sub_cache.clear()
+        self._sub_cache[token] = (now, result)
+        return result
 
     async def _peers(self, _args: dict[str, Any]) -> dict[str, Any]:
         cur = await self._db.conn.execute(
@@ -2210,6 +2407,10 @@ class VpnService:
             return await self._revoke(args)
         if action == ACTION_GET_VLESS:
             return await self._get_vless(args)
+        if action == ACTION_GET_SUBSCRIPTION:
+            return await self._get_subscription(args)
+        if action == ACTION_SUB_LINKS:
+            return await self._sub_links(args)
         if action == ACTION_USAGE:
             return await self._usage(args)
         if action == ACTION_SET_QUOTA:

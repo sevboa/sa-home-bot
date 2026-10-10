@@ -27,6 +27,7 @@ from sa_home_bot.utils.lifespan import Lifespan
 from sa_home_bot.vpn.awg import RealAwgBackend
 from sa_home_bot.vpn.protocol import SERVICE_NAME, TRANSPORT_AWG, TRANSPORT_REALITY
 from sa_home_bot.vpn.service import VpnService
+from sa_home_bot.vpn.subweb import SubscriptionWeb
 
 log = logging.getLogger(__name__)
 
@@ -101,6 +102,17 @@ async def run_vpn(settings: Settings) -> None:
     with contextlib.suppress(Exception):
         await service.check_restore()
 
+    # Подписка Hiddify и https-страница (57.10). Не вышло поднять — служба
+    # живёт без неё (get_subscription вернёт понятную ошибку).
+    sub_web: SubscriptionWeb | None = None
+    if reality_backend is not None and settings.vpn.sub_port > 0:
+        sub_web = SubscriptionWeb(settings.vpn, service.resolve_subscription)
+        service.sub_web = sub_web
+        try:
+            await sub_web.start()
+        except Exception:
+            log.exception("vpn: страница подписки не запустилась")
+
     usage_task = asyncio.create_task(service.usage_loop(), name="vpn-usage-loop")
     # Проверки доступности (vpn_check) — только для awg-нод: у reality-only
     # ноды нет netns-пробника AmneziaWG.
@@ -122,6 +134,8 @@ async def run_vpn(settings: Settings) -> None:
         for task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        if sub_web is not None:
+            await sub_web.stop()
         if service.backup is not None:
             await service.backup.stop()
         await server.stop()

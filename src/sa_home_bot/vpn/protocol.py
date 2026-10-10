@@ -104,6 +104,11 @@ ACTION_REVOKE = "revoke"  # отозвать {chat_id, device_label}
 # Этап 57.1: ссылка/конфиг VLESS существующего устройства без перевыпуска
 # {chat_id, device_label} — UUID клиента хранится в vpn_peers.public_key.
 ACTION_GET_VLESS = "get_vless"
+# Этап 57.10: подписка Hiddify на устройство. get_subscription {chat_id,
+# device_label} -> {page_url, sub_url, ...} (для бота); sub_links {token} —
+# служебное между vpn-нодами: «есть ли у вас VLESS устройства с этим токеном».
+ACTION_GET_SUBSCRIPTION = "get_subscription"
+ACTION_SUB_LINKS = "sub_links"
 ACTION_USAGE = "usage"  # с chat_id — свой расход; без — сводка по всем (админ)
 ACTION_SET_QUOTA = "set_quota"  # админ: прямой грант месяца {chat_id, bytes}
 # Допуск на ЭТОТ сервер + постоянная личная база {chat_id, allowed, base_gb}.

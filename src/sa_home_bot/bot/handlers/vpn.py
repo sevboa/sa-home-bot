@@ -586,14 +586,36 @@ def _conn_button_text(
     return f"{where} {vpn_devices.TRANSPORT_NAME.get(conn.transport, conn.transport)}"
 
 
+async def _subscription_page_url(
+    node_link: ServiceLink, chat_id: int, device: vpn_devices.Device
+) -> str | None:
+    """Адрес страницы подписки Hiddify (57.10) для карточки устройства — с любой
+    живой ноды, у которой есть страница. ``None`` — у устройства нет VLESS или
+    страницы нет нигде (кнопка тогда не рисуется)."""
+    if not any(c.transport == vpn_protocol.TRANSPORT_REALITY for c in device.issued):
+        return None
+    answers = await vpn_nodes.fanout(
+        node_link,
+        vpn_protocol.ACTION_GET_SUBSCRIPTION,
+        {"chat_id": chat_id, "device_label": device.label},
+    )
+    urls = [str(a["page_url"]) for a in answers if a.get("page_url")]
+    # https надёжнее http: Telegram и браузеры охотнее открывают его.
+    urls.sort(key=lambda u: not u.startswith("https://"))
+    return urls[0] if urls else None
+
+
 def _card_keyboard_for_device(
     device: vpn_devices.Device,
     servers: list[dict],
     *,
     subscription: Subscription | None,
+    page_url: str | None = None,
 ) -> InlineKeyboardMarkup:
     countries = vpn_devices.countries_of(servers)
     rows: list[list[InlineKeyboardButton]] = []
+    if page_url:
+        rows.append([InlineKeyboardButton(text="🔌 Подключить в Hiddify", url=page_url)])
     if _allows(subscription, vpn_protocol.ACTION_REISSUE):
         rows.append(
             [
@@ -1176,7 +1198,10 @@ async def _show_screen(
         await callback.answer()
     if screen == _SCREEN_DEVICE:
         text = vpn_devices.card_text(device, servers)
-        keyboard = _card_keyboard_for_device(device, servers, subscription=subscription)
+        page_url = await _subscription_page_url(node_link, callback.message.chat.id, device)
+        keyboard = _card_keyboard_for_device(
+            device, servers, subscription=subscription, page_url=page_url
+        )
     elif screen == _SCREEN_REISSUE:
         text, keyboard = vpn_devices.reissue_text(device), _reissue_keyboard(device, servers)
     elif screen == _SCREEN_DELETE:

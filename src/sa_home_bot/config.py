@@ -954,6 +954,25 @@ class VpnConfig(BaseModel):
     transports: list[str] = Field(default_factory=lambda: ["awg"])
     reality: RealityTransportConfig | None = None
 
+    # --- Подписка Hiddify и https-страница (подэтап 57.10, vpn/subweb.py).
+    # Лёгкий aiohttp-сервер внутри службы vpn на отдельном порту (443/8443
+    # заняты mtg/xray). 0 — страница выключена. Токен подписи — HMAC от
+    # sub_secret, а пусто — от [swarm].token (он один на весь рой, значит на
+    # обеих vpn-нодах подписка проверяется без общей БД и переживает
+    # переустановку ноды: identity-бэкап несёт и [vpn], и [swarm]).
+    sub_port: int = Field(default=8444, ge=0, le=65535)
+    sub_bind: str = "0.0.0.0"
+    # Публичный адрес в ссылках. Пусто — [vpn.reality].endpoint_host, затем endpoint_host.
+    sub_public_host: str = ""
+    # TLS: сертификат и ключ (PEM). Пусто — ~/.config/sa-home-bot/sub-tls/{fullchain,privkey}.pem.
+    # Нет файлов — работаем по http, если sub_allow_http (запасной путь).
+    sub_tls_cert: str = ""
+    sub_tls_key: str = ""
+    sub_allow_http: bool = True
+    sub_secret: str = ""
+    sub_update_interval_h: int = Field(default=12, ge=1)
+    sub_support_url: str = ""
+
 
 class VpnCheckConfig(BaseModel):
     """Служба vpn_check (`sa-home-bot --service vpn_check`) — исполнитель

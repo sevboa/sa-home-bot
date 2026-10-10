@@ -714,6 +714,58 @@ def make_awg_ufw_fixup(settings: Settings) -> Fixup:
     )
 
 
+# --- Подписка Hiddify (57.10): порт https-страницы и порт 80 под http-01 Let's
+# Encrypt. Только на ноде с АКТИВНЫМ ufw (wooster); на jeeves (чистый nftables)
+# те же две строки вносятся в /etc/nftables.conf руками — см. deploy/sub-cert.sh.
+
+
+def _sub_ports(settings: Settings) -> list[str]:
+    vpn = settings.vpn
+    if vpn.sub_port <= 0 or vpn.reality is None:
+        return []
+    return [f"{vpn.sub_port}/tcp", "80/tcp"]
+
+
+def _sub_ufw_needed(settings: Settings) -> bool:
+    return bool(_sub_ports(settings)) and _which("ufw") is not None and _ufw_state() != "inactive"
+
+
+def _ufw_allows_tcp(status_text: str, spec: str) -> bool:
+    port = spec.split("/")[0]
+    for line in status_text.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "ALLOW" and parts[0] in (spec, port):
+            return True
+    return False
+
+
+def _sub_ufw_check(settings: Settings) -> bool:
+    text = _ufw_status_text()
+    if text is None or _ufw_active(text) is not True:
+        return False
+    return all(_ufw_allows_tcp(text, spec) for spec in _sub_ports(settings))
+
+
+def _sub_ufw_apply(settings: Settings) -> None:
+    ufw = _which("ufw")
+    if ufw is None:
+        raise FixupError("ufw не найден")
+    text = _ufw_status_text() or ""
+    for spec in _sub_ports(settings):
+        if not _ufw_allows_tcp(text, spec):
+            _sudo([ufw, "allow", spec, "comment", "sa-home vpn: подписка Hiddify / http-01"])
+
+
+def make_sub_ufw_fixup(settings: Settings) -> Fixup:
+    return Fixup(
+        id="sub-ufw-ports",
+        title="ufw: порт страницы подписки Hiddify и 80/tcp для сертификата",
+        needed=_sub_ufw_needed,
+        check=lambda: _sub_ufw_check(settings),
+        apply=lambda: _sub_ufw_apply(settings),
+    )
+
+
 def _awg_forward_names(interface: str) -> tuple[Path, Path]:
     return (
         Path(f"/usr/local/lib/sa-home-bot/{interface}-forward-reapply.sh"),
@@ -2535,6 +2587,7 @@ def build_fixups(settings: Settings) -> list[Fixup]:
         WOL_ENABLE,
         make_awg_sudoers_fixup(settings),
         make_awg_ufw_fixup(settings),
+        make_sub_ufw_fixup(settings),
         make_awg_forward_fixup(settings),
     ]
     if _vpn_check_needed(settings):
