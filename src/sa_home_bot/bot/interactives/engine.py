@@ -565,6 +565,19 @@ class Interactives:
     def _pinned(self, chat_id: int) -> bool:
         return chat_id in self._settings.llm.speech_therapy_pinned_chat_ids
 
+    def canary_ok(self, user_id: int | None) -> bool:
+        """Канарейка Этапа 59 (решение владельца 2026-10-10): новое — только
+        гостям из ``llm.interactives_canary_user_ids``. Единая проверка для
+        сценариев (``Scenario.canary``), тулов search/walk, мест кроме
+        кабинета и вещей этапа. Для прочих гостей поведение бота прежнее."""
+        return user_id is not None and user_id in self._settings.llm.interactives_canary_user_ids
+
+    def scenarios_for(self, user_id: int | None) -> list[Scenario]:
+        """Сценарии, которые существуют для гостя: канареечные — только
+        канарейкам."""
+        canary = self.canary_ok(user_id)
+        return [s for s in REGISTRY.values() if canary or not s.canary]
+
     # --- ход /ai ---
 
     async def before_turn(
@@ -584,28 +597,32 @@ class Interactives:
             return plan
         if await self._state.is_opted_out(chat_id):
             return plan
-        scenario = radio.RADIO
-        run = await self._state.load_run(chat_id, scenario.id)
-        run = await self._expire_offer(run)
-        triggered = bool(scenario.trigger_re.search(user_text))
+        loaded: list[tuple[Scenario, Run | None, bool]] = []
+        for scenario in self.scenarios_for(user_id):
+            run = await self._state.load_run(chat_id, scenario.id)
+            run = await self._expire_offer(run)
+            triggered = bool(scenario.trigger_re.search(user_text))
 
-        if run is not None and run.status == STATUS_IDLE and triggered:
-            run.status = STATUS_ACTIVE  # согласие уже было — продолжаем молча
-            await self._state.save_run(run)
-        if run is not None and run.status == STATUS_ACTIVE:
-            plan.scenario = scenario.id
-            plan.scene = True
-            cab = await cabinet_mod.load(self._store, user_id)
-            outside = await self._transylvania.outside(self._now())
-            place = f"{cab.describe_ru()} Сейчас {outside.ru()}."
-            scene_note = build_scene_note(scenario, run, place)
-            plan.note = f"{scene_note}\n\n{plan.note}" if plan.note else scene_note
-            plan.force_swap_form = run.finale and not run.finale_form_sent
-            return plan
-        if triggered and await self._may_offer(scenario, run, user_id):
-            await self._offer(scenario, run, chat_id, user_id, user_text)
-            plan.scenario = scenario.id
-            plan.offered = True
+            if run is not None and run.status == STATUS_IDLE and triggered:
+                run.status = STATUS_ACTIVE  # согласие уже было — продолжаем молча
+                await self._state.save_run(run)
+            if run is not None and run.status == STATUS_ACTIVE:
+                plan.scenario = scenario.id
+                plan.scene = True
+                cab = await cabinet_mod.load(self._store, user_id)
+                outside = await self._transylvania.outside(self._now())
+                place = f"{cab.describe_ru()} Сейчас {outside.ru()}."
+                scene_note = build_scene_note(scenario, run, place)
+                plan.note = f"{scene_note}\n\n{plan.note}" if plan.note else scene_note
+                plan.force_swap_form = run.finale and not run.finale_form_sent
+                return plan
+            loaded.append((scenario, run, triggered))
+        for scenario, run, triggered in loaded:
+            if triggered and await self._may_offer(scenario, run, user_id):
+                await self._offer(scenario, run, chat_id, user_id, user_text)
+                plan.scenario = scenario.id
+                plan.offered = True
+                return plan
         return plan
 
     async def _may_offer(self, scenario: Scenario, run: Run | None, user_id: int) -> bool:
@@ -2023,6 +2040,10 @@ class Interactives:
         Альфреда после кнопки уходит в тот же тред и тот же диалог (живой баг
         2026-09-28: без них ответ улетал в общий топик лички)."""
         scenario = REGISTRY[scenario_id]
+        if scenario.canary and not self.canary_ok(user_id):
+            # Канареечной формы у прочих гостей нет; нажать могут только
+            # подделкой callback_data.
+            return "Эта форма не для вас.", None, False
         run = await self._state.load_run(chat_id, scenario_id)
         where = await self._where(chat_id, message_id, message_thread_id)
         if button in (BTN_PLAY, BTN_LATER, BTN_NEVER):

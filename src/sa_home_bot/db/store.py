@@ -139,6 +139,19 @@ class Store:
                 (key, value),
             )
 
+    async def state_keys(self, prefix: str) -> list[str]:
+        """Ключи app_state с данным префиксом (Этап 59: сброс прогресса
+        гостя отладочной командой /interactives reset)."""
+        cur = await self.db.conn.execute(
+            "SELECT key FROM app_state WHERE substr(key, 1, ?) = ? ORDER BY key",
+            (len(prefix), prefix),
+        )
+        return [row["key"] for row in await cur.fetchall()]
+
+    async def delete_state(self, key: str) -> None:
+        async with self.db.transaction() as conn:
+            await conn.execute("DELETE FROM app_state WHERE key=?", (key,))
+
     async def get_action_ticks(self, action_key: str) -> list[datetime]:
         """Метки принятых ручных действий (для лимитера), ключ — «служба:действие»."""
         raw = await self.get_state(ACTION_TICKS_PREFIX + action_key)

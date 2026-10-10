@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -73,6 +74,45 @@ class Scenario:
     # копится по ходу сцены и в финале достаётся гостю (Этап 49.3).
     item_kind: str | None = None
 
+    # --- Этап 59: несколько сценариев в REGISTRY. Всё ниже имеет значения по
+    # умолчанию, при которых сценарий ведёт себя ровно как радио до Этапа 59.
+    # Канарейка (59.C): сценарий предлагается, триггерится и продолжается
+    # только гостям из llm.interactives_canary_user_ids.
+    canary: bool = False
+    # "complaint" — предлагается по trigger_re (жалоба гостя); "spontaneous" —
+    # ещё и сам, без повода (шанс на ход, не чаще раза в сутки), а trigger_re
+    # тогда — прямой вопрос гостя о теме сценария.
+    trigger: str = "complaint"
+    # Подписи кнопок формы согласия (согласие, отказ) — форма сценария может
+    # звучать в голосе Альфреда, а не «Да»/«Нет».
+    offer_buttons: tuple[str, str] = ("Да", "Нет")
+    # Кулдаун после явного отказа; None — общий DECLINE_COOLDOWN движка.
+    decline_cooldown: timedelta | None = None
+    # Куда встаёт Альфред, когда гость согласился (places.PLACES).
+    start_place: str | None = None
+    # Реплика Альфреда после согласия ({transcript}); пусто — как у радио.
+    after_agree: str = ""
+    # Текст события финала ({fault}); по умолчанию — радио.
+    finale_effect: str = "Внутри радиостанции обнаруживается страшное: {fault}."
+    # Строка Ведущему, когда финал уже наступил ({fault}); пусто — как у радио.
+    finale_running_line: str = ""
+    # Что такое finale_fault в этом сценарии (подсказка Ведущему); пусто — радио.
+    finale_fault_hint: str = ""
+    # Стадии растут сами по мягкому потолку / финал наступает сам по ходам.
+    # У сценариев, где переходы держит сюжет (cellar), выключены.
+    auto_stages: bool = True
+    auto_finale: bool = True
+    # (Run, желаемая стадия) → разрешённая стадия: условия сюжета поверх
+    # решений Ведущего (cellar: стадия 3 — только когда код нашёл ключ).
+    stage_gate: Callable[[Run, int], int] | None = None
+    # Дополнительный блок к входу Ведущего (Run → текст) и описание
+    # дополнительных полей его JSON-ответа.
+    extra_input: Callable[[Run], str] | None = None
+    extra_fields: str = ""
+    # Финал сцены завершает её на СЛЕДУЮЩЕМ ходу, а не ждёт формы: Альфред
+    # успевает пересказать последнее событие (cellar).
+    finish_after_finale: bool = False
+
     @property
     def last_stage(self) -> int:
         return len(self.ladder) - 1
@@ -117,6 +157,10 @@ class Run:
     offered_at: str | None = None
     declined_until: str | None = None
     updated_at: str | None = None
+    # Мир сцены (Этап 59): то, что живёт, пока идёт сцена, и нигде больше не
+    # хранится — временные места (комнаты, которые придумал Ведущий), число
+    # обысков, исход обыска для Ведущего. Пусто — в JSON не попадает.
+    world: dict[str, Any] = field(default_factory=dict)
 
     def log(self, who: str, text: str) -> None:
         line = " ".join(text.split())
@@ -126,7 +170,11 @@ class Run:
         del self.transcript[:-TRANSCRIPT_LINES]
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self), ensure_ascii=False)
+        data = asdict(self)
+        if not data["world"]:
+            # Прогресс радио хранится ровно как до Этапа 59.
+            del data["world"]
+        return json.dumps(data, ensure_ascii=False)
 
     @classmethod
     def from_json(cls, raw: str) -> Run:
