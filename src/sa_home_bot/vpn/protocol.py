@@ -101,6 +101,9 @@ ACTION_PEERS = "peers"  # админ: все пиры всех гостей
 ACTION_ISSUE = "issue"  # выдать новый конфиг {chat_id, device_label}
 ACTION_REISSUE = "reissue"  # перевыпустить: старый пир снимается, новый — тот же гость/label
 ACTION_REVOKE = "revoke"  # отозвать {chat_id, device_label}
+# Этап 57.1: ссылка/конфиг VLESS существующего устройства без перевыпуска
+# {chat_id, device_label} — UUID клиента хранится в vpn_peers.public_key.
+ACTION_GET_VLESS = "get_vless"
 ACTION_USAGE = "usage"  # с chat_id — свой расход; без — сводка по всем (админ)
 ACTION_SET_QUOTA = "set_quota"  # админ: прямой грант месяца {chat_id, bytes}
 # Допуск на ЭТОТ сервер + постоянная личная база {chat_id, allowed, base_gb}.
@@ -161,6 +164,12 @@ EVENT_VPN_NODE_QUOTA_WARNING = "vpn_node_quota_warning"
 # "мут" повторных оповещений об одной и той же проблеме.
 EVENT_VPN_CHECK_FAILED = "vpn_check_failed"
 EVENT_VPN_CHECK_RECOVERED = "vpn_check_recovered"
+# Этап 57.1: после reconcile() на старте служба заметила, что ключ сервера
+# сменился (сервер переустановлен / БД восстановлена на новый сервер) — данные
+# {node, location, affected: [{chat_id, device_label, transport}]}. Пробник
+# chat_id=0 в списке не бывает. Бот без обработчика молча пропускает событие
+# (node_events: неизвестное имя -> ``else: return``); обработка — 57.7.
+EVENT_VPN_SERVER_RESTORED = "vpn_server_restored"
 
 # Код ошибки ProtoError: гость упёрся в потолок самообслуживания
 # (self_ceiling_gb) — бот на этот код сам оформляет request_extra вместо

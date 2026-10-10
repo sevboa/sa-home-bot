@@ -88,6 +88,7 @@ from sa_home_bot.vpn.protocol import (
     ACTION_APK_SET_FILE_ID,
     ACTION_CHECK_NOW,
     ACTION_CHECK_STATUS,
+    ACTION_GET_VLESS,
     ACTION_GRANT_EXTRA,
     ACTION_ISSUE,
     ACTION_PEERS,
@@ -114,12 +115,14 @@ from sa_home_bot.vpn.protocol import (
     EVENT_VPN_PEER_ISSUED,
     EVENT_VPN_QUOTA_EXCEEDED,
     EVENT_VPN_QUOTA_WARNING,
+    EVENT_VPN_SERVER_RESTORED,
     PROXY_SECRET_SEED,
     SERVICE_NAME,
     TELEGRAM_EGRESS_TARGET,
     TELEGRAM_EGRESS_TRANSPORT,
     TRANSPORT_AWG,
     TRANSPORT_REALITY,
+    TRANSPORTS,
     country_flag,
 )
 from sa_home_bot.vpn.proxy_backend import ProxyBackend, RealProxyBackend
@@ -130,6 +133,10 @@ log = logging.getLogger(__name__)
 # Байты в гигабайте — десятичный (10^9), как считают провайдеры трафика, а
 # не 2^30 (гибибайт): пользователю обещают «500 ГБ», это должно совпадать.
 GB = 1_000_000_000
+# Предел имени устройства, заданного ботом (этап 57.1).
+MAX_DEVICE_LABEL_LEN = 64
+# chat_id пробника vpn_check (node/fixups.py::VPN_PROBE_CHAT_ID) — не гость.
+PROBE_CHAT_ID = 0
 
 # Сентинельный chat_id для учёта состояния "весь канал ноды" в тех же
 # таблицах, что и учёт по чатам (vpn_quota_state) — реальный Telegram
@@ -315,6 +322,11 @@ class VpnService:
         self._node_link = node_link
         # Бэкап снапшота БД напарнику (39.0.8(c), backup/snapshot.py); ставит app.py.
         self.backup: SnapshotBackup | None = None
+        # Проверка «пара (chat, label, transport) свободна» и INSERT — одним
+        # куском: уникальность активной пары держится кодом (индекс на старых
+        # базах с возможными дублями не создать), поэтому два параллельных
+        # issue не должны проскочить мимо проверки друг друга.
+        self._issue_lock = asyncio.Lock()
 
     def _has(self, transport: str) -> bool:
         return transport in self._transports
@@ -322,6 +334,9 @@ class VpnService:
     def describe(self) -> ServiceDescription:
         chat_id_param = ActionParam(name="chat_id", type="int", title="Чей это гость")
         device_param = ActionParam(name="device_label", type="string", title="Устройство")
+        optional_device_param = ActionParam(
+            name="device_label", type="string", required=False, title="Устройство (имя)"
+        )
         # transport необязателен: если нода несёт один транспорт — берётся он;
         # если оба (awg + reality) — бот/модель указывают, какой под устройство.
         transport_param = ActionParam(
@@ -344,19 +359,23 @@ class VpnService:
             ActionSpec(id=ACTION_PEERS, title="🔌 Все пиры"),
             ActionSpec(
                 id=ACTION_ISSUE,
-                # Имя устройства служба выбирает сама (случайный цветок,
-                # решение пользователя 2026-08-04) — device_param тут не нужен,
-                # в отличие от reissue/revoke, которым он указывает, КАКОЕ
-                # существующее устройство трогать.
+                # Имя устройства: без device_label служба выбирает сама
+                # (случайный цветок, решение 2026-08-04); с device_label
+                # (этап 57.1) — выдаёт под этим именем, повтор активной пары
+                # (label, transport) — ошибка, не дубль.
                 title="➕ Выдать доступ",
-                params=(chat_id_param, transport_param),
+                params=(chat_id_param, transport_param, optional_device_param),
             ),
             ActionSpec(
                 id=ACTION_REISSUE,
                 title="🔄 Перевыпустить",
-                params=(chat_id_param, device_param),
+                params=(chat_id_param, device_param, transport_param),
             ),
-            ActionSpec(id=ACTION_REVOKE, title="🚫 Отозвать", params=(chat_id_param, device_param)),
+            ActionSpec(
+                id=ACTION_REVOKE,
+                title="🚫 Отозвать",
+                params=(chat_id_param, device_param, transport_param),
+            ),
             ActionSpec(
                 id=ACTION_USAGE,
                 title="📊 Расход",
@@ -402,6 +421,15 @@ class VpnService:
                 ),
             ),
         ]
+        if self._reality is not None and self._reality_cfg is not None:
+            capabilities += [ACTION_GET_VLESS]
+            actions += [
+                ActionSpec(
+                    id=ACTION_GET_VLESS,
+                    title="🔗 Ссылка VLESS",
+                    params=(chat_id_param, device_param),
+                ),
+            ]
         # APK AmneziaWG — только там, где awg раздают: без него файл клиента
         # гостю не нужен.
         if self._has(TRANSPORT_AWG):
@@ -650,6 +678,46 @@ class VpnService:
         )
         await self._db.conn.commit()
 
+    async def _device_usage(
+        self, chat_id: int, month: str, devices: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Трафик за месяц по устройствам и подключениям (этап 57.1).
+
+        Устройство = device_label; в его трафик входят ВСЕ ключи этого имени,
+        в том числе перевыпущенные (expired) и отозванные в этом месяце, —
+        иначе перевыпуск обнулял бы цифру. Подключение = активная пара
+        (label, transport); его ``used_bytes`` считается так же, по транспорту.
+        Устройство без активного подключения в список не попадает.
+        """
+        cur = await self._db.conn.execute(
+            "SELECT p.device_label AS label, COALESCE(p.transport, 'awg') AS transport, "
+            "COALESCE(SUM(u.used_bytes), 0) AS used "
+            "FROM vpn_peers p JOIN vpn_peer_usage u ON u.peer_id = p.id "
+            "WHERE p.chat_id = ? AND u.month = ? GROUP BY p.device_label, 2",
+            (chat_id, month),
+        )
+        by_pair = {(r["label"], r["transport"]): int(r["used"]) for r in await cur.fetchall()}
+        result: dict[str, dict[str, Any]] = {}
+        for dev in devices:
+            label = dev["device_label"]
+            transport = dev["transport"]
+            entry = result.setdefault(label, {"device_label": label, "connections": []})
+            entry["connections"].append(
+                {
+                    "transport": transport,
+                    "status": dev["status"],
+                    "last_handshake_at": dev["last_handshake_at"],
+                    "created_at": dev["created_at"],
+                    "broken": bool(dev.get("broken", False)),
+                    "used_bytes": by_pair.get((label, transport), 0),
+                }
+            )
+        for label, entry in result.items():
+            # Трафик устройства — по всем транспортам имени, включая те, у кого
+            # активного подключения уже нет (отозвали awg, остался vless).
+            entry["used_bytes"] = sum(v for (lbl, _t), v in by_pair.items() if lbl == label)
+        return list(result.values())
+
     async def _peers_for_chat(self, chat_id: int) -> list[dict[str, Any]]:
         cur = await self._db.conn.execute(
             "SELECT device_label, transport, status, created_at, last_handshake_at, server "
@@ -685,7 +753,10 @@ class VpnService:
             "FROM vpn_peers WHERE chat_id = ? AND status = 'active'",
             (chat_id,),
         )
-        rows = {row["device_label"]: row for row in await cur.fetchall()}
+        rows = {
+            (row["device_label"], row["transport"] or TRANSPORT_AWG): row
+            for row in await cur.fetchall()
+        }
         try:
             live_awg = (
                 set((await self._backend.transfer()).keys()) if self._has(TRANSPORT_AWG) else None
@@ -700,7 +771,7 @@ class VpnService:
             log.warning("vpn: сверка пиров с сервером не удалась", exc_info=True)
             return devices
         for device in devices:
-            row = rows.get(device["device_label"])
+            row = rows.get((device["device_label"], device.get("transport") or TRANSPORT_AWG))
             if row is None:
                 continue
             if (row["transport"] or TRANSPORT_AWG) == TRANSPORT_AWG:
@@ -803,6 +874,73 @@ class VpnService:
                 if email not in current_r:
                     await self._reality.add_client(client_uuid, email, self._reality_cfg.flow)
 
+    # --- сравнение после восстановления (этап 57.1) ---
+
+    async def _meta_get(self, key: str) -> str | None:
+        cur = await self._db.conn.execute("SELECT value FROM vpn_meta WHERE key = ?", (key,))
+        row = await cur.fetchone()
+        return row["value"] if row else None
+
+    async def _meta_set(self, key: str, value: str) -> None:
+        await self._db.conn.execute(
+            "INSERT INTO vpn_meta (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+            "updated_at = excluded.updated_at",
+            (key, value, _now().isoformat()),
+        )
+        await self._db.conn.commit()
+
+    async def check_restore(self) -> list[dict[str, Any]]:
+        """Звать на старте ПОСЛЕ reconcile(): не сменился ли ключ сервера.
+
+        Задет тот, чей ключ сервера в БД (``vpn_peers.server_pubkey``) не равен
+        текущему, а если на этой ноде запомненный отпечаток ключа транспорта
+        (``vpn_meta``) сменился — все активные пиры этого транспорта. Отсутствие
+        пира на интерфейсе само по себе НЕ признак: после перезагрузки сервера
+        интерфейс пуст, reconcile() возвращает пиров, и при прежнем ключе у гостей
+        всё продолжает работать. Событие шлётся один раз на смену (отпечаток
+        запоминается), пробник chat_id=0 исключён. Возвращает список задетых.
+        """
+        fingerprints: dict[str, str] = {}
+        try:
+            if self._has(TRANSPORT_AWG):
+                fingerprints[TRANSPORT_AWG] = await self._server_public_key()
+        except Exception:  # noqa: BLE001 — не смогли прочитать ключ: не судим
+            log.warning("vpn: сверка ключа awg-сервера после старта не удалась", exc_info=True)
+        if (
+            self._reality is not None
+            and self._reality_cfg is not None
+            and self._reality_cfg.server_public_key
+        ):
+            fingerprints[TRANSPORT_REALITY] = self._reality_cfg.server_public_key
+        affected: dict[tuple[int, str, str], None] = {}
+        for transport, current in fingerprints.items():
+            meta_key = f"server_key:{transport}"
+            recorded = await self._meta_get(meta_key)
+            if recorded == current:
+                continue
+            cur = await self._db.conn.execute(
+                "SELECT chat_id, device_label, server_pubkey FROM vpn_peers "
+                "WHERE status = 'active' AND chat_id != ? "
+                "AND COALESCE(transport, 'awg') = ? ORDER BY chat_id, created_at",
+                (PROBE_CHAT_ID, transport),
+            )
+            for row in await cur.fetchall():
+                stale = bool(row["server_pubkey"]) and row["server_pubkey"] != current
+                if stale or recorded is not None:
+                    affected[(row["chat_id"], row["device_label"], transport)] = None
+            await self._meta_set(meta_key, current)
+        items = [
+            {"chat_id": c, "device_label": label, "transport": t} for (c, label, t) in affected
+        ]
+        if items:
+            log.warning("vpn: ключ сервера сменился, задето подключений: %d", len(items))
+            await self._emit(
+                EVENT_VPN_SERVER_RESTORED,
+                {"node": self._node, "location": self._cfg.location, "affected": items},
+            )
+        return items
+
     # --- issue/reissue/revoke ---
 
     async def _active_labels(self, chat_id: int) -> set[str]:
@@ -811,6 +949,44 @@ class VpnService:
             (chat_id,),
         )
         return {row["device_label"] for row in await cur.fetchall()}
+
+    async def _active_row(self, chat_id: int, label: str, transport: str | None):
+        """Активная запись пира по (chat, label[, transport]). Без transport —
+        старое поведение: любая активная запись под этим именем (самая ранняя)."""
+        sql = (
+            "SELECT id, public_key, address, transport FROM vpn_peers "
+            "WHERE chat_id = ? AND device_label = ? AND status = 'active'"
+        )
+        params: list[Any] = [chat_id, label]
+        if transport:
+            # transport у старых строк мог быть NULL до миграции — трактуем как awg.
+            sql += " AND COALESCE(transport, 'awg') = ?"
+            params.append(transport)
+        cur = await self._db.conn.execute(sql + " ORDER BY created_at, id", params)
+        return await cur.fetchone()
+
+    @staticmethod
+    def _optional_transport(args: dict[str, Any]) -> str | None:
+        """transport для reissue/revoke/get_vless: пусто — старое поведение."""
+        raw = str(args.get("transport") or "").strip().lower()
+        if not raw:
+            return None
+        if raw not in TRANSPORTS:
+            raise ProtoError(ERR_BAD_REQUEST, f"неизвестный транспорт {raw!r}")
+        return raw
+
+    @staticmethod
+    def _explicit_label(args: dict[str, Any]) -> str | None:
+        """Заданное ботом имя устройства (этап 57.1) или None — тогда случайное."""
+        label = str(args.get("device_label") or "").strip()
+        if not label:
+            return None
+        if len(label) > MAX_DEVICE_LABEL_LEN or any(ord(c) < 32 for c in label):
+            raise ProtoError(
+                ERR_BAD_REQUEST,
+                f"имя устройства не длиннее {MAX_DEVICE_LABEL_LEN} символов и без управляющих",
+            )
+        return label
 
     def _resolve_transport(self, args: dict[str, Any]) -> str:
         """Какой транспорт выдавать. Явный ``transport`` в args валидируется
@@ -859,9 +1035,66 @@ class VpnService:
         # ``forced_label`` — только для _reissue ниже: у СУЩЕСТВУЮЩЕГО
         # устройства имя не меняется при перевыпуске ключа.
         existing_labels = await self._active_labels(chat_id)
-        device_label = forced_label or _random_device_label(existing_labels)
+        explicit = None if forced_label else self._explicit_label(args)
+        device_label = forced_label or explicit or _random_device_label(existing_labels)
         now = _now().isoformat()
 
+        async with self._issue_lock:
+            if explicit is not None and await self._active_row(chat_id, explicit, transport):
+                # Не дубль и не тихий перевыпуск: перевыпуск — отдельное явное
+                # действие (reissue по (label, transport)).
+                raise ProtoError(
+                    ERR_BAD_REQUEST,
+                    f"устройство «{explicit}» ({transport}) уже выдано — "
+                    "для нового ключа используйте перевыпуск",
+                )
+            artifacts = await self._issue_locked(
+                chat_id, device_label, transport, now
+            )
+
+        await self._emit(
+            EVENT_VPN_PEER_ISSUED,
+            {"chat_id": chat_id, "device_label": device_label, "transport": transport},
+        )
+        return {
+            **artifacts,
+            "transport": transport,
+            "device_label": device_label,
+            # Откуда конфиг — бот ставит страну в имя файла, чтобы гость с
+            # несколькими серверами не путал, какой откуда.
+            "location": self._cfg.location,
+            # Число устройств чата ДО этой выдачи — bot/handlers/vpn.py и
+            # bot/tools.py::tool_vpn выбирают по нему, что показать первым
+            # (решение пользователя 2026-08-04): 0 — это первое устройство
+            # чата, скорее всего настраивается прямо с этого же телефона →
+            # удобнее файл; иначе — вероятно, для ДРУГОГО устройства → QR.
+            "prior_device_count": len(existing_labels),
+        }
+
+    def _reality_artifacts(self, client_uuid: str, device_label: str) -> dict[str, Any]:
+        """Конфиг/ссылка/QR reality-устройства из хранимого UUID — общее для
+        issue и get_vless (ссылку можно отдать снова без перевыпуска)."""
+        assert self._reality_cfg is not None
+        # sing-box-конфиг несёт все правила маршрутизации (Hiddify),
+        # vless://-ссылка — только быстрый импорт/QR. self._reality_cfg
+        # (RealityTransportConfig) несёт поля с теми же именами, что
+        # client_config.RealityParams — render_* берут его по duck-typing.
+        config_text = render_singbox_config(self._reality_cfg, client_uuid)
+        # Имя профиля в Hiddify — то, что видит гость в списке подключений.
+        # Со страной, иначе два сервера в списке не отличить друг от друга.
+        flag = country_flag(self._cfg.location)
+        profile_label = f"{flag} {device_label}" if flag else device_label
+        share_url = render_vless_url(self._reality_cfg, client_uuid, profile_label)
+        return {
+            "config_text": config_text,
+            "share_url": share_url,
+            "deep_link": render_deep_link(share_url),
+            "qr_png_b64": _render_qr_png_b64(share_url),
+        }
+
+    async def _issue_locked(
+        self, chat_id: int, device_label: str, transport: str, now: str
+    ) -> dict[str, Any]:
         if transport == TRANSPORT_AWG:
             private_key, public_key = await self._backend.generate_keypair()
             address = _allocate_address(self._cfg.subnet, await self._active_addresses())
@@ -893,48 +1126,28 @@ class VpnService:
             assert self._reality is not None and self._reality_cfg is not None
             client_uuid = str(uuidlib.uuid4())
             email = _reality_email(chat_id, device_label)
+            # server_pubkey у reality — публичный ключ Reality-сервера на момент
+            # выдачи (57.1): по нему видно «сервер переустановлен». У старых
+            # reality-пиров NULL — их по ключу не судим.
             await self._db.conn.execute(
                 "INSERT INTO vpn_peers (chat_id, device_label, transport, public_key, address, "
-                "status, created_at, server) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)",
-                (chat_id, device_label, TRANSPORT_REALITY, client_uuid, email, now, self._node),
+                "status, created_at, server, server_pubkey) "
+                "VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)",
+                (
+                    chat_id,
+                    device_label,
+                    TRANSPORT_REALITY,
+                    client_uuid,
+                    email,
+                    now,
+                    self._node,
+                    self._reality_cfg.server_public_key or None,
+                ),
             )
             await self._db.conn.commit()
             await self._reality.add_client(client_uuid, email, self._reality_cfg.flow)
-            # sing-box-конфиг несёт все правила маршрутизации (Hiddify),
-            # vless://-ссылка — только быстрый импорт/QR. self._reality_cfg
-            # (RealityTransportConfig) несёт поля с теми же именами, что
-            # client_config.RealityParams — render_* берут его по duck-typing.
-            config_text = render_singbox_config(self._reality_cfg, client_uuid)
-            # Имя профиля в Hiddify — то, что видит гость в списке подключений.
-            # Со страной, иначе два сервера в списке не отличить друг от друга.
-            flag = country_flag(self._cfg.location)
-            profile_label = f"{flag} {device_label}" if flag else device_label
-            share_url = render_vless_url(self._reality_cfg, client_uuid, profile_label)
-            artifacts = {
-                "config_text": config_text,
-                "share_url": share_url,
-                "deep_link": render_deep_link(share_url),
-                "qr_png_b64": _render_qr_png_b64(share_url),
-            }
-
-        await self._emit(
-            EVENT_VPN_PEER_ISSUED,
-            {"chat_id": chat_id, "device_label": device_label, "transport": transport},
-        )
-        return {
-            **artifacts,
-            "transport": transport,
-            "device_label": device_label,
-            # Откуда конфиг — бот ставит страну в имя файла, чтобы гость с
-            # несколькими серверами не путал, какой откуда.
-            "location": self._cfg.location,
-            # Число устройств чата ДО этой выдачи — bot/handlers/vpn.py и
-            # bot/tools.py::tool_vpn выбирают по нему, что показать первым
-            # (решение пользователя 2026-08-04): 0 — это первое устройство
-            # чата, скорее всего настраивается прямо с этого же телефона →
-            # удобнее файл; иначе — вероятно, для ДРУГОГО устройства → QR.
-            "prior_device_count": len(existing_labels),
-        }
+            artifacts = self._reality_artifacts(client_uuid, device_label)
+        return artifacts
 
     async def _remove_from_backend(self, transport: str, public_key: str, address: str) -> None:
         """Снять пир с сервера нужным транспортом: awg — по pubkey, reality —
@@ -953,12 +1166,10 @@ class VpnService:
         # Проверка здесь, а не только в _issue: перевыпуск снимает старый пир
         # ДО выдачи нового, и недопущенный остался бы вообще без устройства.
         await self._require_access(chat_id)
-        cur = await self._db.conn.execute(
-            "SELECT public_key, address, transport FROM vpn_peers "
-            "WHERE chat_id = ? AND device_label = ? AND status = 'active'",
-            (chat_id, device_label),
-        )
-        row = await cur.fetchone()
+        # transport (57.1) адресует конкретное подключение устройства; без него —
+        # старое поведение (старый бот его не шлёт).
+        wanted = self._optional_transport(args)
+        row = await self._active_row(chat_id, device_label, wanted)
         transport = row["transport"] or TRANSPORT_AWG if row is not None else None
         if row is not None:
             await self._db.conn.execute(
@@ -974,12 +1185,7 @@ class VpnService:
     async def _revoke(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)
         device_label = str(args.get("device_label") or "").strip()
-        cur = await self._db.conn.execute(
-            "SELECT public_key, address, transport FROM vpn_peers "
-            "WHERE chat_id = ? AND device_label = ? AND status = 'active'",
-            (chat_id, device_label),
-        )
-        row = await cur.fetchone()
+        row = await self._active_row(chat_id, device_label, self._optional_transport(args))
         if row is None:
             raise ProtoError(ERR_BAD_REQUEST, f"нет активного устройства «{device_label}»")
         await self._db.conn.execute(
@@ -990,7 +1196,33 @@ class VpnService:
         await self._remove_from_backend(
             row["transport"] or TRANSPORT_AWG, row["public_key"], row["address"]
         )
-        return {"revoked": True, "device_label": device_label}
+        return {
+            "revoked": True,
+            "device_label": device_label,
+            "transport": row["transport"] or TRANSPORT_AWG,
+        }
+
+    async def _get_vless(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Ссылка/sing-box конфиг/QR VLESS существующего устройства без
+        перевыпуска: UUID клиента лежит в vpn_peers.public_key."""
+        chat_id = self._chat_id(args)
+        device_label = str(args.get("device_label") or "").strip()
+        if not device_label:
+            raise ProtoError(ERR_BAD_REQUEST, "не указано устройство (device_label)")
+        if self._reality is None or self._reality_cfg is None:
+            raise ProtoError(ERR_BAD_REQUEST, f"на сервере {self._node} нет VLESS")
+        await self._require_access(chat_id)
+        row = await self._active_row(chat_id, device_label, TRANSPORT_REALITY)
+        if row is None:
+            raise ProtoError(
+                ERR_BAD_REQUEST, f"у «{device_label}» нет активного VLESS-подключения"
+            )
+        return {
+            **self._reality_artifacts(row["public_key"], device_label),
+            "transport": TRANSPORT_REALITY,
+            "device_label": device_label,
+            "location": self._cfg.location,
+        }
 
     async def _peers(self, _args: dict[str, Any]) -> dict[str, Any]:
         cur = await self._db.conn.execute(
@@ -1024,6 +1256,11 @@ class VpnService:
             limit = await self._limit_bytes(chat_id, month)
             state = await self._quota_state(chat_id, month)
             allowed, base_bytes = await self._access(chat_id)
+            devices = await self._mark_broken(
+                chat_id,
+                await self._peers_for_chat(chat_id),
+                withheld=state["blocked_at"] is not None or not allowed,
+            )
             return {
                 "chat_id": chat_id,
                 "month": month,
@@ -1045,11 +1282,11 @@ class VpnService:
                 "personal_base": base_bytes is not None,
                 # `broken` — пира нет на живом сервере (39.0.8(e)); для
                 # снятого за квоту/допуск гостя не выставляется.
-                "devices": await self._mark_broken(
-                    chat_id,
-                    await self._peers_for_chat(chat_id),
-                    withheld=state["blocked_at"] is not None or not allowed,
-                ),
+                "devices": devices,
+                # Этап 57.1: трафик месяца по устройствам + подключения
+                # (transport, status, last_handshake_at, created_at). Новое
+                # поле рядом со старыми — старый бот его не читает.
+                "device_usage": await self._device_usage(chat_id, month, devices),
                 # Транспорты этой ноды — карточка /vpn по ним решает, показывать
                 # ли выбор технологии при «➕ Новое устройство».
                 "transports": list(self._transports),
@@ -1971,6 +2208,8 @@ class VpnService:
             return await self._reissue(args)
         if action == ACTION_REVOKE:
             return await self._revoke(args)
+        if action == ACTION_GET_VLESS:
+            return await self._get_vless(args)
         if action == ACTION_USAGE:
             return await self._usage(args)
         if action == ACTION_SET_QUOTA:

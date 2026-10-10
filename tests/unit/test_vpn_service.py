@@ -131,15 +131,43 @@ def test_random_device_label_falls_back_to_full_pool_when_exhausted():
     assert _random_device_label(set(_FLOWER_NAMES)) in _FLOWER_NAMES
 
 
-async def test_issue_assigns_random_english_label_ignoring_manual_input(env):
+async def test_issue_without_label_assigns_random_english_label(env):
     svc, _backend, _events = env
-    result = await svc.run_command(
-        vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "device_label": "Мой телефон"}
-    )
-    # Имя больше не вводится вручную (решение 2026-08-04) — служба сама
-    # выбирает случайное английское слово, любой переданный device_label
-    # игнорируется.
+    result = await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
     assert result["device_label"] in _FLOWER_NAMES
+
+
+async def test_issue_honours_explicit_device_label(env):
+    svc, _backend, events = env
+    result = await svc.run_command(
+        vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "device_label": "  📱 iPhone "}
+    )
+    assert result["device_label"] == "📱 iPhone"
+    assert events[-1][1]["device_label"] == "📱 iPhone"
+
+
+async def test_issue_same_label_and_transport_is_error_not_duplicate(env):
+    svc, backend, _events = env
+    args = {"chat_id": CHAT, "device_label": "iPhone"}
+    await svc.run_command(vpn_protocol.ACTION_ISSUE, args)
+    with pytest.raises(ProtoError) as exc:
+        await svc.run_command(vpn_protocol.ACTION_ISSUE, args)
+    assert exc.value.code == ERR_BAD_REQUEST
+    assert len(backend.peers) == 1
+    # другой гость может взять то же имя
+    await svc.run_command(vpn_protocol.ACTION_ISSUE, {**args, "chat_id": OTHER_CHAT})
+    # после отзыва имя снова свободно
+    await svc.run_command(vpn_protocol.ACTION_REVOKE, args)
+    await svc.run_command(vpn_protocol.ACTION_ISSUE, args)
+
+
+async def test_issue_rejects_bad_label(env):
+    svc, _backend, _events = env
+    for bad in ("x" * 65, "a\nb"):
+        with pytest.raises(ProtoError):
+            await svc.run_command(
+                vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "device_label": bad}
+            )
 
 
 async def test_issue_reports_prior_device_count(env):
@@ -1091,3 +1119,231 @@ async def test_usage_unreadable_interface_is_not_broken(env):
 
     backend.transfer = boom
     assert [d["broken"] for d in await _usage_devices(svc)] == [False]
+
+
+# --- этап 57.1: устройство = (label, transport), usage по устройствам, get_vless ---
+
+
+async def _issue_pair(svc, label="iPhone", chat_id=CHAT):
+    awg = await svc.run_command(
+        vpn_protocol.ACTION_ISSUE,
+        {"chat_id": chat_id, "device_label": label, "transport": TRANSPORT_AWG},
+    )
+    vls = await svc.run_command(
+        vpn_protocol.ACTION_ISSUE,
+        {"chat_id": chat_id, "device_label": label, "transport": TRANSPORT_REALITY},
+    )
+    return awg, vls
+
+
+async def test_same_label_allowed_under_both_transports(env_both):
+    svc, awg, xray, _events = env_both
+    await _issue_pair(svc)
+    assert len(awg.peers) == 1 and len(xray.clients) == 1
+    with pytest.raises(ProtoError):
+        await svc.run_command(
+            vpn_protocol.ACTION_ISSUE,
+            {"chat_id": CHAT, "device_label": "iPhone", "transport": TRANSPORT_REALITY},
+        )
+    assert len(xray.clients) == 1
+
+
+async def test_revoke_and_reissue_by_label_and_transport(env_both):
+    svc, awg, xray, _events = env_both
+    await _issue_pair(svc)
+    old_uuid = next(iter(xray.clients.values()))
+    await svc.run_command(
+        vpn_protocol.ACTION_REISSUE,
+        {"chat_id": CHAT, "device_label": "iPhone", "transport": TRANSPORT_REALITY},
+    )
+    assert len(awg.peers) == 1  # awg не тронут
+    assert next(iter(xray.clients.values())) != old_uuid
+    await svc.run_command(
+        vpn_protocol.ACTION_REVOKE,
+        {"chat_id": CHAT, "device_label": "iPhone", "transport": TRANSPORT_AWG},
+    )
+    assert awg.peers == {} and len(xray.clients) == 1  # vless жив
+    with pytest.raises(ProtoError):
+        await svc.run_command(
+            vpn_protocol.ACTION_REVOKE,
+            {"chat_id": CHAT, "device_label": "iPhone", "transport": TRANSPORT_AWG},
+        )
+    with pytest.raises(ProtoError):
+        await svc.run_command(
+            vpn_protocol.ACTION_REVOKE,
+            {"chat_id": CHAT, "device_label": "iPhone", "transport": "bogus"},
+        )
+
+
+async def test_revoke_without_transport_keeps_old_behaviour(env_both):
+    svc, awg, xray, _events = env_both
+    await _issue_reality(svc)
+    label = next(iter(xray.clients)).split("-", 1)[1]
+    result = await svc.run_command(
+        vpn_protocol.ACTION_REVOKE, {"chat_id": CHAT, "device_label": label}
+    )
+    assert result["revoked"] is True and xray.clients == {}
+
+
+async def test_usage_device_usage_sums_all_keys_of_label_this_month(env_both):
+    svc, awg, xray, _events = env_both
+    a, v = await _issue_pair(svc)
+    awg.set_traffic(next(iter(awg.peers)), rx=100, tx=50)
+    xray.set_traffic(next(iter(xray.clients)), up=10, down=5)
+    await svc.sample_once()
+    # перевыпуск awg: старый ключ expired, но его трафик остаётся за устройством
+    await svc.run_command(
+        vpn_protocol.ACTION_REISSUE,
+        {"chat_id": CHAT, "device_label": "iPhone", "transport": TRANSPORT_AWG},
+    )
+    awg.set_traffic(next(iter(awg.peers)), rx=7, tx=3)
+    await svc.sample_once()
+    usage = await svc.run_command(vpn_protocol.ACTION_USAGE, {"chat_id": CHAT})
+    assert usage["used_bytes"] == 150 + 15 + 10  # старые поля живы
+    assert len(usage["devices"]) == 2
+    [dev] = usage["device_usage"]
+    assert dev["device_label"] == "iPhone" and dev["used_bytes"] == 175
+    by = {c["transport"]: c for c in dev["connections"]}
+    assert set(by) == {TRANSPORT_AWG, TRANSPORT_REALITY}
+    assert by[TRANSPORT_AWG]["used_bytes"] == 160 and by[TRANSPORT_REALITY]["used_bytes"] == 15
+    for c in by.values():
+        assert c["status"] == "active" and c["created_at"]
+        assert "last_handshake_at" in c and c["broken"] is False
+
+
+async def test_usage_broken_flag_is_per_transport(env_both):
+    svc, awg, xray, _events = env_both
+    await _issue_pair(svc)
+    await xray.remove_client(next(iter(xray.clients)))  # reality пропал, awg цел
+    usage = await svc.run_command(vpn_protocol.ACTION_USAGE, {"chat_id": CHAT})
+    by = {c["transport"]: c["broken"] for c in usage["device_usage"][0]["connections"]}
+    assert by == {TRANSPORT_AWG: False, TRANSPORT_REALITY: True}
+
+
+async def test_get_vless_returns_same_link_without_reissue(env_both):
+    svc, awg, xray, events = env_both
+    _a, issued = await _issue_pair(svc)
+    events.clear()
+    again = await svc.run_command(
+        vpn_protocol.ACTION_GET_VLESS, {"chat_id": CHAT, "device_label": "iPhone"}
+    )
+    assert again["share_url"] == issued["share_url"]
+    assert again["config_text"] == issued["config_text"]
+    assert again["transport"] == TRANSPORT_REALITY and again["qr_png_b64"]
+    assert len(xray.clients) == 1 and events == []
+    with pytest.raises(ProtoError):
+        await svc.run_command(
+            vpn_protocol.ACTION_GET_VLESS, {"chat_id": CHAT, "device_label": "Нет такого"}
+        )
+    with pytest.raises(ProtoError):
+        await svc.run_command(
+            vpn_protocol.ACTION_GET_VLESS, {"chat_id": STRANGER, "device_label": "iPhone"}
+        )
+
+
+async def test_get_vless_unavailable_on_awg_only_node(env):
+    svc, _backend, _events = env
+    with pytest.raises(ProtoError):
+        await svc.run_command(
+            vpn_protocol.ACTION_GET_VLESS, {"chat_id": CHAT, "device_label": "x"}
+        )
+    assert vpn_protocol.ACTION_GET_VLESS not in svc.describe().capabilities
+
+
+async def test_describe_exposes_get_vless_on_reality_node(env_both):
+    svc, *_ = env_both
+    assert vpn_protocol.ACTION_GET_VLESS in svc.describe().capabilities
+
+
+# --- check_restore ---
+
+
+def _restored(events):
+    return [d for n, d in events if n == vpn_protocol.EVENT_VPN_SERVER_RESTORED]
+
+
+async def test_check_restore_silent_on_first_run_and_restart(env_both):
+    svc, awg, xray, events = env_both
+    await _issue_pair(svc)
+    events.clear()
+    await svc.reconcile()
+    assert await svc.check_restore() == []  # первый запуск: нет эталона, ключи совпадают
+    awg.peers.clear()  # «перезагрузка»: интерфейс пуст, ключ тот же
+    await svc.reconcile()
+    assert await svc.check_restore() == [] and _restored(events) == []
+
+
+async def test_check_restore_flags_peers_with_other_server_key_once(env_both):
+    svc, awg, xray, events = env_both
+    await _issue_pair(svc, "iPhone")
+    await _issue_pair(svc, "Pad", chat_id=OTHER_CHAT)
+    await svc.check_restore()
+    events.clear()
+    svc._server_pubkey = None
+    awg.server_pub = "new-key"  # сервер переустановлен
+    awg.peers.clear()
+    await svc.reconcile()
+    affected = await svc.check_restore()
+    assert {(i["chat_id"], i["device_label"], i["transport"]) for i in affected} == {
+        (CHAT, "iPhone", TRANSPORT_AWG),
+        (OTHER_CHAT, "Pad", TRANSPORT_AWG),
+    }
+    [event] = _restored(events)
+    assert event["affected"] == affected and "node" in event
+    events.clear()
+    assert await svc.check_restore() == []  # отпечаток запомнен — без повторов
+    assert _restored(events) == []
+
+
+async def test_check_restore_first_run_catches_stale_rows_and_skips_probe(env_both):
+    svc, awg, xray, events = env_both
+    await allow(svc, 0)
+    await _issue_pair(svc, "iPhone")
+    await _issue_pair(svc, "probe", chat_id=0)
+    # БД восстановлена из бэкапа на новый сервер: в ней ключи старого, мета пуста
+    await svc._db.conn.execute("UPDATE vpn_peers SET server_pubkey = 'old-key'")
+    await svc._db.conn.commit()
+    events.clear()
+    affected = await svc.check_restore()
+    assert {(i["chat_id"], i["device_label"], i["transport"]) for i in affected} == {
+        (CHAT, "iPhone", TRANSPORT_AWG),
+        (CHAT, "iPhone", TRANSPORT_REALITY),
+    }
+
+
+async def test_check_restore_reality_key_change_flags_all_reality_peers(env_both):
+    svc, awg, xray, events = env_both
+    await _issue_pair(svc)
+    await svc.check_restore()
+    events.clear()
+    svc._reality_cfg = svc._reality_cfg.model_copy(update={"server_public_key": "NEW_PUB"})
+    affected = await svc.check_restore()
+    assert [(i["device_label"], i["transport"]) for i in affected] == [
+        ("iPhone", TRANSPORT_REALITY)
+    ]
+
+
+async def test_old_bot_node_events_ignores_server_restored_event():
+    """Бот без обработчика (до 57.7) не должен ни падать, ни слать уведомлений."""
+    from sa_home_bot.bot.node_events import build_node_event_handler
+    from sa_home_bot.proto.messages import Address, make_event
+
+    class _Book:
+        def __getattr__(self, _name):
+            raise AssertionError("событие не должно трогать подписки")
+
+    class _Notifier:
+        def __getattr__(self, _name):
+            raise AssertionError("событие не должно слать сообщений")
+
+    handler = build_node_event_handler(_Book(), _Notifier(), object())
+    env = make_event(
+        vpn_protocol.EVENT_VPN_SERVER_RESTORED,
+        {
+            "node": "jeeves",
+            "location": "",
+            "affected": [{"chat_id": 1, "device_label": "x", "transport": "awg"}],
+        },
+        src=Address(node="jeeves", service="vpn"),
+    )
+    await handler(env)

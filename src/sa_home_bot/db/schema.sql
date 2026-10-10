@@ -516,6 +516,17 @@ CREATE TABLE IF NOT EXISTS vpn_requests (
     decided_at  TEXT
 );
 
+-- Этап 57.1: служебные пометки службы vpn (ключ → значение). Сейчас — отпечаток
+-- ключа сервера по транспортам ("server_key:awg" / "server_key:reality"), по
+-- нему после reconcile() на старте видно, что сервер переустановлен, и событие
+-- vpn_server_restored не повторяется на каждом рестарте. Таблица новая и
+-- аддитивная, существующих баз не касается; в снапшот бэкапа не входит.
+CREATE TABLE IF NOT EXISTS vpn_meta (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
 -- (VLESS+Reality — не отдельная служба со своими таблицами, а второй
 -- транспорт службы vpn: см. vpn_peers.transport выше. Учёт и квота общие,
 -- поэтому reality-пиры живут в vpn_peers / vpn_counters / vpn_peer_usage.)

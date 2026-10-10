@@ -98,6 +98,8 @@ async def run_vpn(settings: Settings) -> None:
 
     with contextlib.suppress(Exception):
         await service.reconcile()
+    with contextlib.suppress(Exception):
+        await service.check_restore()
 
     usage_task = asyncio.create_task(service.usage_loop(), name="vpn-usage-loop")
     # Проверки доступности (vpn_check) — только для awg-нод: у reality-only
