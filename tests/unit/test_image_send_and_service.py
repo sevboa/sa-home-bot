@@ -229,6 +229,24 @@ def test_put_second_keeps_main_subject_first_and_skips_repeats():
     assert image_prompt.put_second("cat, night", "night, moon") == "cat, moon, night"
 
 
+def test_put_second_move_pulls_existing_tags_forward_only_on_request():
+    from sa_home_bot.llm import image_prompt
+
+    prompt = "rose, close up, dark study, night, cold blue moonlight, shelves"
+    extra = "Night, cold blue moonlight"
+    # по умолчанию — как раньше: не дублирует, не переносит
+    assert image_prompt.put_second(prompt, extra) == prompt
+    assert (
+        image_prompt.put_second(prompt, extra, move=True)
+        == "rose, Night, cold blue moonlight, close up, dark study, shelves"
+    )
+    # частично стоящий свет: недостающее добавляется, стоящее переносится
+    assert (
+        image_prompt.put_second("cat, sofa, moon", "night, moon", move=True)
+        == "cat, night, moon, sofa"
+    )
+
+
 async def test_generate_image_empty_prompt_is_bad_request():
     with pytest.raises(ProtoError) as excinfo:
         await _svc(imagegen_enabled=True).run_command("generate_image", {"prompt": "  "})

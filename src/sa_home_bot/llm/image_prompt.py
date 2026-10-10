@@ -133,10 +133,19 @@ def split_tags(prompt: str) -> list[str]:
     return [tag.strip() for tag in prompt.replace("\n", ",").split(",") if tag.strip()]
 
 
-def put_second(prompt: str, extra: str) -> str:
+def put_second(prompt: str, extra: str, *, move: bool = False) -> str:
     """Теги ``extra`` — сразу за главным объектом: промптер их не выкинет, а
-    fit_prompt не срежет хвостом. Уже стоящие в промпте не повторяются."""
+    fit_prompt не срежет хвостом. Уже стоящие в промпте не повторяются.
+
+    ``move`` — уже стоящие в промпте теги ``extra`` переносятся на второе место
+    (а не остаются в хвосте). Нужно для ночи: короткий свет промптер копирует
+    дословно 6–8-м тегом, и там он теряет силу (стенд 2026-10-10, 80 кадров:
+    «ночь» читается 86% против 75%, «тёмный» 21% против 38%). Крупному плану
+    и закату перенос вредит (главное 53% против 69%; закат становится ночным)."""
     tags = split_tags(prompt)
+    if move:
+        want = {tag.lower() for tag in split_tags(extra)}
+        tags = [tags[0], *(tag for tag in tags[1:] if tag.lower() not in want)] if tags else tags
     have = {tag.lower() for tag in tags}
     new = [tag for tag in split_tags(extra) if tag.lower() not in have]
     return ", ".join([*tags[:1], *new, *tags[1:]])

@@ -897,6 +897,29 @@ async def test_closeup_photo_gets_colour_light(store):
     assert "window" not in gen["context"]
 
 
+def test_window_view_regex_takes_views_not_window_items():
+    for focus in ("вид из окна", "Вид из моего окна", "окно с видом на горизонт",
+                  "окно и вид за ним", "вид на ночной замок из окна", "лес за окном"):
+        assert engine.WINDOW_VIEW_RE.search(focus), focus
+    for focus in ("подоконник со свечой", "оконная рама с трещиной", "чучело совы",
+                  "треснувшее стекло радиопередатчика"):
+        assert not engine.WINDOW_VIEW_RE.search(focus), focus
+
+
+async def test_window_view_is_general_light_and_moves_light_at_night(store):
+    link = FakeLink()
+    svc, _ = _make(store, link)
+    await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
+    await svc.tool_take_photo(GUEST, GUEST, {"focus": "вид из окна кабинета"})
+    await _drain(svc)
+    await svc.tool_take_photo(GUEST, GUEST, {"focus": "чучело совы"})
+    await _drain(svc)
+    window, closeup = link.generated()
+    # Вид из окна — свет общего вида (с окном и небом по фазе), ночью свет переносится.
+    assert "in the window" in window["light"] and window["light_move"] is True
+    assert "light_move" not in closeup  # крупному плану перенос вредит
+
+
 async def test_selfie_by_word_without_flag(store):
     link = FakeLink()
     svc, _ = _make(store, link)

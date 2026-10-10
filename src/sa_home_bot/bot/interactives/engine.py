@@ -73,7 +73,7 @@ from sa_home_bot.bot.interactives.director import (
     ask_features,
 )
 from sa_home_bot.bot.interactives.transylvania import TZ as TRANSYLVANIA_TZ
-from sa_home_bot.bot.interactives.transylvania import Outside, Transylvania
+from sa_home_bot.bot.interactives.transylvania import PHASE_NIGHT, Outside, Transylvania
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings, reminder_reason
 from sa_home_bot.db.store import Store
@@ -153,6 +153,16 @@ GENERAL_VIEW_RE = re.compile(
     r"^(?:(?:мой|наш|твой|весь)\s+)?(?:общ\w+\s+(?:вид|план)\w*"
     r"|(?:(?:общ\w+\s+)?(?:вид|план|снимок|фото)\w*\s+)?(?:(?:на|всего|мо\w+|тво\w+)\s+)*"
     r"(?:кабинет|комнат)\w*)",
+    re.I,
+)
+# Вид ИЗ окна («вид из окна», «окно с видом на горизонт», «окно и вид за ним»,
+# «за окном») — не крупный план предмета, хотя focus непустой: ему нужен свет
+# общего вида с окном и луной по фазе (стенд 2026-10-10: как «крупный» он получал
+# _CLOSEUP_LIGHT — без окна и без луны). «Подоконник», «оконная рама с трещиной»
+# сюда не попадают: это предметы, их снимают крупно.
+WINDOW_VIEW_RE = re.compile(
+    r"\bиз\s+(?:\w+\s+){0,2}окн|\bза\s+(?:\w+\s+){0,2}окн|\bокн\w*\s+(?:и|с)\s+вид"
+    r"|window\s+view|view\s+(?:from|through|out)",
     re.I,
 )
 # Кадры по ходу сцены (Ведущий, поле photo): переход стадии и финал снимаются
@@ -1485,8 +1495,17 @@ class Interactives:
             request["loras"] = loras
         # Свет вшивает служба вторым тегом: в хвосте промпта «dark window at
         # night» не держал ночь — ни у LoRA Альфреда, ни у пустого кабинета.
-        closeup = not selfie and bool(focus or (shot is not None and shot.place == "closeup"))
+        window = bool(WINDOW_VIEW_RE.search(focus))
+        closeup = (
+            not selfie
+            and not window
+            and bool(focus or (shot is not None and shot.place == "closeup"))
+        )
         request["light"] = outside.en(closeup=closeup)
+        if outside.light == PHASE_NIGHT and not closeup:
+            # Ночью свет, уже стоящий в промпте, переносится на второе место
+            # (стенд 2026-10-10: ночь 86% против 75%); крупному плану вредит.
+            request["light_move"] = True
         if shot is not None:
             # Этап 49.3: предмет — пикселями поверх готовой сцены.
             request["paste"] = {"key": shot.key, "place": shot.place, "hint": shot.kind.paste_hint}

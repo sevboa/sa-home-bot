@@ -363,6 +363,8 @@ def _imagegen_options(args: dict[str, Any]) -> dict[str, Any]:
         "ref": ref,
         "paste": paste,
         "light": " ".join(light.split())[:160] if isinstance(light, str) else "",
+        # Перенос уже стоящего света на второе место (ночь, не крупный план).
+        "light_move": args.get("light_move") is True,
     }
 
 
@@ -1378,7 +1380,9 @@ class LlmService:
             if options["light"]:
                 # Свет снимка (время суток и погода) — мимо промптера: он
                 # выкидывал «night», и LoRA Альфреда рисовала дневное окно.
-                prompt = image_prompt.put_second(prompt, options["light"])
+                prompt = image_prompt.put_second(
+                    prompt, options["light"], move=options["light_move"]
+                )
             if paste is not None and paste["place"] == "desk":
                 prompt = f"{item_paste.DESK_COMPOSITION}, {prompt.strip()}"
         self._image_phase(args.get("request_id"), IMAGE_PHASE_DRAW)
