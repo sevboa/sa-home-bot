@@ -228,7 +228,7 @@ async def test_awg_issue_sends_file_steps_and_buttons():
     (_, doc, caption) = notifier.sent_documents[0]
     assert doc.startswith(b"[Interface]") and caption == f"⚡ {LABEL} · AmneziaWG · 🇳🇱"
     (_, text), markup = notifier.sent_direct[0], notifier.sent_direct_markups[0]
-    assert "1. Установите AmneziaVPN" in text
+    assert "1. Установите именно AmneziaVPN" in text
     assert "«Открыть в AmneziaVPN»" in text
     assert f"❗️ Обязательно переименуйте добавленное подключение — например, «🇳🇱 {LABEL}»." in text
     texts = _texts(markup)

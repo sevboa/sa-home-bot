@@ -653,7 +653,7 @@ def render_awg_result(
         main = f"""<div class="card">
 <p><b>Настройки показаны один раз</b> — добавьте их в AmneziaVPN сейчас.</p>
 <ol>
-<li>Установите AmneziaVPN:<br>{stores}</li>
+<li>Установите именно <b>AmneziaVPN</b> — без него ключ не заработает (приложение AmneziaWG его не понимает):<br>{stores}</li>
 <li>Нажмите «Скопировать ключ».</li>
 <li>В AmneziaVPN нажмите «+», в поле «Вставьте ключ» — «Вставить», затем «Продолжить».</li>
 <li>Проверьте имя подключения — например, «{e(rename)}».</li>
@@ -668,7 +668,7 @@ def render_awg_result(
         main = f"""<div class="card">
 <p><b>Настройки показаны один раз</b> — сохраните файл сейчас.</p>
 <ol>
-<li>Установите AmneziaVPN:<br>{stores}</li>
+<li>Установите <b>AmneziaVPN</b>:<br>{stores}</li>
 <li>Скачайте файл ниже и откройте его в AmneziaVPN.</li>
 <li>Проверьте имя подключения — например, «{e(rename)}».</li>
 </ol></div>"""

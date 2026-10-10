@@ -246,7 +246,7 @@ def awg_file_caption(label: str, country: vd.Country) -> str:
 def awg_steps_text(label: str, country: vd.Country) -> str:
     rename = html.escape(f"{country.short} {label}".strip())
     return (
-        "1. Установите AmneziaVPN — кнопки ниже.\n"
+        "1. Установите именно AmneziaVPN — кнопки ниже (не AmneziaWG).\n"
         "2. Нажмите на файл выше → «Открыть в AmneziaVPN».\n"
         f"3. ❗️ Обязательно переименуйте добавленное подключение — например, «{rename}»."
     )
