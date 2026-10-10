@@ -3,7 +3,7 @@
 Чистый модуль (тексты и клавиатуры, без сети). Все экраны живут под действием
 ``apk`` (право ``apk@vpn``, оно же у кнопки «❓ Помощь»): значение пусто — список
 вопросов, ``q<код>`` — ответ. Ответ редактирует то же сообщение; внизу всегда
-«⬅️ К вопросам». Те же ответы повторяет ``tool_vpn``/промпт Альфреда (57.8).
+«⬅️ К вопросам». Те же ответы (bot/vpn_facts.py) лежат в описании ``tool_vpn`` (57.8).
 Ссылок на AmneziaWG в магазинах нет нигде — только AmneziaVPN, а AmneziaWG
 запасным путём (.apk).
 """
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from sa_home_bot.bot import commands, vpn_report, vpn_settings, vpn_wizard
+from sa_home_bot.bot import commands, vpn_facts, vpn_report, vpn_settings, vpn_wizard
 from sa_home_bot.config import VpnConfig
 from sa_home_bot.vpn import protocol as vpn_protocol
 
@@ -21,7 +21,13 @@ ACTION = "apk"
 HOME_ACTION = "vpn_card"
 
 Q_PREFIX = "q"
-Q_HIDDIFY, Q_AWG, Q_TROUBLE, Q_DEVICE, Q_STORE, Q_ASK = "h", "a", "c", "d", "s", "x"
+Q_HIDDIFY, Q_AWG, Q_TROUBLE, Q_DEVICE = (
+    vpn_facts.Q_HIDDIFY,
+    vpn_facts.Q_AWG,
+    vpn_facts.Q_TROUBLE,
+    vpn_facts.Q_DEVICE,
+)
+Q_STORE, Q_ASK = "s", "x"
 
 QUESTIONS: tuple[tuple[str, str], ...] = (
     (Q_HIDDIFY, "Что такое Hiddify?"),
@@ -36,25 +42,7 @@ BACK_BUTTON = "⬅️ К вопросам"
 LIST_TEXT = "❓ <b>Помощь</b>\n\nВыберите вопрос."
 
 ANSWERS = {
-    Q_HIDDIFY: (
-        "Приложение для VPN. В настройках оно называется «VLESS · Hiddify»: "
-        "VLESS — способ подключения, Hiddify — приложение для него. Это одно и то же."
-    ),
-    Q_AWG: (
-        "Другой способ подключения, обычно быстрее. Из России работает, но на части "
-        "серверов может не работать — тогда используйте «VLESS · Hiddify».\n"
-        "Приложение для него — AmneziaVPN."
-    ),
-    Q_TROUBLE: (
-        "1. На главной посмотрите, работает ли страна.\n"
-        "2. В Hiddify выберите другую страну.\n"
-        "3. Нажмите «🔌 Подключить» ещё раз или перевыпустите ключ в «⚙️ Управление».\n"
-        "Не помогло — спросите Альфреда."
-    ),
-    Q_DEVICE: (
-        "Нажмите «📱 Подключить по шагам» на главной.\n"
-        "Одно устройство — это один телефон или компьютер: в нём сразу все страны."
-    ),
+    **vpn_facts.ANSWERS,
     Q_ASK: "Напишите Альфреду вопрос — например: /alfred не подключается VPN на iPhone",
 }
 HIDDIFY_NO_STORE = "Hiddify можно скачать и с сайта — кнопки ниже."

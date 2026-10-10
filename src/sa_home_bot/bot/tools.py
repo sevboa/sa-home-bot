@@ -62,6 +62,7 @@ from sa_home_bot.bot import (
     invites,
     recipients,
     voice_mode,
+    vpn_facts,
     vpn_nodes,
 )
 from sa_home_bot.bot.interactives import cabinet as interactive_cabinet
@@ -3173,35 +3174,135 @@ _DECL_MEMORY: dict[str, Any] = {
 }
 
 
-# --- vpn: доступ к AmneziaWG на jeeves (Этап 33 IMPLEMENTATION_PLAN.md) ---
+# --- vpn: личный VPN (Этап 33; модель устройств — Этап 57, 57.8) ---
 #
-# Секрет (приватный ключ) НИКОГДА не возвращается моделью текстом — issue/
-# reissue сами шлют конфиг+QR через ctx.notifier.send_direct в личку
-# (только приватный чат, ctx.chat_id > 0), модели достаётся лишь
-# подтверждение факта отправки. Иначе ключ осел бы в ai_turns/контексте
-# модели — прямое нарушение решения плана «секрет уходит в личку один раз».
-# chat_id, как и у memory, подставляет бот из ToolContext, не модель.
+# Секреты (ключи, ссылки vless, QR, .conf) НИКОГДА не проходят через модель и
+# не выпускаются самим тулом: их отдают только кнопки /vpn сообщениями бота с
+# удалением по TTL. Тул лишь присылает человеку нужный экран с кнопкой
+# («📱 Подключить по шагам», «📥 Получить настройки») — те же экраны, что
+# в /vpn. Поэтому ни ctx.notifier.send_document/send_photo здесь нет вовсе
+# (иначе секрет осел бы в ai_turns/контексте модели). chat_id, как и у memory,
+# подставляет бот из ToolContext, не модель; chat_id=0 — пробник, не человек.
 
-_VPN_ACTION_APK = "apk"  # виртуальное действие бота (apk_info+доставка), не команда службы
-
-
-def _vpn_conf_filename(device_label: str, location: str = "") -> str:
-    return vpn_protocol.secret_filename(vpn_protocol.TRANSPORT_AWG, device_label, location)
-
-
-def _vpn_reality_filename(device_label: str, location: str = "") -> str:
-    return vpn_protocol.secret_filename(vpn_protocol.TRANSPORT_REALITY, device_label, location)
+_VPN_ACTION_APK = "apk"  # приложение: магазины/.apk, не команда службы
+_VPN_ACTION_SETTINGS = "settings"  # «📥 Получить настройки» устройства (кнопка карточки)
+_VPN_ACTION_REPORT = "report"  # «⚠️ Сообщить о проблеме»
+_VPN_NO_PRIVATE = "недоступно: настройки доступа отдаю только в личном чате, не в группе"
 
 
-def _vpn_store_row(emoji: str, store: str, vpn_url: str, wg_url: str) -> str:
-    """Строка «магазин: AmneziaVPN · AmneziaWG» — обе ссылки текстом, не
-    длинным URL (решение пользователя 2026-08-04). Дублирует
-    bot/handlers/vpn.py::_store_row — этот модуль сознательно не тянет
-    aiogram (см. докстринг у _VPN_ACTION_APK ниже)."""
-    return (
-        f'{emoji} {store}: <a href="{escape(vpn_url)}">AmneziaVPN</a> · '
-        f'<a href="{escape(wg_url)}">AmneziaWG</a>'
+async def _vpn_recipient(ctx: ToolContext, who: str) -> tuple[int | None, str]:
+    """Другой человек (recipient): (chat_id, текст-отказ). Только у админа."""
+    is_admin = ctx.subscription is not None and ActionRight(
+        vpn_protocol.ACTION_PEERS, _VPN_SERVICE
+    ).granted(ctx.subscription)
+    if not is_admin:
+        return None, (
+            "недоступно: подключать другого человека может только админ — пусть он "
+            "попросит меня об этом сам, в своём чате"
+        )
+    if ctx.book is None:
+        return None, "недоступно: сейчас не могу искать получателей по имени"
+    found = recipients.find_recipients(who, ctx.book, _people(ctx))
+    if not found:
+        return None, (
+            f"не получилось: «{who}» я не знаю — подключать могу только тех, "
+            "кто уже говорит со мной в личном чате"
+        )
+    if len(found) > 1:
+        names = ", ".join(f"{r.display} ({r.chat_id})" for r in found)
+        return None, f"уточни, кому именно: под «{who}» подходят {names}"
+    return found[0].chat_id, ""
+
+
+async def _vpn_person_action(ctx: ToolContext, action: str, args: dict[str, Any]) -> str:
+    """usage (статус) / issue / settings / report — действия про конкретного человека."""
+    from sa_home_bot.bot import vpn_agent  # лениво: тянет клавиатуры aiogram
+
+    if ctx.chat_id is None or ctx.chat_id == 0:
+        return "недоступно: VPN привязан к человеку, а сейчас его нет"
+    chat_id = ctx.chat_id
+    thread_id = ctx.message_thread_id
+    private = chat_id > 0
+
+    if action == vpn_protocol.ACTION_USAGE:
+        servers, _answered = await vpn_agent.servers_for(ctx.node_link, chat_id)
+        return vpn_agent.status_text(servers)
+
+    if action == vpn_protocol.ACTION_ISSUE:
+        who = str(args.get("recipient") or "").strip()
+        target, thread = chat_id, thread_id
+        target_name = ""
+        if who:
+            target, refusal = await _vpn_recipient(ctx, who)
+            if target is None:
+                return refusal
+            thread = None
+            target_name = f" {who}"
+        elif not private:
+            return _VPN_NO_PRIVATE
+        if ctx.notifier is None:
+            return "недоступно: сейчас не могу отправить сообщение"
+        servers, _answered = await vpn_agent.servers_for(ctx.node_link, target)
+        if not vpn_agent.wizard_available(servers):
+            return "недоступно: этому человеку сейчас нечего подключать — VPN ему не открыт"
+        sent = await vpn_agent.send_wizard(ctx.notifier, target, thread)
+        if sent is None:
+            return "не вышло: сообщение не доставилось"
+        return (
+            f"готово: человеку{target_name} ушло сообщение с кнопкой «📱 Подключить по шагам» "
+            "— дальше он проходит настройку кнопками (ключей и ссылок я не выдаю). "
+            "Скажи коротко, что нужно нажать эту кнопку."
+        )
+
+    if action == _VPN_ACTION_SETTINGS:
+        if not private:
+            return _VPN_NO_PRIVATE
+        if ctx.notifier is None:
+            return "недоступно: сейчас не могу отправить сообщение"
+        servers, _answered = await vpn_agent.servers_for(ctx.node_link, chat_id)
+        label = str(args.get("device_label") or "")
+        device = vpn_agent.find_device(servers, label)
+        if device is None:
+            names = ", ".join(f"«{d.label}»" for d in vpn_agent.vd.build_devices(servers))
+            what = f"не нашёл устройство «{label}»" if label else "уточни, какое устройство"
+            return what + (f" — есть: {names}" if names else " — устройств нет")
+        sent = await vpn_agent.send_settings(ctx.notifier, chat_id, thread_id, device)
+        if sent is None:
+            return "не вышло: сообщение не доставилось"
+        return (
+            f"готово: экран «📥 Получить настройки» для «{device.label}» ушёл личным "
+            "сообщением — человек выбирает способ кнопками (ключей и ссылок я не показываю)."
+        )
+
+    # report
+    reason = str(args.get("reason") or "").strip()
+    if not reason:
+        return "ошибка: не указана причина (reason) — что случилось, словами человека"
+    if ctx.notifier is None or ctx.book is None:
+        return "недоступно: сейчас не могу передать сообщение владельцу"
+    servers, answered = await vpn_agent.servers_for(ctx.node_link, chat_id)
+    device = vpn_agent.find_device(servers, str(args.get("device_label") or "")) if args.get(
+        "device_label"
+    ) else None
+    name = ctx.author or str(chat_id)
+    username = ctx.people.username(chat_id) if ctx.people is not None else None
+    outcome = await vpn_agent.submit_report(
+        ctx.node_link,
+        ctx.notifier,
+        ctx.book,
+        chat_id=chat_id,
+        name=name,
+        username=username or None,
+        reason=reason,
+        servers=servers,
+        answered=answered,
+        device_key=device.key if device is not None else "",
     )
+    if outcome == "sent":
+        return "готово: владельцу передано, ответ придёт человеку сюда же"
+    if outcome == "throttled":
+        return "уже передавали меньше 10 минут назад — не дублирую, ждать ответа владельца"
+    return "сейчас некому передать — пусть человек напишет владельцу напрямую"
 
 
 async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
@@ -3212,8 +3313,7 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
     if action not in allowed:
         return f"не умею: {action or 'без уточнения'}"
     # Ноду с vpn ищем динамически (этап 39: серверов несколько). ``server``
-    # в args — подсказка от модели, какую локацию хочет пользователь;
-    # выбор локации при issue штатно приедет в 39.0.5, пока — первая живая.
+    # в args — подсказка от модели, какую локацию хочет пользователь.
     dst = await vpn_nodes.resolve_vpn_dst(
         ctx.node_link, server=str(args.get("server") or "") or None
     )
@@ -3222,271 +3322,47 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
 
     if action == vpn_protocol.ACTION_PROXY_LINK and not args.get("server"):
         # Без явного «server» отдаём ссылку СРАЗУ со всех серверов, где
-        # настроен прокси (решение пользователя 2026-09-20) — а не только с
-        # первой живой ноды, как выбрал бы resolve_vpn_dst выше.
+        # настроен прокси (решение пользователя 2026-09-20).
         results = await vpn_nodes.fanout(ctx.node_link, action, {})
         if not results:
             return "недоступно: прокси Telegram сейчас не настроен ни на одном сервере"
         return json.dumps(results, ensure_ascii=False)
 
-    if action in (vpn_protocol.ACTION_ISSUE, vpn_protocol.ACTION_REISSUE):
-        # issue не принимает имя устройства вовсе (решение пользователя
-        # 2026-08-04) — служба сама выбирает случайное английское слово
-        # (vpn/service.py::_random_device_label). reissue по-прежнему
-        # требует его — им указывают, КАКОЕ существующее устройство менять.
-        device_label = str(args.get("device_label") or "").strip()
-        if action == vpn_protocol.ACTION_REISSUE and not device_label:
-            return "ошибка: не указано устройство (device_label) — какое перевыпустить"
-        # Транспорт (awg/reality) под общей квотой. issue на сервере с двумя
-        # транспортами обязан его указать; reissue сохраняет транспорт
-        # устройства сам (transport передавать не нужно).
-        transport = str(args.get("transport") or "").strip().lower()
-        if action == vpn_protocol.ACTION_ISSUE and not transport:
-            node_transports: list[str] = []
-            try:
-                state = await ctx.node_link.get_state(dst=dst)
-                node_transports = state.get("transports") or []
-            except (ServiceUnavailableError, ProtoError, TimeoutError):
-                node_transports = []
-            if len(node_transports) > 1:
-                return (
-                    f"уточни технологию: этот сервер даёт {', '.join(node_transports)} — "
-                    "вызови vpn ещё раз с transport='reality' (для России, маскируется "
-                    "под обычный HTTPS) или transport='awg' (быстрее вне России)"
-                )
-        who = str(args.get("recipient") or "").strip()
-        target_display: str | None = None
-        if who:
-            # Выдать/перевыпустить доступ ДРУГОМУ человеку — только у админа
-            # (peers@vpn, тот же признак, что у кнопки «Все гости»). Секрет
-            # уходит В ЧАТ ПОЛУЧАТЕЛЯ, не того, кто просит — живой баг
-            # 2026-08-04: тул тихо создавал пир себе с меткой чужого имени и
-            # слал конфиг просящему, отдавая чужой приватный ключ не тому
-            # человеку, пока модель ещё и врала, что получатель его получил.
-            is_admin = ctx.subscription is not None and ActionRight(
-                vpn_protocol.ACTION_PEERS, _VPN_SERVICE
-            ).granted(ctx.subscription)
-            if not is_admin:
-                return (
-                    "недоступно: выдавать VPN другому человеку может только "
-                    "админ — пусть он попросит меня об этом сам, в своём чате"
-                )
-            if ctx.book is None:
-                return "недоступно: сейчас не могу искать получателей по имени"
-            found = recipients.find_recipients(who, ctx.book, _people(ctx))
-            if not found:
-                return (
-                    f"не получилось: «{who}» я не знаю — выдавать доступ я могу "
-                    "только тем, кто уже говорит со мной в личном чате"
-                )
-            if len(found) > 1:
-                names = ", ".join(f"{r.display} ({r.chat_id})" for r in found)
-                return f"уточни, кому именно: под «{who}» подходят {names}"
-            target_chat_id = found[0].chat_id
-            target_thread_id = None  # чужой чат — свои топики тут ни при чём
-            target_display = found[0].display
-        else:
-            if ctx.chat_id is None or ctx.chat_id <= 0:
-                return "недоступно: секрет доступа отдаю только в личном чате, не в группе"
-            target_chat_id = ctx.chat_id
-            target_thread_id = ctx.message_thread_id
-        # reissue снимает старый ключ немедленно (vpn/service.py::_reissue) —
-        # устройство, где он ещё стоит, обрывает соединение сразу же, до
-        # того как человек успеет поставить новый .conf. Модель обязана
-        # спросить согласия словами и позвать тул повторно с confirm=true —
-        # без этого действие не уходит в службу вовсе (тот же приём, что
-        # ERR_QUOTA_CEILING ниже: тул возвращает модели, что сделать дальше,
-        # вместо того чтобы действовать по собственной инициативе).
-        if action == vpn_protocol.ACTION_REISSUE and not args.get("confirm"):
-            target_note = f" у {target_display}" if target_display else ""
-            return (
-                f"уточни подтверждение: перевыпуск заменит ключ устройства "
-                f"«{device_label}»{target_note} — старый конфиг перестанет работать "
-                "СРАЗУ ЖЕ, ещё до того как придёт новый файл. Спроси явное согласие "
-                "и только потом вызови vpn ещё раз с теми же параметрами и "
-                "confirm=true — без этого параметра перевыпуск не выполнится."
-            )
-        payload: dict[str, Any] = {"chat_id": target_chat_id}
-        if device_label:  # reissue — какое устройство; issue — служба выберет сама
-            payload["device_label"] = device_label
-        if transport and action == vpn_protocol.ACTION_ISSUE:
-            payload["transport"] = transport
-        try:
-            result = await ctx.node_link.command(action, payload, dst=dst)
-        except ProtoError as exc:
-            return f"не вышло: {exc.message}"
-        except (ServiceUnavailableError, TimeoutError) as exc:
-            return f"недоступно: VPN-служба не отвечает ({exc})"
-        issued_label = str(result.get("device_label") or device_label or "устройство")
-        issued_location = str(result.get("location") or "")
-        # Первое устройство чата — почти наверняка настраивается прямо с
-        # этого телефона (рекомендуем файл: «Открыть с помощью» → AmneziaWG
-        # импортирует тоннель без копирования), второе и далее — обычно для
-        # ДРУГОГО устройства или человека (рекомендуем QR). Тот же критерий,
-        # что и у кнопок /vpn (bot/handlers/vpn.py::_send_secret, решение
-        # пользователя 2026-08-04) — vpn/service.py::_issue::prior_device_count.
-        file_first = int(result.get("prior_device_count") or 0) == 0
-        result_transport = str(result.get("transport") or vpn_protocol.TRANSPORT_AWG)
-        is_reality = result_transport == vpn_protocol.TRANSPORT_REALITY
-        if ctx.notifier is not None:
-            qr_b64 = result.get("qr_png_b64")
-            if is_reality:
-                file_caption = (
-                    f"🔐 Конфиг «{escape(issued_label)}» (VLESS).\n"
-                    "Hiddify → «+» → «Из файла» → выбери этот файл → «Подключить». "
-                    "Маршрутизация России уже внутри файла."
-                )
-                qr_caption = (
-                    f"📶 QR — «{escape(issued_label)}» (VLESS). "
-                    "Hiddify → «+» → «Сканировать QR»."
-                )
-                conf_filename = _vpn_reality_filename(issued_label, issued_location)
-            else:
-                file_caption = (
-                    f"🔐 Конфиг устройства «{escape(issued_label)}».\n"
-                    "Нажми на файл → «Открыть с помощью» → AmneziaWG — тоннель "
-                    "добавится сразу, без копирования."
-                )
-                qr_caption = f"📶 QR — устройство «{escape(issued_label)}»."
-                conf_filename = _vpn_conf_filename(issued_label, issued_location)
-
-            async def _send_file() -> None:
-                await ctx.notifier.send_document(
-                    target_chat_id,
-                    str(result["config_text"]).encode("utf-8"),
-                    filename=conf_filename,
-                    caption=file_caption,
-                    message_thread_id=target_thread_id,
-                )
-
-            async def _send_qr() -> None:
-                if qr_b64:
-                    await ctx.notifier.send_photo(
-                        target_chat_id,
-                        base64.b64decode(qr_b64),
-                        filename="vpn-qr.png",
-                        caption=qr_caption,
-                        message_thread_id=target_thread_id,
-                    )
-
-            if file_first:
-                await _send_file()
-                await _send_qr()
-            else:
-                await _send_qr()
-                await _send_file()
-            if is_reality:
-                deep_link = str(result.get("deep_link") or "")
-                share_url = str(result.get("share_url") or "")
-                note_parts = []
-                if deep_link:
-                    note_parts.append(f"🔗 Импорт одним нажатием: <code>{escape(deep_link)}</code>")
-                if share_url:
-                    note_parts.append(f"Ссылка: <code>{escape(share_url)}</code>")
-                if note_parts:
-                    await ctx.notifier.send_direct(
-                        target_chat_id,
-                        "\n".join(note_parts),
-                        message_thread_id=target_thread_id,
-                    )
-        who_note = f" {target_display}" if target_display else ""
-        if is_reality:
-            recommendation = (
-                "поставить Hiddify (action='apk'), импортировать файл и нажать «Подключить»"
-            )
-        elif file_first:
-            recommendation = "для настройки удобнее конфиг-файл"
-        else:
-            recommendation = (
-                "если это другое устройство — удобнее QR, отсканировать его камерой из приложения"
-            )
-        transport_note = " (VLESS/Reality)" if is_reality else ""
-        return (
-            f"готово: устройство «{issued_label}»{transport_note}, конфиг-файл (и QR) ушли"
-            f"{who_note} личным сообщением — {recommendation} (приватный ключ не показываю)"
-        )
-
-    if action == _VPN_ACTION_APK:
-        if ctx.notifier is None or ctx.chat_id is None:
-            return "недоступно: сейчас не могу отправить сообщение"
-        # Сначала официальные способы поставить приложение (решение
-        # пользователя 2026-08-04) — на iOS сайдлоада нет вовсе, а на
-        # Android апстор надёжнее файла, который надо ещё разрешить
-        # ставить из неизвестного источника. Рекомендуем полную AmneziaVPN,
-        # у облегчённой AmneziaWG — только .apk как аварийный запасной
-        # способ (решение пользователя 2026-08-04). Дублирует
-        # _apk_links_text bot/handlers/vpn.py — тот модуль тянет aiogram
-        # (клавиатуры), этот модуль сознательно не должен (см. докстринг
-        # файла).
-        cfg = ctx.settings.vpn
-        await ctx.notifier.send_direct(
-            ctx.chat_id,
-            "📱 Настоятельно рекомендуем полную версию — <b>AmneziaVPN</b>. Есть и "
-            "облегчённая — <b>AmneziaWG</b> (её и использует эта настройка).\n\n"
-            + _vpn_store_row(
-                "🍎", "App Store", cfg.amneziavpn_ios_app_store_url, cfg.ios_app_store_url
-            )
-            + "\n"
-            + _vpn_store_row(
-                "🤖", "Google Play", cfg.amneziavpn_google_play_url, cfg.google_play_url
-            )
-            + "\n"
-            f"🌐 Официальный сайт (все платформы, обе версии): "
-            f"{escape(cfg.official_download_url)}",
-            message_thread_id=ctx.message_thread_id,
-        )
-        try:
-            info = await ctx.node_link.command(vpn_protocol.ACTION_APK_INFO, {}, dst=dst)
-        except ProtoError as exc:
-            return f"ссылки отправил, но подробности о .apk не вышло получить: {exc.message}"
-        except (ServiceUnavailableError, TimeoutError) as exc:
-            return f"ссылки отправил, но VPN-служба не отвечает ({exc})"
-        file_id = info.get("telegram_file_id")
-        if not file_id:
-            return (
-                "готово: ссылки на приложение ушли личным сообщением "
-                "(файл .apk сейчас не кэширован — попроси открыть /vpn и нажать «Приложение»)"
-            )
-        sent = await ctx.notifier.send_document(
-            ctx.chat_id,
-            str(file_id),
-            caption=f"AmneziaWG {info.get('version', '')}",
-            message_thread_id=ctx.message_thread_id,
-        )
-        if sent:
-            return "готово: ссылки и файл приложения ушли личным сообщением"
-        return "готово: ссылки ушли, но файл .apk отправить не вышло"
-
-    if action == vpn_protocol.ACTION_RESOLVE_REQUEST:
-        raw_id = args.get("request_id")
-        if raw_id is None:
-            return "ошибка: не указан request_id"
-        payload: dict[str, Any] = {"request_id": raw_id, "approve": bool(args.get("approve"))}
-    elif action == vpn_protocol.ACTION_PEERS:
-        payload = {}
-    elif action == vpn_protocol.ACTION_USAGE and args.get("all_guests"):
-        # Сводка по ВСЕМ гостям + свободный от резерва трафик ноды — доступна
-        # только тому, у кого есть peers@vpn (тот же admin-признак, что и
-        # кнопка «Все гости» в bot/handlers/vpn.py::_is_admin). Модель может
-        # передать all_guests, не имея права, — сверяемся сами, а не
-        # доверяем декларации (та же осторожность, что у остальных VariantRights).
+    if action == vpn_protocol.ACTION_USAGE and args.get("all_guests"):
+        # Сводка по ВСЕМ гостям — только с peers@vpn (тот же admin-признак, что
+        # у кнопки «Все гости»); сверяемся сами, а не доверяем декларации.
         is_admin = ctx.subscription is not None and ActionRight(
             vpn_protocol.ACTION_PEERS, _VPN_SERVICE
         ).granted(ctx.subscription)
         if not is_admin:
             return "недоступно: сводка по всем гостям — только у админа"
+        payload: dict[str, Any] = {}
+    elif action in (
+        vpn_protocol.ACTION_USAGE,
+        vpn_protocol.ACTION_ISSUE,
+        _VPN_ACTION_SETTINGS,
+        _VPN_ACTION_REPORT,
+    ):
+        return await _vpn_person_action(ctx, action, args)
+    elif action == _VPN_ACTION_APK:
+        return await _vpn_apps(ctx, dst, str(args.get("app") or "hiddify"))
+    elif action == vpn_protocol.ACTION_RESOLVE_REQUEST:
+        raw_id = args.get("request_id")
+        if raw_id is None:
+            return "ошибка: не указан request_id"
+        payload = {"request_id": raw_id, "approve": bool(args.get("approve"))}
+    elif action == vpn_protocol.ACTION_PEERS:
         payload = {}
     elif action in (
         vpn_protocol.ACTION_PROXY_LINK,
         vpn_protocol.ACTION_PROXY_ROTATE_SECRET,
         vpn_protocol.ACTION_PROXY_USAGE,
     ):
-        # Общая ссылка на всех, не привязана к конкретному разговору —
-        # chat_id тут не при чём (см. vpn/protocol.py про per-guest).
+        # Общая ссылка на всех, не привязана к конкретному разговору.
         payload = {}
     else:
-        if ctx.chat_id is None:
-            return "недоступно: VPN привязан к разговору, а его сейчас нет"
+        if ctx.chat_id is None or ctx.chat_id == 0:
+            return "недоступно: VPN привязан к человеку, а сейчас его нет"
         payload = {"chat_id": ctx.chat_id}
         if action == vpn_protocol.ACTION_REQUEST_EXTRA:
             gb = args.get("gb")
@@ -3507,13 +3383,48 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+async def _vpn_apps(ctx: ToolContext, dst: Address, app: str) -> str:
+    """apk: прислать приложение. hiddify (по умолчанию) — магазины Hiddify для
+    «VLESS · Hiddify»; amnezia — магазины AmneziaVPN; amnezia_apk — файл .apk
+    AmneziaWG, запасной вариант."""
+    if ctx.notifier is None or ctx.chat_id is None or ctx.chat_id <= 0:
+        return "недоступно: сейчас не могу отправить сообщение (нужен личный чат)"
+    from sa_home_bot.bot import vpn_faq  # лениво: клавиатуры aiogram
+
+    if app == "amnezia_apk":
+        from sa_home_bot.bot.vpn_apk import deliver_apk
+
+        text = await deliver_apk(
+            ctx.node_link, ctx.notifier, ctx.chat_id, dst, message_thread_id=ctx.message_thread_id
+        )
+        return text if text.startswith(("не вышло", "недоступно")) else f"готово: {text}"
+    code = vpn_faq.Q_AWG if app == "amnezia" else vpn_faq.Q_HIDDIFY
+    sent = await ctx.notifier.send_direct(
+        ctx.chat_id,
+        vpn_faq.answer_text(code),
+        reply_markup=vpn_faq.answer_keyboard(code, ctx.settings.vpn, can_wizard=False),
+        message_thread_id=ctx.message_thread_id,
+    )
+    if sent is None:
+        return "не вышло: сообщение не доставилось"
+    return "готово: ссылки на приложение ушли личным сообщением"
+
+
 _VPN_SERVICE = vpn_protocol.SERVICE_NAME
+# Ответы справки /vpn (bot/vpn_facts.py) — те же слова, что на кнопках «❓ Помощь».
+_VPN_FACTS = vpn_facts.ANSWERS
+_VPN_Q_HIDDIFY, _VPN_Q_AWG = vpn_facts.Q_HIDDIFY, vpn_facts.Q_AWG
+_VPN_Q_TROUBLE, _VPN_Q_DEVICE = vpn_facts.Q_TROUBLE, vpn_facts.Q_DEVICE
+_VPN_APK_NOTE, _VPN_RENAME_NOTE = vpn_facts.APK_NOTE, vpn_facts.RENAME_NOTE
 _VPN_VARIANTS = VariantRights(
     param="action",
     rights=(
         (vpn_protocol.ACTION_USAGE, ActionRight(vpn_protocol.ACTION_USAGE, _VPN_SERVICE)),
         (vpn_protocol.ACTION_ISSUE, ActionRight(vpn_protocol.ACTION_ISSUE, _VPN_SERVICE)),
-        (vpn_protocol.ACTION_REISSUE, ActionRight(vpn_protocol.ACTION_REISSUE, _VPN_SERVICE)),
+        # Те же права, что у кнопок: «📥 Получить настройки» — vpn_card@vpn;
+        # «Сообщить о проблеме» — у каждого с usage@vpn (vpn_report.can_report).
+        (_VPN_ACTION_SETTINGS, ActionRight("vpn_card", _VPN_SERVICE)),
+        (_VPN_ACTION_REPORT, ActionRight(vpn_protocol.ACTION_USAGE, _VPN_SERVICE)),
         (
             vpn_protocol.ACTION_GRANT_EXTRA,
             ActionRight(vpn_protocol.ACTION_GRANT_EXTRA, _VPN_SERVICE),
@@ -3548,55 +3459,42 @@ _DECL_VPN: dict[str, Any] = {
     "function": {
         "name": "vpn",
         "description": (
-            "Личный VPN на выходном узле (обход блокировок): свой расход/лимит, "
-            "выдать/перевыпустить доступ, попросить ещё трафика, прислать "
-            "приложение и объяснить, как подключиться. Секрет доступа (конфиг) "
-            "я отправляю отдельным личным сообщением, не показываю его в "
-            "разговоре, и только в личке, не в группе.\n"
-            "usage — свой расход и лимит месяца (у админа — с all_guests=true "
-            "сводка по всем гостям: расход, лимит и число устройств каждого, "
-            "плюс сколько трафика ноды ещё свободно от резерва); issue — "
-            "выдать доступ НОВОМУ устройству, имя ему сама служба выбирает "
-            "случайно (не спрашивай, как назвать, и не передавай device_label — "
-            "он у issue игнорируется), число устройств не ограничено; на "
-            "сервере с двумя технологиями укажи transport ('reality' для "
-            "России, 'awg' иначе) — тул подскажет, если надо уточнить; "
-            "reissue — перевыпустить СУЩЕСТВУЮЩЕЕ устройство: device_label "
-            "ОБЯЗАТЕЛЕН (какое из уже выданных, имя видно в usage), имя при "
-            "перевыпуске не меняется, а старый ключ СРАЗУ перестаёт работать, "
-            "поэтому сначала спроси подтверждение словами и вызови ещё раз с "
-            "confirm=true, только когда получено явное согласие; grant_extra — "
-            "добавить трафика самому (доступно, только когда трафика реально "
-            "осталось мало — иначе тул откажет и скажет, когда можно "
-            "попробовать снова), пока не упёрся в потолок самообслуживания "
-            "(тогда используй request_extra — заявка админу, необязательный "
-            "gb — сколько ГБ); apk — прислать ссылки на официальное "
-            "приложение AmneziaWG (App Store, Google Play, сайт) и, если "
-            "файл .apk уже кэширован, сразу сам файл; proxy_link — ссылка(и) на "
-            "прокси Telegram (mtg — НЕ VPN, только сам Telegram, ставится "
-            "прямо в его настройках без стороннего приложения; без server "
-            "отдаёт список со всех серверов, где прокси настроен, — покажи "
-            "пользователю все) плюс SOCKS5-адрес для ботов; "
-            "proxy_rotate_secret — сменить секрет прокси (старая ссылка "
-            "сразу перестаёт работать у ВСЕХ, кто её получил — используй, "
-            "только если явно попросили сменить/отозвать); proxy_usage — "
-            "расход трафика прокси за месяц.\n"
-            "issue/reissue БЕЗ recipient — всегда себе, в ТЕКУЩИЙ разговор. "
-            "«Выдай/перевыпусти доступ Наташе» (просьба выдать ДРУГОМУ "
-            "человеку, не тому, кто сейчас пишет) — это recipient=«Наташа», "
-            "доступно ТОЛЬКО админу; без права на это тул сам откажет, не "
-            "выдумывай, что получилось, если он сказал «недоступно». Секрет "
-            "тогда уходит В ЛИЧКУ ПОЛУЧАТЕЛЯ, не тому, кто попросил, — не "
-            "утверждай, что конфиг получил ты сам или собеседник.\n"
-            "Как подключиться — объясняй своими словами по этим фактам, не "
-            "выдумывай другой порядок: поставить приложение AmneziaWG (action="
-            "«apk» пришлёт ссылки на App Store/Google Play/сайт, плюс сам "
-            "файл, если он уже под рукой) → сначала прилетает QR — отсканировать "
-            "его прямо в приложении удобно для настройки с ДРУГОГО устройства "
-            "(сфотографировать собственный экран телефон не может); следом — "
-            "файл .conf, для настройки С ЭТОГО устройства: открыть его и "
-            "выбрать «Открыть с помощью» → AmneziaWG, тоннель добавится сам, "
-            "копировать ничего не нужно.\n"
+            "Личный VPN (обход блокировок) на серверах в нескольких странах. Устройство — "
+            "это один телефон или компьютер: в нём сразу все страны, отдельных ключей "
+            "«на технологию» человеку не выдают. Ключи, ссылки vless, QR и файлы я НЕ "
+            "показываю и сам не выпускаю — они приходят только отдельными сообщениями "
+            "бота по кнопкам (и удаляются через время).\n"
+            "usage — статус: страны (✅ работает / ⚠️ может не работать), остаток квоты "
+            "до 1 числа, устройства с трафиком и временем последней связи; расскажи "
+            "своими словами (у админа с all_guests=true — сводка по всем гостям и "
+            "свободный резерв ноды); issue — ПОДКЛЮЧИТЬ новое устройство: человеку "
+            "приходит сообщение с кнопкой «📱 Подключить по шагам», дальше он идёт по "
+            "шагам сам; имён и технологий не спрашивай; settings — дать настройки "
+            "СУЩЕСТВУЮЩЕГО устройства (device_label — имя из usage): человеку приходит "
+            "экран «📥 Получить настройки», там выбор «VLESS · Hiddify» или AmneziaWG, "
+            "перевыпуск ключей — на карточке устройства в «⚙️ Управление»; report — "
+            "сообщить владельцу о проблеме (reason — со слов человека, коротко; не "
+            "выдумывай причину; раз в 10 минут на человека); grant_extra — добавить "
+            "трафика самому (только когда осталось мало; потолок — тогда request_extra, "
+            "заявка админу, gb — сколько ГБ); apk — прислать приложение: app="
+            "'hiddify' (по умолчанию, для «VLESS · Hiddify»), 'amnezia' (AmneziaVPN), "
+            "'amnezia_apk' (файл AmneziaWG — только запасной вариант, если магазин "
+            "недоступен); proxy_link — ссылки на прокси Telegram (mtg — НЕ VPN, только "
+            "сам Telegram, ставится в его настройках; без server — со всех серверов, "
+            "покажи все) плюс SOCKS5 для ботов; proxy_rotate_secret — сменить секрет "
+            "прокси (старая ссылка сразу перестаёт работать у ВСЕХ — только по явной "
+            "просьбе); proxy_usage — расход прокси за месяц.\n"
+            "issue БЕЗ recipient — себе. «Подключи Наталью» (ДРУГОМУ человеку) — "
+            "recipient=«Наталья», только админу; без права тул откажет, не выдумывай, "
+            "что получилось. Сообщение уйдёт в личку получателя — не говори, что "
+            "кнопку нажал ты или собеседник.\n"
+            "Справка — отвечай коротко, в своём образе, на «вы», без упоминаний пола, "
+            "бабушек и родственников, по этим фактам, ничего не выдумывая:\n"
+            f"• Что такое Hiddify: {_VPN_FACTS[_VPN_Q_HIDDIFY]}\n"
+            f"• Чем отличается AmneziaWG: {_VPN_FACTS[_VPN_Q_AWG]} {_VPN_APK_NOTE}\n"
+            f"• Не подключается: {_VPN_FACTS[_VPN_Q_TROUBLE].rsplit(chr(10), 1)[0]}\n  Если не помогло — report (ты и есть «Альфред» из справки).\n"
+            f"• Ещё одно устройство: {_VPN_FACTS[_VPN_Q_DEVICE]} Если просят подключить — issue.\n"
+            f"• {_VPN_RENAME_NOTE}\n"
             "Значения action перечислены в enum: чего там нет — не умеешь."
         ),
         "parameters": {
@@ -3610,41 +3508,31 @@ _DECL_VPN: dict[str, Any] = {
                 "device_label": {
                     "type": "string",
                     "description": (
-                        "reissue: ОБЯЗАТЕЛЕН — имя существующего устройства "
-                        "(возьми из usage). issue его игнорирует — не передавай."
+                        "settings: имя существующего устройства (из usage); report: "
+                        "необязательно — о каком устройстве речь"
                     ),
                 },
-                "transport": {
+                "reason": {
                     "type": "string",
-                    "enum": ["awg", "reality"],
-                    "description": (
-                        "issue: технология под общей квотой — 'reality' (VLESS, "
-                        "работает из России) или 'awg' (AmneziaWG, быстрее вне "
-                        "России). Нужен, только если сервер даёт обе (тул сам "
-                        "скажет, если надо уточнить). reissue его игнорирует."
-                    ),
+                    "description": "report: что случилось — со слов человека, коротко",
+                },
+                "app": {
+                    "type": "string",
+                    "enum": ["hiddify", "amnezia", "amnezia_apk"],
+                    "description": "apk: какое приложение прислать (по умолчанию hiddify)",
                 },
                 "recipient": {
                     "type": "string",
                     "description": (
-                        "issue/reissue: имя/ник ДРУГОГО человека, которому "
-                        "выдать доступ (не себе) — только у админа. Без этого "
-                        "параметра — всегда себе"
+                        "issue: имя/ник ДРУГОГО человека, которого подключить (не себя) "
+                        "— только у админа. Без этого параметра — всегда себе"
                     ),
                 },
                 "all_guests": {
                     "type": "boolean",
                     "description": (
                         "usage: true — сводка по всем гостям и свободный резерв "
-                        "ноды (только у админа); без этого — свой расход"
-                    ),
-                },
-                "confirm": {
-                    "type": "boolean",
-                    "description": (
-                        "reissue: true — только после явного согласия "
-                        "собеседника перевыпустить ключ (старый сразу перестанет "
-                        "работать). Без этого параметра перевыпуск не выполнится."
+                        "ноды (только у админа); без этого — свой статус"
                     ),
                 },
                 "gb": {

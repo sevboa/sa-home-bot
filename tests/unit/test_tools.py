@@ -2347,9 +2347,9 @@ def _vpn_enum(subscription) -> list[str]:
 
 
 def test_vpn_enum_is_per_action_right():
-    assert _vpn_enum(_sub("usage@vpn")) == ["usage"]
+    assert _vpn_enum(_sub("usage@vpn")) == ["usage", "report"]
     assert _vpn_enum(ADMIN) == [
-        "usage", "issue", "reissue", "grant_extra", "request_extra", "apk", "peers",
+        "usage", "issue", "settings", "report", "grant_extra", "request_extra", "apk", "peers",
         "resolve_request", "proxy_link", "proxy_rotate_secret", "proxy_usage",
     ]
 
@@ -2374,34 +2374,8 @@ def _vpn_link(**kwargs):
     return _FakeSwarmLink(states=states, **kwargs)
 
 
-async def test_vpn_issue_sends_secret_via_notifier_not_to_model(store):
-    """Приватный ключ никогда не должен попасть в текст, который видит
-    модель, — только в личное сообщение через ctx.notifier."""
-    link = _vpn_link(
-        command_result={"config_text": "[Interface]\nPrivateKey = SECRET", "device_label": "тел"}
-    )
-    notifier = _FakeNotifier()
-    result = await tools.tool_vpn(
-        _ctx(store, node_link=link, subscription=ADMIN, notifier=notifier, chat_id=777),
-        {"action": "issue", "device_label": "тел"},
-    )
-    assert "SECRET" not in result
-    assert notifier.sent_documents  # секрет ушёл файлом .conf, а не текстом модели
-    assert b"SECRET" in notifier.sent_documents[0][1]
-    assert notifier.sent_documents[0][0] == 777
-    action, dst = link.commands[0]
-    assert (action, dst.node, dst.service) == ("issue", "jeeves", "vpn")
-    assert link.sent_args[0]["chat_id"] == 777  # свой чат, не подсунутый моделью
 
 
-async def test_vpn_issue_refuses_outside_private_chat(store):
-    link = _vpn_link()
-    result = await tools.tool_vpn(
-        _ctx(store, node_link=link, subscription=ADMIN, notifier=_FakeNotifier(), chat_id=-100123),
-        {"action": "issue", "device_label": "тел"},
-    )
-    assert result.startswith("недоступно")
-    assert link.commands == []
 
 
 async def test_vpn_ceiling_error_tells_model_to_request_extra(store):
@@ -2413,28 +2387,8 @@ async def test_vpn_ceiling_error_tells_model_to_request_extra(store):
     assert "request_extra" in result
 
 
-async def test_vpn_reissue_without_confirm_asks_before_acting(store):
-    link = _vpn_link()
-    result = await tools.tool_vpn(
-        _ctx(store, node_link=link, subscription=ADMIN, notifier=_FakeNotifier(), chat_id=777),
-        {"action": "reissue", "device_label": "тел"},
-    )
-    assert "confirm" in result
-    assert link.commands == []  # служба не тронута, пока нет явного согласия
 
 
-async def test_vpn_reissue_with_confirm_proceeds(store):
-    link = _vpn_link(
-        command_result={"config_text": "[Interface]\nPrivateKey = SECRET", "device_label": "тел"}
-    )
-    notifier = _FakeNotifier()
-    result = await tools.tool_vpn(
-        _ctx(store, node_link=link, subscription=ADMIN, notifier=notifier, chat_id=777),
-        {"action": "reissue", "device_label": "тел", "confirm": True},
-    )
-    assert "готово" in result
-    action, dst = link.commands[0]
-    assert (action, dst.node, dst.service) == ("reissue", "jeeves", "vpn")
 
 
 async def test_vpn_usage_all_guests_requires_admin_right(store):
@@ -2460,24 +2414,8 @@ async def test_vpn_usage_all_guests_admin_gets_node_wide_summary(store):
     assert link.sent_args[0] == {}  # без chat_id — сводка по всем, не по своему чату
 
 
-async def test_vpn_apk_sends_by_cached_file_id(store):
-    link = _vpn_link(command_result={"telegram_file_id": "cached-id", "version": "2.0.1"})
-    notifier = _FakeNotifier()
-    result = await tools.tool_vpn(
-        _ctx(store, node_link=link, subscription=ADMIN, notifier=notifier, chat_id=777),
-        {"action": "apk"},
-    )
-    assert "готово" in result
-    assert notifier.sent_documents[0][:2] == (777, "cached-id")
 
 
-async def test_vpn_apk_without_cache_tells_to_use_bot_ui(store):
-    link = _vpn_link(command_result={"telegram_file_id": None, "version": "2.0.1"})
-    result = await tools.tool_vpn(
-        _ctx(store, node_link=link, subscription=ADMIN, notifier=_FakeNotifier(), chat_id=777),
-        {"action": "apk"},
-    )
-    assert "/vpn" in result
 
 
 # --- note_person (Этап 54.2, с Этапа 58 — в person_claims) ---
