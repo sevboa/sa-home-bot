@@ -1,7 +1,9 @@
 """Веб-сервер подписки Hiddify внутри службы vpn (подэтап 57.10).
 
 Адреса: ``/s/<токен>`` — хаб устройства (57.11: «VPN включён?», Hiddify,
-страны и остаток, AmneziaWG), ``POST /s/<токен>/awg`` — выдача AmneziaWG (только
+страны и остаток, AmneziaWG), ``GET /s/<токен>/where`` — «идёт ли трафик через
+эту ноду» (57.12; страница спрашивает его у каждой ноды из браузера, CORS — только для
+страниц наших нод), ``POST /s/<токен>/awg`` — выдача AmneziaWG (только
 форма со страницы: Origin/Referer + одноразовый nonce + ограничение частоты),
 ``/sub/<токен>`` — сама подписка (``?format=vless|plain|singbox``). Всё прочее —
 голый 404, как и неизвестный/отозванный токен: снаружи не отличить «нет такого»
@@ -20,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import secrets
 import ssl
@@ -31,6 +34,7 @@ from urllib.parse import urlsplit
 from aiohttp import web
 
 from sa_home_bot.config import VpnConfig
+from sa_home_bot.vpn import amnezia_key
 from sa_home_bot.vpn import protocol as vpn_protocol
 from sa_home_bot.vpn import subscription as sub
 
@@ -162,6 +166,7 @@ class SubscriptionWeb:
     def _app(self) -> web.Application:
         app = web.Application(middlewares=[_hardening], client_max_size=4096)
         app.router.add_get("/s/{token}", self._page)
+        app.router.add_get("/s/{token}/where", self._where)
         app.router.add_post("/s/{token}/awg", self._awg_post)
         app.router.add_get("/sub/{token}", self._sub)
         return app
@@ -339,7 +344,25 @@ class SubscriptionWeb:
             awg_forms=forms,
             path=f"/s/{token}",
         )
-        return self._html(body)
+        resp = self._html(body)
+        resp.headers["content-security-policy"] = sub.page_csp(found.nodes)
+        return resp
+
+    async def _where(self, request: web.Request) -> web.Response:
+        """Идёт ли запрос через ЭТУ ноду (57.12): ``{"via": "awg"|"vless"|""}``.
+        Токен проверяется как везде; CORS — только для страниц наших нод."""
+        found = await self._lookup(request)
+        if found is None or not found.entries:
+            return _not_found()
+        via = sub.detect_via(request.remote or "", found.nodes, self._cfg.subnet)
+        resp = _Response(
+            text=json.dumps({"via": via}), content_type="application/json", charset="utf-8"
+        )
+        origin = request.headers.get("Origin", "")
+        if origin and origin in {n.base for n in found.nodes if n.base}:
+            resp.headers["access-control-allow-origin"] = origin
+            resp.headers["vary"] = "Origin"
+        return resp
 
     async def _awg_post(self, request: web.Request) -> web.Response:
         """Выдача AmneziaWG: Origin/Referer, одноразовый nonce, частота, для
@@ -387,6 +410,13 @@ class SubscriptionWeb:
         conf = str(result.get("config_text") or "")
         if not conf:
             return _not_found()
+        try:
+            key = amnezia_key.build_key(
+                conf, f"{sub.flag_of(node.name)} {found.device_label}".strip()
+            )
+        except amnezia_key.ConfigError as exc:
+            log.warning("vpn: ключ vpn:// для AmneziaVPN не собран: %s", exc)
+            key = ""
         filename = vpn_protocol.secret_filename(
             vpn_protocol.TRANSPORT_AWG, found.device_label, str(result.get("location") or node.name)
         )
@@ -398,6 +428,7 @@ class SubscriptionWeb:
             qr_data_uri=sub.qr_data_uri(conf),
             links=self._links,
             path=path,
+            key=key,
         )
         return self._html(body)
 

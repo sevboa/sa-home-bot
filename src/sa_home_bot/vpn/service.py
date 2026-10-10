@@ -132,6 +132,7 @@ from sa_home_bot.vpn.protocol import (
     country_flag,
 )
 from sa_home_bot.vpn.proxy_backend import ProxyBackend, RealProxyBackend
+from sa_home_bot.vpn.subweb import public_host as sub_public_host
 from sa_home_bot.vpn_check import protocol as vpn_check_protocol
 
 log = logging.getLogger(__name__)
@@ -1374,6 +1375,11 @@ class VpnService:
             return self._reality_cfg.endpoint_host
         return self._cfg.endpoint_host
 
+    def _sub_base(self) -> str:
+        if self._cfg.sub_port <= 0 or self._reality_cfg is None:
+            return ""
+        return f"https://{sub_public_host(self._cfg)}:{self._cfg.sub_port}"
+
     async def _sub_health(self) -> str:
         """«ok» / «bad» / «» — проверки VLESS этой страны (иначе любого транспорта)."""
         rows = [r for r in await self._check_rollup(server=self._node) if r.get("status")]
@@ -1394,6 +1400,8 @@ class VpnService:
             "name": self._sub_entry_name(),
             "ip": self._node_ip(),
             "awg": self._has(TRANSPORT_AWG),
+            # Адрес страницы этой ноды: по нему браузер спрашивает «трафик идёт через вас?».
+            "base": self._sub_base(),
         }
         found = await self._sub_local(token)
         if found is None:
