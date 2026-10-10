@@ -37,6 +37,10 @@ STATUS_PAUSED = "paused"  # гость вышел кнопкой — продо�
 STATUS_DECLINED = "declined"  # «Не сейчас» / форма протухла — кулдаун
 STATUS_DONE = "done"  # завершена (эффект применён)
 
+# Состояние эффекта со сроком (InteractiveStore.timed_effect).
+EFFECT_ACTIVE = "active"
+EFFECT_EXPIRED = "expired"
+
 TRANSCRIPT_LINES = 14
 TRANSCRIPT_LINE_CHARS = 500
 
@@ -120,6 +124,10 @@ class Scenario:
     # Финал сцены завершает её на СЛЕДУЮЩЕМ ходу, а не ждёт формы: Альфред
     # успевает пересказать последнее событие (cellar).
     finish_after_finale: bool = False
+    # Этап 59.3: вещи, которые гость получает, когда сцена доходит до стадии:
+    # ((стадия, вид вещи из items.KINDS), …). Выдаёт код при смене стадии
+    # (engine._after_canary_turn), Ведущий лишь обставляет находку.
+    stage_items: tuple[tuple[int, str], ...] = ()
 
     @property
     def last_stage(self) -> int:
@@ -237,6 +245,32 @@ class InteractiveStore:
 
     async def set_effect(self, key: str, user_id: int, value: str) -> None:
         await self._store.set_state(f"user_effect:{key}:{user_id}", value)
+
+    # --- эффекты со сроком (Этап 59.3, общий механизм «Применение», 49.4) ---
+    # ``user_effect:<ключ>:<гость>`` = JSON ``{"on": true, "expires_at": iso|null}``.
+    # Срока нет (null) — действует, пока вещь не вернут (фотоаппарат).
+
+    async def set_timed_effect(self, key: str, user_id: int, expires_at: datetime | None) -> None:
+        value = {"on": True, "expires_at": iso(expires_at) if expires_at else None}
+        await self.set_effect(key, user_id, json.dumps(value))
+
+    async def timed_effect(self, key: str, user_id: int, now: datetime) -> str | None:
+        """``EFFECT_ACTIVE`` / ``EFFECT_EXPIRED`` / None (эффекта нет). Старое
+        значение без срока (``"1"``) считается действующим."""
+        raw = await self.get_effect(key, user_id)
+        if not raw or raw == "0":
+            return None
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return EFFECT_ACTIVE
+        until = parse_iso(data.get("expires_at")) if isinstance(data, dict) else None
+        if until is not None and until <= now:
+            return EFFECT_EXPIRED
+        return EFFECT_ACTIVE
+
+    async def clear_effect(self, key: str, user_id: int) -> None:
+        await self._store.delete_state(f"user_effect:{key}:{user_id}")
 
     async def plain_turns(self, chat_id: int) -> int:
         """Обычные ходы подряд в чате без сцены (спонтанный триггер, Этап 59.2)."""

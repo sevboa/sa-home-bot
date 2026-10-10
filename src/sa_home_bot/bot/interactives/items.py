@@ -16,6 +16,14 @@
 49.3.0 (``Trait.en`` не пуст), остальные живут в тексте: Альфред о них
 знает и рассказывает, а на картинке радиостанция обычная.
 
+Этап 59: к радио добавились вещи подвала — вино (``wine``, 59.3) и старый
+фотоаппарат (``camera``, 59.6). Они канареечные (``ItemKind.canary``): видны
+и действуют только гостям из ``llm.interactives_canary_user_ids``. Черты у них
+свободные (``free_traits``): Ведущий пишет приметы своими словами, портрет —
+архетип без перекраски. Действие, после которого вещь исчезает, — общий
+механизм «Применение» (``ItemAction.consumable``, 49.4): вещь ``consumed``,
+эффект гостя (``UserEffect``) — ``user_effect:<ключ>:<гость>`` со сроком.
+
 Действия (Этап 49.3.7) вид объявляет сам — ``ItemKind.actions``: из них
 строятся «Действия» под карточкой и в описи /items, опись для Альфреда и
 форма тула ``item_action``. Особенные вещи — рычаги поместья: их не
@@ -28,11 +36,14 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from sa_home_bot.bot.interactives import radio
 
 RADIO_TYPE = "radio"
+WINE_TYPE = "wine"
+CAMERA_TYPE = "camera"
 
 # Где вещь (Этап 49.3.5). Стоит в кабинете — попадает в его снимки
 # (вставкой), в чулане — показывается карточкой.
@@ -62,7 +73,9 @@ class ItemAction:
     как действие видит Альфред в описи; ``done`` — ответ на нажатие;
     ``event`` — запись в ``item_events``; ``directive`` — что сказать
     Альфреду после; ``pinned_locked`` — в закреплённых чатах (речь
-    закреплена, llm.speech_therapy_pinned_chat_ids) недоступно."""
+    закреплена, llm.speech_therapy_pinned_chat_ids) недоступно;
+    ``consumable`` (Этап 59.3, «Применение» из 49.4) — после действия вещь
+    израсходована: ``consumed``, из описи и мест она пропадает."""
 
     name: str
     code: str
@@ -77,6 +90,27 @@ class ItemAction:
     event: str = ""
     directive: str = ""
     pinned_locked: bool = False
+    consumable: bool = False
+    # Снимок Альфреда после действия (селфи, фраза по-английски для художника)
+    # и подпись к нему; пусто — без снимка.
+    snapshot: str = ""
+    snapshot_caption: str = ""
+
+
+@dataclass(frozen=True)
+class UserEffect:
+    """Эффект гостя (``user_effect:<ключ>:<гость>``, Этап 59.3): пока он
+    действует, ``text`` уходит скрытой заметкой в system Альфреда на каждый
+    ход гостя; ``hours`` — срок (None — пока вещь не вернут); ``ended`` —
+    одна заметка Альфреду, когда срок вышел; ``item_type`` — вещь, чья
+    заметка (``note``) подставляется в ``text`` как ``{note}`` (« (модель)»
+    или пусто)."""
+
+    key: str
+    text: str
+    hours: float | None = None
+    ended: str = ""
+    item_type: str = ""
 
 
 @dataclass(frozen=True)
@@ -138,6 +172,39 @@ class ItemKind:
     actions: tuple[ItemAction, ...] = field(default_factory=tuple)
     # Особенная вещь — рычаг поместья, не передаётся (49.4 «Передача»).
     transferable: bool = False
+    # --- Этап 59: вещи подвала. Всё ниже по умолчанию даёт радио как было. ---
+    # Канареечная вещь: видна и действует только гостям из канареечного списка.
+    canary: bool = False
+    # Черты — свободный текст Ведущего («этикетка выцвела, виден год — 1887»),
+    # а не ключи словаря ``traits``: в портрете они не участвуют.
+    free_traits: bool = False
+    # Тексты вещи; пусто — как у радио (radio.ITEM_*). Место → строка.
+    where_inv: dict[str, str] = field(default_factory=dict)  # опись /items и manor_items
+    where_card: dict[str, str] = field(default_factory=dict)  # низ подписи карточки
+    where_menu: dict[str, str] = field(default_factory=dict)  # шапка перечня действий
+    card_caption: str = ""  # шаблон карточки: {name} {traits} {fault} {where}
+    menu_caption: str = ""  # шаблон перечня действий: {name} {where}
+    note_card: str = ""  # заметка в карточке: {fault}; пусто — «Беда с ней»
+    note_tool: str = ""  # заметка в описи Альфреду: {fault}
+    consumed_text: str = ""  # подпись карточки после расхода
+    # Находка (59.3/59.6): запасные приметы/заметка, пока Ведущий не придумал
+    # свои, и что Ведущему придумать (блок ко входу, поле ``found_item``).
+    fallback_traits: tuple[str, ...] = ()
+    fallback_notes: tuple[str, ...] = ()
+    found_ask: str = ""
+
+    def where_ru(self, place: str) -> str:
+        return self.where_inv.get(place) or PLACE_RU.get(place, place)
+
+    def card_where(self, place: str) -> str:
+        if place in self.where_card:
+            return self.where_card[place]
+        return radio.ITEM_CARD_INSTALLED if place == PLACE_DESK else radio.ITEM_CARD_STORED
+
+    def menu_where(self, place: str) -> str:
+        if place in self.where_menu:
+            return self.where_menu[place]
+        return radio.ITEM_PLACE_INSTALLED if place == PLACE_DESK else radio.ITEM_PLACE_STORED
 
     def available(self, place: str) -> list[ItemAction]:
         """Действия, которые сейчас имеют смысл (по месту вещи)."""
@@ -176,6 +243,8 @@ class ItemKind:
         }
 
     def traits_ru(self, traits: list[str]) -> list[str]:
+        if self.free_traits:
+            return [k for k in traits if k]
         return [self.traits[k].ru for k in traits if k in self.traits]
 
     def drawn_key(self, traits: list[str]) -> tuple[str, ...]:
@@ -277,16 +346,255 @@ RADIO = ItemKind(
     ),
 )
 
-KINDS: dict[str, ItemKind] = {RADIO.type: RADIO}
+# --- Этап 59.3: вино ---
+
+# Сколько Альфред хмелеет от бутылки (решение плана 59.3: по умолчанию 3 ч).
+TIPSY_HOURS = 3.0
+# Этап 59.6: размер снимков Альфреда со старым фотоаппаратом (вместо 64).
+CAMERA_PHOTO_PX = 128
+
+# Архетипы новых вещей — на стенд 59.0 (портрет turbo, как у радио): пока
+# строки по образцу RADIO_ARCHETYPE, не проверенные 32 из 32.
+WINE_ARCHETYPE = (
+    "single old dusty dark green wine bottle, faded paper label, cork sealed with "
+    "black wax, cobwebs on the shoulder"
+)
+CAMERA_ARCHETYPE = (
+    "single vintage 1950s twin-lens reflex camera, worn black leather body, brass "
+    "lens ring, folding viewfinder hood, leather neck strap"
+)
+
+WINE_ACTION_DRINK = (
+    "распить бутылку вместе с собеседником (бутылка одна: после этого её не "
+    "станет, а ты ненадолго захмелеешь)"
+)
+WINE_FORM_TEXT = "Распить бутылку вина?"
+# Снимок после распития (селфи): Альфред с бокалом, чуть раскрасневшийся.
+WINE_SNAPSHOT_EN = "holding a glass of dark red wine, cheeks slightly flushed, a faint smile"
+AFTER_DRINK_DIRECTIVE = (
+    "Вы с собеседником только что распили бутылку выдержанного вина из "
+    "подвала: ты налил себе бокал и пригубил. Скажи две-три фразы, в образе: "
+    "оцени вкус и возраст вина, поблагодари собеседника за компанию и дай "
+    "понять, что от бокала ты чуть захмелел. Не говори про «эффект» и сроки."
+)
+WINE_CARD_CAPTION = "<b>{name}</b>\nБутылка из подвала замка. {traits}{fault}\n{where}"
+WINE_ACTIONS_CAPTION = "<b>{name}</b>\n{where}\nЧто с ней сделать?"
+WINE_NOTE_CARD = "На этикетке: {fault}."
+WINE_NOTE_TOOL = " На этикетке: {fault}."
+WINE_CONSUMED = "Бутылка распита."
+WINE_FOUND_ASK = (
+    "Бутылка вина у входа в подвал теперь вещь Альфреда. Опиши её в поле "
+    "found_item: traits — 2-3 приметы короткими фразами (выцветшая этикетка, "
+    "год, пыль, пробка, сургуч), note — что написано на этикетке (название и "
+    "год, одной фразой). Эту бутылку Альфред потом может распить."
+)
+TIPSY_TEXT = (
+    "Ты выпил вина вместе с собеседником и слегка навеселе: речь чуть мягче и "
+    "многословнее обычного, ты теплее, разговорчивее и позволяешь себе "
+    "лишнюю шутку или откровенность, изредка слегка сбиваешься, но остаёшься "
+    "дворецким с достоинством. Не говори про «эффект», «игру» и время "
+    "действия."
+)
+TIPSY_ENDED = (
+    "Хмель выветрился, ты снова трезв. Можешь упомянуть об этом одной "
+    "фразой, с лёгким смущением."
+)
+
+WINE = ItemKind(
+    type=WINE_TYPE,
+    name="Бутылка вина",
+    icon="🍷",
+    archetype=WINE_ARCHETYPE,
+    checks=(
+        "wine bottle :: a glass bottle with a long neck and a cork or cap; a jar or a "
+        "glass does NOT count",
+        "paper label :: a label glued on the bottle",
+    ),
+    traits={},
+    ladder=(),
+    paste_hint="old dusty wine bottle",
+    focus_re=re.compile(r"бутылк|бутылоч|вин[оауеым]\b|вина\b|этикетк", re.IGNORECASE),
+    canary=True,
+    free_traits=True,
+    where_inv={PLACE_STOREROOM: "стоит в подвале, у входа"},
+    where_card={
+        PLACE_STOREROOM: "Стоит в подвале у входа. Бутылка одна — если пожелаете, откроем."
+    },
+    where_menu={PLACE_STOREROOM: "Сейчас стоит в подвале у входа."},
+    card_caption=WINE_CARD_CAPTION,
+    menu_caption=WINE_ACTIONS_CAPTION,
+    note_card=WINE_NOTE_CARD,
+    note_tool=WINE_NOTE_TOOL,
+    consumed_text=WINE_CONSUMED,
+    fallback_traits=(
+        "покрыта густой пылью",
+        "этикетка выцвела, читается лишь год",
+        "пробка залита чёрным сургучом",
+        "стекло тёмно-зелёное, с пузырьками",
+        "на плече бутылки паутина",
+    ),
+    fallback_notes=("«Шато Мортем», 1887", "«Вальдкеллер», год стёрся", "«Тёмный Дракон», 1923"),
+    found_ask=WINE_FOUND_ASK,
+    actions=(
+        ItemAction(
+            name="drink",
+            code="d",
+            label="Распить",
+            when=PLACE_STOREROOM,
+            effect="user_effect",
+            arg="tipsy",
+            form=WINE_FORM_TEXT,
+            confirm="Распить",
+            tool_ru=WINE_ACTION_DRINK,
+            done="Распито.",
+            event="consumed",
+            directive=AFTER_DRINK_DIRECTIVE,
+            consumable=True,
+            snapshot=WINE_SNAPSHOT_EN,
+            snapshot_caption="Альфред с бокалом",
+        ),
+    ),
+)
+
+# --- Этап 59.6: старый фотоаппарат ---
+
+CAMERA_FORM_USE = (
+    "Снимать этим аппаратом? Снимки выйдут чётче, сэр, но аппарат старый: "
+    "он иногда видит то, чего нет."
+)
+CAMERA_FORM_BACK = "Вернуть прежний аппарат?"
+CAMERA_ACTION_USE = "начать снимать этим аппаратом (снимки чётче, но он иногда видит то, чего нет)"
+CAMERA_ACTION_BACK = "вернуть прежний аппарат"
+AFTER_CAMERA_USE_DIRECTIVE = (
+    "Ты повесил на шею старый фотоаппарат из проявочной. Скажи одну-две "
+    "фразы, в образе: теперь ты снимаешь им, и кадры выйдут чётче, но "
+    "предупреди, что аппарат иногда видит то, чего нет. Не говори про "
+    "пиксели и разрешение."
+)
+AFTER_CAMERA_BACK_DIRECTIVE = (
+    "Ты убрал старый фотоаппарат в чулан и снова снимаешь прежним. Скажи одну "
+    "короткую фразу, в образе, с лёгким облегчением."
+)
+CAMERA_CARD_CAPTION = (
+    "<b>{name}</b>\nСтарый фотоаппарат из проявочной под замком. {traits}{fault}\n{where}"
+)
+CAMERA_ACTIONS_CAPTION = "<b>{name}</b>\n{where}\nЧто с ним сделать?"
+CAMERA_NOTE_CARD = "Аппарат: {fault}."
+CAMERA_NOTE_TOOL = " Аппарат: {fault}."
+CAMERA_FOUND_ASK = (
+    "Альфред нашёл старый фотоаппарат, который сам когда-то оставил здесь. "
+    "Придумай его в поле found_item: note — производитель и модель, одной "
+    "фразой (выдуманные, правдоподобные для старой техники), traits — 1-3 "
+    "приметы корпуса короткими фразами (потёртая кожа, трещина на "
+    "видоискателе, медные накладки)."
+)
+CAMERA_TEXT = (
+    "Ты снимаешь старым фотоаппаратом из проявочной{note}: снимки выходят "
+    "заметно чётче, но этот аппарат иногда видит то, чего нет. Если на снимке "
+    "оказалось что-то странное, лишнее или искажённое, ты не удивляешься, а "
+    "списываешь это на причуды аппарата. Не говори про пиксели, настройки и "
+    "разрешение."
+)
+
+CAMERA = ItemKind(
+    type=CAMERA_TYPE,
+    name="Старый фотоаппарат",
+    icon="📷",
+    archetype=CAMERA_ARCHETYPE,
+    checks=(
+        "old camera :: a photographic camera body with a lens; a radio or a box without "
+        "a lens does NOT count",
+        "round lens :: a round glass lens on the front of the camera",
+    ),
+    traits={},
+    ladder=(),
+    paste_hint="vintage reflex camera",
+    focus_re=re.compile(r"фотоаппарат|фотик|фотокамер|камер[аыуе]\b|аппарат", re.IGNORECASE),
+    canary=True,
+    free_traits=True,
+    where_inv={
+        PLACE_DESK: "в деле: Альфред снимает им",
+        PLACE_STOREROOM: "лежит в чулане",
+    },
+    where_card={
+        PLACE_DESK: "Сейчас снимаю им: кадры выходят чётче, хотя аппарат порой видит лишнее.",
+        PLACE_STOREROOM: "Лежит в чулане — если пожелаете, буду снимать им.",
+    },
+    where_menu={PLACE_DESK: "Сейчас снимаю им.", PLACE_STOREROOM: "Сейчас лежит в чулане."},
+    card_caption=CAMERA_CARD_CAPTION,
+    menu_caption=CAMERA_ACTIONS_CAPTION,
+    note_card=CAMERA_NOTE_CARD,
+    note_tool=CAMERA_NOTE_TOOL,
+    fallback_traits=(
+        "кожа корпуса потёрта до блеска",
+        "медные накладки в зелёных пятнах",
+        "трещина на матовом стекле видоискателя",
+        "ремешок засален и перетёрт",
+    ),
+    fallback_notes=(
+        "Цейс Иконта, модель «Икофлекс», 1938 года",
+        "«Рейнхольд-Лукс», двухобъективная зеркальная, 1952 года",
+        "«Альбрехт и сыновья», складная, около 1930 года",
+    ),
+    found_ask=CAMERA_FOUND_ASK,
+    actions=(
+        ItemAction(
+            name="use",
+            code="s",
+            label="Снимать им",
+            when=PLACE_STOREROOM,
+            effect="user_effect",
+            arg="camera",
+            form=CAMERA_FORM_USE,
+            confirm="Снимать им",
+            tool_ru=CAMERA_ACTION_USE,
+            done="Теперь снимаю им.",
+            event="installed",
+            directive=AFTER_CAMERA_USE_DIRECTIVE,
+        ),
+        ItemAction(
+            name="back",
+            code="v",
+            label="Вернуть прежний",
+            when=PLACE_DESK,
+            effect="user_effect",
+            arg="-camera",
+            form=CAMERA_FORM_BACK,
+            confirm="Вернуть",
+            tool_ru=CAMERA_ACTION_BACK,
+            done="Вернул прежний.",
+            event="removed",
+            directive=AFTER_CAMERA_BACK_DIRECTIVE,
+        ),
+    ),
+)
+
+KINDS: dict[str, ItemKind] = {RADIO.type: RADIO, WINE.type: WINE, CAMERA.type: CAMERA}
+
+# Эффекты гостя от вещей (общий механизм «Применение», 49.4; ключ —
+# ``user_effect:<ключ>:<гость>``, ``ItemAction.arg``).
+EFFECTS: dict[str, UserEffect] = {
+    "tipsy": UserEffect("tipsy", TIPSY_TEXT, hours=TIPSY_HOURS, ended=TIPSY_ENDED),
+    "camera": UserEffect("camera", CAMERA_TEXT, item_type=CAMERA_TYPE),
+}
 
 
-def find_kind(text: str) -> ItemKind | None:
-    """Вид по словам модели («радиостанция», «старый передатчик», «radio»)."""
+def find_kind(text: str, kinds: Iterable[ItemKind] | None = None) -> ItemKind | None:
+    """Вид по словам модели («радиостанция», «старый передатчик», «radio»).
+    ``kinds`` — среди каких видов искать (по умолчанию все; движок отдаёт
+    только видимые гостю — канареечные вещи прочим не существуют). Точное имя
+    или тип — раньше любого узора, а из узоров первыми идут канареечные виды
+    с узкими словами: «корпус фотоаппарата» не должно уходить в радио по
+    слову «корпус»."""
     text = " ".join(text.split())
     if not text:
         return None
-    for kind in KINDS.values():
-        if text.lower() in (kind.type, kind.name.lower()) or kind.focus_re.search(text):
+    pool = list(KINDS.values() if kinds is None else kinds)
+    for kind in pool:
+        if text.lower() in (kind.type, kind.name.lower()):
+            return kind
+    for kind in sorted(pool, key=lambda k: not k.canary):
+        if kind.focus_re.search(text):
             return kind
     return None
 

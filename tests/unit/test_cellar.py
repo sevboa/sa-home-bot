@@ -507,11 +507,14 @@ async def _to_hatch(svc, store, link):
     assert (await _run(store)).stage == 4
 
 
-async def test_stage_three_mentions_the_bottle_but_it_is_not_an_item_yet(store):
+async def test_stage_three_gives_the_bottle_as_an_item(store):
+    """59.3: бутылка у входа — вещь гостя (подробнее: test_wine.py)."""
     svc, _, link = _make(store, dice=Dice(0.0))
     await _to_hatch(svc, store, link)
-    assert "бутылк" in link.director_inputs[-2].lower()  # TODO 59.3 в промпте Ведущего
-    assert await store.items_of(CANARY) == []
+    wine = await store.items_of(CANARY, "wine")
+    assert len(wine) == 1 and wine[0]["origin"] == "stage"
+    # Ведущему со следующего вызова — придумать приметы бутылки.
+    assert "found_item" in link.director_inputs[-1]
 
 
 async def test_finale_sets_flags_then_finishes_on_the_next_turn(store):

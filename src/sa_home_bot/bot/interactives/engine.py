@@ -58,6 +58,8 @@ from sa_home_bot.bot.interactives import cabinet as cabinet_mod
 from sa_home_bot.bot.interactives import cellar, places, radio
 from sa_home_bot.bot.interactives import items as items_mod
 from sa_home_bot.bot.interactives.base import (
+    EFFECT_ACTIVE,
+    EFFECT_EXPIRED,
     STATUS_ACTIVE,
     STATUS_DECLINED,
     STATUS_DONE,
@@ -71,7 +73,6 @@ from sa_home_bot.bot.interactives.base import (
     parse_iso,
 )
 from sa_home_bot.bot.interactives.cabinet import Cabinet
-from sa_home_bot.bot.interactives.places import Room
 from sa_home_bot.bot.interactives.director import (
     ACTION_CHAT,
     ROLE_DIRECTOR,
@@ -80,8 +81,9 @@ from sa_home_bot.bot.interactives.director import (
     ask_director,
     ask_features,
 )
-from sa_home_bot.bot.interactives.transylvania import TZ as TRANSYLVANIA_TZ
+from sa_home_bot.bot.interactives.places import Room
 from sa_home_bot.bot.interactives.transylvania import PHASE_NIGHT, Outside, Transylvania
+from sa_home_bot.bot.interactives.transylvania import TZ as TRANSYLVANIA_TZ
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings, reminder_reason
 from sa_home_bot.db.store import Store
@@ -305,11 +307,8 @@ def item_actions_keyboard(
 
 
 def item_actions_caption(kind: items_mod.ItemKind, place: str) -> str:
-    return radio.ITEM_ACTIONS_CAPTION.format(
-        name=html.escape(kind.name),
-        where=radio.ITEM_PLACE_INSTALLED
-        if place == items_mod.PLACE_DESK
-        else radio.ITEM_PLACE_STORED,
+    return (kind.menu_caption or radio.ITEM_ACTIONS_CAPTION).format(
+        name=html.escape(kind.name), where=kind.menu_where(place)
     )
 
 
@@ -353,7 +352,7 @@ def inventory_text(entries: list[tuple[items_mod.ItemKind, dict[str, Any], str]]
         line = items_mod.INVENTORY_LINE.format(
             icon=kind.icon,
             name=html.escape(kind.name),
-            where=items_mod.PLACE_RU.get(place, place),
+            where=kind.where_ru(place),
         )
         traits = kind.traits_ru(item.get("traits") or [])
         if traits:
@@ -735,6 +734,12 @@ class Interactives:
         if await self._state.is_opted_out(chat_id):
             return plan
         canary = self.canary_ok(user_id)
+        if canary:
+            # Эффекты вещей (59.3/59.6): хмель, старый фотоаппарат — пока
+            # действуют, текст уходит в system Альфреда каждый ход гостя.
+            effects = await self._effects_note(user_id)
+            if effects:
+                plan.note = f"{effects}\n\n{plan.note}" if plan.note else effects
         base_note = plan.note
         if canary:
             # Альфред мог вернуться в кабинет, пока гость молчал (59.1).
@@ -791,6 +796,46 @@ class Interactives:
                 plan.scenario = offered.id
                 plan.offered = True
         return plan
+
+    # --- Этап 59.3/59.6: эффекты вещей (общий механизм «Применение», 49.4) ---
+
+    async def _effects_note(self, user_id: int) -> str | None:
+        """Скрытая заметка Альфреду о действующих эффектах гостя
+        (``user_effect:<ключ>:<гость>``, items.EFFECTS). Срок вышел — эффект
+        снимается, и Альфред один раз получает заметку о конце (хмель прошёл).
+        Только канарейкам: вызывающий проверяет ``canary_ok``."""
+        now = self._now()
+        parts: list[str] = []
+        for effect in items_mod.EFFECTS.values():
+            state = await self._state.timed_effect(effect.key, user_id, now)
+            if state == EFFECT_ACTIVE:
+                note = ""
+                if effect.item_type:
+                    owned = await self._store.items_of(user_id, effect.item_type)
+                    note = (owned[0].get("note") or "").rstrip(". ") if owned else ""
+                parts.append(effect.text.format(note=f" ({note})" if note else ""))
+            elif state == EFFECT_EXPIRED:
+                await self._state.clear_effect(effect.key, user_id)
+                if effect.ended:
+                    parts.append(effect.ended)
+        return "\n".join(parts) or None
+
+    async def camera_on(self, user_id: int | None) -> bool:
+        """Снимает ли Альфред для гостя старым фотоаппаратом (59.6). Эффект
+        действует только пока гость в канареечном списке."""
+        if not self.canary_ok(user_id):
+            return False
+        return (
+            await self._state.timed_effect("camera", int(user_id or 0), self._now())
+            == EFFECT_ACTIVE
+        )
+
+    async def photo_size(self, user_id: int | None) -> int | None:
+        """Размер снимков Альфреда для гостя: ``items.CAMERA_PHOTO_PX`` со
+        старым фотоаппаратом, иначе None — службе llm достаётся прежний
+        (``imagegen_size``). Все снимки гостя (кабинет, подвал, катакомбы,
+        сцены, take_photo, селфи) берут размер отсюда."""
+        return items_mod.CAMERA_PHOTO_PX if await self.camera_on(user_id) else None
 
     async def _spontaneous(
         self,
@@ -898,6 +943,8 @@ class Interactives:
             # Где Альфред — Ведущему (cellar.extra_input).
             run.world["here"] = cab.canon.name_ru if isinstance(cab, Room) else "кабинет"
         decision = await self._ask_director(scenario, run, cab)
+        # Ведущий придумал приметы найденной вещи (59.3/59.6) — дописываем.
+        await self._apply_found_item(run, decision)
         stage_before, finale_before = run.stage, run.finale
         if decision is not None and decision.cabinet_add:
             # Перечитываем перед записью: снимок в фоне мог дописать своё.
@@ -970,6 +1017,10 @@ class Interactives:
             await self._end_scene_in_room(run)
             await self._go_home(user_id, announce=True)
             return
+        for stage, kind_type in scenario.stage_items:
+            if stage_before < stage <= run.stage:
+                # Вошёл в подвал — бутылка вина теперь вещь гостя (59.3).
+                await self._give_found_item(run, items_mod.KINDS[kind_type], origin="stage")
         if scenario.stage_places and run.stage != stage_before:
             await self._move_to(user_id, scenario.stage_places[min(run.stage, scenario.last_stage)])
         elif (
@@ -988,6 +1039,64 @@ class Interactives:
         elif run.finale and finale_before and scenario.finish_after_finale:
             run.status = STATUS_DONE
             await self._end_scene_in_room(run)
+
+    # --- вещи, найденные в сцене (Этап 59.3 вино, 59.6 фотоаппарат) ---
+
+    async def _create_found_item(
+        self, user_id: int, kind: items_mod.ItemKind, origin: str
+    ) -> dict[str, Any] | None:
+        """Завести гостю вещь вида ``kind`` с запасными приметами и заметкой
+        (Ведущий потом заменит их своими, ``_apply_found_item``). Такая вещь
+        у гостя уже есть (повторная сцена, сброс) — ничего не заводим."""
+        if await self._store.items_of(user_id, kind.type):
+            return None
+        pool = list(kind.fallback_traits)
+        traits: list[str] = []
+        for _ in range(min(2, len(pool))):
+            pick = self._choose(tuple(pool))
+            pool.remove(pick)
+            traits.append(pick)
+        note = self._choose(kind.fallback_notes) if kind.fallback_notes else None
+        item_id = await self._store.add_item(
+            type=kind.type,
+            owner_user_id=user_id,
+            traits=traits,
+            image_id=None,
+            origin=origin,
+            now=self._now(),
+            note=note,
+        )
+        log.info(
+            "interactives: гостю %s выдана вещь %s (#%s, %s)", user_id, kind.type, item_id, origin
+        )
+        return await self._store.item_by_id(item_id)
+
+    @staticmethod
+    def _ask_found_item(run: Run, item: dict[str, Any], kind: items_mod.ItemKind) -> None:
+        """Ведущему на следующем вызове — придумать вещи приметы и заметку
+        (director._found_item_block)."""
+        run.world["found_item"] = {"id": int(item["id"]), "name": kind.name, "ask": kind.found_ask}
+
+    async def _give_found_item(self, run: Run, kind: items_mod.ItemKind, *, origin: str) -> None:
+        item = await self._create_found_item(run.user_id, kind, origin)
+        if item is not None:
+            self._ask_found_item(run, item, kind)
+
+    async def _apply_found_item(self, run: Run, decision: DirectorDecision | None) -> None:
+        """Ведущий ответил на ``found_item``: его приметы и заметка заменяют
+        запасные. Не ответил — остаются запасные; просьба снимается в любом
+        случае (одна попытка на вызов)."""
+        found = run.world.pop("found_item", None)
+        if not isinstance(found, dict) or decision is None or decision.found_item is None:
+            return
+        item = await self._store.item_by_id(int(found.get("id") or 0))
+        if item is None or int(item["owner_user_id"]) != run.user_id:
+            return
+        await self._store.update_item(
+            int(item["id"]),
+            traits=decision.found_item["traits"] or None,
+            note=decision.found_item["note"],
+        )
 
     async def _apply_move(self, scenario: Scenario, run: Run, move: dict[str, str]) -> None:
         """Перенос Альфреда по слову Ведущего: во временную комнату (канон
@@ -1252,11 +1361,28 @@ class Interactives:
             searched: list[str] = entry.setdefault("searched", [])
         else:
             searched = await places.load_searched(self._store, user_id, canon.id)
-        result = places.search_room(canon, where, searched, rng=self._rng, choose=self._choose)
+        have = frozenset(it["type"] for it in await self._store.items_of(user_id))
+        result = places.search_room(
+            canon, where, searched, rng=self._rng, choose=self._choose, have_items=have
+        )
         if not temp:
             await places.save_searched(self._store, user_id, canon.id, searched)
+        found_kind = items_mod.KINDS.get(result.item or "")
+        found_item = (
+            await self._create_found_item(user_id, found_kind, f"find:{canon.id}")
+            if found_kind is not None
+            else None
+        )
         if run is None:
-            return places.TOOL_SEARCH_FREE.format(where=where, found=result.text)
+            found = result.text
+            if found_kind is not None and found_item is not None:
+                # Ведущего нет — заметку (производитель, модель) даёт запасной
+                # список вида.
+                note = (found_item.get("note") or "").rstrip(". ")
+                found += places.SEARCH_ITEM_TAKEN.format(
+                    name=found_kind.name, note=f" ({note})" if note else ""
+                )
+            return places.TOOL_SEARCH_FREE.format(where=where, found=found)
         hunting = (
             run.scenario == cellar.SCENARIO_ID
             and run.stage == cellar.STAGE_KEY_HUNT
@@ -1270,6 +1396,13 @@ class Interactives:
         run.world["search_outcome"] = cellar.search_outcome_text(
             where, result.kind, result.text, key=key, hunting=hunting
         )
+        if found_kind is not None and found_item is not None and not key:
+            # Находка с вещью: итог для Ведущего — что найдено, а приметы и
+            # заметку вещи он придумает в ответе (found_item).
+            run.world["search_outcome"] = places.SEARCH_ITEM_DIRECTOR.format(
+                where=where, text=result.text, name=found_kind.name
+            )
+            self._ask_found_item(run, found_item, found_kind)
         await self._state.save_run(run)
         return places.TOOL_SEARCH_SCENE.format(where=where)
 
@@ -1342,7 +1475,7 @@ class Interactives:
         # запоминается (план 59.1): повторного показа нет.
         if cab.features and not isinstance(cab, Room):
             shot = await self._item_shot(chat_id, user_id, "", draw=False)
-            reuse_key = photo_state_key(cab, outside, shot)
+            reuse_key = photo_state_key(cab, outside, shot, await self.photo_size(user_id))
         if not selfie and not focus and not happening and not expect and reuse_key in cab.photos:
             image = await self._store.image_by_id(cab.photos[reuse_key])
             # Тот же кадр в тот же чат второй раз — дубль: просят снова —
@@ -1659,16 +1792,20 @@ class Interactives:
                 if cab.add(list(new)):
                     await cabinet_mod.save(self._store, cab)
             description = portrait_description(cab, outside)
+            portrait_request: dict[str, Any] = {
+                "description": description,
+                "mode": "free",
+                "chat_id": chat_id,
+                "negative_extra": cabinet_mod.PHOTO_NEGATIVE_EN,
+                "loras": [list(cabinet_mod.ALFRED_LORA)],
+                "light": outside.en(),
+            }
+            px = await self.photo_size(user_id)  # старый фотоаппарат (59.6)
+            if px:
+                portrait_request["size"] = px
             result = await node_link.command(
                 image_tools.ACTION_GENERATE_IMAGE,
-                {
-                    "description": description,
-                    "mode": "free",
-                    "chat_id": chat_id,
-                    "negative_extra": cabinet_mod.PHOTO_NEGATIVE_EN,
-                    "loras": [list(cabinet_mod.ALFRED_LORA)],
-                    "light": outside.en(),
-                },
+                portrait_request,
                 dst=dst,
                 timeout=cfg.imagegen_request_timeout_s,
             )
@@ -1829,6 +1966,10 @@ class Interactives:
             "expect": list(expect or []),
             "negative_extra": cabinet_mod.PHOTO_NEGATIVE_EN,
         }
+        # Старый фотоаппарат (59.6): снимок крупнее прежних 64 px.
+        px = await self.photo_size(user_id)
+        if px:
+            request["size"] = px
         # Пересъёмка после промаха: то, чего не было на прошлом снимке,
         # промптер ставит главным (llm/image_prompt.py, emphasize).
         emphasize = retake_emphasis(await self._last_photo(chat_id), list(expect or []))
@@ -1891,7 +2032,7 @@ class Interactives:
         inspection = result.get("inspect") if isinstance(result.get("inspect"), dict) else None
         seen = str(inspection.get("description") or "") if inspection else ""
         missing = [m for m in (inspection or {}).get("missing") or [] if isinstance(m, str)]
-        state = photo_state_key(cab, outside, shot)
+        state = photo_state_key(cab, outside, shot, px)
         image_id = await self._store.add_image(
             chat_id=chat_id,
             author=None,
@@ -1978,7 +2119,7 @@ class Interactives:
             return True
         if not focus and not happening and not selfie and not alfred and not isinstance(cab, Room):
             cab = await cabinet_mod.load(self._store, user_id)
-            cab.remember_photo(photo_state_key(cab, outside, shot), image_id)
+            cab.remember_photo(photo_state_key(cab, outside, shot, px), image_id)
             await cabinet_mod.save(self._store, cab)
         return True
 
@@ -2150,6 +2291,9 @@ class Interactives:
                 # Мимика — главным: без этого промптер выкинет её ради обстановки.
                 "emphasize": [e for e in (face or action,) if e],
             }
+            px = await self.photo_size(user_id)  # старый фотоаппарат (59.6)
+            if px:
+                request["size"] = px
             loras: list[list[Any]] = [list(cabinet_mod.ALFRED_LORA)]
             preset = MOOD_PRESETS.get(mood or "")
             if preset is not None:
@@ -2742,7 +2886,7 @@ class Interactives:
         kind = items_mod.KINDS.get(item["type"])
         if kind is None:
             return False
-        installed = not await self.speech_clear(user_id)
+        installed = await self.item_place(user_id, item) == items_mod.PLACE_DESK
         caption = item_caption(kind, item, installed)
         markup = item_keyboard(kind, int(item["id"]))
         image = await self._store.image_by_id(int(item["image_id"])) if item["image_id"] else None
@@ -2783,13 +2927,13 @@ class Interactives:
         if chat_id is None or user_id is None:
             return radio.TOOL_ITEMS_UNAVAILABLE
         await self._owned_item(user_id, items_mod.RADIO)  # ленивая выдача
-        owned = [it for it in await self._store.items_of(user_id) if it["type"] in items_mod.KINDS]
+        owned = await self._owned_items(user_id)
         if not owned:
             return radio.TOOL_ITEMS_NONE
         lines = await self.manor_lines(user_id, owned)
         if not show.strip():
             return radio.TOOL_ITEMS_LIST.format(lines=lines)
-        kind = items_mod.find_kind(show)
+        kind = items_mod.find_kind(show, self._visible_kinds(user_id))
         chosen = [it for it in owned if kind is not None and it["type"] == kind.type]
         if not chosen:
             return radio.TOOL_ITEMS_UNKNOWN.format(lines=lines)
@@ -2822,11 +2966,13 @@ class Interactives:
             lines.append(
                 radio.TOOL_ITEMS_LINE.format(
                     name=kind.name,
-                    where=items_mod.PLACE_RU.get(place, place),
+                    where=kind.where_ru(place),
                     traits=radio.TOOL_ITEMS_TRAITS.format(traits="; ".join(traits))
                     if traits
                     else "",
-                    fault=radio.TOOL_ITEMS_FAULT.format(fault=note) if note else "",
+                    fault=(kind.note_tool or radio.TOOL_ITEMS_FAULT).format(fault=note)
+                    if note
+                    else "",
                     actions=actions or radio.TOOL_ITEMS_NO_ACTIONS,
                 )
             )
@@ -2841,11 +2987,11 @@ class Interactives:
         if chat_id is None or user_id is None:
             return radio.TOOL_ACTION_UNAVAILABLE
         await self._owned_item(user_id, items_mod.RADIO)  # ленивая выдача
-        owned = [it for it in await self._store.items_of(user_id) if it["type"] in items_mod.KINDS]
+        owned = await self._owned_items(user_id)
         if not owned:
             return radio.TOOL_ITEMS_NONE
         lines = await self.manor_lines(user_id, owned)
-        kind = items_mod.find_kind(item)
+        kind = items_mod.find_kind(item, self._visible_kinds(user_id))
         chosen = next((it for it in owned if kind is not None and it["type"] == kind.type), None)
         if chosen is None or kind is None:
             return radio.TOOL_ITEMS_UNKNOWN.format(lines=lines)
@@ -2856,7 +3002,7 @@ class Interactives:
             return radio.TOOL_PINNED
         place = await self.item_place(user_id, chosen)
         if act not in kind.available(place):
-            return radio.TOOL_ACTION_ALREADY.format(where=items_mod.PLACE_RU.get(place, place))
+            return radio.TOOL_ACTION_ALREADY.format(where=kind.where_ru(place))
         queued = self._queued.setdefault(chat_id, _Queued())
         queued.user_id = user_id
         if (int(chosen["id"]), act.code) not in queued.items:
@@ -2865,15 +3011,30 @@ class Interactives:
 
     async def item_place(self, user_id: int, item: dict[str, Any]) -> str:
         """Где вещь. У радио правда — речь Альфреда: старый передатчик стоит,
-        пока картавость не снята (speech_clear), иначе он в чулане."""
+        пока картавость не снята (speech_clear), иначе он в чулане. Старый
+        фотоаппарат «в деле» (PLACE_DESK), пока Альфред снимает им (эффект
+        camera, 59.6); вино до распития — в чулане (PLACE_STOREROOM)."""
         if item["type"] == items_mod.RADIO_TYPE and not await self.speech_clear(user_id):
             return items_mod.PLACE_DESK
+        if item["type"] == items_mod.CAMERA_TYPE and await self.camera_on(user_id):
+            return items_mod.PLACE_DESK
         return items_mod.PLACE_STOREROOM
+
+    def _visible_kinds(self, user_id: int | None) -> list[items_mod.ItemKind]:
+        """Виды вещей, что существуют для гостя: канареечные — только
+        канарейкам (59.C)."""
+        canary = self.canary_ok(user_id)
+        return [k for k in items_mod.KINDS.values() if canary or not k.canary]
+
+    async def _owned_items(self, user_id: int) -> list[dict[str, Any]]:
+        """Вещи гостя, которые ему видны (опись, тулы, карточки)."""
+        visible = {k.type for k in self._visible_kinds(user_id)}
+        return [it for it in await self._store.items_of(user_id) if it["type"] in visible]
 
     async def inventory(self, user_id: int) -> tuple[str, InlineKeyboardMarkup | None]:
         """Опись вещей гостя (/items): текст и кнопки «принести карточку»."""
         await self._owned_item(user_id, items_mod.RADIO)  # ленивая выдача
-        owned = [it for it in await self._store.items_of(user_id) if it["type"] in items_mod.KINDS]
+        owned = await self._owned_items(user_id)
         entries = [
             (items_mod.KINDS[it["type"]], it, await self.item_place(user_id, it)) for it in owned
         ]
@@ -2960,6 +3121,19 @@ class Interactives:
         if item is None or int(item["owner_user_id"]) != user_id:
             return radio.ITEM_NOT_YOURS, None, None
         kind = items_mod.KINDS.get(item["type"])
+        if kind is not None and kind.canary and not self.canary_ok(user_id):
+            return radio.ITEM_NOT_YOURS, None, None  # канареечная вещь (59.C)
+        if item.get("status") == "consumed" and kind is not None:
+            # Старая карточка израсходованной вещи (бутылка уже распита).
+            if button.startswith(ITEM_FROM_INVENTORY):
+                text, markup = await self.inventory(user_id)
+                return kind.consumed_text or "Уже нет.", markup or _NO_BUTTONS, text
+            await self._forget_buttons(chat_id, message_id)
+            return (
+                kind.consumed_text or "Уже нет.",
+                _NO_BUTTONS,
+                item_caption(kind, item, False) if kind.consumed_text else None,
+            )
         if button == ITEM_BTN_CARD and kind is not None:
             shown = await self._show_card(chat_id, user_id, item, message_thread_id)
             return (radio.ITEM_CARD_SHOWN if shown else radio.ITEM_CARD_DRAWING), None, None
@@ -3011,9 +3185,16 @@ class Interactives:
                     data=None,
                     now=self._now(),
                 )
+            if action.consumable:
+                # «Применение» (49.4): вещь израсходована — из описи и мест
+                # она пропадает, запись и журнал остаются.
+                await self._store.consume_item(item_id)
+                item["status"] = "consumed"
             if action.directive:
                 where = await self._where(chat_id, message_id, message_thread_id)
                 await self._speak(chat_id, action.directive, where)
+            if action.snapshot:
+                await self._action_selfie(chat_id, user_id, action, message_thread_id)
             answer = action.done
             place = await self.item_place(user_id, item)
         if origin == ITEM_FROM_FORM:
@@ -3022,7 +3203,33 @@ class Interactives:
                 _NO_BUTTONS,
                 radio.ITEM_FORM_DONE.format(form=action.form, confirm=action.confirm),
             )
+        if item.get("status") == "consumed" and origin != ITEM_FROM_INVENTORY:
+            # Бутылка распита: карточка остаётся подписью без кнопок.
+            return answer, _NO_BUTTONS, item_caption(kind, item, False)
         return (answer, *await self._item_view(user_id, kind, item, origin, place))
+
+    async def _action_selfie(
+        self,
+        chat_id: int,
+        user_id: int,
+        action: items_mod.ItemAction,
+        message_thread_id: int | None,
+    ) -> None:
+        """Снимок Альфреда по действию вещи (``ItemAction.snapshot``, 59.3:
+        с бокалом вина). Best-effort: занято или нет связи — без снимка."""
+        started = await self._start_photo(
+            chat_id,
+            user_id,
+            focus=action.snapshot,
+            caption=action.snapshot_caption or cabinet_mod.SELFIE_CAPTION,
+            happening=None,
+            outside=await self._transylvania.outside(self._now()),
+            message_thread_id=message_thread_id,
+            trigger_message_id=None,
+            selfie=True,
+        )
+        if not started:
+            log.info("interactives: снимок по действию %s не начат (chat=%s)", action.name, chat_id)
 
     async def _item_view(
         self,
@@ -3041,7 +3248,25 @@ class Interactives:
 
     # Эффекты действий вещей (ItemAction.effect → метод). Новый рычаг —
     # новый метод здесь и действие в данных вида (items.py).
-    _ITEM_EFFECTS = {"radio_desk": "_effect_radio_desk"}
+    _ITEM_EFFECTS = {"radio_desk": "_effect_radio_desk", "user_effect": "_effect_user_effect"}
+
+    async def _effect_user_effect(
+        self, chat_id: int, user_id: int, item: dict[str, Any], action: items_mod.ItemAction
+    ) -> None:
+        """Общий механизм «Применение» (49.4, первым применением — вино 59.3):
+        ``action.arg`` — ключ эффекта из ``items.EFFECTS``; с «-» впереди
+        эффект снимается (вернуть прежний фотоаппарат). Эффект — запись
+        ``user_effect:<ключ>:<гость>`` со сроком (``expires_at``: хмель — 3 ч,
+        фотоаппарат — пока не вернут), его текст каждый ход гостя уходит
+        в system Альфреда (``_effects_note``)."""
+        if action.arg.startswith("-"):
+            await self._state.clear_effect(action.arg[1:], user_id)
+            return
+        effect = items_mod.EFFECTS[action.arg]
+        expires = (
+            self._now() + timedelta(hours=effect.hours) if effect.hours is not None else None
+        )
+        await self._state.set_timed_effect(effect.key, user_id, expires)
 
     async def _effect_radio_desk(
         self, chat_id: int, user_id: int, item: dict[str, Any], action: items_mod.ItemAction
@@ -3099,25 +3324,38 @@ class Interactives:
         return await self._state.is_opted_out(chat_id)
 
 
-def photo_state_key(cab: Cabinet, outside: Outside, shot: _ItemShot | None) -> str:
+def photo_state_key(
+    cab: Cabinet, outside: Outside, shot: _ItemShot | None, size: int | None = None
+) -> str:
     """Ключ повторного показа общего вида: обстановка и свет, а если на стол
-    вставляется предмет — ещё и версия его облика (Этап 49.3)."""
+    вставляется предмет — ещё и версия его облика (Этап 49.3). ``size`` —
+    снимок другого размера (старый фотоаппарат, 59.6) не подменяется прежним
+    64-пиксельным."""
     key = cab.state_key(outside.key)
     if shot is not None and shot.place == "desk":
         key += f"#{shot.tag}"
+    if size:
+        key += f"#px{size}"
     return key
 
 
 def item_caption(kind: items_mod.ItemKind, item: dict[str, Any], installed: bool) -> str:
+    if item.get("status") == "consumed" and kind.consumed_text:
+        return f"<b>{html.escape(kind.name)}</b>\n{kind.consumed_text}"
     traits = kind.traits_ru(item.get("traits") or [])
     note = item.get("note")
-    return radio.ITEM_CARD_CAPTION.format(
+    place = items_mod.PLACE_DESK if installed else items_mod.PLACE_STOREROOM
+    return (kind.card_caption or radio.ITEM_CARD_CAPTION).format(
         name=html.escape(kind.name),
         traits=radio.ITEM_CARD_TRAITS.format(traits=html.escape("; ".join(traits)))
         if traits
         else "",
-        fault=radio.ITEM_CARD_FAULT.format(fault=html.escape(note.rstrip(". "))) if note else "",
-        where=radio.ITEM_CARD_INSTALLED if installed else radio.ITEM_CARD_STORED,
+        fault=(kind.note_card or radio.ITEM_CARD_FAULT).format(
+            fault=html.escape(note.rstrip(". "))
+        )
+        if note
+        else "",
+        where=kind.card_where(place),
     )
 
 
