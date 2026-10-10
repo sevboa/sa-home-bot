@@ -22,6 +22,13 @@
 («исправить проблему с коммуникацией?») с «Да»/«Нет», без намёка на игру.
 «Да» — сцена стартует; «Нет» — запрет интерактивов в этой переписке
 (снимается скрытой командой /interactives); без ответа час — кулдаун.
+Этап 59 (канарейка, решение владельца 2026-10-10): в REGISTRY несколько
+сценариев — радио и «Стук снизу» (cellar.py). Канареечные (``Scenario.canary``)
+существуют только для гостей из ``llm.interactives_canary_user_ids``
+(``canary_ok``/``scenarios_for``); для остальных ход идёт ровно как до этапа.
+Альфред стоит не только в кабинете: ``alfred_at`` и комнаты — places.py, обыск
+— тул ``search``, спонтанный триггер — ``_spontaneous``.
+
 Сцены — только в личке: в общем чате подсказки сцены сбивали бы Альфреда
 в разговоре с остальными. Эффект и
 завершённость — на гостя глобально (base.py), так что переключатель после
@@ -48,8 +55,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sa_home_bot.bot import image_tools
 from sa_home_bot.bot.interactives import cabinet as cabinet_mod
+from sa_home_bot.bot.interactives import cellar, places, radio
 from sa_home_bot.bot.interactives import items as items_mod
-from sa_home_bot.bot.interactives import radio
 from sa_home_bot.bot.interactives.base import (
     STATUS_ACTIVE,
     STATUS_DECLINED,
@@ -64,6 +71,7 @@ from sa_home_bot.bot.interactives.base import (
     parse_iso,
 )
 from sa_home_bot.bot.interactives.cabinet import Cabinet
+from sa_home_bot.bot.interactives.places import Room
 from sa_home_bot.bot.interactives.director import (
     ACTION_CHAT,
     ROLE_DIRECTOR,
@@ -82,7 +90,9 @@ from sa_home_bot.proto.messages import Address, ProtoError
 
 log = logging.getLogger(__name__)
 
-REGISTRY: dict[str, Scenario] = {radio.RADIO.id: radio.RADIO}
+# Порядок важен: радио первым (до Этапа 59 он был единственным), канареечные
+# сценарии после — гостю вне списка они недоступны (Interactives.scenarios_for).
+REGISTRY: dict[str, Scenario] = {radio.RADIO.id: radio.RADIO, cellar.CELLAR.id: cellar.CELLAR}
 
 LLM_NODE = "mycraft"
 LLM_SERVICE = "llm"
@@ -91,6 +101,10 @@ SET_SPEECH_TIMEOUT_S = 15.0
 
 OFFER_TTL = timedelta(hours=1)
 DECLINE_COOLDOWN = timedelta(hours=24)
+# Спонтанный триггер (59.2): обычных ходов подряд в чате до броска и интервал
+# между предложениями одного сценария.
+SPONTANEOUS_MIN_PLAIN_TURNS = 3
+SPONTANEOUS_GAP = timedelta(hours=24)
 NOTES_KEEP = 6
 NOTE_TRANSCRIPT_LINES = 8
 
@@ -243,10 +257,11 @@ def _keyboard(scenario: str, rows: list[list[tuple[str, str]]]) -> InlineKeyboar
 
 
 def offer_keyboard(scenario: str) -> InlineKeyboardMarkup:
+    yes, no = REGISTRY[scenario].offer_buttons if scenario in REGISTRY else ("Да", "Нет")
     return _keyboard(
         scenario,
         [
-            [("Да", BTN_PLAY), ("Нет", BTN_NEVER)],
+            [(yes, BTN_PLAY), (no, BTN_NEVER)],
         ],
     )
 
@@ -419,8 +434,12 @@ def apply_decision(
     if run.turns_on_stage < scenario.min_turns_on_stage:
         wanted = run.stage
     target = max(run.stage, min(wanted, run.stage + 1, scenario.last_stage))
+    if scenario.stage_gate is not None:
+        # Условия сюжета поверх решения Ведущего (Этап 59: ключ найден кодом).
+        target = max(run.stage, min(scenario.stage_gate(run, target), scenario.last_stage))
     if (
-        target == run.stage
+        scenario.auto_stages
+        and target == run.stage
         and run.stage < scenario.last_stage
         and run.turns_on_stage >= scenario.stage_soft_cap
     ):
@@ -434,7 +453,9 @@ def apply_decision(
             run.directive = None
 
     wants_finale = decision is not None and decision.finale
-    if allowed and (wants_finale or run.turns_on_stage >= scenario.stage_soft_cap):
+    if allowed and (
+        wants_finale or (scenario.auto_finale and run.turns_on_stage >= scenario.stage_soft_cap)
+    ):
         run.finale = True
         # Поломку можно задать заранее (вернуть гостю прежнюю после сброса
         # сцены) — тогда она главнее выдумки Ведущего, а его эффект, писанный
@@ -446,7 +467,7 @@ def apply_decision(
             else choose(scenario.fallback_faults)
         )
         if preset or not effect:
-            effect = f"Внутри радиостанции обнаруживается страшное: {run.finale_fault}."
+            effect = scenario.finale_effect.format(fault=run.finale_fault)
     run.last_effect = effect or run.last_effect
     return effect
 
@@ -565,6 +586,135 @@ class Interactives:
     def _pinned(self, chat_id: int) -> bool:
         return chat_id in self._settings.llm.speech_therapy_pinned_chat_ids
 
+    def canary_ok(self, user_id: int | None) -> bool:
+        """Канарейка Этапа 59 (решение владельца 2026-10-10): новое — только
+        гостям из ``llm.interactives_canary_user_ids``. Единая проверка для
+        сценариев (``Scenario.canary``), тулов search/walk, мест кроме
+        кабинета и вещей этапа. Для прочих гостей поведение бота прежнее."""
+        return user_id is not None and user_id in self._settings.llm.interactives_canary_user_ids
+
+    def scenarios_for(self, user_id: int | None) -> list[Scenario]:
+        """Сценарии, которые существуют для гостя: канареечные — только
+        канарейкам."""
+        canary = self.canary_ok(user_id)
+        return [s for s in REGISTRY.values() if canary or not s.canary]
+
+    # --- Этап 59.1: где Альфред ---
+
+    async def _scene_run(self, chat_id: int, user_id: int | None) -> Run | None:
+        """Идущая сцена гостя в чате: радио, а канарейке — и канареечные."""
+        for scenario in self.scenarios_for(user_id):
+            run = await self._state.load_run(chat_id, scenario.id)
+            if run is not None and run.status == STATUS_ACTIVE:
+                return run
+        return None
+
+    async def _room(self, chat_id: int, user_id: int) -> Cabinet:
+        """Комната, где сейчас Альфред. Гость вне списка канареек — всегда
+        кабинет, и ``alfred_at`` для него не читается."""
+        if not self.canary_ok(user_id):
+            return await cabinet_mod.load(self._store, user_id)
+        at = await places.get_at(self._store, user_id)
+        if at is None or at.in_cabinet:
+            return await cabinet_mod.load(self._store, user_id)
+        if at.place in places.PLACES:
+            return await places.load_room(self._store, user_id, at.place)
+        if places.is_temp(at.place):
+            for scenario in self.scenarios_for(user_id):
+                run = await self._state.load_run(chat_id, scenario.id)
+                if run is not None and run.world:
+                    room = places.temp_room(run.world, user_id, at.place)
+                    if room is not None:
+                        return room
+        # Место потеряно (временная комната ушла вместе со сценой, катакомбы
+        # ещё не подключены) — Альфред у себя.
+        return await cabinet_mod.load(self._store, user_id)
+
+    async def _save_room(self, room: Cabinet, run: Run | None = None) -> None:
+        """Записать комнату: кабинет и обычные комнаты — в хранилище, временную
+        — в мир сцены (``run`` сохранит вызывающий)."""
+        if isinstance(room, Room):
+            if room.temp:
+                if run is not None:
+                    places.store_temp_room(run.world, room)
+            else:
+                await places.save_room(self._store, room)
+        else:
+            await cabinet_mod.save(self._store, room)
+
+    async def _move_to(self, user_id: int, place: str) -> None:
+        """Альфред переходит в другое место (``alfred_at``)."""
+        at = places.new_at(place, self._now())
+        await places.set_at(self._store, user_id, at)
+
+    def _from_phrase(self, at: places.At) -> str:
+        canon = places.PLACES.get(at.place)
+        if canon is not None:
+            return canon.from_ru
+        return "оттуда, где искал ключ" if places.is_temp(at.place) else places.RETURN_FROM_UNKNOWN
+
+    async def _go_home(self, user_id: int, *, announce: bool) -> None:
+        """Альфред возвращается в кабинет. ``announce`` — следующим ходом он
+        сам скажет, что поднялся (before_turn → _tend_position)."""
+        at = await places.get_at(self._store, user_id)
+        if at is None or at.in_cabinet:
+            return
+        extra = {"returned_from": self._from_phrase(at)} if announce else {}
+        home = places.new_at(places.PLACE_CABINET, self._now(), **extra)
+        await places.set_at(self._store, user_id, home)
+
+    async def _tend_position(self, user_id: int) -> str | None:
+        """Начало хода канарейки: вернуть Альфреда в кабинет после простоя и
+        отдать заметку «ты вернулся» (или освежить метку «гость на связи»).
+        Идущая канареечная сцена при возврате уходит в idle: продолжится,
+        когда гость сам вернётся к теме."""
+        at = await places.get_at(self._store, user_id)
+        if at is None:
+            return None
+        now = self._now()
+        if at.returned_from:
+            await places.set_at(self._store, user_id, places.new_at(places.PLACE_CABINET, now))
+            return places.RETURN_NOTE.format(from_ru=at.returned_from)
+        if at.in_cabinet:
+            return None
+        if places.is_idle(at, now, self._settings.llm.interactives_return_idle_h):
+            for scenario in self.scenarios_for(user_id):
+                if not scenario.canary:
+                    continue
+                for chat_id in await self._canary_chats(user_id, scenario):
+                    run = await self._state.load_run(chat_id, scenario.id)
+                    if run is not None and run.status == STATUS_ACTIVE:
+                        run.status = STATUS_IDLE
+                        await self._state.save_run(run)
+            phrase = self._from_phrase(at)
+            await places.set_at(self._store, user_id, places.new_at(places.PLACE_CABINET, now))
+            return places.RETURN_NOTE.format(from_ru=phrase)
+        at.touched = iso(now)
+        await places.set_at(self._store, user_id, at)
+        return None
+
+    async def _canary_chats(self, user_id: int, scenario: Scenario) -> list[int]:
+        """Чаты гостя, где есть ход этого сценария (в личке chat_id совпадает с
+        user_id, но берём по данным)."""
+        chats = []
+        for key in await self._store.state_keys("interactive_run:"):
+            parts = key.split(":")
+            if len(parts) == 3 and parts[2] == scenario.id and parts[1].lstrip("-").isdigit():
+                run = await self._state.load_run(int(parts[1]), scenario.id)
+                if run is not None and run.user_id == user_id:
+                    chats.append(int(parts[1]))
+        return chats
+
+    async def _room_extra(self, room: Cabinet, user_id: int) -> str:
+        """Приписка к «Где ты» для комнат вне кабинета (канарейка)."""
+        if (
+            isinstance(room, Room)
+            and room.canon.id == places.PLACE_CELLAR
+            and await self._state.get_effect(places.EFFECT_CATACOMBS_OPEN, user_id) == "1"
+        ):
+            return places.CELLAR_HATCH_HINT
+        return ""
+
     # --- ход /ai ---
 
     async def before_turn(
@@ -584,29 +734,101 @@ class Interactives:
             return plan
         if await self._state.is_opted_out(chat_id):
             return plan
-        scenario = radio.RADIO
-        run = await self._state.load_run(chat_id, scenario.id)
-        run = await self._expire_offer(run)
-        triggered = bool(scenario.trigger_re.search(user_text))
+        canary = self.canary_ok(user_id)
+        base_note = plan.note
+        if canary:
+            # Альфред мог вернуться в кабинет, пока гость молчал (59.1).
+            back = await self._tend_position(user_id)
+            if back:
+                plan.note = f"{back}\n\n{plan.note}" if plan.note else back
+        loaded: list[tuple[Scenario, Run | None, bool]] = []
+        for scenario in self.scenarios_for(user_id):
+            run = await self._state.load_run(chat_id, scenario.id)
+            run = await self._expire_offer(run)
+            triggered = bool(scenario.trigger_re.search(user_text))
 
-        if run is not None and run.status == STATUS_IDLE and triggered:
-            run.status = STATUS_ACTIVE  # согласие уже было — продолжаем молча
-            await self._state.save_run(run)
-        if run is not None and run.status == STATUS_ACTIVE:
-            plan.scenario = scenario.id
-            plan.scene = True
-            cab = await cabinet_mod.load(self._store, user_id)
-            outside = await self._transylvania.outside(self._now())
-            place = f"{cab.describe_ru()} Сейчас {outside.ru()}."
-            scene_note = build_scene_note(scenario, run, place)
-            plan.note = f"{scene_note}\n\n{plan.note}" if plan.note else scene_note
-            plan.force_swap_form = run.finale and not run.finale_form_sent
-            return plan
-        if triggered and await self._may_offer(scenario, run, user_id):
-            await self._offer(scenario, run, chat_id, user_id, user_text)
-            plan.scenario = scenario.id
-            plan.offered = True
+            if run is not None and run.status == STATUS_IDLE and triggered:
+                run.status = STATUS_ACTIVE  # согласие уже было — продолжаем молча
+                await self._state.save_run(run)
+                if canary and scenario.stage_places:
+                    # Альфред вернулся к делу: туда, где сцена остановилась
+                    # (и заметка «поднялся в кабинет» этому ходу уже не нужна).
+                    stage = min(run.stage, scenario.last_stage)
+                    await self._move_to(user_id, scenario.stage_places[stage])
+                    plan.note = base_note
+            if run is not None and run.status == STATUS_ACTIVE:
+                plan.scenario = scenario.id
+                plan.scene = True
+                if canary and not scenario.canary:
+                    # Сцена радио идёт в кабинете, где бы Альфред ни был;
+                    # канареечные сцены место держат сами (stage_places,
+                    # move_to, walk катакомб).
+                    await self._go_home(user_id, announce=False)
+                cab = await self._room(chat_id, user_id)
+                if cab.windowed:
+                    outside = await self._transylvania.outside(self._now())
+                    place = f"{cab.describe_ru()} Сейчас {outside.ru()}."
+                else:
+                    place = cab.describe_ru()
+                scene_note = build_scene_note(scenario, run, place)
+                plan.note = f"{scene_note}\n\n{plan.note}" if plan.note else scene_note
+                plan.force_swap_form = (
+                    run.finale and not run.finale_form_sent and not scenario.finish_after_finale
+                )
+                return plan
+            loaded.append((scenario, run, triggered))
+        for scenario, run, triggered in loaded:
+            if triggered and await self._may_offer(scenario, run, user_id):
+                await self._offer(scenario, run, chat_id, user_id, user_text)
+                plan.scenario = scenario.id
+                plan.offered = True
+                if canary:
+                    await self._state.set_plain_turns(chat_id, 0)
+                return plan
+        if canary:
+            offered = await self._spontaneous(loaded, chat_id, user_id, user_text)
+            if offered is not None:
+                plan.scenario = offered.id
+                plan.offered = True
         return plan
+
+    async def _spontaneous(
+        self,
+        loaded: list[tuple[Scenario, Run | None, bool]],
+        chat_id: int,
+        user_id: int,
+        user_text: str,
+    ) -> Scenario | None:
+        """Спонтанный триггер (59.2, канарейка): Альфред сам слышит стук —
+        вне другой сцены, после ≥3 обычных ходов, с шансом на ход (конфиг),
+        не чаще раза в сутки. Считает обычные ходы чата и предлагает форму.
+        Возвращает предложенный сценарий или None."""
+        candidates = [(s, r) for s, r, _ in loaded if s.trigger == "spontaneous"]
+        if not candidates:
+            return None
+        if any(r is not None and r.status in (STATUS_OFFERED, STATUS_ACTIVE) for _, r, _ in loaded):
+            return None  # идёт другая сцена или висит чужая форма
+        plain = await self._state.plain_turns(chat_id)
+        if plain < SPONTANEOUS_MIN_PLAIN_TURNS:
+            await self._state.set_plain_turns(chat_id, plain + 1)
+            return None
+        now = self._now()
+        for scenario, run in candidates:
+            if await self._state.is_completed(scenario.id, user_id):
+                continue
+            if run is not None and run.status != STATUS_DECLINED:
+                continue  # пауза/idle продолжаются только по слову гостя
+            if not await self._may_offer(scenario, run, user_id):
+                continue
+            offered = parse_iso(run.offered_at) if run is not None else None
+            if offered is not None and offered + SPONTANEOUS_GAP > now:
+                continue  # не чаще раза в сутки
+            if self._rng() >= self._settings.llm.interactives_spontaneous_chance:
+                continue
+            await self._offer(scenario, run, chat_id, user_id, user_text)
+            await self._state.set_plain_turns(chat_id, 0)
+            return scenario
+        return None
 
     async def _may_offer(self, scenario: Scenario, run: Run | None, user_id: int) -> bool:
         if await self._state.is_completed(scenario.id, user_id):
@@ -671,21 +893,28 @@ class Interactives:
         run.log("Альфред", reply)
         # Прошлое событие Альфред уже пересказал этим ответом.
         run.pending_effect = None
-        cab = await cabinet_mod.load(self._store, run.user_id)
+        cab = await self._room(run.chat_id, run.user_id)
+        if scenario.canary:
+            # Где Альфред — Ведущему (cellar.extra_input).
+            run.world["here"] = cab.canon.name_ru if isinstance(cab, Room) else "кабинет"
         decision = await self._ask_director(scenario, run, cab)
         stage_before, finale_before = run.stage, run.finale
         if decision is not None and decision.cabinet_add:
             # Перечитываем перед записью: снимок в фоне мог дописать своё.
-            cab = await cabinet_mod.load(self._store, run.user_id)
+            cab = await self._room(run.chat_id, run.user_id)
             # Первые особенности (кабинет ещё пуст) — постоянные, прочие —
             # следы сцены.
             if cab.add(list(decision.cabinet_add), scene=bool(cab.features)):
-                await cabinet_mod.save(self._store, cab)
+                await self._save_room(cab, run)
         effect = apply_decision(scenario, run, decision, choose=self._choose)
         if effect:
             run.log("Событие", effect)
             run.pending_effect = effect
         key_moment = run.stage != stage_before or run.finale != finale_before
+        if scenario.canary:
+            await self._after_canary_turn(
+                scenario, run, decision, stage_before=stage_before, finale_before=finale_before
+            )
         kind = items_mod.KINDS.get(scenario.item_kind or "")
         if kind is not None and run.status == STATUS_ACTIVE:
             if run.item_seed is None:
@@ -694,6 +923,12 @@ class Interactives:
             if trait is not None:
                 log.info("interactives: у передатчика новая черта %r (chat=%s)", trait, run.chat_id)
         focus = scene_photo_focus(run, decision, key_moment=key_moment)
+        scene_caption = PHOTO_SCENE_CAPTION
+        if scenario.canary:
+            # Кадр рисует фоновая задача и читает комнату (в том числе
+            # временную, из мира сцены) из хранилища — сначала запись.
+            await self._state.save_run(run)
+            scene_caption = (await self._room(run.chat_id, run.user_id)).scene_caption
         if (
             focus is not None
             and run.status == STATUS_ACTIVE
@@ -703,7 +938,7 @@ class Interactives:
                 run.chat_id,
                 run.user_id,
                 focus=focus,
-                caption=PHOTO_SCENE_CAPTION,
+                caption=scene_caption,
                 happening=run.last_effect,
                 mood=run.mood,
                 alfred=decision.alfred if decision is not None else None,
@@ -716,6 +951,64 @@ class Interactives:
                 run.photo_turn = run.turns_total
         await self._state.save_run(run)
 
+    async def _after_canary_turn(
+        self,
+        scenario: Scenario,
+        run: Run,
+        decision: DirectorDecision | None,
+        *,
+        stage_before: int,
+        finale_before: bool,
+    ) -> None:
+        """Ход канареечной сцены после решения Ведущего (59.1/59.2): исход
+        обыска ушёл Ведущему, перенос Альфреда, финал и завершение. Всё это
+        — решения кода, Ведущий лишь предлагает (``move_to``, ``finale``)."""
+        user_id = run.user_id
+        run.world.pop("search_outcome", None)  # Ведущий его уже получил
+        if run.status == STATUS_IDLE:
+            # Гость ушёл в свою тему — Альфред поднимается и скажет об этом сам.
+            await self._end_scene_in_room(run)
+            await self._go_home(user_id, announce=True)
+            return
+        if scenario.stage_places and run.stage != stage_before:
+            await self._move_to(user_id, scenario.stage_places[min(run.stage, scenario.last_stage)])
+        elif (
+            decision is not None
+            and decision.move_to
+            and run.stage in scenario.move_stages
+            and not run.finale
+        ):
+            await self._apply_move(scenario, run, decision.move_to)
+        if run.finale and not finale_before:
+            # Финал наступил: сцена пройдена и открыто новое (флаги гостя),
+            # а завершится она на следующем ходу — Альфред успеет рассказать.
+            await self._state.mark_completed(scenario.id, user_id)
+            for flag in scenario.finale_flags:
+                await self._state.set_effect(flag, user_id, "1")
+        elif run.finale and finale_before and scenario.finish_after_finale:
+            run.status = STATUS_DONE
+            await self._end_scene_in_room(run)
+
+    async def _apply_move(self, scenario: Scenario, run: Run, move: dict[str, str]) -> None:
+        """Перенос Альфреда по слову Ведущего: во временную комнату (канон
+        придумал Ведущий, живёт в мире сцены) или к известному месту стадии."""
+        if "place" in move:
+            allowed = scenario.stage_places[min(run.stage, scenario.last_stage)]
+            if move["place"] in (allowed, places.PLACE_CABINET) and move["place"] in places.PLACES:
+                await self._move_to(run.user_id, move["place"])
+            return
+        spec = places.temp_spec(move)
+        if spec is None:
+            return
+        tid = places.put_temp_room(run.world, spec)
+        await self._move_to(run.user_id, tid)
+
+    async def _end_scene_in_room(self, run: Run) -> None:
+        """Следы сцены в комнате, где стоит Альфред, уходят вместе со сценой."""
+        room = await self._room(run.chat_id, run.user_id)
+        if room.end_scene():
+            await self._save_room(room, run)
+
     async def _ask_director(
         self, scenario: Scenario, run: Run, cab: Cabinet
     ) -> DirectorDecision | None:
@@ -723,6 +1016,9 @@ class Interactives:
         if node_link is None:
             return None
         outside = await self._transylvania.outside(self._now())
+        room = None
+        if isinstance(cab, Room):
+            room = (cab.canon.of_ru, cab.canon.in_ru)
         return await ask_director(
             node_link,
             Address(node=LLM_NODE, service=LLM_SERVICE),
@@ -731,8 +1027,11 @@ class Interactives:
             run,
             finale_allowed=finale_allowed(scenario, run),
             place=cab.describe_ru(),
-            outside=outside.ru(),
-            need_features=0 if cab.features else cabinet_mod.FIRST_FEATURES,
+            outside=outside.ru() if cab.windowed else None,
+            need_features=(
+                0 if cab.features or isinstance(cab, Room) else cabinet_mod.FIRST_FEATURES
+            ),
+            room=room,
         )
 
     # --- формы ---
@@ -929,6 +1228,51 @@ class Interactives:
             return radio.TOOL_OFFER
         return radio.TOOL_NOT_YET
 
+    # --- тул search (Этап 59.1) ---
+
+    async def tool_search(self, chat_id: int | None, user_id: int | None, where: str) -> str:
+        """Альфред порыскал в месте, где стоит. Что найдено, решает код по
+        таблице находок места (places.search_room); обысканное помечается.
+        В идущей сцене итог (а на поиске ключа — и сам ключ, cellar.roll_key)
+        уходит Ведущему, и Альфред узнаёт его следующим ходом; вне сцены
+        итог отдаётся сразу. Только канарейкам."""
+        if chat_id is None or user_id is None or not self.canary_ok(user_id):
+            return places.TOOL_SEARCH_UNAVAILABLE
+        where = " ".join(where.split())[: places.SEARCH_WHERE_MAX]
+        if not where:
+            return places.TOOL_SEARCH_NO_WHERE
+        room = await self._room(chat_id, user_id)
+        run = await self._scene_run(chat_id, user_id)
+        canon = room.canon if isinstance(room, Room) else places.CABINET_CANON
+        temp = isinstance(room, Room) and room.temp
+        if temp:
+            entry = ((run.world.get("rooms") or {}) if run is not None else {}).get(canon.id)
+            if entry is None:
+                return places.TOOL_SEARCH_UNAVAILABLE
+            searched: list[str] = entry.setdefault("searched", [])
+        else:
+            searched = await places.load_searched(self._store, user_id, canon.id)
+        result = places.search_room(canon, where, searched, rng=self._rng, choose=self._choose)
+        if not temp:
+            await places.save_searched(self._store, user_id, canon.id, searched)
+        if run is None:
+            return places.TOOL_SEARCH_FREE.format(where=where, found=result.text)
+        hunting = (
+            run.scenario == cellar.SCENARIO_ID
+            and run.stage == cellar.STAGE_KEY_HUNT
+            and not run.finale
+        )
+        key = False
+        if hunting and result.kind != places.SEARCH_KIND_REPEAT:
+            key = cellar.roll_key(run, self._rng)
+            if key:
+                await self._state.set_effect(places.EFFECT_CELLAR_UNLOCKED, user_id, "1")
+        run.world["search_outcome"] = cellar.search_outcome_text(
+            where, result.kind, result.text, key=key, hunting=hunting
+        )
+        await self._state.save_run(run)
+        return places.TOOL_SEARCH_SCENE.format(where=where)
+
     # --- тул take_photo: снимок кабинета (Этап 49.2) ---
 
     async def tool_take_photo(
@@ -960,16 +1304,22 @@ class Interactives:
             selfie, focus = True, ""
         elif not focus and cabinet_mod.SELFIE_FOCUS_RE.match(caption):
             selfie = True
+        # Где Альфред: кабинет, а канарейке — комната из alfred_at (59.1).
+        cab = await self._room(chat_id, user_id)
         # Модель не всегда заполняет focus/expect: «Вид из окна» только в
         # подписи давал общий вид кабинета, а меч без expect — несверенную
         # тарелку. Подпись о конкретном — это и есть focus, focus — то, что
         # должно выйти на снимке.
-        if GENERAL_VIEW_RE.match(focus):
+        if GENERAL_VIEW_RE.match(focus) or (focus and cab.is_general(focus)):
             focus = ""
         elif not focus and caption and not selfie and not GENERAL_VIEW_RE.match(caption):
             focus = caption
-        caption = caption or (cabinet_mod.SELFIE_CAPTION if selfie else PHOTO_CAPTION)
-        if not selfie and await self._wants_stored_item(user_id, f"{focus} {caption}"):
+        caption = caption or (cabinet_mod.SELFIE_CAPTION if selfie else cab.caption)
+        if (
+            not selfie
+            and not isinstance(cab, Room)
+            and await self._wants_stored_item(user_id, f"{focus} {caption}")
+        ):
             await self.tool_manor_items(
                 chat_id,
                 user_id,
@@ -981,15 +1331,16 @@ class Interactives:
         expect = photo_expect(args.get("expect")) or ([focus] if focus else [])
         now = self._now()
         outside = await self._transylvania.outside(now)
-        cab = await cabinet_mod.load(self._store, user_id)
-        run = await self._state.load_run(chat_id, radio.SCENARIO_ID)
-        in_scene = run is not None and run.status == STATUS_ACTIVE
+        run = await self._scene_run(chat_id, user_id)
+        in_scene = run is not None
         if not in_scene and cab.end_scene():
-            await cabinet_mod.save(self._store, cab)
-        happening = run.last_effect if in_scene else None
-        mood = run.mood if in_scene else None
+            await self._save_room(cab)
+        happening = run.last_effect if run is not None else None
+        mood = run.mood if run is not None else None
         reuse_key = None
-        if cab.features:
+        # Снимок комнаты вне кабинета каждый раз рисуется заново и не
+        # запоминается (план 59.1): повторного показа нет.
+        if cab.features and not isinstance(cab, Room):
             shot = await self._item_shot(chat_id, user_id, "", draw=False)
             reuse_key = photo_state_key(cab, outside, shot)
         if not selfie and not focus and not happening and not expect and reuse_key in cab.photos:
@@ -1053,9 +1404,8 @@ class Interactives:
             or chat_id in self._photo_join
         ):
             return cabinet_mod.TOOL_PHOTO_BUSY
-        cab = await cabinet_mod.load(self._store, user_id)
-        run = await self._state.load_run(chat_id, radio.SCENARIO_ID)
-        in_scene = run is not None and run.status == STATUS_ACTIVE
+        cab = await self._room(chat_id, user_id)
+        in_scene = await self._scene_run(chat_id, user_id) is not None
         self._photo_join[chat_id] = {
             "describe": await self._where_ru(cab, user_id, in_scene=in_scene, tools=False),
             "dialogue_id": dialogue_id,
@@ -1080,6 +1430,8 @@ class Interactives:
         стоит на столе (radio.RADIO_STATE_*). ``tools=False`` — для вызова
         без тулов (подпись к снимку): без подсказок «позови тул»."""
         where = cab.describe_ru()
+        if isinstance(cab, Room):
+            return where + await self._room_extra(cab, user_id)
         if in_scene or not await self._state.is_completed(radio.SCENARIO_ID, user_id):
             return where
         if await self.speech_clear(user_id):
@@ -1435,8 +1787,8 @@ class Interactives:
             focus = ""  # Ведущий тоже просит «общий план кабинета»
         dst = Address(node=LLM_NODE, service=LLM_SERVICE)
         cfg = self._settings.llm
-        cab = await cabinet_mod.load(self._store, user_id)
-        if not cab.features:
+        cab = await self._room(chat_id, user_id)
+        if not cab.features and not isinstance(cab, Room):
             new = await ask_features(
                 node_link,
                 dst,
@@ -1449,7 +1801,12 @@ class Interactives:
             if cab.add(list(new)):
                 await cabinet_mod.save(self._store, cab)
         # Себя — без вставки предмета пикселями: место в кадре занимает Альфред.
-        shot = None if selfie else await self._item_shot(chat_id, user_id, focus, draw=True)
+        # Радио стоит на столе кабинета — в других комнатах его в кадре нет.
+        shot = (
+            None
+            if selfie or isinstance(cab, Room)
+            else await self._item_shot(chat_id, user_id, focus, draw=True)
+        )
         if selfie:
             description, context = selfie_description(cab, outside, focus, happening), ""
         else:
@@ -1501,8 +1858,8 @@ class Interactives:
             and not window
             and bool(focus or (shot is not None and shot.place == "closeup"))
         )
-        request["light"] = outside.en(closeup=closeup)
-        if outside.light == PHASE_NIGHT and not closeup:
+        request["light"] = cab.light_en(outside, closeup=closeup)
+        if cab.windowed and outside.light == PHASE_NIGHT and not closeup:
             # Ночью свет, уже стоящий в промпте, переносится на второе место
             # (стенд 2026-10-10: ночь 86% против 75%); крупному плану вредит.
             request["light_move"] = True
@@ -1549,7 +1906,7 @@ class Interactives:
             purpose=PHOTO_PURPOSE,
             params=json.dumps(
                 {
-                    "location": cabinet_mod.LOCATION,
+                    "location": cab.place,
                     "user_id": user_id,
                     "state": state,
                     "focus": focus,
@@ -1582,7 +1939,7 @@ class Interactives:
                 chat_id,
                 user_id,
                 photo_line_directive(
-                    photo_subject(focus, selfie=selfie),
+                    cab.localize_ru(photo_subject(focus, selfie=selfie)) or cab.subject_ru,
                     seen or focus or cab.describe_ru(),
                     describe,
                     missing if seen else [],
@@ -1619,7 +1976,7 @@ class Interactives:
                 )
             # Промах — не общий вид кабинета: повторно его не показываем.
             return True
-        if not focus and not happening and not selfie and not alfred:
+        if not focus and not happening and not selfie and not alfred and not isinstance(cab, Room):
             cab = await cabinet_mod.load(self._store, user_id)
             cab.remember_photo(photo_state_key(cab, outside, shot), image_id)
             await cabinet_mod.save(self._store, cab)
@@ -1765,8 +2122,8 @@ class Interactives:
             self._photo_status[chat_id] = on_status
         try:
             await self._show_photo_status(chat_id, cabinet_mod.PHOTO_STATUS_AIMING)
-            cab = await cabinet_mod.load(self._store, user_id)
-            if not cab.features:
+            cab = await self._room(chat_id, user_id)
+            if not cab.features and not isinstance(cab, Room):
                 new = await ask_features(
                     node_link,
                     dst,
@@ -1778,10 +2135,9 @@ class Interactives:
                 )
                 if cab.add(list(new)):
                     await cabinet_mod.save(self._store, cab)
-            run = await self._state.load_run(chat_id, radio.SCENARIO_ID)
-            in_scene = run is not None and run.status == STATUS_ACTIVE
-            happening = run.last_effect if run is not None and in_scene else None
-            mood = run.mood if run is not None and in_scene else None
+            run = await self._scene_run(chat_id, user_id)
+            happening = run.last_effect if run is not None else None
+            mood = run.mood if run is not None else None
             face = cabinet_mod.SELFIE_EMOTION_FACE_EN[emotion]
             focus = "; ".join(p for p in (face, action) if p)
             description = selfie_description(cab, outside, focus, happening)
@@ -1801,7 +2157,7 @@ class Interactives:
                 request["model"] = model
                 loras.append([lora, weight])
             request["loras"] = loras
-            request["light"] = outside.en()
+            request["light"] = cab.light_en(outside)
             request["request_id"] = uuid.uuid4().hex
             phases = asyncio.create_task(
                 self._follow_photo_phases(node_link, dst, chat_id, request["request_id"])
@@ -1833,7 +2189,7 @@ class Interactives:
                 purpose=cabinet_mod.SELFIE_MOOD_PURPOSE,
                 params=json.dumps(
                     {
-                        "location": cabinet_mod.LOCATION,
+                        "location": cab.place,
                         "user_id": user_id,
                         "selfie": True,
                         "emotion": emotion,
@@ -2023,6 +2379,10 @@ class Interactives:
         Альфреда после кнопки уходит в тот же тред и тот же диалог (живой баг
         2026-09-28: без них ответ улетал в общий топик лички)."""
         scenario = REGISTRY[scenario_id]
+        if scenario.canary and not self.canary_ok(user_id):
+            # Канареечной формы у прочих гостей нет; нажать могут только
+            # подделкой callback_data.
+            return "Эта форма не для вас.", None, False
         run = await self._state.load_run(chat_id, scenario_id)
         where = await self._where(chat_id, message_id, message_thread_id)
         if button in (BTN_PLAY, BTN_LATER, BTN_NEVER):
@@ -2095,26 +2455,30 @@ class Interactives:
             return "Эта форма не для вас.", None, False
         if run.status != STATUS_OFFERED:
             return "Уже решено.", None, True
-        offer_text = REGISTRY[run.scenario].offer_text
+        scenario = REGISTRY[run.scenario]
+        offer_text = scenario.offer_text
         run = await self._expire_offer(run)
         if run is None or run.status != STATUS_OFFERED:
             return "Вопрос уже неактуален.", offer_text + OFFER_EXPIRED_SUFFIX, True
+        yes_suffix, no_suffix = (f"\n<i>— {label}</i>" for label in scenario.offer_buttons)
         if button == BTN_PLAY:
             run.status = STATUS_ACTIVE
             await self._state.save_run(run)
+            if scenario.start_place is not None:
+                # Согласие на сходить проверить: Альфред уже на месте (59.2).
+                await self._move_to(user_id, scenario.start_place)
             transcript = "\n".join(run.transcript[-NOTE_TRANSCRIPT_LINES:]) or "—"
-            await self._speak(
-                run.chat_id, radio.AFTER_AGREE_DIRECTIVE.format(transcript=transcript), where
-            )
-            return "Хорошо.", offer_text + OFFER_YES_SUFFIX, True
+            directive = scenario.after_agree or radio.AFTER_AGREE_DIRECTIVE
+            await self._speak(run.chat_id, directive.format(transcript=transcript), where)
+            return "Хорошо.", offer_text + yes_suffix, True
         # «Нет» — только пауза (DECLINE_COOLDOWN), не запрет насовсем: гость,
         # раз отказавшись, сам не знал про /interactives on (решение
         # пользователя 2026-10-02). Запрет — только командой /interactives off.
         # BTN_LATER — у форм, разосланных до v0.115.2 («Не сейчас»).
         run.status = STATUS_DECLINED
-        run.declined_until = iso(self._now() + DECLINE_COOLDOWN)
+        run.declined_until = iso(self._now() + (scenario.decline_cooldown or DECLINE_COOLDOWN))
         await self._state.save_run(run)
-        return "Хорошо.", offer_text + OFFER_NO_SUFFIX, True
+        return "Хорошо.", offer_text + no_suffix, True
 
     async def _set_clear(self, chat_id: int, user_id: int, clear: bool) -> None:
         """Источник правды — БД бота, пишется сразу. Служба llm — зеркало:
@@ -2686,6 +3050,46 @@ class Interactives:
         (speech_clear выключен); убрана — речь чистая."""
         await self._set_clear(chat_id, user_id, action.arg == "remove")
 
+    # --- отладка Этапа 59 (скрытые подкоманды /interactives, 59.C) ---
+    # Только канарейкам: прочим handlers/interactives.py отвечает прежним
+    # «Использование…». Здесь — сами действия.
+
+    DEBUG_USAGE = "Использование: /interactives cellar | reset cellar|catacombs|all | where"
+
+    async def debug_cellar(self, chat_id: int, user_id: int) -> str:
+        """``/interactives cellar`` — стук снизу прямо сейчас: без шанса,
+        кулдауна и счёта обычных ходов. Форма уходит сразу."""
+        if not self.canary_ok(user_id):
+            return self.DEBUG_USAGE
+        scenario = REGISTRY[cellar.SCENARIO_ID]
+        run = await self._state.load_run(chat_id, scenario.id)
+        if run is not None and run.status in (STATUS_OFFERED, STATUS_ACTIVE):
+            return "Подвал уже на ходу (форма висит или сцена идёт). Начать заново — reset cellar."
+        if await self._state.is_completed(scenario.id, user_id):
+            return "Подвал уже пройден. Начать заново — reset cellar."
+        await self._offer(scenario, run, chat_id, user_id, None)
+        await self.flush_forms(chat_id)
+        return "Стук отправлен."
+
+    async def debug_reset(self, chat_id: int, user_id: int, scope: str) -> str:
+        """``/interactives reset cellar|catacombs|all`` — стереть свой прогресс
+        Этапа 59. Кабинет не трогается."""
+        if not self.canary_ok(user_id):
+            return self.DEBUG_USAGE
+        if scope not in places.RESET_SCOPES:
+            return "Что стереть: reset cellar | catacombs | all"
+        removed = await places.reset_progress(self._store, user_id, scope, chat_id)
+        await self.dismiss_buttons(chat_id, user_id)
+        return f"Сброшено ({scope}): {len(removed)} запис." if removed else "Нечего сбрасывать."
+
+    async def debug_where(self, user_id: int) -> str:
+        """``/interactives where`` — сырое ``alfred_at`` (место, узел и
+        направление катакомб)."""
+        if not self.canary_ok(user_id):
+            return self.DEBUG_USAGE
+        raw = await self._store.get_state(places.at_key(user_id))
+        return raw or "alfred_at не задан: Альфред в кабинете."
+
     # --- запрет в переписке ---
 
     async def set_opted_out(self, chat_id: int, opted_out: bool) -> None:
@@ -2812,12 +3216,12 @@ def photo_description(
     # главного, а места ей даём, убрав особенности кабинета до одной.
     alfred_en = cabinet_mod.SCENE_ALFRED_EN.get(alfred or "")
     features = visible_features[-(1 if alfred_en else PHOTO_FEATURES_IN_FRAME) :]
-    light = outside.en(closeup=bool(focus))
+    light = cab.light_en(outside, closeup=bool(focus))
     if focus:
         # Крупный план — только предмет, комната и свет: особенности кабинета
         # в контексте промптер тащил в кадр (снимок картины с рунами и
         # туманом, живая находка 2026-09-30).
-        context = f"{cabinet_mod.CANON_EN}; {light}"
+        context = f"{cab.canon_en}; {light}"
         if happening:
             context += f"; just happened: {happening}"
         if alfred_en:
@@ -2834,7 +3238,7 @@ def photo_description(
         parts.append("Must be clearly visible: " + "; ".join(features) + ".")
     # Композицию «стол в нижней трети» под вставку дописывает служба llm
     # (item_paste.DESK_COMPOSITION) — промптер её пересказывал и терял.
-    parts.append(f"Room: {cabinet_mod.CANON_EN}.")
+    parts.append(f"Room: {cab.canon_en}.")
     parts.append(f"Light: {light}.")
     return " ".join(parts), ""
 
@@ -2861,7 +3265,7 @@ def selfie_description(
     if happening:
         subject += f" Just happened around him: {happening}."
     pose = bool(focus) and bool(cabinet_mod.SELFIE_POSE_RE.search(focus))
-    return portrait_description(cab, outside, subject=subject, pose=pose)
+    return portrait_description(cab, outside, subject=cab.localize_selfie(subject), pose=pose)
 
 
 def portrait_description(
@@ -2876,14 +3280,14 @@ def portrait_description(
     обстановка гостя. Особенностей — меньше, чем у снимка: место в 77
     токенах CLIP занимает Альфред. ``pose`` — селфи в ракурсе: голая
     комната без особенностей (cabinet.SELFIE_POSE_RE)."""
-    parts = [subject, f"Light: {outside.en()}."]
+    parts = [subject, f"Light: {cab.light_en(outside)}."]
     if pose:
-        parts.append(f"Room: {cabinet_mod.SELFIE_POSE_ROOM_EN}.")
+        parts.append(f"Room: {cab.pose_room_en}.")
         return " ".join(parts)
     features = cab.visible_features()[-1:]
     if features:
         parts.append("Also visible: " + "; ".join(features) + ".")
-    parts.append(f"Room: {cabinet_mod.CANON_EN}.")
+    parts.append(f"Room: {cab.canon_en}.")
     return " ".join(parts)
 
 

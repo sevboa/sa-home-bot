@@ -66,6 +66,7 @@ from sa_home_bot.bot import (
     vpn_nodes,
 )
 from sa_home_bot.bot.interactives import cabinet as interactive_cabinet
+from sa_home_bot.bot.interactives import places as interactive_places
 from sa_home_bot.bot.interactives import radio as interactive_radio
 from sa_home_bot.bot.monitor_state import parse_disk_summary, parse_health_state
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
@@ -350,6 +351,28 @@ class ToolKit:
 
     declarations: list[dict[str, Any]]
     handlers: dict[str, ToolHandler]
+
+
+# Тулы канарейки Этапа 59 (bot/interactives, 59.C): модель видит их только у
+# гостей из llm.interactives_canary_user_ids. Остальным декларации не
+# уезжают в контекст вовсе — поведение Альфреда прежнее.
+CANARY_TOOLS = frozenset({"search"})
+
+
+def for_context(toolkit: ToolKit, ctx: ToolContext) -> ToolKit:
+    """Комплект тулов под конкретный ход: канареечные — только канарейкам.
+    Без канареечных тулов в комплекте (или без ограничений) — тот же объект."""
+    if not CANARY_TOOLS & toolkit.handlers.keys():
+        return toolkit
+    canary_ok = getattr(ctx.interactives, "canary_ok", None)
+    if canary_ok is not None and canary_ok(ctx.user_id):
+        return toolkit
+    return ToolKit(
+        declarations=[
+            d for d in toolkit.declarations if d["function"]["name"] not in CANARY_TOOLS
+        ],
+        handlers={k: v for k, v in toolkit.handlers.items() if k not in CANARY_TOOLS},
+    )
 
 
 def tools_for(subscription: Subscription | None) -> ToolKit:
@@ -1393,6 +1416,18 @@ async def tool_take_photo(ctx: ToolContext, args: dict[str, Any]) -> str:
     if result == interactive_cabinet.TOOL_PHOTO_STARTED:
         ctx.end_turn = True
     return result
+
+
+async def tool_search(ctx: ToolContext, args: dict[str, Any]) -> str:
+    """Порыскать в месте, где стоит Альфред (Этап 59.1, только канарейкам):
+    итог решает код по таблице находок места — Interactives.tool_search."""
+    canary_ok = getattr(ctx.interactives, "canary_ok", None)
+    if canary_ok is None or not canary_ok(ctx.user_id):
+        return interactive_places.TOOL_SEARCH_UNAVAILABLE
+    where = args.get("where")
+    return await ctx.interactives.tool_search(
+        ctx.chat_id, ctx.user_id, where if isinstance(where, str) else ""
+    )
 
 
 async def tool_generate_image(ctx: ToolContext, args: dict[str, Any]) -> str:
@@ -4584,6 +4619,13 @@ TOOLS: tuple[ToolSpec, ...] = (
         name="take_photo",
         handler=tool_take_photo,
         declaration=interactive_cabinet.TAKE_PHOTO_DECLARATION,
+    ),
+    # Обыск места (Этап 59.1) — канарейка: ToolSpec без requires, но в комплект
+    # попадает только у гостей из списка (for_context).
+    ToolSpec(
+        name="search",
+        handler=tool_search,
+        declaration=interactive_places.SEARCH_DECLARATION,
     ),
     # Вещи поместья (Этап 49.3) — без requires: опись только тех вещей,
     # что выданы сценками этому собеседнику.
