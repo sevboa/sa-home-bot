@@ -3344,7 +3344,10 @@ class Interactives(underground.UndergroundMixin):
             return self.DEBUG_USAGE
         if scope not in places.RESET_SCOPES:
             return "Что стереть: reset cellar | catacombs | all"
-        removed = await places.reset_progress(self._store, user_id, scope, chat_id)
+        # Под замком кадров катакомб: кадр, дорисованный во время сброса,
+        # иначе успевал записать старый лабиринт обратно (remember_frame).
+        async with self._ug().lock:
+            removed = await places.reset_progress(self._store, user_id, scope, chat_id)
         await self.dismiss_buttons(chat_id, user_id)
         return f"Сброшено ({scope}): {len(removed)} запис." if removed else "Нечего сбрасывать."
 

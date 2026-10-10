@@ -231,7 +231,7 @@ def test_special_rooms_registered_by_catalog():
     dark = places.PLACES["darkroom"]
     for word in ("красный", "ванноч", "верёвк", "увеличител"):
         assert word in dark.canon_ru.lower()
-    assert dark.specials == ()  # 59.6: фотоаппарат подключается после слияния
+    assert dark.specials == (places.DARKROOM_CAMERA,)  # 59.6: первый обыск — фотоаппарат
     assert underground.PLACE_CATACOMBS not in places.PLACES
 
 
@@ -564,7 +564,7 @@ async def test_remember_frame_ignored_after_reset(store):
     await _descend(svc, store)
     await svc.tool_walk(CANARY, CANARY, await _first_exit(store))
     await svc.flush_frames(CANARY)
-    await places.reset_progress(store, CANARY, "catacombs")
+    await svc.debug_reset(CANARY, CANARY, "catacombs")
     await asyncio.gather(*list(svc._photo_tasks))
     assert not await store.get_state(f"catacombs:{CANARY}")
 
