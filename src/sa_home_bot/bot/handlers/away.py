@@ -16,7 +16,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
 
-from sa_home_bot.bot import ai_flow, commands
+from sa_home_bot.bot import commands
 from sa_home_bot.bot.away import (
     CALLBACK_PREFIX,
     CB_BACK,
@@ -32,6 +32,8 @@ from sa_home_bot.bot.away import (
 from sa_home_bot.bot.away_return import AwayRunner
 from sa_home_bot.bot.middlewares import DENIED_TEXT
 from sa_home_bot.config import Settings
+from sa_home_bot.people import claims as people_claims
+from sa_home_bot.people.book import PeopleBook
 from sa_home_bot.subscriptions.models import Subscription
 
 log = logging.getLogger(__name__)
@@ -41,14 +43,17 @@ router = Router(name="away")
 CLAMPED_TEXT = " Срок урезан до потолка: возвращение не позже чем через 24 часа."
 
 
-def _owner_tz(settings: Settings, user):
-    """Часовой пояс владельца для «до 23:00»: из settings.people, иначе — пояс сервера."""
-    person = ai_flow._find_known_person(settings, user)
-    if person is not None and person.timezone:
-        try:
-            return ZoneInfo(person.timezone)
-        except ZoneInfoNotFoundError:
-            pass
+async def _owner_tz(away: AwayService, user):
+    """Часовой пояс владельца для «до 23:00»: из его карточки (Этап 58),
+    иначе — пояс сервера."""
+    if user is not None:
+        people = PeopleBook(await away.store.person_claims(), [])
+        tz = people.value(user.id, people_claims.FIELD_TIMEZONE)
+        if tz:
+            try:
+                return ZoneInfo(tz)
+            except ZoneInfoNotFoundError:
+                pass
     return local_tz()
 
 
@@ -70,7 +75,7 @@ async def cmd_away(
         await message.answer(DENIED_TEXT)
         return
     args = (command.args or "").strip()
-    tz = _owner_tz(config, message.from_user)
+    tz = await _owner_tz(away, message.from_user)
     now = away.now()
     try:
         if not args:
@@ -140,7 +145,7 @@ async def cb_away(
         if action == CB_EXTEND and len(parts) > 2 and parts[2].isdigit():
             state = await away.extend(parse_extend(f"{int(parts[2])}м"))
             text = "Продлил. " + status_text(
-                state, away.now(), _owner_tz(config, callback.from_user)
+                state, away.now(), await _owner_tz(away, callback.from_user)
             )
         elif action == CB_BACK:
             text = await _do_back(away, away_runner)

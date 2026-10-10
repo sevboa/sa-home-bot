@@ -14,13 +14,15 @@ from sa_home_bot import llm_chat
 from sa_home_bot.bot import ai_flow, wake_state
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.service_link import ServiceUnavailableError
-from sa_home_bot.config import LlmConfig, PersonConfig, Settings
+from sa_home_bot.config import LlmConfig, Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
 from sa_home_bot.proto.messages import ERR_INTERNAL, ERR_UNAVAILABLE, ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
+
+from .people_helpers import claim, people_book
 
 MYCRAFT_WAKE = {"mac": "aa:bb:cc:dd:ee:ff", "ip": "192.168.0.50", "broadcast": "192.168.0.255"}
 ALFRED_WAKE = {"mac": "7c:83:34:b4:59:ac", "ip": "192.168.0.100", "broadcast": "192.168.0.255"}
@@ -1103,106 +1105,57 @@ def test_display_name_none_for_missing_user():
     assert ai_flow.display_name(None) is None
 
 
-# --- settings.people: сопоставление собеседника, точный возраст, местное
-# время (2026-07-25) — ФИО/даты рождения намеренно НЕ в тестах/репозитории,
-# только выдуманные значения ---
-
-
-def _person(**overrides) -> PersonConfig:
-    defaults = dict(
-        telegram_username="ivan",
-        telegram_id=0,
-        full_name="Иван Иванович Иванов",
-        gender="m",
-        city="Алматы",
-        timezone="Asia/Almaty",
-        birth_date="",
-    )
-    defaults.update(overrides)
-    return PersonConfig(**defaults)
-
-
-def test_find_known_person_matches_by_username_case_insensitive():
-    settings = Settings(people=[_person(telegram_username="Ivan")])
-    user = FakeUser("Иван", username="ivan")
-    assert ai_flow._find_known_person(settings, user) is not None
-
-
-def test_find_known_person_matches_by_telegram_id_when_username_unset():
-    settings = Settings(people=[_person(telegram_username="", telegram_id=42424242)])
-    user = FakeUser("Без ника", username=None, id=42424242)
-    assert ai_flow._find_known_person(settings, user) is not None
-
-
-def test_find_known_person_returns_none_for_unknown_user():
-    settings = Settings(people=[_person()])
-    user = FakeUser("Пётр", username="petr", id=999)
-    assert ai_flow._find_known_person(settings, user) is None
-
-
-def test_find_known_person_returns_none_without_user():
-    settings = Settings(people=[_person()])
-    assert ai_flow._find_known_person(settings, None) is None
+# --- карточка собеседника (Этап 58): точный возраст, местное время, день
+# рождения — ФИО/даты рождения намеренно НЕ из жизни, выдуманные значения ---
 
 
 def test_person_age_computed_from_birth_date():
-    person = _person(birth_date="1990-06-15")
-    assert ai_flow._person_age(person, date(2026, 6, 14)) == 35  # день рождения ещё не наступил
-    assert ai_flow._person_age(person, date(2026, 6, 15)) == 36  # наступил ровно сегодня
-    assert ai_flow._person_age(person, date(2026, 6, 16)) == 36
+    assert ai_flow._person_age("1990-06-15", date(2026, 6, 14)) == 35  # ещё не наступил
+    assert ai_flow._person_age("1990-06-15", date(2026, 6, 15)) == 36  # ровно сегодня
+    assert ai_flow._person_age("1990-06-15", date(2026, 6, 16)) == 36
 
 
 def test_person_age_none_when_birth_date_unknown():
-    person = _person(birth_date="")
-    assert ai_flow._person_age(person, date(2026, 6, 15)) is None
+    assert ai_flow._person_age("", date(2026, 6, 15)) is None
+    assert ai_flow._person_age(None, date(2026, 6, 15)) is None
 
 
-def test_known_person_note_includes_local_time_and_exact_age():
-    person = _person(
-        gender="f", city="Москва", timezone="Europe/Moscow", birth_date="1990-06-15"
+def test_speaker_life_note_includes_local_time_age_and_birthday():
+    people = people_book(
+        cards={
+            42: {
+                "gender": "f",
+                "city": "Москва",
+                "timezone": "Europe/Moscow",
+                "birth_date": "1990-06-15",
+            }
+        }
     )
-    note = ai_flow._known_person_note(person)
-    assert "Иван Иванович Иванов" in note  # ФИО из карточки, как задали
-    assert "Москва" in note
+    note = ai_flow._speaker_life_note(people, 42)
+    assert "У неё в Москва сейчас" in note
     assert "часовой пояс" in note
     assert "лет" in note  # возраст посчитан, не None
     assert "15 июня" in note  # живая находка 2026-09-23: сама дата, не только возраст
 
 
-def test_known_person_note_skips_age_line_when_birth_date_unknown():
-    person = _person(birth_date="")
-    note = ai_flow._known_person_note(person)
+def test_speaker_life_note_none_without_card():
+    assert ai_flow._speaker_life_note(people_book(), 42) is None
+
+
+def test_speaker_life_note_skips_age_when_birth_date_unknown():
+    people = people_book(cards={42: {"timezone": "Asia/Almaty"}})
+    note = ai_flow._speaker_life_note(people, 42)
     assert "Точный возраст" not in note
     assert "День рождения" not in note
-
-
-# Этап 42.5(a): титул обращения детерминированно из gender, не догадка LLM.
-
-
-def test_known_person_note_title_for_male():
-    person = _person(gender="m")
-    note = ai_flow._known_person_note(person)
-    assert "«сэр»" in note
-    assert "к нему" in note
-    assert "«мадам»" not in note
-
-
-def test_known_person_note_title_for_female():
-    person = _person(gender="f")
-    note = ai_flow._known_person_note(person)
-    assert "«мадам»" in note
-    assert "к ней" in note
-    assert "«сэр»" not in note
+    assert "У собеседника сейчас" in note
 
 
 def test_person_birthday_ru_formats_day_and_month():
-    person = _person(birth_date="1990-04-29")
-    assert ai_flow._person_birthday_ru(person) == "29 апреля"
+    assert ai_flow._person_birthday_ru("1990-04-29") == "29 апреля"
 
 
 def test_person_birthday_ru_none_when_birth_date_unknown():
-    person = _person(birth_date="")
-    assert ai_flow._person_birthday_ru(person) is None
+    assert ai_flow._person_birthday_ru("") is None
 
 
 async def test_context_note_time_only_without_sender(store):
@@ -1239,28 +1192,6 @@ async def test_context_note_private_chat_only_mentions_sender(store):
     assert "Иван (@ivan)" in note
     assert "начал" not in note
     assert "также обращались" not in note
-
-
-async def test_context_note_includes_known_person_note_when_matched(store):
-    settings = Settings(people=[_person(telegram_username="ivan")])
-    message = NoteMessage(1, "private", FakeUser("Иван", username="ivan"))
-    note = await ai_flow._build_context_note(message, store, dialogue_id=1, settings=settings)
-    assert "Ты знаешь этого собеседника" in note
-
-
-async def test_context_note_skips_known_person_note_without_settings(store):
-    # Обратная совместимость: settings — необязательный параметр, старые
-    # вызовы (без него) не должны падать и не подмешивают карточку.
-    message = NoteMessage(1, "private", FakeUser("Иван", username="ivan"))
-    note = await ai_flow._build_context_note(message, store, dialogue_id=1)
-    assert "Ты знаешь этого собеседника" not in note
-
-
-async def test_context_note_skips_known_person_note_for_unknown_sender(store):
-    settings = Settings(people=[_person(telegram_username="ivan")])
-    message = NoteMessage(1, "private", FakeUser("Пётр", username="petr", id=999))
-    note = await ai_flow._build_context_note(message, store, dialogue_id=1, settings=settings)
-    assert "Ты знаешь этого собеседника" not in note
 
 
 async def test_context_note_group_includes_starter_and_other_participants(store):
@@ -1428,27 +1359,24 @@ async def test_context_note_inserted_right_before_current_turn(store):
 
 
 async def test_person_cards_reach_the_context_note(store):
-    """Этап 54.3: пол собеседника из общей карточки (сказал сам) и знакомые
-    строкой «имя — id — пол» с источником слабого утверждения."""
+    """Этап 54.3/58: пол собеседника из карточки (сказал сам), прозвище,
+    местное время и знакомые строкой «имя — id — пол» с источником слабого
+    утверждения. Карточки — из БД alfred, не из графа."""
     now = datetime.now(tz=UTC)
     await store.add_confirmed_relationship(10, 999, "acquaintance", now, now)
+    await store.add_person_claims(
+        [
+            claim(10, "gender", "m"),
+            claim(10, "alias", "Лили", by_id=999),
+            claim(10, "timezone", "Europe/Moscow"),
+            claim(999, "gender", "f", by_id=10),
+        ]
+    )
     message = FakeMessage()
     message.from_user = FakeUser("Лилиан", username="lilian", id=10)
     link = FakeNodeLink(
         chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "ответ"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
-        person_cards={
-            "10": {
-                "gender": {"value": "m", "by_id": 10, "strength": "self", "at": "1"},
-                "name": None,
-                "aliases": [{"value": "Лили", "by_id": 999, "strength": "acquaintance"}],
-            },
-            "999": {
-                "gender": {"value": "f", "by_id": 10, "strength": "acquaintance", "at": "1"},
-                "name": None,
-                "aliases": [],
-            },
-        },
     )
 
     await ai_flow.request_alfred(
@@ -1460,8 +1388,9 @@ async def test_person_cards_reach_the_context_note(store):
     assert "Собеседник — мужчина: сказал это о себе сам" in note
     assert "«сэр»" in note
     assert "Его также зовут: Лили." in note
+    assert "У него сейчас" in note
     assert "admin — id 999 — женщина (так говорит Лилиан (@lilian))" in note
-    assert link.person_cards_calls == [{"ids": "10,999"}]
+    assert link.person_cards_calls == []
 
 
 async def test_person_cards_unavailable_leave_note_without_them(store):
@@ -1982,18 +1911,16 @@ async def test_guest_second_turn_does_not_requery_identity(store):
 
 
 async def test_known_family_member_does_not_query_guest_identity(store):
-    """Собеседник из settings.people — уже есть _known_person_note, второй
-    graph-запрос про личность ему не нужен, даже на первом ходе треда."""
+    """У собеседника есть карточка (Этап 58) — второй graph-запрос про
+    личность ему не нужен, даже на первом ходе треда."""
     message = FakeMessage()
     message.from_user = FakeUser("Иван", username="ivan", id=777)
     link = FakeNodeLink(
         chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Как скажете"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
-    settings = Settings(
-        llm=LlmConfig(request_timeout_s=5.0),
-        people=[PersonConfig(telegram_username="ivan", full_name="Иван Иванов", gender="m")],
-    )
+    await store.add_person_claims([claim(777, "name", "Иван Иванов", by_id=1)])
+    settings = Settings(llm=LlmConfig(request_timeout_s=5.0))
 
     await ai_flow.request_alfred(
         message, link, store, settings, [{"role": "user", "content": "привет"}], 1,

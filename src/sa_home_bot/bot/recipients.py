@@ -1,20 +1,17 @@
 """Кому Альфред может передать личное сообщение (тул ``tell``).
 
 Задача одна: превратить то, как человека назвали в разговоре («передай
-Андрею», «скажи @andrey»), в конкретный `chat_id` личного чата. Источники
-знаний два, и оба уже есть в системе:
-
-- ``[[people]]`` из конфига — там есть `telegram_username`/`telegram_id` и
-  полное имя, то есть «Андрей Иванов» находится по слову «Андрей»;
-- подписки, включая гостевые — там имя, под которым человек вошёл
-  (`invited_user`, «Андрей (@andrey)»).
+Андрею», «скажи @andrey»), в конкретный `chat_id` личного чата. Имена
+человека знает его карточка (Этап 58, people/book.py::PeopleBook): имя,
+прозвища, профиль Telegram, @ник, имя при приглашении. Без карточек (служба
+tasks) — только имена подписок.
 
 Два жёстких ограничения, без которых тул стал бы способом писать незнакомым
 людям от чужого имени:
 
 1. **Только подписной чат.** Нет подписки — нет и получателя, даже если имя
-   совпало с записью в ``[[people]]``. Право говорить с человеком даёт то же
-   приглашение, что и всё остальное (AUTHORIZATION.md §10).
+   совпало с карточкой. Право говорить с человеком даёт то же приглашение,
+   что и всё остальное (AUTHORIZATION.md §10).
 2. **Только личка.** У Telegram `chat_id` личного чата положителен и равен
    `user_id`, у групп — отрицателен. «Передать лично» в группу — это не
    лично, поэтому групповые чаты в кандидаты не попадают вовсе.
@@ -26,14 +23,16 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from sa_home_bot.config import PersonConfig
 from sa_home_bot.subscriptions.book import SubscriptionBook
+from sa_home_bot.subscriptions.models import Subscription
+
+if TYPE_CHECKING:
+    from sa_home_bot.people.book import PeopleBook
 
 # Откуда узнали про человека — нужно только для пояснений модели.
-SOURCE_PEOPLE = "people"
 SOURCE_SUBSCRIPTION = "subscription"
 # Гость назвал не имя, а роль владельца ("передай хозяину") — совсем не то
 # же самое, что найти владельца по имени: узнав source, tool_tell метит
@@ -119,12 +118,8 @@ def query_chat_id(query: str) -> int | None:
     return _query_chat_id(query)
 
 
-def person_chat_ids(person: PersonConfig, book: SubscriptionBook) -> list[int]:
-    return _person_chat_ids(person, book)
-
-
 def find_by_chat_id(
-    chat_id: int, book: SubscriptionBook, people: Sequence[PersonConfig] = ()
+    chat_id: int, book: SubscriptionBook, people: PeopleBook | None = None
 ) -> list[Recipient]:
     """Получатель по id — так адресуют tell/notify_guest/request_acquaintance
     с Этапа 54.5: id находит find_person, имя больше не угадывается."""
@@ -171,10 +166,21 @@ def _is_private(chat_id: int) -> bool:
     return chat_id > 0
 
 
+def _display(sub: Subscription, people: PeopleBook | None) -> str:
+    shown = people.display(sub.chat_id) if people is not None else None
+    return shown or sub.invited_user or sub.name
+
+
+def _labels(sub: Subscription, people: PeopleBook | None) -> list[str]:
+    if people is not None:
+        return [label for _kind, label in people.labels(sub.chat_id)]
+    return [label for label in (sub.name, sub.invited_user) if label]
+
+
 def find_recipients(
     query: str,
     book: SubscriptionBook,
-    people: Sequence[PersonConfig] = (),
+    people: PeopleBook | None = None,
 ) -> list[Recipient]:
     """Кандидаты под то, как человека назвали. Пусто — писать некому."""
     # Точные ключи сильнее имени: id и "@ник" уникальны, не склоняются и
@@ -184,7 +190,12 @@ def find_recipients(
         return _find_by_chat_id(chat_id, book, people)
     handle = _query_handle(query)
     if handle is not None:
-        by_handle = _find_by_handle(handle, book, people)
+        by_handle = [
+            Recipient(sub.chat_id, _display(sub, people), SOURCE_SUBSCRIPTION)
+            for sub in book.all()
+            if _is_private(sub.chat_id)
+            and any(_has_handle(handle, label) for label in _labels(sub, people))
+        ]
         if by_handle:
             return by_handle
         # Юзернейм не наш (сменил ник?) — пробуем имя без скобки с ником.
@@ -196,76 +207,31 @@ def find_recipients(
 
     found: dict[int, Recipient] = {}
 
-    def remember(chat_id: int, display: str, source: str) -> None:
-        # Первый источник выигрывает: people разбирается раньше, и его
-        # full_name — лучшее из имён, что у нас есть.
-        if _is_private(chat_id) and book.for_chat(chat_id) is not None:
-            found.setdefault(chat_id, Recipient(chat_id, display, source))
+    def remember(sub: Subscription, source: str) -> None:
+        if _is_private(sub.chat_id):
+            found.setdefault(sub.chat_id, Recipient(sub.chat_id, _display(sub, people), source))
 
     # Роль — первой: "передай владельцу" обязано дать SOURCE_OWNER_ROLE, даже
-    # если подписка владельца случайно названа тем же словом ("owner"), —
-    # tell пускает к владельцу без знакомства только по роли.
+    # если владельца зовут тем же словом, — tell пускает к владельцу без
+    # знакомства только по роли.
     if _is_owner_role_reference(wanted):
         for sub in book.all():
             if sub.is_owner:
-                remember(sub.chat_id, sub.invited_user or sub.name, SOURCE_OWNER_ROLE)
-
-    for person in people:
-        if _matches(wanted, person.telegram_username) or _matches(wanted, person.full_name):
-            for person_chat_id in _person_chat_ids(person, book):
-                remember(person_chat_id, person.full_name, SOURCE_PEOPLE)
+                remember(sub, SOURCE_OWNER_ROLE)
 
     for sub in book.all():
-        if _matches(wanted, sub.name) or _matches(wanted, sub.invited_user):
-            remember(sub.chat_id, sub.invited_user or sub.name, SOURCE_SUBSCRIPTION)
+        if any(_matches(wanted, label) for label in _labels(sub, people)):
+            remember(sub, SOURCE_SUBSCRIPTION)
 
-    return list(found.values())
-
-
-def _person_chat_ids(person: PersonConfig, book: SubscriptionBook) -> list[int]:
-    """chat_id человека из [[people]]. Нет telegram_id — ищем его подписку по
-    нику: гость входит как "Имя (@ник)" (живой баг 2026-09-27: "Наталья
-    Вадимовна" без telegram_id не находилась, хотя гостья с её ником есть)."""
-    if person.telegram_id:
-        return [person.telegram_id]
-    handle = _norm(person.telegram_username or "")
-    if not handle:
-        return []
-    return [
-        sub.chat_id
-        for sub in book.all()
-        if _has_handle(handle, sub.name) or _has_handle(handle, sub.invited_user)
-    ]
-
-
-def _find_by_handle(
-    handle: str, book: SubscriptionBook, people: Sequence[PersonConfig]
-) -> list[Recipient]:
-    found: dict[int, Recipient] = {}
-    for person in people:
-        if person.telegram_id and _has_handle(handle, person.telegram_username):
-            chat_id = person.telegram_id
-            if _is_private(chat_id) and book.for_chat(chat_id) is not None:
-                found.setdefault(chat_id, Recipient(chat_id, person.full_name, SOURCE_PEOPLE))
-    for sub in book.all():
-        if _has_handle(handle, sub.name) or _has_handle(handle, sub.invited_user):
-            if _is_private(sub.chat_id):
-                found.setdefault(
-                    sub.chat_id,
-                    Recipient(sub.chat_id, sub.invited_user or sub.name, SOURCE_SUBSCRIPTION),
-                )
     return list(found.values())
 
 
 def _find_by_chat_id(
-    chat_id: int, book: SubscriptionBook, people: Sequence[PersonConfig]
+    chat_id: int, book: SubscriptionBook, people: PeopleBook | None
 ) -> list[Recipient]:
     if not _is_private(chat_id):
         return []
     sub = book.for_chat(chat_id)
     if sub is None:
         return []
-    for person in people:
-        if person.telegram_id == chat_id:
-            return [Recipient(chat_id, person.full_name, SOURCE_PEOPLE)]
-    return [Recipient(chat_id, sub.invited_user or sub.name, SOURCE_SUBSCRIPTION)]
+    return [Recipient(chat_id, _display(sub, people), SOURCE_SUBSCRIPTION)]

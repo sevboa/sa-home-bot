@@ -1,5 +1,5 @@
 """bot/recipients.py — find_recipients: как названного человека находят по
-[[people]] и подпискам (bot/tools.py::tool_tell)."""
+карточкам людей (Этап 58) и подпискам (bot/tools.py::tool_tell)."""
 
 import pytest
 
@@ -9,9 +9,10 @@ from sa_home_bot.bot.recipients import (
     _matches,
     find_recipients,
 )
-from sa_home_bot.config import PersonConfig
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
+
+from .people_helpers import people_book
 
 
 def _guest(name: str, chat_id: int, invited_user: str | None = None) -> Subscription:
@@ -58,27 +59,23 @@ def test_find_recipients_by_username_in_parens():
     assert found[0].source == SOURCE_SUBSCRIPTION
 
 
-def test_find_recipients_by_people_username_and_full_name():
-    people = [
-        PersonConfig(
-            telegram_username="asevbo",
-            telegram_id=188548043,
-            full_name="Алексей Александрович Севбо",
-            gender="m",
-        )
-    ]
+def test_find_recipients_by_card_name_and_telegram_username():
     book = SubscriptionBook([Subscription(name="me", chat_id=188548043)])
+    people = people_book(
+        book,
+        {188548043: {"name": "Алексей Александрович Севбо"}},
+        {188548043: ("Алексей Севбо", "asevbo")},
+    )
     assert [r.chat_id for r in find_recipients("asevbo", book, people)] == [188548043]
     assert [r.chat_id for r in find_recipients("алексей", book, people)] == [188548043]
 
 
 def test_find_recipients_ignores_people_without_subscription():
-    # "Только подписной чат" — bot/recipients.py: совпадение по [[people]]
+    # "Только подписной чат" — bot/recipients.py: совпадение по карточке
     # ничего не даёт, если у человека нет подписки в книге.
-    people = [
-        PersonConfig(telegram_username="ghost", telegram_id=1, full_name="Призрак", gender="m")
-    ]
-    assert find_recipients("ghost", SubscriptionBook([]), people) == []
+    book = SubscriptionBook([])
+    people = people_book(book, {1: {"name": "Призрак"}}, {1: ("Призрак", "ghost")})
+    assert find_recipients("ghost", book, people) == []
 
 
 def test_find_recipients_ignores_group_chats():
@@ -127,7 +124,7 @@ def _owner(chat_id: int = 188548043) -> Subscription:
 )
 def test_find_recipients_by_owner_role(query):
     book = SubscriptionBook([_owner()])
-    found = find_recipients(query, book, [])
+    found = find_recipients(query, book, people_book(book))
     assert [r.chat_id for r in found] == [188548043]
     assert found[0].source == SOURCE_OWNER_ROLE
 
@@ -136,7 +133,7 @@ def test_owner_role_reference_finds_nobody_without_an_owner():
     # Нет ни одной подписки с "*" (например, книга службы tasks) — роль
     # никого не находит, а не ломается.
     book = SubscriptionBook([_guest("Гость", 600)])
-    assert find_recipients("хозяину", book, []) == []
+    assert find_recipients("хозяину", book, people_book(book)) == []
 
 
 def test_owner_role_reference_does_not_shadow_ordinary_guest_names():
@@ -144,7 +141,7 @@ def test_owner_role_reference_does_not_shadow_ordinary_guest_names():
     # и владельца — стебли роли проверяются отдельной веткой, не влияют на
     # остальные пути поиска.
     book = SubscriptionBook([_owner(), _guest("Максим", 601)])
-    found = find_recipients("максим", book, [])
+    found = find_recipients("максим", book, people_book(book))
     assert [r.chat_id for r in found] == [601]
 
 
@@ -163,13 +160,9 @@ def test_find_recipients_label_with_misnamed_person_uses_handle():
     assert [r.chat_id for r in find_recipients("Наталья (@nava40a)", book)] == [1243270013]
 
 
-def test_find_recipients_label_handle_via_people_username():
+def test_find_recipients_label_handle_via_telegram_profile():
     book = SubscriptionBook([_guest("Наташа", 1243270013)])
-    people = [
-        PersonConfig(
-            telegram_id=1243270013, telegram_username="nava40a", full_name="Н. В.", gender="f"
-        )
-    ]
+    people = people_book(book, {1243270013: {"name": "Н. В."}}, {1243270013: ("", "nava40a")})
     assert [r.chat_id for r in find_recipients("Наталья (@nava40a)", book, people)] == [1243270013]
 
 
@@ -207,22 +200,35 @@ def test_matches_multiword_query_skips_middle_name():
 
 
 def test_find_recipients_owner_by_first_and_last_name():
-    book = SubscriptionBook([_guest("me", 188548043, invited_user="")])
-    people = [
-        PersonConfig(
-            telegram_id=188548043,
-            telegram_username="asevbo",
-            full_name="Алексей Александрович Севбо",
-            gender="m",
-        ),
-        PersonConfig(telegram_id=518571647, full_name="Андрей Александрович Севбо", gender="m"),
-    ]
+    book = SubscriptionBook(
+        [_guest("me", 188548043, invited_user=""), _guest("Kein", 518571647)]
+    )
+    people = people_book(
+        book,
+        {
+            188548043: {"name": "Алексей Александрович Севбо"},
+            518571647: {"name": "Андрей Александрович Севбо"},
+        },
+    )
     assert [r.chat_id for r in find_recipients("Алексей Севбо", book, people)] == [188548043]
 
 
-def test_find_recipients_people_without_id_resolved_by_username():
+def test_find_recipients_by_card_name_beside_invite_name():
     book = SubscriptionBook([_guest("Наташа Сорокина (@nava40a)", 1243270013)])
-    people = [PersonConfig(telegram_username="nava40a", full_name="Наталья Вадимовна", gender="f")]
+    people = people_book(book, {1243270013: {"name": "Наталья Вадимовна"}})
     found = find_recipients("Наталья Вадимовна", book, people)
     assert [r.chat_id for r in found] == [1243270013]
     assert [r.chat_id for r in find_recipients("Наталья", book, people)] == [1243270013]
+
+
+def test_find_recipients_finds_brother_by_card_name_not_subscription_label():
+    # Живая находка 2026-10-10: подписка брата владельца — «Kein», имя —
+    # только в карточке. Display — имя из карточки с ником из Telegram.
+    book = SubscriptionBook([_guest("Kein", 518571647), _guest("Andrey (@AndreyPietilya)", 348)])
+    people = people_book(
+        book, {518571647: {"name": "Андрей Александрович Севбо"}}, {518571647: ("Kein", "kein")}
+    )
+    found = find_recipients("Андрей Севбо", book, people)
+    assert [r.chat_id for r in found] == [518571647]
+    assert found[0].display == "Андрей Александрович Севбо (@kein)"
+    assert [r.chat_id for r in find_recipients("@kein", book, people)] == [518571647]

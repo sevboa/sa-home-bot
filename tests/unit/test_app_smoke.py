@@ -66,7 +66,9 @@ async def test_app_boots_and_shuts_down_cleanly(tmp_path, monkeypatch):
     fake_bot = FakeBot()
 
     monkeypatch.setattr(app_module, "build_bot", lambda token, proxy="": fake_bot)
-    monkeypatch.setattr(app_module, "build_dispatcher", lambda book, gate: FakeDispatcher())
+    monkeypatch.setattr(
+        app_module, "build_dispatcher", lambda book, gate, store=None: FakeDispatcher()
+    )
     monkeypatch.setattr(app_module, "Lifespan", ImmediateLifespan)
 
     settings = Settings(

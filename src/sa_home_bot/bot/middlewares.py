@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from aiogram import BaseMiddleware
-from aiogram.types import CallbackQuery, Message, Update
+from aiogram.types import CallbackQuery, Message, Update, User
 
 from sa_home_bot.bot import commands
 from sa_home_bot.bot.invites import Gatekeeper
@@ -200,3 +201,41 @@ class CallbackAuthorizationMiddleware(BaseMiddleware):
             return None
 
         return await handler(event, data)
+
+
+class ProfileMiddleware(BaseMiddleware):
+    """Профиль Telegram отправителя — в карточку человека (Этап 58):
+    имя, фамилия, @ник, как они есть в Telegram сейчас. В БД — только при
+    изменении; кэш в памяти процесса. Сбой записи апдейт не останавливает."""
+
+    def __init__(self, store: Any) -> None:
+        self._store = store
+        self._seen: dict[int, tuple[str, str, str]] = {}
+        self._loaded = False
+
+    async def __call__(
+        self,
+        handler: Callable[[Any, dict[str, Any]], Awaitable[Any]],
+        event: Any,
+        data: dict[str, Any],
+    ) -> Any:
+        user = getattr(event, "from_user", None)
+        if isinstance(user, User) and not user.is_bot:
+            try:
+                await self._remember(user)
+            except Exception:
+                log.warning("Профиль %s не записан", user.id, exc_info=True)
+        return await handler(event, data)
+
+    async def _remember(self, user: User) -> None:
+        if not self._loaded:
+            for row in await self._store.person_profiles():
+                self._seen[int(row["user_id"])] = (
+                    row["first_name"], row["last_name"], row["username"]
+                )
+            self._loaded = True
+        now = (user.first_name or "", user.last_name or "", user.username or "")
+        if self._seen.get(user.id) == now:
+            return
+        await self._store.upsert_person_profile(user.id, *now, datetime.now(UTC))
+        self._seen[user.id] = now

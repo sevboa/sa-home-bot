@@ -26,9 +26,10 @@ def test_weak_claim_names_its_source():
     assert "«мадам»" in note
 
 
-def test_config_gender_suppresses_card_gender_but_inflects_aliases():
-    note = speaker_card_note(_card("m", 202, "acquaintance", ["Лиля"]), name_of, known_gender="f")
-    assert note == "Её также зовут: Лиля."
+def test_self_claim_gender_inflects_aliases():
+    note = speaker_card_note(_card("f", 303, "self", ["Лиля"]), name_of)
+    assert "Собеседник — женщина: сказала это о себе сама" in note
+    assert note.endswith("Её также зовут: Лиля.")
 
 
 def test_empty_card_gives_no_note():

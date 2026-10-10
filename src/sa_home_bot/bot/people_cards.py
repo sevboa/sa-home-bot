@@ -1,61 +1,25 @@
-"""Карточки людей в справке перед ходом (Этап 54.3): чтение из graph_memory
-и текст для модели.
+"""Карточки людей в справке перед ходом: текст для модели (Этап 54.3,
+с Этапа 58 карточки — people/book.py::PeopleBook из БД alfred).
 
-Карточку собирает служба (graph_memory/people.py::build_cards), здесь только
-запрос и формулировки. Имён источников в графе нет — только by_id; имя
-подставляет вызывающий из того, что знает бот (подписки, участники чата).
-Недоступность mycraft — пустой словарь, а не ошибка: справка необязательна,
-как и recall_graph_facts.
+Имён источников в карточке нет — только by_id; имя подставляет вызывающий
+(``name_of``).
 """
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from typing import Any
 
-from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
-from sa_home_bot.graph_memory import protocol as graph_memory_protocol
-from sa_home_bot.proto.messages import Address, ProtoError
-
-log = logging.getLogger(__name__)
-
-# Как GRAPH_MEMORY_TIMEOUT_S в bot/ai_flow.py: спящий mycraft не должен
-# заметно задерживать ответ.
-PERSON_CARDS_TIMEOUT_S = 3.0
+from sa_home_bot.people import claims as people_claims
+from sa_home_bot.people.claims import Card
 
 _GENDER_WORD = {
-    graph_memory_protocol.GENDER_MALE: "мужчина",
-    graph_memory_protocol.GENDER_FEMALE: "женщина",
+    people_claims.GENDER_MALE: "мужчина",
+    people_claims.GENDER_FEMALE: "женщина",
 }
-_TITLE = {graph_memory_protocol.GENDER_MALE: "сэр", graph_memory_protocol.GENDER_FEMALE: "мадам"}
+_TITLE = {people_claims.GENDER_MALE: "сэр", people_claims.GENDER_FEMALE: "мадам"}
 
-Card = dict[str, Any]
 NameOf = Callable[[int], str | None]
-
-
-async def fetch_person_cards(node_link: ServiceLink | None, ids: list[int]) -> dict[int, Card]:
-    ids = sorted({i for i in ids if i})
-    if node_link is None or not ids:
-        return {}
-    dst = Address(node=graph_memory_protocol.NODE_ID, service=graph_memory_protocol.SERVICE_NAME)
-    try:
-        result = await node_link.command(
-            graph_memory_protocol.ACTION_PERSON_CARDS,
-            {"ids": ",".join(str(i) for i in ids)},
-            dst=dst,
-            timeout=PERSON_CARDS_TIMEOUT_S,
-        )
-    except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
-        log.debug("people_cards: карточки не получены: %s", exc)
-        return {}
-    cards: dict[int, Card] = {}
-    for key, card in (result.get("cards") or {}).items():
-        try:
-            cards[int(key)] = card
-        except (TypeError, ValueError):
-            continue
-    return cards
 
 
 def card_gender(card: Card | None) -> str | None:
@@ -64,7 +28,7 @@ def card_gender(card: Card | None) -> str | None:
 
 
 def _is_self(claim: dict[str, Any]) -> bool:
-    return claim.get("strength") == graph_memory_protocol.CLAIM_STRENGTH_SELF
+    return claim.get("strength") == people_claims.STRENGTH_SELF
 
 
 def _source(claim: dict[str, Any], name_of: NameOf) -> str:
@@ -72,25 +36,21 @@ def _source(claim: dict[str, Any], name_of: NameOf) -> str:
 
 
 def _by_gender(gender: str | None, male: str, female: str, unknown: str) -> str:
-    if gender == graph_memory_protocol.GENDER_MALE:
+    if gender == people_claims.GENDER_MALE:
         return male
-    if gender == graph_memory_protocol.GENDER_FEMALE:
+    if gender == people_claims.GENDER_FEMALE:
         return female
     return unknown
 
 
-def speaker_card_note(
-    card: Card | None, name_of: NameOf, *, known_gender: str | None = None
-) -> str | None:
-    """Строки о собеседнике. ``known_gender`` — пол из settings.people: он
-    задан владельцем в конфиге, важнее карточки, и строку о поле тогда не
-    пишем (её уже дал _known_person_note), только склоняем по нему."""
+def speaker_card_note(card: Card | None, name_of: NameOf) -> str | None:
+    """Строки о собеседнике: пол с источником и обращение, имя, прозвища."""
     if not card:
         return None
     parts: list[str] = []
     claim = card.get("gender")
-    gender = known_gender or card_gender(card)
-    if known_gender is None and isinstance(claim, dict) and gender in _GENDER_WORD:
+    gender = card_gender(card)
+    if isinstance(claim, dict) and gender in _GENDER_WORD:
         word, title = _GENDER_WORD[gender], _TITLE[gender]
         if _is_self(claim):
             said = _by_gender(gender, "сказал это о себе сам", "сказала это о себе сама", "")

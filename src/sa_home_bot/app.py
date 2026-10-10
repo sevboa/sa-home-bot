@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import socket
 
@@ -51,6 +52,7 @@ from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
 from sa_home_bot.node.instances import slot_key
+from sa_home_bot.people import seed as people_seed
 from sa_home_bot.runtime import Runtime
 from sa_home_bot.sensors.power import read_power_events_sync
 from sa_home_bot.subscriptions.book import SubscriptionBook
@@ -84,6 +86,11 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
 
     # 3. Подписки: владельческие из конфига + гости, впущенные инвайтами.
     book = SubscriptionBook.from_config(settings.subscriptions, settings.guest_subscriptions)
+    # Этап 58.2: [[people]] и профили Telegram — в карточки людей, один раз.
+    try:
+        await people_seed.seed_local(store, settings, book)
+    except Exception:
+        log.exception("Карточки людей: перенос не удался, повтор при следующем старте")
 
     # 4. Bot + Notifier + watchdog связи.
     bot = build_bot(settings.telegram.token, settings.telegram.proxy)
@@ -117,7 +124,7 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
     )
     if not gate.enabled:
         log.info("Приглашения выключены (нет пакета инстанса или [invites].enabled=false)")
-    dp = build_dispatcher(book, gate)
+    dp = build_dispatcher(book, gate, store)
 
     # 5. Валидация подписок (пометка broken).
     await book.validate_on_startup(bot)
@@ -292,6 +299,10 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
         notifier,
     )
     away_task = asyncio.create_task(away_runner.run(), name="away")
+    # Этап 58.2: карточки людей этапа 54 из графа на mycraft — когда ответит.
+    people_seed_task = asyncio.create_task(
+        people_seed.graph_seed_loop(store, book, node_link), name="people-seed"
+    )
 
     # 10. Polling.
     polling_task = asyncio.create_task(
@@ -352,6 +363,7 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
             polling_task=polling_task,
             active_ai_chats=active_ai_chats,
             away_task=away_task,
+            people_seed_task=people_seed_task,
             egress=egress,
             outbox_flusher=outbox_flusher,
             pending_actions=pending_actions,
@@ -384,6 +396,7 @@ async def _shutdown(
     bot,
     db: Database,
     away_task: asyncio.Task | None = None,
+    people_seed_task: asyncio.Task | None = None,
     egress: EgressManager | None = None,
     outbox_flusher: OutboxFlusher | None = None,
 ) -> None:
@@ -429,6 +442,11 @@ async def _shutdown(
             pass
         except Exception:  # noqa: BLE001
             log.warning("away-задача упала при остановке", exc_info=True)
+
+    if people_seed_task is not None and not people_seed_task.done():
+        people_seed_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await people_seed_task
 
     # Таймеры форм в памяти — снять: будильники в tasks и recover() на
     # следующем старте их заменят.

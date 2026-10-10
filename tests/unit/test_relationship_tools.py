@@ -12,11 +12,14 @@ import pytest_asyncio
 
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.pending_actions import PendingActions
-from sa_home_bot.config import GuestSubscriptionConfig, PersonConfig, Settings, SubscriptionConfig
+from sa_home_bot.config import GuestSubscriptionConfig, Settings, SubscriptionConfig
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
+from sa_home_bot.people.book import PeopleBook
 from sa_home_bot.subscriptions.book import SubscriptionBook
+
+from .people_helpers import claim
 
 OWNER_CHAT = 1
 GUEST_A = 301  # инициатор
@@ -182,18 +185,15 @@ async def test_form_owner_never_named_in_third_person_and_not_me(store):
         [SubscriptionConfig(name="me", chat_id=OWNER_CHAT, allowed_commands=["*"])],
         [_guest("Настя", GUEST_B)],
     )
-    settings = Settings(
-        people=[
-            PersonConfig(
-                telegram_id=OWNER_CHAT,
-                telegram_username="asevbo",
-                full_name="Алексей Александрович Севбо",
-                gender="m",
-            ),
-            PersonConfig(telegram_id=GUEST_B, full_name="Наташа Сорокина", gender="f"),
+    await store.add_person_claims(
+        [
+            claim(OWNER_CHAT, "name", "Алексей Александрович Севбо"),
+            claim(GUEST_B, "name", "Наташа Сорокина", by_id=OWNER_CHAT),
         ]
     )
-    ctx, _, _ = _ctx(store, chat_id=OWNER_CHAT, book=book, settings=settings)
+    await store.upsert_person_profile(OWNER_CHAT, "Алексей", "", "asevbo", datetime.now(UTC))
+    ctx, _, _ = _ctx(store, chat_id=OWNER_CHAT, book=book)
+    ctx.people = await PeopleBook.load(store, book)
 
     result = await _request(ctx, GUEST_B)
 

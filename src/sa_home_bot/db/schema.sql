@@ -704,3 +704,30 @@ CREATE TABLE IF NOT EXISTS outbox (
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_created ON outbox(created_at, id);
 CREATE INDEX IF NOT EXISTS idx_outbox_dedup ON outbox(chat_id, dedup_key);
+
+-- Карточка человека (Этап 58, sa_home_bot/people/): утверждения о
+-- Telegram id — «by_id сказал, что у subject_id поле field = value».
+-- strength: 'self' — сам о себе, 'acquaintance' — знакомый (и владелец о
+-- других, в т.ч. перенос [[people]]). Итог поля собирает people/claims.py;
+-- строки не правятся и не удаляются — история нужна для «откуда знаешь» и
+-- для поиска по прежним именам.
+CREATE TABLE IF NOT EXISTS person_claims (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_id  INTEGER NOT NULL,
+    field       TEXT NOT NULL,
+    value       TEXT NOT NULL,
+    by_id       INTEGER NOT NULL,
+    strength    TEXT NOT NULL CHECK (strength IN ('self', 'acquaintance')),
+    at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_person_claims_subject ON person_claims(subject_id);
+
+-- Профиль Telegram (Этап 58): как человек назван в самом Telegram сейчас.
+-- Пишет middleware по from_user, только при изменении.
+CREATE TABLE IF NOT EXISTS person_profiles (
+    user_id     INTEGER PRIMARY KEY,
+    first_name  TEXT NOT NULL DEFAULT '',
+    last_name   TEXT NOT NULL DEFAULT '',
+    username    TEXT NOT NULL DEFAULT '',
+    seen_at     TEXT NOT NULL
+);

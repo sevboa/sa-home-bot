@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -46,6 +47,7 @@ from sa_home_bot.bot.menu import (  # noqa: F401 — реэкспорт: мен�
 from sa_home_bot.bot.middlewares import (
     AuthorizationMiddleware,
     CallbackAuthorizationMiddleware,
+    ProfileMiddleware,
     SilenceGate,
 )
 from sa_home_bot.subscriptions.book import SubscriptionBook
@@ -60,11 +62,18 @@ def build_bot(token: str, proxy: str = "") -> Bot:
     )
 
 
-def build_dispatcher(book: SubscriptionBook, gate: Gatekeeper) -> Dispatcher:
+def build_dispatcher(
+    book: SubscriptionBook, gate: Gatekeeper, store: Any | None = None
+) -> Dispatcher:
     dp = Dispatcher()
     # Гейт молчания — САМЫЙ первый и на update целиком: чужой чат не должен
     # доходить ни до одного роутера, каким бы путём он ни пришёл.
     dp.update.outer_middleware(SilenceGate(book, gate))
+    # Профиль Telegram в карточку человека (Этап 58) — только своих: гейт выше.
+    if store is not None:
+        profiles = ProfileMiddleware(store)
+        dp.message.outer_middleware(profiles)
+        dp.callback_query.outer_middleware(profiles)
     dp.message.middleware(AuthorizationMiddleware(book))
     dp.callback_query.middleware(CallbackAuthorizationMiddleware(book))
     # invites рано: ловит /invite, /guests и то единственное сообщение, каким

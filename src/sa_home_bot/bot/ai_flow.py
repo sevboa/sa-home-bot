@@ -86,7 +86,7 @@ from sa_home_bot.bot.pending_actions import open_forms_note
 from sa_home_bot.bot.rich_stream import RichStreamSession
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.tool_debug import ToolCalls
-from sa_home_bot.config import PersonConfig, Settings
+from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.graph_memory import protocol as graph_memory_protocol
 from sa_home_bot.llm.model_profiles import REASON_LEVELS, ModelProfileSummary
@@ -98,6 +98,8 @@ from sa_home_bot.llm.prompt import (
 )
 from sa_home_bot.llm_chat import ChatStats, run_chat_loop
 from sa_home_bot.memory import protocol as memory_protocol
+from sa_home_bot.people import claims as people_claims
+from sa_home_bot.people.book import PeopleBook
 from sa_home_bot.proto.messages import (
     ERR_UNAVAILABLE,
     ERR_UNKNOWN_DST,
@@ -612,33 +614,15 @@ def display_name(user: User | None) -> str | None:
     return f"{name} (@{user.username})" if user.username else name
 
 
-def _find_known_person(settings: Settings, user: User | None) -> PersonConfig | None:
-    """Сопоставить отправителя с settings.people (config.py::PersonConfig).
-
-    По username в первую очередь (у большинства он есть) — по telegram_id
-    как фоллбэк, для тех, чей username не был известен человеку, который
-    вписывал config.toml (у них там telegram_username = "")."""
-    if user is None:
-        return None
-    username = (user.username or "").lower()
-    for person in settings.people:
-        if username and person.telegram_username.lower() == username:
-            return person
-    for person in settings.people:
-        if person.telegram_id and person.telegram_id == user.id:
-            return person
-    return None
-
-
-def _person_age(person: PersonConfig, today: date) -> int | None:
+def _person_age(birth_date: str | None, today: date) -> int | None:
     """Точный возраст на сегодня — детерминированно в коде, не поручаем
     модели вычитание дат (та же логика, что и с часовыми поясами: живая
     находка про то, что маленькие модели систематически ошибаются в
     арифметике с датами)."""
-    if not person.birth_date:
+    if not birth_date:
         return None
     try:
-        birth = date.fromisoformat(person.birth_date)
+        birth = date.fromisoformat(birth_date)
     except ValueError:
         return None
     return today.year - birth.year - ((today.month, today.day) < (birth.month, birth.day))
@@ -646,7 +630,7 @@ def _person_age(person: PersonConfig, today: date) -> int | None:
 
 # Родительный падеж — та же форма, что уже используют факты memory
 # ("День рождения — 29 апреля", см. живые данные): "29 апреля", не "29 April"
-# и не "апрель 29". Только для _known_person_note ниже, отдельного модуля
+# и не "апрель 29". Только для _speaker_life_note ниже, отдельного модуля
 # под дату не заводим — используется в одном месте.
 _MONTHS_RU_GENITIVE = (
     "января", "февраля", "марта", "апреля", "мая", "июня",
@@ -654,14 +638,14 @@ _MONTHS_RU_GENITIVE = (
 )
 
 
-def _person_birthday_ru(person: PersonConfig) -> str | None:
+def _person_birthday_ru(birth_date: str | None) -> str | None:
     """«29 апреля» — день и месяц рождения (без года: год модель и так
     получает как точный возраст через _person_age, а прямая дата рождения —
     личные данные, которые не стоит подсвечивать лишний раз)."""
-    if not person.birth_date:
+    if not birth_date:
         return None
     try:
-        birth = date.fromisoformat(person.birth_date)
+        birth = date.fromisoformat(birth_date)
     except ValueError:
         return None
     return f"{birth.day} {_MONTHS_RU_GENITIVE[birth.month - 1]}"
@@ -669,52 +653,44 @@ def _person_birthday_ru(person: PersonConfig) -> str | None:
 
 # (субъект "он/она", предложный "у него/у неё", притяжательный "его/её" —
 # для "него"/"неё" совпадает с предложным только у мужского рода, поэтому
-# три отдельных формы, не выводим одну из другой).
-_PRONOUNS = {"m": ("он", "него", "его"), "f": ("она", "неё", "её")}
-
-# Титул обращения — раньше модель угадывала его по имени собеседника
-# (правило в llm-prompt.toml), что ненадёжно для неоднозначных/иностранных
-# имён (живая находка, Этап 42.5). Для собеседников из settings.people пол
-# известен точно, поэтому титул подставляем детерминированно в коде, а не
-# полагаемся на догадку LLM.
-_TITLES = {"m": "сэр", "f": "мадам"}
+# три отдельных формы, не выводим одну из другой). Пол неизвестен —
+# «собеседник».
+_PRONOUNS = {
+    "m": ("он", "него", "его"),
+    "f": ("она", "неё", "её"),
+    None: ("собеседник", "собеседника", "его/её"),
+}
 
 
-def _known_person_note(person: PersonConfig) -> str | None:
-    """Заметка о собеседнике, которого узнали по settings.people: точное
-    местное время в его/её городе (не пояс сервера — верхняя строка),
-    точный возраст и титул обращения (сэр/мадам) по известному полу — не
-    оставляем модели угадывать его по имени. Правила о ТОМ, как это
-    использовать (обращение по нику, такт с возрастом дам, поправка тона на
-    разницу в возрасте с самим Альфредом, родственные связи) — в характере
-    персонажа (llm-prompt.toml, не дублируем здесь построчно)."""
-    subject, prepositional, possessive = _PRONOUNS[person.gender]
-    dative = "нему" if person.gender == "m" else "ней"
-    parts = [
-        f"Ты знаешь этого собеседника — это {person.full_name}.",
-        f"Обращайся к {dative} как «{_TITLES[person.gender]}» — это точно "
-        "известно, не нужно угадывать по имени.",
-    ]
-
-    if person.timezone:
+def _speaker_life_note(people: PeopleBook, person_id: int) -> str | None:
+    """Местное время, возраст и день рождения собеседника из его карточки
+    (Этап 58; раньше — из [[people]] конфига): точное местное время в
+    его/её городе (не пояс сервера — верхняя строка) и точный возраст.
+    Правила о ТОМ, как это использовать (такт с возрастом дам, поправка тона
+    на разницу в возрасте с самим Альфредом) — в характере персонажа
+    (llm-prompt.toml, не дублируем здесь построчно)."""
+    gender = people.gender(person_id)
+    subject, prepositional, possessive = _PRONOUNS.get(gender, _PRONOUNS[None])
+    parts: list[str] = []
+    tz = people.value(person_id, people_claims.FIELD_TIMEZONE)
+    if tz:
         try:
-            local_now = datetime.now(ZoneInfo(person.timezone))
-        except ZoneInfoNotFoundError:
+            local_now = datetime.now(ZoneInfo(tz))
+        except (ZoneInfoNotFoundError, ValueError):
             local_now = None
         if local_now is not None:
-            city = f" в {person.city}" if person.city else ""
+            city = people.value(person_id, people_claims.FIELD_CITY)
+            where = f" в {city}" if city else ""
             parts.append(
-                f"У {prepositional}{city} сейчас "
+                f"У {prepositional}{where} сейчас "
                 f"{local_now:%H:%M} ({ai_tools.WEEKDAYS_RU[local_now.weekday()]}) — "
                 f"это {possessive} часовой пояс, а не пояс сервера выше; называй "
-                f"именно это время, если он{'а' if person.gender == 'f' else ''} "
-                f"спросит который час или это иначе уместно."
+                "именно это время, если спросят, который час, или это иначе уместно."
             )
-
-    age = _person_age(person, date.today())
+    birth_date = people.value(person_id, people_claims.FIELD_BIRTH_DATE)
+    age = _person_age(birth_date, date.today())
     if age is not None:
-        parts.append(f"Точный возраст {subject} сейчас: {age} лет.")
-
+        parts.append(f"Точный возраст ({subject}) сейчас: {age} лет.")
     # Живая находка 2026-09-23: возраст выше уже считался из birth_date, а
     # сам день рождения (число и месяц) собеседнику не сообщался ни разу.
     # ВАЖНО (выяснилось при живой проверке): на ПРЯМОЙ вопрос о СВОЁМ дне
@@ -722,17 +698,10 @@ def _known_person_note(person: PersonConfig) -> str | None:
     # llm-prompt.toml, не в репозитории) НАМЕРЕННО велит притворяться, что
     # не знает — это осознанная черта персонажа пользователя, не баг, и эта
     # строка её не переопределяет (промпт персонажа важнее любой заметки).
-    # Полезна эта строка ровно для того случая, который тот же промпт прямо
-    # РАЗРЕШАЕТ — вопрос о дне рождения ДРУГОГО члена семьи («когда у
-    # Андрея день рождения?»): там из memory/recall дата не всегда
-    # долетает надёжно (несколько похожих ФИО-фактов путают bm25-ранжирование),
-    # а PersonConfig даёт точный ответ без гадания.
-    birthday = _person_birthday_ru(person)
+    birthday = _person_birthday_ru(birth_date)
     if birthday is not None:
-        possessive_cap = possessive[0].upper() + possessive[1:]
-        parts.append(f"{possessive_cap} день рождения: {birthday}.")
-
-    return " ".join(parts)
+        parts.append(f"День рождения ({possessive}): {birthday}.")
+    return " ".join(parts) or None
 
 
 # Реплай на явно длинное сообщение (например, кто-то процитировал большой
@@ -806,15 +775,12 @@ async def _people_context_lines(
     message: Message,
     store: Store,
     book: SubscriptionBook | None,
-    node_link: ServiceLink,
-    settings: Settings | None,
+    people: PeopleBook,
 ) -> list[str]:
-    """Этап 54.3: карточки собеседника, участников группы и его знакомых
-    из graph_memory (раздел people) — пол и прозвища, общие для всех чатов.
-
-    Приоритет пола: settings.people (конфиг владельца) → карточка → догадка
-    модели по имени. Знакомые идут строкой «имя — id — пол» и без карточки:
-    по id их адресуют tell/request_acquaintance."""
+    """Карточки собеседника, участников группы и его знакомых (Этап 58,
+    people/book.py) — имя, пол, прозвища, местное время и возраст, общие для
+    всех чатов. Знакомые идут строкой «имя — id — пол»: по id их адресуют
+    tell/request_acquaintance."""
     user = message.from_user
     if user is None:
         return []
@@ -834,32 +800,22 @@ async def _people_context_lines(
     for row in await store.relationships_for(speaker_id, status="confirmed"):
         other = row["guest_b"] if row["guest_a"] == speaker_id else row["guest_a"]
         acquaintances.append(other)
-        sub = book.for_chat(other) if book is not None else None
-        if sub is not None:
-            names.setdefault(other, sub.invited_user or sub.name)
-
-    cards = await people_cards.fetch_person_cards(
-        node_link, [speaker_id, *participants, *acquaintances]
-    )
 
     def name_of(person_id: int) -> str | None:
-        if person_id in names:
-            return names[person_id]
-        sub = book.for_chat(person_id) if book is not None else None
-        return (sub.invited_user or sub.name) if sub is not None else None
+        return people.display(person_id) or names.get(person_id)
 
     lines: list[str] = []
-    known = _find_known_person(settings, user) if settings else None
-    note = people_cards.speaker_card_note(
-        cards.get(speaker_id), name_of, known_gender=known.gender if known else None
-    )
-    if note:
-        lines.append(note)
+    for note in (
+        people_cards.speaker_card_note(people.card(speaker_id), name_of),
+        _speaker_life_note(people, speaker_id),
+    ):
+        if note:
+            lines.append(note)
     if participants:
         lines.append(
             "Участники этого чата: "
             + "; ".join(
-                people_cards.roster_line(p, names.get(p) or "?", cards.get(p), name_of)
+                people_cards.roster_line(p, name_of(p) or "?", people.card(p), name_of)
                 for p in participants
             )
             + "."
@@ -868,7 +824,7 @@ async def _people_context_lines(
         lines.append(
             "Знакомые собеседника (им можно передавать сообщения, адресуй по id): "
             + "; ".join(
-                people_cards.roster_line(a, name_of(a) or "?", cards.get(a), name_of)
+                people_cards.roster_line(a, name_of(a) or "?", people.card(a), name_of)
                 for a in acquaintances
             )
             + "."
@@ -902,10 +858,10 @@ async def _build_context_note(
     сейчас (§8.1 плана — маленькие локальные модели плохо знают "сейчас", а
     время нужно почти на каждый запрос, отдельного тула для этого не
     заводим) — плюс отдельно личное время самого Альфреда (ALFRED_TIMEZONE,
-    2026-07-25), кто сейчас пишет — включая местное время/возраст, если это
-    известный собеседник из settings.people (см. _known_person_note), кто
-    начал этот тред, кто ещё обращался к Альфреду в этом чате, и что за
-    сообщение цитируют/на что отвечают (см. _reply_context_lines).
+    2026-07-25), кто сейчас пишет (карточка собеседника — в ``people_lines``,
+    см. _people_context_lines), кто начал этот тред, кто ещё обращался к
+    Альфреду в этом чате, и что за сообщение цитируют/на что отвечают (см.
+    _reply_context_lines).
 
     ``graph_facts`` — вызывающий (request_alfred) может смешать в один
     список результаты ДВУХ разных запросов в graph_memory: обычный поиск по
@@ -988,11 +944,6 @@ async def _build_context_note(
     is_group = message.chat is not None and message.chat.type in ("group", "supergroup")
     if sender_name is not None:
         lines.append(f"Сейчас с тобой говорит: {sender_name}.")
-    known_person = _find_known_person(settings, message.from_user) if settings else None
-    if known_person is not None:
-        note = _known_person_note(known_person)
-        if note:
-            lines.append(note)
     if people_lines:
         lines.extend(people_lines)
     if sender_name is not None and is_group:
@@ -1227,6 +1178,9 @@ async def request_alfred(
     # раз — комплект нужен и заметке (знает ли он про интернет), и tool_ctx.
     subscription = book.for_chat(message.chat.id) if message.chat else None
     has_web_search = SURFING_TOOL in ai_tools.tools_for(subscription).handlers
+    # Карточки людей (Этап 58) — снимок на ход: справка, тулы и доставка
+    # читают имена и пол отсюда.
+    people = await PeopleBook.load(store, book)
     recall_calls = [
         recall_facts(
             node_link,
@@ -1239,8 +1193,8 @@ async def request_alfred(
             message.text or "",
         ),
     ]
-    # Этап 42.5(b): у гостя (не в settings.people, см. _find_known_person) нет
-    # структурного профиля вообще — только то, что накопилось в graph_memory
+    # Этап 42.5(b): у гостя без карточки (Этап 58) нет структурного профиля
+    # вообще — только то, что накопилось в graph_memory
     # через обычные реплики (piggyback_dialogue_episode, Этап 42.2, пишет
     # КАЖДЫЙ ход в граф уже сегодня — заводить отдельный путь записи под
     # "представиться" не нужно). Решение пользователя: НЕ структурная таблица
@@ -1254,7 +1208,8 @@ async def request_alfred(
     # dialogue_id, см. bot/handlers/ai.py) длиннее одного элемента только
     # если в треде уже был обмен репликами; синтетический первый промпт
     # (OPENING_PROMPT/текст команды) — всегда ровно один элемент.
-    if _find_known_person(settings, message.from_user) is None and len(history) <= 1:
+    sender = message.from_user
+    if sender is not None and not people.card(sender.id) and len(history) <= 1:
         sender_name = display_name(message.from_user)
         if sender_name:
             recall_calls.append(
@@ -1264,9 +1219,7 @@ async def request_alfred(
                     f"Кто такой(-ая) {sender_name} и как к нему/ней обращаться?",
                 )
             )
-    # Карточки людей (Этап 54.3) — в том же gather: mycraft спит → [] за
-    # тот же короткий таймаут, что и у графа, а не последовательно сверху.
-    people_task = _people_context_lines(message, store, book, node_link, settings)
+    people_task = _people_context_lines(message, store, book, people)
     *recall_results, people_lines = await asyncio.gather(*recall_calls, people_task)
     memory_facts = recall_results[0]
     graph_facts = recall_results[1] + (recall_results[2] if len(recall_results) > 2 else [])
@@ -1459,6 +1412,7 @@ async def request_alfred(
             notifier=notifier,
             store=store,
             author=display_name(message.from_user),
+            people=people,
             pending_actions=pending_actions,
             interactives=interactives,
             user_id=message.from_user.id if message.from_user else None,

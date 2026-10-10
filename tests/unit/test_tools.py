@@ -2480,7 +2480,7 @@ async def test_vpn_apk_without_cache_tells_to_use_bot_ui(store):
     assert "/vpn" in result
 
 
-# --- note_person (Этап 54.2) ---
+# --- note_person (Этап 54.2, с Этапа 58 — в person_claims) ---
 
 SPEAKER = 501
 FRIEND = 502
@@ -2493,30 +2493,53 @@ def _person_ctx(store, link, *, user_id=SPEAKER):
     return ctx
 
 
+def _claims(rows):
+    return [(r["subject_id"], r["field"], r["value"], r["by_id"], r["strength"]) for r in rows]
+
+
 async def test_note_person_about_self_uses_speaker_id(store):
     link = _FakeNodeLink()
-    result = await tools.tool_note_person(
-        _person_ctx(store, link), {"gender": "мужчина", "alias": ["Лили"]}
-    )
+    ctx = _person_ctx(store, link)
+    result = await tools.tool_note_person(ctx, {"gender": "мужчина", "alias": ["Лили"]})
     assert "со слов самого человека" in result
-    sent = [args for _action, args, _dst in link.calls]
-    assert sent == [
-        {"subject_id": SPEAKER, "field": "gender", "value": "m", "by_id": SPEAKER},
-        {"subject_id": SPEAKER, "field": "alias", "value": "Лили", "by_id": SPEAKER},
+    assert _claims(await store.person_claims()) == [
+        (SPEAKER, "gender", "m", SPEAKER, "self"),
+        (SPEAKER, "alias", "Лили", SPEAKER, "self"),
     ]
-    assert link.calls[0][0] == "person_claim"
+    assert link.calls == []  # граф больше не трогаем
+    assert ctx.people.gender(SPEAKER) == "m"  # снимок хода обновлён
+
+
+async def test_note_person_records_birth_date_city_and_timezone(store):
+    result = await tools.tool_note_person(
+        _person_ctx(store, _FakeNodeLink()),
+        {"birth_date": "1990-04-29", "city": "Казань", "timezone": "Europe/Moscow"},
+    )
+    assert result.startswith("записал")
+    assert {(f, v) for _s, f, v, _b, _st in _claims(await store.person_claims())} == {
+        ("birth_date", "1990-04-29"),
+        ("city", "Казань"),
+        ("timezone", "Europe/Moscow"),
+    }
+
+
+async def test_note_person_rejects_bad_timezone_and_date(store):
+    ctx = _person_ctx(store, _FakeNodeLink())
+    assert (await tools.tool_note_person(ctx, {"timezone": "Москва"})).startswith("ошибка")
+    assert (await tools.tool_note_person(ctx, {"birth_date": "29 апреля"})).startswith("ошибка")
+    assert await store.person_claims() == []
 
 
 async def test_note_person_about_acquaintance_is_weak(store):
     now = datetime.now(tz=UTC)
     await store.add_confirmed_relationship(FRIEND, SPEAKER, "acquaintance", now, now)
-    link = _FakeNodeLink()
     result = await tools.tool_note_person(
-        _person_ctx(store, link), {"person_id": FRIEND, "name": "Милана"}
+        _person_ctx(store, _FakeNodeLink()), {"person_id": FRIEND, "name": "Милана"}
     )
     assert "знакомого" in result
-    assert link.calls[0][1]["by_id"] == SPEAKER
-    assert link.calls[0][1]["subject_id"] == FRIEND
+    assert _claims(await store.person_claims()) == [
+        (FRIEND, "name", "Милана", SPEAKER, "acquaintance")
+    ]
 
 
 async def test_note_person_refuses_strangers(store):

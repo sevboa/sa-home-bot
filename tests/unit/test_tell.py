@@ -8,12 +8,14 @@ from sa_home_bot.bot import recipients
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.config import (
     GuestSubscriptionConfig,
-    PersonConfig,
     Settings,
     SubscriptionConfig,
 )
+from sa_home_bot.people.book import PeopleBook
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.tasks import protocol as task_protocol
+
+from .people_helpers import people_book
 
 ANDREY_CHAT = 555
 GROUP_CHAT = -100500
@@ -36,22 +38,16 @@ def _book() -> SubscriptionBook:
     )
 
 
-def _people() -> list[PersonConfig]:
-    return [
-        PersonConfig(
-            telegram_username="andrey",
-            telegram_id=ANDREY_CHAT,
-            full_name="Андрей Иванов",
-            gender="m",
-        ),
-        # Известен конфигу, но подписки нет — писать ему нельзя.
-        PersonConfig(
-            telegram_username="stranger",
-            telegram_id=4242,
-            full_name="Пётр Незнакомый",
-            gender="m",
-        ),
-    ]
+def _people(book: SubscriptionBook | None = None) -> PeopleBook:
+    return people_book(
+        book or _book(),
+        {
+            ANDREY_CHAT: {"name": "Андрей Иванов", "gender": "m"},
+            # Есть карточка, но подписки нет — писать ему нельзя.
+            4242: {"name": "Пётр Незнакомый", "gender": "m"},
+        },
+        {ANDREY_CHAT: ("Андрей", "andrey"), 4242: ("Пётр", "stranger")},
+    )
 
 
 class FakeNotifier:
@@ -101,13 +97,14 @@ def _ctx(**over):
         chat_id=1,
         dialogue_id=10,
         trigger_message_id=10,
-        settings=Settings(people=_people()),
+        settings=Settings(),
         book=_book(),
         notifier=FakeNotifier(),
         store=FakeStore(),
         author="Алексей (@sevboa)",
     )
     defaults.update(over)
+    defaults.setdefault("people", _people(defaults.get("book")))
     # В реальном потоке (bot/ai_flow.py) ctx.subscription — это подписка
     # САМОГО звонящего чата, не получателя; здесь по умолчанию берём её из
     # book по chat_id, как и наяву, если тест не передал subscription сам.
@@ -154,7 +151,7 @@ def test_ambiguity_returns_all_candidates():
             SubscriptionConfig(name="Андрей Петров", chat_id=12, allowed_commands=["chat@llm"]),
         ]
     )
-    found = recipients.find_recipients("Андрей", book, [])
+    found = recipients.find_recipients("Андрей", book, people_book(book))
     assert sorted(r.chat_id for r in found) == [11, 12]
 
 
@@ -578,19 +575,11 @@ async def test_tell_reaches_owner_by_role_word_not_name():
 
 async def test_tell_by_personal_name_has_no_owner_role_marker():
     notifier = FakeNotifier()
-    people = [
-        PersonConfig(
-            telegram_username="asevbo",
-            telegram_id=1,
-            full_name="Алексей Александрович Севбо",
-            gender="m",
-        )
-    ]
     ctx = _ctx(
         chat_id=ANDREY_CHAT,
         book=_book(),
         notifier=notifier,
-        settings=Settings(people=people),
+        people=people_book(_book(), {1: {"name": "Алексей Александрович Севбо"}}),
     )
     result = await ai_tools.tool_tell(ctx, {"recipient_id": OWNER_CHAT, "text": "привет"})
     assert "передано" in result
@@ -745,15 +734,12 @@ async def test_notify_guest_still_unavailable_without_notifier_or_emit():
 # --- решение 2026-09-27: владелец по роли — всем, по имени — знакомым ------
 
 
-def _owner_people() -> list[PersonConfig]:
-    return [
-        PersonConfig(
-            telegram_username="asevbo",
-            telegram_id=OWNER_CHAT,
-            full_name="Алексей Александрович Севбо",
-            gender="m",
-        )
-    ]
+def _owner_people() -> PeopleBook:
+    return people_book(
+        _permission_book(),
+        {OWNER_CHAT: {"name": "Алексей Александрович Севбо", "gender": "m"}},
+        {OWNER_CHAT: ("Алексей", "asevbo")},
+    )
 
 
 async def test_owner_by_personal_name_needs_acquaintance():
@@ -764,7 +750,7 @@ async def test_owner_by_personal_name_needs_acquaintance():
         book=_permission_book(),
         notifier=notifier,
         store=FakeStore(acquainted=()),
-        settings=Settings(people=_owner_people()),
+        people=_owner_people(),
     )
     result = await ai_tools.tool_tell(ctx, {"recipient_id": OWNER_CHAT, "text": "привет"})
     assert "не знакомы" in result and "владельцу" in result
@@ -785,7 +771,7 @@ async def test_owner_by_name_via_tasks_bridge_requires_acquaintance():
         book=_permission_book(),
         notifier=None,
         store=None,
-        settings=Settings(people=_owner_people()),
+        people=_owner_people(),
         emit=emit,
     )
     await ai_tools.tool_tell(ctx, {"recipient_id": OWNER_CHAT, "text": "привет"})
@@ -820,6 +806,7 @@ def _twins_book() -> SubscriptionBook:
 
 
 def _find_ctx(chat_id, acquainted, **over):
+    over.setdefault("people", people_book(_twins_book()))
     return _ctx(
         chat_id=chat_id,
         book=_twins_book(),
@@ -932,27 +919,18 @@ async def test_find_person_for_acquaintance_points_to_request_acquaintance():
     assert f"request_acquaintance(recipient_id={PLAIN_GUEST_CHAT})" in result
 
 
-class _CardsLink:
-    """graph_memory с одной карточкой: прозвище «Мила» у FAMILY_B_CHAT."""
-
-    async def command(self, action, args=None, dst=None, *, timeout=None):
-        assert action == "person_cards"
-        return {
-            "cards": {
-                str(FAMILY_B_CHAT): {
-                    "gender": {"value": "f", "by_id": FAMILY_B_CHAT, "strength": "self"},
-                    "name": None,
-                    "aliases": [{"value": "Мила", "by_id": FAMILY_B_CHAT, "strength": "self"}],
-                }
-            }
-        }
+def _cards() -> PeopleBook:
+    """Одна карточка: прозвище «Мила» у FAMILY_B_CHAT, женщина — сама сказала."""
+    return people_book(
+        _twins_book(), {FAMILY_B_CHAT: {"gender": "f", "alias": ["Мила"]}}, by_id=FAMILY_B_CHAT
+    )
 
 
 async def test_find_person_matches_alias_from_card_and_tells_gender():
     ctx = _find_ctx(
         PLAIN_GUEST_CHAT,
         ((PLAIN_GUEST_CHAT, FAMILY_A_CHAT), (PLAIN_GUEST_CHAT, FAMILY_B_CHAT)),
-        node_link=_CardsLink(),
+        people=_cards(),
     )
     result = await ai_tools.tool_find_person(ctx, {"description": "Миле"})
     assert result.startswith("Нашёл:")
@@ -964,7 +942,7 @@ async def test_tell_result_is_inflected_by_card_gender():
     ctx = _find_ctx(
         PLAIN_GUEST_CHAT,
         ((PLAIN_GUEST_CHAT, FAMILY_B_CHAT),),
-        node_link=_CardsLink(),
+        people=_cards(),
         notifier=notifier,
     )
     result = await ai_tools.tool_tell(ctx, {"recipient_id": FAMILY_B_CHAT, "text": "привет"})
@@ -1019,9 +997,10 @@ async def test_id_of_non_acquaintance_still_refused():
     assert notifier.sent == []
 
 
-async def test_guests_list_shows_config_name_and_nick():
-    """Живая находка 2026-10-09: брат владельца был в списке как «Kein»
-    без имени и ника из [[people]]."""
+async def test_guests_list_shows_card_name_first_with_nick():
+    """Живые находки 2026-10-09/10: брат владельца был в списке как «Kein»,
+    а с именем в «ещё: …» модель его всё равно не нашла — имя читает по
+    началу строки. Имя из карточки — первым, подпись подписки — в «ещё»."""
     book = SubscriptionBook.from_config(
         [SubscriptionConfig(name="me", chat_id=1, allowed_commands=["*"])],
         [
@@ -1033,4 +1012,29 @@ async def test_guests_list_shows_config_name_and_nick():
     ctx = _ctx(book=book)
     result = await ai_tools.tool_guests_list(ctx, {})
     line = next(row for row in result.splitlines() if str(ANDREY_CHAT) in row)
-    assert "Kein" in line and "Андрей Иванов" in line and "@andrey" in line
+    assert line.startswith(f"• Андрей Иванов (@andrey) (chat_id {ANDREY_CHAT}, ещё: ")
+    assert "Kein" in line
+
+
+async def test_find_person_finds_brother_by_card_name_not_namesake():
+    """Живая находка 2026-10-10: «Андрей Севбо» — брат владельца в подписке
+    «Kein», рядом гость Andrey (@AndreyPietilya). Карточка решает, кто есть кто."""
+    book = SubscriptionBook.from_config(
+        [SubscriptionConfig(name="me", chat_id=1, allowed_commands=["*"])],
+        [
+            GuestSubscriptionConfig(
+                name="Kein", chat_id=ANDREY_CHAT, allowed_commands=["chat@llm"]
+            ),
+            GuestSubscriptionConfig(
+                name="Andrey (@AndreyPietilya)", chat_id=600, allowed_commands=["chat@llm"]
+            ),
+        ],
+    )
+    people = people_book(
+        book, {ANDREY_CHAT: {"name": "Андрей Александрович Севбо"}}, {ANDREY_CHAT: ("Kein", "kein")}
+    )
+    ctx = _ctx(book=book, people=people)
+    result = await ai_tools.tool_find_person(ctx, {"description": "Андрей Севбо"})
+    assert result.startswith("Нашёл: Андрей Александрович Севбо (@kein) — id 555")
+    listed = await ai_tools.tool_guests_list(ctx, {})
+    assert "• Андрей Александрович Севбо (@kein) (chat_id 555, ещё: Kein) — прав: 1" in listed

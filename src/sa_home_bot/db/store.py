@@ -1009,6 +1009,51 @@ class Store:
         )
         return [dict(r) for r in await cur.fetchall()]
 
+    # --- карточки людей (Этап 58, sa_home_bot/people/) ---
+
+    async def add_person_claims(self, claims: list[dict[str, Any]]) -> None:
+        """Утверждения (subject_id, field, value, by_id, strength, at) —
+        одной транзакцией: note_person пишет сразу несколько полей."""
+        async with self.db.transaction() as conn:
+            await conn.executemany(
+                "INSERT INTO person_claims(subject_id, field, value, by_id, strength, at) "
+                "VALUES(?, ?, ?, ?, ?, ?)",
+                [
+                    (c["subject_id"], c["field"], c["value"], c["by_id"], c["strength"], c["at"])
+                    for c in claims
+                ],
+            )
+
+    async def person_claims(self) -> list[dict]:
+        """Все утверждения: людей — десятки, грузим целиком на ход /ai."""
+        cur = await self.db.conn.execute("SELECT * FROM person_claims ORDER BY id")
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def upsert_person_profile(
+        self, user_id: int, first_name: str, last_name: str, username: str, now: datetime
+    ) -> None:
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "INSERT INTO person_profiles(user_id, first_name, last_name, username, seen_at) "
+                "VALUES(?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
+                "first_name=excluded.first_name, last_name=excluded.last_name, "
+                "username=excluded.username, seen_at=excluded.seen_at",
+                (user_id, first_name, last_name, username, _iso(now)),
+            )
+
+    async def person_profiles(self) -> list[dict]:
+        cur = await self.db.conn.execute("SELECT * FROM person_profiles")
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def latest_turn_user_names(self) -> list[dict]:
+        """Последнее ``user_name`` каждого ``user_id`` из ai_turns — профиль
+        Telegram тех, кто писал до появления person_profiles (Этап 58.2)."""
+        cur = await self.db.conn.execute(
+            "SELECT user_id, user_name, MAX(created_at) AS at FROM ai_turns "
+            "WHERE user_id IS NOT NULL AND user_name IS NOT NULL GROUP BY user_id"
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
     # --- guest_relationships (Этап 42.6.1, связи между гостями) ---
 
     async def get_relationship(self, relationship_id: int) -> dict | None:
