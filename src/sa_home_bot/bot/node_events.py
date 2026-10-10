@@ -59,7 +59,7 @@ from datetime import UTC, datetime
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from sa_home_bot.bot import commands
+from sa_home_bot.bot import commands, vpn_nodes, vpn_notify
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.ai_flow import (
     ALBERT_ASLEEP,
@@ -567,19 +567,92 @@ def render_vpn_check(name: str, data: dict) -> str | None:
     return "\n".join(lines)
 
 
-def _vpn_grant_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="➕ 100 ГБ",
-                    callback_data=commands.action_callback(
-                        "grant_extra", service=vpn_protocol.SERVICE_NAME
-                    ),
+_VPN_GUEST_EVENTS = (
+    vpn_protocol.EVENT_VPN_QUOTA_WARNING,
+    vpn_protocol.EVENT_VPN_QUOTA_EXCEEDED,
+    vpn_protocol.EVENT_VPN_ACCESS_RESTORED,
+    vpn_protocol.EVENT_VPN_EXTRA_RESOLVED,
+)
+_VPN_ADMIN_EVENTS = (
+    vpn_protocol.EVENT_VPN_EXTRA_REQUESTED,
+    vpn_protocol.EVENT_VPN_NODE_QUOTA_WARNING,
+    vpn_protocol.EVENT_VPN_PEER_ISSUED,
+    vpn_protocol.EVENT_VPN_SERVER_RESTORED,
+)
+
+
+async def _other_countries_work(node_link, chat_id: int, node: str) -> bool:
+    """Есть ли у человека другие открытые страны с остатком — спрашиваем ноды;
+    не вышло спросить — не обещаем (лучше недосказать, чем соврать)."""
+    if node_link is None:
+        return False
+    try:
+        answered = await vpn_nodes.fanout(
+            node_link, vpn_protocol.ACTION_USAGE, {"chat_id": chat_id}
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    return vpn_notify.others_with_quota(answered, node)
+
+
+async def _handle_vpn_event(name, data, book, notifier, store, node_link) -> None:
+    """Уведомления службы vpn: страна — по ноде-источнику события (57.7).
+    Пробник (chat_id=0) не получает ничего."""
+    country = vpn_notify.country_of(data)
+    chat_id = data.get("chat_id")
+    if name in _VPN_GUEST_EVENTS:
+        if not chat_id:
+            return
+        markup = None
+        if name == vpn_protocol.EVENT_VPN_QUOTA_WARNING:
+            text = vpn_notify.quota_warning_text(country, int(data.get("remaining_bytes") or 0))
+            markup = vpn_notify.grant_keyboard(country)
+        elif name == vpn_protocol.EVENT_VPN_QUOTA_EXCEEDED:
+            others = await _other_countries_work(node_link, chat_id, country.node)
+            text = vpn_notify.quota_exceeded_text(country, others_work=others)
+            markup = vpn_notify.grant_keyboard(country)
+        elif name == vpn_protocol.EVENT_VPN_ACCESS_RESTORED:
+            text = vpn_notify.access_restored_text(country)
+        else:
+            text = vpn_notify.extra_resolved_text(country, bool(data.get("approved")))
+        await notifier.send_direct(chat_id, text, reply_markup=markup)
+        return
+    if name == vpn_protocol.EVENT_VPN_EXTRA_REQUESTED:
+        request_id = data.get("request_id")
+        if not chat_id or request_id is None:
+            return
+        gb = float(data.get("bytes") or 0) / 1_000_000_000
+        text = vpn_notify.extra_requested_text(country, chat_id, gb, request_id)
+        await store.record_event(name, None, text, datetime.now(tz=UTC))
+        await notify_admins(
+            book, notifier, text, reply_markup=resolve_request_callback(int(request_id))
+        )
+    elif name == vpn_protocol.EVENT_VPN_NODE_QUOTA_WARNING:
+        text = vpn_notify.node_quota_text(
+            country, int(data.get("used_bytes") or 0), int(data.get("limit_bytes") or 0)
+        )
+        await store.record_event(name, None, text, datetime.now(tz=UTC))
+        await notify_admins(book, notifier, text)
+    elif name == vpn_protocol.EVENT_VPN_PEER_ISSUED:
+        if not chat_id:
+            return
+        text = vpn_notify.peer_issued_text(country, chat_id, str(data.get("device_label") or ""))
+        await store.record_event(name, None, text, datetime.now(tz=UTC))
+        await notify_admins(book, notifier, text)
+    elif name == vpn_protocol.EVENT_VPN_SERVER_RESTORED:
+        items = vpn_notify.real_affected(data.get("affected"))
+        for guest, devices in vpn_notify.group_by_chat(items).items():
+            try:
+                await notifier.send_direct(
+                    guest,
+                    vpn_notify.restored_guest_text(country, devices),
+                    reply_markup=vpn_notify.restored_guest_keyboard(country, devices),
                 )
-            ]
-        ]
-    )
+            except Exception:  # noqa: BLE001 — один недоставленный не должен глушить остальных
+                log.warning("vpn: не доставил «сервер переустановлен» в %s", guest, exc_info=True)
+        text = vpn_notify.restored_owner_text(country, items)
+        await store.record_event(name, data.get("node"), text, datetime.now(tz=UTC))
+        await notify_admins(book, notifier, text)
 
 
 def build_close_ssh_keyboard(node_id: str) -> InlineKeyboardMarkup:
@@ -741,82 +814,10 @@ def build_node_event_handler(
                 reply_markup=build_close_ssh_keyboard(node_id),
             )
             return
-        elif name == vpn_protocol.EVENT_VPN_QUOTA_WARNING:
-            chat_id = data.get("chat_id")
-            if chat_id is None:
-                return
-            remaining_gb = float(data.get("remaining_bytes") or 0) / 1_000_000_000
-            await notifier.send_direct(
-                chat_id,
-                f"📶 VPN: осталось ~{remaining_gb:.1f} ГБ трафика до конца месяца.",
-                reply_markup=_vpn_grant_keyboard(),
+        elif name in _VPN_GUEST_EVENTS or name in _VPN_ADMIN_EVENTS:
+            await _handle_vpn_event(
+                name, data, book, notifier, store, get_node_link() if get_node_link else None
             )
-            return
-        elif name == vpn_protocol.EVENT_VPN_QUOTA_EXCEEDED:
-            chat_id = data.get("chat_id")
-            if chat_id is None:
-                return
-            await notifier.send_direct(
-                chat_id,
-                "⛔️ VPN: месячный лимит трафика исчерпан, доступ приостановлен. "
-                "Можно добавить ещё через /vpn или дождаться начала месяца.",
-                reply_markup=_vpn_grant_keyboard(),
-            )
-            return
-        elif name == vpn_protocol.EVENT_VPN_ACCESS_RESTORED:
-            chat_id = data.get("chat_id")
-            if chat_id is None:
-                return
-            await notifier.send_direct(chat_id, "✅ VPN: доступ восстановлен.")
-            return
-        elif name == vpn_protocol.EVENT_VPN_EXTRA_REQUESTED:
-            chat_id = data.get("chat_id")
-            request_id = data.get("request_id")
-            if chat_id is None or request_id is None:
-                return
-            gb = float(data.get("bytes") or 0) / 1_000_000_000
-            extra_text = (
-                f"✋ VPN: гость <code>{chat_id}</code> просит ещё {gb:.0f} ГБ "
-                f"(заявка №{request_id})."
-            )
-            await store.record_event(name, None, extra_text, datetime.now(tz=UTC))
-            await notify_admins(
-                book,
-                notifier,
-                extra_text,
-                reply_markup=resolve_request_callback(int(request_id)),
-            )
-            return
-        elif name == vpn_protocol.EVENT_VPN_EXTRA_RESOLVED:
-            chat_id = data.get("chat_id")
-            if chat_id is None:
-                return
-            approved = bool(data.get("approved"))
-            await notifier.send_direct(
-                chat_id,
-                "✅ VPN: заявка на доп. трафик одобрена."
-                if approved
-                else "🚫 VPN: заявка на доп. трафик отклонена.",
-            )
-            return
-        elif name == vpn_protocol.EVENT_VPN_NODE_QUOTA_WARNING:
-            used_gb = float(data.get("used_bytes") or 0) / 1_000_000_000
-            limit_gb = float(data.get("limit_bytes") or 0) / 1_000_000_000
-            node_quota_text = (
-                f"⚠️ VPN: канал jeeves близок к месячному лимиту тарифа — "
-                f"{used_gb:.0f} / {limit_gb:.0f} ГБ."
-            )
-            await store.record_event(name, None, node_quota_text, datetime.now(tz=UTC))
-            await notify_admins(book, notifier, node_quota_text)
-            return
-        elif name == vpn_protocol.EVENT_VPN_PEER_ISSUED:
-            chat_id = data.get("chat_id")
-            if chat_id is None:
-                return
-            device = html.escape(str(data.get("device_label") or ""))
-            issued_text = f"🔐 VPN: выдан доступ гостю <code>{chat_id}</code> ({device})."
-            await store.record_event(name, None, issued_text, datetime.now(tz=UTC))
-            await notify_admins(book, notifier, issued_text)
             return
         elif name in (
             vpn_protocol.EVENT_VPN_CHECK_FAILED,

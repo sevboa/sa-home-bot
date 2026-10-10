@@ -41,6 +41,10 @@ SCREEN_PICK, SCREEN_AWG, SCREEN_NEW = "g", "a", "n"
 KIND_VLESS, KIND_FILE, KIND_AWG, KIND_NEW = "v", "s", "g", "n"
 # Перевыпуск по выбранным: ``reissue:~m<ключ>-<подпись>-<маска>``.
 SCREEN_REISSUE, KIND_MULTI = "r", "m"
+# После переустановки сервера (57.7): ``vpn_card:R<ключ>-<хэш ноды>-<коды транспортов>`` —
+# экран перевыпуска с заранее отмеченными задетыми подключениями этой страны.
+SCREEN_RESTORE = "R"
+_TRANSPORT_CODE = {vd.REALITY: "v", vd.AWG: "a"}
 
 APK_NO_STORE = "nostore"
 MAY_NOT_WORK = "сейчас может не работать"
@@ -429,3 +433,30 @@ def reissue_result_keyboard(key: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="⬅️ К устройству", callback_data=_device_cb(key))]
         ]
     )
+
+
+# --- «сервер переустановлен» (57.7): предвыбор на экране перевыпуска ---------
+
+
+def node_hash(node: str) -> str:
+    return hashlib.sha1(node.encode("utf-8")).hexdigest()[:4]
+
+
+def restore_cb(key: str, node: str, transports: list[str]) -> str:
+    codes = "".join(_TRANSPORT_CODE[t] for t in vd.TRANSPORT_ORDER if t in transports)
+    return card_cb(SCREEN_RESTORE, f"{key}-{node_hash(node)}-{codes}")
+
+
+def parse_restore(rest: str) -> tuple[str, str, str]:
+    key, _, tail = rest.partition("-")
+    nh, _, codes = tail.partition("-")
+    return key, nh, codes
+
+
+def restore_mask(conns: list[vd.Connection], nh: str, codes: str) -> int:
+    """Маска выбора: подключения страны с хэшем ``nh`` и транспортами из ``codes``."""
+    mask = 0
+    for i, conn in enumerate(conns):
+        if node_hash(conn.node) == nh and _TRANSPORT_CODE.get(conn.transport) in codes:
+            mask |= 1 << i
+    return mask

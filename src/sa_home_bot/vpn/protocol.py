@@ -172,8 +172,9 @@ EVENT_VPN_CHECK_RECOVERED = "vpn_check_recovered"
 # Этап 57.1: после reconcile() на старте служба заметила, что ключ сервера
 # сменился (сервер переустановлен / БД восстановлена на новый сервер) — данные
 # {node, location, affected: [{chat_id, device_label, transport}]}. Пробник
-# chat_id=0 в списке не бывает. Бот без обработчика молча пропускает событие
-# (node_events: неизвестное имя -> ``else: return``); обработка — 57.7.
+# chat_id=0 в списке не бывает. Бот (57.7, bot/vpn_notify.py) пишет задетым по
+# одному сообщению, владельцу — сводку; при смене ключа без задетых ``affected``
+# пуст. Квотные события и vpn_peer_issued несут ``node``/``location`` — страну.
 EVENT_VPN_SERVER_RESTORED = "vpn_server_restored"
 
 # Код ошибки ProtoError: гость упёрся в потолок самообслуживания

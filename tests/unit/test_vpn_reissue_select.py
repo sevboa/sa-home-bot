@@ -155,3 +155,12 @@ def test_parse_selection():
     assert vs.parse_selection("abc") == ("abc", None, 0)
     assert vs.parse_selection("abc-1f2e-5") == ("abc", "1f2e", 5)
     assert vs.parse_selection("abc-1f2e-zz") == ("abc", "1f2e", 0)
+
+
+async def test_restore_button_preselects_affected_connections_of_that_country():
+    """57.7: «Обновить» из «сервер переустановлен» → экран перевыпуска с галочками."""
+    cb_data = vs.restore_cb(KEY, "wooster", [vd.REALITY, vd.AWG])
+    cb, _, _ = await _press(cb_data)
+    texts = _texts(cb.message.edit_markups[-1])
+    assert texts[:3] == ["☐ 🇳🇱 VLESS · Hiddify", "☑️ 🇺🇸 VLESS · Hiddify", "☑️ 🇺🇸 AmneziaWG"]
+    assert "🔄 Перевыпустить (2)" in texts

@@ -1323,27 +1323,17 @@ async def test_check_restore_reality_key_change_flags_all_reality_peers(env_both
     ]
 
 
-async def test_old_bot_node_events_ignores_server_restored_event():
-    """Бот без обработчика (до 57.7) не должен ни падать, ни слать уведомлений."""
-    from sa_home_bot.bot.node_events import build_node_event_handler
-    from sa_home_bot.proto.messages import Address, make_event
+async def test_check_restore_key_change_without_affected_still_emits(env_both):
+    svc, awg, xray, events = env_both
+    await svc.check_restore()  # эталон ключей запомнен, пиров нет
+    events.clear()
+    svc._server_pubkey = None
+    awg.server_pub = "new-key"
+    assert await svc.check_restore() == []
+    [event] = _restored(events)
+    assert event["affected"] == [] and "node" in event and "location" in event
 
-    class _Book:
-        def __getattr__(self, _name):
-            raise AssertionError("событие не должно трогать подписки")
 
-    class _Notifier:
-        def __getattr__(self, _name):
-            raise AssertionError("событие не должно слать сообщений")
-
-    handler = build_node_event_handler(_Book(), _Notifier(), object())
-    env = make_event(
-        vpn_protocol.EVENT_VPN_SERVER_RESTORED,
-        {
-            "node": "jeeves",
-            "location": "",
-            "affected": [{"chat_id": 1, "device_label": "x", "transport": "awg"}],
-        },
-        src=Address(node="jeeves", service="vpn"),
-    )
-    await handler(env)
+async def test_quota_events_carry_node_and_location(env_both):
+    svc, awg, xray, events = env_both
+    assert svc._where() == {"node": svc._node, "location": svc._cfg.location}

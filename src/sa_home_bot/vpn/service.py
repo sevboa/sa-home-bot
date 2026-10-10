@@ -943,11 +943,13 @@ class VpnService:
         ):
             fingerprints[TRANSPORT_REALITY] = self._reality_cfg.server_public_key
         affected: dict[tuple[int, str, str], None] = {}
+        key_changed = False
         for transport, current in fingerprints.items():
             meta_key = f"server_key:{transport}"
             recorded = await self._meta_get(meta_key)
             if recorded == current:
                 continue
+            key_changed = key_changed or recorded is not None
             cur = await self._db.conn.execute(
                 "SELECT chat_id, device_label, server_pubkey FROM vpn_peers "
                 "WHERE status = 'active' AND chat_id != ? "
@@ -962,7 +964,9 @@ class VpnService:
         items = [
             {"chat_id": c, "device_label": label, "transport": t} for (c, label, t) in affected
         ]
-        if items:
+        if items or key_changed:
+            # Ключ сменился, а задетых нет — событие всё равно уходит: бот скажет
+            # владельцу одну строку (57.7); гостям при пустом списке не пишет.
             log.warning("vpn: ключ сервера сменился, задето подключений: %d", len(items))
             await self._emit(
                 EVENT_VPN_SERVER_RESTORED,
@@ -1083,7 +1087,12 @@ class VpnService:
 
         await self._emit(
             EVENT_VPN_PEER_ISSUED,
-            {"chat_id": chat_id, "device_label": device_label, "transport": transport},
+            {
+                "chat_id": chat_id,
+                "device_label": device_label,
+                "transport": transport,
+                **self._where(),
+            },
         )
         return {
             **artifacts,
@@ -1644,7 +1653,7 @@ class VpnService:
         request_id = cur.lastrowid
         await self._emit(
             EVENT_VPN_EXTRA_REQUESTED,
-            {"request_id": request_id, "chat_id": chat_id, "bytes": bytes_},
+            {"request_id": request_id, "chat_id": chat_id, "bytes": bytes_, **self._where()},
         )
         return {"request_id": request_id, "status": "pending"}
 
@@ -1682,9 +1691,14 @@ class VpnService:
                 "chat_id": chat_id,
                 "approved": approve,
                 "bytes": row["bytes"],
+                **self._where(),
             },
         )
         return {"request_id": request_id, "status": status}
+
+    def _where(self) -> dict[str, str]:
+        """Откуда событие: бот ставит в текст страну сервера (57.7)."""
+        return {"node": self._node, "location": self._cfg.location}
 
     async def _check_thresholds(self, chat_id: int, month: str) -> None:
         allowed, _base = await self._access(chat_id)
@@ -1704,18 +1718,18 @@ class VpnService:
             if state["blocked_at"] is None:
                 await self._set_quota_state(chat_id, month, blocked_at=_now().isoformat())
                 await self.reconcile()
-                await self._emit(EVENT_VPN_QUOTA_EXCEEDED, {"chat_id": chat_id})
+                await self._emit(EVENT_VPN_QUOTA_EXCEEDED, {"chat_id": chat_id, **self._where()})
                 await self._emit(EVENT_VPN_PEER_BLOCKED, {"chat_id": chat_id})
             return
         if state["blocked_at"] is not None:
             await self._set_quota_state(chat_id, month, blocked_at=None)
             await self.reconcile()
-            await self._emit(EVENT_VPN_ACCESS_RESTORED, {"chat_id": chat_id})
+            await self._emit(EVENT_VPN_ACCESS_RESTORED, {"chat_id": chat_id, **self._where()})
         if remaining <= warn_threshold and state["warned_limit_bytes"] != limit:
             await self._set_quota_state(chat_id, month, warned_limit_bytes=limit)
             await self._emit(
                 EVENT_VPN_QUOTA_WARNING,
-                {"chat_id": chat_id, "remaining_bytes": max(remaining, 0)},
+                {"chat_id": chat_id, "remaining_bytes": max(remaining, 0), **self._where()},
             )
 
     async def _check_node_limit(self, month: str) -> None:
@@ -1733,7 +1747,10 @@ class VpnService:
         if state["warned_limit_bytes"] == limit:
             return
         await self._set_quota_state(NODE_SENTINEL_CHAT_ID, month, warned_limit_bytes=limit)
-        await self._emit(EVENT_VPN_NODE_QUOTA_WARNING, {"used_bytes": total, "limit_bytes": limit})
+        await self._emit(
+            EVENT_VPN_NODE_QUOTA_WARNING,
+            {"used_bytes": total, "limit_bytes": limit, **self._where()},
+        )
 
     # --- прокси (mtg/microsocks на jeeves) ---
     #

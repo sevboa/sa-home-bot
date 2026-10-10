@@ -57,6 +57,7 @@ from sa_home_bot.bot import (
     vpn_faq,
     vpn_help,
     vpn_nodes,
+    vpn_notify,
     vpn_proxy_screen,
     vpn_report,
     vpn_settings,
@@ -1274,6 +1275,33 @@ async def _show_reissue_select(
             mask,
             can_run=_allows(subscription, vpn_protocol.ACTION_REISSUE),
         ),
+    )
+
+
+async def _show_restore_select(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    subscription: Subscription,
+    config: Settings,
+    rest: str,
+) -> None:
+    """``vpn_card:R<ключ>-<хэш ноды>-<транспорты>`` — кнопка «Обновить» из «сервер
+    переустановлен» (57.7): экран перевыпуска 57.5 с отмеченными задетыми
+    подключениями этой страны."""
+    key, node_hash, codes = vpn_settings.parse_restore(rest)
+    found = await _fresh_device(callback, node_link, subscription, config, key)
+    if found is None:
+        return
+    device, _servers = found
+    conns = vpn_settings.reissue_connections(device)
+    mask = vpn_settings.restore_mask(conns, node_hash, codes)
+    await _show_reissue_select(
+        callback,
+        node_link,
+        subscription,
+        config,
+        f"{key}-{vpn_settings.list_signature(conns)}-{mask:x}",
+        answered=False,
     )
 
 
@@ -2965,6 +2993,8 @@ async def handle_action(
             await _wizard_show(
                 callback, node_link, notifier, config, subscription, book, value, store
             )
+        elif value and value[0] == vpn_settings.SCREEN_RESTORE:
+            await _show_restore_select(callback, node_link, subscription, config, value[1:])
         elif value and value[0] == vpn_settings.SCREEN_REISSUE:
             await _show_reissue_select(
                 callback, node_link, subscription, config, value[1:], answered=False
@@ -3291,7 +3321,9 @@ async def _handle_set_access(
         return
 
     await callback.answer(_access_toast(server))
-    await _notify_guest_access(notifier, chat_id, server, opened=bool(server.get("allowed")))
+    await _notify_guest_access(
+        notifier, chat_id, server, opened=bool(server.get("allowed")), node_link=node_link
+    )
     text, keyboard = vpn_admin_view.build_location_view(guest, server)
     await _redraw_screen(callback, text, keyboard)
 
@@ -3307,21 +3339,35 @@ def _access_toast(server: dict) -> str:
 
 
 async def _notify_guest_access(
-    notifier: Notifier, chat_id: int, server: dict, *, opened: bool
+    notifier: Notifier,
+    chat_id: int,
+    server: dict,
+    *,
+    opened: bool,
+    node_link: ServiceLink | None = None,
 ) -> None:
     """Сказать гостю, что у него изменилось. Отдельного события протокола не
     заводим: кнопку нажал человек в боте — бот и сообщает (события службы
-    ходят по другому поводу, см. bot/node_events.py)."""
+    ходят по другому поводу, см. bot/node_events.py). Тексты — bot/vpn_notify.py;
+    есть ли у человека устройства, спрашиваем у нод (не вышло — без обещаний)."""
     if not _is_private(chat_id):
         return
-    where = html.escape(str(server.get("label") or server.get("node") or "VPN"))
+    country = vpn_devices.Country(
+        str(server.get("node") or ""), str(server.get("label") or server.get("node") or "")
+    )
     if opened:
+        has_devices: bool | None = None
+        if node_link is not None:
+            with contextlib.suppress(Exception):
+                error, servers, _down = await _card(node_link, chat_id)
+                has_devices = bool(vpn_devices.build_devices(servers)) if error is None else None
         base_gb = server.get("base_limit_bytes", 0) / 1_000_000_000
-        text = f"📶 VPN: вам открыт доступ — {where}, {base_gb:.0f} ГБ в месяц. Карточка: /vpn"
+        text = vpn_notify.access_opened_text(country, base_gb, has_devices=has_devices)
+        markup = vpn_notify.access_keyboard(has_devices=has_devices)
     else:
-        text = f"📶 VPN: доступ к локации {where} закрыт."
+        text, markup = vpn_notify.access_closed_text(country), None
     with contextlib.suppress(Exception):
-        await notifier.send_direct(chat_id, text)
+        await notifier.send_direct(chat_id, text, reply_markup=markup)
 
 
 def _parse_offset(value: str | None) -> int:
