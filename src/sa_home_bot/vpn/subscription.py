@@ -254,7 +254,7 @@ def render_headers(
         "content-disposition": f"attachment; filename*=UTF-8''{quote(title, safe='')}",
         "cache-control": "no-store",
         "x-robots-tag": "noindex, nofollow",
-        "referrer-policy": "no-referrer",
+        "referrer-policy": "same-origin",
     }
     if support_url:
         headers["support-url"] = support_url
@@ -347,7 +347,7 @@ def _layout(title: str, body: str, script: str = "") -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<meta name="referrer" content="no-referrer">
+<meta name="referrer" content="same-origin">
 <title>{e(title)}</title>
 <style>{_CSS}</style>
 </head>

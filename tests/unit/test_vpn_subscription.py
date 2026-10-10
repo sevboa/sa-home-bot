@@ -588,7 +588,7 @@ async def test_web_headers_no_server_and_bare_404s(awg_swarm):
     for resp in (page, await cl.get("/s/" + "A" * 32), await cl.get("/nope")):
         assert "Server" not in resp.headers
         assert resp.headers["Cache-Control"] == "no-store"
-        assert resp.headers["Referrer-Policy"] == "no-referrer"
+        assert resp.headers["Referrer-Policy"] == "same-origin"
         assert "noindex" in resp.headers["X-Robots-Tag"]
     assert "default-src 'none'" in page.headers["Content-Security-Policy"]
     for path in ("/", "/nope", "/s/", "/s/short", f"/s/{token}/x", "/favicon.ico"):

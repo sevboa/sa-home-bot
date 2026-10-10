@@ -53,7 +53,7 @@ AWG_GLOBAL = (30, 3600.0)  # и 30 в час на всю ноду
 _COMMON_HEADERS = {
     "cache-control": "no-store",
     "x-robots-tag": "noindex, nofollow",
-    "referrer-policy": "no-referrer",
+    "referrer-policy": "same-origin",
     "x-content-type-options": "nosniff",
     "content-security-policy": (
         "default-src 'none'; img-src data:; style-src 'unsafe-inline'; "
