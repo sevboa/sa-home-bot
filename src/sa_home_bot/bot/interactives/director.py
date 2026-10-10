@@ -77,6 +77,9 @@ class DirectorDecision:
     # или описание временной комнаты {"name", "where", "canon_ru", "canon_en"}
     # (places.temp_spec). Применяется только сценариями с move_stages.
     move_to: dict[str, str] | None = None
+    # Этап 59.3/59.6: приметы и заметка вещи, которую Альфред только что нашёл
+    # (``Run.world["found_item"]``): {"traits": [str], "note": str|None}.
+    found_item: dict[str, Any] | None = None
 
 
 def _clean(value: Any, limit: int) -> str | None:
@@ -160,6 +163,31 @@ def _move_to(value: Any) -> dict[str, str] | None:
     return spec if spec["name"] and spec["canon_ru"] and spec["canon_en"] else None
 
 
+FOUND_TRAITS_MAX = 3
+FOUND_TRAIT_CHARS = 70
+FOUND_NOTE_CHARS = 120
+
+
+def _found_item(value: Any) -> dict[str, Any] | None:
+    """``found_item``: {"traits": [str], "note": str} — приметы и заметка
+    найденной вещи. Мусор и пустое — None (остаётся запасное описание кода)."""
+    if not isinstance(value, dict):
+        return None
+    raw = value.get("traits")
+    if isinstance(raw, str):
+        raw = [raw]
+    traits: list[str] = []
+    for entry in raw if isinstance(raw, list) else []:
+        text = _clean(entry, FOUND_TRAIT_CHARS)
+        text = text.rstrip(" .") if text else None
+        if text and text not in traits:
+            traits.append(text)
+    note = _clean(value.get("note"), FOUND_NOTE_CHARS)
+    if not traits and not note:
+        return None
+    return {"traits": traits[:FOUND_TRAITS_MAX], "note": note.rstrip(" .") if note else None}
+
+
 def parse_decision(
     raw: str, current_stage: int, trait_keys: tuple[str, ...] = ()
 ) -> DirectorDecision | None:
@@ -185,6 +213,7 @@ def parse_decision(
         alfred=_alfred(data.get("alfred")),
         item_trait=_item_trait(data.get("item_trait"), trait_keys),
         move_to=_move_to(data.get("move_to")),
+        found_item=_found_item(data.get("found_item")),
     )
 
 
@@ -282,6 +311,8 @@ def build_director_input(
         cabinet_field = cabinet_field.replace("кабинета", room[0]).replace("в кабинете", room[1])
     extra = (scenario.extra_input(run) + "\n\n") if scenario.extra_input is not None else ""
     item_block, item_field = _item_block(scenario, run)
+    found_block, found_field = _found_item_block(run)
+    item_block, item_field = item_block + found_block, item_field + found_field
     return (
         f"Сценарий: {scenario.title}\n"
         f"Лестница подсказок Альфреду (стадии):\n{ladder}\n"
@@ -332,6 +363,20 @@ def _item_block(scenario: Scenario, run: Run) -> tuple[str, str]:
         "На стадиях 0 и 1 — только неприметное (пыль, трещина)"
     )
     return block, field_text
+
+
+def _found_item_block(run: Run) -> tuple[str, str]:
+    """Найденная гостем вещь (``Run.world["found_item"]``, Этап 59.3/59.6): код
+    уже завёл её с запасным описанием, Ведущий придумывает приметы и заметку.
+    Ответ — поле ``found_item``; не ответил — остаётся запасное."""
+    found = run.world.get("found_item")
+    if not isinstance(found, dict) or not found.get("ask"):
+        return "", ""
+    return (
+        f"Новая вещь Альфреда: {found.get('name', 'вещь')}. {found['ask']}\n\n",
+        ',\n "found_item": {"traits": [str], "note": str} — приметы и заметка '
+        "новой вещи Альфреда (см. выше)",
+    )
 
 
 async def ask_director(

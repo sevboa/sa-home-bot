@@ -1660,6 +1660,25 @@ class Store:
                 (image_id, json.dumps(traits, ensure_ascii=False), item_id),
             )
 
+    async def consume_item(self, item_id: int) -> None:
+        """Предмет израсходован (Этап 59.3): из описи и мест он пропадает,
+        запись и журнал остаются."""
+        async with self.db.transaction() as conn:
+            await conn.execute("UPDATE items SET status='consumed' WHERE id=?", (item_id,))
+
+    async def update_item(
+        self, item_id: int, *, traits: list[str] | None = None, note: str | None = None
+    ) -> None:
+        """Приметы и/или заметка предмета (Ведущий дописывает находку, 59.3/59.6)."""
+        async with self.db.transaction() as conn:
+            if traits is not None:
+                await conn.execute(
+                    "UPDATE items SET traits=? WHERE id=?",
+                    (json.dumps(traits, ensure_ascii=False), item_id),
+                )
+            if note is not None:
+                await conn.execute("UPDATE items SET note=? WHERE id=?", (note, item_id))
+
     async def add_item_event(
         self,
         item_id: int,

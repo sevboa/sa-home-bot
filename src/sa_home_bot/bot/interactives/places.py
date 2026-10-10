@@ -25,6 +25,9 @@ heading?, since}``. «Где ты», take_photo и кадры Ведущего �
 Обыск (тул ``search``): что найдено, решает код по таблице находок места
 (``RoomCanon.specials`` — особая находка, иначе пусто или мелочь для
 антуража); обысканное помечается, повторный обыск там ничего не даёт.
+Особая находка может выдать вещь гостю (``Find.item``, Этап 59.6: старый
+фотоаппарат в проявочной): вещь заводит код (engine.tool_search), Ведущий
+придумывает ей приметы и заметку (``found_item`` его ответа).
 """
 
 from __future__ import annotations
@@ -67,10 +70,22 @@ TEMP_ROOMS_KEEP = 8
 class Find:
     """Особая находка места: срабатывает, когда обыскивают то, что назвал
     Альфред (``pattern`` по тексту ``where``). Один раз на гостя в месте —
-    обысканное помечается."""
+    обысканное помечается.
 
-    pattern: re.Pattern[str]
+    Этап 59.6: ``pattern=None`` — подходит любое место; ``first`` — только
+    самый первый обыск комнаты (что бы Альфред ни назвал); ``item`` — вид
+    вещи из ``items.KINDS``, которую находка выдаёт гостю (если она у него
+    уже есть, находка пропускается — дальше трофей или пусто)."""
+
+    pattern: re.Pattern[str] | None
     text: str
+    item: str | None = None
+    first: bool = False
+
+    def matches(self, where: str, *, first_search: bool) -> bool:
+        if self.first and not first_search:
+            return False
+        return self.pattern is None or bool(self.pattern.search(where))
 
 
 @dataclass(frozen=True)
@@ -491,6 +506,7 @@ SEARCH_KIND_EMPTY = "empty"
 class SearchResult:
     kind: str
     text: str  # что нашёл Альфред — словами для него
+    item: str | None = None  # вид вещи, выданной находкой (Find.item)
 
 
 SEARCH_REPEAT_TEXT = "Это место ты уже обыскал — ничего нового там нет."
@@ -505,21 +521,44 @@ def search_room(
     *,
     rng: Callable[[], float],
     choose: Callable[[tuple[str, ...]], str],
+    have_items: frozenset[str] = frozenset(),
 ) -> SearchResult:
     """Итог обыска ``where`` в комнате по таблице находок. ``searched``
     (нормализованные названия обысканного) дописывается — повторный обыск
-    того же ничего не даёт."""
+    того же ничего не даёт. ``have_items`` — виды вещей, что уже есть у
+    гостя: находка с такой вещью пропускается (фотоаппарат не выдаётся
+    дважды)."""
     norm = normalize_where(where) or "здесь"
     if norm in searched:
         return SearchResult(SEARCH_KIND_REPEAT, SEARCH_REPEAT_TEXT)
+    first_search = not searched
     searched.append(norm)
     for find in canon.specials:
-        if find.pattern.search(where):
-            return SearchResult(SEARCH_KIND_SPECIAL, find.text)
+        if find.item is not None and find.item in have_items:
+            continue
+        if find.matches(where, first_search=first_search):
+            return SearchResult(SEARCH_KIND_SPECIAL, find.text, find.item)
     if canon.trinkets and rng() < canon.trinket_chance:
         item = choose(canon.trinkets)
         return SearchResult(SEARCH_KIND_TRINKET, SEARCH_TRINKET_TEXT.format(item=item))
     return SearchResult(SEARCH_KIND_EMPTY, SEARCH_EMPTY_TEXT)
+
+
+# Находка проявочной (Этап 59.5/59.6): первый обыск в ней — всегда старый
+# фотоаппарат, что бы Альфред ни назвал; Альфред вспоминает, что сам оставил
+# его здесь. Канон проявочной (особое место катакомб) подключает эту находку
+# в ``RoomCanon.specials``; производителя и модель придумывает Ведущий
+# (``found_item``) либо запасной список вида (items.CAMERA).
+DARKROOM_CAMERA_TEXT = (
+    "На полке среди склянок ты находишь старый фотоаппарат — и сразу узнаёшь "
+    "его: ты сам оставил его здесь когда-то и успел позабыть."
+)
+DARKROOM_CAMERA = Find(
+    pattern=None,
+    text=DARKROOM_CAMERA_TEXT,
+    item="camera",
+    first=True,
+)
 
 
 # --- сброс прогресса (отладка, /interactives reset) ---
@@ -579,6 +618,16 @@ async def reset_progress(
             group = canon.group if canon is not None else GROUP_CATACOMBS
             if group in groups:
                 await drop(key)
+    # Вещи и эффекты этапа (59.3, 59.6): вещь не стираем, а помечаем
+    # израсходованной — из описи она пропадает и находится заново; эффект
+    # снимаем. Вино — с подвалом, фотоаппарат — с катакомбами.
+    stage_items = {"cellar": (("wine", "tipsy"),), "catacombs": (("camera", "camera"),)}
+    for scenario in scenarios:
+        for item_type, effect in stage_items[scenario]:
+            for item in await store.items_of(user_id, item_type):
+                await store.consume_item(int(item["id"]))
+                removed.append(f"item:{item_type}:{item['id']}")
+            await drop(f"user_effect:{effect}:{user_id}")
     if chat_id is not None:
         await drop(PLAIN_TURNS_KEY.format(chat_id=chat_id))
     await drop(at_key(user_id))
@@ -610,6 +659,16 @@ TOOL_SEARCH_SCENE = (
 TOOL_SEARCH_FREE = (
     "Ты обыскал «{where}». {found} Расскажи об этом собеседнику своими "
     "словами, ничего не добавляя от себя."
+)
+
+# Находка с вещью (Find.item, Этап 59.6). Ведущему — что найдено и что
+# придумать; Альфреду без Ведущего — сразу, с запасной заметкой вещи.
+SEARCH_ITEM_DIRECTOR = (
+    "Альфред обыскал «{where}». {text} Он забирает находку с собой: это вещь "
+    "«{name}». Опиши, как она выглядит (поле found_item)."
+)
+SEARCH_ITEM_TAKEN = (
+    " Ты забираешь находку: {name}{note}. Теперь она среди особенных вещей поместья."
 )
 
 SEARCH_DECLARATION: dict[str, Any] = {
