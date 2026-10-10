@@ -53,8 +53,10 @@ from sa_home_bot.bot import (
     commands,
     vpn_admin_view,
     vpn_devices,
+    vpn_faq,
     vpn_help,
     vpn_nodes,
+    vpn_proxy_screen,
     vpn_settings,
     vpn_wizard,
 )
@@ -398,7 +400,7 @@ def _card_keyboard(
     if _allows(subscription, _ACTION_APK):
         top_row.append(
             InlineKeyboardButton(
-                text="📱 Приложение",
+                text="❓ Помощь",
                 callback_data=commands.action_callback("apk", service=SERVICE),
             )
         )
@@ -869,67 +871,6 @@ def _proxy_keyboard(
             ]
         ]
     )
-
-
-def _apk_links_text(config: Settings) -> str:
-    """Ссылки на AmneziaVPN (рекомендуемый клиент); AmneziaWG в магазинах не
-    даём нигде (решение владельца 2026-10-10) — только .apk запасным путём."""
-    cfg = config.vpn
-    return (
-        "📱 Для AmneziaWG рекомендуем приложение <b>AmneziaVPN</b>:\n"
-        f'🍎 <a href="{html.escape(cfg.amneziavpn_ios_app_store_url)}">App Store</a>\n'
-        f'🤖 <a href="{html.escape(cfg.amneziavpn_google_play_url)}">Google Play</a>\n'
-        f"🌐 Сайт: {html.escape(cfg.official_download_url)}\n\n"
-        "Если магазин недоступен — можно временно поставить приложение AmneziaWG "
-        "файлом .apk, кнопка ниже. Потом скачайте настоящий AmneziaVPN и "
-        "перенесите туда настройки."
-    )
-
-
-def _apk_links_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📦 Скачать AmneziaWG (.apk)",
-                    callback_data=commands.action_callback("apk", "send", service=SERVICE),
-                )
-            ]
-        ]
-    )
-
-
-def _hiddify_links_text(config: Settings) -> str:
-    cfg = config.vpn
-    return (
-        "🌐 Для <b>VLESS</b> — приложение <b>Hiddify</b> (все платформы):\n"
-        f'🍎 App Store: <a href="{html.escape(cfg.hiddify_ios_app_store_url)}">Hiddify</a>\n'
-        f'🤖 Google Play: <a href="{html.escape(cfg.hiddify_google_play_url)}">Hiddify</a>\n'
-        f"🖥 Windows / macOS / Linux / APK: {html.escape(cfg.hiddify_releases_url)}\n"
-        f"🌐 Официальный сайт: {html.escape(cfg.hiddify_site_url)}\n\n"
-        "📋 <b>Как подключиться:</b>\n"
-        "1. Установите приложение по одной из ссылок выше.\n"
-        "2. В /vpn нажмите «➕ Новое устройство».\n"
-        "3. Придёт файл настроек (JSON) — импортируйте его: Hiddify → ⚙️ → "
-        "«⋮» (три точки справа вверху) → «Импорт» → «Импортировать настройки "
-        "из файла» → выберите скачанный файл. Это только маршруты/DNS, само "
-        "подключение здесь ещё не появится.\n"
-        "4. Следом придёт ссылка «vless://» — скопируйте её, вернитесь на "
-        "главный экран Hiddify → «+» (справа вверху) → «Буфер обмена». "
-        "Профиль подключения появится в списке.\n"
-        "5. Нажмите на профиль — «Нажмите для подключения»."
-    )
-
-
-def _app_links_text(config: Settings, transports: list[str]) -> str:
-    """Ссылки на клиенты под транспорты этой ноды: Hiddify для reality,
-    AmneziaVPN/WG для awg (оба блока, если нода несёт оба)."""
-    blocks: list[str] = []
-    if vpn_protocol.TRANSPORT_REALITY in transports:
-        blocks.append(_hiddify_links_text(config))
-    if vpn_protocol.TRANSPORT_AWG in transports or not blocks:
-        blocks.append(_apk_links_text(config))
-    return "\n\n".join(blocks)
 
 
 # Шаг 1 выдачи — только когда живых серверов несколько (этап 39.0.5).
@@ -2481,25 +2422,21 @@ async def handle_action(
             with contextlib.suppress(TelegramBadRequest):
                 await callback.message.edit_reply_markup(reply_markup=None)
             return
-        # Ссылки на клиенты под транспорты ноды-держателя (Hiddify для VLESS,
-        # AmneziaVPN/WG для awg). Определяем best-effort — на VPN-дауне
-        # показываем awg-блок (исходное поведение), не падаем.
-        transports: list[str] = []
-        links_dst = await vpn_nodes.resolve_vpn_dst(node_link, server=node_id)
-        if links_dst is not None:
-            with contextlib.suppress(ServiceUnavailableError, ProtoError):
-                state = await node_link.get_state(dst=links_dst)
-                transports = state.get("transports") or []
+        # Справка: пустое значение — вопросы, q<код> — ответ (bot/vpn_faq.py).
         await callback.answer()
-        await callback.message.answer(
-            _app_links_text(config, transports),
-            reply_markup=(
-                _apk_links_keyboard()
-                if vpn_protocol.TRANSPORT_AWG in transports or not transports
-                else None
-            ),
-            disable_web_page_preview=True,
-        )
+        code = vpn_faq.parse_question(value)
+        if code is None:
+            text = vpn_faq.LIST_TEXT
+            keyboard = vpn_faq.list_keyboard(home_cb=_home_cb())
+        else:
+            text = vpn_faq.answer_text(code)
+            keyboard = vpn_faq.answer_keyboard(
+                code, config.vpn, can_wizard=_allows(subscription, vpn_protocol.ACTION_ISSUE)
+            )
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.edit_text(
+                text, reply_markup=keyboard, disable_web_page_preview=True
+            )
         return
 
     if action_id == vpn_protocol.ACTION_GRANT_EXTRA:
@@ -2827,13 +2764,12 @@ async def handle_action(
         return
 
     if action_id == vpn_protocol.ACTION_PROXY_LINK:
-        # node_id из callback'а — только у старой кнопки/повторного действия
-        # после смены секрета (тогда бьём в конкретный сервер). Новая кнопка
-        # «✈️ Прокси Telegram» шлёт callback без node_id — фанаутим ACTION_
-        # PROXY_LINK по всем живым серверам с прокси и присылаем ссылку
-        # КАЖДОГО (решение пользователя 2026-09-20: раньше отвечал только
-        # первый живой сервер списка).
-        if node_id:
+        # Экран (bot/vpn_proxy_screen.py): кнопки-ссылки по странам из ответов
+        # всех живых нод; «qr» — QR одной страны; «d» — секрет и порт, только
+        # тем, у кого есть proxy_rotate_secret@vpn (смена секрета рвёт ссылку
+        # у всех — подробности гостю не нужны).
+        can_rotate = _allows(subscription, vpn_protocol.ACTION_PROXY_ROTATE_SECRET)
+        if value == vpn_proxy_screen.VALUE_QR:
             dst = await _need_dst()
             if dst is None:
                 return
@@ -2845,35 +2781,45 @@ async def handle_action(
             except ServiceUnavailableError:
                 await callback.answer("⚠️ Служба VPN недоступна.", show_alert=True)
                 return
-            results = [result]
-        else:
-            results = await vpn_nodes.fanout(node_link, vpn_protocol.ACTION_PROXY_LINK, {})
-            if not results:
-                await callback.answer(
-                    "⚠️ Прокси Telegram сейчас не настроен ни на одном сервере.",
-                    show_alert=True,
-                )
-                return
-        await callback.answer()
-        can_rotate = _allows(subscription, vpn_protocol.ACTION_PROXY_ROTATE_SECRET)
-        for result in results:
             qr_b64 = result.get("qr_png_b64")
-            if qr_b64:
-                label = result.get("label")
-                caption = "✈️ QR прокси Telegram"
-                if label:
-                    caption += f" · {label}"
-                caption += " — отсканируйте в приложении."
-                await notifier.send_photo(
-                    chat_id,
-                    base64.b64decode(qr_b64),
-                    filename="proxy-qr.png",
-                    caption=caption,
-                    message_thread_id=callback.message.message_thread_id,
+            if not qr_b64:
+                await callback.answer("⚠️ QR сейчас недоступен.", show_alert=True)
+                return
+            await callback.answer()
+            country = vpn_proxy_screen.country_of(result)
+            await notifier.send_photo(
+                chat_id,
+                base64.b64decode(qr_b64),
+                filename="proxy-qr.png",
+                caption=f"✈️ QR прокси Telegram {country.short}\nОтсканируйте в Telegram.",
+                message_thread_id=callback.message.message_thread_id,
+            )
+            return
+        results = await vpn_nodes.fanout(node_link, vpn_protocol.ACTION_PROXY_LINK, {})
+        if not results:
+            await callback.answer(
+                "⚠️ Прокси Telegram сейчас не настроен ни на одном сервере.",
+                show_alert=True,
+            )
+            return
+        if value == vpn_proxy_screen.VALUE_SECRET:
+            if not can_rotate:
+                await callback.answer("⛔️ Недоступно.", show_alert=True)
+                return
+            await callback.answer()
+            for result in results:
+                await callback.message.answer(
+                    _proxy_text(result, admin=True),
+                    reply_markup=_proxy_keyboard(result.get("node"), can_rotate=True),
                 )
-            await callback.message.answer(
-                _proxy_text(result, admin=can_rotate),
-                reply_markup=_proxy_keyboard(result.get("node"), can_rotate=can_rotate),
+            return
+        await callback.answer()
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.edit_text(
+                vpn_proxy_screen.TEXT,
+                reply_markup=vpn_proxy_screen.keyboard(
+                    results, can_secret=can_rotate, home_cb=_home_cb()
+                ),
             )
         return
 

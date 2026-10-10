@@ -684,19 +684,13 @@ async def test_card_reports_unavailable_when_no_vpn_in_swarm():
     assert "недоступна" in error
 
 
-async def test_apk_first_click_shows_links_not_file():
+async def test_apk_first_click_shows_faq_list_not_file():
     link = FakeNodeLink()
     notifier = FakeNotifier()
     callback = FakeCallback("act:vpn:apk", chat_id=777)
     await vpn_handlers.handle_action(callback, link, notifier, _config(), GUEST, _pending())
-    text = next(t for t in callback.message.answers if "App Store" in t)
-    assert "Google Play" in text
-    # Магазины — только AmneziaVPN; ссылок на AmneziaWG в магазинах нет нигде.
-    cfg = _config().vpn
-    assert f'<a href="{cfg.amneziavpn_ios_app_store_url}">App Store</a>' in text
-    assert f'<a href="{cfg.amneziavpn_google_play_url}">Google Play</a>' in text
-    assert cfg.ios_app_store_url not in text and cfg.google_play_url not in text
-    assert link.calls == []  # ссылки статические — служба вообще не спрошена
+    assert callback.message.edits[-1].startswith("❓")
+    assert link.calls == []  # справка статическая — служба вообще не спрошена
     assert notifier.sent_documents == []  # файл ещё не ушёл
 
 
@@ -994,14 +988,6 @@ async def test_picked_reality_transport_issues_and_sends_singbox_json():
     assert "VLESS" in (notifier.sent_documents[0][2] or "")
     # deep-link — в тексте кнопочного сообщения
     assert any("hiddify://import" in text for _, text in notifier.sent_direct)
-
-
-async def test_app_links_text_is_hiddify_for_reality_only_node():
-    cfg = Settings(vpn=VpnConfig())
-    reality = vpn_handlers._app_links_text(cfg, ["reality"])
-    awg = vpn_handlers._app_links_text(cfg, ["awg"])
-    assert "Hiddify" in reality and "AmneziaWG" not in reality
-    assert "AmneziaWG" in awg and "Hiddify" not in awg
 
 
 # --- админский раздел «👥 Все гости» ---------------------------------------
