@@ -257,7 +257,7 @@ def fmt_stamp(stamp: str | None, *, tz: tzinfo | None = None, with_time: bool = 
 def fmt_gb(bytes_: int) -> str:
     gb = bytes_ / 1_000_000_000
     if bytes_ > 0 and gb < 0.05:
-        return "<0.1 ГБ"
+        return "меньше 0.1 ГБ"  # без «<»: текст уходит в HTML-разметку Telegram
     return f"{gb:.1f} ГБ"
 
 
