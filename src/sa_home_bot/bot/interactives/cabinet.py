@@ -203,8 +203,57 @@ class Cabinet:
     def describe_ru(self) -> str:
         shown = self.visible_features()[-DESCRIBE_MAX:]
         if not shown:
-            return CANON_RU
-        return CANON_RU + " Особенности: " + "; ".join(shown) + "."
+            return self.canon_ru
+        return self.canon_ru + " Особенности: " + "; ".join(shown) + "."
+
+    # --- Этап 59.1: кабинет — одна из комнат (bot/interactives/places.py::Room
+    # переопределяет всё ниже). Для кабинета значения прежние, поэтому код
+    # снимков, написанный под кабинет, не знает, в какой он комнате.
+    @property
+    def place(self) -> str:
+        return LOCATION
+
+    @property
+    def canon_ru(self) -> str:
+        return CANON_RU
+
+    @property
+    def canon_en(self) -> str:
+        return CANON_EN
+
+    # Есть ли окно: за ним Трансильвания со временем суток и погодой. У
+    # подвала света снаружи нет — его освещение задаёт сама комната.
+    @property
+    def windowed(self) -> bool:
+        return True
+
+    @property
+    def caption(self) -> str:
+        return "Кабинет"
+
+    @property
+    def scene_caption(self) -> str:
+        return "В кабинете"
+
+    @property
+    def subject_ru(self) -> str:
+        return PHOTO_SUBJECT_ROOM
+
+    @property
+    def pose_room_en(self) -> str:
+        return SELFIE_POSE_ROOM_EN
+
+    def light_en(self, outside: Any, *, closeup: bool = False) -> str:
+        return outside.en(closeup=closeup)
+
+    def localize_selfie(self, text: str) -> str:
+        return text
+
+    def localize_ru(self, text: str) -> str:
+        return text
+
+    def is_general(self, focus: str) -> bool:
+        return False
 
     def state_key(self, outside_key: str) -> str:
         digest = hashlib.sha1("\n".join((*self.features, *self.scene)).encode()).hexdigest()[:10]

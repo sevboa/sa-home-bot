@@ -298,7 +298,7 @@ async def run_chat_loop(
     # Комплект собирается ОДИН раз на проход и по правам собеседника: тула, на
     # который у него нет прав, модель не видит вовсе (см. bot/tools.py::
     # tools_for — требование "Альфред не отказывает, а не умеет").
-    toolkit = ai_tools.tools_for(tool_ctx.subscription)
+    toolkit = ai_tools.for_context(ai_tools.tools_for(tool_ctx.subscription), tool_ctx)
 
     async def _chat_args(tools: list[dict[str, Any]]) -> dict[str, Any]:
         args: dict[str, Any] = {"messages": messages, "tools": tools, "reason": reason}

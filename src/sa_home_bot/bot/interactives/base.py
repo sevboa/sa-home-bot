@@ -90,6 +90,12 @@ class Scenario:
     decline_cooldown: timedelta | None = None
     # Куда встаёт Альфред, когда гость согласился (places.PLACES).
     start_place: str | None = None
+    # Где Альфред на каждой стадии (индекс = стадия; places.PLACES): при смене
+    # стадии код переставляет его сам. Пусто — сценарий место не трогает.
+    stage_places: tuple[str, ...] = ()
+    # На каких стадиях Ведущий может перенести Альфреда (поле move_to ответа):
+    # во временную комнату, которую он придумал на ходу.
+    move_stages: tuple[int, ...] = ()
     # Реплика Альфреда после согласия ({transcript}); пусто — как у радио.
     after_agree: str = ""
     # Текст события финала ({fault}); по умолчанию — радио.
@@ -109,6 +115,8 @@ class Scenario:
     # дополнительных полей его JSON-ответа.
     extra_input: Callable[[Run], str] | None = None
     extra_fields: str = ""
+    # Флаги гостя (user_effect:<ключ>:<гость>), которые выставляет финал.
+    finale_flags: tuple[str, ...] = ()
     # Финал сцены завершает её на СЛЕДУЮЩЕМ ходу, а не ждёт формы: Альфред
     # успевает пересказать последнее событие (cellar).
     finish_after_finale: bool = False
@@ -229,6 +237,16 @@ class InteractiveStore:
 
     async def set_effect(self, key: str, user_id: int, value: str) -> None:
         await self._store.set_state(f"user_effect:{key}:{user_id}", value)
+
+    async def plain_turns(self, chat_id: int) -> int:
+        """Обычные ходы подряд в чате без сцены (спонтанный триггер, Этап 59.2)."""
+        raw = await self._store.get_state(f"interactives_plain:{chat_id}")
+        return int(raw) if raw and raw.isdigit() else 0
+
+    async def set_plain_turns(self, chat_id: int, count: int) -> None:
+        if await self.plain_turns(chat_id) == count:
+            return  # лишних записей в app_state не плодим
+        await self._store.set_state(f"interactives_plain:{chat_id}", str(count))
 
     async def is_opted_out(self, chat_id: int) -> bool:
         return await self._store.get_state(f"interactives_opt_out:{chat_id}") == "1"

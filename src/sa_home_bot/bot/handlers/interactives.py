@@ -77,6 +77,22 @@ async def cmd_interactives(
         return
     arg = (command.args or "").strip().lower()
     chat_id = message.chat.id
+    user_id = message.from_user.id if message.from_user is not None else None
+    # Отладка Этапа 59 (скрытые подкоманды, только канарейкам; прочие уходят
+    # дальше и получают прежнее «Использование»).
+    words = arg.split()
+    if words and words[0] in ("cellar", "reset", "where") and interactives.canary_ok(user_id):
+        assert user_id is not None
+        if words[0] == "cellar":
+            reply = await interactives.debug_cellar(chat_id, user_id)
+        elif words[0] == "reset":
+            reply = await interactives.debug_reset(
+                chat_id, user_id, words[1] if len(words) > 1 else ""
+            )
+        else:
+            reply = await interactives.debug_where(user_id)
+        await message.answer(reply)
+        return
     if arg in ("off", "выкл", "нет"):
         await interactives.set_opted_out(chat_id, True)
         await message.answer(engine.OPT_OUT_TEXT)

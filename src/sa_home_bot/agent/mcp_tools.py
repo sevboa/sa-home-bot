@@ -126,6 +126,7 @@ _EXCLUDED_TOOLS = frozenset(
         "recall_tool_result",
         "vpn",
         "swarm_events",
+        "search",  # обыск места Альфреда — Этап 59, живое состояние бота
     }
 )
 

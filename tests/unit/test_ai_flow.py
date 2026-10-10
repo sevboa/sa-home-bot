@@ -311,11 +311,13 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
     assert (action, node) == ("chat", "mycraft")
     assert router_args["chat_id"] == 1
     assert router_args["reason"] == "off"
-    # Комплект собран под права собеседника, а не глобальный список.
-    assert (
-        router_args["tools"]
-        == ai_flow.ai_tools.tools_for(_admin_book().for_chat(1)).declarations
-    )
+    # Комплект собран под права собеседника, а не глобальный список. Тулы
+    # канарейки Этапа 59 (search) гостю вне списка не даются.
+    assert router_args["tools"] == [
+        d
+        for d in ai_flow.ai_tools.tools_for(_admin_book().for_chat(1)).declarations
+        if d["function"]["name"] not in ai_flow.ai_tools.CANARY_TOOLS
+    ]
     assert router_args["role"] == "router"
     persona_args = link.command_calls[1][1]
     assert "role" not in persona_args

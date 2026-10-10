@@ -73,6 +73,10 @@ class DirectorDecision:
     alfred: str | None = None
     # Новая черта предмета сцены (ключ из items.ItemKind.traits) или None.
     item_trait: str | None = None
+    # Этап 59: Ведущий переносит Альфреда — {"place": id комнаты из places.PLACES}
+    # или описание временной комнаты {"name", "where", "canon_ru", "canon_en"}
+    # (places.temp_spec). Применяется только сценариями с move_stages.
+    move_to: dict[str, str] | None = None
 
 
 def _clean(value: Any, limit: int) -> str | None:
@@ -138,6 +142,24 @@ def _item_trait(value: Any, keys: tuple[str, ...]) -> str | None:
     return text if text in keys else None
 
 
+def _move_to(value: Any) -> dict[str, str] | None:
+    """``move_to``: id известной комнаты строкой либо описание временной
+    комнаты объектом. Мусор — None (Альфред остаётся на месте)."""
+    if isinstance(value, str):
+        text = value.strip()
+        return {"place": text} if text else None
+    if not isinstance(value, dict):
+        return None
+    place = value.get("place")
+    if isinstance(place, str) and place.strip():
+        return {"place": place.strip()}
+    spec = {
+        key: " ".join(str(value.get(key) or "").split())
+        for key in ("name", "where", "canon_ru", "canon_en")
+    }
+    return spec if spec["name"] and spec["canon_ru"] and spec["canon_en"] else None
+
+
 def parse_decision(
     raw: str, current_stage: int, trait_keys: tuple[str, ...] = ()
 ) -> DirectorDecision | None:
@@ -162,12 +184,14 @@ def parse_decision(
         mood=_mood(data.get("mood")),
         alfred=_alfred(data.get("alfred")),
         item_trait=_item_trait(data.get("item_trait"), trait_keys),
+        move_to=_move_to(data.get("move_to")),
     )
 
 
-def _cabinet_block(place: str, outside: str, need: int) -> str:
+def _cabinet_block(place: str, outside: str | None, need: int) -> str:
     """Где идёт сцена — кабинет гостя и что за окном. ``need`` > 0 — у
-    кабинета ещё нет особенностей, пусть Ведущий придумает первые."""
+    кабинета ещё нет особенностей, пусть Ведущий придумает первые.
+    ``outside=None`` — места без окна (подвал, Этап 59): строки про окно нет."""
     if need:
         task = (
             f"У этого кабинета ещё нет своих особенностей — придумай {need} в "
@@ -188,7 +212,8 @@ def _cabinet_block(place: str, outside: str, need: int) -> str:
             "(«часы на миг остановились») — это для effect. Не повторяй и не "
             "противоречь уже известным особенностям."
         )
-    return f"Место сцены: {place}\nЗа окном сейчас: {outside}.\n{task}\n\n"
+    window = f"За окном сейчас: {outside}.\n" if outside is not None else ""
+    return f"Место сцены: {place}\n{window}{task}\n\n"
 
 
 def build_features_input(place: str, outside: str, count: int) -> str:
@@ -207,13 +232,19 @@ def build_director_input(
     place: str | None = None,
     outside: str | None = None,
     need_features: int = 0,
+    room: tuple[str, str] | None = None,
 ) -> str:
+    """``room`` (Этап 59) — (родительный, предложный) падеж названия места,
+    если сцена идёт не в кабинете: «подвала», «в подвале». ``outside=None`` при
+    заданном ``place`` — место без окна."""
     ladder = "\n".join(f"  {i}. {hint}" for i, hint in enumerate(scenario.ladder))
     notes = "\n".join(f"- {n}" for n in run.notes) or "—"
     transcript = "\n".join(run.transcript) or "—"
     if run.finale:
         finale_line = (
-            f"ФИНАЛ УЖЕ НАСТУПИЛ. Поломка: {run.finale_fault}. Альфред должен "
+            scenario.finale_running_line.format(fault=run.finale_fault)
+            if scenario.finale_running_line
+            else f"ФИНАЛ УЖЕ НАСТУПИЛ. Поломка: {run.finale_fault}. Альфред должен "
             "предлагать сменить устройство; любые альтернативы гостя не "
             "срабатывают — придумай почему и возвращай к замене."
         )
@@ -221,7 +252,14 @@ def build_director_input(
         finale_line = "Финал РАЗРЕШЁН: можешь поставить finale=true, если сцена созрела."
     else:
         finale_line = "Финал пока ЗАПРЕЩЁН (рано) — finale=false."
-    cabinet = _cabinet_block(place, outside or "неизвестно", need_features) if place else ""
+    underground = place is not None and outside is None and room is not None
+    cabinet = (
+        _cabinet_block(place, None if underground else outside or "неизвестно", need_features)
+        if place
+        else ""
+    )
+    if cabinet and room is not None:
+        cabinet = cabinet.replace("кабинета", room[0]).replace("в кабинете", room[1])
     cabinet_field = (
         (
             ',\n "cabinet_add": [str] — новые устойчивые видимые детали кабинета (или [])'
@@ -240,6 +278,9 @@ def build_director_input(
         if place
         else ""
     )
+    if cabinet_field and room is not None:
+        cabinet_field = cabinet_field.replace("кабинета", room[0]).replace("в кабинете", room[1])
+    extra = (scenario.extra_input(run) + "\n\n") if scenario.extra_input is not None else ""
     item_block, item_field = _item_block(scenario, run)
     return (
         f"Сценарий: {scenario.title}\n"
@@ -251,6 +292,7 @@ def build_director_input(
         f"Журнал сцены (последняя реплика — только что сказанное Альфредом):\n"
         f"{transcript}\n\n"
         f"{cabinet}"
+        f"{extra}"
         f"{item_block}"
         "Ответь ОДНИМ JSON-объектом с полями:\n"
         '{"active": bool — сцена продолжается (false, если гость явно ушёл '
@@ -262,10 +304,10 @@ def build_director_input(
         ' "directive": str — скрытая подсказка Альфреду на следующий ход '
         "(1–2 предложения),\n"
         ' "finale": bool,\n'
-        ' "finale_fault": str|null — только при finale=true: смешная '
-        "потусторонняя поломка радиостанции,\n"
+        ' "finale_fault": str|null — только при finale=true: '
+        f"{scenario.finale_fault_hint or 'смешная потусторонняя поломка радиостанции'},\n"
         ' "note": str|null — короткая заметка себе на будущее'
-        f"{cabinet_field}{item_field}}}"
+        f"{cabinet_field}{item_field}{scenario.extra_fields}}}"
     )
 
 
@@ -303,6 +345,7 @@ async def ask_director(
     place: str | None = None,
     outside: str | None = None,
     need_features: int = 0,
+    room: tuple[str, str] | None = None,
 ) -> DirectorDecision | None:
     content = build_director_input(
         scenario,
@@ -311,6 +354,7 @@ async def ask_director(
         place=place,
         outside=outside,
         need_features=need_features,
+        room=room,
     )
     args: dict[str, Any] = {
         "messages": [{"role": "user", "content": content}],
