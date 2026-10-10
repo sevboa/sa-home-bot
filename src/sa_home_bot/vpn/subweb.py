@@ -1,9 +1,12 @@
 """Веб-сервер подписки Hiddify внутри службы vpn (подэтап 57.10).
 
-Два адреса: ``/s/<токен>`` — страница с кнопкой «Открыть в Hiddify»,
+Адреса: ``/s/<токен>`` — хаб устройства (57.11: «VPN включён?», Hiddify,
+страны и остаток, AmneziaWG), ``POST /s/<токен>/awg`` — выдача AmneziaWG (только
+форма со страницы: Origin/Referer + одноразовый nonce + ограничение частоты),
 ``/sub/<токен>`` — сама подписка (``?format=vless|plain|singbox``). Всё прочее —
-404, как и неизвестный/отозванный токен: снаружи не отличить «нет такого» от
-«отозвано». Порт отдельный (не 443/8443 — там mtg и xray).
+голый 404, как и неизвестный/отозванный токен: снаружи не отличить «нет такого»
+от «отозвано». Заголовок ``Server`` убран. Порт отдельный (не 443/8443 — там
+mtg и xray). IP посетителей не пишем никуда.
 
 TLS: если на диске есть сертификат и ключ — https, иначе http (при
 ``sub_allow_http``). Сертификат Let's Encrypt на IP короткоживущий (~6 суток),
@@ -18,13 +21,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import secrets
 import ssl
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from aiohttp import web
 
 from sa_home_bot.config import VpnConfig
+from sa_home_bot.vpn import protocol as vpn_protocol
 from sa_home_bot.vpn import subscription as sub
 
 log = logging.getLogger(__name__)
@@ -34,6 +41,34 @@ DEFAULT_TLS_DIR = Path("~/.config/sa-home-bot/sub-tls")
 
 # resolve(token) -> Subscription | None
 Resolver = Callable[[str], Awaitable[sub.Subscription | None]]
+# issue_awg(chat_id, device_label, node, replace=...) -> ответ issue/reissue службы
+AwgIssuer = Callable[..., Awaitable[dict]]
+
+NONCE_TTL_S = 1800.0
+NONCE_MAX = 4000
+AWG_PER_COUNTRY_S = 60.0  # не чаще раза в минуту на устройство и страну
+AWG_PER_TOKEN = (6, 3600.0)  # и не больше 6 в час на устройство
+AWG_GLOBAL = (30, 3600.0)  # и 30 в час на всю ноду
+
+_COMMON_HEADERS = {
+    "cache-control": "no-store",
+    "x-robots-tag": "noindex, nofollow",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "content-security-policy": (
+        "default-src 'none'; img-src data:; style-src 'unsafe-inline'; "
+        "script-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; "
+        "frame-ancestors 'none'"
+    ),
+}
+
+
+class _Response(web.Response):
+    """Ответ без заголовка ``Server`` (aiohttp добавляет его при записи заголовков)."""
+
+    async def _write_headers(self) -> None:
+        self._headers.pop("Server", None)
+        await super()._write_headers()
 
 
 def tls_paths(cfg: VpnConfig) -> tuple[Path, Path]:
@@ -52,17 +87,36 @@ def public_host(cfg: VpnConfig) -> str:
 
 
 def _not_found() -> web.Response:
-    return web.Response(
-        status=404,
-        text="Not found\n",
-        headers={"cache-control": "no-store", "x-robots-tag": "noindex"},
-    )
+    return _Response(status=404, text="Not found\n")
+
+
+@web.middleware
+async def _hardening(request: web.Request, handler) -> web.StreamResponse:
+    """Любая ошибка/чужой путь/чужой метод — тот же голый 404; общие заголовки."""
+    try:
+        resp = await handler(request)
+    except web.HTTPException:
+        resp = _not_found()
+    except Exception:
+        log.exception("vpn: страница подписки упала")
+        resp = _not_found()
+    for key, value in _COMMON_HEADERS.items():
+        resp.headers.setdefault(key, value)
+    return resp
 
 
 class SubscriptionWeb:
-    def __init__(self, cfg: VpnConfig, resolve: Resolver) -> None:
+    def __init__(
+        self, cfg: VpnConfig, resolve: Resolver, issue_awg: AwgIssuer | None = None
+    ) -> None:
         self._cfg = cfg
         self._resolve = resolve
+        self._issue_awg = issue_awg
+        # nonce -> (истекает, токен, нода): форма AmneziaWG одноразовая.
+        self._nonces: dict[str, tuple[float, str, str]] = {}
+        self._awg_last: dict[tuple[str, str], float] = {}
+        self._awg_by_token: dict[str, list[float]] = {}
+        self._awg_all: list[float] = []
         self._runner: web.AppRunner | None = None
         self._ctx: ssl.SSLContext | None = None
         self._mtimes: tuple[float, float] | None = None
@@ -106,8 +160,9 @@ class SubscriptionWeb:
         return ctx
 
     def _app(self) -> web.Application:
-        app = web.Application()
+        app = web.Application(middlewares=[_hardening], client_max_size=4096)
         app.router.add_get("/s/{token}", self._page)
+        app.router.add_post("/s/{token}/awg", self._awg_post)
         app.router.add_get("/sub/{token}", self._sub)
         return app
 
@@ -199,29 +254,152 @@ class SubscriptionWeb:
                 log.exception("vpn: сборка подписки упала")
                 return None
 
+    # --- nonce и частота ---
+
+    def _new_nonce(self, token: str, node: str) -> str:
+        now = time.monotonic()
+        if len(self._nonces) >= NONCE_MAX:
+            self._nonces = {k: v for k, v in self._nonces.items() if v[0] > now}
+            if len(self._nonces) >= NONCE_MAX:
+                self._nonces.clear()
+        nonce = secrets.token_urlsafe(18)
+        self._nonces[nonce] = (now + NONCE_TTL_S, token, node)
+        return nonce
+
+    def _take_nonce(self, nonce: str, token: str, node: str) -> bool:
+        entry = self._nonces.pop(nonce, None)
+        return entry is not None and entry[0] > time.monotonic() and entry[1:] == (token, node)
+
+    def _rate_ok(self, token: str, node: str) -> bool:
+        """Проверка и учёт попытки выдачи AmneziaWG (в памяти, без адресов)."""
+        now = time.monotonic()
+        last = self._awg_last.get((token, node))
+        mine = [t for t in self._awg_by_token.get(token, []) if now - t < AWG_PER_TOKEN[1]]
+        self._awg_all = [t for t in self._awg_all if now - t < AWG_GLOBAL[1]]
+        if (
+            (last is not None and now - last < AWG_PER_COUNTRY_S)
+            or len(mine) >= AWG_PER_TOKEN[0]
+            or len(self._awg_all) >= AWG_GLOBAL[0]
+        ):
+            return False
+        self._awg_last[(token, node)] = now
+        self._awg_by_token[token] = [*mine, now]
+        self._awg_all.append(now)
+        if len(self._awg_last) > 4000:
+            self._awg_last.clear()
+            self._awg_by_token.clear()
+        return True
+
+    def _same_origin(self, request: web.Request) -> bool:
+        """POST только со своей страницы: Origin (или, если его нет, Referer) —
+        тот же хост, что в Host. Без обоих — отказ."""
+        source = request.headers.get("Origin") or request.headers.get("Referer") or ""
+        if not source or source == "null":
+            return False
+        return urlsplit(source).netloc == request.host
+
+    # --- обработчики ---
+
+    @property
+    def _links(self) -> sub.PageLinks:
+        c = self._cfg
+        return sub.PageLinks(
+            hiddify_ios=c.hiddify_ios_app_store_url,
+            hiddify_android=c.hiddify_google_play_url,
+            hiddify_site=c.hiddify_site_url,
+            amnezia_ios=c.amneziavpn_ios_app_store_url,
+            amnezia_android=c.amneziavpn_google_play_url,
+            amnezia_site=c.official_download_url,
+        )
+
+    @staticmethod
+    def _html(text: str, status: int = 200) -> web.Response:
+        return _Response(text=text, status=status, content_type="text/html", charset="utf-8")
+
     async def _page(self, request: web.Request) -> web.Response:
         found = await self._lookup(request)
         if found is None or not found.entries:
             return _not_found()
         token = request.match_info["token"]
+        status = sub.detect_status(request.remote or "", found.nodes, self._cfg.subnet)
+        forms: dict[str, str] = {}
+        if self._issue_awg is not None:
+            have = {entry.node for entry in found.entries}
+            forms = {
+                n.node: self._new_nonce(token, n.node)
+                for n in found.nodes
+                if n.awg and n.node in have
+            }
         body = sub.render_page(
             found,
             sub_url=self.sub_url(token),
             qr_data_uri=sub.qr_data_uri(self.sub_url(token)),
-            ios_url=self._hiddify_ios,
-            android_url=self._hiddify_android,
-            site_url=self._hiddify_site,
+            links=self._links,
+            status=status,
+            awg_forms=forms,
+            path=f"/s/{token}",
         )
-        return web.Response(
-            text=body,
-            content_type="text/html",
-            charset="utf-8",
-            headers={
-                "cache-control": "no-store",
-                "x-robots-tag": "noindex, nofollow",
-                "referrer-policy": "no-referrer",
-            },
+        return self._html(body)
+
+    async def _awg_post(self, request: web.Request) -> web.Response:
+        """Выдача AmneziaWG: Origin/Referer, одноразовый nonce, частота, для
+        существующего ключа — явное подтверждение замены. Результат — один раз."""
+        if self._issue_awg is None or not self._same_origin(request):
+            return _not_found()
+        found = await self._lookup(request)
+        if found is None or not found.entries or not found.chat_id:
+            return _not_found()
+        token = request.match_info["token"]
+        path = f"/s/{token}"
+        form = await request.post()
+        nonce, node_id = str(form.get("nonce") or ""), str(form.get("node") or "")
+        confirm = str(form.get("confirm") or "") == "1"
+        node = next((n for n in found.nodes if n.node == node_id), None)
+        have = {entry.node for entry in found.entries}
+        if node is None or not node.awg or node.node not in have:
+            return _not_found()
+        if not self._take_nonce(nonce, token, node_id):
+            text = sub.render_notice(
+                "Страница устарела", "Обновите страницу и нажмите кнопку ещё раз.", path=path
+            )
+            return self._html(text, 400)
+        if node.awg_key and not confirm:
+            return self._html(
+                sub.render_awg_confirm(found, node, self._new_nonce(token, node_id), path)
+            )
+        if not self._rate_ok(token, node_id):
+            text = sub.render_notice(
+                "Слишком часто", "Подождите минуту и попробуйте ещё раз.", path=path
+            )
+            return self._html(text, 429)
+        try:
+            result = await self._issue_awg(
+                found.chat_id, found.device_label, node_id, replace=node.awg_key
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vpn: выдача AmneziaWG со страницы не удалась: %s", exc)
+            text = sub.render_notice(
+                "Не получилось",
+                "Не получилось выпустить настройки — попробуйте чуть позже.",
+                path=path,
+            )
+            return self._html(text, 502)
+        conf = str(result.get("config_text") or "")
+        if not conf:
+            return _not_found()
+        filename = vpn_protocol.secret_filename(
+            vpn_protocol.TRANSPORT_AWG, found.device_label, str(result.get("location") or node.name)
         )
+        body = sub.render_awg_result(
+            found,
+            node,
+            filename=filename,
+            conf_text=conf,
+            qr_data_uri=sub.qr_data_uri(conf),
+            links=self._links,
+            path=path,
+        )
+        return self._html(body)
 
     async def _sub(self, request: web.Request) -> web.Response:
         found = await self._lookup(request)
@@ -239,17 +417,4 @@ class SubscriptionWeb:
             support_url=self._cfg.sub_support_url,
             fmt=fmt,
         )
-        return web.Response(body=text.encode(), headers={**headers, "content-type": ctype})
-
-    # Ссылки на приложение — из [vpn] (те же, что в мастере бота).
-    @property
-    def _hiddify_ios(self) -> str:
-        return self._cfg.hiddify_ios_app_store_url
-
-    @property
-    def _hiddify_android(self) -> str:
-        return self._cfg.hiddify_google_play_url
-
-    @property
-    def _hiddify_site(self) -> str:
-        return self._cfg.hiddify_site_url
+        return _Response(body=text.encode(), headers={**headers, "content-type": ctype})

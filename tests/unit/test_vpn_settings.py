@@ -364,3 +364,77 @@ async def test_callback_data_within_64_bytes():
         for b in _all_buttons(markup):
             if b.callback_data:
                 assert len(b.callback_data.encode()) <= 64, b.callback_data
+
+
+# --- 57.11: «Получить настройки» — одно пересылаемое сообщение ----------------
+
+
+def _card_markup(page_url):
+    servers = _servers()
+    device = vd.build_devices(servers)[0]
+    return h._card_keyboard_for_device(device, servers, subscription=GUEST_FULL, page_url=page_url)
+
+
+def test_card_page_button_first_then_link_and_other_ways():
+    markup = _card_markup(PAGE)
+    first = _all_buttons(markup)[0]
+    assert first.text == "📶 Настройки на странице" and first.url == PAGE
+    texts = _texts(markup)
+    get = [b for b in _all_buttons(markup) if b.text == "📥 Получить настройки"][0]
+    other = [b for b in _all_buttons(markup) if b.text == "Другие способы"][0]
+    assert get.callback_data.endswith(f":l{KEY}") and other.callback_data.endswith(f":g{KEY}")
+    assert texts.index("📥 Получить настройки") < texts.index("Другие способы")
+
+
+def test_card_without_page_keeps_old_get_settings():
+    markup = _card_markup(None)
+    get = [b for b in _all_buttons(markup) if b.text == "📥 Получить настройки"][0]
+    assert get.callback_data.endswith(f":g{KEY}")
+    assert "Другие способы" not in _texts(markup)
+
+
+async def test_get_settings_sends_one_forwardable_message(monkeypatch):
+    async def fake_fanout(link, action, args):
+        if action == vpn_protocol.ACTION_GET_SUBSCRIPTION:
+            return [{"page_url": PAGE}]
+        return _servers()
+
+    monkeypatch.setattr(vpn_nodes, "fanout", fake_fanout)
+    cb, link, notifier = await _press(f"act:vpn:vpn_card:l{KEY}")
+    assert len(notifier.sent_direct) == 1 and not notifier.sent_documents
+    chat, text = notifier.sent_direct[0]
+    assert chat == 778
+    assert text == (
+        f"📶 <b>Настройки VPN · {LABEL}</b>\n"
+        "Откройте ссылку на телефоне, который подключаете — там всё по шагам: "
+        "Hiddify, AmneziaWG и проверка, что VPN включён.\n"
+        f"{PAGE}\n"
+        "Ссылку можно переслать. Не делитесь ей с чужими: по ней подключается это устройство."
+    )
+    markup = notifier.sent_direct_markups[0]
+    buttons = _all_buttons(markup)
+    assert [(b.text, b.url, b.callback_data) for b in buttons] == [
+        ("📶 Открыть настройки", PAGE, None)
+    ]
+    assert not notifier.deleted  # для пересылки: по TTL не удаляется
+    assert not [c for c in link.calls if c[0] == vpn_protocol.ACTION_ISSUE]
+
+
+async def test_get_settings_link_private_only_and_needs_page(monkeypatch):
+    async def fake_fanout(link, action, args):
+        if action == vpn_protocol.ACTION_GET_SUBSCRIPTION:
+            return []
+        return _servers()
+
+    monkeypatch.setattr(vpn_nodes, "fanout", fake_fanout)
+    cb, _, notifier = await _press(f"act:vpn:vpn_card:l{KEY}")
+    assert not notifier.sent_direct and cb.answered[0][1].get("show_alert")
+    cb, _, notifier = await _press(f"act:vpn:vpn_card:l{KEY}", chat_id=-100)
+    assert not notifier.sent_direct and cb.answered[0][1].get("show_alert")
+
+
+def test_help_texts_mention_page_and_vpn_check():
+    from sa_home_bot.bot import vpn_facts
+
+    joined = " ".join(vpn_facts.ANSWERS.values())
+    assert "страниц" in joined and "включён ли VPN" in joined

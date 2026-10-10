@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import ssl
@@ -34,12 +35,12 @@ from .test_vpn_service import CHAT, FakeAwg, FakeXray, allow
 SWARM = "swarm-token-xyz"
 
 
-def _cfg(host, location, **over) -> VpnConfig:
+def _cfg(host, location, transports=None, **over) -> VpnConfig:
     return VpnConfig(
         subnet="10.9.0.0/29",
         base_quota_gb=1,
         endpoint_host=host,
-        transports=[TRANSPORT_REALITY],
+        transports=transports or [TRANSPORT_REALITY],
         location=location,
         reality=RealityTransportConfig(
             endpoint_host=host, server_public_key=f"PUB_{host}", short_id="abcd1234"
@@ -49,11 +50,11 @@ def _cfg(host, location, **over) -> VpnConfig:
     )
 
 
-async def _make(tmp_path, name, host, location):
+async def _make(tmp_path, name, host, location, transports=None):
     db = Database(tmp_path / f"{name}.sqlite")
     await db.open()
     await apply_migrations(db)
-    settings = Settings(vpn=_cfg(host, location), swarm=SwarmConfig(token=SWARM))
+    settings = Settings(vpn=_cfg(host, location, transports), swarm=SwarmConfig(token=SWARM))
     svc = VpnService(settings, db, FakeAwg(), _noop, reality_backend=FakeXray())
     svc._node_id = name
     await allow(svc, CHAT)
@@ -191,28 +192,115 @@ def test_headers():
         value.encode("latin-1")
 
 
-def test_page_has_button_copy_hint_qr_and_links():
-    page = subs.render_page(
-        _sub(),
+LINKS = subs.PageLinks(
+    hiddify_ios="https://apps.apple.com/x",
+    hiddify_android="https://play.google.com/x",
+    hiddify_site="https://hiddify.com",
+    amnezia_ios="https://apps.apple.com/amnezia",
+    amnezia_android="https://play.google.com/amnezia",
+    amnezia_site="https://amnezia.org",
+)
+
+
+def _page(sub=None, **kw):
+    return subs.render_page(
+        sub or _sub(),
         sub_url="https://h:8444/sub/tok",
         qr_data_uri="data:image/svg+xml;base64,AAA",
-        ios_url="https://apps.apple.com/x",
-        android_url="https://play.google.com/x",
-        site_url="https://hiddify.com",
+        links=LINKS,
+        path="/s/tok",
+        **kw,
     )
-    assert "Открыть в Hiddify" in page and "Скопировать ссылку" in page
+
+
+def test_page_is_hub_with_hiddify_steps_copy_qr_and_stores():
+    page = _page()
+    assert "📶 VPN · 📱 iPhone" in page and "VLESS · Hiddify" in page
     assert 'href="hiddify://import/https://h:8444/sub/tok"' in page
-    assert "Открыть в браузере" in page and "data:image/svg+xml" in page
-    assert "🇳🇱 Нидерланды" in page and "apps.apple.com" in page and "play.google.com" in page
-    assert "VPN · 📱 iPhone" in page
+    assert "➕ Добавить в Hiddify" in page and "📋 Скопировать ссылку" in page
+    assert (
+        "data:image/svg+xml" in page and "apps.apple.com/x" in page and "play.google.com/x" in page
+    )
+    assert "включите круглую кнопку" in page.lower()
+    assert "🇳🇱 Нидерланды" in page and "🇺🇸 США" in page
+    # автопереход один раз и без внешних ресурсов
+    assert "localStorage" in page and "setTimeout" in page
+    assert "http://" not in page and 'src="http' not in page
+
+
+def test_page_status_blocks_and_auto_open_off_when_on():
+    off = _page(status=subs.VpnStatus(False))
+    assert "❌ VPN сейчас выключен" in off and "🔄 Проверить ещё раз" in off
+    assert "if (true)" in off
+    on = _page(status=subs.VpnStatus(True, "🇳🇱 Нидерланды", subs.METHOD_AWG))
+    assert "✅ VPN включён — 🇳🇱 Нидерланды" in on and "Способ: AmneziaWG" in on
+    assert "if (false)" in on
+
+
+def test_page_countries_health_and_remaining():
+    sub = subs.Subscription(
+        "d",
+        _sub().entries,
+        used_bytes=13 * 10**9,
+        total_bytes=100 * 10**9,
+        expire_ts=1_793_491_200,  # 1 ноября 2026
+        nodes=(
+            subs.NodeInfo("jeeves", "🇳🇱 Нидерланды", "198.51.100.1", health="ok"),
+            subs.NodeInfo("wooster", "🇺🇸 США", "198.51.100.2", health="bad"),
+        ),
+    )
+    page = _page(sub)
+    assert "🇳🇱 Нидерланды — работает" in page and "🇺🇸 США — может не работать" in page
+    assert "Осталось 87 ГБ из 100 до 1 ноября" in page
 
 
 def test_page_escapes_label():
     sub = subs.Subscription("<script>x</script>", _sub().entries)
-    page = subs.render_page(
-        sub, sub_url="https://h/sub/t", qr_data_uri="d", ios_url="i", android_url="a", site_url="s"
+    assert "<script>x</script>" not in _page(sub)
+
+
+def test_page_awg_block_collapsed_with_forms_per_country():
+    nodes = (
+        subs.NodeInfo("jeeves", "🇳🇱 Нидерланды", "198.51.100.1", awg=True),
+        subs.NodeInfo("wooster", "🇺🇸 США", "198.51.100.2", awg=True),
     )
-    assert "<script>x</script>" not in page
+    sub = subs.Subscription("d", _sub().entries, nodes=nodes)
+    page = _page(sub, awg_forms={"jeeves": "N1", "wooster": "N2"})
+    assert "<details><summary>AmneziaWG</summary>" in page
+    assert "Получить настройки 🇳🇱" in page and 'action="/s/tok/awg"' in page
+    assert 'value="N1"' in page and "не на всех" in page
+    assert "AmneziaWG</summary>" not in _page(sub)  # без форм блока нет
+
+
+def test_detect_status_by_address():
+    nodes = (
+        subs.NodeInfo("jeeves", "🇳🇱 Нидерланды", "198.51.100.1", local=True),
+        subs.NodeInfo("wooster", "🇺🇸 США", "198.51.100.2"),
+    )
+    net = "10.9.0.0/29"
+    own_awg = subs.detect_status("10.9.0.3", nodes, net)
+    assert own_awg == subs.VpnStatus(True, "🇳🇱 Нидерланды", "AmneziaWG")
+    own_vless = subs.detect_status("198.51.100.1", nodes, net)
+    assert own_vless == subs.VpnStatus(True, "🇳🇱 Нидерланды", "VLESS · Hiddify")
+    peer = subs.detect_status("::ffff:198.51.100.2", nodes, net)
+    assert peer == subs.VpnStatus(True, "🇺🇸 США", "")  # страна без способа
+    assert subs.detect_status("203.0.113.9", nodes, net) == subs.VpnStatus(False)
+    assert subs.detect_status("garbage", nodes, net) == subs.VpnStatus(False)
+    assert subs.detect_status("", nodes, net) == subs.VpnStatus(False)
+
+
+def test_token_carries_generation_and_rejects_forgery():
+    secret = subs.derive_secret("", SWARM)
+    t0, t1 = subs.make_token(secret, 5, "d"), subs.make_token(secret, 5, "d", 1_700_000_000)
+    assert t0 != t1 and subs.token_gen(t1) == 1_700_000_000 and subs.token_gen(t0) == 0
+    assert subs.token_matches(secret, t1, 5, "d")
+    # подделка поколения (подмена первых 4 байт) не проходит подпись
+    forged = subs.make_token(secret, 5, "d", 0)
+    raw = base64.urlsafe_b64decode(forged + "==")
+    raw = (1).to_bytes(4, "big") + raw[4:]
+    assert not subs.token_matches(
+        secret, base64.urlsafe_b64encode(raw).decode().rstrip("="), 5, "d"
+    )
 
 
 # --- служба: токен находится на любой ноде, подписка собирается из роя ---
@@ -335,7 +423,7 @@ async def test_web_subscription_and_page(client):
     page = await cl.get(f"/s/{token}")
     assert page.status == 200 and page.content_type == "text/html"
     text = await page.text()
-    assert "Открыть в Hiddify" in text and f"/sub/{token}" in text
+    assert "Добавить в Hiddify" in text and f"/sub/{token}" in text
 
 
 async def test_web_404_for_unknown_revoked_and_garbage(client):
@@ -353,6 +441,295 @@ async def test_web_404_for_unknown_revoked_and_garbage(client):
         svc._sub_cache.clear()
     assert (await cl.get(f"/sub/{token}")).status == 404
     assert (await cl.get(f"/s/{token}")).status == 404
+
+
+# --- токен-поколение: перевыпуск гасит старую ссылку на всех нодах ---
+
+
+async def _reissue(svc, label="📱 iPhone", transport=TRANSPORT_REALITY):
+    await asyncio.sleep(1.1)  # поколение — секунды
+    await svc.run_command(
+        vpn_protocol.ACTION_REISSUE,
+        {"chat_id": CHAT, "device_label": label, "transport": transport},
+    )
+    for node in (svc, *svc._node_link.peers.values()):
+        node._sub_cache.clear()
+
+
+async def _fresh_token(svc, label="📱 iPhone"):
+    res = await svc.run_command(
+        vpn_protocol.ACTION_GET_SUBSCRIPTION, {"chat_id": CHAT, "device_label": label}
+    )
+    return res["page_url"].rsplit("/", 1)[1]
+
+
+@pytest_asyncio.fixture
+async def webswarm(swarm):
+    a, b, link = swarm
+    for svc in (a, b):
+        svc.sub_web = SubscriptionWeb(svc._cfg, svc.resolve_subscription, svc.web_issue_awg)
+        svc.sub_web._runner = object()  # type: ignore[assignment]
+    return a, b, link
+
+
+async def test_reissue_on_any_node_kills_old_token_everywhere(webswarm):
+    a, b, _link = webswarm
+    old = await _fresh_token(a)
+    assert old == await _fresh_token(b) == _token(a)  # поколения нет — токен прежний
+    for svc in (a, b):
+        assert await svc.resolve_subscription(old) is not None
+    await _reissue(b)  # перевыпуск только в США
+    new = await _fresh_token(a)  # другая нода узнаёт поколение у соседа
+    assert new != old and new == await _fresh_token(b)
+    for svc in (a, b):
+        assert await svc.resolve_subscription(old) is None
+        sub = await svc.resolve_subscription(new)
+        assert sub is not None and len(sub.entries) == 2
+    await _reissue(a)
+    newest = await _fresh_token(b)
+    assert newest not in (old, new)
+    assert await b.resolve_subscription(new) is None
+    assert await b.resolve_subscription(newest) is not None
+
+
+async def test_reissue_token_survives_node_restore_from_peers_table(webswarm):
+    """Поколение живёт в vpn_peers (revoked_at снятых строк) — другого хранилища нет."""
+    a, b, _link = webswarm
+    await _reissue(a)
+    token = await _fresh_token(a)
+    # «переустановка» ноды: новая служба на той же БД, кэшей нет
+    fresh = VpnService(
+        Settings(vpn=_cfg("198.51.100.1", "🇳🇱 Нидерланды"), swarm=SwarmConfig(token=SWARM)),
+        a._db, FakeAwg(), _noop, reality_backend=FakeXray(),
+    )  # fmt: skip
+    fresh._node_id = "jeeves"
+    fresh._node_link = a._node_link
+    assert await fresh.resolve_subscription(token) is not None
+    assert await fresh.resolve_subscription(_token(a)) is None  # токен нулевого поколения мёртв
+
+
+async def test_new_country_does_not_change_token(tmp_path, monkeypatch):
+    a, dba = await _make(tmp_path, "jeeves", "198.51.100.1", "🇳🇱 Нидерланды")
+    b, dbb = await _make(tmp_path, "wooster", "198.51.100.2", "🇺🇸 США")
+    a._node_link = b._node_link = PeerLink({"jeeves": a, "wooster": b})  # type: ignore[assignment]
+
+    async def live(_link):
+        return ["jeeves", "wooster"]
+
+    monkeypatch.setattr(vpn_nodes, "live_vpn_nodes", live)
+    for svc in (a, b):
+        svc.sub_web = SubscriptionWeb(svc._cfg, svc.resolve_subscription)
+        svc.sub_web._runner = object()  # type: ignore[assignment]
+    args = {"chat_id": CHAT, "device_label": "📱 iPhone", "transport": TRANSPORT_REALITY}
+    await a.run_command(vpn_protocol.ACTION_ISSUE, args)
+    before = await _fresh_token(a)
+    await b.run_command(vpn_protocol.ACTION_ISSUE, args)  # страну открыли позже
+    assert await _fresh_token(a) == before == await _fresh_token(b)
+    assert len((await a.resolve_subscription(before)).entries) == 2
+    await dba.close()
+    await dbb.close()
+
+
+async def test_deleted_device_is_404_even_with_fresh_token(webswarm):
+    a, b, _link = webswarm
+    token = await _fresh_token(a)
+    for svc in (a, b):
+        await svc.run_command(
+            vpn_protocol.ACTION_REVOKE,
+            {"chat_id": CHAT, "device_label": "📱 iPhone", "transport": TRANSPORT_REALITY},
+        )
+    assert await a.resolve_subscription(token) is None
+
+
+# --- веб: заголовки, 404, статус «VPN включён», выдача AmneziaWG ---
+
+
+@pytest_asyncio.fixture
+async def awg_swarm(tmp_path, monkeypatch):
+    both = [TRANSPORT_REALITY, vpn_protocol.TRANSPORT_AWG]
+    a, dba = await _make(tmp_path, "jeeves", "127.0.0.1", "🇳🇱 Нидерланды", both)
+    b, dbb = await _make(tmp_path, "wooster", "198.51.100.2", "🇺🇸 США", both)
+    a._node_link = b._node_link = PeerLink({"jeeves": a, "wooster": b})  # type: ignore[assignment]
+
+    async def live(_link):
+        return ["jeeves", "wooster"]
+
+    monkeypatch.setattr(vpn_nodes, "live_vpn_nodes", live)
+    for svc in (a, b):
+        await svc.run_command(
+            vpn_protocol.ACTION_ISSUE,
+            {"chat_id": CHAT, "device_label": "📱 iPhone", "transport": TRANSPORT_REALITY},
+        )
+    web = SubscriptionWeb(a._cfg, a.resolve_subscription, a.web_issue_awg)
+    cl = TestClient(TestServer(web._app()))
+    await cl.start_server()
+    yield cl, a, b, web
+    await cl.close()
+    await dba.close()
+    await dbb.close()
+
+
+def _origin(cl):
+    return {"Origin": f"http://{cl.server.host}:{cl.server.port}"}
+
+
+async def _form_nonce(cl, token, node):
+    text = await (await cl.get(f"/s/{token}")).text()
+    marker = f'name="node" value="{node}"'
+    chunk = text[: text.index(marker)]
+    return chunk.rsplit('name="nonce" value="', 1)[1].split('"', 1)[0]
+
+
+async def test_web_headers_no_server_and_bare_404s(awg_swarm):
+    cl, a, _b, _web = awg_swarm
+    token = _token(a)
+    page = await cl.get(f"/s/{token}")
+    assert page.status == 200
+    for resp in (page, await cl.get("/s/" + "A" * 32), await cl.get("/nope")):
+        assert "Server" not in resp.headers
+        assert resp.headers["Cache-Control"] == "no-store"
+        assert resp.headers["Referrer-Policy"] == "no-referrer"
+        assert "noindex" in resp.headers["X-Robots-Tag"]
+    assert "default-src 'none'" in page.headers["Content-Security-Policy"]
+    for path in ("/", "/nope", "/s/", "/s/short", f"/s/{token}/x", "/favicon.ico"):
+        resp = await cl.get(path)
+        assert resp.status == 404 and (await resp.text()) == "Not found\n"
+    assert (await cl.post(f"/s/{token}")).status == 404  # чужой метод — тот же 404
+    assert (await cl.put(f"/sub/{token}")).status == 404
+    assert (await cl.post("/s/" + "A" * 32 + "/awg", headers=_origin(cl))).status == 404
+
+
+async def test_web_status_by_request_address(awg_swarm):
+    cl, a, _b, _web = awg_swarm
+    token = _token(a)
+    # тестовый клиент приходит с 127.0.0.1 = публичный адрес «своей» ноды jeeves
+    on = await (await cl.get(f"/s/{token}")).text()
+    assert "✅ VPN включён — 🇳🇱 Нидерланды" in on and "VLESS · Hiddify" in on
+    a._cfg.reality.endpoint_host = "198.51.100.9"  # теперь адрес запроса — чужой
+    a._cfg.endpoint_host = "198.51.100.9"
+    a._sub_cache.clear()
+    off = await (await cl.get(f"/s/{token}")).text()
+    assert "❌ VPN сейчас выключен" in off and "✅ VPN включён" not in off
+    assert "198.51.100.2" not in off  # адрес соседней ноды на страницу не попадает
+
+
+async def test_awg_post_requires_origin_and_nonce(awg_swarm):
+    cl, a, _b, _web = awg_swarm
+    token = _token(a)
+    nonce = await _form_nonce(cl, token, "jeeves")
+    data = {"nonce": nonce, "node": "jeeves"}
+    assert (await cl.post(f"/s/{token}/awg", data=data)).status == 404  # без Origin/Referer
+    evil = {"Origin": "http://evil.example"}
+    assert (await cl.post(f"/s/{token}/awg", data=data, headers=evil)).status == 404
+    bad = await cl.post(
+        f"/s/{token}/awg", data={"nonce": "x", "node": "jeeves"}, headers=_origin(cl)
+    )
+    assert bad.status == 400 and "устарела" in await bad.text()
+    # Referer вместо Origin тоже годится
+    ref = {"Referer": f"http://{cl.server.host}:{cl.server.port}/s/{token}"}
+    ok = await cl.post(f"/s/{token}/awg", data=data, headers=ref)
+    assert ok.status == 200
+    # nonce одноразовый
+    again = await cl.post(f"/s/{token}/awg", data=data, headers=_origin(cl))
+    assert again.status == 400
+
+
+async def test_awg_issue_local_and_remote_show_config_once(awg_swarm):
+    cl, a, b, _web = awg_swarm
+    token = _token(a)
+    for node, svc, name in (("jeeves", a, "awg_nl_"), ("wooster", b, "awg_us_")):
+        nonce = await _form_nonce(cl, token, node)
+        resp = await cl.post(
+            f"/s/{token}/awg", data={"nonce": nonce, "node": node}, headers=_origin(cl)
+        )
+        text = await resp.text()
+        assert resp.status == 200, text
+        assert "Настройки показаны один раз" in text and f'download="{name}' in text
+        assert "AmneziaVPN" in text and "переименуйте" in text
+        assert "Магазин недоступен? Запросите файл в боте" in text and "data:image/svg+xml" in text
+        row = await svc._active_row(CHAT, "📱 iPhone", vpn_protocol.TRANSPORT_AWG)
+        assert row is not None
+    # на странице после выдачи ключ есть →
+    a._sub_cache.clear()
+    nonce = await _form_nonce(cl, token, "jeeves")
+    assert nonce
+
+
+async def test_awg_existing_key_needs_confirmation_then_replaces(awg_swarm):
+    cl, a, _b, web = awg_swarm
+    token = _token(a)
+    await a.run_command(
+        vpn_protocol.ACTION_ISSUE,
+        {"chat_id": CHAT, "device_label": "📱 iPhone", "transport": vpn_protocol.TRANSPORT_AWG},
+    )
+    old = await a._active_row(CHAT, "📱 iPhone", vpn_protocol.TRANSPORT_AWG)
+    nonce = await _form_nonce(cl, token, "jeeves")
+    ask = await cl.post(
+        f"/s/{token}/awg", data={"nonce": nonce, "node": "jeeves"}, headers=_origin(cl)
+    )
+    text = await ask.text()
+    assert "Новый заменит старый" in text and 'name="confirm" value="1"' in text
+    assert (await a._active_row(CHAT, "📱 iPhone", vpn_protocol.TRANSPORT_AWG))["public_key"] == (
+        old["public_key"]
+    )  # без подтверждения ничего не заменено
+    nonce2 = text.split('name="nonce" value="', 1)[1].split('"', 1)[0]
+    done = await cl.post(
+        f"/s/{token}/awg",
+        data={"nonce": nonce2, "node": "jeeves", "confirm": "1"},
+        headers=_origin(cl),
+    )
+    assert done.status == 200 and "Настройки показаны один раз" in await done.text()
+    new = await a._active_row(CHAT, "📱 iPhone", vpn_protocol.TRANSPORT_AWG)
+    assert new["public_key"] != old["public_key"]
+    assert web._issue_awg is not None
+
+
+async def test_awg_rate_limit_per_country_and_token(awg_swarm):
+    cl, a, _b, web = awg_swarm
+    token = _token(a)
+    n1 = await _form_nonce(cl, token, "jeeves")
+    n2 = await _form_nonce(cl, token, "jeeves")
+    first = await cl.post(
+        f"/s/{token}/awg", data={"nonce": n1, "node": "jeeves"}, headers=_origin(cl)
+    )
+    assert first.status == 200
+    a._sub_cache.clear()
+    # ключ уже есть → подтверждение; частота проверяется при самой выдаче
+    ask = await cl.post(
+        f"/s/{token}/awg", data={"nonce": n2, "node": "jeeves"}, headers=_origin(cl)
+    )
+    text = await ask.text()
+    n3 = text.split('name="nonce" value="', 1)[1].split('"', 1)[0]
+    limited = await cl.post(
+        f"/s/{token}/awg",
+        data={"nonce": n3, "node": "jeeves", "confirm": "1"},
+        headers=_origin(cl),
+    )
+    assert limited.status == 429 and "Подождите минуту" in await limited.text()
+    # окно прошло — можно; общий предел на токен — шесть в час
+    web._awg_last.clear()
+    assert web._rate_ok(token, "jeeves")
+    for _i in range(10):
+        web._awg_last.clear()
+        web._rate_ok(token, "wooster")
+    web._awg_last.clear()
+    assert not web._rate_ok(token, "wooster")
+
+
+async def test_awg_not_offered_without_issuer(swarm):
+    a, _b, _link = swarm
+    web = SubscriptionWeb(a._cfg, a.resolve_subscription)
+    cl = TestClient(TestServer(web._app()))
+    await cl.start_server()
+    try:
+        text = await (await cl.get(f"/s/{_token(a)}")).text()
+        assert "<summary>AmneziaWG" not in text
+        resp = await cl.post(
+            f"/s/{_token(a)}/awg", data={"nonce": "x", "node": "jeeves"}, headers=_origin(cl)
+        )
+        assert resp.status == 404
+    finally:
+        await cl.close()
 
 
 # --- TLS: http как запасной путь, подхват сертификата ---
@@ -431,7 +808,7 @@ def test_card_keyboard_has_hiddify_url_button_first():
         device, servers, subscription=ADMIN, page_url="https://h:8444/s/tok"
     )
     first = markup.inline_keyboard[0][0]
-    assert first.text == "🔌 Подключить в Hiddify" and first.url == "https://h:8444/s/tok"
+    assert first.text == "📶 Настройки на странице" and first.url == "https://h:8444/s/tok"
     plain = h._card_keyboard_for_device(device, servers, subscription=ADMIN)
     assert all(b.url is None for row in plain.inline_keyboard for b in row)
 

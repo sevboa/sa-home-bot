@@ -6,7 +6,9 @@
 
 Экраны (``w`` + код):
   p — выбор устройства              x — «Я разберусь сам» (старая карточка)
-  a/b/c/d — шаги: установка / файл настроек / подключение / проверка
+  b/c/d — шаги: файл настроек (если включён) / страница настроек / проверка
+  (57.11: установка и подключение живут на странице; код ``a`` остаётся для
+  старых кнопок и ведёт на страницу)
   y — «Заработало»                  f/o/h + <шаг><платформа><ключ> — «Не
   получается» / другая страна / позвать на помощь. Шаг ``n`` — устройство не
   удалось создать (ключа нет).
@@ -15,6 +17,7 @@
 
 from __future__ import annotations
 
+import html
 from dataclasses import dataclass
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -33,7 +36,7 @@ PICK, EXPERT = "p", "x"
 INSTALL, FILE, CONNECT, CHECK = "a", "b", "c", "d"
 DONE, FAIL, OTHER, HELP = "y", "f", "o", "h"
 NOT_CREATED = "n"  # «шаг» для помощи, когда устройство не удалось создать
-STEP_ORDER = (INSTALL, FILE, CONNECT)
+STEP_ORDER = (FILE, CONNECT)
 
 INTRO_TEXT = (
     "📶 <b>VPN</b>\n\nПодключим ваш телефон или компьютер?\nПроведу по шагам — займёт пару минут."
@@ -192,6 +195,24 @@ def pick_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def page_link_text(label: str, page_url: str) -> str:
+    """Сообщение для пересылки тому, чей это телефон. Ссылка — текстом (на
+    случай, если кнопка не пересланa), дальше всё по шагам на самой странице."""
+    return (
+        f"📶 <b>Настройки VPN · {html.escape(label)}</b>\n"
+        "Откройте ссылку на телефоне, который подключаете — там всё по шагам: "
+        "Hiddify, AmneziaWG и проверка, что VPN включён.\n"
+        f"{html.escape(page_url)}\n"
+        "Ссылку можно переслать. Не делитесь ей с чужими: по ней подключается это устройство."
+    )
+
+
+def connect_text(label: str, page_url: str, title: str | None = None) -> str:
+    """Шаг «Откройте страницу настроек» — то же пересылаемое сообщение, что в карточке."""
+    head = f"<b>{title}</b>\n" if title else ""
+    return head + page_link_text(label, page_url)
+
+
 def step_keyboard(
     code: str,
     platform: Platform,
@@ -221,7 +242,7 @@ def step_keyboard(
             [InlineKeyboardButton(text=platform.store_button, url=store_url(platform, cfg))]
         )
     if code == CONNECT and page_url:
-        rows.append([InlineKeyboardButton(text="🔌 Подключить", url=page_url)])
+        rows.append([InlineKeyboardButton(text="📶 Открыть настройки", url=page_url)])
     ready = InlineKeyboardButton(
         text="✅ Готово", callback_data=card_cb(next_step(code, needs_file), ctx(p, key))
     )

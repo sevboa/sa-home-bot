@@ -109,6 +109,7 @@ ACTION_GET_VLESS = "get_vless"
 # служебное между vpn-нодами: «есть ли у вас VLESS устройства с этим токеном».
 ACTION_GET_SUBSCRIPTION = "get_subscription"
 ACTION_SUB_LINKS = "sub_links"
+ACTION_SUB_GEN = "sub_gen"  # служебное между vpn-нодами: поколение токена устройства
 ACTION_USAGE = "usage"  # с chat_id — свой расход; без — сводка по всем (админ)
 ACTION_SET_QUOTA = "set_quota"  # админ: прямой грант месяца {chat_id, bytes}
 # Допуск на ЭТОТ сервер + постоянная личная база {chat_id, allowed, base_gb}.

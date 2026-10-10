@@ -106,7 +106,7 @@ async def run_vpn(settings: Settings) -> None:
     # живёт без неё (get_subscription вернёт понятную ошибку).
     sub_web: SubscriptionWeb | None = None
     if reality_backend is not None and settings.vpn.sub_port > 0:
-        sub_web = SubscriptionWeb(settings.vpn, service.resolve_subscription)
+        sub_web = SubscriptionWeb(settings.vpn, service.resolve_subscription, service.web_issue_awg)
         service.sub_web = sub_web
         try:
             await sub_web.start()
