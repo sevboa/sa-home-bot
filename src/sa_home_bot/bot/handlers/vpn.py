@@ -49,7 +49,14 @@ from aiogram.types import (
     Message,
 )
 
-from sa_home_bot.bot import commands, vpn_admin_view, vpn_devices, vpn_nodes
+from sa_home_bot.bot import (
+    commands,
+    vpn_admin_view,
+    vpn_devices,
+    vpn_help,
+    vpn_nodes,
+    vpn_wizard,
+)
 from sa_home_bot.bot.invites import Gatekeeper
 from sa_home_bot.bot.menu import refresh_chat_menu
 from sa_home_bot.bot.notifier import Notifier
@@ -509,7 +516,7 @@ def _back_button(text: str, callback_data: str) -> list[InlineKeyboardButton]:
 
 
 def _new_device_button() -> InlineKeyboardButton:
-    # Пока — прежний поток выдачи (выбор сервера/технологии); мастер — 57.3a.
+    # Прежний поток выдачи (выбор сервера/технологии); мастер — рядом, 57.3a.
     return InlineKeyboardButton(
         text="➕ Новое устройство",
         callback_data=commands.action_callback(vpn_protocol.ACTION_ISSUE, service=SERVICE),
@@ -522,7 +529,7 @@ def _home_keyboard(
     """Новая главная (у человека есть устройства). Кнопки — строго по правам."""
     rows: list[list[InlineKeyboardButton]] = []
     if _allows(subscription, vpn_protocol.ACTION_ISSUE):
-        rows.append([_new_device_button()])
+        rows.append([vpn_wizard.wizard_button(), _new_device_button()])
     second: list[InlineKeyboardButton] = []
     if _allows(subscription, _ACTION_APK):
         second.append(
@@ -573,7 +580,7 @@ def _list_keyboard(
     if row:
         rows.append(row)
     if _allows(subscription, vpn_protocol.ACTION_ISSUE):
-        rows.append([_new_device_button()])
+        rows.append([vpn_wizard.wizard_button(), _new_device_button()])
     rows.append(_back_button("⬅️ Назад", _home_cb()))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1131,22 +1138,41 @@ async def cmd_vpn(
             return
         await message.answer(error)
         return
-    text, keyboard = _render_main(servers, down, subscription, config)
+    text, keyboard = _render_main(
+        servers, down, subscription, config, wizard=_is_private(message.chat.id)
+    )
     await message.answer(text, reply_markup=keyboard)
 
 
+def _wizard_available(servers: list[dict], subscription: Subscription | None) -> bool:
+    """Мастер возможен, если можно выдать устройство и есть открытый сервер
+    с VLESS (мастер всегда VLESS · Hiddify)."""
+    return _allows(subscription, vpn_protocol.ACTION_ISSUE) and any(
+        _is_allowed(server) and vpn_protocol.TRANSPORT_REALITY in (server.get("transports") or [])
+        for server in servers
+    )
+
+
 def _render_main(
-    servers: list[dict], down: list[dict], subscription: Subscription | None, config: Settings
+    servers: list[dict],
+    down: list[dict],
+    subscription: Subscription | None,
+    config: Settings,
+    *,
+    wizard: bool = False,
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Главная /vpn. Есть устройства — новая (этап 57.3): остаток квоты и
     предупреждение словами, без цветов и трафика по странам. Нет устройств —
-    прежняя карточка (мастер первого подключения — 57.3a)."""
+    первый экран мастера (57.3a, ``wizard`` — личка и без «Я разберусь сам»),
+    а иначе прежняя карточка."""
     self_serve = _self_serve_nodes(servers, config)
     if vpn_devices.build_devices(servers):
         return (
             vpn_devices.home_text(servers, unavailable=down),
             _home_keyboard(servers, subscription=subscription, self_serve_nodes=self_serve),
         )
+    if wizard and _wizard_available(servers, subscription):
+        return vpn_wizard.INTRO_TEXT, vpn_wizard.intro_keyboard()
     return (
         _usage_text(servers, unavailable=down),
         _card_keyboard(servers, subscription=subscription, self_serve_nodes=self_serve),
@@ -1154,7 +1180,12 @@ def _render_main(
 
 
 async def _redraw_card(
-    callback: CallbackQuery, node_link: ServiceLink, subscription: Subscription, config: Settings
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    subscription: Subscription,
+    config: Settings,
+    *,
+    expert: bool = False,
 ) -> None:
     error, servers, down = await _card(node_link, callback.message.chat.id, subscription)
     if error is not None:
@@ -1164,7 +1195,13 @@ async def _redraw_card(
                     _PROXY_ONLY_CARD, reply_markup=_proxy_only_keyboard()
                 )
         return
-    text, keyboard = _render_main(servers, down, subscription, config)
+    text, keyboard = _render_main(
+        servers,
+        down,
+        subscription,
+        config,
+        wizard=not expert and _is_private(callback.message.chat.id),
+    )
     with contextlib.suppress(TelegramBadRequest):
         await callback.message.edit_text(text, reply_markup=keyboard)
 
@@ -1313,6 +1350,275 @@ async def _expert_delete(
         return
     await callback.answer(f"Удалено: {device.label}")
     await _show_screen(callback, node_link, subscription, config, _SCREEN_LIST)
+
+
+# --- пошаговая настройка (этап 57.3a) ---------------------------------------
+
+
+def _delete_later(notifier: Notifier, chat_id: int, message_id: int | None, ttl_s: float) -> None:
+    """Файл с настройками удаляется по тому же TTL, что и прочие секреты."""
+    if message_id is None:
+        return
+
+    async def _cleanup() -> None:
+        await asyncio.sleep(ttl_s)
+        await notifier.delete_message(chat_id, message_id)
+
+    asyncio.create_task(_cleanup(), name="vpn-wizard-file-cleanup")
+
+
+async def _wizard_edit(callback: CallbackQuery, text: str, keyboard: InlineKeyboardMarkup) -> None:
+    with contextlib.suppress(TelegramBadRequest):
+        await callback.message.edit_text(text, reply_markup=keyboard)
+
+
+async def _wizard_issue_one(
+    node_link: ServiceLink, chat_id: int, node: str, label: str
+) -> dict | None:
+    try:
+        return await node_link.command(
+            vpn_protocol.ACTION_ISSUE,
+            {
+                "chat_id": chat_id,
+                "device_label": label,
+                "transport": vpn_protocol.TRANSPORT_REALITY,
+            },
+            dst=Address(node=node, service=SERVICE),
+        )
+    except (ProtoError, ServiceUnavailableError) as exc:
+        log.warning("vpn: мастер не смог выпустить VLESS на %s: %s", node, exc)
+        return None
+
+
+async def _wizard_create(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    config: Settings,
+    subscription: Subscription,
+    platform_code: str,
+) -> None:
+    """``issue:~w<платформа>`` — создать устройство: VLESS во всех странах,
+    открытых человеку. Часть нод не ответила — идём с тем, что есть."""
+    chat_id = callback.message.chat.id
+    platform = vpn_wizard.PLATFORMS.get(platform_code)
+    if platform is None:
+        await callback.answer()
+        return
+    if not _is_private(chat_id):
+        await callback.answer("Настройка идёт только в личке — напишите мне туда.", show_alert=True)
+        return
+    await callback.answer("Готовлю подключение…")
+    error, servers, _down = await _card(node_link, chat_id, subscription)
+    targets = [
+        server
+        for server in (servers if error is None else [])
+        if _is_allowed(server)
+        and vpn_protocol.TRANSPORT_REALITY in (server.get("transports") or [])
+        and server.get("node")
+    ]
+    devices = vpn_devices.build_devices(servers) if error is None else []
+    label = vpn_wizard.next_label(platform, {dev.label for dev in devices})
+    results = await asyncio.gather(
+        *(_wizard_issue_one(node_link, chat_id, server["node"], label) for server in targets)
+    )
+    if not any(result is not None for result in results):
+        await _wizard_edit(
+            callback,
+            vpn_wizard.CREATE_FAILED_TEXT,
+            vpn_wizard.create_failed_keyboard(platform.code),
+        )
+        return
+    key = vpn_devices.device_key(label)
+    needs_file = vpn_wizard.needs_settings_file(config.vpn, devices, key)
+    await _wizard_edit(
+        callback,
+        _wizard_step_text(vpn_wizard.INSTALL, needs_file),
+        vpn_wizard.step_keyboard(
+            vpn_wizard.INSTALL, platform, key, config.vpn, needs_file=needs_file
+        ),
+    )
+
+
+def _wizard_step_text(code: str, needs_file: bool) -> str:
+    title = vpn_wizard.step_title(code, needs_file)
+    body = {
+        vpn_wizard.INSTALL: "Установите приложение Hiddify.",
+        vpn_wizard.FILE: "Нажмите на файл ниже и выберите «Hiddify».",
+        vpn_wizard.CONNECT: "Нажмите кнопку — откроется Hiddify, нажмите там «Добавить».",
+    }[code]
+    return f"<b>{title}</b>\n{body}"
+
+
+async def _wizard_show(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    notifier: Notifier,
+    config: Settings,
+    subscription: Subscription,
+    book: SubscriptionBook | None,
+    value: str,
+) -> None:
+    """``vpn_card:w…`` — экраны мастера, одно сообщение, правится на месте."""
+    chat_id = callback.message.chat.id
+    code, step, rest = vpn_wizard.parse(value)
+    if code == vpn_wizard.PICK:
+        await callback.answer()
+        await _wizard_edit(callback, vpn_wizard.PICK_TEXT, vpn_wizard.pick_keyboard())
+        return
+    if code == vpn_wizard.EXPERT:
+        await callback.answer()
+        await _redraw_card(callback, node_link, subscription, config, expert=True)
+        return
+    if code == vpn_wizard.DONE:
+        await callback.answer()
+        await _wizard_edit(callback, vpn_wizard.DONE_TEXT, vpn_wizard.done_keyboard())
+        return
+
+    # Остальные экраны: ``<шаг (для f/o/h)><платформа><ключ>``.
+    platform = vpn_wizard.PLATFORMS.get(rest[:1])
+    key = rest[1:]
+    if platform is None:
+        await callback.answer()
+        await _redraw_card(callback, node_link, subscription, config)
+        return
+    p = platform.code
+
+    if code == vpn_wizard.FAIL:
+        await callback.answer()
+        await _wizard_edit(callback, vpn_wizard.FAIL_TEXT, vpn_wizard.fail_keyboard(step, p, key))
+        return
+    if code == vpn_wizard.OTHER:
+        await callback.answer()
+        await _wizard_edit(
+            callback,
+            vpn_wizard.OTHER_TEXT,
+            vpn_wizard.back_to_step_keyboard(step, p, key, help_button=True),
+        )
+        return
+
+    error, servers, _down = await _card(node_link, chat_id, subscription)
+    devices = vpn_devices.build_devices(servers) if error is None else []
+    device = vpn_devices.find_device(devices, key) if key else None
+    needs_file = vpn_wizard.needs_settings_file(config.vpn, devices, key)
+
+    if code == vpn_wizard.HELP:
+        await _wizard_help(callback, notifier, subscription, book, platform, step, key, needs_file)
+        return
+
+    if code not in vpn_wizard.STEP_ORDER + (vpn_wizard.CHECK,):
+        await callback.answer()
+        return
+    if device is None:
+        await callback.answer("Устройство не найдено — начнём заново.", show_alert=True)
+        await _wizard_edit(callback, vpn_wizard.PICK_TEXT, vpn_wizard.pick_keyboard())
+        return
+    await callback.answer()
+    if code == vpn_wizard.FILE and not needs_file:
+        code = vpn_wizard.CONNECT  # флаг выключили или Hiddify уже настроен
+    page_url: str | None = None
+    if code == vpn_wizard.FILE:
+        if not _is_private(chat_id):
+            return
+        if not await _wizard_send_settings(
+            callback, node_link, notifier, config, chat_id, device, platform, needs_file
+        ):
+            await _wizard_edit(
+                callback, vpn_wizard.UNAVAILABLE_TEXT, vpn_wizard.unavailable_keyboard(code, p, key)
+            )
+        return
+    if code == vpn_wizard.CONNECT:
+        page_url = await _subscription_page_url(node_link, chat_id, device)
+        if page_url is None:
+            await _wizard_edit(
+                callback, vpn_wizard.UNAVAILABLE_TEXT, vpn_wizard.unavailable_keyboard(code, p, key)
+            )
+            return
+    text = (
+        vpn_wizard.CHECK_TEXT if code == vpn_wizard.CHECK else _wizard_step_text(code, needs_file)
+    )
+    await _wizard_edit(
+        callback,
+        text,
+        vpn_wizard.step_keyboard(
+            code, platform, key, config.vpn, needs_file=needs_file, page_url=page_url
+        ),
+    )
+
+
+async def _wizard_send_settings(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    notifier: Notifier,
+    config: Settings,
+    chat_id: int,
+    device: vpn_devices.Device,
+    platform: vpn_wizard.Platform,
+    needs_file: bool,
+) -> bool:
+    """Шаг 2: текст шага правится на месте, файл настроек (sing-box из
+    ``get_vless``) уходит отдельным сообщением и удаляется по TTL секретов.
+    False — получить файл не удалось (экран ошибки рисует вызывающий)."""
+    conn = next((c for c in device.issued if c.transport == vpn_devices.REALITY), None)
+    if conn is None:
+        return False
+    try:
+        result = await node_link.command(
+            vpn_protocol.ACTION_GET_VLESS,
+            {"chat_id": chat_id, "device_label": device.label},
+            dst=Address(node=conn.node, service=SERVICE),
+        )
+    except (ProtoError, ServiceUnavailableError):
+        return False
+    config_text = str(result.get("config_text") or "")
+    if not config_text:
+        return False
+    key = device.key
+    await _wizard_edit(
+        callback,
+        _wizard_step_text(vpn_wizard.FILE, needs_file),
+        vpn_wizard.step_keyboard(vpn_wizard.FILE, platform, key, config.vpn, needs_file=needs_file),
+    )
+    sent = await notifier.send_document(
+        chat_id,
+        config_text.encode("utf-8"),
+        filename=_reality_filename(device.label, str(result.get("location") or "")),
+        caption=vpn_wizard.FILE_CAPTION,
+        message_thread_id=callback.message.message_thread_id,
+    )
+    _delete_later(
+        notifier, chat_id, sent[0] if sent is not None else None, config.vpn.config_message_ttl_s
+    )
+    return True
+
+
+async def _wizard_help(
+    callback: CallbackQuery,
+    notifier: Notifier,
+    subscription: Subscription,
+    book: SubscriptionBook | None,
+    platform: vpn_wizard.Platform,
+    step: str,
+    key: str,
+    needs_file: bool,
+) -> None:
+    """«🙋 Позвать на помощь» → владельцу (``vpn_help.send_help_request``)."""
+    user = getattr(callback, "from_user", None)
+    name = getattr(user, "full_name", None) or subscription.name or str(subscription.chat_id)
+    who = vpn_help.who_text(name, getattr(user, "username", None))
+    reason = html.escape(vpn_wizard.stuck_text(step, platform, needs_file))
+    outcome = await vpn_help.send_help_request(
+        book, notifier, chat_id=callback.message.chat.id, who=who, reason=reason
+    )
+    if outcome == "throttled":
+        await callback.answer(vpn_wizard.HELP_THROTTLED_TEXT, show_alert=True)
+        return
+    await callback.answer()
+    text = vpn_wizard.HELP_SENT_TEXT if outcome == "sent" else vpn_wizard.HELP_NOBODY_TEXT
+    await _wizard_edit(
+        callback,
+        text,
+        vpn_wizard.back_to_step_keyboard(step, platform.code, key, help_button=False),
+    )
 
 
 def _conf_filename(device_label: str, location: str = "") -> str:
@@ -1609,6 +1915,14 @@ async def handle_action(
         )
         return
 
+    if (
+        action_id == vpn_protocol.ACTION_ISSUE
+        and value
+        and value.startswith(f"~{vpn_wizard.PREFIX}")
+    ):
+        await _wizard_create(callback, node_link, config, subscription, value[2:3])
+        return
+
     if action_id in (vpn_protocol.ACTION_ISSUE, vpn_protocol.ACTION_REISSUE):
         if not _is_private(chat_id):
             await callback.answer("Секрет доступа выдаётся только в личке.", show_alert=True)
@@ -1791,7 +2105,9 @@ async def handle_action(
         return
 
     if action_id == _ACTION_VPN_CARD:
-        if value:
+        if value and value.startswith(vpn_wizard.PREFIX):
+            await _wizard_show(callback, node_link, notifier, config, subscription, book, value)
+        elif value:
             await _show_screen(
                 callback, node_link, subscription, config, value[0], value[1:], answered=False
             )

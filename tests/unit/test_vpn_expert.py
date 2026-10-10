@@ -139,7 +139,7 @@ def test_all_callbacks_fit_64_bytes():
         h._card_keyboard_for_device(device, servers, subscription=ADMIN),
         h._reissue_keyboard(device, servers),
         h._delete_keyboard(device),
-    ]
+    ]  # экраны мастера — в test_vpn_wizard.py
     for markup in markups:
         for button in _all_buttons(markup):
             assert len(button.callback_data.encode()) <= 64, button.callback_data
@@ -152,13 +152,15 @@ async def test_home_for_user_with_devices(_fanout):
     assert "🇳🇱 Нидерланды: осталось 87 ГБ из 100 до " in text
     flat = _texts(markup)
     assert "⚙️ Управление" in flat and "❓ Помощь" in flat and "➕ Новое устройство" in flat
-    assert not any("Подключить по шагам" in t or "Сообщить" in t for t in flat)
+    assert "📱 Подключить по шагам" in flat
+    assert not any("Сообщить" in t for t in flat)
     assert not any("Перевыпустить" in t or "Отозвать" in t for t in flat)
 
 
-async def test_home_without_devices_is_old_card(_fanout):
+async def test_home_without_devices_is_old_card_in_group(_fanout):
+    # В личке без устройств открывается мастер (test_vpn_wizard.py); в группе мастера нет.
     _fanout["servers"] = [_srv("jeeves", "", [], devices=[])]
-    cb, _, _ = await _press("act:vpn:vpn_card")
+    cb, _, _ = await _press("act:vpn:vpn_card", chat_id=-100)
     assert "📶 <b>VPN</b>" in cb.message.edits[-1]
     assert "Управление" not in " ".join(_texts(cb.message.edit_markups[-1]))
 

@@ -907,6 +907,10 @@ class VpnConfig(BaseModel):
     hiddify_google_play_url: str = "https://play.google.com/store/apps/details?id=app.hiddify.com"
     hiddify_ios_app_store_url: str = "https://apps.apple.com/app/hiddify-proxy-vpn/id6596777532"
     hiddify_releases_url: str = "https://github.com/hiddify/hiddify-app/releases/latest"
+    # Мастер /vpn (57.3a): шаг «файл настроек» (sing-box с маршрутами РФ) перед
+    # подпиской. Владелец выключает его, когда проверит на телефоне, что
+    # маршруты приходят через подписку сама.
+    wizard_settings_file: bool = True
 
     # --- Мониторинг доступности VPN (служба vpn_check, найдена нужда
     # 2026-08-17: NAT-правило на jeeves тихо пропало на 4 дня, узнали только
