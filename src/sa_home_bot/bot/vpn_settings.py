@@ -1,7 +1,9 @@
 """Выдача настроек в экспертном режиме /vpn (этап 57.4): тексты и кнопки.
 
 Экраны (``vpn_card:<код><ключ устройства>``, право ``vpn_card@vpn``):
-  g — «Получить настройки»: чем подключаться (VLESS · Hiddify / AmneziaWG)
+  l — «Получить настройки» (57.11): одно пересылаемое сообщение со ссылкой на страницу
+      настроек (URL-кнопка, без callback-кнопок, не удаляется по TTL)
+  g — «Другие способы»: запасные пути без страницы (VLESS · Hiddify / AmneziaWG)
   a — AmneziaWG: выбор страны
   n — «➕ Новое устройство»: выбор платформы (имя — как в мастере)
   r — «🔄 Перевыпустить ключи» (57.5): галочки по выданным подключениям; значение
@@ -37,6 +39,7 @@ EXPERT_PREFIX = "~"
 
 # Экраны ``vpn_card``.
 SCREEN_PICK, SCREEN_AWG, SCREEN_NEW = "g", "a", "n"
+SCREEN_LINK = "l"  # одно сообщение со ссылкой на страницу настроек (57.11)
 # Виды действий ``issue:~<вид>…`` / ``reissue:~<вид>…``.
 KIND_VLESS, KIND_FILE, KIND_AWG, KIND_NEW = "v", "s", "g", "n"
 # Перевыпуск по выбранным: ``reissue:~m<ключ>-<подпись>-<маска>``.
@@ -73,6 +76,21 @@ def _device_cb(key: str) -> str:
 
 
 # --- выбор технологии ------------------------------------------------------
+
+
+PAGE_BUTTON = "📶 Открыть настройки"
+PAGE_CARD_BUTTON = "📶 Настройки на странице"
+OTHER_WAYS_BUTTON = "Другие способы"
+
+
+page_link_text = wizard.page_link_text
+
+
+def page_link_keyboard(page_url: str) -> InlineKeyboardMarkup:
+    """Только URL-кнопка: callback-кнопки у получателя пересылки не работают."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=PAGE_BUTTON, url=page_url)]]
+    )
 
 
 def pick_text(label: str) -> str:

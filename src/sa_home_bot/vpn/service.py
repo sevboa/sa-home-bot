@@ -106,6 +106,7 @@ from sa_home_bot.vpn.protocol import (
     ACTION_REVOKE,
     ACTION_SET_ACCESS,
     ACTION_SET_QUOTA,
+    ACTION_SUB_GEN,
     ACTION_SUB_LINKS,
     ACTION_TELEGRAM_EGRESS,
     ACTION_USAGE,
@@ -446,7 +447,7 @@ class VpnService:
         # Подписка Hiddify (57.10): get_subscription — для бота; sub_links —
         # служебное между vpn-нодами (собрать VLESS устройства по токену).
         if self._reality is not None and self._reality_cfg is not None:
-            capabilities += [ACTION_GET_SUBSCRIPTION, ACTION_SUB_LINKS]
+            capabilities += [ACTION_GET_SUBSCRIPTION, ACTION_SUB_LINKS, ACTION_SUB_GEN]
             actions += [
                 ActionSpec(
                     id=ACTION_GET_SUBSCRIPTION,
@@ -457,6 +458,11 @@ class VpnService:
                     id=ACTION_SUB_LINKS,
                     title="🔗 VLESS по токену подписки",
                     params=(ActionParam(name="token", type="string", title="Токен"),),
+                ),
+                ActionSpec(
+                    id=ACTION_SUB_GEN,
+                    title="🔗 Поколение токена устройства",
+                    params=(chat_id_param, device_param),
                 ),
             ]
         # APK AmneziaWG — только там, где awg раздают: без него файл клиента
@@ -1072,6 +1078,7 @@ class VpnService:
         device_label = forced_label or explicit or _random_device_label(existing_labels)
         now = _now().isoformat()
 
+        self._sub_cache.clear()
         async with self._issue_lock:
             if explicit is not None and await self._active_row(chat_id, explicit, transport):
                 # Не дубль и не тихий перевыпуск: перевыпуск — отдельное явное
@@ -1081,9 +1088,7 @@ class VpnService:
                     f"устройство «{explicit}» ({transport}) уже выдано — "
                     "для нового ключа используйте перевыпуск",
                 )
-            artifacts = await self._issue_locked(
-                chat_id, device_label, transport, now
-            )
+            artifacts = await self._issue_locked(chat_id, device_label, transport, now)
 
         await self._emit(
             EVENT_VPN_PEER_ISSUED,
@@ -1203,6 +1208,7 @@ class VpnService:
             raise ProtoError(ERR_BAD_REQUEST, "не указано устройство (device_label)")
         # Проверка здесь, а не только в _issue: перевыпуск снимает старый пир
         # ДО выдачи нового, и недопущенный остался бы вообще без устройства.
+        self._sub_cache.clear()
         await self._require_access(chat_id)
         # transport (57.1) адресует конкретное подключение устройства; без него —
         # старое поведение (старый бот его не шлёт).
@@ -1218,9 +1224,13 @@ class VpnService:
             await self._remove_from_backend(transport, row["public_key"], row["address"])
         # Перевыпуск сохраняет транспорт устройства (если пир нашёлся); нового
         # пира без исходного — как обычный issue (транспорт из args/дефолт).
-        return await self._issue(args, forced_label=device_label, forced_transport=transport)
+        try:
+            return await self._issue(args, forced_label=device_label, forced_transport=transport)
+        finally:
+            self._sub_cache.clear()
 
     async def _revoke(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._sub_cache.clear()
         chat_id = self._chat_id(args)
         device_label = str(args.get("device_label") or "").strip()
         row = await self._active_row(chat_id, device_label, self._optional_transport(args))
@@ -1252,9 +1262,7 @@ class VpnService:
         await self._require_access(chat_id)
         row = await self._active_row(chat_id, device_label, TRANSPORT_REALITY)
         if row is None:
-            raise ProtoError(
-                ERR_BAD_REQUEST, f"у «{device_label}» нет активного VLESS-подключения"
-            )
+            raise ProtoError(ERR_BAD_REQUEST, f"у «{device_label}» нет активного VLESS-подключения")
         return {
             **self._reality_artifacts(row["public_key"], device_label),
             "transport": TRANSPORT_REALITY,
@@ -1278,10 +1286,11 @@ class VpnService:
         await self._require_access(chat_id)
         row = await self._active_row(chat_id, device_label, TRANSPORT_REALITY)
         if row is None:
-            raise ProtoError(
-                ERR_BAD_REQUEST, f"у «{device_label}» нет активного VLESS-подключения"
-            )
-        token = subs.make_token(self._sub_secret, chat_id, device_label)
+            raise ProtoError(ERR_BAD_REQUEST, f"у «{device_label}» нет активного VLESS-подключения")
+        gen = await self._device_gen(chat_id, device_label)
+        for peer_gen in await self._peer_gens(chat_id, device_label):
+            gen = max(gen, peer_gen)
+        token = subs.make_token(self._sub_secret, chat_id, device_label, gen)
         return {
             "page_url": self.sub_web.page_url(token),
             "sub_url": self.sub_web.sub_url(token),
@@ -1306,9 +1315,45 @@ class VpnService:
     def _sub_entry_name(self) -> str:
         return self._cfg.location or self._node_id
 
+    async def _device_gen(self, chat_id: int, device_label: str) -> int:
+        """«Поколение» токена на ЭТОЙ ноде: unix-время последнего перевыпуска или
+        отзыва VLESS-ключа устройства (``revoked_at`` снятых строк vpn_peers).
+        Выпуск новой страны ничего не меняет — ссылка на телефоне остаётся живой.
+        Живёт в vpn_peers, поэтому переживает переустановку ноды из бэкапа."""
+        cur = await self._db.conn.execute(
+            "SELECT revoked_at FROM vpn_peers WHERE chat_id = ? AND device_label = ? "
+            "AND COALESCE(transport, 'awg') = ? AND status != 'active' AND revoked_at IS NOT NULL",
+            (chat_id, device_label, TRANSPORT_REALITY),
+        )
+        best = 0
+        for row in await cur.fetchall():
+            try:
+                best = max(best, int(datetime.fromisoformat(row["revoked_at"]).timestamp()))
+            except ValueError:
+                continue
+        return best
+
+    async def _peer_gens(self, chat_id: int, device_label: str) -> list[int]:
+        """Поколения токена на соседних vpn-нодах (недоступные пропускаем)."""
+        if self._node_link is None:
+            return []
+        out: list[int] = []
+        for node in await self._sub_peer_nodes():
+            try:
+                reply = await self._node_link.command(
+                    ACTION_SUB_GEN,
+                    {"chat_id": chat_id, "device_label": device_label},
+                    dst=Address(node=node, service=SERVICE_NAME),
+                    timeout=6.0,
+                )
+                out.append(int(reply.get("gen") or 0))
+            except (ServiceUnavailableError, ProtoError, TimeoutError, OSError, ValueError):
+                continue
+        return out
+
     async def _sub_local(self, token: str) -> tuple[int, str, str] | None:
         """``(chat_id, label, uuid)`` активного VLESS-ключа ЭТОЙ ноды с таким
-        токеном: токен пересчитывается по каждому ключу (их единицы), без хранилища."""
+        токеном: MAC пересчитывается по каждому ключу (их единицы), без хранилища."""
         if self._reality is None or self._reality_cfg is None:
             return None
         cur = await self._db.conn.execute(
@@ -1324,15 +1369,35 @@ class VpnService:
                 return row["chat_id"], row["device_label"], row["public_key"]
         return None
 
+    def _node_ip(self) -> str:
+        if self._reality_cfg is not None and self._reality_cfg.endpoint_host:
+            return self._reality_cfg.endpoint_host
+        return self._cfg.endpoint_host
+
+    async def _sub_health(self) -> str:
+        """«ok» / «bad» / «» — проверки VLESS этой страны (иначе любого транспорта)."""
+        rows = [r for r in await self._check_rollup(server=self._node) if r.get("status")]
+        mine = [r for r in rows if r.get("transport") == TRANSPORT_REALITY] or rows
+        if not mine:
+            return ""
+        return "ok" if all(r["status"] == CHECK_OK for r in mine) else "bad"
+
     async def _sub_links(self, args: dict[str, Any]) -> dict[str, Any]:
         """Служебное между vpn-нодами: есть ли здесь VLESS устройства с этим
-        токеном; если есть — сервер, UUID, расход и лимит гостя за месяц."""
+        токеном; если есть — сервер, UUID, расход и лимит гостя за месяц, поколение
+        токена и сведения о ноде для страницы (адрес выхода, здоровье, AmneziaWG)."""
         token = str(args.get("token") or "")
         if not subs.valid_token_shape(token):
             return {"found": False}
+        base = {
+            "node": self._node_id,
+            "name": self._sub_entry_name(),
+            "ip": self._node_ip(),
+            "awg": self._has(TRANSPORT_AWG),
+        }
         found = await self._sub_local(token)
         if found is None:
-            return {"found": False}
+            return {"found": False, "info": base}
         chat_id, label, client_uuid = found
         month = _month_key(_now())
         entry = subs.SubEntry(
@@ -1341,10 +1406,14 @@ class VpnService:
             uuid=client_uuid,
             params=self._reality_params(),
         )
+        awg_key = await self._active_row(chat_id, label, TRANSPORT_AWG) is not None
         return {
             "found": True,
             "device_label": label,
+            "chat_id": chat_id,
+            "gen": await self._device_gen(chat_id, label),
             "entry": entry.to_wire(),
+            "info": {**base, "health": await self._sub_health(), "awg_key": awg_key},
             "used_bytes": await self._used_bytes(chat_id, month),
             "limit_bytes": await self._limit_bytes(chat_id, month),
         }
@@ -1388,7 +1457,10 @@ class VpnService:
         if cached is not None and now - cached[0] < (20 if cached[1] else 30):
             return cached[1]
         entries: list[subs.SubEntry] = []
+        nodes: list[subs.NodeInfo] = []
         label = ""
+        chat_id = 0
+        newest_gen = 0
         used = total = 0
         local = await self._sub_links({"token": token})
         answers: list[tuple[str, dict[str, Any] | None]] = [(self._node_id, local)]
@@ -1400,6 +1472,12 @@ class VpnService:
             if reply is None:  # нода не ответила: держим последнюю известную страну
                 entries += self._sub_stale.get((token, node), [])
                 continue
+            try:
+                if reply.get("info"):
+                    info = subs.NodeInfo.from_wire(reply["info"], local=node == self._node_id)
+                    nodes.append(info)
+            except (KeyError, TypeError, ValueError):
+                pass
             if not reply.get("found"):
                 self._sub_stale.pop((token, node), None)
                 continue
@@ -1410,10 +1488,13 @@ class VpnService:
             entries.append(entry)
             self._sub_stale[(token, node)] = [entry]
             label = label or str(reply.get("device_label") or "")
+            chat_id = chat_id or int(reply.get("chat_id") or 0)
+            newest_gen = max(newest_gen, int(reply.get("gen") or 0))
             used += int(reply.get("used_bytes") or 0)
             total += int(reply.get("limit_bytes") or 0)
         result: subs.Subscription | None = None
-        if entries:
+        # Токен старого поколения (VLESS перевыпускали на любой ноде) — как неизвестный.
+        if entries and (subs.token_gen(token) or 0) >= newest_gen:
             if not label:
                 label = "устройство"
             nxt = _now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -1424,11 +1505,30 @@ class VpnService:
                 used_bytes=used,
                 total_bytes=total,
                 expire_ts=int(nxt.timestamp()),
+                chat_id=chat_id,
+                nodes=tuple(sorted(nodes, key=lambda n: (n.name, n.node))),
             )
         if len(self._sub_cache) > 2000:
             self._sub_cache.clear()
         self._sub_cache[token] = (now, result)
         return result
+
+    async def web_issue_awg(
+        self, chat_id: int, device_label: str, node: str, *, replace: bool
+    ) -> dict[str, Any]:
+        """Выдача AmneziaWG со страницы устройства: выпуск (label+awg) или, если
+        ключ в стране уже есть и ``replace``, перевыпуск. Чужая страна — вызовом
+        к соседней ноде, как sub_links. Возвращает ответ issue/reissue."""
+        action = ACTION_REISSUE if replace else ACTION_ISSUE
+        args = {"chat_id": chat_id, "device_label": device_label, "transport": TRANSPORT_AWG}
+        self._sub_cache.clear()
+        if node == self._node_id:
+            return await self.run_command(action, args)
+        if self._node_link is None:
+            raise ProtoError(ERR_BAD_REQUEST, "нода недоступна")
+        return await self._node_link.command(
+            action, args, dst=Address(node=node, service=SERVICE_NAME), timeout=20.0
+        )
 
     async def _peers(self, _args: dict[str, Any]) -> dict[str, Any]:
         cur = await self._db.conn.execute(
@@ -2428,6 +2528,9 @@ class VpnService:
             return await self._get_subscription(args)
         if action == ACTION_SUB_LINKS:
             return await self._sub_links(args)
+        if action == ACTION_SUB_GEN:
+            label = str(args.get("device_label") or "").strip()
+            return {"gen": await self._device_gen(self._chat_id(args), label)}
         if action == ACTION_USAGE:
             return await self._usage(args)
         if action == ACTION_SET_QUOTA:

@@ -616,10 +616,14 @@ async def _subscription_page_url(
     страницы нет нигде (кнопка тогда не рисуется)."""
     if not any(c.transport == vpn_protocol.TRANSPORT_REALITY for c in device.issued):
         return None
+    return await _page_url_by_label(node_link, chat_id, device.label)
+
+
+async def _page_url_by_label(node_link: ServiceLink, chat_id: int, label: str) -> str | None:
     answers = await vpn_nodes.fanout(
         node_link,
         vpn_protocol.ACTION_GET_SUBSCRIPTION,
-        {"chat_id": chat_id, "device_label": device.label},
+        {"chat_id": chat_id, "device_label": label},
     )
     urls = [str(a["page_url"]) for a in answers if a.get("page_url")]
     # https надёжнее http: Telegram и браузеры охотнее открывают его.
@@ -637,16 +641,30 @@ def _card_keyboard_for_device(
     countries = vpn_devices.countries_of(servers)
     rows: list[list[InlineKeyboardButton]] = []
     if page_url:
-        rows.append([InlineKeyboardButton(text="🔌 Подключить в Hiddify", url=page_url)])
+        rows.append([InlineKeyboardButton(text=vpn_settings.PAGE_CARD_BUTTON, url=page_url)])
     if _allows(subscription, vpn_protocol.ACTION_ISSUE):
+        # Со страницей «Получить настройки» — одно пересылаемое сообщение (57.11);
+        # старые пути (vless-блок, файл, AmneziaWG в Telegram) — «Другие способы».
         rows.append(
             [
                 InlineKeyboardButton(
                     text="📥 Получить настройки",
-                    callback_data=vpn_settings.card_cb(vpn_settings.SCREEN_PICK, device.key),
+                    callback_data=vpn_settings.card_cb(
+                        vpn_settings.SCREEN_LINK if page_url else vpn_settings.SCREEN_PICK,
+                        device.key,
+                    ),
                 )
             ]
         )
+        if page_url:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=vpn_settings.OTHER_WAYS_BUTTON,
+                        callback_data=vpn_settings.card_cb(vpn_settings.SCREEN_PICK, device.key),
+                    )
+                ]
+            )
     if _allows(subscription, vpn_protocol.ACTION_REISSUE):
         rows.append(
             [
@@ -1683,6 +1701,41 @@ async def _vless_send(
     return True
 
 
+async def _send_settings_link(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    notifier: Notifier,
+    subscription: Subscription,
+    config: Settings,
+    key: str,
+) -> None:
+    """``vpn_card:l<ключ>`` — «📥 Получить настройки» (57.11): ОДНО сообщение со
+    ссылкой на страницу настроек и URL-кнопкой, чтобы его можно было переслать
+    владельцу телефона. Без callback-кнопок; по TTL не удаляется (утечка ссылки
+    лечится перевыпуском — токен меняется)."""
+    chat_id = callback.message.chat.id
+    if not _is_private(chat_id):
+        await callback.answer("Ссылка на настройки выдаётся только в личке.", show_alert=True)
+        return
+    found = await _fresh_device(callback, node_link, subscription, config, key)
+    if found is None:
+        return
+    device, _servers = found
+    page_url = await _subscription_page_url(node_link, chat_id, device)
+    if page_url is None:
+        await callback.answer(
+            "Страница настроек недоступна — попробуйте «Другие способы».", show_alert=True
+        )
+        return
+    await callback.answer()
+    await notifier.send_direct(
+        chat_id,
+        vpn_settings.page_link_text(device.label, page_url),
+        reply_markup=vpn_settings.page_link_keyboard(page_url),
+        message_thread_id=callback.message.message_thread_id,
+    )
+
+
 async def _vless_file_again(
     callback: CallbackQuery,
     node_link: ServiceLink,
@@ -1986,6 +2039,7 @@ async def _wizard_create(
     platform_code: str,
     *,
     expert: bool = False,
+    notifier: Notifier | None = None,
 ) -> None:
     """``issue:~w<платформа>`` — создать устройство: VLESS во всех странах,
     открытых человеку. Часть нод не ответила — идём с тем, что есть.
@@ -2027,23 +2081,41 @@ async def _wizard_create(
         await _wizard_edit(callback, vpn_settings.pick_text(label), vpn_settings.pick_keyboard(key))
         return
     needs_file = vpn_wizard.needs_settings_file(config.vpn, devices, key)
+    first = vpn_wizard.steps(needs_file)[0]
+    if first == vpn_wizard.FILE and notifier is not None:
+        error, servers, _down = await _card(node_link, chat_id, subscription)
+        device = (
+            vpn_devices.find_device(vpn_devices.build_devices(servers), key)
+            if error is None
+            else None
+        )
+        if device is not None and await _wizard_send_settings(
+            callback, node_link, notifier, config, chat_id, device, platform, needs_file
+        ):
+            return
+    page_url = await _page_url_by_label(node_link, chat_id, label)
+    if page_url is None:
+        await _wizard_edit(
+            callback,
+            vpn_wizard.UNAVAILABLE_TEXT,
+            vpn_wizard.unavailable_keyboard(vpn_wizard.CONNECT, platform.code, key),
+        )
+        return
     await _wizard_edit(
         callback,
-        _wizard_step_text(vpn_wizard.INSTALL, needs_file),
+        _wizard_step_text(vpn_wizard.CONNECT, needs_file, label, page_url),
         vpn_wizard.step_keyboard(
-            vpn_wizard.INSTALL, platform, key, config.vpn, needs_file=needs_file
+            vpn_wizard.CONNECT, platform, key, config.vpn, needs_file=needs_file, page_url=page_url
         ),
     )
 
 
-def _wizard_step_text(code: str, needs_file: bool) -> str:
-    title = vpn_wizard.step_title(code, needs_file)
-    body = {
-        vpn_wizard.INSTALL: "Установите приложение Hiddify.",
-        vpn_wizard.FILE: "Нажмите на файл ниже и выберите «Hiddify».",
-        vpn_wizard.CONNECT: "Нажмите кнопку — откроется Hiddify, нажмите там «Добавить».",
-    }[code]
-    return f"<b>{title}</b>\n{body}"
+def _wizard_step_text(code: str, needs_file: bool, label: str = "", page_url: str = "") -> str:
+    title = vpn_wizard.step_title(code, needs_file) if needs_file else None
+    if code == vpn_wizard.CONNECT:
+        return vpn_wizard.connect_text(label, page_url, title)
+    body = "Нажмите на файл ниже и выберите «Hiddify»."
+    return f"<b>{title}</b>\n{body}" if title else body
 
 
 async def _wizard_show(
@@ -2101,11 +2173,21 @@ async def _wizard_show(
 
     if code == vpn_wizard.HELP:
         await _wizard_help(
-            callback, node_link, notifier, subscription, book, store,
-            platform, step, key, needs_file,
+            callback,
+            node_link,
+            notifier,
+            subscription,
+            book,
+            store,
+            platform,
+            step,
+            key,
+            needs_file,
         )
         return
 
+    if code == vpn_wizard.INSTALL:
+        code = vpn_wizard.CONNECT  # старая кнопка: установка теперь на странице
     if code not in vpn_wizard.STEP_ORDER + (vpn_wizard.CHECK,):
         await callback.answer()
         return
@@ -2135,7 +2217,9 @@ async def _wizard_show(
             )
             return
     text = (
-        vpn_wizard.CHECK_TEXT if code == vpn_wizard.CHECK else _wizard_step_text(code, needs_file)
+        vpn_wizard.CHECK_TEXT
+        if code == vpn_wizard.CHECK
+        else _wizard_step_text(code, needs_file, device.label, page_url or "")
     )
     await _wizard_edit(
         callback,
@@ -2811,7 +2895,9 @@ async def handle_action(
         and value
         and value.startswith(f"~{vpn_wizard.PREFIX}")
     ):
-        await _wizard_create(callback, node_link, config, subscription, value[2:3])
+        await _wizard_create(
+            callback, node_link, config, subscription, value[2:3], notifier=notifier
+        )
         return
 
     if action_id == vpn_protocol.ACTION_ISSUE and value and value.startswith(_EXPERT_PREFIX):
@@ -3010,6 +3096,10 @@ async def handle_action(
         if value and value.startswith(vpn_wizard.PREFIX):
             await _wizard_show(
                 callback, node_link, notifier, config, subscription, book, value, store
+            )
+        elif value and value[0] == vpn_settings.SCREEN_LINK:
+            await _send_settings_link(
+                callback, node_link, notifier, subscription, config, value[1:]
             )
         elif value and value[0] == vpn_settings.SCREEN_RESTORE:
             await _show_restore_select(callback, node_link, subscription, config, value[1:])

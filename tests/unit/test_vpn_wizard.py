@@ -160,8 +160,8 @@ async def test_pick_screen():
 # --- создание устройства ------------------------------------------------------
 
 
-async def test_create_issues_vless_in_every_country_and_shows_step_one():
-    cb, link, _ = await _press("act:vpn:issue:~wi")
+async def test_create_issues_vless_in_every_country_and_shows_page_step():
+    cb, link, _ = await _press("act:vpn:issue:~wi", cfg=_cfg(wizard_settings_file=False))
     issues = [
         (d.node, a)
         for (act, a), d in zip(link.calls, link.dsts, strict=True)
@@ -173,24 +173,25 @@ async def test_create_issues_vless_in_every_country_and_shows_step_one():
         for _, a in issues
     )
     text, markup = _last(cb)
-    assert text == "<b>Шаг 1 из 3</b>\nУстановите приложение Hiddify."
-    store = _all_buttons(markup)[0]
-    assert store.text == "⬇️ Открыть App Store" and "apps.apple.com" in store.url
+    assert text == (
+        "📶 <b>Настройки VPN · 📱 iPhone</b>\n"
+        "Откройте ссылку на телефоне, который подключаете — там всё по шагам: "
+        "Hiddify, AmneziaWG и проверка, что VPN включён.\n"
+        "https://1.2.3.4:8444/s/tok\n"
+        "Ссылку можно переслать. Не делитесь ей с чужими: по ней подключается это устройство."
+    )
+    assert "⋮" not in text
+    page = _all_buttons(markup)[0]
+    assert page.text == "📶 Открыть настройки" and page.url == "https://1.2.3.4:8444/s/tok"
     assert _texts(markup)[1:] == ["✅ Готово", "🙋 Не получается"]
 
 
-@pytest.mark.parametrize(
-    ("code", "label", "button", "url"),
-    [
-        ("a", "🤖 Android", "⬇️ Открыть Google Play", "play.google.com"),
-        ("c", "💻 Компьютер", "⬇️ Открыть сайт Hiddify", "hiddify.com"),
-    ],
-)
-async def test_platforms(code, label, button, url):
-    cb, link, _ = await _press(f"act:vpn:issue:~w{code}")
-    assert link.calls[-1][1]["device_label"] == label
+@pytest.mark.parametrize(("code", "label"), [("a", "🤖 Android"), ("c", "💻 Компьютер")])
+async def test_platforms(code, label):
+    cb, link, _ = await _press(f"act:vpn:issue:~w{code}", cfg=_cfg(wizard_settings_file=False))
+    assert link.calls[0][1]["device_label"] == label
     first = _all_buttons(_last(cb)[1])[0]
-    assert first.text == button and url in first.url
+    assert first.text == "📶 Открыть настройки" and "/s/tok" in first.url
 
 
 def test_device_names_get_numbers():
@@ -204,12 +205,14 @@ def test_device_names_get_numbers():
 async def test_second_android_is_numbered(_env):
     _env["servers"] = _with("🤖 Android")
     _, link, _ = await _press("act:vpn:issue:~wa")
-    assert link.calls[-1][1]["device_label"] == "🤖 Android 2"
+    assert link.calls[0][1]["device_label"] == "🤖 Android 2"
 
 
 async def test_partial_node_failure_continues():
-    cb, link, _ = await _press("act:vpn:issue:~wi", link=Link(fail_nodes={"wooster"}))
-    assert _last(cb)[0].startswith("<b>Шаг 1 из 3</b>")
+    cb, link, _ = await _press(
+        "act:vpn:issue:~wi", link=Link(fail_nodes={"wooster"}), cfg=_cfg(wizard_settings_file=False)
+    )
+    assert _last(cb)[0].startswith("📶 <b>Настройки VPN")
 
 
 async def test_all_nodes_failing_says_so_and_offers_help():
@@ -234,9 +237,9 @@ KEY = vd.device_key(LABEL)
 async def test_numbering_with_settings_file_step(_env):
     _env["servers"] = _with(LABEL)
     cb, _, _ = await _press(f"act:vpn:vpn_card:wbi{KEY}")
-    assert cb.message.edits[-1] == "<b>Шаг 2 из 3</b>\nНажмите на файл ниже и выберите «Hiddify»."
+    assert cb.message.edits[-1] == "<b>Шаг 1 из 2</b>\nНажмите на файл ниже и выберите «Hiddify»."
     cb, _, _ = await _press(f"act:vpn:vpn_card:wci{KEY}")
-    assert cb.message.edits[-1].startswith("<b>Шаг 3 из 3</b>\nНажмите кнопку — откроется Hiddify")
+    assert cb.message.edits[-1].startswith("<b>Шаг 2 из 2</b>\n📶 <b>Настройки VPN")
 
 
 async def test_no_file_step_when_vless_already_worked(_env):
@@ -246,23 +249,21 @@ async def test_no_file_step_when_vless_already_worked(_env):
     _env["servers"] = other
     cb, _, _ = await _press(f"act:vpn:vpn_card:wai{KEY}")
     text, markup = _last(cb)
-    assert text.startswith("<b>Шаг 1 из 2</b>")
+    assert text.startswith("📶 <b>Настройки VPN") and "Шаг" not in text  # единственный шаг
     ready = [b for b in _all_buttons(markup) if b.text == "✅ Готово"][0]
-    assert ready.callback_data.endswith(f":wci{KEY}")  # минуя файл
-    cb, _, _ = await _press(f"act:vpn:vpn_card:wci{KEY}")
-    assert cb.message.edits[-1].startswith("<b>Шаг 2 из 2</b>")
+    assert ready.callback_data.endswith(f":wdi{KEY}")  # сразу проверка
 
 
 async def test_no_file_step_when_flag_off(_env):
     _env["servers"] = _with(LABEL)
     cb, _, _ = await _press(f"act:vpn:vpn_card:wai{KEY}", cfg=_cfg(wizard_settings_file=False))
-    assert cb.message.edits[-1].startswith("<b>Шаг 1 из 2</b>")
+    assert cb.message.edits[-1].startswith("📶 <b>Настройки VPN")
 
 
 async def test_own_handshake_does_not_change_numbering(_env):
     _env["servers"] = _with(LABEL, hs="2026-10-10T10:00:00+00:00")
     cb, _, _ = await _press(f"act:vpn:vpn_card:wai{KEY}")
-    assert cb.message.edits[-1].startswith("<b>Шаг 1 из 3</b>")
+    assert cb.message.edits[-1].startswith("<b>Шаг 2 из 2</b>")
 
 
 async def test_file_step_sends_settings_and_deletes_by_ttl(_env):
@@ -287,7 +288,7 @@ async def test_connect_step_has_subscription_button(_env):
     _env["servers"] = _with(LABEL)
     cb, _, _ = await _press(f"act:vpn:vpn_card:wci{KEY}")
     connect = _all_buttons(_last(cb)[1])[0]
-    assert connect.text == "🔌 Подключить" and connect.url == "https://1.2.3.4:8444/s/tok"
+    assert connect.text == "📶 Открыть настройки" and connect.url == "https://1.2.3.4:8444/s/tok"
 
 
 async def test_check_and_done_screens(_env):
@@ -332,7 +333,7 @@ async def test_help_notifies_owner_with_context_and_card_button(_env):
     assert chat == 1
     assert text.startswith(
         "⚠️ VPN: проблема у <b>Алексей</b> (@alex)\n"
-        "Причина: Застрял(а) на шаге 2 из 3 (iPhone)\n"
+        "Причина: Застрял(а) на шаге 1 из 2 (iPhone)\n"
         f"Устройство: {LABEL} · VLESS · Hiddify\n"
     )
     reply_btn, card_btn = notifier.sent_direct_markups[0].inline_keyboard[0]
