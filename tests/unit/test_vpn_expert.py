@@ -156,7 +156,7 @@ async def test_home_for_user_with_devices(_fanout):
     flat = _texts(markup)
     assert "⚙️ Управление" in flat and "❓ Помощь" in flat and "➕ Новое устройство" in flat
     assert "📱 Подключить по шагам" in flat
-    assert not any("Сообщить" in t for t in flat)
+    assert "⚠️ Сообщить о проблеме" in flat
     assert not any("Перевыпустить" in t or "Отозвать" in t for t in flat)
 
 
@@ -211,7 +211,7 @@ async def test_card_buttons_follow_rights():
         chat_id=779, name="v", allowed_commands=frozenset({"usage@vpn", "vpn_card@vpn"})
     )
     cb, _, _ = await _press(f"act:vpn:vpn_card:d{KEY}", sub=view_only, chat_id=779)
-    assert _texts(cb.message.edit_markups[-1]) == ["⬅️ К устройствам"]
+    assert _texts(cb.message.edit_markups[-1]) == ["⚠️ Сообщить о проблеме", "⬅️ К устройствам"]
 
 
 async def test_unknown_device_goes_back_to_list():

@@ -61,7 +61,7 @@ async def _press(data, sub=GUEST_FULL, chat_id=778):
 # --- справка -----------------------------------------------------------------
 
 
-async def test_faq_list_has_all_questions_and_no_report_button():
+async def test_faq_list_has_all_questions_and_report_button():
     cb, _ = await _press("act:vpn:apk")
     markup = cb.message.edit_markups[-1]
     assert _texts(markup) == [
@@ -71,9 +71,9 @@ async def test_faq_list_has_all_questions_and_no_report_button():
         "Как подключить ещё одно устройство",
         "Магазин недоступен?",
         "🤵 Спросить Альфреда",
+        "⚠️ Сообщить о проблеме",
         "⬅️ Назад",
     ]
-    assert "Сообщить" not in " ".join(_texts(markup))
 
 
 @pytest.mark.parametrize("code", ["h", "a", "c", "d", "s", "x"])

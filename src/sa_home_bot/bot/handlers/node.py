@@ -156,6 +156,7 @@ async def on_dynamic_action(
                 book,
                 gate,
                 bot,
+                store,
             )
         else:
             await callback.answer()

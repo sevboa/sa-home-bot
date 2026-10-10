@@ -41,9 +41,10 @@ import logging
 
 from aiogram import Bot, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command
+from aiogram.filters import Command, Filter
 from aiogram.types import (
     CallbackQuery,
+    ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -57,6 +58,7 @@ from sa_home_bot.bot import (
     vpn_help,
     vpn_nodes,
     vpn_proxy_screen,
+    vpn_report,
     vpn_settings,
     vpn_wizard,
 )
@@ -69,6 +71,7 @@ from sa_home_bot.bot.vpn_apk import deliver_apk
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecret, PendingVpnSecrets
 from sa_home_bot.config import Settings
 from sa_home_bot.domain import vpn_check
+from sa_home_bot.people.book import PeopleBook
 from sa_home_bot.proto.messages import ERR_UNKNOWN_ACTION, Address, ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
@@ -548,6 +551,8 @@ def _home_keyboard(
     proxy_row = _proxy_row(servers, subscription)
     if proxy_row is not None:
         rows.append(proxy_row)
+    if vpn_report.can_report(subscription):
+        rows.append([vpn_report.report_button()])
     admin_row = _admin_row(servers, subscription)
     if admin_row is not None:
         rows.append(admin_row)
@@ -662,6 +667,8 @@ def _card_keyboard_for_device(
                 )
             ]
         )
+    if vpn_report.can_report(subscription):
+        rows.append([vpn_report.report_button(device.key)])
     rows.append(_back_button("⬅️ К устройствам", _screen_cb(_SCREEN_LIST)))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -2001,6 +2008,7 @@ async def _wizard_show(
     subscription: Subscription,
     book: SubscriptionBook | None,
     value: str,
+    store=None,
 ) -> None:
     """``vpn_card:w…`` — экраны мастера, одно сообщение, правится на месте."""
     chat_id = callback.message.chat.id
@@ -2046,7 +2054,10 @@ async def _wizard_show(
     needs_file = vpn_wizard.needs_settings_file(config.vpn, devices, key)
 
     if code == vpn_wizard.HELP:
-        await _wizard_help(callback, notifier, subscription, book, platform, step, key, needs_file)
+        await _wizard_help(
+            callback, node_link, notifier, subscription, book, store,
+            platform, step, key, needs_file,
+        )
         return
 
     if code not in vpn_wizard.STEP_ORDER + (vpn_wizard.CHECK,):
@@ -2137,21 +2148,30 @@ async def _wizard_send_settings(
 
 async def _wizard_help(
     callback: CallbackQuery,
+    node_link: ServiceLink,
     notifier: Notifier,
     subscription: Subscription,
     book: SubscriptionBook | None,
+    store,
     platform: vpn_wizard.Platform,
     step: str,
     key: str,
     needs_file: bool,
 ) -> None:
-    """«🙋 Позвать на помощь» → владельцу (``vpn_help.send_help_request``)."""
-    user = getattr(callback, "from_user", None)
-    name = getattr(user, "full_name", None) or subscription.name or str(subscription.chat_id)
-    who = vpn_help.who_text(name, getattr(user, "username", None))
-    reason = html.escape(vpn_wizard.stuck_text(step, platform, needs_file))
-    outcome = await vpn_help.send_help_request(
-        book, notifier, chat_id=callback.message.chat.id, who=who, reason=reason
+    """«🙋 Позвать на помощь» → владельцу тем же механизмом, что «⚠️ Сообщить о
+    проблеме» (``_submit_report``), причина — шаг мастера."""
+    stuck = vpn_wizard.stuck_text(step, platform, needs_file)
+    reason = html.escape(stuck[:1].upper() + stuck[1:])
+    outcome = await _submit_report(
+        node_link,
+        notifier,
+        book,
+        store,
+        chat_id=callback.message.chat.id,
+        user=getattr(callback, "from_user", None),
+        subscription=subscription,
+        reason=reason,
+        device_key=key,
     )
     if outcome == "throttled":
         await callback.answer(vpn_wizard.HELP_THROTTLED_TEXT, show_alert=True)
@@ -2163,6 +2183,244 @@ async def _wizard_help(
         text,
         vpn_wizard.back_to_step_keyboard(step, platform.code, key, help_button=False),
     )
+
+
+# --- «⚠️ Сообщить о проблеме» и «💬 Ответить» (57.6b) ------------------------
+
+
+async def _person(
+    chat_id: int, user, subscription: Subscription | None, book, store
+) -> tuple[str, str | None]:
+    """Имя и ник человека для уведомления владельцу: карточка человека
+    (people/book.py::PeopleBook), без БД — профиль Telegram из самого апдейта."""
+    name = username = None
+    pid = getattr(user, "id", None) or chat_id
+    if store is not None:
+        try:
+            people = await PeopleBook.load(store, book)
+            name, username = people.name(pid), people.username(pid) or None
+        except Exception:  # noqa: BLE001 — имя не стоит срыва заявки
+            log.warning("Карточка человека %s не прочиталась", pid, exc_info=True)
+    name = name or getattr(user, "full_name", None) or (subscription.name if subscription else "")
+    return name or str(chat_id), username or getattr(user, "username", None)
+
+
+async def _report_context(node_link: ServiceLink, chat_id: int, device_key: str) -> list[str]:
+    """Строки контекста по свежему usage всех нод; сбой — без контекста."""
+    try:
+        answered = await vpn_nodes.fanout(
+            node_link, vpn_protocol.ACTION_USAGE, {"chat_id": chat_id}
+        )
+        vpn_nodes.remember_servers(answered)
+        down = vpn_nodes.unavailable_servers(answered)
+        return vpn_report.context_lines(_allowed_servers(answered), down, device_key)
+    except Exception:  # noqa: BLE001
+        log.warning("Контекст заявки по VPN не собрался (chat=%s)", chat_id, exc_info=True)
+        return []
+
+
+async def _submit_report(
+    node_link: ServiceLink,
+    notifier: Notifier,
+    book,
+    store,
+    *,
+    chat_id: int,
+    user,
+    subscription: Subscription | None,
+    reason: str,
+    device_key: str = "",
+) -> vpn_help.Outcome:
+    """Одна заявка владельцу (мастер и «Сообщить о проблеме»); ``reason`` — HTML."""
+    if chat_id == 0 or not vpn_help.has_admins(book):  # chat_id=0 — пробник, не человек
+        return "nobody"
+    if vpn_help.is_throttled(chat_id):
+        return "throttled"
+    name, username = await _person(chat_id, user, subscription, book, store)
+    context = await _report_context(node_link, chat_id, device_key)
+    return await vpn_help.send_help_request(
+        book,
+        notifier,
+        chat_id=chat_id,
+        who=vpn_help.who_text(name, username),
+        reason=reason,
+        context=context,
+    )
+
+
+async def _handle_report(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    notifier: Notifier,
+    subscription: Subscription,
+    book,
+    store,
+    value: str | None,
+) -> None:
+    chat_id = callback.message.chat.id
+    code, key = vpn_report.parse_report(value)
+    if chat_id == 0 or not vpn_report.can_report(subscription):
+        await callback.answer("⛔️ Недоступно", show_alert=True)
+        return
+    if code in (vpn_report.MENU, vpn_report.MENU_FAQ):
+        await callback.answer()
+        if key:
+            back = _screen_cb(_SCREEN_DEVICE, key)
+        elif code == vpn_report.MENU_FAQ:
+            back = vpn_faq.list_cb()
+        else:
+            back = _home_cb()
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.edit_text(
+                vpn_report.MENU_TEXT, reply_markup=vpn_report.menu_keyboard(key, back_cb=back)
+            )
+        return
+    if vpn_help.is_throttled(chat_id):
+        await callback.answer(vpn_report.THROTTLED_TEXT, show_alert=True)
+        return
+    user = getattr(callback, "from_user", None)
+    if code == vpn_report.OTHER:
+        await callback.answer()
+        sent = await callback.message.answer(
+            vpn_report.OTHER_PROMPT,
+            reply_markup=ForceReply(input_field_placeholder="Что случилось?"),
+        )
+        message_id = getattr(sent, "message_id", None)
+        if message_id is not None:
+            vpn_report.remember(
+                chat_id,
+                message_id,
+                vpn_report.new_pending(
+                    vpn_report.KIND_REPORT, getattr(user, "id", None) or chat_id, device_key=key
+                ),
+            )
+        return
+    reason = vpn_report.REASONS[code][1]
+    outcome = await _submit_report(
+        node_link,
+        notifier,
+        book,
+        store,
+        chat_id=chat_id,
+        user=user,
+        subscription=subscription,
+        reason=reason,
+        device_key=key,
+    )
+    if outcome == "throttled":
+        await callback.answer(vpn_report.THROTTLED_TEXT, show_alert=True)
+        return
+    await callback.answer()
+    text = vpn_report.SENT_TEXT if outcome == "sent" else vpn_report.NOBODY_TEXT
+    with contextlib.suppress(TelegramBadRequest):
+        await callback.message.edit_text(text, reply_markup=vpn_report.done_keyboard(_home_cb()))
+
+
+async def _handle_owner_reply_button(
+    callback: CallbackQuery, subscription: Subscription, book, store, value: str | None
+) -> None:
+    """«💬 Ответить» под заявкой — только админу: ForceReply, ответ уйдёт человеку."""
+    try:
+        target = int(value or "")
+    except ValueError:
+        target = 0
+    if not vpn_report.can_reply(subscription) or target == 0:
+        await callback.answer("⛔️ Недоступно", show_alert=True)
+        return
+    await callback.answer()
+    user = getattr(callback, "from_user", None)
+    target_sub = book.for_chat(target) if book is not None else None
+    name, username = await _person(target, None, target_sub, book, store)
+    shown = f"{name} (@{username})" if username else name
+    sent = await callback.message.answer(
+        html.escape(vpn_report.owner_prompt(shown)),
+        reply_markup=ForceReply(input_field_placeholder="Ответ человеку"),
+    )
+    message_id = getattr(sent, "message_id", None)
+    if message_id is not None:
+        vpn_report.remember(
+            callback.message.chat.id,
+            message_id,
+            vpn_report.new_pending(
+                vpn_report.KIND_ANSWER,
+                getattr(user, "id", None) or callback.message.chat.id,
+                target_chat=target,
+            ),
+        )
+
+
+class VpnReplyFilter(Filter):
+    """Текстовый reply на сообщение бота, которое просило описание проблемы или
+    ответ владельца, от того же человека, что нажимал кнопку. Чужой reply и
+    reply на что-то другое — пропуск дальше по роутерам (в диалог с Альфредом)."""
+
+    async def __call__(self, message: Message) -> bool | dict:
+        reply = message.reply_to_message
+        if (
+            reply is None
+            or message.chat is None
+            or message.from_user is None
+            or not message.text
+            or message.text.startswith("/")
+        ):
+            return False
+        entry = vpn_report.lookup(message.chat.id, reply.message_id)
+        if entry is None or entry.user_id != message.from_user.id:
+            return False
+        return {"vpn_reply": entry}
+
+
+@router.message(VpnReplyFilter())
+async def on_vpn_reply(
+    message: Message,
+    vpn_reply: vpn_report.Pending,
+    node_link: ServiceLink,
+    notifier: Notifier,
+    book: SubscriptionBook | None = None,
+    store=None,
+    subscription: Subscription | None = None,
+) -> None:
+    chat_id = message.chat.id
+    reply_id = message.reply_to_message.message_id
+    if vpn_report.is_expired(vpn_reply):
+        vpn_report.forget(chat_id, reply_id)
+        await message.answer(vpn_report.EXPIRED_TEXT)
+        return
+    text = (message.text or "").strip()[: vpn_report.MAX_DESCRIPTION]
+    if subscription is None and book is not None:
+        subscription = book.for_chat(chat_id)
+    if vpn_reply.kind == vpn_report.KIND_ANSWER:
+        if not vpn_report.can_reply(subscription):
+            return
+        vpn_report.forget(chat_id, reply_id)
+        delivered = await notifier.send_direct(
+            vpn_reply.target_chat, vpn_report.ANSWER_PREFIX + html.escape(text)
+        )
+        await message.answer(
+            vpn_report.OWNER_SENT_TEXT if delivered is not None else vpn_report.OWNER_FAILED_TEXT
+        )
+        return
+    if not vpn_report.can_report(subscription) or chat_id == 0:
+        return
+    if vpn_help.is_throttled(chat_id):
+        await message.answer(vpn_report.THROTTLED_TEXT)
+        return
+    vpn_report.forget(chat_id, reply_id)
+    outcome = await _submit_report(
+        node_link,
+        notifier,
+        book,
+        store,
+        chat_id=chat_id,
+        user=message.from_user,
+        subscription=subscription,
+        reason=html.escape(text),
+        device_key=vpn_reply.device_key,
+    )
+    if outcome == "throttled":
+        await message.answer(vpn_report.THROTTLED_TEXT)
+    else:
+        await message.answer(vpn_report.SENT_TEXT if outcome == "sent" else vpn_report.NOBODY_TEXT)
 
 
 def _conf_filename(device_label: str, location: str = "") -> str:
@@ -2372,6 +2630,7 @@ async def handle_action(
     book: SubscriptionBook | None = None,
     gate: Gatekeeper | None = None,
     bot: Bot | None = None,
+    store=None,
 ) -> None:
     """Вызывается из bot/handlers/node.py::on_dynamic_action для service="vpn"."""
     parsed = commands.parse_action_callback(callback.data)
@@ -2390,6 +2649,14 @@ async def handle_action(
         if dst is None:
             await callback.answer("⚠️ Служба VPN недоступна.", show_alert=True)
         return dst
+
+    if action_id == vpn_report.REPORT_ACTION:
+        await _handle_report(callback, node_link, notifier, subscription, book, store, value)
+        return
+
+    if action_id == vpn_report.REPLY_ACTION:
+        await _handle_owner_reply_button(callback, subscription, book, store, value)
+        return
 
     if action_id == "apk":
         if not _is_private(chat_id):
@@ -2427,7 +2694,9 @@ async def handle_action(
         code = vpn_faq.parse_question(value)
         if code is None:
             text = vpn_faq.LIST_TEXT
-            keyboard = vpn_faq.list_keyboard(home_cb=_home_cb())
+            keyboard = vpn_faq.list_keyboard(
+                home_cb=_home_cb(), report=vpn_report.can_report(subscription)
+            )
         else:
             text = vpn_faq.answer_text(code)
             keyboard = vpn_faq.answer_keyboard(
@@ -2693,7 +2962,9 @@ async def handle_action(
 
     if action_id == _ACTION_VPN_CARD:
         if value and value.startswith(vpn_wizard.PREFIX):
-            await _wizard_show(callback, node_link, notifier, config, subscription, book, value)
+            await _wizard_show(
+                callback, node_link, notifier, config, subscription, book, value, store
+            )
         elif value and value[0] == vpn_settings.SCREEN_REISSUE:
             await _show_reissue_select(
                 callback, node_link, subscription, config, value[1:], answered=False

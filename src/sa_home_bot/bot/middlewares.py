@@ -21,7 +21,7 @@ from typing import Any
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, Update, User
 
-from sa_home_bot.bot import commands
+from sa_home_bot.bot import commands, vpn_report
 from sa_home_bot.bot.invites import Gatekeeper
 from sa_home_bot.subscriptions.book import SubscriptionBook
 
@@ -180,7 +180,15 @@ class CallbackAuthorizationMiddleware(BaseMiddleware):
         action = commands.parse_action_callback(event.data)
         if action is not None:
             service, action_id, _, _ = action
-            if subscription is None or not subscription.allows_action(action_id, service):
+            if subscription is None or not (
+                subscription.allows_action(action_id, service)
+                # «Сообщить о проблеме» — у каждого, у кого есть VPN (57.6b)
+                or (
+                    service == vpn_report.SERVICE
+                    and action_id == vpn_report.REPORT_ACTION
+                    and vpn_report.can_report(subscription)
+                )
+            ):
                 log.info("Отказ в действии %s для chat_id=%s", event.data, chat_id)
                 await event.answer("⛔️ Недоступно", show_alert=True)
                 return None

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from sa_home_bot.bot import commands, vpn_settings, vpn_wizard
+from sa_home_bot.bot import commands, vpn_report, vpn_settings, vpn_wizard
 from sa_home_bot.config import VpnConfig
 from sa_home_bot.vpn import protocol as vpn_protocol
 
@@ -83,12 +83,15 @@ def parse_question(value: str | None) -> str | None:
     return None
 
 
-def list_keyboard(*, home_cb: str) -> InlineKeyboardMarkup:
+def list_keyboard(*, home_cb: str, report: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text=text, callback_data=question_cb(code))]
         for code, text in QUESTIONS
     ]
-    rows.append([InlineKeyboardButton(text=ASK_BUTTON, callback_data=question_cb(Q_ASK))])
+    last = [InlineKeyboardButton(text=ASK_BUTTON, callback_data=question_cb(Q_ASK))]
+    if report:
+        last.append(vpn_report.report_button(faq=True))
+    rows.append(last)
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=home_cb)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

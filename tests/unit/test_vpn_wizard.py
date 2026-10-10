@@ -329,9 +329,14 @@ async def test_help_notifies_owner_with_context_and_card_button(_env):
     assert len(notifier.sent_direct) == 1
     chat, text = notifier.sent_direct[0]
     assert chat == 1
-    assert text == "🙋 VPN: <b>Алексей</b> (@alex) застрял(а) на шаге 2 из 3 (iPhone)"
-    button = notifier.sent_direct_markups[0].inline_keyboard[0][0]
-    assert button.callback_data == "act:vpn:peers:g778"
+    assert text.startswith(
+        "⚠️ VPN: проблема у <b>Алексей</b> (@alex)\n"
+        "Причина: Застрял(а) на шаге 2 из 3 (iPhone)\n"
+        f"Устройство: {LABEL} · VLESS · Hiddify\n"
+    )
+    reply_btn, card_btn = notifier.sent_direct_markups[0].inline_keyboard[0]
+    assert reply_btn.callback_data == "act:vpn:reply:778"
+    assert card_btn.callback_data == "act:vpn:peers:g778"
     assert _last(cb)[0] == "✅ Передал владельцу. Ответ придёт сюда."
 
 
@@ -355,7 +360,7 @@ async def test_help_throttled_per_person(_env, monkeypatch):
 
 async def test_help_when_device_not_created(_env):
     _, _, notifier = await _press("act:vpn:vpn_card:whni", book=_book())
-    assert notifier.sent_direct[0][1].endswith("не удалось подготовить подключение (iPhone)")
+    assert "Причина: Не удалось подготовить подключение (iPhone)" in notifier.sent_direct[0][1]
 
 
 async def test_help_on_check_step_and_without_book(_env):
