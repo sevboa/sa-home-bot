@@ -31,7 +31,7 @@ Q_STORE, Q_ASK = "s", "x"
 
 QUESTIONS: tuple[tuple[str, str], ...] = (
     (Q_HIDDIFY, "Что такое Hiddify?"),
-    (Q_AWG, "Чем отличается AmneziaWG?"),
+    (Q_AWG, "Чем отличается AmneziaVPN?"),
     (Q_TROUBLE, "Не подключается"),
     (Q_DEVICE, "Как подключить ещё одно устройство"),
     (Q_STORE, "Магазин недоступен?"),

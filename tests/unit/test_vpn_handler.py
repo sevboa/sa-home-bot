@@ -250,7 +250,7 @@ def test_card_shows_transport_health_indicators():
             )
         ]
     )
-    assert "🛰 VLESS (Reality) 🟢 · AmneziaWG 🔴" in text
+    assert "🛰 VLESS (Reality) 🟢 · AmneziaVPN 🔴" in text
 
 
 def test_card_shows_partial_as_orange_with_legend():
@@ -304,7 +304,7 @@ def test_transport_picker_marks_each_technology():
     )
     texts = [b.text for row in keyboard.inline_keyboard for b in row]
     assert texts[0] == "VLESS (Reality) — для РФ 🟢"
-    assert texts[1] == "AmneziaWG 🔴"
+    assert texts[1] == "AmneziaVPN 🔴"
 
 
 def test_check_status_text_groups_observers_under_pair():

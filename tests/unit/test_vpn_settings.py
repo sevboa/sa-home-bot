@@ -1,5 +1,5 @@
 """bot/handlers/vpn.py + bot/vpn_settings.py: выдача настроек в экспертном
-режиме (57.4) — VLESS · Hiddify, AmneziaWG, новое устройство."""
+режиме (57.4) — VLESS · Hiddify, AmneziaVPN, новое устройство."""
 
 from __future__ import annotations
 
@@ -113,7 +113,7 @@ async def test_card_has_get_settings_button_and_pick_screen():
     cb, _, _ = await _press(f"act:vpn:vpn_card:g{KEY}")
     text, markup = _last(cb)
     assert text == f"📥 <b>{LABEL}</b> — чем подключаться?"
-    assert _texts(markup) == ["🛡 VLESS · Hiddify", "⚡ AmneziaWG", "⬅️ Назад"]
+    assert _texts(markup) == ["🛡 VLESS · Hiddify", "⚡ AmneziaVPN", "⬅️ Назад"]
 
 
 # --- VLESS · Hiddify ---------------------------------------------------------
@@ -226,7 +226,7 @@ async def test_awg_issue_sends_file_steps_and_buttons():
     ]
     assert not link.of(vpn_protocol.ACTION_REISSUE)
     (_, doc, caption) = notifier.sent_documents[0]
-    assert doc.startswith(b"[Interface]") and caption == f"⚡ {LABEL} · AmneziaWG · 🇳🇱"
+    assert doc.startswith(b"[Interface]") and caption == f"⚡ {LABEL} · AmneziaVPN · 🇳🇱"
     (_, text), markup = notifier.sent_direct[0], notifier.sent_direct_markups[0]
     assert "1. Установите именно AmneziaVPN" in text
     assert "«Открыть в AmneziaVPN»" in text
@@ -254,7 +254,7 @@ async def test_awg_existing_key_asks_before_replacing(_env):
     cb, link, notifier = await _press(f"act:vpn:issue:~g{KEY}:jeeves")
     text, markup = _last(cb)
     assert text == (
-        f"⚠️ У <b>{LABEL}</b> уже есть ключ AmneziaWG 🇳🇱.\n"
+        f"⚠️ У <b>{LABEL}</b> уже есть ключ AmneziaVPN 🇳🇱.\n"
         "Новый заменит старый — там, где стоит старый, связь пропадёт."
     )
     assert _texts(markup) == ["Выпустить новый", "Отмена"]
@@ -407,7 +407,7 @@ async def test_get_settings_sends_one_forwardable_message(monkeypatch):
     assert text == (
         f"📶 <b>Настройки VPN · {LABEL}</b>\n"
         "Откройте ссылку на телефоне, который подключаете — там всё по шагам: "
-        "Hiddify, AmneziaWG и проверка, что VPN включён.\n"
+        "Hiddify, AmneziaVPN и проверка, что VPN включён.\n"
         f"{PAGE}\n"
         "Ссылку можно переслать. Не делитесь ей с чужими: по ней подключается это устройство."
     )

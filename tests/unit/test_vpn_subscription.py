@@ -233,7 +233,7 @@ def test_page_status_blocks_and_auto_open_off_when_on():
     assert "❌ VPN сейчас выключен" in off and "🔄 Проверить ещё раз" in off
     assert "AUTO = true" in off or "AUTO = true" in off.replace("  ", " ")
     on = _page(status=subs.VpnStatus(True, "🇳🇱 Нидерланды", subs.METHOD_AWG))
-    assert "✅ VPN включён — 🇳🇱 Нидерланды" in on and "Способ: AmneziaWG" in on
+    assert "✅ VPN включён — 🇳🇱 Нидерланды" in on and "Способ: AmneziaVPN" in on
     assert "AUTO = false" in on.replace("  ", " ") or "AUTO = false" in on
 
 
@@ -266,10 +266,10 @@ def test_page_awg_block_collapsed_with_forms_per_country():
     )
     sub = subs.Subscription("d", _sub().entries, nodes=nodes)
     page = _page(sub, awg_forms={"jeeves": "N1", "wooster": "N2"})
-    assert "<details><summary>AmneziaWG</summary>" in page
+    assert "<details><summary>AmneziaVPN</summary>" in page
     assert "Получить настройки 🇳🇱" in page and 'action="/s/tok/awg"' in page
     assert 'value="N1"' in page and "не на всех" in page
-    assert "AmneziaWG</summary>" not in _page(sub)  # без форм блока нет
+    assert "AmneziaVPN</summary>" not in _page(sub)  # без форм блока нет
 
 
 def test_detect_status_by_address():
@@ -279,7 +279,7 @@ def test_detect_status_by_address():
     )
     net = "10.9.0.0/29"
     own_awg = subs.detect_status("10.9.0.3", nodes, net)
-    assert own_awg == subs.VpnStatus(True, "🇳🇱 Нидерланды", "AmneziaWG")
+    assert own_awg == subs.VpnStatus(True, "🇳🇱 Нидерланды", "AmneziaVPN")
     own_vless = subs.detect_status("198.51.100.1", nodes, net)
     assert own_vless == subs.VpnStatus(True, "🇳🇱 Нидерланды", "VLESS · Hiddify")
     peer = subs.detect_status("::ffff:198.51.100.2", nodes, net)
@@ -724,7 +724,7 @@ async def test_awg_not_offered_without_issuer(swarm):
     await cl.start_server()
     try:
         text = await (await cl.get(f"/s/{_token(a)}")).text()
-        assert "<summary>AmneziaWG" not in text
+        assert "<summary>AmneziaVPN" not in text
         resp = await cl.post(
             f"/s/{_token(a)}/awg", data={"nonce": "x", "node": "jeeves"}, headers=_origin(cl)
         )

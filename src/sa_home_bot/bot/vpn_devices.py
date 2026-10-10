@@ -27,7 +27,7 @@ AWG = vpn_protocol.TRANSPORT_AWG
 TRANSPORT_ORDER = (REALITY, AWG)
 # Имена транспортов в текстах: «VLESS · Hiddify» всегда вместе, AmneziaWG — без
 # оговорок про страны (решение владельца 2026-10-10).
-TRANSPORT_NAME = {REALITY: "VLESS · Hiddify", AWG: "AmneziaWG"}
+TRANSPORT_NAME = {REALITY: "VLESS · Hiddify", AWG: "AmneziaVPN"}
 
 _MONTHS_NOM = (
     "январь февраль март апрель май июнь июль август сентябрь октябрь ноябрь декабрь"

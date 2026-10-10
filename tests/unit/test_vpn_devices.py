@@ -126,9 +126,9 @@ def test_card_text_words_and_terms():
     assert "🇳🇱 Нидерланды — 8.7 ГБ" in text
     assert "🇺🇸 США — 0.4 ГБ" in text
     assert "🇳🇱 VLESS · Hiddify — на связи 10.10 14:02" in text
-    assert "🇳🇱 AmneziaWG — не выдано" in text
+    assert "🇳🇱 AmneziaVPN — не выдано" in text
     assert "🇺🇸 VLESS · Hiddify — ещё не подключалось" in text
-    assert "🇺🇸 AmneziaWG — 🔧 сервер его не помнит" in text
+    assert "🇺🇸 AmneziaVPN — 🔧 сервер его не помнит" in text
     assert "России" not in text
 
 
@@ -196,7 +196,7 @@ def test_summary_single_country_with_status():
 
 
 def test_summary_looks_at_vless_first():
-    """AmneziaWG красный, но VLESS (основной способ) зелёный — страна работает."""
+    """AmneziaVPN красный, но VLESS (основной способ) зелёный — страна работает."""
     srv = _server(
         "wooster", "🇺🇸 США", [], check=[_check("awg", "alerting"), _check("reality", "ok")]
     )
@@ -217,7 +217,7 @@ def test_card_adds_status_only_for_bad_transport():
     base = [copy.deepcopy(NL), copy.deepcopy(US)]
     base[1]["check"] = [_check("awg", "alerting"), _check("reality", "ok")]
     text = vd.card_text(vd.build_devices(base)[0], base, now=NOW, tz=UTC)
-    assert "🇺🇸 AmneziaWG — 🔧 сервер его не помнит · ⚠️ сервер сейчас может не работать" in text
+    assert "🇺🇸 AmneziaVPN — 🔧 сервер его не помнит · ⚠️ сервер сейчас может не работать" in text
     assert "🇺🇸 VLESS · Hiddify — ещё не подключалось\n" in text + "\n"
     assert "🇳🇱 VLESS · Hiddify — на связи 10.10 14:02\n" in text + "\n"
     assert vd.transport_health(servers[0], "awg") == "alerting"

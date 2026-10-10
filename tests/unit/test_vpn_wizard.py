@@ -176,7 +176,7 @@ async def test_create_issues_vless_in_every_country_and_shows_page_step():
     assert text == (
         "📶 <b>Настройки VPN · 📱 iPhone</b>\n"
         "Откройте ссылку на телефоне, который подключаете — там всё по шагам: "
-        "Hiddify, AmneziaWG и проверка, что VPN включён.\n"
+        "Hiddify, AmneziaVPN и проверка, что VPN включён.\n"
         "https://1.2.3.4:8444/s/tok\n"
         "Ссылку можно переслать. Не делитесь ей с чужими: по ней подключается это устройство."
     )

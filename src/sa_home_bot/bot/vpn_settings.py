@@ -57,7 +57,7 @@ NO_STORE_TEXT = (
     "Подключитесь через него, затем скачайте настоящий AmneziaVPN и перенесите туда настройки."
 )
 UNAVAILABLE_TEXT = "Не получилось подготовить настройки — сервер не ответил.\nПовторите чуть позже."
-NO_AWG_TEXT = "AmneziaWG сейчас не выдаётся ни в одной стране."
+NO_AWG_TEXT = "AmneziaVPN сейчас не выдаётся ни в одной стране."
 VLESS_FILE_CAPTION = "Настройки Hiddify. Нажмите на файл и выберите «Hiddify»."
 
 
@@ -106,7 +106,7 @@ def pick_keyboard(key: str) -> InlineKeyboardMarkup:
                     callback_data=action_cb(vpn_protocol.ACTION_ISSUE, KIND_VLESS, key),
                 )
             ],
-            [InlineKeyboardButton(text="⚡ AmneziaWG", callback_data=card_cb(SCREEN_AWG, key))],
+            [InlineKeyboardButton(text="⚡ AmneziaVPN", callback_data=card_cb(SCREEN_AWG, key))],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data=_device_cb(key))],
         ]
     )
@@ -193,7 +193,7 @@ def qr_button_text(country: vd.Country, multi: bool) -> str:
 
 
 def awg_pick_text(label: str) -> str:
-    return f"⚡ <b>{html.escape(label)}</b> · AmneziaWG — в какой стране?"
+    return f"⚡ <b>{html.escape(label)}</b> · AmneziaVPN — в какой стране?"
 
 
 def awg_country_button_text(server: dict) -> str:
@@ -220,7 +220,7 @@ def awg_pick_keyboard(key: str, servers: list[dict]) -> InlineKeyboardMarkup:
 
 def awg_replace_text(label: str, country: vd.Country) -> str:
     return (
-        f"⚠️ У <b>{html.escape(label)}</b> уже есть ключ AmneziaWG {html.escape(country.short)}.\n"
+        f"⚠️ У <b>{html.escape(label)}</b> уже есть ключ AmneziaVPN {html.escape(country.short)}.\n"
         "Новый заменит старый — там, где стоит старый, связь пропадёт."
     )
 
@@ -240,7 +240,7 @@ def awg_replace_keyboard(key: str, node: str) -> InlineKeyboardMarkup:
 
 
 def awg_file_caption(label: str, country: vd.Country) -> str:
-    return f"⚡ {html.escape(label)} · AmneziaWG · {html.escape(country.short)}"
+    return f"⚡ {html.escape(label)} · AmneziaVPN · {html.escape(country.short)}"
 
 
 def awg_steps_text(label: str, country: vd.Country) -> str:

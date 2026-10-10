@@ -106,7 +106,7 @@ _ACTION_APK = "apk"
 # Человеческие названия транспортов (vpn_peers.transport) для карточки и
 # кнопок выбора «➕ Новое устройство».
 _TRANSPORT_LABEL = {
-    vpn_protocol.TRANSPORT_AWG: "AmneziaWG",
+    vpn_protocol.TRANSPORT_AWG: "AmneziaVPN",
     vpn_protocol.TRANSPORT_REALITY: "VLESS (Reality)",
 }
 # Префикс значения кнопки выбора транспорта: act:vpn:issue:t_<transport>.
@@ -919,7 +919,7 @@ _PICK_SERVER_TEXT = "Где завести новое устройство?"
 _PICK_TRANSPORT_TEXT = (
     "Какой технологией выдать новое устройство?\n\n"
     "• <b>VLESS · Hiddify</b> — для DPI неотличимо от обычного HTTPS.\n"
-    "• <b>AmneziaWG</b> — быстрее, но в части стран может не работать."
+    "• <b>AmneziaVPN</b> — быстрее, но в части стран может не работать."
 )
 
 
@@ -1799,7 +1799,7 @@ async def _awg_country(
     device, servers = found
     server = next((s for s in _awg_servers(servers) if s.get("node") == node), None)
     if server is None or not node:
-        await callback.answer("В этой стране AmneziaWG сейчас не выдаётся.", show_alert=True)
+        await callback.answer("В этой стране AmneziaVPN сейчас не выдаётся.", show_alert=True)
         await _show_screen(callback, node_link, subscription, config, vpn_settings.SCREEN_AWG, key)
         return
     if device.connection(node, vpn_protocol.TRANSPORT_AWG) is not None:
@@ -1978,7 +1978,7 @@ async def _awg_replace(
     device, servers = found
     server = next((s for s in _awg_servers(servers) if s.get("node") == node_id), None)
     if server is None:
-        await callback.answer("В этой стране AmneziaWG сейчас не выдаётся.", show_alert=True)
+        await callback.answer("В этой стране AmneziaVPN сейчас не выдаётся.", show_alert=True)
         return
     await _awg_deliver(
         callback,
@@ -2560,14 +2560,14 @@ def _conf_filename(device_label: str, location: str = "") -> str:
 def _file_caption(label_escaped: str) -> str:
     return (
         f"🔐 Конфиг устройства «{label_escaped}».\n"
-        "Нажмите на файл → «Открыть с помощью» → AmneziaWG — тоннель "
+        "Нажмите на файл → «Открыть с помощью» → AmneziaVPN — тоннель "
         "добавится сразу, без копирования."
     )
 
 
 def _qr_caption(label_escaped: str, flag: str = "") -> str:
     return (
-        f"📶 QR — «{label_escaped}» · AmneziaWG{' ' + flag if flag else ''}. Откройте AmneziaVPN → "
+        f"📶 QR — «{label_escaped}» · AmneziaVPN{' ' + flag if flag else ''}. Откройте AmneziaVPN → "
         "«+» → «QR-код» (удобно для настройки с ДРУГОГО "
         "устройства — сфотографировать собственный экран телефон не может)."
     )

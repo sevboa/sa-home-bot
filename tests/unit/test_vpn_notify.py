@@ -280,7 +280,7 @@ async def test_restore_one_device_goes_to_reissue_screen(monkeypatch):
     assert len(guest) == 1
     assert guest[0][1] == (
         "🔧 VPN 🇳🇱: сервер переустановлен, настройки нужно обновить: "
-        "📱 iPhone (VLESS · Hiddify, AmneziaWG).\n"
+        "📱 iPhone (VLESS · Hiddify, AmneziaVPN).\n"
         "Если подключались кнопкой «🔌 Подключить», Hiddify обновится сам."
     )
     [(text, cb)] = _buttons(guest[0][2])
@@ -299,7 +299,7 @@ async def test_restore_awg_only_has_no_hiddify_hint(monkeypatch):
         {"node": "jeeves", "location": NL, "affected": [_item(GUEST, "📱 iPhone", "awg")]},
     )
     assert "Hiddify обновится" not in notifier.sent[0][1]
-    assert "📱 iPhone (AmneziaWG)" in notifier.sent[0][1]
+    assert "📱 iPhone (AmneziaVPN)" in notifier.sent[0][1]
 
 
 async def test_restore_several_devices_leads_to_manage_list(monkeypatch):
@@ -316,7 +316,7 @@ async def test_restore_several_devices_leads_to_manage_list(monkeypatch):
     await send(vp.EVENT_VPN_SERVER_RESTORED, data)
     by_chat = {c: (t, m) for c, t, m in notifier.sent}
     text, markup = by_chat[GUEST]
-    assert "📱 iPhone (AmneziaWG), 🌸 Rose (VLESS · Hiddify)" in text
+    assert "📱 iPhone (AmneziaVPN), 🌸 Rose (VLESS · Hiddify)" in text
     assert _buttons(markup) == [("Обновить", vpn_settings.card_cb("m"))]
     assert "Hiddify обновится сам" in by_chat[OTHER][0]
     assert by_chat[ADMIN][0] == (

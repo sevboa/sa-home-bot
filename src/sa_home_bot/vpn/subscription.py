@@ -209,7 +209,7 @@ def detect_status(addr: str, nodes: tuple[NodeInfo, ...], local_subnet: str) -> 
     return VpnStatus(False)
 
 
-METHOD_AWG = "AmneziaWG"
+METHOD_AWG = "AmneziaVPN"
 METHOD_VLESS = "VLESS · Hiddify"
 VIA_AWG = "awg"  # ответ /where: трафик идёт через эту ноду по AmneziaWG
 VIA_VLESS = "vless"
@@ -458,11 +458,11 @@ def _awg_card(sub: Subscription, forms: dict[str, str], path: str) -> str:
             "</button></form>"
         )
     return (
-        '<div class="card"><details><summary>AmneziaWG</summary>'
+        '<div class="card"><details><summary>AmneziaVPN</summary>'
         '<p class="hint">Другой способ, обычно быстрее. Из России работает не на всех '
         "серверах.</p>"
         f"{''.join(buttons)}"
-        '<p class="hint">Ключ AmneziaWG на сервере не хранится: настройки показываются один '
+        '<p class="hint">Ключ AmneziaVPN на сервере не хранится: настройки показываются один '
         "раз. Если ключ в стране уже есть, новый заменит старый.</p>"
         "</details></div>"
     )
@@ -493,7 +493,7 @@ _PAGE_JS = """(function () {
   }
   var st = document.getElementById('st'), stm = document.getElementById('stm');
   var again = document.getElementById('recheck');
-  var METHODS = { awg: 'AmneziaWG', vless: 'VLESS \\u00b7 Hiddify' };
+  var METHODS = { awg: 'AmneziaVPN', vless: 'VLESS \\u00b7 Hiddify' };
   function show(cls, text, hint) {
     if (!st) return;
     st.className = 'status ' + cls; st.textContent = text;
@@ -608,8 +608,8 @@ def render_notice(title: str, text: str, *, path: str = "", back: bool = True) -
 
 def render_awg_confirm(sub: Subscription, node: NodeInfo, nonce: str, path: str) -> str:
     e = html.escape
-    body = f"""<h1>AmneziaWG {e(flag_of(node.name) or node.name)}</h1>
-<div class="card"><p>⚠️ У «{e(sub.device_label)}» уже есть ключ AmneziaWG в этой стране.
+    body = f"""<h1>AmneziaVPN {e(flag_of(node.name) or node.name)}</h1>
+<div class="card"><p>⚠️ У «{e(sub.device_label)}» уже есть ключ AmneziaVPN в этой стране.
 Новый заменит старый — там, где стоит старый, связь пропадёт.</p>
 <form method="post" action="{e(path, quote=True)}/awg">
 <input type="hidden" name="nonce" value="{e(nonce, quote=True)}">
@@ -617,7 +617,7 @@ def render_awg_confirm(sub: Subscription, node: NodeInfo, nonce: str, path: str)
 <input type="hidden" name="confirm" value="1">
 <button class="btn" type="submit">Выпустить новый</button></form>
 <a class="btn alt" href="{e(path, quote=True)}">Отмена</a></div>"""
-    return _layout("AmneziaWG", body)
+    return _layout("AmneziaVPN", body)
 
 
 def render_awg_result(
@@ -646,7 +646,7 @@ def render_awg_result(
 <p class="hint">Файл настроек: скачайте и откройте его в AmneziaVPN.</p>
 <a class="btn alt" download="{e(filename, quote=True)}" href="{e(data, quote=True)}">⬇️ Скачать {e(filename)}</a>
 <div class="qr"><p class="hint">QR для другого устройства:</p>
-<img src="{e(qr_data_uri, quote=True)}" alt="QR-код настроек AmneziaWG"></div></details>"""
+<img src="{e(qr_data_uri, quote=True)}" alt="QR-код настроек AmneziaVPN"></div></details>"""
     script = ""
     if key:
         script = _AWG_JS
@@ -673,11 +673,11 @@ def render_awg_result(
 <li>Проверьте имя подключения — например, «{e(rename)}».</li>
 </ol></div>"""
         fallback = fallback.replace("<details", "<details open")
-    body = f"""<h1>AmneziaWG {e(flag or node.name)}</h1>
+    body = f"""<h1>AmneziaVPN {e(flag or node.name)}</h1>
 {main}
 {fallback}
 <a class="btn alt" href="{e(path, quote=True)}">⬅️ К настройкам</a>"""
-    return _layout("AmneziaWG", body, script)
+    return _layout("AmneziaVPN", body, script)
 
 
 _AWG_JS = """(function () {

@@ -201,7 +201,7 @@ def page_link_text(label: str, page_url: str) -> str:
     return (
         f"📶 <b>Настройки VPN · {html.escape(label)}</b>\n"
         "Откройте ссылку на телефоне, который подключаете — там всё по шагам: "
-        "Hiddify, AmneziaWG и проверка, что VPN включён.\n"
+        "Hiddify, AmneziaVPN и проверка, что VPN включён.\n"
         f"{html.escape(page_url)}\n"
         "Ссылку можно переслать. Не делитесь ей с чужими: по ней подключается это устройство."
     )

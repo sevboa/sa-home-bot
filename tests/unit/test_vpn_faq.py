@@ -66,7 +66,7 @@ async def test_faq_list_has_all_questions_and_report_button():
     markup = cb.message.edit_markups[-1]
     assert _texts(markup) == [
         "Что такое Hiddify?",
-        "Чем отличается AmneziaWG?",
+        "Чем отличается AmneziaVPN?",
         "Не подключается",
         "Как подключить ещё одно устройство",
         "Магазин недоступен?",
