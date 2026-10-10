@@ -49,7 +49,7 @@ from aiogram.types import (
     Message,
 )
 
-from sa_home_bot.bot import commands, vpn_admin_view, vpn_nodes
+from sa_home_bot.bot import commands, vpn_admin_view, vpn_devices, vpn_nodes
 from sa_home_bot.bot.invites import Gatekeeper
 from sa_home_bot.bot.menu import refresh_chat_menu
 from sa_home_bot.bot.notifier import Notifier
@@ -115,8 +115,7 @@ _CHECK_ICON = {
     vpn_check.ALERTING: "🔴",
 }
 _CHECK_LEGEND = (
-    "🟠 — доступен не отовсюду (где-то уже блокируют), 🔴 — не отвечает ни "
-    "одному наблюдателю."
+    "🟠 — доступен не отовсюду (где-то уже блокируют), 🔴 — не отвечает ни одному наблюдателю."
 )
 
 
@@ -305,6 +304,70 @@ def _allows(subscription: Subscription | None, action_id: str) -> bool:
     return subscription is not None and subscription.allows_action(action_id, SERVICE)
 
 
+def _admin_row(
+    servers: list[dict], subscription: Subscription | None
+) -> list[InlineKeyboardButton] | None:
+    """Админская строка «👥 Все гости» / «🛰 Проверка сети» (None — не админ)."""
+    if subscription is None or not _is_admin(subscription):
+        return None
+    admin_row = [
+        InlineKeyboardButton(
+            text="👥 Все гости",
+            # Право кнопки (peers@vpn) теперь совпадает с признаком, по
+            # которому она рисуется (_is_admin) — раньше рисовалась по
+            # peers@vpn, а слала usage_all и отказывала админу с точечным
+            # правом.
+            callback_data=vpn_admin_view.guests_cb(0),
+        )
+    ]
+    # Проверка сети — у любого живого vpn-инстанса (39.0.7(f)): состояние
+    # проверок реплицировано на все живые (vpn_check/service.py::
+    # _run_and_report фанаутит отчёт), а пробник умеет и reality, не только
+    # awg-туннель в netns. Старый гейт «нужен сервер с awg» прятал кнопку
+    # целиком, стоило упасть jeeves, хотя wooster жив и всё знает — тот же
+    # класс окаменевшего гейта, что уже чинили для кнопки прокси.
+    check_node = next((server.get("node") for server in servers if server.get("node")), None)
+    if check_node is not None:
+        admin_row.append(
+            InlineKeyboardButton(
+                text="🛰 Проверка сети",
+                callback_data=commands.action_callback(
+                    vpn_protocol.ACTION_CHECK_STATUS, service=SERVICE, node_id=check_node
+                ),
+            )
+        )
+    return admin_row
+
+
+def _proxy_row(
+    servers: list[dict], subscription: Subscription | None
+) -> list[InlineKeyboardButton] | None:
+    # Прокси Telegram от VPN-транспорта не зависит — он живёт на том же
+    # VPS сам по себе (на wooster поднят при reality-only раскладке).
+    # Кнопка без node_id — обработчик фанаутит ACTION_PROXY_LINK по ВСЕМ
+    # живым серверам с прокси и присылает ссылку каждого (решение
+    # пользователя 2026-09-20: раньше показывался только один — первый
+    # живой сервер списка, — второй сервер приходилось выцарапывать
+    # отдельным запросом к ноде).
+    #
+    # Гейт — право `proxy_link@vpn`, а не админство (решение пользователя
+    # 2026-09-24). Раньше кнопка жила внутри `if is_admin`, и прокси нельзя
+    # было открыть гостю в принципе: право существовало, но ни выдать его
+    # (в каталоге /guests его не было), ни нажать (кнопки гость не видел).
+    if _allows(subscription, vpn_protocol.ACTION_PROXY_LINK) and any(
+        server.get("proxy_available") for server in servers
+    ):
+        return [
+            InlineKeyboardButton(
+                text="✈️ Прокси Telegram",
+                callback_data=commands.action_callback(
+                    vpn_protocol.ACTION_PROXY_LINK, service=SERVICE
+                ),
+            )
+        ]
+    return None
+
+
 def _card_keyboard(
     servers: list[dict],
     *,
@@ -321,7 +384,6 @@ def _card_keyboard(
     видел четыре кнопки и на каждой получал «⛔️ Недоступно». Показываем то,
     что человек и правда может.
     """
-    is_admin = _is_admin(subscription) if subscription is not None else False
     multi = len(servers) > 1
     devices = [device for server in servers for device in (server.get("devices") or [])]
     top_row: list[InlineKeyboardButton] = []
@@ -395,60 +457,223 @@ def _card_keyboard(
                 )
             ]
         )
-    if is_admin:
-        admin_row = [
-            InlineKeyboardButton(
-                text="👥 Все гости",
-                # Право кнопки (peers@vpn) теперь совпадает с признаком, по
-                # которому она рисуется (_is_admin) — раньше рисовалась по
-                # peers@vpn, а слала usage_all и отказывала админу с точечным
-                # правом.
-                callback_data=vpn_admin_view.guests_cb(0),
-            )
-        ]
-        # Проверка сети — у любого живого vpn-инстанса (39.0.7(f)): состояние
-        # проверок реплицировано на все живые (vpn_check/service.py::
-        # _run_and_report фанаутит отчёт), а пробник умеет и reality, не только
-        # awg-туннель в netns. Старый гейт «нужен сервер с awg» прятал кнопку
-        # целиком, стоило упасть jeeves, хотя wooster жив и всё знает — тот же
-        # класс окаменевшего гейта, что уже чинили для кнопки прокси.
-        check_node = next((server.get("node") for server in servers if server.get("node")), None)
-        if check_node is not None:
-            admin_row.append(
-                InlineKeyboardButton(
-                    text="🛰 Проверка сети",
-                    callback_data=commands.action_callback(
-                        vpn_protocol.ACTION_CHECK_STATUS, service=SERVICE, node_id=check_node
-                    ),
-                )
-            )
+    admin_row = _admin_row(servers, subscription)
+    if admin_row is not None:
         rows.append(admin_row)
-    # Прокси Telegram от VPN-транспорта не зависит — он живёт на том же
-    # VPS сам по себе (на wooster поднят при reality-only раскладке).
-    # Кнопка без node_id — обработчик фанаутит ACTION_PROXY_LINK по ВСЕМ
-    # живым серверам с прокси и присылает ссылку каждого (решение
-    # пользователя 2026-09-20: раньше показывался только один — первый
-    # живой сервер списка, — второй сервер приходилось выцарапывать
-    # отдельным запросом к ноде).
-    #
-    # Гейт — право `proxy_link@vpn`, а не админство (решение пользователя
-    # 2026-09-24). Раньше кнопка жила внутри `if is_admin`, и прокси нельзя
-    # было открыть гостю в принципе: право существовало, но ни выдать его
-    # (в каталоге /guests его не было), ни нажать (кнопки гость не видел).
-    if _allows(subscription, vpn_protocol.ACTION_PROXY_LINK) and any(
-        server.get("proxy_available") for server in servers
-    ):
+    proxy_row = _proxy_row(servers, subscription)
+    if proxy_row is not None:
+        rows.append(proxy_row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# --- Экспертный режим (этап 57.3): главная, «⚙️ Управление», устройства ------
+#
+# Кнопки идут по схеме act:vpn:<действие>[:<значение>[:<нода>]]. Права — те, что
+# уже есть: экраны чтения живут под ``vpn_card@vpn`` (значение — экран), удаление
+# — ``revoke@vpn``, перевыпуск/починка — ``reissue@vpn``; новых прав нет.
+# Устройство в callback — 8-символьный хэш имени (vpn_devices.device_key), по
+# свежему usage он разрешается обратно в имя; префикс «~» в значении отличает
+# новые кнопки от старых («значение = имя устройства»).
+#
+# Значения ``vpn_card``:  m — список устройств; d<ключ> — карточка;
+#   r<ключ> — выбор ключей для перевыпуска; x<ключ> — подтверждение удаления.
+# Значения ``reissue``:  ~r<ключ> / ~a<ключ> + нода — перевыпустить VLESS / AmneziaWG
+#   этой страны; ~f<ключ> + нода — починить страну (все сломанные подключения).
+# Значения ``revoke``:  ~d<ключ> — удалить устройство целиком.
+_SCREEN_LIST = "m"
+_SCREEN_DEVICE = "d"
+_SCREEN_REISSUE = "r"
+_SCREEN_DELETE = "x"
+_EXPERT_PREFIX = "~"
+_KIND_REALITY = "r"
+_KIND_AWG = "a"
+_KIND_FIX = "f"
+_KIND_DELETE = "d"
+_KIND_BY_TRANSPORT = {
+    vpn_protocol.TRANSPORT_REALITY: _KIND_REALITY,
+    vpn_protocol.TRANSPORT_AWG: _KIND_AWG,
+}
+_TRANSPORT_BY_KIND = {kind: transport for transport, kind in _KIND_BY_TRANSPORT.items()}
+
+
+def _screen_cb(screen: str, key: str = "") -> str:
+    return commands.action_callback(_ACTION_VPN_CARD, f"{screen}{key}", service=SERVICE)
+
+
+def _home_cb() -> str:
+    return commands.action_callback(_ACTION_VPN_CARD, service=SERVICE)
+
+
+def _back_button(text: str, callback_data: str) -> list[InlineKeyboardButton]:
+    return [InlineKeyboardButton(text=text, callback_data=callback_data)]
+
+
+def _new_device_button() -> InlineKeyboardButton:
+    # Пока — прежний поток выдачи (выбор сервера/технологии); мастер — 57.3a.
+    return InlineKeyboardButton(
+        text="➕ Новое устройство",
+        callback_data=commands.action_callback(vpn_protocol.ACTION_ISSUE, service=SERVICE),
+    )
+
+
+def _home_keyboard(
+    servers: list[dict], *, subscription: Subscription | None, self_serve_nodes: list[str]
+) -> InlineKeyboardMarkup:
+    """Новая главная (у человека есть устройства). Кнопки — строго по правам."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if _allows(subscription, vpn_protocol.ACTION_ISSUE):
+        rows.append([_new_device_button()])
+    second: list[InlineKeyboardButton] = []
+    if _allows(subscription, _ACTION_APK):
+        second.append(
+            InlineKeyboardButton(
+                text="❓ Помощь",
+                callback_data=commands.action_callback("apk", service=SERVICE),
+            )
+        )
+    second.append(InlineKeyboardButton(text="⚙️ Управление", callback_data=_screen_cb(_SCREEN_LIST)))
+    rows.append(second)
+    proxy_row = _proxy_row(servers, subscription)
+    if proxy_row is not None:
+        rows.append(proxy_row)
+    admin_row = _admin_row(servers, subscription)
+    if admin_row is not None:
+        rows.append(admin_row)
+    if _allows(subscription, vpn_protocol.ACTION_GRANT_EXTRA):
+        multi = len(servers) > 1
+        grants = [
+            InlineKeyboardButton(
+                text=f"➕ 100 ГБ{' ' + vpn_devices.Country(server['node'], _server_label(server)).short if multi else ''}",
+                callback_data=commands.action_callback(
+                    "grant_extra", service=SERVICE, node_id=server["node"]
+                ),
+            )
+            for server in servers
+            if server.get("node") in self_serve_nodes
+        ]
+        if grants:
+            rows.append(grants)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _list_keyboard(
+    devices: list[vpn_devices.Device], *, subscription: Subscription | None
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for dev in devices:
+        row.append(
+            InlineKeyboardButton(
+                text=dev.label[:28], callback_data=_screen_cb(_SCREEN_DEVICE, dev.key)
+            )
+        )
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    if _allows(subscription, vpn_protocol.ACTION_ISSUE):
+        rows.append([_new_device_button()])
+    rows.append(_back_button("⬅️ Назад", _home_cb()))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _conn_button_text(
+    conn: vpn_devices.Connection, countries: dict[str, vpn_devices.Country]
+) -> str:
+    country = countries.get(conn.node)
+    where = country.short if country else conn.node
+    return f"{where} {vpn_devices.TRANSPORT_NAME.get(conn.transport, conn.transport)}"
+
+
+def _card_keyboard_for_device(
+    device: vpn_devices.Device,
+    servers: list[dict],
+    *,
+    subscription: Subscription | None,
+) -> InlineKeyboardMarkup:
+    countries = vpn_devices.countries_of(servers)
+    rows: list[list[InlineKeyboardButton]] = []
+    if _allows(subscription, vpn_protocol.ACTION_REISSUE):
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="✈️ Прокси Telegram",
-                    callback_data=commands.action_callback(
-                        vpn_protocol.ACTION_PROXY_LINK, service=SERVICE
-                    ),
-                ),
+                    text="🔄 Перевыпустить ключи",
+                    callback_data=_screen_cb(_SCREEN_REISSUE, device.key),
+                )
             ]
         )
+        for node in device.broken_nodes():
+            country = countries.get(node)
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"🔧 Починить {country.short if country else node}",
+                        callback_data=commands.action_callback(
+                            vpn_protocol.ACTION_REISSUE,
+                            f"{_EXPERT_PREFIX}{_KIND_FIX}{device.key}",
+                            node_id=node,
+                            service=SERVICE,
+                        ),
+                    )
+                ]
+            )
+    if _allows(subscription, vpn_protocol.ACTION_REVOKE):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🗑 Удалить устройство",
+                    callback_data=_screen_cb(_SCREEN_DELETE, device.key),
+                )
+            ]
+        )
+    rows.append(_back_button("⬅️ К устройствам", _screen_cb(_SCREEN_LIST)))
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _reissue_keyboard(device: vpn_devices.Device, servers: list[dict]) -> InlineKeyboardMarkup:
+    """Выданные подключения — по кнопке на каждое (выбор нескольких — 57.5)."""
+    countries = vpn_devices.countries_of(servers)
+    rows: list[list[InlineKeyboardButton]] = []
+    for conn in device.issued:
+        kind = _KIND_BY_TRANSPORT.get(conn.transport)
+        if kind is None:
+            continue
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"🔄 {_conn_button_text(conn, countries)}",
+                    callback_data=commands.action_callback(
+                        vpn_protocol.ACTION_REISSUE,
+                        f"{_EXPERT_PREFIX}{kind}{device.key}",
+                        node_id=conn.node,
+                        service=SERVICE,
+                    ),
+                )
+            ]
+        )
+    rows.append(_back_button("⬅️ Назад", _screen_cb(_SCREEN_DEVICE, device.key)))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _delete_keyboard(device: vpn_devices.Device) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Да, удалить",
+                    callback_data=commands.action_callback(
+                        vpn_protocol.ACTION_REVOKE,
+                        f"{_EXPERT_PREFIX}{_KIND_DELETE}{device.key}",
+                        service=SERVICE,
+                    ),
+                ),
+                InlineKeyboardButton(
+                    text="Отмена", callback_data=_screen_cb(_SCREEN_DEVICE, device.key)
+                ),
+            ]
+        ]
+    )
 
 
 def _target_label(url: str) -> str:
@@ -495,8 +720,7 @@ def _check_status_text(
         lines.append("Пока нет ни одной проверки — нажмите «Запустить проверку».")
     else:
         pair_status = {
-            (row.get("server"), row.get("transport")): row.get("status")
-            for row in (rollup or [])
+            (row.get("server"), row.get("transport")): row.get("status") for row in (rollup or [])
         }
         grouped: dict[tuple[str, str], list[dict]] = {}
         for row in states:
@@ -507,18 +731,14 @@ def _check_status_text(
             lines.append("")
             head_icon = _CHECK_ICON.get(pair_status.get((server, transport), ""), "")
             label = _TRANSPORT_LABEL.get(transport, transport)
-            lines.append(
-                f"<b>{html.escape(server)}</b> · {html.escape(label)}{_suffix(head_icon)}"
-            )
+            lines.append(f"<b>{html.escape(server)}</b> · {html.escape(label)}{_suffix(head_icon)}")
             by_node: dict[str, list[dict]] = {}
             for row in rows:
                 by_node.setdefault(row["node"], []).append(row)
             for node in sorted(by_node):
                 node_rows = sorted(by_node[node], key=lambda r: r["target"])
                 node_icon = (
-                    "🔴"
-                    if any(r["status"] == vpn_check.ALERTING for r in node_rows)
-                    else "🟢"
+                    "🔴" if any(r["status"] == vpn_check.ALERTING for r in node_rows) else "🟢"
                 )
                 parts = []
                 for row in node_rows:
@@ -535,9 +755,7 @@ def _check_status_text(
                 )
     if pending:
         lines.append("")
-        lines.append(
-            "⏳ Проверка запущена — жмите «↻ Обновить», пока не увидите свежий результат."
-        )
+        lines.append("⏳ Проверка запущена — жмите «↻ Обновить», пока не увидите свежий результат.")
     return "\n".join(lines)
 
 
@@ -587,8 +805,7 @@ def _proxy_text(result: dict, *, admin: bool) -> str:
         heading += f" · {html.escape(str(label))}"
     heading += " — общая ссылка, один секрет на всех.\n"
     text = (
-        heading
-        + f"Ссылка: {html.escape(result['tg_link'])}\n"
+        heading + f"Ссылка: {html.escape(result['tg_link'])}\n"
         f"t.me: {html.escape(result['t_me_link'])}\n\n"
         f"Сервер: <code>{html.escape(str(result['host']))}</code>\n"
         f"Порт: <code>{result['port']}</code>\n"
@@ -892,12 +1109,26 @@ async def cmd_vpn(
             return
         await message.answer(error)
         return
-    keyboard = _card_keyboard(
-        servers,
-        subscription=subscription,
-        self_serve_nodes=_self_serve_nodes(servers, config),
+    text, keyboard = _render_main(servers, down, subscription, config)
+    await message.answer(text, reply_markup=keyboard)
+
+
+def _render_main(
+    servers: list[dict], down: list[dict], subscription: Subscription | None, config: Settings
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Главная /vpn. Есть устройства — новая (этап 57.3): остаток квоты и
+    предупреждение словами, без цветов и трафика по странам. Нет устройств —
+    прежняя карточка (мастер первого подключения — 57.3a)."""
+    self_serve = _self_serve_nodes(servers, config)
+    if vpn_devices.build_devices(servers):
+        return (
+            vpn_devices.home_text(servers, unavailable=down),
+            _home_keyboard(servers, subscription=subscription, self_serve_nodes=self_serve),
+        )
+    return (
+        _usage_text(servers, unavailable=down),
+        _card_keyboard(servers, subscription=subscription, self_serve_nodes=self_serve),
     )
-    await message.answer(_usage_text(servers, unavailable=down), reply_markup=keyboard)
 
 
 async def _redraw_card(
@@ -911,15 +1142,152 @@ async def _redraw_card(
                     _PROXY_ONLY_CARD, reply_markup=_proxy_only_keyboard()
                 )
         return
-    keyboard = _card_keyboard(
-        servers,
-        subscription=subscription,
-        self_serve_nodes=_self_serve_nodes(servers, config),
-    )
+    text, keyboard = _render_main(servers, down, subscription, config)
     with contextlib.suppress(TelegramBadRequest):
-        await callback.message.edit_text(
-            _usage_text(servers, unavailable=down), reply_markup=keyboard
+        await callback.message.edit_text(text, reply_markup=keyboard)
+
+
+async def _show_screen(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    subscription: Subscription,
+    config: Settings,
+    screen: str,
+    key: str = "",
+    *,
+    answered: bool = True,
+) -> None:
+    """Экраны экспертного режима — одним сообщением, редактируется на месте.
+    Устройство разрешается по свежему usage; пропало — назад к списку."""
+    error, servers, _down = await _card(node_link, callback.message.chat.id, subscription)
+    devices = vpn_devices.build_devices(servers) if error is None else []
+    if not devices:
+        if not answered:
+            await callback.answer()
+        await _redraw_card(callback, node_link, subscription, config)
+        return
+    device = vpn_devices.find_device(devices, key) if key else None
+    if screen != _SCREEN_LIST and device is None:
+        if not answered:
+            await callback.answer("Устройство не найдено — обновил список.", show_alert=True)
+            answered = True
+        screen = _SCREEN_LIST
+    if not answered:
+        await callback.answer()
+    if screen == _SCREEN_DEVICE:
+        text = vpn_devices.card_text(device, servers)
+        keyboard = _card_keyboard_for_device(device, servers, subscription=subscription)
+    elif screen == _SCREEN_REISSUE:
+        text, keyboard = vpn_devices.reissue_text(device), _reissue_keyboard(device, servers)
+    elif screen == _SCREEN_DELETE:
+        text, keyboard = vpn_devices.delete_text(device), _delete_keyboard(device)
+    else:
+        text = vpn_devices.list_text(devices)
+        keyboard = _list_keyboard(devices, subscription=subscription)
+    with contextlib.suppress(TelegramBadRequest):
+        await callback.message.edit_text(text, reply_markup=keyboard)
+
+
+async def _expert_reissue(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    notifier: Notifier,
+    config: Settings,
+    subscription: Subscription,
+    pending: PendingVpnSecrets,
+    value: str,
+    node_id: str | None,
+) -> None:
+    """``reissue:~<вид><ключ>:<нода>`` — перевыпуск подключений устройства в одной
+    стране: ``r``/``a`` — один VLESS / AmneziaWG, ``f`` — «🔧 Починить»: только
+    сломанные. Новые настройки приходят тем же способом, что и при обычном
+    перевыпуске (_send_secret)."""
+    chat_id = callback.message.chat.id
+    if not _is_private(chat_id):
+        await callback.answer("Секрет доступа выдаётся только в личке.", show_alert=True)
+        return
+    kind, key = value[1:2], value[2:]
+    error, servers, _down = await _card(node_link, chat_id, subscription)
+    device = (
+        vpn_devices.find_device(vpn_devices.build_devices(servers), key) if error is None else None
+    )
+    if device is None or not node_id:
+        await callback.answer("Устройство не найдено — обновите список.", show_alert=True)
+        await _show_screen(callback, node_link, subscription, config, _SCREEN_LIST)
+        return
+    if kind == _KIND_FIX:
+        transports = [c.transport for c in device.broken_in(node_id)]
+    else:
+        transport = _TRANSPORT_BY_KIND.get(kind)
+        found = device.connection(node_id, transport) if transport else None
+        transports = [found.transport] if found is not None else []
+    if not transports:
+        await callback.answer("Тут нечего перевыпускать.", show_alert=True)
+        await _show_screen(callback, node_link, subscription, config, _SCREEN_DEVICE, key)
+        return
+    await callback.answer("Перевыпускаю…")
+    dst = Address(node=node_id, service=SERVICE)
+    for transport in transports:
+        try:
+            result = await node_link.command(
+                vpn_protocol.ACTION_REISSUE,
+                {"chat_id": chat_id, "device_label": device.label, "transport": transport},
+                dst=dst,
+            )
+        except ProtoError as exc:
+            await callback.message.answer(f"⚠️ {exc.message}")
+            continue
+        except ServiceUnavailableError:
+            await callback.message.answer("⚠️ Служба VPN недоступна.")
+            break
+        await _send_secret(
+            notifier,
+            pending,
+            chat_id,
+            vpn_protocol.ACTION_REISSUE,
+            result,
+            config.vpn.config_message_ttl_s,
+            message_thread_id=callback.message.message_thread_id,
         )
+    await _show_screen(callback, node_link, subscription, config, _SCREEN_DEVICE, key)
+
+
+async def _expert_delete(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    subscription: Subscription,
+    config: Settings,
+    value: str,
+) -> None:
+    """``revoke:~d<ключ>`` — снять ключи устройства на всех нодах и транспортах."""
+    chat_id = callback.message.chat.id
+    key = value[2:]
+    error, servers, _down = await _card(node_link, chat_id, subscription)
+    device = (
+        vpn_devices.find_device(vpn_devices.build_devices(servers), key) if error is None else None
+    )
+    if device is None:
+        await callback.answer("Устройство не найдено — обновите список.", show_alert=True)
+        await _show_screen(callback, node_link, subscription, config, _SCREEN_LIST)
+        return
+    failed = 0
+    for conn in device.issued:
+        try:
+            await node_link.command(
+                vpn_protocol.ACTION_REVOKE,
+                {"chat_id": chat_id, "device_label": device.label, "transport": conn.transport},
+                dst=Address(node=conn.node, service=SERVICE),
+            )
+        except (ProtoError, ServiceUnavailableError):
+            failed += 1
+    if failed:
+        await callback.answer(
+            f"Удалено не всё: {failed} подключ. не отвечают. Повторите позже.", show_alert=True
+        )
+        await _show_screen(callback, node_link, subscription, config, _SCREEN_DEVICE, key)
+        return
+    await callback.answer(f"Удалено: {device.label}")
+    await _show_screen(callback, node_link, subscription, config, _SCREEN_LIST)
 
 
 def _conf_filename(device_label: str, location: str = "") -> str:
@@ -1020,9 +1388,7 @@ async def _send_secret(
     location = str(result.get("location") or "")
     # reality: deep-link и vless://-ссылка (tap-to-copy) — всегда в тексте
     # сообщения, независимо от того, каким способом ушёл основной артефакт.
-    links_note = (
-        _reality_links_note(result) if transport == vpn_protocol.TRANSPORT_REALITY else ""
-    )
+    links_note = _reality_links_note(result) if transport == vpn_protocol.TRANSPORT_REALITY else ""
 
     # Первое устройство чата — почти наверняка настраивается прямо с этого
     # телефона (файл удобнее), второе и далее — обычно для другого устройства
@@ -1212,6 +1578,12 @@ async def handle_action(
         await _redraw_card(callback, node_link, subscription, config)
         return
 
+    if action_id == vpn_protocol.ACTION_REISSUE and value and value.startswith(_EXPERT_PREFIX):
+        await _expert_reissue(
+            callback, node_link, notifier, config, subscription, pending_vpn_secrets, value, node_id
+        )
+        return
+
     if action_id in (vpn_protocol.ACTION_ISSUE, vpn_protocol.ACTION_REISSUE):
         if not _is_private(chat_id):
             await callback.answer("Секрет доступа выдаётся только в личке.", show_alert=True)
@@ -1337,6 +1709,10 @@ async def handle_action(
         await _redraw_card(callback, node_link, subscription, config)
         return
 
+    if action_id == vpn_protocol.ACTION_REVOKE and value and value.startswith(_EXPERT_PREFIX):
+        await _expert_delete(callback, node_link, subscription, config, value)
+        return
+
     if action_id == vpn_protocol.ACTION_REVOKE:
         if not value:
             await callback.answer()
@@ -1390,8 +1766,13 @@ async def handle_action(
         return
 
     if action_id == _ACTION_VPN_CARD:
-        await callback.answer()
-        await _redraw_card(callback, node_link, subscription, config)
+        if value:
+            await _show_screen(
+                callback, node_link, subscription, config, value[0], value[1:], answered=False
+            )
+        else:
+            await callback.answer()
+            await _redraw_card(callback, node_link, subscription, config)
         return
 
     if action_id == vpn_protocol.ACTION_CHECK_STATUS:
@@ -1409,9 +1790,7 @@ async def handle_action(
         await callback.answer()
         with contextlib.suppress(TelegramBadRequest):
             await callback.message.edit_text(
-                _check_status_text(
-                    result.get("states") or [], rollup=result.get("rollup") or []
-                ),
+                _check_status_text(result.get("states") or [], rollup=result.get("rollup") or []),
                 reply_markup=_check_status_keyboard(),
             )
         return
