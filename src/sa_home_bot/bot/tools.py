@@ -68,6 +68,7 @@ from sa_home_bot.bot import (
 from sa_home_bot.bot.interactives import cabinet as interactive_cabinet
 from sa_home_bot.bot.interactives import places as interactive_places
 from sa_home_bot.bot.interactives import radio as interactive_radio
+from sa_home_bot.bot.interactives import underground as interactive_underground
 from sa_home_bot.bot.monitor_state import parse_disk_summary, parse_health_state
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings, reminder_reason
@@ -356,7 +357,7 @@ class ToolKit:
 # Тулы канарейки Этапа 59 (bot/interactives, 59.C): модель видит их только у
 # гостей из llm.interactives_canary_user_ids. Остальным декларации не
 # уезжают в контекст вовсе — поведение Альфреда прежнее.
-CANARY_TOOLS = frozenset({"search"})
+CANARY_TOOLS = frozenset({"search", "walk", "go"})
 
 
 def for_context(toolkit: ToolKit, ctx: ToolContext) -> ToolKit:
@@ -1427,6 +1428,36 @@ async def tool_search(ctx: ToolContext, args: dict[str, Any]) -> str:
     where = args.get("where")
     return await ctx.interactives.tool_search(
         ctx.chat_id, ctx.user_id, where if isinstance(where, str) else ""
+    )
+
+
+async def tool_walk(ctx: ToolContext, args: dict[str, Any]) -> str:
+    """Шаг по катакомбам (Этап 59.4, только канарейкам): топологию решает код,
+    описание нового места присылает Ведущий — Interactives.tool_walk."""
+    canary_ok = getattr(ctx.interactives, "canary_ok", None)
+    if canary_ok is None or not canary_ok(ctx.user_id):
+        return interactive_underground.TOOL_WALK_UNAVAILABLE
+    return await ctx.interactives.tool_walk(
+        ctx.chat_id,
+        ctx.user_id,
+        args.get("direction"),
+        message_thread_id=ctx.message_thread_id,
+        trigger_message_id=ctx.trigger_message_id,
+    )
+
+
+async def tool_go(ctx: ToolContext, args: dict[str, Any]) -> str:
+    """Быстрый переход знакомой дорогой (Этап 59.5, только канарейкам) —
+    Interactives.tool_go."""
+    canary_ok = getattr(ctx.interactives, "canary_ok", None)
+    if canary_ok is None or not canary_ok(ctx.user_id):
+        return interactive_underground.TOOL_GO_UNAVAILABLE
+    return await ctx.interactives.tool_go(
+        ctx.chat_id,
+        ctx.user_id,
+        args.get("place"),
+        message_thread_id=ctx.message_thread_id,
+        trigger_message_id=ctx.trigger_message_id,
     )
 
 
@@ -4626,6 +4657,18 @@ TOOLS: tuple[ToolSpec, ...] = (
         name="search",
         handler=tool_search,
         declaration=interactive_places.SEARCH_DECLARATION,
+    ),
+    # Катакомбы (Этап 59.4–59.5) — тоже канарейка: шаг по лабиринту и
+    # быстрый переход знакомой дорогой.
+    ToolSpec(
+        name="walk",
+        handler=tool_walk,
+        declaration=interactive_underground.WALK_DECLARATION,
+    ),
+    ToolSpec(
+        name="go",
+        handler=tool_go,
+        declaration=interactive_underground.GO_DECLARATION,
     ),
     # Вещи поместья (Этап 49.3) — без requires: опись только тех вещей,
     # что выданы сценками этому собеседнику.

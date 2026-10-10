@@ -106,6 +106,7 @@ async def test_canary_scenario_exists_only_for_canaries(store, ghost):
     assert [s.id for s in svc.scenarios_for(CANARY)] == [
         radio.SCENARIO_ID,
         cellar.SCENARIO_ID,
+        "catacombs",
         GHOST_ID,
     ]
     assert [s.id for s in svc.scenarios_for(GUEST)] == [radio.SCENARIO_ID]

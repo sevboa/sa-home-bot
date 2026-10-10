@@ -55,7 +55,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sa_home_bot.bot import image_tools
 from sa_home_bot.bot.interactives import cabinet as cabinet_mod
-from sa_home_bot.bot.interactives import cellar, places, radio
+from sa_home_bot.bot.interactives import cellar, places, radio, underground
 from sa_home_bot.bot.interactives import items as items_mod
 from sa_home_bot.bot.interactives.base import (
     STATUS_ACTIVE,
@@ -92,7 +92,11 @@ log = logging.getLogger(__name__)
 
 # Порядок важен: радио первым (до Этапа 59 он был единственным), канареечные
 # сценарии после — гостю вне списка они недоступны (Interactives.scenarios_for).
-REGISTRY: dict[str, Scenario] = {radio.RADIO.id: radio.RADIO, cellar.CELLAR.id: cellar.CELLAR}
+REGISTRY: dict[str, Scenario] = {
+    radio.RADIO.id: radio.RADIO,
+    cellar.CELLAR.id: cellar.CELLAR,
+    underground.CATACOMBS.id: underground.CATACOMBS,
+}
 
 LLM_NODE = "mycraft"
 LLM_SERVICE = "llm"
@@ -537,7 +541,7 @@ class _ItemShot:
     tag: str
 
 
-class Interactives:
+class Interactives(underground.UndergroundMixin):
     """Сервис интерактивов бота (один на процесс, см. app.py)."""
 
     def __init__(
@@ -617,6 +621,10 @@ class Interactives:
         at = await places.get_at(self._store, user_id)
         if at is None or at.in_cabinet:
             return await cabinet_mod.load(self._store, user_id)
+        if at.place == underground.PLACE_CATACOMBS:
+            # Под землёй: особое место, если Альфред внутри, иначе вид узла
+            # или прохода лабиринта (59.4).
+            return await self._catacombs_room(user_id, at)
         if at.place in places.PLACES:
             return await places.load_room(self._store, user_id, at.place)
         if places.is_temp(at.place):
@@ -626,8 +634,8 @@ class Interactives:
                     room = places.temp_room(run.world, user_id, at.place)
                     if room is not None:
                         return room
-        # Место потеряно (временная комната ушла вместе со сценой, катакомбы
-        # ещё не подключены) — Альфред у себя.
+        # Место потеряно (временная комната ушла вместе со сценой) — Альфред
+        # у себя.
         return await cabinet_mod.load(self._store, user_id)
 
     async def _save_room(self, room: Cabinet, run: Run | None = None) -> None:
@@ -648,6 +656,8 @@ class Interactives:
         await places.set_at(self._store, user_id, at)
 
     def _from_phrase(self, at: places.At) -> str:
+        if at.place == underground.PLACE_CATACOMBS:
+            return underground.CATACOMBS_CANON.from_ru
         canon = places.PLACES.get(at.place)
         if canon is not None:
             return canon.from_ru
@@ -712,8 +722,9 @@ class Interactives:
             and room.canon.id == places.PLACE_CELLAR
             and await self._state.get_effect(places.EFFECT_CATACOMBS_OPEN, user_id) == "1"
         ):
-            return places.CELLAR_HATCH_HINT
-        return ""
+            # Войдя в подвал, Альфред сам предлагает быстрые переходы (59.5).
+            return places.CELLAR_HATCH_HINT + await self._travel_hint(user_id)
+        return await self._underground_extra(room, user_id)
 
     # --- ход /ai ---
 
@@ -1050,6 +1061,8 @@ class Interactives:
         dialogue_id: int | None = None,
         message_thread_id: int | None = None,
     ) -> None:
+        # Кадры катакомб (59.4) — тоже после речи Альфреда.
+        await self.flush_frames(chat_id)
         if plan is not None and plan.force_swap_form and plan.scenario is not None:
             run = await self._state.load_run(chat_id, plan.scenario)
             if run is not None and run.status == STATUS_ACTIVE and run.finale:
@@ -1093,6 +1106,7 @@ class Interactives:
             )
 
     def discard_forms(self, chat_id: int) -> None:
+        self.discard_frames(chat_id)
         self._queued.pop(chat_id, None)
 
     # --- живые кнопки: следующее сообщение гостя их гасит ---
@@ -1241,6 +1255,11 @@ class Interactives:
         where = " ".join(where.split())[: places.SEARCH_WHERE_MAX]
         if not where:
             return places.TOOL_SEARCH_NO_WHERE
+        # Коридоры и перекрёстки катакомб (59.4): места поиска узла/прохода,
+        # итог сразу. Особые места катакомб идут обычным путём ниже.
+        labyrinth = await self.search_labyrinth(chat_id, user_id, where)
+        if labyrinth is not None:
+            return labyrinth
         room = await self._room(chat_id, user_id)
         run = await self._scene_run(chat_id, user_id)
         canon = room.canon if isinstance(room, Room) else places.CABINET_CANON
@@ -1315,6 +1334,18 @@ class Interactives:
         elif not focus and caption and not selfie and not GENERAL_VIEW_RE.match(caption):
             focus = caption
         caption = caption or (cabinet_mod.SELFIE_CAPTION if selfie else cab.caption)
+        # В лабиринте катакомб общий вид и места поиска — запомненные кадры (59.4).
+        under = await self.underground_photo(
+            chat_id,
+            user_id,
+            cab,
+            focus,
+            selfie=selfie,
+            message_thread_id=message_thread_id,
+            trigger_message_id=trigger_message_id,
+        )
+        if under is not None:
+            return under
         if (
             not selfie
             and not isinstance(cab, Room)
@@ -1777,9 +1808,13 @@ class Interactives:
         dialogue_id: int | None = None,
         describe: str | None = None,
         selfie: bool = False,
+        frame: underground.Frame | None = None,
     ) -> bool:
         """Снимок нарисован и отправлен — True. ``selfie`` — в кадре сам
-        Альфред (LoRA облика) в том же кабинете, свете и сцене."""
+        Альфред (LoRA облика) в том же кабинете, свете и сцене. ``frame``
+        (Этап 59.4) — кадр катакомб: рисуется комната кадра (не та, где
+        Альфред стоит сейчас — он мог уйти дальше), без сверки зрением, и
+        нарисованное запоминается у узла/прохода/места поиска."""
         node_link = self._get_node_link()
         if node_link is None:
             return False
@@ -1787,7 +1822,7 @@ class Interactives:
             focus = ""  # Ведущий тоже просит «общий план кабинета»
         dst = Address(node=LLM_NODE, service=LLM_SERVICE)
         cfg = self._settings.llm
-        cab = await self._room(chat_id, user_id)
+        cab = frame.room if frame is not None else await self._room(chat_id, user_id)
         if not cab.features and not isinstance(cab, Room):
             new = await ask_features(
                 node_link,
@@ -1829,6 +1864,9 @@ class Interactives:
             "expect": list(expect or []),
             "negative_extra": cabinet_mod.PHOTO_NEGATIVE_EN,
         }
+        if frame is not None:
+            # Опорные кадры катакомб зрением не сверяем: обещать на них нечего.
+            del request["keep_key"]
         # Пересъёмка после промаха: то, чего не было на прошлом снимке,
         # промптер ставит главным (llm/image_prompt.py, emphasize).
         emphasize = retake_emphasis(await self._last_photo(chat_id), list(expect or []))
@@ -1957,6 +1995,8 @@ class Interactives:
             log.warning("interactives: снимок #%s не ушёл в чат %s", image_id, chat_id)
             return False
         await self._store.set_image_sent(image_id, sent[1], sent[0])
+        if frame is not None:
+            await self.remember_frame(user_id, frame, image_id, sent[1])
         if line and dialogue_id is not None:
             # Подпись — ход Альфреда в треде: на неё можно ответить.
             await self._store.record_ai_turn(
@@ -3088,7 +3128,9 @@ class Interactives:
         if not self.canary_ok(user_id):
             return self.DEBUG_USAGE
         raw = await self._store.get_state(places.at_key(user_id))
-        return raw or "alfred_at не задан: Альфред в кабинете."
+        if not raw:
+            return "alfred_at не задан: Альфред в кабинете."
+        return raw + await self.underground_debug(user_id)
 
     # --- запрет в переписке ---
 

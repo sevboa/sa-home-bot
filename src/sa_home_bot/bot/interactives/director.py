@@ -403,3 +403,35 @@ async def ask_features(
     if data is None:
         return ()
     return _str_list(data.get("cabinet_add"), count)
+
+
+async def ask_json(
+    node_link: ServiceLink,
+    dst: Address,
+    timeout: float,
+    *,
+    chat_id: int,
+    system: str,
+    content: str,
+) -> dict | None:
+    """Разовый вопрос Ведущему вне сцены (Этап 59.4: описание нового места
+    катакомб прямо в ходе тула walk): роль director, один JSON-ответ. Сбой или
+    не-JSON — None, вызывающий подставляет запасной вариант."""
+    args: dict[str, Any] = {
+        "messages": [{"role": "user", "content": content}],
+        "role": ROLE_DIRECTOR,
+        "system": system,
+        "chat_id": chat_id,
+    }
+    try:
+        result = await node_link.command(ACTION_CHAT, args, dst=dst, timeout=timeout)
+    except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
+        log.warning("interactives: Ведущий недоступен для описания (chat=%s): %s", chat_id, exc)
+        return None
+    raw = result.get("response", "") if isinstance(result, dict) else ""
+    data = _json_object(raw)
+    if data is None:
+        log.warning(
+            "interactives: Ведущий вернул не JSON для описания (chat=%s): %r", chat_id, raw[:300]
+        )
+    return data

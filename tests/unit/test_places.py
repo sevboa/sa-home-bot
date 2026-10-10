@@ -114,7 +114,8 @@ async def test_stale_place_falls_back_to_the_cabinet(store):
     svc = _make(store)
     await places.set_at(store, CANARY, places.new_at("t7", NOW))  # временной комнаты нет
     assert type(await svc._room(CANARY, CANARY)) is Cabinet
-    await places.set_at(store, CANARY, places.new_at("catacombs", NOW, node=[0, 0]))
+    # Неизвестное место (не в реестре, не временное, не катакомбы) — тоже у себя.
+    await places.set_at(store, CANARY, places.new_at("nowhere", NOW))
     assert type(await svc._room(CANARY, CANARY)) is Cabinet
 
 
@@ -351,7 +352,8 @@ async def test_search_declaration_reaches_only_canaries(store):
     for_guest = ai_tools.for_context(kit, _ctx(svc, GUEST))
     assert "search" not in for_guest.handlers
     assert all(d["function"]["name"] != "search" for d in for_guest.declarations)
-    assert len(for_guest.declarations) == len(kit.declarations) - 1
+    # search, walk и go (Этап 59.4–59.5) — тулы канарейки.
+    assert len(for_guest.declarations) == len(kit.declarations) - len(ai_tools.CANARY_TOOLS)
     assert "search" not in ai_tools.for_context(kit, _ctx(None, CANARY)).handlers
     # Подставной вызов от обычного гостя всё равно отказывает.
     handler = kit.handlers["search"]
