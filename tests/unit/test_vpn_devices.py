@@ -161,30 +161,68 @@ def _check(transport, status):
     return {"server": "x", "transport": transport, "status": status, "observers": 2}
 
 
-def test_warning_names_bad_country_and_suggests_good_one():
+def test_summary_shows_status_always_and_fallback_hint():
     us = _server("wooster", "🇺🇸 США", [], check=[_check("reality", "alerting")])
     nl = _server("jeeves", "🇳🇱 Нидерланды", [], check=[_check("reality", "ok")])
-    assert vd.warnings([nl, us]) == ["⚠️ США сейчас может не работать — выберите Нидерланды."]
-    assert vd.warnings([nl]) == []
+    lines = vd.home_summary([nl, us], now=NOW)
+    assert lines[0] == "🇳🇱 Нидерланды — ✅ работает"
+    assert lines[1].startswith("осталось 87 ГБ из 100")
+    assert lines[2] == "🇺🇸 США — ⚠️ может не работать"
+    assert lines[-1] == "Если одна страна не работает — выберите другую."
 
 
-def test_warning_partial_and_all_bad_and_no_data():
-    us = _server("wooster", "🇺🇸 США", [], check=[_check("reality", "partial")])
-    nl = _server("jeeves", "🇳🇱 Нидерланды", [], check=[_check("reality", "alerting")])
-    assert vd.warnings([nl, us]) == [
-        "⚠️ Нидерланды сейчас может не работать.",
-        "⚠️ США сейчас может не работать.",
+def test_summary_no_hint_when_all_ok_or_all_bad_or_no_data():
+    ok = [_check("reality", "ok")]
+    bad = [_check("reality", "partial")]
+    nl_ok = _server("jeeves", "🇳🇱 Нидерланды", [], check=ok)
+    us_ok = _server("wooster", "🇺🇸 США", [], check=ok)
+    all_ok = vd.home_summary([nl_ok, us_ok], now=NOW)
+    assert "✅" in all_ok[0] and not any("выберите" in line for line in all_ok)
+    nl_bad = _server("jeeves", "🇳🇱 Нидерланды", [], check=bad)
+    us_bad = _server("wooster", "🇺🇸 США", [], check=bad)
+    all_bad = vd.home_summary([nl_bad, us_bad], now=NOW)
+    assert not any("выберите" in line for line in all_bad)
+    # данных нет — статус не пишем, только остаток
+    (line,) = vd.home_summary([_server("jeeves", "🇳🇱 Нидерланды", [])], now=NOW)
+    assert line == "Осталось 87 ГБ из 100 до 1 ноября."
+
+
+def test_summary_single_country_with_status():
+    nl = _server("jeeves", "🇳🇱 Нидерланды", [], check=[_check("reality", "ok")])
+    assert vd.home_summary([nl], now=NOW) == [
+        "🇳🇱 Нидерланды — ✅ работает",
+        "Осталось 87 ГБ из 100 до 1 ноября.",
     ]
-    # проверок нет — молчим, а не выдумываем проблему
-    assert vd.warnings([_server("jeeves", "🇳🇱 Нидерланды", [])]) == []
 
 
-def test_warning_looks_at_vless_first():
-    """AmneziaWG красный, но VLESS (основной способ) зелёный — не пугаем."""
+def test_summary_looks_at_vless_first():
+    """AmneziaWG красный, но VLESS (основной способ) зелёный — страна работает."""
     srv = _server(
         "wooster", "🇺🇸 США", [], check=[_check("awg", "alerting"), _check("reality", "ok")]
     )
-    assert vd.warnings([srv]) == []
+    assert vd.home_summary([srv], now=NOW)[0] == "🇺🇸 США — ✅ работает"
+
+
+def test_card_adds_status_only_for_bad_transport():
+    servers = [
+        _server(
+            "wooster",
+            "🇺🇸 США",
+            [],
+            check=[_check("awg", "alerting"), _check("reality", "ok")],
+        )
+    ]
+    import copy
+
+    base = [copy.deepcopy(NL), copy.deepcopy(US)]
+    base[1]["check"] = [_check("awg", "alerting"), _check("reality", "ok")]
+    text = vd.card_text(vd.build_devices(base)[0], base, now=NOW, tz=UTC)
+    assert "🇺🇸 AmneziaWG — 🔧 сервер его не помнит · ⚠️ сервер сейчас может не работать" in text
+    assert "🇺🇸 VLESS · Hiddify — ещё не подключалось\n" in text + "\n"
+    assert "🇳🇱 VLESS · Hiddify — на связи 10.10 14:02\n" in text + "\n"
+    assert vd.transport_health(servers[0], "awg") == "alerting"
+    assert vd.transport_health(servers[0], "reality") == "ok"
+    assert vd.transport_health(_server("x", "🇺🇸 США", []), "awg") is None
 
 
 def test_home_text_has_no_colors_or_per_country_traffic():
@@ -192,4 +230,4 @@ def test_home_text_has_no_colors_or_per_country_traffic():
     nl = _server("jeeves", "🇳🇱 Нидерланды", [], check=[_check("reality", "ok")])
     text = vd.home_text([nl, us], now=NOW)
     assert "🟢" not in text and "🔴" not in text and "🟠" not in text
-    assert "выберите Нидерланды" in text
+    assert "Если одна страна не работает — выберите другую." in text

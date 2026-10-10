@@ -291,43 +291,51 @@ def _server_health(server: dict) -> str | None:
     return vpn_check.rollup_status(statuses)
 
 
-def warnings(servers: list[dict]) -> list[str]:
-    """Предупреждения словами по странам, чьи проверки не зелёные."""
-    countries = countries_of(servers)
-    health = {s["node"]: _server_health(s) for s in servers if s.get("node")}
-    good = [html.escape(countries[n].name) for n, h in health.items() if h in (None, vpn_check.OK)]
-    lines: list[str] = []
-    for node, status in health.items():
-        if status in (None, vpn_check.OK):
-            continue
-        name = html.escape(countries[node].name)
-        if good:
-            lines.append(f"⚠️ {name} сейчас может не работать — выберите {' или '.join(good)}.")
-        else:
-            lines.append(f"⚠️ {name} сейчас может не работать.")
-    return lines
+_STATUS_OK = "✅ работает"
+_STATUS_BAD = "⚠️ может не работать"
+_FALLBACK_LINE = "Если одна страна не работает — выберите другую."
+
+
+def transport_health(server: dict, transport: str) -> str | None:
+    """Свёрнутый статус проверок одного транспорта в стране или None, если данных нет."""
+    statuses = [
+        r["status"]
+        for r in (server.get("check") or [])
+        if r.get("status") and r.get("transport") == transport
+    ]
+    return vpn_check.rollup_status(statuses) if statuses else None
 
 
 def home_summary(servers: list[dict], *, now: datetime | None = None) -> list[str]:
-    """Строки сводки главной: остаток квоты по странам до 1 числа + предупреждения.
-    Одна страна — одна строка без названия; несколько — по строке на страну."""
+    """Строки сводки главной: по стране — статус проверки (если есть данные) и остаток
+    квоты до 1 числа; в конце подсказка выбрать другую страну, если одна не работает,
+    а другая работает. Одна страна без данных проверки — одна строка без названия."""
     now = now or datetime.now(UTC)
     reset = next_reset_phrase(now)
     multi = len(servers) > 1
     lines: list[str] = []
+    statuses: list[str | None] = []
     for server in servers:
         country = Country(server.get("node") or "?", server.get("label") or "")
-        prefix = f"{html.escape(country.label)}: " if multi and country.label else ""
+        health = _server_health(server)
+        statuses.append(health)
+        titled = health is not None
+        prefix = f"{html.escape(country.label)}: " if multi and country.label and not titled else ""
+        if titled:
+            mark = _STATUS_OK if health == vpn_check.OK else _STATUS_BAD
+            lines.append(f"{html.escape(country.label or country.name)} — {mark}")
         if server.get("blocked"):
             lines.append(f"⛔️ {prefix}лимит исчерпан — связь приостановлена до {reset}.")
             continue
         remaining = int(server.get("remaining_bytes") or 0)
         limit = int(server.get("limit_bytes") or 0)
-        verb = "осталось" if prefix else "Осталось"
+        verb = "осталось" if prefix or (titled and multi) else "Осталось"
         lines.append(
             f"{prefix}{verb} {_gb_short(remaining)} ГБ из {limit / 1_000_000_000:.0f} до {reset}."
         )
-    lines.extend(warnings(servers))
+    known = [h for h in statuses if h is not None]
+    if any(h != vpn_check.OK for h in known) and any(h == vpn_check.OK for h in known):
+        lines += ["", _FALLBACK_LINE]
     return lines
 
 
@@ -387,11 +395,19 @@ def card_text(
                 f"{html.escape(country.label)} — {fmt_gb(device.traffic_by_node.get(node, 0))}"
             )
     lines += ["", "Подключения:"]
+    by_node = {s.get("node"): s for s in servers}
     for conn in card_rows(device, servers):
         country = countries.get(conn.node)
         where = country.short if country else conn.node
         name = TRANSPORT_NAME.get(conn.transport, conn.transport)
-        lines.append(f"{where} {name} — {conn_status(conn, tz=tz)}")
+        tail = ""
+        server = by_node.get(conn.node)
+        if server is not None and transport_health(server, conn.transport) not in (
+            None,
+            vpn_check.OK,
+        ):
+            tail = " · ⚠️ сервер сейчас может не работать"
+        lines.append(f"{where} {name} — {conn_status(conn, tz=tz)}{tail}")
     return "\n".join(lines)
 
 

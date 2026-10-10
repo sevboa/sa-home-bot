@@ -167,7 +167,10 @@ async def test_home_shows_warning_in_words(_fanout):
     _fanout["servers"][1]["check"] = [{"transport": "reality", "status": "alerting"}]
     _fanout["servers"][0]["check"] = [{"transport": "reality", "status": "ok"}]
     cb, _, _ = await _press("act:vpn:vpn_card")
-    assert "⚠️ США сейчас может не работать — выберите Нидерланды." in cb.message.edits[-1]
+    text = cb.message.edits[-1]
+    assert "🇺🇸 США — ⚠️ может не работать" in text
+    assert "🇳🇱 Нидерланды — ✅ работает" in text
+    assert "Если одна страна не работает — выберите другую." in text
 
 
 async def test_list_screen():
