@@ -100,13 +100,13 @@ def pick_text(label: str) -> str:
 def pick_keyboard(key: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="⚡ AmneziaVPN", callback_data=card_cb(SCREEN_AWG, key))],
             [
                 InlineKeyboardButton(
                     text=f"🛡 {vd.TRANSPORT_NAME[vd.REALITY]}",
                     callback_data=action_cb(vpn_protocol.ACTION_ISSUE, KIND_VLESS, key),
                 )
             ],
-            [InlineKeyboardButton(text="⚡ AmneziaVPN", callback_data=card_cb(SCREEN_AWG, key))],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data=_device_cb(key))],
         ]
     )

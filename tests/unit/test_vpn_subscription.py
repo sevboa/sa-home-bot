@@ -25,6 +25,7 @@ from sa_home_bot.proto.messages import ProtoError
 from sa_home_bot.reality.client_config import RealityParams
 from sa_home_bot.vpn import protocol as vpn_protocol
 from sa_home_bot.vpn import subscription as subs
+from sa_home_bot.vpn import subweb
 from sa_home_bot.vpn.protocol import TRANSPORT_REALITY
 from sa_home_bot.vpn.service import VpnService
 from sa_home_bot.vpn.subweb import SubscriptionWeb
@@ -213,28 +214,32 @@ def _page(sub=None, **kw):
     )
 
 
-def test_page_is_hub_with_hiddify_steps_copy_qr_and_stores():
+def test_page_hiddify_one_button_others_folded_no_autoopen():
     page = _page()
     assert "📶 VPN · 📱 iPhone" in page and "VLESS · Hiddify" in page
     assert 'href="hiddify://import/https://h:8444/sub/tok"' in page
-    assert "➕ Добавить в Hiddify" in page and "📋 Скопировать ссылку" in page
-    assert (
-        "data:image/svg+xml" in page and "apps.apple.com/x" in page and "play.google.com/x" in page
-    )
-    assert "включите круглую кнопку" in page.lower()
-    assert "🇳🇱 Нидерланды" in page and "🇺🇸 США" in page
-    # автопереход один раз и без внешних ресурсов
-    assert "localStorage" in page and "setTimeout" in page
+    assert "➕ Добавить в Hiddify" in page
+    assert "Убедитесь, что установлено приложение <b>Hiddify</b>" in page
+    assert "apps.apple.com/x" in page and "play.google.com/x" in page
+    assert "нажмите «🔄 Проверить ещё раз» — должно загореться зелёное «✅ VPN включён»" in page
+    # копирование, QR и файл — только под «Другие способы»
+    other = page.index("Другие способы")
+    for marker in ("📋 Скопировать ссылку", "data:image/svg+xml", "⬇️ Файл настроек"):
+        assert page.index(marker) > other
+    # автоперехода нет вообще
+    assert "localStorage" not in page and "setTimeout(function () { location" not in page
+    assert "AUTO" not in page and "autoOpen" not in page
     assert "http://" not in page and 'src="http' not in page
 
 
-def test_page_status_blocks_and_auto_open_off_when_on():
+def test_page_status_blocks_green_when_on():
     off = _page(status=subs.VpnStatus(False))
     assert "❌ VPN сейчас выключен" in off and "🔄 Проверить ещё раз" in off
-    assert "AUTO = true" in off or "AUTO = true" in off.replace("  ", " ")
+    assert 'class="card" id="stcard"' in off
     on = _page(status=subs.VpnStatus(True, "🇳🇱 Нидерланды", subs.METHOD_AWG))
     assert "✅ VPN включён — 🇳🇱 Нидерланды" in on and "Способ: AmneziaVPN" in on
-    assert "AUTO = false" in on.replace("  ", " ") or "AUTO = false" in on
+    assert 'class="card ok" id="stcard"' in on and ".card.ok" in on  # зелёный статус
+    assert "stcard.className = 'card' + (cls === 'on' ? ' ok' : '')" in on
 
 
 def test_page_countries_health_and_remaining():
@@ -259,17 +264,72 @@ def test_page_escapes_label():
     assert "<script>x</script>" not in _page(sub)
 
 
-def test_page_awg_block_collapsed_with_forms_per_country():
+def _awg_sub(have=()):
     nodes = (
-        subs.NodeInfo("jeeves", "🇳🇱 Нидерланды", "198.51.100.1", awg=True),
-        subs.NodeInfo("wooster", "🇺🇸 США", "198.51.100.2", awg=True),
+        subs.NodeInfo(
+            "jeeves", "🇳🇱 Нидерланды", "198.51.100.1", awg=True, awg_key="jeeves" in have
+        ),
+        subs.NodeInfo("wooster", "🇺🇸 США", "198.51.100.2", awg=True, awg_key="wooster" in have),
     )
-    sub = subs.Subscription("d", _sub().entries, nodes=nodes)
-    page = _page(sub, awg_forms={"jeeves": "N1", "wooster": "N2"})
-    assert "<details><summary>AmneziaVPN</summary>" in page
-    assert "Получить настройки 🇳🇱" in page and 'action="/s/tok/awg"' in page
-    assert 'value="N1"' in page and "не на всех" in page
-    assert "AmneziaVPN</summary>" not in _page(sub)  # без форм блока нет
+    return subs.Subscription("d", _sub().entries, nodes=nodes)
+
+
+FORMS = {"jeeves": "N1", "wooster": "N2"}
+
+
+def test_page_awg_block_collapsed_cells_per_country_no_forms():
+    page = _page(_awg_sub(), awg_forms=FORMS)
+    assert '<details id="awg" open><summary>AmneziaVPN — основной способ, обычно быстрее' in page
+    assert 'data-node="jeeves"' in page and 'data-nonce="N1"' in page and 'data-have="0"' in page
+    assert "<form" not in page and "/awg" in page  # URL в скрипте, форм нет
+    assert "🔑 Сгенерировать ключ 🇳🇱" in page and "🔑 Сгенерировать ключ 🇺🇸" in page
+    assert "AmneziaVPN — основной" not in _page(_awg_sub())  # без nonce блока нет
+
+
+def test_page_awg_existing_key_shows_reissue_button():
+    page = _page(_awg_sub(have=("jeeves",)), awg_forms=FORMS)
+    assert "🔄 Перевыпустить 🇳🇱" in page and "показать его нельзя" in page
+    assert 'data-node="jeeves" data-flag="🇳🇱" data-have="1"' in page
+    assert 'data-node="wooster" data-flag="🇺🇸" data-have="0"' in page
+    assert "Старый ключ перестанет работать — нажмите ещё раз" in page
+
+
+def test_detect_platform_by_user_agent():
+    android = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/120 Mobile"
+    iphone = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605 Safari"
+    ipad = "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605"
+    desktop = "Mozilla/5.0 (X11; Linux x86_64) Firefox/120.0"
+    assert subs.detect_platform(android) == "android"
+    assert subs.detect_platform(iphone) == subs.detect_platform(ipad) == "ios"
+    assert subs.detect_platform(desktop) == subs.detect_platform("") == "other"
+
+
+def test_page_awg_layout_per_platform():
+    sub = _awg_sub()
+    android = _page(sub, awg_forms=FORMS, platform="android")
+    ios = _page(sub, awg_forms=FORMS, platform="ios")
+    other = _page(sub, awg_forms=FORMS, platform="other")
+    for page in (android, ios, other):
+        assert (
+            "Убедитесь, что установлено именно приложение <b>AmneziaVPN</b> (не AmneziaWG)" in page
+        )
+        assert "без него ключ не заработает" in page
+        assert "play.google.com/amnezia" in page and "apps.apple.com/amnezia" in page
+        assert "нажмите «🔄 Проверить ещё раз» — должно загореться зелёное «✅ VPN включён»" in page
+    assert 'PLATFORM = "android"' in android and "«➕ Подключить»" in android
+    assert "Вставьте ключ" not in android
+    assert 'PLATFORM = "ios"' in ios and "«📋 Скопировать»" in ios
+    assert "«+», в поле «Вставьте ключ» — «Вставить», затем «Продолжить»" in ios
+    assert "«➕ Подключить»" not in ios and "Добавить в AmneziaVPN" not in ios
+    assert 'PLATFORM = "other"' in other and "«➕ Подключить»" in other
+    assert "«📋 Скопировать»" in other and ".conf" in other
+
+
+def test_page_scripts_are_valid_js():
+    esprima = pytest.importorskip("esprima")
+    page = _page(_awg_sub(have=("jeeves",)), awg_forms=FORMS, platform="ios")
+    scripts = page.split("<script>\n", 1)[1].rsplit("\n</script>", 1)[0]
+    esprima.parseScript(scripts)
 
 
 def test_detect_status_by_address():
@@ -575,9 +635,19 @@ def _origin(cl):
 
 async def _form_nonce(cl, token, node):
     text = await (await cl.get(f"/s/{token}")).text()
-    marker = f'name="node" value="{node}"'
-    chunk = text[: text.index(marker)]
-    return chunk.rsplit('name="nonce" value="', 1)[1].split('"', 1)[0]
+    marker = f'data-node="{node}"'
+    chunk = text[text.index(marker) :]
+    return chunk.split('data-nonce="', 1)[1].split('"', 1)[0]
+
+
+async def _awg(cl, token, node, action="issue", nonce=None, headers=None):
+    nonce = nonce if nonce is not None else await _form_nonce(cl, token, node)
+    resp = await cl.post(
+        f"/s/{token}/awg",
+        data={"nonce": nonce, "node": node, "action": action},
+        headers=headers or _origin(cl),
+    )
+    return resp
 
 
 async def test_web_headers_no_server_and_bare_404s(awg_swarm):
@@ -609,21 +679,44 @@ async def test_web_status_by_request_address(awg_swarm):
     a._cfg.endpoint_host = "198.51.100.9"
     a._sub_cache.clear()
     off = await (await cl.get(f"/s/{token}")).text()
-    assert "❌ VPN сейчас выключен" in off and "✅ VPN включён" not in off
+    assert "❌ VPN сейчас выключен" in off and 'class="status on"' not in off
+
+
+async def test_get_page_issues_nothing_and_never_autoopens(awg_swarm):
+    cl, a, b, _web = awg_swarm
+    token = _token(a)
+    for _ in range(3):
+        text = await (await cl.get(f"/s/{token}")).text()
+        assert '="vpn://' not in text and "AUTO" not in text
+    for svc in (a, b):
+        assert await svc._active_row(CHAT, "📱 iPhone", vpn_protocol.TRANSPORT_AWG) is None
+
+
+async def test_page_layout_by_user_agent_over_http(awg_swarm):
+    cl, a, _b, _web = awg_swarm
+    token = _token(a)
+    ua_android = {"User-Agent": "Mozilla/5.0 (Linux; Android 14) Chrome/120 Mobile"}
+    ua_iphone = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)"}
+    android = await (await cl.get(f"/s/{token}", headers=ua_android)).text()
+    ios = await (await cl.get(f"/s/{token}", headers=ua_iphone)).text()
+    other = await (await cl.get(f"/s/{token}")).text()
+    assert 'PLATFORM = "android"' in android and 'PLATFORM = "ios"' in ios
+    assert 'PLATFORM = "other"' in other
 
 
 async def test_awg_post_requires_origin_and_nonce(awg_swarm):
     cl, a, _b, _web = awg_swarm
     token = _token(a)
     nonce = await _form_nonce(cl, token, "jeeves")
-    data = {"nonce": nonce, "node": "jeeves"}
+    data = {"nonce": nonce, "node": "jeeves", "action": "issue"}
     assert (await cl.post(f"/s/{token}/awg", data=data)).status == 404  # без Origin/Referer
     evil = {"Origin": "http://evil.example"}
     assert (await cl.post(f"/s/{token}/awg", data=data, headers=evil)).status == 404
-    bad = await cl.post(
-        f"/s/{token}/awg", data={"nonce": "x", "node": "jeeves"}, headers=_origin(cl)
-    )
-    assert bad.status == 400 and "устарела" in await bad.text()
+    bad = await _awg(cl, token, "jeeves", nonce="x")
+    assert bad.status == 400 and (await bad.json()) == {"ok": False, "error": "stale"}
+    # неизвестные страна/действие — голый 404
+    assert (await _awg(cl, token, "nowhere", nonce=nonce)).status == 404
+    assert (await _awg(cl, token, "jeeves", action="drop", nonce=nonce)).status == 404
     # Referer вместо Origin тоже годится
     ref = {"Referer": f"http://{cl.server.host}:{cl.server.port}/s/{token}"}
     ok = await cl.post(f"/s/{token}/awg", data=data, headers=ref)
@@ -633,30 +726,27 @@ async def test_awg_post_requires_origin_and_nonce(awg_swarm):
     assert again.status == 400
 
 
-async def test_awg_issue_local_and_remote_show_config_once(awg_swarm):
+async def test_awg_post_issues_missing_keys_local_and_remote_json_no_store(awg_swarm):
     cl, a, b, _web = awg_swarm
     token = _token(a)
     for node, svc, name in (("jeeves", a, "awg_nl_"), ("wooster", b, "awg_us_")):
-        nonce = await _form_nonce(cl, token, node)
-        resp = await cl.post(
-            f"/s/{token}/awg", data={"nonce": nonce, "node": node}, headers=_origin(cl)
-        )
-        text = await resp.text()
-        assert resp.status == 200, text
-        assert "Настройки показаны один раз" in text and f'download="{name}' in text
-        assert "AmneziaVPN" in text and "Проверьте имя подключения" in text
-        assert "Скопировать ключ" in text and 'id="addkey"' in text and "vpn://" in text
-        assert "Другие способы" in text and "Магазин недоступен? Запросите файл" in text
-        assert "data:image/svg+xml" in text
+        resp = await _awg(cl, token, node)
+        assert resp.status == 200
+        assert resp.headers["Cache-Control"] == "no-store"
+        assert resp.headers["Content-Type"].startswith("application/json")
+        j = await resp.json()
+        assert j["ok"] and j["key"].startswith("vpn://") and j["filename"].startswith(name)
+        assert "[Interface]" in j["conf"] and j["qr"].startswith("data:image/svg+xml")
+        assert j["nonce"]
         row = await svc._active_row(CHAT, "📱 iPhone", vpn_protocol.TRANSPORT_AWG)
         assert row is not None
-    # на странице после выдачи ключ есть →
+    # после выпуска страница предлагает только перевыпуск, ключа в ней нет
     a._sub_cache.clear()
-    nonce = await _form_nonce(cl, token, "jeeves")
-    assert nonce
+    text = await (await cl.get(f"/s/{token}")).text()
+    assert text.count('data-have="1"') == 2 and '="vpn://' not in text
 
 
-async def test_awg_existing_key_needs_confirmation_then_replaces(awg_swarm):
+async def test_awg_issue_never_replaces_existing_key_reissue_does(awg_swarm):
     cl, a, _b, web = awg_swarm
     token = _token(a)
     await a.run_command(
@@ -665,54 +755,40 @@ async def test_awg_existing_key_needs_confirmation_then_replaces(awg_swarm):
     )
     old = await a._active_row(CHAT, "📱 iPhone", vpn_protocol.TRANSPORT_AWG)
     nonce = await _form_nonce(cl, token, "jeeves")
-    ask = await cl.post(
-        f"/s/{token}/awg", data={"nonce": nonce, "node": "jeeves"}, headers=_origin(cl)
-    )
-    text = await ask.text()
-    assert "Новый заменит старый" in text and 'name="confirm" value="1"' in text
+    exists = await _awg(cl, token, "jeeves", "issue", nonce=nonce)
+    j = await exists.json()
+    assert exists.status == 409 and j["error"] == "exists" and j["nonce"]
+    assert "key" not in j
     assert (await a._active_row(CHAT, "📱 iPhone", vpn_protocol.TRANSPORT_AWG))["public_key"] == (
         old["public_key"]
-    )  # без подтверждения ничего не заменено
-    nonce2 = text.split('name="nonce" value="', 1)[1].split('"', 1)[0]
-    done = await cl.post(
-        f"/s/{token}/awg",
-        data={"nonce": nonce2, "node": "jeeves", "confirm": "1"},
-        headers=_origin(cl),
     )
-    assert done.status == 200 and "Настройки показаны один раз" in await done.text()
+    done = await _awg(cl, token, "jeeves", "reissue", nonce=j["nonce"])  # nonce из ответа
+    dj = await done.json()
+    assert done.status == 200 and dj["ok"] and dj["key"].startswith("vpn://")
     new = await a._active_row(CHAT, "📱 iPhone", vpn_protocol.TRANSPORT_AWG)
     assert new["public_key"] != old["public_key"]
     assert web._issue_awg is not None
 
 
-async def test_awg_rate_limit_per_country_and_token(awg_swarm):
+async def test_awg_rate_limits_allow_issue_two_countries_and_reissues(awg_swarm):
     cl, a, _b, web = awg_swarm
     token = _token(a)
-    n1 = await _form_nonce(cl, token, "jeeves")
-    n2 = await _form_nonce(cl, token, "jeeves")
-    first = await cl.post(
-        f"/s/{token}/awg", data={"nonce": n1, "node": "jeeves"}, headers=_origin(cl)
-    )
-    assert first.status == 200
-    a._sub_cache.clear()
-    # ключ уже есть → подтверждение; частота проверяется при самой выдаче
-    ask = await cl.post(
-        f"/s/{token}/awg", data={"nonce": n2, "node": "jeeves"}, headers=_origin(cl)
-    )
-    text = await ask.text()
-    n3 = text.split('name="nonce" value="', 1)[1].split('"', 1)[0]
-    limited = await cl.post(
-        f"/s/{token}/awg",
-        data={"nonce": n3, "node": "jeeves", "confirm": "1"},
-        headers=_origin(cl),
-    )
-    assert limited.status == 429 and "Подождите минуту" in await limited.text()
-    # окно прошло — можно; общий предел на токен — шесть в час
+    first = await _awg(cl, token, "jeeves")
+    nonce = (await first.json())["nonce"]
+    limited = await _awg(cl, token, "jeeves", "reissue", nonce=nonce)  # сразу же — рано
+    lj = await limited.json()
+    assert limited.status == 429 and lj["error"] == "rate" and lj["nonce"]
+    # другая страна не мешает; окно прошло — перевыпуск проходит
+    assert (await _awg(cl, token, "wooster")).status == 200
     web._awg_last.clear()
-    assert web._rate_ok(token, "jeeves")
-    for _i in range(10):
+    a._sub_cache.clear()
+    assert (await _awg(cl, token, "jeeves", "reissue", nonce=lj["nonce"])).status == 200
+    # общий предел на токен: 2 выпуска + перевыпуски укладываются, перебор — нет
+    web._awg_last.clear()
+    web._awg_by_token.clear()
+    for _i in range(subweb.AWG_PER_TOKEN[0]):
         web._awg_last.clear()
-        web._rate_ok(token, "wooster")
+        assert web._rate_ok(token, "wooster")
     web._awg_last.clear()
     assert not web._rate_ok(token, "wooster")
 
@@ -997,23 +1073,14 @@ def test_amnezia_key_from_real_client_conf_and_errors():
         ak.build_key("[Interface]\nAddress = 1.2.3.4/32\n", "n")
 
 
-def test_awg_result_page_key_first_file_under_other_ways():
-    sub = subs.Subscription("📱 iPhone", _sub().entries)
-    node = subs.NodeInfo("jeeves", "🇳🇱 Нидерланды", "198.51.100.1")
-    page = subs.render_awg_result(
-        sub, node, filename="a.conf", conf_text="x", qr_data_uri="data:image/svg+xml;base64,AAA",
-        links=LINKS, path="/s/tok", key="vpn://AbC_-",
-    )  # fmt: skip
-    assert "📋 Скопировать ключ" in page and "➕ Добавить в AmneziaVPN" in page
-    assert 'value="vpn://AbC_-"' in page and 'href="vpn://AbC_-"' in page
-    assert "/Android/" not in page and 'id="addkey" href="vpn://AbC_-">' in page
-    assert "«+»" in page and "Вставьте ключ" in page
-    assert "play.google.com/amnezia" in page and "apps.apple.com/amnezia" in page
-    assert "«🇳🇱 📱 iPhone»" in page and "Проверьте имя подключения" in page
-    assert "переименуйте" not in page
-    assert page.index("Скопировать ключ") < page.index("Другие способы") < page.index("a.conf")
-    no_key = subs.render_awg_result(
-        sub, node, filename="a.conf", conf_text="x", qr_data_uri="data:image/svg+xml;base64,AAA",
-        links=LINKS, path="/s/tok",
-    )  # fmt: skip
-    assert "Скопировать ключ" not in no_key and "<details open " in no_key
+def test_page_order_amnezia_first_hiddify_fallback_no_autoissue():
+    page = _page(_awg_sub(), awg_forms=FORMS, status=subs.VpnStatus(False))
+    assert (
+        page.index('id="stcard"')
+        < page.index("AmneziaVPN — основной")
+        < page.index("VLESS · Hiddify")
+    )
+    assert "запасной способ" in page and "Если AmneziaVPN не подключается" in page
+    assert "toggle" not in page  # выпуск только по нажатию кнопки
+    plain = _page()  # без AmneziaVPN Hiddify — единственный
+    assert "запасной способ" not in plain

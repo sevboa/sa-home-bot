@@ -74,8 +74,8 @@ def test_devices_are_glued_by_label_across_nodes():
     assert iphone.used_bytes == int(9.1 * GB)
     assert [(c.node, c.transport) for c in iphone.issued] == [
         ("jeeves", "reality"),
-        ("wooster", "reality"),
         ("wooster", "awg"),
+        ("wooster", "reality"),
     ]
     assert iphone.last_handshake_at == "2026-10-10T14:02:00+00:00"
     assert not iphone.never_connected
@@ -112,10 +112,10 @@ def test_card_rows_include_not_issued():
     iphone = vd.build_devices(servers)[0]
     rows = vd.card_rows(iphone, servers)
     assert [(c.node, c.transport, c.issued) for c in rows] == [
-        ("jeeves", "reality", True),
         ("jeeves", "awg", False),
-        ("wooster", "reality", True),
+        ("jeeves", "reality", True),
         ("wooster", "awg", True),
+        ("wooster", "reality", True),
     ]
 
 

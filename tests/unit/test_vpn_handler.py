@@ -250,7 +250,7 @@ def test_card_shows_transport_health_indicators():
             )
         ]
     )
-    assert "🛰 VLESS (Reality) 🟢 · AmneziaVPN 🔴" in text
+    assert "🛰 AmneziaVPN 🔴 · VLESS (Reality) 🟢" in text
 
 
 def test_card_shows_partial_as_orange_with_legend():
@@ -303,8 +303,8 @@ def test_transport_picker_marks_each_technology():
         {"awg": "🔴", "reality": "🟢"},
     )
     texts = [b.text for row in keyboard.inline_keyboard for b in row]
-    assert texts[0] == "VLESS (Reality) — для РФ 🟢"
-    assert texts[1] == "AmneziaVPN 🔴"
+    assert texts[0] == "AmneziaVPN 🔴"
+    assert texts[1] == "VLESS (Reality) — для РФ 🟢"
 
 
 def test_check_status_text_groups_observers_under_pair():
@@ -637,7 +637,7 @@ async def test_chosen_server_survives_into_transport_picker():
         for b in row
         if "Назад" not in b.text
     ]
-    assert picks == ["act:vpn:issue:t_reality:jeeves", "act:vpn:issue:t_awg:jeeves"]
+    assert picks == ["act:vpn:issue:t_awg:jeeves", "act:vpn:issue:t_reality:jeeves"]
 
 
 async def test_issue_on_chosen_server_goes_to_that_node():

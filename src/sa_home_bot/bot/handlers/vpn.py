@@ -115,7 +115,7 @@ _TRANSPORT_PICK_PREFIX = "t_"
 
 # Порядок транспортов везде, где их перечисляют рядом (индикатор, пикер):
 # VLESS первым — он нужен гостям в РФ, с него и начинают выбирать.
-_TRANSPORT_ORDER = (vpn_protocol.TRANSPORT_REALITY, vpn_protocol.TRANSPORT_AWG)
+_TRANSPORT_ORDER = (vpn_protocol.TRANSPORT_AWG, vpn_protocol.TRANSPORT_REALITY)
 
 # Индикатор доступности по данным чекеров (39.0.7(f), vpn/service.py::
 # _check_rollup). Трёхцветный по решению владельца 2026-09-18: 🟢 — сервер
@@ -2078,7 +2078,19 @@ async def _wizard_create(
         return
     key = vpn_devices.device_key(label)
     if expert:
-        await _wizard_edit(callback, vpn_settings.pick_text(label), vpn_settings.pick_keyboard(key))
+        # 57.13: настройки нового устройства — сразу страница (одно пересылаемое сообщение);
+        # выбор способа в Telegram — только если страницы нет.
+        page_url = await _page_url_by_label(node_link, chat_id, label)
+        if page_url is not None:
+            await _wizard_edit(
+                callback,
+                vpn_settings.page_link_text(label, page_url),
+                vpn_settings.page_link_keyboard(page_url),
+            )
+        else:
+            await _wizard_edit(
+                callback, vpn_settings.pick_text(label), vpn_settings.pick_keyboard(key)
+            )
         return
     needs_file = vpn_wizard.needs_settings_file(config.vpn, devices, key)
     first = vpn_wizard.steps(needs_file)[0]

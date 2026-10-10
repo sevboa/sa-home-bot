@@ -1,10 +1,11 @@
 """Веб-сервер подписки Hiddify внутри службы vpn (подэтап 57.10).
 
 Адреса: ``/s/<токен>`` — хаб устройства (57.11: «VPN включён?», Hiddify,
-страны и остаток, AmneziaWG), ``GET /s/<токен>/where`` — «идёт ли трафик через
+страны и остаток, AmneziaVPN), ``GET /s/<токен>/where`` — «идёт ли трафик через
 эту ноду» (57.12; страница спрашивает его у каждой ноды из браузера, CORS — только для
-страниц наших нод), ``POST /s/<токен>/awg`` — выдача AmneziaWG (только
-форма со страницы: Origin/Referer + одноразовый nonce + ограничение частоты),
+страниц наших нод), ``POST /s/<токен>/awg`` — выпуск/перевыпуск ключа AmneziaVPN (57.13;
+JSON-ответ только скрипту страницы: Origin/Referer + одноразовый nonce + частота;
+GET ничего не выпускает),
 ``/sub/<токен>`` — сама подписка (``?format=vless|plain|singbox``). Всё прочее —
 голый 404, как и неизвестный/отозванный токен: снаружи не отличить «нет такого»
 от «отозвано». Заголовок ``Server`` убран. Порт отдельный (не 443/8443 — там
@@ -48,11 +49,11 @@ Resolver = Callable[[str], Awaitable[sub.Subscription | None]]
 # issue_awg(chat_id, device_label, node, replace=...) -> ответ issue/reissue службы
 AwgIssuer = Callable[..., Awaitable[dict]]
 
-NONCE_TTL_S = 1800.0
-NONCE_MAX = 4000
-AWG_PER_COUNTRY_S = 60.0  # не чаще раза в минуту на устройство и страну
-AWG_PER_TOKEN = (6, 3600.0)  # и не больше 6 в час на устройство
-AWG_GLOBAL = (30, 3600.0)  # и 30 в час на всю ноду
+NONCE_TTL_S = 21600.0  # страница может долго лежать открытой
+NONCE_MAX = 20000
+AWG_PER_COUNTRY_S = 5.0  # не чаще раза в 5 секунд на устройство и страну
+AWG_PER_TOKEN = (20, 3600.0)  # и не больше 20 в час на устройство (2 страны + перевыпуски)
+AWG_GLOBAL = (120, 3600.0)  # и 120 в час на всю ноду
 
 _COMMON_HEADERS = {
     "cache-control": "no-store",
@@ -342,6 +343,7 @@ class SubscriptionWeb:
             links=self._links,
             status=status,
             awg_forms=forms,
+            platform=sub.detect_platform(request.headers.get("User-Agent", "")),
             path=f"/s/{token}",
         )
         resp = self._html(body)
@@ -364,52 +366,52 @@ class SubscriptionWeb:
             resp.headers["vary"] = "Origin"
         return resp
 
+    def _json(self, data: dict, status: int = 200) -> web.Response:
+        return _Response(
+            text=json.dumps(data, ensure_ascii=False),
+            status=status,
+            content_type="application/json",
+            charset="utf-8",
+        )
+
     async def _awg_post(self, request: web.Request) -> web.Response:
-        """Выдача AmneziaWG: Origin/Referer, одноразовый nonce, частота, для
-        существующего ключа — явное подтверждение замены. Результат — один раз."""
+        """Выпуск/перевыпуск AmneziaVPN для скрипта страницы: Origin/Referer,
+        одноразовый nonce (в ответе — следующий), частота. ``action=issue`` ключ не
+        заменяет никогда (есть — ``exists``); замена только по ``action=reissue``.
+        Ключ — только в этом ответе, ``no-store``."""
         if self._issue_awg is None or not self._same_origin(request):
             return _not_found()
         found = await self._lookup(request)
         if found is None or not found.entries or not found.chat_id:
             return _not_found()
         token = request.match_info["token"]
-        path = f"/s/{token}"
         form = await request.post()
         nonce, node_id = str(form.get("nonce") or ""), str(form.get("node") or "")
-        confirm = str(form.get("confirm") or "") == "1"
+        action = str(form.get("action") or "")
         node = next((n for n in found.nodes if n.node == node_id), None)
         have = {entry.node for entry in found.entries}
-        if node is None or not node.awg or node.node not in have:
+        if node is None or not node.awg or node.node not in have or action not in (
+            "issue",
+            "reissue",
+        ):
             return _not_found()
         if not self._take_nonce(nonce, token, node_id):
-            text = sub.render_notice(
-                "Страница устарела", "Обновите страницу и нажмите кнопку ещё раз.", path=path
-            )
-            return self._html(text, 400)
-        if node.awg_key and not confirm:
-            return self._html(
-                sub.render_awg_confirm(found, node, self._new_nonce(token, node_id), path)
-            )
+            return self._json({"ok": False, "error": "stale"}, 400)
+        nxt = self._new_nonce(token, node_id)
+        if action == "issue" and node.awg_key:
+            return self._json({"ok": False, "error": "exists", "nonce": nxt}, 409)
         if not self._rate_ok(token, node_id):
-            text = sub.render_notice(
-                "Слишком часто", "Подождите минуту и попробуйте ещё раз.", path=path
-            )
-            return self._html(text, 429)
+            return self._json({"ok": False, "error": "rate", "nonce": nxt}, 429)
         try:
             result = await self._issue_awg(
                 found.chat_id, found.device_label, node_id, replace=node.awg_key
             )
         except Exception as exc:  # noqa: BLE001
-            log.warning("vpn: выдача AmneziaWG со страницы не удалась: %s", exc)
-            text = sub.render_notice(
-                "Не получилось",
-                "Не получилось выпустить настройки — попробуйте чуть позже.",
-                path=path,
-            )
-            return self._html(text, 502)
+            log.warning("vpn: выдача AmneziaVPN со страницы не удалась: %s", exc)
+            return self._json({"ok": False, "error": "failed", "nonce": nxt}, 502)
         conf = str(result.get("config_text") or "")
         if not conf:
-            return _not_found()
+            return self._json({"ok": False, "error": "failed", "nonce": nxt}, 502)
         try:
             key = amnezia_key.build_key(
                 conf, f"{sub.flag_of(node.name)} {found.device_label}".strip()
@@ -420,17 +422,16 @@ class SubscriptionWeb:
         filename = vpn_protocol.secret_filename(
             vpn_protocol.TRANSPORT_AWG, found.device_label, str(result.get("location") or node.name)
         )
-        body = sub.render_awg_result(
-            found,
-            node,
-            filename=filename,
-            conf_text=conf,
-            qr_data_uri=sub.qr_data_uri(conf),
-            links=self._links,
-            path=path,
-            key=key,
+        return self._json(
+            {
+                "ok": True,
+                "key": key,
+                "conf": conf,
+                "filename": filename,
+                "qr": sub.qr_data_uri(conf),
+                "nonce": nxt,
+            }
         )
-        return self._html(body)
 
     async def _sub(self, request: web.Request) -> web.Response:
         found = await self._lookup(request)

@@ -335,10 +335,10 @@ class PageLinks:
 
 _CSS = """
 :root { --bg:#f5f6f8; --card:#fff; --fg:#14181f; --muted:#5b6472;
-  --accent:#2f6bff; --line:#e1e4ea; --ok:#14804a; --bad:#b42318; }
+  --accent:#2f6bff; --line:#e1e4ea; --ok:#14804a; --bad:#b42318; --okbg:#e6f6ec; }
 @media (prefers-color-scheme: dark) {
   :root { --bg:#10131a; --card:#181d27; --fg:#eef1f6; --muted:#98a2b3;
-    --accent:#5b8cff; --line:#2a3140; --ok:#4ade80; --bad:#f87171; }
+    --accent:#5b8cff; --line:#2a3140; --ok:#4ade80; --bad:#f87171; --okbg:#10301e; }
 }
 * { box-sizing: border-box; }
 [hidden] { display:none !important; }
@@ -366,6 +366,13 @@ input.t { width:100%; padding:10px; border-radius:10px; border:1px solid var(--l
   background:var(--bg); color:var(--fg); font:13px monospace; margin-top:10px; }
 details > summary { cursor:pointer; font-weight:600; font-size:18px; }
 ul { margin:6px 0 0; padding-left:20px; }
+.card.ok { border-color:var(--ok); background:var(--okbg); }
+.pair { display:flex; flex-wrap:wrap; gap:8px; }
+.cell { flex:1 1 150px; min-width:0; }
+.btn.warn { background:var(--bad); color:#fff; border:0; font-size:15px; padding:12px; }
+.btn:disabled { opacity:.6; cursor:default; }
+summary.sm { font-size:16px; }
+.moreblk { margin-top:10px; }
 """
 
 
@@ -416,12 +423,12 @@ def _status_card(status: VpnStatus | None) -> str:
     if status.on:
         method = f"Способ: {e(status.method)}" if status.method else ""
         return (
-            '<div class="card"><p class="status on" id="st">'
+            '<div class="card ok" id="stcard"><p class="status on" id="st">'
             f"✅ VPN включён — {e(status.name)}</p>"
             f'<p class="hint" id="stm"{"" if method else " hidden"}>{method}</p>{again}</div>'
         )
     return (
-        '<div class="card"><p class="status off" id="st">❌ VPN сейчас выключен</p>'
+        '<div class="card" id="stcard"><p class="status off" id="st">❌ VPN сейчас выключен</p>'
         f'<p class="hint" id="stm">{_OFF_HINT}</p>{again}</div>'
     )
 
@@ -439,39 +446,108 @@ def _countries_card(sub: Subscription) -> str:
     return f'<div class="card"><h2>Страны</h2><ul>{"".join(rows)}</ul>{tail}</div>'
 
 
-def _awg_card(sub: Subscription, forms: dict[str, str], path: str) -> str:
-    """Свёрнутый блок AmneziaWG: по стране — кнопка «Получить настройки»;
-    ``forms`` — node -> одноразовый nonce формы. Пусто, если выдавать нечем."""
+PLATFORM_ANDROID, PLATFORM_IOS, PLATFORM_OTHER = "android", "ios", "other"
+
+
+def detect_platform(user_agent: str) -> str:
+    """Платформа по User-Agent: ``android`` / ``ios`` (iPhone, iPad, iPod) / ``other``.
+    iPadOS в режиме «компьютер» представляется как Macintosh — это ``other`` (там
+    показываются обе кнопки)."""
+    ua = (user_agent or "").lower()
+    if "android" in ua:
+        return PLATFORM_ANDROID
+    if any(mark in ua for mark in ("iphone", "ipad", "ipod")):
+        return PLATFORM_IOS
+    return PLATFORM_OTHER
+
+
+_CHECK_STEP = (
+    "Включите VPN, вернитесь на эту страницу и нажмите «🔄 Проверить ещё раз» — "
+    "должно загореться зелёное «✅ VPN включён»."
+)
+
+
+def _awg_steps(platform: str, stores: str) -> str:
+    """Короткая нумерованная инструкция AmneziaVPN под платформу."""
+    install = (
+        "Убедитесь, что установлено именно приложение <b>AmneziaVPN</b> (не AmneziaWG) — "
+        "без него ключ не заработает:"
+        f"<br>{stores}"
+    )
+    if platform == PLATFORM_IOS:
+        steps = [
+            install,
+            "Нажмите «📋 Скопировать» с нужной страной.",
+            "В AmneziaVPN нажмите «+», в поле «Вставьте ключ» — «Вставить», затем «Продолжить».",
+            "Если хотите, так же добавьте другую страну.",
+            _CHECK_STEP,
+        ]
+    elif platform == PLATFORM_ANDROID:
+        steps = [
+            install,
+            "Нажмите «➕ Подключить» с нужной страной — откроется AmneziaVPN, подтвердите добавление.",
+            _CHECK_STEP,
+        ]
+    else:
+        steps = [
+            install,
+            "Нажмите «➕ Подключить» — если AmneziaVPN не открылся, нажмите «📋 Скопировать», "
+            "в AmneziaVPN «+» → «Вставьте ключ» → «Вставить» → «Продолжить». "
+            "Файл .conf — в «Другие способы» ниже.",
+            _CHECK_STEP,
+        ]
+    return "<ol>" + "".join(f"<li>{step}</li>" for step in steps) + "</ol>"
+
+
+def _awg_card(sub: Subscription, forms: dict[str, str], platform: str, links: PageLinks) -> str:
+    """Основной (раскрытый) блок AmneziaVPN. Ключи выпускает и перевыпускает скрипт
+    страницы (POST ``…/awg``) только по нажатию кнопки, автовыпуска нет; по стране — ячейка с кнопкой. ``forms`` —
+    node -> одноразовый nonce. Пусто, если выдавать нечем."""
     e = html.escape
     if not forms:
         return ""
-    buttons = []
+    stores = _links(
+        ("Google Play", links.amnezia_android),
+        ("App Store", links.amnezia_ios),
+        ("Сайт", links.amnezia_site),
+    )
+    cells = []
     for node in sub.nodes:
         nonce = forms.get(node.node)
         if nonce is None:
             continue
-        buttons.append(
-            f'<form method="post" action="{e(path, quote=True)}/awg">'
-            f'<input type="hidden" name="nonce" value="{e(nonce, quote=True)}">'
-            f'<input type="hidden" name="node" value="{e(node.node, quote=True)}">'
-            f'<button class="btn alt" type="submit">Получить настройки {e(flag_of(node.name) or node.name)}'
-            "</button></form>"
+        flag = flag_of(node.name) or node.name
+        if node.awg_key:
+            act = f'<button class="btn alt re" type="button">🔄 Перевыпустить {e(flag)}</button>'
+            msg = "Ключ уже выпускался — показать его нельзя."
+        else:
+            act = f'<button class="btn alt go" type="button">🔑 Сгенерировать ключ {e(flag)}</button>'
+            msg = ""
+        cells.append(
+            f'<div class="cell" data-node="{e(node.node, quote=True)}" '
+            f'data-flag="{e(flag, quote=True)}" data-have="{1 if node.awg_key else 0}" '
+            f'data-nonce="{e(nonce, quote=True)}"><div class="act">{act}</div>'
+            f'<p class="hint msg">{e(msg)}</p></div>'
         )
     return (
-        '<div class="card"><details><summary>AmneziaVPN</summary>'
-        '<p class="hint">Другой способ, обычно быстрее. Из России работает не на всех '
-        "серверах.</p>"
-        f"{''.join(buttons)}"
-        '<p class="hint">Ключ AmneziaVPN на сервере не хранится: настройки показываются один '
-        "раз. Если ключ в стране уже есть, новый заменит старый.</p>"
+        '<div class="card"><details id="awg" open><summary>AmneziaVPN — основной способ, обычно быстрее'
+        "</summary>"
+        f"{_awg_steps(platform, stores)}"
+        f'<div class="pair">{"".join(cells)}</div>'
+        '<p class="hint">Ключ на сервере не хранится и показывается один раз. Выпущенный раньше '
+        "показать нельзя — его можно только перевыпустить: старый перестанет работать.</p>"
+        '<noscript><p class="hint">Для выдачи ключей нужен JavaScript. Запросите ключ в боте: '
+        "/vpn → «Другие способы».</p></noscript>"
+        '<details id="awgmore" hidden><summary class="sm">Другие способы</summary>'
+        '<div id="awgmorebody"></div></details>'
         "</details></div>"
     )
 
 
-_PAGE_JS = """(function () {
-  var NODES = __NODES__, WHERE = __WHERE__, AUTO = __AUTO__, OFF_HINT = __OFF_HINT__;
+_PAGE_JS = r"""(function () {
+  var NODES = __NODES__, WHERE = __WHERE__, OFF_HINT = __OFF_HINT__;
   var btn = document.getElementById('copy'), box = document.getElementById('url');
-  var note = document.getElementById('copied'), add = document.getElementById('add');
+  var note = document.getElementById('copied');
   function done() { note.hidden = false; }
   function fallback() {
     box.focus(); box.select(); box.setSelectionRange(0, box.value.length);
@@ -482,21 +558,14 @@ _PAGE_JS = """(function () {
       navigator.clipboard.writeText(box.value).then(done, fallback);
     } else { fallback(); }
   });
-  function autoOpen() {
-    try {
-      var k = 'hid:' + location.pathname;
-      if (!localStorage.getItem(k)) {
-        localStorage.setItem(k, '1');
-        setTimeout(function () { location.href = add.href; }, 700);
-      }
-    } catch (e) {}
-  }
   var st = document.getElementById('st'), stm = document.getElementById('stm');
+  var stcard = document.getElementById('stcard');
   var again = document.getElementById('recheck');
-  var METHODS = { awg: 'AmneziaVPN', vless: 'VLESS \\u00b7 Hiddify' };
+  var METHODS = { awg: 'AmneziaVPN', vless: 'VLESS · Hiddify' };
   function show(cls, text, hint) {
     if (!st) return;
     st.className = 'status ' + cls; st.textContent = text;
+    if (stcard) stcard.className = 'card' + (cls === 'on' ? ' ok' : '');
     if (stm) { stm.textContent = hint; stm.hidden = !hint; }
   }
   // Каждая нода отвечает только за себя: идёт ли трафик через неё и каким способом.
@@ -517,29 +586,159 @@ _PAGE_JS = """(function () {
   var init = st ? { c: st.className.replace('status ', ''), t: st.textContent,
                     h: stm && !stm.hidden ? stm.textContent : '' } : null;
   function check() {
-    show('', '\\u23f3 Проверяем\\u2026', '');
+    show('', '⏳ Проверяем…', '');
     return Promise.all(NODES.map(ask)).then(function (rs) {
       var hit = rs.filter(function (r) { return r.via && METHODS[r.via]; })[0];
       if (hit) {
-        show('on', '\\u2705 VPN включён \\u2014 ' + hit.n, 'Способ: ' + METHODS[hit.via]);
+        show('on', '✅ VPN включён — ' + hit.n, 'Способ: ' + METHODS[hit.via]);
         return true;
       }
       if (rs.some(function (r) { return !r.err; })) {
-        show('off', '\\u274c VPN сейчас выключен', OFF_HINT);
+        show('off', '❌ VPN сейчас выключен', OFF_HINT);
       } else if (init) {
         show(init.c, init.t, init.h);  // ни одна нода не ответила — решение сервера
       }
       return false;
     });
   }
-  if (!window.fetch || !window.Promise || !NODES.length || !WHERE) {
-    if (AUTO) autoOpen();
-    return;
-  }
+  if (!window.fetch || !window.Promise || !NODES.length || !WHERE) return;
   if (again) {
     again.addEventListener('click', function (ev) { ev.preventDefault(); check(); });
   }
-  check().then(function (on) { if (!on && AUTO) autoOpen(); });
+  check();
+})();"""
+
+
+# Выпуск и перевыпуск ключей AmneziaVPN на месте: POST ``…/awg`` (node, nonce, action),
+# ответ — JSON. GET ничего не выпускает, поэтому предпросмотр ссылок и сканеры (без JS)
+# ключей не создают.
+_AWG_JS = r"""(function () {
+  var PLATFORM = __PLATFORM__, URL = __URL__;
+  var box = document.getElementById('awg');
+  if (!box || !window.fetch || !window.Promise) return;
+  var cells = Array.prototype.slice.call(box.querySelectorAll('.cell'));
+  var more = document.getElementById('awgmore'), moreBody = document.getElementById('awgmorebody');
+  function el(tag, cls, text) {
+    var x = document.createElement(tag);
+    if (cls) x.className = cls;
+    if (text) x.textContent = text;
+    return x;
+  }
+  function btn(cls, text) { var b = el('button', 'btn ' + cls, text); b.type = 'button'; return b; }
+  function part(cell, sel) { return cell.querySelector(sel); }
+  function flag(cell) { return cell.getAttribute('data-flag'); }
+  function setMsg(cell, text) { part(cell, '.msg').textContent = text || ''; }
+  function setAct(cell, node) {
+    var act = part(cell, '.act');
+    while (act.firstChild) act.removeChild(act.firstChild);
+    act.appendChild(node);
+  }
+  function busy(cell, text) {
+    var b = btn('alt', '⏳ ' + text); b.disabled = true; setAct(cell, b);
+  }
+  function copyText(text, onDone) {
+    function legacy() {
+      var t = el('textarea'); t.value = text; t.style.position = 'fixed'; t.style.opacity = '0';
+      document.body.appendChild(t); t.focus(); t.select();
+      try { if (document.execCommand('copy')) onDone(); } catch (e) {}
+      document.body.removeChild(t);
+    }
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(onDone, legacy);
+    } else { legacy(); }
+  }
+  function post(cell, action) {
+    var body = new URLSearchParams();
+    body.set('node', cell.getAttribute('data-node'));
+    body.set('nonce', cell.getAttribute('data-nonce'));
+    body.set('action', action);
+    return fetch(URL, { method: 'POST', body: body, cache: 'no-store', credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) { if (j && j.nonce) cell.setAttribute('data-nonce', j.nonce); return j; });
+  }
+  function fail(cell, j, retry) {
+    var why = j && j.error;
+    setMsg(cell, why === 'stale' ? 'Страница устарела — обновите её.'
+      : why === 'rate' ? 'Слишком часто — подождите несколько секунд и нажмите ещё раз.'
+      : 'Не получилось — попробуйте ещё раз чуть позже.');
+    if (why === 'exists') { setMsg(cell, 'Ключ уже выпускался — показать его нельзя.'); showReissue(cell); }
+    else retry(cell);
+  }
+  function showIssue(cell) {
+    var b = btn('alt go', '🔑 Сгенерировать ключ ' + flag(cell));
+    b.addEventListener('click', function () { issue(cell); });
+    setAct(cell, b);
+  }
+  function showReissue(cell) {
+    var label = '🔄 Перевыпустить ' + flag(cell), armed = false, timer = null;
+    var b = btn('alt re', label);
+    function reset() { armed = false; b.className = 'btn alt re'; b.textContent = label; }
+    b.addEventListener('click', function () {
+      if (!armed) {
+        armed = true; b.className = 'btn warn';
+        b.textContent = 'Старый ключ перестанет работать — нажмите ещё раз';
+        timer = setTimeout(reset, 7000);
+        return;
+      }
+      clearTimeout(timer);
+      busy(cell, 'Перевыпускаю…'); setMsg(cell, '');
+      post(cell, 'reissue').then(function (j) {
+        if (j && j.ok) ready(cell, j); else fail(cell, j, showReissue);
+      }, function () { fail(cell, null, showReissue); });
+    });
+    setAct(cell, b);
+  }
+  function more_(cell, j) {
+    var node = cell.getAttribute('data-node'), old = moreBody.querySelector('[data-for="' + node + '"]');
+    if (old) moreBody.removeChild(old);
+    var blk = el('div', 'moreblk'); blk.setAttribute('data-for', node);
+    blk.appendChild(el('p', 'hint', 'Ключ ' + flag(cell) + ' (ссылка vpn://) и файл настроек:'));
+    if (j.key) {
+      var inp = el('input', 't'); inp.readOnly = true; inp.value = j.key;
+      inp.setAttribute('aria-label', 'Ключ AmneziaVPN ' + flag(cell));
+      blk.appendChild(inp);
+    }
+    if (j.conf) {
+      var a = el('a', 'btn alt', '⬇️ Скачать ' + j.filename);
+      a.setAttribute('download', j.filename);
+      try { a.href = 'data:application/octet-stream;base64,' + btoa(unescape(encodeURIComponent(j.conf))); }
+      catch (e) { a.hidden = true; }
+      blk.appendChild(a);
+    }
+    if (j.qr) {
+      var q = el('div', 'qr'), img = el('img'); img.src = j.qr; img.alt = 'QR-код настроек AmneziaVPN';
+      q.appendChild(img); blk.appendChild(q);
+    }
+    moreBody.appendChild(blk); more.hidden = false;
+  }
+  function ready(cell, j) {
+    var holder = el('div'), f = flag(cell);
+    if (j.key && PLATFORM !== 'ios') {
+      var a = el('a', 'btn', '➕ ' + f + ' Подключить'); a.href = j.key; holder.appendChild(a);
+    }
+    if (j.key && PLATFORM !== 'android') {
+      var label = '📋 Скопировать ' + f;
+      var c = btn(PLATFORM === 'ios' ? '' : 'alt', label);
+      c.addEventListener('click', function () {
+        copyText(j.key, function () { c.textContent = '✅ Скопировано ' + f; });
+      });
+      holder.appendChild(c);
+    }
+    setAct(cell, holder);
+    setMsg(cell, j.key ? 'Ключ показан один раз — добавьте его в AmneziaVPN сейчас.'
+      : 'Ключ собрать не вышло — используйте файл в «Другие способы».');
+    more_(cell, j);
+    if (!j.key) more.open = true;
+  }
+  function issue(cell) {
+    busy(cell, 'Выпускаю…'); setMsg(cell, '');
+    return post(cell, 'issue').then(function (j) {
+      if (j && j.ok) ready(cell, j); else fail(cell, j, showIssue);
+    }, function () { fail(cell, null, showIssue); });
+  }
+  cells.forEach(function (cell) {
+    if (cell.getAttribute('data-have') === '1') showReissue(cell); else showIssue(cell);
+  });
 })();"""
 
 
@@ -551,11 +750,12 @@ def render_page(
     links: PageLinks,
     status: VpnStatus | None = None,
     awg_forms: dict[str, str] | None = None,
-    auto_open: bool = True,
+    platform: str = PLATFORM_OTHER,
     path: str = "",
 ) -> str:
-    """Хаб устройства: статус «VPN включён», подключение через Hiddify, страны
-    и остаток, AmneziaWG. Русский, на «вы», без пола; всё инлайн."""
+    """Хаб устройства: статус «VPN включён», Hiddify одной кнопкой, страны и остаток,
+    AmneziaVPN (ключи выпускаются скриптом страницы, не по нажатию). Русский, на
+    «вы», без пола; всё инлайн. Автоперехода в приложения нет."""
     e = html.escape
     link = deep_link(sub_url, sub.device_label)
     title = f"📶 VPN · {sub.device_label}"
@@ -566,135 +766,40 @@ def render_page(
     )
     body = f"""<h1>{e(title)}</h1>
 {_status_card(status)}
+{_awg_card(sub, awg_forms or {}, platform, links)}
 <div class="card">
-<h2>VLESS · Hiddify</h2>
+<h2>VLESS · Hiddify{" — запасной способ" if awg_forms else ""}</h2>
+{'<p class="hint">Если AmneziaVPN не подключается — используйте Hiddify.</p>' if awg_forms else ""}
 <ol>
-<li>Установите Hiddify:<br>{stores}</li>
-<li>Нажмите кнопку ниже — откроется Hiddify, подтвердите добавление.</li>
-<li>Включите круглую кнопку в Hiddify и вернитесь на эту страницу — здесь будет видно, что VPN работает.</li>
+<li>Убедитесь, что установлено приложение <b>Hiddify</b>:<br>{stores}</li>
+<li>Нажмите кнопку ниже и подтвердите добавление в Hiddify.</li>
+<li>{e(_CHECK_STEP)}</li>
 </ol>
 <a class="btn" id="add" href="{e(link, quote=True)}">➕ Добавить в Hiddify</a>
-<p class="hint">Не открылось? Откройте эту страницу в обычном браузере.</p>
+<details style="margin-top:12px"><summary class="sm">Другие способы</summary>
+<p class="hint">Не открылось? Откройте эту страницу в обычном браузере или добавьте вручную.</p>
 <button class="btn alt" id="copy" type="button">📋 Скопировать ссылку</button>
 <input class="t" id="url" readonly value="{e(sub_url, quote=True)}" aria-label="Ссылка подписки">
 <p class="hint" id="copied" hidden>Ссылка скопирована. В Hiddify: «+» &rarr; «Добавить из буфера обмена».</p>
-<details style="margin-top:12px"><summary style="font-size:16px">QR для другого устройства</summary>
-<div class="qr"><img src="{e(qr_data_uri, quote=True)}" alt="QR-код ссылки подписки"></div></details>
+<a class="btn alt" download href="{e(sub_url + "?format=singbox", quote=True)}">⬇️ Файл настроек</a>
+<div class="qr"><p class="hint">QR для другого устройства:</p><img src="{e(qr_data_uri, quote=True)}" alt="QR-код ссылки подписки"></div>
+</details>
 </div>
-{_countries_card(sub)}
-{_awg_card(sub, awg_forms or {}, path)}"""
-    auto = "true" if auto_open and not (status and status.on and status.method) else "false"
+{_countries_card(sub)}"""
     nodes_json = json.dumps(check_nodes(sub.nodes), ensure_ascii=False).replace("<", "\\u003c")
     where = json.dumps(f"{path}/where") if path else '""'
     script = (
         _PAGE_JS.replace("__NODES__", nodes_json)
         .replace("__WHERE__", where)
-        .replace("__AUTO__", auto)
         .replace("__OFF_HINT__", json.dumps(_OFF_HINT, ensure_ascii=False))
     )
+    if awg_forms and path:
+        script += "\n" + (
+            _AWG_JS.replace("__PLATFORM__", json.dumps(platform)).replace(
+                "__URL__", json.dumps(f"{path}/awg")
+            )
+        )
     return _layout(title, body, script)
-
-
-def render_notice(title: str, text: str, *, path: str = "", back: bool = True) -> str:
-    """Короткая страница-сообщение (ошибка, «подождите»)."""
-    e = html.escape
-    tail = (
-        f'<a class="btn alt" href="{e(path, quote=True)}">⬅️ К настройкам</a>'
-        if back and path
-        else ""
-    )
-    return _layout(title, f'<h1>{e(title)}</h1><div class="card"><p>{e(text)}</p>{tail}</div>')
-
-
-def render_awg_confirm(sub: Subscription, node: NodeInfo, nonce: str, path: str) -> str:
-    e = html.escape
-    body = f"""<h1>AmneziaVPN {e(flag_of(node.name) or node.name)}</h1>
-<div class="card"><p>⚠️ У «{e(sub.device_label)}» уже есть ключ AmneziaVPN в этой стране.
-Новый заменит старый — там, где стоит старый, связь пропадёт.</p>
-<form method="post" action="{e(path, quote=True)}/awg">
-<input type="hidden" name="nonce" value="{e(nonce, quote=True)}">
-<input type="hidden" name="node" value="{e(node.node, quote=True)}">
-<input type="hidden" name="confirm" value="1">
-<button class="btn" type="submit">Выпустить новый</button></form>
-<a class="btn alt" href="{e(path, quote=True)}">Отмена</a></div>"""
-    return _layout("AmneziaVPN", body)
-
-
-def render_awg_result(
-    sub: Subscription,
-    node: NodeInfo,
-    *,
-    filename: str,
-    conf_text: str,
-    qr_data_uri: str,
-    links: PageLinks,
-    path: str,
-    key: str = "",
-) -> str:
-    """Настройки AmneziaWG — показываются один раз (ключ не хранится). Основной
-    путь — ключ ``vpn://`` (копирование/ссылка), файл и QR — запасные."""
-    e = html.escape
-    flag = flag_of(node.name)
-    rename = f"{flag} {sub.device_label}".strip()
-    data = "data:application/octet-stream;base64," + base64.b64encode(conf_text.encode()).decode()
-    stores = _links(
-        ("Google Play", links.amnezia_android),
-        ("App Store", links.amnezia_ios),
-        ("Сайт", links.amnezia_site),
-    )
-    fallback = f"""<details class="card"><summary>Другие способы</summary>
-<p class="hint">Файл настроек: скачайте и откройте его в AmneziaVPN.</p>
-<a class="btn alt" download="{e(filename, quote=True)}" href="{e(data, quote=True)}">⬇️ Скачать {e(filename)}</a>
-<div class="qr"><p class="hint">QR для другого устройства:</p>
-<img src="{e(qr_data_uri, quote=True)}" alt="QR-код настроек AmneziaVPN"></div></details>"""
-    script = ""
-    if key:
-        script = _AWG_JS
-        main = f"""<div class="card">
-<p><b>Настройки показаны один раз</b> — добавьте их в AmneziaVPN сейчас.</p>
-<ol>
-<li>Установите именно <b>AmneziaVPN</b> — без него ключ не заработает (приложение AmneziaWG его не понимает):<br>{stores}</li>
-<li>Нажмите «Скопировать ключ».</li>
-<li>В AmneziaVPN нажмите «+», в поле «Вставьте ключ» — «Вставить», затем «Продолжить».</li>
-<li>Проверьте имя подключения — например, «{e(rename)}».</li>
-</ol>
-<button class="btn" id="copykey" type="button">📋 Скопировать ключ</button>
-<a class="btn alt" id="addkey" href="{e(key, quote=True)}">➕ Добавить в AmneziaVPN</a>
-<input class="t" id="key" readonly value="{e(key, quote=True)}" aria-label="Ключ AmneziaVPN">
-<p class="hint" id="keycopied" hidden>Ключ скопирован. В AmneziaVPN: «+» &rarr; «Вставить».</p>
-<p class="hint">Магазин недоступен? Запросите файл в боте: /vpn → ❓ Помощь → Магазин недоступен?</p>
-</div>"""
-    else:  # ключ собрать не вышло — остаётся файл
-        main = f"""<div class="card">
-<p><b>Настройки показаны один раз</b> — сохраните файл сейчас.</p>
-<ol>
-<li>Установите <b>AmneziaVPN</b>:<br>{stores}</li>
-<li>Скачайте файл ниже и откройте его в AmneziaVPN.</li>
-<li>Проверьте имя подключения — например, «{e(rename)}».</li>
-</ol></div>"""
-        fallback = fallback.replace("<details", "<details open")
-    body = f"""<h1>AmneziaVPN {e(flag or node.name)}</h1>
-{main}
-{fallback}
-<a class="btn alt" href="{e(path, quote=True)}">⬅️ К настройкам</a>"""
-    return _layout("AmneziaVPN", body, script)
-
-
-_AWG_JS = """(function () {
-  var btn = document.getElementById('copykey'), box = document.getElementById('key');
-  var note = document.getElementById('keycopied');
-  function done() { note.hidden = false; }
-  function fallback() {
-    box.focus(); box.select(); box.setSelectionRange(0, box.value.length);
-    try { if (document.execCommand('copy')) done(); } catch (e) {}
-  }
-  btn.addEventListener('click', function () {
-    if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(box.value).then(done, fallback);
-    } else { fallback(); }
-  });
-  // Кнопка «Добавить» видна везде: на Android vpn:// открывает AmneziaVPN, на iOS — проверяем.
-})();"""
 
 
 def qr_data_uri(text: str) -> str:

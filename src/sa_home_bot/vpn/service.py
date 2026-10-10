@@ -1530,13 +1530,16 @@ class VpnService:
         action = ACTION_REISSUE if replace else ACTION_ISSUE
         args = {"chat_id": chat_id, "device_label": device_label, "transport": TRANSPORT_AWG}
         self._sub_cache.clear()
-        if node == self._node_id:
-            return await self.run_command(action, args)
-        if self._node_link is None:
-            raise ProtoError(ERR_BAD_REQUEST, "нода недоступна")
-        return await self._node_link.command(
-            action, args, dst=Address(node=node, service=SERVICE_NAME), timeout=20.0
-        )
+        try:
+            if node == self._node_id:
+                return await self.run_command(action, args)
+            if self._node_link is None:
+                raise ProtoError(ERR_BAD_REQUEST, "нода недоступна")
+            return await self._node_link.command(
+                action, args, dst=Address(node=node, service=SERVICE_NAME), timeout=20.0
+            )
+        finally:
+            self._sub_cache.clear()  # параллельная загрузка страницы не оставит старый «ключа нет»
 
     async def _peers(self, _args: dict[str, Any]) -> dict[str, Any]:
         cur = await self._db.conn.execute(

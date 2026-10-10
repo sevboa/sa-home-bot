@@ -65,8 +65,8 @@ async def test_faq_list_has_all_questions_and_report_button():
     cb, _ = await _press("act:vpn:apk")
     markup = cb.message.edit_markups[-1]
     assert _texts(markup) == [
-        "Что такое Hiddify?",
         "Чем отличается AmneziaVPN?",
+        "Что такое Hiddify?",
         "Не подключается",
         "Как подключить ещё одно устройство",
         "Магазин недоступен?",

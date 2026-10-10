@@ -113,7 +113,7 @@ async def test_card_has_get_settings_button_and_pick_screen():
     cb, _, _ = await _press(f"act:vpn:vpn_card:g{KEY}")
     text, markup = _last(cb)
     assert text == f"📥 <b>{LABEL}</b> — чем подключаться?"
-    assert _texts(markup) == ["🛡 VLESS · Hiddify", "⚡ AmneziaVPN", "⬅️ Назад"]
+    assert _texts(markup) == ["⚡ AmneziaVPN", "🛡 VLESS · Hiddify", "⬅️ Назад"]
 
 
 # --- VLESS · Hiddify ---------------------------------------------------------
@@ -308,8 +308,11 @@ async def test_new_device_pick_platform_then_get_settings_screen(_env):
     assert sorted(n for _, n in issued) == ["jeeves", "wooster"]
     assert all(a["device_label"] == "🤖 Android" and a["transport"] == "reality" for a, _ in issued)
     text, markup = _last(cb)
-    assert text == "📥 <b>🤖 Android</b> — чем подключаться?"
-    assert _texts(markup)[0] == "🛡 VLESS · Hiddify"
+    # 57.13: сразу страница на сайте, а не выбор способа в Telegram
+    assert text.startswith("📶 <b>Настройки VPN · 🤖 Android</b>")
+    assert "https://1.2.3.4:8444/s/tok" in text
+    assert _texts(markup) == ["📶 Открыть настройки"]
+    assert _all_buttons(markup)[0].url == "https://1.2.3.4:8444/s/tok"
 
 
 async def test_new_device_label_gets_number_when_taken():
@@ -406,8 +409,8 @@ async def test_get_settings_sends_one_forwardable_message(monkeypatch):
     assert chat == 778
     assert text == (
         f"📶 <b>Настройки VPN · {LABEL}</b>\n"
-        "Откройте ссылку на телефоне, который подключаете — там всё по шагам: "
-        "Hiddify, AmneziaVPN и проверка, что VPN включён.\n"
+        "Откройте ссылку на устройстве, которое подключаете (телефон или компьютер) — там всё "
+        "по шагам: AmneziaVPN, Hiddify и проверка, что VPN включён.\n"
         f"{PAGE}\n"
         "Ссылку можно переслать. Не делитесь ей с чужими: по ней подключается это устройство."
     )

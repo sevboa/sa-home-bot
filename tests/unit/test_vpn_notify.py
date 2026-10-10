@@ -280,14 +280,14 @@ async def test_restore_one_device_goes_to_reissue_screen(monkeypatch):
     assert len(guest) == 1
     assert guest[0][1] == (
         "🔧 VPN 🇳🇱: сервер переустановлен, настройки нужно обновить: "
-        "📱 iPhone (VLESS · Hiddify, AmneziaVPN).\n"
+        "📱 iPhone (AmneziaVPN, VLESS · Hiddify).\n"
         "Если подключались кнопкой «🔌 Подключить», Hiddify обновится сам."
     )
     [(text, cb)] = _buttons(guest[0][2])
     key, nh, codes = vpn_settings.parse_restore(cb.split(":")[-1][1:])
     assert text == "Обновить" and cb.startswith("act:vpn:vpn_card:R")
     assert key == vd.device_key("📱 iPhone") and nh == vpn_settings.node_hash("jeeves")
-    assert codes == "va" and len(cb.encode()) <= 64
+    assert codes == "av" and len(cb.encode()) <= 64
     owner = [m for m in notifier.sent if m[0] == ADMIN]
     assert owner[0][1] == "🔧 VPN 🇳🇱: сервер переустановлен, задето 2 подключения у 1 человека."
 

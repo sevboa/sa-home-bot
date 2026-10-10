@@ -98,16 +98,9 @@ def next_label(platform: Platform, existing: set[str]) -> str:
 
 
 def needs_settings_file(cfg: VpnConfig, devices: list[vd.Device], key: str) -> bool:
-    """Шаг «файл настроек» нужен, если включён флагом и ни одно ДРУГОЕ устройство
-    человека ещё не выходило на связь по VLESS (Hiddify не настроен)."""
-    if not cfg.wizard_settings_file:
-        return False
-    return not any(
-        conn.transport == vd.REALITY and conn.last_handshake_at
-        for dev in devices
-        if dev.key != key
-        for conn in dev.issued
-    )
+    """С 57.13 всегда ``False``: настройки нового или существующего устройства — сразу
+    страница на сайте (файл в Telegram остался только под «Другие способы»)."""
+    return False
 
 
 def steps(needs_file: bool) -> list[str]:
@@ -200,8 +193,8 @@ def page_link_text(label: str, page_url: str) -> str:
     случай, если кнопка не пересланa), дальше всё по шагам на самой странице."""
     return (
         f"📶 <b>Настройки VPN · {html.escape(label)}</b>\n"
-        "Откройте ссылку на телефоне, который подключаете — там всё по шагам: "
-        "Hiddify, AmneziaVPN и проверка, что VPN включён.\n"
+        "Откройте ссылку на устройстве, которое подключаете (телефон или компьютер) — там всё "
+        "по шагам: AmneziaVPN, Hiddify и проверка, что VPN включён.\n"
         f"{html.escape(page_url)}\n"
         "Ссылку можно переслать. Не делитесь ей с чужими: по ней подключается это устройство."
     )

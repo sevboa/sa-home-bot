@@ -316,7 +316,7 @@ def test_description_carries_faq_answers():
     for needle in (
         vpn_facts.ANSWERS[vpn_facts.Q_HIDDIFY],
         "«VLESS · Hiddify»",
-        "Из России работает, но на части серверов может не работать",
+        "Основной способ подключения, обычно быстрее",
         "AmneziaVPN",
         ".apk",
         "выберите другую страну",

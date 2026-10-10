@@ -276,8 +276,8 @@ async def test_reissue_menu_lists_only_issued_unchecked():
     texts = _texts(cb.message.edit_markups[-1])
     assert texts == [
         "☐ 🇳🇱 VLESS · Hiddify",
-        "☐ 🇺🇸 VLESS · Hiddify",
         "☐ 🇺🇸 AmneziaVPN",
+        "☐ 🇺🇸 VLESS · Hiddify",
         "Выбрать все",
         "Отмена",
     ]

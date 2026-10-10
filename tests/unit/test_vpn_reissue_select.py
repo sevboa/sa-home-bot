@@ -56,14 +56,14 @@ def _reissues(link):
 
 
 async def test_toggle_marks_checkbox_and_shows_count_button():
-    cb, _, _ = await _press(_screen(0b101))
+    cb, _, _ = await _press(_screen(0b011))
     texts = _texts(cb.message.edit_markups[-1])
-    assert texts[:3] == ["☑️ 🇳🇱 VLESS · Hiddify", "☐ 🇺🇸 VLESS · Hiddify", "☑️ 🇺🇸 AmneziaVPN"]
+    assert texts[:3] == ["☑️ 🇳🇱 VLESS · Hiddify", "☑️ 🇺🇸 AmneziaVPN", "☐ 🇺🇸 VLESS · Hiddify"]
     assert "🔄 Перевыпустить (2)" in texts
     assert "Выбрать все" in texts
     # нажатие на отмеченную снимает её (маска XOR)
     buttons = {b.text: b.callback_data for b in _all_buttons(cb.message.edit_markups[-1])}
-    assert buttons["☑️ 🇳🇱 VLESS · Hiddify"].endswith(f"-{_sig()}-4")
+    assert buttons["☑️ 🇳🇱 VLESS · Hiddify"].endswith(f"-{_sig()}-2")
     assert buttons["☐ 🇺🇸 VLESS · Hiddify"].endswith(f"-{_sig()}-7")
 
 
@@ -87,7 +87,7 @@ async def test_run_with_zero_mask_does_nothing():
 
 
 async def test_run_reissues_selected_pairs_and_delivers_new_settings():
-    cb, link, notifier = await _press(_run(0b101), link=VlessLink(None))
+    cb, link, notifier = await _press(_run(0b011), link=VlessLink(None))
     assert sorted(_reissues(link)) == [("jeeves", "reality"), ("wooster", "awg")]
     # AmneziaWG — файл .conf + инструкция с «Обязательно переименуйте»
     assert notifier.sent_documents
@@ -162,5 +162,5 @@ async def test_restore_button_preselects_affected_connections_of_that_country():
     cb_data = vs.restore_cb(KEY, "wooster", [vd.REALITY, vd.AWG])
     cb, _, _ = await _press(cb_data)
     texts = _texts(cb.message.edit_markups[-1])
-    assert texts[:3] == ["☐ 🇳🇱 VLESS · Hiddify", "☑️ 🇺🇸 VLESS · Hiddify", "☑️ 🇺🇸 AmneziaVPN"]
+    assert texts[:3] == ["☐ 🇳🇱 VLESS · Hiddify", "☑️ 🇺🇸 AmneziaVPN", "☑️ 🇺🇸 VLESS · Hiddify"]
     assert "🔄 Перевыпустить (2)" in texts

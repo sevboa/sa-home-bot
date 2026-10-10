@@ -24,7 +24,7 @@ from sa_home_bot.vpn import protocol as vpn_protocol
 REALITY = vpn_protocol.TRANSPORT_REALITY
 AWG = vpn_protocol.TRANSPORT_AWG
 # VLESS первым — с него начинают; незнакомые транспорты (нода новее бота) — в хвост.
-TRANSPORT_ORDER = (REALITY, AWG)
+TRANSPORT_ORDER = (AWG, REALITY)  # 57.13: AmneziaVPN первым
 # Имена транспортов в текстах: «VLESS · Hiddify» всегда вместе, AmneziaWG — без
 # оговорок про страны (решение владельца 2026-10-10).
 TRANSPORT_NAME = {REALITY: "VLESS · Hiddify", AWG: "AmneziaVPN"}
