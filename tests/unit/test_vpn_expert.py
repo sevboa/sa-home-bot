@@ -7,6 +7,7 @@ import pytest
 
 from sa_home_bot.bot import commands, vpn_nodes
 from sa_home_bot.bot import vpn_devices as vd
+from sa_home_bot.bot import vpn_settings as vs
 from sa_home_bot.bot.handlers import vpn as h
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.proto.messages import ProtoError
@@ -137,7 +138,9 @@ def test_all_callbacks_fit_64_bytes():
         h._home_keyboard(servers, subscription=ADMIN, self_serve_nodes=["jeeves", "wooster"]),
         h._list_keyboard(vd.build_devices(servers), subscription=ADMIN),
         h._card_keyboard_for_device(device, servers, subscription=ADMIN),
-        h._reissue_keyboard(device, servers),
+        vs.reissue_select_keyboard(
+            device, vs.reissue_connections(device), vd.countries_of(servers), 5
+        ),
         h._delete_keyboard(device),
     ]  # экраны мастера — в test_vpn_wizard.py
     for markup in markups:
@@ -267,17 +270,16 @@ async def test_fix_in_group_chat_refused():
     assert cb.answered[0][1].get("show_alert")
 
 
-async def test_reissue_menu_lists_only_issued_and_reissues_one():
+async def test_reissue_menu_lists_only_issued_unchecked():
     cb, _, _ = await _press(f"act:vpn:vpn_card:r{KEY}")
     texts = _texts(cb.message.edit_markups[-1])
-    assert texts[:-1] == [
-        "🔄 🇳🇱 VLESS · Hiddify",
-        "🔄 🇺🇸 VLESS · Hiddify",
-        "🔄 🇺🇸 AmneziaWG",
+    assert texts == [
+        "☐ 🇳🇱 VLESS · Hiddify",
+        "☐ 🇺🇸 VLESS · Hiddify",
+        "☐ 🇺🇸 AmneziaWG",
+        "Выбрать все",
+        "Отмена",
     ]
-    cb, link, _ = await _press(f"act:vpn:reissue:~r{KEY}:jeeves")
-    reissue = [a for act, a in link.calls if act == vpn_protocol.ACTION_REISSUE]
-    assert reissue == [{"chat_id": 778, "device_label": LABEL, "transport": "reality"}]
 
 
 async def test_new_device_and_help_buttons():

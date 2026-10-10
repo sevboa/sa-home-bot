@@ -484,8 +484,10 @@ def _card_keyboard(
 # новые кнопки от старых («значение = имя устройства»).
 #
 # Значения ``vpn_card``:  m — список устройств; d<ключ> — карточка;
-#   r<ключ> — выбор ключей для перевыпуска; x<ключ> — подтверждение удаления.
-# Значения ``reissue``:  ~r<ключ> / ~a<ключ> + нода — перевыпустить VLESS / AmneziaWG
+#   r<ключ>[-<подпись>-<маска>] — галочки перевыпуска (57.5, bot/vpn_settings.py);
+#   x<ключ> — подтверждение удаления.
+# Значения ``reissue``:  ~m<ключ>-<подпись>-<маска> — перевыпустить выбранные (57.5);
+#   ~r<ключ> / ~a<ключ> + нода — перевыпустить VLESS / AmneziaWG
 #   этой страны; ~f<ключ> + нода — починить страну (все сломанные подключения).
 # Значения ``revoke``:  ~d<ключ> — удалить устройство целиком.
 _SCREEN_LIST = "m"
@@ -586,14 +588,6 @@ def _list_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _conn_button_text(
-    conn: vpn_devices.Connection, countries: dict[str, vpn_devices.Country]
-) -> str:
-    country = countries.get(conn.node)
-    where = country.short if country else conn.node
-    return f"{where} {vpn_devices.TRANSPORT_NAME.get(conn.transport, conn.transport)}"
-
-
 async def _subscription_page_url(
     node_link: ServiceLink, chat_id: int, device: vpn_devices.Device
 ) -> str | None:
@@ -667,31 +661,6 @@ def _card_keyboard_for_device(
             ]
         )
     rows.append(_back_button("⬅️ К устройствам", _screen_cb(_SCREEN_LIST)))
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def _reissue_keyboard(device: vpn_devices.Device, servers: list[dict]) -> InlineKeyboardMarkup:
-    """Выданные подключения — по кнопке на каждое (выбор нескольких — 57.5)."""
-    countries = vpn_devices.countries_of(servers)
-    rows: list[list[InlineKeyboardButton]] = []
-    for conn in device.issued:
-        kind = _KIND_BY_TRANSPORT.get(conn.transport)
-        if kind is None:
-            continue
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"🔄 {_conn_button_text(conn, countries)}",
-                    callback_data=commands.action_callback(
-                        vpn_protocol.ACTION_REISSUE,
-                        f"{_EXPERT_PREFIX}{kind}{device.key}",
-                        node_id=conn.node,
-                        service=SERVICE,
-                    ),
-                )
-            ]
-        )
-    rows.append(_back_button("⬅️ Назад", _screen_cb(_SCREEN_DEVICE, device.key)))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1238,8 +1207,6 @@ async def _show_screen(
         keyboard = _card_keyboard_for_device(
             device, servers, subscription=subscription, page_url=page_url
         )
-    elif screen == _SCREEN_REISSUE:
-        text, keyboard = vpn_devices.reissue_text(device), _reissue_keyboard(device, servers)
     elif screen == _SCREEN_DELETE:
         text, keyboard = vpn_devices.delete_text(device), _delete_keyboard(device)
     elif screen == vpn_settings.SCREEN_PICK:
@@ -1320,6 +1287,149 @@ async def _expert_reissue(
             message_thread_id=callback.message.message_thread_id,
         )
     await _show_screen(callback, node_link, subscription, config, _SCREEN_DEVICE, key)
+
+
+async def _show_reissue_select(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    subscription: Subscription,
+    config: Settings,
+    rest: str,
+    *,
+    answered: bool,
+    note: str = "",
+) -> None:
+    """``vpn_card:r<ключ>[-<подпись>-<маска>]`` — галочки по выданным подключениям (57.5).
+    Подпись списка не сошлась с текущей (подключение пропало или появилось) —
+    выбор сбрасывается: номера битов уже указывают на другие подключения."""
+    key, sig, mask = vpn_settings.parse_selection(rest)
+    found = await _fresh_device(callback, node_link, subscription, config, key)
+    if found is None:
+        return
+    device, servers = found
+    conns = vpn_settings.reissue_connections(device)
+    if not answered:
+        await callback.answer()
+    if sig is not None and (
+        sig != vpn_settings.list_signature(conns) or mask & ~vpn_settings.all_mask(conns)
+    ):
+        mask, note = 0, vpn_settings.LIST_CHANGED_TEXT
+    elif sig is None:
+        mask = 0
+    await _wizard_edit(
+        callback,
+        vpn_settings.reissue_select_text(device.label, note),
+        vpn_settings.reissue_select_keyboard(
+            device,
+            conns,
+            vpn_devices.countries_of(servers),
+            mask,
+            can_run=_allows(subscription, vpn_protocol.ACTION_REISSUE),
+        ),
+    )
+
+
+async def _expert_reissue_multi(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    notifier: Notifier,
+    config: Settings,
+    subscription: Subscription,
+    pending: PendingVpnSecrets,
+    rest: str,
+) -> None:
+    """``reissue:~m<ключ>-<подпись>-<маска>`` — «🔄 Перевыпустить (N)»: reissue по
+    каждой выбранной паре (нода, транспорт). Новые настройки — как при выдаче
+    (57.4): AmneziaWG файлом + шаги, VLESS одним сообщением «VLESS · Hiddify».
+    Часть нод отказала — итог говорит, что удалось, а что нет."""
+    chat_id = callback.message.chat.id
+    if not _is_private(chat_id):
+        await callback.answer("Секрет доступа выдаётся только в личке.", show_alert=True)
+        return
+    key, sig, mask = vpn_settings.parse_selection(rest)
+    error, servers, _down = await _card(node_link, chat_id, subscription)
+    device = (
+        vpn_devices.find_device(vpn_devices.build_devices(servers), key) if error is None else None
+    )
+    if device is None:
+        await callback.answer("Устройство не найдено — обновите список.", show_alert=True)
+        await _show_screen(callback, node_link, subscription, config, _SCREEN_LIST)
+        return
+    conns = vpn_settings.reissue_connections(device)
+    if sig != vpn_settings.list_signature(conns) or mask & ~vpn_settings.all_mask(conns):
+        await callback.answer(vpn_settings.LIST_CHANGED_TEXT, show_alert=True)
+        await _show_reissue_select(
+            callback,
+            node_link,
+            subscription,
+            config,
+            key,
+            answered=True,
+            note=vpn_settings.LIST_CHANGED_TEXT,
+        )
+        return
+    chosen = vpn_settings.selected(conns, mask)
+    if not chosen:
+        await callback.answer(vpn_settings.NOTHING_PICKED_TEXT, show_alert=True)
+        return
+    await callback.answer("Перевыпускаю…")
+    countries = vpn_devices.countries_of(servers)
+    done: list[str] = []
+    failed: list[tuple[str, str]] = []
+    results: list[tuple[vpn_devices.Connection, dict]] = []
+    for conn in chosen:
+        name = vpn_settings.reissue_conn_text(conn, countries)
+        try:
+            result = await node_link.command(
+                vpn_protocol.ACTION_REISSUE,
+                {"chat_id": chat_id, "device_label": device.label, "transport": conn.transport},
+                dst=Address(node=conn.node, service=SERVICE),
+            )
+        except ProtoError as exc:
+            failed.append((name, exc.message))
+            continue
+        except ServiceUnavailableError:
+            failed.append((name, "сервер не ответил"))
+            continue
+        done.append(name)
+        results.append((conn, result))
+    for conn, result in results:
+        if conn.transport == vpn_protocol.TRANSPORT_AWG:
+            await _awg_send(
+                callback,
+                notifier,
+                config,
+                pending,
+                device,
+                countries.get(conn.node) or vpn_devices.Country(conn.node, conn.node),
+                result,
+            )
+    if any(conn.transport == vpn_protocol.TRANSPORT_REALITY for conn, _ in results):
+        _err, fresh_servers, _d = await _card(node_link, chat_id, subscription)
+        fresh = vpn_devices.find_device(vpn_devices.build_devices(fresh_servers), key)
+        sent = fresh is not None and await _vless_send(
+            callback,
+            node_link,
+            notifier,
+            config,
+            pending,
+            fresh,
+            fresh_servers,
+            issue_missing=False,
+            reissued=True,
+        )
+        if not sent:
+            failed.append(
+                (
+                    "VLESS · Hiddify — настройки",
+                    "ключи перевыпущены, но настройки не получены: нажмите «📥 Получить настройки»",
+                )
+            )
+    await _wizard_edit(
+        callback,
+        vpn_settings.reissue_result_text(device.label, done, failed),
+        vpn_settings.reissue_result_keyboard(key),
+    )
 
 
 async def _expert_delete(
@@ -1445,6 +1555,31 @@ async def _deliver_vless(
         return
     device, servers = found
     await callback.answer("Готовлю настройки…")
+    if not await _vless_send(
+        callback, node_link, notifier, config, pending, device, servers, issue_missing=True
+    ):
+        await _wizard_edit(
+            callback, vpn_settings.UNAVAILABLE_TEXT, vpn_settings.back_keyboard(device.key)
+        )
+
+
+async def _vless_send(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    notifier: Notifier,
+    config: Settings,
+    pending: PendingVpnSecrets,
+    device: vpn_devices.Device,
+    servers: list[dict],
+    *,
+    issue_missing: bool,
+    reissued: bool = False,
+) -> bool:
+    """Сообщение «VLESS · Hiddify» (57.4): файл — если без handshake, «🔌 Подключить»,
+    ссылки стран, QR. ``issue_missing`` — довыпустить недостающие страны; после
+    перевыпуска (``reissued``) — без довыпуска и с пометкой про обновление
+    подписки. False — ни одна нода не ответила."""
+    chat_id = callback.message.chat.id
     thread_id = callback.message.message_thread_id
     ttl_s = config.vpn.config_message_ttl_s
     reality = vpn_protocol.TRANSPORT_REALITY
@@ -1458,7 +1593,7 @@ async def _deliver_vless(
         if device.connection(node, reality) is not None:
             nodes.append(node)
             continue
-        if _is_allowed(server) and reality in (server.get("transports") or []):
+        if issue_missing and _is_allowed(server) and reality in (server.get("transports") or []):
             issued = await _command_or_none(
                 node_link,
                 vpn_protocol.ACTION_ISSUE,
@@ -1482,10 +1617,7 @@ async def _deliver_vless(
     )
     got = [(node, res) for node, res in zip(nodes, results, strict=True) if res]
     if not got:
-        await _wizard_edit(
-            callback, vpn_settings.UNAVAILABLE_TEXT, vpn_settings.back_keyboard(device.key)
-        )
-        return
+        return False
 
     wants_file = config.vpn.wizard_settings_file
     file_needed = wants_file and not vpn_settings.had_vless_handshake(device)
@@ -1535,7 +1667,12 @@ async def _deliver_vless(
                 )
             )
     text = vpn_settings.vless_text(
-        device.label, links, has_page=bool(page_url), file_sent=file_sent, added=added
+        device.label,
+        links,
+        has_page=bool(page_url),
+        file_sent=file_sent,
+        added=added,
+        reissued=reissued,
     )
     button_id = await notifier.send_direct(
         chat_id,
@@ -1549,6 +1686,7 @@ async def _deliver_vless(
     )
     message_ids.append(button_id)
     _schedule_cleanup(notifier, pending, chat_id, message_ids, tokens, ttl_s)
+    return True
 
 
 async def _vless_file_again(
@@ -1674,9 +1812,40 @@ async def _awg_deliver(
     except ServiceUnavailableError:
         await callback.message.answer("⚠️ Служба VPN недоступна.")
         return
+    await _awg_send(
+        callback,
+        notifier,
+        config,
+        pending,
+        device,
+        vpn_devices.Country(node, _server_label(server)),
+        result,
+    )
+    if action == vpn_protocol.ACTION_REISSUE:
+        # Предупреждение с «Выпустить новый» не должно остаться под рукой.
+        await _show_screen(
+            callback,
+            node_link,
+            subscription,
+            config,
+            vpn_settings.SCREEN_AWG,
+            device.key,
+        )
+
+
+async def _awg_send(
+    callback: CallbackQuery,
+    notifier: Notifier,
+    config: Settings,
+    pending: PendingVpnSecrets,
+    device: vpn_devices.Device,
+    country: vpn_devices.Country,
+    result: dict,
+) -> None:
+    """Файл .conf + шаги установки AmneziaVPN (57.4); всё удаляется по TTL."""
+    chat_id = callback.message.chat.id
     thread_id = callback.message.message_thread_id
     ttl_s = config.vpn.config_message_ttl_s
-    country = vpn_devices.Country(node, _server_label(server))
     config_text = str(result.get("config_text") or "")
     qr_b64 = result.get("qr_png_b64")
     sent = await notifier.send_document(
@@ -1716,16 +1885,6 @@ async def _awg_deliver(
         tokens,
         ttl_s,
     )
-    if action == vpn_protocol.ACTION_REISSUE:
-        # Предупреждение с «Выпустить новый» не должно остаться под рукой.
-        await _show_screen(
-            callback,
-            node_link,
-            subscription,
-            config,
-            vpn_settings.SCREEN_AWG,
-            device.key,
-        )
 
 
 async def _expert_issue(
@@ -2372,6 +2531,16 @@ async def handle_action(
     if (
         action_id == vpn_protocol.ACTION_REISSUE
         and value
+        and value.startswith(f"{_EXPERT_PREFIX}{vpn_settings.KIND_MULTI}")
+    ):
+        await _expert_reissue_multi(
+            callback, node_link, notifier, config, subscription, pending_vpn_secrets, value[2:]
+        )
+        return
+
+    if (
+        action_id == vpn_protocol.ACTION_REISSUE
+        and value
         and value.startswith(f"{_EXPERT_PREFIX}{vpn_settings.KIND_AWG}")
     ):
         await _awg_replace(
@@ -2588,6 +2757,10 @@ async def handle_action(
     if action_id == _ACTION_VPN_CARD:
         if value and value.startswith(vpn_wizard.PREFIX):
             await _wizard_show(callback, node_link, notifier, config, subscription, book, value)
+        elif value and value[0] == vpn_settings.SCREEN_REISSUE:
+            await _show_reissue_select(
+                callback, node_link, subscription, config, value[1:], answered=False
+            )
         elif value:
             await _show_screen(
                 callback, node_link, subscription, config, value[0], value[1:], answered=False

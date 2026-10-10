@@ -411,13 +411,6 @@ def card_text(
     return "\n".join(lines)
 
 
-def reissue_text(device: Device) -> str:
-    return (
-        f"🔄 <b>{html.escape(device.label)}</b> — какие ключи перевыпустить?\n"
-        "Старые перестанут работать сразу, новые настройки придут следом."
-    )
-
-
 def delete_text(device: Device) -> str:
     return (
         f"🗑 Удалить <b>{html.escape(device.label)}</b>?\n"

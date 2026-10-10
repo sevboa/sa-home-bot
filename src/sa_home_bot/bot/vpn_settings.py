@@ -4,6 +4,10 @@
   g — «Получить настройки»: чем подключаться (VLESS · Hiddify / AmneziaWG)
   a — AmneziaWG: выбор страны
   n — «➕ Новое устройство»: выбор платформы (имя — как в мастере)
+  r — «🔄 Перевыпустить ключи» (57.5): галочки по выданным подключениям; значение
+      ``r<ключ>[-<подпись списка>-<маска>]``, маска — hex, бит i = i-й выданный
+      транспорт в стабильном порядке (страны как у серверов, VLESS перед AmneziaWG);
+      подпись (4 hex) — хэш этого списка: изменился между нажатиями — выбор сброшен
 
 Действия, которые могут выпустить ключ, идут под ``issue@vpn`` / ``reissue@vpn``
 (``issue:~<вид><ключ>[:<нода>]``): v — VLESS · Hiddify (довыпускает недостающие
@@ -15,6 +19,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -34,6 +39,8 @@ EXPERT_PREFIX = "~"
 SCREEN_PICK, SCREEN_AWG, SCREEN_NEW = "g", "a", "n"
 # Виды действий ``issue:~<вид>…`` / ``reissue:~<вид>…``.
 KIND_VLESS, KIND_FILE, KIND_AWG, KIND_NEW = "v", "s", "g", "n"
+# Перевыпуск по выбранным: ``reissue:~m<ключ>-<подпись>-<маска>``.
+SCREEN_REISSUE, KIND_MULTI = "r", "m"
 
 APK_NO_STORE = "nostore"
 MAY_NOT_WORK = "сейчас может не работать"
@@ -98,6 +105,7 @@ def vless_text(
     has_page: bool,
     file_sent: bool,
     added: list[str],
+    reissued: bool = False,
 ) -> str:
     """``links`` — (название страны, vless://-ссылка); ``added`` — страны,
     довыпущенные только что."""
@@ -113,6 +121,11 @@ def vless_text(
         lines.append("Нажмите «🔌 Подключить» — откроется Hiddify, нажмите там «Добавить».")
     if added:
         lines += ["", "➕ Добавлено: " + ", ".join(html.escape(a) for a in added) + "."]
+    if reissued:
+        lines += [
+            "",
+            "Hiddify обновит подключение сам; если нет — нажмите «🔌 Подключить» ещё раз.",
+        ]
     lines += [
         "",
         "Если кнопка не сработала: нажмите на ссылку — она скопируется, затем в Hiddify "
@@ -288,5 +301,131 @@ def back_keyboard(key: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data=card_cb(SCREEN_PICK, key))]
+        ]
+    )
+
+
+# --- перевыпуск по выбранным подключениям (57.5) ----------------------------
+
+MAX_REISSUE_BITS = 16
+LIST_CHANGED_TEXT = "Список изменился, выберите заново."
+NOTHING_PICKED_TEXT = "Ничего не выбрано."
+
+
+def reissue_connections(device: vd.Device) -> list[vd.Connection]:
+    """Выданные подключения в стабильном порядке (его задаёт ``build_devices``);
+    бит маски = индекс в этом списке."""
+    return [c for c in device.issued if c.transport in vd.TRANSPORT_NAME][:MAX_REISSUE_BITS]
+
+
+def list_signature(conns: list[vd.Connection]) -> str:
+    raw = "|".join(f"{c.node}/{c.transport}" for c in conns)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:4]
+
+
+def all_mask(conns: list[vd.Connection]) -> int:
+    return (1 << len(conns)) - 1
+
+
+def selected(conns: list[vd.Connection], mask: int) -> list[vd.Connection]:
+    return [c for i, c in enumerate(conns) if mask >> i & 1]
+
+
+def parse_selection(rest: str) -> tuple[str, str | None, int]:
+    """``<ключ>[-<подпись>-<маска>]`` → (ключ, подпись | None, маска); мусор — без выбора."""
+    key, _, tail = rest.partition("-")
+    sig, _, mask_hex = tail.partition("-")
+    if not sig:
+        return key, None, 0
+    try:
+        return key, sig, int(mask_hex, 16)
+    except ValueError:
+        return key, sig, 0
+
+
+def reissue_select_cb(key: str, conns: list[vd.Connection], mask: int) -> str:
+    return card_cb(SCREEN_REISSUE, f"{key}-{list_signature(conns)}-{mask:x}")
+
+
+def reissue_run_cb(key: str, conns: list[vd.Connection], mask: int) -> str:
+    return action_cb(
+        vpn_protocol.ACTION_REISSUE, KIND_MULTI, f"{key}-{list_signature(conns)}-{mask:x}"
+    )
+
+
+def reissue_conn_text(conn: vd.Connection, countries: dict[str, vd.Country]) -> str:
+    country = countries.get(conn.node)
+    return f"{country.short if country else conn.node} {vd.TRANSPORT_NAME[conn.transport]}"
+
+
+def reissue_select_text(label: str, note: str = "") -> str:
+    head = (
+        f"🔄 <b>{html.escape(label)}</b> — какие ключи перевыпустить?\n"
+        "Старые перестанут работать сразу, новые настройки придут следом."
+    )
+    return f"{html.escape(note)}\n\n{head}" if note else head
+
+
+def reissue_select_keyboard(
+    device: vd.Device,
+    conns: list[vd.Connection],
+    countries: dict[str, vd.Country],
+    mask: int,
+    *,
+    can_run: bool = True,
+) -> InlineKeyboardMarkup:
+    key = device.key
+    rows: list[list[InlineKeyboardButton]] = []
+    last_node: str | None = None
+    for i, conn in enumerate(conns):
+        mark = "☑️" if mask >> i & 1 else "☐"
+        button = InlineKeyboardButton(
+            text=f"{mark} {reissue_conn_text(conn, countries)}",
+            callback_data=reissue_select_cb(key, conns, mask ^ (1 << i)),
+        )
+        if rows and conn.node == last_node:
+            rows[-1].append(button)
+        else:
+            rows.append([button])
+        last_node = conn.node
+    everything = all_mask(conns)
+    if everything and mask != everything:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Выбрать все", callback_data=reissue_select_cb(key, conns, everything)
+                )
+            ]
+        )
+    last: list[InlineKeyboardButton] = []
+    count = len(selected(conns, mask))
+    if count and can_run:
+        last.append(
+            InlineKeyboardButton(
+                text=f"🔄 Перевыпустить ({count})", callback_data=reissue_run_cb(key, conns, mask)
+            )
+        )
+    last.append(InlineKeyboardButton(text="Отмена", callback_data=_device_cb(key)))
+    rows.append(last)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def reissue_result_text(label: str, done: list[str], failed: list[tuple[str, str]]) -> str:
+    lines = [f"🔄 <b>{html.escape(label)}</b>", ""]
+    if done:
+        lines.append("✅ Перевыпущено: " + ", ".join(html.escape(d) for d in done) + ".")
+    if failed:
+        lines.append("⚠️ Не удалось:")
+        lines += [f"• {html.escape(name)} — {html.escape(why)}" for name, why in failed]
+        lines.append("Повторите чуть позже.")
+    if done:
+        lines.append("Новые настройки — в сообщениях ниже.")
+    return "\n".join(lines)
+
+
+def reissue_result_keyboard(key: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ К устройству", callback_data=_device_cb(key))]
         ]
     )
