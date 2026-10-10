@@ -659,7 +659,7 @@ def render_awg_result(
 <li>Проверьте имя подключения — например, «{e(rename)}».</li>
 </ol>
 <button class="btn" id="copykey" type="button">📋 Скопировать ключ</button>
-<a class="btn alt" id="addkey" href="{e(key, quote=True)}">➕ Добавить в AmneziaVPN</a>
+<a class="btn alt" id="addkey" href="{e(key, quote=True)}" hidden>➕ Добавить в AmneziaVPN</a>
 <input class="t" id="key" readonly value="{e(key, quote=True)}" aria-label="Ключ AmneziaVPN">
 <p class="hint" id="keycopied" hidden>Ключ скопирован. В AmneziaVPN: «+» &rarr; «Вставить».</p>
 <p class="hint">Магазин недоступен? Запросите файл в боте: /vpn → ❓ Помощь → Магазин недоступен?</p>
@@ -682,7 +682,7 @@ def render_awg_result(
 
 _AWG_JS = """(function () {
   var btn = document.getElementById('copykey'), box = document.getElementById('key');
-  var note = document.getElementById('keycopied');
+  var note = document.getElementById('keycopied'), add = document.getElementById('addkey');
   function done() { note.hidden = false; }
   function fallback() {
     box.focus(); box.select(); box.setSelectionRange(0, box.value.length);
@@ -693,7 +693,8 @@ _AWG_JS = """(function () {
       navigator.clipboard.writeText(box.value).then(done, fallback);
     } else { fallback(); }
   });
-  // Кнопка «Добавить» видна везде: на Android vpn:// открывает AmneziaVPN, на iOS — проверяем.
+  // AmneziaVPN для Android принимает ссылки vpn:// из браузера; для iOS такого обработчика нет.
+  if (/Android/i.test(navigator.userAgent)) add.hidden = false;
 })();"""
 
 

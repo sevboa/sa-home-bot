@@ -1006,8 +1006,7 @@ def test_awg_result_page_key_first_file_under_other_ways():
     )  # fmt: skip
     assert "📋 Скопировать ключ" in page and "➕ Добавить в AmneziaVPN" in page
     assert 'value="vpn://AbC_-"' in page and 'href="vpn://AbC_-"' in page
-    assert "/Android/" not in page and 'id="addkey" href="vpn://AbC_-">' in page
-    assert "«+»" in page and "Вставьте ключ" in page
+    assert "Android" in page and "«+»" in page and "Вставьте ключ" in page
     assert "play.google.com/amnezia" in page and "apps.apple.com/amnezia" in page
     assert "«🇳🇱 📱 iPhone»" in page and "Проверьте имя подключения" in page
     assert "переименуйте" not in page
