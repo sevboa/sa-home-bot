@@ -280,10 +280,12 @@ async def test_reissue_menu_lists_only_issued_and_reissues_one():
     assert reissue == [{"chat_id": 778, "device_label": LABEL, "transport": "reality"}]
 
 
-async def test_new_device_and_help_lead_to_existing_flows():
+async def test_new_device_and_help_buttons():
     cb, _, _ = await _press("act:vpn:vpn_card")
     buttons = {b.text: b.callback_data for b in _all_buttons(cb.message.edit_markups[-1])}
-    assert buttons["➕ Новое устройство"] == commands.action_callback("issue", service="vpn")
+    assert buttons["➕ Новое устройство"] == commands.action_callback(
+        "vpn_card", "n", service="vpn"
+    )
     assert buttons["❓ Помощь"] == commands.action_callback("apk", service="vpn")
 
 

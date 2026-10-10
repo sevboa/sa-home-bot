@@ -74,7 +74,7 @@ PLATFORMS: dict[str, Platform] = {
     "a": Platform("a", "🤖", "Android", "⬇️ Открыть Google Play"),
     "c": Platform("c", "💻", "Компьютер", "⬇️ Открыть сайт Hiddify"),
 }
-_PICK_BUTTONS = {"i": "🍎 iPhone", "a": "🤖 Android", "c": "💻 Компьютер"}
+PICK_BUTTONS = {"i": "🍎 iPhone", "a": "🤖 Android", "c": "💻 Компьютер"}
 
 
 def store_url(platform: Platform, cfg: VpnConfig) -> str:
@@ -185,7 +185,7 @@ def pick_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(text=text, callback_data=create_cb(code))
-                for code, text in _PICK_BUTTONS.items()
+                for code, text in PICK_BUTTONS.items()
             ],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data=home_cb())],
         ]

@@ -691,12 +691,11 @@ async def test_apk_first_click_shows_links_not_file():
     await vpn_handlers.handle_action(callback, link, notifier, _config(), GUEST, _pending())
     text = next(t for t in callback.message.answers if "App Store" in t)
     assert "Google Play" in text
-    # Обе ссылки по магазину — текстом ("AmneziaVPN"/"AmneziaWG"), не длинным URL.
+    # Магазины — только AmneziaVPN; ссылок на AmneziaWG в магазинах нет нигде.
     cfg = _config().vpn
-    assert f'<a href="{cfg.amneziavpn_ios_app_store_url}">AmneziaVPN</a>' in text
-    assert f'<a href="{cfg.ios_app_store_url}">AmneziaWG</a>' in text
-    assert f'<a href="{cfg.amneziavpn_google_play_url}">AmneziaVPN</a>' in text
-    assert f'<a href="{cfg.google_play_url}">AmneziaWG</a>' in text
+    assert f'<a href="{cfg.amneziavpn_ios_app_store_url}">App Store</a>' in text
+    assert f'<a href="{cfg.amneziavpn_google_play_url}">Google Play</a>' in text
+    assert cfg.ios_app_store_url not in text and cfg.google_play_url not in text
     assert link.calls == []  # ссылки статические — служба вообще не спрошена
     assert notifier.sent_documents == []  # файл ещё не ушёл
 
@@ -1018,9 +1017,7 @@ ANYA = Subscription(chat_id=777, name="Аня", source=SOURCE_GUEST)
 async def test_all_guests_button_leads_to_admin_screen():
     """Кнопка рисуется по peers@vpn — под тем же правом должна и работать
     (раньше слала usage_all и отказывала админу с точечным правом)."""
-    keyboard = vpn_handlers._card_keyboard(
-        [_server()], subscription=ADMIN, self_serve_nodes=[]
-    )
+    keyboard = vpn_handlers._card_keyboard([_server()], subscription=ADMIN, self_serve_nodes=[])
     flat = [b for row in keyboard.inline_keyboard for b in row]
     button = next(b for b in flat if "Все гости" in b.text)
     assert button.callback_data == vpn_admin_view.guests_cb(0)
@@ -1052,9 +1049,7 @@ async def test_set_access_grants_quota_and_tells_the_guest():
     link = TwoServersLink()
     link._result = _server(node="wooster", label="🇺🇸 США", base_limit_bytes=200 * 10**9)
     notifier = FakeNotifier()
-    callback = FakeCallback(
-        vpn_admin_view.set_access_cb(777, "wooster", "200"), chat_id=1
-    )
+    callback = FakeCallback(vpn_admin_view.set_access_cb(777, "wooster", "200"), chat_id=1)
     await vpn_handlers.handle_action(
         callback, link, notifier, _config(), ADMIN, _pending(), _book(ANYA)
     )

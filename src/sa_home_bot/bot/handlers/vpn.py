@@ -55,6 +55,7 @@ from sa_home_bot.bot import (
     vpn_devices,
     vpn_help,
     vpn_nodes,
+    vpn_settings,
     vpn_wizard,
 )
 from sa_home_bot.bot.invites import Gatekeeper
@@ -516,10 +517,10 @@ def _back_button(text: str, callback_data: str) -> list[InlineKeyboardButton]:
 
 
 def _new_device_button() -> InlineKeyboardButton:
-    # Прежний поток выдачи (выбор сервера/технологии); мастер — рядом, 57.3a.
+    # Выбор платформы → устройство с VLESS во всех странах → «Получить настройки» (57.4).
     return InlineKeyboardButton(
         text="➕ Новое устройство",
-        callback_data=commands.action_callback(vpn_protocol.ACTION_ISSUE, service=SERVICE),
+        callback_data=vpn_settings.card_cb(vpn_settings.SCREEN_NEW),
     )
 
 
@@ -623,6 +624,15 @@ def _card_keyboard_for_device(
     rows: list[list[InlineKeyboardButton]] = []
     if page_url:
         rows.append([InlineKeyboardButton(text="🔌 Подключить в Hiddify", url=page_url)])
+    if _allows(subscription, vpn_protocol.ACTION_ISSUE):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="📥 Получить настройки",
+                    callback_data=vpn_settings.card_cb(vpn_settings.SCREEN_PICK, device.key),
+                )
+            ]
+        )
     if _allows(subscription, vpn_protocol.ACTION_REISSUE):
         rows.append(
             [
@@ -892,31 +902,18 @@ def _proxy_keyboard(
     )
 
 
-def _store_row(emoji: str, store: str, vpn_url: str, wg_url: str) -> str:
-    return (
-        f'{emoji} {store}: <a href="{html.escape(vpn_url)}">AmneziaVPN</a> · '
-        f'<a href="{html.escape(wg_url)}">AmneziaWG</a>'
-    )
-
-
-# Обе ссылки в строке текстом (не длинным URL): решение пользователя
-# 2026-08-04, "на аппстор обе и на гугл плей обе" — по магазину, а не по
-# приложению, чтобы у AmneziaWG остался явный официальный путь на iOS
-# (сайдлоада там нет вовсе).
 def _apk_links_text(config: Settings) -> str:
+    """Ссылки на AmneziaVPN (рекомендуемый клиент); AmneziaWG в магазинах не
+    даём нигде (решение владельца 2026-10-10) — только .apk запасным путём."""
     cfg = config.vpn
     return (
-        "📱 Настоятельно рекомендуем полную версию — <b>AmneziaVPN</b>. Есть и "
-        "облегчённая — <b>AmneziaWG</b> (её и использует эта настройка).\n\n"
-        + _store_row("🍎", "App Store", cfg.amneziavpn_ios_app_store_url, cfg.ios_app_store_url)
-        + "\n"
-        + _store_row("🤖", "Google Play", cfg.amneziavpn_google_play_url, cfg.google_play_url)
-        + "\n"
-        f"🌐 Официальный сайт (все платформы, обе версии): "
-        f"{html.escape(cfg.official_download_url)}\n\n"
-        "Если магазины недоступны — можно получить файл .apk облегчённой версии "
-        "прямо здесь, кнопка ниже. Это аварийный способ на случай, если "
-        "официальные способы не сработали, а не замена им."
+        "📱 Для AmneziaWG рекомендуем приложение <b>AmneziaVPN</b>:\n"
+        f'🍎 <a href="{html.escape(cfg.amneziavpn_ios_app_store_url)}">App Store</a>\n'
+        f'🤖 <a href="{html.escape(cfg.amneziavpn_google_play_url)}">Google Play</a>\n'
+        f"🌐 Сайт: {html.escape(cfg.official_download_url)}\n\n"
+        "Если магазин недоступен — можно временно поставить приложение AmneziaWG "
+        "файлом .apk, кнопка ниже. Потом скачайте настоящий AmneziaVPN и "
+        "перенесите туда настройки."
     )
 
 
@@ -925,7 +922,7 @@ def _apk_links_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📦 Дать APK",
+                    text="📦 Скачать AmneziaWG (.apk)",
                     callback_data=commands.action_callback("apk", "send", service=SERVICE),
                 )
             ]
@@ -973,9 +970,8 @@ _PICK_SERVER_TEXT = "Где завести новое устройство?"
 # оба транспорта. Порядок: VLESS первым (нужен гостям в РФ).
 _PICK_TRANSPORT_TEXT = (
     "Какой технологией выдать новое устройство?\n\n"
-    "• <b>VLESS (Reality)</b> — работает из России (для DPI неотличимо от "
-    "обычного HTTPS).\n"
-    "• <b>AmneziaWG</b> — быстрее там, где не блокируют (не Россия)."
+    "• <b>VLESS · Hiddify</b> — для DPI неотличимо от обычного HTTPS.\n"
+    "• <b>AmneziaWG</b> — быстрее, но в части стран может не работать."
 )
 
 
@@ -1160,13 +1156,15 @@ def _render_main(
     config: Settings,
     *,
     wizard: bool = False,
+    expert: bool = False,
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Главная /vpn. Есть устройства — новая (этап 57.3): остаток квоты и
     предупреждение словами, без цветов и трафика по странам. Нет устройств —
-    первый экран мастера (57.3a, ``wizard`` — личка и без «Я разберусь сам»),
-    а иначе прежняя карточка."""
+    первый экран мастера (57.3a, ``wizard`` — личка и без «Я разберусь сам»);
+    после «Я разберусь сам» (``expert``) — та же новая главная с пустым списком
+    (57.4); иначе прежняя карточка (группа, нет VLESS-сервера)."""
     self_serve = _self_serve_nodes(servers, config)
-    if vpn_devices.build_devices(servers):
+    if vpn_devices.build_devices(servers) or (expert and _wizard_available(servers, subscription)):
         return (
             vpn_devices.home_text(servers, unavailable=down),
             _home_keyboard(servers, subscription=subscription, self_serve_nodes=self_serve),
@@ -1201,6 +1199,7 @@ async def _redraw_card(
         subscription,
         config,
         wizard=not expert and _is_private(callback.message.chat.id),
+        expert=expert,
     )
     with contextlib.suppress(TelegramBadRequest):
         await callback.message.edit_text(text, reply_markup=keyboard)
@@ -1219,14 +1218,14 @@ async def _show_screen(
     """Экраны экспертного режима — одним сообщением, редактируется на месте.
     Устройство разрешается по свежему usage; пропало — назад к списку."""
     error, servers, _down = await _card(node_link, callback.message.chat.id, subscription)
-    devices = vpn_devices.build_devices(servers) if error is None else []
-    if not devices:
+    if error is not None:
         if not answered:
             await callback.answer()
         await _redraw_card(callback, node_link, subscription, config)
         return
+    devices = vpn_devices.build_devices(servers)
     device = vpn_devices.find_device(devices, key) if key else None
-    if screen != _SCREEN_LIST and device is None:
+    if screen not in (_SCREEN_LIST, vpn_settings.SCREEN_NEW) and device is None:
         if not answered:
             await callback.answer("Устройство не найдено — обновил список.", show_alert=True)
             answered = True
@@ -1243,6 +1242,15 @@ async def _show_screen(
         text, keyboard = vpn_devices.reissue_text(device), _reissue_keyboard(device, servers)
     elif screen == _SCREEN_DELETE:
         text, keyboard = vpn_devices.delete_text(device), _delete_keyboard(device)
+    elif screen == vpn_settings.SCREEN_PICK:
+        text = vpn_settings.pick_text(device.label)
+        keyboard = vpn_settings.pick_keyboard(device.key)
+    elif screen == vpn_settings.SCREEN_AWG:
+        awg_servers = _awg_servers(servers)
+        text = vpn_settings.awg_pick_text(device.label) if awg_servers else vpn_settings.NO_AWG_TEXT
+        keyboard = vpn_settings.awg_pick_keyboard(device.key, awg_servers)
+    elif screen == vpn_settings.SCREEN_NEW:
+        text, keyboard = vpn_wizard.PICK_TEXT, vpn_settings.new_device_keyboard()
     else:
         text = vpn_devices.list_text(devices)
         keyboard = _list_keyboard(devices, subscription=subscription)
@@ -1352,6 +1360,433 @@ async def _expert_delete(
     await _show_screen(callback, node_link, subscription, config, _SCREEN_LIST)
 
 
+# --- выдача настроек в экспертном режиме (этап 57.4) --------------------------
+
+
+def _awg_servers(servers: list[dict]) -> list[dict]:
+    """Открытые человеку страны, где выдаётся AmneziaWG."""
+    return [
+        server
+        for server in servers
+        if server.get("node")
+        and _is_allowed(server)
+        and vpn_protocol.TRANSPORT_AWG in (server.get("transports") or [])
+    ]
+
+
+def _schedule_cleanup(
+    notifier: Notifier,
+    pending: PendingVpnSecrets,
+    chat_id: int,
+    message_ids: list[int | None],
+    tokens: list[str],
+    ttl_s: float,
+) -> None:
+    """Сообщения с настройками и ожидающие кнопки-секреты исчезают по TTL."""
+
+    async def _cleanup() -> None:
+        await asyncio.sleep(ttl_s)
+        for token in tokens:
+            pending.discard(token)
+        for message_id in message_ids:
+            if message_id is not None:
+                await notifier.delete_message(chat_id, message_id)
+
+    asyncio.create_task(_cleanup(), name="vpn-settings-cleanup")
+
+
+async def _fresh_device(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    subscription: Subscription,
+    config: Settings,
+    key: str,
+) -> tuple[vpn_devices.Device, list[dict]] | None:
+    """Устройство по ключу из свежего usage. Нет — алерт и возврат к списку."""
+    error, servers, _down = await _card(node_link, callback.message.chat.id, subscription)
+    device = (
+        vpn_devices.find_device(vpn_devices.build_devices(servers), key) if error is None else None
+    )
+    if device is None:
+        await callback.answer("Устройство не найдено — обновите список.", show_alert=True)
+        await _show_screen(callback, node_link, subscription, config, _SCREEN_LIST)
+        return None
+    return device, servers
+
+
+async def _command_or_none(
+    node_link: ServiceLink, action: str, payload: dict, node: str
+) -> dict | None:
+    try:
+        return await node_link.command(action, payload, dst=Address(node=node, service=SERVICE))
+    except (ProtoError, ServiceUnavailableError) as exc:
+        log.warning("vpn: %s на %s не удалось: %s", action, node, exc)
+        return None
+
+
+async def _deliver_vless(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    notifier: Notifier,
+    config: Settings,
+    subscription: Subscription,
+    pending: PendingVpnSecrets,
+    key: str,
+) -> None:
+    """``issue:~v<ключ>`` — VLESS · Hiddify одним сообщением: «🔌 Подключить»,
+    ссылки всех стран, QR по кнопке; файл настроек — если устройство ещё не
+    выходило на связь. Недостающие страны сначала довыпускаются."""
+    chat_id = callback.message.chat.id
+    if not _is_private(chat_id):
+        await callback.answer("Секрет доступа выдаётся только в личке.", show_alert=True)
+        return
+    found = await _fresh_device(callback, node_link, subscription, config, key)
+    if found is None:
+        return
+    device, servers = found
+    await callback.answer("Готовлю настройки…")
+    thread_id = callback.message.message_thread_id
+    ttl_s = config.vpn.config_message_ttl_s
+    reality = vpn_protocol.TRANSPORT_REALITY
+
+    added: list[str] = []
+    nodes: list[str] = []
+    for server in servers:
+        node = server.get("node")
+        if not node:
+            continue
+        if device.connection(node, reality) is not None:
+            nodes.append(node)
+            continue
+        if _is_allowed(server) and reality in (server.get("transports") or []):
+            issued = await _command_or_none(
+                node_link,
+                vpn_protocol.ACTION_ISSUE,
+                {"chat_id": chat_id, "device_label": device.label, "transport": reality},
+                node,
+            )
+            if issued is not None:
+                nodes.append(node)
+                added.append(_server_label(server))
+    countries = vpn_devices.countries_of(servers)
+    results = await asyncio.gather(
+        *(
+            _command_or_none(
+                node_link,
+                vpn_protocol.ACTION_GET_VLESS,
+                {"chat_id": chat_id, "device_label": device.label},
+                node,
+            )
+            for node in nodes
+        )
+    )
+    got = [(node, res) for node, res in zip(nodes, results, strict=True) if res]
+    if not got:
+        await _wizard_edit(
+            callback, vpn_settings.UNAVAILABLE_TEXT, vpn_settings.back_keyboard(device.key)
+        )
+        return
+
+    wants_file = config.vpn.wizard_settings_file
+    file_needed = wants_file and not vpn_settings.had_vless_handshake(device)
+    message_ids: list[int | None] = []
+    first = got[0][1]
+    config_text = str(first.get("config_text") or "")
+    file_sent = False
+    if file_needed and config_text:
+        sent = await notifier.send_document(
+            chat_id,
+            config_text.encode("utf-8"),
+            filename=_reality_filename(device.label, str(first.get("location") or "")),
+            caption=vpn_settings.VLESS_FILE_CAPTION,
+            message_thread_id=thread_id,
+        )
+        message_ids.append(sent[0] if sent is not None else None)
+        file_sent = sent is not None
+
+    page_url = await _subscription_page_url(node_link, chat_id, device)
+    multi = len(got) > 1
+    tokens: list[str] = []
+    qr_buttons: list[tuple[str, str]] = []
+    links: list[tuple[str, str]] = []
+    for node, res in got:
+        country = countries.get(node) or vpn_devices.Country(node, node)
+        if res.get("share_url"):
+            links.append((country.label, str(res["share_url"])))
+        if res.get("qr_png_b64"):
+            token = pending.put(
+                str(res.get("config_text") or ""),
+                device.label,
+                res.get("qr_png_b64"),
+                "qr",
+                ttl_s,
+                transport=reality,
+                share_url=res.get("share_url"),
+                deep_link=res.get("deep_link"),
+                location=str(res.get("location") or country.label),
+            )
+            tokens.append(token)
+            qr_buttons.append(
+                (
+                    vpn_settings.qr_button_text(country, multi),
+                    commands.action_callback(
+                        vpn_protocol.ACTION_ISSUE, f"f_{token}", service=SERVICE
+                    ),
+                )
+            )
+    text = vpn_settings.vless_text(
+        device.label, links, has_page=bool(page_url), file_sent=file_sent, added=added
+    )
+    button_id = await notifier.send_direct(
+        chat_id,
+        text,
+        reply_markup=vpn_settings.vless_keyboard(
+            page_url=page_url,
+            file_again_key=device.key if wants_file and not file_sent else None,
+            qr_buttons=qr_buttons,
+        ),
+        message_thread_id=thread_id,
+    )
+    message_ids.append(button_id)
+    _schedule_cleanup(notifier, pending, chat_id, message_ids, tokens, ttl_s)
+
+
+async def _vless_file_again(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    notifier: Notifier,
+    config: Settings,
+    subscription: Subscription,
+    key: str,
+) -> None:
+    """``issue:~s<ключ>`` — файл настроек Hiddify ещё раз (по TTL удаляется)."""
+    chat_id = callback.message.chat.id
+    if not _is_private(chat_id):
+        await callback.answer("Секрет доступа выдаётся только в личке.", show_alert=True)
+        return
+    found = await _fresh_device(callback, node_link, subscription, config, key)
+    if found is None:
+        return
+    device, _servers = found
+    conn = next((c for c in device.issued if c.transport == vpn_protocol.TRANSPORT_REALITY), None)
+    result = (
+        await _command_or_none(
+            node_link,
+            vpn_protocol.ACTION_GET_VLESS,
+            {"chat_id": chat_id, "device_label": device.label},
+            conn.node,
+        )
+        if conn is not None
+        else None
+    )
+    config_text = str((result or {}).get("config_text") or "")
+    if not config_text:
+        await callback.answer("Сервер не ответил — повторите чуть позже.", show_alert=True)
+        return
+    await callback.answer("Отправляю…")
+    sent = await notifier.send_document(
+        chat_id,
+        config_text.encode("utf-8"),
+        filename=_reality_filename(device.label, str(result.get("location") or "")),
+        caption=vpn_settings.VLESS_FILE_CAPTION,
+        message_thread_id=callback.message.message_thread_id,
+    )
+    _delete_later(
+        notifier, chat_id, sent[0] if sent is not None else None, config.vpn.config_message_ttl_s
+    )
+
+
+async def _awg_country(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    notifier: Notifier,
+    config: Settings,
+    subscription: Subscription,
+    pending: PendingVpnSecrets,
+    key: str,
+    node: str | None,
+) -> None:
+    """``issue:~g<ключ>:<нода>`` — страна выбрана. Ключ AmneziaWG уже есть —
+    сначала предупреждение, иначе выпуск."""
+    found = await _fresh_device(callback, node_link, subscription, config, key)
+    if found is None:
+        return
+    device, servers = found
+    server = next((s for s in _awg_servers(servers) if s.get("node") == node), None)
+    if server is None or not node:
+        await callback.answer("В этой стране AmneziaWG сейчас не выдаётся.", show_alert=True)
+        await _show_screen(callback, node_link, subscription, config, vpn_settings.SCREEN_AWG, key)
+        return
+    if device.connection(node, vpn_protocol.TRANSPORT_AWG) is not None:
+        await callback.answer()
+        country = vpn_devices.Country(node, _server_label(server))
+        await _wizard_edit(
+            callback,
+            vpn_settings.awg_replace_text(device.label, country),
+            vpn_settings.awg_replace_keyboard(key, node),
+        )
+        return
+    await _awg_deliver(
+        callback,
+        node_link,
+        notifier,
+        config,
+        subscription,
+        pending,
+        device,
+        server,
+        vpn_protocol.ACTION_ISSUE,
+    )
+
+
+async def _awg_deliver(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    notifier: Notifier,
+    config: Settings,
+    subscription: Subscription,
+    pending: PendingVpnSecrets,
+    device: vpn_devices.Device,
+    server: dict,
+    action: str,
+) -> None:
+    """Выпустить (issue) или заменить (reissue) ключ AmneziaWG в стране и отдать
+    файл .conf + шаги установки. Всё удаляется по TTL."""
+    chat_id = callback.message.chat.id
+    if not _is_private(chat_id):
+        await callback.answer("Секрет доступа выдаётся только в личке.", show_alert=True)
+        return
+    await callback.answer("Выпускаю…")
+    node = server["node"]
+    try:
+        result = await node_link.command(
+            action,
+            {
+                "chat_id": chat_id,
+                "device_label": device.label,
+                "transport": vpn_protocol.TRANSPORT_AWG,
+            },
+            dst=Address(node=node, service=SERVICE),
+        )
+    except ProtoError as exc:
+        await callback.message.answer(f"⚠️ {exc.message}")
+        return
+    except ServiceUnavailableError:
+        await callback.message.answer("⚠️ Служба VPN недоступна.")
+        return
+    thread_id = callback.message.message_thread_id
+    ttl_s = config.vpn.config_message_ttl_s
+    country = vpn_devices.Country(node, _server_label(server))
+    config_text = str(result.get("config_text") or "")
+    qr_b64 = result.get("qr_png_b64")
+    sent = await notifier.send_document(
+        chat_id,
+        config_text.encode("utf-8"),
+        filename=_conf_filename(device.label, str(result.get("location") or "")),
+        caption=vpn_settings.awg_file_caption(device.label, country),
+        message_thread_id=thread_id,
+    )
+    tokens: list[str] = []
+    qr_callback = None
+    if qr_b64:
+        token = pending.put(
+            config_text,
+            device.label,
+            qr_b64,
+            "qr",
+            ttl_s,
+            transport=vpn_protocol.TRANSPORT_AWG,
+            location=str(result.get("location") or ""),
+        )
+        tokens.append(token)
+        qr_callback = commands.action_callback(
+            vpn_protocol.ACTION_ISSUE, f"f_{token}", service=SERVICE
+        )
+    button_id = await notifier.send_direct(
+        chat_id,
+        vpn_settings.awg_steps_text(device.label, country),
+        reply_markup=vpn_settings.awg_steps_keyboard(config.vpn, qr_callback),
+        message_thread_id=thread_id,
+    )
+    _schedule_cleanup(
+        notifier,
+        pending,
+        chat_id,
+        [sent[0] if sent is not None else None, button_id],
+        tokens,
+        ttl_s,
+    )
+    if action == vpn_protocol.ACTION_REISSUE:
+        # Предупреждение с «Выпустить новый» не должно остаться под рукой.
+        await _show_screen(
+            callback,
+            node_link,
+            subscription,
+            config,
+            vpn_settings.SCREEN_AWG,
+            device.key,
+        )
+
+
+async def _expert_issue(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    notifier: Notifier,
+    config: Settings,
+    subscription: Subscription,
+    pending: PendingVpnSecrets,
+    value: str,
+    node_id: str | None,
+) -> None:
+    """``issue:~<вид><ключ>`` экспертного режима (57.4): v — VLESS · Hiddify,
+    s — файл настроек ещё раз, g — AmneziaWG в стране, n — новое устройство."""
+    kind, rest = value[1:2], value[2:]
+    if kind == vpn_settings.KIND_VLESS:
+        await _deliver_vless(callback, node_link, notifier, config, subscription, pending, rest)
+    elif kind == vpn_settings.KIND_FILE:
+        await _vless_file_again(callback, node_link, notifier, config, subscription, rest)
+    elif kind == vpn_settings.KIND_AWG:
+        await _awg_country(
+            callback, node_link, notifier, config, subscription, pending, rest, node_id
+        )
+    elif kind == vpn_settings.KIND_NEW:
+        await _wizard_create(callback, node_link, config, subscription, rest[:1], expert=True)
+    else:
+        await callback.answer()
+
+
+async def _awg_replace(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    notifier: Notifier,
+    config: Settings,
+    subscription: Subscription,
+    pending: PendingVpnSecrets,
+    value: str,
+    node_id: str | None,
+) -> None:
+    """``reissue:~g<ключ>:<нода>`` — «Выпустить новый» после предупреждения."""
+    found = await _fresh_device(callback, node_link, subscription, config, value[2:])
+    if found is None:
+        return
+    device, servers = found
+    server = next((s for s in _awg_servers(servers) if s.get("node") == node_id), None)
+    if server is None:
+        await callback.answer("В этой стране AmneziaWG сейчас не выдаётся.", show_alert=True)
+        return
+    await _awg_deliver(
+        callback,
+        node_link,
+        notifier,
+        config,
+        subscription,
+        pending,
+        device,
+        server,
+        vpn_protocol.ACTION_REISSUE,
+    )
+
+
 # --- пошаговая настройка (этап 57.3a) ---------------------------------------
 
 
@@ -1396,9 +1831,13 @@ async def _wizard_create(
     config: Settings,
     subscription: Subscription,
     platform_code: str,
+    *,
+    expert: bool = False,
 ) -> None:
     """``issue:~w<платформа>`` — создать устройство: VLESS во всех странах,
-    открытых человеку. Часть нод не ответила — идём с тем, что есть."""
+    открытых человеку. Часть нод не ответила — идём с тем, что есть.
+    ``expert`` (``issue:~n<платформа>``, 57.4) — после создания открывается экран
+    «Получить настройки» этого устройства, а не шаги мастера."""
     chat_id = callback.message.chat.id
     platform = vpn_wizard.PLATFORMS.get(platform_code)
     if platform is None:
@@ -1425,10 +1864,15 @@ async def _wizard_create(
         await _wizard_edit(
             callback,
             vpn_wizard.CREATE_FAILED_TEXT,
-            vpn_wizard.create_failed_keyboard(platform.code),
+            vpn_settings.create_failed_keyboard(platform.code)
+            if expert
+            else vpn_wizard.create_failed_keyboard(platform.code),
         )
         return
     key = vpn_devices.device_key(label)
+    if expert:
+        await _wizard_edit(callback, vpn_settings.pick_text(label), vpn_settings.pick_keyboard(key))
+        return
     needs_file = vpn_wizard.needs_settings_file(config.vpn, devices, key)
     await _wizard_edit(
         callback,
@@ -1633,10 +2077,10 @@ def _file_caption(label_escaped: str) -> str:
     )
 
 
-def _qr_caption(label_escaped: str) -> str:
+def _qr_caption(label_escaped: str, flag: str = "") -> str:
     return (
-        f"📶 QR — устройство «{label_escaped}». Откройте AmneziaWG → "
-        "«+» → «Сканировать QR-код» (удобно для настройки с ДРУГОГО "
+        f"📶 QR — «{label_escaped}» · AmneziaWG{' ' + flag if flag else ''}. Откройте AmneziaVPN → "
+        "«+» → «QR-код» (удобно для настройки с ДРУГОГО "
         "устройства — сфотографировать собственный экран телефон не может)."
     )
 
@@ -1656,13 +2100,10 @@ def _reality_file_caption(label_escaped: str) -> str:
     )
 
 
-def _reality_qr_caption(label_escaped: str) -> str:
+def _reality_qr_caption(label_escaped: str, flag: str = "") -> str:
     return (
-        f"📶 QR — «{label_escaped}» (VLESS), подключение. Hiddify → «+» → "
-        "«Сканировать QR» (удобно для настройки с ДРУГОГО устройства). "
-        "Если на этом устройстве Hiddify ставится впервые — один раз "
-        "импортируйте ещё и файл настроек маршрутизации (см. предыдущие "
-        "сообщения/ссылку ниже)."
+        f"📶 QR — «{label_escaped}» · VLESS · Hiddify{' ' + flag if flag else ''}. "
+        "Hiddify → «+» → «Сканировать QR» (удобно для настройки с ДРУГОГО устройства)."
     )
 
 
@@ -1676,10 +2117,11 @@ def _secret_file_caption(transport: str, label_escaped: str) -> str:
     return _file_caption(label_escaped)
 
 
-def _secret_qr_caption(transport: str, label_escaped: str) -> str:
+def _secret_qr_caption(transport: str, label_escaped: str, location: str = "") -> str:
+    where = html.escape(vpn_protocol.country_flag(location))
     if transport == vpn_protocol.TRANSPORT_REALITY:
-        return _reality_qr_caption(label_escaped)
-    return _qr_caption(label_escaped)
+        return _reality_qr_caption(label_escaped, where)
+    return _qr_caption(label_escaped, where)
 
 
 def _reality_links_note(result_or_secret: dict | PendingVpnSecret) -> str:
@@ -1750,7 +2192,7 @@ async def _send_secret(
                 chat_id,
                 base64.b64decode(qr_b64),
                 filename="vpn-qr.png",
-                caption=_secret_qr_caption(transport, label_escaped),
+                caption=_secret_qr_caption(transport, label_escaped, location),
                 message_thread_id=message_thread_id,
             )
         reveal = "file"
@@ -1787,6 +2229,18 @@ async def _send_secret(
             await notifier.delete_message(chat_id, button_id)
 
     asyncio.create_task(_cleanup(), name="vpn-secret-cleanup")
+
+
+def _without_button(message: object, callback_data: str | None) -> InlineKeyboardMarkup | None:
+    """Клавиатура сообщения без нажатой кнопки; пусто — ``None`` (у сообщения с
+    несколькими кнопками-секретами, напр. QR по странам, остальные остаются)."""
+    markup = getattr(message, "reply_markup", None)
+    rows = [
+        [b for b in row if b.callback_data != callback_data]
+        for row in (getattr(markup, "inline_keyboard", None) or [])
+    ]
+    rows = [row for row in rows if row]
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
 def _get_config_keyboard(action_id: str, token: str, button_text: str) -> InlineKeyboardMarkup:
@@ -1840,6 +2294,12 @@ async def handle_action(
     if action_id == "apk":
         if not _is_private(chat_id):
             await callback.answer("Напишите мне в личку — там и пришлю.", show_alert=True)
+            return
+        if value == vpn_settings.APK_NO_STORE:
+            await callback.answer()
+            await callback.message.answer(
+                vpn_settings.NO_STORE_TEXT, reply_markup=vpn_settings.no_store_keyboard()
+            )
             return
         if value == "send":
             # Второе нажатие — «📦 Дать APK» под сообщением со ссылками: сам
@@ -1909,6 +2369,16 @@ async def handle_action(
         await _redraw_card(callback, node_link, subscription, config)
         return
 
+    if (
+        action_id == vpn_protocol.ACTION_REISSUE
+        and value
+        and value.startswith(f"{_EXPERT_PREFIX}{vpn_settings.KIND_AWG}")
+    ):
+        await _awg_replace(
+            callback, node_link, notifier, config, subscription, pending_vpn_secrets, value, node_id
+        )
+        return
+
     if action_id == vpn_protocol.ACTION_REISSUE and value and value.startswith(_EXPERT_PREFIX):
         await _expert_reissue(
             callback, node_link, notifier, config, subscription, pending_vpn_secrets, value, node_id
@@ -1921,6 +2391,12 @@ async def handle_action(
         and value.startswith(f"~{vpn_wizard.PREFIX}")
     ):
         await _wizard_create(callback, node_link, config, subscription, value[2:3])
+        return
+
+    if action_id == vpn_protocol.ACTION_ISSUE and value and value.startswith(_EXPERT_PREFIX):
+        await _expert_issue(
+            callback, node_link, notifier, config, subscription, pending_vpn_secrets, value, node_id
+        )
         return
 
     if action_id in (vpn_protocol.ACTION_ISSUE, vpn_protocol.ACTION_REISSUE):
@@ -1941,15 +2417,15 @@ async def handle_action(
             await callback.answer("Отправляю…")
             label_escaped = html.escape(secret.device_label)
             if secret.reveal == "qr" and secret.qr_png_b64:
-                await notifier.send_photo(
+                sent_id = await notifier.send_photo(
                     chat_id,
                     base64.b64decode(secret.qr_png_b64),
                     filename="vpn-qr.png",
-                    caption=_secret_qr_caption(secret.transport, label_escaped),
+                    caption=_secret_qr_caption(secret.transport, label_escaped, secret.location),
                     message_thread_id=callback.message.message_thread_id,
                 )
             else:
-                await notifier.send_document(
+                sent = await notifier.send_document(
                     chat_id,
                     secret.config_text.encode("utf-8"),
                     filename=_secret_filename(
@@ -1958,8 +2434,13 @@ async def handle_action(
                     caption=_secret_file_caption(secret.transport, label_escaped),
                     message_thread_id=callback.message.message_thread_id,
                 )
+                sent_id = sent[0] if sent is not None else None
+            # Отданный секрет исчезает, как и само сообщение (по TTL).
+            _delete_later(notifier, chat_id, sent_id, config.vpn.config_message_ttl_s)
             with contextlib.suppress(TelegramBadRequest):
-                await callback.message.edit_reply_markup(reply_markup=None)
+                await callback.message.edit_reply_markup(
+                    reply_markup=_without_button(callback.message, callback.data)
+                )
             return
 
         # Выбор транспорта из пикера: act:vpn:issue:t_<transport> — дальше как
