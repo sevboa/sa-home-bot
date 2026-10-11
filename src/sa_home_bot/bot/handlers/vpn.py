@@ -1956,7 +1956,9 @@ async def _expert_issue(
             callback, node_link, notifier, config, subscription, pending, rest, node_id
         )
     elif kind == vpn_settings.KIND_NEW:
-        await _wizard_create(callback, node_link, config, subscription, rest[:1], expert=True)
+        await _wizard_create(
+            callback, node_link, config, subscription, rest[:1], expert=True, notifier=notifier
+        )
     else:
         await callback.answer()
 
@@ -2078,19 +2080,23 @@ async def _wizard_create(
         return
     key = vpn_devices.device_key(label)
     if expert:
-        # 57.13: настройки нового устройства — сразу страница (одно пересылаемое сообщение);
-        # выбор способа в Telegram — только если страницы нет.
+        # 57.13: настройки нового устройства — сразу страница: ссылка ОТДЕЛЬНЫМ
+        # пересылаемым сообщением, а меню становится карточкой устройства (оттуда
+        # «⬅️ Назад» к списку). Выбор способа в Telegram — только если страницы нет.
         page_url = await _page_url_by_label(node_link, chat_id, label)
-        if page_url is not None:
-            await _wizard_edit(
-                callback,
-                vpn_settings.page_link_text(label, page_url),
-                vpn_settings.page_link_keyboard(page_url),
-            )
-        else:
+        if page_url is None:
             await _wizard_edit(
                 callback, vpn_settings.pick_text(label), vpn_settings.pick_keyboard(key)
             )
+            return
+        if notifier is not None:
+            await notifier.send_direct(
+                chat_id,
+                vpn_settings.page_link_text(label, page_url),
+                reply_markup=vpn_settings.page_link_keyboard(page_url),
+                message_thread_id=callback.message.message_thread_id,
+            )
+        await _show_screen(callback, node_link, subscription, config, _SCREEN_DEVICE, key)
         return
     needs_file = vpn_wizard.needs_settings_file(config.vpn, devices, key)
     first = vpn_wizard.steps(needs_file)[0]

@@ -133,6 +133,9 @@ class NodeInfo:
     awg: bool = False
     awg_key: bool = False
     base: str = ""  # https://хост:порт страницы этой ноды (для проверки из браузера)
+    # Устройство этой ноде известно (по VLESS или по подписи токена) — можно выдавать
+    # AmneziaVPN, даже если VLESS в этой стране у устройства нет.
+    device: bool = False
 
     def to_wire(self) -> dict:
         return {
@@ -143,6 +146,7 @@ class NodeInfo:
             "health": self.health,
             "awg": self.awg,
             "awg_key": self.awg_key,
+            "device": self.device,
         }
 
     @classmethod
@@ -156,6 +160,7 @@ class NodeInfo:
             awg=bool(raw.get("awg")),
             awg_key=bool(raw.get("awg_key")),
             base=str(raw.get("base") or ""),
+            device=bool(raw.get("device")),
         )
 
 

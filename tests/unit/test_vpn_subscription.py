@@ -793,6 +793,50 @@ async def test_awg_rate_limits_allow_issue_two_countries_and_reissues(awg_swarm)
     assert not web._rate_ok(token, "wooster")
 
 
+async def test_awg_offered_where_device_has_no_vless(awg_swarm):
+    """Старое устройство: VLESS только в 🇳🇱, AmneziaVPN в 🇺🇸 уже есть — страница
+    всё равно знает обе страны: 🇺🇸 предлагает перевыпуск, после отзыва — выпуск."""
+    cl, a, b, _web = awg_swarm
+    token = _token(a)
+    await b.run_command(
+        vpn_protocol.ACTION_REVOKE,
+        {"chat_id": CHAT, "device_label": "📱 iPhone", "transport": TRANSPORT_REALITY},
+    )
+    await b.run_command(
+        vpn_protocol.ACTION_ISSUE,
+        {"chat_id": CHAT, "device_label": "📱 iPhone", "transport": vpn_protocol.TRANSPORT_AWG},
+    )
+    a._sub_cache.clear()
+    text = await (await cl.get(f"/s/{token}")).text()
+    assert 'data-node="jeeves"' in text and 'data-node="wooster"' in text
+    wooster = text[text.index('data-node="wooster"') :]
+    assert 'data-have="1"' in wooster.split("</div>", 1)[0]
+    exists = await _awg(cl, token, "wooster")
+    assert exists.status == 409
+    await b.run_command(
+        vpn_protocol.ACTION_REVOKE,
+        {"chat_id": CHAT, "device_label": "📱 iPhone", "transport": vpn_protocol.TRANSPORT_AWG},
+    )
+    a._sub_cache.clear()
+    resp = await _awg(cl, token, "wooster")
+    assert resp.status == 200 and (await resp.json())["key"].startswith("vpn://")
+    assert await b._active_row(CHAT, "📱 iPhone", vpn_protocol.TRANSPORT_AWG) is not None
+
+
+async def test_sub_links_hint_must_match_token_signature(awg_swarm):
+    _cl, a, b, _web = awg_swarm
+    token = _token(a)
+    await b.run_command(
+        vpn_protocol.ACTION_REVOKE,
+        {"chat_id": CHAT, "device_label": "📱 iPhone", "transport": TRANSPORT_REALITY},
+    )
+    for chat_id, label in ((CHAT + 1, "📱 iPhone"), (CHAT, "чужое"), (0, "📱 iPhone")):
+        reply = await b._sub_links({"token": token, "chat_id": chat_id, "device_label": label})
+        assert not reply["found"] and not reply["info"].get("device")
+    ok = await b._sub_links({"token": token, "chat_id": CHAT, "device_label": "📱 iPhone"})
+    assert not ok["found"] and ok["info"]["device"] and not ok["info"]["awg_key"]
+
+
 async def test_awg_not_offered_without_issuer(swarm):
     a, _b, _link = swarm
     web = SubscriptionWeb(a._cfg, a.resolve_subscription)

@@ -330,11 +330,8 @@ class SubscriptionWeb:
         status = sub.detect_status(request.remote or "", found.nodes, self._cfg.subnet)
         forms: dict[str, str] = {}
         if self._issue_awg is not None:
-            have = {entry.node for entry in found.entries}
             forms = {
-                n.node: self._new_nonce(token, n.node)
-                for n in found.nodes
-                if n.awg and n.node in have
+                n.node: self._new_nonce(token, n.node) for n in found.nodes if n.awg and n.device
             }
         body = sub.render_page(
             found,
@@ -389,8 +386,7 @@ class SubscriptionWeb:
         nonce, node_id = str(form.get("nonce") or ""), str(form.get("node") or "")
         action = str(form.get("action") or "")
         node = next((n for n in found.nodes if n.node == node_id), None)
-        have = {entry.node for entry in found.entries}
-        if node is None or not node.awg or node.node not in have or action not in (
+        if node is None or not node.awg or not node.device or action not in (
             "issue",
             "reissue",
         ):
