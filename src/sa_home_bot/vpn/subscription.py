@@ -785,7 +785,8 @@ def render_page(
 <a class="btn" id="add" href="{e(link, quote=True)}">➕ Добавить в Hiddify</a>
 <details style="margin-top:12px"><summary class="sm">Другие способы</summary>
 <p class="hint">🧪 Проверка (временно): профиль Hiddify сразу с маршрутами — российские сайты
-напрямую, остальное через VPN. После добавления выберите в Hiddify профиль «· маршруты».</p>
+напрямую, остальное через VPN. После добавления выберите в Hiddify профиль «· маршруты».
+Проверка: 2ip.ru должен показать ваш настоящий адрес, а ifconfig.me — страну VPN.</p>
 <a class="btn alt" id="addroutes" href="{e(deep_link(sub_url + "?format=singbox", sub.device_label), quote=True)}">🧪 Hiddify с маршрутами</a>
 <p class="hint">Не открылось? Откройте эту страницу в обычном браузере или добавьте вручную.</p>
 <button class="btn alt" id="copy" type="button">📋 Скопировать ссылку</button>
