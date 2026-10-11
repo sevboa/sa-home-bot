@@ -27,6 +27,44 @@ SERVICE_NAME = "vpn"
 # пользователя 2026-09-10). Значение хранится в vpn_peers.transport.
 # Reality-пир переиспользует колонки: public_key = UUID клиента xray,
 # address = его email ("c<chat_id>-<устройство>").
+# Имена устройств — цветы (решение пользователя 2026-08-04, вернули 2026-10-11):
+# служба выбирает их при выдаче без имени, мастер /vpn — для новых устройств
+# («🤖 Peony»: платформа эмодзи, как страна флагом). Только английские буквы и не
+# длиннее 8 символов: имя файла .conf не должно превышать 15 символов — предел
+# имени тоннеля wireguard-android.
+FLOWER_NAMES = (
+    "Rose",
+    "Lily",
+    "Iris",
+    "Aster",
+    "Poppy",
+    "Daisy",
+    "Tulip",
+    "Lotus",
+    "Phlox",
+    "Pansy",
+    "Sedum",
+    "Canna",
+    "Hosta",
+    "Orchid",
+    "Violet",
+    "Dahlia",
+    "Azalea",
+    "Camellia",
+    "Jasmine",
+    "Lilac",
+    "Peony",
+    "Zinnia",
+    "Yarrow",
+    "Crocus",
+    "Freesia",
+    "Begonia",
+    "Petunia",
+    "Gerbera",
+    "Mallow",
+    "Cosmos",
+)
+
 TRANSPORT_AWG = "awg"  # AmneziaWG (UDP + обфускация) — исходный транспорт
 TRANSPORT_REALITY = "reality"  # VLESS+Reality через xray-core (TCP/443) — для РФ
 TRANSPORTS = (TRANSPORT_AWG, TRANSPORT_REALITY)

@@ -158,6 +158,12 @@ async def test_pick_screen():
 # --- создание устройства ------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _first_flower(monkeypatch):
+    """Цветок для имени выбирается случайно — в тестах берём первый свободный."""
+    monkeypatch.setattr(w.random, "choice", lambda seq: seq[0])
+
+
 async def test_create_issues_vless_in_every_country_and_shows_page_step():
     cb, link, _ = await _press("act:vpn:issue:~wi", cfg=_cfg(wizard_settings_file=False))
     issues = [
@@ -167,12 +173,11 @@ async def test_create_issues_vless_in_every_country_and_shows_page_step():
     ]
     assert sorted(n for n, _ in issues) == ["jeeves", "wooster"]
     assert all(
-        a == {"chat_id": 778, "device_label": "📱 iPhone", "transport": "reality"}
-        for _, a in issues
+        a == {"chat_id": 778, "device_label": "📱 Rose", "transport": "reality"} for _, a in issues
     )
     text, markup = _last(cb)
     assert text == (
-        "📶 <b>Настройки VPN · 📱 iPhone</b>\n"
+        "📶 <b>Настройки VPN · 📱 Rose</b>\n"
         "Откройте ссылку на устройстве, которое подключаете (телефон или компьютер) — там всё "
         "по шагам: AmneziaVPN, Hiddify и проверка, что VPN включён.\n"
         "https://1.2.3.4:8444/s/tok\n"
@@ -184,7 +189,7 @@ async def test_create_issues_vless_in_every_country_and_shows_page_step():
     assert _texts(markup)[1:] == ["✅ Готово", "🙋 Не получается"]
 
 
-@pytest.mark.parametrize(("code", "label"), [("a", "🤖 Android"), ("c", "💻 Компьютер")])
+@pytest.mark.parametrize(("code", "label"), [("a", "🤖 Rose"), ("c", "💻 Rose")])
 async def test_platforms(code, label):
     cb, link, _ = await _press(f"act:vpn:issue:~w{code}", cfg=_cfg(wizard_settings_file=False))
     assert link.calls[0][1]["device_label"] == label
@@ -192,18 +197,21 @@ async def test_platforms(code, label):
     assert first.text == "📶 Открыть настройки" and "/s/tok" in first.url
 
 
-def test_device_names_get_numbers():
+def test_device_names_are_flowers_with_platform_emoji():
     ip = w.PLATFORMS["i"]
-    assert w.next_label(ip, set()) == "📱 iPhone"
-    assert w.next_label(ip, {"📱 iPhone"}) == "📱 iPhone 2"
-    assert w.next_label(ip, {"📱 iPhone", "📱 iPhone 2"}) == "📱 iPhone 3"
-    assert w.next_label(w.PLATFORMS["a"], {"📱 iPhone"}) == "🤖 Android"
+    rose, lily = vpn_protocol.FLOWER_NAMES[:2]
+    assert w.next_label(ip, set()) == f"📱 {rose}"
+    # цветок занят и с другим эмодзи, и без него (старые «Rose»)
+    assert w.next_label(ip, {f"🤖 {rose}"}) == f"📱 {lily}"
+    assert w.next_label(w.PLATFORMS["a"], {rose}) == f"🤖 {lily}"
+    every = set(vpn_protocol.FLOWER_NAMES)
+    assert w.next_label(ip, every) == f"📱 {rose} 2"
 
 
-async def test_second_android_is_numbered(_env):
-    _env["servers"] = _with("🤖 Android")
+async def test_second_android_gets_another_flower(_env):
+    _env["servers"] = _with("🤖 Rose")
     _, link, _ = await _press("act:vpn:issue:~wa")
-    assert link.calls[0][1]["device_label"] == "🤖 Android 2"
+    assert link.calls[0][1]["device_label"] == "🤖 Lily"
 
 
 async def test_partial_node_failure_continues():

@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from sa_home_bot.bot import vpn_devices as vd
-from sa_home_bot.bot import vpn_nodes, vpn_settings
+from sa_home_bot.bot import vpn_nodes, vpn_settings, vpn_wizard
 from sa_home_bot.bot.handlers import vpn as h
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings, VpnConfig
@@ -303,25 +303,38 @@ async def test_new_device_pick_platform_then_get_settings_screen(_env):
         "💻 Компьютер",
         "⬅️ Назад",
     ]
-    cb, link, notifier = await _press("act:vpn:issue:~na")
+    cb, link, _ = await _press("act:vpn:issue:~na")
     issued = link.of(vpn_protocol.ACTION_ISSUE)
     assert sorted(n for _, n in issued) == ["jeeves", "wooster"]
-    assert all(a["device_label"] == "🤖 Android" and a["transport"] == "reality" for a, _ in issued)
-    # 57.13: сразу страница на сайте — ОТДЕЛЬНЫМ пересылаемым сообщением…
-    (_, text), markup = notifier.sent_direct[0], notifier.sent_direct_markups[0]
-    assert text.startswith("📶 <b>Настройки VPN · 🤖 Android</b>")
+    labels = {a["device_label"] for a, _ in issued}
+    assert len(labels) == 1 and all(a["transport"] == "reality" for a, _ in issued)
+    label = labels.pop()
+    assert label.startswith("🤖 ") and label[2:] in vpn_protocol.FLOWER_NAMES
+    # 57.13: сразу страница на сайте в том же сообщении + возврат к карточке
+    text, markup = _last(cb)
+    assert text.startswith(f"📶 <b>Настройки VPN · {label}</b>")
     assert "https://1.2.3.4:8444/s/tok" in text
-    assert _texts(markup) == ["📶 Открыть настройки"]
-    assert _all_buttons(markup)[0].url == "https://1.2.3.4:8444/s/tok"
-    # …а меню остаётся меню: из него можно вернуться к устройствам
-    _text, menu = _last(cb)
-    assert all(b.callback_data for b in _all_buttons(menu))
-    assert "⬅️ Назад" in _texts(menu)
+    assert _texts(markup) == ["📶 Открыть настройки", "⬅️ К устройству"]
+    buttons = _all_buttons(markup)
+    assert buttons[0].url == "https://1.2.3.4:8444/s/tok"
+    assert buttons[1].callback_data == vpn_settings.card_cb("d", vd.device_key(label))
 
 
 async def test_new_device_label_gets_number_when_taken():
-    cb, link, _ = await _press("act:vpn:issue:~ni")  # «📱 iPhone» уже есть
-    assert {a["device_label"] for a, _ in link.of(vpn_protocol.ACTION_ISSUE)} == {"📱 iPhone 2"}
+    cb, link, _ = await _press("act:vpn:issue:~ni")
+    (label,) = {a["device_label"] for a, _ in link.of(vpn_protocol.ACTION_ISSUE)}
+    assert label.startswith("📱 ") and label[2:] in vpn_protocol.FLOWER_NAMES
+
+
+def test_next_label_is_platform_emoji_and_free_flower():
+    android = vpn_wizard.PLATFORMS["a"]
+    # занятые цветы — с эмодзи и без (старые устройства звались просто «Rose»)
+    taken = {"Rose", *(f"📱 {n}" for n in vpn_protocol.FLOWER_NAMES[1:-1])}
+    assert vpn_wizard.next_label(android, taken) == f"🤖 {vpn_protocol.FLOWER_NAMES[-1]}"
+    every = set(vpn_protocol.FLOWER_NAMES)
+    first = vpn_protocol.FLOWER_NAMES[0]
+    assert vpn_wizard.next_label(android, every) == f"🤖 {first} 2"
+    assert vpn_wizard.next_label(android, every | {f"🤖 {first} 2"}) == f"🤖 {first} 3"
 
 
 async def test_new_device_failure_offers_retry():

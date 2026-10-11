@@ -86,6 +86,7 @@ from sa_home_bot.vpn import apk as apk_client
 from sa_home_bot.vpn import subscription as subs
 from sa_home_bot.vpn.awg import AwgBackend
 from sa_home_bot.vpn.protocol import (
+    FLOWER_NAMES,
     ACTION_APK_CHUNK,
     ACTION_APK_INFO,
     ACTION_APK_SET_FILE_ID,
@@ -173,38 +174,7 @@ CHECK_STALE_FACTOR = 3
 # .conf = "<слово>_<таймстамп>" не должно превышать 15 символов — предел
 # имени тоннеля wireguard-android (NAME_PATTERN, см. bot/handlers/vpn.py и
 # bot/tools.py, где имя файла реально собирается).
-_FLOWER_NAMES = (
-    "Rose",
-    "Lily",
-    "Iris",
-    "Aster",
-    "Poppy",
-    "Daisy",
-    "Tulip",
-    "Lotus",
-    "Phlox",
-    "Pansy",
-    "Sedum",
-    "Canna",
-    "Hosta",
-    "Orchid",
-    "Violet",
-    "Dahlia",
-    "Azalea",
-    "Camellia",
-    "Jasmine",
-    "Lilac",
-    "Peony",
-    "Zinnia",
-    "Yarrow",
-    "Crocus",
-    "Freesia",
-    "Begonia",
-    "Petunia",
-    "Gerbera",
-    "Mallow",
-    "Cosmos",
-)
+_FLOWER_NAMES = FLOWER_NAMES
 
 
 def _random_device_label(used: set[str]) -> str:

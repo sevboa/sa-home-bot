@@ -93,6 +93,16 @@ def page_link_keyboard(page_url: str) -> InlineKeyboardMarkup:
     )
 
 
+def new_device_link_keyboard(page_url: str, key: str) -> InlineKeyboardMarkup:
+    """Новое устройство из «Управления»: та же URL-кнопка + возврат к карточке."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=PAGE_BUTTON, url=page_url)],
+            [InlineKeyboardButton(text="⬅️ К устройству", callback_data=_device_cb(key))],
+        ]
+    )
+
+
 def pick_text(label: str) -> str:
     return f"📥 <b>{html.escape(label)}</b> — чем подключаться?"
 
