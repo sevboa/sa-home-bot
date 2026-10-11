@@ -191,6 +191,10 @@ def test_headers():
     assert headers["support-url"] == "https://t.me/x"
     for value in headers.values():  # HTTP-заголовки — latin-1
         value.encode("latin-1")
+    sb = subs.render_headers(
+        _sub(), page_url="https://h/s/t", update_interval_h=12, fmt=subs.FORMAT_SINGBOX
+    )
+    assert base64.b64decode(sb["profile-title"][7:]).decode() == "VPN · 📱 iPhone · маршруты"
 
 
 LINKS = subs.PageLinks(
@@ -226,6 +230,9 @@ def test_page_hiddify_one_button_others_folded_no_autoopen():
     other = page.index("Другие способы")
     for marker in ("📋 Скопировать ссылку", "data:image/svg+xml", "⬇️ Файл настроек"):
         assert page.index(marker) > other
+    # 🧪 проверка маршрутов: тот же импорт, но sing-box формат подписки
+    assert 'href="hiddify://import/https://h:8444/sub/tok?format=singbox"' in page
+    assert page.index("🧪 Hiddify с маршрутами") > page.index("➕ Добавить в Hiddify")
     # автоперехода нет вообще
     assert "localStorage" not in page and "setTimeout(function () { location" not in page
     assert "AUTO" not in page and "autoOpen" not in page

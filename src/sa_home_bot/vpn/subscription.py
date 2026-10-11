@@ -278,6 +278,8 @@ def render_headers(
     """Заголовки профиля для Hiddify. Заголовки HTTP — latin-1, поэтому
     название (с эмодзи и кириллицей) уходит в ``base64:…``."""
     title = profile_title(sub.device_label)
+    if fmt == FORMAT_SINGBOX:  # отдельный профиль в Hiddify, чтобы не спутать с обычным
+        title += " · маршруты"
     headers = {
         "profile-title": _b64_header(title),
         "profile-update-interval": str(update_interval_h),
@@ -782,6 +784,9 @@ def render_page(
 </ol>
 <a class="btn" id="add" href="{e(link, quote=True)}">➕ Добавить в Hiddify</a>
 <details style="margin-top:12px"><summary class="sm">Другие способы</summary>
+<p class="hint">🧪 Проверка (временно): профиль Hiddify сразу с маршрутами — российские сайты
+напрямую, остальное через VPN. После добавления выберите в Hiddify профиль «· маршруты».</p>
+<a class="btn alt" id="addroutes" href="{e(deep_link(sub_url + "?format=singbox", sub.device_label), quote=True)}">🧪 Hiddify с маршрутами</a>
 <p class="hint">Не открылось? Откройте эту страницу в обычном браузере или добавьте вручную.</p>
 <button class="btn alt" id="copy" type="button">📋 Скопировать ссылку</button>
 <input class="t" id="url" readonly value="{e(sub_url, quote=True)}" aria-label="Ссылка подписки">
