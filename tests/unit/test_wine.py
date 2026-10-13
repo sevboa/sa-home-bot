@@ -9,7 +9,7 @@ from datetime import timedelta
 
 import pytest_asyncio
 
-from sa_home_bot.bot.interactives import engine, items
+from sa_home_bot.bot.interactives import engine, items, places
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
@@ -151,24 +151,30 @@ async def test_item_action_tool_asks_with_a_form(store):
 # --- эффект в заметке Альфреду ---
 
 
+def _no_where(note: str | None) -> str | None:
+    """Заметка без «Где ты» (59.7): она есть у канарейки каждый ход."""
+    assert note is not None and places.MOVE_RULE in note
+    return note.split(places.MOVE_RULE)[-1].strip() or None
+
+
 async def test_tipsy_text_goes_to_alfred_note_until_it_expires(store):
     clock = Clock()
     svc, _, _ = _make(store, clock=clock)
     item = await _wine(svc, store)
     plan = await svc.before_turn(CANARY, CANARY, "Привет", is_private=True)
-    assert plan.note is None
+    assert _no_where(plan.note) is None
     await svc.handle_item_click(CANARY, CANARY, item["id"], "d")
     plan = await svc.before_turn(CANARY, CANARY, "Как самочувствие?", is_private=True)
-    assert items.TIPSY_TEXT in plan.note
+    assert items.TIPSY_TEXT in _no_where(plan.note)
     clock.now += timedelta(hours=2, minutes=59)
     plan = await svc.before_turn(CANARY, CANARY, "И ещё?", is_private=True)
-    assert items.TIPSY_TEXT in plan.note
+    assert items.TIPSY_TEXT in _no_where(plan.note)
     clock.now += timedelta(minutes=2)
     plan = await svc.before_turn(CANARY, CANARY, "Ну?", is_private=True)
-    assert plan.note == items.TIPSY_ENDED  # один раз: хмель прошёл
+    assert _no_where(plan.note) == items.TIPSY_ENDED  # один раз: хмель прошёл
     assert await store.get_state(f"user_effect:tipsy:{CANARY}") is None
     plan = await svc.before_turn(CANARY, CANARY, "Ну?", is_private=True)
-    assert plan.note is None
+    assert _no_where(plan.note) is None
 
 
 async def test_tipsy_effect_is_ignored_for_non_canary(store):
