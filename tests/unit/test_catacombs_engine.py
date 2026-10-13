@@ -275,7 +275,7 @@ async def test_walk_and_go_declarations_reach_only_canaries(store):
     svc, _, _ = _make(store)
     kit = ai_tools.tools_for(Subscription(name="me", chat_id=1, allowed_commands=frozenset({"*"})))
     assert {"walk", "go", "search"} <= kit.handlers.keys()
-    assert ai_tools.CANARY_TOOLS == {"search", "walk", "go"}
+    assert ai_tools.CANARY_TOOLS == {"search", "walk", "go", "act"}
     guest_kit = ai_tools.for_context(kit, _ctx(svc, GUEST))
     for name in ("walk", "go", "search"):
         assert name not in guest_kit.handlers
@@ -775,16 +775,19 @@ async def test_special_room_found_entered_searched_and_left(store):
     assert "red safelight" in link.generated[-1]["description"]
     maze, _ = await _vision(store)
     assert maze.nodes[state.node].image_id == door_image  # снимок комнаты в лабиринт не пишется
-    # Обыск в особом месте — обычный путь: итог — Ведущему, обысканное помечено.
+    # Обыск в особом месте — обычный путь: итог решил код, Ведущий обставляет
+    # его синхронно (Этап 59.7), обысканное помечено.
+    link.director_replies = [json.dumps({"result": "В ванночке плёнка.", "stage": 0})]
     out = await svc.tool_search(CANARY, CANARY, "ванночки")
-    assert out == places.TOOL_SEARCH_SCENE.format(where="ванночки")
+    assert "В ванночке плёнка." in out
+    assert "фотоаппарат" in link.director_inputs[-1]
     assert places.normalize_where("ванночки") in await places.load_searched(
         store, CANARY, "darkroom"
     )
-    again = await svc.tool_search(CANARY, CANARY, "ванночки")
-    assert again == places.TOOL_SEARCH_SCENE.format(where="ванночки")
-    outcome = (await InteractiveStore(store).load_run(CANARY, "catacombs")).world["search_outcome"]
-    assert places.SEARCH_REPEAT_TEXT in outcome  # повторный обыск ничего не даёт
+    link.director_replies = [json.dumps({"result": "Всё то же.", "stage": 0})]
+    await svc.tool_search(CANARY, CANARY, "ванночки")
+    # повторный обыск ничего не даёт
+    assert places.SEARCH_REPEAT_TEXT in link.director_inputs[-1]
     # Выйти нельзя иначе как назад.
     assert "один путь" in await svc.tool_walk(CANARY, CANARY, "forward")
     left = await svc.tool_walk(CANARY, CANARY, "back")

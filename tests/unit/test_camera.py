@@ -15,7 +15,7 @@ from sa_home_bot.bot.interactives.base import STATUS_ACTIVE, Run
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
-from tests.unit.test_cellar import CANARY, GUEST, Dice, _dir, _make, _run, _turn
+from tests.unit.test_cellar import CANARY, GUEST, Dice, _make, _run, _turn
 
 LAB = places.RoomCanon(
     id="testlab",
@@ -116,31 +116,33 @@ async def test_search_in_a_scene_hands_the_find_to_the_director(store):
     run = Run(scenario="cellar", chat_id=CANARY, user_id=CANARY, status=STATUS_ACTIVE, stage=4)
     await svc._state.save_run(run)
     await svc._move_to(CANARY, LAB.id)
-    answer = await svc.tool_search(CANARY, CANARY, "полка")
-    assert places.TOOL_SEARCH_SCENE.format(where="полка") == answer
-    run = await _run(store)
-    assert "старый фотоаппарат" in run.world["search_outcome"]
-    camera = (await store.items_of(CANARY, "camera"))[0]
-    assert run.world["found_item"]["id"] == camera["id"]
-    # Ведущему уходит просьба придумать производителя и модель…
+    # Ведущий обставляет находку тем же синхронным запросом (Этап 59.7):
+    # просит придумать производителя и модель вещи…
     link.director_replies = [
-        _dir(
-            stage=4,
-            found_item={
-                "traits": ["кожа потёрта", "трещина на видоискателе"],
-                "note": "«Зоннтаг-Лукс», 1941 года.",
+        json.dumps(
+            {
+                "result": "На полке старый аппарат в кожаном чехле.",
+                "stage": 4,
+                "found_item": {
+                    "traits": ["кожа потёрта", "трещина на видоискателе"],
+                    "note": "«Зоннтаг-Лукс», 1941 года.",
+                },
             },
+            ensure_ascii=False,
         )
     ]
-    plan = await svc.before_turn(CANARY, CANARY, "Что нашёл?", is_private=True)
-    await svc.after_turn(plan, "Шарю на полке.", dialogue_id=1)
+    answer = await svc.tool_search(CANARY, CANARY, "полка")
+    assert "На полке старый аппарат в кожаном чехле." in answer
+    assert "старый фотоаппарат" in link.director_inputs[-1]
     assert "производитель и модель" in link.director_inputs[-1]
     assert '"found_item"' in link.director_inputs[-1]
+    run = await _run(store)
+    camera = (await store.items_of(CANARY, "camera"))[0]
     # …и приметы с заметкой заменяют запасные.
     fresh = await store.item_by_id(camera["id"])
     assert fresh["note"] == "«Зоннтаг-Лукс», 1941 года"
     assert fresh["traits"] == ["кожа потёрта", "трещина на видоискателе"]
-    assert "found_item" not in (await _run(store)).world
+    assert "found_item" not in run.world
 
 
 async def test_search_gives_nothing_to_non_canary(store):

@@ -27,7 +27,9 @@
 существуют только для гостей из ``llm.interactives_canary_user_ids``
 (``canary_ok``/``scenarios_for``); для остальных ход идёт ровно как до этапа.
 Альфред стоит не только в кабинете: ``alfred_at`` и комнаты — places.py, обыск
-— тул ``search``, спонтанный триггер — ``_spontaneous``.
+— тул ``search``, спонтанный триггер — ``_spontaneous``. Этап 59.7: физические
+действия Альфреда в канареечных сценах — тул ``act`` (acts.py), исход даёт Ведущий
+синхронно, внутри тула; ``after_turn`` остаётся для темпа.
 
 Сцены — только в личке: в общем чате подсказки сцены сбивали бы Альфреда
 в разговоре с остальными. Эффект и
@@ -39,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
 import functools
 import html
 import json
@@ -54,8 +57,9 @@ from typing import Any
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sa_home_bot.bot import image_tools
+from sa_home_bot.bot.interactives import acts, cellar, places, radio, underground
 from sa_home_bot.bot.interactives import cabinet as cabinet_mod
-from sa_home_bot.bot.interactives import cellar, places, radio, underground
+from sa_home_bot.bot.interactives import director as director_mod
 from sa_home_bot.bot.interactives import items as items_mod
 from sa_home_bot.bot.interactives.base import (
     EFFECT_ACTIVE,
@@ -80,6 +84,7 @@ from sa_home_bot.bot.interactives.director import (
     _json_object,
     ask_director,
     ask_features,
+    facts_of,
 )
 from sa_home_bot.bot.interactives.places import Room
 from sa_home_bot.bot.interactives.transylvania import PHASE_NIGHT, Outside, Transylvania
@@ -164,6 +169,8 @@ ALFRED_PHOTO_PREFIX = "<b>Альфред:</b> "
 # Больше двух особенностей промптер под 77 токенов CLIP не удерживает:
 # живые снимки 2026-09-30 из четырёх сохранили по две.
 PHOTO_FEATURES_IN_FRAME = 2
+# Факты мира сцены в общем виде (Этап 59.7) — тоже под бюджет промпта.
+PHOTO_FACTS_IN_FRAME = 3
 PHOTO_CAPTION = "Кабинет"
 # Подпись или focus про весь кабинет — общий вид, а не крупный план
 # (tool_take_photo, _photo). Хвост не важен: «Вид кабинета после инцидента»,
@@ -404,6 +411,16 @@ def finale_allowed(scenario: Scenario, run: Run) -> bool:
     )
 
 
+def stage_target(scenario: Scenario, run: Run, wanted: int) -> int:
+    """Стадия после решения Ведущего: не больше +1, в пределах лестницы и с
+    условиями сюжета поверх (Этап 59: ключ найден кодом — ``stage_gate``).
+    Общая для хода сцены (apply_decision) и тула act (Этап 59.7)."""
+    target = max(run.stage, min(wanted, run.stage + 1, scenario.last_stage))
+    if scenario.stage_gate is not None:
+        target = max(run.stage, min(scenario.stage_gate(run, target), scenario.last_stage))
+    return target
+
+
 def apply_decision(
     scenario: Scenario,
     run: Run,
@@ -436,10 +453,7 @@ def apply_decision(
     wanted = decision.stage if decision is not None else run.stage
     if run.turns_on_stage < scenario.min_turns_on_stage:
         wanted = run.stage
-    target = max(run.stage, min(wanted, run.stage + 1, scenario.last_stage))
-    if scenario.stage_gate is not None:
-        # Условия сюжета поверх решения Ведущего (Этап 59: ключ найден кодом).
-        target = max(run.stage, min(scenario.stage_gate(run, target), scenario.last_stage))
+    target = stage_target(scenario, run, wanted)
     if (
         scenario.auto_stages
         and target == run.stage
@@ -479,6 +493,10 @@ def build_scene_note(scenario: Scenario, run: Run, place: str | None = None) -> 
     parts = [scenario.scene_frame]
     if place:
         parts.append(f"Где ты: {place}")
+    facts = facts_of(run)
+    if facts:
+        # Этап 59.7: что в мире уже так (решил Ведущий, исходы действий).
+        parts.append("Что вокруг уже так (не противоречь): " + "; ".join(facts) + ".")
     kind = items_mod.KINDS.get(scenario.item_kind or "")
     if kind is not None and run.item_traits:
         parts.append(
@@ -540,7 +558,7 @@ class _ItemShot:
     tag: str
 
 
-class Interactives(underground.UndergroundMixin):
+class Interactives(underground.UndergroundMixin, acts.ActsMixin):
     """Сервис интерактивов бота (один на процесс, см. app.py)."""
 
     def __init__(
@@ -730,6 +748,9 @@ class Interactives(underground.UndergroundMixin):
     async def before_turn(
         self, chat_id: int, user_id: int | None, user_text: str, *, is_private: bool
     ) -> TurnPlan:
+        # Новый ход гостя: счётчик действий обнуляется, реплику запоминаем —
+        # по ней Ведущий в тулах act проверяет согласие (Этап 59.7).
+        self._acts_new_turn(chat_id, user_text)
         plan = TurnPlan(
             chat_id=chat_id,
             user_id=user_id,
@@ -945,7 +966,9 @@ class Interactives(underground.UndergroundMixin):
             return
         if not plan.scene or run.status != STATUS_ACTIVE:
             return
-        run.log("Гость", plan.user_text)
+        # Тул act уже занёс реплику гостя в журнал перед своим действием.
+        if run.world.pop("guest_logged", None) != plan.user_text:
+            run.log("Гость", plan.user_text)
         run.log("Альфред", reply)
         # Прошлое событие Альфред уже пересказал этим ответом.
         run.pending_effect = None
@@ -954,6 +977,11 @@ class Interactives(underground.UndergroundMixin):
             # Где Альфред — Ведущему (cellar.extra_input).
             run.world["here"] = cab.canon.name_ru if isinstance(cab, Room) else "кабинет"
         decision = await self._ask_director(scenario, run, cab)
+        # Был act — исходы действий уже даны Альфреду в самом ходу, событие
+        # после хода их не придумывает (Этап 59.7).
+        acted = bool(run.world.pop("acted", None))
+        if acted and decision is not None and decision.effect:
+            decision = dataclasses.replace(decision, effect=None)
         # Ведущий придумал приметы найденной вещи (59.3/59.6) — дописываем.
         await self._apply_found_item(run, decision)
         stage_before, finale_before = run.stage, run.finale
@@ -964,11 +992,20 @@ class Interactives(underground.UndergroundMixin):
             # следы сцены.
             if cab.add(list(decision.cabinet_add), scene=bool(cab.features)):
                 await self._save_room(cab, run)
+        if decision is not None and run.world.get("act_key") and decision.stage > run.stage:
+            # Стадию уже сдвинул act этого хода: вторая за ход — рано, Альфред
+            # ещё не получил подсказки новой стадии.
+            decision = dataclasses.replace(decision, stage=run.stage)
         effect = apply_decision(scenario, run, decision, choose=self._choose)
         if effect:
             run.log("Событие", effect)
             run.pending_effect = effect
-        key_moment = run.stage != stage_before or run.finale != finale_before
+        key_moment = (
+            run.stage != stage_before
+            or run.finale != finale_before
+            # Стадию или финал в этом ходу сдвинул тул act (кадр сцены — тот же).
+            or bool(run.world.pop("act_key", None))
+        )
         if scenario.canary:
             await self._after_canary_turn(
                 scenario, run, decision, stage_before=stage_before, finale_before=finale_before
@@ -1028,28 +1065,46 @@ class Interactives(underground.UndergroundMixin):
             await self._end_scene_in_room(run)
             await self._go_home(user_id, announce=True)
             return
+        # Финал мог наступить в этом же ходу через act: флаги уже выданы, а
+        # завершается сцена только со следующего хода (Альфред успеет рассказать).
+        fresh_finale = bool(run.world.pop("act_finale", None))
+        await self._canary_progress(
+            scenario,
+            run,
+            decision.move_to if decision is not None else None,
+            stage_before=stage_before,
+            finale_before=finale_before and not fresh_finale,
+        )
+        if run.finale and finale_before and not fresh_finale and scenario.finish_after_finale:
+            run.status = STATUS_DONE
+            await self._end_scene_in_room(run)
+
+    async def _canary_progress(
+        self,
+        scenario: Scenario,
+        run: Run,
+        move: dict[str, str] | None,
+        *,
+        stage_before: int,
+        finale_before: bool,
+    ) -> None:
+        """Следствия сдвига стадии/финала канареечной сцены — решения кода:
+        вещи стадии, перенос Альфреда, флаги финала. Общая для хода сцены
+        (_after_canary_turn) и тула act (Этап 59.7: применяется сразу)."""
+        user_id = run.user_id
         for stage, kind_type in scenario.stage_items:
             if stage_before < stage <= run.stage:
                 # Вошёл в подвал — бутылка вина теперь вещь гостя (59.3).
                 await self._give_found_item(run, items_mod.KINDS[kind_type], origin="stage")
         if scenario.stage_places and run.stage != stage_before:
             await self._move_to(user_id, scenario.stage_places[min(run.stage, scenario.last_stage)])
-        elif (
-            decision is not None
-            and decision.move_to
-            and run.stage in scenario.move_stages
-            and not run.finale
-        ):
-            await self._apply_move(scenario, run, decision.move_to)
+        if move and run.stage in scenario.move_stages and not run.finale:
+            await self._apply_move(scenario, run, move)
         if run.finale and not finale_before:
-            # Финал наступил: сцена пройдена и открыто новое (флаги гостя),
-            # а завершится она на следующем ходу — Альфред успеет рассказать.
+            # Финал наступил: сцена пройдена и открыто новое (флаги гостя).
             await self._state.mark_completed(scenario.id, user_id)
             for flag in scenario.finale_flags:
                 await self._state.set_effect(flag, user_id, "1")
-        elif run.finale and finale_before and scenario.finish_after_finale:
-            run.status = STATUS_DONE
-            await self._end_scene_in_room(run)
 
     # --- вещи, найденные в сцене (Этап 59.3 вино, 59.6 фотоаппарат) ---
 
@@ -1093,7 +1148,9 @@ class Interactives(underground.UndergroundMixin):
         if item is not None:
             self._ask_found_item(run, item, kind)
 
-    async def _apply_found_item(self, run: Run, decision: DirectorDecision | None) -> None:
+    async def _apply_found_item(
+        self, run: Run, decision: DirectorDecision | director_mod.ActDecision | None
+    ) -> None:
         """Ведущий ответил на ``found_item``: его приметы и заметка заменяют
         запасные. Не ответил — остаются запасные; просьба снимается в любом
         случае (одна попытка на вызов)."""
@@ -1356,9 +1413,10 @@ class Interactives(underground.UndergroundMixin):
     async def tool_search(self, chat_id: int | None, user_id: int | None, where: str) -> str:
         """Альфред порыскал в месте, где стоит. Что найдено, решает код по
         таблице находок места (places.search_room); обысканное помечается.
-        В идущей сцене итог (а на поиске ключа — и сам ключ, cellar.roll_key)
-        уходит Ведущему, и Альфред узнаёт его следующим ходом; вне сцены
-        итог отдаётся сразу. Только канарейкам."""
+        В идущей канареечной сцене итог (а на поиске ключа — и сам ключ,
+        cellar.roll_key) решён кодом, а Ведущий обставляет его синхронно тем же
+        запросом, что и тул act (Этап 59.7: поиск — частный случай действия);
+        вне сцены итог отдаётся сразу. Только канарейкам."""
         if chat_id is None or user_id is None or not self.canary_ok(user_id):
             return places.TOOL_SEARCH_UNAVAILABLE
         where = " ".join(where.split())[: places.SEARCH_WHERE_MAX]
@@ -1371,6 +1429,10 @@ class Interactives(underground.UndergroundMixin):
             return labyrinth
         room = await self._room(chat_id, user_id)
         run = await self._scene_run(chat_id, user_id)
+        if run is not None and not REGISTRY[run.scenario].canary:
+            run = None  # сцена радио поиска не касается (прогресс радио не трогаем)
+        if run is not None and not self._take_act(chat_id):
+            return acts.TOOL_ACT_LIMIT
         canon = room.canon if isinstance(room, Room) else places.CABINET_CANON
         temp = isinstance(room, Room) and room.temp
         if temp:
@@ -1412,18 +1474,26 @@ class Interactives(underground.UndergroundMixin):
             key = cellar.roll_key(run, self._rng)
             if key:
                 await self._state.set_effect(places.EFFECT_CELLAR_UNLOCKED, user_id, "1")
-        run.world["search_outcome"] = cellar.search_outcome_text(
+        outcome = cellar.search_outcome_text(
+            where, result.kind, result.text, key=key, hunting=hunting
+        )
+        fallback = cellar.search_fallback_text(
             where, result.kind, result.text, key=key, hunting=hunting
         )
         if found_kind is not None and found_item is not None and not key:
             # Находка с вещью: итог для Ведущего — что найдено, а приметы и
             # заметку вещи он придумает в ответе (found_item).
-            run.world["search_outcome"] = places.SEARCH_ITEM_DIRECTOR.format(
+            outcome = places.SEARCH_ITEM_DIRECTOR.format(
                 where=where, text=result.text, name=found_kind.name
             )
+            note = (found_item.get("note") or "").rstrip(". ")
+            fallback = result.text + places.SEARCH_ITEM_TAKEN.format(
+                name=found_kind.name, note=f" ({note})" if note else ""
+            )
             self._ask_found_item(run, found_item, found_kind)
-        await self._state.save_run(run)
-        return places.TOOL_SEARCH_SCENE.format(where=where)
+        return await self._act_in_scene(
+            run, f"порыскать: {where}", outcome=outcome, fallback=fallback
+        )
 
     # --- тул take_photo: снимок кабинета (Этап 49.2) ---
 
@@ -1990,6 +2060,7 @@ class Interactives(underground.UndergroundMixin):
                 item=shot.kind if shot else None,
                 item_place=shot.place if shot else None,
                 alfred=alfred,
+                state=None if frame is not None else await self._scene_facts(chat_id, user_id),
             )
         request: dict[str, Any] = {
             "description": description,
@@ -3479,6 +3550,7 @@ def photo_description(
     item: items_mod.ItemKind | None = None,
     item_place: str | None = None,
     alfred: str | None = None,
+    state: list[str] | None = None,
 ) -> tuple[str, str]:
     """Описание снимка для художника-промптера (llm/image_prompt.py) и
     контекст сцены. Общий вид — особенности гостя первыми (самые свежие:
@@ -3488,7 +3560,10 @@ def photo_description(
 
     ``item_place`` (Этап 49.3) — в кадр вставят предмет ``item`` пикселями
     (``desk`` — на стол общего вида, ``closeup`` — крупно): словами его в
-    описании быть не должно, иначе промптер нарисует второй, свой."""
+    описании быть не должно, иначе промптер нарисует второй, свой.
+
+    ``state`` (Этап 59.7) — факты мира идущей сцены («доски сорваны»): в общем
+    виде последние ``PHOTO_FACTS_IN_FRAME`` идут после особенностей."""
     visible_features = cab.visible_features()
     if item is not None and item_place is not None:
         visible_features = [f for f in visible_features if not item.focus_re.search(f)]
@@ -3520,6 +3595,8 @@ def photo_description(
         parts.append(f"In frame: {alfred_en}.")
     if features:
         parts.append("Must be clearly visible: " + "; ".join(features) + ".")
+    if state:
+        parts.append("Current state: " + "; ".join(state[-PHOTO_FACTS_IN_FRAME:]) + ".")
     # Композицию «стол в нижней трети» под вставку дописывает служба llm
     # (item_paste.DESK_COMPOSITION) — промптер её пересказывал и терял.
     parts.append(f"Room: {cab.canon_en}.")
