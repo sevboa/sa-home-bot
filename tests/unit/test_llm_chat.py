@@ -6,6 +6,8 @@ tasks, tasks/service.py, этот параметр вообще не перед�
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from sa_home_bot import llm_chat
@@ -414,3 +416,47 @@ async def test_tool_can_end_the_turn():
     )
     assert result == ""
     assert link._chat_results == [{"response": "лишнее"}]
+
+
+async def test_act_calls_run_one_per_round_and_see_each_result():
+    """Этап 59.7: несколько act в одном ответе модели исполняется только первый
+    (исход нужен модели, прежде чем решать следующее); остальные — «не выполнено».
+    Цепочка из четырёх act + финальный текст укладывается в MAX_TOOL_ROUNDS."""
+    ran: list[str] = []
+    results: list[str] = []
+
+    async def act(ctx, args):
+        ran.append(args["action"])
+        return f"итог {len(ran)}"
+
+    ai_tools.tools_for(None).handlers["act"] = act
+    ctx = _ctx()
+    ctx.interactives = SimpleNamespace(canary_ok=lambda user_id: True)  # канареечный тул
+    two = [_tool_call("act", {"action": "a"}), _tool_call("act", {"action": "b"})]
+    link = FakeNodeLink(
+        chat_results=[
+            {"tool_calls": two},
+            {"tool_calls": [_tool_call("act", {"action": "b"})]},
+            {"tool_calls": [_tool_call("act", {"action": "c"})]},
+            {"tool_calls": [_tool_call("act", {"action": "d"})]},
+            {"response": "рассказ"},
+        ]
+    )
+
+    async def on_call(name, args, result):
+        results.append(result)
+
+    answer = await llm_chat.run_chat_loop(
+        link,
+        DST,
+        5.0,
+        [],
+        ctx,
+        reason="off",
+        telegram_chat_id=None,
+        log_chat_id="test",
+        on_tool_call=on_call,
+    )
+    assert answer == "рассказ"
+    assert ran == ["a", "b", "c", "d"]  # «b» из первого ответа не исполнялся
+    assert results[1] == ai_tools.SERIAL_DEFERRED

@@ -310,9 +310,29 @@ def build_director_input(
     if cabinet_field and room is not None:
         cabinet_field = cabinet_field.replace("кабинета", room[0]).replace("в кабинете", room[1])
     extra = (scenario.extra_input(run) + "\n\n") if scenario.extra_input is not None else ""
+    extra += facts_block(run)
     item_block, item_field = _item_block(scenario, run)
     found_block, found_field = _found_item_block(run)
     item_block, item_field = item_block + found_block, item_field + found_field
+    if scenario.act_prompt:
+        # Этап 59.7: исходы действий Альфреда даёт тул act, не этот вызов.
+        acted = (
+            " В этом ходу Альфред действовал через инструмент и уже получил исходы — "
+            "effect null."
+            if run.world.get("acted")
+            else ""
+        )
+        effect_field = (
+            ' "effect": str|null — только то, что изменилось вокруг САМО (звук, капля, '
+            "сквозняк, шорох; 1 предложение, от лица рассказчика), НЕ исход действий "
+            f"Альфреда; null, если ничего.{acted}\n"
+        )
+    else:
+        effect_field = (
+            ' "effect": str|null — что произошло в ответ на действие Альфреда '
+            "(1–2 предложения, от лица рассказчика; null, если Альфред ничего не "
+            "делал),\n"
+        )
     return (
         f"Сценарий: {scenario.title}\n"
         f"Лестница подсказок Альфреду (стадии):\n{ladder}\n"
@@ -328,9 +348,7 @@ def build_director_input(
         "Ответь ОДНИМ JSON-объектом с полями:\n"
         '{"active": bool — сцена продолжается (false, если гость явно ушёл '
         "в другую тему),\n"
-        ' "effect": str|null — что произошло в ответ на действие Альфреда '
-        "(1–2 предложения, от лица рассказчика; null, если Альфред ничего не "
-        "делал),\n"
+        f"{effect_field}"
         ' "stage": int — стадия на следующий ход (можно оставить или +1),\n'
         ' "directive": str — скрытая подсказка Альфреду на следующий ход '
         "(1–2 предложения),\n"
@@ -480,3 +498,196 @@ async def ask_json(
             "interactives: Ведущий вернул не JSON для описания (chat=%s): %r", chat_id, raw[:300]
         )
     return data
+
+
+# --- Этап 59.7: режим «действие» (тул act) ---
+
+ACT_RESULT_MAX = 400
+FACT_CHARS = 90
+FACTS_ADD_MAX = 3
+FACTS_KEEP = 12
+
+
+@dataclass(frozen=True)
+class ActDecision:
+    """Ответ Ведущего на одно физическое действие Альфреда (тул act)."""
+
+    # Факт в 1–2 предложения от рассказчика: что вышло из действия.
+    result: str
+    stage: int
+    move_to: dict[str, str] | None = None
+    facts_add: tuple[str, ...] = ()
+    facts_remove: tuple[str, ...] = ()
+    finale: bool = False
+    finale_fault: str | None = None
+    found_item: dict[str, Any] | None = None
+
+
+def facts_of(run: Run) -> list[str]:
+    facts = run.world.get("facts")
+    return [f for f in facts if isinstance(f, str) and f] if isinstance(facts, list) else []
+
+
+def facts_block(run: Run) -> str:
+    """Факты мира (``Run.world["facts"]``) для Ведущего — в каждом его вызове."""
+    facts = facts_of(run)
+    if not facts:
+        return ""
+    lines = "\n".join(f"- {f}" for f in facts)
+    return f"Факты мира сейчас (так и есть, не противоречь):\n{lines}\n\n"
+
+
+def update_facts(run: Run, add: tuple[str, ...], remove: tuple[str, ...]) -> None:
+    """Снять утратившие силу факты и дописать новые; держим последние
+    ``FACTS_KEEP`` — старые вытесняются."""
+    facts = facts_of(run)
+    for gone in remove:
+        key = gone.casefold()
+        facts = [f for f in facts if f.casefold() != key and key not in f.casefold()]
+    known = {f.casefold() for f in facts}
+    for fact in add:
+        if fact.casefold() not in known:
+            facts.append(fact)
+            known.add(fact.casefold())
+    if facts:
+        run.world["facts"] = facts[-FACTS_KEEP:]
+    else:
+        run.world.pop("facts", None)
+
+
+def _facts_list(value: Any, limit: int) -> tuple[str, ...]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return ()
+    cleaned = (_clean(v, FACT_CHARS) for v in value)
+    return tuple(v.rstrip(" .") for v in cleaned if v)[:limit]
+
+
+def parse_act(raw: str, current_stage: int) -> ActDecision | None:
+    """JSON Ведущего в режиме act → решение. Нет ``result`` — None (Альфред
+    получит запасной исход кода)."""
+    data = _json_object(raw)
+    if data is None:
+        return None
+    result = _clean(data.get("result"), ACT_RESULT_MAX)
+    if result is None:
+        return None
+    stage = data.get("stage")
+    if not isinstance(stage, int) or isinstance(stage, bool):
+        stage = current_stage
+    return ActDecision(
+        result=result,
+        stage=stage,
+        move_to=_move_to(data.get("move_to")),
+        facts_add=_facts_list(data.get("facts_add"), FACTS_ADD_MAX),
+        facts_remove=_facts_list(data.get("facts_remove"), FACTS_ADD_MAX),
+        finale=data.get("finale") is True,
+        finale_fault=_clean(data.get("finale_fault"), EFFECT_MAX_CHARS),
+        found_item=_found_item(data.get("found_item")),
+    )
+
+
+def build_act_input(
+    scenario: Scenario,
+    run: Run,
+    *,
+    action: str,
+    guest_text: str | None,
+    place: str,
+    window: str | None,
+    finale_allowed: bool,
+    outcome: str | None,
+) -> str:
+    """Вход Ведущему в режиме act: сценарий, стадия, место (``window`` — что
+    за окном, None — окна нет), факты мира, журнал с последней репликой гостя
+    (по ней Ведущий проверяет согласие), действие. ``outcome`` — исход, который
+    уже решил код (обыск, ключ): Ведущий его не меняет, а обставляет."""
+    ladder = "\n".join(f"  {i}. {hint}" for i, hint in enumerate(scenario.ladder))
+    notes = "\n".join(f"- {n}" for n in run.notes) or "—"
+    transcript = "\n".join(run.transcript) or "—"
+    if run.finale:
+        finale_line = "Финал уже наступил — finale=false, ничего нового не открывай."
+    elif finale_allowed:
+        finale_line = "Финал РАЗРЕШЁН: можешь поставить finale=true, если действие к нему ведёт."
+    else:
+        finale_line = "Финал пока ЗАПРЕЩЁН — finale=false."
+    window_line = f"За окном сейчас: {window}." if window else "Окна здесь нет."
+    extra = (scenario.extra_input(run) + "\n\n") if scenario.extra_input is not None else ""
+    found_block, found_field = _found_item_block(run)
+    code_line = (
+        f"Исход определён кодом (НЕ меняй, а обставь: как это выглядит): {outcome}\n\n"
+        if outcome
+        else ""
+    )
+    guest = f"«{guest_text}»" if guest_text else "—"
+    return (
+        f"Сценарий: {scenario.title}\n"
+        f"Лестница подсказок Альфреду (стадии):\n{ladder}\n"
+        f"Текущая стадия: {run.stage}.\n"
+        f"{finale_line}\n"
+        f"Место Альфреда: {place} {window_line}\n\n"
+        f"{facts_block(run)}"
+        f"Твои заметки с прошлых ходов:\n{notes}\n\n"
+        f"Журнал (последнее — самое свежее):\n{transcript}\n"
+        f"Последняя реплика гостя в этом ходу: {guest}\n\n"
+        f"{extra}{found_block}{code_line}"
+        f"ДЕЙСТВИЕ Альфреда (одно): «{action}»\n\n"
+        "Ответь ОДНИМ JSON-объектом с полями:\n"
+        '{"result": str — что вышло из ЭТОГО действия, факт в 1–2 предложения от '
+        "рассказчика (Альфред до твоего ответа исхода не знает и перескажет "
+        "именно его),\n"
+        ' "stage": int — стадия после действия (оставь или +1),\n'
+        ' "facts_add": [str] — новые устойчивые факты мира, до 3, по 2–5 слов '
+        '(«доски сорваны», «ящик открыт»), или [],\n'
+        ' "facts_remove": [str] — факты, переставшие быть правдой (как в '
+        "списке), или [],\n"
+        ' "finale": bool,\n'
+        ' "finale_fault": str|null — только при finale=true: как выглядит находка'
+        f"{scenario.act_fields}{found_field}}}"
+    )
+
+
+async def ask_act(
+    node_link: ServiceLink,
+    dst: Address,
+    timeout: float,
+    scenario: Scenario,
+    run: Run,
+    *,
+    action: str,
+    guest_text: str | None,
+    place: str,
+    window: str | None,
+    finale_allowed: bool,
+    outcome: str | None,
+) -> ActDecision | None:
+    """Синхронный вопрос Ведущему внутри тула act. Сбой или не-JSON — None."""
+    content = build_act_input(
+        scenario,
+        run,
+        action=action,
+        guest_text=guest_text,
+        place=place,
+        window=window,
+        finale_allowed=finale_allowed,
+        outcome=outcome,
+    )
+    args: dict[str, Any] = {
+        "messages": [{"role": "user", "content": content}],
+        "role": ROLE_DIRECTOR,
+        "system": scenario.act_prompt,
+        "chat_id": run.chat_id,
+    }
+    try:
+        result = await node_link.command(ACTION_CHAT, args, dst=dst, timeout=timeout)
+    except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
+        log.warning("interactives: Ведущий недоступен для act (chat=%s): %s", run.chat_id, exc)
+        return None
+    raw = result.get("response", "") if isinstance(result, dict) else ""
+    decision = parse_act(raw, run.stage)
+    if decision is None:
+        log.warning(
+            "interactives: Ведущий вернул не JSON для act (chat=%s): %r", run.chat_id, raw[:300]
+        )
+    return decision

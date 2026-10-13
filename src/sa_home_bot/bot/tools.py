@@ -65,6 +65,7 @@ from sa_home_bot.bot import (
     vpn_facts,
     vpn_nodes,
 )
+from sa_home_bot.bot.interactives import acts as interactive_acts
 from sa_home_bot.bot.interactives import cabinet as interactive_cabinet
 from sa_home_bot.bot.interactives import places as interactive_places
 from sa_home_bot.bot.interactives import radio as interactive_radio
@@ -357,7 +358,16 @@ class ToolKit:
 # Тулы канарейки Этапа 59 (bot/interactives, 59.C): модель видит их только у
 # гостей из llm.interactives_canary_user_ids. Остальным декларации не
 # уезжают в контекст вовсе — поведение Альфреда прежнее.
-CANARY_TOOLS = frozenset({"search", "walk", "go"})
+CANARY_TOOLS = frozenset({"search", "walk", "go", "act"})
+
+# Тулы, что выполняются по одному за раунд (Этап 59.7): исход каждого решает
+# Ведущий, и модель должна увидеть его, прежде чем решать следующее действие.
+# Лишние вызовы того же ответа модели не исполняются (llm_chat.run_chat_loop).
+SERIAL_TOOLS = frozenset({"act", "search"})
+SERIAL_DEFERRED = (
+    "Не выполнено: такие действия идут строго по одному. Сначала дождись итога "
+    "предыдущего действия, потом повтори это отдельным вызовом."
+)
 
 
 def for_context(toolkit: ToolKit, ctx: ToolContext) -> ToolKit:
@@ -1429,6 +1439,15 @@ async def tool_search(ctx: ToolContext, args: dict[str, Any]) -> str:
     return await ctx.interactives.tool_search(
         ctx.chat_id, ctx.user_id, where if isinstance(where, str) else ""
     )
+
+
+async def tool_act(ctx: ToolContext, args: dict[str, Any]) -> str:
+    """Физическое действие Альфреда (Этап 59.7, только канарейкам): исход даёт
+    Ведущий синхронно — Interactives.tool_act."""
+    canary_ok = getattr(ctx.interactives, "canary_ok", None)
+    if canary_ok is None or not canary_ok(ctx.user_id):
+        return interactive_acts.TOOL_ACT_UNAVAILABLE
+    return await ctx.interactives.tool_act(ctx.chat_id, ctx.user_id, args.get("action"))
 
 
 async def tool_walk(ctx: ToolContext, args: dict[str, Any]) -> str:
@@ -4660,6 +4679,12 @@ TOOLS: tuple[ToolSpec, ...] = (
     ),
     # Катакомбы (Этап 59.4–59.5) — тоже канарейка: шаг по лабиринту и
     # быстрый переход знакомой дорогой.
+    # Физическое действие через Ведущего (Этап 59.7) — тоже канарейка.
+    ToolSpec(
+        name="act",
+        handler=tool_act,
+        declaration=interactive_acts.ACT_DECLARATION,
+    ),
     ToolSpec(
         name="walk",
         handler=tool_walk,

@@ -172,6 +172,13 @@ def _dir(**fields) -> str:
     return json.dumps(data, ensure_ascii=False)
 
 
+def _act_reply(result="Ничего не происходит.", **fields) -> str:
+    """Ответ Ведущего в режиме act (Этап 59.7)."""
+    data = {"result": result, "stage": None, "facts_add": [], "facts_remove": []}
+    data.update(fields)
+    return json.dumps(data, ensure_ascii=False)
+
+
 async def _offered(svc, store):
     """Канарейка: три обычных хода и четвёртый с форм (бросок удался)."""
     for _ in range(3):
@@ -515,48 +522,63 @@ def test_fifth_search_always_finds_the_key():
     assert run.world["key_found"] is True
 
 
-async def test_search_tool_in_key_hunt_hands_the_outcome_to_the_director(store):
+async def test_search_tool_in_key_hunt_asks_the_director_synchronously(store):
     svc, _, link = _make(store, dice=Dice(0.0))
     await _to_key_hunt(svc, store, link)
     # 1-й обыск: ключа нет, как бы ни выпал кубик.
+    link.director_replies = [_act_reply("Шкаф пуст, лишь пыль и паутина.")]
     answer = await svc.tool_search(CANARY, CANARY, "шкаф в кладовой")
-    assert "не выдумывай" in answer and "шкаф в кладовой" in answer
-    run = await _run(store)
-    assert "ключа здесь нет" in run.world["search_outcome"].lower()
-    assert not run.world.get("key_found")
-    assert await svc._state.get_effect("cellar_unlocked", CANARY) is None
-    link.director_replies = [_dir(stage=2)]
-    await _turn(svc, "Ну?")
-    assert "Исход обыска" in link.director_inputs[-1]
+    assert "Шкаф пуст, лишь пыль и паутина." in answer
     assert "ключа здесь нет" in link.director_inputs[-1].lower()
-    assert "search_outcome" not in (await _run(store)).world  # ушёл и забыт
+    assert "Исход определён кодом" in link.director_inputs[-1]
+    run = await _run(store)
+    assert not run.world.get("key_found")
+    assert "search_outcome" not in run.world
+    assert run.transcript[-2].startswith("Действие: порыскать: шкаф в кладовой")
+    assert run.transcript[-1] == "Итог: Шкаф пуст, лишь пыль и паутина."
+    assert await svc._state.get_effect("cellar_unlocked", CANARY) is None
+    # После хода событие ничего не придумывает: исход Альфред уже получил.
+    link.director_replies = [_dir(stage=2, effect="Придуманный исход.")]
+    await _turn(svc, "Ну?")
+    run = await _run(store)
+    assert run.pending_effect is None and run.last_effect != "Придуманный исход."
 
 
 async def test_second_search_with_good_roll_finds_the_key_and_opens_the_cellar(store):
     svc, _, link = _make(store, dice=Dice(0.0))
     await _to_key_hunt(svc, store, link)
+    link.director_replies = [_act_reply("Пусто."), _act_reply("В ящике блестит ключ.")]
     await svc.tool_search(CANARY, CANARY, "шкаф в кладовой")
-    await svc.tool_search(CANARY, CANARY, "ящик буфета")  # 2-й: шанс 25%, rng 0.0
+    answer = await svc.tool_search(CANARY, CANARY, "ящик буфета")  # 2-й: шанс 25%, rng 0.0
+    assert "В ящике блестит ключ." in answer
+    assert "НАХОДИТ ключ" in link.director_inputs[-1]
     run = await _run(store)
     assert run.world["key_found"] is True
     assert await svc._state.get_effect("cellar_unlocked", CANARY) == "1"
-    assert "НАХОДИТ ключ" in run.world["search_outcome"]
-    # Ход: код сам переводит на стадию 3 и ставит Альфреда в подвал.
-    link.director_replies = [_dir(stage=2, effect="Ключ блестит в ящике.")]
-    await _turn(svc, "Ну что?")
-    run = await _run(store)
+    # Стадия 3 и подвал — сразу внутри обыска, а не со следующего хода.
     assert run.stage == 3
     assert (await places.get_at(store, CANARY)).place == places.PLACE_CELLAR
+
+
+async def test_search_without_director_uses_the_code_outcome(store):
+    svc, _, link = _make(store, dice=Dice(0.0))
+    await _to_key_hunt(svc, store, link)
+    svc._get_node_link = lambda: None
+    await svc.tool_search(CANARY, CANARY, "шкаф")
+    answer = await svc.tool_search(CANARY, CANARY, "ящик буфета")
+    assert "ключ" in answer
+    assert (await _run(store)).stage == 3
 
 
 async def test_repeat_search_in_same_place_gives_nothing_and_is_not_an_attempt(store):
     svc, _, link = _make(store, dice=Dice(0.0))
     await _to_key_hunt(svc, store, link)
+    link.director_replies = [_act_reply("Пусто."), _act_reply("Всё то же.")]
     await svc.tool_search(CANARY, CANARY, "ящик стола")
     await svc.tool_search(CANARY, CANARY, "В ящик стола!")
     run = await _run(store)
     assert run.world["key_searches"] == 1
-    assert "ничего нового" in run.world["search_outcome"]
+    assert "ничего нового" in link.director_inputs[-1]
 
 
 async def test_fifth_new_place_guarantees_the_key(store):
@@ -564,6 +586,7 @@ async def test_fifth_new_place_guarantees_the_key(store):
     await _to_key_hunt(svc, store, link)
     svc._rng = Dice(0.99)  # _offered подменил кубик на «всегда везёт»
     for i, where in enumerate(["шкаф", "ящик", "полка", "сундук", "ниша"], start=1):
+        svc._acts_new_turn(CANARY, "ищи")  # потолок действий — за ход гостя
         await svc.tool_search(CANARY, CANARY, where)
         assert bool((await _run(store)).world.get("key_found")) == (i == 5)
 

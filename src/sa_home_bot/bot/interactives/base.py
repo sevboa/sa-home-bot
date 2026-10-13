@@ -129,6 +129,11 @@ class Scenario:
     # ((стадия, вид вещи из items.KINDS), …). Выдаёт код при смене стадии
     # (engine._after_canary_turn), Ведущий лишь обставляет находку.
     stage_items: tuple[tuple[int, str], ...] = ()
+    # Этап 59.7: режим «действие» Ведущего (тул act). ``act_prompt`` — system
+    # этого режима (пусто — Ведущий не спрашивается, сценарий без act),
+    # ``act_fields`` — дополнительные поля его JSON-ответа.
+    act_prompt: str = ""
+    act_fields: str = ""
 
     @property
     def last_stage(self) -> int:

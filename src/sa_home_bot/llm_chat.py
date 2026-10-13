@@ -370,6 +370,7 @@ async def run_chat_loop(
             await _maybe_send_remark(result)
             return result.get("response", "")
         messages.append({"role": "assistant", "tool_calls": tool_calls})
+        serial_done = False
         for call in tool_calls:
             fn = call.get("function", {}) if isinstance(call, dict) else {}
             name = fn.get("name", "")
@@ -381,7 +382,12 @@ async def run_chat_loop(
             handler = toolkit.handlers.get(name) if allow_tools else None
             if handler is None:
                 tool_result = f"неизвестный инструмент: {name}"
+            elif name in ai_tools.SERIAL_TOOLS and serial_done:
+                # Действия идут по одному (Этап 59.7): следующее модель
+                # назначит, увидев итог предыдущего, — в следующем раунде.
+                tool_result = ai_tools.SERIAL_DEFERRED
             else:
+                serial_done = serial_done or name in ai_tools.SERIAL_TOOLS
                 if on_tool_start is not None:
                     await on_tool_start(name, call_args)
                 try:
