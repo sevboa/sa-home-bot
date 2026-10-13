@@ -193,7 +193,7 @@ async def test_device_card_with_fix_button_for_broken_country():
     cb, _, _ = await _press(f"act:vpn:vpn_card:d{KEY}")
     text, markup = cb.message.edits[-1], cb.message.edit_markups[-1]
     assert "🇳🇱 Нидерланды — 8.7 ГБ" in text
-    assert "🇺🇸 AmneziaWG — 🔧 сервер его не помнит" in text
+    assert "🇺🇸 AmneziaVPN — 🔧 сервер его не помнит" in text
     texts = _texts(markup)
     assert "🔧 Починить 🇺🇸" in texts
     assert "🔄 Перевыпустить ключи" in texts and "🗑 Удалить устройство" in texts
@@ -276,8 +276,8 @@ async def test_reissue_menu_lists_only_issued_unchecked():
     texts = _texts(cb.message.edit_markups[-1])
     assert texts == [
         "☐ 🇳🇱 VLESS · Hiddify",
+        "☐ 🇺🇸 AmneziaVPN",
         "☐ 🇺🇸 VLESS · Hiddify",
-        "☐ 🇺🇸 AmneziaWG",
         "Выбрать все",
         "Отмена",
     ]

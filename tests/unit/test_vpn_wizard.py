@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from sa_home_bot.bot import vpn_devices as vd
@@ -160,6 +158,12 @@ async def test_pick_screen():
 # --- создание устройства ------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _first_flower(monkeypatch):
+    """Цветок для имени выбирается случайно — в тестах берём первый свободный."""
+    monkeypatch.setattr(w.random, "choice", lambda seq: seq[0])
+
+
 async def test_create_issues_vless_in_every_country_and_shows_page_step():
     cb, link, _ = await _press("act:vpn:issue:~wi", cfg=_cfg(wizard_settings_file=False))
     issues = [
@@ -169,14 +173,13 @@ async def test_create_issues_vless_in_every_country_and_shows_page_step():
     ]
     assert sorted(n for n, _ in issues) == ["jeeves", "wooster"]
     assert all(
-        a == {"chat_id": 778, "device_label": "📱 iPhone", "transport": "reality"}
-        for _, a in issues
+        a == {"chat_id": 778, "device_label": "📱 Rose", "transport": "reality"} for _, a in issues
     )
     text, markup = _last(cb)
     assert text == (
-        "📶 <b>Настройки VPN · 📱 iPhone</b>\n"
-        "Откройте ссылку на телефоне, который подключаете — там всё по шагам: "
-        "Hiddify, AmneziaWG и проверка, что VPN включён.\n"
+        "📶 <b>Настройки VPN · 📱 Rose</b>\n"
+        "Откройте ссылку на устройстве, которое подключаете (телефон или компьютер) — там всё "
+        "по шагам: AmneziaVPN, Hiddify и проверка, что VPN включён.\n"
         "https://1.2.3.4:8444/s/tok\n"
         "Ссылку можно переслать. Не делитесь ей с чужими: по ней подключается это устройство."
     )
@@ -186,7 +189,7 @@ async def test_create_issues_vless_in_every_country_and_shows_page_step():
     assert _texts(markup)[1:] == ["✅ Готово", "🙋 Не получается"]
 
 
-@pytest.mark.parametrize(("code", "label"), [("a", "🤖 Android"), ("c", "💻 Компьютер")])
+@pytest.mark.parametrize(("code", "label"), [("a", "🤖 Rose"), ("c", "💻 Rose")])
 async def test_platforms(code, label):
     cb, link, _ = await _press(f"act:vpn:issue:~w{code}", cfg=_cfg(wizard_settings_file=False))
     assert link.calls[0][1]["device_label"] == label
@@ -194,18 +197,21 @@ async def test_platforms(code, label):
     assert first.text == "📶 Открыть настройки" and "/s/tok" in first.url
 
 
-def test_device_names_get_numbers():
+def test_device_names_are_flowers_with_platform_emoji():
     ip = w.PLATFORMS["i"]
-    assert w.next_label(ip, set()) == "📱 iPhone"
-    assert w.next_label(ip, {"📱 iPhone"}) == "📱 iPhone 2"
-    assert w.next_label(ip, {"📱 iPhone", "📱 iPhone 2"}) == "📱 iPhone 3"
-    assert w.next_label(w.PLATFORMS["a"], {"📱 iPhone"}) == "🤖 Android"
+    rose, lily = vpn_protocol.FLOWER_NAMES[:2]
+    assert w.next_label(ip, set()) == f"📱 {rose}"
+    # цветок занят и с другим эмодзи, и без него (старые «Rose»)
+    assert w.next_label(ip, {f"🤖 {rose}"}) == f"📱 {lily}"
+    assert w.next_label(w.PLATFORMS["a"], {rose}) == f"🤖 {lily}"
+    every = set(vpn_protocol.FLOWER_NAMES)
+    assert w.next_label(ip, every) == f"📱 {rose} 2"
 
 
-async def test_second_android_is_numbered(_env):
-    _env["servers"] = _with("🤖 Android")
+async def test_second_android_gets_another_flower(_env):
+    _env["servers"] = _with("🤖 Rose")
     _, link, _ = await _press("act:vpn:issue:~wa")
-    assert link.calls[0][1]["device_label"] == "🤖 Android 2"
+    assert link.calls[0][1]["device_label"] == "🤖 Lily"
 
 
 async def test_partial_node_failure_continues():
@@ -234,12 +240,12 @@ LABEL = "📱 iPhone"
 KEY = vd.device_key(LABEL)
 
 
-async def test_numbering_with_settings_file_step(_env):
+async def test_no_file_step_by_default_page_first(_env):
     _env["servers"] = _with(LABEL)
-    cb, _, _ = await _press(f"act:vpn:vpn_card:wbi{KEY}")
-    assert cb.message.edits[-1] == "<b>Шаг 1 из 2</b>\nНажмите на файл ниже и выберите «Hiddify»."
-    cb, _, _ = await _press(f"act:vpn:vpn_card:wci{KEY}")
-    assert cb.message.edits[-1].startswith("<b>Шаг 2 из 2</b>\n📶 <b>Настройки VPN")
+    # старая кнопка шага «файл» ведёт на страницу: файла в Telegram больше нет
+    cb, _, notifier = await _press(f"act:vpn:vpn_card:wbi{KEY}")
+    assert cb.message.edits[-1].startswith("📶 <b>Настройки VPN")
+    assert not notifier.sent_documents
 
 
 async def test_no_file_step_when_vless_already_worked(_env):
@@ -260,22 +266,10 @@ async def test_no_file_step_when_flag_off(_env):
     assert cb.message.edits[-1].startswith("📶 <b>Настройки VPN")
 
 
-async def test_own_handshake_does_not_change_numbering(_env):
+async def test_own_handshake_still_page_step(_env):
     _env["servers"] = _with(LABEL, hs="2026-10-10T10:00:00+00:00")
     cb, _, _ = await _press(f"act:vpn:vpn_card:wai{KEY}")
-    assert cb.message.edits[-1].startswith("<b>Шаг 2 из 2</b>")
-
-
-async def test_file_step_sends_settings_and_deletes_by_ttl(_env):
-    _env["servers"] = _with(LABEL)
-    cb, link, notifier = await _press(
-        f"act:vpn:vpn_card:wbi{KEY}", cfg=_cfg(config_message_ttl_s=0.01)
-    )
-    assert [c[0] for c in link.calls].count(vpn_protocol.ACTION_GET_VLESS) == 1
-    assert len(notifier.sent_documents) == 1
-    assert notifier.sent_documents[0][1] == b'{"singbox": 1}'
-    await asyncio.sleep(0.05)
-    assert notifier.deleted == [(778, 1)]
+    assert cb.message.edits[-1].startswith("📶 <b>Настройки VPN")
 
 
 async def test_file_step_never_in_group(_env):
@@ -327,13 +321,13 @@ def _book():
 
 async def test_help_notifies_owner_with_context_and_card_button(_env):
     _env["servers"] = _with(LABEL)
-    cb, _, notifier = await _press(f"act:vpn:vpn_card:whbi{KEY}", book=_book())
+    cb, _, notifier = await _press(f"act:vpn:vpn_card:whci{KEY}", book=_book())
     assert len(notifier.sent_direct) == 1
     chat, text = notifier.sent_direct[0]
     assert chat == 1
     assert text.startswith(
         "⚠️ VPN: проблема у <b>Алексей</b> (@alex)\n"
-        "Причина: Застрял(а) на шаге 1 из 2 (iPhone)\n"
+        "Причина: Застрял(а) на шаге 1 из 1 (iPhone)\n"
         f"Устройство: {LABEL} · VLESS · Hiddify\n"
     )
     reply_btn, card_btn = notifier.sent_direct_markups[0].inline_keyboard[0]
@@ -347,16 +341,16 @@ async def test_help_throttled_per_person(_env, monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr(vpn_help.time, "monotonic", lambda: clock[0])
     book = _book()
-    _, _, n1 = await _press(f"act:vpn:vpn_card:whbi{KEY}", book=book)
-    cb, _, n2 = await _press(f"act:vpn:vpn_card:whbi{KEY}", book=book)
+    _, _, n1 = await _press(f"act:vpn:vpn_card:whci{KEY}", book=book)
+    cb, _, n2 = await _press(f"act:vpn:vpn_card:whci{KEY}", book=book)
     assert len(n1.sent_direct) == 1 and not n2.sent_direct
     assert cb.answered[0][0] == ("Уже передал, ждите ответа.",)
     other, _, n3 = await _press(
-        f"act:vpn:vpn_card:whbi{KEY}", book=book, chat_id=779, sub=GUEST_FULL
+        f"act:vpn:vpn_card:whci{KEY}", book=book, chat_id=779, sub=GUEST_FULL
     )
     assert len(n3.sent_direct) == 1  # другой человек
     clock[0] += 601
-    _, _, n4 = await _press(f"act:vpn:vpn_card:whbi{KEY}", book=book)
+    _, _, n4 = await _press(f"act:vpn:vpn_card:whci{KEY}", book=book)
     assert len(n4.sent_direct) == 1
 
 

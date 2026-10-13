@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import html
+import random
 from dataclasses import dataclass
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -88,26 +89,22 @@ def store_url(platform: Platform, cfg: VpnConfig) -> str:
 
 
 def next_label(platform: Platform, existing: set[str]) -> str:
-    """«📱 iPhone», при повторе «📱 iPhone 2», «📱 iPhone 3» …"""
-    if platform.label not in existing:
-        return platform.label
+    """«🤖 Peony»: эмодзи платформы + цветок, которого у человека ещё нет (с эмодзи
+    или без — старые устройства звались просто «Rose»). Цветы кончились — с номером."""
+    taken = {label.split(" ", 1)[-1] for label in existing}
+    free = [name for name in vpn_protocol.FLOWER_NAMES if name not in taken]
+    if free:
+        return f"{platform.emoji} {random.choice(free)}"
     n = 2
-    while f"{platform.label} {n}" in existing:
+    while f"{platform.emoji} {vpn_protocol.FLOWER_NAMES[0]} {n}" in existing:
         n += 1
-    return f"{platform.label} {n}"
+    return f"{platform.emoji} {vpn_protocol.FLOWER_NAMES[0]} {n}"
 
 
 def needs_settings_file(cfg: VpnConfig, devices: list[vd.Device], key: str) -> bool:
-    """Шаг «файл настроек» нужен, если включён флагом и ни одно ДРУГОЕ устройство
-    человека ещё не выходило на связь по VLESS (Hiddify не настроен)."""
-    if not cfg.wizard_settings_file:
-        return False
-    return not any(
-        conn.transport == vd.REALITY and conn.last_handshake_at
-        for dev in devices
-        if dev.key != key
-        for conn in dev.issued
-    )
+    """С 57.13 всегда ``False``: настройки нового или существующего устройства — сразу
+    страница на сайте (файл в Telegram остался только под «Другие способы»)."""
+    return False
 
 
 def steps(needs_file: bool) -> list[str]:
@@ -200,8 +197,8 @@ def page_link_text(label: str, page_url: str) -> str:
     случай, если кнопка не пересланa), дальше всё по шагам на самой странице."""
     return (
         f"📶 <b>Настройки VPN · {html.escape(label)}</b>\n"
-        "Откройте ссылку на телефоне, который подключаете — там всё по шагам: "
-        "Hiddify, AmneziaWG и проверка, что VPN включён.\n"
+        "Откройте ссылку на устройстве, которое подключаете (телефон или компьютер) — там всё "
+        "по шагам: AmneziaVPN, Hiddify и проверка, что VPN включён.\n"
         f"{html.escape(page_url)}\n"
         "Ссылку можно переслать. Не делитесь ей с чужими: по ней подключается это устройство."
     )

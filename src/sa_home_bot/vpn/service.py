@@ -86,6 +86,7 @@ from sa_home_bot.vpn import apk as apk_client
 from sa_home_bot.vpn import subscription as subs
 from sa_home_bot.vpn.awg import AwgBackend
 from sa_home_bot.vpn.protocol import (
+    FLOWER_NAMES,
     ACTION_APK_CHUNK,
     ACTION_APK_INFO,
     ACTION_APK_SET_FILE_ID,
@@ -132,6 +133,7 @@ from sa_home_bot.vpn.protocol import (
     country_flag,
 )
 from sa_home_bot.vpn.proxy_backend import ProxyBackend, RealProxyBackend
+from sa_home_bot.vpn.subweb import public_host as sub_public_host
 from sa_home_bot.vpn_check import protocol as vpn_check_protocol
 
 log = logging.getLogger(__name__)
@@ -172,38 +174,7 @@ CHECK_STALE_FACTOR = 3
 # .conf = "<слово>_<таймстамп>" не должно превышать 15 символов — предел
 # имени тоннеля wireguard-android (NAME_PATTERN, см. bot/handlers/vpn.py и
 # bot/tools.py, где имя файла реально собирается).
-_FLOWER_NAMES = (
-    "Rose",
-    "Lily",
-    "Iris",
-    "Aster",
-    "Poppy",
-    "Daisy",
-    "Tulip",
-    "Lotus",
-    "Phlox",
-    "Pansy",
-    "Sedum",
-    "Canna",
-    "Hosta",
-    "Orchid",
-    "Violet",
-    "Dahlia",
-    "Azalea",
-    "Camellia",
-    "Jasmine",
-    "Lilac",
-    "Peony",
-    "Zinnia",
-    "Yarrow",
-    "Crocus",
-    "Freesia",
-    "Begonia",
-    "Petunia",
-    "Gerbera",
-    "Mallow",
-    "Cosmos",
-)
+_FLOWER_NAMES = FLOWER_NAMES
 
 
 def _random_device_label(used: set[str]) -> str:
@@ -1374,6 +1345,11 @@ class VpnService:
             return self._reality_cfg.endpoint_host
         return self._cfg.endpoint_host
 
+    def _sub_base(self) -> str:
+        if self._cfg.sub_port <= 0 or self._reality_cfg is None:
+            return ""
+        return f"https://{sub_public_host(self._cfg)}:{self._cfg.sub_port}"
+
     async def _sub_health(self) -> str:
         """«ok» / «bad» / «» — проверки VLESS этой страны (иначе любого транспорта)."""
         rows = [r for r in await self._check_rollup(server=self._node) if r.get("status")]
@@ -1394,10 +1370,12 @@ class VpnService:
             "name": self._sub_entry_name(),
             "ip": self._node_ip(),
             "awg": self._has(TRANSPORT_AWG),
+            # Адрес страницы этой ноды: по нему браузер спрашивает «трафик идёт через вас?».
+            "base": self._sub_base(),
         }
         found = await self._sub_local(token)
         if found is None:
-            return {"found": False, "info": base}
+            return {"found": False, "info": await self._sub_device_info(token, args, base)}
         chat_id, label, client_uuid = found
         month = _month_key(_now())
         entry = subs.SubEntry(
@@ -1413,10 +1391,40 @@ class VpnService:
             "chat_id": chat_id,
             "gen": await self._device_gen(chat_id, label),
             "entry": entry.to_wire(),
-            "info": {**base, "health": await self._sub_health(), "awg_key": awg_key},
+            "info": {
+                **base,
+                "health": await self._sub_health(),
+                "awg_key": awg_key,
+                "device": True,
+            },
             "used_bytes": await self._used_bytes(chat_id, month),
             "limit_bytes": await self._limit_bytes(chat_id, month),
         }
+
+    async def _sub_device_info(
+        self, token: str, args: dict[str, Any], base: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Сведения о ноде, где у устройства нет VLESS. Если собиратель подписки
+        уже знает устройство (``chat_id``/``device_label`` от другой ноды) и токен
+        подписан именно им — здесь можно выдать AmneziaVPN (старые устройства, у
+        которых VLESS только в части стран); ``awg_key`` — есть ли ключ здесь."""
+        try:
+            chat_id = int(args.get("chat_id") or 0)
+        except (TypeError, ValueError):
+            return base
+        label = str(args.get("device_label") or "")
+        if (
+            not chat_id
+            or chat_id == NODE_SENTINEL_CHAT_ID
+            or not label
+            or not subs.token_matches(self._sub_secret, token, chat_id, label)
+        ):
+            return base
+        allowed, _base = await self._access(chat_id)
+        if not allowed:
+            return {**base, "awg": False}
+        awg_key = await self._active_row(chat_id, label, TRANSPORT_AWG) is not None
+        return {**base, "awg_key": awg_key, "device": True}
 
     async def _sub_peer_nodes(self) -> list[str]:
         """Остальные живые vpn-ноды роя (кэш на минуту)."""
@@ -1431,14 +1439,19 @@ class VpnService:
         self._peer_nodes_cache = (now, nodes)
         return nodes
 
-    async def _sub_ask_peer(self, node: str, token: str) -> dict[str, Any] | None:
+    async def _sub_ask(self, node: str, args: dict[str, Any]) -> dict[str, Any] | None:
+        if node == self._node_id:
+            return await self._sub_links(args)
+        return await self._sub_ask_peer(node, args)
+
+    async def _sub_ask_peer(self, node: str, args: dict[str, Any]) -> dict[str, Any] | None:
         """Ответ соседа или ``None``, если он недоступен (тогда берём старое
         из ``_sub_stale``: страна не должна пропадать из подписки на время сбоя)."""
         assert self._node_link is not None
         try:
             return await self._node_link.command(
                 ACTION_SUB_LINKS,
-                {"token": token},
+                args,
                 dst=Address(node=node, service=SERVICE_NAME),
                 timeout=6.0,
             )
@@ -1466,8 +1479,23 @@ class VpnService:
         answers: list[tuple[str, dict[str, Any] | None]] = [(self._node_id, local)]
         peers = await self._sub_peer_nodes()
         if peers:
-            replies = await asyncio.gather(*(self._sub_ask_peer(n, token) for n in peers))
+            replies = await asyncio.gather(
+                *(self._sub_ask_peer(n, {"token": token}) for n in peers)
+            )
             answers += list(zip(peers, replies, strict=True))
+        # Второй заход: ноды, где у устройства нет VLESS, узнают его по подписи
+        # токена (chat_id/label — от ноды, где VLESS есть) и скажут про AmneziaVPN.
+        known = next((r for _n, r in answers if r and r.get("found")), None)
+        missing = [n for n, r in answers if r is not None and not r.get("found")]
+        if known is not None and missing:
+            hint = {
+                "token": token,
+                "chat_id": known.get("chat_id"),
+                "device_label": known.get("device_label"),
+            }
+            again = await asyncio.gather(*(self._sub_ask(n, hint) for n in missing))
+            redo = dict(zip(missing, again, strict=True))
+            answers = [(n, redo[n] if (redo.get(n) or {}).get("info") else r) for n, r in answers]
         for node, reply in answers:
             if reply is None:  # нода не ответила: держим последнюю известную страну
                 entries += self._sub_stale.get((token, node), [])
@@ -1522,13 +1550,16 @@ class VpnService:
         action = ACTION_REISSUE if replace else ACTION_ISSUE
         args = {"chat_id": chat_id, "device_label": device_label, "transport": TRANSPORT_AWG}
         self._sub_cache.clear()
-        if node == self._node_id:
-            return await self.run_command(action, args)
-        if self._node_link is None:
-            raise ProtoError(ERR_BAD_REQUEST, "нода недоступна")
-        return await self._node_link.command(
-            action, args, dst=Address(node=node, service=SERVICE_NAME), timeout=20.0
-        )
+        try:
+            if node == self._node_id:
+                return await self.run_command(action, args)
+            if self._node_link is None:
+                raise ProtoError(ERR_BAD_REQUEST, "нода недоступна")
+            return await self._node_link.command(
+                action, args, dst=Address(node=node, service=SERVICE_NAME), timeout=20.0
+            )
+        finally:
+            self._sub_cache.clear()  # параллельная загрузка страницы не оставит старый «ключа нет»
 
     async def _peers(self, _args: dict[str, Any]) -> dict[str, Any]:
         cur = await self._db.conn.execute(

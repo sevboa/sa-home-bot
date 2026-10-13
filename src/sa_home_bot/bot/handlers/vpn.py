@@ -106,7 +106,7 @@ _ACTION_APK = "apk"
 # Человеческие названия транспортов (vpn_peers.transport) для карточки и
 # кнопок выбора «➕ Новое устройство».
 _TRANSPORT_LABEL = {
-    vpn_protocol.TRANSPORT_AWG: "AmneziaWG",
+    vpn_protocol.TRANSPORT_AWG: "AmneziaVPN",
     vpn_protocol.TRANSPORT_REALITY: "VLESS (Reality)",
 }
 # Префикс значения кнопки выбора транспорта: act:vpn:issue:t_<transport>.
@@ -115,7 +115,7 @@ _TRANSPORT_PICK_PREFIX = "t_"
 
 # Порядок транспортов везде, где их перечисляют рядом (индикатор, пикер):
 # VLESS первым — он нужен гостям в РФ, с него и начинают выбирать.
-_TRANSPORT_ORDER = (vpn_protocol.TRANSPORT_REALITY, vpn_protocol.TRANSPORT_AWG)
+_TRANSPORT_ORDER = (vpn_protocol.TRANSPORT_AWG, vpn_protocol.TRANSPORT_REALITY)
 
 # Индикатор доступности по данным чекеров (39.0.7(f), vpn/service.py::
 # _check_rollup). Трёхцветный по решению владельца 2026-09-18: 🟢 — сервер
@@ -919,7 +919,7 @@ _PICK_SERVER_TEXT = "Где завести новое устройство?"
 _PICK_TRANSPORT_TEXT = (
     "Какой технологией выдать новое устройство?\n\n"
     "• <b>VLESS · Hiddify</b> — для DPI неотличимо от обычного HTTPS.\n"
-    "• <b>AmneziaWG</b> — быстрее, но в части стран может не работать."
+    "• <b>AmneziaVPN</b> — быстрее, но в части стран может не работать."
 )
 
 
@@ -1799,7 +1799,7 @@ async def _awg_country(
     device, servers = found
     server = next((s for s in _awg_servers(servers) if s.get("node") == node), None)
     if server is None or not node:
-        await callback.answer("В этой стране AmneziaWG сейчас не выдаётся.", show_alert=True)
+        await callback.answer("В этой стране AmneziaVPN сейчас не выдаётся.", show_alert=True)
         await _show_screen(callback, node_link, subscription, config, vpn_settings.SCREEN_AWG, key)
         return
     if device.connection(node, vpn_protocol.TRANSPORT_AWG) is not None:
@@ -1978,7 +1978,7 @@ async def _awg_replace(
     device, servers = found
     server = next((s for s in _awg_servers(servers) if s.get("node") == node_id), None)
     if server is None:
-        await callback.answer("В этой стране AmneziaWG сейчас не выдаётся.", show_alert=True)
+        await callback.answer("В этой стране AmneziaVPN сейчас не выдаётся.", show_alert=True)
         return
     await _awg_deliver(
         callback,
@@ -2078,7 +2078,19 @@ async def _wizard_create(
         return
     key = vpn_devices.device_key(label)
     if expert:
-        await _wizard_edit(callback, vpn_settings.pick_text(label), vpn_settings.pick_keyboard(key))
+        # 57.13: настройки нового устройства — сразу страница, в том же сообщении;
+        # «⬅️ К устройству» — в карточку. Выбор способа в Telegram — если страницы нет.
+        page_url = await _page_url_by_label(node_link, chat_id, label)
+        if page_url is not None:
+            await _wizard_edit(
+                callback,
+                vpn_settings.page_link_text(label, page_url),
+                vpn_settings.new_device_link_keyboard(page_url, key),
+            )
+        else:
+            await _wizard_edit(
+                callback, vpn_settings.pick_text(label), vpn_settings.pick_keyboard(key)
+            )
         return
     needs_file = vpn_wizard.needs_settings_file(config.vpn, devices, key)
     first = vpn_wizard.steps(needs_file)[0]
@@ -2560,14 +2572,14 @@ def _conf_filename(device_label: str, location: str = "") -> str:
 def _file_caption(label_escaped: str) -> str:
     return (
         f"🔐 Конфиг устройства «{label_escaped}».\n"
-        "Нажмите на файл → «Открыть с помощью» → AmneziaWG — тоннель "
+        "Нажмите на файл → «Открыть с помощью» → AmneziaVPN — тоннель "
         "добавится сразу, без копирования."
     )
 
 
 def _qr_caption(label_escaped: str, flag: str = "") -> str:
     return (
-        f"📶 QR — «{label_escaped}» · AmneziaWG{' ' + flag if flag else ''}. Откройте AmneziaVPN → "
+        f"📶 QR — «{label_escaped}» · AmneziaVPN{' ' + flag if flag else ''}. Откройте AmneziaVPN → "
         "«+» → «QR-код» (удобно для настройки с ДРУГОГО "
         "устройства — сфотографировать собственный экран телефон не может)."
     )

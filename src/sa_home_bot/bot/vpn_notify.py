@@ -159,7 +159,7 @@ def access_opened_text(country: vd.Country, base_gb: float, *, has_devices: bool
     text = f"📶 Вам открыт VPN: {where}, {base_gb:.0f} ГБ в месяц."
     if has_devices:
         text += (
-            "\nСтрана появится в Hiddify сама; для AmneziaWG — «📥 Получить настройки» "
+            "\nСтрана появится в Hiddify сама; для AmneziaVPN — «📥 Получить настройки» "
             "в «⚙️ Управление»."
         )
     return text

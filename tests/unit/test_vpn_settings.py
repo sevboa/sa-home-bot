@@ -1,12 +1,12 @@
 """bot/handlers/vpn.py + bot/vpn_settings.py: выдача настроек в экспертном
-режиме (57.4) — VLESS · Hiddify, AmneziaWG, новое устройство."""
+режиме (57.4) — VLESS · Hiddify, AmneziaVPN, новое устройство."""
 
 from __future__ import annotations
 
 import pytest
 
 from sa_home_bot.bot import vpn_devices as vd
-from sa_home_bot.bot import vpn_nodes, vpn_settings
+from sa_home_bot.bot import vpn_nodes, vpn_settings, vpn_wizard
 from sa_home_bot.bot.handlers import vpn as h
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings, VpnConfig
@@ -113,7 +113,7 @@ async def test_card_has_get_settings_button_and_pick_screen():
     cb, _, _ = await _press(f"act:vpn:vpn_card:g{KEY}")
     text, markup = _last(cb)
     assert text == f"📥 <b>{LABEL}</b> — чем подключаться?"
-    assert _texts(markup) == ["🛡 VLESS · Hiddify", "⚡ AmneziaWG", "⬅️ Назад"]
+    assert _texts(markup) == ["⚡ AmneziaVPN", "🛡 VLESS · Hiddify", "⬅️ Назад"]
 
 
 # --- VLESS · Hiddify ---------------------------------------------------------
@@ -226,9 +226,9 @@ async def test_awg_issue_sends_file_steps_and_buttons():
     ]
     assert not link.of(vpn_protocol.ACTION_REISSUE)
     (_, doc, caption) = notifier.sent_documents[0]
-    assert doc.startswith(b"[Interface]") and caption == f"⚡ {LABEL} · AmneziaWG · 🇳🇱"
+    assert doc.startswith(b"[Interface]") and caption == f"⚡ {LABEL} · AmneziaVPN · 🇳🇱"
     (_, text), markup = notifier.sent_direct[0], notifier.sent_direct_markups[0]
-    assert "1. Установите AmneziaVPN" in text
+    assert "1. Установите именно AmneziaVPN" in text
     assert "«Открыть в AmneziaVPN»" in text
     assert f"❗️ Обязательно переименуйте добавленное подключение — например, «🇳🇱 {LABEL}»." in text
     texts = _texts(markup)
@@ -254,7 +254,7 @@ async def test_awg_existing_key_asks_before_replacing(_env):
     cb, link, notifier = await _press(f"act:vpn:issue:~g{KEY}:jeeves")
     text, markup = _last(cb)
     assert text == (
-        f"⚠️ У <b>{LABEL}</b> уже есть ключ AmneziaWG 🇳🇱.\n"
+        f"⚠️ У <b>{LABEL}</b> уже есть ключ AmneziaVPN 🇳🇱.\n"
         "Новый заменит старый — там, где стоит старый, связь пропадёт."
     )
     assert _texts(markup) == ["Выпустить новый", "Отмена"]
@@ -306,15 +306,35 @@ async def test_new_device_pick_platform_then_get_settings_screen(_env):
     cb, link, _ = await _press("act:vpn:issue:~na")
     issued = link.of(vpn_protocol.ACTION_ISSUE)
     assert sorted(n for _, n in issued) == ["jeeves", "wooster"]
-    assert all(a["device_label"] == "🤖 Android" and a["transport"] == "reality" for a, _ in issued)
+    labels = {a["device_label"] for a, _ in issued}
+    assert len(labels) == 1 and all(a["transport"] == "reality" for a, _ in issued)
+    label = labels.pop()
+    assert label.startswith("🤖 ") and label[2:] in vpn_protocol.FLOWER_NAMES
+    # 57.13: сразу страница на сайте в том же сообщении + возврат к карточке
     text, markup = _last(cb)
-    assert text == "📥 <b>🤖 Android</b> — чем подключаться?"
-    assert _texts(markup)[0] == "🛡 VLESS · Hiddify"
+    assert text.startswith(f"📶 <b>Настройки VPN · {label}</b>")
+    assert "https://1.2.3.4:8444/s/tok" in text
+    assert _texts(markup) == ["📶 Открыть настройки", "⬅️ К устройству"]
+    buttons = _all_buttons(markup)
+    assert buttons[0].url == "https://1.2.3.4:8444/s/tok"
+    assert buttons[1].callback_data == vpn_settings.card_cb("d", vd.device_key(label))
 
 
 async def test_new_device_label_gets_number_when_taken():
-    cb, link, _ = await _press("act:vpn:issue:~ni")  # «📱 iPhone» уже есть
-    assert {a["device_label"] for a, _ in link.of(vpn_protocol.ACTION_ISSUE)} == {"📱 iPhone 2"}
+    cb, link, _ = await _press("act:vpn:issue:~ni")
+    (label,) = {a["device_label"] for a, _ in link.of(vpn_protocol.ACTION_ISSUE)}
+    assert label.startswith("📱 ") and label[2:] in vpn_protocol.FLOWER_NAMES
+
+
+def test_next_label_is_platform_emoji_and_free_flower():
+    android = vpn_wizard.PLATFORMS["a"]
+    # занятые цветы — с эмодзи и без (старые устройства звались просто «Rose»)
+    taken = {"Rose", *(f"📱 {n}" for n in vpn_protocol.FLOWER_NAMES[1:-1])}
+    assert vpn_wizard.next_label(android, taken) == f"🤖 {vpn_protocol.FLOWER_NAMES[-1]}"
+    every = set(vpn_protocol.FLOWER_NAMES)
+    first = vpn_protocol.FLOWER_NAMES[0]
+    assert vpn_wizard.next_label(android, every) == f"🤖 {first} 2"
+    assert vpn_wizard.next_label(android, every | {f"🤖 {first} 2"}) == f"🤖 {first} 3"
 
 
 async def test_new_device_failure_offers_retry():
@@ -406,8 +426,8 @@ async def test_get_settings_sends_one_forwardable_message(monkeypatch):
     assert chat == 778
     assert text == (
         f"📶 <b>Настройки VPN · {LABEL}</b>\n"
-        "Откройте ссылку на телефоне, который подключаете — там всё по шагам: "
-        "Hiddify, AmneziaWG и проверка, что VPN включён.\n"
+        "Откройте ссылку на устройстве, которое подключаете (телефон или компьютер) — там всё "
+        "по шагам: AmneziaVPN, Hiddify и проверка, что VPN включён.\n"
         f"{PAGE}\n"
         "Ссылку можно переслать. Не делитесь ей с чужими: по ней подключается это устройство."
     )

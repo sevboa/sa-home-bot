@@ -113,4 +113,8 @@ DIRECT_SUFFIXES: tuple[str, ...] = (
     "market.yandex.ru",
     "megamarket.ru",
     "dzen.ru",
+    # контрольный: показывает адрес — «2ip.ru видит настоящий адрес, а ifconfig.me —
+    # страну VPN» значит, что маршруты в клиенте работают (проверка 2026-10-11)
+    "2ip.ru",
+    "2ip.io",  # 2ip.ru переадресует сюда
 )

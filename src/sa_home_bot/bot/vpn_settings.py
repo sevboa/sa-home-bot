@@ -57,7 +57,7 @@ NO_STORE_TEXT = (
     "Подключитесь через него, затем скачайте настоящий AmneziaVPN и перенесите туда настройки."
 )
 UNAVAILABLE_TEXT = "Не получилось подготовить настройки — сервер не ответил.\nПовторите чуть позже."
-NO_AWG_TEXT = "AmneziaWG сейчас не выдаётся ни в одной стране."
+NO_AWG_TEXT = "AmneziaVPN сейчас не выдаётся ни в одной стране."
 VLESS_FILE_CAPTION = "Настройки Hiddify. Нажмите на файл и выберите «Hiddify»."
 
 
@@ -93,6 +93,16 @@ def page_link_keyboard(page_url: str) -> InlineKeyboardMarkup:
     )
 
 
+def new_device_link_keyboard(page_url: str, key: str) -> InlineKeyboardMarkup:
+    """Новое устройство из «Управления»: та же URL-кнопка + возврат к карточке."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=PAGE_BUTTON, url=page_url)],
+            [InlineKeyboardButton(text="⬅️ К устройству", callback_data=_device_cb(key))],
+        ]
+    )
+
+
 def pick_text(label: str) -> str:
     return f"📥 <b>{html.escape(label)}</b> — чем подключаться?"
 
@@ -100,13 +110,13 @@ def pick_text(label: str) -> str:
 def pick_keyboard(key: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="⚡ AmneziaVPN", callback_data=card_cb(SCREEN_AWG, key))],
             [
                 InlineKeyboardButton(
                     text=f"🛡 {vd.TRANSPORT_NAME[vd.REALITY]}",
                     callback_data=action_cb(vpn_protocol.ACTION_ISSUE, KIND_VLESS, key),
                 )
             ],
-            [InlineKeyboardButton(text="⚡ AmneziaWG", callback_data=card_cb(SCREEN_AWG, key))],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data=_device_cb(key))],
         ]
     )
@@ -193,7 +203,7 @@ def qr_button_text(country: vd.Country, multi: bool) -> str:
 
 
 def awg_pick_text(label: str) -> str:
-    return f"⚡ <b>{html.escape(label)}</b> · AmneziaWG — в какой стране?"
+    return f"⚡ <b>{html.escape(label)}</b> · AmneziaVPN — в какой стране?"
 
 
 def awg_country_button_text(server: dict) -> str:
@@ -220,7 +230,7 @@ def awg_pick_keyboard(key: str, servers: list[dict]) -> InlineKeyboardMarkup:
 
 def awg_replace_text(label: str, country: vd.Country) -> str:
     return (
-        f"⚠️ У <b>{html.escape(label)}</b> уже есть ключ AmneziaWG {html.escape(country.short)}.\n"
+        f"⚠️ У <b>{html.escape(label)}</b> уже есть ключ AmneziaVPN {html.escape(country.short)}.\n"
         "Новый заменит старый — там, где стоит старый, связь пропадёт."
     )
 
@@ -240,13 +250,13 @@ def awg_replace_keyboard(key: str, node: str) -> InlineKeyboardMarkup:
 
 
 def awg_file_caption(label: str, country: vd.Country) -> str:
-    return f"⚡ {html.escape(label)} · AmneziaWG · {html.escape(country.short)}"
+    return f"⚡ {html.escape(label)} · AmneziaVPN · {html.escape(country.short)}"
 
 
 def awg_steps_text(label: str, country: vd.Country) -> str:
     rename = html.escape(f"{country.short} {label}".strip())
     return (
-        "1. Установите AmneziaVPN — кнопки ниже.\n"
+        "1. Установите именно AmneziaVPN — кнопки ниже (не AmneziaWG).\n"
         "2. Нажмите на файл выше → «Открыть в AmneziaVPN».\n"
         f"3. ❗️ Обязательно переименуйте добавленное подключение — например, «{rename}»."
     )

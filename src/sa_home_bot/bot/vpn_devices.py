@@ -24,10 +24,10 @@ from sa_home_bot.vpn import protocol as vpn_protocol
 REALITY = vpn_protocol.TRANSPORT_REALITY
 AWG = vpn_protocol.TRANSPORT_AWG
 # VLESS первым — с него начинают; незнакомые транспорты (нода новее бота) — в хвост.
-TRANSPORT_ORDER = (REALITY, AWG)
+TRANSPORT_ORDER = (AWG, REALITY)  # 57.13: AmneziaVPN первым
 # Имена транспортов в текстах: «VLESS · Hiddify» всегда вместе, AmneziaWG — без
 # оговорок про страны (решение владельца 2026-10-10).
-TRANSPORT_NAME = {REALITY: "VLESS · Hiddify", AWG: "AmneziaWG"}
+TRANSPORT_NAME = {REALITY: "VLESS · Hiddify", AWG: "AmneziaVPN"}
 
 _MONTHS_NOM = (
     "январь февраль март апрель май июнь июль август сентябрь октябрь ноябрь декабрь"
@@ -257,7 +257,7 @@ def fmt_stamp(stamp: str | None, *, tz: tzinfo | None = None, with_time: bool = 
 def fmt_gb(bytes_: int) -> str:
     gb = bytes_ / 1_000_000_000
     if bytes_ > 0 and gb < 0.05:
-        return "<0.1 ГБ"
+        return "меньше 0.1 ГБ"  # без «<»: текст уходит в HTML-разметку Telegram
     return f"{gb:.1f} ГБ"
 
 
