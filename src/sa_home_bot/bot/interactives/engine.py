@@ -141,6 +141,30 @@ FORM_ITEM = "item"  # форма тула item_action (вещь поместья
 OFFER_YES_SUFFIX = "\n<i>— Да</i>"
 OFFER_NO_SUFFIX = "\n<i>— Нет</i>"
 OFFER_EXPIRED_SUFFIX = "\n<i>— Вопрос уже неактуален</i>"
+
+# Ответ словами на канареечное предложение (59.7, живая находка 2026-10-11:
+# «Да, проверь, что там внизу» не начинало сцену). Только начало реплики:
+# «не проверяй» не согласие. Сначала проверяется отказ.
+OFFER_NO_WORDS_RE = re.compile(
+    r"^\W*(?:ну\W+)?(?:нет|неа|не\s+(?:надо|нужно|стоит|обращай|ходи|сейчас)|забудь|оставь|потом)\b",
+    re.I,
+)
+OFFER_YES_WORDS_RE = re.compile(
+    r"^\W*(?:ну\W+)?(?:да|ага|угу|конечно|давай|ок(?:ей)?|хорошо|ладно|"
+    r"проверь(?:те)?|сходи(?:те)?|иди(?:те)?|пойд[её]м|спустись|спуститесь|спустимся|"
+    r"посмотри(?:те)?|глянь(?:те)?|сходим)\b",
+    re.I,
+)
+# Ход, где согласие дано словами: сцена началась в этом же ходу.
+AGREED_BY_WORDS_NOTE = (
+    "Собеседник только что согласился сходить проверить. Скажи коротко, что "
+    "берёшь фонарь и спускаешься, и опиши, что видишь на месте."
+)
+# Просьба о снимке — спонтанный стук в этот ход не предлагаем: форма влезала
+# между ответом и снимком (живая находка 2026-10-11).
+PHOTO_REQUEST_RE = re.compile(
+    r"\b(?:покажи\w*|сними\w*|снимок|сфот\w*|фот\w*|селфи|кадр\w*)", re.I
+)
 # Кнопка выхода была под сообщениями рассказчика до v0.115.3 — рассказчика
 # больше нет, обработка оставлена для уже разосланных сообщений.
 EXIT_ALERT = "Хорошо."
@@ -738,10 +762,19 @@ class Interactives(underground.UndergroundMixin):
             speech_clear_now=functools.partial(self.speech_clear, user_id),
             note=await self.photo_note(chat_id),
         )
+        # Канарейка отвечает на предложение словами (59.7): «да»/«нет» — как
+        # кнопки; о другом — предложение живёт свой час, кнопки остаются.
+        agreed, keep = (
+            await self._offer_by_words(chat_id, user_id, user_text)
+            if is_private and user_id is not None and self.canary_ok(user_id)
+            else (False, set())
+        )
         # Гость пишет, не нажав кнопок, — прежние формы проигнорированы.
-        await self.dismiss_buttons(chat_id, user_id)
+        await self.dismiss_buttons(chat_id, user_id, keep=keep)
         if not is_private or user_id is None or self._pinned(chat_id):
             return plan
+        if agreed:
+            plan.note = f"{AGREED_BY_WORDS_NOTE}\n\n{plan.note}" if plan.note else AGREED_BY_WORDS_NOTE
         if await self._state.is_opted_out(chat_id):
             return plan
         canary = self.canary_ok(user_id)
@@ -868,6 +901,8 @@ class Interactives(underground.UndergroundMixin):
         if plain < SPONTANEOUS_MIN_PLAIN_TURNS:
             await self._state.set_plain_turns(chat_id, plain + 1)
             return None
+        if PHOTO_REQUEST_RE.search(user_text):
+            return None  # стук — в другой ход, не между ответом и снимком
         now = self._now()
         for scenario, run in candidates:
             if await self._state.is_completed(scenario.id, user_id):
@@ -1248,16 +1283,62 @@ class Interactives(underground.UndergroundMixin):
         if len(left) != len(entries):
             await self._save_live_buttons(chat_id, left)
 
-    async def dismiss_buttons(self, chat_id: int, user_id: int | None) -> int:
+    async def _offer_by_words(
+        self, chat_id: int, user_id: int, user_text: str
+    ) -> tuple[bool, set[int]]:
+        """Живые канареечные предложения и реплика гостя (59.7): согласие
+        словами — как «Проверьте» (сцена начинается этим же ходом), отказ —
+        как «Не обращать внимания». Возвращает (согласился ли, сообщения
+        с предложением, которые не гасить: гость заговорил о другом)."""
+        agreed, keep = False, set()
+        for entry in await self._live_buttons(chat_id):
+            scenario = REGISTRY.get(str(entry.get("scenario")))
+            if (
+                entry.get("form") != FORM_OFFER
+                or scenario is None
+                or not scenario.canary
+                or entry.get("u") not in (None, user_id)
+            ):
+                continue
+            run = await self._expire_offer(await self._state.load_run(chat_id, scenario.id))
+            if run is None or run.status != STATUS_OFFERED or run.user_id != user_id:
+                continue  # истекло — погасит dismiss_buttons
+            message_id = int(entry["m"])
+            if OFFER_NO_WORDS_RE.match(user_text):
+                answer = scenario.offer_buttons[1]
+                run.status = STATUS_DECLINED
+                run.declined_until = iso(
+                    self._now() + (scenario.decline_cooldown or DECLINE_COOLDOWN)
+                )
+            elif OFFER_YES_WORDS_RE.match(user_text):
+                answer = scenario.offer_buttons[0]
+                run.status = STATUS_ACTIVE
+                agreed = True
+            else:
+                keep.add(message_id)
+                continue
+            await self._state.save_run(run)
+            if run.status == STATUS_ACTIVE and scenario.start_place is not None:
+                await self._move_to(user_id, scenario.start_place)
+            await self._forget_buttons(chat_id, message_id)
+            await self._notifier.edit_text(
+                chat_id, message_id, f"{scenario.offer_text}\n<i>— {answer}</i>"
+            )
+        return agreed, keep
+
+    async def dismiss_buttons(
+        self, chat_id: int, user_id: int | None, *, keep: set[int] | frozenset[int] = frozenset()
+    ) -> int:
         """Гость написал, не нажав кнопку, — «проигнорировано гостем»: у форм
         кнопки снимаются (решение остаётся прежним; согласие на сцену можно
         будет спросить снова), раскрытый перечень действий сворачивается в
         карточку. Чужое сообщение в общем чате чужих форм не трогает.
+        ``keep`` — сообщения, которые не гасить (живое предложение канарейки).
         Возвращает, сколько сообщений погашено."""
         entries = await self._live_buttons(chat_id)
         if not entries:
             return 0
-        mine = [e for e in entries if e.get("u") in (None, user_id)]
+        mine = [e for e in entries if e.get("u") in (None, user_id) and e.get("m") not in keep]
         if not mine:
             return 0
         await self._save_live_buttons(chat_id, [e for e in entries if e not in mine])

@@ -55,6 +55,8 @@ class FakeNotifier:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str, object]] = []
         self.photos: list[tuple[int, object, str | None]] = []
+        self.edited: list[tuple[int, int, str]] = []
+        self.unmarked: list[tuple[int, int]] = []
         self._next = 1000
 
     async def send_direct(self, chat_id, text, reply_markup=None, **_kw):
@@ -65,6 +67,14 @@ class FakeNotifier:
     async def send_photo_ex(self, chat_id, photo, *, caption=None, **_kw):
         self.photos.append((chat_id, photo, caption))
         return 500 + len(self.photos), f"file-{len(self.photos)}"
+
+    async def edit_text(self, chat_id, message_id, text, reply_markup=None):
+        self.edited.append((chat_id, message_id, text))
+        return True
+
+    async def edit_markup(self, chat_id, message_id, reply_markup):
+        self.unmarked.append((chat_id, message_id))
+        return True
 
     def texts(self, chat_id: int) -> list[str]:
         return [t for c, t, _ in self.sent if c == chat_id]
@@ -272,6 +282,7 @@ async def test_spontaneous_only_in_private_and_not_when_opted_out(store):
 async def test_spontaneous_not_during_another_scene(store):
     svc, notifier, _ = _make(store, dice=Dice(0.0))
     await _turn(svc, "Альфред, ты картавишь!")  # радио предложено
+    await svc.handle_click(CANARY, CANARY, radio.RADIO.id, engine.BTN_PLAY)  # и идёт
     for _ in range(6):
         plan = await _turn(svc)
         assert plan.scenario != cellar.SCENARIO_ID
@@ -335,6 +346,75 @@ async def test_yes_button_text_and_alfred_goes_to_the_cellar_door(store):
     assert at is not None and at.place == places.PLACE_CELLAR_DOOR
     directive, _ = svc.spoken[-1]
     assert "заколочена досками" in directive and "снимать ли" in directive
+
+
+# --- ответ словами на предложение (59.7) ---
+
+
+async def test_yes_in_words_starts_the_scene_this_turn(store):
+    svc, notifier, _ = _make(store)
+    await _offered(svc, store)
+    offer_id = notifier._next
+    plan = await svc.before_turn(CANARY, CANARY, "Да, проверь, что там внизу", is_private=True)
+    assert plan.scene and plan.scenario == cellar.SCENARIO_ID
+    assert engine.AGREED_BY_WORDS_NOTE in plan.note
+    assert (await _run(store)).status == STATUS_ACTIVE
+    at = await places.get_at(store, CANARY)
+    assert at is not None and at.place == places.PLACE_CELLAR_DOOR
+    assert notifier.edited == [
+        (CANARY, offer_id, cellar.OFFER_TEXT + "\n<i>— Проверьте</i>")
+    ]
+
+
+async def test_no_in_words_declines_with_cooldown(store):
+    svc, notifier, _ = _make(store)
+    await _offered(svc, store)
+    plan = await svc.before_turn(CANARY, CANARY, "Нет, не надо", is_private=True)
+    assert not plan.scene
+    run = await _run(store)
+    assert run.status == STATUS_DECLINED
+    assert engine.parse_iso(run.declined_until) > svc._now() + timedelta(days=2)
+    assert notifier.edited[-1][2].endswith("<i>— Не обращать внимания</i>")
+
+
+async def test_other_talk_keeps_the_offer_and_its_buttons(store):
+    svc, notifier, _ = _make(store)
+    await _offered(svc, store)
+    await _turn(svc, "Разошли всем уведомление про VPN")
+    assert (await _run(store)).status == STATUS_OFFERED
+    assert notifier.unmarked == [] and notifier.edited == []
+    answer = await svc.handle_click(CANARY, CANARY, cellar.SCENARIO_ID, engine.BTN_PLAY)
+    assert answer[0] == "Хорошо."
+
+
+async def test_offer_still_expires_after_an_hour(store):
+    clock = Clock()
+    svc, notifier, _ = _make(store, clock=clock)
+    await _offered(svc, store)
+    clock.now += timedelta(hours=1, minutes=1)
+    plan = await svc.before_turn(CANARY, CANARY, "Да, проверь", is_private=True)
+    assert not plan.scene
+    assert (await _run(store)).status == STATUS_DECLINED
+    assert notifier.unmarked  # кнопки погашены
+
+
+@pytest.mark.parametrize("text", ["не проверяй", "Какая погода?", "проверка связи", "данные"])
+def test_words_regexes_do_not_misread(text):
+    assert not engine.OFFER_YES_WORDS_RE.match(text)
+
+
+@pytest.mark.parametrize("text", ["да", "Ну давай", "Проверьте", "сходи глянь", "пойдём вниз"])
+def test_yes_words(text):
+    assert engine.OFFER_YES_WORDS_RE.match(text) and not engine.OFFER_NO_WORDS_RE.match(text)
+
+
+async def test_spontaneous_knock_not_on_a_photo_request(store):
+    svc, notifier, _ = _make(store, dice=Dice(0.0))
+    for _ in range(3):
+        await _turn(svc)
+    plan = await _turn(svc, "хорошо, покажи что за окном")
+    assert not plan.offered and notifier.sent == []
+    assert (await _turn(svc)).offered  # следующий обычный ход — можно
 
 
 # --- сцена: стадии ---
