@@ -108,6 +108,7 @@ DARKROOM_CANON = RoomCanon(
     specials=(places.DARKROOM_CAMERA,),
     of_ru="проявочной",
     from_ru="из проявочной",
+    names=(r"проявоч\w*",),
 )
 
 LABORATORY_CANON = RoomCanon(
@@ -135,6 +136,7 @@ LABORATORY_CANON = RoomCanon(
     ),
     of_ru="лаборатории",
     from_ru="из лаборатории",
+    names=(r"лаборатор\w*",),
 )
 
 CAVE_CANON = RoomCanon(
@@ -161,6 +163,7 @@ CAVE_CANON = RoomCanon(
     ),
     of_ru="пещеры",
     from_ru="из пещеры",
+    names=(r"пещер\w*",),
 )
 
 WINE_CELLAR_CANON = RoomCanon(
@@ -186,6 +189,7 @@ WINE_CELLAR_CANON = RoomCanon(
     ),
     of_ru="винного погреба",
     from_ru="из винного погреба",
+    names=(r"винн\w*\s+(?:погреб|подвал)\w*",),
 )
 
 SPECIAL_CANONS: dict[str, RoomCanon] = {
@@ -218,8 +222,10 @@ CATACOMBS_CANON = RoomCanon(
     trinket_chance=0.2,
     of_ru="катакомб",
     from_ru="из катакомб",
+    names=(r"(?:катаком|коридор|подземел|тоннел|туннел)\w*",),
 )
 
+places.register_nameable(CATACOMBS_CANON)
 for _canon in SPECIAL_CANONS.values():
     places.register(_canon)
 

@@ -59,6 +59,11 @@ GROUP_CATACOMBS = "catacombs"
 # Темп кадра подземелья: свет — фонарь Альфреда, без времени суток и погоды
 # (план 59.0: кэш картинок поэтому стабилен).
 UNDERGROUND_LIGHT_EN = "dim lantern light, deep shadows"
+# Ключ состояния комнаты без окна: вместо погоды и времени суток (59.7).
+NO_OUTSIDE_KEY = "lantern"
+# В негатив рисунка комнат без окна (59.7): окон и дневного света там нет,
+# а кадр иначе рисует их под потолком (живой прогон 2026-10-13).
+NO_WINDOW_NEGATIVE_EN = "window, daylight, sunlight, sky"
 
 TEMP_NAME_MAX = 40
 TEMP_CANON_RU_MAX = 220
@@ -112,6 +117,10 @@ class RoomCanon:
     # Склонения для Ведущего и Альфреда: «подвала» и «из подвала».
     of_ru: str = "этого места"
     from_ru: str = "оттуда, где был"
+    # Основы названия места для распознавания в просьбах (regex-фрагменты,
+    # без групп захвата): по ним take_photo и search узнают, что названо
+    # другое место (``foreign_place``).
+    names: tuple[str, ...] = ()
 
 
 CABINET_CANON = RoomCanon(
@@ -128,6 +137,7 @@ CABINET_CANON = RoomCanon(
     group=GROUP_CABINET,
     windowed=True,
     light_en=None,
+    names=(r"кабинет\w*",),
     trinkets=(
         "выцветшую записку без подписи",
         "огрызок сургучной палочки",
@@ -152,6 +162,10 @@ CELLAR_DOOR_CANON = RoomCanon(
     in_en="at an old boarded-up cellar door",
     of_ru="лестницы у двери подвала",
     from_ru="от двери подвала",
+    names=(
+        r"двер\w*\s+(?:в\s+)?(?:подвал|погреб)\w*",
+        r"(?:лестниц|пролёт|пролет)\w*(?:\s+(?:в|к|на)\s+(?:подвал|погреб)\w*)?",
+    ),
     trinkets=(
         "ржавый гвоздь из доски",
         "клочок паутины с высохшей мухой",
@@ -174,6 +188,7 @@ CELLAR_CANON = RoomCanon(
     in_en="in a dark stone cellar",
     of_ru="подвала",
     from_ru="из подвала",
+    names=(r"(?:подвал|погреб)\w*",),
     trinkets=(
         "пустую бутылку без этикетки",
         "треснувшую глиняную кружку",
@@ -191,6 +206,48 @@ PLACES: dict[str, RoomCanon] = {
 
 def register(canon: RoomCanon) -> None:
     PLACES[canon.id] = canon
+    NAMEABLE[canon.id] = canon
+
+
+# Места, названия которых распознаются в просьбах: все комнаты реестра и
+# катакомбы (их в ``PLACES`` нет — это лабиринт, а не комната).
+NAMEABLE: dict[str, RoomCanon] = dict(PLACES)
+
+
+def register_nameable(canon: RoomCanon) -> None:
+    NAMEABLE[canon.id] = canon
+
+
+# --- какое место названо в просьбе (Этап 59.7) ---
+
+# Лаз принадлежит и подвалу (он там, за бочкой), и катакомбам (он ведёт в
+# них): из любого из двух он «здесь». Название — как его называет Альфред.
+_HATCH_RE = r"\bлаз(?:а|у|ом|е|ы)?\b"
+_HATCH_IDS = frozenset({PLACE_CELLAR, "catacombs"})
+_HATCH_NAME = "лаз в катакомбы"
+
+
+def foreign_place(text: str, here: str) -> str | None:
+    """Название другого места, если в ``text`` (focus, подпись, ``where``)
+    названо не то, где Альфред стоит (``here`` — id места). None — чужих мест
+    нет. Словарь основ — ``RoomCanon.names``, без LLM: самое левое совпадение
+    выигрывает, поэтому «дверь подвала» — это лестница у двери, а не подвал, а
+    «винный погреб» — не подвал. Временные комнаты Ведущего по названию не
+    узнаются."""
+    low = text.casefold()
+    parts: list[tuple[frozenset[str], str]] = []
+    patterns: list[str] = []
+    for canon in NAMEABLE.values():
+        for fragment in canon.names:
+            patterns.append(f"(?P<g{len(parts)}>{fragment})")
+            parts.append((frozenset({canon.id}), canon.name_ru))
+    patterns.append(f"(?P<g{len(parts)}>{_HATCH_RE})")
+    parts.append((_HATCH_IDS, _HATCH_NAME))
+    for match in re.finditer("|".join(patterns), low):
+        ids, name = parts[int(match.lastgroup[1:])]  # type: ignore[index]
+        if here not in ids:
+            return name
+    return None
 
 
 # --- положение Альфреда ---
@@ -342,6 +399,9 @@ class Room(Cabinet):
         return self.canon.stem in low and len(low.split()) <= 3
 
     def state_key(self, outside_key: str) -> str:
+        # Без окна снаружи ничего не видно: ни погоды, ни времени суток (59.7).
+        if not self.canon.windowed:
+            outside_key = NO_OUTSIDE_KEY
         return f"{self.canon.id}:{super().state_key(outside_key)}"
 
 
@@ -558,6 +618,41 @@ DARKROOM_CAMERA = Find(
     text=DARKROOM_CAMERA_TEXT,
     item="camera",
     first=True,
+)
+
+
+# --- «Где ты» каждый ход и запрет чужого места (Этап 59.7) ---
+
+# Правило в system Альфреда на каждом ходу канарейки: место знает код, а не
+# слова — Альфред никуда не «спускается» сам.
+MOVE_RULE = (
+    "Перейти в другое место ты можешь только инструментом (go или walk): "
+    "словами ты никуда не уходишь, а «спустился» или «поднялся» говоришь лишь "
+    "после того, как инструмент это сделал. Снимок и обыск — только того "
+    "места, где ты стоишь сейчас."
+)
+WINDOW_YES = "Здесь есть окно."
+WINDOW_NO = "Окон здесь нет, света снаружи нет — только твой фонарь."
+WHERE_NOTE = "Где ты сейчас: {here}.{detail}"
+# Выходы из места, где нет приписки «Где ты» (кабинет, лестница, подвал…).
+EXIT_HOME = " Домой, в кабинет, — go(cabinet)."
+EXIT_CABINET_TO = " Отсюда знакомой дорогой (go): {targets}."
+
+TOOL_PHOTO_ELSEWHERE = (
+    "Снимка не будет: место «{name}» отсюда не снять — ты сейчас {here}. "
+    "Снимать можно только то, что вокруг тебя. Чтобы снять то место, сначала "
+    "перейди туда инструментом go (по катакомбам — walk), потом снимай. "
+    "Скажи об этом собеседнику своими словами."
+)
+TOOL_PHOTO_NO_WINDOW = (
+    "Снимка не будет: окон здесь нет — ты сейчас {here}, вида из окна отсюда "
+    "не снять. Скажи об этом собеседнику своими словами."
+)
+TOOL_SEARCH_ELSEWHERE = (
+    "Обыскать место «{name}» отсюда нельзя: ты сейчас {here}. Порыскать можно "
+    "только там, где стоишь. Чтобы порыскать там, сначала перейди туда "
+    "инструментом go (по катакомбам — walk). Скажи об этом собеседнику "
+    "своими словами."
 )
 
 

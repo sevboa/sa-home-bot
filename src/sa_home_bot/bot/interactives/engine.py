@@ -189,16 +189,32 @@ ALFRED_PHOTO_PREFIX = "<b>Альфред:</b> "
 # живые снимки 2026-09-30 из четырёх сохранили по две.
 PHOTO_FEATURES_IN_FRAME = 2
 PHOTO_CAPTION = "Кабинет"
+
+
+def _general_view_re(nouns: str) -> re.Pattern[str]:
+    return re.compile(
+        r"^(?:(?:мой|наш|твой|весь)\s+)?(?:общ\w+\s+(?:вид|план)\w*"
+        r"|(?:(?:общ\w+\s+)?(?:вид|план|снимок|фото)\w*\s+)?(?:(?:на|всего|мо\w+|тво\w+)\s+)*"
+        rf"(?:{nouns})\w*)",
+        re.I,
+    )
+
+
 # Подпись или focus про весь кабинет — общий вид, а не крупный план
 # (tool_take_photo, _photo). Хвост не важен: «Вид кабинета после инцидента»,
 # «кабинет с корпусом передатчика на полу» — тоже общий вид; крупным планом
 # их снимали без радио на столе (живой прогон 2026-10-01).
-GENERAL_VIEW_RE = re.compile(
-    r"^(?:(?:мой|наш|твой|весь)\s+)?(?:общ\w+\s+(?:вид|план)\w*"
-    r"|(?:(?:общ\w+\s+)?(?:вид|план|снимок|фото)\w*\s+)?(?:(?:на|всего|мо\w+|тво\w+)\s+)*"
-    r"(?:кабинет|комнат)\w*)",
-    re.I,
-)
+GENERAL_VIEW_RE = _general_view_re("кабинет|комнат")
+# Вне кабинета (Этап 59.7) «кабинет» — другое место, а не общий вид того, где
+# Альфред стоит: «Мой кабинет» в подвале рисовал подвал.
+GENERAL_VIEW_ROOM_RE = _general_view_re("комнат")
+
+
+def is_general_view(text: str, cab: Cabinet) -> bool:
+    """Подпись или focus про весь вид места, где стоит Альфред."""
+    return bool((GENERAL_VIEW_ROOM_RE if isinstance(cab, Room) else GENERAL_VIEW_RE).match(text))
+
+
 # Вид ИЗ окна («вид из окна», «окно с видом на горизонт», «окно и вид за ним»,
 # «за окном») — не крупный план предмета, хотя focus непустой: ему нужен свет
 # общего вида с окном и луной по фазе (стенд 2026-10-10: как «крупный» он получал
@@ -820,6 +836,9 @@ class Interactives(underground.UndergroundMixin):
                 else:
                     place = cab.describe_ru()
                 scene_note = build_scene_note(scenario, run, place)
+                if canary:
+                    # Место в сцене уже сказано выше; здесь только правило (59.7).
+                    scene_note += "\n\n" + self._where_rule(cab)
                 plan.note = f"{scene_note}\n\n{plan.note}" if plan.note else scene_note
                 plan.force_swap_form = (
                     run.finale and not run.finale_form_sent and not scenario.finish_after_finale
@@ -833,13 +852,48 @@ class Interactives(underground.UndergroundMixin):
                 plan.offered = True
                 if canary:
                     await self._state.set_plain_turns(chat_id, 0)
+                    await self._add_where_note(plan, chat_id, user_id)
                 return plan
         if canary:
             offered = await self._spontaneous(loaded, chat_id, user_id, user_text)
             if offered is not None:
                 plan.scenario = offered.id
                 plan.offered = True
+            await self._add_where_note(plan, chat_id, user_id)
         return plan
+
+    # --- Этап 59.7: «Где ты» каждый ход канарейки ---
+
+    def _where_rule(self, cab: Cabinet) -> str:
+        """Правило места (перейти можно только тулом) и есть ли окно."""
+        window = places.WINDOW_YES if cab.windowed else places.WINDOW_NO
+        return f"{window} {places.MOVE_RULE}"
+
+    async def _add_where_note(self, plan: TurnPlan, chat_id: int, user_id: int) -> None:
+        """Заметка «Где ты» вне сцены: место по ``alfred_at``, окно, как
+        отсюда выйти и правило. В сцене место уже в её заметке."""
+        cab = await self._room(chat_id, user_id)
+        if isinstance(cab, Room):
+            detail = " " + cab.describe_ru() + await self._room_extra(cab, user_id)
+            if cab.canon.group != places.GROUP_CATACOMBS:
+                detail += places.EXIT_HOME
+            note = places.WHERE_NOTE.format(here=cab.canon.in_ru, detail=detail)
+        else:
+            note = places.WHERE_NOTE.format(
+                here=places.CABINET_CANON.in_ru, detail=await self._cabinet_exits(user_id)
+            )
+        note += f"\n{self._where_rule(cab)}"
+        plan.note = f"{note}\n\n{plan.note}" if plan.note else note
+
+    async def _cabinet_exits(self, user_id: int) -> str:
+        """Куда из кабинета знакомой дорогой можно пойти (то, что открыто)."""
+        unlocked, opened = await self._flags(user_id)
+        targets = []
+        if unlocked:
+            targets.append("в подвал — cellar")
+        if opened:
+            targets.append("в катакомбы — catacombs")
+        return places.EXIT_CABINET_TO.format(targets=", ".join(targets)) if targets else ""
 
     # --- Этап 59.3/59.6: эффекты вещей (общий механизм «Применение», 49.4) ---
 
@@ -1445,14 +1499,19 @@ class Interactives(underground.UndergroundMixin):
         where = " ".join(where.split())[: places.SEARCH_WHERE_MAX]
         if not where:
             return places.TOOL_SEARCH_NO_WHERE
+        room = await self._room(chat_id, user_id)
+        canon = room.canon if isinstance(room, Room) else places.CABINET_CANON
+        # Обыскать можно только то место, где стоишь (59.7): чужое место не
+        # обыскивается и не помечается обысканным.
+        name = places.foreign_place(where, room.place)
+        if name is not None:
+            return places.TOOL_SEARCH_ELSEWHERE.format(name=name, here=canon.in_ru)
         # Коридоры и перекрёстки катакомб (59.4): места поиска узла/прохода,
         # итог сразу. Особые места катакомб идут обычным путём ниже.
         labyrinth = await self.search_labyrinth(chat_id, user_id, where)
         if labyrinth is not None:
             return labyrinth
-        room = await self._room(chat_id, user_id)
         run = await self._scene_run(chat_id, user_id)
-        canon = room.canon if isinstance(room, Room) else places.CABINET_CANON
         temp = isinstance(room, Room) and room.temp
         if temp:
             entry = ((run.world.get("rooms") or {}) if run is not None else {}).get(canon.id)
@@ -1525,13 +1584,18 @@ class Interactives(underground.UndergroundMixin):
         показ прежнего снимка, mycraft не будим."""
         if chat_id is None or user_id is None or not hasattr(self._notifier, "send_photo_ex"):
             return cabinet_mod.TOOL_PHOTO_UNAVAILABLE
-        if chat_id in self._photo_busy:
-            return await self._join_photo(chat_id, user_id, trigger_message_id, dialogue_id)
         focus = args.get("focus") if isinstance(args.get("focus"), str) else ""
         focus = " ".join(focus.split())
         caption = args.get("caption") if isinstance(args.get("caption"), str) else ""
         caption = " ".join(caption.split())[:80]
         selfie = args.get("selfie") is True or str(args.get("selfie")).lower() == "true"
+        if self.canary_ok(user_id):
+            # Снимок только того места, где Альфред стоит (59.7).
+            refusal = await self._photo_elsewhere(chat_id, user_id, f"{focus} {caption}")
+            if refusal is not None:
+                return refusal
+        if chat_id in self._photo_busy:
+            return await self._join_photo(chat_id, user_id, trigger_message_id, dialogue_id)
         # «Сними себя» словом в focus/caption без selfie — тоже снимок себя.
         if cabinet_mod.SELFIE_FOCUS_RE.match(focus):
             selfie, focus = True, ""
@@ -1543,9 +1607,9 @@ class Interactives(underground.UndergroundMixin):
         # подписи давал общий вид кабинета, а меч без expect — несверенную
         # тарелку. Подпись о конкретном — это и есть focus, focus — то, что
         # должно выйти на снимке.
-        if GENERAL_VIEW_RE.match(focus) or (focus and cab.is_general(focus)):
+        if is_general_view(focus, cab) or (focus and cab.is_general(focus)):
             focus = ""
-        elif not focus and caption and not selfie and not GENERAL_VIEW_RE.match(caption):
+        elif not focus and caption and not selfie and not is_general_view(caption, cab):
             focus = caption
         caption = caption or (cabinet_mod.SELFIE_CAPTION if selfie else cab.caption)
         # В лабиринте катакомб общий вид и места поиска — запомненные кадры (59.4).
@@ -1629,6 +1693,20 @@ class Interactives(underground.UndergroundMixin):
         if not started:
             return cabinet_mod.TOOL_PHOTO_UNAVAILABLE
         return cabinet_mod.TOOL_PHOTO_STARTED
+
+    async def _photo_elsewhere(self, chat_id: int, user_id: int, text: str) -> str | None:
+        """Отказ без снимка (текст для Альфреда), если в просьбе названо чужое
+        место или вид из окна там, где окна нет. None — снимать можно. Только
+        канарейкам: вызывающий проверяет ``canary_ok``. Распознавание — словарь
+        основ мест (``places.foreign_place``), без LLM."""
+        cab = await self._room(chat_id, user_id)
+        here = cab.canon.in_ru if isinstance(cab, Room) else places.CABINET_CANON.in_ru
+        name = places.foreign_place(text, cab.place)
+        if name is not None:
+            return places.TOOL_PHOTO_ELSEWHERE.format(name=name, here=here)
+        if not cab.windowed and WINDOW_VIEW_RE.search(text):
+            return places.TOOL_PHOTO_NO_WINDOW.format(here=here)
+        return None
 
     async def _join_photo(
         self,
@@ -2036,11 +2114,11 @@ class Interactives(underground.UndergroundMixin):
         node_link = self._get_node_link()
         if node_link is None:
             return False
-        if GENERAL_VIEW_RE.match(focus):
-            focus = ""  # Ведущий тоже просит «общий план кабинета»
         dst = Address(node=LLM_NODE, service=LLM_SERVICE)
         cfg = self._settings.llm
         cab = frame.room if frame is not None else await self._room(chat_id, user_id)
+        if is_general_view(focus, cab):
+            focus = ""  # Ведущий тоже просит «общий план кабинета»
         if not cab.features and not isinstance(cab, Room):
             new = await ask_features(
                 node_link,
@@ -2080,7 +2158,7 @@ class Interactives(underground.UndergroundMixin):
             # Этап 49.2.1: mycraft сохранит 512-оригинал и сверит его зрением.
             "keep_key": f"snap-{chat_id}-{uuid.uuid4().hex[:12]}",
             "expect": list(expect or []),
-            "negative_extra": cabinet_mod.PHOTO_NEGATIVE_EN,
+            "negative_extra": photo_negative(cab),
         }
         if frame is not None:
             # Опорные кадры катакомб зрением не сверяем: обещать на них нечего.
@@ -2402,6 +2480,8 @@ class Interactives(underground.UndergroundMixin):
             happening = run.last_effect if run is not None else None
             mood = run.mood if run is not None else None
             face = cabinet_mod.SELFIE_EMOTION_FACE_EN[emotion]
+            if action and self.canary_ok(user_id) and places.foreign_place(action, cab.place):
+                action = ""  # селфи только здесь: чужое место в позе не рисуем (59.7)
             focus = "; ".join(p for p in (face, action) if p)
             description = selfie_description(cab, outside, focus, happening)
             request: dict[str, Any] = {
@@ -2409,7 +2489,7 @@ class Interactives(underground.UndergroundMixin):
                 "mode": "free",
                 "context": "",
                 "chat_id": chat_id,
-                "negative_extra": cabinet_mod.PHOTO_NEGATIVE_EN,
+                "negative_extra": photo_negative(cab),
                 # Мимика — главным: без этого промптер выкинет её ради обстановки.
                 "emphasize": [e for e in (face or action,) if e],
             }
@@ -3449,6 +3529,13 @@ class Interactives(underground.UndergroundMixin):
 
     async def is_opted_out(self, chat_id: int) -> bool:
         return await self._state.is_opted_out(chat_id)
+
+
+def photo_negative(cab: Cabinet) -> str:
+    """Негатив рисунка. Комнате без окна — ещё и окно с дневным светом (59.7)."""
+    if cab.windowed:
+        return cabinet_mod.PHOTO_NEGATIVE_EN
+    return f"{cabinet_mod.PHOTO_NEGATIVE_EN}, {places.NO_WINDOW_NEGATIVE_EN}"
 
 
 def photo_state_key(
