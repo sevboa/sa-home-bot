@@ -1385,13 +1385,20 @@ async def tool_manor_items(ctx: ToolContext, args: dict[str, Any]) -> str:
     if ctx.interactives is None:
         return interactive_radio.TOOL_ITEMS_UNAVAILABLE
     show = args.get("show")
-    return await ctx.interactives.tool_manor_items(
+    result = await ctx.interactives.tool_manor_items(
         ctx.chat_id,
         ctx.user_id,
         show=show if isinstance(show, str) else "",
         message_thread_id=ctx.message_thread_id,
         trigger_message_id=ctx.trigger_message_id,
+        dialogue_id=ctx.dialogue_id,
     )
+    # Портрет вещи ещё рисуется — Альфред молчит до карточки, как со снимком:
+    # «сейчас подготовлю описание» ломало четвёртую стену (живая находка
+    # 2026-10-15).
+    if result.startswith(interactive_radio.TOOL_ITEMS_DRAWING_HEAD):
+        ctx.end_turn = True
+    return result
 
 
 async def tool_item_action(ctx: ToolContext, args: dict[str, Any]) -> str:

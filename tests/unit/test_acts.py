@@ -9,7 +9,7 @@ import json
 import pytest_asyncio
 
 from sa_home_bot.bot import tools as ai_tools
-from sa_home_bot.bot.interactives import acts, cellar, director, engine, places
+from sa_home_bot.bot.interactives import acts, cellar, director, engine, places, underground
 from sa_home_bot.bot.interactives.base import STATUS_ACTIVE, STATUS_DONE, Run
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
@@ -89,6 +89,26 @@ async def test_chain_of_acts_moves_stage_immediately_and_logs_each(store):
     assert run.pending_effect is None
     assert "Придуманное после хода." not in " ".join(run.transcript)
     assert "effect null" in link.director_inputs[-1]
+
+
+async def test_go_during_key_hunt_is_an_act_through_the_director(store):
+    """Живая находка 2026-10-15: в поисках ключа go отвечал «занят другим
+    делом» и «не знаю такого места». Теперь дорогу решает Ведущий."""
+    svc, _, link = _make(store, dice=Dice(0.0))
+    await _active(svc, store)
+    await _begin(svc, "Сходи на кухню")
+    link.director_replies = [
+        _act_reply("Альфред дошёл до кухни."),
+        _act_reply("Дверь подвала всё так же заперта."),
+    ]
+    assert (await svc.tool_go(CANARY, CANARY, "kitchen")).startswith(
+        "Итог: Альфред дошёл до кухни."
+    )
+    assert "пойти: kitchen" in link.director_inputs[0]
+    assert (await svc.tool_go(CANARY, CANARY, "cellar")).startswith("Итог: Дверь подвала")
+    assert "пойти к двери подвала" in link.director_inputs[1]
+    assert await svc.tool_go(CANARY, CANARY, "cabinet") == underground.TOOL_GO_HOME
+    assert (await _run(store)).status == STATUS_ACTIVE
 
 
 async def test_stage_never_jumps_more_than_one_by_act(store):

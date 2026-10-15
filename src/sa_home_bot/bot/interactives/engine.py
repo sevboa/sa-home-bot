@@ -618,6 +618,9 @@ class Interactives(underground.UndergroundMixin, acts.ActsMixin):
         # Снимок по просьбе: задача на чат (ход /ai её дожидается, wait_photo)
         # и куда показывать его статусы, пока ход ждёт.
         self._photo_jobs: dict[int, asyncio.Task] = {}
+        # Карточка вещи, чей портрет ещё рисуется (manor_items show): ход /ai
+        # молчит и ждёт её так же, как снимок.
+        self._card_jobs: dict[int, asyncio.Task] = {}
         self._photo_status: dict[int, Callable[[str], Awaitable[None]]] = {}
         # Фоновый снимок (сцены), к которому присоединился ход с take_photo:
         # реплику к нему скажет Альфред этого хода (describe, dialogue_id,
@@ -1903,7 +1906,7 @@ class Interactives(underground.UndergroundMixin, acts.ActsMixin):
         """Ход /ai, закончившийся снимком (take_photo), ждёт его здесь —
         и показывает статусы съёмки (``on_status`` — черновик хода). Отмена
         хода снимок не отменяет: он дойдёт сам."""
-        task = self._photo_jobs.get(chat_id)
+        task = self._photo_jobs.get(chat_id) or self._card_jobs.get(chat_id)
         if task is None or task.done():
             return
         if on_status is not None:
@@ -2941,7 +2944,7 @@ class Interactives(underground.UndergroundMixin, acts.ActsMixin):
 
     # --- сюжетные предметы (Этап 49.3) ---
 
-    def _spawn(self, coro: Awaitable[Any], what: str) -> None:
+    def _spawn(self, coro: Awaitable[Any], what: str) -> asyncio.Task:
         async def run() -> None:
             try:
                 await coro
@@ -2951,6 +2954,7 @@ class Interactives(underground.UndergroundMixin, acts.ActsMixin):
         task = asyncio.create_task(run())
         self._photo_tasks.add(task)
         task.add_done_callback(self._photo_tasks.discard)
+        return task
 
     async def _portrait(
         self, chat_id: int, key: str, kind: items_mod.ItemKind, traits: list[str], seed: int
@@ -3157,19 +3161,19 @@ class Interactives(underground.UndergroundMixin, acts.ActsMixin):
         *,
         message_thread_id: int | None = None,
         reply_to_message_id: int | None = None,
-    ) -> bool:
+    ) -> int | None:
+        """Карточка вещи в чат; id сообщения или None — не ушла."""
         kind = items_mod.KINDS.get(item["type"])
         if kind is None:
-            return False
+            return None
         installed = await self.item_place(user_id, item) == items_mod.PLACE_DESK
         caption = item_caption(kind, item, installed)
         markup = item_keyboard(kind, int(item["id"]))
         image = await self._store.image_by_id(int(item["image_id"])) if item["image_id"] else None
         if image is None or not hasattr(self._notifier, "send_photo_ex"):
-            message_id = await self._notifier.send_direct(
+            return await self._notifier.send_direct(
                 chat_id, caption, reply_markup=markup, message_thread_id=message_thread_id
             )
-            return message_id is not None
         photo: bytes | str = image["telegram_file_id"] or image_tools.upscale_png(
             image["png"], self._settings.llm.imagegen_display_px
         )
@@ -3182,10 +3186,10 @@ class Interactives(underground.UndergroundMixin, acts.ActsMixin):
             reply_markup=markup,
         )
         if sent is None:
-            return False
+            return None
         if not image["telegram_file_id"]:
             await self._store.set_image_sent(int(image["id"]), sent[1], sent[0])
-        return True
+        return sent[0]
 
     async def tool_manor_items(
         self,
@@ -3195,6 +3199,7 @@ class Interactives(underground.UndergroundMixin, acts.ActsMixin):
         show: str = "",
         message_thread_id: int | None = None,
         trigger_message_id: int | None = None,
+        dialogue_id: int | None = None,
     ) -> str:
         """Тул manor_items (Этап 49.3.6): опись особенных вещей поместья —
         Альфреду, не в чат: он отвечает гостю своими словами. ``show`` —
@@ -3216,7 +3221,12 @@ class Interactives(underground.UndergroundMixin, acts.ActsMixin):
         for it in chosen[:ITEMS_SHOWN_MAX]:
             name = items_mod.KINDS[it["type"]].name
             if await self._show_card(
-                chat_id, user_id, it, message_thread_id, reply_to_message_id=trigger_message_id
+                chat_id,
+                user_id,
+                it,
+                message_thread_id,
+                reply_to_message_id=trigger_message_id,
+                dialogue_id=dialogue_id,
             ):
                 names.append(name)
             else:
@@ -3341,9 +3351,11 @@ class Interactives(underground.UndergroundMixin, acts.ActsMixin):
         message_thread_id: int | None,
         *,
         reply_to_message_id: int | None = None,
+        dialogue_id: int | None = None,
     ) -> bool:
         """Карточка вещи; портрета ещё нет — рисуется в фоне, карточка придёт
-        сама (False)."""
+        сама (False). ``dialogue_id`` — показ по просьбе в /ai: ход молчит,
+        пока портрет рисуется, а карточка ложится в историю его ответом."""
         kind = items_mod.KINDS[item["type"]]
         if item["image_id"]:
             await self._send_item_card(
@@ -3354,10 +3366,19 @@ class Interactives(underground.UndergroundMixin, acts.ActsMixin):
                 reply_to_message_id=reply_to_message_id,
             )
             return True
-        self._spawn(
-            self._draw_and_send_card(chat_id, user_id, item, kind, message_thread_id),
+        task = self._spawn(
+            self._draw_and_send_card(
+                chat_id, user_id, item, kind, message_thread_id, dialogue_id=dialogue_id
+            ),
             "карточка предмета",
         )
+        if dialogue_id is not None:
+            self._card_jobs[chat_id] = task
+            task.add_done_callback(
+                lambda t: self._card_jobs.pop(chat_id, None)
+                if self._card_jobs.get(chat_id) is t
+                else None
+            )
         return False
 
     async def _draw_and_send_card(
@@ -3367,9 +3388,27 @@ class Interactives(underground.UndergroundMixin, acts.ActsMixin):
         item: dict[str, Any],
         kind: items_mod.ItemKind,
         message_thread_id: int | None,
+        *,
+        dialogue_id: int | None = None,
     ) -> None:
         await self._item_cut(chat_id, item, kind, draw=True)
-        await self._send_item_card(chat_id, user_id, item, message_thread_id=message_thread_id)
+        message_id = await self._send_item_card(
+            chat_id, user_id, item, message_thread_id=message_thread_id
+        )
+        if message_id is None or dialogue_id is None:
+            return
+        # Ход /ai, попросивший показать вещь, закончился молча (живая находка
+        # 2026-10-15: «сейчас подготовлю описание» ломало четвёртую стену) —
+        # его ответом в истории становится сама карточка.
+        installed = await self.item_place(user_id, item) == items_mod.PLACE_DESK
+        await self._store.record_ai_turn(
+            chat_id,
+            message_id,
+            dialogue_id,
+            "assistant",
+            _plain(item_caption(kind, item, installed)),
+            self._now(),
+        )
 
     async def handle_item_click(
         self,

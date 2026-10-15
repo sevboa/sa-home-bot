@@ -372,10 +372,6 @@ TOOL_WALK_NOT_HERE = (
     "инструмент go (place=catacombs), если собеседник согласен."
 )
 TOOL_GO_UNAVAILABLE = "недоступно: перейти можно только в личном разговоре"
-TOOL_GO_UNKNOWN = (
-    "Не знаю такого места. Доступно: cabinet (кабинет), cellar (подвал, если он "
-    "открыт), catacombs (катакомбы, к лазу) и найденные особые места по id."
-)
 TOOL_GO_BUSY = "Сейчас ты занят другим делом и никуда не пойдёшь — закончи его сначала."
 TOOL_GO_CELLAR_LOCKED = "Подвал заперт — ключа у тебя нет, пройти туда ты не можешь."
 TOOL_GO_NO_WAY = "Ты не знаешь дороги туда: путь в катакомбы тебе ещё не открылся."
@@ -454,7 +450,11 @@ GO_DECLARATION: dict[str, Any] = {
             "properties": {
                 "place": {
                     "type": "string",
-                    "description": "cabinet | cellar | catacombs | id найденного особого места",
+                    "description": (
+                        "cabinet | cellar | catacombs | id найденного особого места | "
+                        "любое другое место поместья словами (кухня, двор) — туда "
+                        "дорогу решит Ведущий"
+                    ),
                 }
             },
             "required": ["place"],
@@ -491,6 +491,14 @@ def normalize_direction(raw: Any) -> str | None:
     if text in catacombs.WALK_DIRECTIONS:
         return text
     return _DIRECTION_ALIASES.get(text)
+
+
+def go_action(raw: Any) -> str:
+    """Переход go, отданный Ведущему, — как физическое действие для act."""
+    text = " ".join(str(raw or "").split())
+    if resolve_target(text) == "cellar":
+        return "пойти к двери подвала"
+    return f"пойти: {text}" if text else "пойти дальше"
 
 
 def resolve_target(raw: Any) -> str | None:
@@ -667,7 +675,7 @@ def labyrinth_room(user_id: int, maze: Maze, state: CatacombsState) -> Room:
 
 # --- кадры ---
 
-FRAMES_PER_TURN = 2
+FRAMES_PER_TURN = 1
 
 
 @dataclass
@@ -768,13 +776,12 @@ def spot_frame(user_id: int, maze: Maze, owner: Node | Passage, spot: catacombs.
 
 def plan_frames(user_id: int, maze: Maze, result: WalkResult) -> list[Frame]:
     """Какие кадры показать после шага (комнату особого места рисует вызывающий).
-    Новый проход показываем кадром коридора, потом — кадр узла, куда пришли
-    (запомненный уходит по file_id); повторные проходы — только узел."""
+    Один кадр на шаг — узел, куда пришли (запомненный уходит по file_id):
+    кадр коридора перед ним читался гостем как второй ответ Альфреда (живая
+    находка 2026-10-15)."""
     outcome = result.outcome
     frames: list[Frame] = []
     if outcome in (Outcome.MOVED, Outcome.NEW_PASSAGE, Outcome.CONNECTED):
-        if result.passage is not None and catacombs.passage_needs_frame(result.passage):
-            frames.append(passage_frame(user_id, maze, result.passage))
         if result.node is not None:
             frames.append(node_frame(user_id, maze, result.node))
     elif outcome == Outcome.LEVER_WALL and result.passage is not None:
@@ -1158,14 +1165,21 @@ class UndergroundMixin:
         assert chat_id is not None and user_id is not None
         target = resolve_target(place)
         if target is None:
-            return TOOL_GO_UNKNOWN
+            # Кухня, двор, темница — обычные места поместья: дорогу туда
+            # решает Ведущий (act), а не отказ «не знаю такого места» (живая
+            # находка 2026-10-15: Альфред пересказывал его как «нет в списке»).
+            return await self.tool_act(chat_id, user_id, go_action(place))
         busy = await self._scene_run(chat_id, user_id)
         if busy is not None and busy.scenario != SCENARIO_ID:
             if busy.scenario == cellar.SCENARIO_ID and busy.finale:
                 # Сказка про подвал дошла до финала — она закончена.
                 busy.status = STATUS_DONE
                 await self._state.save_run(busy)
-            else:
+            elif busy.scenario == cellar.SCENARIO_ID and target != "cabinet":
+                # Поиски ключа идут по всему поместью: к двери подвала и
+                # куда угодно ещё ведёт Ведущий — он знает, заперто ли.
+                return await self.tool_act(chat_id, user_id, go_action(place))
+            elif busy.scenario != cellar.SCENARIO_ID:
                 return TOOL_GO_BUSY
         unlocked, opened = await self._flags(user_id)
         if target == "cabinet":

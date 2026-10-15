@@ -15,8 +15,8 @@ from PIL import Image
 
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.handlers.interactives import cmd_interactives
+from sa_home_bot.bot.interactives import acts, engine, places, underground
 from sa_home_bot.bot.interactives import catacombs as cat
-from sa_home_bot.bot.interactives import engine, places, underground
 from sa_home_bot.bot.interactives.base import (
     STATUS_ACTIVE,
     STATUS_DONE,
@@ -326,7 +326,8 @@ async def test_go_refuses_until_unlocked_and_unknown(store):
     assert await svc.tool_go(CANARY, CANARY, "cellar") == underground.TOOL_GO_CELLAR_LOCKED
     assert await svc.tool_go(CANARY, CANARY, "catacombs") == underground.TOOL_GO_NO_WAY
     assert await svc.tool_go(CANARY, CANARY, "darkroom") == underground.TOOL_GO_NO_WAY
-    assert await svc.tool_go(CANARY, CANARY, "в космос") == underground.TOOL_GO_UNKNOWN
+    # Незнакомое место — действие для Ведущего; из кабинета вне сцены его нет.
+    assert await svc.tool_go(CANARY, CANARY, "в космос") == acts.TOOL_ACT_CABINET
     assert await places.get_at(store, CANARY) is None
     # Ключ есть, лаза нет: в подвал можно, в катакомбы нет.
     await svc._state.set_effect(places.EFFECT_CELLAR_UNLOCKED, CANARY, "1")
@@ -485,23 +486,19 @@ async def test_frames_come_after_the_reply_and_are_remembered(store):
     assert "придёт" in text
     assert len(notifier.photos) == shots  # до flush ничего не ушло
     await _frames(svc)
-    # Новый проход: кадр коридора, затем кадр узла.
-    assert len(notifier.photos) == shots + 2 and len(link.generated) == drawn + 2
+    # Новый проход — один кадр: узел, куда пришли; коридор отдельно не рисуется.
+    assert len(notifier.photos) == shots + 1 and len(link.generated) == drawn + 1
     maze, state = await _vision(store)
     passage = next(iter(maze.passages.values()))
     node = maze.nodes[state.node]
-    assert passage.image_id and passage.file_id
+    assert not passage.image_id
     assert node.image_id and node.file_id and node.image_key == cat.node_frame_key(node)
-    assert {passage.file_id, node.file_id} == {"file-2", "file-3"}
+    assert node.file_id == "file-2"
     request = link.generated[-1]
     assert request["light"] == places.UNDERGROUND_LIGHT_EN
     assert "Alfred" not in request["description"] and "loras" not in request
     assert "keep_key" not in request and "paste" not in request
     assert "light_move" not in request
-    assert (
-        "visible" in link.generated[-2]["description"]
-        or "ящик" in link.generated[-2]["description"]
-    )
 
 
 async def test_known_places_are_shown_by_file_id_without_generation(store):
@@ -569,19 +566,15 @@ async def test_remember_frame_ignored_after_reset(store):
     assert not await store.get_state(f"catacombs:{CANARY}")
 
 
-def test_plan_frames_node_after_known_passage_only():
+def test_plan_frames_one_node_frame_per_step():
     maze = Maze.new(1, 7)
     state = CatacombsState.at_entrance(maze)
     res = cat.walk(state, maze, "forward")
+    # Новый проход — всё равно один кадр: узел, куда пришли (живая находка
+    # 2026-10-15: кадр коридора перед ним выглядел вторым ответом).
     frames = underground.plan_frames(1, maze, res)
-    assert [f.kind for f in frames] == ["passage", "node"]
-    for f in frames:
-        assert "Alfred" not in f.room.canon.canon_en
-    # проход получил картинку — в следующий раз только узел
-    res.passage.image_id = 5
-    res.passage.file_id = "pf"
-    again = underground.plan_frames(1, maze, res)
-    assert [f.kind for f in again] == ["node"]
+    assert [f.kind for f in frames] == ["node"]
+    assert "Alfred" not in frames[0].room.canon.canon_en
     res.node.image_id, res.node.file_id = 6, "nf"
     res.node.image_key = cat.node_frame_key(res.node)
     assert underground.plan_frames(1, maze, res)[0].file_id == "nf"
@@ -907,7 +900,7 @@ async def test_flush_forms_sends_frames_after_the_reply(store):
     assert len(notifier.photos) == shots  # реплика ещё не ушла — кадров нет
     await svc.flush_forms(CANARY, plan, dialogue_id=77)
     await asyncio.gather(*list(svc._photo_tasks))
-    assert len(notifier.photos) == shots + 2
+    assert len(notifier.photos) == shots + 1  # один кадр на шаг
 
 
 async def test_canary_handlers_walk_through_the_toolkit(store):

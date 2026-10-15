@@ -494,6 +494,46 @@ async def test_photo_of_stored_cursed_radio_sends_its_card(store):
     assert text != radio.TOOL_PHOTO_STORED_ITEM and len(link.generated()) == shots + 1
 
 
+async def test_show_while_portrait_draws_ends_turn_silently(store):
+    """Живая находка 2026-10-15: пока портрет рисовался, Альфред говорил
+    «сейчас подготовлю описание». Теперь ход молчит, а карточка, придя,
+    ложится в историю его ответом."""
+    from sa_home_bot.bot import tools as ai_tools
+    from sa_home_bot.config import Settings
+
+    link = ItemLink()
+    svc, notifier = _make(store, link)
+    await InteractiveStore(store).mark_completed("radio", GUEST)
+    ctx = ai_tools.ToolContext(
+        chat_id=GUEST,
+        dialogue_id=7,
+        trigger_message_id=5,
+        settings=Settings(),
+        interactives=svc,
+        user_id=GUEST,
+    )
+    text = await ai_tools.tool_manor_items(ctx, {"show": "радио"})
+    assert ctx.end_turn and text.startswith(radio.TOOL_ITEMS_DRAWING_HEAD)
+    await svc.wait_photo(GUEST)
+    await _drain(svc)
+    (_chat, _photo, caption) = notifier.photos[-1]
+    turn = await store.ai_turn(GUEST, 100 + len(notifier.photos))
+    assert turn["role"] == "assistant" and turn["dialogue_id"] == 7
+    assert "Проклятая радиостанция" in turn["content"] and "<b>" not in turn["content"]
+    assert "Проклятая радиостанция" in caption
+    # Портрет уже есть — карточка сразу, ход не молчит.
+    ctx2 = ai_tools.ToolContext(
+        chat_id=GUEST,
+        dialogue_id=7,
+        trigger_message_id=6,
+        settings=Settings(),
+        interactives=svc,
+        user_id=GUEST,
+    )
+    await ai_tools.tool_manor_items(ctx2, {"show": "радио"})
+    assert not ctx2.end_turn
+
+
 async def test_guest_who_finished_before_items_gets_radio_lazily(store):
     link = ItemLink()
     svc, notifier = _make(store, link)
