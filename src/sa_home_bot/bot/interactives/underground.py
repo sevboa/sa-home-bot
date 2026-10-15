@@ -776,9 +776,10 @@ def spot_frame(user_id: int, maze: Maze, owner: Node | Passage, spot: catacombs.
 
 def plan_frames(user_id: int, maze: Maze, result: WalkResult) -> list[Frame]:
     """Какие кадры показать после шага (комнату особого места рисует вызывающий).
-    Один кадр на шаг — узел, куда пришли (запомненный уходит по file_id):
-    кадр коридора перед ним читался гостем как второй ответ Альфреда (живая
-    находка 2026-10-15)."""
+    Один кадр на шаг — всегда узел, куда пришли (запомненный уходит по
+    file_id). Кадра коридора по пути нет: он читался гостем как второй ответ
+    Альфреда; картинка места бывает только по обыску (решение владельца
+    2026-10-15)."""
     outcome = result.outcome
     frames: list[Frame] = []
     if outcome in (Outcome.MOVED, Outcome.NEW_PASSAGE, Outcome.CONNECTED):
@@ -1404,11 +1405,15 @@ class UndergroundMixin:
                     owner.spots.append(spot)
                 spot.searched = True
                 await catacombs.save(self._store, maze)
+            # Картинка обысканного места — только по обыску (решение владельца
+            # 2026-10-15), рисуется раз и запоминается у места поиска.
+            frame = spot_frame(user_id, maze, owner, spot)
+        self._queue_frames(chat_id, user_id, [frame], None, None)
         run = await self._scene_run(chat_id, user_id)
         if run is not None and run.scenario == SCENARIO_ID:
             run.world["search_outcome"] = f"Альфред обыскал «{where}». {result.text}"
             await self._state.save_run(run)
-        return places.TOOL_SEARCH_FREE.format(where=where, found=result.text)
+        return places.TOOL_SEARCH_FREE.format(where=where, found=result.text) + TOOL_FRAME_NOTE
 
     async def underground_photo(
         self,

@@ -672,6 +672,9 @@ async def test_search_in_corridor_uses_spots_and_finds_nothing_special(store):
     # перед стеной нельзя, поэтому обыскиваем то, что назвал Альфред.
     out = await svc.tool_search(CANARY, CANARY, "ящик у стены")
     assert "Ты обыскал" in out and "Ничего интересного" in out  # rng 0.99 — пусто
+    assert underground.TOOL_FRAME_NOTE in out
+    # Картинка обысканного места ждёт конца реплики.
+    assert [f.kind for f in svc._ug().pending[CANARY].frames] == ["spot"]
     maze, state = await _vision(store)
     node = maze.nodes[state.node]
     assert [s.name for s in node.spots] == ["ящик у стены"] and node.spots[0].searched
@@ -686,6 +689,26 @@ async def test_search_in_corridor_uses_spots_and_finds_nothing_special(store):
     # Идущей прогулке итог виден Ведущему.
     run = await InteractiveStore(store).load_run(CANARY, "catacombs")
     assert "кучу костей" in run.world["search_outcome"]
+
+
+async def test_search_frame_is_drawn_once_and_remembered(store):
+    svc, notifier, link = _make(store)
+    await _descend(svc, store)
+    await _step(svc, store)
+    await _frames(svc)
+    drawn, shots = len(link.generated), len(notifier.photos)
+    await svc.tool_search(CANARY, CANARY, "ящик у стены")
+    await _frames(svc)
+    assert len(link.generated) == drawn + 1 and len(notifier.photos) == shots + 1
+    assert notifier.photos[-1][2] == "Ящик у стены"
+    maze, state = await _vision(store)
+    spot = maze.nodes[state.node].spots[-1]
+    assert spot.image_id and spot.file_id
+    # Повторный обыск — та же картинка по file_id, без генерации.
+    await svc.tool_search(CANARY, CANARY, "ящик у стены")
+    await _frames(svc)
+    assert len(link.generated) == drawn + 1
+    assert notifier.photos[-1][1] == spot.file_id
 
 
 async def test_take_photo_in_corridor_shows_remembered_frame_and_spot_closeup(store):
