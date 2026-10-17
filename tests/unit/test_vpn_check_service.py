@@ -84,7 +84,7 @@ class _FakeProc:
         self.terminated = False
         self.killed = False
 
-    async def communicate(self) -> tuple[bytes, bytes]:
+    async def communicate(self, input=None) -> tuple[bytes, bytes]:  # noqa: A002
         return self._stdout, self._stderr_bytes
 
     def terminate(self) -> None:
@@ -156,7 +156,7 @@ def _patch_curl(
     секунды в каждом тесте."""
     calls: list[tuple] = []
 
-    async def fake_create_subprocess_exec(*cmd, stdout=None, stderr=None):
+    async def fake_create_subprocess_exec(*cmd, stdin=None, stdout=None, stderr=None):
         calls.append(cmd)
         if any("awg-quick" in c for c in cmd):
             if "up" in cmd:
@@ -572,7 +572,7 @@ async def test_gate_detects_localized_sudo_password_prompt(monkeypatch):
     # Русская локаль ноды: `sudo -n` пишет «sudo: требуется указать пароль».
     calls = _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
 
-    async def ru_locale(*cmd, stdout=None, stderr=None):
+    async def ru_locale(*cmd, stdin=None, stdout=None, stderr=None):
         calls.append(cmd)
         if any("awg-quick" in c for c in cmd):
             return _FakeProc(b"", b"", 0)
@@ -626,7 +626,7 @@ async def test_head_rejected_falls_back_to_get(monkeypatch):
     codes = iter([b"405", b"200"])  # первый вызов (HEAD) → 405, второй (GET) → 200
     calls = _patch_curl(monkeypatch, {"https://strict.example": (b"", b"", 0)})
 
-    async def _next_code(*cmd, stdout=None, stderr=None):
+    async def _next_code(*cmd, stdin=None, stdout=None, stderr=None):
         calls.append(cmd)
         if "curl" in cmd and cmd[-1] == "https://strict.example":
             return _FakeProc(next(codes), b"", 0)

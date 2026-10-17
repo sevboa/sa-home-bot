@@ -12,7 +12,6 @@ mtg.service` принадлежит тому же пользователю, чт
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
@@ -21,7 +20,8 @@ from pathlib import Path
 from typing import Protocol
 
 from sa_home_bot.proto.messages import ERR_INTERNAL, ERR_NEEDS_PRIVILEGE, ProtoError
-from sa_home_bot.utils.requirements import looks_like_permission_error
+from sa_home_bot.utils.process import run
+from sa_home_bot.vpn.privileged import sudo_stdout
 
 log = logging.getLogger(__name__)
 
@@ -47,25 +47,14 @@ class ProxyBackend(Protocol):
         ...
 
 
-async def _run(argv: list[str]) -> tuple[int, str, str]:
-    proc = await asyncio.create_subprocess_exec(
-        *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    stdout, stderr_raw = await proc.communicate()
-    return proc.returncode or 0, stdout.decode(), stderr_raw.decode(errors="replace").strip()
-
-
 async def _sudo_nft(*args: str) -> str:
-    path = shutil.which("nft") or "nft"
-    code, stdout, stderr = await _run(["sudo", "-n", path, *args])
-    if code != 0:
-        if looks_like_permission_error(stderr) or "a password is required" in stderr.lower():
-            raise ProtoError(
-                ERR_NEEDS_PRIVILEGE,
-                "нужны права для чтения счётчиков прокси — по SSH выполните: nodectl fix",
-            )
-        raise ProtoError(ERR_INTERNAL, f"nft {' '.join(args)} завершился ошибкой: {stderr}")
-    return stdout
+    return await sudo_stdout(
+        "nft",
+        *args,
+        needs_privilege_text=(
+            "нужны права для чтения счётчиков прокси — по SSH выполните: nodectl fix"
+        ),
+    )
 
 
 def _parse_counter_bytes(output: str) -> int:
@@ -89,10 +78,10 @@ class RealProxyBackend:
 
     async def generate_secret(self, domain: str) -> str:
         mtg_path = shutil.which("mtg") or "/usr/local/bin/mtg"
-        code, stdout, stderr = await _run([mtg_path, "generate-secret", domain])
-        if code != 0:
-            raise ProtoError(ERR_INTERNAL, f"mtg generate-secret: {stderr}")
-        secret = stdout.strip()
+        generated = await run([mtg_path, "generate-secret", domain])
+        if generated.returncode != 0:
+            raise ProtoError(ERR_INTERNAL, f"mtg generate-secret: {generated.stderr_text}")
+        secret = generated.stdout.decode().strip()
         if not secret:
             raise ProtoError(ERR_INTERNAL, "mtg generate-secret вернул пустой секрет")
         return secret
@@ -107,6 +96,8 @@ class RealProxyBackend:
         if count != 1:
             raise ProtoError(ERR_INTERNAL, "не удалось найти секрет в mtg.service для замены")
         MTG_UNIT_PATH.write_text(new_content, encoding="utf-8")
-        code, _, stderr = await _run(["systemctl", "--user", "restart", "mtg.service"])
-        if code != 0:
-            raise ProtoError(ERR_INTERNAL, f"systemctl --user restart mtg.service: {stderr}")
+        restarted = await run(["systemctl", "--user", "restart", "mtg.service"])
+        if restarted.returncode != 0:
+            raise ProtoError(
+                ERR_INTERNAL, f"systemctl --user restart mtg.service: {restarted.stderr_text}"
+            )

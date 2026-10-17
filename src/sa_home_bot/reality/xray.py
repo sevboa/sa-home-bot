@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import shutil
@@ -24,6 +23,7 @@ from pathlib import Path
 from typing import Protocol
 
 from sa_home_bot.proto.messages import ERR_INTERNAL, ProtoError
+from sa_home_bot.utils.process import run
 
 log = logging.getLogger(__name__)
 
@@ -101,22 +101,13 @@ class RealXrayBackend:
         return shutil.which("xray") or "/usr/local/bin/xray"
 
     async def _run(self, *args: str, stdin: bytes | None = None) -> str:
-        proc = await asyncio.create_subprocess_exec(
-            self._bin(),
-            "api",
-            *args,
-            stdin=asyncio.subprocess.PIPE if stdin is not None else None,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr_raw = await proc.communicate(stdin)
-        if proc.returncode != 0:
-            stderr = stderr_raw.decode(errors="replace").strip()
+        result = await run([self._bin(), "api", *args], input=stdin)
+        if result.returncode != 0:
             raise ProtoError(
                 ERR_INTERNAL,
-                f"xray api {args[0] if args else ''} завершился ошибкой: {stderr}",
+                f"xray api {args[0] if args else ''} завершился ошибкой: {result.stderr_text}",
             )
-        return stdout.decode()
+        return result.stdout.decode()
 
     async def add_client(self, client_uuid: str, email: str, flow: str) -> None:
         snippet = {

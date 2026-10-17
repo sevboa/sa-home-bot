@@ -59,7 +59,8 @@ from sa_home_bot.proto.messages import (
     ServiceDescription,
     ServiceInfo,
 )
-from sa_home_bot.utils.requirements import looks_like_permission_error
+from sa_home_bot.utils.process import run
+from sa_home_bot.utils.requirements import looks_like_sudo_denied, looks_like_sudo_message
 from sa_home_bot.vpn_check.protocol import ACTION_CHECK, SERVICE_NAME
 
 log = logging.getLogger(__name__)
@@ -90,25 +91,12 @@ _REALITY_STARTUP_DELAY_S = 0.5
 _REALITY_STOP_GRACE_S = 5.0
 
 
-def _looks_like_needs_password(err: str) -> bool:
-    low = err.strip().lower()
-    # ``sudo -n`` без права печатает локализованное сообщение («a password is
-    # required» / «требуется указать пароль» / …) — но всегда с префиксом
-    # ``sudo:``. На него и опираемся, чтобы не зависеть от локали ноды.
-    return looks_like_permission_error(err) or low.startswith("sudo:")
-
-
 async def _run(*cmd: str, timeout: float) -> tuple[int, str, str]:
-    """(код, stdout, stderr). Сетевые/OS-сбои сведены к коду 1 — вызывающему
-    важно только «получилось / нет»."""
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        result = await run(cmd, timeout=timeout)
     except (OSError, TimeoutError) as exc:
         return 1, "", str(exc)
-    return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
+    return result.returncode, result.stdout_text, result.stderr.decode(errors="replace")
 
 
 class VpnCheckService:
@@ -284,7 +272,7 @@ class VpnCheckService:
             timeout=self._cfg.check_timeout_s + 5.0,
         )
         if code != 0:
-            if _looks_like_needs_password(err):
+            if looks_like_sudo_message(err):
                 return "нет прав поднять туннель пробника — выполните: nodectl fix"
             return f"awg-quick up {slot.iface} не отработал: {err.strip() or code}"
         return None
@@ -306,7 +294,7 @@ class VpnCheckService:
             str(slot.iface),
             timeout=self._cfg.check_timeout_s + 5.0,
         )
-        if code != 0 and not _looks_like_needs_password(err):
+        if code != 0 and not looks_like_sudo_message(err):
             log.warning(
                 "vpn_check: awg-quick down %s (netns %s) не отработал: %s",
                 slot.iface,
@@ -356,7 +344,7 @@ class VpnCheckService:
                     stderr = await asyncio.wait_for(proc.stderr.read(), timeout=1.0)
             del self._reality_procs[slot.netns]
             err = stderr.decode(errors="replace").strip()
-            if _looks_like_needs_password(err):
+            if looks_like_sudo_message(err):
                 return "нет прав поднять xray-пробник — выполните: nodectl fix"
             return f"xray-пробник упал сразу после запуска: {err or proc.returncode}"
         return None
@@ -433,21 +421,16 @@ class VpnCheckService:
         cmd = self._curl_argv(slot, [*args, target])
         started = time.monotonic()
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s + 3.0)
+            result = await run(cmd, timeout=timeout_s + 3.0)
         except (OSError, TimeoutError) as exc:
             return {"ok": False, "ms": None, "error": str(exc)}
         latency_ms = int((time.monotonic() - started) * 1000)
-        if proc.returncode != 0:
-            err = stderr.decode(errors="replace").strip() or f"curl exit {proc.returncode}"
-            if looks_like_permission_error(err) or "a password is required" in err.lower():
+        if result.returncode != 0:
+            err = result.stderr_text or f"curl exit {result.returncode}"
+            if looks_like_sudo_denied(err):
                 err = "нет прав на netns пробника — выполните: nodectl fix"
             return {"ok": False, "ms": latency_ms, "error": err}
-        code = stdout.decode(errors="replace").strip()
+        code = result.stdout_text.strip()
         ok = code.startswith(("2", "3"))
         return {
             "ok": ok,
@@ -502,7 +485,7 @@ class VpnCheckService:
             timeout=self._cfg.check_timeout_s + 3.0,
         )
         if code != 0:
-            if _looks_like_needs_password(err):
+            if looks_like_sudo_message(err):
                 return "нет прав на проверку маршрута netns — выполните: nodectl fix"
             return f"netns {slot.netns}: `ip route get` не отработал: {err.strip() or code}"
         if f"dev {slot.iface}" not in out:
