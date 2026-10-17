@@ -5,12 +5,12 @@ from __future__ import annotations
 import pytest
 
 from sa_home_bot.graph_memory.people import (
-    MAX_ALIASES,
     ClaimError,
     build_cards,
     normalize_claim,
     strength_for,
 )
+from sa_home_bot.people.claims import MAX_ALIASES
 
 LILIAN = 101
 MILANA = 202

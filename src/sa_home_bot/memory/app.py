@@ -1,9 +1,3 @@
-"""Сборка и жизненный цикл службы memory (отдельный процесс).
-
-По образцу tasks: proto-сервер поверх MemoryService плюс своя БД (общая
-схема проекта, см. db/migrations.py — таблица facts объявлена там же).
-"""
-
 from __future__ import annotations
 
 import logging
@@ -24,8 +18,6 @@ async def run_memory(settings: Settings) -> None:
     await apply_migrations(db)
     service = MemoryService(settings, db)
     server = ProtoServer(settings.memory.socket, service, token=settings.swarm.token)
-    # Обработчики сигналов — до start(): он ждёт появления своего адреса
-    # (см. proto/server.py), и всё это время остановка иначе не обрабатывалась бы.
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
     await server.start()

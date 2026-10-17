@@ -1,14 +1,3 @@
-"""Перенос знаний о людях в карточки (Этап 58.2) — один раз, метки в
-app_state.
-
-- ``[[people]]`` из конфига — слово владельца: слабое утверждение с
-  by_id = владелец (о себе самом — сильное);
-- профили Telegram тех, кто писал до person_profiles: последнее
-  ``ai_turns.user_name`` и ``invited_user`` подписок;
-- карточки ``PersonClaim`` из графа (этап 54) — по-прежнему на mycraft;
-  метка ставится только после ответа службы, иначе повтор позже.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -20,7 +9,8 @@ from sa_home_bot.config import PersonConfig, Settings
 from sa_home_bot.graph_memory import protocol as graph_memory_protocol
 from sa_home_bot.people import claims as people_claims
 from sa_home_bot.people.book import split_label
-from sa_home_bot.proto.messages import Address
+from sa_home_bot.proto.addresses import GRAPH_MEMORY_ADDRESS
+from sa_home_bot.utils.clock import utc_now
 
 log = logging.getLogger(__name__)
 
@@ -34,8 +24,6 @@ def _iso(dt: datetime) -> str:
 
 
 def config_person_ids(person: PersonConfig, book: Any) -> list[int]:
-    """Telegram id записи [[people]]: telegram_id, иначе подписка с тем же
-    @ником («Имя (@ник)»)."""
     if person.telegram_id:
         return [person.telegram_id]
     handle = person.telegram_username.lstrip("@").casefold()
@@ -91,14 +79,12 @@ def config_claims(settings: Settings, book: Any, now: datetime) -> list[dict[str
 async def seed_local(
     store: Any, settings: Settings, book: Any, now: datetime | None = None
 ) -> None:
-    """Конфиг и профили — всё, что есть на alfred. Зовётся при старте бота."""
-    now = now or datetime.now(UTC)
+    now = now or utc_now()
     if await store.get_state(SEED_PROFILES_KEY) is None:
         profiles: dict[int, tuple[str, str]] = {}
         for sub in book.all():
             if sub.chat_id > 0 and sub.invited_user:
                 profiles[sub.chat_id] = split_label(sub.invited_user)
-        # ai_turns свежее приглашения — перекрывает.
         for row in await store.latest_turn_user_names():
             profiles[int(row["user_id"])] = split_label(row["user_name"])
         for person in settings.people:
@@ -121,8 +107,6 @@ async def seed_local(
 
 
 def graph_card_claims(subject_id: int, card: dict[str, Any]) -> list[dict[str, Any]]:
-    """Карточка этапа 54 ({gender, name: {value, by_id, strength, at}, aliases})
-    → утверждения с теми же источниками."""
     out: list[dict[str, Any]] = []
     picked = [(f, card.get(f)) for f in (people_claims.FIELD_GENDER, people_claims.FIELD_NAME)]
     picked += [(people_claims.FIELD_ALIAS, a) for a in card.get("aliases") or []]
@@ -146,22 +130,19 @@ def graph_card_claims(subject_id: int, card: dict[str, Any]) -> list[dict[str, A
 
 
 async def seed_from_graph(store: Any, book: Any, node_link: Any) -> bool:
-    """Карточки из графа. True — перенесено (или уже было); False — служба
-    не ответила, попробовать позже. Ошибки связи не пробрасывает."""
     if await store.get_state(SEED_GRAPH_KEY) is not None:
         return True
     if node_link is None:
         return False
     ids = sorted(sub.chat_id for sub in book.all() if sub.chat_id > 0)
-    dst = Address(node=graph_memory_protocol.NODE_ID, service=graph_memory_protocol.SERVICE_NAME)
     try:
         result = await node_link.command(
             graph_memory_protocol.ACTION_PERSON_CARDS,
             {"ids": ",".join(str(i) for i in ids)},
-            dst=dst,
+            dst=GRAPH_MEMORY_ADDRESS,
             timeout=10.0,
         )
-    except Exception as exc:  # служба спит/недоступна — повтор позже
+    except Exception as exc:
         log.info("Карточки людей: граф не ответил, перенос позже (%s)", exc)
         return False
     claims: list[dict[str, Any]] = []
@@ -174,19 +155,16 @@ async def seed_from_graph(store: Any, book: Any, node_link: Any) -> bool:
             claims += graph_card_claims(subject_id, card)
     if claims:
         await store.add_person_claims(claims)
-    await store.set_state(SEED_GRAPH_KEY, _iso(datetime.now(UTC)))
+    await store.set_state(SEED_GRAPH_KEY, _iso(utc_now()))
     log.info("Карточки людей: перенесено из графа %d утверждений", len(claims))
     return True
 
 
-# Связь с нодой поднимается не сразу, mycraft может спать: первая попытка —
-# через минуту после старта, дальше раз в 10 минут, пока не перенесём.
 GRAPH_SEED_FIRST_S = 60.0
 GRAPH_SEED_RETRY_S = 600.0
 
 
 async def graph_seed_loop(store: Any, book: Any, node_link: Any) -> None:
-    """Фоновая задача бота: перенос карточек из графа, пока не удастся."""
     await asyncio.sleep(GRAPH_SEED_FIRST_S)
     while True:
         try:
