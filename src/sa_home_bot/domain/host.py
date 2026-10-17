@@ -14,10 +14,8 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from sa_home_bot.domain.hysteresis import reconcile_band
-from sa_home_bot.domain.models import ALERTING, OK, KnownState
+from sa_home_bot.domain.models import OK, KnownState
 from sa_home_bot.domain.policy import BAND_MID, BAND_OVER, BAND_UNDER
-
-KIND_HOST = "host"
 
 EVENT_HOST_DEGRADED = "host_degraded"  # host-метрика ушла за порог
 EVENT_HOST_RECOVERED = "host_recovered"  # вернулась в норму
@@ -254,27 +252,3 @@ def compute_host_diff(
                 )
             )
     return HostHealthDiff(states=states, transitions=transitions)
-
-
-def classify_host_events(transitions: list[HostTransition]) -> list[HostEvent]:
-    events: list[HostEvent] = []
-    for tr in transitions:
-        if tr.from_status == OK and tr.to_status == ALERTING:
-            event_type = EVENT_HOST_DEGRADED
-        elif tr.from_status == ALERTING and tr.to_status == OK:
-            event_type = EVENT_HOST_RECOVERED
-        else:
-            continue
-        events.append(
-            HostEvent(
-                type=event_type,
-                component_id=tr.component_id,
-                metric=tr.metric,
-                label=tr.label,
-                value=tr.value,
-                unit=tr.unit,
-                hint=tr.hint,
-                at=tr.at,
-            )
-        )
-    return events

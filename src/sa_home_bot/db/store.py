@@ -863,10 +863,6 @@ class Store:
         )
         return [dict(r) for r in await cur.fetchall()]
 
-    async def all_away_media(self) -> list[dict]:
-        cur = await self.db.conn.execute("SELECT * FROM away_media ORDER BY chat_id, message_id")
-        return [dict(r) for r in await cur.fetchall()]
-
     async def delete_away_media(self, chat_id: int, message_id: int) -> None:
         async with self.db.transaction() as conn:
             await conn.execute(
@@ -1364,12 +1360,6 @@ class Store:
                 (_iso(at), code),
             )
             return cur.rowcount > 0
-
-    async def prune_invites(self, older_than: datetime) -> int:
-        """Убрать давно истёкшие/погашенные коды — их след уже в подписках."""
-        async with self.db.transaction() as conn:
-            cur = await conn.execute("DELETE FROM invites WHERE expires_at<?", (_iso(older_than),))
-            return cur.rowcount
 
     # --- swarm_events (журнал системных/админских событий, bot/node_events.py) ---
 
