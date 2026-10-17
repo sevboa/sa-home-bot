@@ -35,16 +35,14 @@
 
 from __future__ import annotations
 
-import contextlib
-import os
 import random
 import re
-import tempfile
 from collections.abc import Callable
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
+
+from sa_home_bot.utils.files import load_model, save_model
 
 if TYPE_CHECKING:
     from sa_home_bot.config import LlmConfig
@@ -121,33 +119,12 @@ class SpeechTherapyState(BaseModel):
     cured: bool = False
     clear_user_ids: list[int] = Field(default_factory=list)
 
-    @classmethod
-    def load(cls, path: str | Path) -> SpeechTherapyState:
-        p = Path(path)
-        if not p.exists():
-            return cls()
-        return cls.model_validate_json(p.read_bytes())
-
-    def save(self, path: str | Path) -> None:
-        """Атомарная запись: temp-файл в том же каталоге + `os.replace`."""
-        p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(dir=p.parent, prefix=f".{p.name}.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write(self.model_dump_json(indent=2))
-            os.replace(tmp_name, p)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp_name)
-            raise
-
 
 class SpeechTherapist:
     def __init__(self, cfg: LlmConfig, *, rand: Callable[[], float] = random.random) -> None:
         self._cfg = cfg
         self._rand = rand
-        self._state = SpeechTherapyState.load(cfg.speech_therapy_state_path)
+        self._state = load_model(SpeechTherapyState, cfg.speech_therapy_state_path)
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -168,7 +145,7 @@ class SpeechTherapist:
             self._state.clear_user_ids.append(user_id)
         else:
             self._state.clear_user_ids.remove(user_id)
-        self._state.save(self._cfg.speech_therapy_state_path)
+        save_model(self._state, self._cfg.speech_therapy_state_path)
         return True
 
     def process(
@@ -230,7 +207,7 @@ class SpeechTherapist:
                     just_cured = True
 
         if changed:
-            self._state.save(self._cfg.speech_therapy_state_path)
+            save_model(self._state, self._cfg.speech_therapy_state_path)
 
         final_text = "".join(result)
         return final_text, remark, just_cured

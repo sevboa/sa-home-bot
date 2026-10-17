@@ -52,6 +52,13 @@ def _append_error_body(exc: urllib.error.HTTPError) -> None:
         exc.msg = f"{exc.msg}: {detail}"
 
 
+def parse_json_object(content: str) -> dict[str, Any]:
+    data = json.loads(content)
+    if not isinstance(data, dict):
+        raise ValueError("ответ не объект")
+    return data
+
+
 def _json_post_request(url: str, payload: dict[str, Any]) -> urllib.request.Request:
     return urllib.request.Request(
         url,

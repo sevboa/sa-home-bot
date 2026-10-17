@@ -23,7 +23,6 @@ shot») в промпте разрешены (2026-09-30, по решению в
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -172,9 +171,7 @@ def fit_prompt(
 
 
 def _parse(content: str) -> tuple[str, str]:
-    data = json.loads(content)
-    if not isinstance(data, dict):
-        raise ValueError("ответ не объект")
+    data = ollama.parse_json_object(content)
     prompt = data.get("prompt")
     negative = data.get("negative") or ""
     if not isinstance(prompt, str) or not prompt.strip():

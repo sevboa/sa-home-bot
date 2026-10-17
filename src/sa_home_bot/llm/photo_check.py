@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
@@ -94,10 +93,8 @@ def parse(content: str, expect: list[str]) -> dict[str, Any] | None:
     ответа промахом не считается (лучше пропустить промах, чем зря
     огорчить Альфреда). ``answers`` — {название: True/False}."""
     try:
-        data = json.loads(content)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(data, dict):
+        data = ollama.parse_json_object(content)
+    except (ValueError, TypeError):
         return None
     description = data.get("description")
     if not isinstance(description, str) or not description.strip():

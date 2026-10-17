@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from sa_home_bot.config import LlmConfig
 from sa_home_bot.llm.speech_therapy import SpeechTherapist, SpeechTherapyState
+from sa_home_bot.utils.files import load_model, save_model
 
 # 0.5 < error_probability=1.0 (искажает), но >= _VISIT_PROBABILITY_PER_WORD=0.025
 # (визит не срабатывает) — детерминированное «только искажение, без визита».
@@ -17,24 +18,6 @@ _NEVER = 1.0  # >= error_probability=1.0 (дефолт) — никогда не 
 def _cfg(tmp_path, **overrides) -> LlmConfig:
     overrides.setdefault("speech_therapy_state_path", str(tmp_path / "speech-therapy.json"))
     return LlmConfig(model="qwen2.5:7b", **overrides)
-
-
-def test_state_load_without_file_returns_defaults(tmp_path):
-    state = SpeechTherapyState.load(tmp_path / "missing.json")
-    assert state.error_probability == 1.0
-    assert state.corrections_total == 0
-    assert state.excluded_words == []
-    assert state.cured is False
-
-
-def test_state_save_load_roundtrip(tmp_path):
-    path = tmp_path / "state.json"
-    state = SpeechTherapyState(
-        error_probability=0.5, corrections_total=500, excluded_words=["привет"], cured=False
-    )
-    state.save(path)
-    loaded = SpeechTherapyState.load(path)
-    assert loaded == state
 
 
 def test_corrupts_word_when_probability_is_full(tmp_path):
@@ -65,7 +48,7 @@ def test_pinned_chat_always_corrupts_regardless_of_state(tmp_path):
 
 def test_pinned_chat_ignores_excluded_words(tmp_path):
     path = tmp_path / "state.json"
-    SpeechTherapyState(excluded_words=["роман"]).save(path)
+    save_model(SpeechTherapyState(excluded_words=["роман"]), path)
     cfg = _cfg(tmp_path, speech_therapy_pinned_chat_ids=[99])
     cfg = cfg.model_copy(update={"speech_therapy_state_path": str(path)})
     therapist = SpeechTherapist(cfg, rand=lambda: _NEVER)
@@ -75,7 +58,7 @@ def test_pinned_chat_ignores_excluded_words(tmp_path):
 
 def test_excluded_word_is_never_corrupted_again(tmp_path):
     path = tmp_path / "state.json"
-    SpeechTherapyState(excluded_words=["роман"]).save(path)
+    save_model(SpeechTherapyState(excluded_words=["роман"]), path)
     cfg = _cfg(tmp_path).model_copy(update={"speech_therapy_state_path": str(path)})
     therapist = SpeechTherapist(cfg, rand=lambda: _ALWAYS)
     text, _, _ = therapist.process("сэр Роман", chat_id=1)
@@ -98,7 +81,7 @@ def test_visit_registers_correction_and_excludes_word(tmp_path):
     assert snapshot["corrections_total"] == 1
     assert snapshot["error_probability"] == 0.999
 
-    loaded = SpeechTherapyState.load(cfg.speech_therapy_state_path)
+    loaded = load_model(SpeechTherapyState, cfg.speech_therapy_state_path)
     assert loaded.excluded_words == ["сэр"]
 
 
@@ -114,7 +97,7 @@ def test_at_most_one_visit_per_message(tmp_path):
 
 def test_becomes_cured_after_thousand_corrections(tmp_path):
     path = tmp_path / "state.json"
-    SpeechTherapyState(error_probability=0.001, corrections_total=999).save(path)
+    save_model(SpeechTherapyState(error_probability=0.001, corrections_total=999), path)
     cfg = _cfg(tmp_path).model_copy(update={"speech_therapy_state_path": str(path)})
     therapist = SpeechTherapist(cfg, rand=lambda: _ALWAYS)
 
@@ -130,7 +113,7 @@ def test_becomes_cured_after_thousand_corrections(tmp_path):
 
 def test_just_cured_is_true_only_on_the_transition(tmp_path):
     path = tmp_path / "state.json"
-    SpeechTherapyState(error_probability=0.001, corrections_total=999).save(path)
+    save_model(SpeechTherapyState(error_probability=0.001, corrections_total=999), path)
     cfg = _cfg(tmp_path).model_copy(update={"speech_therapy_state_path": str(path)})
     therapist = SpeechTherapist(cfg, rand=lambda: _ALWAYS)
 
@@ -143,7 +126,7 @@ def test_just_cured_is_true_only_on_the_transition(tmp_path):
 
 def test_cured_chat_no_longer_corrupted(tmp_path):
     path = tmp_path / "state.json"
-    SpeechTherapyState(cured=True).save(path)
+    save_model(SpeechTherapyState(cured=True), path)
     cfg = _cfg(tmp_path).model_copy(update={"speech_therapy_state_path": str(path)})
     therapist = SpeechTherapist(cfg, rand=lambda: _ALWAYS)
 
@@ -156,7 +139,7 @@ def test_cured_chat_no_longer_corrupted(tmp_path):
 
 def test_cured_pinned_chat_still_corrupted(tmp_path):
     path = tmp_path / "state.json"
-    SpeechTherapyState(cured=True).save(path)
+    save_model(SpeechTherapyState(cured=True), path)
     cfg = _cfg(tmp_path, speech_therapy_pinned_chat_ids=[99])
     cfg = cfg.model_copy(update={"speech_therapy_state_path": str(path)})
     therapist = SpeechTherapist(cfg, rand=lambda: _NEVER)
