@@ -705,17 +705,3 @@ async def test_cmd_invite_rejects_bad_hours_without_issuing_code(store, tmp_path
     assert message.answers == [invite_handlers.BAD_INVITE_HOURS_TEXT]
     # Код не выпущен — открытых приглашений от этого чата нет.
     assert await gate.open_codes() == []
-
-
-def test_guest_list_shows_local_time():
-    """Живая находка 2026-07-30: /guests показывал UTC («вошёл 05:02» вместо
-    10:02) — обрезка ISO-строки вместо перевода в местное время."""
-    from datetime import UTC, datetime
-
-    from sa_home_bot.bot.handlers import invites as invite_handlers
-
-    moment = datetime(2026, 7, 30, 5, 2, tzinfo=UTC)
-    expected = moment.astimezone().strftime("%Y-%m-%d %H:%M")
-    assert invite_handlers._local_time(moment.isoformat()) == expected
-    # Мусор не роняет список — показываем как есть.
-    assert invite_handlers._local_time("не дата") == "не дата"

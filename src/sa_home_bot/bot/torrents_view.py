@@ -236,10 +236,6 @@ def _speed_limit_text(mbps: int) -> str:
     return "без ограничения" if mbps <= 0 else f"{mbps} МБ/с"
 
 
-def _cb(code: str, *parts: object) -> str:
-    return ":".join([commands.CALLBACK_PREFIX, code, *(str(p) for p in parts)])
-
-
 def _speed_buttons(current_mbps: int, offset: int) -> list[InlineKeyboardButton]:
     buttons = []
     for mbps in SPEED_PRESETS:
@@ -248,7 +244,8 @@ def _speed_buttons(current_mbps: int, offset: int) -> list[InlineKeyboardButton]
             label = f"✅ {label}"
         buttons.append(
             InlineKeyboardButton(
-                text=label, callback_data=_cb(commands.TORRENT_SPEED_CODE, mbps, offset)
+                text=label,
+                callback_data=commands.panel_callback(commands.TORRENT_SPEED_CODE, mbps, offset),
             )
         )
     return buttons
@@ -291,13 +288,18 @@ def build_list_view(result: dict[str, Any], offset: int) -> tuple[str, InlineKey
                 text=f"{_lamp(t.get('state', ''), int(t.get('progress_pct', 0)))} "
                 f"{_moon_phase(int(t.get('progress_pct', 0)))} "
                 f"{_short_name(t.get('name', '?'))}",
-                callback_data=_cb(commands.TORRENT_CARD_CODE, t.get("hash", "")),
+                callback_data=commands.panel_callback(
+                    commands.TORRENT_CARD_CODE, t.get("hash", "")
+                ),
             )
         ]
         for t in page
     ]
     nav = nav_row(
-        offset, TORRENTS_PAGE_SIZE, len(torrents), lambda o: _cb(commands.TORRENTS_LIST_CODE, o)
+        offset,
+        TORRENTS_PAGE_SIZE,
+        len(torrents),
+        lambda o: commands.panel_callback(commands.TORRENTS_LIST_CODE, o),
     )
     if nav:
         buttons.append(nav)
@@ -305,14 +307,16 @@ def build_list_view(result: dict[str, Any], offset: int) -> tuple[str, InlineKey
     buttons.append(
         [
             InlineKeyboardButton(
-                text="🧲 qBittorrent", callback_data=_cb(commands.TORRENT_APP_CODE)
+                text="🧲 qBittorrent",
+                callback_data=commands.panel_callback(commands.TORRENT_APP_CODE),
             )
         ]
     )
     buttons.append(
         [
             InlineKeyboardButton(
-                text="🔄 Обновить", callback_data=_cb(commands.TORRENTS_LIST_CODE, offset)
+                text="🔄 Обновить",
+                callback_data=commands.panel_callback(commands.TORRENTS_LIST_CODE, offset),
             )
         ]
     )
@@ -325,8 +329,17 @@ def build_app_view(text: str) -> tuple[str, InlineKeyboardMarkup]:
     apps_view.run_app_skill): это не отдельная точка входа со своими правами
     apps, а справочный экран внутри /torrents (см. apps_view.HIDDEN_MENU_APP_IDS)."""
     buttons = [
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data=_cb(commands.TORRENT_APP_CODE))],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=_cb(commands.TORRENTS_LIST_CODE, 0))],
+        [
+            InlineKeyboardButton(
+                text="🔄 Обновить", callback_data=commands.panel_callback(commands.TORRENT_APP_CODE)
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=commands.panel_callback(commands.TORRENTS_LIST_CODE, 0),
+            )
+        ],
     ]
     return text, InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -355,17 +368,20 @@ def build_card_view(torrent: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]
     buttons = [
         [
             InlineKeyboardButton(
-                text=toggle_text, callback_data=_cb(commands.TORRENT_TOGGLE_CODE, thash)
+                text=toggle_text,
+                callback_data=commands.panel_callback(commands.TORRENT_TOGGLE_CODE, thash),
             )
         ],
         [
             InlineKeyboardButton(
-                text="🔄 Обновить", callback_data=_cb(commands.TORRENT_CARD_CODE, thash)
+                text="🔄 Обновить",
+                callback_data=commands.panel_callback(commands.TORRENT_CARD_CODE, thash),
             )
         ],
         [
             InlineKeyboardButton(
-                text="⬅️ Назад", callback_data=_cb(commands.TORRENTS_LIST_CODE, 0)
+                text="⬅️ Назад",
+                callback_data=commands.panel_callback(commands.TORRENTS_LIST_CODE, 0),
             )
         ],
     ]

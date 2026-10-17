@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from sa_home_bot.bot.ui.callback_data import pack
+
 
 @dataclass(frozen=True)
 class Command:
@@ -151,6 +153,10 @@ WAKE_CODE = "wake"
 # управляется с любой). Право — `действие@служба`, не зависит от node_id
 # (Subscription.allows_action) — правило одно на весь рой.
 ACTION_CALLBACK_PREFIX = "act"
+
+
+def panel_callback(code: str, *parts: object) -> str:
+    return pack(CALLBACK_PREFIX, code, *parts)
 
 
 def action_callback(

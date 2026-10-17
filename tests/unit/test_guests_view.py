@@ -2,6 +2,8 @@
 (bot/handlers/invites.py::on_guest_screen делает сетевые вызовы и запись
 состояния, сюда не относится)."""
 
+from datetime import UTC, datetime
+
 from sa_home_bot.bot import commands, guest_rights, guests_view
 from sa_home_bot.subscriptions.models import SOURCE_GUEST, Subscription
 
@@ -287,3 +289,13 @@ def test_fine_rights_still_have_a_human_label():
     text, _kb = guests_view.build_perms_view(sub, 0)
     assert "proxy_link@vpn" not in text
     assert "прокси" in text.lower()
+
+
+def test_guest_list_shows_local_time():
+    """Живая находка 2026-07-30: /guests показывал UTC («вошёл 05:02» вместо
+    10:02) — обрезка ISO-строки вместо перевода в местное время."""
+    moment = datetime(2026, 7, 30, 5, 2, tzinfo=UTC)
+    expected = moment.astimezone().strftime("%Y-%m-%d %H:%M")
+    assert guests_view.format_local_time(moment.isoformat()) == expected
+    # Мусор не роняет список — показываем как есть.
+    assert guests_view.format_local_time("не дата") == "не дата"

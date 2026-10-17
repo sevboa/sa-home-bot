@@ -8,13 +8,11 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
 from datetime import UTC, datetime
 from html import escape
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, Filter
 from aiogram.types import CallbackQuery, Message
 
@@ -29,6 +27,8 @@ from sa_home_bot.bot.menu import refresh_chat_menu
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.bot.tool_debug import ToolCalls
+from sa_home_bot.bot.ui.callback_data import int_or
+from sa_home_bot.bot.ui.redraw import redraw
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.subscriptions.book import SubscriptionBook
@@ -155,30 +155,11 @@ async def cmd_invite(
     )
 
 
-# Реэкспорт: старое имя используется тестом test_guest_list_shows_local_time,
-# каноническая реализация — в guests_view (её же зовут экраны /guests).
-_local_time = guests_view.format_local_time
-
-
-def _parse_int(raw: str | None, default: int = 0) -> int:
-    try:
-        return int(raw) if raw is not None else default
-    except ValueError:
-        return default
-
-
 @router.message(Command(commands.GUESTS.name))
 async def cmd_guests(message: Message, book: SubscriptionBook) -> None:
     guests = sorted(book.guests(), key=lambda g: g.invited_at)
     text, keyboard = guests_view.build_list_view(guests, 0)
     await message.answer(text, reply_markup=keyboard)
-
-
-async def _redraw(callback: CallbackQuery, text: str, keyboard) -> None:
-    if callback.message is None:
-        return
-    with contextlib.suppress(TelegramBadRequest):
-        await callback.message.edit_text(text, reply_markup=keyboard)
 
 
 async def _guest_or_redraw_list(
@@ -192,7 +173,7 @@ async def _guest_or_redraw_list(
     await callback.answer("Такого гостя уже нет", show_alert=True)
     guests = sorted(book.guests(), key=lambda g: g.invited_at)
     text, keyboard = guests_view.build_list_view(guests, 0)
-    await _redraw(callback, text, keyboard)
+    await redraw(callback, text, keyboard)
     return None
 
 
@@ -212,18 +193,18 @@ async def on_guest_screen(
     code = parts[1] if len(parts) > 1 else ""
 
     if code == commands.GUESTS_LIST_CODE:
-        offset = _parse_int(parts[2] if len(parts) > 2 else None)
+        offset = int_or(parts[2] if len(parts) > 2 else None)
         guests = sorted(book.guests(), key=lambda g: g.invited_at)
         text, keyboard = guests_view.build_list_view(guests, offset)
-        await _redraw(callback, text, keyboard)
+        await redraw(callback, text, keyboard)
         await callback.answer()
         return
 
     if code == commands.OPEN_CODES_LIST_CODE:
-        offset = _parse_int(parts[2] if len(parts) > 2 else None)
+        offset = int_or(parts[2] if len(parts) > 2 else None)
         open_codes = await gate.open_codes()
         text, keyboard = guests_view.build_codes_view(open_codes, offset)
-        await _redraw(callback, text, keyboard)
+        await redraw(callback, text, keyboard)
         await callback.answer()
         return
 
@@ -234,31 +215,31 @@ async def on_guest_screen(
         await callback.answer(toast, show_alert=not ok)
         open_codes = await gate.open_codes()
         text, keyboard = guests_view.build_codes_view(open_codes, 0)
-        await _redraw(callback, text, keyboard)
+        await redraw(callback, text, keyboard)
         return
 
     if code == commands.GUEST_CARD_CODE:
-        chat_id = _parse_int(parts[2] if len(parts) > 2 else None, default=-1)
+        chat_id = int_or(parts[2] if len(parts) > 2 else None, default=-1)
         sub = await _guest_or_redraw_list(callback, book, chat_id)
         if sub is None:
             return
         text, keyboard = guests_view.build_card_view(sub)
-        await _redraw(callback, text, keyboard)
+        await redraw(callback, text, keyboard)
         await callback.answer()
         return
 
     if code == commands.GUEST_KICK_CONFIRM_CODE:
-        chat_id = _parse_int(parts[2] if len(parts) > 2 else None, default=-1)
+        chat_id = int_or(parts[2] if len(parts) > 2 else None, default=-1)
         sub = await _guest_or_redraw_list(callback, book, chat_id)
         if sub is None:
             return
         text, keyboard = guests_view.build_kick_confirm_view(sub)
-        await _redraw(callback, text, keyboard)
+        await redraw(callback, text, keyboard)
         await callback.answer()
         return
 
     if code == commands.GUEST_REVOKE_CODE:
-        chat_id = _parse_int(parts[2] if len(parts) > 2 else None, default=-1)
+        chat_id = int_or(parts[2] if len(parts) > 2 else None, default=-1)
         ok = gate.revoke_guest(chat_id)
         if ok:
             # Меню чата больше не наше дело — убираем, чтобы у выставленного
@@ -271,45 +252,45 @@ async def on_guest_screen(
             await callback.answer("Такого гостя уже нет", show_alert=True)
         guests = sorted(book.guests(), key=lambda g: g.invited_at)
         text, keyboard = guests_view.build_list_view(guests, 0)
-        await _redraw(callback, text, keyboard)
+        await redraw(callback, text, keyboard)
         return
 
     if code == commands.GUEST_STATS_CODE:
-        chat_id = _parse_int(parts[2] if len(parts) > 2 else None, default=-1)
+        chat_id = int_or(parts[2] if len(parts) > 2 else None, default=-1)
         sub = await _guest_or_redraw_list(callback, book, chat_id)
         if sub is None:
             return
         body = await vpn_handlers.usage_text(node_link, chat_id)
         text, keyboard = guests_view.build_back_to_card_view(sub.name, chat_id, body)
-        await _redraw(callback, text, keyboard)
+        await redraw(callback, text, keyboard)
         await callback.answer()
         return
 
     if code == commands.GUEST_PERMS_CODE:
-        chat_id = _parse_int(parts[2] if len(parts) > 2 else None, default=-1)
-        offset = _parse_int(parts[3] if len(parts) > 3 else None)
+        chat_id = int_or(parts[2] if len(parts) > 2 else None, default=-1)
+        offset = int_or(parts[3] if len(parts) > 3 else None)
         sub = await _guest_or_redraw_list(callback, book, chat_id)
         if sub is None:
             return
         text, keyboard = guests_view.build_perms_view(sub, offset)
-        await _redraw(callback, text, keyboard)
+        await redraw(callback, text, keyboard)
         await callback.answer()
         return
 
     if code == commands.GUEST_PERM_ADD_LIST_CODE:
-        chat_id = _parse_int(parts[2] if len(parts) > 2 else None, default=-1)
-        offset = _parse_int(parts[3] if len(parts) > 3 else None)
+        chat_id = int_or(parts[2] if len(parts) > 2 else None, default=-1)
+        offset = int_or(parts[3] if len(parts) > 3 else None)
         sub = await _guest_or_redraw_list(callback, book, chat_id)
         if sub is None:
             return
         text, keyboard = guests_view.build_perm_add_view(sub, offset)
-        await _redraw(callback, text, keyboard)
+        await redraw(callback, text, keyboard)
         await callback.answer()
         return
 
     if code == commands.GUEST_PERM_OFF_CODE:
-        chat_id = _parse_int(parts[2] if len(parts) > 2 else None, default=-1)
-        offset = _parse_int(parts[3] if len(parts) > 3 else None)
+        chat_id = int_or(parts[2] if len(parts) > 2 else None, default=-1)
+        offset = int_or(parts[3] if len(parts) > 3 else None)
         right = parts[4] if len(parts) > 4 else ""
         updated = gate.remove_guest_right(chat_id, right)
         if updated is None:
@@ -321,7 +302,7 @@ async def on_guest_screen(
         return
 
     if code == commands.GUEST_PERM_ADD_CODE:
-        chat_id = _parse_int(parts[2] if len(parts) > 2 else None, default=-1)
+        chat_id = int_or(parts[2] if len(parts) > 2 else None, default=-1)
         right = parts[4] if len(parts) > 4 else ""
         updated = gate.add_guest_right(chat_id, right)
         if updated is None:
@@ -330,7 +311,7 @@ async def on_guest_screen(
         await refresh_chat_menu(bot, chat_id, updated)
         await callback.answer("Право выдано")
         text, keyboard = guests_view.build_perms_view(updated, 0)
-        await _redraw(callback, text, keyboard)
+        await redraw(callback, text, keyboard)
         return
 
     # Группа прав (bot/guest_rights.py) — выдаётся и снимается целиком, ОДНОЙ
@@ -338,8 +319,8 @@ async def on_guest_screen(
     # файл N раз и оставили бы гостя в промежуточных состояниях, если бы
     # запись на середине сорвалась.
     if code in (commands.GUEST_GROUP_ADD_CODE, commands.GUEST_GROUP_OFF_CODE):
-        chat_id = _parse_int(parts[2] if len(parts) > 2 else None, default=-1)
-        offset = _parse_int(parts[3] if len(parts) > 3 else None)
+        chat_id = int_or(parts[2] if len(parts) > 2 else None, default=-1)
+        offset = int_or(parts[3] if len(parts) > 3 else None)
         group = guest_rights.group(parts[4] if len(parts) > 4 else "")
         sub = await _guest_or_redraw_list(callback, book, chat_id)
         if sub is None:
@@ -370,7 +351,7 @@ async def _redraw_perms(callback: CallbackQuery, sub: Subscription, offset: int)
         offset, guests_view.PERM_PAGE_SIZE, guests_view.granted_rows(sub)
     )
     text, keyboard = guests_view.build_perms_view(sub, offset)
-    await _redraw(callback, text, keyboard)
+    await redraw(callback, text, keyboard)
 
 
 class CodeFromInsider(Filter):

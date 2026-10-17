@@ -23,16 +23,16 @@ CallbackAuthorizationMiddleware уже проверила его до вызов
 
 from __future__ import annotations
 
-import contextlib
 import logging
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from sa_home_bot.bot import apps_view, commands, torrents_view
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
+from sa_home_bot.bot.ui.callback_data import int_or
+from sa_home_bot.bot.ui.redraw import redraw
 from sa_home_bot.proto.messages import ProtoError
 
 log = logging.getLogger(__name__)
@@ -45,25 +45,11 @@ ACTION_RESUME = "resume"
 ACTION_SPEED_LIMIT = "speed_limit"
 
 
-def _parse_int(raw: str | None, default: int = 0) -> int:
-    try:
-        return int(raw) if raw is not None else default
-    except ValueError:
-        return default
-
-
 async def _fetch(torrents_link: ServiceLink) -> dict | None:
     try:
         return await torrents_link.command(ACTION_LIST, {"with_hash": True})
     except (ServiceUnavailableError, ProtoError):
         return None
-
-
-async def _redraw(callback: CallbackQuery, text: str, keyboard) -> None:
-    if callback.message is None:
-        return
-    with contextlib.suppress(TelegramBadRequest):
-        await callback.message.edit_text(text, reply_markup=keyboard)
 
 
 def _find(result: dict, thash: str) -> dict | None:
@@ -96,19 +82,19 @@ async def on_torrents_screen(
             apps_link, None, apps_view.QBITTORRENT_APP_ID
         )
         text, keyboard = torrents_view.build_app_view(text)
-        await _redraw(callback, text, keyboard)
+        await redraw(callback, text, keyboard)
         await callback.answer()
         return
 
     if code == commands.TORRENTS_LIST_CODE:
-        offset = _parse_int(parts[2] if len(parts) > 2 else None)
+        offset = int_or(parts[2] if len(parts) > 2 else None)
         result = await _fetch(torrents_link)
         if result is None:
-            await _redraw(callback, torrents_view.UNAVAILABLE_TEXT, None)
+            await redraw(callback, torrents_view.UNAVAILABLE_TEXT, None)
             await callback.answer()
             return
         text, keyboard = torrents_view.build_list_view(result, offset)
-        await _redraw(callback, text, keyboard)
+        await redraw(callback, text, keyboard)
         await callback.answer()
         return
 
@@ -116,7 +102,7 @@ async def on_torrents_screen(
         thash = parts[2] if len(parts) > 2 else ""
         result = await _fetch(torrents_link)
         if result is None:
-            await _redraw(callback, torrents_view.UNAVAILABLE_TEXT, None)
+            await redraw(callback, torrents_view.UNAVAILABLE_TEXT, None)
             await callback.answer()
             return
         torrent = _find(result, thash)
@@ -124,7 +110,7 @@ async def on_torrents_screen(
             await callback.answer("Раздача пропала из списка — обновите.", show_alert=True)
             return
         text, keyboard = torrents_view.build_card_view(torrent)
-        await _redraw(callback, text, keyboard)
+        await redraw(callback, text, keyboard)
         await callback.answer()
         return
 
@@ -132,7 +118,7 @@ async def on_torrents_screen(
         thash = parts[2] if len(parts) > 2 else ""
         result = await _fetch(torrents_link)
         if result is None:
-            await _redraw(callback, torrents_view.UNAVAILABLE_TEXT, None)
+            await redraw(callback, torrents_view.UNAVAILABLE_TEXT, None)
             await callback.answer()
             return
         torrent = _find(result, thash)
@@ -153,7 +139,7 @@ async def on_torrents_screen(
             return
         result = await _fetch(torrents_link)
         if result is None:
-            await _redraw(callback, torrents_view.UNAVAILABLE_TEXT, None)
+            await redraw(callback, torrents_view.UNAVAILABLE_TEXT, None)
             await callback.answer("Готово")
             return
         torrent = _find(result, thash)
@@ -161,13 +147,13 @@ async def on_torrents_screen(
             await callback.answer("Готово")
             return
         text, keyboard = torrents_view.build_card_view(torrent)
-        await _redraw(callback, text, keyboard)
+        await redraw(callback, text, keyboard)
         await callback.answer("Готово")
         return
 
     if code == commands.TORRENT_SPEED_CODE:
-        mbps = _parse_int(parts[2] if len(parts) > 2 else None)
-        offset = _parse_int(parts[3] if len(parts) > 3 else None)
+        mbps = int_or(parts[2] if len(parts) > 2 else None)
+        offset = int_or(parts[3] if len(parts) > 3 else None)
         try:
             await torrents_link.command(ACTION_SPEED_LIMIT, {"mbps": mbps})
         except ServiceUnavailableError:
@@ -178,11 +164,11 @@ async def on_torrents_screen(
             return
         result = await _fetch(torrents_link)
         if result is None:
-            await _redraw(callback, torrents_view.UNAVAILABLE_TEXT, None)
+            await redraw(callback, torrents_view.UNAVAILABLE_TEXT, None)
             await callback.answer("Лимит обновлён")
             return
         text, keyboard = torrents_view.build_list_view(result, offset)
-        await _redraw(callback, text, keyboard)
+        await redraw(callback, text, keyboard)
         await callback.answer("Лимит обновлён")
         return
 
