@@ -272,12 +272,14 @@ async def _post_with_retry(
             return await asyncio.to_thread(_post_json_sync, url, payload, left)
         except JSON_FETCH_ERRORS as exc:
             last_exc = exc
-            if sent_any or attempt >= _POST_RETRY_ATTEMPTS or not _is_transient_connection_error(exc):
+            out_of_attempts = attempt >= _POST_RETRY_ATTEMPTS
+            if sent_any or out_of_attempts or not _is_transient_connection_error(exc):
                 break
             if deadline - loop.time() <= _POST_RETRY_DELAY_S:
                 break
             log.warning(
-                "llm: %s%s оборвался сразу после прогрева (%s) — повтор через %.0fс (попытка %d/%d)",
+                "llm: %s%s оборвался сразу после прогрева (%s) — повтор через %.0fс "
+                "(попытка %d/%d)",
                 url,
                 " (стрим)" if streaming else "",
                 exc,

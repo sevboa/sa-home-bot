@@ -575,22 +575,6 @@ async def test_transcribe_voice_unknown_session_rejected():
     assert excinfo.value.code == ERR_BAD_REQUEST
 
 
-async def test_sweep_stt_uploads_evicts_only_stale_sessions():
-    svc = LlmService(_settings())
-    now = datetime.now(tz=UTC)
-    svc._stt_uploads["stale"] = bytearray(b"old")
-    svc._stt_upload_touched["stale"] = now - timedelta(
-        seconds=llm_service._STT_UPLOAD_TTL_S + 1
-    )
-    svc._stt_uploads["fresh"] = bytearray(b"new")
-    svc._stt_upload_touched["fresh"] = now - timedelta(seconds=1)
-
-    svc._sweep_stt_uploads()
-
-    assert set(svc._stt_uploads) == {"fresh"}
-    assert set(svc._stt_upload_touched) == {"fresh"}
-
-
 # --- голосовые ОТВЕТЫ /ai (синтез — Coqui XTTS v2 на CPU, см. llm/tts.py;
 # здесь tts.synthesize_speech замокан целиком — своя логика проверяется
 # отдельно в test_llm_tts.py, здесь только обвязка протокола) ---
@@ -690,26 +674,10 @@ async def test_tts_download_chunk_unknown_session_rejected():
 
 async def test_tts_download_chunk_rejects_negative_offset():
     svc = LlmService(_settings())
-    svc._tts_sessions["s1"] = b"data"
+    svc._tts_sessions.put("s1", b"data")
     with pytest.raises(ProtoError) as excinfo:
         await svc.run_command("tts_chunk", {"session_id": "s1", "offset": -1})
     assert excinfo.value.code == ERR_BAD_REQUEST
-
-
-async def test_sweep_tts_sessions_evicts_only_stale_sessions():
-    svc = LlmService(_settings())
-    now = datetime.now(tz=UTC)
-    svc._tts_sessions["stale"] = b"old"
-    svc._tts_session_touched["stale"] = now - timedelta(
-        seconds=llm_service._TTS_SESSION_TTL_S + 1
-    )
-    svc._tts_sessions["fresh"] = b"new"
-    svc._tts_session_touched["fresh"] = now - timedelta(seconds=1)
-
-    svc._sweep_tts_sessions()
-
-    assert set(svc._tts_sessions) == {"fresh"}
-    assert set(svc._tts_session_touched) == {"fresh"}
 
 
 # --- request_id / chat_progress (этап 34, Фаза 2 — Rich-стрим ответов) ---
@@ -754,7 +722,6 @@ async def test_chat_stream_fills_streaming_buffer_and_marks_done(monkeypatch):
     # После завершения запись остаётся (для последнего опроса бота), но
     # помечена done — см. также тест на подметание ниже.
     assert svc._streaming["req-2"]["done"] is True
-    assert svc._streaming["req-2"]["done_at"] is not None
 
 
 async def test_chat_stream_marks_done_even_on_ollama_failure(monkeypatch):
@@ -771,12 +738,7 @@ async def test_chat_stream_marks_done_even_on_ollama_failure(monkeypatch):
         await svc.run_command(
             "chat", {"messages": [{"role": "user", "content": "1"}], "request_id": "req-3"}
         )
-    assert svc._streaming["req-3"] == {
-        "partial": "часть",
-        "done": True,
-        "done_at": svc._streaming["req-3"]["done_at"],
-    }
-    assert svc._streaming["req-3"]["done_at"] is not None
+    assert svc._streaming["req-3"] == {"partial": "часть", "done": True}
 
 
 async def test_chat_progress_reflects_current_buffer(monkeypatch):
@@ -817,26 +779,6 @@ async def test_chat_rejects_non_string_request_id():
             "chat", {"messages": [{"role": "user", "content": "1"}], "request_id": 123}
         )
     assert excinfo.value.code == ERR_BAD_REQUEST
-
-
-async def test_sweep_streaming_evicts_only_stale_done_entries():
-    svc = LlmService(_settings())
-    now = datetime.now(tz=UTC)
-    svc._streaming["stale"] = {
-        "partial": "старое",
-        "done": True,
-        "done_at": now - timedelta(seconds=llm_service._STREAMING_ENTRY_TTL_S + 1),
-    }
-    svc._streaming["fresh_done"] = {
-        "partial": "недавнее",
-        "done": True,
-        "done_at": now - timedelta(seconds=1),
-    }
-    svc._streaming["still_running"] = {"partial": "идёт", "done": False, "done_at": None}
-
-    svc._sweep_streaming()
-
-    assert set(svc._streaming) == {"fresh_done", "still_running"}
 
 
 async def test_sleep_action_stops_ollama_and_marks_asleep(monkeypatch):

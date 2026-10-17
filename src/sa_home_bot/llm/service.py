@@ -24,10 +24,8 @@ import json
 import logging
 import socket
 import time
-import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from datetime import UTC, datetime
 from typing import Any
 
 from PIL import Image
@@ -51,6 +49,9 @@ from sa_home_bot.llm.prompt import (
     strip_math_notation,
 )
 from sa_home_bot.llm.speech_therapy import SpeechTherapist
+from sa_home_bot.llm.ttl_store import TtlStore
+from sa_home_bot.proto.addresses import LLM_SERVICE
+from sa_home_bot.proto.chunks import CHUNK_BYTES
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     ERR_INTERNAL,
@@ -59,11 +60,14 @@ from sa_home_bot.proto.messages import (
     ProtoError,
     ServiceDescription,
     ServiceInfo,
+    new_id,
 )
+from sa_home_bot.utils.clock import utc_now
+from sa_home_bot.utils.ids import random_seed32
 
 log = logging.getLogger(__name__)
 
-SERVICE_NAME = "llm"
+SERVICE_NAME = LLM_SERVICE
 
 
 def _log_ollama_timings(what: str, result: dict[str, Any]) -> None:
@@ -104,7 +108,7 @@ def _log_ollama_timings(what: str, result: dict[str, Any]) -> None:
         result.get("done_reason", "?"),
     )
 
-def _usage(cfg: LlmConfig, result: dict[str, Any]) -> dict[str, Any]:
+def _usage_stats(cfg: LlmConfig, result: dict[str, Any]) -> dict[str, Any]:
     """Счётчики окна из ответа Ollama — наружу боту (Этап 50, 2026-09-30).
 
     Раньше они жили только в логе (_log_ollama_timings выше), и бот не знал,
@@ -260,7 +264,6 @@ _STT_UPLOAD_TTL_S = 300.0
 # сама причина осиротения другая, чем у _stt_uploads (там недовершённая
 # ЗАГРУЗКА, тут неполученный ГОТОВЫЙ результат), TTL взят тем же порядком.
 _INLINE_TTS_B64_BYTES = 800_000
-_TTS_CHUNK_BYTES = 700 * 1024
 _TTS_SESSION_TTL_S = 300.0
 
 EventEmitter = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -271,7 +274,7 @@ async def _noop_emit(event_type: str, data: dict[str, Any]) -> None:
 
 
 
-def _num(args: dict[str, Any], key: str, kind: type, lo: float, hi: float) -> Any:
+def _bounded_number_arg(args: dict[str, Any], key: str, kind: type, lo: float, hi: float) -> Any:
     value = args.get(key)
     if value is None:
         return None
@@ -298,7 +301,7 @@ def _imagegen_options(args: dict[str, Any]) -> dict[str, Any]:
             ref.load()
         except Exception:
             raise ProtoError(ERR_BAD_REQUEST, "образец не читается как картинка") from None
-    ip_scale = _num(args, "ip_scale", float, 0.0, 1.5)
+    ip_scale = _bounded_number_arg(args, "ip_scale", float, 0.0, 1.5)
     if ref is not None and mode == "scene" and ip_scale is None:
         ip_scale = imagegen.DEFAULT_IP_SCALE
     model = args.get("model")
@@ -351,13 +354,13 @@ def _imagegen_options(args: dict[str, Any]) -> dict[str, Any]:
         ][:5],
         "raw": bool(args.get("raw")),
         "style": args.get("style", True) is not False,
-        "seed": _num(args, "seed", int, 0, 2**32 - 1),
-        "strength": _num(args, "strength", float, 0.05, 1.0),
+        "seed": _bounded_number_arg(args, "seed", int, 0, 2**32 - 1),
+        "strength": _bounded_number_arg(args, "strength", float, 0.05, 1.0),
         "ip_scale": ip_scale if mode == "scene" else None,
-        "steps": _num(args, "steps", int, 1, 30),
-        "guidance": _num(args, "guidance", float, 1.0, 10.0),
-        "size": _num(args, "size", int, 16, 512),
-        "colors": _num(args, "colors", int, 0, 256),
+        "steps": _bounded_number_arg(args, "steps", int, 1, 30),
+        "guidance": _bounded_number_arg(args, "guidance", float, 1.0, 10.0),
+        "size": _bounded_number_arg(args, "size", int, 16, 512),
+        "colors": _bounded_number_arg(args, "colors", int, 0, 256),
         "model": model,
         "loras": loras,
         "ref": ref,
@@ -379,7 +382,7 @@ def _restyle_option(raw: Any) -> dict[str, Any] | None:
     options = _imagegen_options(
         {"model": raw.get("model"), "loras": raw.get("loras"), "mode": "free"}
     )
-    strength = _num(raw, "strength", float, 0.05, 0.9)
+    strength = _bounded_number_arg(raw, "strength", float, 0.05, 0.9)
     if strength is None:
         raise ProtoError(ERR_BAD_REQUEST, "restyle.strength — число 0.05..0.9")
     prompt = raw.get("prompt")
@@ -406,7 +409,7 @@ def _paste_option(raw: Any, ref: Image.Image | None) -> dict[str, Any] | None:
     place = raw.get("place") or "desk"
     if place not in item_paste.PLACES:
         raise ProtoError(ERR_BAD_REQUEST, f"paste.place — одно из {', '.join(item_paste.PLACES)}")
-    width = _num(raw, "width", float, 0.1, 1.0)
+    width = _bounded_number_arg(raw, "width", float, 0.1, 1.0)
     hint = raw.get("hint")
     return {
         "key": key,
@@ -414,12 +417,6 @@ def _paste_option(raw: Any, ref: Image.Image | None) -> dict[str, Any] | None:
         "width": width,
         "hint": " ".join(hint.split())[:200] if isinstance(hint, str) else "",
     }
-
-def _jpeg_b64(image: Image.Image) -> str:
-    buf = io.BytesIO()
-    image.convert("RGB").save(buf, format="JPEG", quality=90)
-    return base64.b64encode(buf.getvalue()).decode()
-
 
 class LlmService:
     def __init__(
@@ -463,7 +460,7 @@ class LlmService:
         )
         self._node = socket.gethostname()
         self._emit = emit
-        self._last_activity = datetime.now(tz=UTC)
+        self._last_activity = utc_now()
         self._asleep = False
         # Живая находка при аудите механизма пробуждения (2026-08-26): после
         # рестарта/деплоя ЭТОГО процесса (не Ollama) presence-проверка
@@ -497,17 +494,15 @@ class LlmService:
         )
         # request_id -> {"partial": str, "done": bool, "done_at": datetime | None}
         # (этап 34, Фаза 2 — см. ACTION_CHAT_PROGRESS выше).
-        self._streaming: dict[str, dict[str, Any]] = {}
+        self._streaming: TtlStore[dict[str, Any]] = TtlStore(_STREAMING_ENTRY_TTL_S)
         # session_id -> накопленные байты чанкованной загрузки голосового
         # (см. ACTION_STT_UPLOAD_CHUNK/ACTION_TRANSCRIBE_VOICE выше) и время
         # последнего чанка (для TTL-очистки осиротевших сессий, idle_loop).
-        self._stt_uploads: dict[str, bytearray] = {}
-        self._stt_upload_touched: dict[str, datetime] = {}
+        self._stt_uploads: TtlStore[bytearray] = TtlStore(_STT_UPLOAD_TTL_S)
         # session_id -> готовый синтезированный OGG/Opus (см.
         # ACTION_SYNTHESIZE_SPEECH/ACTION_TTS_DOWNLOAD_CHUNK выше) и время
         # последнего обращения (TTL-очистка осиротевших сессий, idle_loop).
-        self._tts_sessions: dict[str, bytes] = {}
-        self._tts_session_touched: dict[str, datetime] = {}
+        self._tts_sessions: TtlStore[bytes] = TtlStore(_TTS_SESSION_TTL_S)
 
     def describe(self) -> ServiceDescription:
         return ServiceDescription(
@@ -882,7 +877,7 @@ class LlmService:
         return self._profile.think_arg(reason)
 
     async def _touch(self, chat_id: Any = None) -> None:
-        self._last_activity = datetime.now(tz=UTC)
+        self._last_activity = utc_now()
         self._asleep = False
         self._warmup_confirmed = True
         if isinstance(chat_id, int):
@@ -1027,7 +1022,7 @@ class LlmService:
                 return {
                     "tool_calls": tool_calls,
                     "model": self._cfg.model,
-                    **_usage(self._cfg, result),
+                    **_usage_stats(self._cfg, result),
                 }
             cleaned = strip_math_notation(message.get("content", ""))
             reply, remark, just_cured = self._speech.process(
@@ -1038,7 +1033,7 @@ class LlmService:
             out: dict[str, Any] = {
                 "response": reply,
                 "model": self._cfg.model,
-                **_usage(self._cfg, result),
+                **_usage_stats(self._cfg, result),
             }
             if remark is not None:
                 out["speech_remark"] = remark
@@ -1103,7 +1098,10 @@ class LlmService:
                 raise ProtoError(ERR_BAD_REQUEST, "offset должен быть целым числом")
             if not isinstance(data_b64, str):
                 raise ProtoError(ERR_BAD_REQUEST, "data_b64 должен быть строкой")
-            buf = self._stt_uploads.setdefault(session_id, bytearray())
+            buf = self._stt_uploads.get(session_id)
+            if buf is None:
+                buf = bytearray()
+                self._stt_uploads.put(session_id, buf)
             if offset != len(buf):
                 raise ProtoError(
                     ERR_BAD_REQUEST, f"неожиданный offset: {offset}, ожидался {len(buf)}"
@@ -1113,7 +1111,7 @@ class LlmService:
             except Exception as exc:
                 raise ProtoError(ERR_BAD_REQUEST, "data_b64 не является валидным base64") from exc
             buf.extend(chunk)
-            self._stt_upload_touched[session_id] = datetime.now(tz=UTC)
+            self._stt_uploads.touch(session_id)
             return {"received": len(buf)}
         if action == ACTION_TRANSCRIBE_VOICE:
             audio_b64 = args.get("audio_b64")
@@ -1126,8 +1124,7 @@ class LlmService:
                         ERR_BAD_REQUEST, "audio_b64 не является валидным base64"
                     ) from exc
             elif isinstance(session_id, str) and session_id:
-                buf = self._stt_uploads.pop(session_id, None)
-                self._stt_upload_touched.pop(session_id, None)
+                buf = self._stt_uploads.pop(session_id)
                 if buf is None:
                     raise ProtoError(
                         ERR_BAD_REQUEST, f"неизвестная сессия загрузки: {session_id}"
@@ -1173,9 +1170,8 @@ class LlmService:
             audio_b64 = base64.b64encode(audio_bytes).decode()
             if len(audio_b64) <= _INLINE_TTS_B64_BYTES:
                 return {"audio_b64": audio_b64, "format": "ogg"}
-            session_id = uuid.uuid4().hex
-            self._tts_sessions[session_id] = audio_bytes
-            self._tts_session_touched[session_id] = datetime.now(tz=UTC)
+            session_id = new_id()
+            self._tts_sessions.put(session_id, audio_bytes)
             return {
                 "session_id": session_id,
                 "size": len(audio_bytes),
@@ -1197,7 +1193,7 @@ class LlmService:
         if action == ACTION_TTS_DOWNLOAD_CHUNK:
             session_id = args.get("session_id")
             offset = args.get("offset")
-            length = args.get("length") or _TTS_CHUNK_BYTES
+            length = args.get("length") or CHUNK_BYTES
             if not isinstance(session_id, str) or not session_id:
                 raise ProtoError(ERR_BAD_REQUEST, "session_id должен быть непустой строкой")
             if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
@@ -1207,10 +1203,10 @@ class LlmService:
                 raise ProtoError(ERR_BAD_REQUEST, f"неизвестная сессия синтеза: {session_id}")
             chunk = data[offset : offset + int(length)]
             eof = offset + len(chunk) >= len(data)
-            self._tts_session_touched[session_id] = datetime.now(tz=UTC)
             if eof:
-                self._tts_sessions.pop(session_id, None)
-                self._tts_session_touched.pop(session_id, None)
+                self._tts_sessions.pop(session_id)
+            else:
+                self._tts_sessions.touch(session_id)
             return {"data_b64": base64.b64encode(chunk).decode(), "offset": offset, "eof": eof}
         if action == ACTION_CHAT_PROGRESS:
             request_id = args.get("request_id")
@@ -1306,7 +1302,7 @@ class LlmService:
     ) -> item_paste.Placement | None:
         """Где в кадре столешница — спросить зрение. Сбой — None."""
         try:
-            image_b64 = await asyncio.to_thread(_jpeg_b64, scene)
+            image_b64 = await asyncio.to_thread(vision.jpeg_b64, scene)
             result = await ollama.chat(
                 self._cfg,
                 [{"role": "user", "content": item_paste.DESK_BOX_QUESTION, "images": [image_b64]}],
@@ -1459,12 +1455,15 @@ class LlmService:
         if not isinstance(request_id, str) or not request_id:
             return
         if phase is not None:
-            self._streaming[request_id] = {"partial": phase, "done": False, "done_at": None}
+            self._streaming.put(request_id, {"partial": phase, "done": False}, touched=False)
             return
+        self._finish_streaming(request_id)
+
+    def _finish_streaming(self, request_id: str) -> None:
         entry = self._streaming.get(request_id)
         if entry is not None:
             entry["done"] = True
-            entry["done_at"] = datetime.now(tz=UTC)
+            self._streaming.touch(request_id)
 
     async def _item_portrait(self, args: dict[str, Any]) -> dict[str, Any]:
         """Портрет предмета: turbo на сером фоне, сверка ``checks`` зрением,
@@ -1476,10 +1475,10 @@ class LlmService:
         key = args.get("key")
         if not isinstance(key, str) or not item_paste.KEY_RE.match(key):
             raise ProtoError(ERR_BAD_REQUEST, "key — [a-z0-9_-], до 64 знаков")
-        seed = _num(args, "seed", int, 0, 2**32 - 1)
+        seed = _bounded_number_arg(args, "seed", int, 0, 2**32 - 1)
         if seed is None:
-            seed = int.from_bytes(uuid.uuid4().bytes[:4], "big")
-        attempts = _num(args, "attempts", int, 1, _ITEM_ATTEMPTS_MAX) or 3
+            seed = random_seed32()
+        attempts = _bounded_number_arg(args, "attempts", int, 1, _ITEM_ATTEMPTS_MAX) or 3
         _restyle_option(args.get("restyle"))  # кривое — отказ до рисования
         raw_checks = args.get("checks")
         checks = [
@@ -1503,7 +1502,10 @@ class LlmService:
 
             def preview(image: Image.Image, verdict: dict[str, Any] = verdict) -> bool:
                 future = asyncio.run_coroutine_threadsafe(
-                    photo_check.inspect(_jpeg_b64(image), checks, self._cfg, think=think), loop
+                    photo_check.inspect(
+                        vision.jpeg_b64(image), checks, self._cfg, think=think
+                    ),
+                    loop,
                 )
                 try:
                     inspection = future.result(timeout=self._cfg.request_timeout_s)
@@ -1539,7 +1541,7 @@ class LlmService:
             spent += result["seconds"]
             inspection = verdict.get("inspection")
             if checks and inspection is None:
-                image_b64 = await asyncio.to_thread(_jpeg_b64, result["original"])
+                image_b64 = await asyncio.to_thread(vision.jpeg_b64, result["original"])
                 inspection = await photo_check.inspect(image_b64, checks, self._cfg, think=think)
             misses = len(inspection["missing"]) if inspection else 0
             if best is None or misses < len(best[1]["missing"] if best[1] else []):
@@ -1643,7 +1645,7 @@ class LlmService:
         (done=True, done_at) в finally — даже если Ollama упала, опрашивающий
         бот должен увидеть завершение, а не крутиться до собственного
         таймаута."""
-        self._streaming[request_id] = {"partial": "", "done": False, "done_at": None}
+        self._streaming.put(request_id, {"partial": "", "done": False}, touched=False)
 
         def _on_chunk(text: str) -> None:
             entry = self._streaming.get(request_id)
@@ -1655,44 +1657,7 @@ class LlmService:
                 self._cfg, messages, system, _on_chunk, tools=tools, think=think
             )
         finally:
-            entry = self._streaming.get(request_id)
-            if entry is not None:
-                entry["done"] = True
-                entry["done_at"] = datetime.now(tz=UTC)
-
-    def _sweep_streaming(self) -> None:
-        now = datetime.now(tz=UTC)
-        stale = [
-            rid
-            for rid, entry in self._streaming.items()
-            if entry["done"]
-            and entry["done_at"] is not None
-            and (now - entry["done_at"]).total_seconds() >= _STREAMING_ENTRY_TTL_S
-        ]
-        for rid in stale:
-            del self._streaming[rid]
-
-    def _sweep_stt_uploads(self) -> None:
-        now = datetime.now(tz=UTC)
-        stale = [
-            sid
-            for sid, touched in self._stt_upload_touched.items()
-            if (now - touched).total_seconds() >= _STT_UPLOAD_TTL_S
-        ]
-        for sid in stale:
-            self._stt_uploads.pop(sid, None)
-            self._stt_upload_touched.pop(sid, None)
-
-    def _sweep_tts_sessions(self) -> None:
-        now = datetime.now(tz=UTC)
-        stale = [
-            sid
-            for sid, touched in self._tts_session_touched.items()
-            if (now - touched).total_seconds() >= _TTS_SESSION_TTL_S
-        ]
-        for sid in stale:
-            self._tts_sessions.pop(sid, None)
-            self._tts_session_touched.pop(sid, None)
+            self._finish_streaming(request_id)
 
     async def _director_chat(
         self, messages: list[Any], args: dict[str, Any]
@@ -1738,7 +1703,7 @@ class LlmService:
         return {
             "response": (result.get("message") or {}).get("content", ""),
             "model": self._cfg.model,
-            **_usage(self._cfg, result),
+            **_usage_stats(self._cfg, result),
         }
 
     async def _emit_speech_cured(self) -> None:
@@ -1793,7 +1758,7 @@ class LlmService:
     async def _maybe_sleep_idle(self) -> None:
         if self._asleep:
             return
-        idle_for = (datetime.now(tz=UTC) - self._last_activity).total_seconds()
+        idle_for = (utc_now() - self._last_activity).total_seconds()
         if idle_for >= self._cfg.idle_sleep_after_s:
             await self._sleep_now()
             try:
@@ -1808,6 +1773,6 @@ class LlmService:
         while True:
             await asyncio.sleep(_IDLE_CHECK_INTERVAL_S)
             await self._maybe_sleep_idle()
-            self._sweep_streaming()
-            self._sweep_stt_uploads()
-            self._sweep_tts_sessions()
+            self._streaming.sweep()
+            self._stt_uploads.sweep()
+            self._tts_sessions.sweep()

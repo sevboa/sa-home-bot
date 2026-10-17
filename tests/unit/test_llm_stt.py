@@ -11,13 +11,6 @@ from sa_home_bot.config import LlmConfig
 from sa_home_bot.llm import stt as llm_stt
 
 
-@pytest.fixture(autouse=True)
-def _reset_model_cache(monkeypatch):
-    # _model — модульный синглтон (см. докстринг llm/stt.py) — без сброса
-    # между тестами один тест "прогрел" бы модель для всех последующих.
-    monkeypatch.setattr(llm_stt, "_model", None)
-
-
 class _FakeSegment:
     def __init__(self, text: str) -> None:
         self.text = text

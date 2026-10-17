@@ -30,6 +30,23 @@ _SWEEP_MIN_INTERVAL_S = 24 * 3600.0
 _last_sweep_at = 0.0
 
 
+JPEG_QUALITY = 90
+
+
+def encode_b64(data: bytes) -> str:
+    return base64.b64encode(data).decode()
+
+
+def jpeg_bytes(image: Image.Image, quality: int = JPEG_QUALITY) -> bytes:
+    buf = io.BytesIO()
+    image.convert("RGB").save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
+
+
+def jpeg_b64(image: Image.Image) -> str:
+    return encode_b64(jpeg_bytes(image))
+
+
 def _resized_jpeg(raw: bytes, cfg: LlmConfig) -> bytes:
     img = Image.open(io.BytesIO(raw))
     img = ImageOps.exif_transpose(img) or img
@@ -45,7 +62,7 @@ def prepare(raw: bytes, cfg: LlmConfig) -> str:
     """Как ``resize_and_store``, но без сохранения: base64 для ``images``.
     Своя картинка Альфреда (look_at_photo с raw_image) — её байты и так в
     базе бота. CPU-bound — через ``asyncio.to_thread``."""
-    return base64.b64encode(_resized_jpeg(raw, cfg)).decode()
+    return encode_b64(_resized_jpeg(raw, cfg))
 
 
 def resize_and_store(raw: bytes, photo_key: str, cfg: LlmConfig) -> str:
@@ -63,7 +80,7 @@ def resize_and_store(raw: bytes, photo_key: str, cfg: LlmConfig) -> str:
     path = cfg.photos_dir / f"{photo_key}.jpg"
     path.write_bytes(encoded)
     log.info("vision: сохранено фото %s (%d байт)", photo_key, len(encoded))
-    return base64.b64encode(encoded).decode()
+    return encode_b64(encoded)
 
 
 def _encode_with_degradation(img: Image.Image, start_quality: int) -> bytes:
@@ -87,7 +104,7 @@ def load_stored(photo_key: str, cfg: LlmConfig) -> str | None:
         raw = path.read_bytes()
     except OSError:
         return None
-    return base64.b64encode(raw).decode()
+    return encode_b64(raw)
 
 
 def cleanup_old_photos(cfg: LlmConfig) -> int:

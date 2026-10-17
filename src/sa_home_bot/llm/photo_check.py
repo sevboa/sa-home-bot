@@ -12,8 +12,6 @@
 
 from __future__ import annotations
 
-import base64
-import io
 import json
 import logging
 from typing import Any
@@ -21,11 +19,10 @@ from typing import Any
 from PIL import Image
 
 from sa_home_bot.config import LlmConfig
-from sa_home_bot.llm import ollama
+from sa_home_bot.llm import ollama, vision
 
 log = logging.getLogger(__name__)
 
-_JPEG_QUALITY = 90
 _OPTIONS: dict[str, Any] = {"temperature": 0, "num_predict": 512}
 
 # Этап 49.3 (стенд 2026-10-01, «Стенд предметов», раздел vlm): «да/нет по
@@ -63,13 +60,11 @@ def label(item: str) -> str:
 
 def save_original(image: Image.Image, photo_key: str, cfg: LlmConfig) -> str:
     """512²-оригинал → JPEG в ``photos_dir/{photo_key}.jpg``; вернуть base64."""
-    buf = io.BytesIO()
-    image.convert("RGB").save(buf, format="JPEG", quality=_JPEG_QUALITY)
-    data = buf.getvalue()
+    data = vision.jpeg_bytes(image)
     cfg.photos_dir.mkdir(parents=True, exist_ok=True)
     (cfg.photos_dir / f"{photo_key}.jpg").write_bytes(data)
     log.info("photo_check: оригинал снимка %s сохранён (%d байт)", photo_key, len(data))
-    return base64.b64encode(data).decode()
+    return vision.encode_b64(data)
 
 
 def build_question(expect: list[str]) -> str:
