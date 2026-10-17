@@ -18,14 +18,19 @@ from math import sqrt
 from typing import Any
 
 from sa_home_bot.db.connection import Database
+from sa_home_bot.db.state_tables import (
+    HEALTH_STATES,
+    HOST_STATES,
+    StateTable,
+    iso_or_none,
+    parse_iso_or_none,
+)
 from sa_home_bot.domain.host import (
     HostHealthDiff,
     HostMetricReading,
     HostMetricState,
 )
 from sa_home_bot.domain.models import (
-    ALERTING,
-    OK,
     DiskSummary,
     HealthDiff,
     HealthState,
@@ -56,10 +61,6 @@ def _item(row: Any) -> dict:
     return item
 
 
-def _iso(dt: datetime | None) -> str | None:
-    return dt.isoformat() if dt is not None else None
-
-
 # Постоянная очередь исходящих (Этап 52, bot/outbox.py): виды и их TTL.
 # Протухшее не доставляем — «сервер упал 7 часов назад» уже не новость.
 OUTBOX_KIND_ALERT = "alert"  # алерты/события мониторинга
@@ -85,44 +86,24 @@ def _utc_iso(dt: datetime) -> str:
     return dt.astimezone(UTC).isoformat(timespec="microseconds")
 
 
-def _parse(value: str | None) -> datetime | None:
-    return datetime.fromisoformat(value) if value else None
-
-
 def _pending_action_row(row) -> dict:
     data = dict(row)
     data["payload"] = json.loads(data.pop("payload_json") or "{}")
     return data
 
 
-def _row_to_state(row) -> HealthState:
-    return HealthState(
-        component_id=row["component_id"],
-        kind=row["kind"],
-        label=row["label"],
-        status=row["status"],
-        temperature_c=row["last_temperature_c"],
-        consecutive_count=row["consecutive_count"],
-        alerting_since=_parse(row["alerting_since"]),
-    )
-
-
-def _row_to_host_state(row) -> HostMetricState:
-    return HostMetricState(
-        component_id=row["component_id"],
-        metric=row["metric"],
-        label=row["label"],
-        value=row["last_value"],
-        unit=row["unit"],
-        status=row["status"],
-        consecutive_count=row["consecutive_count"],
-        alerting_since=_parse(row["alerting_since"]),
-    )
-
-
 class Store:
     def __init__(self, db: Database) -> None:
         self.db = db
+
+    async def _fetch_one(self, sql: str, params: tuple = ()) -> dict | None:
+        cur = await self.db.conn.execute(sql, params)
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def _fetch_all(self, sql: str, params: tuple = ()) -> list[dict]:
+        cur = await self.db.conn.execute(sql, params)
+        return [dict(r) for r in await cur.fetchall()]
 
     # --- app_state (KV) ---
 
@@ -163,7 +144,9 @@ class Store:
             return []
 
     async def set_action_ticks(self, action_key: str, ticks: list[datetime]) -> None:
-        await self.set_state(ACTION_TICKS_PREFIX + action_key, json.dumps([_iso(t) for t in ticks]))
+        await self.set_state(
+            ACTION_TICKS_PREFIX + action_key, json.dumps([iso_or_none(t) for t in ticks])
+        )
 
     # --- outbox (Этап 52) ---
 
@@ -242,7 +225,7 @@ class Store:
         async with self.db.transaction() as conn:
             cur = await conn.execute(
                 "INSERT INTO job_runs(job_type, started_at, status) VALUES(?, ?, 'running')",
-                (job_type, _iso(started_at)),
+                (job_type, iso_or_none(started_at)),
             )
             return cur.lastrowid
 
@@ -257,15 +240,11 @@ class Store:
         async with self.db.transaction() as conn:
             await conn.execute(
                 "UPDATE job_runs SET status=?, finished_at=?, error=?, metrics_json=? WHERE id=?",
-                (status, _iso(finished_at), error, metrics_json, run_id),
+                (status, iso_or_none(finished_at), error, metrics_json, run_id),
             )
 
     async def recent_job_runs(self, limit: int = 10) -> list[dict]:
-        cur = await self.db.conn.execute(
-            "SELECT * FROM job_runs ORDER BY id DESC LIMIT ?", (limit,)
-        )
-        rows = await cur.fetchall()
-        return [dict(r) for r in rows]
+        return await self._fetch_all("SELECT * FROM job_runs ORDER BY id DESC LIMIT ?", (limit,))
 
     async def job_run_counts(self) -> dict[str, int]:
         cur = await self.db.conn.execute(
@@ -277,154 +256,123 @@ class Store:
     # --- health_states ---
 
     async def get_known_states(self) -> dict[str, KnownState]:
-        cur = await self.db.conn.execute(
-            "SELECT component_id, status, consecutive_count, alerting_since FROM health_states"
+        return await self._known_states("health_states")
+
+    async def get_known_host_states(self) -> dict[str, KnownState]:
+        return await self._known_states("host_metric_states")
+
+    async def apply_diff(self, diff: HealthDiff, now: datetime) -> None:
+        async with self.db.transaction() as conn:
+            await HEALTH_STATES.apply(conn, diff.states, diff.transitions, now)
+
+    async def apply_host_diff(self, diff: HostHealthDiff, now: datetime) -> None:
+        async with self.db.transaction() as conn:
+            await HOST_STATES.apply(conn, diff.states, diff.transitions, now)
+
+    async def pending_alerts(self) -> list[HealthState]:
+        return await self._pending_alerts(HEALTH_STATES)
+
+    async def pending_clears(self) -> list[HealthState]:
+        return await self._pending_clears(HEALTH_STATES)
+
+    async def pending_host_alerts(self) -> list[HostMetricState]:
+        return await self._pending_alerts(HOST_STATES)
+
+    async def pending_host_clears(self) -> list[HostMetricState]:
+        return await self._pending_clears(HOST_STATES)
+
+    async def mark_alert_notified(self, component_id: str, at: datetime) -> None:
+        await self._mark_notified(HEALTH_STATES, "notified_alert_at", component_id, at)
+
+    async def mark_cleared_notified(self, component_id: str, at: datetime) -> None:
+        await self._mark_notified(HEALTH_STATES, "notified_cleared_at", component_id, at)
+
+    async def mark_host_alert_notified(self, component_id: str, at: datetime) -> None:
+        await self._mark_notified(HOST_STATES, "notified_alert_at", component_id, at)
+
+    async def mark_host_cleared_notified(self, component_id: str, at: datetime) -> None:
+        await self._mark_notified(HOST_STATES, "notified_cleared_at", component_id, at)
+
+    async def _known_states(self, table: str) -> dict[str, KnownState]:
+        rows = await self._fetch_all(
+            f"SELECT component_id, status, consecutive_count, alerting_since FROM {table}"
         )
-        rows = await cur.fetchall()
         return {
             r["component_id"]: KnownState(
                 component_id=r["component_id"],
                 status=r["status"],
                 consecutive_count=r["consecutive_count"],
-                alerting_since=_parse(r["alerting_since"]),
+                alerting_since=parse_iso_or_none(r["alerting_since"]),
             )
             for r in rows
         }
 
-    async def get_all_states(self) -> list[HealthState]:
-        cur = await self.db.conn.execute("SELECT * FROM health_states ORDER BY kind, component_id")
-        rows = await cur.fetchall()
-        return [_row_to_state(r) for r in rows]
-
-    async def apply_diff(self, diff: HealthDiff, now: datetime) -> None:
-        """Одной транзакцией записать новый срез состояний и сбросить флаги по переходам."""
-        now_s = _iso(now)
-        started = {t.component_id for t in diff.transitions if t.to_status == ALERTING}
-        cleared = {t.component_id for t in diff.transitions if t.to_status == OK}
-
-        async with self.db.transaction() as conn:
-            for st in diff.states:
-                alerting_since_s = _iso(st.alerting_since)
-                cur = await conn.execute(
-                    "SELECT 1 FROM health_states WHERE component_id=?", (st.component_id,)
-                )
-                exists = await cur.fetchone() is not None
-
-                if not exists:
-                    await conn.execute(
-                        "INSERT INTO health_states("
-                        "component_id, kind, label, status, last_temperature_c, "
-                        "consecutive_count, alerting_since, first_seen_at, last_seen_at, "
-                        "notified_alert_at, notified_cleared_at) "
-                        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
-                        (
-                            st.component_id,
-                            st.kind,
-                            st.label,
-                            st.status,
-                            st.temperature_c,
-                            st.consecutive_count,
-                            alerting_since_s,
-                            now_s,
-                            now_s,
-                        ),
-                    )
-                elif st.component_id in started:
-                    # Новый цикл перегрева — сбрасываем оба флага доставки.
-                    await conn.execute(
-                        "UPDATE health_states SET status=?, label=?, last_temperature_c=?, "
-                        "consecutive_count=?, alerting_since=?, last_seen_at=?, "
-                        "notified_alert_at=NULL, notified_cleared_at=NULL "
-                        "WHERE component_id=?",
-                        (
-                            st.status,
-                            st.label,
-                            st.temperature_c,
-                            st.consecutive_count,
-                            now_s,
-                            now_s,
-                            st.component_id,
-                        ),
-                    )
-                elif st.component_id in cleared:
-                    # Остыл — нужно разослать "остыл" (флаг alert сохраняем).
-                    await conn.execute(
-                        "UPDATE health_states SET status=?, label=?, last_temperature_c=?, "
-                        "consecutive_count=?, alerting_since=NULL, last_seen_at=?, "
-                        "notified_cleared_at=NULL WHERE component_id=?",
-                        (
-                            st.status,
-                            st.label,
-                            st.temperature_c,
-                            st.consecutive_count,
-                            now_s,
-                            st.component_id,
-                        ),
-                    )
-                else:
-                    # Без перехода — флаги доставки не трогаем.
-                    await conn.execute(
-                        "UPDATE health_states SET status=?, label=?, last_temperature_c=?, "
-                        "consecutive_count=?, alerting_since=?, last_seen_at=? "
-                        "WHERE component_id=?",
-                        (
-                            st.status,
-                            st.label,
-                            st.temperature_c,
-                            st.consecutive_count,
-                            alerting_since_s,
-                            now_s,
-                            st.component_id,
-                        ),
-                    )
-
-            # Компонент, пропавший из среза (сменил component_id/индекс,
-            # отвалилось железо), иначе висел бы в /status «призраком»
-            # навсегда — apply_diff никогда не видит его снова. Чистим
-            # только внутри видов, которые реально участвовали в этом
-            # скане, — вид датчика, отключённый в конфиге, своей истории
-            # не лишаем (для него diff.states просто пуст).
-            scanned_kinds = {st.kind for st in diff.states}
-            current_ids = {st.component_id for st in diff.states}
-            if scanned_kinds:
-                kind_ph = ",".join("?" for _ in scanned_kinds)
-                id_ph = ",".join("?" for _ in current_ids)
-                await conn.execute(
-                    f"DELETE FROM health_states WHERE kind IN ({kind_ph}) "
-                    f"AND component_id NOT IN ({id_ph})",
-                    (*scanned_kinds, *current_ids),
-                )
-
-    # --- pending уведомления ---
-
-    async def pending_alerts(self) -> list[HealthState]:
+    async def _pending_alerts(self, table: StateTable) -> list:
         cur = await self.db.conn.execute(
-            "SELECT * FROM health_states WHERE status='alerting' AND notified_alert_at IS NULL"
+            f"SELECT * FROM {table.table} WHERE status='alerting' AND notified_alert_at IS NULL"
         )
-        rows = await cur.fetchall()
-        return [_row_to_state(r) for r in rows]
+        return [table.row_to_state(r) for r in await cur.fetchall()]
 
-    async def pending_clears(self) -> list[HealthState]:
+    async def _pending_clears(self, table: StateTable) -> list:
         cur = await self.db.conn.execute(
-            "SELECT * FROM health_states WHERE status='ok' "
+            f"SELECT * FROM {table.table} WHERE status='ok' "
             "AND notified_alert_at IS NOT NULL AND notified_cleared_at IS NULL"
         )
-        rows = await cur.fetchall()
-        return [_row_to_state(r) for r in rows]
+        return [table.row_to_state(r) for r in await cur.fetchall()]
 
-    async def mark_alert_notified(self, component_id: str, at: datetime) -> None:
+    async def _mark_notified(
+        self, table: StateTable, column: str, component_id: str, at: datetime
+    ) -> None:
         async with self.db.transaction() as conn:
             await conn.execute(
-                "UPDATE health_states SET notified_alert_at=? WHERE component_id=?",
-                (_iso(at), component_id),
+                f"UPDATE {table.table} SET {column}=? WHERE component_id=?",
+                (iso_or_none(at), component_id),
             )
 
-    async def mark_cleared_notified(self, component_id: str, at: datetime) -> None:
+    async def record_readings(self, readings: list[SensorReading]) -> None:
+        await self._insert_readings(
+            "readings(component_id, temperature_c, taken_at)",
+            [(r.component_id, r.temperature_c, iso_or_none(r.taken_at)) for r in readings],
+        )
+
+    async def record_host_readings(self, readings: list[HostMetricReading]) -> None:
+        await self._insert_readings(
+            "host_readings(component_id, metric, value, taken_at)",
+            [(r.component_id, r.metric, r.value, iso_or_none(r.taken_at)) for r in readings],
+        )
+
+    async def prune_readings(self, keep_per_component: int) -> int:
+        return await self._prune_keep_last("readings", keep_per_component)
+
+    async def prune_host_readings(self, keep_per_component: int) -> int:
+        return await self._prune_keep_last("host_readings", keep_per_component)
+
+    async def _insert_readings(self, target: str, rows: list[tuple]) -> None:
+        if not rows:
+            return
+        marks = ", ".join("?" for _ in rows[0])
         async with self.db.transaction() as conn:
-            await conn.execute(
-                "UPDATE health_states SET notified_cleared_at=? WHERE component_id=?",
-                (_iso(at), component_id),
+            await conn.executemany(f"INSERT INTO {target} VALUES({marks})", rows)
+
+    async def _prune_keep_last(self, table: str, keep_per_component: int) -> int:
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                f"DELETE FROM {table} WHERE id IN ("
+                "  SELECT id FROM ("
+                "    SELECT id, ROW_NUMBER() OVER ("
+                "      PARTITION BY component_id ORDER BY id DESC"
+                f"    ) AS rn FROM {table}"
+                "  ) WHERE rn > ?"
+                ")",
+                (keep_per_component,),
             )
+            return cur.rowcount
+
+    async def get_all_states(self) -> list[HealthState]:
+        rows = await self._fetch_all("SELECT * FROM health_states ORDER BY kind, component_id")
+        return [HEALTH_STATES.row_to_state(r) for r in rows]
+
+    # --- pending уведомления ---
 
     # --- health_notifications (для reply-цепочки) ---
 
@@ -442,7 +390,7 @@ class Store:
                 "component_id, chat_id, kind, message_id, sent_at) VALUES(?, ?, ?, ?, ?) "
                 "ON CONFLICT(component_id, chat_id, kind) DO UPDATE SET "
                 "message_id=excluded.message_id, sent_at=excluded.sent_at",
-                (component_id, chat_id, kind, message_id, _iso(sent_at)),
+                (component_id, chat_id, kind, message_id, iso_or_none(sent_at)),
             )
 
     async def get_alert_message_id(self, component_id: str, chat_id: int) -> int | None:
@@ -456,153 +404,9 @@ class Store:
 
     # --- host_metric_states (здоровье VPS: steal/iowait/load/...) ---
 
-    async def get_known_host_states(self) -> dict[str, KnownState]:
-        cur = await self.db.conn.execute(
-            "SELECT component_id, status, consecutive_count, alerting_since FROM host_metric_states"
-        )
-        rows = await cur.fetchall()
-        return {
-            r["component_id"]: KnownState(
-                component_id=r["component_id"],
-                status=r["status"],
-                consecutive_count=r["consecutive_count"],
-                alerting_since=_parse(r["alerting_since"]),
-            )
-            for r in rows
-        }
-
     async def get_all_host_states(self) -> list[HostMetricState]:
-        cur = await self.db.conn.execute("SELECT * FROM host_metric_states ORDER BY component_id")
-        return [_row_to_host_state(r) for r in await cur.fetchall()]
-
-    async def apply_host_diff(self, diff: HostHealthDiff, now: datetime) -> None:
-        """Записать срез host-состояний и сбросить флаги доставки по переходам."""
-        if not diff.states:
-            return
-        now_s = _iso(now)
-        started = {t.component_id for t in diff.transitions if t.to_status == ALERTING}
-        cleared = {t.component_id for t in diff.transitions if t.to_status == OK}
-        current_ids = {st.component_id for st in diff.states}
-
-        async with self.db.transaction() as conn:
-            for st in diff.states:
-                since_s = _iso(st.alerting_since)
-                cur = await conn.execute(
-                    "SELECT 1 FROM host_metric_states WHERE component_id=?",
-                    (st.component_id,),
-                )
-                if await cur.fetchone() is None:
-                    await conn.execute(
-                        "INSERT INTO host_metric_states("
-                        "component_id, metric, label, unit, status, last_value, "
-                        "consecutive_count, alerting_since, first_seen_at, last_seen_at) "
-                        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            st.component_id,
-                            st.metric,
-                            st.label,
-                            st.unit,
-                            st.status,
-                            st.value,
-                            st.consecutive_count,
-                            since_s,
-                            now_s,
-                            now_s,
-                        ),
-                    )
-                elif st.component_id in started:
-                    await conn.execute(
-                        "UPDATE host_metric_states SET status=?, label=?, unit=?, "
-                        "last_value=?, consecutive_count=?, alerting_since=?, last_seen_at=?, "
-                        "notified_alert_at=NULL, notified_cleared_at=NULL WHERE component_id=?",
-                        (
-                            st.status,
-                            st.label,
-                            st.unit,
-                            st.value,
-                            st.consecutive_count,
-                            now_s,
-                            now_s,
-                            st.component_id,
-                        ),
-                    )
-                elif st.component_id in cleared:
-                    await conn.execute(
-                        "UPDATE host_metric_states SET status=?, label=?, unit=?, "
-                        "last_value=?, consecutive_count=?, alerting_since=NULL, last_seen_at=?, "
-                        "notified_cleared_at=NULL WHERE component_id=?",
-                        (
-                            st.status,
-                            st.label,
-                            st.unit,
-                            st.value,
-                            st.consecutive_count,
-                            now_s,
-                            st.component_id,
-                        ),
-                    )
-                else:
-                    await conn.execute(
-                        "UPDATE host_metric_states SET status=?, label=?, unit=?, "
-                        "last_value=?, consecutive_count=?, alerting_since=?, last_seen_at=? "
-                        "WHERE component_id=?",
-                        (
-                            st.status,
-                            st.label,
-                            st.unit,
-                            st.value,
-                            st.consecutive_count,
-                            since_s,
-                            now_s,
-                            st.component_id,
-                        ),
-                    )
-
-            # Метрика пропала из среза (ядро без PSI после апгрейда и т.п.) —
-            # не держим призрака в карточке ноды.
-            id_ph = ",".join("?" for _ in current_ids)
-            await conn.execute(
-                f"DELETE FROM host_metric_states WHERE component_id NOT IN ({id_ph})",
-                tuple(current_ids),
-            )
-
-    async def pending_host_alerts(self) -> list[HostMetricState]:
-        cur = await self.db.conn.execute(
-            "SELECT * FROM host_metric_states WHERE status='alerting' AND notified_alert_at IS NULL"
-        )
-        return [_row_to_host_state(r) for r in await cur.fetchall()]
-
-    async def pending_host_clears(self) -> list[HostMetricState]:
-        cur = await self.db.conn.execute(
-            "SELECT * FROM host_metric_states WHERE status='ok' "
-            "AND notified_alert_at IS NOT NULL AND notified_cleared_at IS NULL"
-        )
-        return [_row_to_host_state(r) for r in await cur.fetchall()]
-
-    async def mark_host_alert_notified(self, component_id: str, at: datetime) -> None:
-        async with self.db.transaction() as conn:
-            await conn.execute(
-                "UPDATE host_metric_states SET notified_alert_at=? WHERE component_id=?",
-                (_iso(at), component_id),
-            )
-
-    async def mark_host_cleared_notified(self, component_id: str, at: datetime) -> None:
-        async with self.db.transaction() as conn:
-            await conn.execute(
-                "UPDATE host_metric_states SET notified_cleared_at=? WHERE component_id=?",
-                (_iso(at), component_id),
-            )
-
-    async def record_host_readings(self, readings: list[HostMetricReading]) -> None:
-        """Записать срез host-показаний в историю (для monitor.host_trend)."""
-        if not readings:
-            return
-        async with self.db.transaction() as conn:
-            await conn.executemany(
-                "INSERT INTO host_readings(component_id, metric, value, taken_at) "
-                "VALUES(?, ?, ?, ?)",
-                [(r.component_id, r.metric, r.value, _iso(r.taken_at)) for r in readings],
-            )
+        rows = await self._fetch_all("SELECT * FROM host_metric_states ORDER BY component_id")
+        return [HOST_STATES.row_to_state(r) for r in rows]
 
     async def host_trend(self, metric: str, hours: int, now: datetime) -> list[dict]:
         """Средние host-метрики по 10-минуткам за последние ``hours`` часов.
@@ -631,31 +435,7 @@ class Store:
             for r in await cur.fetchall()
         ]
 
-    async def prune_host_readings(self, keep_per_component: int) -> int:
-        async with self.db.transaction() as conn:
-            cur = await conn.execute(
-                "DELETE FROM host_readings WHERE id IN ("
-                "  SELECT id FROM ("
-                "    SELECT id, ROW_NUMBER() OVER ("
-                "      PARTITION BY component_id ORDER BY id DESC"
-                "    ) AS rn FROM host_readings"
-                "  ) WHERE rn > ?"
-                ")",
-                (keep_per_component,),
-            )
-            return cur.rowcount
-
     # --- readings (история для BaselinePolicy) ---
-
-    async def record_readings(self, readings: list[SensorReading]) -> None:
-        """Записать срез показаний в историю (для baseline)."""
-        if not readings:
-            return
-        async with self.db.transaction() as conn:
-            await conn.executemany(
-                "INSERT INTO readings(component_id, temperature_c, taken_at) VALUES(?, ?, ?)",
-                [(r.component_id, r.temperature_c, _iso(r.taken_at)) for r in readings],
-            )
 
     async def baseline_stats(self, component_id: str, window: int) -> BaselineStats:
         """Статистика по последним ``window`` показаниям компонента."""
@@ -673,21 +453,6 @@ class Store:
         mean = row["m"]
         variance = max(0.0, (row["mm"] or 0.0) - mean * mean)
         return BaselineStats(count=n, mean=mean, std=sqrt(variance))
-
-    async def prune_readings(self, keep_per_component: int) -> int:
-        """Оставить последние ``keep_per_component`` показаний на каждый компонент."""
-        async with self.db.transaction() as conn:
-            cur = await conn.execute(
-                "DELETE FROM readings WHERE id IN ("
-                "  SELECT id FROM ("
-                "    SELECT id, ROW_NUMBER() OVER ("
-                "      PARTITION BY component_id ORDER BY id DESC"
-                "    ) AS rn FROM readings"
-                "  ) WHERE rn > ?"
-                ")",
-                (keep_per_component,),
-            )
-            return cur.rowcount
 
     # --- smart_snapshots (baseline для дельты SMART) ---
 
@@ -725,7 +490,13 @@ class Store:
                 "ON CONFLICT(component_id) DO UPDATE SET "
                 "label=excluded.label, health=excluded.health, "
                 "attrs_json=excluded.attrs_json, taken_at=excluded.taken_at",
-                (snap.component_id, snap.label, snap.health, attrs_json, _iso(snap.taken_at)),
+                (
+                    snap.component_id,
+                    snap.label,
+                    snap.health,
+                    attrs_json,
+                    iso_or_none(snap.taken_at),
+                ),
             )
 
     async def save_disk_summaries(self, disks: list[DiskSummary]) -> None:
@@ -762,7 +533,7 @@ class Store:
                     dialogue_id,
                     role,
                     content,
-                    _iso(at),
+                    iso_or_none(at),
                     user_id,
                     user_name,
                     photo_path,
@@ -771,19 +542,16 @@ class Store:
 
     async def ai_turn(self, chat_id: int, message_id: int) -> dict | None:
         """Резолв reply: чьё это сообщение и к какому диалогу относится."""
-        cur = await self.db.conn.execute(
-            "SELECT * FROM ai_turns WHERE chat_id=? AND message_id=?", (chat_id, message_id)
+        return await self._fetch_one(
+            "SELECT * FROM ai_turns WHERE chat_id=? AND message_id=?",
+            (chat_id, message_id),
         )
-        row = await cur.fetchone()
-        return dict(row) if row else None
 
     async def ai_turns_for_dialogue(self, chat_id: int, dialogue_id: int) -> list[dict]:
-        cur = await self.db.conn.execute(
+        return await self._fetch_all(
             "SELECT * FROM ai_turns WHERE chat_id=? AND dialogue_id=? ORDER BY message_id",
             (chat_id, dialogue_id),
         )
-        rows = await cur.fetchall()
-        return [dict(r) for r in rows]
 
     async def set_ai_turn_content(self, chat_id: int, message_id: int, content: str) -> None:
         """Подменить текст хода (Этап 51: транскрипт вместо заглушки голосового).
@@ -853,15 +621,15 @@ class Store:
             await conn.execute(
                 "INSERT OR REPLACE INTO away_media(chat_id, message_id, kind, path, file_id, "
                 "duration_s, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
-                (chat_id, message_id, kind, path, file_id, duration_s, _iso(at)),
+                (chat_id, message_id, kind, path, file_id, duration_s, iso_or_none(at)),
             )
 
     async def away_media_for_chat(self, chat_id: int) -> list[dict]:
         """Ждущие распознавания файлы чата — по порядку сообщений."""
-        cur = await self.db.conn.execute(
-            "SELECT * FROM away_media WHERE chat_id=? ORDER BY message_id", (chat_id,)
+        return await self._fetch_all(
+            "SELECT * FROM away_media WHERE chat_id=? ORDER BY message_id",
+            (chat_id,),
         )
-        return [dict(r) for r in await cur.fetchall()]
 
     async def delete_away_media(self, chat_id: int, message_id: int) -> None:
         async with self.db.transaction() as conn:
@@ -873,13 +641,11 @@ class Store:
         """Последний ход этого треда с прикреплённым фото — для тула
         look_at_photo (bot/tools.py), который просит службу llm ещё раз
         взглянуть на уже сохранённую (на её стороне) уменьшенную копию."""
-        cur = await self.db.conn.execute(
+        return await self._fetch_one(
             "SELECT * FROM ai_turns WHERE chat_id=? AND dialogue_id=? AND photo_path IS NOT NULL "
             "ORDER BY message_id DESC LIMIT 1",
             (chat_id, dialogue_id),
         )
-        row = await cur.fetchone()
-        return dict(row) if row else None
 
     async def chat_participants(self, chat_id: int) -> list[dict]:
         """Различные пользователи (role='user'), кто когда-либо обращался к
@@ -887,14 +653,12 @@ class Store:
         (bot/ai_flow.py::_build_context_note). Старые записи без user_id
         (до миграции) в выборку не попадают — это не критично, участники
         со временем "подтянутся" новыми обращениями."""
-        cur = await self.db.conn.execute(
+        return await self._fetch_all(
             "SELECT user_id, user_name, MIN(message_id) AS first_message_id "
             "FROM ai_turns WHERE chat_id=? AND role='user' AND user_id IS NOT NULL "
             "GROUP BY user_id ORDER BY first_message_id",
             (chat_id,),
         )
-        rows = await cur.fetchall()
-        return [dict(r) for r in rows]
 
     async def record_tool_call(
         self,
@@ -920,17 +684,15 @@ class Store:
                     tool_name,
                     json.dumps(args, ensure_ascii=False),
                     result,
-                    _iso(at),
+                    iso_or_none(at),
                 ),
             )
 
     async def tool_calls_for_dialogue(self, chat_id: int, dialogue_id: int) -> list[dict]:
-        cur = await self.db.conn.execute(
+        return await self._fetch_all(
             "SELECT * FROM ai_tool_calls WHERE chat_id=? AND dialogue_id=? ORDER BY id",
             (chat_id, dialogue_id),
         )
-        rows = await cur.fetchall()
-        return [dict(r) for r in rows]
 
     async def latest_ai_dialogue(self, chat_id: int) -> int | None:
         """dialogue_id последнего хода в чате — для неявного продолжения
@@ -947,13 +709,11 @@ class Store:
     async def latest_dialogue_summary(self, chat_id: int, dialogue_id: int) -> dict | None:
         """Действующее краткое содержание треда — версия с наибольшим
         upto_message_id (см. schema.sql::ai_dialogue_summaries)."""
-        cur = await self.db.conn.execute(
+        return await self._fetch_one(
             "SELECT * FROM ai_dialogue_summaries WHERE chat_id=? AND dialogue_id=? "
             "ORDER BY upto_message_id DESC, id DESC LIMIT 1",
             (chat_id, dialogue_id),
         )
-        row = await cur.fetchone()
-        return dict(row) if row else None
 
     async def add_dialogue_summary(
         self, chat_id: int, dialogue_id: int, upto_message_id: int, summary: str, at: datetime
@@ -962,17 +722,15 @@ class Store:
             cur = await conn.execute(
                 "INSERT INTO ai_dialogue_summaries(chat_id, dialogue_id, upto_message_id, "
                 "summary, created_at) VALUES(?, ?, ?, ?, ?)",
-                (chat_id, dialogue_id, upto_message_id, summary, _iso(at)),
+                (chat_id, dialogue_id, upto_message_id, summary, iso_or_none(at)),
             )
             return cur.lastrowid
 
     async def dialogue_context_state(self, chat_id: int, dialogue_id: int) -> dict | None:
-        cur = await self.db.conn.execute(
+        return await self._fetch_one(
             "SELECT * FROM ai_dialogue_context WHERE chat_id=? AND dialogue_id=?",
             (chat_id, dialogue_id),
         )
-        row = await cur.fetchone()
-        return dict(row) if row else None
 
     async def save_dialogue_context_state(
         self,
@@ -993,7 +751,15 @@ class Store:
                 "prompt_tokens=excluded.prompt_tokens, sent_chars=excluded.sent_chars, "
                 "num_ctx=excluded.num_ctx, done_reason=excluded.done_reason, "
                 "updated_at=excluded.updated_at",
-                (chat_id, dialogue_id, prompt_tokens, sent_chars, num_ctx, done_reason, _iso(at)),
+                (
+                    chat_id,
+                    dialogue_id,
+                    prompt_tokens,
+                    sent_chars,
+                    num_ctx,
+                    done_reason,
+                    iso_or_none(at),
+                ),
             )
 
     async def latest_known_num_ctx(self) -> int | None:
@@ -1010,13 +776,12 @@ class Store:
     ) -> list[dict]:
         """Ходы треда с message_id <= max_message_id под FTS5-выражение
         ``match`` (ai_turns_fts, trigram), лучшие по bm25 первыми."""
-        cur = await self.db.conn.execute(
+        return await self._fetch_all(
             "SELECT CAST(message_id AS INTEGER) AS message_id, bm25(ai_turns_fts) AS score "
             "FROM ai_turns_fts WHERE ai_turns_fts MATCH ? AND chat_id=? AND dialogue_id=? "
             "AND message_id<=? ORDER BY score LIMIT ?",
             (match, chat_id, dialogue_id, max_message_id, limit),
         )
-        return [dict(r) for r in await cur.fetchall()]
 
     # --- карточки людей (Этап 58, sa_home_bot/people/) ---
 
@@ -1035,8 +800,7 @@ class Store:
 
     async def person_claims(self) -> list[dict]:
         """Все утверждения: людей — десятки, грузим целиком на ход /ai."""
-        cur = await self.db.conn.execute("SELECT * FROM person_claims ORDER BY id")
-        return [dict(r) for r in await cur.fetchall()]
+        return await self._fetch_all("SELECT * FROM person_claims ORDER BY id")
 
     async def upsert_person_profile(
         self, user_id: int, first_name: str, last_name: str, username: str, now: datetime
@@ -1047,40 +811,35 @@ class Store:
                 "VALUES(?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
                 "first_name=excluded.first_name, last_name=excluded.last_name, "
                 "username=excluded.username, seen_at=excluded.seen_at",
-                (user_id, first_name, last_name, username, _iso(now)),
+                (user_id, first_name, last_name, username, iso_or_none(now)),
             )
 
     async def person_profiles(self) -> list[dict]:
-        cur = await self.db.conn.execute("SELECT * FROM person_profiles")
-        return [dict(r) for r in await cur.fetchall()]
+        return await self._fetch_all("SELECT * FROM person_profiles")
 
     async def latest_turn_user_names(self) -> list[dict]:
         """Последнее ``user_name`` каждого ``user_id`` из ai_turns — профиль
         Telegram тех, кто писал до появления person_profiles (Этап 58.2)."""
-        cur = await self.db.conn.execute(
+        return await self._fetch_all(
             "SELECT user_id, user_name, MAX(created_at) AS at FROM ai_turns "
             "WHERE user_id IS NOT NULL AND user_name IS NOT NULL GROUP BY user_id"
         )
-        return [dict(r) for r in await cur.fetchall()]
 
     # --- guest_relationships (Этап 42.6.1, связи между гостями) ---
 
     async def get_relationship(self, relationship_id: int) -> dict | None:
-        cur = await self.db.conn.execute(
-            "SELECT * FROM guest_relationships WHERE id=?", (relationship_id,)
+        return await self._fetch_one(
+            "SELECT * FROM guest_relationships WHERE id=?",
+            (relationship_id,),
         )
-        row = await cur.fetchone()
-        return dict(row) if row else None
 
     async def relationships_for(self, chat_id: int, status: str = "confirmed") -> list[dict]:
         """Связи chat_id в любой из двух ролей (guest_a или guest_b)."""
-        cur = await self.db.conn.execute(
+        return await self._fetch_all(
             "SELECT * FROM guest_relationships WHERE status=? AND (guest_a=? OR guest_b=?) "
             "ORDER BY id",
             (status, chat_id, chat_id),
         )
-        rows = await cur.fetchall()
-        return [dict(r) for r in rows]
 
     async def add_confirmed_relationship(
         self, guest_a: int, guest_b: int, relation: str, created_at: datetime, now: datetime
@@ -1091,7 +850,7 @@ class Store:
             cur = await conn.execute(
                 "INSERT INTO guest_relationships(guest_a, guest_b, relation, status, "
                 "proposed_by, created_at, confirmed_at) VALUES(?, ?, ?, 'confirmed', ?, ?, ?)",
-                (guest_a, guest_b, relation, guest_a, _iso(created_at), _iso(now)),
+                (guest_a, guest_b, relation, guest_a, iso_or_none(created_at), iso_or_none(now)),
             )
             row_id = cur.lastrowid
         row = await self.get_relationship(row_id)
@@ -1118,8 +877,8 @@ class Store:
                     initiator,
                     addressee,
                     json.dumps(payload, ensure_ascii=False),
-                    _iso(expires_at),
-                    _iso(now),
+                    iso_or_none(expires_at),
+                    iso_or_none(now),
                 ),
             )
             row_id = cur.lastrowid
@@ -1151,10 +910,10 @@ class Store:
         params: list[Any] = [to_status]
         if to_status == "pending":
             sets += ["submitted_at=?", "expires_at=?"]
-            params += [_iso(now), _iso(expires_at)]
+            params += [iso_or_none(now), iso_or_none(expires_at)]
         else:
             sets += ["decided_at=?", "decided_by=?", "reason=?"]
-            params += [_iso(now), decided_by, reason]
+            params += [iso_or_none(now), decided_by, reason]
         async with self.db.transaction() as conn:
             cur = await conn.execute(
                 f"UPDATE pending_actions SET {', '.join(sets)} "
@@ -1241,19 +1000,17 @@ class Store:
                     json.dumps(args, ensure_ascii=False),
                     timeout_s,
                     json.dumps(meta, ensure_ascii=False),
-                    _iso(due_at),
-                    _iso(created_at),
+                    iso_or_none(due_at),
+                    iso_or_none(created_at),
                 ),
             )
             return cur.lastrowid
 
     async def due_tasks(self, now: datetime) -> list[dict]:
-        cur = await self.db.conn.execute(
+        return await self._fetch_all(
             "SELECT * FROM tasks WHERE fired_at IS NULL AND due_at<=? ORDER BY due_at",
-            (_iso(now),),
+            (iso_or_none(now),),
         )
-        rows = await cur.fetchall()
-        return [dict(r) for r in rows]
 
     async def get_pending_task(self, task_id: int) -> dict | None:
         """Задача по id, если она ещё не сработала — иначе ``None``.
@@ -1262,23 +1019,20 @@ class Store:
         bot/tools.py): будим задачу раньше due_at по приходу события, а не
         по будильнику. ``fired_at IS NULL`` в условии — та же защита от
         повторного срабатывания, что и у `due_tasks`/`_fire_due`."""
-        cur = await self.db.conn.execute(
-            "SELECT * FROM tasks WHERE id=? AND fired_at IS NULL", (task_id,)
+        return await self._fetch_one(
+            "SELECT * FROM tasks WHERE id=? AND fired_at IS NULL",
+            (task_id,),
         )
-        row = await cur.fetchone()
-        return dict(row) if row is not None else None
 
     async def mark_task_fired(self, task_id: int, at: datetime) -> None:
         async with self.db.transaction() as conn:
-            await conn.execute("UPDATE tasks SET fired_at=? WHERE id=?", (_iso(at), task_id))
+            await conn.execute("UPDATE tasks SET fired_at=? WHERE id=?", (iso_or_none(at), task_id))
 
     async def tasks_needing_prewake(self, deadline: datetime) -> list[dict]:
-        cur = await self.db.conn.execute(
+        return await self._fetch_all(
             "SELECT * FROM tasks WHERE fired_at IS NULL AND prewake_done=0 AND due_at<=?",
-            (_iso(deadline),),
+            (iso_or_none(deadline),),
         )
-        rows = await cur.fetchall()
-        return [dict(r) for r in rows]
 
     async def mark_task_prewake_done(self, task_id: int) -> None:
         async with self.db.transaction() as conn:
@@ -1302,8 +1056,8 @@ class Store:
                     code,
                     issued_by_chat_id,
                     issued_by_user_id,
-                    _iso(created_at),
-                    _iso(expires_at),
+                    iso_or_none(created_at),
+                    iso_or_none(expires_at),
                 ),
             )
 
@@ -1327,7 +1081,7 @@ class Store:
                 "UPDATE invites SET redeemed_at=?, redeemed_chat_id=?, redeemed_user_id=?, "
                 "redeemed_user_name=? WHERE code=? AND redeemed_at IS NULL "
                 "AND revoked_at IS NULL AND expires_at>?",
-                (_iso(at), chat_id, user_id, user_name, code, _iso(at)),
+                (iso_or_none(at), chat_id, user_id, user_name, code, iso_or_none(at)),
             )
             if cur.rowcount == 0:
                 return None
@@ -1338,18 +1092,15 @@ class Store:
     async def find_invite(self, code: str) -> dict | None:
         """Код как он есть, в любом состоянии — нужен, чтобы отличить
         присланный код от случайной строки из восьми символов."""
-        cur = await self.db.conn.execute("SELECT * FROM invites WHERE code=?", (code,))
-        row = await cur.fetchone()
-        return dict(row) if row else None
+        return await self._fetch_one("SELECT * FROM invites WHERE code=?", (code,))
 
     async def open_invites(self, now: datetime) -> list[dict]:
         """Выпущенные и ещё годные коды — для /guests."""
-        cur = await self.db.conn.execute(
+        return await self._fetch_all(
             "SELECT * FROM invites WHERE redeemed_at IS NULL AND revoked_at IS NULL "
             "AND expires_at>? ORDER BY created_at",
-            (_iso(now),),
+            (iso_or_none(now),),
         )
-        return [dict(r) for r in await cur.fetchall()]
 
     async def revoke_invite(self, code: str, at: datetime) -> bool:
         """Отозвать ещё не погашенный код. False — гасить было нечего."""
@@ -1357,7 +1108,7 @@ class Store:
             cur = await conn.execute(
                 "UPDATE invites SET revoked_at=? WHERE code=? AND redeemed_at IS NULL "
                 "AND revoked_at IS NULL",
-                (_iso(at), code),
+                (iso_or_none(at), code),
             )
             return cur.rowcount > 0
 
@@ -1372,7 +1123,7 @@ class Store:
         async with self.db.transaction() as conn:
             await conn.execute(
                 "INSERT INTO swarm_events(event_type, node, text, created_at) VALUES(?, ?, ?, ?)",
-                (event_type, node, text, _iso(at)),
+                (event_type, node, text, iso_or_none(at)),
             )
 
     async def recent_events(
@@ -1391,15 +1142,14 @@ class Store:
             params.append(node)
         if since is not None:
             clauses.append("created_at >= ?")
-            params.append(_iso(since))
+            params.append(iso_or_none(since))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(limit)
-        cur = await self.db.conn.execute(
+        return await self._fetch_all(
             f"SELECT event_type, node, text, created_at FROM swarm_events {where} "
             "ORDER BY id DESC LIMIT ?",
             params,
         )
-        return [dict(r) for r in await cur.fetchall()]
 
     async def prune_swarm_events(self, keep_last: int = 500) -> int:
         async with self.db.transaction() as conn:
@@ -1419,7 +1169,7 @@ class Store:
             await conn.execute(
                 "INSERT INTO event_waiters(task_id, node, event_type, created_at) "
                 "VALUES(?, ?, ?, ?)",
-                (task_id, node, event_type, _iso(created_at)),
+                (task_id, node, event_type, iso_or_none(created_at)),
             )
 
     async def pop_event_waiter_for(self, node: str, event_type: str) -> int | None:
@@ -1469,7 +1219,7 @@ class Store:
                 "width, height, colors, png, created_at, purpose, params) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (chat_id, author, prompt_ru, prompt_en, caption, width, height, colors,
-                 png, _iso(now), purpose, params),
+                 png, iso_or_none(now), purpose, params),
             )
             image_id = cur.lastrowid
             await conn.execute(
@@ -1491,12 +1241,10 @@ class Store:
     async def get_image(self, chat_id: int, image_id: int) -> dict | None:
         """Только картинка ЭТОГО чата и из разговора — чужую и отладочную
         (/draw) по номеру не достать."""
-        cur = await self.db.conn.execute(
+        return await self._fetch_one(
             "SELECT * FROM images WHERE id=? AND chat_id=? AND purpose='chat'",
             (image_id, chat_id),
         )
-        row = await cur.fetchone()
-        return dict(row) if row else None
 
     async def search_images(self, chat_id: int, query: str, limit: int = 5) -> list[dict]:
         """Картинки этого чата по смыслу запроса, лучшие первыми. Стемминга у
@@ -1511,22 +1259,20 @@ class Store:
             terms.append(f'"{stem}"*')
         if not terms:
             return []
-        cur = await self.db.conn.execute(
+        return await self._fetch_all(
             "SELECT i.id, i.caption, i.prompt_ru, i.created_at, i.telegram_file_id "
             "FROM images_fts f JOIN images i ON i.id = f.rowid "
             "WHERE images_fts MATCH ? AND i.chat_id=? AND i.purpose='chat' "
             "ORDER BY bm25(images_fts) LIMIT ?",
             (" OR ".join(terms), chat_id, limit),
         )
-        return [dict(r) for r in await cur.fetchall()]
 
     async def recent_images(self, chat_id: int, limit: int = 5) -> list[dict]:
-        cur = await self.db.conn.execute(
+        return await self._fetch_all(
             "SELECT id, caption, prompt_ru, created_at, telegram_file_id FROM images "
             "WHERE chat_id=? AND purpose='chat' ORDER BY id DESC LIMIT ?",
             (chat_id, limit),
         )
-        return [dict(r) for r in await cur.fetchall()]
 
     async def count_images_since(
         self, chat_id: int, since: datetime, purpose: str = "chat"
@@ -1534,7 +1280,7 @@ class Store:
         cur = await self.db.conn.execute(
             "SELECT COUNT(*) AS n FROM images WHERE chat_id=? AND created_at>=? "
             "AND purpose=?",
-            (chat_id, _iso(since), purpose),
+            (chat_id, iso_or_none(since), purpose),
         )
         row = await cur.fetchone()
         return int(row["n"])
@@ -1542,9 +1288,7 @@ class Store:
     # Отладочный /draw (Этап 49, bot/draw_debug.py) — владелец, любой чат.
 
     async def image_by_id(self, image_id: int) -> dict | None:
-        cur = await self.db.conn.execute("SELECT * FROM images WHERE id=?", (image_id,))
-        row = await cur.fetchone()
-        return dict(row) if row else None
+        return await self._fetch_one("SELECT * FROM images WHERE id=?", (image_id,))
 
     # Картинки, которые Альфред сам прислал в чат: нарисованные, снимки
     # кабинета, карточки вещей (отладочный /draw — нет).
@@ -1566,16 +1310,13 @@ class Store:
             params.append(message_id)
         else:
             sql += " AND message_id IS NOT NULL"
-        cur = await self.db.conn.execute(sql + " ORDER BY id DESC LIMIT 1", params)
-        row = await cur.fetchone()
-        return dict(row) if row else None
+        return await self._fetch_one(sql + " ORDER BY id DESC LIMIT 1", params)
 
     async def image_by_message(self, chat_id: int, message_id: int) -> dict | None:
-        cur = await self.db.conn.execute(
-            "SELECT * FROM images WHERE chat_id=? AND message_id=?", (chat_id, message_id)
+        return await self._fetch_one(
+            "SELECT * FROM images WHERE chat_id=? AND message_id=?",
+            (chat_id, message_id),
         )
-        row = await cur.fetchone()
-        return dict(row) if row else None
 
     async def set_image_purpose(self, image_id: int, purpose: str) -> bool:
         async with self.db.transaction() as conn:
@@ -1618,13 +1359,19 @@ class Store:
                 "INSERT INTO items (type, owner_user_id, traits, image_id, origin, note, "
                 "created_at) VALUES (?,?,?,?,?,?,?)",
                 (type, owner_user_id, json.dumps(traits, ensure_ascii=False), image_id, origin,
-                 note, _iso(now)),
+                 note, iso_or_none(now)),
             )
             item_id = int(cur.lastrowid)
             await conn.execute(
                 "INSERT INTO item_events (item_id, kind, user_id, data, created_at) "
                 "VALUES (?,?,?,?,?)",
-                (item_id, "created", owner_user_id, json.dumps({"origin": origin}), _iso(now)),
+                (
+                    item_id,
+                    "created",
+                    owner_user_id,
+                    json.dumps({"origin": origin}),
+                    iso_or_none(now),
+                ),
             )
             return item_id
 
@@ -1684,14 +1431,15 @@ class Store:
                 "INSERT INTO item_events (item_id, kind, user_id, chat_id, data, created_at) "
                 "VALUES (?,?,?,?,?,?)",
                 (item_id, kind, user_id, chat_id,
-                 json.dumps(data, ensure_ascii=False) if data is not None else None, _iso(now)),
+                 json.dumps(data, ensure_ascii=False) if data is not None else None,
+                 iso_or_none(now)),
             )
 
     async def item_events(self, item_id: int) -> list[dict]:
-        cur = await self.db.conn.execute(
-            "SELECT * FROM item_events WHERE item_id=? ORDER BY id", (item_id,)
+        return await self._fetch_all(
+            "SELECT * FROM item_events WHERE item_id=? ORDER BY id",
+            (item_id,),
         )
-        return [dict(r) for r in await cur.fetchall()]
 
     # --- housekeeping ---
 
