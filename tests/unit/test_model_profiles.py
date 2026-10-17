@@ -1,6 +1,3 @@
-"""llm/model_profiles.py — резолв профиля по имени модели и перевод
-намерения-уровня рассуждения в параметр Ollama ``think``."""
-
 from __future__ import annotations
 
 import textwrap
@@ -19,7 +16,6 @@ def test_packaged_profiles_load_and_have_default():
     reg = load_profiles(None)
     names = [p.name for p in reg.profiles]
     assert "_default" in names
-    # _default идёт последним (фоллбэк), у него пустой match
     assert reg.profiles[-1].name == "_default"
     assert reg.profiles[-1].match == ()
 
@@ -55,7 +51,7 @@ def test_num_ctx_default_from_packaged_profile():
         ("flag", "low", True),
         ("flag", "high", True),
         ("flag_implicit_on", "off", False),
-        ("flag_implicit_on", "medium", None),  # флаг не слать — модель думает сама
+        ("flag_implicit_on", "medium", None),
         ("effort", "off", False),
         ("effort", "low", "low"),
         ("effort", "medium", "medium"),
@@ -73,7 +69,7 @@ def test_all_reason_levels_translate_without_error():
     for control in ("flag", "flag_implicit_on", "effort", "none"):
         p = ModelProfile(name="x", think_control=control)
         for level in REASON_LEVELS:
-            p.think_arg(level)  # не должно кидать
+            p.think_arg(level)
 
 
 def test_summary_roundtrip():
@@ -107,11 +103,10 @@ def test_local_override_replaces_by_name_and_appends_new(tmp_path):
     )
     reg = load_profiles(local)
     gemma, _ = reg.resolve("gemma-4:latest")
-    assert gemma.think_control == "effort"  # заменён локальным
+    assert gemma.think_control == "effort"
     assert gemma.num_ctx == 9000
     mine, matched = reg.resolve("my-model:1")
     assert matched and mine.think_control == "none" and mine.router is False
-    # новая запись вставлена ПЕРЕД _default
     assert reg.profiles[-1].name == "_default"
 
 
@@ -129,5 +124,5 @@ def test_unknown_think_control_falls_back_to_flag(tmp_path, caplog):
 def test_broken_local_file_is_ignored(tmp_path):
     local = tmp_path / "model-profiles.toml"
     local.write_text("this is not = valid toml [[[", encoding="utf-8")
-    reg = load_profiles(local)  # не кидает
+    reg = load_profiles(local)
     assert any(p.name == "_default" for p in reg.profiles)

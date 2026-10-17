@@ -1,19 +1,3 @@
-"""LlmService — ServiceHandler службы llm (Альфред: диалог с Ollama на этой машине).
-
-Действия `ask`/`chat` бьют в Ollama по loopback (см. llm/ollama.py) —
-никакого сетевого HTTP наружу, только протокол роя достаёт досюда
-(LLM_INTEGRATION_PLAN.md §0). Собственный идле-таймер (idle_loop) сам
-останавливает контейнер после простоя, не дожидаясь команды бота. Если за
-это «тёплое окно» были чаты с реальными запросами (`chat_id` в args
-действия `chat`) — при засыпании служба сама эмитит событие
-`llm_idle_sleep` со списком этих chat_id (ретранслируется до бота тем же
-механизмом, что node_joined/update_finished — см. node/app.py::build_router,
-bot/node_events.py) — бот шлёт туда закрывающее сообщение РОВНО один раз,
-а не сканирует диалоги сам. Тем же приёмом (см. notify_restart) служба
-извещает те же чаты перед собственным остановом (деплой/апдейт/ручной
-restart) — событие `llm_service_restart`, другой текст в боте.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -71,18 +55,6 @@ SERVICE_NAME = LLM_SERVICE
 
 
 def _log_ollama_timings(what: str, result: dict[str, Any]) -> None:
-    """Тайминги ответа Ollama в лог одной строкой.
-
-    Живая находка 2026-08-10: без этого разбор «почему Альфред отвечает 20
-    секунд» упирался в гадание — служба брала из ответа только текст, а
-    prompt_eval_*/eval_* молча выбрасывала. Настоящая причина оказалась в
-    невидимых токенах размышления (message.thinking): на «Привет!» модель
-    писала 222 токена ради ответа из пяти слов, и это выглядело как
-    «медленно читает контекст», хотя prefill шёл больше 1000 ток/с. Здесь
-    видно и то, и другое — сколько токенов промпта и с какой скоростью,
-    сколько сгенерировано и сколько из этого ушло в thinking.
-    """
-
     def _speed(count: Any, duration_ns: Any) -> str:
         if not isinstance(count, int) or not isinstance(duration_ns, int) or duration_ns <= 0:
             return "?"
@@ -103,24 +75,10 @@ def _log_ollama_timings(what: str, result: dict[str, Any]) -> None:
         f"{result['total_duration'] / 1e9:.1f}с"
         if isinstance(result.get("total_duration"), int)
         else "?",
-        # Этап 50: length — окно кончилось посреди генерации (обрывок/пустой
-        # ответ), это и есть признак переполнения, см. _usage ниже.
         result.get("done_reason", "?"),
     )
 
 def _usage_stats(cfg: LlmConfig, result: dict[str, Any]) -> dict[str, Any]:
-    """Счётчики окна из ответа Ollama — наружу боту (Этап 50, 2026-09-30).
-
-    Раньше они жили только в логе (_log_ollama_timings выше), и бот не знал,
-    что промпт дорос до ~31.8k из 32768: модель уходила в thinking, окно
-    кончалось (done_reason=length) — и пользователь получал пустой ответ
-    («Альбегт») или обрывок на полуслове. Теперь бот видит: сколько токенов
-    занял промпт (prompt_eval_count), сколько сгенерировано (eval_count),
-    почему генерация остановилась (done_reason: stop / length) и какое окно
-    у модели на самом деле (num_ctx — действующее значение службы, а не
-    дефолт профиля). Отсутствующие у Ollama поля просто не кладём; нет
-    ни одного счётчика — нет и num_ctx (замерять нечего).
-    """
     out: dict[str, Any] = {}
     for key in ("prompt_eval_count", "eval_count", "done_reason"):
         value = result.get(key)
@@ -133,96 +91,32 @@ def _usage_stats(cfg: LlmConfig, result: dict[str, Any]) -> dict[str, Any]:
 
 ACTION_ASK = "ask"
 ACTION_CHAT = "chat"
-# Экшн-представление (см. PROTOCOL.md, прецедент "downtime" службы monitor)
-# под чтение буфера частичной генерации — этап 34, Фаза 2 (Rich-стрим
-# ответов). get_state() параметров не принимает (PROTOCOL.md), а Альфред
-# может вести несколько диалогов одновременно (разные чаты семьи), поэтому
-# частичный текст не кладём одним полем в get_state, а раздаём по
-# request_id через обычный command.
 ACTION_CHAT_PROGRESS = "chat_progress"
 ACTION_SLEEP = "sleep"
-# Прогреть контейнер БЕЗ генерации — для службы tasks (tasks/service.py),
-# которая будит цель заранее (prewake_loop, за PREWAKE_LEAD_S до due_at) и
-# не хочет тратить эту попытку на настоящий ask/chat (живая находка
-# 2026-07-24: ensure_running и так вызывается лениво внутри ask/chat, но
-# тогда прогрев занял бы ПЕРВЫЙ реальный запрос, а не время заранее).
 ACTION_WARMUP = "warmup"
-# Мультимодальный /ai (2026-08-10): alfred присылает сырое (необработанное)
-# фото ключом "raw_image" внутри последнего элемента messages в ACTION_CHAT
-# (см. run_command) — эта служба сама делает ресайз/хранение (llm/vision.py,
-# сильнее CPU, уже рядом с Ollama) и возвращает photo_key для ai_turns.
-# ACTION_LOOK_AT_PHOTO — повторный точечный просмотр УЖЕ сохранённого фото
-# по этому ключу (bot/tools.py::tool_look_at_photo), без похода через
-# ресайз заново и без пересылки байт между узлами — файл уже здесь.
 ACTION_LOOK_AT_PHOTO = "look_at_photo"
 
-# Голосовые сообщения /ai (см. llm/stt.py) — тот же принцип, что у фото:
-# alfred шлёт сырые байты, эта нода их обрабатывает (faster-whisper на CPU,
-# не Ollama/Gemma). ACTION_TRANSCRIBE_VOICE — основной путь: голосовое
-# целиком одним base64-блобом в args (короткие сообщения). Для длинных
-# голосовых, которые после base64 не влезают в протокольный лимит, сначала
-# идут чанки ACTION_STT_UPLOAD_CHUNK (bot/voice_stt.py::_upload_chunked, по
-# образцу vpn/service.py::ACTION_APK_CHUNK, но в обратном направлении —
-# push, не pull), потом сам ACTION_TRANSCRIBE_VOICE уже без audio_b64, с
-# session_id вместо него.
 ACTION_TRANSCRIBE_VOICE = "transcribe_voice"
 ACTION_STT_UPLOAD_CHUNK = "stt_chunk"
 
-# Синтез голосовых ответов /ai (см. llm/tts.py) — Coqui XTTS v2, тоже CPU,
-# тоже эта служба (не бот, не Ollama/Gemma) — тот же принцип, что у STT, но
-# данные текут в обратную сторону: alfred просит синтезировать текст
-# (ACTION_SYNTHESIZE_SPEECH), готовое аудио едет назад инлайном (короткие
-# ответы) либо чанками (ACTION_TTS_DOWNLOAD_CHUNK) — pull-паттерн по образцу
-# vpn/service.py::ACTION_APK_CHUNK + bot/vpn_apk.py::_download_chunks, не
-# push, как у STT-загрузки: тут служба, а не alfred, готовит данные.
 ACTION_SYNTHESIZE_SPEECH = "synthesize_speech"
 ACTION_TTS_DOWNLOAD_CHUNK = "tts_chunk"
 
-# Этап 48: картинка по просьбе собеседника (llm/imagegen.py) — тоже CPU и
-# тоже эта служба. Готовый PNG (≤512², уменьшенный до imagegen_size) едет
-# назад инлайном: даже 512² PNG укладывается в протокольный лимит, чанки не
-# нужны. Хранит картинку бот (БД на alfred), не эта нода: mycraft штатно
-# спит, а повторный показ не должен её будить.
 ACTION_GENERATE_IMAGE = "generate_image"
-# Фазы generate_image для опроса chat_progress по request_id (снимок кабинета,
-# bot/interactives/engine.py): промптер пишет запрос генератору, затем рисование.
 IMAGE_PHASE_COMPOSE = "compose"
 IMAGE_PHASE_DRAW = "draw"
 
-# Этап 49.3: портрет сюжетного предмета (llm/item_paste.py). turbo рисует
-# готовую строку-архетип на сером фоне, зрение сверяет ``checks`` (промах —
-# следующее зерно, не больше ``attempts`` раз), вырезка ложится в
-# ``items_dir/{key}.png`` — её потом вставляет generate_image с ``paste``.
 ACTION_ITEM_PORTRAIT = "item_portrait"
 ITEM_PORTRAIT_MODEL = "turbo"
-# Вес фона — стенд 49.3.0: черты с весом (пыль) иначе перекрашивают фон, и
-# rembg уже не отделяет предмет.
 ITEM_PORTRAIT_BACKGROUND = "(isolated on plain light grey background)1.3"
 _ITEM_ATTEMPTS_MAX = 4
 
-# Этап 47: «чистая речь» гостя (llm/speech_therapy.py::clear_user_ids) —
-# бот переключает её, когда гость меняет «устройство связи» в интерактиве
-# «Проклятый передатчик» (bot/interactives/radio.py).
 ACTION_SET_SPEECH_CLEAR = "set_speech_clear"
 
-# Роль chat для Ведущего интерактивов (bot/interactives/director.py): system
-# приходит от бота (не персонаж Альфреда), ответ — JSON, без тулов, без
-# рассуждения и БЕЗ Логопеда: это служебные данные сцены, не реплика
-# Альфреда (картавость испортила бы и JSON, и текст рассказчика).
 ROLE_DIRECTOR = "director"
-# Этап 50 (2026-09-30): сжатие истории /ai (bot/dialogue_context.py). Та же
-# схема, что у Ведущего: system от бота, без тулов, без рассуждения, без
-# Логопеда (краткое содержание — служебный текст для модели, не реплика
-# Альфреда), но ответ — обычный текст, temperature 0 (пересказ, а не
-# творчество) и потолок длины: пересказ не должен сам съесть окно.
 ROLE_SUMMARIZER = "summarizer"
 _SUMMARIZER_OPTIONS: dict[str, Any] = {"temperature": 0, "num_predict": 2048}
 
-# Отказы фото-путей намеренно возвращаются как обычный {"response": ...}, а
-# не отдельным полем-ошибкой: для ACTION_CHAT это просто ложится в ai_turns
-# как обычная реплика Альфреда (ai.py не должен знать про фото-специфику),
-# для ACTION_LOOK_AT_PHOTO — как обычный текст результата тула, который
-# модель сама естественно перескажет пользователю (bot/tools.py).
 PHOTO_PROCESS_FAILED_TEXT = (
     "Не получилось обработать фото — возможно, файл повреждён. Пришлите его ещё раз, сэр."
 )
@@ -230,39 +124,12 @@ PHOTO_NOT_FOUND_TEXT = "Не нахожу это фото — похоже, со
 
 EVENT_IDLE_SLEEP = "llm_idle_sleep"
 EVENT_SERVICE_RESTART = "llm_service_restart"
-# Отдельно от EVENT_IDLE_SLEEP: тот адресован реальным чатам и намеренно НЕ
-# эмитится, если активных chat_id нет (см. run_command/ACTION_WARMUP — прогрев
-# не в счёт, test_warmup_does_not_add_chat_id_to_active_chats). Но
-# node/app.py::on_local_event нужен сигнал «простой дошёл до сна» БЕЗ этого
-# условия — иначе автовыключение (node/service.py::maybe_auto_poweroff_idle)
-# никогда не сработало бы на машине, с которой Alfred просто ни разу не
-# заговорили (живая находка 2026-08-03 при обкатке на mycraft: тестовый
-# warmup не породил EVENT_IDLE_SLEEP вовсе). Эмитится ТОЛЬКО из
-# _maybe_sleep_idle — естественного тайм-аута простоя, не ручного sleep.
 EVENT_WENT_IDLE = "llm_went_idle"
-# Логопед (llm/speech_therapy.py) вылечил Альфреда полностью — разовое
-# событие на весь процесс службы, боту нужно известить ВСЕ чаты (не только
-# активные, в отличие от EVENT_IDLE_SLEEP/EVENT_SERVICE_RESTART).
 EVENT_SPEECH_CURED = "llm_speech_cured"
 
 _IDLE_CHECK_INTERVAL_S = 60.0
-# Буфер частичной генерации (этап 34, Фаза 2) переживает завершённый ответ
-# на этот срок — чтобы опрашивающий бот успел забрать последний "done"-тик,
-# даже если он чуть отстал от реального завершения command(). После этого
-# запись подметается в idle_loop — иначе self._streaming растёт без предела,
-# если бот упал/переподключился посреди опроса и так и не дочитал ответ.
 _STREAMING_ENTRY_TTL_S = 120.0
-# Осиротевшие сессии чанкованной загрузки голосового (клиент прервался
-# посреди отправки — упал, потерял связь) — иначе self._stt_uploads растёт
-# без предела. Короче _STREAMING_ENTRY_TTL_S: там довершённый ответ ждёт
-# отставшего опроса бота, здесь — недовершённая загрузка, которую всё равно
-# нечем продолжить (offset начался бы заново).
 _STT_UPLOAD_TTL_S = 300.0
-# Инлайн/чанки готового синтеза — те же величины, что у voice_stt.py на
-# приёмной стороне (запас от MAX_MESSAGE_BYTES, base64 раздувает на треть).
-# Осиротевшие сессии синтеза (бот не успел/не смог их дочитать чанками) —
-# сама причина осиротения другая, чем у _stt_uploads (там недовершённая
-# ЗАГРУЗКА, тут неполученный ГОТОВЫЙ результат), TTL взят тем же порядком.
 _INLINE_TTS_B64_BYTES = 800_000
 _TTS_SESSION_TTL_S = 300.0
 
@@ -271,7 +138,6 @@ EventEmitter = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 async def _noop_emit(event_type: str, data: dict[str, Any]) -> None:
     pass
-
 
 
 def _bounded_number_arg(args: dict[str, Any], key: str, kind: type, lo: float, hi: float) -> Any:
@@ -286,9 +152,6 @@ def _bounded_number_arg(args: dict[str, Any], key: str, kind: type, lo: float, h
 
 
 def _imagegen_options(args: dict[str, Any]) -> dict[str, Any]:
-    """Необязательные ключи generate_image (Этап 49, /draw). Образец —
-    ``ref_png_b64``; с ``ip_scale`` он идёт в IP-Adapter (сцена), без —
-    в img2img (вариант предмета)."""
     mode = args.get("mode") or "free"
     if mode not in imagegen.MODES:
         raise ProtoError(ERR_BAD_REQUEST, f"неизвестный режим {mode!r}")
@@ -328,7 +191,6 @@ def _imagegen_options(args: dict[str, Any]) -> dict[str, Any]:
             )
         if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not 0 < weight <= 2:
             raise ProtoError(ERR_BAD_REQUEST, f"вес LoRA {name} — число 0..2")
-        # Без model= рисует эталон из конфига — это SD1.5.
         lora = imagegen.LORAS[name]
         fits = imagegen.lora_fits(lora, spec) if spec is not None else lora.kind == "sd15"
         if not fits:
@@ -366,15 +228,11 @@ def _imagegen_options(args: dict[str, Any]) -> dict[str, Any]:
         "ref": ref,
         "paste": paste,
         "light": " ".join(light.split())[:160] if isinstance(light, str) else "",
-        # Перенос уже стоящего света на второе место (ночь, не крупный план).
         "light_move": args.get("light_move") is True,
     }
 
 
 def _restyle_option(raw: Any) -> dict[str, Any] | None:
-    """``restyle`` item_portrait: {model, loras: [[имя, вес]], strength,
-    prompt?} — перекраска портрета img2img (уровень проклятия). Кривое —
-    ProtoError, как и у generate_image."""
     if raw is None:
         return None
     if not isinstance(raw, dict):
@@ -395,8 +253,6 @@ def _restyle_option(raw: Any) -> dict[str, Any] | None:
 
 
 def _paste_option(raw: Any, ref: Image.Image | None) -> dict[str, Any] | None:
-    """``paste`` generate_image (Этап 49.3): {key, place, width?, hint?} —
-    вставить вырезку предмета ``key`` в готовую сцену (llm/item_paste.py)."""
     if raw is None:
         return None
     if not isinstance(raw, dict):
@@ -426,25 +282,16 @@ class LlmService:
         emit: EventEmitter = _noop_emit,
         speech_rand: Callable[[], float] | None = None,
     ) -> None:
-        """``speech_rand`` — только для тестов: делает Логопеда (llm/speech_therapy.py)
-        детерминированным, не проброшено в конфиг/CLI."""
         self._cfg: LlmConfig = settings.llm
-        # Живая находка 2026-07-25: текст персонажа убран из репозитория
-        # (см. llm/prompt.py) — берём его из локального config.toml
-        # (settings.llm.persona_prompt), фоллбэк на безликую заглушку, если
-        # он не заполнен, чтобы служба не падала на пустом system-промпте.
         self._persona_prompt = self._cfg.persona_prompt or DEFAULT_PERSONA_PROMPT
         if not self._cfg.persona_prompt:
             log.warning(
                 "settings.llm.persona_prompt пуст — используется безликая заглушка "
                 "DEFAULT_PERSONA_PROMPT вместо характера персонажа"
             )
-        # Профиль модели — контракт рассуждения, подключаемый вместе с моделью
-        # (llm/model_profiles.py). Резолвится один раз по имени модели.
         registry = load_profiles(self._cfg.model_profiles_path)
         self._profile: ModelProfile
         self._profile, matched = registry.resolve(self._cfg.model)
-        # num_ctx: явное значение в config.toml побеждает, иначе — дефолт профиля.
         if "num_ctx" not in self._cfg.model_fields_set:
             self._cfg.num_ctx = self._profile.num_ctx
         (log.warning if not matched else log.info)(
@@ -462,57 +309,22 @@ class LlmService:
         self._emit = emit
         self._last_activity = utc_now()
         self._asleep = False
-        # Живая находка при аудите механизма пробуждения (2026-08-26): после
-        # рестарта/деплоя ЭТОГО процесса (не Ollama) presence-проверка
-        # (wake_core.ensure_service_ready) читала только self._asleep и
-        # честно, но неверно докладывала "не сплю" — хотя модель в VRAM у
-        # Ollama на самом деле не загружена (свежий процесс её ещё не
-        # трогал). Первый чат-запрос после рестарта молча платил за холодную
-        # загрузку (~200с) внутри своего таймаута, без единой реплики
-        # персонажа о прогреве. _warmup_confirmed — отдельный от _asleep
-        # флаг: True только после РЕАЛЬНОГО успешного обращения к Ollama
-        # (_touch/ACTION_WARMUP), False сразу после старта процесса и после
-        # каждого сна (см. _sleep_now). get_state() ниже репортит "asleep"
-        # как ``self._asleep or not self._warmup_confirmed`` — не трогая
-        # сам _asleep и его роль в idle-таймере (_maybe_sleep_idle),
-        # который должен продолжать работать и для машины, которую ни разу
-        # не трогали (см. EVENT_WENT_IDLE/автовыключение, живая находка
-        # 2026-08-03 — заводить для этого отдельный флаг было бы неверно).
         self._warmup_confirmed = False
         self._active_chat_ids: set[int] = set()
-        # Живая находка 2026-07-23: короткоживущие вызовы wsl.exe (прогрев,
-        # ретраи в llm/ollama.py) сами по себе не держат WSL2-VM живой — она
-        # гасла уже через секунды после КАЖДОГО ответа, а не через
-        # idle_sleep_after_s. Keepalive-процесс теперь живёт здесь, на весь
-        # тёплый период (старт при выходе из простоя, стоп — вместе с
-        # реальным сном), не вокруг одного запроса (см. llm/ollama.py).
         self._keepalive = ollama.WslKeepalive(
             self._cfg, duration_s=self._cfg.idle_sleep_after_s + 60.0
         )
         self._speech = SpeechTherapist(
             self._cfg, **({"rand": speech_rand} if speech_rand is not None else {})
         )
-        # request_id -> {"partial": str, "done": bool, "done_at": datetime | None}
-        # (этап 34, Фаза 2 — см. ACTION_CHAT_PROGRESS выше).
         self._streaming: TtlStore[dict[str, Any]] = TtlStore(_STREAMING_ENTRY_TTL_S)
-        # session_id -> накопленные байты чанкованной загрузки голосового
-        # (см. ACTION_STT_UPLOAD_CHUNK/ACTION_TRANSCRIBE_VOICE выше) и время
-        # последнего чанка (для TTL-очистки осиротевших сессий, idle_loop).
         self._stt_uploads: TtlStore[bytearray] = TtlStore(_STT_UPLOAD_TTL_S)
-        # session_id -> готовый синтезированный OGG/Opus (см.
-        # ACTION_SYNTHESIZE_SPEECH/ACTION_TTS_DOWNLOAD_CHUNK выше) и время
-        # последнего обращения (TTL-очистка осиротевших сессий, idle_loop).
         self._tts_sessions: TtlStore[bytes] = TtlStore(_TTS_SESSION_TTL_S)
 
     def describe(self) -> ServiceDescription:
         return ServiceDescription(
             info=ServiceInfo(node=self._node, service=SERVICE_NAME, version=__version__),
             capabilities=(self._cfg.model,),
-            # num_ctx — ДЕЙСТВУЮЩЕЕ окно службы (явный [llm].num_ctx побеждает
-            # дефолт профиля, см. __init__), а не дефолт профиля: боту по нему
-            # считать заполненность истории (Этап 50, bot/dialogue_context.py).
-            # До 2026-09-30 сюда уезжал дефолт профиля (14336 у gemma-4), хотя
-            # на mycraft реально 32768.
             model_profile=replace(
                 self._profile.summary(), num_ctx=self._cfg.num_ctx
             ).to_payload(),
@@ -854,20 +666,11 @@ class LlmService:
             "node": self._node,
             "service": SERVICE_NAME,
             "model": self._cfg.model,
-            # "не подтверждено, что модель реально в VRAM" — тоже "сплю" с
-            # точки зрения presence-проверки (см. _warmup_confirmed выше).
             "asleep": self._asleep or not self._warmup_confirmed,
             "speech_therapy": self._speech.snapshot(),
         }
 
     def _think_arg(self, args: dict[str, Any]) -> bool | str | None:
-        """Из args действия chat → значение поля ``think`` запроса к Ollama.
-
-        Приоритет: ``reason`` (off|low|medium|high, новый протокол) → голый
-        ``think`` (устаревший булев: True→high, False→off) → дефолт ``off``
-        (нет намерения — быстрый проход). Перевод уровня в конкретный параметр
-        делает профиль модели (llm/model_profiles.py).
-        """
         reason = args.get("reason")
         if not isinstance(reason, str) or reason not in REASON_LEVELS:
             think = args.get("think")
@@ -882,18 +685,10 @@ class LlmService:
         self._warmup_confirmed = True
         if isinstance(chat_id, int):
             self._active_chat_ids.add(chat_id)
-        # Keepalive держит живой WSL2-VM — актуально только для
-        # container_backend="wsl-docker" (winpc); на native-Linux (mycraft)
-        # Ollama — always-on systemd-сервис, никакого wsl.exe тут нет.
         if self._cfg.container_backend == "wsl-docker" and not self._keepalive.alive:
             await self._keepalive.start()
 
     def _speech_target(self, args: dict[str, Any]) -> int | None:
-        """Адресат ответа для Логопеда (Этап 47) + самовосстановление
-        зеркала «чистой речи»: бот шлёт user_id и speech_clear из своей БД в
-        каждом живом запросе, так что потерянное/устаревшее состояние здесь
-        чинится первым же ходом гостя. Звать при получении запроса: флаг
-        прочитан ботом перед самой отправкой."""
         user_id = args.get("user_id")
         if not isinstance(user_id, int) or isinstance(user_id, bool):
             return None
@@ -918,9 +713,6 @@ class LlmService:
                 raise ProtoError(ERR_BAD_REQUEST, "prompt должен быть непустой строкой")
             chat_id = args.get("chat_id")
             await self._touch(chat_id)
-            # Флаг «чистой речи» — на входе, а не после генерации: запрос,
-            # отправленный до смены передатчика, иначе затёр бы её (живой
-            # баг 2026-09-28, генерация в очереди Ollama шла ~3 минуты).
             speaker = self._speech_target(args)
             result = await ollama.generate(self._cfg, prompt, self._persona_prompt)
             _log_ollama_timings("ask", result)
@@ -946,33 +738,8 @@ class LlmService:
                 return await self._director_chat(messages, args)
             if role == ROLE_SUMMARIZER:
                 return await self._summarizer_chat(messages, args)
-            # Намерение-уровень рассуждения (off|low|medium|high) от бота, и его
-            # перевод в параметр Ollama `think` через профиль этой модели.
             think = self._think_arg(args)
-            # Общий префикс для обеих ролей (2026-08-10): system[0] всегда
-            # персонаж, а служебная инструкция роутера уезжает ПОСЛЕДНИМ
-            # системным сообщением в хвост. Раньше роли брали разный
-            # system[0] — то есть два непересекающихся с нулевого токена
-            # префикса, и KV-кэш роутерного прохода не годился персонажному
-            # (а на SWA-моделях вроде gemma-4 это ещё и рушило кэш целиком:
-            # "forcing full prompt re-processing ... likely due to SWA" в
-            # логах Ollama). Теперь роутерный проход прогревает кэш для
-            # персонажного, и тот платит только за хвост. Триажу это не
-            # мешает: его инструкция стоит вплотную к точке генерации, а
-            # конкурировать с персонажем за внимание модели она начинала
-            # именно когда лежала В ОДНОМ system-блоке с ним (живая находка
-            # 2026-07-25, llm/prompt.py) — отдельным сообщением этого нет.
             system = self._persona_prompt
-            # raw_image ищем именно в ПОСЛЕДНЕМ элементе — это текущий ход
-            # пользователя (см. bot/ai_flow.py::request_alfred, history[-1]
-            # всегда текущий ход). Известное ограничение v1: если router-
-            # проход (mode="router_think") на ЭТОМ же ходу вызовет тул,
-            # messages вырастет и фото-сообщение перестанет быть последним
-            # до персонажного прохода — картинка потеряется для финального
-            # ответа. Редкий составной случай (фото + вопрос, требующий
-            # ещё и отдельного тула в том же ходу), не решается в этой
-            # итерации (см. план — чанкованная загрузка/групповые фото
-            # тоже отложены).
             last = messages[-1] if isinstance(messages[-1], dict) else None
             if last is not None and "raw_image" in last:
                 raw_image = last.pop("raw_image")
@@ -995,9 +762,6 @@ class LlmService:
                 messages = [*messages, {"role": "system", "content": ROUTER_SYSTEM_PROMPT}]
             chat_id = args.get("chat_id")
             await self._touch(chat_id)
-            # Флаг «чистой речи» — на входе, а не после генерации: запрос,
-            # отправленный до смены передатчика, иначе затёр бы её (живой
-            # баг 2026-09-28, генерация в очереди Ollama шла ~3 минуты).
             speaker = self._speech_target(args)
             request_id = args.get("request_id")
             if request_id is not None and (
@@ -1012,11 +776,6 @@ class LlmService:
                 result = await ollama.chat(self._cfg, messages, system, tools=tools, think=think)
             _log_ollama_timings(f"chat/{role}", result)
             message = result.get("message", {})
-            # Модель попросила вызвать инструмент(ы) — служба llm сама по рою
-            # не ходит (нет ServiceLink к соседям, только к своей Ollama), это
-            # исполняет фронтенд (см. LLM_INTEGRATION_PLAN.md §7.1). Ответ тут
-            # НЕ прогоняем через SpeechTherapist — это ещё не финальный
-            # текст персонажа, а служебные данные для цикла вызовов.
             tool_calls = message.get("tool_calls")
             if tool_calls:
                 return {
@@ -1047,14 +806,9 @@ class LlmService:
                 raise ProtoError(ERR_BAD_REQUEST, "question должен быть непустой строкой")
             chat_id = args.get("chat_id")
             await self._touch(chat_id)
-            # Флаг «чистой речи» — на входе, а не после генерации: запрос,
-            # отправленный до смены передатчика, иначе затёр бы её (живой
-            # баг 2026-09-28, генерация в очереди Ollama шла ~3 минуты).
             speaker = self._speech_target(args)
             raw_image = args.get("raw_image")
             if isinstance(raw_image, str) and raw_image:
-                # Своя картинка Альфреда (снимок, generate_image): байты из
-                # базы бота — то, что видел гость; на диске не храним.
                 try:
                     stored_b64 = await asyncio.to_thread(
                         vision.prepare, base64.b64decode(raw_image, validate=True), self._cfg
@@ -1066,9 +820,6 @@ class LlmService:
                 stored_b64 = await asyncio.to_thread(vision.load_stored, photo_key, self._cfg)
             if stored_b64 is None:
                 return {"response": PHOTO_NOT_FOUND_TEXT, "model": self._cfg.model}
-            # Без tools (узкий вопрос про изображение не требует рекурсивного
-            # tool-calling) и без рассуждения — перевод «off» через профиль
-            # модели (у gemma-4 это явный think=False; явный True даёт 400).
             result = await ollama.chat(
                 self._cfg,
                 [{"role": "user", "content": question, "images": [stored_b64]}],
@@ -1179,8 +930,6 @@ class LlmService:
                 "format": "ogg",
             }
         if action == ACTION_GENERATE_IMAGE:
-            # request_id — фаза снимка для опроса chat_progress (снимок кабинета:
-            # «наводит фотоаппарат» на промптере, «проявляет снимок» на рисовании).
             request_id = args.get("request_id")
             try:
                 return await self._generate_image(args)
@@ -1214,24 +963,16 @@ class LlmService:
                 raise ProtoError(ERR_BAD_REQUEST, "request_id должен быть непустой строкой")
             entry = self._streaming.get(request_id)
             if entry is None:
-                # Гонка первого опроса (бот уже спрашивает, а стрим ещё не
-                # успел завести запись) — не ошибка, просто пока пусто.
                 return {"partial": "", "done": False}
             return {"partial": entry["partial"], "done": entry["done"]}
         if action == ACTION_SLEEP:
             await self._sleep_now(quiet=bool(args.get("quiet")))
             return {"asleep": True}
         if action == ACTION_WARMUP:
-            # НЕ _touch(chat_id) — прогрев не значит, что был реальный чат,
-            # ложный chat_id раздул бы список для EVENT_IDLE_SLEEP.
             await ollama.ensure_running(self._cfg)
-            # И саму модель — в память: без этого «прогретая» служба всё
-            # равно платит за загрузку на первом же реальном запросе (см.
-            # ollama.preload, живая находка 2026-07-27).
             await ollama.preload(self._cfg)
             await self._touch()
             return {"asleep": False}
-        # Сервер валидирует action по describe — сюда неизвестное не доходит.
         raise ValueError(f"необъявленное действие: {action}")
 
     async def _paste_item(
@@ -1240,11 +981,6 @@ class LlmService:
         options: dict[str, Any],
         where: item_paste.Placement | None,
     ) -> tuple[dict[str, Any], tuple[int, int, int, int]]:
-        """Готовая сцена → вставка вырезки предмета → img2img той же моделью
-        (LoRA настроения ослаблена до ``item_mood_lora_weight``) → предмет
-        по маске поверх (llm/item_paste.py). ``where`` — место по столешнице
-        (``_desk_placement``), None — место по умолчанию. Возвращает результат
-        generate_image с подменёнными картинкой и временем и рамку предмета."""
         paste = options["paste"]
         path = item_paste.cut_path(self._cfg, paste["key"])
         cut = await asyncio.to_thread(lambda: Image.open(path).convert("RGBA"))
@@ -1300,7 +1036,6 @@ class LlmService:
     async def _desk_placement(
         self, scene: Image.Image, place: str
     ) -> item_paste.Placement | None:
-        """Где в кадре столешница — спросить зрение. Сбой — None."""
         try:
             image_b64 = await asyncio.to_thread(vision.jpeg_b64, scene)
             result = await ollama.chat(
@@ -1324,9 +1059,6 @@ class LlmService:
     async def _generate_image(self, args: dict[str, Any]) -> dict[str, Any]:
         if not self._cfg.imagegen_enabled:
             raise ProtoError(ERR_BAD_REQUEST, "генерация картинок на этой ноде выключена")
-        # description — свободное описание от Альфреда, его переводит в
-        # промпт художник-промптер (llm/image_prompt.py); prompt — готовый
-        # английский промпт (боты до v0.117.0), идёт как есть.
         description = args.get("description")
         prompt = args.get("prompt")
         if isinstance(description, str) and description.strip():
@@ -1337,8 +1069,6 @@ class LlmService:
             raise ProtoError(ERR_BAD_REQUEST, "нужно непустое description или prompt")
         negative = args.get("negative")
         negative = negative.strip() if isinstance(negative, str) else ""
-        # Этап 49, отладочный /draw: режим, образец и ручные ручки. Чат
-        # (tool generate_image) их не шлёт — там всё как было.
         options = _imagegen_options(args)
         paste = options["paste"]
         if paste is not None and not item_paste.cut_path(self._cfg, paste["key"]).exists():
@@ -1366,16 +1096,12 @@ class LlmService:
                 prompt = source
         if not options["raw"]:
             negative = negative or self._cfg.imagegen_negative
-            # Добавка вызывающего поверх любого негатива (снимки кабинета:
-            # «monochrome, grayscale»), а не вместо него.
             extra = args.get("negative_extra")
             if isinstance(extra, str) and extra.strip():
                 negative = f"{negative}, {extra.strip()}" if negative else extra.strip()
             if "bad hands" not in negative:
                 negative = ", ".join(x for x in (negative, image_prompt.HANDS_NEGATIVE) if x)
             if options["light"]:
-                # Свет снимка (время суток и погода) — мимо промптера: он
-                # выкидывал «night», и LoRA Альфреда рисовала дневное окно.
                 prompt = image_prompt.put_second(
                     prompt, options["light"], move=options["light_move"]
                 )
@@ -1395,8 +1121,6 @@ class LlmService:
                     ip_scale=options["ip_scale"],
                     steps=options["steps"],
                     guidance=options["guidance"],
-                    # raw — ровно то, что написал владелец: без промптера,
-                    # подрезки, стилевого шаблона и негативов из конфига.
                     style=options["style"] and not options["raw"],
                     fit=not options["raw"],
                     size=options["size"],
@@ -1415,10 +1139,6 @@ class LlmService:
         item_box = None
         if paste is not None:
             where = await self._desk_placement(result["original"], paste["place"])
-            # Годной столешницы нет (зрение не нашло стол, рамка — пол или
-            # дальний узкий стол) — фон другим зерном: наугад радио стояло на
-            # полу или висело в воздухе (стенд ~/refbench/desk, 2026-10-02).
-            # Заданное зерно (отладочный /draw) не трогаем — воспроизводимость.
             redraws = item_paste.DESK_REDRAWS if options["seed"] is None else 0
             for _ in range(redraws):
                 if where is not None:
@@ -1450,8 +1170,6 @@ class LlmService:
         }
 
     def _image_phase(self, request_id: Any, phase: str | None) -> None:
-        """Фаза generate_image в self._streaming (читает ACTION_CHAT_PROGRESS):
-        IMAGE_PHASE_* в partial; None — готово (done, подметёт idle_loop)."""
         if not isinstance(request_id, str) or not request_id:
             return
         if phase is not None:
@@ -1466,9 +1184,6 @@ class LlmService:
             self._streaming.touch(request_id)
 
     async def _item_portrait(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Портрет предмета: turbo на сером фоне, сверка ``checks`` зрением,
-        при промахе — следующее зерно; лучший кадр (меньше промахов) режется
-        rembg и ложится в ``items_dir/{key}.png``."""
         prompt = args.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
             raise ProtoError(ERR_BAD_REQUEST, "нужен непустой prompt")
@@ -1479,7 +1194,7 @@ class LlmService:
         if seed is None:
             seed = random_seed32()
         attempts = _bounded_number_arg(args, "attempts", int, 1, _ITEM_ATTEMPTS_MAX) or 3
-        _restyle_option(args.get("restyle"))  # кривое — отказ до рисования
+        _restyle_option(args.get("restyle"))
         raw_checks = args.get("checks")
         checks = [
             " ".join(c.split())
@@ -1495,8 +1210,6 @@ class LlmService:
         think = self._profile.think_arg("off")
         for n in range(attempts):
             tried = n + 1
-            # 49.3.4: черновик после 1-го шага turbo проверяется до шага 2 и
-            # VAE; последняя попытка рисуется целиком в любом случае.
             preview_check = self._cfg.item_preview_check and bool(checks) and n < attempts - 1
             verdict: dict[str, Any] = {}
 
@@ -1517,9 +1230,6 @@ class LlmService:
 
             started = time.monotonic()
             try:
-                # Архетип с чертами — проверенная строка с весами compel
-                # («(rust)1.3»), без подрезки под 77 токенов: подрезка по
-                # тегам срезала бы черты и фон, а без серого фона не вырезать.
                 result = await imagegen.generate_image(
                     full,
                     self._cfg.imagegen_negative,
@@ -1554,9 +1264,6 @@ class LlmService:
         result, inspection = best
         restyle = _restyle_option(args.get("restyle"))
         if restyle is not None:
-            # «Уровень проклятия» (стенд 49.3.0): тот же портрет перекрашивается
-            # img2img моделью с LoRA настроения — облик узнаваем, а гниль и
-            # свечение нарастают с силой. Проверка признаков — по исходному.
             try:
                 cursed = await imagegen.generate_image(
                     f"{restyle['prompt'] or prompt}, isolated on plain light grey background",
@@ -1603,10 +1310,6 @@ class LlmService:
     async def _inspect_snapshot(
         self, args: dict[str, Any], original: Any
     ) -> dict[str, Any] | None:
-        """Снимок Альфреда (Этап 49.2.1): ``keep_key`` — сохранить 512-оригинал
-        и посмотреть на него зрением gemma, сверив с ``expect`` (что Альфред
-        обещал в кадре). Без ``keep_key`` или при любом сбое — None: картинка
-        уходит как есть."""
         keep_key = args.get("keep_key")
         if original is None or not isinstance(keep_key, str) or not keep_key or "/" in keep_key:
             return None
@@ -1640,11 +1343,6 @@ class LlmService:
         tools: list[dict[str, Any]] | None,
         think: bool | str | None,
     ) -> dict[str, Any]:
-        """Обёртка вокруг ollama.chat_stream: заводит запись в self._streaming
-        на время генерации (читает её ACTION_CHAT_PROGRESS), закрывает её
-        (done=True, done_at) в finally — даже если Ollama упала, опрашивающий
-        бот должен увидеть завершение, а не крутиться до собственного
-        таймаута."""
         self._streaming.put(request_id, {"partial": "", "done": False}, touched=False)
 
         def _on_chunk(text: str) -> None:
@@ -1662,8 +1360,6 @@ class LlmService:
     async def _director_chat(
         self, messages: list[Any], args: dict[str, Any]
     ) -> dict[str, Any]:
-        """Ведущий интерактивов (Этап 47): свой system от бота, JSON-ответ,
-        ни тулов, ни рассуждения, ни Логопеда."""
         system = args.get("system")
         if not isinstance(system, str) or not system:
             raise ProtoError(ERR_BAD_REQUEST, "для role=director нужен непустой system")
@@ -1685,8 +1381,6 @@ class LlmService:
     async def _summarizer_chat(
         self, messages: list[Any], args: dict[str, Any]
     ) -> dict[str, Any]:
-        """Сжатие истории /ai (Этап 50, см. ROLE_SUMMARIZER): свой system от
-        бота, без тулов/рассуждения/Логопеда, temperature 0."""
         system = args.get("system")
         if not isinstance(system, str) or not system:
             raise ProtoError(ERR_BAD_REQUEST, "для role=summarizer нужен непустой system")
@@ -1709,20 +1403,10 @@ class LlmService:
     async def _emit_speech_cured(self) -> None:
         try:
             await self._emit(EVENT_SPEECH_CURED, {})
-        except Exception:  # noqa: BLE001 — сбой эмита не должен ронять ответ пользователю
+        except Exception:  # noqa: BLE001
             log.exception("llm: не удалось эмитить %s", EVENT_SPEECH_CURED)
 
     async def _sleep_now(self, *, quiet: bool = False) -> None:
-        """``quiet`` — погасить контейнер, не прощаясь с чатами.
-
-        Нужен для штатного роспуска («Альфред, ты свободен» → бот сам уже
-        отправил прощание модели, см. bot/ai_flow.py::perform_dismissal):
-        `llm_idle_sleep` рендерится в «не дождался обращения и уходит», что
-        прямо противоречило бы только что сказанному. Очистка списка чатов
-        при этом ВАЖНА и в тихом режиме: сразу после роспуска машину обычно
-        выключают, а останов процесса шлёт тем же чатам `llm_service_restart`
-        («появились другие дела») — пустой список гасит и его.
-        """
         await ollama.stop(self._cfg)
         if self._cfg.container_backend == "wsl-docker":
             await self._keepalive.stop()
@@ -1736,23 +1420,16 @@ class LlmService:
             self._active_chat_ids.clear()
             try:
                 await self._emit(EVENT_IDLE_SLEEP, {"chat_ids": chat_ids})
-            except Exception:  # noqa: BLE001 — сбой эмита не должен ронять идле-таймер
+            except Exception:  # noqa: BLE001
                 log.exception("llm: не удалось эмитить %s", EVENT_IDLE_SLEEP)
 
     async def notify_restart(self) -> None:
-        """Перед остановом процесса (см. llm/app.py::run_llm, finally-блок) —
-        если за текущее тёплое окно были активные чаты, известить их: служба
-        перезапускается (деплой/апдейт/ручной restart), а не просто зависла.
-        Тот же приём, что EVENT_IDLE_SLEEP (§8.5-соседняя механика), другой
-        повод и текст — решение пользователя 2026-07-24. Не трогает
-        _active_chat_ids/асинхронный Ollama-контейнер: процесс всё равно
-        сейчас завершится, чистить состояние незачем."""
         if not self._active_chat_ids:
             return
         chat_ids = sorted(self._active_chat_ids)
         try:
             await self._emit(EVENT_SERVICE_RESTART, {"chat_ids": chat_ids})
-        except Exception:  # noqa: BLE001 — сбой эмита не должен мешать останову
+        except Exception:  # noqa: BLE001
             log.exception("llm: не удалось эмитить %s", EVENT_SERVICE_RESTART)
 
     async def _maybe_sleep_idle(self) -> None:
@@ -1763,13 +1440,10 @@ class LlmService:
             await self._sleep_now()
             try:
                 await self._emit(EVENT_WENT_IDLE, {})
-            except Exception:  # noqa: BLE001 — сбой эмита не должен ронять идле-таймер
+            except Exception:  # noqa: BLE001
                 log.exception("llm: не удалось эмитить %s", EVENT_WENT_IDLE)
 
     async def idle_loop(self) -> None:
-        """Раз в минуту проверять простой; после `idle_sleep_after_s` без
-        запросов — погасить контейнер (освободить VRAM) и, если были чаты,
-        уведомить их через llm_idle_sleep."""
         while True:
             await asyncio.sleep(_IDLE_CHECK_INTERVAL_S)
             await self._maybe_sleep_idle()

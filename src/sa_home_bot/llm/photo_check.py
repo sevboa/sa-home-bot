@@ -1,15 +1,3 @@
-"""Сверка снимка Альфреда (Этап 49.2.1): что на самом деле вышло на картинке.
-
-Альфред знает, что снимает (это уходит в генератор), но генератор может
-промахнуться — обещанной собаки в кадре нет. Здесь gemma со зрением смотрит
-на 512-оригинал (не на пиксельную версию, которую видит гость — на 64px
-детали не разобрать) и отвечает, что на снимке и чего из обещанного не видно.
-
-Служебный вызов: без персоны, без рассуждения, temperature 0, ответ JSON.
-Оригинал сохраняется в ``cfg.photos_dir`` рядом с фото гостей — та же чистка
-по TTL (llm/vision.py).
-"""
-
 from __future__ import annotations
 
 import logging
@@ -24,14 +12,6 @@ log = logging.getLogger(__name__)
 
 _OPTIONS: dict[str, Any] = {"temperature": 0, "num_predict": 512}
 
-# Этап 49.3 (стенд 2026-10-01, «Стенд предметов», раздел vlm): «да/нет по
-# каждому признаку» по-английски и на целом 512-кадре — ложные «да» 8%,
-# ложные «нет» 14%; прежний список «missing» от модели промахивался на 13/22.
-# Поэтому промах считает код по ответам, а не модель.
-# Описание идёт Альфреду в подпись «ты сфотографировал…»: со словами
-# «стилизованная иллюстрация» gemma уходила в роль генератора картинок и
-# писала текстом поддельный вызов dalle.text2im (стенд 2026-10-08: 6-8 из 10,
-# без этих слов — 0 из 16).
 SYSTEM_PROMPT = """\
 You look at a picture and report only what is actually visible. The picture is
 a stylized illustration of a room or an object; small details may be simplified.
@@ -47,9 +27,6 @@ Do not guess or assume things that are not drawn. Reply with strict JSON only:
   "yes"), otherwise "no". Respect the "does NOT count" notes of an item.
 """
 
-# Пункт ``expect`` может нести определение после ``DEFINITION_SEP``:
-# «separate handheld microphone :: a bare cable does NOT count». Модель видит
-# пункт целиком, в ``missing`` уходит только название (до разделителя).
 DEFINITION_SEP = " :: "
 
 
@@ -58,7 +35,6 @@ def label(item: str) -> str:
 
 
 def save_original(image: Image.Image, photo_key: str, cfg: LlmConfig) -> str:
-    """512²-оригинал → JPEG в ``photos_dir/{photo_key}.jpg``; вернуть base64."""
     data = vision.jpeg_bytes(image)
     cfg.photos_dir.mkdir(parents=True, exist_ok=True)
     (cfg.photos_dir / f"{photo_key}.jpg").write_bytes(data)
@@ -88,10 +64,6 @@ def _yes(value: Any) -> bool | None:
 
 
 def parse(content: str, expect: list[str]) -> dict[str, Any] | None:
-    """JSON модели → {"description", "missing", "answers"}; None — ответ не
-    разобрать. ``missing`` — названия пунктов с ответом «нет»; пункт без
-    ответа промахом не считается (лучше пропустить промах, чем зря
-    огорчить Альфреда). ``answers`` — {название: True/False}."""
     try:
         data = ollama.parse_json_object(content)
     except (ValueError, TypeError):
@@ -118,7 +90,6 @@ def parse(content: str, expect: list[str]) -> dict[str, Any] | None:
 async def inspect(
     image_b64: str, expect: list[str], cfg: LlmConfig, *, think: Any = None
 ) -> dict[str, Any] | None:
-    """Посмотреть на снимок. None — сверка не удалась (снимок уходит как есть)."""
     try:
         result = await ollama.chat(
             cfg,

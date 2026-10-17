@@ -1,25 +1,3 @@
-"""Распознавание голосовых сообщений Telegram (STT) для мультимодального /ai.
-
-Намеренно на стороне службы llm (см. ``LlmConfig.stt_*``), не бота: alfred
-шлёт сюда сырые байты голосового как есть, эта нода (сейчас mycraft — Xeon
-E5-2678 v3, 12 ядер/24 потока) сама транскрибирует — тот же принцип, что и
-у фото (llm/vision.py).
-
-В отличие от фото — CPU/RAM, не GPU и не Ollama. Живая находка при выборе
-архитектуры (2026-08-10): аудио-вход самой Gemma 4 (``gemma4:e2b``/``e4b``)
-через Ollama на практике сломан (галлюцинации, минуты обработки секунд
-аудио, открытые баги апстрима), а продовая модель персонажа
-(``gemma-4-26B-A4B``) аудио не поддерживает вовсе — и VRAM V100 занята ей
-почти под завязку, второй модели там просто нет места без выгрузки первой.
-faster-whisper на CPU не трогает VRAM вообще и не зависит от этой
-незрелой фичи апстрима.
-
-``faster-whisper`` — не основная зависимость пакета (устанавливается
-extras-группой ``stt``, см. pyproject.toml), поэтому импортируется лениво
-внутри ``_load_model_sync`` — модуль (и служба llm целиком) должен
-оставаться импортируемым на нодах без этой экстры.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -33,11 +11,6 @@ from sa_home_bot.config import LlmConfig
 from sa_home_bot.llm.lazy_load import LazyModel
 
 log = logging.getLogger(__name__)
-
-# Модель резидентна в RAM с первого запроса до конца жизни процесса — в
-# отличие от Ollama/gemma4:e4b (отброшенный вариант архитектуры), тут нет
-# конкуренции за VRAM и незачем выгружать/перезагружать между запросами:
-# medium занимает ~1.5 ГБ, при 62 ГБ RAM на mycraft это не заметно.
 
 
 def _load_model_sync(cfg: LlmConfig) -> Any:
@@ -59,15 +32,9 @@ def _load_model_sync(cfg: LlmConfig) -> Any:
     return model
 
 
-
-
 def _write_transcribe_cleanup_sync(
     model: Any, raw_bytes: bytes, tmp_dir: Path, cfg: LlmConfig
 ) -> str:
-    """Синхронная часть целиком в одном потоке: запись временного файла,
-    сам инференс (CPU-bound, отдаём GIL надолго) и удаление файла — вызывать
-    только через ``asyncio.to_thread``, не блокировать событийный цикл
-    службы на время генерации других чатов."""
     tmp_dir.mkdir(parents=True, exist_ok=True)
     path = tmp_dir / f"{uuid.uuid4().hex}.ogg"
     try:
@@ -82,15 +49,6 @@ def _write_transcribe_cleanup_sync(
 
 
 async def transcribe_voice(raw_bytes: bytes, cfg: LlmConfig) -> str:
-    """Транскрибировать голосовое сообщение (сырые байты OGG/Opus) в текст.
-
-    faster-whisper декодирует и режет на окна сам (VAD отсекает тишину) —
-    произвольная длина входа, без ручной нарезки на 30-секундные куски
-    (в отличие от отброшенного варианта с аудио-входом Gemma 4).
-
-    Пустая строка — распознать не удалось (тишина/неразборчиво), это не
-    ошибка; вызывающий (llm/service.py) решает, как её показать пользователю.
-    """
     model = await _model.get(cfg)
     text = await asyncio.to_thread(
         _write_transcribe_cleanup_sync, model, raw_bytes, cfg.stt_tmp_dir, cfg

@@ -1,9 +1,3 @@
-"""Служба llm (Альфред): describe, ask/chat/sleep, идле-таймер.
-
-Ollama/WSL не трогаем (monkeypatch sa_home_bot.llm.service.ollama) — это
-чистая loopback-обвязка, ей место в отдельном тесте llm/ollama.py, а не здесь.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -21,9 +15,6 @@ PERSONA = "ТЕСТОВЫЙ ПЕРСОНАЖ (persona_prompt в тестовом
 
 @pytest.fixture(autouse=True)
 def _isolate_speech_therapy_state(tmp_path, monkeypatch):
-    # speech_therapy_state_path — относительный путь по умолчанию (см.
-    # config.py::LlmConfig) — без chdir тесты читали/писали бы реальный файл
-    # состояния Логопеда в репозитории.
     monkeypatch.chdir(tmp_path)
 
 
@@ -85,26 +76,16 @@ async def test_ask_calls_ollama_generate_with_system_prompt(monkeypatch):
         return {"response": "Здравствуйте, сэр"}
 
     monkeypatch.setattr(llm_service.ollama, "generate", fake_generate)
-    # speech_rand=0.5: гарантированно ниже стартовой error_probability=1.0
-    # (искажает), но выше вероятности визита логопеда 0.025 (без визита) —
-    # иначе к ответу мог бы случайно (~5%) прилипнуть текст логопеда и
-    # сломать точное сравнение ниже.
     svc = LlmService(_settings(), speech_rand=lambda: 0.5)
     result = await svc.run_command("ask", {"prompt": "Как погода?"})
 
-    # Картавость — вероятностная механика «Логопед» (llm/speech_therapy.py),
-    # не вывод модели как есть.
     assert result == {"response": "Здгавствуйте, сэг", "model": "qwen2.5:7b"}
     assert calls[0][0] == "qwen2.5:7b"
     assert calls[0][1] == "Как погода?"
-    assert calls[0][2] == PERSONA  # системный промпт реально ушёл
+    assert calls[0][2] == PERSONA
 
 
 async def test_ask_falls_back_to_default_persona_when_unconfigured(monkeypatch):
-    # Живая находка 2026-07-25: текст персонажа убран из репозитория в
-    # settings.llm.persona_prompt (локальный config.toml) — если он не
-    # заполнен (свежий чекаут, CI), служба не должна слать Ollama пустую
-    # строку системным промптом.
     calls = []
 
     async def fake_generate(cfg, prompt, system):
@@ -130,17 +111,12 @@ async def test_chat_calls_ollama_chat_and_extracts_message(monkeypatch):
         return {"message": {"role": "assistant", "content": "Добрый день"}}
 
     monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
-    svc = LlmService(_settings(), speech_rand=lambda: 0.5)  # см. комментарий выше
+    svc = LlmService(_settings(), speech_rand=lambda: 0.5)
     result = await svc.run_command("chat", {"messages": [{"role": "user", "content": "привет"}]})
     assert result == {"response": "Добгый день", "model": "qwen2.5:7b"}
 
 
 async def test_chat_puts_speech_remark_in_own_field_not_in_response(monkeypatch):
-    # Живой баг 2026-08-03: ремарка раньше дописывалась ПРЯМО в "response"
-    # (см. llm/speech_therapy.py::process) — уезжала одним сообщением с
-    # ответом и ломано отформатированной выше по стеку (bot/handlers/ai.py
-    # экранирует ВЕСЬ текст персонажа как plain text). rand=0.0 —
-    # наихудший случай, визит логопеда гарантирован.
     async def fake_chat(cfg, messages, system, tools=None, think=None):
         return {"message": {"role": "assistant", "content": "сэр"}}
 
@@ -148,7 +124,7 @@ async def test_chat_puts_speech_remark_in_own_field_not_in_response(monkeypatch)
     svc = LlmService(_settings(), speech_rand=lambda: 0.0)
     result = await svc.run_command("chat", {"messages": [{"role": "user", "content": "привет"}]})
 
-    assert result["response"] == "сэг"  # без хвоста-ремарки
+    assert result["response"] == "сэг"
     assert result["speech_remark"] == "🗣 <b>Логопед:</b> <i>Не «сэг», а «сэр»!</i>"
 
 
@@ -158,10 +134,6 @@ async def test_chat_rejects_non_list_messages():
         await svc.run_command("chat", {"messages": "не список"})
     with pytest.raises(ProtoError):
         await svc.run_command("chat", {"messages": []})
-
-
-# --- think (вариативное рассуждение, LLM_INTEGRATION_PLAN.md §7 —
-# bot/ai_flow.py теперь передаёт think явно на каждый вызов) ---
 
 
 async def test_chat_passes_explicit_think_through_to_ollama(monkeypatch):
@@ -188,9 +160,9 @@ async def test_chat_without_reason_defaults_to_off(monkeypatch):
         return {"message": {"content": "ответ"}}
 
     monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
-    svc = LlmService(_settings())  # qwen2.5:7b → профиль _default (think_control=flag)
+    svc = LlmService(_settings())
     await svc.run_command("chat", {"messages": [{"role": "user", "content": "1"}]})
-    assert seen["think"] is False  # нет намерения → быстрый проход
+    assert seen["think"] is False
 
 
 async def test_chat_reason_level_translated_via_profile(monkeypatch):
@@ -201,7 +173,7 @@ async def test_chat_reason_level_translated_via_profile(monkeypatch):
         return {"message": {"content": "ответ"}}
 
     monkeypatch.setattr(llm_service.ollama, "chat", fake_chat)
-    svc = LlmService(_settings())  # _default: think_control=flag → любой уровень >0 = True
+    svc = LlmService(_settings())
     await svc.run_command(
         "chat", {"messages": [{"role": "user", "content": "1"}], "reason": "medium"}
     )
@@ -229,12 +201,6 @@ async def test_chat_rejects_non_bool_think():
     assert excinfo.value.code == ERR_BAD_REQUEST
 
 
-# --- role (живая находка 2026-07-25: триаж "думать ли"/"звать ли тул"
-# вынесен в отдельный вызов с маленьким промптом без персонажа — см.
-# llm/prompt.py::ROUTER_SYSTEM_PROMPT — чтобы не конкурировать за внимание
-# модели с 12 правилами персонажа Альфреда) ---
-
-
 async def test_chat_role_router_uses_router_prompt_not_persona(monkeypatch):
     seen = {}
 
@@ -248,9 +214,6 @@ async def test_chat_role_router_uses_router_prompt_not_persona(monkeypatch):
     await svc.run_command(
         "chat", {"messages": [{"role": "user", "content": "1"}], "role": "router"}
     )
-    # Общий с персонажным проходом префикс (2026-08-10): system[0] у роутера
-    # ТОТ ЖЕ, что у персонажа, — иначе KV-кэш одного прохода не годится
-    # другому. Сама инструкция триажа уезжает последним системным сообщением.
     assert seen["system"] == PERSONA
     assert seen["messages"][-1] == {
         "role": "system",
@@ -282,10 +245,6 @@ async def test_chat_rejects_unknown_role():
             "chat", {"messages": [{"role": "user", "content": "1"}], "role": "admin"}
         )
     assert excinfo.value.code == ERR_BAD_REQUEST
-
-
-# --- фото (мультимодальный /ai, 2026-08-10 — ресайз/хранение на стороне
-# этой службы, alfred шлёт raw_image как есть, см. llm/vision.py) ---
 
 
 def _tiny_jpeg_b64() -> str:
@@ -386,8 +345,6 @@ async def test_look_at_photo_loads_stored_and_returns_response(monkeypatch):
 
 
 async def test_look_at_photo_takes_alfred_picture_inline(monkeypatch, tmp_path):
-    """Своя картинка Альфреда приходит байтами из базы бота — без файла на
-    диске, и на диск не сохраняется (2026-10-02)."""
     seen = {}
 
     async def fake_chat(cfg, messages, system, tools=None, think=None):
@@ -419,11 +376,6 @@ async def test_look_at_photo_rejects_missing_args():
         await svc.run_command("look_at_photo", {"question": "что там?"})
     with pytest.raises(ProtoError):
         await svc.run_command("look_at_photo", {"photo_key": "x"})
-
-
-# --- голосовые сообщения /ai (распознавание — faster-whisper на CPU,
-# см. llm/stt.py; здесь stt.transcribe_voice замокан целиком — своя логика
-# проверяется отдельно в test_llm_stt.py, здесь только обвязка протокола) ---
 
 
 def _b64(raw: bytes) -> str:
@@ -544,7 +496,6 @@ async def test_transcribe_voice_from_chunked_session_verifies_integrity(monkeypa
     )
     assert result == {"transcript": "длинное голосовое"}
     assert seen["raw_bytes"] == raw
-    # Сессия одноразовая — использована и убрана из буфера.
     assert "s1" not in svc._stt_uploads
 
 
@@ -573,11 +524,6 @@ async def test_transcribe_voice_unknown_session_rejected():
     with pytest.raises(ProtoError) as excinfo:
         await svc.run_command("transcribe_voice", {"session_id": "нет-такой"})
     assert excinfo.value.code == ERR_BAD_REQUEST
-
-
-# --- голосовые ОТВЕТЫ /ai (синтез — Coqui XTTS v2 на CPU, см. llm/tts.py;
-# здесь tts.synthesize_speech замокан целиком — своя логика проверяется
-# отдельно в test_llm_tts.py, здесь только обвязка протокола) ---
 
 
 async def test_synthesize_speech_inline_calls_tts_and_returns_audio(monkeypatch):
@@ -656,12 +602,10 @@ async def test_tts_download_chunk_returns_data_and_eof(monkeypatch):
     assert first["eof"] is False
     assert len(base64.b64decode(first["data_b64"])) == 500
 
-    # Дочитываем остаток одним куском большего размера, чем осталось данных.
     rest = await svc.run_command(
         "tts_chunk", {"session_id": session_id, "offset": 500, "length": 10_000_000}
     )
     assert rest["eof"] is True
-    # Сессия одноразовая — вычищена после eof.
     assert session_id not in svc._tts_sessions
 
 
@@ -678,9 +622,6 @@ async def test_tts_download_chunk_rejects_negative_offset():
     with pytest.raises(ProtoError) as excinfo:
         await svc.run_command("tts_chunk", {"session_id": "s1", "offset": -1})
     assert excinfo.value.code == ERR_BAD_REQUEST
-
-
-# --- request_id / chat_progress (этап 34, Фаза 2 — Rich-стрим ответов) ---
 
 
 async def test_chat_with_request_id_goes_through_chat_stream_not_chat(monkeypatch):
@@ -710,7 +651,7 @@ async def test_chat_stream_fills_streaming_buffer_and_marks_done(monkeypatch):
         seen_partials.append(svc._streaming["req-2"]["partial"])
         on_chunk("Добрый день")
         seen_partials.append(svc._streaming["req-2"]["partial"])
-        assert svc._streaming["req-2"]["done"] is False  # ещё не завершили
+        assert svc._streaming["req-2"]["done"] is False
         return {"message": {"content": "Добрый день"}}
 
     monkeypatch.setattr(llm_service.ollama, "chat_stream", fake_chat_stream)
@@ -719,15 +660,10 @@ async def test_chat_stream_fills_streaming_buffer_and_marks_done(monkeypatch):
         "chat", {"messages": [{"role": "user", "content": "1"}], "request_id": "req-2"}
     )
     assert seen_partials == ["Доб", "Добрый день"]
-    # После завершения запись остаётся (для последнего опроса бота), но
-    # помечена done — см. также тест на подметание ниже.
     assert svc._streaming["req-2"]["done"] is True
 
 
 async def test_chat_stream_marks_done_even_on_ollama_failure(monkeypatch):
-    # Опрашивающий бот не должен крутиться до собственного таймаута, если
-    # Ollama упала посреди генерации — finally в _chat_streamed закрывает
-    # запись независимо от исхода.
     async def fake_chat_stream(cfg, messages, system, on_chunk, tools=None, think=None):
         on_chunk("часть")
         raise RuntimeError("Ollama оборвалась")
@@ -758,8 +694,6 @@ async def test_chat_progress_reflects_current_buffer(monkeypatch):
 
 
 async def test_chat_progress_unknown_request_id_is_not_an_error():
-    # Гонка первого опроса: бот уже спрашивает, а запись ещё не заведена
-    # (или уже подметена, см. sweep-тест ниже) — не bad_request, просто пусто.
     svc = LlmService(_settings())
     result = await svc.run_command("chat_progress", {"request_id": "никогда-не-было"})
     assert result == {"partial": "", "done": False}
@@ -813,11 +747,6 @@ async def test_ask_after_sleep_wakes_up_again(monkeypatch):
 
 
 async def test_warmup_also_preloads_model(monkeypatch):
-    # Живая находка 2026-07-27: раньше прогрев только поднимал WSL/контейнер
-    # (ensure_running), а модель оставалась выгруженной — "прогретая" служба
-    # всё равно платила за её загрузку на первом реальном запросе, и
-    # отложенная задача опаздывала на десятки секунд. Теперь прогрев тянет и
-    # саму модель в память (ollama.preload).
     calls = []
 
     async def fake_ensure_running(cfg):
@@ -836,8 +765,6 @@ async def test_warmup_also_preloads_model(monkeypatch):
 
 
 async def test_warmup_does_not_add_chat_id_to_active_chats(monkeypatch):
-    # Живая находка (см. llm/service.py::run_command): прогрев — не реальный
-    # чат, не должен раздувать список для EVENT_IDLE_SLEEP.
     async def fake_ensure_running(cfg):
         pass
 
@@ -855,7 +782,7 @@ async def test_warmup_does_not_add_chat_id_to_active_chats(monkeypatch):
     svc = LlmService(_settings(), emit=emitter)
     await svc.run_command("warmup", {})
     await svc.run_command("sleep", {})
-    assert emitter.events == []  # ни одного llm_idle_sleep — не было chat_id
+    assert emitter.events == []
 
 
 async def test_idle_check_sleeps_after_threshold(monkeypatch):
@@ -866,12 +793,6 @@ async def test_idle_check_sleeps_after_threshold(monkeypatch):
 
     monkeypatch.setattr(llm_service.ollama, "stop", fake_stop)
     svc = LlmService(_settings(idle_sleep_after_s=60.0))
-    # Живая находка при аудите механизма пробуждения (2026-08-26):
-    # get_state()["asleep"] теперь учитывает и _warmup_confirmed (см.
-    # LlmService.__init__/_touch) — тест эмулирует службу, которая реально
-    # была активна недавно (а не свежесозданный, ни разу не тронутый
-    # процесс), поэтому явно подтверждаем прогрев, как это сделал бы
-    # настоящий _touch().
     svc._warmup_confirmed = True
     svc._last_activity = datetime.now(tz=UTC) - timedelta(seconds=61)
 
@@ -889,8 +810,6 @@ async def test_idle_check_no_sleep_before_threshold(monkeypatch):
 
     monkeypatch.setattr(llm_service.ollama, "stop", fake_stop)
     svc = LlmService(_settings(idle_sleep_after_s=60.0))
-    # См. комментарий в test_idle_check_sleeps_after_threshold выше про
-    # _warmup_confirmed.
     svc._warmup_confirmed = True
     svc._last_activity = datetime.now(tz=UTC) - timedelta(seconds=5)
 
@@ -913,12 +832,7 @@ async def test_idle_check_is_noop_once_already_asleep(monkeypatch):
 
     await svc._maybe_sleep_idle()
 
-    assert calls == []  # уже спит — второй docker stop не нужен
-
-
-# --- chat_id tracking + llm_idle_sleep (живая находка 2026-07-23: закрытие
-# диалога должно быть событийным — один раз на сон контейнера, только в
-# реально спрашивавшие чаты — а не сканом БД по каждому диалогу отдельно) ---
+    assert calls == []
 
 
 async def test_chat_tracks_chat_id_for_idle_sleep_event(monkeypatch):
@@ -945,11 +859,6 @@ async def test_chat_tracks_chat_id_for_idle_sleep_event(monkeypatch):
 
 
 async def test_quiet_sleep_says_nothing_and_forgets_chats(monkeypatch):
-    """Штатный роспуск («ты свободен»): прощание уже сказано ботом, и
-    llm_idle_sleep («не дождался обращения») противоречил бы ему. Список
-    чатов при этом чистится — иначе останов процесса при выключении машины
-    доложит тем же чатам llm_service_restart."""
-
     async def fake_chat(cfg, messages, system, tools=None, think=None):
         return {"message": {"content": "ответ"}}
 
@@ -970,7 +879,7 @@ async def test_quiet_sleep_says_nothing_and_forgets_chats(monkeypatch):
     assert (await svc.get_state())["asleep"] is True
     assert emitter.events == []
     await svc.notify_restart()
-    assert emitter.events == []  # и останов процесса следом — тоже молча
+    assert emitter.events == []
 
 
 async def test_sleep_without_active_chats_emits_nothing(monkeypatch):
@@ -1010,13 +919,6 @@ async def test_idle_triggered_sleep_also_emits(monkeypatch):
 
 
 async def test_idle_triggered_sleep_emits_went_idle_even_without_chats(monkeypatch):
-    """Живая находка 2026-08-03 (обкатка автовыключения mycraft): warmup без
-    единого реального обращения не рождает llm_idle_sleep вовсе (адресован
-    чатам — см. test_warmup_does_not_add_chat_id_to_active_chats), но
-    node/service.py::maybe_auto_poweroff_idle всё равно должен узнать, что
-    простой наступил — иначе автовыключение никогда не сработало бы на
-    машине, с которой Alfred просто ни разу не заговорили."""
-
     async def fake_stop(cfg):
         pass
 
@@ -1031,9 +933,6 @@ async def test_idle_triggered_sleep_emits_went_idle_even_without_chats(monkeypat
 
 
 async def test_manual_sleep_does_not_emit_went_idle(monkeypatch):
-    """`llm_went_idle` — только естественный тайм-аут (_maybe_sleep_idle),
-    не ручной вызов действия sleep (роспуск через ai_flow.py или nodectl call)."""
-
     async def fake_stop(cfg):
         pass
 
@@ -1062,7 +961,7 @@ async def test_active_chat_ids_reset_after_emit(monkeypatch):
         "chat", {"messages": [{"role": "user", "content": "привет"}], "chat_id": 1}
     )
     await svc.run_command("sleep", {})
-    await svc.run_command("sleep", {})  # второй сон подряд — новых чатов не было
+    await svc.run_command("sleep", {})
 
     assert emitter.events == [("llm_idle_sleep", {"chat_ids": [1]})]
 
@@ -1084,15 +983,9 @@ async def test_emit_failure_does_not_break_sleep(monkeypatch):
     await svc.run_command(
         "chat", {"messages": [{"role": "user", "content": "привет"}], "chat_id": 1}
     )
-    await svc.run_command("sleep", {})  # не должно бросить исключение
+    await svc.run_command("sleep", {})
 
     assert (await svc.get_state())["asleep"] is True
-
-
-# --- WSL keepalive живёт весь тёплый период, не один запрос (живая
-# находка 2026-07-23: раньше держался только на время одного вызова в
-# llm/ollama.py, и WSL гасла уже через секунды после ответа — задолго до
-# idle_sleep_after_s) ---
 
 
 class FakeKeepalive:
@@ -1118,7 +1011,7 @@ class FakeKeepalive:
 def test_keepalive_duration_covers_idle_window(monkeypatch):
     monkeypatch.setattr(llm_service.ollama, "WslKeepalive", FakeKeepalive)
     svc = LlmService(_settings(idle_sleep_after_s=1800.0))
-    assert svc._keepalive.duration_s == 1800.0 + 60.0  # запас поверх idle-порога
+    assert svc._keepalive.duration_s == 1800.0 + 60.0
 
 
 async def test_keepalive_started_on_first_activity_and_not_restarted(monkeypatch):
@@ -1132,7 +1025,7 @@ async def test_keepalive_started_on_first_activity_and_not_restarted(monkeypatch
     await svc.run_command("chat", {"messages": [{"role": "user", "content": "1"}]})
     await svc.run_command("chat", {"messages": [{"role": "user", "content": "2"}]})
 
-    assert svc._keepalive.start_calls == 1  # второй раз уже жив — не перезапускаем
+    assert svc._keepalive.start_calls == 1
 
 
 async def test_keepalive_stopped_only_when_service_actually_sleeps(monkeypatch):
@@ -1154,10 +1047,6 @@ async def test_keepalive_stopped_only_when_service_actually_sleeps(monkeypatch):
 
     assert svc._keepalive.alive is False
     assert svc._keepalive.stop_calls == 1
-
-
-# --- notify_restart (перед остановом процесса, llm/app.py — известить
-# активные чаты, что служба перезапускается, а не просто зависла) ---
 
 
 async def test_notify_restart_emits_for_active_chats(monkeypatch):
@@ -1201,10 +1090,7 @@ async def test_notify_restart_failure_is_swallowed(monkeypatch):
     await svc.run_command(
         "chat", {"messages": [{"role": "user", "content": "привет"}], "chat_id": 1}
     )
-    await svc.notify_restart()  # не должно бросить исключение наружу
-
-
-# --- Этап 47: чистая речь гостя и Ведущий интерактивов ---
+    await svc.notify_restart()
 
 
 async def test_chat_speech_clear_hint_disables_lisp_and_heals_mirror(monkeypatch):
@@ -1218,10 +1104,8 @@ async def test_chat_speech_clear_hint_disables_lisp_and_heals_mirror(monkeypatch
         "chat", {"messages": msgs, "chat_id": 42, "user_id": 42, "speech_clear": True}
     )
     assert result["response"] == "Добрый день"
-    # Зеркало запомнило: задача tasks без user_id (только chat_id) тоже чистая.
     result = await svc.run_command("chat", {"messages": msgs, "chat_id": 42})
     assert result["response"] == "Добрый день"
-    # Бот сказал «картавость снова включена» — зеркало обновилось.
     result = await svc.run_command(
         "chat", {"messages": msgs, "chat_id": 42, "user_id": 42, "speech_clear": False}
     )
@@ -1229,9 +1113,6 @@ async def test_chat_speech_clear_hint_disables_lisp_and_heals_mirror(monkeypatch
 
 
 async def test_stale_request_does_not_undo_swap_made_during_generation(monkeypatch):
-    # Живой баг 2026-09-28: запрос ушёл с speech_clear=False, пока он ~3 мин
-    # ждал Ollama, гость сменил передатчик (set_speech_clear) — флаг
-    # применяется на входе, а не после генерации, и смену не затирает.
     svc = LlmService(_settings(), speech_rand=lambda: 0.5)
 
     async def fake_chat(cfg, messages, system, tools=None, think=None):
@@ -1286,7 +1167,7 @@ async def test_director_role_uses_own_system_json_and_no_lisp(monkeypatch):
             "chat_id": 42,
         },
     )
-    assert result["response"] == '{"effect": "Шорох в эфире"}'  # без р→г и ремарок
+    assert result["response"] == '{"effect": "Шорох в эфире"}'
     assert "speech_remark" not in result
     assert seen == {"system": "ТЫ ВЕДУЩИЙ", "tools": None, "response_format": "json"}
 
@@ -1300,8 +1181,6 @@ async def test_director_role_requires_system():
 
 
 async def test_chat_returns_window_usage(monkeypatch):
-    """Этап 50: счётчики окна из ответа Ollama едут боту вместе с ответом."""
-
     async def fake_chat(cfg, messages, system, tools=None, think=None):
         return {
             "message": {"role": "assistant", "content": "Ок"},
@@ -1341,7 +1220,7 @@ async def test_summarizer_role_own_system_temperature_zero_no_lisp(monkeypatch):
             "chat_id": 42,
         },
     )
-    assert result["response"] == "Говорили про медведя Тихона."  # без р→г
+    assert result["response"] == "Говорили про медведя Тихона."
     assert "speech_remark" not in result
     assert result["prompt_eval_count"] == 5000
     assert seen["system"] == "СОЖМИ" and seen["tools"] is None

@@ -1,23 +1,7 @@
-"""strip_math_notation — зачистка LaTeX-разметки формул из ответа модели.
-
-Живая находка 2026-07-24: чисто промптовая инструкция ненадёжна (см.
-llm/prompt.py docstring) — чистим в коде после ответа модели, не полагаясь
-на то, что модель сама будет соблюдать формат. Картавость (раньше здесь же
-— apply_speech_defect) теперь вероятностная, излечимая механика «Логопед»
-— см. tests/unit/test_speech_therapy.py.
-
-wrap_context_note/wrap_system_directive — два хелпера для сборки
-messages-словарей (framing-заметка vs системная директива), см. докстринги
-в llm/prompt.py. Отдельная проверка на регрессию: у них НЕ общая роль —
-у прежней версии дизайна была одна _DIRECTIVE_ROLE на оба хелпера, из-за
-чего смена роли для директив тихо поменяла бы и роль context_note."""
-
 from __future__ import annotations
 
 from sa_home_bot.llm import prompt
 from sa_home_bot.llm.prompt import strip_math_notation, wrap_context_note, wrap_system_directive
-
-# --- strip_math_notation ---
 
 
 def test_strip_math_strips_dollar_delimiters():
@@ -70,17 +54,11 @@ def test_strip_math_full_cylinder_example_has_no_leftover_latex():
         assert token not in result
 
 
-# --- wrap_context_note / wrap_system_directive ---
-
-
 def test_wrap_context_note_returns_system_role_and_body_unchanged():
     assert wrap_context_note("hello") == {"role": "system", "content": "hello"}
 
 
 def test_wrap_context_note_role_is_system_even_if_directive_role_changes():
-    # Регрессия: раньше обе функции делили одну role-константу — смена роли
-    # директив тихо меняла бы и role заметки. wrap_context_note role="system"
-    # захардкожена независимо от _DIRECTIVE_ROLE (см. докстринг в llm/prompt.py).
     original = prompt._DIRECTIVE_ROLE
     try:
         prompt._DIRECTIVE_ROLE = "system_OTHER"

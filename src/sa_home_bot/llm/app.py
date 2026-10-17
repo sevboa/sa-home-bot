@@ -1,9 +1,3 @@
-"""Сборка и жизненный цикл службы llm (отдельный процесс, деплоится на winpc).
-
-Как apps/torrents — минимальный proto-сервер, плюс один фоновый таск
-(идле-таймер, см. LlmService.idle_loop).
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -19,9 +13,6 @@ log = logging.getLogger(__name__)
 
 
 async def run_llm(settings: Settings) -> None:
-    # server создаётся после service (см. node/app.py::run_node — тот же
-    # приём) — emit замыкается на переменную server, реально дёргается уже
-    # после server.start().
     server: ProtoServer | None = None
 
     async def emit(event_type: str, data: dict) -> None:
@@ -30,8 +21,6 @@ async def run_llm(settings: Settings) -> None:
 
     service = LlmService(settings, emit=emit)
     server = ProtoServer(settings.llm.socket, service, token=settings.swarm.token)
-    # Обработчики сигналов — до start(): он ждёт появления своего адреса
-    # (см. proto/server.py), и всё это время остановка иначе не обрабатывалась бы.
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
     await server.start()
@@ -47,9 +36,6 @@ async def run_llm(settings: Settings) -> None:
         idle_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await idle_task
-        # До остановки proto-сервера — известить чаты с активным диалогом,
-        # что Альфред отходит по делам (деплой/апдейт/ручной restart), а не
-        # просто не отвечает (см. LlmService.notify_restart).
         await service.notify_restart()
         await server.stop()
         log.info("Служба llm остановлена чисто")

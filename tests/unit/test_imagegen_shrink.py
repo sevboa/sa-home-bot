@@ -1,8 +1,3 @@
-"""llm/imagegen.py::shrink_to_png и bot/image_tools.py::upscale_png (Этап 48).
-
-Только Pillow — diffusers/torch в dev-окружении нет, и модуль не должен
-тянуть их при импорте (ленивый импорт внутри _load_pipeline_sync)."""
-
 from __future__ import annotations
 
 import io
@@ -85,7 +80,6 @@ def test_upscale_is_nearest_without_smoothing():
     small.save(buf, format="PNG")
     big = _open(upscale_png(buf.getvalue(), 8)).convert("RGB")
     assert big.size == (8, 4)
-    # чёткая граница: левая половина чёрная, правая белая, без полутонов
     assert {big.getpixel((x, 0)) for x in range(4)} == {(0, 0, 0)}
     assert {big.getpixel((x, 0)) for x in range(4, 8)} == {(255, 255, 255)}
 
@@ -96,8 +90,6 @@ def test_upscale_keeps_palette_mode():
     assert big.size == (256, 256)
     assert big.mode == "P"
 
-
-# --- apply_style: сборка промпта по шаблону из конфига ---
 
 from sa_home_bot.llm.imagegen import apply_style  # noqa: E402
 

@@ -1,9 +1,3 @@
-"""llm/ollama.py: прогрев WSL/контейнера, generate/chat, стоп.
-
-`ollama_version`/`_post_json_sync` — реальные HTTP-вызовы к loopback, здесь
-не выполняются; monkeypatch подменяет их на уровне модуля, как _run_systemctl
-в test_apps_service.py."""
-
 from __future__ import annotations
 
 import io
@@ -22,20 +16,12 @@ def _cfg(**overrides) -> LlmConfig:
 
 @pytest.fixture(autouse=True)
 def fast_warmup(monkeypatch):
-    # Не ждать реальные секунды между попытками прогрева/ретрая.
     monkeypatch.setattr(ollama, "_WARMUP_POLL_INTERVAL_S", 0.01)
     monkeypatch.setattr(ollama, "_WARMUP_TIMEOUT_S", 0.03)
     monkeypatch.setattr(ollama, "_POST_RETRY_DELAY_S", 0.01)
 
 
-# --- _post_json_sync: тело HTTP-ошибки ---
-
-
 def test_post_json_sync_includes_json_error_body_in_http_error(monkeypatch):
-    # Живой сбой 2026-08-04: str(HTTPError) по умолчанию — голое "HTTP Error
-    # 400: Bad Request", а тело ответа Ollama (реальная причина отказа)
-    # молча терялось — разбор сводился к логам трёх машин. Тело должно
-    # попасть в сообщение исключения.
     body = b'{"error": "messages: assistant tool_calls without a tool response"}'
 
     def fake_urlopen(req, timeout=None):
@@ -118,7 +104,7 @@ async def test_ensure_running_skips_warmup_when_already_up(monkeypatch):
     monkeypatch.setattr(ollama, "ollama_version", fake_version)
     monkeypatch.setattr(ollama, "_wsl_exec", fake_wsl_exec)
     await ollama.ensure_running(_cfg())
-    assert calls == []  # уже отвечает — прогрев не нужен
+    assert calls == []
 
 
 async def test_ensure_running_warms_up_then_succeeds(monkeypatch):
@@ -145,7 +131,7 @@ async def test_ensure_running_warms_up_then_succeeds(monkeypatch):
 
 async def test_ensure_running_gives_up_after_timeout(monkeypatch):
     async def fake_version(cfg, timeout=None):
-        return None  # никогда не поднимается
+        return None
 
     async def fake_wsl_exec(cfg, *args):
         return False
@@ -208,13 +194,6 @@ async def test_chat_prepends_system_message(monkeypatch):
 
 
 async def test_chat_think_none_omits_key_from_payload(monkeypatch):
-    # Живая находка 2026-07-25: раньше think=None подставлял cfg.think_chat
-    # как дефолт — решение пользователя изменило семантику, потому что
-    # принудительный think=false на новых моделях (qwen3.5/3.6, свой
-    # renderer/parser) давал галлюцинации. Теперь think=None значит "не
-    # слать поле think вообще" — пусть модель решает сама, cfg.think_chat
-    # этот путь больше не подставляет (используется явно только в
-    # bot/tools.py::tool_remind для отложенных задач).
     monkeypatch.setattr(ollama, "ensure_running", _noop)
     posted = {}
 
@@ -263,8 +242,6 @@ async def test_generate_wraps_http_error(monkeypatch):
 
 
 async def test_chat_retries_once_after_transient_connection_error(monkeypatch):
-    # Живая находка: сразу после холодного старта контейнера первый POST
-    # иногда обрывается, хотя /api/version уже отвечал — один ретрай.
     monkeypatch.setattr(ollama, "ensure_running", _noop)
     calls = {"n": 0}
 
@@ -294,12 +271,10 @@ async def test_chat_gives_up_after_exhausting_retries(monkeypatch):
         await ollama.chat(_cfg(), [{"role": "user", "content": "привет"}], "system")
 
     assert excinfo.value.code == ERR_INTERNAL
-    assert calls["n"] == ollama._POST_RETRY_ATTEMPTS  # не бесконечный ретрай
+    assert calls["n"] == ollama._POST_RETRY_ATTEMPTS
 
 
 async def test_chat_does_not_retry_real_http_error_response(monkeypatch):
-    # HTTPError — реальный ответ сервера (например, модель не найдена) —
-    # повторный точно такой же запрос даст тот же результат, ретрай бессмыслен.
     monkeypatch.setattr(ollama, "ensure_running", _noop)
     calls = {"n": 0}
 
@@ -312,16 +287,10 @@ async def test_chat_does_not_retry_real_http_error_response(monkeypatch):
         await ollama.chat(_cfg(), [{"role": "user", "content": "привет"}], "system")
 
     assert excinfo.value.code == ERR_INTERNAL
-    assert calls["n"] == 1  # ни одного ретрая
-
-
-# --- chat_stream (этап 34, Фаза 2 — Rich-стрим ответов) ---
+    assert calls["n"] == 1
 
 
 class FakeStreamResp:
-    """Файлоподобный итератор строк NDJSON — то, что реально отдаёт
-    urllib.request.urlopen() при stream=True (по строке на чанк)."""
-
     def __init__(self, lines: list[bytes]) -> None:
         self._lines = lines
 
@@ -350,7 +319,7 @@ def test_post_json_stream_sync_accumulates_chunks_and_calls_on_chunk(monkeypatch
         "http://127.0.0.1:11434/api/chat", {"messages": []}, 5.0, seen.append
     )
 
-    assert seen == ["При", "Привет"]  # накопленный текст на каждый тик, не дельта
+    assert seen == ["При", "Привет"]
     assert result["message"]["content"] == "Привет"
     assert result["eval_count"] == 5
 
@@ -390,8 +359,6 @@ async def test_chat_stream_prepends_system_message_and_sets_stream_true(monkeypa
 
 
 async def test_chat_stream_does_not_retry_once_a_chunk_already_arrived(monkeypatch):
-    # Стрим уже начался и виден в буфере частичной генерации (llm/service.py)
-    # — повтор с нуля задвоил бы текст, а не просто потратил время.
     monkeypatch.setattr(ollama, "ensure_running", _noop)
     calls = {"n": 0}
 
@@ -452,7 +419,7 @@ class FakeKeepaliveProc:
     def __init__(self) -> None:
         self.terminated = False
         self.waited = False
-        self.returncode = None  # None = ещё выполняется, как настоящий Process
+        self.returncode = None
 
     def terminate(self) -> None:
         self.terminated = True
@@ -500,22 +467,20 @@ async def test_wsl_keepalive_stop_terminates_process(monkeypatch):
 
 
 async def test_wsl_keepalive_spawn_failure_leaves_it_not_alive(monkeypatch):
-    # Не удалось поднять keepalive (например, самого wsl.exe нет) — не
-    # повод валить вызывающий код, просто остаётся "не живым".
     async def fake_exec(*args, **kwargs):
         raise OSError("wsl.exe not found")
 
     monkeypatch.setattr(ollama.asyncio, "create_subprocess_exec", fake_exec)
     keepalive = ollama.WslKeepalive(_cfg(), duration_s=60.0)
 
-    await keepalive.start()  # не бросает
+    await keepalive.start()
 
     assert keepalive.alive is False
 
 
 async def test_wsl_keepalive_stop_without_start_is_noop():
     keepalive = ollama.WslKeepalive(_cfg(), duration_s=60.0)
-    await keepalive.stop()  # не бросает, даже если start() не звали
+    await keepalive.stop()
 
 
 async def _noop(cfg):

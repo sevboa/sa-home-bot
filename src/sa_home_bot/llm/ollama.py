@@ -1,11 +1,3 @@
-"""Тонкий клиент Ollama (loopback, только localhost) + прогрев/усыпление
-контейнера внутри WSL2 на этой же машине (см. LLM_INTEGRATION_PLAN.md §0-1).
-
-Никакого httpx/aiohttp — проект сознательно не тянет HTTP-библиотеку ради
-одной локальной службы (urllib + asyncio.to_thread хватает для loopback,
-см. pyproject.toml).
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -25,19 +17,7 @@ log = logging.getLogger(__name__)
 
 _VERSION_PROBE_TIMEOUT_S = 3.0
 _WARMUP_POLL_INTERVAL_S = 2.0
-# Живая находка 2026-07-23: WSL на этой конкретной машине (старая LTSC-
-# инсталляция) автоматически "засыпает" между вызовами wsl.exe и холодно
-# стартует по новой на каждый прогрев — иногда заметно дольше 90с (первый
-# прогон в проде занял ~95с и не уложился, curl сразу после — уже отвечал).
-# Это ожидаемый режим работы (по требованию пользователя 2026-07-23: модель
-# не должна быть постоянно поднята — машина используется и для другого),
-# не баг, который нужно скрывать держа WSL всегда тёплым.
 _WARMUP_TIMEOUT_S = 150.0
-# Живая находка 2026-07-23 (позже в тот же день): даже когда /api/version
-# уже отвечает, самый первый /api/generate|chat сразу после холодного старта
-# контейнера иногда обрывается ("Remote end closed connection without
-# response") — GPU/модельный бэкенд Ollama ещё не полностью готов принимать
-# реальные запросы, хотя HTTP-сервер уже слушает. Один короткий ретрай.
 _POST_RETRY_ATTEMPTS = 3
 _POST_RETRY_DELAY_S = 3.0
 
@@ -116,7 +96,6 @@ def _post_json_stream_sync(
 async def ollama_version(
     cfg: LlmConfig, timeout: float = _VERSION_PROBE_TIMEOUT_S
 ) -> dict[str, Any] | None:
-    """None — Ollama сейчас не отвечает (контейнер спит/WSL не поднята)."""
     try:
         return await get_json_async(f"{cfg.ollama_url}/api/version", timeout)
     except JSON_FETCH_ERRORS:
@@ -128,18 +107,6 @@ def _wsl_argv(cfg: LlmConfig, *args: str) -> list[str]:
 
 
 class WslKeepalive:
-    """Держит WSL2-VM живой фоновым `wsl -d ... -- sleep N` процессом:
-    короткие `wsl -d ... -- <cmd>` вызовы (прогрев, ретраи) сами по себе
-    не мешают VM погаснуть сразу после выхода — держит только ЖИВОЙ
-    присоединённый процесс внутри неё.
-
-    Живая находка 2026-07-23: это не одноразовая обвязка вокруг ОДНОГО
-    запроса (так было раньше — и WSL гасла уже через секунды ПОСЛЕ ответа,
-    задолго до 30-минутного idle-таймера, живая находка того же дня чуть
-    позже) — владелец жизненного цикла теперь llm/service.py: старт при
-    выходе из простоя, стоп — вместе с реальным сном по idle_sleep_after_s.
-    """
-
     def __init__(self, cfg: LlmConfig, duration_s: float) -> None:
         self._cfg = cfg
         self._duration_s = duration_s
@@ -193,26 +160,13 @@ async def _wsl_exec(cfg: LlmConfig, *args: str) -> bool:
 
 
 async def ensure_running(cfg: LlmConfig) -> None:
-    """Прогреть WSL/контейнер, если Ollama сейчас не отвечает.
-
-    Дёшево, если уже поднята: один быстрый `/api/version` и выход. Ждёт
-    здесь же, синхронно с вызовом `ask`/`chat` — таймаут на это отдельный
-    (`_WARMUP_TIMEOUT_S`, чисто внутренний, локальный), протокольный таймаут
-    роя (`Envelope.timeout_s`) считается от начала запроса бота и покрывает
-    в том числе и этот прогрев.
-
-    ``container_backend == "native"`` (Linux, systemd) — своего "подъёма"
-    нет: Ollama держит себя живой сама (Restart=on-failure), здесь только
-    ждём, пока она ответит (например, после рестарта systemd-юнита) — без
-    wsl.exe/docker, которых на этой платформе просто нет.
-    """
     if await ollama_version(cfg) is not None:
         return
     if cfg.container_backend == "native":
         log.info("llm: Ollama (native) не отвечает — жду поднятия systemd-сервиса")
     else:
         log.info("llm: Ollama не отвечает — прогрев WSL/контейнера %s", cfg.ollama_container)
-        await _wsl_exec(cfg, "true")  # поднять сам дистрибутив WSL
+        await _wsl_exec(cfg, "true")
         await _wsl_exec(cfg, "docker", "start", cfg.ollama_container)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _WARMUP_TIMEOUT_S
@@ -224,13 +178,6 @@ async def ensure_running(cfg: LlmConfig) -> None:
 
 
 async def stop(cfg: LlmConfig) -> None:
-    """``native`` — процесс Ollama не трогаем (systemd always-on, отдельный
-    выделенный сервер под LLM — гасить его нечем и незачем), только просим
-    Ollama немедленно выгрузить модель из RAM явным `keep_alive: 0` (не
-    дожидаясь её собственного 5-минутного таймера, живая находка
-    2026-07-24 в LlmConfig). ``wsl-docker`` — прежнее поведение: гасим
-    контейнер, освобождая VRAM.
-    """
     if cfg.container_backend == "native":
         payload = {"model": cfg.model, "prompt": "", "stream": False, "keep_alive": 0}
         try:
@@ -242,8 +189,6 @@ async def stop(cfg: LlmConfig) -> None:
 
 
 def _is_transient_connection_error(exc: Exception) -> bool:
-    # HTTPError — реальный ответ сервера (в т.ч. с ошибкой) — не транзиентная
-    # проблема соединения, ретраить бессмысленно (тот же результат снова).
     if isinstance(exc, urllib.error.HTTPError):
         return False
     return isinstance(exc, (urllib.error.URLError, TimeoutError, OSError))
@@ -302,31 +247,11 @@ async def _post_with_retry(
     raise ProtoError(ERR_INTERNAL, f"{url}: {last_exc}")
 
 
-# Живая находка 2026-07-24: без явного "keep_alive" в запросе Ollama сама
-# выгружает модель из памяти через 5 минут после последнего ответа — это
-# ПОЛНОСТЬЮ отдельный от cfg.idle_sleep_after_s таймер (тот управляет только
-# жизнью WSL2-VM/контейнера, не самой моделью внутри Ollama). Служба об
-# этом не узнаёт (_asleep не выставляется, llm_idle_sleep не эмитится) —
-# пользователь видел только "модель зачем-то выгружается за несколько
-# минут" без единой реплики в характере. Передаём то же idle_sleep_after_s
-# как keep_alive (в секундах, Ollama принимает число) — модель и служба
-# теперь согласны, когда наступает сон, и num_ctx (см. LlmConfig.num_ctx) —
-# фиксирован явно на каждый вызов одинаково, иначе Ollama не переиспользует
-# KV-кэш между запросами, считая их разной конфигурацией.
 def _keep_alive_options(cfg: LlmConfig) -> dict[str, Any]:
     return {"keep_alive": cfg.idle_sleep_after_s, "options": {"num_ctx": cfg.num_ctx}}
 
 
 async def preload(cfg: LlmConfig) -> None:
-    """Загрузить модель в память, ничего не генерируя.
-
-    Живая находка 2026-07-27: `ensure_running` поднимает только WSL/контейнер
-    и ждёт /api/version — модели в памяти при этом нет, и первый же реальный
-    запрос платит десятки секунд за её загрузку. Для отложенных задач это
-    значит «прогрето» ≠ «ответит в срок». Ollama на пустом prompt именно
-    загружает модель и сразу отвечает (это её штатный способ preload), а
-    keep_alive держит её до конца тёплого окна — как и у обычных запросов.
-    """
     payload = {"model": cfg.model, "prompt": "", "stream": False, **_keep_alive_options(cfg)}
     await _post_with_retry(cfg, f"{cfg.ollama_url}/api/generate", payload)
 
@@ -359,21 +284,10 @@ async def chat(
         "stream": False,
         **_keep_alive_options(cfg),
     }
-    # Этап 50 (2026-09-30): сэмплинг служебного прохода (сжатие истории —
-    # temperature 0, потолок num_predict). Только параметры генерации, не
-    # загрузки: num_ctx остаётся из _keep_alive_options тем же, что у всех
-    # вызовов, — иначе Ollama пересоздала бы раннер (см. комментарий выше).
     if options:
         payload["options"] = {**options, **payload["options"]}
-    # "json" — структурный ответ (Ведущий интерактивов, Этап 47).
     if response_format is not None:
         payload["format"] = response_format
-    # think: bool | str | None. None — ключ не отправлять вовсе (не то же, что
-    # False: у моделей вроде gemma-4 явный False глушит скрытое рассуждение, а
-    # отсутствие флага — нет). Строка ("low"/"medium"/"high") — уровень
-    # reasoning для effort-моделей (gpt-oss и т.п.). Чем выразить намерение
-    # для конкретной модели решает её профиль (llm/model_profiles.py), сюда
-    # приходит уже готовое значение.
     if think is not None:
         payload["think"] = think
     if tools:
@@ -389,14 +303,6 @@ async def chat_stream(
     tools: list[dict[str, Any]] | None = None,
     think: bool | str | None = None,
 ) -> dict[str, Any]:
-    """Как chat(), но потоково (этап 34, Фаза 2 — Rich-стрим ответов).
-
-    ``on_chunk`` зовётся синхронно (функция сама выполняется в
-    ``asyncio.to_thread``, как и обычный ``chat()``) на каждый кусок текста
-    от Ollama, с уже НАКОПЛЕННЫМ содержимым — вызывающий (LlmService,
-    llm/service.py) просто кладёт его в буфер частичной генерации как есть,
-    без собственной конкатенации дельт. Возвращает тот же формат dict, что
-    и ``chat()`` — вызывающему без разницы, каким путём получен ответ."""
     full_messages = [{"role": "system", "content": system}, *messages]
     payload: dict[str, Any] = {
         "model": cfg.model,

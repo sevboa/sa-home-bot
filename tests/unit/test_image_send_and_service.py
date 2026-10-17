@@ -1,7 +1,3 @@
-"""Этап 48, обвязка вокруг картинок: Notifier.send_photo_ex (байты или
-file_id → (message_id, file_id)) и ветка generate_image службы llm
-(сам генератор замокан — diffusers в dev-окружении нет)."""
-
 from __future__ import annotations
 
 import base64
@@ -26,11 +22,7 @@ def _fast_and_isolated(tmp_path, monkeypatch):
         return None
 
     monkeypatch.setattr(notifier_module.asyncio, "sleep", _no_sleep)
-    # см. test_llm_service.py: относительный путь состояния Логопеда
     monkeypatch.chdir(tmp_path)
-
-
-# --- Notifier.send_photo_ex ---
 
 
 class PhotoBot:
@@ -95,9 +87,6 @@ async def test_send_photo_ex_message_without_photo_is_none():
     assert await Notifier(PhotoBot(photo_sizes=())).send_photo_ex(5, b"x") is None
 
 
-# --- служба llm: generate_image ---
-
-
 def _svc(**llm) -> LlmService:
     llm.setdefault("idle_sleep_after_s", 1800.0)
     return LlmService(Settings(llm=LlmConfig(model="qwen2.5:7b", **llm)))
@@ -135,7 +124,6 @@ async def test_generate_image_returns_png_b64(monkeypatch):
         "seconds": 12.3,
         "prompt": "a cat",
         "prompt_seconds": 0.0,
-        # Этап 49 (/draw): генератор-заглушка их не вернул.
         "full_prompt": None,
         "full_negative": None,
         "tokens": None,
@@ -178,7 +166,6 @@ async def test_generate_image_negative_extra_is_appended(monkeypatch):
 
 
 async def test_generate_image_hands_negative_once(monkeypatch):
-    """Руки — в негатив всегда (кроме raw), но без повтора, если уже есть."""
     seen = []
 
     async def fake_generate(prompt, negative, cfg, **kwargs):
@@ -200,8 +187,6 @@ def test_prompter_keeps_facial_expression_and_viewpoint():
 
 
 async def test_generate_image_light_goes_right_after_main_subject(monkeypatch):
-    """Свет снимка Альфреда (2026-10-06): промптер выкинул «night», и LoRA
-    нарисовала дневное окно — служба вшивает свет вторым тегом сама."""
     seen = []
 
     async def fake_generate(prompt, negative, cfg, **kwargs):
@@ -234,13 +219,11 @@ def test_put_second_move_pulls_existing_tags_forward_only_on_request():
 
     prompt = "rose, close up, dark study, night, cold blue moonlight, shelves"
     extra = "Night, cold blue moonlight"
-    # по умолчанию — как раньше: не дублирует, не переносит
     assert image_prompt.put_second(prompt, extra) == prompt
     assert (
         image_prompt.put_second(prompt, extra, move=True)
         == "rose, Night, cold blue moonlight, close up, dark study, shelves"
     )
-    # частично стоящий свет: недостающее добавляется, стоящее переносится
     assert (
         image_prompt.put_second("cat, sofa, moon", "night, moon", move=True)
         == "cat, night, moon, sofa"
@@ -278,7 +261,6 @@ def test_generate_sync_passes_guidance_from_config():
             return _R()
 
     cfg = LlmConfig(model="qwen2.5:7b", imagegen_guidance=1.5, imagegen_steps=6)
-    # generate_image собирает job из конфига (steps/guidance по умолчанию).
     job = {"ref": None, "steps": cfg.imagegen_steps, "guidance": cfg.imagegen_guidance}
     loaded = imagegen._Loaded(_Pipe(), imagegen.MODELS["dream"])
     assert imagegen._generate_sync(loaded, "a cat", "", cfg, job) == "img"
@@ -312,8 +294,6 @@ async def test_generate_image_description_goes_through_prompt_agent(monkeypatch)
 
 
 async def test_generate_image_reports_phases_through_chat_progress(monkeypatch):
-    """Снимок кабинета: request_id — фазы для chat_progress (промптер →
-    рисование → готово), и на сбое запись тоже закрывается."""
     svc = _svc(imagegen_enabled=True)
     phases = []
 
@@ -364,9 +344,6 @@ async def test_generate_image_prompt_agent_off_keeps_description(monkeypatch):
     assert seen["prompt"] == "a red dragon, castle, cinematic lighting, 8k"
 
 
-# --- Этап 49: ключи отладочного /draw в generate_image ---
-
-
 async def test_generate_image_raw_skips_prompt_agent_and_passes_options(monkeypatch):
     seen = {}
 
@@ -385,11 +362,11 @@ async def test_generate_image_raw_skips_prompt_agent_and_passes_options(monkeypa
          "seed": 5, "steps": 8},
     )
     assert seen["prompt"] == "old radio, white background"
-    assert seen["negative"] == ""  # raw — без негатива по умолчанию
+    assert seen["negative"] == ""
     assert seen["seed"] == 5 and seen["steps"] == 8
-    assert seen["style"] is False and seen["fit"] is False  # raw — и без стиля
+    assert seen["style"] is False and seen["fit"] is False
     assert seen["ref"] is None and seen["ip_scale"] is None
-    assert seen["size"] is None and seen["colors"] is None  # по умолчанию — конфиг
+    assert seen["size"] is None and seen["colors"] is None
     assert result["seed"] == 5
 
 
@@ -463,7 +440,7 @@ async def test_generate_image_bad_mode_and_ref_rules(monkeypatch):
     svc = _svc(imagegen_enabled=True, imagegen_prompt_agent=False)
     bad = [
         {"description": "x", "mode": "nope"},
-        {"description": "x", "mode": "variant"},  # без образца
+        {"description": "x", "mode": "variant"},
         {"description": "x", "mode": "item", "ref_png_b64": _png_b64()},
         {"description": "x", "seed": -1},
         {"description": "x", "ref_png_b64": base64.b64encode(b"junk").decode(),
@@ -487,7 +464,7 @@ async def test_generate_image_passes_model(monkeypatch):
     result = await svc.run_command("generate_image", {"description": "radio", "model": "rv"})
     assert seen["model"] == "rv" and result["model"] == "rv"
     await svc.run_command("generate_image", {"description": "radio"})
-    assert seen["model"] is None  # чат — модель из конфига
+    assert seen["model"] is None
     with pytest.raises(ProtoError):
         await svc.run_command("generate_image", {"description": "radio", "model": "sdxl"})
 
@@ -512,7 +489,7 @@ async def test_generate_image_validates_loras(monkeypatch):
     for bad in (
         {"loras": [["nope", 0.8]]},
         {"loras": [["giger", 5]]},
-        {"loras": [["fleshxl", 0.8]]},  # SDXL-LoRA на эталоне SD1.5
+        {"loras": [["fleshxl", 0.8]]},
         {"model": "turbo", "loras": [["giger", 0.8]]},
         {"loras": ["giger"]},
     ):

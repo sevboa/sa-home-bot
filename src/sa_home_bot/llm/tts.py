@@ -1,57 +1,3 @@
-"""Синтез речи (TTS) для голосовых ответов Альфреда в /ai.
-
-Намеренно на стороне службы llm (см. ``LlmConfig.tts_*``), не бота: та же
-служба и та же нода (сейчас mycraft — Xeon E5-2678 v3, 12 ядер/24 потока),
-что и распознавание голосовых (llm/stt.py) — по той же причине: CPU, не
-GPU/Ollama, VRAM V100 занята продовой моделью персонажа почти под завязку.
-
-Coqui XTTS v2 — voice cloning по референсному клипу (``LlmConfig.
-tts_reference_voice_path``), не набор фиксированных дикторов: голос Альфреда
-задаётся одним WAV-образцом, а не выбором из готового списка. Картавость
-персонажа (llm/speech_therapy.py) сюда не имеет отношения — она уже вшита
-побуквенной подменой в сам текст ответа ДО синтеза, поэтому синтезатору
-не нужно уметь имитировать дефект речи: он просто прочитает уже
-подменённые буквы.
-
-Живая находка 2026-08-11 (при деплое, по логам с mycraft): наивный вызов
-``tts_to_file(..., speaker_wav=путь)`` пересчитывает conditioning latents
-(проход через референс-энкодер) ЗАНОВО НА КАЖДОЕ ПРЕДЛОЖЕНИЕ входного текста
-(coqui-tts бьёт текст на предложения и синтезирует их по одному) — для
-ответа из 5 предложений это давало 58 из 77 секунд общего времени чисто на
-повторный пересчёт одного и того же голоса. Латенты считаются РОВНО ОДИН РАЗ
-при загрузке модели (``_load_model_sync``) и кладутся в самодельный
-``speaker_manager.speakers[_SPEAKER_ID]`` — тот же приём, которым XTTS сам
-кэширует пачку встроенных дикторов (``TTS.tts.layers.xtts.xtts_manager.
-SpeakerManager``, тривиальный класс-обёртка над словарём). Дальше
-``tts_to_file`` зовётся с ``speaker=_SPEAKER_ID`` вместо ``speaker_wav`` —
-``synthesize()`` внутри XTTS видит имя в ``speaker_manager.speakers`` и берёт
-латенты из памяти, не трогая референсный WAV вовсе.
-
-Плата за это: смена референсного голоса (замена файла по
-``tts_reference_voice_path``) больше НЕ подхватывается на лету — латенты
-закэшированы в резидентной модели на весь срок жизни процесса, нужен
-перезапуск службы ``llm``, как и для любого другого конфига, читаемого один
-раз при старте.
-
-XTTS v2 отдаёт только WAV — прямого OGG/Opus-выхода у Coqui нет, а Telegram
-``sendVoice`` требует именно OGG/Opus. Конвертация — внешним процессом
-``ffmpeg`` (тот же класс интеграции, что и у остальных системных утилит в
-проекте: smartctl, systemctl, git, wg — см. sensors/*.py, vpn/awg.py), не
-Python-биндинг и не новая pip-зависимость. Требует ``apt install ffmpeg`` на
-ноде — разовый инфраструктурный шаг, не покрытый extras-группой ``tts``.
-
-``coqui-tts`` — не основная зависимость пакета (устанавливается
-extras-группой ``tts``, см. pyproject.toml), поэтому импортируется лениво
-внутри ``_load_model_sync`` — модуль (и служба llm целиком) должен
-оставаться импортируемым на нодах без этой экстры.
-
-Модель распространяется под Coqui Public Model License (CPML,
-некоммерческая) — первая загрузка весов требует явного согласия, которое
-даёт оператор через переменную окружения ``COQUI_TOS_AGREED=1`` в юните
-службы (см. деплой-заметку в pyproject.toml), не код: молча соглашаться с
-лицензией от имени пользователя не наше дело.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -67,26 +13,10 @@ from sa_home_bot.llm.lazy_load import LazyModel
 log = logging.getLogger(__name__)
 
 _MODEL_NAME = "tts_models/multilingual/multi-dataset/xtts_v2"
-# Единственный голос, который у нас вообще есть (voice cloning по одному
-# референсу, не выбор из набора) — имя чисто техническое, ключ в кэше
-# латентов, никогда не показывается пользователю.
 _SPEAKER_ID = "alfred"
-
-# Модель резидентна в RAM с первого запроса до конца жизни процесса — как и
-# faster-whisper в llm/stt.py, никакой конкуренции за VRAM и незачем
-# выгружать/перезагружать между запросами. Латенты голоса (см. докстринг
-# модуля) закэшированы ВНУТРИ этого же объекта (model.synthesizer.tts_model.
-# speaker_manager) — не отдельная переменная, чтобы не рассинхронизироваться
-# с тем, для какого файла они посчитаны.
 
 
 class _VoiceCache:
-    """Подмена TTS.tts.layers.xtts.xtts_manager.SpeakerManager — та же форма
-    (``.speakers`` — словарь имя → {gpt_conditioning_latents,
-    speaker_embedding}), но без чтения ``speakers_xtts.pth`` с диска: нам
-    нужен ровно один голос, посчитанный из своего референса, а не набор
-    встроенных."""
-
     def __init__(self, speakers: dict[str, dict[str, Any]]) -> None:
         self.speakers = speakers
 
@@ -126,8 +56,6 @@ def _load_model_sync(cfg: LlmConfig) -> Any:
     return model
 
 
-
-
 def _synthesize_wav_sync(model: Any, text: str, cfg: LlmConfig) -> Path:
     cfg.tts_tmp_dir.mkdir(parents=True, exist_ok=True)
     wav_path = cfg.tts_tmp_dir / f"{uuid.uuid4().hex}.wav"
@@ -164,13 +92,6 @@ async def _wav_to_ogg(wav_path: Path, ogg_path: Path, cfg: LlmConfig) -> None:
 
 
 async def synthesize_speech(text: str, cfg: LlmConfig) -> bytes:
-    """Синтезировать голосовой ответ Альфреда, вернуть готовый OGG/Opus.
-
-    Бросает исключение при сбое (нет референсного голоса, модель не
-    загрузилась, ffmpeg упал) — в отличие от STT, где пустой результат не
-    ошибка. Вызывающий (llm/service.py) явно транслирует это в ProtoError,
-    а bot/voice_tts.py решает откатиться на текстовый ответ.
-    """
     if not Path(cfg.tts_reference_voice_path).is_file():
         raise RuntimeError(f"референсный голос не найден: {cfg.tts_reference_voice_path}")
     model = await _model.get(cfg)

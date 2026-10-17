@@ -1,18 +1,12 @@
-"""SpeechTherapist/SpeechTherapyState — вероятностная, излечимая картавость
-Альфреда («Логопед», llm/speech_therapy.py). Все проверки на детерминированном
-``rand``, чтобы не зависеть от настоящего random.random()."""
-
 from __future__ import annotations
 
 from sa_home_bot.config import LlmConfig
 from sa_home_bot.llm.speech_therapy import SpeechTherapist, SpeechTherapyState
 from sa_home_bot.utils.files import load_model, save_model
 
-# 0.5 < error_probability=1.0 (искажает), но >= _VISIT_PROBABILITY_PER_WORD=0.025
-# (визит не срабатывает) — детерминированное «только искажение, без визита».
 _CORRUPT_ONLY = 0.5
-_ALWAYS = 0.0  # < любого порога — искажает и всегда провоцирует визит
-_NEVER = 1.0  # >= error_probability=1.0 (дефолт) — никогда не срабатывает
+_ALWAYS = 0.0
+_NEVER = 1.0
 
 
 def _cfg(tmp_path, **overrides) -> LlmConfig:
@@ -62,7 +56,6 @@ def test_excluded_word_is_never_corrupted_again(tmp_path):
     cfg = _cfg(tmp_path).model_copy(update={"speech_therapy_state_path": str(path)})
     therapist = SpeechTherapist(cfg, rand=lambda: _ALWAYS)
     text, _, _ = therapist.process("сэр Роман", chat_id=1)
-    # "сэр" искажается (не в excluded), "Роман" — уже исключено, не трогаем.
     assert text.startswith("сэг Роман")
 
 
@@ -71,9 +64,6 @@ def test_visit_registers_correction_and_excludes_word(tmp_path):
     therapist = SpeechTherapist(cfg, rand=lambda: _ALWAYS)
     text, remark, just_cured = therapist.process("сэр", chat_id=1)
     assert text == "сэг"
-    # rand всегда 0.0 -> индекс шаблона тоже 0 -> канонiчная формулировка
-    # (см. llm/speech_therapy.py::_REMARK_TEMPLATES[0]). Имя жирным, реплика
-    # курсивом — решение пользователя 2026-08-04.
     assert remark == "🗣 <b>Логопед:</b> <i>Не «сэг», а «сэр»!</i>"
     assert just_cured is False
 
@@ -89,7 +79,7 @@ def test_at_most_one_visit_per_message(tmp_path):
     cfg = _cfg(tmp_path)
     therapist = SpeechTherapist(cfg, rand=lambda: _ALWAYS)
     text, remark, _ = therapist.process("сэр Роман работал", chat_id=1)
-    assert "🗣" not in text  # ремарка не подмешивается в текст ответа
+    assert "🗣" not in text
     assert remark is not None
     assert remark.count("🗣") == 1
     assert therapist.snapshot()["corrections_total"] == 1
@@ -159,10 +149,6 @@ def test_chat_id_none_behaves_as_regular_unpinned_chat(tmp_path):
 
 
 def test_all_remark_templates_format_cleanly_and_differ():
-    # Решение пользователя 2026-08-04: пул из ~30 фраз («скажи р-р-р-р,
-    # скажи эррр, не гыыы»), часть со словом ({corrupt}/{word}), часть без.
-    # +0.5 — детерминированный выбор бакета i вне зависимости от плавающей
-    # погрешности деления/умножения (i/N*N не всегда точно i).
     from sa_home_bot.llm.speech_therapy import _REMARK_TEMPLATES, _pick_remark
 
     seen = set()
@@ -187,9 +173,6 @@ def test_text_without_r_words_is_untouched_and_state_not_saved(tmp_path):
     assert not path.exists()
 
 
-# --- Этап 47: «чистая речь» гостя после смены передатчика ---
-
-
 def test_clear_user_gets_clean_text_and_no_remark(tmp_path):
     therapist = SpeechTherapist(_cfg(tmp_path), rand=lambda: _ALWAYS)
     therapist.set_clear(42, True)
@@ -198,12 +181,10 @@ def test_clear_user_gets_clean_text_and_no_remark(tmp_path):
         None,
         False,
     )
-    # Прогресс лечения не тронут — чистая речь не «лечит» Альфреда.
     assert therapist.snapshot()["corrections_total"] == 0
 
 
 def test_clear_falls_back_to_chat_id_without_user_id(tmp_path):
-    # Задачи службы tasks знают только chat_id — в личке он и есть гость.
     therapist = SpeechTherapist(_cfg(tmp_path), rand=lambda: _CORRUPT_ONLY)
     therapist.set_clear(42, True)
     assert therapist.process("пора", chat_id=42)[0] == "пора"

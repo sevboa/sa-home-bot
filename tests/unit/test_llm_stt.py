@@ -1,8 +1,3 @@
-"""Распознавание голосовых (llm/stt.py) — faster-whisper замокан целиком:
-модуль не тянется как зависимость теста, проверяем только нашу обвязку
-(временный файл создаётся/удаляется, сегменты склеиваются, модель
-кэшируется по процессу)."""
-
 from __future__ import annotations
 
 import pytest
@@ -49,7 +44,6 @@ async def test_transcribe_voice_joins_segment_text_and_removes_temp_file(tmp_pat
 
     assert text == "привет мир"
     assert len(model.calls) == 1
-    # Временный файл удалён после транскрипции — каталог остался пустым.
     assert list(cfg.stt_tmp_dir.iterdir()) == []
 
 

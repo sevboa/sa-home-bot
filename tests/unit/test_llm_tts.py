@@ -1,8 +1,3 @@
-"""Синтез голосовых ответов (llm/tts.py) — Coqui XTTS v2 и ffmpeg замокан
-целиком: модуль не тянется как зависимость теста, проверяем только нашу
-обвязку (референс проверяется, временные файлы создаются/удаляются, модель
-кэшируется по процессу)."""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -60,7 +55,6 @@ async def test_synthesize_speech_calls_model_and_cleans_temp_files(tmp_path, mon
     assert call["text"] == "Добрый вечер, сэр."
     assert call["language"] == cfg.tts_language
     assert call["speaker"] == llm_tts._SPEAKER_ID
-    # Временные wav/ogg удалены после синтеза — каталог остался пустым.
     assert list(cfg.tts_tmp_dir.iterdir()) == []
 
 
