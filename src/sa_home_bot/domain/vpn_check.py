@@ -20,6 +20,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 
+from sa_home_bot.domain.hysteresis import reconcile_band
+from sa_home_bot.domain.policy import BAND_OVER, BAND_UNDER
+
 OK = "ok"
 ALERTING = "alerting"
 PARTIAL = "partial"
@@ -96,50 +99,37 @@ def reconcile_vpn_check(
     fail_threshold: int,
     clear_threshold: int,
 ) -> tuple[CheckState, CheckTransition | None]:
-    prev_status = known.status if known else OK
-    prev_count = known.consecutive_count if known else 0
-    alerting_since = known.alerting_since if known else None
-
-    def state(status: str, count: int, since: datetime | None) -> CheckState:
-        return CheckState(
-            node=result.node,
-            server=result.server,
-            transport=result.transport,
-            target=result.target,
-            status=status,
-            last_ok=result.ok,
-            last_latency_ms=result.latency_ms,
-            last_error=result.error,
-            consecutive_count=count,
-            alerting_since=since,
-        )
-
-    def transition(from_status: str, to_status: str) -> CheckTransition:
-        return CheckTransition(
-            node=result.node,
-            server=result.server,
-            transport=result.transport,
-            target=result.target,
-            from_status=from_status,
-            to_status=to_status,
-            at=now,
-        )
-
-    if prev_status == OK:
-        # Счётчик копит подряд идущие неудачи.
-        if not result.ok:
-            count = prev_count + 1
-            if count >= fail_threshold:
-                return state(ALERTING, 0, now), transition(OK, ALERTING)
-            return state(OK, count, None), None
-        # Успех — серия неудач прервалась.
-        return state(OK, 0, None), None
-
-    # prev_status == ALERTING: счётчик копит подряд идущие успехи.
-    if result.ok:
-        count = prev_count + 1
-        if count >= clear_threshold:
-            return state(OK, 0, None), transition(ALERTING, OK)
-        return state(ALERTING, count, alerting_since), None
-    # Снова неудача — остаёмся в alerting, серия восстановления прервалась.
-    return state(ALERTING, 0, alerting_since), None
+    band = BAND_UNDER if result.ok else BAND_OVER
+    step = reconcile_band(
+        band,
+        prev_status=known.status if known else OK,
+        prev_count=known.consecutive_count if known else 0,
+        alerting_since=known.alerting_since if known else None,
+        consecutive_to_alert=fail_threshold,
+        consecutive_to_clear=clear_threshold,
+        now=now,
+    )
+    state = CheckState(
+        node=result.node,
+        server=result.server,
+        transport=result.transport,
+        target=result.target,
+        status=step.status,
+        last_ok=result.ok,
+        last_latency_ms=result.latency_ms,
+        last_error=result.error,
+        consecutive_count=step.consecutive_count,
+        alerting_since=step.alerting_since,
+    )
+    if step.transitioned_to is None:
+        return state, None
+    transition = CheckTransition(
+        node=result.node,
+        server=result.server,
+        transport=result.transport,
+        target=result.target,
+        from_status=OK if step.transitioned_to == ALERTING else ALERTING,
+        to_status=step.transitioned_to,
+        at=now,
+    )
+    return state, transition
