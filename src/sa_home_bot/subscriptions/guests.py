@@ -25,8 +25,9 @@ import logging
 from collections.abc import Sequence
 from pathlib import Path
 
-from sa_home_bot.node.instances import atomic_write
 from sa_home_bot.subscriptions.models import Subscription
+from sa_home_bot.toml_emit import toml_string, toml_value
+from sa_home_bot.utils.files import atomic_write
 
 log = logging.getLogger(__name__)
 
@@ -43,16 +44,6 @@ HEADER = """\
 """
 
 
-def _toml_string(value: str) -> str:
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    escaped = escaped.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-    return f'"{escaped}"'
-
-
-def _toml_list(values: Sequence[str]) -> str:
-    return "[" + ", ".join(_toml_string(v) for v in sorted(values)) + "]"
-
-
 def render(guests: Sequence[Subscription]) -> bytes:
     """Гостевые подписки → содержимое пакета (детерминированное).
 
@@ -63,13 +54,13 @@ def render(guests: Sequence[Subscription]) -> bytes:
     lines = [HEADER]
     for guest in sorted(guests, key=lambda g: g.chat_id):
         lines.append("[[guest_subscriptions]]")
-        lines.append(f"name = {_toml_string(guest.name)}")
+        lines.append(f"name = {toml_string(guest.name)}")
         lines.append(f"chat_id = {guest.chat_id}")
-        lines.append(f"event_types = {_toml_list(guest.event_types)}")
-        lines.append(f"allowed_commands = {_toml_list(guest.allowed_commands)}")
+        lines.append(f"event_types = {toml_value(sorted(guest.event_types))}")
+        lines.append(f"allowed_commands = {toml_value(sorted(guest.allowed_commands))}")
         lines.append(f"invited_by_chat_id = {guest.invited_by_chat_id}")
-        lines.append(f"invited_at = {_toml_string(guest.invited_at)}")
-        lines.append(f"invited_user = {_toml_string(guest.invited_user)}")
+        lines.append(f"invited_at = {toml_string(guest.invited_at)}")
+        lines.append(f"invited_user = {toml_string(guest.invited_user)}")
         lines.append("")
     return ("\n".join(lines)).encode("utf-8")
 

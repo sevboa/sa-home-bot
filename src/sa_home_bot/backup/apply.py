@@ -48,6 +48,8 @@ from sa_home_bot.backup.snapshot import SNAPSHOT_TABLES
 from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
+from sa_home_bot.toml_emit import toml_table
+from sa_home_bot.utils.files import atomic_write
 
 AWG_DIR = Path("/etc/amnezia/amneziawg")
 REALITY_ENV = Path("/etc/sa-home-reality/reality.env")
@@ -166,21 +168,6 @@ def patch_xray_config(doc: dict[str, Any], reality: dict[str, Any]) -> bool:
     return False
 
 
-def _toml_value(value: Any) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int | float):
-        return repr(value)
-    if isinstance(value, list):
-        return "[" + ", ".join(_toml_value(v) for v in value) + "]"
-    return json.dumps(str(value), ensure_ascii=False)  # JSON-строка — валидная TOML-строка
-
-
-def render_table(name: str, values: dict[str, Any]) -> str:
-    body = [f"{k} = {_toml_value(v)}" for k, v in values.items() if v is not None]
-    return "\n".join([f"[{name}]", *body]) + "\n"
-
-
 _HEADER = re.compile(r"^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$")
 
 
@@ -203,9 +190,9 @@ def patch_config_toml(text: str, identity: dict[str, Any]) -> str:
         if not skipping:
             kept.append(line)
     out = "\n".join(kept).rstrip("\n")
-    parts = [render_table("vpn", vpn)]
+    parts = [toml_table("vpn", vpn)]
     if cfg.get("vpn_reality"):
-        parts.append(render_table("vpn.reality", cfg["vpn_reality"]))
+        parts.append(toml_table("vpn.reality", cfg["vpn_reality"]))
     return (out + "\n\n" if out else "") + "\n".join(parts)
 
 
@@ -310,10 +297,7 @@ async def apply_bundle(
                 doc = json.loads(xray_path.read_text(encoding="utf-8"))
                 if patch_xray_config(doc, ident["reality"]):
                     shutil.copy2(xray_path, xray_path.with_name(xray_path.name + ".pre-restore"))
-                    tmp = xray_path.with_name(xray_path.name + ".tmp")
-                    tmp.write_text(json.dumps(doc, indent=2), encoding="utf-8")
-                    tmp.chmod(0o600)
-                    tmp.replace(xray_path)
+                    atomic_write(xray_path, json.dumps(doc, indent=2))
                     xray_reload = True
                     log(f"reality: privateKey/shortIds подставлены в {xray_path}")
             else:

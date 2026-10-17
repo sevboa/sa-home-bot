@@ -135,3 +135,28 @@ async def test_validate_on_startup_survives_a_transient_network_blip(monkeypatch
     assert issues == []
     assert book.for_chat(1).broken is False
     assert book.for_chat(2).broken is False
+
+
+def test_guest_package_bytes_are_stable():
+    from sa_home_bot.subscriptions.guests import HEADER, render
+
+    guest = Subscription(
+        name='Гость "Ы" \\ путь',
+        chat_id=7,
+        event_types=frozenset({"b", "a"}),
+        allowed_commands=frozenset({"/status"}),
+        invited_by_chat_id=1,
+        invited_at="2026-01-01T00:00:00+00:00",
+        invited_user="тест\tи\nперенос",
+    )
+    expected = (
+        HEADER + "\n[[guest_subscriptions]]\n"
+        'name = "Гость \\"Ы\\" \\\\ путь"\n'
+        "chat_id = 7\n"
+        'event_types = ["a", "b"]\n'
+        'allowed_commands = ["/status"]\n'
+        "invited_by_chat_id = 1\n"
+        'invited_at = "2026-01-01T00:00:00+00:00"\n'
+        'invited_user = "тест\\tи\\nперенос"\n'
+    )
+    assert render([guest]).decode("utf-8") == expected

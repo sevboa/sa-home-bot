@@ -34,7 +34,8 @@ from typing import Any
 from sa_home_bot.backup import sealed
 from sa_home_bot.backup.hold import HOLD_HINT, publish_allowed
 from sa_home_bot.config import Settings
-from sa_home_bot.node.instances import InstanceStore, atomic_write
+from sa_home_bot.node.instances import InstanceStore
+from sa_home_bot.utils.files import atomic_write
 from sa_home_bot.vpn import protocol as vpn_protocol
 
 log = logging.getLogger(__name__)
