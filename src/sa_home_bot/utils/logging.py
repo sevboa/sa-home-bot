@@ -1,5 +1,3 @@
-"""Настройка логирования: plain или json."""
-
 from __future__ import annotations
 
 import json
@@ -38,6 +36,5 @@ def configure_logging(level: str = "INFO", fmt: str = "plain") -> None:
     root.addHandler(handler)
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
 
-    # aiogram/apscheduler шумят на INFO — приглушаем до WARNING.
     logging.getLogger("aiogram").setLevel(logging.WARNING)
     logging.getLogger("apscheduler").setLevel(logging.WARNING)

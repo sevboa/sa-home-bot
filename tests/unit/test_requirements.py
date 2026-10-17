@@ -1,5 +1,3 @@
-"""Requirement — проверка внешних программ, ограничений по ОС и прав."""
-
 import sys
 
 import pytest
@@ -31,7 +29,7 @@ def test_program_missing(monkeypatch):
 def test_platform_mismatch_unavailable_regardless_of_program(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/whatever")
     req = Requirement(program="whatever", platforms=("win32",))
-    assert not req.available()  # sys.platform у тестов не win32
+    assert not req.available()
 
 
 def test_platform_match_is_available():
@@ -72,9 +70,6 @@ def test_install_hint_unsupported_platform_mentions_future():
     assert "служба Windows" in hint
 
 
-# --- diagnose(): типизированный аналог available() ---
-
-
 def test_diagnose_ok(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/smartctl")
     req = Requirement(program="smartctl", package="smartmontools")
@@ -91,9 +86,6 @@ def test_diagnose_unsupported_platform(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/whatever")
     req = Requirement(program="whatever", platforms=("win32",))
     assert req.diagnose() is RequirementStatus.UNSUPPORTED_PLATFORM
-
-
-# --- looks_like_permission_error(): классификация stderr ---
 
 
 @pytest.mark.parametrize(
@@ -118,9 +110,6 @@ def test_looks_like_permission_error_false(stderr):
     assert not looks_like_permission_error(stderr)
 
 
-# --- install_argv(): argv для реальной установки (nodectl fix) ---
-
-
 def test_install_argv_picks_found_manager(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/apt" if name == "apt" else None)
     assert install_argv("smartmontools") == ["apt-get", "install", "-y", "smartmontools"]
@@ -131,15 +120,10 @@ def test_install_argv_none_when_no_manager_found(monkeypatch):
     assert install_argv("smartmontools") is None
 
 
-# --- RequirementRegistry: живой реестр диагнозов ---
-
-
 def test_registry_status_for_prefers_live_static_over_stale_registry(monkeypatch):
     registry = RequirementRegistry()
     req = Requirement(program="smartctl", package="smartmontools")
     registry.report(req, RequirementStatus.NEEDS_PRIVILEGE)
-    # Программа реально отсутствует прямо сейчас — статика важнее устаревшего
-    # NEEDS_PRIVILEGE в реестре (например, программу снесли между вызовами).
     monkeypatch.setattr("shutil.which", lambda name: None)
     assert registry.status_for(req) is RequirementStatus.MISSING_PROGRAM
 
