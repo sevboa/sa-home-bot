@@ -53,13 +53,9 @@ _OWNER_ROLE_STEMS = (
 )
 
 
-def _is_owner_role_reference(query: str) -> bool:
-    return any(query.startswith(stem) for stem in _OWNER_ROLE_STEMS)
-
-
 def is_owner_role_reference(query: str) -> bool:
-    """Назван не человек, а роль владельца («хозяину», «админу»)."""
-    return _is_owner_role_reference(_norm(query))
+    normalized = _normalize_label(query)
+    return any(normalized.startswith(stem) for stem in _OWNER_ROLE_STEMS)
 
 
 @dataclass(frozen=True)
@@ -69,18 +65,19 @@ class Recipient:
     source: str
 
 
-def _norm(value: str) -> str:
+def _normalize_label(value: str) -> str:
     return value.strip().lstrip("@").casefold()
 
 
-def _matches(query: str, candidate: str) -> bool:
+def matches(query: str, candidate: str | None) -> bool:
     """Совпадает ли имя. Целиком, по слову или по началу слова.
 
     «Андрей» находит «Андрей Иванов» и «Андрюха» не находит — намеренно: в
     доставке личных сообщений лучше не угадать, чем угадать неверно и написать
     не тому человеку.
     """
-    candidate_norm = _norm(candidate)
+    query = _normalize_label(query)
+    candidate_norm = _normalize_label(candidate or "")
     if not query or not candidate_norm:
         return False
     if query == candidate_norm:
@@ -108,24 +105,6 @@ def _matches(query: str, candidate: str) -> bool:
     return True
 
 
-def matches(query: str, candidate: str | None) -> bool:
-    """Публичная обёртка _matches для поиска по описанию (bot/tools.py::
-    tool_find_person) — та же строгость: целиком, по слову, по началу слова."""
-    return _matches(_norm(query), candidate or "")
-
-
-def query_chat_id(query: str) -> int | None:
-    return _query_chat_id(query)
-
-
-def find_by_chat_id(
-    chat_id: int, book: SubscriptionBook, people: PeopleBook | None = None
-) -> list[Recipient]:
-    """Получатель по id — так адресуют tell/notify_guest/request_acquaintance
-    с Этапа 54.5: id находит find_person, имя больше не угадывается."""
-    return _find_by_chat_id(chat_id, book, people)
-
-
 # "@ник" внутри запроса. Модель любит передавать адресата целым лейблом —
 # "Наталья (@nava40a)", — где имя она уже успела переиначить (живой баг
 # 2026-09-27: гостья вошла как "Наташа Сорокина (@nava40a)"). Юзернейм же
@@ -151,14 +130,14 @@ _EXPLICIT_ID_RE = re.compile(r"(?<!\w)id\s*:?\s*(\d+)(?!\w)", re.IGNORECASE)
 _CHAT_ID_RE = re.compile(r"(?<![\w@])(\d{5,})(?!\w)")
 
 
-def _query_chat_id(query: str) -> int | None:
+def query_chat_id(query: str) -> int | None:
     match = _EXPLICIT_ID_RE.search(query) or _CHAT_ID_RE.search(query)
     return int(match.group(1)) if match else None
 
 
-def _has_handle(handle: str, candidate: str | None) -> bool:
+def _label_has_handle(handle: str, candidate: str | None) -> bool:
     """Точное совпадение юзернейма — как поля, так и слова "(@ник)" в лейбле."""
-    words = _norm(candidate or "").replace("(", " ").replace(")", " ").split()
+    words = _normalize_label(candidate or "").replace("(", " ").replace(")", " ").split()
     return any(word.lstrip("@") == handle for word in words)
 
 
@@ -185,23 +164,23 @@ def find_recipients(
     """Кандидаты под то, как человека назвали. Пусто — писать некому."""
     # Точные ключи сильнее имени: id и "@ник" уникальны, не склоняются и
     # не переиначиваются моделью. Названы — ищем только по ним.
-    chat_id = _query_chat_id(query)
+    chat_id = query_chat_id(query)
     if chat_id is not None:
-        return _find_by_chat_id(chat_id, book, people)
+        return find_by_chat_id(chat_id, book, people)
     handle = _query_handle(query)
     if handle is not None:
         by_handle = [
             Recipient(sub.chat_id, _display(sub, people), SOURCE_SUBSCRIPTION)
             for sub in book.all()
             if _is_private(sub.chat_id)
-            and any(_has_handle(handle, label) for label in _labels(sub, people))
+            and any(_label_has_handle(handle, label) for label in _labels(sub, people))
         ]
         if by_handle:
             return by_handle
         # Юзернейм не наш (сменил ник?) — пробуем имя без скобки с ником.
         query = _HANDLE_RE.sub(" ", query).replace("(", " ").replace(")", " ")
         query = " ".join(query.split())
-    wanted = _norm(query)
+    wanted = _normalize_label(query)
     if not wanted:
         return []
 
@@ -214,20 +193,20 @@ def find_recipients(
     # Роль — первой: "передай владельцу" обязано дать SOURCE_OWNER_ROLE, даже
     # если владельца зовут тем же словом, — tell пускает к владельцу без
     # знакомства только по роли.
-    if _is_owner_role_reference(wanted):
+    if is_owner_role_reference(wanted):
         for sub in book.all():
             if sub.is_owner:
                 remember(sub, SOURCE_OWNER_ROLE)
 
     for sub in book.all():
-        if any(_matches(wanted, label) for label in _labels(sub, people)):
+        if any(matches(wanted, label) for label in _labels(sub, people)):
             remember(sub, SOURCE_SUBSCRIPTION)
 
     return list(found.values())
 
 
-def _find_by_chat_id(
-    chat_id: int, book: SubscriptionBook, people: PeopleBook | None
+def find_by_chat_id(
+    chat_id: int, book: SubscriptionBook, people: PeopleBook | None = None
 ) -> list[Recipient]:
     if not _is_private(chat_id):
         return []

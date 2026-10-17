@@ -4,7 +4,7 @@ from sa_home_bot import __version__
 from sa_home_bot.bot.apps_view import render_app_card, run_app_skill
 from sa_home_bot.bot.handlers.basic import build_help
 from sa_home_bot.bot.service_link import ServiceUnavailableError
-from sa_home_bot.bot.setup import build_menu_commands
+from sa_home_bot.bot.menu import build_menu_commands
 from sa_home_bot.proto.messages import ERR_NEEDS_PRIVILEGE, ActionParam, ActionSpec, ProtoError
 from sa_home_bot.subscriptions.models import Subscription
 

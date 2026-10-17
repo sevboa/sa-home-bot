@@ -429,9 +429,6 @@ class AwayService:
     async def load(self) -> AwayState | None:
         return AwayState.from_json(await self.store.get_state(ALFRED_AWAY_KEY))
 
-    async def is_active(self) -> bool:
-        return await self.load() is not None
-
     async def _update(self, mutate: Callable[[AwayState | None], AwayState | None]) -> None:
         """Атомарная правка записи; ``mutate`` чистая (см. Store.update_state)."""
 

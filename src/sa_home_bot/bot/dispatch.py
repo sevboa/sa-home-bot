@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Protocol
 
+from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.db.store import NOTIF_ALERT, NOTIF_CLEARED, OUTBOX_KIND_ALERT, Store
 from sa_home_bot.domain.host import HostEvent
 from sa_home_bot.domain.models import Event, SmartChange
@@ -21,25 +21,10 @@ from sa_home_bot.subscriptions.book import SubscriptionBook
 log = logging.getLogger(__name__)
 
 
-class NotifierProtocol(Protocol):
-    async def send_direct(
-        self,
-        chat_id: int,
-        text: str,
-        reply_to_message_id: int | None = None,
-        *,
-        outbox_kind: str = OUTBOX_KIND_ALERT,
-        dedup_key: str | None = None,
-    ) -> int | None:
-        """Отправить сообщение. Вернуть message_id при успехе, иначе None.
-        ``outbox_kind``/``dedup_key`` — очередь недоставленного (Этап 52)."""
-        ...
-
-
 class TelegramEventDispatcher:
     def __init__(
         self,
-        notifier: NotifierProtocol,
+        notifier: Notifier,
         subscriptions: SubscriptionBook,
         store: Store,
     ) -> None:

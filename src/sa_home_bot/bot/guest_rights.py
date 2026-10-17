@@ -148,15 +148,6 @@ _BY_RIGHT = (
     | {r.right: r for r in FINE_RIGHTS}
 )
 
-# Все права, которые вообще можно выдать кнопкой ЗДЕСЬ — одиночные плюс члены
-# групп. Тонкие (FINE_RIGHTS) не входят: их страница «Добавить право» не
-# предлагает, они живут на своём экране.
-CATALOG_RIGHTS: frozenset[str] = frozenset(
-    [r.right for r in GUEST_RIGHTS]
-    + [member.right for group in GUEST_GROUPS for member in group.members]
-)
-
-
 def label(right: str) -> str:
     """Человеческое название права — или само право, если оно не в каталоге
     (например, выдано руками в config.toml до появления этой страницы)."""
@@ -166,11 +157,3 @@ def label(right: str) -> str:
 
 def group(key: str) -> RightGroup | None:
     return _BY_GROUP.get(key)
-
-
-def group_of(right: str) -> RightGroup | None:
-    """Группа, в которую входит право (None — одиночное или не из каталога)."""
-    for item in GUEST_GROUPS:
-        if right in item.rights:
-            return item
-    return None

@@ -5,6 +5,11 @@
 from sa_home_bot.bot import commands, guest_rights, guests_view
 from sa_home_bot.subscriptions.models import SOURCE_GUEST, Subscription
 
+CATALOG_RIGHTS = frozenset(
+    [r.right for r in guest_rights.GUEST_RIGHTS]
+    + [member.right for group in guest_rights.GUEST_GROUPS for member in group.members]
+)
+
 
 def _guest(
     chat_id: int,
@@ -148,7 +153,7 @@ def test_perm_add_view_excludes_already_granted():
 
 
 def test_perm_add_view_all_granted_says_so():
-    sub = _guest(77, rights=guest_rights.CATALOG_RIGHTS)
+    sub = _guest(77, rights=CATALOG_RIGHTS)
     text, kb = guests_view.build_perm_add_view(sub, 0)
     assert "уже выданы" in text
     # Кроме «Назад», выдавать больше нечего.
@@ -208,12 +213,6 @@ def test_granted_rows_counts_group_as_one():
     assert guests_view.granted_rows(sub) == 2
 
 
-def test_group_of_finds_owning_group():
-    assert guest_rights.group_of("issue@vpn") is _vpn_group()
-    assert guest_rights.group_of("chat@llm") is None
-    assert guest_rights.group_of("peers@vpn") is None
-
-
 def test_group_member_label_carries_service_prefix():
     # В общем списке прав «перевыпустить» без службы не читается.
     assert guest_rights.label("reissue@vpn") == "📶 VPN: перевыпустить"
@@ -258,7 +257,7 @@ def test_guest_rights_catalog_excludes_infrastructure_and_delegation():
         "*@vpn",
     )
     for right in forbidden:
-        assert right not in guest_rights.CATALOG_RIGHTS
+        assert right not in CATALOG_RIGHTS
 
 
 def test_guest_groups_do_not_overlap_with_single_rights():
@@ -276,7 +275,7 @@ def test_guest_groups_do_not_overlap_with_single_rights():
 def test_fine_rights_are_not_offered_on_the_add_page():
     """`proxy_link@vpn` открывается в /vpn → «👥 Все гости» → «🔐 Права VPN»:
     /guests отвечает только на вопрос «пускаем ли вообще в VPN»."""
-    sub = _guest(77, rights=guest_rights.CATALOG_RIGHTS)
+    sub = _guest(77, rights=CATALOG_RIGHTS)
     _text, kb = guests_view.build_perm_add_view(sub, 0)
     assert not any("proxy" in c for c in _callbacks(kb))
 

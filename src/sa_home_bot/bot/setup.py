@@ -28,8 +28,6 @@ from sa_home_bot.bot.handlers import (
     node,
     node_links,
     pending_actions,
-    power,
-    stats,
     status,
     swarm_panel,
     tool_debug,
@@ -39,11 +37,7 @@ from sa_home_bot.bot.handlers import (
     wake,
 )
 from sa_home_bot.bot.invites import Gatekeeper
-from sa_home_bot.bot.menu import (  # noqa: F401 — реэкспорт: меню переехало в
-    # bot/menu.py, но привычные импорты из setup остаются рабочими.
-    build_menu_commands,
-    set_bot_commands,
-)
+from sa_home_bot.bot.menu import set_bot_commands  # noqa: F401
 from sa_home_bot.bot.middlewares import (
     AuthorizationMiddleware,
     CallbackAuthorizationMiddleware,
@@ -106,9 +100,7 @@ def build_dispatcher(
     dp.include_router(swarm_panel.router)
     dp.include_router(torrents_panel.router)
     dp.include_router(status.router)
-    dp.include_router(stats.router)
     dp.include_router(control.router)
-    dp.include_router(power.router)
     dp.include_router(node.router)
     # node_links до apps: ловит фиксированные префиксы /node_* и /svc_*.
     dp.include_router(node_links.router)

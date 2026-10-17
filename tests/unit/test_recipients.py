@@ -6,7 +6,7 @@ import pytest
 from sa_home_bot.bot.recipients import (
     SOURCE_OWNER_ROLE,
     SOURCE_SUBSCRIPTION,
-    _matches,
+    matches,
     find_recipients,
 )
 from sa_home_bot.subscriptions.book import SubscriptionBook
@@ -21,32 +21,32 @@ def _guest(name: str, chat_id: int, invited_user: str | None = None) -> Subscrip
     )
 
 
-# --- _matches: сопоставление имени/ника ---
+# --- matches: сопоставление имени/ника ---
 
 
 def test_matches_exact_and_prefix_word():
-    assert _matches("андрей", "Андрей Иванов")
-    assert not _matches("андрюха", "Андрей Иванов")  # намеренно: не угадывать
+    assert matches("андрей", "Андрей Иванов")
+    assert not matches("андрюха", "Андрей Иванов")  # намеренно: не угадывать
 
 
 def test_matches_bare_username_inside_parens():
     # Живой баг 2026-08-01: invited_user вида "Имя Фамилия (@ник)" — голый
     # ник без "@" не находился, хотя имя находило того же человека.
     candidate = "Наташа Сорокина (@nava40a)"
-    assert _matches("nava40a", candidate)
-    assert _matches("наташа", candidate)
+    assert matches("nava40a", candidate)
+    assert matches("наташа", candidate)
 
 
 def test_find_recipients_by_username_with_leading_at():
     # query нормализует find_recipients (лишний "@" перед юзернеймом — как
-    # его обычно и пишут) — _matches получает уже готовое "nava40a".
+    # его обычно и пишут) — matches получает уже готовое "nava40a".
     book = SubscriptionBook([_guest("Наташа Сорокина (@nava40a)", 1243270013)])
     assert [r.chat_id for r in find_recipients("@nava40a", book)] == [1243270013]
 
 
 def test_matches_empty_query_or_candidate_is_false():
-    assert not _matches("", "Андрей Иванов")
-    assert not _matches("андрей", "")
+    assert not matches("", "Андрей Иванов")
+    assert not matches("андрей", "")
 
 
 # --- find_recipients: сборка кандидатов из people + подписок ---
@@ -191,12 +191,12 @@ def test_find_recipients_by_chat_id_in_query():
 
 
 def test_matches_multiword_query_skips_middle_name():
-    assert _matches("алексей севбо", "Алексей Александрович Севбо")
-    assert _matches("севбо алексей", "Алексей Александрович Севбо")
-    assert _matches("алекс севб", "Алексей Александрович Севбо")
-    assert not _matches("павел севбо", "Алексей Александрович Севбо")
+    assert matches("алексей севбо", "Алексей Александрович Севбо")
+    assert matches("севбо алексей", "Алексей Александрович Севбо")
+    assert matches("алекс севб", "Алексей Александрович Севбо")
+    assert not matches("павел севбо", "Алексей Александрович Севбо")
     # Одно слово кандидата не закрывает два слова запроса.
-    assert not _matches("алексей алексей", "Алексей Александрович Севбо")
+    assert not matches("алексей алексей", "Алексей Александрович Севбо")
 
 
 def test_find_recipients_owner_by_first_and_last_name():

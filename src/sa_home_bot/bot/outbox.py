@@ -16,14 +16,7 @@ from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import InlineKeyboardMarkup, ReplyParameters
 
 from sa_home_bot.bot.notifier import MAX_LEN, Notifier, is_permanent_send_error
-from sa_home_bot.db.store import (  # noqa: F401 — реэкспорт для вызывающих
-    OUTBOX_KIND_ALERT,
-    OUTBOX_KIND_DELIVER,
-    OUTBOX_KIND_INTERACTIVE,
-    OUTBOX_KIND_TASK,
-    OUTBOX_TTL,
-    Store,
-)
+from sa_home_bot.db.store import Store
 
 log = logging.getLogger(__name__)
 

@@ -11,7 +11,7 @@ build_menu_commands/build_help добавляли и вторые тоже ка�
 from __future__ import annotations
 
 from sa_home_bot.bot.handlers.basic import build_help
-from sa_home_bot.bot.setup import build_menu_commands
+from sa_home_bot.bot.menu import build_menu_commands
 from sa_home_bot.proto.messages import ActionParam, ActionSpec
 from sa_home_bot.subscriptions.models import Subscription
 
