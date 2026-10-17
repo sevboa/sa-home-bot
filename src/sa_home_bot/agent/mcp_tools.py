@@ -32,7 +32,7 @@ alfred для большинства тулов не нужен вовсе.
 ``tools_for(None)`` уже даёт fail-closed набор (тот же принцип, что у службы
 ``tasks`` без подписки, см. ``bot.tools.tools_for``).
 
-Набор тулов — не весь ``tools_for(subscription)``, а минус ``_EXCLUDED_TOOLS``
+Набор тулов — не весь ``tools_for(subscription)``, а минус ``TELEGRAM_ONLY_TOOLS``
 (см. константу ниже) — тулы, завязанные на живые Telegram-объекты бота на
 alfred, которых здесь физически нет; эта версия не пытается эмулировать мост
 к ним (отдельная, более поздняя задача).
@@ -78,60 +78,7 @@ SERVER_NAME = "sa-home-bot-agent-tools"
 # коллизия с -1 исключена практически.
 AGENT_SENTINEL_CHAT_ID = -1
 
-# Тулы, завязанные на живые Telegram-объекты бота (ctx.notifier/ctx.store/
-# ctx.dismissal/ctx.book, или на историю живого треда ctx.history) — на
-# mycraft их физически нет, мост к ним — отдельная, более поздняя задача
-# (см. план vast-skipping-crane.md, Phase 2). Разбор по каждому тулу (каталог
-# составлен разведкой bot/tools.py в этой же сессии):
-#   dismiss         — мутирует ctx.dismissal (DismissalBox), исполняется уже
-#                      ПОСЛЕ ответа хендлером bot/handlers/ai.py — без живого
-#                      Telegram-хода исполнять нечего.
-#   remind          — требует ctx.chat_id/ctx.dialogue_id/ctx.trigger_message_id
-#                      живого треда и берёт снимок ctx.history; вне диалога
-#                      сам тул честно отказывает, но семантика "запомнить и
-#                      напомнить в ЭТОМ чате" здесь не имеет смысла вовсе.
-#   tell/notify_guest — доставка личного сообщения через ctx.notifier/ctx.emit
-#                      в чужой Telegram-чат, поиск получателя по ctx.book.
-#   voice_mode       — переключает формат ОТВЕТА (voice/text) конкретного
-#                      Telegram chat_id — вне Telegram-рендеринга бессмысленно.
-#   look_at_photo    — ctx.store.latest_photo_turn(chat_id, dialogue_id):
-#                      история присланных в Telegram-тред фото конкретного чата.
-#   guests_list      — ctx.book.guests(): список гостей-подписчиков БОТА,
-#                      внутренняя ACL-модель Telegram-развёртывания, не роя.
-#   recall_tool_result — ctx.tool_result_cache живёт только в памяти ОДНОГО
-#                      прохода run_chat_loop; для дискретных вызовов этого
-#                      MCP-сервера кэша просто не существует, тул всегда
-#                      отвечал бы "ничего не сохранено".
-#   vpn              — ветки с доставкой секрета (issue/reissue/apk) шлют его
-#                      строго через ctx.notifier.send_document/photo/direct в
-#                      Telegram; тул неразделим на уровне ToolSpec на действие
-#                      (один ToolSpec на все action), поэтому исключается
-#                      целиком, а не только опасные ветки.
-#   swarm_events     — НЕ было в исходном плане, добавлено при реализации:
-#                      тул читает ctx.store.recent_events — SQLite-журнал уже
-#                      отправленных ботом Telegram-уведомлений (db/store.py на
-#                      alfred), которого на mycraft нет. В отличие от
-#                      swarm_status (тот опрашивает рой ЖИВЬЁМ через
-#                      node_link, доступен) — это исторический журнал именно
-#                      бота, не текущее состояние роя.
-_EXCLUDED_TOOLS = frozenset(
-    {
-        "dismiss",
-        "remind",
-        "tell",
-        "notify_guest",
-        "voice_mode",
-        "look_at_photo",
-        "guests_list",
-        "recall_tool_result",
-        "vpn",
-        "swarm_events",
-        "act",  # физическое действие Альфреда через Ведущего — Этап 59.7
-        "search",  # обыск места Альфреда — Этап 59, живое состояние бота
-        "walk",  # шаг по катакомбам — Этап 59.4, живое состояние бота
-        "go",  # быстрый переход Альфреда — Этап 59.5, живое состояние бота
-    }
-)
+TELEGRAM_ONLY_TOOLS = frozenset(spec.name for spec in bot_tools.TOOLS if spec.telegram_only)
 
 
 def _mcp_tool(declaration: dict[str, Any]) -> types.Tool:
@@ -186,7 +133,7 @@ class AgentMcpTools:
             tools=[
                 _mcp_tool(declaration)
                 for declaration in toolkit.declarations
-                if declaration["function"]["name"] not in _EXCLUDED_TOOLS
+                if declaration["function"]["name"] not in TELEGRAM_ONLY_TOOLS
             ]
         )
 
@@ -195,9 +142,9 @@ class AgentMcpTools:
     ) -> types.CallToolResult:
         # Чёрный список проверяется здесь тоже, не только в tools/list —
         # клиент мог запомнить имя из более раннего list_tools до правки
-        # _EXCLUDED_TOOLS, либо просто выдумать имя (тот же приём, что
+        # TELEGRAM_ONLY_TOOLS, либо просто выдумать имя (тот же приём, что
         # llm_chat.run_chat_loop использует для незаявленных тулов).
-        if params.name in _EXCLUDED_TOOLS:
+        if params.name in TELEGRAM_ONLY_TOOLS:
             return types.CallToolResult(
                 content=[
                     types.TextContent(type="text", text=f"неизвестный инструмент: {params.name}")
