@@ -62,6 +62,7 @@ from pathlib import Path
 from typing import Any
 
 from sa_home_bot.config import LlmConfig
+from sa_home_bot.llm.lazy_load import LazyModel
 
 log = logging.getLogger(__name__)
 
@@ -77,8 +78,6 @@ _SPEAKER_ID = "alfred"
 # модуля) закэшированы ВНУТРИ этого же объекта (model.synthesizer.tts_model.
 # speaker_manager) — не отдельная переменная, чтобы не рассинхронизироваться
 # с тем, для какого файла они посчитаны.
-_model: Any = None
-_model_lock = asyncio.Lock()
 
 
 class _VoiceCache:
@@ -127,13 +126,6 @@ def _load_model_sync(cfg: LlmConfig) -> Any:
     return model
 
 
-async def _get_model(cfg: LlmConfig) -> Any:
-    global _model
-    if _model is None:
-        async with _model_lock:
-            if _model is None:
-                _model = await asyncio.to_thread(_load_model_sync, cfg)
-    return _model
 
 
 def _synthesize_wav_sync(model: Any, text: str, cfg: LlmConfig) -> Path:
@@ -181,7 +173,7 @@ async def synthesize_speech(text: str, cfg: LlmConfig) -> bytes:
     """
     if not Path(cfg.tts_reference_voice_path).is_file():
         raise RuntimeError(f"референсный голос не найден: {cfg.tts_reference_voice_path}")
-    model = await _get_model(cfg)
+    model = await _model.get(cfg)
     wav_path = await asyncio.to_thread(_synthesize_wav_sync, model, text, cfg)
     ogg_path = wav_path.with_suffix(".ogg")
     try:
@@ -191,3 +183,6 @@ async def synthesize_speech(text: str, cfg: LlmConfig) -> bytes:
         for p in (wav_path, ogg_path):
             with contextlib.suppress(OSError):
                 p.unlink()
+
+
+_model = LazyModel(lambda cfg: _load_model_sync(cfg))

@@ -19,6 +19,7 @@ from typing import Any
 
 from sa_home_bot.config import LlmConfig
 from sa_home_bot.proto.messages import ERR_INTERNAL, ProtoError
+from sa_home_bot.utils.http import JSON_FETCH_ERRORS, get_json_async
 
 log = logging.getLogger(__name__)
 
@@ -41,33 +42,32 @@ _POST_RETRY_ATTEMPTS = 3
 _POST_RETRY_DELAY_S = 3.0
 
 
-def _post_json_sync(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
-    body = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+def _append_error_body(exc: urllib.error.HTTPError) -> None:
+    detail = exc.read().decode("utf-8", "replace").strip()
+    with contextlib.suppress(ValueError):
+        parsed = json.loads(detail)
+        if isinstance(parsed, dict) and parsed.get("error"):
+            detail = str(parsed["error"])
+    if detail:
+        exc.msg = f"{exc.msg}: {detail}"
+
+
+def _json_post_request(url: str, payload: dict[str, Any]) -> urllib.request.Request:
+    return urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
+
+
+def _post_json_sync(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — только localhost
+        with urllib.request.urlopen(_json_post_request(url, payload), timeout=timeout) as resp:  # noqa: S310
             return json.loads(resp.read())
     except urllib.error.HTTPError as exc:
-        # Живая находка 2026-08-04: str(exc) по умолчанию — голое "HTTP Error
-        # 400: Bad Request", тело ответа Ollama (с точной причиной валидации
-        # запроса) терялось молча. Разбор сбоя без него сводился к чтению
-        # логов трёх машин (см. bot/node_events.py::ALBERT_TASK_MISSED) —
-        # дописываем тело в exc.msg, оно же уходит дальше в ProtoError.
-        detail = exc.read().decode("utf-8", "replace").strip()
-        with contextlib.suppress(ValueError):
-            parsed = json.loads(detail)
-            if isinstance(parsed, dict) and parsed.get("error"):
-                detail = str(parsed["error"])
-        if detail:
-            exc.msg = f"{exc.msg}: {detail}"
+        _append_error_body(exc)
         raise
-
-
-def _get_json_sync(url: str, timeout: float) -> dict[str, Any]:
-    with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 — только localhost
-        return json.loads(resp.read())
 
 
 def _post_json_stream_sync(
@@ -76,25 +76,11 @@ def _post_json_stream_sync(
     timeout: float,
     on_chunk: Callable[[str], None],
 ) -> dict[str, Any]:
-    """Как _post_json_sync, но для запросов со `"stream": True` — Ollama
-    отдаёт NDJSON (по строке на чанк вместо одного JSON-документа),
-    ``on_chunk`` зовётся на каждую строку с уже НАКОПЛЕННЫМ (не дельта)
-    текстом — тот же контракт, что ждёт LlmService.run_command (этап 34,
-    Фаза 2). Возвращает dict в том же формате, что и chat() без стрима:
-    финальный чанк Ollama (``done: true``) несёт tool_calls/метаданные, сюда
-    же подставляется полный склеенный текст в message.content."""
-    body = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
-    )
     content_parts: list[str] = []
-    # Этап 50: thinking раньше выбрасывался целиком — лог (llm/service.py::
-    # _log_ollama_timings) не видел, сколько окна ушло в рассуждение. Копим
-    # только ради длины в логе, наружу боту он не едет.
     thinking_parts: list[str] = []
     final: dict[str, Any] = {}
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — только localhost
+        with urllib.request.urlopen(_json_post_request(url, payload), timeout=timeout) as resp:  # noqa: S310
             for raw_line in resp:
                 line = raw_line.strip()
                 if not line:
@@ -110,14 +96,7 @@ def _post_json_stream_sync(
                 if chunk.get("done"):
                     final = chunk
     except urllib.error.HTTPError as exc:
-        # См. _post_json_sync — то же дописывание тела ответа в exc.msg.
-        detail = exc.read().decode("utf-8", "replace").strip()
-        with contextlib.suppress(ValueError):
-            parsed = json.loads(detail)
-            if isinstance(parsed, dict) and parsed.get("error"):
-                detail = str(parsed["error"])
-        if detail:
-            exc.msg = f"{exc.msg}: {detail}"
+        _append_error_body(exc)
         raise
     final_message = dict(final.get("message") or {})
     final_message["content"] = "".join(content_parts)
@@ -132,9 +111,13 @@ async def ollama_version(
 ) -> dict[str, Any] | None:
     """None — Ollama сейчас не отвечает (контейнер спит/WSL не поднята)."""
     try:
-        return await asyncio.to_thread(_get_json_sync, f"{cfg.ollama_url}/api/version", timeout)
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return await get_json_async(f"{cfg.ollama_url}/api/version", timeout)
+    except JSON_FETCH_ERRORS:
         return None
+
+
+def _wsl_argv(cfg: LlmConfig, *args: str) -> list[str]:
+    return ["wsl", "-d", cfg.wsl_distro, "-u", "root", "--", *args]
 
 
 class WslKeepalive:
@@ -162,14 +145,7 @@ class WslKeepalive:
     async def start(self) -> None:
         try:
             self._proc = await asyncio.create_subprocess_exec(
-                "wsl",
-                "-d",
-                self._cfg.wsl_distro,
-                "-u",
-                "root",
-                "--",
-                "sleep",
-                str(int(self._duration_s)),
+                *_wsl_argv(self._cfg, "sleep", str(int(self._duration_s))),
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -190,13 +166,7 @@ class WslKeepalive:
 async def _wsl_exec(cfg: LlmConfig, *args: str) -> bool:
     try:
         proc = await asyncio.create_subprocess_exec(
-            "wsl",
-            "-d",
-            cfg.wsl_distro,
-            "-u",
-            "root",
-            "--",
-            *args,
+            *_wsl_argv(cfg, *args),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -272,71 +242,13 @@ def _is_transient_connection_error(exc: Exception) -> bool:
     return isinstance(exc, (urllib.error.URLError, TimeoutError, OSError))
 
 
-async def _post_with_retry(cfg: LlmConfig, url: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """``ensure_running`` вызывается на КАЖДУЮ попытку, не один раз до цикла:
-    без него ретрай просто бился бы в ту же отвалившуюся WSL/контейнер.
-    ``ensure_running`` быстрый no-op, если Ollama и так уже отвечает.
-
-    WSL-keepalive здесь сознательно не заводим — эта функция вызывается на
-    КАЖДЫЙ запрос, а держать VM живой нужно на весь «тёплый» idle-период
-    (до 30 минут), не только на один запрос (живая находка 2026-07-23: раньше
-    keepalive был здесь и WSL гасла уже через секунды после ответа) —
-    владеет им llm/service.py::LlmService (WslKeepalive.start()/stop()
-    вокруг всего простоя, не вокруг одного запроса).
-
-    Живая находка 2026-07-27: ретраи считались без оглядки на общий бюджет —
-    3 попытки по (до 150с прогрева + до request_timeout_s на сам POST)
-    складывались в ~20 минут, тогда как вызывающий ждёт ровно
-    request_timeout_s (Envelope.timeout_s). Клиент отваливался задолго до
-    того, как служба сдавалась, и вместо внятной ошибки наверх приходил
-    голый таймаут. Теперь дедлайн общий: новая попытка не начинается, если
-    время вызывающего всё равно вышло.
-    """
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + cfg.request_timeout_s
-    last_exc: Exception | None = None
-    for attempt in range(1, _POST_RETRY_ATTEMPTS + 1):
-        await ensure_running(cfg)
-        left = deadline - loop.time()
-        if left <= 0:
-            break
-        try:
-            return await asyncio.to_thread(_post_json_sync, url, payload, left)
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-            last_exc = exc
-            if attempt >= _POST_RETRY_ATTEMPTS or not _is_transient_connection_error(exc):
-                break
-            if deadline - loop.time() <= _POST_RETRY_DELAY_S:
-                break
-            log.warning(
-                "llm: %s оборвался сразу после прогрева (%s) — повтор через %.0fс (попытка %d/%d)",
-                url,
-                exc,
-                _POST_RETRY_DELAY_S,
-                attempt,
-                _POST_RETRY_ATTEMPTS,
-            )
-            await asyncio.sleep(_POST_RETRY_DELAY_S)
-    if last_exc is None:
-        raise ProtoError(
-            ERR_INTERNAL, f"{url}: бюджет {cfg.request_timeout_s:.0f}с истёк на прогреве"
-        )
-    raise ProtoError(ERR_INTERNAL, f"{url}: {last_exc}")
-
-
-async def _post_stream_with_retry(
+async def _post_with_retry(
     cfg: LlmConfig,
     url: str,
     payload: dict[str, Any],
-    on_chunk: Callable[[str], None],
+    on_chunk: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Как _post_with_retry, но для потокового /api/chat (этап 34, Фаза 2).
-
-    Ретраится только попытка, в которой не пришло НИ ОДНОГО чанка — если
-    стрим уже начался и оборвался, накопленный текст уже ушёл в on_chunk
-    (буфер частичной генерации, llm/service.py) и виден пользователю в
-    Rich-черновике; повторять запрос с нуля означало бы задвоение текста в
-    буфере на следующий заход, не только трату времени."""
+    streaming = on_chunk is not None
     loop = asyncio.get_running_loop()
     deadline = loop.time() + cfg.request_timeout_s
     last_exc: Exception | None = None
@@ -347,25 +259,27 @@ async def _post_stream_with_retry(
             break
         sent_any = False
 
-        def _on_chunk(text: str) -> None:
+        def _mark_chunk(text: str) -> None:
             nonlocal sent_any
             sent_any = True
             on_chunk(text)
 
         try:
-            return await asyncio.to_thread(_post_json_stream_sync, url, payload, left, _on_chunk)
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            if streaming:
+                return await asyncio.to_thread(
+                    _post_json_stream_sync, url, payload, left, _mark_chunk
+                )
+            return await asyncio.to_thread(_post_json_sync, url, payload, left)
+        except JSON_FETCH_ERRORS as exc:
             last_exc = exc
-            if sent_any or attempt >= _POST_RETRY_ATTEMPTS or not _is_transient_connection_error(
-                exc
-            ):
+            if sent_any or attempt >= _POST_RETRY_ATTEMPTS or not _is_transient_connection_error(exc):
                 break
             if deadline - loop.time() <= _POST_RETRY_DELAY_S:
                 break
             log.warning(
-                "llm: %s (стрим) оборвался сразу после прогрева (%s) — повтор через %.0fс "
-                "(попытка %d/%d)",
+                "llm: %s%s оборвался сразу после прогрева (%s) — повтор через %.0fс (попытка %d/%d)",
                 url,
+                " (стрим)" if streaming else "",
                 exc,
                 _POST_RETRY_DELAY_S,
                 attempt,
@@ -485,4 +399,4 @@ async def chat_stream(
         payload["think"] = think
     if tools:
         payload["tools"] = tools
-    return await _post_stream_with_retry(cfg, f"{cfg.ollama_url}/api/chat", payload, on_chunk)
+    return await _post_with_retry(cfg, f"{cfg.ollama_url}/api/chat", payload, on_chunk)

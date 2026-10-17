@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from sa_home_bot.config import LlmConfig
+from sa_home_bot.llm.lazy_load import LazyModel
 
 log = logging.getLogger(__name__)
 
@@ -37,8 +38,6 @@ log = logging.getLogger(__name__)
 # отличие от Ollama/gemma4:e4b (отброшенный вариант архитектуры), тут нет
 # конкуренции за VRAM и незачем выгружать/перезагружать между запросами:
 # medium занимает ~1.5 ГБ, при 62 ГБ RAM на mycraft это не заметно.
-_model: Any = None
-_model_lock = asyncio.Lock()
 
 
 def _load_model_sync(cfg: LlmConfig) -> Any:
@@ -60,13 +59,6 @@ def _load_model_sync(cfg: LlmConfig) -> Any:
     return model
 
 
-async def _get_model(cfg: LlmConfig) -> Any:
-    global _model
-    if _model is None:
-        async with _model_lock:
-            if _model is None:
-                _model = await asyncio.to_thread(_load_model_sync, cfg)
-    return _model
 
 
 def _write_transcribe_cleanup_sync(
@@ -99,8 +91,11 @@ async def transcribe_voice(raw_bytes: bytes, cfg: LlmConfig) -> str:
     Пустая строка — распознать не удалось (тишина/неразборчиво), это не
     ошибка; вызывающий (llm/service.py) решает, как её показать пользователю.
     """
-    model = await _get_model(cfg)
+    model = await _model.get(cfg)
     text = await asyncio.to_thread(
         _write_transcribe_cleanup_sync, model, raw_bytes, cfg.stt_tmp_dir, cfg
     )
     return text.strip()
+
+
+_model = LazyModel(lambda cfg: _load_model_sync(cfg))

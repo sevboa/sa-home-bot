@@ -55,7 +55,7 @@ async def test_synthesize_speech_calls_model_and_cleans_temp_files(tmp_path, mon
     async def fake_get_model(cfg):
         return model
 
-    monkeypatch.setattr(llm_tts, "_get_model", fake_get_model)
+    monkeypatch.setattr(llm_tts._model, "get", fake_get_model)
     monkeypatch.setattr(llm_tts, "_wav_to_ogg", _fake_wav_to_ogg_factory(b"fake-ogg-bytes"))
 
     cfg = _cfg(tmp_path)
@@ -86,7 +86,7 @@ async def test_synthesize_speech_cleans_temp_files_even_on_ffmpeg_failure(tmp_pa
     async def fake_wav_to_ogg_fail(wav_path, ogg_path, cfg):
         raise RuntimeError("ffmpeg упал")
 
-    monkeypatch.setattr(llm_tts, "_get_model", fake_get_model)
+    monkeypatch.setattr(llm_tts._model, "get", fake_get_model)
     monkeypatch.setattr(llm_tts, "_wav_to_ogg", fake_wav_to_ogg_fail)
 
     cfg = _cfg(tmp_path)
@@ -94,20 +94,3 @@ async def test_synthesize_speech_cleans_temp_files_even_on_ffmpeg_failure(tmp_pa
         await llm_tts.synthesize_speech("текст", cfg)
 
     assert list(cfg.tts_tmp_dir.iterdir()) == []
-
-
-async def test_get_model_loads_once_and_caches(tmp_path, monkeypatch):
-    calls = []
-
-    def fake_load(cfg):
-        calls.append(cfg)
-        return _FakeXttsModel()
-
-    monkeypatch.setattr(llm_tts, "_load_model_sync", fake_load)
-
-    cfg = _cfg(tmp_path)
-    m1 = await llm_tts._get_model(cfg)
-    m2 = await llm_tts._get_model(cfg)
-
-    assert m1 is m2
-    assert len(calls) == 1

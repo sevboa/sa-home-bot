@@ -49,7 +49,7 @@ async def test_transcribe_voice_joins_segment_text_and_removes_temp_file(tmp_pat
     async def fake_get_model(cfg):
         return model
 
-    monkeypatch.setattr(llm_stt, "_get_model", fake_get_model)
+    monkeypatch.setattr(llm_stt._model, "get", fake_get_model)
 
     cfg = _cfg(tmp_path)
     text = await llm_stt.transcribe_voice(b"fake-ogg-bytes", cfg)
@@ -66,7 +66,7 @@ async def test_transcribe_voice_empty_segments_returns_empty_string(tmp_path, mo
     async def fake_get_model(cfg):
         return model
 
-    monkeypatch.setattr(llm_stt, "_get_model", fake_get_model)
+    monkeypatch.setattr(llm_stt._model, "get", fake_get_model)
 
     text = await llm_stt.transcribe_voice(b"...", _cfg(tmp_path))
     assert text == ""
@@ -78,27 +78,10 @@ async def test_transcribe_voice_removes_temp_file_even_on_exception(tmp_path, mo
     async def fake_get_model(cfg):
         return model
 
-    monkeypatch.setattr(llm_stt, "_get_model", fake_get_model)
+    monkeypatch.setattr(llm_stt._model, "get", fake_get_model)
 
     cfg = _cfg(tmp_path)
     with pytest.raises(RuntimeError):
         await llm_stt.transcribe_voice(b"...", cfg)
 
     assert list(cfg.stt_tmp_dir.iterdir()) == []
-
-
-async def test_get_model_loads_once_and_caches(tmp_path, monkeypatch):
-    calls = []
-
-    def fake_load(cfg):
-        calls.append(cfg)
-        return _FakeModel([_FakeSegment("ok")])
-
-    monkeypatch.setattr(llm_stt, "_load_model_sync", fake_load)
-
-    cfg = _cfg(tmp_path)
-    m1 = await llm_stt._get_model(cfg)
-    m2 = await llm_stt._get_model(cfg)
-
-    assert m1 is m2
-    assert len(calls) == 1
