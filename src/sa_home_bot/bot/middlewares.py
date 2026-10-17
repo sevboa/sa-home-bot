@@ -28,6 +28,7 @@ from sa_home_bot.subscriptions.book import SubscriptionBook
 log = logging.getLogger(__name__)
 
 DENIED_TEXT = "⛔️ Команда недоступна в этом чате."
+DENIED_ALERT_TEXT = "⛔️ Недоступно"
 
 
 def _update_chat_id(update: Update) -> int | None:
@@ -148,9 +149,7 @@ class AuthorizationMiddleware(BaseMiddleware):
         # Управляющая команда — проверяем права (алиасы делят одно право).
         if commands.is_control(command):
             right = commands.required_right(command)
-            if subscription is None or subscription.broken or not subscription.allows_command(
-                right
-            ):
+            if subscription is None or not subscription.allows_command(right):
                 log.info("Отказ в /%s для chat_id=%s", command, chat_id)
                 await event.answer(DENIED_TEXT)
                 return None
@@ -190,7 +189,7 @@ class CallbackAuthorizationMiddleware(BaseMiddleware):
                 )
             ):
                 log.info("Отказ в действии %s для chat_id=%s", event.data, chat_id)
-                await event.answer("⛔️ Недоступно", show_alert=True)
+                await event.answer(DENIED_ALERT_TEXT, show_alert=True)
                 return None
             return await handler(event, data)
 
@@ -199,13 +198,9 @@ class CallbackAuthorizationMiddleware(BaseMiddleware):
         if cmd is None:
             return await handler(event, data)
 
-        if (
-            subscription is None
-            or subscription.broken
-            or not subscription.allows_command(cmd.right or cmd.name)
-        ):
+        if subscription is None or not subscription.allows_command(cmd.right or cmd.name):
             log.info("Отказ в кнопке %s для chat_id=%s", event.data, chat_id)
-            await event.answer("⛔️ Недоступно", show_alert=True)
+            await event.answer(DENIED_ALERT_TEXT, show_alert=True)
             return None
 
         return await handler(event, data)

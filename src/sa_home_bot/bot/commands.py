@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from sa_home_bot.bot.ui.callback_data import pack
+
+if TYPE_CHECKING:
+    from sa_home_bot.subscriptions.models import Subscription
 
 
 @dataclass(frozen=True)
@@ -127,6 +131,16 @@ CONTROL_COMMANDS: list[Command] = [c for c in ALL_COMMANDS if not c.universal]
 MENU_UNIVERSAL_COMMANDS: list[Command] = [c for c in UNIVERSAL_COMMANDS if c.menu]
 # Управляющие, попадающие в меню/список умений (сейчас только STATUS).
 MENU_CONTROL_COMMANDS: list[Command] = [c for c in CONTROL_COMMANDS if c.menu]
+
+
+def can_run_action(subscription: Subscription | None, action_id: str, service: str) -> bool:
+    return subscription is not None and subscription.allows_action(action_id, service)
+
+
+def menu_control_commands_for(subscription: Subscription | None) -> list[Command]:
+    if subscription is None:
+        return []
+    return [c for c in MENU_CONTROL_COMMANDS if subscription.allows_command(c.right or c.name)]
 
 # Кнопки-представления под /status: callback-код → команда. Действия служб
 # (скан и т.п.) сюда не входят — они строятся динамически из describe (см.

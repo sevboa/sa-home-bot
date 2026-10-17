@@ -18,7 +18,7 @@ import logging
 from aiogram import F, Router
 from aiogram.types import Message
 
-from sa_home_bot.bot import apps_view
+from sa_home_bot.bot import apps_view, commands
 from sa_home_bot.bot.middlewares import DENIED_TEXT, extract_command
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.subscriptions.models import Subscription
@@ -44,9 +44,7 @@ async def cmd_app_skill(
     )
     if action is None:
         return  # не скилл-приложение — игнор, как любую неизвестную команду
-    if subscription is None or not subscription.allows_action(
-        command, apps_view.APPS_SERVICE
-    ):
+    if not commands.can_run_action(subscription, command, apps_view.APPS_SERVICE):
         log.info("Отказ в скилле /%s для chat_id=%s", command, message.chat.id)
         await message.answer(DENIED_TEXT)
         return

@@ -42,21 +42,9 @@ def build_menu_commands(
     """Меню чата: скилы (приложения + ноды) по правам, затем универсальные."""
     menu = [
         BotCommand(command=action.id, description=f"{action.title}: состояние и веб-морда")
-        for action in app_actions
-        # Параметризованные (start/stop/restart с обязательным "какое
-        # приложение") — только кнопки на карточке конкретного приложения
-        # (apps_view.run_app_skill), не голые команды меню — живой баг
-        # 2026-07-18: /start/stop/restart лезли в меню без указания, какое
-        # приложение, и падали "нет такого приложения: ''".
-        if not action.params
-        and action.id not in apps_view.HIDDEN_MENU_APP_IDS
-        and subscription.allows_action(action.id, apps_view.APPS_SERVICE)
+        for action in apps_view.visible_skill_actions(subscription, app_actions)
     ]
-    menu += [
-        _to_bot_command(c)
-        for c in commands.MENU_CONTROL_COMMANDS
-        if subscription.allows_command(c.right or c.name)
-    ]
+    menu += [_to_bot_command(c) for c in commands.menu_control_commands_for(subscription)]
     menu += [_to_bot_command(c) for c in commands.MENU_UNIVERSAL_COMMANDS]
     return menu
 

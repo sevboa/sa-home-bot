@@ -21,6 +21,7 @@ from urllib.parse import unquote
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from sa_home_bot.bot import commands
 from sa_home_bot.bot.middlewares import DENIED_TEXT
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.torrent_pending import PendingTorrent, PendingTorrents
@@ -104,7 +105,7 @@ async def cmd_torrent_file(
 ) -> None:
     if not _is_torrent_document(message):
         return  # не .torrent — не наш файл, игнор
-    if subscription is None or not subscription.allows_action(ACTION_ADD, SERVICE):
+    if not commands.can_run_action(subscription, ACTION_ADD, SERVICE):
         await message.answer(DENIED_TEXT)
         return
     buf = await message.bot.download(message.document)
@@ -120,7 +121,7 @@ async def cmd_torrent_magnet(
     pending_torrents: PendingTorrents,
     subscription: Subscription | None = None,
 ) -> None:
-    if subscription is None or not subscription.allows_action(ACTION_ADD, SERVICE):
+    if not commands.can_run_action(subscription, ACTION_ADD, SERVICE):
         await message.answer(DENIED_TEXT)
         return
     magnet = message.text.strip()
@@ -134,7 +135,7 @@ async def cb_torrent_save(
     pending_torrents: PendingTorrents,
     subscription: Subscription | None = None,
 ) -> None:
-    if subscription is None or not subscription.allows_action(ACTION_ADD, SERVICE):
+    if not commands.can_run_action(subscription, ACTION_ADD, SERVICE):
         await callback.answer(DENIED_TEXT, show_alert=True)
         return
     parts = (callback.data or "").split(":")

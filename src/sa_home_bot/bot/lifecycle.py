@@ -9,7 +9,7 @@ import logging
 from typing import Any
 
 from sa_home_bot.bot import tool_debug
-from sa_home_bot.bot.notifier import Notifier
+from sa_home_bot.bot.notifier import Notifier, broadcast
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.domain.models import EVENT_SYSTEM, POWER_UNEXPECTED, PowerEvent
 from sa_home_bot.domain.render import render_outage_line
@@ -50,26 +50,15 @@ def render_link_restored(downtime_seconds: float) -> str:
     )
 
 
-async def broadcast_system(
-    book: SubscriptionBook, notifier: Notifier, text: str
-) -> int:
-    sent = 0
-    for sub in book.accepting(EVENT_SYSTEM):
-        if await notifier.send_direct(sub.chat_id, text) is not None:
-            sent += 1
+async def broadcast_system(book: SubscriptionBook, notifier: Notifier, text: str) -> int:
+    sent = await broadcast(book.accepting(EVENT_SYSTEM), notifier, text)
     log.info("Системное событие разослано %d подписчикам", sent)
     return sent
 
 
 async def broadcast_all(book: SubscriptionBook, notifier: Notifier, text: str) -> int:
-    """Буквально всем не-broken подпискам, без opt-in по event_types —
-    для событий, которые обязаны дойти и до гостей (у тех event_types по
-    умолчанию пуст, book.accepting() их бы не нашёл). Тот же приём, что
-    уже применён в notify_tool_call ниже."""
-    sent = 0
-    for sub in book.all():
-        if not sub.broken and await notifier.send_direct(sub.chat_id, text) is not None:
-            sent += 1
+    alive = (sub for sub in book.all() if not sub.broken)
+    sent = await broadcast(alive, notifier, text)
     log.info("Событие разослано %d подписчикам (broadcast_all)", sent)
     return sent
 
@@ -106,6 +95,7 @@ async def notify_tool_call(
     # каждой реплике, это давало спам в личный чат админа, хотя дебаг-канал
     # для него не заводили. alfred_tool_call — только явный opt-in по
     # точному имени, вайлдкард на него не распространяется.
-    for sub in book.all():
-        if not sub.broken and EVENT_ALFRED_TOOL_CALL in sub.event_types:
-            await notifier.send_direct(sub.chat_id, text, reply_markup=markup)
+    opted_in = (
+        sub for sub in book.all() if not sub.broken and EVENT_ALFRED_TOOL_CALL in sub.event_types
+    )
+    await broadcast(opted_in, notifier, text, reply_markup=markup)

@@ -9,11 +9,13 @@ command к службе apps → карточка с состоянием юни
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from aiogram.types import InlineKeyboardMarkup
 
-from sa_home_bot.bot import actions
+from sa_home_bot.bot import actions, commands
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
-from sa_home_bot.proto.messages import ERR_NEEDS_PRIVILEGE, ProtoError
+from sa_home_bot.proto.messages import ERR_NEEDS_PRIVILEGE, ActionSpec, ProtoError
 from sa_home_bot.subscriptions.models import Subscription
 
 APPS_SERVICE = "apps"
@@ -34,6 +36,18 @@ _APP_STATUS = {
     "inactive": "⏹ остановлен",
     "failed": "❌ упал",
 }
+
+
+def visible_skill_actions(
+    subscription: Subscription | None, app_actions: Sequence[ActionSpec]
+) -> list[ActionSpec]:
+    return [
+        action
+        for action in app_actions
+        if not action.params
+        and action.id not in HIDDEN_MENU_APP_IDS
+        and commands.can_run_action(subscription, action.id, APPS_SERVICE)
+    ]
 
 
 def render_app_card(app: dict) -> str:

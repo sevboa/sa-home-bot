@@ -58,7 +58,7 @@ async def _owner_tz(away: AwayService, user):
 
 
 def _is_owner(subscription: Subscription | None) -> bool:
-    return subscription is not None and not subscription.broken and subscription.is_owner
+    return subscription is not None and subscription.is_owner
 
 
 @router.message(Command(commands.AWAY.name))
