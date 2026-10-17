@@ -14,7 +14,8 @@ from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.proto.messages import ERR_BAD_REQUEST, ProtoError
 from sa_home_bot.vpn import protocol as vpn_protocol
 from sa_home_bot.vpn.protocol import TRANSPORT_AWG, TRANSPORT_REALITY
-from sa_home_bot.vpn.service import _FLOWER_NAMES, GB, VpnService, _random_device_label
+from sa_home_bot.vpn.protocol import FLOWER_NAMES, GB
+from sa_home_bot.vpn.service import VpnService, _random_device_label
 
 CHAT = 111
 OTHER_CHAT = 222
@@ -123,18 +124,18 @@ async def test_private_key_never_stored_in_db(env):
 
 
 def test_random_device_label_avoids_active_names_when_possible():
-    used = set(_FLOWER_NAMES[:-1])
-    assert _random_device_label(used) == _FLOWER_NAMES[-1]
+    used = set(FLOWER_NAMES[:-1])
+    assert _random_device_label(used) == FLOWER_NAMES[-1]
 
 
 def test_random_device_label_falls_back_to_full_pool_when_exhausted():
-    assert _random_device_label(set(_FLOWER_NAMES)) in _FLOWER_NAMES
+    assert _random_device_label(set(FLOWER_NAMES)) in FLOWER_NAMES
 
 
 async def test_issue_without_label_assigns_random_english_label(env):
     svc, _backend, _events = env
     result = await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT})
-    assert result["device_label"] in _FLOWER_NAMES
+    assert result["device_label"] in FLOWER_NAMES
 
 
 async def test_issue_honours_explicit_device_label(env):

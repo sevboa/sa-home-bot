@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 
 from sa_home_bot.reality.routing import (
     DIRECT_SUFFIXES,
@@ -28,6 +28,9 @@ _TAG_DIRECT_MANUAL = "ru-direct-manual"
 _TAG_BLOCKED = "ru-blocked"
 _TAG_INSIDE = "ru-inside"
 
+DEFAULT_FLOW = "xtls-rprx-vision"
+CLIENT_FINGERPRINT = "chrome"
+
 
 @dataclass(frozen=True)
 class RealityParams:
@@ -39,7 +42,7 @@ class RealityParams:
     server_public_key: str
     short_id: str
     sni: str
-    flow: str = "xtls-rprx-vision"
+    flow: str = DEFAULT_FLOW
 
 
 def _remote_ruleset(tag: str) -> dict:
@@ -61,12 +64,7 @@ def _inline_direct_ruleset() -> dict:
     }
 
 
-def render_singbox_config(
-    params: RealityParams,
-    client_uuid: str,
-    *,
-    all_proxy: bool = False,
-) -> str:
+def _singbox_config(params: RealityParams, client_uuid: str, *, all_proxy: bool) -> dict:
     """Полный sing-box конфиг под одно устройство. Имя профиля клиенту задаёт
     имя файла (``<label>.json``), не содержимое.
 
@@ -87,7 +85,7 @@ def render_singbox_config(
         "tls": {
             "enabled": True,
             "server_name": params.sni,
-            "utls": {"enabled": True, "fingerprint": "chrome"},
+            "utls": {"enabled": True, "fingerprint": CLIENT_FINGERPRINT},
             "reality": {
                 "enabled": True,
                 "public_key": params.server_public_key,
@@ -161,7 +159,20 @@ def render_singbox_config(
             "auto_detect_interface": True,
         },
     }
+    return config
+
+
+def _dump_singbox(config: dict) -> str:
     return json.dumps(config, indent=2, ensure_ascii=False) + "\n"
+
+
+def render_singbox_config(
+    params: RealityParams,
+    client_uuid: str,
+    *,
+    all_proxy: bool = False,
+) -> str:
+    return _dump_singbox(_singbox_config(params, client_uuid, all_proxy=all_proxy))
 
 
 def render_vless_url(params: RealityParams, client_uuid: str, label: str) -> str:
@@ -175,7 +186,7 @@ def render_vless_url(params: RealityParams, client_uuid: str, label: str) -> str
             ("flow", params.flow),
             ("security", "reality"),
             ("sni", params.sni),
-            ("fp", "chrome"),
+            ("fp", CLIENT_FINGERPRINT),
             ("pbk", params.server_public_key),
             ("sid", params.short_id),
             ("type", "tcp"),
@@ -185,6 +196,42 @@ def render_vless_url(params: RealityParams, client_uuid: str, label: str) -> str
         f"vless://{client_uuid}@{params.endpoint_host}:{int(params.port)}"
         f"?{query}#{quote(label, safe='')}"
     )
+
+
+def parse_vless_url(url: str) -> tuple[RealityParams, str]:
+    """Обратное к ``client_config.py::render_vless_url``: достать параметры
+    Reality-сервера и UUID клиента прямо из выданной гостю ссылки — не
+    ходить за ними в конфиг сервера (пробник — другая нода, читать его
+    приватный ``config.toml`` ей и незачем, и негде)."""
+    parsed = urlsplit(url)
+    if parsed.scheme != "vless":
+        raise ValueError(f"не vless:// ссылка: {url!r}")
+    client_uuid = parsed.username
+    if not client_uuid:
+        raise ValueError("vless:// без uuid перед @")
+    host = parsed.hostname
+    port = parsed.port
+    if host is None or port is None:
+        raise ValueError("vless:// без host:port")
+    query = parse_qs(parsed.query)
+
+    def _param(name: str, *, default: str | None = None) -> str:
+        values = query.get(name)
+        if values:
+            return values[0]
+        if default is not None:
+            return default
+        raise ValueError(f"vless:// без обязательного параметра {name}")
+
+    params = RealityParams(
+        endpoint_host=host,
+        port=port,
+        server_public_key=_param("pbk"),
+        short_id=_param("sid"),
+        sni=_param("sni"),
+        flow=_param("flow", default=DEFAULT_FLOW),
+    )
+    return params, client_uuid
 
 
 def render_deep_link(vless_url: str) -> str:
@@ -210,13 +257,11 @@ def render_singbox_multi(
     if not servers:
         raise ValueError("нужна хотя бы одна страна")
     _first_name, first_params, first_uuid = servers[0]
-    config = json.loads(render_singbox_config(first_params, first_uuid, all_proxy=all_proxy))
+    config = _singbox_config(first_params, first_uuid, all_proxy=all_proxy)
     outbounds: list[dict] = []
     for name, params, client_uuid in servers:
-        single = json.loads(render_singbox_config(params, client_uuid, all_proxy=all_proxy))
-        out = dict(single["outbounds"][0])
-        out["tag"] = name
-        outbounds.append(out)
+        single = _singbox_config(params, client_uuid, all_proxy=all_proxy)
+        outbounds.append({**single["outbounds"][0], "tag": name})
     names = [o["tag"] for o in outbounds]
     outbounds.append(
         {
@@ -233,5 +278,4 @@ def render_singbox_multi(
     )
     outbounds.append({"type": "direct", "tag": "direct"})
     config["outbounds"] = outbounds
-    # DNS через туннель ходит по тегу proxy — selector его принимает как detour.
-    return json.dumps(config, indent=2, ensure_ascii=False) + "\n"
+    return _dump_singbox(config)

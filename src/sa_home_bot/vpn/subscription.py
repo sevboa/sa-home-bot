@@ -26,10 +26,12 @@ from datetime import UTC, datetime
 from urllib.parse import quote
 
 from sa_home_bot.reality.client_config import (
+    DEFAULT_FLOW,
     RealityParams,
     render_singbox_multi,
     render_vless_url,
 )
+from sa_home_bot.vpn.protocol import GB, country_flag
 
 TOKEN_LEN = 32
 _TOKEN_RE = re.compile(rf"^[A-Za-z0-9_-]{{{TOKEN_LEN}}}$")
@@ -115,7 +117,7 @@ class SubEntry:
                 server_public_key=str(p["server_public_key"]),
                 short_id=str(p["short_id"]),
                 sni=str(p["sni"]),
-                flow=str(p.get("flow") or "xtls-rprx-vision"),
+                flow=str(p.get("flow") or DEFAULT_FLOW),
             ),
         )
 
@@ -218,7 +220,6 @@ METHOD_AWG = "AmneziaVPN"
 METHOD_VLESS = "VLESS · Hiddify"
 VIA_AWG = "awg"  # ответ /where: трафик идёт через эту ноду по AmneziaWG
 VIA_VLESS = "vless"
-_VIA_METHOD = {VIA_AWG: METHOD_AWG, VIA_VLESS: METHOD_VLESS}
 
 
 def detect_via(addr: str, nodes: tuple[NodeInfo, ...], local_subnet: str) -> str:
@@ -312,7 +313,7 @@ _MONTHS_GEN = (
 
 
 def _gb(value: int) -> str:
-    gb = max(value, 0) / 1_000_000_000
+    gb = max(value, 0) / GB
     return f"{gb:.0f}" if gb >= 10 else f"{gb:.1f}".removesuffix(".0")
 
 
@@ -410,11 +411,6 @@ def _links(*pairs: tuple[str, str]) -> str:
     return "".join(
         f'<a class="l" href="{e(url, quote=True)}">{e(name)}</a>' for name, url in pairs if url
     )
-
-
-def flag_of(name: str) -> str:
-    flag = [c for c in name if 0x1F1E6 <= ord(c) <= 0x1F1FF]
-    return "".join(flag[:2])
 
 
 _OFF_HINT = "Включите VPN (в Hiddify — круглая кнопка) и вернитесь на эту страницу."
@@ -523,7 +519,7 @@ def _awg_card(sub: Subscription, forms: dict[str, str], platform: str, links: Pa
         nonce = forms.get(node.node)
         if nonce is None:
             continue
-        flag = flag_of(node.name) or node.name
+        flag = country_flag(node.name) or node.name
         if node.awg_key:
             act = f'<button class="btn alt re" type="button">🔄 Перевыпустить {e(flag)}</button>'
             msg = "Ключ уже выпускался — показать его нельзя."

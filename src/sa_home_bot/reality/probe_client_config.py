@@ -22,45 +22,14 @@ sing-box поверх.
 from __future__ import annotations
 
 import json
-from urllib.parse import parse_qs, urlsplit
 
-from sa_home_bot.reality.client_config import RealityParams
+from sa_home_bot.reality.client_config import (
+    CLIENT_FINGERPRINT,
+    RealityParams,
+    parse_vless_url,
+)
 
-
-def parse_vless_url(url: str) -> tuple[RealityParams, str]:
-    """Обратное к ``client_config.py::render_vless_url``: достать параметры
-    Reality-сервера и UUID клиента прямо из выданной гостю ссылки — не
-    ходить за ними в конфиг сервера (пробник — другая нода, читать его
-    приватный ``config.toml`` ей и незачем, и негде)."""
-    parsed = urlsplit(url)
-    if parsed.scheme != "vless":
-        raise ValueError(f"не vless:// ссылка: {url!r}")
-    client_uuid = parsed.username
-    if not client_uuid:
-        raise ValueError("vless:// без uuid перед @")
-    host = parsed.hostname
-    port = parsed.port
-    if host is None or port is None:
-        raise ValueError("vless:// без host:port")
-    query = parse_qs(parsed.query)
-
-    def _param(name: str, *, default: str | None = None) -> str:
-        values = query.get(name)
-        if values:
-            return values[0]
-        if default is not None:
-            return default
-        raise ValueError(f"vless:// без обязательного параметра {name}")
-
-    params = RealityParams(
-        endpoint_host=host,
-        port=port,
-        server_public_key=_param("pbk"),
-        short_id=_param("sid"),
-        sni=_param("sni"),
-        flow=_param("flow", default="xtls-rprx-vision"),
-    )
-    return params, client_uuid
+__all__ = ["parse_vless_url", "render_probe_client_config"]
 
 
 def render_probe_client_config(params: RealityParams, client_uuid: str, *, socks_port: int) -> str:
@@ -104,7 +73,7 @@ def render_probe_client_config(params: RealityParams, client_uuid: str, *, socks
                         "serverName": params.sni,
                         "publicKey": params.server_public_key,
                         "shortId": params.short_id,
-                        "fingerprint": "chrome",
+                        "fingerprint": CLIENT_FINGERPRINT,
                     },
                 },
             }

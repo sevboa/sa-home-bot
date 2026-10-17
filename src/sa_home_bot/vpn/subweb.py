@@ -410,7 +410,7 @@ class SubscriptionWeb:
             return self._json({"ok": False, "error": "failed", "nonce": nxt}, 502)
         try:
             key = amnezia_key.build_key(
-                conf, f"{sub.flag_of(node.name)} {found.device_label}".strip()
+                conf, f"{vpn_protocol.country_flag(node.name)} {found.device_label}".strip()
             )
         except amnezia_key.ConfigError as exc:
             log.warning("vpn: ключ vpn:// для AmneziaVPN не собран: %s", exc)

@@ -82,11 +82,11 @@ from sa_home_bot.reality.client_config import (
     render_vless_url,
 )
 from sa_home_bot.reality.xray import XrayBackend
+from sa_home_bot.utils.clock import utc_now
 from sa_home_bot.vpn import apk as apk_client
 from sa_home_bot.vpn import subscription as subs
 from sa_home_bot.vpn.awg import AwgBackend
 from sa_home_bot.vpn.protocol import (
-    FLOWER_NAMES,
     ACTION_APK_CHUNK,
     ACTION_APK_INFO,
     ACTION_APK_SET_FILE_ID,
@@ -123,6 +123,10 @@ from sa_home_bot.vpn.protocol import (
     EVENT_VPN_QUOTA_EXCEEDED,
     EVENT_VPN_QUOTA_WARNING,
     EVENT_VPN_SERVER_RESTORED,
+    FLOWER_NAMES,
+    GB,
+    NODE_SENTINEL_CHAT_ID,
+    PROBE_CHAT_ID,
     PROXY_SECRET_SEED,
     SERVICE_NAME,
     TELEGRAM_EGRESS_TARGET,
@@ -138,18 +142,8 @@ from sa_home_bot.vpn_check import protocol as vpn_check_protocol
 
 log = logging.getLogger(__name__)
 
-# Байты в гигабайте — десятичный (10^9), как считают провайдеры трафика, а
-# не 2^30 (гибибайт): пользователю обещают «500 ГБ», это должно совпадать.
-GB = 1_000_000_000
 # Предел имени устройства, заданного ботом (этап 57.1).
 MAX_DEVICE_LABEL_LEN = 64
-# chat_id пробника vpn_check (node/fixups.py::VPN_PROBE_CHAT_ID) — не гость.
-PROBE_CHAT_ID = 0
-
-# Сентинельный chat_id для учёта состояния "весь канал ноды" в тех же
-# таблицах, что и учёт по чатам (vpn_quota_state) — реальный Telegram
-# chat_id никогда не бывает 0, коллизии не будет.
-NODE_SENTINEL_CHAT_ID = 0
 
 # Локальные копии констант сервиса node (node/service.py::SERVICE_NAME,
 # ACTION_TRIGGER_PEERS) — тот же приём, что уже используют node/peers.py,
@@ -174,14 +168,13 @@ CHECK_STALE_FACTOR = 3
 # .conf = "<слово>_<таймстамп>" не должно превышать 15 символов — предел
 # имени тоннеля wireguard-android (NAME_PATTERN, см. bot/handlers/vpn.py и
 # bot/tools.py, где имя файла реально собирается).
-_FLOWER_NAMES = FLOWER_NAMES
 
 
 def _random_device_label(used: set[str]) -> str:
     """Случайное имя, по возможности не повторяющее уже активные устройства
     этого гостя (не критично для работы — только чтобы список в /vpn не
     путал одинаковыми именами; настоящая уникальность пира — public_key)."""
-    pool = [name for name in _FLOWER_NAMES if name not in used] or list(_FLOWER_NAMES)
+    pool = [name for name in FLOWER_NAMES if name not in used] or list(FLOWER_NAMES)
     return random.choice(pool)
 
 
@@ -196,10 +189,6 @@ APK_DOWNLOAD_TIMEOUT_S = 90.0
 APK_CHUNK_BYTES = 700 * 1024
 
 EmitFn = Callable[[str, dict[str, Any]], Awaitable[None]]
-
-
-def _now() -> datetime:
-    return datetime.now(tz=UTC)
 
 
 def _month_key(when: datetime) -> str:
@@ -406,7 +395,7 @@ class VpnService:
                 ),
             ),
         ]
-        if self._reality is not None and self._reality_cfg is not None:
+        if self._reality_enabled:
             capabilities += [ACTION_GET_VLESS]
             actions += [
                 ActionSpec(
@@ -417,7 +406,7 @@ class VpnService:
             ]
         # Подписка Hiddify (57.10): get_subscription — для бота; sub_links —
         # служебное между vpn-нодами (собрать VLESS устройства по токену).
-        if self._reality is not None and self._reality_cfg is not None:
+        if self._reality_enabled:
             capabilities += [ACTION_GET_SUBSCRIPTION, ACTION_SUB_LINKS, ACTION_SUB_GEN]
             actions += [
                 ActionSpec(
@@ -680,7 +669,7 @@ class VpnService:
         await self._db.conn.execute(
             "INSERT INTO vpn_quota_grants (chat_id, month, bytes, source, request_id, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (chat_id, month, bytes_, source, request_id, _now().isoformat()),
+            (chat_id, month, bytes_, source, request_id, utc_now().isoformat()),
         )
         await self._db.conn.commit()
 
@@ -769,7 +758,7 @@ class VpnService:
             )
             live_r = (
                 await self._reality.list_clients()
-                if self._reality is not None and self._reality_cfg is not None
+                if self._reality_enabled
                 else None
             )
             live_key = await self._server_public_key() if self._has(TRANSPORT_AWG) else None
@@ -818,7 +807,7 @@ class VpnService:
             "INSERT INTO vpn_chat_access (chat_id, allowed, base_bytes, updated_at) "
             "SELECT DISTINCT chat_id, 1, NULL, ? FROM vpn_peers WHERE status = 'active' "
             "ON CONFLICT(chat_id) DO NOTHING",
-            (_now().isoformat(),),
+            (utc_now().isoformat(),),
         )
         if cur.rowcount:
             await self._db.conn.commit()
@@ -838,7 +827,7 @@ class VpnService:
     # --- reconciler ---
 
     async def reconcile(self) -> None:
-        month = _month_key(_now())
+        month = _month_key(utc_now())
         blocked = await self._blocked_chats(month)
         allowed = await self._allowed_chats()
         cur = await self._db.conn.execute(
@@ -865,7 +854,7 @@ class VpnService:
                 if pubkey not in current:
                     await self._backend.add_peer(pubkey, address)
 
-        if self._reality is not None and self._reality_cfg is not None:
+        if self._reality_enabled:
             # reality: ключ — email (совпадает с ключом list_clients/statsquery
             # на сервере), значение — UUID клиента xray (колонка public_key).
             desired_r = {
@@ -892,7 +881,7 @@ class VpnService:
             "INSERT INTO vpn_meta (key, value, updated_at) VALUES (?, ?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
             "updated_at = excluded.updated_at",
-            (key, value, _now().isoformat()),
+            (key, value, utc_now().isoformat()),
         )
         await self._db.conn.commit()
 
@@ -914,8 +903,7 @@ class VpnService:
         except Exception:  # noqa: BLE001 — не смогли прочитать ключ: не судим
             log.warning("vpn: сверка ключа awg-сервера после старта не удалась", exc_info=True)
         if (
-            self._reality is not None
-            and self._reality_cfg is not None
+            self._reality_enabled
             and self._reality_cfg.server_public_key
         ):
             fingerprints[TRANSPORT_REALITY] = self._reality_cfg.server_public_key
@@ -986,9 +974,24 @@ class VpnService:
         return raw
 
     @staticmethod
+    def _device_label(args: dict[str, Any]) -> str:
+        return str(args.get("device_label") or "").strip()
+
+    @staticmethod
+    def _required_device_label(args: dict[str, Any]) -> str:
+        label = VpnService._device_label(args)
+        if not label:
+            raise ProtoError(ERR_BAD_REQUEST, "не указано устройство (device_label)")
+        return label
+
+    @property
+    def _reality_enabled(self) -> bool:
+        return self._reality is not None and self._reality_cfg is not None
+
+    @staticmethod
     def _explicit_label(args: dict[str, Any]) -> str | None:
         """Заданное ботом имя устройства (этап 57.1) или None — тогда случайное."""
-        label = str(args.get("device_label") or "").strip()
+        label = VpnService._device_label(args)
         if not label:
             return None
         if len(label) > MAX_DEVICE_LABEL_LEN or any(ord(c) < 32 for c in label):
@@ -1047,7 +1050,7 @@ class VpnService:
         existing_labels = await self._active_labels(chat_id)
         explicit = None if forced_label else self._explicit_label(args)
         device_label = forced_label or explicit or _random_device_label(existing_labels)
-        now = _now().isoformat()
+        now = utc_now().isoformat()
 
         self._sub_cache.clear()
         async with self._issue_lock:
@@ -1137,7 +1140,7 @@ class VpnService:
                 "address": address,
             }
         else:  # TRANSPORT_REALITY
-            assert self._reality is not None and self._reality_cfg is not None
+            assert self._reality_enabled
             client_uuid = str(uuidlib.uuid4())
             email = _reality_email(chat_id, device_label)
             # server_pubkey у reality — публичный ключ Reality-сервера на момент
@@ -1174,9 +1177,7 @@ class VpnService:
 
     async def _reissue(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)
-        device_label = str(args.get("device_label") or "").strip()
-        if not device_label:
-            raise ProtoError(ERR_BAD_REQUEST, "не указано устройство (device_label)")
+        device_label = self._required_device_label(args)
         # Проверка здесь, а не только в _issue: перевыпуск снимает старый пир
         # ДО выдачи нового, и недопущенный остался бы вообще без устройства.
         self._sub_cache.clear()
@@ -1189,7 +1190,7 @@ class VpnService:
         if row is not None:
             await self._db.conn.execute(
                 "UPDATE vpn_peers SET status = 'expired', revoked_at = ? WHERE public_key = ?",
-                (_now().isoformat(), row["public_key"]),
+                (utc_now().isoformat(), row["public_key"]),
             )
             await self._db.conn.commit()
             await self._remove_from_backend(transport, row["public_key"], row["address"])
@@ -1203,13 +1204,13 @@ class VpnService:
     async def _revoke(self, args: dict[str, Any]) -> dict[str, Any]:
         self._sub_cache.clear()
         chat_id = self._chat_id(args)
-        device_label = str(args.get("device_label") or "").strip()
+        device_label = self._device_label(args)
         row = await self._active_row(chat_id, device_label, self._optional_transport(args))
         if row is None:
             raise ProtoError(ERR_BAD_REQUEST, f"нет активного устройства «{device_label}»")
         await self._db.conn.execute(
             "UPDATE vpn_peers SET status = 'revoked', revoked_at = ? WHERE public_key = ?",
-            (_now().isoformat(), row["public_key"]),
+            (utc_now().isoformat(), row["public_key"]),
         )
         await self._db.conn.commit()
         await self._remove_from_backend(
@@ -1225,10 +1226,8 @@ class VpnService:
         """Ссылка/sing-box конфиг/QR VLESS существующего устройства без
         перевыпуска: UUID клиента лежит в vpn_peers.public_key."""
         chat_id = self._chat_id(args)
-        device_label = str(args.get("device_label") or "").strip()
-        if not device_label:
-            raise ProtoError(ERR_BAD_REQUEST, "не указано устройство (device_label)")
-        if self._reality is None or self._reality_cfg is None:
+        device_label = self._required_device_label(args)
+        if not self._reality_enabled:
             raise ProtoError(ERR_BAD_REQUEST, f"на сервере {self._node} нет VLESS")
         await self._require_access(chat_id)
         row = await self._active_row(chat_id, device_label, TRANSPORT_REALITY)
@@ -1247,10 +1246,8 @@ class VpnService:
         """Адреса страницы и подписки устройства на ЭТОЙ ноде. Токен из них
         годится на любой vpn-ноде; адрес привязан к ноде, ответившей боту."""
         chat_id = self._chat_id(args)
-        device_label = str(args.get("device_label") or "").strip()
-        if not device_label:
-            raise ProtoError(ERR_BAD_REQUEST, "не указано устройство (device_label)")
-        if self._reality is None or self._reality_cfg is None:
+        device_label = self._required_device_label(args)
+        if not self._reality_enabled:
             raise ProtoError(ERR_BAD_REQUEST, f"на сервере {self._node} нет VLESS")
         if self.sub_web is None or not self.sub_web.listening:
             raise ProtoError(ERR_BAD_REQUEST, f"страница подписки на {self._node} не запущена")
@@ -1325,7 +1322,7 @@ class VpnService:
     async def _sub_local(self, token: str) -> tuple[int, str, str] | None:
         """``(chat_id, label, uuid)`` активного VLESS-ключа ЭТОЙ ноды с таким
         токеном: MAC пересчитывается по каждому ключу (их единицы), без хранилища."""
-        if self._reality is None or self._reality_cfg is None:
+        if not self._reality_enabled:
             return None
         cur = await self._db.conn.execute(
             "SELECT chat_id, device_label, public_key FROM vpn_peers "
@@ -1377,7 +1374,7 @@ class VpnService:
         if found is None:
             return {"found": False, "info": await self._sub_device_info(token, args, base)}
         chat_id, label, client_uuid = found
-        month = _month_key(_now())
+        month = _month_key(utc_now())
         entry = subs.SubEntry(
             node=self._node_id,
             name=self._sub_entry_name(),
@@ -1525,7 +1522,7 @@ class VpnService:
         if entries and (subs.token_gen(token) or 0) >= newest_gen:
             if not label:
                 label = "устройство"
-            nxt = _now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            nxt = utc_now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             nxt = (nxt + timedelta(days=32)).replace(day=1)
             result = subs.Subscription(
                 device_label=label,
@@ -1585,7 +1582,7 @@ class VpnService:
     # --- квоты ---
 
     async def _usage(self, args: dict[str, Any]) -> dict[str, Any]:
-        month = _month_key(_now())
+        month = _month_key(utc_now())
         raw_chat_id = args.get("chat_id")
         if raw_chat_id is not None:
             chat_id = self._chat_id(args)
@@ -1682,7 +1679,7 @@ class VpnService:
         if raw_bytes is None:
             raise ProtoError(ERR_BAD_REQUEST, "не указан bytes — целевой лимит месяца")
         target = int(raw_bytes)
-        month = _month_key(_now())
+        month = _month_key(utc_now())
         current_limit = await self._limit_bytes(chat_id, month)
         delta = target - current_limit
         if delta:
@@ -1724,7 +1721,7 @@ class VpnService:
             "INSERT INTO vpn_chat_access (chat_id, allowed, base_bytes, updated_at) "
             "VALUES (?, ?, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET allowed = excluded.allowed, "
             "base_bytes = excluded.base_bytes, updated_at = excluded.updated_at",
-            (chat_id, int(allowed), base_bytes, _now().isoformat()),
+            (chat_id, int(allowed), base_bytes, utc_now().isoformat()),
         )
         await self._db.conn.commit()
 
@@ -1732,14 +1729,14 @@ class VpnService:
         # квоты — при поднятом лимите он сам снимется. Затем реконсайл уже на
         # сам переключатель: пиры поднимаются/снимаются сразу, а не через тик
         # сэмплера.
-        month = _month_key(_now())
+        month = _month_key(utc_now())
         await self._check_thresholds(chat_id, month)
         await self.reconcile()
         return await self._usage({"chat_id": chat_id})
 
     async def _grant_extra(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)
-        month = _month_key(_now())
+        month = _month_key(utc_now())
         # Самообслуживание открыто только когда трафик РЕАЛЬНО заканчивается
         # (решение пользователя 2026-08-03) — гость с почти полной квотой не
         # может докупить впрок; порог тот же, что у предупреждения
@@ -1778,7 +1775,7 @@ class VpnService:
         cur = await self._db.conn.execute(
             "INSERT INTO vpn_requests (chat_id, bytes, status, created_at) "
             "VALUES (?, ?, 'pending', ?)",
-            (chat_id, bytes_, _now().isoformat()),
+            (chat_id, bytes_, utc_now().isoformat()),
         )
         await self._db.conn.commit()
         request_id = cur.lastrowid
@@ -1805,12 +1802,12 @@ class VpnService:
         status = "approved" if approve else "denied"
         await self._db.conn.execute(
             "UPDATE vpn_requests SET status = ?, decided_at = ? WHERE id = ?",
-            (status, _now().isoformat(), request_id),
+            (status, utc_now().isoformat(), request_id),
         )
         await self._db.conn.commit()
         chat_id = row["chat_id"]
         if approve:
-            month = _month_key(_now())
+            month = _month_key(utc_now())
             await self._add_grant(
                 chat_id, month, row["bytes"], source="admin", request_id=request_id
             )
@@ -1847,7 +1844,7 @@ class VpnService:
 
         if used >= limit:
             if state["blocked_at"] is None:
-                await self._set_quota_state(chat_id, month, blocked_at=_now().isoformat())
+                await self._set_quota_state(chat_id, month, blocked_at=utc_now().isoformat())
                 await self.reconcile()
                 await self._emit(EVENT_VPN_QUOTA_EXCEEDED, {"chat_id": chat_id, **self._where()})
                 await self._emit(EVENT_VPN_PEER_BLOCKED, {"chat_id": chat_id})
@@ -1911,7 +1908,7 @@ class VpnService:
             "INSERT INTO proxy_state (id, mtg_secret, updated_at) VALUES (1, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET mtg_secret = excluded.mtg_secret, "
             "updated_at = excluded.updated_at",
-            (secret, _now().isoformat()),
+            (secret, utc_now().isoformat()),
         )
         await self._db.conn.commit()
 
@@ -1947,7 +1944,7 @@ class VpnService:
         return await self._proxy_link(args)
 
     async def _proxy_usage(self, args: dict[str, Any]) -> dict[str, Any]:
-        month = _month_key(_now())
+        month = _month_key(utc_now())
         used: dict[str, int] = {}
         for key, peer_id in self.PROXY_PEER_IDS.items():
             cur = await self._db.conn.execute(
@@ -1975,7 +1972,7 @@ class VpnService:
             # sudoers ещё не поставлен (nodectl fix не прогнан) — не рушим
             # остальной тик сэмплера ради этого, просто пропускаем прокси.
             return
-        now_iso = _now().isoformat()
+        now_iso = utc_now().isoformat()
         for key, total in counters.items():
             pubkey = f"proxy-{key}"
             peer_id = self.PROXY_PEER_IDS[key]
@@ -2003,7 +2000,7 @@ class VpnService:
     # --- сэмплер ---
 
     async def sample_once(self) -> None:
-        now = _now()
+        now = utc_now()
         month = _month_key(now)
         # awg: (rx, tx) с момента поднятия интерфейса + unix-ts хендшейков.
         transfer = await self._backend.transfer() if self._has(TRANSPORT_AWG) else {}
@@ -2151,7 +2148,7 @@ class VpnService:
         results = args.get("results")
         if not node or not isinstance(results, list) or not results:
             raise ProtoError(ERR_BAD_REQUEST, "нужны node и непустой список results")
-        now = _now()
+        now = utc_now()
         # Прогон списка сайтов через один туннель (сервер + транспорт) — одно
         # событие на вид (упал/поднялся) со списком сайтов, а не событие на
         # каждый сайт: общий сбой туннеля раньше сыпал сообщением на сайт.
@@ -2354,7 +2351,7 @@ class VpnService:
         check: dict[str, Any] | None = None
         if row is not None:
             stale_before = (
-                _now() - timedelta(seconds=self._cfg.check_interval_s * CHECK_STALE_FACTOR)
+                utc_now() - timedelta(seconds=self._cfg.check_interval_s * CHECK_STALE_FACTOR)
             ).isoformat()
             check = {
                 "ok": bool(row["last_ok"]),
@@ -2383,7 +2380,7 @@ class VpnService:
         исчезает — бот покажет её без индикатора, а не выдуманным цветом.
         """
         stale_before = (
-            _now() - timedelta(seconds=self._cfg.check_interval_s * CHECK_STALE_FACTOR)
+            utc_now() - timedelta(seconds=self._cfg.check_interval_s * CHECK_STALE_FACTOR)
         ).isoformat()
         sql = "SELECT node, server, transport, status FROM vpn_check_states WHERE last_seen_at >= ?"
         params: list[Any] = [stale_before]
@@ -2457,7 +2454,7 @@ class VpnService:
             tmp.unlink(missing_ok=True)
             raise ProtoError(ERR_INTERNAL, "скачанный APK не совпал по sha256")
         tmp.replace(dest)
-        now = _now().isoformat()
+        now = utc_now().isoformat()
         await self._db.conn.execute(
             "INSERT INTO vpn_apk (id, version, file_name, size, sha256, path, "
             "telegram_file_id, checked_at, updated_at) "
@@ -2471,7 +2468,7 @@ class VpnService:
         await self._db.conn.commit()
 
     async def _apk_info(self, _args: dict[str, Any]) -> dict[str, Any]:
-        now = _now()
+        now = utc_now()
         if (
             self._apk_checked_at is not None
             and (now - self._apk_checked_at).total_seconds() < APK_INFO_MEMO_S
@@ -2560,7 +2557,7 @@ class VpnService:
         if action == ACTION_SUB_LINKS:
             return await self._sub_links(args)
         if action == ACTION_SUB_GEN:
-            label = str(args.get("device_label") or "").strip()
+            label = self._device_label(args)
             return {"gen": await self._device_gen(self._chat_id(args), label)}
         if action == ACTION_USAGE:
             return await self._usage(args)
