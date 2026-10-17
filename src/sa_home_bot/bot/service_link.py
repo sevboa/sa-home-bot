@@ -19,15 +19,12 @@ from typing import Any
 
 from sa_home_bot.proto.client import EventCallback, ProtoClient
 from sa_home_bot.proto.endpoints import Endpoint, parse_endpoint
+from sa_home_bot.proto.errors import ServiceUnavailableError
 from sa_home_bot.proto.messages import ActionSpec, Address, ProtoError, ServiceDescription
 
 log = logging.getLogger(__name__)
 
 RECONNECT_DELAY_S = 5.0
-
-
-class ServiceUnavailableError(RuntimeError):
-    """Нет живого соединения со службой."""
 
 
 class ServiceTimeoutError(ServiceUnavailableError):
