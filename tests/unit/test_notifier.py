@@ -133,3 +133,59 @@ async def test_delete_message_swallows_network_errors():
     await notifier.delete_message(1, 42)  # не бросает
 
     assert bot.deleted == []
+
+
+class _MediaMessage:
+    message_id = 7
+
+    class document:
+        file_id = "doc-file-id"
+
+
+class _MediaBot:
+    def __init__(self, failures: list[Exception]) -> None:
+        self.failures = failures
+        self.calls = 0
+
+    async def _send(self, *_args, **_kwargs):
+        self.calls += 1
+        if self.failures:
+            raise self.failures.pop(0)
+        return _MediaMessage()
+
+    send_document = send_photo = send_voice = _send
+
+
+MEDIA_SENDERS = [
+    ("send_document", (7, "doc-file-id")),
+    ("send_photo", 7),
+    ("send_voice", 7),
+]
+
+
+@pytest.mark.parametrize(("method", "expected"), MEDIA_SENDERS)
+async def test_media_send_retries_429_and_transient_then_succeeds(method, expected):
+    bot = _MediaBot(
+        [TelegramRetryAfter(None, "flood", retry_after=0), ConnectionError("proxy timed out")]
+    )
+
+    result = await getattr(Notifier(bot), method)(1, b"payload", filename="f.bin")
+
+    assert result == expected
+    assert bot.calls == 3
+
+
+@pytest.mark.parametrize(("method", "expected"), MEDIA_SENDERS)
+async def test_media_send_gives_up_after_max_retries(method, expected):
+    bot = _MediaBot([ConnectionError("proxy timed out")] * MAX_RETRIES)
+
+    assert await getattr(Notifier(bot), method)(1, b"payload") is None
+    assert bot.calls == MAX_RETRIES
+
+
+@pytest.mark.parametrize(("method", "expected"), MEDIA_SENDERS)
+async def test_media_send_does_not_retry_permanent_error(method, expected):
+    bot = _MediaBot([TelegramBadRequest(method=None, message="wrong file")])
+
+    assert await getattr(Notifier(bot), method)(1, b"payload") is None
+    assert bot.calls == 1

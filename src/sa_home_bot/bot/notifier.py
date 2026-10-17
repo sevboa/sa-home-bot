@@ -463,25 +463,16 @@ class Notifier:
         send_direct."""
         if isinstance(document, bytes):
             document = BufferedInputFile(document, filename=filename or "file")
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                msg = await self._bot.send_document(
-                    chat_id,
-                    document,
-                    caption=caption,
-                    message_thread_id=message_thread_id,
-                )
-                file_id = msg.document.file_id if msg.document else ""
-                return msg.message_id, file_id
-            except TelegramRetryAfter as exc:
-                wait = exc.retry_after + 1
-                log.warning("429 от Telegram (chat=%s), жду %ss", chat_id, wait)
-                await asyncio.sleep(wait)
-            except Exception as exc:  # noqa: BLE001 — CancelledError не Exception, проходит мимо
-                if not await _after_send_failure(exc, "документ", chat_id, attempt):
-                    return None
-        log.error("Исчерпаны ретраи отправки документа в chat=%s", chat_id)
-        return None
+        msg = await send_with_retry(
+            chat_id,
+            "документ",
+            lambda: self._bot.send_document(
+                chat_id, document, caption=caption, message_thread_id=message_thread_id
+            ),
+        )
+        if msg is None:
+            return None
+        return msg.message_id, msg.document.file_id if msg.document else ""
 
     async def send_photo(
         self,
@@ -494,21 +485,14 @@ class Notifier:
     ) -> int | None:
         if isinstance(photo, bytes):
             photo = BufferedInputFile(photo, filename=filename or "photo.png")
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                msg = await self._bot.send_photo(
-                    chat_id, photo, caption=caption, message_thread_id=message_thread_id
-                )
-                return msg.message_id
-            except TelegramRetryAfter as exc:
-                wait = exc.retry_after + 1
-                log.warning("429 от Telegram (chat=%s), жду %ss", chat_id, wait)
-                await asyncio.sleep(wait)
-            except Exception as exc:  # noqa: BLE001 — CancelledError не Exception, проходит мимо
-                if not await _after_send_failure(exc, "фото", chat_id, attempt):
-                    return None
-        log.error("Исчерпаны ретраи отправки фото в chat=%s", chat_id)
-        return None
+        msg = await send_with_retry(
+            chat_id,
+            "фото",
+            lambda: self._bot.send_photo(
+                chat_id, photo, caption=caption, message_thread_id=message_thread_id
+            ),
+        )
+        return msg.message_id if msg is not None else None
 
     async def send_photo_ex(
         self,
@@ -562,21 +546,14 @@ class Notifier:
     ) -> int | None:
         if isinstance(voice, bytes):
             voice = BufferedInputFile(voice, filename=filename or "voice.ogg")
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                msg = await self._bot.send_voice(
-                    chat_id, voice, caption=caption, message_thread_id=message_thread_id
-                )
-                return msg.message_id
-            except TelegramRetryAfter as exc:
-                wait = exc.retry_after + 1
-                log.warning("429 от Telegram (chat=%s), жду %ss", chat_id, wait)
-                await asyncio.sleep(wait)
-            except Exception as exc:  # noqa: BLE001 — CancelledError не Exception, проходит мимо
-                if not await _after_send_failure(exc, "голосовое", chat_id, attempt):
-                    return None
-        log.error("Исчерпаны ретраи отправки голосового в chat=%s", chat_id)
-        return None
+        msg = await send_with_retry(
+            chat_id,
+            "голосовое",
+            lambda: self._bot.send_voice(
+                chat_id, voice, caption=caption, message_thread_id=message_thread_id
+            ),
+        )
+        return msg.message_id if msg is not None else None
 
     async def delete_message(self, chat_id: int, message_id: int) -> None:
         with contextlib.suppress(Exception):  # noqa: BLE001 — необязательная уборка
