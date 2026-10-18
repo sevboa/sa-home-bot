@@ -340,6 +340,21 @@ def test_sub_ufw_opens_only_missing_ports(root):
     assert allowed == ["80/tcp"]
 
 
+def test_sub_ufw_check_requires_both_ports_and_is_off_without_sub_port(root):
+    settings = make_settings(["vpn"])
+    settings.vpn.sub_port = 18444
+    settings.vpn.reality = object()
+    assert vpn_server.sub_ufw_specs(settings) == ["18444/tcp", "80/tcp"]
+    status = "Status: active\n\nTo Action From\n-- ------ ----\n18444/tcp ALLOW Anywhere\n"
+    fixup = vpn_server.make_sub_ufw_fixup(settings)
+    root.outputs[UFW_STATUS] = status
+    assert not fixup.check()
+    root.outputs[UFW_STATUS] = status + "80/tcp ALLOW Anywhere\n"
+    assert fixup.check()
+    settings.vpn.sub_port = 0
+    assert vpn_server.sub_ufw_specs(settings) == []
+
+
 def _forward_world(root, *, existing: bool):
     root.outputs[UFW_STATUS] = UFW_CLEAN
     root.outputs["/usr/bin/ip -4 route show default"] = "default via 192.168.0.1 dev eth0\n"
