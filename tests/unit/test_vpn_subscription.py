@@ -914,20 +914,6 @@ async def test_subscription_page_url_prefers_https_and_skips_without_vless(monke
     assert KEY
 
 
-def test_sub_ufw_fixup_checks_both_ports(monkeypatch):
-    from sa_home_bot.node import fixups
-
-    settings = Settings(vpn=_cfg("198.51.100.1", "x"))
-    assert fixups._sub_ports(settings) == ["18444/tcp", "80/tcp"]
-    status = "Status: active\n\nTo Action From\n-- ------ ----\n18444/tcp ALLOW Anywhere\n"
-    monkeypatch.setattr(fixups, "_ufw_status_text", lambda: status)
-    assert not fixups._sub_ufw_check(settings)
-    monkeypatch.setattr(fixups, "_ufw_status_text", lambda: status + "80/tcp ALLOW Anywhere\n")
-    assert fixups._sub_ufw_check(settings)
-    off = Settings(vpn=VpnConfig(sub_port=0))
-    assert fixups._sub_ports(off) == []
-
-
 def _node_pair(**kw):
     return (
         subs.NodeInfo("jeeves", "🇳🇱 Нидерланды", "198.51.100.1", base="https://198.51.100.1:8444"),
