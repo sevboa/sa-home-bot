@@ -12,7 +12,8 @@ from sa_home_bot.bot.interactives.photo_text import photo_description
 from sa_home_bot.bot.interactives.places import Room
 from sa_home_bot.bot.interactives.transylvania import Outside, Transylvania
 from sa_home_bot.config import LlmConfig, Settings
-from tests.unit.interactives_kit import clear_sky
+from sa_home_bot.subscriptions.models import Subscription
+from tests.unit.interactives_kit import clear_sky, tool_context
 
 CANARY = 901
 GUEST = 902
@@ -287,34 +288,14 @@ async def test_before_turn_for_non_canary_never_touches_places(store):
     assert svc is not None
 
 
-def _ctx(interactives, user_id):
-    return ai_tools.ToolContext(
-        chat_id=user_id,
-        dialogue_id=None,
-        trigger_message_id=None,
-        settings=Settings(llm=LlmConfig(model="m")),
-        interactives=interactives,
-        user_id=user_id,
-    )
-
-
-async def test_search_declaration_reaches_only_canaries(store):
+async def test_search_tool_refuses_guests_and_works_for_canaries(store):
     svc = _make(store)
-    from sa_home_bot.subscriptions.models import Subscription
-
-    sub = Subscription(name="me", chat_id=1, allowed_commands=frozenset({"*"}))
-    kit = ai_tools.tools_for(sub)
-    assert "search" in kit.handlers
-    for_canary = ai_tools.for_context(kit, _ctx(svc, CANARY))
-    assert for_canary is kit
-    for_guest = ai_tools.for_context(kit, _ctx(svc, GUEST))
-    assert "search" not in for_guest.handlers
-    assert all(d["function"]["name"] != "search" for d in for_guest.declarations)
-    assert len(for_guest.declarations) == len(kit.declarations) - len(ai_tools.CANARY_TOOLS)
-    assert "search" not in ai_tools.for_context(kit, _ctx(None, CANARY)).handlers
+    kit = ai_tools.tools_for(Subscription(name="me", chat_id=1, allowed_commands=frozenset({"*"})))
     handler = kit.handlers["search"]
-    assert await handler(_ctx(svc, GUEST), {"where": "ящик"}) == places.TOOL_SEARCH_UNAVAILABLE
-    assert "Ты обыскал" in await handler(_ctx(svc, CANARY), {"where": "ящик"})
+    assert (
+        await handler(tool_context(svc, GUEST), {"where": "ящик"}) == places.TOOL_SEARCH_UNAVAILABLE
+    )
+    assert "Ты обыскал" in await handler(tool_context(svc, CANARY), {"where": "ящик"})
 
 
 async def test_reset_scopes_split_cellar_and_catacombs(store):

@@ -5,6 +5,7 @@ import base64
 import json
 from datetime import UTC, datetime
 
+from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.interactives import cellar, keyboards, underground
 from sa_home_bot.bot.interactives.base import STATUS_ACTIVE, STATUS_OFFERED, InteractiveStore, Run
 from sa_home_bot.bot.interactives.director import FEATURES_SYSTEM
@@ -226,3 +227,14 @@ async def reach_hatch(svc, store, link):
     link.director_replies = [director_reply(stage=4)]
     await run_turn(svc, "Поищи ещё вина")
     assert (await cellar_run(store)).stage == 4
+
+
+def tool_context(svc, user_id):
+    return ai_tools.ToolContext(
+        chat_id=user_id,
+        dialogue_id=None,
+        trigger_message_id=None,
+        settings=Settings(llm=LlmConfig(model="m")),
+        interactives=svc,
+        user_id=user_id,
+    )

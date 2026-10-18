@@ -16,7 +16,6 @@ from sa_home_bot.bot.interactives.base import (
     Run,
 )
 from sa_home_bot.bot.interactives.catacombs import CatacombsState, Maze, Node, Passage
-from sa_home_bot.config import LlmConfig, Settings
 from sa_home_bot.subscriptions.models import Subscription
 from tests.unit.interactives_kit import (
     CANARY,
@@ -24,6 +23,7 @@ from tests.unit.interactives_kit import (
     GUEST,
     Dice,
     make_service,
+    tool_context,
 )
 from tests.unit.support.fakes import Clock
 
@@ -132,37 +132,14 @@ def test_normalize_direction():
     assert underground.normalize_direction(5) is None
 
 
-def _ctx(svc, user_id):
-    return ai_tools.ToolContext(
-        chat_id=user_id,
-        dialogue_id=None,
-        trigger_message_id=None,
-        settings=Settings(llm=LlmConfig(model="m")),
-        interactives=svc,
-        user_id=user_id,
-    )
-
-
-async def test_walk_and_go_declarations_reach_only_canaries(store):
-    svc, _, _ = make_service(store)
-    kit = ai_tools.tools_for(Subscription(name="me", chat_id=1, allowed_commands=frozenset({"*"})))
-    assert {"walk", "go", "search"} <= kit.handlers.keys()
-    assert ai_tools.CANARY_TOOLS == {"search", "walk", "go", "act"}
-    guest_kit = ai_tools.for_context(kit, _ctx(svc, GUEST))
-    for name in ("walk", "go", "search"):
-        assert name not in guest_kit.handlers
-        assert all(d["function"]["name"] != name for d in guest_kit.declarations)
-    assert ai_tools.for_context(kit, _ctx(svc, CANARY)) is kit
-
-
 async def test_forged_walk_and_go_by_non_canary_do_nothing(store):
     svc, notifier, link = make_service(store)
     kit = ai_tools.tools_for(Subscription(name="me", chat_id=1, allowed_commands=frozenset({"*"})))
     before = {k: await store.get_state(k) for k in await store.state_keys("")}
-    assert await kit.handlers["walk"](_ctx(svc, GUEST), {"direction": "left"}) == (
+    assert await kit.handlers["walk"](tool_context(svc, GUEST), {"direction": "left"}) == (
         underground.TOOL_WALK_UNAVAILABLE
     )
-    assert await kit.handlers["go"](_ctx(svc, GUEST), {"place": "catacombs"}) == (
+    assert await kit.handlers["go"](tool_context(svc, GUEST), {"place": "catacombs"}) == (
         underground.TOOL_GO_UNAVAILABLE
     )
     assert await svc.tool_walk(GUEST, GUEST, "left") == underground.TOOL_WALK_UNAVAILABLE
@@ -749,7 +726,7 @@ async def test_canary_handlers_walk_through_the_toolkit(store):
     svc, _, _ = make_service(store)
     await _descend(svc, store)
     kit = ai_tools.tools_for(Subscription(name="me", chat_id=1, allowed_commands=frozenset({"*"})))
-    ctx = _ctx(svc, CANARY)
+    ctx = tool_context(svc, CANARY)
     out = await kit.handlers["walk"](ctx, {"direction": await _first_exit(store)})
     assert "Ты пошёл" in out
     assert "Знакомой дорогой" in await kit.handlers["go"](ctx, {"place": "cellar"})

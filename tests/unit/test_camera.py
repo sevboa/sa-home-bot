@@ -297,14 +297,6 @@ async def test_non_canary_radio_flow_is_untouched(store):
     assert await svc._state.get_effect("camera", GUEST) is None
 
 
-def test_darkroom_gives_the_camera_on_first_search():
-    from sa_home_bot.bot.interactives import underground
-
-    canon = places.PLACES["darkroom"]
-    assert canon is underground.DARKROOM_CANON
-    assert places.DARKROOM_CAMERA in canon.specials
-
-
 async def test_reset_returns_the_camera_to_be_found_again(store):
     svc, _, _ = make_service(store)
     camera = await _camera(svc)

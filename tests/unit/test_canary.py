@@ -8,12 +8,14 @@ import re
 
 import pytest
 
+from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.interactives import cellar, keyboards, radio, registry
 from sa_home_bot.bot.interactives.base import STATUS_OFFERED, InteractiveStore, Run
 from sa_home_bot.bot.interactives.engine import Interactives
 from sa_home_bot.bot.interactives.transylvania import Transylvania
 from sa_home_bot.config import LlmConfig, Settings
-from tests.unit.interactives_kit import clear_sky
+from sa_home_bot.subscriptions.models import Subscription
+from tests.unit.interactives_kit import clear_sky, tool_context
 from tests.unit.support.factories import png_bytes
 from tests.unit.support.fakes import FakeNotifier
 
@@ -129,8 +131,6 @@ def test_run_json_without_world_is_the_old_format():
     assert "world" not in run.to_json()
     run.world["x"] = 1
     assert Run.from_json(run.to_json()).world == {"x": 1}
-    old = Run.from_json(Run(scenario="radio", chat_id=1, user_id=1).to_json())
-    assert old.world == {}
 
 
 class SceneLink:
@@ -243,3 +243,16 @@ async def test_old_run_json_without_new_fields_still_loads(store):
     await store.set_state(f"interactive_run:{GUEST}:radio", json.dumps(old))
     run = await InteractiveStore(store).load_run(GUEST, "radio")
     assert run is not None and run.stage == 2 and run.world == {}
+
+
+@pytest.mark.parametrize("tool", sorted(ai_tools.CANARY_TOOLS))
+async def test_canary_tools_exist_only_for_canaries(store, tool):
+    svc = _make(store)
+    kit = ai_tools.tools_for(Subscription(name="me", chat_id=1, allowed_commands=frozenset({"*"})))
+    assert tool in kit.handlers
+    assert ai_tools.for_context(kit, tool_context(svc, CANARY)) is kit
+    guest_kit = ai_tools.for_context(kit, tool_context(svc, GUEST))
+    assert tool not in guest_kit.handlers
+    assert all(d["function"]["name"] != tool for d in guest_kit.declarations)
+    assert len(guest_kit.declarations) == len(kit.declarations) - len(ai_tools.CANARY_TOOLS)
+    assert tool not in ai_tools.for_context(kit, tool_context(None, CANARY)).handlers
