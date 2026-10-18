@@ -1,14 +1,3 @@
-"""Останов не имеет права висеть (этап 29).
-
-Живой сбой на jeeves 2026-07-30: нода приняла `restart_node`, написала
-«Останов ноды...» и осталась работать — процесс дожил до `TimeoutStopSec` и был
-добит SIGKILL. Причина не одна: последовательность останова состояла из голых
-`await`, каждый из которых полагался на добрую волю собеседника.
-
-Здесь проверяются места, где останов мог не закончиться НИКОГДА, — каждое
-отдельно, без сети и без таймингов планировщика.
-"""
-
 import asyncio
 import shutil
 import tempfile
@@ -28,12 +17,6 @@ pytest_plugins = ["tests.unit.sock_fixture"]
 
 
 class HangingWriter:
-    """Полумёртвый сокет: closed(), но закрытие не подтверждается никогда.
-
-    Так выглядит соединение, у которого данные лежат в Send-Q и не уходят:
-    ни FIN, ни ошибка — `wait_closed()` просто не возвращается.
-    """
-
     def __init__(self) -> None:
         self.closed = False
 
@@ -58,14 +41,11 @@ async def test_бюджет_бросает_зависший_шаг_и_идёт_�
 
     assert await budget.step("быстрый", asyncio.sleep(0)) is True
     assert await budget.step("зависший", asyncio.Event().wait()) is False
-    # Просрочка не отменяет остальные шаги: соседей предупредить, детей
-    # погасить и сокеты закрыть надо в любом случае.
     assert await budget.step("после зависшего", asyncio.sleep(0)) is True
     assert budget.overdue == ["зависший"]
 
 
 async def test_бюджет_не_даёт_шагам_сложиться_за_общий_дедлайн():
-    """Пиров в рое много; каждый по потолку — это уже минуты."""
     budget = ShutdownBudget(total_s=0.3, step_s=5.0)
     loop = asyncio.get_running_loop()
     started = loop.time()
@@ -76,8 +56,6 @@ async def test_бюджет_не_даёт_шагам_сложиться_за_о�
 
 
 async def test_proto_сервер_останавливается_с_полумёртвым_клиентом(sock_dir, monkeypatch):
-    """Именно здесь останов ноды мог зависнуть навсегда: `wait_closed()` у
-    клиента с забитым Send-Q не возвращается ни через минуту, ни через час."""
     monkeypatch.setattr(server_mod, "CLOSE_TIMEOUT_S", 0.05)
     server = ProtoServer(f"unix://{sock_dir / 'node.sock'}", StubService("peer"))
     await server.start()
@@ -87,15 +65,6 @@ async def test_proto_сервер_останавливается_с_полумё
 
 
 async def test_погашенный_линк_не_переподключается(sock_dir):
-    """Окно между `reconnect_now()` и пробуждением `_serve`: отмена от stop()
-    в этот момент неотличима от нашего собственного сброса связи — её
-    проглатывают, и линк продолжает переподключаться, а `stop()` ждёт задачу,
-    которая уже никогда не завершится.
-
-    Окно узкое и снаружи невоспроизводимо детерминированно, поэтому проверяем
-    не гонку, а инвариант: после `stop()` линк лежит и связь не поднимает,
-    в каком бы состоянии его ни застали.
-    """
     endpoint = f"unix://{sock_dir / 'peer.sock'}"
     server = ProtoServer(endpoint, StubService("peer"))
     await server.start()
@@ -109,14 +78,10 @@ async def test_погашенный_линк_не_переподключаетс
             await asyncio.sleep(0.01)
         assert link.alive, "линк не поднялся"
 
-        # Ровно состояние того окна: соединение сбрасываем мы сами, и в этот
-        # момент линк гасят.
         link._dropping = True
         await asyncio.wait_for(link.stop(), timeout=5.0)
         assert not link.alive
 
-        # Цикл переподключения, переживший stop(), успел бы поднять связь
-        # заново — reconnect_delay здесь 0.05 с.
         await asyncio.sleep(0.3)
         assert not link.alive, "погашенный линк поднялся заново"
         assert server.connection_count == 0, "погашенный линк держит соединение"
@@ -125,9 +90,6 @@ async def test_погашенный_линк_не_переподключаетс
 
 
 async def test_служба_останавливается_с_зависшей_задачей_наблюдения(monkeypatch):
-    """`await self._task` без потолка: задача наблюдения могла спать перед
-    перезапуском или писать событие полумёртвому клиенту."""
-
     monkeypatch.setattr(supervisor_mod, "SUPERVISE_EXIT_TIMEOUT_S", 0.05)
 
     async def emit(event_type: str, data: dict) -> None:

@@ -1,12 +1,3 @@
-"""Этап 23: моментальные и точные статусы присутствия.
-
-Раньше presence строился на догадках: «нода корректно остановилась» и
-«машину выдернули из розетки» выглядели одинаково, возвращение рабочей
-станции не объявлялось вообще (node_up требовал предшествующего node_down).
-Здесь проверяются: штатный уход (node_leaving → пометка left, без ложного
-node_down), возвращение любой ноды (node_returned) и их сочетания.
-"""
-
 from __future__ import annotations
 
 from sa_home_bot.node.app import SeenEvents, _relay_peer_event
@@ -23,8 +14,6 @@ from sa_home_bot.proto.messages import Address, make_event
 
 
 class FakeLink:
-    """Пир с управляемой живостью и временем недоступности."""
-
     def __init__(self, name: str, *, alive: bool, kind: str = "", down_s: float | None = None):
         self.name = name
         self.endpoint = f"tcp://{name}:8710"
@@ -49,12 +38,9 @@ def _watcher(node_id: str, *links: FakeLink, **kw) -> tuple[PresenceWatcher, lis
     return PresenceWatcher(node_id, router, emit=emit, **kw), events
 
 
-# --- Штатный уход: node_leaving подавляет аварию -----------------------------
-
-
 async def test_left_нода_не_рождает_node_down_даже_для_сервера():
     link = FakeLink("jeeves", alive=False, kind=KIND_VPS, down_s=600)
-    link.left = True  # предупредила об уходе
+    link.left = True
     watcher, events = _watcher("alfred", link)
     await watcher.check_once()
     assert events == []
@@ -81,28 +67,20 @@ async def test_relay_помечает_линк_left_по_node_leaving():
         seen=SeenEvents(),
     )
     assert link.left is True
-    assert link.downtime_s() is not None  # отсчёт простоя начался сразу
+    assert link.downtime_s() is not None
 
 
 async def test_возвращение_сбрасывает_left():
-    """После нового hello уход исчерпан: следующая пропажа — снова
-    полноценный кандидат в аварии. Проверяем через peers_state()."""
     link = PeerLink("winpc", "tcp://winpc:8710")
     link.note_left()
     router = NodeRouter("alfred", peers={"winpc": link})
     assert router.peers_state()[0]["left"] is True
 
 
-# --- Возвращение: node_returned для любого типа машины -----------------------
-
-
 async def test_возвращение_рабочей_станции_объявляется():
-    """До этапа 23 возвращение workstation не объявлялось никогда:
-    node_up требовал предшествующего node_down, а node_down для неё
-    не рождается by design."""
     link = FakeLink("winpc", alive=False, kind=KIND_WORKSTATION, down_s=100)
     watcher, events = _watcher("alfred", link)
-    await watcher.check_once()  # замечена недоступной
+    await watcher.check_once()
     assert events == []
     link.alive = True
     await watcher.check_once()
@@ -123,7 +101,7 @@ async def test_после_аварии_только_node_up_без_дубля_re
 async def test_моргание_между_тиками_не_объявляется():
     link = FakeLink("winpc", alive=True, kind=KIND_WORKSTATION)
     watcher, events = _watcher("alfred", link)
-    await watcher.check_once()  # жива на обоих тиках — undown не замечен
+    await watcher.check_once()
     await watcher.check_once()
     assert events == []
 
@@ -131,14 +109,11 @@ async def test_моргание_между_тиками_не_объявляет�
 async def test_возвращение_объявляет_только_объявитель():
     link = FakeLink("winpc", alive=False, kind=KIND_WORKSTATION, down_s=100)
     peer = FakeLink("alfred", alive=True)
-    watcher, events = _watcher("zeta", link, peer)  # alfred < zeta — молчим
+    watcher, events = _watcher("zeta", link, peer)
     await watcher.check_once()
     link.alive = True
     await watcher.check_once()
     assert events == []
-
-
-# --- Сквозной путь: прощание доезжает до клиентов, линк помечен -------------
 
 
 class _NodeService:
@@ -162,10 +137,6 @@ class _NodeService:
 
 
 async def test_node_leaving_доезжает_до_клиентов_и_метит_линк(tmp_path):
-    """Регрессия: note_left рвёт то соединение, по которому событие пришло —
-    если пометить линк ДО ретрансляции, отмена читающей задачи съедает
-    рассылку, и бот прощания не видит. Проверяем весь путь на настоящих
-    сокетах: A прощается → B ретранслирует своим клиентам И метит линк."""
     import asyncio
 
     from sa_home_bot.proto.client import ProtoClient
@@ -253,7 +224,7 @@ async def test_node_down_is_reported_once_then_node_up_on_return():
     link = FakeLink("jeeves", alive=False, kind=KIND_VPS, down_s=600)
     watcher, events = _watcher("alfred", link)
     await watcher.check_once()
-    await watcher.check_once()  # ещё лежит — повторно не сообщаем
+    await watcher.check_once()
     assert [e[0] for e in events] == [EVENT_NODE_DOWN]
     link.alive = True
     await watcher.check_once()
@@ -261,23 +232,19 @@ async def test_node_down_is_reported_once_then_node_up_on_return():
 
 
 async def test_only_the_lowest_id_alive_node_announces():
-    """Иначе о каждой пропаже пришло бы по сообщению от каждого соседа:
-    SeenEvents дедуплицирует одно событие, но не три разных об одном факте."""
     down = FakeLink("jeeves", alive=False, kind=KIND_VPS, down_s=600)
     peer = FakeLink("winpc", alive=True, kind=KIND_WORKSTATION)
 
-    quiet, quiet_events = _watcher("zeta", down, peer)  # "winpc" < "zeta" — молчим
+    quiet, quiet_events = _watcher("zeta", down, peer)
     await quiet.check_once()
     assert quiet_events == []
 
-    loud, loud_events = _watcher("alfred", down, peer)  # "alfred" — наименьший
+    loud, loud_events = _watcher("alfred", down, peer)
     await loud.check_once()
     assert [e[0] for e in loud_events] == [EVENT_NODE_DOWN]
 
 
 async def test_kind_of_an_unreachable_peer_is_remembered(tmp_path):
-    """Тип нужен именно тогда, когда ноду уже не спросить, — значит он обязан
-    пережить рестарт."""
     state_path = tmp_path / "node-state.json"
     state = NodeState()
     link = FakeLink("jeeves", alive=True, kind=KIND_VPS)
@@ -287,8 +254,6 @@ async def test_kind_of_an_unreachable_peer_is_remembered(tmp_path):
     reloaded = NodeState.load(state_path)
     assert [(p.id, p.kind) for p in reloaded.peers] == [("jeeves", KIND_VPS)]
 
-    # Связь потеряна, тип забыт линком — но известен из состояния, поэтому
-    # алерт всё равно поднимается.
     link.alive = False
     link.node_kind = ""
     link._down_s = 600

@@ -1,13 +1,3 @@
-"""Адаптер температуры дисков через smartctl (smartmontools).
-
-Парсинг JSON-вывода вынесен в чистые функции для тестов. Реальные вызовы
-подпроцесса делает вызывающий код через run_in_executor.
-
-Каждое устройство опрашивается с типом адаптера (``-d``): без него USB-мосты
-(например JMicron, ``sntjmicron``) отдают ``temperature: null``. Тип берётся из
-``smartctl --scan -j`` либо задаётся вручную в конфиге как ``/dev/sda:тип``.
-"""
-
 from __future__ import annotations
 
 import json
@@ -39,8 +29,6 @@ from sa_home_bot.utils.requirements import (
 
 log = logging.getLogger(__name__)
 
-# Таймаут одного вызова smartctl. Защищает скан от зависшего USB-моста:
-# опрос диска прерывается, остальные диски опрашиваются дальше.
 SMARTCTL_TIMEOUT_S = 20
 
 SMARTCTL_REQUIREMENT = Requirement(
@@ -49,8 +37,6 @@ SMARTCTL_REQUIREMENT = Requirement(
     note="температура и здоровье дисков по SMART",
 )
 
-# Префиксы устройств без поддержки SMART — не опрашиваем (eMMC, optical, loop,
-# software-RAID, device-mapper, ram/zram). Иначе — спам ошибок в лог каждый скан.
 UNSUPPORTED_PREFIXES = (
     "/dev/mmcblk",
     "/dev/loop",
@@ -64,22 +50,15 @@ UNSUPPORTED_PREFIXES = (
 
 @dataclass(frozen=True)
 class DiskTarget:
-    """Устройство для опроса smartctl: путь + опциональный тип адаптера (``-d``)."""
-
     name: str
     dev_type: str | None = None
 
 
 def is_smart_capable(name: str) -> bool:
-    """Поддерживает ли устройство SMART (по имени; eMMC/loop/raid — нет)."""
     return not name.startswith(UNSUPPORTED_PREFIXES)
 
 
 def parse_device_spec(spec: str) -> DiskTarget | None:
-    """Разобрать запись конфига: ``/dev/sda`` или ``/dev/sda:sntjmicron``.
-
-    Тип отделяется последним двоеточием. Пустая или некорректная запись → None.
-    """
     spec = spec.strip()
     if not spec:
         return None
@@ -87,13 +66,12 @@ def parse_device_spec(spec: str) -> DiskTarget | None:
     if not sep:
         return DiskTarget(spec, None)
     name = name.strip()
-    if not name:  # запись вида ":type" без устройства
+    if not name:
         return None
     return DiskTarget(name, dev_type.strip() or None)
 
 
 def parse_scan(data: dict) -> list[DiskTarget]:
-    """Список устройств из ``smartctl --scan -j`` с типом адаптера (``-d``)."""
     targets: list[DiskTarget] = []
     for d in data.get("devices", []):
         name = d.get("name")
@@ -104,7 +82,6 @@ def parse_scan(data: dict) -> list[DiskTarget]:
 
 
 def read_args(target: DiskTarget) -> list[str]:
-    """Аргументы smartctl для чтения атрибутов: ``[-d тип] -j -A /dev/X``."""
     args: list[str] = []
     if target.dev_type:
         args += ["-d", target.dev_type]
@@ -113,12 +90,10 @@ def read_args(target: DiskTarget) -> list[str]:
 
 
 def parse_device_temp(device: str, data: dict, now: datetime) -> SensorReading | None:
-    """Достать температуру из ``smartctl -j -A /dev/X``."""
     temp = None
     if isinstance(data.get("temperature"), dict):
         temp = data["temperature"].get("current")
     if temp is None:
-        # Fallback: атрибут 194 (Temperature_Celsius) в таблице ATA.
         table = data.get("ata_smart_attributes", {}).get("table", [])
         for attr in table:
             if attr.get("id") == 194:
@@ -151,14 +126,11 @@ def _run_smartctl(args: list[str]) -> dict | None:
             timeout=SMARTCTL_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired:
-        # Зависший USB-мост/больной диск: не валим скан остальных устройств.
         log.warning("smartctl %s: таймаут %dс", " ".join(args), SMARTCTL_TIMEOUT_S)
         return None
     except Exception as exc:  # noqa: BLE001
         log.warning("smartctl %s не сработал: %s", " ".join(args), exc)
         return None
-    # smartctl возвращает ненулевой код при некритичных предупреждениях,
-    # но JSON всё равно валиден — парсим stdout.
     if not out.stdout.strip():
         if looks_like_permission_error(out.stderr):
             requirements_registry.report(SMARTCTL_REQUIREMENT, RequirementStatus.NEEDS_PRIVILEGE)
@@ -173,7 +145,6 @@ def _run_smartctl(args: list[str]) -> dict | None:
 
 
 def discover_devices_sync() -> list[DiskTarget]:
-    """Автоопределение дисков через ``smartctl --scan`` (с типом, без не-SMART)."""
     data = _run_smartctl(["--scan", "-j"])
     if not data:
         return []
@@ -181,7 +152,6 @@ def discover_devices_sync() -> list[DiskTarget]:
 
 
 def _resolve_targets(specs: list[str]) -> list[DiskTarget]:
-    """Из конфиг-записей собрать список устройств; пусто → автоскан."""
     if not specs:
         return discover_devices_sync()
     targets: list[DiskTarget] = []
@@ -197,13 +167,6 @@ def _resolve_targets(specs: list[str]) -> list[DiskTarget]:
 def read_disks_sync(
     specs: list[str], now: datetime, lhm_dll_path: str = ""
 ) -> list[SensorReading]:
-    """Снять температуры дисков (блокирующе).
-
-    Опрос каждого устройства изолирован: ошибка/таймаут одного не роняет
-    остальные. Устройства без SMART (eMMC и т.п.) молча пропускаются.
-    На Windows источник — LibreHardwareMonitor (см. `sensors/lhm.py`),
-    smartctl там остаётся только для SMART-снимков деградации.
-    """
     if sys.platform == "win32":
         from sa_home_bot.sensors import lhm
 
@@ -221,10 +184,6 @@ def read_disks_sync(
     return readings
 
 
-# --- Сводка по дискам для /status (SMART-здоровье + температура + место) ---
-
-
-# Виды носителей (DiskSummary.kind); определяют метку и ожидание SMART.
 KIND_HDD = "hdd"
 KIND_SSD = "ssd"
 KIND_NVME = "nvme"
@@ -235,10 +194,8 @@ _KIND_LABEL = {KIND_HDD: "HDD", KIND_SSD: "SSD", KIND_NVME: "NVMe", KIND_EMMC: "
 
 @dataclass(frozen=True)
 class BlockDisk:
-    """Физический диск из lsblk: путь, вид носителя, точки монтирования."""
-
-    path: str  # /dev/sda
-    kind: str  # KIND_HDD | KIND_SSD | KIND_NVME | KIND_EMMC
+    path: str
+    kind: str
     mountpoints: tuple[str, ...]
     model: str | None
 
@@ -247,19 +204,11 @@ _NVME_NAMESPACE_RE = re.compile(r"^(/dev/nvme\d+)n\d+$")
 
 
 def nvme_controller_path(path: str) -> str | None:
-    """``/dev/nvme0n1`` → ``/dev/nvme0``.
-
-    ``lsblk`` отдаёт namespace-устройство (диск с разделами), а
-    ``smartctl --scan``/SMART-команды для NVMe работают с контроллером —
-    другим device-node. Без пересчёта совпадений по realpath не будет и
-    температура/health NVMe в сводке всегда остаются пустыми. ``None``, если
-    путь не похож на NVMe namespace (ничего пересчитывать не нужно)."""
     m = _NVME_NAMESPACE_RE.match(path)
     return m.group(1) if m else None
 
 
 def health_args(target: DiskTarget) -> list[str]:
-    """Аргументы smartctl для здоровья+атрибутов: ``[-d тип] -j -H -A /dev/X``."""
     args: list[str] = []
     if target.dev_type:
         args += ["-d", target.dev_type]
@@ -281,11 +230,6 @@ def _extract_temp(data: dict) -> float | None:
 
 
 def parse_health(data: dict) -> str | None:
-    """Классифицировать SMART-здоровье: DISK_OK | DISK_WARN | DISK_FAIL | None.
-
-    FAILED → диск при смерти. PASSED, но с pending/uncorrectable секторами →
-    предупреждение. Иначе — норма. Нет smart_status → None (недоступно).
-    """
     passed = data.get("smart_status", {}).get("passed")
     if passed is None:
         return None
@@ -298,14 +242,12 @@ def parse_health(data: dict) -> str | None:
                 return a.get("raw", {}).get("value") or 0
         return 0
 
-    pending = _attr(197)  # Current_Pending_Sector
-    uncorrectable = _attr(198)  # Offline_Uncorrectable
+    pending = _attr(197)
+    uncorrectable = _attr(198)
     return DISK_WARN if (pending or uncorrectable) else DISK_OK
 
 
 def _is_rotational(rota) -> bool:
-    """ROTA из lsblk: bool или строка "0"/"1"; отсутствие поля — считаем HDD
-    (старый lsblk без колонки — честная деградация к прежнему поведению)."""
     if isinstance(rota, str):
         return rota.strip() != "0"
     if rota is None:
@@ -314,7 +256,6 @@ def _is_rotational(rota) -> bool:
 
 
 def _disk_kind(name: str, tran: str | None, rota) -> str:
-    """Вид носителя по данным lsblk (eMMC и SD не различаем — не усложняем)."""
     if tran == "mmc" or name.startswith("mmcblk"):
         return KIND_EMMC
     if tran == "nvme" or name.startswith("nvme"):
@@ -325,10 +266,6 @@ def _disk_kind(name: str, tran: str | None, rota) -> str:
 
 
 def _is_empty_media(size) -> bool:
-    """SIZE=0 у диска — нет вставленного носителя (пустой картридер/привод).
-
-    Отсутствие поля SIZE (старый lsblk без колонки) — не считаем пустым,
-    честная деградация к прежнему поведению (как с ROTA)."""
     if size is None:
         return False
     if isinstance(size, str):
@@ -342,14 +279,10 @@ def _is_empty_media(size) -> bool:
 
 
 def parse_lsblk_disks(data: dict) -> list[BlockDisk]:
-    """Разобрать ``lsblk -J`` в список физических дисков (type=disk).
-
-    Диски с SIZE=0 (пустой картридер/оптический привод без носителя)
-    пропускаются — показывать нечего."""
     disks: list[BlockDisk] = []
     for dev in data.get("blockdevices", []):
         if dev.get("type") != "disk" or "boot" in (dev.get("name") or ""):
-            continue  # пропускаем mmcblkXbootY и не-диски
+            continue
         if _is_empty_media(dev.get("size")):
             continue
         mps: list[str] = []
@@ -377,7 +310,6 @@ def _collect_mountpoints(node: dict, out: list[str]) -> None:
 
 
 def _disk_usage(mountpoints: tuple[str, ...]) -> tuple[int | None, int | None]:
-    """Суммарные (free, total) байты по смонтированным ФС диска."""
     import psutil
 
     free = total = 0
@@ -414,13 +346,6 @@ def _list_block_disks_sync() -> list[BlockDisk]:
 
 
 def _label_disks(disks: list[BlockDisk]) -> list[tuple[str, BlockDisk]]:
-    """Назначить метки по виду носителя: HDD1/HDD2, SSD, NVMe, eMMC.
-
-    Номер добавляется только когда дисков одного вида больше одного.
-    eMMC — первой (сразу после CPU в /status): для неё нет температуры (SMART
-    недоступен), поэтому в сводке она должна открывать список дисков, а не
-    прятаться в конце.
-    """
     ordered = sorted(disks, key=lambda x: (x.kind != KIND_EMMC, x.path))
     per_kind: dict[str, int] = {}
     for d in ordered:
@@ -443,26 +368,10 @@ def read_disk_summaries_sync(
     health_overrides: dict[str, str | None] | None = None,
     lhm_dll_path: str = "",
 ) -> list[DiskSummary]:
-    """Собрать сводку по ВСЕМ физическим дискам (блокирующе, через executor).
-
-    На Windows сводка строится из LibreHardwareMonitor (lsblk там нет);
-    health/свободное место в ней пока пустые — см. `sensors/lhm.py`.
-
-    Температура снимается на лету (меняется быстро), сопоставление по реальному
-    пути (by-id → /dev/sdX) — иначе автоопределение USB-моста виснет. Свободное
-    место — по точкам монтирования, для всех дисков (включая eMMC без SMART).
-
-    SMART-здоровье (иконка) берётся из ``health_overrides`` — карты
-    ``realpath -> health`` из последних снимков БД (SmartScanJob), чтобы иконка в
-    /status совпадала с состоянием, по которому шлются алерты. Для диска, которого
-    ещё нет в снимках (холодный старт до первого прогона), health берётся из
-    живого опроса. Без ``health_overrides`` весь health — живой (старое поведение).
-    """
     if sys.platform == "win32":
         from sa_home_bot.sensors import lhm
 
         return lhm.read_disk_summaries_sync(lhm_dll_path)
-    # SMART по реальному пути устройства (живой опрос: temp + запасной health).
     smart: dict[str, tuple[str | None, float | None]] = {}
     for target in _resolve_targets(specs):
         if not is_smart_capable(target.name):
@@ -482,9 +391,9 @@ def read_disk_summaries_sync(
                 real = os.path.realpath(controller)
         live_health, temp = smart.get(real, (None, None))
         if health_overrides is not None and real in health_overrides:
-            health = health_overrides[real]  # из БД (совпадает с алертами)
+            health = health_overrides[real]
         else:
-            health = live_health  # холодный старт / overrides не заданы
+            health = live_health
         free, total = _disk_usage(disk.mountpoints)
         summaries.append(
             DiskSummary(
@@ -500,16 +409,7 @@ def read_disk_summaries_sync(
     return summaries
 
 
-# --- Снимок SMART-счётчиков для мониторинга деградации (SmartScanJob) ---
-
-
 def _raw_count(raw: dict) -> int | None:
-    """Чистый счётчик из SMART raw: ведущее число ``raw.string``.
-
-    ``raw.value`` у части дисков пакует несколько полей в одно число
-    (напр. Hitachi: string ``'31 (0 9)'`` при value ``589855``) — берём первый
-    токен строки; при её отсутствии/непарсибельности откатываемся к ``value``.
-    """
     s = raw.get("string")
     if isinstance(s, str):
         head = s.strip().split(" ", 1)[0]
@@ -522,7 +422,6 @@ def _raw_count(raw: dict) -> int | None:
 
 
 def _raw_attrs(data: dict) -> dict[int, int]:
-    """Счётчики отслеживаемых SMART-атрибутов из таблицы ATA (чистые значения)."""
     out: dict[int, int] = {}
     for a in data.get("ata_smart_attributes", {}).get("table", []):
         aid = a.get("id")
@@ -534,7 +433,6 @@ def _raw_attrs(data: dict) -> dict[int, int]:
 
 
 def parse_smart_snapshot(component_id: str, data: dict, now: datetime) -> SmartSnapshot:
-    """Собрать снимок SMART-счётчиков из ``smartctl -H -A /dev/X``."""
     model = data.get("model_name") or data.get("device", {}).get("name") or component_id
     return SmartSnapshot(
         component_id=component_id,
@@ -546,13 +444,6 @@ def parse_smart_snapshot(component_id: str, data: dict, now: datetime) -> SmartS
 
 
 def read_smart_snapshots_sync(specs: list[str], now: datetime) -> list[SmartSnapshot]:
-    """Снять SMART-снимки по сконфигурированным дискам (блокирующе).
-
-    Read-only ``-H -A``, self-test'ы НЕ запускаются — диск не изнашивается.
-    Опрашиваются только устройства с известным типом адаптера (конфиг/автоскан);
-    ключ снимка — realpath устройства (стабилен при by-id ↔ /dev/sdX). Ошибка/
-    таймаут одного устройства не роняет остальные; дубли по realpath отсекаются.
-    """
     snapshots: list[SmartSnapshot] = []
     seen: set[str] = set()
     for target in _resolve_targets(specs):

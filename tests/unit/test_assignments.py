@@ -1,5 +1,3 @@
-"""Строка назначения: роль, инстанс, приоритет — и совместимость со старой формой."""
-
 from __future__ import annotations
 
 import pytest
@@ -15,7 +13,6 @@ from sa_home_bot.node.assignments import (
 
 
 def test_plain_name_still_means_what_it_meant():
-    """Существующие config.toml и node-state.json не требуют миграции."""
     assert parse("monitor") == Assignment(service="monitor", role=ROLE_ACTIVE)
     assert parse("monitor").key == "monitor"
     assert not parse("monitor").standby
@@ -35,7 +32,6 @@ def test_explicit_priority():
 
 
 def test_priority_is_none_when_not_given():
-    """None значит «спроси у типа машины» — это не то же, что приоритет 0."""
     assert parse("telegram-bot@alfred").priority is None
 
 

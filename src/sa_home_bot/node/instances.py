@@ -1,28 +1,3 @@
-"""Пакеты настроек инстансов: переносимая часть конфига службы-синглтона.
-
-Зачем. Служба-синглтон (telegram-bot) может жить не на одной ноде: одна
-держит её активной, другая — в резерве. Резерв бесполезен, если у него не те
-настройки, а держать их одинаковыми руками на двух машинах — обязательно
-однажды забыть. Поэтому «переносимая» часть конфига такой службы вынимается
-из общего ``config.toml`` в отдельный файл-**пакет**, и уже он реплицируется
-по рою как единое целое.
-
-Что где лежит (каталог ``instances/`` рядом с config.toml):
-
-- ``telegram-bot.<instance>.toml`` — сам пакет: обычный TOML, который правит
-  человек. Инстанс — конкретный бот: у каждого свой токен, свои подписки,
-  своя пара активный/резервный. Имя инстанса берётся из имени файла, внутри
-  никаких служебных полей нет.
-- ``telegram-bot.<instance>.rev.json`` — сайдкар с ревизией: ``rev``, ``hash``,
-  когда и на какой ноде правили.
-
-Ключевое решение: **реплицируются байты файла, а не разобранная структура.**
-Нода не пересобирает TOML из объектов — она передаёт и записывает ровно то
-содержимое, которое видел человек, вместе с комментариями и форматированием.
-Поэтому же служебные поля живут в сайдкаре: у ноды нет причин переписывать
-файл, который правит владелец.
-"""
-
 from __future__ import annotations
 
 import contextlib
@@ -41,32 +16,15 @@ PACKAGE_SUFFIX = ".toml"
 META_SUFFIX = ".rev.json"
 INSTANCES_DIRNAME = "instances"
 
-# Пакет-**сателлит**: та же служба и тот же инстанс, но файл ведёт не человек,
-# а сама служба (для telegram-bot — гостевые подписки, выданные инвайтами,
-# см. subscriptions/guests.py). Отдельный файл потому, что два писателя в
-# одном — это и затёртые комментарии владельца, и расхождение ревизий при
-# одновременной правке.
-#
-# Ничего в механизме репликации ради этого расширять не пришлось: имя файла
-# разбирается по ПЕРВОЙ точке (см. known()), поэтому
-# `telegram-bot.alfred.guests.toml` уже виден как служба `telegram-bot`,
-# инстанс `alfred.guests` — со своим сайдкаром, своей ревизией и обычной
-# рассылкой по рою. Знать про сателлита нужно только в двух местах
-# ConfigReplicator: чей он (base_instance) и какой слот перезапускать.
 SATELLITE_GUESTS = ".guests"
 SATELLITE_SUFFIXES = (SATELLITE_GUESTS,)
 
 
 def slot_key(service: str, instance: str) -> str:
-    """Имя пары «служба + инстанс»: и ключ слота супервизора, и имя файла."""
     return f"{service}@{instance}" if instance else service
 
 
 def base_instance(instance: str) -> str:
-    """Инстанс, которому принадлежит пакет: сателлит → его хозяин.
-
-    ``alfred.guests`` → ``alfred``; обычный инстанс возвращается как есть.
-    """
     for suffix in SATELLITE_SUFFIXES:
         if instance.endswith(suffix):
             return instance[: -len(suffix)]
@@ -78,7 +36,6 @@ def is_satellite(instance: str) -> bool:
 
 
 def guests_package_path(package_path: Path) -> Path:
-    """Путь гостевого пакета рядом с основным (файла может не быть)."""
     return package_path.with_name(
         package_path.name[: -len(PACKAGE_SUFFIX)] + SATELLITE_GUESTS + PACKAGE_SUFFIX
     )
@@ -86,8 +43,6 @@ def guests_package_path(package_path: Path) -> Path:
 
 @dataclass(frozen=True)
 class InstanceMeta:
-    """Ревизия пакета: кто, когда и какую версию содержимого записал."""
-
     service: str
     instance: str
     rev: int
@@ -117,14 +72,6 @@ class InstanceMeta:
         )
 
     def wins_over(self, other: InstanceMeta | None) -> bool:
-        """Побеждает ли эта ревизия чужую при их расхождении.
-
-        Обычный случай — больше ``rev``. Равные ``rev`` с разным содержимым
-        означают, что пакет правили на двух нодах, пока они не видели друг
-        друга; спорить об этом бесполезно, важно лишь чтобы **все** ноды
-        выбрали одно и то же. Отсюда детерминированный порядок: свежее время
-        правки, а при совпадении — имя ноды.
-        """
         if other is None:
             return True
         if self.rev != other.rev:
@@ -139,11 +86,6 @@ def content_hash(data: bytes) -> str:
 
 
 def atomic_write(path: Path, data: bytes) -> None:
-    """Запись без промежуточного состояния — как в node/state.py.
-
-    Пакет читает стартующая служба; увидеть его наполовину записанным она
-    не должна ни при каком стечении обстоятельств.
-    """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
@@ -157,10 +99,6 @@ def atomic_write(path: Path, data: bytes) -> None:
 
 
 def instances_dir(config_path: str | Path | None, override: str = "") -> Path | None:
-    """Каталог пакетов: явный из конфига или ``instances/`` рядом с config.toml.
-
-    None — конфиг не файловый (тесты, чистый env): пакетов нет и быть не может.
-    """
     if override:
         return Path(override)
     if config_path is None:
@@ -169,13 +107,10 @@ def instances_dir(config_path: str | Path | None, override: str = "") -> Path | 
 
 
 class InstanceStore:
-    """Пакеты настроек на этой ноде: чтение, учёт ревизий, приём реплик."""
-
     def __init__(self, directory: str | Path | None, node_id: str) -> None:
         self.dir = Path(directory) if directory is not None else None
         self._node_id = node_id
 
-    # --- пути ---------------------------------------------------------------
 
     def package_path(self, service: str, instance: str) -> Path | None:
         if self.dir is None:
@@ -187,7 +122,6 @@ class InstanceStore:
             return None
         return self.dir / f"{service}.{instance}{META_SUFFIX}"
 
-    # --- чтение -------------------------------------------------------------
 
     def read_package(self, service: str, instance: str) -> bytes | None:
         path = self.package_path(service, instance)
@@ -207,7 +141,6 @@ class InstanceStore:
             return None
 
     def known(self) -> list[InstanceMeta]:
-        """Ревизии всех пакетов, найденных на диске (для обмена по рою)."""
         if self.dir is None or not self.dir.exists():
             return []
         metas = []
@@ -225,15 +158,8 @@ class InstanceStore:
                 metas.append(meta)
         return metas
 
-    # --- локальные правки ---------------------------------------------------
 
     def refresh(self, service: str, instance: str) -> InstanceMeta | None:
-        """Сверить пакет с записанной ревизией; правку человеком — засчитать.
-
-        Возвращает новую ревизию, если содержимое изменилось (её и нужно
-        разослать рою), иначе None. Пакет без сайдкара получает ревизию 1 —
-        так выглядит только что созданный руками файл.
-        """
         data = self.read_package(service, instance)
         if data is None:
             return None
@@ -258,7 +184,6 @@ class InstanceStore:
         return new_meta
 
     def refresh_all(self) -> list[InstanceMeta]:
-        """Сверить все пакеты на диске; вернуть те, что изменились."""
         if self.dir is None or not self.dir.exists():
             return []
         changed = []
@@ -271,19 +196,8 @@ class InstanceStore:
                 changed.append(meta)
         return changed
 
-    # --- приём реплики ------------------------------------------------------
 
     def apply(self, meta: InstanceMeta, data: bytes, *, force: bool = False) -> bool:
-        """Принять пакет от соседа. False — своя версия не хуже, ничего не меняли.
-
-        ``force`` — не сверять ревизии (решение о приёме уже принято
-        вызывающим: см. ConfigReplicator, пассивные пакеты, где источник
-        авторитетен и после его пересборки ревизия начинается заново).
-
-        Несовпадение хеша с содержимым — признак порчи в пути: такой пакет не
-        применяется вовсе, лучше остаться на прежних настройках, чем поднять
-        службу на испорченных.
-        """
         actual = content_hash(data)
         if actual != meta.hash:
             log.warning(

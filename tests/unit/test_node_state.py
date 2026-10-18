@@ -1,5 +1,3 @@
-"""node/state.py — персистентное состояние ноды (assignments, пиры)."""
-
 from sa_home_bot.config import SwarmNodeConfig
 from sa_home_bot.node.state import NodeState
 
@@ -18,7 +16,7 @@ def test_last_known_version_roundtrip(tmp_path):
 
 
 def test_save_then_load_roundtrip(tmp_path):
-    path = tmp_path / "sub" / "node-state.json"  # каталог ещё не существует
+    path = tmp_path / "sub" / "node-state.json"
     state = NodeState(
         assignments=["apps", "monitor"],
         peers=[SwarmNodeConfig(id="arch-t480", endpoint="tcp://100.110.58.31:8710")],

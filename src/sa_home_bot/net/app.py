@@ -1,9 +1,3 @@
-"""Сборка и жизненный цикл службы net (отдельный процесс).
-
-Минимальная служба по образцу apps: proto-сервер поверх NetService, без БД и
-планировщика. Состояние (живость SearXNG) читается на каждый запрос.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -19,8 +13,6 @@ log = logging.getLogger(__name__)
 async def run_net(settings: Settings) -> None:
     service = NetService(settings)
     server = ProtoServer(settings.net.socket, service, token=settings.swarm.token)
-    # Обработчики сигналов — до start(): он ждёт появления своего адреса
-    # (см. proto/server.py), и всё это время остановка иначе не обрабатывалась бы.
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
     await server.start()

@@ -1,5 +1,3 @@
-"""SensorScanJob в режиме mode="baseline": аномалия ловится раньше fixed-порога."""
-
 import pytest_asyncio
 
 from sa_home_bot.bot.dispatch import TelegramEventDispatcher
@@ -53,7 +51,7 @@ def _settings() -> Settings:
         telegram=TelegramConfig(token="x"),
         sensors=SensorsConfig(
             cpu=CpuSensorConfig(
-                warn_c=80.0,  # fixed никогда не сработает на скачке до 60°C
+                warn_c=80.0,
                 crit_c=90.0,
                 hysteresis_delta_c=5.0,
                 consecutive_to_alert=2,
@@ -78,7 +76,6 @@ async def ctx(tmp_path):
         [SubscriptionConfig(name="me", chat_id=1, event_types=["*"], allowed_commands=[])]
     )
     notifier = FakeNotifier()
-    # 60 ровных тиков ~40°C (норма) + устойчивый скачок до 60°C.
     sensors = FakeSensors([40.0] * 60 + [60.0] * 4)
     store = Store(db)
     context = JobContext(
@@ -98,18 +95,14 @@ async def test_baseline_catches_anomaly_below_fixed_warn(ctx):
     results = [await job.run(context) for _ in range(64)]
     alerts = sum(r.alerts_sent for r in results)
 
-    # Ровно один алерт — на онсете аномалии (60°C >> baseline ~40°C),
-    # хотя fixed warn=80 не был бы превышен ни разу.
     assert alerts == 1
     assert any("Перегрев" in s[1] for s in notifier.sent)
-    # История показаний писалась (baseline включён).
     assert (await context.store.baseline_stats("cpu:pkg", window=200)).count == 64
 
 
 async def test_no_alert_while_warming_up_on_flat_temperature(ctx):
     context, notifier = ctx
     job = SensorScanJob()
-    # Первые 60 тиков — ровные 40°C, ни одного алерта.
     for _ in range(60):
         await job.run(context)
     assert notifier.sent == []

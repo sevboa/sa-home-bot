@@ -1,10 +1,3 @@
-"""MonitorService — реализация ServiceHandler для службы monitor.
-
-`get_state` отдаёт сырые данные (здоровье, диски, аптайм, статистика прогонов),
-рендер в человекочитаемый текст — забота фронтенда (бота). Действия объявляются
-в `describe` — фронтенды строят UI по этому списку, ничего не хардкодя.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -45,11 +38,9 @@ ACTION_SCAN_NOW = "scan_now"
 ACTION_DOWNTIME = "downtime"
 ACTION_HOST_TREND = "host_trend"
 
-# Границы окна тренда host-метрик.
 HOST_TREND_DEFAULT_HOURS = 24
 HOST_TREND_MAX_HOURS = 24 * 14
 
-# Границы страницы истории отключений (защита от абсурдных запросов).
 DOWNTIME_DEFAULT_LIMIT = 10
 DOWNTIME_MAX_LIMIT = 50
 
@@ -99,8 +90,6 @@ class MonitorService:
         self._node = socket.gethostname()
 
     def describe(self) -> ServiceDescription:
-        # downtime — команда-представление (чтение с параметрами): фронтенды
-        # не рисуют её кнопкой (у неё есть params), а зовут сами с offset/limit.
         return ServiceDescription(
             info=ServiceInfo(node=self._node, service=SERVICE_NAME, version=__version__),
             capabilities=("temperature", "smart", "power", "host"),
@@ -129,9 +118,6 @@ class MonitorService:
         loop = asyncio.get_running_loop()
         states = await self._store.get_all_states()
         host_states = await self._store.get_all_host_states()
-        # Диски — кэш SensorScanJob (см. Store.save_disk_summaries), не
-        # живой опрос: smartctl/LHM на каждый запрос бота делали /status и
-        # особенно веерный /swarm заметно медленными (живой баг 2026-07-18).
         disks = await self._store.get_disk_summaries() or []
         uptime, (outages, _) = await asyncio.gather(
             loop.run_in_executor(None, read_uptime_sync),
@@ -141,12 +127,6 @@ class MonitorService:
         cpu_cfg = self._settings.sensors.cpu
         gpu_cfg = self._settings.sensors.gpu
         disk_cfg = self._settings.sensors.disks
-        # smartctl/nvidia-smi — только если соответствующий датчик включён
-        # (иначе не шумим про программу, от которой ничего и не ждали);
-        # история отключений (`last`, journalctl) — всегда, она не зависит от
-        # датчиков. journalctl упоминается отдельно, только когда сам `last`
-        # в порядке — иначе оба сводятся к одной проблеме (нет истории
-        # отключений / не та ОС).
         smartctl_problem = (
             requirements_registry.problem_for(SMARTCTL_REQUIREMENT) if disk_cfg.enabled else None
         )
@@ -157,8 +137,6 @@ class MonitorService:
         journal_problem = (
             None if last_problem else requirements_registry.problem_for(JOURNALCTL_REQUIREMENT)
         )
-        # kernel-журнал (kernel_stall_events этапа 40) — только при включённом
-        # host-датчике: на server/workstation его никто не читает.
         kernel_journal_problem = (
             requirements_registry.problem_for(KERNEL_JOURNAL_REQUIREMENT)
             if self._settings.sensors.host.enabled
@@ -197,7 +175,6 @@ class MonitorService:
         }
 
     def _host_thresholds(self) -> dict[str, dict[str, Any]]:
-        """Эффективные пороги host-метрик (дефолты METRICS + перекрытия конфига)."""
         overrides = self._settings.sensors.host.thresholds
         out: dict[str, dict[str, Any]] = {}
         for name, spec in METRICS.items():
@@ -218,11 +195,9 @@ class MonitorService:
             return await self._downtime_page(args)
         if action == ACTION_HOST_TREND:
             return await self._host_trend_page(args)
-        # Сервер валидирует action по describe — сюда неизвестное не доходит.
         raise ValueError(f"необъявленное действие: {action}")
 
     async def _host_trend_page(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Тренд одной host-метрики по 10-минуткам (ловит «steal подрос за неделю»)."""
         metric = str(args.get("metric", "")).strip()
         if metric not in METRICS:
             return {"error": "unknown_metric", "metric": metric, "known": sorted(METRICS)}
@@ -235,11 +210,6 @@ class MonitorService:
         return {"metric": metric, "hours": hours, "buckets": buckets}
 
     async def _downtime_page(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Страница истории отключений ЭТОЙ машины (`last`+`journalctl`).
-
-        Раньше бот читал журнал сам — работало только для своей машины;
-        теперь история любой ноды доступна по протоколу («спроси любого»).
-        """
         try:
             offset = max(0, int(args.get("offset", 0)))
         except (TypeError, ValueError):

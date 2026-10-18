@@ -1,5 +1,3 @@
-"""Служба net: describe, поиск, состояние и коды ошибок."""
-
 from __future__ import annotations
 
 import pytest
@@ -71,8 +69,6 @@ async def test_get_state_reports_searxng_available(monkeypatch):
     state = await NetService(_settings()).get_state()
     assert state["available"] is True
     assert state["searxng_url"] == "http://127.0.0.1:8888"
-    # Проба живости — короткий таймаут, не рабочий: карточка службы не должна
-    # висеть полный request_timeout_s из-за мёртвого поисковика.
     assert calls[0]["timeout"] == _settings().net.probe_timeout_s
 
 

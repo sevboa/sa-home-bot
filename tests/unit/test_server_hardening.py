@@ -1,11 +1,3 @@
-"""Живучесть серверной стороны + предохранитель hops (аудит 2026-07-28).
-
-До v0.43 принятые сокеты не получали keepalive, рассылка шла последовательно
-и без таймаута (один полумёртвый клиент вешал emit(), а с ним супервизор и
-аренду), молчащее соединение без auth жило вечно, а защита от шторма
-ретрансляции держалась на единственном дедуп-наборе.
-"""
-
 import asyncio
 import errno
 import socket
@@ -28,8 +20,6 @@ from sa_home_bot.proto.server import ProtoServer
 from tests.unit.netsupport import StubService
 from tests.unit.support.waiting import wait_for
 
-# --- hops: второй предохранитель от шторма ---
-
 pytest_plugins = ["tests.unit.sock_fixture"]
 
 
@@ -37,7 +27,7 @@ def test_hops_переживает_кодирование():
     env = make_event("node_down", {"node": "winpc"}, src=Address(node="alfred"))
     assert env.hops == 0
     bumped = decode(encode(env))
-    assert bumped.hops == 0  # поле не пишется, пока ноль — совместимость
+    assert bumped.hops == 0
 
     import dataclasses
 
@@ -48,7 +38,7 @@ def test_hops_переживает_кодирование():
 def test_hops_отсутствие_в_json_равно_нулю():
     env = make_event("x", {})
     raw = encode(env)
-    assert b"hops" not in raw  # старая нода увидит привычный конверт
+    assert b"hops" not in raw
 
 
 async def test_ретрансляция_инкрементит_hops():
@@ -70,7 +60,7 @@ async def test_ретрансляция_инкрементит_hops():
         seen=SeenEvents(),
     )
     assert [e.hops for e in broadcasts] == [1]
-    assert broadcasts[0].id == env.id  # id не меняется — дедуп работает как раньше
+    assert broadcasts[0].id == env.id
 
 
 async def test_событие_с_превышением_hops_дропается():
@@ -96,9 +86,6 @@ async def test_событие_с_превышением_hops_дропается(
     )
 
 
-# --- broadcast: полумёртвый клиент не тормозит остальных ---
-
-
 async def test_broadcast_не_виснет_на_полумёртвом_клиенте(tmp_path, monkeypatch):
     monkeypatch.setattr(server_mod, "SEND_TIMEOUT_S", 0.1)
 
@@ -112,7 +99,6 @@ async def test_broadcast_не_виснет_на_полумёртвом_клие�
     await stuck.connect()
     try:
         assert await wait_for(lambda: server.connection_count == 2)
-        # Одно из соединений «залипает»: его send больше никогда не завершается.
         victim = next(iter(server._connections))
 
         async def hanging_send(env):
@@ -121,16 +107,12 @@ async def test_broadcast_не_виснет_на_полумёртвом_клие�
         victim.send = hanging_send  # type: ignore[method-assign]
 
         delivered = await asyncio.wait_for(server.broadcast_event("ping", {}), timeout=2.0)
-        # Здоровый получатель обслужен, залипший — выброшен из соединений.
         assert delivered == 1
         assert victim not in server._connections
     finally:
         await healthy.close()
         await stuck.close()
         await server.stop()
-
-
-# --- TCP: auth-дедлайн и keepalive на принятой стороне ---
 
 
 async def test_молчащее_соединение_закрывается_по_auth_таймауту(monkeypatch):
@@ -141,7 +123,6 @@ async def test_молчащее_соединение_закрывается_по
     addr = server.endpoint
     try:
         reader, writer = await asyncio.open_connection(addr.host, addr.port)
-        # Ничего не шлём. Сервер обязан закрыть соединение сам.
         eof = await asyncio.wait_for(reader.read(1), timeout=2.0)
         assert eof == b""
         writer.close()
@@ -168,14 +149,11 @@ async def test_принятый_сокет_получает_keepalive():
 async def test_нода_поднимается_на_доступном_адресе_не_дожидаясь_отстающего(
     sock_dir, monkeypatch
 ):
-    """Главный смысл этапа: LAN есть сразу, tailscale-адреса ещё нет —
-    нода обязана работать уже сейчас, а не через минуту."""
     monkeypatch.setattr(server_mod, "BIND_RETRY_INTERVAL_S", 0.01)
     real_start_server = asyncio.start_server
     attempts = {"n": 0}
 
     async def flaky_start_server(*args, **kwargs):
-        # Адрес «tailscale» (порт 0 с этим хостом) не поднимается первые разы.
         if kwargs.get("host") == "127.0.0.2":
             attempts["n"] += 1
             if attempts["n"] < 3:
@@ -191,22 +169,16 @@ async def test_нода_поднимается_на_доступном_адре�
     )
     await server.start()
     try:
-        # start() вернулся, хотя второй адрес ещё не поднялся.
         assert len(server.bound_endpoints) == 1
         assert await wait_for(lambda: len(server.bound_endpoints) == 2), (
             "отстающий адрес так и не добрали фоном"
         )
-        # Объявлять рою нечего: unix-сокет и loopback (а 127.0.0.2 — он же)
-        # соседу бесполезны, по ним он попадёт к себе.
         assert server.advertised_endpoints() == []
     finally:
         await server.stop()
 
 
 async def test_занятый_порт_среди_нескольких_адресов_не_маскируется(sock_dir, monkeypatch):
-    """EADDRINUSE — чужой процесс на порту: молча работать «наполовину»
-    нельзя, это не «адрес ещё не приехал»."""
-
     async def busy_start_server(*args, **kwargs):
         raise OSError(errno.EADDRINUSE, "address already in use")
 

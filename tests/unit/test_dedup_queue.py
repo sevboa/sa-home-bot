@@ -31,7 +31,6 @@ async def test_key_released_on_get_allows_requeue():
     await q.put(FakeJob("scan"))
     job = await q.get()
     assert job.dedup_key == "scan"
-    # После get() ключ свободен — можно поставить снова.
     assert await q.put(FakeJob("scan")) is True
 
 

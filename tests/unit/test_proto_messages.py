@@ -1,5 +1,3 @@
-"""Сериализация и версионирование сообщений протокола v0."""
-
 import json
 
 import pytest
@@ -37,9 +35,6 @@ def test_request_roundtrip():
 
 
 def test_request_roundtrip_with_timeout_s():
-    # llm.chat/ask используют это поле, чтобы попросить больше времени на
-    # ответ, чем DEFAULT_TIMEOUT (proto/client.py) — едет через все хопы
-    # форварда без изменений (см. докстринг Envelope).
     env = make_request(MSG_GET_STATE, timeout_s=180.0)
     decoded = decode(encode(env))
     assert decoded.timeout_s == 180.0
@@ -80,7 +75,7 @@ def test_encode_is_single_ndjson_line():
     line = encode(make_request(MSG_GET_STATE))
     assert line.endswith(b"\n")
     assert line.count(b"\n") == 1
-    json.loads(line)  # валидный JSON
+    json.loads(line)
 
 
 def test_decode_rejects_foreign_version():
@@ -96,10 +91,10 @@ def test_decode_rejects_foreign_version():
     [
         b"not json",
         b"[1,2,3]",
-        b'{"id": "x", "type": "get_state"}',  # нет версии
-        b'{"v": 0, "type": "get_state"}',  # нет id
-        b'{"v": 0, "id": "x"}',  # нет типа
-        b'{"v": 0, "id": "x", "type": "get_state", "payload": []}',  # payload не объект
+        b'{"id": "x", "type": "get_state"}',
+        b'{"v": 0, "type": "get_state"}',
+        b'{"v": 0, "id": "x"}',
+        b'{"v": 0, "id": "x", "type": "get_state", "payload": []}',
     ],
 )
 def test_decode_rejects_garbage(line):
@@ -139,17 +134,12 @@ def test_hello_payload_requires_fields():
 
 
 def test_hello_carries_wake_info():
-    # Реквизиты WoL едут уже в hello (как и node_kind): сосед должен знать,
-    # КАК будить ноду, к моменту, когда она уснула и её уже не спросить —
-    # см. wake_core.resolve_wake_info.
     wake = {"mac": "04:92:26:da:63:7c", "ip": "192.168.0.105", "broadcast": "192.168.0.255"}
     info = ServiceInfo(node="winpc", service="node", version="0.38.1", wake=wake)
     assert ServiceInfo.from_payload(info.to_payload()) == info
 
 
 def test_hello_without_wake_is_old_node():
-    # Нода прежней версии поля не шлёт — это не ошибка разбора, просто её
-    # нечем будить (как и Wi-Fi-ноду, у которой wake=None).
     restored = ServiceInfo.from_payload(
         {"node": "arch-t480", "service": "node", "version": "0.30.0"}
     )

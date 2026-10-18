@@ -1,5 +1,3 @@
-"""ProtoEventDispatcher: события уходят broadcast'ом, без клиентов — pending."""
-
 from datetime import UTC, datetime
 
 from sa_home_bot.domain.models import (
@@ -64,7 +62,6 @@ async def test_alert_broadcast_when_client_connected():
 async def test_no_clients_keeps_event_pending():
     server = FakeServer(clients=0)
     result = await ProtoEventDispatcher(server).dispatch_alert(_event())
-    # handled=False → job не пометит notified, событие повторится.
     assert not result.delivered and not result.handled
 
 

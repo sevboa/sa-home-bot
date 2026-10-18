@@ -1,23 +1,3 @@
-"""Назначение службы ноде: что именно, в какой роли и с каким приоритетом.
-
-Раньше назначение было просто именем службы (``"monitor"``). С появлением
-резервных служб этого мало: нужно различать «держи эту службу запущенной» и
-«держи её наготове, но не запускай, пока её держит другой», а у службы с
-несколькими инстансами (разные боты) — ещё и о каком из них речь.
-
-Формат строки (он же лежит в ``[node].assignments`` и в ``node-state.json``)::
-
-    <служба>[@<инстанс>][:<роль>][:prio=<число>]
-
-    monitor                          — как раньше: активная, без инстансов
-    telegram-bot@alfred              — активный экземпляр бота «alfred»
-    telegram-bot@alfred:standby      — тот же бот в резерве
-    telegram-bot@alfred:standby:prio=70
-
-Старые плоские строки читаются без изменений и означают ровно то же, что и
-означали, — существующие конфиги и состояния нод не требуют миграции.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -32,18 +12,11 @@ _PRIO_PREFIX = "prio="
 
 
 class AssignmentError(ValueError):
-    """Строка назначения не разбирается."""
+    pass
 
 
 @dataclass(frozen=True)
 class Assignment:
-    """Разобранное назначение.
-
-    ``priority`` — ``None`` означает «взять из типа машины» (`node/kind.py`);
-    явное число нужно там, где владелец хочет иной порядок, чем подсказывает
-    железо.
-    """
-
     service: str
     instance: str = ""
     role: str = ROLE_ACTIVE
@@ -51,7 +24,6 @@ class Assignment:
 
     @property
     def key(self) -> str:
-        """Ключ слота: по нему живёт запись в супервизоре и имя пакета."""
         return slot_key(self.service, self.instance)
 
     @property
@@ -60,7 +32,6 @@ class Assignment:
 
 
 def parse(text: str) -> Assignment:
-    """Разобрать строку назначения. Пустая/битая — AssignmentError."""
     raw = text.strip()
     if not raw:
         raise AssignmentError("пустое назначение")

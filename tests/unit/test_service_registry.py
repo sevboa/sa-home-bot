@@ -1,10 +1,3 @@
-"""Реестр служб — единственный источник знания о службе.
-
-Тесты фиксируют то, что раньше жило в трёх местах: чем службу спавнить
-(ASSIGNMENT_ARGS), как её запустить руками (--service choices) и куда к ней
-стучаться (service_endpoints).
-"""
-
 from __future__ import annotations
 
 from sa_home_bot.config import Settings
@@ -28,7 +21,6 @@ def test_known_services():
 
 
 def test_cli_args_map_assignment_name_to_service_flag():
-    # Имя в рое и имя в CLI различаются только у бота — это знание живёт здесь.
     assert registry.SERVICES["telegram-bot"].cli_args == ["--service", "bot"]
     assert registry.SERVICES["monitor"].cli_args == ["--service", "monitor"]
 
@@ -41,8 +33,6 @@ def test_cli_choices_include_every_service_and_the_node_itself():
 
 
 def test_llm_is_externally_managed_and_not_assignable():
-    """Живая находка 2026-07-23: WSL2 не стартует из Session-0, поэтому llm
-    поднимает не супервизор. Маршрут к ней при этом есть."""
     llm = registry.SERVICES["llm"]
     assert llm.externally_managed
     assert not llm.assignable
@@ -53,7 +43,6 @@ def test_llm_is_externally_managed_and_not_assignable():
 
 def test_service_endpoints_cover_services_with_own_server():
     endpoints = registry.service_endpoints(Settings())
-    # Бот — клиент, своего proto-сервера у него нет: маршрутизировать нечего.
     assert "telegram-bot" not in endpoints
     assert set(endpoints) == {
         name for name, svc in registry.SERVICES.items() if svc.endpoint_attr

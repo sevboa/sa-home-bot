@@ -1,14 +1,3 @@
-"""AppsService — ServiceHandler службы apps (адаптер приложений).
-
-Каждое приложение из конфига (`[apps] items`) — умение роя: индивидуальное
-действие в describe (`id` приложения — карточка со статусом и ссылками) плюс
-общие `start`/`stop`/`restart` с параметром `name` (выбор приложения) —
-реальное управление systemd-юнитом, не только просмотр. Право на скилл в
-подписке — `<id>@apps` (карточка) и `start@apps`/`stop@apps`/`restart@apps`
-(управление). В систему ходит только эта служба, фронтенды — по протоколу
-(правило «бот в систему не ходит»).
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -32,7 +21,6 @@ from sa_home_bot.utils.requirements import looks_like_permission_error
 
 SERVICE_NAME = "apps"
 
-# Статусы приложения (значение `systemctl is-active` юнита).
 STATUS_ACTIVE = "active"
 STATUS_UNKNOWN = "unknown"
 
@@ -47,7 +35,6 @@ _MANAGE_ACTIONS = {
 
 
 async def read_unit_status(unit: str) -> str:
-    """`systemctl is-active <unit>` → active/inactive/failed/… (unknown при сбое)."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "systemctl",
@@ -64,9 +51,6 @@ async def read_unit_status(unit: str) -> str:
 
 
 async def _run_systemctl(action: str, unit: str) -> None:
-    """`sudo -n systemctl <action> <unit>` — `-n`: без интерактивного prompt,
-    отказ без настроенного NOPASSWD-сниппета (`nodectl fix`) — и есть сигнал.
-    """
     proc = await asyncio.create_subprocess_exec(
         "sudo",
         "-n",
@@ -88,14 +72,6 @@ async def _run_systemctl(action: str, unit: str) -> None:
 
 
 def _resolve_urls(urls: list[str]) -> list[str]:
-    """Подставляет ``{lan_ip}`` актуальным LAN-адресом ноды вместо статики в
-    конфиге — тем же способом, каким рой уже объявляет себя соседям
-    (``proto/endpoints.py::local_lan_ipv4_address``, этап 31, PROTOCOL.md
-    «Маячок discovery»). Живая находка: адрес alfred за время проекта уехал
-    дважды (см. IMPLEMENTATION_PLAN.md, этап 31) — конфиг `[apps] items`
-    хардкодил старый IP и молча указывал в никуда, пока не заметили руками.
-    Ссылки на qBittorrent/Jellyfin — их человек открывает сам, поэтому лучше
-    вообще не показать ссылку (LAN недоступен), чем показать мёртвую."""
     lan_ip = local_lan_ipv4_address()
     resolved = []
     for url in urls:
@@ -162,6 +138,5 @@ class AppsService:
             return await self._app_dict(app)
         app = self._apps.get(action)
         if app is None:
-            # Сервер валидирует action по describe — сюда неизвестное не доходит.
             raise ValueError(f"необъявленное действие: {action}")
         return await self._app_dict(app)

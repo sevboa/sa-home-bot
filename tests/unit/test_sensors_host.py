@@ -1,5 +1,3 @@
-"""Адаптер host-метрик VPS (sensors/host.py): парсинг /proc на фикстурах."""
-
 import shutil
 from datetime import UTC, datetime
 
@@ -28,7 +26,6 @@ _HAS_JOURNALCTL = shutil.which("journalctl") is not None
 NOW = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
 
 _STAT_1 = "cpu  100 0 50 800 20 0 5 10 0 0\ncpu0 50 0 25 400 10 0 2 5 0 0\n"
-# +40 user, +10 system, +100 idle, +5 iowait, +45 steal → total delta 200
 _STAT_2 = "cpu  140 0 60 900 25 0 5 55 0 0\ncpu0 70 0 30 450 12 0 2 30 0 0\n"
 
 _MEMINFO = """MemTotal:        4000000 kB
@@ -48,13 +45,13 @@ def test_parse_proc_stat_cpu_reads_aggregate_line():
     parsed = parse_proc_stat_cpu(_STAT_1)
     assert parsed["steal"] == 10
     assert parsed["iowait"] == 20
-    assert "guest" not in parsed  # guest/guest_nice в сумму не берём
+    assert "guest" not in parsed
 
 
 def test_cpu_deltas_steal_and_iowait_over_window():
     steal, iowait = cpu_deltas(parse_proc_stat_cpu(_STAT_1), parse_proc_stat_cpu(_STAT_2))
-    assert steal == pytest.approx(22.5)  # 45 / 200 * 100
-    assert iowait == pytest.approx(2.5)  # 5 / 200 * 100
+    assert steal == pytest.approx(22.5)
+    assert iowait == pytest.approx(2.5)
 
 
 def test_cpu_deltas_zero_window_is_safe():
@@ -86,17 +83,12 @@ def test_parse_vmstat_delta_for_oom():
     assert d2["oom_kill"] - d1["oom_kill"] == 2
 
 
-# --- /proc/net/dev, conntrack, стойла ядра (этап 40) ---
-
-# Поля после «iface:»: rx(bytes packets errs drop fifo frame compressed multicast)
-#                      tx(bytes packets errs drop fifo colls carrier compressed)
 _NETDEV_1 = """Inter-|   Receive   |  Transmit
  face |b p e d f fr c m|b p e d f co ca c
     lo: 100 2 0 0 0 0 0 0 100 2 0 0 0 0 0 0
   eth0: 5000 40 3 1 0 0 0 0 4000 30 0 2 0 0 0 0
   eth1: 10 1 100 100 0 0 0 0 10 1 50 50 0 0 0 0
 """
-# eth1 исчезает во втором снимке; eth0: +2 rx_errs, +1 rx_drop, +3 tx_errs, +0 tx_drop
 _NETDEV_2 = """Inter-|   Receive   |  Transmit
  face |b p e d f fr c m|b p e d f co ca c
     lo: 200 4 0 0 0 0 0 0 200 4 0 0 0 0 0 0
@@ -107,31 +99,30 @@ _NETDEV_2 = """Inter-|   Receive   |  Transmit
 def test_parse_proc_net_dev_skips_lo_and_headers():
     parsed = parse_proc_net_dev(_NETDEV_1)
     assert set(parsed) == {"eth0", "eth1"}
-    assert parsed["eth0"] == (3, 1, 0, 2)  # rx_errs, rx_drop, tx_errs, tx_drop
+    assert parsed["eth0"] == (3, 1, 0, 2)
 
 
 def test_net_err_delta_counts_errs_only_not_drops():
     prev = parse_proc_net_dev(_NETDEV_1)
     cur = parse_proc_net_dev(_NETDEV_2)
-    # eth0: rx_errs (5-3)=2 + tx_errs (3-0)=3 = 5; drop (rx+1) не считаем; eth1 исчез
     assert net_err_delta(prev, cur) == 5
 
 
 def test_net_err_delta_ignores_pure_drop_growth():
     prev = {"eth0": (0, 100, 0, 5)}
-    cur = {"eth0": (0, 900, 0, 40)}  # растут только дропы — это шум, не сбой
+    cur = {"eth0": (0, 900, 0, 40)}
     assert net_err_delta(prev, cur) == 0
 
 
 def test_net_err_delta_ignores_counter_reset():
     prev = {"eth0": (10, 10, 10, 10)}
-    cur = {"eth0": (0, 0, 0, 0)}  # ребут интерфейса — счётчики обнулились
+    cur = {"eth0": (0, 0, 0, 0)}
     assert net_err_delta(prev, cur) == 0
 
 
 def test_parse_conntrack_percentage_and_missing():
     assert parse_conntrack("32768", "131072") == pytest.approx(25.0)
-    assert parse_conntrack("", "131072") is None  # модуль не загружен — файла нет
+    assert parse_conntrack("", "131072") is None
     assert parse_conntrack("10", "0") is None
 
 
@@ -219,8 +210,8 @@ def test_read_host_sync_builds_readings_from_proc(monkeypatch):
     assert by_metric["mem_available_pct"].value == pytest.approx(20.0)
     assert by_metric["swap_used_pct"].value == pytest.approx(25.0)
     assert by_metric["psi_cpu"].value == pytest.approx(3.42)
-    assert "psi_memory" not in by_metric  # пустой файл — метрику не эмитим
-    assert "conntrack_pct" not in by_metric  # нет файлов nf_conntrack — не эмитим
+    assert "psi_memory" not in by_metric
+    assert "conntrack_pct" not in by_metric
     assert by_metric["steal_pct"].component_id == "host:steal_pct"
     assert by_metric["steal_pct"].unit == "%"
 
@@ -249,7 +240,7 @@ def test_read_host_sync_emits_net_conntrack_and_kernel_stalls(monkeypatch):
 
     by_metric = {r.metric: r for r in read_host_sync(NOW, 60.0)}
     assert by_metric["conntrack_pct"].value == pytest.approx(25.0)
-    assert by_metric["net_err_rate"].value == pytest.approx(5.0)  # rx+tx errs за 60с окно
+    assert by_metric["net_err_rate"].value == pytest.approx(5.0)
     assert by_metric["kernel_stall_events"].value == pytest.approx(2.0)
     assert by_metric["kernel_stall_events"].unit == "/скан"
 
@@ -259,8 +250,8 @@ def test_host_sensor_auto_enabled_on_vps(tmp_path):
     cfg.write_text('[node]\nkind = "vps"\n', encoding="utf-8")
     s = Settings.load(cfg)
     assert s.sensors.host.enabled is True
-    assert s.sensors.cpu.enabled is False  # coretemp виртуалки — бесполезен
-    assert s.sensors.disks.enabled is False  # SMART у виртуального диска нет
+    assert s.sensors.cpu.enabled is False
+    assert s.sensors.disks.enabled is False
 
 
 def test_host_sensor_off_by_default_on_server(tmp_path):

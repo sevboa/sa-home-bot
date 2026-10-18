@@ -1,13 +1,3 @@
-"""NodeService — управление нодой по протоколу v0 (клиент — nodectl).
-
-`get_state` — статус служб под супервизией, аптайм и presence пиров;
-действия start/stop/restart объявлены в describe с параметром ``name``
-и валидируются сервером по нему. Power-действия (выключить/перезагрузить/
-усыпить машину) и ``restart_node`` (сама нода-супервизор, не путать с
-рестартом службы) — умения роя без параметров: выполнение с задержкой,
-чтобы ответ успел уйти клиенту.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -63,8 +53,8 @@ ACTION_RESTART = "restart"
 ACTION_ASSIGN = "assign"
 ACTION_UNASSIGN = "unassign"
 
-ACTION_SWARM_JOIN = "swarm_join"  # входящее: сосед присоединяется к нам
-ACTION_JOIN = "join"  # исходящее: мы присоединяемся к соседу (nodectl join)
+ACTION_SWARM_JOIN = "swarm_join"
+ACTION_JOIN = "join"
 EVENT_NODE_JOINED = "node_joined"
 
 ACTION_RESTART_NODE = "restart_node"
@@ -73,11 +63,6 @@ ACTION_POWEROFF = "poweroff"
 ACTION_REBOOT = "reboot"
 ACTION_SUSPEND = "suspend"
 
-# Автовыключение по простою Alfred (config.py::NodeConfig.idle_poweroff,
-# maybe_auto_poweroff_idle ниже): если открыта SSH-сессия ИЛИ живёт
-# tmux-сессия (переживает разрыв SSH — utils/ssh_sessions.py), выключение
-# откладывается и рою уходит это событие — админ либо сам разберётся и
-# перевыключит руками, либо нажмёт кнопку ACTION_CLOSE_SSH_SESSIONS.
 ACTION_CLOSE_SSH_SESSIONS = "close_ssh_sessions"
 CLOSE_SSH_SESSIONS_TITLE = "🔌 Закрыть SSH+tmux и выключить"
 EVENT_IDLE_POWER_BLOCKED = "idle_power_blocked"
@@ -86,36 +71,12 @@ ACTION_CHECK_UPDATE = "check_update"
 ACTION_UPDATE = "update"
 EVENT_UPDATE_FINISHED = "update_finished"
 
-# Эмитится один раз при старте процесса, если версия успела смениться с
-# прошлого известного старта (node/state.py::last_known_version) — то есть
-# ФАЙЛЫ уже реально ИСПОЛНЯЮТСЯ, в отличие от update_finished (файлы легли
-# на диск, но процесс мог и не перезапуститься). Решение пользователя
-# 2026-08-04: без этого события отложенная задача-продолжение (remind
-# after_event, bot/tools.py) не может отличить «update лёг на диск» от
-# «рестарт реально применил новую версию» — а Альфред уже путал одно с
-# другим, докладывая «готово» до фактического restart_node. См.
-# node/app.py::_announce_version_if_changed — сравнение и эмит живут там
-# (там же лежит __version__ и state), не здесь.
 EVENT_RESTART_APPLIED = "restart_applied"
 
-ACTION_SEND_WOL = "send_wol"  # рой просит ЭТУ ноду разбудить кого-то в её LAN
+ACTION_SEND_WOL = "send_wol"
 
-# Дочерний процесс слота-синглтона (сейчас — только telegram-bot) сообщает:
-# я реально поднялся, а не просто спавнился ОС-процессом (для бота — успешный
-# bot.get_me(), см. app.py::run). Служебное действие, зовёт только сам
-# процесс по уже открытому node_link — человеку в UI делать тут нечего,
-# поэтому без choices на параметрах (см. describe()). Уходит в
-# LeaseManager.set_ready()/local_state()["ready"] — на нём строит решение
-# LeaseManager._decide() соседей (node/lease.py, SUPERIOR_READY_TIMEOUT_S).
 ACTION_REPORT_READY = "report_ready"
 
-# Generic fan-out: разослать команду именованной службе на себе + всех
-# живых пирах, где она поднята (сейчас единственный такой примитив в рое —
-# остальные действия строго "один запрос — один узел"). Не ждёт результата
-# самой работы дольше timeout_s — только подтверждение доставки; вызываемая
-# служба либо отвечает мгновенно (ack), либо сама асинхронно шлёт результат
-# отдельным вызовом инициатору (см. vpn_check → vpn/report_check).
-# Служебное действие (как report_ready) — без choices, не для UI.
 ACTION_TRIGGER_PEERS = "trigger_peers"
 
 RESTART_NODE_TITLE = "🔄 Перезапустить ноду"
@@ -125,13 +86,10 @@ CHECK_UPDATE_TITLE = "🔍 Проверить обновления"
 UPDATE_TITLE = "⬆️ Обновить"
 SEND_WOL_TITLE = "📡 Отправить Wake-on-LAN"
 
-# Пауза перед выполнением power-команды/само-рестарта: ответ и события
-# должны успеть уйти.
 POWER_DELAY_S = 1.0
 
 
 def power_commands() -> dict[str, list[str]]:
-    """Команды управления питанием текущей ОС (умение объявляется по факту)."""
     if sys.platform == "win32":
         return {
             ACTION_POWEROFF: ["shutdown", "/s", "/t", "5"],
@@ -192,26 +150,14 @@ class NodeService:
         make_peer_link: Callable[[str, str | Sequence[str]], PeerLink] | None = None,
         make_local_link: Callable[[str, str | Sequence[str]], PeerLink] | None = None,
     ) -> None:
-        # Репликация пакетов настроек: None — на этой ноде каталога пакетов
-        # нет (конфиг не файловый), обмениваться нечем.
         self._replicator = replicator
-        # Аренда синглтонов: None — в тестах/сборках без неё.
         self._lease = lease
         self._supervisor = supervisor
         self._router = router
         self._node = node_id or socket.gethostname()
-        # Тип машины: не привилегия, а ответ на «ждать ли ноду всегда», «можно
-        # ли будить», «есть ли датчики железа» — см. node/kind.py.
         self._kind = node_kind
         self._traits = node_kinds.traits_for(node_kind)
         self._runtime = Runtime()
-        # Power-действия (poweroff/reboot/suspend) объявляются только машине,
-        # которую можно добровольно уводить в офлайн — см. NodeTraits.power_controllable.
-        # ``power_controllable`` (параметр конструктора, из [node].power_controllable
-        # конфига) — явный оверрайд для конкретной машины: always_on-нода всё
-        # равно алертит о пропаже (traits.always_on не трогаем), но физически
-        # доступный домашний сервер можно разрешить выключать/перезагружать
-        # кнопкой, в отличие от удалённого VDS без такого оверрайда.
         controllable = (
             self._traits.power_controllable
             if power_controllable is None
@@ -219,27 +165,12 @@ class NodeService:
         )
         self._power = power_commands() if controllable else {}
         self._power_runner = power_runner or _default_power_runner
-        # Автовыключение по простою Alfred (см. config.py::NodeConfig.idle_poweroff)
-        # — осмысленно, только если машину вообще можно выключить; иначе
-        # флаг молча не действует, а не падает конфигом на server/vps.
         self._idle_poweroff = idle_poweroff and controllable
         self._restart_node = restart_node
-        # assign/unassign: состояние ноды переживает рестарт через state_path
-        # (см. node/state.py); без него — только в памяти этого процесса
-        # (удобно для тестов и для ноды без настроенного каталога данных).
         self._state = state if state is not None else NodeState()
         self._state_path = state_path
-        # Локальные службы со своим proto-сервером (monitor, apps) — при
-        # assign() нужно ещё поднять PeerLink в router, не только процесс.
-        # telegram-bot — клиент, сервера у него нет, сюда не входит.
         self._local_service_endpoints = local_service_endpoints or {}
         self._swarm_token = swarm_token
-        # Фабрики линков из node/app.py::make_link_factories: несут on_event и
-        # self_node, которые здесь взять больше неоткуда. Живой баг (аудит
-        # 2026-07-28): линки, собранные тут на месте голым PeerLink(...,
-        # token=...), не принимали события соседа/службы до рестарта ноды и
-        # не представлялись в auth. Запасной вариант — для тестов и сборок
-        # без событийной части.
         self._make_peer_link = make_peer_link or (
             lambda pid, ep: PeerLink(pid, ep, token=swarm_token, self_node=self._node)
         )
@@ -248,34 +179,18 @@ class NodeService:
                 name, ep, token=swarm_token, heartbeat_timeout=LOCAL_HEARTBEAT_TIMEOUT_S
             )
         )
-        # swarm_join: без своего TCP-адреса нечего давать соседям для обратной
-        # связи — действие объявляется только когда есть куда стучаться.
         self._own_endpoint = own_endpoint
-        # Чем нода представляется рою (этап 24): все реально слушаемые адреса,
-        # а не один из конфига. Живёт колбэком, потому что список меняется —
-        # tailscale-адрес приезжает через десятки секунд после старта, LAN
-        # доступен сразу (см. ProtoServer.advertised_endpoints).
         self._advertise = advertise
         self._emit = emit
-        # Самообновление через pipx (не требует root — в отличие от
-        # `nodectl fix`, можно звать прямо из этого процесса). None — ставили
-        # не из git-репозитория (dev-чекаут и т.п.) — умение не объявляется.
         self._update_source = update_source
         self._updating = False
         self._last_update: dict[str, Any] | None = None
-        # Маячок discovery (node/discovery.py) собирается ПОСЛЕ службы — ему
-        # нужен наш же join(), — поэтому не параметр конструктора, а колбэк,
-        # который node/app.py прицепляет следом. None — маячка нет.
         self._discovery_state: Callable[[], dict[str, Any]] | None = None
 
     def attach_discovery(self, state: Callable[[], dict[str, Any]]) -> None:
-        """Показывать состояние маячка в get_state: без этого «почему сосед
-        не нашёлся» выясняется только по логам."""
         self._discovery_state = state
 
     def describe(self) -> ServiceDescription:
-        # choices — имена служб под супервизией: фронтенд строит кнопку на
-        # каждое значение, ничего не хардкодя.
         name_param = ActionParam(
             name="name",
             type="string",
@@ -308,7 +223,6 @@ class NodeService:
                 ActionSpec(id=ACTION_ASSIGN, title="➕ Назначить", params=(assign_param,)),
                 ActionSpec(id=ACTION_UNASSIGN, title="➖ Снять", params=(name_param,)),
                 ActionSpec(id=ACTION_SEND_WOL, title=SEND_WOL_TITLE, params=(mac_param,)),
-                # Без choices — служебное действие, не для UI (см. константу).
                 ActionSpec(
                     id=ACTION_REPORT_READY,
                     title="📶 Готовность службы",
@@ -370,11 +284,6 @@ class NodeService:
                     if ACTION_POWEROFF in self._power
                     else ()
                 ),
-                # Репликация настроек: оба действия с обязательными
-                # параметрами, поэтому фронтенды их кнопками не рисуют и зовёт
-                # их только другая нода (PROTOCOL.md, «команды-представления»).
-                # get_instance_config отдаёт секреты — канал внутри роя уже
-                # защищён (TCP + токен роя, unix-сокет — правами файла).
                 *(
                     (
                         ActionSpec(
@@ -400,11 +309,6 @@ class NodeService:
         )
 
     def _advertised(self) -> list[str]:
-        """Свои адреса для рою — реально слушаемые, иначе настроенный.
-
-        Запасной вариант нужен не только тестам: пока сервер не поднялся (и в
-        сборках без него) единственная правда о себе — это конфиг.
-        """
         live = self._advertise() if self._advertise is not None else []
         if live:
             return live
@@ -412,27 +316,12 @@ class NodeService:
 
     @staticmethod
     def _local_wake_payload() -> dict[str, str] | None:
-        """Свои Ethernet-реквизиты для WoL (None — Wi-Fi/без LAN). Один вид
-        для hello (ServiceInfo.wake) и для get_state()["wake"] — соседи
-        кладут в кэш то же самое, откуда бы ни узнали."""
         info = wol.detect_local_wake_info()
         if info is None:
             return None
         return {"mac": info.mac, "ip": info.ip, "broadcast": info.broadcast}
 
     def _services_state(self) -> list[dict[str, Any]]:
-        """Службы ноды для /nodes и `nodectl status`.
-
-        Супервизор знает не все: внешне управляемые назначения (llm на
-        Windows-ноде — её поднимает scheduled task в интерактивной сессии,
-        см. deploy/llm-runner.ps1) он сознательно не спавнит, поэтому в
-        `supervisor.services` их нет. Живой баг 2026-07-28: из-за этого
-        рабочая llm вообще не показывалась в рое — «на ноде winpc нет службы
-        llm», хотя она отвечала. Берём их из маршрутизатора: линк к локальной
-        службе есть ровно тогда, когда она назначена, а его `alive` — честное
-        состояние (процесс отвечает), лучшее, что о ней вообще известно
-        снаружи: ни pid, ни времени старта чужого процесса нода не знает.
-        """
         services = [svc.to_dict() for svc in self._supervisor.services.values()]
         if self._router is None:
             return services
@@ -451,8 +340,6 @@ class NodeService:
                     "service": name,
                     "instance": None,
                     "role": None,
-                    # Фронтенду: это не наш процесс — не предлагать start/stop,
-                    # супервизор такую службу не поднимет (см. nodectl.py).
                     "external": True,
                 }
             )
@@ -464,20 +351,14 @@ class NodeService:
             "service": SERVICE_NAME,
             "version": __version__,
             "kind": self._kind,
-            # Ревизии пакетов настроек — по ним соседи понимают, у кого версия
-            # свежее, и подтягивают её (node/replication.py).
             "instances": (
                 self._replicator.local_revisions() if self._replicator is not None else []
             ),
-            # Кто из нод держит службу-синглтон: на этом соседи строят своё
-            # решение брать/уступать (node/lease.py).
             "singletons": self._lease.local_state() if self._lease is not None else {},
             "uptime_s": round(self._runtime.uptime_seconds(), 1),
             "system_uptime_s": system_uptime_seconds(),
             "services": self._services_state(),
             "peers": self._router.peers_state() if self._router is not None else [],
-            # Свои Ethernet-реквизиты (None — Wi-Fi/без LAN): бот кэширует их,
-            # пока нода жива, и использует, когда та уснёт (этап 19 п.6).
             "wake": self._local_wake_payload(),
         }
         if self._discovery_state is not None:
@@ -540,23 +421,14 @@ class NodeService:
         return ProtoError(ERR_BAD_REQUEST, f"нет такой службы: {name!r} (есть: {known})")
 
     async def _assign(self, name: str) -> dict[str, Any]:
-        """Назначить службу в рантайме: поднять процесс + (если есть свой
-        сокет — monitor/apps) линк в router, персистентно (переживает рестарт
-        ноды через state_path). Идемпотентно — повторный assign не дублирует.
-        """
         try:
             assignment = assignments_mod.parse(name)
             svc = self._supervisor.assign(name)
         except ValueError as exc:
             raise ProtoError(ERR_BAD_REQUEST, str(exc)) from exc
-        # Синглтон не запускаем прямо здесь: его черёд определит аренда
-        # лидерства, убедившись, что службу не держит другая нода
-        # (node/lease.py). Для активной роли это ожидание нулевое.
         spec = registry.spec(assignment.service)
         if spec is None or not spec.singleton:
             await svc.start()
-        # Маршрут — по имени службы: "telegram-bot@alfred" и "telegram-bot"
-        # ведут к одному и тому же сокету.
         service = assignment.service
         endpoint = self._local_service_endpoints.get(service)
         already_linked = self._router is not None and service in self._router.local_services
@@ -569,8 +441,6 @@ class NodeService:
         return {"service": svc.to_dict()}
 
     async def _unassign(self, name: str) -> dict[str, Any]:
-        # Снять можно и по ключу слота ("telegram-bot@alfred"), и по строке
-        # назначения целиком — так же, как её задавали.
         key = assignments_mod.key_or_raw(name)
         if self._supervisor.get(key) is None:
             raise self._no_such_service(name)
@@ -578,7 +448,6 @@ class NodeService:
         await self._supervisor.unassign(key)
         if self._router is not None:
             await self._router.remove_local_service(service)
-        # В состоянии лежит исходная строка назначения — найти её по ключу.
         for item in list(self._state.assignments):
             if assignments_mod.key_or_raw(item) == key:
                 self._state.assignments.remove(item)
@@ -595,9 +464,6 @@ class NodeService:
         return {"service": service, "instances": revisions}
 
     def _get_instance_config(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Отдать пакет настроек соседу. Зовётся нодой, не человеком: пакет
-        содержит секреты службы (токен бота), поэтому едет адресным ответом
-        по защищённому каналу роя, а не broadcast'ом."""
         if self._replicator is None:
             raise ProtoError(ERR_BAD_REQUEST, "на этой ноде нет каталога пакетов настроек")
         service = str(args.get("service", ""))
@@ -610,11 +476,6 @@ class NodeService:
         return payload
 
     def _report_ready(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Дочерний процесс слота-синглтона подтверждает (или снимает)
-        готовность — см. ACTION_REPORT_READY. Best-effort со стороны
-        вызывающего (app.py::run), поэтому здесь достаточно мягкой валидации:
-        неизвестное имя слота — явная ошибка вызывающему, отсутствие аренды
-        на этой сборке/в тестах — тихий no-op, а не падение."""
         name = str(args.get("name", ""))
         if self._supervisor.get(name) is None:
             raise self._no_such_service(name)
@@ -624,13 +485,6 @@ class NodeService:
         return {"name": name, "ready": ready}
 
     async def _trigger_peers(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Fan-out — см. ACTION_TRIGGER_PEERS. Пробует себя (по своему же
-        node_id, роутер сам разрулит "локальная служба") + всех живых
-        пиров; для каждого отдельно ловит "нет такой службы" (пропустить
-        молча, не у всех нод она поднята) и "недоступна" (сеть/таймаут —
-        не валит всю операцию). Возвращает только сводку доставки, не
-        результат самой команды — тот, если нужен, вызываемая служба
-        репортит отдельно инициатору сама."""
         service = str(args.get("service", ""))
         if not service:
             raise ProtoError(ERR_BAD_REQUEST, "не передан service")
@@ -670,9 +524,6 @@ class NodeService:
         return outcome
 
     def _send_wol(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Разослать magic packet в СВОЙ LAN-сегмент — вызывается пиром роя,
-        когда именно эта нода оказалась в одной подсети со спящей целью
-        (bot/wake_state.py + bot/swarm_view.find_lan_waker, этап 19 п.6)."""
         try:
             mac = wol.normalize_mac(str(args.get("mac", "")))
         except ValueError as exc:
@@ -690,14 +541,8 @@ class NodeService:
             self._state.save(self._state_path)
 
     async def _swarm_join(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Принять присоединение соседа: узнать о нём, вернуть полный граф
-        известных пиров (включая себя) за один round-trip — присоединяющийся
-        сразу может связаться со всеми, без цепочки отдельных запросов.
-        """
         caller_id = str(args.get("node_id", ""))
         caller_endpoint = str(args.get("endpoint", ""))
-        # Список адресов присоединяющегося (этап 24) — необязательный: нода
-        # старой версии пришлёт только endpoint, и это по-прежнему работает.
         caller_endpoints = merge_endpoints(caller_endpoint, args.get("endpoints"))
         if not caller_id or not caller_endpoint:
             raise ProtoError(ERR_BAD_REQUEST, "swarm_join требует node_id и endpoint")
@@ -738,14 +583,6 @@ class NodeService:
         return {"peers": peers}
 
     async def join(self, endpoint: str) -> dict[str, Any]:
-        """Присоединиться к рою через уже существующую ноду: разовый запрос
-        (не постоянный `PeerLink`) `swarm_join`, из ответа — полный граф
-        пиров, связаться со всеми напрямую («один seed → полный mesh»).
-
-        Тот же путь и для установки (`node/app.py` при первом старте с
-        `[swarm].join`), и для консоли (`nodectl join`) — по инварианту
-        «сначала действие ноды» ни бот, ни установка не обходят протокол.
-        """
         if not endpoint:
             raise ProtoError(ERR_BAD_REQUEST, "join требует endpoint")
         advertised = self._advertised()
@@ -780,8 +617,6 @@ class NodeService:
         return {"joined_via": endpoint, "peers_added": added}
 
     async def _check_update(self) -> dict[str, Any]:
-        """Только посмотреть: что работает, что на диске, что в репозитории.
-        Ничего не переустанавливает."""
         assert self._update_source is not None
         latest = await node_update.latest_tag(self._update_source)
         if latest is None:
@@ -790,39 +625,17 @@ class NodeService:
             "repo": self._update_source,
             "running": __version__,
             "installed": node_update.installed_version(),
-            # latest_tag() отдаёт git-тег как есть ("vX.Y.Z") — а
-            # installed_version()/__version__ без префикса ("X.Y.Z", PEP 440);
-            # без lstrip сравнение installed == latest никогда бы не совпадало
-            # (баг 2026-07-17: update считал себя устаревшим на каждой
-            # свежепоставленной версии и переустанавливался вхолостую).
             "latest": latest.lstrip("v"),
         }
 
     async def _update(self) -> dict[str, Any]:
-        """Подтянуть последний тег — БЕЗ рестарта процесса (на Linux) или
-        через внешнюю задачу планировщика, которая рестарт делает сама
-        (на win32, см. _schedule_windows_update).
-
-        На Linux файлы на диске обновляются сразу; уже загруженный в память
-        код продолжает работать по-старому, пока человек не выполнит
-        restart_node — get_state().update.restart_required честно скажет,
-        когда это нужно.
-        """
         assert self._update_source is not None
-        latest = await node_update.latest_tag(self._update_source)  # тег с "v" — нужен git-ref
+        latest = await node_update.latest_tag(self._update_source)
         if latest is None:
             raise ProtoError(ERR_INTERNAL, "не удалось проверить обновления (сеть?)")
-        target_version = latest.lstrip("v")  # для сравнения/отображения — см. _check_update
+        target_version = latest.lstrip("v")
         installed = node_update.installed_version()
         if installed == target_version:
-            # Живой баг 2026-08-04: up_to_date сравнивал ТОЛЬКО installed
-            # (на диске) с target — если файлы уже легли раньше (этот же
-            # update уже вызывали, restart_node ещё не делали), ответ
-            # выглядел как "полностью готово", и Альфред пропускал
-            # необходимый restart_node, доложив о готовности ноды, которая
-            # на деле ещё исполняет старый код. running (== __version__)
-            # добавлен явно, чтобы вызывающий (bot/tools.py::
-            # tool_node_manage) не спутал "на диске" с "исполняется".
             return {
                 "up_to_date": True,
                 "version": target_version,
@@ -836,18 +649,12 @@ class NodeService:
         return {"scheduled": True, "target_version": target_version}
 
     def _schedule_windows_update(self, target_version: str) -> dict[str, Any]:
-        """На win32 pipx_reinstall в процессе не работает (WinError 5 — см.
-        update_source_for_this_platform) — вместо этого дёргаем задачу
-        планировщика (deploy/win-auto-update.ps1): она сама стопает службу,
-        ставит pipx, стартует заново. Процесс, ответивший на этот RPC, скоро
-        сам умрёт от Stop-Service — событие об успехе эмитить уже некому,
-        поэтому фиксируем только неудачу (задача не запустилась вообще)."""
         self._updating = True
 
         async def run() -> None:
             try:
                 ok, output = await node_update.trigger_scheduled_task()
-            except Exception as exc:  # noqa: BLE001 — фон не должен уронить ноду
+            except Exception as exc:  # noqa: BLE001
                 ok, output = False, str(exc)
             finally:
                 self._updating = False
@@ -860,7 +667,7 @@ class NodeService:
                 await self._emit(EVENT_UPDATE_FINISHED, self._last_update)
 
         task = asyncio.create_task(run(), name="node-update-win")
-        self._update_task = task  # ссылка, чтобы задачу не собрал GC
+        self._update_task = task
         return {"scheduled": True, "target_version": target_version, "via": "scheduled_task"}
 
     def _schedule_update(self, git_ref: str, target_version: str) -> None:
@@ -871,7 +678,7 @@ class NodeService:
         async def run() -> None:
             try:
                 ok, output = await node_update.pipx_reinstall(repo, git_ref)
-            except Exception as exc:  # noqa: BLE001 — фон не должен уронить ноду
+            except Exception as exc:  # noqa: BLE001
                 ok, output = False, str(exc)
             finally:
                 self._updating = False
@@ -888,7 +695,7 @@ class NodeService:
                 await self._emit(EVENT_UPDATE_FINISHED, self._last_update)
 
         task = asyncio.create_task(run(), name="node-update")
-        self._update_task = task  # ссылка, чтобы задачу не собрал GC
+        self._update_task = task
 
     def _schedule_power(self, action: str) -> dict[str, Any]:
         argv = self._power[action]
@@ -899,12 +706,10 @@ class NodeService:
             await self._power_runner(argv)
 
         task = asyncio.create_task(run(), name=f"power-{action}")
-        self._power_task = task  # ссылка, чтобы задачу не собрал GC
+        self._power_task = task
         return {"scheduled": action, "delay_s": POWER_DELAY_S}
 
     def _schedule_restart_node(self) -> dict[str, Any]:
-        # describe() объявляет это действие только когда restart_node задан,
-        # сервер валидирует action по describe — сюда без колбэка не дойти.
         assert self._restart_node is not None
         log.warning("Запрошен само-рестарт ноды через %.0f с", POWER_DELAY_S)
 
@@ -913,28 +718,16 @@ class NodeService:
             self._restart_node()
 
         task = asyncio.create_task(run(), name="restart-node")
-        self._power_task = task  # ссылка, чтобы задачу не собрал GC
+        self._power_task = task
         return {"scheduled": ACTION_RESTART_NODE, "delay_s": POWER_DELAY_S}
 
     @staticmethod
     async def _blocking_sessions() -> tuple[list[ssh_sessions.SshSession], list[str]]:
-        """Оба независимых сигнала «за машиной работают руками» — открытые
-        SSH-сессии и живые tmux-сессии (та переживает разрыв SSH — см.
-        докстроку utils/ssh_sessions.py, живая находка 2026-08-03: без этой
-        проверки отсоединившийся tmux с фоновой задачей не остановил бы
-        автовыключение)."""
         ssh = await ssh_sessions.list_ssh_sessions()
         tmux = await ssh_sessions.list_tmux_sessions()
         return ssh, tmux
 
     async def _close_ssh_sessions(self) -> dict[str, Any]:
-        """Кнопка/действие «выгнать всех и выключить» — и ручное (карточка
-        ноды), и то, что жмёт админ из уведомления `EVENT_IDLE_POWER_BLOCKED`.
-        Одно действие, не два шага (решение пользователя 2026-08-03): раз уж
-        закрываем чужие сессии, дальше выключаем сразу же, а не ждём
-        следующего простоя Alfred. tmux гасится целиком (kill-server, вместе
-        со всем, что в нём запущено) — тем же решением: кнопка означает
-        «выключить», а не «просто отсоединить»."""
         ssh, tmux = await self._blocking_sessions()
         await ssh_sessions.terminate_sessions([s.id for s in ssh])
         if tmux:
@@ -945,36 +738,6 @@ class NodeService:
         return result
 
     async def maybe_auto_poweroff_idle(self) -> None:
-        """Вызывается node/app.py::on_local_event на КАЖДОЕ натуральное (не
-        тихое — см. llm/service.py::_sleep_now) событие `llm_went_idle` этой
-        же ноды — эмитится безусловно, даже если ни одного обращения к
-        Alfred за это время не было (в отличие от адресованного чатам
-        `llm_idle_sleep`). Ручной роспуск («Альфред, ты свободен») машину не
-        трогает — это отдельное, явное решение человека, а не простой.
-
-        Открытая SSH-сессия или живая tmux-сессия — вероятный признак того,
-        что за машиной сейчас работают руками, не через Alfred
-        (config.py::NodeConfig.idle_poweroff).
-
-        История режима сна, чтобы никто не ходил по этим граблям заново:
-
-        - ACTION_POWEROFF — исходное поведение;
-        - hybrid-sleep (пишет hibernate-образ на диск перед сном) — пробовали
-          2026-09-22, на mycraft стабильно роняло Tesla V100 с шины
-          (nvidia-smi после пробуждения отвечает "Unknown Error"), 5
-          воспроизведений из 5, включая случаи с полностью УСПЕШНОЙ записью
-          образа: дело не в ENOMEM, ломает сам переход через глубокий ACPI S4.
-          Откатили;
-        - ACTION_SUSPEND (s2idle) — тот же прогон пережил 2 из 2, поставили
-          как более экономный и быстро просыпающийся;
-        - **ACTION_POWEROFF снова, решение владельца 2026-09-23** — вернуть
-          полное выключение при простое. Suspend технически работал, но
-          владелец хочет, чтобы простаивающая машина именно гасла. Будится
-          она, как и раньше, по WoL (node/wake_core.py), так что на
-          доступности по запросу это не сказывается.
-
-        Ни один из режимов не переживает реальную потерю питания во сне —
-        poweroff в этом смысле единственный честный: нечего терять."""
         if not self._idle_poweroff:
             return
         ssh, tmux = await self._blocking_sessions()

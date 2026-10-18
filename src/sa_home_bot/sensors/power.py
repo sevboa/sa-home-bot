@@ -1,20 +1,3 @@
-"""История отключений машины: `last` (wtmp) + `journalctl` (systemd-журнал).
-
-`last` классифицирует boot-сессии: сессия помечена `crash`, если перед
-следующей загрузкой не было штатного shutdown → машину вырубило внезапно
-(питание/зависание/reset). Если у сессии есть время конца — был штатный
-shutdown в этот момент (точный `down_at`).
-
-Для внезапного обрыва точного момента в wtmp нет, поэтому его оцениваем по
-последнему событию systemd-журнала той сессии (`journalctl --list-boots`):
-boot-сессии сопоставляются по времени старта (last START ≈ journal first_entry
-с точностью до секунд), и `last_entry` крашнувшейся сессии ≈ момент обрыва.
-
-Парсинг вынесен в чистые функции (тестируются на фикстурах), блокирующий
-запуск подпроцессов делает `read_power_events_sync` через executor вызывающего
-кода (инвариант ARCHITECTURE.md §9.6 — не блокировать event loop).
-"""
-
 from __future__ import annotations
 
 import json
@@ -34,13 +17,9 @@ from sa_home_bot.utils.requirements import (
 
 log = logging.getLogger(__name__)
 
-# -xR: reboot-псевдопользователь, без hostname-колонки.
-# --time-format iso: разбираемое время с offset вместо локализованного.
 LAST_ARGS = ["last", "-xR", "--time-format", "iso", "reboot"]
 JOURNAL_ARGS = ["journalctl", "--list-boots", "-o", "json"]
 
-# История отключений строится на wtmp/journald — на Windows её пока нет
-# (platforms → «не поддерживается на этой ОС» вместо подсказки про apt).
 LAST_REQUIREMENT = Requirement(
     program="last",
     package="util-linux",
@@ -54,13 +33,11 @@ JOURNALCTL_REQUIREMENT = Requirement(
     note="точное время внезапных отключений",
 )
 
-_STILL_RUNNING = "still"  # last пишет "still running" для текущей сессии
-# Макс. расхождение START (last) и first_entry (journal) при сопоставлении сессий.
+_STILL_RUNNING = "still"
 _MATCH_TOLERANCE = timedelta(minutes=2)
 
 
 def _parse_ts(token: str) -> datetime | None:
-    """ISO-время last вида 2026-07-05T00:23:52+0500 → aware datetime."""
     try:
         return datetime.fromisoformat(token)
     except ValueError:
@@ -68,29 +45,13 @@ def _parse_ts(token: str) -> datetime | None:
 
 
 def parse_last_reboots(text: str, limit: int = 10) -> list[PowerEvent]:
-    """Разобрать вывод `last -xR --time-format iso reboot` в список отключений.
-
-    Строки идут от новых к старым (между reboot/boot есть колонка версии ядра):
-        reboot system boot <KERNEL> <START>  - still running
-        reboot system boot <KERNEL> <START>  - crash
-        reboot system boot <KERNEL> <START>  - <END>  (dur)
-    Каждая завершённая сессия → одно отключение. `still running` — текущая
-    сессия, ещё не отключение (но её START = момент возврата после предыдущего
-    краха). Для внезапных `down_at` пока None — заполняется журналом отдельно.
-
-    START ищем как первый токен-ISO-дату (устойчиво к ширине колонки ядра),
-    затем ожидаем разделитель `-` и токен конца сессии.
-    """
     events: list[PowerEvent] = []
-    # START более новой (уже обработанной) сессии — момент возврата машины
-    # после отключения текущей строки.
     newer_boot_at: datetime | None = None
 
     for line in text.splitlines():
         parts = line.split()
         if not parts or parts[0] != "reboot":
             continue
-        # Первый токен-дата — START сессии; сразу за `-` следует токен конца.
         start = None
         idx = 0
         for i, tok in enumerate(parts):
@@ -103,7 +64,6 @@ def parse_last_reboots(text: str, limit: int = 10) -> list[PowerEvent]:
         end_token = parts[idx + 2]
 
         if end_token.startswith(_STILL_RUNNING):
-            # Текущая сессия — не отключение, но фиксируем момент возврата.
             newer_boot_at = start
             continue
 
@@ -112,7 +72,7 @@ def parse_last_reboots(text: str, limit: int = 10) -> list[PowerEvent]:
                 PowerEvent(
                     kind=POWER_UNEXPECTED,
                     boot_at=start,
-                    down_at=None,  # оценим по journal-у
+                    down_at=None,
                     up_at=newer_boot_at,
                     down_approx=True,
                 )
@@ -123,7 +83,7 @@ def parse_last_reboots(text: str, limit: int = 10) -> list[PowerEvent]:
                 PowerEvent(
                     kind=POWER_CLEAN,
                     boot_at=start,
-                    down_at=end,  # точный момент штатного выключения
+                    down_at=end,
                     up_at=newer_boot_at,
                 )
             )
@@ -133,10 +93,6 @@ def parse_last_reboots(text: str, limit: int = 10) -> list[PowerEvent]:
 
 
 def parse_journal_boots(text: str) -> list[tuple[datetime, datetime]]:
-    """Разобрать `journalctl --list-boots -o json` в (first_entry, last_entry).
-
-    Времена в JSON — микросекунды CLOCK_REALTIME; возвращаем aware UTC-datetime.
-    """
     try:
         boots = json.loads(text)
     except (ValueError, TypeError):
@@ -158,12 +114,6 @@ def parse_journal_boots(text: str) -> list[tuple[datetime, datetime]]:
 def enrich_unexpected(
     events: list[PowerEvent], boots: list[tuple[datetime, datetime]]
 ) -> list[PowerEvent]:
-    """Заполнить `down_at` внезапных отключений last_entry-ем journal-сессии.
-
-    Сессия сопоставляется по времени старта: last `boot_at` ≈ journal
-    `first_entry`. Если пары в пределах допуска нет — событие остаётся без
-    `down_at` (простой посчитать нельзя).
-    """
     out: list[PowerEvent] = []
     for ev in events:
         if ev.kind != POWER_UNEXPECTED or ev.down_at is not None:
@@ -173,7 +123,7 @@ def enrich_unexpected(
         if match is None:
             out.append(ev)
             continue
-        out.append(replace(ev, down_at=match[1]))  # last_entry ≈ момент обрыва
+        out.append(replace(ev, down_at=match[1]))
     return out
 
 
@@ -190,11 +140,6 @@ def _nearest_boot(
 
 
 def _run(args: list[str], requirement: Requirement | None = None) -> str | None:
-    """Запустить подпроцесс, вернуть stdout или None при любой ошибке.
-
-    ``requirement`` — если задан, диагноз реального вызова (нехватка прав)
-    репортится в `requirements_registry` (см. `utils/requirements.py`).
-    """
     if shutil.which(args[0]) is None:
         log.warning("Утилита `%s` не найдена", args[0])
         if requirement is not None:
@@ -218,13 +163,12 @@ def _run(args: list[str], requirement: Requirement | None = None) -> str | None:
 
 
 def read_uptime_sync() -> timedelta | None:
-    """Аптайм машины (psutil.boot_time). Вызывать через executor. None при ошибке."""
     try:
         import psutil
 
         boot = datetime.fromtimestamp(psutil.boot_time(), tz=UTC)
         return datetime.now(tz=UTC) - boot
-    except Exception as exc:  # noqa: BLE001 — аптайм не критичен, не роняем сводку
+    except Exception as exc:  # noqa: BLE001
         log.warning("Не удалось получить аптайм: %s", exc)
         return None
 
@@ -232,17 +176,7 @@ def read_uptime_sync() -> timedelta | None:
 def read_power_events_sync(
     offset: int = 0, limit: int = 10
 ) -> tuple[list[PowerEvent], bool]:
-    """Блокирующе собрать страницу истории отключений. Вызывать через executor.
-
-    `last` обязателен (классификация и времена). `journalctl` опционален —
-    без него внезапные события остаются без точного `down_at`.
-
-    Возвращает (события страницы `[offset:offset+limit]`, есть ли следующая
-    страница) — для этого запрашивается на одно событие больше, чем нужно.
-    """
     if not LAST_REQUIREMENT.available():
-        # Не та ОС / нет `last` — не шумим в лог каждым сканом, причину
-        # объяснит requirements в get_state монитора.
         return [], False
     last_out = _run(LAST_ARGS, requirement=LAST_REQUIREMENT)
     if last_out is None:

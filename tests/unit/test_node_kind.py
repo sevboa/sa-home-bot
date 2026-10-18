@@ -1,5 +1,3 @@
-"""Тип машины ноды: свойства и конфиг."""
-
 from __future__ import annotations
 
 import pytest
@@ -7,8 +5,6 @@ import pytest
 from sa_home_bot.node.kind import KIND_SERVER, KIND_VPS, KIND_WORKSTATION, traits_for
 from sa_home_bot.node.service import NodeService
 from sa_home_bot.node.supervisor import Supervisor
-
-# --- traits -----------------------------------------------------------------
 
 
 def test_server_and_vps_are_expected_online_workstation_is_not():
@@ -32,7 +28,6 @@ def test_lease_priority_prefers_the_machine_more_likely_to_be_on():
 
 
 def test_unknown_kind_is_conservative():
-    """Нода старой версии не шумит алертами и не отбирает синглтон."""
     unknown = traits_for("")
     assert not unknown.always_on
     assert not unknown.wakeable

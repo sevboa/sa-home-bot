@@ -1,5 +1,3 @@
-"""Разбор endpoint'ов транспорта: unix-путь, unix:-префикс, tcp://host:port."""
-
 import socket
 import sys
 import types
@@ -97,18 +95,10 @@ def test_unix_rejected_on_windows(monkeypatch):
     for raw in ("./data/node.sock", "unix:/tmp/x.sock", Path("/tmp/x.sock")):
         with pytest.raises(ValueError, match="tcp://127.0.0.1"):
             parse_endpoint(raw)
-    # tcp продолжает работать
     assert parse_endpoint("tcp://127.0.0.1:8710") == TcpEndpoint("127.0.0.1", 8710)
 
 
-# --- local_lan_ipv4_address: нужен именно домашний адрес, tailscale (CGNAT)
-# не в счёт (apps/service.py::_resolve_urls подставляет его в "{lan_ip}") ---
-
-
 def test_local_lan_ipv4_address_skips_tailscale_cgnat(monkeypatch):
-    # local_ipv4_addresses не сортирован по рангу — если tailscale оказался
-    # первым в списке, наивный "первый элемент" подставил бы оверлей вместо
-    # домашнего IP.
     monkeypatch.setattr(
         endpoints, "local_ipv4_addresses", lambda: ["100.73.52.92", "192.168.0.102"]
     )
@@ -121,9 +111,6 @@ def test_local_lan_ipv4_address_none_without_lan(monkeypatch):
 
 
 def test_локальная_сеть_пробуется_раньше_оверлея():
-    """Ровно то, ради чего затевался этап: LAN — основной путь, tailscale —
-    аварийный. 100.64.0.0/10 Python считает приватным, поэтому ранг у него
-    свой, а не «как у 192.168»."""
     assert endpoint_rank(TcpEndpoint("192.168.0.100", 8710)) == RANK_LAN
     assert endpoint_rank(TcpEndpoint("100.73.52.92", 8710)) == RANK_OVERLAY
     assert endpoint_rank(TcpEndpoint("8.8.8.8", 8710)) == RANK_OTHER
@@ -140,7 +127,6 @@ def test_loopback_и_0000_опознаются():
 
 
 def test_объявляем_только_адреса_по_которым_к_нам_придут():
-    """Unix-сокет и loopback соседу бесполезны: по ним он попадёт к себе."""
     advertised = advertisable(
         [
             UnixEndpoint(Path("/tmp/node.sock")),
@@ -153,8 +139,6 @@ def test_объявляем_только_адреса_по_которым_к_н�
 
 
 def test_0000_раскрывается_в_адреса_интерфейсов(monkeypatch):
-    """`listen = "tcp://0.0.0.0:8710"` — законная настройка, но объявить
-    рою «ноль» нельзя: это не адрес, по которому к нам придут."""
     monkeypatch.setattr(
         "sa_home_bot.proto.endpoints.local_ipv4_addresses",
         lambda: ["192.168.0.100", "100.73.52.92"],
@@ -166,10 +150,6 @@ def test_0000_раскрывается_в_адреса_интерфейсов(mo
 
 
 def test_адреса_виртуальных_сетей_не_объявляются(monkeypatch):
-    """Найдено при деплое этапа 24 на winpc: WSL и Hyper-V дают хосту адреса
-    172.x, снаружи недостижимые НИКОГДА. Объявленные рою, они становятся
-    мёртвыми кандидатами впереди настоящего LAN-адреса — сосед тратит на
-    каждый полный CONNECT_TIMEOUT_S, и «LAN как основной путь» не работает."""
     class FakeAddr:
         def __init__(self, address: str) -> None:
             self.family = socket.AF_INET
@@ -182,7 +162,6 @@ def test_адреса_виртуальных_сетей_не_объявляют�
         "Ethernet": [FakeAddr("192.168.0.105")],
         "Tailscale": [FakeAddr("100.78.225.83")],
     }
-    # local_ipv4_addresses импортирует psutil внутри функции — подменяем модуль.
     monkeypatch.setitem(
         sys.modules, "psutil", types.SimpleNamespace(net_if_addrs=lambda: fake_ifaces)
     )
@@ -191,8 +170,6 @@ def test_адреса_виртуальных_сетей_не_объявляют�
 
 
 def test_настоящий_мост_и_оверлей_под_фильтр_не_попадают():
-    """`br0` — обычно РЕАЛЬНЫЙ мост LAN, `br-<hash>` — docker; tailscale0 —
-    рабочий путь, просто медленнее LAN."""
     assert not is_virtual_iface("br0")
     assert not is_virtual_iface("tailscale0")
     assert not is_virtual_iface("enp1s0")
@@ -201,7 +178,6 @@ def test_настоящий_мост_и_оверлей_под_фильтр_не_
 
 
 def test_listen_принимает_и_строку_и_список():
-    """Конфиги, написанные до этапа 24, продолжают работать как есть."""
     assert NodeConfig(listen="tcp://100.1.2.3:8710").listen == ["tcp://100.1.2.3:8710"]
     assert NodeConfig(listen="").listen == []
     assert NodeConfig(listen=["tcp://a:1", "tcp://b:2"]).listen == ["tcp://a:1", "tcp://b:2"]

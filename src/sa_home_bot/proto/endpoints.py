@@ -1,17 +1,3 @@
-"""Endpoint'ы транспорта протокола v0: unix-сокет или TCP.
-
-В конфиге и CLI endpoint задаётся строкой:
-
-- ``./data/node.sock`` или ``unix:./data/node.sock`` — unix-сокет (Linux);
-- ``tcp://127.0.0.1:8710`` — TCP (Windows и межнодовый канал), сервер на TCP
-  требует токен (см. PROTOCOL.md, «Транспорт»).
-
-Нода живёт не на одном адресе, а на нескольких (этап 24): unix-сокет для
-локальных фронтендов плюс один или несколько TCP — LAN и tailscale. Отсюда
-здесь же классификация адресов: по ней сосед решает, каким путём ходить
-первым, а нода — какие из своих адресов вообще объявлять рою.
-"""
-
 from __future__ import annotations
 
 import ipaddress
@@ -26,25 +12,16 @@ log = logging.getLogger(__name__)
 TCP_PREFIX = "tcp://"
 UNIX_PREFIX = "unix:"
 
-# Адреса, на которые нельзя стучаться к СОСЕДУ: у него это он сам, у нас по
-# тому же адресу окажемся мы (и рискуем принять себя за него).
 _LOOPBACK_HOSTNAMES = frozenset({"localhost", "localhost.localdomain"})
 
-# Tailscale раздаёт адреса из CGNAT-диапазона (RFC 6598). Формально Python
-# считает его приватным, но по смыслу это оверлей поверх интернета: рабочий,
-# зато и медленнее LAN, и мёртвый без сети. Отсюда отдельный ранг.
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
 
-# Имена интерфейсов виртуальных сетей — их адреса рою не объявляем
-# (см. is_virtual_iface). Windows: "vEthernet (WSL)", "vEthernet (Default
-# Switch)"; Linux: docker0, br-<id>, veth<id>, virbr0, vmnet1.
 _VIRTUAL_IFACE_MARKERS = ("vethernet", "docker", "virbr", "vmnet", "br-", "veth")
 
-# Ранги для порядка проб (меньше — пробуем раньше).
-RANK_LOCAL = 0  # unix-сокет: тот же хост, дешевле некуда
-RANK_LAN = 1  # приватная сеть 192.168/10./172.16 — прямой путь без оверлея
-RANK_OVERLAY = 2  # tailscale (CGNAT) — работает почти всегда, но не мгновенно
-RANK_OTHER = 3  # публичный адрес или имя, которое ещё надо резолвить
+RANK_LOCAL = 0
+RANK_LAN = 1
+RANK_OVERLAY = 2
+RANK_OTHER = 3
 
 
 def _unix_endpoint(path: Path) -> UnixEndpoint:
@@ -77,7 +54,6 @@ Endpoint = UnixEndpoint | TcpEndpoint
 
 
 def parse_endpoint(value: str | Path | Endpoint) -> Endpoint:
-    """Строка/путь → endpoint. ValueError на непонятный формат."""
     if isinstance(value, (UnixEndpoint, TcpEndpoint)):
         return value
     if isinstance(value, Path):
@@ -99,7 +75,7 @@ def parse_endpoint(value: str | Path | Endpoint) -> Endpoint:
 
     if raw.startswith(UNIX_PREFIX):
         rest = raw[len(UNIX_PREFIX) :]
-        if rest.startswith("//"):  # url-форма unix:///abs/path
+        if rest.startswith("//"):
             rest = rest[2:]
         if not rest:
             raise ValueError(f"невалидный unix-endpoint: {raw!r}")
@@ -109,8 +85,6 @@ def parse_endpoint(value: str | Path | Endpoint) -> Endpoint:
 
 
 def _host_ip(ep: Endpoint) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
-    """IP из endpoint'а; None — unix-сокет или имя хоста (резолвить не пытаемся:
-    классификация обязана быть мгновенной и без сети)."""
     if isinstance(ep, UnixEndpoint):
         return None
     try:
@@ -120,7 +94,6 @@ def _host_ip(ep: Endpoint) -> ipaddress.IPv4Address | ipaddress.IPv6Address | No
 
 
 def is_loopback(ep: Endpoint) -> bool:
-    """Адрес указывает на «эту же машину»."""
     if isinstance(ep, UnixEndpoint):
         return True
     if ep.host.lower() in _LOOPBACK_HOSTNAMES:
@@ -130,22 +103,11 @@ def is_loopback(ep: Endpoint) -> bool:
 
 
 def is_unspecified(ep: Endpoint) -> bool:
-    """``0.0.0.0``/``::`` — «слушать на всех интерфейсах». Слушать так можно,
-    объявить рою — нет: это не адрес, по которому к нам придут."""
     ip = _host_ip(ep)
     return ip is not None and ip.is_unspecified
 
 
 def endpoint_rank(ep: Endpoint) -> int:
-    """Насколько путь предпочтителен (меньше — пробовать раньше).
-
-    Домашние ноды и так ходят друг к другу по LAN напрямую (tailscale
-    поднимает прямой туннель, `tailscale status` показывает
-    ``direct 192.168.0.105:41641``) — но только когда tailscale поднялся.
-    Собственный LAN-адрес доступен сразу после загрузки и не зависит от
-    интернета: две машины в двух метрах друг от друга обязаны видеться,
-    даже когда провайдер лежит (этап 24).
-    """
     if isinstance(ep, UnixEndpoint):
         return RANK_LOCAL
     ip = _host_ip(ep)
@@ -159,27 +121,11 @@ def endpoint_rank(ep: Endpoint) -> int:
 
 
 def is_virtual_iface(name: str) -> bool:
-    """Интерфейс — хост-сторона виртуальной сети (WSL, Hyper-V, docker, libvirt).
-
-    Адрес на таком интерфейсе выглядит как обычный приватный (172.26.48.1), но
-    снаружи машины к нему не прийти НИКОГДА: это адрес хоста в NAT-сети
-    контейнеров. Объявить его рою — значит подсунуть соседу мёртвого кандидата,
-    на который тот потратит полный `CONNECT_TIMEOUT_S`. Найдено при деплое
-    этапа 24: winpc с WSL и Hyper-V объявил три таких адреса, и настоящий
-    LAN-адрес оказался четвёртым в очереди проб.
-
-    Отличить можно только по имени интерфейса — диапазоны у них честно
-    приватные. `tailscale0`/`Tailscale` под фильтр не попадает намеренно: это
-    рабочий путь, просто медленнее LAN (см. RANK_OVERLAY).
-    """
     low = name.lower()
     return any(marker in low for marker in _VIRTUAL_IFACE_MARKERS)
 
 
 def local_ipv4_addresses() -> list[str]:
-    """Свои IPv4, кроме loopback и виртуальных сетей — чем раскрывается
-    ``0.0.0.0`` при объявлении адресов рою (см. advertisable)."""
-    # psutil уже в зависимостях (sensors, wol) — отдельной возиться не с чем.
     import psutil
 
     found: list[str] = []
@@ -202,13 +148,6 @@ def local_ipv4_addresses() -> list[str]:
 
 
 def local_lan_ipv4_address() -> str | None:
-    """Первый настоящий LAN-адрес (приватная сеть, НЕ tailscale-оверлей) —
-    для мест, где нужен именно домашний IP, а не весь список кандидатов на
-    объявление рою (см. apps/service.py::_resolve_urls, ``{lan_ip}`` в
-    конфиге `[apps] items`). ``local_ipv4_addresses`` не отсортирован по
-    рангу (порядок — как отдал psutil), tailscale там не выкинут — годится
-    для объявления соседям (advertisable сам сортирует), но не для одного
-    конкретного адреса."""
     for addr in local_ipv4_addresses():
         ip = ipaddress.ip_address(addr)
         if ip.is_private and ip not in _CGNAT:
@@ -217,12 +156,6 @@ def local_lan_ipv4_address() -> str | None:
 
 
 def local_broadcast_addresses() -> list[str]:
-    """Broadcast-адреса своих сетей — куда стучится маячок discovery (этап 31).
-
-    Тот же фильтр виртуальных интерфейсов, что и у ``local_ipv4_addresses``:
-    broadcast NAT-сети WSL/docker уводит запрос в никуда — отвечать оттуда
-    некому, а пакет всё равно уходит.
-    """
     import psutil
 
     found: list[str] = []
@@ -238,12 +171,6 @@ def local_broadcast_addresses() -> list[str]:
 
 
 def advertisable(endpoints: list[Endpoint] | tuple[Endpoint, ...]) -> list[str]:
-    """Какие из своих адресов имеет смысл объявить соседям, в порядке проб.
-
-    Отсеиваются unix-сокеты и loopback (сосед по ним попадёт не к нам, а к
-    себе — и, что хуже, может принять себя за нас), ``0.0.0.0`` раскрывается
-    в конкретные адреса интерфейсов.
-    """
     out: list[str] = []
     for ep in endpoints:
         if isinstance(ep, UnixEndpoint) or is_loopback(ep):
@@ -257,11 +184,6 @@ def advertisable(endpoints: list[Endpoint] | tuple[Endpoint, ...]) -> list[str]:
 
 
 def resolve_endpoint(value: str | Path | Endpoint, base_dir: Path | None = None) -> Endpoint:
-    """parse_endpoint + относительный unix-путь резолвится от ``base_dir``.
-
-    Нужен фронтендам, читающим endpoint из чужого конфига (nodectl -c …):
-    относительный путь в конфиге — относительно каталога конфига, а не CWD.
-    """
     endpoint = parse_endpoint(value)
     if (
         isinstance(endpoint, UnixEndpoint)

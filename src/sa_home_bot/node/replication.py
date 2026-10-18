@@ -1,28 +1,3 @@
-"""Репликация пакетов настроек по рою.
-
-Задача одна: у всех нод, несущих один и тот же инстанс службы-синглтона,
-пакет настроек должен быть одинаковым — и на активной, и на резервной. Иначе
-резерв бесполезен: он поднимется на настройках, устаревших ровно настолько,
-насколько давно их правили.
-
-Как это устроено (без выделенного хранилища и без выборов координатора):
-
-- **Правка замечается там, где сделана.** Владелец правит пакет как обычный
-  файл; нода видит изменение содержимого, поднимает ревизию и объявляет её
-  рою событием ``instance_config_changed``. Ревизия — сайдкар рядом с файлом
-  (`node/instances.py`), сам пакет нода не переписывает.
-- **Тянет тот, кому нужно.** Событие несёт только «есть ревизия N у ноды X»;
-  сам пакет забирает уже заинтересованная нода — та, которой этот инстанс
-  назначен, всё равно в какой роли. Секреты не летят в broadcast, а едут
-  адресным ответом.
-- **Догон вместо гарантий доставки.** События доставляются at-most-once, а
-  нода могла быть выключена, когда настройки правили. Поэтому раз в цикл
-  нода просто спрашивает живых соседей, какие у них ревизии, и подтягивает
-  всё, что новее. Пропущенное событие перестаёт что-либо значить.
-- **Активная служба перезапускается.** Конфиг иммутабелен по построению
-  (ARCHITECTURE §9 п. 7) — применить новые настройки можно только рестартом.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -62,10 +37,7 @@ POLL_INTERVAL_S = 30.0
 PEER_TIMEOUT_S = 10.0
 
 
-
 def _encode_package(data: bytes) -> str:
-    """Пакет в JSON-конверт — как текст: TOML и есть текст, а base64 сделал бы
-    отладочный вывод протокола нечитаемым."""
     return data.decode("utf-8")
 
 
@@ -74,8 +46,6 @@ def _decode_package(text: str) -> bytes:
 
 
 class ConfigReplicator:
-    """Держит пакеты назначенных инстансов в актуальном состоянии."""
-
     def __init__(
         self,
         node_id: str,
@@ -96,20 +66,12 @@ class ConfigReplicator:
         self._emit = emit
         self._poll_interval_s = poll_interval_s
         self._task: asyncio.Task | None = None
-        # Пассивные пакеты (бэкап identity vpn-сервера, 39.0.8(b)): нам нужна
-        # копия, но инстанс нам НЕ назначен — ни промоушена, ни рестартов
-        # (слота у службы нет, _apply_to_running_service молчит). Источник
-        # такого пакета авторитетен: пересобранная нода начинает ревизии
-        # заново, и её свежий пакет обязан побеждать «старшую» копию у соседа.
         self._passive = passive
         self._before_announce = before_announce
         self._on_applied = on_applied
 
-    # --- что нас касается ---------------------------------------------------
 
     def _my_instances(self) -> list[Assignment]:
-        """Инстансы, назначенные этой ноде, — активные и резервные наравне:
-        резерв обязан быть готов, а значит и настройки ему нужны те же."""
         return [
             svc.assignment
             for svc in self._supervisor.services.values()
@@ -117,8 +79,6 @@ class ConfigReplicator:
         ]
 
     def _cares_about(self, service: str, instance: str) -> bool:
-        """Наш ли это пакет. Сателлит (``<инстанс>.guests``) принадлежит
-        своему хозяину: назначен инстанс — значит нужны и его спутники."""
         if self._passive is not None and self._passive(service, instance):
             return True
         base = base_instance(instance)
@@ -128,8 +88,6 @@ class ConfigReplicator:
         return self._passive is not None and self._passive(service, instance)
 
     def _wins(self, meta: InstanceMeta, local: InstanceMeta | None) -> bool:
-        """Принимать ли ревизию соседа. Для пассивного пакета, присланного его
-        собственным источником, — по содержимому и времени, а не по номеру."""
         if self._is_passive(meta.service, meta.instance) and meta.origin_node == meta.instance:
             if local is None:
                 return True
@@ -137,36 +95,24 @@ class ConfigReplicator:
         return meta.wins_over(local)
 
     def local_revisions(self) -> list[dict]:
-        """Ревизии наших пакетов — этим нода отвечает на get_state."""
         return [m.to_dict() for m in self._store.known()]
 
-    # --- локальные правки ---------------------------------------------------
 
     async def announce_local_changes(self) -> list[InstanceMeta]:
-        """Заметить правки владельца и объявить их рою."""
         if self._before_announce is not None:
             try:
                 await self._before_announce()
-            except Exception:  # сбор бэкапа не должен ломать репликацию
+            except Exception:
                 log.exception("Репликация: ошибка подготовки локальных пакетов")
         changed = self._store.refresh_all()
         for meta in changed:
             await self._emit(EVENT_INSTANCE_CONFIG_CHANGED, meta.to_dict())
-            # Сателлит правит сама служба (гостевые подписки — бот), и своё
-            # изменение она уже держит в памяти — рестарт ей ничего не даст,
-            # зато оборвал бы разговор ровно в тот момент, когда гостя только
-            # что впустили. Правку сателлита руками рестартом тоже не ловим:
-            # файл заявлен как ведомый службой (subscriptions/guests.py),
-            # человеку туда лезть незачем. Реплика от соседа — другое дело
-            # (см. _pull): там наша копия действительно отстала.
             if not is_satellite(meta.instance):
                 await self._apply_to_running_service(meta)
         return changed
 
-    # --- приём -------------------------------------------------------------
 
     async def on_config_changed(self, env: Envelope) -> None:
-        """Сосед объявил новую ревизию — забрать её, если инстанс наш."""
         data = env.payload.get("data", {})
         meta = InstanceMeta.from_dict(data)
         if not meta.service or not meta.instance:
@@ -182,11 +128,6 @@ class ConfigReplicator:
         await self._pull(meta, source)
 
     async def sync_from_peers(self) -> None:
-        """Догон: спросить живых соседей их ревизии и подтянуть, что новее.
-
-        Нужен там, где события бессильны: нода была выключена, когда пакет
-        правили, — событие до неё просто не доехало.
-        """
         if self._router is None:
             return
         if not self._my_instances() and self._passive is None:
@@ -220,7 +161,6 @@ class ConfigReplicator:
         return response.payload if response.ok else None
 
     async def _pull(self, meta: InstanceMeta, source: str) -> None:
-        """Забрать пакет у ноды-источника и применить."""
         if self._router is None:
             return
         link = self._router.peers.get(source)
@@ -270,12 +210,6 @@ class ConfigReplicator:
             await self._apply_to_running_service(remote_meta)
 
     async def _apply_to_running_service(self, meta: InstanceMeta) -> None:
-        """Новый пакет вступает в силу только рестартом — конфиг читается
-        один раз при старте и дальше иммутабелен (ARCHITECTURE §9 п. 7).
-        Резервную службу не трогаем: она и не запущена.
-
-        Слот ищем по хозяину: у сателлита своего слота нет — он часть
-        настроек той же службы, что и основной пакет."""
         slot = self._supervisor.get(slot_key(meta.service, base_instance(meta.instance)))
         if slot is None or slot.assignment.standby:
             return
@@ -287,25 +221,20 @@ class ConfigReplicator:
         )
         await slot.restart()
 
-    # --- ответы на запросы соседей ------------------------------------------
 
     def package_payload(self, service: str, instance: str) -> dict | None:
-        """Содержимое пакета + его ревизия — ответ на get_instance_config."""
         data = self._store.read_package(service, instance)
         meta = self._store.read_meta(service, instance)
         if data is None or meta is None:
             return None
         return {"meta": meta.to_dict(), "content": _encode_package(data)}
 
-    # --- цикл ---------------------------------------------------------------
 
     async def tick(self) -> None:
         await self.announce_local_changes()
         await self.sync_from_peers()
 
     async def start(self) -> None:
-        # Первый проход сразу: нода могла проспать все правки, пока была
-        # выключена, и поднимать службу на устаревшем пакете незачем.
         with contextlib.suppress(Exception):
             await self.tick()
         self._task = asyncio.create_task(self._run(), name="config-replicator")
@@ -319,5 +248,5 @@ class ConfigReplicator:
             await asyncio.sleep(self._poll_interval_s)
             try:
                 await self.tick()
-            except Exception:  # репликация не должна ронять ноду
+            except Exception:
                 log.exception("Репликация: ошибка цикла синхронизации")

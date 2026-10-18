@@ -1,12 +1,3 @@
-"""Живучесть линков на управляемой сети (стенд tests/netlab.py, этап 25 п. 1).
-
-Те же классы отказов, что дала ночь 2026-07-28 на проде, но воспроизведённые
-настоящим TCP-путём через прокси: half-open (заморозка без закрытия сокетов),
-внезапная смерть без FIN, возвращение машины на тот же адрес. Существующие
-tests/unit/test_link_recovery.py проверяют слои по отдельности (моками) —
-здесь проверяется весь путь PeerLink → ProtoClient → сокет → сервер.
-"""
-
 import asyncio
 
 import pytest
@@ -28,8 +19,6 @@ from tests.unit.support.waiting import wait_for
 
 @pytest.fixture
 async def stand(monkeypatch):
-    """Сервер «соседа» + прокси перед ним. Тайминги ужаты, чтобы отказ
-    обнаруживался за доли секунды, а не за прод-минуты."""
     from sa_home_bot.proto import client as client_mod
 
     monkeypatch.setattr(peers_mod, "HEARTBEAT_INTERVAL_S", 0.05)
@@ -53,7 +42,6 @@ async def stand(monkeypatch):
 
 
 async def test_прокси_прозрачен_для_протокола(stand):
-    """Санити: через прокси проходит обычный RPC — стенд не искажает обмен."""
     server, proxy, link = stand
     env = make_request(MSG_GET_STATE)
     response = await link.forward(env)
@@ -62,11 +50,6 @@ async def test_прокси_прозрачен_для_протокола(stand):
 
 
 async def test_half_open_обнаруживается_и_линк_воскресает(stand):
-    """Прод-сценарий v0.42.0: сокет жив, ответы не приходят (half-open).
-
-    Heartbeat обязан уронить линк, цикл переподключения — пережить закрытие
-    полумёртвого сокета (v0.42.3) и восстановить связь, когда сеть ожила.
-    """
     server, proxy, link = stand
     proxy.freeze()
     assert await wait_for(lambda: not link.alive), "heartbeat не заметил half-open"
@@ -75,23 +58,15 @@ async def test_half_open_обнаруживается_и_линк_воскрес
 
 
 async def test_внезапная_смерть_без_FIN_и_возвращение(stand):
-    """«Машину выдернули из розетки»: ни FIN, ни RST, порт пропал.
-
-    Линк обязан упасть сам, молотить переподключения без падений задачи и
-    восстановиться, когда машина вернулась на тот же адрес.
-    """
     server, proxy, link = stand
     await proxy.drop_silently()
     assert await wait_for(lambda: not link.alive), "смерть соседа не замечена"
-    # Несколько циклов «connection refused» — задача линка обязана выжить.
     await asyncio.sleep(0.3)
     await proxy.restore()
     assert await wait_for(lambda: link.alive), "линк не восстановился после возвращения"
 
 
 async def test_запрос_в_замороженную_сеть_не_виснет(stand):
-    """forward в half-open обязан завершиться быстрым честным отказом
-    (unavailable) по таймауту конверта, а не висеть вечно."""
     server, proxy, link = stand
     proxy.freeze()
     env = make_request(MSG_GET_STATE, timeout_s=0.2)
@@ -102,7 +77,6 @@ async def test_запрос_в_замороженную_сеть_не_висне
 
 
 async def test_медленная_сеть_не_ломает_обмен(stand):
-    """Задержка пересылки меньше таймаутов — обмен работает, линк живёт."""
     server, proxy, link = stand
     proxy.delay_s = 0.02
     client = ProtoClient(proxy.endpoint, token="s3cret")

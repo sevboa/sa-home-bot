@@ -1,11 +1,3 @@
-"""Контракт job'ов: протокол SensorJob, контекст, результат и шов доставки.
-
-`EventDispatcher` — куда job отдаёт события здоровья. В процессе бота это
-рассылка по Telegram-чатам (`bot.dispatch.TelegramEventDispatcher`), в процессе
-монитора — broadcast по протоколу (`monitor.dispatch.ProtoEventDispatcher`).
-Сам job не знает, кто его слушает.
-"""
-
 from __future__ import annotations
 
 import json
@@ -22,14 +14,6 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class DispatchResult:
-    """Итог доставки события.
-
-    `handled` — событие принято, можно двигать флаг notified/baseline и не
-    повторять. `delivered` — реально дошло хоть до одного адресата (метрика).
-    Telegram-диспетчер всегда handled=True (повтор дал бы дубли живым чатам);
-    proto-диспетчер handled=False, когда клиентов нет, — событие повторится.
-    """
-
     delivered: bool
     handled: bool
 

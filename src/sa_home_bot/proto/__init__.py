@@ -1,9 +1,3 @@
-"""Протокол v0 — общение служб ноды: JSON поверх unix-сокета.
-
-Публичный API пакета: сообщения (`messages`), сервер (`server`), клиент
-(`client`). Описание протокола — в PROTOCOL.md в корне репозитория.
-"""
-
 from sa_home_bot.proto.client import ProtoClient
 from sa_home_bot.proto.messages import (
     PROTO_VERSION,

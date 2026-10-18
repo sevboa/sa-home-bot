@@ -1,5 +1,3 @@
-"""Аренда лидерства: кто держит синглтон, кто уступает, что делает 409."""
-
 from __future__ import annotations
 
 import logging
@@ -21,14 +19,11 @@ SLOT = "telegram-bot@alfred"
 
 
 class FakePeer:
-    """Сосед, отдающий заданную картину по синглтонам."""
-
     def __init__(self, node_id: str, singletons: dict, *, alive: bool = True):
         self.name = node_id
         self.endpoint = f"tcp://{node_id}:8710"
         self.alive = alive
         self.node_kind = KIND_SERVER
-        # Момент первой неудачи соединения; None — попытки ещё не было.
         self.down_since = None if alive else 0.0
         self._singletons = singletons
 
@@ -42,8 +37,6 @@ class FakePeer:
 
 
 class FakeSlot:
-    """Слот супервизора с управляемым статусом и записью команд."""
-
     def __init__(self, assignment: str, status: str = STOPPED, *, process_alive: bool = True):
         self.assignment = parse(assignment)
         self.name = self.assignment.key
@@ -92,12 +85,7 @@ def _entry(node: str, *, running=False, claiming=False, ready=False, role="activ
     }
 
 
-# --- старшинство ------------------------------------------------------------
-
-
 def test_active_role_outranks_standby_regardless_of_machine():
-    """«Активный на основной ноде» — это про роль, а не про то, чьё железо
-    мощнее: иначе назначение перестаёт что-либо значить."""
     active_on_vps = rank(parse("telegram-bot@a"), KIND_VPS, "jeeves")
     standby_on_server = rank(parse("telegram-bot@a:standby"), KIND_SERVER, "alfred")
     assert active_on_vps > standby_on_server
@@ -109,12 +97,7 @@ def test_explicit_priority_beats_the_machine_type():
     assert boosted > default
 
 
-# --- захват -----------------------------------------------------------------
-
-
 async def test_active_takes_the_slot_immediately():
-    """Обычный старт основной ноды не должен ждать grace — бот молчал бы две
-    минуты на каждом рестарте."""
     slot = FakeSlot("telegram-bot@alfred")
     lease, events = _lease("alfred", KIND_SERVER, slot)
     await lease.tick()
@@ -123,7 +106,6 @@ async def test_active_takes_the_slot_immediately():
 
 
 async def test_standby_waits_out_the_grace_period():
-    """Иначе служба скакала бы по рою на каждом моргании сети."""
     slot = FakeSlot("telegram-bot@alfred:standby")
     lease, _ = _lease("jeeves", KIND_VPS, slot, grace_s=120.0)
     await lease.tick()
@@ -147,7 +129,6 @@ async def test_standby_does_not_start_while_the_active_node_holds_it():
 
 
 async def test_sleeping_peer_does_not_block_takeover():
-    """Спящая нода претендовать не может — и мешать не должна."""
     peer = FakePeer("winpc", {SLOT: _entry("winpc", running=True)}, alive=False)
     slot = FakeSlot("telegram-bot@alfred:standby")
     lease, _ = _lease("jeeves", KIND_VPS, slot, peer, grace_s=0.0)
@@ -159,13 +140,10 @@ async def test_grace_restarts_when_the_active_node_blinks():
     peer_up = FakePeer("alfred", {SLOT: _entry("alfred", running=True)})
     slot = FakeSlot("telegram-bot@alfred:standby")
     lease, _ = _lease("jeeves", KIND_VPS, slot, peer_up, grace_s=60.0)
-    await lease.tick()  # активная на месте
+    await lease.tick()
     peer_up.alive = False
-    await lease.tick()  # тишина началась только сейчас
+    await lease.tick()
     assert slot.calls == []
-
-
-# --- уступка ----------------------------------------------------------------
 
 
 async def test_running_standby_yields_to_the_returning_active_node():
@@ -178,8 +156,6 @@ async def test_running_standby_yields_to_the_returning_active_node():
 
 
 async def test_active_claims_instead_of_starting_over_a_running_standby():
-    """Запуск поверх работающего резерва означал бы двух поллеров на мгновение,
-    и 409 прилетел бы как раз законному владельцу."""
     peer = FakePeer("jeeves", {SLOT: _entry("jeeves", running=True, role="standby")})
     slot = FakeSlot("telegram-bot@alfred")
     lease, _ = _lease("alfred", KIND_SERVER, slot, peer)
@@ -192,22 +168,18 @@ async def test_active_starts_once_the_standby_has_stepped_aside():
     peer = FakePeer("jeeves", {SLOT: _entry("jeeves", running=True, role="standby")})
     slot = FakeSlot("telegram-bot@alfred")
     lease, _ = _lease("alfred", KIND_SERVER, slot, peer)
-    await lease.tick()  # объявили притязание
+    await lease.tick()
     peer._singletons = {SLOT: _entry("jeeves", running=False, role="standby")}
     await lease.tick()
     assert slot.calls == ["start"]
 
 
 async def test_lower_ranked_node_waits_for_the_superior_to_take_it():
-    """Старший жив и вот-вот возьмёт — младший не должен его опережать."""
     peer = FakePeer("alfred", {SLOT: _entry("alfred", running=False)})
     slot = FakeSlot("telegram-bot@alfred:standby")
     lease, _ = _lease("jeeves", KIND_VPS, slot, peer, grace_s=0.0)
     await lease.tick()
     assert slot.calls == []
-
-
-# --- готовность и таймаут-подстраховка (фикс 2026-08-08) --------------------
 
 
 def test_ready_field_reported_in_local_state():
@@ -219,34 +191,26 @@ def test_ready_field_reported_in_local_state():
 
 
 async def test_junior_does_not_reclaim_before_ready_timeout():
-    """Сразу после уступки младший не должен пытаться забрать слот обратно —
-    иначе не будет отличаться от того, что было (мгновенное перебрасывание
-    туда-сюда)."""
     peer = FakePeer("alfred", {SLOT: _entry("alfred", claiming=True)})
     slot = FakeSlot("telegram-bot@alfred:standby", status=RUNNING)
     lease, _ = _lease("jeeves", KIND_VPS, slot, peer, grace_s=0.0, ready_timeout_s=9999.0)
-    await lease.tick()  # уступил
+    await lease.tick()
     assert slot.calls == ["stop"]
-    await lease.tick()  # сразу следующий тик — таймаут (9999с) не мог истечь
+    await lease.tick()
     assert slot.calls == ["stop"]
 
 
 async def test_junior_reclaims_after_superior_ready_timeout():
-    """Если старший так и не подтвердил готовность — младший не должен
-    держать бота немым бесконечно (живой инцидент 2026-08-08: ~18 минут без
-    держателя службы)."""
     peer = FakePeer("alfred", {SLOT: _entry("alfred", claiming=True, ready=False)})
     slot = FakeSlot("telegram-bot@alfred:standby", status=RUNNING)
     lease, events = _lease("jeeves", KIND_VPS, slot, peer, grace_s=0.0, ready_timeout_s=0.0)
-    await lease.tick()  # уступил
-    await lease.tick()  # таймаут (0с) уже истёк — забирает обратно
+    await lease.tick()
+    await lease.tick()
     assert slot.calls == ["stop", "start"]
     assert [e[0] for e in events] == [EVENT_SINGLETON_YIELDED, EVENT_SINGLETON_ACTIVATED]
 
 
 async def test_junior_does_not_reclaim_if_superior_reports_ready():
-    """Даже с нулевым таймаутом — если старший успел подтвердить готовность,
-    забирать слот обратно не за чем."""
     peer = FakePeer("alfred", {SLOT: _entry("alfred", claiming=True, ready=True)})
     slot = FakeSlot("telegram-bot@alfred:standby", status=RUNNING)
     lease, _ = _lease("jeeves", KIND_VPS, slot, peer, grace_s=0.0, ready_timeout_s=0.0)
@@ -256,98 +220,69 @@ async def test_junior_does_not_reclaim_if_superior_reports_ready():
 
 
 async def test_junior_reclaim_uses_running_superior_ready_flag_too():
-    """Готовность может прийти и когда старший уже виден как running (не
-    только claiming) — оба случая учитываются одинаково."""
     peer = FakePeer("alfred", {SLOT: _entry("alfred", running=True, ready=True)})
     slot = FakeSlot("telegram-bot@alfred:standby", status=RUNNING)
     lease, _ = _lease("jeeves", KIND_VPS, slot, peer, grace_s=0.0, ready_timeout_s=0.0)
     await lease.tick()
     await lease.tick()
-    assert slot.calls == ["stop"]  # не реклеймит — старший готов и running
+    assert slot.calls == ["stop"]
 
 
 async def test_yielded_since_resets_between_episodes():
-    """Таймер «жду ready» не должен пережить эпизод, в котором старший
-    вовсе пропал (это уже отдельный, штатный failover через grace) —
-    иначе следующая, уже не связанная уступка мгновенно считалась бы
-    просроченной (ready_timeout_s=0.0 ниже сделал бы это мгновенным)."""
     peer = FakePeer("alfred", {SLOT: _entry("alfred", claiming=True, ready=False)})
     slot = FakeSlot("telegram-bot@alfred:standby", status=RUNNING)
     lease, _ = _lease("jeeves", KIND_VPS, slot, peer, grace_s=999.0, ready_timeout_s=0.0)
-    await lease.tick()  # уступил, _yielded_since выставлен
+    await lease.tick()
     assert slot.calls == ["stop"]
 
-    # Старший исчезает целиком (не просто "не ready") — обычный failover,
-    # не наш новый путь: до grace (999с) ещё далеко, реклейма быть не должно.
     peer.alive = False
     peer.down_since = 0.0
     await lease.tick()
-    assert slot.calls == ["stop"]  # ни второго "stop", ни "start"
+    assert slot.calls == ["stop"]
 
-    # Старший — уже другой эпизод, снова claiming. Будь _yielded_since
-    # унаследован из первого эпизода, ready_timeout_s=0.0 реклеймнул бы
-    # немедленно, хотя старший только что появился.
     peer.alive = True
     peer.down_since = None
     await lease.tick()
-    assert slot.calls == ["stop"]  # всё ещё без "start"
-
-
-# --- гонка LeaseManager/SupervisedService (живой инцидент 2026-08-12) -------
+    assert slot.calls == ["stop"]
 
 
 async def test_returning_superior_does_not_steal_a_self_inflicted_crash(caplog):
-    """Старшая нода "вернулась" (claiming), но наш процесс уже упал сам (по
-    причине, не связанной с ареndой, например TelegramNetworkError на
-    старте) — SupervisedService._run() ещё не успел обработать выход
-    (status снаружи всё ещё RUNNING). Раньше stop() отсюда синхронно снимал
-    desired_running ДО того, как _run() дойдёт до проверки rc, и падение
-    тихо терялось под видом штатной уступки. Теперь process_alive=False
-    останавливает эту ветку — обычный restart-loop сам разберётся."""
     peer = FakePeer("alfred", {SLOT: _entry("alfred", claiming=True)})
     slot = FakeSlot("telegram-bot@alfred:standby", status=RUNNING, process_alive=False)
     lease, events = _lease("jeeves", KIND_VPS, slot, peer, grace_s=0.0)
     with caplog.at_level(logging.WARNING, logger="sa_home_bot.node.lease"):
         await lease.tick()
-    assert slot.calls == []  # stop() НЕ вызван
-    assert events == []  # EVENT_SINGLETON_YIELDED не эмитится
+    assert slot.calls == []
+    assert events == []
     assert lease.local_state()[SLOT]["claiming"] is False
     assert any("процесс уже" in r.message for r in caplog.records)
 
 
 async def test_stuck_slot_warns_once_past_threshold(caplog):
-    """Слот, который долго не работает (не RUNNING), должен быть виден в
-    логе хотя бы через WARNING — раньше этот класс инцидентов был совсем
-    немым (единственной уликой было отсутствие ожидаемых строк)."""
-    slot = FakeSlot("telegram-bot@alfred:standby")  # STOPPED, без пиров
+    slot = FakeSlot("telegram-bot@alfred:standby")
     lease, _ = _lease("jeeves", KIND_VPS, slot, grace_s=999.0, stuck_warn_s=0.0)
     with caplog.at_level(logging.WARNING, logger="sa_home_bot.node.lease"):
         await lease.tick()
-    assert slot.calls == []  # grace ещё не истёк — не должен запускаться
+    assert slot.calls == []
     assert any("не работает" in r.message for r in caplog.records)
 
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="sa_home_bot.node.lease"):
-        await lease.tick()  # второй тик — не долбить WARNING на каждом тике
+        await lease.tick()
     assert not any("не работает" in r.message for r in caplog.records)
 
 
 async def test_stuck_tracker_resets_once_the_slot_runs_again():
-    """Слот снова RUNNING — счётчик "не работает" не должен пережить это и
-    ошибочно сработать в следующем, уже не связанном эпизоде."""
     slot = FakeSlot("telegram-bot@alfred")
     lease, _ = _lease("alfred", KIND_SERVER, slot, stuck_warn_s=0.0)
-    await lease.tick()  # свободна — берёт сразу (активная роль, grace=0);
-    assert slot.calls == ["start"]  # тут же и регистрирует "не работает"
-    assert SLOT in lease._not_running_since  # (со статусом STOPPED на входе)
+    await lease.tick()
+    assert slot.calls == ["start"]
+    assert SLOT in lease._not_running_since
 
-    await lease.tick()  # на этот раз status уже RUNNING — сброс
+    await lease.tick()
     assert slot.calls == ["start"]
     assert SLOT not in lease._not_running_since
     assert SLOT not in lease._stuck_warned
-
-
-# --- fencing ----------------------------------------------------------------
 
 
 async def test_fenced_node_stays_quiet():
@@ -370,7 +305,6 @@ async def test_fenced_node_resumes_after_the_holdoff(monkeypatch):
 
 
 async def test_supervisor_does_not_restart_a_fenced_service(monkeypatch):
-    """Перезапуск вытесненного экземпляра — это война двух поллеров за апдейты."""
     import asyncio
 
     import sa_home_bot.node.supervisor as sup_mod
@@ -401,20 +335,15 @@ async def test_supervisor_does_not_restart_a_fenced_service(monkeypatch):
 
 
 async def test_first_decision_waits_for_peer_links_to_settle():
-    """Линки поднимаются асинхронно: реши аренда сразу — вернувшаяся основная
-    нода запустила бы бота поверх работающего резерва (живая находка при
-    выкатке 0.38.0: перекрытие 5 с)."""
     peer = FakePeer("jeeves", {SLOT: _entry("jeeves", running=True, role="standby")})
     peer.alive = False
-    peer.down_since = None  # соединение ещё даже не пробовали
+    peer.down_since = None
     slot = FakeSlot("telegram-bot@alfred")
     lease, _ = _lease("alfred", KIND_SERVER, slot, peer)
     lease._settle_s = 0.1
 
     await lease.start()
     await lease.stop()
-    # За время ожидания связь так и не поднялась — решаем по тому, что есть,
-    # но ожидание было (иначе тест бы не отличался от прямого tick).
     assert slot.calls == ["start"]
 
 
@@ -422,19 +351,17 @@ async def test_settle_ends_as_soon_as_every_peer_has_answered():
     peer = FakePeer("jeeves", {SLOT: _entry("jeeves", running=True, role="standby")})
     slot = FakeSlot("telegram-bot@alfred")
     lease, _ = _lease("alfred", KIND_SERVER, slot, peer)
-    lease._settle_s = 30.0  # столько ждать не придётся: пир жив с самого начала
+    lease._settle_s = 30.0
 
     start = time.monotonic()
     await lease.start()
     await lease.stop()
     assert time.monotonic() - start < 5.0
-    # Резерв работает — не запускаемся поверх, а объявляем притязание.
     assert slot.calls == []
     assert lease.local_state()[SLOT]["claiming"] is True
 
 
 async def test_startup_does_not_launch_singletons_directly():
-    """Их запуск — дело аренды, даже для активной роли."""
     sup = Supervisor(["telegram-bot@alfred", "monitor"], None, emit=_noop)
     await sup.start_all()
     assert sup.services["telegram-bot@alfred"].status == STOPPED

@@ -1,56 +1,15 @@
-"""Единый реестр служб роя — одно место, где служба описана целиком.
-
-До этого модуля одна и та же служба была описана в трёх независимых местах:
-``ASSIGNMENT_ARGS`` (чем её спавнить), ``--service`` choices в ``cli.py`` (как
-её запустить руками) и ``local_service_endpoints()`` (куда к ней стучаться).
-Добавление любого свойства службы — синглтон ли она, нужны ли ей датчики
-железа, есть ли у неё переносимый пакет настроек — множило эти места дальше.
-Здесь всё это — поля одного ``ServiceSpec``.
-
-Реестр описывает **службы**, которые нода может нести. Сама нода
-(``--service node``) службой роя не является — она хост для служб, поэтому в
-``SERVICES`` её нет, а в CLI-choices она добавляется отдельно
-(``NODE_CLI_NAME``).
-"""
-
 from __future__ import annotations
 
 import importlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:  # pragma: no cover — только для аннотаций
+if TYPE_CHECKING:  # pragma: no cover
     from sa_home_bot.config import Settings
 
 
 @dataclass(frozen=True)
 class ServiceSpec:
-    """Описание одной службы роя.
-
-    ``name`` — имя в назначениях ноды и в ``dst.service`` конверта
-    (``telegram-bot``); ``cli_name`` — значение ``--service`` (``bot``): они
-    исторически различаются, и реестр — единственное место, где это знание
-    хранится.
-
-    ``endpoint_attr`` — путь к полю сокета в ``Settings`` через точку
-    (``monitor.socket``); ``None`` — своего proto-сервера у службы нет
-    (telegram-bot только клиент), маршрутизировать к ней нечего.
-
-    ``assignable`` — предлагать ли службу в ``assign`` (кнопки бота,
-    ``nodectl assign``). ``externally_managed`` — процесс поднимает не
-    супервизор (см. ``llm`` ниже).
-
-    ``singleton`` — на весь рой активен только один экземпляр (на инстанс,
-    если ``instanced``); такими управляет аренда лидерства.
-    ``instanced`` — у службы есть переносимый пакет настроек, и её экземпляры
-    адресуются парой ``service@instance``.
-
-    ``needs_hardware_sensors`` — службе нужны термозоны/SMART реальной
-    машины; на ноде без них (vps) она бессмысленна и не предлагается.
-    С этапа 38 у monitor этот флаг снят: на vps он мерит host-метрики
-    из /proc (steal/iowait/память/диск), а не температуры.
-    """
-
     name: str
     cli_name: str
     runner: str
@@ -62,12 +21,9 @@ class ServiceSpec:
 
     @property
     def cli_args(self) -> list[str]:
-        """Аргументы запуска этой службы этим же пакетом."""
         return ["--service", self.cli_name]
 
 
-# Порядок важен дважды: он задаёт порядок кнопок «назначить службу» в боте
-# (describe → choices) и порядок остановки служб (обратный) в супервизоре.
 _SPECS: tuple[ServiceSpec, ...] = (
     ServiceSpec(
         name="monitor",
@@ -79,9 +35,9 @@ _SPECS: tuple[ServiceSpec, ...] = (
         name="telegram-bot",
         cli_name="bot",
         runner="sa_home_bot.app:run",
-        endpoint_attr=None,  # бот — только клиент, своего сервера нет
-        singleton=True,  # у токена может быть лишь один активный поллер
-        instanced=True,  # свой пакет настроек на каждого бота
+        endpoint_attr=None,
+        singleton=True,
+        instanced=True,
     ),
     ServiceSpec(
         name="apps",
@@ -95,48 +51,27 @@ _SPECS: tuple[ServiceSpec, ...] = (
         runner="sa_home_bot.torrents.app:run_torrents",
         endpoint_attr="torrents.socket",
     ),
-    # tasks по смыслу тоже синглтон (своя БД напоминаний), но резерва для неё
-    # пока не делаем: БД не реплицируется, и включать аренду без этого рано.
     ServiceSpec(
         name="tasks",
         cli_name="tasks",
         runner="sa_home_bot.tasks.app:run_tasks",
         endpoint_attr="tasks.socket",
     ),
-    # net — обёртка над локальным SearXNG (веб-поиск для /ai). Обычная
-    # служба: где стоит SearXNG, там её и назначают (сейчас alfred, см.
-    # net/protocol.py::NODE_ID).
     ServiceSpec(
         name="net", cli_name="net", runner="sa_home_bot.net.app:run_net", endpoint_attr="net.socket"
     ),
-    # memory — долгая память Альфреда о чате. Как и net, живёт там, где нода
-    # круглосуточная (см. memory/protocol.py::NODE_ID): вспоминать должно
-    # получаться всегда, а не только когда проснулась машина с моделью.
     ServiceSpec(
         name="memory",
         cli_name="memory",
         runner="sa_home_bot.memory.app:run_memory",
         endpoint_attr="memory.socket",
     ),
-    # graph_memory — графовая память Альфреда (Neo4j+Graphiti, Этап 41):
-    # дополнение к memory, не замена. В отличие от memory/net, пинуется на
-    # mycraft (там Neo4j и Ollama), а не на всегда-включённой ноде — её
-    # недоступность во время сна mycraft штатна (см. graph_memory/protocol.py).
     ServiceSpec(
         name="graph_memory",
         cli_name="graph_memory",
         runner="sa_home_bot.graph_memory.app:run_graph_memory",
         endpoint_attr="graph_memory.socket",
     ),
-    # Живая находка 2026-07-23: служба llm на Windows-ноде дёргает wsl.exe, а
-    # тот из-под Session-0 (Windows-служба sa-home-node, LocalSystem) вообще
-    # не запускается (exit code -1) — WSL2 требует интерактивную сессию.
-    # Поэтому llm супервизором НЕ спавнится: на нодах, где она нужна, процесс
-    # поднимает задача планировщика от интерактивного пользователя
-    # (deploy/llm-runner.ps1). При этом llm остаётся в [node].assignments —
-    # супервизия и маршрутизация независимы: NodeRouter строит локальный
-    # маршрут к settings.llm.socket по тому же списку назначений, так что
-    # запрос доедет до внешне управляемого процесса на том же сокете.
     ServiceSpec(
         name="llm",
         cli_name="llm",
@@ -145,16 +80,9 @@ _SPECS: tuple[ServiceSpec, ...] = (
         assignable=False,
         externally_managed=True,
     ),
-    # vpn — доступ к обходу на ноде с белым IP (Этап 33 + подэтап 39.0.x):
-    # два транспорта под общей квотой — AmneziaWG (UDP) и VLESS+Reality
-    # (TCP/443, xray-core; [vpn].transports + [vpn.reality]). Мультинодовая
-    # (jeeves + wooster), бот ищет держателя по списку служб.
     ServiceSpec(
         name="vpn", cli_name="vpn", runner="sa_home_bot.vpn.app:run_vpn", endpoint_attr="vpn.socket"
     ),
-    # vpn_check — исполнитель пробных запросов через VPN (мониторинг
-    # доступности, см. VpnConfig.check_nodes выше): деплоится на нескольких
-    # нодах сразу (jeeves, alfred, ...), в отличие от самой vpn.
     ServiceSpec(
         name="vpn_check",
         cli_name="vpn_check",
@@ -165,24 +93,19 @@ _SPECS: tuple[ServiceSpec, ...] = (
 
 SERVICES: dict[str, ServiceSpec] = {s.name: s for s in _SPECS}
 
-# Сервис ноды — не служба роя, а хост для служб: назначить его нельзя,
-# но запустить через CLI нужно.
 NODE_CLI_NAME = "node"
 NODE_RUNNER = "sa_home_bot.node.app:run_node"
 
 
 def spec(name: str) -> ServiceSpec | None:
-    """Описание службы по имени назначения; None — имя неизвестно."""
     return SERVICES.get(name)
 
 
 def assignable_names() -> tuple[str, ...]:
-    """Службы, которые можно назначить ноде (choices действия ``assign``)."""
     return tuple(s.name for s in _SPECS if s.assignable)
 
 
 def supervised_names() -> tuple[str, ...]:
-    """Службы, которые спавнит супервизор (не внешне управляемые)."""
     return tuple(s.name for s in _SPECS if not s.externally_managed)
 
 
@@ -196,7 +119,6 @@ def load_runner(cli_name: str):
 
 
 def cli_service_choices() -> tuple[str, ...]:
-    """Значения ``--service``: все службы + сам сервис ноды."""
     return tuple(s.cli_name for s in _SPECS) + (NODE_CLI_NAME,)
 
 
@@ -208,9 +130,4 @@ def _resolve(settings: Settings, dotted: str) -> str:
 
 
 def service_endpoints(settings: Settings) -> dict[str, str]:
-    """Локальные службы со своим proto-сервером: имя → endpoint из конфига.
-
-    Именно к ним нода умеет проксировать запросы (telegram-bot сюда не
-    попадает — он клиент, а не сервер).
-    """
     return {s.name: _resolve(settings, s.endpoint_attr) for s in _SPECS if s.endpoint_attr}

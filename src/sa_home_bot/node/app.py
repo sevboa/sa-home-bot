@@ -1,15 +1,3 @@
-"""Сборка и жизненный цикл сервиса ноды (супервизора).
-
-Единственный systemd-юнит — у ноды: она поднимает назначенные службы
-(monitor, telegram-bot) дочерними процессами, рестартит упавших и отдаёт
-статус/управление по протоколу v0. События жизненного цикла служб уходят
-broadcast'ом подключённым клиентам (nodectl events).
-
-Нода же — точка входа роя: запросы с чужим ``dst`` пересылаются пирам из
-``[[swarm.nodes]]`` или локальным службам (см. node/peers.py), события
-пиров ретранслируются своим клиентам с сохранением src.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -45,61 +33,25 @@ from sa_home_bot.utils.shutdown import STEP_TIMEOUT_S, ShutdownBudget, arm_hard_
 
 log = logging.getLogger(__name__)
 
-# Сколько времени даётся всему останову СВЕРХ срока на гашение дочерних служб
-# (`[node].stop_timeout_s`): прощание с роем, фоновые задачи, линки, сокеты.
-# Двадцати секунд хватает рою из десятка нод даже при полностью мёртвой сети.
 SHUTDOWN_BUDGET_S = 20.0
 
-# Запас сторожу поверх бюджета: сначала свои потолки и честная запись в лог,
-# и только потом — принудительный выход.
 HARD_EXIT_MARGIN_S = 15.0
 
-# Фабрика линка: (имя, endpoint или список адресов) → PeerLink со всеми
-# обязательными колбэками.
 LinkFactory = Callable[[str, "str | Sequence[str]"], PeerLink]
 
-# Размер дедуп-набора: изначально 512 «событий мало», но с тех пор через тот
-# же канал ходят tool_call/task_result/llm_idle_sleep/алерты монитора — при
-# всплеске больше maxsize РАЗНЫХ id за время оборота циркулирующей копии
-# старый id вытесняется и событие принимается повторно, т.е. защита протекает
-# ровно в штормовом сценарии. 2048 строк-ключей — копейки по памяти.
 SEEN_EVENT_IDS_CAPACITY = 2048
 
 EVENT_LLM_WENT_IDLE = "llm_went_idle"
 
-# Второй предохранитель от шторма ретрансляции, НЕЗАВИСИМЫЙ от дедупа
-# (ARCHITECTURE §11: «TTL/hop-limit в конверте — предохранитель на случай
-# рассинхрона»). Дедуп по id — единственный барьер, и он дырявый по краям:
-# рестарт ноды сбрасывает набор, переполнение вытесняет старые id. Диаметр
-# полного графа — 1 хоп, будущего Chord — O(log n): 8 хватает с запасом,
-# а лавине — нет.
 MAX_RELAY_HOPS = 8
 
 
 class SeenEvents:
-    """Ограниченный набор недавно виденных id событий — защита от штормов
-    ретрансляции.
-
-    Живой инцидент 2026-07-17: в полносвязном рое из 3 нод (alfred,
-    arch-t480, winpc — каждая напрямую связана с каждой) единственная
-    проверка в `_relay_peer_event` («не эхо ли это моего же события»)
-    ловит только прямой возврат к источнику, но НЕ повторные копии,
-    приходящие от РАЗНЫХ соседей одним и тем же путём через треугольник —
-    каждый узел ретранслирует КАЖДУЮ полученную копию по всем своим рёбрам
-    заново, без счётчика «уже переслал». Событие размножается лавинообразно
-    (без верхней границы, кроме размера графа) — Telegram забанил бота
-    rate-limit'ом (429, retry-after 578с) примерно через 7 минут шторма.
-    `env.id` — uuid4, генерируется один раз в `make_event()` и не меняется
-    при ретрансляции (`broadcast_envelope` пересылает тот же `Envelope`) —
-    надёжный ключ дедупа.
-    """
-
     def __init__(self, maxsize: int = SEEN_EVENT_IDS_CAPACITY) -> None:
         self._maxsize = maxsize
         self._ids: dict[str, None] = {}
 
     def seen(self, event_id: str) -> bool:
-        """True, если уже видели этот id — иначе запоминает и возвращает False."""
         if event_id in self._ids:
             return True
         self._ids[event_id] = None
@@ -111,27 +63,6 @@ class SeenEvents:
 def make_link_factories(
     settings: Settings, node_id: str, on_peer_event, on_local_event, on_endpoints=None
 ) -> tuple[LinkFactory, LinkFactory]:
-    """Единственный источник правды о том, КАК создавать линки.
-
-    Живой баг (найден аудитом 2026-07-28): линки, созданные в рантайме
-    (`join`/`swarm_join`/`assign` в node/service.py), собирались на месте
-    голым `PeerLink(id, endpoint, token=...)` — без `on_event` (события
-    соседа/службы молча терялись до рестарта ноды — тот же класс бага, что
-    уже чинил 00f9e00 для локальных служб) и без `self_node` (в auth не
-    ехали имя и инкарнация — уборка протухших линков после ребута соседа,
-    proto/server.py::_note_peer, для них не работала). Фабрики закрывают
-    класс бага целиком: все шесть точек создания используют их.
-
-    ``on_peer_event``/``on_local_event`` — РАЗНЫЕ колбэки (живая находка
-    2026-07-24, живой баг на проде: `task_result` от службы tasks молча
-    терялся). Локальная служба репортует СВОЙ ЖЕ узел в `describe().info.
-    node` (см. proto/server.py::broadcast_event — `src=Address(node=info.
-    node,...)`), который для локальной службы равен `node_id` этой самой
-    ноды — эхо-проверка в `_relay_peer_event` (`env.src.node == node_id`)
-    расценивала это как "моё же событие вернулось от соседа" и молча
-    дропала. Для событий ПИРОВ (`src.node` — чужой узел) проверка верна, для
-    ЛОКАЛЬНЫХ служб — никогда не эхо (локальная связь однонаправленная,
-    возврата по кругу физически нет), проверять нечего."""
 
     def make_peer_link(peer_id: str, endpoint: str | Sequence[str]) -> PeerLink:
         return PeerLink(
@@ -139,23 +70,11 @@ def make_link_factories(
             endpoint,
             token=settings.swarm.token,
             on_event=on_peer_event,
-            # Адреса, которые сосед назовёт в hello (этап 24), сохраняются в
-            # состоянии ноды — иначе выученный LAN-путь терялся бы при каждом
-            # рестарте и рой снова начинал бы с одного адреса из конфига.
             on_endpoints=on_endpoints,
-            # Представляемся соседу в auth — по этому имени он уронит свой
-            # протухший линк к нам, когда мы переподключимся после ребута
-            # (proto/server.py::_note_peer). Локальным службам ниже незачем:
-            # они живут в том же процессе-родителе, «переподключения после
-            # ребута соседа» там не бывает.
             self_node=node_id,
         )
 
     def make_local_link(service: str, endpoint: str | Sequence[str]) -> PeerLink:
-        # on_event=on_local_event (НЕ on_peer_event, см. докстринг выше) —
-        # локальные службы (llm — llm_idle_sleep, tasks — task_result и
-        # т.п.) тоже могут эмитить события, которые нужно довезти до бота
-        # через ту же ретрансляцию, что уже работает для событий пиров.
         return PeerLink(
             service,
             endpoint,
@@ -170,14 +89,6 @@ def make_link_factories(
 def peer_candidates(
     nodes: Sequence[SwarmNodeConfig], extra: Sequence[SwarmNodeConfig]
 ) -> dict[str, list[str]]:
-    """Адреса каждого пира из обоих источников, в порядке проб (этап 24).
-
-    Состояние ноды идёт ПЕРВЫМ, а не как раньше (TOML побеждал целиком):
-    там лежит последний удачный путь и всё, что сосед о себе рассказал, —
-    то есть более свежая правда, чем один адрес, вписанный в конфиг руками.
-    Сам конфиг при этом не теряется: он добавляется следом и остаётся
-    единственным, что работает, когда состояние пустое (первый запуск).
-    """
     out: dict[str, list[str]] = {}
     for cfg in (*extra, *nodes):
         known = out.setdefault(cfg.id, [])
@@ -190,16 +101,6 @@ def peer_candidates(
 def peer_kinds(
     nodes: Sequence[SwarmNodeConfig], extra: Sequence[SwarmNodeConfig]
 ) -> dict[str, str]:
-    """Тип каждого пира, известный ещё до его первого hello: из персистентного
-    состояния (там его пишет PresenceWatcher, узнав из hello) либо из TOML.
-
-    Нужен ровно тогда, когда соседа не спросить: после рестарта своей ноды
-    ``PeerLink`` создаётся с пустым ``node_kind``, и до тех пор пока
-    недоступный сосед не пришлёт hello, сводка роя не может отличить
-    «пропал сервер/VDS» (авария) от «уснула рабочая станция» (норма). hello
-    потом уточнит (``PeerLink`` перезапишет). Состояние идёт первым, как и в
-    ``peer_candidates``.
-    """
     out: dict[str, str] = {}
     for cfg in (*extra, *nodes):
         if cfg.kind and cfg.id not in out:
@@ -215,28 +116,15 @@ def build_router(
     make_peer_link: LinkFactory,
     make_local_link: LinkFactory,
 ) -> NodeRouter:
-    """Маршрутизатор: пиры из [[swarm.nodes]] ∪ персистентного состояния
-    (join, этап 18) + локальные службы из назначений.
-
-    ``assignments`` — эффективный набор (TOML ∪ персистентное состояние
-    ноды), не только `settings.node.assignments` — см. `node/state.py`.
-
-    Линки создаются только фабриками (см. make_link_factories)."""
     peers = {
         pid: make_peer_link(pid, candidates)
         for pid, candidates in peer_candidates(settings.swarm.nodes, extra_peers).items()
-        if pid != node_id  # свой id в списке — не пир
+        if pid != node_id
     }
-    # Тип соседа из состояния/конфига — чтобы недоступная нода не выглядела
-    # «спящей» до своего первого hello (иначе сводка роя путает пропавший
-    # сервер с уснувшей рабочей станцией). hello потом уточнит — PeerLink
-    # перезапишет node_kind по confirmed-ответу.
     for pid, node_kind in peer_kinds(settings.swarm.nodes, extra_peers).items():
         link = peers.get(pid)
         if link is not None and not link.node_kind:
             link.node_kind = node_kind
-    # Маршрут строится по ИМЕНИ СЛУЖБЫ, а не по строке назначения целиком:
-    # "telegram-bot@alfred:standby" — это всё та же служба telegram-bot.
     assigned_services = {a.service for a in assignments_mod.parse_valid(assignments)}
     local = {
         name: make_local_link(name, endpoint)
@@ -246,15 +134,6 @@ def build_router(
     return NodeRouter(node_id, peers=peers, local_services=local)
 
 
-# Живой баг 2026-08-05: emit() сразу после server.start() шлёт в
-# ProtoServer.broadcast_event, а тот рассылает только УЖЕ АУТЕНТИФИЦИРОВАННЫМ
-# соединениям (proto/server.py::_connections) — то есть соседям/локальным
-# службам, которые УСПЕЛИ переподключиться к нам после рестарта. Прямо
-# после старта их обычно ровно ноль (переподключение — отдельный процесс
-# на стороне соседа, не мгновенный), и событие рассылалось в пустоту без
-# единого получателя. Событие restart_applied ни разу не долетело до бота
-# с момента появления фичи. Решение — не гадать с задержкой, а повторять
-# рассылку, пока не появится хоть один получатель, в разумном окне.
 ANNOUNCE_VERSION_RETRY_S = 5.0
 ANNOUNCE_VERSION_WINDOW_S = 120.0
 
@@ -267,26 +146,6 @@ async def _announce_version_if_changed(
     retry_s: float = ANNOUNCE_VERSION_RETRY_S,
     window_s: float = ANNOUNCE_VERSION_WINDOW_S,
 ) -> None:
-    """Событие ``restart_applied``, если версия сменилась с прошлого старта.
-
-    Молчит на самом первом старте с этим полем (``last_known_version`` ещё
-    ``None`` — иначе разом «применили обновление» получил бы весь рой сразу
-    после деплоя, где его в реальности не было) и когда версия не менялась.
-    Срабатывает и на обычном `restart_node`/`update`, и на ручном `nodectl
-    update` по SSH, и на голом передеплое юнита — в любом случае это
-    единственный источник правды «нода реально ИСПОЛНЯЕТ новую версию», не
-    просто положила файлы на диск (для этого уже есть update_finished,
-    node/service.py::_update).
-
-    ``state`` персистится СРАЗУ (до попытки доставки) — версия и так
-    сменилась реально, а повторный рестарт до истечения окна доставки не
-    должен решить, что "менялось дважды". Доставка — лучшая из возможных
-    попыток: `broadcast` (обычно ``ProtoServer.broadcast_event``, возвращает
-    число реальных доставок) повторяется каждые ``retry_s``, пока не
-    доставится хотя бы одному получателю или не истечёт ``window_s`` —
-    после этого молча сдаётся (событие best-effort, не source of truth:
-    swarm_status/check_update всё равно покажут актуальную версию).
-    """
     if state.last_known_version is None:
         state.last_known_version = __version__
         state.save(state_path)
@@ -327,30 +186,6 @@ async def _relay_peer_event(
     is_local: bool = False,
     replicator: ConfigReplicator | None = None,
 ) -> None:
-    """Ретрансляция события (пира или локальной службы) своим клиентам +
-    замыкание сетки (этап 18) для событий пиров.
-
-    Эхо-проверка (``env.src.node == node_id`` — "моё же событие вернулось
-    от соседа") применяется ТОЛЬКО к событиям пиров (``is_local=False``):
-    локальная служба репортует src.node == node_id этой же ноды не потому,
-    что это эхо, а потому что это буквально её собственный узел — для
-    локальной связи возврата по кругу не бывает (см. make_link_factories).
-    Живой баг на проде 2026-07-24: без этого различения `task_result` от
-    службы tasks молча терялся здесь же, до бота дело не доходило.
-
-    ``node_joined`` от уже связанного пира — авто-подключиться к новому
-    узлу тем же путём, каким мы сами узнаём о событиях: так третий узел, не
-    участвовавший в handshake напрямую, всё равно достраивает полную сетку
-    за один хоп репликации события, без отдельного каталога. Локальная
-    служба этот тип события никогда не эмитит — веткой ниже не задевается.
-
-    ``seen`` — дедуп по ``env.id``: в связном рое (≥3 узла, каждый с каждым)
-    одно событие приходит несколькими путями, а без дедупа каждый узел
-    ретранслирует КАЖДУЮ полученную копию заново — лавина (см. SeenEvents).
-    Второй, независимый рубеж — счётчик ретрансляций в конверте: событие,
-    пережившее MAX_RELAY_HOPS пересылок, уже точно циркулирует по кругу
-    (диаметр полного графа — 1), дальше не идёт.
-    """
     if not is_local and env.src is not None and env.src.node == node_id:
         return
     if seen.seen(env.id):
@@ -367,8 +202,6 @@ async def _relay_peer_event(
         data = env.payload.get("data", {})
         new_id, new_endpoint = data.get("node_id"), data.get("endpoint")
         if new_id and new_endpoint and new_id != node_id and new_id not in router.peers:
-            # Новый узел назвал все свои адреса (этап 24) — связываемся по
-            # лучшему из них, а не по одному, попавшему в событие.
             candidates = merge_endpoints(new_endpoint, data.get("endpoints"))
             link = make_peer_link(new_id, candidates)
             await router.add_peer(link)
@@ -380,18 +213,10 @@ async def _relay_peer_event(
         and env.type == MSG_EVENT
         and env.payload.get("event") == EVENT_INSTANCE_CONFIG_CHANGED
     ):
-        # Сосед объявил новую ревизию пакета — забрать её, если этот инстанс
-        # назначен и нам (node/replication.py).
         await replicator.on_config_changed(env)
     if server is not None:
         await server.broadcast_envelope(dataclasses.replace(env, hops=env.hops + 1))
     if env.type == MSG_EVENT and env.payload.get("event") == EVENT_NODE_LEAVING:
-        # Сосед прощается перед остановкой (этап 23): роняем линк к нему и
-        # помечаем уход штатным — точный детект вместо heartbeat и без
-        # ложного node_down через down_after_s. СТРОГО после ретрансляции:
-        # note_left рвёт то самое соединение, по которому событие пришло, —
-        # отмена читающей задачи (мы выполняемся в её callback'е) прилетела
-        # бы на ближайшем await и оборвала бы рассылку боту.
         leaving = env.payload.get("data", {}).get("node") or (env.src.node if env.src else None)
         left_link = router.peers.get(leaving) if leaving else None
         if left_link is not None:
@@ -399,17 +224,10 @@ async def _relay_peer_event(
 
 
 async def run_node(settings: Settings, config_path: str | None = None) -> bool:
-    """Запустить ноду; вернуть True, если перед выходом запрошен само-рестарт
-    (см. `restart_node` — cli.main() тогда делает os.execv на том же PID)."""
-    # Сервер создаётся до супервизора: emit замыкается на его broadcast.
     emit = DeferredEmitter()
     server: ProtoServer | None = None
     replicator: ConfigReplicator | None = None
     lease: LeaseManager | None = None
-    # Читается в on_local_event ниже, назначается только после создания
-    # (тот же приём, что и server выше) — сама NodeService нужна там, чтобы
-    # среагировать на llm_went_idle своей же ноды (автовыключение по
-    # простою, node/service.py::maybe_auto_poweroff_idle).
     node_service: NodeService | None = None
     node_id = settings.node.id or socket.gethostname()
     lifespan = Lifespan()
@@ -441,24 +259,12 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
 
     async def on_local_event(env: Envelope) -> None:
         await relay(env, is_local=True)
-        # Строковый литерал, не импорт из llm/service.py — та же конвенция,
-        # что и в bot/node_events.py::EVENT_LLM_IDLE_SLEEP. `llm_went_idle`
-        # (не `llm_idle_sleep`!) — эмитится ТОЛЬКО из _maybe_sleep_idle
-        # (натуральный тайм-аут простоя), безусловно, даже без активных
-        # chat_id (в отличие от llm_idle_sleep, который адресован реальным
-        # чатам и молчит, если чатов не было — живая находка 2026-08-03: с
-        # llm_idle_sleep автовыключение не срабатывало на машине, с которой
-        # Alfred просто ни разу не заговорили). Ручной роспуск Alfred
-        # (llm/service.py::_sleep_now(quiet=True)) не эмитит НИ ОДНО из двух
-        # событий — машину сам по себе не гасит.
         if env.payload.get("event") == EVENT_LLM_WENT_IDLE and node_service is not None:
             asyncio.create_task(
                 node_service.maybe_auto_poweroff_idle(), name="idle-poweroff-check"
             )
 
     def on_peer_endpoints(peer_id: str, endpoints: list[str]) -> None:
-        """Линк узнал новые адреса соседа или переехал на другой путь —
-        сохранить, чтобы не переучиваться после каждого рестарта."""
         if not endpoints:
             return
         state.remember_peer(peer_id, endpoints[0], endpoints)
@@ -468,24 +274,14 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         settings, node_id, on_peer_event, on_local_event, on_peer_endpoints
     )
 
-    # assignments в TOML — стартовый набор, не единственный источник:
-    # состояние из assign/unassign в рантайме (nodectl/бот) переживает
-    # рестарт через state_path (node/state.py), а не только через TOML.
-    # То же для пиров: [[swarm.nodes]] — стартовый список, join (этап 18)
-    # добавляет к нему динамически.
     state = NodeState.load(settings.node.state_path)
     effective_assignments = sorted(set(settings.node.assignments) | set(state.assignments))
 
     def on_fenced(slot_name: str) -> None:
-        # Аренда создаётся ниже супервизора (ей нужен router), поэтому
-        # колбэк смотрит на переменную, а не захватывает объект.
         if lease is not None:
             lease.note_fenced(slot_name)
 
     def on_spawned(slot_name: str) -> None:
-        # Новый спавн — старое "ready: true" (если было) устарело: дочерний
-        # процесс ещё не успел ничего подтвердить заново (см.
-        # node/lease.py::SUPERIOR_READY_TIMEOUT_S, app.py::_report_bot_ready).
         if lease is not None:
             lease.set_ready(slot_name, False)
 
@@ -504,8 +300,6 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
     router = build_router(
         settings, node_id, effective_assignments, state.peers, make_peer_link, make_local_link
     )
-    # Пакеты настроек лежат рядом с config.toml; без файлового конфига их
-    # попросту негде держать — тогда репликации нет (и она не нужна).
     packages_dir = instances_dir(config_path)
     replicator = None
     if packages_dir is not None:
@@ -516,8 +310,6 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
             supervisor=supervisor,
             router=router,
             emit=emit,
-            # Бэкап identity vpn-сервера у напарника (39.0.8(b)); без
-            # [backup].partner — пустой набор, поведение прежнее.
             **identity_replicator_hooks(
                 settings, package_store, node_id,
                 vpn_assigned=assignments_mod.has_service(effective_assignments, "vpn"),
@@ -532,9 +324,6 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         grace_s=settings.swarm.failover_grace_s,
         ready_timeout_s=settings.swarm.superior_ready_timeout_s,
     )
-    # Нода слушает socket (локальные фронтенды) и все адреса из listen —
-    # TCP для пиров роя. Адрес, которого ещё нет (tailscale поднимается
-    # десятки секунд), старт не задерживает: сервер доберёт его фоном.
     endpoints = [settings.node.socket, *settings.node.listen]
     node_service = NodeService(
         supervisor,
@@ -545,39 +334,23 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         state_path=settings.node.state_path,
         local_service_endpoints=registry.service_endpoints(settings),
         swarm_token=settings.swarm.token,
-        # Настроенный адрес объявляет умения join/swarm_join (он статичен и
-        # известен сразу), а рою нода называет то, что РЕАЛЬНО слушает —
-        # список меняется, пока адреса доезжают (см. ProtoServer.start).
         own_endpoint=settings.node.listen[0] if settings.node.listen else "",
         advertise=lambda: server.advertised_endpoints() if server is not None else [],
         emit=emit,
-        # Дешёвая файловая проверка (без сети) — editable/не-git установка
-        # (dev-чекаут) или win32 дают None, и check_update/update не
-        # объявляются (см. update_source_for_this_platform).
         update_source=node_update.origin_repo_url(),
         node_kind=settings.node.kind,
         power_controllable=settings.node.power_controllable,
         idle_poweroff=settings.node.idle_poweroff,
         replicator=replicator,
         lease=lease,
-        # Динамические линки (join/assign в рантайме) обязаны собираться теми
-        # же фабриками, что и стартовые, — см. make_link_factories.
         make_peer_link=make_peer_link,
         make_local_link=make_local_link,
     )
     def on_peer_connect(peer_node: str) -> None:
-        """Сосед постучался к нам заново — значит, он перезапустился, и наш
-        исходящий линк к нему держит труп прошлого соединения. Роняем его
-        сразу, не дожидаясь ни heartbeat'а, ни ОС-таймаутов."""
         link = router.peers.get(peer_node)
         if link is not None:
             link.reconnect_now("сосед подключился заново")
 
-    # Сигналы перехватываем ДО первого долгого шага, а не после того, как всё
-    # поднялось (живая находка 2026-07-28): `server.start()` ждёт появления
-    # своего адреса до трёх минут (Tailscale поднимается не мгновенно), и всё
-    # это время остановка обрабатывалась бы по умолчанию — процесс умирал бы
-    # на месте, не погасив уже запущенные дочерние службы.
     lifespan.install_signal_handlers()
 
     server = ProtoServer(
@@ -589,27 +362,17 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
     )
     emit.bind(server)
     await server.start()
-    # Фоновой задачей, не await: доставка ретраится до ANNOUNCE_VERSION_
-    # WINDOW_S, пока соседи/локальные службы переподключаются — ждать это
-    # синхронно означало бы задерживать старт остальных служб (см.
-    # докстринг _announce_version_if_changed про баг 2026-08-05).
     asyncio.create_task(
         _announce_version_if_changed(state, settings.node.state_path, server.broadcast_event),
         name="announce-version",
     )
     for link in (*router.peers.values(), *router.local_services.values()):
         await link.start()
-    # До запуска служб: пакет, правленный пока нода была выключена, должен
-    # вступить в силу сразу, а не после лишнего рестарта службы.
     if replicator is not None:
         await replicator.start()
     await supervisor.start_all()
-    # Синглтоны стартует аренда, а не start_all: даже активная роль сначала
-    # убеждается, что службу не держит другая нода (node/lease.py).
     await lease.start()
 
-    # Присутствие соседей: пропажа ноды, обязанной быть в сети, — авария;
-    # пропажа рабочей станции — норма (node/watch.py).
     watcher = PresenceWatcher(
         node_id,
         router,
@@ -620,9 +383,6 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
     )
     await watcher.start()
 
-    # Маячок в локальной сети (этап 31): соседа в той же локалке не нужно
-    # вписывать в конфиг, а уехавший DHCP-адрес чинится сам. Собирается
-    # последним — ему нужны и join сервиса ноды, и реальные адреса сервера.
     discovery = SwarmDiscovery(
         node_id,
         router,
@@ -635,11 +395,6 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
     node_service.attach_discovery(discovery.state)
     await discovery.start()
 
-    # Первый запуск с заданным swarm.join и ещё пустым списком пиров:
-    # разовый bootstrap через тот же NodeService.join(), что и `nodectl join`
-    # (принцип «сначала действие ноды») — дальше рой сам разъедется (join
-    # соседа ретранслирует node_joined остальным — «замыкание сетки» выше).
-    # Повторные рестарты join не повторяют — полагаемся на persisted-список.
     if settings.swarm.join and not state.peers:
         try:
             result = await node_service.join(settings.swarm.join)
@@ -667,18 +422,8 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         await lifespan.wait()
     finally:
         log.info("Останов ноды...")
-        # Каждый шаг — под потолком, вся последовательность — под общим
-        # бюджетом (этап 29: на jeeves останов не заканчивался никогда, и по
-        # логу нельзя было понять, на чём именно он встал). Детям бюджет
-        # отдельный: погасить службу — честная работа, а не зависание, и
-        # укладываться она обязана в свой stop_timeout_s.
         budget = ShutdownBudget(total_s=settings.node.stop_timeout_s + SHUTDOWN_BUDGET_S)
-        # Последний рубеж — за нашим кодом: даже пройдя все шаги, процесс
-        # может застрять в уборке задач внутри asyncio.run().
         arm_hard_exit(budget.total_s + HARD_EXIT_MARGIN_S)
-        # Прощаемся ПЕРВЫМ делом, пока соединения живы: соседи по node_leaving
-        # мгновенно и точно узнают о штатном уходе (этап 23) — без этого
-        # «корректно остановилась» и «выдернули из розетки» неотличимы.
         farewell = emit(EVENT_NODE_LEAVING, {"node": node_id, "kind": settings.node.kind})
         await budget.step("прощание с роем", farewell)
         await budget.step("присутствие соседей", watcher.stop())

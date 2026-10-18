@@ -1,9 +1,3 @@
-"""JobWorker — единственный исполнитель тяжёлых job'ов (строго последовательно).
-
-Падение одного job'а не валит worker; запись в job_runs ведётся до/после
-выполнения. Останов — sentinel None в очереди.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -24,7 +18,7 @@ class JobWorker:
         log.info("JobWorker запущен")
         while True:
             job = await self._queue.get()
-            if job is None:  # sentinel остановки
+            if job is None:
                 self._queue.task_done()
                 break
             await self._execute(job)
@@ -39,6 +33,6 @@ class JobWorker:
                 run_id, "ok", utc_now(), metrics_json=result.to_json()
             )
             log.info("Job %s завершён: %s", job.job_type, result.to_json())
-        except Exception as exc:  # noqa: BLE001 — worker не должен падать
+        except Exception as exc:  # noqa: BLE001
             log.exception("Job %s упал", job.job_type)
             await self._ctx.store.finish_job_run(run_id, "error", utc_now(), error=str(exc))

@@ -43,4 +43,3 @@ class StubService:
 
     async def run_command(self, action: str, args: dict) -> dict:
         return {"accepted": True}
-

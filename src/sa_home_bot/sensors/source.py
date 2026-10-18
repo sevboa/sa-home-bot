@@ -1,9 +1,3 @@
-"""SensorSource — изоляция доменного типа SensorReading от источников.
-
-Все блокирующие вызовы (psutil, smartctl-подпроцесс) уходят в executor, чтобы
-не блокировать event loop (инвариант ARCHITECTURE.md §9.6).
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -46,11 +40,6 @@ class SensorSource:
     async def read_host(
         self, kernel_since: datetime | None = None
     ) -> list[HostMetricReading]:
-        """Host-метрики VPS (/proc). Пусто, если датчик выключен (не-vps по дефолту).
-
-        ``kernel_since`` — курсор окна kernel-журнала (``jobs/scan`` хранит его
-        в ``app_state`` и сдвигает после каждого среза).
-        """
         if not self._config.host.enabled:
             return []
         loop = asyncio.get_running_loop()
@@ -63,14 +52,12 @@ class SensorSource:
         )
 
     async def read_all(self) -> list[SensorReading]:
-        # Порядок в списке = порядок отображения в /status: CPU → GPU → диски.
         cpu_readings, gpu_readings, disk_readings = await asyncio.gather(
             self.read_cpu(), self.read_gpu(), self.read_disks()
         )
         return [*cpu_readings, *gpu_readings, *disk_readings]
 
     async def read_smart_snapshots(self) -> list[SmartSnapshot]:
-        """Снимок SMART-счётчиков дисков (read-only, для мониторинга деградации)."""
         if not self._config.disks.enabled:
             return []
         loop = asyncio.get_running_loop()
@@ -82,7 +69,6 @@ class SensorSource:
     async def read_disk_summaries(
         self, health_overrides: dict[str, str | None]
     ) -> list[DiskSummary]:
-        """Сводка по дискам для /status (health/temp/место) — для кэша в БД."""
         loop = asyncio.get_running_loop()
         devices = list(self._config.disks.devices)
         return await loop.run_in_executor(

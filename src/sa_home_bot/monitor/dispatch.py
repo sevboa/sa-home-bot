@@ -1,10 +1,3 @@
-"""ProtoEventDispatcher — события здоровья уходят broadcast'ом по протоколу.
-
-В отличие от Telegram-диспетчера, handled=False, пока не подключён ни один
-клиент: pending-флаги в БД монитора не двигаются, и событие повторится на
-следующем прогоне — бот, поднявшись, ничего не потеряет.
-"""
-
 from __future__ import annotations
 
 from dataclasses import asdict

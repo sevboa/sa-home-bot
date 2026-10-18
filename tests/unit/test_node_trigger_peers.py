@@ -1,6 +1,3 @@
-"""node/service.py::_trigger_peers — generic fan-out команды службе на себе
-и на живых пирах (доставка/skip/unreachable), см. ACTION_TRIGGER_PEERS."""
-
 from __future__ import annotations
 
 import pytest
@@ -19,9 +16,6 @@ from sa_home_bot.proto.messages import (
 
 
 class _FakePeer:
-    """Двойник PeerLink: только то, что реально читает NodeRouter/
-    _trigger_peers (peers_state + forward), без настоящего сокета."""
-
     def __init__(
         self,
         name: str,
@@ -72,7 +66,7 @@ async def test_dispatches_to_self_when_local_service_present():
 
 
 async def test_skips_self_when_no_local_service():
-    router = NodeRouter("jeeves")  # local_services пуст
+    router = NodeRouter("jeeves")
     svc = NodeService(_fake_supervisor(), router, node_id="jeeves")
     result = await svc.run_command(
         "trigger_peers", {"service": "vpn_check", "action": "check", "args": {}}

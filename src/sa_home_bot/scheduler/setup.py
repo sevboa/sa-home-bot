@@ -1,9 +1,3 @@
-"""Планировщик: cron-триггеры кладут job'ы в очередь.
-
-В callback'е планировщика — только put в DedupQueue (ARCHITECTURE §4). Все
-cron-job'ы: coalesce=True, max_instances=1 (инвариант §9.4).
-"""
-
 from __future__ import annotations
 
 import logging

@@ -1,5 +1,3 @@
-"""Точка входа CLI: разбор аргументов, загрузка Settings, запуск приложения."""
-
 from __future__ import annotations
 
 import argparse
@@ -16,9 +14,6 @@ from sa_home_bot.utils.logging import configure_logging
 
 log = logging.getLogger(__name__)
 
-# Windows: os.execv не заменяет образ процесса (новый PID, обёртка службы
-# сочтёт ноду умершей) — само-рестарт там делается выходом с этим кодом,
-# перезапуск выполняет обёртка (WinSW <onfailure action="restart"/>) или человек.
 RESTART_EXIT_CODE = 10
 
 
@@ -109,15 +104,9 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 0
     if args.service == registry.SERVICES["telegram-bot"].cli_name:
-        # Бот вернул True — его вытеснил другой поллер того же токена. Код
-        # выхода говорит ноде «не перезапускай»: решение за арендой лидерства
-        # (node/supervisor.py::FENCED_EXIT_CODE).
         return FENCED_EXIT_CODE if result else 0
     restart = result
     if restart:
-        # run_node вернул True (запрошен само-рестарт «restart_node»): чистый
-        # останов уже прошёл, заменяем образ процесса на себя же — тот же PID,
-        # работает и под systemd (Restart= не нужен), и вручную в терминале.
         if sys.platform == "win32":
             log.info("Само-рестарт: выход с кодом %d, перезапуск — за обёрткой "
                      "службы (WinSW) или вручную", RESTART_EXIT_CODE)
