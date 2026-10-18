@@ -1,29 +1,5 @@
-"""Художник-промптер (Этап 48): свободное описание картинки от Альфреда —
-любой длины, на любом языке — в короткий точный промпт под SD1.5.
-
-Живая находка 2026-09-29: когда gemma-персонаж сам писал ``prompt_en``, он
-спотыкался о CLIP-токены и терял суть. Персонажу не место думать о CLIP:
-он описывает сцену как хочет, а отдельный служебный вызов той же gemma
-(свой system, JSON, без рассуждения — как Ведущий интерактивов) выжимает из
-описания промпт.
-
-Свет, камера и «качество» («cinematic lighting», «highly detailed», «wide
-shot») в промпте разрешены (2026-09-30, по решению владельца: сцены с ними
-выходят заметно лучше — ср. «Замок Дракулы», #25). Пиксельность держит
-стилевой шаблон и постобработка, от реализма — стилевой негатив.
-
-Предохранитель в коде поверх модели — ``fit_prompt``: срезает хвостовые
-теги, пока промпт вместе со стилевым шаблоном не влезет в 77 токенов CLIP
-(иначе CLIP молча отрезал бы именно стиль — он в шаблоне после сути).
-
-Радиостанция Альфреда (2026-10-02) — домашний трансивер на столе; слово
-«radio station» SD понимает как здание или вышку вещания, поэтому в
-правилах явная замена на «vintage ham radio transceiver».
-"""
-
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -33,7 +9,6 @@ from sa_home_bot.llm import ollama
 
 log = logging.getLogger(__name__)
 
-# CLIP SD1.5: 77 позиций, две из них — служебные BOS/EOS.
 CLIP_MAX_TOKENS = 75
 
 SYSTEM_PROMPT = """\
@@ -70,13 +45,8 @@ Output: JSON {"prompt": "...", "negative": "..."} and nothing else.
 only when the description clearly says so; otherwise "".
 """
 
-# Руки — слабое место SD1.5 (на портретах Альфреда особенно): добавка к
-# любому негативу, кроме raw.
 HANDS_NEGATIVE = "bad hands, extra fingers, mutated hands, fused fingers"
 
-# Этап 49, отладочный /draw: что это за картинка — подсказка промптеру
-# перед описанием. Альфред в кадре — пожилой дворецкий: сама модель
-# «Альфреда» не знает.
 MODE_HINTS = {
     "free": "",
     "item": (
@@ -96,9 +66,6 @@ MODE_HINTS = {
 }
 
 
-# Пересъёмка после промаха (Этап 49.2.1). Весов «(x:1.3)» пайплайн не
-# понимает (без compel это просто текст), поэтому упор — порядком: первый
-# тег fit_prompt не срезает никогда, и ключевое слово ещё раз ближе к концу.
 EMPHASIZE_HINT = (
     "The previous picture FAILED to show: {items}. Now it must be the main "
     "subject: put it as the very first tag, large and clearly visible, and "
@@ -112,9 +79,6 @@ def build_request(
     context: str = "",
     emphasize: list[str] | None = None,
 ) -> str:
-    """Текст для промптера: подсказка режима, контекст сцены от режиссёра,
-    упор пересъёмки, потом само описание. Для «free» без контекста и упора —
-    описание как есть."""
     parts = []
     hint = MODE_HINTS.get(mode, "")
     if hint:
@@ -134,14 +98,6 @@ def split_tags(prompt: str) -> list[str]:
 
 
 def put_second(prompt: str, extra: str, *, move: bool = False) -> str:
-    """Теги ``extra`` — сразу за главным объектом: промптер их не выкинет, а
-    fit_prompt не срежет хвостом. Уже стоящие в промпте не повторяются.
-
-    ``move`` — уже стоящие в промпте теги ``extra`` переносятся на второе место
-    (а не остаются в хвосте). Нужно для ночи: короткий свет промптер копирует
-    дословно 6–8-м тегом, и там он теряет силу (стенд 2026-10-10, 80 кадров:
-    «ночь» читается 86% против 75%, «тёмный» 21% против 38%). Крупному плану
-    и закату перенос вредит (главное 53% против 69%; закат становится ночным)."""
     tags = split_tags(prompt)
     if move:
         want = {tag.lower() for tag in split_tags(extra)}
@@ -154,9 +110,6 @@ def put_second(prompt: str, extra: str, *, move: bool = False) -> str:
 def fit_prompt(
     prompt: str, template: str, count_tokens: Callable[[str], int], limit: int = CLIP_MAX_TOKENS
 ) -> str:
-    """Срезать хвостовые теги, пока ``template`` с подставленным промптом не
-    влезет в ``limit`` токенов. Первый тег (главный объект) не срезается
-    никогда."""
     template = template.strip() or "{prompt}"
     tags = split_tags(prompt)
 
@@ -172,9 +125,7 @@ def fit_prompt(
 
 
 def _parse(content: str) -> tuple[str, str]:
-    data = json.loads(content)
-    if not isinstance(data, dict):
-        raise ValueError("ответ не объект")
+    data = ollama.parse_json_object(content)
     prompt = data.get("prompt")
     negative = data.get("negative") or ""
     if not isinstance(prompt, str) or not prompt.strip():
@@ -185,8 +136,6 @@ def _parse(content: str) -> tuple[str, str]:
 
 
 async def compose(description: str, cfg: LlmConfig, think: Any = None) -> tuple[str, str]:
-    """Описание → (prompt_en, negative_en). При любой ошибке модели — описание
-    как есть: картинка важнее идеального промпта."""
     try:
         result = await ollama.chat(
             cfg,

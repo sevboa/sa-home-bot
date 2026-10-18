@@ -1,25 +1,3 @@
-"""Генерация картинок по просьбе собеседника /ai (Этап 48).
-
-Намеренно на стороне службы llm и на CPU — та же причина, что у llm/stt.py и
-llm/tts.py: VRAM Tesla V100 почти целиком занята gemma, вторая модель её бы
-выгрузила. Xeon E5-2678 v3 (12 ядер/24 потока, AVX2) вытягивает SD1.5 за
-секунды благодаря LCM-LoRA — 4 шага вместо 25-50.
-
-Отдельный процесс-генератор, а не Ollama: у Ollama на mycraft одна общая
-очередь, долгая CPU-задача в ней стопорила бы живой чат (живая находка
-Этапа 41, graph_memory).
-
-SD1.5 рисует только в родном 512×512 — меньшие размеры (латент 1/8) дают
-кашу. Поэтому генерация всегда 512², а уменьшение до ``imagegen_size`` и
-необязательное квантование палитры — отдельная постобработка
-(``shrink_to_png``), которая от модели не зависит и тестируется без неё.
-
-``diffusers``/``torch`` — не основные зависимости пакета (экстра
-``imagegen``, см. pyproject.toml), поэтому импорт ленивый, внутри
-``_load_pipeline_sync``: модуль (и служба llm целиком) импортируется и на
-нодах без этой экстры.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -42,18 +20,9 @@ log = logging.getLogger(__name__)
 
 _NATIVE_PX = 512
 
-# Этап 49, отладочный /draw: генерация по образцу. Константы, а не конфиг —
-# пока подбираем; после выбора переедут в LlmConfig. Замер 2026-09-29
-# (IMPLEMENTATION_PLAN, 49.0): variant (img2img) рабочий на strength
-# 0.5-0.65; для сцены с образцом годится только light-адаптер, scale 0.3-0.5
-# (полный топит сцену в образце).
 MODES = ("free", "item", "variant", "scene")
 DEFAULT_STRENGTH = 0.55
 DEFAULT_IP_SCALE = 0.4
-# Этап 49.3.4: черновик turbo — x0-предсказание после 1-го шага того же
-# прогона, декодированное крошечным VAE (стенд 2026-10-01: DINO к финалу
-# 0.92 за ~41% времени). Не прошёл проверку — прогон прерывается до шага 2
-# и полного VAE.
 _TAESDXL_REPO = "madebyollin/taesdxl"
 _IP_REPO = "h94/IP-Adapter"
 _IP_WEIGHT = "ip-adapter_sd15_light.bin"
@@ -61,12 +30,6 @@ _IP_WEIGHT = "ip-adapter_sd15_light.bin"
 
 @dataclass(frozen=True)
 class ModelSpec:
-    """Модель для ``/draw model=``. ``kind``: ``sd15`` — SD1.5-чекпоинт,
-    ускоряется общей LCM-LoRA и умеет IP-Adapter; ``sdxl-turbo`` — свой
-    дистиллят на 1-4 шага, без LCM и без IP-Adapter. ``steps``/``guidance``
-    — умолчания модели вместо конфиговых (None — из конфига). ``file`` —
-    чекпоинт одним файлом в репо ``repo`` (не в формате diffusers)."""
-
     repo: str
     variant: str | None
     kind: str
@@ -75,20 +38,13 @@ class ModelSpec:
     file: str = ""
 
 
-# Этап 49: подбор модели под предметы (dreamshaper хорош в окружении, но
-# технику и стекло рисует плохо). Короткие имена — для /draw; ключ по
-# умолчанию (None) — imagegen_model из конфига, т.е. эталон C.
 MODELS: dict[str, ModelSpec] = {
     "dream": ModelSpec("Lykon/dreamshaper-8", "fp16", "sd15"),
     "rv": ModelSpec("SG161222/Realistic_Vision_V5.1_noVAE", None, "sd15"),
     "epic": ModelSpec("emilianJR/epiCRealism", None, "sd15"),
-    # Turbo обучен без CFG: guidance ≤1 — CFG выключен, негатив не работает.
     "turbo": ModelSpec("stabilityai/sdxl-turbo", "fp16", "sdxl-turbo", steps=2, guidance=1.0),
-    # Мрачные SD1.5-чекпоинты (рекомендация владельца 2026-09-30). Зеркала
-    # на HF: с Civitai эти файлы без API-токена не отдаются (401).
     "revanim": ModelSpec("Yntec/RevAnimatedV2Rebirth", "fp16", "sd15"),
     "ghostmix": ModelSpec("digiplay/GhostMix", "fp16", "sd15"),
-    # Для опытов владельца в /draw (2026-10-08): фотореализм, 2.5D, аниме.
     "rv6": ModelSpec("SG161222/Realistic_Vision_V6.0_B1_noVAE", None, "sd15"),
     "cyber": ModelSpec(
         "cyberdelia/CyberRealistic", None, "sd15", file="CyberRealistic_FINAL_FP16.safetensors"
@@ -100,21 +56,12 @@ MODELS: dict[str, ModelSpec] = {
 
 @dataclass(frozen=True)
 class LoraSpec:
-    """Стилевая LoRA с Civitai (``version`` — id версии файла). ``kind`` —
-    к каким моделям подходит: ``sd15`` или ``sdxl`` (SDXL-LoRA идут и на
-    SDXL-Turbo). ``trigger`` — слово, на которое её обучали: дописывается в
-    начало промпта, кроме raw."""
-
     version: int
     kind: str
     trigger: str = ""
-    # Своя LoRA (не с Civitai): путь внутри imagegen_model_dir, ``version``
-    # тогда не используется. Файл в git не лежит — кладётся на ноду руками.
     file: str = ""
 
 
-# Этап 49: древние постройки, боди-хоррор, сплав органики с предметами и
-# зданиями. «World Morph» — перекраивает в свой материал весь кадр.
 LORAS: dict[str, LoraSpec] = {
     "giger": LoraSpec(24810, "sd15", "hnsrdlf style"),
     "gigerworld": LoraSpec(343533, "sd15", "gigerworld"),
@@ -129,8 +76,6 @@ LORAS: dict[str, LoraSpec] = {
     "castlesxl": LoraSpec(1281424, "sdxl"),
     "lovecraftxl": LoraSpec(205756, "sdxl", "hp_lovecraft_style"),
     "biomechxl": LoraSpec(1613047, "sdxl"),
-    # Облик Альфреда (2026-10-05): обучена на dreamshaper-8 по 104 кадрам
-    # Qwen-Image-Edit, стенд — /mnt/data/claude/alfred-bench/qwen на alfred.
     "alfred": LoraSpec(0, "sd15", "alfredbutler", file="loras/alfred-v2.safetensors"),
 }
 DEFAULT_LORA_WEIGHT = 0.8
@@ -138,7 +83,7 @@ _CIVITAI_URL = "https://civitai.com/api/download/models/{version}"
 
 
 class ImagegenError(RuntimeError):
-    """Понятная владельцу причина, почему не нарисовалось (текст — как есть)."""
+    pass
 
 
 def lora_fits(lora: LoraSpec, model: ModelSpec) -> bool:
@@ -146,8 +91,6 @@ def lora_fits(lora: LoraSpec, model: ModelSpec) -> bool:
 
 
 def lora_file(name: str, cfg: LlmConfig) -> Path:
-    """Файл LoRA: своя — из кэша моделей (нет — понятная ошибка), с Civitai —
-    скачивается при первом обращении."""
     spec = LORAS[name]
     if not spec.file:
         return _civitai_file(spec.version, cfg)
@@ -158,8 +101,6 @@ def lora_file(name: str, cfg: LlmConfig) -> Path:
 
 
 def _civitai_file(version: int, cfg: LlmConfig) -> Path:
-    """Скачать файл версии Civitai в кэш моделей (один раз). Синхронно —
-    зовётся из потоков загрузки/генерации."""
     import shutil
     import urllib.error
     import urllib.request
@@ -192,19 +133,10 @@ def _civitai_file(version: int, cfg: LlmConfig) -> Path:
         version, path.stat().st_size / 2**20, time.monotonic() - started,
     )
     return path
-# Сколько НЕ-эталонных моделей держать в RAM сразу (эталон — всегда).
-# SD1.5 в fp32 ~4 ГБ, SDXL ~10 ГБ; на mycraft 62 ГБ, gemma живёт в VRAM.
 _MAX_EXTRA_MODELS = 2
 
 
 class _Loaded:
-    """Резидентный пайплайн и его производные. img2img — те же веса
-    (from_pipe, без второй копии в RAM). IP-Adapter (~+2.5 ГБ) грузится при
-    первой сцене с образцом и держится, пока идут такие сцены: с ним в UNet
-    обычная генерация без образца падает, поэтому перед любой другой
-    генерацией он выгружается. img2img и IP-Adapter — только под
-    _generate_lock."""
-
     def __init__(self, pipe: Any, spec: ModelSpec) -> None:
         self.pipe = pipe
         self.spec = spec
@@ -216,17 +148,11 @@ class _Loaded:
 
 
 def _prompt_kwargs(loaded: _Loaded, prompt: str, negative: str, job: dict) -> dict[str, Any]:
-    """Промпт для пайплайна: строкой или, при ``weighted`` (Этап 49.3,
-    портрет предмета на turbo), эмбеддингами compel — веса «(черта)1.3» и
-    длина без обрезки по 77 токенам (truncate_long_prompts=False). Негатив
-    при весах не нужен: у turbo guidance выключен."""
     if not job.get("weighted"):
         return {"prompt": prompt, "negative_prompt": negative or None}
     import torch
 
     if loaded.compel is None:
-        # compel 2.1: базовый Compel на оба энкодера SDXL (обёрток CompelFor*
-        # ещё нет, а 2.4 требует transformers 5).
         from compel import Compel, ReturnedEmbeddingsType
 
         pipe = loaded.pipe
@@ -243,17 +169,12 @@ def _prompt_kwargs(loaded: _Loaded, prompt: str, negative: str, job: dict) -> di
 
 
 class PreviewRejected(Exception):
-    """Черновик turbo не прошёл проверку — прогон прерван (Этап 49.3.4)."""
+    pass
 
 
 def _preview_sync(
     loaded: _Loaded, prompt: str, negative: str, cfg: LlmConfig, job: dict
 ) -> Image.Image:
-    """turbo с проверкой черновика: обёртка ``scheduler.step`` ловит x0 после
-    шага 1 (в callback_on_step_end его нет), TAESDXL декодирует, ``preview``
-    решает; «нет» — ``pipe._interrupt`` и PreviewRejected, «да» — шаг 2 и
-    полный VAE. Латенты пайплайн отдаёт сырыми (output_type="latent"), чтобы
-    прерванный прогон не платил за VAE."""
     import torch
 
     pipe = loaded.pipe
@@ -306,18 +227,12 @@ def _preview_sync(
     return pipe.image_processor.postprocess(image, output_type="pil")[0]
 
 
-# Пайплайны резидентны в RAM с первого запроса до конца жизни процесса —
-# как XTTS в llm/tts.py. Ключ — repo. Лок генерации отдельно от лока
-# загрузки: две генерации одновременно на одном CPU только мешали бы друг
-# другу.
 _pipelines: dict[str, _Loaded] = {}
 _load_lock = asyncio.Lock()
 _generate_lock = asyncio.Lock()
 
 
 def resolve_model(name: str | None, cfg: LlmConfig) -> tuple[str, ModelSpec]:
-    """Короткое имя → (имя для подписи, спецификация). None — модель из
-    конфига (эталон); неизвестное имя — ValueError."""
     if name is None:
         for key, spec in MODELS.items():
             if spec.repo == cfg.imagegen_model:
@@ -336,10 +251,6 @@ def _load_pipeline_sync(spec: ModelSpec, cfg: LlmConfig) -> Any:
     cfg.imagegen_model_dir.mkdir(parents=True, exist_ok=True)
     log.info("imagegen: загрузка %s (%s, CPU)...", spec.repo, spec.kind)
     started = time.monotonic()
-    # variant="fp16" — вдвое меньше скачивать; на CPU считаем в fp32
-    # (half на CPU медленнее и местами не поддержан), веса апкастятся при
-    # загрузке. safety_checker выключен: право generate_image@llm выдаётся
-    # владельцем вручную, а сам чекер — ещё ~1 ГБ и лишний проход.
     common = {
         "variant": spec.variant,
         "torch_dtype": torch.float32,
@@ -367,8 +278,6 @@ def _load_pipeline_sync(spec: ModelSpec, cfg: LlmConfig) -> Any:
         pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
         pipe.load_lora_weights(cfg.imagegen_lcm_lora, cache_dir=str(cfg.imagegen_model_dir))
         pipe.fuse_lora()
-        # LCM остаётся вшитым в веса, а слой адаптера снимаем — иначе
-        # стилевые LoRA через set_adapters «распаивали» бы LCM обратно.
         pipe.unload_lora_weights()
     pipe.set_progress_bar_config(disable=True)
     log.info("imagegen: %s загружен за %.1fс", spec.repo, time.monotonic() - started)
@@ -385,8 +294,6 @@ async def _get_pipeline(spec: ModelSpec, cfg: LlmConfig) -> _Loaded:
             pipe = await asyncio.to_thread(_load_pipeline_sync, spec, cfg)
             loaded = _pipelines[spec.repo] = _Loaded(pipe, spec)
             extra = [repo for repo in _pipelines if repo not in (cfg.imagegen_model, spec.repo)]
-            # dict хранит порядок загрузки — выселяем самые старые. Идущая
-            # генерация держит свою ссылку, память освободится после неё.
             for repo in extra[: max(0, len(extra) - _MAX_EXTRA_MODELS)]:
                 del _pipelines[repo]
                 log.info("imagegen: %s выгружен из RAM", repo)
@@ -395,13 +302,6 @@ async def _get_pipeline(spec: ModelSpec, cfg: LlmConfig) -> _Loaded:
 
 
 def shrink_to_png(image: Image.Image, size: int, colors: int) -> tuple[bytes, int, int]:
-    """512² → ``size``×``size`` (с сохранением пропорций), опционально
-    ``colors`` цветов палитры, → PNG. Возвращает (png, ширина, высота).
-
-    Уменьшение — BOX (усреднение), а не nearest: из 512 в 64-128 nearest
-    выдёргивает случайные пиксели и даёт шум, усреднение — чистые пятна.
-    Квантование без дизеринга: при крупных пикселях дизер выглядит как грязь.
-    """
     image = image.convert("RGB")
     if max(image.size) > size:
         scale = size / max(image.size)
@@ -415,11 +315,6 @@ def shrink_to_png(image: Image.Image, size: int, colors: int) -> tuple[bytes, in
 
 
 def apply_style(prompt: str, negative: str, cfg: LlmConfig) -> tuple[str, str]:
-    """Собрать промпт по шаблону из конфига (``imagegen_prompt_template``,
-    ``{prompt}`` — суть от модели-персонажа). Слово-триггер стилевой модели
-    в шаблоне стоит первым: CLIP сильнее всего слушает начало и режет всё
-    после 77 токенов. Шаблон без ``{prompt}`` — суть дописывается в конец,
-    чтобы опечатка в конфиге не превращала все картинки в одну и ту же."""
     template = cfg.imagegen_prompt_template.strip() or "{prompt}"
     if "{prompt}" in template:
         prompt = template.replace("{prompt}", prompt)
@@ -432,8 +327,6 @@ def apply_style(prompt: str, negative: str, cfg: LlmConfig) -> tuple[str, str]:
 
 
 def _fit_ref(ref: Image.Image) -> Image.Image:
-    """Образец → 512² RGB. Маленькие (наши 64px из БД) растягиваются гладко:
-    img2img и IP-Adapter ждут «обычную» картинку, а не лесенку пикселей."""
     from PIL import ImageOps
 
     return ImageOps.fit(ref.convert("RGB"), (_NATIVE_PX, _NATIVE_PX), Image.Resampling.LANCZOS)
@@ -467,8 +360,6 @@ def _generate_sync(
         loaded.ip_loaded = False
     common = {
         "negative_prompt": negative or None,
-        # LCM рассчитан на 1.0 (guidance выключен); чуть выше — послушнее
-        # к промпту, но шаг вдвое дороже (см. LlmConfig.imagegen_guidance).
         "guidance_scale": job["guidance"],
         "generator": job.get("generator"),
     }
@@ -526,28 +417,6 @@ async def generate_image(
     preview: Callable[[Image.Image], bool] | None = None,
     weighted: bool = False,
 ) -> dict[str, Any]:
-    """Сгенерировать картинку. Результат: ``png`` (байты), ``width``,
-    ``height``, ``seconds`` (время самой генерации, без ожидания лока),
-    ``prompt`` (суть, как она ушла в модель — после подгонки под CLIP),
-    ``full_prompt``/``full_negative`` (с шаблоном стиля), ``tokens``,
-    ``seed``, ``steps``, ``colors``, ``model``, ``loras``, ``original`` —
-    сам 512²-кадр до уменьшения (PIL, для сверки снимка, Этап 49.2.1).
-
-    Без ключевых аргументов — эталон C (Этап 48). ``ref`` + ``ip_scale`` —
-    сцена с образцом (IP-Adapter), ``ref`` без ``ip_scale`` — вариант
-    образца (img2img, ``strength``). ``style=False`` — без стилевого
-    шаблона, ``fit=False`` — промпт не подрезается под 77 токенов CLIP.
-    ``size``/``colors`` — итоговый размер и палитра вместо конфиговых
-    (рисуется всё равно 512², это только уменьшение после). ``model`` —
-    короткое имя из ``MODELS`` вместо модели из конфига. ``loras`` —
-    [(имя из ``LORAS``, вес)]; их триггеры дописываются в начало промпта,
-    кроме ``fit=False`` (raw — ровно то, что написано).
-
-    ``preview`` (Этап 49.3.4, только turbo без образца и LoRA) — проверка
-    черновика после 1-го шага, зовётся в потоке генерации; False — прогон
-    прерывается, ``PreviewRejected``. ``weighted`` — промпт с весами compel
-    «(слова)1.3» без обрезки по 77 токенам (тоже только turbo без образца
-    и LoRA; ``fit`` при этом не нужен)."""
     model, spec = resolve_model(model, cfg)
     if (preview is not None or weighted) and (
         spec.kind != "sdxl-turbo" or ref is not None or loras
@@ -572,8 +441,6 @@ async def generate_image(
         return len(pipe.tokenizer(text).input_ids) - 2
 
     template = cfg.imagegen_prompt_template if style else "{prompt}"
-    # Суть + стилевой шаблон должны влезть в 77 токенов CLIP, иначе он молча
-    # отрежет хвост — а там как раз стиль (см. llm/image_prompt.py).
     if fit:
         prompt = image_prompt.fit_prompt(prompt, template, count_tokens)
     subject = prompt
@@ -586,8 +453,6 @@ async def generate_image(
         ref = _fit_ref(ref)
     if ref is not None and ip_scale is None:
         strength = strength or DEFAULT_STRENGTH
-        # LCM в img2img делает int(steps*strength) шагов — держим столько же
-        # реальных, сколько без образца.
         steps = max(steps, round(steps / strength))
     import torch
 

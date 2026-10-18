@@ -1,12 +1,3 @@
-"""Обработка фото для мультимодального /ai.
-
-Намеренно на стороне службы llm (см. ``LlmConfig.photos_dir``), не бота:
-alfred присылает сырые байты как есть (``raw_image`` в llm/service.py), а
-эта нода (сейчас mycraft — сильнее CPU, уже держит Ollama/Tesla V100) сама
-делает Pillow-ресайз и хранит результат у себя же. Тулу look_at_photo
-(bot/tools.py) потом не нужно ничего пересылать заново — файл уже на месте.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -20,14 +11,28 @@ from sa_home_bot.config import LlmConfig
 
 log = logging.getLogger(__name__)
 
-# Деградация качества, если 250 КБ (запас от MAX_MESSAGE_BYTES=1МиБ, см.
-# proto/messages.py и прецедент vpn/service.py::APK_CHUNK_BYTES) не удаётся
-# уложить с первого раза — редкий случай очень шумного/сложного фото.
 _MAX_OUTPUT_BYTES = 250 * 1024
 _QUALITY_STEPS = (80, 65, 50)
 _SWEEP_MIN_INTERVAL_S = 24 * 3600.0
 
 _last_sweep_at = 0.0
+
+
+JPEG_QUALITY = 90
+
+
+def encode_b64(data: bytes) -> str:
+    return base64.b64encode(data).decode()
+
+
+def jpeg_bytes(image: Image.Image, quality: int = JPEG_QUALITY) -> bytes:
+    buf = io.BytesIO()
+    image.convert("RGB").save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
+
+
+def jpeg_b64(image: Image.Image) -> str:
+    return encode_b64(jpeg_bytes(image))
 
 
 def _resized_jpeg(raw: bytes, cfg: LlmConfig) -> bytes:
@@ -42,28 +47,17 @@ def _resized_jpeg(raw: bytes, cfg: LlmConfig) -> bytes:
 
 
 def prepare(raw: bytes, cfg: LlmConfig) -> str:
-    """Как ``resize_and_store``, но без сохранения: base64 для ``images``.
-    Своя картинка Альфреда (look_at_photo с raw_image) — её байты и так в
-    базе бота. CPU-bound — через ``asyncio.to_thread``."""
-    return base64.b64encode(_resized_jpeg(raw, cfg)).decode()
+    return encode_b64(_resized_jpeg(raw, cfg))
 
 
 def resize_and_store(raw: bytes, photo_key: str, cfg: LlmConfig) -> str:
-    """EXIF-transpose + ресайз до ``cfg.photo_max_edge_px`` + JPEG-сжатие с
-    деградацией качества, сохранить в ``cfg.photos_dir/{photo_key}.jpg``,
-    вернуть base64 итогового файла (готов для ``images`` в сообщении Ollama).
-
-    CPU-bound — вызывать через ``asyncio.to_thread`` (как ``llm/ollama.py``
-    делает для своего urllib-клиента), чтобы не блокировать событийный цикл
-    службы на время генерации других чатов.
-    """
     encoded = _resized_jpeg(raw, cfg)
 
     cfg.photos_dir.mkdir(parents=True, exist_ok=True)
     path = cfg.photos_dir / f"{photo_key}.jpg"
     path.write_bytes(encoded)
     log.info("vision: сохранено фото %s (%d байт)", photo_key, len(encoded))
-    return base64.b64encode(encoded).decode()
+    return encode_b64(encoded)
 
 
 def _encode_with_degradation(img: Image.Image, start_quality: int) -> bytes:
@@ -75,24 +69,19 @@ def _encode_with_degradation(img: Image.Image, start_quality: int) -> bytes:
         encoded = buf.getvalue()
         if len(encoded) <= _MAX_OUTPUT_BYTES:
             return encoded
-    return encoded  # не уложились даже на самом низком качестве — отдаём как есть
+    return encoded
 
 
 def load_stored(photo_key: str, cfg: LlmConfig) -> str | None:
-    """Прочитать уже сохранённый файл (для ACTION_LOOK_AT_PHOTO) — без
-    повторного ресайза, файл уже в нужном виде. None — файла нет (устарел,
-    удалён TTL-уборкой, либо ключ невалиден)."""
     path = cfg.photos_dir / f"{photo_key}.jpg"
     try:
         raw = path.read_bytes()
     except OSError:
         return None
-    return base64.b64encode(raw).decode()
+    return encode_b64(raw)
 
 
 def cleanup_old_photos(cfg: LlmConfig) -> int:
-    """Удалить файлы старше ``cfg.photo_ttl_days`` (по mtime). Возвращает
-    число удалённых файлов. Синхронная — вызывать через asyncio.to_thread."""
     if not cfg.photos_dir.is_dir():
         return 0
     cutoff = time.time() - cfg.photo_ttl_days * 86400
@@ -110,11 +99,6 @@ def cleanup_old_photos(cfg: LlmConfig) -> int:
 
 
 def maybe_sweep_sync(cfg: LlmConfig) -> None:
-    """Ленивая версия ``cleanup_old_photos`` — не чаще раза в сутки за
-    время жизни процесса. Вызывается из run_command после успешного
-    resize_and_store; у службы llm нет своего периодического планировщика
-    (в отличие от monitor/tasks), заводить его ради редкой уборки — оверкилл
-    при типичном свободном месте на диске."""
     global _last_sweep_at
     now = time.time()
     if now - _last_sweep_at < _SWEEP_MIN_INTERVAL_S:
