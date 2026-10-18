@@ -29,11 +29,13 @@ class FakeNodeLink:
         self._routes = dict(routes or {})
         self._wake_reveals = wake_reveals or {}
         self.commands: list[tuple[str, dict, str | None]] = []
+        self.requests: list[str] = []
 
     async def get_state(self, dst=None):
         if dst is None:
             return self._own
         key = f"{dst.node}:{dst.service}"
+        self.requests.append(key)
         if key in self._routes:
             return self._routes[key]
         raise ServiceUnavailableError("нет связи")
@@ -189,6 +191,7 @@ async def test_wait_for_service_returns_true_immediately_when_reachable():
         await wake_core.wait_for_service(link, "winpc", "llm", timeout_s=5.0, interval_s=0.01)
         is True
     )
+    assert link.requests == ["winpc:llm"]
 
 
 async def test_wait_for_service_polls_until_available():
