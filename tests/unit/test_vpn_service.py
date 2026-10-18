@@ -264,18 +264,18 @@ async def test_sampler_treats_negative_delta_as_reset(env):
 
 
 async def test_sampler_month_rollover_keeps_separate_history(env, monkeypatch):
-    import sa_home_bot.vpn.service as svc_module
+    import sa_home_bot.vpn.service_common as svc_module
 
     svc, backend, _events = env
     await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "device_label": "тел"})
     pubkey = next(iter(backend.peers))
 
     backend.set_traffic(pubkey, rx=1000, tx=0)
-    monkeypatch.setattr(svc_module, "_month_key", lambda when: "2026-01")
+    monkeypatch.setattr(svc_module, "month_key", lambda when: "2026-01")
     await svc.sample_once()
 
     backend.set_traffic(pubkey, rx=1500, tx=0)
-    monkeypatch.setattr(svc_module, "_month_key", lambda when: "2026-02")
+    monkeypatch.setattr(svc_module, "month_key", lambda when: "2026-02")
     await svc.sample_once()
 
     cur = await svc._db.conn.execute("SELECT month, used_bytes FROM vpn_peer_usage ORDER BY month")
