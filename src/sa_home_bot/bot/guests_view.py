@@ -1,21 +1,3 @@
-"""Иерархия /guests (AUTHORIZATION.md §10) — «телефонное меню» в одном
-сообщении: список гостей → карточка гостя → права → добавление права.
-
-Решение пользователя 2026-08-04: вместо плоских карточек с новыми
-сообщениями на каждый шаг — список с пагинацией, кнопки открывают вложенные
-экраны РЕДАКТИРОВАНИЕМ того же сообщения (``edit_text``), «Назад» ведёт на
-уровень выше. Права гостя (§3.2/§3.3) теперь можно листать, отключать
-по одному и добавлять из каталога (bot/guest_rights.py) без перезапуска —
-это сняло инвариант АВТОРИЗАЦИИ §8.11 в его прежней редакции («права
-командой не выдаются»): гостевые подписки и так уже мутабельны в рантайме
-(revoke_guest), точечная правка — тот же приём.
-
-Модуль только рендерит (текст + клавиатура) из уже готовых данных; сетевые
-вызовы (VPN usage) и запись состояния — в bot/handlers/invites.py. Права
-проверяет CallbackAuthorizationMiddleware по общей записи в
-commands._ALL_CALLBACK_ACTIONS (право GUESTS = `invite`, как и раньше).
-"""
-
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -26,36 +8,21 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sa_home_bot.bot import commands, guest_rights
 from sa_home_bot.bot.invites import format_code
-from sa_home_bot.bot.pagination import clamp_offset, nav_row  # noqa: F401 — реэкспорт
+from sa_home_bot.bot.pagination import clamp_offset, nav_row  # noqa: F401
 from sa_home_bot.subscriptions.models import Subscription
 
-# Гостей и прав на странице немного (домашний контур, не десятки людей) —
-# 5/6 в ряд достаточно, чтобы страница не растягивалась на экран без надобности.
-# Гостей — 10: список уже перевалил за десяток (живой рост 2026-08-06),
-# при 5 на страницу пришлось бы листать втрое.
 GUEST_PAGE_SIZE = 10
 CODE_PAGE_SIZE = 5
 PERM_PAGE_SIZE = 6
 
-_MAX_NAME_LEN = 40  # с запасом под эмодзи-префикс кнопки, лимит Telegram куда шире
+_MAX_NAME_LEN = 40
 
 
 def format_local_time(iso: str) -> str:
-    """UTC-метка из базы → местное время (то же соглашение, что везде в боте).
-
-    Мусор (не ISO-строка) не роняет экран — показывается как есть.
-    """
     try:
         return datetime.fromisoformat(iso).astimezone().strftime("%Y-%m-%d %H:%M")
     except ValueError:
         return iso
-
-
-def _cb(code: str, *parts: object) -> str:
-    return ":".join([commands.CALLBACK_PREFIX, code, *(str(p) for p in parts)])
-
-
-# --- список гостей ------------------------------------------------------
 
 
 def build_list_view(
@@ -74,27 +41,28 @@ def build_list_view(
         [
             InlineKeyboardButton(
                 text=f"👤 {guest.name}"[:_MAX_NAME_LEN],
-                callback_data=_cb(commands.GUEST_CARD_CODE, guest.chat_id),
+                callback_data=commands.panel_callback(commands.GUEST_CARD_CODE, guest.chat_id),
             )
         ]
         for guest in page
     ]
     nav = nav_row(
-        offset, GUEST_PAGE_SIZE, len(guests), lambda o: _cb(commands.GUESTS_LIST_CODE, o)
+        offset,
+        GUEST_PAGE_SIZE,
+        len(guests),
+        lambda o: commands.panel_callback(commands.GUESTS_LIST_CODE, o),
     )
     if nav:
         buttons.append(nav)
     buttons.append(
         [
             InlineKeyboardButton(
-                text="🔑 Открытые коды", callback_data=_cb(commands.OPEN_CODES_LIST_CODE, 0)
+                text="🔑 Открытые коды",
+                callback_data=commands.panel_callback(commands.OPEN_CODES_LIST_CODE, 0),
             )
         ]
     )
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-# --- открытые коды --------------------------------------------------------
 
 
 def build_codes_view(open_codes: Sequence[dict], offset: int) -> tuple[str, InlineKeyboardMarkup]:
@@ -104,34 +72,34 @@ def build_codes_view(open_codes: Sequence[dict], offset: int) -> tuple[str, Inli
     page = open_codes[offset : offset + CODE_PAGE_SIZE]
     for row in page:
         lines.append(
-            f"• <code>{format_code(row['code'])}</code> — до "
-            f"{format_local_time(row['expires_at'])}"
+            f"• <code>{format_code(row['code'])}</code> — до {format_local_time(row['expires_at'])}"
         )
     buttons = [
         [
             InlineKeyboardButton(
                 text=f"🔒 Отозвать {format_code(row['code'])}",
-                callback_data=_cb(commands.CODE_REVOKE_CODE, row["code"]),
+                callback_data=commands.panel_callback(commands.CODE_REVOKE_CODE, row["code"]),
             )
         ]
         for row in page
     ]
     nav = nav_row(
-        offset, CODE_PAGE_SIZE, len(open_codes), lambda o: _cb(commands.OPEN_CODES_LIST_CODE, o)
+        offset,
+        CODE_PAGE_SIZE,
+        len(open_codes),
+        lambda o: commands.panel_callback(commands.OPEN_CODES_LIST_CODE, o),
     )
     if nav:
         buttons.append(nav)
     buttons.append(
         [
             InlineKeyboardButton(
-                text="⬅️ К списку гостей", callback_data=_cb(commands.GUESTS_LIST_CODE, 0)
+                text="⬅️ К списку гостей",
+                callback_data=commands.panel_callback(commands.GUESTS_LIST_CODE, 0),
             )
         ]
     )
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-# --- карточка гостя --------------------------------------------------------
 
 
 def build_card_view(sub: Subscription) -> tuple[str, InlineKeyboardMarkup]:
@@ -145,22 +113,28 @@ def build_card_view(sub: Subscription) -> tuple[str, InlineKeyboardMarkup]:
         [
             InlineKeyboardButton(
                 text=f"🔐 Права ({len(sub.allowed_commands)})",
-                callback_data=_cb(commands.GUEST_PERMS_CODE, sub.chat_id, 0),
+                callback_data=commands.panel_callback(commands.GUEST_PERMS_CODE, sub.chat_id, 0),
             )
         ],
         [
             InlineKeyboardButton(
                 text="📊 Статистика VPN",
-                callback_data=_cb(commands.GUEST_STATS_CODE, sub.chat_id),
+                callback_data=commands.panel_callback(commands.GUEST_STATS_CODE, sub.chat_id),
             )
         ],
         [
             InlineKeyboardButton(
                 text="🚪 Выставить",
-                callback_data=_cb(commands.GUEST_KICK_CONFIRM_CODE, sub.chat_id),
+                callback_data=commands.panel_callback(
+                    commands.GUEST_KICK_CONFIRM_CODE, sub.chat_id
+                ),
             )
         ],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=_cb(commands.GUESTS_LIST_CODE, 0))],
+        [
+            InlineKeyboardButton(
+                text="⬅️ Назад", callback_data=commands.panel_callback(commands.GUESTS_LIST_CODE, 0)
+            )
+        ],
     ]
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -173,12 +147,14 @@ def build_kick_confirm_view(sub: Subscription) -> tuple[str, InlineKeyboardMarku
     buttons = [
         [
             InlineKeyboardButton(
-                text="✅ Да, выставить", callback_data=_cb(commands.GUEST_REVOKE_CODE, sub.chat_id)
+                text="✅ Да, выставить",
+                callback_data=commands.panel_callback(commands.GUEST_REVOKE_CODE, sub.chat_id),
             )
         ],
         [
             InlineKeyboardButton(
-                text="⬅️ Отмена", callback_data=_cb(commands.GUEST_CARD_CODE, sub.chat_id)
+                text="⬅️ Отмена",
+                callback_data=commands.panel_callback(commands.GUEST_CARD_CODE, sub.chat_id),
             )
         ],
     ]
@@ -188,25 +164,19 @@ def build_kick_confirm_view(sub: Subscription) -> tuple[str, InlineKeyboardMarku
 def build_back_to_card_view(
     sub_name: str, chat_id: int, body: str
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """Общий каркас «текст + кнопка назад к карточке» (для VPN-статистики)."""
     text = f"📊 <b>{escape(sub_name)}</b>\n\n{body}"
     buttons = [
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=_cb(commands.GUEST_CARD_CODE, chat_id))]
+        [
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=commands.panel_callback(commands.GUEST_CARD_CODE, chat_id),
+            )
+        ]
     ]
     return text, InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-# --- права гостя -------------------------------------------------------
-
-
 def _granted_entries(sub: Subscription) -> list[tuple[str, str, str]]:
-    """Что выдано гостю, строками экрана: (подпись, код снятия, аргумент).
-
-    Права одной службы схлопываются в одну строку-группу (guest_rights.py) —
-    иначе VPN занимает семь строк из шести на странице. Частично выданная
-    группа показывает дробь: владелец видит, что комплект неполный, но снимает
-    его всё равно целиком.
-    """
     entries: list[tuple[str, str, str]] = []
     grouped: set[str] = set()
     for group in guest_rights.GUEST_GROUPS:
@@ -223,8 +193,6 @@ def _granted_entries(sub: Subscription) -> list[tuple[str, str, str]]:
 
 
 def granted_rows(sub: Subscription) -> int:
-    """Сколько строк на экране прав — по ним считается пагинация, а не по
-    числу самих прав: группа занимает одну строку на всю службу."""
     return len(_granted_entries(sub))
 
 
@@ -240,7 +208,7 @@ def build_perms_view(sub: Subscription, offset: int) -> tuple[str, InlineKeyboar
         [
             InlineKeyboardButton(
                 text=f"➖ {text}"[:_MAX_NAME_LEN],
-                callback_data=_cb(code, sub.chat_id, offset, arg),
+                callback_data=commands.panel_callback(code, sub.chat_id, offset, arg),
             )
         ]
         for text, code, arg in page
@@ -249,7 +217,7 @@ def build_perms_view(sub: Subscription, offset: int) -> tuple[str, InlineKeyboar
         offset,
         PERM_PAGE_SIZE,
         len(entries),
-        lambda o: _cb(commands.GUEST_PERMS_CODE, sub.chat_id, o),
+        lambda o: commands.panel_callback(commands.GUEST_PERMS_CODE, sub.chat_id, o),
     )
     if nav:
         buttons.append(nav)
@@ -257,14 +225,17 @@ def build_perms_view(sub: Subscription, offset: int) -> tuple[str, InlineKeyboar
         [
             InlineKeyboardButton(
                 text="➕ Добавить право",
-                callback_data=_cb(commands.GUEST_PERM_ADD_LIST_CODE, sub.chat_id, 0),
+                callback_data=commands.panel_callback(
+                    commands.GUEST_PERM_ADD_LIST_CODE, sub.chat_id, 0
+                ),
             )
         ]
     )
     buttons.append(
         [
             InlineKeyboardButton(
-                text="⬅️ Назад", callback_data=_cb(commands.GUEST_CARD_CODE, sub.chat_id)
+                text="⬅️ Назад",
+                callback_data=commands.panel_callback(commands.GUEST_CARD_CODE, sub.chat_id),
             )
         ]
     )
@@ -272,11 +243,6 @@ def build_perms_view(sub: Subscription, offset: int) -> tuple[str, InlineKeyboar
 
 
 def _addable_entries(sub: Subscription) -> list[tuple[str, str, str, str]]:
-    """Что ещё можно выдать: (подпись, код выдачи, аргумент, подсказка).
-
-    Группа предлагается, пока выдана не полностью — дожать неполный комплект
-    той же кнопкой проще, чем искать недостающие права по одному.
-    """
     entries: list[tuple[str, str, str, str]] = [
         (group.label, commands.GUEST_GROUP_ADD_CODE, group.key, group.note)
         for group in guest_rights.GUEST_GROUPS
@@ -306,7 +272,7 @@ def build_perm_add_view(sub: Subscription, offset: int) -> tuple[str, InlineKeyb
         [
             InlineKeyboardButton(
                 text=f"➕ {text}"[:_MAX_NAME_LEN],
-                callback_data=_cb(code, sub.chat_id, offset, arg),
+                callback_data=commands.panel_callback(code, sub.chat_id, offset, arg),
             )
         ]
         for text, code, arg, _note in page
@@ -315,14 +281,15 @@ def build_perm_add_view(sub: Subscription, offset: int) -> tuple[str, InlineKeyb
         offset,
         PERM_PAGE_SIZE,
         len(addable),
-        lambda o: _cb(commands.GUEST_PERM_ADD_LIST_CODE, sub.chat_id, o),
+        lambda o: commands.panel_callback(commands.GUEST_PERM_ADD_LIST_CODE, sub.chat_id, o),
     )
     if nav:
         buttons.append(nav)
     buttons.append(
         [
             InlineKeyboardButton(
-                text="⬅️ Назад", callback_data=_cb(commands.GUEST_PERMS_CODE, sub.chat_id, 0)
+                text="⬅️ Назад",
+                callback_data=commands.panel_callback(commands.GUEST_PERMS_CODE, sub.chat_id, 0),
             )
         ]
     )

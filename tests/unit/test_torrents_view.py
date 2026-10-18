@@ -1,6 +1,3 @@
-"""Панель /torrents: список закачек (кружки статусов, обрезка имён, пагинация,
-пресеты лимита скорости) и карточка раздачи (bot/torrents_view.py)."""
-
 import pytest
 
 from sa_home_bot.bot.torrents_view import (
@@ -30,32 +27,21 @@ def _torrent(**overrides):
     return base
 
 
-# --- Список -----------------------------------------------------------------
-
-
 def test_list_view_renders_lamp_progress_and_speed():
     result = {"torrents": [_torrent()], "speed_limit_mbps": 0}
     text, kb = build_list_view(result, 0)
     assert "🧲 <b>Закачки</b> (1)" in text
-    # downloading — активная скачка, лампа жёлтая, скорость показана.
-    # Прогресс в строке списка — луной (33-66% → 🌓), не числом; точный
-    # процент остаётся на карточке (см. test_card_view_shows_moon_and_percent).
     assert "🟡" in text and "🌓" in text and "1.0 МБ/с" in text
     assert "Лимит скорости: без ограничения" in text
 
 
 def test_list_view_moon_sits_right_next_to_lamp():
-    """Луна — рядом с лампой статуса (оба про состояние раздачи), не в
-    хвосте строки рядом со скоростью; между ними — пробел (иначе два
-    круглых эмодзи подряд читаются как один значок)."""
     text, _ = build_list_view({"torrents": [_torrent(state="downloading")]}, 0)
     line = next(line for line in text.splitlines() if "🟡" in line)
     assert "🟡 🌓 " in line
 
 
 def test_list_view_line_has_safety_margin_below_reference():
-    """Реальный клиент переносил строки даже в рамках расчётного бюджета —
-    эффективный бюджет должен быть заметно меньше «сырой» ширины примера."""
     long_name = "Marvels.Daredevil.Born.Again.S01.2160p.WEB-DL.DDP5.1.Atmos.HEVC"
     result = {"torrents": [_torrent(name=long_name, state="downloading", dlspeed_bytes_s=0)]}
     text, _ = build_list_view(result, 0)
@@ -64,16 +50,12 @@ def test_list_view_line_has_safety_margin_below_reference():
     assert _text_width(line) < raw_reference * 0.9
 
 
-# --- Кружки статусов ---------------------------------------------------------
-
-
 def test_lamp_downloading_is_yellow():
     text, _ = build_list_view({"torrents": [_torrent(state="downloading")]}, 0)
     assert "🟡" in text
 
 
 def test_lamp_metadata_is_orange_not_yellow():
-    """Получение метаданных magnet-ссылки — не передача данных, ожидание."""
     text, _ = build_list_view({"torrents": [_torrent(state="metaDL")]}, 0)
     assert "🟠" in text and "🟡" not in text
 
@@ -89,8 +71,6 @@ def test_lamp_waiting_is_orange():
 
 
 def test_lamp_stalled_up_is_green_not_orange():
-    """Раздача без активных запросов — не проблема, а штатное сидирование:
-    живая находка пользователя 2026-08-22, раньше читалось как «ждёт»."""
     text, _ = build_list_view({"torrents": [_torrent(state="stalledUP", progress_pct=100)]}, 0)
     assert "🟢" in text and "🟠" not in text
 
@@ -153,9 +133,6 @@ def test_card_speed_shown_when_downloading():
 
 
 def test_list_line_never_exceeds_reference_width_budget():
-    """Пример пользователя: «🔵 Marvels.Daredevil.S01.1080p.L.N.B.J — 100% ·
-    ↓0» задаёт бюджет ширины строки — длинное имя должно ужиматься под него
-    вместе с суффиксом (прогресс + скорость), а не просто под число символов."""
     long_name = "Marvels.Daredevil.Born.Again.S01.2160p.WEB-DL.DDP5.1.Atmos.HEVC"
     result = {"torrents": [_torrent(name=long_name, state="downloading", dlspeed_bytes_s=0)]}
     text, _ = build_list_view(result, 0)
@@ -196,7 +173,7 @@ def test_list_view_paginates():
     text, kb = build_list_view(result, 0)
     assert "T0" in text and f"T{TORRENTS_PAGE_SIZE}" not in text
     codes = [b.callback_data for row in kb.inline_keyboard for b in row]
-    assert "st:t_list:8" in codes  # ➡️
+    assert "st:t_list:8" in codes
 
 
 def test_list_view_marks_active_speed_preset():
@@ -215,13 +192,7 @@ def test_list_view_speed_buttons_carry_offset():
     assert f"st:t_speed:5:{TORRENTS_PAGE_SIZE}" in codes
 
 
-# --- Сортировка: группы статусов, внутри группы — новые сверху --------------
-
-
 def test_list_view_orders_by_status_group():
-    """Решение пользователя 2026-08-22: ошибка/ищет источники → качаются →
-    на паузе (не докачаны) → раздаются → докачаны, в очереди на раздачу →
-    докачаны, раздача выключена."""
     torrents = [
         _torrent(name="Paused100", hash="h1", state="pausedUP", progress_pct=100, added_on=1),
         _torrent(name="QueuedUp", hash="h2", state="queuedUP", progress_pct=100, added_on=1),
@@ -253,9 +224,6 @@ def test_list_view_sorts_newest_first_within_group():
     assert text.index("Newer") < text.index("Older")
 
 
-# --- Карточка -----------------------------------------------------------------
-
-
 def test_card_view_shows_seeds_and_peers():
     text, _ = build_card_view(_torrent(seeds=9, peers=4))
     assert "9 сидов, 4 личей" in text
@@ -264,9 +232,6 @@ def test_card_view_shows_seeds_and_peers():
 def test_card_view_shows_moon_and_exact_percent():
     text, _ = build_card_view(_torrent(progress_pct=42))
     assert "🌓 42%" in text
-
-
-# --- Фазы луны (прогресс в строке списка) ------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -306,9 +271,6 @@ def test_card_view_back_goes_to_list_first_page():
 def test_card_view_unknown_eta_says_so():
     text, _ = build_card_view(_torrent(eta_s=None))
     assert "Осталось: неизвестно" in text
-
-
-# --- Карточка apps/qbittorrent внутри панели ---------------------------------
 
 
 def test_app_view_keeps_original_text():

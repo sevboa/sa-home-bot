@@ -1,11 +1,3 @@
-"""Приём событий монитора: proto-событие → доменная модель → рассылка в чаты.
-
-Подписки, авторизация и рендер остаются в боте: монитор шлёт голые данные,
-здесь они превращаются в Event/SmartChange и уходят через
-TelegramEventDispatcher (reply-цепочка «остыл» → «перегрев» продолжает
-работать — message_id хранятся в БД бота).
-"""
-
 from __future__ import annotations
 
 import logging
@@ -29,8 +21,6 @@ log = logging.getLogger(__name__)
 
 
 def build_event_handler(dispatcher: TelegramEventDispatcher):
-    """Callback для ProtoClient.on_event: разбирает и рассылает события."""
-
     async def handle(env: Envelope) -> None:
         name = env.payload.get("event")
         data = env.payload.get("data", {})

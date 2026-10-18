@@ -1,16 +1,3 @@
-"""Динамические команды-скилы из describe службы apps (/jellyfin, …).
-
-Имена команд не захардкожены: сообщение с командой сверяется с актуальным
-describe (кэш линка). Роутер включается ПОСЛЕДНИМ — все статические команды
-уже разобраны раньше, чужие/неизвестные команды молча игнорируются (как и
-до этого). Права: `<id>@apps` (authorization-middleware реестровых команд
-про них не знает, поэтому проверка здесь).
-
-Приложения из ``apps_view.HIDDEN_MENU_APP_IDS`` (сейчас — qbittorrent)
-голой командой не открываются вовсе — у них своя специализированная панель
-(/torrents), голый вызов игнорируется так же, как и незнакомая команда.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -18,7 +5,7 @@ import logging
 from aiogram import F, Router
 from aiogram.types import Message
 
-from sa_home_bot.bot import apps_view
+from sa_home_bot.bot import apps_view, commands
 from sa_home_bot.bot.middlewares import DENIED_TEXT, extract_command
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.subscriptions.models import Subscription
@@ -38,15 +25,13 @@ async def cmd_app_skill(
     if command is None:
         return
     if command in apps_view.HIDDEN_MENU_APP_IDS:
-        return  # доступно только через свою панель (см. HIDDEN_MENU_APP_IDS)
+        return
     action = next(
         (a for a in await apps_link.actions() if a.id == command), None
     )
     if action is None:
-        return  # не скилл-приложение — игнор, как любую неизвестную команду
-    if subscription is None or not subscription.allows_action(
-        command, apps_view.APPS_SERVICE
-    ):
+        return
+    if not commands.can_run_action(subscription, command, apps_view.APPS_SERVICE):
         log.info("Отказ в скилле /%s для chat_id=%s", command, message.chat.id)
         await message.answer(DENIED_TEXT)
         return

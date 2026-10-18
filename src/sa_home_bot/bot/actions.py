@@ -1,11 +1,3 @@
-"""Выполнение динамических действий служб (кнопки и команды из describe).
-
-Бот не знает семантику действий: берёт ActionSpec из describe службы,
-подставляет значение параметра (если есть) и шлёт command. Дорогие действия
-монитора защищены анти-спам лимитом (scan_limit) с ключом «служба:действие» —
-слот расходуется только если действие реально принято.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -22,7 +14,6 @@ from sa_home_bot.subscriptions.models import Subscription
 
 log = logging.getLogger(__name__)
 
-# Службы, чьи действия ограничены анти-спам лимитом (датчики — дорогие).
 RATE_LIMITED_SERVICES = frozenset({"monitor"})
 
 ALREADY_QUEUED_TEXT = "⏳ Уже в очереди — дождитесь результата."
@@ -47,18 +38,12 @@ async def find_action(
 
 
 def build_args(action: ActionSpec, value: str | None) -> dict:
-    """Значение из кнопки → аргументы команды (первый параметр действия)."""
     if value is None or not action.params:
         return {}
     return {action.params[0].name: value}
 
 
 def render_result(action: ActionSpec, result: dict) -> str:
-    """Универсальный текст об исполнении.
-
-    Соглашение: булевы значения в ответе — «поставлено ли» (dedup-очередь);
-    если все False, действие уже выполняется.
-    """
     flags = [v for v in result.values() if isinstance(v, bool)]
     if flags and not any(flags):
         return ALREADY_QUEUED_TEXT
@@ -73,13 +58,6 @@ async def run_action(
     value: str | None = None,
     node_id: str | None = None,
 ) -> str:
-    """Выполнить действие службы (своей или пира), вернуть текст для чата.
-
-    ``link`` — линк к своей ноде («спроси любого»): адресация службы/ноды —
-    через ``dst`` конверта, включая службы своей ноды (node_id=None).
-    Ключ анти-спам лимита включает node_id — форс-скан пира не расходует
-    слот своей ноды (и наоборот).
-    """
     dst = Address(node=node_id, service=service)
     action = await find_action(link, action_id, dst=dst)
     if action is None:
@@ -104,7 +82,6 @@ async def run_action(
         return f"⚠️ Служба «{link.display_name}» не ответила вовремя — попробуйте позже."
 
     text = render_result(action, result)
-    # Слот лимита расходуем только если действие реально принято.
     if limited and decision is not None and text != ALREADY_QUEUED_TEXT:
         await store.set_action_ticks(key, list(decision.ticks))
     return text
@@ -125,12 +102,6 @@ def build_choice_keyboard(
     value: str,
     node_id: str | None = None,
 ) -> InlineKeyboardMarkup | None:
-    """Кнопки действий, чей первый параметр — choices, содержащий ``value``.
-
-    Общий паттерн карточки «объект среди choices» (служба ноды по имени,
-    приложение apps по id): право — `действие@service`, значение уходит в
-    callback вторым полем. ``node_id`` — та же карточка на пире.
-    """
     if subscription is None:
         return None
     buttons = [

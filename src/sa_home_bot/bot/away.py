@@ -1,28 +1,3 @@
-"""«Альфред в городе» (Этап 51, IMPLEMENTATION_PLAN.md): окно обслуживания mycraft.
-
-На время обслуживания или занятия мощностей сервера (обновления, генерация
-датасета, обучение LoRA) никто не должен звать модель — ни гости, ни
-владелец. Альфред «спустился из замка в город по делам»: входящее копится в
-``ai_turns``, модель не зовётся, гостям уходит заготовленная записка; по
-возвращении он разбирает всё сам (bot/away_return.py).
-
-Состояние — одна запись ``app_state["alfred_away"]`` (JSON, ``AwayState``):
-читается из БД на каждом входящем, поэтому правка из CLI (``sa-home-bot away``,
-src/sa_home_bot/away_cli.py) подхватывается без перезапуска. Таймеров в памяти
-нет — срок и потолок проверяет периодический проход (bot/away_return.py::
-AwayRunner), состояние живёт в БД и переживает рестарт бота.
-
-Фазы: ``away`` — Альфред в городе; ``returning`` — возвращение объявлено
-(``/back``, потолок 24 ч), но очередь ещё не разобрана: гости по-прежнему видят
-записку «вот-вот вернётся», модель всё ещё не зовётся ни для кого, кроме
-разбора очереди. Запись исчезает, когда ``pending`` пуст.
-
-Потолок: возвращение не позже 24 ч от ``started_at``; продления за потолок не
-уводят. По ``until`` режим НЕ снимается — Альфред «задерживается» до ``/back``.
-
-Модуль не импортирует хендлеры на уровне модуля (хендлеры импортируют его).
-"""
-
 from __future__ import annotations
 
 import html
@@ -48,8 +23,6 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 ALFRED_AWAY_KEY = "alfred_away"
-# Очередь сообщений владельцу, которые должен отправить бот: CLI — отдельный
-# процесс и Telegram не знает (изменения от Claude, см. AwayService.queue_notice).
 ALFRED_AWAY_NOTICES_KEY = "alfred_away_notices"
 
 PHASE_AWAY = "away"
@@ -58,25 +31,19 @@ PHASE_RETURNING = "returning"
 SET_BY_ADMIN = "admin"
 SET_BY_CLAUDE = "claude"
 
-# Потолок отъезда от started_at.
 MAX_AWAY = timedelta(hours=24)
-# За сколько до срока напомнить владельцу.
 REMIND_BEFORE = timedelta(minutes=15)
-# Не чаще раза в N минут на чат — записка гостю (после продления — заново).
 NOTE_INTERVAL = timedelta(minutes=30)
-# Сколько раз подряд можно не доставить ответ чату при возвращении, прежде
-# чем снять чат с очереди (владельцу — сообщение).
 MAX_RETURN_ATTEMPTS = 3
 
-# Разбор очереди голосовых при возвращении (bot/away_return.py): лимит на чат.
 MAX_VOICES_PER_CHAT = 5
 MAX_VOICE_SECONDS_PER_CHAT = 10 * 60
 
 KIND_TEXT = "text"
 KIND_PHOTO = "photo"
 KIND_STICKER = "sticker"
-KIND_MEDIA = "media"  # голосовое / кружочек / аудио
-KIND_SUMMON = "summon"  # позвали без содержимого (голый /alfred, упоминание)
+KIND_MEDIA = "media"
+KIND_SUMMON = "summon"
 
 MEDIA_VOICE = "voice"
 MEDIA_VIDEO_NOTE = "video_note"
@@ -86,7 +53,6 @@ _MEDIA_LABELS = {
     MEDIA_VIDEO_NOTE: "кружочек",
     MEDIA_AUDIO: "аудио",
 }
-# Заглушка в ai_turns на месте файла, пока он не распознан.
 MEDIA_STUB_SUFFIX = ", ждёт распознавания]"
 MEDIA_FAILED_TEXT = "[голосовое, не удалось разобрать]"
 MEDIA_SKIPPED_TEXT = "[голосовое, не разбиралось — прислали ещё несколько голосовых]"
@@ -99,8 +65,6 @@ USAGE_TEXT = (
 )
 
 
-# Кнопки напоминания владельцу: «away:ext:<минуты>» и «away:back»
-# (bot/handlers/away.py).
 CALLBACK_PREFIX = "away"
 CB_EXTEND = "ext"
 CB_BACK = "back"
@@ -108,7 +72,6 @@ EXTEND_STEPS_MIN = (30, 60, 120)
 
 
 def reminder_keyboard() -> InlineKeyboardMarkup:
-    """[+30м] [+1ч] [+2ч] [Вернуться сейчас]."""
     labels = {30: "+30м", 60: "+1ч", 120: "+2ч"}
     row = [
         InlineKeyboardButton(
@@ -123,10 +86,8 @@ def reminder_keyboard() -> InlineKeyboardMarkup:
 
 
 class AwayError(Exception):
-    """Понятная человеку причина отказа (текст — прямо в ответ владельцу)."""
+    pass
 
-
-# ---------------------------------------------------------------- разбор срока
 
 _UNITS: dict[str, int] = {}
 for _names, _seconds in (
@@ -143,10 +104,6 @@ _CLOCK_RE = re.compile(r"(\d{1,2})[:.](\d{2})(?!\d)")
 
 
 def parse_duration(text: str) -> tuple[timedelta, str] | None:
-    """Срок с начала строки: ``3ч``, ``1ч30м``, ``90 минут``, ``1.5h``.
-
-    Возвращает (срок, остаток строки) или None — строка не начинается со
-    срока. Число без единицы («3») — не срок: неясно, часы это или минуты."""
     total = 0.0
     pos = 0
     found = False
@@ -166,7 +123,6 @@ def parse_duration(text: str) -> tuple[timedelta, str] | None:
 
 
 def _clock_after(prefix: str, text: str) -> tuple[int, int, str] | None:
-    """«до 23:00 причина» → (23, 0, «причина»), если строка начинается с prefix."""
     lowered = text.lower()
     if not lowered.startswith(prefix):
         return None
@@ -181,12 +137,6 @@ def _clock_after(prefix: str, text: str) -> tuple[int, int, str] | None:
 
 
 def parse_away_args(text: str, now: datetime, tz: tzinfo) -> tuple[datetime, str]:
-    """Аргументы ``/away``/``away set`` → (until в UTC, причина).
-
-    ``3ч``/``1ч30м`` — от ``now``; ``до 23:00`` — ближайшее такое время в
-    часовом поясе ``tz`` (уже прошло — завтра); ``завтра 10:00`` — завтра.
-    Потолок здесь НЕ применяется (см. clamp_until): нужен started_at.
-    Исключение AwayError — срока нет или он непонятен."""
     text = (text or "").strip()
     if not text:
         raise AwayError("Нужен срок. " + USAGE_TEXT)
@@ -217,7 +167,6 @@ def parse_away_args(text: str, now: datetime, tz: tzinfo) -> tuple[datetime, str
 
 
 def parse_extend(text: str) -> timedelta:
-    """``+1ч``/``1ч``/``30м`` → на сколько продлить."""
     parsed = parse_duration((text or "").strip().lstrip("+").strip())
     if parsed is None or parsed[0] <= timedelta(0):
         raise AwayError("Не понял, на сколько продлить. Пример: /away +1ч")
@@ -225,25 +174,19 @@ def parse_extend(text: str) -> timedelta:
 
 
 def clamp_until(until: datetime, started_at: datetime) -> tuple[datetime, bool]:
-    """Срок не позже потолка (started_at + 24 ч). Второе — True, если урезали."""
     ceiling = started_at + MAX_AWAY
     if until > ceiling:
         return ceiling, True
     return until, False
 
 
-# ------------------------------------------------------------------ оформление
-
-
 def format_remaining(until: datetime, now: datetime) -> str:
-    """«через 2 ч 15 мин»; минуты — вверх, меньше минуты — «меньше чем через
-    минуту», срок прошёл — «вот-вот должен вернуться»."""
     seconds = (until - now).total_seconds()
     if seconds <= 0:
         return "вот-вот должен вернуться"
     if seconds < 60:
         return "меньше чем через минуту"
-    minutes = -(-int(seconds) // 60)  # потолок: 2 ч 14 мин 10 с → 2 ч 15 мин
+    minutes = -(-int(seconds) // 60)
     hours, minutes = divmod(minutes, 60)
     parts = []
     if hours:
@@ -254,7 +197,6 @@ def format_remaining(until: datetime, now: datetime) -> str:
 
 
 def _clock(until: datetime, now: datetime, tz: tzinfo) -> str:
-    """«18:00» — или «10:00 завтра», если по часам tz это другой день."""
     local = until.astimezone(tz)
     text = f"{local:%H:%M}"
     if local.date() != now.astimezone(tz).date():
@@ -263,13 +205,10 @@ def _clock(until: datetime, now: datetime, tz: tzinfo) -> str:
 
 
 def castle_clock(until: datetime, now: datetime) -> str:
-    """Время возвращения по «замковым часам» — Europe/Bucharest."""
     return _clock(until, now, ZoneInfo(ALFRED_TIMEZONE))
 
 
 def note_text(state: AwayState, now: datetime) -> str:
-    """Записка гостю — заготовленная фраза в образе, без LLM. Остаток
-    считается в момент отправки."""
     if state.phase == PHASE_RETURNING:
         return "Альфред уже идёт обратно в замок — вот-вот должен вернуться."
     if state.until <= now:
@@ -289,8 +228,6 @@ def _times(count: int) -> str:
 
 
 def status_text(state: AwayState | None, now: datetime, tz: tzinfo) -> str:
-    """Статус владельцу: «в городе до 18:00 (через 2 ч 15 мин), продлевали 1
-    раз, включил: Claude, причина: датасет». Время — в поясе владельца."""
     if state is None:
         return NOT_AWAY_TEXT + " Отправить в город: /away 3ч [причина]"
     waiting = f", ждут ответа чатов: {len(state.pending)}" if state.pending else ""
@@ -305,27 +242,17 @@ def status_text(state: AwayState | None, now: datetime, tz: tzinfo) -> str:
     return "Альфред " + ", ".join(parts) + waiting + "."
 
 
-# ------------------------------------------------------------------ состояние
-
-
 @dataclass
 class AwayState:
-    """Запись ``app_state["alfred_away"]``."""
-
     until: datetime
     started_at: datetime
     set_by: str = SET_BY_ADMIN
     reason: str = ""
     extended: int = 0
-    # chat_id (строкой — ключи JSON) → когда последний раз писали записку
     noted: dict[str, str] = field(default_factory=dict)
-    # chat_id → что нужно для ответа при возвращении (см. AwayService.intercept)
     pending: dict[str, dict[str, Any]] = field(default_factory=dict)
     phase: str = PHASE_AWAY
-    # для какого until уже отправлено напоминание за 15 мин (после продления
-    # until другой — напомним заново)
     reminded_for: str = ""
-    # chat_id → сколько раз подряд не вышло ответить при возвращении
     attempts: dict[str, int] = field(default_factory=dict)
 
     def to_json(self) -> str:
@@ -347,8 +274,6 @@ class AwayState:
 
     @classmethod
     def from_json(cls, raw: str | None) -> AwayState | None:
-        """None — записи нет или она повреждена (тогда Альфред считается дома:
-        испорченное состояние не должно навсегда заглушить бота)."""
         if not raw:
             return None
         try:
@@ -383,7 +308,6 @@ def is_media_stub(content: str) -> bool:
 
 
 def media_of(message: Message) -> tuple[str, Any] | None:
-    """(вид, объект файла) для голосового/кружочка/аудио сообщения."""
     for kind in (MEDIA_VOICE, MEDIA_VIDEO_NOTE, MEDIA_AUDIO):
         obj = getattr(message, kind, None)
         if obj:
@@ -391,20 +315,11 @@ def media_of(message: Message) -> tuple[str, Any] | None:
     return None
 
 
-# --------------------------------------------------------------------- сервис
-
-
 def local_tz() -> tzinfo:
-    """Часовой пояс самого сервера (alfred) — для разбора «до 23:00» из CLI."""
     return datetime.now().astimezone().tzinfo or UTC
 
 
 class AwayService:
-    """Состояние «Альфред в городе»: чтение/правка записи и перехват входящих.
-
-    Без ``notifier``/``book`` (CLI, отдельный процесс) умеет только править
-    запись; перехват и записки нужны боту."""
-
     def __init__(
         self,
         store: Store,
@@ -421,20 +336,13 @@ class AwayService:
 
     @property
     def media_dir(self) -> Path:
-        """Куда качаются голосовые — рядом с БД бота (eMMC alfred), не на /mnt/scratch."""
         return Path(self.settings.database.path).parent / "away-media"
 
-    # --- чтение / правка записи ---
 
     async def load(self) -> AwayState | None:
         return AwayState.from_json(await self.store.get_state(ALFRED_AWAY_KEY))
 
-    async def is_active(self) -> bool:
-        return await self.load() is not None
-
     async def _update(self, mutate: Callable[[AwayState | None], AwayState | None]) -> None:
-        """Атомарная правка записи; ``mutate`` чистая (см. Store.update_state)."""
-
         def fn(raw: str | None) -> str | None:
             new = mutate(AwayState.from_json(raw))
             return None if new is None else new.to_json()
@@ -448,8 +356,6 @@ class AwayService:
         set_by: str = SET_BY_ADMIN,
         reason: str = "",
     ) -> tuple[AwayState, bool]:
-        """Отправить Альфреда в город. Второе — True, если срок урезан потолком.
-        Уже в городе — AwayError (продлевать надо ``extend``)."""
         now = self.now()
         until = until.astimezone(UTC)
         if until <= now:
@@ -472,9 +378,6 @@ class AwayService:
         return stored, clamped
 
     async def extend(self, delta: timedelta) -> AwayState:
-        """Продлить («задерживается»). Отсчёт — от срока, а если он уже прошёл —
-        от «сейчас». Потолок 24 ч не пробивается: уже на нём — AwayError.
-        Записки гостям после продления пишутся заново (noted сбрасывается)."""
         now = self.now()
         outcome: dict[str, Any] = {}
 
@@ -504,8 +407,6 @@ class AwayService:
         return outcome["state"]
 
     async def back(self) -> tuple[AwayState, bool]:
-        """Вернуть Альфреда. Второе — True, если разбирать нечего и режим снят
-        сразу; иначе фаза ``returning`` до конца очереди (bot/away_return.py)."""
         outcome: dict[str, Any] = {}
 
         def mutate(state: AwayState | None) -> AwayState | None:
@@ -527,12 +428,9 @@ class AwayService:
         return outcome["state"], outcome["immediate"]
 
     async def clear(self) -> None:
-        """Снять режим совсем (очередь пуста)."""
         await self._update(lambda state: None)
 
     async def queue_notice(self, text: str) -> None:
-        """Положить сообщение владельцу в очередь (CLI → бот, см. AwayRunner)."""
-
         def fn(raw: str | None) -> str | None:
             items = json.loads(raw) if raw else []
             items.append(text)
@@ -552,7 +450,6 @@ class AwayService:
         await self.store.update_state(ALFRED_AWAY_NOTICES_KEY, fn)
         return list(taken)
 
-    # --- перехват ---
 
     async def intercept(
         self,
@@ -563,17 +460,6 @@ class AwayService:
         dialogue_id: int | None = None,
         continuing: bool = False,
     ) -> bool:
-        """Перехват ИИ-входа. True — Альфред в городе: входящее записано,
-        записка (если пора) отправлена, вызывающий выходит, модель не зовётся.
-        False — Альфред дома, всё идёт как обычно.
-
-        ``kind`` — вид входящего; не передан — определяется по сообщению
-        (файл/фото/стикер/текст). ``text`` — текст обращения без служебной
-        части (``/alfred …`` без команды, упоминание без @имени, подпись).
-        ``dialogue_id`` — тред, в который сообщение пошло бы в обычном режиме;
-        ``continuing`` — это реплай в уже начатый тред. За время отъезда все
-        входящие чата сводятся в один диалог: тот, что открыл первый перехват
-        (в топике — сам топик; вне топика — последний тред чата)."""
         state = await self.load()
         if state is None or message.chat is None:
             return False
@@ -649,12 +535,11 @@ class AwayService:
             if fresh is not None:
                 try:
                     await message.reply(f"<i>{note_text(fresh, now)}</i>")
-                except Exception:  # noqa: BLE001 — записка не должна ронять приём
+                except Exception:  # noqa: BLE001
                     log.warning("away: записка не ушла (chat=%s)", chat_id, exc_info=True)
         return True
 
     async def note_for_click(self) -> str | None:
-        """Текст записки для кнопки интерактива (ответ на нажатие); None — Альфред дома."""
         state = await self.load()
         return None if state is None else note_text(state, self.now())
 
@@ -678,8 +563,7 @@ class AwayService:
     async def _content_for(
         self, message: Message, kind: str, text: str, media: tuple[str, Any] | None
     ) -> str | None:
-        """Что записать в ai_turns вместо хода (None — писать нечего)."""
-        from sa_home_bot.bot.handlers import ai as ai_handler  # noqa: PLC0415 — цикл импортов
+        from sa_home_bot.bot.handlers import ai as ai_handler  # noqa: PLC0415
 
         if kind == KIND_TEXT:
             return text
@@ -704,8 +588,6 @@ class AwayService:
         media: tuple[str, Any] | None,
         now: datetime,
     ) -> bool:
-        """Записать ход в ai_turns; файлы — на диск и в away_media. False —
-        сообщение уже записано (повторная доставка апдейта)."""
         chat_id = message.chat.id
         if await self.store.ai_turn(chat_id, message.message_id) is not None:
             return False
@@ -727,8 +609,6 @@ class AwayService:
     async def _save_media(
         self, message: Message, media: tuple[str, Any], now: datetime
     ) -> None:
-        """Скачать файл сразу (потом его, возможно, уже не достать): путь на
-        диске alfred; не вышло — остаётся file_id как запасной путь."""
         kind, obj = media
         chat_id = message.chat.id
         path: str | None = None
@@ -737,7 +617,7 @@ class AwayService:
             target = self.media_dir / f"{chat_id}_{message.message_id}.{kind}"
             await message.bot.download(obj, destination=target)
             path = str(target)
-        except Exception:  # noqa: BLE001 — запасной путь: file_id
+        except Exception:  # noqa: BLE001
             log.warning(
                 "away: не удалось скачать файл (chat=%s, msg=%s)", chat_id, message.message_id,
                 exc_info=True,
@@ -752,12 +632,8 @@ class AwayService:
             now,
         )
 
-    # --- очередь возвращения (bot/away_return.py) ---
 
     async def finish_chat(self, chat_id: int, handled_message_id: int) -> None:
-        """Снять чат с очереди после доставленного ответа. Пока шёл ответ,
-        в чат могли написать ещё — тогда чат остаётся, будет следующий круг.
-        Очередь опустела в фазе ``returning`` — режим снимается совсем."""
         key = str(chat_id)
 
         def mutate(state: AwayState | None) -> AwayState | None:
@@ -774,7 +650,6 @@ class AwayService:
         await self._update(mutate)
 
     async def record_failure(self, chat_id: int) -> bool:
-        """Не вышло ответить чату. True — попытки кончились, чат снят с очереди."""
         key = str(chat_id)
         dropped = False
 
@@ -796,7 +671,6 @@ class AwayService:
         return dropped
 
     async def mark_phase_returning(self) -> AwayState | None:
-        """Потолок 24 ч — принудительное возвращение (из прохода планировщика)."""
         outcome: dict[str, Any] = {}
 
         def mutate(state: AwayState | None) -> AwayState | None:
@@ -813,8 +687,6 @@ class AwayService:
         return outcome.get("state")
 
     async def mark_reminded(self) -> bool:
-        """Отметить, что напоминание за 15 мин по текущему сроку отправлено.
-        False — уже было (или режима нет): слать не нужно."""
         sent = False
 
         def mutate(state: AwayState | None) -> AwayState | None:

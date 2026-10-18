@@ -1,5 +1,3 @@
-"""Базовые хендлеры: /start, /ping (универсальные)."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -23,28 +21,20 @@ def build_help(
     subscription: Subscription | None,
     app_actions: Sequence[ActionSpec] = (),
 ) -> str:
-    """Скилы роя первого уровня, затем универсальные команды и about."""
     skills = [
         f"/{action.id} — {action.title}: состояние и веб-морда"
-        for action in app_actions
-        # Параметризованные (start/stop/restart) — только кнопки на карточке
-        # конкретного приложения, не голые команды (см. bot/setup.py).
-        if not action.params
-        and action.id not in apps_view.HIDDEN_MENU_APP_IDS
-        and subscription is not None
-        and subscription.allows_action(action.id, apps_view.APPS_SERVICE)
+        for action in apps_view.visible_skill_actions(subscription, app_actions)
     ]
     skills += [
         f"/{cmd.name} — {cmd.description}"
-        for cmd in commands.MENU_CONTROL_COMMANDS
-        if subscription is not None and subscription.allows_command(cmd.right or cmd.name)
+        for cmd in commands.menu_control_commands_for(subscription)
     ]
     lines = ["<b>Доступные команды</b>", ""]
     if skills:
         lines += skills
         lines.append("")
     lines += [f"/{cmd.name} — {cmd.description}" for cmd in commands.MENU_UNIVERSAL_COMMANDS]
-    if subscription is not None and subscription.allows_action("add", "torrents"):
+    if commands.can_run_action(subscription, "add", "torrents"):
         lines += ["", "🧲 Пришлите .torrent-файл или magnet-ссылку — предложу, куда сохранить."]
     lines += ["", ABOUT_LINE]
     return "\n".join(lines)

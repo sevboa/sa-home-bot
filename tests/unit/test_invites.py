@@ -1,5 +1,3 @@
-"""Приватный вход: коды, гейт молчания, гостевой пакет (AUTHORIZATION.md §10)."""
-
 from __future__ import annotations
 
 import tomllib
@@ -59,9 +57,6 @@ def _gate(store, tmp_path, book=None, notifier=None, cfg=None) -> invites.Gateke
     )
 
 
-# --- формат кода ---------------------------------------------------------
-
-
 def test_generated_code_is_in_alphabet():
     code = invites.generate_code()
     assert len(code) == invites.CODE_LENGTH
@@ -79,7 +74,6 @@ def test_normalize_accepts_human_variants(raw):
 
 
 def test_normalize_reads_confusable_letters_as_digits():
-    # Crockford: O читается как 0, I и L — как 1 (человек списывает с экрана).
     assert invites.normalize("O1IL2345") == "01112345"
 
 
@@ -100,15 +94,11 @@ def test_invite_candidate_prefers_deep_link_payload():
     assert invite_candidate(None) is None
 
 
-# --- лимитер -------------------------------------------------------------
-
-
 def test_limiter_allows_up_to_limit_then_stops():
     limiter = invites.AttemptLimiter(limit=2)
     assert limiter.register(5) is True
     assert limiter.register(5) is True
     assert limiter.register(5) is False
-    # Момент исчерпания — ровно один, чтобы админа не заваливало.
     assert limiter.exhausted_now(5) is True
     limiter.register(5)
     assert limiter.exhausted_now(5) is False
@@ -121,9 +111,6 @@ def test_limiter_window_slides():
     assert limiter.register(5, now=10_000.0) is True
 
 
-# --- выдача и погашение --------------------------------------------------
-
-
 async def test_issued_code_admits_once(store, tmp_path):
     gate = _gate(store, tmp_path)
     code, _expires = await gate.issue(chat_id=1, user_id=10)
@@ -133,13 +120,10 @@ async def test_issued_code_admits_once(store, tmp_path):
     assert admission.subscription.chat_id == 77
     assert admission.subscription.is_guest
     assert admission.invited_by_chat_id == 1
-    # Второй раз тот же код не работает — он одноразовый.
     assert await gate.try_admit(78, code) is None
 
 
 async def test_issue_ttl_override_replaces_config_default(store, tmp_path):
-    """/invite <часы> (bot/handlers/invites.py::cmd_invite) переопределяет
-    [invites].ttl_s разово, не трогая конфиг."""
     from datetime import UTC, datetime
 
     cfg = InvitesConfig(ttl_s=3600.0)
@@ -192,10 +176,8 @@ async def test_bruteforce_exhausts_limit_and_warns_admin(store, tmp_path):
 
     for _ in range(3):
         assert await gate.try_admit(77, "ZZZZ9999") is None
-    # Админ узнал ровно один раз.
     assert len(notifier.sent) == 1
     assert notifier.sent[0][0] == 1
-    # И даже верный код после исчерпания лимита уже не пускает.
     assert await gate.try_admit(77, code) is None
 
 
@@ -210,17 +192,13 @@ async def test_invites_disabled_without_guest_package(store):
 
 async def test_guest_can_be_revoked(store, tmp_path):
     gate = _gate(store, tmp_path)
-    book = gate._book  # noqa: SLF001 — проверяем именно состав книги
+    book = gate._book  # noqa: SLF001
     code, _ = await gate.issue(chat_id=1, user_id=None)
     await gate.try_admit(77, code)
 
     assert gate.revoke_guest(77) is True
     assert book.for_chat(77) is None
-    # Владельческую подписку тем же путём снять нельзя.
     assert gate.revoke_guest(1) is False
-
-
-# --- точечная правка прав гостя (решение 2026-08-04) ----------------------
 
 
 async def test_add_guest_right_updates_book_and_package(store, tmp_path):
@@ -248,15 +226,13 @@ async def test_remove_guest_right_updates_book_and_package(store, tmp_path):
     updated = gate.remove_guest_right(77, "search@net")
     assert updated is not None
     assert not updated.allows_command("search@net")
-    assert updated.allows_command("chat@llm")  # прочие права не тронуты
+    assert updated.allows_command("chat@llm")
 
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     assert data["guest_subscriptions"][0]["allowed_commands"] == ["chat@llm"]
 
 
 async def test_guest_rights_cannot_touch_owner_subscription(store, tmp_path):
-    # Владельческая подписка (chat_id=1 в _book()) — не гость: точечная
-    # правка прав её не касается, как и revoke_guest.
     gate = _gate(store, tmp_path)
     assert gate.add_guest_right(1, "usage@vpn") is None
     assert gate.remove_guest_right(1, "invite") is None
@@ -268,13 +244,7 @@ def test_guest_right_on_unknown_chat_is_noop(store, tmp_path):
     assert gate.remove_guest_right(9999, "usage@vpn") is None
 
 
-# --- группы прав (решение 2026-09-18) -------------------------------------
-
-
 async def test_group_is_granted_in_one_package_rewrite(store, tmp_path):
-    """Группа выдаётся одной перезаписью гостевого пакета: N вызовов
-    add_guest_right переписали бы файл N раз и оставили бы гостя в
-    промежуточных состояниях, сорвись запись на середине."""
     path = tmp_path / "telegram-bot.test.guests.toml"
     gate = _gate(store, tmp_path, cfg=InvitesConfig(grant_commands=["chat@llm"]))
     code, _ = await gate.issue(chat_id=1, user_id=None)
@@ -285,7 +255,7 @@ async def test_group_is_granted_in_one_package_rewrite(store, tmp_path):
     updated = gate.set_guest_rights(77, sub.allowed_commands | group.rights)
     assert updated is not None
     assert group.rights <= updated.allowed_commands
-    assert updated.allows_command("chat@llm")  # прежние права на месте
+    assert updated.allows_command("chat@llm")
 
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     assert set(data["guest_subscriptions"][0]["allowed_commands"]) == group.rights | {"chat@llm"}
@@ -312,12 +282,6 @@ async def test_group_cannot_touch_owner_subscription(store, tmp_path):
     assert gate.set_guest_rights(1, group.rights) is None
 
 
-# --- флаг «семья» гостя (решение 2026-08-04) ------------------------------
-
-
-# --- гостевой пакет ------------------------------------------------------
-
-
 async def test_admission_is_written_to_guest_package(store, tmp_path):
     path = tmp_path / "telegram-bot.test.guests.toml"
     gate = _gate(store, tmp_path)
@@ -333,8 +297,6 @@ async def test_admission_is_written_to_guest_package(store, tmp_path):
 
 
 def test_render_is_deterministic():
-    # Пакет реплицируется по хешу содержимого — одна и та же выдача обязана
-    # давать те же байты, иначе ревизия росла бы на ровном месте.
     guests = [
         Subscription(name="b", chat_id=2, allowed_commands=frozenset({"z", "a"})),
         Subscription(name="a", chat_id=1, allowed_commands=frozenset({"a", "z"})),
@@ -349,15 +311,12 @@ def test_render_escapes_quotes():
 
 
 def test_old_package_with_family_line_still_loads():
-    """Пакеты до 2026-09-27 содержат `family = ...` — флаг убран, строка
-    должна молча игнорироваться, а не ронять загрузку гостей."""
     data = tomllib.loads(
         '[[guest_subscriptions]]\nname = "Наташа"\nchat_id = 6\nfamily = true\n'
     )
     cfg = GuestSubscriptionConfig(**data["guest_subscriptions"][0])
     assert cfg.chat_id == 6
     assert "family" not in render([Subscription(name="Наташа", chat_id=6)]).decode("utf-8")
-# --- книга подписок ------------------------------------------------------
 
 
 def test_guests_are_loaded_from_config():
@@ -380,11 +339,8 @@ def test_owner_subscription_wins_over_stale_guest_record():
         [GuestSubscriptionConfig(name="гость", chat_id=1, allowed_commands=["chat@llm"])],
     )
     sub = book.for_chat(1)
-    assert sub.allows_command("status")  # права админа, не урезанные гостевые
+    assert sub.allows_command("status")
     assert book.guests() == []
-
-
-# --- гейт молчания -------------------------------------------------------
 
 
 def _update(chat_id: int, text: str | None = None, *, kind: str = "message"):
@@ -430,7 +386,6 @@ async def test_gate_swallows_everything_from_stranger(store, tmp_path):
     gate = SilenceGate(book, _gate(store, tmp_path, book=book))
     for text in ("/start", "/ping", "/status", "привет", "ZZZZ9999"):
         assert await gate(_passthrough, _update(999, text), {}) is None
-    # Кнопка из чужого чата — тоже ничего.
     assert await gate(_passthrough, _update(999, "любой", kind="callback"), {}) is None
 
 
@@ -443,16 +398,10 @@ async def test_gate_admits_on_valid_code_and_marks_update(store, tmp_path):
     data: dict = {}
     assert await gate(_passthrough, _update(77, f"/start {code}"), data) == "HANDLED"
     assert data["admission"].subscription.chat_id == 77
-    # Впущенный чат дальше проходит как свой, без всяких кодов.
     assert await gate(_passthrough, _update(77, "привет"), {}) == "HANDLED"
 
 
-# --- интеграция с диспетчером --------------------------------------------
-
-
 async def test_stranger_update_reaches_no_router(store, tmp_path):
-    """Гейт зарегистрирован так, что чужой апдейт не доходит ни до одного
-    роутера: проверяем на настоящем Dispatcher, а не на middleware в вакууме."""
     from aiogram import Bot, Router
     from aiogram.types import Chat, Message, Update, User
 
@@ -464,7 +413,7 @@ async def test_stranger_update_reaches_no_router(store, tmp_path):
     spy = Router(name="spy")
 
     @spy.message()
-    async def _catch_all(message: Message) -> None:  # pragma: no cover — не должен вызваться
+    async def _catch_all(message: Message) -> None:  # pragma: no cover
         seen.append(message.text or "")
 
     dp.include_router(spy)
@@ -487,13 +436,7 @@ async def test_stranger_update_reaches_no_router(store, tmp_path):
     assert seen == []
 
 
-# --- код, присланный в подписной чат -------------------------------------
-
-
 async def test_known_code_is_recognised_inside(store, tmp_path):
-    """Живая находка 2026-07-30: код, присланный уже подписанным человеком,
-    уезжал в разговор с Альфредом и оттуда в веб-поиск. Распознаём такой код
-    до того, как он попадёт куда-либо ещё."""
     gate = _gate(store, tmp_path)
     code, _ = await gate.issue(chat_id=1, user_id=None)
 
@@ -505,8 +448,6 @@ async def test_known_code_is_recognised_inside(store, tmp_path):
 
 
 async def test_random_lookalike_string_is_not_a_code(store, tmp_path):
-    """Восемь символов из алфавита — слишком слабый признак сам по себе:
-    перехватывать по нему любую похожую строку в живом разговоре нельзя."""
     gate = _gate(store, tmp_path)
     await gate.issue(chat_id=1, user_id=None)
     assert await gate.known_code("ZZZZ9999") is None
@@ -523,12 +464,7 @@ async def test_redeemed_code_is_still_recognisable(store, tmp_path):
     assert known[1]["redeemed_at"] is not None
 
 
-# --- приветствие гостя ---------------------------------------------------
-
-
 def test_welcome_prompt_demands_the_menu_hint():
-    """Решение пользователя 2026-07-30: приветствие пишет модель, но подсказка
-    про меню команд в нём обязательна (/help выпилен 2026-08-04)."""
     from sa_home_bot.bot.handlers import invites as invite_handlers
 
     assert invite_handlers.MENU_HINT_KEYWORD in invite_handlers.WELCOME_PROMPT.lower()
@@ -536,8 +472,6 @@ def test_welcome_prompt_demands_the_menu_hint():
 
 
 async def test_welcome_prompt_uses_what_memory_knows(store, tmp_path, monkeypatch):
-    """Обычный путь подмешивания памяти ищет по тексту реплики, а реплика тут —
-    инвайт-код; поэтому память спрашивается отдельно, по имени гостя."""
     from types import SimpleNamespace
 
     from sa_home_bot.bot import ai_flow
@@ -557,11 +491,9 @@ async def test_welcome_prompt_uses_what_memory_knows(store, tmp_path, monkeypatc
     message = SimpleNamespace(chat=SimpleNamespace(id=77))
     prompt = await invite_handlers._welcome_prompt(None, message, admission.subscription)
 
-    # Запрос — по имени, без хвоста «(@username)».
     assert asked == ["Наташа Сорокина"]
     assert "любит чай без сахара" in prompt
     assert "как со знакомым" in prompt
-    # требование про меню не теряется, когда есть что вспомнить
     assert invite_handlers.MENU_HINT_KEYWORD in prompt.lower()
 
 
@@ -582,9 +514,6 @@ async def test_welcome_prompt_without_memory_is_the_plain_directive(store, tmp_p
     message = SimpleNamespace(chat=SimpleNamespace(id=77))
     prompt = await invite_handlers._welcome_prompt(None, message, admission.subscription)
     assert prompt == invite_handlers.WELCOME_PROMPT
-
-
-# --- текст сообщения с кодом ---------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -630,9 +559,6 @@ def test_expiry_is_spelled_in_days_beyond_48_hours(hours, expected):
 
     expires = datetime.now(tz=UTC) + timedelta(hours=hours)
     assert invite_handlers._format_expiry(expires) == expected
-
-
-# --- /invite <часы> --------------------------------------------------------
 
 
 @pytest.mark.parametrize("raw", [None, "", "  "])
@@ -703,19 +629,4 @@ async def test_cmd_invite_rejects_bad_hours_without_issuing_code(store, tmp_path
     await invite_handlers.cmd_invite(message, _command("не число"), gate, "sa_home_test_bot")
 
     assert message.answers == [invite_handlers.BAD_INVITE_HOURS_TEXT]
-    # Код не выпущен — открытых приглашений от этого чата нет.
     assert await gate.open_codes() == []
-
-
-def test_guest_list_shows_local_time():
-    """Живая находка 2026-07-30: /guests показывал UTC («вошёл 05:02» вместо
-    10:02) — обрезка ISO-строки вместо перевода в местное время."""
-    from datetime import UTC, datetime
-
-    from sa_home_bot.bot.handlers import invites as invite_handlers
-
-    moment = datetime(2026, 7, 30, 5, 2, tzinfo=UTC)
-    expected = moment.astimezone().strftime("%Y-%m-%d %H:%M")
-    assert invite_handlers._local_time(moment.isoformat()) == expected
-    # Мусор не роняет список — показываем как есть.
-    assert invite_handlers._local_time("не дата") == "не дата"

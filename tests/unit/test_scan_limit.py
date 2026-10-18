@@ -1,5 +1,3 @@
-"""Лимит ручного форс-скана: раз в минуту, 5 за скользящие сутки."""
-
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -26,7 +24,6 @@ def test_blocked_within_a_minute():
     d = scan_limit.decide(prev, T0)
     assert not d.allowed
     assert "Слишком часто" in d.reason
-    # Метку не добавили — только очищенный список.
     assert d.ticks == tuple(prev)
 
 
@@ -37,7 +34,6 @@ def test_allowed_after_a_minute():
 
 
 def test_daily_limit_blocks_sixth():
-    # 5 сканов за последние часы, последний — 2 мин назад (интервал ок).
     ticks = [T0 - timedelta(hours=h) for h in (10, 8, 6, 4, 2)]
     ticks[-1] = T0 - timedelta(minutes=2)
     d = scan_limit.decide(ticks, T0)
@@ -46,21 +42,16 @@ def test_daily_limit_blocks_sixth():
 
 
 def test_old_ticks_outside_window_are_pruned():
-    # 5 меток, но все старше суток → окно пустое, скан разрешён.
     ticks = [T0 - timedelta(days=1, hours=h) for h in range(5)]
     d = scan_limit.decide(ticks, T0)
     assert d.allowed
-    assert d.ticks == (T0,)  # старые выкинуты, осталась только новая
+    assert d.ticks == (T0,)
 
 
 def test_ticks_capped_at_max():
     ticks = [T0 - timedelta(minutes=m) for m in (50, 40, 30, 20, 10)]
-    # последний 10 мин назад — интервал ок, но уже 5 в окне → блок
     d = scan_limit.decide(ticks, T0)
     assert not d.allowed
-
-
-# --- store roundtrip ---
 
 
 @pytest_asyncio.fixture
@@ -77,7 +68,6 @@ async def test_store_action_ticks_roundtrip(store):
     ticks = [T0 - timedelta(minutes=5), T0]
     await store.set_action_ticks("monitor:scan_now", ticks)
     assert await store.get_action_ticks("monitor:scan_now") == ticks
-    # Ключи независимы по действиям.
     assert await store.get_action_ticks("monitor:other") == []
 
 
@@ -86,12 +76,7 @@ async def test_store_action_ticks_bad_json(store):
     assert await store.get_action_ticks("monitor:scan_now") == []
 
 
-# --- actions.run_action: describe → команда, лимит, расход слота ---
-
-
 class FakeLink:
-    """Фейковый node_link: run_action всегда адресует службу через dst."""
-
     display_name = "нода"
 
     def __init__(self, result=None, fail=False, action_ids=("scan_now",)):
@@ -137,7 +122,6 @@ async def test_run_action_sends_command_and_records_tick(store):
 
     assert "Принято" in text
     assert link.calls == [("scan_now", {})]
-    # Слот израсходован — записана одна метка.
     assert len(await store.get_action_ticks("monitor:scan_now")) == 1
 
 
@@ -149,7 +133,7 @@ async def test_run_action_blocked_when_too_soon(store):
     text = await actions.run_action(store, link, "monitor", "scan_now")
 
     assert "Слишком часто" in text
-    assert link.calls == []  # до монитора не дошло
+    assert link.calls == []
 
 
 async def test_run_action_service_down_keeps_slot(store):
@@ -158,7 +142,6 @@ async def test_run_action_service_down_keeps_slot(store):
     text = await actions.run_action(store, FakeLink(fail=True), "monitor", "scan_now")
 
     assert "недоступна" in text
-    # Слот НЕ израсходован — действие не состоялось.
     assert await store.get_action_ticks("monitor:scan_now") == []
 
 
@@ -176,7 +159,6 @@ async def test_run_action_not_rate_limited_for_node(store):
     from sa_home_bot.bot import actions
 
     link = FakeLink(result={"service": {"name": "monitor"}}, action_ids=("restart",))
-    # Два подряд — node-действия не лимитируются.
     await actions.run_action(store, link, "node", "restart", "monitor")
     text = await actions.run_action(store, link, "node", "restart", "monitor")
     assert "Принято" in text
@@ -199,7 +181,6 @@ async def test_run_action_peer_has_separate_limit_slot(store):
     from sa_home_bot.bot import actions
 
     link = FakeLink()
-    # Слот своей ноды израсходован — скан пира всё равно проходит.
     await actions.run_action(store, link, "monitor", "scan_now")
     text = await actions.run_action(store, link, "monitor", "scan_now", node_id="arch-t480")
     assert "Принято" in text

@@ -1,35 +1,25 @@
-"""Единый реестр команд: имена + описания. Источник правды для меню/списка умений."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from sa_home_bot.bot.ui.callback_data import pack
+
+if TYPE_CHECKING:
+    from sa_home_bot.subscriptions.models import Subscription
 
 
 @dataclass(frozen=True)
 class Command:
     name: str
     description: str
-    universal: bool  # True — работает везде без проверок
-    menu: bool = True  # показывать в меню бота и списке умений (/start)
-    right: str | None = None  # имя права в allowed_commands (None = name):
-    # алиасы вроде /swarm↔/nodes живут под одним правом, конфиги не ломаются
+    universal: bool
+    menu: bool = True
+    right: str | None = None
 
 
-# Универсальные — всегда и везде, не указываются в allowed_commands.
-# PING скрыт из меню/списка умений (menu=False) — рабочая команда,
-# но самостоятельной пользы в общем списке не несёт (решение 2026-08-04,
-# заодно выпилены /help и /whoami — надобность в них отпала).
 PING = Command("ping", "проверка живости (pong)", universal=True, menu=False)
 
-# Управляющие — требуют права в allowed_commands не-broken подписки.
-# Меню бота — скилы роя первого уровня: динамические команды-приложения из
-# describe службы apps (см. setup.build_menu_commands) + «Сводка роя»
-# (/swarm; /nodes — алиас под тем же правом). Остальное скрыто и вызывается
-# ссылками/кнопками: /status — карточка локальной ноды.
-# Решение пользователя 2026-08-04: панель /swarm стала иерархией в духе
-# /guests (bot/swarm_panel.py) — такой же раздел-«панель», как /status и
-# /guests, поэтому оба алиаса скрыты из меню (menu=False), а не
-# только NODES.
 SWARM = Command("swarm", "сводка роя", universal=False, menu=False, right="nodes")
 NODES = Command("nodes", "сводка роя (алиас /swarm)", universal=False, menu=False)
 STATUS = Command("status", "карточка локальной ноды", universal=False, menu=False)
@@ -41,34 +31,14 @@ SCAN_NOW = Command("scan_now", "форс-скан датчиков и диско
 DOWNTIME = Command(
     "downtime", "последние отключения машины", universal=False, menu=False
 )
-# Wake — кнопка в разделе /nodes; командой тоже работает, но в меню не нужна.
 WAKE = Command("wake", "разбудить домашний ПК (Wake-on-LAN)", universal=False, menu=False)
-# Право — не голое имя команды, а действие@служба (как у динамических экшенов
-# apps/torrents) — так /alfred не завязана на отдельное "право команды бота",
-# а участвует в общем правиле «действие@служба» (allows_action-совместимая
-# строка, проверяется через allows_command — см. AUTHORIZATION.md).
-# /alfred — видимое в меню имя (нарочно без упоминания LLM/ИИ в описании —
-# в общем чате не должно бросаться в глаза); /ai — тот же скилл под тем же
-# правом, скрытый алиас (как /swarm↔/nodes), меню не засоряет.
 ALFRED = Command("alfred", "позвать Альфреда", universal=False, menu=True, right="chat@llm")
 AI = Command("ai", "то же самое, что /alfred", universal=False, menu=False, right="chat@llm")
-# Приватный вход (AUTHORIZATION.md §10). Обе — под одним правом `invite`: кто
-# приглашает, тот и выставляет. Скрытые (как /status, /stats и прочие): это
-# админский инструмент, а не скилл роя, и в меню чата ему не место — тем
-# более что чаще всего оно у админа и так открыто по `*`.
 INVITE = Command("invite", "выпустить код приглашения", universal=False, menu=False,
                  right="invite")
 GUESTS = Command("guests", "приглашённые и открытые коды", universal=False, menu=False,
                  right="invite")
-# VPN — карточка своего доступа (расход/лимит/устройства, кнопки «+100 ГБ»,
-# «новый доступ», «приложение»). Право — то же usage@vpn, что и у действия
-# usage службы: команда и кнопка под ней проверяются одним правилом
-# (действие@служба), как и у остальных скилов роя.
 VPN = Command("vpn", "доступ к VPN", universal=False, menu=True, right="usage@vpn")
-# Панель закачек qBittorrent (bot/handlers/torrents_panel.py) — как /guests и
-# /swarm, одно право на весь раздел (список, карточка раздачи, пауза/старт,
-# общий лимит скорости): `list@torrents`, то же имя действия, что и у самого
-# read-only списка службы torrents.
 TORRENTS = Command(
     "torrents",
     "закачки: список, пауза/старт, лимит скорости",
@@ -76,21 +46,11 @@ TORRENTS = Command(
     menu=True,
     right="list@torrents",
 )
-# Сценки-интерактивы (Этап 47, bot/interactives): тумблер запрета в этой
-# переписке. Универсальная и скрытая — касается только своего чата, а
-# подсказку о ней гость получает в тексте формы «Больше не предлагать».
 INTERACTIVES = Command(
     "interactives", "сценки в этом чате: on/off", universal=True, menu=False
 )
-# Опись сюжетных вещей гостя (Этап 49.3.5, bot/handlers/items.py): где
-# каждая лежит, кнопки «принести карточку». Своя у каждого — универсальная.
 ITEMS = Command("items", "особенные вещи поместья", universal=True, menu=True)
-# Отладка режимов генерации картинок (Этап 49, bot/draw_debug.py): владелец
-# подбирает архетипы предметов и настройки сцен. Скрыта — памятка по
-# «/draw» без аргументов или «/draw help».
 DRAW = Command("draw", "отладка генерации картинок", universal=False, menu=False)
-# «Альфред в городе» (Этап 51, bot/away.py): окно обслуживания mycraft. Только
-# владелец (`*`); /back — под тем же правом `away`. Скрытые из меню.
 AWAY = Command(
     "away", "Альфред в городе: окно обслуживания", universal=False, menu=False, right="away"
 )
@@ -120,15 +80,19 @@ ALL_COMMANDS: list[Command] = [
 
 UNIVERSAL_COMMANDS: list[Command] = [c for c in ALL_COMMANDS if c.universal]
 CONTROL_COMMANDS: list[Command] = [c for c in ALL_COMMANDS if not c.universal]
-# Универсальные, попадающие в меню/список умений (сейчас — ни одной: PING
-# скрыт).
 MENU_UNIVERSAL_COMMANDS: list[Command] = [c for c in UNIVERSAL_COMMANDS if c.menu]
-# Управляющие, попадающие в меню/список умений (сейчас только STATUS).
 MENU_CONTROL_COMMANDS: list[Command] = [c for c in CONTROL_COMMANDS if c.menu]
 
-# Кнопки-представления под /status: callback-код → команда. Действия служб
-# (скан и т.п.) сюда не входят — они строятся динамически из describe (см.
-# ACTION_CALLBACK_PREFIX).
+
+def can_run_action(subscription: Subscription | None, action_id: str, service: str) -> bool:
+    return subscription is not None and subscription.allows_action(action_id, service)
+
+
+def menu_control_commands_for(subscription: Subscription | None) -> list[Command]:
+    if subscription is None:
+        return []
+    return [c for c in MENU_CONTROL_COMMANDS if subscription.allows_command(c.right or c.name)]
+
 STATUS_ACTIONS: dict[str, Command] = {
     "full": STATUS_FULL,
     "stats": STATS,
@@ -136,21 +100,16 @@ STATUS_ACTIONS: dict[str, Command] = {
 }
 CALLBACK_PREFIX = "st"
 
-# Иерархия раздела нод: список нод («st:nodes») → карточка ноды
-# («st:nodecard», = /status: мониторинг + службы) → карточка службы
-# («st:svc:<имя>», данные + кнопки управления). Wake-on-LAN — «st:wake».
 NODES_CODE = "nodes"
 NODE_CARD_CODE = "nodecard"
 SERVICE_CARD_CODE = "svc"
 WAKE_CODE = "wake"
 
-# Динамические действия служб: «act:<служба>:<действие>[:<значение>[:<node_id>]]»,
-# например «act:monitor:scan_now», «act:node:restart:telegram-bot» (локально)
-# или «act:node:restart:telegram-bot:arch-t480» (та же кнопка для пира —
-# «спроси любого», ARCHITECTURE §11 п. 2: рой равноправен, любая нода
-# управляется с любой). Право — `действие@служба`, не зависит от node_id
-# (Subscription.allows_action) — правило одно на весь рой.
 ACTION_CALLBACK_PREFIX = "act"
+
+
+def panel_callback(code: str, *parts: object) -> str:
+    return pack(CALLBACK_PREFIX, code, *parts)
 
 
 def action_callback(
@@ -159,7 +118,6 @@ def action_callback(
     node_id: str | None = None,
     service: str = "node",
 ) -> str:
-    """Собрать «act:<служба>:<действие>[:<значение>[:<node_id>]]» для кнопки."""
     parts = [ACTION_CALLBACK_PREFIX, service, action_id]
     if value or node_id:
         parts.append(value or "")
@@ -169,9 +127,6 @@ def action_callback(
 
 
 def wake_callback(node_id: str | None = None) -> str:
-    """Собрать «st:wake[:<node_id>]»: без node_id — ручной путь ([wake] в
-    конфиге), с node_id — точечная кнопка «Разбудить <нода>» для конкретной
-    уснувшей ноды роя (bot/wake_state.py)."""
     parts = [CALLBACK_PREFIX, WAKE_CODE]
     if node_id:
         parts.append(node_id)
@@ -179,7 +134,6 @@ def wake_callback(node_id: str | None = None) -> str:
 
 
 def parse_wake_callback(data: str | None) -> str | None:
-    """«st:wake[:<node_id>]» → node_id (None — ручной путь [wake])."""
     if not data:
         return None
     parts = data.split(":")
@@ -189,8 +143,6 @@ def parse_wake_callback(data: str | None) -> str | None:
 
 
 def parse_action_callback(data: str | None) -> tuple[str, str, str | None, str | None] | None:
-    """«act:<служба>:<действие>[:<значение>[:<node_id>]]» →
-    (служба, действие, значение, node_id)."""
     if not data:
         return None
     parts = data.split(":")
@@ -200,56 +152,35 @@ def parse_action_callback(data: str | None) -> tuple[str, str, str | None, str |
     node_id = parts[4] if len(parts) > 4 and parts[4] else None
     return parts[1], parts[2], value, node_id
 
-# Пагинация /downtime («st:downtime_page:<offset>») — не кнопка под /status,
-# но требует тех же прав, что и сама команда DOWNTIME.
 DOWNTIME_PAGE_CODE = "downtime_page"
 
-# Иерархия /guests — все коды с префиксом «g_», единая точка входа
-# bot/handlers/invites.py::on_guest_screen (bot/guests_view.py строит текст и
-# клавиатуру каждого экрана). Право у всех одно — GUESTS (`invite`), как и
-# раньше: кто приглашает, тот и управляет.
-GUESTS_LIST_CODE = "g_list"  # «st:g_list:<offset>» — список гостей, страница
-OPEN_CODES_LIST_CODE = "g_codes"  # «st:g_codes:<offset>» — открытые коды
-GUEST_CARD_CODE = "g_card"  # «st:g_card:<chat_id>» — карточка гостя
-GUEST_KICK_CONFIRM_CODE = "g_kick_ask"  # «st:g_kick_ask:<chat_id>» — «точно?»
-GUEST_REVOKE_CODE = "g_kick"  # «st:g_kick:<chat_id>» — подтверждённый отзыв
-CODE_REVOKE_CODE = "g_code_off"  # «st:g_code_off:<code>» — отозвать код
-GUEST_STATS_CODE = "g_stats"  # «st:g_stats:<chat_id>» — расход VPN гостя
-GUEST_PERMS_CODE = "g_perms"  # «st:g_perms:<chat_id>:<offset>» — права гостя
-GUEST_PERM_OFF_CODE = "g_poff"  # «st:g_poff:<chat_id>:<offset>:<право>»
-GUEST_PERM_ADD_LIST_CODE = "g_padd"  # «st:g_padd:<chat_id>:<offset>»
-GUEST_PERM_ADD_CODE = "g_pon"  # «st:g_pon:<chat_id>:<offset>:<право>»
-# Группы прав (bot/guest_rights.py) — выдаются и снимаются целиком, одной
-# перезаписью гостевого пакета: «st:g_gon:<chat_id>:<offset>:<группа>».
+GUESTS_LIST_CODE = "g_list"
+OPEN_CODES_LIST_CODE = "g_codes"
+GUEST_CARD_CODE = "g_card"
+GUEST_KICK_CONFIRM_CODE = "g_kick_ask"
+GUEST_REVOKE_CODE = "g_kick"
+CODE_REVOKE_CODE = "g_code_off"
+GUEST_STATS_CODE = "g_stats"
+GUEST_PERMS_CODE = "g_perms"
+GUEST_PERM_OFF_CODE = "g_poff"
+GUEST_PERM_ADD_LIST_CODE = "g_padd"
+GUEST_PERM_ADD_CODE = "g_pon"
 GUEST_GROUP_ADD_CODE = "g_gon"
 GUEST_GROUP_OFF_CODE = "g_goff"
 
-# Иерархия /swarm — все коды с префиксом «sw_», единая точка входа
-# bot/handlers/swarm_panel.py::on_swarm_screen (bot/swarm_panel.py и
-# bot/node_view.py строят текст и клавиатуру каждого экрана). Права —
-# те же, что уже были у /node_<id> (`status`) и /svc_<node>_<svc>
-# (`nodes`), см. докстринг bot/handlers/node_links.py — новых прав не
-# заводим, только даём им путь через кнопки, а не только текстовые ссылки.
-SWARM_PANEL_CODE = "sw_panel"  # «st:sw_panel» — сводная панель роя
-SWARM_SKILLS_CODE = "sw_skills"  # «st:sw_skills:<offset>» — список умений
-SWARM_SKILL_CODE = "sw_skill"  # «st:sw_skill:<app_id>» — карточка умения
-SWARM_NODES_CODE = "sw_nodes"  # «st:sw_nodes:<offset>» — список нод
-SWARM_NODE_CODE = "sw_node"  # «st:sw_node[:<node_id>]» — карточка ноды
-SWARM_SVCS_CODE = "sw_svcs"  # «st:sw_svcs:<node_id_or_->:<offset>» — список служб
-SWARM_SVC_CODE = "sw_svc"  # «st:sw_svc:<node_id_or_->:<имя>» — карточка службы
-SWARM_UPDATE_CODE = "sw_update"  # «st:sw_update» — проверка обновлений по рою
+SWARM_PANEL_CODE = "sw_panel"
+SWARM_SKILLS_CODE = "sw_skills"
+SWARM_SKILL_CODE = "sw_skill"
+SWARM_NODES_CODE = "sw_nodes"
+SWARM_NODE_CODE = "sw_node"
+SWARM_SVCS_CODE = "sw_svcs"
+SWARM_SVC_CODE = "sw_svc"
+SWARM_UPDATE_CODE = "sw_update"
 
-# Иерархия /torrents — все коды с префиксом «t_», единая точка входа
-# bot/handlers/torrents_panel.py::on_torrents_screen (bot/torrents_view.py
-# строит текст и клавиатуру каждого экрана). Право у всех одно — TORRENTS
-# (`list@torrents`), как и у /guests/`invite`: кто может открыть панель, тот
-# и управляет закачками из неё.
-TORRENTS_LIST_CODE = "t_list"  # «st:t_list:<offset>» — список закачек
-TORRENT_CARD_CODE = "t_card"  # «st:t_card:<hash>» — карточка раздачи
-TORRENT_TOGGLE_CODE = "t_toggle"  # «st:t_toggle:<hash>» — пауза/старт
-TORRENT_SPEED_CODE = "t_speed"  # «st:t_speed:<mbps>:<offset>» — лимит скорости
-# «st:t_app» — карточка apps/qbittorrent (без кнопок управления, только
-# обновить/назад) — единственный вход к ней (см. apps_view.HIDDEN_MENU_APP_IDS).
+TORRENTS_LIST_CODE = "t_list"
+TORRENT_CARD_CODE = "t_card"
+TORRENT_TOGGLE_CODE = "t_toggle"
+TORRENT_SPEED_CODE = "t_speed"
 TORRENT_APP_CODE = "t_app"
 
 _ALL_CALLBACK_ACTIONS: dict[str, Command] = {
@@ -269,15 +200,15 @@ _ALL_CALLBACK_ACTIONS: dict[str, Command] = {
     GUEST_GROUP_ADD_CODE: GUESTS,
     GUEST_GROUP_OFF_CODE: GUESTS,
     NODES_CODE: NODES,
-    NODE_CARD_CODE: STATUS,  # карточка ноды = данные /status
-    SERVICE_CARD_CODE: NODES,  # карточка службы — часть управления нодами
+    NODE_CARD_CODE: STATUS,
+    SERVICE_CARD_CODE: NODES,
     WAKE_CODE: WAKE,
     SWARM_PANEL_CODE: SWARM,
     SWARM_SKILLS_CODE: SWARM,
     SWARM_SKILL_CODE: SWARM,
     SWARM_NODES_CODE: SWARM,
-    SWARM_NODE_CODE: STATUS,  # как /node_<id> — право `status`
-    SWARM_SVCS_CODE: NODES,  # как /svc_<node>_<svc> — право `nodes`
+    SWARM_NODE_CODE: STATUS,
+    SWARM_SVCS_CODE: NODES,
     SWARM_SVC_CODE: NODES,
     SWARM_UPDATE_CODE: SWARM,
     TORRENTS_LIST_CODE: TORRENTS,
@@ -295,7 +226,6 @@ def get(name: str) -> Command | None:
 
 
 def required_right(name: str) -> str:
-    """Имя права команды в allowed_commands (алиасы делят одно право)."""
     cmd = _BY_NAME.get(name)
     if cmd is None:
         return name
@@ -313,11 +243,6 @@ def is_control(name: str) -> bool:
 
 
 def command_for_callback(data: str | None) -> Command | None:
-    """Разобрать callback_data «st:<код>[:<аргумент>]» в команду-действие.
-
-    Третий сегмент (offset пагинации /downtime) игнорируется — код действия
-    всегда второй сегмент.
-    """
     if not data:
         return None
     parts = data.split(":")

@@ -1,10 +1,8 @@
-"""Скилы-приложения: карточка, динамическое меню, /start-справка, управление юнитом."""
-
 from sa_home_bot import __version__
 from sa_home_bot.bot.apps_view import render_app_card, run_app_skill
 from sa_home_bot.bot.handlers.basic import build_help
+from sa_home_bot.bot.menu import build_menu_commands
 from sa_home_bot.bot.service_link import ServiceUnavailableError
-from sa_home_bot.bot.setup import build_menu_commands
 from sa_home_bot.proto.messages import ERR_NEEDS_PRIVILEGE, ActionParam, ActionSpec, ProtoError
 from sa_home_bot.subscriptions.models import Subscription
 
@@ -44,13 +42,6 @@ def test_app_card_failed_without_urls():
 
 
 def test_menu_skills_first_then_universal():
-    # /swarm (право «nodes») теперь панель-раздел вроде /guests, /status —
-    # в меню не попадает (menu=False), хотя команда рабочая. /ping тоже
-    # скрыт (menu=False); из универсальных в меню — только /items (опись
-    # вещей, Этап 49.3.5), после скилов.
-    # qbittorrent — в HIDDEN_MENU_APP_IDS (см. test_menu_hides_qbittorrent_
-    # even_with_right): своей команды/пункта меню больше нет, доступ — только
-    # кнопкой внутри /torrents.
     menu = build_menu_commands(
         _sub("nodes", "qbittorrent@apps", "jellyfin@apps"), _app_actions()
     )
@@ -59,12 +50,8 @@ def test_menu_skills_first_then_universal():
 
 
 def test_menu_hides_qbittorrent_even_with_right():
-    """qbittorrent — теперь только кнопка внутри /torrents (bot/torrents_view.py
-    ::build_app_view), не отдельная команда/пункт меню — иначе два входа на
-    одну и ту же карточку, один из которых ведёт в никуда (голая команда
-    заблокирована, см. bot/handlers/apps.py::cmd_app_skill)."""
     menu = build_menu_commands(_sub("qbittorrent@apps"), _app_actions())
-    assert [c.command for c in menu] == ["items"]  # только универсальная
+    assert [c.command for c in menu] == ["items"]
 
 
 def test_menu_filters_skills_by_rights():
@@ -75,9 +62,9 @@ def test_menu_filters_skills_by_rights():
 
 def test_help_lists_allowed_skills_and_about():
     text = build_help(_sub("nodes", "qbittorrent@apps", "jellyfin@apps"), _app_actions())
-    assert "/qbittorrent" not in text  # скрыт из списков, см. HIDDEN_MENU_APP_IDS
+    assert "/qbittorrent" not in text
     assert "/jellyfin — 🎬 Jellyfin" in text
-    assert "/swarm" not in text  # раздел-панель, скрыт из списка (menu=False)
+    assert "/swarm" not in text
     assert f"sa-home-bot v{__version__}" in text
 
 
@@ -85,9 +72,6 @@ def test_help_without_subscription_only_universal():
     text = build_help(None, _app_actions())
     assert "/qbittorrent" not in text and "/swarm" not in text
     assert f"v{__version__}" in text
-
-
-# --- run_app_skill: карточка + кнопки управления / ошибка прав ---
 
 
 def _manage_actions() -> list[ActionSpec]:
@@ -136,7 +120,7 @@ async def test_run_app_skill_card_only_no_manage_rights():
     link = FakeAppsLink()
     text, keyboard = await run_app_skill(link, _sub_with("qbittorrent@apps"), "qbittorrent")
     assert "🧲 qBittorrent" in text
-    assert keyboard is None  # нет start/stop/restart@apps — кнопок нет
+    assert keyboard is None
 
 
 async def test_run_app_skill_adds_manage_buttons_when_allowed():
@@ -146,7 +130,7 @@ async def test_run_app_skill_adds_manage_buttons_when_allowed():
     )
     assert keyboard is not None
     labels = {b.text for row in keyboard.inline_keyboard for b in row}
-    assert labels == {"▶️ Запустить", "⏹ Остановить"}  # restart не разрешён
+    assert labels == {"▶️ Запустить", "⏹ Остановить"}
 
 
 async def test_run_app_skill_manage_action_calls_command_with_name():
@@ -169,3 +153,37 @@ async def test_run_app_skill_unavailable_when_disconnected():
     text, keyboard = await run_app_skill(link, _sub_with("start@apps"), "start", "qbittorrent")
     assert "недоступна" in text
     assert keyboard is None
+
+
+_NAME_PARAM = ActionParam(name="name", type="string", required=True, choices=("jellyfin",))
+
+_PARAMETERIZED_APP_ACTIONS = [
+    ActionSpec(id="jellyfin", title="🎬 Jellyfin"),
+    ActionSpec(id="start", title="▶️ Запустить", params=(_NAME_PARAM,)),
+    ActionSpec(id="stop", title="⏹ Остановить", params=(_NAME_PARAM,)),
+    ActionSpec(id="restart", title="🔄 Перезапустить", params=(_NAME_PARAM,)),
+]
+
+
+def _parameterized_sub() -> Subscription:
+    return Subscription(
+        chat_id=1,
+        name="me",
+        allowed_commands=frozenset(
+            {"jellyfin@apps", "start@apps", "stop@apps", "restart@apps"}
+        ),
+    )
+
+
+def test_menu_commands_skip_parameterized_app_actions():
+    menu = build_menu_commands(_parameterized_sub(), _PARAMETERIZED_APP_ACTIONS)
+    names = {c.command for c in menu}
+    assert "jellyfin" in names
+    assert names.isdisjoint({"start", "stop", "restart"})
+
+
+def test_help_skips_parameterized_app_actions():
+    text = build_help(_parameterized_sub(), _PARAMETERIZED_APP_ACTIONS)
+    assert "/jellyfin" in text
+    for bare in ("/start —", "/stop —", "/restart —"):
+        assert bare not in text
