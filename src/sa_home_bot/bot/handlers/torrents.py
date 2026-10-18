@@ -1,16 +1,3 @@
-"""Приём .torrent-файлов и magnet-ссылок в чате.
-
-Файл/ссылка → карточка «куда сохранить?» с кнопками директорий из describe
-службы torrents (`save_path`, choices) → по нажатию команда `add` уходит
-службе. Бот в систему не ходит — файл гонится по протоколу как base64-строка
-(ActionParam — только string|int|float|bool, PROTOCOL.md); обычные
-.torrent-метафайлы на порядки меньше лимита сообщения (MAX_MESSAGE_BYTES =
-1 МиБ, proto/messages.py), раздутие исключено.
-
-Права не через AuthorizationMiddleware (она разбирает только текстовые
-команды и «act:»-кнопки) — проверяются здесь же, как в apps.py.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -104,7 +91,7 @@ async def cmd_torrent_file(
     subscription: Subscription | None = None,
 ) -> None:
     if not _is_torrent_document(message):
-        return  # не .torrent — не наш файл, игнор
+        return
     if not commands.can_run_action(subscription, ACTION_ADD, SERVICE):
         await message.answer(DENIED_TEXT)
         return

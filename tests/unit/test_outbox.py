@@ -1,6 +1,3 @@
-"""Этап 52: постоянная очередь исходящих (db/store.py outbox, bot/outbox.py,
-постановка из Notifier.send_direct)."""
-
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -37,7 +34,7 @@ async def store(tmp_path):
 class FakeBot:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
-        self.script: list[Exception | None] = []  # по одному на вызов
+        self.script: list[Exception | None] = []
 
     async def send_message(self, chat_id, text, reply_parameters=None, reply_markup=None,
                            message_thread_id=None):
@@ -141,7 +138,7 @@ async def test_late_mark(store):
     await flush_outbox(Notifier(bot), store, now=T0 + timedelta(seconds=110))
     hhmm = T0.astimezone().strftime("%H:%M")
     assert bot.sent[0][1] == f"late\n\n⏳ с задержкой, {hhmm}"
-    assert bot.sent[1][1] == "fresh"  # 10 с — без пометки
+    assert bot.sent[1][1] == "fresh"
 
 
 async def test_notifier_enqueues_on_transient(store):

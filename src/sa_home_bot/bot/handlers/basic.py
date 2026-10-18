@@ -1,5 +1,3 @@
-"""Базовые хендлеры: /start, /ping (универсальные)."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -23,7 +21,6 @@ def build_help(
     subscription: Subscription | None,
     app_actions: Sequence[ActionSpec] = (),
 ) -> str:
-    """Скилы роя первого уровня, затем универсальные команды и about."""
     skills = [
         f"/{action.id} — {action.title}: состояние и веб-морда"
         for action in apps_view.visible_skill_actions(subscription, app_actions)

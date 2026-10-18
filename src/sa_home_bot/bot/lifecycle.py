@@ -1,8 +1,3 @@
-"""Системные события жизненного цикла: старт (clean/crash), shutdown, восстановление связи.
-
-Тип события — `system`; получают подписки с `system` или `*` в event_types.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -22,8 +17,6 @@ log = logging.getLogger(__name__)
 def render_startup(clean: bool, last_outage: PowerEvent | None = None) -> str:
     if clean:
         return "🟢 <b>Сторож снова на посту.</b>\nЗапуск после штатного завершения."
-    # Нештатное завершение: если последнее отключение машины — потеря питания
-    # (внезапный обрыв), прикладываем его детали (когда, простой).
     if last_outage is not None and last_outage.kind == POWER_UNEXPECTED:
         return (
             "🟠 <b>Сторож восстановился после сбоя.</b>\n"
@@ -63,12 +56,6 @@ async def broadcast_all(book: SubscriptionBook, notifier: Notifier, text: str) -
     return sent
 
 
-# Дебаг-канал: факт вызова инструмента Alfred'ом (живой /ai и self-scheduled
-# remind через службу tasks). Само сообщение короткое — «обращался ли и в
-# какой тул» (решение пользователя 2026-07-27); вход и выход прячутся за
-# кнопкой «развернуть» (bot/tool_debug.py, просьба пользователя 2026-07-29):
-# на каждой реплике вываливать килобайты выдачи в чат незачем, но когда
-# модель ищет и не находит — без них не разобраться.
 EVENT_ALFRED_TOOL_CALL = "alfred_tool_call"
 
 
@@ -81,20 +68,11 @@ async def notify_tool_call(
     result: str | None = None,
     debug: ToolCalls | None = None,
 ) -> None:
-    """``debug``/``args``/``result`` — если известны, к сообщению добавляется
-    кнопка «развернуть». У события от службы tasks (bot/node_events.py) их
-    нет: та шлёт по рою только имя тула, и кнопке нечего показывать."""
     text = tool_debug.render_short(tool_name)
     markup = None
     if debug is not None and args is not None and result is not None:
         token = debug.add(tool_debug.ToolCall(name=tool_name, args=args, result=result))
         markup = tool_debug.keyboard(token, expanded=False)
-    # Живая находка 2026-07-27: НЕ book.accepting() — тот трактует "*" в
-    # event_types как "всё", а у админской подписки event_types=["*"]
-    # (полный охват системных событий). На вызов тула, происходящий на
-    # каждой реплике, это давало спам в личный чат админа, хотя дебаг-канал
-    # для него не заводили. alfred_tool_call — только явный opt-in по
-    # точному имени, вайлдкард на него не распространяется.
     opted_in = (
         sub for sub in book.all() if not sub.broken and EVENT_ALFRED_TOOL_CALL in sub.event_types
     )

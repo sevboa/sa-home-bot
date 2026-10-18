@@ -1,13 +1,10 @@
-"""bot/recipients.py — find_recipients: как названного человека находят по
-карточкам людей (Этап 58) и подпискам (bot/tools.py::tool_tell)."""
-
 import pytest
 
 from sa_home_bot.bot.recipients import (
     SOURCE_OWNER_ROLE,
     SOURCE_SUBSCRIPTION,
-    matches,
     find_recipients,
+    matches,
 )
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
@@ -21,25 +18,18 @@ def _guest(name: str, chat_id: int, invited_user: str | None = None) -> Subscrip
     )
 
 
-# --- matches: сопоставление имени/ника ---
-
-
 def test_matches_exact_and_prefix_word():
     assert matches("андрей", "Андрей Иванов")
-    assert not matches("андрюха", "Андрей Иванов")  # намеренно: не угадывать
+    assert not matches("андрюха", "Андрей Иванов")
 
 
 def test_matches_bare_username_inside_parens():
-    # Живой баг 2026-08-01: invited_user вида "Имя Фамилия (@ник)" — голый
-    # ник без "@" не находился, хотя имя находило того же человека.
     candidate = "Наташа Сорокина (@nava40a)"
     assert matches("nava40a", candidate)
     assert matches("наташа", candidate)
 
 
 def test_find_recipients_by_username_with_leading_at():
-    # query нормализует find_recipients (лишний "@" перед юзернеймом — как
-    # его обычно и пишут) — matches получает уже готовое "nava40a".
     book = SubscriptionBook([_guest("Наташа Сорокина (@nava40a)", 1243270013)])
     assert [r.chat_id for r in find_recipients("@nava40a", book)] == [1243270013]
 
@@ -47,9 +37,6 @@ def test_find_recipients_by_username_with_leading_at():
 def test_matches_empty_query_or_candidate_is_false():
     assert not matches("", "Андрей Иванов")
     assert not matches("андрей", "")
-
-
-# --- find_recipients: сборка кандидатов из people + подписок ---
 
 
 def test_find_recipients_by_username_in_parens():
@@ -71,8 +58,6 @@ def test_find_recipients_by_card_name_and_telegram_username():
 
 
 def test_find_recipients_ignores_people_without_subscription():
-    # "Только подписной чат" — bot/recipients.py: совпадение по карточке
-    # ничего не даёт, если у человека нет подписки в книге.
     book = SubscriptionBook([])
     people = people_book(book, {1: {"name": "Призрак"}}, {1: ("Призрак", "ghost")})
     assert find_recipients("ghost", book, people) == []
@@ -88,12 +73,7 @@ def test_find_recipients_empty_query():
     assert find_recipients("", book) == []
 
 
-# --- обращение к владельцу по роли, не по имени ---------------------------
-
-
 def _owner(chat_id: int = 188548043) -> Subscription:
-    # Прод-конфиг называет владельческую подписку технически, "me" — не по
-    # имени, которое гость мог бы угадать (instances/telegram-bot.alfred.toml).
     return Subscription(name="me", chat_id=chat_id, allowed_commands=frozenset({"*"}))
 
 
@@ -119,7 +99,7 @@ def _owner(chat_id: int = 188548043) -> Subscription:
         "admin",
         "owner",
         "ХОЗЯИНУ",
-        "Owner",  # регистр не важен
+        "Owner",
     ],
 )
 def test_find_recipients_by_owner_role(query):
@@ -130,27 +110,17 @@ def test_find_recipients_by_owner_role(query):
 
 
 def test_owner_role_reference_finds_nobody_without_an_owner():
-    # Нет ни одной подписки с "*" (например, книга службы tasks) — роль
-    # никого не находит, а не ломается.
     book = SubscriptionBook([_guest("Гость", 600)])
     assert find_recipients("хозяину", book, people_book(book)) == []
 
 
 def test_owner_role_reference_does_not_shadow_ordinary_guest_names():
-    # Обычный поиск по личному имени гостя не должен внезапно находить ещё
-    # и владельца — стебли роли проверяются отдельной веткой, не влияют на
-    # остальные пути поиска.
     book = SubscriptionBook([_owner(), _guest("Максим", 601)])
     found = find_recipients("максим", book, people_book(book))
     assert [r.chat_id for r in found] == [601]
 
 
-# --- лейбл "Имя (@ник)" с чужим именем: ищем по нику ---
-
-
 def test_find_recipients_label_with_misnamed_person_uses_handle():
-    # Живой баг 2026-09-27: модель передала "Наталья (@nava40a)", гостья
-    # вошла как "Наташа Сорокина (@nava40a)" — имя не совпало, ник совпал.
     book = SubscriptionBook(
         [
             _guest("Наташа Сорокина (@nava40a)", 1243270013),
@@ -183,11 +153,7 @@ def test_find_recipients_by_chat_id_in_query():
     )
     assert [r.chat_id for r in find_recipients("Наталья (id 1243270013)", book)] == [1243270013]
     assert [r.chat_id for r in find_recipients("1243270013", book)] == [1243270013]
-    # Чужой id — не подписчик: к имени не откатываемся, писать некому.
     assert find_recipients("Наталья (id 99999999)", book) == []
-
-
-# --- живые находки 2026-09-27: имя+фамилия без отчества, people без id ---
 
 
 def test_matches_multiword_query_skips_middle_name():
@@ -195,7 +161,6 @@ def test_matches_multiword_query_skips_middle_name():
     assert matches("севбо алексей", "Алексей Александрович Севбо")
     assert matches("алекс севб", "Алексей Александрович Севбо")
     assert not matches("павел севбо", "Алексей Александрович Севбо")
-    # Одно слово кандидата не закрывает два слова запроса.
     assert not matches("алексей алексей", "Алексей Александрович Севбо")
 
 
@@ -222,8 +187,6 @@ def test_find_recipients_by_card_name_beside_invite_name():
 
 
 def test_find_recipients_finds_brother_by_card_name_not_subscription_label():
-    # Живая находка 2026-10-10: подписка брата владельца — «Kein», имя —
-    # только в карточке. Display — имя из карточки с ником из Telegram.
     book = SubscriptionBook([_guest("Kein", 518571647), _guest("Andrey (@AndreyPietilya)", 348)])
     people = people_book(
         book, {518571647: {"name": "Андрей Александрович Севбо"}}, {518571647: ("Kein", "kein")}

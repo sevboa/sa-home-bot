@@ -1,26 +1,3 @@
-"""/torrents — панель закачек qBittorrent, иерархия «t_*» в одном сообщении
-(список → карточка раздачи), по образцу bot/handlers/swarm_panel.py.
-
-Служба torrents живёт на одной ноде (как vpn), поэтому, в отличие от
-swarm_panel/node_view, здесь не нужна dst-адресация — используется тот же
-``torrents_link: ServiceLink``, что уже инжектится в bot/handlers/torrents.py
-для приёма .torrent-файлов/magnet-ссылок.
-
-Хэш раздачи запрашивается у службы явным флагом ``with_hash`` (не через
-объявленный ``ActionParam`` действия ``list`` — см. докстринг
-torrents/service.py::_list_sync): нужен только этому экрану бота как
-стабильный идентификатор для callback_data, модели он не виден. Право на всю
-панель — одно, `list@torrents` (commands.TORRENTS), как у /guests и /swarm:
-CallbackAuthorizationMiddleware уже проверила его до вызова этих хендлеров.
-
-Кнопка «🧲 qBittorrent» (``t_app``) — карточка службы apps того же
-приложения (юнит qbittorrent-nox, состояние + ссылка на веб-морду), но без
-кнопок управления юнитом: это единственный вход к ней (голая команда
-/qbittorrent и пункт меню убраны, см. apps_view.HIDDEN_MENU_APP_IDS), и
-отдельного права apps `qbittorrent@apps` здесь не спрашивают — кто открыл
-/torrents, тому естественно видеть карточку и самого клиента.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -74,10 +51,6 @@ async def on_torrents_screen(
     code = parts[1] if len(parts) > 1 else ""
 
     if code == commands.TORRENT_APP_CODE:
-        # subscription=None — карточка apps/qbittorrent открывается без
-        # кнопок управления (build_app_view их не строит вовсе), а run_app_skill
-        # использует subscription только для них; своя клавиатура строится
-        # ниже независимо от того, что вернул бы run_app_skill.
         text, _ignored_keyboard = await apps_view.run_app_skill(
             apps_link, None, apps_view.QBITTORRENT_APP_ID
         )
@@ -127,9 +100,6 @@ async def on_torrents_screen(
             return
         action = ACTION_RESUME if torrent.get("paused") else ACTION_PAUSE
         try:
-            # _select в службе понимает точный хэш как есть (см.
-            # torrents/service.py::_select) — однозначная адресация без
-            # риска попасть по подстроке чужого имени.
             await torrents_link.command(action, {"name": thash})
         except ServiceUnavailableError:
             await callback.answer(torrents_view.UNAVAILABLE_TEXT, show_alert=True)

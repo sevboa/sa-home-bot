@@ -1,5 +1,3 @@
-"""Реестр команд: меню-фильтрация, callback-действия, клавиатура /status."""
-
 from __future__ import annotations
 
 from sa_home_bot.bot import commands
@@ -9,13 +7,6 @@ from sa_home_bot.subscriptions.models import Subscription
 
 
 def test_menu_has_only_alfred_vpn_and_torrents_skills():
-    # В меню из реестра — «/alfred», «/vpn» и «/torrents» (гостю нужно найти
-    # доступ без подсказки); /ai — скрытый алиас (как /swarm↔/nodes), в
-    # меню/списке умений не должен светиться (сознательно — чтобы в общем
-    # чате не так явно читалось как ИИ). /swarm — теперь раздел-панель (как
-    # /status, /guests): рабочая команда, но не первого уровня, поэтому тоже
-    # скрыт (menu=False). Остальные скилы первого уровня динамические (из
-    # describe apps, build_menu_commands).
     menu_names = {c.name for c in commands.MENU_CONTROL_COMMANDS}
     assert menu_names == {"alfred", "vpn", "torrents"}
     for name in (
@@ -25,9 +16,6 @@ def test_menu_has_only_alfred_vpn_and_torrents_skills():
 
 
 def test_ping_is_universal_but_hidden_from_menu():
-    # /ping работает без проверок прав, но не попадает в меню/список умений
-    # (решение пользователя 2026-08-04: /help и /whoami выпилены целиком,
-    # /ping оставлен рабочим, но скрытым).
     assert commands.PING.universal is True
     assert commands.PING.menu is False
     assert commands.PING not in commands.MENU_UNIVERSAL_COMMANDS
@@ -40,11 +28,10 @@ def test_ai_is_hidden_alias_of_alfred_same_right():
 
 
 def test_required_right_for_aliases():
-    # /swarm и /nodes живут под одним правом «nodes» — конфиги не ломаются.
     assert commands.required_right("swarm") == "nodes"
     assert commands.required_right("nodes") == "nodes"
     assert commands.required_right("status") == "status"
-    assert commands.required_right("no-such") == "no-such"  # неизвестное — как есть
+    assert commands.required_right("no-such") == "no-such"
 
 
 def test_all_status_actions_are_control_commands():
@@ -72,7 +59,6 @@ def test_parse_action_callback():
         "telegram-bot",
         None,
     )
-    # Кнопка пира: значение + node_id, и power-действие без значения + node_id.
     assert commands.parse_action_callback("act:node:restart:telegram-bot:arch-t480") == (
         "node",
         "restart",
@@ -102,14 +88,11 @@ def test_action_callback_builds_expected_strings():
 
 
 def test_command_for_callback_downtime_pagination():
-    # «st:downtime_page:<offset>» — те же права, что и у команды DOWNTIME.
     assert commands.command_for_callback("st:downtime_page:10") is commands.DOWNTIME
     assert commands.command_for_callback("st:downtime_page:0") is commands.DOWNTIME
 
 
 def test_command_for_callback_node_hierarchy_and_wake():
-    # Список нод и карточка службы — права /nodes; карточка ноды — данные
-    # /status; кнопка WoL — права /wake.
     assert commands.command_for_callback("st:nodes") is commands.NODES
     assert commands.command_for_callback("st:nodecard") is commands.STATUS
     assert commands.command_for_callback("st:svc:monitor") is commands.NODES
@@ -127,7 +110,7 @@ def _monitor_actions() -> list[ActionSpec]:
 def test_keyboard_shows_only_allowed_actions():
     kb = build_status_keyboard(_sub("status", "downtime"), _monitor_actions())
     codes = [b.callback_data for row in kb.inline_keyboard for b in row]
-    assert codes == ["st:downtime"]  # только разрешённое представление
+    assert codes == ["st:downtime"]
 
 
 def test_keyboard_full_rights_two_by_two():
@@ -135,13 +118,13 @@ def test_keyboard_full_rights_two_by_two():
         _sub("status_full", "stats", "downtime", "scan_now@monitor"),
         _monitor_actions(),
     )
-    assert len(kb.inline_keyboard) == 2  # 4 кнопки, по 2 в ряд
+    assert len(kb.inline_keyboard) == 2
     codes = {b.callback_data for row in kb.inline_keyboard for b in row}
     assert codes == {"st:full", "st:stats", "st:downtime", "act:monitor:scan_now"}
 
 
 def test_keyboard_dynamic_action_takes_title_from_describe():
-    kb = build_status_keyboard(_sub("scan_now"), _monitor_actions())  # голое имя — ок
+    kb = build_status_keyboard(_sub("scan_now"), _monitor_actions())
     button = kb.inline_keyboard[0][0]
     assert button.text == "🔄 Скан датчиков"
     assert button.callback_data == "act:monitor:scan_now"

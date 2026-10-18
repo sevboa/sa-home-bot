@@ -47,7 +47,7 @@ def test_extract_command():
 
 async def test_universal_command_always_passes():
     mw = AuthorizationMiddleware(_book())
-    msg = _message(999, "/ping")  # неподписной чат
+    msg = _message(999, "/ping")
     assert await mw(_passthrough, msg, {}) == "HANDLED"
 
 
@@ -61,7 +61,7 @@ async def test_control_command_allowed():
 
 async def test_control_command_without_right_denied():
     mw = AuthorizationMiddleware(_book())
-    msg = _message(1, "/scan_now")  # нет в allowed_commands
+    msg = _message(1, "/scan_now")
     result = await mw(_passthrough, msg, {})
     assert result is None
     assert msg._answered == [DENIED_TEXT]
@@ -89,9 +89,6 @@ async def test_control_command_broken_chat_denied():
     assert msg._answered == [DENIED_TEXT]
 
 
-# --- callback-кнопки под /status ---
-
-
 def _callback(chat_id: int | None, data: str):
     alerts: list[tuple[str, bool]] = []
 
@@ -110,7 +107,7 @@ def _cb_book():
 
 async def test_callback_allowed_action_passes():
     mw = CallbackAuthorizationMiddleware(_cb_book())
-    cb = _callback(1, "st:downtime")  # право есть
+    cb = _callback(1, "st:downtime")
     data: dict = {}
     assert await mw(_passthrough, cb, data) == "HANDLED"
     assert data["subscription"].name == "me"
@@ -118,9 +115,9 @@ async def test_callback_allowed_action_passes():
 
 async def test_callback_action_without_right_denied():
     mw = CallbackAuthorizationMiddleware(_cb_book())
-    cb = _callback(1, "st:full")  # status_full не в allowed_commands
+    cb = _callback(1, "st:full")
     assert await mw(_passthrough, cb, {}) is None
-    assert cb._alerts and cb._alerts[0][1] is True  # show_alert
+    assert cb._alerts and cb._alerts[0][1] is True
 
 
 async def test_callback_dynamic_action_checks_action_at_service():
@@ -129,14 +126,14 @@ async def test_callback_dynamic_action_checks_action_at_service():
     )
     mw = CallbackAuthorizationMiddleware(book)
 
-    ok = _callback(1, "act:node:restart:telegram-bot")  # право есть
+    ok = _callback(1, "act:node:restart:telegram-bot")
     assert await mw(_passthrough, ok, {}) == "HANDLED"
 
-    denied = _callback(1, "act:node:stop:monitor")  # stop@node не выдан
+    denied = _callback(1, "act:node:stop:monitor")
     assert await mw(_passthrough, denied, {}) is None
     assert denied._alerts and denied._alerts[0][1] is True
 
-    stranger = _callback(999, "act:node:restart:monitor")  # чужой чат
+    stranger = _callback(999, "act:node:restart:monitor")
     assert await mw(_passthrough, stranger, {}) is None
 
 

@@ -1,11 +1,3 @@
-"""Приватный вход: /invite, /guests и встреча приглашённого.
-
-Дверь (молчание для неподписных чатов) — в bot/middlewares.py::SilenceGate,
-механика кода и гостевых подписок — в bot/invites.py. Здесь только то, что
-видит человек: как выдаётся код, как выглядит список гостей и что происходит
-в чате в момент, когда чужой становится своим.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -39,9 +31,6 @@ log = logging.getLogger(__name__)
 router = Router(name="invites")
 
 WELCOME_TEXT = "🔑 Приглашение принято — добро пожаловать."
-# Ключевое слово, по которому проверяем, что модель упомянула меню (см.
-# WELCOME_PROMPT и cmd_admitted ниже). Дописывается фолбэком, если модель
-# всё-таки не упомянула его сама.
 MENU_HINT_KEYWORD = "меню"
 FALLBACK_HINT = "<i>Полный список умений — в меню команд (значок рядом с полем ввода)</i>"
 NO_INVITES_TEXT = (
@@ -49,22 +38,11 @@ NO_INVITES_TEXT = (
     "Запустите бота с <code>--instance</code>, тогда гостевые подписки будут "
     "жить рядом с основным пакетом и реплицироваться по рою."
 )
-# Потолок для "/invite <часы>" — не техническое ограничение, а страховка от
-# опечатки (лишний ноль превратит одноразовый код в код, живущий месяцами).
-MAX_INVITE_HOURS = 720.0  # 30 суток
+MAX_INVITE_HOURS = 720.0
 BAD_INVITE_HOURS_TEXT = (
     f"ошибка: часы должны быть числом больше 0 и не больше {MAX_INVITE_HOURS:g} "
     "(пример: <code>/invite 3</code>)"
 )
-# Директива приветствия. Как и OPENING_PROMPT в bot/handlers/ai.py, в историю
-# диалога не пишется — только ответ на неё.
-#
-# Решение пользователя 2026-07-30: встречает гостя ИМЕННО модель, а не
-# заготовленный текст, и заведомо небыстрый путь (разбудить машину, прогреть
-# модель — со «шагами» и Агнольдом, см. ai_flow) здесь не недостаток, а
-# интрига: первое впечатление важнее пары секунд. Единственное жёсткое
-# требование к содержанию — подсказка про меню команд в конце: без неё гость
-# не узнает, что ещё умеет бот, а меню появляется молча.
 WELCOME_PROMPT = (
     "Тебя только что познакомили с новым собеседником: его впустили в дом по "
     "одноразовому приглашению, и это его первые секунды здесь. Поздоровайся в "
@@ -76,8 +54,6 @@ WELCOME_PROMPT = (
 
 
 class JustAdmitted(Filter):
-    """Сообщение, которым чат предъявил годный код (SilenceGate его пометил)."""
-
     async def __call__(self, message: Message, admission: Admission | None = None) -> bool:
         return admission is not None
 
@@ -94,10 +70,6 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
 
 
 def _format_expiry(expires: datetime) -> str:
-    """Срок кода словами — минуты для короткого срока, иначе часы/сутки:
-    «/invite <часы>» позволяет выпустить код и на несколько суток, а
-    «43200 минут» никто не читает. Округление вверх — чтобы только что
-    выпущенный код не оказался короче заявленного из-за долей секунды."""
     left = expires - datetime.now(tz=UTC)
     total_minutes = max(-(-int(left.total_seconds()) // 60), 0)
     if total_minutes < 90:
@@ -110,8 +82,6 @@ def _format_expiry(expires: datetime) -> str:
 
 
 def _parse_invite_hours(raw: str | None) -> float | None:
-    """``None`` — аргумент не задан (дефолт [invites].ttl_s, сейчас 1 час).
-    ``ValueError`` — не число или вне диапазона (0, MAX_INVITE_HOURS]."""
     if raw is None or not raw.strip():
         return None
     hours = float(raw.strip().replace(",", "."))
@@ -142,10 +112,6 @@ async def cmd_invite(
         ttl_s=hours * 3600.0 if hours is not None else None,
     )
     link = f"https://t.me/{bot_username}?start={code}"
-    # Коротко: код, ссылка и одна пояснительная строка. Всё остальное, что тут
-    # было раньше (что код одноразовый, что в группе нужен именно код, какие
-    # права получит гость), владелец и так знает — а пересылать это сообщение
-    # человеку проще, когда лишнего в нём нет.
     await message.answer(
         "🔑 <b>Код приглашения</b>\n\n"
         f"<code>{invites.format_code(code)}</code>\n\n"
@@ -165,8 +131,6 @@ async def cmd_guests(message: Message, book: SubscriptionBook) -> None:
 async def _guest_or_redraw_list(
     callback: CallbackQuery, book: SubscriptionBook, chat_id: int
 ) -> Subscription | None:
-    """Найти гостя по chat_id; если его уже нет (отозван из другой сессии) —
-    честно откатить экран на список вместо ошибки в чат."""
     sub = book.for_chat(chat_id)
     if sub is not None and sub.is_guest:
         return sub
@@ -185,10 +149,6 @@ async def on_guest_screen(
     node_link: ServiceLink,
     bot: Bot,
 ) -> None:
-    """Единая точка входа во всю иерархию /guests (bot/guests_view.py строит
-    текст и клавиатуру каждого экрана; здесь — разбор callback'а, сетевые
-    вызовы и запись состояния). Права уже проверены
-    CallbackAuthorizationMiddleware (право GUESTS = `invite`)."""
     parts = (callback.data or "").split(":")
     code = parts[1] if len(parts) > 1 else ""
 
@@ -242,8 +202,6 @@ async def on_guest_screen(
         chat_id = int_or(parts[2] if len(parts) > 2 else None, default=-1)
         ok = gate.revoke_guest(chat_id)
         if ok:
-            # Меню чата больше не наше дело — убираем, чтобы у выставленного
-            # не осталось кнопок, которые всё равно не сработают.
             await refresh_chat_menu(bot, chat_id, None)
             await callback.answer("Гость выставлен")
             if callback.message:
@@ -314,10 +272,6 @@ async def on_guest_screen(
         await redraw(callback, text, keyboard)
         return
 
-    # Группа прав (bot/guest_rights.py) — выдаётся и снимается целиком, ОДНОЙ
-    # перезаписью гостевого пакета: N вызовов add_guest_right переписали бы
-    # файл N раз и оставили бы гостя в промежуточных состояниях, если бы
-    # запись на середине сорвалась.
     if code in (commands.GUEST_GROUP_ADD_CODE, commands.GUEST_GROUP_OFF_CODE):
         chat_id = int_or(parts[2] if len(parts) > 2 else None, default=-1)
         offset = int_or(parts[3] if len(parts) > 3 else None)
@@ -345,8 +299,6 @@ async def on_guest_screen(
 
 
 async def _redraw_perms(callback: CallbackQuery, sub: Subscription, offset: int) -> None:
-    """Экран прав после правки: страница могла опустеть — отступ подтягивается
-    к последней существующей (та же логика, что у списка гостей)."""
     offset = guests_view.clamp_offset(
         offset, guests_view.PERM_PAGE_SIZE, guests_view.granted_rows(sub)
     )
@@ -355,16 +307,6 @@ async def _redraw_perms(callback: CallbackQuery, sub: Subscription, offset: int)
 
 
 class CodeFromInsider(Filter):
-    """Код приглашения, присланный в чат, который и так подписной.
-
-    Живая находка 2026-07-30 (первый живой прогон): человек, у которого
-    подписка уже была, прислал код боту — гейт пропустил сообщение как
-    обычный текст, и оно уехало в разговор с Альфредом, а тот принял код за
-    поисковый запрос и отправил его в веб-поиск. То есть одноразовый секрет
-    ушёл во внешний поисковик, а человек так и не понял, почему «инвайт не
-    работает». Перехватываем такое сообщение до всех широких фильтров.
-    """
-
     async def __call__(self, message: Message, gate: Gatekeeper) -> bool | dict:
         known = await gate.known_code(message.text)
         if known is None:
@@ -380,7 +322,6 @@ async def on_code_from_insider(
     insider_code_row: dict,
     notifier: Notifier,
 ) -> None:
-    """Объяснить, что код тут не нужен, и не пустить его дальше в разговор."""
     if insider_code_row.get("redeemed_at"):
         await message.answer("🔑 Этот код уже использован — второй раз он не сработает.")
         return
@@ -394,8 +335,6 @@ async def on_code_from_insider(
     )
     issuer = insider_code_row.get("issued_by_chat_id")
     if issuer and issuer != message.chat.id:
-        # Код мог уйти не по адресу — тот, кто его выпускал, должен знать и
-        # решить, отзывать ли (/guests).
         await notifier.send_direct(
             issuer,
             f"ℹ️ Код <code>{invites.format_code(insider_code)}</code> прислали мне из чата "
@@ -420,22 +359,8 @@ async def on_admitted(
     away: AwayService | None = None,
     interactives: Interactives | None = None,
 ) -> None:
-    """Первое, что видит впущенный, — живого Альфреда, а не системный текст.
-
-    Решение пользователя 2026-07-30: встречает гостя модель. Дорога к ней
-    бывает долгой (машину надо разбудить, модель — прогреть), и по пути гость
-    увидит «шаги» и Агнольда из обычного presence-сценария (bot/ai_flow.py) —
-    это оставлено намеренно, как интрига: расположить к себе важнее, чем
-    ответить за секунду.
-
-    Системное «приглашение принято» со списком команд осталось ровно на один
-    случай — Альфреда не нашли вовсе: молча впустить и ничего не сказать
-    нельзя, человек не поймёт, сработал ли код.
-    """
     subscription = admission.subscription
     app_actions = await apps_link.actions()
-    # Меню чата — молча: список команд гость увидит там, о чём ему скажет сам
-    # Альфред.
     await refresh_chat_menu(bot, message.chat.id, subscription, app_actions)
 
     if admission.invited_by_chat_id and admission.invited_by_chat_id != message.chat.id:
@@ -447,8 +372,6 @@ async def on_admitted(
 
     right = commands.required_right(commands.ALFRED.name)
     greeting = None
-    # Этап 51: Альфред в городе — приветствовать некому, вместо модели записка
-    # (intercept её отправил), а гость получает обычное системное «принято».
     in_city = (
         subscription.allows_command(right)
         and away is not None
@@ -471,30 +394,12 @@ async def on_admitted(
         await message.answer(WELCOME_TEXT + "\n\n" + build_help(subscription, app_actions))
         return
     if MENU_HINT_KEYWORD not in greeting.lower():
-        # Промпт просит модель закончить подсказкой про меню, но обещание
-        # модели — не гарантия (та же природа, что у живой находки про
-        # get_time: маленькая модель выполняет инструкцию не всегда). Раз
-        # подсказка объявлена обязательной, дописываем её сами — одной
-        # строкой, чтобы не спорить с только что сказанным.
         await message.answer(FALLBACK_HINT)
 
 
 async def _welcome_prompt(
     node_link: ServiceLink, message: Message, subscription: Subscription
 ) -> str:
-    """Директива приветствия, дополненная тем, что о человеке уже известно.
-
-    Обычный путь подмешивания памяти (ai_flow.recall_facts внутри
-    request_alfred) ищет по тексту текущей реплики — а здесь реплика это
-    инвайт-код, по которому не найдётся ничего. Поэтому спрашиваем память
-    сами и по осмысленному запросу: имени гостя.
-
-    Память привязана к chat_id, и в личке chat_id равен user_id — поэтому
-    человек, который когда-то уже говорил с Альфредом (а потом остался без
-    подписки), будет узнан, а не встречен как незнакомец.
-    """
-    # Ищем по имени, без «(@username)»: память ищет по подстроке, и хвост со
-    # скобками только сужает совпадения.
     query = (subscription.invited_user or subscription.name).split(" (@")[0]
     facts = await ai_flow.recall_facts(node_link, message.chat.id, query)
     if not facts:

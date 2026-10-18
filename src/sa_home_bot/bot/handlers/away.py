@@ -1,11 +1,3 @@
-"""/away, /back и кнопки напоминания — «Альфред в городе» (Этап 51, bot/away.py).
-
-Только владельцу (``*`` в allowed_commands): ``/away <срок> [причина]``,
-``/away +1ч`` (продлить), ``/back``, ``/away`` без аргументов — статус. Кнопки
-напоминания за 15 минут до срока — ``away:ext:<минуты>`` и ``away:back``.
-Это служебные команды: работают и пока Альфред в городе.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -44,8 +36,6 @@ CLAMPED_TEXT = " Срок урезан до потолка: возвращени
 
 
 async def _owner_tz(away: AwayService, user):
-    """Часовой пояс владельца для «до 23:00»: из его карточки (Этап 58),
-    иначе — пояс сервера."""
     if user is not None:
         people = PeopleBook(await away.store.person_claims(), [])
         tz = people.value(user.id, people_claims.FIELD_TIMEZONE)

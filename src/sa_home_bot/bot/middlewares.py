@@ -1,16 +1,3 @@
-"""Middleware: гейт молчания, контекст чата и авторизация команд (chat-level).
-
-Два разных барьера, не путать:
-
-- `SilenceGate` — на входе, для **чужих**: чат без подписки не получает
-  вообще ничего (AUTHORIZATION.md §10). Он не отвечает «недоступно», не
-  печатает «набирает сообщение» — просто ничего не происходит.
-- `AuthorizationMiddleware` — для **своих**: универсальные команды
-  (ping) проходят без проверок, управляющие требуют права в
-  allowed_commands не-broken подписки (§5). Здесь отказ виден и объясняется:
-  человек уже впущен, скрывать от него нечего.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -32,8 +19,6 @@ DENIED_ALERT_TEXT = "⛔️ Недоступно"
 
 
 def _update_chat_id(update: Update) -> int | None:
-    """chat_id апдейта любого типа. None — апдейт вне чата (inline-запрос и
-    прочее, чего бот не поддерживает): для гейта это тем более чужой."""
     for event in (
         update.message,
         update.edited_message,
@@ -51,12 +36,6 @@ def _update_chat_id(update: Update) -> int | None:
 
 
 def invite_candidate(message: Message | None) -> str | None:
-    """Текст, который стоит проверить как инвайт-код.
-
-    Два пути: deep-link `t.me/<bot>?start=КОД` (Telegram присылает его как
-    `/start КОД`) — основной, и код, присланный текстом, — запасной, для
-    групп, куда ссылка не годится.
-    """
     if message is None or not message.text:
         return None
     text = message.text.strip()
@@ -67,17 +46,6 @@ def invite_candidate(message: Message | None) -> str | None:
 
 
 class SilenceGate(BaseMiddleware):
-    """Чужой чат не получает ничего, кроме возможности предъявить инвайт.
-
-    Стоит на `dp.update` (outer), а не на `message`: путей к боту сегодня
-    минимум шесть — команда, реплай в треде, любое сообщение в личке,
-    упоминание в группе, .torrent-файл, callback-кнопка. Проверять каждый
-    отдельно значит однажды забыть один; здесь же вход ровно один.
-
-    Неверный код молчит так же, как всё остальное: ответ «код неверный» был
-    бы подтверждением, что бот здесь есть и ждёт правильный.
-    """
-
     def __init__(self, book: SubscriptionBook, gate: Gatekeeper) -> None:
         self._book = book
         self._gate = gate
@@ -105,14 +73,11 @@ class SilenceGate(BaseMiddleware):
         if admission is None:
             log.debug("Гейт: апдейт из неподписного chat_id=%s проигнорирован", chat_id)
             return None
-        # Впустили — этот же апдейт идёт дальше: приветствие пишет хендлер
-        # (bot/handlers/invites.py), у которого есть все зависимости.
         data["admission"] = admission
         return await handler(event, data)
 
 
 def _user_name(message: Message | None) -> str | None:
-    """Как подписать гостя в /guests: имя профиля плюс @username, если есть."""
     user = message.from_user if message else None
     if user is None:
         return None
@@ -142,11 +107,9 @@ class AuthorizationMiddleware(BaseMiddleware):
 
         command = extract_command(event.text)
 
-        # Не команда или универсальная — пропускаем без проверок.
         if command is None or commands.is_universal(command):
             return await handler(event, data)
 
-        # Управляющая команда — проверяем права (алиасы делят одно право).
         if commands.is_control(command):
             right = commands.required_right(command)
             if subscription is None or not subscription.allows_command(right):
@@ -158,8 +121,6 @@ class AuthorizationMiddleware(BaseMiddleware):
 
 
 class CallbackAuthorizationMiddleware(BaseMiddleware):
-    """Права на кнопки-действия под /status (callback_data «st:<код>»)."""
-
     def __init__(self, book: SubscriptionBook) -> None:
         self._book = book
 
@@ -174,14 +135,11 @@ class CallbackAuthorizationMiddleware(BaseMiddleware):
         subscription = self._book.for_chat(chat_id) if chat_id is not None else None
         data["subscription"] = subscription
 
-        # Динамические действия служб («act:<служба>:<действие>[:<значение>]»):
-        # право — `действие@служба` из describe, не имя команды бота.
         action = commands.parse_action_callback(event.data)
         if action is not None:
             service, action_id, _, _ = action
             if subscription is None or not (
                 subscription.allows_action(action_id, service)
-                # «Сообщить о проблеме» — у каждого, у кого есть VPN (57.6b)
                 or (
                     service == vpn_report.SERVICE
                     and action_id == vpn_report.REPORT_ACTION
@@ -194,7 +152,6 @@ class CallbackAuthorizationMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         cmd = commands.command_for_callback(event.data)
-        # Не наша кнопка — пропускаем (обработается по месту или проигнорируется).
         if cmd is None:
             return await handler(event, data)
 
@@ -207,10 +164,6 @@ class CallbackAuthorizationMiddleware(BaseMiddleware):
 
 
 class ProfileMiddleware(BaseMiddleware):
-    """Профиль Telegram отправителя — в карточку человека (Этап 58):
-    имя, фамилия, @ник, как они есть в Telegram сейчас. В БД — только при
-    изменении; кэш в памяти процесса. Сбой записи апдейт не останавливает."""
-
     def __init__(self, store: Any) -> None:
         self._store = store
         self._seen: dict[int, tuple[str, str, str]] = {}

@@ -1,10 +1,3 @@
-"""TelegramEventDispatcher — доставка событий здоровья в Telegram-чаты.
-
-Рендер текста и фан-аут по подпискам живут здесь, а не в job'ах: job отдаёт
-доменное событие, диспетчер решает, кому и как. message_id «перегрева»
-запоминается, чтобы «остыл» ушёл reply'ем на него.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -49,8 +42,6 @@ class TelegramEventDispatcher:
                 await self._store.record_notification(
                     event.component_id, sub.chat_id, NOTIF_ALERT, message_id, now
                 )
-        # handled всегда: помечаем доставленным, даже если часть чатов не
-        # ответила, — иначе следующий тик зашлёт дубль живым подписчикам.
         return DispatchResult(delivered=delivered, handled=True)
 
     async def dispatch_clear(self, event: Event) -> DispatchResult:
@@ -59,8 +50,6 @@ class TelegramEventDispatcher:
         delivered = False
         for sub in self._subscriptions.accepting(event.type):
             reply_to = await self._store.get_alert_message_id(event.component_id, sub.chat_id)
-            # Тот же dedup_key, что у алерта: если алерт ещё ждёт в outbox,
-            # свежий статус «восстановлено» заменяет его, а не шлётся вдогонку.
             message_id = await self._notifier.send_direct(
                 sub.chat_id,
                 text,

@@ -1,6 +1,3 @@
-"""Хендлер torrents: распознавание .torrent-документа, имя из magnet-ссылки,
-кнопки директорий из describe."""
-
 from types import SimpleNamespace
 
 from sa_home_bot.bot.handlers import torrents as torrents_handler

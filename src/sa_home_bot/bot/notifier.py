@@ -1,5 +1,3 @@
-"""Notifier — обёртка над bot.send_message: ретраи 429, чанкование, reply-fallback."""
-
 from __future__ import annotations
 
 import asyncio
@@ -30,52 +28,17 @@ log = logging.getLogger(__name__)
 
 MAX_LEN = 4096
 MAX_RETRIES = 3
-# Пауза перед повтором ТРАНЗИЕНТНОГО сбоя доставки, по номеру попытки
-# (сек). Короткая экспонента: цель — пережить моргание SOCKS-прокси до
-# Telegram (память telegram-bot-api-proxy) или краткий 5xx, а не ждать
-# минутами — пользователь смотрит на «печатает». 429 сюда не относится,
-# у него свой sleep(retry_after+1).
 _TRANSIENT_BACKOFF_S = (0.0, 2.0, 5.0)
-# Telegram сам гасит typing-action примерно через 5с — повторяем чуть чаще,
-# чтобы индикатор не мигал видимым образом.
 TYPING_KEEPALIVE_INTERVAL_S = 4.0
-# Защитный потолок для TypingIndicator.start() без последующего stop() —
-# тот же приём, что и _KEEPALIVE_MAX_IDLE_S в rich_stream.py: сессия должна
-# всегда дойти до места, которое останавливает индикатор (push_status/
-# finalize/finalize_status), это подстраховка на случай, если её всё же
-# бросят, не закрыв. 450 тиков * 4с = 30 минут — тот же запас, что и у
-# keep-alive черновика.
 TYPING_MAX_TICKS = 450
 
 
 class TypingIndicator:
-    """Индикатор «печатает» с независимыми start()/stop() — для мест, где
-    его нужно включать/выключать по ходу дела, а не одним блоком на весь
-    запрос (см. typing_action() ниже про такой блок).
-
-    Решение пользователя 2026-08-11: индикатор должен гореть ровно пока
-    в чат реально льётся текст ответа, а не пока модель «думает» или «идёт»
-    (router-проход, статусы тулов, ожидание пробуждения, распознавание
-    голосового) — там уже есть свой thinking-блок со статусом
-    (RichStreamSession.push_status), дублировать typing поверх него не
-    нужно. RichStreamSession включает этот индикатор из _push_markdown
-    (реальный кусок текста) и выключает из _push_thinking/_send_persisted
-    (статус или финал).
-
-    Этап 34.3 (2026-09-30): при стриме черновиком RichStreamSession этот
-    индикатор больше не включает вовсе — сам черновик и есть знак, что
-    ответ идёт, а параллельный send_chat_action раз в 4 с лишь добавлял
-    клиенту обновлений (Android подвисал). Индикатор остаётся для
-    rich-режима без черновика (LlmConfig.rich_draft_streaming=False) и для
-    фолбэк-путей (typing_action ниже)."""
-
     def __init__(self, bot: Bot, chat_id: int, message_thread_id: int | None = None) -> None:
         self._bot = bot
         self._chat_id = chat_id
         self._message_thread_id = message_thread_id
         self._task: asyncio.Task | None = None
-        # Сколько раз реально ушёл send_chat_action (с успехом или нет) —
-        # для итоговой строки сессии (RichStreamSession, этап 34.3).
         self.sends = 0
 
     async def _send(self) -> None:
@@ -84,11 +47,7 @@ class TypingIndicator:
             await self._bot.send_chat_action(
                 self._chat_id, "typing", message_thread_id=self._message_thread_id
             )
-        except Exception:  # noqa: BLE001 — не критично, просто не обновится в этот раз
-            # Живая находка 2026-08-29 (см. rich_stream.py::_send_draft):
-            # сетевые сбои вроде aiohttp_socks.ProxyTimeoutError не
-            # подклассы TelegramAPIError и раньше улетали наверх, хотя
-            # индикатор — некритичный побочный эффект, не сам ответ.
+        except Exception:  # noqa: BLE001
             pass
 
     async def _loop(self) -> None:
@@ -97,16 +56,8 @@ class TypingIndicator:
             await self._send()
 
     async def start(self) -> None:
-        """No-op, если уже горит — вызывающие (RichStreamSession) зовут это
-        на каждый кусок текста, не только на первый."""
         if self._task is not None and not self._task.done():
             return
-        # Первый вызов — сразу и синхронно, не через create_task: если
-        # дальнейший код ни разу по-настоящему не приостановится (нет
-        # реального I/O-ожидания на своём пути), фоновая задача рискует не
-        # получить ни одного шанса выполниться до stop() — индикатор не
-        # загорелся бы вовсе. Цикл-повтор ниже нужен только чтобы Telegram
-        # не погасил его сам примерно через 5с.
         await self._send()
         self._task = asyncio.create_task(self._loop())
 
@@ -121,10 +72,6 @@ class TypingIndicator:
 
 @contextlib.asynccontextmanager
 async def typing_action(bot: Bot, chat_id: int, message_thread_id: int | None = None):
-    """Держать индикатор «печатает» в чате на весь блок — для путей без
-    покускового стрима (группы/фолбэк без rich-сессии), где нет отдельного
-    сигнала "текст реально льётся" и лучшее приближение — вся генерация
-    ответа целиком (см. bot/ai_flow.py::_typing_while_asking)."""
     indicator = TypingIndicator(bot, chat_id, message_thread_id)
     await indicator.start()
     try:
@@ -134,33 +81,12 @@ async def typing_action(bot: Bot, chat_id: int, message_thread_id: int | None = 
 
 
 def is_permanent_send_error(exc: BaseException) -> bool:
-    """Сбой доставки, который повтором ТОГО ЖЕ payload не лечится — ретраить
-    его бессмысленно, вызывающий должен деградировать формат или сообщить
-    об отказе:
-
-    - ``TelegramBadRequest`` — Bot API отверг сам запрос: битая разметка
-      rich/HTML, «message is too long», нерезолвимый reply и т.п.;
-    - ``TelegramForbiddenError`` — бот заблокирован/удалён из чата;
-    - ``TelegramNotFound`` — чат или сообщение не существует.
-
-    Всё остальное считаем транзиентным и повторяем: сетевые таймауты и
-    обрывы, в т.ч. ``aiohttp_socks.ProxyError``/``ProxyTimeoutError``
-    зависшего прокси до Telegram (обычные ``Exception``, не подклассы
-    ``TelegramAPIError`` — живая находка 2026-08-29), 5xx от Telegram.
-    На «терять нельзя» путях (rich_stream.finalize) лучше зря сделать пару
-    лишних попыток и всё равно сдаться, чем сдаться на первом же моргании
-    связи (живая находка 2026-08-30: первый же не-429 сбой давал
-    ``return None`` — молча терялся готовый ответ модели)."""
     return isinstance(exc, (TelegramBadRequest, TelegramForbiddenError, TelegramNotFound))
 
 
-async def _after_send_failure(
+async def _wait_and_report_if_retryable(
     exc: BaseException, action: str, chat_id: int, attempt: int
 ) -> bool:
-    """Разобрать неудачную попытку отправки (не 429). Вернуть ``True`` —
-    сбой транзиентный и попытки ещё есть, стоит повторить (пауза уже
-    выждана здесь); ``False`` — сдаться (перманентный сбой либо попытки
-    кончились). Общий хвост для всех циклов отправки ниже."""
     if is_permanent_send_error(exc):
         log.warning(
             "Не удалось отправить %s в chat=%s (перманентный сбой, без ретрая): %s",
@@ -183,25 +109,6 @@ async def send_with_retry(
     call: Callable[[], Awaitable[_T]],
     outcome: dict | None = None,
 ) -> _T | None:
-    """Общий цикл ретраев отправки (MAX_RETRIES попыток) — вынесен для
-    bot/rich_stream.py (этап 34, Фаза 2), чтобы не копировать цикл
-    ``Notifier._send_one`` под sendRichMessage. ``action`` — короткое
-    описание для логов ("rich-сообщение" и т.п.).
-
-    - ``TelegramRetryAfter`` (429): полноценный sleep(retry_after+1),
-      повтор, попытка НЕ расходуется (лимит — не наш сбой);
-    - транзиентный сетевой сбой (обрыв/таймаут связи, зависший SOCKS-
-      прокси до Telegram, 5xx): пауза по ``_TRANSIENT_BACKOFF_S``, повтор.
-      Живая находка 2026-08-30: раньше первый же такой сбой давал
-      ``return None`` — на ``rich_stream.finalize()`` это молча теряло уже
-      готовый ответ модели;
-    - перманентный сбой (``is_permanent_send_error``: битая разметка,
-      бот заблокирован, чат не найден): ``return None`` сразу, повтор
-      бессмыслен — вызывающий деградирует формат/сообщает об отказе.
-
-    ``outcome`` (необязательно, Этап 52) — словарь, куда пишется
-    ``transient=True``, если сдались из-за ТРАНЗИЕНТНОГО сбоя (кончились
-    попытки) — такое сообщение стоит поставить в outbox."""
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             return await call()
@@ -209,8 +116,8 @@ async def send_with_retry(
             wait = exc.retry_after + 1
             log.warning("429 от Telegram (chat=%s, %s), жду %ss", chat_id, action, wait)
             await asyncio.sleep(wait)
-        except Exception as exc:  # noqa: BLE001 — CancelledError не Exception, проходит мимо
-            if not await _after_send_failure(exc, action, chat_id, attempt):
+        except Exception as exc:  # noqa: BLE001
+            if not await _wait_and_report_if_retryable(exc, action, chat_id, attempt):
                 if outcome is not None and not is_permanent_send_error(exc):
                     outcome["transient"] = True
                 return None
@@ -253,19 +160,11 @@ async def notify_admins(
 
 class Notifier:
     def __init__(self, bot: Bot, outbox: Store | None = None) -> None:
-        """``outbox`` — Store с таблицей outbox (Этап 52): текст, не
-        доставленный из-за транзиентного сбоя, ставится в постоянную очередь
-        (флаш — bot/outbox.py). None — прежнее поведение (потеря после ретраев)."""
         self._bot = bot
         self._outbox = outbox
 
     @property
     def bot(self) -> Bot:
-        """Экземпляр aiogram Bot — нужен местам, которым нужна не сама
-        отправка обычного sendMessage (send_direct ниже), а другая механика
-        Bot API поверх того же бота (RichStreamSession, bot/rich_stream.py —
-        см. bot/node_events.py::_handle_task_prewake, где служба tasks шлёт
-        «шаги»/«Агнольд» тем же rich-путём, что и живой /ai)."""
         return self._bot
 
     async def send_direct(
@@ -278,19 +177,6 @@ class Notifier:
         outbox_kind: str = OUTBOX_KIND_INTERACTIVE,
         dedup_key: str | None = None,
     ) -> int | None:
-        """Отправить сообщение. Вернуть message_id первого чанка или None при провале.
-
-        ``outbox_kind`` (OUTBOX_KIND_* из db/store.py) задаёт TTL очереди,
-        ``dedup_key`` — «свежее вытесняет старое»; обоим есть дело только
-        если у Notifier есть outbox и сбой транзиентный (Этап 52).
-
-        ``reply_markup`` вешается на ПЕРВЫЙ чанк: кнопка относится к
-        сообщению целиком, а не к его хвосту (у длинных текстов чанков
-        несколько, см. chunk_text). ``message_thread_id`` — топик личного
-        чата (Private Chat Topics, bot/handlers/ai.py): без него
-        проактивная отправка (не ответ на сообщение) уезжает в общий топик,
-        а не туда, где пользователь реально смотрит переписку (живой баг
-        vpn: конфиг/QR/APK терялись из вида в топике — 2026-08-03)."""
         chunks = chunk_text(text)
         first_message_id: int | None = None
         for i, chunk in enumerate(chunks):
@@ -302,7 +188,7 @@ class Notifier:
                 else None
             )
             outcome: dict = {}
-            message_id = await self._send_one(
+            message_id = await self._send_chunk(
                 chat_id,
                 chunk,
                 reply,
@@ -312,7 +198,7 @@ class Notifier:
             )
             if message_id is None:
                 if outcome.get("transient") and self._outbox is not None:
-                    await self._enqueue_rest(
+                    await self._enqueue_undelivered_chunks(
                         chat_id, chunks[i:], i == 0, reply_to_message_id,
                         reply_markup if i == 0 else None, message_thread_id,
                         outbox_kind, dedup_key, i,
@@ -322,7 +208,7 @@ class Notifier:
                 first_message_id = message_id
         return first_message_id
 
-    async def _enqueue_rest(
+    async def _enqueue_undelivered_chunks(
         self,
         chat_id: int,
         chunks: list[str],
@@ -334,8 +220,6 @@ class Notifier:
         dedup_key: str | None,
         first_index: int,
     ) -> None:
-        """Поставить недоставленные чанки в outbox по порядку. Любой сбой самой
-        очереди не должен ронять отправителя — только в лог."""
         now = datetime.now(UTC)
         try:
             for n, chunk in enumerate(chunks):
@@ -360,7 +244,7 @@ class Notifier:
         except Exception:  # noqa: BLE001
             log.exception("Не удалось поставить сообщение в outbox (chat=%s)", chat_id)
 
-    async def _send_one(
+    async def _send_chunk(
         self,
         chat_id: int,
         text: str,
@@ -390,10 +274,6 @@ class Notifier:
         text: str,
         reply_markup: InlineKeyboardMarkup | None = None,
     ) -> bool:
-        """Переписать уже отправленное сообщение (форма подтверждения после
-        решения, Этап 45 — bot/pending_actions.py). Без reply_markup кнопки
-        убираются. False — не удалось (сообщение удалено, «not modified» и
-        т.п.): для вызывающих это не ошибка, итог уже записан в БД."""
         msg = await send_with_retry(
             chat_id,
             "правка сообщения",
@@ -406,8 +286,6 @@ class Notifier:
     async def edit_markup(
         self, chat_id: int, message_id: int, reply_markup: InlineKeyboardMarkup | None
     ) -> bool:
-        """Сменить или снять (None) кнопки под сообщением — форма, которую
-        гость проигнорировал (bot/interactives/engine.py::dismiss_buttons)."""
         msg = await send_with_retry(
             chat_id,
             "правка кнопок",
@@ -426,8 +304,6 @@ class Notifier:
         reply_markup: InlineKeyboardMarkup | None = None,
         photo: bool = True,
     ) -> bool:
-        """Переписать подпись фото (``photo``) или текст сообщения вместе с
-        кнопками — карточка предмета, свёрнутая из перечня действий."""
         if not photo:
             return await self.edit_text(chat_id, message_id, caption, reply_markup=reply_markup)
         msg = await send_with_retry(
@@ -448,16 +324,6 @@ class Notifier:
         caption: str | None = None,
         message_thread_id: int | None = None,
     ) -> tuple[int, str] | None:
-        """Отправить документ: байты (``BufferedInputFile`` или голый
-        ``bytes`` + ``filename`` — второе нужно вызывающим без aiogram,
-        см. bot/tools.py) или уже загруженный в Telegram ``file_id``
-        (строка) — тогда байты никуда не едут, Telegram переиспользует
-        прежнюю загрузку.
-
-        Возвращает ``(message_id, file_id)`` — второе нужно вызывающему,
-        чтобы запомнить file_id и не гонять файл повторно (см.
-        bot/vpn_apk.py::deliver_apk). ``message_thread_id`` — см.
-        send_direct."""
         if isinstance(document, bytes):
             document = BufferedInputFile(document, filename=filename or "file")
         msg = await send_with_retry(
@@ -503,11 +369,6 @@ class Notifier:
         has_spoiler: bool = False,
         reply_markup: InlineKeyboardMarkup | None = None,
     ) -> tuple[int, str] | None:
-        """Фото байтами ИЛИ уже загруженное в Telegram (``str`` — file_id).
-        Возвращает (message_id, file_id самого крупного размера) — вызывающий
-        сохраняет file_id, чтобы повторная отправка не гоняла байты
-        (Этап 48, bot/image_tools.py). ``None`` — не отправилось.
-        ``reply_markup`` — кнопки под фото (карточка предмета, Этап 49.3)."""
         media = BufferedInputFile(photo, filename=filename) if isinstance(photo, bytes) else photo
         extra = {"reply_markup": reply_markup} if reply_markup is not None else {}
         reply = (
@@ -553,5 +414,5 @@ class Notifier:
         return msg.message_id if msg is not None else None
 
     async def delete_message(self, chat_id: int, message_id: int) -> None:
-        with contextlib.suppress(Exception):  # noqa: BLE001 — необязательная уборка
+        with contextlib.suppress(Exception):  # noqa: BLE001
             await self._bot.delete_message(chat_id, message_id)

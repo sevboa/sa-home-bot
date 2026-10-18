@@ -1,27 +1,3 @@
-"""«Альфред в городе» (Этап 51): проход раз в минуту и возвращение.
-
-``AwayRunner`` — периодическая задача бота (не таймер в памяти: вся
-арифметика сроков идёт по записи ``app_state["alfred_away"]``, которую
-правят и бот, и CLI): сообщения владельцу от CLI, напоминание за 15 минут до
-срока, принудительное возвращение по потолку 24 ч и разбор очереди, когда
-возвращение объявлено (``/back``, кнопка, потолок).
-
-``AwayReturn`` — сам разбор очереди (IMPLEMENTATION_PLAN.md, этап 51,
-«Возвращение»):
-
-1. ждём готовности LLM на mycraft (существующая логика пробуждения,
-   wake_core.ensure_service_ready); пока не готова — гости видят «вот-вот
-   вернётся», следующий проход повторит попытку;
-2. чаты из ``pending`` — строго по одному (у Ollama одна очередь);
-3. в чате: отложенные голосовые по порядку через voice_stt (транскрипт
-   подменяет заглушку в той же записи ai_turns), затем ОДИН запрос к Альфреду
-   через обычный путь (bot/handlers/ai.py::_ask_and_reply) с system-вставкой
-   «ты вернулся из города»; ответ — реплаем на последнее сообщение;
-4. чат снимается с ``pending`` только после доставленного ответа; состояние
-   разбора — в БД (ai_turns, away_media, запись alfred_away), поэтому падение
-   на середине продолжается с места остановки.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -63,7 +39,6 @@ log = logging.getLogger(__name__)
 
 TICK_S = 60.0
 
-# System-вставка перед последней репликой собеседника — в образе, текст из плана.
 RETURN_NOTE = (
     "Ты только что вернулся в замок из города, куда спускался по делам; пока "
     "тебя не было, тебе написали — ответь на всё разом, в образе, можно коротко "
@@ -78,9 +53,6 @@ DROPPED_TEXT = (
 
 
 def build_message(bot: Bot | None, chat_id: int, entry: dict[str, Any]) -> Message:
-    """Синтетическое «последнее сообщение» чата из записи очереди — чтобы
-    вернуться по тому же пути ``_ask_and_reply``, что и живой диалог (ответ
-    реплаем на это сообщение, топик, собеседник для заметки Альфреду)."""
     user = entry.get("user")
     thread_id = entry.get("thread_id")
     message = Message(
@@ -106,8 +78,6 @@ def build_message(bot: Bot | None, chat_id: int, entry: dict[str, Any]) -> Messa
 
 
 class AwayReturn:
-    """Разбор очереди ``pending`` после возвращения Альфреда."""
-
     def __init__(
         self,
         service: AwayService,
@@ -134,7 +104,6 @@ class AwayReturn:
         self._interactives = interactives
 
     async def run_pass(self) -> int:
-        """Один проход по очереди. Возвращает число чатов, снятых с очереди."""
         state = await self._service.load()
         if state is None or state.phase != PHASE_RETURNING:
             return 0
@@ -156,9 +125,7 @@ class AwayReturn:
             return 0
 
         done = 0
-        failed: set[str] = set()  # чат, на который не вышло ответить, — до следующего прохода
-        # Пока есть прогресс: пока отвечали одному чату, в другой (или в тот же)
-        # могли написать ещё — тогда он остался в очереди и идёт на следующий круг.
+        failed: set[str] = set()
         while True:
             state = await self._service.load()
             if state is None or state.phase != PHASE_RETURNING:
@@ -178,14 +145,11 @@ class AwayReturn:
                 return done
 
     async def _handle_chat(self, node_link: ServiceLink, chat_id: int) -> bool:
-        """Ответить одному чату. True — чат снят с очереди с ответом;
-        False — ответа нет (попытка записана)."""
         state = await self._service.load()
         entry = state.pending.get(str(chat_id)) if state else None
         if entry is None:
             return False
         try:
-            # Новые голосовые могли прийти, пока разбирали прежние.
             for _ in range(3):
                 if not await self._transcribe_media(node_link, chat_id):
                     break
@@ -199,13 +163,12 @@ class AwayReturn:
                 self._store, self._config, chat_id, dialogue_id
             )
             if not history or history[-1].get("role") != "user":
-                # Отвечать не на что — просто снять чат.
                 await self._service.finish_chat(chat_id, last_id)
                 return True
             history.insert(len(history) - 1, wrap_context_note(RETURN_NOTE))
             message = build_message(self._notifier.bot, chat_id, entry)
             raw = await self._ask(message, node_link, dialogue_id, history)
-        except Exception:  # noqa: BLE001 — один чат не должен остановить остальные
+        except Exception:  # noqa: BLE001
             log.exception("away: возвращение — чат %s не разобран", chat_id)
             raw = None
             last_id = 0
@@ -225,7 +188,6 @@ class AwayReturn:
         dialogue_id: int,
         history: list[dict[str, Any]],
     ) -> str | None:
-        # Импорт здесь: хендлер сам импортирует bot/away.py.
         from sa_home_bot.bot.handlers import ai as ai_handler  # noqa: PLC0415
 
         return await ai_handler._ask_and_reply(
@@ -244,11 +206,8 @@ class AwayReturn:
             interactives=self._interactives,
         )
 
-    # --- голосовые ---
 
     async def _transcribe_media(self, node_link: ServiceLink, chat_id: int) -> bool:
-        """Распознать ждущие файлы чата по порядку, подменяя заглушки в ai_turns.
-        True — что-то обработано (стоит проверить, не пришло ли ещё)."""
         rows = await self._store.away_media_for_chat(chat_id)
         handled = False
         used_n = 0
@@ -257,7 +216,6 @@ class AwayReturn:
             message_id = int(row["message_id"])
             turn = await self._store.ai_turn(chat_id, message_id)
             if turn is None or not is_media_stub(str(turn["content"])):
-                # Уже подменено до падения — осталось убрать след.
                 await self._drop_media(row)
                 continue
             handled = True
@@ -277,7 +235,6 @@ class AwayReturn:
     async def _recognize(
         self, node_link: ServiceLink, chat_id: int, row: dict[str, Any]
     ) -> str:
-        """Транскрипт файла; пустая строка — не вышло (текст пометки выбирает вызывающий)."""
         raw = await self._read_media(row)
         if raw is None:
             return ""
@@ -288,7 +245,6 @@ class AwayReturn:
             return ""
 
     async def _read_media(self, row: dict[str, Any]) -> bytes | None:
-        """Файл с диска alfred; нет его — по запасному file_id из Telegram."""
         path = row.get("path")
         if path:
             with contextlib.suppress(OSError):
@@ -303,7 +259,6 @@ class AwayReturn:
         return None
 
     async def _drop_media(self, row: dict[str, Any]) -> None:
-        """Файл и строка away_media не нужны после подмены заглушки."""
         path = row.get("path")
         if path:
             with contextlib.suppress(OSError):
@@ -312,9 +267,6 @@ class AwayReturn:
 
 
 class AwayRunner:
-    """Проход раз в минуту: владельцу — сообщения CLI, напоминание, потолок;
-    при возвращении — разбор очереди."""
-
     def __init__(
         self,
         service: AwayService,
@@ -332,7 +284,6 @@ class AwayRunner:
         self._kick = asyncio.Event()
 
     def kick(self) -> None:
-        """Не ждать минуту: ``/back`` хочет начать разбор сразу."""
         self._kick.set()
 
     async def run(self) -> None:
@@ -341,7 +292,7 @@ class AwayRunner:
                 await self.tick()
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 — задача живёт до останова бота
+            except Exception:  # noqa: BLE001
                 log.exception("away: проход не удался")
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._kick.wait(), self._tick_s)

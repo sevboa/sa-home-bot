@@ -1,13 +1,3 @@
-"""Меню/help не должны показывать параметризованные apps-действия голыми.
-
-Живой баг 2026-07-18: describe службы apps отдаёт вперемешку действия per-app
-(id приложения, без параметров — карточка) и общие управляющие start/stop/
-restart (обязательный параметр "какое приложение" — кнопки НА карточке).
-build_menu_commands/build_help добавляли и вторые тоже как голые команды
-/start, /stop, /restart — без приложения они бессмысленны (или падают
-"нет такого приложения: ''").
-"""
-
 from __future__ import annotations
 
 from sa_home_bot.bot.handlers.basic import build_help

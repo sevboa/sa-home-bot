@@ -1,10 +1,3 @@
-"""Парсинг payload'ов монитора (get_state / события) в доменные объекты.
-
-Обратная сторона сериализации в ``monitor.service`` и ``monitor.dispatch``:
-бот получает по протоколу голые dict'ы и восстанавливает из них модели для
-рендера. Невалидный payload → KeyError/ValueError, вызывающий решает сам.
-"""
-
 from __future__ import annotations
 
 from datetime import datetime
@@ -32,7 +25,7 @@ def parse_health_state(raw: dict[str, Any]) -> HealthState:
         label=raw["label"],
         status=raw["status"],
         temperature_c=raw["temperature_c"],
-        consecutive_count=0,  # деталь гистерезиса, наружу монитор её не отдаёт
+        consecutive_count=0,
         alerting_since=_dt(raw.get("alerting_since")),
     )
 
@@ -45,7 +38,7 @@ def parse_host_metric_state(raw: dict[str, Any]) -> HostMetricState:
         value=raw["value"],
         unit=raw.get("unit", ""),
         status=raw["status"],
-        consecutive_count=0,  # деталь гистерезиса, монитор её наружу не отдаёт
+        consecutive_count=0,
         alerting_since=_dt(raw.get("alerting_since")),
     )
 
@@ -64,8 +57,6 @@ def parse_host_event(event_type: str, data: dict[str, Any]) -> HostEvent:
 
 
 def parse_disk_summary(raw: dict[str, Any]) -> DiskSummary:
-    # kind появился позже label: старый монитор его не шлёт — выводим из
-    # метки (eMMC узнаваема), остальное честно деградирует к hdd.
     kind = raw.get("kind") or ("emmc" if raw["label"] == "eMMC" else "hdd")
     return DiskSummary(
         label=raw["label"],
