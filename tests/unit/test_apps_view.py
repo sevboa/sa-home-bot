@@ -153,3 +153,37 @@ async def test_run_app_skill_unavailable_when_disconnected():
     text, keyboard = await run_app_skill(link, _sub_with("start@apps"), "start", "qbittorrent")
     assert "недоступна" in text
     assert keyboard is None
+
+
+_NAME_PARAM = ActionParam(name="name", type="string", required=True, choices=("jellyfin",))
+
+_PARAMETERIZED_APP_ACTIONS = [
+    ActionSpec(id="jellyfin", title="🎬 Jellyfin"),
+    ActionSpec(id="start", title="▶️ Запустить", params=(_NAME_PARAM,)),
+    ActionSpec(id="stop", title="⏹ Остановить", params=(_NAME_PARAM,)),
+    ActionSpec(id="restart", title="🔄 Перезапустить", params=(_NAME_PARAM,)),
+]
+
+
+def _parameterized_sub() -> Subscription:
+    return Subscription(
+        chat_id=1,
+        name="me",
+        allowed_commands=frozenset(
+            {"jellyfin@apps", "start@apps", "stop@apps", "restart@apps"}
+        ),
+    )
+
+
+def test_menu_commands_skip_parameterized_app_actions():
+    menu = build_menu_commands(_parameterized_sub(), _PARAMETERIZED_APP_ACTIONS)
+    names = {c.command for c in menu}
+    assert "jellyfin" in names
+    assert names.isdisjoint({"start", "stop", "restart"})
+
+
+def test_help_skips_parameterized_app_actions():
+    text = build_help(_parameterized_sub(), _PARAMETERIZED_APP_ACTIONS)
+    assert "/jellyfin" in text
+    for bare in ("/start —", "/stop —", "/restart —"):
+        assert bare not in text
