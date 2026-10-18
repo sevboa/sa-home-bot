@@ -1,22 +1,8 @@
-"""Общий цикл tool-calling поверх llm.chat (LLM_INTEGRATION_PLAN.md §7.1).
-
-Раньше жил только в bot/ai_flow.py (живой /ai) — вынесен сюда (живая
-находка 2026-07-24, генерализация напоминаний в отдельный сервис задач),
-потому что теперь его использует и служба tasks (bot/ai_flow.py остаётся
-для живого /ai, sa_home_bot.tasks.service — для отложенных задач вида
-"спросить нейронку", в т.ч. созданных самой моделью через тул remind).
-
-Зависит от bot.tools (ToolContext/tools_for) — это чистый Python без
-aiogram (см. докстринг ToolContext), поэтому служба tasks может его
-импортировать, не таща Telegram-зависимости.
-"""
-
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
-import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -27,30 +13,22 @@ from sa_home_bot.bot.service_link import (
     ServiceTimeoutError,
     ServiceUnavailableError,
 )
-from sa_home_bot.proto.messages import ERR_INTERNAL, ERR_UNAVAILABLE, Address, ProtoError
+from sa_home_bot.proto.messages import (
+    ERR_INTERNAL,
+    ERR_UNAVAILABLE,
+    Address,
+    ProtoError,
+    new_id,
+)
+from sa_home_bot.utils.ids import short_token
 
 log = logging.getLogger(__name__)
 
 ACTION_CHAT = "chat"
-# Дублирует llm/service.py::ACTION_CHAT_PROGRESS — тот же приём, что и с
-# ACTION_CHAT выше: этот модуль намеренно не импортирует llm/service.py
-# (используется службой tasks, у которой нет тяжёлых зависимостей LLM-
-# службы, только клиентский ServiceLink).
 ACTION_CHAT_PROGRESS = "chat_progress"
-# Опрос буфера частичной генерации (этап 34, Фаза 2 — Rich-стрим ответов):
-# раз в ~1с, короткий таймаут на сам round-trip (не путать с общим timeout
-# на весь ответ модели, который ждёт вызывающий).
 _POLL_INTERVAL_S = 1.0
 _POLL_TIMEOUT_S = 3.0
 
-# Паузы перед повторами одного раунда chat, если до службы llm в моменте
-# нет связи (решение пользователя 2026-09-25). Живая находка: линк
-# alfred → mycraft переподключился посреди хода (~5 с без связи), раунд после
-# тула упал в unavailable — и гость вместо ответа, для которого всё уже было
-# собрано, получил «Альфреда нет на месте». Паузы покрывают переподключение
-# PeerLink/ServiceLink (RECONNECT_DELAY_S = 5 с у обоих). Повторяем ТОЛЬКО
-# «нет связи»: таймаут значит, что модель уже думала весь бюджет, повтор
-# лишь удвоит ожидание; остальные ошибки детерминированы.
 CHAT_RETRY_DELAYS_S: tuple[float, ...] = (3.0, 6.0)
 
 
@@ -62,40 +40,16 @@ def _is_link_gap(exc: Exception) -> bool:
     return isinstance(exc, ProtoError) and exc.code == ERR_UNAVAILABLE
 
 
-# Сколько раз подряд можно уйти в tool_calls, прежде чем модель обязана дать
-# финальный текстовый ответ — защита от зацикливания (LLM_INTEGRATION_
-# PLAN.md §7.1 п.5).
-#
-# 5 (было 4, решение пользователя 2026-07-27): с появлением web_search модель
-# на одном вопросе делает несколько поисков подряд, переформулируя запрос —
-# на живом вопросе про Нидерланды ушло три раунда только на поиск, и лимита
-# в 4 едва хватало.
 MAX_TOOL_ROUNDS = 5
 
-# Живая находка 2026-09-04: web_search (и в принципе любой тул) может
-# вернуть результат, который сам по себе не гигантский, но несколько таких
-# подряд в одном раунде tool-calling (см. MAX_TOOL_ROUNDS выше — модель
-# переформулирует запрос и ищет по несколько раз) добивают контекст модели
-# до предела (num_ctx профиля, llm/model-profiles.toml) — модель тогда
-# возвращает пустую строку без единой ошибки (bot/handlers/ai.py:
-# "пустой ответ модели"). Результаты длиннее лимита в messages не кладём
-# целиком: сохраняем полный текст в tool_ctx.tool_result_cache и даём
-# модели укороченный превью с id — если деталей не хватит, модель сама
-# зовёт recall_tool_result(id) (см. bot/tools.py) и получает полный текст
-# вторым раундом, вместо того чтобы всегда таскать его в каждом сообщении.
 _TOOL_RESULT_INLINE_LIMIT = 1000
 _TOOL_RESULT_PREVIEW_CHARS = 600
 
 
 def _inline_or_cache(tool_ctx: ai_tools.ToolContext, tool_result: str) -> str:
-    """Результат тула как он идёт в ``messages`` — целиком, если короткий,
-    иначе укороченное превью + id для recall_tool_result (см. константы
-    выше). Полный текст остаётся доступен через ``tool_ctx.tool_result_cache``
-    независимо от того, что здесь возвращено — вызывающий (on_tool_call)
-    пишет в durable-трассу (ai_tool_calls) именно его, не это превью."""
     if len(tool_result) <= _TOOL_RESULT_INLINE_LIMIT:
         return tool_result
-    recall_id = uuid.uuid4().hex[:8]
+    recall_id = short_token()
     tool_ctx.tool_result_cache[recall_id] = tool_result
     return (
         f"{tool_result[:_TOOL_RESULT_PREVIEW_CHARS]}\n"
@@ -104,42 +58,14 @@ def _inline_or_cache(tool_ctx: ai_tools.ToolContext, tool_result: str) -> str:
     )
 
 
-# (имя тула, аргументы, результат) — вызывается после каждого тула. Этот
-# модуль сам БД не трогает (см. докстринг модуля — им пользуется и служба
-# tasks, у которой БД бота нет вовсе); колбэк передаёт вызывающий (живой
-# /ai в bot/ai_flow.py пишет в Store.record_tool_call, tasks его просто не
-# передаёт — см. schema.sql::ai_tool_calls).
 ToolCallSink = Callable[[str, dict[str, Any], str], Awaitable[None]]
 
-# (имя тула, аргументы) — вызывается ПЕРЕД хендлером тула (в отличие от
-# ToolCallSink выше, который зовётся после, с результатом — для durable-
-# записи). Живая находка 2026-08-10: пользователь захотел, чтобы статусная
-# фраза ("Альфред проверяет погоду...") появлялась, пока тул реально
-# выполняется, а не постфактум — для медленных тулов (web_search, torrents)
-# постфактум-уведомление не даёт ощущения "происходит прямо сейчас".
 ToolStartSink = Callable[[str, dict[str, Any]], Awaitable[None]]
 
-# Ремарка «Логопеда» (llm/speech_therapy.py) на финальный текстовый ответ —
-# отдельно от response, чтобы вызывающий мог отправить её отдельным
-# сообщением ПОСЛЕ ответа Альфреда (решение пользователя 2026-08-03: раньше
-# ремарка дописывалась в тот же текст и уезжала одним сообщением, к тому же
-# ломано отформатированным — см. bot/ai_flow.py::request_alfred).
 SpeechRemarkSink = Callable[[str], Awaitable[None]]
 
 @dataclass
 class ChatStats:
-    """Счётчики окна за один ход /ai (Этап 50, 2026-09-30) — служба llm
-    отдаёт их в каждом раунде chat (llm/service.py::_usage), run_chat_loop
-    складывает сюда, если вызывающий передал ячейку.
-
-    ``first_prompt_tokens`` — промпт ПЕРВОГО раунда хода (история + заметка,
-    ещё без результатов тулов этого хода): по нему бот оценивает, сколько
-    места занимает сама история (bot/dialogue_context.py). ``max_prompt_tokens``
-    — самый большой промпт хода (с результатами тулов) — для лога и
-    страховки. ``done_reason`` — последнего раунда: ``length`` значит, что
-    окно кончилось посреди генерации (обрывок или пустой ответ).
-    """
-
     first_prompt_tokens: int | None = None
     max_prompt_tokens: int = 0
     eval_tokens: int = 0
@@ -169,12 +95,6 @@ class ChatStats:
         return self.done_reason == "length"
 
 
-# Кусок накопленного (не дельта) текста текущего раунда + флаг "раунд
-# завершён" — этап 34, Фаза 2. Вызывается на каждый тик опроса
-# chat_progress, ПОКА идёт конкретный раунд tool-calling; раунд, который
-# оказался tool-calling-раундом (не финальным), просто не попадёт в
-# персистентный rich-ответ — это решает вызывающий (bot/rich_stream.py),
-# не этот модуль.
 PartialSink = Callable[[str, bool], Awaitable[None]]
 
 
@@ -184,18 +104,6 @@ async def _poll_partial(
     request_id: str,
     on_partial: PartialSink,
 ) -> None:
-    """Раз в ~1с опрашивать llm.chat_progress, пока раунд не завершится —
-    тот же паттерн опроса, что wake_core.py::wait_for_service/fetch_state,
-    только вместо get_state зовём command с параметром: get_state параметров
-    не принимает (PROTOCOL.md), а Альфред может вести несколько диалогов
-    одновременно (разные чаты семьи) — частичный текст держится по
-    request_id, не одним полем состояния службы.
-
-    Финальный текст ответа вызывающий всё равно берёт из результата
-    основного ``command(ACTION_CHAT, ...)``, не отсюда — сбой опроса не
-    критичен, в худшем случае превью отстаёт от реальной генерации на
-    несколько тиков. Останавливается сама на ``done=True`` от службы или по
-    отмене задачи вызывающим (когда основной command() уже резолвился)."""
     while True:
         await asyncio.sleep(_POLL_INTERVAL_S)
         try:
@@ -233,78 +141,12 @@ async def run_chat_loop(
     stats: ChatStats | None = None,
     allow_tools: bool = True,
 ) -> str:
-    """Один проход диалога с моделью: раунды tool-calling (до
-    MAX_TOOL_ROUNDS), пока не придёт финальный текст.
-
-    Если лимит раундов исчерпан, а модель всё ещё зовёт инструменты, проход
-    НЕ падает: делается ещё один запрос без деклараций инструментов — звать
-    нечего, и модель формулирует ответ из уже собранного (см. конец функции).
-
-    ``messages`` мутируется по ходу (дописываются tool_calls/результаты) —
-    вызывающий передаёт отдельный список на каждый проход, если хочет
-    сохранить исходную историю чистой. ``tool_ctx.history`` привязывается к
-    этому же списку (та же ссылка) — тул remind видит в нём ровно то, что
-    сейчас видит модель (включая уже случившиеся раунды tool-calling), не
-    отдельный запрос к БД (у службы tasks её и нет).
-
-    ``role`` — какой системный промпт использует служба llm (см.
-    llm/service.py, llm/prompt.py): ``None``/не передан — персонаж Альфреда
-    (по умолчанию, как было всегда), ``"router"`` — служебный триаж без
-    персонажа (живая находка 2026-07-25: см. llm/prompt.py::
-    ROUTER_SYSTEM_PROMPT про то, почему триаж выделен в отдельный вызов).
-
-    ``reason`` — намерение-уровень рассуждения: ``off`` / ``low`` / ``medium``
-    / ``high`` (индекс = уровень, который выдал router-проход, см.
-    llm/prompt.py::parse_router_level). Как этот уровень превратится в
-    конкретный параметр Ollama — решает профиль модели на стороне службы llm
-    (llm/model_profiles.py), сюда знание про механизм не течёт. Router-проход
-    всегда шлёт ``off``.
-
-    ``on_partial`` — этап 34, Фаза 2 (Rich-стрим ответов): не передан —
-    поведение не меняется вовсе (обычный блокирующий command(), так вызывает
-    служба tasks). Передан — каждый раунд идёт со своим request_id и
-    параллельным опросом chat_progress (см. _poll_partial выше), колбэк
-    зовётся на каждый тик текущего раунда; какой из раундов в итоге
-    персистится как настоящий ответ — решает вызывающий, не этот цикл.
-
-    ``on_tool_start`` — уведомление ДО выполнения тула (имя, аргументы),
-    в отличие от ``on_tool_call`` (после, с результатом — durable-запись).
-    Чистый side-effect, ничего не блокирует и не меняет; не зовётся для
-    неизвестного модели тула (там и выполнять нечего).
-
-    ``photo_key`` — мультимодальный /ai (2026-08-10): передан на КАЖДЫЙ
-    раунд как есть (не только на первый), но реально используется службой
-    llm только если ПОСЛЕДНИЙ элемент ``messages`` в этом конкретном
-    раунде несёт ``raw_image`` (см. llm/service.py::run_command) — на
-    раундах после tool-calling, где последний элемент уже не фото-ход, он
-    просто игнорируется. Само значение вычисляет bot/ai_flow.py::
-    photo_key_for(message) — детерминированно, без похода в БД.
-
-    ``speech_user_id``/``speech_clear`` — Этап 47: кому адресован ответ и
-    выключена ли у него картавость (БД бота, bot/interactives). Служба llm
-    применяет их к Логопеду и заодно чинит своё зеркало (llm/service.py::
-    _speech_target). Служба tasks их не передаёт — там chat_id.
-    ``speech_clear`` может быть функцией — тогда флаг перечитывается перед
-    каждым раундом: гость мог сменить передатчик кнопкой посреди хода, и
-    старое значение затёрло бы смену (живой баг 2026-09-28).
-
-    ``stats`` — Этап 50: ячейка под счётчики окна (см. ChatStats), общая на
-    все раунды (и на router- и персонажный проход, если вызывающий передаёт
-    одну и ту же). ``allow_tools=False`` — проход без деклараций тулов вовсе:
-    перегенерация ответа после переполнения окна (bot/ai_flow.py), когда
-    тулы этого хода уже отработали и повторять их побочные эффекты нельзя
-    (заодно промпт легче на все декларации)."""
     tool_ctx.history = messages
-    # Комплект собирается ОДИН раз на проход и по правам собеседника: тула, на
-    # который у него нет прав, модель не видит вовсе (см. bot/tools.py::
-    # tools_for — требование "Альфред не отказывает, а не умеет").
     toolkit = ai_tools.for_context(ai_tools.tools_for(tool_ctx.subscription), tool_ctx)
 
     async def _chat_args(tools: list[dict[str, Any]]) -> dict[str, Any]:
         args: dict[str, Any] = {"messages": messages, "tools": tools, "reason": reason}
         if telegram_chat_id is not None:
-            # chat_id — не для маршрутизации (та по dst), а чтобы служба
-            # llm знала, какие чаты уведомлять при llm_idle_sleep.
             args["chat_id"] = telegram_chat_id
         if role is not None:
             args["role"] = role
@@ -325,12 +167,9 @@ async def run_chat_loop(
             await on_speech_remark(remark)
 
     async def _call_chat(args: dict[str, Any]) -> dict[str, Any]:
-        """Один раунд chat: без on_partial — просто command(), как раньше.
-        С on_partial — плюс параллельная задача опроса chat_progress на
-        время этого конкретного раунда (см. _poll_partial)."""
         if on_partial is None:
             return await node_link.command(ACTION_CHAT, args, dst=dst, timeout=timeout)
-        request_id = uuid.uuid4().hex
+        request_id = new_id()
         streamed_args = {**args, "request_id": request_id}
         poll_task = asyncio.create_task(_poll_partial(node_link, dst, request_id, on_partial))
         try:
@@ -341,9 +180,6 @@ async def run_chat_loop(
                 await poll_task
 
     async def _call_chat_with_retry(args: dict[str, Any]) -> dict[str, Any]:
-        """Раунд chat с повторами на кратковременный обрыв связи (см.
-        CHAT_RETRY_DELAYS_S). Раунд идемпотентен: служба llm только
-        генерирует, тулы исполняются здесь, после ответа."""
         for delay in CHAT_RETRY_DELAYS_S:
             try:
                 return await _call_chat(args)
@@ -375,16 +211,10 @@ async def run_chat_loop(
             fn = call.get("function", {}) if isinstance(call, dict) else {}
             name = fn.get("name", "")
             call_args = fn.get("arguments") or {}
-            # Тот же отфильтрованный комплект, что ушёл в декларации: если
-            # модель выдумает имя тула, которого ей не давали, — сюда она не
-            # пройдёт, права проверены один раз и в одном месте.
-            # allow_tools=False: даже выдуманный моделью вызов не исполняем.
             handler = toolkit.handlers.get(name) if allow_tools else None
             if handler is None:
                 tool_result = f"неизвестный инструмент: {name}"
             elif name in ai_tools.SERIAL_TOOLS and serial_done:
-                # Действия идут по одному (Этап 59.7): следующее модель
-                # назначит, увидев итог предыдущего, — в следующем раунде.
                 tool_result = ai_tools.SERIAL_DEFERRED
             else:
                 serial_done = serial_done or name in ai_tools.SERIAL_TOOLS
@@ -392,14 +222,9 @@ async def run_chat_loop(
                     await on_tool_start(name, call_args)
                 try:
                     tool_result = await handler(tool_ctx, call_args)
-                except Exception as exc:  # noqa: BLE001 — сбой тула не должен ронять диалог
+                except Exception as exc:  # noqa: BLE001
                     log.exception("llm_chat: тул %s упал (chat=%s)", name, log_chat_id)
                     tool_result = f"внутренняя ошибка инструмента: {exc}"
-            # Живая находка 2026-07-24: раньше в проде не было видно вообще,
-            # вызывает ли модель тул и с чем — баг "получил не знаю пояс, но
-            # всё равно придумал время" диагностировать было нечем, кроме
-            # логов Ollama. on_tool_call — durable-версия для живого /ai
-            # (см. ToolCallSink выше).
             log.info(
                 "llm_chat: тул %s(%s) -> %s (chat=%s)", name, call_args, tool_result, log_chat_id
             )
@@ -408,18 +233,7 @@ async def run_chat_loop(
             inline_result = _inline_or_cache(tool_ctx, tool_result)
             messages.append({"role": "tool", "content": inline_result, "name": name})
         if tool_ctx.end_turn:
-            # Тул сам закончил ход (ToolContext.end_turn) — дальше не генерируем.
             return ""
-    # Лимит раундов исчерпан. Раньше здесь был ProtoError → пользователь
-    # получал ALBERT_HICCUP («Альфред отвлёкся, повторите») после того, как
-    # прождал несколько минут, — и это при том, что результаты инструментов
-    # уже лежали в messages, отвечать было ЧЕМ. Живая находка 2026-07-27: на
-    # вопросе про Нидерланды модель сделала три поиска подряд и упёрлась в
-    # лимит буквально на последнем раунде.
-    #
-    # Решение пользователя: не ломаться, а дожать. Последний запрос идёт БЕЗ
-    # деклараций инструментов — тогда модели просто нечего вызвать, и она
-    # обязана сформулировать текст из того, что уже собрала.
     log.info(
         "llm_chat: лимит раундов (%d) исчерпан, дожимаем ответ без тулов (chat=%s)",
         MAX_TOOL_ROUNDS,
@@ -432,6 +246,4 @@ async def run_chat_loop(
     if response:
         await _maybe_send_remark(result)
         return response
-    # Пустой ответ без единого доступного инструмента — это уже не
-    # «зациклилась», а настоящий сбой генерации: сюда и правда нужен HICCUP.
     raise ProtoError(ERR_INTERNAL, "модель не дала ответа после лимита раундов")

@@ -1,10 +1,3 @@
-"""Сборка и жизненный цикл службы graph_memory (отдельный процесс, mycraft).
-
-По образцу memory/app.py (своя БД + ProtoServer) плюс фоновый цикл обработки
-очереди эпизодов, как у tasks/app.py (prewake_task/fire_task) — здесь один
-цикл, _ingest_loop (graph_memory/service.py).
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -27,8 +20,6 @@ async def run_graph_memory(settings: Settings) -> None:
     await apply_migrations(db)
     service = GraphMemoryService(settings, db)
     server = ProtoServer(settings.graph_memory.socket, service, token=settings.swarm.token)
-    # Обработчики сигналов — до start(): он ждёт появления своего адреса
-    # (см. proto/server.py), и всё это время остановка иначе не обрабатывалась бы.
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
     await server.start()

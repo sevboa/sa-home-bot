@@ -1,6 +1,3 @@
-"""Служба memory: запись/поиск/забывание фактов, границы видимости между
-чатами, общее знание дома и пометка личного."""
-
 from __future__ import annotations
 
 import pytest
@@ -37,10 +34,6 @@ async def test_remember_then_recall_by_meaningful_words(svc):
 
 
 async def test_recall_survives_a_different_word_ending(svc):
-    """Живая находка: записали «в озвучкЕ», спросили «какая озвучкА» — и
-    триграммный индекс не нашёл ничего, потому что ищет подстроку целиком.
-    Окончание у слов запроса отрезается — это не морфология, а грубое
-    приближение, но именно оно и нужно."""
     await svc.run_command("remember", {"text": "Смотрим в озвучке LostFilm", "chat_id": FAMILY})
     for query in ("озвучк", "а какая у нас озвучка?", "в какой озвучкой смотрим"):
         found = await svc.run_command("recall", {"query": query, "chat_id": FAMILY})
@@ -54,8 +47,6 @@ async def test_memory_of_one_chat_is_invisible_to_another(svc):
 
 
 async def test_common_knowledge_is_visible_from_every_chat(svc):
-    """Справочник (кто такой Альфред, как выглядит) — не чья-то тайна: его
-    заводят один раз и видно отовсюду."""
     await svc.run_command(
         "remember",
         {"text": "Альфред носит фрак и седые бакенбарды", "chat_id": FAMILY, "scope": "common"},
@@ -67,8 +58,6 @@ async def test_common_knowledge_is_visible_from_every_chat(svc):
 
 
 async def test_guest_family_arg_no_longer_grants_family_scope(svc):
-    """Гостевой флаг «семья» убран 2026-09-27: guest_family от старого бота
-    игнорируется, scope=family — только [memory].family_chat_ids."""
     with pytest.raises(ProtoError):
         await svc.run_command(
             "remember",
@@ -104,7 +93,6 @@ async def test_unknown_scope_is_refused(svc):
 
 async def test_forget_only_touches_own_chat(svc):
     added = await svc.run_command("remember", {"text": "Забывчивый факт", "chat_id": PRIVATE})
-    # Чужой чат знает номер, но стереть не может.
     alien = await svc.run_command("forget", {"id": added["id"], "chat_id": FAMILY})
     assert alien["forgotten"] is False
     own = await svc.run_command("forget", {"id": added["id"], "chat_id": PRIVATE})
@@ -114,7 +102,6 @@ async def test_forget_only_touches_own_chat(svc):
 
 
 async def test_common_knowledge_is_not_erased_from_a_random_chat(svc):
-    """Общее знание заводит человек руками — пусть руками и убирает."""
     added = await svc.run_command(
         "remember", {"text": "Рой состоит из alfred, winpc и jeeves", "chat_id": FAMILY,
                      "scope": "common"}
@@ -139,8 +126,6 @@ async def test_remember_without_chat_id_is_refused(svc):
 
 
 async def test_recall_ignores_short_and_punctuation_only_queries(svc):
-    """Живое сообщение приходит как есть: пунктуация и служебные слова FTS5
-    («AND», «*») не должны ломать разбор запроса."""
     await svc.run_command("remember", {"text": "Кот Барсик спит на роутере", "chat_id": FAMILY})
     for query in ("а он?", "* AND *", "!!!", ""):
         assert (await svc.run_command("recall", {"query": query, "chat_id": FAMILY}))["count"] == 0

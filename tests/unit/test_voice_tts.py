@@ -1,9 +1,3 @@
-"""Синтез голосового ответа на стороне alfred (bot/voice_tts.py).
-
-wake_core.ensure_service_ready замокан целиком (см. test_voice_stt.py про
-тот же приём) — здесь важна только реакция voice_tts на его исход, на
-инлайн/чанкованный ответ службы и на сбои (откат на None, не исключение)."""
-
 from __future__ import annotations
 
 import base64
@@ -13,6 +7,7 @@ from sa_home_bot import wake_core
 from sa_home_bot.bot import voice_tts
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.config import LlmConfig, Settings
+from sa_home_bot.proto import chunks as proto_chunks
 from sa_home_bot.proto.messages import ERR_INTERNAL, ProtoError
 
 
@@ -96,7 +91,7 @@ async def test_returns_none_when_service_not_ready(monkeypatch):
 
     assert result is None
     assert link.commands == []
-    assert message.sent == []  # статус синтеза не показывается, если служба недоступна
+    assert message.sent == []
 
 
 async def test_inline_response_returns_bytes(monkeypatch):
@@ -131,7 +126,7 @@ async def test_chunked_response_downloads_and_verifies_sha256(monkeypatch):
         },
         chunks=chunks,
     )
-    monkeypatch.setattr(voice_tts, "_CHUNK_BYTES", 2000)
+    monkeypatch.setattr(proto_chunks, "CHUNK_BYTES", 2000)
 
     result = await voice_tts.synthesize_voice_reply(
         message, link, store=None, config=_settings(), rich_session=None, text="длинный ответ"

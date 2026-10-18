@@ -1,13 +1,3 @@
-"""Приём и распознавание голосовых на стороне alfred (bot/voice_stt.py).
-
-wake_core.fetch_state/ensure_service_ready замокан целиком — тот сценарий
-уже подробно проверен в test_wake_core.py, здесь важна только реакция
-voice_stt на его исходы (READY/UNREACHABLE/WARMUP_FAILED), на содержимое
-транскрипта и на то, куда идут статусы: message.answer (plain) vs
-push_status/finalize_status общей RichStreamSession (rich, thinking-блок —
-переиспользует персонажные константы ai_flow.STEPS_TEXT/ALBERT_*, см.
-докстринг voice_stt.py)."""
-
 from __future__ import annotations
 
 import io
@@ -61,10 +51,6 @@ class FakeMessage:
 
 
 class FakeRichSession:
-    """Записывает вызовы push_status/finalize_status — реальная
-    RichStreamSession (bot/rich_stream.py) требует настоящий aiogram.Bot,
-    тут важна только последовательность/содержимое статусов."""
-
     def __init__(self) -> None:
         self.statuses: list[str] = []
         self.finalized: list[str] = []
@@ -132,8 +118,6 @@ async def test_unavailable_when_service_not_ready(monkeypatch):
     result = await voice_stt.transcribe_voice_message(message, link, store=None, config=_settings())
 
     assert result is None
-    # Недоступность мycraft — тот же персонаж/текст, что и у текстового /ai
-    # (ai_flow.ALBERT_UNAVAILABLE), не отдельная голосовая копия.
     assert ai_flow.ALBERT_UNAVAILABLE in message.sent
     assert message.bot.download_calls == 0
     assert link.commands == []
@@ -147,8 +131,6 @@ async def test_waiting_text_shown_when_initially_asleep(monkeypatch):
     result = await voice_stt.transcribe_voice_message(message, link, store=None, config=_settings())
 
     assert result == "разбудили и распознали"
-    # "Шаги" (ожидание пробуждения) + "слушаю" (сама транскрипция) — та же
-    # реплика "шагов", что и в текстовом /ai (ai_flow.STEPS_TEXT).
     assert message.sent == [ai_flow.STEPS_TEXT, voice_stt.VOICE_LISTENING_TEXT]
 
 
@@ -162,7 +144,6 @@ async def test_success_returns_transcript_without_waiting_text_when_already_warm
     result = await voice_stt.transcribe_voice_message(message, link, store=None, config=_settings())
 
     assert result == "привет альфред"
-    # Нет "шагов" (mycraft уже не спала) — только статус "слушаю".
     assert message.sent == [voice_stt.VOICE_LISTENING_TEXT]
     action, args = link.commands[0]
     assert action == voice_stt.ACTION_TRANSCRIBE_VOICE
@@ -195,10 +176,6 @@ async def test_service_error_sends_hiccup_text(monkeypatch):
     result = await voice_stt.transcribe_voice_message(message, link, store=None, config=_settings())
 
     assert result is None
-    # Сбой уже ВО ВРЕМЯ распознавания (mycraft была доступна) — тот же
-    # персонаж-текст, что и у сбоя генерации в текстовом /ai
-    # (ai_flow.ALBERT_HICCUP), не ALBERT_UNAVAILABLE (та — только про сам
-    # wake-сценарий).
     assert message.sent == [voice_stt.VOICE_LISTENING_TEXT, ai_flow.ALBERT_HICCUP]
 
 
@@ -206,7 +183,6 @@ async def test_large_voice_uses_chunked_upload_with_session(monkeypatch):
     _patch_wake(
         monkeypatch, fetch_state_result={"asleep": False}, ensure_outcome=wake_core.READY
     )
-    # После base64 (раздувает на треть) должно уйти за _INLINE_VOICE_B64_BYTES.
     payload = b"x" * 1_500_000
     message = FakeMessage(FakeVoice(), payload=payload)
     link = FakeNodeLink(transcript="длинное голосовое")
@@ -215,7 +191,7 @@ async def test_large_voice_uses_chunked_upload_with_session(monkeypatch):
 
     assert result == "длинное голосовое"
     chunk_actions = [a for a, _ in link.commands if a == voice_stt.ACTION_STT_UPLOAD_CHUNK]
-    assert len(chunk_actions) >= 2  # payload крупнее _CHUNK_BYTES
+    assert len(chunk_actions) >= 2
     final_action, final_args = link.commands[-1]
     assert final_action == voice_stt.ACTION_TRANSCRIBE_VOICE
     assert "audio_b64" not in final_args
@@ -236,11 +212,6 @@ async def test_any_non_ready_outcome_is_treated_as_unavailable(monkeypatch, outc
     assert message.sent == [ai_flow.ALBERT_UNAVAILABLE]
 
 
-# --- rich-режим: статусы идут через push_status/finalize_status общей
-# сессии, а не message.answer (см. bot/ai_flow.py::_announce_steps/
-# _announce_albert про тот же выбор для текстового /ai) ---
-
-
 async def test_rich_session_gets_listening_status_not_message_answer(monkeypatch):
     _patch_wake(
         monkeypatch, fetch_state_result={"asleep": False}, ensure_outcome=wake_core.READY
@@ -254,10 +225,8 @@ async def test_rich_session_gets_listening_status_not_message_answer(monkeypatch
     )
 
     assert result == "привет альфред"
-    assert message.sent == []  # ничего голым message.answer
+    assert message.sent == []
     assert rich_session.statuses == [voice_stt.VOICE_LISTENING_TEXT_PLAIN]
-    # Успех: сессия НЕ финализируется здесь — черновик остаётся активным для
-    # финального ответа Альфреда (см. докстринг transcribe_voice_message).
     assert rich_session.finalized == []
 
 

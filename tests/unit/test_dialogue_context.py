@@ -1,7 +1,3 @@
-"""Этап 50: сжатие истории /ai — оценка окна, сборка истории с кратким
-содержанием, дословный возврат деталей (FTS5), защита от двойного сжатия,
-страховка при done_reason=length (bot/dialogue_context.py, bot/ai_flow.py)."""
-
 from __future__ import annotations
 
 import asyncio
@@ -13,9 +9,8 @@ import pytest_asyncio
 from sa_home_bot.bot import ai_flow, dialogue_context
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.config import LlmConfig, Settings
-from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
-from sa_home_bot.db.store import Store
+from sa_home_bot.llm.prompt import ROUTE_OK
 from sa_home_bot.llm_chat import ChatStats
 from sa_home_bot.proto.messages import Address
 from sa_home_bot.subscriptions.book import SubscriptionBook
@@ -29,15 +24,6 @@ NOW = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
 
 def _settings(**llm) -> Settings:
     return Settings(llm=LlmConfig(request_timeout_s=5.0, **llm))
-
-
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    db = Database(tmp_path / "test.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -57,13 +43,9 @@ async def _turn(store, message_id, role, content, dialogue_id=DIALOGUE, name=Non
 
 
 async def _long_dialogue(store, pairs: int, reply_len: int = 50) -> None:
-    """Тред из ``pairs`` пар реплик: message_id 1, 2, 3 … по порядку."""
     for i in range(pairs):
         await _turn(store, 2 * i + 1, "user", f"вопрос номер {i}")
         await _turn(store, 2 * i + 2, "assistant", f"ответ {i} " + "х" * reply_len)
-
-
-# --- оценка порога ---
 
 
 def test_estimate_by_chars_without_measure():
@@ -73,10 +55,8 @@ def test_estimate_by_chars_without_measure():
 
 def test_estimate_takes_larger_of_measure_and_chars():
     settings = _settings(context_base_tokens=12000, context_chars_per_token=3.2)
-    # Замер больше оценки по символам (база реально толще) — берём замер + прирост.
     state = {"prompt_tokens": 25000, "sent_chars": 30000}
     assert dialogue_context.estimate_prompt_tokens(settings, 33200, state) == 26000
-    # Замер занижен кэшем префикса Ollama — выигрывает оценка по символам.
     low = {"prompt_tokens": 500, "sent_chars": 30000}
     assert dialogue_context.estimate_prompt_tokens(settings, 32000, low) == 22000
 
@@ -94,20 +74,15 @@ def test_looks_overflowed():
     ok = ChatStats()
     ok.absorb({"prompt_eval_count": 1000, "done_reason": "stop", "num_ctx": 32768})
     assert not dialogue_context.looks_overflowed("ответ", ok, 32768)
-    assert not dialogue_context.looks_overflowed("", ok, 32768)  # пусто, но окно свободно
+    assert not dialogue_context.looks_overflowed("", ok, 32768)
     full = ChatStats()
     full.absorb({"prompt_eval_count": 31800, "done_reason": "stop", "num_ctx": 32768})
     assert dialogue_context.looks_overflowed("", full, 32768)
 
 
 def test_step_away_lines_have_no_letter_r():
-    # Идут мимо Логопеда — без «р» верны и для картавого Альфреда, и для
-    # «чистой речи» гостя.
     for line in dialogue_context.STEP_AWAY_LINES:
         assert "р" not in line.lower(), line
-
-
-# --- сборка истории ---
 
 
 async def test_load_history_without_summary_is_full_dialogue(store):
@@ -120,9 +95,6 @@ async def test_load_history_without_summary_is_full_dialogue(store):
 
 
 async def test_history_shows_photo_tool_rounds_after_the_request(store):
-    """Живая находка 2026-10-03: в истории были только тексты, и на «дай
-    фото кабинета» модель отвечала словами, как в прошлой подписи. Вызов
-    take_photo теперь виден в истории — как в живом раунде тулов."""
     await _turn(store, 1, "user", "покажи кабинет")
     await store.record_tool_call(
         chat_id=CHAT, dialogue_id=DIALOGUE, trigger_message_id=1, tool_name="take_photo",
@@ -142,14 +114,11 @@ async def test_history_shows_photo_tool_rounds_after_the_request(store):
     assert call == [{"function": {"name": "take_photo", "arguments": {"caption": "Вид кабинета"}}}]
     assert history[2]["name"] == "take_photo"
     assert len(history[2]["content"]) == dialogue_context.HISTORY_TOOL_RESULT_MAX
-    # Обрезка по бюджету не оставляет раунд тула без хода собеседника.
     trimmed = dialogue_context.trim_to_budget(list(history)[1:], 10_000)
     assert trimmed[0]["role"] == "assistant" and "tool_calls" not in trimmed[0]
 
 
 async def test_history_keeps_person_id_from_find_person(store):
-    """Живая находка 2026-10-09: id из find_person жил один ход, и на «да,
-    хочу связь» модель выдумала recipient_id=123456789."""
     found = "Нашёл: Андрей Александрович Севбо — id 518571647 — мужчина"
     await _turn(store, 1, "user", "а как @kein есть такой?")
     await store.record_tool_call(
@@ -165,7 +134,7 @@ async def test_history_keeps_person_id_from_find_person(store):
 
 
 async def test_load_history_with_summary_and_short_old_replies(store):
-    await _long_dialogue(store, 12, reply_len=900)  # message_id 1..24
+    await _long_dialogue(store, 12, reply_len=900)
     await store.add_dialogue_summary(CHAT, DIALOGUE, 8, "Говорили о пчёлах.", NOW)
     settings = _settings(context_keep_recent_turns=10, context_old_reply_max_chars=600)
     history = await dialogue_context.load_history(store, settings, CHAT, DIALOGUE)
@@ -174,8 +143,6 @@ async def test_load_history_with_summary_and_short_old_replies(store):
         "role": "system",
         "content": dialogue_context.SUMMARY_PREFIX + "Говорили о пчёлах.",
     }
-    # Ходы 9..24 — 16 сообщений; дословно последние 10, старые 6 — укорочены
-    # только у Альфреда.
     turns = history[1:]
     assert len(turns) == 16
     assert turns[0]["content"] == "вопрос номер 4"
@@ -187,7 +154,7 @@ async def test_load_history_with_summary_and_short_old_replies(store):
     assert all(not m["content"].endswith(dialogue_context.SHORTENED_MARK) for m in recent)
     assert history.summary_upto == 8
     assert history.compressible == 6
-    assert history.max_hidden_id == 14  # последний укороченный ответ
+    assert history.max_hidden_id == 14
     assert 24 in history.verbatim_ids and 10 not in history.verbatim_ids
 
 
@@ -210,12 +177,9 @@ def test_trim_to_budget_keeps_summary_and_last_turn():
     assert trimmed == [messages[0], messages[3]]
 
 
-# --- дословный возврат (FTS5) ---
-
-
 def test_fts_query_drops_stop_words_and_stems():
     query = dialogue_context.fts_query("Альфред, а какие глаза были у медведя?")
-    assert '"медве"' in query  # «медведя» → «медве»: найдёт и «медведь»
+    assert '"медве"' in query
     assert '"глаз"' in query
     assert "альфред" not in query and "какие" not in query
 
@@ -236,7 +200,7 @@ async def test_recall_finds_bear_by_inflected_word(store):
     block, count = await dialogue_context.recall_verbatim(
         store, _settings(), CHAT, DIALOGUE, "Какого цвета глаза у медведя?", history
     )
-    assert count == 2  # пара: реплика собеседника + ответ Альфреда
+    assert count == 2
     assert block.startswith(dialogue_context.RECALL_HEADER)
     assert "Сева: Придумай мне медведя для сказки" in block
     assert "у него зелёные глаза" in block
@@ -262,7 +226,7 @@ async def test_recall_respects_budget(store):
     block, count = await dialogue_context.recall_verbatim(
         store, settings, CHAT, DIALOGUE, "медведь", history
     )
-    assert count == 1  # пара не влезает — только само найденное, целиком
+    assert count == 1
     assert len(block) < 3500 + len(dialogue_context.RECALL_HEADER) + 50
 
 
@@ -277,13 +241,7 @@ async def test_fts_backfill_on_migration(store):
     assert [h["message_id"] for h in hits] == [1]
 
 
-# --- сжатие ---
-
-
 class SummaryLink:
-    """Служба llm, отвечающая только на role=summarizer; ответ можно
-    придержать событием (проверка двойного запуска)."""
-
     def __init__(self, gate: asyncio.Event | None = None) -> None:
         self.calls: list[dict] = []
         self.gate = gate
@@ -297,7 +255,7 @@ class SummaryLink:
 
 
 async def test_compress_writes_summary_and_keeps_recent(store):
-    await _long_dialogue(store, 10)  # 1..20
+    await _long_dialogue(store, 10)
     link = SummaryLink()
     settings = _settings(context_keep_recent_turns=6)
     wrote = await dialogue_context.COMPRESSOR.compress_now(
@@ -309,7 +267,6 @@ async def test_compress_writes_summary_and_keeps_recent(store):
     assert summary["summary"] == "итог №1"
     request = link.calls[0]["messages"][0]["content"]
     assert "вопрос номер 0" in request and "вопрос номер 7" not in request
-    # ai_turns не тронута.
     assert len(await store.ai_turns_for_dialogue(CHAT, DIALOGUE)) == 20
     history = await dialogue_context.load_history(store, settings, CHAT, DIALOGUE)
     assert history[0]["content"].endswith("итог №1")
@@ -326,8 +283,6 @@ async def test_double_compression_is_prevented(store):
     await asyncio.sleep(0)
     assert compressor.is_running(CHAT, DIALOGUE)
     assert not compressor.schedule(link, store, settings, CHAT, DIALOGUE, DST, num_ctx=32768)
-    # Синхронное сжатие во время фонового ждёт его замка и, перечитав БД,
-    # видит, что сжимать нечего.
     sync = asyncio.create_task(
         compressor.compress_now(link, store, settings, CHAT, DIALOGUE, DST, num_ctx=32768)
     )
@@ -362,12 +317,9 @@ async def test_load_history_gives_up_waiting_and_uses_old_state(store):
     settings = _settings(context_keep_recent_turns=6, context_compress_wait_s=0.01)
     dialogue_context.COMPRESSOR.schedule(link, store, settings, CHAT, DIALOGUE, DST, num_ctx=32768)
     history = await dialogue_context.load_history(store, settings, CHAT, DIALOGUE)
-    assert history.summary_upto is None and len(history) == 20  # целиком, ничего не потеряно
+    assert history.summary_upto is None and len(history) == 20
     gate.set()
     await asyncio.sleep(0.01)
-
-
-# --- request_alfred: порог и страховка ---
 
 
 class FakeBot:
@@ -407,9 +359,6 @@ def _book() -> SubscriptionBook:
 
 
 class AlfredLink:
-    """Служба llm для request_alfred: router/persona по очереди из
-    ``chat_results``, summarizer — отдельно."""
-
     def __init__(self, chat_results) -> None:
         self.chat_results = list(chat_results)
         self.chat_calls: list[dict] = []
@@ -445,16 +394,15 @@ def _ok(text, prompt=1000):
 
 
 async def test_threshold_adds_step_away_instruction(store):
-    await _long_dialogue(store, 10)  # 1..20
+    await _long_dialogue(store, 10)
     await _turn(store, 21, "user", "а что дальше?")
     settings = _settings(context_keep_recent_turns=6)
     history = await dialogue_context.load_history(store, settings, CHAT, DIALOGUE)
-    # Прошлый ход показал промпт почти под порогом.
     await store.save_dialogue_context_state(
         CHAT, DIALOGUE, prompt_tokens=25000, sent_chars=100, num_ctx=32768,
         done_reason="stop", at=NOW,
     )
-    link = AlfredLink([_ok(ai_flow.ROUTE_OK), _ok("Ответ. Позвольте отлучиться.")])
+    link = AlfredLink([_ok(ROUTE_OK), _ok("Ответ. Позвольте отлучиться.")])
     raw = await ai_flow.request_alfred(
         FakeMessage(), link, store, settings, history, DIALOGUE, _book(), FakeNotifier()
     )
@@ -463,7 +411,6 @@ async def test_threshold_adds_step_away_instruction(store):
     persona_messages = link.chat_calls[1]["messages"]
     assert persona_messages[-2]["content"] == dialogue_context.STEP_AWAY_INSTRUCTION
     assert persona_messages[-1]["content"] == "а что дальше?"
-    # Замер этого хода сохранён для следующего.
     state = await store.dialogue_context_state(CHAT, DIALOGUE)
     assert state["prompt_tokens"] == 1000 and state["num_ctx"] == 32768
 
@@ -472,7 +419,7 @@ async def test_below_threshold_no_instruction(store):
     await _long_dialogue(store, 10)
     await _turn(store, 21, "user", "а что дальше?")
     history = await dialogue_context.load_history(store, _settings(), CHAT, DIALOGUE)
-    link = AlfredLink([_ok(ai_flow.ROUTE_OK), _ok("Ответ.")])
+    link = AlfredLink([_ok(ROUTE_OK), _ok("Ответ.")])
     await ai_flow.request_alfred(
         FakeMessage(), link, store, _settings(), history, DIALOGUE, _book(), FakeNotifier()
     )
@@ -482,7 +429,7 @@ async def test_below_threshold_no_instruction(store):
 
 
 async def test_rescue_on_length_compresses_and_regenerates(store):
-    await _long_dialogue(store, 10)  # 1..20
+    await _long_dialogue(store, 10)
     await _turn(store, 21, "user", "а что дальше?")
     settings = _settings(context_keep_recent_turns=6)
     history = await dialogue_context.load_history(store, settings, CHAT, DIALOGUE)
@@ -493,18 +440,16 @@ async def test_rescue_on_length_compresses_and_regenerates(store):
         "num_ctx": 32768,
     }
     link = AlfredLink(
-        [_ok(ai_flow.ROUTE_OK), truncated, _ok(ai_flow.ROUTE_OK), _ok("Полный ответ.")]
+        [_ok(ROUTE_OK), truncated, _ok(ROUTE_OK), _ok("Полный ответ.")]
     )
     message = FakeMessage()
     raw = await ai_flow.request_alfred(
         message, link, store, settings, history, DIALOGUE, _book(), FakeNotifier()
     )
     assert raw == "Полный ответ."
-    # Одна реплика в образе вместо «Альбегта» и обрывка.
     assert len(message.answers) == 1
     assert any(line in message.answers[0] for line in dialogue_context.STEP_AWAY_LINES)
     assert ai_flow.ALBERT_HICCUP not in message.answers
-    # Сжали синхронно (keep = 6 // 2 = 3 → хвост с реплики собеседника).
     assert len(link.summary_calls) == 1
     summary = await store.latest_dialogue_summary(CHAT, DIALOGUE)
     assert summary is not None
@@ -512,7 +457,7 @@ async def test_rescue_on_length_compresses_and_regenerates(store):
     assert retry[0]["content"].startswith(dialogue_context.SUMMARY_PREFIX)
     assert retry[-1]["content"] == "а что дальше?"
     assert len(retry) < len(link.chat_calls[1]["messages"])
-    assert not history.compress_after  # фоновое сжатие больше не нужно
+    assert not history.compress_after
 
 
 async def test_rescue_falls_back_to_trim_when_still_overflowing(store):
@@ -524,9 +469,9 @@ async def test_rescue_falls_back_to_trim_when_still_overflowing(store):
                  "num_ctx": 32768}
     link = AlfredLink(
         [
-            _ok(ai_flow.ROUTE_OK), truncated,
-            _ok(ai_flow.ROUTE_OK), truncated,
-            _ok(ai_flow.ROUTE_OK), _ok("Коротко, но ответ."),
+            _ok(ROUTE_OK), truncated,
+            _ok(ROUTE_OK), truncated,
+            _ok(ROUTE_OK), _ok("Коротко, но ответ."),
         ]
     )
     raw = await ai_flow.request_alfred(

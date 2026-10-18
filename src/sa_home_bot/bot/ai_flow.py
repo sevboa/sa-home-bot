@@ -1,230 +1,105 @@
-"""Оркестрация диалога /ai: вызов службы llm с presence/wake-сценарием.
-
-Персонажи и сценарий — из обсуждения с пользователем 2026-07-23: если нода
-winpc недоступна, показать «шаги», молча разбудить через рой (существующий
-механизм — см. bot/handlers/wake.py::wake_swarm_node_core), подождать до
-WAKE_POLL_TIMEOUT_S, затем «Агнольд» (успех) или «Альбегт» (неудача). Имена
-персонажей — фиксированные строки (не вывод модели): их произносит Альфред,
-отсюда искажение «р→г» («Арнольд»→«Агнольд», «Альберт»→«Альбегт»); сами они
-«р» выговаривают, поэтому их реплики пишутся без искажений.
-
-Живая находка 2026-07-24: 30с было мало — winpc не всегда успевала выйти из
-S3-сна (BIOS POST + загрузка Windows + старт службы sa-home-node + регистрация
-"llm" пиром) за это время, пользователь получал «Альбегт» раньше, чем машина
-реально просыпалась. Отдельно нашлась и первопричина частых засыпаний:
-AC-таймер сна (`powercfg`) на winpc оказался снова включён (45 мин) — раньше
-уже отключался (см. память "Windows PC"), видимо сбросился (обновление/смена
-схемы питания). Таймер выключен заново, но код всё равно должен переживать
-холодный подъём из S3, если сон когда-нибудь включится опять (вручную,
-обновлением и т.п.) — таймаут увеличен с запасом.
-
-Живая находка 2026-07-24: обращение к Альфреду часто идёт реплаем — либо
-на его же прошлое сообщение с выделением (quote) конкретного слова/фразы,
-либо (в группе) реплаем на ЧУЖОЕ сообщение с упоминанием бота, где сам
-текст обращения смысла без контекста не имеет ("узнай точный счёт" —
-счёт чего?). См. _reply_context_lines: добавляет в заметку (1) текст
-чужого сообщения, если оно не часть уже идущей истории диалога, и (2)
-выделенную цитату (Message.quote, Bot API "reply with quote") — второе
-добавляется всегда, даже в своём треде, потому что история диалога
-хранит полный текст хода, но не то, какую его часть выделили.
-
-Живая находка 2026-07-24 (проверено вживую на реальном боте, не только в
-тестах): реплай на чужое сообщение сработал сразу и верно (модель
-процитировала нужный текст), а вот quote (выделенное слово) — нет,
-модель назвала другое слово. Причина оказалась двойная:
-1. Формулировка "в нём выделен фрагмент" ссылалась местоимением на
-   строку про "чужое сообщение", а та для СВОЕГО треда как раз
-   пропускается (текст уже есть в истории) — антецедент терялся.
-   Переписано так, чтобы предложение про quote само называло источник
-   ("из твоего же предыдущего сообщения"), без внешних отсылок.
-2. Заметка вставлялась ПЕРЕД всей историей диалога — в уже не самом
-   коротком треде это далеко от текущего хода, к которому она относится.
-   Теперь вставляется прямо перед последним (текущим) сообщением, а не в
-   начало — ближе к месту, где решается, что ответить.
-Диагностика велась временным INFO-логом (chat/dialogue/reply_to/quote/
-note) — подтвердил, что Telegram-данные приходят правильно, проблема
-была чисто в промпте; лог убран после проверки.
-
-Живая находка 2026-07-24: когда presence не показывал сна, но сам
-chat-запрос всё равно падал (внутренний сбой Ollama, ERR_INTERNAL — не
-«недоступна»), пользователю уходил голый технический текст без
-персонажа ("Прошу прощения, не вышло — попробуйте чуть позже", от лица
-"Альфреда", но без картавости — читалось чужеродно в общем чате).
-Пользователь явно попросил не пускать такое в группу; раз полностью
-исключить единичный сбой генерации нельзя (Ollama иногда даёт сетевой
-сбой сразу после начала запроса), обёрнуто в того же персонажа —
-ALBERT_HICCUP ("Альфред на секунду отвлёкся — повторите"), не голая
-техника. См. также notify_admins — админ получает подробности отдельно
-(в свою личку, не в общий чат — определяется по allowed_commands="*" в
-подписке, у общих групповых чатов его нет).
-"""
-
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import re
 import time
-from datetime import UTC, date, datetime
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from aiogram.types import Message, User
+from aiogram.types import Message
 
 from sa_home_bot import wake_core
-from sa_home_bot.bot import dialogue_context, people_cards
+from sa_home_bot.bot import dialogue_context
 from sa_home_bot.bot import tools as ai_tools
-from sa_home_bot.bot.lifecycle import notify_tool_call
-from sa_home_bot.bot.notifier import (  # noqa: F401 — реэкспорт, см. ниже
-    Notifier,
-    notify_admins,
-    typing_action,
+from sa_home_bot.bot.ai_context import (  # noqa: F401
+    ALFRED_TIMEZONE,
+    LENGTH_NOTE,
+    build_context_note,
+    display_name,
+    people_context_lines,
+    recall_facts,
+    recall_graph_facts,
+    replied_picture_note,
 )
+from sa_home_bot.bot.ai_lines import (  # noqa: F401
+    ALBERT_ASLEEP,
+    ALBERT_ASLEEP_MD,
+    ALBERT_HICCUP,
+    ALBERT_HICCUP_MD,
+    ALBERT_TASK_MISSED,
+    ALBERT_TASK_MISSED_MD,
+    ALBERT_UNAVAILABLE,
+    ALBERT_UNAVAILABLE_MD,
+    ARNOLD_WAKING,
+    ARNOLD_WAKING_MD,
+    CLOSING_TEXT,
+    RESTART_TEXT,
+    STEPS_TEXT,
+    STEPS_TEXT_PLAIN,
+    SURFING_TEXT,
+    SURFING_TOOL,
+    THINKING_TEXT,
+    THINKING_TEXT_PLAIN,
+    TOOL_STATUS_DEFAULT,
+    TOOL_STATUS_TEXT,
+)
+from sa_home_bot.bot.lifecycle import notify_tool_call
+from sa_home_bot.bot.notifier import Notifier, notify_admins, typing_action
 from sa_home_bot.bot.pending_actions import open_forms_note
-from sa_home_bot.bot.rich_stream import RichStreamSession
-from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
+from sa_home_bot.bot.rich_stream import (
+    RichStreamSession,
+    finalize_status_or_answer,
+    push_status_or_answer,
+)
+from sa_home_bot.bot.service_errors import UNREACHABLE_ERRORS
+from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.graph_memory import protocol as graph_memory_protocol
+from sa_home_bot.graph_memory.client import add_episode
 from sa_home_bot.llm.model_profiles import REASON_LEVELS, ModelProfileSummary
-from sa_home_bot.llm.prompt import (
-    ROUTE_OK,  # noqa: F401  — реэкспорт для тестов и обратной совместимости
-    THINK_MARKER,  # noqa: F401
-    parse_router_level,
-    wrap_context_note,
-)
+from sa_home_bot.llm.prompt import parse_router_level, wrap_context_note
 from sa_home_bot.llm_chat import ChatStats, run_chat_loop
-from sa_home_bot.memory import protocol as memory_protocol
-from sa_home_bot.people import claims as people_claims
 from sa_home_bot.people.book import PeopleBook
-from sa_home_bot.proto.messages import (
-    ERR_UNAVAILABLE,
-    ERR_UNKNOWN_DST,
-    Address,
-    ProtoError,
-)
+from sa_home_bot.proto.addresses import LLM_ADDRESS, LLM_NODE, LLM_SERVICE, node_address
+from sa_home_bot.proto.errors import ServiceUnavailableError, is_service_unavailable
+from sa_home_bot.proto.messages import Address, ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
+from sa_home_bot.utils.clock import utc_now
 
 log = logging.getLogger(__name__)
 
-# Реэкспорт notify_admins (импорт выше): исторически она жила здесь, и вызовы
-# вида ai_flow.notify_admins(...) остаются рабочими; сама функция переехала в
-# bot/notifier.py — ею пользуется и приватный вход (bot/invites.py), которому
-# вся LLM-обвязка этого модуля не нужна.
-
-LLM_NODE = "mycraft"
-# Скрытая строка о длине ответа — см. request_alfred (живая находка
-# 2026-09-30: ответы росли вместе с перепиской).
-LENGTH_NOTE = (
-    "Объём ответа соразмеряй с репликой собеседника, а не со своими прошлыми "
-    "ответами: на короткую реплику — одна-три фразы; развёрнуто — только если "
-    "об этом просят или без этого не обойтись."
-)
-LLM_SERVICE = "llm"
-
-# Личное место жительства Альфреда (не дома семьи — своё, персонажное; см.
-# персонажный промпт, живая находка 2026-07-25) — Бран, Трансильвания,
-# Румыния (тот самый, у замка Дракулы). Часовой пояс — детерминированно в
-# коде, той же логикой, что и время собеседника (_known_person_note): не
-# поручаем модели арифметику с часовыми поясами. Город для get_weather —
-# отдельно, промптом персонажа (см. llm-prompt.toml, вне репозитория).
-ALFRED_TIMEZONE = "Europe/Bucharest"
-
-STEPS_TEXT = "<i>Вы слышите приближающиеся шаги...</i>"
-# Тот же текст без HTML — для thinking-блока в rich-черновике
-# (bot/rich_stream.py::push_status шлёт как есть, без разметки). Две строки
-# рядом, не общий html→markdown хелпер — риск расхождения виден с одного
-# взгляда (в отличие от think_style, разъехавшегося по трём разным файлам).
-STEPS_TEXT_PLAIN = "Вы слышите приближающиеся шаги..."
-ARNOLD_WAKING = "<b>Агнольд:</b> Сейчас Альфред подойдёт"
-# Markdown-вариант той же реплики — для rich_session.finalize_status()
-# (см. STEPS_TEXT_PLAIN про ту же пару и почему их два: rich-путь не
-# понимает HTML, только markdown/blocks).
-ARNOLD_WAKING_MD = "**Агнольд:** Сейчас Альфред подойдёт"
-ALBERT_UNAVAILABLE = (
-    "<b>Альбегт:</b> К сожалению Альфреда нет на месте, попробуйте позже, сэр/мадам"
-)
-ALBERT_ASLEEP = "<b>Альбегт:</b> Альфред, кажется, уснул — обратитесь позже, сэр/мадам"
-# Markdown-варианты двух реплик выше — та же пара, что и у ARNOLD_WAKING_MD
-# (см. её комментарий), для тех же rich-вызовов finalize_status() из службы
-# tasks (bot/node_events.py::_handle_task_prewake).
-ALBERT_UNAVAILABLE_MD = (
-    "**Альбегт:** К сожалению Альфреда нет на месте, попробуйте позже, сэр/мадам"
-)
-ALBERT_ASLEEP_MD = "**Альбегт:** Альфред, кажется, уснул — обратитесь позже, сэр/мадам"
-# Внутренний сбой генерации (нода жива, presence не показывал сна, но сам
-# chat-запрос упал — например Ollama на секунду поперхнулась) — раньше сюда
-# шёл технический "Прошу прощения, не вышло" без персонажа (голым текстом
-# от лица "Альфреда", без картавости — читалось чужеродно); пользователь
-# явно попросил (2026-07-24) не пускать техническое в чат. Решение: даже не
-# зная точной причины, подаём это тем же персонажем — Альфред как будто на
-# секунду отвлёкся, просим повторить.
-ALBERT_HICCUP = "<b>Альбегт:</b> Прошу прощения, Альфред на секунду отвлёкся — повторите, сэр/мадам"
-# Markdown-вариант — та же пара, что и у ALBERT_ASLEEP_MD/ALBERT_UNAVAILABLE_MD
-# выше (см. их комментарий), для rich_session.finalize_status() в самом
-# request_alfred ниже (живая находка 2026-08-11: без этого «Альбегт» уходил
-# голым message.answer() мимо активной rich-сессии, оставляя её черновик
-# незакрытым — см. _announce_albert).
-ALBERT_HICCUP_MD = (
-    "**Альбегт:** Прошу прощения, Альфред на секунду отвлёкся — повторите, сэр/мадам"
-)
-# Ход закончил тул (ToolContext.end_turn, take_photo): реплики нет и не
-# надо — Альфред заговорит, когда снимок будет готов. Отличается от пустого
-# ответа модели, который означает сбой («Альбегт»).
 SILENT_REPLY = "\x00silent"
-# Закрытие треда, когда служба llm сама гасит контейнер по простою
-# (llm/service.py::EVENT_IDLE_SLEEP) — не отсюда, а из bot/node_events.py
-# (событие прилетает не в ответ на сообщение пользователя), но текст —
-# часть того же персонажа, поэтому живёт здесь.
-CLOSING_TEXT = "<i>Альфред не дождался обращения и уходит к себе в подсобку</i>"
-# Перезапуск процесса службы llm (деплой/апдейт/ручной restart) — тот же
-# приём, что и CLOSING_TEXT (llm/service.py::EVENT_SERVICE_RESTART, отсюда
-# рассылает bot/node_events.py), другой повод и текст: явно НЕ выглядит как
-# сбой — пользователь попросил именно это 2026-07-24.
-RESTART_TEXT = "<i>У Альфреда появились другие дела</i>"
-# Отложенная задача (тул remind, служба tasks) сработала, но Альфреда так и
-# не нашли — не отсюда, а из bot/node_events.py по событию task_result
-# (ok=False). Решение пользователя 2026-07-27: сюда доходит только после
-# того, как служба будила цель заранее (PREWAKE_LEAD_S) И повторяла попытки
-# ещё FIRE_GRACE_S после срока — то есть это уже настоящая неудача, а не
-# «просто не успели прогреть» (см. tasks/service.py).
-ALBERT_TASK_MISSED = (
-    "<b>Альбегт:</b> Прошу прощения, не удалось найти Альфреда, чтобы он сделал, что обещал."
+
+WAKE_POLL_TIMEOUT_S = wake_core.WAKE_POLL_TIMEOUT_S
+WAKE_POLL_INTERVAL_S = wake_core.WAKE_POLL_INTERVAL_S
+
+PROFILE_TTL_S = 300.0
+_profile_cache: dict[str, tuple[float, ModelProfileSummary | None]] = {}
+_seen_num_ctx: dict[str, int] = {}
+
+DISMISS_TEXTS = {
+    ai_tools.DISMISS_MODEL: "<i>Альфред откланивается и уходит к себе в подсобку</i>",
+    ai_tools.DISMISS_SLEEP: "<i>Альфред откланивается; свет гаснет, машина засыпает</i>",
+    ai_tools.DISMISS_OFF: "<i>Альфред откланивается; свет гаснет, машина выключается</i>",
+}
+DISMISS_NODE_ACTIONS = {
+    ai_tools.DISMISS_SLEEP: "suspend",
+    ai_tools.DISMISS_OFF: "poweroff",
+}
+LLM_SLEEP_ACTION = "sleep"
+DISMISS_TIMEOUT_S = 15.0
+DISMISS_FAILED_TEXT = (
+    "<b>Альбегт:</b> Альфред уже попрощался, но машину погасить не вышло — "
+    "она осталась на ногах, сэр/мадам"
 )
-ALBERT_TASK_MISSED_MD = (
-    "**Альбегт:** Прошу прощения, не удалось найти Альфреда, чтобы он сделал, что обещал."
-)
+
+_URL_RE = re.compile(r"https?://\S+")
 
 
 class ActiveAiChats:
-    """chat_id → asyncio.Task с прямо сейчас идущим /ai-запросом.
-
-    Живая находка 2026-07-24 (первый заход): раньше RESTART_TEXT слался
-    только при останове службы llm (winpc) — но останов самого БОТА
-    (alfred, любой деплой/restart_node) с тем же успехом обрывает запрос на
-    середине: `bot.session.close()` в _shutdown() закрывает HTTP-коннектор,
-    и уже ушедший на LLM запрос падает с TelegramNetworkError/"Connector is
-    closed" прямо в лицо пользователю. Раньше это было маловероятно (ответ
-    занимал секунды), но v0.35.0 включил think_chat (~30-40с на раунд) —
-    окно для такой коллизии выросло на порядок.
-
-    Живая находка 2026-07-24 (второй заход, живой баг на проде): версия
-    выше только УВЕДОМЛЯЛА хендлер (хранила голый set[int]), не отменяя
-    саму задачу — а aiogram диспетчеризует каждый апдейт своей asyncio-
-    задачей, не дожидаясь её в `dp.stop_polling()`. Оборвавшийся хендлер
-    продолжал жить как осиротевшая задача и, когда `_shutdown()` рвал
-    node_link ДО рассылки RESTART_TEXT, сам падал на попытке дозвониться
-    и слал голое "Прошу прощения, что-то пошло не так" — то до RESTART_
-    TEXT, то после, то и другое разом (гонка, не гарантия). Теперь здесь
-    хранится сама asyncio.Task — bot/app.py::_shutdown() рассылает
-    RESTART_TEXT и АКТИВНО отменяет задачу (task.cancel()) РАНЬШЕ, чем
-    рвёт связи со службами: CancelledError — не Exception, try/finally в
-    bot/handlers/ai.py::_ask_and_reply корректно снимет регистрацию и
-    выйдет молча, минуя `except Exception` и голый "что-то пошло не так"."""
-
     def __init__(self) -> None:
         self._tasks: dict[int, asyncio.Task] = {}
 
@@ -240,44 +115,32 @@ class ActiveAiChats:
         return dict(self._tasks)
 
 
-# Сценарные константы presence/wake — общие с службой tasks, живут в
-# wake_core.py (живая находка 2026-07-27: пока их было две копии, правку
-# 2b8fae7 пришлось делать в обоих файлах, и они всё равно разъезжались —
-# WAKE_POLL_TIMEOUT_S здесь и там уже значил разное). Здесь только
-# реэкспорт под привычными именами, чтобы не трогать тесты и вызовы.
-WAKE_POLL_TIMEOUT_S = wake_core.WAKE_POLL_TIMEOUT_S
-WAKE_POLL_INTERVAL_S = wake_core.WAKE_POLL_INTERVAL_S
-_PRESENCE_CHECK_TIMEOUT_S = wake_core.PRESENCE_TIMEOUT_S
+class SpeechRemarkBox:
+    text: str | None = None
 
-# Профиль модели, объявляемый службой llm через describe() — боту от него
-# нужно ровно одно: нужен ли двухпроходный router-триаж (router=False →
-# один персонажный проход сразу). Кэш на 5 минут: describe — сетевой вызов
-# к чужой ноде, а профиль меняется только при рестарте службы llm.
-_PROFILE_TTL_S = 300.0
-_profile_cache: dict[str, tuple[float, ModelProfileSummary | None]] = {}
+
+def _llm_key(dst: Address) -> str:
+    return f"{dst.node}/{dst.service}"
 
 
 async def _llm_profile(node_link: ServiceLink, dst: Address) -> ModelProfileSummary | None:
-    key = f"{dst.node}/{dst.service}"
+    key = _llm_key(dst)
     now = time.monotonic()
     hit = _profile_cache.get(key)
-    if hit is not None and now - hit[0] < _PROFILE_TTL_S:
+    if hit is not None and now - hit[0] < PROFILE_TTL_S:
         return hit[1]
     summary: ModelProfileSummary | None = None
     try:
         desc = await node_link.describe(dst)
         if desc is not None and desc.model_profile:
             summary = ModelProfileSummary.from_payload(desc.model_profile)
-    except (TimeoutError, ServiceUnavailableError, ProtoError, OSError):
+    except UNREACHABLE_ERRORS:
         summary = None
     _profile_cache[key] = (now, summary)
     return summary
 
 
 async def _use_router(settings: Settings, node_link: ServiceLink, dst: Address) -> bool:
-    """Двухпроходный router-триаж? Явный ``[llm].mode`` в config.toml
-    побеждает (legacy-override); иначе решает профиль модели (describe);
-    без профиля — прежний дефолт (router_think)."""
     if "mode" in settings.llm.model_fields_set:
         return settings.llm.mode == "router_think"
     profile = await _llm_profile(node_link, dst)
@@ -286,267 +149,27 @@ async def _use_router(settings: Settings, node_link: ServiceLink, dst: Address) 
     return True
 
 
-# Вариативное рассуждение (LLM_INTEGRATION_PLAN.md §7, живая находка
-# 2026-07-24): включать think=true на КАЖДЫЙ запрос надёжно для расчётов,
-# но раздувает даже "привет" до 30-40с. Вместо этого — сначала лёгкий
-# router-проход (think=false, ROUTER_SYSTEM_PROMPT без персонажа), который
-# решает, нужен ли think и/или тул, и только потом один персонажный проход
-# уже с известным think — без гадания через маркер в тексте персонажа.
-#
-# Живая находка 2026-07-25: раньше (до этой правки) решение "думать ли"
-# принималось В ТОМ ЖЕ вызове, что и сам ответ персонажа (SYSTEM_PROMPT +
-# отдельное system-сообщение _TRIAGE_INSTRUCTION поверх него) — модель на
-# фоне 12 конкурирующих правил персонажа (тон, анти-повтор, конфликты,
-# внешность и т.д.) регулярно проваливала именно триаж: на головоломку про
-# кружку с запаянным верхом ответила с ходу и неверно, хотя нужный текст
-# (_SPATIAL_REASONING в llm/prompt.py) физически был в контексте — само
-# решение "мне нужно подумать" не было принято. Решение пользователя:
-# вынести триаж в отдельный вызов с маленьким промптом без персонажа (см.
-# llm/prompt.py::ROUTER_SYSTEM_PROMPT) — роутер ничем не отвлекается от
-# самой задачи классификации. Дороже (гарантированный второй вызов модели
-# на КАЖДОЕ сообщение, не только на сложные — явное решение пользователя,
-# готового к этому ради надёжности), но проверено дешевле, чем always-on
-# think=true (роутер сам всегда reason="off" и с коротким ответом).
-#
-# Роутер оценивает вопрос по шкале 0..3 (llm/prompt.py::parse_router_level,
-# ROUTER_SYSTEM_PROMPT) — не бинарно. Уровень → намерение reason
-# (REASON_LEVELS), а его перевод в параметр модели делает профиль на стороне
-# службы llm (llm/model_profiles.py).
-
-# Показывается перед персонажным проходом, если роутер попросил think —
-# пользователь явно попросил лаконичную реплику в духе персонажа, не
-# техническое "думаю...".
-THINKING_TEXT = "<i>На лице Альфреда проступает задумчивость</i>"
-THINKING_TEXT_PLAIN = "На лице Альфреда проступает задумчивость"
-# Поход в интернет (тул web_search) — самый долгий из инструментов не сам по
-# себе (SearXNG отвечает за ~1.5 с), а потому что модель делает несколько
-# поисков подряд, переформулируя запрос, и между ними думает: живой замер
-# 2026-07-27 — три минуты от вопроса до ответа. Без этой строки такая пауза
-# читается как зависший бот. Шлётся ОДИН раз за запрос, по первому же
-# web_search (см. _record_tool_call), а не на каждый поиск.
-#
-# Это — фолбэк-путь (группы, response_mode="typing_plain"): плейсхолдер
-# persist-ится обычным сообщением, поэтому его нельзя слать на каждый вызов
-# тула — заспамит чат. В rich-пути (см. TOOL_STATUS_TEXT/_announce_tool_start
-# ниже) ограничение другое: черновик эфемерен, и дедуп уже в
-# RichStreamSession._last_sent — гейтинг "один раз за запрос" там не нужен.
-SURFING_TEXT = "<i>Альфред увлечённо сёрфит интернет...</i>"
-SURFING_TOOL = "web_search"
-
-# Курсивная "бегущая строка" в rich-черновике на каждый вызов тула (этап 34,
-# живая находка 2026-08-10) — в отличие от SURFING_TEXT выше, это работает
-# для ВСЕХ тулов сразу, не только web_search, и показывается ДО выполнения
-# (см. llm_chat.py::ToolStartSink), а не после. TOOL_STATUS_DEFAULT — на
-# случай, если тул добавят и забудут дописать сюда фразу.
-TOOL_STATUS_TEXT: dict[str, str] = {
-    "calc": "Альфред мысленно щёлкает костяшками счётов",
-    "get_weather": "Альфред выглядывает в окно, прикидывая погоду",
-    "convert_currency": "Альфред листает вчерашние котировки",
-    "get_time": "Альфред сверяется с карманными часами",
-    "look_at_photo": "Альфред снова вглядывается в фотографию",
-    "remind": "Альфред делает пометку в своём блокноте",
-    "swarm_status": "Альфред обходит дозором домашние машины",
-    "swarm_events": "Альфред листает журнал происшествий",
-    "node_manage": "Альфред возится с рычагами в подсобке",
-    "torrents": "Альфред заглядывает в качалку",
-    "dismiss": "Альфред неспешно собирается",
-    "voice_mode": "Альфред щёлкает тумблером на пульте",
-    "memory": "Альфред роется в своих записях",
-    "vpn": "Альфред готовит потайной ход",
-    "web_search": "Альфред увлечённо сёрфит интернет",
-    "recall_tool_result": "Альфред листает свои же черновики за минуту до этого",
-    "tell": "Альфред отправляется с поручением",
-    "notify_persona": "Альфред выбирает, от чьего имени говорить",
-    "notify_guest": "Альфред составляет официальное объявление",
-    "guests_list": "Альфред сверяется со списком гостей",
-    "request_acquaintance": "Альфред готовит бланк знакомства",
-    "my_acquaintances": "Альфред пролистывает свою адресную книгу",
-    "note_person": "Альфред делает пометку в адресной книге",
-    "find_person": "Альфред ищет нужную карточку в адресной книге",
-    "swap_radio": "Альфред возится с радиостанцией",
-    "generate_image": "Альфред берётся за кисти и мольберт",
-    "find_image": "Альфред роется в папке с рисунками",
-    "take_photo": "Альфред наводит фотоаппарат",
-    "search": "Альфред шарит по углам",
-    "act": "Альфред берётся за дело",
-    "walk": "Альфред осторожно ступает в темноту",
-    "go": "Альфред идёт знакомой дорогой",
-    "manor_items": "Альфред сверяется с описью поместья",
-    "item_action": "Альфред готовит вещь поместья",
-}
-TOOL_STATUS_DEFAULT = "Альфред что-то мастерит за кулисами"
-
-# --- роспуск («ты свободен», тул dismiss) ---------------------------------
-#
-# Ремарки уходят ПОСЛЕ прощания самой модели: тул только назначает уход, а
-# исполняет его bot/handlers/ai.py, когда ответ уже отправлен (см.
-# bot/tools.py::DismissalBox про то, почему не сразу). Тексты — такие же
-# ремарки в характере, как CLOSING_TEXT/RESTART_TEXT выше, разница только в
-# поводе: там Альфред уходит сам, здесь его отпустили.
-DISMISS_TEXTS = {
-    ai_tools.DISMISS_MODEL: "<i>Альфред откланивается и уходит к себе в подсобку</i>",
-    ai_tools.DISMISS_SLEEP: "<i>Альфред откланивается; свет гаснет, машина засыпает</i>",
-    ai_tools.DISMISS_OFF: "<i>Альфред откланивается; свет гаснет, машина выключается</i>",
-}
-# Машину гасим через её же ноду-супервизора — теми же действиями, что и
-# кнопки «Усыпить/Выключить машину» на карточке ноды (node/service.py).
-NODE_SERVICE = "node"
-DISMISS_NODE_ACTIONS = {
-    ai_tools.DISMISS_SLEEP: "suspend",
-    ai_tools.DISMISS_OFF: "poweroff",
-}
-LLM_SLEEP_ACTION = "sleep"
-# Роспуск не должен ждать столько же, сколько ответ модели: команды короткие
-# (обе только ставят задачу на своей стороне), а пользователь уже получил
-# прощание и ждёт лишь ремарку.
-DISMISS_TIMEOUT_S = 15.0
-DISMISS_FAILED_TEXT = (
-    "<b>Альбегт:</b> Альфред уже попрощался, но машину погасить не вышло — "
-    "она осталась на ногах, сэр/мадам"
-)
+async def resolve_num_ctx(settings: Settings, store: Store, dst: Address) -> int:
+    seen = _seen_num_ctx.get(_llm_key(dst))
+    if seen:
+        return seen
+    known = await store.latest_known_num_ctx()
+    if known:
+        return known
+    return settings.llm.num_ctx
 
 
-# --- долгая память (служба memory) ---
-#
-# Факты подмешиваются в служебную заметку САМИ, до ответа, а не только по
-# зову тула: модель зовёт инструменты далеко не всегда, а «ты же знаешь, куда
-# я качаю» звучит в разговоре без всякого повода спрашивать память.
-# Бюджет жёсткий — на 16k контекста память не имеет права занимать больше
-# нескольких строк (живая находка 2026-07-29: декларации тулов и выдача
-# поиска уже однажды выбили окно, и ответ пришёл пустым).
-MEMORY_RECALL_LIMIT = 3
-MEMORY_FACT_CHARS = 160
-MEMORY_TIMEOUT_S = 5.0
+def llm_address() -> Address:
+    return LLM_ADDRESS
 
 
-async def recall_facts(
-    node_link: ServiceLink, chat_id: int | None, text: str
-) -> list[str]:
-    """Факты из памяти чата под текущую реплику; пусто — память молчит.
-
-    Права здесь сознательно НЕ проверяются, хотя тул `memory` ими гейтится:
-    сюда приходит только память САМОГО этого чата, общее знание дома
-    (scope=common — кто такой Альфред, как выглядит) и, если чат в
-    `[memory].family_chat_ids`, семейное знание (scope=family) — ничего, на
-    что у собеседника не было бы права. Гейтить
-    пришлось бы ровно наоборот:
-    справочник о персонаже нужен всем, кому вообще разрешено с ним говорить.
-
-    Любой сбой памяти — пустой список, а не ошибка: разговор не должен
-    падать из-за необязательной справки.
-    """
-    if chat_id is None or not text.strip():
-        return []
-    dst = Address(node=memory_protocol.NODE_ID, service=memory_protocol.SERVICE_NAME)
-    try:
-        result = await node_link.command(
-            memory_protocol.ACTION_RECALL,
-            {
-                "query": text,
-                "chat_id": chat_id,
-                "limit": MEMORY_RECALL_LIMIT,
-            },
-            dst=dst,
-            timeout=MEMORY_TIMEOUT_S,
-        )
-    except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
-        log.debug("ai_flow: память не ответила: %s", exc)
-        return []
-    facts: list[str] = []
-    for fact in result.get("facts", []):
-        text_value = str(fact.get("text", ""))[:MEMORY_FACT_CHARS]
-        if not text_value:
-            continue
-        # Личное помечаем прямо в заметке: видимость уже ограничена запросом
-        # (такой факт физически не выйдет за свой чат), а это — просьба не
-        # произносить его вслух без повода.
-        facts.append(f"{text_value} [личное: знай, но вслух не пересказывай]"
-                     if fact.get("sensitive") else text_value)
-    return facts
-
-
-# Короче MEMORY_TIMEOUT_S: graph_memory живёт на mycraft, которая штатно
-# спит (ОСЛАБЛЕННЫЙ инвариант в отличие от memory — см.
-# graph_memory/protocol.py::NODE_ID), и недоступность не должна добавлять
-# заметную задержку ответа сверх собственного таймаута этого запроса.
-GRAPH_MEMORY_TIMEOUT_S = 3.0
-GRAPH_MEMORY_RECALL_LIMIT = 3
-GRAPH_MEMORY_FACT_CHARS = 160
-
-
-async def recall_graph_facts(node_link: ServiceLink, chat_id: int | None, text: str) -> list[str]:
-    """Реляционные факты из графовой памяти (Этап 41) под текущую реплику —
-    аналог recall_facts, но по графу сущностей/рёбер (Neo4j+Graphiti),
-    а не полнотекстовому поиску.
-
-    Любой сбой (mycraft спит, Neo4j/Ollama недоступны, служба не назначена)
-    — пустой список, а не ошибка: та же логика, что и у recall_facts —
-    разговор не должен падать из-за необязательной справки. Партиционировано
-    по chat_id так же, как memory — сказанное в одном разговоре не должно
-    всплыть в другом (см. graph_memory/service.py).
-    """
-    if chat_id is None or not text.strip():
-        return []
-    dst = Address(node=graph_memory_protocol.NODE_ID, service=graph_memory_protocol.SERVICE_NAME)
-    try:
-        result = await node_link.command(
-            graph_memory_protocol.ACTION_SEARCH,
-            {"query": text, "chat_id": chat_id, "limit": GRAPH_MEMORY_RECALL_LIMIT},
-            dst=dst,
-            timeout=GRAPH_MEMORY_TIMEOUT_S,
-        )
-    except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
-        log.debug("ai_flow: графовая память не ответила: %s", exc)
-        return []
-    return [str(fact)[:GRAPH_MEMORY_FACT_CHARS] for fact in result.get("facts", []) if fact]
-
-
-# Этап 42.2: ход диалога (реплика собеседника + ответ Альфреда) → эпизод
-# графа, best-effort ПОСЛЕ того, как ответ уже доставлен пользователю (см.
-# вызывающего — bot/handlers/ai.py::_do_ask_and_reply, вызов идёт после
-# store.record_ai_turn для хода assistant). Триггер — по завершении хода
-# ответа, а не по таймауту неактивности треда: решение принято при
-# реализации — фоновый таймер ради этого не заводим (простота на слабом
-# CPU alfred, см. CLAUDE.md), а "не блокировать основной /ai-ответ" и так
-# соблюдено — ответ к этому моменту уже отправлен в Telegram.
-DIALOGUE_EPISODE_TIMEOUT_S = 2.0
-# Как graph_memory/service.py::MAX_EPISODE_CHARS — тот же приём, что и у
-# bot/tools.py::_GRAPH_EPISODE_MAX_CHARS (не терять эпизод молча).
-DIALOGUE_EPISODE_MAX_CHARS = 400
-_URL_RE = re.compile(r"https?://\S+")
-
-
-async def _add_graph_episode(
-    node_link: ServiceLink, chat_id: int, text: str, source: str
-) -> None:
-    if len(text) > DIALOGUE_EPISODE_MAX_CHARS:
-        text = text[: DIALOGUE_EPISODE_MAX_CHARS - 1] + "…"
-    dst = Address(node=graph_memory_protocol.NODE_ID, service=graph_memory_protocol.SERVICE_NAME)
-    try:
-        await node_link.command(
-            graph_memory_protocol.ACTION_ADD_EPISODE,
-            {"text": text, "chat_id": chat_id, "source": source},
-            dst=dst,
-            timeout=DIALOGUE_EPISODE_TIMEOUT_S,
-        )
-    except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
-        log.debug("ai_flow: графовая память не приняла эпизод (%s): %s", source, exc)
+def photo_key_for(message: Message) -> str:
+    return f"{message.chat.id}_{message.message_id}"
 
 
 async def piggyback_dialogue_episode(
     node_link: ServiceLink | None, chat_id: int | None, user_text: str, assistant_text: str
 ) -> None:
-    """История диалога → граф (Этап 42.2), тем же best-effort приёмом, что и
-    bot/tools.py::_piggyback_graph_episode у remember: недоступность
-    graph_memory (mycraft штатно спит) молча проглатывается — ai_turns
-    (SQLite) и так хранит полную историю, граф — дополнительный источник, не
-    единственный.
-
-    Ссылки (URL) в ходе — отдельные эпизоды с source=EPISODE_SOURCE_LINK
-    (тем же текстом хода, что и основной эпизод, только под своим source),
-    чтобы граф впоследствии мог отвечать "что мы обсуждали по этой ссылке"
-    (см. IMPLEMENTATION_PLAN.md, Этап 42.2).
-    """
     if node_link is None or chat_id is None:
         return
     user_text = user_text.strip()
@@ -554,457 +177,10 @@ async def piggyback_dialogue_episode(
     if not user_text or not assistant_text:
         return
     text = f"{user_text} → {assistant_text}"
-    await _add_graph_episode(
-        node_link, chat_id, text, graph_memory_protocol.EPISODE_SOURCE_DIALOGUE_TURN
-    )
+    await add_episode(node_link, chat_id, text, graph_memory_protocol.EPISODE_SOURCE_DIALOGUE_TURN)
     urls = dict.fromkeys(_URL_RE.findall(user_text) + _URL_RE.findall(assistant_text))
     for _url in urls:
-        await _add_graph_episode(
-            node_link, chat_id, text, graph_memory_protocol.EPISODE_SOURCE_LINK
-        )
-
-
-def _is_unavailable(exc: Exception) -> bool:
-    if isinstance(exc, ServiceUnavailableError):
-        return True
-    return isinstance(exc, ProtoError) and exc.code in (ERR_UNAVAILABLE, ERR_UNKNOWN_DST)
-
-
-# Гость ответил на картинку Альфреда (снимок, рисунок, карточку): самой
-# картинки модель не видит — без подсказки она отвечала «по памяти»
-# (2026-10-02).
-REPLIED_PICTURE_NOTE = (
-    "Собеседник отвечает на твою картинку #{id} «{caption}». Ты её не видишь, "
-    "пока не посмотришь: о деталях — сначала look_at_photo (whose=mine).{seen}"
-)
-REPLIED_PICTURE_SEEN = " Когда ты её отправлял, на ней было видно: {seen}"
-
-
-async def _replied_picture_note(message: Message, store: Store | None) -> str | None:
-    if store is None or message.chat is None or message.reply_to_message is None:
-        return None
-    image = await store.alfred_image(
-        message.chat.id, message_id=message.reply_to_message.message_id
-    )
-    if image is None:
-        return None
-    seen = ""
-    try:
-        params = json.loads(image.get("params") or "{}")
-    except (TypeError, ValueError):
-        params = {}
-    if isinstance(params, dict) and isinstance(params.get("seen"), str) and params["seen"]:
-        seen = REPLIED_PICTURE_SEEN.format(seen=params["seen"])
-    return REPLIED_PICTURE_NOTE.format(id=image["id"], caption=image["caption"], seen=seen)
-
-
-def photo_key_for(message: Message) -> str:
-    """Детерминированный ключ фото на диске службы llm (см. LlmConfig.photos_dir,
-    llm/vision.py) — тот же, что bot/handlers/ai.py::_handle_photo_message
-    пишет в ``ai_turns.photo_path``. Вычисляется заново здесь (без похода в
-    БД) для исходящего ``raw_image`` этого хода в _ask() ниже — тот же
-    ``message``, что вызвал текущий проход диалога, и есть фото-сообщение,
-    если оно вообще было (см. photo_key на history[-1].get("raw_image"))."""
-    return f"{message.chat.id}_{message.message_id}"
-
-
-def display_name(user: User | None) -> str | None:
-    """Имя для промпта LLM и для колонки ai_turns.user_name: имя(+фамилия)
-    Telegram-профиля, плюс @username в скобках, если он есть (полезно, когда
-    у двух собеседников совпадают имена)."""
-    if user is None:
-        return None
-    name = user.full_name
-    return f"{name} (@{user.username})" if user.username else name
-
-
-def _person_age(birth_date: str | None, today: date) -> int | None:
-    """Точный возраст на сегодня — детерминированно в коде, не поручаем
-    модели вычитание дат (та же логика, что и с часовыми поясами: живая
-    находка про то, что маленькие модели систематически ошибаются в
-    арифметике с датами)."""
-    if not birth_date:
-        return None
-    try:
-        birth = date.fromisoformat(birth_date)
-    except ValueError:
-        return None
-    return today.year - birth.year - ((today.month, today.day) < (birth.month, birth.day))
-
-
-# Родительный падеж — та же форма, что уже используют факты memory
-# ("День рождения — 29 апреля", см. живые данные): "29 апреля", не "29 April"
-# и не "апрель 29". Только для _speaker_life_note ниже, отдельного модуля
-# под дату не заводим — используется в одном месте.
-_MONTHS_RU_GENITIVE = (
-    "января", "февраля", "марта", "апреля", "мая", "июня",
-    "июля", "августа", "сентября", "октября", "ноября", "декабря",
-)
-
-
-def _person_birthday_ru(birth_date: str | None) -> str | None:
-    """«29 апреля» — день и месяц рождения (без года: год модель и так
-    получает как точный возраст через _person_age, а прямая дата рождения —
-    личные данные, которые не стоит подсвечивать лишний раз)."""
-    if not birth_date:
-        return None
-    try:
-        birth = date.fromisoformat(birth_date)
-    except ValueError:
-        return None
-    return f"{birth.day} {_MONTHS_RU_GENITIVE[birth.month - 1]}"
-
-
-# (субъект "он/она", предложный "у него/у неё", притяжательный "его/её" —
-# для "него"/"неё" совпадает с предложным только у мужского рода, поэтому
-# три отдельных формы, не выводим одну из другой). Пол неизвестен —
-# «собеседник».
-_PRONOUNS = {
-    "m": ("он", "него", "его"),
-    "f": ("она", "неё", "её"),
-    None: ("собеседник", "собеседника", "его/её"),
-}
-
-
-def _speaker_life_note(people: PeopleBook, person_id: int) -> str | None:
-    """Местное время, возраст и день рождения собеседника из его карточки
-    (Этап 58; раньше — из [[people]] конфига): точное местное время в
-    его/её городе (не пояс сервера — верхняя строка) и точный возраст.
-    Правила о ТОМ, как это использовать (такт с возрастом дам, поправка тона
-    на разницу в возрасте с самим Альфредом) — в характере персонажа
-    (llm-prompt.toml, не дублируем здесь построчно)."""
-    gender = people.gender(person_id)
-    subject, prepositional, possessive = _PRONOUNS.get(gender, _PRONOUNS[None])
-    parts: list[str] = []
-    tz = people.value(person_id, people_claims.FIELD_TIMEZONE)
-    if tz:
-        try:
-            local_now = datetime.now(ZoneInfo(tz))
-        except (ZoneInfoNotFoundError, ValueError):
-            local_now = None
-        if local_now is not None:
-            city = people.value(person_id, people_claims.FIELD_CITY)
-            where = f" в {city}" if city else ""
-            parts.append(
-                f"У {prepositional}{where} сейчас "
-                f"{local_now:%H:%M} ({ai_tools.WEEKDAYS_RU[local_now.weekday()]}) — "
-                f"это {possessive} часовой пояс, а не пояс сервера выше; называй "
-                "именно это время, если спросят, который час, или это иначе уместно."
-            )
-    birth_date = people.value(person_id, people_claims.FIELD_BIRTH_DATE)
-    age = _person_age(birth_date, date.today())
-    if age is not None:
-        parts.append(f"Точный возраст ({subject}) сейчас: {age} лет.")
-    # Живая находка 2026-09-23: возраст выше уже считался из birth_date, а
-    # сам день рождения (число и месяц) собеседнику не сообщался ни разу.
-    # ВАЖНО (выяснилось при живой проверке): на ПРЯМОЙ вопрос о СВОЁМ дне
-    # рождения («когда у меня день рождения?») характер Альфреда (см.
-    # llm-prompt.toml, не в репозитории) НАМЕРЕННО велит притворяться, что
-    # не знает — это осознанная черта персонажа пользователя, не баг, и эта
-    # строка её не переопределяет (промпт персонажа важнее любой заметки).
-    birthday = _person_birthday_ru(birth_date)
-    if birthday is not None:
-        parts.append(f"День рождения ({possessive}): {birthday}.")
-    return " ".join(parts) or None
-
-
-# Реплай на явно длинное сообщение (например, кто-то процитировал большой
-# форвард) режем — это справочная заметка, а не полноценный ход диалога,
-# ей не место раздувать контекст модели ради текста, который сама история
-# диалога всё равно не хранит.
-_REPLY_QUOTE_MAX_CHARS = 800
-
-
-async def _reply_context_lines(message: Message, store: Store, dialogue_id: int) -> list[str]:
-    """Контекст о сообщении, на которое сейчас отвечают (Telegram reply) —
-    то, что модель иначе никак не увидит.
-
-    Два независимых случая (решение пользователя 2026-07-24):
-    1. Реплай на "чужое" сообщение — не часть уже идущего треда Альфреда
-       (другой dialogue_id или вообще не ход Альфреда, например ответ на
-       обычное сообщение в группе с упоминанием бота) — его текст сюда не
-       попал бы никаким другим путём, добавляем целиком (с автором).
-    2. Reply-quote (Telegram "ответить с выделением") — конкретный
-       фрагмент, который человек явно выделил перед ответом. Добавляем
-       всегда, даже если само сообщение уже есть в истории диалога (свой
-       же тред) — то, ЧТО именно выделено, история диалога не хранит."""
-    reply_to = message.reply_to_message
-    if reply_to is None:
-        return []
-    lines: list[str] = []
-
-    known = await store.ai_turn(message.chat.id, reply_to.message_id) if message.chat else None
-    is_own_thread = known is not None and known["dialogue_id"] == dialogue_id
-    if not is_own_thread:
-        text = reply_to.text or reply_to.caption
-        if text:
-            author = display_name(reply_to.from_user) or "неизвестный собеседник"
-            if len(text) > _REPLY_QUOTE_MAX_CHARS:
-                text = text[:_REPLY_QUOTE_MAX_CHARS] + "…"
-            lines.append(f"Сообщение, на которое сейчас отвечают ({author}): «{text}».")
-
-    quote = message.quote
-    if quote is not None and quote.text:
-        quote_text = quote.text
-        if len(quote_text) > _REPLY_QUOTE_MAX_CHARS:
-            quote_text = quote_text[:_REPLY_QUOTE_MAX_CHARS] + "…"
-        # Живая находка 2026-07-24: формулировка должна называть источник
-        # цитаты САМА — раньше был дефис-отсылка "в нём", которая указывала
-        # на строку выше, а та строка для своего же треда как раз
-        # пропускается (текст и так есть в истории) — "нём" повисало без
-        # антецедента, и модель на практике путала выделенное слово с
-        # каким-то другим (проверено вживую 2026-07-24: попросили
-        # процитировать выделенное "привычки" — модель назвала "повтори").
-        if is_own_thread:
-            lines.append(
-                f"Отвечая тебе, собеседник выделил и процитировал фрагмент "
-                f"именно ИЗ ТВОЕГО ЖЕ предыдущего сообщения в этом треде — "
-                f"вот он, дословно: «{quote_text}». Если тебя просят повторить "
-                f"или процитировать «то слово»/«то, на что я ответил» — речь "
-                f"именно про этот фрагмент, не подбирай другое слово из своей "
-                f"памяти о переписке."
-            )
-        else:
-            lines.append(
-                f"Отвечая, собеседник выделил и процитировал в сообщении "
-                f"выше именно этот фрагмент, дословно: «{quote_text}». Если "
-                f"тебя просят повторить или процитировать «то, на что я "
-                f"ответил» — речь именно про этот фрагмент."
-            )
-
-    return lines
-
-
-async def _people_context_lines(
-    message: Message,
-    store: Store,
-    book: SubscriptionBook | None,
-    people: PeopleBook,
-) -> list[str]:
-    """Карточки собеседника, участников группы и его знакомых (Этап 58,
-    people/book.py) — имя, пол, прозвища, местное время и возраст, общие для
-    всех чатов. Знакомые идут строкой «имя — id — пол»: по id их адресуют
-    tell/request_acquaintance."""
-    user = message.from_user
-    if user is None:
-        return []
-    speaker_id = user.id
-    names: dict[int, str] = {}
-    sender_name = display_name(user)
-    if sender_name:
-        names[speaker_id] = sender_name
-    participants: list[int] = []
-    if message.chat is not None and message.chat.type in ("group", "supergroup"):
-        for row in await store.chat_participants(message.chat.id):
-            if row["user_id"] == speaker_id:
-                continue
-            participants.append(row["user_id"])
-            names.setdefault(row["user_id"], row["user_name"])
-    acquaintances: list[int] = []
-    for row in await store.relationships_for(speaker_id, status="confirmed"):
-        other = row["guest_b"] if row["guest_a"] == speaker_id else row["guest_a"]
-        acquaintances.append(other)
-
-    def name_of(person_id: int) -> str | None:
-        return people.display(person_id) or names.get(person_id)
-
-    lines: list[str] = []
-    for note in (
-        people_cards.speaker_card_note(people.card(speaker_id), name_of),
-        _speaker_life_note(people, speaker_id),
-    ):
-        if note:
-            lines.append(note)
-    if participants:
-        lines.append(
-            "Участники этого чата: "
-            + "; ".join(
-                people_cards.roster_line(p, name_of(p) or "?", people.card(p), name_of)
-                for p in participants
-            )
-            + "."
-        )
-    if acquaintances:
-        lines.append(
-            "Знакомые собеседника (им можно передавать сообщения, адресуй по id): "
-            + "; ".join(
-                people_cards.roster_line(a, name_of(a) or "?", people.card(a), name_of)
-                for a in acquaintances
-            )
-            + "."
-        )
-    # Живая находка 2026-10-09: владелец просил «установить связь» с отцом,
-    # а модель рассуждала по-житейски («вы и так его знаете») — правило о
-    # знакомстве жило только в описаниях тулов.
-    lines.append(
-        "Порядок дома: письма ты передаёшь только между теми, кого представил "
-        "друг другу сам, — знакомство через тебя (request_acquaintance). Это "
-        "касается и родных: знают ли люди друг друга в жизни, не важно. Просят "
-        "связать, познакомить или передать тому, кого нет среди знакомых "
-        "собеседника, — открывай форму знакомства. Исключение одно: передать "
-        "«владельцу»/«хозяину» по роли можно всегда."
-    )
-    return lines
-
-
-async def _build_context_note(
-    message: Message,
-    store: Store,
-    dialogue_id: int,
-    settings: Settings | None = None,
-    *,
-    has_web_search: bool = True,
-    memory_facts: list[str] | None = None,
-    graph_facts: list[str] | None = None,
-    people_lines: list[str] | None = None,
-) -> str:
-    """Служебная заметка для модели (не для пользователя): точное время
-    сейчас (§8.1 плана — маленькие локальные модели плохо знают "сейчас", а
-    время нужно почти на каждый запрос, отдельного тула для этого не
-    заводим) — плюс отдельно личное время самого Альфреда (ALFRED_TIMEZONE,
-    2026-07-25), кто сейчас пишет (карточка собеседника — в ``people_lines``,
-    см. _people_context_lines), кто начал этот тред, кто ещё обращался к
-    Альфреду в этом чате, и что за сообщение цитируют/на что отвечают (см.
-    _reply_context_lines).
-
-    ``graph_facts`` — вызывающий (request_alfred) может смешать в один
-    список результаты ДВУХ разных запросов в graph_memory: обычный поиск по
-    теме текущей реплики и, для гостей на первом ходе треда, поиск про
-    личность самого собеседника (Этап 42.5b) — оба одинаково "может быть
-    неполным/устаревшим", разделять их по тону здесь не нужно.
-
-    Пункты про тред/участников — только для групп: в личке собеседник
-    всегда один и тот же, уточнять нечего. Строится заново на каждый запрос
-    (не хранится в ai_turns) — участники чата могут появляться по ходу дела,
-    а время не имеет смысла хранить вовсе. settings — опциональный параметр
-    (не Optional по смыслу, а ради существующих тестов/вызовов, где список
-    известных людей не нужен): без него просто пропускаем сопоставление."""
-    # Живой баг 2026-07-24: голая строка времени без указания пояса —
-    # модель на вопрос "это в каком часовом поясе" отвечала наугад и
-    # противоречила себе же. Явный UTC-оффсет плюс запрет досчитывать чужой
-    # пояс (часовой пояс собеседника Telegram боту не передаёт — только
-    # свой явный вопрос про "у нас" бот и знает; для других мест — см.
-    # тул get_time в bot/tools.py, туда же вынесена таблица дней недели).
-    now_local = datetime.now().astimezone()
-    offset = now_local.strftime("%z")
-    lines = [
-        f"Точное время сейчас (пояс сервера, UTC{offset[:3]}:{offset[3:]}): "
-        f"{now_local:%Y-%m-%d %H:%M} ({ai_tools.WEEKDAYS_RU[now_local.weekday()]}). "
-        "Это ПОЯС СЕРВЕРА, не обязательно пояс собеседника — если тебя "
-        "спросят, в каком поясе сейчас сам собеседник, и ниже нет отдельной "
-        "строки про его/её местное время — честно скажи, что не знаешь, не "
-        "додумывай."
-    ]
-    if not has_web_search:
-        # Живая находка 2026-07-27: в чате без права search@net тула
-        # web_search модель не видит вовсе (bot/tools.py::tools_for) — и,
-        # не зная, что поиск в принципе бывает, отвечает про свежие события
-        # из памяти, ВЫДУМЫВАЯ даты и факты. Молчаливое отсутствие
-        # инструмента само по себе не учит модель осторожности, поэтому
-        # говорим прямо — тем же приёмом, что и строка про часовой пояс выше
-        # («честно скажи, что не знаешь, не додумывай»).
-        lines.append(
-            "Выхода в интернет у тебя сейчас нет — проверить ничего не "
-            "можешь. Если спрашивают о свежем (новости, события последних "
-            "лет, чей-то запуск/матч/курс, «что было вчера») — прямо скажи, "
-            "что сейчас без интернета и потому не знаешь. НЕ придумывай "
-            "события, даты, числа и названия и не выдавай за факт то, что "
-            "помнишь: память могла устареть или подвести. Признаться в "
-            "незнании — не стыдно, соврать — стыдно."
-        )
-    # Живая находка 2026-08-10: инструмент честно вернул отказ (например,
-    # get_weather — "не удалось определить координаты города") ДВАЖДЫ, а
-    # модель после этого всё равно ответила конкретной температурой и
-    # ветром — выдумала данные вместо того, чтобы сказать «не получилось».
-    # Та же логика, что у строк про часовой пояс/интернет выше: не молчаливо
-    # надеяться, что модель сама поймёт, а сказать прямо и безусловно (не
-    # завязано на конкретный тул — иначе на каждый новый тул пришлось бы
-    # заводить свою копию).
-    # Живая находка 2026-10-09: note_person ответил «не записал», а модель
-    # сказала «Записал, сэр» — характер запрещает извиняться и отказываться,
-    # и честное «не вышло» казалось ей выходом из роли. Правило — про любое
-    # действие, не про один тул.
-    lines.append(
-        "Если инструмент вернул отказ или ошибку (например, «не удалось», "
-        "«не записал», «не умею», «недоступен», «не настроено») — это финальный "
-        "ответ на твой запрос к нему, не повод придумать правдоподобные "
-        "цифры/факты взамен. Если это было действие (записать, передать, "
-        "отправить, запомнить) — оно НЕ сделано: не говори «записал», "
-        "«передал», «зафиксировал». Скажи собеседнику как есть: не получилось, "
-        "почему (если сказано) и что можно сделать дальше. Доложить хозяину, "
-        "что поручение не исполнено, — долг дворецкого, а не извинение и не "
-        "выход из роли."
-    )
-    alfred_now = datetime.now(ZoneInfo(ALFRED_TIMEZONE))
-    lines.append(
-        f"Отдельно: ТВОЁ (Альфреда) личное время сейчас — там, где ты живёшь: "
-        f"{alfred_now:%H:%M} ({ai_tools.WEEKDAYS_RU[alfred_now.weekday()]}). Своё "
-        "место жительства ты не скрываешь, если прямо спросят, где ты живёшь или "
-        "который час у ТЕБЯ (не у собеседника и не пояс сервера выше) — называй "
-        "именно это время; про сам город — см. свой характер."
-    )
-
-    sender_name = display_name(message.from_user)
-    is_group = message.chat is not None and message.chat.type in ("group", "supergroup")
-    if sender_name is not None:
-        lines.append(f"Сейчас с тобой говорит: {sender_name}.")
-    if people_lines:
-        lines.extend(people_lines)
-    if sender_name is not None and is_group:
-        starter = await store.ai_turn(message.chat.id, dialogue_id)
-        starter_name = starter.get("user_name") if starter else None
-        if starter_name and starter_name != sender_name:
-            lines.append(
-                f"Этот разговор начал(а) {starter_name}, а сейчас в него отвечает "
-                f"{sender_name} — не тот человек, кто начинал. Это чужой тред: не "
-                f"отказывай в ответе, но веди себя чуть сдержаннее, чем со "
-                f"{starter_name} — обратись к {sender_name} по имени и мягко "
-                f"дай понять, что это разговор {starter_name} (например: «Это, "
-                f"кажется, беседа {starter_name}, сэр/мадам — но извольте, чем "
-                f"могу быть полезен?» или предложи начать свой отдельный "
-                f"разговор), не подхватывай тему с тем же радушием, как с тем, "
-                f"кто начал."
-            )
-
-        participants = await store.chat_participants(message.chat.id)
-        others = [
-            p["user_name"]
-            for p in participants
-            if p["user_name"] and p["user_name"] not in (sender_name, starter_name)
-        ]
-        if others:
-            lines.append("В этом чате к тебе также обращались: " + ", ".join(others) + ".")
-
-    if memory_facts:
-        # Не «вот факты», а «ты это помнишь»: для персонажа это его
-        # собственная память, а не справка, зачитанная кем-то со стороны.
-        lines.append(
-            "Из того, что ты помнишь про этот разговор и его людей: "
-            + "; ".join(memory_facts)
-            + ". Пользуйся, если к месту, но не зачитывай списком и не "
-            "объявляй, что «сверился с памятью»."
-        )
-    if graph_facts:
-        # Отдельный блок, не смешанный с memory_facts выше: источник менее
-        # надёжный (графовая память — Этап 41, MVP, экстракция локальной
-        # LLM на mycraft может ошибаться со склонениями/связями), и это
-        # честно сказано модели, а не выдано за то же самое, что «ты сам
-        # помнишь» — см. graph_memory/service.py.
-        lines.append(
-            "Дополнительно — связи, которые ты мог уловить между людьми и "
-            "вещами (может быть неполным или устаревшим, используй как "
-            "подсказку, а не как точный факт): "
-            + "; ".join(graph_facts)
-            + "."
-        )
-
-    lines.extend(await _reply_context_lines(message, store, dialogue_id))
-
-    lines.append(
-        "Это справка для тебя, не пересказывай её вслух — просто учти при ответе "
-        "(например, обратиться по имени), если уместно."
-    )
-    return " ".join(lines)
+        await add_episode(node_link, chat_id, text, graph_memory_protocol.EPISODE_SOURCE_LINK)
 
 
 async def perform_dismissal(
@@ -1014,26 +190,11 @@ async def perform_dismissal(
     book: SubscriptionBook,
     notifier: Notifier,
 ) -> None:
-    """Исполнить роспуск, назначенный тулом dismiss (bot/tools.py).
-
-    Зовётся ТОЛЬКО после того, как прощание Альфреда уже отправлено в чат
-    (bot/handlers/ai.py) — до этого гасить нечего и незачем: ответ ещё
-    генерируется той самой моделью, которую предстоит выгрузить.
-
-    Порядок — модель, потом машина: выгрузка контейнера штатная и быстрая, а
-    выдёргивать питание из-под работающей WSL2/Docker-связки лишний раз
-    незачем (см. память про хрупкость этого стека на winpc). Неудача с
-    моделью выключение машины не отменяет — она всё равно погасит контейнер
-    вместе со всем остальным.
-    """
-    llm_dst = Address(node=LLM_NODE, service=LLM_SERVICE)
     try:
-        # quiet=True — прощание уже сказано, а llm_idle_sleep отрендерился бы
-        # поверх него в «не дождался обращения» (llm/service.py::_sleep_now).
         await node_link.command(
-            LLM_SLEEP_ACTION, {"quiet": True}, dst=llm_dst, timeout=DISMISS_TIMEOUT_S
+            LLM_SLEEP_ACTION, {"quiet": True}, dst=LLM_ADDRESS, timeout=DISMISS_TIMEOUT_S
         )
-    except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
+    except UNREACHABLE_ERRORS as exc:
         log.warning("ai_flow: роспуск — модель не выгрузилась: %s", exc)
         if mode == ai_tools.DISMISS_MODEL:
             await message.answer(DISMISS_FAILED_TEXT)
@@ -1044,12 +205,9 @@ async def perform_dismissal(
     if action is not None:
         try:
             await node_link.command(
-                action,
-                {},
-                dst=Address(node=LLM_NODE, service=NODE_SERVICE),
-                timeout=DISMISS_TIMEOUT_S,
+                action, {}, dst=node_address(LLM_NODE), timeout=DISMISS_TIMEOUT_S
             )
-        except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
+        except UNREACHABLE_ERRORS as exc:
             log.warning("ai_flow: роспуск — %s не удался: %s", action, exc)
             await message.answer(DISMISS_FAILED_TEXT)
             await notify_admins(book, notifier, f"⚠️ роспуск Альфреда: {action} — {exc}")
@@ -1058,62 +216,15 @@ async def perform_dismissal(
     await message.answer(DISMISS_TEXTS[mode])
 
 
-class SpeechRemarkBox:
-    """Изменяемая ячейка под ремарку «Логопеда» (llm/speech_therapy.py) —
-    заполняется во время запроса к модели, отправляется вызывающим
-    (bot/handlers/ai.py) отдельным сообщением ПОСЛЕ ответа Альфреда.
-
-    Тот же паттерн, что и bot/tools.py::DismissalBox: колбэк из llm_chat.py
-    срабатывает до того, как этот код успевает отправить сам ответ (см.
-    _send_alfred_reply в bot/handlers/ai.py), поэтому раньше времени
-    отправлять ремарку нельзя — иначе она обгонит ответ, на который
-    ссылается. ``None`` — визита логопеда в этом ответе не было."""
-
-    text: str | None = None
-
-
-def _typing_while_asking(message: Message) -> contextlib.AbstractAsyncContextManager[None]:
-    """typing_action на чат/топик этого сообщения — no-op, если chat неизвестен
-    (message.chat может быть None в синтетических вызовах вроде start_dialogue
-    из тестов; в реальном Telegram-апдейте он всегда есть)."""
-    if message.chat is None:
-        return contextlib.nullcontext()
-    return typing_action(message.bot, message.chat.id, message.message_thread_id)
-
-
-def llm_address() -> Address:
-    """Адрес службы llm для /ai — хендлеру (фоновое сжатие истории, Этап 50)."""
-    return Address(node=LLM_NODE, service=LLM_SERVICE)
-
-
-# Действующее окно службы llm (num_ctx), как его сообщила сама служба в
-# последнем ответе chat (llm/service.py::_usage) — Этап 50.
-_seen_num_ctx: dict[str, int] = {}
-
-
-async def resolve_num_ctx(settings: Settings, store: Store, dst: Address) -> int:
-    """Окно модели для оценки заполненности: что служба сказала в последнем
-    ответе этому процессу → последний замер из БД (ai_dialogue_context) →
-    [llm].num_ctx из конфига бота (грубый фоллбэк: на alfred это дефолт,
-    реальное окно живёт на mycraft).
-
-    describe здесь намеренно не зовём: оценка идёт ДО пробуждения службы,
-    а неудачный describe спящей ноды закэшировал бы «профиля нет» на
-    _PROFILE_TTL_S и сбил бы выбор router-прохода (_use_router)."""
-    seen = _seen_num_ctx.get(f"{dst.node}/{dst.service}")
-    if seen:
-        return seen
-    known = await store.latest_known_num_ctx()
-    if known:
-        return known
-    return settings.llm.num_ctx
+def _tools_done_note(executed: list[tuple[str, dict[str, Any], str]]) -> str:
+    lines = [f"- {name}({args}) → {result[:600]}" for name, args, result in executed]
+    return (
+        "В этом ходе ты уже вызвал инструменты, повторно их не вызывай — вот "
+        "результаты:\n" + "\n".join(lines)
+    )
 
 
 async def _current_turn_text(store: Store, message: Message) -> str:
-    """Текст текущей реплики собеседника — как он записан в ai_turns (для
-    голосового — распознанный текст, для фото — подпись). Директивы без
-    записанного хода (OPENING_PROMPT и т.п.) — пустая строка: искать по
-    служебному тексту в истории нечего."""
     if message.chat is None:
         return ""
     turn = await store.ai_turn(message.chat.id, message.message_id)
@@ -1122,17 +233,552 @@ async def _current_turn_text(store: Store, message: Message) -> str:
     return str(turn.get("content") or "")
 
 
-def _tools_done_note(executed: list[tuple[str, dict[str, Any], str]]) -> str:
-    """Для перегенерации после переполнения (Этап 50): тулы этого хода уже
-    отработали — повторять их побочные эффекты (передать сообщение,
-    поставить напоминание) нельзя, а результаты модели нужны."""
-    lines = [
-        f"- {name}({args}) → {result[:600]}" for name, args, result in executed
-    ]
-    return (
-        "В этом ходе ты уже вызвал инструменты, повторно их не вызывай — вот "
-        "результаты:\n" + "\n".join(lines)
-    )
+class _AlfredTurn:
+    def __init__(
+        self,
+        message: Message,
+        node_link: ServiceLink,
+        store: Store,
+        settings: Settings,
+        history: list[dict[str, Any]],
+        dialogue_id: int,
+        book: SubscriptionBook,
+        notifier: Notifier,
+        dismissal: ai_tools.DismissalBox | None,
+        tool_calls: ToolCalls | None,
+        speech_remark: SpeechRemarkBox | None,
+        rich_session: RichStreamSession | None,
+        pending_actions: Any | None,
+        interactive_turn: Any | None,
+        interactives: Any | None,
+    ) -> None:
+        self.message = message
+        self.node_link = node_link
+        self.store = store
+        self.settings = settings
+        self.history = history
+        self.dialogue_id = dialogue_id
+        self.book = book
+        self.notifier = notifier
+        self.dismissal = dismissal
+        self.tool_calls = tool_calls
+        self.speech_remark = speech_remark
+        self.rich_session = rich_session
+        self.pending_actions = pending_actions
+        self.interactive_turn = interactive_turn
+        self.interactives = interactives
+
+        self.dst = LLM_ADDRESS
+        self.timeout = settings.llm.request_timeout_s
+        self.chat_key = message.chat.id if message.chat is not None else None
+        self.log_chat_id = self.chat_key if self.chat_key is not None else "?"
+        self.subscription = book.for_chat(message.chat.id) if message.chat else None
+        self.people: PeopleBook
+        self.context_note = ""
+        self.speech_user_id = getattr(interactive_turn, "user_id", None)
+        self.speech_clear = getattr(interactive_turn, "speech_clear_now", None) or getattr(
+            interactive_turn, "speech_clear", None
+        )
+        self.is_scene = bool(getattr(interactive_turn, "scene", False))
+        self.surfing_announced = False
+        self.executed_tools: list[tuple[str, dict[str, Any], str]] = []
+
+        compression = settings.llm
+        self.compress_cfg = compression
+        self.dhistory = history if isinstance(history, dialogue_context.DialogueHistory) else None
+        self.managed = compression.context_compression and self.chat_key is not None
+        self.recall_note: str | None = None
+        self.step_away = False
+        self.num_ctx = compression.num_ctx
+        self.sent_chars = 0
+
+    async def run(self) -> str | None:
+        await self._prepare_context_note()
+        await self._plan_context_window()
+        outcome = await wake_core.ensure_service_ready(
+            self.node_link,
+            self.store,
+            LLM_NODE,
+            LLM_SERVICE,
+            wake_timeout_s=WAKE_POLL_TIMEOUT_S,
+            wake_poll_interval_s=WAKE_POLL_INTERVAL_S,
+            warmup_timeout_s=self.settings.llm.warmup_timeout_s,
+            on_phase_change=self._on_phase_change,
+        )
+        if outcome == wake_core.CRASHED:
+            await self._announce_albert(ALBERT_UNAVAILABLE, ALBERT_UNAVAILABLE_MD)
+            await notify_admins(
+                self.book,
+                self.notifier,
+                f"🔥 /ai (chat={self.log_chat_id}): нода «{LLM_NODE}» жива, служба "
+                f"«{LLM_SERVICE}» не отвечает — WoL не поможет, нужен ручной перезапуск службы",
+            )
+            return None
+        if outcome == wake_core.UNREACHABLE:
+            await self._announce_albert(ALBERT_UNAVAILABLE, ALBERT_UNAVAILABLE_MD)
+            return None
+        if outcome == wake_core.WARMUP_FAILED:
+            await self._announce_albert(ALBERT_ASLEEP, ALBERT_ASLEEP_MD)
+            await notify_admins(
+                self.book,
+                self.notifier,
+                f"⚠️ /ai (chat={self.log_chat_id}): прогрев {LLM_NODE}/{LLM_SERVICE} не подтверждён",
+            )
+            return None
+        return await self._ask_ready_service()
+
+    async def _ask_ready_service(self) -> str | None:
+        try:
+            return await self._ask()
+        except ProtoError as exc:
+            if is_service_unavailable(exc):
+                await self._announce_albert(ALBERT_UNAVAILABLE, ALBERT_UNAVAILABLE_MD)
+            else:
+                await self._announce_albert(ALBERT_HICCUP, ALBERT_HICCUP_MD)
+                await notify_admins(
+                    self.book,
+                    self.notifier,
+                    f"⚠️ /ai (chat={self.log_chat_id}): {exc.code} — {exc.message}",
+                )
+            return None
+        except ServiceUnavailableError:
+            await self._announce_albert(ALBERT_UNAVAILABLE, ALBERT_UNAVAILABLE_MD)
+            return None
+
+    async def _prepare_context_note(self) -> None:
+        message = self.message
+        has_web_search = SURFING_TOOL in ai_tools.tools_for(self.subscription).handlers
+        self.people = await PeopleBook.load(self.store, self.book)
+        memory_facts, graph_facts, people_lines = await self._gather_facts_and_people()
+        note = await build_context_note(
+            message,
+            self.store,
+            self.dialogue_id,
+            has_web_search=has_web_search,
+            memory_facts=memory_facts,
+            graph_facts=graph_facts,
+            people_lines=people_lines,
+        )
+        extra_notes = [
+            await self._open_forms_note(),
+            await replied_picture_note(message, self.store),
+            getattr(self.interactive_turn, "note", None),
+        ]
+        for extra, separator in zip(extra_notes, (" ", "\n\n", "\n\n"), strict=True):
+            if extra:
+                note = f"{note}{separator}{extra}" if note else extra
+        self.context_note = f"{note}\n\n{LENGTH_NOTE}" if note else LENGTH_NOTE
+
+    async def _open_forms_note(self) -> str | None:
+        if self.pending_actions is None or self.message.chat is None:
+            return None
+        return open_forms_note(
+            await self.store.open_pending_actions(chat_id=self.message.chat.id),
+            self.message.chat.id,
+        )
+
+    async def _gather_facts_and_people(self) -> tuple[list[str], list[str], list[str]]:
+        message = self.message
+        text = message.text or ""
+        recalls = [
+            recall_facts(self.node_link, self.chat_key, text),
+            recall_graph_facts(self.node_link, self.chat_key, text),
+        ]
+        sender = message.from_user
+        if sender is not None and not self.people.card(sender.id) and len(self.history) <= 1:
+            sender_name = display_name(sender)
+            if sender_name:
+                recalls.append(
+                    recall_graph_facts(
+                        self.node_link,
+                        self.chat_key,
+                        f"Кто такой(-ая) {sender_name} и как к нему/ней обращаться?",
+                    )
+                )
+        people_task = people_context_lines(message, self.store, self.book, self.people)
+        *recall_results, people_lines = await asyncio.gather(*recalls, people_task)
+        memory_facts = recall_results[0]
+        graph_facts = recall_results[1] + (recall_results[2] if len(recall_results) > 2 else [])
+        return memory_facts, graph_facts, people_lines
+
+    async def _plan_context_window(self) -> None:
+        cfg = self.compress_cfg
+        if self.managed and self.dhistory is not None:
+            self.recall_note, recalled = await dialogue_context.recall_verbatim(
+                self.store,
+                self.settings,
+                self.chat_key,
+                self.dialogue_id,
+                await _current_turn_text(self.store, self.message),
+                self.dhistory,
+            )
+            if recalled:
+                log.info(
+                    "ai_flow: дословный возврат — %d сообщ. из начала разговора (chat=%s)",
+                    recalled,
+                    self.log_chat_id,
+                )
+            self.num_ctx = await resolve_num_ctx(self.settings, self.store, self.dst)
+        extra_chars = len(self.context_note) + len(self.recall_note or "")
+        self.sent_chars = dialogue_context.content_chars(list(self.history)) + extra_chars
+        if not (self.managed and self.dhistory is not None):
+            return
+        state = await self.store.dialogue_context_state(self.chat_key, self.dialogue_id)
+        estimated = dialogue_context.estimate_prompt_tokens(self.settings, self.sent_chars, state)
+        limit_tokens = dialogue_context.threshold_tokens(self.settings, self.num_ctx)
+        if limit_tokens <= cfg.context_base_tokens:
+            log.debug(
+                "ai_flow: окно %d слишком мало для порога (база %d) — пропуск (chat=%s)",
+                self.num_ctx,
+                cfg.context_base_tokens,
+                self.log_chat_id,
+            )
+        elif (
+            estimated > limit_tokens
+            and self.dhistory.compressible >= cfg.context_min_compress_turns
+            and not dialogue_context.COMPRESSOR.is_running(self.chat_key, self.dialogue_id)
+        ):
+            self.step_away = True
+            self.dhistory.compress_after = True
+            self.sent_chars += len(dialogue_context.STEP_AWAY_INSTRUCTION)
+            log.info(
+                "ai_flow: окно треда chat=%s dialogue=%s ~%d ток. из %d (порог %d, замер %s) "
+                "— Альфред отлучится, после ответа сожмём %d ходов",
+                self.log_chat_id,
+                self.dialogue_id,
+                estimated,
+                self.num_ctx,
+                limit_tokens,
+                state.get("prompt_tokens") if state else "нет",
+                self.dhistory.compressible,
+            )
+
+    def _notes(self, extra: tuple[str, ...] = ()) -> list[str]:
+        notes = [n for n in (self.recall_note, self.context_note) if n]
+        return notes + [n for n in extra if n]
+
+    async def _save_stats(self, stats: ChatStats, chars: int) -> None:
+        if stats.num_ctx:
+            _seen_num_ctx[_llm_key(self.dst)] = stats.num_ctx
+        if self.chat_key is None or stats.first_prompt_tokens is None:
+            return
+        try:
+            await self.store.save_dialogue_context_state(
+                self.chat_key,
+                self.dialogue_id,
+                prompt_tokens=stats.first_prompt_tokens,
+                sent_chars=chars,
+                num_ctx=stats.num_ctx,
+                done_reason=stats.done_reason,
+                at=utc_now(),
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("ai_flow: не удалось сохранить замер окна (chat=%s)", self.log_chat_id)
+
+    def _tool_context(self) -> ai_tools.ToolContext:
+        message = self.message
+        return ai_tools.ToolContext(
+            chat_id=self.chat_key,
+            dialogue_id=self.dialogue_id,
+            trigger_message_id=message.message_id if message.chat else None,
+            settings=self.settings,
+            node_link=self.node_link,
+            subscription=self.subscription,
+            dismissal=self.dismissal,
+            message_thread_id=message.message_thread_id,
+            book=self.book,
+            notifier=self.notifier,
+            store=self.store,
+            author=display_name(message.from_user),
+            people=self.people,
+            pending_actions=self.pending_actions,
+            interactives=self.interactives,
+            user_id=message.from_user.id if message.from_user else None,
+            is_private=message.chat is not None and message.chat.type == "private",
+            reply_to_message_id=(
+                message.reply_to_message.message_id if message.reply_to_message else None
+            ),
+        )
+
+    async def _record_tool_call(self, name: str, call_args: dict[str, Any], result: str) -> None:
+        self.executed_tools.append((name, call_args, result))
+        await notify_tool_call(
+            self.book, self.notifier, name, args=call_args, result=result, debug=self.tool_calls
+        )
+        if self.rich_session is None and name == SURFING_TOOL and not self.surfing_announced:
+            self.surfing_announced = True
+            await self.message.answer(SURFING_TEXT)
+        if self.chat_key is None:
+            return
+        await self.store.record_tool_call(
+            chat_id=self.chat_key,
+            dialogue_id=self.dialogue_id,
+            trigger_message_id=self.message.message_id,
+            tool_name=name,
+            args=call_args,
+            result=result,
+            at=utc_now(),
+        )
+
+    async def _record_speech_remark(self, remark: str) -> None:
+        if self.speech_remark is not None:
+            self.speech_remark.text = remark
+
+    async def _announce_tool_start(self, name: str, call_args: dict[str, Any]) -> None:
+        if self.rich_session is None:
+            return
+        await self.rich_session.push_status(TOOL_STATUS_TEXT.get(name, TOOL_STATUS_DEFAULT))
+
+    def _typing_while_asking(self) -> contextlib.AbstractAsyncContextManager[None]:
+        message = self.message
+        if message.chat is None:
+            return contextlib.nullcontext()
+        return typing_action(message.bot, message.chat.id, message.message_thread_id)
+
+    async def _generate(self, *args: Any, **kwargs: Any) -> str:
+        if self.rich_session is not None:
+            return await run_chat_loop(*args, **kwargs)
+        async with self._typing_while_asking():
+            return await run_chat_loop(*args, **kwargs)
+
+    async def _persona_pass(
+        self,
+        messages: list[dict[str, Any]],
+        tool_ctx: ai_tools.ToolContext,
+        reason: str,
+        photo_key: str | None,
+        stats: ChatStats,
+        allow_tools: bool,
+    ) -> str:
+        raw = await self._generate(
+            self.node_link,
+            self.dst,
+            self.timeout,
+            messages,
+            tool_ctx,
+            reason,
+            telegram_chat_id=self.chat_key,
+            log_chat_id=self.log_chat_id,
+            on_tool_call=self._record_tool_call,
+            on_speech_remark=self._record_speech_remark,
+            on_partial=self.rich_session.on_partial if self.rich_session is not None else None,
+            on_tool_start=self._announce_tool_start,
+            photo_key=photo_key,
+            speech_user_id=self.speech_user_id,
+            speech_clear=self.speech_clear,
+            stats=stats,
+            allow_tools=allow_tools,
+        )
+        return SILENT_REPLY if tool_ctx.end_turn else raw
+
+    async def _router_pass(
+        self,
+        messages: list[dict[str, Any]],
+        tool_ctx: ai_tools.ToolContext,
+        photo_key: str | None,
+        stats: ChatStats,
+        allow_tools: bool,
+    ) -> int:
+        decision = await run_chat_loop(
+            self.node_link,
+            self.dst,
+            self.timeout,
+            messages,
+            tool_ctx,
+            "off",
+            telegram_chat_id=self.chat_key,
+            log_chat_id=self.log_chat_id,
+            on_tool_call=self._record_tool_call,
+            on_tool_start=self._announce_tool_start,
+            role="router",
+            photo_key=photo_key,
+            stats=stats,
+            allow_tools=allow_tools,
+        )
+        return parse_router_level(decision)
+
+    def _messages_with_notes(
+        self, hist: list[dict[str, Any]], notes: list[str]
+    ) -> list[dict[str, Any]]:
+        if not notes:
+            return list(hist)
+        return [*hist[:-1], *(wrap_context_note(note) for note in notes), hist[-1]]
+
+    def _photo_key_of(self, hist: list[dict[str, Any]]) -> str | None:
+        current_turn = hist[-1] if hist else None
+        if isinstance(current_turn, dict) and "raw_image" in current_turn:
+            return photo_key_for(self.message)
+        return None
+
+    async def _ask_once(
+        self,
+        hist: list[dict[str, Any]],
+        stats: ChatStats,
+        notes: list[str],
+        *,
+        allow_tools: bool = True,
+    ) -> str:
+        base_messages = self._messages_with_notes(hist, notes)
+        photo_key = self._photo_key_of(hist)
+        tool_ctx = self._tool_context()
+
+        if not await _use_router(self.settings, self.node_link, self.dst):
+            single_reason = "high" if self.settings.llm.single_call_think else "off"
+            if self.is_scene:
+                single_reason = "off"
+            return await self._persona_pass(
+                list(base_messages), tool_ctx, single_reason, photo_key, stats, allow_tools
+            )
+
+        router_messages = list(base_messages)
+        level = await self._router_pass(router_messages, tool_ctx, photo_key, stats, allow_tools)
+        if tool_ctx.end_turn:
+            return SILENT_REPLY
+        if self.is_scene:
+            level = 0
+        log.info("ai_flow: router -> THINK:%d (chat=%s)", level, self.log_chat_id)
+        if level >= 1:
+            await push_status_or_answer(
+                self.message, self.rich_session, THINKING_TEXT_PLAIN, THINKING_TEXT
+            )
+        return await self._persona_pass(
+            router_messages, tool_ctx, REASON_LEVELS[level], photo_key, stats, allow_tools
+        )
+
+    async def _announce_step_away(self) -> None:
+        html_line, md_line = dialogue_context.pick_step_away_line()
+        await finalize_status_or_answer(self.message, self.rich_session, md_line, html_line)
+
+    async def _rescue(self, first: ChatStats) -> str:
+        assert self.chat_key is not None
+        cfg = self.compress_cfg
+        log.warning(
+            "ai_flow: окно переполнено (chat=%s dialogue=%s, промпт %d из %s, стоп %s) — "
+            "сжимаем синхронно и перегенерируем",
+            self.log_chat_id,
+            self.dialogue_id,
+            first.max_prompt_tokens,
+            first.num_ctx or self.num_ctx,
+            first.done_reason,
+        )
+        started = time.monotonic()
+        await dialogue_context.COMPRESSOR.compress_now(
+            self.node_link,
+            self.store,
+            self.settings,
+            self.chat_key,
+            self.dialogue_id,
+            self.dst,
+            num_ctx=first.num_ctx or self.num_ctx,
+            keep_recent=max(2, cfg.context_keep_recent_turns // 2),
+        )
+        if self.dhistory is not None:
+            self.dhistory.compress_after = False
+        await self._announce_step_away()
+        prefix = await dialogue_context.load_history(
+            self.store,
+            self.settings,
+            self.chat_key,
+            self.dialogue_id,
+            before_message_id=self.message.message_id,
+            wait=False,
+        )
+        retry_hist = dialogue_context.DialogueHistory(
+            [*prefix, self.history[-1]],
+            summary_upto=prefix.summary_upto,
+            verbatim_ids=prefix.verbatim_ids,
+            max_hidden_id=prefix.max_hidden_id,
+        )
+        self.recall_note, recalled = await dialogue_context.recall_verbatim(
+            self.store,
+            self.settings,
+            self.chat_key,
+            self.dialogue_id,
+            await _current_turn_text(self.store, self.message),
+            retry_hist,
+        )
+        tools_ran = list(self.executed_tools)
+        extra = (_tools_done_note(tools_ran),) if tools_ran else ()
+        notes = self._notes(extra)
+        retry_stats = ChatStats()
+        raw = await self._ask_once(retry_hist, retry_stats, notes, allow_tools=not tools_ran)
+        if raw == SILENT_REPLY:
+            return raw
+        await self._save_stats(
+            retry_stats,
+            dialogue_context.content_chars(list(retry_hist)) + sum(map(len, notes)),
+        )
+        overflowed = dialogue_context.looks_overflowed(raw, retry_stats, self.num_ctx)
+        log.info(
+            "ai_flow: перегенерация после сжатия — %.1f с, промпт %d → %d ток., "
+            "возвращено дословно %d, %s (chat=%s)",
+            time.monotonic() - started,
+            first.max_prompt_tokens,
+            retry_stats.max_prompt_tokens,
+            recalled,
+            "снова переполнено" if overflowed else "ок",
+            self.log_chat_id,
+        )
+        if not overflowed:
+            return raw
+        budget_chars = max(
+            4000,
+            int(
+                (
+                    dialogue_context.threshold_tokens(self.settings, self.num_ctx)
+                    - cfg.context_base_tokens
+                )
+                * cfg.context_chars_per_token
+            )
+            - sum(map(len, notes)),
+        )
+        trimmed = dialogue_context.trim_to_budget(list(retry_hist), budget_chars)
+        log.warning(
+            "ai_flow: и после сжатия переполнено — режем историю %d → %d сообщ. (chat=%s)",
+            len(retry_hist),
+            len(trimmed),
+            self.log_chat_id,
+        )
+        last_stats = ChatStats()
+        raw = await self._ask_once(trimmed, last_stats, notes, allow_tools=not tools_ran)
+        if raw == SILENT_REPLY:
+            return raw
+        await self._save_stats(last_stats, dialogue_context.content_chars(trimmed))
+        if dialogue_context.looks_overflowed(raw, last_stats, self.num_ctx):
+            return ""
+        return raw
+
+    async def _ask(self) -> str:
+        extra = (dialogue_context.STEP_AWAY_INSTRUCTION,) if self.step_away else ()
+        stats = ChatStats()
+        try:
+            raw = await self._ask_once(self.history, stats, self._notes(extra))
+        except ProtoError:
+            await self._save_stats(stats, self.sent_chars)
+            if not (self.managed and stats.truncated):
+                raise
+            raw = ""
+        else:
+            await self._save_stats(stats, self.sent_chars)
+        if raw == SILENT_REPLY:
+            return raw
+        if self.managed and dialogue_context.looks_overflowed(raw, stats, self.num_ctx):
+            return await self._rescue(stats)
+        return raw
+
+    async def _announce_steps(self) -> None:
+        await push_status_or_answer(self.message, self.rich_session, STEPS_TEXT_PLAIN, STEPS_TEXT)
+
+    async def _announce_albert(self, text_html: str, text_md: str) -> None:
+        await finalize_status_or_answer(self.message, self.rich_session, text_md, text_html)
+
+    async def _on_phase_change(self, phase: str) -> None:
+        if phase == wake_core.PHASE_WOKEN:
+            await finalize_status_or_answer(
+                self.message, self.rich_session, ARNOLD_WAKING_MD, ARNOLD_WAKING
+            )
+        else:
+            await self._announce_steps()
 
 
 async def request_alfred(
@@ -1153,668 +799,21 @@ async def request_alfred(
     interactive_turn: Any | None = None,
     interactives: Any | None = None,
 ) -> str | None:
-    """Сходить в llm.chat с presence/wake-сценарием.
-
-    Возвращает сырой текст ответа модели, либо None — Альфреда не нашли
-    (сообщение об этом пользователю уже отправлено здесь же, вызывающему
-    отвечать больше нечего).
-
-    ``dismissal`` — ячейка под «меня отпустили» (тул dismiss): заполняется
-    здесь, а исполняется вызывающим после отправки ответа (см.
-    perform_dismissal). Без неё тул честно скажет, что сейчас не умеет.
-
-    ``rich_session`` — этап 34, Фаза 2 (Rich-стрим ответов): не передан —
-    поведение не меняется. Передан — его ``on_partial`` идёт ТОЛЬКО в
-    персонажные проходы run_chat_loop ниже (тот же набор вызовов, что уже
-    получает ``on_speech_remark``), не в router-проход — вывод роутера и
-    сегодня не показывается пользователю, стримить нечего.
-
-    ``interactive_turn`` — Этап 47 (bot/interactives/engine.py::TurnPlan):
-    заметка сцены для Альфреда и «чистая речь» собеседника; ``interactives``
-    — сервис для тула swap_radio. Оба передаёт только прод-путь
-    (bot/handlers/ai.py), подмены в тестах их не знают.
-    """
-    dst = Address(node=LLM_NODE, service=LLM_SERVICE)
-    timeout = settings.llm.request_timeout_s
-    chat_id = message.chat.id if message.chat else "?"
-    # Права собеседника ограничивают комплект тулов: Альфред не должен быть
-    # обходным путём вокруг подписок (bot/tools.py::tools_for). Резолвим один
-    # раз — комплект нужен и заметке (знает ли он про интернет), и tool_ctx.
-    subscription = book.for_chat(message.chat.id) if message.chat else None
-    has_web_search = SURFING_TOOL in ai_tools.tools_for(subscription).handlers
-    # Карточки людей (Этап 58) — снимок на ход: справка, тулы и доставка
-    # читают имена и пол отсюда.
-    people = await PeopleBook.load(store, book)
-    recall_calls = [
-        recall_facts(
-            node_link,
-            message.chat.id if message.chat else None,
-            message.text or "",
-        ),
-        recall_graph_facts(
-            node_link,
-            message.chat.id if message.chat else None,
-            message.text or "",
-        ),
-    ]
-    # Этап 42.5(b): у гостя без карточки (Этап 58) нет структурного профиля
-    # вообще — только то, что накопилось в graph_memory
-    # через обычные реплики (piggyback_dialogue_episode, Этап 42.2, пишет
-    # КАЖДЫЙ ход в граф уже сегодня — заводить отдельный путь записи под
-    # "представиться" не нужно). Решение пользователя: НЕ структурная таблица
-    # под профиль гостя — гендер/обращение/прозвище такого человека это
-    # нечёткое накопленное знание, ему место в графе, не в БД. Не хватало
-    # только чтения: recall_graph_facts выше ищет по теме текущей реплики, не
-    # по личности собеседника — здесь тот же вызов с другим text.
-    # Один раз на тред (решение пользователя 2026-09-25), не на каждый ход —
-    # опрашивать спящий mycraft на каждую реплику ради того же самого лишнее.
-    # "Первый ход треда" — без новой БД-выборки: history (из ai_turns этого
-    # dialogue_id, см. bot/handlers/ai.py) длиннее одного элемента только
-    # если в треде уже был обмен репликами; синтетический первый промпт
-    # (OPENING_PROMPT/текст команды) — всегда ровно один элемент.
-    sender = message.from_user
-    if sender is not None and not people.card(sender.id) and len(history) <= 1:
-        sender_name = display_name(message.from_user)
-        if sender_name:
-            recall_calls.append(
-                recall_graph_facts(
-                    node_link,
-                    message.chat.id if message.chat else None,
-                    f"Кто такой(-ая) {sender_name} и как к нему/ней обращаться?",
-                )
-            )
-    people_task = _people_context_lines(message, store, book, people)
-    *recall_results, people_lines = await asyncio.gather(*recall_calls, people_task)
-    memory_facts = recall_results[0]
-    graph_facts = recall_results[1] + (recall_results[2] if len(recall_results) > 2 else [])
-    context_note = await _build_context_note(
+    turn = _AlfredTurn(
         message,
-        store,
-        dialogue_id,
-        settings,
-        has_web_search=has_web_search,
-        memory_facts=memory_facts,
-        graph_facts=graph_facts,
-        people_lines=people_lines,
-    )
-    if pending_actions is not None and message.chat is not None:
-        # Этап 45.4: открытые формы подтверждения собеседника — скрытой
-        # строкой, чтобы на текстовое «да/не хочу» Альфред отправил к
-        # кнопкам, а не делал вид, что решение принято (живая находка
-        # 2026-09-26, заявка #5).
-        forms_note = open_forms_note(
-            await store.open_pending_actions(chat_id=message.chat.id), message.chat.id
-        )
-        if forms_note:
-            context_note = f"{context_note} {forms_note}" if context_note else forms_note
-    picture_note = await _replied_picture_note(message, store)
-    if picture_note:
-        context_note = f"{context_note}\n\n{picture_note}" if context_note else picture_note
-    scene_note = getattr(interactive_turn, "note", None)
-    if scene_note:
-        # Этап 47: сцена интерактива — рамка, подсказка стадии, директива
-        # Ведущего и журнал (в личке тред /ai сцену не держит, см.
-        # bot/interactives/base.py::Run.transcript).
-        context_note = f"{context_note}\n\n{scene_note}" if context_note else scene_note
-    # Живая находка 2026-09-30 (пользователь: «чем больше переписка, тем
-    # длиннее ответы»): медиана ответа растёт с ~170 симв. в первых ходах до
-    # 700–1250 к 20–30-му — модель подстраивается под длину собственных
-    # прошлых ответов в истории. Скрытая строка на каждом ходу рядом с
-    # последней репликой — там её вес максимален.
-    context_note = f"{context_note}\n\n{LENGTH_NOTE}" if context_note else LENGTH_NOTE
-    speech_user_id = getattr(interactive_turn, "user_id", None)
-    speech_clear = getattr(interactive_turn, "speech_clear_now", None) or getattr(
-        interactive_turn, "speech_clear", None
-    )
-    # Список как изменяемая ячейка: _record_tool_call — вложенная функция, а
-    # nonlocal через два уровня вложенности (_ask → колбэк) читается хуже.
-    # Непустой = вставка «сёрфит» за этот запрос уже отправлена.
-    surfing_announced: list[bool] = []
-    # Этап 50: тулы, реально отработавшие за этот ход, — для перегенерации
-    # после переполнения окна (см. _tools_done_note).
-    executed_tools: list[tuple[str, dict[str, Any], str]] = []
-
-    # --- Этап 50: окно контекста (bot/dialogue_context.py) ---
-    # Оценка заполненности окна ДО генерации, дословный возврат деталей из
-    # сжатого начала разговора и, при превышении порога, инструкция Альфреду
-    # «ответь и скажи, что ненадолго отлучишься». Только для истории,
-    # собранной load_history (у неё есть разметка сжатого) и при известном
-    # чате; синтетические вызовы (start_dialogue, тесты) идут как раньше.
-    dst_llm = dst
-    compress_cfg = settings.llm
-    chat_key = message.chat.id if message.chat is not None else None
-    dhistory = history if isinstance(history, dialogue_context.DialogueHistory) else None
-    managed = compress_cfg.context_compression and chat_key is not None
-    recall_note: str | None = None
-    step_away = False
-    num_ctx = compress_cfg.num_ctx
-    if managed and dhistory is not None:
-        recall_note, recalled = await dialogue_context.recall_verbatim(
-            store,
-            settings,
-            chat_key,
-            dialogue_id,
-            await _current_turn_text(store, message),
-            dhistory,
-        )
-        if recalled:
-            log.info(
-                "ai_flow: дословный возврат — %d сообщ. из начала разговора (chat=%s)",
-                recalled,
-                chat_id,
-            )
-        num_ctx = await resolve_num_ctx(settings, store, dst_llm)
-    extra_chars = len(context_note or "") + len(recall_note or "")
-    sent_chars = dialogue_context.content_chars(list(history)) + extra_chars
-    if managed and dhistory is not None:
-        state = await store.dialogue_context_state(chat_key, dialogue_id)
-        estimated = dialogue_context.estimate_prompt_tokens(settings, sent_chars, state)
-        limit_tokens = dialogue_context.threshold_tokens(settings, num_ctx)
-        if limit_tokens <= compress_cfg.context_base_tokens:
-            # Окно неизвестно (ни одного замера, фоллбэк [llm].num_ctx на
-            # alfred — дефолт 8192) или слишком мало для самой базы промпта —
-            # порог так сработал бы на каждом ходе. Не «отлучаемся»; от
-            # реального переполнения страхует _rescue по done_reason.
-            log.debug(
-                "ai_flow: окно %d слишком мало для порога (база %d) — пропуск (chat=%s)",
-                num_ctx,
-                compress_cfg.context_base_tokens,
-                chat_id,
-            )
-        elif (
-            estimated > limit_tokens
-            and dhistory.compressible >= compress_cfg.context_min_compress_turns
-            and not dialogue_context.COMPRESSOR.is_running(chat_key, dialogue_id)
-        ):
-            step_away = True
-            dhistory.compress_after = True
-            sent_chars += len(dialogue_context.STEP_AWAY_INSTRUCTION)
-            log.info(
-                "ai_flow: окно треда chat=%s dialogue=%s ~%d ток. из %d (порог %d, замер %s) "
-                "— Альфред отлучится, после ответа сожмём %d ходов",
-                chat_id,
-                dialogue_id,
-                estimated,
-                num_ctx,
-                limit_tokens,
-                state.get("prompt_tokens") if state else "нет",
-                dhistory.compressible,
-            )
-
-    def _notes(extra: tuple[str, ...] = ()) -> list[str]:
-        """Служебные вставки перед текущим ходом, по порядку: дословный
-        возврат (это содержание разговора — дальше от хода), заметка,
-        инструкции этого хода (ближе всего к точке генерации)."""
-        notes = [n for n in (recall_note, context_note) if n]
-        return notes + [n for n in extra if n]
-
-    async def _save_stats(stats: ChatStats, chars: int) -> None:
-        if stats.num_ctx:
-            _seen_num_ctx[f"{dst_llm.node}/{dst_llm.service}"] = stats.num_ctx
-        if chat_key is None or stats.first_prompt_tokens is None:
-            return
-        try:
-            await store.save_dialogue_context_state(
-                chat_key,
-                dialogue_id,
-                prompt_tokens=stats.first_prompt_tokens,
-                sent_chars=chars,
-                num_ctx=stats.num_ctx,
-                done_reason=stats.done_reason,
-                at=datetime.now(tz=UTC),
-            )
-        except Exception:  # noqa: BLE001 — замер вспомогательный, ход важнее
-            log.exception("ai_flow: не удалось сохранить замер окна (chat=%s)", chat_id)
-
-    async def _ask_once(
-        hist: list[dict[str, Any]],
-        stats: ChatStats,
-        notes: list[str],
-        *,
-        allow_tools: bool = True,
-    ) -> str:
-        if notes:
-            # Живая находка 2026-07-24: заметка вставлялась ПЕРЕД всей
-            # историей — далеко от текущего хода, если тред уже длинный.
-            # Модель на практике хуже использует информацию, если она не
-            # рядом с тем сообщением, к которому относится (проверено
-            # вживую: цитата в заметке была верной, но модель ответила не
-            # тем словом). hist[-1] — всегда текущий ход пользователя
-            # (см. вызовы request_alfred в bot/handlers/ai.py — history
-            # собирается с ним последним).
-            base_messages: list[dict[str, Any]] = [
-                *hist[:-1],
-                *(wrap_context_note(note) for note in notes),
-                hist[-1],
-            ]
-        else:
-            base_messages = list(hist)
-        # Мультимодальный /ai (2026-08-10): hist[-1] несёт raw_image,
-        # только если этот ход — свежее фото (bot/handlers/ai.py::
-        # _handle_photo_message). photo_key передаётся на оба прохода
-        # (router + persona) одинаково — служба llm сама разберётся, где
-        # он реально нужен (см. llm_chat.run_chat_loop про photo_key).
-        current_turn = hist[-1] if hist else None
-        photo_key = (
-            photo_key_for(message)
-            if isinstance(current_turn, dict) and "raw_image" in current_turn
-            else None
-        )
-        tool_ctx = ai_tools.ToolContext(
-            chat_id=message.chat.id if message.chat else None,
-            dialogue_id=dialogue_id,
-            trigger_message_id=message.message_id if message.chat else None,
-            settings=settings,
-            node_link=node_link,
-            subscription=subscription,
-            dismissal=dismissal,
-            message_thread_id=message.message_thread_id,
-            # Для тула tell: кому можно передать сообщение (book), чем
-            # отправить (notifier), где записать доставленное как ход диалога
-            # получателя (store) и от кого оно (author).
-            book=book,
-            notifier=notifier,
-            store=store,
-            author=display_name(message.from_user),
-            people=people,
-            pending_actions=pending_actions,
-            interactives=interactives,
-            user_id=message.from_user.id if message.from_user else None,
-            is_private=message.chat is not None and message.chat.type == "private",
-            reply_to_message_id=(
-                message.reply_to_message.message_id if message.reply_to_message else None
-            ),
-        )
-        telegram_chat_id = message.chat.id if message.chat is not None else None
-
-        async def _record_tool_call(name: str, call_args: dict[str, Any], result: str) -> None:
-            # Живая находка 2026-07-24: "шиза" с часовыми поясами была
-            # недиагностируема — ai_turns хранит только финальный текст
-            # ответа, не видно, звала ли модель тул вообще и что тот
-            # вернул (см. schema.sql::ai_tool_calls). Пишет только живой
-            # /ai — у него есть Store, у службы tasks его нет вовсе.
-            executed_tools.append((name, call_args, result))
-            await notify_tool_call(
-                book, notifier, name, args=call_args, result=result, debug=tool_calls
-            )
-            if rich_session is None and name == SURFING_TOOL and not surfing_announced:
-                # Флаг — в области request_alfred, а не _ask: пересборка
-                # ответа после пробуждения ноды не должна слать вставку
-                # повторно. Колбэк общий для router- и персонажного прохода,
-                # поэтому без флага строк было бы несколько на один запрос.
-                #
-                # Только фолбэк (rich_session is None): в rich-пути статус
-                # тула уже показан заранее через _announce_tool_start ниже
-                # (до выполнения, для всех тулов, без гейтинга — см.
-                # TOOL_STATUS_TEXT про то, почему там гейтинг не нужен).
-                surfing_announced.append(True)
-                await message.answer(SURFING_TEXT)
-            if telegram_chat_id is None:
-                return
-            await store.record_tool_call(
-                chat_id=telegram_chat_id,
-                dialogue_id=dialogue_id,
-                trigger_message_id=message.message_id,
-                tool_name=name,
-                args=call_args,
-                result=result,
-                at=datetime.now(tz=UTC),
-            )
-
-        async def _record_speech_remark(remark: str) -> None:
-            if speech_remark is not None:
-                speech_remark.text = remark
-
-        async def _announce_tool_start(name: str, call_args: dict[str, Any]) -> None:
-            # Только rich-путь — фолбэк (группы/typing_plain) продолжает
-            # получать SURFING_TEXT постфактум через _record_tool_call выше,
-            # без изменений. Здесь гейтинг "один раз за запрос" не нужен:
-            # RichStreamSession._last_sent сам гасит подряд идущие
-            # одинаковые статусы, а разные тулы подряд должны показать обе
-            # фразы по очереди — это и есть след рассуждения. Этап 34.3:
-            # если тулы идут чаще ограничителя черновиков сессии, промежуточные
-            # статусы сворачиваются — показан будет последний.
-            if rich_session is None:
-                return
-            await rich_session.push_status(TOOL_STATUS_TEXT.get(name, TOOL_STATUS_DEFAULT))
-
-        async def _generate(*args: Any, **kwargs: Any) -> str:
-            # typing («печатает») — решение пользователя 2026-08-11: только
-            # вокруг вызова, который реально пишет ответ (не роутер, не
-            # ожидание пробуждения). С rich_session индикатором управляет
-            # сама сессия по факту прихода текста (RichStreamSession.
-            # _push_markdown/_push_thinking) — обёртка тут была бы вторым,
-            # несинхронным источником того же send_chat_action и держала бы
-            # typing горящим и во время статусов/тулов, что мы и убираем.
-            # Этап 34.3 (2026-09-30): при стриме черновиком сессия typing не
-            # включает вовсе, при rich_draft_streaming=False — включает сама
-            # на первый статус/кусок текста и гасит до финала.
-            # Без rich_session (группы/фолбэк) отдельного сигнала "текст
-            # реально льётся" нет — вся генерация целиком лучшее приближение.
-            if rich_session is not None:
-                return await run_chat_loop(*args, **kwargs)
-            async with _typing_while_asking(message):
-                return await run_chat_loop(*args, **kwargs)
-
-        if not await _use_router(settings, node_link, dst):
-            # Роутеру нечего решать, если у модели выбора «думать/не думать»
-            # всё равно нет (profile.router=False) — один персонажный проход
-            # сразу. Уровень рассуждения — из legacy-настройки single_call_think
-            # (False → off, иначе high); перевод в параметр Ollama делает
-            # профиль модели на стороне службы llm.
-            single_reason = "high" if settings.llm.single_call_think else "off"
-            if getattr(interactive_turn, "scene", False):
-                single_reason = "off"  # сцена — без рассуждения (см. ниже)
-            raw = await _generate(
-                node_link,
-                dst,
-                timeout,
-                list(base_messages),
-                tool_ctx,
-                single_reason,
-                telegram_chat_id=telegram_chat_id,
-                log_chat_id=chat_id,
-                on_tool_call=_record_tool_call,
-                on_speech_remark=_record_speech_remark,
-                on_partial=rich_session.on_partial if rich_session is not None else None,
-                on_tool_start=_announce_tool_start,
-                photo_key=photo_key,
-                speech_user_id=speech_user_id,
-                speech_clear=speech_clear,
-                stats=stats,
-                allow_tools=allow_tools,
-            )
-            return SILENT_REPLY if tool_ctx.end_turn else raw
-
-        # Вариативное рассуждение: сначала лёгкий router-проход (без персонажа,
-        # ROUTER_SYSTEM_PROMPT), который оценивает вопрос по шкале 0..3 и/или
-        # вызывает нужный тул — router_messages мутируется run_chat_loop
-        # (дописываются tool_calls/результаты) и этот же список идёт дальше в
-        # персонажный проход, чтобы Альфред видел, что вернул тул.
-        router_messages = list(base_messages)
-        route_decision = await run_chat_loop(
-            node_link,
-            dst,
-            timeout,
-            router_messages,
-            tool_ctx,
-            "off",
-            telegram_chat_id=telegram_chat_id,
-            log_chat_id=chat_id,
-            on_tool_call=_record_tool_call,
-            on_tool_start=_announce_tool_start,
-            role="router",
-            photo_key=photo_key,
-            stats=stats,
-            allow_tools=allow_tools,
-        )
-        if tool_ctx.end_turn:
-            return SILENT_REPLY
-        level = parse_router_level(route_decision)
-        if getattr(interactive_turn, "scene", False):
-            # Ход сцены ведёт Ведущий (что случилось, черта, кадр) — Альфреду
-            # остаётся отыграть реплику; рассуждение стоило ~60 с на ход
-            # (живая находка 2026-10-02, router почти всегда давал THINK:1).
-            level = 0
-        needs_think = level >= 1
-        log.info("ai_flow: router -> THINK:%d (chat=%s)", level, chat_id)
-
-        if needs_think:
-            if rich_session is not None:
-                await rich_session.push_status(THINKING_TEXT_PLAIN)
-            else:
-                await message.answer(THINKING_TEXT)
-        # Уровень едет в персонажный проход намерением-строкой; как он станет
-        # параметром Ollama (булев тумблер / reasoning-уровень / отсутствие
-        # флага) — решает профиль модели на стороне службы llm
-        # (llm/model_profiles.py). Раньше эта развилка была списана вручную
-        # тут и в bot/tools.py и регулярно разъезжалась (живая находка
-        # 2026-08-10 про think_style).
-        persona_reason = REASON_LEVELS[level]
-        raw = await _generate(
-            node_link,
-            dst,
-            timeout,
-            router_messages,
-            tool_ctx,
-            persona_reason,
-            telegram_chat_id=telegram_chat_id,
-            log_chat_id=chat_id,
-            on_tool_call=_record_tool_call,
-            on_speech_remark=_record_speech_remark,
-            on_partial=rich_session.on_partial if rich_session is not None else None,
-            on_tool_start=_announce_tool_start,
-            photo_key=photo_key,
-            speech_user_id=speech_user_id,
-            speech_clear=speech_clear,
-            stats=stats,
-            allow_tools=allow_tools,
-        )
-        return SILENT_REPLY if tool_ctx.end_turn else raw
-
-    async def _announce_step_away() -> None:
-        # Страховка Этапа 50: Альфред «отлучился», пока история сжимается
-        # и ответ пишется заново. Через rich-сессию, как «Агнольд» (см.
-        # _on_phase_change): реплика остаётся в чате, черновик с обрывком
-        # первой попытки ею же и вытесняется.
-        html_line, md_line = dialogue_context.pick_step_away_line()
-        if rich_session is not None:
-            await rich_session.finalize_status(md_line)
-        else:
-            await message.answer(html_line)
-
-    async def _rescue(first: ChatStats) -> str:
-        """Страховка Этапа 50: ответ испорчен переполнением окна. Синхронно
-        сжать, сказать реплику в образе, перегенерировать; не помогло —
-        отрезать самые старые ходы по бюджету. Пустая строка на выходе —
-        вызывающий покажет обычного «Альбегта» (bot/handlers/ai.py)."""
-        nonlocal recall_note
-        assert chat_key is not None
-        log.warning(
-            "ai_flow: окно переполнено (chat=%s dialogue=%s, промпт %d из %s, стоп %s) — "
-            "сжимаем синхронно и перегенерируем",
-            chat_id,
-            dialogue_id,
-            first.max_prompt_tokens,
-            first.num_ctx or num_ctx,
-            first.done_reason,
-        )
-        started = time.monotonic()
-        await dialogue_context.COMPRESSOR.compress_now(
-            node_link,
-            store,
-            settings,
-            chat_key,
-            dialogue_id,
-            dst_llm,
-            num_ctx=first.num_ctx or num_ctx,
-            keep_recent=max(2, compress_cfg.context_keep_recent_turns // 2),
-        )
-        if dhistory is not None:
-            # Сжали уже здесь — фоновое после ответа не нужно.
-            dhistory.compress_after = False
-        await _announce_step_away()
-        prefix = await dialogue_context.load_history(
-            store, settings, chat_key, dialogue_id,
-            before_message_id=message.message_id, wait=False,
-        )
-        retry_hist = dialogue_context.DialogueHistory(
-            [*prefix, history[-1]],
-            summary_upto=prefix.summary_upto,
-            verbatim_ids=prefix.verbatim_ids,
-            max_hidden_id=prefix.max_hidden_id,
-        )
-        recall_note, recalled = await dialogue_context.recall_verbatim(
-            store, settings, chat_key, dialogue_id,
-            await _current_turn_text(store, message), retry_hist,
-        )
-        tools_ran = list(executed_tools)
-        extra = (_tools_done_note(tools_ran),) if tools_ran else ()
-        notes = _notes(extra)
-        retry_stats = ChatStats()
-        raw = await _ask_once(retry_hist, retry_stats, notes, allow_tools=not tools_ran)
-        if raw == SILENT_REPLY:
-            return raw
-        await _save_stats(
-            retry_stats,
-            dialogue_context.content_chars(list(retry_hist)) + sum(map(len, notes)),
-        )
-        overflowed = dialogue_context.looks_overflowed(raw, retry_stats, num_ctx)
-        log.info(
-            "ai_flow: перегенерация после сжатия — %.1f с, промпт %d → %d ток., "
-            "возвращено дословно %d, %s (chat=%s)",
-            time.monotonic() - started,
-            first.max_prompt_tokens,
-            retry_stats.max_prompt_tokens,
-            recalled,
-            "снова переполнено" if overflowed else "ок",
-            chat_id,
-        )
-        if not overflowed:
-            return raw
-        # Крайняя мера: самые старые ходы прочь, пока история не влезет в
-        # бюджет порога (база промпта — вне бюджета).
-        budget_chars = max(
-            4000,
-            int(
-                (dialogue_context.threshold_tokens(settings, num_ctx)
-                 - compress_cfg.context_base_tokens)
-                * compress_cfg.context_chars_per_token
-            ) - sum(map(len, notes)),
-        )
-        trimmed = dialogue_context.trim_to_budget(list(retry_hist), budget_chars)
-        log.warning(
-            "ai_flow: и после сжатия переполнено — режем историю %d → %d сообщ. (chat=%s)",
-            len(retry_hist),
-            len(trimmed),
-            chat_id,
-        )
-        last_stats = ChatStats()
-        raw = await _ask_once(trimmed, last_stats, notes, allow_tools=not tools_ran)
-        if raw == SILENT_REPLY:
-            return raw
-        await _save_stats(last_stats, dialogue_context.content_chars(trimmed))
-        if dialogue_context.looks_overflowed(raw, last_stats, num_ctx):
-            return ""
-        return raw
-
-    async def _ask() -> str:
-        extra = (dialogue_context.STEP_AWAY_INSTRUCTION,) if step_away else ()
-        stats = ChatStats()
-        try:
-            raw = await _ask_once(history, stats, _notes(extra))
-        except ProtoError:
-            await _save_stats(stats, sent_chars)
-            # Пустой ответ после лимита раундов (llm_chat.run_chat_loop) —
-            # если причина в окне, это случай страховки, а не «Альбегта».
-            if not (managed and stats.truncated):
-                raise
-            raw = ""
-        else:
-            await _save_stats(stats, sent_chars)
-        if raw == SILENT_REPLY:
-            return raw
-        if managed and dialogue_context.looks_overflowed(raw, stats, num_ctx):
-            return await _rescue(stats)
-        return raw
-
-    async def _announce_steps() -> None:
-        # Три точки вызова ниже — presence-проверка, молчаливый wake,
-        # пробуждение контейнера — общий хелпер, чтобы rich/фолбэк-ветка не
-        # разъехалась по трём копиям (тот же класс бага, что think_style,
-        # разошедшийся по трём файлам — см. живую находку 2026-08-10 выше).
-        if rich_session is not None:
-            await rich_session.push_status(STEPS_TEXT_PLAIN)
-        else:
-            await message.answer(STEPS_TEXT)
-
-    async def _announce_albert(text_html: str, text_md: str) -> None:
-        # Живая находка 2026-08-11: пять точек ниже (ALBERT_ASLEEP/HICCUP/
-        # UNAVAILABLE) раньше слали голый message.answer() даже при активной
-        # rich-сессии — «шаги»/«задумчивость» оставались незакрытым
-        # черновиком, который никто не финализирует (см. keep-alive в
-        # rich_stream.py — без finalize_status() крутился бы до защитного
-        # потолка). Тот же приём, что и _announce_steps() выше и
-        # node_events.py::TaskRichSessions — единственная точка выхода из
-        # rich-сессии для «Альбегта».
-        if rich_session is not None:
-            await rich_session.finalize_status(text_md)
-        else:
-            await message.answer(text_html)
-
-    # Единая точка готовности LLM-сервиса — wake_core.ensure_service_ready,
-    # общая для текста/фото/стикера/голоса (голос отдельно зовёт её же перед
-    # STT, см. bot/voice_stt.py — та же функция, не своя копия) и для службы
-    # tasks. Раньше здесь жила собственная, менее строгая последовательность
-    # (presence -> первая попытка _ask() -> wake -> почти дословно
-    # дублирующая вторая попытка _ask()) — по итогам аудита 2026-08-26
-    # (Приложения 2-4 плана механизма готовности) она удалена целиком: одна
-    # функция сама решает presence/сон/аварию/прогрев, колбэк ниже лишь
-    # переводит её фазы в персонажные реплики Альфреда, не дублируя логику.
-    async def _on_phase_change(phase: str) -> None:
-        if phase == wake_core.PHASE_WOKEN:
-            # Агнольд — отдельный персонаж со своей репликой, не эфемерный
-            # статус (живая находка 2026-08-10, третий заход): его сообщение
-            # должно ОСТАТЬСЯ в чате, не перекрываясь ни «шагами», ни ответом
-            # самого Альфреда — finalize_status() вытесняет активный
-            # черновик той же сессии напрямую, без зазора (см. rich_stream.py).
-            if rich_session is not None:
-                await rich_session.finalize_status(ARNOLD_WAKING_MD)
-            else:
-                await message.answer(ARNOLD_WAKING)
-        else:
-            # PHASE_WAKING (шлём WoL) и PHASE_WARMING (грузим модель) —
-            # один и тот же статус-текст «шаги», что и раньше: разный повод,
-            # одна и та же ремарка (см. _announce_steps).
-            await _announce_steps()
-
-    outcome = await wake_core.ensure_service_ready(
         node_link,
         store,
-        LLM_NODE,
-        LLM_SERVICE,
-        wake_timeout_s=WAKE_POLL_TIMEOUT_S,
-        wake_poll_interval_s=WAKE_POLL_INTERVAL_S,
-        warmup_timeout_s=settings.llm.warmup_timeout_s,
-        on_phase_change=_on_phase_change,
+        settings,
+        history,
+        dialogue_id,
+        book,
+        notifier,
+        dismissal,
+        tool_calls,
+        speech_remark,
+        rich_session,
+        pending_actions,
+        interactive_turn,
+        interactives,
     )
-    if outcome == wake_core.CRASHED:
-        # Нода жива, но сама служба llm не отвечает — WoL тут не поможет
-        # (ensure_service_ready уже это проверил и НЕ будил машину зря, см.
-        # Приложение 3/5 плана). Это более тревожный случай, чем обычный
-        # сон — стоит явно предупредить админов, а не молчать, как при
-        # обычной недоступности спящей машины.
-        await _announce_albert(ALBERT_UNAVAILABLE, ALBERT_UNAVAILABLE_MD)
-        await notify_admins(
-            book, notifier,
-            f"🔥 /ai (chat={chat_id}): нода «{LLM_NODE}» жива, служба «{LLM_SERVICE}» "
-            "не отвечает — WoL не поможет, нужен ручной перезапуск службы",
-        )
-        return None
-    if outcome == wake_core.UNREACHABLE:
-        await _announce_albert(ALBERT_UNAVAILABLE, ALBERT_UNAVAILABLE_MD)
-        return None
-    if outcome == wake_core.WARMUP_FAILED:
-        await _announce_albert(ALBERT_ASLEEP, ALBERT_ASLEEP_MD)
-        await notify_admins(
-            book, notifier,
-            f"⚠️ /ai (chat={chat_id}): прогрев {LLM_NODE}/{LLM_SERVICE} не подтверждён",
-        )
-        return None
-
-    # outcome == READY — служба готова (и это заземлено на реальный ответ
-    # Ollama, не только на самоотчёт), один вызов вместо прежних двух попыток.
-    try:
-        return await _ask()
-    except ServiceUnavailableError:
-        await _announce_albert(ALBERT_UNAVAILABLE, ALBERT_UNAVAILABLE_MD)
-        return None
-    except ProtoError as exc:
-        if _is_unavailable(exc):
-            await _announce_albert(ALBERT_UNAVAILABLE, ALBERT_UNAVAILABLE_MD)
-        else:
-            await _announce_albert(ALBERT_HICCUP, ALBERT_HICCUP_MD)
-            await notify_admins(
-                book, notifier, f"⚠️ /ai (chat={chat_id}): {exc.code} — {exc.message}"
-            )
-        return None
+    return await turn.run()

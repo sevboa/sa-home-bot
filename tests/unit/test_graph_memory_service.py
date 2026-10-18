@@ -1,8 +1,3 @@
-"""Служба graph_memory: очередь эпизодов, границы chat_id, выбор модели
-экстракции — без реального Graphiti/Neo4j (юниты для той части, что не
-требует живого mycraft; сквозная проверка с реальным Graphiti — вручную,
-см. историю Этапа 41)."""
-
 from __future__ import annotations
 
 import pytest
@@ -32,9 +27,6 @@ async def svc(tmp_path):
 
 
 def test_extraction_model_defaults_to_the_persona_chat_model(svc):
-    """Решение пользователя 2026-09-22: пустой extraction_model берёт ту же
-    модель, что уже держит в VRAM живой чат — не отдельную (см. докстринг
-    GraphMemoryConfig в config.py и service.py::_extraction_model)."""
     assert svc._extraction_model() == "hf.co/unsloth/gemma-4-26B-A4B-it-GGUF:UD-IQ4_XS"
 
 
@@ -88,9 +80,6 @@ async def test_search_requires_chat_id(svc):
 
 
 async def test_reset_stuck_processing_on_restart_recovers_orphaned_episode(svc):
-    """Живучесть очереди (Верификация, п.6 плана Этапа 41): эпизод, застрявший
-    в 'processing' после аварийного завершения службы, должен вернуться в
-    'pending' при следующем старте _ingest_loop, а не потеряться навсегда."""
     await svc.run_command("add_episode", {"text": "факт", "chat_id": CHAT_A})
     await svc._db.conn.execute("UPDATE graph_episodes SET status = 'processing' WHERE id = 1")
     await svc._db.conn.commit()
@@ -108,9 +97,6 @@ class _FakeResult:
 
 
 class _FakeDriver:
-    """Этап 54: карточки людей пишутся прямым Cypher — эмулируем MERGE по
-    ключу (subject_id, field, value, by_id) в списке."""
-
     def __init__(self):
         self.claims: list[dict] = []
 
@@ -169,5 +155,4 @@ async def test_person_cards_empty_ids_skip_neo4j(svc):
 
 
 def test_person_ids_accept_single_int():
-    # nodectl call приводит «ids=7136623771» к int (живой баг 2026-10-08).
     assert GraphMemoryService._person_ids({"ids": 7136623771}) == [7136623771]

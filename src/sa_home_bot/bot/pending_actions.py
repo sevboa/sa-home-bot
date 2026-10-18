@@ -1,54 +1,26 @@
-"""Детерминированные формы подтверждения (Этап 45, IMPLEMENTATION_PLAN.md).
-
-Альфред — помощник, решает человек. LLM формулирует и сопровождает
-словами, но не принимает решений и не пишет итог в БД: решение — нажатие
-кнопки на ОТДЕЛЬНОМ сообщении-форме, текст которого собирает код по
-шаблону. Живая находка 2026-09-26: заявка связи #5 зависла в pending
-навсегда — адресат ответил «Не хочу», модель сказала «решение принято», но
-reject_relationship не вызвала (директива с id жила только в chat_loop-
-задаче, в историю живого /ai не попадала).
-
-Каждое событие = два сообщения: сначала текст Альфреда (LLM, «желательно»),
-затем форма/оповещение (код, «гарантированно»). Если LLM не ответила —
-вместо её текста заглушка ``NO_WORDS_TEXT``, форма уходит всё равно.
-
-Жизненный цикл записи ``pending_actions`` (db/schema.sql):
-draft (у инициатора, 1 ч) → pending (у адресата, 72 ч) → accepted/rejected;
-из draft/pending — cancelled/expired. Писатель статуса один — этот модуль
-(у бота Store); кнопки, будильник службы tasks и восстановление на старте
-лишь просят перехода, сам переход атомарен (Store.transition_pending_action)
-— повторное нажатие или гонка с экспирацией просто не находят строку.
-
-События (``ActionBus``): каждый переход публикует ровно одно из
-``action_created``/``action_submitted``/``action_decided``. Реакции —
-подписчики, а не код внутри обработчика кнопки: «Альфред говорит + форма
-адресату» на submitted, «Альфред говорит + оповещение инициатору» на
-decided, а при принятии ещё «Альфред поздравляет + оповещение» адресату
-(Этап 46: знакомы теперь оба, и обоим надо сказать, что Альфред готов
-передавать сообщения). Позже без правки ядра: эпизод в graph_memory, аудит.
-
-Сейчас единственный ``kind`` — знакомство между гостями (``relationship``,
-Этап 46: одна связь без типов, relation в payload всегда acquaintance).
-"""
-
 from __future__ import annotations
 
 import asyncio
 import html
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardMarkup
 
 from sa_home_bot.bot import tools as ai_tools
-from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
+from sa_home_bot.bot.service_link import ServiceLink
+from sa_home_bot.bot.ui.callback_data import pack, unpack_id_and_button
+from sa_home_bot.bot.ui.keyboards import button, markup
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.llm.prompt import wrap_system_directive
-from sa_home_bot.proto.messages import Address, ProtoError
+from sa_home_bot.proto.addresses import TASKS_ADDRESS
+from sa_home_bot.proto.errors import SERVICE_CALL_ERRORS
 from sa_home_bot.tasks import protocol as task_protocol
+from sa_home_bot.utils.clock import utc_now
+from sa_home_bot.utils.timefmt import format_local
 
 log = logging.getLogger(__name__)
 
@@ -57,8 +29,6 @@ KIND_RELATIONSHIP = "relationship"
 DRAFT_TTL = timedelta(hours=1)
 OFFER_TTL = timedelta(hours=72)
 
-# Заглушка вместо текста Альфреда, когда LLM не ответила (упала, не
-# проснулась, служба tasks лежит) — форма/оповещение уходят всё равно.
 NO_WORDS_TEXT = "🎩 <i>У Альфреда нет слов.</i>"
 NO_WORDS_PLAIN = "🎩 У Альфреда нет слов."
 
@@ -73,29 +43,22 @@ VERDICT_EXPIRED = "expired"
 
 OPEN_STATUSES = ("draft", "pending")
 
-# callback_data «pa:<id>:<кнопка>» — только id и вердикт (лимит 64 байта),
-# всё остальное бот берёт из своей БД.
 CALLBACK_PREFIX = "pa"
+FORM_TIME_FORMAT = "%d.%m %H:%M"
 BUTTON_SUBMIT = "s"
 BUTTON_CANCEL = "c"
 BUTTON_ACCEPT = "a"
 BUTTON_REJECT = "r"
 
-# Какая речь Альфреда сопровождает какое сообщение-форму: meta chat_loop-
-# задачи несёт pending_action_id + pending_action_stage, bot/node_events.py
-# отдаёт результат сюда (on_speech_result).
-STAGE_OFFER = "offer"  # адресату: речь → форма «Принять/Отклонить»
-STAGE_OUTCOME = "outcome"  # инициатору: речь → итоговое оповещение
-STAGE_WELCOME = "welcome"  # адресату после «Принять»: поздравление → оповещение
+STAGE_OFFER = "offer"
+STAGE_OUTCOME = "outcome"
+STAGE_WELCOME = "welcome"
 _STAGE_COLUMN = {
     STAGE_OFFER: "offer_message_id",
     STAGE_OUTCOME: "notice_message_id",
     STAGE_WELCOME: "welcome_message_id",
 }
 
-# Сколько ждать речь Альфреда от службы tasks, прежде чем слать форму с
-# заглушкой самим: FIRE_GRACE_S службы (tasks/service.py — побудка/прогрев
-# спящей LLM-ноды с повторами) + бюджет самого запроса к модели + запас.
 _TASKS_FIRE_GRACE_S = 300.0
 _SPEECH_FALLBACK_MARGIN_S = 60.0
 
@@ -103,30 +66,20 @@ Subscriber = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 def parse_callback(data: str | None) -> tuple[int, str] | None:
-    if not data:
-        return None
-    parts = data.split(":")
-    if len(parts) != 3 or parts[0] != CALLBACK_PREFIX or not parts[1].isdigit():
-        return None
-    return int(parts[1]), parts[2]
+    return unpack_id_and_button(data, CALLBACK_PREFIX)
 
 
-def _callback(action_id: int, button: str) -> str:
-    return f"{CALLBACK_PREFIX}:{action_id}:{button}"
+def _callback(action_id: int, button_code: str) -> str:
+    return pack(CALLBACK_PREFIX, action_id, button_code)
 
 
-def _fmt_time(dt: datetime | str | None) -> str:
-    if dt is None:
+def _fmt_time(moment: datetime | str | None) -> str:
+    if moment is None:
         return "?"
-    if isinstance(dt, str):
-        dt = datetime.fromisoformat(dt)
-    return dt.astimezone().strftime("%d.%m %H:%M")
+    return format_local(moment, FORM_TIME_FORMAT)
 
 
 class ActionBus:
-    """Шина событий форм внутри процесса бота. Сбой одного подписчика не
-    мешает остальным и не откатывает сам переход — он уже записан."""
-
     def __init__(self) -> None:
         self._subscribers: dict[str, list[Subscriber]] = {}
 
@@ -137,11 +90,8 @@ class ActionBus:
         for handler in self._subscribers.get(event_type, []):
             try:
                 await handler(data)
-            except Exception:  # noqa: BLE001 — реакция не должна ронять переход
+            except Exception:  # noqa: BLE001
                 log.exception("pending_actions: подписчик %s упал", event_type)
-
-
-# --- тексты форм и оповещений (шаблоны кода, не LLM) ---
 
 
 RELAY_LATER = "После согласия Альфред сможет передавать ваши сообщения друг другу."
@@ -206,8 +156,6 @@ def render_offer_form(row: dict) -> str:
 
 
 def render_outcome_notice(row: dict) -> str:
-    """Итог инициатору. Имя — именительным лейблом перед тире: падеж на
-    нём не держим (full_name в конфиге только в именительном)."""
     name = html.escape(row["payload"].get("addressee_name") or "гость")
     at = _fmt_time(row.get("decided_at"))
     status = row["status"]
@@ -227,51 +175,33 @@ def render_outcome_notice(row: dict) -> str:
 
 
 def render_welcome_notice(row: dict) -> str:
-    """Адресату после его «Принять» — симметрично итогу инициатора."""
     name = html.escape(row["payload"].get("initiator_name") or "гость")
     at = _fmt_time(row.get("decided_at"))
     return f"🤝 {name} — знакомство подтверждено {at}. {RELAY_NOW}"
 
 
 def _plain(text_html: str) -> str:
-    """Текст формы для ai_turns — без разметки: модель увидит форму в
-    истории треда и не будет делать вид, что её нет."""
     for tag in ("<b>", "</b>", "<i>", "</i>"):
         text_html = text_html.replace(tag, "")
     return html.unescape(text_html)
 
 
 def _draft_keyboard(action_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📨 Отправить", callback_data=_callback(action_id, BUTTON_SUBMIT)
-                ),
-                InlineKeyboardButton(
-                    text="✖️ Отмена", callback_data=_callback(action_id, BUTTON_CANCEL)
-                ),
-            ]
+    return markup(
+        [
+            button("📨 Отправить", _callback(action_id, BUTTON_SUBMIT)),
+            button("✖️ Отмена", _callback(action_id, BUTTON_CANCEL)),
         ]
     )
 
 
 def _offer_keyboard(action_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ Принять", callback_data=_callback(action_id, BUTTON_ACCEPT)
-                ),
-                InlineKeyboardButton(
-                    text="🚫 Отклонить", callback_data=_callback(action_id, BUTTON_REJECT)
-                ),
-            ]
+    return markup(
+        [
+            button("✅ Принять", _callback(action_id, BUTTON_ACCEPT)),
+            button("🚫 Отклонить", _callback(action_id, BUTTON_REJECT)),
         ]
     )
-
-
-# --- директивы для речи Альфреда (LLM сопровождает, но не решает) ---
 
 
 def _offer_directive(row: dict) -> str:
@@ -332,11 +262,6 @@ def _welcome_directive(row: dict) -> str:
 
 
 class PendingActions:
-    """Формы подтверждения: создание, переходы, реакции, таймеры.
-
-    ``get_node_link`` — геттер, а не сам ServiceLink (тот же приём, что у
-    build_node_event_handler в app.py): связь с нодой создаётся позже."""
-
     def __init__(
         self,
         store: Store,
@@ -364,7 +289,6 @@ class PendingActions:
         self._speech_claimed: set[tuple[int, str]] = set()
         self._timers: set[asyncio.Task] = set()
 
-    # --- создание ---
 
     async def create_relationship_draft(
         self,
@@ -374,7 +298,7 @@ class PendingActions:
         initiator_name: str,
         addressee_name: str,
     ) -> dict:
-        now = datetime.now(tz=UTC)
+        now = utc_now()
         row = await self._store.create_pending_action(
             KIND_RELATIONSHIP,
             initiator,
@@ -394,10 +318,6 @@ class PendingActions:
     async def flush_drafts(
         self, chat_id: int, dialogue_id: int | None, message_thread_id: int | None = None
     ) -> None:
-        """Отправить формы черновиков инициатору — ПОСЛЕ ответа Альфреда
-        (bot/handlers/ai.py зовёт это последним шагом хода): тул
-        request_acquaintance срабатывает посреди генерации, и форма,
-        посланная сразу, обогнала бы речь."""
         for row in await self._store.open_pending_actions(KIND_RELATIONSHIP, chat_id):
             if row["status"] == "draft" and row["initiator"] == chat_id:
                 await self._deliver_draft(row["id"], dialogue_id, message_thread_id)
@@ -422,17 +342,14 @@ class PendingActions:
             await self._store.set_pending_action_message(action_id, "draft_message_id", message_id)
             await self._record_turn(row["initiator"], message_id, dialogue_id, text)
 
-    # --- нажатия ---
 
-    async def handle_click(self, action_id: int, button: str, user_id: int) -> str:
-        """Нажатие кнопки формы. Возвращает короткий текст для
-        callback.answer — итог в чат уходит правкой формы/реакциями."""
+    async def handle_click(self, action_id: int, button_code: str, user_id: int) -> str:
         row = await self._store.get_pending_action(action_id)
         if row is None:
             return "Форма не найдена."
-        if button in (BUTTON_SUBMIT, BUTTON_CANCEL):
+        if button_code in (BUTTON_SUBMIT, BUTTON_CANCEL):
             expected_status, decider = "draft", row["initiator"]
-        elif button in (BUTTON_ACCEPT, BUTTON_REJECT):
+        elif button_code in (BUTTON_ACCEPT, BUTTON_REJECT):
             expected_status, decider = "pending", row["addressee"]
         else:
             return "Неизвестная кнопка."
@@ -440,15 +357,15 @@ class PendingActions:
             return "Эта форма не для вас."
         if row["status"] != expected_status:
             return "Уже решено."
-        now = datetime.now(tz=UTC)
+        now = utc_now()
         if datetime.fromisoformat(row["expires_at"]) <= now:
             await self.expire(action_id)
             return "Срок формы истёк."
 
-        if button == BUTTON_CANCEL:
+        if button_code == BUTTON_CANCEL:
             await self._decide(row, VERDICT_CANCELLED, user_id, now)
             return "Отменено."
-        if button == BUTTON_REJECT:
+        if button_code == BUTTON_REJECT:
             await self._decide(row, VERDICT_REJECTED, user_id, now)
             return "Отклонено."
 
@@ -462,7 +379,7 @@ class PendingActions:
         if conflict is not None:
             await self._decide(row, VERDICT_CANCELLED, user_id, now, reason=conflict)
             return "Не получилось — подробности в форме."
-        if button == BUTTON_SUBMIT:
+        if button_code == BUTTON_SUBMIT:
             return await self._submit(row, now)
         return await self._accept(row, user_id, now)
 
@@ -514,24 +431,17 @@ class PendingActions:
         await self._edit(row, "offer_message_id", render_offer_form(row))
         await self.bus.publish(EVENT_ACTION_DECIDED, _event(row))
 
-    # --- экспирация ---
 
     async def expire(self, action_id: int) -> None:
-        """Идемпотентно: уже решено или срок продлён (draft → pending
-        переставил expires_at, а будильник черновика всё равно сработает) —
-        no-op."""
         row = await self._store.get_pending_action(action_id)
         if row is None or row["status"] not in OPEN_STATUSES:
             return
-        now = datetime.now(tz=UTC)
+        now = utc_now()
         if datetime.fromisoformat(row["expires_at"]) > now:
             return
         await self._decide(row, VERDICT_EXPIRED, None, now)
 
     async def _schedule_expiry(self, row: dict) -> None:
-        """Будильник в службе tasks (персистентная очередь, переживает
-        рестарт бота). Служба недоступна — таймер в памяти процесса; его
-        потеря при рестарте закрывается recover() на старте."""
         expires_at = datetime.fromisoformat(row["expires_at"])
         node_link = self._get_node_link()
         if node_link is not None:
@@ -548,10 +458,10 @@ class PendingActions:
                             "pending_action_id": row["id"],
                         },
                     },
-                    dst=Address(node=task_protocol.NODE_ID, service=task_protocol.SERVICE_NAME),
+                    dst=TASKS_ADDRESS,
                 )
                 return
-            except (ServiceUnavailableError, ProtoError) as exc:
+            except SERVICE_CALL_ERRORS as exc:
                 log.warning(
                     "pending_actions: будильник #%s в tasks не поставлен (%s), таймер в памяти",
                     row["id"],
@@ -560,10 +470,9 @@ class PendingActions:
         self._arm_expiry_timer(row["id"], expires_at)
 
     def _arm_expiry_timer(self, action_id: int, expires_at: datetime) -> None:
-        delay = max((expires_at - datetime.now(tz=UTC)).total_seconds(), 0.0) + 1.0
+        delay = max((expires_at - utc_now()).total_seconds(), 0.0) + 1.0
         self._spawn(self._after(delay, self.expire(action_id)), f"pa-expire-{action_id}")
 
-    # --- реакции на события ---
 
     async def _on_submitted(self, data: dict[str, Any]) -> None:
         row = await self._store.get_pending_action(data["id"])
@@ -584,11 +493,6 @@ class PendingActions:
             )
 
     async def _request_speech(self, row: dict, stage: str, chat_id: int, directive: str) -> None:
-        """Речь Альфреда — chat_loop-задачей службы tasks; её task_result
-        вернётся в on_speech_result, и только ПОСЛЕ речи уйдёт форма/
-        оповещение. Задачу поставить не удалось — сразу заглушка + форма;
-        удалось — страховочный таймер на случай, если результат не придёт
-        вовсе (служба упала посреди, LLM висит)."""
         node_link = self._get_node_link()
         scheduled = False
         if node_link is not None:
@@ -602,7 +506,7 @@ class PendingActions:
                     meta_extra={"pending_action_id": row["id"], "pending_action_stage": stage},
                 )
                 scheduled = True
-            except (ServiceUnavailableError, ProtoError) as exc:
+            except SERVICE_CALL_ERRORS as exc:
                 log.warning("pending_actions: речь #%s/%s не поставлена: %s", row["id"], stage, exc)
         if not scheduled:
             await self._deliver(row["id"], stage, None)
@@ -621,9 +525,6 @@ class PendingActions:
         await self._deliver(action_id, stage, None)
 
     async def claim_speech(self, action_id: int, stage: str) -> bool:
-        """Вызывается bot/node_events.py ДО отправки речи Альфреда. False —
-        форма уже ушла (страховочный таймер успел раньше с заглушкой):
-        опоздавшую речь не шлём, иначе она встанет ПОСЛЕ формы."""
         column = _STAGE_COLUMN.get(stage)
         if column is None:
             return False
@@ -637,8 +538,6 @@ class PendingActions:
     async def on_speech_result(
         self, action_id: int, stage: str, dialogue_id: int | None, message_thread_id=None
     ) -> None:
-        """Речь ушла (dialogue_id — её тред) или не получилась (None →
-        заглушка). Дальше — детерминированная часть."""
         await self._deliver(action_id, stage, dialogue_id, message_thread_id)
         self._speech_claimed.discard((action_id, stage))
 
@@ -677,14 +576,9 @@ class PendingActions:
             await self._store.set_pending_action_message(action_id, column, message_id)
             await self._record_turn(chat_id, message_id, dialogue_id or message_id, text)
 
-    # --- старт процесса ---
 
     async def recover(self) -> None:
-        """После рестарта бота: просроченное — истечь; открытое — таймер в
-        памяти (будильник tasks мог не встать); недоставленное — дослать
-        (формы черновиков сразу, речь+форму — страховочным таймером от
-        момента события, как если бы процесс не прерывался)."""
-        now = datetime.now(tz=UTC)
+        now = utc_now()
         for row in await self._store.open_pending_actions():
             expires_at = datetime.fromisoformat(row["expires_at"])
             if expires_at <= now:
@@ -711,7 +605,6 @@ class PendingActions:
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
 
-    # --- служебное ---
 
     def _lock(self, action_id: int) -> asyncio.Lock:
         return self._locks.setdefault(action_id, asyncio.Lock())
@@ -750,17 +643,15 @@ class PendingActions:
             dialogue_id if dialogue_id is not None else message_id,
             "assistant",
             _plain(text),
-            datetime.now(tz=UTC),
+            utc_now(),
         )
 
 
 def _initiator_needs_notice(row: dict) -> bool:
-    # Отмену сам инициатор и нажал — оповещать его нечем.
     return not (row["status"] == VERDICT_CANCELLED and row["decided_by"] == row["initiator"])
 
 
 def _undelivered_stages(row: dict) -> list[str]:
-    """Какие речь+сообщения по записи должны были уйти, но не ушли."""
     if row["status"] == "pending":
         return [STAGE_OFFER] if row["offer_message_id"] is None else []
     if row["status"] in OPEN_STATUSES:
@@ -782,9 +673,6 @@ def _event(row: dict) -> dict[str, Any]:
 
 
 def open_forms_note(rows: list[dict], chat_id: int) -> str | None:
-    """Скрытая строка в системную заметку живого /ai (45.4): у собеседника
-    открытые формы — на текстовое «да/нет» Альфред должен отправить к
-    кнопкам, а не делать вид, что принял решение сам."""
     items: list[str] = []
     for row in rows:
         payload = row["payload"]
