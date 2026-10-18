@@ -1,16 +1,7 @@
-"""SensorScanJob — снять срез, reconcile, разослать pending-уведомления.
-
-Инварианты (ARCHITECTURE §4.2, §9):
-- состояние коммитится одной транзакцией (apply_diff);
-- отправка — отдельный шаг; notified_* выставляется только когда диспетчер
-  принял событие (handled), поэтому падение между записью и отправкой не
-  теряет и не дублирует.
-"""
-
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import datetime
 
 from sa_home_bot.domain.health import compute_health_diff
 from sa_home_bot.domain.host import (
@@ -40,6 +31,7 @@ from sa_home_bot.domain.policy import (
 )
 from sa_home_bot.jobs.base import JobContext, JobResult
 from sa_home_bot.sensors.host import KERNEL_SCAN_STATE_KEY
+from sa_home_bot.utils.clock import utc_now
 
 log = logging.getLogger(__name__)
 
@@ -47,13 +39,7 @@ DEDUP_KEY = "sensor-scan"
 JOB_TYPE = "sensor_scan"
 
 
-def _now() -> datetime:
-    return datetime.now(tz=UTC)
-
-
 def _cfg_for_kind(config, kind: str):
-    """Секция sensors.* по виду показания: cpu/gpu — свои, всё остальное (диски)
-    — disk_cfg (дефолт, как и раньше до появления GPU)."""
     if kind == KIND_CPU:
         return config.sensors.cpu
     if kind == KIND_GPU:
@@ -94,7 +80,7 @@ class SensorScanJob:
         return resolve
 
     async def run(self, ctx: JobContext) -> JobResult:
-        now = _now()
+        now = utc_now()
         readings = await ctx.sensors.read_all()
         sensors_cfg = ctx.config.sensors
         uses_baseline = "baseline" in (
@@ -103,8 +89,6 @@ class SensorScanJob:
             sensors_cfg.disks.mode,
         )
 
-        # Статистику берём по ПРОШЛЫМ показаниям — текущее ещё не записано,
-        # чтобы аномалия оценивалась относительно накопленной нормы.
         stats: dict[str, BaselineStats] = {}
         if uses_baseline:
             for r in readings:
@@ -154,7 +138,6 @@ class SensorScanJob:
         return resolve
 
     async def _scan_host(self, ctx: JobContext, now: datetime) -> tuple[int, int, int, int]:
-        """Срез host-метрик VPS (пусто на server/workstation — [sensors.host] выключен)."""
         kernel_since_raw = await ctx.store.get_state(KERNEL_SCAN_STATE_KEY)
         kernel_since: datetime | None = None
         if kernel_since_raw:
@@ -165,9 +148,6 @@ class SensorScanJob:
         readings = await ctx.sensors.read_host(kernel_since=kernel_since)
         if not readings:
             return 0, 0, 0, 0
-        # Курсор kernel-журнала двигаем сразу после успешного среза — окно
-        # следующего прогона начнётся отсюда (мелкое перекрытие безвредно:
-        # kernel_stall_events всё равно алертит при любом событии).
         await ctx.store.set_state(KERNEL_SCAN_STATE_KEY, now.isoformat())
         known = await ctx.store.get_known_host_states()
         diff = compute_host_diff(readings, known, self._host_resolver(ctx.config), now)
@@ -215,16 +195,7 @@ class SensorScanJob:
         return sent
 
     async def _refresh_disk_summaries(self, ctx: JobContext) -> None:
-        """Пересчитать DiskSummary (для /status) и закэшировать в БД.
-
-        Тот же живой опрос (smartctl/LHM), что раньше делал `MonitorService.
-        get_state()` синхронно на каждый запрос бота — здесь он уходит в
-        фон на кадансе scan_cron, а бот читает готовый кэш (см.
-        `Store.get_disk_summaries`).
-        """
         if not ctx.config.sensors.disks.enabled:
-            # vps: физических дисков со SMART нет, не опрашиваем; заодно
-            # затираем кэш, если он остался с тех пор, когда датчик был включён.
             await ctx.store.save_disk_summaries([])
             return
         health_overrides = await ctx.store.get_smart_health_map()

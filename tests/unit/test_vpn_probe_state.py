@@ -1,7 +1,3 @@
-"""node/vpn_probe_state.py: сериализация состояния пробников (39.0.7(d)) —
-чистые функции, реальный файл/root не трогаем (запись — привилегированная,
-живёт в node/fixups.py::make_vpn_probe_state_fixup)."""
-
 from __future__ import annotations
 
 from sa_home_bot.node import vpn_probe_state as state

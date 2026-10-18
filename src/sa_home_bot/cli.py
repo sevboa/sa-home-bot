@@ -1,5 +1,3 @@
-"""Точка входа CLI: разбор аргументов, загрузка Settings, запуск приложения."""
-
 from __future__ import annotations
 
 import argparse
@@ -16,9 +14,6 @@ from sa_home_bot.utils.logging import configure_logging
 
 log = logging.getLogger(__name__)
 
-# Windows: os.execv не заменяет образ процесса (новый PID, обёртка службы
-# сочтёт ноду умершей) — само-рестарт там делается выходом с этим кодом,
-# перезапуск выполняет обёртка (WinSW <onfailure action="restart"/>) или человек.
 RESTART_EXIT_CODE = 10
 
 
@@ -96,71 +91,22 @@ def main(argv: list[str] | None = None) -> int:
 
     configure_logging(settings.logging.level, settings.logging.format)
 
-    # Импорт здесь, чтобы --check-config не тянул тяжёлые зависимости.
-    if args.service == "node":
-        from sa_home_bot.node.app import run_node
-
-        # Ноде нужен путь к конфигу — она передаёт его дочерним службам.
-        coro = run_node(settings, config_path=args.config)
-    elif args.service == "monitor":
-        from sa_home_bot.monitor.app import run_monitor
-
-        coro = run_monitor(settings)
-    elif args.service == "apps":
-        from sa_home_bot.apps.app import run_apps
-
-        coro = run_apps(settings)
-    elif args.service == "torrents":
-        from sa_home_bot.torrents.app import run_torrents
-
-        coro = run_torrents(settings)
-    elif args.service == "llm":
-        from sa_home_bot.llm.app import run_llm
-
-        coro = run_llm(settings)
-    elif args.service == "tasks":
-        from sa_home_bot.tasks.app import run_tasks
-
-        coro = run_tasks(settings)
-    elif args.service == "net":
-        from sa_home_bot.net.app import run_net
-
-        coro = run_net(settings)
-    elif args.service == "memory":
-        from sa_home_bot.memory.app import run_memory
-
-        coro = run_memory(settings)
-    elif args.service == "graph_memory":
-        from sa_home_bot.graph_memory.app import run_graph_memory
-
-        coro = run_graph_memory(settings)
-    elif args.service == "vpn":
-        from sa_home_bot.vpn.app import run_vpn
-
-        coro = run_vpn(settings)
-    elif args.service == "vpn_check":
-        from sa_home_bot.vpn_check.app import run_vpn_check
-
-        coro = run_vpn_check(settings)
+    runner = registry.load_runner(args.service)
+    if args.service == registry.NODE_CLI_NAME:
+        coro = runner(settings, config_path=args.config)
+    elif args.service == registry.SERVICES["telegram-bot"].cli_name:
+        coro = runner(settings, instance=args.instance)
     else:
-        from sa_home_bot.app import run
-
-        coro = run(settings, instance=args.instance)
+        coro = runner(settings)
 
     try:
         result = asyncio.run(coro)
     except KeyboardInterrupt:
         return 0
     if args.service == registry.SERVICES["telegram-bot"].cli_name:
-        # Бот вернул True — его вытеснил другой поллер того же токена. Код
-        # выхода говорит ноде «не перезапускай»: решение за арендой лидерства
-        # (node/supervisor.py::FENCED_EXIT_CODE).
         return FENCED_EXIT_CODE if result else 0
     restart = result
     if restart:
-        # run_node вернул True (запрошен само-рестарт «restart_node»): чистый
-        # останов уже прошёл, заменяем образ процесса на себя же — тот же PID,
-        # работает и под systemd (Restart= не нужен), и вручную в терминале.
         if sys.platform == "win32":
             log.info("Само-рестарт: выход с кодом %d, перезапуск — за обёрткой "
                      "службы (WinSW) или вручную", RESTART_EXIT_CODE)

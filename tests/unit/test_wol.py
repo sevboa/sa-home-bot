@@ -1,6 +1,3 @@
-"""Wake-on-LAN: нормализация MAC, magic packet, ожидание пробуждения,
-определение своего Ethernet-сегмента (этап 19 п.6)."""
-
 from __future__ import annotations
 
 import socket
@@ -45,7 +42,6 @@ def test_build_magic_packet_layout():
 
 
 def test_send_magic_packet_over_udp():
-    # Локальный приёмник вместо broadcast — проверяем реальную отправку.
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as recv:
         recv.bind(("127.0.0.1", 0))
         recv.settimeout(2)
@@ -75,7 +71,6 @@ async def test_wait_host_up_timeout(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_send_magic_packet_binds_to_interface():
-    # bind_ip привязывает исходящий сокет — приёмник видит именно её как src.
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as recv:
         recv.bind(("127.0.0.1", 0))
         recv.settimeout(2)
@@ -84,9 +79,6 @@ def test_send_magic_packet_binds_to_interface():
         data, addr = recv.recvfrom(1024)
     assert addr[0] == "127.0.0.1"
     assert data == wol.build_magic_packet(MAC)
-
-
-# --- detect_local_wake_info: своя Ethernet-нода определяет себя (этап 19 п.6) ---
 
 
 def _mock_lan(monkeypatch: pytest.MonkeyPatch, iface: str, ip: str = "192.168.0.100") -> None:

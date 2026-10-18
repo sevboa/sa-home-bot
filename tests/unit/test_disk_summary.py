@@ -1,12 +1,10 @@
-"""Сбор сводки по дискам: классификация SMART, разбор lsblk, метки."""
-
 from __future__ import annotations
 
 from sa_home_bot.domain.models import DISK_FAIL, DISK_OK, DISK_WARN
 from sa_home_bot.sensors.disks import (
+    KIND_NVME,
     BlockDisk,
     DiskTarget,
-    KIND_NVME,
     _extract_temp,
     _label_disks,
     health_args,
@@ -47,7 +45,7 @@ def test_parse_health_failed():
 
 
 def test_parse_health_unavailable():
-    assert parse_health({}) is None  # нет smart_status
+    assert parse_health({}) is None
 
 
 def test_extract_temp_prefers_temperature_block():
@@ -69,8 +67,6 @@ def test_health_args_includes_type_and_flags():
     assert health_args(DiskTarget("/dev/sda", None)) == ["-j", "-H", "-A", "/dev/sda"]
 
 
-# Форма реального `lsblk -J -b`: диски + служебные mmcblk*boot* + разделы.
-# ROTA у современного lsblk — bool; sda/sdb — вращающиеся USB-HDD.
 LSBLK = {
     "blockdevices": [
         {
@@ -90,7 +86,6 @@ LSBLK = {
     ]
 }
 
-# Ноутбук с NVMe (arch-t480) + SATA SSD со строковым ROTA (старый формат lsblk).
 LSBLK_MIXED = {
     "blockdevices": [
         {
@@ -107,7 +102,7 @@ LSBLK_MIXED = {
         },
         {
             "name": "sdc", "type": "disk", "tran": "usb", "model": "Hitachi",
-            "path": "/dev/sdc",  # без ROTA (старый lsblk) → считаем HDD
+            "path": "/dev/sdc",
         },
     ]
 }
@@ -116,11 +111,11 @@ LSBLK_MIXED = {
 def test_parse_lsblk_skips_boot_and_collects_mounts():
     disks = parse_lsblk_disks(LSBLK)
     names = {d.path for d in disks}
-    assert names == {"/dev/sda", "/dev/mmcblk0"}  # boot0 отброшен
+    assert names == {"/dev/sda", "/dev/mmcblk0"}
     sda = next(d for d in disks if d.path == "/dev/sda")
     assert sda.mountpoints == ("/mnt/scratch",)
     mmc = next(d for d in disks if d.path == "/dev/mmcblk0")
-    assert mmc.mountpoints == ("/",)  # SWAP исключён
+    assert mmc.mountpoints == ("/",)
     assert mmc.kind == "emmc" and sda.kind == "hdd"
 
 
@@ -128,36 +123,30 @@ def test_parse_lsblk_kinds_nvme_ssd_hdd():
     kinds = {d.path: d.kind for d in parse_lsblk_disks(LSBLK_MIXED)}
     assert kinds == {
         "/dev/nvme0n1": "nvme",
-        "/dev/sda": "ssd",  # строковый ROTA "0"
-        "/dev/sdb": "hdd",  # строковый ROTA "1"
-        "/dev/sdc": "hdd",  # ROTA отсутствует — деградация к hdd
+        "/dev/sda": "ssd",
+        "/dev/sdb": "hdd",
+        "/dev/sdc": "hdd",
     }
 
 
 def test_label_disks_single_of_kind_without_number():
     disks = parse_lsblk_disks(LSBLK)
     labels = dict((label, d.path) for label, d in _label_disks(disks))
-    # По одному диску каждого вида — метки без номера.
     assert labels["HDD"] == "/dev/sda"
     assert labels["eMMC"] == "/dev/mmcblk0"
 
 
 def test_label_disks_numbering_only_when_multiple():
     labels = [label for label, _ in _label_disks(parse_lsblk_disks(LSBLK_MIXED))]
-    # NVMe и SSD по одному — без номера; HDD два — HDD1/HDD2.
     assert labels == ["NVMe", "SSD", "HDD1", "HDD2"]
 
 
 def test_label_disks_emmc_comes_first():
-    # eMMC без температуры (SMART недоступен) должна открывать список дисков
-    # (в /status — сразу после CPU), а не оказываться в конце.
     disks = parse_lsblk_disks(LSBLK)
     ordered_labels = [label for label, _ in _label_disks(disks)]
     assert ordered_labels[0] == "eMMC"
 
 
-# Многослотовый USB-картридер: три вставленных слота имеют реальный SIZE,
-# пустые (нет карты) отдают SIZE=0.
 LSBLK_CARD_READER = {
     "blockdevices": [
         {
@@ -166,7 +155,7 @@ LSBLK_CARD_READER = {
         },
         {
             "name": "sdb", "type": "disk", "tran": "usb", "model": "Card Reader",
-            "path": "/dev/sdb", "rota": False, "size": "0",  # lsblk иногда отдаёт строкой
+            "path": "/dev/sdb", "rota": False, "size": "0",
         },
         {
             "name": "sdc", "type": "disk", "tran": "usb", "model": "Samsung SD",
@@ -182,16 +171,8 @@ def test_parse_lsblk_skips_empty_card_reader_slots():
 
 
 def test_parse_lsblk_keeps_disk_without_size_field():
-    # Старый lsblk без колонки SIZE — не должны случайно скрыть настоящий диск.
     disks = parse_lsblk_disks(LSBLK)
     assert {d.path for d in disks} == {"/dev/sda", "/dev/mmcblk0"}
-
-
-# --- nvme_controller_path(): lsblk отдаёт namespace-устройство (/dev/nvme0n1),
-# а smartctl --scan/SMART для NVMe — контроллер (/dev/nvme0); без пересчёта
-# сопоставление по realpath никогда не срабатывает — живой баг на mycraft:
-# после починки PATH (обёртка smartctl доступна) NVMe всё равно показывал
-# пустую температуру именно из-за этого расхождения путей.
 
 
 def test_nvme_controller_path_strips_namespace_suffix():
@@ -201,7 +182,7 @@ def test_nvme_controller_path_strips_namespace_suffix():
 
 def test_nvme_controller_path_none_for_non_nvme():
     assert nvme_controller_path("/dev/sda") is None
-    assert nvme_controller_path("/dev/nvme0") is None  # уже контроллер, не namespace
+    assert nvme_controller_path("/dev/nvme0") is None
 
 
 def test_read_disk_summaries_matches_nvme_controller_to_namespace_device(monkeypatch):
@@ -226,8 +207,6 @@ def test_read_disk_summaries_matches_nvme_controller_to_namespace_device(monkeyp
 
 
 def test_parse_disk_summary_kind_fallback_for_old_monitor():
-    # Ответ монитора старой версии (без поля kind) — бот не падает: eMMC
-    # выводится из метки, остальное деградирует к hdd.
     from sa_home_bot.bot.monitor_state import parse_disk_summary
 
     old_hdd = parse_disk_summary({"label": "HDD1", "model": "X"})

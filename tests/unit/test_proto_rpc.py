@@ -1,5 +1,3 @@
-"""Пара клиент↔сервер протокола v0 на unix-сокете во временной директории."""
-
 import asyncio
 import shutil
 import tempfile
@@ -22,8 +20,6 @@ from sa_home_bot.proto.server import ProtoServer
 
 
 class FakeMonitor:
-    """Мини-служба для тестов: пара действий, счётчик команд."""
-
     def __init__(self) -> None:
         self.commands: list[tuple[str, dict]] = []
 
@@ -54,7 +50,6 @@ class FakeMonitor:
 
 @pytest.fixture
 async def rpc():
-    # Свой короткий tempdir: путь unix-сокета ограничен ~108 байтами.
     tmpdir = Path(tempfile.mkdtemp(prefix="sa-proto-"))
     socket_path = tmpdir / "monitor.sock"
     handler = FakeMonitor()
@@ -113,7 +108,6 @@ async def test_missing_required_param_rejected(rpc):
     with pytest.raises(ProtoError) as exc_info:
         await client.command("set_threshold")
     assert exc_info.value.code == ERR_BAD_REQUEST
-    # с параметром — проходит
     result = await client.command("set_threshold", {"value": 85.0})
     assert result == {"accepted": True}
 
@@ -123,7 +117,6 @@ async def test_handler_crash_returns_internal_error(rpc):
     with pytest.raises(ProtoError) as exc_info:
         await client.command("boom")
     assert exc_info.value.code == ERR_INTERNAL
-    # соединение живо — следующий запрос работает
     assert (await client.get_state())["status"] == "ok"
 
 
@@ -147,7 +140,6 @@ async def test_event_reaches_all_clients(rpc):
     client2 = ProtoClient(client._endpoint, on_event=on_event2, timeout=5.0)
     await client2.connect()
     try:
-        # дождаться регистрации второго подключения на сервере
         await client2.hello()
         await server.broadcast_event("smart_degraded", {})
         await asyncio.wait_for(got2.wait(), timeout=5.0)
@@ -158,17 +150,12 @@ async def test_event_reaches_all_clients(rpc):
 
 async def test_server_survives_garbage_line(rpc):
     _, _, client, _, _ = rpc
-    # мусор напрямую в сокет — сервер должен ответить ошибкой и не упасть
     client._writer.write(b"garbage\n")
     await client._writer.drain()
     assert (await client.get_state())["status"] == "ok"
 
 
 async def test_timeout_s_overrides_default_per_request(tmp_path):
-    """`timeout` в command()/request() побеждает DEFAULT_TIMEOUT клиента —
-    режет долгий дефолт и продлевает короткий (llm.chat/ask, см.
-    Envelope.timeout_s)."""
-
     class SlowMonitor(FakeMonitor):
         def describe(self) -> ServiceDescription:
             base = super().describe()
@@ -187,13 +174,11 @@ async def test_timeout_s_overrides_default_per_request(tmp_path):
     socket_path = tmp_path / "slow.sock"
     server = ProtoServer(socket_path, SlowMonitor())
     await server.start()
-    # Дефолт клиента короче обработки "slow" — без override запрос падает.
     client = ProtoClient(socket_path, timeout=0.05)
     await client.connect()
     try:
         with pytest.raises(TimeoutError):
             await client.command("slow")
-        # override продлевает конкретно этот запрос — проходит.
         result = await client.command("slow", timeout=2.0)
         assert result == {"accepted": True}
     finally:
@@ -204,6 +189,6 @@ async def test_timeout_s_overrides_default_per_request(tmp_path):
 async def test_server_stop_fails_pending_and_closes_client(rpc):
     _, server, client, _, _ = rpc
     await server.stop()
-    await asyncio.sleep(0.1)  # дать читателю клиента увидеть EOF
+    await asyncio.sleep(0.1)
     with pytest.raises((ProtoError, ConnectionError, OSError)):
         await client.get_state()

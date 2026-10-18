@@ -1,13 +1,3 @@
-"""Адаптер температуры CPU: psutil, fallback на `sensors -j` (lm-sensors).
-
-На Windows ни psutil, ни lm-sensors температур не дают — там источник
-LibreHardwareMonitor (см. `sensors/lhm.py`), диспетчеризация в `read_cpu_sync`.
-
-Парсинг вынесен в чистые функции (`parse_psutil_temps`, `parse_lm_sensors`),
-чтобы тестировать на фикстурах без реального железа. Блокирующие вызовы делает
-вызывающий код (SensorSource) через run_in_executor.
-"""
-
 from __future__ import annotations
 
 import json
@@ -23,11 +13,9 @@ log = logging.getLogger(__name__)
 
 
 def parse_psutil_temps(data: dict, now: datetime) -> list[SensorReading]:
-    """Разобрать вывод psutil.sensors_temperatures() в SensorReading."""
     readings: list[SensorReading] = []
     for chip, entries in data.items():
         for idx, entry in enumerate(entries):
-            # entry — psutil shwtemp(label, current, high, critical) или совместимый.
             current = getattr(entry, "current", None)
             label = getattr(entry, "label", "") or ""
             if current is None:
@@ -47,7 +35,6 @@ def parse_psutil_temps(data: dict, now: datetime) -> list[SensorReading]:
 
 
 def parse_lm_sensors(data: dict, now: datetime) -> list[SensorReading]:
-    """Разобрать вывод `sensors -j` в SensorReading (fallback)."""
     readings: list[SensorReading] = []
     for chip, features in data.items():
         if not isinstance(features, dict):
@@ -75,8 +62,6 @@ def parse_lm_sensors(data: dict, now: datetime) -> list[SensorReading]:
 
 
 def read_cpu_sync(now: datetime, lhm_dll_path: str = "") -> list[SensorReading]:
-    """Снять температуры CPU (блокирующе). psutil → fallback lm-sensors;
-    на Windows — LibreHardwareMonitor."""
     if sys.platform == "win32":
         from sa_home_bot.sensors import lhm
 
@@ -89,7 +74,7 @@ def read_cpu_sync(now: datetime, lhm_dll_path: str = "") -> list[SensorReading]:
             readings = parse_psutil_temps(data, now)
             if readings:
                 return readings
-    except Exception as exc:  # noqa: BLE001 — источник опционален
+    except Exception as exc:  # noqa: BLE001
         log.warning("psutil.sensors_temperatures недоступен: %s", exc)
 
     sensors_bin = shutil.which("sensors")

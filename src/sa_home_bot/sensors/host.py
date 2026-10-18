@@ -1,15 +1,3 @@
-"""Адаптер host-метрик VPS: читает /proc и statvfs, без smartctl и psutil.
-
-Всё дёшево, кроме двух снимков /proc/{stat,vmstat,net/dev} с паузой между ними
-(нужна дельта за окно для steal/iowait/oom/ошибок NIC) — вызов идёт из executor
-(`SensorSource.read_host`), поэтому пауза на воркер-потоке приемлема. Стойла ядра
-(`kernel_stall_events`) — единственный вызов подпроцесса (`journalctl -k`), тоже
-из executor; недоступность (не Linux, нет прав) молча пропускается и
-объясняется через `requirements_registry`.
-
-Парсинг вынесен в чистые функции — тестируются на фикстурах без реального /proc.
-"""
-
 from __future__ import annotations
 
 import grp
@@ -30,14 +18,8 @@ from sa_home_bot.utils.requirements import (
 
 log = logging.getLogger(__name__)
 
-# Ключ app_state: верхняя граница прошлого скана kernel-журнала (ISO-время).
-# Двигается каждым прогоном, сужая окно `journalctl -k -S … -U …`.
 KERNEL_SCAN_STATE_KEY = "host:kernel_scan_at"
 
-# Доступ к kernel-журналу без root: нужна группа systemd-journal или adm
-# (у `journalctl -k` иначе просто пусто, без явной ошибки — поэтому проверяем
-# членство в группе заранее, а не по факту вызова). Отдельный ключ реестра:
-# программа делится с power.py::JOURNALCTL_REQUIREMENT, но права нужны другие.
 KERNEL_JOURNAL_REQUIREMENT = Requirement(
     program="journalctl",
     package="systemd",
@@ -48,8 +30,6 @@ KERNEL_JOURNAL_REQUIREMENT = Requirement(
 
 _JOURNAL_GROUPS = ("systemd-journal", "adm")
 
-# Паттерны строк kernel-журнала, означающих стойло ядра/фриз VM гипервизором
-# (ровно сценарий jeeves-vpn-hypervisor-stalls).
 _STALL_PATTERN = re.compile(
     r"hung_task"
     r"|rcu_(?:sched|preempt)[^\n]*stall"
@@ -62,8 +42,6 @@ _STALL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Поля первой строки /proc/stat (jiffies), в порядке ядра. guest/guest_nice уже
-# входят в user/nice — в сумму «всего времени» их не включаем (двойной счёт).
 _STAT_FIELDS = ("user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal")
 
 
@@ -76,7 +54,6 @@ def _read(path: str) -> str:
 
 
 def parse_proc_stat_cpu(text: str) -> dict[str, int]:
-    """Агрегированная строка ``cpu`` из /proc/stat → {поле: jiffies}."""
     for line in text.splitlines():
         if line.startswith("cpu "):
             nums = [int(x) for x in line.split()[1:]]
@@ -85,7 +62,6 @@ def parse_proc_stat_cpu(text: str) -> dict[str, int]:
 
 
 def cpu_deltas(prev: dict[str, int], cur: dict[str, int]) -> tuple[float, float]:
-    """(steal_pct, iowait_pct) за интервал между двумя снимками /proc/stat."""
     total = sum(cur.get(k, 0) - prev.get(k, 0) for k in _STAT_FIELDS)
     if total <= 0:
         return 0.0, 0.0
@@ -95,7 +71,6 @@ def cpu_deltas(prev: dict[str, int], cur: dict[str, int]) -> tuple[float, float]
 
 
 def parse_meminfo(text: str) -> dict[str, int]:
-    """/proc/meminfo → {ключ: значение в kB}."""
     out: dict[str, int] = {}
     for line in text.splitlines():
         key, _, rest = line.partition(":")
@@ -119,7 +94,6 @@ def parse_loadavg(text: str) -> float | None:
 
 
 def parse_pressure_some_avg60(text: str) -> float | None:
-    """`some avg60=...` из /proc/pressure/{cpu,memory,io} — доля времени в %."""
     for line in text.splitlines():
         if line.startswith("some"):
             for tok in line.split():
@@ -143,20 +117,16 @@ def parse_vmstat(text: str) -> dict[str, int]:
     return out
 
 
-# Поля /proc/net/dev после «iface:»: 8 rx + 8 tx (порядок ядра).
-#   rx: bytes packets errs drop fifo frame compressed multicast
-#   tx: bytes packets errs drop fifo colls carrier compressed
 _NETDEV_RX_ERRS, _NETDEV_RX_DROP = 2, 3
 _NETDEV_TX_ERRS, _NETDEV_TX_DROP = 10, 11
 
 
 def parse_proc_net_dev(text: str) -> dict[str, tuple[int, int, int, int]]:
-    """/proc/net/dev → {iface: (rx_errs, rx_drop, tx_errs, tx_drop)}, без `lo`."""
     out: dict[str, tuple[int, int, int, int]] = {}
     for line in text.splitlines():
         name, sep, rest = line.partition(":")
         if not sep:
-            continue  # строки-заголовки
+            continue
         iface = name.strip()
         if iface == "lo":
             continue
@@ -180,27 +150,17 @@ def net_err_delta(
     prev: dict[str, tuple[int, int, int, int]],
     cur: dict[str, tuple[int, int, int, int]],
 ) -> int:
-    """Суммарный прирост rx_errs + tx_errs по интерфейсам, живым в обоих снимках.
-
-    Только ошибки, НЕ drop: на виртуальном NIC (virtio, cloud) `rx_drop` почти
-    целиком — шум виртуального свитча гипервизора (пакеты не нам, ARP-флуд),
-    он ненулевой на здоровой машине и даёт ложную тревогу; `tx_drop` —
-    переполнение qdisc/нероутируемое на туннелях, тоже не признак сбоя железа.
-    Настоящую деградацию линка (класс «downshift/битый драйвер») видно именно
-    по errs.
-    """
     total = 0
     for iface, (rx_errs, _rx_drop, tx_errs, _tx_drop) in cur.items():
         prev_vals = prev.get(iface)
         if prev_vals is None:
-            continue  # интерфейс появился между снимками — дельту не считаем
+            continue
         p_rx_errs, _, p_tx_errs, _ = prev_vals
         total += max(0, rx_errs - p_rx_errs) + max(0, tx_errs - p_tx_errs)
     return total
 
 
 def parse_conntrack(count_text: str, max_text: str) -> float | None:
-    """Заполнение таблицы conntrack в % (count/max·100). None — модуль не загружен."""
     try:
         count = int(count_text.strip())
         limit = int(max_text.strip())
@@ -212,12 +172,10 @@ def parse_conntrack(count_text: str, max_text: str) -> float | None:
 
 
 def count_kernel_stalls(text: str) -> int:
-    """Число строк kernel-журнала, подходящих под паттерны стойл ядра."""
     return sum(1 for line in text.splitlines() if _STALL_PATTERN.search(line))
 
 
 def _can_read_kernel_journal() -> bool:
-    """root или членство в systemd-journal/adm — иначе `journalctl -k` пуст."""
     if os.geteuid() == 0:
         return True
     try:
@@ -228,9 +186,8 @@ def _can_read_kernel_journal() -> bool:
 
 
 def _read_kernel_stall_count(since: datetime, until: datetime) -> int | None:
-    """Стойла ядра за окно [since, until) через `journalctl -k`. None — недоступно."""
     if not KERNEL_JOURNAL_REQUIREMENT.available():
-        return None  # не Linux / нет journalctl — молчим (причину даст requirements)
+        return None
     if not _can_read_kernel_journal():
         requirements_registry.report(
             KERNEL_JOURNAL_REQUIREMENT, RequirementStatus.NEEDS_PRIVILEGE
@@ -277,13 +234,6 @@ def read_host_sync(
     sample_window_s: float = 10.0,
     kernel_since: datetime | None = None,
 ) -> list[HostMetricReading]:
-    """Снять срез host-метрик (блокирующе). Не-Linux / нет /proc → пустой список.
-
-    ``kernel_since`` — нижняя граница окна скана kernel-журнала (для
-    ``kernel_stall_events``); ``None`` — первый прогон, берём ``now -
-    sample_window_s``. Верхняя граница — ``now``; вызывающий сдвигает курсор
-    в ``app_state`` на ``now`` после успешного среза.
-    """
     stat1 = _read("/proc/stat")
     vm1 = _read("/proc/vmstat")
     netdev1 = _read("/proc/net/dev")
@@ -328,7 +278,7 @@ def read_host_sync(
     ):
         text = _read(path)
         if not text:
-            continue  # ядро без PSI — метрику просто не эмитим
+            continue
         val = parse_pressure_some_avg60(text)
         if val is not None:
             out.append(_reading(metric, val, now))

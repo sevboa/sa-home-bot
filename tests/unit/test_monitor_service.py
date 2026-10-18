@@ -1,5 +1,3 @@
-"""MonitorService: describe, get_state, scan_now (без реального железа)."""
-
 import sys
 from datetime import UTC, datetime
 from unittest.mock import patch
@@ -28,8 +26,6 @@ from .conftest import cpu_policy, make_reading
 
 @pytest.fixture(autouse=True)
 def _clean_requirements_registry():
-    # Синглтон живёт дольше одного теста — изолируем реальные NEEDS_PRIVILEGE
-    # диагнозы между тестами (сама статика per-запусковая, не тухнет).
     requirements_registry.reset()
     yield
     requirements_registry.reset()
@@ -55,8 +51,6 @@ def test_describe_declares_scan_now_and_downtime(service):
     assert desc.find_action(ACTION_SCAN_NOW) is not None
     downtime = desc.find_action(ACTION_DOWNTIME)
     assert downtime is not None
-    # Параметры необязательные — сервер не потребует их в command; фронтенды
-    # не рисуют кнопку (есть params), а зовут действие сами.
     assert {p.name for p in downtime.params} == {"offset", "limit"}
     assert all(not p.required for p in downtime.params)
 
@@ -67,8 +61,6 @@ async def test_get_state_returns_health_from_store(service):
     diff = compute_health_diff([make_reading(42.0)], {}, lambda r: cpu_policy(), now)
     await store.apply_diff(diff, now)
 
-    # Железо не трогаем: блокирующие читатели подменяются. Диски — кэш из
-    # Store (см. SensorScanJob), тут просто пуст (SensorScanJob не запускался).
     with (
         patch("sa_home_bot.monitor.service.read_uptime_sync", return_value=None),
         patch("sa_home_bot.monitor.service.read_power_events_sync", return_value=([], False)),
@@ -81,12 +73,11 @@ async def test_get_state_returns_health_from_store(service):
     assert state["health"][0]["temperature_c"] == 42.0
     assert state["last_outage"] is None
     assert state["thresholds"]["cpu"]["warn_c"] == 80.0
-    assert state["thresholds"]["gpu"]["warn_c"] == 80.0  # дефолт GpuSensorConfig
+    assert state["thresholds"]["gpu"]["warn_c"] == 80.0
 
 
 async def test_get_state_flags_missing_smartctl_when_disks_enabled(service, monkeypatch):
     svc, _, _ = service
-    # smartctl не найден, остальные утилиты (в т.ч. journalctl) — как обычно.
     monkeypatch.setattr(
         "shutil.which", lambda name: None if name == "smartctl" else f"/usr/bin/{name}"
     )
@@ -114,7 +105,6 @@ async def test_get_state_quiet_when_disks_disabled(tmp_path, monkeypatch):
         subscriptions=[],
     )
     svc = MonitorService(settings, store, DedupQueue())
-    # smartctl всё равно не найден, но диски выключены — не должен попасть в вывод.
     monkeypatch.setattr(
         "shutil.which", lambda name: None if name == "smartctl" else f"/usr/bin/{name}"
     )
@@ -126,7 +116,7 @@ async def test_get_state_quiet_when_disks_disabled(tmp_path, monkeypatch):
         state = await svc.get_state()
     await db.close()
 
-    assert state["requirements"] == []  # диски выключены — не шумим
+    assert state["requirements"] == []
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="kernel-журнал только на Linux")
@@ -188,12 +178,10 @@ async def test_get_state_quiet_kernel_journal_when_host_disabled(tmp_path, monke
         state = await svc.get_state()
     await db.close()
 
-    assert state["requirements"] == []  # host-датчик выключен — kernel-журнал никто не читает
+    assert state["requirements"] == []
 
 
 async def test_get_state_quiet_when_gpu_disabled_by_default(tmp_path, monkeypatch):
-    """gpu.enabled=False (дефолт) — отсутствие nvidia-smi не должно шуметь на
-    нодах без видеокарты (все, кроме mycraft)."""
     db = Database(tmp_path / "monitor.sqlite")
     await db.open()
     await apply_migrations(db)
@@ -245,13 +233,9 @@ async def test_scan_now_queues_both_jobs_once(service):
     svc, _, queue = service
     first = await svc.run_command(ACTION_SCAN_NOW, {})
     assert first == {"sensor_queued": True, "smart_queued": True}
-    # Повтор при непустой очереди дедуплицируется.
     second = await svc.run_command(ACTION_SCAN_NOW, {})
     assert second == {"sensor_queued": False, "smart_queued": False}
     assert queue.qsize() == 2
-
-
-# --- downtime: история отключений по протоколу ---
 
 
 def _fake_events(n: int):
@@ -283,7 +267,6 @@ async def test_downtime_returns_serialized_page(service):
     assert result["offset"] == 10
     assert result["has_next"] is True
     assert len(result["events"]) == 2
-    # Формат события — тот же _outage_dict, что у last_outage в get_state.
     assert result["events"][0]["kind"] == "clean"
     assert "boot_at" in result["events"][0]
 
@@ -300,11 +283,8 @@ async def test_downtime_clamps_bad_args(service):
         await svc.run_command(ACTION_DOWNTIME, {"offset": -5, "limit": 9999})
         await svc.run_command(ACTION_DOWNTIME, {"offset": "мусор", "limit": None})
 
-    assert calls[0] == (0, 50)  # отрицательный offset → 0, limit → максимум
-    assert calls[1] == (0, 10)  # непарсибельные значения → дефолты
-
-
-# --- host-метрики VPS (этап 38) ---
+    assert calls[0] == (0, 50)
+    assert calls[1] == (0, 10)
 
 
 def test_describe_declares_host_capability_and_trend(service):

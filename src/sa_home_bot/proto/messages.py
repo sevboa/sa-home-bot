@@ -1,11 +1,3 @@
-"""Протокол v0: конверт, сообщения и (де)сериализация.
-
-Кадрирование — одна строка UTF-8 JSON на сообщение (NDJSON). Конверт несёт
-версию протокола и адресата (`dst`): маршрутизация к удалённым нодам позже
-ляжет в тот же формат, фронтенду достаточно одного подключения к своей ноде.
-Полное описание — в PROTOCOL.md.
-"""
-
 from __future__ import annotations
 
 import json
@@ -15,8 +7,7 @@ from typing import Any
 
 PROTO_VERSION = 0
 
-# --- Типы сообщений ---
-MSG_AUTH = "auth"  # только TCP: первое сообщение соединения, payload {"token"}
+MSG_AUTH = "auth"
 MSG_HELLO = "hello"
 MSG_DESCRIBE = "describe"
 MSG_GET_STATE = "get_state"
@@ -26,25 +17,21 @@ MSG_EVENT = "event"
 
 REQUEST_TYPES = frozenset({MSG_AUTH, MSG_HELLO, MSG_DESCRIBE, MSG_GET_STATE, MSG_COMMAND})
 
-# --- Коды ошибок ---
 ERR_BAD_REQUEST = "bad_request"
 ERR_UNSUPPORTED_PROTO = "unsupported_proto"
 ERR_UNKNOWN_TYPE = "unknown_type"
 ERR_UNKNOWN_ACTION = "unknown_action"
-ERR_UNAUTHORIZED = "unauthorized"  # TCP без/до auth или неверный токен; соединение закрывается
-ERR_UNKNOWN_DST = "unknown_dst"  # dst указывает на неизвестную ноду/службу
-ERR_UNAVAILABLE = "unavailable"  # нода/служба известна, но сейчас нет соединения
-ERR_TIMEOUT = "timeout"  # соединение живо, но ответа на ЭТОТ запрос не дождались
+ERR_UNAUTHORIZED = "unauthorized"
+ERR_UNKNOWN_DST = "unknown_dst"
+ERR_UNAVAILABLE = "unavailable"
+ERR_TIMEOUT = "timeout"
 ERR_INTERNAL = "internal"
-ERR_NEEDS_PRIVILEGE = "needs_privilege"  # действию не хватает прав; см. `nodectl fix`
+ERR_NEEDS_PRIVILEGE = "needs_privilege"
 
-# Максимальная длина одного сообщения на проводе (защита от мусора в сокете).
 MAX_MESSAGE_BYTES = 1 * 1024 * 1024
 
 
 class ProtoError(Exception):
-    """Ошибка протокола: невалидное сообщение или отрицательный ответ."""
-
     def __init__(self, code: str, message: str) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code
@@ -53,8 +40,6 @@ class ProtoError(Exception):
 
 @dataclass(frozen=True)
 class Address:
-    """Адрес в конверте: нода + служба. node=None — локальная нода."""
-
     node: str | None = None
     service: str | None = None
 
@@ -78,33 +63,14 @@ class Address:
 
 @dataclass(frozen=True)
 class Envelope:
-    """Конверт сообщения. Ответ несёт `id` исходного запроса.
-
-    ``timeout_s`` — необязательный таймаут ожидания ответа (сек), который
-    хочет вызывающий вместо дефолтного `ProtoClient.DEFAULT_TIMEOUT`. Едет
-    вместе с конвертом через все хопы форварда без изменений (сервер
-    пересылает тот же объект `Envelope` дальше, см. `node/peers.py`), поэтому
-    один параметр на клиенте применяется на каждом хопе цепочки
-    бот → своя нода → пир/локальная служба — без переделки протокола
-    маршрутизации. Нужен, в частности, для `llm.chat`/`llm.ask` (генерация,
-    в т.ч. с холодным стартом, дольше дефолтных 10с — см. LLM_INTEGRATION_PLAN.md §3).
-
-    ``hops`` — сколько ретрансляций пережило СОБЫТИЕ (второй предохранитель
-    от шторма, независимый от дедупа SeenEvents — см. ARCHITECTURE §11
-    «топология событийной сети» и node/app.py::MAX_EVENT_HOPS). Инкрементится
-    нодой при каждой ретрансляции; отсутствие поля в JSON = 0, поэтому ноды
-    старых версий события с ним принимают и не ломаются (лишь не наращивают
-    счётчик — защита деградирует до одного рубежа, как было до v0.43).
-    """
-
     type: str
     id: str
     v: int = PROTO_VERSION
     src: Address | None = None
     dst: Address | None = None
     payload: dict[str, Any] = field(default_factory=dict)
-    ok: bool | None = None  # только для response
-    error: dict[str, Any] | None = None  # {"code", "message"} при ok=False
+    ok: bool | None = None
+    error: dict[str, Any] | None = None
     timeout_s: float | None = None
     hops: int = 0
 
@@ -160,7 +126,6 @@ def make_event(
 
 
 def encode(env: Envelope) -> bytes:
-    """Конверт → одна NDJSON-строка (с завершающим \\n)."""
     raw: dict[str, Any] = {"v": env.v, "id": env.id, "type": env.type}
     if env.src is not None:
         raw["src"] = env.src.to_dict()
@@ -180,7 +145,6 @@ def encode(env: Envelope) -> bytes:
 
 
 def decode(line: bytes) -> Envelope:
-    """NDJSON-строка → конверт. Бросает ProtoError на мусор/чужую версию."""
     try:
         raw = json.loads(line)
     except (ValueError, UnicodeDecodeError) as exc:
@@ -233,34 +197,13 @@ def decode(line: bytes) -> Envelope:
     )
 
 
-# --- Описание службы (hello / describe) ---
-
-
 @dataclass(frozen=True)
 class ServiceInfo:
-    """Кто ты: ответ на hello."""
-
     node: str
     service: str
     version: str
-    # Тип машины ноды (server|workstation|vps) — едет уже в hello, чтобы рой
-    # знал, ждать ли ноду всегда и можно ли её будить, без отдельного запроса.
-    # Пусто — нода старой версии: см. node/kind.py::traits_for (консервативно).
     node_kind: str = ""
-    # Ethernet-реквизиты для Wake-on-LAN (mac/ip/broadcast) — по той же
-    # причине, что и node_kind выше: чтобы сосед знал, КАК будить, ещё до
-    # того, как цель уснула и её уже не спросить. Живая находка 2026-07-27:
-    # раньше это ехало только в get_state() и оседало в БД спрашивавшего —
-    # у службы без своей истории опросов (tasks) кэш оставался пустым
-    # навсегда, и разбудить она не могла никогда (см. wake_core.
-    # resolve_wake_info). None — нода старой версии либо без Ethernet.
     wake: dict[str, str] | None = None
-    # Все адреса, по которым к этой ноде можно прийти (этап 24), в порядке
-    # предпочтения — сосед по ним ходит, а не по одному захардкоженному в его
-    # конфиге. Без этого домашний рой не собирался без интернета: единственным
-    # известным адресом был tailscale-адрес, а он появляется через 40-60 с
-    # после загрузки и только при живой сети. Пусто — нода старой версии либо
-    # без TCP-слушателя (только unix-сокет): тогда работает адрес из конфига.
     endpoints: tuple[str, ...] = ()
 
     def to_payload(self) -> dict[str, Any]:
@@ -297,16 +240,10 @@ class ServiceInfo:
 
 @dataclass(frozen=True)
 class ActionParam:
-    """Параметр действия: имя, тип, обязательность.
-
-    ``choices`` — допустимые значения (если конечны): фронтенд строит по ним
-    UI (кнопка на значение), ничего не зная о семантике параметра.
-    """
-
     name: str
-    type: str = "string"  # string | int | float | bool
+    type: str = "string"
     required: bool = True
-    title: str | None = None  # человекочитаемое имя для UI
+    title: str | None = None
     choices: tuple[str, ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -331,12 +268,6 @@ class ActionParam:
 
 @dataclass(frozen=True)
 class ActionSpec:
-    """Действие службы: id, название для UI, параметры.
-
-    Фронтенды строят кнопки и проверяют права (`действие@нода`) по этому
-    списку, ничего не хардкодя.
-    """
-
     id: str
     title: str
     params: tuple[ActionParam, ...] = ()
@@ -355,14 +286,6 @@ class ActionSpec:
 
 @dataclass(frozen=True)
 class ServiceDescription:
-    """Ответ на describe: кто ты + capabilities + список действий.
-
-    ``model_profile`` — необязательная сводка профиля модели (служба llm,
-    llm/model_profiles.py::ModelProfileSummary): нужен ли router-проход и
-    уводит ли модель рассуждение в невидимый буфер. Здесь — сырым dict, чтобы
-    proto не зависел от llm-слоя; разбирает его вызывающий.
-    """
-
     info: ServiceInfo
     capabilities: tuple[str, ...] = ()
     actions: tuple[ActionSpec, ...] = ()

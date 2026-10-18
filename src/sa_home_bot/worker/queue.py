@@ -1,10 +1,3 @@
-"""DedupQueue — очередь job'ов с дедупликацией по ключу.
-
-Ключ освобождается на get(): пока job выполняется, может быть поставлен новый
-идентичный (следующий тик), но дубль в очереди не накапливается. None —
-sentinel остановки, дедупликации не подлежит.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -23,7 +16,6 @@ class DedupQueue:
         self._keys: set[str] = set()
 
     async def put(self, job: Dedupable) -> bool:
-        """Поставить job. Вернуть False, если такой ключ уже в очереди."""
         if job.dedup_key in self._keys:
             return False
         self._keys.add(job.dedup_key)
@@ -40,7 +32,6 @@ class DedupQueue:
         self._queue.task_done()
 
     async def stop(self) -> None:
-        """Положить sentinel остановки."""
         await self._queue.put(None)
 
     def qsize(self) -> int:

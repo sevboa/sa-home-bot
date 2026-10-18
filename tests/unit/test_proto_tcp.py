@@ -1,5 +1,3 @@
-"""Пара клиент↔сервер протокола v0 по TCP c auth-токеном."""
-
 import asyncio
 import socket
 
@@ -39,7 +37,6 @@ class FakeService:
 
 @pytest.fixture
 async def tcp_server():
-    # Порт 0 — свободный порт выберет ОС; реальный отдаёт server.endpoint.
     server = ProtoServer(TcpEndpoint("127.0.0.1", 0), FakeService(), token=TOKEN)
     await server.start()
     try:
@@ -82,7 +79,6 @@ async def test_request_before_auth_rejected_and_closed(tcp_server):
         response = decode(await reader.readline())
         assert response.ok is False
         assert response.error_code() == ERR_UNAUTHORIZED
-        # сервер закрывает соединение после unauthorized
         assert await reader.readline() == b""
     finally:
         writer.close()
@@ -97,7 +93,6 @@ async def test_events_only_to_authenticated(tcp_server):
 
     authed = ProtoClient(ep, token=TOKEN, on_event=on_event, timeout=5.0)
     await authed.connect()
-    # Второе соединение висит без auth — событий получать не должно.
     _, raw_writer = await asyncio.open_connection(ep.host, ep.port)
     try:
         delivered = await tcp_server.broadcast_event("service_started", {"name": "x"})
@@ -109,7 +104,6 @@ async def test_events_only_to_authenticated(tcp_server):
 
 
 async def test_dual_listen_unix_and_tcp():
-    """Нода слушает unix (локальные, без auth) и tcp (пиры, с auth) сразу."""
     import shutil
     import tempfile
     from pathlib import Path
@@ -126,18 +120,14 @@ async def test_dual_listen_unix_and_tcp():
         async def on_event(env):
             got.set()
 
-        # Локальный клиент по unix — токен не нужен.
         local = ProtoClient(unix_ep, on_event=on_event, timeout=5.0)
         await local.connect()
         assert (await local.hello()).node == "winpc"
-        # Пир по tcp — с токеном.
         peer = ProtoClient(tcp_ep, token=TOKEN, timeout=5.0)
         await peer.connect()
         assert (await peer.get_state())["status"] == "ok"
-        # Событие доходит обоим.
         assert await server.broadcast_event("x", {}) == 2
         await asyncio.wait_for(got.wait(), timeout=5.0)
-        # На tcp-слушателе auth обязателен даже при живом unix-слушателе.
         reader, writer = await asyncio.open_connection(tcp_ep.host, tcp_ep.port)
         writer.write(encode(make_request("get_state")))
         await writer.drain()
@@ -159,12 +149,7 @@ async def test_repeated_auth_is_ok(tcp_server):
         await client.close()
 
 
-# --- TCP keepalive: обнаружение молча пропавшего пира (2026-07-20) ---
-
-
 async def test_tcp_connect_enables_keepalive(tcp_server):
-    """Без этого сон/обрыв сети у пира не замечается годами (ОС-дефолт) —
-    PeerLink.alive врал бы "жив" бесконечно (живой баг, см. proto/client.py)."""
     client = ProtoClient(tcp_server.endpoint, token=TOKEN, timeout=5.0)
     await client.connect()
     try:
@@ -175,7 +160,6 @@ async def test_tcp_connect_enables_keepalive(tcp_server):
 
 
 async def test_unix_connect_does_not_touch_keepalive(tmp_path):
-    """Unix-сокеты не роняют connect() попыткой выставить TCP-опции."""
     from sa_home_bot.proto.messages import ServiceDescription, ServiceInfo
 
     class Svc:
@@ -193,7 +177,7 @@ async def test_unix_connect_does_not_touch_keepalive(tmp_path):
     await server.start()
     try:
         client = ProtoClient(sock_path, timeout=5.0)
-        await client.connect()  # не должно бросить исключение
+        await client.connect()
         try:
             assert (await client.hello()).node == "n"
         finally:

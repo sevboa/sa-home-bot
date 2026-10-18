@@ -1,5 +1,3 @@
-"""Репликация пакетов настроек: объявление правок, приём, догон, рестарт."""
-
 from __future__ import annotations
 
 from sa_home_bot.node.instances import InstanceMeta, InstanceStore, content_hash
@@ -18,8 +16,6 @@ NEWER = b'[telegram]\ntoken = "222:bbb"\n'
 
 
 class FakePeer:
-    """Сосед, отвечающий заранее заданным состоянием и пакетом."""
-
     def __init__(self, node_id: str, *, state: dict | None = None, package: bytes | None = None,
                  meta: InstanceMeta | None = None, alive: bool = True):
         self.name = node_id
@@ -76,9 +72,6 @@ def _replicator(tmp_path, *, assignments: list[str], peers=(), node="jeeves"):
     return rep, store, supervisor, events
 
 
-# --- объявление локальных правок --------------------------------------------
-
-
 async def test_local_edit_is_announced_to_the_swarm(tmp_path):
     rep, store, _, events = _replicator(tmp_path, assignments=["telegram-bot@alfred"])
     path = store.package_path("telegram-bot", "alfred")
@@ -102,9 +95,6 @@ async def test_untouched_package_is_not_announced(tmp_path):
     assert events == []
 
 
-# --- приём объявления -------------------------------------------------------
-
-
 def _changed_event(meta: InstanceMeta, src: str) -> Envelope:
     return make_event(
         EVENT_INSTANCE_CONFIG_CHANGED, meta.to_dict(), src=Address(node=src, service="node")
@@ -124,7 +114,6 @@ async def test_announced_revision_is_pulled_when_the_instance_is_ours(tmp_path):
 
 
 async def test_standby_gets_the_settings_too(tmp_path):
-    """Смысл резерва в том и состоит: он держит те же настройки, что активная."""
     meta = _meta(1, PACKAGE, node="alfred")
     peer = FakePeer("alfred", package=PACKAGE, meta=meta)
     rep, store, _, _ = _replicator(
@@ -135,7 +124,6 @@ async def test_standby_gets_the_settings_too(tmp_path):
 
 
 async def test_foreign_instance_is_not_pulled(tmp_path):
-    """Чужой бот — не наше дело: его токен нам незачем даже получать."""
     meta = _meta(3, PACKAGE, node="alfred")
     peer = FakePeer("alfred", package=PACKAGE, meta=meta)
     rep, store, _, _ = _replicator(tmp_path, assignments=["monitor"], peers=[peer])
@@ -158,12 +146,7 @@ async def test_older_announced_revision_is_not_pulled(tmp_path):
     assert store.read_package("telegram-bot", "alfred") == NEWER
 
 
-# --- догон ------------------------------------------------------------------
-
-
 async def test_catch_up_pulls_newer_revision_from_a_peer(tmp_path):
-    """Нода была выключена, когда настройки правили: событие до неё не доехало,
-    но при следующем цикле она сама спросит соседей."""
     meta = _meta(7, NEWER, node="alfred")
     peer = FakePeer(
         "alfred", state={"instances": [meta.to_dict()]}, package=NEWER, meta=meta
@@ -197,12 +180,7 @@ async def test_catch_up_does_nothing_without_instanced_assignments(tmp_path):
     assert peer.requests == []
 
 
-# --- применение к работающей службе -----------------------------------------
-
-
 async def test_updated_package_restarts_the_running_service(tmp_path):
-    """Конфиг читается один раз при старте (ARCH §9 п. 7) — иначе новые
-    настройки просто не вступят в силу."""
     meta = _meta(2, NEWER, node="alfred")
     peer = FakePeer("alfred", package=NEWER, meta=meta)
     rep, store, supervisor, _ = _replicator(
@@ -234,13 +212,10 @@ async def test_standby_is_not_restarted(tmp_path):
         restarted.append(True)
 
     slot.restart = fake_restart
-    slot._status = "running"  # даже если почему-то запущена
+    slot._status = "running"
 
     await rep.on_config_changed(_changed_event(meta, "alfred"))
     assert restarted == []
-
-
-# --- действия ноды ----------------------------------------------------------
 
 
 async def test_node_serves_the_package_to_a_peer(tmp_path):
@@ -279,14 +254,10 @@ async def _noop(event_type: str, data: dict) -> None:
     return None
 
 
-# --- сателлиты (гостевой пакет, AUTHORIZATION.md §10) -----------------------
-
 GUESTS = '[[guest_subscriptions]]\nname = "гость"\nchat_id = 77\n'.encode()
 
 
 async def test_satellite_of_our_instance_is_pulled(tmp_path):
-    """Гостевой пакет принадлежит тому же инстансу — резерв обязан получить и
-    его, иначе после переезда бота гости просто исчезнут."""
     meta = InstanceMeta(
         service="telegram-bot",
         instance="alfred.guests",
@@ -305,9 +276,6 @@ async def test_satellite_of_our_instance_is_pulled(tmp_path):
 
 
 async def test_local_guest_edit_does_not_restart_the_bot(tmp_path):
-    """Гостевой пакет пишет сам бот и своё изменение уже держит в памяти:
-    рестарт ничего бы не дал, зато оборвал бы разговор ровно в тот момент,
-    когда гостя только что впустили."""
     rep, store, supervisor, events = _replicator(
         tmp_path, assignments=["telegram-bot@alfred"]
     )
@@ -325,13 +293,10 @@ async def test_local_guest_edit_does_not_restart_the_bot(tmp_path):
 
     await rep.announce_local_changes()
     assert restarted == []
-    # Но рою правка всё равно объявлена — резерву она нужна.
     assert [e[0] for e in events] == [EVENT_INSTANCE_CONFIG_CHANGED]
 
 
 async def test_incoming_guest_package_restarts_the_owner_slot(tmp_path):
-    """У сателлита своего слота нет: перезапускать надо хозяина — иначе
-    прилетевший от соседа состав гостей не вступит в силу."""
     meta = InstanceMeta(
         service="telegram-bot",
         instance="alfred.guests",

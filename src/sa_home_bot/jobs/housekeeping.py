@@ -1,5 +1,3 @@
-"""HousekeepingJob — ночная уборка: подрезать историю job_runs."""
-
 from __future__ import annotations
 
 from sa_home_bot.jobs.base import JobContext, JobResult
@@ -7,12 +5,8 @@ from sa_home_bot.jobs.base import JobContext, JobResult
 DEDUP_KEY = "housekeeping"
 JOB_TYPE = "housekeeping"
 KEEP_LAST_RUNS = 500
-# Потолок истории показаний на компонент (с запасом над типичным baseline_window).
 KEEP_READINGS_PER_COMPONENT = 5000
-# Потолок host-истории на метрику: ~10 суток при scan */1 — хватает поймать
-# «steal подрос за неделю» (monitor.host_trend).
 KEEP_HOST_READINGS_PER_METRIC = 15000
-# Потолок журнала событий роя (db/schema.sql::swarm_events, bot/node_events.py).
 KEEP_LAST_SWARM_EVENTS = 500
 
 

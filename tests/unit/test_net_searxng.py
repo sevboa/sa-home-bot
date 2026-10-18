@@ -1,6 +1,3 @@
-"""Клиент локального SearXNG: сборка URL, срез результатов, обработка сбоев.
-Реальный HTTP не идёт — подменяется _get_json_sync (как в test_llm_ollama)."""
-
 from __future__ import annotations
 
 import urllib.error
@@ -41,8 +38,6 @@ async def test_search_returns_narrow_slice(monkeypatch):
 
 
 async def test_search_requests_json_format_explicitly(monkeypatch):
-    """format=json в settings.yml выключен по умолчанию — если его не
-    попросить явно, вернётся HTML (главная ловушка §9 плана)."""
     calls = []
     monkeypatch.setattr(searxng, "_get_json_sync", _fake(_PAYLOAD, calls))
     await searxng.search(BASE, "что-то", limit=1, timeout=5)
@@ -64,7 +59,7 @@ async def test_search_trims_long_snippets(monkeypatch):
     payload = {"results": [{"title": "T", "url": "u", "content": long_text}]}
     monkeypatch.setattr(searxng, "_get_json_sync", _fake(payload))
     results = await searxng.search(BASE, "q", limit=1, timeout=5)
-    assert len(results[0]["snippet"]) <= searxng.SNIPPET_LIMIT + 1  # +1 на «…»
+    assert len(results[0]["snippet"]) <= searxng.SNIPPET_LIMIT + 1
     assert results[0]["snippet"].endswith("…")
 
 
@@ -80,7 +75,6 @@ async def test_search_network_error_becomes_searxng_error(monkeypatch):
 
 
 async def test_search_html_instead_of_json_becomes_searxng_error(monkeypatch):
-    """format=json не включили в settings.yml — json.loads падает на ValueError."""
     monkeypatch.setattr(searxng, "_get_json_sync", _fake(ValueError("не JSON")))
     with pytest.raises(searxng.SearxngError):
         await searxng.search(BASE, "q", limit=5, timeout=5)
