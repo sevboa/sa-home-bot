@@ -18,6 +18,7 @@ from sa_home_bot.bot.away import KIND_SUMMON, KIND_TEXT, AwayService
 from sa_home_bot.bot.interactives.engine import Interactives
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.pending_actions import PendingActions
+from sa_home_bot.bot.rich_stream import RichStreamSession
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import Settings
@@ -118,18 +119,23 @@ class GroupMention(Filter):
         return False
 
 
-def _services(
+async def _ask_and_reply(
+    message: Message,
     node_link: ServiceLink,
     store: Store,
     config: Settings,
     book: SubscriptionBook,
     notifier: Notifier,
+    dialogue_id: int,
+    history: list[dict[str, Any]],
     active_ai_chats: ai_flow.ActiveAiChats,
     tool_calls: ToolCalls,
-    pending_actions: PendingActions | None,
-    interactives: Interactives | None,
-) -> TurnServices:
-    return TurnServices(
+    rich_session: RichStreamSession | None,
+    *,
+    pending_actions: PendingActions | None = None,
+    interactives: Interactives | None = None,
+) -> str | None:
+    services = TurnServices(
         node_link=node_link,
         store=store,
         config=config,
@@ -140,6 +146,15 @@ def _services(
         pending_actions=pending_actions,
         interactives=interactives,
     )
+    return await ask_and_reply(message, services, dialogue_id, history, rich_session)
+
+
+_rich_session_for = rich_session_for
+_dialogue_id_for = dialogue_id_of
+_handle_photo_message = ai_turns.photo_history
+_handle_sticker_message = ai_turns.sticker_history
+PHOTO_MARKER = ai_turns.PHOTO_MARKER
+STICKER_MARKER = ai_turns.STICKER_MARKER
 
 
 @router.message(Command(commands.ALFRED.name, commands.AI.name))
@@ -180,18 +195,21 @@ async def cmd_ai(
     if not prompt:
         _greeting_portrait(message, interactives)
 
-    services = _services(
+    await _ask_and_reply(
+        message,
         node_link,
         store,
         config,
         book,
         notifier,
+        dialogue_id,
+        history,
         active_ai_chats,
         tool_calls,
-        pending_actions,
-        interactives,
+        rich_session_for(message, config),
+        pending_actions=pending_actions,
+        interactives=interactives,
     )
-    await ask_and_reply(message, services, dialogue_id, history, rich_session_for(message, config))
 
 
 @router.message(AiReplyContinuation())
@@ -241,18 +259,21 @@ async def on_ai_reply(
             store, config, message, ai_dialogue_id, ai_turns.EMPTY_REPLY_PROMPT
         )
 
-    services = _services(
+    await _ask_and_reply(
+        message,
         node_link,
         store,
         config,
         book,
         notifier,
+        ai_dialogue_id,
+        history,
         active_ai_chats,
         tool_calls,
-        pending_actions,
-        interactives,
+        rich_session,
+        pending_actions=pending_actions,
+        interactives=interactives,
     )
-    await ask_and_reply(message, services, ai_dialogue_id, history, rich_session)
 
 
 @catchall_router.message(PrivateChatText())
@@ -279,18 +300,21 @@ async def on_private_message(
     ):
         return
     history = await ai_turns.record_text_turn(store, config, message, dialogue_id, text)
-    services = _services(
+    await _ask_and_reply(
+        message,
         node_link,
         store,
         config,
         book,
         notifier,
+        dialogue_id,
+        history,
         active_ai_chats,
         tool_calls,
-        pending_actions,
-        interactives,
+        rich_session_for(message, config),
+        pending_actions=pending_actions,
+        interactives=interactives,
     )
-    await ask_and_reply(message, services, dialogue_id, history, rich_session_for(message, config))
 
 
 @catchall_router.message(PrivateChatPhoto())
@@ -318,18 +342,21 @@ async def on_private_photo(
     if history is None:
         await message.answer(ai_turns.PHOTO_TOO_LARGE_TEXT)
         return
-    services = _services(
+    await _ask_and_reply(
+        message,
         node_link,
         store,
         config,
         book,
         notifier,
+        dialogue_id,
+        history,
         active_ai_chats,
         tool_calls,
-        pending_actions,
-        interactives,
+        rich_session,
+        pending_actions=pending_actions,
+        interactives=interactives,
     )
-    await ask_and_reply(message, services, dialogue_id, history, rich_session)
 
 
 @catchall_router.message(PrivateChatVoice())
@@ -358,18 +385,21 @@ async def on_private_voice(
     )
     if history is None:
         return
-    services = _services(
+    await _ask_and_reply(
+        message,
         node_link,
         store,
         config,
         book,
         notifier,
+        dialogue_id,
+        history,
         active_ai_chats,
         tool_calls,
-        pending_actions,
-        interactives,
+        rich_session,
+        pending_actions=pending_actions,
+        interactives=interactives,
     )
-    await ask_and_reply(message, services, dialogue_id, history, rich_session)
 
 
 @catchall_router.message(PrivateChatSticker())
@@ -394,18 +424,21 @@ async def on_private_sticker(
         return
     rich_session = rich_session_for(message, config)
     history = await ai_turns.sticker_history(message, store, config, dialogue_id, rich_session)
-    services = _services(
+    await _ask_and_reply(
+        message,
         node_link,
         store,
         config,
         book,
         notifier,
+        dialogue_id,
+        history,
         active_ai_chats,
         tool_calls,
-        pending_actions,
-        interactives,
+        rich_session,
+        pending_actions=pending_actions,
+        interactives=interactives,
     )
-    await ask_and_reply(message, services, dialogue_id, history, rich_session)
 
 
 @catchall_router.message(PrivateChatOtherMedia())
@@ -453,18 +486,21 @@ async def on_group_mention(
         history = [{"role": "user", "content": ai_turns.OPENING_PROMPT}]
         _greeting_portrait(message, interactives)
 
-    services = _services(
+    await _ask_and_reply(
+        message,
         node_link,
         store,
         config,
         book,
         notifier,
+        dialogue_id,
+        history,
         active_ai_chats,
         tool_calls,
-        pending_actions,
-        interactives,
+        rich_session_for(message, config),
+        pending_actions=pending_actions,
+        interactives=interactives,
     )
-    await ask_and_reply(message, services, dialogue_id, history, rich_session_for(message, config))
 
 
 async def start_dialogue(
@@ -485,21 +521,18 @@ async def start_dialogue(
     if away is not None and await away.intercept(message, kind=KIND_SUMMON):
         return None
     _greeting_portrait(message, interactives)
-    services = _services(
+    return await _ask_and_reply(
+        message,
         node_link,
         store,
         config,
         book,
         notifier,
-        active_ai_chats,
-        tool_calls,
-        pending_actions,
-        interactives,
-    )
-    return await ask_and_reply(
-        message,
-        services,
         dialogue_id_of(message),
         [{"role": "user", "content": prompt}],
+        active_ai_chats,
+        tool_calls,
         rich_session_for(message, config),
+        pending_actions=pending_actions,
+        interactives=interactives,
     )
