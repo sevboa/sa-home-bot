@@ -70,6 +70,9 @@ POST не вынесен: единственный потребитель `llm/o
 - `zone_or_none(name) -> ZoneInfo | None` — `None` для пустого имени, неизвестного ключа и `ValueError`. Заменяет `bot/handlers/away.py::_owner_tz` (там ловился только `ZoneInfoNotFoundError`; расширение до `ValueError` — только для заведомо мусорных ключей), `bot/tools.py::_local_zone`, `bot/ai_flow.py` (строка с `datetime.now(ZoneInfo(tz))`).
 - НЕ унифицированы по выводу: `_human_downtime` (`bot/node_events.py`), `_format_hours_diff` (`bot/tools.py`), `format_remaining` (`bot/away.py`) — три разные формы «ч/мин» с разными краевыми случаями (0 минут, 0 часов); `domain/render._fmt_uptime_short`; размеры (`_fmt_gb` и др.). Это персонажные/пользовательские тексты — зона оставляет их у себя, максимум берёт `ceil_div`/`split_dhms` внутри.
 
+## utils/peer_path.py
+`format_peer_path(peer)` - хвост строки пира (задержка, потери, ретранслятор) из записи `get_state()["peers"]`; пустая строка, если полей нет. Потребитель: `nodectl.py::_render_peer`.
+
 ## utils/plural.py
 `plural_ru(count, one, few, many)`. Проверено табличной эквивалентностью с четырьмя прежними реализациями на n = −100..1000. Заменяет `bot/vpn_notify.py::_plural`, `bot/handlers/invites.py::_plural`, `bot/interactives/underground.py::_cells_ru` (`f"{n} {plural_ru(n, 'клетка', 'клетки', 'клеток')}"`).
 
