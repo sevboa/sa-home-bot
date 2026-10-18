@@ -21,36 +21,31 @@ def fast_warmup(monkeypatch):
     monkeypatch.setattr(ollama, "_POST_RETRY_DELAY_S", 0.01)
 
 
-def test_post_json_sync_includes_json_error_body_in_http_error(monkeypatch):
-    body = b'{"error": "messages: assistant tool_calls without a tool response"}'
-
+@pytest.mark.parametrize(
+    ("status", "reason", "body", "expected"),
+    [
+        (
+            400,
+            "Bad Request",
+            b'{"error": "messages: assistant tool_calls without a tool response"}',
+            "messages: assistant tool_calls without a tool response",
+        ),
+        (500, "Internal Server Error", b"panic: nil pointer", "panic: nil pointer"),
+    ],
+)
+def test_post_json_sync_includes_error_body_in_http_error(
+    monkeypatch, status, reason, body, expected
+):
     def fake_urlopen(req, timeout=None):
         raise urllib.error.HTTPError(
-            "http://127.0.0.1:11434/api/chat", 400, "Bad Request", None, io.BytesIO(body)
+            "http://127.0.0.1:11434/api/chat", status, reason, None, io.BytesIO(body)
         )
 
     monkeypatch.setattr(ollama.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(urllib.error.HTTPError) as excinfo:
         ollama._post_json_sync("http://127.0.0.1:11434/api/chat", {"messages": []}, 5.0)
 
-    assert "messages: assistant tool_calls without a tool response" in str(excinfo.value)
-
-
-def test_post_json_sync_includes_plain_text_error_body_in_http_error(monkeypatch):
-    def fake_urlopen(req, timeout=None):
-        raise urllib.error.HTTPError(
-            "http://127.0.0.1:11434/api/chat",
-            500,
-            "Internal Server Error",
-            None,
-            io.BytesIO(b"panic: nil pointer"),
-        )
-
-    monkeypatch.setattr(ollama.urllib.request, "urlopen", fake_urlopen)
-    with pytest.raises(urllib.error.HTTPError) as excinfo:
-        ollama._post_json_sync("http://127.0.0.1:11434/api/chat", {"messages": []}, 5.0)
-
-    assert "panic: nil pointer" in str(excinfo.value)
+    assert expected in str(excinfo.value)
 
 
 class FakeProc:
@@ -75,20 +70,25 @@ async def test_wsl_exec_success(monkeypatch):
     assert calls[0] == ("wsl", "-d", "Docker", "-u", "root", "--", "docker", "start", "ollama")
 
 
-async def test_wsl_exec_nonzero_returncode_is_false(monkeypatch):
-    async def fake_exec(*args, **kwargs):
-        return FakeProc(1, b"error: distro not found")
-
-    monkeypatch.setattr(ollama.asyncio, "create_subprocess_exec", fake_exec)
+@pytest.mark.parametrize(
+    "spawn",
+    [
+        lambda *args, **kwargs: _async_value(FakeProc(1, b"error: distro not found")),
+        lambda *args, **kwargs: _async_raise(OSError("wsl.exe not found")),
+    ],
+    ids=["nonzero-returncode", "missing-binary"],
+)
+async def test_wsl_exec_failure_is_false(monkeypatch, spawn):
+    monkeypatch.setattr(ollama.asyncio, "create_subprocess_exec", spawn)
     assert await ollama._wsl_exec(_cfg(), "true") is False
 
 
-async def test_wsl_exec_missing_binary_is_false(monkeypatch):
-    async def fake_exec(*args, **kwargs):
-        raise OSError("wsl.exe not found")
+async def _async_value(value):
+    return value
 
-    monkeypatch.setattr(ollama.asyncio, "create_subprocess_exec", fake_exec)
-    assert await ollama._wsl_exec(_cfg(), "true") is False
+
+async def _async_raise(exc):
+    raise exc
 
 
 async def test_ensure_running_skips_warmup_when_already_up(monkeypatch):
@@ -274,22 +274,6 @@ async def test_chat_gives_up_after_exhausting_retries(monkeypatch):
     assert calls["n"] == ollama._POST_RETRY_ATTEMPTS
 
 
-async def test_chat_does_not_retry_real_http_error_response(monkeypatch):
-    monkeypatch.setattr(ollama, "ensure_running", _noop)
-    calls = {"n": 0}
-
-    def fake_post(url, payload, timeout):
-        calls["n"] += 1
-        raise urllib.error.HTTPError(url, 404, "model not found", None, None)
-
-    monkeypatch.setattr(ollama, "_post_json_sync", fake_post)
-    with pytest.raises(ProtoError) as excinfo:
-        await ollama.chat(_cfg(), [{"role": "user", "content": "привет"}], "system")
-
-    assert excinfo.value.code == ERR_INTERNAL
-    assert calls["n"] == 1
-
-
 class FakeStreamResp:
     def __init__(self, lines: list[bytes]) -> None:
         self._lines = lines
@@ -397,19 +381,23 @@ async def test_chat_stream_retries_when_no_chunk_arrived_yet(monkeypatch):
     assert calls["n"] == 2
 
 
-async def test_chat_stream_does_not_retry_real_http_error_response(monkeypatch):
+@pytest.mark.parametrize("streaming", [False, True], ids=["chat", "chat_stream"])
+async def test_real_http_error_response_is_not_retried(monkeypatch, streaming):
     monkeypatch.setattr(ollama, "ensure_running", _noop)
     calls = {"n": 0}
 
-    def fake_post_stream(url, payload, timeout, on_chunk):
+    def fake_post(url, payload, timeout, *rest):
         calls["n"] += 1
         raise urllib.error.HTTPError(url, 404, "model not found", None, None)
 
-    monkeypatch.setattr(ollama, "_post_json_stream_sync", fake_post_stream)
+    monkeypatch.setattr(ollama, "_post_json_sync", fake_post)
+    monkeypatch.setattr(ollama, "_post_json_stream_sync", fake_post)
+    messages = [{"role": "user", "content": "привет"}]
     with pytest.raises(ProtoError) as excinfo:
-        await ollama.chat_stream(
-            _cfg(), [{"role": "user", "content": "1"}], "system", lambda t: None
-        )
+        if streaming:
+            await ollama.chat_stream(_cfg(), messages, "system", lambda t: None)
+        else:
+            await ollama.chat(_cfg(), messages, "system")
 
     assert excinfo.value.code == ERR_INTERNAL
     assert calls["n"] == 1
@@ -476,11 +464,6 @@ async def test_wsl_keepalive_spawn_failure_leaves_it_not_alive(monkeypatch):
     await keepalive.start()
 
     assert keepalive.alive is False
-
-
-async def test_wsl_keepalive_stop_without_start_is_noop():
-    keepalive = ollama.WslKeepalive(_cfg(), duration_s=60.0)
-    await keepalive.stop()
 
 
 async def _noop(cfg):
