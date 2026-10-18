@@ -1110,10 +1110,10 @@ def test_amnezia_key_from_real_client_conf_and_errors():
     import pytest as _pytest
 
     from sa_home_bot.vpn import amnezia_key as ak
-    from sa_home_bot.vpn.service import _render_client_conf
+    from sa_home_bot.vpn.awg_conf import render as render_client_conf
 
     cfg = _cfg("203.0.113.7", "x")
-    conf = _render_client_conf(cfg, "PRIV", "10.9.0.4", "SRVPUB")
+    conf = render_client_conf(cfg, "PRIV", "10.9.0.4", "SRVPUB")
     parsed = ak.decode_key(ak.build_key(conf, "n"))
     import json
 

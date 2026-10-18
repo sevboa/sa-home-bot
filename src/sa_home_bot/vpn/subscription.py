@@ -807,9 +807,3 @@ def render_page(
             )
         )
     return _layout(title, body, script)
-
-
-def qr_data_uri(text: str) -> str:
-    import segno
-
-    return segno.make(text, error="m").svg_data_uri(scale=6, border=2)

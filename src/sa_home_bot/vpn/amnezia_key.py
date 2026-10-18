@@ -18,14 +18,11 @@ import json
 import re
 import zlib
 
+from sa_home_bot.vpn import awg_conf
+
 PREFIX = "vpn://"
 CONTAINER = "amnezia-awg"
 PROTOCOL = "awg"
-# Параметры AWG, которые клиент переносит из [Interface] как есть (configKey::awgProtocolKeys).
-AWG_KEYS = (
-    "Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4",
-    "H1", "H2", "H3", "H4", "I1", "I2", "I3", "I4", "I5",
-)  # fmt: skip
 _DEFAULT_PORT = 51820
 _AWG_MTU = "1280"  # protocols::awg::defaultMtu на Android/iOS; клиент всё равно подставляет своё
 _IPV4 = re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b")
@@ -33,19 +30,6 @@ _IPV4 = re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b")
 
 class ConfigError(ValueError):
     """Конфиг без обязательных полей (Endpoint, PrivateKey, Address, PublicKey)."""
-
-
-def _parse_conf(text: str) -> dict[str, str]:
-    """Как клиент: строки ``ключ = значение``, заголовки секций пропускаются."""
-    out: dict[str, str] = {}
-    for line in text.split("\n"):
-        line = line.strip()
-        if line.startswith("[") and line.endswith("]"):
-            continue
-        idx = line.find("=")
-        if idx > 0:
-            out[line[:idx].strip()] = line[idx + 1 :].strip()
-    return out
 
 
 def _split_endpoint(value: str) -> tuple[str, int]:
@@ -57,7 +41,7 @@ def _split_endpoint(value: str) -> tuple[str, int]:
 
 def build_config(conf_text: str, name: str) -> dict:
     """JSON-конфиг сервера AmneziaVPN для импорта (до сжатия)."""
-    conf = _parse_conf(conf_text)
+    conf = awg_conf.parse(conf_text)
     host, port = _split_endpoint(conf.get("Endpoint", ""))
     if not host or not all(conf.get(k) for k in ("PrivateKey", "Address", "PublicKey")):
         raise ConfigError("в конфиге AmneziaWG нет Endpoint/PrivateKey/Address/PublicKey")
@@ -75,7 +59,7 @@ def build_config(conf_text: str, name: str) -> dict:
     if conf.get("PersistentKeepalive"):
         last["persistent_keep_alive"] = conf["PersistentKeepalive"]
     last["allowed_ips"] = [p for p in re.split(r"\s*,\s*", conf.get("AllowedIPs", "")) if p]
-    for key in AWG_KEYS:
+    for key in awg_conf.AWG_KEYS:
         if conf.get(key):
             last[key] = conf[key]
     last["mtu"] = conf.get("MTU") or _AWG_MTU

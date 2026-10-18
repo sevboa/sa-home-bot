@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import parse_qs, quote, urlsplit
 
 from sa_home_bot.reality.routing import (
@@ -43,6 +44,17 @@ class RealityParams:
     short_id: str
     sni: str
     flow: str = DEFAULT_FLOW
+
+    @classmethod
+    def from_config(cls, cfg: Any) -> RealityParams:
+        return cls(
+            endpoint_host=cfg.endpoint_host,
+            port=cfg.port,
+            server_public_key=cfg.server_public_key,
+            short_id=cfg.short_id,
+            sni=cfg.sni,
+            flow=cfg.flow,
+        )
 
 
 def _remote_ruleset(tag: str) -> dict:

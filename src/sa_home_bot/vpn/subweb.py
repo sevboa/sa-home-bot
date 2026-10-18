@@ -35,7 +35,7 @@ from urllib.parse import urlsplit
 from aiohttp import web
 
 from sa_home_bot.config import VpnConfig
-from sa_home_bot.vpn import amnezia_key
+from sa_home_bot.vpn import amnezia_key, qr
 from sa_home_bot.vpn import protocol as vpn_protocol
 from sa_home_bot.vpn import subscription as sub
 
@@ -336,7 +336,7 @@ class SubscriptionWeb:
         body = sub.render_page(
             found,
             sub_url=self.sub_url(token),
-            qr_data_uri=sub.qr_data_uri(self.sub_url(token)),
+            qr_data_uri=qr.svg_data_uri(self.sub_url(token)),
             links=self._links,
             status=status,
             awg_forms=forms,
@@ -424,7 +424,7 @@ class SubscriptionWeb:
                 "key": key,
                 "conf": conf,
                 "filename": filename,
-                "qr": sub.qr_data_uri(conf),
+                "qr": qr.svg_data_uri(conf),
                 "nonce": nxt,
             }
         )

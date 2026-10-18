@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import io
 import ipaddress
 import logging
 import random
@@ -84,6 +83,7 @@ from sa_home_bot.reality.client_config import (
 from sa_home_bot.reality.xray import XrayBackend
 from sa_home_bot.utils.clock import utc_now
 from sa_home_bot.vpn import apk as apk_client
+from sa_home_bot.vpn import awg_conf, qr
 from sa_home_bot.vpn import subscription as subs
 from sa_home_bot.vpn.awg import AwgBackend
 from sa_home_bot.vpn.protocol import (
@@ -207,47 +207,12 @@ def _allocate_address(subnet: str, used: set[str]) -> str:
     raise ProtoError(ERR_BAD_REQUEST, "подсеть VPN исчерпана — нет свободных адресов")
 
 
-def _render_client_conf(cfg: Any, private_key: str, address: str, server_public_key: str) -> str:
-    endpoint = f"{cfg.endpoint_host}:{cfg.endpoint_port}"
-    return (
-        "[Interface]\n"
-        f"PrivateKey = {private_key}\n"
-        f"Address = {address}/32\n"
-        f"DNS = {cfg.dns}\n"
-        f"MTU = {cfg.mtu}\n"
-        f"Jc = {cfg.jc}\n"
-        f"Jmin = {cfg.jmin}\n"
-        f"Jmax = {cfg.jmax}\n"
-        f"S1 = {cfg.s1}\n"
-        f"S2 = {cfg.s2}\n"
-        f"H1 = {cfg.h1}\n"
-        f"H2 = {cfg.h2}\n"
-        f"H3 = {cfg.h3}\n"
-        f"H4 = {cfg.h4}\n"
-        "\n"
-        "[Peer]\n"
-        f"PublicKey = {server_public_key}\n"
-        f"Endpoint = {endpoint}\n"
-        "AllowedIPs = 0.0.0.0/0\n"
-        "PersistentKeepalive = 25\n"
-    )
-
-
 def _reality_email(chat_id: int, device_label: str) -> str:
     """email клиента xray — человекочитаемый ярлык для ``statsquery`` на
     сервере, уникальный среди активных (у чата не бывает двух активных
     устройств с одним именем). Для reality-пиров хранится в
     ``vpn_peers.address`` (у awg-пиров там IP подсети)."""
     return f"c{chat_id}-{device_label}"
-
-
-def _render_qr_png_b64(text: str) -> str:
-    import segno
-
-    qr = segno.make(text, error="m")
-    buf = io.BytesIO()
-    qr.save(buf, kind="png", scale=4, border=2)
-    return base64.b64encode(buf.getvalue()).decode()
 
 
 class VpnService:
@@ -1096,17 +1061,18 @@ class VpnService:
         # vless://-ссылка — только быстрый импорт/QR. self._reality_cfg
         # (RealityTransportConfig) несёт поля с теми же именами, что
         # client_config.RealityParams — render_* берут его по duck-typing.
-        config_text = render_singbox_config(self._reality_cfg, client_uuid)
+        params = self._reality_params()
+        config_text = render_singbox_config(params, client_uuid)
         # Имя профиля в Hiddify — то, что видит гость в списке подключений.
         # Со страной, иначе два сервера в списке не отличить друг от друга.
         flag = country_flag(self._cfg.location)
         profile_label = f"{flag} {device_label}" if flag else device_label
-        share_url = render_vless_url(self._reality_cfg, client_uuid, profile_label)
+        share_url = render_vless_url(params, client_uuid, profile_label)
         return {
             "config_text": config_text,
             "share_url": share_url,
             "deep_link": render_deep_link(share_url),
-            "qr_png_b64": _render_qr_png_b64(share_url),
+            "qr_png_b64": qr.png_b64(share_url),
         }
 
     async def _issue_locked(
@@ -1133,10 +1099,10 @@ class VpnService:
             )
             await self._db.conn.commit()
             await self._backend.add_peer(public_key, address)
-            conf = _render_client_conf(self._cfg, private_key, address, server_pub)
+            conf = awg_conf.render(self._cfg, private_key, address, server_pub)
             artifacts: dict[str, Any] = {
                 "config_text": conf,
-                "qr_png_b64": _render_qr_png_b64(conf),
+                "qr_png_b64": qr.png_b64(conf),
                 "address": address,
             }
         else:  # TRANSPORT_REALITY
@@ -1270,15 +1236,7 @@ class VpnService:
 
     def _reality_params(self) -> RealityParams:
         assert self._reality_cfg is not None
-        cfg = self._reality_cfg
-        return RealityParams(
-            endpoint_host=cfg.endpoint_host,
-            port=cfg.port,
-            server_public_key=cfg.server_public_key,
-            short_id=cfg.short_id,
-            sni=cfg.sni,
-            flow=cfg.flow,
-        )
+        return RealityParams.from_config(self._reality_cfg)
 
     def _sub_entry_name(self) -> str:
         return self._cfg.location or self._node_id
@@ -1924,7 +1882,7 @@ class VpnService:
         return {
             "tg_link": tg_link,
             "t_me_link": f"https://t.me/proxy?{query}",
-            "qr_png_b64": _render_qr_png_b64(tg_link),
+            "qr_png_b64": qr.png_b64(tg_link),
             "host": self._cfg.mtg_public_host,
             "port": self._cfg.mtg_port,
             "secret": secret,
