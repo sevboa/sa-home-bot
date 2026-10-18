@@ -4,8 +4,6 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 
-import pytest_asyncio
-
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.interactives import cabinet, photo_text, places
 from sa_home_bot.bot.interactives.cabinet import Cabinet
@@ -14,26 +12,11 @@ from sa_home_bot.bot.interactives.photo_text import photo_description
 from sa_home_bot.bot.interactives.places import Room
 from sa_home_bot.bot.interactives.transylvania import Outside, Transylvania
 from sa_home_bot.config import LlmConfig, Settings
-from sa_home_bot.db.connection import Database
-from sa_home_bot.db.migrations import apply_migrations
-from sa_home_bot.db.store import Store
+from tests.unit.interactives_kit import clear_sky
 
 CANARY = 901
 GUEST = 902
 NOW = datetime(2026, 10, 10, 12, 0, tzinfo=UTC)
-
-
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    db = Database(tmp_path / "test.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
-
-
-async def _clear() -> int:
-    return 0
 
 
 class _Link:
@@ -50,7 +33,7 @@ def _make(store, *, canary=(CANARY,), now=NOW, rng=lambda: 0.99):
         now=lambda: now,
         choose=lambda options: options[0],
         rng=rng,
-        transylvania=Transylvania(fetch=_clear),
+        transylvania=Transylvania(fetch=clear_sky),
     )
 
 

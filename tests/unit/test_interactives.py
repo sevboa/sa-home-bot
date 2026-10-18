@@ -5,7 +5,6 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
-import pytest_asyncio
 
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.interactives import keyboards, radio, registry
@@ -25,10 +24,8 @@ from sa_home_bot.bot.interactives.scene import apply_decision
 from sa_home_bot.bot.interactives.transylvania import Transylvania
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.config import LlmConfig, Settings
-from sa_home_bot.db.connection import Database
-from sa_home_bot.db.migrations import apply_migrations
-from sa_home_bot.db.store import Store
 from sa_home_bot.tasks import protocol as task_protocol
+from tests.unit.support.fakes import Clock, FakeNotifier
 
 PROD_RADIO = radio.RADIO
 FAST_RADIO = dataclasses.replace(
@@ -62,31 +59,6 @@ PINNED = 503
 COMPLAINT = "Альфред, ты картавишь!"
 
 
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    db = Database(tmp_path / "test.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
-
-
-class FakeNotifier:
-    def __init__(self) -> None:
-        self.sent: list[tuple[int, str, object]] = []
-        self._next = 1000
-
-    async def send_direct(
-        self, chat_id, text, reply_to_message_id=None, reply_markup=None, message_thread_id=None
-    ):
-        self._next += 1
-        self.sent.append((chat_id, text, reply_markup))
-        return self._next
-
-    def texts(self, chat_id: int) -> list[str]:
-        return [text for chat, text, _ in self.sent if chat == chat_id]
-
-
 class FakeNodeLink:
     def __init__(self) -> None:
         self.director_replies: list[str] = []
@@ -117,20 +89,18 @@ def _director(**fields) -> str:
     return json.dumps(data, ensure_ascii=False)
 
 
-class Clock:
-    def __init__(self) -> None:
-        self.now = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
-
-    def __call__(self) -> datetime:
-        return self.now
-
-
 async def _rainy() -> int:
     return 61
 
 
+class TextOnlyNotifier(FakeNotifier):
+    @property
+    def send_photo_ex(self):
+        raise AttributeError("send_photo_ex")
+
+
 def _make(store, *, clock=None):
-    notifier = FakeNotifier()
+    notifier = TextOnlyNotifier()
     link = FakeNodeLink()
     settings = Settings(llm=LlmConfig(model="m", speech_therapy_pinned_chat_ids=[PINNED]))
     svc = Interactives(
@@ -138,7 +108,7 @@ def _make(store, *, clock=None):
         notifier,
         settings,
         lambda: link,
-        now=clock or Clock(),
+        now=clock or Clock(datetime(2026, 9, 27, 12, 0, tzinfo=UTC)),
         choose=lambda options: options[0],
         transylvania=Transylvania(fetch=_rainy),
     )
@@ -170,7 +140,7 @@ async def _play(svc, store):
 async def test_offer_form_does_not_reveal_a_game(store):
     svc, notifier, _ = _make(store)
     await _turn(svc, COMPLAINT)
-    _, text, markup = notifier.sent[-1]
+    _, text, markup = notifier.sent_with_markup[-1]
     labels = [b.text for row in markup.inline_keyboard for b in row]
     assert labels == ["Да", "Нет"]
     for word in ("сценк", "игр", "Ведущ"):
@@ -223,7 +193,7 @@ async def test_yes_makes_alfred_react_with_conversation_context(store):
 async def test_yes_reply_goes_to_the_forms_thread_and_dialogue(store):
     svc, notifier, link = _make(store)
     await _turn(svc, COMPLAINT)
-    form_id = notifier._next
+    form_id = 1000 + len(notifier.sent)
     await svc.handle_click(
         GUEST, GUEST, "radio", keyboards.BTN_PLAY, message_id=form_id, message_thread_id=42
     )
@@ -328,7 +298,7 @@ def test_closing_line_after_swap_does_not_announce_the_change():
 
 
 async def test_later_gives_cooldown_then_offers_again(store):
-    clock = Clock()
+    clock = Clock(datetime(2026, 9, 27, 12, 0, tzinfo=UTC))
     svc, notifier, _ = _make(store, clock=clock)
     await _turn(svc, COMPLAINT)
     await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_LATER)
@@ -341,7 +311,7 @@ async def test_later_gives_cooldown_then_offers_again(store):
 
 
 async def test_no_is_only_a_pause_not_an_opt_out(store):
-    clock = Clock()
+    clock = Clock(datetime(2026, 9, 27, 12, 0, tzinfo=UTC))
     svc, notifier, _ = _make(store, clock=clock)
     await _turn(svc, COMPLAINT)
     answer, text, _ = await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_NEVER)
@@ -355,7 +325,7 @@ async def test_no_is_only_a_pause_not_an_opt_out(store):
 
 
 async def test_offer_expires_after_ttl(store):
-    clock = Clock()
+    clock = Clock(datetime(2026, 9, 27, 12, 0, tzinfo=UTC))
     svc, _, _ = _make(store, clock=clock)
     await _turn(svc, COMPLAINT)
     clock.now += timedelta(hours=2)
@@ -413,10 +383,10 @@ async def test_nothing_the_guest_sees_has_emoji_or_game_words(store):
     svc, notifier, link = _make(store)
     await _reach_finale(svc, store, link)
     await _turn(svc, "что там?")
-    texts = [text for _, text, _ in notifier.sent]
+    texts = [text for _, text, _ in notifier.sent_with_markup]
     labels = [
         b.text
-        for _, _, markup in notifier.sent
+        for _, _, markup in notifier.sent_with_markup
         if markup
         for row in markup.inline_keyboard
         for b in row

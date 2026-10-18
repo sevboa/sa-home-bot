@@ -1,13 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import io
 import json
-from datetime import UTC, datetime, timedelta
-
-import pytest_asyncio
-from PIL import Image
+from datetime import timedelta
 
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.handlers.interactives import cmd_interactives
@@ -21,128 +16,16 @@ from sa_home_bot.bot.interactives.base import (
     Run,
 )
 from sa_home_bot.bot.interactives.catacombs import CatacombsState, Maze, Node, Passage
-from sa_home_bot.bot.interactives.engine import Interactives
-from sa_home_bot.bot.interactives.transylvania import Transylvania
 from sa_home_bot.config import LlmConfig, Settings
-from sa_home_bot.db.connection import Database
-from sa_home_bot.db.migrations import apply_migrations
-from sa_home_bot.db.store import Store
 from sa_home_bot.subscriptions.models import Subscription
-
-CANARY = 1101
-GUEST = 1102
-
-
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    db = Database(tmp_path / "test.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
-
-
-def _png() -> bytes:
-    buf = io.BytesIO()
-    Image.new("RGB", (8, 8), "brown").save(buf, format="PNG")
-    return buf.getvalue()
-
-
-class FakeNotifier:
-    def __init__(self) -> None:
-        self.sent: list[tuple[int, str]] = []
-        self.photos: list[tuple[int, object, str | None]] = []
-
-    async def send_direct(self, chat_id, text, reply_markup=None, **_kw):
-        self.sent.append((chat_id, text))
-        return 1000 + len(self.sent)
-
-    async def send_photo_ex(self, chat_id, photo, *, caption=None, **_kw):
-        self.photos.append((chat_id, photo, caption))
-        return 500 + len(self.photos), f"file-{len(self.photos)}"
-
-
-class FakeLink:
-    def __init__(self) -> None:
-        self.director_replies: list[str] = []
-        self.director_inputs: list[str] = []
-        self.director_systems: list[str] = []
-        self.describe_inputs: list[str] = []
-        self.describe_fail = False
-        self.generated: list[dict] = []
-
-    async def command(self, action, args, dst=None, timeout=None):
-        if action == "chat" and args.get("role") == "director":
-            if args.get("system") == underground.DESCRIBE_SYSTEM:
-                self.describe_inputs.append(args["messages"][0]["content"])
-                if self.describe_fail:
-                    raise TimeoutError
-                n = len(self.describe_inputs)
-                return {
-                    "response": json.dumps(
-                        {
-                            "passage": {
-                                "describe": f"Коридор {n} с рыжими потёками",
-                                "spots": ["ящик у стены"],
-                            },
-                            "node": {"describe": f"Перекрёсток {n}, на полу кости", "spots": []},
-                        },
-                        ensure_ascii=False,
-                    )
-                }
-            self.director_systems.append(args["system"])
-            self.director_inputs.append(args["messages"][0]["content"])
-            return {"response": self.director_replies.pop(0) if self.director_replies else "{}"}
-        if action == "chat":
-            return {"response": "Готово, сэр."}
-        if action == "generate_image":
-            self.generated.append(args)
-            return {
-                "png_b64": base64.b64encode(_png()).decode(),
-                "width": 8,
-                "height": 8,
-                "prompt": "p",
-                "seed": 7,
-            }
-        if action == "chat_progress":
-            return {"partial": "draw", "done": True}
-        raise AssertionError(action)
-
-
-class Clock:
-    def __init__(self) -> None:
-        self.now = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
-
-    def __call__(self) -> datetime:
-        return self.now
-
-
-class Dice:
-    def __init__(self, *values: float) -> None:
-        self.values = list(values) or [0.99]
-
-    def __call__(self) -> float:
-        return self.values.pop(0) if len(self.values) > 1 else self.values[0]
-
-
-async def _clear() -> int:
-    return 0
-
-
-def _make(store, *, canary=(CANARY,), dice=None, clock=None):
-    notifier, link = FakeNotifier(), FakeLink()
-    svc = Interactives(
-        store,
-        notifier,
-        Settings(llm=LlmConfig(model="m", interactives_canary_user_ids=list(canary))),
-        lambda: link,
-        now=clock or Clock(),
-        choose=lambda options: options[0],
-        rng=dice or Dice(0.99),
-        transylvania=Transylvania(fetch=_clear),
-    )
-    svc.spoken = []
-    return svc, notifier, link
+from tests.unit.interactives_kit import (
+    CANARY,
+    DEFAULT_NOW,
+    GUEST,
+    Dice,
+    make_service,
+)
+from tests.unit.support.fakes import Clock
 
 
 async def _open(svc, user=CANARY):
@@ -261,7 +144,7 @@ def _ctx(svc, user_id):
 
 
 async def test_walk_and_go_declarations_reach_only_canaries(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     kit = ai_tools.tools_for(Subscription(name="me", chat_id=1, allowed_commands=frozenset({"*"})))
     assert {"walk", "go", "search"} <= kit.handlers.keys()
     assert ai_tools.CANARY_TOOLS == {"search", "walk", "go", "act"}
@@ -273,7 +156,7 @@ async def test_walk_and_go_declarations_reach_only_canaries(store):
 
 
 async def test_forged_walk_and_go_by_non_canary_do_nothing(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     kit = ai_tools.tools_for(Subscription(name="me", chat_id=1, allowed_commands=frozenset({"*"})))
     before = {k: await store.get_state(k) for k in await store.state_keys("")}
     assert await kit.handlers["walk"](_ctx(svc, GUEST), {"direction": "left"}) == (
@@ -291,7 +174,7 @@ async def test_forged_walk_and_go_by_non_canary_do_nothing(store):
 
 
 async def test_catacombs_never_offered_or_continued_for_others(store):
-    svc, notifier, _ = _make(store)
+    svc, notifier, _ = make_service(store)
     await _open(svc, GUEST)
     await InteractiveStore(store).save_run(
         Run(scenario="catacombs", chat_id=GUEST, user_id=GUEST, status=STATUS_ACTIVE)
@@ -306,7 +189,7 @@ async def test_catacombs_never_offered_or_continued_for_others(store):
 
 
 async def test_go_refuses_until_unlocked_and_unknown(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     assert await svc.tool_go(CANARY, CANARY, "cellar") == underground.TOOL_GO_CELLAR_LOCKED
     assert await svc.tool_go(CANARY, CANARY, "catacombs") == underground.TOOL_GO_NO_WAY
     assert await svc.tool_go(CANARY, CANARY, "darkroom") == underground.TOOL_GO_NO_WAY
@@ -319,7 +202,7 @@ async def test_go_refuses_until_unlocked_and_unknown(store):
 
 
 async def test_go_catacombs_starts_walk_at_the_hatch(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     text = await _descend(svc, store, frames=False)
     assert "к самому началу" in text and "катакомбы" in text.lower()
     at = await places.get_at(store, CANARY)
@@ -337,7 +220,7 @@ async def test_go_catacombs_starts_walk_at_the_hatch(store):
 
 
 async def test_go_again_to_the_hatch_resets_position_and_shows_no_frames(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _descend(svc, store)
     await _step(svc, store)
     maze, state = await _vision(store)
@@ -353,7 +236,7 @@ async def test_go_again_to_the_hatch_resets_position_and_shows_no_frames(store):
 
 
 async def test_go_to_cellar_and_cabinet_end_the_walk(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     await _descend(svc, store)
     assert (await InteractiveStore(store).load_run(CANARY, "catacombs")).status == STATUS_ACTIVE
     text = await svc.tool_go(CANARY, CANARY, "cellar")
@@ -367,7 +250,7 @@ async def test_go_to_cellar_and_cabinet_end_the_walk(store):
 
 
 async def test_go_is_busy_during_another_scene_but_closes_finished_cellar(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     await _open(svc)
     radio_run = Run(scenario="radio", chat_id=CANARY, user_id=CANARY, status=STATUS_ACTIVE)
     await InteractiveStore(store).save_run(radio_run)
@@ -384,7 +267,7 @@ async def test_go_is_busy_during_another_scene_but_closes_finished_cellar(store)
 
 
 async def test_cellar_hint_offers_catacombs_and_found_rooms_by_name(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     await _open(svc)
     await _seed_maze(store)
     await svc.tool_go(CANARY, CANARY, "cellar")
@@ -400,14 +283,14 @@ async def test_cellar_hint_offers_catacombs_and_found_rooms_by_name(store):
 
 
 async def test_walk_not_in_catacombs_and_bad_direction(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     assert await svc.tool_walk(CANARY, CANARY, "left") == underground.TOOL_WALK_NOT_HERE
     await _descend(svc, store)
     assert await svc.tool_walk(CANARY, CANARY, "вбок") == underground.TOOL_WALK_BAD_DIRECTION
 
 
 async def test_walk_builds_describes_once_and_saves_position(store):
-    svc, _, link = _make(store)
+    svc, _, link = make_service(store)
     await _descend(svc, store)
     link.describe_inputs.clear()
     maze_before, _ = await _vision(store)
@@ -434,7 +317,7 @@ async def test_walk_builds_describes_once_and_saves_position(store):
 
 
 async def test_walk_director_failure_uses_fallback_descriptions(store):
-    svc, _, link = _make(store)
+    svc, _, link = make_service(store)
     await _descend(svc, store)
     link.describe_fail = True
     text = await _step(svc, store, frames=False)
@@ -446,7 +329,7 @@ async def test_walk_director_failure_uses_fallback_descriptions(store):
 
 
 async def test_walk_without_node_link_still_works(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     await _descend(svc, store)
     svc._get_node_link = lambda: None
     text = await _step(svc, store, frames=False)
@@ -454,7 +337,7 @@ async def test_walk_without_node_link_still_works(store):
 
 
 async def test_frames_come_after_the_reply_and_are_remembered(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _descend(svc, store)
     shots, drawn = len(notifier.photos), len(link.generated)
     text = await svc.tool_walk(CANARY, CANARY, await _first_exit(store))
@@ -476,7 +359,7 @@ async def test_frames_come_after_the_reply_and_are_remembered(store):
 
 
 async def test_known_places_are_shown_by_file_id_without_generation(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _descend(svc, store)
     await _step(svc, store)
     maze, state = await _vision(store)
@@ -492,7 +375,7 @@ async def test_known_places_are_shown_by_file_id_without_generation(store):
 
 
 async def test_node_is_redrawn_only_when_its_exits_change(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _descend(svc, store)
     await _step(svc, store)
     maze, state = await _vision(store)
@@ -512,7 +395,7 @@ async def test_node_is_redrawn_only_when_its_exits_change(store):
 
 
 async def test_frames_per_turn_capped_and_skipped_when_camera_busy(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _descend(svc, store)
     svc._photo_busy.add(CANARY)
     await svc.tool_walk(CANARY, CANARY, await _first_exit(store))
@@ -529,7 +412,7 @@ async def test_frames_per_turn_capped_and_skipped_when_camera_busy(store):
 
 
 async def test_remember_frame_ignored_after_reset(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _descend(svc, store)
     await svc.tool_walk(CANARY, CANARY, await _first_exit(store))
     await svc.flush_frames(CANARY)
@@ -564,7 +447,7 @@ def test_frame_canon_en_structure_and_spots():
 
 
 async def test_scene_note_and_director_input_after_walk(store):
-    svc, _, link = _make(store)
+    svc, _, link = make_service(store)
     await _descend(svc, store)
     plan = await svc.before_turn(CANARY, CANARY, "Ну что там?", is_private=True)
     assert plan.scene is False or plan.scenario == "catacombs"
@@ -584,7 +467,7 @@ async def test_scene_note_and_director_input_after_walk(store):
 
 
 async def test_director_idle_takes_alfred_home_from_catacombs(store):
-    svc, _, link = _make(store)
+    svc, _, link = make_service(store)
     await _descend(svc, store)
     plan = await svc.before_turn(CANARY, CANARY, "Кстати, анекдот", is_private=True)
     link.director_replies = [json.dumps({"active": False})]
@@ -597,8 +480,8 @@ async def test_director_idle_takes_alfred_home_from_catacombs(store):
 
 
 async def test_guest_silence_returns_alfred_from_catacombs(store):
-    clock = Clock()
-    svc, _, _ = _make(store, clock=clock)
+    clock = Clock(DEFAULT_NOW)
+    svc, _, _ = make_service(store, clock=clock)
     await _descend(svc, store)
     clock.now += timedelta(hours=1, minutes=50)
     plan = await svc.before_turn(CANARY, CANARY, "Я тут", is_private=True)
@@ -614,7 +497,7 @@ async def test_guest_silence_returns_alfred_from_catacombs(store):
 
 
 async def test_walk_up_goes_to_the_cellar_and_ends_the_walk(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     await _descend(svc, store)
     await _step(svc, store)
     text = await svc.tool_walk(CANARY, CANARY, "up")
@@ -626,7 +509,7 @@ async def test_walk_up_goes_to_the_cellar_and_ends_the_walk(store):
 
 
 async def test_search_in_corridor_uses_spots_and_finds_nothing_special(store):
-    svc, _, _ = _make(store, dice=Dice(0.99))
+    svc, _, _ = make_service(store, dice=Dice(0.99))
     await _descend(svc, store)
     await _step(svc, store)
     await svc.tool_walk(CANARY, CANARY, "back")
@@ -649,7 +532,7 @@ async def test_search_in_corridor_uses_spots_and_finds_nothing_special(store):
 
 
 async def test_search_frame_is_drawn_once_and_remembered(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _descend(svc, store)
     await _step(svc, store)
     await _frames(svc)
@@ -668,7 +551,7 @@ async def test_search_frame_is_drawn_once_and_remembered(store):
 
 
 async def test_take_photo_in_corridor_shows_remembered_frame_and_spot_closeup(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _descend(svc, store)
     await _step(svc, store)
     maze, state = await _vision(store)
@@ -702,7 +585,7 @@ async def test_take_photo_in_corridor_shows_remembered_frame_and_spot_closeup(st
 
 
 async def test_selfie_in_corridor_uses_the_ordinary_path(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _descend(svc, store)
     out = await svc.tool_take_photo(CANARY, CANARY, {"selfie": True})
     assert out != underground.TOOL_FRAME_STARTED
@@ -722,7 +605,7 @@ async def _at_darkroom_door(svc, store):
 
 
 async def test_special_room_found_entered_searched_and_left(store):
-    svc, notifier, link = _make(store, dice=Dice(0.99))
+    svc, notifier, link = make_service(store, dice=Dice(0.99))
     await _at_darkroom_door(svc, store)
     text = await svc.tool_walk(CANARY, CANARY, "forward")
     await _frames(svc)
@@ -758,7 +641,7 @@ async def test_special_room_found_entered_searched_and_left(store):
 
 
 async def test_go_to_special_room_by_name_faces_the_door(store):
-    svc, notifier, _ = _make(store)
+    svc, notifier, _ = make_service(store)
     await _open(svc)
     assert await svc.tool_go(CANARY, CANARY, "darkroom") == underground.TOOL_GO_NOT_FOUND
     maze, side = _maze_with_darkroom()
@@ -785,7 +668,7 @@ async def test_go_to_special_room_by_name_faces_the_door(store):
 
 
 async def test_special_room_photo_is_not_remembered(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _at_darkroom_door(svc, store)
     await svc.tool_walk(CANARY, CANARY, "forward")
     await svc.tool_walk(CANARY, CANARY, "enter")
@@ -815,7 +698,7 @@ class FakeCommand:
 
 
 async def test_debug_where_shows_node_heading_and_explored_count(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     await _descend(svc, store)
     await _step(svc, store)
     message = FakeMessage(CANARY)
@@ -832,7 +715,7 @@ async def test_debug_where_shows_node_heading_and_explored_count(store):
 
 
 async def test_reset_catacombs_clears_position_maze_run_and_special_rooms(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     await _at_darkroom_door(svc, store)
     await svc.tool_walk(CANARY, CANARY, "forward")
     await svc.tool_walk(CANARY, CANARY, "enter")
@@ -850,7 +733,7 @@ async def test_reset_catacombs_clears_position_maze_run_and_special_rooms(store)
 
 
 async def test_flush_forms_sends_frames_after_the_reply(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _descend(svc, store)
     shots = len(notifier.photos)
     plan = await svc.before_turn(CANARY, CANARY, "Налево", is_private=True)
@@ -863,7 +746,7 @@ async def test_flush_forms_sends_frames_after_the_reply(store):
 
 
 async def test_canary_handlers_walk_through_the_toolkit(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     await _descend(svc, store)
     kit = ai_tools.tools_for(Subscription(name="me", chat_id=1, allowed_commands=frozenset({"*"})))
     ctx = _ctx(svc, CANARY)

@@ -3,22 +3,19 @@ from __future__ import annotations
 import asyncio
 import base64
 import dataclasses
-import io
 import json
 import re
 
 import pytest
-import pytest_asyncio
-from PIL import Image
 
 from sa_home_bot.bot.interactives import cellar, keyboards, radio, registry
 from sa_home_bot.bot.interactives.base import STATUS_OFFERED, InteractiveStore, Run
 from sa_home_bot.bot.interactives.engine import Interactives
 from sa_home_bot.bot.interactives.transylvania import Transylvania
 from sa_home_bot.config import LlmConfig, Settings
-from sa_home_bot.db.connection import Database
-from sa_home_bot.db.migrations import apply_migrations
-from sa_home_bot.db.store import Store
+from tests.unit.interactives_kit import clear_sky
+from tests.unit.support.factories import png_bytes
+from tests.unit.support.fakes import FakeNotifier
 
 CANARY = 701
 GUEST = 702
@@ -26,31 +23,9 @@ GHOST_ID = "ghost"
 GHOST_TEXT = "Альфред, тут призрак?"
 
 
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    db = Database(tmp_path / "test.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
-
-
-class FakeNotifier:
-    def __init__(self) -> None:
-        self.sent: list[tuple[int, str, object]] = []
-
-    async def send_direct(self, chat_id, text, **kw):
-        self.sent.append((chat_id, text, kw.get("reply_markup")))
-        return 1000 + len(self.sent)
-
-
 class FakeLink:
     async def command(self, action, args, dst=None, timeout=None):
         return {"response": "{}"}
-
-
-async def _clear() -> int:
-    return 0
 
 
 def _make(store, *, canary=(CANARY,)):
@@ -59,7 +34,7 @@ def _make(store, *, canary=(CANARY,)):
         FakeNotifier(),
         Settings(llm=LlmConfig(model="m", interactives_canary_user_ids=list(canary))),
         lambda: FakeLink(),
-        transylvania=Transylvania(fetch=_clear),
+        transylvania=Transylvania(fetch=clear_sky),
     )
     return svc
 
@@ -158,22 +133,6 @@ def test_run_json_without_world_is_the_old_format():
     assert old.world == {}
 
 
-def _png() -> bytes:
-    buf = io.BytesIO()
-    Image.new("RGB", (8, 8), "brown").save(buf, format="PNG")
-    return buf.getvalue()
-
-
-class PhotoNotifier(FakeNotifier):
-    def __init__(self) -> None:
-        super().__init__()
-        self.photos: list[tuple[int, object, str | None]] = []
-
-    async def send_photo_ex(self, chat_id, photo, *, caption=None, **_kw):
-        self.photos.append((chat_id, photo, caption))
-        return 100 + len(self.photos), f"file-{len(self.photos)}"
-
-
 class SceneLink:
     def __init__(self) -> None:
         self.generated: list[dict] = []
@@ -199,7 +158,7 @@ class SceneLink:
         if action == "generate_image":
             self.generated.append(args)
             return {
-                "png_b64": base64.b64encode(_png()).decode(),
+                "png_b64": base64.b64encode(png_bytes()).decode(),
                 "width": 8,
                 "height": 8,
                 "prompt": "p",
@@ -209,7 +168,7 @@ class SceneLink:
             return {"partial": "draw", "done": True}
         if action == "item_portrait":
             return {
-                "png_b64": base64.b64encode(_png()).decode(),
+                "png_b64": base64.b64encode(png_bytes()).decode(),
                 "width": 8,
                 "height": 8,
                 "seed": args["seed"],
@@ -231,13 +190,13 @@ NEW_KEYS_PREFIXES = (
 
 
 async def test_radio_and_cabinet_flow_for_non_canary_is_the_old_one(store):
-    notifier, link = PhotoNotifier(), SceneLink()
+    notifier, link = FakeNotifier(), SceneLink()
     svc = Interactives(
         store,
         notifier,
         Settings(llm=LlmConfig(model="m", interactives_canary_user_ids=[CANARY])),
         lambda: link,
-        transylvania=Transylvania(fetch=_clear),
+        transylvania=Transylvania(fetch=clear_sky),
         rng=lambda: 0.0,
     )
 
@@ -249,7 +208,7 @@ async def test_radio_and_cabinet_flow_for_non_canary_is_the_old_one(store):
     assert plan.offered and plan.scenario == radio.SCENARIO_ID
     await svc.after_turn(plan, "Я говогю чисто.", dialogue_id=77)
     await svc.flush_forms(GUEST, plan, dialogue_id=77)
-    _, text, markup = notifier.sent[-1]
+    _, text, markup = notifier.sent_with_markup[-1]
     assert text == radio.RADIO.offer_text
     assert [b.text for row in markup.inline_keyboard for b in row] == ["Да", "Нет"]
     await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_PLAY)

@@ -24,7 +24,8 @@ from sa_home_bot.bot.interactives.scene import grow_item
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
-from tests.unit.test_cabinet_photo import GUEST, FakeLink, _drain, _make
+from tests.unit.interactives_kit import CabinetLink, drain
+from tests.unit.test_cabinet_photo import GUEST, _make
 
 RADIO = items.RADIO
 
@@ -38,7 +39,7 @@ async def store(tmp_path):
     await db.close()
 
 
-class ItemLink(FakeLink):
+class ItemLink(CabinetLink):
     async def command(self, action, args, dst=None, timeout=None):
         if action in ("chat", "generate_image", "item_portrait"):
             return await super().command(action, args, dst=dst, timeout=timeout)
@@ -186,10 +187,10 @@ async def test_scene_frame_draws_portrait_then_pastes_radio_on_desk(store):
         message_thread_id=None,
         trigger_message_id=None,
     )
-    await _drain(svc)
+    await drain(svc)
     (portrait,) = link.portraits()
     assert portrait["seed"] == 77 and portrait["prompt"].startswith(items.RADIO_ARCHETYPE)
-    (gen,) = link.generated()
+    (gen,) = link.generated
     assert gen["paste"]["key"] == portrait["key"] and gen["paste"]["place"] == "desk"
     run = await InteractiveStore(store).load_run(GUEST, "radio")
     assert run.item_key == portrait["key"] and run.item_drawn == list(RADIO.drawn_key(["пыль"]))
@@ -203,10 +204,10 @@ async def test_scene_frame_draws_portrait_then_pastes_radio_on_desk(store):
         message_thread_id=None,
         trigger_message_id=None,
     )
-    await _drain(svc)
+    await drain(svc)
     assert len(link.portraits()) == 1
-    assert link.generated()[-1]["paste"]["place"] == "closeup"
-    assert link.generated()[-1]["description"] == photo_text.ITEM_CLOSEUP_RU
+    assert link.generated[-1]["paste"]["place"] == "closeup"
+    assert link.generated[-1]["description"] == photo_text.ITEM_CLOSEUP_RU
 
 
 async def test_other_closeups_have_no_radio(store):
@@ -223,8 +224,8 @@ async def test_other_closeups_have_no_radio(store):
         message_thread_id=None,
         trigger_message_id=None,
     )
-    await _drain(svc)
-    assert link.portraits() == [] and "paste" not in link.generated()[0]
+    await drain(svc)
+    assert link.portraits() == [] and "paste" not in link.generated[0]
 
 
 async def _finale(store, svc, **kw):
@@ -238,7 +239,7 @@ async def test_swap_grants_cursed_radio_card_with_toggle(store):
     await _finale(store, svc, item_seed=9, item_traits=["пыль", "глаз"], item_key="radio-601-a")
     answer, _, _ = await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_SWAP)
     assert answer == "Готово."
-    await _drain(svc)
+    await drain(svc)
     (owned,) = await store.items_of(GUEST, "radio")
     assert owned["traits"] == ["пыль", "глаз"] and owned["note"] == "в катушке жижа слизня"
     image = await store.image_by_id(owned["image_id"])
@@ -257,7 +258,7 @@ async def test_item_card_actions_menu_toggles_speech(store):
     svc, _ = _make(store, link)
     await _finale(store, svc, item_seed=9)
     await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_SWAP)
-    await _drain(svc)
+    await drain(svc)
     (owned,) = await store.items_of(GUEST)
     assert await svc.speech_clear(GUEST) is True
     card = keyboards.item_keyboard(RADIO, owned["id"])
@@ -368,7 +369,7 @@ async def test_cabinet_general_view_shows_the_radio_that_stands(store):
     svc, _ = _make(store, link)
     await _finale(store, svc, item_seed=9, item_key="radio-601-a")
     await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_SWAP)
-    await _drain(svc)
+    await drain(svc)
     outside = await svc._transylvania.outside(svc._now())
     await svc._start_photo(
         GUEST,
@@ -380,8 +381,8 @@ async def test_cabinet_general_view_shows_the_radio_that_stands(store):
         message_thread_id=None,
         trigger_message_id=None,
     )
-    await _drain(svc)
-    assert link.generated()[-1]["paste"]["key"] == item_flow.NEW_RADIO_CUT_KEY
+    await drain(svc)
+    assert link.generated[-1]["paste"]["key"] == item_flow.NEW_RADIO_CUT_KEY
     assert link.portraits()[-1]["key"] == item_flow.NEW_RADIO_CUT_KEY
     (owned,) = await store.items_of(GUEST)
     await svc.handle_item_click(GUEST, GUEST, owned["id"], "p")
@@ -395,8 +396,8 @@ async def test_cabinet_general_view_shows_the_radio_that_stands(store):
         message_thread_id=None,
         trigger_message_id=None,
     )
-    await _drain(svc)
-    assert link.generated()[-1]["paste"]["key"] == "radio-601-a"
+    await drain(svc)
+    assert link.generated[-1]["paste"]["key"] == "radio-601-a"
 
 
 async def test_general_view_by_words_puts_radio_on_desk_and_alfred_knows_it(store):
@@ -404,7 +405,7 @@ async def test_general_view_by_words_puts_radio_on_desk_and_alfred_knows_it(stor
     svc, _ = _make(store, link)
     await _finale(store, svc, item_seed=9, item_traits=["пыль"], item_key="radio-601-a")
     await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_SWAP)
-    await _drain(svc)
+    await drain(svc)
     (owned,) = await store.items_of(GUEST)
     await svc.handle_item_click(GUEST, GUEST, owned["id"], "p")
     text = await svc.tool_take_photo(
@@ -412,8 +413,8 @@ async def test_general_view_by_words_puts_radio_on_desk_and_alfred_knows_it(stor
         GUEST,
         {"caption": "Вид кабинета после инцидента", "focus": "общий план кабинета"},
     )
-    await _drain(svc)
-    gen = link.generated()[-1]
+    await drain(svc)
+    gen = link.generated[-1]
     assert gen["mode"] != "scene" and gen["paste"]["place"] == "desk"
     assert text == cabinet.TOOL_PHOTO_STARTED
     directive = link.lines()[-1]
@@ -421,14 +422,14 @@ async def test_general_view_by_words_puts_radio_on_desk_and_alfred_knows_it(stor
     miss = ["пустой корпус передатчика"]
     await svc._save_last_photo(GUEST, 1, "стол", miss, miss)
     await svc.tool_take_photo(GUEST, GUEST, {"focus": "пустой корпус передатчика"})
-    await _drain(svc)
-    gen = link.generated()[-1]
+    await drain(svc)
+    gen = link.generated[-1]
     assert gen["paste"]["place"] == "closeup" and "emphasize" not in gen
     await svc.handle_item_click(GUEST, GUEST, owned["id"], "r")
     assert await svc.tool_take_photo(GUEST, GUEST, {"caption": "Кабинет"}) == (
         cabinet.TOOL_PHOTO_STARTED
     )
-    await _drain(svc)
+    await drain(svc)
     assert radio.RADIO_STATE_NEW in link.lines()[-1]
     assert "manor_items" not in link.lines()[-1]
 
@@ -438,17 +439,17 @@ async def test_photo_of_stored_cursed_radio_sends_its_card(store):
     svc, notifier = _make(store, link)
     await _finale(store, svc, item_seed=9, item_key="radio-601-a")
     await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_SWAP)
-    await _drain(svc)
+    await drain(svc)
     cards = len(notifier.photos)
-    shots = len(link.generated())
+    shots = len(link.generated)
     text = await svc.tool_take_photo(
         GUEST, GUEST, {"caption": "Тот самый", "focus": "проклятый передатчик в чулане"}
     )
     assert text == radio.TOOL_PHOTO_STORED_ITEM
-    assert len(notifier.photos) == cards + 1 and len(link.generated()) == shots
+    assert len(notifier.photos) == cards + 1 and len(link.generated) == shots
     text = await svc.tool_take_photo(GUEST, GUEST, {"focus": "новый передатчик крупно"})
-    await _drain(svc)
-    assert text != radio.TOOL_PHOTO_STORED_ITEM and len(link.generated()) == shots + 1
+    await drain(svc)
+    assert text != radio.TOOL_PHOTO_STORED_ITEM and len(link.generated) == shots + 1
 
 
 async def test_show_while_portrait_draws_ends_turn_silently(store):
@@ -469,9 +470,9 @@ async def test_show_while_portrait_draws_ends_turn_silently(store):
     text = await ai_tools.tool_manor_items(ctx, {"show": "радио"})
     assert ctx.end_turn and text.startswith(radio.TOOL_ITEMS_DRAWING_HEAD)
     await svc.wait_photo(GUEST)
-    await _drain(svc)
+    await drain(svc)
     (_chat, _photo, caption) = notifier.photos[-1]
-    turn = await store.ai_turn(GUEST, 100 + len(notifier.photos))
+    turn = await store.ai_turn(GUEST, 500 + len(notifier.photos))
     assert turn["role"] == "assistant" and turn["dialogue_id"] == 7
     assert "Проклятая радиостанция" in turn["content"] and "<b>" not in turn["content"]
     assert "Проклятая радиостанция" in caption
@@ -493,7 +494,7 @@ async def test_guest_who_finished_before_items_gets_radio_lazily(store):
     await InteractiveStore(store).mark_completed("radio", GUEST)
     text = await svc.tool_manor_items(GUEST, GUEST, show="радио")
     assert text == radio.TOOL_ITEMS_DRAWING.format(items="Проклятая радиостанция")
-    await _drain(svc)
+    await drain(svc)
     (owned,) = await store.items_of(GUEST)
     assert owned["origin"] == "radio_scene_before_items" and owned["traits"] == []
     assert len(link.portraits()) == 1 and notifier.photos
@@ -507,7 +508,7 @@ async def test_manor_items_tells_alfred_not_the_chat(store):
     svc, notifier = _make(store, link)
     await _finale(store, svc, item_seed=9, item_traits=["пыль"], item_key="radio-601-a")
     await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_SWAP)
-    await _drain(svc)
+    await drain(svc)
     sent, photos = len(notifier.sent), len(notifier.photos)
     text = await svc.tool_manor_items(GUEST, GUEST)
     assert len(notifier.sent) == sent and len(notifier.photos) == photos
@@ -526,7 +527,7 @@ async def test_inventory_lists_items_with_place_and_card_buttons(store):
     svc, notifier = _make(store, link)
     await _finale(store, svc, item_seed=9, item_traits=["пыль"], item_key="radio-601-a")
     await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_SWAP)
-    await _drain(svc)
+    await drain(svc)
     photos = len(notifier.photos)
     (owned,) = await store.items_of(GUEST)
     text, markup = await svc.inventory(GUEST)
@@ -560,19 +561,19 @@ async def test_lazy_radio_is_drawn_instead_of_reshowing_old_general_view(store):
     svc, notifier = _make(store, link)
     outside = await svc._transylvania.outside(svc._now())
     await svc.tool_take_photo(GUEST, GUEST, {})
-    await _drain(svc)
-    assert "paste" not in link.generated()[-1]
+    await drain(svc)
+    assert "paste" not in link.generated[-1]
     await InteractiveStore(store).mark_completed("radio", GUEST)
     await InteractiveStore(store).set_effect("speech_clear", GUEST, "0")
     await svc.tool_take_photo(GUEST, GUEST, {})
-    await _drain(svc)
-    assert len(link.generated()) == 2 and link.generated()[-1]["paste"]["place"] == "desk"
+    await drain(svc)
+    assert len(link.generated) == 2 and link.generated[-1]["paste"]["place"] == "desk"
     cab = await cabinet_mod.load(store, GUEST)
     image_id = (await store.items_of(GUEST))[0]["image_id"]
     assert any(key.endswith(f":{image_id}") for key in cab.photos)
     await svc.tool_take_photo(-100, GUEST, {})
-    await _drain(svc)
-    assert len(link.generated()) == 2 and outside
+    await drain(svc)
+    assert len(link.generated) == 2 and outside
 
 
 def test_kind_declares_actions_by_place():
@@ -598,7 +599,7 @@ async def _swapped(store):
     svc._notifier = notifier
     await _finale(store, svc, item_seed=9, item_traits=["пыль"], item_key="radio-601-a")
     await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_SWAP)
-    await _drain(svc)
+    await drain(svc)
     (owned,) = await store.items_of(GUEST)
     return svc, notifier, owned
 
