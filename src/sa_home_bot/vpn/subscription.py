@@ -1,16 +1,4 @@
-# ruff: noqa: E501
-"""Подписка Hiddify на устройство: токен, сборка ответа, страница (подэтап 57.10).
-
-Модуль чистый — без сети и БД. Токен не содержит chat_id и не хранится:
-4 байта «поколения» (unix-время последнего перевыпуска/отзыва VLESS-ключа
-устройства на любой ноде) + 20 байт ``HMAC-SHA256(секрет, "chat_id\\0label\\0поколение")``,
-всё в base64url (32 символа). Любая vpn-нода пересчитывает MAC по своим
-активным VLESS-ключам и находит владельца, общая БД не нужна. Токен со старым
-поколением нода отвергает, если хоть одна нода знает более новое — так
-перевыпуск гасит утёкшую ссылку (vpn/service.py::resolve_subscription). Секрет — ``[vpn].sub_secret``, а если пуст,
-то производная от ``[swarm].token`` (он один на весь рой и входит в бэкап
-identity ноды, поэтому ссылки переживают переустановку).
-"""
+# ruff: noqa
 
 from __future__ import annotations
 
@@ -26,23 +14,24 @@ from datetime import UTC, datetime
 from urllib.parse import quote
 
 from sa_home_bot.reality.client_config import (
+    DEFAULT_FLOW,
     RealityParams,
     render_singbox_multi,
     render_vless_url,
 )
+from sa_home_bot.vpn.protocol import GB, country_flag
 
 TOKEN_LEN = 32
 _TOKEN_RE = re.compile(rf"^[A-Za-z0-9_-]{{{TOKEN_LEN}}}$")
 _SECRET_CONTEXT = b"sa-home-bot/vpn-subscription/v1"
 
-FORMAT_VLESS = "vless"  # base64-список vless:// (по умолчанию)
-FORMAT_PLAIN = "plain"  # тот же список без base64
-FORMAT_SINGBOX = "singbox"  # sing-box JSON с несколькими outbound
+FORMAT_VLESS = "vless"
+FORMAT_PLAIN = "plain"
+FORMAT_SINGBOX = "singbox"
 FORMATS = (FORMAT_VLESS, FORMAT_PLAIN, FORMAT_SINGBOX)
 
 
 def derive_secret(sub_secret: str, swarm_token: str) -> bytes:
-    """Ключ подписи. Явный ``sub_secret`` главнее; иначе — от токена роя."""
     base = (sub_secret or swarm_token or "").encode()
     return hmac.new(base, _SECRET_CONTEXT, hashlib.sha256).digest()
 
@@ -54,7 +43,6 @@ def make_token(secret: bytes, chat_id: int, device_label: str, gen: int = 0) -> 
 
 
 def token_gen(token: str) -> int | None:
-    """Поколение из токена (без проверки подписи) или ``None``, если токен кривой."""
     try:
         raw = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
     except ValueError:
@@ -75,10 +63,8 @@ def valid_token_shape(token: str) -> bool:
 
 @dataclass(frozen=True)
 class SubEntry:
-    """Одна страна устройства: сервер и UUID клиента."""
-
     node: str
-    name: str  # «🇳🇱 Нидерланды»
+    name: str
     uuid: str
     params: RealityParams
 
@@ -115,26 +101,21 @@ class SubEntry:
                 server_public_key=str(p["server_public_key"]),
                 short_id=str(p["short_id"]),
                 sni=str(p["sni"]),
-                flow=str(p.get("flow") or "xtls-rprx-vision"),
+                flow=str(p.get("flow") or DEFAULT_FLOW),
             ),
         )
 
 
 @dataclass(frozen=True)
 class NodeInfo:
-    """Нода роя, как её видит страница: публичный адрес (для «VPN включён?»),
-    здоровье VLESS по проверкам, выдаёт ли AmneziaWG и есть ли уже ключ."""
-
     node: str
     name: str
     ip: str
     local: bool = False
-    health: str = ""  # "ok" / "bad" / "" — нет данных
+    health: str = ""
     awg: bool = False
     awg_key: bool = False
-    base: str = ""  # https://хост:порт страницы этой ноды (для проверки из браузера)
-    # Устройство этой ноде известно (по VLESS или по подписи токена) — можно выдавать
-    # AmneziaVPN, даже если VLESS в этой стране у устройства нет.
+    base: str = ""
     device: bool = False
 
     def to_wire(self) -> dict:
@@ -166,8 +147,6 @@ class NodeInfo:
 
 @dataclass(frozen=True)
 class Subscription:
-    """Собранная подписка устройства со всех нод."""
-
     device_label: str
     entries: tuple[SubEntry, ...]
     used_bytes: int = 0
@@ -180,8 +159,8 @@ class Subscription:
 @dataclass(frozen=True)
 class VpnStatus:
     on: bool
-    name: str = ""  # «🇳🇱 Нидерланды»
-    method: str = ""  # «AmneziaWG» / «VLESS · Hiddify» / "" — не определить надёжно
+    name: str = ""
+    method: str = ""
 
 
 def _norm_ip(text: str):
@@ -193,11 +172,6 @@ def _norm_ip(text: str):
 
 
 def detect_status(addr: str, nodes: tuple[NodeInfo, ...], local_subnet: str) -> VpnStatus:
-    """Включён ли VPN у того, кто открыл страницу, — по адресу запроса. Из
-    awg-подсети СВОЕЙ ноды — AmneziaWG (трафик к собственному адресу не
-    маскарадится); с публичного адреса своей ноды — VLESS (xray ходит наружу
-    с хоста); с адреса соседней ноды — только страна. Положение человека не
-    определяется, GeoIP нет."""
     ip = _norm_ip(addr or "")
     if ip is None:
         return VpnStatus(False)
@@ -216,13 +190,11 @@ def detect_status(addr: str, nodes: tuple[NodeInfo, ...], local_subnet: str) -> 
 
 METHOD_AWG = "AmneziaVPN"
 METHOD_VLESS = "VLESS · Hiddify"
-VIA_AWG = "awg"  # ответ /where: трафик идёт через эту ноду по AmneziaWG
+VIA_AWG = "awg"
 VIA_VLESS = "vless"
-_VIA_METHOD = {VIA_AWG: METHOD_AWG, VIA_VLESS: METHOD_VLESS}
 
 
 def detect_via(addr: str, nodes: tuple[NodeInfo, ...], local_subnet: str) -> str:
-    """Для /where: идёт ли запрос через ЭТУ ноду. ``"awg"`` / ``"vless"`` / ``""``."""
     status = detect_status(addr, nodes, local_subnet)
     if not status.on or not status.method:
         return ""
@@ -230,12 +202,10 @@ def detect_via(addr: str, nodes: tuple[NodeInfo, ...], local_subnet: str) -> str
 
 
 def check_nodes(nodes: tuple[NodeInfo, ...]) -> list[dict[str, str]]:
-    """Ноды, у которых страница умеет отвечать на /where: ``[{n: имя, u: https://…}]``."""
     return [{"n": n.name, "u": n.base} for n in nodes if n.base.startswith("https://")]
 
 
 def page_csp(nodes: tuple[NodeInfo, ...]) -> str:
-    """CSP страницы: ``connect-src`` — только она сама и страницы наших нод."""
     connect = " ".join(["'self'", *sorted({n["u"] for n in check_nodes(nodes)})])
     return (
         "default-src 'none'; img-src data:; style-src 'unsafe-inline'; "
@@ -249,7 +219,6 @@ def sort_entries(entries: list[SubEntry]) -> list[SubEntry]:
 
 
 def render_body(sub: Subscription, fmt: str) -> tuple[str, str]:
-    """``(тело, content-type)`` подписки в выбранном формате."""
     if fmt == FORMAT_SINGBOX:
         text = render_singbox_multi([(e.name, e.params, e.uuid) for e in sub.entries])
         return text, "application/json; charset=utf-8"
@@ -275,10 +244,8 @@ def render_headers(
     support_url: str = "",
     fmt: str = FORMAT_VLESS,
 ) -> dict[str, str]:
-    """Заголовки профиля для Hiddify. Заголовки HTTP — latin-1, поэтому
-    название (с эмодзи и кириллицей) уходит в ``base64:…``."""
     title = profile_title(sub.device_label)
-    if fmt == FORMAT_SINGBOX:  # отдельный профиль в Hiddify, чтобы не спутать с обычным
+    if fmt == FORMAT_SINGBOX:
         title += " · маршруты"
     headers = {
         "profile-title": _b64_header(title),
@@ -299,9 +266,6 @@ def render_headers(
 
 
 def deep_link(sub_url: str, device_label: str) -> str:
-    """``hiddify://import/<адрес подписки>`` без ``#имени``: Hiddify показывает
-    фрагмент как есть, не раскодируя проценты («VPN%20%C2%B7…»), а имя с
-    эмодзи и кириллицей берёт из заголовка ``profile-title`` (base64)."""
     return f"hiddify://import/{sub_url}"
 
 
@@ -312,12 +276,11 @@ _MONTHS_GEN = (
 
 
 def _gb(value: int) -> str:
-    gb = max(value, 0) / 1_000_000_000
+    gb = max(value, 0) / GB
     return f"{gb:.0f}" if gb >= 10 else f"{gb:.1f}".removesuffix(".0")
 
 
 def remaining_text(sub: Subscription) -> str:
-    """«Осталось 87 ГБ из 100 до 1 ноября» (пусто, если лимита нет)."""
     if sub.total_bytes <= 0:
         return ""
     left = max(sub.total_bytes - sub.used_bytes, 0)
@@ -330,8 +293,6 @@ def remaining_text(sub: Subscription) -> str:
 
 @dataclass(frozen=True)
 class PageLinks:
-    """Внешние ссылки страницы — из ``[vpn]`` (те же, что в боте)."""
-
     hiddify_ios: str
     hiddify_android: str
     hiddify_site: str
@@ -412,17 +373,10 @@ def _links(*pairs: tuple[str, str]) -> str:
     )
 
 
-def flag_of(name: str) -> str:
-    flag = [c for c in name if 0x1F1E6 <= ord(c) <= 0x1F1FF]
-    return "".join(flag[:2])
-
-
 _OFF_HINT = "Включите VPN (в Hiddify — круглая кнопка) и вернитесь на эту страницу."
 
 
 def _status_card(status: VpnStatus | None) -> str:
-    """Карточка «VPN включён?». Элементы с id переписывает скрипт страницы после
-    опроса /where всех нод; без скрипта остаётся то, что решил сервер по адресу."""
     e = html.escape
     if status is None:
         return ""
@@ -457,9 +411,6 @@ PLATFORM_ANDROID, PLATFORM_IOS, PLATFORM_OTHER = "android", "ios", "other"
 
 
 def detect_platform(user_agent: str) -> str:
-    """Платформа по User-Agent: ``android`` / ``ios`` (iPhone, iPad, iPod) / ``other``.
-    iPadOS в режиме «компьютер» представляется как Macintosh — это ``other`` (там
-    показываются обе кнопки)."""
     ua = (user_agent or "").lower()
     if "android" in ua:
         return PLATFORM_ANDROID
@@ -475,7 +426,6 @@ _CHECK_STEP = (
 
 
 def _awg_steps(platform: str, stores: str) -> str:
-    """Короткая нумерованная инструкция AmneziaVPN под платформу."""
     install = (
         "Убедитесь, что установлено именно приложение <b>AmneziaVPN</b> (не AmneziaWG) — "
         "без него ключ не заработает:"
@@ -507,9 +457,6 @@ def _awg_steps(platform: str, stores: str) -> str:
 
 
 def _awg_card(sub: Subscription, forms: dict[str, str], platform: str, links: PageLinks) -> str:
-    """Основной (раскрытый) блок AmneziaVPN. Ключи выпускает и перевыпускает скрипт
-    страницы (POST ``…/awg``) только по нажатию кнопки, автовыпуска нет; по стране — ячейка с кнопкой. ``forms`` —
-    node -> одноразовый nonce. Пусто, если выдавать нечем."""
     e = html.escape
     if not forms:
         return ""
@@ -523,7 +470,7 @@ def _awg_card(sub: Subscription, forms: dict[str, str], platform: str, links: Pa
         nonce = forms.get(node.node)
         if nonce is None:
             continue
-        flag = flag_of(node.name) or node.name
+        flag = country_flag(node.name) or node.name
         if node.awg_key:
             act = f'<button class="btn alt re" type="button">🔄 Перевыпустить {e(flag)}</button>'
             msg = "Ключ уже выпускался — показать его нельзя."
@@ -616,9 +563,6 @@ _PAGE_JS = r"""(function () {
 })();"""
 
 
-# Выпуск и перевыпуск ключей AmneziaVPN на месте: POST ``…/awg`` (node, nonce, action),
-# ответ — JSON. GET ничего не выпускает, поэтому предпросмотр ссылок и сканеры (без JS)
-# ключей не создают.
 _AWG_JS = r"""(function () {
   var PLATFORM = __PLATFORM__, URL = __URL__;
   var box = document.getElementById('awg');
@@ -760,9 +704,6 @@ def render_page(
     platform: str = PLATFORM_OTHER,
     path: str = "",
 ) -> str:
-    """Хаб устройства: статус «VPN включён», Hiddify одной кнопкой, страны и остаток,
-    AmneziaVPN (ключи выпускаются скриптом страницы, не по нажатию). Русский, на
-    «вы», без пола; всё инлайн. Автоперехода в приложения нет."""
     e = html.escape
     link = deep_link(sub_url, sub.device_label)
     title = f"📶 VPN · {sub.device_label}"
@@ -811,9 +752,3 @@ def render_page(
             )
         )
     return _layout(title, body, script)
-
-
-def qr_data_uri(text: str) -> str:
-    import segno
-
-    return segno.make(text, error="m").svg_data_uri(scale=6, border=2)

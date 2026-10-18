@@ -1,11 +1,3 @@
-"""Сборка и жизненный цикл службы vpn_check (отдельный процесс).
-
-Минимальная служба по образцу net/app.py: proto-сервер поверх
-VpnCheckService, без БД и планировщика — реактивная. Плюс свой
-ServiceLink-клиент к локальной ноде (по образцу tasks/app.py) для
-исходящего пуша результата проверки в vpn/report_check на jeeves.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -27,8 +19,6 @@ async def run_vpn_check(settings: Settings) -> None:
 
     service = VpnCheckService(settings, node_link)
     server = ProtoServer(settings.vpn_check.socket, service, token=settings.swarm.token)
-    # Обработчики сигналов — до start(): он ждёт появления своего адреса
-    # (см. proto/server.py), и всё это время остановка иначе не обрабатывалась бы.
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
     await server.start()

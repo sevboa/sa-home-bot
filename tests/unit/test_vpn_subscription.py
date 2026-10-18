@@ -1,6 +1,3 @@
-"""Подписка Hiddify и https-страница (57.10): токен, сборка, форматы, заголовки,
-страница, отказ при отозванном, ходьба по нодам, кнопка в карточке устройства."""
-
 from __future__ import annotations
 
 import asyncio
@@ -67,8 +64,6 @@ async def _noop(*_a) -> None:
 
 
 class PeerLink:
-    """node_link, ведущий к другим службам в памяти."""
-
     def __init__(self, peers: dict[str, VpnService]) -> None:
         self.peers = peers
         self.down: set[str] = set()
@@ -104,9 +99,6 @@ def _token(svc, label="📱 iPhone"):
     return subs.make_token(svc._sub_secret, CHAT, label)
 
 
-# --- токен ---
-
-
 def test_token_is_stable_hides_chat_and_depends_on_secret():
     secret = subs.derive_secret("", SWARM)
     token = subs.make_token(secret, 188548043, "iPhone")
@@ -126,9 +118,6 @@ def test_token_shape_validation():
     assert not subs.valid_token_shape("a" * 31)
     assert not subs.valid_token_shape("a" * 32 + "/")
     assert not subs.valid_token_shape("../" + "a" * 29)
-
-
-# --- сборка и форматы ---
 
 
 def _sub():
@@ -189,7 +178,7 @@ def test_headers():
     assert base64.b64decode(title[7:]).decode() == "VPN · 📱 iPhone"
     assert headers["profile-web-page-url"] == "https://h/s/t"
     assert headers["support-url"] == "https://t.me/x"
-    for value in headers.values():  # HTTP-заголовки — latin-1
+    for value in headers.values():
         value.encode("latin-1")
     sb = subs.render_headers(
         _sub(), page_url="https://h/s/t", update_interval_h=12, fmt=subs.FORMAT_SINGBOX
@@ -226,14 +215,11 @@ def test_page_hiddify_one_button_others_folded_no_autoopen():
     assert "Убедитесь, что установлено приложение <b>Hiddify</b>" in page
     assert "apps.apple.com/x" in page and "play.google.com/x" in page
     assert "нажмите «🔄 Проверить ещё раз» — должно загореться зелёное «✅ VPN включён»" in page
-    # копирование, QR и файл — только под «Другие способы»
     other = page.index("Другие способы")
     for marker in ("📋 Скопировать ссылку", "data:image/svg+xml", "⬇️ Файл настроек"):
         assert page.index(marker) > other
-    # 🧪 проверка маршрутов: тот же импорт, но sing-box формат подписки
     assert 'href="hiddify://import/https://h:8444/sub/tok?format=singbox"' in page
     assert page.index("🧪 Hiddify с маршрутами") > page.index("➕ Добавить в Hiddify")
-    # автоперехода нет вообще
     assert "localStorage" not in page and "setTimeout(function () { location" not in page
     assert "AUTO" not in page and "autoOpen" not in page
     assert "http://" not in page and 'src="http' not in page
@@ -245,7 +231,7 @@ def test_page_status_blocks_green_when_on():
     assert 'class="card" id="stcard"' in off
     on = _page(status=subs.VpnStatus(True, "🇳🇱 Нидерланды", subs.METHOD_AWG))
     assert "✅ VPN включён — 🇳🇱 Нидерланды" in on and "Способ: AmneziaVPN" in on
-    assert 'class="card ok" id="stcard"' in on and ".card.ok" in on  # зелёный статус
+    assert 'class="card ok" id="stcard"' in on and ".card.ok" in on
     assert "stcard.className = 'card' + (cls === 'on' ? ' ok' : '')" in on
 
 
@@ -255,7 +241,7 @@ def test_page_countries_health_and_remaining():
         _sub().entries,
         used_bytes=13 * 10**9,
         total_bytes=100 * 10**9,
-        expire_ts=1_793_491_200,  # 1 ноября 2026
+        expire_ts=1_793_491_200,
         nodes=(
             subs.NodeInfo("jeeves", "🇳🇱 Нидерланды", "198.51.100.1", health="ok"),
             subs.NodeInfo("wooster", "🇺🇸 США", "198.51.100.2", health="bad"),
@@ -288,9 +274,9 @@ def test_page_awg_block_collapsed_cells_per_country_no_forms():
     page = _page(_awg_sub(), awg_forms=FORMS)
     assert '<details id="awg" open><summary>AmneziaVPN — основной способ, обычно быстрее' in page
     assert 'data-node="jeeves"' in page and 'data-nonce="N1"' in page and 'data-have="0"' in page
-    assert "<form" not in page and "/awg" in page  # URL в скрипте, форм нет
+    assert "<form" not in page and "/awg" in page
     assert "🔑 Сгенерировать ключ 🇳🇱" in page and "🔑 Сгенерировать ключ 🇺🇸" in page
-    assert "AmneziaVPN — основной" not in _page(_awg_sub())  # без nonce блока нет
+    assert "AmneziaVPN — основной" not in _page(_awg_sub())
 
 
 def test_page_awg_existing_key_shows_reissue_button():
@@ -350,7 +336,7 @@ def test_detect_status_by_address():
     own_vless = subs.detect_status("198.51.100.1", nodes, net)
     assert own_vless == subs.VpnStatus(True, "🇳🇱 Нидерланды", "VLESS · Hiddify")
     peer = subs.detect_status("::ffff:198.51.100.2", nodes, net)
-    assert peer == subs.VpnStatus(True, "🇺🇸 США", "")  # страна без способа
+    assert peer == subs.VpnStatus(True, "🇺🇸 США", "")
     assert subs.detect_status("203.0.113.9", nodes, net) == subs.VpnStatus(False)
     assert subs.detect_status("garbage", nodes, net) == subs.VpnStatus(False)
     assert subs.detect_status("", nodes, net) == subs.VpnStatus(False)
@@ -361,16 +347,12 @@ def test_token_carries_generation_and_rejects_forgery():
     t0, t1 = subs.make_token(secret, 5, "d"), subs.make_token(secret, 5, "d", 1_700_000_000)
     assert t0 != t1 and subs.token_gen(t1) == 1_700_000_000 and subs.token_gen(t0) == 0
     assert subs.token_matches(secret, t1, 5, "d")
-    # подделка поколения (подмена первых 4 байт) не проходит подпись
     forged = subs.make_token(secret, 5, "d", 0)
     raw = base64.urlsafe_b64decode(forged + "==")
     raw = (1).to_bytes(4, "big") + raw[4:]
     assert not subs.token_matches(
         secret, base64.urlsafe_b64encode(raw).decode().rstrip("="), 5, "d"
     )
-
-
-# --- служба: токен находится на любой ноде, подписка собирается из роя ---
 
 
 async def test_get_subscription_requires_running_web(swarm):
@@ -384,7 +366,7 @@ async def test_get_subscription_requires_running_web(swarm):
 async def test_get_subscription_returns_urls(swarm):
     a, _b, _link = swarm
     a.sub_web = SubscriptionWeb(a._cfg, a.resolve_subscription)
-    a.sub_web._runner = object()  # type: ignore[assignment]  # «слушает»
+    a.sub_web._runner = object()  # type: ignore[assignment]
     res = await a.run_command(
         vpn_protocol.ACTION_GET_SUBSCRIPTION, {"chat_id": CHAT, "device_label": "📱 iPhone"}
     )
@@ -401,13 +383,13 @@ async def test_get_subscription_returns_urls(swarm):
 async def test_token_resolves_on_any_node_with_all_countries(swarm):
     a, b, _link = swarm
     token = _token(a)
-    assert token == _token(b)  # общий секрет: тот же токен на обеих нодах
+    assert token == _token(b)
     for svc in (a, b):
         sub = await svc.resolve_subscription(token)
         assert sub is not None
         assert [e.name for e in sub.entries] == ["🇳🇱 Нидерланды", "🇺🇸 США"]
         assert sub.device_label == "📱 iPhone"
-        assert sub.total_bytes == 2 * 10**9  # лимиты двух нод
+        assert sub.total_bytes == 2 * 10**9
 
 
 async def test_peer_down_keeps_last_known_country(swarm):
@@ -460,9 +442,6 @@ async def test_sentinel_probe_never_gets_subscription(swarm):
     assert await a.resolve_subscription(subs.make_token(a._sub_secret, 0, "probe")) is None
 
 
-# --- веб ---
-
-
 @pytest_asyncio.fixture
 async def client(swarm):
     a, _b, _link = swarm
@@ -510,11 +489,8 @@ async def test_web_404_for_unknown_revoked_and_garbage(client):
     assert (await cl.get(f"/s/{token}")).status == 404
 
 
-# --- токен-поколение: перевыпуск гасит старую ссылку на всех нодах ---
-
-
 async def _reissue(svc, label="📱 iPhone", transport=TRANSPORT_REALITY):
-    await asyncio.sleep(1.1)  # поколение — секунды
+    await asyncio.sleep(1.1)
     await svc.run_command(
         vpn_protocol.ACTION_REISSUE,
         {"chat_id": CHAT, "device_label": label, "transport": transport},
@@ -542,11 +518,11 @@ async def webswarm(swarm):
 async def test_reissue_on_any_node_kills_old_token_everywhere(webswarm):
     a, b, _link = webswarm
     old = await _fresh_token(a)
-    assert old == await _fresh_token(b) == _token(a)  # поколения нет — токен прежний
+    assert old == await _fresh_token(b) == _token(a)
     for svc in (a, b):
         assert await svc.resolve_subscription(old) is not None
-    await _reissue(b)  # перевыпуск только в США
-    new = await _fresh_token(a)  # другая нода узнаёт поколение у соседа
+    await _reissue(b)
+    new = await _fresh_token(a)
     assert new != old and new == await _fresh_token(b)
     for svc in (a, b):
         assert await svc.resolve_subscription(old) is None
@@ -560,11 +536,9 @@ async def test_reissue_on_any_node_kills_old_token_everywhere(webswarm):
 
 
 async def test_reissue_token_survives_node_restore_from_peers_table(webswarm):
-    """Поколение живёт в vpn_peers (revoked_at снятых строк) — другого хранилища нет."""
     a, b, _link = webswarm
     await _reissue(a)
     token = await _fresh_token(a)
-    # «переустановка» ноды: новая служба на той же БД, кэшей нет
     fresh = VpnService(
         Settings(vpn=_cfg("198.51.100.1", "🇳🇱 Нидерланды"), swarm=SwarmConfig(token=SWARM)),
         a._db, FakeAwg(), _noop, reality_backend=FakeXray(),
@@ -572,7 +546,7 @@ async def test_reissue_token_survives_node_restore_from_peers_table(webswarm):
     fresh._node_id = "jeeves"
     fresh._node_link = a._node_link
     assert await fresh.resolve_subscription(token) is not None
-    assert await fresh.resolve_subscription(_token(a)) is None  # токен нулевого поколения мёртв
+    assert await fresh.resolve_subscription(_token(a)) is None
 
 
 async def test_new_country_does_not_change_token(tmp_path, monkeypatch):
@@ -590,7 +564,7 @@ async def test_new_country_does_not_change_token(tmp_path, monkeypatch):
     args = {"chat_id": CHAT, "device_label": "📱 iPhone", "transport": TRANSPORT_REALITY}
     await a.run_command(vpn_protocol.ACTION_ISSUE, args)
     before = await _fresh_token(a)
-    await b.run_command(vpn_protocol.ACTION_ISSUE, args)  # страну открыли позже
+    await b.run_command(vpn_protocol.ACTION_ISSUE, args)
     assert await _fresh_token(a) == before == await _fresh_token(b)
     assert len((await a.resolve_subscription(before)).entries) == 2
     await dba.close()
@@ -606,9 +580,6 @@ async def test_deleted_device_is_404_even_with_fresh_token(webswarm):
             {"chat_id": CHAT, "device_label": "📱 iPhone", "transport": TRANSPORT_REALITY},
         )
     assert await a.resolve_subscription(token) is None
-
-
-# --- веб: заголовки, 404, статус «VPN включён», выдача AmneziaWG ---
 
 
 @pytest_asyncio.fixture
@@ -671,7 +642,7 @@ async def test_web_headers_no_server_and_bare_404s(awg_swarm):
     for path in ("/", "/nope", "/s/", "/s/short", f"/s/{token}/x", "/favicon.ico"):
         resp = await cl.get(path)
         assert resp.status == 404 and (await resp.text()) == "Not found\n"
-    assert (await cl.post(f"/s/{token}")).status == 404  # чужой метод — тот же 404
+    assert (await cl.post(f"/s/{token}")).status == 404
     assert (await cl.put(f"/sub/{token}")).status == 404
     assert (await cl.post("/s/" + "A" * 32 + "/awg", headers=_origin(cl))).status == 404
 
@@ -679,10 +650,9 @@ async def test_web_headers_no_server_and_bare_404s(awg_swarm):
 async def test_web_status_by_request_address(awg_swarm):
     cl, a, _b, _web = awg_swarm
     token = _token(a)
-    # тестовый клиент приходит с 127.0.0.1 = публичный адрес «своей» ноды jeeves
     on = await (await cl.get(f"/s/{token}")).text()
     assert "✅ VPN включён — 🇳🇱 Нидерланды" in on and "VLESS · Hiddify" in on
-    a._cfg.reality.endpoint_host = "198.51.100.9"  # теперь адрес запроса — чужой
+    a._cfg.reality.endpoint_host = "198.51.100.9"
     a._cfg.endpoint_host = "198.51.100.9"
     a._sub_cache.clear()
     off = await (await cl.get(f"/s/{token}")).text()
@@ -716,19 +686,16 @@ async def test_awg_post_requires_origin_and_nonce(awg_swarm):
     token = _token(a)
     nonce = await _form_nonce(cl, token, "jeeves")
     data = {"nonce": nonce, "node": "jeeves", "action": "issue"}
-    assert (await cl.post(f"/s/{token}/awg", data=data)).status == 404  # без Origin/Referer
+    assert (await cl.post(f"/s/{token}/awg", data=data)).status == 404
     evil = {"Origin": "http://evil.example"}
     assert (await cl.post(f"/s/{token}/awg", data=data, headers=evil)).status == 404
     bad = await _awg(cl, token, "jeeves", nonce="x")
     assert bad.status == 400 and (await bad.json()) == {"ok": False, "error": "stale"}
-    # неизвестные страна/действие — голый 404
     assert (await _awg(cl, token, "nowhere", nonce=nonce)).status == 404
     assert (await _awg(cl, token, "jeeves", action="drop", nonce=nonce)).status == 404
-    # Referer вместо Origin тоже годится
     ref = {"Referer": f"http://{cl.server.host}:{cl.server.port}/s/{token}"}
     ok = await cl.post(f"/s/{token}/awg", data=data, headers=ref)
     assert ok.status == 200
-    # nonce одноразовый
     again = await cl.post(f"/s/{token}/awg", data=data, headers=_origin(cl))
     assert again.status == 400
 
@@ -747,7 +714,6 @@ async def test_awg_post_issues_missing_keys_local_and_remote_json_no_store(awg_s
         assert j["nonce"]
         row = await svc._active_row(CHAT, "📱 iPhone", vpn_protocol.TRANSPORT_AWG)
         assert row is not None
-    # после выпуска страница предлагает только перевыпуск, ключа в ней нет
     a._sub_cache.clear()
     text = await (await cl.get(f"/s/{token}")).text()
     assert text.count('data-have="1"') == 2 and '="vpn://' not in text
@@ -769,7 +735,7 @@ async def test_awg_issue_never_replaces_existing_key_reissue_does(awg_swarm):
     assert (await a._active_row(CHAT, "📱 iPhone", vpn_protocol.TRANSPORT_AWG))["public_key"] == (
         old["public_key"]
     )
-    done = await _awg(cl, token, "jeeves", "reissue", nonce=j["nonce"])  # nonce из ответа
+    done = await _awg(cl, token, "jeeves", "reissue", nonce=j["nonce"])
     dj = await done.json()
     assert done.status == 200 and dj["ok"] and dj["key"].startswith("vpn://")
     new = await a._active_row(CHAT, "📱 iPhone", vpn_protocol.TRANSPORT_AWG)
@@ -782,15 +748,13 @@ async def test_awg_rate_limits_allow_issue_two_countries_and_reissues(awg_swarm)
     token = _token(a)
     first = await _awg(cl, token, "jeeves")
     nonce = (await first.json())["nonce"]
-    limited = await _awg(cl, token, "jeeves", "reissue", nonce=nonce)  # сразу же — рано
+    limited = await _awg(cl, token, "jeeves", "reissue", nonce=nonce)
     lj = await limited.json()
     assert limited.status == 429 and lj["error"] == "rate" and lj["nonce"]
-    # другая страна не мешает; окно прошло — перевыпуск проходит
     assert (await _awg(cl, token, "wooster")).status == 200
     web._awg_last.clear()
     a._sub_cache.clear()
     assert (await _awg(cl, token, "jeeves", "reissue", nonce=lj["nonce"])).status == 200
-    # общий предел на токен: 2 выпуска + перевыпуски укладываются, перебор — нет
     web._awg_last.clear()
     web._awg_by_token.clear()
     for _i in range(subweb.AWG_PER_TOKEN[0]):
@@ -801,8 +765,6 @@ async def test_awg_rate_limits_allow_issue_two_countries_and_reissues(awg_swarm)
 
 
 async def test_awg_offered_where_device_has_no_vless(awg_swarm):
-    """Старое устройство: VLESS только в 🇳🇱, AmneziaVPN в 🇺🇸 уже есть — страница
-    всё равно знает обе страны: 🇺🇸 предлагает перевыпуск, после отзыва — выпуск."""
     cl, a, b, _web = awg_swarm
     token = _token(a)
     await b.run_command(
@@ -858,9 +820,6 @@ async def test_awg_not_offered_without_issuer(swarm):
         assert resp.status == 404
     finally:
         await cl.close()
-
-
-# --- TLS: http как запасной путь, подхват сертификата ---
 
 
 def _selfsigned(tmp_path, name):
@@ -926,9 +885,6 @@ async def test_disabled_when_port_zero():
     assert not await web.start()
 
 
-# --- бот: кнопка в карточке устройства ---
-
-
 def test_card_keyboard_has_hiddify_url_button_first():
     servers = _servers()
     device = vd.build_devices(servers)[0]
@@ -955,10 +911,7 @@ async def test_subscription_page_url_prefers_https_and_skips_without_vless(monke
     assert await h._subscription_page_url(object(), 5, device) == "https://b/s/t"  # type: ignore[arg-type]
     answers.clear()
     assert await h._subscription_page_url(object(), 5, device) is None  # type: ignore[arg-type]
-    assert KEY  # ключ устройства стабилен
-
-
-# --- фикс ufw ---
+    assert KEY
 
 
 def test_sub_ufw_fixup_checks_both_ports(monkeypatch):
@@ -973,9 +926,6 @@ def test_sub_ufw_fixup_checks_both_ports(monkeypatch):
     assert fixups._sub_ufw_check(settings)
     off = Settings(vpn=VpnConfig(sub_port=0))
     assert fixups._sub_ports(off) == []
-
-
-# --- 57.12: способ подключения от каждой ноды, ключ vpn:// ---
 
 
 def _node_pair(**kw):
@@ -994,7 +944,6 @@ def test_page_asks_every_node_and_csp_allows_only_them():
     csp = subs.page_csp(sub.nodes)
     assert "connect-src 'self' https://198.51.100.1:8444 https://198.51.100.2:8444;" in csp
     assert "default-src 'none'" in csp and "form-action 'self'" in csp
-    # узел без адреса страницы не опрашивается
     bare = subs.Subscription("d", _sub().entries, nodes=(subs.NodeInfo("j", "x", "1.1.1.1"),))
     assert subs.check_nodes(bare.nodes) == [] and "connect-src 'self';" in subs.page_csp(bare.nodes)
 
@@ -1013,7 +962,7 @@ def test_detect_via_only_for_own_node():
     net = "10.9.0.0/29"
     assert subs.detect_via("10.9.0.3", nodes, net) == "awg"
     assert subs.detect_via("198.51.100.1", nodes, net) == "vless"
-    assert subs.detect_via("198.51.100.2", nodes, net) == ""  # соседняя нода — не «через меня»
+    assert subs.detect_via("198.51.100.2", nodes, net) == ""
     assert subs.detect_via("203.0.113.9", nodes, net) == ""
 
 
@@ -1021,26 +970,21 @@ async def test_where_endpoint_cors_token_and_answers(awg_swarm):
     cl, a, _b, _web = awg_swarm
     token = _token(a)
     base_b = "https://198.51.100.2:18444"
-    # наш origin (страница соседней ноды): ответ + CORS; запрос с 127.0.0.1 = адрес выхода jeeves
     resp = await cl.get(f"/s/{token}/where", headers={"Origin": base_b})
     assert resp.status == 200 and resp.content_type == "application/json"
     assert await resp.json() == {"via": "vless"}
     assert resp.headers["Access-Control-Allow-Origin"] == base_b
     assert resp.headers["Vary"] == "Origin"
     assert "Server" not in resp.headers and resp.headers["Cache-Control"] == "no-store"
-    # чужой origin и без origin — ответ тот же, но CORS-разрешения нет
     for hdrs in ({"Origin": "https://evil.example"}, {}):
         r = await cl.get(f"/s/{token}/where", headers=hdrs)
         assert r.status == 200 and "Access-Control-Allow-Origin" not in r.headers
-    # из awg-подсети этой ноды — AmneziaWG
     a._cfg.subnet = "127.0.0.0/8"
     assert (await (await cl.get(f"/s/{token}/where")).json()) == {"via": "awg"}
-    # запрос приходит не через эту ноду
     a._cfg.subnet = "10.9.0.0/29"
     a._cfg.reality.endpoint_host = a._cfg.endpoint_host = "198.51.100.9"
     a._sub_cache.clear()
     assert (await (await cl.get(f"/s/{token}/where")).json()) == {"via": ""}
-    # ничего лишнего в теле
     assert (await (await cl.get(f"/s/{token}/where")).text()) == '{"via": ""}'
 
 
@@ -1072,6 +1016,15 @@ CONF = (
 )
 
 
+def _decode_amnezia_key(key: str) -> dict:
+    import json
+    import zlib
+
+    body = key.removeprefix("vpn://")
+    raw = base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))
+    return json.loads(zlib.decompress(raw[4:]))
+
+
 def test_amnezia_key_roundtrip_matches_conf():
     import json
     import zlib
@@ -1080,12 +1033,10 @@ def test_amnezia_key_roundtrip_matches_conf():
 
     key = ak.build_key(CONF, "🇳🇱 📱 iPhone")
     assert key.startswith("vpn://") and not set("=+/") & set(key[6:])
-    # как в клиенте: base64url -> qUncompress (4 байта длины + zlib) -> JSON
     raw = base64.urlsafe_b64decode(key[6:] + "=" * (-len(key[6:]) % 4))
     body = zlib.decompress(raw[4:])
     assert int.from_bytes(raw[:4], "big") == len(body)
     cfg = json.loads(body)
-    assert cfg == ak.decode_key(key)
     assert cfg["description"] == "🇳🇱 📱 iPhone" and cfg["hostName"] == "203.0.113.7"
     assert cfg["defaultContainer"] == "amnezia-awg" and cfg["dns1"] == "1.1.1.1"
     (cont,) = cfg["containers"]
@@ -1093,7 +1044,7 @@ def test_amnezia_key_roundtrip_matches_conf():
     assert cont["container"] == "amnezia-awg" and awg["isThirdPartyConfig"] is True
     assert awg["port"] == "51820" and awg["transport_proto"] == "udp"
     last = json.loads(awg["last_config"])
-    assert last["config"] == CONF  # исходный .conf целиком
+    assert last["config"] == CONF
     assert last["hostName"] == "203.0.113.7" and last["port"] == 51820
     assert last["client_priv_key"] == "cHJpdmF0ZUtleUZvclRlc3RzMTIzNDU2Nzg5MDEyMzQ="
     assert last["client_ip"] == "10.9.0.3/32"
@@ -1110,11 +1061,11 @@ def test_amnezia_key_from_real_client_conf_and_errors():
     import pytest as _pytest
 
     from sa_home_bot.vpn import amnezia_key as ak
-    from sa_home_bot.vpn.service import _render_client_conf
+    from sa_home_bot.vpn.awg_conf import render as render_client_conf
 
     cfg = _cfg("203.0.113.7", "x")
-    conf = _render_client_conf(cfg, "PRIV", "10.9.0.4", "SRVPUB")
-    parsed = ak.decode_key(ak.build_key(conf, "n"))
+    conf = render_client_conf(cfg, "PRIV", "10.9.0.4", "SRVPUB")
+    parsed = _decode_amnezia_key(ak.build_key(conf, "n"))
     import json
 
     last = json.loads(parsed["containers"][0]["awg"]["last_config"])
@@ -1132,6 +1083,6 @@ def test_page_order_amnezia_first_hiddify_fallback_no_autoissue():
         < page.index("VLESS · Hiddify")
     )
     assert "запасной способ" in page and "Если AmneziaVPN не подключается" in page
-    assert "toggle" not in page  # выпуск только по нажатию кнопки
-    plain = _page()  # без AmneziaVPN Hiddify — единственный
+    assert "toggle" not in page
+    plain = _page()
     assert "запасной способ" not in plain

@@ -1,7 +1,3 @@
-"""Текст алерта vpn_check: одно сообщение на прогон списка сайтов через
-туннель, «все» при полном отказе, адреса в <code> (иначе Telegram лепит
-превью ссылок)."""
-
 from __future__ import annotations
 
 from sa_home_bot.bot.node_events import render_vpn_check

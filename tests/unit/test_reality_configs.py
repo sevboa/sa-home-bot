@@ -1,6 +1,3 @@
-"""reality/client_config.py: валидность sing-box JSON, порядок правил
-маршрутизации, форма vless://-ссылки и deep-link. Чистые функции, БД/сети нет."""
-
 from __future__ import annotations
 
 import json
@@ -8,11 +5,14 @@ import json
 import pytest
 
 from sa_home_bot.reality.client_config import (
+    DEFAULT_FLOW,
     RealityParams,
+    parse_vless_url,
     render_deep_link,
     render_singbox_config,
     render_vless_url,
 )
+from sa_home_bot.reality.probe_client_config import render_probe_client_config
 from sa_home_bot.reality.routing import DIRECT_SUFFIXES, RULESET_URLS
 
 PARAMS = RealityParams(
@@ -36,7 +36,7 @@ def _rule_set_tags(rule: dict) -> list[str]:
 def test_singbox_config_is_valid_json_with_trailing_newline() -> None:
     text = render_singbox_config(PARAMS, UUID)
     assert text.endswith("\n")
-    json.loads(text)  # не бросает
+    json.loads(text)
 
 
 def test_proxy_outbound_carries_reality_and_flow() -> None:
@@ -68,7 +68,6 @@ def test_route_rule_actions_match_intent() -> None:
     assert by_tag["ru-direct-manual"]["outbound"] == "direct"
     assert by_tag["ru-blocked"]["outbound"] == "proxy"
     assert by_tag["ru-inside"]["outbound"] == "direct"
-    # sniff и hijack-dns идут первыми
     assert rules[0].get("action") == "sniff"
     assert any(r.get("action") == "hijack-dns" for r in rules[:3])
     assert any(r.get("ip_is_private") for r in rules)
@@ -105,7 +104,7 @@ def test_all_proxy_drops_split_rules() -> None:
     tags = {tag for rule in cfg["route"]["rules"] for tag in _rule_set_tags(rule)}
     assert "ru-blocked" not in tags
     assert "ru-inside" not in tags
-    assert "ru-direct-manual" in tags  # банки по-прежнему напрямую
+    assert "ru-direct-manual" in tags
     rs_tags = {rs["tag"] for rs in cfg["route"]["rule_set"]}
     assert rs_tags == {"ru-direct-manual"}
     assert cfg["dns"]["final"] == "proxy-dns"
@@ -127,7 +126,6 @@ def test_render_vless_url_shape() -> None:
     assert "sid=0123456789abcdef" in url
     assert "sni=www.google.com" in url
     assert "type=tcp" in url
-    # фрагмент — URL-экранированное имя устройства, в самом конце
     assert url.endswith("#%D1%82%D0%B5%D0%BB%D0%B5%D1%84%D0%BE%D0%BD%20%D0%9F%D0%B5%D1%82%D0%B8")
 
 
@@ -142,9 +140,68 @@ def test_direct_suffixes_are_clean(suffix: str) -> None:
     assert not suffix.startswith(".")
     assert " " not in suffix
     assert "/" not in suffix
-    assert "." in suffix  # это домен, а не голое слово
+    assert "." in suffix
 
 
 def test_direct_suffixes_no_duplicates() -> None:
     assert len(DIRECT_SUFFIXES) == len(set(DIRECT_SUFFIXES))
-    assert DIRECT_SUFFIXES  # непустой
+    assert DIRECT_SUFFIXES
+
+
+PROBE_PARAMS = RealityParams(
+    endpoint_host="172.245.159.221",
+    port=8443,
+    server_public_key="pta_VF3o7pvmIw_X3VDePlqIsgOuyWVGrFBvPxjA-wk",
+    short_id="51ccffcdddd273ab",
+    sni="www.google.com",
+    flow=DEFAULT_FLOW,
+)
+PROBE_UUID = "c0ffee00-dead-beef-0000-000000000001"
+
+
+def test_parse_vless_url_round_trips_with_render_vless_url():
+    url = render_vless_url(PROBE_PARAMS, PROBE_UUID, "🇳🇱 Rose")
+    assert parse_vless_url(url) == (PROBE_PARAMS, PROBE_UUID)
+
+
+def test_parse_vless_url_defaults_flow_when_absent():
+    url = (
+        "vless://uuid-1@1.2.3.4:8443?encryption=none&security=reality"
+        "&sni=www.google.com&fp=chrome&pbk=PBK&sid=SID&type=tcp#label"
+    )
+    params, client_uuid = parse_vless_url(url)
+    assert client_uuid == "uuid-1"
+    assert params.flow == DEFAULT_FLOW
+
+
+@pytest.mark.parametrize(
+    ("url", "message"),
+    [
+        ("https://example.com", "vless"),
+        ("vless://@1.2.3.4:8443?pbk=PBK&sid=SID&sni=x", "uuid"),
+        ("vless://uuid-1@1.2.3.4:8443?sni=x&sid=SID", "pbk"),
+    ],
+)
+def test_parse_vless_url_rejects_malformed(url, message):
+    with pytest.raises(ValueError, match=message):
+        parse_vless_url(url)
+
+
+def test_render_probe_client_config_socks_inbound_and_reality_outbound():
+    config = json.loads(render_probe_client_config(PROBE_PARAMS, PROBE_UUID, socks_port=11080))
+    inbound = config["inbounds"][0]
+    assert inbound["protocol"] == "socks"
+    assert inbound["listen"] == "127.0.0.1"
+    assert inbound["port"] == 11080
+    assert inbound["settings"]["udp"] is True
+    outbound = config["outbounds"][0]
+    assert outbound["protocol"] == "vless"
+    vnext = outbound["settings"]["vnext"][0]
+    user = vnext["users"][0]
+    assert user == {"id": PROBE_UUID, "encryption": "none", "flow": DEFAULT_FLOW}
+    reality = outbound["streamSettings"]["realitySettings"]
+    assert reality["serverName"] == PROBE_PARAMS.sni
+    assert reality["publicKey"] == PROBE_PARAMS.server_public_key
+    assert reality["shortId"] == PROBE_PARAMS.short_id
+    assert vnext["address"] == PROBE_PARAMS.endpoint_host
+    assert vnext["port"] == PROBE_PARAMS.port

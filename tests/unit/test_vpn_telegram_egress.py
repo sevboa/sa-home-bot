@@ -1,6 +1,3 @@
-"""VpnService: telegram_egress (этап 52) — SOCKS-адрес своей ноды и проба
-api.telegram.org через её reality, снятая наблюдателем-ботом."""
-
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -142,7 +139,6 @@ async def test_other_transport_target_observer_server_not_mixed(env):
 
     await _put(db, svc, ms=777)
     assert (await _ask(svc))["check"]["ms"] == 777
-    # другой наблюдатель видит только свою строку
     assert (await _ask(svc, "wooster"))["check"]["ms"] == 3
 
 
