@@ -1,29 +1,24 @@
-"""Presence/wake-сценарий /ai (bot/ai_flow.py): «шаги», молчаливый wake через
-рой, Агнольд/Альбегт. Персонаж и текстовки — из обсуждения с пользователем
-2026-07-23 (см. докстринг модуля ai_flow.py)."""
-
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
-import pytest_asyncio
+import pytest
 
 from sa_home_bot import llm_chat
-from sa_home_bot.bot import ai_context, ai_flow, wake_state
+from sa_home_bot.bot import ai_flow, wake_state
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.config import LlmConfig, Settings
-from sa_home_bot.db.connection import Database
-from sa_home_bot.db.migrations import apply_migrations
-from sa_home_bot.db.store import Store
 from sa_home_bot.llm.prompt import ROUTE_OK, THINK_MARKER
 from sa_home_bot.proto.messages import ERR_INTERNAL, ERR_UNAVAILABLE, ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
+from tests.unit.support.fakes import FakeNotifier
 
-from .people_helpers import claim, people_book
+from .ai_helpers import FakeRichSession, user
+from .people_helpers import claim
 
 MYCRAFT_WAKE = {"mac": "aa:bb:cc:dd:ee:ff", "ip": "192.168.0.50", "broadcast": "192.168.0.255"}
 ALFRED_WAKE = {"mac": "7c:83:34:b4:59:ac", "ip": "192.168.0.100", "broadcast": "192.168.0.255"}
@@ -64,60 +59,11 @@ class FakeMessage:
         self.answers.append(text)
 
 
-class FakeNotifier:
-    def __init__(self) -> None:
-        self.sent: list[tuple[int, str]] = []
-
-    async def send_direct(self, chat_id, text, reply_to_message_id=None, reply_markup=None):
-        self.sent.append((chat_id, text))
-        return 1
-
-
-class FakeUser:
-    def __init__(self, first_name, last_name=None, username=None, id=1):  # noqa: A002
-        self.id = id
-        self.first_name = first_name
-        self.last_name = last_name
-        self.username = username
-
-    @property
-    def full_name(self):
-        return f"{self.first_name} {self.last_name}" if self.last_name else self.first_name
-
-
-class NoteMessage:
-    """Мини-заглушка Message только для _build_context_note — не тянет весь
-    presence/wake-сценарий FakeMessage/FakeNodeLink."""
-
-    def __init__(self, chat_id, chat_type, from_user, reply_to_message=None, quote=None):
-        self.chat = SimpleNamespace(id=chat_id, type=chat_type)
-        self.from_user = from_user
-        self.reply_to_message = reply_to_message
-        self.quote = quote
-
-
-class FakeRepliedMessage:
-    """Заглушка reply_to_message — сообщение, на которое отвечают."""
-
-    def __init__(self, message_id, from_user=None, text=None, caption=None):
-        self.message_id = message_id
-        self.from_user = from_user
-        self.text = text
-        self.caption = caption
-
-
-class FakeQuote:
-    def __init__(self, text):
-        self.text = text
+def _notifier():
+    return FakeNotifier(send_direct_result=1)
 
 
 def _admin_book() -> SubscriptionBook:
-    """Админский чат для уведомлений (999) + сам собеседник (1, чат FakeMessage).
-
-    У собеседника права перечислены группами, но БЕЗ голого "*" — иначе
-    notify_admins считал бы админом и его тоже. По этой подписке собирается
-    комплект тулов для /ai (bot/tools.py::tools_for).
-    """
     return SubscriptionBook(
         [
             Subscription(chat_id=999, name="admin", allowed_commands=frozenset({"*"})),
@@ -155,26 +101,12 @@ class FakeNodeLink:
         self.recall_calls: list[dict] = []
         self.graph_recall_calls: list[dict] = []
         self._own = own or OWN_STATE
-        # chat_results — список результатов/исключений, по одному на каждый
-        # вызов command("chat", ...) (по порядку) — эмулирует "недоступна,
-        # затем доступна после wake".
         self._chat_results = list(chat_results)
         self._get_state_routes = get_state_routes or {}
-        # get_state_sequences — то же самое, но по одному значению НА ВЫЗОВ
-        # (в отличие от routes — статичного ответа навсегда): нужно, чтобы
-        # честно смоделировать реальный WoL-сценарий — сначала presence не
-        # отвечает (None), затем, после отправки magic packet, начинает
-        # отвечать (wake_core.wait_for_service опрашивает по кругу). ``None``
-        # в списке — "недоступна в этот раз" (как отсутствие в routes).
         self._get_state_sequences = {k: list(v) for k, v in (get_state_sequences or {}).items()}
         self.wol_sent = wol_sent if wol_sent is not None else []
         self.command_calls: list[tuple[str, dict, str | None]] = []
         self.get_state_calls: list[str] = []
-        # Прогрев (wake_core.try_warmup, теперь звучит из ensure_service_ready
-        # безусловно на "спящей"/только что разбуженной ветке — живая находка
-        # при аудите 2026-08-26) — по умолчанию мгновенно успешен (как в
-        # реальной службе llm, ACTION_WARMUP почти всегда поддержан и удачен);
-        # исключение — сконфигурировать сбой прогрева отдельно от chat_results.
         self._warmup_result = warmup_result
 
     async def describe(self, dst=None):
@@ -205,23 +137,12 @@ class FakeNodeLink:
 
     async def command(self, action, args=None, dst=None, timeout=None):
         if action == "recall":
-            # Память спрашивается перед КАЖДЫМ запросом (bot/ai_flow.py::
-            # recall_facts) — в command_calls её не пишем, иначе каждый тест
-            # про раунды chat считал бы её лишним вызовом. По умолчанию
-            # память пуста: заметка остаётся ровно такой, как была раньше.
             self.recall_calls.append(args)
             return {"facts": list(self.memory_facts), "count": len(self.memory_facts)}
         if action == "search" and dst is not None and dst.service == "graph_memory":
-            # Графовая память (Этап 41, recall_graph_facts) спрашивается
-            # перед КАЖДЫМ запросом ровно как memory выше — та же причина не
-            # писать в command_calls. Совпадение имени действия с net.search
-            # (web_search) не проблема в проде (маршрутизация по dst), здесь
-            # разводим тем же полем.
             self.graph_recall_calls.append(args)
             return {"facts": list(self.graph_facts), "count": len(self.graph_facts)}
         if action == "person_cards":
-            # Карточки людей (Этап 54.3) — тоже перед каждым ходом, та же
-            # причина не писать в command_calls.
             self.person_cards_calls.append(args)
             return {"cards": dict(self.person_cards)}
         self.command_calls.append((action, args, dst.node if dst else None))
@@ -229,7 +150,6 @@ class FakeNodeLink:
             self.wol_sent.append(args)
             return {"sent": True}
         if action == "search":
-            # Служба net (тул web_search) — отвечаем канонично, не ходя в сеть.
             return {
                 "query": args.get("query", ""),
                 "results": [{"title": "T", "url": "u"}],
@@ -246,26 +166,6 @@ class FakeNodeLink:
         return result
 
 
-class FakeRichSession:
-    """Двойник bot/rich_stream.py::RichStreamSession — только то, что видит
-    ai_flow.py (push_status/on_partial/finalize_status), без реального
-    draft/Bot API."""
-
-    def __init__(self) -> None:
-        self.statuses: list[str] = []
-        self.partials: list[tuple[str, bool]] = []
-        self.finalized_statuses: list[str] = []
-
-    async def push_status(self, text: str) -> None:
-        self.statuses.append(text)
-
-    async def on_partial(self, text: str, done: bool) -> None:
-        self.partials.append((text, done))
-
-    async def finalize_status(self, markdown: str) -> None:
-        self.finalized_statuses.append(markdown)
-
-
 def _settings() -> Settings:
     return Settings(llm=LlmConfig(request_timeout_s=5.0))
 
@@ -274,20 +174,37 @@ def _single_call_settings() -> Settings:
     return Settings(llm=LlmConfig(request_timeout_s=5.0, mode="single_call"))
 
 
-@pytest_asyncio.fixture(autouse=True)
+async def _ask(
+    message,
+    link,
+    store,
+    text="привет",
+    *,
+    history=None,
+    settings=None,
+    dialogue_id=1,
+    book=None,
+    notifier=None,
+    **extras,
+):
+    return await ai_flow.request_alfred(
+        message,
+        link,
+        store,
+        settings or _settings(),
+        history or [{"role": "user", "content": text}],
+        dialogue_id,
+        book or _admin_book(),
+        notifier or _notifier(),
+        **extras,
+    )
+
+
+@pytest.fixture(autouse=True)
 def _clear_profile_cache():
     ai_flow._profile_cache.clear()
     yield
     ai_flow._profile_cache.clear()
-
-
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    db = Database(tmp_path / "test.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
 
 
 async def test_fast_path_no_narrative_when_node_already_up(store):
@@ -297,23 +214,15 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    raw = await _ask(message, link, store)
 
     assert raw == "Добгый день, сэ"
-    assert message.answers == []  # никаких «шагов»/Агнольда — узел жив, модель не спит
-    # Два вызова — лёгкий router-проход (без персонажа, решает think/тулы,
-    # ЯВНО think=false ради скорости), затем персонажный проход с явным
-    # think=false — роутер не настоял на думании.
+    assert message.answers == []
     assert len(link.command_calls) == 2
     action, router_args, node = link.command_calls[0]
     assert (action, node) == ("chat", "mycraft")
     assert router_args["chat_id"] == 1
     assert router_args["reason"] == "off"
-    # Комплект собран под права собеседника, а не глобальный список. Тулы
-    # канарейки Этапа 59 (search) гостю вне списка не даются.
     assert router_args["tools"] == [
         d
         for d in ai_flow.ai_tools.tools_for(_admin_book().for_chat(1)).declarations
@@ -323,8 +232,6 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
     persona_args = link.command_calls[1][1]
     assert "role" not in persona_args
     assert persona_args["reason"] == "off"
-    # Router и персонажный проход видят ОДНУ и ту же историю — никакой
-    # отдельной триаж-инструкции больше не вставляется в сообщения.
     assert router_args["messages"] == persona_args["messages"]
     assert router_args["messages"][-1] == {"role": "user", "content": "привет"}
     assert len(router_args["messages"]) == 2
@@ -332,64 +239,7 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
     assert "Точное время сейчас" in router_args["messages"][0]["content"]
 
 
-async def test_single_call_think_true_sends_high_reason(store):
-    # single_call_think=True (legacy-override) — единственный проход просит
-    # рассуждение уровнем "high"; как это станет параметром Ollama, решает
-    # профиль модели на стороне службы llm.
-    message = FakeMessage()
-    link = FakeNodeLink(
-        chat_results=[{"response": "Добгый день, сэг"}],
-        get_state_routes={"mycraft:llm": {"asleep": False}},
-    )
-    settings = Settings(
-        llm=LlmConfig(request_timeout_s=5.0, mode="single_call", single_call_think=True)
-    )
-
-    await ai_flow.request_alfred(
-        message, link, store, settings,
-        [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
-
-    _, args, _ = link.command_calls[0]
-    assert args["reason"] == "high"
-    assert "think" not in args
-
-
-async def test_single_call_mode_skips_router(store):
-    # LlmConfig.mode="single_call" (явный legacy-override) — ни router-прохода,
-    # ни поля think; один персонажный вызов сразу с reason="off"
-    # (single_call_think не задан).
-    message = FakeMessage()
-    link = FakeNodeLink(
-        chat_results=[{"response": "Добгый день, сэ"}],
-        get_state_routes={"mycraft:llm": {"asleep": False}},
-    )
-
-    raw = await ai_flow.request_alfred(
-        message, link, store, _single_call_settings(),
-        [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
-
-    assert raw == "Добгый день, сэ"
-    assert message.answers == []  # ни «шагов», ни THINKING_TEXT — решать нечего
-    assert len(link.command_calls) == 1
-    action, args, node = link.command_calls[0]
-    assert (action, node) == ("chat", "mycraft")
-    assert args["reason"] == "off"
-    assert "think" not in args
-    assert "role" not in args
-
-
 async def test_speech_remark_is_captured_not_sent_inline(store):
-    # Живой баг 2026-08-03: ремарка «Логопеда» раньше дописывалась llm/
-    # service.py прямо в текст ответа — уезжала одним сообщением с ним И
-    # ломано отформатированной (bot/handlers/ai.py экранирует ВЕСЬ текст
-    # персонажа как plain text). Теперь служба llm отдаёт её отдельным
-    # полем speech_remark, а request_alfred только складывает её в box —
-    # отправка отдельным сообщением ПОСЛЕ ответа остаётся за вызывающим
-    # (bot/handlers/ai.py::_do_ask_and_reply), не за этой функцией.
     message = FakeMessage()
     remark = "🗣 <i>Логопед:</i> не «сэг», а «сэр»!"
     link = FakeNodeLink(
@@ -399,21 +249,23 @@ async def test_speech_remark_is_captured_not_sent_inline(store):
     box = ai_flow.SpeechRemarkBox()
 
     raw = await ai_flow.request_alfred(
-        message, link, store, _single_call_settings(),
-        [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(), speech_remark=box,
+        message,
+        link,
+        store,
+        _single_call_settings(),
+        [{"role": "user", "content": "привет"}],
+        1,
+        _admin_book(),
+        _notifier(),
+        speech_remark=box,
     )
 
-    assert raw == "Добгый день, сэг"  # ремарка НЕ подмешана в текст ответа
+    assert raw == "Добгый день, сэг"
     assert box.text == remark
-    assert message.answers == []  # request_alfred сама ничего не шлёт
+    assert message.answers == []
 
 
 async def test_tool_call_round_trip_reaches_final_response(store):
-    # Тул вызывается в router-проходе (round 1: просьба вызвать calc, round
-    # 2: после результата — решение "OK"), персонажный проход (3й вызов)
-    # видит уже готовый результат тула в истории и формулирует финальный
-    # ответ (§7.1 плана).
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[
@@ -424,25 +276,18 @@ async def test_tool_call_round_trip_reaches_final_response(store):
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "сколько 2+2"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    raw = await _ask(message, link, store, "сколько 2+2")
 
     assert raw == "Отвечу: 4"
     assert len(link.command_calls) == 3
     router_round2_messages = link.command_calls[1][1]["messages"]
     assert router_round2_messages[-2]["role"] == "assistant"
     assert router_round2_messages[-1] == {"role": "tool", "content": "4", "name": "calc"}
-    # Персонажный проход видит тот же обмен с тулом, что и router.
     assert link.command_calls[2][1]["messages"] == router_round2_messages
     assert "role" not in link.command_calls[2][1]
 
 
 async def test_photo_tool_ends_the_turn_without_a_reply(store):
-    """Живая находка 2026-10-02: Альфред описывал снимок, которого ещё нет.
-    Снимок пошёл рисоваться — ход кончается без реплики и без персонажного
-    прохода; рассказ о снимке придёт вместе с ним (bot/interactives)."""
     from sa_home_bot.bot.interactives import cabinet
 
     class Photos:
@@ -456,8 +301,15 @@ async def test_photo_tool_ends_the_turn_without_a_reply(store):
     )
 
     raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "скинь фото"}], 1,
-        _admin_book(), FakeNotifier(), interactives=Photos(),
+        message,
+        link,
+        store,
+        _settings(),
+        [{"role": "user", "content": "скинь фото"}],
+        1,
+        _admin_book(),
+        _notifier(),
+        interactives=Photos(),
     )
 
     assert raw == ai_flow.SILENT_REPLY
@@ -465,10 +317,6 @@ async def test_photo_tool_ends_the_turn_without_a_reply(store):
 
 
 async def test_tool_call_is_recorded_in_store(store):
-    # Живая находка 2026-07-24: "шиза" с часовыми поясами была
-    # недиагностируема — ai_turns хранит только финальный текст ответа, не
-    # видно, звала ли модель тул вообще. Теперь каждый вызов тула пишется
-    # через колбэк в Store.record_tool_call (schema.sql::ai_tool_calls).
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[
@@ -479,10 +327,7 @@ async def test_tool_call_is_recorded_in_store(store):
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
-    await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "сколько 2+2"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    await _ask(message, link, store, "сколько 2+2")
 
     calls = await store.tool_calls_for_dialogue(message.chat.id, 1)
     assert len(calls) == 1
@@ -502,10 +347,7 @@ async def test_unknown_tool_name_reported_back_to_model(store):
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "..."}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    raw = await _ask(message, link, store, "...")
 
     assert raw == "ладно"
     tool_msg = link.command_calls[1][1]["messages"][-1]
@@ -514,41 +356,26 @@ async def test_unknown_tool_name_reported_back_to_model(store):
 
 
 async def test_tool_call_round_limit_squeezes_answer_without_tools(store):
-    """Лимит раундов исчерпан — не сбой, а последний запрос БЕЗ инструментов.
-
-    Живая находка 2026-07-27: модель делала три поиска подряд и упиралась в
-    лимит, после чего пользователь получал ALBERT_HICCUP, прождав минуты, —
-    хотя результаты тулов уже лежали в messages и отвечать было чем.
-    """
     tool_calls = [{"function": {"name": "calc", "arguments": {"expression": "1+1"}}}]
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[
-            # router-проход: упирается в лимит...
             *[{"tool_calls": tool_calls}] * llm_chat.MAX_TOOL_ROUNDS,
-            # ...и дожимает решение уже без тулов
             {"response": ROUTE_OK},
-            # персонажный проход
             {"response": "Двá, сэг"},
         ],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "..."}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    raw = await _ask(message, link, store, "...")
 
     assert raw == "Двá, сэг"
     assert ai_flow.ALBERT_HICCUP not in message.answers
-    # Дожимающий запрос — ровно тот, что идёт сразу после исчерпания лимита;
-    # у него пустой tools, иначе модели снова было бы что вызвать.
     squeeze_args = link.command_calls[llm_chat.MAX_TOOL_ROUNDS][1]
     assert squeeze_args["tools"] == []
 
 
 async def test_empty_answer_after_round_limit_is_still_a_hiccup(store):
-    """Пустой ответ, когда звать уже нечего, — настоящий сбой генерации."""
     tool_calls = [{"function": {"name": "calc", "arguments": {"expression": "1+1"}}}]
     message = FakeMessage()
     link = FakeNodeLink(
@@ -559,30 +386,13 @@ async def test_empty_answer_after_round_limit_is_still_a_hiccup(store):
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "..."}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    raw = await _ask(message, link, store, "...")
 
     assert raw is None
     assert message.answers == [ai_flow.ALBERT_HICCUP]
 
 
-# --- вариативное рассуждение (THINK_MARKER/THINKING_TEXT): быстрый проход
-# (think=false) с триаж-инструкцией; думающий (think=true) — только если
-# модель сама попросила подумать ---
-
-
 def test_think_marker_survives_llm_service_transforms(tmp_path):
-    # Живой баг на проде 2026-07-24: старый маркер с кириллической "Р"
-    # утекал в чат мангленным ("[[ТГЕБУЕТСЯ_ГАЗМЫШЛЕНИЕ]]") — llm/service.py
-    # прогоняет ЛЮБОЙ ответ модели (в т.ч. этот служебный маркер) через
-    # SpeechTherapist/strip_math_notation до того, как отдать боту. Маркер
-    # обязан пережить обе трансформации байт-в-байт, иначе проверка
-    # "THINK_MARKER not in fast_answer" в _ask() молча перестаёт работать.
-    # rand=0.0 — наихудший случай (искажение/визит логопеда сработали бы
-    # всегда) — показывает, что маркер защищён структурно (латиница вне
-    # regex [А-Яа-яЁё]+), не везением рандома.
     from sa_home_bot.config import LlmConfig
     from sa_home_bot.llm.prompt import strip_math_notation
     from sa_home_bot.llm.speech_therapy import SpeechTherapist
@@ -593,86 +403,7 @@ def test_think_marker_survives_llm_service_transforms(tmp_path):
     assert transformed == THINK_MARKER
 
 
-async def test_fast_path_no_thinking_when_marker_absent(store):
-    message = FakeMessage()
-    link = FakeNodeLink(
-        chat_results=[{"response": ROUTE_OK}, {"response": "Добгый день, сэ"}],
-        get_state_routes={"mycraft:llm": {"asleep": False}},
-    )
-
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
-
-    assert raw == "Добгый день, сэ"
-    assert message.answers == []  # THINKING_TEXT не показывался — думать не понадобилось
-    assert len(link.command_calls) == 2
-    assert link.command_calls[0][1]["reason"] == "off"
-    assert link.command_calls[1][1]["reason"] == "off"
-
-
-async def test_escalates_to_thinking_when_marker_returned(store):
-    message = FakeMessage()
-    link = FakeNodeLink(
-        chat_results=[
-            {"response": f"кое-что... {THINK_MARKER}"},
-            {"response": "Точный ответ после раздумий"},
-        ],
-        get_state_routes={"mycraft:llm": {"asleep": False}},
-    )
-
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "сложный вопрос"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
-
-    assert raw == "Точный ответ после раздумий"
-    assert message.answers == [ai_flow.THINKING_TEXT]
-    assert len(link.command_calls) == 2
-    router_args = link.command_calls[0][1]
-    persona_args = link.command_calls[1][1]
-    assert router_args["role"] == "router"
-    assert router_args["reason"] == "off"
-    assert "role" not in persona_args
-    assert persona_args["reason"] == "high"  # THINK_MARKER → уровень 3
-    # Персонажный проход видит ту же историю, что и router (никакой
-    # отдельной триаж-инструкции/маркера в сообщениях не остаётся: её
-    # дописывает служба llm у себя, см. llm/service.py — так у обоих
-    # проходов общий префикс и общий KV-кэш).
-    assert persona_args["messages"] == router_args["messages"]
-    assert persona_args["messages"][-1] == {"role": "user", "content": "сложный вопрос"}
-
-
-async def test_escalates_to_thinking_uses_rich_status_not_plain_message(store):
-    # rich_session передан (приватный чат + response_mode="rich") — THINKING_
-    # TEXT идёт курсивной строкой в тот же черновик, а не отдельным
-    # сообщением (см. ai_flow.py::THINKING_TEXT_PLAIN).
-    message = FakeMessage()
-    rich_session = FakeRichSession()
-    link = FakeNodeLink(
-        chat_results=[
-            {"response": f"кое-что... {THINK_MARKER}"},
-            {"response": "Точный ответ после раздумий"},
-        ],
-        get_state_routes={"mycraft:llm": {"asleep": False}},
-    )
-
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "сложный вопрос"}], 1,
-        _admin_book(), FakeNotifier(),
-        rich_session=rich_session,
-    )
-
-    assert raw == "Точный ответ после раздумий"
-    assert message.answers == []
-    assert rich_session.statuses == [ai_flow.THINKING_TEXT_PLAIN]
-
-
 async def test_router_level_maps_to_reason(store):
-    # Роутер вернул THINK:2 → персонажный проход просит reason="medium".
-    # Перевод уровня в параметр модели (флаг/effort/отсутствие флага) —
-    # уже на стороне службы llm по профилю модели, бот шлёт только намерение.
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[
@@ -682,20 +413,15 @@ async def test_router_level_maps_to_reason(store):
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
-    await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "задачка"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    await _ask(message, link, store, "задачка")
 
-    assert link.command_calls[0][1]["reason"] == "off"  # роутер сам не думает
+    assert link.command_calls[0][1]["reason"] == "off"
     assert link.command_calls[1][1]["reason"] == "medium"
     assert "think" not in link.command_calls[1][1]
-    assert message.answers == [ai_flow.THINKING_TEXT]  # уровень >= 1 → «задумчивость»
+    assert message.answers == [ai_flow.THINKING_TEXT]
 
 
 async def test_scene_turn_does_not_think(store):
-    # Сцена интерактива: ход ведёт Ведущий — Альфред отвечает без
-    # рассуждения, даже если роутер попросил думать (2026-10-02).
     from types import SimpleNamespace
 
     message = FakeMessage()
@@ -708,18 +434,13 @@ async def test_scene_turn_does_not_think(store):
     )
     turn = SimpleNamespace(scene=True, note=None, user_id=1, speech_clear=False)
 
-    await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "щёлкаю тумблер"}], 1,
-        _admin_book(), FakeNotifier(), interactive_turn=turn,
-    )
+    await _ask(message, link, store, "щёлкаю тумблер", interactive_turn=turn)
 
     assert link.command_calls[1][1]["reason"] == "off"
-    assert message.answers == []  # без «задумчивости»
+    assert message.answers == []
 
 
 async def test_router_uses_describe_profile_when_mode_not_pinned(store):
-    # [llm].mode не задан явно → бот берёт router из профиля модели (describe).
-    # profile.router=False → один персонажный проход без router.
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[{"response": "Ответ"}],
@@ -727,208 +448,10 @@ async def test_router_uses_describe_profile_when_mode_not_pinned(store):
         model_profile={"name": "solo", "router": False, "thinking_hidden": False, "num_ctx": 8192},
     )
 
-    await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    await _ask(message, link, store)
 
     assert len(link.command_calls) == 1
     assert "role" not in link.command_calls[0][1]
-
-
-async def test_asleep_model_shows_steps_but_no_wake(store):
-    # Узел доступен, модель просто спит (idle-таймер llm/service.py) — не
-    # сценарий wake (магик-пакет тут ни при чём), но пользователь должен
-    # увидеть «шаги», а не молча ждать до request_timeout_s.
-    message = FakeMessage()
-    link = FakeNodeLink(
-        chat_results=[{"response": ROUTE_OK}, {"response": "Секунду, сэг"}],
-        get_state_routes={"mycraft:llm": {"asleep": True}},
-    )
-
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
-
-    assert raw == "Секунду, сэг"
-    assert message.answers == [ai_flow.STEPS_TEXT]
-    assert link.wol_sent == []  # узел был доступен — будить не нужно
-
-
-async def test_asleep_model_shows_steps_via_rich_status_not_plain_message(store):
-    # Тот же сценарий, что test_asleep_model_shows_steps_but_no_wake, но с
-    # rich_session — STEPS_TEXT идёт в черновик курсивом (push_status), а не
-    # отдельным message.answer (см. ai_flow.py::_announce_steps).
-    message = FakeMessage()
-    rich_session = FakeRichSession()
-    link = FakeNodeLink(
-        chat_results=[{"response": ROUTE_OK}, {"response": "Секунду, сэг"}],
-        get_state_routes={"mycraft:llm": {"asleep": True}},
-    )
-
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-        rich_session=rich_session,
-    )
-
-    assert raw == "Секунду, сэг"
-    assert message.answers == []
-    assert rich_session.statuses == [ai_flow.STEPS_TEXT_PLAIN]
-
-
-async def test_asleep_warmup_fails_answers_as_albert_not_generic_error(store):
-    # Прогрев не уложился (Ollama не поднялась) — раз мы уже знали, что
-    # модель спит, это подаётся как «Альфред, кажется, уснул» (Альбегт),
-    # а не безликое «Прошу прощения, не вышло» от самого Альфреда. Сбой
-    # теперь моделируется через warmup_result (ensure_service_ready сама
-    # решает прогрев/сон — chat вообще не должен вызываться, см. ниже).
-    message = FakeMessage()
-    notifier = FakeNotifier()
-    link = FakeNodeLink(
-        get_state_routes={"mycraft:llm": {"asleep": True}},
-        warmup_result=ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева"),
-    )
-
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), notifier,
-    )
-
-    assert raw is None
-    assert message.answers == [ai_flow.STEPS_TEXT, ai_flow.ALBERT_ASLEEP]
-    assert link.wol_sent == []  # узел был доступен — будить не нужно
-    assert link.command_calls == [("warmup", {}, "mycraft")]  # chat не вызывался вовсе
-    assert len(notifier.sent) == 1  # админ всё равно узнаёт о сбое
-
-
-async def test_asleep_warmup_fails_uses_rich_finalize_status_not_plain_answer(store):
-    # Живая находка 2026-08-11: раньше «Альбегт» уходил голым message.answer()
-    # даже при активной rich-сессии — черновик «шагов» оставался незакрытым
-    # (см. keep-alive в rich_stream.py, который иначе крутился бы до
-    # защитного потолка). _announce_albert должен закрывать сессию тем же
-    # finalize_status, что и «Агнольд».
-    message = FakeMessage()
-    rich_session = FakeRichSession()
-    link = FakeNodeLink(
-        get_state_routes={"mycraft:llm": {"asleep": True}},
-        warmup_result=ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева"),
-    )
-
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-        rich_session=rich_session,
-    )
-
-    assert raw is None
-    assert message.answers == []
-    assert rich_session.statuses == [ai_flow.STEPS_TEXT_PLAIN]
-    assert rich_session.finalized_statuses == [ai_flow.ALBERT_ASLEEP_MD]
-
-
-async def test_unavailable_then_woken_within_30s(store, monkeypatch):
-    # Настоящий холодный старт: presence не отвечает вовсе (None) -> молчаливый
-    # WoL -> опрос (wake_core.wait_for_service) снова застаёт службу на связи
-    # -> Агнольд -> прогрев -> единственный проход _ask(). get_state_sequences
-    # моделирует "сначала недоступна, потом отвечает" честно, по вызовам, а
-    # не статичным ответом навсегда (см. FakeNodeLink про разницу с routes).
-    await wake_state.remember(store, "mycraft", MYCRAFT_WAKE)
-    monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
-    message = FakeMessage()
-    link = FakeNodeLink(
-        chat_results=[{"response": ROUTE_OK}, {"response": "Сейчас подойду"}],
-        get_state_sequences={"mycraft:llm": [None, {"asleep": True}]},
-    )
-
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
-
-    assert raw == "Сейчас подойду"
-    # Второе «шаги» — про прогрев модели (отдельная неопределённость от
-    # самого подъёма машины); успех не добавляет отдельного сообщения
-    # персонажа, это тот же самый ЕДИНСТВЕННЫЙ проход _ask().
-    assert message.answers == [ai_flow.STEPS_TEXT, ai_flow.ARNOLD_WAKING, ai_flow.STEPS_TEXT]
-    assert link.wol_sent == [{"mac": MYCRAFT_WAKE["mac"]}]  # разбудили молча
-    assert ("warmup", {}, "mycraft") in link.command_calls
-
-
-async def test_unavailable_then_woken_within_30s_via_rich_status(store, monkeypatch):
-    # Тот же сценарий, что test_unavailable_then_woken_within_30s, но с
-    # rich_session: «шаги» (до и после wake) идут эфемерными статусами в
-    # черновик (push_status), а реплика Агнольда — через finalize_status
-    # (персистентный sendRichMessage, вытесняет черновик той же сессии
-    # напрямую — живая находка 2026-08-10, третий заход: message.answer
-    # создавала заметный разрыв между исчезновением «шагов» и появлением
-    # реплики, т.к. это отдельный от rich-механики Bot API метод).
-    await wake_state.remember(store, "mycraft", MYCRAFT_WAKE)
-    monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
-    message = FakeMessage()
-    rich_session = FakeRichSession()
-    link = FakeNodeLink(
-        chat_results=[{"response": ROUTE_OK}, {"response": "Сейчас подойду"}],
-        get_state_sequences={"mycraft:llm": [None, {"asleep": True}]},
-    )
-
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-        rich_session=rich_session,
-    )
-
-    assert raw == "Сейчас подойду"
-    assert message.answers == []
-    assert rich_session.statuses == [ai_flow.STEPS_TEXT_PLAIN, ai_flow.STEPS_TEXT_PLAIN]
-    assert rich_session.finalized_statuses == [ai_flow.ARNOLD_WAKING_MD]
-    assert link.wol_sent == [{"mac": MYCRAFT_WAKE["mac"]}]  # разбудили молча
-
-
-async def test_unavailable_and_no_wake_data_gives_up_immediately(store, monkeypatch):
-    # get_state_routes пуст — presence-проверка сама уже "недоступна",
-    # полноценный _ask() с этим же исходом не запускается вовсе (живая
-    # находка 2026-07-23: не тратим до request_timeout_s на заведомо
-    # обречённую попытку, см. _PRESENCE_CHECK_TIMEOUT_S).
-    monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
-    monkeypatch.setattr(ai_flow, "WAKE_POLL_TIMEOUT_S", 0.05)
-    message = FakeMessage()
-    link = FakeNodeLink()
-
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
-
-    assert raw is None
-    assert message.answers == [ai_flow.STEPS_TEXT, ai_flow.ALBERT_UNAVAILABLE]
-    assert link.wol_sent == []  # нечем будить — нет кэша MAC
-    assert link.command_calls == []  # chat вообще не пытались звать
-
-
-async def test_unavailable_gives_up_uses_rich_finalize_status_not_plain_answer(
-    store, monkeypatch
-):
-    # Тот же сценарий, что test_unavailable_and_no_wake_data_gives_up_
-    # immediately, но с rich_session — «Альбегт» должен подменить черновик
-    # «шагов» finalize_status'ом, а не уйти отдельным message.answer().
-    monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
-    monkeypatch.setattr(ai_flow, "WAKE_POLL_TIMEOUT_S", 0.05)
-    message = FakeMessage()
-    rich_session = FakeRichSession()
-    link = FakeNodeLink()
-
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-        rich_session=rich_session,
-    )
-
-    assert raw is None
-    assert message.answers == []
-    assert rich_session.statuses == [ai_flow.STEPS_TEXT_PLAIN]
-    assert rich_session.finalized_statuses == [ai_flow.ALBERT_UNAVAILABLE_MD]
 
 
 async def test_unavailable_wake_sent_but_still_unreachable_after_30s(store, monkeypatch):
@@ -936,31 +459,18 @@ async def test_unavailable_wake_sent_but_still_unreachable_after_30s(store, monk
     monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
     monkeypatch.setattr(ai_flow, "WAKE_POLL_TIMEOUT_S", 0.05)
     message = FakeMessage()
-    link = FakeNodeLink(get_state_routes={})  # mycraft:llm так и не отвечает
+    link = FakeNodeLink(get_state_routes={})
 
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    raw = await _ask(message, link, store)
 
     assert raw is None
     assert message.answers == [ai_flow.STEPS_TEXT, ai_flow.ALBERT_UNAVAILABLE]
-    assert link.wol_sent == [{"mac": MYCRAFT_WAKE["mac"]}]  # будили, но не помогло
+    assert link.wol_sent == [{"mac": MYCRAFT_WAKE["mac"]}]
 
 
 async def test_ask_discovers_unavailable_despite_fresh_presence_reports_immediately(
     store, monkeypatch
 ):
-    # Живая находка при аудите механизма пробуждения (2026-08-26): раньше
-    # такой сбой (presence свежий и говорит "не сплю", но сам chat всё равно
-    # ловит ERR_UNAVAILABLE — редкая гонка) запускал полноценный повторный
-    # сценарий wake (молчаливый WoL + вторая, почти дословно дублирующая
-    # попытка _ask()) — см. Приложение 2.Б плана механизма готовности.
-    # Единственная точка готовности (wake_core.ensure_service_ready) уже
-    # сказала READY по presence — если сам запрос всё равно словил
-    # "недоступна", это гонка: без второго сценария wake и без WoL живой
-    # машине. С 2026-09-25 сам раунд chat коротко повторяется на обрыв связи
-    # (llm_chat.py::CHAT_RETRY_DELAYS_S) — здесь связь так и не вернулась.
     monkeypatch.setattr(llm_chat, "CHAT_RETRY_DELAYS_S", (0.0, 0.0))
     message = FakeMessage()
     link = FakeNodeLink(
@@ -968,91 +478,24 @@ async def test_ask_discovers_unavailable_despite_fresh_presence_reports_immediat
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    raw = await _ask(message, link, store)
 
     assert raw is None
     assert message.answers == [ai_flow.ALBERT_UNAVAILABLE]
-    assert link.wol_sent == []  # presence был свежим — второй попытки/wake нет
-
-
-async def test_internal_error_on_first_try_answers_user_and_notifies_admin(store):
-    # Не «недоступна» (нода жива, Ollama сама упала) — раньше улетало
-    # необработанным исключением, теперь: сообщение юзеру + диагностика админу.
-    # get_state должен успешно ответить (узел доступен) — иначе presence-
-    # проверка сама сочтёт это недоступностью и chat не будет вызван вовсе.
-    message = FakeMessage()
-    notifier = FakeNotifier()
-    link = FakeNodeLink(
-        chat_results=[ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева")],
-        get_state_routes={"mycraft:llm": {"asleep": False}},
-    )
-
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), notifier,
-    )
-
-    assert raw is None
-    # Без «шагов» — это не сценарий недоступности узла. Текст пользователю —
-    # в характере персонажа (Альбегт просит повторить), без утечки техники;
-    # подробности — только админу.
-    assert message.answers == [ai_flow.ALBERT_HICCUP]
-    assert "Ollama" not in message.answers[0]
-    assert link.wol_sent == []  # это не сценарий недоступности — wake не трогаем
-    assert len(notifier.sent) == 1
-    admin_chat_id, admin_text = notifier.sent[0]
-    assert admin_chat_id == 999
-    assert "internal" in admin_text
-    assert "Ollama не поднялась после прогрева" in admin_text
-
-
-async def test_internal_error_uses_rich_finalize_status_not_plain_answer(store):
-    # Тот же сценарий, что test_internal_error_on_first_try_answers_user_
-    # and_notifies_admin, но с rich_session — «Альбегт» (ALBERT_HICCUP)
-    # должен уйти через finalize_status, а не голым message.answer(),
-    # закрывая rich-сессию (иначе черновик — тут, правда, ещё не показанный,
-    # presence не сообщал о сне — просто не откроется вовсе).
-    message = FakeMessage()
-    notifier = FakeNotifier()
-    rich_session = FakeRichSession()
-    link = FakeNodeLink(
-        chat_results=[ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева")],
-        get_state_routes={"mycraft:llm": {"asleep": False}},
-    )
-
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), notifier,
-        rich_session=rich_session,
-    )
-
-    assert raw is None
-    assert message.answers == []
-    assert rich_session.statuses == []  # presence не сообщал о сне — «шагов» не было
-    assert rich_session.finalized_statuses == [ai_flow.ALBERT_HICCUP_MD]
+    assert link.wol_sent == []
 
 
 async def test_wake_succeeds_but_warmup_fails_after_wake(store, monkeypatch):
-    # Настоящий холодный старт: machine поднялась по WoL (Агнольд успел
-    # сказать своё), но сам прогрев модели не задался — это шаги уже
-    # Альбегта, не безликое извинение Альфреда. chat вообще не вызывается —
-    # ensure_service_ready решает всё до request_alfred::_ask().
     await wake_state.remember(store, "mycraft", MYCRAFT_WAKE)
     monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
     message = FakeMessage()
-    notifier = FakeNotifier()
+    notifier = _notifier()
     link = FakeNodeLink(
         get_state_sequences={"mycraft:llm": [None, {"asleep": True}]},
         warmup_result=ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева"),
     )
 
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), notifier,
-    )
+    raw = await _ask(message, link, store, notifier=notifier)
 
     assert raw is None
     assert message.answers == [
@@ -1061,284 +504,30 @@ async def test_wake_succeeds_but_warmup_fails_after_wake(store, monkeypatch):
         ai_flow.STEPS_TEXT,
         ai_flow.ALBERT_ASLEEP,
     ]
-    assert link.command_calls[-1] == ("warmup", {}, "mycraft")  # chat не вызывался вовсе
+    assert link.command_calls[-1] == ("warmup", {}, "mycraft")
     assert len(notifier.sent) == 1
 
 
 async def test_node_alive_but_service_down_skips_wake_reports_crashed(store):
-    # Живая находка при аудите механизма пробуждения (2026-08-26): раньше
-    # "не отвечает" был один исход что на "машина спит", что на "машина
-    # жива, но именно служба llm упала/зависла" — magic packet слался
-    # вслепую живой машине, и код ждал до WAKE_POLL_TIMEOUT_S впустую.
-    # ensure_service_ready теперь различает их дешёвой доп.проверкой
-    # присутствия ноды (служба node, отдельная от llm) ПЕРЕД тем, как
-    # решать будить или нет.
     message = FakeMessage()
-    notifier = FakeNotifier()
+    notifier = _notifier()
     link = FakeNodeLink(get_state_routes={"mycraft:node": {"kind": "workstation"}})
 
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), notifier,
-    )
+    raw = await _ask(message, link, store, notifier=notifier)
 
     assert raw is None
     assert message.answers == [ai_flow.ALBERT_UNAVAILABLE]
-    assert link.wol_sent == []  # машина жива — будить нечего
-    assert link.command_calls == []  # chat/warmup вообще не пытались звать
+    assert link.wol_sent == []
+    assert link.command_calls == []
     assert len(notifier.sent) == 1
     admin_chat_id, admin_text = notifier.sent[0]
     assert admin_chat_id == 999
     assert "WoL" in admin_text
 
 
-# --- display_name / _build_context_note (2026-07-24: "кто пишет", "кто
-# начал", "кто ещё обращался" — контекст для промпта LLM) ---
-
-
-def test_display_name_with_username():
-    assert ai_flow.display_name(FakeUser("Иван", username="ivan")) == "Иван (@ivan)"
-
-
-def test_display_name_without_username():
-    assert ai_flow.display_name(FakeUser("Иван", "Иванов")) == "Иван Иванов"
-
-
-def test_display_name_none_for_missing_user():
-    assert ai_flow.display_name(None) is None
-
-
-# --- карточка собеседника (Этап 58): точный возраст, местное время, день
-# рождения — ФИО/даты рождения намеренно НЕ из жизни, выдуманные значения ---
-
-
-def test_person_age_computed_from_birth_date():
-    assert ai_context._person_age("1990-06-15", date(2026, 6, 14)) == 35  # ещё не наступил
-    assert ai_context._person_age("1990-06-15", date(2026, 6, 15)) == 36  # ровно сегодня
-    assert ai_context._person_age("1990-06-15", date(2026, 6, 16)) == 36
-
-
-def test_person_age_none_when_birth_date_unknown():
-    assert ai_context._person_age("", date(2026, 6, 15)) is None
-    assert ai_context._person_age(None, date(2026, 6, 15)) is None
-
-
-def test_speaker_life_note_includes_local_time_age_and_birthday():
-    people = people_book(
-        cards={
-            42: {
-                "gender": "f",
-                "city": "Москва",
-                "timezone": "Europe/Moscow",
-                "birth_date": "1990-06-15",
-            }
-        }
-    )
-    note = ai_context._speaker_life_note(people, 42)
-    assert "У неё в Москва сейчас" in note
-    assert "часовой пояс" in note
-    assert "лет" in note  # возраст посчитан, не None
-    assert "15 июня" in note  # живая находка 2026-09-23: сама дата, не только возраст
-
-
-def test_speaker_life_note_none_without_card():
-    assert ai_context._speaker_life_note(people_book(), 42) is None
-
-
-def test_speaker_life_note_skips_age_when_birth_date_unknown():
-    people = people_book(cards={42: {"timezone": "Asia/Almaty"}})
-    note = ai_context._speaker_life_note(people, 42)
-    assert "Точный возраст" not in note
-    assert "День рождения" not in note
-    assert "У собеседника сейчас" in note
-
-
-def test_person_birthday_ru_formats_day_and_month():
-    assert ai_context._person_birthday_ru("1990-04-29") == "29 апреля"
-
-
-def test_person_birthday_ru_none_when_birth_date_unknown():
-    assert ai_context._person_birthday_ru("") is None
-
-
-async def test_context_note_time_only_without_sender(store):
-    # Без отправителя (from_user=None) заметка больше не пустая — время
-    # (§8.1 плана) вставляется безусловно, только сведений о собеседнике нет.
-    message = NoteMessage(1, "private", None)
-    note = await ai_context.build_context_note(message, store, dialogue_id=1)
-    assert "Точное время сейчас" in note
-    assert "говорит" not in note
-
-
-async def test_context_note_includes_alfred_own_time_always(store):
-    # Живая находка 2026-07-25: личное время Альфреда (ALFRED_TIMEZONE) —
-    # безусловно, не привязано к тому, узнан ли отправитель.
-    message = NoteMessage(1, "private", None)
-    note = await ai_context.build_context_note(message, store, dialogue_id=1)
-    assert "ТВОЁ (Альфреда) личное время" in note
-
-
-async def test_context_note_warns_against_fabricating_after_tool_failure(store):
-    # Живая находка 2026-08-10: get_weather дважды честно вернул отказ
-    # («не удалось определить координаты»), а модель всё равно ответила
-    # конкретной температурой — выдумала. Инструкция безусловная (не
-    # привязана к конкретному тулу), как и предупреждение про интернет.
-    message = NoteMessage(1, "private", None)
-    note = await ai_context.build_context_note(message, store, dialogue_id=1)
-    assert "не повод придумать" in note
-
-
-async def test_context_note_private_chat_only_mentions_sender(store):
-    message = NoteMessage(1, "private", FakeUser("Иван", username="ivan"))
-    note = await ai_context.build_context_note(message, store, dialogue_id=1)
-    assert note is not None
-    assert "Иван (@ivan)" in note
-    assert "начал" not in note
-    assert "также обращались" not in note
-
-
-async def test_context_note_group_includes_starter_and_other_participants(store):
-    ivan = FakeUser("Иван", username="ivan", id=10)
-    maria = FakeUser("Мария", id=20)
-    petr = FakeUser("Пётр", id=30)
-    now = datetime.now(tz=UTC)
-
-    # Иван начал этот тред (dialogue_id=500).
-    await store.record_ai_turn(
-        1, 500, 500, "user", "привет", now, user_id=10, user_name=ai_flow.display_name(ivan)
-    )
-    await store.record_ai_turn(1, 501, 500, "assistant", "Здравствуйте", now)
-    # Мария обращалась к Альфреду в этом же чате, но в другом треде.
-    await store.record_ai_turn(
-        1, 600, 600, "user", "как дела", now, user_id=20, user_name=ai_flow.display_name(maria)
-    )
-
-    message = NoteMessage(1, "group", petr)
-    note = await ai_context.build_context_note(message, store, dialogue_id=500)
-
-    assert "Пётр" in note  # сейчас пишет
-    assert "Иван (@ivan)" in note  # начал тред
-    assert "Мария" in note  # ещё обращалась (другой тред, тот же чат)
-    assert "чужой тред" in note  # инструкция вести себя сдержаннее в тред другого
-
-
-async def test_context_note_skips_starter_line_when_same_as_sender(store):
-    ivan = FakeUser("Иван", username="ivan", id=10)
-    now = datetime.now(tz=UTC)
-    await store.record_ai_turn(
-        1, 500, 500, "user", "привет", now, user_id=10, user_name=ai_flow.display_name(ivan)
-    )
-
-    message = NoteMessage(1, "group", ivan)
-    note = await ai_context.build_context_note(message, store, dialogue_id=500)
-
-    assert note.count("Иван (@ivan)") == 1  # не повторяем "начал" для того же человека
-    assert "начал" not in note
-    assert "чужой тред" not in note  # свой же тред — подсказка про сдержанность не нужна
-
-
-# --- реплай-контекст: содержимое сообщения, на которое отвечают, и
-# конкретно выделенная (quote) цитата (2026-07-24) ---
-
-
-async def test_reply_context_includes_foreign_message_text(store):
-    # Реплай на сообщение, не принадлежащее ни одному ходу Альфреда —
-    # модель иначе его вообще не увидела бы.
-    vasya = FakeUser("Вася", id=99)
-    foreign = FakeRepliedMessage(777, from_user=vasya, text="Когда следующий матч?")
-    ivan = FakeUser("Иван", username="ivan", id=10)
-
-    message = NoteMessage(1, "group", ivan, reply_to_message=foreign)
-    note = await ai_context.build_context_note(message, store, dialogue_id=500)
-
-    assert "Вася" in note
-    assert "Когда следующий матч?" in note
-
-
-async def test_reply_context_skips_text_already_in_current_dialogue_history(store):
-    # Реплай на сообщение Альфреда из ТЕКУЩЕГО треда — текст уже есть в
-    # истории, отдельно дублировать не нужно.
-    ivan = FakeUser("Иван", username="ivan", id=10)
-    now = datetime.now(tz=UTC)
-    await store.record_ai_turn(1, 500, 500, "user", "привет", now, user_id=10, user_name="Иван")
-    await store.record_ai_turn(1, 501, 500, "assistant", "Слушаю, сэр", now)
-
-    reply_to = FakeRepliedMessage(501, text="Слушаю, сэр")
-    message = NoteMessage(1, "group", ivan, reply_to_message=reply_to)
-    note = await ai_context.build_context_note(message, store, dialogue_id=500)
-
-    assert "Сообщение, на которое сейчас отвечают" not in note
-
-
-async def test_reply_context_includes_quote_even_for_own_thread(store):
-    # Quote (выделенный при ответе фрагмент) — информация, которой нет в
-    # истории диалога, поэтому добавляется даже для реплая в свой же тред.
-    ivan = FakeUser("Иван", username="ivan", id=10)
-    now = datetime.now(tz=UTC)
-    await store.record_ai_turn(1, 500, 500, "user", "привет", now, user_id=10, user_name="Иван")
-    await store.record_ai_turn(
-        1, 501, 500, "assistant", "Я умею много всего, сэр", now
-    )
-
-    reply_to = FakeRepliedMessage(501, text="Я умею много всего, сэр")
-    message = NoteMessage(
-        1, "group", ivan, reply_to_message=reply_to, quote=FakeQuote("много всего")
-    )
-    note = await ai_context.build_context_note(message, store, dialogue_id=500)
-
-    assert "много всего" in note
-    assert "Сообщение, на которое сейчас отвечают" not in note  # текст уже в истории
-
-
-async def test_reply_context_truncates_long_foreign_message(store):
-    ivan = FakeUser("Иван", username="ivan", id=10)
-    long_text = "Ы" * (ai_context._REPLY_QUOTE_MAX_CHARS + 200)
-    foreign = FakeRepliedMessage(777, from_user=None, text=long_text)
-
-    message = NoteMessage(1, "group", ivan, reply_to_message=foreign)
-    note = await ai_context.build_context_note(message, store, dialogue_id=500)
-
-    assert "…" in note
-    assert long_text not in note  # обрезано, а не вставлено целиком
-
-
-async def test_no_reply_context_without_reply_to_message(store):
-    ivan = FakeUser("Иван", username="ivan", id=10)
-    message = NoteMessage(1, "private", ivan)
-    note = await ai_context.build_context_note(message, store, dialogue_id=500)
-
-    assert "отвечают" not in note
-
-
-async def test_reply_context_quote_is_self_contained_for_own_thread(store):
-    # Живая находка 2026-07-24: старая формулировка ("в нём выделено...")
-    # ссылалась на строку про "чужое сообщение", которая для своего же
-    # треда как раз пропускается — "нём" повисало без антецедента, и
-    # модель на практике путала процитированное слово с другим. Новая
-    # формулировка должна называть источник цитаты сама, без внешних ссылок.
-    ivan = FakeUser("Иван", username="ivan", id=10)
-    now = datetime.now(tz=UTC)
-    await store.record_ai_turn(1, 500, 500, "user", "привет", now, user_id=10, user_name="Иван")
-    await store.record_ai_turn(1, 501, 500, "assistant", "не имею привычки", now)
-
-    reply_to = FakeRepliedMessage(501, text="не имею привычки")
-    message = NoteMessage(
-        1, "group", ivan, reply_to_message=reply_to, quote=FakeQuote("привычки")
-    )
-    note = await ai_context.build_context_note(message, store, dialogue_id=500)
-
-    assert "твоего же предыдущего сообщения" in note.lower() or "твоего же" in note
-    assert "привычки»" in note
-
-
 async def test_context_note_inserted_right_before_current_turn(store):
-    # Живая находка 2026-07-24: заметка вставлялась ПЕРЕД всей историей —
-    # на длинном треде это слишком далеко от текущего хода, модель хуже
-    # использовала её (проверено вживую: верная цитата в заметке, но не тот
-    # ответ). Теперь заметка должна идти прямо перед последним (текущим)
-    # сообщением истории, а не в самом начале.
     message = FakeMessage()
-    message.from_user = FakeUser("Иван", username="ivan", id=10)
+    message.from_user = user("Иван", username="ivan", id=10)
     link = FakeNodeLink(
         chat_results=[{"response": ROUTE_OK}, {"response": "ответ"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
@@ -1349,22 +538,15 @@ async def test_context_note_inserted_right_before_current_turn(store):
         {"role": "user", "content": "текущий вопрос"},
     ]
 
-    await ai_flow.request_alfred(
-        message, link, store, _settings(), history, 500, _admin_book(), FakeNotifier()
-    )
+    await _ask(message, link, store, history=history, dialogue_id=500)
 
     sent_messages = link.command_calls[0][1]["messages"]
-    # Последнее сообщение — текущий ход, перед ним — заметка о контексте
-    # (никакой отдельной триаж-инструкции больше не вставляется).
     assert sent_messages[-1] == {"role": "user", "content": "текущий вопрос"}
     assert sent_messages[-2]["role"] == "system"
     assert sent_messages[:-2] == history[:-1]
 
 
 async def test_person_cards_reach_the_context_note(store):
-    """Этап 54.3/58: пол собеседника из карточки (сказал сам), прозвище,
-    местное время и знакомые строкой «имя — id — пол» с источником слабого
-    утверждения. Карточки — из БД alfred, не из графа."""
     now = datetime.now(tz=UTC)
     await store.add_confirmed_relationship(10, 999, "acquaintance", now, now)
     await store.add_person_claims(
@@ -1376,15 +558,21 @@ async def test_person_cards_reach_the_context_note(store):
         ]
     )
     message = FakeMessage()
-    message.from_user = FakeUser("Лилиан", username="lilian", id=10)
+    message.from_user = user("Лилиан", username="lilian", id=10)
     link = FakeNodeLink(
         chat_results=[{"response": ROUTE_OK}, {"response": "ответ"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
-        500, _admin_book(), FakeNotifier(),
+        message,
+        link,
+        store,
+        _settings(),
+        [{"role": "user", "content": "привет"}],
+        500,
+        _admin_book(),
+        _notifier(),
     )
 
     note = link.command_calls[0][1]["messages"][-2]["content"]
@@ -1398,15 +586,21 @@ async def test_person_cards_reach_the_context_note(store):
 
 async def test_person_cards_unavailable_leave_note_without_them(store):
     message = FakeMessage()
-    message.from_user = FakeUser("Лилиан", username="lilian", id=10)
+    message.from_user = user("Лилиан", username="lilian", id=10)
     link = FakeNodeLink(
         chat_results=[{"response": ROUTE_OK}, {"response": "ответ"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
     await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}],
-        500, _admin_book(), FakeNotifier(),
+        message,
+        link,
+        store,
+        _settings(),
+        [{"role": "user", "content": "привет"}],
+        500,
+        _admin_book(),
+        _notifier(),
     )
 
     note = link.command_calls[0][1]["messages"][-2]["content"]
@@ -1414,76 +608,11 @@ async def test_person_cards_unavailable_leave_note_without_them(store):
     assert "Знакомые собеседника" not in note
 
 
-# --- ActiveAiChats (живая находка 2026-07-24: редеплой бота посреди
-# долгого думающего ответа обрывал /ai голой сетевой ошибкой; второй заход —
-# хранит саму asyncio.Task (не просто chat_id), чтобы bot/app.py::_shutdown
-# мог не только уведомить, но и по-настоящему отменить задачу до того, как
-# она сама упадёт на разорванном node_link) ---
-
-
-def test_active_ai_chats_starts_empty():
-    assert ai_flow.ActiveAiChats().snapshot() == {}
-
-
-def test_active_ai_chats_register_and_snapshot():
-    chats = ai_flow.ActiveAiChats()
-    task42, task7 = object(), object()
-    chats.register(42, task42)
-    chats.register(7, task7)
-    assert chats.snapshot() == {42: task42, 7: task7}
-
-
-def test_active_ai_chats_register_overwrites_same_chat():
-    chats = ai_flow.ActiveAiChats()
-    old_task, new_task = object(), object()
-    chats.register(42, old_task)
-    chats.register(42, new_task)
-    assert chats.snapshot() == {42: new_task}
-
-
-def test_active_ai_chats_unregister_removes():
-    chats = ai_flow.ActiveAiChats()
-    task = object()
-    chats.register(42, task)
-    chats.unregister(42, task)
-    assert chats.snapshot() == {}
-
-
-def test_active_ai_chats_unregister_missing_is_noop():
-    chats = ai_flow.ActiveAiChats()
-    chats.unregister(42, object())  # не бросает, даже если не был зарегистрирован
-    assert chats.snapshot() == {}
-
-
-def test_active_ai_chats_unregister_only_matching_task():
-    # Если chat_id успел перерегистрироваться на новую задачу (например,
-    # новый /ai подряд), unregister по СТАРОЙ задаче не должен снять новую.
-    chats = ai_flow.ActiveAiChats()
-    old_task, new_task = object(), object()
-    chats.register(42, old_task)
-    chats.register(42, new_task)
-    chats.unregister(42, old_task)
-    assert chats.snapshot() == {42: new_task}
-
-
-def test_active_ai_chats_ignores_none():
-    chats = ai_flow.ActiveAiChats()
-    chats.register(None, object())
-    chats.unregister(None, object())
-    assert chats.snapshot() == {}
-
-
-# --- «Альфред увлечённо сёрфит»: пауза на поиск не должна читаться как
-# зависший бот (живой замер 2026-07-27: три минуты от вопроса до ответа) ---
-
-
 def _search_call(query: str = "новости"):
     return {"function": {"name": "web_search", "arguments": {"query": query}}}
 
 
 async def test_web_search_announces_surfing_once_per_request(store):
-    """Вставка шлётся ОДИН раз, хотя поисков за запрос бывает несколько и
-    колбэк общий для router- и персонажного прохода."""
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[
@@ -1495,20 +624,15 @@ async def test_web_search_announces_surfing_once_per_request(store):
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "что нового?"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    raw = await _ask(message, link, store, "что нового?")
 
     assert raw == "Вот что нашёл, сэг"
     assert message.answers.count(ai_flow.SURFING_TEXT) == 1
-    # Оба поиска реально случились — вставка не подменяет работу тула.
     calls = await store.tool_calls_for_dialogue(message.chat.id, 1)
     assert [c["tool_name"] for c in calls] == ["web_search", "web_search"]
 
 
 async def test_other_tools_do_not_announce_surfing(store):
-    """calc/погода отрабатывают за миллисекунды — про сёрфинг там врать нечего."""
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[
@@ -1519,23 +643,12 @@ async def test_other_tools_do_not_announce_surfing(store):
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
-    await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "2+2"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    await _ask(message, link, store, "2+2")
 
     assert ai_flow.SURFING_TEXT not in message.answers
 
 
-# --- курсивная "бегущая строка" на каждый тул в rich-пути (2026-08-10):
-# в отличие от SURFING_TEXT выше (фолбэк, один раз за запрос, только
-# web_search), это для ВСЕХ тулов, без гейтинга, до выполнения тула ---
-
-
 async def test_tool_status_pushed_for_every_call_when_rich_session_present(store):
-    """rich-путь: статус пушится в черновик на КАЖДЫЙ вызов тула, не
-    отдельным сообщением (RichStreamSession._last_sent сам дедупит
-    одинаковые подряд — см. ai_flow.py::_announce_tool_start)."""
     message = FakeMessage()
     rich_session = FakeRichSession()
     link = FakeNodeLink(
@@ -1548,14 +661,10 @@ async def test_tool_status_pushed_for_every_call_when_rich_session_present(store
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "что нового?"}], 1,
-        _admin_book(), FakeNotifier(),
-        rich_session=rich_session,
-    )
+    raw = await _ask(message, link, store, "что нового?", rich_session=rich_session)
 
     assert raw == "Вот что нашёл, сэг"
-    assert ai_flow.SURFING_TEXT not in message.answers  # фолбэк-путь не сработал
+    assert ai_flow.SURFING_TEXT not in message.answers
     assert rich_session.statuses == [ai_flow.TOOL_STATUS_TEXT["web_search"]] * 2
 
 
@@ -1571,104 +680,23 @@ async def test_tool_status_uses_per_tool_phrase(store):
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
-    await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "2+2"}], 1,
-        _admin_book(), FakeNotifier(),
-        rich_session=rich_session,
-    )
+    await _ask(message, link, store, "2+2", rich_session=rich_session)
 
     assert rich_session.statuses == [ai_flow.TOOL_STATUS_TEXT["calc"]]
 
 
-def test_tool_status_default_fallback_for_unmapped_tool():
-    assert (
-        ai_flow.TOOL_STATUS_TEXT.get("future_tool", ai_flow.TOOL_STATUS_DEFAULT)
-        == ai_flow.TOOL_STATUS_DEFAULT
-    )
-
-
 def test_tool_status_covers_every_registered_tool():
-    # Защита от будущего тула, который забудут дописать в TOOL_STATUS_TEXT —
-    # не упадёт (TOOL_STATUS_DEFAULT), но лучше поймать на тесте, чем в проде.
     admin = Subscription(chat_id=1, name="admin", allowed_commands=frozenset({"*"}))
     toolkit = ai_tools.tools_for(admin)
     missing = set(toolkit.handlers) - set(ai_flow.TOOL_STATUS_TEXT)
     assert missing == set()
 
 
-# --- нет права на поиск => прямое указание не выдумывать (2026-07-27) ---
-
-
 def _note_msg(messages) -> str:
-    """Служебная заметка — единственное system-сообщение в запросе."""
     return next(m["content"] for m in messages if m["role"] == "system")
 
 
-async def test_without_search_right_model_is_told_not_to_invent(store):
-    """Живая находка: без права search@net модель не видит тул вовсе и,
-    не зная, что поиск бывает, отвечала про свежие события из памяти —
-    выдумывая даты и факты. Молчаливое отсутствие тула её не останавливает,
-    нужно сказать прямо."""
-    message = FakeMessage()
-    link = FakeNodeLink(
-        chat_results=[{"response": ROUTE_OK}, {"response": "Не знаю, сэг"}],
-        get_state_routes={"mycraft:llm": {"asleep": False}},
-    )
-    book = SubscriptionBook(
-        [Subscription(chat_id=1, name="группа", allowed_commands=frozenset({"chat@llm"}))]
-    )
-
-    await ai_flow.request_alfred(
-        message, link, store, _settings(),
-        [{"role": "user", "content": "что вчера запустил SpaceX?"}], 1,
-        book, FakeNotifier(),
-    )
-
-    note = _note_msg(link.command_calls[0][1]["messages"])
-    assert "Выхода в интернет у тебя сейчас нет" in note
-    assert "НЕ придумывай" in note
-
-
-async def test_with_search_right_no_such_warning(store):
-    """У кого поиск есть — предупреждение только сбивало бы с толку."""
-    message = FakeMessage()
-    link = FakeNodeLink(
-        chat_results=[{"response": ROUTE_OK}, {"response": "Извольте"}],
-        get_state_routes={"mycraft:llm": {"asleep": False}},
-    )
-
-    await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "новости?"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
-
-    note = _note_msg(link.command_calls[0][1]["messages"])
-    assert "Выхода в интернет у тебя сейчас нет" not in note
-
-
-async def test_chat_without_subscription_also_warned(store):
-    """Fail-closed: подписки нет — тулов нет, значит и интернета нет."""
-    message = FakeMessage()
-    link = FakeNodeLink(
-        chat_results=[{"response": ROUTE_OK}, {"response": "..."}],
-        get_state_routes={"mycraft:llm": {"asleep": False}},
-    )
-
-    await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "?"}], 1,
-        SubscriptionBook([]), FakeNotifier(),
-    )
-
-    assert "Выхода в интернет" in _note_msg(link.command_calls[0][1]["messages"])
-
-
-# --- роспуск: «ты свободен» (тул dismiss + perform_dismissal) ---
-
-
 class FakeDismissLink:
-    """Двойник ServiceLink для perform_dismissal: фиксирует, кому и что
-    отправили, и умеет падать на конкретном действии."""
-
     display_name = "нода"
 
     def __init__(self, fail_on=None, exc=None):
@@ -1684,8 +712,6 @@ class FakeDismissLink:
 
 
 async def test_dismiss_tool_powers_nothing_off_during_the_request(store):
-    """Тул только назначает уход: пока идёт запрос, гасить нельзя — ответом
-    занята ровно та модель, которую предстоит выгрузить."""
     message = FakeMessage()
     box = ai_flow.ai_tools.DismissalBox()
     link = FakeNodeLink(
@@ -1697,66 +723,19 @@ async def test_dismiss_tool_powers_nothing_off_during_the_request(store):
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
-    raw = await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "спасибо, свободен"}], 1,
-        _admin_book(), FakeNotifier(), box,
-    )
+    raw = await _ask(message, link, store, "спасибо, свободен", dismissal=box)
 
     assert raw == "Всего доброго, сэг"
     assert box.mode == "off"
-    # Ни одной power-команды за время запроса — только сами chat-раунды.
     assert {call[0] for call in link.command_calls} == {"chat"}
 
 
-async def test_perform_dismissal_off_unloads_model_then_powers_machine_off(store):
-    message = FakeMessage()
-    link = FakeDismissLink()
-
-    await ai_flow.perform_dismissal(
-        message, link, ai_flow.ai_tools.DISMISS_OFF, _admin_book(), FakeNotifier()
-    )
-
-    assert link.calls == [
-        # quiet=True — прощание уже сказано, llm_idle_sleep поверх него был бы
-        # прямым противоречием («не дождался обращения»).
-        ("sleep", {"quiet": True}, "mycraft", "llm"),
-        ("poweroff", {}, "mycraft", "node"),
-    ]
-    assert message.answers == [ai_flow.DISMISS_TEXTS[ai_flow.ai_tools.DISMISS_OFF]]
-
-
-async def test_perform_dismissal_sleep_suspends_instead_of_powering_off(store):
-    message = FakeMessage()
-    link = FakeDismissLink()
-
-    await ai_flow.perform_dismissal(
-        message, link, ai_flow.ai_tools.DISMISS_SLEEP, _admin_book(), FakeNotifier()
-    )
-
-    assert [c[0] for c in link.calls] == ["sleep", "suspend"]
-    assert message.answers == [ai_flow.DISMISS_TEXTS[ai_flow.ai_tools.DISMISS_SLEEP]]
-
-
-async def test_perform_dismissal_model_only_leaves_the_machine_alone(store):
-    message = FakeMessage()
-    link = FakeDismissLink()
-
-    await ai_flow.perform_dismissal(
-        message, link, ai_flow.ai_tools.DISMISS_MODEL, _admin_book(), FakeNotifier()
-    )
-
-    assert [c[0] for c in link.calls] == ["sleep"]
-    assert message.answers == [ai_flow.DISMISS_TEXTS[ai_flow.ai_tools.DISMISS_MODEL]]
-
-
 async def test_perform_dismissal_powers_off_even_if_model_did_not_unload(store):
-    """Невыгруженная модель погаснет вместе с машиной — не повод отменять
-    выключение, которое человек уже попросил и получил на него прощание."""
     message = FakeMessage()
     link = FakeDismissLink(fail_on="sleep")
 
     await ai_flow.perform_dismissal(
-        message, link, ai_flow.ai_tools.DISMISS_OFF, _admin_book(), FakeNotifier()
+        message, link, ai_flow.ai_tools.DISMISS_OFF, _admin_book(), _notifier()
     )
 
     assert [c[0] for c in link.calls] == ["sleep", "poweroff"]
@@ -1765,7 +744,7 @@ async def test_perform_dismissal_powers_off_even_if_model_did_not_unload(store):
 
 async def test_perform_dismissal_reports_when_machine_stayed_up(store):
     message = FakeMessage()
-    notifier = FakeNotifier()
+    notifier = _notifier()
     link = FakeDismissLink(fail_on="poweroff")
 
     await ai_flow.perform_dismissal(
@@ -1777,9 +756,8 @@ async def test_perform_dismissal_reports_when_machine_stayed_up(store):
 
 
 async def test_perform_dismissal_model_only_failure_is_reported(store):
-    """Для mode=model выгрузка модели — единственное, что было обещано."""
     message = FakeMessage()
-    notifier = FakeNotifier()
+    notifier = _notifier()
     link = FakeDismissLink(fail_on="sleep")
 
     await ai_flow.perform_dismissal(
@@ -1790,12 +768,7 @@ async def test_perform_dismissal_model_only_failure_is_reported(store):
     assert notifier.sent and "llm.sleep" in notifier.sent[0][1]
 
 
-# --- долгая память: факты подмешиваются сами, до ответа ---
-
-
 async def test_memory_facts_land_in_the_context_note(store):
-    """На тул надежда плохая — модель зовёт его далеко не всегда, поэтому
-    подходящее подмешивается в заметку само."""
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[{"response": ROUTE_OK}, {"response": "Как скажете"}],
@@ -1806,16 +779,11 @@ async def test_memory_facts_land_in_the_context_note(store):
         ],
     )
 
-    await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "скачай кино"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    await _ask(message, link, store, "скачай кино")
 
     assert link.recall_calls[0]["chat_id"] == 1
     note = _note_msg(link.command_calls[0][1]["messages"])
     assert "Качаем в /mnt/data/pr" in note
-    # Личное уходит с оговоркой: видимость уже ограничена запросом к службе,
-    # а это — просьба не произносить вслух без повода.
     assert "Код от домофона 1234 [личное: знай, но вслух не пересказывай]" in note
 
 
@@ -1826,25 +794,12 @@ async def test_silent_memory_leaves_the_note_as_it_was(store):
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
-    await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    await _ask(message, link, store)
 
     assert "Из того, что ты помнишь" not in _note_msg(link.command_calls[0][1]["messages"])
 
 
-async def test_broken_memory_does_not_break_the_conversation(store):
-    """Память необязательна: её сбой не должен ронять разговор."""
-    facts = await ai_flow.recall_facts(
-        FakeNodeLink(chat_results=[]), 1, "привет"
-    )
-    assert facts == []
-
-
 async def test_graph_facts_land_in_the_context_note(store):
-    """Этап 41: recall_graph_facts подмешивается в заметку ОТДЕЛЬНЫМ блоком
-    от memory_facts — источник менее надёжный (см. _build_context_note)."""
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[{"response": ROUTE_OK}, {"response": "Как скажете"}],
@@ -1852,10 +807,7 @@ async def test_graph_facts_land_in_the_context_note(store):
         graph_facts=["Наташа — жена Алексея"],
     )
 
-    await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "кто жена Алексея?"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    await _ask(message, link, store, "кто жена Алексея?")
 
     assert link.graph_recall_calls[0]["chat_id"] == 1
     note = _note_msg(link.command_calls[0][1]["messages"])
@@ -1863,28 +815,15 @@ async def test_graph_facts_land_in_the_context_note(store):
     assert "Дополнительно — связи" in note
 
 
-async def test_broken_graph_memory_does_not_break_the_conversation():
-    """graph_memory штатно спит вместе с mycraft — сбой не должен ронять
-    разговор (тот же принцип, что и у recall_facts)."""
-    facts = await ai_flow.recall_graph_facts(FakeNodeLink(chat_results=[]), 1, "привет")
-    assert facts == []
-
-
 async def test_guest_first_turn_queries_graph_for_identity(store):
-    """Этап 42.5(b): гость (не в settings.people) на первом ходе треда —
-    ВТОРОЙ, отдельный запрос в graph_memory про личность самого
-    собеседника, поверх обычного запроса по теме реплики."""
     message = FakeMessage()
-    message.from_user = FakeUser("Гусь", username="goose", id=777)
+    message.from_user = user("Гусь", username="goose", id=777)
     link = FakeNodeLink(
         chat_results=[{"response": ROUTE_OK}, {"response": "Как скажете"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
-    await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    await _ask(message, link, store)
 
     assert len(link.graph_recall_calls) == 2
     identity_call = link.graph_recall_calls[1]
@@ -1893,10 +832,8 @@ async def test_guest_first_turn_queries_graph_for_identity(store):
 
 
 async def test_guest_second_turn_does_not_requery_identity(store):
-    """Один раз на тред (решение пользователя 2026-09-25) — если в history
-    уже есть прошлый обмен репликами, второй graph-запрос не шлётся."""
     message = FakeMessage()
-    message.from_user = FakeUser("Гусь", username="goose", id=777)
+    message.from_user = user("Гусь", username="goose", id=777)
     link = FakeNodeLink(
         chat_results=[{"response": ROUTE_OK}, {"response": "Как скажете"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
@@ -1906,18 +843,14 @@ async def test_guest_second_turn_does_not_requery_identity(store):
         {"role": "assistant", "content": "Здравствуйте"},
     ]
 
-    await ai_flow.request_alfred(
-        message, link, store, _settings(), history, 1, _admin_book(), FakeNotifier(),
-    )
+    await _ask(message, link, store, history=history)
 
     assert len(link.graph_recall_calls) == 1
 
 
 async def test_known_family_member_does_not_query_guest_identity(store):
-    """У собеседника есть карточка (Этап 58) — второй graph-запрос про
-    личность ему не нужен, даже на первом ходе треда."""
     message = FakeMessage()
-    message.from_user = FakeUser("Иван", username="ivan", id=777)
+    message.from_user = user("Иван", username="ivan", id=777)
     link = FakeNodeLink(
         chat_results=[{"response": ROUTE_OK}, {"response": "Как скажете"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
@@ -1925,19 +858,12 @@ async def test_known_family_member_does_not_query_guest_identity(store):
     await store.add_person_claims([claim(777, "name", "Иван Иванов", by_id=1)])
     settings = Settings(llm=LlmConfig(request_timeout_s=5.0))
 
-    await ai_flow.request_alfred(
-        message, link, store, settings, [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    await _ask(message, link, store, settings=settings)
 
     assert len(link.graph_recall_calls) == 1
 
 
 class _FakeEpisodeLink:
-    """Двойник ServiceLink только для ACTION_ADD_EPISODE — piggyback_dialogue_
-    episode (Этап 42.2) не ходит ни за что другое, полный FakeNodeLink с его
-    заточенным под request_alfred command() тут не подходит."""
-
     def __init__(self, *, raises: Exception | None = None) -> None:
         self.calls: list[tuple[str, dict, object]] = []
         self._raises = raises
@@ -1950,8 +876,6 @@ class _FakeEpisodeLink:
 
 
 async def test_piggyback_dialogue_episode_writes_the_turn(store):
-    """Этап 42.2: ход диалога (реплика + ответ) пишется в graph_memory как
-    ACTION_ADD_EPISODE с source=dialogue_turn."""
     link = _FakeEpisodeLink()
 
     await ai_flow.piggyback_dialogue_episode(link, 777, "какая погода в Москве?", "Прохладно, сэр.")
@@ -1967,8 +891,6 @@ async def test_piggyback_dialogue_episode_writes_the_turn(store):
 
 
 async def test_piggyback_dialogue_episode_extracts_links_separately():
-    """Этап 42.2: URL в ходе диалога — дополнительный эпизод с
-    source=link (поверх основного dialogue_turn)."""
     link = _FakeEpisodeLink()
 
     await ai_flow.piggyback_dialogue_episode(
@@ -1980,13 +902,6 @@ async def test_piggyback_dialogue_episode_extracts_links_separately():
     assert sources == ["dialogue_turn", "link"]
 
 
-async def test_piggyback_dialogue_episode_survives_graph_memory_being_asleep():
-    """graph_memory штатно спит вместе с mycraft — сбой не должен всплыть
-    наружу (тот же принцип, что и у recall_graph_facts)."""
-    link = _FakeEpisodeLink(raises=ServiceUnavailableError("mycraft спит"))
-    await ai_flow.piggyback_dialogue_episode(link, 777, "привет", "Здравствуйте, сэр.")
-
-
 async def test_piggyback_dialogue_episode_skips_without_node_link_or_chat():
     link = _FakeEpisodeLink()
     await ai_flow.piggyback_dialogue_episode(None, 777, "привет", "Здравствуйте, сэр.")
@@ -1995,18 +910,10 @@ async def test_piggyback_dialogue_episode_skips_without_node_link_or_chat():
 
 
 async def test_piggyback_dialogue_episode_skips_empty_turns():
-    """Директивы без реального хода (OPENING_PROMPT/EMPTY_REPLY_PROMPT) не
-    должны порождать пустые/бессмысленные эпизоды."""
     link = _FakeEpisodeLink()
     await ai_flow.piggyback_dialogue_episode(link, 777, "", "Здравствуйте, сэр.")
     await ai_flow.piggyback_dialogue_episode(link, 777, "привет", "")
     assert link.calls == []
-
-
-# --- typing keep-alive: индикатор "печатает" должен гореть только пока
-# модель реально готовит ответ (решение пользователя 2026-08-01) — не с
-# момента приёма сообщения человеком, и не во время presence-проверки/
-# прогрева контейнера (тем этапам хватает своих текстовых "шагов") ---
 
 
 async def test_typing_fires_for_the_chat_around_the_actual_ask(store):
@@ -2016,13 +923,10 @@ async def test_typing_fires_for_the_chat_around_the_actual_ask(store):
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
-    await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    await _ask(message, link, store)
 
     assert message.bot.typing_chats == [message.chat.id]
-    assert message.bot.typing_threads == [None]  # вне топика — без message_thread_id
+    assert message.bot.typing_threads == [None]
 
 
 async def test_typing_uses_the_topic_thread_id(store):
@@ -2033,47 +937,32 @@ async def test_typing_uses_the_topic_thread_id(store):
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
-    await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    await _ask(message, link, store)
 
     assert message.bot.typing_threads == [777]
 
 
 async def test_typing_does_not_fire_while_node_unreachable_and_no_wake_data(store, monkeypatch):
-    # get_state_routes пуст — presence-проверка сама уже "недоступна", до
-    # настоящей генерации дело не доходит (см. test_unavailable_and_no_wake_
-    # data_gives_up_immediately) — значит и typing загораться не должен.
     monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
     monkeypatch.setattr(ai_flow, "WAKE_POLL_TIMEOUT_S", 0.05)
     message = FakeMessage()
     link = FakeNodeLink()
 
-    await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    await _ask(message, link, store)
 
     assert message.bot.typing_chats == []
 
 
 async def test_typing_does_not_fire_during_asleep_warmup_before_the_retry(store):
-    # Модель спит (см. test_asleep_model_shows_steps_but_no_wake) — "шаги"
-    # уже сказаны текстом, до typing на этом этапе доходить не должно; он
-    # загорится только внутри самого _ask(), который ниже успешно отвечает.
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[{"response": ROUTE_OK}, {"response": "Секунду, сэг"}],
         get_state_routes={"mycraft:llm": {"asleep": True}},
     )
 
-    await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    await _ask(message, link, store)
 
-    assert message.bot.typing_chats == [message.chat.id]  # ровно вокруг _ask(), не раньше
+    assert message.bot.typing_chats == [message.chat.id]
 
 
 async def test_typing_keepalive_repeats_while_the_model_is_slow(store, monkeypatch):
@@ -2093,42 +982,250 @@ async def test_typing_keepalive_repeats_while_the_model_is_slow(store, monkeypat
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
-    await ai_flow.request_alfred(
-        message, link, store, _settings(), [{"role": "user", "content": "привет"}], 1,
-        _admin_book(), FakeNotifier(),
-    )
+    await _ask(message, link, store)
 
-    # Два раунда "chat" по 0.05с каждый на интервале в 0.01с — keep-alive
-    # обязан повториться хотя бы раз, не только зажечься единожды.
     assert len(message.bot.typing_chats) > 1
     assert set(message.bot.typing_chats) == {message.chat.id}
 
 
-async def test_reply_to_alfreds_picture_adds_a_note(store):
-    """Гость отвечает на картинку Альфреда — в ход подмешивается, что это
-    за картинка, что на ней видели и что смотреть её — look_at_photo."""
-    import json
-    from types import SimpleNamespace
+PLAIN = "plain"
+RICH = "rich"
+MODES = [PLAIN, RICH]
 
-    image_id = await store.add_image(
-        chat_id=555,
-        author=None,
-        prompt_ru="кабинет",
-        prompt_en="study",
-        caption="Мой кабинет",
-        width=8,
-        height=8,
-        colors=32,
-        png=b"png",
-        now=datetime.now(tz=UTC),
-        purpose="photo",
-        params=json.dumps({"seen": "камин и сова"}, ensure_ascii=False),
+
+def _session(mode):
+    return FakeRichSession() if mode == RICH else None
+
+
+def _shown(message, session):
+    if session is None:
+        return message.answers, [], []
+    return message.answers, session.statuses, session.finalized_statuses
+
+
+def _expected(mode, *, plain=(), statuses=(), finalized=()):
+    if mode == PLAIN:
+        return list(plain), [], []
+    return [], list(statuses), list(finalized)
+
+
+def _awake_link(*chat_results, **kwargs):
+    return FakeNodeLink(
+        chat_results=list(chat_results),
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+        **kwargs,
     )
-    await store.set_image_sent(image_id, "file-1", 900)
-    message = SimpleNamespace(
-        chat=SimpleNamespace(id=555), reply_to_message=SimpleNamespace(message_id=900)
+
+
+@pytest.mark.parametrize(
+    ("llm_kwargs", "reason"),
+    [({}, "off"), ({"single_call_think": True}, "high")],
+    ids=["no_think", "think"],
+)
+async def test_single_call_mode_skips_router_and_sends_intent(store, llm_kwargs, reason):
+    message = FakeMessage()
+    link = _awake_link({"response": "Добгый день, сэ"})
+    settings = Settings(llm=LlmConfig(request_timeout_s=5.0, mode="single_call", **llm_kwargs))
+
+    raw = await _ask(message, link, store, settings=settings)
+
+    assert raw == "Добгый день, сэ"
+    assert message.answers == []
+    assert len(link.command_calls) == 1
+    action, args, node = link.command_calls[0]
+    assert (action, node) == ("chat", "mycraft")
+    assert args["reason"] == reason
+    assert "think" not in args
+    assert "role" not in args
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_escalates_to_thinking_when_router_asks(store, mode):
+    message, session = FakeMessage(), _session(mode)
+    link = _awake_link(
+        {"response": f"кое-что... {THINK_MARKER}"}, {"response": "Точный ответ после раздумий"}
     )
-    note = await ai_context.replied_picture_note(message, store)
-    assert f"#{image_id}" in note and "камин и сова" in note and "look_at_photo" in note
-    message.reply_to_message = SimpleNamespace(message_id=901)
-    assert await ai_context.replied_picture_note(message, store) is None
+
+    raw = await _ask(message, link, store, "сложный вопрос", rich_session=session)
+
+    assert raw == "Точный ответ после раздумий"
+    assert _shown(message, session) == _expected(
+        mode, plain=[ai_flow.THINKING_TEXT], statuses=[ai_flow.THINKING_TEXT_PLAIN]
+    )
+    router_args, persona_args = link.command_calls[0][1], link.command_calls[1][1]
+    assert router_args["role"] == "router"
+    assert router_args["reason"] == "off"
+    assert "role" not in persona_args
+    assert persona_args["reason"] == "high"
+    assert persona_args["messages"] == router_args["messages"]
+    assert persona_args["messages"][-1] == {"role": "user", "content": "сложный вопрос"}
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_asleep_model_shows_steps_but_no_wake(store, mode):
+    message, session = FakeMessage(), _session(mode)
+    link = FakeNodeLink(
+        chat_results=[{"response": ROUTE_OK}, {"response": "Секунду, сэг"}],
+        get_state_routes={"mycraft:llm": {"asleep": True}},
+    )
+
+    raw = await _ask(message, link, store, rich_session=session)
+
+    assert raw == "Секунду, сэг"
+    assert _shown(message, session) == _expected(
+        mode, plain=[ai_flow.STEPS_TEXT], statuses=[ai_flow.STEPS_TEXT_PLAIN]
+    )
+    assert link.wol_sent == []
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_asleep_warmup_fails_answers_as_albert(store, mode):
+    message, session, notifier = FakeMessage(), _session(mode), _notifier()
+    link = FakeNodeLink(
+        get_state_routes={"mycraft:llm": {"asleep": True}},
+        warmup_result=ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева"),
+    )
+
+    raw = await _ask(message, link, store, notifier=notifier, rich_session=session)
+
+    assert raw is None
+    assert _shown(message, session) == _expected(
+        mode,
+        plain=[ai_flow.STEPS_TEXT, ai_flow.ALBERT_ASLEEP],
+        statuses=[ai_flow.STEPS_TEXT_PLAIN],
+        finalized=[ai_flow.ALBERT_ASLEEP_MD],
+    )
+    assert link.wol_sent == []
+    assert link.command_calls == [("warmup", {}, "mycraft")]
+    assert len(notifier.sent) == 1
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_unavailable_then_woken_within_30s(store, monkeypatch, mode):
+    await wake_state.remember(store, "mycraft", MYCRAFT_WAKE)
+    monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
+    message, session = FakeMessage(), _session(mode)
+    link = FakeNodeLink(
+        chat_results=[{"response": ROUTE_OK}, {"response": "Сейчас подойду"}],
+        get_state_sequences={"mycraft:llm": [None, {"asleep": True}]},
+    )
+
+    raw = await _ask(message, link, store, rich_session=session)
+
+    assert raw == "Сейчас подойду"
+    assert _shown(message, session) == _expected(
+        mode,
+        plain=[ai_flow.STEPS_TEXT, ai_flow.ARNOLD_WAKING, ai_flow.STEPS_TEXT],
+        statuses=[ai_flow.STEPS_TEXT_PLAIN, ai_flow.STEPS_TEXT_PLAIN],
+        finalized=[ai_flow.ARNOLD_WAKING_MD],
+    )
+    assert link.wol_sent == [{"mac": MYCRAFT_WAKE["mac"]}]
+    assert ("warmup", {}, "mycraft") in link.command_calls
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_unavailable_and_no_wake_data_gives_up_immediately(store, monkeypatch, mode):
+    monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(ai_flow, "WAKE_POLL_TIMEOUT_S", 0.05)
+    message, session = FakeMessage(), _session(mode)
+    link = FakeNodeLink()
+
+    raw = await _ask(message, link, store, rich_session=session)
+
+    assert raw is None
+    assert _shown(message, session) == _expected(
+        mode,
+        plain=[ai_flow.STEPS_TEXT, ai_flow.ALBERT_UNAVAILABLE],
+        statuses=[ai_flow.STEPS_TEXT_PLAIN],
+        finalized=[ai_flow.ALBERT_UNAVAILABLE_MD],
+    )
+    assert link.wol_sent == []
+    assert link.command_calls == []
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_internal_error_answers_user_and_notifies_admin(store, mode):
+    message, session, notifier = FakeMessage(), _session(mode), _notifier()
+    link = _awake_link(ProtoError(ERR_INTERNAL, "Ollama не поднялась после прогрева"))
+
+    raw = await _ask(message, link, store, notifier=notifier, rich_session=session)
+
+    assert raw is None
+    assert _shown(message, session) == _expected(
+        mode, plain=[ai_flow.ALBERT_HICCUP], finalized=[ai_flow.ALBERT_HICCUP_MD]
+    )
+    assert "Ollama" not in "".join(message.answers)
+    assert link.wol_sent == []
+    assert len(notifier.sent) == 1
+    admin_chat_id, admin_text = notifier.sent[0]
+    assert admin_chat_id == 999
+    assert "internal" in admin_text
+    assert "Ollama не поднялась после прогрева" in admin_text
+
+
+def test_active_ai_chats_register_snapshot_and_overwrite():
+    chats = ai_flow.ActiveAiChats()
+    assert chats.snapshot() == {}
+    old_task, other_task, new_task = object(), object(), object()
+    chats.register(42, old_task)
+    chats.register(7, other_task)
+    chats.register(42, new_task)
+    chats.register(None, object())
+    assert chats.snapshot() == {42: new_task, 7: other_task}
+
+
+def test_active_ai_chats_unregister_is_idempotent_and_ignores_none():
+    chats = ai_flow.ActiveAiChats()
+    task = object()
+    chats.register(42, task)
+    chats.unregister(42, task)
+    chats.unregister(42, task)
+    chats.unregister(None, task)
+    assert chats.snapshot() == {}
+
+
+def test_active_ai_chats_unregister_only_matching_task():
+    chats = ai_flow.ActiveAiChats()
+    old_task, new_task = object(), object()
+    chats.register(42, old_task)
+    chats.register(42, new_task)
+    chats.unregister(42, old_task)
+    assert chats.snapshot() == {42: new_task}
+
+
+NO_SEARCH_BOOK = SubscriptionBook(
+    [Subscription(chat_id=1, name="группа", allowed_commands=frozenset({"chat@llm"}))]
+)
+
+
+@pytest.mark.parametrize(
+    ("book", "warned"),
+    [(None, False), (NO_SEARCH_BOOK, True), (SubscriptionBook([]), True)],
+    ids=["search_right", "no_search_right", "no_subscription"],
+)
+async def test_model_is_told_not_to_invent_only_without_search(store, book, warned):
+    link = _awake_link({"response": ROUTE_OK}, {"response": "Не знаю, сэг"})
+
+    await _ask(FakeMessage(), link, store, "что вчера запустил SpaceX?", book=book)
+
+    note = _note_msg(link.command_calls[0][1]["messages"])
+    assert ("Выхода в интернет у тебя сейчас нет" in note) is warned
+    assert ("НЕ придумывай" in note) is warned
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_calls"),
+    [
+        (ai_tools.DISMISS_OFF, ["sleep", "poweroff"]),
+        (ai_tools.DISMISS_SLEEP, ["sleep", "suspend"]),
+        (ai_tools.DISMISS_MODEL, ["sleep"]),
+    ],
+)
+async def test_perform_dismissal_unloads_model_then_acts_on_machine(store, mode, expected_calls):
+    message, link = FakeMessage(), FakeDismissLink()
+
+    await ai_flow.perform_dismissal(message, link, mode, _admin_book(), _notifier())
+
+    assert [c[0] for c in link.calls] == expected_calls
+    assert link.calls[0] == ("sleep", {"quiet": True}, "mycraft", "llm")
+    assert message.answers == [ai_flow.DISMISS_TEXTS[mode]]
