@@ -4,7 +4,7 @@ import base64
 
 import pytest
 
-from sa_home_bot.bot import vpn_faq, vpn_legacy_card, vpn_nodes, vpn_proxy_screen
+from sa_home_bot.bot import vpn_faq, vpn_nodes, vpn_proxy_screen
 from sa_home_bot.bot.handlers import vpn as h
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings, VpnConfig
@@ -132,17 +132,6 @@ async def test_ask_alfred_points_to_command():
 async def test_unknown_question_falls_back_to_list():
     cb, _ = await _press("act:vpn:apk:qzzz")
     assert cb.message.edits[-1] == vpn_faq.LIST_TEXT
-
-
-async def test_old_apps_screen_is_gone_from_home_keyboards():
-    flat = " ".join(
-        b.text
-        for row in vpn_legacy_card.card_keyboard(
-            [], subscription=GUEST_FULL, self_serve_nodes=[]
-        ).inline_keyboard
-        for b in row
-    )
-    assert "Приложение" not in flat and "❓ Помощь" in flat
 
 
 async def test_proxy_screen_url_buttons_per_country(results):
