@@ -1,10 +1,3 @@
-"""Карточки людей в справке перед ходом: текст для модели (Этап 54.3,
-с Этапа 58 карточки — people/book.py::PeopleBook из БД alfred).
-
-Имён источников в карточке нет — только by_id; имя подставляет вызывающий
-(``name_of``).
-"""
-
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -44,7 +37,6 @@ def _by_gender(gender: str | None, male: str, female: str, unknown: str) -> str:
 
 
 def speaker_card_note(card: Card | None, name_of: NameOf) -> str | None:
-    """Строки о собеседнике: пол с источником и обращение, имя, прозвища."""
     if not card:
         return None
     parts: list[str] = []
@@ -83,8 +75,6 @@ def speaker_card_note(card: Card | None, name_of: NameOf) -> str | None:
 
 
 def roster_line(person_id: int, display: str, card: Card | None, name_of: NameOf) -> str:
-    """«Милана — id 202 — женщина (сама сказала)» для списка знакомых и
-    участников: по этой строке модель и адресует, и склоняет."""
     bits = [display, f"id {person_id}"]
     gender = (card or {}).get("gender")
     if isinstance(gender, dict) and gender.get("value") in _GENDER_WORD:

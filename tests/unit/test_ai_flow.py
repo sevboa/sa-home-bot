@@ -11,13 +11,14 @@ from types import SimpleNamespace
 import pytest_asyncio
 
 from sa_home_bot import llm_chat
-from sa_home_bot.bot import ai_flow, wake_state
+from sa_home_bot.bot import ai_context, ai_flow, wake_state
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.config import LlmConfig, Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
+from sa_home_bot.llm.prompt import ROUTE_OK, THINK_MARKER
 from sa_home_bot.proto.messages import ERR_INTERNAL, ERR_UNAVAILABLE, ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
@@ -292,7 +293,7 @@ async def store(tmp_path):
 async def test_fast_path_no_narrative_when_node_already_up(store):
     message = FakeMessage()
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Добгый день, сэ"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "Добгый день, сэ"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
@@ -417,7 +418,7 @@ async def test_tool_call_round_trip_reaches_final_response(store):
     link = FakeNodeLink(
         chat_results=[
             {"tool_calls": [{"function": {"name": "calc", "arguments": {"expression": "2 + 2"}}}]},
-            {"response": ai_flow.ROUTE_OK},
+            {"response": ROUTE_OK},
             {"response": "Отвечу: 4"},
         ],
         get_state_routes={"mycraft:llm": {"asleep": False}},
@@ -472,7 +473,7 @@ async def test_tool_call_is_recorded_in_store(store):
     link = FakeNodeLink(
         chat_results=[
             {"tool_calls": [{"function": {"name": "calc", "arguments": {"expression": "2 + 2"}}}]},
-            {"response": ai_flow.ROUTE_OK},
+            {"response": ROUTE_OK},
             {"response": "Отвечу: 4"},
         ],
         get_state_routes={"mycraft:llm": {"asleep": False}},
@@ -495,7 +496,7 @@ async def test_unknown_tool_name_reported_back_to_model(store):
     link = FakeNodeLink(
         chat_results=[
             {"tool_calls": [{"function": {"name": "no_such_tool", "arguments": {}}}]},
-            {"response": ai_flow.ROUTE_OK},
+            {"response": ROUTE_OK},
             {"response": "ладно"},
         ],
         get_state_routes={"mycraft:llm": {"asleep": False}},
@@ -526,7 +527,7 @@ async def test_tool_call_round_limit_squeezes_answer_without_tools(store):
             # router-проход: упирается в лимит...
             *[{"tool_calls": tool_calls}] * llm_chat.MAX_TOOL_ROUNDS,
             # ...и дожимает решение уже без тулов
-            {"response": ai_flow.ROUTE_OK},
+            {"response": ROUTE_OK},
             # персонажный проход
             {"response": "Двá, сэг"},
         ],
@@ -588,14 +589,14 @@ def test_think_marker_survives_llm_service_transforms(tmp_path):
 
     cfg = LlmConfig(speech_therapy_state_path=str(tmp_path / "speech-therapy.json"))
     therapist = SpeechTherapist(cfg, rand=lambda: 0.0)
-    transformed, _, _ = therapist.process(strip_math_notation(ai_flow.THINK_MARKER), chat_id=None)
-    assert transformed == ai_flow.THINK_MARKER
+    transformed, _, _ = therapist.process(strip_math_notation(THINK_MARKER), chat_id=None)
+    assert transformed == THINK_MARKER
 
 
 async def test_fast_path_no_thinking_when_marker_absent(store):
     message = FakeMessage()
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Добгый день, сэ"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "Добгый день, сэ"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
@@ -615,7 +616,7 @@ async def test_escalates_to_thinking_when_marker_returned(store):
     message = FakeMessage()
     link = FakeNodeLink(
         chat_results=[
-            {"response": f"кое-что... {ai_flow.THINK_MARKER}"},
+            {"response": f"кое-что... {THINK_MARKER}"},
             {"response": "Точный ответ после раздумий"},
         ],
         get_state_routes={"mycraft:llm": {"asleep": False}},
@@ -651,7 +652,7 @@ async def test_escalates_to_thinking_uses_rich_status_not_plain_message(store):
     rich_session = FakeRichSession()
     link = FakeNodeLink(
         chat_results=[
-            {"response": f"кое-что... {ai_flow.THINK_MARKER}"},
+            {"response": f"кое-что... {THINK_MARKER}"},
             {"response": "Точный ответ после раздумий"},
         ],
         get_state_routes={"mycraft:llm": {"asleep": False}},
@@ -741,7 +742,7 @@ async def test_asleep_model_shows_steps_but_no_wake(store):
     # увидеть «шаги», а не молча ждать до request_timeout_s.
     message = FakeMessage()
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Секунду, сэг"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "Секунду, сэг"}],
         get_state_routes={"mycraft:llm": {"asleep": True}},
     )
 
@@ -762,7 +763,7 @@ async def test_asleep_model_shows_steps_via_rich_status_not_plain_message(store)
     message = FakeMessage()
     rich_session = FakeRichSession()
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Секунду, сэг"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "Секунду, сэг"}],
         get_state_routes={"mycraft:llm": {"asleep": True}},
     )
 
@@ -837,7 +838,7 @@ async def test_unavailable_then_woken_within_30s(store, monkeypatch):
     monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
     message = FakeMessage()
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Сейчас подойду"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "Сейчас подойду"}],
         get_state_sequences={"mycraft:llm": [None, {"asleep": True}]},
     )
 
@@ -868,7 +869,7 @@ async def test_unavailable_then_woken_within_30s_via_rich_status(store, monkeypa
     message = FakeMessage()
     rich_session = FakeRichSession()
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Сейчас подойду"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "Сейчас подойду"}],
         get_state_sequences={"mycraft:llm": [None, {"asleep": True}]},
     )
 
@@ -1112,14 +1113,14 @@ def test_display_name_none_for_missing_user():
 
 
 def test_person_age_computed_from_birth_date():
-    assert ai_flow._person_age("1990-06-15", date(2026, 6, 14)) == 35  # ещё не наступил
-    assert ai_flow._person_age("1990-06-15", date(2026, 6, 15)) == 36  # ровно сегодня
-    assert ai_flow._person_age("1990-06-15", date(2026, 6, 16)) == 36
+    assert ai_context._person_age("1990-06-15", date(2026, 6, 14)) == 35  # ещё не наступил
+    assert ai_context._person_age("1990-06-15", date(2026, 6, 15)) == 36  # ровно сегодня
+    assert ai_context._person_age("1990-06-15", date(2026, 6, 16)) == 36
 
 
 def test_person_age_none_when_birth_date_unknown():
-    assert ai_flow._person_age("", date(2026, 6, 15)) is None
-    assert ai_flow._person_age(None, date(2026, 6, 15)) is None
+    assert ai_context._person_age("", date(2026, 6, 15)) is None
+    assert ai_context._person_age(None, date(2026, 6, 15)) is None
 
 
 def test_speaker_life_note_includes_local_time_age_and_birthday():
@@ -1133,7 +1134,7 @@ def test_speaker_life_note_includes_local_time_age_and_birthday():
             }
         }
     )
-    note = ai_flow._speaker_life_note(people, 42)
+    note = ai_context._speaker_life_note(people, 42)
     assert "У неё в Москва сейчас" in note
     assert "часовой пояс" in note
     assert "лет" in note  # возраст посчитан, не None
@@ -1141,30 +1142,30 @@ def test_speaker_life_note_includes_local_time_age_and_birthday():
 
 
 def test_speaker_life_note_none_without_card():
-    assert ai_flow._speaker_life_note(people_book(), 42) is None
+    assert ai_context._speaker_life_note(people_book(), 42) is None
 
 
 def test_speaker_life_note_skips_age_when_birth_date_unknown():
     people = people_book(cards={42: {"timezone": "Asia/Almaty"}})
-    note = ai_flow._speaker_life_note(people, 42)
+    note = ai_context._speaker_life_note(people, 42)
     assert "Точный возраст" not in note
     assert "День рождения" not in note
     assert "У собеседника сейчас" in note
 
 
 def test_person_birthday_ru_formats_day_and_month():
-    assert ai_flow._person_birthday_ru("1990-04-29") == "29 апреля"
+    assert ai_context._person_birthday_ru("1990-04-29") == "29 апреля"
 
 
 def test_person_birthday_ru_none_when_birth_date_unknown():
-    assert ai_flow._person_birthday_ru("") is None
+    assert ai_context._person_birthday_ru("") is None
 
 
 async def test_context_note_time_only_without_sender(store):
     # Без отправителя (from_user=None) заметка больше не пустая — время
     # (§8.1 плана) вставляется безусловно, только сведений о собеседнике нет.
     message = NoteMessage(1, "private", None)
-    note = await ai_flow._build_context_note(message, store, dialogue_id=1)
+    note = await ai_context.build_context_note(message, store, dialogue_id=1)
     assert "Точное время сейчас" in note
     assert "говорит" not in note
 
@@ -1173,7 +1174,7 @@ async def test_context_note_includes_alfred_own_time_always(store):
     # Живая находка 2026-07-25: личное время Альфреда (ALFRED_TIMEZONE) —
     # безусловно, не привязано к тому, узнан ли отправитель.
     message = NoteMessage(1, "private", None)
-    note = await ai_flow._build_context_note(message, store, dialogue_id=1)
+    note = await ai_context.build_context_note(message, store, dialogue_id=1)
     assert "ТВОЁ (Альфреда) личное время" in note
 
 
@@ -1183,13 +1184,13 @@ async def test_context_note_warns_against_fabricating_after_tool_failure(store):
     # конкретной температурой — выдумала. Инструкция безусловная (не
     # привязана к конкретному тулу), как и предупреждение про интернет.
     message = NoteMessage(1, "private", None)
-    note = await ai_flow._build_context_note(message, store, dialogue_id=1)
+    note = await ai_context.build_context_note(message, store, dialogue_id=1)
     assert "не повод придумать" in note
 
 
 async def test_context_note_private_chat_only_mentions_sender(store):
     message = NoteMessage(1, "private", FakeUser("Иван", username="ivan"))
-    note = await ai_flow._build_context_note(message, store, dialogue_id=1)
+    note = await ai_context.build_context_note(message, store, dialogue_id=1)
     assert note is not None
     assert "Иван (@ivan)" in note
     assert "начал" not in note
@@ -1213,7 +1214,7 @@ async def test_context_note_group_includes_starter_and_other_participants(store)
     )
 
     message = NoteMessage(1, "group", petr)
-    note = await ai_flow._build_context_note(message, store, dialogue_id=500)
+    note = await ai_context.build_context_note(message, store, dialogue_id=500)
 
     assert "Пётр" in note  # сейчас пишет
     assert "Иван (@ivan)" in note  # начал тред
@@ -1229,7 +1230,7 @@ async def test_context_note_skips_starter_line_when_same_as_sender(store):
     )
 
     message = NoteMessage(1, "group", ivan)
-    note = await ai_flow._build_context_note(message, store, dialogue_id=500)
+    note = await ai_context.build_context_note(message, store, dialogue_id=500)
 
     assert note.count("Иван (@ivan)") == 1  # не повторяем "начал" для того же человека
     assert "начал" not in note
@@ -1248,7 +1249,7 @@ async def test_reply_context_includes_foreign_message_text(store):
     ivan = FakeUser("Иван", username="ivan", id=10)
 
     message = NoteMessage(1, "group", ivan, reply_to_message=foreign)
-    note = await ai_flow._build_context_note(message, store, dialogue_id=500)
+    note = await ai_context.build_context_note(message, store, dialogue_id=500)
 
     assert "Вася" in note
     assert "Когда следующий матч?" in note
@@ -1264,7 +1265,7 @@ async def test_reply_context_skips_text_already_in_current_dialogue_history(stor
 
     reply_to = FakeRepliedMessage(501, text="Слушаю, сэр")
     message = NoteMessage(1, "group", ivan, reply_to_message=reply_to)
-    note = await ai_flow._build_context_note(message, store, dialogue_id=500)
+    note = await ai_context.build_context_note(message, store, dialogue_id=500)
 
     assert "Сообщение, на которое сейчас отвечают" not in note
 
@@ -1283,7 +1284,7 @@ async def test_reply_context_includes_quote_even_for_own_thread(store):
     message = NoteMessage(
         1, "group", ivan, reply_to_message=reply_to, quote=FakeQuote("много всего")
     )
-    note = await ai_flow._build_context_note(message, store, dialogue_id=500)
+    note = await ai_context.build_context_note(message, store, dialogue_id=500)
 
     assert "много всего" in note
     assert "Сообщение, на которое сейчас отвечают" not in note  # текст уже в истории
@@ -1291,11 +1292,11 @@ async def test_reply_context_includes_quote_even_for_own_thread(store):
 
 async def test_reply_context_truncates_long_foreign_message(store):
     ivan = FakeUser("Иван", username="ivan", id=10)
-    long_text = "Ы" * (ai_flow._REPLY_QUOTE_MAX_CHARS + 200)
+    long_text = "Ы" * (ai_context._REPLY_QUOTE_MAX_CHARS + 200)
     foreign = FakeRepliedMessage(777, from_user=None, text=long_text)
 
     message = NoteMessage(1, "group", ivan, reply_to_message=foreign)
-    note = await ai_flow._build_context_note(message, store, dialogue_id=500)
+    note = await ai_context.build_context_note(message, store, dialogue_id=500)
 
     assert "…" in note
     assert long_text not in note  # обрезано, а не вставлено целиком
@@ -1304,7 +1305,7 @@ async def test_reply_context_truncates_long_foreign_message(store):
 async def test_no_reply_context_without_reply_to_message(store):
     ivan = FakeUser("Иван", username="ivan", id=10)
     message = NoteMessage(1, "private", ivan)
-    note = await ai_flow._build_context_note(message, store, dialogue_id=500)
+    note = await ai_context.build_context_note(message, store, dialogue_id=500)
 
     assert "отвечают" not in note
 
@@ -1324,7 +1325,7 @@ async def test_reply_context_quote_is_self_contained_for_own_thread(store):
     message = NoteMessage(
         1, "group", ivan, reply_to_message=reply_to, quote=FakeQuote("привычки")
     )
-    note = await ai_flow._build_context_note(message, store, dialogue_id=500)
+    note = await ai_context.build_context_note(message, store, dialogue_id=500)
 
     assert "твоего же предыдущего сообщения" in note.lower() or "твоего же" in note
     assert "привычки»" in note
@@ -1339,7 +1340,7 @@ async def test_context_note_inserted_right_before_current_turn(store):
     message = FakeMessage()
     message.from_user = FakeUser("Иван", username="ivan", id=10)
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "ответ"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "ответ"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
     history = [
@@ -1377,7 +1378,7 @@ async def test_person_cards_reach_the_context_note(store):
     message = FakeMessage()
     message.from_user = FakeUser("Лилиан", username="lilian", id=10)
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "ответ"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "ответ"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
@@ -1399,7 +1400,7 @@ async def test_person_cards_unavailable_leave_note_without_them(store):
     message = FakeMessage()
     message.from_user = FakeUser("Лилиан", username="lilian", id=10)
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "ответ"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "ответ"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
@@ -1487,7 +1488,7 @@ async def test_web_search_announces_surfing_once_per_request(store):
     link = FakeNodeLink(
         chat_results=[
             {"tool_calls": [_search_call("первый")]},
-            {"response": ai_flow.ROUTE_OK},
+            {"response": ROUTE_OK},
             {"tool_calls": [_search_call("второй")]},
             {"response": "Вот что нашёл, сэг"},
         ],
@@ -1512,7 +1513,7 @@ async def test_other_tools_do_not_announce_surfing(store):
     link = FakeNodeLink(
         chat_results=[
             {"tool_calls": [{"function": {"name": "calc", "arguments": {"expression": "2+2"}}}]},
-            {"response": ai_flow.ROUTE_OK},
+            {"response": ROUTE_OK},
             {"response": "Четыге"},
         ],
         get_state_routes={"mycraft:llm": {"asleep": False}},
@@ -1540,7 +1541,7 @@ async def test_tool_status_pushed_for_every_call_when_rich_session_present(store
     link = FakeNodeLink(
         chat_results=[
             {"tool_calls": [_search_call("первый")]},
-            {"response": ai_flow.ROUTE_OK},
+            {"response": ROUTE_OK},
             {"tool_calls": [_search_call("второй")]},
             {"response": "Вот что нашёл, сэг"},
         ],
@@ -1564,7 +1565,7 @@ async def test_tool_status_uses_per_tool_phrase(store):
     link = FakeNodeLink(
         chat_results=[
             {"tool_calls": [{"function": {"name": "calc", "arguments": {"expression": "2+2"}}}]},
-            {"response": ai_flow.ROUTE_OK},
+            {"response": ROUTE_OK},
             {"response": "Четыге"},
         ],
         get_state_routes={"mycraft:llm": {"asleep": False}},
@@ -1610,7 +1611,7 @@ async def test_without_search_right_model_is_told_not_to_invent(store):
     нужно сказать прямо."""
     message = FakeMessage()
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Не знаю, сэг"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "Не знаю, сэг"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
     book = SubscriptionBook(
@@ -1632,7 +1633,7 @@ async def test_with_search_right_no_such_warning(store):
     """У кого поиск есть — предупреждение только сбивало бы с толку."""
     message = FakeMessage()
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Извольте"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "Извольте"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
@@ -1649,7 +1650,7 @@ async def test_chat_without_subscription_also_warned(store):
     """Fail-closed: подписки нет — тулов нет, значит и интернета нет."""
     message = FakeMessage()
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "..."}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "..."}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
@@ -1690,7 +1691,7 @@ async def test_dismiss_tool_powers_nothing_off_during_the_request(store):
     link = FakeNodeLink(
         chat_results=[
             {"tool_calls": [{"function": {"name": "dismiss", "arguments": {"mode": "off"}}}]},
-            {"response": ai_flow.ROUTE_OK},
+            {"response": ROUTE_OK},
             {"response": "Всего доброго, сэг"},
         ],
         get_state_routes={"mycraft:llm": {"asleep": False}},
@@ -1797,7 +1798,7 @@ async def test_memory_facts_land_in_the_context_note(store):
     подходящее подмешивается в заметку само."""
     message = FakeMessage()
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Как скажете"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "Как скажете"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
         memory_facts=[
             {"text": "Качаем в /mnt/data/pr", "sensitive": False},
@@ -1821,7 +1822,7 @@ async def test_memory_facts_land_in_the_context_note(store):
 async def test_silent_memory_leaves_the_note_as_it_was(store):
     message = FakeMessage()
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "…"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "…"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
@@ -1846,7 +1847,7 @@ async def test_graph_facts_land_in_the_context_note(store):
     от memory_facts — источник менее надёжный (см. _build_context_note)."""
     message = FakeMessage()
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Как скажете"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "Как скажете"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
         graph_facts=["Наташа — жена Алексея"],
     )
@@ -1876,7 +1877,7 @@ async def test_guest_first_turn_queries_graph_for_identity(store):
     message = FakeMessage()
     message.from_user = FakeUser("Гусь", username="goose", id=777)
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Как скажете"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "Как скажете"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
@@ -1897,7 +1898,7 @@ async def test_guest_second_turn_does_not_requery_identity(store):
     message = FakeMessage()
     message.from_user = FakeUser("Гусь", username="goose", id=777)
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Как скажете"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "Как скажете"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
     history = [
@@ -1918,7 +1919,7 @@ async def test_known_family_member_does_not_query_guest_identity(store):
     message = FakeMessage()
     message.from_user = FakeUser("Иван", username="ivan", id=777)
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Как скажете"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "Как скажете"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
     await store.add_person_claims([claim(777, "name", "Иван Иванов", by_id=1)])
@@ -2011,7 +2012,7 @@ async def test_piggyback_dialogue_episode_skips_empty_turns():
 async def test_typing_fires_for_the_chat_around_the_actual_ask(store):
     message = FakeMessage()
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Добгый день, сэ"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "Добгый день, сэ"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
@@ -2028,7 +2029,7 @@ async def test_typing_uses_the_topic_thread_id(store):
     message = FakeMessage()
     message.message_thread_id = 777
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "ответ"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "ответ"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
@@ -2063,7 +2064,7 @@ async def test_typing_does_not_fire_during_asleep_warmup_before_the_retry(store)
     # загорится только внутри самого _ask(), который ниже успешно отвечает.
     message = FakeMessage()
     link = FakeNodeLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "Секунду, сэг"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "Секунду, сэг"}],
         get_state_routes={"mycraft:llm": {"asleep": True}},
     )
 
@@ -2088,7 +2089,7 @@ async def test_typing_keepalive_repeats_while_the_model_is_slow(store, monkeypat
             return await super().command(action, args, dst, timeout)
 
     link = SlowLink(
-        chat_results=[{"response": ai_flow.ROUTE_OK}, {"response": "ответ"}],
+        chat_results=[{"response": ROUTE_OK}, {"response": "ответ"}],
         get_state_routes={"mycraft:llm": {"asleep": False}},
     )
 
@@ -2127,7 +2128,7 @@ async def test_reply_to_alfreds_picture_adds_a_note(store):
     message = SimpleNamespace(
         chat=SimpleNamespace(id=555), reply_to_message=SimpleNamespace(message_id=900)
     )
-    note = await ai_flow._replied_picture_note(message, store)
+    note = await ai_context.replied_picture_note(message, store)
     assert f"#{image_id}" in note and "камин и сова" in note and "look_at_photo" in note
     message.reply_to_message = SimpleNamespace(message_id=901)
-    assert await ai_flow._replied_picture_note(message, store) is None
+    assert await ai_context.replied_picture_note(message, store) is None

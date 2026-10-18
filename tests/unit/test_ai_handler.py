@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest_asyncio
 
-from sa_home_bot.bot import ai_flow, voice_mode
+from sa_home_bot.bot import ai_flow, ai_reply, ai_turns, voice_mode
 from sa_home_bot.bot.handlers import ai as ai_handler
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import Settings
@@ -181,8 +181,8 @@ async def test_cmd_ai_without_text_asks_model_for_greeting(store, monkeypatch):
         tool_calls=ToolCalls(),
     )
 
-    assert seen_history == [[{"role": "user", "content": ai_handler.OPENING_PROMPT}]]
-    assert message.sent == [ai_handler._format_answer("Да, сэг? Слушаю вас")]
+    assert seen_history == [[{"role": "user", "content": ai_turns.OPENING_PROMPT}]]
+    assert message.sent == [ai_reply.format_answer("Да, сэг? Слушаю вас")]
     # Только ответ ассистента — сама директива не осела в истории диалога.
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert len(rows) == 1
@@ -230,7 +230,7 @@ async def test_cmd_ai_with_text_calls_ai_flow_and_records_both_turns(store, monk
     )
 
     assert seen_history == [[{"role": "user", "content": "привет"}]]
-    assert message.sent == [ai_handler._format_answer("Добгый день, сэ")]
+    assert message.sent == [ai_reply.format_answer("Добгый день, сэ")]
 
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert [r["role"] for r in rows] == ["user", "assistant"]
@@ -369,7 +369,7 @@ async def test_cmd_ai_long_response_is_split_across_telegram_messages(store, mon
         tool_calls=ToolCalls(),
     )
 
-    expected_chunks = ai_handler.chunk_text(ai_handler._format_answer(long_answer))
+    expected_chunks = ai_reply.chunk_text(ai_reply.format_answer(long_answer))
     assert len(expected_chunks) > 1  # проверка не имеет смысла на одном чанке
     assert message.sent == expected_chunks
 
@@ -422,7 +422,7 @@ async def test_cmd_ai_voice_mode_enabled_sends_voice_instead_of_text(store, monk
         return b"fake-ogg-bytes"
 
     monkeypatch.setattr(ai_flow, "request_alfred", _fake_request_returns("Добрый вечер, сэр."))
-    monkeypatch.setattr(ai_handler.voice_tts, "synthesize_voice_reply", fake_synthesize)
+    monkeypatch.setattr(ai_reply.voice_tts, "synthesize_voice_reply", fake_synthesize)
     message = FakeMessage(1, text="/alfred привет")
     notifier = FakeNotifier()
 
@@ -450,7 +450,7 @@ async def test_cmd_ai_voice_mode_enabled_synthesis_fails_falls_back_to_text(stor
         return None  # служба недоступна / ffmpeg упал / что угодно
 
     monkeypatch.setattr(ai_flow, "request_alfred", _fake_request_returns("Добрый вечер, сэр."))
-    monkeypatch.setattr(ai_handler.voice_tts, "synthesize_voice_reply", fake_synthesize_fails)
+    monkeypatch.setattr(ai_reply.voice_tts, "synthesize_voice_reply", fake_synthesize_fails)
     message = FakeMessage(1, text="/alfred привет")
     notifier = FakeNotifier()
 
@@ -462,7 +462,7 @@ async def test_cmd_ai_voice_mode_enabled_synthesis_fails_falls_back_to_text(stor
 
     assert notifier.sent_voices == []
     # Тихий откат на обычный текстовый путь — пользователь не остаётся без ответа.
-    assert message.sent == [ai_handler._format_answer("Добрый вечер, сэр.")]
+    assert message.sent == [ai_reply.format_answer("Добрый вечер, сэр.")]
 
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert rows[1]["content"] == "Добрый вечер, сэр."
@@ -477,7 +477,7 @@ async def test_cmd_ai_voice_mode_enabled_but_telegram_rejects_voice_falls_back_t
         return b"fake-ogg-bytes"
 
     monkeypatch.setattr(ai_flow, "request_alfred", _fake_request_returns("Добрый вечер, сэр."))
-    monkeypatch.setattr(ai_handler.voice_tts, "synthesize_voice_reply", fake_synthesize)
+    monkeypatch.setattr(ai_reply.voice_tts, "synthesize_voice_reply", fake_synthesize)
     message = FakeMessage(1, text="/alfred привет")
     notifier = FakeNotifier(send_voice_result=None)  # Telegram отверг файл
 
@@ -488,7 +488,7 @@ async def test_cmd_ai_voice_mode_enabled_but_telegram_rejects_voice_falls_back_t
     )
 
     assert notifier.sent_voices == [(1, b"fake-ogg-bytes")]
-    assert message.sent == [ai_handler._format_answer("Добрый вечер, сэр.")]
+    assert message.sent == [ai_reply.format_answer("Добрый вечер, сэр.")]
 
 
 async def test_cmd_ai_voice_mode_disabled_never_calls_synthesize(store, monkeypatch):
@@ -500,7 +500,7 @@ async def test_cmd_ai_voice_mode_disabled_never_calls_synthesize(store, monkeypa
         return b"should-not-be-called"
 
     monkeypatch.setattr(ai_flow, "request_alfred", _fake_request_returns("Добрый вечер, сэр."))
-    monkeypatch.setattr(ai_handler.voice_tts, "synthesize_voice_reply", fake_synthesize)
+    monkeypatch.setattr(ai_reply.voice_tts, "synthesize_voice_reply", fake_synthesize)
     message = FakeMessage(1, text="/alfred привет")
     notifier = FakeNotifier()
 
@@ -512,7 +512,7 @@ async def test_cmd_ai_voice_mode_disabled_never_calls_synthesize(store, monkeypa
 
     assert called is False
     assert notifier.sent_voices == []
-    assert message.sent == [ai_handler._format_answer("Добрый вечер, сэр.")]
+    assert message.sent == [ai_reply.format_answer("Добрый вечер, сэр.")]
 
 
 async def test_cmd_ai_unhandled_exception_apologizes_and_notifies_admin(store, monkeypatch):
@@ -671,7 +671,7 @@ async def test_on_ai_reply_appends_history_and_answers(store, monkeypatch):
             {"role": "user", "content": "продолжаю"},
         ]
     ]
-    assert message.sent == [ai_handler._format_answer("втогой ответ")]
+    assert message.sent == [ai_reply.format_answer("втогой ответ")]
 
 
 async def test_on_ai_reply_without_text_still_asks_model(store, monkeypatch):
@@ -704,8 +704,8 @@ async def test_on_ai_reply_without_text_still_asks_model(store, monkeypatch):
         subscription=_sub("chat@llm"),
     )
 
-    assert seen_history == [[{"role": "user", "content": ai_handler.EMPTY_REPLY_PROMPT}]]
-    assert message.sent == [ai_handler._format_answer("Простите, не расслышал, сэр")]
+    assert seen_history == [[{"role": "user", "content": ai_turns.EMPTY_REPLY_PROMPT}]]
+    assert message.sent == [ai_reply.format_answer("Простите, не расслышал, сэр")]
 
     # Директива не осела в истории — только ответ ассистента.
     rows = await store.ai_turns_for_dialogue(1, 500)
@@ -823,7 +823,7 @@ async def test_on_private_message_starts_new_dialogue_when_none_exists(store, mo
     )
 
     assert seen_history == [[{"role": "user", "content": "добрый вечер"}]]
-    assert message.sent == [ai_handler._format_answer("Здгавствуйте, сэ")]
+    assert message.sent == [ai_reply.format_answer("Здгавствуйте, сэ")]
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert [r["role"] for r in rows] == ["user", "assistant"]
 
@@ -932,10 +932,10 @@ async def test_on_private_photo_without_caption_uses_default_prompt(store, monke
         tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
     )
 
-    assert seen_history[0][-1]["content"] == ai_handler.PHOTO_NO_CAPTION_PROMPT
+    assert seen_history[0][-1]["content"] == ai_turns.PHOTO_NO_CAPTION_PROMPT
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     user_row = next(r for r in rows if r["role"] == "user")
-    assert user_row["content"] == ai_handler.PHOTO_MARKER
+    assert user_row["content"] == ai_turns.PHOTO_MARKER
 
 
 async def test_on_private_photo_too_large_declines_without_asking_model(store, monkeypatch):
@@ -943,7 +943,7 @@ async def test_on_private_photo_too_large_declines_without_asking_model(store, m
         raise AssertionError("слишком большое фото не должно уходить в request_alfred")
 
     monkeypatch.setattr(ai_flow, "request_alfred", fail_request)
-    monkeypatch.setattr(ai_handler, "_MAX_RAW_IMAGE_B64_BYTES", 4)
+    monkeypatch.setattr(ai_turns, "MAX_RAW_IMAGE_B64_BYTES", 4)
     message = FakeMessage(1, photo=["size1"], chat_type="private")
 
     await ai_handler.on_private_photo(
@@ -953,7 +953,7 @@ async def test_on_private_photo_too_large_declines_without_asking_model(store, m
         tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
     )
 
-    assert message.sent == [ai_handler.PHOTO_TOO_LARGE_TEXT]
+    assert message.sent == [ai_turns.PHOTO_TOO_LARGE_TEXT]
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert rows == []  # ничего не записано — как в плане
 
@@ -962,9 +962,9 @@ async def test_handle_photo_message_pushes_looking_status_when_rich(store):
     rich_session = FakeRichSession()
     message = FakeMessage(1, photo=["size1"], chat_type="private")
 
-    await ai_handler._handle_photo_message(message, store, _plain_settings(), 999, rich_session)
+    await ai_turns.photo_history(message, store, _plain_settings(), 999, rich_session)
 
-    assert rich_session.statuses == [ai_handler.PHOTO_LOOKING_TEXT_PLAIN]
+    assert rich_session.statuses == [ai_turns.PHOTO_LOOKING_TEXT_PLAIN]
 
 
 async def test_on_private_photo_denied_without_right(store):
@@ -1010,7 +1010,7 @@ async def test_on_private_sticker_with_emoji_sends_raw_image_and_persists_photo_
     assert len(seen_history) == 1 and len(seen_history[0]) == 1
     turn = seen_history[0][0]
     assert turn["role"] == "user"
-    assert turn["content"] == ai_handler.STICKER_PROMPT.format(emoji="😂")
+    assert turn["content"] == ai_turns.STICKER_PROMPT.format(emoji="😂")
     assert isinstance(turn["raw_image"], str) and turn["raw_image"]
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     user_row = next(r for r in rows if r["role"] == "user")
@@ -1041,7 +1041,7 @@ async def test_on_private_sticker_without_thumbnail_falls_back_to_text_only(stor
     assert message.bot.downloaded == []
     turn = seen_history[0][0]
     assert "raw_image" not in turn
-    assert turn["content"] == ai_handler.STICKER_PROMPT_NO_IMAGE.format(emoji="😂")
+    assert turn["content"] == ai_turns.STICKER_PROMPT_NO_IMAGE.format(emoji="😂")
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     user_row = next(r for r in rows if r["role"] == "user")
     assert user_row["content"] == "[стикер] 😂"
@@ -1059,7 +1059,7 @@ async def test_on_private_sticker_too_large_falls_back_to_text_only(store, monke
         return "ответ"
 
     monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
-    monkeypatch.setattr(ai_handler, "_MAX_RAW_IMAGE_B64_BYTES", 4)
+    monkeypatch.setattr(ai_turns, "MAX_RAW_IMAGE_B64_BYTES", 4)
     message = FakeMessage(
         1, sticker=FakeSticker(emoji="😂", thumbnail="thumb1"), chat_type="private"
     )
@@ -1098,7 +1098,7 @@ async def test_on_private_sticker_without_emoji_uses_marker_only(store, monkeypa
 
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     user_row = next(r for r in rows if r["role"] == "user")
-    assert user_row["content"] == ai_handler.STICKER_MARKER
+    assert user_row["content"] == ai_turns.STICKER_MARKER
 
 
 async def test_handle_sticker_message_pushes_looking_status_when_rich(store):
@@ -1107,16 +1107,16 @@ async def test_handle_sticker_message_pushes_looking_status_when_rich(store):
         1, sticker=FakeSticker(emoji="😂", thumbnail="thumb1"), chat_type="private"
     )
 
-    await ai_handler._handle_sticker_message(message, store, _plain_settings(), 999, rich_session)
+    await ai_turns.sticker_history(message, store, _plain_settings(), 999, rich_session)
 
-    assert rich_session.statuses == [ai_handler.STICKER_LOOKING_TEXT_PLAIN]
+    assert rich_session.statuses == [ai_turns.STICKER_LOOKING_TEXT_PLAIN]
 
 
 async def test_handle_sticker_message_no_status_without_thumbnail(store):
     rich_session = FakeRichSession()
     message = FakeMessage(1, sticker=FakeSticker(emoji="😂", thumbnail=None), chat_type="private")
 
-    await ai_handler._handle_sticker_message(message, store, _plain_settings(), 999, rich_session)
+    await ai_turns.sticker_history(message, store, _plain_settings(), 999, rich_session)
 
     assert rich_session.statuses == []
 
@@ -1149,7 +1149,7 @@ async def test_on_private_voice_records_transcript_and_calls_ai_flow(store, monk
         seen_history.append(history)
         return "Добрый день, сэр"
 
-    monkeypatch.setattr(ai_handler.voice_stt, "transcribe_voice_message", fake_transcribe)
+    monkeypatch.setattr(ai_turns.voice_stt, "transcribe_voice_message", fake_transcribe)
     monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
     message = FakeMessage(1, voice="voice-obj", chat_type="private")
 
@@ -1174,7 +1174,7 @@ async def test_on_private_voice_none_transcript_declines_without_asking_model(st
     async def fail_request(*args, **kwargs):
         raise AssertionError("без транскрипта не должно уходить в request_alfred")
 
-    monkeypatch.setattr(ai_handler.voice_stt, "transcribe_voice_message", fake_transcribe)
+    monkeypatch.setattr(ai_turns.voice_stt, "transcribe_voice_message", fake_transcribe)
     monkeypatch.setattr(ai_flow, "request_alfred", fail_request)
     message = FakeMessage(1, voice="voice-obj", chat_type="private")
 
@@ -1221,7 +1221,7 @@ async def test_on_ai_reply_with_voice_calls_ai_flow_with_transcript(store, monke
         seen_history.append(history)
         return "Слушаю, сэр"
 
-    monkeypatch.setattr(ai_handler.voice_stt, "transcribe_voice_message", fake_transcribe)
+    monkeypatch.setattr(ai_turns.voice_stt, "transcribe_voice_message", fake_transcribe)
     monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
     message = FakeMessage(1, voice="voice-obj", reply_to=reply_to, chat_type="private")
 
@@ -1246,7 +1246,7 @@ async def test_on_ai_reply_with_voice_none_transcript_sends_nothing_extra(store,
     async def fail_request(*args, **kwargs):
         raise AssertionError("без транскрипта не должно уходить в request_alfred")
 
-    monkeypatch.setattr(ai_handler.voice_stt, "transcribe_voice_message", fake_transcribe)
+    monkeypatch.setattr(ai_turns.voice_stt, "transcribe_voice_message", fake_transcribe)
     monkeypatch.setattr(ai_flow, "request_alfred", fail_request)
     message = FakeMessage(1, voice="voice-obj", reply_to=reply_to, chat_type="private")
 
@@ -1289,7 +1289,7 @@ async def test_on_ai_reply_with_sticker_calls_ai_flow_with_image(store, monkeypa
     )
 
     turn = seen_history[0][-1]
-    assert turn["content"] == ai_handler.STICKER_PROMPT.format(emoji="😂")
+    assert turn["content"] == ai_turns.STICKER_PROMPT.format(emoji="😂")
     assert isinstance(turn["raw_image"], str) and turn["raw_image"]
 
 
@@ -1352,7 +1352,7 @@ async def test_on_group_mention_with_text_starts_fresh_dialogue(store, monkeypat
     )
 
     assert seen_history == [[{"role": "user", "content": "какая погода?"}]]
-    assert message.sent == [ai_handler._format_answer("Слушаю, сэ")]
+    assert message.sent == [ai_reply.format_answer("Слушаю, сэ")]
 
 
 async def test_on_group_mention_without_text_asks_model_for_greeting(store, monkeypatch):
@@ -1375,7 +1375,7 @@ async def test_on_group_mention_without_text_asks_model_for_greeting(store, monk
         tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
     )
 
-    assert seen_history == [[{"role": "user", "content": ai_handler.OPENING_PROMPT}]]
+    assert seen_history == [[{"role": "user", "content": ai_turns.OPENING_PROMPT}]]
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert len(rows) == 1  # директива-приветствие не записана, только ответ
     assert rows[0]["role"] == "assistant"
@@ -1425,7 +1425,7 @@ async def test_dismissal_runs_after_the_farewell_is_sent(store, monkeypatch):
     assert len(seen) == 1
     mode, sent_at_that_moment, rows = seen[0]
     assert mode == "off"
-    assert sent_at_that_moment == [ai_handler._format_answer("Всего добгого, сэг")]
+    assert sent_at_that_moment == [ai_reply.format_answer("Всего добгого, сэг")]
     assert [r["role"] for r in rows] == ["user", "assistant"]
 
 
@@ -1545,7 +1545,7 @@ async def test_cmd_ai_in_topic_without_text_continues_with_opening_prompt(store,
         [
             {"role": "user", "content": "первый вопрос"},
             {"role": "assistant", "content": "первый ответ"},
-            {"role": "user", "content": ai_handler.OPENING_PROMPT},
+            {"role": "user", "content": ai_turns.OPENING_PROMPT},
         ]
     ]
 
@@ -1569,7 +1569,7 @@ async def test_cmd_ai_in_fresh_topic_without_text_is_same_as_outside_topic(store
         tool_calls=ToolCalls(),
     )
 
-    assert seen_history == [[{"role": "user", "content": ai_handler.OPENING_PROMPT}]]
+    assert seen_history == [[{"role": "user", "content": ai_turns.OPENING_PROMPT}]]
 
 
 async def test_on_private_message_in_topic_continues_same_topic_without_reply(store, monkeypatch):
@@ -1669,7 +1669,7 @@ async def test_send_alfred_reply_rich_returns_message_id_on_success():
     session = _FakeFinalizeSession(FakeMessage(1))
     notifier = FakeNotifier()
 
-    result = await ai_handler._send_alfred_reply_rich(message, "ответ", session, notifier)
+    result = await ai_reply.send_alfred_reply_rich(message, "ответ", session, notifier)
 
     assert result == session._finalize_result.message_id
     assert notifier.sent == []  # фолбэк не понадобился
@@ -1682,12 +1682,12 @@ async def test_send_alfred_reply_rich_falls_back_to_plain_when_rich_fails():
     session = _FakeFinalizeSession(None)
     notifier = FakeNotifier(send_direct_result=777)
 
-    result = await ai_handler._send_alfred_reply_rich(
+    result = await ai_reply.send_alfred_reply_rich(
         message, "ответ модели", session, notifier
     )
 
     assert result == 777
-    assert notifier.sent == [(1, ai_handler._format_answer("ответ модели"))]
+    assert notifier.sent == [(1, ai_reply.format_answer("ответ модели"))]
 
 
 async def test_send_alfred_reply_rich_returns_none_when_both_paths_fail():
@@ -1695,7 +1695,7 @@ async def test_send_alfred_reply_rich_returns_none_when_both_paths_fail():
     session = _FakeFinalizeSession(None)
     notifier = FakeNotifier(send_direct_result=None)
 
-    result = await ai_handler._send_alfred_reply_rich(message, "ответ", session, notifier)
+    result = await ai_reply.send_alfred_reply_rich(message, "ответ", session, notifier)
 
     assert result is None
 
@@ -1886,7 +1886,7 @@ async def test_no_mood_selfie_sends_text_as_usual(store, monkeypatch):
         tool_calls=ToolCalls(), interactives=interactives,
     )
 
-    assert message.sent == [ai_handler._format_answer("Добгый день")]
+    assert message.sent == [ai_reply.format_answer("Добгый день")]
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert rows[-1]["role"] == "assistant"
 
@@ -1906,4 +1906,4 @@ async def test_mood_selfie_skipped_when_turn_already_sent_a_picture(store, monke
         tool_calls=ToolCalls(), interactives=interactives,
     )
 
-    assert interactives.calls == [] and message.sent == [ai_handler._format_answer("Вот, пгошу")]
+    assert interactives.calls == [] and message.sent == [ai_reply.format_answer("Вот, пгошу")]

@@ -13,6 +13,7 @@ from sa_home_bot import wake_core
 from sa_home_bot.bot import voice_tts
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.config import LlmConfig, Settings
+from sa_home_bot.proto import chunks as proto_chunks
 from sa_home_bot.proto.messages import ERR_INTERNAL, ProtoError
 
 
@@ -131,7 +132,7 @@ async def test_chunked_response_downloads_and_verifies_sha256(monkeypatch):
         },
         chunks=chunks,
     )
-    monkeypatch.setattr(voice_tts, "_CHUNK_BYTES", 2000)
+    monkeypatch.setattr(proto_chunks, "CHUNK_BYTES", 2000)
 
     result = await voice_tts.synthesize_voice_reply(
         message, link, store=None, config=_settings(), rich_session=None, text="длинный ответ"

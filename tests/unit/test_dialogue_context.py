@@ -16,6 +16,7 @@ from sa_home_bot.config import LlmConfig, Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
+from sa_home_bot.llm.prompt import ROUTE_OK
 from sa_home_bot.llm_chat import ChatStats
 from sa_home_bot.proto.messages import Address
 from sa_home_bot.subscriptions.book import SubscriptionBook
@@ -454,7 +455,7 @@ async def test_threshold_adds_step_away_instruction(store):
         CHAT, DIALOGUE, prompt_tokens=25000, sent_chars=100, num_ctx=32768,
         done_reason="stop", at=NOW,
     )
-    link = AlfredLink([_ok(ai_flow.ROUTE_OK), _ok("Ответ. Позвольте отлучиться.")])
+    link = AlfredLink([_ok(ROUTE_OK), _ok("Ответ. Позвольте отлучиться.")])
     raw = await ai_flow.request_alfred(
         FakeMessage(), link, store, settings, history, DIALOGUE, _book(), FakeNotifier()
     )
@@ -472,7 +473,7 @@ async def test_below_threshold_no_instruction(store):
     await _long_dialogue(store, 10)
     await _turn(store, 21, "user", "а что дальше?")
     history = await dialogue_context.load_history(store, _settings(), CHAT, DIALOGUE)
-    link = AlfredLink([_ok(ai_flow.ROUTE_OK), _ok("Ответ.")])
+    link = AlfredLink([_ok(ROUTE_OK), _ok("Ответ.")])
     await ai_flow.request_alfred(
         FakeMessage(), link, store, _settings(), history, DIALOGUE, _book(), FakeNotifier()
     )
@@ -493,7 +494,7 @@ async def test_rescue_on_length_compresses_and_regenerates(store):
         "num_ctx": 32768,
     }
     link = AlfredLink(
-        [_ok(ai_flow.ROUTE_OK), truncated, _ok(ai_flow.ROUTE_OK), _ok("Полный ответ.")]
+        [_ok(ROUTE_OK), truncated, _ok(ROUTE_OK), _ok("Полный ответ.")]
     )
     message = FakeMessage()
     raw = await ai_flow.request_alfred(
@@ -524,9 +525,9 @@ async def test_rescue_falls_back_to_trim_when_still_overflowing(store):
                  "num_ctx": 32768}
     link = AlfredLink(
         [
-            _ok(ai_flow.ROUTE_OK), truncated,
-            _ok(ai_flow.ROUTE_OK), truncated,
-            _ok(ai_flow.ROUTE_OK), _ok("Коротко, но ответ."),
+            _ok(ROUTE_OK), truncated,
+            _ok(ROUTE_OK), truncated,
+            _ok(ROUTE_OK), _ok("Коротко, но ответ."),
         ]
     )
     raw = await ai_flow.request_alfred(
