@@ -1,9 +1,3 @@
-"""Watchdog связи с Telegram как request-middleware.
-
-Отслеживает сетевые сбои исходящих запросов; при восстановлении после долгого
-дисконнекта вызывает on_reconnect (broadcast system-события).
-"""
-
 from __future__ import annotations
 
 import asyncio

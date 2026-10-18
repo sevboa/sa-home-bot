@@ -1,10 +1,9 @@
 """node_links: генерация и разбор ссылок-команд /node_* и /svc_*."""
 
 from sa_home_bot.bot.node_links import (
-    match_service,
+    match_name,
     node_command,
     normalize,
-    resolve_node,
     resolve_svc_candidates,
     svc_command,
 )
@@ -45,10 +44,10 @@ def test_command_length_limit():
 # --- Разбор ---
 
 
-def test_resolve_node_exact_normalized_match():
-    assert resolve_node("arch_t480", KNOWN) == "arch-t480"
-    assert resolve_node("alfred", KNOWN) == "alfred"
-    assert resolve_node("toaster", KNOWN) is None
+def test_match_name_normalized():
+    assert match_name("arch_t480", KNOWN) == "arch-t480"
+    assert match_name("telegram_bot", ["monitor", "telegram-bot"]) == "telegram-bot"
+    assert match_name("nope", ["monitor"]) is None
 
 
 def test_resolve_svc_candidates_longest_prefix_first():
@@ -63,9 +62,3 @@ def test_resolve_svc_candidates_longest_prefix_first():
 
 def test_resolve_svc_candidates_no_match():
     assert resolve_svc_candidates("toaster_monitor", KNOWN) == []
-
-
-def test_match_service_normalized():
-    assert match_service("telegram_bot", ["monitor", "telegram-bot"]) == "telegram-bot"
-    assert match_service("monitor", ["monitor"]) == "monitor"
-    assert match_service("nope", ["monitor"]) is None

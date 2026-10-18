@@ -1,61 +1,56 @@
-"""Сводка роя (/swarm, алиас /nodes): агрегатная шапка + строка на ноду.
-
-Данные собираются веером через одну свою ноду («спроси любого»): для каждой
-живой ноды — get_state её сервиса node и её монитора, всё параллельно
-(ProtoClient мультиплексирует запросы по id конверта) с коротким таймаутом
-на запрос — зависший пир не тормозит сводку, мёртвому запросов не шлём.
-
-Шапка — плотные факты без воздуха: сколько нод/в сети, разъезд версий ПО
-(ноды обновляются вручную — отставшие видны сразу), последний сбой по рою.
-Ограничение честности: у каждой ноды виден только ПОСЛЕДНИЙ outage — если
-после сбоя было штатное выключение, сбой из шапки исчезает (доп. запросов
-к истории ради этого сознательно не делаем).
-"""
-
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import datetime
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sa_home_bot import wake_core
 from sa_home_bot.bot import actions, commands, node_links, node_view, wake_state
 from sa_home_bot.bot.monitor_state import parse_outage
-from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
+from sa_home_bot.bot.service_link import ServiceLink
+from sa_home_bot.bot.ui.keyboards import button
 from sa_home_bot.config import WakeConfig
 from sa_home_bot.db.store import Store
 from sa_home_bot.domain.models import KIND_CPU, KIND_GPU, POWER_UNEXPECTED, PowerEvent
 from sa_home_bot.node.kind import traits_for
-from sa_home_bot.proto.messages import ProtoError
+from sa_home_bot.proto.errors import SERVICE_CALL_ERRORS
 from sa_home_bot.runtime import format_duration
 from sa_home_bot.subscriptions.models import Subscription
+from sa_home_bot.utils.clock import utc_now
 from sa_home_bot.utils.version import version_key
 
 SWARM_HEADER = "🕸 <b>Рой</b>"
 
-# Домашний ПК известен рою только адресом для WoL, своей ноды на нём ещё нет.
-REMOTE_STUB_TEXT = (
-    "💻 <b>Домашний ПК</b> — вне роя (нода ещё не развёрнута), Wake-on-LAN"
-)
+REMOTE_STUB_TEXT = "💻 <b>Домашний ПК</b> — вне роя (нода ещё не развёрнута), Wake-on-LAN"
 
 WAKE_BUTTON_TEXT = "🔌 Разбудить ПК"
 
-# Сбор состояний роя живёт в wake_core (telegram-независимое ядро) — здесь
-# только рендеринг. Раньше это была локальная копия _NodeReport/_collect;
-# слито, когда за теми же данными пришёл тул swarm_status (bot/tools.py).
-_NodeReport = wake_core.NodeReport
+
+def wake_node_text(node_id: str) -> str:
+    return f"🔌 Разбудить {node_id}"
 
 
-def _versions_line(reports: list[_NodeReport]) -> str | None:
-    versions = {
+NodeReport = wake_core.NodeReport
+
+
+def node_versions(reports: Sequence[NodeReport]) -> dict[str, str]:
+    return {
         r.node_id: r.state["version"]
         for r in reports
         if r.state is not None and r.state.get("version")
     }
+
+
+def latest_version(versions: dict[str, str]) -> str:
+    return max(versions.values(), key=version_key)
+
+
+def _versions_line(reports: Sequence[NodeReport]) -> str | None:
+    versions = node_versions(reports)
     if not versions:
         return None
-    latest = max(versions.values(), key=version_key)
+    latest = latest_version(versions)
     stale = {nid: v for nid, v in versions.items() if v != latest}
     if not stale:
         return f"ПО: v{latest} у всех"
@@ -63,8 +58,7 @@ def _versions_line(reports: list[_NodeReport]) -> str | None:
     return f"ПО: свежая v{latest} · отстаёт {lagging}"
 
 
-def last_failure_line(reports: list[_NodeReport], now: datetime) -> str | None:
-    """Самый свежий внезапный сбой по рою (см. ограничение в докстроке модуля)."""
+def last_failure_line(reports: list[NodeReport], now: datetime) -> str | None:
     freshest: tuple[datetime, str, PowerEvent] | None = None
     for r in reports:
         if r.monitor is None:
@@ -91,53 +85,35 @@ def _temp_max(monitor: dict, kind: str) -> float | None:
     return max(temps) if temps else None
 
 
-def _health_bucket(report: _NodeReport) -> int:
-    """Куда поставить ноду в списке сводки: 0 — требует внимания, 1 — в строю
-    и здорова, 2 — штатно не в сети (спит / выключена нарочно).
-
-    Порядок «проблемные → активные → неактивные»: то, из-за чего открывают
-    /swarm, стоит сверху, штатно спящие машины не оттесняют его вниз.
-    Сортировка стабильна — внутри группы сохраняется порядок роя (своя
-    нода первой, см. wake_core.collect_reports).
-    """
+def _health_bucket(report: NodeReport) -> int:
     if not report.alive:
         if report.left:
-            return 2  # предупредила об уходе — выключена нарочно
-        # Сервер/VDS, обязанный быть в сети, пропал — это авария.
+            return 2
         return 0 if traits_for(report.kind).always_on else 2
     if report.state is None:
-        return 0  # "не отвечает"
+        return 0
     services = report.state.get("services", [])
     if any(s.get("status") != "running" for s in services):
-        return 0  # часть служб не поднялась
+        return 0
     monitor = report.monitor
     if monitor is None:
-        return 0  # "монитор не отвечает"
+        return 0
     if any(h.get("status") == "alerting" for h in monitor.get("health", [])):
-        return 0  # 🔔 датчик в тревоге
+        return 0
     if monitor.get("requirements"):
-        return 0  # ⚠️ незакрытые требования
+        return 0
     return 1
 
 
-def order_by_health(reports: Sequence[_NodeReport]) -> list[_NodeReport]:
-    """Порядок для любого списка нод: проблемные → активные → штатно не в
-    сети. Стабильно — внутри группы сохраняется порядок роя (своя нода
-    первой, см. wake_core.collect_reports). Общий для /swarm и панели
-    «🖥 Ноды», в панели — ДО пагинации, чтобы проблемные не утекли на 2-ю
-    страницу."""
+def order_by_health(reports: Sequence[NodeReport]) -> list[NodeReport]:
     return sorted(reports, key=_health_bucket)
 
 
-def node_line(report: _NodeReport) -> str:
+def node_line(report: NodeReport) -> str:
     name = node_links.node_command(report.node_id) or f"<b>{report.node_id}</b>"
     if not report.alive:
-        # Нода, предупредившая об уходе (node_leaving), выключена нарочно —
-        # не пугаем красной лампой даже сервер.
         if report.left:
             return f"{node_view.LAMP_GRAY} {name} — выключена штатно"
-        # Машина, которая штатно выключается, — это не авария: правило роя
-        # п. 4 «спящая не-24/7 нода — норма» (ARCHITECTURE §11).
         if not traits_for(report.kind).always_on:
             return f"{node_view.LAMP_GRAY} {name} — спит (это норма)"
         return f"{node_view.LAMP_RED} {name} — не в сети"
@@ -158,9 +134,7 @@ def node_line(report: _NodeReport) -> str:
         gpu = _temp_max(report.monitor, KIND_GPU)
         if gpu is not None:
             bits.append(f"GPU {gpu:.0f}°C")
-        alerting = sum(
-            1 for h in report.monitor.get("health", []) if h.get("status") == "alerting"
-        )
+        alerting = sum(1 for h in report.monitor.get("health", []) if h.get("status") == "alerting")
         if alerting:
             bits.append(f"🔔 {alerting}")
         if report.monitor.get("requirements"):
@@ -168,9 +142,7 @@ def node_line(report: _NodeReport) -> str:
     return f"{node_view.LAMP_GREEN} {name} · " + " · ".join(bits)
 
 
-def render_swarm(
-    reports: list[_NodeReport], wake: WakeConfig | None, now: datetime
-) -> str:
+def render_swarm(reports: list[NodeReport], wake: WakeConfig | None, now: datetime) -> str:
     total = len(reports)
     online = sum(1 for r in reports if r.alive and r.state is not None)
     lines = [f"{SWARM_HEADER}: {total} нод, в сети {online}"]
@@ -184,42 +156,21 @@ def render_swarm(
     return "\n".join(lines)
 
 
-def wake_rows(
-    subscription: Subscription, wake: WakeConfig | None
-) -> list[InlineKeyboardButton]:
-    """Ручная кнопка — фиксированная машина из [wake] (запасной путь)."""
+def wake_rows(subscription: Subscription, wake: WakeConfig | None) -> list[InlineKeyboardButton]:
     if wake is None or not wake.mac or not subscription.allows_command(commands.WAKE.name):
         return []
-    return [InlineKeyboardButton(text=WAKE_BUTTON_TEXT, callback_data=commands.wake_callback())]
+    return [button(WAKE_BUTTON_TEXT, commands.wake_callback())]
 
 
 async def offline_wakeable_ids(
-    subscription: Subscription, store: Store, reports: Sequence[_NodeReport]
+    subscription: Subscription, store: Store, reports: Sequence[NodeReport]
 ) -> list[str]:
-    """node_id уснувших нод, для которых можно предложить будильник — общее
-    ядро для точечной кнопки на /swarm (``offline_wake_rows`` ниже) и
-    построчных кнопок в списке нод панели (bot/swarm_panel.py).
-
-    «Недоступна для будильника» — не только формально disconnected
-    (``alive=False``, «не в сети» в node_line), но и «не отвечает»
-    (``alive=True``, но get_state не дозвался, ``state is None``) — то же
-    промежуточное состояние, в котором PeerLink ещё не обнаружил обрыв
-    (TCP keepalive обнаруживает пропажу пира не мгновенно, см.
-    proto/client.py). Иначе пользователь видит "не отвечает" и не может
-    разбудить именно тогда, когда это и нужно (живая находка 2026-07-20).
-    """
     if not subscription.allows_command(commands.WAKE.name):
         return []
     ids = []
     for r in reports:
         if r.alive and r.state is not None:
             continue
-        # Машину, которая не должна выключаться (сервер, VDS), будить нечем и
-        # незачем: WoL — про рабочие станции в локальной сети. Кнопка на VDS
-        # только вводила бы в заблуждение, что молчание лечится нажатием.
-        # Тип НЕ сообщён (нода старой версии) — ведём себя как раньше и кнопку
-        # показываем: наличие кэшированных WoL-реквизитов само по себе значит,
-        # что машина когда-то представилась пригодной для побудки.
         if r.kind and not traits_for(r.kind).wakeable:
             continue
         if await wake_state.cached(store, r.node_id) is None:
@@ -229,20 +180,13 @@ async def offline_wakeable_ids(
 
 
 async def offline_wake_rows(
-    subscription: Subscription, store: Store, reports: Sequence[_NodeReport]
+    subscription: Subscription, store: Store, reports: Sequence[NodeReport]
 ) -> list[InlineKeyboardButton]:
-    """Точечная кнопка на каждую уснувшую ноду, чьи реквизиты уже известны
-    (см. wake_state.remember, вызывается ниже при сборе сводки)."""
     ids = await offline_wakeable_ids(subscription, store, reports)
-    return [
-        InlineKeyboardButton(
-            text=f"🔌 Разбудить {node_id}", callback_data=commands.wake_callback(node_id)
-        )
-        for node_id in ids
-    ]
+    return [button(wake_node_text(node_id), commands.wake_callback(node_id)) for node_id in ids]
 
 
-async def remember_wake_info(store: Store, reports: Sequence[_NodeReport]) -> None:
+async def remember_wake_info(store: Store, reports: Sequence[NodeReport]) -> None:
     for r in reports:
         if r.state is not None:
             await wake_state.remember(store, r.node_id, r.state.get("wake"))
@@ -251,25 +195,15 @@ async def remember_wake_info(store: Store, reports: Sequence[_NodeReport]) -> No
 async def build_swarm_keyboard(
     subscription: Subscription | None,
     wake: WakeConfig | None,
-    reports: Sequence[_NodeReport] = (),
+    reports: Sequence[NodeReport] = (),
     store: Store | None = None,
 ) -> InlineKeyboardMarkup | None:
-    """Только действия (wake) — навигация к нодам идёт ссылками в тексте."""
     if subscription is None:
         return None
     buttons = wake_rows(subscription, wake)
     if store is not None:
         buttons = buttons + await offline_wake_rows(subscription, store, reports)
     return actions.rows(buttons)
-
-
-# find_lan_waker/wait_for_service — вынесены в sa_home_bot.wake_core (живая
-# находка 2026-07-24: служба tasks, без Telegram, тоже должна уметь будить
-# спящую цель перед сроком задачи, а этот модуль тянет aiogram на весь
-# файл). Реэкспорт здесь — чтобы не трогать остальные вызовы в этом файле
-# и в bot/handlers/wake.py, поведение /wake и /swarm не менялось.
-find_lan_waker = wake_core.find_lan_waker
-wait_for_service = wake_core.wait_for_service
 
 
 async def build_swarm_view(
@@ -280,11 +214,11 @@ async def build_swarm_view(
 ) -> tuple[str, InlineKeyboardMarkup | None]:
     try:
         own_state = await node_link.get_state()
-    except (ServiceUnavailableError, ProtoError):
+    except SERVICE_CALL_ERRORS:
         return node_view.NODE_DOWN_TEXT, None
     reports = await wake_core.collect_reports(node_link, own_state, with_monitor=True)
     if store is not None:
         await remember_wake_info(store, reports)
-    text = render_swarm(reports, wake, datetime.now(tz=UTC))
+    text = render_swarm(reports, wake, utc_now())
     keyboard = await build_swarm_keyboard(subscription, wake, reports, store)
     return text, keyboard

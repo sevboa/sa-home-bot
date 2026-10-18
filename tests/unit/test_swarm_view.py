@@ -6,18 +6,13 @@ import pytest_asyncio
 
 from sa_home_bot.bot import wake_state
 from sa_home_bot.bot.node_view import NODE_DOWN_TEXT
-from sa_home_bot.bot.swarm_view import (
-    REMOTE_STUB_TEXT,
-    build_swarm_view,
-    find_lan_waker,
-    wait_for_service,
-)
+from sa_home_bot.bot.swarm_view import REMOTE_STUB_TEXT, build_swarm_view
 from sa_home_bot.config import WakeConfig
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
 from sa_home_bot.subscriptions.models import Subscription
-from sa_home_bot.wake_core import PEER_TIMEOUT_S
+from sa_home_bot.wake_core import PEER_TIMEOUT_S, find_lan_waker, wait_for_service
 
 OWN_STATE = {
     "node": "alfred",
