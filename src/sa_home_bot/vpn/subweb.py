@@ -1,24 +1,3 @@
-"""Веб-сервер подписки Hiddify внутри службы vpn (подэтап 57.10).
-
-Адреса: ``/s/<токен>`` — хаб устройства (57.11: «VPN включён?», Hiddify,
-страны и остаток, AmneziaVPN), ``GET /s/<токен>/where`` — «идёт ли трафик через
-эту ноду» (57.12; страница спрашивает его у каждой ноды из браузера, CORS — только для
-страниц наших нод), ``POST /s/<токен>/awg`` — выпуск/перевыпуск ключа AmneziaVPN (57.13;
-JSON-ответ только скрипту страницы: Origin/Referer + одноразовый nonce + частота;
-GET ничего не выпускает),
-``/sub/<токен>`` — сама подписка (``?format=vless|plain|singbox``). Всё прочее —
-голый 404, как и неизвестный/отозванный токен: снаружи не отличить «нет такого»
-от «отозвано». Заголовок ``Server`` убран. Порт отдельный (не 443/8443 — там
-mtg и xray). IP посетителей не пишем никуда.
-
-TLS: если на диске есть сертификат и ключ — https, иначе http (при
-``sub_allow_http``). Сертификат Let's Encrypt на IP короткоживущий (~6 суток),
-продлевает его внешний таймер (``deploy/sub-cert.sh``); здесь раз в
-``RELOAD_EVERY_S`` проверяется mtime файлов и сертификат перечитывается на
-том же SSLContext без остановки сервера, а появление сертификата у
-работавшего по http сервера переключает его на https.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -44,16 +23,14 @@ log = logging.getLogger(__name__)
 RELOAD_EVERY_S = 600.0
 DEFAULT_TLS_DIR = Path("~/.config/sa-home-bot/sub-tls")
 
-# resolve(token) -> Subscription | None
 Resolver = Callable[[str], Awaitable[sub.Subscription | None]]
-# issue_awg(chat_id, device_label, node, replace=...) -> ответ issue/reissue службы
 AwgIssuer = Callable[..., Awaitable[dict]]
 
-NONCE_TTL_S = 21600.0  # страница может долго лежать открытой
+NONCE_TTL_S = 21600.0
 NONCE_MAX = 20000
-AWG_PER_COUNTRY_S = 5.0  # не чаще раза в 5 секунд на устройство и страну
-AWG_PER_TOKEN = (20, 3600.0)  # и не больше 20 в час на устройство (2 страны + перевыпуски)
-AWG_GLOBAL = (120, 3600.0)  # и 120 в час на всю ноду
+AWG_PER_COUNTRY_S = 5.0
+AWG_PER_TOKEN = (20, 3600.0)
+AWG_GLOBAL = (120, 3600.0)
 
 _COMMON_HEADERS = {
     "cache-control": "no-store",
@@ -69,8 +46,6 @@ _COMMON_HEADERS = {
 
 
 class _Response(web.Response):
-    """Ответ без заголовка ``Server`` (aiohttp добавляет его при записи заголовков)."""
-
     async def _write_headers(self) -> None:
         self._headers.pop("Server", None)
         await super()._write_headers()
@@ -97,7 +72,6 @@ def _not_found() -> web.Response:
 
 @web.middleware
 async def _hardening(request: web.Request, handler) -> web.StreamResponse:
-    """Любая ошибка/чужой путь/чужой метод — тот же голый 404; общие заголовки."""
     try:
         resp = await handler(request)
     except web.HTTPException:
@@ -117,7 +91,6 @@ class SubscriptionWeb:
         self._cfg = cfg
         self._resolve = resolve
         self._issue_awg = issue_awg
-        # nonce -> (истекает, токен, нода): форма AmneziaWG одноразовая.
         self._nonces: dict[str, tuple[float, str, str]] = {}
         self._awg_last: dict[tuple[str, str], float] = {}
         self._awg_by_token: dict[str, list[float]] = {}
@@ -128,14 +101,12 @@ class SubscriptionWeb:
         self._reload_task: asyncio.Task | None = None
         self.tls = False
         self.error: str | None = None
-        # Не больше N одновременных разборов токена: каждый может ходить к нодам.
         self._sem = asyncio.Semaphore(8)
 
     @property
     def listening(self) -> bool:
         return self._runner is not None
 
-    # --- адреса ---
 
     @property
     def base_url(self) -> str:
@@ -148,7 +119,6 @@ class SubscriptionWeb:
     def sub_url(self, token: str) -> str:
         return f"{self.base_url}/sub/{token}"
 
-    # --- запуск ---
 
     def _tls_ready(self) -> bool:
         cert, key = tls_paths(self._cfg)
@@ -173,7 +143,6 @@ class SubscriptionWeb:
         return app
 
     async def start(self) -> bool:
-        """Поднять сервер. ``False`` — выключен или не вышло (служба живёт дальше)."""
         if self._cfg.sub_port <= 0:
             return False
         await self._listen()
@@ -216,10 +185,8 @@ class SubscriptionWeb:
             self._runner = None
 
     async def check_tls(self) -> None:
-        """Одна итерация слежения за сертификатом (вынесена для тестов)."""
         ready = self._tls_ready()
         if ready and not self.tls:
-            # Был http, сертификат появился: пересоздаём сайт уже с TLS.
             log.info("vpn: появился сертификат подписки — переключаюсь на https")
             old = self._runner
             self._runner = None
@@ -247,7 +214,6 @@ class SubscriptionWeb:
             except Exception:
                 log.exception("vpn: слежение за сертификатом подписки упало")
 
-    # --- обработчики ---
 
     async def _lookup(self, request: web.Request) -> sub.Subscription | None:
         token = request.match_info["token"]
@@ -260,7 +226,6 @@ class SubscriptionWeb:
                 log.exception("vpn: сборка подписки упала")
                 return None
 
-    # --- nonce и частота ---
 
     def _new_nonce(self, token: str, node: str) -> str:
         now = time.monotonic()
@@ -277,7 +242,6 @@ class SubscriptionWeb:
         return entry is not None and entry[0] > time.monotonic() and entry[1:] == (token, node)
 
     def _rate_ok(self, token: str, node: str) -> bool:
-        """Проверка и учёт попытки выдачи AmneziaWG (в памяти, без адресов)."""
         now = time.monotonic()
         last = self._awg_last.get((token, node))
         mine = [t for t in self._awg_by_token.get(token, []) if now - t < AWG_PER_TOKEN[1]]
@@ -297,14 +261,11 @@ class SubscriptionWeb:
         return True
 
     def _same_origin(self, request: web.Request) -> bool:
-        """POST только со своей страницы: Origin (или, если его нет, Referer) —
-        тот же хост, что в Host. Без обоих — отказ."""
         source = request.headers.get("Origin") or request.headers.get("Referer") or ""
         if not source or source == "null":
             return False
         return urlsplit(source).netloc == request.host
 
-    # --- обработчики ---
 
     @property
     def _links(self) -> sub.PageLinks:
@@ -348,8 +309,6 @@ class SubscriptionWeb:
         return resp
 
     async def _where(self, request: web.Request) -> web.Response:
-        """Идёт ли запрос через ЭТУ ноду (57.12): ``{"via": "awg"|"vless"|""}``.
-        Токен проверяется как везде; CORS — только для страниц наших нод."""
         found = await self._lookup(request)
         if found is None or not found.entries:
             return _not_found()
@@ -372,10 +331,6 @@ class SubscriptionWeb:
         )
 
     async def _awg_post(self, request: web.Request) -> web.Response:
-        """Выпуск/перевыпуск AmneziaVPN для скрипта страницы: Origin/Referer,
-        одноразовый nonce (в ответе — следующий), частота. ``action=issue`` ключ не
-        заменяет никогда (есть — ``exists``); замена только по ``action=reissue``.
-        Ключ — только в этом ответе, ``no-store``."""
         if self._issue_awg is None or not self._same_origin(request):
             return _not_found()
         found = await self._lookup(request)

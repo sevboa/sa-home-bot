@@ -1,7 +1,3 @@
-"""reality/probe_client_config.py: конфиг xray-клиента для VPN-пробника
-(39.0.7(e)) — SOCKS5-инбаунд + VLESS/Reality outbound, и разбор
-``vless://``-ссылки обратно в параметры."""
-
 from __future__ import annotations
 
 import json
@@ -60,7 +56,7 @@ def test_parse_vless_url_rejects_missing_uuid():
 
 def test_parse_vless_url_rejects_missing_required_param():
     try:
-        parse_vless_url("vless://uuid-1@1.2.3.4:8443?sni=x&sid=SID")  # без pbk
+        parse_vless_url("vless://uuid-1@1.2.3.4:8443?sni=x&sid=SID")
     except ValueError as exc:
         assert "pbk" in str(exc)
     else:

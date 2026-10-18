@@ -1,15 +1,3 @@
-"""Обёртка над mtg/microsocks на jeeves — единственное место, где служба vpn
-трогает эти демоны напрямую (по образцу vpn/awg.py).
-
-Счётчики трафика читаются через `sudo -n nft -j list counter inet filter
-<name>` — узкий sudoers-снипет (node/fixups.py::make_proxy_firewall_fixup,
-NOPASSWD ровно на чтение двух конкретных именованных счётчиков, не на весь
-`nft`). Секрет mtg меняется БЕЗ sudo — юзер-юнит `~/.config/systemd/user/
-mtg.service` принадлежит тому же пользователю, что и сама служба vpn
-(node/fixups.py::make_proxy_units_fixup ставит mtg в /usr/local/bin, но сам
-юнит — обычный файл в $HOME).
-"""
-
 from __future__ import annotations
 
 import json
@@ -26,8 +14,6 @@ from sa_home_bot.vpn.privileged import sudo_stdout
 log = logging.getLogger(__name__)
 
 MTG_UNIT_PATH = Path.home() / ".config" / "systemd" / "user" / "mtg.service"
-# ExecStart=/usr/local/bin/mtg simple-run 0.0.0.0:443 <secret> — секрет
-# всегда последний токен строки simple-run, независимо от пути к бинарю.
 _SECRET_RE = re.compile(r"^(ExecStart=.*\bsimple-run\s+\S+\s+)(\S+)\s*$", re.MULTILINE)
 
 _COUNTER_NAMES = {"mtg": "mtg_bytes", "socks": "socks_bytes"}
@@ -35,15 +21,12 @@ _COUNTER_NAMES = {"mtg": "mtg_bytes", "socks": "socks_bytes"}
 
 class ProxyBackend(Protocol):
     async def counters(self) -> dict[str, int]:
-        """{"mtg": bytes, "socks": bytes} — счётчик nft с момента его создания."""
         ...
 
     async def generate_secret(self, domain: str) -> str:
-        """Новый секрет fake-TLS для ``domain`` — не sudo, локальная утилита."""
         ...
 
     async def rotate_secret(self, new_secret: str) -> None:
-        """Переписать ExecStart юнита mtg новым секретом и перезапустить демон."""
         ...
 
 
@@ -67,8 +50,6 @@ def _parse_counter_bytes(output: str) -> int:
 
 
 class RealProxyBackend:
-    """Настоящая реализация — зовёт `sudo -n nft` и правит юзер-юнит mtg."""
-
     async def counters(self) -> dict[str, int]:
         result: dict[str, int] = {}
         for key, counter_name in _COUNTER_NAMES.items():

@@ -1,7 +1,3 @@
-"""Прокси на jeeves (mtg/microsocks) поверх VpnService: ссылка, ротация
-секрета, агрегатный расход — поверх подменяемого ProxyBackend (настоящие
-`nft`/`systemctl` в тестах не зовём)."""
-
 from __future__ import annotations
 
 import pytest_asyncio
@@ -69,7 +65,7 @@ async def env(tmp_path):
         mtg_port=443,
         socks_host="100.111.4.42",
         socks_port=1080,
-        node_limit_gb=1,  # маленький лимит — быстрые пороги
+        node_limit_gb=1,
         warn_remaining_gb=0,
     )
     svc = VpnService(Settings(vpn=cfg), db, DummyAwg(), emit, proxy_backend=proxy)
@@ -97,9 +93,6 @@ async def test_proxy_link_requires_public_host(tmp_path):
 
 
 async def test_proxy_declared_on_reality_only_node(tmp_path):
-    """Прокси живёт на VPS сам по себе: reality-only нода (wooster) всё равно
-    объявляет его умения, если mtg настроен. Раньше гейт шёл по awg — и кнопка
-    пропадала из бота вместе с переводом ноды на reality."""
     db = Database(tmp_path / "vpn.sqlite")
     await db.open()
     await apply_migrations(db)
@@ -111,8 +104,6 @@ async def test_proxy_declared_on_reality_only_node(tmp_path):
     svc = VpnService(Settings(vpn=cfg), db, DummyAwg(), emit, proxy_backend=FakeProxyBackend())
     caps = svc.describe().capabilities
     assert vpn_protocol.ACTION_PROXY_LINK in caps
-    # Проверки сети тоже не про awg: служба лишь копит отчёты пробников,
-    # туннель поднимает vpn_check. А вот APK без awg раздавать нечего.
     assert vpn_protocol.ACTION_CHECK_STATUS in caps
     assert vpn_protocol.ACTION_APK_INFO not in caps
     await db.close()
@@ -141,7 +132,7 @@ async def test_proxy_link_seeds_and_reuses_secret(env):
     assert "tg://proxy?" in first["tg_link"]
     assert first["socks_host"] == "100.111.4.42"
     second = await svc.run_command(vpn_protocol.ACTION_PROXY_LINK, {})
-    assert second["secret"] == first["secret"]  # тот же секрет, не пересидировался
+    assert second["secret"] == first["secret"]
 
 
 async def test_proxy_rotate_secret_updates_backend_and_db(env):
@@ -150,7 +141,6 @@ async def test_proxy_rotate_secret_updates_backend_and_db(env):
     assert proxy.generated_domain == "www.microsoft.com"
     assert proxy.rotated_to == "new-secret"
     assert result["secret"] == "new-secret"
-    # Ссылка после ротации отдаёт уже новый секрет, не старый.
     again = await svc.run_command(vpn_protocol.ACTION_PROXY_LINK, {})
     assert again["secret"] == "new-secret"
 
@@ -165,7 +155,6 @@ async def test_proxy_usage_accumulates_via_sampler(env):
     assert usage["socks_bytes"] == 500
     assert usage["node_used_bytes"] == 1500
 
-    # Второй тик — только дельта, не повторный полный счётчик.
     proxy.mtg_bytes = 1500
     proxy.socks_bytes = 500
     await svc.sample_once()
@@ -176,19 +165,17 @@ async def test_proxy_usage_accumulates_via_sampler(env):
 
 async def test_proxy_bytes_count_toward_node_limit_warning(env):
     svc, proxy, events = env
-    proxy.mtg_bytes = 2 * GB  # больше node_limit_gb=1 из фикстуры
+    proxy.mtg_bytes = 2 * GB
     await svc.sample_once()
     kinds = [e for e, _ in events]
     assert vpn_protocol.EVENT_VPN_NODE_QUOTA_WARNING in kinds
 
 
 async def test_sample_proxy_tolerates_missing_sudoers(env):
-    """Если nodectl fix ещё не прогнан (ProxyBackend.counters кидает
-    ProtoError) — тик сэмплера не должен падать целиком."""
     svc, proxy, _events = env
 
     async def failing_counters():
         raise ProtoError("needs_privilege", "нет прав")
 
     proxy.counters = failing_counters
-    await svc.sample_once()  # не должно бросить исключение
+    await svc.sample_once()

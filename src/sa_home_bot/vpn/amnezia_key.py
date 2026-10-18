@@ -1,16 +1,3 @@
-"""Ключ AmneziaVPN ``vpn://…`` из клиентского конфига AmneziaWG (подэтап 57.12).
-
-Формат взят из исходников amnezia-client (``importController.cpp``,
-``extractConfigFromData`` / ``extractWireGuardConfig``): ``vpn://`` +
-base64url без ``=`` от ``qCompress(JSON)``, где qCompress = 4 байта длины
-несжатых данных (big-endian) + zlib-поток. Клиент разбирает такой ключ как
-«Amnezia»-конфиг (``containers`` / ``hostName``); структуру берём ровно ту,
-что клиент сам строит при импорте ``.conf`` с AWG-параметрами: контейнер
-``amnezia-awg``, в нём ``awg.last_config`` — строка с JSON (в ней же исходный
-текст ``.conf``) и ``isThirdPartyConfig: true``. Ключ содержит приватный ключ
-клиента — обращаться как с самим ``.conf``.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -24,12 +11,12 @@ PREFIX = "vpn://"
 CONTAINER = "amnezia-awg"
 PROTOCOL = "awg"
 _DEFAULT_PORT = 51820
-_AWG_MTU = "1280"  # protocols::awg::defaultMtu на Android/iOS; клиент всё равно подставляет своё
+_AWG_MTU = "1280"
 _IPV4 = re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b")
 
 
 class ConfigError(ValueError):
-    """Конфиг без обязательных полей (Endpoint, PrivateKey, Address, PublicKey)."""
+    pass
 
 
 def _split_endpoint(value: str) -> tuple[str, int]:
@@ -40,7 +27,6 @@ def _split_endpoint(value: str) -> tuple[str, int]:
 
 
 def build_config(conf_text: str, name: str) -> dict:
-    """JSON-конфиг сервера AmneziaVPN для импорта (до сжатия)."""
     conf = awg_conf.parse(conf_text)
     host, port = _split_endpoint(conf.get("Endpoint", ""))
     if not host or not all(conf.get(k) for k in ("PrivateKey", "Address", "PublicKey")):
@@ -87,7 +73,6 @@ def build_config(conf_text: str, name: str) -> dict:
 
 
 def q_compress(data: bytes) -> bytes:
-    """``qCompress``: длина несжатого (4 байта, big-endian) + zlib."""
     return len(data).to_bytes(4, "big") + zlib.compress(data, 6)
 
 
@@ -100,17 +85,15 @@ def q_uncompress(data: bytes) -> bytes:
 
 
 def build_key(conf_text: str, name: str) -> str:
-    """``vpn://…`` для вставки в AmneziaVPN."""
     raw = json.dumps(build_config(conf_text, name), ensure_ascii=False).encode()
     return PREFIX + base64.urlsafe_b64encode(q_compress(raw)).decode().rstrip("=")
 
 
 def decode_key(key: str) -> dict:
-    """Обратное преобразование (как в клиенте; для проверок и тестов)."""
     body = key.strip().removeprefix(PREFIX)
     raw = base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))
     try:
         raw = q_uncompress(raw)
     except (zlib.error, ValueError):
-        pass  # клиент при пустом qUncompress берёт данные как есть
+        pass
     return json.loads(raw)

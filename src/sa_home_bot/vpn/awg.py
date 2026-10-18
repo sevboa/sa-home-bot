@@ -1,17 +1,3 @@
-"""Обёртка над `awg` (amneziawg-tools) — единственное место, где служба vpn
-зовёт внешний бинарник.
-
-Долгоживущий процесс сам не имеет root: команды, меняющие интерфейс, идут
-через `sudo -n` на узкий sudoers-снипет (см. node/fixups.py::AWG_SUDOERS —
-NOPASSWD ровно на `awg show *` и `awg set <iface> peer *`, не на весь
-`awg-quick`, который исполняет произвольные PostUp). Отказ sudo превращается
-в ProtoError(ERR_NEEDS_PRIVILEGE) — тот же приём, что apps/service.py::
-_run_systemctl, с той же подсказкой «выполните nodectl fix».
-
-Генерация ключей (`awg genkey`/`awg pubkey`) root не требует — приватный
-ключ никогда не должен всплывать в sudo-логе.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -32,15 +18,12 @@ class AwgBackend(Protocol):
     async def remove_peer(self, public_key: str) -> None: ...
 
     async def transfer(self) -> dict[str, tuple[int, int]]:
-        """pubkey → (rx_bytes, tx_bytes) с момента поднятия интерфейса."""
         ...
 
     async def latest_handshakes(self) -> dict[str, int]:
-        """pubkey → unix-timestamp последнего хендшейка (0 — никогда)."""
         ...
 
     async def generate_keypair(self) -> tuple[str, str]:
-        """(приватный, публичный) — без sudo."""
         ...
 
 
@@ -71,8 +54,6 @@ def _parse_handshakes(output: str) -> dict[str, int]:
 
 
 class RealAwgBackend:
-    """Настоящая реализация — зовёт `sudo -n awg ...` на jeeves."""
-
     def __init__(self, interface: str) -> None:
         self._interface = interface
 
@@ -87,8 +68,6 @@ class RealAwgBackend:
         return (await self._sudo_awg("show", self._interface, "public-key")).strip()
 
     async def server_private_key(self) -> str:
-        """Приватный ключ сервера — только для бэкапа identity (backup/identity.py).
-        Укладывается в существующий sudoers ``awg show *``."""
         return (await self._sudo_awg("show", self._interface, "private-key")).strip()
 
     async def add_peer(self, public_key: str, address: str) -> None:

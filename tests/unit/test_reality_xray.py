@@ -1,14 +1,3 @@
-"""Юнит-тесты обёртки над ``xray api`` (транспорт reality службы vpn).
-
-``RealXrayBackend`` — единственное место, где reality-транспорт зовёт внешний
-процесс. Живого xray в CI нет, поэтому подменяем ``_run`` и проверяем форму
-сниппета ``adu`` и разбор ответов ``statsquery``/``inbounduser``.
-
-Регрессия 2026-09-10 (v0.102.1): сниппет ``adu`` без ``port`` и
-``decryption:"none"`` xray 26.3.x отвергает («failed to build config»), но
-``adu`` при этом выходит с кодом 0 — служба выдавала гостю нерабочий конфиг.
-"""
-
 from __future__ import annotations
 
 import json
@@ -20,8 +9,6 @@ from sa_home_bot.reality.xray import RealXrayBackend, _parse_clients, _parse_sta
 
 
 class _Backend(RealXrayBackend):
-    """RealXrayBackend с перехваченным ``_run``: копит вызовы, отдаёт скрипт."""
-
     def __init__(self, replies: list[str] | None = None) -> None:
         super().__init__("127.0.0.1:10085", "reality-in", 8443)
         self.calls: list[tuple[str, ...]] = []
@@ -30,8 +17,6 @@ class _Backend(RealXrayBackend):
 
     async def _run(self, *args: str, stdin: bytes | None = None) -> str:
         self.calls.append(args)
-        # последний аргумент adu — путь к temp-файлу сниппета; читаем его до
-        # того, как add_client его удалит (finally отрабатывает после _run).
         if args and args[0] == "adu":
             with open(args[-1], encoding="utf-8") as fh:
                 self.written.append(json.load(fh))
@@ -55,7 +40,6 @@ async def test_add_client_snippet_has_port_and_decryption() -> None:
 
 @pytest.mark.asyncio
 async def test_add_client_raises_on_silent_zero_added() -> None:
-    # adu вышел с кодом 0, но ничего не добавил — прежде это молча «удавалось».
     be = _Backend(
         [
             "processing inbound: reality-in\n"
@@ -73,7 +57,7 @@ async def test_remove_client_swallows_not_found() -> None:
         async def _run(self, *args: str, stdin: bytes | None = None) -> str:
             raise ProtoError("INTERNAL", "xray api rmu завершился ошибкой: User not found.")
 
-    await _NF().remove_client("c1-gone")  # не бросает
+    await _NF().remove_client("c1-gone")
 
 
 @pytest.mark.asyncio

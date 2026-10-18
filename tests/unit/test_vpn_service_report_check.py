@@ -1,7 +1,3 @@
-"""VpnService: report_check пишет в vpn_check_states и алертит только на
-переходе статуса (мут повторов), check_now/check_status — обвязка вокруг
-этого же состояния."""
-
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -100,7 +96,7 @@ async def test_single_failure_does_not_alert(env):
 async def test_alerts_only_once_after_threshold_then_mutes(env):
     svc, events, _ = env
     await _report(svc, "jeeves", False, "timeout")
-    await _report(svc, "jeeves", False, "timeout")  # второй подряд — порог достигнут
+    await _report(svc, "jeeves", False, "timeout")
     failed = [d for name, d in events if name == vpn_protocol.EVENT_VPN_CHECK_FAILED]
     assert len(failed) == 1
     assert failed[0]["node"] == "jeeves"
@@ -108,7 +104,6 @@ async def test_alerts_only_once_after_threshold_then_mutes(env):
     assert failed[0]["targets"] == [{"target": TARGET, "error": "timeout"}]
     assert failed[0]["all_failed"] is True and failed[0]["total"] == 1
 
-    # Ещё несколько неуспешных тиков подряд — новых алертов быть не должно (мут).
     await _report(svc, "jeeves", False, "timeout")
     await _report(svc, "jeeves", False, "timeout")
     failed_after = [d for name, d in events if name == vpn_protocol.EVENT_VPN_CHECK_FAILED]
@@ -167,7 +162,6 @@ async def test_independent_nodes_do_not_interfere(env):
     svc, events, _ = env
     await _report(svc, "jeeves", False, "timeout")
     await _report(svc, "alfred", False, "timeout")
-    # По одному провалу на каждую ноду — порог 2 не достигнут ни для одной.
     assert not any(name == vpn_protocol.EVENT_VPN_CHECK_FAILED for name, _ in events)
 
 
@@ -183,7 +177,7 @@ async def test_check_status_reflects_latest_state(env):
     assert states[0]["transport"] == "awg"
     assert states[0]["target"] == TARGET
     assert states[0]["status"] == "alerting"
-    assert states[0]["consecutive_count"] == 0  # сброс на самом переходе
+    assert states[0]["consecutive_count"] == 0
     assert status["rollup"] == [
         {"server": "jeeves", "transport": "awg", "status": "alerting", "observers": 1}
     ]
@@ -191,8 +185,6 @@ async def test_check_status_reflects_latest_state(env):
 
 async def test_check_status_rollup_partial_when_observers_disagree(env):
     svc, _, _ = env
-    # Один и тот же (server, transport), но два разных наблюдателя (node) —
-    # один видит ok, другой alerting → роллап «partial».
     await _report(svc, "jeeves", True, server="wooster", transport="reality")
     await _report(svc, "alfred", False, "blocked", server="wooster", transport="reality")
     await _report(svc, "alfred", False, "blocked", server="wooster", transport="reality")
@@ -203,8 +195,6 @@ async def test_check_status_rollup_partial_when_observers_disagree(env):
 
 
 async def test_rollup_counts_observers_not_rows(env):
-    """observers — число НАБЛЮДАТЕЛЕЙ, а не строк: у каждого своя строка на
-    каждую цель из check_targets (живая находка на деплое 0.109.0)."""
     svc, _, _ = env
     for target in ("https://1.1.1.1", "https://api.telegram.org"):
         for node in ("alfred", "wooster"):
@@ -225,15 +215,13 @@ async def test_rollup_counts_observers_not_rows(env):
                 },
             )
     status = await svc.run_command(vpn_protocol.ACTION_CHECK_STATUS, {})
-    assert len(status["states"]) == 4  # 2 наблюдателя × 2 цели
+    assert len(status["states"]) == 4
     assert status["rollup"] == [
         {"server": "jeeves", "transport": "awg", "status": "ok", "observers": 2}
     ]
 
 
 async def test_usage_carries_own_check_rollup(env):
-    """Индикатор для карточки /vpn едет вместе с расходом (39.0.7(f)): своя
-    пара — в ответе, чужие — нет, про них спросят их собственный сервер."""
     svc, _, _ = env
     await _report(svc, "alfred", True, server=svc._node, transport="awg")
     await _report(svc, "alfred", False, "blocked", server="wooster", transport="reality")
@@ -244,8 +232,6 @@ async def test_usage_carries_own_check_rollup(env):
 
 
 async def test_get_state_carries_own_check_rollup(env):
-    """Пикер локации строится из get_state (bot/vpn_nodes.live_vpn_servers) —
-    индикатор должен быть и там, не только в usage."""
     svc, _, _ = env
     await _report(svc, "alfred", True, server=svc._node, transport="awg")
     state = await svc.get_state()
@@ -255,9 +241,6 @@ async def test_get_state_carries_own_check_rollup(env):
 
 
 async def test_stale_observer_drops_out_of_rollup(env):
-    """Наблюдатель замолчал (его нода умерла) — его последний «ok» не должен
-    вечно красить индикатор зелёным: строка старше CHECK_STALE_FACTOR циклов
-    из сводки выпадает. Сырые states при этом остаются — админу видно всё."""
     svc, _, _ = env
     await _report(svc, "alfred", True, server="jeeves", transport="awg")
     stale = (
@@ -292,7 +275,7 @@ async def test_check_now_without_node_link_does_not_raise(tmp_path):
     async def emit(event_type, data):
         pass
 
-    svc = VpnService(Settings(vpn=VpnConfig()), db, DummyAwg(), emit)  # node_link=None
+    svc = VpnService(Settings(vpn=VpnConfig()), db, DummyAwg(), emit)
     result = await svc.run_command(vpn_protocol.ACTION_CHECK_NOW, {})
     assert result["dispatched_to"] == []
     await db.close()

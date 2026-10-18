@@ -1,18 +1,3 @@
-"""Обёртка над бинарником ``xray`` — единственное место, где транспорт
-``reality`` службы ``vpn`` зовёт внешний процесс.
-
-Управление юзерами и учёт трафика идут через gRPC API самого xray
-(``xray api adu``/``rmu``/``inbounduser``/``statsquery`` на локальном
-``127.0.0.1:10085``) — это обычный пользовательский вызов, **без sudo и без
-рестарта юнита** (в отличие от ``vpn/awg.py``, которому нужен ``sudo -n awg``).
-Поэтому у reality-транспорта отдельного sudoers-снипета нет.
-
-``xray api adu`` меняет только ЖИВОЙ инстанс, не файл ``config.json`` — после
-рестарта xray список юзеров пуст, а БД помнит всех активных. Свести их
-обратно — задача ``VpnService.reconcile()`` при старте (тот же приём, что
-для ``awg0``).
-"""
-
 from __future__ import annotations
 
 import json
@@ -34,21 +19,13 @@ class XrayBackend(Protocol):
     async def remove_client(self, email: str) -> None: ...
 
     async def list_clients(self) -> set[str]:
-        """email'ы юзеров, реально сидящих в inbound прямо сейчас."""
         ...
 
     async def stats(self) -> dict[str, tuple[int, int]]:
-        """email → (uplink, downlink) в байтах с момента старта xray (или с
-        последнего ``-reset``; мы не сбрасываем — дельту считает сервис)."""
         ...
 
 
 def _parse_stats(payload: str) -> dict[str, tuple[int, int]]:
-    """Разбор вывода ``xray api statsquery`` (JSON ``{"stat": [{name, value}]}``).
-
-    Имена вида ``user>>>bob@x>>>traffic>>>uplink`` — email может содержать
-    ``>>>``? Нет: xml-подобный разделитель зарезервирован, email его не несёт.
-    """
     try:
         data = json.loads(payload or "{}")
     except ValueError as exc:
@@ -81,23 +58,12 @@ def _parse_clients(payload: str) -> set[str]:
 
 
 class RealXrayBackend:
-    """Настоящая реализация — зовёт ``xray api ...`` на локальном gRPC-порту."""
-
     def __init__(self, api_addr: str, inbound_tag: str, port: int) -> None:
         self._api = api_addr
         self._tag = inbound_tag
-        # ``xray api adu`` строит из сниппета ПОЛНЫЙ InboundDetour и валидирует
-        # его — а не просто дописывает клиента в живой inbound. Поэтому сниппет
-        # обязан пройти те же проверки, что и боевой конфиг: непустой ``port``
-        # (иначе «Listen on AnyIP but no Port(s) set») и ``decryption:"none"``
-        # в settings (иначе «please add/set "decryption":"none"»). Значения долж-
-        # ны совпадать с реальным inbound — xray матчит правку по ``tag``.
         self._port = port
 
     def _bin(self) -> str:
-        # Резолвим при каждом вызове (не кэшируем) — как node/fixups.py::_which:
-        # если xray доставили/обновили после старта службы, подхватится без
-        # рестарта.
         return shutil.which("xray") or "/usr/local/bin/xray"
 
     async def _run(self, *args: str, stdin: bytes | None = None) -> str:
@@ -123,16 +89,12 @@ class RealXrayBackend:
                 }
             ]
         }
-        # ``xray api adu`` принимает только пути к файлам, не stdin.
         tmp = Path(tempfile.mkstemp(prefix="reality-adu-", suffix=".json")[1])
         try:
             tmp.write_text(json.dumps(snippet), encoding="utf-8")
             out = await self._run("adu", f"--server={self._api}", str(tmp))
         finally:
             tmp.unlink(missing_ok=True)
-        # ``adu`` выходит с кодом 0 даже когда ничего не добавил (битый сниппет,
-        # «failed to build config») — ловим это по хвосту вывода, иначе служба
-        # выдаст гостю нерабочий конфиг, а пир осядет в БД как активный.
         if "Added 0 user(s)" in out or "failed to build config" in out:
             raise ProtoError(
                 ERR_INTERNAL,
@@ -143,8 +105,6 @@ class RealXrayBackend:
         try:
             await self._run("rmu", f"--server={self._api}", f"-tag={self._tag}", email)
         except ProtoError as exc:
-            # Юзера уже нет в живом инстансе (рестарт xray, ручная правка) —
-            # для реконсайлера это успех, а не ошибка.
             if "not found" in str(exc).lower():
                 log.info("reality: rmu %s — юзера уже нет, пропускаю", email)
                 return

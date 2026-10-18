@@ -1,36 +1,3 @@
-"""VpnService — ServiceHandler службы vpn: доступ к обходу на ноде роя с
-белым IP, выдаваемый и учитываемый через бота.
-
-Два транспорта под ОБЩЕЙ квотой (подэтап 39.0.x, решение пользователя
-2026-09-10 — одна квота на гостя на сервер, независимо от транспорта):
-
-* ``awg`` — AmneziaWG (UDP + обфускация), исходный (Этап 33). Пир = ключ
-  WireGuard + адрес в подсети, учёт из ``awg show <iface> transfer``.
-* ``reality`` — VLESS+Reality через xray-core (TCP/443), для РФ. Пир = UUID
-  клиента xray + его email (переиспользуют колонки ``public_key``/``address``
-  в ``vpn_peers``), учёт из ``xray api statsquery``, бэкенд —
-  ``reality/xray.py`` (без sudo и без рестарта).
-
-Какие транспорты держит нода — ``[vpn].transports`` (+ секция ``[vpn.reality]``
-для второго). jeeves: ``["awg"]``; wooster: ``["reality"]``; можно оба.
-
-Реконсайлер, а не разрозненные add/remove (решение из плана этапа 33):
-``reconcile`` сравнивает желаемое состояние сервера (активные пиры
-незаблокированных чатов — из БД, БД источник истины) с фактическим — по
-каждому транспорту отдельно. Лишних снимает, недостающих добавляет.
-Вызывается при старте (после рестарта сервера список пиров/юзеров пуст, БД
-помнит всех) и на каждом тике сэмплера — тем же ходом закрывает и месячную
-разблокировку 1-го числа, и снятие пира при блокировке по квоте, и
-самовосстановление после ручных правок на сервере.
-
-Приватность (решение плана): служба хранит только объёмы и время последнего
-хендшейка. Ни адресов назначения, ни DNS-запросов, ни логов соединений —
-adress пира это внутренний IP в VPN-подсети, не то, куда он ходит.
-
-Деньги/трафик считаются в ГБ = 10^9 байт (десятичные, как у провайдеров),
-в БД — байты.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -142,50 +109,22 @@ from sa_home_bot.vpn_check import protocol as vpn_check_protocol
 
 log = logging.getLogger(__name__)
 
-# Предел имени устройства, заданного ботом (этап 57.1).
 MAX_DEVICE_LABEL_LEN = 64
 
-# Локальные копии констант сервиса node (node/service.py::SERVICE_NAME,
-# ACTION_TRIGGER_PEERS) — тот же приём, что уже используют node/peers.py,
-# node/lease.py, wake_core.py и др. (свой NODE_SERVICE = "node" в каждом),
-# чтобы не тянуть в лёгкую службу vpn тяжёлые зависимости node/service.py
-# (Supervisor, LeaseManager и т.п.) ради двух строковых констант.
 NODE_SERVICE = "node"
 ACTION_TRIGGER_PEERS = "trigger_peers"
 
-# Сколько циклов проверки строка vpn_check_states считается свежей (39.0.7(f)).
-# Наблюдатель может замолчать не сказав ни слова — его нода умерла, ушла из
-# роя или потеряла интернет; последняя запись при этом остаётся в таблице
-# навсегда. Держать её в индикаторе /vpn нельзя: зелёный от мертвеца хуже,
-# чем отсутствие индикатора. Три интервала, а не один: пропущенный тик —
-# обычный джиттер (пробник поднимает тоннель на время цикла), мигать из-за
-# него незачем.
 CHECK_STALE_FACTOR = 3
-
-# Имя устройства (решение пользователя 2026-08-04) больше не вводит ни
-# человек, ни модель — служба сама выбирает случайное слово из этого пула
-# при выдаче. Только английские буквы и не длиннее 8 символов: имя файла
-# .conf = "<слово>_<таймстамп>" не должно превышать 15 символов — предел
-# имени тоннеля wireguard-android (NAME_PATTERN, см. bot/handlers/vpn.py и
-# bot/tools.py, где имя файла реально собирается).
 
 
 def _random_device_label(used: set[str]) -> str:
-    """Случайное имя, по возможности не повторяющее уже активные устройства
-    этого гостя (не критично для работы — только чтобы список в /vpn не
-    путал одинаковыми именами; настоящая уникальность пира — public_key)."""
     pool = [name for name in FLOWER_NAMES if name not in used] or list(FLOWER_NAMES)
     return random.choice(pool)
 
 
-# Сколько держать ответ apk_info без повторного похода на GitHub — гость,
-# нажавший кнопку дважды подряд, не должен провоцировать два запроса к API.
 APK_INFO_MEMO_S = 60.0
 APK_API_TIMEOUT_S = 15.0
 APK_DOWNLOAD_TIMEOUT_S = 90.0
-# Кусок APK на одно сообщение протокола роя — с запасом от MAX_MESSAGE_BYTES
-# (1 МиБ, proto/messages.py): base64 раздувает байты на треть, плюс сам
-# конверт JSON.
 APK_CHUNK_BYTES = 700 * 1024
 
 EmitFn = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -196,8 +135,6 @@ def _month_key(when: datetime) -> str:
 
 
 def _allocate_address(subnet: str, used: set[str]) -> str:
-    """Наименьший свободный адрес подсети — первый хост (обычно .1)
-    зарезервирован под сам сервер и в ``used`` не участвует."""
     network = ipaddress.ip_network(subnet, strict=False)
     hosts = list(network.hosts())
     for host in hosts[1:]:
@@ -208,10 +145,6 @@ def _allocate_address(subnet: str, used: set[str]) -> str:
 
 
 def _reality_email(chat_id: int, device_label: str) -> str:
-    """email клиента xray — человекочитаемый ярлык для ``statsquery`` на
-    сервере, уникальный среди активных (у чата не бывает двух активных
-    устройств с одним именем). Для reality-пиров хранится в
-    ``vpn_peers.address`` (у awg-пиров там IP подсети)."""
     return f"c{chat_id}-{device_label}"
 
 
@@ -232,9 +165,6 @@ class VpnService:
         self._backend = backend
         self._reality = reality_backend
         self._reality_cfg = settings.vpn.reality
-        # Транспорты, реально доступные на этой ноде: из [vpn].transports, но
-        # reality — только если бэкенд xray собран (есть секция [vpn.reality]).
-        # awg доступен всегда (бэкенд конструируется без побочных эффектов).
         wanted = list(settings.vpn.transports or [TRANSPORT_AWG])
         self._transports: tuple[str, ...] = tuple(
             t
@@ -246,23 +176,12 @@ class VpnService:
         self._node = socket.gethostname()
         self._server_pubkey: str | None = None
         self._apk_checked_at: datetime | None = None
-        # Клиент к своей же локальной ноде — для рассылки проверок
-        # доступности VPN (см. check_loop/_dispatch_checks). None в тестах,
-        # которые конструируют службу напрямую — тогда рассылка тихо
-        # логирует предупреждение и ничего не делает.
         self._node_link = node_link
-        # Бэкап снапшота БД напарнику (39.0.8(c), backup/snapshot.py); ставит app.py.
         self.backup: SnapshotBackup | None = None
-        # Проверка «пара (chat, label, transport) свободна» и INSERT — одним
-        # куском: уникальность активной пары держится кодом (индекс на старых
-        # базах с возможными дублями не создать), поэтому два параллельных
-        # issue не должны проскочить мимо проверки друг друга.
         self._issue_lock = asyncio.Lock()
-        # Подписка Hiddify (57.10): ключ подписи токенов, веб-сервер (ставит
-        # app.py), кэши сборки и список соседних vpn-нод.
         self._node_id = settings.node.id or socket.gethostname()
         self._sub_secret = subs.derive_secret(self._cfg.sub_secret, settings.swarm.token)
-        self.sub_web: Any = None  # vpn.subweb.SubscriptionWeb
+        self.sub_web: Any = None
         self._sub_cache: dict[str, tuple[float, subs.Subscription | None]] = {}
         self._sub_stale: dict[tuple[str, str], list[subs.SubEntry]] = {}
         self._peer_nodes_cache: tuple[float, list[str]] | None = None
@@ -276,8 +195,6 @@ class VpnService:
         optional_device_param = ActionParam(
             name="device_label", type="string", required=False, title="Устройство (имя)"
         )
-        # transport необязателен: если нода несёт один транспорт — берётся он;
-        # если оба (awg + reality) — бот/модель указывают, какой под устройство.
         transport_param = ActionParam(
             name="transport", type="string", required=False, title="Транспорт (awg/reality)"
         )
@@ -298,10 +215,6 @@ class VpnService:
             ActionSpec(id=ACTION_PEERS, title="🔌 Все пиры"),
             ActionSpec(
                 id=ACTION_ISSUE,
-                # Имя устройства: без device_label служба выбирает сама
-                # (случайный цветок, решение 2026-08-04); с device_label
-                # (этап 57.1) — выдаёт под этим именем, повтор активной пары
-                # (label, transport) — ошибка, не дубль.
                 title="➕ Выдать доступ",
                 params=(chat_id_param, transport_param, optional_device_param),
             ),
@@ -369,8 +282,6 @@ class VpnService:
                     params=(chat_id_param, device_param),
                 ),
             ]
-        # Подписка Hiddify (57.10): get_subscription — для бота; sub_links —
-        # служебное между vpn-нодами (собрать VLESS устройства по токену).
         if self._reality_enabled:
             capabilities += [ACTION_GET_SUBSCRIPTION, ACTION_SUB_LINKS, ACTION_SUB_GEN]
             actions += [
@@ -390,8 +301,6 @@ class VpnService:
                     params=(chat_id_param, device_param),
                 ),
             ]
-        # APK AmneziaWG — только там, где awg раздают: без него файл клиента
-        # гостю не нужен.
         if self._has(TRANSPORT_AWG):
             capabilities += [ACTION_APK_INFO]
             actions += [
@@ -410,13 +319,8 @@ class VpnService:
                     params=(ActionParam(name="telegram_file_id", type="string", title="file_id"),),
                 ),
             ]
-        # Проверки доступности — на любой ноде со службой vpn: сама служба тут
-        # только принимает и отдаёт строки vpn_check_states, туннель поднимает
-        # пробник (vpn_check). Раньше висело на awg-гейте — и reality-only
-        # нода не могла принять отчёт даже собственного пробника.
         capabilities += [ACTION_CHECK_NOW, ACTION_CHECK_STATUS, ACTION_TELEGRAM_EGRESS]
         actions += [
-            # Служебное — зовёт только сама служба vpn_check, не для UI.
             ActionSpec(
                 id=ACTION_REPORT_CHECK,
                 title="📡 Отчёт проверки VPN",
@@ -427,16 +331,12 @@ class VpnService:
             ),
             ActionSpec(id=ACTION_CHECK_NOW, title="🛰 Проверить сеть сейчас"),
             ActionSpec(id=ACTION_CHECK_STATUS, title="🛰 Статус проверок сети"),
-            # Служебное чтение для бота (этап 52), не для UI.
             ActionSpec(
                 id=ACTION_TELEGRAM_EGRESS,
                 title="📡 Маршрут до Telegram через эту ноду",
                 params=(ActionParam(name="observer", type="string", title="Нода бота"),),
             ),
         ]
-        # Прокси Telegram (mtg/microsocks) живёт на VPS сам по себе и от
-        # VPN-транспорта не зависит: на wooster он поднят при reality-only
-        # раскладке (2026-09-06). Гейт — по факту настройки, как и в _proxy_link.
         if self._cfg.mtg_public_host:
             capabilities += [
                 ACTION_PROXY_LINK,
@@ -448,7 +348,7 @@ class VpnService:
                 ActionSpec(id=ACTION_PROXY_ROTATE_SECRET, title="🔁 Сменить секрет прокси"),
                 ActionSpec(id=ACTION_PROXY_USAGE, title="📊 Расход прокси"),
             ]
-        if self.backup is not None:  # служебное, не для UI (backup/snapshot.py)
+        if self.backup is not None:
             for spec in self.backup.action_specs():
                 capabilities.append(spec.id)
                 actions.append(spec)
@@ -463,21 +363,11 @@ class VpnService:
             "SELECT COUNT(*) AS n FROM vpn_peers WHERE status = 'active'"
         )
         row = await cur.fetchone()
-        # Публичный ключ awg-сервера (кэширован, меняется только с
-        # пересборкой VPS). Не секрет — он и так лежит в конфиге каждого
-        # гостя; нужен пробникам, чтобы заметить, что их конфиг протух
-        # (node/fixups.py::_probe_conf_stale). Живой случай 2026-09-20:
-        # jeeves переустановили 18.09, конфиг пробника на wooster остался с
-        # 01.09 со старым ключом — фикс считал «файл на месте, всё применено»
-        # и не перевыпускал, а awg wooster→jeeves молча не поднимался месяц.
         server_pubkey: str | None = None
         if self._has(TRANSPORT_AWG):
-            # Ключ читается у живого интерфейса (awg show) — на ноде, где awg
-            # почему-то не поднят, это не повод валить весь get_state: его
-            # дёргает бот на каждый экран.
             try:
                 server_pubkey = await self._server_public_key()
-            except Exception:  # noqa: BLE001 — любая беда с awg тут не фатальна
+            except Exception:  # noqa: BLE001
                 log.warning("vpn: не удалось прочитать публичный ключ awg-сервера", exc_info=True)
         return {
             "node": self._node,
@@ -485,22 +375,11 @@ class VpnService:
             "active_peers": row["n"] if row else 0,
             "label": self._cfg.location,
             "server_public_key": server_pubkey,
-            # Транспорты этой ноды — бот по ним решает, предлагать ли выбор
-            # (awg/reality) в карточке «➕ Новое устройство».
             "transports": list(self._transports),
-            # То же, что в usage: индикатор по транспортам (39.0.7(f)) — здесь
-            # он нужен пикерам локации/технологии, которые строятся из
-            # get_state (bot/vpn_nodes.py::live_vpn_servers), а не из usage.
             "check": await self._check_rollup(server=self._node),
-            # Умеет ли эта нода допуск (set_access). Флаг в get_state, а не
-            # в describe: бот и так дёргает состояние на каждый экран
-            # (bot/vpn_nodes.py::live_vpn_servers), а лишний describe ради
-            # одного признака гонять по рою незачем. Старая нода поля не
-            # шлёт — бот читает отсутствие как «допуск не ведёт, пущены все».
             "access_control": True,
         }
 
-    # --- вспомогательное ---
 
     @staticmethod
     def _chat_id(args: dict[str, Any]) -> int:
@@ -518,8 +397,6 @@ class VpnService:
         return self._server_pubkey
 
     async def _active_addresses(self) -> set[str]:
-        # Только awg-пиры: у reality-пира в колонке address лежит email
-        # ("c<chat>-<label>"), а не IP подсети — в пул адресов он не входит.
         cur = await self._db.conn.execute(
             "SELECT address FROM vpn_peers WHERE status = 'active' AND transport = ?",
             (TRANSPORT_AWG,),
@@ -535,8 +412,6 @@ class VpnService:
 
     async def _allowed_chats(self) -> set[int]:
         cur = await self._db.conn.execute("SELECT chat_id FROM vpn_chat_access WHERE allowed = 1")
-        # Сентинель ноды — всегда свой (см. _access): пробник vpn_check не
-        # гость, снимать его с интерфейса реконсайлером нельзя.
         return {row["chat_id"] for row in await cur.fetchall()} | {NODE_SENTINEL_CHAT_ID}
 
     async def _quota_state(self, chat_id: int, month: str) -> dict[str, Any]:
@@ -588,16 +463,6 @@ class VpnService:
         return int(row["total"] or 0)
 
     async def _access(self, chat_id: int) -> tuple[bool, int | None]:
-        """``(допущен, личная база в байтах)`` — нет строки значит «не допущен»
-        (fail-closed: новый гость закрыт, пока владелец не откроет локацию).
-
-        Сентинель ноды — исключение: под ``chat_id = 0`` ходит не гость, а сама
-        нода (пробник vpn_check, node/fixups.py::VPN_PROBE_CHAT_ID выпускает
-        его тем же ``issue``). Допуск — про людей, которых пускают на сервер;
-        закрывать им собственную диагностику незачем, а на ноде, где пробника
-        ещё не заводили, бэкфилл строки не создаст, и `nodectl fix` не смог бы
-        его выпустить вовсе.
-        """
         if chat_id == NODE_SENTINEL_CHAT_ID:
             return True, None
         cur = await self._db.conn.execute(
@@ -609,7 +474,6 @@ class VpnService:
         return bool(row["allowed"]), row["base_bytes"]
 
     async def _base_bytes(self, chat_id: int) -> int:
-        """База месяца: личная, если задана, иначе общая из конфига."""
         _allowed, base = await self._access(chat_id)
         return self._cfg.base_quota_gb * GB if base is None else int(base)
 
@@ -624,8 +488,6 @@ class VpnService:
         )
 
     async def _limit_bytes(self, chat_id: int, month: str) -> int:
-        # Недопущенному лимит НЕ обнуляем: допуск — отдельная ось, а нулевой
-        # лимит прочитался бы как «исчерпал квоту» (см. _check_thresholds).
         return await self._base_bytes(chat_id) + await self._granted_bytes(chat_id, month)
 
     async def _add_grant(
@@ -641,14 +503,6 @@ class VpnService:
     async def _device_usage(
         self, chat_id: int, month: str, devices: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """Трафик за месяц по устройствам и подключениям (этап 57.1).
-
-        Устройство = device_label; в его трафик входят ВСЕ ключи этого имени,
-        в том числе перевыпущенные (expired) и отозванные в этом месяце, —
-        иначе перевыпуск обнулял бы цифру. Подключение = активная пара
-        (label, transport); его ``used_bytes`` считается так же, по транспорту.
-        Устройство без активного подключения в список не попадает.
-        """
         cur = await self._db.conn.execute(
             "SELECT p.device_label AS label, COALESCE(p.transport, 'awg') AS transport, "
             "COALESCE(SUM(u.used_bytes), 0) AS used "
@@ -673,8 +527,6 @@ class VpnService:
                 }
             )
         for label, entry in result.items():
-            # Трафик устройства — по всем транспортам имени, включая те, у кого
-            # активного подключения уже нет (отозвали awg, остался vless).
             entry["used_bytes"] = sum(v for (lbl, _t), v in by_pair.items() if lbl == label)
         return list(result.values())
 
@@ -699,13 +551,6 @@ class VpnService:
     async def _mark_broken(
         self, chat_id: int, devices: list[dict[str, Any]], *, withheld: bool
     ) -> list[dict[str, Any]]:
-        """``broken: True`` у устройств, которых реально нет на сервере (39.0.8(e)).
-
-        Сверка с ФАКТОМ (интерфейс awg / клиенты xray), а не с БД. ``withheld`` —
-        пиры гостя сняты за квоту или допуск: reconcile держит их вне интерфейса
-        намеренно, это не поломка. Любая неясность (сбой чтения, пир без
-        ключа) — не ломаем: ложное «перевыпустите» хуже молчания.
-        """
         for device in devices:
             device["broken"] = False
         cur = await self._db.conn.execute(
@@ -727,7 +572,7 @@ class VpnService:
                 else None
             )
             live_key = await self._server_public_key() if self._has(TRANSPORT_AWG) else None
-        except Exception:  # noqa: BLE001 — не смогли прочитать факт: не судим
+        except Exception:  # noqa: BLE001
             log.warning("vpn: сверка пиров с сервером не удалась", exc_info=True)
             return devices
         for device in devices:
@@ -746,12 +591,8 @@ class VpnService:
                 device["broken"] = row["address"] not in live_r
         return devices
 
-    # --- миграция данных ---
 
     async def backfill_server(self) -> None:
-        """Пиры, выданные до этапа 39, не знают своего сервера — все они на
-        этой ноде (единственной с `vpn` до появления второго сервера).
-        Проставляем `[node].id` разово; на нодах со свежей БД строк нет."""
         cur = await self._db.conn.execute(
             "UPDATE vpn_peers SET server = ? WHERE server IS NULL", (self._node,)
         )
@@ -760,14 +601,6 @@ class VpnService:
             log.info("vpn: проставлен server=%s у %d старых пиров", self._node, cur.rowcount)
 
     async def backfill_access(self) -> None:
-        """Гости с живыми пирами были допущены де-факто — до vpn_chat_access
-        допуска не существовало вовсе. Проставляем им ``allowed = 1`` с общей
-        базой, чтобы обновление службы никого не выставило за дверь.
-
-        ``DO NOTHING``, а не upsert: рестарт не должен воскрешать допуск,
-        который владелец снял руками (пиры при снятии остаются ``active``,
-        см. reconcile — их просто не поднимают на интерфейсе).
-        """
         cur = await self._db.conn.execute(
             "INSERT INTO vpn_chat_access (chat_id, allowed, base_bytes, updated_at) "
             "SELECT DISTINCT chat_id, 1, NULL, ? FROM vpn_peers WHERE status = 'active' "
@@ -777,10 +610,6 @@ class VpnService:
         if cur.rowcount:
             await self._db.conn.commit()
             log.info("vpn: допуск проставлен %d гостям с активными пирами", cur.rowcount)
-        # Гость, у которого все пиры отозваны, под бэкфилл не попадает и
-        # сам себе новый конфиг уже не выпустит. Это осознанно (новые —
-        # только по явной выдаче), но владельцу стоит знать, кого это
-        # задело: иначе он узнает об этом из жалобы.
         cur = await self._db.conn.execute(
             "SELECT DISTINCT chat_id FROM vpn_peers "
             "WHERE chat_id NOT IN (SELECT chat_id FROM vpn_chat_access)"
@@ -789,7 +618,6 @@ class VpnService:
         if orphans:
             log.info("vpn: гости с историей, но без активных пиров — допуск не выдан: %s", orphans)
 
-    # --- reconciler ---
 
     async def reconcile(self) -> None:
         month = _month_key(utc_now())
@@ -799,9 +627,6 @@ class VpnService:
             "SELECT chat_id, transport, public_key, address FROM vpn_peers WHERE status = 'active'"
         )
         rows = await cur.fetchall()
-        # На интерфейс идут допущенные и не исчерпавшие квоту. Строки в БД не
-        # трогаем: пир остаётся `active`, поэтому возврат допуска не требует
-        # перевыпуска конфига у гостя — тот же ключ поднимется обратно.
         active = [
             row for row in rows if row["chat_id"] in allowed and row["chat_id"] not in blocked
         ]
@@ -820,8 +645,6 @@ class VpnService:
                     await self._backend.add_peer(pubkey, address)
 
         if self._reality_enabled:
-            # reality: ключ — email (совпадает с ключом list_clients/statsquery
-            # на сервере), значение — UUID клиента xray (колонка public_key).
             desired_r = {
                 row["address"]: row["public_key"]
                 for row in active
@@ -834,7 +657,6 @@ class VpnService:
                 if email not in current_r:
                     await self._reality.add_client(client_uuid, email, self._reality_cfg.flow)
 
-    # --- сравнение после восстановления (этап 57.1) ---
 
     async def _meta_get(self, key: str) -> str | None:
         cur = await self._db.conn.execute("SELECT value FROM vpn_meta WHERE key = ?", (key,))
@@ -851,21 +673,11 @@ class VpnService:
         await self._db.conn.commit()
 
     async def check_restore(self) -> list[dict[str, Any]]:
-        """Звать на старте ПОСЛЕ reconcile(): не сменился ли ключ сервера.
-
-        Задет тот, чей ключ сервера в БД (``vpn_peers.server_pubkey``) не равен
-        текущему, а если на этой ноде запомненный отпечаток ключа транспорта
-        (``vpn_meta``) сменился — все активные пиры этого транспорта. Отсутствие
-        пира на интерфейсе само по себе НЕ признак: после перезагрузки сервера
-        интерфейс пуст, reconcile() возвращает пиров, и при прежнем ключе у гостей
-        всё продолжает работать. Событие шлётся один раз на смену (отпечаток
-        запоминается), пробник chat_id=0 исключён. Возвращает список задетых.
-        """
         fingerprints: dict[str, str] = {}
         try:
             if self._has(TRANSPORT_AWG):
                 fingerprints[TRANSPORT_AWG] = await self._server_public_key()
-        except Exception:  # noqa: BLE001 — не смогли прочитать ключ: не судим
+        except Exception:  # noqa: BLE001
             log.warning("vpn: сверка ключа awg-сервера после старта не удалась", exc_info=True)
         if (
             self._reality_enabled
@@ -895,8 +707,6 @@ class VpnService:
             {"chat_id": c, "device_label": label, "transport": t} for (c, label, t) in affected
         ]
         if items or key_changed:
-            # Ключ сменился, а задетых нет — событие всё равно уходит: бот скажет
-            # владельцу одну строку (57.7); гостям при пустом списке не пишет.
             log.warning("vpn: ключ сервера сменился, задето подключений: %d", len(items))
             await self._emit(
                 EVENT_VPN_SERVER_RESTORED,
@@ -904,7 +714,6 @@ class VpnService:
             )
         return items
 
-    # --- issue/reissue/revoke ---
 
     async def _active_labels(self, chat_id: int) -> set[str]:
         cur = await self._db.conn.execute(
@@ -914,15 +723,12 @@ class VpnService:
         return {row["device_label"] for row in await cur.fetchall()}
 
     async def _active_row(self, chat_id: int, label: str, transport: str | None):
-        """Активная запись пира по (chat, label[, transport]). Без transport —
-        старое поведение: любая активная запись под этим именем (самая ранняя)."""
         sql = (
             "SELECT id, public_key, address, transport FROM vpn_peers "
             "WHERE chat_id = ? AND device_label = ? AND status = 'active'"
         )
         params: list[Any] = [chat_id, label]
         if transport:
-            # transport у старых строк мог быть NULL до миграции — трактуем как awg.
             sql += " AND COALESCE(transport, 'awg') = ?"
             params.append(transport)
         cur = await self._db.conn.execute(sql + " ORDER BY created_at, id", params)
@@ -930,7 +736,6 @@ class VpnService:
 
     @staticmethod
     def _optional_transport(args: dict[str, Any]) -> str | None:
-        """transport для reissue/revoke/get_vless: пусто — старое поведение."""
         raw = str(args.get("transport") or "").strip().lower()
         if not raw:
             return None
@@ -955,7 +760,6 @@ class VpnService:
 
     @staticmethod
     def _explicit_label(args: dict[str, Any]) -> str | None:
-        """Заданное ботом имя устройства (этап 57.1) или None — тогда случайное."""
         label = VpnService._device_label(args)
         if not label:
             return None
@@ -967,9 +771,6 @@ class VpnService:
         return label
 
     def _resolve_transport(self, args: dict[str, Any]) -> str:
-        """Какой транспорт выдавать. Явный ``transport`` в args валидируется
-        против списка этой ноды; без него — единственный транспорт ноды, а
-        если их несколько — ошибка «уточните transport»."""
         raw = str(args.get("transport") or "").strip().lower()
         if raw:
             if raw not in self._transports:
@@ -1000,18 +801,7 @@ class VpnService:
     ) -> dict[str, Any]:
         chat_id = self._chat_id(args)
         transport = forced_transport or self._resolve_transport(args)
-        # Проверка ДО генерации ключа и выделения адреса: у отказа не должно
-        # быть следов — ни пира в БД, ни занятого адреса в подсети.
         await self._require_access(chat_id)
-        # Число устройств на гостя намеренно не ограничено (решение
-        # пользователя 2026-08-03) — реальный потолок стоимости уже задаёт
-        # трафик (base_quota_gb/self_ceiling_gb), отдельный счётчик устройств
-        # был бы лишней строгостью.
-        #
-        # Имя устройства больше не спрашиваем (решение пользователя
-        # 2026-08-04) — гость и модель путались, что тут вообще вводить;
-        # ``forced_label`` — только для _reissue ниже: у СУЩЕСТВУЮЩЕГО
-        # устройства имя не меняется при перевыпуске ключа.
         existing_labels = await self._active_labels(chat_id)
         explicit = None if forced_label else self._explicit_label(args)
         device_label = forced_label or explicit or _random_device_label(existing_labels)
@@ -1020,8 +810,6 @@ class VpnService:
         self._sub_cache.clear()
         async with self._issue_lock:
             if explicit is not None and await self._active_row(chat_id, explicit, transport):
-                # Не дубль и не тихий перевыпуск: перевыпуск — отдельное явное
-                # действие (reissue по (label, transport)).
                 raise ProtoError(
                     ERR_BAD_REQUEST,
                     f"устройство «{explicit}» ({transport}) уже выдано — "
@@ -1042,29 +830,14 @@ class VpnService:
             **artifacts,
             "transport": transport,
             "device_label": device_label,
-            # Откуда конфиг — бот ставит страну в имя файла, чтобы гость с
-            # несколькими серверами не путал, какой откуда.
             "location": self._cfg.location,
-            # Число устройств чата ДО этой выдачи — bot/handlers/vpn.py и
-            # bot/tools.py::tool_vpn выбирают по нему, что показать первым
-            # (решение пользователя 2026-08-04): 0 — это первое устройство
-            # чата, скорее всего настраивается прямо с этого же телефона →
-            # удобнее файл; иначе — вероятно, для ДРУГОГО устройства → QR.
             "prior_device_count": len(existing_labels),
         }
 
     def _reality_artifacts(self, client_uuid: str, device_label: str) -> dict[str, Any]:
-        """Конфиг/ссылка/QR reality-устройства из хранимого UUID — общее для
-        issue и get_vless (ссылку можно отдать снова без перевыпуска)."""
         assert self._reality_cfg is not None
-        # sing-box-конфиг несёт все правила маршрутизации (Hiddify),
-        # vless://-ссылка — только быстрый импорт/QR. self._reality_cfg
-        # (RealityTransportConfig) несёт поля с теми же именами, что
-        # client_config.RealityParams — render_* берут его по duck-typing.
         params = self._reality_params()
         config_text = render_singbox_config(params, client_uuid)
-        # Имя профиля в Hiddify — то, что видит гость в списке подключений.
-        # Со страной, иначе два сервера в списке не отличить друг от друга.
         flag = country_flag(self._cfg.location)
         profile_label = f"{flag} {device_label}" if flag else device_label
         share_url = render_vless_url(params, client_uuid, profile_label)
@@ -1105,13 +878,10 @@ class VpnService:
                 "qr_png_b64": qr.png_b64(conf),
                 "address": address,
             }
-        else:  # TRANSPORT_REALITY
+        else:
             assert self._reality_enabled
             client_uuid = str(uuidlib.uuid4())
             email = _reality_email(chat_id, device_label)
-            # server_pubkey у reality — публичный ключ Reality-сервера на момент
-            # выдачи (57.1): по нему видно «сервер переустановлен». У старых
-            # reality-пиров NULL — их по ключу не судим.
             await self._db.conn.execute(
                 "INSERT INTO vpn_peers (chat_id, device_label, transport, public_key, address, "
                 "status, created_at, server, server_pubkey) "
@@ -1133,8 +903,6 @@ class VpnService:
         return artifacts
 
     async def _remove_from_backend(self, transport: str, public_key: str, address: str) -> None:
-        """Снять пир с сервера нужным транспортом: awg — по pubkey, reality —
-        по email (в колонке address)."""
         if transport == TRANSPORT_REALITY:
             if self._reality is not None:
                 await self._reality.remove_client(address)
@@ -1144,12 +912,8 @@ class VpnService:
     async def _reissue(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)
         device_label = self._required_device_label(args)
-        # Проверка здесь, а не только в _issue: перевыпуск снимает старый пир
-        # ДО выдачи нового, и недопущенный остался бы вообще без устройства.
         self._sub_cache.clear()
         await self._require_access(chat_id)
-        # transport (57.1) адресует конкретное подключение устройства; без него —
-        # старое поведение (старый бот его не шлёт).
         wanted = self._optional_transport(args)
         row = await self._active_row(chat_id, device_label, wanted)
         transport = row["transport"] or TRANSPORT_AWG if row is not None else None
@@ -1160,8 +924,6 @@ class VpnService:
             )
             await self._db.conn.commit()
             await self._remove_from_backend(transport, row["public_key"], row["address"])
-        # Перевыпуск сохраняет транспорт устройства (если пир нашёлся); нового
-        # пира без исходного — как обычный issue (транспорт из args/дефолт).
         try:
             return await self._issue(args, forced_label=device_label, forced_transport=transport)
         finally:
@@ -1189,8 +951,6 @@ class VpnService:
         }
 
     async def _get_vless(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Ссылка/sing-box конфиг/QR VLESS существующего устройства без
-        перевыпуска: UUID клиента лежит в vpn_peers.public_key."""
         chat_id = self._chat_id(args)
         device_label = self._required_device_label(args)
         if not self._reality_enabled:
@@ -1206,11 +966,8 @@ class VpnService:
             "location": self._cfg.location,
         }
 
-    # --- подписка Hiddify (57.10) ---
 
     async def _get_subscription(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Адреса страницы и подписки устройства на ЭТОЙ ноде. Токен из них
-        годится на любой vpn-ноде; адрес привязан к ноде, ответившей боту."""
         chat_id = self._chat_id(args)
         device_label = self._required_device_label(args)
         if not self._reality_enabled:
@@ -1242,10 +999,6 @@ class VpnService:
         return self._cfg.location or self._node_id
 
     async def _device_gen(self, chat_id: int, device_label: str) -> int:
-        """«Поколение» токена на ЭТОЙ ноде: unix-время последнего перевыпуска или
-        отзыва VLESS-ключа устройства (``revoked_at`` снятых строк vpn_peers).
-        Выпуск новой страны ничего не меняет — ссылка на телефоне остаётся живой.
-        Живёт в vpn_peers, поэтому переживает переустановку ноды из бэкапа."""
         cur = await self._db.conn.execute(
             "SELECT revoked_at FROM vpn_peers WHERE chat_id = ? AND device_label = ? "
             "AND COALESCE(transport, 'awg') = ? AND status != 'active' AND revoked_at IS NOT NULL",
@@ -1260,7 +1013,6 @@ class VpnService:
         return best
 
     async def _peer_gens(self, chat_id: int, device_label: str) -> list[int]:
-        """Поколения токена на соседних vpn-нодах (недоступные пропускаем)."""
         if self._node_link is None:
             return []
         out: list[int] = []
@@ -1278,8 +1030,6 @@ class VpnService:
         return out
 
     async def _sub_local(self, token: str) -> tuple[int, str, str] | None:
-        """``(chat_id, label, uuid)`` активного VLESS-ключа ЭТОЙ ноды с таким
-        токеном: MAC пересчитывается по каждому ключу (их единицы), без хранилища."""
         if not self._reality_enabled:
             return None
         cur = await self._db.conn.execute(
@@ -1306,7 +1056,6 @@ class VpnService:
         return f"https://{sub_public_host(self._cfg)}:{self._cfg.sub_port}"
 
     async def _sub_health(self) -> str:
-        """«ok» / «bad» / «» — проверки VLESS этой страны (иначе любого транспорта)."""
         rows = [r for r in await self._check_rollup(server=self._node) if r.get("status")]
         mine = [r for r in rows if r.get("transport") == TRANSPORT_REALITY] or rows
         if not mine:
@@ -1314,9 +1063,6 @@ class VpnService:
         return "ok" if all(r["status"] == CHECK_OK for r in mine) else "bad"
 
     async def _sub_links(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Служебное между vpn-нодами: есть ли здесь VLESS устройства с этим
-        токеном; если есть — сервер, UUID, расход и лимит гостя за месяц, поколение
-        токена и сведения о ноде для страницы (адрес выхода, здоровье, AmneziaWG)."""
         token = str(args.get("token") or "")
         if not subs.valid_token_shape(token):
             return {"found": False}
@@ -1325,7 +1071,6 @@ class VpnService:
             "name": self._sub_entry_name(),
             "ip": self._node_ip(),
             "awg": self._has(TRANSPORT_AWG),
-            # Адрес страницы этой ноды: по нему браузер спрашивает «трафик идёт через вас?».
             "base": self._sub_base(),
         }
         found = await self._sub_local(token)
@@ -1359,10 +1104,6 @@ class VpnService:
     async def _sub_device_info(
         self, token: str, args: dict[str, Any], base: dict[str, Any]
     ) -> dict[str, Any]:
-        """Сведения о ноде, где у устройства нет VLESS. Если собиратель подписки
-        уже знает устройство (``chat_id``/``device_label`` от другой ноды) и токен
-        подписан именно им — здесь можно выдать AmneziaVPN (старые устройства, у
-        которых VLESS только в части стран); ``awg_key`` — есть ли ключ здесь."""
         try:
             chat_id = int(args.get("chat_id") or 0)
         except (TypeError, ValueError):
@@ -1382,7 +1123,6 @@ class VpnService:
         return {**base, "awg_key": awg_key, "device": True}
 
     async def _sub_peer_nodes(self) -> list[str]:
-        """Остальные живые vpn-ноды роя (кэш на минуту)."""
         if self._node_link is None:
             return []
         now = time.monotonic()
@@ -1400,8 +1140,6 @@ class VpnService:
         return await self._sub_ask_peer(node, args)
 
     async def _sub_ask_peer(self, node: str, args: dict[str, Any]) -> dict[str, Any] | None:
-        """Ответ соседа или ``None``, если он недоступен (тогда берём старое
-        из ``_sub_stale``: страна не должна пропадать из подписки на время сбоя)."""
         assert self._node_link is not None
         try:
             return await self._node_link.command(
@@ -1416,8 +1154,6 @@ class VpnService:
             return {"found": False}
 
     async def resolve_subscription(self, token: str) -> subs.Subscription | None:
-        """Подписка по токену со всех нод; ``None`` — токен неизвестен или
-        устройство отозвано везде (веб отвечает 404)."""
         if not subs.valid_token_shape(token):
             return None
         now = time.monotonic()
@@ -1438,8 +1174,6 @@ class VpnService:
                 *(self._sub_ask_peer(n, {"token": token}) for n in peers)
             )
             answers += list(zip(peers, replies, strict=True))
-        # Второй заход: ноды, где у устройства нет VLESS, узнают его по подписи
-        # токена (chat_id/label — от ноды, где VLESS есть) и скажут про AmneziaVPN.
         known = next((r for _n, r in answers if r and r.get("found")), None)
         missing = [n for n, r in answers if r is not None and not r.get("found")]
         if known is not None and missing:
@@ -1452,7 +1186,7 @@ class VpnService:
             redo = dict(zip(missing, again, strict=True))
             answers = [(n, redo[n] if (redo.get(n) or {}).get("info") else r) for n, r in answers]
         for node, reply in answers:
-            if reply is None:  # нода не ответила: держим последнюю известную страну
+            if reply is None:
                 entries += self._sub_stale.get((token, node), [])
                 continue
             try:
@@ -1476,7 +1210,6 @@ class VpnService:
             used += int(reply.get("used_bytes") or 0)
             total += int(reply.get("limit_bytes") or 0)
         result: subs.Subscription | None = None
-        # Токен старого поколения (VLESS перевыпускали на любой ноде) — как неизвестный.
         if entries and (subs.token_gen(token) or 0) >= newest_gen:
             if not label:
                 label = "устройство"
@@ -1499,9 +1232,6 @@ class VpnService:
     async def web_issue_awg(
         self, chat_id: int, device_label: str, node: str, *, replace: bool
     ) -> dict[str, Any]:
-        """Выдача AmneziaWG со страницы устройства: выпуск (label+awg) или, если
-        ключ в стране уже есть и ``replace``, перевыпуск. Чужая страна — вызовом
-        к соседней ноде, как sub_links. Возвращает ответ issue/reissue."""
         action = ACTION_REISSUE if replace else ACTION_ISSUE
         args = {"chat_id": chat_id, "device_label": device_label, "transport": TRANSPORT_AWG}
         self._sub_cache.clear()
@@ -1514,7 +1244,7 @@ class VpnService:
                 action, args, dst=Address(node=node, service=SERVICE_NAME), timeout=20.0
             )
         finally:
-            self._sub_cache.clear()  # параллельная загрузка страницы не оставит старый «ключа нет»
+            self._sub_cache.clear()
 
     async def _peers(self, _args: dict[str, Any]) -> dict[str, Any]:
         cur = await self._db.conn.execute(
@@ -1526,7 +1256,6 @@ class VpnService:
                 "chat_id": row["chat_id"],
                 "device_label": row["device_label"],
                 "transport": row["transport"] or TRANSPORT_AWG,
-                # awg — IP в подсети; reality — email клиента xray.
                 "address": row["address"],
                 "status": row["status"],
                 "created_at": row["created_at"],
@@ -1537,7 +1266,6 @@ class VpnService:
         ]
         return {"peers": peers}
 
-    # --- квоты ---
 
     async def _usage(self, args: dict[str, Any]) -> dict[str, Any]:
         month = _month_key(utc_now())
@@ -1557,45 +1285,22 @@ class VpnService:
                 "chat_id": chat_id,
                 "month": month,
                 "node": self._node,
-                # Как назвать этот сервер человеку в карточке /vpn, когда их
-                # несколько. Пусто — бот покажет голый id ноды.
                 "label": self._cfg.location,
                 "used_bytes": used,
                 "limit_bytes": limit,
                 "remaining_bytes": max(limit - used, 0),
-                # `blocked` — строго про исчерпанную квоту, `allowed` — про
-                # допуск на эту локацию. Две разные причины, и бот показывает
-                # их по-разному: недопущенную локацию он просто не рисует.
                 "blocked": state["blocked_at"] is not None,
                 "allowed": allowed,
                 "base_limit_bytes": (
                     self._cfg.base_quota_gb * GB if base_bytes is None else int(base_bytes)
                 ),
                 "personal_base": base_bytes is not None,
-                # `broken` — пира нет на живом сервере (39.0.8(e)); для
-                # снятого за квоту/допуск гостя не выставляется.
                 "devices": devices,
-                # Этап 57.1: трафик месяца по устройствам + подключения
-                # (transport, status, last_handshake_at, created_at). Новое
-                # поле рядом со старыми — старый бот его не читает.
                 "device_usage": await self._device_usage(chat_id, month, devices),
-                # Транспорты этой ноды — карточка /vpn по ним решает, показывать
-                # ли выбор технологии при «➕ Новое устройство».
                 "transports": list(self._transports),
-                # Индикатор доступности этого сервера по транспортам
-                # (39.0.7(f)): едет вместе с расходом, чтобы карточка /vpn
-                # не делала ради него отдельный RPC — она и так фанаутит
-                # usage по всем живым серверам. Каждый сервер отчитывается
-                # про СЕБЯ: запись в vpn_check_states реплицирована на все
-                # живые инстансы, так что своя БД знает, как эту ноду видят
-                # чужие наблюдатели.
                 "check": await self._check_rollup(server=self._node),
                 "proxy_available": bool(self._cfg.mtg_public_host),
             }
-        # Сводка для админа. «Резервируют» трафик ноды все допущенные — даже
-        # те, кто ещё не завёл ни одного устройства: обещание уже дано. Гость
-        # с активными пирами, у которого допуск сняли, тоже должен быть виден
-        # (иначе он молча исчезнет из сводки вместе со своим расходом).
         cur = await self._db.conn.execute(
             "SELECT chat_id FROM vpn_peers WHERE status = 'active' "
             "UNION SELECT chat_id FROM vpn_chat_access WHERE allowed = 1"
@@ -1620,10 +1325,6 @@ class VpnService:
         return {
             "month": month,
             "chats": chats,
-            # "Резерв" — сумма ЛИМИТОВ (не факта потребления) гостей из
-            # списка выше: сколько канала занято обещаниями, даже если
-            # реально ещё не потрачено — решение пользователя 2026-08-03,
-            # чтобы видеть риск перерасхода тарифа ДО того, как он случится.
             "node": {
                 "limit_bytes": node_limit_bytes,
                 "reserved_bytes": reserved_bytes,
@@ -1646,19 +1347,11 @@ class VpnService:
         return await self._usage({"chat_id": chat_id})
 
     async def _set_access(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Допуск гостя на ЭТОТ сервер и его постоянная личная база.
-
-        Отличие от ``set_quota``: тот задаёт целевой лимит ТЕКУЩЕГО месяца
-        компенсирующим грантом (1-го числа сбрасывается), а ``base_gb`` —
-        саму базу, с которой каждый месяц начинается заново.
-        """
         chat_id = self._chat_id(args)
         if "allowed" not in args:
             raise ProtoError(ERR_BAD_REQUEST, "не указан allowed — допущен ли гость на сервер")
         allowed = bool(args["allowed"])
 
-        # base_gb не передали — личную базу не трогаем (частый случай «просто
-        # открой/закрой доступ»); передали явный null — сбрасываем на общую.
         _was_allowed, base_bytes = await self._access(chat_id)
         if "base_gb" in args:
             raw = args["base_gb"]
@@ -1683,10 +1376,6 @@ class VpnService:
         )
         await self._db.conn.commit()
 
-        # Сначала пороги: вернувшийся допуск мог застать blocked_at от старой
-        # квоты — при поднятом лимите он сам снимется. Затем реконсайл уже на
-        # сам переключатель: пиры поднимаются/снимаются сразу, а не через тик
-        # сэмплера.
         month = _month_key(utc_now())
         await self._check_thresholds(chat_id, month)
         await self.reconcile()
@@ -1695,11 +1384,6 @@ class VpnService:
     async def _grant_extra(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)
         month = _month_key(utc_now())
-        # Самообслуживание открыто только когда трафик РЕАЛЬНО заканчивается
-        # (решение пользователя 2026-08-03) — гость с почти полной квотой не
-        # может докупить впрок; порог тот же, что у предупреждения
-        # (warn_remaining_gb), чтобы «пришло предупреждение» и «можно
-        # докупить» совпадали для гостя по смыслу.
         used = await self._used_bytes(chat_id, month)
         limit = await self._limit_bytes(chat_id, month)
         remaining = limit - used
@@ -1714,8 +1398,6 @@ class VpnService:
         self_granted = await self._granted_bytes(chat_id, month, source="self")
         step = self._cfg.extra_step_gb * GB
         ceiling = self._cfg.self_ceiling_gb * GB
-        # База — личная, если владелец её задал: иначе гость с личными 50 ГБ
-        # доливал бы себе до потолка, посчитанного от чужих 500.
         base = await self._base_bytes(chat_id)
         if base + self_granted + step > ceiling:
             raise ProtoError(
@@ -1783,16 +1465,11 @@ class VpnService:
         return {"request_id": request_id, "status": status}
 
     def _where(self) -> dict[str, str]:
-        """Откуда событие: бот ставит в текст страну сервера (57.7)."""
         return {"node": self._node, "location": self._cfg.location}
 
     async def _check_thresholds(self, chat_id: int, month: str) -> None:
         allowed, _base = await self._access(chat_id)
         if not allowed:
-            # Недопущенного квота не касается вовсе: трафика он не набирает
-            # (реконсайлер не поднимает его пиры), а blocked_at значит
-            # «исчерпал», а не «не пущен». Без этого возврата владелец, задав
-            # квоту до открытия доступа, слал бы гостю ⛔️ ни за что.
             return
         used = await self._used_bytes(chat_id, month)
         limit = await self._limit_bytes(chat_id, month)
@@ -1838,14 +1515,6 @@ class VpnService:
             {"used_bytes": total, "limit_bytes": limit, **self._where()},
         )
 
-    # --- прокси (mtg/microsocks на jeeves) ---
-    #
-    # Общий секрет/ссылка на всех гостей — не per-guest (см. vpn/protocol.py
-    # для обоснования). Байты считаются тем же дельта-механизмом, что и у
-    # awg-пиров (vpn_counters по псевдо-ключам, vpn_peer_usage по
-    # отрицательным peer_id — реальные пиры получают id из AUTOINCREMENT,
-    # он всегда положителен, коллизии не будет), и попадают в ТОТ ЖЕ
-    # общий счётчик node_limit_gb без единой правки _check_node_limit.
 
     PROXY_PEER_IDS = {"mtg": -1, "socks": -2}
 
@@ -1854,10 +1523,6 @@ class VpnService:
         row = await cur.fetchone()
         if row is not None:
             return str(row["mtg_secret"])
-        # Первый запуск после деплоя — сидируем тем же бутстрап-секретом,
-        # что и node/fixups.py::make_proxy_units_fixup пишет в юнит mtg,
-        # если тот ещё не создан (см. PROXY_SECRET_SEED), чтобы оба места
-        # сошлись без похода друг к другу.
         await self._set_proxy_secret(PROXY_SECRET_SEED)
         return PROXY_SECRET_SEED
 
@@ -1888,9 +1553,6 @@ class VpnService:
             "secret": secret,
             "socks_host": self._cfg.socks_host,
             "socks_port": self._cfg.socks_port,
-            # Нода/метка локации — чтобы вызывающий (fanout по нескольким
-            # серверам, bot/vpn_nodes.py) мог подписать, чей это прокси:
-            # секрет у каждой ноды свой (своя vpn.sqlite:proxy_state).
             "node": self._node,
             "label": self._cfg.location,
         }
@@ -1927,8 +1589,6 @@ class VpnService:
         try:
             counters = await self._proxy_backend.counters()
         except ProtoError:
-            # sudoers ещё не поставлен (nodectl fix не прогнан) — не рушим
-            # остальной тик сэмплера ради этого, просто пропускаем прокси.
             return
         now_iso = utc_now().isoformat()
         for key, total in counters.items():
@@ -1955,15 +1615,12 @@ class VpnService:
             )
         await self._db.conn.commit()
 
-    # --- сэмплер ---
 
     async def sample_once(self) -> None:
         now = utc_now()
         month = _month_key(now)
-        # awg: (rx, tx) с момента поднятия интерфейса + unix-ts хендшейков.
         transfer = await self._backend.transfer() if self._has(TRANSPORT_AWG) else {}
         handshakes = await self._backend.latest_handshakes() if self._has(TRANSPORT_AWG) else {}
-        # reality: email → (uplink, downlink) с момента старта xray.
         reality_stats = await self._reality.stats() if self._reality is not None else {}
 
         cur = await self._db.conn.execute(
@@ -1974,28 +1631,23 @@ class VpnService:
         touched_chats: set[int] = set()
         for row in rows:
             transport = row["transport"] or TRANSPORT_AWG
-            # counter_key — по чему ведём вчерашний срез в vpn_counters:
-            # для обоих транспортов это public_key (awg-pubkey либо xray-UUID).
             counter_key = row["public_key"]
             handshake_ts = 0
             if transport == TRANSPORT_AWG:
                 if row["public_key"] not in transfer:
                     continue
-                a, b = transfer[row["public_key"]]  # rx, tx
+                a, b = transfer[row["public_key"]]
                 handshake_ts = handshakes.get(row["public_key"], 0)
-            else:  # reality — ключ статистики xray это email (колонка address)
+            else:
                 if row["address"] not in reality_stats:
                     continue
-                a, b = reality_stats[row["address"]]  # uplink, downlink
+                a, b = reality_stats[row["address"]]
             total = a + b
             cur2 = await self._db.conn.execute(
                 "SELECT last_rx, last_tx FROM vpn_counters WHERE public_key = ?", (counter_key,)
             )
             prev = await cur2.fetchone()
             if prev is None:
-                # Первое наблюдение этого пира: он либо только что выдан
-                # (счётчики сервера стартуют с нуля), либо это первый тик
-                # сэмплера после его появления — в обоих случаях база 0.
                 delta = total
             else:
                 prev_total = prev["last_rx"] + prev["last_tx"]
@@ -2009,8 +1661,6 @@ class VpnService:
                 )
                 touched_chats.add(row["chat_id"])
                 if transport == TRANSPORT_REALITY:
-                    # У reality нет отдельного «хендшейка» — «было на связи»
-                    # ведём по факту прироста трафика (как reality/service.py).
                     await self._db.conn.execute(
                         "UPDATE vpn_peers SET last_handshake_at = ? WHERE id = ?",
                         (now.isoformat(), row["id"]),
@@ -2041,34 +1691,11 @@ class VpnService:
             await asyncio.sleep(self._cfg.sample_interval_s)
             try:
                 await self.sample_once()
-            except Exception:  # noqa: BLE001 — сбой одного тика не должен ронять цикл
+            except Exception:  # noqa: BLE001
                 log.exception("vpn: сбой сэмплера трафика")
 
-    # --- мониторинг доступности (vpn_check) ---
-    #
-    # Pull/push, а не синхронный сбор ответов (решение пользователя
-    # 2026-08-17): эта служба только РАССЫЛАЕТ команду "проверь" через
-    # generic fan-out node-сервиса (node/service.py::ACTION_TRIGGER_PEERS)
-    # и не ждёт результатов синхронно — каждая vpn_check-служба на своей
-    # ноде сама, отдельным вызовом, пушит результат обратно сюда
-    # (ACTION_REPORT_CHECK). Мут повторных алертов даёт не отдельный
-    # флаг, а сама гистерезис-функция domain/vpn_check.py::reconcile_vpn_check
-    # — событие эмитится только на переходе статуса, не на каждый неуспешный
-    # тик (см. её докстринг).
 
     async def _dispatch_checks(self) -> dict[str, Any]:
-        # 39.0.7 (2026-09-18): каждый инстанс vpn просит проверить ТОЛЬКО
-        # себя (``server=self._node``), не общий плоский список целей на
-        # всю матрицу серверов — иначе при N живых серверах дублируется
-        # диспетчеризация N раз за интервал (было так, пока сервер был
-        # один — не бросалось в глаза). Заодно это даёт бесплатный
-        # heartbeat: если этот инстанс vpn целиком упал, его check_loop не
-        # бежит, и «проверьте меня» просто не уходит — лишних попыток
-        # дёргать мёртвую цель нет. Смерть хоста как таковая не теряется:
-        # её отдельно и мгновенно видно через live_vpn_nodes()/monitor —
-        # vpn_check отвечает за более узкий вопрос («сервер жив на уровне
-        # роя, но реально ли через него идёт трафик именно этого
-        # транспорта именно оттуда»), не за то же самое дважды.
         if self._node_link is None:
             log.warning("vpn: node_link не настроен — проверки доступности не разосланы")
             return {"dispatched_to": [], "unreachable": [], "skipped": []}
@@ -2098,7 +1725,7 @@ class VpnService:
             await asyncio.sleep(self._cfg.check_interval_s)
             try:
                 await self._dispatch_checks()
-            except Exception:  # noqa: BLE001 — сбой одного тика не должен ронять цикл
+            except Exception:  # noqa: BLE001
                 log.exception("vpn: сбой цикла проверок доступности")
 
     async def _report_check(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -2107,9 +1734,6 @@ class VpnService:
         if not node or not isinstance(results, list) or not results:
             raise ProtoError(ERR_BAD_REQUEST, "нужны node и непустой список results")
         now = utc_now()
-        # Прогон списка сайтов через один туннель (сервер + транспорт) — одно
-        # событие на вид (упал/поднялся) со списком сайтов, а не событие на
-        # каждый сайт: общий сбой туннеля раньше сыпал сообщением на сайт.
         runs: dict[tuple[str, str], dict[str, Any]] = {}
         for raw in results:
             if not isinstance(raw, dict):
@@ -2153,18 +1777,6 @@ class VpnService:
                     EVENT_VPN_CHECK_RECOVERED,
                     {**base, "targets": run["recovered"], "all_ok": run["bad"] == 0},
                 )
-        # Пробник сам фанаутит report_check на все живые vpn-инстансы (не
-        # только на одну ноду через resolve_vpn_dst) — см.
-        # vpn_check/service.py::_run_and_report. Эта служба здесь просто
-        # применяет то, что до неё долетело; повторного вещания дальше не
-        # делает (иначе легко словить каскад). Из-за этого каждый инстанс
-        # прогоняет reconcile_vpn_check по СВОЕЙ копии данных, независимо —
-        # если один инстанс на миг пропустил отчёт (был недоступен),
-        # его гистерезис-счётчик может на 1-2 тика разойтись с другими;
-        # самовыравнивается за пару циклов. Ценой этого может задвоиться
-        # событие EVENT_VPN_CHECK_FAILED/RECOVERED (два инстанса перейдут
-        # порог не в один и тот же тик) — принято осознанно: дешевле, чем
-        # городить координацию «кто один имеет право эмитить».
         return {"accepted": True}
 
     async def _apply_check_result(
@@ -2178,8 +1790,6 @@ class VpnService:
         error: str | None,
         now: datetime,
     ) -> str | None:
-        """Записать результат; вернуть статус, в который строка ПЕРЕШЛА
-        (``None`` — перехода не было). Событие шлёт вызывающий, пачкой."""
         cur = await self._db.conn.execute(
             "SELECT status, consecutive_count, alerting_since, first_seen_at, "
             "notified_alert_at, notified_cleared_at FROM vpn_check_states "
@@ -2259,11 +1869,6 @@ class VpnService:
         return transition.to_status if transition is not None else None
 
     async def _check_status(self) -> dict[str, Any]:
-        # Не фанаутим на чтение: запись уже фанаутится на все живые
-        # vpn-инстансы (vpn_check/service.py::_run_and_report), так что
-        # любой живой инстанс, включая этот, уже держит (почти) полную
-        # картину сам по себе — второй фанаут на чтение был бы двойной
-        # работой ради того же результата. См. 39.0.7 в IMPLEMENTATION_PLAN.md.
         cur = await self._db.conn.execute(
             "SELECT node, server, transport, target, status, last_ok, last_latency_ms, "
             "last_error, consecutive_count, alerting_since, last_seen_at FROM vpn_check_states "
@@ -2289,14 +1894,6 @@ class VpnService:
         return {"states": states, "rollup": await self._check_rollup()}
 
     async def _telegram_egress(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Кандидат на маршрут до Telegram Bot API для бота на ноде ``observer``
-        (этап 52): SOCKS5-адрес этой ноды и последняя проба api.telegram.org
-        через её reality-VLESS, снятая этим наблюдателем (``vpn_check``).
-
-        Только чтение, без QR. Протухшая по тому же правилу, что и в
-        ``_check_rollup``, строка не прячется, а помечается ``stale`` — решать,
-        что «неизвестно», будет бот. Нет строки — ``check`` = None.
-        """
         observer = str(args.get("observer") or "").strip()
         if not observer:
             raise ProtoError(ERR_BAD_REQUEST, "не передан observer")
@@ -2326,17 +1923,6 @@ class VpnService:
         }
 
     async def _check_rollup(self, *, server: str | None = None) -> list[dict[str, Any]]:
-        """Сводка «как эти (сервер, транспорт) видят наблюдатели» — для
-        индикатора в /vpn (39.0.7(f)).
-
-        ``server`` сужает выборку до одной ноды: карточка спрашивает у
-        каждого живого сервера про него самого (поле ``check`` в ответах
-        ``usage``/``get_state``), и лишние чужие пары ей там ни к чему.
-
-        Протухшие строки отбрасываются (``CHECK_STALE_FACTOR``), поэтому
-        пара, про которую давно никто не отчитывался, из сводки просто
-        исчезает — бот покажет её без индикатора, а не выдуманным цветом.
-        """
         stale_before = (
             utc_now() - timedelta(seconds=self._cfg.check_interval_s * CHECK_STALE_FACTOR)
         ).isoformat()
@@ -2355,20 +1941,12 @@ class VpnService:
             {
                 "server": pair_server,
                 "transport": transport,
-                # Цвет — по ВСЕМ строкам пары: недостижимая цель у одного
-                # наблюдателя уже делает картину неоднородной (partial), даже
-                # если вторая цель у него же отвечает.
                 "status": rollup_status([status for _node, status in rows]),
-                # А вот считаем именно НАБЛЮДАТЕЛЕЙ, а не строки: у каждого их
-                # столько, сколько целей в check_targets, и «observers: 4» при
-                # двух живых наблюдателях (живая находка на деплое 0.109.0)
-                # вводит в заблуждение кого угодно, включая будущего себя.
                 "observers": len({node for node, _status in rows}),
             }
             for (pair_server, transport), rows in sorted(by_pair.items())
         ]
 
-    # --- APK ---
 
     async def _apk_row(self) -> dict[str, Any] | None:
         cur = await self._db.conn.execute(
@@ -2487,7 +2065,6 @@ class VpnService:
         await self._db.conn.commit()
         return {"ok": True}
 
-    # --- диспетчер ---
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if self.backup is not None:
@@ -2496,7 +2073,7 @@ class VpnService:
                 return own
         result = await self._run_command(action, args)
         if self.backup is not None and action in SNAPSHOT_TRIGGER_ACTIONS:
-            self.backup.touch()  # БД изменилась — снапшот напарнику вне очереди
+            self.backup.touch()
         return result
 
     async def _run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -2549,5 +2126,4 @@ class VpnService:
             return await self._proxy_rotate_secret(args)
         if action == ACTION_PROXY_USAGE:
             return await self._proxy_usage(args)
-        # Сервер валидирует action по describe — сюда неизвестное не доходит.
         raise ValueError(f"необъявленное действие: {action}")

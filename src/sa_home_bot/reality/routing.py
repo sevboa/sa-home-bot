@@ -1,26 +1,5 @@
-"""Маршрутизация сплит-туннеля для клиентского конфига Hiddify / sing-box.
-
-Ноль импортов пакета — только константы, как ``vpn/protocol.py``. Используется
-``reality/client_config.py`` (генератор клиентского конфига).
-
-Модель: **сплит по чёрному списку**. Заблокированное в РФ → в туннель на
-wooster; РФ-геолокация и всё «жёстко напрямую» → мимо туннеля. Списки
-блокировок клиент тянет сам автообновляемыми remote rule-set с GitHub
-(``itdoginfo/allow-domains``), поэтому свежесть не зависит от нас.
-"""
-
 from __future__ import annotations
 
-# Автообновляемые бинарные rule-set sing-box (.srs). Требуют sing-box >= 1.11
-# в клиенте (Hiddify свежих версий несёт). Релиз ``latest`` обновляется
-# ежедневно самим itdoginfo.
-#
-#   russia_inside  — «ресурсы, которые блокируются, в т.ч. зарубежные, которые
-#                    сами блокируют российские подсети» (YouTube, Instagram/Meta,
-#                    X, Discord, TikTok, HDRezka, новости…) → В ТУННЕЛЬ.
-#   russia_outside — «российские ресурсы, доступные только для российских
-#                    подсетей» (для тех, кто за границей) → НАПРЯМУЮ (для гостя
-#                    в РФ и так работает, гонять через США незачем).
 RULESET_URLS: dict[str, str] = {
     "ru-blocked": (
         "https://github.com/itdoginfo/allow-domains/releases/latest/download/russia_inside.srs"
@@ -32,17 +11,7 @@ RULESET_URLS: dict[str, str] = {
 
 RULESET_UPDATE_INTERVAL = "24h"
 
-# --- always-direct: банки, госуслуги, платёжная инфраструктура ---
-#
-# Высший приоритет в ``route.rules`` — идёт РАНЬШЕ блок-листа. Страховка: если
-# банковский домен случайно попадёт в ``russia_inside`` (или гость включит
-# режим «всё через туннель»), он всё равно уходит напрямую. Иначе — заход в
-# банк с зарубежного IP → срабатывает анти-фрод, блокировка операции/входа.
-#
-# Ведём вручную, меняется редко. Только регистрируемые домены (без поддоменов —
-# ``domain_suffix`` в sing-box матчит и сам домен, и любые поддомены).
 DIRECT_SUFFIXES: tuple[str, ...] = (
-    # госуслуги / госорганы
     "gosuslugi.ru",
     "gu-st.ru",
     "gov.ru",
@@ -62,12 +31,10 @@ DIRECT_SUFFIXES: tuple[str, ...] = (
     "fssp.gov.ru",
     "sudrf.ru",
     "cbr.ru",
-    # НСПК / СБП / платёжная инфраструктура
     "nspk.ru",
     "mironline.ru",
     "privetmir.ru",
     "mir-connect.ru",
-    # банки
     "sberbank.ru",
     "sber.ru",
     "sberbank.com",
@@ -106,15 +73,12 @@ DIRECT_SUFFIXES: tuple[str, ...] = (
     "yoomoney.ru",
     "yookassa.ru",
     "qiwi.com",
-    # маркетплейсы / повседневные РФ-сервисы, которым зарубежный IP ломает вход
     "wildberries.ru",
     "wb.ru",
     "ozon.ru",
     "market.yandex.ru",
     "megamarket.ru",
     "dzen.ru",
-    # контрольный: показывает адрес — «2ip.ru видит настоящий адрес, а ifconfig.me —
-    # страну VPN» значит, что маршруты в клиенте работают (проверка 2026-10-11)
     "2ip.ru",
-    "2ip.io",  # 2ip.ru переадресует сюда
+    "2ip.io",
 )

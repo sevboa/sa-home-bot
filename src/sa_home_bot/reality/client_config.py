@@ -1,15 +1,3 @@
-"""Генерация клиентских артефактов VLESS+Reality: полный sing-box конфиг
-(основной артефакт для Hiddify), ``vless://``-ссылка и Hiddify deep-link.
-
-Ноль зависимостей — только stdlib. QR тут НЕ рисуем — рендер QR живёт в
-вызывающем коде (``deploy/reality-client.py`` для ручной раздачи,
-``vpn/service.py`` для reality-транспорта в рое).
-
-Формат конфига — sing-box (Hiddify его понимает). Правила маршрутизации зашиты
-в файл (см. ``reality/routing.py``), клиент сам обновляет remote rule-set с
-GitHub. Целимся в схему sing-box >= 1.11 (``format: "binary"`` для ``.srs``).
-"""
-
 from __future__ import annotations
 
 import json
@@ -23,8 +11,6 @@ from sa_home_bot.reality.routing import (
     RULESET_URLS,
 )
 
-# Порядок тегов в route.rule_set / route.rules осмысленный — см. комментарии
-# ниже; тесты фиксируют относительный порядок.
 _TAG_DIRECT_MANUAL = "ru-direct-manual"
 _TAG_BLOCKED = "ru-blocked"
 _TAG_INSIDE = "ru-inside"
@@ -35,9 +21,6 @@ CLIENT_FINGERPRINT = "chrome"
 
 @dataclass(frozen=True)
 class RealityParams:
-    """Параметры сервера Reality. ``config.RealityTransportConfig`` несёт те же
-    имена полей → ``render_*`` принимают его по duck-typing без изменений."""
-
     endpoint_host: str
     port: int
     server_public_key: str
@@ -77,16 +60,6 @@ def _inline_direct_ruleset() -> dict:
 
 
 def _singbox_config(params: RealityParams, client_uuid: str, *, all_proxy: bool) -> dict:
-    """Полный sing-box конфиг под одно устройство. Имя профиля клиенту задаёт
-    имя файла (``<label>.json``), не содержимое.
-
-    ``all_proxy=False`` (обычный сплит для гостя в РФ): заблокированное → туннель,
-    РФ-геолокация и always-direct → напрямую, неопознанное → туннель
-    (``final: "proxy"``, чтобы обход не ломался на свежих блокировках).
-
-    ``all_proxy=True`` (одна точка выхода — для гостей вне РФ): всё в туннель,
-    напрямую только банки/госуслуги из ``ru-direct-manual``.
-    """
     proxy_out = {
         "type": "vless",
         "tag": "proxy",
@@ -111,15 +84,12 @@ def _singbox_config(params: RealityParams, client_uuid: str, *, all_proxy: bool)
         rule_sets.append(_remote_ruleset(_TAG_BLOCKED))
         rule_sets.append(_remote_ruleset(_TAG_INSIDE))
 
-    # DNS: заблокированное резолвим через туннель (обход DNS-спуфинга ТСПУ),
-    # остальное — напрямую.
     dns_rules: list[dict] = [{"rule_set": [_TAG_DIRECT_MANUAL], "server": "direct-dns"}]
     if not all_proxy:
         dns_rules.insert(0, {"rule_set": [_TAG_BLOCKED], "server": "proxy-dns"})
         dns_rules.append({"rule_set": [_TAG_INSIDE], "server": "direct-dns"})
     dns_final = "proxy-dns" if all_proxy else "direct-dns"
 
-    # route.rules: always-direct раньше блок-листа, блок-лист раньше РФ-геолок.
     route_rules: list[dict] = [
         {"action": "sniff"},
         {"protocol": "dns", "action": "hijack-dns"},
@@ -188,9 +158,6 @@ def render_singbox_config(
 
 
 def render_vless_url(params: RealityParams, client_uuid: str, label: str) -> str:
-    """``vless://``-ссылка для быстрого импорта / QR. Правил маршрутизации не
-    несёт (Hiddify применит свой встроенный пресет «Регион: Россия») — основной
-    артефакт всё равно ``render_singbox_config``."""
     query = "&".join(
         f"{k}={v}"
         for k, v in (
@@ -211,10 +178,6 @@ def render_vless_url(params: RealityParams, client_uuid: str, label: str) -> str
 
 
 def parse_vless_url(url: str) -> tuple[RealityParams, str]:
-    """Обратное к ``client_config.py::render_vless_url``: достать параметры
-    Reality-сервера и UUID клиента прямо из выданной гостю ссылки — не
-    ходить за ними в конфиг сервера (пробник — другая нода, читать его
-    приватный ``config.toml`` ей и незачем, и негде)."""
     parsed = urlsplit(url)
     if parsed.scheme != "vless":
         raise ValueError(f"не vless:// ссылка: {url!r}")
@@ -247,9 +210,6 @@ def parse_vless_url(url: str) -> tuple[RealityParams, str]:
 
 
 def render_deep_link(vless_url: str) -> str:
-    """Hiddify deep-link: одно нажатие в Telegram открывает Hiddify и
-    импортирует профиль. Имя профиля Hiddify берёт из фрагмента ``#label``
-    самой ``vless://``-ссылки."""
     return f"hiddify://import/{vless_url}"
 
 
@@ -258,14 +218,6 @@ def render_singbox_multi(
     *,
     all_proxy: bool = False,
 ) -> str:
-    """sing-box конфиг подписки: несколько стран в одном профиле (57.10).
-
-    ``servers`` — ``[(имя, параметры сервера, uuid клиента)]``; имя — тег
-    outbound'а, то, что человек видит в списке («🇳🇱 Нидерланды»). Маршруты и DNS
-    — те же, что у ``render_singbox_config``; ``proxy`` становится selector'ом
-    (по умолчанию ``auto`` — urltest по всем странам), поэтому все правила
-    «в туннель» продолжают ссылаться на ``proxy``.
-    """
     if not servers:
         raise ValueError("нужна хотя бы одна страна")
     _first_name, first_params, first_uuid = servers[0]

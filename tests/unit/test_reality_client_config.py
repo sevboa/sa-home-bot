@@ -1,6 +1,3 @@
-"""reality/client_config.py: валидность sing-box JSON, порядок правил
-маршрутизации, форма vless://-ссылки и deep-link. Чистые функции, БД/сети нет."""
-
 from __future__ import annotations
 
 import json
@@ -36,7 +33,7 @@ def _rule_set_tags(rule: dict) -> list[str]:
 def test_singbox_config_is_valid_json_with_trailing_newline() -> None:
     text = render_singbox_config(PARAMS, UUID)
     assert text.endswith("\n")
-    json.loads(text)  # не бросает
+    json.loads(text)
 
 
 def test_proxy_outbound_carries_reality_and_flow() -> None:
@@ -68,7 +65,6 @@ def test_route_rule_actions_match_intent() -> None:
     assert by_tag["ru-direct-manual"]["outbound"] == "direct"
     assert by_tag["ru-blocked"]["outbound"] == "proxy"
     assert by_tag["ru-inside"]["outbound"] == "direct"
-    # sniff и hijack-dns идут первыми
     assert rules[0].get("action") == "sniff"
     assert any(r.get("action") == "hijack-dns" for r in rules[:3])
     assert any(r.get("ip_is_private") for r in rules)
@@ -105,7 +101,7 @@ def test_all_proxy_drops_split_rules() -> None:
     tags = {tag for rule in cfg["route"]["rules"] for tag in _rule_set_tags(rule)}
     assert "ru-blocked" not in tags
     assert "ru-inside" not in tags
-    assert "ru-direct-manual" in tags  # банки по-прежнему напрямую
+    assert "ru-direct-manual" in tags
     rs_tags = {rs["tag"] for rs in cfg["route"]["rule_set"]}
     assert rs_tags == {"ru-direct-manual"}
     assert cfg["dns"]["final"] == "proxy-dns"
@@ -127,7 +123,6 @@ def test_render_vless_url_shape() -> None:
     assert "sid=0123456789abcdef" in url
     assert "sni=www.google.com" in url
     assert "type=tcp" in url
-    # фрагмент — URL-экранированное имя устройства, в самом конце
     assert url.endswith("#%D1%82%D0%B5%D0%BB%D0%B5%D1%84%D0%BE%D0%BD%20%D0%9F%D0%B5%D1%82%D0%B8")
 
 
@@ -142,9 +137,9 @@ def test_direct_suffixes_are_clean(suffix: str) -> None:
     assert not suffix.startswith(".")
     assert " " not in suffix
     assert "/" not in suffix
-    assert "." in suffix  # это домен, а не голое слово
+    assert "." in suffix
 
 
 def test_direct_suffixes_no_duplicates() -> None:
     assert len(DIRECT_SUFFIXES) == len(set(DIRECT_SUFFIXES))
-    assert DIRECT_SUFFIXES  # непустой
+    assert DIRECT_SUFFIXES

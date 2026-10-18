@@ -18,7 +18,6 @@ CLEAR_THRESHOLD = 1
 
 
 def _drive(oks: list[bool], *, fail_threshold=FAIL_THRESHOLD, clear_threshold=CLEAR_THRESHOLD):
-    """Прогнать последовательность ok/fail через reconciliation, имитируя тики."""
     known: KnownCheckState | None = None
     transitions = []
     final_state = None
@@ -61,7 +60,6 @@ def test_single_failure_does_not_alert():
 
 
 def test_debounce_resets_on_interruption():
-    # fail, ok (сброс), fail, fail → alert только на последней паре подряд.
     state, transitions = _drive([False, True, False, False])
     assert transitions == [(OK, ALERTING)]
     assert state.status == ALERTING
@@ -81,8 +79,6 @@ def test_higher_clear_threshold_requires_multiple_successes():
 
 
 def test_no_repeated_alert_while_still_failing():
-    # Мут: после первого перехода в alerting дальнейшие неудачи не дают
-    # новых транзишенов (событие не эмитится повторно на каждый тик).
     state, transitions = _drive([False, False, False, False, False])
     assert transitions == [(OK, ALERTING)]
     assert state.status == ALERTING

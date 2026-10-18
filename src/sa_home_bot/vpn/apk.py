@@ -1,13 +1,3 @@
-"""Клиент GitHub Releases для официального APK AmneziaWG — сетевой слой
-кэша, который держит vpn/service.py.
-
-Только ``urllib`` + ``asyncio.to_thread`` (как net/searxng.py и llm/ollama.py
-— в проекте сознательно нет httpx/aiohttp). Свежесть проверяется через API
-на КАЖДЫЙ запрос гостя (с коротким memo в самой службе — см.
-VpnService._apk_info), а не по расписанию: кэш на jeeves — это ускоритель
-доставки, а не источник правды о версии.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -25,12 +15,12 @@ _HEADERS = {"User-Agent": "sa-home-bot", "Accept": "application/vnd.github+json"
 
 
 class ApkFetchError(RuntimeError):
-    """GitHub недоступен/ответил не тем — не значит, что кэша нет вовсе."""
+    pass
 
 
 def _get_json_sync(url: str, timeout: float) -> Any:
     req = urllib.request.Request(url, headers=_HEADERS)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — GitHub API, https
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
         return json.loads(resp.read())
 
 
@@ -53,8 +43,6 @@ def pick_apk_asset(assets: list[Any]) -> dict[str, Any] | None:
 
 
 def asset_sha256(asset: dict[str, Any]) -> str | None:
-    """sha256 из поля ``digest`` (``"sha256:...."``) — GitHub его отдаёт не
-    для всех релизов; отсутствие не ошибка, тогда сверяем только размер."""
     digest = asset.get("digest")
     if isinstance(digest, str) and digest.startswith("sha256:"):
         return digest.removeprefix("sha256:")
@@ -63,7 +51,7 @@ def asset_sha256(asset: dict[str, Any]) -> str | None:
 
 def download_sync(url: str, dest: Path, timeout: float) -> None:
     req = urllib.request.Request(url, headers=_HEADERS)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — GitHub, https
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
         with open(dest, "wb") as f:
             shutil.copyfileobj(resp, f)
 
