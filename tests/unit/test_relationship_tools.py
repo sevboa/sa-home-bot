@@ -1,40 +1,20 @@
-"""Тулы знакомства между гостями (Этап 46: связь одна — знакомство):
-request_acquaintance (модель только открывает форму, решают кнопки), общая
-проверка acquaintance_conflict и my_acquaintances. Сам жизненный цикл
-формы (кнопки, экспирация, речь + форма) — в test_pending_actions.py,
-передача сообщений знакомым — в test_tell.py."""
-
 from __future__ import annotations
 
 from datetime import UTC, datetime
 
-import pytest_asyncio
-
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.pending_actions import PendingActions
 from sa_home_bot.config import GuestSubscriptionConfig, Settings, SubscriptionConfig
-from sa_home_bot.db.connection import Database
-from sa_home_bot.db.migrations import apply_migrations
-from sa_home_bot.db.store import Store
 from sa_home_bot.people.book import PeopleBook
 from sa_home_bot.subscriptions.book import SubscriptionBook
 
 from .people_helpers import claim
 
 OWNER_CHAT = 1
-GUEST_A = 301  # инициатор
-GUEST_B = 302  # адресат
+GUEST_A = 301
+GUEST_B = 302
 GUEST_C = 303
-STRANGER_CHAT = 999  # неизвестный chat_id — не в book
-
-
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    db = Database(tmp_path / "test.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
+STRANGER_CHAT = 999
 
 
 def _guest(name: str, chat_id: int) -> GuestSubscriptionConfig:
@@ -101,9 +81,6 @@ async def _request(ctx, recipient_id):
     return await ai_tools.tool_request_acquaintance(ctx, {"recipient_id": recipient_id})
 
 
-# --- request_acquaintance ---
-
-
 async def test_form_creates_draft_but_sends_nothing_yet(store):
     ctx, notifier, node_link = _ctx(store, chat_id=GUEST_A, book=_book())
 
@@ -117,16 +94,12 @@ async def test_form_creates_draft_but_sends_nothing_yet(store):
     assert rows[0]["status"] == "draft"
     assert rows[0]["addressee"] == GUEST_B
     assert rows[0]["payload"]["relation"] == "acquaintance"
-    # Форма уходит ПОСЛЕ ответа Альфреда (flush_drafts), не из тула; адресат
-    # о черновике не знает вовсе.
     assert notifier.sent == []
     assert await store.open_pending_actions(chat_id=GUEST_B) == []
-    # Будильник экспирации поставлен, речь адресату — нет.
     assert [c[1]["action"] for c in node_link.calls] == ["timer"]
 
 
 def test_declaration_has_no_relation_type():
-    """Этап 46: тип связи модель больше не выбирает — только адресата."""
     params = ai_tools._DECL_REQUEST_ACQUAINTANCE["function"]["parameters"]  # noqa: SLF001
     assert set(params["properties"]) == {"recipient_id"}
     names = {spec.name for spec in ai_tools.TOOLS}
@@ -135,7 +108,6 @@ def test_declaration_has_no_relation_type():
 
 
 async def test_form_unavailable_without_pending_actions(store):
-    # Служба tasks (chat_loop) — форм там показать некому.
     ctx, _, _ = _ctx(store, chat_id=GUEST_A, book=_book(), with_forms=False)
     assert "недоступно" in await _request(ctx, GUEST_B)
     assert await store.open_pending_actions() == []
@@ -177,10 +149,6 @@ async def test_form_already_acquainted_either_direction(store):
 
 
 async def test_form_owner_never_named_in_third_person_and_not_me(store):
-    # Живые находки 2026-09-26: владелец технически "me" (не для показа), а
-    # его настоящее ФИО в тексте, адресованном ЕМУ САМОМУ, Gemma озвучивала
-    # слово в слово. Тул отвечает инициатору — его имени там нет вовсе; в
-    # payload (форма адресату) — настоящее имя, не "me".
     book = SubscriptionBook.from_config(
         [SubscriptionConfig(name="me", chat_id=OWNER_CHAT, allowed_commands=["*"])],
         [_guest("Настя", GUEST_B)],
@@ -200,14 +168,10 @@ async def test_form_owner_never_named_in_third_person_and_not_me(store):
     assert "Алексей Александрович Севбо" not in result
     assert "asevbo" not in result
     assert "«вы»" in result
-    # Падеж — на служебном слове, имя именительным лейблом.
     assert "адресат — Наташа Сорокина" in result
     payload = (await store.open_pending_actions())[0]["payload"]
     assert payload["initiator_name"] == "Алексей Александрович Севбо (@asevbo)"
     assert payload["addressee_name"] == "Наташа Сорокина"
-
-
-# --- acquaintance_conflict (повторная проверка на «Отправить»/«Принять») ---
 
 
 async def test_conflict_ignores_the_form_itself(store):
@@ -226,8 +190,6 @@ async def test_conflict_ignores_the_form_itself(store):
 
 
 async def test_conflict_counter_offer_points_to_its_form(store):
-    # Встречное предложение B → A уже отправлено — A надо лишь нажать
-    # «Принять» в форме B, а не слать своё.
     now = datetime.now(tz=UTC)
     row = await store.create_pending_action(
         "relationship", GUEST_B, GUEST_A, {"relation": "acquaintance"}, now, now
@@ -242,9 +204,6 @@ async def test_are_acquainted_is_symmetric_and_pairwise(store):
     assert await ai_tools.are_acquainted(store, GUEST_A, GUEST_B)
     assert await ai_tools.are_acquainted(store, GUEST_B, GUEST_A)
     assert not await ai_tools.are_acquainted(store, GUEST_A, GUEST_C)
-
-
-# --- my_acquaintances ---
 
 
 async def test_my_acquaintances_no_store():

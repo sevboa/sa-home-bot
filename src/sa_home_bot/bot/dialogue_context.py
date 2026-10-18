@@ -235,7 +235,8 @@ def looks_overflowed(raw: str, stats: ChatStats, num_ctx: int) -> bool:
     if stats.truncated:
         return True
     window = stats.num_ctx or num_ctx
-    return not raw.strip() and stats.max_prompt_tokens >= int(window * EMPTY_REPLY_OVERFLOW_PROMPT_SHARE)
+    nearly_full = stats.max_prompt_tokens >= int(window * EMPTY_REPLY_OVERFLOW_PROMPT_SHARE)
+    return not raw.strip() and nearly_full
 
 
 def trim_to_budget(messages: list[dict[str, Any]], max_chars: int) -> list[dict[str, Any]]:

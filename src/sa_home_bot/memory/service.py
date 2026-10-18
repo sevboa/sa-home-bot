@@ -168,25 +168,32 @@ class MemoryService:
         await self._db.conn.commit()
         return {"id": cur.lastrowid, "text": text, "scope": scope, "sensitive": sensitive}
 
+    def _visible_to(self, chat_id: int) -> tuple[str, list[Any]]:
+        scopes = [SCOPE_COMMON]
+        if self._is_family_chat(chat_id):
+            scopes.append(SCOPE_FAMILY)
+        clause = "(chat_id = ?" + " OR scope = ?" * len(scopes) + ")"
+        return clause, [chat_id, *scopes]
+
+    async def _select_facts(self, tail_sql: str, params: list[Any]) -> dict[str, Any]:
+        cur = await self._db.conn.execute(
+            "SELECT rowid AS id, text, scope, sensitive, created_at FROM facts " + tail_sql,
+            params,
+        )
+        facts = [_row_to_fact(row) for row in await cur.fetchall()]
+        return {"facts": facts, "count": len(facts)}
+
     async def _recall(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)
         limit = min(int(args.get("limit") or DEFAULT_RECALL), MAX_RECALL)
         match = _match_query(str(args.get("query") or ""))
         if not match:
             return {"facts": [], "count": 0}
-        sql = (
-            "SELECT rowid AS id, text, scope, sensitive, created_at FROM facts "
-            "WHERE facts MATCH ? AND (chat_id = ? OR scope = ?"
+        visible_sql, visible_params = self._visible_to(chat_id)
+        return await self._select_facts(
+            f"WHERE facts MATCH ? AND {visible_sql} ORDER BY rank LIMIT ?",
+            [match, *visible_params, limit],
         )
-        params: list[Any] = [match, chat_id, SCOPE_COMMON]
-        if self._is_family_chat(chat_id):
-            sql += " OR scope = ?"
-            params.append(SCOPE_FAMILY)
-        sql += ") ORDER BY rank LIMIT ?"
-        params.append(limit)
-        cur = await self._db.conn.execute(sql, params)
-        facts = [_row_to_fact(row) for row in await cur.fetchall()]
-        return {"facts": facts, "count": len(facts)}
 
     async def _forget(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)
@@ -204,19 +211,10 @@ class MemoryService:
     async def _list(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)
         limit = min(int(args.get("limit") or MAX_RECALL), MAX_RECALL)
-        sql = (
-            "SELECT rowid AS id, text, scope, sensitive, created_at "
-            "FROM facts WHERE chat_id = ? OR scope = ?"
+        visible_sql, visible_params = self._visible_to(chat_id)
+        return await self._select_facts(
+            f"WHERE {visible_sql} ORDER BY rowid DESC LIMIT ?", [*visible_params, limit]
         )
-        params: list[Any] = [chat_id, SCOPE_COMMON]
-        if self._is_family_chat(chat_id):
-            sql += " OR scope = ?"
-            params.append(SCOPE_FAMILY)
-        sql += " ORDER BY rowid DESC LIMIT ?"
-        params.append(limit)
-        cur = await self._db.conn.execute(sql, params)
-        facts = [_row_to_fact(row) for row in await cur.fetchall()]
-        return {"facts": facts, "count": len(facts)}
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if action == ACTION_REMEMBER:

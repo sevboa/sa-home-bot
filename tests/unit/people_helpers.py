@@ -1,5 +1,3 @@
-"""Карточки людей для тестов (Этап 58): PeopleBook из коротких описаний."""
-
 from __future__ import annotations
 
 from typing import Any
@@ -33,9 +31,6 @@ def people_book(
     profiles: dict[int, tuple[str, str]] | None = None,
     by_id: int = OWNER,
 ) -> PeopleBook:
-    """``cards`` — {id: {"name": …, "gender": …, "alias": [...], …}}, слово
-    ``by_id`` (по умолчанию владельца; о самом владельце — его же, сильное).
-    ``profiles`` — {id: (имя в Telegram, ник)}."""
     claims: list[dict[str, Any]] = []
     for subject_id, fields in (cards or {}).items():
         for field, value in fields.items():

@@ -1,9 +1,3 @@
-"""Синтез голосового ответа на стороне alfred (bot/voice_tts.py).
-
-wake_core.ensure_service_ready замокан целиком (см. test_voice_stt.py про
-тот же приём) — здесь важна только реакция voice_tts на его исход, на
-инлайн/чанкованный ответ службы и на сбои (откат на None, не исключение)."""
-
 from __future__ import annotations
 
 import base64
@@ -97,7 +91,7 @@ async def test_returns_none_when_service_not_ready(monkeypatch):
 
     assert result is None
     assert link.commands == []
-    assert message.sent == []  # статус синтеза не показывается, если служба недоступна
+    assert message.sent == []
 
 
 async def test_inline_response_returns_bytes(monkeypatch):

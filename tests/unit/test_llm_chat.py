@@ -1,9 +1,3 @@
-"""llm_chat.py::run_chat_loop — контракт хука on_tool_start (этап 34, живая
-находка 2026-08-10): зовётся ДО хендлера тула, в отличие от on_tool_call
-(после, с результатом — durable-запись, bot/ai_flow.py). Не зовётся для
-неизвестного модели тула. Обратно совместим при on_tool_start=None (служба
-tasks, tasks/service.py, этот параметр вообще не передаёт)."""
-
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -26,10 +20,6 @@ DST = Address(node="mycraft", service="llm")
 
 
 class FakeNodeLink:
-    """Отвечает на command("chat", ...) по очереди — тот же приём, что
-    FakeNodeLink в test_ai_flow.py, но без presence/wake-обвязки: этот файл
-    проверяет только hook-контракт run_chat_loop, не сценарий /ai."""
-
     def __init__(self, chat_results):
         self._chat_results = list(chat_results)
 
@@ -47,9 +37,6 @@ async def _fake_handler(ctx, args):
 
 @pytest.fixture(autouse=True)
 def fake_toolkit(monkeypatch):
-    """Подменяет tools_for на фиксированный комплект с одним известным
-    тулом — реальные права/декларации (bot/tools.py::tools_for) здесь ни
-    при чём, тестируется только порядок вызова хуков вокруг хендлера."""
     toolkit = ai_tools.ToolKit(
         declarations=[{"type": "function", "function": {"name": "known_tool"}}],
         handlers={"known_tool": _fake_handler},
@@ -126,12 +113,10 @@ async def test_on_tool_start_not_called_for_unknown_tool():
     )
 
     assert result == "финальный ответ"
-    assert events == []  # неизвестный тул — исполнять нечего, уведомлять не о чем
+    assert events == []
 
 
 async def test_on_tool_start_none_is_backward_compatible():
-    # Служба tasks (tasks/service.py) не передаёт on_tool_start вовсе —
-    # дефолт None не должен ронять цикл.
     link = FakeNodeLink(
         chat_results=[
             {"tool_calls": [_tool_call("known_tool")]},
@@ -144,12 +129,6 @@ async def test_on_tool_start_none_is_backward_compatible():
     )
 
     assert result == "финальный ответ"
-
-
-# --- сокращение длинных тул-результатов (живая находка 2026-09-04, см.
-# llm_chat.py::_inline_or_cache) — длинный результат (web_search и т.п.) не
-# должен целиком уходить в messages на каждый раунд: несколько таких подряд
-# добивают контекст модели, и она возвращает пустой ответ. ---
 
 
 async def test_long_tool_result_is_shortened_but_full_text_reaches_on_tool_call(monkeypatch):
@@ -191,13 +170,10 @@ async def test_long_tool_result_is_shortened_but_full_text_reaches_on_tool_call(
     )
 
     assert result == "финальный ответ"
-    # on_tool_call (durable-трасса, ai_tool_calls) видит результат целиком.
     assert seen_by_on_tool_call == [long_result]
-    # В messages (то, что реально уходит модели) — только укороченное превью.
     tool_message = next(m for m in messages if m.get("role") == "tool")
     assert len(tool_message["content"]) < len(long_result)
     assert "сокращено" in tool_message["content"]
-    # Полный текст остаётся достижимым через tool_result_cache по id из превью.
     assert len(ctx.tool_result_cache) == 1
     (cached_id, cached_full) = next(iter(ctx.tool_result_cache.items()))
     assert cached_id in tool_message["content"]
@@ -230,12 +206,6 @@ async def test_short_tool_result_is_not_cached(monkeypatch):
     tool_message = next(m for m in messages if m.get("role") == "tool")
     assert tool_message["content"] == "короткий результат"
     assert ctx.tool_result_cache == {}
-
-
-# --- повтор раунда chat на кратковременный обрыв связи (живая находка
-# 2026-09-25, см. llm_chat.py::CHAT_RETRY_DELAYS_S): линк до mycraft
-# переподключился посреди хода — раунд после тула не должен сразу
-# превращаться в «Альфреда нет на месте». ---
 
 
 @pytest.fixture
@@ -280,8 +250,6 @@ async def test_повторы_конечны(no_retry_sleep):
     ],
 )
 async def test_таймаут_и_сбои_не_повторяются(no_retry_sleep, error):
-    # Таймаут значит, что модель уже думала весь бюджет, — повтор только
-    # удвоил бы ожидание гостя; прочие ошибки повтор не лечит.
     link = FakeNodeLink(chat_results=[error, {"response": "не должно дойти"}])
 
     with pytest.raises(type(error)):
@@ -289,8 +257,6 @@ async def test_таймаут_и_сбои_не_повторяются(no_retry_s
 
 
 async def test_speech_user_and_clear_flag_ride_every_round():
-    # Этап 47: адресат и «чистая речь» из БД бота — в каждом раунде chat, в
-    # т.ч. после tool-calling (служба llm применяет их к Логопеду).
     seen: list[dict] = []
 
     class RecordingLink(FakeNodeLink):
@@ -309,8 +275,6 @@ async def test_speech_user_and_clear_flag_ride_every_round():
 
 
 async def test_speech_clear_getter_is_reread_every_round():
-    # Живой баг 2026-09-28: гость сменил передатчик кнопкой посреди хода, а
-    # следующий раунд вёз флаг, прочитанный в начале хода, и затирал смену.
     seen: list[dict] = []
     flags = iter([False, True])
 
@@ -349,8 +313,6 @@ async def test_no_speech_user_means_no_speech_args():
 
 
 async def test_stats_collect_window_counters_across_rounds():
-    """Этап 50: счётчики окна службы llm копятся в ChatStats — промпт первого
-    раунда, максимальный, done_reason последнего и действующий num_ctx."""
     link = FakeNodeLink(
         chat_results=[
             {"tool_calls": [_tool_call("known_tool")], "prompt_eval_count": 1200,
@@ -374,8 +336,6 @@ async def test_stats_collect_window_counters_across_rounds():
 
 
 async def test_allow_tools_false_sends_no_declarations_and_runs_no_tools():
-    """Этап 50: перегенерация после переполнения — без тулов вовсе, даже
-    выдуманный моделью вызов не исполняется."""
     sent_tools: list = []
     ran: list = []
 
@@ -396,13 +356,10 @@ async def test_allow_tools_false_sends_no_declarations_and_runs_no_tools():
     )
     assert result == "ответ"
     assert sent_tools == [[], []]
-    assert ran == ["known_tool"]  # записан как «неизвестный», но хендлер не звался
+    assert ran == ["known_tool"]
 
 
 async def test_tool_can_end_the_turn():
-    """ToolContext.end_turn (take_photo): после такого тула моделей больше
-    не спрашиваем — реплики в этом ходе не будет."""
-
     async def ending(ctx, args):
         ctx.end_turn = True
         return "снимок делается"
@@ -419,9 +376,6 @@ async def test_tool_can_end_the_turn():
 
 
 async def test_act_calls_run_one_per_round_and_see_each_result():
-    """Этап 59.7: несколько act в одном ответе модели исполняется только первый
-    (исход нужен модели, прежде чем решать следующее); остальные — «не выполнено».
-    Цепочка из четырёх act + финальный текст укладывается в MAX_TOOL_ROUNDS."""
     ran: list[str] = []
     results: list[str] = []
 
@@ -431,7 +385,7 @@ async def test_act_calls_run_one_per_round_and_see_each_result():
 
     ai_tools.tools_for(None).handlers["act"] = act
     ctx = _ctx()
-    ctx.interactives = SimpleNamespace(canary_ok=lambda user_id: True)  # канареечный тул
+    ctx.interactives = SimpleNamespace(canary_ok=lambda user_id: True)
     two = [_tool_call("act", {"action": "a"}), _tool_call("act", {"action": "b"})]
     link = FakeNodeLink(
         chat_results=[
@@ -458,5 +412,5 @@ async def test_act_calls_run_one_per_round_and_see_each_result():
         on_tool_call=on_call,
     )
     assert answer == "рассказ"
-    assert ran == ["a", "b", "c", "d"]  # «b» из первого ответа не исполнялся
+    assert ran == ["a", "b", "c", "d"]
     assert results[1] == ai_tools.SERIAL_DEFERRED
