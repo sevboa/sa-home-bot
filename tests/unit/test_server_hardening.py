@@ -7,7 +7,10 @@
 """
 
 import asyncio
+import errno
 import socket
+
+import pytest
 
 from sa_home_bot.node.app import MAX_RELAY_HOPS, SeenEvents, _relay_peer_event
 from sa_home_bot.node.peers import NodeRouter, PeerLink
@@ -26,6 +29,8 @@ from tests.unit.netsupport import StubService
 from tests.unit.support.waiting import wait_for
 
 # --- hops: второй предохранитель от шторма ---
+
+pytest_plugins = ["tests.unit.sock_fixture"]
 
 
 def test_hops_переживает_кодирование():
@@ -158,3 +163,60 @@ async def test_принятый_сокет_получает_keepalive():
     finally:
         await client.close()
         await server.stop()
+
+
+async def test_нода_поднимается_на_доступном_адресе_не_дожидаясь_отстающего(
+    sock_dir, monkeypatch
+):
+    """Главный смысл этапа: LAN есть сразу, tailscale-адреса ещё нет —
+    нода обязана работать уже сейчас, а не через минуту."""
+    monkeypatch.setattr(server_mod, "BIND_RETRY_INTERVAL_S", 0.01)
+    real_start_server = asyncio.start_server
+    attempts = {"n": 0}
+
+    async def flaky_start_server(*args, **kwargs):
+        # Адрес «tailscale» (порт 0 с этим хостом) не поднимается первые разы.
+        if kwargs.get("host") == "127.0.0.2":
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                raise OSError("could not bind on any address")
+        return await real_start_server(*args, **kwargs)
+
+    monkeypatch.setattr(server_mod.asyncio, "start_server", flaky_start_server)
+
+    server = ProtoServer(
+        [f"unix://{sock_dir / 'node.sock'}", TcpEndpoint("127.0.0.2", 0)],
+        StubService(),
+        token="s3cret",
+    )
+    await server.start()
+    try:
+        # start() вернулся, хотя второй адрес ещё не поднялся.
+        assert len(server.bound_endpoints) == 1
+        assert await wait_for(lambda: len(server.bound_endpoints) == 2), (
+            "отстающий адрес так и не добрали фоном"
+        )
+        # Объявлять рою нечего: unix-сокет и loopback (а 127.0.0.2 — он же)
+        # соседу бесполезны, по ним он попадёт к себе.
+        assert server.advertised_endpoints() == []
+    finally:
+        await server.stop()
+
+
+async def test_занятый_порт_среди_нескольких_адресов_не_маскируется(sock_dir, monkeypatch):
+    """EADDRINUSE — чужой процесс на порту: молча работать «наполовину»
+    нельзя, это не «адрес ещё не приехал»."""
+
+    async def busy_start_server(*args, **kwargs):
+        raise OSError(errno.EADDRINUSE, "address already in use")
+
+    monkeypatch.setattr(server_mod.asyncio, "start_server", busy_start_server)
+    server = ProtoServer(
+        [f"unix://{sock_dir / 'node.sock'}", TcpEndpoint("127.0.0.1", 9999)],
+        StubService(),
+        token="s3cret",
+    )
+    with pytest.raises(OSError) as exc:
+        await server.start()
+    assert exc.value.errno == errno.EADDRINUSE
+    await server.stop()

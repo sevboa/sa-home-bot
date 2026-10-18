@@ -43,3 +43,13 @@ def test_save_overwrites_previous_content(tmp_path):
     NodeState(assignments=["apps"]).save(path)
     NodeState(assignments=["monitor"]).save(path)
     assert NodeState.load(path).assignments == ["monitor"]
+
+
+def test_remember_peer_keeps_known_kind():
+    state = NodeState(
+        peers=[SwarmNodeConfig(id="winpc", endpoint="tcp://old:8710", kind="workstation")]
+    )
+    state.remember_peer("winpc", "tcp://192.168.0.105:8710", ["tcp://192.168.0.105:8710"])
+    assert state.peers[0].kind == "workstation"
+    assert state.peers[0].endpoint == "tcp://192.168.0.105:8710"
+    assert state.peers[0].endpoints == []

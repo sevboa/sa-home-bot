@@ -1,5 +1,6 @@
 """Присоединение к рою по токену (этап 18): swarm_join/join, замыкание сетки."""
 
+
 import shutil
 import tempfile
 from pathlib import Path
@@ -12,6 +13,7 @@ from sa_home_bot.node.app import (
     _relay_peer_event,
     build_router,
     make_link_factories,
+    peer_candidates,
     peer_kinds,
 )
 from sa_home_bot.node.peers import NodeRouter, PeerLink
@@ -426,3 +428,99 @@ async def test_seen_events_bounded_size():
     # старые id вытеснены — id0/id1 больше не считаются виденными
     assert seen.seen("id0") is False
     assert seen.seen("id4") is True  # свежий всё ещё в наборе
+
+
+def test_адреса_пира_берутся_из_состояния_вперёд_конфига():
+    """В состоянии — последний удачный путь и всё выученное; в TOML — один
+    адрес, вписанный руками. Пропадать не должно ни то, ни другое."""
+    toml = [SwarmNodeConfig(id="winpc", endpoint="tcp://100.78.225.83:8710")]
+    state = [
+        SwarmNodeConfig(
+            id="winpc",
+            endpoint="tcp://192.168.0.105:8710",
+            endpoints=["tcp://100.78.225.83:8710"],
+        )
+    ]
+    assert peer_candidates(toml, state) == {
+        "winpc": ["tcp://192.168.0.105:8710", "tcp://100.78.225.83:8710"]
+    }
+
+
+def test_пир_только_из_конфига_работает_как_раньше():
+    toml = [SwarmNodeConfig(id="winpc", endpoint="tcp://100.78.225.83:8710")]
+    assert peer_candidates(toml, []) == {"winpc": ["tcp://100.78.225.83:8710"]}
+
+
+def _service(**kw) -> NodeService:
+    return NodeService(Supervisor([], None, emit=_emit), node_id="alfred", **kw)
+
+
+def test_нода_называет_рою_то_что_реально_слушает():
+    """Не адрес из конфига, а живой список: он меняется, пока адреса
+    доезжают (tailscale поднимается десятки секунд после старта)."""
+    live = ["tcp://192.168.0.100:8710"]
+    svc = _service(own_endpoint="tcp://100.73.52.92:8710", advertise=lambda: list(live))
+    assert svc.describe().info.endpoints == ("tcp://192.168.0.100:8710",)
+    live.append("tcp://100.73.52.92:8710")
+    assert len(svc.describe().info.endpoints) == 2
+
+
+def test_без_живого_списка_объявляется_настроенный_адрес():
+    """Пока сервер не поднялся (и в сборках без него) единственная правда о
+    себе — конфиг."""
+    svc = _service(own_endpoint="tcp://100.73.52.92:8710", advertise=lambda: [])
+    assert svc.describe().info.endpoints == ("tcp://100.73.52.92:8710",)
+
+
+async def test_swarm_join_возит_все_адреса_обеих_сторон():
+    """Присоединяющийся называет все свои адреса, принимающий — свои и
+    известные ему адреса соседей."""
+    router = NodeRouter("alfred")
+    created: list[tuple[str, list[str]]] = []
+
+    async def fake_add_peer(link: PeerLink) -> None:
+        created.append((link.name, link.endpoints))
+        router.peers[link.name] = link
+
+    router.add_peer = fake_add_peer  # type: ignore[method-assign]
+    svc = NodeService(
+        Supervisor([], None, emit=_emit),
+        router,
+        node_id="alfred",
+        own_endpoint="tcp://100.73.52.92:8710",
+        advertise=lambda: ["tcp://192.168.0.100:8710", "tcp://100.73.52.92:8710"],
+    )
+
+    result = await svc.run_command(
+        "swarm_join",
+        {
+            "node_id": "winpc",
+            "endpoint": "tcp://192.168.0.105:8710",
+            "endpoints": ["tcp://192.168.0.105:8710", "tcp://100.78.225.83:8710"],
+        },
+    )
+
+    assert created == [
+        ("winpc", ["tcp://192.168.0.105:8710", "tcp://100.78.225.83:8710"])
+    ]
+    assert result["peers"][0]["endpoints"] == [
+        "tcp://192.168.0.100:8710",
+        "tcp://100.73.52.92:8710",
+    ]
+
+
+async def test_swarm_join_от_ноды_старой_версии_работает_как_раньше():
+    """Поле endpoints появилось в этапе 24 — без него всё как было."""
+    router = NodeRouter("alfred")
+    created: list[list[str]] = []
+
+    async def fake_add_peer(link: PeerLink) -> None:
+        created.append(link.endpoints)
+        router.peers[link.name] = link
+
+    router.add_peer = fake_add_peer  # type: ignore[method-assign]
+    svc = NodeService(
+        Supervisor([], None, emit=_emit), router, node_id="alfred", own_endpoint="tcp://a:8710"
+    )
+    await svc.run_command("swarm_join", {"node_id": "winpc", "endpoint": "tcp://old:8710"})
+    assert created == [["tcp://old:8710"]]

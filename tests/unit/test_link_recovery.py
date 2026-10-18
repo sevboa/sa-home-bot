@@ -9,6 +9,7 @@
 heartbeat, немедленный реконнект и опознание вернувшегося соседа.
 """
 
+
 import asyncio
 import shutil
 import tempfile
@@ -375,5 +376,203 @@ async def test_медленный_запрос_не_рвёт_линк(sock_dir):
         assert link.alive, "таймаут одного запроса уронил линк"
     finally:
         release.set()
+        await link.stop()
+        await server.stop()
+
+
+async def test_линк_перебирает_адреса_до_рабочего(sock_dir):
+    """Первый адрес мёртв (машина сменила сеть) — связь всё равно есть."""
+    endpoint = f"unix://{sock_dir / 'peer.sock'}"
+    server = ProtoServer(endpoint, StubService())
+    await server.start()
+
+    link = PeerLink(
+        "winpc",
+        [f"unix://{sock_dir / 'nowhere.sock'}", endpoint],
+        reconnect_delay=0.05,
+    )
+    await link.start()
+    try:
+        assert await wait_for(lambda: link.alive), "линк не нашёл живой адрес"
+        assert str(link.endpoint) == str(sock_dir / "peer.sock")
+        # Удачный адрес встал первым — следующий перебор начнётся с него.
+        assert link.endpoints[0] == str(sock_dir / "peer.sock")
+    finally:
+        await link.stop()
+        await server.stop()
+
+
+async def test_адрес_с_чужой_нодой_уступает_правильному(sock_dir):
+    """Сосед мог назвать адрес, который в НАШЕЙ сети занят кем-то другим:
+    связь по нему — это запросы не туда. Пока есть другие адреса, берём их."""
+    wrong = f"unix://{sock_dir / 'wrong.sock'}"
+    right = f"unix://{sock_dir / 'right.sock'}"
+    other = ProtoServer(wrong, StubService(node="alfred"))
+    ours = ProtoServer(right, StubService(node="winpc"))
+    await other.start()
+    await ours.start()
+
+    link = PeerLink("winpc", [wrong, right], reconnect_delay=0.05)
+    await link.start()
+    try:
+        assert await wait_for(lambda: link.alive)
+        assert str(link.endpoint) == str(sock_dir / "right.sock"), (
+            "линк остался на адресе, где отвечает чужая нода"
+        )
+    finally:
+        await link.stop()
+        await ours.stop()
+        await other.stop()
+
+
+async def test_единственный_адрес_с_чужим_именем_всё_же_работает(sock_dir, caplog):
+    """Имя в [[swarm.nodes]] человек пишет как ему удобно и оно законно может
+    не совпасть с hostname соседа: отказываться от единственного адреса
+    из-за этого нельзя — так вело себя и до этапа 24."""
+    endpoint = f"unix://{sock_dir / 'peer.sock'}"
+    server = ProtoServer(endpoint, StubService(node="desktop-ie953ua"))
+    await server.start()
+
+    link = PeerLink("winpc", endpoint, reconnect_delay=0.05)
+    await link.start()
+    try:
+        assert await wait_for(lambda: link.alive), "линк отказался от единственного адреса"
+    finally:
+        await link.stop()
+        await server.stop()
+
+
+async def test_адрес_отвечающий_нами_самими_уступает_правильному(sock_dir):
+    """Живая находка 2026-08-04: DHCP без резервации отдал IP, когда-то
+    выученный как адрес соседа, нам самим. Ответ «это я» — не «сосед иначе
+    называется» (RANK-фолбэк из теста выше), а гарантированно мёртвый
+    кандидат: пока есть настоящий адрес соседа, брать его."""
+    stale = f"unix://{sock_dir / 'stale.sock'}"
+    right = f"unix://{sock_dir / 'right.sock'}"
+    ourselves = ProtoServer(stale, StubService(node="alfred"))
+    neighbour = ProtoServer(right, StubService(node="mycraft"))
+    await ourselves.start()
+    await neighbour.start()
+
+    link = PeerLink("mycraft", [stale, right], reconnect_delay=0.05, self_node="alfred")
+    await link.start()
+    try:
+        assert await wait_for(lambda: link.alive)
+        assert str(link.endpoint) == str(sock_dir / "right.sock"), (
+            "линк остался на адресе, где отвечаем мы сами"
+        )
+    finally:
+        await link.stop()
+        await neighbour.stop()
+        await ourselves.stop()
+
+
+async def test_единственный_адрес_отвечающий_нами_самими_не_считается_живым(sock_dir):
+    """В отличие от «просто другое имя в конфиге» (тест выше), ответ
+    буквально нашим собственным node_id никогда не годится даже как
+    последняя надежда — иначе линк подключается сам к себе и врёт
+    PresenceWatcher, что сосед «вернулся в строй»."""
+    stale = f"unix://{sock_dir / 'stale.sock'}"
+    ourselves = ProtoServer(stale, StubService(node="alfred"))
+    await ourselves.start()
+
+    link = PeerLink("mycraft", stale, reconnect_delay=0.05, self_node="alfred")
+    await link.start()
+    try:
+        await asyncio.sleep(0.2)
+        assert not link.alive, "линк принял ответ от самого себя за соседа"
+    finally:
+        await link.stop()
+        await ourselves.stop()
+
+
+async def test_устаревший_адрес_не_копится_после_свежего_hello(sock_dir):
+    """Живая находка 2026-08-04: раньше выученное только прирастало «в
+    надежде, что адрес вернётся к старому» — стухший кандидат простаивал
+    в списке навсегда. Свежий hello ЗАМЕНЯЕТ список, а не дополняет."""
+    stale = f"unix://{sock_dir / 'stale.sock'}"  # никто не слушает
+    right = f"unix://{sock_dir / 'right.sock'}"
+    service = StubService(node="mycraft", endpoints=("tcp://192.168.0.103:8710",))
+    server = ProtoServer(right, service)
+    await server.start()
+
+    link = PeerLink("mycraft", [stale, right], reconnect_delay=0.05)
+    await link.start()
+    try:
+        assert await wait_for(lambda: link.alive)
+        assert await wait_for(lambda: stale not in link.endpoints), link.endpoints
+        assert "tcp://192.168.0.103:8710" in link.endpoints
+    finally:
+        await link.stop()
+        await server.stop()
+
+
+async def test_мисматч_чужого_соседа_не_портит_kind_и_адреса(sock_dir):
+    """Найдено 2026-08-04: «запасной» ответ от РЕАЛЬНОГО, но другого
+    соседа (устаревший адрес переехал на него, не на нас — тот случай
+    гонит тест выше) раньше приписывал нашему линку чужие kind/endpoints.
+    Мисматч годится только для связи, не для памяти о соседе."""
+    wrong = f"unix://{sock_dir / 'wrong.sock'}"
+    other = ProtoServer(
+        wrong,
+        StubService(
+            node="winpc", endpoints=("tcp://192.168.0.104:8710",), node_kind="workstation"
+        ),
+    )
+    await other.start()
+
+    link = PeerLink("mycraft", wrong, reconnect_delay=0.05)
+    await link.start()
+    try:
+        assert await wait_for(lambda: link.alive)
+        await asyncio.sleep(0.1)
+        assert link.node_kind == ""
+        assert "tcp://192.168.0.104:8710" not in link.endpoints
+    finally:
+        await link.stop()
+        await other.stop()
+
+
+async def test_линк_учит_адреса_из_hello_и_сообщает_их_наверх(sock_dir):
+    """Сосед знает свои адреса точнее, чем чужой конфиг, — рассказывает их
+    в hello, а нода сохраняет (иначе выученное терялось бы на рестарте)."""
+    endpoint = f"unix://{sock_dir / 'peer.sock'}"
+    service = StubService(endpoints=("tcp://192.168.0.105:8710", "tcp://100.78.225.83:8710"))
+    server = ProtoServer(endpoint, service)
+    await server.start()
+
+    learned: list[tuple[str, list[str]]] = []
+    link = PeerLink(
+        "winpc",
+        endpoint,
+        on_endpoints=lambda n, e: learned.append((n, e)),
+        reconnect_delay=0.05,
+    )
+    await link.start()
+    try:
+        assert await wait_for(lambda: link.alive)
+        assert await wait_for(lambda: len(link.endpoints) == 3), link.endpoints
+        # Сначала — путь, по которому связь уже есть, затем LAN, затем оверлей.
+        assert link.endpoints[1:] == ["tcp://192.168.0.105:8710", "tcp://100.78.225.83:8710"]
+        assert learned and learned[-1][0] == "winpc"
+    finally:
+        await link.stop()
+        await server.stop()
+
+
+async def test_линк_не_учит_loopback_соседа(sock_dir):
+    """По 127.0.0.1 мы попадём не к соседу, а к себе — такой адрес не берём
+    ни при каких обстоятельствах."""
+    endpoint = f"unix://{sock_dir / 'peer.sock'}"
+    server = ProtoServer(endpoint, StubService(endpoints=("tcp://127.0.0.1:8710",)))
+    await server.start()
+
+    link = PeerLink("winpc", endpoint, reconnect_delay=0.05)
+    await link.start()
+    try:
+        assert await wait_for(lambda: link.alive)
+        await asyncio.sleep(0.1)
+        assert link.endpoints == [str(sock_dir / "peer.sock")]
+    finally:
         await link.stop()
         await server.stop()
