@@ -21,24 +21,13 @@ from sa_home_bot.bot.tools.core import (
 from sa_home_bot.proto.messages import Address, ProtoError
 from sa_home_bot.vpn import protocol as vpn_protocol
 
-# --- vpn: личный VPN (Этап 33; модель устройств — Этап 57, 57.8) ---
-#
-# Секреты (ключи, ссылки vless, QR, .conf) НИКОГДА не проходят через модель и
-# не выпускаются самим тулом: их отдают только кнопки /vpn сообщениями бота с
-# удалением по TTL. Тул лишь присылает человеку нужный экран с кнопкой
-# («📱 Подключить по шагам», «📥 Получить настройки») — те же экраны, что
-# в /vpn. Поэтому ни ctx.notifier.send_document/send_photo здесь нет вовсе
-# (иначе секрет осел бы в ai_turns/контексте модели). chat_id, как и у memory,
-# подставляет бот из ToolContext, не модель; chat_id=0 — пробник, не человек.
-
-_VPN_ACTION_APK = "apk"  # приложение: магазины/.apk, не команда службы
-_VPN_ACTION_SETTINGS = "settings"  # «📥 Получить настройки» устройства (кнопка карточки)
-_VPN_ACTION_REPORT = "report"  # «⚠️ Сообщить о проблеме»
+_VPN_ACTION_APK = "apk"
+_VPN_ACTION_SETTINGS = "settings"
+_VPN_ACTION_REPORT = "report"
 _VPN_NO_PRIVATE = "недоступно: настройки доступа отдаю только в личном чате, не в группе"
 
 
 async def _vpn_recipient(ctx: ToolContext, who: str) -> tuple[int | None, str]:
-    """Другой человек (recipient): (chat_id, текст-отказ). Только у админа."""
     is_admin = ctx.subscription is not None and ActionRight(
         vpn_protocol.ACTION_PEERS, _VPN_SERVICE
     ).granted(ctx.subscription)
@@ -62,8 +51,7 @@ async def _vpn_recipient(ctx: ToolContext, who: str) -> tuple[int | None, str]:
 
 
 async def _vpn_person_action(ctx: ToolContext, action: str, args: dict[str, Any]) -> str:
-    """usage (статус) / issue / settings / report — действия про конкретного человека."""
-    from sa_home_bot.bot import vpn_agent  # лениво: тянет клавиатуры aiogram
+    from sa_home_bot.bot import vpn_agent
 
     if ctx.chat_id is None or ctx.chat_id == 0:
         return "недоступно: VPN привязан к человеку, а сейчас его нет"
@@ -121,7 +109,6 @@ async def _vpn_person_action(ctx: ToolContext, action: str, args: dict[str, Any]
             "сообщением — человек выбирает способ кнопками (ключей и ссылок я не показываю)."
         )
 
-    # report
     reason = text_arg(args, "reason")
     if not reason:
         return "ошибка: не указана причина (reason) — что случилось, словами человека"
@@ -159,8 +146,6 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
     refusal = _VPN_VARIANTS.refusal_for(ctx.subscription, action)
     if refusal is not None:
         return refusal
-    # Ноду с vpn ищем динамически (этап 39: серверов несколько). ``server``
-    # в args — подсказка от модели, какую локацию хочет пользователь.
     dst = await vpn_nodes.resolve_vpn_dst(
         ctx.node_link, server=str(args.get("server") or "") or None
     )
@@ -168,16 +153,12 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
         return "недоступно: VPN сейчас не поднят ни на одной ноде роя"
 
     if action == vpn_protocol.ACTION_PROXY_LINK and not args.get("server"):
-        # Без явного «server» отдаём ссылку СРАЗУ со всех серверов, где
-        # настроен прокси (решение пользователя 2026-09-20).
         results = await vpn_nodes.fanout(ctx.node_link, action, {})
         if not results:
             return "недоступно: прокси Telegram сейчас не настроен ни на одном сервере"
         return json.dumps(results, ensure_ascii=False)
 
     if action == vpn_protocol.ACTION_USAGE and args.get("all_guests"):
-        # Сводка по ВСЕМ гостям — только с peers@vpn (тот же admin-признак, что
-        # у кнопки «Все гости»); сверяемся сами, а не доверяем декларации.
         is_admin = ctx.subscription is not None and ActionRight(
             vpn_protocol.ACTION_PEERS, _VPN_SERVICE
         ).granted(ctx.subscription)
@@ -205,7 +186,6 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
         vpn_protocol.ACTION_PROXY_ROTATE_SECRET,
         vpn_protocol.ACTION_PROXY_USAGE,
     ):
-        # Общая ссылка на всех, не привязана к конкретному разговору.
         payload = {}
     else:
         if ctx.chat_id is None or ctx.chat_id == 0:
@@ -239,12 +219,9 @@ def _quota_ceiling_refusal(exc: ProtoError) -> str | None:
 
 
 async def _vpn_apps(ctx: ToolContext, dst: Address, app: str) -> str:
-    """apk: прислать приложение. hiddify (по умолчанию) — магазины Hiddify для
-    «VLESS · Hiddify»; amnezia — магазины AmneziaVPN; amnezia_apk — файл .apk
-    AmneziaWG, запасной вариант."""
     if ctx.notifier is None or ctx.chat_id is None or ctx.chat_id <= 0:
         return "недоступно: сейчас не могу отправить сообщение (нужен личный чат)"
-    from sa_home_bot.bot import vpn_faq  # лениво: клавиатуры aiogram
+    from sa_home_bot.bot import vpn_faq
 
     if app == "amnezia_apk":
         from sa_home_bot.bot.vpn_apk import deliver_apk
@@ -266,7 +243,6 @@ async def _vpn_apps(ctx: ToolContext, dst: Address, app: str) -> str:
 
 
 _VPN_SERVICE = vpn_protocol.SERVICE_NAME
-# Ответы справки /vpn (bot/vpn_facts.py) — те же слова, что на кнопках «❓ Помощь».
 _VPN_FACTS = vpn_facts.ANSWERS
 _VPN_Q_HIDDIFY, _VPN_Q_AWG = vpn_facts.Q_HIDDIFY, vpn_facts.Q_AWG
 _VPN_Q_TROUBLE, _VPN_Q_DEVICE = vpn_facts.Q_TROUBLE, vpn_facts.Q_DEVICE
@@ -276,8 +252,6 @@ _VPN_VARIANTS = VariantRights(
     rights=(
         (vpn_protocol.ACTION_USAGE, ActionRight(vpn_protocol.ACTION_USAGE, _VPN_SERVICE)),
         (vpn_protocol.ACTION_ISSUE, ActionRight(vpn_protocol.ACTION_ISSUE, _VPN_SERVICE)),
-        # Те же права, что у кнопок: «📥 Получить настройки» — vpn_card@vpn;
-        # «Сообщить о проблеме» — у каждого с usage@vpn (vpn_report.can_report).
         (_VPN_ACTION_SETTINGS, ActionRight("vpn_card", _VPN_SERVICE)),
         (_VPN_ACTION_REPORT, ActionRight(vpn_protocol.ACTION_USAGE, _VPN_SERVICE)),
         (

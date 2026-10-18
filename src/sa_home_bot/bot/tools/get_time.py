@@ -31,7 +31,6 @@ def _hhmm(moment: datetime | None, zone: ZoneInfo | timezone) -> str | None:
 
 
 def place_now(lat: float, lon: float, zone: ZoneInfo | timezone, now: datetime) -> dict[str, Any]:
-    """Время, время суток, солнце и луна в точке — без сети (``astro``)."""
     local = now.astimezone(zone)
     altitude, azimuth = astro.sun_position(lat, lon, now)
     day = astro.sun_day(lat, lon, local.date())
@@ -56,19 +55,6 @@ def place_now(lat: float, lon: float, zone: ZoneInfo | timezone, now: datetime) 
     }
 
 
-# --- get_time ---
-#
-# Живой баг 2026-07-24: на вопрос "точное время по Москве/в Казахстане"
-# модель сама пересчитывала часовые пояса — неверно и непоследовательно
-# (например, разница Москва/Казахстан то 3 часа, то время без указания
-# пояса вообще выдавалось за конкретный пояс). Часовой пояс — тот же класс
-# факта, что погода и курс валют (см. докстринг файла): не полагаться на
-# "память" модели, а считать детерминированно. В отличие от get_weather,
-# сеть тут не нужна вообще — координаты города не важны, важен только IANA
-# часовой пояс, поэтому вместо геокодинга — статическая таблица
-# место→пояс и расчёт через stdlib zoneinfo (без новых зависимостей,
-# requires-python >=3.11).
-
 _PLACE_TIMEZONES: dict[str, str] = {
     "москва": "Europe/Moscow",
     "россия": "Europe/Moscow",
@@ -84,10 +70,6 @@ _PLACE_TIMEZONES: dict[str, str] = {
     "лондон": "Europe/London",
     "великобритания": "Europe/London",
     "англия": "Europe/London",
-    # Живая находка 2026-07-24: "по Гринвичу"/"по гринвичскому" в бытовой
-    # речи значит "по UTC" (смещение 0 всегда) — НЕ гражданское время
-    # обсерватории Гринвич (та живёт по Europe/London и уходит в BST летом).
-    # Пользователь спрашивает про нулевой пояс, не про городок под Лондоном.
     "гринвич": "UTC",
     "гмт": "UTC",
     "gmt": "UTC",
@@ -131,12 +113,6 @@ def _place_entry(place: str, tz_name: str, target: datetime) -> dict[str, str]:
 
 
 async def tool_get_time(ctx: ToolContext, args: dict[str, Any]) -> str:
-    # Живая находка 2026-07-24: на вопрос "разница между Москвой и Италией"
-    # тула не было вовсе — модель считала её сама в уме и путалась,
-    # противореча даже собственным же названным поясам. places (список) —
-    # для сравнения нескольких мест разом, тул сам детерминированно считает
-    # разницу; place (одно место) остаётся как раньше, формат ответа для
-    # него не меняется.
     places_raw = args.get("places")
     if isinstance(places_raw, list) and places_raw:
         place_list = [p.strip() for p in places_raw if isinstance(p, str) and p.strip()]
@@ -186,8 +162,6 @@ async def tool_get_time(ctx: ToolContext, args: dict[str, Any]) -> str:
     if unknown:
         payload["unknown_places"] = unknown
 
-    # Разница между КАЖДОЙ парой посчитана здесь, а не моделью — именно
-    # ручной пересчёт разницы между поясами и был источником "шизы".
     diffs = []
     for (place_a, _, target_a), (place_b, _, target_b) in itertools.combinations(resolved, 2):
         delta_minutes = round((target_b.utcoffset() - target_a.utcoffset()).total_seconds() / 60)

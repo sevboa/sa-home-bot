@@ -14,12 +14,6 @@ from sa_home_bot.utils.clock import utc_now
 
 
 def _note_person_stranger(ctx: ToolContext, subject_id: int, name: str) -> str:
-    """Отказ note_person о незнакомом — с тем, чей это id.
-
-    Живая находка 2026-10-09: «Я знаком с Андреем, это мой брат» — модель
-    без find_person взяла id Александра — единственный id в семейных фактах
-    памяти (у Андрея там id нет), а безымянный отказ ещё и подсказал открыть
-    знакомство с ним же."""
     if ctx.book is None:
         who = "этот человек"
     else:
@@ -44,12 +38,6 @@ def _note_person_stranger(ctx: ToolContext, subject_id: int, name: str) -> str:
 
 
 async def tool_note_person(ctx: ToolContext, args: dict[str, Any]) -> str:
-    """Записать о человеке пол, имя, прозвища, день рождения, город или
-    часовой пояс в его карточку (Этап 58, таблица person_claims) — её видят
-    все чаты, а не только этот.
-
-    Вес решает бот, не модель: говорящий о себе — сильное утверждение;
-    о знакомом — слабое; о постороннем — отказ."""
     if ctx.store is None:
         return "недоступно: карточки людей сейчас не записать"
     by_id = ctx.user_id
@@ -151,9 +139,6 @@ def _stem(word: str) -> str:
 
 
 def _same_stems(query: str, candidate: str) -> bool:
-    """Падеж: «Миле» и «Мила», «Андрею» и «Андрей» — у каждого слова
-    запроса есть слово кандидата с той же основой (без последней буквы).
-    Строже, чем начало слова: «Миле» не находит «Милану»."""
     words = [_stem(w) for w in candidate.replace("(", " ").replace(")", " ").split()]
     query_words = [_stem(w) for w in query.split()]
     return bool(query_words) and all(w in words for w in query_words)
@@ -163,7 +148,6 @@ def _stem_query(query: str) -> str:
     return " ".join(_stem(w) for w in query.split())
 
 
-# Слова описания, которые не имя: «Андрей который кейн», «это мой отец».
 _DESCRIPTION_FILLER = frozenset(
     "который которая которое которые это этот эта мой моя моё мое мои твой "
     "его её ее их есть такой такая как тот та кто зовут зовёт по нику ник "
@@ -172,7 +156,6 @@ _DESCRIPTION_FILLER = frozenset(
 
 
 def _nick_spellings(word: str) -> set[str]:
-    """Кириллицей написанный ник латиницей: «кейн» → kein/keyn/kejn."""
     base = word.translate(CYRILLIC_TO_LATIN)
     if base == word:
         return set()
@@ -187,10 +170,6 @@ def _nick_spellings(word: str) -> set[str]:
 def _match_by_words(
     query: str, labels: dict[int, list[tuple[str, str]]]
 ) -> dict[int, str]:
-    """Последний заход find_person: описание целиком не совпало ни с кем —
-    («Андрей который кейн», живая находка 2026-10-09) — ищем по отдельным
-    словам без служебных, и кириллицу ещё транслитом (ник «kein»). Берём
-    тех, у кого совпало больше всего слов; несколько — выберет собеседник."""
     words = [
         w
         for w in (w.strip(".,!?«»\"'()").casefold() for w in query.split())
@@ -215,8 +194,6 @@ def _match_by_words(
 
 
 def _name_fits(name: str, own: list[tuple[str, str]]) -> bool:
-    """Подходит ли названное имя к меткам одного человека — те же заходы,
-    что у find_person, кроме id и роли."""
     for _kind, label in own:
         if label and (
             recipients.matches(name, label)
@@ -228,18 +205,6 @@ def _name_fits(name: str, own: list[tuple[str, str]]) -> bool:
 
 
 async def tool_find_person(ctx: ToolContext, args: dict[str, Any]) -> str:
-    """Этап 54.4: найти id человека по описанию. Ищет только среди тех,
-    к кому собеседнику вообще можно обратиться:
-
-    - purpose="message" (tell, notify_guest): у гостя — подтверждённые
-      знакомые и роль владельца; у владельца — все гости в личке;
-    - purpose="acquaintance" (request_acquaintance): все гости, но если
-      никто не подошёл, список не выдаём — гостю он не положен.
-
-    Совпадения — по всем именам карточки человека (Этап 58: имена,
-    прозвища, профиль Telegram, @ник, имя при приглашении); вторым заходом —
-    без последней буквы (падеж).
-    Несколько кандидатов — отдаём всех с отличиями, выбирает собеседник."""
     if ctx.chat_id is None or ctx.book is None:
         return "недоступно: сейчас не вижу, кому можно писать"
     query = " ".join(str(args.get("description") or "").split())
@@ -274,15 +239,10 @@ async def tool_find_person(ctx: ToolContext, args: dict[str, Any]) -> str:
         for chat_id, sub in private.items():
             if sub.is_owner and chat_id != ctx.chat_id:
                 hits[chat_id] = "роль владельца — передавай с to_owner_role=true"
-    # @ник в описании точнее любого имени рядом с ним: «Александр
-    # Сергеевич Севбо @ksytal_as» целиком не совпадал ни с одной меткой
-    # (живая находка 2026-10-09).
     for nick in (w for w in query.split() if w.startswith("@") and len(w) > 1):
         for chat_id, own in labels.items():
             if any(label and recipients.matches(nick, label) for _kind, label in own):
                 hits.setdefault(chat_id, f"ник «{nick}»")
-    # Три захода, от строгого к мягкому: как названо; та же основа
-    # (падеж); начало слова по основе. Следующий — только если пусто.
     matchers = (
         lambda label: recipients.matches(query, label),
         lambda label: _same_stems(query, label),

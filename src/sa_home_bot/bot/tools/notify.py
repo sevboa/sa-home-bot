@@ -60,13 +60,6 @@ _NOTIFY_PERSONAS_BY_TITLE = {p["title"]: p for p in _NOTIFY_PERSONAS}
 
 
 def _resolve_persona(raw: str) -> dict[str, str] | None:
-    """Найти персонажа по значению persona из notify_guest.
-
-    Терпимо к лишнему вокруг названия: модель иногда копирует persona не
-    отдельным словом, а вместе с эмодзи или другим текстом из ответа
-    notify_persona (живой баг 2026-08-05 — "Граф 🦇" вместо "Граф"), точное
-    совпадение по словарю такое не находило.
-    """
     normalized = raw.strip()
     if normalized in _NOTIFY_PERSONAS_BY_TITLE:
         return _NOTIFY_PERSONAS_BY_TITLE[normalized]

@@ -19,16 +19,7 @@ ACTION_LOOK_AT_PHOTO = "look_at_photo"
 
 
 async def tool_generate_image(ctx: ToolContext, args: dict[str, Any]) -> str:
-    """Нарисовать картинку (Этап 48) — тонкая обёртка над
-    bot/image_tools.py::generate, как tool_swap_radio над интерактивом.
-    Эпизод графа передаётся колбэком: image_tools не импортирует bot.tools
-    (иначе цикл), а piggyback_graph_episode живёт здесь."""
-
     async def remember(text: str) -> None:
-        # generate зовёт remember только после доставки картинки в чат, а
-        # доставка без chat_id невозможна (_can_deliver) — но колбэк не
-        # должен полагаться на порядок вызовов чужого модуля: без чата
-        # эпизоду не к чему привязаться, молча пропускаем.
         if ctx.chat_id is None:
             return
         await piggyback_graph_episode(
@@ -39,16 +30,8 @@ async def tool_generate_image(ctx: ToolContext, args: dict[str, Any]) -> str:
 
 
 async def tool_find_image(ctx: ToolContext, args: dict[str, Any]) -> str:
-    """Показать ранее нарисованную картинку (Этап 48) — поиск и отправка
-    целиком в bot/image_tools.py::find, только по картинкам своего чата."""
     return await image_tools.find(ctx, args)
 
-
-# --- look_at_photo: мультимодальный /ai, 2026-08-10 — точечный повторный
-# просмотр УЖЕ сохранённого фото из этого же треда. Файл лежит на mycraft
-# (там же, где Ollama — ресайз/хранение делает служба llm, см.
-# llm/vision.py), этот тул только передаёт ключ и вопрос; ничего не
-# скачивает и не пересылает заново.
 
 _DECL_LOOK_AT_PHOTO: dict[str, Any] = {
     "type": "function",
@@ -87,8 +70,6 @@ _DECL_LOOK_AT_PHOTO: dict[str, Any] = {
 
 
 async def _own_picture(ctx: ToolContext, args: dict[str, Any]) -> dict | str | None:
-    """Своя картинка Альфреда для look_at_photo: ответ гостя на картинку,
-    номер или последняя. None — смотреть фото гостя; строка — отказ."""
     assert ctx.store is not None and ctx.chat_id is not None
     whose = args.get("whose")
     image_id = args.get("image_id")
@@ -121,8 +102,6 @@ async def tool_look_at_photo(ctx: ToolContext, args: dict[str, Any]) -> str:
     if isinstance(mine, str):
         return mine
     if mine is not None:
-        # Своя картинка — байты из базы, как их видел гость (служба llm её
-        # не хранит; 2026-10-02: Альфред не видел своих снимков).
         request["photo_key"] = f"img-{mine['id']}"
         request["raw_image"] = base64.b64encode(
             image_tools.upscale_png(mine["png"], ctx.settings.llm.imagegen_display_px)
@@ -147,8 +126,6 @@ async def tool_look_at_photo(ctx: ToolContext, args: dict[str, Any]) -> str:
         return f"не получилось рассмотреть фото ещё раз: {exc}"
     response = str(result.get("response", "")).strip()
     if response:
-        # Этап 42.2: повторное распознавание фото — тоже эпизод графа
-        # (best-effort, по образцу piggyback у remember выше).
         await piggyback_graph_episode(
             ctx,
             f"Фото, вопрос «{question}»: {response}",

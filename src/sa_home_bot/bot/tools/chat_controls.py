@@ -15,30 +15,12 @@ DISMISS_SLEEP = "sleep"
 DISMISS_OFF = "off"
 
 
-# --- dismiss: «ты свободен» — погасить модель и машину под ней ---
-#
-# Единственный тул, который НИЧЕГО не делает в момент вызова (см.
-# DismissalBox): гасить Ollama прямо здесь — значит оборвать ещё не
-# сгенерированный ответ модели, то есть прощание, ради которого всё и
-# затевалось. Тул записывает намерение, исполняет его bot/handlers/ai.py
-# после отправки ответа.
-#
-# Машина здесь не параметр и не результат поиска по рою — это ровно та
-# нода, с которой ТОЛЬКО ЧТО разговаривали (LLM_NODE, тот же адрес, что у
-# самого диалога в bot/ai_flow.py). Иначе «выключись» в руках модели
-# означало бы «выключи любую машину роя», включая ту, на которой живёт сам
-# бот, — а этого не должно быть даже как опечатки.
-
-
 async def tool_dismiss(ctx: ToolContext, args: dict[str, Any]) -> str:
     mode = text_arg(args, "mode")
     refusal = _DISMISS_VARIANTS.refusal_for(ctx.subscription, mode)
     if refusal is not None:
         return refusal
     if ctx.dismissal is None:
-        # Отложенная задача (служба tasks) или иной не-живой вызов: некому
-        # исполнить намерение после ответа — честно говорим «сейчас нет»,
-        # а не обещаем выключение, которого не будет.
         return "недоступно: распустить себя можно только в живом разговоре"
     ctx.dismissal.mode = mode
     if mode == DISMISS_MODEL:
@@ -53,9 +35,6 @@ async def tool_dismiss(ctx: ToolContext, args: dict[str, Any]) -> str:
 _DISMISS_VARIANTS = VariantRights(
     param="mode",
     rights=(
-        # Право на то же самое, что и кнопки на карточке ноды/службы у
-        # человека: погасить модель — sleep@llm, усыпить и выключить машину —
-        # suspend@node / poweroff@node.
         (DISMISS_MODEL, ActionRight("sleep", LLM_SERVICE)),
         (DISMISS_SLEEP, ActionRight("suspend", "node")),
         (DISMISS_OFF, ActionRight("poweroff", "node")),
@@ -84,7 +63,6 @@ _DECL_DISMISS: dict[str, Any] = {
             "properties": {
                 "mode": {
                     "type": "string",
-                    # enum подставляется под права собеседника (см. tools_for).
                     "enum": [v for v, _ in _DISMISS_VARIANTS.rights],
                     "description": (
                         "model — выгрузить только модель, машина продолжает "
@@ -98,16 +76,6 @@ _DECL_DISMISS: dict[str, Any] = {
         },
     },
 }
-
-
-# --- voice_mode: тумблер голосовых ответов в этом чате ---
-#
-# Личная настройка формата ОТВЕТА, не системная операция — requires=None,
-# как у calc/get_weather: ничего про систему не раскрывает, доступна без
-# подписки. Состояние — per-chat в app_state (bot/voice_mode.py), эффект
-# немедленный (в отличие от dismiss, тут не нужна отложенная исполнение
-# после текущего ответа — сам этот ответ ещё может уйти текстом, следующий
-# уже будет голосом).
 
 
 async def tool_voice_mode(ctx: ToolContext, args: dict[str, Any]) -> str:
@@ -149,18 +117,6 @@ _DECL_VOICE_MODE: dict[str, Any] = {
         },
     },
 }
-
-
-# --- recall_tool_result: полный текст сокращённого результата тула ---
-#
-# Живая находка 2026-09-04: длинные результаты тулов (в первую очередь
-# web_search) сокращаются перед тем, как уйти модели (см. llm_chat.py::
-# _inline_or_cache) — иначе несколько таких подряд в одном раунде
-# tool-calling добивали окно контекста модели (num_ctx в llm/model-
-# profiles.toml) и она возвращала пустой ответ. Полный текст никуда не
-# девается — лежит в ctx.tool_result_cache под тем же id, что указан в
-# пометке «сокращено»; этот тул — единственный способ модели его достать,
-# если превью не хватило для ответа.
 
 
 async def tool_recall_tool_result(ctx: ToolContext, args: dict[str, Any]) -> str:

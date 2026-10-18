@@ -16,22 +16,6 @@ from sa_home_bot.bot.tools.core import (
 from sa_home_bot.bot.tools.swarm import own_state
 from sa_home_bot.proto.messages import Address
 
-# --- torrents: закачки целиком (список, место, magnet, пауза/запуск) ---
-#
-# Раньше «что качается» было ещё одним значением what у swarm_status
-# (2026-07-27). С появлением у службы действий, которые не только читают
-# (add/pause/resume), держать закачки внутри тула «состояние роя» стало
-# неверно и по смыслу, и по правам: у swarm_status одно право на весь тул
-# (данные /status, /nodes), а тут право нужно РАЗНОЕ на каждое действие.
-# Поэтому торренты уехали в отдельный тул целиком, вместе со списком — два
-# разных пути к одному и тому же списку модель только путали бы.
-#
-# Один тул с enum действий, а не пять отдельных тулов: декларации уезжают в
-# контекст модели на КАЖДОМ раунде (см. config.py про их размер), а общее
-# описание («что такое домашние торренты», откуда брать save_path) у всех
-# пяти одно. Права при этом всё равно раздельные — ровно для этого и есть
-# VariantRights, режущий enum под подписку.
-
 TORRENTS_SERVICE = "torrents"
 TORRENTS_ACTION_LIST = "list"
 TORRENTS_ACTION_SPACE = "space"
@@ -42,22 +26,10 @@ TORRENTS_ACTION_SEARCH = "search"
 TORRENTS_ACTION_SEARCH_SMART = "search_smart"
 TORRENTS_ACTION_DETAILS = "details"
 
-# Что тул принимает как источник раздачи: magnet-ссылку — от человека, либо
-# ссылку из выдачи СВОЕГО ЖЕ поиска (action=search) — её служба скачает
-# руками поискового плагина qBittorrent. Base64-файл сюда не пускаем вовсе,
-# хотя служба умеет: файл человек присылает вложением в чат
-# (bot/handlers/torrents.py), модели он взяться неоткуда.
-#
-# Произвольный http-адрес из разговора («скачай вот отсюда») отсекает уже
-# служба: она принимает http(s) только для трекеров с установленным
-# плагином (torrents/service.py::_add_sync) — проверять хосты здесь значило
-# бы держать в боте копию знания о том, какие плагины стоят.
 _SOURCE_PREFIXES = ("magnet:", "http://", "https://")
 
 
 def _service_host(reports: list[wake_core.NodeReport], service: str) -> str | None:
-    """Нода, несущая службу. Спрашиваем рой, а не хардкодим имя: службы
-    переезжают (назначения меняются кнопкой в боте, без правки кода)."""
     for report in reports:
         for svc in (report.state or {}).get("services", []):
             if svc.get("name") == service:
@@ -66,7 +38,6 @@ def _service_host(reports: list[wake_core.NodeReport], service: str) -> str | No
 
 
 async def _torrents_host(ctx: ToolContext) -> tuple[str | None, str]:
-    """(нода со службой torrents, текст отказа) — ровно одно из двух непусто."""
     own = await own_state(ctx)
     if own is None:
         return None, "недоступно: своя нода не отвечает"
@@ -78,7 +49,6 @@ async def _torrents_host(ctx: ToolContext) -> tuple[str | None, str]:
 
 
 def _torrents_args(action: str, args: dict[str, Any]) -> dict[str, Any] | str:
-    """Аргументы команды службе, либо текст ошибки для модели."""
     if action == TORRENTS_ACTION_DETAILS:
         page = text_arg(args, "page")
         if not page.startswith(("http://", "https://")):
@@ -102,9 +72,6 @@ def _torrents_args(action: str, args: dict[str, Any]) -> dict[str, Any] | str:
             payload["words"] = words
         return payload
     if action == TORRENTS_ACTION_ADD:
-        # magnet — историческое имя параметра, но принимает и находку поиска:
-        # переименование сломало бы уже работающие у людей формулировки, а
-        # описание в декларации говорит про оба случая прямо.
         source = str(args.get("magnet") or args.get("source") or "").strip()
         if not source.startswith(_SOURCE_PREFIXES):
             return (
@@ -115,9 +82,6 @@ def _torrents_args(action: str, args: dict[str, Any]) -> dict[str, Any] | str:
             )
         save_path = text_arg(args, "save_path")
         if not save_path:
-            # Иначе сюда прилетит голое «нет обязательного параметра:
-            # save_path» от сервера протокола — формально верно, но модели
-            # непонятно, где взять значение.
             return (
                 "ошибка: не указано, куда сохранить (save_path). Вызови "
                 "action=«space» и передай одно из значений path оттуда дословно."
@@ -142,8 +106,6 @@ async def tool_torrents(ctx: ToolContext, args: dict[str, Any]) -> str:
     if ctx.node_link is None:
         return NO_SWARM_LINK
     action = text_arg(args, "action")
-    # Права уже проверены при сборке комплекта (tools_for) — но модель может
-    # передать что угодно, поэтому сверяемся ещё раз, по той же подписке.
     refusal = _TORRENTS_VARIANTS.refusal_for(ctx.subscription, action)
     if refusal is not None:
         return refusal
@@ -170,15 +132,9 @@ async def tool_torrents(ctx: ToolContext, args: dict[str, Any]) -> str:
 _TORRENTS_VARIANTS = VariantRights(
     param="action",
     rights=(
-        # Право на действие модели — ровно то же `действие@torrents`, что и у
-        # человека на ту же операцию: Альфред не расширяет доступ.
         (TORRENTS_ACTION_LIST, ActionRight(TORRENTS_ACTION_LIST, TORRENTS_SERVICE)),
         (TORRENTS_ACTION_SPACE, ActionRight(TORRENTS_ACTION_SPACE, TORRENTS_SERVICE)),
         (TORRENTS_ACTION_SEARCH, ActionRight(TORRENTS_ACTION_SEARCH, TORRENTS_SERVICE)),
-        # search_smart — тот же поиск по трекерам, другим способом добытый
-        # (torrents/service.py). Отдельного права под него не заводим: это не
-        # новая возможность, а альтернативный путь к search, тот же login и
-        # те же трекеры — делить их разными правами гостю нечем.
         (TORRENTS_ACTION_SEARCH_SMART, ActionRight(TORRENTS_ACTION_SEARCH, TORRENTS_SERVICE)),
         (TORRENTS_ACTION_DETAILS, ActionRight(TORRENTS_ACTION_DETAILS, TORRENTS_SERVICE)),
         (TORRENTS_ACTION_ADD, ActionRight(TORRENTS_ACTION_ADD, TORRENTS_SERVICE)),
@@ -191,10 +147,6 @@ _DECL_TORRENTS: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "torrents",
-        # Текст намеренно сжат (живая находка 2026-07-29): декларации уезжают
-        # в контекст модели на КАЖДОМ раунде, и вместе с выдачей поиска они
-        # выбивали окно в 8k токенов — ответ приходил пустым или обрывался на
-        # полуслове. Правила те же, слов меньше.
         "description": (
             "Домашние торренты (qBittorrent на машине роя): что качается, "
             "сколько места, найти и поставить раздачу, пауза/запуск. "
@@ -231,7 +183,6 @@ _DECL_TORRENTS: dict[str, Any] = {
             "properties": {
                 "action": {
                     "type": "string",
-                    # enum подставляется под права собеседника (см. tools_for).
                     "enum": [v for v, _ in _TORRENTS_VARIANTS.rights],
                     "description": (
                         "list — что качается; space — куда сохранять и сколько "

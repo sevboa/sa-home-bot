@@ -13,12 +13,8 @@ from sa_home_bot.proto.addresses import (
 from sa_home_bot.proto.errors import ServiceUnavailableError
 from sa_home_bot.proto.messages import ProtoError
 
-# --- web_search: интернет через свой SearXNG (LLM_INTEGRATION_PLAN.md §9) ---
-
 
 def _web_search_episode_text(query: str, results: list[dict[str, Any]]) -> str:
-    """Заголовки+выдержки в один текст эпизода — конечную обрезку до
-    _GRAPH_EPISODE_MAX_CHARS делает сам piggyback_graph_episode."""
     parts = [f"Поиск «{query}»:"]
     for item in results:
         title = str(item.get("title") or "").strip()
@@ -30,8 +26,6 @@ def _web_search_episode_text(query: str, results: list[dict[str, Any]]) -> str:
     return " ".join(parts)
 
 
-# Запас сверх net.request_timeout_s на дорогу alfred ↔ mycraft и разбор
-# выдачи — чтобы ответ службы успел доехать, а не упасть в таймаут у финиша.
 _WEB_SEARCH_TIMEOUT_MARGIN_S = 5.0
 
 
@@ -43,9 +37,6 @@ async def tool_web_search(ctx: ToolContext, args: dict[str, Any]) -> str:
         return "ошибка: не указан поисковый запрос"
     dst = NET_ADDRESS
     try:
-        # Ждём дольше, чем net сам ждёт SearXNG: без явного таймаута
-        # действовали 10 с ProtoClient по умолчанию, а поиску отведено 20
-        # (живая находка 2026-09-25 — медленный brave обрывал ответ целиком).
         result = await ctx.node_link.command(
             net_protocol.ACTION_SEARCH,
             {"query": query},
@@ -53,15 +44,11 @@ async def tool_web_search(ctx: ToolContext, args: dict[str, Any]) -> str:
             timeout=ctx.settings.net.request_timeout_s + _WEB_SEARCH_TIMEOUT_MARGIN_S,
         )
     except (ServiceUnavailableError, ProtoError, TimeoutError) as exc:
-        # §7.3: недоступный поисковик — обычный результат тула, персонаж сам
-        # решит, как об этом сказать; цикл tool-calling не роняем.
         return f"недоступно: поиск не работает ({exc})"
     results = result.get("results") or []
     if not results:
         return f"по запросу «{query}» ничего не нашлось"
     if ctx.chat_id is not None:
-        # Этап 42.3: сырая выдача поиска — тоже эпизод графа, тем же
-        # best-effort приёмом, что у remember/look_at_photo выше.
         await piggyback_graph_episode(
             ctx,
             _web_search_episode_text(query, results),

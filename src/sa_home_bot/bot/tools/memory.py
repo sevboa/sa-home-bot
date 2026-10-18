@@ -25,17 +25,6 @@ from sa_home_bot.proto.messages import ProtoError
 log = logging.getLogger(__name__)
 
 
-# --- memory: долгая память о чате (служба memory) ---
-#
-# Модель не выбирает, чью память трогать: chat_id проставляет бот из
-# ToolContext. Иначе «вспомни, что тебе говорили в другом чате» стало бы
-# рабочей просьбой — а память сознательно раздельная (memory/service.py).
-#
-# Вспоминает не только модель по своей воле: бот перед каждым запросом сам
-# подмешивает подходящие факты в служебную заметку (bot/ai_flow.py) — на тул
-# надежда плохая, модель зовёт его далеко не всегда.
-
-
 async def tool_memory(ctx: ToolContext, args: dict[str, Any]) -> str:
     if ctx.node_link is None:
         return NO_SWARM_LINK
@@ -69,10 +58,6 @@ async def tool_memory(ctx: ToolContext, args: dict[str, Any]) -> str:
     if isinstance(result, str):
         return result
     if action == memory_protocol.ACTION_REMEMBER:
-        # Piggyback в графовую память (Этап 41) — best-effort ПОВЕРХ уже
-        # успешной записи в memory: недоступность graph_memory (mycraft
-        # спит) не должна портить основной remember, поэтому отдельный
-        # try/except, а не общий с ним.
         await piggyback_graph_episode(
             ctx,
             payload["text"],
@@ -84,21 +69,12 @@ async def tool_memory(ctx: ToolContext, args: dict[str, Any]) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-# Как graph_memory/service.py::MAX_EPISODE_CHARS — держим тот же лимит на
-# стороне вызывающего, чтобы не терять эпизод молча: служба отклоняет текст
-# длиннее этого ProtoError'ом (ERR_BAD_REQUEST), а piggyback ниже все ошибки
-# проглатывает.
 _GRAPH_EPISODE_MAX_CHARS = 400
 
 
 async def piggyback_graph_episode(
     ctx: ToolContext, text: str, chat_id: int, *, source: str
 ) -> None:
-    """Best-effort копия текста в графовую память (Этап 41, Этап 42.2 — см.
-    graph_memory/protocol.py::NODE_ID: служба живёт на mycraft и штатно
-    недоступна, пока та спит). Короткий таймаут и полное подавление ошибок:
-    это дополнение поверх основного действия (remember/look_at_photo), а не
-    часть его контракта."""
     if ctx.node_link is None:
         return
     if len(text) > _GRAPH_EPISODE_MAX_CHARS:
@@ -158,7 +134,6 @@ _DECL_MEMORY: dict[str, Any] = {
             "properties": {
                 "action": {
                     "type": "string",
-                    # enum подставляется под права собеседника (см. tools_for).
                     "enum": [v for v, _ in _MEMORY_VARIANTS.rights],
                     "description": "recall — вспомнить; remember — запомнить; forget — забыть",
                 },

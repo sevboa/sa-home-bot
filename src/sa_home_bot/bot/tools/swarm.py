@@ -21,12 +21,6 @@ from sa_home_bot.bot.tools.core import (
 from sa_home_bot.node.kind import traits_for
 from sa_home_bot.utils.clock import utc_now
 
-# --- swarm_status: read-only состояние роя (LLM_INTEGRATION_PLAN.md §8.3) ---
-#
-# Сбор данных переиспользует wake_core.collect_reports — тот же веерный опрос,
-# что и у сводки /swarm (bot/swarm_view.py), только без Telegram-рендеринга:
-# модель получает JSON, а не строку с эмодзи. Второго пути к данным здесь нет.
-
 WHAT_NODES = "nodes"
 WHAT_HEALTH = "health"
 WHAT_DISKS = "disks"
@@ -46,9 +40,6 @@ def _node_summary(report: wake_core.NodeReport) -> dict[str, Any]:
         "online": report.alive and report.state is not None,
     }
     if not summary["online"]:
-        # Различие «спит — это норма» vs «пропала машина, обязанная быть в
-        # сети» — правило роя (ARCHITECTURE §11 п. 4). Отдаём полем, а не
-        # эмодзи: решение, как это сказать, остаётся за персонажем.
         summary["sleeping_is_normal"] = not traits.always_on
         return summary
     state = report.state or {}
@@ -71,7 +62,7 @@ def _health_summary(report: wake_core.NodeReport) -> dict[str, Any]:
         try:
             state = parse_health_state(raw)
         except KeyError:
-            continue  # монитор старой версии — пропускаем, а не роняем тул
+            continue
         components.append(
             {
                 "label": state.label,
@@ -120,9 +111,6 @@ async def tool_swarm_status(ctx: ToolContext, args: dict[str, Any]) -> str:
     wanted_node = args.get("node")
     wanted_node = str(wanted_node).strip() if wanted_node else None
 
-    # Права уже проверены при сборке комплекта (tools_for): значений, которых
-    # собеседнику не положено, в enum не было. Но модель может передать
-    # что угодно, поэтому сверяемся ещё раз — по той же подписке.
     refusal = _SWARM_VARIANTS.refusal_for(ctx.subscription, what)
     if refusal is not None:
         return refusal
@@ -149,8 +137,6 @@ async def tool_swarm_status(ctx: ToolContext, args: dict[str, Any]) -> str:
 _SWARM_VARIANTS = VariantRights(
     param="what",
     rights=(
-        # Право на данные — то же, чем гейтится команда бота с теми же данными
-        # (/nodes, /status): Альфред не расширяет доступ, а повторяет его.
         (WHAT_NODES, CommandRight(commands.NODES.name)),
         (WHAT_HEALTH, CommandRight(commands.STATUS.name)),
         (WHAT_DISKS, CommandRight(commands.STATUS.name)),
@@ -175,7 +161,6 @@ _DECL_SWARM_STATUS: dict[str, Any] = {
             "properties": {
                 "what": {
                     "type": "string",
-                    # enum подставляется под права собеседника (см. tools_for).
                     "enum": [v for v, _ in _SWARM_VARIANTS.rights],
                     "description": (
                         "nodes — состав роя, кто в сети и кто спит; "
@@ -196,14 +181,6 @@ _DECL_SWARM_STATUS: dict[str, Any] = {
     },
 }
 
-
-# --- swarm_events: журнал того, что уже произошло (в отличие от swarm_status —
-# текущего состояния) — bot/node_events.py::store.record_event пишет туда те
-# же строки, что уходят в рассылку. Решение пользователя 2026-08-04: до этого
-# у Альфреда не было доступа даже к тому, что уже случилось, не то что к
-# системным логам — только к состоянию /nodes прямо сейчас. Право — то же,
-# чем гейтится /nodes (CommandRight, не отдельное): это те же данные о рое,
-# только в прошедшем времени, не повод заводить новое право.
 
 DEFAULT_SWARM_EVENTS_LIMIT = 20
 MAX_SWARM_EVENTS_LIMIT = 100

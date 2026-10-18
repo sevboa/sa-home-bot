@@ -40,8 +40,6 @@ def _geocode_score(item: dict[str, Any], names: set[str], country: str) -> tuple
 
 
 async def _resolve_city(city: str) -> tuple[float, float, str] | None:
-    """(latitude, longitude, отображаемое название) или None — город не
-    найден геокодером, либо сам геокодер недоступен."""
     key = city.strip().lower()
     if key in _GEOCODE_CACHE:
         return _GEOCODE_CACHE[key]
@@ -73,7 +71,6 @@ async def _resolve_city(city: str) -> tuple[float, float, str] | None:
     return resolved
 
 
-# WMO weather code → по-русски: модель сама коды не знает и гадала бы.
 _WMO_RU = {
     0: "ясно",
     1: "преимущественно ясно",
@@ -107,8 +104,6 @@ _WMO_RU = {
 
 
 def _local_zone(data: dict[str, Any]) -> ZoneInfo | timezone:
-    """Пояс города из ответа прогноза (``timezone=auto``); незнакомое
-    системе имя — хотя бы смещение."""
     name = data.get("timezone")
     zone = zone_or_none(name) if isinstance(name, str) else None
     if zone is not None:
@@ -117,13 +112,6 @@ def _local_zone(data: dict[str, Any]) -> ZoneInfo | timezone:
 
 
 async def tool_get_weather(ctx: ToolContext, args: dict[str, Any]) -> str:
-    # Живой баг 2026-07-24: декларация раньше не принимала город вообще
-    # ("узнать погоду ДОМА") — модель на прямой вопрос про другой город
-    # честно отказывала, а не молчаливо путала его с домом. args["city"] —
-    # необязательный: без него — прежнее поведение (город из конфига).
-    # С 2026-10-09 тул — «что сейчас в городе» целиком: к погоде добавлены
-    # местное время, время суток, солнце и луна (всё считается локально по
-    # координатам и поясу из того же ответа Open-Meteo).
     requested_city = args.get("city")
     city = requested_city.strip() if isinstance(requested_city, str) else ""
     if not city:

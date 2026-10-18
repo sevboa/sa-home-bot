@@ -18,18 +18,6 @@ TELL_RIGHT = "tell@llm"
 
 
 def render_tell(text: str, author: str | None, to_owner_role: bool = False) -> str:
-    """Как выглядит доставленное сообщение.
-
-    Отдельная «шапка» обязательна: человек должен видеть, что это не бот сам
-    придумал написать и не сообщение от системы, а Альфред передаёт просьбу
-    конкретного человека. Текст — от Альфреда и в его манере, поэтому идёт
-    как обычная его реплика.
-
-    ``to_owner_role`` — гость назвал не личное имя владельца, а его роль
-    («хозяин»/«владелец»/«админ», см. recipients.SOURCE_OWNER_ROLE): владелец
-    должен сразу увидеть, что к нему обратились официально, а не просто
-    написали лично ему как знакомому.
-    """
     role = " (к вам как к владельцу)" if to_owner_role else ""
     who = f" по просьбе {escape(author)}" if author else ""
     return f"📨 <b>Альфред{role}{who}:</b>\n\n{escape(text.strip())}"
@@ -47,9 +35,6 @@ async def tool_tell(ctx: ToolContext, args: dict[str, Any]) -> str:
     if not text:
         return "ошибка: не сказано, что передать (text)"
 
-    # Владелец по РОЛИ ("передай хозяину/владельцу/админу") доступен всем
-    # всегда. По личному имени ("передай Алексею") владелец — такой же
-    # человек, как все: нужно знакомство (решение 2026-09-27).
     def _to_owner_role(target: recipients.Recipient) -> bool:
         return target.source == recipients.SOURCE_OWNER_ROLE
 
@@ -57,8 +42,6 @@ async def tool_tell(ctx: ToolContext, args: dict[str, Any]) -> str:
         if _to_owner_role(target):
             return None
         if ctx.store is None and ctx.notifier is None:
-            # Служба tasks: Store нет — знакомство проверит бот перед
-            # отправкой (emit_extra ниже → require_acquaintance).
             return None
         if ctx.store is not None and await are_acquainted(ctx.store, ctx.chat_id, target.chat_id):
             return None

@@ -20,8 +20,6 @@ _RATES_CACHE: dict[str, tuple[float, dict[str, float]]] = {}
 
 
 async def _get_rates(base: str) -> dict[str, float] | None:
-    """Курсы всех валют за 1 единицу ``base``, или None — база не найдена
-    сервисом, либо сам сервис недоступен."""
     now = time.monotonic()
     cached = _RATES_CACHE.get(base)
     if cached is not None and now - cached[0] < _RATES_TTL_S:
