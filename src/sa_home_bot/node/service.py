@@ -213,6 +213,7 @@ class NodeService:
                 node_kind=self._kind,
                 wake=self._local_wake_payload(),
                 endpoints=tuple(self._advertised()),
+                links=self._router.links_table() if self._router is not None else None,
             ),
             capabilities=("supervisor", "power"),
             actions=(

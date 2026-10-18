@@ -205,9 +205,10 @@ class ServiceInfo:
     node_kind: str = ""
     wake: dict[str, str] | None = None
     endpoints: tuple[str, ...] = ()
+    links: dict[str, dict[str, Any]] | None = None
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "node": self.node,
             "service": self.service,
             "version": self.version,
@@ -216,6 +217,9 @@ class ServiceInfo:
             "endpoints": list(self.endpoints),
             "proto": PROTO_VERSION,
         }
+        if self.links is not None:
+            payload["links"] = self.links
+        return payload
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> ServiceInfo:
@@ -233,9 +237,31 @@ class ServiceInfo:
                     if isinstance(raw_endpoints, list)
                     else ()
                 ),
+                links=_parse_links(payload.get("links")),
             )
         except KeyError as exc:
             raise ProtoError(ERR_BAD_REQUEST, f"hello без поля {exc}") from exc
+
+
+def _parse_links(raw: Any) -> dict[str, dict[str, Any]] | None:
+    if not isinstance(raw, dict):
+        return None
+    links: dict[str, dict[str, Any]] = {}
+    for peer, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+        rtt = entry.get("rtt_ms")
+        loss = entry.get("loss")
+        links[str(peer)] = {
+            "rtt_ms": float(rtt) if _is_number(rtt) else None,
+            "loss": float(loss) if _is_number(loss) else 0.0,
+            "alive": entry.get("alive") is True,
+        }
+    return links
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 @dataclass(frozen=True)
