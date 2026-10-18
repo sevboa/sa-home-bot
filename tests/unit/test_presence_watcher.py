@@ -20,7 +20,22 @@ from sa_home_bot.node.watch import (
     PresenceWatcher,
 )
 from sa_home_bot.proto.messages import Address, make_event
-from tests.unit.test_node_kind import FakeLink
+
+
+class FakeLink:
+    """Пир с управляемой живостью и временем недоступности."""
+
+    def __init__(self, name: str, *, alive: bool, kind: str = "", down_s: float | None = None):
+        self.name = name
+        self.endpoint = f"tcp://{name}:8710"
+        self.endpoints = [self.endpoint]
+        self.alive = alive
+        self.node_kind = kind
+        self.left = False
+        self._down_s = down_s
+
+    def downtime_s(self) -> float | None:
+        return None if self.alive else self._down_s
 
 
 def _watcher(node_id: str, *links: FakeLink, **kw) -> tuple[PresenceWatcher, list[tuple]]:
@@ -209,3 +224,76 @@ async def test_node_leaving_доезжает_до_клиентов_и_метит
         await link.stop()
         await server_b.stop()
         await server_a.stop()
+
+
+async def test_sleeping_workstation_raises_no_alarm():
+    watcher, events = _watcher(
+        "alfred", FakeLink("winpc", alive=False, kind=KIND_WORKSTATION, down_s=9999)
+    )
+    await watcher.check_once()
+    assert events == []
+
+
+async def test_missing_always_on_node_raises_node_down():
+    watcher, events = _watcher("alfred", FakeLink("jeeves", alive=False, kind=KIND_VPS, down_s=600))
+    await watcher.check_once()
+    assert [e[0] for e in events] == [EVENT_NODE_DOWN]
+    assert events[0][1]["node"] == "jeeves"
+
+
+async def test_node_down_waits_for_the_threshold():
+    watcher, events = _watcher(
+        "alfred", FakeLink("jeeves", alive=False, kind=KIND_VPS, down_s=120), down_after_s=300.0
+    )
+    await watcher.check_once()
+    assert events == []
+
+
+async def test_node_down_is_reported_once_then_node_up_on_return():
+    link = FakeLink("jeeves", alive=False, kind=KIND_VPS, down_s=600)
+    watcher, events = _watcher("alfred", link)
+    await watcher.check_once()
+    await watcher.check_once()  # ещё лежит — повторно не сообщаем
+    assert [e[0] for e in events] == [EVENT_NODE_DOWN]
+    link.alive = True
+    await watcher.check_once()
+    assert [e[0] for e in events] == [EVENT_NODE_DOWN, EVENT_NODE_UP]
+
+
+async def test_only_the_lowest_id_alive_node_announces():
+    """Иначе о каждой пропаже пришло бы по сообщению от каждого соседа:
+    SeenEvents дедуплицирует одно событие, но не три разных об одном факте."""
+    down = FakeLink("jeeves", alive=False, kind=KIND_VPS, down_s=600)
+    peer = FakeLink("winpc", alive=True, kind=KIND_WORKSTATION)
+
+    quiet, quiet_events = _watcher("zeta", down, peer)  # "winpc" < "zeta" — молчим
+    await quiet.check_once()
+    assert quiet_events == []
+
+    loud, loud_events = _watcher("alfred", down, peer)  # "alfred" — наименьший
+    await loud.check_once()
+    assert [e[0] for e in loud_events] == [EVENT_NODE_DOWN]
+
+
+async def test_kind_of_an_unreachable_peer_is_remembered(tmp_path):
+    """Тип нужен именно тогда, когда ноду уже не спросить, — значит он обязан
+    пережить рестарт."""
+    state_path = tmp_path / "node-state.json"
+    state = NodeState()
+    link = FakeLink("jeeves", alive=True, kind=KIND_VPS)
+    watcher, _ = _watcher("alfred", link, state=state, state_path=str(state_path))
+    await watcher.check_once()
+
+    reloaded = NodeState.load(state_path)
+    assert [(p.id, p.kind) for p in reloaded.peers] == [("jeeves", KIND_VPS)]
+
+    # Связь потеряна, тип забыт линком — но известен из состояния, поэтому
+    # алерт всё равно поднимается.
+    link.alive = False
+    link.node_kind = ""
+    link._down_s = 600
+    watcher2, events = _watcher(
+        "alfred", link, state=reloaded, state_path=str(state_path)
+    )
+    await watcher2.check_once()
+    assert [e[0] for e in events] == [EVENT_NODE_DOWN]

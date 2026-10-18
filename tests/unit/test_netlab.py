@@ -52,7 +52,6 @@ async def stand(monkeypatch):
     await server.stop()
 
 
-@pytest.mark.asyncio
 async def test_прокси_прозрачен_для_протокола(stand):
     """Санити: через прокси проходит обычный RPC — стенд не искажает обмен."""
     server, proxy, link = stand
@@ -62,7 +61,6 @@ async def test_прокси_прозрачен_для_протокола(stand):
     assert response.payload == {"node": "winpc"}
 
 
-@pytest.mark.asyncio
 async def test_half_open_обнаруживается_и_линк_воскресает(stand):
     """Прод-сценарий v0.42.0: сокет жив, ответы не приходят (half-open).
 
@@ -76,7 +74,6 @@ async def test_half_open_обнаруживается_и_линк_воскрес
     assert await wait_for(lambda: link.alive), "линк не воскрес после разморозки"
 
 
-@pytest.mark.asyncio
 async def test_внезапная_смерть_без_FIN_и_возвращение(stand):
     """«Машину выдернули из розетки»: ни FIN, ни RST, порт пропал.
 
@@ -92,7 +89,6 @@ async def test_внезапная_смерть_без_FIN_и_возвращен�
     assert await wait_for(lambda: link.alive), "линк не восстановился после возвращения"
 
 
-@pytest.mark.asyncio
 async def test_запрос_в_замороженную_сеть_не_виснет(stand):
     """forward в half-open обязан завершиться быстрым честным отказом
     (unavailable) по таймауту конверта, а не висеть вечно."""
@@ -105,7 +101,6 @@ async def test_запрос_в_замороженную_сеть_не_висне
     assert await wait_for(lambda: link.alive), "линк не восстановился после отказа"
 
 
-@pytest.mark.asyncio
 async def test_медленная_сеть_не_ломает_обмен(stand):
     """Задержка пересылки меньше таймаутов — обмен работает, линк живёт."""
     server, proxy, link = stand

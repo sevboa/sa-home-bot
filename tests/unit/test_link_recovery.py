@@ -41,7 +41,6 @@ def sock_dir():
     shutil.rmtree(path, ignore_errors=True)
 
 
-@pytest.mark.asyncio
 async def test_heartbeat_рвёт_линк_когда_сосед_перестал_отвечать(sock_dir, monkeypatch):
     """Соединение живо, а ответов нет — линк обязан стать недоступным сам.
 
@@ -76,7 +75,6 @@ async def test_heartbeat_рвёт_линк_когда_сосед_переста�
         await server.stop()
 
 
-@pytest.mark.asyncio
 async def test_reconnect_now_поднимает_связь_заново(sock_dir):
     """Принудительный сброс линка не убивает его насовсем — он переподключается."""
     service = StubService("winpc")
@@ -96,7 +94,6 @@ async def test_reconnect_now_поднимает_связь_заново(sock_dir
         await server.stop()
 
 
-@pytest.mark.asyncio
 async def test_перезапустившийся_сосед_роняет_старое_соединение(monkeypatch):
     """Сосед пришёл с ДРУГОЙ инкарнацией (перезапустился) → сервер зовёт
     колбэк и закрывает его прошлое соединение (иначе они копятся: на проде
@@ -136,7 +133,6 @@ async def test_перезапустившийся_сосед_роняет_ста
         await server.stop()
 
 
-@pytest.mark.asyncio
 async def test_переподключение_без_перезапуска_не_дёргает_колбэк():
     """Инкарнация та же — сосед просто переподключился.
 
@@ -170,7 +166,6 @@ async def test_переподключение_без_перезапуска_не
         await server.stop()
 
 
-@pytest.mark.asyncio
 async def test_клиент_без_self_node_не_ломает_auth():
     """Локальные службы и старые ноды не представляются — auth обязан
     работать как раньше, колбэк просто не зовётся."""
@@ -192,7 +187,6 @@ async def test_клиент_без_self_node_не_ломает_auth():
         await server.stop()
 
 
-@pytest.mark.asyncio
 async def test_сервер_ждёт_появления_своего_адреса(monkeypatch):
     """Адреса ещё нет (Tailscale не поднялся) — нода обязана дождаться его,
     а не упасть.
@@ -227,7 +221,6 @@ async def test_сервер_ждёт_появления_своего_адрес�
         await server.stop()
 
 
-@pytest.mark.asyncio
 async def test_занятый_порт_не_ждём(monkeypatch):
     """EADDRINUSE — чужой процесс на порту, ожидание не поможет: падаем сразу,
     а не висим три минуты."""
@@ -248,7 +241,6 @@ async def test_занятый_порт_не_ждём(monkeypatch):
     assert exc.value.errno == errno_mod.EADDRINUSE
 
 
-@pytest.mark.asyncio
 async def test_close_не_виснет_на_полумёртвом_сокете(sock_dir, monkeypatch):
     """`close()` обязан вернуться, даже если сокет не подтверждает закрытие.
 
@@ -279,7 +271,6 @@ async def test_close_не_виснет_на_полумёртвом_сокете(
         await server.stop()
 
 
-@pytest.mark.asyncio
 async def test_одновременный_разрыв_и_heartbeat_не_убивают_линк(sock_dir, monkeypatch):
     """Гонка reconnect_now + heartbeat не должна вешать цикл переподключения.
 
@@ -313,7 +304,6 @@ async def test_одновременный_разрыв_и_heartbeat_не_уби�
         await server.stop()
 
 
-@pytest.mark.asyncio
 async def test_цикл_переподключения_переживает_любую_ошибку(sock_dir, monkeypatch, caplog):
     """Неожиданное исключение не должно убивать задачу линка молча."""
     service = StubService("winpc")
@@ -343,7 +333,6 @@ async def test_цикл_переподключения_переживает_лю
         await server.stop()
 
 
-@pytest.mark.asyncio
 async def test_медленный_запрос_не_рвёт_линк(sock_dir):
     """Живая находка 2026-09-25: SearXNG думал дольше таймаута web_search —
     forward() ронял всё соединение, и следующий раунд chat по тому же линку

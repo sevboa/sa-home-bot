@@ -14,8 +14,6 @@ import shutil
 import tempfile
 from pathlib import Path
 
-import pytest
-
 from sa_home_bot.node import supervisor as supervisor_mod
 from sa_home_bot.node.peers import PeerLink
 from sa_home_bot.node.supervisor import SupervisedService
@@ -55,7 +53,6 @@ def sock_dir():
     shutil.rmtree(path, ignore_errors=True)
 
 
-@pytest.mark.asyncio
 async def test_бюджет_бросает_зависший_шаг_и_идёт_дальше():
     budget = ShutdownBudget(total_s=5.0, step_s=0.2)
 
@@ -67,7 +64,6 @@ async def test_бюджет_бросает_зависший_шаг_и_идёт_�
     assert budget.overdue == ["зависший"]
 
 
-@pytest.mark.asyncio
 async def test_бюджет_не_даёт_шагам_сложиться_за_общий_дедлайн():
     """Пиров в рое много; каждый по потолку — это уже минуты."""
     budget = ShutdownBudget(total_s=0.3, step_s=5.0)
@@ -79,7 +75,6 @@ async def test_бюджет_не_даёт_шагам_сложиться_за_о�
     assert len(budget.overdue) == 5
 
 
-@pytest.mark.asyncio
 async def test_proto_сервер_останавливается_с_полумёртвым_клиентом(sock_dir, monkeypatch):
     """Именно здесь останов ноды мог зависнуть навсегда: `wait_closed()` у
     клиента с забитым Send-Q не возвращается ни через минуту, ни через час."""
@@ -91,7 +86,6 @@ async def test_proto_сервер_останавливается_с_полумё
     await asyncio.wait_for(server.stop(), timeout=10.0)
 
 
-@pytest.mark.asyncio
 async def test_погашенный_линк_не_переподключается(sock_dir):
     """Окно между `reconnect_now()` и пробуждением `_serve`: отмена от stop()
     в этот момент неотличима от нашего собственного сброса связи — её
@@ -130,7 +124,6 @@ async def test_погашенный_линк_не_переподключаетс
         await server.stop()
 
 
-@pytest.mark.asyncio
 async def test_служба_останавливается_с_зависшей_задачей_наблюдения(monkeypatch):
     """`await self._task` без потолка: задача наблюдения могла спать перед
     перезапуском или писать событие полумёртвому клиенту."""
@@ -148,7 +141,6 @@ async def test_служба_останавливается_с_зависшей_�
     assert svc._task is None
 
 
-@pytest.mark.asyncio
 async def test_lifespan_не_держат_зависшие_колбэки(monkeypatch):
     monkeypatch.setattr(lifespan_mod, "CALLBACK_TIMEOUT_S", 0.05)
     done: list[str] = []
