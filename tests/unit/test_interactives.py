@@ -1,10 +1,3 @@
-"""Интерактивы (Этап 47, bot/interactives): согласие, запрет в переписке,
-рамки темпа поверх Ведущего, финал с гарантированной формой, глобальная
-завершённость на гостя и переключатель передатчика после неё.
-
-Ведущий и служба llm — подделка FakeNodeLink (ответ Ведущего задаётся
-тестом), Store — настоящий на временной SQLite."""
-
 from __future__ import annotations
 
 import dataclasses
@@ -12,10 +5,9 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
-import pytest_asyncio
 
 from sa_home_bot.bot import tools as ai_tools
-from sa_home_bot.bot.interactives import engine, radio
+from sa_home_bot.bot.interactives import keyboards, radio, registry
 from sa_home_bot.bot.interactives.base import (
     STATUS_ACTIVE,
     STATUS_DECLINED,
@@ -27,19 +19,14 @@ from sa_home_bot.bot.interactives.base import (
     Run,
 )
 from sa_home_bot.bot.interactives.director import DirectorDecision, parse_decision
-from sa_home_bot.bot.interactives.engine import Interactives, apply_decision
+from sa_home_bot.bot.interactives.engine import Interactives
+from sa_home_bot.bot.interactives.scene import apply_decision
 from sa_home_bot.bot.interactives.transylvania import Transylvania
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.config import LlmConfig, Settings
-from sa_home_bot.db.connection import Database
-from sa_home_bot.db.migrations import apply_migrations
-from sa_home_bot.db.store import Store
 from sa_home_bot.tasks import protocol as task_protocol
+from tests.unit.support.fakes import Clock, FakeNotifier
 
-# Боевой темп сцены (живая находка 2026-09-30: минимум 2 хода на стадию,
-# финал не раньше 10-го хода) проверяется отдельно — test_radio_pacing_*.
-# Механику движка тесты ниже гоняют на прежнем быстром темпе, чтобы не
-# прокручивать по десятку ходов в каждом.
 PROD_RADIO = radio.RADIO
 FAST_RADIO = dataclasses.replace(
     PROD_RADIO, min_turns_on_stage=1, min_turns_before_finale=4, stage_soft_cap=3
@@ -49,13 +36,13 @@ FAST_RADIO = dataclasses.replace(
 @pytest.fixture(autouse=True)
 def _fast_radio(monkeypatch):
     monkeypatch.setattr(radio, "RADIO", FAST_RADIO)
-    monkeypatch.setitem(engine.REGISTRY, FAST_RADIO.id, FAST_RADIO)
+    monkeypatch.setitem(registry.REGISTRY, FAST_RADIO.id, FAST_RADIO)
 
 
 def test_radio_pacing_stage_needs_two_turns_and_finale_not_before_tenth():
     run = Run(scenario=PROD_RADIO.id, chat_id=1, user_id=1)
     apply_decision(PROD_RADIO, run, _decision(stage=1))
-    assert run.stage == 0  # первый ход стадии — Ведущий ещё не может поднять
+    assert run.stage == 0
     apply_decision(PROD_RADIO, run, _decision(stage=1))
     assert run.stage == 1
     for _ in range(20):
@@ -64,6 +51,7 @@ def test_radio_pacing_stage_needs_two_turns_and_finale_not_before_tenth():
             break
     assert run.finale and run.turns_total >= 10
 
+
 GUEST = 501
 OTHER = 502
 GROUP = -1001
@@ -71,34 +59,7 @@ PINNED = 503
 COMPLAINT = "Альфред, ты картавишь!"
 
 
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    db = Database(tmp_path / "test.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
-
-
-class FakeNotifier:
-    def __init__(self) -> None:
-        self.sent: list[tuple[int, str, object]] = []
-        self._next = 1000
-
-    async def send_direct(
-        self, chat_id, text, reply_to_message_id=None, reply_markup=None, message_thread_id=None
-    ):
-        self._next += 1
-        self.sent.append((chat_id, text, reply_markup))
-        return self._next
-
-    def texts(self, chat_id: int) -> list[str]:
-        return [text for chat, text, _ in self.sent if chat == chat_id]
-
-
 class FakeNodeLink:
-    """Ведущий (chat role=director), set_speech_clear и tasks.create."""
-
     def __init__(self) -> None:
         self.director_replies: list[str] = []
         self.calls: list[tuple[str, dict]] = []
@@ -128,20 +89,18 @@ def _director(**fields) -> str:
     return json.dumps(data, ensure_ascii=False)
 
 
-class Clock:
-    def __init__(self) -> None:
-        self.now = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
-
-    def __call__(self) -> datetime:
-        return self.now
-
-
 async def _rainy() -> int:
-    return 61  # WMO: небольшой дождь
+    return 61
+
+
+class TextOnlyNotifier(FakeNotifier):
+    @property
+    def send_photo_ex(self):
+        raise AttributeError("send_photo_ex")
 
 
 def _make(store, *, clock=None):
-    notifier = FakeNotifier()
+    notifier = TextOnlyNotifier()
     link = FakeNodeLink()
     settings = Settings(llm=LlmConfig(model="m", speech_therapy_pinned_chat_ids=[PINNED]))
     svc = Interactives(
@@ -149,7 +108,7 @@ def _make(store, *, clock=None):
         notifier,
         settings,
         lambda: link,
-        now=clock or Clock(),
+        now=clock or Clock(datetime(2026, 9, 27, 12, 0, tzinfo=UTC)),
         choose=lambda options: options[0],
         transylvania=Transylvania(fetch=_rainy),
     )
@@ -171,20 +130,17 @@ async def _run(store, chat=GUEST) -> Run:
 
 async def _play(svc, store):
     await _turn(svc, COMPLAINT)
-    assert await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_PLAY) == (
+    assert await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_PLAY) == (
         "Хорошо.",
-        radio.RADIO.offer_text + engine.OFFER_YES_SUFFIX,
+        radio.RADIO.offer_text + keyboards.offer_suffix("Да"),
         True,
     )
-
-
-# --- согласие ---
 
 
 async def test_offer_form_does_not_reveal_a_game(store):
     svc, notifier, _ = _make(store)
     await _turn(svc, COMPLAINT)
-    _, text, markup = notifier.sent[-1]
+    _, text, markup = notifier.sent_with_markup[-1]
     labels = [b.text for row in markup.inline_keyboard for b in row]
     assert labels == ["Да", "Нет"]
     for word in ("сценк", "игр", "Ведущ"):
@@ -197,7 +153,7 @@ async def test_complaint_offers_scene_but_does_not_start_it(store):
     assert plan.offered and not plan.scene and plan.note is None
     assert notifier.texts(GUEST) == [radio.RADIO.offer_text]
     assert (await _run(store)).status == STATUS_OFFERED
-    assert "chat" not in link.actions()  # Ведущий до согласия не зовётся
+    assert "chat" not in link.actions()
 
 
 async def test_no_trigger_no_offer(store):
@@ -220,13 +176,13 @@ async def test_play_starts_scene_with_note_for_alfred(store):
     assert plan.scene
     assert radio.RADIO.scene_frame in plan.note
     assert radio.RADIO.ladder[0] in plan.note
-    assert f"Гость: {COMPLAINT}" in plan.note  # журнал держит начало сцены
+    assert f"Гость: {COMPLAINT}" in plan.note
 
 
 async def test_yes_makes_alfred_react_with_conversation_context(store):
     svc, _, link = _make(store)
     await _turn(svc, COMPLAINT, reply="Я говогю безупгечно.")
-    await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_PLAY)
+    await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_PLAY)
     created = [args for action, args in link.calls if action == task_protocol.ACTION_CREATE]
     assert len(created) == 1
     directive = created[0]["args"]["messages"][0]["content"]
@@ -235,12 +191,11 @@ async def test_yes_makes_alfred_react_with_conversation_context(store):
 
 
 async def test_yes_reply_goes_to_the_forms_thread_and_dialogue(store):
-    """Живой баг 2026-09-28: реакция на «Да» уходила в общий топик лички."""
     svc, notifier, link = _make(store)
     await _turn(svc, COMPLAINT)
-    form_id = notifier._next  # форма согласия записана в диалог 77
+    form_id = 1000 + len(notifier.sent)
     await svc.handle_click(
-        GUEST, GUEST, "radio", engine.BTN_PLAY, message_id=form_id, message_thread_id=42
+        GUEST, GUEST, "radio", keyboards.BTN_PLAY, message_id=form_id, message_thread_id=42
     )
     meta = next(a for act, a in link.calls if act == task_protocol.ACTION_CREATE)["meta"]
     assert meta["message_thread_id"] == 42
@@ -251,7 +206,7 @@ async def test_yes_reply_goes_to_the_forms_thread_and_dialogue(store):
 async def test_no_keeps_alfred_silent(store):
     svc, _, link = _make(store)
     await _turn(svc, COMPLAINT)
-    await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_NEVER)
+    await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_NEVER)
     assert task_protocol.ACTION_CREATE not in link.actions()
 
 
@@ -266,8 +221,6 @@ async def test_scene_alternates_acting_and_asking_for_advice(store):
 
 
 def test_transmitter_is_not_blamed_early():
-    """Альфред не кидается сразу на радиостанцию (пользователь 2026-09-28):
-    первые стадии и «действие» через ход о ней не говорят."""
     r = radio.RADIO
     for text in (r.ladder[0], r.ladder[1]):
         assert "кроме радиостанции" in text or "вне подозрений" in text
@@ -279,16 +232,28 @@ def test_transmitter_is_not_blamed_early():
 
 
 def test_device_has_one_name():
-    """Одно имя устройства (пользователь 2026-10-02): в текстах для модели
-    и гостя — «радиостанция», не «передатчик» и не «устройство связи»."""
     r = radio.RADIO
     texts = [
-        r.title, r.scene_frame, r.director_prompt, r.finale_directive, *r.ladder,
-        *r.nudges, radio.ITEM_CARD_CAPTION, radio.RADIO_STATE_OLD, radio.RADIO_STATE_NEW,
-        radio.SWAP_FORM_TEXT, radio.RETURN_FORM_TEXT, radio.REINSTALL_FORM_TEXT,
-        radio.AFTER_AGREE_DIRECTIVE, radio.AFTER_SWAP_DIRECTIVE, radio.AFTER_RETURN_DIRECTIVE,
-        radio.TOOL_NOT_YET, radio.TOOL_SWAP_FORM, radio.TOOL_RETURN_FORM,
-        radio.ITEM_PUT_LABEL, radio.ITEM_REMOVE_LABEL,
+        r.title,
+        r.scene_frame,
+        r.director_prompt,
+        r.finale_directive,
+        *r.ladder,
+        *r.nudges,
+        radio.ITEM_CARD_CAPTION,
+        radio.RADIO_STATE_OLD,
+        radio.RADIO_STATE_NEW,
+        radio.SWAP_FORM_TEXT,
+        radio.RETURN_FORM_TEXT,
+        radio.REINSTALL_FORM_TEXT,
+        radio.AFTER_AGREE_DIRECTIVE,
+        radio.AFTER_SWAP_DIRECTIVE,
+        radio.AFTER_RETURN_DIRECTIVE,
+        radio.TOOL_NOT_YET,
+        radio.TOOL_SWAP_FORM,
+        radio.TOOL_RETURN_FORM,
+        radio.ITEM_PUT_LABEL,
+        radio.ITEM_REMOVE_LABEL,
         radio.SWAP_RADIO_DECLARATION["function"]["description"],
     ]
     for text in texts:
@@ -298,8 +263,6 @@ def test_device_has_one_name():
 
 
 def test_alfred_does_not_know_about_forms_at_all():
-    """Альфред не ломает четвёртую стену: о формах и кнопках он не знает
-    вовсе — даже запрет их упоминать наводит на них (пользователь 2026-09-28)."""
     to_alfred = [
         radio.RADIO.scene_frame,
         radio.RADIO.finale_directive,
@@ -329,49 +292,46 @@ def test_swap_tool_is_not_for_plain_requests_to_recite():
 
 
 def test_closing_line_after_swap_does_not_announce_the_change():
-    """Что речь стала чистой, гость заметит сам (пользователь 2026-09-28)."""
     text = radio.AFTER_SWAP_DIRECTIVE
     assert "Не говори" in text
     assert "как прекрасно теперь слышно" not in text
 
 
 async def test_later_gives_cooldown_then_offers_again(store):
-    clock = Clock()
+    clock = Clock(datetime(2026, 9, 27, 12, 0, tzinfo=UTC))
     svc, notifier, _ = _make(store, clock=clock)
     await _turn(svc, COMPLAINT)
-    await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_LATER)
+    await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_LATER)
     assert (await _run(store)).status == STATUS_DECLINED
     await _turn(svc, COMPLAINT)
-    assert len(notifier.texts(GUEST)) == 1  # в кулдауне — молчим
+    assert len(notifier.texts(GUEST)) == 1
     clock.now += timedelta(hours=25)
     await _turn(svc, COMPLAINT)
     assert len(notifier.texts(GUEST)) == 2
 
 
 async def test_no_is_only_a_pause_not_an_opt_out(store):
-    """Решение пользователя 2026-10-02: «Нет» — пауза, не запрет насовсем
-    (Александр отказался и потом сам спрашивал про дефект речи)."""
-    clock = Clock()
+    clock = Clock(datetime(2026, 9, 27, 12, 0, tzinfo=UTC))
     svc, notifier, _ = _make(store, clock=clock)
     await _turn(svc, COMPLAINT)
-    answer, text, _ = await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_NEVER)
-    assert text == radio.RADIO.offer_text + engine.OFFER_NO_SUFFIX
+    answer, text, _ = await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_NEVER)
+    assert text == radio.RADIO.offer_text + keyboards.offer_suffix("Нет")
     assert not await svc.is_opted_out(GUEST)
     await _turn(svc, COMPLAINT)
-    assert len(notifier.texts(GUEST)) == 1  # пауза — не предлагаем
+    assert len(notifier.texts(GUEST)) == 1
     clock.now += timedelta(hours=25)
     await _turn(svc, COMPLAINT)
     assert len(notifier.texts(GUEST)) == 2
 
 
 async def test_offer_expires_after_ttl(store):
-    clock = Clock()
+    clock = Clock(datetime(2026, 9, 27, 12, 0, tzinfo=UTC))
     svc, _, _ = _make(store, clock=clock)
     await _turn(svc, COMPLAINT)
     clock.now += timedelta(hours=2)
-    assert await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_PLAY) == (
+    assert await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_PLAY) == (
         "Вопрос уже неактуален.",
-        radio.RADIO.offer_text + engine.OFFER_EXPIRED_SUFFIX,
+        radio.RADIO.offer_text + keyboards.OFFER_EXPIRED_SUFFIX,
         True,
     )
     assert (await _run(store)).status == STATUS_DECLINED
@@ -380,29 +340,24 @@ async def test_offer_expires_after_ttl(store):
 async def test_offer_buttons_only_for_that_guest_and_only_once(store):
     svc, _, _ = _make(store)
     await _turn(svc, COMPLAINT)
-    assert (await svc.handle_click(GUEST, OTHER, "radio", engine.BTN_PLAY))[0] == (
+    assert (await svc.handle_click(GUEST, OTHER, "radio", keyboards.BTN_PLAY))[0] == (
         "Эта форма не для вас."
     )
-    await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_PLAY)
-    assert (await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_LATER))[0] == "Уже решено."
+    await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_PLAY)
+    assert (await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_LATER))[0] == "Уже решено."
 
 
 async def test_exit_button_pauses_and_next_complaint_asks_again(store):
     svc, notifier, _ = _make(store)
     await _play(svc, store)
-    answer, text, drop = await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_EXIT)
-    assert (answer, text, drop) == (engine.EXIT_ALERT, None, True)
+    answer, text, drop = await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_EXIT)
+    assert (answer, text, drop) == (keyboards.EXIT_ALERT, None, True)
     assert (await _run(store)).status == STATUS_PAUSED
     plan = await _turn(svc, COMPLAINT)
     assert plan.offered
 
 
-# --- ход сцены и Ведущий ---
-
-
 async def test_director_is_invisible_and_alfred_retells_the_effect(store):
-    # Ведущий гостю не виден: никаких отдельных сообщений — событие уходит
-    # Альфреду скрытой подсказкой на следующий ход, и рассказывает он сам.
     svc, notifier, link = _make(store)
     await _play(svc, store)
     sent_before = len(notifier.sent)
@@ -418,7 +373,6 @@ async def test_director_is_invisible_and_alfred_retells_the_effect(store):
     plan = await svc.before_turn(GUEST, GUEST, "ну?", is_private=True)
     assert "Подсказка на этот ход: Понюхай" in plan.note
     assert "произошло вот что: Из динамика пахнет болотом." in plan.note
-    # Пересказал — на следующем ходу событие уже не подсказывается.
     link.director_replies = [_director()]
     await svc.after_turn(plan, "Фу, болотом тянет!", dialogue_id=77)
     plan = await svc.before_turn(GUEST, GUEST, "и?", is_private=True)
@@ -429,10 +383,10 @@ async def test_nothing_the_guest_sees_has_emoji_or_game_words(store):
     svc, notifier, link = _make(store)
     await _reach_finale(svc, store, link)
     await _turn(svc, "что там?")
-    texts = [text for _, text, _ in notifier.sent]
+    texts = [text for _, text, _ in notifier.sent_with_markup]
     labels = [
         b.text
-        for _, _, markup in notifier.sent
+        for _, _, markup in notifier.sent_with_markup
         if markup
         for row in markup.inline_keyboard
         for b in row
@@ -452,7 +406,7 @@ async def test_director_topic_change_makes_scene_idle_and_complaint_resumes_sile
     sent_before = len(notifier.sent)
     plan = await _turn(svc, "Опять ты картавишь")
     assert plan.scene and not plan.offered
-    assert len(notifier.sent) == sent_before  # без повторного согласия
+    assert len(notifier.sent) == sent_before
 
 
 def _fresh_run() -> Run:
@@ -479,7 +433,7 @@ def test_finale_not_before_last_stage_and_min_turns():
     run.stage = radio.RADIO.last_stage
     run.turns_total = 1
     apply_decision(radio.RADIO, run, _decision(stage=3, finale=True, finale_fault="слизь"))
-    assert not run.finale  # ходов мало
+    assert not run.finale
     apply_decision(radio.RADIO, run, _decision(stage=3, finale=True, finale_fault="слизь"))
     assert not run.finale
     effect = apply_decision(radio.RADIO, run, _decision(stage=3, finale=True, finale_fault="слизь"))
@@ -537,9 +491,6 @@ async def test_broken_director_does_not_break_turn(store):
     assert run.status == STATUS_ACTIVE and run.turns_total == 1
 
 
-# --- финал, смена передатчика, глобальность ---
-
-
 async def _reach_finale(svc, store, link):
     await _play(svc, store)
     stages = [1, 2, 3, 3]
@@ -562,7 +513,6 @@ async def test_finale_directive_and_guaranteed_swap_form(store):
     await svc.after_turn(plan, "Надо менять передатчик!", dialogue_id=77)
     await svc.flush_forms(GUEST, plan, dialogue_id=77)
     assert notifier.texts(GUEST)[-1] == radio.SWAP_FORM_TEXT
-    # Второй раз форма сама не лезет — только по тулу.
     plan = await _turn(svc, "не хочу")
     assert notifier.texts(GUEST).count(radio.SWAP_FORM_TEXT) == 1
 
@@ -572,25 +522,23 @@ async def test_swap_accept_completes_globally_and_clears_speech(store):
     await _reach_finale(svc, store, link)
     assert await ai_tools.tool_swap_radio(_ctx(svc), {}) == radio.TOOL_SWAP_FORM
     await svc.flush_forms(GUEST)
-    answer, text, _ = await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_SWAP)
+    answer, text, _ = await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_SWAP)
     assert text == radio.SWAP_ACCEPTED_TEXT
     assert (await _run(store)).status == STATUS_DONE
     assert ("set_speech_clear", {"user_id": GUEST, "clear": True}) in link.calls
-    assert task_protocol.ACTION_CREATE in link.actions()  # первая чистая реплика
-    # Эффект — на гостя в любом чате, в т.ч. общем.
+    assert task_protocol.ACTION_CREATE in link.actions()
     plan = await svc.before_turn(GROUP, GUEST, "привет", is_private=False)
     assert plan.speech_clear is True
     other = await svc.before_turn(GROUP, OTHER, "привет", is_private=False)
     assert other.speech_clear is False
-    # Повторное нажатие — уже решено.
-    assert (await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_SWAP))[0] == "Уже решено."
+    assert (await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_SWAP))[0] == "Уже решено."
 
 
 async def test_swap_works_when_llm_asleep_mirror_heals_later(store):
     svc, _, link = _make(store)
     await _reach_finale(svc, store, link)
     link.fail_llm = True
-    _, text, _ = await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_SWAP)
+    _, text, _ = await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_SWAP)
     assert text == radio.SWAP_ACCEPTED_TEXT
     assert await svc.speech_clear(GUEST) is True
 
@@ -598,7 +546,7 @@ async def test_swap_works_when_llm_asleep_mirror_heals_later(store):
 async def test_keep_old_radio_leaves_finale_open(store):
     svc, _, link = _make(store)
     await _reach_finale(svc, store, link)
-    assert (await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_KEEP))[1] == (
+    assert (await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_KEEP))[1] == (
         radio.SWAP_KEPT_TEXT
     )
     run = await _run(store)
@@ -608,27 +556,27 @@ async def test_keep_old_radio_leaves_finale_open(store):
 
 async def test_return_old_radio_only_after_completion(store):
     svc, notifier, link = _make(store)
-    # До завершения «вернуть» нет: тул лишь предлагает сцену.
     assert await ai_tools.tool_swap_radio(_ctx(svc), {}) == radio.TOOL_OFFER
-    assert (await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_RETURN_OLD))[0] == (
+    assert (await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_RETURN_OLD))[0] == (
         "Эта форма не для вас."
     )
-    await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_LATER)
+    await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_LATER)
     await InteractiveStore(store).mark_completed("radio", GUEST)
     await InteractiveStore(store).set_effect("speech_clear", GUEST, "1")
-    # После — переключатель, в любом чате, без сцены.
     ctx = _ctx(svc, chat=GROUP, private=False)
     assert await ai_tools.tool_swap_radio(ctx, {}) == radio.TOOL_RETURN_FORM
     await svc.flush_forms(GROUP)
     assert notifier.texts(GROUP) == [radio.RETURN_FORM_TEXT]
-    _, text, _ = await svc.handle_click(GROUP, GUEST, "radio", engine.BTN_RETURN_OLD)
+    _, text, _ = await svc.handle_click(GROUP, GUEST, "radio", keyboards.BTN_RETURN_OLD)
     assert text == radio.RETURN_ACCEPTED_TEXT
     assert await svc.speech_clear(GUEST) is False
     assert await ai_tools.tool_swap_radio(ctx, {}) == radio.TOOL_REINSTALL_FORM
-    _, text, _ = await svc.handle_click(GROUP, GUEST, "radio", engine.BTN_INSTALL_NEW)
+    _, text, _ = await svc.handle_click(GROUP, GUEST, "radio", keyboards.BTN_INSTALL_NEW)
     assert text == radio.REINSTALL_ACCEPTED_TEXT
     assert await svc.speech_clear(GUEST) is True
-    assert (await svc.handle_click(GROUP, GUEST, "radio", engine.BTN_INSTALL_NEW))[0] == "Уже так."
+    assert (await svc.handle_click(GROUP, GUEST, "radio", keyboards.BTN_INSTALL_NEW))[
+        0
+    ] == "Уже так."
 
 
 async def test_progress_is_per_chat(store):

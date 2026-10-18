@@ -1,37 +1,3 @@
-"""Сюжетные предметы гостей (Этап 49.3): реестр видов.
-
-Вид — данные персонажа в коде (характер важнее чистоты кода): название,
-облик и черты. Экземпляр у гостя — таблица ``items`` (db/schema.sql),
-создают его только сценарии, не модель.
-
-Облик предмета держится, только если это проверенная строка в коде
-(«Стенд предметов» 2026-10-01): архетип ``RADIO_ARCHETYPE`` рисуется turbo
-без ламп 32 из 32 раз, а описанный словами в промпте сцены предмет сцена
-«съедает». Поэтому предмет рисуется отдельно портретом (служба llm,
-``item_portrait``) и вставляется в сцены пикселями (``generate_image`` с
-``paste``).
-
-Черты копятся по ходу сцены (Ведущий, поле ``item_trait``; молчит — код
-берёт следующую по лестнице). Рисуются только те, что прошли стенд
-49.3.0 (``Trait.en`` не пуст), остальные живут в тексте: Альфред о них
-знает и рассказывает, а на картинке радиостанция обычная.
-
-Этап 59: к радио добавились вещи подвала — вино (``wine``, 59.3) и старый
-фотоаппарат (``camera``, 59.6). Они канареечные (``ItemKind.canary``): видны
-и действуют только гостям из ``llm.interactives_canary_user_ids``. Черты у них
-свободные (``free_traits``): Ведущий пишет приметы своими словами, портрет —
-архетип без перекраски. Действие, после которого вещь исчезает, — общий
-механизм «Применение» (``ItemAction.consumable``, 49.4): вещь ``consumed``,
-эффект гостя (``UserEffect``) — ``user_effect:<ключ>:<гость>`` со сроком.
-
-Действия (Этап 49.3.7) вид объявляет сам — ``ItemKind.actions``: из них
-строятся «Действия» под карточкой и в описи /items, опись для Альфреда и
-форма тула ``item_action``. Особенные вещи — рычаги поместья: их не
-передают (``transferable=False``), а действия доступны всегда — кнопкой
-из /items или просьбой Альфреду. Что действие делает — ``effect``:
-обработчик в engine.py (``Interactives._ITEM_EFFECTS``).
-"""
-
 from __future__ import annotations
 
 import re
@@ -45,14 +11,10 @@ RADIO_TYPE = "radio"
 WINE_TYPE = "wine"
 CAMERA_TYPE = "camera"
 
-# Где вещь (Этап 49.3.5). Стоит в кабинете — попадает в его снимки
-# (вставкой), в чулане — показывается карточкой.
 PLACE_DESK = "desk"
 PLACE_STOREROOM = "storeroom"
 PLACE_RU = {PLACE_DESK: "на столе в кабинете", PLACE_STOREROOM: "в чулане"}
 
-# Опись вещей поместья (/items) — голос Альфреда. Вещь заведена на гостя
-# (у каждого свой кабинет), но для него это вещи поместья, а не его карман.
 INVENTORY_TITLE = "<b>Особенные вещи поместья</b>"
 INVENTORY_LINE = "{icon} <b>{name}</b> — {where}."
 INVENTORY_TRAITS = "<i>Приметы: {traits}.</i>"
@@ -62,21 +24,6 @@ INVENTORY_EMPTY = "Особенных вещей в поместье пока н
 
 @dataclass(frozen=True)
 class ItemAction:
-    """Действие с вещью — данные вида.
-
-    ``name`` — как его зовёт тул ``item_action``; ``code`` — callback-код
-    кнопки (``it:<id>:<code>``, у радиостанции ``p``/``r`` — со старых
-    карточек); ``label`` — кнопка в перечне «Действия»; ``when`` — где
-    должна быть вещь, чтобы действие имело смысл (``PLACE_*``; пусто —
-    всегда); ``effect``/``arg`` — обработчик в engine.py и его аргумент;
-    ``form``/``confirm`` — вопрос формы тула и кнопка согласия; ``tool_ru`` —
-    как действие видит Альфред в описи; ``done`` — ответ на нажатие;
-    ``event`` — запись в ``item_events``; ``directive`` — что сказать
-    Альфреду после; ``pinned_locked`` — в закреплённых чатах (речь
-    закреплена, llm.speech_therapy_pinned_chat_ids) недоступно;
-    ``consumable`` (Этап 59.3, «Применение» из 49.4) — после действия вещь
-    израсходована: ``consumed``, из описи и мест она пропадает."""
-
     name: str
     code: str
     label: str
@@ -91,21 +38,12 @@ class ItemAction:
     directive: str = ""
     pinned_locked: bool = False
     consumable: bool = False
-    # Снимок Альфреда после действия (селфи, фраза по-английски для художника)
-    # и подпись к нему; пусто — без снимка.
     snapshot: str = ""
     snapshot_caption: str = ""
 
 
 @dataclass(frozen=True)
 class UserEffect:
-    """Эффект гостя (``user_effect:<ключ>:<гость>``, Этап 59.3): пока он
-    действует, ``text`` уходит скрытой заметкой в system Альфреда на каждый
-    ход гостя; ``hours`` — срок (None — пока вещь не вернут); ``ended`` —
-    одна заметка Альфреду, когда срок вышел; ``item_type`` — вещь, чья
-    заметка (``note``) подставляется в ``text`` как ``{note}`` (« (модель)»
-    или пусто)."""
-
     key: str
     text: str
     hours: float | None = None
@@ -115,11 +53,6 @@ class UserEffect:
 
 @dataclass(frozen=True)
 class Trait:
-    """Черта предмета. ``ru`` — как её видят Альфред и Ведущий, ``en`` —
-    фраза по-английски (подсказка перекраске), ``drawn`` — turbo рисует её
-    на портрете с весом ``ItemKind.trait_weight`` (стенд 49.3.0: без веса
-    черты не рисуются вовсе, 1/21)."""
-
     ru: str
     en: str = ""
     drawn: bool = False
@@ -127,10 +60,6 @@ class Trait:
 
 @dataclass(frozen=True)
 class Curse:
-    """«Уровень проклятия» (стенд 49.3.0): портрет перекрашивается img2img
-    моделью ``model`` с LoRA ``lora`` — облик узнаваем, а гниль и свечение
-    нарастают с силой. ``steps`` — (сколько черт, сила) по возрастанию."""
-
     model: str
     lora: str
     weight: float
@@ -150,45 +79,27 @@ class ItemKind:
     type: str
     name: str
     archetype: str
-    # Признаки для сверки зрением (llm/photo_check.py): «название :: что не
-    # считается»; в промахи уходит название.
     checks: tuple[str, ...]
     traits: dict[str, Trait]
-    # Порядок черт, когда Ведущий их не дал (смена стадии без item_trait).
     ladder: tuple[str, ...]
-    # Подсказка гармонизации при вставке в сцену (img2img 0.35 по кадру с
-    # предметом): что за предмет стоит в кадре.
     paste_hint: str
-    # Фокус кадра «про предмет» — крупный план вместо общего вида.
     focus_re: re.Pattern[str]
-    # Стенд 49.3.0 (лестница): 1.3 — черты копятся видно, фон остаётся серым
-    # (вырезке это важно), облик узнаваем (DINO к базе 0.70-0.96); 1.5 по
-    # одной черте рисует явнее, но 5 таких черт дают один глаз во весь кадр.
     trait_weight: float = 1.3
     curse: Curse | None = None
-    # Просьба снять именно убранный экземпляр («проклятый», «со склада»).
     stored_re: re.Pattern[str] | None = None
     icon: str = "📦"
     actions: tuple[ItemAction, ...] = field(default_factory=tuple)
-    # Особенная вещь — рычаг поместья, не передаётся (49.4 «Передача»).
     transferable: bool = False
-    # --- Этап 59: вещи подвала. Всё ниже по умолчанию даёт радио как было. ---
-    # Канареечная вещь: видна и действует только гостям из канареечного списка.
     canary: bool = False
-    # Черты — свободный текст Ведущего («этикетка выцвела, виден год — 1887»),
-    # а не ключи словаря ``traits``: в портрете они не участвуют.
     free_traits: bool = False
-    # Тексты вещи; пусто — как у радио (radio.ITEM_*). Место → строка.
-    where_inv: dict[str, str] = field(default_factory=dict)  # опись /items и manor_items
-    where_card: dict[str, str] = field(default_factory=dict)  # низ подписи карточки
-    where_menu: dict[str, str] = field(default_factory=dict)  # шапка перечня действий
-    card_caption: str = ""  # шаблон карточки: {name} {traits} {fault} {where}
-    menu_caption: str = ""  # шаблон перечня действий: {name} {where}
-    note_card: str = ""  # заметка в карточке: {fault}; пусто — «Беда с ней»
-    note_tool: str = ""  # заметка в описи Альфреду: {fault}
-    consumed_text: str = ""  # подпись карточки после расхода
-    # Находка (59.3/59.6): запасные приметы/заметка, пока Ведущий не придумал
-    # свои, и что Ведущему придумать (блок ко входу, поле ``found_item``).
+    where_inv: dict[str, str] = field(default_factory=dict)
+    where_card: dict[str, str] = field(default_factory=dict)
+    where_menu: dict[str, str] = field(default_factory=dict)
+    card_caption: str = ""
+    menu_caption: str = ""
+    note_card: str = ""
+    note_tool: str = ""
+    consumed_text: str = ""
     fallback_traits: tuple[str, ...] = ()
     fallback_notes: tuple[str, ...] = ()
     found_ask: str = ""
@@ -207,11 +118,9 @@ class ItemKind:
         return radio.ITEM_PLACE_INSTALLED if place == PLACE_DESK else radio.ITEM_PLACE_STORED
 
     def available(self, place: str) -> list[ItemAction]:
-        """Действия, которые сейчас имеют смысл (по месту вещи)."""
         return [a for a in self.actions if not a.when or a.when == place]
 
     def action(self, key: str) -> ItemAction | None:
-        """Действие по callback-коду или имени тула."""
         key = key.strip().lower()
         for action in self.actions:
             if key in (action.code, action.name):
@@ -219,7 +128,6 @@ class ItemKind:
         return None
 
     def portrait_prompt(self, traits: list[str]) -> str:
-        """Промпт turbo с весами compel (служба llm, item_portrait)."""
         drawn = [
             f"({self.traits[k].en}){self.trait_weight:g}"
             for k in traits
@@ -228,7 +136,6 @@ class ItemKind:
         return ", ".join([self.archetype, *drawn])
 
     def restyle(self, traits: list[str]) -> dict | None:
-        """Перекраска портрета под число черт (None — без неё)."""
         if self.curse is None:
             return None
         strength = self.curse.strength(len([k for k in traits if k in self.traits]))
@@ -248,8 +155,6 @@ class ItemKind:
         return [self.traits[k].ru for k in traits if k in self.traits]
 
     def drawn_key(self, traits: list[str]) -> tuple[str, ...]:
-        """Что видно на портрете — рисуемые черты и сила проклятия: другое —
-        новый портрет."""
         key = tuple(k for k in traits if k in self.traits and self.traits[k].drawn)
         restyle = self.restyle(traits)
         return key + ((f"curse{restyle['strength']:g}",) if restyle else ())
@@ -295,16 +200,12 @@ RADIO = ItemKind(
     },
     ladder=("пыль", "трещина", "ржавчина", "дым", "копоть", "стрелка", "глаз"),
     paste_hint="vintage ham radio with needle meters and black handheld microphone on the desk",
-    # «Прибор», «шкала», «корпус» — так Альфред зовёт радиостанцию в сцене
-    # («треснувшее стекло прибора»); без них крупный план шёл без радио.
-    # Старые имена («передатчик», «радио», «рация») — гость скажет как угодно.
     focus_re=re.compile(
         r"радиостанц|\bстанци|трансивер|передатчик|радио|раци|устройств\w* связи|"
         r"микрофон|прибор|шкал|корпус",
         re.IGNORECASE,
     ),
     stored_re=re.compile(r"прокля|стар\w+|склад|чулан|кладов", re.IGNORECASE),
-    # Стоит старая радиостанция — картавость (speech_clear выключен).
     actions=(
         ItemAction(
             name="put",
@@ -346,15 +247,10 @@ RADIO = ItemKind(
     ),
 )
 
-# --- Этап 59.3: вино ---
 
-# Сколько Альфред хмелеет от бутылки (решение плана 59.3: по умолчанию 3 ч).
 TIPSY_HOURS = 3.0
-# Этап 59.6: размер снимков Альфреда со старым фотоаппаратом (вместо 64).
 CAMERA_PHOTO_PX = 128
 
-# Архетипы новых вещей — на стенд 59.0 (портрет turbo, как у радио): пока
-# строки по образцу RADIO_ARCHETYPE, не проверенные 32 из 32.
 WINE_ARCHETYPE = (
     "single old dusty dark green wine bottle, faded paper label, cork sealed with "
     "black wax, cobwebs on the shoulder"
@@ -369,7 +265,6 @@ WINE_ACTION_DRINK = (
     "станет, а ты ненадолго захмелеешь)"
 )
 WINE_FORM_TEXT = "Распить бутылку вина?"
-# Снимок после распития (селфи): Альфред с бокалом, чуть раскрасневшийся.
 WINE_SNAPSHOT_EN = "holding a glass of dark red wine, cheeks slightly flushed, a faint smile"
 AFTER_DRINK_DIRECTIVE = (
     "Вы с собеседником только что распили бутылку выдержанного вина из "
@@ -396,8 +291,7 @@ TIPSY_TEXT = (
     "действия."
 )
 TIPSY_ENDED = (
-    "Хмель выветрился, ты снова трезв. Можешь упомянуть об этом одной "
-    "фразой, с лёгким смущением."
+    "Хмель выветрился, ты снова трезв. Можешь упомянуть об этом одной фразой, с лёгким смущением."
 )
 
 WINE = ItemKind(
@@ -456,7 +350,6 @@ WINE = ItemKind(
     ),
 )
 
-# --- Этап 59.6: старый фотоаппарат ---
 
 CAMERA_FORM_USE = (
     "Снимать этим аппаратом? Снимки выйдут чётче, сэр, но аппарат старый: "
@@ -571,8 +464,6 @@ CAMERA = ItemKind(
 
 KINDS: dict[str, ItemKind] = {RADIO.type: RADIO, WINE.type: WINE, CAMERA.type: CAMERA}
 
-# Эффекты гостя от вещей (общий механизм «Применение», 49.4; ключ —
-# ``user_effect:<ключ>:<гость>``, ``ItemAction.arg``).
 EFFECTS: dict[str, UserEffect] = {
     "tipsy": UserEffect("tipsy", TIPSY_TEXT, hours=TIPSY_HOURS, ended=TIPSY_ENDED),
     "camera": UserEffect("camera", CAMERA_TEXT, item_type=CAMERA_TYPE),
@@ -580,12 +471,6 @@ EFFECTS: dict[str, UserEffect] = {
 
 
 def find_kind(text: str, kinds: Iterable[ItemKind] | None = None) -> ItemKind | None:
-    """Вид по словам модели («радиостанция», «старый передатчик», «radio»).
-    ``kinds`` — среди каких видов искать (по умолчанию все; движок отдаёт
-    только видимые гостю — канареечные вещи прочим не существуют). Точное имя
-    или тип — раньше любого узора, а из узоров первыми идут канареечные виды
-    с узкими словами: «корпус фотоаппарата» не должно уходить в радио по
-    слову «корпус»."""
     text = " ".join(text.split())
     if not text:
         return None
@@ -600,7 +485,6 @@ def find_kind(text: str, kinds: Iterable[ItemKind] | None = None) -> ItemKind | 
 
 
 def new_cut_key(kind: ItemKind, user_id: int) -> str:
-    """Ключ вырезки на ноде llm (llm/item_paste.KEY_RE)."""
     return f"{kind.type}-{user_id}-{uuid.uuid4().hex[:10]}"
 
 
