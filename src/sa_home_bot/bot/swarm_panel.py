@@ -6,20 +6,15 @@ from datetime import datetime
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sa_home_bot.bot import apps_view, commands, swarm_view
-from sa_home_bot.bot.node_view import back_row, node_segment, refresh_row
+from sa_home_bot.bot.node_view import node_segment
 from sa_home_bot.bot.pagination import nav_row
-from sa_home_bot.bot.ui.callback_data import pack
-from sa_home_bot.bot.ui.keyboards import button
+from sa_home_bot.bot.ui.keyboards import back_row, button, refresh_row
 from sa_home_bot.proto.messages import ActionSpec
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.wake_core import NodeReport
 
 NODES_PAGE_SIZE = 5
 SKILLS_PAGE_SIZE = 6
-
-
-def _cb(code: str, *parts: object) -> str:
-    return pack(commands.CALLBACK_PREFIX, code, *parts)
 
 
 def _version_line(reports: Sequence[NodeReport]) -> str | None:
@@ -66,12 +61,12 @@ def build_panel_view(
         lines.append(failure)
 
     buttons: list[list[InlineKeyboardButton]] = [
-        [button("🧩 Умения", _cb(commands.SWARM_SKILLS_CODE, 0))],
-        [button("🖥 Ноды", _cb(commands.SWARM_NODES_CODE, 0))],
-        [button("🔄 Проверить обновления", _cb(commands.SWARM_UPDATE_CODE))],
+        [button("🧩 Умения", commands.panel_callback(commands.SWARM_SKILLS_CODE, 0))],
+        [button("🖥 Ноды", commands.panel_callback(commands.SWARM_NODES_CODE, 0))],
+        [button("🔄 Проверить обновления", commands.panel_callback(commands.SWARM_UPDATE_CODE))],
     ]
     buttons.extend([b] for b in wake_buttons)
-    buttons.append(refresh_row(_cb(commands.SWARM_PANEL_CODE)))
+    buttons.append(refresh_row(commands.panel_callback(commands.SWARM_PANEL_CODE)))
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -93,13 +88,19 @@ def build_skills_list_view(
     if not skills:
         lines.append("Нет доступных умений.")
     page = skills[offset : offset + SKILLS_PAGE_SIZE]
-    buttons = [[button(action.title, _cb(commands.SWARM_SKILL_CODE, action.id))] for action in page]
+    buttons = [
+        [button(action.title, commands.panel_callback(commands.SWARM_SKILL_CODE, action.id))]
+        for action in page
+    ]
     nav = nav_row(
-        offset, SKILLS_PAGE_SIZE, len(skills), lambda o: _cb(commands.SWARM_SKILLS_CODE, o)
+        offset,
+        SKILLS_PAGE_SIZE,
+        len(skills),
+        lambda o: commands.panel_callback(commands.SWARM_SKILLS_CODE, o),
     )
     if nav:
         buttons.append(nav)
-    buttons.append(back_row(_cb(commands.SWARM_PANEL_CODE)))
+    buttons.append(back_row(commands.panel_callback(commands.SWARM_PANEL_CODE)))
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -107,7 +108,7 @@ def build_skill_card_view(
     text: str, keyboard: InlineKeyboardMarkup | None
 ) -> tuple[str, InlineKeyboardMarkup]:
     rows = list(keyboard.inline_keyboard) if keyboard is not None else []
-    rows.append(back_row(_cb(commands.SWARM_SKILLS_CODE, 0)))
+    rows.append(back_row(commands.panel_callback(commands.SWARM_SKILLS_CODE, 0)))
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -126,21 +127,28 @@ def build_nodes_list_view(
     buttons: list[list[InlineKeyboardButton]] = []
     for r in page:
         segment = node_segment(None if r.node_id == own_node_id else r.node_id)
-        buttons.append([button(f"🖥 {r.node_id}", _cb(commands.SWARM_NODE_CODE, segment))])
+        buttons.append(
+            [button(f"🖥 {r.node_id}", commands.panel_callback(commands.SWARM_NODE_CODE, segment))]
+        )
         if r.node_id in wakeable:
             buttons.append(
                 [button(swarm_view.wake_node_text(r.node_id), commands.wake_callback(r.node_id))]
             )
     nav = nav_row(
-        offset, NODES_PAGE_SIZE, len(reports), lambda o: _cb(commands.SWARM_NODES_CODE, o)
+        offset,
+        NODES_PAGE_SIZE,
+        len(reports),
+        lambda o: commands.panel_callback(commands.SWARM_NODES_CODE, o),
     )
     if nav:
         buttons.append(nav)
-    buttons.append(refresh_row(_cb(commands.SWARM_NODES_CODE, offset)))
-    buttons.append(back_row(_cb(commands.SWARM_PANEL_CODE)))
+    buttons.append(refresh_row(commands.panel_callback(commands.SWARM_NODES_CODE, offset)))
+    buttons.append(back_row(commands.panel_callback(commands.SWARM_PANEL_CODE)))
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def build_update_result_view(summary_text: str) -> tuple[str, InlineKeyboardMarkup]:
     text = f"🔄 <b>Обновления роя</b>\n\n{summary_text}"
-    return text, InlineKeyboardMarkup(inline_keyboard=[back_row(_cb(commands.SWARM_PANEL_CODE))])
+    return text, InlineKeyboardMarkup(
+        inline_keyboard=[back_row(commands.panel_callback(commands.SWARM_PANEL_CODE))]
+    )

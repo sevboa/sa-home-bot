@@ -10,12 +10,12 @@ from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings, VpnConfig
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.vpn import protocol as vpn_protocol
+from tests.unit.support.fakes import FakeNotifier
 
 from .vpn_support import (
     GUEST_FULL,
     FakeCallback,
     FakeNodeLink,
-    FakeNotifier,
     all_buttons,
     button_texts,
     press,
@@ -180,4 +180,4 @@ async def test_proxy_qr_sends_photo_for_country():
     cb = FakeCallback("act:vpn:proxy_link:qr:wooster", chat_id=779)
     notifier = FakeNotifier()
     await h.handle_action(cb, Link(), notifier, CFG, PROXY_GUEST, PendingVpnSecrets())
-    assert notifier.sent_photos[0][1] == b"png" and "🇺🇸" in notifier.sent_photos[0][2]
+    assert notifier.photos[0][1] == b"png" and "🇺🇸" in notifier.photos[0][2]

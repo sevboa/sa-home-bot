@@ -2,11 +2,10 @@ import asyncio
 
 from sa_home_bot.bot import wake_state
 from sa_home_bot.bot.node_view import NODE_DOWN_TEXT
-from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.bot.swarm_view import REMOTE_STUB_TEXT, build_swarm_view
 from sa_home_bot.config import WakeConfig
 from sa_home_bot.subscriptions.models import Subscription
-from sa_home_bot.wake_core import PEER_TIMEOUT_S, find_lan_waker, wait_for_service
+from sa_home_bot.wake_core import PEER_TIMEOUT_S
 from tests.unit.support.fakes import FakeNodeLink as SupportNodeLink
 from tests.unit.swarm_support import DeadNodeLink
 
@@ -229,45 +228,3 @@ async def test_swarm_offline_node_no_button_without_cache(store):
     _, keyboard = await build_swarm_view(link, _sub("nodes", "wake"), store=store)
     codes = [b.callback_data for row in keyboard.inline_keyboard for b in row] if keyboard else []
     assert not any(c.startswith("st:wake:") for c in codes)
-
-
-async def test_find_lan_waker_picks_matching_broadcast(store):
-    own = {**OWN_STATE, "wake": ALFRED_WAKE}
-    link = FakeNodeLink(own=own, routes=_routes())
-    waker = await find_lan_waker(link, store, "winpc", "192.168.0.255")
-    assert waker == "alfred"
-    assert await wake_state.cached(store, "alfred") == ALFRED_WAKE
-
-
-async def test_find_lan_waker_none_without_matching_subnet(store):
-    own = {**OWN_STATE, "wake": ALFRED_WAKE}
-    link = FakeNodeLink(own=own, routes=_routes())
-    assert await find_lan_waker(link, store, "winpc", "10.0.0.255") is None
-
-
-async def test_wait_for_service_returns_true_immediately_when_reachable():
-    link = FakeNodeLink(routes={"winpc:llm": {"asleep": False}})
-    assert await wait_for_service(link, "winpc", "llm", timeout_s=5.0, interval_s=0.01) is True
-    assert link.requests == ["winpc:llm"]
-
-
-async def test_wait_for_service_polls_until_available():
-    calls = {"n": 0}
-    link = FakeNodeLink(routes={})
-
-    async def flaky_get_state(dst=None):
-        calls["n"] += 1
-        if calls["n"] < 3:
-            raise ServiceUnavailableError("ещё нет")
-        return {"asleep": False}
-
-    link.get_state = flaky_get_state
-    ok = await wait_for_service(link, "winpc", "llm", timeout_s=5.0, interval_s=0.01)
-    assert ok is True
-    assert calls["n"] == 3
-
-
-async def test_wait_for_service_gives_up_after_timeout():
-    link = FakeNodeLink(routes={})
-    ok = await wait_for_service(link, "winpc", "llm", timeout_s=0.05, interval_s=0.01)
-    assert ok is False

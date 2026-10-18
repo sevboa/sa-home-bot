@@ -26,6 +26,7 @@ from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
+from sa_home_bot.utils.plural import plural_ru
 
 log = logging.getLogger(__name__)
 
@@ -59,27 +60,16 @@ class JustAdmitted(Filter):
         return admission is not None
 
 
-def _plural(n: int, one: str, few: str, many: str) -> str:
-    tail = n % 100
-    if 11 <= tail <= 14:
-        return many
-    if tail % 10 == 1:
-        return one
-    if tail % 10 in (2, 3, 4):
-        return few
-    return many
-
-
 def _format_expiry(expires: datetime) -> str:
     left = expires - datetime.now(tz=UTC)
     total_minutes = max(-(-int(left.total_seconds()) // 60), 0)
     if total_minutes < 90:
-        return f"{total_minutes} {_plural(total_minutes, 'минута', 'минуты', 'минут')}"
+        return f"{total_minutes} {plural_ru(total_minutes, 'минута', 'минуты', 'минут')}"
     total_hours = -(-total_minutes // 60)
     if total_hours < 48:
-        return f"{total_hours} {_plural(total_hours, 'час', 'часа', 'часов')}"
+        return f"{total_hours} {plural_ru(total_hours, 'час', 'часа', 'часов')}"
     days = -(-total_hours // 24)
-    return f"{days} {_plural(days, 'день', 'дня', 'дней')}"
+    return f"{days} {plural_ru(days, 'день', 'дня', 'дней')}"
 
 
 def _parse_invite_hours(raw: str | None) -> float | None:

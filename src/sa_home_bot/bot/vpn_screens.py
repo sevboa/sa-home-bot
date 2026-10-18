@@ -14,7 +14,7 @@ from sa_home_bot.bot import (
     vpn_wizard,
 )
 from sa_home_bot.bot import vpn_check_view as check_view
-from sa_home_bot.bot.ui.keyboards import button, markup
+from sa_home_bot.bot.ui.keyboards import back_row, button, markup
 from sa_home_bot.bot.vpn_nodes import server_label
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.vpn import protocol as vpn_protocol
@@ -114,7 +114,7 @@ def list_keyboard(
                 button(vpn_keyboards.NEW_DEVICE_TEXT, _cb.card_cb(_cb.SCREEN_NEW)),
             ]
         )
-    rows.append(vpn_keyboards.back_row(_cb.home_cb()))
+    rows.append(back_row(_cb.home_cb()))
     return markup(*rows)
 
 
@@ -158,7 +158,7 @@ def device_card_keyboard(
         rows.append([button("🗑 Удалить устройство", _cb.card_cb(_cb.SCREEN_DELETE, device.key))])
     if vpn_report.can_report(subscription):
         rows.append([vpn_report.report_button(device.key)])
-    rows.append(vpn_keyboards.back_row(_cb.card_cb(_cb.SCREEN_LIST), "⬅️ К устройствам"))
+    rows.append(back_row(_cb.card_cb(_cb.SCREEN_LIST), "⬅️ К устройствам"))
     return markup(*rows)
 
 
@@ -185,7 +185,7 @@ def server_picker_keyboard(servers: list[dict]) -> InlineKeyboardMarkup:
         ]
         for server in servers
     ]
-    rows.append(vpn_keyboards.back_row(_cb.home_cb()))
+    rows.append(back_row(_cb.home_cb()))
     return markup(*rows)
 
 
@@ -211,5 +211,5 @@ def transport_picker_keyboard(
                 )
             ]
         )
-    rows.append(vpn_keyboards.back_row(_cb.home_cb()))
+    rows.append(back_row(_cb.home_cb()))
     return markup(*rows)

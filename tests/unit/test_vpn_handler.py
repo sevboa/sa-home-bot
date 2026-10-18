@@ -20,6 +20,7 @@ from sa_home_bot.proto.messages import ERR_UNKNOWN_ACTION, ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import SOURCE_GUEST, Subscription
 from sa_home_bot.vpn import protocol as vpn_protocol
+from tests.unit.support.fakes import FakeNotifier
 
 from .vpn_support import (
     ADMIN,
@@ -28,7 +29,6 @@ from .vpn_support import (
     FakeCallback,
     FakeMessage,
     FakeNodeLink,
-    FakeNotifier,
     make_config,
     new_pending,
 )
@@ -556,7 +556,7 @@ async def test_apk_first_click_shows_faq_list_not_file():
     await vpn_handlers.handle_action(callback, link, notifier, make_config(), GUEST, new_pending())
     assert callback.message.edits[-1].startswith("❓")
     assert link.calls == []
-    assert notifier.sent_documents == []
+    assert notifier.documents == []
 
 
 async def test_apk_send_click_delivers_file_and_hides_button():
@@ -564,7 +564,7 @@ async def test_apk_send_click_delivers_file_and_hides_button():
     notifier = FakeNotifier()
     callback = FakeCallback("act:vpn:apk:send", chat_id=777)
     await vpn_handlers.handle_action(callback, link, notifier, make_config(), GUEST, new_pending())
-    assert notifier.sent_documents[0][:2] == (777, "cached-id")
+    assert notifier.documents[0][:2] == (777, "cached-id")
     assert callback.message.reply_markup_cleared
 
 
@@ -591,11 +591,11 @@ async def test_issue_first_device_sends_file_first_then_qr_button():
     callback = FakeCallback("act:vpn:issue", chat_id=777)
     await vpn_handlers.handle_action(callback, link, notifier, make_config(), GUEST, new_pending())
 
-    assert notifier.sent_documents and notifier.sent_documents[0][0] == 777
-    assert b"SECRET" in notifier.sent_documents[0][1]
-    assert notifier.sent_photos == []
-    assert notifier.sent_direct and notifier.sent_direct[0][0] == 777
-    assert notifier.sent_direct_markups[0] is not None
+    assert notifier.documents and notifier.documents[0][0] == 777
+    assert b"SECRET" in notifier.documents[0][1]
+    assert notifier.photos == []
+    assert notifier.sent and notifier.sent[0][0] == 777
+    assert notifier.markups[0] is not None
 
 
 async def test_issue_second_device_sends_qr_first_then_config_button():
@@ -611,10 +611,10 @@ async def test_issue_second_device_sends_qr_first_then_config_button():
     callback = FakeCallback("act:vpn:issue", chat_id=777)
     await vpn_handlers.handle_action(callback, link, notifier, make_config(), GUEST, new_pending())
 
-    assert notifier.sent_photos and notifier.sent_photos[0][0] == 777
-    assert notifier.sent_documents == []
-    assert notifier.sent_direct and notifier.sent_direct[0][0] == 777
-    assert notifier.sent_direct_markups[0] is not None
+    assert notifier.photos and notifier.photos[0][0] == 777
+    assert notifier.documents == []
+    assert notifier.sent and notifier.sent[0][0] == 777
+    assert notifier.markups[0] is not None
 
 
 async def test_config_button_delivers_file_and_hides_itself():
@@ -631,14 +631,14 @@ async def test_config_button_delivers_file_and_hides_itself():
     callback = FakeCallback("act:vpn:issue", chat_id=777)
     await vpn_handlers.handle_action(callback, link, notifier, make_config(), GUEST, pending)
 
-    button_markup = notifier.sent_direct_markups[0]
+    button_markup = notifier.markups[0]
     token_button = button_markup.inline_keyboard[0][0]
     callback2 = FakeCallback(token_button.callback_data, chat_id=777)
     await vpn_handlers.handle_action(callback2, link, notifier, make_config(), GUEST, pending)
 
-    assert notifier.sent_documents
-    assert b"SECRET" in notifier.sent_documents[0][1]
-    assert notifier.sent_documents[0][0] == 777
+    assert notifier.documents
+    assert b"SECRET" in notifier.documents[0][1]
+    assert notifier.documents[0][0] == 777
     assert callback2.message.reply_markup_cleared
 
 
@@ -656,13 +656,13 @@ async def test_config_button_reveals_qr_when_file_was_first():
     callback = FakeCallback("act:vpn:issue", chat_id=777)
     await vpn_handlers.handle_action(callback, link, notifier, make_config(), GUEST, pending)
 
-    button_markup = notifier.sent_direct_markups[0]
+    button_markup = notifier.markups[0]
     token_button = button_markup.inline_keyboard[0][0]
     callback2 = FakeCallback(token_button.callback_data, chat_id=777)
     await vpn_handlers.handle_action(callback2, link, notifier, make_config(), GUEST, pending)
 
-    assert notifier.sent_photos
-    assert notifier.sent_photos[0][0] == 777
+    assert notifier.photos
+    assert notifier.photos[0][0] == 777
     assert callback2.message.reply_markup_cleared
 
 
@@ -679,14 +679,14 @@ async def test_config_button_used_twice_refuses_second_time():
     pending = new_pending()
     callback = FakeCallback("act:vpn:issue", chat_id=777)
     await vpn_handlers.handle_action(callback, link, notifier, make_config(), GUEST, pending)
-    token_button = notifier.sent_direct_markups[0].inline_keyboard[0][0]
+    token_button = notifier.markups[0].inline_keyboard[0][0]
 
     callback2 = FakeCallback(token_button.callback_data, chat_id=777)
     await vpn_handlers.handle_action(callback2, link, notifier, make_config(), GUEST, pending)
     callback3 = FakeCallback(token_button.callback_data, chat_id=777)
     await vpn_handlers.handle_action(callback3, link, notifier, make_config(), GUEST, pending)
 
-    assert len(notifier.sent_documents) == 1
+    assert len(notifier.documents) == 1
     assert callback3.answered
 
 
@@ -850,10 +850,10 @@ async def test_picked_reality_transport_issues_and_sends_singbox_json():
 
     issue = [c for c in link.calls if c[0] == vpn_protocol.ACTION_ISSUE]
     assert issue and issue[0][1].get("transport") == "reality"
-    assert notifier.sent_documents and notifier.sent_documents[0][0] == 777
-    assert b'"outbounds"' in notifier.sent_documents[0][1]
-    assert "VLESS" in (notifier.sent_documents[0][2] or "")
-    assert any("hiddify://import" in text for _, text in notifier.sent_direct)
+    assert notifier.documents and notifier.documents[0][0] == 777
+    assert b'"outbounds"' in notifier.documents[0][1]
+    assert "VLESS" in (notifier.documents[0][2] or "")
+    assert any("hiddify://import" in text for _, text in notifier.sent)
 
 
 def _book(*guests: Subscription) -> SubscriptionBook:
@@ -902,8 +902,8 @@ async def test_set_access_grants_quota_and_tells_the_guest():
     call = next(c for c in link.calls if c[0] == vpn_protocol.ACTION_SET_ACCESS)
     assert call[1] == {"chat_id": 777, "base_gb": 200, "allowed": True}
     assert link.dsts[-1].node == "wooster"
-    assert notifier.sent_direct and notifier.sent_direct[0][0] == 777
-    assert "200 ГБ" in notifier.sent_direct[0][1]
+    assert notifier.sent and notifier.sent[0][0] == 777
+    assert "200 ГБ" in notifier.sent[0][1]
 
 
 async def test_closing_access_does_not_touch_the_quota():

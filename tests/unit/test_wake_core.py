@@ -151,9 +151,7 @@ async def test_warmup_budget_outlives_a_cold_model_load(store):
 
 async def test_warmup_timeout_can_be_narrowed_by_caller(store):
     link = WarmupSpy(OWN_STATE, routes={"winpc:llm": {"asleep": True}})
-    await wake_core.ensure_service_ready(
-        link, store, "winpc", "llm", warmup_timeout_s=42.0
-    )
+    await wake_core.ensure_service_ready(link, store, "winpc", "llm", warmup_timeout_s=42.0)
     assert link.warmup_timeouts == [42.0]
 
 
@@ -171,3 +169,45 @@ async def test_failed_warmup_is_reported_with_its_reason(store, caplog, outcome)
     text = caplog.text
     assert "winpc" in text and "llm" in text
     assert ("Ollama" in text) or ("TimeoutError" in text)
+
+
+async def test_find_lan_waker_picks_matching_broadcast(store):
+    link = FakeNodeLink(OWN_STATE)
+    waker = await wake_core.find_lan_waker(link, store, "winpc", "192.168.0.255")
+    assert waker == "alfred"
+    assert await wake_state.cached(store, "alfred") == ALFRED_WAKE
+
+
+async def test_find_lan_waker_none_without_matching_subnet(store):
+    link = FakeNodeLink(OWN_STATE)
+    assert await wake_core.find_lan_waker(link, store, "winpc", "10.0.0.255") is None
+
+
+async def test_wait_for_service_returns_true_immediately_when_reachable():
+    link = FakeNodeLink({}, {"winpc:llm": {"asleep": False}})
+    assert (
+        await wake_core.wait_for_service(link, "winpc", "llm", timeout_s=5.0, interval_s=0.01)
+        is True
+    )
+
+
+async def test_wait_for_service_polls_until_available():
+    calls = {"n": 0}
+    link = FakeNodeLink({})
+
+    async def flaky_get_state(dst=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise ServiceUnavailableError("ещё нет")
+        return {"asleep": False}
+
+    link.get_state = flaky_get_state
+    ok = await wake_core.wait_for_service(link, "winpc", "llm", timeout_s=5.0, interval_s=0.01)
+    assert ok is True
+    assert calls["n"] == 3
+
+
+async def test_wait_for_service_gives_up_after_timeout():
+    link = FakeNodeLink({})
+    ok = await wake_core.wait_for_service(link, "winpc", "llm", timeout_s=0.05, interval_s=0.01)
+    assert ok is False

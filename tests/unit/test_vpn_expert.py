@@ -5,7 +5,6 @@ import pytest
 from sa_home_bot.bot import commands, vpn_callbacks, vpn_nodes, vpn_screens
 from sa_home_bot.bot import vpn_devices as vd
 from sa_home_bot.bot import vpn_settings as vs
-from sa_home_bot.bot.handlers import vpn as h
 from sa_home_bot.proto.messages import ProtoError
 from sa_home_bot.vpn import protocol as vpn_protocol
 
@@ -93,7 +92,7 @@ def test_all_callbacks_fit_64_bytes():
             servers, subscription=ADMIN, self_serve_nodes=["jeeves", "wooster"]
         ),
         vpn_screens.list_keyboard(vd.build_devices(servers), subscription=ADMIN),
-        h._card_keyboard_for_device(device, servers, subscription=ADMIN),
+        vpn_screens.device_card_keyboard(device, servers, subscription=ADMIN),
         vs.reissue_select_keyboard(
             device, vs.reissue_connections(device), vd.countries_of(servers), 5
         ),
@@ -215,7 +214,7 @@ async def test_fix_reissues_only_broken_in_that_country_and_delivers_secret():
         if act == vpn_protocol.ACTION_REISSUE
     ]
     assert reissues == [("wooster", {"chat_id": 778, "device_label": LABEL, "transport": "awg"})]
-    assert notifier.sent_direct
+    assert notifier.sent
     assert cb.message.edits
 
 

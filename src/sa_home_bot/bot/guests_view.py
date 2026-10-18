@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
 from html import escape
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -10,6 +9,7 @@ from sa_home_bot.bot import commands, guest_rights
 from sa_home_bot.bot.invites import format_code
 from sa_home_bot.bot.pagination import clamp_offset, nav_row  # noqa: F401
 from sa_home_bot.subscriptions.models import Subscription
+from sa_home_bot.utils.timefmt import format_local
 
 GUEST_PAGE_SIZE = 10
 CODE_PAGE_SIZE = 5
@@ -19,10 +19,7 @@ _MAX_NAME_LEN = 40
 
 
 def format_local_time(iso: str) -> str:
-    try:
-        return datetime.fromisoformat(iso).astimezone().strftime("%Y-%m-%d %H:%M")
-    except ValueError:
-        return iso
+    return format_local(iso, "%Y-%m-%d %H:%M", tolerant=True)
 
 
 def build_list_view(

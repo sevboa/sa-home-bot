@@ -5,6 +5,7 @@ from sa_home_bot.bot.handlers import vpn as handlers
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings, VpnConfig
 from sa_home_bot.subscriptions.models import Subscription
+from tests.unit.support.fakes import FakeNotifier
 
 ADMIN = Subscription(chat_id=1, name="admin", allowed_commands=frozenset({"*"}))
 GUEST = Subscription(
@@ -84,42 +85,6 @@ class FakeNodeLink:
         return self._result
 
 
-class FakeNotifier:
-    def __init__(self) -> None:
-        self.sent_direct: list[tuple[int, str]] = []
-        self.sent_direct_markups: list[object] = []
-        self.sent_documents: list[tuple[int, object, str | None]] = []
-        self.sent_photos: list[tuple[int, object, str | None]] = []
-        self.deleted: list[tuple[int, int]] = []
-
-    async def send_direct(
-        self,
-        chat_id,
-        text,
-        reply_to_message_id=None,
-        reply_markup=None,
-        message_thread_id=None,
-    ):
-        self.sent_direct.append((chat_id, text))
-        self.sent_direct_markups.append(reply_markup)
-        return len(self.sent_direct)
-
-    async def send_document(
-        self, chat_id, document, *, filename=None, caption=None, message_thread_id=None
-    ):
-        self.sent_documents.append((chat_id, document, caption))
-        return (len(self.sent_documents), "tg-file-id")
-
-    async def send_photo(
-        self, chat_id, photo, *, filename=None, caption=None, message_thread_id=None
-    ):
-        self.sent_photos.append((chat_id, photo, caption))
-        return len(self.sent_photos)
-
-    async def delete_message(self, chat_id, message_id):
-        self.deleted.append((chat_id, message_id))
-
-
 def make_config(ttl_s: float = 600.0) -> Settings:
     return Settings(vpn=VpnConfig(config_message_ttl_s=ttl_s))
 
@@ -184,7 +149,7 @@ async def press(
     store=None,
 ):
     link = link or FakeNodeLink()
-    notifier = notifier or FakeNotifier()
+    notifier = notifier or FakeNotifier(first_message_id=0)
     callback = FakeCallback(data, chat_id=chat_id)
     if user is not None:
         callback.from_user = user

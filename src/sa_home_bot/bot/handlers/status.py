@@ -6,7 +6,7 @@ from aiogram.types import CallbackQuery, Message
 
 from sa_home_bot.bot import commands, node_view, status_view, swarm_view
 from sa_home_bot.bot.service_link import ServiceLink
-from sa_home_bot.bot.ui.callback_data import int_or
+from sa_home_bot.bot.ui.callback_data import int_or, part
 from sa_home_bot.config import Settings
 from sa_home_bot.subscriptions.models import Subscription
 
@@ -30,12 +30,8 @@ async def cmd_status_full(message: Message, node_link: ServiceLink) -> None:
     )
 
 
-def _part(parts: list[str], index: int) -> str | None:
-    return parts[index] if len(parts) > index else None
-
-
 def _node_arg(parts: list[str], index: int) -> str | None:
-    return _part(parts, index) or None
+    return part(parts, index) or None
 
 
 @router.callback_query(F.data.startswith(f"{commands.CALLBACK_PREFIX}:"))
@@ -62,7 +58,7 @@ async def on_status_action(
         await callback.message.answer(text, reply_markup=keyboard)
     elif code == commands.SERVICE_CARD_CODE:
         text, keyboard = await node_view.build_service_card_view(
-            node_link, subscription, _part(parts, 2) or "", _node_arg(parts, 3)
+            node_link, subscription, part(parts, 2) or "", _node_arg(parts, 3)
         )
         await callback.message.answer(text, reply_markup=keyboard)
     elif code == "full":
@@ -77,7 +73,7 @@ async def on_status_action(
         )
         await callback.message.answer(text, reply_markup=keyboard)
     elif code == commands.DOWNTIME_PAGE_CODE:
-        offset = max(0, int_or(_part(parts, 2)))
+        offset = max(0, int_or(part(parts, 2)))
         text, keyboard = await status_view.build_downtime_page(
             node_link, offset, node_id=_node_arg(parts, 3)
         )

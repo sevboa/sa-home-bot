@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sa_home_bot.bot import vpn_callbacks, vpn_keyboards
-from sa_home_bot.bot.ui.keyboards import button, markup
+from sa_home_bot.bot.ui.keyboards import back_row, button, markup
 from sa_home_bot.vpn import protocol as vpn_protocol
 
 PREFIX = "w"
@@ -117,7 +117,7 @@ def intro_keyboard() -> InlineKeyboardMarkup:
 def pick_keyboard() -> InlineKeyboardMarkup:
     return markup(
         [button(text, create_cb(code)) for code, text in PICK_BUTTONS.items()],
-        vpn_keyboards.back_row(vpn_callbacks.home_cb()),
+        back_row(vpn_callbacks.home_cb()),
     )
 
 
@@ -153,7 +153,7 @@ def fail_keyboard(step: str, platform: str, key: str) -> InlineKeyboardMarkup:
         tail = f"{step}{ctx(platform, key)}"
         rows.append([button("🔁 Попробовать другую страну", card_cb(OTHER, tail))])
     rows.append(_help_button(step, platform, key))
-    rows.append(vpn_keyboards.back_row(_step_callback(step, platform, key), BACK_TO_STEP_TEXT))
+    rows.append(back_row(_step_callback(step, platform, key), BACK_TO_STEP_TEXT))
     return markup(*rows)
 
 
@@ -163,7 +163,7 @@ def back_to_step_keyboard(
     rows = []
     if help_button:
         rows.append(_help_button(step, platform, key))
-    rows.append(vpn_keyboards.back_row(_step_callback(step, platform, key), BACK_TO_STEP_TEXT))
+    rows.append(back_row(_step_callback(step, platform, key), BACK_TO_STEP_TEXT))
     return markup(*rows)
 
 
@@ -171,7 +171,7 @@ def create_failed_keyboard(platform: str) -> InlineKeyboardMarkup:
     return markup(
         [button(vpn_keyboards.RETRY_TEXT, create_cb(platform))],
         _help_button(NOT_CREATED, platform, ""),
-        vpn_keyboards.back_row(vpn_callbacks.home_cb()),
+        back_row(vpn_callbacks.home_cb()),
     )
 
 

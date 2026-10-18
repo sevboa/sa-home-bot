@@ -3,7 +3,7 @@ from __future__ import annotations
 import html
 
 from sa_home_bot.bot import vpn_callbacks, vpn_devices, vpn_keyboards
-from sa_home_bot.bot.ui.keyboards import button, markup
+from sa_home_bot.bot.ui.keyboards import back_row, button, markup
 from sa_home_bot.domain import vpn_check
 from sa_home_bot.vpn import protocol as vpn_protocol
 
@@ -128,5 +128,5 @@ def status_keyboard():
             ),
             button("↻ Обновить", vpn_callbacks.vpn_callback(vpn_protocol.ACTION_CHECK_STATUS)),
         ],
-        vpn_keyboards.back_row(vpn_callbacks.home_cb()),
+        back_row(vpn_callbacks.home_cb()),
     )

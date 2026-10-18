@@ -8,7 +8,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sa_home_bot.bot import vpn_callbacks, vpn_keyboards
 from sa_home_bot.bot import vpn_devices as vd
 from sa_home_bot.bot import vpn_wizard as wizard
-from sa_home_bot.bot.ui.keyboards import button, markup
+from sa_home_bot.bot.ui.keyboards import back_row, button, markup
 from sa_home_bot.config import VpnConfig
 from sa_home_bot.domain import vpn_check
 from sa_home_bot.vpn import protocol as vpn_protocol
@@ -68,7 +68,7 @@ def pick_keyboard(key: str) -> InlineKeyboardMarkup:
     return markup(
         [button("⚡ AmneziaVPN", vpn_callbacks.card_cb(vpn_callbacks.SCREEN_AWG, key))],
         [button(f"🛡 {vd.TRANSPORT_NAME[vd.REALITY]}", _issue_cb(vpn_callbacks.KIND_VLESS, key))],
-        vpn_keyboards.back_row(_device_cb(key)),
+        back_row(_device_cb(key)),
     )
 
 
@@ -156,7 +156,7 @@ def awg_pick_keyboard(key: str, servers: list[dict]) -> InlineKeyboardMarkup:
         ]
         for server in servers
     ]
-    rows.append(vpn_keyboards.back_row(vpn_callbacks.card_cb(vpn_callbacks.SCREEN_PICK, key)))
+    rows.append(back_row(vpn_callbacks.card_cb(vpn_callbacks.SCREEN_PICK, key)))
     return markup(*rows)
 
 
@@ -232,19 +232,19 @@ def new_device_keyboard() -> InlineKeyboardMarkup:
             button(text, _issue_cb(vpn_callbacks.KIND_NEW, code))
             for code, text in wizard.PICK_BUTTONS.items()
         ],
-        vpn_keyboards.back_row(vpn_callbacks.card_cb(vpn_callbacks.SCREEN_LIST)),
+        back_row(vpn_callbacks.card_cb(vpn_callbacks.SCREEN_LIST)),
     )
 
 
 def create_failed_keyboard(platform: str) -> InlineKeyboardMarkup:
     return markup(
         [button(vpn_keyboards.RETRY_TEXT, _issue_cb(vpn_callbacks.KIND_NEW, platform))],
-        vpn_keyboards.back_row(vpn_callbacks.card_cb(vpn_callbacks.SCREEN_LIST)),
+        back_row(vpn_callbacks.card_cb(vpn_callbacks.SCREEN_LIST)),
     )
 
 
 def back_keyboard(key: str) -> InlineKeyboardMarkup:
-    return markup(vpn_keyboards.back_row(vpn_callbacks.card_cb(vpn_callbacks.SCREEN_PICK, key)))
+    return markup(back_row(vpn_callbacks.card_cb(vpn_callbacks.SCREEN_PICK, key)))
 
 
 def reissue_connections(device: vd.Device) -> list[vd.Connection]:

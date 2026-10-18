@@ -9,7 +9,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sa_home_bot import wake_core
 from sa_home_bot.bot import apps_view, commands, node_view, swarm_panel, swarm_view
 from sa_home_bot.bot.service_link import ServiceLink
-from sa_home_bot.bot.ui.callback_data import int_or
+from sa_home_bot.bot.ui.callback_data import int_or, part
 from sa_home_bot.bot.ui.redraw import redraw
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
@@ -22,10 +22,6 @@ log = logging.getLogger(__name__)
 router = Router(name="swarm_panel")
 
 ScreenView = tuple[str, InlineKeyboardMarkup | None]
-
-
-def _part(parts: list[str], index: int) -> str | None:
-    return parts[index] if len(parts) > index else None
 
 
 async def _collect_reports(
@@ -97,25 +93,25 @@ async def _render_screen(
         if subscription is None:
             return None
         app_actions = await apps_link.actions()
-        offset = int_or(_part(parts, 2))
+        offset = int_or(part(parts, 2))
         return swarm_panel.build_skills_list_view(app_actions, subscription, offset)
     if code == commands.SWARM_SKILL_CODE:
         skill_text, skill_keyboard = await apps_view.run_app_skill(
-            apps_link, subscription, _part(parts, 2) or ""
+            apps_link, subscription, part(parts, 2) or ""
         )
         return swarm_panel.build_skill_card_view(skill_text, skill_keyboard)
     if code == commands.SWARM_NODES_CODE:
-        return await _nodes_view(node_link, store, subscription, int_or(_part(parts, 2)))
-    node_id = node_view.node_from_segment(_part(parts, 2))
+        return await _nodes_view(node_link, store, subscription, int_or(part(parts, 2)))
+    node_id = node_view.node_from_segment(part(parts, 2))
     if code == commands.SWARM_NODE_CODE:
         return await node_view.build_node_card_view(node_link, subscription, node_id)
     if code == commands.SWARM_SVCS_CODE:
         return await node_view.build_services_page_view(
-            node_link, subscription, node_id, int_or(_part(parts, 3))
+            node_link, subscription, node_id, int_or(part(parts, 3))
         )
     if code == commands.SWARM_SVC_CODE:
         return await node_view.build_service_card_view(
-            node_link, subscription, _part(parts, 3) or "", node_id
+            node_link, subscription, part(parts, 3) or "", node_id
         )
     return None
 
@@ -143,7 +139,7 @@ async def on_swarm_screen(
     subscription: Subscription | None = None,
 ) -> None:
     parts = (callback.data or "").split(":")
-    code = _part(parts, 1) or ""
+    code = part(parts, 1) or ""
 
     if code == commands.SWARM_UPDATE_CODE:
         await callback.answer("Проверяю обновления…")
@@ -154,7 +150,7 @@ async def on_swarm_screen(
 
     if code == commands.SWARM_SKILL_CODE and (
         subscription is None
-        or not subscription.allows_action(_part(parts, 2) or "", apps_view.APPS_SERVICE)
+        or not subscription.allows_action(part(parts, 2) or "", apps_view.APPS_SERVICE)
     ):
         await callback.answer("⛔️ Недоступно", show_alert=True)
         return

@@ -13,7 +13,6 @@ from sa_home_bot.bot.monitor_state import (
     parse_outage,
 )
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
-from sa_home_bot.bot.ui.callback_data import pack
 from sa_home_bot.bot.ui.keyboards import button
 from sa_home_bot.domain.models import KIND_CPU, KIND_GPU
 from sa_home_bot.domain.render import (
@@ -69,7 +68,7 @@ def build_status_keyboard(
     if subscription is None:
         return None
     buttons = [
-        button(_LABELS[code], pack(commands.CALLBACK_PREFIX, code, *_node_tail(node_id)))
+        button(_LABELS[code], commands.panel_callback(code, *_node_tail(node_id)))
         for code, cmd in commands.STATUS_ACTIONS.items()
         if subscription.allows_command(cmd.name)
     ]
@@ -143,7 +142,7 @@ async def build_stats_text(link: ServiceLink, dst: Address | None = None) -> str
 
 
 def _downtime_callback(offset: int, node_id: str | None = None) -> str:
-    return pack(commands.CALLBACK_PREFIX, commands.DOWNTIME_PAGE_CODE, offset, *_node_tail(node_id))
+    return commands.panel_callback(commands.DOWNTIME_PAGE_CODE, offset, *_node_tail(node_id))
 
 
 def _downtime_keyboard(

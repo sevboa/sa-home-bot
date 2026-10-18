@@ -29,12 +29,13 @@ from sa_home_bot.bot.lifecycle import (
     render_startup,
 )
 from sa_home_bot.bot.link_watch import LinkWatchMiddleware
+from sa_home_bot.bot.menu import set_bot_commands
 from sa_home_bot.bot.monitor_events import build_event_handler
 from sa_home_bot.bot.node_events import build_node_event_handler
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.pending_actions import PendingActions
 from sa_home_bot.bot.service_link import ServiceLink
-from sa_home_bot.bot.setup import build_bot, build_dispatcher, set_bot_commands
+from sa_home_bot.bot.setup import build_bot, build_dispatcher
 from sa_home_bot.bot.telegram_retry import REQUEST_TIMEOUT_S, call_with_network_retry
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.bot.torrent_pending import PendingTorrents

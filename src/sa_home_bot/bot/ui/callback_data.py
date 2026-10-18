@@ -28,3 +28,7 @@ def int_or(raw: str | None, default: int = 0) -> int:
         return int(raw) if raw is not None else default
     except ValueError:
         return default
+
+
+def part(parts: list[str], index: int) -> str | None:
+    return parts[index] if len(parts) > index else None

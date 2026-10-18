@@ -6,17 +6,12 @@ from sa_home_bot.bot import vpn_callbacks
 from sa_home_bot.bot.ui.keyboards import button, single_button
 from sa_home_bot.vpn import protocol as vpn_protocol
 
-BACK_TEXT = "⬅️ Назад"
 HOME_TEXT = "📶 На главную"
 CALL_FOR_HELP_TEXT = "🙋 Позвать на помощь"
 RETRY_TEXT = "🔁 Попробовать ещё раз"
 HELP_TEXT = "❓ Помощь"
 NEW_DEVICE_TEXT = "➕ Новое устройство"
 GRANT_EXTRA_TEXT = "➕ 100 ГБ"
-
-
-def back_row(callback_data: str, text: str = BACK_TEXT) -> list[InlineKeyboardButton]:
-    return [button(text, callback_data)]
 
 
 def done_keyboard(home_cb: str | None = None) -> InlineKeyboardMarkup:

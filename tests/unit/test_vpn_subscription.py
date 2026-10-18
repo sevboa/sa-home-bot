@@ -12,8 +12,8 @@ import pytest_asyncio
 from aiohttp.test_utils import TestClient, TestServer
 
 from sa_home_bot.bot import vpn_devices as vd
-from sa_home_bot.bot import vpn_nodes
-from sa_home_bot.bot.handlers import vpn as h
+from sa_home_bot.bot import vpn_nodes, vpn_screens
+from sa_home_bot.bot.handlers.vpn import screens as vpn_screens_handlers
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.config import RealityTransportConfig, Settings, SwarmConfig, VpnConfig
 from sa_home_bot.db.connection import Database
@@ -888,12 +888,12 @@ async def test_disabled_when_port_zero():
 def test_card_keyboard_has_hiddify_url_button_first():
     servers = _servers()
     device = vd.build_devices(servers)[0]
-    markup = h._card_keyboard_for_device(
+    markup = vpn_screens.device_card_keyboard(
         device, servers, subscription=ADMIN, page_url="https://h:8444/s/tok"
     )
     first = markup.inline_keyboard[0][0]
     assert first.text == "📶 Настройки на странице" and first.url == "https://h:8444/s/tok"
-    plain = h._card_keyboard_for_device(device, servers, subscription=ADMIN)
+    plain = vpn_screens.device_card_keyboard(device, servers, subscription=ADMIN)
     assert all(b.url is None for row in plain.inline_keyboard for b in row)
 
 
@@ -908,9 +908,9 @@ async def test_subscription_page_url_prefers_https_and_skips_without_vless(monke
         return answers
 
     monkeypatch.setattr(vpn_nodes, "fanout", fake_fanout)
-    assert await h._subscription_page_url(object(), 5, device) == "https://b/s/t"  # type: ignore[arg-type]
+    assert await vpn_screens_handlers.subscription_page_url(object(), 5, device) == "https://b/s/t"  # type: ignore[arg-type]
     answers.clear()
-    assert await h._subscription_page_url(object(), 5, device) is None  # type: ignore[arg-type]
+    assert await vpn_screens_handlers.subscription_page_url(object(), 5, device) is None  # type: ignore[arg-type]
     assert KEY
 
 

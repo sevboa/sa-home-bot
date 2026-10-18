@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import pytest
 
-from sa_home_bot.bot import vpn_callbacks, vpn_delivery, vpn_nodes, vpn_settings, vpn_wizard
+from sa_home_bot.bot import (
+    vpn_callbacks,
+    vpn_delivery,
+    vpn_nodes,
+    vpn_screens,
+    vpn_settings,
+    vpn_wizard,
+)
 from sa_home_bot.bot import vpn_devices as vd
-from sa_home_bot.bot.handlers import vpn as h
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings, VpnConfig
 from sa_home_bot.proto.messages import ProtoError
@@ -107,9 +113,9 @@ async def test_card_has_get_settings_button_and_pick_screen():
 async def test_vless_without_handshake_sends_file_and_one_message():
     cb, link, notifier = await _press(f"act:vpn:issue:~v{KEY}")
     assert not link.of(vpn_protocol.ACTION_ISSUE)
-    assert len(notifier.sent_documents) == 1
-    assert notifier.sent_documents[0][2] == vpn_settings.VLESS_FILE_CAPTION
-    (_, text), markup = notifier.sent_direct[0], notifier.sent_direct_markups[0]
+    assert len(notifier.documents) == 1
+    assert notifier.documents[0][2] == vpn_settings.VLESS_FILE_CAPTION
+    (_, text), markup = notifier.sent[0], notifier.markups[0]
     buttons = all_buttons(markup)
     assert buttons[0].text == "🔌 Подключить" and buttons[0].url == PAGE
     assert "⚙️ Файл настроек ещё раз" not in button_texts(markup)
@@ -123,13 +129,13 @@ async def test_vless_without_handshake_sends_file_and_one_message():
 async def test_vless_with_handshake_gives_button_instead_of_file(_env):
     _env["servers"] = _servers(hs=HS)
     cb, link, notifier = await _press(f"act:vpn:issue:~v{KEY}")
-    assert notifier.sent_documents == []
-    markup = notifier.sent_direct_markups[0]
+    assert notifier.documents == []
+    markup = notifier.markups[0]
     assert button_texts(markup)[:2] == ["🔌 Подключить", "⚙️ Файл настроек ещё раз"]
     again = all_buttons(markup)[1].callback_data
     cb, _, notifier = await _press(again)
-    assert len(notifier.sent_documents) == 1
-    assert notifier.sent_documents[0][1] == b'{"singbox": 1}'
+    assert len(notifier.documents) == 1
+    assert notifier.documents[0][1] == b'{"singbox": 1}'
 
 
 async def test_vless_adds_missing_country_before_delivery(_env):
@@ -139,7 +145,7 @@ async def test_vless_adds_missing_country_before_delivery(_env):
         ({"chat_id": 778, "device_label": LABEL, "transport": "reality"}, "wooster")
     ]
     assert sorted(n for _, n in link.of(vpn_protocol.ACTION_GET_VLESS)) == ["jeeves", "wooster"]
-    text = notifier.sent_direct[0][1]
+    text = notifier.sent[0][1]
     assert "➕ Добавлено: 🇺🇸 США." in text
     assert "uuid-wooster" in text
 
@@ -149,27 +155,27 @@ async def test_vless_survives_failed_extra_country(_env):
     cb, link, notifier = await _press(
         f"act:vpn:issue:~v{KEY}", link=Link(fail_issue_on={"wooster"})
     )
-    text = notifier.sent_direct[0][1]
+    text = notifier.sent[0][1]
     assert "uuid-jeeves" in text and "uuid-wooster" not in text and "Добавлено" not in text
 
 
 async def test_vless_without_subscription_page_has_no_connect_button(_env):
     _env["page"] = None
     _, _, notifier = await _press(f"act:vpn:issue:~v{KEY}")
-    assert "🔌 Подключить" not in button_texts(notifier.sent_direct_markups[0])
+    assert "🔌 Подключить" not in button_texts(notifier.markups[0])
 
 
 async def test_vless_qr_buttons_are_independent_and_secrets_get_deleted():
     pend = PendingVpnSecrets()
     cb, link, notifier = await _press(f"act:vpn:issue:~v{KEY}", pend=pend)
-    qr = [b for b in all_buttons(notifier.sent_direct_markups[0]) if b.text.startswith("📷")]
+    qr = [b for b in all_buttons(notifier.markups[0]) if b.text.startswith("📷")]
     assert len(qr) == 2
     cb2, _, notifier2 = await _press(qr[0].callback_data, pend=pend)
-    assert len(notifier2.sent_photos) == 1 and "🇳🇱" in notifier2.sent_photos[0][2]
+    assert len(notifier2.photos) == 1 and "🇳🇱" in notifier2.photos[0][2]
     from types import SimpleNamespace
 
     left = vpn_delivery.without_button(
-        SimpleNamespace(reply_markup=notifier.sent_direct_markups[0]), qr[0].callback_data
+        SimpleNamespace(reply_markup=notifier.markups[0]), qr[0].callback_data
     )
     assert button_texts(left) == ["🔌 Подключить", "📷 QR 🇺🇸"]
     only = SimpleNamespace(reply_markup=left)
@@ -180,15 +186,15 @@ async def test_vless_qr_buttons_are_independent_and_secrets_get_deleted():
 
 async def test_vless_refused_in_group_chat():
     cb, link, notifier = await _press(f"act:vpn:issue:~v{KEY}", chat_id=-100)
-    assert not link.calls and not notifier.sent_direct
+    assert not link.calls and not notifier.sent
     assert cb.answered[0][1].get("show_alert")
 
 
 async def test_settings_file_flag_off_means_no_file_and_no_button(_env):
     cfg = Settings(vpn=VpnConfig(wizard_settings_file=False))
     _, _, notifier = await _press(f"act:vpn:issue:~v{KEY}", cfg=cfg)
-    assert notifier.sent_documents == []
-    assert "⚙️ Файл настроек ещё раз" not in button_texts(notifier.sent_direct_markups[0])
+    assert notifier.documents == []
+    assert "⚙️ Файл настроек ещё раз" not in button_texts(notifier.markups[0])
 
 
 async def test_awg_country_list_marks_failing_country_in_words(_env):
@@ -207,9 +213,9 @@ async def test_awg_issue_sends_file_steps_and_buttons():
         ({"chat_id": 778, "device_label": LABEL, "transport": "awg"}, "jeeves")
     ]
     assert not link.of(vpn_protocol.ACTION_REISSUE)
-    (_, doc, caption) = notifier.sent_documents[0]
+    (_, doc, caption) = notifier.documents[0]
     assert doc.startswith(b"[Interface]") and caption == f"⚡ {LABEL} · AmneziaVPN · 🇳🇱"
-    (_, text), markup = notifier.sent_direct[0], notifier.sent_direct_markups[0]
+    (_, text), markup = notifier.sent[0], notifier.markups[0]
     assert "1. Установите именно AmneziaVPN" in text
     assert "«Открыть в AmneziaVPN»" in text
     assert f"❗️ Обязательно переименуйте добавленное подключение — например, «🇳🇱 {LABEL}»." in text
@@ -240,13 +246,13 @@ async def test_awg_existing_key_asks_before_replacing(_env):
         "Новый заменит старый — там, где стоит старый, связь пропадёт."
     )
     assert button_texts(markup) == ["Выпустить новый", "Отмена"]
-    assert not link.calls and not notifier.sent_documents
+    assert not link.calls and not notifier.documents
     cb, link, notifier = await _press(all_buttons(markup)[0].callback_data)
     assert link.of(vpn_protocol.ACTION_REISSUE) == [
         ({"chat_id": 778, "device_label": LABEL, "transport": "awg"}, "jeeves")
     ]
     assert not link.of(vpn_protocol.ACTION_ISSUE)
-    assert notifier.sent_documents and notifier.sent_direct
+    assert notifier.documents and notifier.sent
     assert cb.message.edits[-1].startswith("⚡")
 
 
@@ -260,7 +266,7 @@ async def test_awg_cancel_returns_to_country_list(_env):
 async def test_store_unavailable_text_and_apk_button():
     _, _, notifier = await _press(f"act:vpn:issue:~g{KEY}:jeeves")
     no_store = [
-        b for b in all_buttons(notifier.sent_direct_markups[0]) if b.text == "Магазин недоступен?"
+        b for b in all_buttons(notifier.markups[0]) if b.text == "Магазин недоступен?"
     ][0]
     cb, _, _ = await _press(no_store.callback_data)
     assert cb.message.answers[-1] == vpn_settings.NO_STORE_TEXT
@@ -349,7 +355,7 @@ async def test_callback_data_within_64_bytes():
         ),
         vpn_settings.awg_steps_keyboard(VpnConfig(), "act:vpn:issue:f_" + "x" * 8),
         vpn_settings.no_store_keyboard(),
-        h._card_keyboard_for_device(device, servers, subscription=GUEST_FULL),
+        vpn_screens.device_card_keyboard(device, servers, subscription=GUEST_FULL),
     ]
     for markup in markups:
         for b in all_buttons(markup):
@@ -360,7 +366,9 @@ async def test_callback_data_within_64_bytes():
 def _card_markup(page_url):
     servers = _servers()
     device = vd.build_devices(servers)[0]
-    return h._card_keyboard_for_device(device, servers, subscription=GUEST_FULL, page_url=page_url)
+    return vpn_screens.device_card_keyboard(
+        device, servers, subscription=GUEST_FULL, page_url=page_url
+    )
 
 
 def test_card_page_button_first_then_link_and_other_ways():
@@ -389,8 +397,8 @@ async def test_get_settings_sends_one_forwardable_message(monkeypatch):
 
     monkeypatch.setattr(vpn_nodes, "fanout", fake_fanout)
     cb, link, notifier = await _press(f"act:vpn:vpn_card:l{KEY}")
-    assert len(notifier.sent_direct) == 1 and not notifier.sent_documents
-    chat, text = notifier.sent_direct[0]
+    assert len(notifier.sent) == 1 and not notifier.documents
+    chat, text = notifier.sent[0]
     assert chat == 778
     assert text == (
         f"📶 <b>Настройки VPN · {LABEL}</b>\n"
@@ -399,7 +407,7 @@ async def test_get_settings_sends_one_forwardable_message(monkeypatch):
         f"{PAGE}\n"
         "Ссылку можно переслать. Не делитесь ей с чужими: по ней подключается это устройство."
     )
-    markup = notifier.sent_direct_markups[0]
+    markup = notifier.markups[0]
     buttons = all_buttons(markup)
     assert [(b.text, b.url, b.callback_data) for b in buttons] == [
         ("📶 Открыть настройки", PAGE, None)
@@ -416,9 +424,9 @@ async def test_get_settings_link_private_only_and_needs_page(monkeypatch):
 
     monkeypatch.setattr(vpn_nodes, "fanout", fake_fanout)
     cb, _, notifier = await _press(f"act:vpn:vpn_card:l{KEY}")
-    assert not notifier.sent_direct and cb.answered[0][1].get("show_alert")
+    assert not notifier.sent and cb.answered[0][1].get("show_alert")
     cb, _, notifier = await _press(f"act:vpn:vpn_card:l{KEY}", chat_id=-100)
-    assert not notifier.sent_direct and cb.answered[0][1].get("show_alert")
+    assert not notifier.sent and cb.answered[0][1].get("show_alert")
 
 
 def test_help_texts_mention_page_and_vpn_check():

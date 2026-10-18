@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -27,6 +26,7 @@ from sa_home_bot.config import Settings
 from sa_home_bot.people import claims as people_claims
 from sa_home_bot.people.book import PeopleBook
 from sa_home_bot.subscriptions.models import Subscription
+from sa_home_bot.utils.timefmt import zone_or_none
 
 log = logging.getLogger(__name__)
 
@@ -39,11 +39,9 @@ async def _owner_tz(away: AwayService, user):
     if user is not None:
         people = PeopleBook(await away.store.person_claims(), [])
         tz = people.value(user.id, people_claims.FIELD_TIMEZONE)
-        if tz:
-            try:
-                return ZoneInfo(tz)
-            except ZoneInfoNotFoundError:
-                pass
+        zone = zone_or_none(tz)
+        if zone is not None:
+            return zone
     return local_tz()
 
 

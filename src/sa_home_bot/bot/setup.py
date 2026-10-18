@@ -30,7 +30,6 @@ from sa_home_bot.bot.handlers import (
     wake,
 )
 from sa_home_bot.bot.invites import Gatekeeper
-from sa_home_bot.bot.menu import set_bot_commands  # noqa: F401
 from sa_home_bot.bot.middlewares import (
     AuthorizationMiddleware,
     CallbackAuthorizationMiddleware,

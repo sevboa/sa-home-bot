@@ -10,6 +10,7 @@ from aiogram.types import InlineKeyboardMarkup, ReplyParameters
 
 from sa_home_bot.bot.notifier import MAX_LEN, Notifier, is_permanent_send_error
 from sa_home_bot.db.store import Store
+from sa_home_bot.utils.timefmt import format_local
 
 log = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ _flush_lock = asyncio.Lock()
 
 
 def _with_late_mark(text: str, created_at: datetime) -> str:
-    mark = f"⏳ с задержкой, {created_at.astimezone().strftime('%H:%M')}"
+    mark = f"⏳ с задержкой, {format_local(created_at, '%H:%M')}"
     if len(text) + len(mark) + 2 > MAX_LEN:
         return text
     return f"{text}\n\n{mark}"

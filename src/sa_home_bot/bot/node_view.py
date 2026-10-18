@@ -9,8 +9,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sa_home_bot.bot import actions, commands, node_links, status_view
 from sa_home_bot.bot.pagination import clamp_offset, nav_row
 from sa_home_bot.bot.service_link import ServiceLink
-from sa_home_bot.bot.ui.callback_data import pack
-from sa_home_bot.bot.ui.keyboards import button
+from sa_home_bot.bot.ui.keyboards import back_row, button, refresh_row
 from sa_home_bot.proto.addresses import NODE_SERVICE, node_address
 from sa_home_bot.proto.errors import SERVICE_CALL_ERRORS
 from sa_home_bot.proto.messages import ActionSpec, Address, ServiceDescription
@@ -23,8 +22,6 @@ SERVICES_PAGE_SIZE = 6
 OWN_NODE_SEGMENT = "-"
 ACTION_ASSIGN = "assign"
 ACTION_UNASSIGN = "unassign"
-BACK_TEXT = "⬅️ Назад"
-REFRESH_TEXT = "🔄 Обновить"
 
 NODE_DOWN_TEXT = (
     "⚠️ Нода недоступна — не могу получить состояние служб. "
@@ -61,18 +58,6 @@ def node_unavailable_text(node_id: str | None) -> str:
     if node_id:
         return f"⚠️ Нода «{node_id}» недоступна (нет связи или она спит)."
     return NODE_DOWN_TEXT
-
-
-def back_row(callback_data: str) -> list[InlineKeyboardButton]:
-    return [button(BACK_TEXT, callback_data)]
-
-
-def refresh_row(callback_data: str) -> list[InlineKeyboardButton]:
-    return [button(REFRESH_TEXT, callback_data)]
-
-
-def _panel_callback(code: str, *parts: object) -> str:
-    return pack(commands.CALLBACK_PREFIX, code, *parts)
 
 
 def _since_suffix(iso: str | None) -> str:
@@ -187,17 +172,17 @@ def build_node_card_keyboard(
     rows: list[list[InlineKeyboardButton]] = list(grid.inline_keyboard) if grid else []
 
     segment = node_segment(node_id)
-    rows.append(refresh_row(_panel_callback(commands.SWARM_NODE_CODE, segment)))
+    rows.append(refresh_row(commands.panel_callback(commands.SWARM_NODE_CODE, segment)))
     if has_nodes_right:
         rows.append(
             [
                 button(
                     f"⚙️ Службы ({len(service_names)})",
-                    _panel_callback(commands.SWARM_SVCS_CODE, segment, 0),
+                    commands.panel_callback(commands.SWARM_SVCS_CODE, segment, 0),
                 )
             ]
         )
-        rows.append(back_row(_panel_callback(commands.SWARM_NODES_CODE, 0)))
+        rows.append(back_row(commands.panel_callback(commands.SWARM_NODES_CODE, 0)))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -259,7 +244,7 @@ def build_services_list_view(
         [
             button(
                 f"⚙️ {svc.get('name', '?')}"[:MAX_NAME_LEN],
-                _panel_callback(commands.SWARM_SVC_CODE, segment, svc.get("name", "?")),
+                commands.panel_callback(commands.SWARM_SVC_CODE, segment, svc.get("name", "?")),
             )
         ]
         for svc in page
@@ -273,11 +258,11 @@ def build_services_list_view(
         offset,
         SERVICES_PAGE_SIZE,
         len(services),
-        lambda o: _panel_callback(commands.SWARM_SVCS_CODE, segment, o),
+        lambda o: commands.panel_callback(commands.SWARM_SVCS_CODE, segment, o),
     )
     if nav:
         buttons.append(nav)
-    buttons.append(back_row(_panel_callback(commands.SWARM_NODE_CODE, segment)))
+    buttons.append(back_row(commands.panel_callback(commands.SWARM_NODE_CODE, segment)))
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -328,8 +313,10 @@ def build_service_card_keyboard(
     )
     rows: list[list[InlineKeyboardButton]] = list(base.inline_keyboard) if base else []
     segment = node_segment(node_id)
-    rows.append(refresh_row(_panel_callback(commands.SWARM_SVC_CODE, segment, service_name)))
-    rows.append(back_row(_panel_callback(commands.SWARM_SVCS_CODE, segment, 0)))
+    rows.append(
+        refresh_row(commands.panel_callback(commands.SWARM_SVC_CODE, segment, service_name))
+    )
+    rows.append(back_row(commands.panel_callback(commands.SWARM_SVCS_CODE, segment, 0)))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

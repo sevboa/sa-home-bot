@@ -75,7 +75,7 @@ class FakeNotifier:
         self, chat_id, document, *, filename=None, caption=None, **_options
     ):
         self.documents.append((chat_id, document, caption))
-        return 600 + len(self.documents)
+        return 600 + len(self.documents), f"file-{len(self.documents)}"
 
     async def send_voice(self, chat_id, voice, **_options):
         self.voices.append((chat_id, voice))

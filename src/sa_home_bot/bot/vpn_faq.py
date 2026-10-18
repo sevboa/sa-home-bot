@@ -5,12 +5,11 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sa_home_bot.bot import (
     vpn_callbacks,
     vpn_facts,
-    vpn_keyboards,
     vpn_report,
     vpn_settings,
     vpn_wizard,
 )
-from sa_home_bot.bot.ui.keyboards import button, markup
+from sa_home_bot.bot.ui.keyboards import back_row, button, markup
 from sa_home_bot.config import VpnConfig
 from sa_home_bot.vpn import protocol as vpn_protocol
 
@@ -63,7 +62,7 @@ def list_keyboard(*, home_cb: str, report: bool = False) -> InlineKeyboardMarkup
     if report:
         last.append(vpn_report.report_button(faq=True))
     rows.append(last)
-    rows.append(vpn_keyboards.back_row(home_cb))
+    rows.append(back_row(home_cb))
     return markup(*rows)
 
 
@@ -116,5 +115,5 @@ def answer_keyboard(code: str, cfg: VpnConfig, *, can_wizard: bool) -> InlineKey
     elif code == Q_STORE:
         rows += vpn_settings.no_store_keyboard().inline_keyboard
         rows += _hiddify_buttons(cfg)[1:]
-    rows.append(vpn_keyboards.back_row(list_cb(), BACK_BUTTON))
+    rows.append(back_row(list_cb(), BACK_BUTTON))
     return markup(*rows)

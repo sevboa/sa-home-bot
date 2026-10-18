@@ -234,7 +234,7 @@ async def test_no_file_step_by_default_page_first(_env):
     _env["servers"] = _with(LABEL)
     cb, _, notifier = await _press(f"act:vpn:vpn_card:wbi{KEY}")
     assert cb.message.edits[-1].startswith("📶 <b>Настройки VPN")
-    assert not notifier.sent_documents
+    assert not notifier.documents
 
 
 async def test_no_file_step_when_vless_already_worked(_env):
@@ -264,7 +264,7 @@ async def test_own_handshake_still_page_step(_env):
 async def test_file_step_never_in_group(_env):
     _env["servers"] = _with(LABEL)
     _, _, notifier = await _press(f"act:vpn:vpn_card:wbi{KEY}", chat_id=-100)
-    assert not notifier.sent_documents
+    assert not notifier.documents
 
 
 async def test_connect_step_has_subscription_button(_env):
@@ -308,15 +308,15 @@ def _book():
 async def test_help_notifies_owner_with_context_and_card_button(_env):
     _env["servers"] = _with(LABEL)
     cb, _, notifier = await _press(f"act:vpn:vpn_card:whci{KEY}", book=_book())
-    assert len(notifier.sent_direct) == 1
-    chat, text = notifier.sent_direct[0]
+    assert len(notifier.sent) == 1
+    chat, text = notifier.sent[0]
     assert chat == 1
     assert text.startswith(
         "⚠️ VPN: проблема у <b>Алексей</b> (@alex)\n"
         "Причина: Застрял(а) на шаге 1 из 1 (iPhone)\n"
         f"Устройство: {LABEL} · VLESS · Hiddify\n"
     )
-    reply_btn, card_btn = notifier.sent_direct_markups[0].inline_keyboard[0]
+    reply_btn, card_btn = notifier.markups[0].inline_keyboard[0]
     assert reply_btn.callback_data == "act:vpn:reply:778"
     assert card_btn.callback_data == "act:vpn:peers:g778"
     assert last_edit(cb)[0] == "✅ Передал владельцу. Ответ придёт сюда."
@@ -329,28 +329,28 @@ async def test_help_throttled_per_person(_env, monkeypatch):
     book = _book()
     _, _, n1 = await _press(f"act:vpn:vpn_card:whci{KEY}", book=book)
     cb, _, n2 = await _press(f"act:vpn:vpn_card:whci{KEY}", book=book)
-    assert len(n1.sent_direct) == 1 and not n2.sent_direct
+    assert len(n1.sent) == 1 and not n2.sent
     assert cb.answered[0][0] == ("Уже передал, ждите ответа.",)
     other, _, n3 = await _press(
         f"act:vpn:vpn_card:whci{KEY}", book=book, chat_id=779, sub=GUEST_FULL
     )
-    assert len(n3.sent_direct) == 1
+    assert len(n3.sent) == 1
     clock[0] += 601
     _, _, n4 = await _press(f"act:vpn:vpn_card:whci{KEY}", book=book)
-    assert len(n4.sent_direct) == 1
+    assert len(n4.sent) == 1
 
 
 async def test_help_when_device_not_created(_env):
     _, _, notifier = await _press("act:vpn:vpn_card:whni", book=_book())
-    assert "Причина: Не удалось подготовить подключение (iPhone)" in notifier.sent_direct[0][1]
+    assert "Причина: Не удалось подготовить подключение (iPhone)" in notifier.sent[0][1]
 
 
 async def test_help_on_check_step_and_without_book(_env):
     _env["servers"] = _with(LABEL)
     _, _, notifier = await _press(f"act:vpn:vpn_card:whdi{KEY}", book=_book())
-    assert "на проверке" in notifier.sent_direct[0][1]
+    assert "на проверке" in notifier.sent[0][1]
     cb, _, n = await _press(f"act:vpn:vpn_card:whdi{KEY}", book=None)
-    assert not n.sent_direct and "некому передать" in last_edit(cb)[0]
+    assert not n.sent and "некому передать" in last_edit(cb)[0]
 
 
 def test_every_wizard_callback_fits_64_bytes():

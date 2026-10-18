@@ -20,36 +20,6 @@ from tests.unit.tools_support import (
 _vpn_enum = partial(declared_enum, "vpn", "action")
 
 
-class _FakeNotifier:
-    def __init__(self) -> None:
-        self.sent_direct: list[tuple[int, str]] = []
-        self.sent_documents: list[tuple[int, object, str | None]] = []
-        self.sent_photos: list[tuple[int, object, str | None]] = []
-
-    async def send_direct(
-        self,
-        chat_id,
-        text,
-        reply_to_message_id=None,
-        reply_markup=None,
-        message_thread_id=None,
-    ):
-        self.sent_direct.append((chat_id, text))
-        return 1
-
-    async def send_document(
-        self, chat_id, document, *, filename=None, caption=None, message_thread_id=None
-    ):
-        self.sent_documents.append((chat_id, document, caption))
-        return (1, "tg-file-id")
-
-    async def send_photo(
-        self, chat_id, photo, *, filename=None, caption=None, message_thread_id=None
-    ):
-        self.sent_photos.append((chat_id, photo, caption))
-        return 1
-
-
 _VPN_OWN_STATE = {
     "node": "jeeves",
     "kind": "vps",

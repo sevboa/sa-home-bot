@@ -6,9 +6,9 @@ from html import escape
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from sa_home_bot.bot import guest_rights, vpn_callbacks, vpn_format, vpn_keyboards
+from sa_home_bot.bot import guest_rights, vpn_callbacks, vpn_format
 from sa_home_bot.bot.pagination import nav_row
-from sa_home_bot.bot.ui.keyboards import button, markup
+from sa_home_bot.bot.ui.keyboards import back_row, button, markup
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.vpn import protocol as vpn_protocol
 
@@ -189,7 +189,7 @@ def build_guests_view(
     nav = nav_row(offset, GUEST_PAGE_SIZE, len(guests), guests_cb)
     if nav:
         buttons.append(nav)
-    buttons.append(vpn_keyboards.back_row(vpn_callbacks.home_cb(), "⬅️ К карточке"))
+    buttons.append(back_row(vpn_callbacks.home_cb(), "⬅️ К карточке"))
     return "\n".join(lines), markup(*buttons)
 
 
@@ -257,7 +257,7 @@ def build_rights_view(guest: Subscription) -> tuple[str, InlineKeyboardMarkup]:
         ]
         for toggle in VPN_TOGGLES
     ]
-    buttons.append(vpn_keyboards.back_row(guest_cb(guest.chat_id)))
+    buttons.append(back_row(guest_cb(guest.chat_id)))
     return "\n".join(lines), markup(*buttons)
 
 
@@ -312,5 +312,5 @@ def build_location_view(guest: Subscription, server: dict) -> tuple[str, InlineK
     ]
     if allowed:
         buttons.extend(_preset_rows(chat_id, node, base_gb))
-    buttons.append(vpn_keyboards.back_row(guest_cb(chat_id)))
+    buttons.append(back_row(guest_cb(chat_id)))
     return "\n".join(lines), markup(*buttons)

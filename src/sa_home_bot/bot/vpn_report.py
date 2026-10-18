@@ -7,9 +7,9 @@ from datetime import tzinfo
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from sa_home_bot.bot import vpn_callbacks, vpn_check_view, vpn_format, vpn_keyboards, vpn_rights
+from sa_home_bot.bot import vpn_callbacks, vpn_check_view, vpn_format, vpn_rights
 from sa_home_bot.bot import vpn_devices as vd
-from sa_home_bot.bot.ui.keyboards import button, markup
+from sa_home_bot.bot.ui.keyboards import back_row, button, markup
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.vpn import protocol as vpn_protocol
 
@@ -81,7 +81,7 @@ def parse_report(value: str | None) -> tuple[str, str]:
 def menu_keyboard(key: str, *, back_cb: str) -> InlineKeyboardMarkup:
     rows = [[button(text, report_cb(code, key))] for code, (text, _reason) in REASONS.items()]
     rows.append([button(OTHER_BUTTON, report_cb(OTHER, key))])
-    rows.append(vpn_keyboards.back_row(back_cb))
+    rows.append(back_row(back_cb))
     return markup(*rows)
 
 

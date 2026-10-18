@@ -78,9 +78,9 @@ async def test_run_with_zero_mask_does_nothing():
 async def test_run_reissues_selected_pairs_and_delivers_new_settings():
     cb, link, notifier = await _press(_run(0b011), link=VlessLink(None))
     assert sorted(_reissues(link)) == [("jeeves", "reality"), ("wooster", "awg")]
-    assert notifier.sent_documents
-    assert any("Обязательно переименуйте" in t for _, t in notifier.sent_direct)
-    vless = [t for _, t in notifier.sent_direct if "VLESS · Hiddify" in t]
+    assert notifier.documents
+    assert any("Обязательно переименуйте" in t for _, t in notifier.sent)
+    vless = [t for _, t in notifier.sent if "VLESS · Hiddify" in t]
     assert vless and "Hiddify обновит подключение сам" in vless[0]
     final = cb.message.edits[-1]
     assert "✅ Перевыпущено: 🇳🇱 VLESS · Hiddify, 🇺🇸 AmneziaVPN." in final
@@ -101,7 +101,7 @@ async def test_partial_failure_reports_done_and_failed():
     assert "✅ Перевыпущено: 🇳🇱 VLESS · Hiddify." in final
     assert "🇺🇸 VLESS · Hiddify — нода занята" in final
     assert "🇺🇸 AmneziaVPN — нода занята" in final
-    assert not notifier.sent_documents
+    assert not notifier.documents
 
 
 async def test_list_changed_between_presses_resets_selection(_fanout):

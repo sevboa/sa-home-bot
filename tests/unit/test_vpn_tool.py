@@ -9,6 +9,7 @@ from sa_home_bot.proto.messages import Address, ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.vpn import protocol as vpn_protocol
+from tests.unit.support.fakes import FakeNotifier
 
 ADMIN_CHAT = 1
 GUEST_CHAT = 555
@@ -71,31 +72,6 @@ class _Link:
         return {}
 
 
-class _Notifier:
-    def __init__(self):
-        self.sent: list[tuple[int, str, object]] = []
-        self.documents: list = []
-        self.photos: list = []
-
-    async def send_direct(
-        self,
-        chat_id,
-        text,
-        reply_to_message_id=None,
-        reply_markup=None,
-        message_thread_id=None,
-        **kw,
-    ):
-        self.sent.append((chat_id, text, reply_markup))
-        return 1
-
-    async def send_document(self, *a, **kw):
-        self.documents.append((a, kw))
-
-    async def send_photo(self, *a, **kw):
-        self.photos.append((a, kw))
-
-
 @pytest.fixture(autouse=True)
 def _patched(monkeypatch):
     vpn_help.reset_throttle()
@@ -138,7 +114,7 @@ def _ctx(sub=GUEST, chat_id=GUEST_CHAT, link=None, notifier=None, **over):
         node_link=link or _Link(),
         subscription=sub,
         book=_book(),
-        notifier=notifier if notifier is not None else _Notifier(),
+        notifier=notifier if notifier is not None else FakeNotifier(),
         author="Гость",
     )
     kw.update(over)
@@ -168,11 +144,11 @@ async def test_status_without_devices():
 
 
 async def test_issue_sends_wizard_button_not_keys():
-    notifier = _Notifier()
+    notifier = FakeNotifier()
     ctx = _ctx(notifier=notifier)
     out = await ai_tools.tool_vpn(ctx, {"action": "issue", "device_label": "ignored"})
     assert out.startswith("готово")
-    chat, text, markup = notifier.sent[0]
+    chat, text, markup = notifier.sent_with_markup[0]
     assert chat == GUEST_CHAT
     buttons = [b.text for row in markup.inline_keyboard for b in row]
     assert "📱 Подключить по шагам" in buttons
@@ -182,7 +158,7 @@ async def test_issue_sends_wizard_button_not_keys():
 
 
 async def test_issue_refused_in_group_and_for_probe():
-    notifier = _Notifier()
+    notifier = FakeNotifier()
     out = await ai_tools.tool_vpn(_ctx(chat_id=-100, notifier=notifier), {"action": "issue"})
     assert out.startswith("недоступно") and not notifier.sent
     out = await ai_tools.tool_vpn(_ctx(chat_id=0, notifier=notifier), {"action": "issue"})
@@ -196,7 +172,7 @@ async def test_issue_without_vless_server():
 
 
 async def test_issue_for_recipient_admin_only_and_goes_to_recipient():
-    notifier = _Notifier()
+    notifier = FakeNotifier()
     out = await ai_tools.tool_vpn(
         _ctx(notifier=notifier), {"action": "issue", "recipient": "Наталья"}
     )
@@ -204,7 +180,7 @@ async def test_issue_for_recipient_admin_only_and_goes_to_recipient():
     ctx = _ctx(sub=ADMIN, chat_id=ADMIN_CHAT, notifier=notifier)
     out = await ai_tools.tool_vpn(ctx, {"action": "issue", "recipient": "Наталья"})
     assert out.startswith("готово")
-    assert notifier.sent[0][0] == 999222111
+    assert notifier.sent_with_markup[0][0] == 999222111
 
 
 async def test_issue_unknown_recipient():
@@ -214,12 +190,12 @@ async def test_issue_unknown_recipient():
 
 
 async def test_settings_sends_pick_screen_of_device():
-    notifier = _Notifier()
+    notifier = FakeNotifier()
     out = await ai_tools.tool_vpn(
         _ctx(notifier=notifier), {"action": "settings", "device_label": "iphone"}
     )
     assert out.startswith("готово")
-    chat, text, markup = notifier.sent[0]
+    chat, text, markup = notifier.sent_with_markup[0]
     assert chat == GUEST_CHAT and "iPhone" in text and "чем подключаться" in text
     assert not notifier.documents and not notifier.photos
     _no_secrets(out + text)
@@ -238,12 +214,12 @@ async def test_settings_private_only():
 
 
 async def test_report_goes_to_admin_with_context_and_throttles():
-    notifier = _Notifier()
+    notifier = FakeNotifier()
     ctx = _ctx(notifier=notifier)
     args = {"action": "report", "reason": "не грузит <b>сайты</b>", "device_label": "iPhone"}
     out = await ai_tools.tool_vpn(ctx, args)
     assert out.startswith("готово")
-    chat, text, markup = notifier.sent[0]
+    chat, text, markup = notifier.sent_with_markup[0]
     assert chat == ADMIN_CHAT
     assert "проблема у" in text and "Гость" in text
     assert "&lt;b&gt;" in text and "со слов человека" in text
@@ -251,13 +227,13 @@ async def test_report_goes_to_admin_with_context_and_throttles():
     assert any("Ответить" in b.text for row in markup.inline_keyboard for b in row)
     out2 = await ai_tools.tool_vpn(ctx, args)
     assert "уже передавали" in out2
-    assert len(notifier.sent) == 1
+    assert len(notifier.sent_with_markup) == 1
 
 
 async def test_report_needs_reason_and_not_for_probe():
     out = await ai_tools.tool_vpn(_ctx(), {"action": "report"})
     assert out.startswith("ошибка")
-    notifier = _Notifier()
+    notifier = FakeNotifier()
     out = await ai_tools.tool_vpn(
         _ctx(chat_id=0, notifier=notifier), {"action": "report", "reason": "x"}
     )
@@ -303,14 +279,14 @@ async def test_grant_extra_ceiling_and_probe():
 
 
 async def test_apk_defaults_to_hiddify_stores_only_amnezia_vpn_otherwise():
-    notifier = _Notifier()
+    notifier = FakeNotifier()
     sub = Subscription(chat_id=GUEST_CHAT, name="g", allowed_commands=frozenset({"apk@vpn"}))
     out = await ai_tools.tool_vpn(_ctx(sub=sub, notifier=notifier), {"action": "apk"})
     assert out.startswith("готово")
-    urls = [b.url for row in notifier.sent[0][2].inline_keyboard for b in row if b.url]
+    urls = [b.url for row in notifier.sent_with_markup[0][2].inline_keyboard for b in row if b.url]
     assert any("hiddify" in u.lower() for u in urls)
     await ai_tools.tool_vpn(_ctx(sub=sub, notifier=notifier), {"action": "apk", "app": "amnezia"})
-    assert "AmneziaVPN" in notifier.sent[1][1]
+    assert "AmneziaVPN" in notifier.sent_with_markup[1][1]
 
 
 def test_description_carries_faq_answers():

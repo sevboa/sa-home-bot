@@ -4,8 +4,8 @@ import html
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from sa_home_bot.bot import vpn_callbacks, vpn_keyboards
-from sa_home_bot.bot.ui.keyboards import button, markup, single_button
+from sa_home_bot.bot import vpn_callbacks
+from sa_home_bot.bot.ui.keyboards import back_row, button, markup, single_button
 from sa_home_bot.bot.vpn_devices import Country
 from sa_home_bot.vpn import protocol as vpn_protocol
 
@@ -54,7 +54,7 @@ def keyboard(results: list[dict], *, can_secret: bool, home_cb: str) -> InlineKe
         rows.append(qr)
     if can_secret:
         rows.append([button("⚙️ Секрет и порт", vpn_callbacks.vpn_callback(ACTION, VALUE_SECRET))])
-    rows.append(vpn_keyboards.back_row(home_cb))
+    rows.append(back_row(home_cb))
     return markup(*rows)
 
 
