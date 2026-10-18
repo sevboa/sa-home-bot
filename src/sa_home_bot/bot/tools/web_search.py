@@ -4,8 +4,8 @@ import json
 from typing import Any
 
 from sa_home_bot.bot.tools.core import NO_SWARM_LINK, ActionRight, ToolContext, ToolSpec, text_arg
-from sa_home_bot.bot.tools.memory import piggyback_graph_episode
 from sa_home_bot.graph_memory import protocol as graph_memory_protocol
+from sa_home_bot.graph_memory.client import add_episode
 from sa_home_bot.net import protocol as net_protocol
 from sa_home_bot.proto.addresses import (
     NET_ADDRESS,
@@ -48,12 +48,12 @@ async def tool_web_search(ctx: ToolContext, args: dict[str, Any]) -> str:
     results = result.get("results") or []
     if not results:
         return f"по запросу «{query}» ничего не нашлось"
-    if ctx.chat_id is not None:
-        await piggyback_graph_episode(
-            ctx,
-            _web_search_episode_text(query, results),
+    if ctx.chat_id is not None and ctx.node_link is not None:
+        await add_episode(
+            ctx.node_link,
             ctx.chat_id,
-            source=graph_memory_protocol.EPISODE_SOURCE_WEB_SEARCH,
+            _web_search_episode_text(query, results),
+            graph_memory_protocol.EPISODE_SOURCE_WEB_SEARCH,
         )
     return json.dumps(result, ensure_ascii=False)
 

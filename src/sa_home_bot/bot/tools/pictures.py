@@ -7,8 +7,8 @@ from sa_home_bot.bot import (
     image_tools,
 )
 from sa_home_bot.bot.tools.core import ActionRight, ToolContext, ToolSpec
-from sa_home_bot.bot.tools.memory import piggyback_graph_episode
 from sa_home_bot.graph_memory import protocol as graph_memory_protocol
+from sa_home_bot.graph_memory.client import add_episode
 from sa_home_bot.proto.addresses import (
     LLM_ADDRESS,
     LLM_SERVICE,
@@ -21,10 +21,10 @@ ACTION_LOOK_AT_PHOTO = "look_at_photo"
 
 async def tool_generate_image(ctx: ToolContext, args: dict[str, Any]) -> str:
     async def remember(text: str) -> None:
-        if ctx.chat_id is None:
+        if ctx.chat_id is None or ctx.node_link is None:
             return
-        await piggyback_graph_episode(
-            ctx, text, ctx.chat_id, source=graph_memory_protocol.EPISODE_SOURCE_IMAGE
+        await add_episode(
+            ctx.node_link, ctx.chat_id, text, graph_memory_protocol.EPISODE_SOURCE_IMAGE
         )
 
     return await image_tools.generate(ctx, args, remember=remember)
@@ -126,12 +126,12 @@ async def tool_look_at_photo(ctx: ToolContext, args: dict[str, Any]) -> str:
     except (ServiceUnavailableError, ProtoError, TimeoutError) as exc:
         return f"не получилось рассмотреть фото ещё раз: {exc}"
     response = str(result.get("response", "")).strip()
-    if response:
-        await piggyback_graph_episode(
-            ctx,
-            f"Фото, вопрос «{question}»: {response}",
+    if response and ctx.node_link is not None:
+        await add_episode(
+            ctx.node_link,
             ctx.chat_id,
-            source=graph_memory_protocol.EPISODE_SOURCE_LOOK_AT_PHOTO,
+            f"Фото, вопрос «{question}»: {response}",
+            graph_memory_protocol.EPISODE_SOURCE_LOOK_AT_PHOTO,
         )
     return response or "не удалось разглядеть — возможно, стоит переспросить"
 

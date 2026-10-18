@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any
+
+from sa_home_bot.utils.http import get_json_async
 
 log = logging.getLogger(__name__)
 
@@ -15,11 +14,6 @@ SNIPPET_LIMIT = 300
 
 class SearxngError(RuntimeError):
     pass
-
-
-def _get_json_sync(url: str, timeout: float) -> Any:
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
-        return json.loads(resp.read())
 
 
 def _search_url(base_url: str, query: str, language: str) -> str:
@@ -46,7 +40,7 @@ async def search(
 ) -> list[dict[str, str]]:
     url = _search_url(base_url, query, language)
     try:
-        payload = await asyncio.to_thread(_get_json_sync, url, timeout)
+        payload = await get_json_async(url, timeout)
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         raise SearxngError(str(exc)) from exc
     if not isinstance(payload, dict):

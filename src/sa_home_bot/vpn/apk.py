@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import shutil
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+from sa_home_bot.utils.http import get_json
 
 log = logging.getLogger(__name__)
 
@@ -18,16 +19,10 @@ class ApkFetchError(RuntimeError):
     pass
 
 
-def _get_json_sync(url: str, timeout: float) -> Any:
-    req = urllib.request.Request(url, headers=_HEADERS)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read())
-
-
 def latest_release_sync(repo: str, timeout: float) -> dict[str, Any]:
     url = f"https://api.github.com/repos/{repo}/releases/latest"
     try:
-        payload = _get_json_sync(url, timeout)
+        payload = get_json(url, timeout, _HEADERS)
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         raise ApkFetchError(str(exc)) from exc
     if not isinstance(payload, dict):

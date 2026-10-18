@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
 from typing import Any
 
 from sa_home_bot.bot.tools.core import (
@@ -14,15 +13,11 @@ from sa_home_bot.bot.tools.core import (
     text_arg,
 )
 from sa_home_bot.graph_memory import protocol as graph_memory_protocol
+from sa_home_bot.graph_memory.client import add_episode
 from sa_home_bot.memory import protocol as memory_protocol
 from sa_home_bot.proto.addresses import (
-    GRAPH_MEMORY_ADDRESS,
     MEMORY_ADDRESS,
 )
-from sa_home_bot.proto.errors import ServiceUnavailableError
-from sa_home_bot.proto.messages import ProtoError
-
-log = logging.getLogger(__name__)
 
 
 async def tool_memory(ctx: ToolContext, args: dict[str, Any]) -> str:
@@ -57,38 +52,16 @@ async def tool_memory(ctx: ToolContext, args: dict[str, Any]) -> str:
     )
     if isinstance(result, str):
         return result
-    if action == memory_protocol.ACTION_REMEMBER:
-        await piggyback_graph_episode(
-            ctx,
-            payload["text"],
+    if action == memory_protocol.ACTION_REMEMBER and ctx.node_link is not None:
+        await add_episode(
+            ctx.node_link,
             ctx.chat_id,
-            source=graph_memory_protocol.EPISODE_SOURCE_MEMORY_FACT,
+            payload["text"],
+            graph_memory_protocol.EPISODE_SOURCE_MEMORY_FACT,
         )
     if action == memory_protocol.ACTION_RECALL and not result.get("facts"):
         return "в памяти про это ничего нет"
     return json.dumps(result, ensure_ascii=False)
-
-
-_GRAPH_EPISODE_MAX_CHARS = 400
-
-
-async def piggyback_graph_episode(
-    ctx: ToolContext, text: str, chat_id: int, *, source: str
-) -> None:
-    if ctx.node_link is None:
-        return
-    if len(text) > _GRAPH_EPISODE_MAX_CHARS:
-        text = text[: _GRAPH_EPISODE_MAX_CHARS - 1] + "…"
-    dst = GRAPH_MEMORY_ADDRESS
-    try:
-        await ctx.node_link.command(
-            graph_memory_protocol.ACTION_ADD_EPISODE,
-            {"text": text, "chat_id": chat_id, "source": source},
-            dst=dst,
-            timeout=2.0,
-        )
-    except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
-        log.debug("graph_memory недоступна, эпизод (%s) не задублирован: %s", source, exc)
 
 
 _MEMORY_VARIANTS = VariantRights(

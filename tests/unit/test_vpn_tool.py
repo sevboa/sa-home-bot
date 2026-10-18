@@ -5,9 +5,10 @@ import pytest
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot import vpn_agent, vpn_facts, vpn_help, vpn_nodes
 from sa_home_bot.config import GuestSubscriptionConfig, Settings, SubscriptionConfig
-from sa_home_bot.proto.messages import Address
+from sa_home_bot.proto.messages import Address, ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
+from sa_home_bot.vpn import protocol as vpn_protocol
 
 ADMIN_CHAT = 1
 GUEST_CHAT = 555
@@ -290,7 +291,7 @@ async def test_usage_all_guests_requires_admin():
 async def test_grant_extra_ceiling_and_probe():
     class _Raises(_Link):
         async def command(self, action, args=None, dst=None, *, timeout=None):
-            raise ai_tools.ProtoError(ai_tools.vpn_protocol.ERR_QUOTA_CEILING, "потолок")
+            raise ProtoError(vpn_protocol.ERR_QUOTA_CEILING, "потолок")
 
     sub = Subscription(
         chat_id=GUEST_CHAT, name="g", allowed_commands=frozenset({"grant_extra@vpn"})

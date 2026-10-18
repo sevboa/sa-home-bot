@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.pending_actions import PendingActions
+from sa_home_bot.bot.tools.acquaintance import _DECL_REQUEST_ACQUAINTANCE
 from sa_home_bot.config import GuestSubscriptionConfig, Settings, SubscriptionConfig
 from sa_home_bot.people.book import PeopleBook
 from sa_home_bot.subscriptions.book import SubscriptionBook
@@ -100,7 +101,7 @@ async def test_form_creates_draft_but_sends_nothing_yet(store):
 
 
 def test_declaration_has_no_relation_type():
-    params = ai_tools._DECL_REQUEST_ACQUAINTANCE["function"]["parameters"]
+    params = _DECL_REQUEST_ACQUAINTANCE["function"]["parameters"]
     assert set(params["properties"]) == {"recipient_id"}
     names = {spec.name for spec in ai_tools.TOOLS}
     assert {"request_acquaintance", "my_acquaintances"} <= names

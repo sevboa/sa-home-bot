@@ -3,7 +3,6 @@ from __future__ import annotations
 import random
 
 from sa_home_bot.bot.tools.acquaintance import (
-    _DECL_REQUEST_ACQUAINTANCE,
     RELATION_ACQUAINTANCE,
     acquaintance_conflict,
     acquaintance_roster,
@@ -79,8 +78,6 @@ from sa_home_bot.bot.tools.torrents import tool_torrents
 from sa_home_bot.bot.tools.vpn import tool_vpn
 from sa_home_bot.bot.tools.weather import tool_get_weather
 from sa_home_bot.bot.tools.web_search import tool_web_search
-from sa_home_bot.proto.messages import ProtoError
-from sa_home_bot.vpn import protocol as vpn_protocol
 
 __all__ = [
     "ACTION_LOOK_AT_PHOTO",
@@ -92,7 +89,6 @@ __all__ = [
     "DISMISS_SLEEP",
     "DismissalBox",
     "NEED_RECIPIENT_ID",
-    "ProtoError",
     "RELATION_ACQUAINTANCE",
     "SERIAL_DEFERRED",
     "SERIAL_TOOLS",
@@ -104,7 +100,6 @@ __all__ = [
     "ToolKit",
     "ToolSpec",
     "VariantRights",
-    "_DECL_REQUEST_ACQUAINTANCE",
     "_NOTIFY_PERSONAS",
     "acquaintance_conflict",
     "acquaintance_roster",
@@ -151,5 +146,4 @@ __all__ = [
     "tool_walk",
     "tool_web_search",
     "tools_for",
-    "vpn_protocol",
 ]
