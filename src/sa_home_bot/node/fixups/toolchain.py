@@ -59,9 +59,7 @@ def _ensure_go(build_dir: Path) -> str:
         timeout=30,
     )
     if version_probe.returncode != 0 or not version_probe.stdout.strip():
-        raise FixupError(
-            f"не удалось узнать актуальную версию Go: {version_probe.stderr.strip()}"
-        )
+        raise FixupError(f"не удалось узнать актуальную версию Go: {version_probe.stderr.strip()}")
     go_version = version_probe.stdout.splitlines()[0].strip()
     tarball = build_dir / "go.tar.gz"
     download(f"https://go.dev/dl/{go_version}.linux-amd64.tar.gz", tarball, timeout=180)
@@ -82,7 +80,8 @@ def build_amneziawg_tools() -> None:
             raise FixupError(f"{prog} не найден — установите вручную и повторите nodectl fix")
     if find_executable("gcc") is None or find_executable("make") is None:
         install_package(
-            "build-essential", "gcc/make не найдены и неизвестен пакетный менеджер для build-essential"
+            "build-essential",
+            "gcc/make не найдены и неизвестен пакетный менеджер для build-essential",
         )
 
     with tempfile.TemporaryDirectory(prefix="sa-home-awg-build-") as build_dir_str:
@@ -112,9 +111,7 @@ def ensure_xray_binary() -> None:
     if _xray_version_ok():
         return
     if find_executable("unzip") is None:
-        install_package(
-            "unzip", "unzip не найден и неизвестен пакетный менеджер для его установки"
-        )
+        install_package("unzip", "unzip не найден и неизвестен пакетный менеджер для его установки")
     with tempfile.TemporaryDirectory(prefix="sa-home-xray-build-") as build_dir_str:
         build_dir = Path(build_dir_str)
         zip_path = build_dir / "xray.zip"

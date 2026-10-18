@@ -190,10 +190,7 @@ def nftables_conf_with_counters(content: str, settings: Settings) -> str:
         )
     obj_indent = _indent(lines[chain_i])
     rule_indent = _indent(lines[hook_i])
-    counter_objs = (
-        f"{obj_indent}counter mtg_bytes {{ }}\n"
-        f"{obj_indent}counter socks_bytes {{ }}\n"
-    )
+    counter_objs = f"{obj_indent}counter mtg_bytes {{ }}\n{obj_indent}counter socks_bytes {{ }}\n"
     counter_rules = (
         f"{rule_indent}tcp dport {settings.vpn.mtg_port} counter name mtg_bytes accept\n"
         f'{rule_indent}iifname "tailscale0" tcp dport {settings.vpn.socks_port} '
@@ -228,16 +225,38 @@ def _apply_proxy_firewall_live(settings: Settings) -> None:
         return
     run_sudo(
         [
-            "nft", "insert", "rule", "inet", "filter", "input",
-            "tcp", "dport", str(settings.vpn.mtg_port),
-            "counter", "name", "mtg_bytes", "accept",
+            "nft",
+            "insert",
+            "rule",
+            "inet",
+            "filter",
+            "input",
+            "tcp",
+            "dport",
+            str(settings.vpn.mtg_port),
+            "counter",
+            "name",
+            "mtg_bytes",
+            "accept",
         ]
     )
     run_sudo(
         [
-            "nft", "insert", "rule", "inet", "filter", "input",
-            "iifname", "tailscale0", "tcp", "dport", str(settings.vpn.socks_port),
-            "counter", "name", "socks_bytes", "accept",
+            "nft",
+            "insert",
+            "rule",
+            "inet",
+            "filter",
+            "input",
+            "iifname",
+            "tailscale0",
+            "tcp",
+            "dport",
+            str(settings.vpn.socks_port),
+            "counter",
+            "name",
+            "socks_bytes",
+            "accept",
         ]
     )
 

@@ -51,7 +51,7 @@ WAIT_TABLE_FUNCTION = [
     "wait_table() {",
     "  i=0",
     "  while [ $i -lt 60 ]; do",
-    "    nft list table \"$1\" \"$2\" >/dev/null 2>&1 && return 0",
+    '    nft list table "$1" "$2" >/dev/null 2>&1 && return 0',
     "    i=$((i + 1))",
     "    sleep 1",
     "  done",
@@ -202,13 +202,30 @@ def make_vpn_probe_legacy_cleanup_fixup() -> Fixup:
     )
 
 
-def _create_own_chain(family: str, name: str, chain_type: str, hook: str, priority: str) -> NftChain:
+def _create_own_chain(
+    family: str, name: str, chain_type: str, hook: str, priority: str
+) -> NftChain:
     run_sudo(["nft", "add", "table", family, VPN_PROBE_NFT_TABLE])
     run_sudo(
         [
-            "nft", "add", "chain", family, VPN_PROBE_NFT_TABLE, name,
-            "{", "type", chain_type, "hook", hook, "priority", priority, ";",
-            "policy", "accept", ";", "}",
+            "nft",
+            "add",
+            "chain",
+            family,
+            VPN_PROBE_NFT_TABLE,
+            name,
+            "{",
+            "type",
+            chain_type,
+            "hook",
+            hook,
+            "priority",
+            priority,
+            ";",
+            "policy",
+            "accept",
+            ";",
+            "}",
         ]
     )
     return NftChain(family, VPN_PROBE_NFT_TABLE, name)
@@ -265,7 +282,8 @@ def _ensure_chain_line(chain: NftChain, definition: str) -> str:
     if chain.table != VPN_PROBE_NFT_TABLE:
         return (
             f"wait_table {chain.family} {chain.table} || {{ "
-            f'echo "нет таблицы {chain.family} {chain.table} — некуда ставить правила пробников" >&2; '
+            f'echo "нет таблицы {chain.family} {chain.table} — '
+            'некуда ставить правила пробников" >&2; '
             f"exit 1; }}"
         )
     return (
@@ -294,7 +312,7 @@ def vpn_probe_forward_script_content(
         "# Чужую таблицу (напр. ip filter, которую заводит tailscaled) на чистой",
         "# загрузке можно застать ещё не созданной — юнит стартует раньше её",
         "# владельца. Живой инцидент на alfred 2026-09-23: ребут → юнит упал с",
-        "# \"Could not process rule: No such file or directory\" на первом же",
+        '# "Could not process rule: No such file or directory" на первом же',
         "# insert, set -e прибил остальное, и forward/NAT пробников не появились",
         "# ВООБЩЕ — все проверки с этой ноды молча таймаутили до ручного",
         "# nodectl fix. Поэтому ждём появления таблицы, а не падаем сразу.",
@@ -304,8 +322,12 @@ def vpn_probe_forward_script_content(
     ]
     for slot in slots:
         host = slot.veth_host
-        lines.append(_ensure_rule_line(forward, f'iifname "{host}" accept', f"iifname {host} accept"))
-        lines.append(_ensure_rule_line(forward, f'oifname "{host}" accept', f"oifname {host} accept"))
+        lines.append(
+            _ensure_rule_line(forward, f'iifname "{host}" accept', f"iifname {host} accept")
+        )
+        lines.append(
+            _ensure_rule_line(forward, f'oifname "{host}" accept', f"oifname {host} accept")
+        )
         masquerade = f"ip saddr {slot.subnet} masquerade"
         lines.append(_ensure_rule_line(nat, masquerade, masquerade))
     return "\n".join(lines) + "\n"

@@ -72,7 +72,7 @@ def smartctl_sudoers_content(smartctl_path: str, user: str) -> str:
 
 
 def smartctl_wrapper_content(real_path: str) -> str:
-    return f"#!/bin/sh\nexec sudo -n {real_path} \"$@\"\n"
+    return f'#!/bin/sh\nexec sudo -n {real_path} "$@"\n'
 
 
 def _smartctl_sudoers_check() -> bool:
@@ -237,9 +237,7 @@ def _power_control_apply() -> None:
             f"пакета {POWER_POLKIT_PACKAGE!r}",
         )
     run_sudo(["install", "-d", "-m", "0755", str(POWER_POLKIT_RULE_FILE.parent)])
-    install_root_file(
-        POWER_POLKIT_RULE_FILE, power_polkit_rule_content(getuser()), mode="0644"
-    )
+    install_root_file(POWER_POLKIT_RULE_FILE, power_polkit_rule_content(getuser()), mode="0644")
 
 
 POWER_CONTROL_POLKIT = Fixup(
@@ -279,9 +277,7 @@ def _wol_apply() -> None:
         )
     ethtool_path = find_executable("ethtool")
     if ethtool_path is None:
-        install_package(
-            "ethtool", "ethtool не найден и неизвестен пакетный менеджер для установки"
-        )
+        install_package("ethtool", "ethtool не найден и неизвестен пакетный менеджер для установки")
         ethtool_path = find_executable("ethtool")
         if ethtool_path is None:
             raise FixupError("ethtool не нашёлся после установки")

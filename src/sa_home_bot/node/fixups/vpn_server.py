@@ -31,10 +31,7 @@ TCP_IP_HEADER_BYTES = 40
 
 
 def awg_sudoers_content(awg_path: str, interface: str, user: str) -> str:
-    return (
-        f"{user} ALL=(root) NOPASSWD: {awg_path} show *, "
-        f"{awg_path} set {interface} peer *\n"
-    )
+    return f"{user} ALL=(root) NOPASSWD: {awg_path} show *, {awg_path} set {interface} peer *\n"
 
 
 def make_awg_sudoers_fixup(settings: Settings) -> Fixup:

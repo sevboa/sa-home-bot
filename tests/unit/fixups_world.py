@@ -74,7 +74,9 @@ class FakeRoot:
             Path, "exists", lambda p: self._in_root(p, lambda: self._known(p), real["exists"])
         )
         monkeypatch.setattr(
-            Path, "is_file", lambda p: self._in_root(p, lambda: str(p) in self.files, real["is_file"])
+            Path,
+            "is_file",
+            lambda p: self._in_root(p, lambda: str(p) in self.files, real["is_file"]),
         )
         monkeypatch.setattr(
             Path, "is_dir", lambda p: self._in_root(p, lambda: str(p) in self.dirs, real["is_dir"])

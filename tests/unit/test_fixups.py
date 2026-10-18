@@ -5,7 +5,16 @@ from pathlib import Path
 import pytest
 
 from sa_home_bot.config import AppConfig
-from sa_home_bot.node.fixups import FixupError, build_fixups, core, host, netfilter, privileged, proxy, vpn_server
+from sa_home_bot.node.fixups import (
+    FixupError,
+    build_fixups,
+    core,
+    host,
+    netfilter,
+    privileged,
+    proxy,
+    vpn_server,
+)
 from tests.unit.fixups_world import FakeRoot, make_settings
 
 UFW_WOOSTER = (
@@ -28,7 +37,9 @@ def _make_executable(path: Path) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
-@pytest.mark.parametrize(("raises_after_apply", "expected_failed"), [(False, []), (True, ["flaky"])])
+@pytest.mark.parametrize(
+    ("raises_after_apply", "expected_failed"), [(False, []), (True, ["flaky"])]
+)
 def test_run_fixups_survives_check_raising(raises_after_apply, expected_failed):
     applied, after_checked = [], []
     check_calls = []
@@ -87,7 +98,12 @@ _JEEVES_APPS = [
             ["monitor"],
             "server",
             [],
-            {"install-smartmontools", "smartctl-sudoers", "node-unit-smartctl-path", "journalctl-group"},
+            {
+                "install-smartmontools",
+                "smartctl-sudoers",
+                "node-unit-smartctl-path",
+                "journalctl-group",
+            },
         ),
         (
             ["apps"],
@@ -257,7 +273,13 @@ def test_power_control_apply_installs_polkit_package_when_rules_dir_missing(root
     )
     host.POWER_CONTROL_POLKIT.apply()
     assert root.sudo_calls[0] == ["apt-get", "install", "-y", "polkitd"]
-    assert root.sudo_commands("install")[0] == ["install", "-d", "-m", "0755", "/etc/polkit-1/rules.d"]
+    assert root.sudo_commands("install")[0] == [
+        "install",
+        "-d",
+        "-m",
+        "0755",
+        "/etc/polkit-1/rules.d",
+    ]
     assert "polkit.addRule" in root.installed[str(host.POWER_POLKIT_RULE_FILE)]
 
 
@@ -281,7 +303,9 @@ def _ufw_fixup_state(root, ufw_status):
 def test_awg_ufw_and_forward_needed_only_with_active_or_unknown_ufw(root, ufw_status, needed):
     _ufw_fixup_state(root, ufw_status)
     settings = make_settings(["vpn"])
-    assert vpn_server.make_awg_ufw_fixup(settings).needed(settings) is (needed and ufw_status is not None)
+    assert vpn_server.make_awg_ufw_fixup(settings).needed(settings) is (
+        needed and ufw_status is not None
+    )
     forward_needed = vpn_server.make_awg_forward_fixup(settings).needed(settings)
     assert forward_needed is (ufw_status == UFW_CLEAN)
     ids = {f.id for f in build_fixups(settings)}
@@ -359,7 +383,11 @@ def test_awg_forward_script_has_forward_nat_and_mss_clamp_rules():
 def _nft_chain(hook, name, chain_type="filter"):
     return {
         "chain": {
-            "hook": hook, "type": chain_type, "family": "inet", "table": "filter", "name": name,
+            "hook": hook,
+            "type": chain_type,
+            "family": "inet",
+            "table": "filter",
+            "name": name,
         }
     }
 
@@ -400,8 +428,14 @@ def _nft_json(*, counters_only: bool) -> str:
     if counters_only:
         return json.dumps({"nftables": counter_objects})
     rules = [
-        {"rule": {"family": "inet", "table": "filter", "chain": "input",
-                  "expr": [{"counter": n}, {"accept": None}]}}
+        {
+            "rule": {
+                "family": "inet",
+                "table": "filter",
+                "chain": "input",
+                "expr": [{"counter": n}, {"accept": None}],
+            }
+        }
         for n in ("mtg_bytes", "socks_bytes")
     ]
     return json.dumps({"nftables": counter_objects + rules})
@@ -419,7 +453,10 @@ def test_proxy_firewall_check_requires_rules_not_just_counters(root, counters_on
 )
 def test_proxy_firewall_needed_unless_inet_filter_known_missing(root, tables, needed):
     root.outputs["nft list tables"] = tables
-    assert proxy.make_proxy_firewall_fixup(make_settings(["vpn"])).needed(make_settings(["vpn"])) is needed
+    assert (
+        proxy.make_proxy_firewall_fixup(make_settings(["vpn"])).needed(make_settings(["vpn"]))
+        is needed
+    )
 
 
 _WORKING_NFTABLES_CONF = (
@@ -429,18 +466,18 @@ _WORKING_NFTABLES_CONF = (
     "  chain input {\n"
     "    type filter hook input priority 0; policy drop;\n"
     "    ct state established,related accept\n"
-    "    iifname \"tailscale0\" accept\n"
+    '    iifname "tailscale0" accept\n'
     "    tcp dport 443 accept\n"
     "  }\n"
     "  chain forward {\n"
     "    type filter hook forward priority 0; policy drop;\n"
-    "    iifname \"awg0\" accept\n"
+    '    iifname "awg0" accept\n'
     "  }\n"
     "}\n"
     "table ip nat {\n"
     "  chain postrouting {\n"
     "    type nat hook postrouting priority 100;\n"
-    "    ip saddr 10.9.0.0/24 oifname \"eth0\" masquerade\n"
+    '    ip saddr 10.9.0.0/24 oifname "eth0" masquerade\n'
     "  }\n"
     "}\n"
 )

@@ -97,7 +97,9 @@ async def _fetch_server_public_key(
     return str(key) if key else None
 
 
-def fetch_probe_config_or_fail(settings: Settings, slot: vpn_probe_state.ProbeSlot, what: str) -> str:
+def fetch_probe_config_or_fail(
+    settings: Settings, slot: vpn_probe_state.ProbeSlot, what: str
+) -> str:
     try:
         return asyncio.run(_fetch_probe_config(settings, slot))
     except Exception as exc:
@@ -171,7 +173,9 @@ def _awg_conf_apply(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> None
         raw_config_text = existing
     else:
         raw_config_text = fetch_probe_config_or_fail(settings, slot, "конфиг")
-    install_root_file(conf_path, prepare_probe_conf(raw_config_text), mode="0600", make_parents=True)
+    install_root_file(
+        conf_path, prepare_probe_conf(raw_config_text), mode="0600", make_parents=True
+    )
 
 
 def _reality_conf_apply(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> None:

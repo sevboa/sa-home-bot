@@ -79,7 +79,9 @@ def ensure_ip_forward() -> None:
 def default_route_iface() -> str | None:
     ip = find_executable("ip") or "ip"
     try:
-        result = subprocess.run([ip, "-4", "route", "show", "default"], capture_output=True, text=True)
+        result = subprocess.run(
+            [ip, "-4", "route", "show", "default"], capture_output=True, text=True
+        )
     except OSError:
         return None
     for line in result.stdout.splitlines():
