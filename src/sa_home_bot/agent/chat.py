@@ -1,24 +1,3 @@
-"""Интерактивный CLI для ручного тестирования агента (Этап 42.4, Phase 2 —
-план ``vast-skipping-crane.md``): Pydantic AI + Ollama + MCP-тулы из
-``agent/mcp_tools.py``, всё на одной машине (mycraft).
-
-Не подключается к Telegram и не трогает живой ``/ai`` (``bot/ai_flow.py``/
-``llm_chat.py``/``tasks/service.py``/``llm/service.py``) — отдельный, ничего
-не заменяющий путь для дог-фудинга агент-фреймворка, пока не решено, как он
-будет запускаться по-настоящему (см. «Phase 2» в плане: по требованию,
-отдельный action службы ``llm``, отдельная служба роя — не решено).
-
-MCP-тулы — тем же процессом ``python -m sa_home_bot.agent.mcp_tools``,
-запущенным как дочерний (``fastmcp.client.transports.StdioTransport`` —
-доверие=процесс, без сети/токенов, см. докстринг ``agent/mcp_tools.py``).
-
-Персонажный промпт — то же поле, что использует живой ``/ai``
-(``settings.llm.persona_prompt``, см. ``llm/service.py``: там это ровно
-``system[0]`` без какой-либо дополнительной сборки) — не тянем
-``llm/service.py`` целиком (Coqui/faster-whisper и т.п. там тяжёлые), только
-лёгкий фоллбэк из ``llm/prompt.py`` (без тяжёлых импортов), если
-``persona_prompt`` пуст (свежий чекаут/CI)."""
-
 from __future__ import annotations
 
 import argparse
