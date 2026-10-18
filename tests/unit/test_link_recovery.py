@@ -49,7 +49,6 @@ async def test_heartbeat_рвёт_линк_когда_сосед_переста�
     на уровне сокета всё в порядке.
     """
     monkeypatch.setattr(peers_mod, "HEARTBEAT_INTERVAL_S", 0.05)
-    monkeypatch.setattr(peers_mod, "HEARTBEAT_TIMEOUT_S", 0.05)
     monkeypatch.setattr(peers_mod, "HEARTBEAT_MISSES", 2)
 
     service = StubService("winpc")
@@ -57,7 +56,7 @@ async def test_heartbeat_рвёт_линк_когда_сосед_переста�
     server = ProtoServer(endpoint, service)
     await server.start()
 
-    link = PeerLink("winpc", endpoint, reconnect_delay=60.0)
+    link = PeerLink("winpc", endpoint, reconnect_delay=60.0, heartbeat_timeout=0.05)
     await link.start()
     try:
         assert await wait_for(lambda: link.alive), "линк не поднялся"
@@ -290,7 +289,6 @@ async def test_одновременный_разрыв_и_heartbeat_не_уби�
     переподключался вообще («связь потеряна» и тишина три минуты).
     """
     monkeypatch.setattr(peers_mod, "HEARTBEAT_INTERVAL_S", 0.02)
-    monkeypatch.setattr(peers_mod, "HEARTBEAT_TIMEOUT_S", 0.02)
     monkeypatch.setattr(peers_mod, "HEARTBEAT_MISSES", 1)
 
     service = StubService("winpc")
@@ -298,7 +296,7 @@ async def test_одновременный_разрыв_и_heartbeat_не_уби�
     server = ProtoServer(endpoint, service)
     await server.start()
 
-    link = PeerLink("winpc", endpoint, reconnect_delay=0.05)
+    link = PeerLink("winpc", endpoint, reconnect_delay=0.05, heartbeat_timeout=0.02)
     await link.start()
     try:
         assert await wait_for(lambda: link.alive)

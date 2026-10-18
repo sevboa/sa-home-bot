@@ -33,7 +33,6 @@ async def stand(monkeypatch):
     from sa_home_bot.proto import client as client_mod
 
     monkeypatch.setattr(peers_mod, "HEARTBEAT_INTERVAL_S", 0.05)
-    monkeypatch.setattr(peers_mod, "HEARTBEAT_TIMEOUT_S", 0.05)
     monkeypatch.setattr(peers_mod, "HEARTBEAT_MISSES", 2)
     monkeypatch.setattr(client_mod, "CLOSE_TIMEOUT_S", 0.05)
 
@@ -42,7 +41,8 @@ async def stand(monkeypatch):
     proxy = NetLabProxy("127.0.0.1", server.endpoint.port)
     await proxy.start()
     link = PeerLink(
-        "winpc", proxy.endpoint, token="s3cret", self_node="alfred", reconnect_delay=0.05
+        "winpc", proxy.endpoint, token="s3cret", self_node="alfred", reconnect_delay=0.05,
+        heartbeat_timeout=0.05,
     )
     await link.start()
     assert await wait_for(lambda: link.alive), "линк через прокси не поднялся"
