@@ -186,23 +186,23 @@ def test_read_power_events_sync_paginates(monkeypatch):
     assert has_next3 is False
 
 
-def test_fmt_duration_units():
+def test_format_dhms_en_units():
     from datetime import timedelta
 
-    from sa_home_bot.domain.render import _fmt_duration
+    from sa_home_bot.domain.render import _format_dhms_en
 
-    assert _fmt_duration(timedelta(seconds=30)) == "30s"
-    assert _fmt_duration(timedelta(minutes=9)) == "9m"
-    assert _fmt_duration(timedelta(hours=8, minutes=26, seconds=15)) == "8h 26m 15s"
-    assert _fmt_duration(timedelta(days=1, hours=2)) == "1d 2h"
+    assert _format_dhms_en(timedelta(seconds=30)) == "30s"
+    assert _format_dhms_en(timedelta(minutes=9)) == "9m"
+    assert _format_dhms_en(timedelta(hours=8, minutes=26, seconds=15)) == "8h 26m 15s"
+    assert _format_dhms_en(timedelta(days=1, hours=2)) == "1d 2h"
 
 
-def test_fmt_uptime_short_sub_minute_is_html_safe():
+def test_format_largest_unit_en_sub_minute_is_html_safe():
     from datetime import timedelta
 
-    from sa_home_bot.domain.render import _fmt_uptime_short
+    from sa_home_bot.domain.render import _format_largest_unit_en
 
-    assert _fmt_uptime_short(timedelta(seconds=30)) == "&lt;1 m"
+    assert _format_largest_unit_en(timedelta(seconds=30)) == "&lt;1 m"
 
 
 def test_read_power_events_unsupported_on_windows(monkeypatch):
