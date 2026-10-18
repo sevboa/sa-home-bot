@@ -22,8 +22,6 @@ class PhotoReviewMixin(EngineCore):
         expect: list[str],
         missing: list[str],
     ) -> int:
-        """Запомнить, что вышло на последнем снимке чата (только для Альфреда).
-        Возвращает число промахов подряд по тому же ``expect``."""
         key = cabinet_mod.LAST_PHOTO_KEY.format(chat_id=chat_id)
         prev = await self._last_photo(chat_id, fresh_only=False)
         misses = 0
@@ -63,7 +61,6 @@ class PhotoReviewMixin(EngineCore):
         return data
 
     async def photo_note(self, chat_id: int) -> str | None:
-        """Заметка к ходу Альфреда: что на его последнем снимке."""
         data = await self._last_photo(chat_id)
         if data is None or not data.get("seen"):
             return None
@@ -87,8 +84,6 @@ class PhotoReviewMixin(EngineCore):
         trigger_message_id: int | None,
         dialogue_id: int | None,
     ) -> None:
-        """На снимке нет обещанного — Альфред удивляется и предлагает
-        переснять (ответом на снимок, в тот же диалог)."""
         template = cabinet_mod.PHOTO_MISS_DIRECTIVE
         if misses > 1:
             template = cabinet_mod.PHOTO_MISS_AGAIN_DIRECTIVE

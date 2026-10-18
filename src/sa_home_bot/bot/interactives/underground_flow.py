@@ -76,27 +76,11 @@ class _Runtime:
 
 
 class UndergroundMixin(EngineCore):
-    """Катакомбы в ``engine.Interactives``. Все ``self._*`` — атрибуты и методы
-    движка (хранилище, часы, комнаты, снимок)."""
-
-    # --- служебное ---
-
     @functools.cached_property
     def _frames(self) -> _Runtime:
         return _Runtime()
 
-    def _underground_ok(self, chat_id: int | None, user_id: int | None) -> bool:
-        # Только канарейкам и только в личке: chat_id совпадает с user_id.
-        return (
-            chat_id is not None
-            and user_id is not None
-            and chat_id == user_id
-            and self.canary_ok(user_id)
-        )
-
     async def _catacombs_room(self, user_id: int, at: places.At) -> Cabinet:
-        """Комната, где Альфред под землёй: особое место (если внутри) или
-        оболочка лабиринта с видом текущего узла/прохода."""
         maze = await catacombs.load(self._store, user_id)
         state = state_of(at, maze)
         if state.room and state.room in places.PLACES:
@@ -104,16 +88,13 @@ class UndergroundMixin(EngineCore):
         return labyrinth_room(user_id, maze, state)
 
     async def _flags(self, user_id: int) -> tuple[bool, bool]:
-        """(подвал открыт ключом, путь в катакомбы открыт)."""
         state = self._state
         unlocked = await state.get_effect(places.EFFECT_CELLAR_UNLOCKED, user_id) == "1"
         opened = await state.get_effect(places.EFFECT_CATACOMBS_OPEN, user_id) == "1"
         return unlocked or opened, opened
 
-    # --- прогулка как сцена ---
 
     async def _start_descent(self, chat_id: int, user_id: int) -> Run:
-        """Прогулка начинается (или продолжается) — живой ``Run`` на чат."""
         run = await self._state.load_run(chat_id, SCENARIO_ID)
         if run is None or run.status != STATUS_ACTIVE:
             run = Run(scenario=SCENARIO_ID, chat_id=chat_id, user_id=user_id, status=STATUS_ACTIVE)
@@ -121,7 +102,6 @@ class UndergroundMixin(EngineCore):
         return run
 
     async def _end_descent(self, chat_id: int, user_id: int) -> None:
-        """Альфред ушёл из-под земли — прогулка завершена."""
         run = await self._state.load_run(chat_id, SCENARIO_ID)
         if run is not None and run.status == STATUS_ACTIVE:
             run.status = STATUS_DONE
@@ -133,14 +113,10 @@ class UndergroundMixin(EngineCore):
         run.world["step_turn"] = run.turns_total
         await self._state.save_run(run)
 
-    # --- описание новых мест ---
 
     async def describe_new(
         self, chat_id: int, maze: Maze, todo: list[tuple[str, Node | Passage]]
     ) -> None:
-        """Описания для тех из ``todo`` (ключ ``passage``/``node`` и место),
-        у кого их ещё нет: один синхронный вопрос Ведущему, ответ
-        запоминается один раз. Нет связи или сбой — запасные описания."""
         todo = [(k, p) for k, p in todo if catacombs.needs_describe(p)]
         if not todo:
             return
@@ -161,7 +137,6 @@ class UndergroundMixin(EngineCore):
                 parsed = (self._choose(options), [])
             catacombs.set_description(place, parsed[0], parsed[1])
 
-    # --- тул walk ---
 
     async def tool_walk(
         self,
@@ -172,12 +147,10 @@ class UndergroundMixin(EngineCore):
         message_thread_id: int | None = None,
         trigger_message_id: int | None = None,
     ) -> str:
-        """Один шаг Альфреда по катакомбам. Топологию решает ``catacombs.walk``
-        (код), описание нового места присылает Ведущий здесь же, синхронно;
-        кадры уйдут гостю после реплики (``flush_frames``)."""
-        if not self._underground_ok(chat_id, user_id):
+        scope = self.canary_scope(chat_id, user_id, private=True)
+        if scope is None:
             return TOOL_WALK_UNAVAILABLE
-        assert chat_id is not None and user_id is not None
+        chat_id, user_id = scope
         way = normalize_direction(direction)
         if way is None:
             return TOOL_WALK_BAD_DIRECTION
@@ -239,7 +212,6 @@ class UndergroundMixin(EngineCore):
             return text + TOOL_WALK_ROOM_HINT
         return f"{text} {catacombs.look(state, maze).text_ru()}{TOOL_WALK_CLOSING}"
 
-    # --- тул go ---
 
     async def tool_go(
         self,
@@ -250,28 +222,19 @@ class UndergroundMixin(EngineCore):
         message_thread_id: int | None = None,
         trigger_message_id: int | None = None,
     ) -> str:
-        """Быстрый переход «знакомой дорогой» (59.5): из любого места — в
-        кабинет, подвал (если открыт ключом), катакомбы (всегда к лазу) и в
-        найденное особое место. Одна реплика, кадров по пути нет (кроме кадра
-        входа при первом спуске)."""
-        if not self._underground_ok(chat_id, user_id):
+        scope = self.canary_scope(chat_id, user_id, private=True)
+        if scope is None:
             return TOOL_GO_UNAVAILABLE
-        assert chat_id is not None and user_id is not None
+        chat_id, user_id = scope
         target = resolve_target(place)
         if target is None:
-            # Кухня, двор, темница — обычные места поместья: дорогу туда
-            # решает Ведущий (act), а не отказ «не знаю такого места» (живая
-            # находка 2026-10-15: Альфред пересказывал его как «нет в списке»).
             return await self.tool_act(chat_id, user_id, go_action(place))
         busy = await self._scene_run(chat_id, user_id)
         if busy is not None and busy.scenario != SCENARIO_ID:
             if busy.scenario == cellar.SCENARIO_ID and busy.finale:
-                # Сказка про подвал дошла до финала — она закончена.
                 busy.status = STATUS_DONE
                 await self._state.save_run(busy)
             elif busy.scenario == cellar.SCENARIO_ID and target != "cabinet":
-                # Поиски ключа идут по всему поместью: к двери подвала и
-                # куда угодно ещё ведёт Ведущий — он знает, заперто ли.
                 return await self.tool_act(chat_id, user_id, go_action(place))
             elif busy.scenario != cellar.SCENARIO_ID:
                 return TOOL_GO_BUSY
@@ -299,7 +262,6 @@ class UndergroundMixin(EngineCore):
                 entrance = maze.nodes[state.node]
                 await self.describe_new(chat_id, maze, [("node", entrance)])
                 if catacombs.node_needs_frame(entrance):
-                    # Первый спуск (или вход перерисован): кадр входа.
                     frames.append(node_frame(user_id, maze, entrance))
             elif not catacombs.go_to_room(state, maze, target):
                 return TOOL_GO_NOT_FOUND
@@ -307,7 +269,6 @@ class UndergroundMixin(EngineCore):
                 node = maze.nodes[state.node]
                 sides = list(node.exits)
                 if sides:
-                    # Лицом к двери: единственный выход оказывается за спиной.
                     state.heading = catacombs.OPPOSITE[sides[0]]
             await catacombs.save(self._store, maze)
             at = places.new_at(
@@ -332,11 +293,8 @@ class UndergroundMixin(EngineCore):
         )
         return TOOL_GO_ROOM.format(name=canon.name_ru, where=where)
 
-    # --- подсказки «Где ты» ---
 
     async def _travel_hint(self, user_id: int) -> str:
-        """Войдя в подвал, Альфред сам предлагает быстрые переходы: катакомбы
-        и по названию каждое найденное особое место (59.5)."""
         maze = await catacombs.load(self._store, user_id)
         rooms = catacombs.found_rooms(maze)
         text = " Знакомой дорогой (инструмент go) отсюда можно сразу спуститься в катакомбы, к лазу"
@@ -345,8 +303,6 @@ class UndergroundMixin(EngineCore):
         return text + " — сам предложи это собеседнику."
 
     async def _underground_extra(self, room: Cabinet, user_id: int) -> str:
-        """Приписка к «Где ты» для комнат вне подвала: в катакомбах и особых
-        местах — как отсюда выйти."""
         if not isinstance(room, Room):
             return ""
         if room.canon.id == PLACE_CATACOMBS:
@@ -355,7 +311,6 @@ class UndergroundMixin(EngineCore):
             return " Выйти обратно в коридор — walk(back); порыскать — search."
         return ""
 
-    # --- кадры: очередь, отправка, запоминание ---
 
     def _queue_frames(
         self,
@@ -365,8 +320,6 @@ class UndergroundMixin(EngineCore):
         message_thread_id: int | None,
         reply_to: int | None,
     ) -> None:
-        """Кадры хода ждут конца реплики Альфреда (``flush_frames`` из
-        flush_forms). За ход берём не больше ``FRAMES_PER_TURN`` последних."""
         if not frames:
             return
         pending = self._frames.pending
@@ -385,17 +338,14 @@ class UndergroundMixin(EngineCore):
         plan = self._frames.pending.pop(chat_id, None)
         if plan is None or not plan.frames:
             return
-        if not hasattr(self._notifier, "send_photo_ex"):
+        if not self._can_send_photos:
             return
         if chat_id in self._photo_busy:
-            # Камера занята другим снимком: этот кадр не вышел, но и ничего не
-            # запомнено — при следующем заходе он нарисуется заново.
             log.info("interactives: кадры катакомб пропущены, камера занята (chat=%s)", chat_id)
             return
         self._photo_busy.add(chat_id)
         task = asyncio.create_task(self._frames_job(chat_id, plan))
-        self._photo_tasks.add(task)
-        task.add_done_callback(self._photo_tasks.discard)
+        self._track(task)
 
     async def _frames_job(self, chat_id: int, plan: FramePlan) -> None:
         try:
@@ -433,14 +383,11 @@ class UndergroundMixin(EngineCore):
     async def remember_frame(
         self, user_id: int, frame: Frame, image_id: int, file_id: str | None
     ) -> None:
-        """Нарисованный кадр запоминается у узла/прохода/места поиска: повторный
-        показ — тот же file_id. Лабиринт перечитываем: за время рисования он
-        мог измениться (сделан шаг), а затирать чужие правки нельзя."""
         if not frame.remembered:
             return
         async with self._frames.lock:
             if not await self._store.get_state(places.CATACOMBS_KEY.format(user_id=user_id)):
-                return  # лабиринт сброшен, пока кадр рисовался
+                return
             maze = await catacombs.load(self._store, user_id)
             kind, _, ref = frame.owner.partition(":")
             owner: Node | Passage | None
@@ -460,15 +407,8 @@ class UndergroundMixin(EngineCore):
                 catacombs.set_image(owner, image_id, file_id, image_key=frame.key)
             await catacombs.save(self._store, maze)
 
-    # --- тул search и take_photo в лабиринте ---
 
     async def search_labyrinth(self, chat_id: int, user_id: int, where: str) -> str | None:
-        """Обыск в коридоре или узле катакомб (не в особом месте). Обыскиваются
-        места поиска узла/прохода, помеченные при описании; названное Альфредом
-        вне списка тоже обыскивается (помечается как новое место). Итог —
-        сразу, без Ведущего: находку решает код (``places.search_room``),
-        катакомбная таблица — пусто или мелочь. None — не лабиринт, обычный
-        путь ``tool_search``."""
         at = await places.get_at(self._store, user_id)
         if at is None or at.place != PLACE_CATACOMBS:
             return None
@@ -494,8 +434,6 @@ class UndergroundMixin(EngineCore):
                     owner.spots.append(spot)
                 spot.searched = True
                 await catacombs.save(self._store, maze)
-            # Картинка обысканного места — только по обыску (решение владельца
-            # 2026-10-15), рисуется раз и запоминается у места поиска.
             frame = spot_frame(user_id, maze, owner, spot)
         self._queue_frames(chat_id, user_id, [frame], None, None)
         run = await self._scene_run(chat_id, user_id)
@@ -515,10 +453,6 @@ class UndergroundMixin(EngineCore):
         message_thread_id: int | None,
         trigger_message_id: int | None,
     ) -> str | None:
-        """take_photo в лабиринте: общий вид — запомненный кадр узла/прохода,
-        крупный план места поиска — запомненный кадр места (рисуется один раз).
-        None — это что-то иное (селфи, произвольный план, особое место), снимок
-        идёт обычным путём."""
         if selfie or not isinstance(cab, Room) or cab.canon.id != PLACE_CATACOMBS:
             return None
         at = await places.get_at(self._store, user_id)
@@ -540,11 +474,8 @@ class UndergroundMixin(EngineCore):
         self._queue_frames(chat_id, user_id, [frame], message_thread_id, trigger_message_id)
         return TOOL_FRAME_STARTED
 
-    # --- отладка ---
 
     async def underground_debug(self, user_id: int) -> str:
-        """Строка к ``/interactives where``: узел, направление, число
-        разведанных узлов и найденные особые места."""
         at = await places.get_at(self._store, user_id)
         if at is None or at.place != PLACE_CATACOMBS:
             return ""

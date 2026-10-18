@@ -77,7 +77,6 @@ class FormsMixin(EngineCore):
         dialogue_id: int | None = None,
         message_thread_id: int | None = None,
     ) -> None:
-        # Кадры катакомб (59.4) — тоже после речи Альфреда.
         await self.flush_frames(chat_id)
         if plan is not None and plan.force_swap_form and plan.scenario is not None:
             run = await self._state.load_run(chat_id, plan.scenario)
@@ -156,12 +155,6 @@ class FormsMixin(EngineCore):
     async def dismiss_buttons(
         self, chat_id: int, user_id: int | None, *, keep: set[int] | frozenset[int] = frozenset()
     ) -> int:
-        """Гость написал, не нажав кнопку, — «проигнорировано гостем»: у форм
-        кнопки снимаются (решение остаётся прежним; согласие на сцену можно
-        будет спросить снова), раскрытый перечень действий сворачивается в
-        карточку. Чужое сообщение в общем чате чужих форм не трогает.
-        ``keep`` — сообщения, которые не гасить (живое предложение канарейки).
-        Возвращает, сколько сообщений погашено."""
         entries = await self._live_buttons(chat_id)
         if not entries:
             return 0
@@ -172,7 +165,7 @@ class FormsMixin(EngineCore):
         for entry in mine:
             try:
                 await self._dismiss_one(chat_id, entry)
-            except Exception:  # noqa: BLE001 — косметика, ход гостя важнее
+            except Exception:  # noqa: BLE001
                 log.info(
                     "interactives: кнопки не сняты (chat=%s, %s)", chat_id, entry, exc_info=True
                 )
@@ -204,8 +197,6 @@ class FormsMixin(EngineCore):
             return
         await self._notifier.edit_markup(chat_id, message_id, None)
         if entry.get("form") == FORM_OFFER and entry.get("scenario") in REGISTRY:
-            # Согласие без ответа — как истёкшее, но без кулдауна: заговорит
-            # гость о радиостанции снова — спросим снова.
             run = await self._state.load_run(chat_id, str(entry["scenario"]))
             if run is not None and run.status == STATUS_OFFERED:
                 run.status = STATUS_DECLINED
@@ -232,7 +223,6 @@ class FormsMixin(EngineCore):
             return radio.TOOL_PINNED
         scenario = radio.RADIO
         if await self._state.is_completed(scenario.id, user_id):
-            # Прошедшим сцену до Этапа 49.3 — старое радио предметом.
             await self._owned_item(user_id, items_mod.RADIO)
             if await self.speech_clear(user_id):
                 self._queue(chat_id, scenario.id, FORM_RETURN, user_id)
@@ -276,7 +266,7 @@ class FormsMixin(EngineCore):
             message_thread_id=message_thread_id,
         )
         if result[1] is not None or result[2]:
-            await self._forget_buttons(chat_id, message_id)  # форма закрыта нажатием
+            await self._forget_buttons(chat_id, message_id)
         return result
 
     async def _handle_click(
@@ -289,16 +279,8 @@ class FormsMixin(EngineCore):
         message_id: int | None = None,
         message_thread_id: int | None = None,
     ) -> tuple[str, str | None, bool]:
-        """Нажатие кнопки. Возвращает (текст для callback.answer, новый текст
-        формы или None — не править, убрать ли клавиатуру).
-
-        ``message_id``/``message_thread_id`` — сообщение с формой: реплика
-        Альфреда после кнопки уходит в тот же тред и тот же диалог (живой баг
-        2026-09-28: без них ответ улетал в общий топик лички)."""
         scenario = REGISTRY[scenario_id]
         if scenario.canary and not self.canary_ok(user_id):
-            # Канареечной формы у прочих гостей нет; нажать могут только
-            # подделкой callback_data.
             return "Эта форма не для вас.", None, False
         run = await self._state.load_run(chat_id, scenario_id)
         where = await self._where(chat_id, message_id, message_thread_id)
@@ -352,8 +334,6 @@ class FormsMixin(EngineCore):
     async def _where(
         self, chat_id: int, message_id: int | None, message_thread_id: int | None
     ) -> dict[str, Any]:
-        """meta задачи tasks: куда доставить реплику Альфреда после кнопки
-        (bot/node_events.py::_handle_task_result, как у tool_remind)."""
         dialogue_id = None
         if message_id is not None:
             turn = await self._store.ai_turn(chat_id, message_id)
@@ -366,10 +346,6 @@ class FormsMixin(EngineCore):
         }
 
     async def _set_clear(self, chat_id: int, user_id: int, clear: bool) -> None:
-        """Источник правды — БД бота, пишется сразу. Служба llm — зеркало:
-        пуш best-effort, а если mycraft спит, зеркало починит первый же
-        живой запрос гостя (он несёт speech_clear, llm/service.py::
-        _speech_target)."""
         await self._state.set_effect(radio.EFFECT_SPEECH_CLEAR, user_id, "1" if clear else "0")
         node_link = self._get_node_link()
         if node_link is None:
@@ -385,12 +361,9 @@ class FormsMixin(EngineCore):
             log.info("interactives: зеркало речи не обновлено сразу (chat=%s): %s", chat_id, exc)
 
     async def _speak(self, chat_id: int, directive: str, where: dict[str, Any]) -> None:
-        """Реплика Альфреда после кнопки — задачей службы tasks (как речь
-        форм Этапа 45). Best-effort: не вышло — форма уже сказала главное."""
         node_link = self._get_node_link()
         if node_link is None:
             return
-        # Импорт здесь: bot/tools.py сам импортирует этот пакет (тул swap_radio).
         from sa_home_bot.bot import tools as ai_tools
 
         try:

@@ -1,6 +1,3 @@
-"""Топология катакомб (Этап 59.4–59.5): детерминизм, инварианты на длинных
-блужданиях, рычаги, укорачивание, особые места, JSON."""
-
 from __future__ import annotations
 
 import random
@@ -31,7 +28,6 @@ class FakeStore:
 
 
 def explore_step(maze: Maze, state: CatacombsState, rng: random.Random) -> cat.WalkResult:
-    """Один шаг «блуждающего гостя»: в основном по выходам, иногда глупости."""
     roll = rng.random()
     if roll < 0.01:
         return walk(state, maze, "up")
@@ -76,13 +72,11 @@ def check_invariants(maze: Maze) -> None:
             assert cell not in interior, "проходы пересеклись"
             interior[cell] = pid
     assert set(interior) == maze._interior
-    # каждый выход со ссылкой указывает на существующий проход
     for n in maze.nodes.values():
         for s, pid in n.exits.items():
             if pid is not None:
                 p = maze.passages[pid]
                 assert (p.a, p.a_side) == (n.cell, s) or (p.b, p.b_side) == (n.cell, s)
-    # неразведанный выход не замурован: его первая клетка не внутри прохода
     for cell, side in maze._open:
         assert cat._step(cell, side) not in maze._interior
 
@@ -103,9 +97,6 @@ def wander(
     return maze, state, results
 
 
-# --- детерминизм ---
-
-
 def test_same_seed_same_maze():
     a, _, _ = wander(42, 400)
     b, _, _ = wander(42, 400)
@@ -119,12 +110,8 @@ def test_different_seeds_differ():
 
 
 def test_node_exits_depend_only_on_seed_and_cell():
-    # Вход (0, 0) — функция одного зерна.
     assert Maze.new(1, 5).nodes[(0, 0)].exits == Maze.new(99, 5).nodes[(0, 0)].exits
     assert Maze.new(1, 5).entry_heading == Maze.new(1, 5).entry_heading
-
-
-# --- инварианты ---
 
 
 @pytest.mark.parametrize("seed", SEEDS)
@@ -149,13 +136,10 @@ def test_walking_known_passage_does_not_generate():
     snapshot = maze.to_json()
     back = walk(state, maze, "back")
     assert back.outcome == Outcome.MOVED and not back.new_passage
-    again = walk(state, maze, "back")  # снова вперёд по тому же проходу (развернулись)
+    again = walk(state, maze, "back")
     assert again.outcome == Outcome.MOVED
     assert maze.to_json() == snapshot
     assert state.node == first.node.cell
-
-
-# --- рычаг ---
 
 
 def find_lever_wall(seed: int, steps: int = 4000):
@@ -184,7 +168,6 @@ def test_lever_appears_and_opens_exit():
     vision = cat.look(state, maze)
     assert vision.kind == "wall" and vision.lever
 
-    # вперёд нельзя, пока рычаг не потянут
     assert walk(state, maze, "forward").outcome == Outcome.BLOCKED_BY_LEVER
     assert walk(state, maze, "left").outcome == Outcome.NO_EXIT
 
@@ -198,7 +181,6 @@ def test_lever_appears_and_opens_exit():
     assert walk(state, maze, "lever").outcome == Outcome.NO_LEVER
     through = walk(state, maze, "forward")
     assert through.outcome == Outcome.MOVED and state.node == old.cell and state.passage is None
-    # а обратно через открытый проход — к исходному узлу
     back = walk(state, maze, "back")
     assert back.outcome == Outcome.MOVED and state.node == passage.a
 
@@ -217,16 +199,13 @@ def test_lever_wall_back_returns_to_origin():
     assert back.outcome == Outcome.MOVED
     assert state.node == origin and state.passage is None
     assert state.heading == cat.OPPOSITE[heading]
-    assert res.passage.sealed  # рычаг не тронут
+    assert res.passage.sealed
 
 
 def test_lever_without_wall():
     maze = Maze.new(1, 3)
     state = CatacombsState.at_entrance(maze)
     assert walk(state, maze, "lever").outcome == Outcome.NO_LEVER
-
-
-# --- укорачивание ---
 
 
 def test_passages_get_shortened_without_crossing():
@@ -253,14 +232,11 @@ def test_passages_get_shortened_without_crossing():
 
 
 def test_shorten_to_last_free_cell_manual():
-    """Ручная сборка: поперёк пути лежит чужой проход, новый укорачивается."""
     maze = Maze.new(1, 5)
-    # убираем стартовые выходы и строим свою картину
     entrance = maze.nodes[(0, 0)]
     for s in list(entrance.exits):
         del entrance.exits[s]
     maze._open.clear()
-    # горизонтальный проход (-1,2)—(1,2), клетка (0,2) внутри; (0,1) свободна
     left = cat.Node(x=-1, y=2)
     right = cat.Node(x=1, y=2)
     maze.nodes[left.cell] = left
@@ -270,10 +246,9 @@ def test_shorten_to_last_free_cell_manual():
     left.exits["E"] = p.id
     right.exits["W"] = p.id
     maze._interior.add((0, 2))
-    # выход из входа на север: путь (0,1) свободна, (0,2) занята -> узел в (0,1)
     maze._set_exit(entrance, "N", None)
     state = CatacombsState(node=(0, 0), heading="N")
-    for want_seed in range(200):  # длина из ГСЧ может быть 1 — перебираем зёрна
+    for want_seed in range(200):
         maze.seed = want_seed
         if (
             cat._rng(want_seed, "len", 0, 0, "N").choices(
@@ -287,9 +262,6 @@ def test_shorten_to_last_free_cell_manual():
     assert res.passage.length == 1 and state.node == (0, 1)
     assert (0, 2) not in maze.nodes
     check_invariants(maze)
-
-
-# --- относительные направления ---
 
 
 def test_relative_directions_table():
@@ -341,13 +313,9 @@ def test_look_reports_relative_exits():
         assert e.rel == cat.to_relative(state.heading, e.side) and not e.explored
     assert "прямо" in vision.text_ru().lower()
     walk(state, maze, "forward")
-    # после перехода разведанный путь назад виден как explored
     back = [e for e in cat.look(state, maze).exits if e.rel == "back"]
     if back:
         assert back[0].explored and back[0].passage_id
-
-
-# --- особые места ---
 
 
 def test_special_rooms_depth_and_catalog_order():
@@ -367,7 +335,6 @@ def test_special_rooms_depth_and_catalog_order():
         ids = list(maze.special_nodes)
         assert ids == [r.id for r in SPECIAL_ROOMS[: len(ids)]]
         assert maze.found == [i for i in ids if i in maze.found]
-        # найденные — в порядке каталога: нельзя найти вторую, не расставив первую
         assert [r.id for r in cat.found_rooms(maze)] == maze.found
     assert seen_any
     assert SPECIAL_ROOMS[0].id == "darkroom"
@@ -388,7 +355,6 @@ def test_enter_and_leave_room():
     else:
         pytest.fail("особое место не нашлось")
 
-    # вернёмся в узел особого места «знакомой дорогой» и зайдём
     room_id = maze.found[0]
     state = CatacombsState.at_entrance(maze)
     assert cat.go_to_room(state, maze, room_id)
@@ -441,12 +407,8 @@ def test_unknown_direction_raises():
         walk(CatacombsState.at_entrance(maze), maze, "sideways")
 
 
-# --- JSON и хранение ---
-
-
 def test_json_roundtrip_and_continuation():
     maze, state, _ = wander(5, 600)
-    # дописываем описания, картинку и рычаг-состояние
     node = maze.nodes[state.node]
     cat.set_description(node, "Сырой коридор, на стене факел.", ["ящик", "ниша"])
     cat.set_image(node, 7, "AgAD")
@@ -457,7 +419,6 @@ def test_json_roundtrip_and_continuation():
     check_invariants(clone)
     st2 = CatacombsState.from_dict(state.to_dict())
     assert st2 == state
-    # дальнейшее блуждание в оригинале и копии идёт одинаково
     ra, rb = random.Random(1), random.Random(1)
     for _ in range(300):
         explore_step(maze, state, ra)
@@ -480,9 +441,6 @@ async def test_load_save_roundtrip():
     assert len(broken.nodes) == 1
 
 
-# --- описание и кадры ---
-
-
 def test_description_is_remembered_once_and_frame_key_tracks_exits():
     found = None
     for seed in SEEDS:
@@ -494,7 +452,7 @@ def test_description_is_remembered_once_and_frame_key_tracks_exits():
     old = res.linked_node
     assert cat.needs_describe(old) and cat.node_needs_frame(old)
     cat.set_description(old, "Развилка, на полу кости.", ["саркофаг"])
-    cat.set_description(old, "другое", ["ещё"])  # повторно не перетирает
+    cat.set_description(old, "другое", ["ещё"])
     assert old.describe == "Развилка, на полу кости." and [s.name for s in old.spots] == [
         "саркофаг"
     ]

@@ -1,6 +1,3 @@
-"""Места Альфреда (Этап 59.1): комнаты, alfred_at, обыск, временные места,
-возврат в кабинет — и то, что для гостя вне канарейки ничего не меняется."""
-
 from __future__ import annotations
 
 import json
@@ -57,9 +54,6 @@ def _make(store, *, canary=(CANARY,), now=NOW, rng=lambda: 0.99):
     )
 
 
-# --- положение ---
-
-
 def test_at_json_roundtrip_and_old_junk():
     at = places.new_at("cellar", NOW, node=[1, 2], heading="north")
     back = places.At.from_json(at.to_json())
@@ -83,12 +77,10 @@ async def test_non_canary_always_in_the_cabinet_and_alfred_at_is_ignored(store):
     await places.set_at(store, GUEST, places.new_at(places.PLACE_CELLAR, NOW))
     room = await svc._room(GUEST, GUEST)
     assert type(room) is Cabinet and room.place == "cabinet"
-    # «Где ты» — прежний кабинет, без приписок.
     assert await svc._where_ru(room, GUEST, in_scene=False) == cabinet.CANON_RU
 
 
 async def test_canary_without_alfred_at_is_in_the_cabinet_with_old_data(store):
-    """Данные кабинета, записанные до Этапа 59, читаются как были."""
     old = Cabinet(user_id=CANARY, features=["чучело совы"], scene=["туман"], photos={"k": 5})
     await cabinet.save(store, old)
     svc = _make(store)
@@ -105,7 +97,6 @@ async def test_canary_in_a_room_reads_that_room(store):
     room = await svc._room(CANARY, CANARY)
     assert isinstance(room, Room) and room.place == "cellar" and not room.windowed
     assert "Подвал замка" in room.describe_ru()
-    # Убрали из списка — данные остаются, но Альфред снова в кабинете.
     removed = _make(store, canary=())
     assert type(await removed._room(CANARY, CANARY)) is Cabinet
     assert await store.get_state(places.at_key(CANARY)) is not None
@@ -113,14 +104,10 @@ async def test_canary_in_a_room_reads_that_room(store):
 
 async def test_stale_place_falls_back_to_the_cabinet(store):
     svc = _make(store)
-    await places.set_at(store, CANARY, places.new_at("t7", NOW))  # временной комнаты нет
+    await places.set_at(store, CANARY, places.new_at("t7", NOW))
     assert type(await svc._room(CANARY, CANARY)) is Cabinet
-    # Неизвестное место (не в реестре, не временное, не катакомбы) — тоже у себя.
     await places.set_at(store, CANARY, places.new_at("nowhere", NOW))
     assert type(await svc._room(CANARY, CANARY)) is Cabinet
-
-
-# --- хранение комнат ---
 
 
 async def test_room_storage_format_is_the_cabinet_format(store):
@@ -145,7 +132,7 @@ async def test_room_storage_format_is_the_cabinet_format(store):
 async def test_load_room_without_data_is_an_empty_room_of_that_canon(store):
     room = await places.load_room(store, CANARY, places.PLACE_CELLAR_DOOR)
     assert room.features == [] and room.canon is places.CELLAR_DOOR_CANON
-    assert await store.state_keys("location:") == []  # чтение ничего не пишет
+    assert await store.state_keys("location:") == []
 
 
 def test_room_overrides_do_not_touch_the_cabinet_defaults():
@@ -170,7 +157,6 @@ def test_photo_description_uses_the_room_canon_and_light():
     description, _ = photo_description(room, out, "", None)
     assert "dark stone cellar" in description and places.UNDERGROUND_LIGHT_EN in description
     assert "study" not in description
-    # Кабинет — как раньше.
     description, _ = photo_description(Cabinet(user_id=1), out, "", None)
     assert cabinet.CANON_EN in description and out.en() in description
 
@@ -182,9 +168,6 @@ def test_selfie_in_a_room_is_not_in_the_study():
     assert "study" not in text and "dark stone cellar" in text
     posed = photo_text.selfie_description(room, out, "спиной к зрителю", None)
     assert "study" not in posed
-
-
-# --- обыск ---
 
 
 def test_normalize_where():
@@ -257,9 +240,6 @@ async def test_search_tool_needs_a_place_to_look_at(store):
     assert await store.state_keys("") == []
 
 
-# --- временные места ---
-
-
 def test_temp_spec_requires_name_and_canon():
     ok = places.temp_spec(
         {"name": "кладовая", "canon_ru": "Тесная кладовая.", "canon_en": "tiny pantry"}
@@ -290,9 +270,6 @@ def test_temp_rooms_are_capped():
             world, {"name": f"комната {i}", "where": "в", "canon_ru": "к", "canon_en": "r"}
         )
     assert len(world["rooms"]) == places.TEMP_ROOMS_KEEP
-
-
-# --- возврат в кабинет ---
 
 
 async def test_return_to_the_cabinet_is_said_once_next_turn(store):
@@ -327,9 +304,6 @@ async def test_before_turn_for_non_canary_never_touches_places(store):
     assert svc is not None
 
 
-# --- тул search: только канарейкам ---
-
-
 def _ctx(interactives, user_id):
     return ai_tools.ToolContext(
         chat_id=user_id,
@@ -353,16 +327,11 @@ async def test_search_declaration_reaches_only_canaries(store):
     for_guest = ai_tools.for_context(kit, _ctx(svc, GUEST))
     assert "search" not in for_guest.handlers
     assert all(d["function"]["name"] != "search" for d in for_guest.declarations)
-    # search, walk и go (Этап 59.4–59.5) — тулы канарейки.
     assert len(for_guest.declarations) == len(kit.declarations) - len(ai_tools.CANARY_TOOLS)
     assert "search" not in ai_tools.for_context(kit, _ctx(None, CANARY)).handlers
-    # Подставной вызов от обычного гостя всё равно отказывает.
     handler = kit.handlers["search"]
     assert await handler(_ctx(svc, GUEST), {"where": "ящик"}) == places.TOOL_SEARCH_UNAVAILABLE
     assert "Ты обыскал" in await handler(_ctx(svc, CANARY), {"where": "ящик"})
-
-
-# --- сброс ---
 
 
 async def test_reset_scopes_split_cellar_and_catacombs(store):
@@ -370,7 +339,7 @@ async def test_reset_scopes_split_cellar_and_catacombs(store):
         f"location:cabinet:{CANARY}",
         f"location:cellar:{CANARY}",
         f"location:cellar_door:{CANARY}",
-        f"location:dark_room:{CANARY}",  # не в реестре: особое место катакомб
+        f"location:dark_room:{CANARY}",
         f"location_searched:cellar:{CANARY}",
         f"location_searched:cabinet:{CANARY}",
         f"catacombs:{CANARY}",

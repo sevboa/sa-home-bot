@@ -47,8 +47,6 @@ ACTION_ITEM_PORTRAIT = "item_portrait"
 ITEMS_SHOWN_MAX = 3
 
 
-# Новый передатчик (после смены) — один на всех: обычный архетип без черт,
-# зерно из стенда (b1_33). Готовность вырезки — флаг в app_state.
 NEW_RADIO_CUT_KEY = "radio-new"
 
 
@@ -62,8 +60,6 @@ class ItemFlowMixin(EngineCore):
     async def _portrait(
         self, chat_id: int, key: str, kind: items_mod.ItemKind, traits: list[str], seed: int
     ) -> dict[str, Any] | None:
-        """Портрет предмета на ноде llm (item_portrait): рисунок + вырезка
-        для вставки. None — не вышло (кадры идут без предмета)."""
         node_link = self._get_node_link()
         if node_link is None:
             return None
@@ -79,8 +75,6 @@ class ItemFlowMixin(EngineCore):
                     **({"restyle": restyle} if (restyle := kind.restyle(traits)) else {}),
                 },
                 dst=LLM_ADDRESS,
-                # До трёх попыток turbo плюс очередь GPU за чужими картинками:
-                # 2026-10-02 портрет пришёл через 193 с, бот бросил его на 180.
                 timeout=self._settings.llm.imagegen_request_timeout_s * 2,
             )
         except LLM_CALL_ERRORS as exc:
@@ -131,9 +125,6 @@ class ItemFlowMixin(EngineCore):
         )
 
     async def _owned_item(self, user_id: int, kind: items_mod.ItemKind) -> dict[str, Any] | None:
-        """Предмет вида у гостя. Прошедшим сцену до Этапа 49.3 он выдаётся
-        здесь же (ленивая выдача): обычное радио без черт, портрет — когда
-        понадобится."""
         owned = await self._store.items_of(user_id, kind.type)
         if owned:
             return owned[0]
@@ -155,8 +146,6 @@ class ItemFlowMixin(EngineCore):
     async def _item_cut(
         self, chat_id: int, item: dict[str, Any], kind: items_mod.ItemKind, *, draw: bool
     ) -> tuple[str, int] | None:
-        """(ключ вырезки, id портрета) предмета; нет портрета — нарисовать
-        (``draw``), иначе None."""
         if item.get("image_id"):
             image = await self._store.image_by_id(int(item["image_id"]))
             key = _image_params(image).get("cut_key") if image else None
@@ -176,13 +165,6 @@ class ItemFlowMixin(EngineCore):
     async def _item_shot(
         self, chat_id: int, user_id: int, focus: str, *, draw: bool
     ) -> _ItemShot | None:
-        """Какой предмет вставить в кадр кабинета. Общий вид — радио на
-        столе, кадр «про передатчик» — крупно; прочие крупные планы — без
-        предмета. Источник облика: идущая сцена (черты копятся), иначе
-        предмет гостя — старое радио, если стоит, или новое, если старое
-        убрано. ``draw=False`` — только узнать версию облика, ничего не
-        рисуя: портрета ещё нет — метка ``ITEM_PENDING_TAG`` (прежний
-        снимок без предмета повторно не покажется)."""
         kind = items_mod.RADIO
         if focus and not kind.focus_re.search(focus):
             return None
@@ -197,7 +179,6 @@ class ItemFlowMixin(EngineCore):
                 result = await self._portrait(chat_id, key, kind, run.item_traits, run.item_seed)
                 if result is None:
                     return None
-                # Перечитываем: ход сцены мог сохранить Run, пока шёл портрет.
                 fresh = await self._state.load_run(chat_id, radio.SCENARIO_ID) or run
                 fresh.item_key, fresh.item_drawn = key, drawn
                 if isinstance(result.get("seed"), int):
@@ -209,7 +190,6 @@ class ItemFlowMixin(EngineCore):
         if item is None:
             return None
         if await self.speech_clear(user_id):
-            # Старое радио убрано — на столе новый передатчик, один на всех.
             if not await self._store.get_state(NEW_RADIO_READY_KEY):
                 if not draw:
                     return _ItemShot(kind, "", place, ITEM_PENDING_TAG)
@@ -230,16 +210,15 @@ class ItemFlowMixin(EngineCore):
             return
         run = await self._state.load_run(chat_id, radio.SCENARIO_ID)
         if run is not None and run.item_key == shot.key:
-            run.item_drawn = ["-"]  # не совпадёт ни с каким набором — перерисуем
+            run.item_drawn = ["-"]
             await self._state.save_run(run)
 
     async def _grant_item(
         self, chat_id: int, user_id: int, run: Run, message_thread_id: int | None
     ) -> None:
-        """Финал сцены: старый передатчик со всеми чертами — гостю, карточкой."""
         kind = items_mod.KINDS[REGISTRY[run.scenario].item_kind or ""]
         if await self._store.items_of(user_id, kind.type):
-            return  # уже выдан (повторная сцена в другом чате)
+            return
         key = run.item_key or items_mod.new_cut_key(kind, user_id)
         seed = run.item_seed if run.item_seed is not None else items_mod.new_seed()
         result = await self._portrait(chat_id, key, kind, run.item_traits, seed)
@@ -268,7 +247,6 @@ class ItemFlowMixin(EngineCore):
         message_thread_id: int | None = None,
         reply_to_message_id: int | None = None,
     ) -> int | None:
-        """Карточка вещи в чат; id сообщения или None — не ушла."""
         kind = items_mod.KINDS.get(item["type"])
         if kind is None:
             return None
@@ -276,7 +254,7 @@ class ItemFlowMixin(EngineCore):
         caption = item_caption(kind, item, installed)
         markup = item_keyboard(kind, int(item["id"]))
         image = await self._store.image_by_id(int(item["image_id"])) if item["image_id"] else None
-        if image is None or not hasattr(self._notifier, "send_photo_ex"):
+        if image is None or not self._can_send_photos:
             return await self._notifier.send_direct(
                 chat_id, caption, reply_markup=markup, message_thread_id=message_thread_id
             )
@@ -307,12 +285,9 @@ class ItemFlowMixin(EngineCore):
         trigger_message_id: int | None = None,
         dialogue_id: int | None = None,
     ) -> str:
-        """Тул manor_items (Этап 49.3.6): опись особенных вещей поместья —
-        Альфреду, не в чат: он отвечает гостю своими словами. ``show`` —
-        гость просит показать вещь: её карточка с картинкой уходит в чат."""
         if chat_id is None or user_id is None:
             return radio.TOOL_ITEMS_UNAVAILABLE
-        await self._owned_item(user_id, items_mod.RADIO)  # ленивая выдача
+        await self._owned_item(user_id, items_mod.RADIO)
         owned = await self._owned_items(user_id)
         if not owned:
             return radio.TOOL_ITEMS_NONE
@@ -342,8 +317,6 @@ class ItemFlowMixin(EngineCore):
         return radio.TOOL_ITEMS_SENT.format(items=", ".join(names + drawing))
 
     async def manor_lines(self, user_id: int, owned: list[dict[str, Any]]) -> str:
-        """Опись для Альфреда: где вещь, приметы, беда и что с ней можно —
-        из действий вида, доступных сейчас."""
         lines = []
         for item in owned:
             kind = items_mod.KINDS[item["type"]]
@@ -372,12 +345,9 @@ class ItemFlowMixin(EngineCore):
     async def tool_item_action(
         self, chat_id: int | None, user_id: int | None, *, item: str, action: str
     ) -> str:
-        """Тул item_action (Этап 49.3.7): гость просит сделать что-то с вещью
-        поместья — форма подтверждения из данных действия уходит после речи
-        Альфреда (flush_forms). Делает кнопка, не модель."""
         if chat_id is None or user_id is None:
             return radio.TOOL_ACTION_UNAVAILABLE
-        await self._owned_item(user_id, items_mod.RADIO)  # ленивая выдача
+        await self._owned_item(user_id, items_mod.RADIO)
         owned = await self._owned_items(user_id)
         if not owned:
             return radio.TOOL_ITEMS_NONE
@@ -401,10 +371,6 @@ class ItemFlowMixin(EngineCore):
         return radio.TOOL_ACTION_FORM.format(form=_plain(act.form))
 
     async def item_place(self, user_id: int, item: dict[str, Any]) -> str:
-        """Где вещь. У радио правда — речь Альфреда: старый передатчик стоит,
-        пока картавость не снята (speech_clear), иначе он в чулане. Старый
-        фотоаппарат «в деле» (PLACE_DESK), пока Альфред снимает им (эффект
-        camera, 59.6); вино до распития — в чулане (PLACE_STOREROOM)."""
         if item["type"] == items_mod.RADIO_TYPE and not await self.speech_clear(user_id):
             return items_mod.PLACE_DESK
         if item["type"] == items_mod.CAMERA_TYPE and await self.camera_on(user_id):
@@ -412,19 +378,15 @@ class ItemFlowMixin(EngineCore):
         return items_mod.PLACE_STOREROOM
 
     def _visible_kinds(self, user_id: int | None) -> list[items_mod.ItemKind]:
-        """Виды вещей, что существуют для гостя: канареечные — только
-        канарейкам (59.C)."""
         canary = self.canary_ok(user_id)
         return [k for k in items_mod.KINDS.values() if canary or not k.canary]
 
     async def _owned_items(self, user_id: int) -> list[dict[str, Any]]:
-        """Вещи гостя, которые ему видны (опись, тулы, карточки)."""
         visible = {k.type for k in self._visible_kinds(user_id)}
         return [it for it in await self._store.items_of(user_id) if it["type"] in visible]
 
     async def inventory(self, user_id: int) -> tuple[str, InlineKeyboardMarkup | None]:
-        """Опись вещей гостя (/items): текст и кнопки «принести карточку»."""
-        await self._owned_item(user_id, items_mod.RADIO)  # ленивая выдача
+        await self._owned_item(user_id, items_mod.RADIO)
         owned = await self._owned_items(user_id)
         entries = [
             (items_mod.KINDS[it["type"]], it, await self.item_place(user_id, it)) for it in owned
@@ -441,9 +403,6 @@ class ItemFlowMixin(EngineCore):
         reply_to_message_id: int | None = None,
         dialogue_id: int | None = None,
     ) -> bool:
-        """Карточка вещи; портрета ещё нет — рисуется в фоне, карточка придёт
-        сама (False). ``dialogue_id`` — показ по просьбе в /ai: ход молчит,
-        пока портрет рисуется, а карточка ложится в историю его ответом."""
         kind = items_mod.KINDS[item["type"]]
         if item["image_id"]:
             await self._send_item_card(
@@ -487,9 +446,6 @@ class ItemFlowMixin(EngineCore):
         )
         if message_id is None or dialogue_id is None:
             return
-        # Ход /ai, попросивший показать вещь, закончился молча (живая находка
-        # 2026-10-15: «сейчас подготовлю описание» ломало четвёртую стену) —
-        # его ответом в истории становится сама карточка.
         installed = await self.item_place(user_id, item) == items_mod.PLACE_DESK
         await self._store.record_ai_turn(
             chat_id,
@@ -511,24 +467,13 @@ class ItemFlowMixin(EngineCore):
         message_thread_id: int | None = None,
         photo: bool = False,
     ) -> tuple[str, InlineKeyboardMarkup | None, str | None]:
-        """Кнопка карточки, описи или формы вещи. Возвращает (текст для
-        callback.answer, новая клавиатура, новая подпись/текст) — None: не
-        трогать.
-
-        Карточка: «Действия» → сообщение сменяется перечнем действий вида с
-        «Назад»; действие или «Назад» возвращают карточку. Из описи /items
-        (префикс ``ITEM_FROM_INVENTORY``) — то же, но возвращается опись.
-        Форма тула (префикс ``ITEM_FROM_FORM``) закрывается итогом. Раскрытый
-        перечень помнится живыми кнопками: следующее сообщение гостя его
-        свернёт. ``photo`` — карточка с картинкой (свернуть — правкой подписи)."""
         item = await self._store.item_by_id(item_id)
         if item is None or int(item["owner_user_id"]) != user_id:
             return radio.ITEM_NOT_YOURS, None, None
         kind = items_mod.KINDS.get(item["type"])
         if kind is not None and kind.canary and not self.canary_ok(user_id):
-            return radio.ITEM_NOT_YOURS, None, None  # канареечная вещь (59.C)
+            return radio.ITEM_NOT_YOURS, None, None
         if item.get("status") == "consumed" and kind is not None:
-            # Старая карточка израсходованной вещи (бутылка уже распита).
             if button.startswith(ITEM_FROM_INVENTORY):
                 text, markup = await self.inventory(user_id)
                 return kind.consumed_text or "Уже нет.", markup or _NO_BUTTONS, text
@@ -590,8 +535,6 @@ class ItemFlowMixin(EngineCore):
                     now=self._now(),
                 )
             if action.consumable:
-                # «Применение» (49.4): вещь израсходована — из описи и мест
-                # она пропадает, запись и журнал остаются.
                 await self._store.consume_item(item_id)
                 item["status"] = "consumed"
             if action.directive:
@@ -608,7 +551,6 @@ class ItemFlowMixin(EngineCore):
                 radio.ITEM_FORM_DONE.format(form=action.form, confirm=action.confirm),
             )
         if item.get("status") == "consumed" and origin != ITEM_FROM_INVENTORY:
-            # Бутылка распита: карточка остаётся подписью без кнопок.
             return answer, _NO_BUTTONS, item_caption(kind, item, False)
         return (answer, *await self._item_view(user_id, kind, item, origin, place))
 
@@ -619,8 +561,6 @@ class ItemFlowMixin(EngineCore):
         action: items_mod.ItemAction,
         message_thread_id: int | None,
     ) -> None:
-        """Снимок Альфреда по действию вещи (``ItemAction.snapshot``, 59.3:
-        с бокалом вина). Best-effort: занято или нет связи — без снимка."""
         started = await self._start_photo(
             chat_id,
             user_id,
@@ -643,26 +583,17 @@ class ItemFlowMixin(EngineCore):
         origin: str,
         place: str,
     ) -> tuple[InlineKeyboardMarkup, str]:
-        """Куда вернуться из перечня: опись /items или карточка вещи."""
         if origin == ITEM_FROM_INVENTORY:
             text, markup = await self.inventory(user_id)
             return markup or _NO_BUTTONS, text
         card = item_keyboard(kind, int(item["id"])) or _NO_BUTTONS
         return card, item_caption(kind, item, place == items_mod.PLACE_DESK)
 
-    # Эффекты действий вещей (ItemAction.effect → метод). Новый рычаг —
-    # новый метод здесь и действие в данных вида (items.py).
     _ITEM_EFFECTS = {"radio_desk": "_effect_radio_desk", "user_effect": "_effect_user_effect"}
 
     async def _effect_user_effect(
         self, chat_id: int, user_id: int, item: dict[str, Any], action: items_mod.ItemAction
     ) -> None:
-        """Общий механизм «Применение» (49.4, первым применением — вино 59.3):
-        ``action.arg`` — ключ эффекта из ``items.EFFECTS``; с «-» впереди
-        эффект снимается (вернуть прежний фотоаппарат). Эффект — запись
-        ``user_effect:<ключ>:<гость>`` со сроком (``expires_at``: хмель — 3 ч,
-        фотоаппарат — пока не вернут), его текст каждый ход гостя уходит
-        в system Альфреда (``_effects_note``)."""
         if action.arg.startswith("-"):
             await self._state.clear_effect(action.arg[1:], user_id)
             return
@@ -673,6 +604,4 @@ class ItemFlowMixin(EngineCore):
     async def _effect_radio_desk(
         self, chat_id: int, user_id: int, item: dict[str, Any], action: items_mod.ItemAction
     ) -> None:
-        """Старая, проклятая радиостанция на столе — картавость есть
-        (speech_clear выключен); убрана — речь чистая."""
         await self._set_clear(chat_id, user_id, action.arg == "remove")

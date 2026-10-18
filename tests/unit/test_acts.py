@@ -1,7 +1,3 @@
-"""Этап 59.7: тул act — действия Альфреда через Ведущего. Исход физического
-действия даёт Ведущий синхронно, внутри тула; стадия, перенос, финал и вещи
-применяются сразу; случай (ключ) решает код; потолок — 4 действия за ход."""
-
 from __future__ import annotations
 
 import json
@@ -47,11 +43,7 @@ async def store(tmp_path):
 
 
 async def _begin(svc, text):
-    """Начало хода гостя: before_turn (счётчик в ноль, реплика запомнена)."""
     return await svc.before_turn(CANARY, CANARY, text, is_private=True)
-
-
-# --- цепочка действий ---
 
 
 async def test_chain_of_acts_moves_stage_immediately_and_logs_each(store):
@@ -67,18 +59,14 @@ async def test_chain_of_acts_moves_stage_immediately_and_logs_each(store):
         _act_reply("Замок неподвижен, как ни дёргай.", stage=1),
     ]
     first = await svc.tool_act(CANARY, CANARY, "сорвать доски с двери")
-    # Стадия сдвинута уже внутри тула, а не после ответа Альфреда.
     assert "Доски поддаются" in first
     run = await _run(store)
     assert run.stage == 1 and run.world["facts"] == ["доски сняты", "замок заперт"]
-    # Ведущему ушла последняя реплика гостя (по ней он проверяет согласие),
-    # стадия 0 и действие.
     sent = link.director_inputs[0]
     assert "Да, снимайте доски" in sent and "Текущая стадия: 0" in sent
     assert "сорвать доски с двери" in sent
     second = await svc.tool_act(CANARY, CANARY, "дёрнуть замок")
     assert "Замок неподвижен" in second
-    # Второе действие видит факты первого.
     assert "доски сняты" in link.director_inputs[1]
     assert "Текущая стадия: 1" in link.director_inputs[1]
     assert (await _run(store)).transcript[-5:] == [
@@ -88,7 +76,6 @@ async def test_chain_of_acts_moves_stage_immediately_and_logs_each(store):
         "Действие: дёрнуть замок",
         "Итог: Замок неподвижен, как ни дёргай.",
     ]
-    # Ход заканчивается: гость не дублируется в журнале, а событие после хода пусто.
     link.director_replies = [_dir(stage=1, effect="Придуманное после хода.")]
     await svc.after_turn(plan, "Доски сняты, сэр.", dialogue_id=1)
     run = await _run(store)
@@ -100,8 +87,6 @@ async def test_chain_of_acts_moves_stage_immediately_and_logs_each(store):
 
 
 async def test_go_during_key_hunt_is_an_act_through_the_director(store):
-    """Живая находка 2026-10-15: в поисках ключа go отвечал «занят другим
-    делом» и «не знаю такого места». Теперь дорогу решает Ведущий."""
     svc, _, link = _make(store, dice=Dice(0.0))
     await _active(svc, store)
     await _begin(svc, "Сходи на кухню")
@@ -134,7 +119,7 @@ async def test_stage_change_by_act_blocks_a_second_jump_in_the_same_turn(store):
     plan = await _begin(svc, "Снимай")
     link.director_replies = [_act_reply("Доски упали.", stage=1)]
     await svc.tool_act(CANARY, CANARY, "сорвать доски")
-    link.director_replies = [_dir(stage=2)]  # после хода Ведущий спешит дальше
+    link.director_replies = [_dir(stage=2)]
     await svc.after_turn(plan, "Готово.", dialogue_id=1)
     assert (await _run(store)).stage == 1
 
@@ -148,14 +133,10 @@ async def test_act_result_is_quoted_back_to_the_model(store):
     assert text.startswith("Итог: Доски упали.") and "ничего не добавляя" in text
 
 
-# --- случай решает код ---
-
-
 async def test_search_like_act_in_key_hunt_takes_its_outcome_from_the_code(store):
     svc, _, link = _make(store, dice=Dice(0.0))
     await _to_key_hunt(svc, store, link)
     await _begin(svc, "Поищи в кладовой")
-    # Ведущий пытается отдать ключ с первого обыска и стадию 3 — код не даёт.
     link.director_replies = [_act_reply("В ящике лежит ключ!", stage=3)]
     await svc.tool_act(CANARY, CANARY, "порыскать в шкафу кладовой")
     run = await _run(store)
@@ -167,11 +148,11 @@ async def test_search_like_act_in_key_hunt_takes_its_outcome_from_the_code(store
 
 async def test_look_over_is_not_a_search_on_stage_zero(store):
     svc, _, link = _make(store, dice=Dice(0.0))
-    await _active(svc, store)  # стадия 0
+    await _active(svc, store)
     await _begin(svc, "Осмотри дверь")
     link.director_replies = [_act_reply("Дверь как дверь.")]
     await svc.tool_act(CANARY, CANARY, "осмотреть дверь")
-    assert "key_searches" not in (await _run(store)).world  # не обыск
+    assert "key_searches" not in (await _run(store)).world
 
 
 async def test_look_over_is_a_search_on_key_hunt_stage(store):
@@ -187,7 +168,7 @@ async def test_key_found_by_search_act_moves_to_stage_three_at_once(store):
     svc, _, link = _make(store, dice=Dice(0.0))
     await _to_key_hunt(svc, store, link)
     run = await _run(store)
-    run.world["key_searches"] = 4  # пятый обыск — ключ гарантирован
+    run.world["key_searches"] = 4
     await svc._state.save_run(run)
     svc._rng = Dice(0.5)
     await _begin(svc, "Ищи дальше")
@@ -197,11 +178,7 @@ async def test_key_found_by_search_act_moves_to_stage_three_at_once(store):
     assert run.stage == 3 and run.world["key_found"]
     assert await svc._state.get_effect("cellar_unlocked", CANARY) == "1"
     assert (await places.get_at(store, CANARY)).place == places.PLACE_CELLAR
-    # Бутылка выдана сразу (stage_items).
     assert len(await store.items_of(CANARY, "wine")) == 1
-
-
-# --- потолок ---
 
 
 async def test_fifth_act_in_a_turn_stops_without_asking_the_director(store):
@@ -216,13 +193,9 @@ async def test_fifth_act_in_a_turn_stops_without_asking_the_director(store):
     out = await svc.tool_act(CANARY, CANARY, "ещё действие")
     assert out == acts.TOOL_ACT_LIMIT and "спроси" in out
     assert len(link.director_inputs) == asked
-    # Новый ход гостя — счётчик с нуля.
     await _begin(svc, "Дальше")
     link.director_replies = [_act_reply("Снова можно.")]
     assert "Снова можно." in await svc.tool_act(CANARY, CANARY, "действие")
-
-
-# --- факты мира ---
 
 
 async def test_facts_are_capped_at_twelve_and_removed_on_request(store):
@@ -243,14 +216,11 @@ async def test_facts_are_seen_by_alfred_the_director_and_the_snapshot(store):
     await _begin(svc, "Снимай")
     link.director_replies = [_act_reply("Доски упали.", stage=1, facts_add=["доски сняты"])]
     await svc.tool_act(CANARY, CANARY, "сорвать доски")
-    # Альфред: заметка сцены.
     plan = await _begin(svc, "Ну?")
     assert "Что вокруг уже так (не противоречь): доски сняты." in plan.note
-    # Ведущий: каждый вызов, в том числе после хода.
     link.director_replies = [_dir(stage=1)]
     await svc.after_turn(plan, "Ну?", dialogue_id=1)
     assert "- доски сняты" in link.director_inputs[-1]
-    # Снимок: состояние сцены в описании общего вида.
     description, _ = photo_text.photo_description(
         await svc._room(CANARY, CANARY),
         await svc._transylvania.outside(svc._now()),
@@ -267,9 +237,6 @@ async def test_scene_without_facts_changes_nothing_in_notes_or_snapshots(store):
     plan = await _begin(svc, "Ну?")
     assert "уже так" not in plan.note
     assert await svc._scene_facts(CANARY, CANARY) is None
-
-
-# --- переносы, финал, эффект после хода ---
 
 
 async def test_move_to_by_act_on_key_hunt_stage(store):
@@ -304,7 +271,7 @@ async def test_finale_by_act_sets_flags_now_and_finishes_next_turn(store):
     assert await svc._state.get_effect("catacombs_open", CANARY) == "1"
     link.director_replies = [_dir(stage=4)]
     await svc.after_turn(plan, "Лаз, сэр.", dialogue_id=1)
-    assert (await _run(store)).status == STATUS_ACTIVE  # Альфред успевает рассказать
+    assert (await _run(store)).status == STATUS_ACTIVE
     plan = await _begin(svc, "И что?")
     assert "лаз за бочкой" in plan.note
     link.director_replies = [_dir(stage=4)]
@@ -319,7 +286,7 @@ async def test_turn_without_act_keeps_the_directors_surroundings_effect(store):
     await _turn(svc, "Ну что там?")
     run = await _run(store)
     assert run.pending_effect == "Где-то капает вода."
-    assert "САМО" in link.director_inputs[-1]  # просим только то, что изменилось само
+    assert "САМО" in link.director_inputs[-1]
 
 
 async def test_without_a_director_the_act_gets_a_neutral_result(store):
@@ -330,9 +297,6 @@ async def test_without_a_director_the_act_gets_a_neutral_result(store):
     out = await svc.tool_act(CANARY, CANARY, "сорвать доски")
     assert acts.TOOL_ACT_NO_DIRECTOR in out
     assert (await _run(store)).stage == 0
-
-
-# --- кому и где доступно ---
 
 
 async def test_act_refused_for_non_canary_and_group_chats(store):
@@ -386,9 +350,6 @@ async def test_act_in_catacombs_scene_uses_the_director_and_keeps_stage_zero(sto
     assert run.stage == 0 and run.world["facts"] == ["плита сдвинута"]
 
 
-# --- объявление и цепочка тулов ---
-
-
 def test_declaration_and_registration():
     function = acts.ACT_DECLARATION["function"]
     assert function["name"] == "act"
@@ -400,7 +361,6 @@ def test_declaration_and_registration():
 def test_scene_frames_demand_acts_for_physical_actions():
     assert "только инструментом act" in cellar.CELLAR.scene_frame
     assert "только инструментом act" in underground.CATACOMBS.scene_frame
-    # Альфред заранее не знает про замок; Ведущему сказано, что он за досками.
     assert "замок" not in cellar.CELLAR.ladder[0].lower()
     assert "РЖАВЫЙ ЗАПЕРТЫЙ ЗАМОК" in cellar.CELLAR.act_prompt
 

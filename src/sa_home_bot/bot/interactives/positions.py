@@ -13,16 +13,12 @@ from sa_home_bot.bot.interactives.transylvania import Outside
 
 class PositionsMixin(EngineCore):
     async def _room(self, chat_id: int, user_id: int) -> Cabinet:
-        """Комната, где сейчас Альфред. Гость вне списка канареек — всегда
-        кабинет, и ``alfred_at`` для него не читается."""
         if not self.canary_ok(user_id):
             return await cabinet_mod.load(self._store, user_id)
         at = await places.get_at(self._store, user_id)
         if at is None or at.in_cabinet:
             return await cabinet_mod.load(self._store, user_id)
         if at.place == underground.PLACE_CATACOMBS:
-            # Под землёй: особое место, если Альфред внутри, иначе вид узла
-            # или прохода лабиринта (59.4).
             return await self._catacombs_room(user_id, at)
         if at.place in places.PLACES:
             return await places.load_room(self._store, user_id, at.place)
@@ -33,13 +29,9 @@ class PositionsMixin(EngineCore):
                     room = places.temp_room(run.world, user_id, at.place)
                     if room is not None:
                         return room
-        # Место потеряно (временная комната ушла вместе со сценой) — Альфред
-        # у себя.
         return await cabinet_mod.load(self._store, user_id)
 
     async def _save_room(self, room: Cabinet, run: Run | None = None) -> None:
-        """Записать комнату: кабинет и обычные комнаты — в хранилище, временную
-        — в мир сцены (``run`` сохранит вызывающий)."""
         if isinstance(room, Room):
             if room.temp:
                 if run is not None:
@@ -50,7 +42,6 @@ class PositionsMixin(EngineCore):
             await cabinet_mod.save(self._store, room)
 
     async def _move_to(self, user_id: int, place: str) -> None:
-        """Альфред переходит в другое место (``alfred_at``)."""
         at = places.new_at(place, self._now())
         await places.set_at(self._store, user_id, at)
 
@@ -63,8 +54,6 @@ class PositionsMixin(EngineCore):
         return "оттуда, где искал ключ" if places.is_temp(at.place) else places.RETURN_FROM_UNKNOWN
 
     async def _go_home(self, user_id: int, *, announce: bool) -> None:
-        """Альфред возвращается в кабинет. ``announce`` — следующим ходом он
-        сам скажет, что поднялся (before_turn → _tend_position)."""
         at = await places.get_at(self._store, user_id)
         if at is None or at.in_cabinet:
             return
@@ -73,10 +62,6 @@ class PositionsMixin(EngineCore):
         await places.set_at(self._store, user_id, home)
 
     async def _tend_position(self, user_id: int) -> str | None:
-        """Начало хода канарейки: вернуть Альфреда в кабинет после простоя и
-        отдать заметку «ты вернулся» (или освежить метку «гость на связи»).
-        Идущая канареечная сцена при возврате уходит в idle: продолжится,
-        когда гость сам вернётся к теме."""
         at = await places.get_at(self._store, user_id)
         if at is None:
             return None
@@ -103,8 +88,6 @@ class PositionsMixin(EngineCore):
         return None
 
     async def _canary_chats(self, user_id: int, scenario: Scenario) -> list[int]:
-        """Чаты гостя, где есть ход этого сценария (в личке chat_id совпадает с
-        user_id, но берём по данным)."""
         chats = []
         for key in await self._store.state_keys("interactive_run:"):
             parts = key.split(":")
@@ -115,24 +98,19 @@ class PositionsMixin(EngineCore):
         return chats
 
     async def _room_extra(self, room: Cabinet, user_id: int) -> str:
-        """Приписка к «Где ты» для комнат вне кабинета (канарейка)."""
         if (
             isinstance(room, Room)
             and room.canon.id == places.PLACE_CELLAR
             and await self._state.get_effect(places.EFFECT_CATACOMBS_OPEN, user_id) == "1"
         ):
-            # Войдя в подвал, Альфред сам предлагает быстрые переходы (59.5).
             return places.CELLAR_HATCH_HINT + await self._travel_hint(user_id)
         return await self._underground_extra(room, user_id)
 
     def _where_rule(self, cab: Cabinet) -> str:
-        """Правило места (перейти можно только тулом) и есть ли окно."""
         window = places.WINDOW_YES if cab.windowed else places.WINDOW_NO
         return f"{window} {places.MOVE_RULE}"
 
     async def _add_where_note(self, plan: TurnPlan, chat_id: int, user_id: int) -> None:
-        """Заметка «Где ты» вне сцены: место по ``alfred_at``, окно, как
-        отсюда выйти и правило. В сцене место уже в её заметке."""
         cab = await self._room(chat_id, user_id)
         if isinstance(cab, Room):
             detail = " " + cab.describe_ru() + await self._room_extra(cab, user_id)
@@ -147,7 +125,6 @@ class PositionsMixin(EngineCore):
         plan.note = f"{note}\n\n{plan.note}" if plan.note else note
 
     async def _cabinet_exits(self, user_id: int) -> str:
-        """Куда из кабинета знакомой дорогой можно пойти (то, что открыто)."""
         unlocked, opened = await self._flags(user_id)
         targets = []
         if unlocked:
@@ -157,7 +134,6 @@ class PositionsMixin(EngineCore):
         return places.EXIT_CABINET_TO.format(targets=", ".join(targets)) if targets else ""
 
     async def _end_scene_in_room(self, run: Run) -> None:
-        """Следы сцены в комнате, где стоит Альфред, уходят вместе со сценой."""
         room = await self._room(run.chat_id, run.user_id)
         if room.end_scene():
             await self._save_room(room, run)
@@ -168,8 +144,6 @@ class PositionsMixin(EngineCore):
             await cabinet_mod.save(self._store, cab)
 
     async def _apply_move(self, scenario: Scenario, run: Run, move: dict[str, str]) -> None:
-        """Перенос Альфреда по слову Ведущего: во временную комнату (канон
-        придумал Ведущий, живёт в мире сцены) или к известному месту стадии."""
         if "place" in move:
             allowed = scenario.stage_places[min(run.stage, scenario.last_stage)]
             if move["place"] in (allowed, places.PLACE_CABINET) and move["place"] in places.PLACES:
@@ -182,7 +156,7 @@ class PositionsMixin(EngineCore):
         await self._move_to(run.user_id, tid)
 
     async def _ensure_first_features(self, cab: Cabinet, chat_id: int, outside: Outside) -> None:
-        if cab.features or isinstance(cab, Room):
+        if cab.features or not cab.is_study:
             return
         node_link = self._get_node_link()
         if node_link is None:

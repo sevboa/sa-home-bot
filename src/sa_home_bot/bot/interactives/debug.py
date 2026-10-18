@@ -10,8 +10,6 @@ class DebugMixin(UndergroundMixin):
     DEBUG_USAGE = "Использование: /interactives cellar | reset cellar|catacombs|all | where"
 
     async def debug_cellar(self, chat_id: int, user_id: int) -> str:
-        """``/interactives cellar`` — стук снизу прямо сейчас: без шанса,
-        кулдауна и счёта обычных ходов. Форма уходит сразу."""
         if not self.canary_ok(user_id):
             return self.DEBUG_USAGE
         scenario = REGISTRY[cellar.SCENARIO_ID]
@@ -25,22 +23,16 @@ class DebugMixin(UndergroundMixin):
         return "Стук отправлен."
 
     async def debug_reset(self, chat_id: int, user_id: int, scope: str) -> str:
-        """``/interactives reset cellar|catacombs|all`` — стереть свой прогресс
-        Этапа 59. Кабинет не трогается."""
         if not self.canary_ok(user_id):
             return self.DEBUG_USAGE
         if scope not in places.RESET_SCOPES:
             return "Что стереть: reset cellar | catacombs | all"
-        # Под замком кадров катакомб: кадр, дорисованный во время сброса,
-        # иначе успевал записать старый лабиринт обратно (remember_frame).
         async with self._frames.lock:
             removed = await places.reset_progress(self._store, user_id, scope, chat_id)
         await self.dismiss_buttons(chat_id, user_id)
         return f"Сброшено ({scope}): {len(removed)} запис." if removed else "Нечего сбрасывать."
 
     async def debug_where(self, user_id: int) -> str:
-        """``/interactives where`` — сырое ``alfred_at`` (место, узел и
-        направление катакомб)."""
         if not self.canary_ok(user_id):
             return self.DEBUG_USAGE
         raw = await self._store.get_state(places.at_key(user_id))

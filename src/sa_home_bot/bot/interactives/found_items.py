@@ -16,9 +16,6 @@ class FoundItemsMixin(EngineCore):
     async def _create_found_item(
         self, user_id: int, kind: items_mod.ItemKind, origin: str
     ) -> dict[str, Any] | None:
-        """Завести гостю вещь вида ``kind`` с запасными приметами и заметкой
-        (Ведущий потом заменит их своими, ``_apply_found_item``). Такая вещь
-        у гостя уже есть (повторная сцена, сброс) — ничего не заводим."""
         if await self._store.items_of(user_id, kind.type):
             return None
         pool = list(kind.fallback_traits)
@@ -44,8 +41,6 @@ class FoundItemsMixin(EngineCore):
 
     @staticmethod
     def _ask_found_item(run: Run, item: dict[str, Any], kind: items_mod.ItemKind) -> None:
-        """Ведущему на следующем вызове — придумать вещи приметы и заметку
-        (director._found_item_block)."""
         run.world["found_item"] = {"id": int(item["id"]), "name": kind.name, "ask": kind.found_ask}
 
     async def _give_found_item(self, run: Run, kind: items_mod.ItemKind, *, origin: str) -> None:
@@ -56,9 +51,6 @@ class FoundItemsMixin(EngineCore):
     async def _apply_found_item(
         self, run: Run, decision: DirectorDecision | director_mod.ActDecision | None
     ) -> None:
-        """Ведущий ответил на ``found_item``: его приметы и заметка заменяют
-        запасные. Не ответил — остаются запасные; просьба снимается в любом
-        случае (одна попытка на вызов)."""
         found = run.world.pop("found_item", None)
         if not isinstance(found, dict) or decision is None or decision.found_item is None:
             return

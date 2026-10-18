@@ -28,10 +28,7 @@ log = logging.getLogger(__name__)
 
 class MoodSelfieMixin(EngineCore):
     async def _mood_selfie_gated(self, chat_id: int, reply: str) -> bool:
-        """Дешёвые гейты без GPU: связь и отправка фото есть, реплика влезает
-        в подпись, в чате не чаще раза в SELFIE_MOOD_GAP_H часов и
-        SELFIE_MOOD_DAILY в сутки. True — можно спрашивать классификатор."""
-        if not hasattr(self._notifier, "send_photo_ex") or self._get_node_link() is None:
+        if not self._can_send_photos or self._get_node_link() is None:
             return False
         if chat_id in self._photo_busy or chat_id in self._photo_jobs:
             return False
@@ -50,7 +47,6 @@ class MoodSelfieMixin(EngineCore):
     async def _classify_mood(
         self, chat_id: int, user_text: str, reply: str
     ) -> tuple[str, int, str] | None:
-        """(эмоция, интенсивность 0..3, action) или None — сбой/мусор."""
         node_link = self._get_node_link()
         if node_link is None:
             return None
@@ -91,10 +87,6 @@ class MoodSelfieMixin(EngineCore):
         trigger_message_id: int | None = None,
         on_status: Callable[[str], Awaitable[None]] | None = None,
     ) -> int | None:
-        """Спонтанное селфи к ответу /ai: реплика Альфреда (``reply``) уходит
-        подписью к его фото одним сообщением. Возвращает message_id фото или
-        None — селфи нет (гейты, «none», не выпал бросок, сбой) и ответ надо
-        слать обычным текстом. Никогда не бросает: ответ не должен теряться."""
         if user_id is None:
             return None
         try:
@@ -159,7 +151,7 @@ class MoodSelfieMixin(EngineCore):
             mood = run.mood if run is not None else None
             face = cabinet_mod.SELFIE_EMOTION_FACE_EN[emotion]
             if action and self.canary_ok(user_id) and places.foreign_place(action, cab.place):
-                action = ""  # селфи только здесь: чужое место в позе не рисуем (59.7)
+                action = ""
             focus = "; ".join(p for p in (face, action) if p)
             description = selfie_description(cab, outside, focus, happening)
             request: dict[str, Any] = {
@@ -168,10 +160,9 @@ class MoodSelfieMixin(EngineCore):
                 "context": "",
                 "chat_id": chat_id,
                 "negative_extra": photo_negative(cab),
-                # Мимика — главным: без этого промптер выкинет её ради обстановки.
                 "emphasize": [e for e in (face or action,) if e],
             }
-            px = await self.photo_size(user_id)  # старый фотоаппарат (59.6)
+            px = await self.photo_size(user_id)
             if px:
                 request["size"] = px
             loras: list[list[Any]] = [list(image_tools.ALFRED_LORA)]

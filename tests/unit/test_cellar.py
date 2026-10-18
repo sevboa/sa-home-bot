@@ -1,6 +1,3 @@
-"""Сценарий «Стук снизу» (Этап 59.2): спонтанный триггер, форма, стадии,
-поиск ключа (решает код), финал, отладочные подкоманды."""
-
 from __future__ import annotations
 
 import asyncio
@@ -92,7 +89,7 @@ class FakeLink:
             self.director_inputs.append(args["messages"][0]["content"])
             return {"response": self.director_replies.pop(0) if self.director_replies else "{}"}
         if action == "chat":
-            return {"response": "Готово, сэр."}  # подпись к снимку
+            return {"response": "Готово, сэр."}
         if action == "generate_image":
             self.generated.append(args)
             return {
@@ -116,8 +113,6 @@ class Clock:
 
 
 class Dice:
-    """Подставной rng: значения по очереди, затем последнее."""
-
     def __init__(self, *values: float) -> None:
         self.values = list(values) or [0.99]
 
@@ -174,14 +169,12 @@ def _dir(**fields) -> str:
 
 
 def _act_reply(result="Ничего не происходит.", **fields) -> str:
-    """Ответ Ведущего в режиме act (Этап 59.7)."""
     data = {"result": result, "stage": None, "facts_add": [], "facts_remove": []}
     data.update(fields)
     return json.dumps(data, ensure_ascii=False)
 
 
 async def _offered(svc, store):
-    """Канарейка: три обычных хода и четвёртый с форм (бросок удался)."""
     for _ in range(3):
         await _turn(svc)
     svc._rng = Dice(0.0)
@@ -195,9 +188,6 @@ async def _active(svc, store):
     answer = await svc.handle_click(CANARY, CANARY, cellar.SCENARIO_ID, keyboards.BTN_PLAY)
     assert answer[0] == "Хорошо."
     assert (await _run(store)).status == STATUS_ACTIVE
-
-
-# --- триггер ---
 
 
 @pytest.mark.parametrize(
@@ -231,22 +221,17 @@ def test_scenario_shape():
     assert scenario.offer_buttons == ("Проверьте", "Не обращать внимания")
     assert scenario.decline_cooldown == timedelta(days=3)
     assert len(scenario.ladder) == 5 and scenario.last_stage == 4
-    # Гость видит только форму: в ней слов «игра/квест/локация/карта» нет.
     visible = " ".join([scenario.offer_text, *scenario.offer_buttons]).lower()
     for word in ("игр", "квест", "локаци", "карт", "сценк", "ведущ"):
         assert word not in visible
-    # Альфреду эти слова названы только как запрещённые.
     assert "никогда не говори" in scenario.scene_frame
-
-
-# --- спонтанный триггер ---
 
 
 async def test_spontaneous_needs_three_plain_turns_and_the_roll(store):
     svc, notifier, link = _make(store, dice=Dice(0.0))
     for _ in range(3):
         plan = await _turn(svc)
-        assert plan.scenario is None  # первые три хода — только счёт
+        assert plan.scenario is None
     assert notifier.sent == []
     plan = await _turn(svc)
     assert plan.offered and plan.scenario == cellar.SCENARIO_ID
@@ -254,17 +239,17 @@ async def test_spontaneous_needs_three_plain_turns_and_the_roll(store):
     assert text == cellar.OFFER_TEXT
     labels = [b.text for row in markup.inline_keyboard for b in row]
     assert labels == ["Проверьте", "Не обращать внимания"]
-    assert link.director_inputs == []  # Ведущий до согласия не зовётся
+    assert link.director_inputs == []
 
 
 async def test_spontaneous_roll_failure_keeps_rolling_each_turn(store):
     svc, notifier, _ = _make(store, dice=Dice(0.9, 0.9, 0.0))
     for _ in range(3):
         await _turn(svc)
-    await _turn(svc)  # бросок 0.9 >= 1/8
-    await _turn(svc)  # 0.9
+    await _turn(svc)
+    await _turn(svc)
     assert notifier.sent == []
-    plan = await _turn(svc)  # 0.0
+    plan = await _turn(svc)
     assert plan.offered
 
 
@@ -274,7 +259,7 @@ async def test_spontaneous_never_for_non_canary(store):
         plan = await _turn(svc, chat=GUEST, user=GUEST)
         assert plan.scenario is None
     assert notifier.sent == []
-    assert await store.state_keys("") == []  # и ни одной записи
+    assert await store.state_keys("") == []
 
 
 async def test_spontaneous_only_in_private_and_not_when_opted_out(store):
@@ -289,8 +274,8 @@ async def test_spontaneous_only_in_private_and_not_when_opted_out(store):
 
 async def test_spontaneous_not_during_another_scene(store):
     svc, notifier, _ = _make(store, dice=Dice(0.0))
-    await _turn(svc, "Альфред, ты картавишь!")  # радио предложено
-    await svc.handle_click(CANARY, CANARY, radio.RADIO.id, keyboards.BTN_PLAY)  # и идёт
+    await _turn(svc, "Альфред, ты картавишь!")
+    await svc.handle_click(CANARY, CANARY, radio.RADIO.id, keyboards.BTN_PLAY)
     for _ in range(6):
         plan = await _turn(svc)
         assert plan.scenario != cellar.SCENARIO_ID
@@ -301,13 +286,10 @@ async def test_spontaneous_at_most_once_a_day(store):
     clock = Clock()
     svc, notifier, _ = _make(store, dice=Dice(0.0), clock=clock)
     await _offered(svc, store)
-    # Гость молча проигнорировал форму: пишет дальше — кнопки сняты.
     clock.now += timedelta(hours=3)
     for _ in range(8):
         await _turn(svc)
     assert notifier.texts(CANARY).count(cellar.OFFER_TEXT) == 1
-    # Форма без ответа протухла (час), кулдаун протухшей — сутки; после них
-    # новое предложение возможно.
     clock.now += timedelta(hours=25)
     plan = await _turn(svc)
     assert plan.offered
@@ -339,7 +321,6 @@ async def test_refusal_cools_down_for_three_days(store):
     for _ in range(6):
         plan = await _turn(svc)
         assert plan.scenario is None
-    # Прямой вопрос тоже не пробивает кулдаун.
     assert not (await _turn(svc, "А что в подвале?")).offered
     clock.now += timedelta(hours=2)
     assert (await _turn(svc, "А что в подвале?")).offered
@@ -354,9 +335,6 @@ async def test_yes_button_text_and_alfred_goes_to_the_cellar_door(store):
     assert at is not None and at.place == places.PLACE_CELLAR_DOOR
     directive, _ = svc.spoken[-1]
     assert "заколочена досками" in directive and "снимать ли" in directive
-
-
-# --- ответ словами на предложение (59.7) ---
 
 
 async def test_yes_in_words_starts_the_scene_this_turn(store):
@@ -403,7 +381,7 @@ async def test_offer_still_expires_after_an_hour(store):
     plan = await svc.before_turn(CANARY, CANARY, "Да, проверь", is_private=True)
     assert not plan.scene
     assert (await _run(store)).status == STATUS_DECLINED
-    assert notifier.unmarked  # кнопки погашены
+    assert notifier.unmarked
 
 
 @pytest.mark.parametrize("text", ["не проверяй", "Какая погода?", "проверка связи", "данные"])
@@ -422,10 +400,7 @@ async def test_spontaneous_knock_not_on_a_photo_request(store):
         await _turn(svc)
     plan = await _turn(svc, "хорошо, покажи что за окном")
     assert not plan.offered and notifier.sent == []
-    assert (await _turn(svc)).offered  # следующий обычный ход — можно
-
-
-# --- сцена: стадии ---
+    assert (await _turn(svc)).offered
 
 
 async def test_scene_note_places_alfred_at_the_boarded_door(store):
@@ -434,10 +409,10 @@ async def test_scene_note_places_alfred_at_the_boarded_door(store):
     plan = await svc.before_turn(CANARY, CANARY, "Ну что там?", is_private=True)
     assert plan.scene and plan.scenario == cellar.SCENARIO_ID
     assert cellar.CELLAR.scene_frame in plan.note
-    assert "заколочена" in plan.note  # «Где ты» — лестница к двери подвала
+    assert "заколочена" in plan.note
     assert cellar.CELLAR.ladder[0] in plan.note
     assert "Где ты: Узкая каменная лестница" in plan.note
-    assert "за окном" not in plan.note.lower()  # погоды снаружи под землёй нет
+    assert "за окном" not in plan.note.lower()
 
 
 async def test_stage_one_only_after_guest_agrees_and_director_says_so(store):
@@ -460,7 +435,7 @@ async def test_director_cannot_skip_the_key_hunt(store):
     for _ in range(4):
         await _turn(svc)
     run = await _run(store)
-    assert run.stage == 2  # в стадию 3 — только когда код нашёл ключ
+    assert run.stage == 2
     assert not run.world.get("key_found")
 
 
@@ -490,7 +465,6 @@ async def test_move_to_puts_alfred_into_a_temp_room_kept_in_run_world(store):
     assert places.is_temp(at.place)
     run = await _run(store)
     assert run.world["rooms"][at.place]["name"] == "кухня"
-    # Комната в хранилище location:* не попала.
     assert [k for k in await store.state_keys("location:")] == []
     room = await svc._room(CANARY, CANARY)
     assert room.temp and "кухня" in room.describe_ru().lower() or "кухн" in room.describe_ru()
@@ -526,7 +500,6 @@ def test_fifth_search_always_finds_the_key():
 async def test_search_tool_in_key_hunt_asks_the_director_synchronously(store):
     svc, _, link = _make(store, dice=Dice(0.0))
     await _to_key_hunt(svc, store, link)
-    # 1-й обыск: ключа нет, как бы ни выпал кубик.
     link.director_replies = [_act_reply("Шкаф пуст, лишь пыль и паутина.")]
     answer = await svc.tool_search(CANARY, CANARY, "шкаф в кладовой")
     assert "Шкаф пуст, лишь пыль и паутина." in answer
@@ -538,7 +511,6 @@ async def test_search_tool_in_key_hunt_asks_the_director_synchronously(store):
     assert run.transcript[-2].startswith("Действие: порыскать: шкаф в кладовой")
     assert run.transcript[-1] == "Итог: Шкаф пуст, лишь пыль и паутина."
     assert await svc._state.get_effect("cellar_unlocked", CANARY) is None
-    # После хода событие ничего не придумывает: исход Альфред уже получил.
     link.director_replies = [_dir(stage=2, effect="Придуманный исход.")]
     await _turn(svc, "Ну?")
     run = await _run(store)
@@ -550,13 +522,12 @@ async def test_second_search_with_good_roll_finds_the_key_and_opens_the_cellar(s
     await _to_key_hunt(svc, store, link)
     link.director_replies = [_act_reply("Пусто."), _act_reply("В ящике блестит ключ.")]
     await svc.tool_search(CANARY, CANARY, "шкаф в кладовой")
-    answer = await svc.tool_search(CANARY, CANARY, "ящик буфета")  # 2-й: шанс 25%, rng 0.0
+    answer = await svc.tool_search(CANARY, CANARY, "ящик буфета")
     assert "В ящике блестит ключ." in answer
     assert "НАХОДИТ ключ" in link.director_inputs[-1]
     run = await _run(store)
     assert run.world["key_found"] is True
     assert await svc._state.get_effect("cellar_unlocked", CANARY) == "1"
-    # Стадия 3 и подвал — сразу внутри обыска, а не со следующего хода.
     assert run.stage == 3
     assert (await places.get_at(store, CANARY)).place == places.PLACE_CELLAR
 
@@ -585,9 +556,9 @@ async def test_repeat_search_in_same_place_gives_nothing_and_is_not_an_attempt(s
 async def test_fifth_new_place_guarantees_the_key(store):
     svc, _, link = _make(store, dice=Dice(0.99))
     await _to_key_hunt(svc, store, link)
-    svc._rng = Dice(0.99)  # _offered подменил кубик на «всегда везёт»
+    svc._rng = Dice(0.99)
     for i, where in enumerate(["шкаф", "ящик", "полка", "сундук", "ниша"], start=1):
-        svc._acts_new_turn(CANARY, "ищи")  # потолок действий — за ход гостя
+        svc._acts_new_turn(CANARY, "ищи")
         await svc.tool_search(CANARY, CANARY, where)
         assert bool((await _run(store)).world.get("key_found")) == (i == 5)
 
@@ -612,19 +583,16 @@ async def _to_hatch(svc, store, link):
 
 
 async def test_stage_three_gives_the_bottle_as_an_item(store):
-    """59.3: бутылка у входа — вещь гостя (подробнее: test_wine.py)."""
     svc, _, link = _make(store, dice=Dice(0.0))
     await _to_hatch(svc, store, link)
     wine = await store.items_of(CANARY, "wine")
     assert len(wine) == 1 and wine[0]["origin"] == "stage"
-    # Ведущему со следующего вызова — придумать приметы бутылки.
     assert "found_item" in link.director_inputs[-1]
 
 
 async def test_finale_sets_flags_then_finishes_on_the_next_turn(store):
     svc, notifier, link = _make(store, dice=Dice(0.0))
     await _to_hatch(svc, store, link)
-    # Ходы набирают минимум для финала.
     run = await _run(store)
     run.turns_total = 10
     await svc._state.save_run(run)
@@ -635,7 +603,6 @@ async def test_finale_sets_flags_then_finishes_on_the_next_turn(store):
     assert run.pending_effect == "Обнаруживается лаз: лаз за бочкой."
     assert await svc._state.is_completed("cellar", CANARY)
     assert await svc._state.get_effect("catacombs_open", CANARY) == "1"
-    # Формы замены радиостанции у этой сцены нет.
     assert all("радиостанци" not in t for t in notifier.texts(CANARY))
     plan = await svc.before_turn(CANARY, CANARY, "И что?", is_private=True)
     assert not plan.force_swap_form
@@ -643,11 +610,9 @@ async def test_finale_sets_flags_then_finishes_on_the_next_turn(store):
     link.director_replies = [_dir(stage=4)]
     await svc.after_turn(plan, "Лаз, сэр.", dialogue_id=77)
     assert (await _run(store)).status == STATUS_DONE
-    # Подвал — постоянная комната: в «Где ты» отсюда лаз в катакомбы.
     room = await svc._room(CANARY, CANARY)
     where = await svc._where_ru(room, CANARY, in_scene=False)
     assert "лаз в катакомбы" in where
-    # И сцена больше не предлагается.
     for _ in range(6):
         assert not (await _turn(svc, "А что в подвале?")).offered
 
@@ -663,9 +628,6 @@ async def test_finale_not_before_stage_four(store):
     assert not (await _run(store)).finale
 
 
-# --- уход Ведущего в idle и возврат в кабинет ---
-
-
 async def test_director_idle_returns_alfred_to_the_cabinet_with_a_note(store):
     svc, _, link = _make(store, dice=Dice(0.0))
     await _active(svc, store)
@@ -676,12 +638,10 @@ async def test_director_idle_returns_alfred_to_the_cabinet_with_a_note(store):
     assert at.in_cabinet and at.returned_from == "от двери подвала"
     plan = await svc.before_turn(CANARY, CANARY, "Ну что, анекдот?", is_private=True)
     assert "вернулся от двери подвала к себе в кабинет" in plan.note
-    # Один раз: дальше записи о возврате нет.
     plan = await svc.before_turn(CANARY, CANARY, "Ещё", is_private=True)
     assert "вернулся" not in (plan.note or "")
-    # Гость вернулся к теме — сцена продолжается, Альфред снова у двери.
     plan = await svc.before_turn(CANARY, CANARY, "Так что там в подвале?", is_private=True)
-    assert plan.scene and "вернулся" not in plan.note  # не «поднялся», а снова у двери
+    assert plan.scene and "вернулся" not in plan.note
     assert (await places.get_at(store, CANARY)).place == places.PLACE_CELLAR_DOOR
 
 
@@ -691,7 +651,7 @@ async def test_guest_silent_longer_than_the_threshold_brings_alfred_home(store):
     await _active(svc, store)
     clock.now += timedelta(hours=1, minutes=50)
     plan = await svc.before_turn(CANARY, CANARY, "Я тут", is_private=True)
-    assert plan.scene  # ещё в подвале
+    assert plan.scene
     clock.now += timedelta(hours=2, minutes=1)
     plan = await svc.before_turn(CANARY, CANARY, "Я снова тут", is_private=True)
     assert not plan.scene
@@ -699,14 +659,11 @@ async def test_guest_silent_longer_than_the_threshold_brings_alfred_home(store):
     assert (await _run(store)).status == STATUS_IDLE
 
 
-# --- фото и «Где ты» ---
-
-
 async def test_take_photo_in_the_cellar_draws_the_cellar_not_the_study(store):
     svc, notifier, link = _make(store, dice=Dice(0.0))
     await _active(svc, store)
     link.director_replies = [_dir(stage=1)]
-    await _turn(svc)  # переход стадии — кадр сцены у двери подвала
+    await _turn(svc)
     await asyncio.gather(*list(svc._photo_tasks))
     door = link.generated[-1]
     assert "boarded up" in door["description"] and "study" not in door["description"]
@@ -732,9 +689,6 @@ async def test_take_photo_for_non_canary_ignores_alfred_at(store):
     assert request["light"] != places.UNDERGROUND_LIGHT_EN
 
 
-# --- отладка ---
-
-
 class FakeMessage:
     def __init__(self, user_id, chat_id=None):
         self.chat = type("Chat", (), {"id": chat_id or user_id})()
@@ -757,7 +711,6 @@ async def test_debug_cellar_knocks_right_now_for_canary(store):
     assert message.answers == ["Стук отправлен."]
     assert notifier.texts(CANARY) == [cellar.OFFER_TEXT]
     assert (await _run(store)).status == STATUS_OFFERED
-    # Второй раз — уже на ходу.
     message = FakeMessage(CANARY)
     await cmd_interactives(message, FakeCommand("cellar"), svc)
     assert "уже на ходу" in message.answers[0]
@@ -805,10 +758,10 @@ async def test_debug_reset_erases_stage_59_progress_but_not_the_cabinet(store):
     keys = await store.state_keys("")
     assert not [k for k in keys if "cellar" in k and str(GUEST) not in k]
     assert not [k for k in keys if k.startswith(("alfred_at", "catacombs", "location:cellar"))]
-    assert f"location:cabinet:{CANARY}" in keys  # кабинет цел
-    assert f"user_effect:speech_clear:{CANARY}" in keys  # прочие флаги целы
+    assert f"location:cabinet:{CANARY}" in keys
+    assert f"user_effect:speech_clear:{CANARY}" in keys
     assert f"interactive_run:{CANARY}:radio" in keys
-    assert f"interactive_run:{GUEST}:cellar" in keys  # чужой прогресс цел
+    assert f"interactive_run:{GUEST}:cellar" in keys
     assert not [k for k in keys if k.startswith("user_effect:catacombs_open")]
 
 
@@ -840,7 +793,6 @@ async def test_radio_scene_pulls_a_canary_back_to_the_study_but_canary_scenes_ke
         plan = await svc.before_turn(CANARY, CANARY, "Ну как?", is_private=True)
         assert plan.scene and plan.scenario == "ghost"
         assert (await places.get_at(store, CANARY)).place == places.PLACE_CELLAR
-        # А радио идёт в кабинете, где бы Альфред ни был.
         await svc._state.save_run(
             Run(scenario="ghost", chat_id=CANARY, user_id=CANARY, status=STATUS_IDLE)
         )

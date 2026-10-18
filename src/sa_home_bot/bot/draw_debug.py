@@ -1,16 +1,3 @@
-"""Отладочный /draw (Этап 49): режимы генерации руками владельца.
-
-Подбираем архетипы предметов и настройки сцен для интерактивов, прежде чем
-отдавать их Ведущему. Рисует та же служба llm, что и generate_image в чате
-(llm/imagegen.py), тем же эталоном; сверху — режим, образец и ручки
-(seed, strength, ip…). Картинки ложатся в ту же таблицу ``images`` с
-``purpose='debug'``: find_image их не видит, дневной лимит не считает,
-«/draw clean» удаляет пачкой.
-
-Здесь только разбор команды, памятка и подпись — без aiogram, чтобы
-тестировалось без бота. Обработчик — bot/handlers/draw.py.
-"""
-
 from __future__ import annotations
 
 import html
@@ -19,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 MODES = ("free", "item", "variant", "scene")
-# Короткие имена llm/imagegen.MODELS (бот llm-модули не импортирует).
 MODELS = (
     "dream", "rv", "epic", "turbo", "revanim", "ghostmix", "rv6", "cyber", "deliberate", "anything",
 )
@@ -111,7 +97,6 @@ SDXL (turbo):
 <code>/draw clean</code> — удалить отладочные картинки из базы (спросит)
 <code>/draw help</code> — эта памятка"""
 
-# Ключ → (имя аргумента службы, тип, мин, макс).
 _NUMERIC_KEYS: dict[str, tuple[str, type, float, float]] = {
     "seed": ("seed", int, 0, 2**32 - 1),
     "s": ("strength", float, 0.05, 1.0),
@@ -126,16 +111,14 @@ _NUMERIC_KEYS: dict[str, tuple[str, type, float, float]] = {
     "colors": ("colors", int, 0, 256),
 }
 _FLAGS = ("raw", "nostyle")
-_DEFAULT_LORA_WEIGHT = 0.8  # = llm/imagegen.DEFAULT_LORA_WEIGHT
+_DEFAULT_LORA_WEIGHT = 0.8
 
 
-# «neg:» без «|» перед ним — тоже негатив: иначе он прилипал к описанию
-# («/draw scene raw girl neg: pants» уходило в генератор целиком).
 _NEG_MARK = re.compile(r"(?:\|\s*)?\b(?:neg|негатив):", re.IGNORECASE)
 
 
 class DrawSyntaxError(ValueError):
-    """Текст ошибки — для владельца как есть."""
+    pass
 
 
 @dataclass
@@ -151,8 +134,6 @@ class DrawRequest:
     loras: list[tuple[str, float]] = field(default_factory=list)
 
     def service_args(self) -> dict[str, Any]:
-        """Аргументы generate_image службы llm (без образца — его кладёт
-        обработчик: байты берутся из БД или из Telegram)."""
         args: dict[str, Any] = {"description": self.description, "mode": self.mode}
         if self.context:
             args["context"] = self.context
@@ -168,7 +149,6 @@ class DrawRequest:
         return args
 
     def params(self) -> dict[str, Any]:
-        """Что записать в images.params — всё, чтобы повторить."""
         data = self.service_args()
         data.pop("description")
         if self.ref_id is not None:
@@ -178,14 +158,11 @@ class DrawRequest:
 
 @dataclass(frozen=True)
 class DrawCommand:
-    """help / clean / keep — всё, что не рисование."""
-
     name: str
     image_id: int | None = None
 
 
 def _parse_lora(part: str) -> tuple[str, float]:
-    """«giger» или «giger:0.6». Имена проверяет служба — список там."""
     name, _, weight = part.partition(":")
     if not weight:
         return name, _DEFAULT_LORA_WEIGHT
@@ -210,7 +187,6 @@ def _parse_number(key: str, value: str) -> tuple[str, Any]:
 
 
 def parse(args: str | None) -> DrawRequest | DrawCommand:
-    """Текст после «/draw» → запрос на рисование или служебная команда."""
     text = _NEG_MARK.sub("| neg:", (args or "").strip())
     if not text:
         return DrawCommand("help")
@@ -234,7 +210,6 @@ def parse(args: str | None) -> DrawRequest | DrawCommand:
         token = rest[0]
         low = token.lower()
         if low in _FLAGS:
-            # Повтор флага — уже описание («item raw raw meat…»).
             if (request.raw if low == "raw" else not request.style):
                 break
             if low == "raw":
@@ -296,7 +271,6 @@ def accepts_ref(request: DrawRequest) -> bool:
 def caption(
     image_id: int, request: DrawRequest, result: dict[str, Any], ref_label: str | None
 ) -> str:
-    """Подпись к отладочной картинке (HTML, ≤1024 символов)."""
     head = [f"#{image_id}", request.mode]
     if result.get("model"):
         head.append(str(result["model"]))

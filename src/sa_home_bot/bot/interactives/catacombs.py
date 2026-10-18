@@ -1,52 +1,3 @@
-"""Катакомбы Альфреда (Этап 59.4–59.5) — топология лабиринта. Только код:
-ни модели, ни картинок, ни Telegram, ни движка. Модель потом лишь описывает
-то, что решил этот модуль; топологию она не придумывает.
-
-Устройство (решения плана 59.4):
-
-- **Сетка.** Плоская, целые координаты, ось Y растёт на север (``N = (0, +1)``).
-  Вход у лаза — ``(0, 0)``. **Узел** — перекрёсток, поворот, тупик или вход
-  в особое место. **Проход** — прямой отрезок по одной оси между двумя узлами,
-  длина 1–3 клетки (длина = расстояние между узлами; клетки строго между
-  ними — «внутренность» прохода).
-- **Выходы** узла — абсолютные стороны света ``N/E/S/W``. Выход со значением
-  ``None`` — неразведанный: проход ещё не построен. Узел получает выходы при
-  создании (первое посещение), от ГСЧ, заведённого из зерна гостя и координат
-  узла: одно зерно и тот же порядок ходов дают тот же лабиринт.
-- **Проход строится, когда Альфред в него входит** (``walk``). Выбирается длина
-  1–3; клетки по пути проверяются одна за другой. Дошли до известного узла —
-  соединяемся с ним (есть выход с этой стороны — просто соединяем; нет — проход
-  упирается в стену с **рычагом**, ``sealed``, и ``lever`` открывает у старого
-  узла выход). Наткнулись на чужой проход или на клетку, зарезервированную
-  выходом другого узла, — проход **укорачивается** до последней свободной клетки,
-  там возникает новый узел. Пересечений проходов не бывает.
-- **Резерв клетки.** Первая клетка каждого неразведанного выхода считается
-  занятой этим выходом: чужие проходы через неё не идут (исключение — проход
-  по той же линии прямо в этот узел: он его соединит). Так выход никогда не
-  оказывается «замурован» чужим проходом.
-- **Лабиринт не захлопывается.** После каждого построения проверяется, что
-  неразведанный выход остался хотя бы один. Если нет — он добавляется у
-  ближайшего (по графу) узла со свободной стороной (``_ensure_open``).
-- **Направления** хранятся абсолютными; Альфреду и гостю отдаются
-  относительными (``forward|right|back|left``) от ``heading`` — см.
-  ``to_relative``/``to_absolute``. После прохода по проходу ``heading`` — сторона
-  движения; ``back`` — развернуться и идти туда, откуда пришёл.
-- **Особые места** (``SPECIAL_ROOMS``) ставит код: не ближе
-  ``SPECIAL_MIN_DEPTH`` узлов от входа (по графу), шанс на новом узле растёт
-  с числом разведанных узлов, порядок — по каталогу. Узел особого места —
-  тупик, ``enter`` входит в комнату. Саму комнату (канон, обыск) ведёт движок.
-- **Описание и картинки запоминаются** на узле и на проходе (``describe``,
-  ``spots``, ``image_id``, ``file_id``). Кадр узла рисуется заново только при
-  смене набора выходов (рычаг открыл выход) — ключ кадра ``node_frame_key``
-  включает выходы, ``node_needs_frame`` сравнивает его с ключом нарисованного.
-  Сам кадр здесь не рисуется.
-
-Состояние Альфреда под землёй — ``CatacombsState`` (узел, ``heading``, «в
-проходе у рычага», «в комнате»); хранение — снаружи (``alfred_at``, 59.1),
-здесь только ``to_dict``/``from_dict``. Лабиринт хранится в ``app_state``
-``catacombs:<гость>`` (``load``/``save``, как cabinet.py).
-"""
-
 from __future__ import annotations
 
 import json
@@ -64,21 +15,17 @@ Cell = tuple[int, int]
 STATE_PREFIX = "catacombs"
 VERSION = 1
 
-# --- стороны света и относительные направления ---
 
-SIDES = ("N", "E", "S", "W")  # по часовой стрелке
+SIDES = ("N", "E", "S", "W")
 VECTORS: dict[str, Cell] = {"N": (0, 1), "E": (1, 0), "S": (0, -1), "W": (-1, 0)}
 OPPOSITE = {"N": "S", "E": "W", "S": "N", "W": "E"}
-# Индекс = (сторона - heading) mod 4 по часовой.
 RELATIVE = ("forward", "right", "back", "left")
 RELATIVE_RU = {"forward": "прямо", "right": "направо", "back": "назад", "left": "налево"}
 WALK_DIRECTIONS = (*RELATIVE, "lever", "enter", "up")
 
-# --- параметры генерации ---
 
 PASSAGE_LEN_CHOICES = (1, 2, 3)
 PASSAGE_LEN_WEIGHTS = (3, 4, 3)
-# Сколько выходов, кроме того, через который пришли, у нового узла (вес).
 EXTRA_EXITS_CHOICES = (0, 1, 2, 3)
 EXTRA_EXITS_WEIGHTS = (22, 42, 26, 10)
 ENTRANCE_EXITS_CHOICES = (2, 3)
@@ -95,7 +42,6 @@ class SpecialRoom:
     name: str
 
 
-# Порядок — порядок появления. Проявочная первой (плана 59.5).
 SPECIAL_ROOMS: tuple[SpecialRoom, ...] = (
     SpecialRoom("darkroom", "старая проявочная"),
     SpecialRoom("laboratory", "заброшенная лаборатория"),
@@ -109,12 +55,10 @@ def special_room(room_id: str) -> SpecialRoom | None:
 
 
 def to_relative(heading: str, side: str) -> str:
-    """Абсолютная сторона → относительная от ``heading``."""
     return RELATIVE[(SIDES.index(side) - SIDES.index(heading)) % 4]
 
 
 def to_absolute(heading: str, relative: str) -> str:
-    """Относительное направление (``forward|right|back|left``) → абсолютная сторона."""
     return SIDES[(SIDES.index(heading) + RELATIVE.index(relative)) % 4]
 
 
@@ -124,17 +68,11 @@ def _step(cell: Cell, side: str, k: int = 1) -> Cell:
 
 
 def _rng(seed: int, tag: str, *parts: object) -> random.Random:
-    # Строковое зерно Random детерминировано между процессами (в отличие от hash()).
     return random.Random(":".join(str(p) for p in (seed, tag, *parts)))
-
-
-# --- данные ---
 
 
 @dataclass
 class Spot:
-    """Место поиска (ящик, ниша, саркофаг…) на узле или проходе."""
-
     name: str
     searched: bool = False
     image_id: int | None = None
@@ -143,8 +81,6 @@ class Spot:
 
 @dataclass
 class Described:
-    """Всё, что Ведущий придумывает при первом посещении и что запоминается."""
-
     describe: str | None = None
     spots: list[Spot] = field(default_factory=list)
     image_id: int | None = None
@@ -155,10 +91,8 @@ class Described:
 class Node(Described):
     x: int
     y: int
-    # сторона -> id прохода; None — неразведанный выход
     exits: dict[str, str | None] = field(default_factory=dict)
     special: str | None = None
-    # ключ кадра, под которым нарисована картинка (см. node_frame_key)
     image_key: str | None = None
 
     @property
@@ -169,11 +103,9 @@ class Node(Described):
 @dataclass(kw_only=True)
 class Passage(Described):
     a: Cell
-    a_side: str  # сторона узла a, откуда проход начинается
+    a_side: str
     b: Cell
-    b_side: str  # сторона узла b, куда проход приходит (= OPPOSITE[a_side])
-    # Упирается в стену с рычагом у конца b: у узла b нет выхода b_side
-    # до тех пор, пока рычаг не потянут.
+    b_side: str
     sealed: bool = False
 
     @property
@@ -224,43 +156,39 @@ def _place_from_dict(d: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# --- результат хода и «что видно» ---
-
-
 class Outcome(StrEnum):
-    MOVED = "moved"  # прошли по уже известному проходу
-    NEW_PASSAGE = "new_passage"  # построен новый проход, пришли в новый узел
-    CONNECTED = "connected"  # построен новый проход в уже известный узел
-    LEVER_WALL = "lever_wall"  # проход упёрся в стену с рычагом, Альфред в проходе
-    LEVER_PULLED = "lever_pulled"  # рычаг потянут, выход открыт
-    ENTERED_ROOM = "entered_room"  # вошли в особое место
-    LEFT_ROOM = "left_room"  # вышли из особого места в его узел
-    ASCENDED = "ascended"  # наверх, в подвал
-    NO_EXIT = "no_exit"  # туда нельзя: стена
-    BLOCKED_BY_LEVER = "blocked_by_lever"  # вперёд нельзя: стена с рычагом
-    NO_LEVER = "no_lever"  # рычага здесь нет
-    NO_ROOM = "no_room"  # входа в комнату здесь нет
+    MOVED = "moved"
+    NEW_PASSAGE = "new_passage"
+    CONNECTED = "connected"
+    LEVER_WALL = "lever_wall"
+    LEVER_PULLED = "lever_pulled"
+    ENTERED_ROOM = "entered_room"
+    LEFT_ROOM = "left_room"
+    ASCENDED = "ascended"
+    NO_EXIT = "no_exit"
+    BLOCKED_BY_LEVER = "blocked_by_lever"
+    NO_LEVER = "no_lever"
+    NO_ROOM = "no_room"
 
 
 @dataclass
 class WalkResult:
     outcome: Outcome
-    direction: str  # что просили (left|right|forward|back|lever|enter|up)
-    abs_side: str | None = None  # куда реально шли, абсолютная сторона
-    node: Node | None = None  # узел, где Альфред сейчас (или откуда стоит в проходе)
-    passage: Passage | None = None  # пройденный / построенный / упёршийся проход
-    linked_node: Node | None = None  # старый узел за стеной / с открытым рычагом выходом
+    direction: str
+    abs_side: str | None = None
+    node: Node | None = None
+    passage: Passage | None = None
+    linked_node: Node | None = None
     new_passage: bool = False
     new_node: bool = False
-    room: SpecialRoom | None = None  # особое место узла (если пришли/вошли/вышли)
-    room_found_now: bool = False  # особое место увидено впервые
+    room: SpecialRoom | None = None
+    room_found_now: bool = False
 
     @property
     def moved(self) -> bool:
         return self.outcome in (Outcome.MOVED, Outcome.NEW_PASSAGE, Outcome.CONNECTED)
 
     def to_dict(self) -> dict[str, Any]:
-        """Плоская сводка для директивы Ведущему."""
         return {
             "outcome": str(self.outcome),
             "direction": self.direction,
@@ -281,26 +209,23 @@ class ExitView:
     side: str
     explored: bool
     passage_id: str | None = None
-    describe: str | None = None  # описание прохода
-    leads_to: str | None = None  # описание узла на том конце (если узел известен)
+    describe: str | None = None
+    leads_to: str | None = None
     leads_to_room: SpecialRoom | None = None
 
 
 @dataclass
 class Vision:
-    """Что Альфред видит отсюда — для «Где ты». Только разведанное и ближнее."""
-
-    kind: str  # node | wall (в проходе у стены с рычагом) | room
+    kind: str
     heading: str
     exits: list[ExitView] = field(default_factory=list)
     lever: bool = False
-    room: SpecialRoom | None = None  # у входа в особое место / внутри него
-    spots: list[str] = field(default_factory=list)  # необысканные места поиска
+    room: SpecialRoom | None = None
+    spots: list[str] = field(default_factory=list)
     describe: str | None = None
     can_up: bool = True
 
     def text_ru(self) -> str:
-        """Короткая сводка по-русски — для вставки в ответ тула."""
         if self.kind == "room":
             name = self.room.name if self.room else "особое место"
             return f"Альфред внутри: {name}. Выйти можно назад."
@@ -327,10 +252,6 @@ class Vision:
 
 @dataclass
 class CatacombsState:
-    """Где Альфред под землёй. ``passage`` — id прохода, в котором он стоит
-    у стены с рычагом (``node`` — тогда узел, откуда он вошёл); ``room`` — id
-    особого места, где он внутри."""
-
     node: Cell = (0, 0)
     heading: str = "N"
     passage: str | None = None
@@ -360,9 +281,6 @@ class CatacombsState:
         return cls(node=(0, 0), heading=maze.entry_heading)
 
 
-# --- лабиринт ---
-
-
 @dataclass
 class Maze:
     user_id: int
@@ -370,18 +288,14 @@ class Maze:
     nodes: dict[Cell, Node] = field(default_factory=dict)
     passages: dict[str, Passage] = field(default_factory=dict)
     entry_heading: str = "N"
-    # id особых мест в порядке нахождения (узел увиден) / где стоят
     found: list[str] = field(default_factory=list)
     special_nodes: dict[str, Cell] = field(default_factory=dict)
-    # Индексы, не сериализуются: неразведанные выходы и клетки внутри проходов.
     _open: set[tuple[Cell, str]] = field(default_factory=set, init=False, repr=False, compare=False)
     _interior: set[Cell] = field(default_factory=set, init=False, repr=False, compare=False)
-    # (узел, сторона), где проход упёрся в стену с рычагом: выход там заводить нельзя.
     _walls: set[tuple[Cell, str]] = field(
         default_factory=set, init=False, repr=False, compare=False
     )
 
-    # --- создание ---
 
     @classmethod
     def new(cls, user_id: int, seed: int | None = None) -> Maze:
@@ -418,7 +332,6 @@ class Maze:
         else:
             self._open.discard((node.cell, side))
 
-    # --- доступ ---
 
     def passage_of(self, node: Node, side: str) -> Passage | None:
         pid = node.exits.get(side)
@@ -432,10 +345,8 @@ class Maze:
         cell = self.special_nodes.get(room_id)
         return self.nodes.get(cell) if cell else None
 
-    # --- геометрия: что можно строить ---
 
     def _reservers(self, cell: Cell, ignore: tuple[Cell, str] | None = None) -> list[Cell]:
-        """Узлы, чей неразведанный выход первой клеткой упирается в ``cell``."""
         out: list[Cell] = []
         for side in SIDES:
             owner = _step(cell, OPPOSITE[side])
@@ -447,14 +358,12 @@ class Maze:
         return out
 
     def _passable(self, cell: Cell, side: str, ignore: tuple[Cell, str] | None = None) -> bool:
-        """Можно ли проходу, идущему в сторону ``side``, занять свободную клетку."""
         if cell in self._interior:
             return False
         ahead = _step(cell, side)
         return all(owner == ahead for owner in self._reservers(cell, ignore))
 
     def _side_ok(self, cell: Cell, side: str) -> bool:
-        """Можно ли узлу в ``cell`` завести выход в сторону ``side``."""
         if (cell, side) in self._walls:
             return False
         first = _step(cell, side)
@@ -462,7 +371,6 @@ class Maze:
             return True
         return self._passable(first, side)
 
-    # --- граф ---
 
     def _neighbors(self, cell: Cell) -> list[Cell]:
         node = self.nodes[cell]
@@ -485,10 +393,8 @@ class Maze:
         return dist
 
     def depth(self, cell: Cell) -> int | None:
-        """Расстояние в узлах от входа по графу; None — не достижим."""
         return self._bfs((0, 0)).get(cell)
 
-    # --- генерация ---
 
     def _assign_exits(self, node: Node, came_side: str, *, dead_end: bool) -> None:
         rng = _rng(self.seed, "exits", node.x, node.y)
@@ -520,7 +426,6 @@ class Maze:
         return True
 
     def _ensure_open(self, near: Cell) -> None:
-        """Инвариант: остаётся хотя бы один неразведанный выход."""
         if self._open:
             return
         dist = self._bfs(near)
@@ -537,8 +442,6 @@ class Maze:
                     return
 
     def _build(self, node: Node, side: str) -> tuple[Passage, Node, bool] | None:
-        """Построить проход из неразведанного выхода. Возвращает (проход, узел
-        на конце, новый ли узел) или None, если упереться некуда."""
         rng = _rng(self.seed, "len", node.x, node.y, side)
         want = rng.choices(PASSAGE_LEN_CHOICES, PASSAGE_LEN_WEIGHTS)[0]
         ignore = (node.cell, side)
@@ -556,7 +459,7 @@ class Maze:
         if hit is None:
             if not cells:
                 return None
-            hit = cells.pop()  # последняя свободная клетка становится узлом
+            hit = cells.pop()
             new = True
         back = OPPOSITE[side]
         passage = Passage(a=node.cell, a_side=side, b=hit, b_side=back)
@@ -579,7 +482,6 @@ class Maze:
         self._ensure_open(hit)
         return passage, end, new
 
-    # --- сериализация ---
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -656,16 +558,11 @@ class Maze:
         return cls.from_dict(json.loads(raw))
 
 
-# --- хранение (как cabinet.load/save) ---
-
-
 def _key(user_id: int) -> str:
     return f"{STATE_PREFIX}:{user_id}"
 
 
 async def load(store: Store, user_id: int) -> Maze:
-    """Лабиринт гостя. Нет записи (или она битая) — новый со случайным зерном;
-    он существует, только пока его не сохранили (``save``): зерно в памяти."""
     raw = await store.get_state(_key(user_id))
     if raw:
         try:
@@ -680,16 +577,10 @@ async def save(store: Store, maze: Maze) -> None:
 
 
 async def reset(store: Store, user_id: int) -> None:
-    """Стереть прогресс катакомб (отладка ``/interactives reset catacombs``)."""
     await store.set_state(_key(user_id), "")
 
 
-# --- описание и картинки ---
-
-
 def node_frame_key(node: Node) -> str:
-    """Ключ кадра узла: координаты, особое место и набор выходов (разведанных
-    и нет). Рычаг открыл выход — ключ другой, картинку надо перерисовать."""
     exits = "".join(s for s in SIDES if s in node.exits)
     return f"node:{node.x},{node.y}:{exits}:{node.special or '-'}"
 
@@ -711,7 +602,6 @@ def needs_describe(place: Described) -> bool:
 
 
 def set_description(place: Described, describe: str, spots: list[str] | None = None) -> None:
-    """Запомнить описание от Ведущего (один раз; повторно не перетирает)."""
     if place.describe:
         return
     place.describe = describe.strip()
@@ -727,12 +617,7 @@ def set_image(
         place.image_key = image_key if image_key is not None else node_frame_key(place)
 
 
-# --- навигация ---
-
-
 def reset_position(state: CatacombsState, maze: Maze) -> CatacombsState:
-    """«В катакомбы» — всегда к лазу, к ``(0, 0)``, а не туда, где были в
-    прошлый раз."""
     state.node = (0, 0)
     state.heading = maze.entry_heading
     state.passage = None
@@ -741,13 +626,10 @@ def reset_position(state: CatacombsState, maze: Maze) -> CatacombsState:
 
 
 def found_rooms(maze: Maze) -> list[SpecialRoom]:
-    """Найденные особые места в порядке нахождения (для быстрых переходов)."""
     return [r for rid in maze.found if (r := special_room(rid))]
 
 
 def go_to_room(state: CatacombsState, maze: Maze, room_id: str) -> bool:
-    """Быстрый переход «знакомой дорогой» в найденное особое место: Альфред
-    сразу внутри. False — место не найдено."""
     node = maze.room_node(room_id)
     if node is None or room_id not in maze.found:
         return False
@@ -775,10 +657,6 @@ def _arrive(
 
 
 def walk(state: CatacombsState, maze: Maze, direction: str) -> WalkResult:
-    """Один ход Альфреда. ``direction``: ``left|right|forward|back|lever|enter|up``.
-
-    Меняет ``state`` и, если надо, ``maze`` (строит проход, тянет рычаг).
-    Вызывающий сохраняет оба. ``heading`` в ``state`` обязан быть корректным."""
     if direction not in WALK_DIRECTIONS:
         raise ValueError(f"неизвестное направление: {direction!r}")
     node = maze.nodes[state.node]
@@ -817,7 +695,7 @@ def walk(state: CatacombsState, maze: Maze, direction: str) -> WalkResult:
     if passage is not None:
         return _traverse(state, maze, node, passage, side, res, new=False)
     built = maze._build(node, side)
-    if built is None:  # некуда упереться — выход оказался глухим, убираем
+    if built is None:
         del node.exits[side]
         maze._open.discard((node.cell, side))
         maze._ensure_open(node.cell)
@@ -839,7 +717,6 @@ def _traverse(
 ) -> WalkResult:
     end = maze.nodes[passage.other(node.cell)]
     if passage.sealed and passage.a == node.cell:
-        # дошли до стены с рычагом и встали
         state.node = node.cell
         state.heading = side
         state.passage = passage.id
@@ -868,7 +745,7 @@ def _walk_at_wall(
     state: CatacombsState, maze: Maze, node: Node, direction: str, res: Any
 ) -> WalkResult:
     passage = maze.passages[state.passage] if state.passage in maze.passages else None
-    if passage is None:  # битое состояние — возвращаем к узлу
+    if passage is None:
         state.passage = None
         return res(Outcome.NO_EXIT)
     end = maze.nodes[passage.b]
@@ -885,7 +762,6 @@ def _walk_at_wall(
             return res(Outcome.BLOCKED_BY_LEVER, abs_side=side, passage=passage, linked_node=end)
         return _traverse(state, maze, node, passage, side, res, new=False)
     if direction == "back":
-        # развернуться и вернуться к узлу, откуда вошли
         back = OPPOSITE[state.heading]
         room, found_now = _arrive(state, maze, node, back)
         return WalkResult(
@@ -900,11 +776,7 @@ def _walk_at_wall(
     return res(Outcome.NO_EXIT, abs_side=side)
 
 
-# --- что видно отсюда ---
-
-
 def look(state: CatacombsState, maze: Maze) -> Vision:
-    """Что Альфред видит отсюда — только разведанное и ближнее, без карты."""
     node = maze.nodes[state.node]
     heading = state.heading
 

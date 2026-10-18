@@ -1,18 +1,3 @@
-"""Ведущий интерактивов (Этап 47): отдельный LLM-вызов после ответа Альфреда.
-
-Ведущий — режиссёр, не персонаж. Он видит журнал сцены, интерпретирует
-действие Альфреда (``effect`` — что из этого вышло, уходит гостю отдельным
-сообщением рассказчика), решает, пора ли усилить подсказку Альфреду
-(``stage``), и в финале придумывает поломку (``finale_fault``). Решения
-Ведущего — только предложения: рамки темпа накладывает движок
-(engine.apply_decision), чтобы Альфред не нашёл разгадку слишком быстро и
-сцена не тянулась бесконечно.
-
-Вызов идёт в службу llm с role=director (llm/service.py::_director_chat):
-свой system, JSON-ответ, без Логопеда. Любой сбой (служба спит, битый JSON)
-— ``None``: ход сцены пропускается, диалог не ломается.
-"""
-
 from __future__ import annotations
 
 import json
@@ -33,8 +18,6 @@ DIRECTIVE_MAX_CHARS = 600
 CABINET_ADD_MAX = 3
 PHOTO_FOCUS_MAX = 200
 
-# Настроение кадра — Ведущий выбирает, код переводит в модель и LoRA
-# (engine.MOOD_PRESETS). Русские слова — как их видит Ведущий.
 MOOD_PLAIN = "plain"
 MOODS = {
     "обычно": MOOD_PLAIN,
@@ -42,9 +25,6 @@ MOODS = {
     "потустороннее": "eldritch",
 }
 
-# Особенности кабинета вне сцены (первый снимок до всякой сцены) — отдельный
-# маленький вызов той же роли. Нестрогий промпт: вариантов не перечисляем,
-# у каждого гостя кабинет свой (решение пользователя 2026-09-30).
 FEATURES_SYSTEM = (
     "Ты — Ведущий: придумываешь обстановку мира, в котором живёт Альфред — "
     "старый дворецкий в замке в Трансильвании. Пиши по-русски. Отвечай строго "
@@ -61,22 +41,12 @@ class DirectorDecision:
     directive: str | None
     finale_fault: str | None
     note: str | None
-    # Новые устойчивые детали кабинета гостя (cabinet.py) — остаются после сцены.
     cabinet_add: tuple[str, ...] = ()
-    # Кадр гостю в ключевой момент: что снять крупно; "" — общий вид; None — не надо.
     photo: str | None = None
-    # Настроение кадров сцены (MOODS); None — Ведущий не сказал, остаётся прежнее.
     mood: str | None = None
-    # Альфред в кадре сцены участником: "back" (спиной) / "side" (боком) / None.
     alfred: str | None = None
-    # Новая черта предмета сцены (ключ из items.ItemKind.traits) или None.
     item_trait: str | None = None
-    # Этап 59: Ведущий переносит Альфреда — {"place": id комнаты из places.PLACES}
-    # или описание временной комнаты {"name", "where", "canon_ru", "canon_en"}
-    # (places.temp_spec). Применяется только сценариями с move_stages.
     move_to: dict[str, str] | None = None
-    # Этап 59.3/59.6: приметы и заметка вещи, которую Альфред только что нашёл
-    # (``Run.world["found_item"]``): {"traits": [str], "note": str|None}.
     found_item: dict[str, Any] | None = None
 
 
@@ -90,8 +60,6 @@ def _clean(value: Any, limit: int) -> str | None:
 
 
 def json_object(raw: str) -> dict | None:
-    """Модель может обернуть JSON в ```-блок или дописать текст вокруг —
-    берём первый {...}."""
     start, end = raw.find("{"), raw.rfind("}")
     if start < 0 or end <= start:
         return None
@@ -144,8 +112,6 @@ def _item_trait(value: Any, keys: tuple[str, ...]) -> str | None:
 
 
 def _move_to(value: Any) -> dict[str, str] | None:
-    """``move_to``: id известной комнаты строкой либо описание временной
-    комнаты объектом. Мусор — None (Альфред остаётся на месте)."""
     if isinstance(value, str):
         text = value.strip()
         return {"place": text} if text else None
@@ -167,8 +133,6 @@ FOUND_NOTE_CHARS = 120
 
 
 def _found_item(value: Any) -> dict[str, Any] | None:
-    """``found_item``: {"traits": [str], "note": str} — приметы и заметка
-    найденной вещи. Мусор и пустое — None (остаётся запасное описание кода)."""
     if not isinstance(value, dict):
         return None
     raw = value.get("traits")
@@ -189,8 +153,6 @@ def _found_item(value: Any) -> dict[str, Any] | None:
 def parse_decision(
     raw: str, current_stage: int, trait_keys: tuple[str, ...] = ()
 ) -> DirectorDecision | None:
-    """JSON Ведущего → решение. ``trait_keys`` — допустимые черты предмета
-    сцены: прочее (придуманное Ведущим) отбрасывается."""
     data = json_object(raw)
     if data is None:
         return None
@@ -216,9 +178,6 @@ def parse_decision(
 
 
 def _cabinet_block(place: str, outside: str | None, need: int) -> str:
-    """Где идёт сцена — кабинет гостя и что за окном. ``need`` > 0 — у
-    кабинета ещё нет особенностей, пусть Ведущий придумает первые.
-    ``outside=None`` — места без окна (подвал, Этап 59): строки про окно нет."""
     if need:
         task = (
             f"У этого кабинета ещё нет своих особенностей — придумай {need} в "
@@ -261,9 +220,6 @@ def build_director_input(
     need_features: int = 0,
     room: tuple[str, str] | None = None,
 ) -> str:
-    """``room`` (Этап 59) — (родительный, предложный) падеж названия места,
-    если сцена идёт не в кабинете: «подвала», «в подвале». ``outside=None`` при
-    заданном ``place`` — место без окна."""
     ladder = "\n".join(f"  {i}. {hint}" for i, hint in enumerate(scenario.ladder))
     notes = "\n".join(f"- {n}" for n in run.notes) or "—"
     transcript = "\n".join(run.transcript) or "—"
@@ -313,10 +269,8 @@ def build_director_input(
     found_block, found_field = _found_item_block(run)
     item_block, item_field = item_block + found_block, item_field + found_field
     if scenario.act_prompt:
-        # Этап 59.7: исходы действий Альфреда даёт тул act, не этот вызов.
         acted = (
-            " В этом ходу Альфред действовал через инструмент и уже получил исходы — "
-            "effect null."
+            " В этом ходу Альфред действовал через инструмент и уже получил исходы — effect null."
             if run.world.get("acted")
             else ""
         )
@@ -359,8 +313,6 @@ def build_director_input(
 
 
 def _item_block(scenario: Scenario, run: Run) -> tuple[str, str]:
-    """Облик предмета сцены (Этап 49.3): какие черты уже есть и какие можно
-    добавить — только из списка, по одной."""
     kind = items_mod.KINDS.get(scenario.item_kind or "")
     if kind is None:
         return "", ""
@@ -382,9 +334,6 @@ def _item_block(scenario: Scenario, run: Run) -> tuple[str, str]:
 
 
 def _found_item_block(run: Run) -> tuple[str, str]:
-    """Найденная гостем вещь (``Run.world["found_item"]``, Этап 59.3/59.6): код
-    уже завёл её с запасным описанием, Ведущий придумывает приметы и заметку.
-    Ответ — поле ``found_item``; не ответил — остаётся запасное."""
     found = run.world.get("found_item")
     if not isinstance(found, dict) or not found.get("ask"):
         return "", ""
@@ -482,8 +431,6 @@ async def ask_json(
     return data
 
 
-# --- Этап 59.7: режим «действие» (тул act) ---
-
 ACT_RESULT_MAX = 400
 FACT_CHARS = 90
 FACTS_ADD_MAX = 3
@@ -492,9 +439,6 @@ FACTS_KEEP = 12
 
 @dataclass(frozen=True)
 class ActDecision:
-    """Ответ Ведущего на одно физическое действие Альфреда (тул act)."""
-
-    # Факт в 1–2 предложения от рассказчика: что вышло из действия.
     result: str
     stage: int
     move_to: dict[str, str] | None = None
@@ -511,7 +455,6 @@ def facts_of(run: Run) -> list[str]:
 
 
 def facts_block(run: Run) -> str:
-    """Факты мира (``Run.world["facts"]``) для Ведущего — в каждом его вызове."""
     facts = facts_of(run)
     if not facts:
         return ""
@@ -520,8 +463,6 @@ def facts_block(run: Run) -> str:
 
 
 def update_facts(run: Run, add: tuple[str, ...], remove: tuple[str, ...]) -> None:
-    """Снять утратившие силу факты и дописать новые; держим последние
-    ``FACTS_KEEP`` — старые вытесняются."""
     facts = facts_of(run)
     for gone in remove:
         key = gone.casefold()
@@ -547,8 +488,6 @@ def _facts_list(value: Any, limit: int) -> tuple[str, ...]:
 
 
 def parse_act(raw: str, current_stage: int) -> ActDecision | None:
-    """JSON Ведущего в режиме act → решение. Нет ``result`` — None (Альфред
-    получит запасной исход кода)."""
     data = json_object(raw)
     if data is None:
         return None
@@ -581,10 +520,6 @@ def build_act_input(
     finale_allowed: bool,
     outcome: str | None,
 ) -> str:
-    """Вход Ведущему в режиме act: сценарий, стадия, место (``window`` — что
-    за окном, None — окна нет), факты мира, журнал с последней репликой гостя
-    (по ней Ведущий проверяет согласие), действие. ``outcome`` — исход, который
-    уже решил код (обыск, ключ): Ведущий его не меняет, а обставляет."""
     ladder = "\n".join(f"  {i}. {hint}" for i, hint in enumerate(scenario.ladder))
     notes = "\n".join(f"- {n}" for n in run.notes) or "—"
     transcript = "\n".join(run.transcript) or "—"
@@ -621,7 +556,7 @@ def build_act_input(
         "именно его),\n"
         ' "stage": int — стадия после действия (оставь или +1),\n'
         ' "facts_add": [str] — новые устойчивые факты мира, до 3, по 2–5 слов '
-        '(«доски сорваны», «ящик открыт»), или [],\n'
+        "(«доски сорваны», «ящик открыт»), или [],\n"
         ' "facts_remove": [str] — факты, переставшие быть правдой (как в '
         "списке), или [],\n"
         ' "finale": bool,\n'

@@ -1,10 +1,3 @@
-"""/draw — отладка режимов генерации (Этап 49, bot/draw_debug.py).
-
-Право — ``draw`` (у владельца открыто по ``*``), команда скрыта из меню.
-Кнопки «/draw clean» — свой префикс «draw:», право проверяется здесь же тем
-же правилом.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -43,9 +36,7 @@ log = logging.getLogger(__name__)
 
 router = Router(name="draw")
 
-# Первая сцена с образцом ещё и грузит IP-Adapter (+2.5 ГБ с диска).
 _MIN_TIMEOUT_S = 300.0
-# Чужое фото-образец ужимаем до родного размера SD1.5 — меньше гнать по сети.
 _REF_MAX_PX = 512
 
 
@@ -60,10 +51,6 @@ def _ref_from_photo(data: bytes) -> bytes:
 async def _find_ref(
     message: Message, request: DrawRequest, store: Store
 ) -> tuple[bytes, str] | str | None:
-    """(png, подпись образца), текст ошибки или None (образца нет).
-
-    Порядок: ``ref=ID``, картинка, приложенная к самой команде (команда в
-    подписи), картинка, на которую ответили."""
     if request.ref_id is not None:
         row = await store.image_by_id(request.ref_id)
         if row is None:
@@ -136,8 +123,6 @@ async def cmd_draw(
         return
     request = parsed
 
-    # Этап 51: пока Альфред в городе, GPU не трогаем — рисование тоже ждёт
-    # (служебные подкоманды help/keep/clean выше работают).
     if away is not None and await away.intercept(message, kind=KIND_SUMMON):
         return
 

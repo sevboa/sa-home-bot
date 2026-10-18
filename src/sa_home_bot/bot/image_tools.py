@@ -1,17 +1,3 @@
-"""Тулы картинок для /ai (Этап 48): ``generate_image`` и ``find_image``.
-
-Рисует служба llm на mycraft (llm/imagegen.py, CPU), хранит бот — таблица
-``images`` в своей БД (db/schema.sql): «покажи ту картинку» не должно будить
-mycraft. Повторный показ идёт по Telegram file_id — без байтов вовсе; байты
-из БД нужны, только если Telegram file_id не принял.
-
-Отдельный модуль, а не ещё пара сотен строк в bot/tools.py: обработчики там
-тонкие обёртки над ``generate``/``find`` отсюда (как у интерактива радио),
-а этот модуль не импортирует bot.tools — иначе был бы цикл. Всё нужное из
-ToolContext берётся утиной типизацией (``ctx.chat_id``, ``ctx.notifier``…),
-эпизод графа — колбэком ``remember``.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -32,13 +18,10 @@ __all__ = ["LLM_SERVICE"]
 ACTION_GENERATE_IMAGE = "generate_image"
 ALFRED_LORA = ("alfred", 0.5)
 
-# Сколько вариантов показывать модели, если однозначного совпадения нет.
 _CANDIDATES = 5
 
 Remember = Callable[[str], Awaitable[None]]
 
-# «Нарисуй себя» (2026-10-05): Альфред на картинке — LoRA облика и
-# короткая примета первой; что он делает и где — из description модели.
 ALFRED_IN_PICTURE_EN = "Main subject: Alfred, an elderly butler in a black tailcoat."
 
 
@@ -126,9 +109,6 @@ FIND_IMAGE_DECLARATION: dict[str, Any] = {
 
 
 def upscale_png(png: bytes, display_px: int) -> bytes:
-    """Растянуть до ~``display_px`` целым множителем без сглаживания —
-    пиксели маленькой картинки остаются чёткими квадратами. Делается на
-    лету при отправке: храним только маленькую копию."""
     image = Image.open(io.BytesIO(png))
     factor = max(1, display_px // max(image.size))
     if factor > 1:
@@ -204,8 +184,6 @@ async def deliver_generated(
 
 
 async def generate(ctx: Any, args: dict[str, Any], remember: Remember) -> str:
-    # prompt_en — имя параметра до v0.117.0: модель может вспомнить его по
-    # старым тул-вызовам в истории чата.
     description = _str_arg(args, "description") or _str_arg(args, "prompt_en")
     prompt_ru = _str_arg(args, "prompt_ru")
     caption = _str_arg(args, "caption") or prompt_ru[:60]
@@ -303,8 +281,6 @@ async def find(ctx: Any, args: dict[str, Any]) -> str:
     if chosen["telegram_file_id"]:
         sent = await _send(ctx, chosen["telegram_file_id"], caption)
     if sent is None:
-        # file_id нет или Telegram его больше не принимает — шлём байты из БД
-        # и запоминаем новый file_id.
         display_px = ctx.settings.llm.imagegen_display_px
         sent = await _send(ctx, upscale_png(chosen["png"], display_px), caption)
         if sent is None:

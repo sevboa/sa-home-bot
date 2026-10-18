@@ -1,7 +1,3 @@
-"""Одно место Альфреда (Этап 59.7): «Где ты» каждый ход канарейки, снимок и
-обыск только того места, где он стоит, комнаты без окна — без окна, света дня
-и погоды. Гость вне списка ничего этого не видит."""
-
 from __future__ import annotations
 
 import asyncio
@@ -40,9 +36,6 @@ async def _open_ways(svc):
     await svc._state.set_effect(places.EFFECT_CATACOMBS_OPEN, CANARY, "1")
 
 
-# --- словарь мест ---
-
-
 @pytest.mark.parametrize(
     ("text", "here", "named"),
     [
@@ -57,7 +50,6 @@ async def _open_ways(svc):
         ("старая проявочная", "cabinet", "старая проявочная"),
         ("винный погреб", "cabinet", "винный погреб"),
         ("лаз в стене", "cabinet", "лаз в катакомбы"),
-        # то место, где стоишь, — не чужое
         ("бочки в подвале", "cellar", None),
         ("письменный стол в кабинете", "cabinet", None),
         ("дверь подвала", "cellar_door", None),
@@ -65,7 +57,6 @@ async def _open_ways(svc):
         ("красный фонарь в проявочной", "darkroom", None),
         ("лаз за бочкой", "cellar", None),
         ("лаз в стене", "catacombs", None),
-        # «глаз» — не лаз, «дверь» без подвала — не лестница
         ("глаз совы на стене", "cabinet", None),
         ("дверь кабинета", "cabinet", None),
         ("общий вид", "cellar", None),
@@ -89,9 +80,6 @@ def test_general_view_cabinet_noun_belongs_to_the_cabinet_only():
     assert not photo_text.is_general_view("Кабинет Альфреда", cellar)
     assert photo_text.is_general_view("общий вид", cellar)
     assert photo_text.is_general_view("комнату", cellar)
-
-
-# --- комнаты без окна ---
 
 
 def test_windowless_state_key_has_no_weather():
@@ -126,15 +114,12 @@ def test_every_windowless_place_is_lit_by_a_lantern_only(canon):
     assert room.light_en(object()) == places.UNDERGROUND_LIGHT_EN
 
 
-# --- «Где ты» каждый ход ---
-
-
 async def test_canary_gets_where_note_every_turn_in_the_study(store):
     svc, _, _ = _make(store)
     plan = await svc.before_turn(CANARY, CANARY, "Привет", is_private=True)
     assert plan.note.startswith("Где ты сейчас: в кабинете.")
     assert places.WINDOW_YES in plan.note and places.MOVE_RULE in plan.note
-    assert "go(" not in plan.note  # подвал ещё не открыт — идти некуда
+    assert "go(" not in plan.note
 
 
 async def test_study_note_lists_open_ways(store):
@@ -171,9 +156,6 @@ async def test_non_canary_gets_no_where_note(store):
     svc, _, _ = _make(store)
     plan = await svc.before_turn(GUEST, GUEST, "Привет", is_private=True)
     assert plan.note is None
-
-
-# --- take_photo ---
 
 
 async def test_photo_of_another_place_is_refused_without_a_shot(store):
@@ -245,15 +227,11 @@ async def test_catacombs_photo_names_only_catacombs(store):
 
 
 async def test_non_canary_photo_is_not_checked(store):
-    """Гость вне списка: Альфред всегда в кабинете, правило места не действует."""
     svc, _, link = _make(store)
     out = await svc.tool_take_photo(GUEST, GUEST, {"focus": "подвал"})
     assert out == cabinet.TOOL_PHOTO_STARTED
     await _drawn(svc)
     assert link.generated[0]["negative_extra"] == cabinet.PHOTO_NEGATIVE_EN
-
-
-# --- search ---
 
 
 async def test_search_elsewhere_is_refused_and_not_marked(store):
@@ -262,7 +240,6 @@ async def test_search_elsewhere_is_refused_and_not_marked(store):
     assert out == places.TOOL_SEARCH_ELSEWHERE.format(name="подвал", here="в кабинете")
     assert await store.get_state(places.searched_key("cabinet", CANARY)) is None
     assert await store.get_state(places.searched_key("cellar", CANARY)) is None
-    # Здесь — обычный обыск.
     assert "Ты обыскал «ящик стола»" in await svc.tool_search(CANARY, CANARY, "ящик стола")
 
 

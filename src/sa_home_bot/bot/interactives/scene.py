@@ -21,9 +21,6 @@ def grow_item(
     *,
     key_moment: bool,
 ) -> str | None:
-    """Новая черта предмета сцены за ход: от Ведущего (уже проверена по
-    словарю вида), а если он промолчал на переходе стадии или в финале —
-    следующая по лестнице. Не больше одной за ход. Возвращает добавленную."""
     new = decision.item_trait if decision is not None else None
     if new in run.item_traits:
         new = None
@@ -36,17 +33,12 @@ def grow_item(
 
 
 def finale_allowed(scenario: Scenario, run: Run) -> bool:
-    """Финал — только с последней стадии и не раньше минимума ходов
-    (считая текущий, уже отыгранный ход)."""
     return run.stage >= scenario.last_stage and run.turns_total + 1 >= (
         scenario.min_turns_before_finale
     )
 
 
 def stage_target(scenario: Scenario, run: Run, wanted: int) -> int:
-    """Стадия после решения Ведущего: не больше +1, в пределах лестницы и с
-    условиями сюжета поверх (Этап 59: ключ найден кодом — ``stage_gate``).
-    Общая для хода сцены (apply_decision) и тула act (Этап 59.7)."""
     target = max(run.stage, min(wanted, run.stage + 1, scenario.last_stage))
     if scenario.stage_gate is not None:
         target = max(run.stage, min(scenario.stage_gate(run, target), scenario.last_stage))
@@ -60,9 +52,6 @@ def apply_decision(
     *,
     choose: Callable[[tuple[str, ...]], str] = random.choice,
 ) -> str | None:
-    """Рамки темпа поверх решения Ведущего. Возвращает текст эффекта для
-    гостя (или None). ``decision=None`` — Ведущий не ответил: ход всё равно
-    засчитывается, и мягкий потолок продвигает сцену сам."""
     allowed = finale_allowed(scenario, run)
     run.turns_total += 1
     run.turns_on_stage += 1
@@ -96,8 +85,6 @@ def apply_decision(
     if target != run.stage:
         run.stage = target
         run.turns_on_stage = 0
-        # Директива Ведущего писалась под прошлую стадию — новая подсказка
-        # лестницы важнее.
         if decision is None:
             run.directive = None
 
@@ -106,9 +93,6 @@ def apply_decision(
         wants_finale or (scenario.auto_finale and run.turns_on_stage >= scenario.stage_soft_cap)
     ):
         run.finale = True
-        # Поломку можно задать заранее (вернуть гостю прежнюю после сброса
-        # сцены) — тогда она главнее выдумки Ведущего, а его эффект, писанный
-        # под свою поломку, заменяем шаблонным.
         preset = run.finale_fault
         run.finale_fault = preset or (
             decision.finale_fault
@@ -127,7 +111,6 @@ def build_scene_note(scenario: Scenario, run: Run, place: str | None = None) -> 
         parts.append(f"Где ты: {place}")
     facts = facts_of(run)
     if facts:
-        # Этап 59.7: что в мире уже так (решил Ведущий, исходы действий).
         parts.append("Что вокруг уже так (не противоречь): " + "; ".join(facts) + ".")
     kind = items_mod.KINDS.get(scenario.item_kind or "")
     if kind is not None and run.item_traits:
@@ -161,11 +144,9 @@ class TurnPlan:
     user_id: int | None
     user_text: str
     speech_clear: bool
-    # Свежий флаг для каждого раунда запроса к llm (llm_chat.py): гость мог
-    # сменить передатчик кнопкой, пока ход ещё идёт.
     speech_clear_now: Callable[[], Awaitable[bool]] | None = None
     note: str | None = None
     scenario: str | None = None
-    scene: bool = False  # ход сцены: после ответа — Ведущий
-    offered: bool = False  # после ответа — форма согласия
-    force_swap_form: bool = False  # финал: форма смены гарантирована
+    scene: bool = False
+    offered: bool = False
+    force_swap_form: bool = False

@@ -1,41 +1,3 @@
-"""Прогулка по катакомбам, особые места и быстрые переходы (Этап 59.4–59.5,
-IMPLEMENTATION_PLAN.md). Топологию лабиринта держит catacombs.py (чистый код),
-комнаты и положение Альфреда — places.py; здесь они подключаются к разговору.
-
-Что здесь живёт:
-
-- **сценарий-прогулка** ``catacombs`` (``CATACOMBS``): не лестница стадий, а
-  ``Run``, который живёт, пока Альфред под землёй. Формы согласия у него нет
-  (``trigger="manual"``): Альфред сам предлагает спуститься, войдя в подвал, а
-  согласие гостя — обычная реплика; дальше модель зовёт тул ``go`` (решение
-  2026-10-10: тул, а не распознавание слов в before_turn, — модели так проще,
-  а гость формулирует как угодно). Прогулка завершается, когда Альфред
-  поднимается (walk up), уходит быстрым переходом или его возвращает простой
-  (engine._tend_position);
-- **тулы** ``walk`` и ``go`` (канарейка, tools.CANARY_TOOLS). ``walk`` ходит по
-  ``catacombs.walk``; описание нового прохода или узла Ведущий присылает
-  синхронно, прямо в ходе тула (``describe_new``): иначе Альфред отвечал бы
-  «иду налево» вслепую, а о том, что увидел, рассказывал бы только на
-  следующей реплике гостя. Запоминается один раз (``set_description``). Сбой
-  Ведущего — запасное описание, ход не блокируется;
-- **кадры**: у узла и прохода своя картинка (``image_id`` + ``file_id``),
-  повторный показ — тот же ``file_id`` без генерации (mycraft не будим), узел
-  рисуется заново, только если ``node_needs_frame``. Кадры коридоров без
-  Альфреда, находки в промпт не попадают (они решаются позже, при обыске). Кадры
-  уходят гостю ПОСЛЕ реплики Альфреда (engine.flush_forms): иначе готовая
-  картинка по ``file_id`` обогнала бы его речь;
-- **особые места** (59.5): ``RoomCanon`` группы катакомб по каталогу
-  ``catacombs.SPECIAL_ROOMS``, зарегистрированные в ``places.PLACES``. Альфред
-  внутри — ``alfred_at.place == "catacombs"`` и ``CatacombsState.room``; снимок
-  комнаты каждый раз новый, в ней можно порыскать (обычный ``search``);
-- **быстрые переходы** ``go``: из любого места — в подвал, в катакомбы (всегда
-  к лазу, ``reset_position``) и в найденное особое место (``go_to_room``).
-  Одна реплика «знакомой дорогой», кадров по пути нет.
-
-Миксин ``UndergroundMixin`` подмешивается в engine.Interactives: так правок в
-engine.py — несколько строк, а вся логика катакомб читается в одном файле.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -66,12 +28,6 @@ log = logging.getLogger(__name__)
 SCENARIO_ID = "catacombs"
 PLACE_CATACOMBS = "catacombs"
 
-# --- особые места (59.5) ---
-#
-# Канон каждого особого места — в коде, особенности гостя дописывает Ведущий
-# (cabinet_add), как у кабинета. Снимок каждый раз новый и не запоминается; в
-# комнате можно порыскать (search). Таблица находок ``specials`` у всех пока
-# пустая: «почти всегда пусто или мелочь», особые вещи — отдельным шагом.
 
 DARKROOM_CANON = RoomCanon(
     id="darkroom",
@@ -97,8 +53,6 @@ DARKROOM_CANON = RoomCanon(
         "бельевую прищепку",
         "выцветший снимок, на котором ничего не разобрать",
     ),
-    # 59.6: первый обыск проявочной — всегда фотоаппарат, что бы Альфред ни
-    # назвал; он вспоминает, что оставил его здесь сам.
     specials=(places.DARKROOM_CAMERA,),
     of_ru="проявочной",
     from_ru="из проявочной",
@@ -190,10 +144,6 @@ SPECIAL_CANONS: dict[str, RoomCanon] = {
     canon.id: canon for canon in (DARKROOM_CANON, LABORATORY_CANON, CAVE_CANON, WINE_CELLAR_CANON)
 }
 
-# Катакомбы как место: комната-«оболочка» лабиринта. Канон текущего узла или
-# прохода собирается на ходу (``labyrinth_canon``), в хранилище комнаты нет —
-# всё живёт в ``catacombs:<гость>``. В ``places.PLACES`` не регистрируется:
-# ``engine._room`` обрабатывает ``alfred_at.place == "catacombs"`` отдельно.
 CATACOMBS_CANON = RoomCanon(
     id=PLACE_CATACOMBS,
     name_ru="катакомбы",
@@ -205,7 +155,6 @@ CATACOMBS_CANON = RoomCanon(
     stem="катаком",
     in_en="in the catacombs",
     group=places.GROUP_CATACOMBS,
-    # Обыск в лабиринте: «почти всегда пусто или мелочь» (план 59.4).
     trinkets=(
         "обломок кости",
         "потемневшую монетку",
@@ -224,9 +173,6 @@ for _canon in SPECIAL_CANONS.values():
     places.register(_canon)
 
 
-# --- сценарий-прогулка ---
-
-# Формы согласия нет, слова гостя прогулку не запускают (триггер — тул go).
 _NEVER = re.compile(r"(?!)")
 
 _SCENE_FRAME = (
@@ -313,8 +259,6 @@ _DIRECTOR_PROMPT = (
 
 
 def extra_input(run: Run) -> str:
-    """Блок ко входу Ведущего: где Альфред, последний шаг (решение кода),
-    исход обыска."""
     lines = []
     here = run.world.get("here")
     if here:
@@ -338,7 +282,6 @@ CATACOMBS = Scenario(
     finale_directive="",
     director_prompt=_DIRECTOR_PROMPT,
     fallback_faults=(),
-    # Одна «стадия» и никакого финала: прогулка кончается уходом наверх.
     min_turns_before_finale=10**9,
     min_turns_on_stage=1,
     stage_soft_cap=99,
@@ -350,7 +293,6 @@ CATACOMBS = Scenario(
     act_prompt=_ACT_PROMPT,
 )
 
-# --- тексты тулов ---
 
 TOOL_WALK_UNAVAILABLE = "недоступно: ходить по катакомбам можно только в личном разговоре"
 TOOL_WALK_BAD_DIRECTION = (
@@ -452,7 +394,6 @@ GO_DECLARATION: dict[str, Any] = {
     },
 }
 
-# --- направления ---
 
 _DIRECTION_ALIASES = {
     "налево": "left",
@@ -484,7 +425,6 @@ def normalize_direction(raw: Any) -> str | None:
 
 
 def go_action(raw: Any) -> str:
-    """Переход go, отданный Ведущему, — как физическое действие для act."""
     text = " ".join(str(raw or "").split())
     if resolve_target(text) == "cellar":
         return "пойти к двери подвала"
@@ -492,8 +432,6 @@ def go_action(raw: Any) -> str:
 
 
 def resolve_target(raw: Any) -> str | None:
-    """Куда просят перейти: ``cabinet`` / ``cellar`` / ``catacombs`` / id
-    особого места (в том числе по названию: «проявочная», «винный погреб»)."""
     if not isinstance(raw, str):
         return None
     text = places.normalize_where(raw)
@@ -514,12 +452,7 @@ def resolve_target(raw: Any) -> str | None:
     return None
 
 
-# --- положение Альфреда под землёй (alfred_at) ---
-
-
 def state_of(at: places.At | None, maze: Maze) -> CatacombsState:
-    """``CatacombsState`` из ``alfred_at`` (поле ``node`` хранит ``to_dict``).
-    Битое или устаревшее положение (узла нет в лабиринте) — вход."""
     if at is not None and isinstance(at.node, dict):
         try:
             state = CatacombsState.from_dict(at.node)
@@ -546,19 +479,15 @@ def with_state(at: places.At, state: CatacombsState) -> places.At:
 
 
 def current_place(maze: Maze, state: CatacombsState) -> Node | Passage:
-    """Где «стоит» Альфред: в проходе у стены с рычагом или в узле."""
     if state.passage and state.passage in maze.passages:
         return maze.passages[state.passage]
     return maze.nodes[state.node]
 
 
-# --- английский вид места для кадра ---
-
 _COUNT_EN = {1: "one", 2: "two", 3: "three", 4: "four"}
 
 
 def node_kind(maze: Maze, node: Node) -> str:
-    """entrance | special | dead_end | bend | straight | junction."""
     if node.cell == (0, 0):
         return "entrance"
     if node.special:
@@ -609,9 +538,6 @@ def passage_base_en(passage: Passage, *, wall: bool = False) -> str:
 
 
 def frame_canon_en(maze: Maze, place: Node | Passage, *, wall: bool = False) -> str:
-    """Канон кадра места для промптера: структура места (код) → описание
-    Ведущего (русское, промптер переведёт) → места поиска на виду. Находок нет
-    и быть не может: они решаются только при обыске."""
     if isinstance(place, Node):
         base = node_base_en(maze, place)
     else:
@@ -643,8 +569,6 @@ UNDERGROUND_INTRO = "Ты в катакомбах под замком, при с
 
 
 def position_ru(maze: Maze, state: CatacombsState) -> str:
-    """«Где ты» в лабиринте: что видно отсюда (look → text_ru) вместе с
-    описанием узла или прохода."""
     return UNDERGROUND_INTRO + catacombs.look(state, maze).text_ru()
 
 
@@ -658,23 +582,15 @@ def labyrinth_canon(maze: Maze, state: CatacombsState) -> RoomCanon:
 
 
 def labyrinth_room(user_id: int, maze: Maze, state: CatacombsState) -> Room:
-    # temp=True: в хранилище комната не пишется (``Interactives._save_room``
-    # для временных кладёт в мир сцены, а там для неё записи нет — no-op).
     return Room(user_id=user_id, canon=labyrinth_canon(maze, state), temp=True)
 
-
-# --- кадры ---
 
 FRAMES_PER_TURN = 1
 
 
 @dataclass
 class Frame:
-    """Один кадр к показу гостю. ``file_id`` — запомненная картинка: ушла бы
-    прежней, без генерации. ``owner`` — "node:x,y" / "passage:<id>" (чей кадр
-    запоминаем), ``spot`` — крупный план места поиска."""
-
-    kind: str  # node | passage | spot | room
+    kind: str
     owner: str
     key: str
     caption: str
@@ -724,7 +640,6 @@ def passage_frame(user_id: int, maze: Maze, passage: Passage, *, wall: bool = Fa
     )
     room = labyrinth_room(user_id, maze, state)
     if not wall:
-        # Проход без стены: канон — сам коридор, а не узел, где он начинается.
         canon = replace(
             room.canon,
             canon_en=frame_canon_en(maze, passage),
@@ -765,11 +680,6 @@ def spot_frame(user_id: int, maze: Maze, owner: Node | Passage, spot: catacombs.
 
 
 def plan_frames(user_id: int, maze: Maze, result: WalkResult) -> list[Frame]:
-    """Какие кадры показать после шага (комнату особого места рисует вызывающий).
-    Один кадр на шаг — всегда узел, куда пришли (запомненный уходит по
-    file_id). Кадра коридора по пути нет: он читался гостем как второй ответ
-    Альфреда; картинка места бывает только по обыску (решение владельца
-    2026-10-15)."""
     outcome = result.outcome
     frames: list[Frame] = []
     if outcome in (Outcome.MOVED, Outcome.NEW_PASSAGE, Outcome.CONNECTED):
@@ -783,8 +693,6 @@ def plan_frames(user_id: int, maze: Maze, result: WalkResult) -> list[Frame]:
 
 
 def match_spot(spots: list[catacombs.Spot], where: str) -> catacombs.Spot | None:
-    """Место поиска по тому, как его назвал Альфред или гость: «ящик» и «ящик у
-    стены» — одно и то же."""
     wanted = _stems(where)
     if not wanted:
         return None
@@ -796,12 +704,8 @@ def match_spot(spots: list[catacombs.Spot], where: str) -> catacombs.Spot | None
 
 
 def _stems(text: str) -> set[str]:
-    """Слова названия по первым четырём буквам: «в ящике у стены» и «ящик у
-    стены» — одно и то же место (падежи не мешают)."""
     return {w[:4] for w in places.normalize_where(text).split() if len(w) >= 3}
 
-
-# --- описание нового места (Ведущий) ---
 
 DESCRIBE_SYSTEM = (
     "Ты — Ведущий: придумываешь вид мест в катакомбах под старым замком в "
@@ -834,7 +738,6 @@ def _cells_ru(n: int) -> str:
 
 
 def describe_hint(maze: Maze, key: str, place: Node | Passage) -> str:
-    """Что за место просим описать — структура, определённая кодом."""
     if isinstance(place, Passage):
         text = f"Проход — прямой коридор длиной {_cells_ru(place.length)}"
         if place.sealed:
@@ -906,13 +809,9 @@ def parse_described(data: dict | None, key: str) -> tuple[str, list[str]] | None
 
 
 def neighbor_descriptions(maze: Maze) -> list[str]:
-    """Описанные места лабиринта (последние) — чтобы Ведущий не повторялся."""
     seen = [p.describe for p in maze.passages.values() if p.describe]
     seen += [n.describe for n in maze.nodes.values() if n.describe]
     return seen[-NEIGHBORS_SHOWN:]
-
-
-# --- текст шага для модели ---
 
 
 def outcome_ru(result: WalkResult, *, in_room: bool = False) -> str:
@@ -954,5 +853,4 @@ def outcome_ru(result: WalkResult, *, in_room: bool = False) -> str:
 
 
 def step_summary(result: WalkResult) -> str:
-    """Шаг для Ведущего: фраза по-русски и плоская сводка ``to_dict``."""
     return f"{outcome_ru(result)} ({result.to_dict()})"

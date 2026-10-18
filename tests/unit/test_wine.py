@@ -1,7 +1,3 @@
-"""Этап 59.3: вино — особенная вещь подвала и общий механизм «Применение»
-(consumable, 49.4): «Распить» → вещь consumed, эффект tipsy на 3 ч, текст
-эффекта в заметке Альфреду, снимок с бокалом."""
-
 from __future__ import annotations
 
 import asyncio
@@ -32,16 +28,12 @@ async def _wine(svc, store, user=CANARY) -> dict:
     return item
 
 
-# --- вещь появляется на стадии 3 ---
-
-
 async def test_wine_appears_at_stage_three_with_fallback_look(store):
     svc, _, link = _make(store, dice=Dice(0.0))
     await _to_hatch(svc, store, link)
     wine = (await store.items_of(CANARY, "wine"))[0]
     assert wine["status"] == "owned"
     assert len(wine["traits"]) == 2 and wine["note"] in items.WINE.fallback_notes
-    # Бутылка одна: повторный вход ничего не добавляет.
     assert await svc._create_found_item(CANARY, items.WINE, "again") is None
     assert len(await store.items_of(CANARY, "wine")) == 1
 
@@ -49,11 +41,8 @@ async def test_wine_appears_at_stage_three_with_fallback_look(store):
 async def test_director_describes_the_bottle_on_the_next_call(store):
     svc, _, link = _make(store, dice=Dice(0.0))
     await _to_hatch(svc, store, link)
-    # _to_hatch уже сделал вызов Ведущего со стадии 3 (без found_item в ответе):
-    # запасное описание остаётся, просьба снята.
     run = await _run(store)
     assert "found_item" not in run.world
-    # Новая бутылка (после сброса): Ведущий отвечает приметами.
     await store.consume_item((await store.items_of(CANARY, "wine"))[0]["id"])
     item = await _wine(svc, store)
     run.world["found_item"] = {"id": item["id"], "name": "Бутылка вина", "ask": "Опиши."}
@@ -98,9 +87,6 @@ async def test_wine_is_invisible_to_non_canary(store):
     assert await svc._effects_note(CANARY) is None
 
 
-# --- распить ---
-
-
 async def test_drink_consumes_the_bottle_and_sets_tipsy_for_three_hours(store):
     clock = Clock()
     svc, _, link = _make(store, clock=clock)
@@ -112,12 +98,11 @@ async def test_drink_consumes_the_bottle_and_sets_tipsy_for_three_hours(store):
     assert "распита" in caption and not markup.inline_keyboard
     raw = json.loads(await store.get_state(f"user_effect:tipsy:{CANARY}"))
     assert raw["expires_at"] == (clock.now + timedelta(hours=3)).isoformat()
-    # Альфред: реплика после глотка и снимок с бокалом (селфи).
     assert svc.spoken and "распили" in svc.spoken[0][0]
     await asyncio.gather(*list(svc._photo_tasks))
     shot = link.generated[-1]
     assert "glass of dark red wine" in shot["description"]
-    assert "size" not in shot  # обычный размер: фотоаппарата нет
+    assert "size" not in shot
     events = [e["kind"] for e in await store.item_events(item["id"])]
     assert events == ["created", "consumed"]
 
@@ -132,7 +117,6 @@ async def test_drink_only_once(store):
     assert answer == "Бутылка распита."
     assert len(svc.spoken) == spoken
     assert await store.get_state(f"user_effect:tipsy:{CANARY}") == first
-    # Из формы тула — то же самое, и в описи бутылки больше нет.
     assert await svc.tool_item_action(CANARY, CANARY, item="вино", action="drink") != ""
     assert svc._queued.get(CANARY) is None or not svc._queued[CANARY].items
 
@@ -149,11 +133,7 @@ async def test_item_action_tool_asks_with_a_form(store):
     assert markup.inline_keyboard[0][0].callback_data == f"it:{item['id']}:fd"
 
 
-# --- эффект в заметке Альфреду ---
-
-
 def _no_where(note: str | None) -> str | None:
-    """Заметка без «Где ты» (59.7): она есть у канарейки каждый ход."""
     assert note is not None and places.MOVE_RULE in note
     return note.split(places.MOVE_RULE)[-1].strip() or None
 
@@ -172,7 +152,7 @@ async def test_tipsy_text_goes_to_alfred_note_until_it_expires(store):
     assert items.TIPSY_TEXT in _no_where(plan.note)
     clock.now += timedelta(minutes=2)
     plan = await svc.before_turn(CANARY, CANARY, "Ну?", is_private=True)
-    assert _no_where(plan.note) == items.TIPSY_ENDED  # один раз: хмель прошёл
+    assert _no_where(plan.note) == items.TIPSY_ENDED
     assert await store.get_state(f"user_effect:tipsy:{CANARY}") is None
     plan = await svc.before_turn(CANARY, CANARY, "Ну?", is_private=True)
     assert _no_where(plan.note) is None

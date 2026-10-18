@@ -1,7 +1,3 @@
-"""Канарейка Этапа 59 (59.C, решение владельца 2026-10-10): новое видят только
-гости из ``llm.interactives_canary_user_ids``, а для остальных поведение бота
-прежнее — тесты ниже держат это «байт-в-байт»."""
-
 from __future__ import annotations
 
 import asyncio
@@ -70,7 +66,6 @@ def _make(store, *, canary=(CANARY,)):
 
 @pytest.fixture
 def ghost(monkeypatch):
-    """Канареечный сценарий-пустышка в REGISTRY (cellar появится позже)."""
     scenario = dataclasses.replace(
         radio.RADIO,
         id=GHOST_ID,
@@ -132,8 +127,6 @@ async def test_forged_click_on_canary_scenario_is_refused(store, ghost):
 
 
 async def test_radio_complaint_unchanged_for_everyone(store, ghost):
-    """Жалоба на речь предлагает радио и гостю вне списка, и канарейке —
-    ровно прежними ключами app_state."""
     for user in (GUEST, CANARY):
         svc = _make(store)
         plan = await svc.before_turn(user, user, "Альфред, ты картавишь!", is_private=True)
@@ -161,12 +154,8 @@ def test_run_json_without_world_is_the_old_format():
     assert "world" not in run.to_json()
     run.world["x"] = 1
     assert Run.from_json(run.to_json()).world == {"x": 1}
-    # Старый JSON (до Этапа 59) читается: поля world в нём нет.
     old = Run.from_json(Run(scenario="radio", chat_id=1, user_id=1).to_json())
     assert old.world == {}
-
-
-# --- весь путь радио и кабинета для гостя вне списка ---
 
 
 def _png() -> bytes:
@@ -252,11 +241,10 @@ async def test_radio_and_cabinet_flow_for_non_canary_is_the_old_one(store):
         rng=lambda: 0.0,
     )
 
-    async def speak(chat_id, directive, where):  # реплика после кнопки — службе tasks
+    async def speak(chat_id, directive, where):
         return None
 
     svc._speak = speak
-    # Радио: жалоба → форма «Да»/«Нет» → согласие → ход сцены с кадром.
     plan = await svc.before_turn(GUEST, GUEST, "Альфред, ты картавишь!", is_private=True)
     assert plan.offered and plan.scenario == radio.SCENARIO_ID
     await svc.after_turn(plan, "Я говогю чисто.", dialogue_id=77)
@@ -269,19 +257,16 @@ async def test_radio_and_cabinet_flow_for_non_canary_is_the_old_one(store):
     assert plan.scene and "За окном" not in plan.note
     await svc.after_turn(plan, "Проверю антенну.", dialogue_id=77)
     await asyncio.gather(*list(svc._photo_tasks))
-    # Кабинет: «Где ты», кадр сцены и «скинь фото» — только кабинет.
     shot = link.generated[-1]
     assert "gothic study" in shot["description"] and shot["light"]
     assert await svc.tool_take_photo(GUEST, GUEST, {"focus": "полки"})
     await asyncio.gather(*list(svc._photo_tasks))
     assert "study" in link.generated[-1]["context"]
     assert len(notifier.photos) == 2
-    # В хранилище — ни одного ключа Этапа 59, и прогресс радио без world.
     keys = await store.state_keys("")
     assert not [k for k in keys if k.startswith(NEW_KEYS_PREFIXES)]
     assert [k for k in keys if k.startswith("location:")] == [f"location:cabinet:{GUEST}"]
     assert "world" not in await store.get_state(f"interactive_run:{GUEST}:radio")
-    # И в «Где ты» кабинет — без приписок про подвал.
     room = await svc._room(GUEST, GUEST)
     assert type(room).__name__ == "Cabinet"
     assert await svc._where_ru(room, GUEST, in_scene=True) == room.describe_ru()

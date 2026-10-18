@@ -10,7 +10,6 @@ from sa_home_bot.bot.interactives import items as items_mod
 from sa_home_bot.bot.interactives import radio
 from sa_home_bot.bot.interactives.registry import REGISTRY
 
-# callback_data «ia:<сценарий>:<кнопка>» — всё остальное в app_state.
 CALLBACK_PREFIX = "ia"
 
 
@@ -53,7 +52,7 @@ FORM_RETURN = "return"
 FORM_REINSTALL = "reinstall"
 
 
-FORM_ITEM = "item"  # форма тула item_action (вещь поместья)
+FORM_ITEM = "item"
 
 
 def offer_suffix(label: str) -> str:
@@ -63,44 +62,30 @@ def offer_suffix(label: str) -> str:
 OFFER_EXPIRED_SUFFIX = offer_suffix("Вопрос уже неактуален")
 
 
-# Кнопка выхода была под сообщениями рассказчика до v0.115.3 — рассказчика
-# больше нет, обработка оставлена для уже разосланных сообщений.
 EXIT_ALERT = "Хорошо."
 
 
-# Сюжетные предметы (Этап 49.3, items.py). Карточка предмета — фото с
-# кнопкой «it:<id предмета>:<кнопка>»; портрет рисует служба llm
-# (item_portrait), в кадры он вставляется пикселями (generate_image, paste).
 ITEM_CALLBACK_PREFIX = "it"
 
 
-# Кнопка несёт намерение, а не «переключить»: речь можно сменить и формами
-# swap_radio, тогда надпись на старой карточке устарела бы.
-ITEM_BTN_CARD = "c"  # кнопка описи: принести карточку вещи
+ITEM_BTN_CARD = "c"
 
 
-ITEM_BTN_ACTIONS = "a"  # карточка → перечень действий
+ITEM_BTN_ACTIONS = "a"
 
 
-ITEM_BTN_BACK = "b"  # перечень действий → карточка
+ITEM_BTN_BACK = "b"
 
 
-ITEM_BTN_KEEP = "k"  # форма тула: «Оставить как есть» (+ код действия)
+ITEM_BTN_KEEP = "k"
 
 
-# Откуда нажата кнопка — префикс кода: из описи /items (перечень вернётся в
-# опись) или из формы тула item_action (форма закрывается итогом). Коды
-# действий вида поэтому не начинаются с этих букв.
 ITEM_FROM_INVENTORY = "i"
 
 
 ITEM_FROM_FORM = "f"
 
 
-# Живые кнопки (пользователь 2026-10-02): формы сцены и смены радиостанции
-# и раскрытый перечень действий карточки. Следующее сообщение гостя — «гость
-# проигнорировал»: у форм кнопки снимаются, перечень сворачивается обратно
-# в карточку. Иначе старая форма оставалась нажимаемой рядом с новой.
 LIVE_BUTTONS_KEY = "live_buttons:{chat_id}"
 
 
@@ -163,7 +148,6 @@ def _item_button(item_id: int, label: str, button: str) -> list[InlineKeyboardBu
 
 
 def item_keyboard(kind: items_mod.ItemKind, item_id: int) -> InlineKeyboardMarkup | None:
-    """Под карточкой — только «Действия», если вид объявил действия."""
     if not kind.actions:
         return None
     return InlineKeyboardMarkup(
@@ -174,10 +158,6 @@ def item_keyboard(kind: items_mod.ItemKind, item_id: int) -> InlineKeyboardMarku
 def item_actions_keyboard(
     kind: items_mod.ItemKind, item_id: int, place: str, origin: str = ""
 ) -> InlineKeyboardMarkup:
-    """Перечень действий (заменяет карточку или опись) и «Назад». Кнопка
-    несёт намерение, а не «переключить»: состояние можно сменить и формой.
-    ``origin`` — откуда открыт перечень (``ITEM_FROM_INVENTORY`` — из описи
-    /items: «Назад» и действие возвращают опись)."""
     rows = [
         _item_button(item_id, action.label, origin + action.code)
         for action in kind.available(place)
@@ -196,7 +176,6 @@ _NO_BUTTONS = InlineKeyboardMarkup(inline_keyboard=[])
 
 
 def item_form_keyboard(item_id: int, action: items_mod.ItemAction) -> InlineKeyboardMarkup:
-    """Форма тула item_action: согласие и «Оставить как есть»."""
     keep = ITEM_FROM_FORM + ITEM_BTN_KEEP + action.code
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -207,8 +186,6 @@ def item_form_keyboard(item_id: int, action: items_mod.ItemAction) -> InlineKeyb
 
 
 def inventory_keyboard(items: list[dict[str, Any]]) -> InlineKeyboardMarkup | None:
-    """Опись: по строке на вещь — принести карточку и, если вид объявил
-    действия, «Действия» прямо из описи (особенные вещи — всегда)."""
     rows = []
     for item in items:
         kind = items_mod.KINDS.get(item["type"])
@@ -224,7 +201,6 @@ def inventory_keyboard(items: list[dict[str, Any]]) -> InlineKeyboardMarkup | No
 
 
 def inventory_text(entries: list[tuple[items_mod.ItemKind, dict[str, Any], str]]) -> str:
-    """Опись вещей гостя: (вид, вещь, место) → текст в голосе Альфреда."""
     if not entries:
         return items_mod.INVENTORY_EMPTY
     blocks = [items_mod.INVENTORY_TITLE]

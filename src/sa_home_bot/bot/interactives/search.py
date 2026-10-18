@@ -9,32 +9,24 @@ from sa_home_bot.bot.interactives.registry import REGISTRY
 
 class SearchMixin(EngineCore):
     async def tool_search(self, chat_id: int | None, user_id: int | None, where: str) -> str:
-        """Альфред порыскал в месте, где стоит. Что найдено, решает код по
-        таблице находок места (places.search_room); обысканное помечается.
-        В идущей канареечной сцене итог (а на поиске ключа — и сам ключ,
-        cellar.roll_key) решён кодом, а Ведущий обставляет его синхронно тем же
-        запросом, что и тул act (Этап 59.7: поиск — частный случай действия);
-        вне сцены итог отдаётся сразу. Только канарейкам."""
-        if chat_id is None or user_id is None or not self.canary_ok(user_id):
+        scope = self.canary_scope(chat_id, user_id, private=False)
+        if scope is None:
             return places.TOOL_SEARCH_UNAVAILABLE
+        chat_id, user_id = scope
         where = " ".join(where.split())[: places.SEARCH_WHERE_MAX]
         if not where:
             return places.TOOL_SEARCH_NO_WHERE
         room = await self._room(chat_id, user_id)
         canon = room.canon if isinstance(room, Room) else places.CABINET_CANON
-        # Обыскать можно только то место, где стоишь (59.7): чужое место не
-        # обыскивается и не помечается обысканным.
         name = places.foreign_place(where, room.place)
         if name is not None:
             return places.TOOL_SEARCH_ELSEWHERE.format(name=name, here=canon.in_ru)
-        # Коридоры и перекрёстки катакомб (59.4): места поиска узла/прохода,
-        # итог сразу. Особые места катакомб идут обычным путём ниже.
         labyrinth = await self.search_labyrinth(chat_id, user_id, where)
         if labyrinth is not None:
             return labyrinth
         run = await self._scene_run(chat_id, user_id)
         if run is not None and not REGISTRY[run.scenario].canary:
-            run = None  # сцена радио поиска не касается (прогресс радио не трогаем)
+            run = None
         if run is not None and not self._take_act(chat_id):
             return acts.TOOL_ACT_LIMIT
         temp = isinstance(room, Room) and room.temp
@@ -60,18 +52,12 @@ class SearchMixin(EngineCore):
         if run is None:
             found = result.text
             if found_kind is not None and found_item is not None:
-                # Ведущего нет — заметку (производитель, модель) даёт запасной
-                # список вида.
                 note = (found_item.get("note") or "").rstrip(". ")
                 found += places.SEARCH_ITEM_TAKEN.format(
                     name=found_kind.name, note=f" ({note})" if note else ""
                 )
             return places.TOOL_SEARCH_FREE.format(where=where, found=found)
-        hunting = (
-            run.scenario == cellar.SCENARIO_ID
-            and run.stage == cellar.STAGE_KEY_HUNT
-            and not run.finale
-        )
+        hunting = cellar.is_key_hunt(run)
         key = False
         if hunting and result.kind != places.SEARCH_KIND_REPEAT:
             key = cellar.roll_key(run, self._rng)
@@ -84,8 +70,6 @@ class SearchMixin(EngineCore):
             where, result.kind, result.text, key=key, hunting=hunting
         )
         if found_kind is not None and found_item is not None and not key:
-            # Находка с вещью: итог для Ведущего — что найдено, а приметы и
-            # заметку вещи он придумает в ответе (found_item).
             outcome = places.SEARCH_ITEM_DIRECTOR.format(
                 where=where, text=result.text, name=found_kind.name
             )

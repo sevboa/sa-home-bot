@@ -1,5 +1,3 @@
-"""Кабинет Альфреда (Этап 49.2): Трансильвания, особенности от Ведущего, снимки."""
-
 from __future__ import annotations
 
 import asyncio
@@ -73,7 +71,6 @@ class FakeLink:
     async def command(self, action, args, dst=None, timeout=None):
         self.calls.append((action, args))
         if action == "chat" and "system" not in args:
-            # Реплика Альфреда — подпись к снимку (engine._photo_line).
             return {"response": "Готово, сэр."}
         if action == "chat" and args["system"] == FEATURES_SYSTEM:
             return {"response": json.dumps({"cabinet_add": self.features}, ensure_ascii=False)}
@@ -110,7 +107,6 @@ class FakeLink:
         return [a for act, a in self.calls if act == "generate_image"]
 
     def lines(self) -> list[str]:
-        """Директивы подписей к снимкам."""
         return [
             a["messages"][0]["content"]
             for act, a in self.calls
@@ -119,7 +115,7 @@ class FakeLink:
 
 
 async def _night() -> int:
-    return 3  # пасмурно
+    return 3
 
 
 def _make(store, link):
@@ -129,10 +125,9 @@ def _make(store, link):
         notifier,
         Settings(llm=LlmConfig(model="m")),
         lambda: link,
-        now=lambda: datetime(2026, 9, 30, 21, 0, tzinfo=UTC),  # 00:00 в Бухаресте
+        now=lambda: datetime(2026, 9, 30, 21, 0, tzinfo=UTC),
         transylvania=Transylvania(fetch=_night),
     )
-    # Реплики Альфреда (служба tasks) — в список: (директива, куда).
     svc.spoken = []
 
     async def speak(chat_id, directive, where):
@@ -144,9 +139,6 @@ def _make(store, link):
 
 async def _drain(svc) -> None:
     await asyncio.gather(*list(svc._photo_tasks))
-
-
-# --- Трансильвания ---
 
 
 def test_daylight_follows_the_season():
@@ -184,13 +176,12 @@ def test_night_window_shows_moon_phase_unless_clouds():
     assert "starry" in night(moon="новолуние").en() and "moon" not in night(moon="новолуние").en()
     hidden = night(moon="полнолуние", cloud_cover=90).en()
     assert "cloudy night sky" in hidden and "moon" not in hidden
-    assert "moonlight" in night().en()  # фаза неизвестна — просто лунный свет
+    assert "moonlight" in night().en()
     day = Outside(phase="day", weather="clear", local_time="13:00", moon="полнолуние")
     assert "moon" not in day.en()
 
 
 def test_closeup_light_is_colour_only():
-    # День — как у общего вида (без окна день не узнаётся), остальные фазы цветом.
     assert Outside(phase="day", weather=None, local_time="12:00").en(closeup=True) == (
         "daylight through the window"
     )
@@ -223,11 +214,8 @@ async def test_weather_is_cached_and_failure_is_just_no_weather():
     assert await tr.weather() == "storm"
     assert await tr.weather() == "storm" and len(calls) == 1
     t[0] = 4000
-    assert await tr.weather() == "storm"  # сбой — прежнее значение
+    assert await tr.weather() == "storm"
     assert await Transylvania(fetch=fetch).weather() is None
-
-
-# --- особенности кабинета ---
 
 
 def test_features_dedupe_and_limit():
@@ -274,13 +262,9 @@ async def test_scene_note_and_director_see_the_cabinet(store):
     director_input = link.calls[-1][1]["messages"][0]["content"]
     assert "жарко натоплено" in director_input
     cab = await cabinet.load(store, GUEST)
-    # Добавленное по ходу сцены — след сцены, не постоянная особенность.
     assert cab.features == ["жарко натоплено"]
     assert cab.scene == ["на ковре липкий след"]
     assert "на ковре липкий след" in cab.describe_ru()
-
-
-# --- снимок ---
 
 
 async def test_first_photo_invents_features_then_same_state_is_reused(store):
@@ -296,17 +280,13 @@ async def test_first_photo_invents_features_then_same_state_is_reused(store):
     assert len(notifier.photos) == 1 and isinstance(notifier.photos[0][1], bytes)
     image = await store.image_by_id(next(iter(cab.photos.values())))
     assert image["purpose"] == photo_text.PHOTO_PURPOSE
-    # Ничего не изменилось, но снимок уже в этом чате — второй раз тот же не
-    # шлём, снимаем заново (живая находка 2026-10-02).
     assert await svc.tool_take_photo(GUEST, GUEST, {}) == cabinet.TOOL_PHOTO_STARTED
     await _drain(svc)
     assert len(link.generated()) == 2
-    # В другой чат — тот же снимок по file_id, mycraft не трогаем.
     reply = await svc.tool_take_photo(-100, GUEST, {})
     assert "уже отправлен" in reply
     assert len(link.generated()) == 2
     assert notifier.photos[-1][1] == "file-2"
-    # Новая особенность — новый снимок и в другом чате.
     cab = await cabinet.load(store, GUEST)
     cab.add(["на полу мокрые следы"])
     await cabinet.save(store, cab)
@@ -330,13 +310,10 @@ async def test_caption_names_the_subject_when_focus_is_empty(store):
     link = FakeLink()
     svc, _ = _make(store, link)
     await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
-    # Подпись о конкретном — крупный план, и он же сверяется на снимке.
     await svc.tool_take_photo(GUEST, GUEST, {"caption": "Вид из окна"})
     await _drain(svc)
-    # Focus без expect — сверяем focus.
     await svc.tool_take_photo(GUEST, GUEST, {"focus": "меч на стене"})
     await _drain(svc)
-    # «Мой кабинет» — общий вид, как и раньше.
     await svc.tool_take_photo(GUEST, GUEST, {"caption": "Мой кабинет"})
     await _drain(svc)
     window, sword, room = link.generated()
@@ -369,7 +346,6 @@ def test_overview_puts_features_first():
 def test_smells_and_sounds_stay_out_of_cabinet_and_frame():
     cab = cabinet.Cabinet(user_id=1)
     assert cab.add(["Густой аромат лаванды", "за стеной хихиканье", "пятно сажи"]) == ["пятно сажи"]
-    # Уже записанные до фильтра — остаются для Альфреда, но не идут в кадр.
     cab.features = ["сова", "пахнет полынью", "пятно сажи"]
     outside = Outside(phase="night", weather=None, local_time="00:00")
     description, _ = photo_description(cab, outside, "", None)
@@ -402,7 +378,6 @@ async def test_mood_picks_model_and_lora_for_scene_frames(store):
     await _scene_turn(svc, link, {"stage": 0, "mood": "гниль", "photo": "стол"})
     gen = link.generated()[-1]
     assert gen["model"] == "revanim" and gen["loras"] == [["rottech", 0.8]]
-    # Настроение держится, пока Ведущий его не сменит — и в снимках Альфреда.
     await svc.tool_take_photo(GUEST, GUEST, {"focus": "камин"})
     await _drain(svc)
     assert link.generated()[-1]["model"] == "revanim"
@@ -426,7 +401,6 @@ def test_scene_description_with_alfred():
     outside = Outside(phase="night", weather=None, local_time="00:00")
     phrase = cabinet.SCENE_ALFRED_EN["back"]
     description, _ = photo_description(cab, outside, "", "лампа вспыхнула", alfred="back")
-    # После главного, до особенностей; особенностей остаётся одна.
     assert description.index("лампа вспыхнула") < description.index(phrase)
     assert description.index(phrase) < description.index("f3")
     assert "f2" not in description
@@ -452,8 +426,7 @@ async def test_alfred_in_scene_frame(store):
     params = json.loads((await store.image_by_id(1))["params"])
     assert params["alfred"] == "back"
     cab = await cabinet.load(store, GUEST)
-    assert not cab.photos  # такие кадры в кэш повторного показа не идут
-    # Без поля — как раньше.
+    assert not cab.photos
     await _scene_turn(svc, link, {"stage": 1, "mood": "гниль", "photo": "стол"})
     gen = link.generated()[-1]
     assert gen["loras"] == [["rottech", 0.8]]
@@ -472,20 +445,16 @@ async def test_director_frames_key_moments_not_too_often(store):
     svc, notifier = _make(store, link)
     await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
     await svc._state.save_run(Run("radio", GUEST, GUEST, status="active"))
-    # Ведущий просит кадр — снимаем крупно, с тем, что случилось.
     await _scene_turn(svc, link, {"stage": 0, "effect": "лампа вспыхнула", "photo": "лампа"})
     (gen,) = link.generated()
     assert gen["mode"] == "scene" and gen["description"] == "лампа"
     assert "лампа вспыхнула" in gen["context"]
     assert notifier.photos[-1][2] == photo_text.PHOTO_SCENE_CAPTION
-    # Сразу ещё раз — рано, пропускаем.
     await _scene_turn(svc, link, {"stage": 0, "photo": "камин"})
     assert len(link.generated()) == 1
-    # Переход стадии — кадр обязателен, даже без просьбы: общий вид.
     await _scene_turn(svc, link, {"stage": 1})
     assert len(link.generated()) == 2
     assert link.generated()[-1]["mode"] == "free"
-    # Обычный ход без просьбы — без кадра.
     await _scene_turn(svc, link, {"stage": 1})
     assert len(link.generated()) == 2
 
@@ -497,17 +466,13 @@ def test_tool_is_registered(tool):
     assert any(spec.name == tool for spec in tools.TOOLS)
 
 
-# --- следы сцены (живая находка 2026-09-30) ---
-
-
 async def test_scene_traces_leave_with_the_scene(store):
     link = FakeLink()
     svc, _ = _make(store, link)
     cab = cabinet.Cabinet(user_id=GUEST, features=["сова на шкафу"])
     cab.add(["туман у стола", "из динамика шёпот", "пепельные пальцы"], scene=True)
-    assert cab.scene == ["туман у стола", "пепельные пальцы"]  # звук — мимо
+    assert cab.scene == ["туман у стола", "пепельные пальцы"]
     await cabinet.save(store, cab)
-    # Сцены нет (квест пройден) — снимок уже без её следов.
     await svc._state.save_run(Run("radio", GUEST, GUEST, status="done"))
     assert await svc.tool_take_photo(GUEST, GUEST, {}) == cabinet.TOOL_PHOTO_STARTED
     await _drain(svc)
@@ -526,9 +491,6 @@ def test_describe_shows_few_visible_features():
     assert text.count("деталь") == cabinet.DESCRIBE_MAX and "деталь 9" in text
 
 
-# --- сверка снимка (Этап 49.2.1) ---
-
-
 def test_photo_check_parse_counts_misses_from_answers():
     from sa_home_bot.llm import photo_check
 
@@ -538,8 +500,6 @@ def test_photo_check_parse_counts_misses_from_answers():
         ensure_ascii=False,
     )
     parsed = photo_check.parse(raw, expect)
-    # Пункт без внятного ответа промахом не считается; в missing — название
-    # без определения.
     assert parsed == {
         "description": "Стол, камин.",
         "missing": ["собака у камина"],
@@ -568,20 +528,15 @@ async def test_matching_photo_becomes_alfreds_note_only(store):
     (gen,) = link.generated()
     assert gen["expect"] == ["собака у камина"] and gen["keep_key"].startswith(f"snap-{GUEST}-")
     assert gen["negative_extra"] == cabinet.PHOTO_NEGATIVE_EN
-    # Свет — и у пустого кабинета: «dark window at night» в хвосте не держал ночь.
     assert "night" in gen["light"]
     assert len(notifier.photos) == 1
     plan = await svc.before_turn(GUEST, GUEST, "а какого цвета собака?", is_private=True)
     assert "рыжая собака" in plan.note
-    # Ведущему и кабинету — ничего.
     cab = await cabinet.load(store, GUEST)
     assert cab.features == ["сова"] and cab.scene == []
 
 
 async def test_alfred_line_comes_with_the_photo_as_its_caption(store):
-    """Живая находка 2026-10-02: Альфред описывал снимок до того, как он
-    был готов, а потом — длинно. Теперь тул молчит, а короткая реплика на
-    то, что вышло, — подписью к самому снимку и ходом треда."""
     link = FakeLink()
     link.inspect = {"description": "Камин, у огня спит рыжая собака.", "missing": []}
     svc, notifier = _make(store, link)
@@ -593,7 +548,7 @@ async def test_alfred_line_comes_with_the_photo_as_its_caption(store):
     await _drain(svc)
     (directive,) = link.lines()
     assert "рыжая собака" in directive and "сфотографировал собака" in directive
-    assert "сова" in directive  # где Альфред — к реплике
+    assert "сова" in directive
     ((_, _, caption),) = notifier.photos
     assert caption == "<b>Альфред:</b> Готово, сэр."
     turns = await store.ai_turns_for_dialogue(GUEST, 55)
@@ -602,9 +557,6 @@ async def test_alfred_line_comes_with_the_photo_as_its_caption(store):
 
 
 async def test_take_photo_joins_the_scene_photo_and_speaks_with_it(store):
-    """Живая находка 2026-10-02: снимок сцены (Ведущий, в фоне) уже шёл, а
-    take_photo отвечал «занято» — Альфред говорил до снимка и звал тул
-    снова. Теперь ход присоединяется: реплика — подписью к снимку сцены."""
     link = FakeLink()
     svc, notifier = _make(store, link)
     await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
@@ -621,7 +573,6 @@ async def test_take_photo_joins_the_scene_photo_and_speaks_with_it(store):
     assert started
     reply = await svc.tool_take_photo(GUEST, GUEST, {"caption": "Рябь"}, dialogue_id=56)
     assert reply == cabinet.TOOL_PHOTO_STARTED
-    # Второй ход к тому же снимку уже не присоединится.
     assert await svc.tool_take_photo(GUEST, GUEST, {}) == cabinet.TOOL_PHOTO_BUSY
     await svc.wait_photo(GUEST)
     await _drain(svc)
@@ -661,8 +612,6 @@ async def test_scene_frames_are_not_narrated(store):
 
 
 async def test_photo_statuses_follow_the_phases(store, monkeypatch):
-    """Ход ждёт снимок: промптер — «наводит фотоаппарат», рисование и
-    подпись — «проявляет снимок»."""
     monkeypatch.setattr(photos, "PHOTO_PHASE_POLL_S", 0)
     phases = ["compose", "compose", "draw"]
     gate = asyncio.Event()
@@ -694,7 +643,6 @@ async def test_photo_statuses_follow_the_phases(store, monkeypatch):
         cabinet.PHOTO_STATUS_DEVELOPING,
     ]
     assert len(notifier.photos) == 1
-    # Снимка нет — ждать нечего.
     await svc.wait_photo(GUEST, on_status)
 
 
@@ -706,19 +654,15 @@ async def test_missing_subject_makes_alfred_offer_a_retake(store):
     args = {"expect": ["собака у камина"]}
     await svc.tool_take_photo(GUEST, GUEST, args, dialogue_id=55)
     await _drain(svc)
-    assert len(notifier.photos) == 1  # снимок всё равно у гостя
-    # Удивление — подписью к тому же снимку, не отдельной репликой.
+    assert len(notifier.photos) == 1
     (directive,) = link.lines()
     assert "собака у камина" in directive and "переснять" in directive
     assert svc.spoken == []
-    # Промах не становится общим видом кабинета.
     assert (await cabinet.load(store, GUEST)).photos == {}
-    # Снова мимо — шутка про капризную плёнку, но переснять всё равно можно.
     await svc.tool_take_photo(GUEST, GUEST, args, dialogue_id=55)
     await _drain(svc)
     assert "капризн" in link.lines()[-1]
     first, second = link.generated()
-    # Первый снимок — без упора, пересъёмка — с упором на пропущенное.
     assert "emphasize" not in first
     assert second["emphasize"] == ["собака у камина"]
 
@@ -754,8 +698,6 @@ def test_retake_emphasis_matches_rephrased_items():
 
 
 async def test_lost_photo_is_announced_not_silent(store):
-    """Живая находка 2026-10-02: mycraft перезапустили посреди съёмки —
-    Альфред «снял», а снимка нет и ни слова. Теперь гостю говорят."""
     from sa_home_bot.proto.messages import ProtoError
 
     class DeadLink(FakeLink):
@@ -772,7 +714,6 @@ async def test_lost_photo_is_announced_not_silent(store):
     ((chat, text),) = notifier.sent
     assert chat == GUEST and text in cabinet.PHOTO_LOST_TEXTS
     assert await store.get_state(cabinet.PHOTO_PENDING_KEY) == "{}"
-    # Снова можно снимать — камера не «занята» пропавшим снимком.
     assert await svc.tool_take_photo(GUEST, GUEST, {}) == cabinet.TOOL_PHOTO_STARTED
     await _drain(svc)
 
@@ -781,7 +722,6 @@ async def test_photo_cut_by_restart_is_announced_on_start(store):
     link = FakeLink()
     svc, notifier = _make(store, link)
     await svc._mark_photo_pending(GUEST, None, 77)
-    # Бот перезапущен: новая служба находит недоснятый снимок.
     fresh, fresh_notifier = _make(store, link)
     await fresh.recover()
     assert [c for c, _ in fresh_notifier.sent] == [GUEST]
@@ -799,29 +739,21 @@ async def test_delivered_photo_leaves_nothing_pending(store):
     assert await store.get_state(cabinet.PHOTO_PENDING_KEY) == "{}"
 
 
-# --- портрет Альфреда к приветствию (2026-10-05) ---
-
-
 async def test_greeting_portrait_draws_alfred_in_guests_study_with_light(store):
     link = FakeLink()
     svc, notifier = _make(store, link)
     assert svc.start_greeting_portrait(GUEST, GUEST, trigger_message_id=55)
-    # Пока рисуется — второй в тот же чат не начинаем.
     assert not svc.start_greeting_portrait(GUEST, GUEST)
     await _drain(svc)
     (gen,) = link.generated()
     assert gen["loras"] == [list(image_tools.ALFRED_LORA)]
     assert gen["description"].startswith(cabinet.PORTRAIT_SUBJECT_EN)
-    # Свет — тот же, что у снимков кабинета (ночь, пасмурно); обстановка гостя.
     assert "candlelit" in gen["description"] and "треснувший портрет" in gen["description"]
-    # Свет — ещё и отдельно: служба вошьёт его в промпт мимо промптера.
-    assert "night" in gen["light"] and "cloudy night sky" in gen["light"]  # пасмурно — без луны
+    assert "night" in gen["light"] and "cloudy night sky" in gen["light"]
     assert cabinet.CANON_EN in gen["description"]
     (chat, photo, caption) = notifier.photos[0]
     assert chat == GUEST and isinstance(photo, bytes) and caption is None
-    # Особенности кабинета придуманы и сохранены, как при первом снимке.
     assert (await cabinet.load(store, GUEST)).features
-    # Портрет — не снимок кабинета: повторный показ снимков его не берёт.
     assert not (await cabinet.load(store, GUEST)).photos
     assert svc.start_greeting_portrait(GUEST, GUEST)
     await _drain(svc)
@@ -843,8 +775,6 @@ async def test_greeting_portrait_failure_is_silent(store):
 
 
 async def test_selfie_puts_alfred_into_the_same_study_light_and_mood(store):
-    """«Сфоткай себя» (2026-10-05): тот же кабинет гостя, свет и настроение
-    сцены, что у снимка кабинета, но в кадре сам Альфред — LoRA облика."""
     link = FakeLink()
     svc, notifier = _make(store, link)
     await cabinet.save(store, cabinet.Cabinet(user_id=GUEST, features=["сова"]))
@@ -863,10 +793,8 @@ async def test_selfie_puts_alfred_into_the_same_study_light_and_mood(store):
     assert "сфотографировал себя" in directive
     image = await store.image_by_id(1)
     assert json.loads(image["params"])["selfie"] is True
-    # Снимок себя — не общий вид кабинета: повторным показом не станет.
     assert not (await cabinet.load(store, GUEST)).photos
     assert len(notifier.photos) == 1
-    # Настроение сцены — вторая LoRA к облику, модель — от настроения.
     await svc._state.save_run(Run("radio", GUEST, GUEST, status="active", mood="rot"))
     await svc.tool_take_photo(GUEST, GUEST, {"selfie": True})
     await _drain(svc)
@@ -877,8 +805,6 @@ async def test_selfie_puts_alfred_into_the_same_study_light_and_mood(store):
 
 
 def test_selfie_in_pose_gets_bare_room_without_features():
-    """Спиной/в профиль/в рост — без стола и особенностей: они тянули кадр в
-    «анфас за столом» (ночная лаборатория 2026-10-09)."""
     cab = cabinet.Cabinet(user_id=GUEST, features=["сова"])
     out = Outside(phase="night", weather="clear", local_time="01:00")
     for focus in ("стоит спиной у окна", "в профиль с подсвечником", "идёт по коридору"):
@@ -917,9 +843,8 @@ async def test_window_view_is_general_light_and_moves_light_at_night(store):
     await svc.tool_take_photo(GUEST, GUEST, {"focus": "чучело совы"})
     await _drain(svc)
     window, closeup = link.generated()
-    # Вид из окна — свет общего вида (с окном и небом по фазе), ночью свет переносится.
     assert "in the window" in window["light"] and window["light_move"] is True
-    assert "light_move" not in closeup  # крупному плану перенос вредит
+    assert "light_move" not in closeup
 
 
 async def test_selfie_by_word_without_flag(store):
@@ -934,8 +859,6 @@ async def test_selfie_by_word_without_flag(store):
         assert gen["loras"] == [list(image_tools.ALFRED_LORA)]
         assert gen["description"].startswith(cabinet.SELFIE_SUBJECT_EN)
 
-
-# --- эмоциональное селфи к ответу (2026-10-05) ---
 
 def _mood(emotion="anger", intensity=3, action="slamming a book shut") -> str:
     return json.dumps({"emotion": emotion, "intensity": intensity, "action": action})
@@ -973,9 +896,7 @@ async def test_mood_selfie_carries_the_reply_as_caption_with_face_emphasized(sto
     assert face in gen["description"] and "slamming a book shut" in gen["description"]
     assert "candlelit" in gen["description"] and "сова" in gen["description"]
     assert "night" in gen["light"]
-    # Сверка зрением не включалась.
     assert "expect" not in gen and "keep_key" not in gen
-    # Подпись — сам ответ (html-экранированный), а не новая реплика LLM.
     (chat, _photo, caption) = notifier.photos[0]
     assert chat == GUEST
     assert caption == photo_text.ALFRED_PHOTO_PREFIX + "Это возмутительно, сэр &amp; всё такое."
@@ -1004,8 +925,8 @@ async def test_mood_selfie_about_him_uses_action_only_and_scene_mood(store):
     [
         (_mood("none", 3), 0.0),
         (_mood("anger", 1), 0.0),
-        (_mood("anger", 2), 0.3),  # шанс 0.25
-        (_mood("anger", 3), 0.6),  # шанс 0.6
+        (_mood("anger", 2), 0.3),
+        (_mood("anger", 3), 0.6),
         (_mood("rage", 3), 0.0),
         ("не json", 0.0),
         ("{}", 0.0),
@@ -1033,12 +954,9 @@ async def test_mood_selfie_cooldown_daily_limit_and_length_without_gpu(store):
     link.director_replies = [_mood()] * 10
     svc, notifier = await _mood_svc(store, link)
     assert await _selfie(svc) is not None
-    # Сразу же — кулдаун: классификатор даже не спрашиваем.
     asked = len(link.calls)
     assert await _selfie(svc) is None
     assert len(link.calls) == asked
-    # Через каждые 3 часа можно; всего — SELFIE_MOOD_DAILY в сутки (images
-    # пишутся по часам службы — двигаем их).
     start = datetime(2026, 9, 30, 21, 0, tzinfo=UTC)
     clock = {"now": start}
     svc._now = lambda: clock["now"]
@@ -1047,7 +965,6 @@ async def test_mood_selfie_cooldown_daily_limit_and_length_without_gpu(store):
         assert await _selfie(svc) is not None
     clock["now"] += timedelta(hours=3)
     assert await _selfie(svc) is None
-    # Слишком длинная реплика не влезает в подпись.
     clock["now"] += timedelta(days=2)
     asked = len(link.calls)
     assert await _selfie(svc, reply="а" * (cabinet.PHOTO_LINE_MAX + 1)) is None
@@ -1066,7 +983,6 @@ async def test_mood_selfie_generation_failure_is_silent_and_not_counted(store):
     svc, notifier = await _mood_svc(store, link)
     assert await _selfie(svc) is None
     assert notifier.photos == []
-    # Чат не залип «занятым»; неудача не съела кулдаун.
     assert GUEST not in svc._photo_busy
     assert await svc._mood_selfie_gated(GUEST, "Хорошо.")
 
