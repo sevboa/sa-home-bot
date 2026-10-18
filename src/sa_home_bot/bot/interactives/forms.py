@@ -45,6 +45,7 @@ from sa_home_bot.bot.interactives.keyboards import (
     swap_keyboard,
     toggle_keyboard,
 )
+from sa_home_bot.bot.interactives.llm_link import LLM_CALL_ERRORS
 from sa_home_bot.bot.interactives.registry import REGISTRY
 from sa_home_bot.bot.interactives.scene import TurnPlan
 from sa_home_bot.bot.service_link import ServiceUnavailableError
@@ -380,7 +381,7 @@ class FormsMixin(EngineCore):
                 dst=LLM_ADDRESS,
                 timeout=SET_SPEECH_TIMEOUT_S,
             )
-        except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
+        except LLM_CALL_ERRORS as exc:
             log.info("interactives: зеркало речи не обновлено сразу (chat=%s): %s", chat_id, exc)
 
     async def _speak(self, chat_id: int, directive: str, where: dict[str, Any]) -> None:

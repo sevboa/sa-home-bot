@@ -62,7 +62,6 @@ PHOTO_NEGATIVE_EN = "monochrome, grayscale"
 # 0.4 — лицо слабеет, 1.0 — всё тянет в крупный портрет и комната теряется.
 # 0.7 → 0.5 (ночная лаборатория 2026-10-09, 288 кадров): облик 93% против
 # 95%, «слишком тёмный» 40% против 56%; ракурсы от веса не зависят.
-ALFRED_LORA = ("alfred", 0.5)
 PORTRAIT_SUBJECT_EN = (
     "Main subject: Alfred, an elderly butler in a black tailcoat, waist-up, "
     "standing in his study and greeting the viewer with a slight polite bow."

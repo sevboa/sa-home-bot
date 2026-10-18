@@ -12,6 +12,7 @@ import pytest
 import pytest_asyncio
 from PIL import Image
 
+from sa_home_bot.bot import image_tools
 from sa_home_bot.bot.interactives import cabinet, photo_text, photos, radio, transylvania
 from sa_home_bot.bot.interactives.base import Run
 from sa_home_bot.bot.interactives.director import (
@@ -446,7 +447,7 @@ async def test_alfred_in_scene_frame(store):
         {"stage": 0, "effect": "лампа вспыхнула", "mood": "гниль", "photo": True, "alfred": "back"},
     )
     gen = link.generated()[-1]
-    assert gen["loras"] == [["rottech", 0.8], list(cabinet.ALFRED_LORA)]
+    assert gen["loras"] == [["rottech", 0.8], list(image_tools.ALFRED_LORA)]
     assert cabinet.SCENE_ALFRED_EN["back"] in gen["description"]
     params = json.loads((await store.image_by_id(1))["params"])
     assert params["alfred"] == "back"
@@ -809,7 +810,7 @@ async def test_greeting_portrait_draws_alfred_in_guests_study_with_light(store):
     assert not svc.start_greeting_portrait(GUEST, GUEST)
     await _drain(svc)
     (gen,) = link.generated()
-    assert gen["loras"] == [list(cabinet.ALFRED_LORA)]
+    assert gen["loras"] == [list(image_tools.ALFRED_LORA)]
     assert gen["description"].startswith(cabinet.PORTRAIT_SUBJECT_EN)
     # Свет — тот же, что у снимков кабинета (ночь, пасмурно); обстановка гостя.
     assert "candlelit" in gen["description"] and "треснувший портрет" in gen["description"]
@@ -853,7 +854,7 @@ async def test_selfie_puts_alfred_into_the_same_study_light_and_mood(store):
     assert reply == cabinet.TOOL_PHOTO_STARTED
     await _drain(svc)
     (gen,) = link.generated()
-    assert gen["mode"] == "free" and gen["loras"] == [list(cabinet.ALFRED_LORA)]
+    assert gen["mode"] == "free" and gen["loras"] == [list(image_tools.ALFRED_LORA)]
     assert gen["description"].startswith("Main subject: Alfred")
     assert "у окна с бокалом вина" in gen["description"]
     assert "night" in gen["light"]
@@ -871,7 +872,7 @@ async def test_selfie_puts_alfred_into_the_same_study_light_and_mood(store):
     await _drain(svc)
     gen = link.generated()[-1]
     assert gen["model"] == "revanim"
-    assert gen["loras"] == [list(cabinet.ALFRED_LORA), ["rottech", 0.8]]
+    assert gen["loras"] == [list(image_tools.ALFRED_LORA), ["rottech", 0.8]]
     assert gen["description"].startswith(cabinet.SELFIE_SUBJECT_EN)
 
 
@@ -930,7 +931,7 @@ async def test_selfie_by_word_without_flag(store):
     await svc.tool_take_photo(GUEST, GUEST, {"caption": "Селфи"})
     await _drain(svc)
     for gen in link.generated():
-        assert gen["loras"] == [list(cabinet.ALFRED_LORA)]
+        assert gen["loras"] == [list(image_tools.ALFRED_LORA)]
         assert gen["description"].startswith(cabinet.SELFIE_SUBJECT_EN)
 
 
@@ -965,7 +966,7 @@ async def test_mood_selfie_carries_the_reply_as_caption_with_face_emphasized(sto
     sent_id = await _selfie(svc, on_status=on_status)
     assert sent_id == 101
     (gen,) = link.generated()
-    assert gen["loras"] == [list(cabinet.ALFRED_LORA)] and gen["mode"] == "free"
+    assert gen["loras"] == [list(image_tools.ALFRED_LORA)] and gen["mode"] == "free"
     face = cabinet.SELFIE_EMOTION_FACE_EN["anger"]
     assert gen["emphasize"] == [face]
     assert gen["description"].startswith("Main subject: Alfred")
@@ -995,7 +996,7 @@ async def test_mood_selfie_about_him_uses_action_only_and_scene_mood(store):
     (gen,) = link.generated()
     assert gen["emphasize"] == ["pointing at the old radio on his desk"]
     assert gen["model"] == "revanim"
-    assert gen["loras"] == [list(cabinet.ALFRED_LORA), ["rottech", 0.8]]
+    assert gen["loras"] == [list(image_tools.ALFRED_LORA), ["rottech", 0.8]]
 
 
 @pytest.mark.parametrize(

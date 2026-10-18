@@ -65,7 +65,6 @@ from sa_home_bot.bot.interactives.underground import (
     step_summary,
     with_state,
 )
-from sa_home_bot.proto.addresses import LLM_ADDRESS
 
 log = logging.getLogger(__name__)
 
@@ -150,7 +149,6 @@ class UndergroundMixin(EngineCore):
         if link is not None:
             data = await ask_json(
                 link,
-                LLM_ADDRESS,
                 self._settings.llm.request_timeout_s,
                 chat_id=chat_id,
                 system=DESCRIBE_SYSTEM,

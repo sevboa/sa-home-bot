@@ -22,13 +22,11 @@ from typing import Any
 
 from sa_home_bot.bot.interactives import items as items_mod
 from sa_home_bot.bot.interactives.base import Run, Scenario
-from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
-from sa_home_bot.proto.messages import Address, ProtoError
+from sa_home_bot.bot.interactives.llm_link import ask_as_director
+from sa_home_bot.bot.service_link import ServiceLink
 
 log = logging.getLogger(__name__)
 
-ROLE_DIRECTOR = "director"
-ACTION_CHAT = "chat"
 
 EFFECT_MAX_CHARS = 600
 DIRECTIVE_MAX_CHARS = 600
@@ -91,7 +89,7 @@ def _clean(value: Any, limit: int) -> str | None:
     return text[:limit]
 
 
-def _json_object(raw: str) -> dict | None:
+def json_object(raw: str) -> dict | None:
     """Модель может обернуть JSON в ```-блок или дописать текст вокруг —
     берём первый {...}."""
     start, end = raw.find("{"), raw.rfind("}")
@@ -193,7 +191,7 @@ def parse_decision(
 ) -> DirectorDecision | None:
     """JSON Ведущего → решение. ``trait_keys`` — допустимые черты предмета
     сцены: прочее (придуманное Ведущим) отбрасывается."""
-    data = _json_object(raw)
+    data = json_object(raw)
     if data is None:
         return None
     stage = data.get("stage")
@@ -399,7 +397,6 @@ def _found_item_block(run: Run) -> tuple[str, str]:
 
 async def ask_director(
     node_link: ServiceLink,
-    dst: Address,
     timeout: float,
     scenario: Scenario,
     run: Run,
@@ -419,18 +416,16 @@ async def ask_director(
         need_features=need_features,
         room=room,
     )
-    args: dict[str, Any] = {
-        "messages": [{"role": "user", "content": content}],
-        "role": ROLE_DIRECTOR,
-        "system": scenario.director_prompt,
-        "chat_id": run.chat_id,
-    }
-    try:
-        result = await node_link.command(ACTION_CHAT, args, dst=dst, timeout=timeout)
-    except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
-        log.warning("interactives: Ведущий недоступен (chat=%s): %s", run.chat_id, exc)
+    raw = await ask_as_director(
+        node_link,
+        timeout,
+        chat_id=run.chat_id,
+        system=scenario.director_prompt,
+        content=content,
+        failure="Ведущий недоступен",
+    )
+    if raw is None:
         return None
-    raw = result.get("response", "") if isinstance(result, dict) else ""
     kind = items_mod.KINDS.get(scenario.item_kind or "")
     decision = parse_decision(raw, run.stage, tuple(kind.traits) if kind else ())
     if decision is None:
@@ -440,7 +435,6 @@ async def ask_director(
 
 async def ask_features(
     node_link: ServiceLink,
-    dst: Address,
     timeout: float,
     *,
     chat_id: int,
@@ -448,21 +442,15 @@ async def ask_features(
     outside: str,
     count: int,
 ) -> tuple[str, ...]:
-    """Первые особенности кабинета вне сцены. Сбой — пусто: снимок и без них
-    получится, особенности допишутся в следующий раз."""
-    args: dict[str, Any] = {
-        "messages": [{"role": "user", "content": build_features_input(place, outside, count)}],
-        "role": ROLE_DIRECTOR,
-        "system": FEATURES_SYSTEM,
-        "chat_id": chat_id,
-    }
-    try:
-        result = await node_link.command(ACTION_CHAT, args, dst=dst, timeout=timeout)
-    except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
-        log.warning("interactives: Ведущий недоступен для кабинета (chat=%s): %s", chat_id, exc)
-        return ()
-    raw = result.get("response", "") if isinstance(result, dict) else ""
-    data = _json_object(raw)
+    raw = await ask_as_director(
+        node_link,
+        timeout,
+        chat_id=chat_id,
+        system=FEATURES_SYSTEM,
+        content=build_features_input(place, outside, count),
+        failure="Ведущий недоступен для кабинета",
+    )
+    data = json_object(raw) if raw is not None else None
     if data is None:
         return ()
     return _str_list(data.get("cabinet_add"), count)
@@ -470,29 +458,23 @@ async def ask_features(
 
 async def ask_json(
     node_link: ServiceLink,
-    dst: Address,
     timeout: float,
     *,
     chat_id: int,
     system: str,
     content: str,
 ) -> dict | None:
-    """Разовый вопрос Ведущему вне сцены (Этап 59.4: описание нового места
-    катакомб прямо в ходе тула walk): роль director, один JSON-ответ. Сбой или
-    не-JSON — None, вызывающий подставляет запасной вариант."""
-    args: dict[str, Any] = {
-        "messages": [{"role": "user", "content": content}],
-        "role": ROLE_DIRECTOR,
-        "system": system,
-        "chat_id": chat_id,
-    }
-    try:
-        result = await node_link.command(ACTION_CHAT, args, dst=dst, timeout=timeout)
-    except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
-        log.warning("interactives: Ведущий недоступен для описания (chat=%s): %s", chat_id, exc)
+    raw = await ask_as_director(
+        node_link,
+        timeout,
+        chat_id=chat_id,
+        system=system,
+        content=content,
+        failure="Ведущий недоступен для описания",
+    )
+    if raw is None:
         return None
-    raw = result.get("response", "") if isinstance(result, dict) else ""
-    data = _json_object(raw)
+    data = json_object(raw)
     if data is None:
         log.warning(
             "interactives: Ведущий вернул не JSON для описания (chat=%s): %r", chat_id, raw[:300]
@@ -567,7 +549,7 @@ def _facts_list(value: Any, limit: int) -> tuple[str, ...]:
 def parse_act(raw: str, current_stage: int) -> ActDecision | None:
     """JSON Ведущего в режиме act → решение. Нет ``result`` — None (Альфред
     получит запасной исход кода)."""
-    data = _json_object(raw)
+    data = json_object(raw)
     if data is None:
         return None
     result = _clean(data.get("result"), ACT_RESULT_MAX)
@@ -650,7 +632,6 @@ def build_act_input(
 
 async def ask_act(
     node_link: ServiceLink,
-    dst: Address,
     timeout: float,
     scenario: Scenario,
     run: Run,
@@ -662,7 +643,6 @@ async def ask_act(
     finale_allowed: bool,
     outcome: str | None,
 ) -> ActDecision | None:
-    """Синхронный вопрос Ведущему внутри тула act. Сбой или не-JSON — None."""
     content = build_act_input(
         scenario,
         run,
@@ -673,18 +653,16 @@ async def ask_act(
         finale_allowed=finale_allowed,
         outcome=outcome,
     )
-    args: dict[str, Any] = {
-        "messages": [{"role": "user", "content": content}],
-        "role": ROLE_DIRECTOR,
-        "system": scenario.act_prompt,
-        "chat_id": run.chat_id,
-    }
-    try:
-        result = await node_link.command(ACTION_CHAT, args, dst=dst, timeout=timeout)
-    except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
-        log.warning("interactives: Ведущий недоступен для act (chat=%s): %s", run.chat_id, exc)
+    raw = await ask_as_director(
+        node_link,
+        timeout,
+        chat_id=run.chat_id,
+        system=scenario.act_prompt,
+        content=content,
+        failure="Ведущий недоступен для act",
+    )
+    if raw is None:
         return None
-    raw = result.get("response", "") if isinstance(result, dict) else ""
     decision = parse_act(raw, run.stage)
     if decision is None:
         log.warning(

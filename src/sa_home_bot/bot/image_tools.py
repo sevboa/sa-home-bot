@@ -23,17 +23,14 @@ from typing import Any
 
 from PIL import Image
 
-from sa_home_bot.bot.interactives import cabinet as cabinet_mod
-from sa_home_bot.bot.service_link import ServiceUnavailableError
-from sa_home_bot.proto.messages import Address, ProtoError
+from sa_home_bot.proto.addresses import LLM_ADDRESS, LLM_SERVICE
+from sa_home_bot.proto.errors import SERVICE_CALL_ERRORS
 
 log = logging.getLogger(__name__)
 
-# Литералы, не импорт из llm/service.py — тот же приём, что в bot/tools.py:
-# бот не тянет тяжёлую LLM-службу.
-LLM_NODE = "mycraft"
-LLM_SERVICE = "llm"
+__all__ = ["LLM_SERVICE"]
 ACTION_GENERATE_IMAGE = "generate_image"
+ALFRED_LORA = ("alfred", 0.5)
 
 # Сколько вариантов показывать модели, если однозначного совпадения нет.
 _CANDIDATES = 5
@@ -162,6 +159,50 @@ async def _send(ctx: Any, photo: bytes | str, caption: str) -> tuple[int, str] |
     )
 
 
+async def record_generated(
+    store: Any,
+    result: dict[str, Any],
+    *,
+    chat_id: int,
+    author: str | None,
+    prompt_ru: str,
+    fallback_prompt_en: str,
+    caption: str,
+    colors: int,
+    now: datetime,
+    **stored_options: Any,
+) -> tuple[bytes, int]:
+    png = base64.b64decode(result["png_b64"])
+    image_id = await store.add_image(
+        chat_id=chat_id,
+        author=author,
+        prompt_ru=prompt_ru,
+        prompt_en=str(result.get("prompt") or fallback_prompt_en),
+        caption=caption,
+        width=int(result["width"]),
+        height=int(result["height"]),
+        colors=colors,
+        png=png,
+        now=now,
+        **stored_options,
+    )
+    return png, image_id
+
+
+async def deliver_generated(
+    notifier: Any,
+    store: Any,
+    image_id: int,
+    chat_id: int,
+    photo: bytes,
+    **send_options: Any,
+) -> tuple[int, str] | None:
+    sent = await notifier.send_photo_ex(chat_id, photo, **send_options)
+    if sent is not None:
+        await store.set_image_sent(image_id, sent[1], sent[0])
+    return sent
+
+
 async def generate(ctx: Any, args: dict[str, Any], remember: Remember) -> str:
     # prompt_en — имя параметра до v0.117.0: модель может вспомнить его по
     # старым тул-вызовам в истории чата.
@@ -183,7 +224,7 @@ async def generate(ctx: Any, args: dict[str, Any], remember: Remember) -> str:
     }
     if args.get("alfred") is True or str(args.get("alfred")).lower() == "true":
         request["description"] = f"{ALFRED_IN_PICTURE_EN} {description}"
-        request["loras"] = [list(cabinet_mod.ALFRED_LORA)]
+        request["loras"] = [list(ALFRED_LORA)]
     cfg = ctx.settings.llm
     now = datetime.now(tz=UTC)
     if cfg.imagegen_daily_limit:
@@ -199,29 +240,34 @@ async def generate(ctx: Any, args: dict[str, Any], remember: Remember) -> str:
         result = await ctx.node_link.command(
             ACTION_GENERATE_IMAGE,
             request,
-            dst=Address(node=LLM_NODE, service=LLM_SERVICE),
+            dst=LLM_ADDRESS,
             timeout=cfg.imagegen_request_timeout_s,
         )
-    except (ServiceUnavailableError, ProtoError, TimeoutError) as exc:
+    except (*SERVICE_CALL_ERRORS, TimeoutError) as exc:
         return f"не получилось нарисовать: {exc}"
-    png = base64.b64decode(result["png_b64"])
-    image_id = await ctx.store.add_image(
+    png, image_id = await record_generated(
+        ctx.store,
+        result,
         chat_id=ctx.chat_id,
         author=ctx.author,
         prompt_ru=prompt_ru,
-        prompt_en=str(result.get("prompt") or request["description"]),
+        fallback_prompt_en=request["description"],
         caption=caption,
-        width=int(result["width"]),
-        height=int(result["height"]),
         colors=cfg.imagegen_colors,
-        png=png,
         now=now,
     )
-    sent = await _send(ctx, upscale_png(png, cfg.imagegen_display_px), caption)
+    sent = await deliver_generated(
+        ctx.notifier,
+        ctx.store,
+        image_id,
+        ctx.chat_id,
+        upscale_png(png, cfg.imagegen_display_px),
+        caption=caption,
+        message_thread_id=ctx.message_thread_id,
+        reply_to_message_id=ctx.trigger_message_id,
+    )
     if sent is None:
         return f"картинка #{image_id} нарисована, но в чат не ушла — Telegram не принял"
-    message_id, file_id = sent
-    await ctx.store.set_image_sent(image_id, file_id, message_id)
     who = ctx.author or "собеседника"
     await remember(f"Альфред нарисовал для {who} картинку #{image_id}: {caption} ({prompt_ru})")
     return (

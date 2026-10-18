@@ -29,7 +29,6 @@ from sa_home_bot.bot.interactives.scene import (
     finale_allowed,
     grow_item,
 )
-from sa_home_bot.proto.addresses import LLM_ADDRESS
 
 log = logging.getLogger(__name__)
 
@@ -345,7 +344,6 @@ class TurnsMixin(EngineCore):
             room = (cab.canon.of_ru, cab.canon.in_ru)
         return await ask_director(
             node_link,
-            LLM_ADDRESS,
             self._settings.llm.request_timeout_s,
             scenario,
             run,

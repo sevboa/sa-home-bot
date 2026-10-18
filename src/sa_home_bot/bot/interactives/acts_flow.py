@@ -25,7 +25,6 @@ from sa_home_bot.bot.interactives.director import ask_act, facts_of, update_fact
 from sa_home_bot.bot.interactives.places import Room
 from sa_home_bot.bot.interactives.registry import REGISTRY
 from sa_home_bot.bot.interactives.scene import finale_allowed, stage_target
-from sa_home_bot.proto.addresses import LLM_ADDRESS
 
 
 @dataclass
@@ -141,7 +140,6 @@ class ActsMixin(EngineCore):
             if link is not None and scenario.act_prompt:
                 decision = await ask_act(
                     link,
-                    LLM_ADDRESS,
                     self._settings.llm.request_timeout_s,
                     scenario,
                     run,

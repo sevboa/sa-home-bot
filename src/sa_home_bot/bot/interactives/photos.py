@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import html
 import json
 import logging
@@ -16,7 +15,7 @@ from sa_home_bot.bot.interactives import items as items_mod
 from sa_home_bot.bot.interactives import places, radio, underground
 from sa_home_bot.bot.interactives.cabinet import Cabinet
 from sa_home_bot.bot.interactives.core import EngineCore
-from sa_home_bot.bot.interactives.director import ACTION_CHAT, ask_features
+from sa_home_bot.bot.interactives.llm_link import LLM_CALL_ERRORS, ask_chat
 from sa_home_bot.bot.interactives.photo_text import (
     ALFRED_PHOTO_PREFIX,
     MOOD_PRESETS,
@@ -37,7 +36,7 @@ from sa_home_bot.bot.interactives.photo_text import (
 )
 from sa_home_bot.bot.interactives.places import Room
 from sa_home_bot.bot.interactives.transylvania import PHASE_NIGHT, Outside
-from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
+from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.llm.prompt import wrap_system_directive
 from sa_home_bot.proto.addresses import LLM_ADDRESS
 from sa_home_bot.proto.messages import Address, ProtoError
@@ -364,7 +363,7 @@ class PhotosMixin(EngineCore):
                 state = await node_link.command(
                     ACTION_CHAT_PROGRESS, {"request_id": request_id}, dst=dst, timeout=10
                 )
-            except (ServiceUnavailableError, ProtoError, TimeoutError, OSError):
+            except LLM_CALL_ERRORS:
                 continue
             text = PHOTO_PHASE_STATUS.get(str(state.get("partial") or ""))
             if text is not None and text != shown:
@@ -465,25 +464,14 @@ class PhotosMixin(EngineCore):
             now = self._now()
             outside = await self._transylvania.outside(now)
             cab = await cabinet_mod.load(self._store, user_id)
-            if not cab.features:
-                new = await ask_features(
-                    node_link,
-                    dst,
-                    cfg.request_timeout_s,
-                    chat_id=chat_id,
-                    place=cab.describe_ru(),
-                    outside=outside.ru(),
-                    count=cabinet_mod.FIRST_FEATURES,
-                )
-                if cab.add(list(new)):
-                    await cabinet_mod.save(self._store, cab)
+            await self._ensure_first_features(cab, chat_id, outside)
             description = portrait_description(cab, outside)
             portrait_request: dict[str, Any] = {
                 "description": description,
                 "mode": "free",
                 "chat_id": chat_id,
                 "negative_extra": cabinet_mod.PHOTO_NEGATIVE_EN,
-                "loras": [list(cabinet_mod.ALFRED_LORA)],
+                "loras": [list(image_tools.ALFRED_LORA)],
                 "light": outside.en(),
             }
             px = await self.photo_size(user_id)  # старый фотоаппарат (59.6)
@@ -495,17 +483,15 @@ class PhotosMixin(EngineCore):
                 dst=dst,
                 timeout=cfg.imagegen_request_timeout_s,
             )
-            png = base64.b64decode(result["png_b64"])
-            image_id = await self._store.add_image(
+            png, image_id = await image_tools.record_generated(
+                self._store,
+                result,
                 chat_id=chat_id,
                 author=None,
                 prompt_ru=f"{cabinet_mod.PORTRAIT_CAPTION}: {outside.ru()}",
-                prompt_en=str(result.get("prompt") or description),
+                fallback_prompt_en=description,
                 caption=cabinet_mod.PORTRAIT_CAPTION,
-                width=int(result["width"]),
-                height=int(result["height"]),
                 colors=cfg.imagegen_colors,
-                png=png,
                 now=now,
                 purpose=PORTRAIT_PURPOSE,
                 params=json.dumps(
@@ -518,13 +504,16 @@ class PhotosMixin(EngineCore):
                     ensure_ascii=False,
                 ),
             )
-            sent = await self._notifier.send_photo_ex(
+            sent = await image_tools.deliver_generated(
+                self._notifier,
+                self._store,
+                image_id,
                 chat_id,
                 image_tools.upscale_png(png, cfg.imagegen_display_px),
                 message_thread_id=message_thread_id,
                 reply_to_message_id=trigger_message_id,
             )
-        except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
+        except LLM_CALL_ERRORS as exc:
             log.warning(
                 "interactives: портрет к приветствию не нарисован (chat=%s): %s", chat_id, exc
             )
@@ -534,8 +523,6 @@ class PhotosMixin(EngineCore):
             return
         if sent is None:
             log.warning("interactives: портрет #%s не ушёл в чат %s", image_id, chat_id)
-            return
-        await self._store.set_image_sent(image_id, sent[1], sent[0])
 
     async def _photo_lost(
         self, chat_id: int, message_thread_id: int | None, reply_to: int | None
@@ -615,18 +602,7 @@ class PhotosMixin(EngineCore):
         cab = frame.room if frame is not None else await self._room(chat_id, user_id)
         if is_general_view(focus, cab):
             focus = ""  # Ведущий тоже просит «общий план кабинета»
-        if not cab.features and not isinstance(cab, Room):
-            new = await ask_features(
-                node_link,
-                dst,
-                cfg.request_timeout_s,
-                chat_id=chat_id,
-                place=cab.describe_ru(),
-                outside=outside.ru(),
-                count=cabinet_mod.FIRST_FEATURES,
-            )
-            if cab.add(list(new)):
-                await cabinet_mod.save(self._store, cab)
+        await self._ensure_first_features(cab, chat_id, outside)
         # Себя — без вставки предмета пикселями: место в кадре занимает Альфред.
         # Радио стоит на столе кабинета — в других комнатах его в кадре нет.
         shot = (
@@ -675,7 +651,7 @@ class PhotosMixin(EngineCore):
         if emphasize:
             request["emphasize"] = emphasize
             log.info("interactives: пересъёмка, упор на %s (chat=%s)", emphasize, chat_id)
-        loras: list[list[Any]] = [list(cabinet_mod.ALFRED_LORA)] if selfie else []
+        loras: list[list[Any]] = [list(image_tools.ALFRED_LORA)] if selfie else []
         preset = MOOD_PRESETS.get(mood or "")
         if preset is not None:
             model, lora, weight = preset
@@ -683,7 +659,7 @@ class PhotosMixin(EngineCore):
             loras.append([lora, weight])
         if alfred in cabinet_mod.SCENE_ALFRED_EN and not selfie:
             # Альфред в кадре события — его LoRA облика рядом с LoRA настроения.
-            loras.append(list(cabinet_mod.ALFRED_LORA))
+            loras.append(list(image_tools.ALFRED_LORA))
         if loras:
             request["loras"] = loras
         # Свет вшивает служба вторым тегом: в хвосте промпта «dark window at
@@ -714,7 +690,7 @@ class PhotosMixin(EngineCore):
                 dst=dst,
                 timeout=cfg.imagegen_request_timeout_s,
             )
-        except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
+        except LLM_CALL_ERRORS as exc:
             log.warning("interactives: снимок не нарисован (chat=%s): %s", chat_id, exc)
             if shot is not None and isinstance(exc, ProtoError):
                 # Вырезки могло не оказаться на ноде (сменили диск, почистили
@@ -723,21 +699,19 @@ class PhotosMixin(EngineCore):
             return False
         finally:
             phases.cancel()
-        png = base64.b64decode(result["png_b64"])
         inspection = result.get("inspect") if isinstance(result.get("inspect"), dict) else None
         seen = str(inspection.get("description") or "") if inspection else ""
         missing = [m for m in (inspection or {}).get("missing") or [] if isinstance(m, str)]
         state = photo_state_key(cab, outside, shot, px)
-        image_id = await self._store.add_image(
+        png, image_id = await image_tools.record_generated(
+            self._store,
+            result,
             chat_id=chat_id,
             author=None,
             prompt_ru=f"{caption}: {focus or cab.describe_ru()}",
-            prompt_en=str(result.get("prompt") or description),
+            fallback_prompt_en=description,
             caption=caption,
-            width=int(result["width"]),
-            height=int(result["height"]),
             colors=cfg.imagegen_colors,
-            png=png,
             now=self._now(),
             purpose=PHOTO_PURPOSE,
             params=json.dumps(
@@ -782,7 +756,10 @@ class PhotosMixin(EngineCore):
                     misses,
                 ),
             )
-        sent = await self._notifier.send_photo_ex(
+        sent = await image_tools.deliver_generated(
+            self._notifier,
+            self._store,
+            image_id,
             chat_id,
             image_tools.upscale_png(png, cfg.imagegen_display_px),
             caption=ALFRED_PHOTO_PREFIX + html.escape(line) if line else caption,
@@ -792,7 +769,6 @@ class PhotosMixin(EngineCore):
         if sent is None:
             log.warning("interactives: снимок #%s не ушёл в чат %s", image_id, chat_id)
             return False
-        await self._store.set_image_sent(image_id, sent[1], sent[0])
         if frame is not None:
             await self.remember_frame(user_id, frame, image_id, sent[1])
         if line and dialogue_id is not None:
@@ -834,15 +810,11 @@ class PhotosMixin(EngineCore):
             "user_id": user_id,
             "speech_clear": await self.speech_clear(user_id),
         }
-        try:
-            result = await node_link.command(
-                ACTION_CHAT,
-                args,
-                dst=LLM_ADDRESS,
-                timeout=self._settings.llm.request_timeout_s,
-            )
-        except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
-            log.warning("interactives: подпись к снимку не вышла (chat=%s): %s", chat_id, exc)
-            return ""
-        line = str(result.get("response") or "").strip() if isinstance(result, dict) else ""
+        raw = await ask_chat(
+            node_link,
+            self._settings.llm.request_timeout_s,
+            args,
+            failure="подпись к снимку не вышла",
+        )
+        line = (raw or "").strip()
         return line[: cabinet_mod.PHOTO_LINE_MAX]

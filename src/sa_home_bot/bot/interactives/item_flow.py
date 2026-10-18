@@ -31,11 +31,10 @@ from sa_home_bot.bot.interactives.keyboards import (
     item_caption,
     item_keyboard,
 )
+from sa_home_bot.bot.interactives.llm_link import LLM_CALL_ERRORS
 from sa_home_bot.bot.interactives.photo_text import ITEM_PENDING_TAG, _image_params, _ItemShot
 from sa_home_bot.bot.interactives.registry import REGISTRY
-from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.proto.addresses import LLM_ADDRESS
-from sa_home_bot.proto.messages import ProtoError
 
 log = logging.getLogger(__name__)
 
@@ -84,7 +83,7 @@ class ItemFlowMixin(EngineCore):
                 # 2026-10-02 портрет пришёл через 193 с, бот бросил его на 180.
                 timeout=self._settings.llm.imagegen_request_timeout_s * 2,
             )
-        except (ServiceUnavailableError, ProtoError, TimeoutError, OSError) as exc:
+        except LLM_CALL_ERRORS as exc:
             log.warning("interactives: портрет %s не нарисован (chat=%s): %s", key, chat_id, exc)
             return None
         if not isinstance(result, dict) or not result.get("png_b64"):

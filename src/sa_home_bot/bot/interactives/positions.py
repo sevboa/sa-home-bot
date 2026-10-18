@@ -5,8 +5,10 @@ from sa_home_bot.bot.interactives import places, underground
 from sa_home_bot.bot.interactives.base import STATUS_ACTIVE, STATUS_IDLE, Run, Scenario, iso
 from sa_home_bot.bot.interactives.cabinet import Cabinet
 from sa_home_bot.bot.interactives.core import EngineCore
+from sa_home_bot.bot.interactives.director import ask_features
 from sa_home_bot.bot.interactives.places import Room
 from sa_home_bot.bot.interactives.scene import TurnPlan
+from sa_home_bot.bot.interactives.transylvania import Outside
 
 
 class PositionsMixin(EngineCore):
@@ -178,3 +180,20 @@ class PositionsMixin(EngineCore):
             return
         tid = places.put_temp_room(run.world, spec)
         await self._move_to(run.user_id, tid)
+
+    async def _ensure_first_features(self, cab: Cabinet, chat_id: int, outside: Outside) -> None:
+        if cab.features or isinstance(cab, Room):
+            return
+        node_link = self._get_node_link()
+        if node_link is None:
+            return
+        new = await ask_features(
+            node_link,
+            self._settings.llm.request_timeout_s,
+            chat_id=chat_id,
+            place=cab.describe_ru(),
+            outside=outside.ru(),
+            count=cabinet_mod.FIRST_FEATURES,
+        )
+        if cab.add(list(new)):
+            await cabinet_mod.save(self._store, cab)

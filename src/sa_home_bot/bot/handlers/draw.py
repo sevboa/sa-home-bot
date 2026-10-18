@@ -25,19 +25,18 @@ from aiogram.types import (
 )
 from PIL import Image
 
-from sa_home_bot.bot import commands, draw_debug
+from sa_home_bot.bot import commands, draw_debug, image_tools
 from sa_home_bot.bot.away import KIND_SUMMON, AwayService
 from sa_home_bot.bot.draw_debug import DrawCommand, DrawRequest, DrawSyntaxError
 from sa_home_bot.bot.image_tools import (
     ACTION_GENERATE_IMAGE,
-    LLM_NODE,
-    LLM_SERVICE,
     upscale_png,
 )
-from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
+from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
-from sa_home_bot.proto.messages import Address, ProtoError
+from sa_home_bot.proto.addresses import LLM_ADDRESS
+from sa_home_bot.proto.errors import SERVICE_CALL_ERRORS
 from sa_home_bot.subscriptions.models import Subscription
 
 log = logging.getLogger(__name__)
@@ -171,25 +170,23 @@ async def cmd_draw(
         result = await node_link.command(
             ACTION_GENERATE_IMAGE,
             args,
-            dst=Address(node=LLM_NODE, service=LLM_SERVICE),
+            dst=LLM_ADDRESS,
             timeout=max(cfg.imagegen_request_timeout_s, _MIN_TIMEOUT_S),
         )
-    except (ServiceUnavailableError, ProtoError, TimeoutError) as exc:
+    except (*SERVICE_CALL_ERRORS, TimeoutError) as exc:
         await waiting.edit_text(f"⚠️ не нарисовалось: {exc}")
         return
 
-    png = base64.b64decode(result["png_b64"])
     author = message.from_user.full_name if message.from_user else None
-    image_id = await store.add_image(
+    png, image_id = await image_tools.record_generated(
+        store,
+        result,
         chat_id=message.chat.id,
         author=author,
         prompt_ru=request.description,
-        prompt_en=str(result.get("prompt") or request.description),
+        fallback_prompt_en=request.description,
         caption=f"отладка {request.mode}",
-        width=int(result["width"]),
-        height=int(result["height"]),
         colors=int(result.get("colors") or 0),
-        png=png,
         now=datetime.now(tz=UTC),
         purpose="debug",
         params=json.dumps(
