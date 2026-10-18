@@ -20,6 +20,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from sa_home_bot.proto.addresses import NODE_SERVICE
 from sa_home_bot.proto.client import EventCallback, ProtoClient
 from sa_home_bot.proto.endpoints import (
     Endpoint,
@@ -86,7 +87,6 @@ LOCAL_HEARTBEAT_TIMEOUT_S = 20.0
 NODE_INCARNATION = uuid.uuid4().hex
 
 # Служба самого сервиса ноды: запросы к ней (и без dst) обрабатываются локально.
-NODE_SERVICE = "node"
 
 
 def _parse_all(values: Sequence[str | Path | Endpoint]) -> list[Endpoint]:

@@ -40,6 +40,7 @@ from sa_home_bot.node.instances import (
 )
 from sa_home_bot.node.peers import NodeRouter
 from sa_home_bot.node.supervisor import EventEmitter, Supervisor
+from sa_home_bot.proto.addresses import NODE_SERVICE
 from sa_home_bot.proto.messages import (
     MSG_COMMAND,
     MSG_GET_STATE,
@@ -48,6 +49,7 @@ from sa_home_bot.proto.messages import (
     ProtoError,
     make_request,
 )
+from sa_home_bot.utils.lifespan import cancel_task
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +61,6 @@ ACTION_GET_INSTANCE_CONFIG = "get_instance_config"
 POLL_INTERVAL_S = 30.0
 PEER_TIMEOUT_S = 10.0
 
-NODE_SERVICE = "node"
 
 
 def _encode_package(data: bytes) -> str:
@@ -310,11 +311,8 @@ class ConfigReplicator:
         self._task = asyncio.create_task(self._run(), name="config-replicator")
 
     async def stop(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
-            self._task = None
+        await cancel_task(self._task)
+        self._task = None
 
     async def _run(self) -> None:
         while True:

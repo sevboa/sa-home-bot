@@ -55,8 +55,7 @@ class ProtoEventDispatcher:
     async def dispatch_alert(self, event: Event) -> DispatchResult:
         return await self._broadcast(event.type, event_payload(event))
 
-    async def dispatch_clear(self, event: Event) -> DispatchResult:
-        return await self._broadcast(event.type, event_payload(event))
+    dispatch_clear = dispatch_alert
 
     async def dispatch_smart(self, change: SmartChange) -> DispatchResult:
         return await self._broadcast(change.event_type, smart_change_payload(change))
@@ -64,8 +63,7 @@ class ProtoEventDispatcher:
     async def dispatch_host_alert(self, event: HostEvent) -> DispatchResult:
         return await self._broadcast(event.type, host_event_payload(event))
 
-    async def dispatch_host_clear(self, event: HostEvent) -> DispatchResult:
-        return await self._broadcast(event.type, host_event_payload(event))
+    dispatch_host_clear = dispatch_host_alert
 
     async def _broadcast(self, event_type: str, data: dict) -> DispatchResult:
         delivered = await self._server.broadcast_event(event_type, data)

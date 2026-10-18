@@ -20,6 +20,7 @@ from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.wake_state import cached as cached_wake_info
 from sa_home_bot.bot.wake_state import remember as remember_wake_info
 from sa_home_bot.db.store import Store
+from sa_home_bot.proto.addresses import MONITOR_SERVICE, NODE_SERVICE
 from sa_home_bot.proto.messages import ERR_UNKNOWN_ACTION, Address, ProtoError
 
 log = logging.getLogger(__name__)
@@ -85,8 +86,6 @@ PHASE_WARMING = "warming"  # служба отвечает, но себя счи
 # Имена служб, к которым ходит обзорный сбор. Литералами, а не импортом из
 # bot/node_view.py и bot/status_view.py — те тянут aiogram, чего этот модуль
 # сознательно избегает (см. докстринг).
-NODE_SERVICE = "node"
-MONITOR_SERVICE = "monitor"
 
 
 @dataclass

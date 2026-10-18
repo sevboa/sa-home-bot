@@ -44,6 +44,7 @@ from sa_home_bot.proto.endpoints import (
     parse_endpoint,
 )
 from sa_home_bot.proto.messages import ProtoError
+from sa_home_bot.utils.lifespan import cancel_task
 
 log = logging.getLogger(__name__)
 
@@ -261,11 +262,8 @@ class SwarmDiscovery:
         log.info("discovery: маячок роя на UDP :%s", self._port)
 
     async def stop(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
-            self._task = None
+        await cancel_task(self._task)
+        self._task = None
         for job in list(self._jobs):
             job.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):

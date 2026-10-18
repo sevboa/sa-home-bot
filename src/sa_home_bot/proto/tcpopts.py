@@ -33,7 +33,7 @@ TCP_USER_TIMEOUT_S = 30
 # Windows-аналог TCP_USER_TIMEOUT: TCP_MAXRT (в секундах) — той же природы
 # потолок на ретрансмиссии. В socket-модуле константы нет, номер опции из
 # заголовков Winsock (mstcpip.h).
-_WIN_TCP_MAXRT = 5
+WINDOWS_TCP_MAXRT_S = 5
 
 
 def enable_tcp_keepalive(sock: socket.socket) -> None:
@@ -51,7 +51,7 @@ def enable_tcp_keepalive(sock: socket.socket) -> None:
                 (1, TCP_KEEPALIVE_IDLE_S * 1000, TCP_KEEPALIVE_INTERVAL_S * 1000),
             )
         with contextlib.suppress(OSError):
-            sock.setsockopt(socket.IPPROTO_TCP, _WIN_TCP_MAXRT, TCP_USER_TIMEOUT_S)
+            sock.setsockopt(socket.IPPROTO_TCP, WINDOWS_TCP_MAXRT_S, TCP_USER_TIMEOUT_S)
     else:
         # TCP_USER_TIMEOUT — в миллисекундах, в отличие от keepalive-опций.
         user_timeout_opt = getattr(socket, "TCP_USER_TIMEOUT", None)

@@ -41,8 +41,10 @@ from sa_home_bot.node.assignments import ROLE_ACTIVE, Assignment
 from sa_home_bot.node.kind import traits_for
 from sa_home_bot.node.peers import NodeRouter
 from sa_home_bot.node.supervisor import RUNNING, EventEmitter, Supervisor
+from sa_home_bot.proto.addresses import NODE_SERVICE
 from sa_home_bot.proto.messages import MSG_GET_STATE, Address, ProtoError, make_request
 from sa_home_bot.services import registry
+from sa_home_bot.utils.lifespan import cancel_task
 
 log = logging.getLogger(__name__)
 
@@ -82,7 +84,6 @@ STUCK_WARN_S = 600.0
 EVENT_SINGLETON_ACTIVATED = "singleton_activated"
 EVENT_SINGLETON_YIELDED = "singleton_yielded"
 
-NODE_SERVICE = "node"
 
 _ROLE_RANK = {ROLE_ACTIVE: 1}
 
@@ -423,11 +424,8 @@ class LeaseManager:
         self._task = asyncio.create_task(self._run(), name="lease-manager")
 
     async def stop(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
-            self._task = None
+        await cancel_task(self._task)
+        self._task = None
 
     async def _run(self) -> None:
         while True:
