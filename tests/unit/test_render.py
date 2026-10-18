@@ -90,8 +90,8 @@ def _disks():
 
 def test_render_status_full_lists_all_components():
     text = render_status_full(_states())
-    assert "перегрев" in text.lower()  # sdb в ALERTING
-    assert text.count("\n") >= 3  # заголовок + строки компонентов
+    assert "перегрев" in text.lower()
+    assert text.count("\n") >= 3
 
 
 def test_render_status_full_empty():
@@ -124,19 +124,17 @@ def test_render_status_summary_has_uptime_temps_and_outage():
         disk_warn_c=55.0,
         disk_crit_c=65.0,
     )
-    assert "2026-06-22" in text  # дата отчёта, без слова "Сводка"
+    assert "2026-06-22" in text
     assert "uptime: 1 h" in text
     assert "CPU: 42.0°C" in text
-    # GPU идёт между CPU и дисками.
     cpu_pos = text.index("CPU: 42.0°C")
     gpu_pos = text.index("GPU Tesla V100-SXM2-16GB: 41.0°C")
     disk_pos = text.index("HDD ST9250")
     assert cpu_pos < gpu_pos < disk_pos
-    assert "⚠️ HDD ST9250" in text and "✅ HDD Hitachi" in text  # иконка + модель
-    # eMMC — без иконки здоровья вовсе (SMART у неё физически нет), однострочно.
+    assert "⚠️ HDD ST9250" in text and "✅ HDD Hitachi" in text
     assert "\neMMC:" in text and "❔ eMMC" not in text
-    assert "31°C" in text  # температура HDD1
-    assert "108 из 245 ГБ" in text  # занятое место (было — свободное)
+    assert "31°C" in text
+    assert "108 из 245 ГБ" in text
     assert "last off:" in text
 
 
@@ -148,14 +146,11 @@ def test_render_status_summary_no_data():
         disk_warn_c=55.0, disk_crit_c=65.0,
     )
     assert "2026-06-22" in text
-    assert "uptime:" not in text  # uptime None — строку не добавляем
-    assert "HDD" not in text  # дисков нет — секцию не показываем
+    assert "uptime:" not in text
+    assert "HDD" not in text
 
 
 def test_disk_temp_mood_matches_configured_alert_thresholds():
-    # «Настроение» температуры — та же шкала warn_c/crit_c, что и у реальных
-    # алертов (не выдуманные отдельно числа): 48°C ниже warn_c=55 — норма,
-    # но выше warn_c=45 — уже «жарко». Иконка не должна противоречить алерту.
     from sa_home_bot.domain.models import DISK_OK, DiskSummary
     from sa_home_bot.domain.render import render_disk_line
 
@@ -178,10 +173,8 @@ def test_disk_line_question_mark_only_for_smart_capable():
     from sa_home_bot.domain.models import DiskSummary
     from sa_home_bot.domain.render import render_disk_line
 
-    # SMART-способный диск без данных (нет прав/программы) — ❔.
     no_smart = DiskSummary("NVMe", None, None, 1, 2, "SAMSUNG 970", kind="nvme")
     assert render_disk_line(no_smart, warn_c=55.0, crit_c=65.0).startswith("❔")
-    # У eMMC SMART физически нет — без иконки вовсе.
     emmc = DiskSummary("eMMC", None, None, 1, 2, None, kind="emmc")
     line = render_disk_line(emmc, warn_c=55.0, crit_c=65.0)
     assert line.startswith("eMMC:") and "❔" not in line
@@ -197,9 +190,6 @@ def test_render_stats_counts_and_runs():
 
 def test_render_stats_empty():
     assert "не было" in render_stats({}, [])
-
-
-# --- host-метрики VPS (этап 38) ---
 
 
 def _host_state(metric, value, unit, status=OK, since=None):
@@ -281,8 +271,8 @@ def test_render_host_block_conntrack_always_net_and_stalls_only_when_alerting():
             _host_state("kernel_stall_events", 0.0, "/скан"),
         ]
     )
-    assert "conntrack заполнен: <b>12%</b>" in calm  # постоянно в карточке
-    assert "NIC" not in calm  # нулевой net_err_rate не шумит
+    assert "conntrack заполнен: <b>12%</b>" in calm
+    assert "NIC" not in calm
     assert "стойла ядра" not in calm
 
     hot = render_host_block(

@@ -1,8 +1,3 @@
-"""Store: таблица картинок /ai (Этап 48) — images + FTS5 images_fts.
-
-Главное: поиск ловит русские окончания («дракона» → «дракон») и картинки
-одного чата не видны из другого — ни поиском, ни по номеру."""
-
 from __future__ import annotations
 
 from datetime import timedelta
@@ -59,13 +54,13 @@ async def test_set_image_sent_stores_file_id_and_keeps_message_id_on_none(store)
     await store.set_image_sent(image_id, "file-2", None)
     image = await store.get_image(CHAT, image_id)
     assert image["telegram_file_id"] == "file-2"
-    assert image["message_id"] == 55  # COALESCE: None не затирает прежний
+    assert image["message_id"] == 55
 
 
 async def test_search_catches_russian_word_endings(store):
     dragon = await _add(store, caption="Красный дракон", prompt_ru="нарисуй дракон над замком",
                         prompt_en="a red dragon")
-    await _add(store)  # кот — не должен найтись по дракону
+    await _add(store)
     for query in ("дракона", "драконом", "покажи дракона ещё раз"):
         found = await store.search_images(CHAT, query)
         assert [r["id"] for r in found] == [dragon], query
@@ -97,7 +92,6 @@ async def test_search_ignores_short_and_punctuation_only_queries(store):
 
 async def test_search_query_with_fts_syntax_does_not_crash(store):
     await _add(store)
-    # кавычки/звёздочки/NEAR/OR — операторы FTS5; \w+ их вырезает
     found = await store.search_images(CHAT, 'кота" OR * NEAR( -"')
     assert len(found) == 1
 
@@ -119,9 +113,6 @@ async def test_count_images_since_counts_only_window_and_chat(store):
     assert await store.count_images_since(OTHER_CHAT, BASE_TIME - timedelta(days=1)) == 1
 
 
-# --- Этап 49: отладочный /draw — purpose='debug'/'ref' не видны разговору ---
-
-
 async def _add_debug(store: Store, purpose: str = "debug") -> int:
     return await store.add_image(
         chat_id=CHAT, author="Сева", prompt_ru="рыжий кот", prompt_en="a ginger cat",
@@ -137,7 +128,6 @@ async def test_debug_images_hidden_from_chat_lookups(store):
     assert await store.search_images(CHAT, "кот") == []
     assert await store.recent_images(CHAT) == []
     assert await store.count_images_since(CHAT, BASE_TIME - timedelta(days=1)) == 0
-    # а сам /draw видит любую — по номеру и по сообщению
     assert (await store.image_by_id(ref_id))["purpose"] == "ref"
     await store.set_image_sent(debug_id, "file-1", 77)
     assert (await store.image_by_message(CHAT, 77))["id"] == debug_id

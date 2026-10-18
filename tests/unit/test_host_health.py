@@ -1,5 +1,3 @@
-"""domain/host.py: полосы порогов по направлению + reconcile с гистерезисом."""
-
 from datetime import UTC, datetime, timedelta
 
 from sa_home_bot.domain.host import (
@@ -15,16 +13,16 @@ BASE = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
 
 
 def test_band_direction_above_steal():
-    spec = METRICS["steal_pct"]  # warn 10, hysteresis 3
+    spec = METRICS["steal_pct"]
     assert spec.band(12.0) == BAND_OVER
     assert spec.band(6.0) == BAND_UNDER
     assert spec.band(8.5) == BAND_MID
 
 
 def test_band_direction_below_mem_available():
-    spec = METRICS["mem_available_pct"]  # warn 15, hysteresis 4, DIR_BELOW
-    assert spec.band(10.0) == BAND_OVER  # мало памяти — тревога
-    assert spec.band(20.0) == BAND_UNDER  # памяти снова много — норма
+    spec = METRICS["mem_available_pct"]
+    assert spec.band(10.0) == BAND_OVER
+    assert spec.band(20.0) == BAND_UNDER
     assert spec.band(17.0) == BAND_MID
 
 

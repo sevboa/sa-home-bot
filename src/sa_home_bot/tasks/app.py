@@ -1,11 +1,3 @@
-"""Сборка и жизненный цикл службы tasks (отдельный процесс, обычно на той
-же ноде, что бот — см. tasks/protocol.py::NODE_ID).
-
-Как llm/app.py — минимальный proto-сервер (входящие create от кого угодно
-в рое) плюс свой ServiceLink-клиент к локальной ноде (исходящие команды к
-dst задач — llm.chat, WoL и т.п., см. tasks/service.py) и два фоновых
-цикла (прогрев заранее, срабатывание по due_at)."""
-
 from __future__ import annotations
 
 import asyncio
@@ -36,15 +28,10 @@ async def run_tasks(settings: Settings) -> None:
     )
     await node_link.start()
 
-    # server создаётся после service (тот же приём, что node/app.py::run_node
-    # и llm/app.py::run_llm) — emit замыкается на переменную server, реально
-    # дёргается уже после server.start().
     emitter = DeferredEmitter()
     service = TasksService(settings, store, node_link, emit=emitter)
     server = ProtoServer(settings.tasks.socket, service, token=settings.swarm.token)
     emitter.bind(server)
-    # Обработчики сигналов — до start(): он ждёт появления своего адреса
-    # (см. proto/server.py), и всё это время остановка иначе не обрабатывалась бы.
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
     await server.start()

@@ -1,5 +1,3 @@
-"""Динамический снапшот VPN-БД (39.0.8(c)): дамп, seal, доставка напарнику, хранение."""
-
 from __future__ import annotations
 
 import asyncio
@@ -90,9 +88,6 @@ def _source(settings, db, clock=None, notify=None):
     )
 
 
-# --- дамп -> seal -> open ---------------------------------------------------------
-
-
 async def test_roundtrip_dump_seal_open(db, tmp_path):
     await _fill(db)
     snap = await _source(_settings(tmp_path), db).current()
@@ -104,7 +99,6 @@ async def test_roundtrip_dump_seal_open(db, tmp_path):
     assert peers["columns"][:3] == ["id", "chat_id", "device_label"]
     assert [r[peers["columns"].index("public_key")] for r in peers["rows"]] == ["pub0", "pub1"]
     assert doc["tables"]["vpn_peer_usage"]["rows"] == [[1, "2026-10", 12345]]
-    # нужные для восстановления таблицы на месте, оперативные — нет
     assert set(doc["tables"]) == set(SNAPSHOT_TABLES)
     assert "vpn_check_states" not in doc["tables"] and "vpn_apk" not in doc["tables"]
     assert snap.meta["rows"]["vpn_peers"] == 2 and snap.meta["rows"]["vpn_peers_active"] == 2
@@ -124,13 +118,13 @@ async def test_hash_stable_and_rebuild_only_on_change(db, tmp_path):
     clock = Clock()
     src = _source(_settings(tmp_path, snapshot_interval_s=600), db, clock)
     first = await src.current()
-    clock.t += 700  # интервал истёк, БД та же
+    clock.t += 700
     second = await src.current()
     assert second.meta["hash"] == first.meta["hash"]
     assert second.blob == first.blob and second.meta["rev"] == first.meta["rev"]
     await db.conn.execute("UPDATE vpn_peers SET status = 'revoked' WHERE public_key = 'pub0'")
     await db.conn.commit()
-    clock.t += 10  # интервал не истёк — отдаём прежний
+    clock.t += 10
     assert (await src.current()).meta["hash"] == first.meta["hash"]
     clock.t += 700
     third = await src.current()
@@ -146,9 +140,6 @@ async def test_get_unchanged_and_full(db, tmp_path):
     assert await src.handle_get({"have_hash": full["hash"]}) == {
         "unchanged": True, "hash": full["hash"]
     }
-
-
-# --- приёмник ----------------------------------------------------------------------
 
 
 def _receiver(settings, source, tmp_path, calls=None):
@@ -172,7 +163,7 @@ async def test_receiver_pulls_stores_and_skips_unchanged(db, tmp_path):
     assert open_snapshot(PRIV, stored.blob)["tables"]["vpn_peers"]["rows"]
     path = store.snapshots_dir("jeeves") / "latest.sealed"
     assert oct(path.stat().st_mode & 0o777) == "0o600"
-    assert await rcv.pull_once() is False  # хеш тот же
+    assert await rcv.pull_once() is False
     assert store.snapshot_history("jeeves") == []
 
 
@@ -194,7 +185,6 @@ async def test_receiver_history_is_capped(db, tmp_path):
 async def test_receiver_rejects_foreign_source(db, tmp_path):
     await _fill(db)
     src = _source(_settings(tmp_path), db)
-    # приёмник ждёт «mycraft», а блоб от jeeves
     rcv, store = _receiver(_settings(tmp_path, node="wooster", partner="mycraft"), src, tmp_path)
     with pytest.raises(SnapshotError):
         await rcv.pull_once()
@@ -208,11 +198,9 @@ async def test_empty_snapshot_does_not_displace_last_nonempty(db, tmp_path):
     rcv, store = _receiver(_settings(tmp_path, node="wooster", partner="jeeves"), src, tmp_path)
     await rcv.pull_once()
     good_hash = store.load_snapshot("jeeves").meta["hash"]
-    # «пересобранная нода»: БД пуста
     for table in ("vpn_peers", "vpn_chat_access", "vpn_peer_usage", "vpn_quota_grants"):
         await db.conn.execute(f"DELETE FROM {table}")
     await db.conn.commit()
-    # много пустых версий подряд — больше глубины истории
     for i in range(SNAPSHOT_HISTORY_KEEP + 3):
         await db.conn.execute("DELETE FROM vpn_counters")
         await db.conn.execute(
@@ -222,13 +210,10 @@ async def test_empty_snapshot_does_not_displace_last_nonempty(db, tmp_path):
         clock.t += 700
         await rcv.pull_once()
     latest = store.load_snapshot("jeeves")
-    assert latest.meta["empty"] is True  # пустой принимаем — это правда о ноде
+    assert latest.meta["empty"] is True
     keep = store.load_last_nonempty("jeeves")
     assert keep.meta["hash"] == good_hash and keep.meta["empty"] is False
     assert open_snapshot(PRIV, keep.blob)["tables"]["vpn_peers"]["rows"]
-
-
-# --- подключение ---------------------------------------------------------------------
 
 
 async def test_disabled_without_partner_or_key(db, tmp_path):
@@ -239,7 +224,6 @@ async def test_disabled_without_partner_or_key(db, tmp_path):
     no_key = build_backup(_settings(tmp_path, pub=False), lambda: db.conn, "jeeves", ask)
     assert no_key is not None and no_key.source is None and no_key.receiver is not None
     ids = [s.id for s in no_key.action_specs()]
-    # отдавать снапшот нечего — get не объявлен; выдача копий напарника (serve) — есть
     assert ids == [ACTION_SNAPSHOT_POKE, "backup_store_list", "backup_store_get"]
     full = build_backup(_settings(tmp_path), lambda: db.conn, "jeeves", ask)
     assert [s.id for s in full.action_specs()][:2] == [ACTION_GET_SNAPSHOT, ACTION_SNAPSHOT_POKE]
@@ -268,7 +252,7 @@ async def test_poke_wakes_receiver(db, tmp_path):
     await backup.start()
     try:
         await asyncio.sleep(0.05)
-        assert calls == []  # опрос раз в час — сам не пошёл
+        assert calls == []
         assert await backup.handle(ACTION_SNAPSHOT_POKE, {}) == {"ok": True}
         for _ in range(100):
             if store.load_snapshot("jeeves"):
@@ -277,9 +261,6 @@ async def test_poke_wakes_receiver(db, tmp_path):
         assert store.load_snapshot("jeeves") is not None
     finally:
         await backup.stop()
-
-
-# --- служба vpn: триггер после изменяющих команд -----------------------------------
 
 
 @pytest_asyncio.fixture

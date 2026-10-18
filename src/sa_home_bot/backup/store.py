@@ -20,12 +20,6 @@ HISTORY_KEEP = 5
 
 _NON_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 
-# Снапшоты VPN-БД (39.0.8(c)): ``<нода>/snapshots/latest.sealed`` + ``latest.meta.json``
-# (rev, hash, taken_at, stored_at, rows по таблицам, empty), ``history/snapshot.<stored_at>
-# .sealed`` — предыдущие, не больше SNAPSHOT_HISTORY_KEEP; ``last_nonempty.sealed`` —
-# последний снапшот С пирами, его пустые не вытесняют: пересобранная нода с пустой БД
-# публикует пустой снапшот, и без этого он за SNAPSHOT_HISTORY_KEEP циклов выдавил бы
-# из истории ровно ту копию, ради которой бэкап и нужен.
 SNAPSHOTS_DIR = "snapshots"
 SNAPSHOT_FILE = "latest.sealed"
 SNAPSHOT_META_FILE = "latest.meta.json"
@@ -35,7 +29,6 @@ SNAPSHOT_HISTORY_KEEP = 24
 
 
 def snapshot_is_empty(meta: dict) -> bool:
-    """В снапшоте нет ни одной строки vpn_peers (по счётчикам в meta)."""
     return int((meta.get("rows") or {}).get("vpn_peers", 0)) == 0
 
 
@@ -51,7 +44,6 @@ def _meta_json(info: dict) -> bytes:
 
 
 def backups_dir(state_path: str | Path) -> Path:
-    """Каталог бэкапов рядом с node-state.json (``./data/backups``)."""
     return Path(state_path).parent / BACKUPS_DIRNAME
 
 

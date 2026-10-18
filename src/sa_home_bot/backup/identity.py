@@ -1,24 +1,3 @@
-"""Статическая identity vpn-сервера: сбор, запечатывание, публикация (39.0.8(b)).
-
-Что входит (всё, без чего пересобранный на том же IP сервер не примет старых
-клиентов), одним JSON-документом ``format = IDENTITY_FORMAT``:
-
-- ``awg``: приватный ключ серверного интерфейса (``awg show <iface> private-key``
-  под уже существующим узким sudoers ``awg show *`` — ``awg0.conf`` читает только
-  root) и параметры обфускации ``jc/jmin/jmax/s1/s2/h1..h4`` из ``[vpn]``
-  (служба обязана держать их равными ``awg0.conf``, см. ``VpnConfig``);
-- ``reality``: ``privateKey`` и ``shortIds`` из inbound-а xray (``~/.config/xray/
-  config.json`` — файл принадлежит пользователю ноды, sudo не нужен);
-- ``config``: секции ``[vpn]`` и ``[vpn.reality]`` из config.toml.
-
-Пиры (``[Peer]`` в awg0.conf, клиенты xray) — динамика, подэтап (c), сюда не входят.
-
-Публикация идёт через ``ConfigReplicator``: пакет ``vpn-identity.<нода>.toml`` в
-каталоге пакетов — TOML-конверт с base64-блобом ``sealed.seal``. Блоб при каждом
-запечатывании другой (эфемерный ключ), поэтому ревизия растёт только когда
-изменился ОТКРЫТЫЙ текст: его sha256 лежит в сайдкаре ``….src.json``.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -48,13 +27,12 @@ OBFUSCATION_FIELDS = ("jc", "jmin", "jmax", "s1", "s2", "h1", "h2", "h3", "h4")
 
 
 class IdentityError(Exception):
-    """Не удалось собрать/разобрать identity (источник недоступен, битый пакет)."""
+    pass
 
 
 def collect_identity(
     settings: Settings, *, awg_private_key: str | None, xray_config: dict | None
 ) -> dict[str, Any]:
-    """Собрать identity из конфига и прочитанных секретов (без ввода-вывода)."""
     vpn = settings.vpn
     transports = vpn.transports or [vpn_protocol.TRANSPORT_AWG]
     doc: dict[str, Any] = {"format": IDENTITY_FORMAT}
@@ -90,7 +68,6 @@ def _reality_secrets(xray_config: dict | None, inbound_tag: str) -> dict[str, An
 
 
 def canonical_bytes(doc: dict[str, Any]) -> bytes:
-    """Детерминированная сериализация: одинаковая identity — одинаковые байты."""
     return json.dumps(doc, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
 
 
@@ -99,7 +76,6 @@ def plain_hash(plaintext: bytes) -> str:
 
 
 def render_package(source: str, blob: bytes) -> bytes:
-    """TOML-конверт пакета репликации (пакеты едут как текст)."""
     text = (
         f'format = "{IDENTITY_FORMAT}"\n'
         f"source = {json.dumps(source)}\n"
@@ -109,7 +85,6 @@ def render_package(source: str, blob: bytes) -> bytes:
 
 
 def parse_package(data: bytes) -> tuple[str, bytes]:
-    """Пакет → (источник, запечатанный блоб)."""
     try:
         doc = tomllib.loads(data.decode("utf-8"))
         if doc.get("format") != IDENTITY_FORMAT:
@@ -120,7 +95,6 @@ def parse_package(data: bytes) -> tuple[str, bytes]:
 
 
 def open_identity(private_key: bytes, blob: bytes) -> dict[str, Any]:
-    """Расшифровать блоб (на alfred) обратно в документ identity."""
     try:
         return json.loads(sealed.open_sealed(private_key, blob))
     except (sealed.SealedError, ValueError) as exc:
@@ -135,7 +109,6 @@ def read_xray_config(path: str) -> dict | None:
 
 
 def partner_wants(settings: Settings) -> str:
-    """Id напарника, чью копию эта нода хранит; пусто — не хранит."""
     return settings.backup.partner.strip()
 
 
@@ -145,8 +118,6 @@ def publishing_enabled(settings: Settings, vpn_assigned: bool) -> bool:
 
 
 class IdentityPublisher:
-    """Держит в каталоге пакетов актуальный запечатанный пакет своей identity."""
-
     def __init__(
         self,
         settings: Settings,
@@ -169,15 +140,6 @@ class IdentityPublisher:
         return pkg.with_name(f"{IDENTITY_SERVICE}.{self._node_id}{SRC_SUFFIX}") if pkg else None
 
     async def publish_if_changed(self) -> bool:
-        """Собрать identity; если открытый текст изменился — перезаписать пакет.
-
-        Ревизию поднимает уже ``InstanceStore.refresh`` (его зовёт репликатор
-        сразу после этого хука) — по смене содержимого файла. True — файл
-        переписан. Ошибка сбора НЕ затирает прежний пакет: частичная identity
-        хуже прошлой полной. Пока нет маркера «публикация разрешена»
-        (``backup/hold.py``) — не публикуем вовсе: пересобранная нода иначе
-        вытеснила бы у напарника копию, ради которой всё затевалось.
-        """
         if not publish_allowed(self._settings):
             if not self._held_logged:
                 log.warning("Бэкап identity: %s", HOLD_HINT)
@@ -216,12 +178,6 @@ def _read_src_hash(path: Path) -> str:
 def replicator_hooks(
     settings: Settings, store: InstanceStore, node_id: str, *, vpn_assigned: bool
 ) -> dict[str, Any]:
-    """Аргументы ``ConfigReplicator`` для бэкапа identity (пустой dict — выключено).
-
-    Пассивный приём включён, если задан ``[backup].partner``: чужая копия
-    принимается ТОЛЬКО от него и ложится в ``BackupStore``. Публикация своей —
-    если дополнительно на ноде есть служба vpn и ``recipient_public_key``.
-    """
     partner = partner_wants(settings)
     if not partner:
         return {}

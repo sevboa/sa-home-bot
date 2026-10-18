@@ -1,23 +1,9 @@
-"""Солнце и луна по координатам и моменту — локально, без сети.
-
-Нужны туле погоды (``bot/tools.py::tool_get_weather`` — «что сейчас в городе»)
-и окну кабинета Альфреда (``bot/interactives/transylvania.py``). Как и с
-часовыми поясами, не поручаем это модели: высота солнца, восход/закат и фаза
-луны считаются детерминированно.
-
-Формулы — NOAA (солнце, точность ~1 мин по времени и доли градуса по углу) и
-укороченный Meeus, гл. 48 (освещённость луны, точность ~1%). Рефракция у
-горизонта учтена стандартным −0.833° для восхода/заката.
-"""
-
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
-# Высота солнца, ниже которой — ночь (конец гражданских сумерек), и выше
-# которой — полноценный день (кончился «золотой час» у горизонта).
 CIVIL_TWILIGHT_DEG = -6.0
 GOLDEN_HOUR_DEG = 6.0
 
@@ -48,7 +34,6 @@ _SYNODIC_DAYS = 29.530588853
 
 
 def _noaa(when: datetime) -> tuple[float, float]:
-    """(уравнение времени в минутах, склонение солнца в радианах) на момент."""
     t = when.astimezone(UTC)
     n = t.timetuple().tm_yday
     hour = t.hour + t.minute / 60 + t.second / 3600
@@ -73,7 +58,6 @@ def _noaa(when: datetime) -> tuple[float, float]:
 
 
 def sun_position(lat: float, lon: float, when: datetime) -> tuple[float, float]:
-    """(высота над горизонтом, азимут от севера по часовой) в градусах."""
     eqtime, decl = _noaa(when)
     t = when.astimezone(UTC)
     minutes = t.hour * 60 + t.minute + t.second / 60
@@ -91,16 +75,12 @@ def sun_position(lat: float, lon: float, when: datetime) -> tuple[float, float]:
 
 @dataclass(frozen=True)
 class SunDay:
-    """Восход, полдень, закат (UTC). ``None`` у восхода/заката — полярный
-    день или ночь: солнце в эти сутки не пересекает горизонт."""
-
     sunrise: datetime | None
     noon: datetime
     sunset: datetime | None
 
 
 def sun_day(lat: float, lon: float, day: date) -> SunDay:
-    """Восход и закат для календарной даты ``day`` (UTC-сутки этой даты)."""
     midnight = datetime(day.year, day.month, day.day, tzinfo=UTC)
     eqtime, decl = _noaa(midnight + timedelta(hours=12))
     noon = midnight + timedelta(minutes=720 - 4 * lon - eqtime)
@@ -115,8 +95,6 @@ def sun_day(lat: float, lon: float, day: date) -> SunDay:
 
 
 def light_phase(altitude: float, azimuth: float) -> str:
-    """Ночь / рассвет / день / закат по высоте солнца; утро от вечера —
-    по стороне неба (восток — до полудня)."""
     if altitude < CIVIL_TWILIGHT_DEG:
         return LIGHT_NIGHT
     if altitude < GOLDEN_HOUR_DEG:
@@ -126,14 +104,12 @@ def light_phase(altitude: float, azimuth: float) -> str:
 
 @dataclass(frozen=True)
 class Moon:
-    illumination: float  # 0..1, доля освещённого диска
-    age_days: float  # дней с новолуния
+    illumination: float
+    age_days: float
     waxing: bool
 
     @property
     def phase_ru(self) -> str:
-        # По освещённости, как в календарях: новолуние/полнолуние и четверти —
-        # узкие окна, между ними серп (меньше половины) и луна (больше).
         lit = self.illumination
         if lit < 0.03:
             return MOON_PHASES_RU[0]
@@ -147,13 +123,12 @@ class Moon:
 
 
 def moon(when: datetime) -> Moon:
-    """Фаза луны (Meeus, гл. 48, укороченно)."""
     t = when.astimezone(UTC)
     jd = t.timestamp() / 86400 + 2440587.5
     tc = (jd - 2451545.0) / 36525
-    d = math.radians((297.8501921 + 445267.1114034 * tc) % 360)  # элонгация
-    m = math.radians((357.5291092 + 35999.0502909 * tc) % 360)  # аномалия солнца
-    mp = math.radians((134.9633964 + 477198.8675055 * tc) % 360)  # аномалия луны
+    d = math.radians((297.8501921 + 445267.1114034 * tc) % 360)
+    m = math.radians((357.5291092 + 35999.0502909 * tc) % 360)
+    mp = math.radians((134.9633964 + 477198.8675055 * tc) % 360)
     i = (
         180
         - math.degrees(d)
@@ -165,7 +140,7 @@ def moon(when: datetime) -> Moon:
         - 0.110 * math.sin(d)
     )
     illum = (1 + math.cos(math.radians(i))) / 2
-    elong = (180 - i) % 360  # 0 — новолуние, 180 — полнолуние
+    elong = (180 - i) % 360
     return Moon(
         illumination=illum,
         age_days=elong / 360 * _SYNODIC_DAYS,

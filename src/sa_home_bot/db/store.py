@@ -1,12 +1,3 @@
-"""Store — единственный слой доступа к БД. Голый SQL, без ORM.
-
-Идемпотентность уведомлений: флаги `notified_alert_at` / `notified_cleared_at`
-выставляются только после успешной отправки. Жизненный цикл одного цикла
-перегрева: переход в alerting сбрасывает оба флага; отправка "перегрев"
-выставляет `notified_alert_at`; переход в ok сбрасывает `notified_cleared_at`;
-отправка "остыл" выставляет его.
-"""
-
 from __future__ import annotations
 
 import json
@@ -43,11 +34,8 @@ from sa_home_bot.domain.policy import BaselineStats
 NOTIF_ALERT = "alert"
 NOTIF_CLEARED = "cleared"
 
-# Префикс app_state-ключей: метки времени принятых ручных действий (лимитер).
 ACTION_TICKS_PREFIX = "action_ticks:"
 
-# app_state-ключ кэша DiskSummary (см. docstring класса) — пишет SensorScanJob
-# раз в scan_cron, читает MonitorService.get_state() вместо живого опроса.
 DISK_SUMMARIES_KEY = "disk_summaries_cache"
 
 
@@ -61,12 +49,10 @@ def _item(row: Any) -> dict:
     return item
 
 
-# Постоянная очередь исходящих (Этап 52, bot/outbox.py): виды и их TTL.
-# Протухшее не доставляем — «сервер упал 7 часов назад» уже не новость.
-OUTBOX_KIND_ALERT = "alert"  # алерты/события мониторинга
-OUTBOX_KIND_TASK = "task"  # результаты задач, напоминания
+OUTBOX_KIND_ALERT = "alert"
+OUTBOX_KIND_TASK = "task"
 OUTBOX_KIND_DELIVER = "deliver_message"
-OUTBOX_KIND_INTERACTIVE = "interactive"  # ответы /ai и прочее живое
+OUTBOX_KIND_INTERACTIVE = "interactive"
 OUTBOX_TTL: dict[str, timedelta] = {
     OUTBOX_KIND_ALERT: timedelta(hours=6),
     OUTBOX_KIND_TASK: timedelta(hours=24),
@@ -76,13 +62,10 @@ OUTBOX_TTL: dict[str, timedelta] = {
 
 
 def outbox_ttl(kind: str) -> timedelta:
-    """TTL вида; неизвестный вид — как интерактивный (самый короткий)."""
     return OUTBOX_TTL.get(kind, OUTBOX_TTL[OUTBOX_KIND_INTERACTIVE])
 
 
 def _utc_iso(dt: datetime) -> str:
-    """ISO в UTC с микросекундами — строки outbox сравниваются как время.
-    Наивное время считаем локальным."""
     return dt.astimezone(UTC).isoformat(timespec="microseconds")
 
 
@@ -105,7 +88,6 @@ class Store:
         cur = await self.db.conn.execute(sql, params)
         return [dict(r) for r in await cur.fetchall()]
 
-    # --- app_state (KV) ---
 
     async def get_state(self, key: str) -> str | None:
         cur = await self.db.conn.execute("SELECT value FROM app_state WHERE key=?", (key,))
@@ -121,8 +103,6 @@ class Store:
             )
 
     async def state_keys(self, prefix: str) -> list[str]:
-        """Ключи app_state с данным префиксом (Этап 59: сброс прогресса
-        гостя отладочной командой /interactives reset)."""
         cur = await self.db.conn.execute(
             "SELECT key FROM app_state WHERE substr(key, 1, ?) = ? ORDER BY key",
             (len(prefix), prefix),
@@ -134,7 +114,6 @@ class Store:
             await conn.execute("DELETE FROM app_state WHERE key=?", (key,))
 
     async def get_action_ticks(self, action_key: str) -> list[datetime]:
-        """Метки принятых ручных действий (для лимитера), ключ — «служба:действие»."""
         raw = await self.get_state(ACTION_TICKS_PREFIX + action_key)
         if not raw:
             return []
@@ -148,7 +127,6 @@ class Store:
             ACTION_TICKS_PREFIX + action_key, json.dumps([iso_or_none(t) for t in ticks])
         )
 
-    # --- outbox (Этап 52) ---
 
     async def outbox_enqueue(
         self,
@@ -160,9 +138,6 @@ class Store:
         dedup_key: str | None = None,
         message_thread_id: int | None = None,
     ) -> int:
-        """Поставить сообщение в очередь. TTL берётся по ``kind``. Запись с
-        тем же ``(chat_id, dedup_key)`` заменяется новой (свежий статус
-        вытесняет старый). Возвращает id."""
         async with self.db.transaction() as conn:
             if dedup_key is not None:
                 await conn.execute(
@@ -184,8 +159,6 @@ class Store:
             return cur.lastrowid
 
     async def outbox_due(self, now: datetime, limit: int = 100) -> list[dict]:
-        """Непросроченные записи по порядку постановки; ``payload`` — dict,
-        ``created_at`` — aware datetime (UTC)."""
         cur = await self.db.conn.execute(
             "SELECT * FROM outbox WHERE expires_at > ? ORDER BY created_at, id LIMIT ?",
             (_utc_iso(now), limit),
@@ -199,7 +172,6 @@ class Store:
         return rows
 
     async def outbox_delete(self, outbox_id: int) -> None:
-        """Убрать запись (доставлена или перманентно не доставить)."""
         async with self.db.transaction() as conn:
             await conn.execute("DELETE FROM outbox WHERE id=?", (outbox_id,))
 
@@ -208,7 +180,6 @@ class Store:
             await conn.execute("UPDATE outbox SET attempts=attempts+1 WHERE id=?", (outbox_id,))
 
     async def outbox_expire(self, now: datetime) -> int:
-        """Удалить протухшее; вернуть сколько."""
         async with self.db.transaction() as conn:
             cur = await conn.execute(
                 "DELETE FROM outbox WHERE expires_at <= ?", (_utc_iso(now),)
@@ -219,7 +190,6 @@ class Store:
         cur = await self.db.conn.execute("SELECT COUNT(*) AS n FROM outbox")
         return (await cur.fetchone())["n"]
 
-    # --- job_runs ---
 
     async def start_job_run(self, job_type: str, started_at: datetime) -> int:
         async with self.db.transaction() as conn:
@@ -253,7 +223,6 @@ class Store:
         rows = await cur.fetchall()
         return {r["status"]: r["n"] for r in rows}
 
-    # --- health_states ---
 
     async def get_known_states(self) -> dict[str, KnownState]:
         return await self._known_states("health_states")
@@ -372,9 +341,6 @@ class Store:
         rows = await self._fetch_all("SELECT * FROM health_states ORDER BY kind, component_id")
         return [HEALTH_STATES.row_to_state(r) for r in rows]
 
-    # --- pending уведомления ---
-
-    # --- health_notifications (для reply-цепочки) ---
 
     async def record_notification(
         self,
@@ -402,19 +368,12 @@ class Store:
         row = await cur.fetchone()
         return row["message_id"] if row else None
 
-    # --- host_metric_states (здоровье VPS: steal/iowait/load/...) ---
 
     async def get_all_host_states(self) -> list[HostMetricState]:
         rows = await self._fetch_all("SELECT * FROM host_metric_states ORDER BY component_id")
         return [HOST_STATES.row_to_state(r) for r in rows]
 
     async def host_trend(self, metric: str, hours: int, now: datetime) -> list[dict]:
-        """Средние host-метрики по 10-минуткам за последние ``hours`` часов.
-
-        Бакет — час + десятка минут (00/10/.../50); ``taken_at`` хранится как
-        ``datetime.isoformat()`` (с ``T``), поэтому и порог считаем в Python в том
-        же формате — строковое сравнение тогда корректно.
-        """
         cutoff = (now - timedelta(hours=int(hours))).isoformat()
         cur = await self.db.conn.execute(
             "SELECT substr(taken_at, 1, 13) || ':' || "
@@ -435,10 +394,8 @@ class Store:
             for r in await cur.fetchall()
         ]
 
-    # --- readings (история для BaselinePolicy) ---
 
     async def baseline_stats(self, component_id: str, window: int) -> BaselineStats:
-        """Статистика по последним ``window`` показаниям компонента."""
         cur = await self.db.conn.execute(
             "SELECT COUNT(*) AS n, AVG(t) AS m, AVG(t*t) AS mm FROM ("
             "  SELECT temperature_c AS t FROM readings WHERE component_id=? "
@@ -454,7 +411,6 @@ class Store:
         variance = max(0.0, (row["mm"] or 0.0) - mean * mean)
         return BaselineStats(count=n, mean=mean, std=sqrt(variance))
 
-    # --- smart_snapshots (baseline для дельты SMART) ---
 
     async def get_smart_snapshot(self, component_id: str) -> SmartSnapshot | None:
         cur = await self.db.conn.execute(
@@ -472,11 +428,6 @@ class Store:
         )
 
     async def get_smart_health_map(self) -> dict[str, str | None]:
-        """realpath устройства -> последнее SMART-здоровье из снимков (для /status).
-
-        Ключ — реальный путь (``/dev/sda``), т.е. component_id без префикса
-        ``disk:``; сопоставляется с ``os.path.realpath`` физического диска.
-        """
         cur = await self.db.conn.execute("SELECT component_id, health FROM smart_snapshots")
         rows = await cur.fetchall()
         return {r["component_id"].removeprefix("disk:"): r["health"] for r in rows}
@@ -503,13 +454,11 @@ class Store:
         await self.set_state(DISK_SUMMARIES_KEY, json.dumps([asdict(d) for d in disks]))
 
     async def get_disk_summaries(self) -> list[DiskSummary] | None:
-        """Последний кэш DiskSummary или None — до первого прогона SensorScanJob."""
         raw = await self.get_state(DISK_SUMMARIES_KEY)
         if raw is None:
             return None
         return [DiskSummary(**d) for d in json.loads(raw)]
 
-    # --- ai_turns (/ai, диалог с Альфредом) ---
 
     async def record_ai_turn(
         self,
@@ -541,7 +490,6 @@ class Store:
             )
 
     async def ai_turn(self, chat_id: int, message_id: int) -> dict | None:
-        """Резолв reply: чьё это сообщение и к какому диалогу относится."""
         return await self._fetch_one(
             "SELECT * FROM ai_turns WHERE chat_id=? AND message_id=?",
             (chat_id, message_id),
@@ -554,9 +502,6 @@ class Store:
         )
 
     async def set_ai_turn_content(self, chat_id: int, message_id: int, content: str) -> None:
-        """Подменить текст хода (Этап 51: транскрипт вместо заглушки голосового).
-        Индекс ai_turns_fts триггер ловит только на вставке — правим его тут же
-        (та же замена «ё» → «е», что и в триггере)."""
         async with self.db.transaction() as conn:
             await conn.execute(
                 "UPDATE ai_turns SET content=? WHERE chat_id=? AND message_id=?",
@@ -567,21 +512,8 @@ class Store:
                 (content.replace("ё", "е").replace("Ё", "Е"), chat_id, message_id),
             )
 
-    # --- «Альфред в городе» (Этап 51, bot/away.py) ---
 
     async def update_state(self, key: str, fn: Callable[[str | None], str | None]) -> str | None:
-        """Атомарно «прочитать — изменить — записать» запись app_state.
-
-        Запись ``alfred_away`` правят два процесса — бот и CLI (``sa-home-bot
-        away``), — поэтому запись идёт сравнением с прочитанным значением
-        (compare-and-set): если за это время её успели изменить, ``fn``
-        вызывается заново на свежем значении. Поэтому ``fn`` — чистая функция
-        (побочные результаты — через замыкание, перезаписываемое на каждом
-        вызове). Явный BEGIN IMMEDIATE не годится: соединение общее с
-        остальными задачами бота, чужая незавершённая транзакция сломала бы его.
-
-        ``fn`` получает текущее значение (или None), возвращает новое; None —
-        удалить запись. Возвращает итоговое значение."""
         for _ in range(8):
             old = await self.get_state(key)
             new = fn(old)
@@ -625,7 +557,6 @@ class Store:
             )
 
     async def away_media_for_chat(self, chat_id: int) -> list[dict]:
-        """Ждущие распознавания файлы чата — по порядку сообщений."""
         return await self._fetch_all(
             "SELECT * FROM away_media WHERE chat_id=? ORDER BY message_id",
             (chat_id,),
@@ -638,9 +569,6 @@ class Store:
             )
 
     async def latest_photo_turn(self, chat_id: int, dialogue_id: int) -> dict | None:
-        """Последний ход этого треда с прикреплённым фото — для тула
-        look_at_photo (bot/tools.py), который просит службу llm ещё раз
-        взглянуть на уже сохранённую (на её стороне) уменьшенную копию."""
         return await self._fetch_one(
             "SELECT * FROM ai_turns WHERE chat_id=? AND dialogue_id=? AND photo_path IS NOT NULL "
             "ORDER BY message_id DESC LIMIT 1",
@@ -648,11 +576,6 @@ class Store:
         )
 
     async def chat_participants(self, chat_id: int) -> list[dict]:
-        """Различные пользователи (role='user'), кто когда-либо обращался к
-        Альфреду в этом чате — для группового контекста промпта
-        (bot/ai_flow.py::_build_context_note). Старые записи без user_id
-        (до миграции) в выборку не попадают — это не критично, участники
-        со временем "подтянутся" новыми обращениями."""
         return await self._fetch_all(
             "SELECT user_id, user_name, MIN(message_id) AS first_message_id "
             "FROM ai_turns WHERE chat_id=? AND role='user' AND user_id IS NOT NULL "
@@ -670,9 +593,6 @@ class Store:
         result: str,
         at: datetime,
     ) -> None:
-        """Трасса вызова тула /ai — см. schema.sql::ai_tool_calls. Пишет
-        только живой /ai (bot/ai_flow.py через колбэк в llm_chat.
-        run_chat_loop) — служба tasks БД бота не видит вовсе."""
         async with self.db.transaction() as conn:
             await conn.execute(
                 "INSERT INTO ai_tool_calls(chat_id, dialogue_id, trigger_message_id, "
@@ -695,8 +615,6 @@ class Store:
         )
 
     async def latest_ai_dialogue(self, chat_id: int) -> int | None:
-        """dialogue_id последнего хода в чате — для неявного продолжения
-        разговора в личке (любое сообщение без /alfred и без reply)."""
         cur = await self.db.conn.execute(
             "SELECT dialogue_id FROM ai_turns WHERE chat_id=? ORDER BY message_id DESC LIMIT 1",
             (chat_id,),
@@ -704,11 +622,8 @@ class Store:
         row = await cur.fetchone()
         return row["dialogue_id"] if row else None
 
-    # --- сжатие истории /ai (Этап 50, bot/dialogue_context.py) ---
 
     async def latest_dialogue_summary(self, chat_id: int, dialogue_id: int) -> dict | None:
-        """Действующее краткое содержание треда — версия с наибольшим
-        upto_message_id (см. schema.sql::ai_dialogue_summaries)."""
         return await self._fetch_one(
             "SELECT * FROM ai_dialogue_summaries WHERE chat_id=? AND dialogue_id=? "
             "ORDER BY upto_message_id DESC, id DESC LIMIT 1",
@@ -763,7 +678,6 @@ class Store:
             )
 
     async def latest_known_num_ctx(self) -> int | None:
-        """Окно службы llm из самого свежего замера любого треда."""
         cur = await self.db.conn.execute(
             "SELECT num_ctx FROM ai_dialogue_context WHERE num_ctx IS NOT NULL "
             "ORDER BY updated_at DESC LIMIT 1"
@@ -774,8 +688,6 @@ class Store:
     async def search_dialogue_turns(
         self, chat_id: int, dialogue_id: int, match: str, *, max_message_id: int, limit: int
     ) -> list[dict]:
-        """Ходы треда с message_id <= max_message_id под FTS5-выражение
-        ``match`` (ai_turns_fts, trigram), лучшие по bm25 первыми."""
         return await self._fetch_all(
             "SELECT CAST(message_id AS INTEGER) AS message_id, bm25(ai_turns_fts) AS score "
             "FROM ai_turns_fts WHERE ai_turns_fts MATCH ? AND chat_id=? AND dialogue_id=? "
@@ -783,11 +695,8 @@ class Store:
             (match, chat_id, dialogue_id, max_message_id, limit),
         )
 
-    # --- карточки людей (Этап 58, sa_home_bot/people/) ---
 
     async def add_person_claims(self, claims: list[dict[str, Any]]) -> None:
-        """Утверждения (subject_id, field, value, by_id, strength, at) —
-        одной транзакцией: note_person пишет сразу несколько полей."""
         async with self.db.transaction() as conn:
             await conn.executemany(
                 "INSERT INTO person_claims(subject_id, field, value, by_id, strength, at) "
@@ -799,7 +708,6 @@ class Store:
             )
 
     async def person_claims(self) -> list[dict]:
-        """Все утверждения: людей — десятки, грузим целиком на ход /ai."""
         return await self._fetch_all("SELECT * FROM person_claims ORDER BY id")
 
     async def upsert_person_profile(
@@ -818,14 +726,11 @@ class Store:
         return await self._fetch_all("SELECT * FROM person_profiles")
 
     async def latest_turn_user_names(self) -> list[dict]:
-        """Последнее ``user_name`` каждого ``user_id`` из ai_turns — профиль
-        Telegram тех, кто писал до появления person_profiles (Этап 58.2)."""
         return await self._fetch_all(
             "SELECT user_id, user_name, MAX(created_at) AS at FROM ai_turns "
             "WHERE user_id IS NOT NULL AND user_name IS NOT NULL GROUP BY user_id"
         )
 
-    # --- guest_relationships (Этап 42.6.1, связи между гостями) ---
 
     async def get_relationship(self, relationship_id: int) -> dict | None:
         return await self._fetch_one(
@@ -834,7 +739,6 @@ class Store:
         )
 
     async def relationships_for(self, chat_id: int, status: str = "confirmed") -> list[dict]:
-        """Связи chat_id в любой из двух ролей (guest_a или guest_b)."""
         return await self._fetch_all(
             "SELECT * FROM guest_relationships WHERE status=? AND (guest_a=? OR guest_b=?) "
             "ORDER BY id",
@@ -844,8 +748,6 @@ class Store:
     async def add_confirmed_relationship(
         self, guest_a: int, guest_b: int, relation: str, created_at: datetime, now: datetime
     ) -> dict:
-        """Записать уже подтверждённую связь (Этап 45: решение принято
-        кнопкой формы, жизненный цикл запроса жил в pending_actions)."""
         async with self.db.transaction() as conn:
             cur = await conn.execute(
                 "INSERT INTO guest_relationships(guest_a, guest_b, relation, status, "
@@ -857,7 +759,6 @@ class Store:
         assert row is not None
         return row
 
-    # --- pending_actions (Этап 45, детерминированные формы подтверждения) ---
 
     async def create_pending_action(
         self,
@@ -902,9 +803,6 @@ class Store:
         decided_by: int | None = None,
         reason: str | None = None,
     ) -> dict | None:
-        """Атомарный переход статуса. None — строка не в ожидаемом статусе
-        (уже решено, двойное нажатие, гонка с экспирацией): вызывающий
-        ничего не публикует и не шлёт, решение уже принято кем-то раньше."""
         placeholders = ", ".join("?" for _ in from_statuses)
         sets = ["status=?"]
         params: list[Any] = [to_status]
@@ -943,9 +841,6 @@ class Store:
     async def open_pending_actions(
         self, kind: str | None = None, chat_id: int | None = None
     ) -> list[dict]:
-        """Открытые (draft/pending) запросы — все, либо касающиеся chat_id в
-        любой роли. draft касается только инициатора: адресат о черновике
-        ещё ничего не знает."""
         sql = "SELECT * FROM pending_actions WHERE status IN ('draft', 'pending')"
         params: list[Any] = []
         if kind is not None:
@@ -958,13 +853,6 @@ class Store:
         return [_pending_action_row(r) for r in await cur.fetchall()]
 
     async def pending_actions_needing_delivery(self) -> list[dict]:
-        """То, что должно было уйти в чат, но не ушло (рестарт бота посреди
-        сценария): отправленный адресату запрос без формы у адресата,
-        решённый без итогового оповещения инициатору (кроме отмены самим
-        инициатором — ему оповещать нечего, он сам и нажал; истёкший
-        черновик — оповещаем, см. bot/pending_actions.py), либо принятый без
-        поздравления адресату. Какие именно стадии — решает
-        bot/pending_actions.py::_undelivered_stages."""
         cur = await self.db.conn.execute(
             "SELECT * FROM pending_actions WHERE "
             "(status='pending' AND offer_message_id IS NULL) OR "
@@ -976,7 +864,6 @@ class Store:
         )
         return [_pending_action_row(r) for r in await cur.fetchall()]
 
-    # --- tasks (служба tasks, отложенные задачи роя, sa_home_bot/tasks/) ---
 
     async def create_task(
         self,
@@ -1013,12 +900,6 @@ class Store:
         )
 
     async def get_pending_task(self, task_id: int) -> dict | None:
-        """Задача по id, если она ещё не сработала — иначе ``None``.
-
-        Для `fire_now` (tasks/service.py::_fire_now, remind after_event,
-        bot/tools.py): будим задачу раньше due_at по приходу события, а не
-        по будильнику. ``fired_at IS NULL`` в условии — та же защита от
-        повторного срабатывания, что и у `due_tasks`/`_fire_due`."""
         return await self._fetch_one(
             "SELECT * FROM tasks WHERE id=? AND fired_at IS NULL",
             (task_id,),
@@ -1038,7 +919,6 @@ class Store:
         async with self.db.transaction() as conn:
             await conn.execute("UPDATE tasks SET prewake_done=1 WHERE id=?", (task_id,))
 
-    # --- invites (приватный вход, bot/invites.py) ---
 
     async def create_invite(
         self,
@@ -1070,12 +950,6 @@ class Store:
         user_id: int | None,
         user_name: str | None,
     ) -> dict | None:
-        """Погасить код. None — кода нет, он уже использован, отозван или истёк.
-
-        Проверка и погашение — одним UPDATE с условием: два сообщения с одним
-        и тем же кодом могут прийти одновременно, и «сначала проверил, потом
-        записал» дало бы двух гостей на один одноразовый код.
-        """
         async with self.db.transaction() as conn:
             cur = await conn.execute(
                 "UPDATE invites SET redeemed_at=?, redeemed_chat_id=?, redeemed_user_id=?, "
@@ -1090,12 +964,9 @@ class Store:
             return dict(row) if row else None
 
     async def find_invite(self, code: str) -> dict | None:
-        """Код как он есть, в любом состоянии — нужен, чтобы отличить
-        присланный код от случайной строки из восьми символов."""
         return await self._fetch_one("SELECT * FROM invites WHERE code=?", (code,))
 
     async def open_invites(self, now: datetime) -> list[dict]:
-        """Выпущенные и ещё годные коды — для /guests."""
         return await self._fetch_all(
             "SELECT * FROM invites WHERE redeemed_at IS NULL AND revoked_at IS NULL "
             "AND expires_at>? ORDER BY created_at",
@@ -1103,7 +974,6 @@ class Store:
         )
 
     async def revoke_invite(self, code: str, at: datetime) -> bool:
-        """Отозвать ещё не погашенный код. False — гасить было нечего."""
         async with self.db.transaction() as conn:
             cur = await conn.execute(
                 "UPDATE invites SET revoked_at=? WHERE code=? AND redeemed_at IS NULL "
@@ -1112,14 +982,10 @@ class Store:
             )
             return cur.rowcount > 0
 
-    # --- swarm_events (журнал системных/админских событий, bot/node_events.py) ---
 
     async def record_event(
         self, event_type: str, node: str | None, text: str, at: datetime
     ) -> None:
-        """Записать уже отрендеренный текст события — тот же, что уходит в
-        рассылку. Подрезка — отдельным prune_swarm_events из housekeeping
-        (тот же приём, что job_runs/invites), не на каждой записи."""
         async with self.db.transaction() as conn:
             await conn.execute(
                 "INSERT INTO swarm_events(event_type, node, text, created_at) VALUES(?, ?, ?, ?)",
@@ -1133,8 +999,6 @@ class Store:
         since: datetime | None = None,
         limit: int = 20,
     ) -> list[dict]:
-        """Последние события, самые новые первыми — опционально по ноде
-        и/или не раньше ``since``."""
         clauses: list[str] = []
         params: list[object] = []
         if node is not None:
@@ -1160,7 +1024,6 @@ class Store:
             )
             return cur.rowcount
 
-    # --- event_waiters (remind after_event, bot/tools.py) ---
 
     async def add_event_waiter(
         self, task_id: int, node: str, event_type: str, created_at: datetime
@@ -1173,8 +1036,6 @@ class Store:
             )
 
     async def pop_event_waiter_for(self, node: str, event_type: str) -> int | None:
-        """Первый ожидающий task_id под (node, event_type) — удаляет строку,
-        чтобы то же событие не смогло разбудить задачу дважды."""
         async with self.db.transaction() as conn:
             cur = await conn.execute(
                 "SELECT task_id FROM event_waiters WHERE node=? AND event_type=? "
@@ -1189,13 +1050,9 @@ class Store:
             return task_id
 
     async def pop_event_waiter(self, task_id: int) -> None:
-        """Снять ожидание конкретной задачи — она уже сработала (по событию
-        ИЛИ по таймауту due_at в службе tasks, см. node_events.py::
-        _handle_task_result), повторно её ждать незачем."""
         async with self.db.transaction() as conn:
             await conn.execute("DELETE FROM event_waiters WHERE task_id=?", (task_id,))
 
-    # --- images (Этап 48, bot/image_tools.py) ---
 
     async def add_image(
         self,
@@ -1239,18 +1096,12 @@ class Store:
             )
 
     async def get_image(self, chat_id: int, image_id: int) -> dict | None:
-        """Только картинка ЭТОГО чата и из разговора — чужую и отладочную
-        (/draw) по номеру не достать."""
         return await self._fetch_one(
             "SELECT * FROM images WHERE id=? AND chat_id=? AND purpose='chat'",
             (image_id, chat_id),
         )
 
     async def search_images(self, chat_id: int, query: str, limit: int = 5) -> list[dict]:
-        """Картинки этого чата по смыслу запроса, лучшие первыми. Стемминга у
-        FTS5 нет — у слова длиннее 4 букв отрезаем две последние и ищем
-        префиксом («драконом» → «драко*», «шляпе» → «шля*»), слова через OR,
-        порядок — bm25. Без png: байты нужны только выбранной картинке."""
         terms = []
         for word in re.findall(r"\w+", query.lower()):
             if len(word) < 3:
@@ -1285,20 +1136,15 @@ class Store:
         row = await cur.fetchone()
         return int(row["n"])
 
-    # Отладочный /draw (Этап 49, bot/draw_debug.py) — владелец, любой чат.
 
     async def image_by_id(self, image_id: int) -> dict | None:
         return await self._fetch_one("SELECT * FROM images WHERE id=?", (image_id,))
 
-    # Картинки, которые Альфред сам прислал в чат: нарисованные, снимки
-    # кабинета, карточки вещей (отладочный /draw — нет).
     ALFRED_IMAGE_PURPOSES = ("chat", "photo", "item")
 
     async def alfred_image(
         self, chat_id: int, *, image_id: int | None = None, message_id: int | None = None
     ) -> dict | None:
-        """Своя картинка Альфреда в этом чате — по номеру, по сообщению или
-        последняя отправленная (look_at_photo, «посмотри на свой снимок»)."""
         marks = ",".join("?" * len(self.ALFRED_IMAGE_PURPOSES))
         sql = f"SELECT * FROM images WHERE chat_id=? AND purpose IN ({marks})"
         params: list[object] = [chat_id, *self.ALFRED_IMAGE_PURPOSES]
@@ -1341,7 +1187,6 @@ class Store:
             cur = await conn.execute("DELETE FROM images WHERE purpose=?", (purpose,))
             return cur.rowcount
 
-    # --- items (Этап 49.3, bot/interactives/items.py) ---
 
     async def add_item(
         self,
@@ -1381,7 +1226,6 @@ class Store:
         return _item(row) if row else None
 
     async def items_of(self, owner_user_id: int, type: str | None = None) -> list[dict]:
-        """Предметы гостя (кроме израсходованных), старые первыми."""
         sql = "SELECT * FROM items WHERE owner_user_id=? AND status!='consumed'"
         args: tuple = (owner_user_id,)
         if type is not None:
@@ -1398,15 +1242,12 @@ class Store:
             )
 
     async def consume_item(self, item_id: int) -> None:
-        """Предмет израсходован (Этап 59.3): из описи и мест он пропадает,
-        запись и журнал остаются."""
         async with self.db.transaction() as conn:
             await conn.execute("UPDATE items SET status='consumed' WHERE id=?", (item_id,))
 
     async def update_item(
         self, item_id: int, *, traits: list[str] | None = None, note: str | None = None
     ) -> None:
-        """Приметы и/или заметка предмета (Ведущий дописывает находку, 59.3/59.6)."""
         async with self.db.transaction() as conn:
             if traits is not None:
                 await conn.execute(
@@ -1441,7 +1282,6 @@ class Store:
             (item_id,),
         )
 
-    # --- housekeeping ---
 
     async def prune_job_runs(self, keep_last: int = 500) -> int:
         async with self.db.transaction() as conn:

@@ -1,10 +1,3 @@
-"""Ядро reconciliation: срез датчиков + известное состояние из БД → diff.
-
-Здесь же реализован анти-дребезг (гистерезис): переход фиксируется только если
-показание держится в нужной зоне N подряд снятых срезов. Чистые функции, без БД,
-сети и aiogram — тестируются изолированно.
-"""
-
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -73,7 +66,6 @@ def compute_health_diff(
     resolve_policy: PolicyResolver,
     now: datetime,
 ) -> HealthDiff:
-    """Сравнить срез показаний с известным состоянием, вернуть новый срез + переходы."""
     states: list[HealthState] = []
     transitions: list[Transition] = []
     for reading in current:

@@ -47,11 +47,9 @@ def test_allows_action_full_and_bare_forms():
     sub = Subscription(
         "me", 1, allowed_commands=frozenset({"restart@node", "scan_now"})
     )
-    # Полная форма `действие@служба`.
     assert sub.allows_action("restart", "node")
-    assert not sub.allows_action("restart", "monitor")  # другая служба
-    assert not sub.allows_action("stop", "node")  # другое действие
-    # Голое имя действия — совместимость со старыми конфигами: любая служба.
+    assert not sub.allows_action("restart", "monitor")
+    assert not sub.allows_action("stop", "node")
     assert sub.allows_action("scan_now", "monitor")
 
 
@@ -71,9 +69,9 @@ def test_wildcard_allows_any_action_of_any_service():
 def test_service_wildcard_allows_only_that_service():
     sub = Subscription("me", 1, allowed_commands=frozenset({"*@node"}))
     assert sub.allows_action("restart", "node")
-    assert sub.allows_action("check_update", "node")  # новое действие — без правки конфига
-    assert not sub.allows_action("scan_now", "monitor")  # другая служба
-    assert not sub.allows_command("status")  # * относится только к действиям службы node
+    assert sub.allows_action("check_update", "node")
+    assert not sub.allows_action("scan_now", "monitor")
+    assert not sub.allows_command("status")
 
 
 def test_broken_blocks_everything():
@@ -111,10 +109,6 @@ async def test_validate_on_startup_marks_broken():
 
 
 async def test_validate_on_startup_survives_a_transient_network_blip(monkeypatch):
-    """Живой инцидент 2026-08-12: сеть моргнула ровно во время validate_on_
-    startup — один транзиентный TelegramNetworkError не должен молча запирать
-    владельца broken-подпиской до следующего рестарта бота, раз get_chat
-    ретраится (bot/telegram_retry.py)."""
     import asyncio
 
     async def _no_delay(_seconds):

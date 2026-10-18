@@ -1,77 +1,3 @@
-"""TorrentsService — ServiceHandler службы torrents (адаптер qBittorrent).
-
-`add` — добавить раздачу по magnet-ссылке/URL или по
-содержимому .torrent-файла. Файл идёт по протоколу как base64-строка
-(`ActionParam` — только string|int|float|bool, PROTOCOL.md), обычные
-.torrent-метафайлы на порядки меньше лимита сообщения (`MAX_MESSAGE_BYTES`
-= 1 МиБ, proto/messages.py). Директория сохранения — конечный список из
-конфига (`save_dirs`), а не свободный ввод: бот строит кнопки по `choices`
-действия, в systemd не ходит — только к этой службе.
-
-`list` — read-only состояние закачек. Появилось 2026-07-27 вместе с тулом
-swarm_status: до него служба вообще не умела рассказать, что качается
-(get_state отдавал только список директорий), и спросить Альфреда про
-торренты было не у кого. Отдаёт узкий срез (имя, прогресс, состояние,
-скорость, оценка) — путей на диске в нём нет: они ничего не добавляют к
-ответу на вопрос «что там качается», а знать их этому потребителю незачем.
-
-`pause`/`resume` — остановить и снова запустить раздачу. Адресуются
-**по имени** (`name`), не по хэшу: имена — это то, что уже видит потребитель
-в `list`, а сорокасимвольный хэш пришлось бы гонять в контекст модели
-целиком и надеяться, что она перепишет его без опечатки. Разрешение имени в
-хэш делает сама служба (`_select`): точное совпадение → хэш → узнаваемая
-часть имени; неоднозначность — не «остановим на всякий случай все похожие»,
-а честная ошибка со списком кандидатов (`все` — отдельное явное слово).
-
-`search` — поиск по трекерам ЧУЖИМИ руками: встроенным поисковым движком
-qBittorrent и его плагинами (`search_start`/`search_results` Web API).
-Заведено 2026-07-29, потому что Альфред с одним `web_search` (SearXNG)
-упирался в стену: выдача поисковика даёт заголовок, ссылку и сниппет, а
-magnet живёт ВНУТРИ темы трекера, часто ещё и под логином — открыть
-страницу модель не может ничем. Плагин же логинится сам и отдаёт готовые
-поля (имя, размер, сиды), по которым уже можно выбирать осмысленно.
-
-`search_smart` — та же выдача, но по-другому добытая: заведено 2026-08-09,
-переписано под явные `phrase`+`words` 2026-08-10. Обычный `search` (и его
-лестница `_query_ladder`) всё равно шлёт трекеру НЕПРЕРЫВНУЮ фразу — если
-реальное название на трекере записано в другом порядке слов («Дюна: Часть
-вторая» вместо «Дюна Часть 2») или с доп. словом ПОСЕРЕДИНЕ (не в начале/
-конце, где его срезает лестница), обычный поиск находит ноль. `search_smart`
-принимает `phrase` — ту же непрерывную подстрочную фразу, что и `search`
-(отправляется трекеру как pattern тем же способом, но в большой сырой пул
-`SEARCH_SMART_FETCH_LIMIT` с одного задания поиска) — и опциональный `words`:
-набор дополнительных слов (год, качество, сезон, что угодно ещё), каждое из
-которых должно встречаться в имени находки в любом порядке — AND-фильтр уже
-в Python, поверх сырой выдачи по `phrase`. Модель сама решает, что кладёт в
-`phrase` (устойчивая часть названия), а что — в `words` (то, что могло стоять
-в другом порядке или не рядом с названием); никакой автоматической разборки
-свободного текста здесь больше нет. Ответ модели по-прежнему видит только
-верхушку (`SEARCH_LIMIT`) — расширяется только внутренний пул для
-фильтрации, а не то, что уезжает в контекст.
-
-Ссылка из результатов поиска — это НЕ magnet, а `dl.php?t=…`, который
-отдаётся только авторизованному. Поэтому `add` для таких ссылок качает
-метафайл не через qBittorrent, а через `nova2dl.py` самого qBittorrent
-(`_fetch_via_plugin`) — тем же способом, каким это делает его собственный
-GUI: плагин отдаёт .torrent своей сессией, а мы добавляем его как файл, уже
-с нужным `save_path`. Штатное `search/downloadTorrent` Web API так не умеет
-— оно кладёт раздачу в директорию по умолчанию, мимо выбора «куда сохранить».
-
-`details` — карточка одной найденной раздачи: страница трекера, очищенная
-от разметки. В выдаче поиска есть только имя, размер и сиды — а «какая
-озвучка», «какой битрейт», «сколько серий» живёт на странице. Ходим только
-по сайтам с установленным плагином (то же ограничение, что у `add`) и
-только по одной странице за вызов.
-
-`space` — сколько места на дисках директорий сохранения. Свободное место
-считается локально (`shutil.disk_usage`) — служба живёт на той же машине,
-что и qBittorrent, спрашивать его Web API про чужие ФС незачем; сам
-qBittorrent нужен только ради `downloading_left_bytes` (сколько ещё
-предстоит докачать уже принятым раздачам), и если он молчит — это поле
-просто `null`, а место всё равно отдаётся: на вопрос «хватает ли места»
-клиент торрентов не нужен вовсе.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -118,63 +44,25 @@ ACTION_SEARCH_SMART = "search_smart"
 ACTION_DETAILS = "details"
 ACTION_SPEED_LIMIT = "speed_limit"
 
-# Потолок общего лимита скорости (download+upload разом) из бот-панели —
-# домашний канал слабый, выше пользователь ограничивать и не просил.
 MAX_SPEED_LIMIT_MBPS = 5
 
-# Сколько находок отдавать. Их читает модель и выбирает одну — на десятке
-# строк выбор по сидам/размеру делается не хуже, чем на полусотне. Было 10,
-# уменьшено до 6 2026-07-29: вместе с декларациями тулов выдача выбивала окно
-# модели (num_ctx=8192 на тот момент), ответ приходил пустым или обрывался на
-# полуслове. С 2026-07-25 num_ctx поднят до 24576 (см. память
-# llm-model-upgrade) — бюджета снова хватает, вернули 10.
 SEARCH_LIMIT = 10
-# search_smart: сколько тянуть из ОДНОГО задания поиска по слову-якорю, чтобы
-# после AND-фильтра в Python на выходе всё ещё что-то оставалось. Модели
-# отдаётся всё равно не больше SEARCH_LIMIT — эта цифра только про сырой пул,
-# который фильтруется здесь, а не про то, что уезжает в контекст.
 SEARCH_SMART_FETCH_LIMIT = 200
-# Плагин ходит на живой трекер (логин + страница выдачи) — это секунды, но
-# не мгновение; ждём завершения задания, а не первой пустой выдачи.
 SEARCH_WAIT_S = 45.0
 SEARCH_POLL_S = 0.5
 SEARCH_RUNNING = "Running"
-# Скачивание метафайла руками плагина (nova2dl) — короткая операция, но по
-# сети; свой потолок, чтобы зависший трекер не держал команду вечно.
 PLUGIN_FETCH_TIMEOUT_S = 60.0
-# Карточка раздачи (details): что забирать со страницы трекера. Голова —
-# название и «о фильме», техническая часть — качество/видео/аудио/размер.
-# Живая находка 2026-07-29: на руторе техническая карточка лежит ПОСЛЕ
-# синопсиса (позиция ~3300 при полном тексте страницы в 16 000 знаков), так
-# что «первые N символов» теряют ровно то, ради чего страницу и открывают —
-# поэтому берём голову И отдельным куском техническую часть.
 DETAILS_HEAD_CHARS = 700
 DETAILS_TECH_CHARS = 900
 DETAILS_TIMEOUT_S = 20.0
-# UA обычного браузера: с «Python-urllib» часть трекеров отвечает отказом, а
-# ничего специфичного для конкретного клиента мы не делаем.
 DETAILS_UA = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
 
-# Где живут поисковый движок и плагины qBittorrent (nova2dl.py, engines/).
-# Пусто в конфиге — путь по умолчанию для Linux-сборки.
 DEFAULT_NOVA_DIR = "~/.local/share/qBittorrent/nova3"
 
-# Сколько раздач отдавать за раз. Ответ читает и человек, и модель (тул
-# torrents) — полный список на сотню раздач бесполезен обоим, а в контексте
-# модели это ещё и заметные токены. Сортировка — по убыванию активности.
 LIST_LIMIT = 20
 
-# Ниже этого порога свободного места служба новую раздачу не принимает вовсе.
-# Проверка именно здесь, а не только в подсказке модели: размер раздачи по
-# magnet-ссылке заранее неизвестен (метаданные качаются уже после добавления),
-# так что «влезет ли ИМЕННО ЭТО» не проверить в принципе — но забить диск
-# досуха, когда там уже нечего занимать, можно и нужно не дать. Порог общий
-# для всех директорий: на sdb (расходная «помойка») и на /mnt/data одинаково
-# незачем доводить ФС до нуля.
 MIN_FREE_BYTES = 2 * 1024**3
 
-# «Останови всё» — отдельное явное слово, а не побочный эффект того, что
-# пустая/короткая подстрока подошла ко всем раздачам сразу (см. _select).
 ALL_SELECTORS = frozenset({"*", "all", "все", "всё", "все закачки", "всё сразу"})
 
 
@@ -182,18 +70,11 @@ def _is_magnet_or_url(source: str) -> bool:
     return source.startswith(("magnet:", "http://", "https://"))
 
 
-# Живая находка 2026-07-29: трекер (rutor) ищет запрос как НЕПРЕРЫВНУЮ фразу
-# в заголовке раздачи, поэтому любое лишнее слово обнуляет выдачу целиком:
-# «задача трёх тел» → 10 находок, «задача трёх тел 2024» → ноль. Модель же
-# упорно дописывает год, качество и имя релизера (в логе — восемь пустых
-# попыток подряд, каждая с новым набором лишних слов). Просить её в промпте
-# «передавай только название» помогает не всегда, поэтому лестница попыток
-# живёт здесь: запрос как есть → без шумовых слов → всё короче и короче.
 _QUERY_NOISE_RE = re.compile(
     r"\b(?:"
-    r"19\d{2}|20\d{2}"  # год
-    r"|[sS]\d{1,2}(?:[eE]\d{1,3})?"  # S01, S01E02
-    r"|\d{3,4}[pi]"  # 1080p, 720i, 2160p
+    r"19\d{2}|20\d{2}"
+    r"|[sS]\d{1,2}(?:[eE]\d{1,3})?"
+    r"|\d{3,4}[pi]"
     r"|web-?dl(?:rip)?|web-?rip|hd-?rip|bd-?rip|dvd-?rip|blu-?ray|hdtv|remux"
     r"|hevc|avc|x26[45]|h\.?26[45]"
     r"|сериал|сезон|series|season"
@@ -201,8 +82,6 @@ _QUERY_NOISE_RE = re.compile(
     re.IGNORECASE,
 )
 _PUNCT_ONLY_RE = re.compile(r"^[\W_]+$")
-# Потолок попыток: каждая — живой запрос к трекеру (~1–2 с). Пяти хватает,
-# чтобы дойти от полного названия релиза до двух слов.
 MAX_QUERY_ATTEMPTS = 5
 
 
@@ -212,7 +91,6 @@ def _clean_query(query: str) -> str:
 
 
 def _query_ladder(query: str) -> list[str]:
-    """Запросы к трекеру от самого точного к самому широкому (см. выше)."""
     attempts = [query.strip()]
     cleaned = _clean_query(query)
     words = cleaned.split()
@@ -222,10 +100,6 @@ def _query_ladder(query: str) -> list[str]:
     return attempts[:MAX_QUERY_ATTEMPTS]
 
 
-# Вырезаем то, что на странице раздачи заведомо не про раздачу: скрипты и
-# навигацию. Список id/class намеренно общий — у трекеров они называются
-# примерно одинаково, а промахнуться безопасно: не вырезали — просто больше
-# мусора в тексте, вырезали лишнее — текст короче.
 _PAGE_DROP_TAGS_RE = re.compile(r"(?is)<(script|style|head|nav|noscript)\b.*?</\1>")
 _PAGE_DROP_BLOCKS_RE = re.compile(
     r'(?is)<(div|table|ul)[^>]*(?:id|class)="[^"]*'
@@ -234,11 +108,6 @@ _PAGE_DROP_BLOCKS_RE = re.compile(
 _PAGE_BREAK_RE = re.compile(r"(?i)<br\s*/?>|</(?:p|div|tr|li|h\d)>")
 _PAGE_TAG_RE = re.compile(r"(?s)<[^>]+>")
 _PAGE_MAGNET_RE = re.compile(r'href="(magnet:[^"]+)"', re.IGNORECASE)
-# Начало технической части карточки — по словам, одинаковым у русских
-# трекеров. Строка целиком, а не вхождение: «качество» встречается и в
-# описании фильма.
-# Длина строки, с которой начинается «содержательная» часть страницы (см.
-# _page_text): пункты меню короче, названия раздач и подписи полей — длиннее.
 _MEANINGFUL_LINE_CHARS = 25
 _PAGE_TECH_RE = re.compile(
     r"(?im)^\s*(?:качество|формат|видео|аудио|перевод|продолжительность|субтитры|размер)\b"
@@ -250,18 +119,11 @@ def _page_text(page: str) -> str:
     text = _PAGE_TAG_RE.sub(" ", _PAGE_BREAK_RE.sub("\n", text))
     text = html.unescape(text)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    # Живая находка 2026-07-29: вырезание блоков по id/class ловит не всё —
-    # у настоящей страницы меню сделано вложенными div'ами, и нежадный
-    # «до первого </div>» останавливается раньше. Верхнее меню при этом
-    # узнаётся по форме: короткие строки-ссылки («Топ», «Категории», «Чат»)
-    # до первой содержательной. Их и снимаем, а то они съедают голову
-    # карточки, которой отведено немного.
     first = next((i for i, line in enumerate(lines) if len(line) >= _MEANINGFUL_LINE_CHARS), 0)
     return "\n".join(lines[first:])
 
 
 def _page_summary(text: str) -> str:
-    """Голова страницы + техническая карточка (см. DETAILS_HEAD_CHARS)."""
     head = text[:DETAILS_HEAD_CHARS]
     match = _PAGE_TECH_RE.search(text, len(head))
     if match is None:
@@ -286,8 +148,6 @@ def _engine_error_text(result: dict[str, Any]) -> str:
 
 
 def _disk_usage(path: str) -> tuple[int | None, int | None]:
-    """(свободно, всего) в байтах, либо (None, None) — путь недоступен
-    (не смонтирован внешний диск, опечатка в конфиге)."""
     try:
         usage = shutil.disk_usage(path)
     except OSError:
@@ -295,8 +155,6 @@ def _disk_usage(path: str) -> tuple[int | None, int | None]:
     return usage.free, usage.total
 
 
-# qBittorrent отдаёт eta = 8640000 (100 суток) как «неизвестно/бесконечность»
-# для стоящих и раздающихся торрентов, а не как реальную оценку.
 QBIT_ETA_INFINITY_SECONDS = 8640000
 
 
@@ -420,14 +278,6 @@ class TorrentsService:
 
     @staticmethod
     def _plugin_for(plugins: list[Any], url: str) -> str | None:
-        """Имя включённого плагина, чьему сайту принадлежит ссылка.
-
-        Сравниваем хосты, а не префикс строки: у плагина в `url` адрес
-        раздела (`https://rutracker.org/forum/`), а ссылка из выдачи ведёт на
-        другой путь. Поддомен считается тем же сайтом — живая находка
-        2026-07-29: rutor ищет на `rutor.info`, а качать отдаёт с
-        `d.rutor.info`, и точное сравнение хостов такую находку отвергало.
-        """
         host = urlsplit(url).netloc.lower()
         if not host:
             return None
@@ -440,13 +290,6 @@ class TorrentsService:
         return None
 
     def _fetch_via_plugin(self, plugin: str, url: str) -> bytes:
-        """Метафайл руками самого плагина (его авторизованной сессией).
-
-        Ровно тот путь, которым качает GUI qBittorrent: `nova2dl.py <плагин>
-        <ссылка>` печатает «<путь к .torrent> <ссылка>». Свой HTTP-клиент
-        здесь бесполезен — `dl.php` отдаётся только залогиненному, а куки
-        живут внутри плагина.
-        """
         nova = self._nova_dir() / "nova2dl.py"
         if not nova.exists():
             raise ProtoError(
@@ -455,7 +298,7 @@ class TorrentsService:
                 "(проверьте [torrents].search_engine_dir)",
             )
         try:
-            proc = subprocess.run(  # noqa: S603 — фиксированный argv, интерпретатор свой
+            proc = subprocess.run(  # noqa: S603
                 [sys.executable, str(nova), plugin, url],
                 capture_output=True,
                 timeout=PLUGIN_FETCH_TIMEOUT_S,
@@ -465,8 +308,6 @@ class TorrentsService:
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ProtoError(ERR_INTERNAL, f"плагин {plugin} не отдал файл: {exc}") from exc
         out = proc.stdout.decode(errors="replace").strip()
-        # Успех — одна строка «<путь> <ссылка>»; всё прочее (в т.ч. текст
-        # ошибки, который плагин печатает вместо пути) — неудача.
         path = Path(out.split(" ", 1)[0]) if out else None
         if path is None or not path.is_file():
             log.warning(
@@ -484,13 +325,6 @@ class TorrentsService:
     def _run_search_job(
         self, client: Any, pattern: str, limit: int
     ) -> tuple[list[dict[str, Any]], int]:
-        """Одно задание поиска: старт → ожидание → результаты → уборка.
-
-        Возвращает находки (уже урезанные до `limit`) и `total` — сколько
-        всего нашли плагины по этому запросу независимо от `limit` (так
-        отдаёт сам qBittorrent Web API): по нему видно, что выдача обрезана,
-        не выловив это из числа строк в ответе.
-        """
         job = client.search_start(pattern=pattern, plugins="enabled", category="all")
         search_id = job["id"]
         try:
@@ -502,19 +336,11 @@ class TorrentsService:
                 time.sleep(SEARCH_POLL_S)
             raw = client.search_results(search_id=search_id, limit=limit)
         finally:
-            # Задание живёт в qBittorrent, пока его не удалят: без этого
-            # каждый вопрос Альфреда оставлял бы за собой мусор.
             client.search_delete(search_id=search_id)
         results = list(raw.get("results", []))
         return results, int(raw.get("total", len(results)) or 0)
 
     def _details_sync(self, page: str) -> dict[str, Any]:
-        """Карточка раздачи со страницы трекера.
-
-        Ходим только на сайты, для которых установлен поисковый плагин — то
-        же ограничение, что и у `add`: «открой вот эту ссылку из разговора»
-        модели давать незачем, а свои же находки открывать надо.
-        """
         client = self._client()
         try:
             client.auth_log_in()
@@ -534,9 +360,6 @@ class TorrentsService:
         try:
             with urllib.request.urlopen(request, timeout=DETAILS_TIMEOUT_S) as resp:  # noqa: S310
                 raw = resp.read()
-                # Кодировку берём из заголовков: рутор отдаёт utf-8, а
-                # рутрекер и его родня — cp1251, и без этого текст приезжает
-                # кракозябрами.
                 charset = resp.headers.get_content_charset() or "utf-8"
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise ProtoError(ERR_INTERNAL, f"страница не открылась: {exc}") from exc
@@ -545,8 +368,6 @@ class TorrentsService:
         magnet = _PAGE_MAGNET_RE.search(body)
         result: dict[str, Any] = {"page": page, "text": _page_summary(_page_text(body))}
         if magnet is not None:
-            # Со страницы magnet берётся напрямую — его можно отдать в add как
-            # есть, не поднимая плагин ради метафайла.
             result["magnet"] = html.unescape(magnet.group(1))
         return result
 
@@ -557,8 +378,6 @@ class TorrentsService:
             "size_bytes": int(r.get("fileSize", 0) or 0),
             "seeders": max(0, int(r.get("nbSeeders", 0) or 0)),
             "leechers": max(0, int(r.get("nbLeechers", 0) or 0)),
-            # Именно это значение потом уходит в add как source: у трекеров с
-            # логином это не magnet, а ссылка на метафайл.
             "source": r.get("fileUrl", ""),
             "page": r.get("descrLink", ""),
         }
@@ -580,17 +399,10 @@ class TorrentsService:
             used_query = attempts[0]
             for attempt in attempts:
                 raw, total = self._run_search_job(client, attempt, limit)
-                # Сбой плагина приезжает НЕ ошибкой, а фальшивой «находкой»:
-                # имя вида «[запрос][Error]: …», ссылка «<сайт>/error», 100
-                # сидов и терабайт размера (так плагины показывают проблему в
-                # GUI). Пропустить такое в модель — значит дать ей «раздачу» с
-                # рекордными сидами, которую она честно предложит скачать.
                 broken = [r for r in raw if _is_engine_error(r)]
                 usable = [r for r in raw if not _is_engine_error(r)]
                 used_query = attempt
                 if usable or broken:
-                    # Пусто из-за лишних слов — пробуем короче; сломанный
-                    # плагин короче не починится, дальше идти незачем.
                     break
         except qbittorrentapi.APIError as exc:
             raise ProtoError(ERR_INTERNAL, f"qBittorrent отклонил запрос: {exc}") from exc
@@ -601,8 +413,6 @@ class TorrentsService:
             raise ProtoError(ERR_INTERNAL, f"поиск не отработал: {_engine_error_text(broken[0])}")
 
         results = [self._map_result(r) for r in usable]
-        # Сортировка по сидам — то, по чему выбирают раздачу в первую очередь;
-        # qBittorrent отдаёт результаты в порядке прихода от плагинов.
         results.sort(key=lambda r: r["seeders"], reverse=True)
         shown = results[:limit]
         payload: dict[str, Any] = {
@@ -611,16 +421,8 @@ class TorrentsService:
             "query": query,
         }
         if total > len(shown):
-            # Реальных «страниц» нет — задание поиска удаляется сразу после
-            # чтения результатов (см. _run_search_job), просить следующую
-            # порцию не у чего. Отдаём общее число находок, чтобы модель
-            # честно сказала человеку «показал N из total», а не выдала
-            # верхушку за всю выдачу.
             payload["total"] = total
         if used_query != query.strip():
-            # Модель должна знать, что искали не совсем то, о чём её просили:
-            # выдача шире запрошенного, и год/качество надо проверять глазами
-            # по именам находок, а не считать, что трекер их уже учёл.
             payload["used_query"] = used_query
         return payload
 
@@ -647,10 +449,6 @@ class TorrentsService:
         if broken and not usable:
             raise ProtoError(ERR_INTERNAL, f"поиск не отработал: {_engine_error_text(broken[0])}")
 
-        # phrase уже отфильтровала трекер (pattern ищется как непрерывная
-        # фраза — то же доверие движку, что и в search). words — доп.
-        # AND-фильтр ПОВЕРХ найденного, каждое слово в любом порядке,
-        # casefold-подстрока.
         needles = [w.casefold() for w in words]
         matched = [
             r for r in usable if all(n in str(r.get("fileName", "")).casefold() for n in needles)
@@ -671,9 +469,6 @@ class TorrentsService:
         return payload
 
     def _add_sync(self, source: str, save_path: str) -> int | None:
-        """Свободные байты в целевой директории после приёма раздачи (или
-        None — путь недоступен). Раздача не принимается вовсе, если места и
-        так почти нет (MIN_FREE_BYTES)."""
         payload: dict[str, Any] = {}
         plugin: str | None = None
         if source.startswith("magnet:"):
@@ -695,11 +490,6 @@ class TorrentsService:
         try:
             client.auth_log_in()
             if not payload:
-                # Осталась http(s)-ссылка: принимаем её ТОЛЬКО как находку
-                # своего же поиска (см. докстринг модуля). Отдать её
-                # qBittorrent напрямую нельзя — с трекера под логином
-                # вернётся страница входа вместо метафайла, а пускать модель
-                # качать по произвольному адресу из разговора незачем.
                 plugin = self._plugin_for(list(client.search_plugins()), source)
                 if plugin is None:
                     raise ProtoError(
@@ -717,20 +507,9 @@ class TorrentsService:
         return free
 
     def _list_sync(self, *, with_hash: bool = False) -> tuple[list[dict[str, Any]], int]:
-        """Раздачи + текущий общий лимит скорости (в одной qBittorrent-сессии).
-
-        ``with_hash`` — хэш раздачи по умолчанию наружу не уезжает (см.
-        докстринг модуля: сорокасимвольный хэш ничего не даёт модели, только
-        раздувает контекст). Ставит его только бот-панель (bot/torrents_view)
-        — напрямую через ``args``, а не через объявленный ``ActionParam``
-        действия ``list``, так что вызвать это модель не может: тул строит
-        схему из ``describe()``, где такого параметра нет.
-        """
         client = self._client()
         try:
             client.auth_log_in()
-            # sort/limit делает сам qBittorrent — тащить сотню раздач по сети,
-            # чтобы выбросить хвост здесь, незачем.
             raw = client.torrents_info(sort="dlspeed", reverse=True, limit=LIST_LIMIT)
             limit_bytes = client.transfer_download_limit()
         except qbittorrentapi.APIError as exc:
@@ -742,40 +521,22 @@ class TorrentsService:
             item: dict[str, Any] = {
                 "name": t.get("name", "?"),
                 "state": t.get("state", "?"),
-                # progress приходит долей 0..1 — в процентах читают и человек,
-                # и модель, а округление до целых убирает шум вида 0.9999.
                 "progress_pct": round(float(t.get("progress", 0.0)) * 100),
                 "dlspeed_bytes_s": int(t.get("dlspeed", 0)),
                 "upspeed_bytes_s": int(t.get("upspeed", 0)),
-                # Сырое state — внутренние строки qBittorrent («stalledUP»,
-                # «stoppedDL»), по которым не человеку, не модели не очевидно,
-                # стоит раздача или нет; а решение «ставить на паузу или,
-                # наоборот, запускать» именно на этом и держится. Префиксов
-                # два: qBittorrent 5 переименовал paused* в stopped*.
                 "paused": str(t.get("state", "")).startswith(("paused", "stopped")),
-                # -1/огромное значение у qBittorrent означает "неизвестно"
-                # (раздача стоит или сидируется) — отдаём None, чтобы модель не
-                # пересказывала 8640000 секунд как реальную оценку.
                 "eta_s": _eta_or_none(t.get("eta")),
-                # Подключённые пиры (не размер всего роя — то, что реально
-                # качает/раздаёт эту раздачу прямо сейчас).
                 "seeds": max(0, int(t.get("num_seeds", 0) or 0)),
                 "peers": max(0, int(t.get("num_leechs", 0) or 0)),
-                # Unix-время добавления — бот сортирует список по нему внутри
-                # групп статуса (bot/torrents_view.py::_sort_key); человеку и
-                # модели просто число, страшного в нём нет.
                 "added_on": int(t.get("added_on", 0) or 0),
             }
             if with_hash:
                 item["hash"] = str(t.get("hash", ""))
             torrents.append(item)
-        # 0 — общесистемное соглашение qBittorrent для «без ограничения».
         limit_mbps = int(limit_bytes) // (1024 * 1024) if limit_bytes else 0
         return torrents, limit_mbps
 
     def _set_speed_limit_sync(self, mbps: int) -> None:
-        """Общий лимит (download И upload разом, одним значением — отдельных
-        направлений пользователь не просил) — см. докстринг модуля."""
         limit_bytes = mbps * 1024 * 1024
         client = self._client()
         try:
@@ -789,14 +550,6 @@ class TorrentsService:
 
     @staticmethod
     def _select(raw: list[Any], selector: str) -> list[dict[str, Any]]:
-        """Раздачи, которые имел в виду вызывающий (см. докстринг модуля).
-
-        Порядок проб — от самого однозначного к самому свободному: явное
-        «все» → точное имя → хэш → узнаваемая часть имени. Без этого порядка
-        точное имя, оказавшееся подстрокой другого («Foo» при живом
-        «Foo.S02»), считалось бы неоднозначным, хотя вызывающий назвал его
-        целиком.
-        """
         needle = selector.strip().lower()
         if needle in ALL_SELECTORS:
             return list(raw)
@@ -828,9 +581,6 @@ class TorrentsService:
                     "назовите одну точнее или скажите «все»",
                 )
             hashes = [str(t.get("hash", "")) for t in picked]
-            # torrents_pause/_resume — версионно-безопасные псевдонимы: в
-            # qBittorrent 5 эти эндпойнты называются stop/start, и библиотека
-            # сама выбирает нужный по app_web_api_version.
             if pause:
                 client.torrents_pause(torrent_hashes=hashes)
             else:
@@ -849,10 +599,6 @@ class TorrentsService:
             if free is None:
                 entry["error"] = "путь недоступен (диск не смонтирован?)"
             dirs.append(entry)
-        # Сколько ещё предстоит докачать уже принятым раздачам — лучший
-        # ответ на «а хватит ли места»: свободное место само по себе не
-        # учитывает того, что уже обещано текущим закачкам. Best-effort:
-        # молчащий qBittorrent не должен отнимать ответ про сами диски.
         left: int | None = None
         try:
             client = self._client()
@@ -915,7 +661,6 @@ class TorrentsService:
             key = "paused" if action == ACTION_PAUSE else "resumed"
             return {key: names, "count": len(names)}
         if action != ACTION_ADD:
-            # Сервер валидирует action по describe — сюда неизвестное не доходит.
             raise ValueError(f"необъявленное действие: {action}")
         source = str(args.get("source") or "")
         name = str(args.get("name") or "торрент")

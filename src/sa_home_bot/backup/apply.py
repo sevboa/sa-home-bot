@@ -1,36 +1,3 @@
-"""Применение бэкапа на пересобранной ноде — сторона целевого сервера (39.0.8(d)).
-
-Бандл (``backup/restore.py``) приходит с alfred по ssh; здесь он превращается в
-состояние ноды. Запускается ЛОКАЛЬНО (``nodectl restore-apply``), как и
-``nodectl fix``: привилегированные шаги идут через интерактивный ``sudo`` — новых
-sudoers-правил не нужно, root ноде по-прежнему не отдаётся.
-
-Что делается (всё идемпотентно; повторный прогон приводит к тому же состоянию):
-
-1. ``awg0.conf`` (root, 0600): ``PrivateKey`` и ``Jc/Jmin/Jmax/S1/S2/H1..H4`` в
-   ``[Interface]``. Файла нет (ещё не запускали ``deploy/setup-awg-jeeves.sh``) —
-   создаётся минимальный: скрипт при запуске **сохраняет** ключ и обфускацию из
-   существующего файла и дописывает остальное, т.е. не перегенерирует. ``nodectl
-   fix`` ключей сервера не генерирует вообще — только sudoers/пакеты.
-2. Reality: ``/etc/sa-home-reality/reality.env`` (root; так же сохраняется
-   ``deploy/setup-reality-server.sh``) и ``privateKey``/``shortIds`` в xray
-   ``config.json``, если он уже есть (клиенты в нём не трогаем — их вернёт
-   ``reconcile()``).
-3. ``config.toml``: таблицы ``[vpn]`` и ``[vpn.reality]`` заменяются на
-   сохранённые (локальные пути ``socket``/``db_path``/``apk_cache_dir`` остаются
-   прежними); прежний файл сохраняется как ``config.toml.pre-restore``.
-4. ``vpn.sqlite``: миграции, затем вставка строк снапшота по ИМЕНАМ колонок
-   (неизвестные колонки пропускаются, ``id`` сохраняется — на ``vpn_peers.id``
-   ссылается ``vpn_peer_usage.peer_id``). ``vpn_counters`` не переносятся:
-   счётчики интерфейса после пересборки нулевые, сэмплер начнёт с нуля.
-5. Рестарт того, что уже запущено: ``awg-quick@<iface>`` (sudo systemctl) и
-   ``xray.service`` (user-юнит). Службу vpn/ноду НЕ трогаем — их запускает человек
-   после проверки; ``reconcile()`` при старте пересоздаст пиров awg и клиентов
-   xray из ``vpn_peers``.
-6. Маркер ``backup-publish.ok`` (``backup/hold.py``) — только теперь нода
-   вправе публиковать свою identity/снапшот напарнику.
-"""
-
 from __future__ import annotations
 
 import json
@@ -55,11 +22,8 @@ AWG_DIR = Path("/etc/amnezia/amneziawg")
 REALITY_ENV = Path("/etc/sa-home-reality/reality.env")
 XRAY_UNIT = "xray.service"
 
-# Не переносим: счётчики интерфейса после пересборки нулевые (sample_once считает
-# отрицательную дельту от нуля — подставленные старые значения исказили бы учёт).
 SKIP_TABLES = frozenset({"vpn_counters"})
 
-# Локальная раскладка каталогов ноды — из восстановленного [vpn] не берём.
 LOCAL_VPN_KEYS = ("socket", "db_path", "apk_cache_dir")
 
 _AWG_OBF_KEYS = {
@@ -69,10 +33,7 @@ _AWG_OBF_KEYS = {
 
 
 class ApplyError(Exception):
-    """Применить нельзя (чужая нода, БД не пуста, нет конфига…) — ничего не сломано."""
-
-
-# --- привилегированный ввод-вывод ---------------------------------------------------
+    pass
 
 
 class PrivilegedIO(Protocol):
@@ -83,8 +44,6 @@ class PrivilegedIO(Protocol):
 
 
 class SudoIO:
-    """Реальные операции: интерактивный sudo, пароль нигде не хранится."""
-
     def read_root(self, path: Path) -> str | None:
         from sa_home_bot.node.fixups import _privileged_exists, _read_privileged
 
@@ -115,15 +74,10 @@ class SudoIO:
             _sudo(["systemctl", "restart", unit])
 
 
-# --- чистые преобразования текста ----------------------------------------------------
-
-
 def patch_awg_conf(text: str, awg: dict[str, Any]) -> str:
-    """Подставить ``PrivateKey`` и обфускацию в ``[Interface]``; остальное не трогать."""
     values = {"PrivateKey": awg["private_key"]}
     values.update({_AWG_OBF_KEYS[k]: v for k, v in awg["obfuscation"].items()})
     lines = text.splitlines() or ["[Interface]"]
-    # Границы секции [Interface]
     start = next((i for i, ln in enumerate(lines) if ln.strip().lower() == "[interface]"), None)
     if start is None:
         lines = ["[Interface]", *lines]
@@ -158,7 +112,6 @@ def reality_env_text(identity: dict[str, Any]) -> str:
 
 
 def patch_xray_config(doc: dict[str, Any], reality: dict[str, Any]) -> bool:
-    """Подставить ``privateKey``/``shortIds`` в Reality-inbound (на месте); False — inbound нет."""
     for inbound in doc.get("inbounds", []):
         rs = (inbound.get("streamSettings") or {}).get("realitySettings")
         if rs is not None and inbound.get("tag", reality["inbound_tag"]) == reality["inbound_tag"]:
@@ -172,7 +125,6 @@ _HEADER = re.compile(r"^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$")
 
 
 def patch_config_toml(text: str, identity: dict[str, Any]) -> str:
-    """Заменить таблицы ``[vpn]`` и ``[vpn.reality]`` восстановленными."""
     cfg = identity.get("config") or {}
     vpn = dict(cfg.get("vpn") or {})
     old_vpn = (tomllib.loads(text).get("vpn") or {}) if text.strip() else {}
@@ -196,9 +148,6 @@ def patch_config_toml(text: str, identity: dict[str, Any]) -> str:
     return (out + "\n\n" if out else "") + "\n".join(parts)
 
 
-# --- БД ----------------------------------------------------------------------------------
-
-
 async def count_peers(conn: Any) -> int:
     cur = await conn.execute("SELECT name FROM sqlite_master WHERE name = 'vpn_peers'")
     if await cur.fetchone() is None:
@@ -208,11 +157,6 @@ async def count_peers(conn: Any) -> int:
 
 
 async def import_snapshot(conn: Any, snapshot: dict[str, Any], *, wipe: bool) -> dict[str, int]:
-    """Вставить строки снапшота (по именам колонок). ``wipe`` — сначала очистить таблицы.
-
-    Вызывать внутри транзакции: при ошибке откатится всё. Неизвестные колонки
-    (снапшот новее схемы) пропускаются, недостающие берут DEFAULT.
-    """
     done: dict[str, int] = {}
     tables = snapshot.get("tables", {})
     for table in SNAPSHOT_TABLES:
@@ -237,9 +181,6 @@ async def import_snapshot(conn: Any, snapshot: dict[str, Any], *, wipe: bool) ->
     return done
 
 
-# --- оркестрация ------------------------------------------------------------------------
-
-
 def check_bundle(bundle: dict[str, Any], settings: Settings) -> None:
     if bundle.get("node") != settings.node.id:
         raise ApplyError(
@@ -260,7 +201,6 @@ async def apply_bundle(
     awg_conf: Path | None = None,
     reality_env: Path = REALITY_ENV,
 ) -> None:
-    """Применить бандл на этой ноде. Предусловия проверяются ДО первой записи."""
     check_bundle(bundle, settings)
     ident = bundle["identity"]
     snapshot = bundle.get("snapshot")
@@ -280,7 +220,6 @@ async def apply_bundle(
                 "пересобранная нода с тестовыми данными, повторите с --wipe-db"
             )
 
-        # 1. awg0.conf
         awg_reload = False
         if ident.get("awg"):
             path = awg_conf or AWG_DIR / f"{ident['awg']['interface']}.conf"
@@ -288,7 +227,6 @@ async def apply_bundle(
             io.write_root(path, patch_awg_conf(old or "", ident["awg"]))
             log(f"awg: ключ и обфускация записаны в {path}" + ("" if old else " (файл создан)"))
             awg_reload = old is not None
-        # 2. Reality
         xray_reload = False
         if ident.get("reality"):
             io.write_root(reality_env, reality_env_text(ident))
@@ -302,14 +240,12 @@ async def apply_bundle(
                     log(f"reality: privateKey/shortIds подставлены в {xray_path}")
             else:
                 log(f"reality: {xray_path} ещё нет — setup-reality-server.sh возьмёт ключи из env")
-        # 3. config.toml
         text = config_path.read_text(encoding="utf-8")
         new_text = patch_config_toml(text, ident)
         if new_text != text:
             shutil.copy2(config_path, config_path.with_name(config_path.name + ".pre-restore"))
             config_path.write_text(new_text, encoding="utf-8")
             log(f"config: [vpn]/[vpn.reality] восстановлены в {config_path}")
-        # 4. БД
         if snapshot is not None:
             async with db.transaction() as conn:
                 done = await import_snapshot(conn, snapshot, wipe=wipe_db)
@@ -317,7 +253,6 @@ async def apply_bundle(
     finally:
         await db.close()
 
-    # 5. рестарт уже запущенного
     if awg_reload:
         unit = f"awg-quick@{ident['awg']['interface']}"
         if io.unit_active(unit):
@@ -328,6 +263,5 @@ async def apply_bundle(
     if xray_reload and io.unit_active(XRAY_UNIT, user=True):
         io.restart(XRAY_UNIT, user=True)
         log(f"{XRAY_UNIT} перезапущен")
-    # 6. публикация снова разрешена
     marker = allow_publish(settings, f"restore из бандла {bundle.get('identity_label')}")
     log(f"маркер публикации бэкапа: {marker}")
