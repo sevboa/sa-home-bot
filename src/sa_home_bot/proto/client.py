@@ -57,6 +57,8 @@ class ProtoClient:
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._reader_task: asyncio.Task | None = None
+        self._events: asyncio.Queue[Envelope] = asyncio.Queue()
+        self._event_task: asyncio.Task | None = None
         self._pending: dict[str, asyncio.Future[Envelope]] = {}
         self._write_lock = asyncio.Lock()
 
@@ -77,6 +79,8 @@ class ProtoClient:
             if raw_sock is not None:
                 enable_tcp_keepalive(raw_sock)
         self._reader_task = asyncio.create_task(self._read_loop(), name="proto-client-reader")
+        if self._on_event is not None:
+            self._event_task = asyncio.create_task(self._event_loop(), name="proto-client-events")
         if isinstance(self._endpoint, TcpEndpoint):
             auth_payload: dict[str, Any] = {"token": self._token}
             if self._src is not None and self._src.node:
@@ -94,6 +98,7 @@ class ProtoClient:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._reader_task
             self._reader_task = None
+        await self._stop_events()
         if self._writer is not None:
             writer, self._writer = self._writer, None
             writer.close()
@@ -105,6 +110,8 @@ class ProtoClient:
     def abort(self) -> None:
         if self._reader_task is not None:
             self._reader_task.cancel()
+        if self._event_task is not None and self._event_task is not asyncio.current_task():
+            self._event_task.cancel()
         if self._writer is not None:
             with contextlib.suppress(Exception):
                 self._writer.close()
@@ -112,6 +119,7 @@ class ProtoClient:
     async def join(self) -> None:
         if self._reader_task is not None:
             await self._reader_task
+        await self._drain_events()
 
 
     async def hello(self, dst: Address | None = None) -> ServiceInfo:
@@ -195,14 +203,40 @@ class ProtoClient:
                 future.set_result(env)
             return
         if env.type == MSG_EVENT:
-            if self._on_event is None:
-                return
+            if self._on_event is not None:
+                self._events.put_nowait(env)
+            return
+        log.warning("ProtoClient: неожиданный тип сообщения от сервера: %s", env.type)
+
+    async def _event_loop(self) -> None:
+        assert self._on_event is not None
+        while self._event_task is asyncio.current_task():
+            env = await self._events.get()
             try:
                 await self._on_event(env)
             except Exception:
                 log.exception("ProtoClient: обработчик события упал")
+            self._events.task_done()
+
+    async def _drain_events(self) -> None:
+        task = self._event_task
+        if task is None or task is asyncio.current_task():
             return
-        log.warning("ProtoClient: неожиданный тип сообщения от сервера: %s", env.type)
+        drained = asyncio.create_task(self._events.join())
+        try:
+            await asyncio.wait({drained, task}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            drained.cancel()
+
+    async def _stop_events(self) -> None:
+        task, self._event_task = self._event_task, None
+        if task is None:
+            return
+        if task is asyncio.current_task():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
     def _fail_pending(self, exc: Exception) -> None:
         for future in self._pending.values():

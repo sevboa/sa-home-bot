@@ -23,3 +23,4 @@
 | 2026-09-22/23 | hybrid-sleep ломает GPU; возвращён poweroff | lifecycle |
 | 2026-09-24 | pipx терял экстры (numpy 2.5.3 сломал TTS) | lifecycle |
 | 2026-09-25 | Таймаут одного запроса рвал линк с mycraft | swarm-links |
+| 2026-10-18 | Обработчик события в цикле чтения блокировал ответы той же связи (`match_event`, квота VPN) | swarm-links |

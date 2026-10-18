@@ -22,6 +22,7 @@ from sa_home_bot.proto.messages import (
 )
 from sa_home_bot.runtime import format_duration
 from sa_home_bot.utils.files import write_private
+from sa_home_bot.utils.peer_path import format_peer_path
 
 DEFAULT_CONFIGS = ("./config.toml", "~/.config/sa-home-bot/config.toml")
 
@@ -186,6 +187,13 @@ def render_services(services: list[dict]) -> str:
     )
 
 
+def _render_peer(peer: dict) -> str:
+    icon = "🟢" if peer.get("alive") else "🔴"
+    line = f"  {icon} {peer.get('id', '?')} ({peer.get('endpoint', '?')})"
+    path = format_peer_path(peer)
+    return f"{line} · {path}" if path else line
+
+
 def render_status(state: dict) -> str:
     header = f"Нода {state.get('node', '?')} (v{state.get('version', '?')})"
     uptime_bits = []
@@ -198,10 +206,7 @@ def render_status(state: dict) -> str:
     out = header + "\n" + render_services(state.get("services", []))
     peers = state.get("peers") or []
     if peers:
-        lines = [
-            f"  {'🟢' if p.get('alive') else '🔴'} {p.get('id', '?')} ({p.get('endpoint', '?')})"
-            for p in peers
-        ]
+        lines = [_render_peer(p) for p in peers]
         out += "\nПиры:\n" + "\n".join(lines)
     update = state.get("update")
     if update and update.get("restart_required"):

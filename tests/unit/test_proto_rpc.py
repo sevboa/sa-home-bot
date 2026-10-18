@@ -192,3 +192,86 @@ async def test_server_stop_fails_pending_and_closes_client(rpc):
     await asyncio.sleep(0.1)
     with pytest.raises((ProtoError, ConnectionError, OSError)):
         await client.get_state()
+
+
+async def _client_with_handler(server, on_event):
+    client = ProtoClient(server.endpoint, on_event=on_event, timeout=1.0)
+    await client.connect()
+    await client.hello()
+    return client
+
+
+async def test_event_handler_can_query_the_same_link(rpc):
+    _, server, _, _, _ = rpc
+    answered: list = []
+    done = asyncio.Event()
+    holder: dict = {}
+
+    async def on_event(env):
+        answered.append(await holder["client"].get_state())
+        done.set()
+
+    holder["client"] = client = await _client_with_handler(server, on_event)
+    try:
+        await server.broadcast_event("update_finished", {})
+        await asyncio.wait_for(done.wait(), timeout=2.0)
+        assert answered[0]["status"] == "ok"
+    finally:
+        await client.close()
+
+
+async def test_slow_event_handler_does_not_hold_responses(rpc):
+    _, server, _, _, _ = rpc
+    release = asyncio.Event()
+
+    async def on_event(env):
+        await release.wait()
+
+    client = await _client_with_handler(server, on_event)
+    try:
+        await server.broadcast_event("tool_call", {})
+        assert (await asyncio.wait_for(client.get_state(), timeout=0.5))["status"] == "ok"
+    finally:
+        release.set()
+        await client.close()
+
+
+async def test_events_are_handled_one_at_a_time_in_order(rpc):
+    _, server, _, _, _ = rpc
+    seen: list[str] = []
+    done = asyncio.Event()
+
+    async def on_event(env):
+        name = env.payload["event"]
+        if name == "task_prewake":
+            await asyncio.sleep(0.05)
+        seen.append(name)
+        if len(seen) == 2:
+            done.set()
+
+    client = await _client_with_handler(server, on_event)
+    try:
+        await server.broadcast_event("task_prewake", {})
+        await server.broadcast_event("task_result", {})
+        await asyncio.wait_for(done.wait(), timeout=2.0)
+        assert seen == ["task_prewake", "task_result"]
+    finally:
+        await client.close()
+
+
+async def test_join_delivers_event_sent_right_before_disconnect(rpc):
+    _, server, _, _, _ = rpc
+    seen: list[str] = []
+
+    async def on_event(env):
+        await asyncio.sleep(0.05)
+        seen.append(env.payload["event"])
+
+    client = await _client_with_handler(server, on_event)
+    try:
+        await server.broadcast_event("node_leaving", {})
+        await server.stop()
+        await asyncio.wait_for(client.join(), timeout=2.0)
+        assert seen == ["node_leaving"]
+    finally:
+        await client.close()

@@ -255,6 +255,13 @@ def test_render_status_table():
     ]
     text = render_status(state)
     assert "Пиры:" in text and "🔴 winpc (tcp://192.168.0.50:8710)" in text
+    assert text.endswith("🔴 winpc (tcp://192.168.0.50:8710)")
+
+    state["peers"][0].update(alive=True, rtt_ms=254.4, loss=0.13, via="jeeves", via_rtt_ms=185.2)
+    text = render_status(state)
+    assert text.endswith(
+        "🟢 winpc (tcp://192.168.0.50:8710) · 254 мс, потери 13% · через jeeves ~185 мс"
+    )
 
 
 def test_render_services_empty():
