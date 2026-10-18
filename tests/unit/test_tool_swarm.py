@@ -19,9 +19,6 @@ from tests.unit.tools_support import (
 swarm_enum = partial(declared_enum, "swarm_status", "what")
 
 
-# --- swarm_status: сам обработчик (сбор данных через wake_core) ---
-
-
 async def test_swarm_status_nodes_marks_sleeping_workstation_as_normal(store):
     link = swarm_link()
     raw = await tools.tool_swarm_status(
@@ -30,7 +27,6 @@ async def test_swarm_status_nodes_marks_sleeping_workstation_as_normal(store):
     nodes = {n["node"]: n for n in json.loads(raw)["nodes"]}
     assert nodes["alfred"]["online"] is True
     assert nodes["alfred"]["services_running"] == 2
-    # winpc — рабочая станция: выключена = норма, а не авария (ARCH §11 п. 4).
     assert nodes["winpc"]["online"] is False
     assert nodes["winpc"]["sleeping_is_normal"] is True
 
@@ -82,14 +78,9 @@ async def test_swarm_status_own_node_down(store):
     assert result.startswith("недоступно")
 
 
-# --- swarm_events: журнал того, что уже случилось (для Альфреда) ---
-
-
 async def test_swarm_events_lists_recent(store):
     await store.record_event("node_down", "mycraft", "пропала", datetime.now(tz=UTC))
-    result = await tools.tool_swarm_events(
-        _ctx(store, subscription=ADMIN), {}
-    )
+    result = await tools.tool_swarm_events(_ctx(store, subscription=ADMIN), {})
     assert "пропала" in result and "node_down" in result
 
 
@@ -97,9 +88,7 @@ async def test_swarm_events_filters_by_node(store):
     now = datetime.now(tz=UTC)
     await store.record_event("node_down", "mycraft", "mycraft пропала", now)
     await store.record_event("node_down", "jeeves", "jeeves пропала", now)
-    result = await tools.tool_swarm_events(
-        _ctx(store, subscription=ADMIN), {"node": "jeeves"}
-    )
+    result = await tools.tool_swarm_events(_ctx(store, subscription=ADMIN), {"node": "jeeves"})
     assert "jeeves пропала" in result
     assert "mycraft пропала" not in result
 
@@ -119,14 +108,10 @@ async def test_swarm_events_empty_says_so(store):
 
 
 async def test_swarm_events_rejects_bad_hours(store):
-    result = await tools.tool_swarm_events(
-        _ctx(store, subscription=ADMIN), {"hours": "вчера"}
-    )
+    result = await tools.tool_swarm_events(_ctx(store, subscription=ADMIN), {"hours": "вчера"})
     assert "должен быть числом" in result
 
 
 async def test_swarm_events_no_store_degrades_to_text(store):
-    # Служба tasks (второй пользователь этого модуля) не имеет доступа к БД
-    # бота — тот же приём деградации, что и у tool_tell без book/notifier.
     result = await tools.tool_swarm_events(_ctx(None, subscription=ADMIN), {})
     assert result.startswith("недоступно")

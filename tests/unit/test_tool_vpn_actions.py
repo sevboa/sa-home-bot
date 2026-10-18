@@ -20,9 +20,6 @@ from tests.unit.tools_support import (
 _vpn_enum = partial(declared_enum, "vpn", "action")
 
 
-# --- vpn: доступ к AmneziaWG на jeeves (Этап 33 IMPLEMENTATION_PLAN.md) ---
-
-
 class _FakeNotifier:
     def __init__(self) -> None:
         self.sent_direct: list[tuple[int, str]] = []
@@ -67,10 +64,6 @@ def _vpn_link(**kwargs):
     return FakeSwarmLink(states=states, **kwargs)
 
 
-
-
-
-
 async def test_vpn_ceiling_error_tells_model_to_request_extra(store):
     error = ProtoError(vpn_protocol.ERR_QUOTA_CEILING, "потолок")
     link = _vpn_link(command_raises=error)
@@ -78,10 +71,6 @@ async def test_vpn_ceiling_error_tells_model_to_request_extra(store):
         _ctx(store, node_link=link, subscription=ADMIN), {"action": "grant_extra"}
     )
     assert "request_extra" in result
-
-
-
-
 
 
 async def test_vpn_usage_all_guests_requires_admin_right(store):
@@ -104,4 +93,4 @@ async def test_vpn_usage_all_guests_admin_gets_node_wide_summary(store):
     assert "free_bytes" in result
     action, dst = link.commands[0]
     assert (action, dst.node, dst.service) == ("usage", "jeeves", "vpn")
-    assert link.sent_args[0] == {}  # без chat_id — сводка по всем, не по своему чату
+    assert link.sent_args[0] == {}

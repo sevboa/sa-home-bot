@@ -16,8 +16,6 @@ def _clear_rates_cache():
     currency._RATES_CACHE.clear()
 
 
-# --- convert_currency ---
-
 _RATES_RESPONSE = {"result": "success", "base_code": "USD", "rates": {"USD": 1, "RUB": 78.42}}
 
 
@@ -44,7 +42,7 @@ async def test_convert_currency_caches_rates_across_calls(monkeypatch):
     ctx = _ctx()
     await tools.tool_convert_currency(ctx, {"amount": 1, "from": "USD", "to": "RUB"})
     await tools.tool_convert_currency(ctx, {"amount": 2, "from": "USD", "to": "RUB"})
-    assert fetch_calls == 1  # второй раз — из _RATES_CACHE, без сети
+    assert fetch_calls == 1
 
 
 async def test_convert_currency_unknown_target_code(monkeypatch):

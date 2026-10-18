@@ -1,27 +1,14 @@
-"""MCP stdio-сервер умений роя для агента (Этап 42.4, agent/mcp_tools.py).
-
-Хендлеры (``_handle_list_tools``/``_handle_call_tool``) тестируются напрямую
-(поддельный ``ctx`` — они его не читают вовсе, права резолвятся один раз при
-старте из фиксированной подписки, не из запроса), не через реальный
-stdio-процесс: это проверяет саму логику (чёрный список + tools_for), не
-хрупкость живого пайпа. Реальный stdio-транспорт (spawn+``mcp.stdio_client``)
-проверен смоуком отдельно, см. отчёт задачи."""
-
 from __future__ import annotations
 
 import pytest
 
-from sa_home_bot.agent.mcp_tools import TELEGRAM_ONLY_TOOLS, AGENT_SENTINEL_CHAT_ID, AgentMcpTools
+from sa_home_bot.agent.mcp_tools import AGENT_SENTINEL_CHAT_ID, TELEGRAM_ONLY_TOOLS, AgentMcpTools
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.config import Settings, SubscriptionConfig
 from sa_home_bot.proto.messages import ERR_UNKNOWN_ACTION, ProtoError
 
 
 class FakeNodeLink:
-    """Тот же приём, что tests/unit/test_tasks_service.py::FakeNodeLink —
-    минимальная своя нода без пиров, достаточно, чтобы swarm_status/
-    node_manage реально прошли через node_link, не упав на "нет связи"."""
-
     display_name = "нода"
 
     def __init__(self, own=None):
@@ -63,26 +50,24 @@ async def test_list_tools_without_agent_subscription_is_fail_closed():
     server = AgentMcpTools(settings=_settings(None), node_link=FakeNodeLink())
     result = await server._handle_list_tools(None, None)
     names = _tool_names(result)
-    assert "calc" in names  # requires=None — виден всем, см. bot/tools.py::TOOLS
-    assert "swarm_status" not in names  # требует права "nodes" — подписки нет вовсе
+    assert "calc" in names
+    assert "swarm_status" not in names
 
 
 async def test_list_tools_reflects_agent_subscription_rights():
     server = AgentMcpTools(settings=_settings(["nodes"]), node_link=FakeNodeLink())
     result = await server._handle_list_tools(None, None)
     names = _tool_names(result)
-    assert "swarm_status" in names  # право "nodes" — есть
-    assert "torrents" not in names  # права на torrents — нет
+    assert "swarm_status" in names
+    assert "torrents" not in names
 
 
 async def test_excluded_tools_never_appear_even_with_full_rights():
-    """Чёрный список (Telegram-специфичные тулы) применяется ПОВЕРХ прав —
-    даже подписка-владелец ("*") их не видит, см. докстринг модуля."""
     server = AgentMcpTools(settings=_settings(["*"]), node_link=FakeNodeLink())
     result = await server._handle_list_tools(None, None)
     names = _tool_names(result)
     assert names.isdisjoint(TELEGRAM_ONLY_TOOLS)
-    assert "swarm_status" in names  # право есть — переносимый тул виден
+    assert "swarm_status" in names
 
 
 async def test_call_tool_calc_runs_real_handler():
@@ -117,6 +102,18 @@ async def test_call_tool_is_denied(allowed_commands, tool, arguments, expected_i
 
 def test_telegram_only_flag_marks_expected_tools():
     assert TELEGRAM_ONLY_TOOLS == {
-        "dismiss", "remind", "tell", "notify_guest", "voice_mode", "look_at_photo",
-        "guests_list", "recall_tool_result", "vpn", "swarm_events", "act", "search", "walk", "go",
+        "dismiss",
+        "remind",
+        "tell",
+        "notify_guest",
+        "voice_mode",
+        "look_at_photo",
+        "guests_list",
+        "recall_tool_result",
+        "vpn",
+        "swarm_events",
+        "act",
+        "search",
+        "walk",
+        "go",
     }

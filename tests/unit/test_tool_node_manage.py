@@ -20,9 +20,6 @@ from tests.unit.tools_support import (
 _node_enum = partial(declared_enum, "node_manage", "action")
 
 
-# --- node_manage: обновить/перезапустить ноду ---
-
-
 async def test_node_manage_check_update_own_node(store):
     link = swarm_link(
         command_result={
@@ -49,11 +46,6 @@ async def test_node_manage_update_reports_target_version(store):
 
 
 async def test_node_manage_update_scheduled_auto_schedules_wake_and_warns(store):
-    # Живой баг 2026-08-04 (часть 2): update — фоновая операция, ответ
-    # приходит мгновенно, а restart_node сразу после неё рестартовал бы
-    # ноду на СТАРОМ коде. Живой инцидент 2026-08-05: модель СЛОВАМИ
-    # обещала "прослежу", но remind сама не звала — теперь node_manage
-    # ставит ожидание САМ, без участия модели.
     link = swarm_link(command_result={"scheduled": True, "target_version": "0.70.0"})
     result = await tools.tool_node_manage(
         _ctx(store, node_link=link, subscription=ADMIN), {"action": "update", "node": "winpc"}
@@ -62,7 +54,8 @@ async def test_node_manage_update_scheduled_auto_schedules_wake_and_warns(store)
     assert "winpc" in result
     assert "поставлено автоматически" in result
     create_calls = [
-        (action, args) for action, args in zip(link.commands, link.sent_args, strict=True)
+        (action, args)
+        for action, args in zip(link.commands, link.sent_args, strict=True)
         if action[0] == task_protocol.ACTION_CREATE
     ]
     assert len(create_calls) == 1
@@ -74,12 +67,6 @@ async def test_node_manage_update_scheduled_auto_schedules_wake_and_warns(store)
 
 
 async def test_node_manage_update_auto_schedule_snapshot_has_real_result_not_placeholder(store):
-    # Живой баг 2026-08-05 (часть 2): node_manage зовёт remind ИЗНУТРИ
-    # своего же handler'а, пока его собственный tool_calls в ctx.history
-    # ещё висит без ответа (та же ситуация, что и в реальном run_chat_loop
-    # посреди раунда) — снимок задачи-продолжения обязан содержать
-    # настоящий текст результата, а не "(результат не сохранён)", иначе
-    # разбуженная модель не знает, что update реально удался.
     history = [
         {"role": "user", "content": "обнови ноды"},
         {
@@ -107,16 +94,13 @@ async def test_node_manage_update_auto_schedule_snapshot_has_real_result_not_pla
     ]
     assert len(create_calls) == 1
     snapshot_messages = create_calls[0]["args"]["messages"]
-    own_tool_result = snapshot_messages[-2]  # перед директивой-продолжением
+    own_tool_result = snapshot_messages[-2]
     assert own_tool_result["role"] == "tool"
     assert own_tool_result["content"] != "(результат не сохранён)"
-    # Тот же текст, что вернулся модели этим самым вызовом.
     assert own_tool_result["content"] in result
 
 
 async def test_node_manage_update_scheduled_on_own_node_resolves_its_id(store):
-    # Без явного node (своя нода) — id для авто-ожидания берём из
-    # get_state(), не оставляем задачу без адресата.
     link = swarm_link(command_result={"scheduled": True, "target_version": "0.70.0"})
     result = await tools.tool_node_manage(
         _ctx(store, node_link=link, subscription=ADMIN), {"action": "update"}
@@ -129,7 +113,7 @@ async def test_node_manage_update_scheduled_on_own_node_resolves_its_id(store):
     ]
     assert len(create_calls) == 1
     assert create_calls[0]["await_event"] == {
-        "node": "alfred",  # OWN_STATE["node"]
+        "node": "alfred",
         "event_type": tools.EVENT_UPDATE_FINISHED,
     }
 
@@ -160,9 +144,6 @@ async def test_node_manage_restart_remote_node_targets_dst(store):
     assert link.commands[0] == ("restart_node", Address(node="winpc", service="node"))
     assert "ненадолго пропаду" not in result
     assert "winpc" in result
-    # Живой инцидент 2026-08-05: restart_node на чужой ноде тоже сам
-    # ставит ожидание restart_applied — не полагаясь на то, что модель
-    # позовёт remind, чтобы честно подтвердить итог.
     assert "поставлено автоматически" in result
     create_calls = [
         args
@@ -174,9 +155,6 @@ async def test_node_manage_restart_remote_node_targets_dst(store):
         "node": "winpc",
         "event_type": tools.EVENT_RESTART_APPLIED,
     }
-    # Живой баг 2026-08-05 (третий заход): директива больше не просит
-    # переходить к "следующей ноде" — это сталкивало между собой несколько
-    # независимых self-scheduled цепочек, лезущих к чужим нодам разом.
     directive = create_calls[0]["args"]["messages"][-1]["content"]
     assert "следующая нода" not in directive
     assert "переходить не нужно" in directive
@@ -219,9 +197,6 @@ async def test_node_manage_own_node_down(store):
 
 
 async def test_node_manage_check_all_summarizes_fleet(store):
-    """Живой повод 2026-08-04: версия кода одна на весь рой — вместо
-    check_update по каждой ноде отдельно один вызов сразу видит, кому
-    нужен update, кому только restart_node, а кто не ответил."""
     own = {
         "node": "alfred",
         "kind": "server",

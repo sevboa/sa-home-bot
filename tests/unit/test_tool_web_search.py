@@ -13,8 +13,6 @@ from tests.unit.tools_support import (
     make_ctx as _ctx,
 )
 
-# --- web_search: интернет через службу net ---
-
 
 async def test_web_search_calls_net_service(store):
     link = FakeSwarmLink(
@@ -29,9 +27,6 @@ async def test_web_search_calls_net_service(store):
 
 
 async def test_web_search_waits_longer_than_net_itself(store):
-    """Живая находка 2026-09-25: без явного таймаута действовали 10 с
-    ProtoClient по умолчанию, а net ждёт SearXNG 20 с — медленный движок
-    обрывал поиск у бота раньше, чем у самой службы."""
     link = FakeSwarmLink(command_result={"query": "q", "results": [], "count": 0})
     ctx = _ctx(store, node_link=link, subscription=ADMIN)
     await tools.tool_web_search(ctx, {"query": "q"})
@@ -39,8 +34,6 @@ async def test_web_search_waits_longer_than_net_itself(store):
 
 
 async def test_web_search_empty_results_reads_as_plain_text(store):
-    """Пустая выдача — не ошибка и не JSON: модели проще не пересказывать
-    пустой список, а прямо сказать, что ничего не нашлось."""
     link = FakeSwarmLink(command_result={"query": "чепуха", "results": [], "count": 0})
     result = await tools.tool_web_search(
         _ctx(store, node_link=link, subscription=ADMIN), {"query": "чепуха"}
@@ -64,9 +57,6 @@ async def test_web_search_without_query(store):
 
 
 async def test_web_search_piggybacks_a_graph_episode(store):
-    """Этап 42.3: успешный поиск дублируется в graph_memory как
-    ACTION_ADD_EPISODE с source=web_search — тем же best-effort приёмом,
-    что и remember/look_at_photo (тесты выше в модуле)."""
     link = FakeSwarmLink(
         command_result={
             "query": "погода",
@@ -99,17 +89,13 @@ async def test_web_search_empty_results_skips_piggyback(store):
 
 
 async def test_web_search_survives_graph_memory_being_asleep(store):
-    """Этап 42.3: сбой piggyback не должен портить уже успешный ответ."""
-
     class FlakyLink(FakeSwarmLink):
         async def command(self, action, args=None, dst=None, *, timeout=None):
             if action == "add_episode":
                 raise ServiceUnavailableError("mycraft спит")
             return await super().command(action, args=args, dst=dst, timeout=timeout)
 
-    link = FlakyLink(
-        command_result={"query": "погода", "results": [{"title": "T"}], "count": 1}
-    )
+    link = FlakyLink(command_result={"query": "погода", "results": [{"title": "T"}], "count": 1})
     result = await tools.tool_web_search(
         _ctx(store, node_link=link, subscription=ADMIN), {"query": "погода"}
     )

@@ -104,8 +104,6 @@ ALFRED_MONITOR = {
 
 
 class FakeSwarmLink:
-    """Двойник ServiceLink: маршрутизирует get_state/command по dst."""
-
     def __init__(self, states=None, command_result=None, command_raises=None):
         self._states = states or {}
         self._command_result = command_result if command_result is not None else {"torrents": []}

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from functools import partial
 
+import pytest
+
 from sa_home_bot.bot import tools
 from sa_home_bot.proto.errors import ServiceUnavailableError
 from sa_home_bot.proto.messages import ProtoError
@@ -19,12 +21,7 @@ from tests.unit.tools_support import (
 _tor_enum = partial(declared_enum, "torrents", "action")
 
 
-# --- torrents: закачки целиком (список, место, magnet, пауза/запуск) ---
-
-
 async def test_torrents_list_finds_hosting_node(store):
-    """Ноду со службой ищем в состоянии роя, а не хардкодим: назначения
-    меняются кнопкой в боте, без правки кода."""
     link = swarm_link(command_result={"torrents": [{"name": "Foo"}], "count": 1})
     raw = await tools.tool_torrents(
         _ctx(store, node_link=link, subscription=ADMIN), {"action": "list"}
@@ -64,8 +61,6 @@ async def test_torrents_add_sends_magnet_and_save_path(store):
 
 
 async def test_torrents_add_takes_a_search_result_url_too(store):
-    """Ссылка из выдачи своего же поиска — это не magnet, а адрес метафайла
-    на трекере; проверку «а можно ли с этого сайта» делает служба."""
     link = swarm_link(command_result={"name": "Foo", "save_path": "/mnt/data/pr"})
     await tools.tool_torrents(
         _ctx(store, node_link=link, subscription=ADMIN),
@@ -76,17 +71,6 @@ async def test_torrents_add_takes_a_search_result_url_too(store):
         },
     )
     assert link.sent_args[0]["source"] == "https://rutracker.org/forum/dl.php?t=1"
-
-
-async def test_torrents_add_refuses_a_source_that_is_not_a_link(store):
-    """Base64-файл модели взяться неоткуда — его человек присылает сам."""
-    link = swarm_link()
-    result = await tools.tool_torrents(
-        _ctx(store, node_link=link, subscription=ADMIN),
-        {"action": "add", "magnet": "ZDg6YW5ub3VuY2U="},
-    )
-    assert result.startswith("ошибка")
-    assert link.commands == []
 
 
 async def test_torrents_search_sends_query(store):
@@ -120,38 +104,6 @@ async def test_torrents_search_smart_without_words_omits_the_key(store):
     assert link.sent_args[0] == {"phrase": "задача трёх тел"}
 
 
-async def test_torrents_search_without_query_asks_for_it(store):
-    link = swarm_link()
-    result = await tools.tool_torrents(
-        _ctx(store, node_link=link, subscription=ADMIN), {"action": "search"}
-    )
-    assert result.startswith("ошибка")
-    assert link.commands == []
-
-
-async def test_torrents_search_smart_without_phrase_asks_for_it(store):
-    link = swarm_link()
-    result = await tools.tool_torrents(
-        _ctx(store, node_link=link, subscription=ADMIN),
-        {"action": "search_smart", "words": "2024"},
-    )
-    assert result.startswith("ошибка")
-    assert link.commands == []
-
-
-async def test_torrents_add_without_save_path_points_at_space(store):
-    """Сервер протокола ответил бы «нет обязательного параметра: save_path» —
-    формально верно, но не говорит модели, где взять значение."""
-    link = swarm_link()
-    result = await tools.tool_torrents(
-        _ctx(store, node_link=link, subscription=ADMIN),
-        {"action": "add", "magnet": "magnet:?xt=urn:btih:abc"},
-    )
-    assert result.startswith("ошибка")
-    assert "space" in result
-    assert link.commands == []
-
-
 async def test_torrents_pause_sends_name(store):
     link = swarm_link(command_result={"paused": ["Foo.S01"], "count": 1})
     raw = await tools.tool_torrents(
@@ -161,18 +113,7 @@ async def test_torrents_pause_sends_name(store):
     assert link.sent_args[0] == {"name": "Foo.S01"}
 
 
-async def test_torrents_pause_without_name_asks_for_it(store):
-    link = swarm_link()
-    result = await tools.tool_torrents(
-        _ctx(store, node_link=link, subscription=ADMIN), {"action": "pause"}
-    )
-    assert result.startswith("ошибка")
-    assert link.commands == []
-
-
 async def test_torrents_service_refusal_reads_as_answer(store):
-    """Отказ службы (мало места, неоднозначное имя) — готовый ответ модели с
-    объяснением, что делать дальше, а не «внутренняя ошибка»."""
     link = swarm_link(command_raises=ProtoError("bad_request", "мало места в /mnt/data/pr"))
     result = await tools.tool_torrents(
         _ctx(store, node_link=link, subscription=ADMIN),
@@ -182,7 +123,6 @@ async def test_torrents_service_refusal_reads_as_answer(store):
 
 
 async def test_torrents_unreachable_service_degrades_to_text(store):
-    """§7.3: спящая нода — обычный результат для модели, а не сбой цикла."""
     link = swarm_link(command_raises=ServiceUnavailableError("нода спит"))
     result = await tools.tool_torrents(
         _ctx(store, node_link=link, subscription=ADMIN), {"action": "list"}
@@ -199,3 +139,26 @@ async def test_torrents_service_absent_in_swarm(store):
     assert result.startswith("недоступно")
 
 
+@pytest.mark.parametrize(
+    ("args", "hint"),
+    [
+        ({"action": "add", "magnet": "ZDg6YW5ub3VuY2U="}, "magnet"),
+        ({"action": "add", "magnet": "magnet:?xt=urn:btih:abc"}, "space"),
+        ({"action": "search"}, "query"),
+        ({"action": "search_smart", "words": "2024"}, "phrase"),
+        ({"action": "pause"}, "name"),
+    ],
+    ids=[
+        "add-source-not-a-link",
+        "add-without-save-path",
+        "search-no-query",
+        "smart-no-phrase",
+        "pause-no-name",
+    ],
+)
+async def test_torrents_asks_for_missing_argument_without_calling_service(args, hint):
+    link = swarm_link()
+    result = await tools.tool_torrents(_ctx(None, node_link=link, subscription=ADMIN), args)
+    assert result.startswith("ошибка")
+    assert hint in result
+    assert link.commands == []

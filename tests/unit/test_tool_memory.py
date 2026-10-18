@@ -12,12 +12,8 @@ from tests.unit.tools_support import (
     make_ctx as _ctx,
 )
 
-# --- memory: долгая память о чате ---
-
 
 async def test_memory_tool_never_lets_the_model_choose_whose_memory(store):
-    """chat_id проставляет бот из контекста, а не модель: иначе «вспомни, что
-    тебе говорили в другом чате» стало бы рабочей просьбой."""
     link = FakeSwarmLink(command_result={"facts": [{"id": 1, "text": "Качаем в /mnt/data/pr"}]})
     await tools.tool_memory(
         _ctx(store, node_link=link, subscription=ADMIN, chat_id=777),
@@ -25,15 +21,11 @@ async def test_memory_tool_never_lets_the_model_choose_whose_memory(store):
     )
     action, dst = link.commands[0]
     assert (action, dst.node, dst.service) == ("recall", "mycraft", "memory")
-    assert link.sent_args[0]["chat_id"] == 777  # свой чат, не подсунутый моделью
+    assert link.sent_args[0]["chat_id"] == 777
 
 
 async def test_memory_tool_does_not_expose_scope_to_the_model():
-    """Общее знание дома заводит человек руками — сказанное в одном чате не
-    должно вдруг стать видимым во всех."""
-    decl = next(
-        d for d in tools.tools_for(ADMIN).declarations if d["function"]["name"] == "memory"
-    )
+    decl = next(d for d in tools.tools_for(ADMIN).declarations if d["function"]["name"] == "memory")
     params = decl["function"]["parameters"]["properties"]
     assert "scope" not in params and "chat_id" not in params
 
@@ -55,8 +47,6 @@ async def test_memory_outside_a_dialogue_is_honest(store):
 
 
 async def test_remember_piggybacks_a_graph_episode(store):
-    """Этап 41: успешный remember дублирует факт в graph_memory (mycraft)
-    как ACTION_ADD_EPISODE — best-effort ПОВЕРХ основной записи."""
     link = FakeSwarmLink(
         command_result={
             "id": 1,
@@ -88,9 +78,6 @@ async def test_remember_piggybacks_a_graph_episode(store):
 
 
 async def test_remember_survives_graph_memory_being_asleep(store):
-    """mycraft штатно спит (ОСЛАБЛЕННЫЙ инвариант, в отличие от memory) —
-    сбой piggyback не должен портить уже успешный remember."""
-
     class FlakyLink(FakeSwarmLink):
         async def command(self, action, args=None, dst=None, *, timeout=None):
             if action == "add_episode":

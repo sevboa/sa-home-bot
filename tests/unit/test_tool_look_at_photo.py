@@ -11,14 +11,8 @@ from tests.unit.tools_support import (
     make_ctx as _ctx,
 )
 
-# --- look_at_photo (мультимодальный /ai, 2026-08-10) ---
-
 
 class _FakeLookNodeLink:
-    """Двойник ServiceLink для look_at_photo — свой (не FakeNodeLink ниже:
-    той нужен фиксированный {"task_id": 1}, а тут нужен настраиваемый
-    {"response": ...})."""
-
     def __init__(self, *, response: str = "ответ", raises: Exception | None = None) -> None:
         self.calls: list[tuple[str, dict, object]] = []
         self._response = response
@@ -47,9 +41,7 @@ async def test_look_at_photo_no_node_link_returns_error(store):
     await store.record_ai_turn(
         CHAT_ID, 1, 1, "user", "[фото]", datetime.now(tz=UTC), photo_path="key1"
     )
-    result = await tools.tool_look_at_photo(
-        _ctx(store, node_link=None), {"question": "что там?"}
-    )
+    result = await tools.tool_look_at_photo(_ctx(store, node_link=None), {"question": "что там?"})
     assert "ошибка" in result
 
 
@@ -64,7 +56,6 @@ async def test_look_at_photo_success_calls_service_with_stored_key(store):
     )
 
     assert result == "на фото рыжий кот"
-    # Этап 42.2: второй вызов — piggyback в graph_memory (см. тест ниже).
     assert len(link.calls) == 2
     action, args, dst = link.calls[0]
     assert action == tools.ACTION_LOOK_AT_PHOTO
@@ -102,8 +93,6 @@ def _tiny_png() -> bytes:
 
 
 async def test_look_at_photo_sees_alfreds_own_snapshot(store):
-    """2026-10-02: Альфред не видел своих снимков. whose=mine — последняя
-    своя картинка, байтами из базы (как видел гость)."""
     image_id = await _alfred_picture(store)
     link = _FakeLookNodeLink(response="на снимке камин")
     result = await tools.tool_look_at_photo(
@@ -115,7 +104,6 @@ async def test_look_at_photo_sees_alfreds_own_snapshot(store):
 
 
 async def test_look_at_photo_reply_to_alfreds_picture_takes_it(store):
-    """Гость ответил на картинку Альфреда — тул берёт её, даже без whose."""
     await store.record_ai_turn(
         CHAT_ID, 1, 1, "user", "[фото]", datetime.now(tz=UTC), photo_path="111_1"
     )
@@ -135,17 +123,12 @@ async def test_look_at_photo_mine_without_pictures_is_honest(store):
 
 
 async def test_look_at_photo_piggybacks_a_graph_episode(store):
-    """Этап 42.2: успешное повторное распознавание фото дублируется в
-    graph_memory как ACTION_ADD_EPISODE с source=look_at_photo — тем же
-    best-effort приёмом, что и remember (тест выше в модуле)."""
     await store.record_ai_turn(
         CHAT_ID, 1, 1, "user", "[фото]", datetime.now(tz=UTC), photo_path="111_1"
     )
     link = _FakeLookNodeLink(response="на фото рыжий кот")
 
-    await tools.tool_look_at_photo(
-        _ctx(store, node_link=link), {"question": "какого цвета кот?"}
-    )
+    await tools.tool_look_at_photo(_ctx(store, node_link=link), {"question": "какого цвета кот?"})
 
     episode_action, episode_args, episode_dst = link.calls[1]
     assert episode_action == "add_episode"
@@ -157,7 +140,6 @@ async def test_look_at_photo_piggybacks_a_graph_episode(store):
 
 
 async def test_look_at_photo_survives_graph_memory_being_asleep(store):
-    """Этап 42.2: сбой piggyback не должен портить уже успешный ответ."""
     await store.record_ai_turn(
         CHAT_ID, 1, 1, "user", "[фото]", datetime.now(tz=UTC), photo_path="111_1"
     )
@@ -195,7 +177,5 @@ async def test_look_at_photo_unavailable_returns_apology_not_exception(store):
     )
     link = _FakeLookNodeLink(raises=TimeoutError("узел не отвечает"))
 
-    result = await tools.tool_look_at_photo(
-        _ctx(store, node_link=link), {"question": "что там?"}
-    )
+    result = await tools.tool_look_at_photo(_ctx(store, node_link=link), {"question": "что там?"})
     assert "не получилось" in result

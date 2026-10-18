@@ -1,7 +1,3 @@
-"""Тул guests_list: справочник гостей для владельца (право invite, как у
-самой команды /guests — см. bot/guest_rights.py, гостям это право точечно
-не выдаётся)."""
-
 from __future__ import annotations
 
 from sa_home_bot.bot import tools as ai_tools
@@ -43,18 +39,12 @@ def _ctx(**over):
     return ai_tools.ToolContext(**defaults)
 
 
-# --- права -----------------------------------------------------------------
-
-
 def test_guests_list_requires_invite_right():
     owner = _book().for_chat(OWNER_CHAT)
     guest = _book().for_chat(NATASHA_CHAT)
     assert "guests_list" in ai_tools.tools_for(owner).handlers
     assert "guests_list" not in ai_tools.tools_for(guest).handlers
     assert "guests_list" not in ai_tools.tools_for(None).handlers
-
-
-# --- сам тул -----------------------------------------------------------------
 
 
 async def test_guests_list_shows_all_by_default():
@@ -71,20 +61,13 @@ async def test_guests_list_filters_by_right():
 
 
 async def test_guests_list_bare_service_name_matches_any_right_on_it():
-    # Живой баг 2026-08-06: модель передала right="vpn" (голое имя службы,
-    # а не точная строка права вроде "usage@vpn") — фильтр молча ничего не
-    # находил, хотя гости с VPN-правами были, и "гостей с такими условиями
-    # нет" выглядело как правда. Голое имя без "@" теперь значит "есть
-    # хоть какое-то право на эту службу".
     book = SubscriptionBook.from_config(
         [SubscriptionConfig(name="me", chat_id=OWNER_CHAT, allowed_commands=["*"])],
         [
             GuestSubscriptionConfig(
                 name="Наташа", chat_id=NATASHA_CHAT, allowed_commands=["chat@llm", "usage@vpn"]
             ),
-            GuestSubscriptionConfig(
-                name="Игорь", chat_id=IGOR_CHAT, allowed_commands=["chat@llm"]
-            ),
+            GuestSubscriptionConfig(name="Игорь", chat_id=IGOR_CHAT, allowed_commands=["chat@llm"]),
         ],
     )
     result = await ai_tools.tool_guests_list(_ctx(book=book), {"right": "vpn"})
@@ -93,8 +76,6 @@ async def test_guests_list_bare_service_name_matches_any_right_on_it():
 
 
 async def test_guests_list_bare_service_name_still_honours_exact_right():
-    # Точная форма "action@service" продолжает работать как раньше — новая
-    # терпимость только добавляет ветку для голого имени, не подменяет её.
     result = await ai_tools.tool_guests_list(_ctx(), {"right": "recall@memory"})
     assert "Наташа" in result
     assert "Игорь" not in result
@@ -113,19 +94,14 @@ async def test_guests_list_unavailable_without_book():
     assert result.startswith("недоступно")
 
 
-# --- компактность и пагинация (живая находка 2026-08-06: без этого модель
-# сама обрезала пересказ до нескольких гостей и не говорила, что список
-# неполный) -------------------------------------------------------------
-
-
 async def test_guests_list_is_always_compact_no_right_labels():
     result = await ai_tools.tool_guests_list(_ctx(), {})
-    assert "прав: 2" in result  # Наташа: chat@llm, recall@memory
+    assert "прав: 2" in result
     assert "Разговор с Альфредом" not in result
 
     filtered = await ai_tools.tool_guests_list(_ctx(), {"right": "chat@llm"})
     assert "Разговор с Альфредом" not in filtered
-    assert "прав: 1" in filtered  # Игорь: только chat@llm
+    assert "прав: 1" in filtered
 
 
 async def test_guests_list_pagination_notes_when_more_remain():
@@ -149,10 +125,6 @@ async def test_guests_list_no_pagination_note_when_all_shown():
 
 
 async def test_guests_list_works_from_self_scheduled_remind_without_notifier():
-    """Служба tasks (self-scheduled remind, живая находка 2026-08-06) не
-    даёт notifier/store вовсе, но свою SubscriptionBook теперь передаёт (см.
-    tasks/service.py::_fire_chat_loop) — только книга и нужна, тул читает
-    только конфиг подписок, а не живой Telegram."""
     ctx = ai_tools.ToolContext(
         chat_id=OWNER_CHAT,
         dialogue_id=1,
