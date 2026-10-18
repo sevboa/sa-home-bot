@@ -1,11 +1,3 @@
-"""Дельта SMART-снимков → событие деградации/восстановления. Чистые функции.
-
-Отслеживаемые атрибуты — счётчики деградации, которые в исправном диске НЕ
-растут; любой рост = тревога, снижение (например перезапись pending-сектора) =
-восстановление. Здесь только сравнение двух снимков; чтение smartctl — в
-``sensors.disks``. Без БД, сети и aiogram — тестируется изолированно.
-"""
-
 from __future__ import annotations
 
 from sa_home_bot.domain.models import (
@@ -19,35 +11,17 @@ from sa_home_bot.domain.models import (
     SmartSnapshot,
 )
 
-# Отслеживаемые SMART-атрибуты: id -> человекочитаемое имя. Все read-only,
-# чистые счётчики (в норме постоянны); их рост — надёжный ранний признак
-# умирающего диска. Значение берём как ведущее число ``raw.string`` — ``raw.value``
-# у части дисков пакует доп. поля (напр. Hitachi отдаёт 589855 вместо 31).
-#
-# Атрибут 187 (Reported_Uncorrect) сознательно НЕ отслеживаем: его raw ненадёжен
-# (65535-заглушка / упакованное значение у разных вендоров) и давал бы ложные
-# тревоги. Его реальная деградация всё равно всплывает через 197/198 и общий
-# smart_status (см. domain.render._health_word / sensors.disks.parse_health).
 MONITORED_SMART_ATTRS: dict[int, str] = {
-    5: "Reallocated_Sector_Ct",  # переназначенные сектора
-    197: "Current_Pending_Sector",  # кандидаты на переназначение (сбойные)
-    198: "Offline_Uncorrectable",  # нечитаемые при offline-скане
-    199: "UDMA_CRC_Error_Count",  # ошибки интерфейса (кабель/USB-мост)
+    5: "Reallocated_Sector_Ct",
+    197: "Current_Pending_Sector",
+    198: "Offline_Uncorrectable",
+    199: "UDMA_CRC_Error_Count",
 }
 
-# Порядок классов здоровья по тяжести: ok < warning < failed.
 _HEALTH_RANK = {DISK_OK: 0, DISK_WARN: 1, DISK_FAIL: 2}
 
 
 def diff_smart(prev: SmartSnapshot | None, curr: SmartSnapshot) -> SmartChange | None:
-    """Сравнить прошлый и текущий снимок; вернуть событие при значимом изменении.
-
-    Первое наблюдение (``prev is None``) события не даёт — только фиксирует
-    baseline. Рост любого счётчика или ухудшение класса здоровья → degraded
-    (деградация доминирует). Иначе снижение счётчика/улучшение класса →
-    recovered. Если значимых сигналов нет — None (в т.ч. когда SMART только стал
-    доступен: None → ok не считается изменением).
-    """
     if prev is None:
         return None
 

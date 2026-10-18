@@ -1,10 +1,3 @@
-"""Политика порогов: классификация показания относительно зоны нагрева.
-
-MVP — `FixedThresholdPolicy` (фиксированные пороги из конфига). Этап 2 добавит
-`BaselinePolicy` со скользящей статистикой; контракт `ThresholdPolicy` не
-изменится, job и БД-схема тоже.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,22 +5,18 @@ from typing import Protocol
 
 from sa_home_bot.domain.models import SensorReading
 
-# Зоны относительно порогов (с учётом гистерезисной полосы).
-BAND_OVER = "over"  # temp >= warn — тянет в alerting
-BAND_UNDER = "under"  # temp <= warn - delta — тянет в ok
-BAND_MID = "mid"  # мёртвая зона между ними — сбрасывает счётчик гистерезиса
+BAND_OVER = "over"
+BAND_UNDER = "under"
+BAND_MID = "mid"
 
 
 class ThresholdPolicy(Protocol):
     def band(self, reading: SensorReading) -> str:
-        """Вернуть BAND_OVER | BAND_UNDER | BAND_MID для показания."""
         ...
 
 
 @dataclass(frozen=True)
 class FixedThresholdPolicy:
-    """Сравнение с фиксированным warn-порогом и гистерезисной дельтой."""
-
     warn_c: float
     crit_c: float
     hysteresis_delta_c: float
@@ -43,25 +32,13 @@ class FixedThresholdPolicy:
 
 @dataclass(frozen=True)
 class BaselineStats:
-    """Скользящая статистика показаний компонента за окно (из таблицы readings)."""
-
     count: int
     mean: float
-    std: float  # стандартное отклонение (популяционное)
+    std: float
 
 
 @dataclass(frozen=True)
 class BaselinePolicy:
-    """Адаптивный порог: аномальное отклонение от нормальной температуры.
-
-    Порог = ``min(warn_c, mean + k_sigma * max(std, min_std_c))``. То есть baseline
-    может только опустить порог ниже фиксированного ``warn_c`` (раньше поймать
-    перегрев на обычно холодной машине), но никогда не поднимает его выше — ``warn_c``
-    остаётся жёсткой страховкой. Пока накоплено меньше ``min_samples`` показаний,
-    работает как ``FixedThresholdPolicy`` (холодный старт). Гистерезис — тот же, что
-    у фиксированной политики: полоса ``[warn - delta, warn)`` сбрасывает счётчик.
-    """
-
     warn_c: float
     crit_c: float
     hysteresis_delta_c: float
@@ -88,8 +65,6 @@ class BaselinePolicy:
 
 @dataclass(frozen=True)
 class ComponentPolicy:
-    """Политика + параметры анти-дребезга для одного вида компонента."""
-
     policy: ThresholdPolicy
     consecutive_to_alert: int
     consecutive_to_clear: int

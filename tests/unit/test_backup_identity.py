@@ -1,5 +1,3 @@
-"""Бэкап статической identity vpn-сервера (39.0.8(b)): сбор, ревизии, репликация напарнику."""
-
 from __future__ import annotations
 
 import json
@@ -81,9 +79,6 @@ def _publisher(settings, tmp_path, node="jeeves", awg=None, xray=XRAY):
     return pub, store
 
 
-# --- сбор -------------------------------------------------------------------
-
-
 def test_collect_has_all_static_parts(tmp_path):
     doc = collect_identity(_settings(tmp_path), awg_private_key=AWG_KEY, xray_config=XRAY)
     assert doc["awg"]["private_key"] == AWG_KEY
@@ -113,9 +108,6 @@ def test_collect_fails_without_secrets(tmp_path):
         collect_identity(_settings(tmp_path), awg_private_key="", xray_config=XRAY)
     with pytest.raises(IdentityError):
         collect_identity(_settings(tmp_path), awg_private_key=AWG_KEY, xray_config={})
-
-
-# --- публикация и стабильность ревизии --------------------------------------
 
 
 async def test_publish_writes_sealed_package_readable_only_by_alfred(tmp_path):
@@ -168,9 +160,6 @@ def test_canonical_bytes_is_deterministic():
     assert canonical_bytes({"b": 1, "a": 2}) == canonical_bytes({"a": 2, "b": 1})
 
 
-# --- включение --------------------------------------------------------------
-
-
 def test_disabled_without_key_or_partner(tmp_path):
     assert publishing_enabled(_settings(tmp_path), True)
     assert not publishing_enabled(_settings(tmp_path, pub=False), True)
@@ -198,9 +187,6 @@ def test_bad_recipient_key_disables_publishing_not_the_node(tmp_path):
     assert "before_announce" not in hooks
 
 
-# --- репликация к напарнику -------------------------------------------------
-
-
 def _node(tmp_path, node, partner, peers=(), assignments=("vpn",), awg=None, **kw):
     settings = _settings(tmp_path, node=node, partner=partner, **kw)
     store = InstanceStore(tmp_path / node / "instances", node)
@@ -210,7 +196,7 @@ def _node(tmp_path, node, partner, peers=(), assignments=("vpn",), awg=None, **k
         events.append((t, d))
 
     hooks = replicator_hooks(settings, store, node, vpn_assigned=True)
-    if "before_announce" in hooks:  # подменяем чтение секретов
+    if "before_announce" in hooks:
         pub = IdentityPublisher(
             settings, store, node,
             read_awg_private_key=awg or AwgKey(), read_xray=lambda: XRAY,
@@ -239,7 +225,7 @@ def _source_peer(rep, store, node="jeeves"):
 async def test_partner_stores_sealed_copy_passively(tmp_path):
     src, src_store, events, _ = _node(tmp_path, "jeeves", "wooster")
     await src.announce_local_changes()
-    assert [e[1]["service"] for e in events] == [IDENTITY_SERVICE]  # объявление без секрета
+    assert [e[1]["service"] for e in events] == [IDENTITY_SERVICE]
     assert "content" not in events[0][1]
 
     peer = _source_peer(src, src_store)
@@ -255,7 +241,6 @@ async def test_partner_stores_sealed_copy_passively(tmp_path):
     assert sealed_file.stat().st_mode & 0o777 == 0o600
     doc = open_identity(PRIV, stored.blob)
     assert doc["awg"]["private_key"] == AWG_KEY
-    # пассивность: служба vpn на напарнике не тронута, слот не создан
     assert dst_store.read_meta(IDENTITY_SERVICE, "jeeves").rev == 1
 
 
@@ -274,7 +259,6 @@ async def test_announced_event_triggers_pull_on_partner_only(tmp_path):
     await partner.on_config_changed(env)
     assert p_store.read_package(IDENTITY_SERVICE, "jeeves") is not None
 
-    # alfred (не напарник: partner не задан) и нода с другим партнёром — не тянут
     stranger, s_store, _, _ = _node(tmp_path, "alfred", "", peers=[peer], assignments=("monitor",))
     await stranger.on_config_changed(env)
     other, o_store, _, _ = _node(tmp_path, "mycraft", "someone", peers=[peer])
@@ -293,20 +277,17 @@ async def test_unchanged_identity_does_not_reannounce_or_restore(tmp_path):
 
 
 async def test_rebuilt_source_with_restarted_revisions_overrides_stale_copy(tmp_path):
-    """jeeves пересобрали: ревизия снова 1, но свежее — напарник обязан принять."""
     src, src_store, _, _ = _node(tmp_path, "jeeves", "wooster")
     await src.announce_local_changes()
     dst, dst_store, _, _ = _node(
         tmp_path, "wooster", "jeeves", peers=[_source_peer(src, src_store)]
     )
     await dst.sync_from_peers()
-    # у напарника «старая» копия с высокой ревизией
     old = dst_store.read_meta(IDENTITY_SERVICE, "jeeves")
     from dataclasses import replace
 
     dst_store._write_meta(replace(old, rev=9, updated_at="2000-01-01T00:00:00+00:00"))
 
-    # новая сборка jeeves с другой identity (другой ключ) — с нуля, ревизия 1
     import shutil
 
     shutil.rmtree(tmp_path / "jeeves" / "instances")
@@ -320,7 +301,6 @@ async def test_rebuilt_source_with_restarted_revisions_overrides_stale_copy(tmp_
     assert open_identity(PRIV, store.load_identity("jeeves").blob)["awg"]["private_key"].startswith(
         "NEWKEY"
     )
-    # прежняя копия не потеряна — лежит в истории
     assert len(store.history("jeeves")) == 1
 
 

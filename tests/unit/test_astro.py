@@ -1,5 +1,3 @@
-"""astro: солнце и луна без сети (опорные значения — таблицы восхода/фаз)."""
-
 from datetime import UTC, date, datetime
 
 from sa_home_bot import astro
@@ -23,7 +21,6 @@ def test_sun_day_and_noon_altitude():
     assert day.sunrise is not None and day.sunset is not None
     assert day.sunrise < day.noon < day.sunset
     altitude, azimuth = astro.sun_position(*ALMATY, day.noon)
-    # полдень: 90 − широта + склонение (≈ −6° в начале октября), солнце на юге
     assert 39 < altitude < 43
     assert 175 < azimuth < 185
 

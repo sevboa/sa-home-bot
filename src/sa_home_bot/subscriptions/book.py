@@ -1,12 +1,3 @@
-"""SubscriptionBook — реестр подписок: владельческие из конфига + гостевые.
-
-Владельческие подписки по-прежнему иммутабельны: правка = правка конфига и
-рестарт. Гостевые (выданные инвайт-кодом, AUTHORIZATION.md §10) добавляются и
-снимаются в рантайме — иначе приглашённому пришлось бы ждать перезапуска бота
-ровно в тот момент, когда его только что впустили. Персистентность у них
-отдельная — гостевой пакет (`subscriptions/guests.py`), книга её не касается.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -27,14 +18,10 @@ class ValidationIssue:
     reason: str
 
 
-# Права, которых больше нет: снимаются с гостя при загрузке пакета (и
-# пропадают из файла при следующей его перезаписи ботом). tell_guests@llm —
-# обход знакомства в tell, убран 2026-09-27 (Этап 46).
 RETIRED_RIGHTS = frozenset({"tell_guests@llm"})
 
 
 def guest_subscription(cfg: GuestSubscriptionConfig) -> Subscription:
-    """Гостевая запись пакета → подписка (одно место сборки на все пути)."""
     return Subscription(
         name=cfg.name,
         chat_id=cfg.chat_id,
@@ -69,9 +56,6 @@ class SubscriptionBook:
         ]
         known = {s.chat_id for s in subs}
         for g in guests:
-            # Владельческая подписка старше гостевой: если админ вписал этот
-            # чат руками, гостевая запись — след прошлого приглашения, и
-            # молча урезать человеку права она не должна.
             if g.chat_id in known:
                 log.warning(
                     "Гостевая подписка chat_id=%s игнорируется — этот чат есть в конфиге",
@@ -91,17 +75,11 @@ class SubscriptionBook:
         return self._by_chat.get(chat_id)
 
     def add(self, sub: Subscription) -> None:
-        """Добавить подписку в рантайме (гость по инвайту).
-
-        Повторная выдача на тот же чат заменяет запись — так активация кода
-        идемпотентна: гость, приславший второй код, не получает дубль.
-        """
         self.remove(sub.chat_id)
         self._subs.append(sub)
         self._by_chat[sub.chat_id] = sub
 
     def remove(self, chat_id: int) -> bool:
-        """Убрать подписку (отзыв гостя). False — такой не было."""
         if chat_id not in self._by_chat:
             return False
         del self._by_chat[chat_id]
@@ -120,14 +98,6 @@ class SubscriptionBook:
         self._subs = [broken if s.chat_id == chat_id else s for s in self._subs]
 
     async def validate_on_startup(self, bot) -> list[ValidationIssue]:
-        """Проверить доступность чатов через bot.get_chat; недоступные → broken.
-
-        get_chat идёт через bounded retry (bot/telegram_retry.py, короткий
-        бюджет — сеть здесь уже подтверждена предыдущим успешным get_me()):
-        транзиентный сетевой блип не должен молча запирать владельца broken-
-        подпиской до следующего рестарта бота (живой инцидент 2026-08-12).
-        После исчерпания попыток broken по-прежнему означает "недоступен".
-        """
         issues: list[ValidationIssue] = []
         for sub in list(self._subs):
             try:

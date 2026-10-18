@@ -1,18 +1,3 @@
-"""Восстановление vpn-сервера из бэкапа напарника — сторона alfred (39.0.8(d)).
-
-alfred — единственный, кто может расшифровать копии (``[backup].private_key_file``).
-Он забирает запечатанные блобы у ноды-хранителя (действия ``backup_store_list`` /
-``backup_store_get``, ``backup/serve.py``), расшифровывает и собирает **бандл**:
-
-    {format, node, identity_label, snapshot_label, identity, snapshot}
-
-— дальше бандл либо раскладывается в каталог (``--dry-run``: проверка бэкапа без
-касания нод), либо уезжает на целевую ноду по ssh и применяется там
-(``backup/apply.py``). Расшифрованная identity — это приватные ключи сервера, поэтому
-канал — ssh (ключи, а не токен роя, который знает каждая нода), а на диске она
-лежит только 0600 и удаляется после применения.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -35,10 +20,7 @@ Ask = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
 class RestoreError(Exception):
-    """Восстановление невозможно или отказано (читаемая причина — в тексте)."""
-
-
-# --- забор и расшифровка --------------------------------------------------------
+    pass
 
 
 async def list_versions(ask: Ask, node: str) -> dict[str, Any]:
@@ -54,12 +36,6 @@ async def _fetch(ask: Ask, node: str, kind: str, label: str) -> tuple[bytes, dic
 
 
 def pick_snapshot(versions: list[dict], requested: str | None) -> str | None:
-    """Метка снапшота для восстановления; None — снапшотов у хранителя нет.
-
-    По умолчанию ``latest``, но пустой ``latest`` при наличии ``last_nonempty`` —
-    отказ: пересобранная нода публикует пустой снапшот, и молча «восстановить» его
-    значило бы потерять всех гостей.
-    """
     by_label = {v["label"]: v for v in versions}
     if requested:
         if requested not in by_label:
@@ -88,7 +64,6 @@ async def fetch_bundle(
     snapshot_label: str | None = None,
     with_snapshot: bool = True,
 ) -> dict[str, Any]:
-    """Забрать и расшифровать identity (+ снапшот) ноды ``node`` в бандл."""
     listing = await list_versions(ask, node)
     if not any(v["label"] == identity_label for v in listing.get("identity", [])):
         raise RestoreError(f"у хранителя нет identity {identity_label!r} для {node}")
@@ -123,11 +98,7 @@ async def fetch_bundle(
     }
 
 
-# --- сводка (без секретов) ---------------------------------------------------------
-
-
 def awg_public_key(private_key_b64: str) -> str:
-    """Публичный ключ WireGuard по приватному (curve25519 — то же, что X25519)."""
     return sealed.dump_key(sealed.public_from_private(sealed.load_key(private_key_b64)))
 
 
@@ -138,7 +109,6 @@ def _fingerprint(secret: str) -> str:
 
 
 def summarize_bundle(bundle: dict[str, Any]) -> str:
-    """Человекочитаемая сводка: что будет восстановлено. Секреты — только отпечатки."""
     ident = bundle["identity"]
     lines = [f"Нода: {bundle['node']}", f"Identity: {bundle['identity_label']}"]
     meta = bundle.get("identity_meta") or {}
@@ -186,9 +156,6 @@ def snapshot_skipped_tables(snap: dict[str, Any]) -> set[str]:
     return set(snap["tables"]) & SKIP_TABLES
 
 
-# --- каталог (dry-run) и перенос -----------------------------------------------------
-
-
 def _write_private(path: Path, data: bytes) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as fh:
@@ -201,11 +168,6 @@ def _dump(obj: Any) -> bytes:
 
 
 def write_dir(directory: Path, bundle: dict[str, Any]) -> list[Path]:
-    """Разложить бандл: ``identity.json``, ``snapshot.json``, ``meta.json``, ``summary.txt``.
-
-    Каталог 0700, файлы 0600. Непустой существующий каталог — отказ (не мешаем
-    разные бэкапы и не затираем чужое).
-    """
     directory = Path(directory).expanduser()
     if directory.exists() and any(directory.iterdir()):
         raise RestoreError(f"каталог {directory} не пуст — укажите новый или пустой")
@@ -233,7 +195,6 @@ def bundle_to_bytes(bundle: dict[str, Any]) -> bytes:
 
 
 def load_bundle(path: Path) -> dict[str, Any]:
-    """Бандл из одного JSON-файла или из каталога ``write_dir``."""
     path = Path(path).expanduser()
     try:
         if path.is_dir():
@@ -251,7 +212,6 @@ def load_bundle(path: Path) -> dict[str, Any]:
 
 
 def stage_over_ssh(host: str, payload: bytes, remote_nodectl: str = REMOTE_NODECTL) -> None:
-    """Положить бандл на целевую ноду (stdin ssh → ``nodectl restore-stage``, 0600)."""
     cmd = f"{remote_nodectl} restore-stage"
     res = subprocess.run(["ssh", host, cmd], input=payload, capture_output=True)
     if res.returncode != 0:
@@ -262,6 +222,5 @@ def stage_over_ssh(host: str, payload: bytes, remote_nodectl: str = REMOTE_NODEC
 
 
 def apply_over_ssh(host: str, remote_nodectl: str = REMOTE_NODECTL, extra: str = "") -> int:
-    """Интерактивно (нужен tty под пароль sudo): ``nodectl restore-apply --yes``."""
     cmd = f"{remote_nodectl} restore-apply --yes {extra}".strip()
     return subprocess.run(["ssh", "-t", host, cmd]).returncode

@@ -1,10 +1,3 @@
-"""Идемпотентное применение схемы из schema.sql.
-
-CREATE TABLE IF NOT EXISTS в schema.sql не подхватывает новые колонки на уже
-существующей таблице (БД в проде не пересоздаётся) — такие точечные
-довески оформляются здесь через ALTER TABLE с проверкой наличия колонки.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -20,7 +13,6 @@ def _load_schema() -> str:
 
 
 async def _add_column_if_missing(db: Database, table: str, column: str, decl: str) -> bool:
-    """True — колонку только что добавили (можно бэкфиллить)."""
     cur = await db.conn.execute(f"PRAGMA table_info({table})")
     existing = {row["name"] for row in await cur.fetchall()}
     if column in existing:
@@ -33,29 +25,12 @@ async def _add_column_if_missing(db: Database, table: str, column: str, decl: st
 async def apply_migrations(db: Database) -> None:
     schema = _load_schema()
     await db.conn.executescript(schema)
-    # ai_turns.user_id/user_name — добавлены 2026-07-24 (см. schema.sql).
     await _add_column_if_missing(db, "ai_turns", "user_id", "INTEGER")
     await _add_column_if_missing(db, "ai_turns", "user_name", "TEXT")
-    # ai_turns.photo_path — добавлена 2026-08-10, мультимодальный /ai (см. schema.sql).
     await _add_column_if_missing(db, "ai_turns", "photo_path", "TEXT")
-    # vpn_peers.server — добавлена 2026-09-05, два VPN-сервера (этап 39). Бэкфилл
-    # NULL → имя своей ноды делает vpn/service.py::backfill_server (там есть
-    # [node].id; в общей миграции хардкодить "jeeves" не хочется).
     await _add_column_if_missing(db, "vpn_peers", "server", "TEXT")
-    # vpn_peers.transport — добавлена 2026-09-10, второй транспорт службы vpn
-    # (VLESS+Reality). DEFAULT 'awg' верно бэкфиллит все существующие пиры
-    # (до этого транспорт был только один — AmneziaWG). См. schema.sql.
     await _add_column_if_missing(db, "vpn_peers", "transport", "TEXT NOT NULL DEFAULT 'awg'")
-    # vpn_peers.server_pubkey — добавлена 2026-10-05 (39.0.8(e)): ключ awg-сервера
-    # на момент выдачи, для детектора сломанных устройств. См. schema.sql.
     await _add_column_if_missing(db, "vpn_peers", "server_pubkey", "TEXT")
-    # vpn_check_states: PK (node, target) → (node, server, transport, target) —
-    # этап 39.0.7, 2026-09-18 (несколько VPN-серверов и транспортов). Старую
-    # форму таблицы (без server/transport) ALTER TABLE не спасает — PK не
-    # поменять, а бэкфиллить некуда (в старых строках сервер/транспорт не
-    # записаны, а данные проверки — оперативные, не жалко). Пересоздаём: если
-    # таблица есть и колонки server ещё нет — снести и дать schema.sql выше
-    # создать заново в новой форме.
     cur = await db.conn.execute("PRAGMA table_info(vpn_check_states)")
     existing = {row["name"] for row in await cur.fetchall()}
     if existing and "server" not in existing:
@@ -64,17 +39,11 @@ async def apply_migrations(db: Database) -> None:
         log.info(
             "Миграция: vpn_check_states пересоздана под ключ (node, server, transport, target)"
         )
-    # pending_actions.welcome_message_id — добавлена 2026-09-27, поздравление
-    # адресату после «Принять» (Этап 46, см. schema.sql). Принятые ДО этого
-    # формы поздравления не предполагали — помечаем 0 («не положено»), иначе
-    # recover() дослал бы адресату заглушку и оповещение спустя часы.
     if await _add_column_if_missing(db, "pending_actions", "welcome_message_id", "INTEGER"):
         await db.conn.execute(
             "UPDATE pending_actions SET welcome_message_id=0 WHERE status='accepted'"
         )
     await _migrate_guest_relationships_check(db, schema)
-    # images.purpose/params — добавлены 2026-09-29, отладочный /draw (Этап 49).
-    # DEFAULT 'chat' верно бэкфиллит всё нарисованное до того (см. schema.sql).
     await _add_column_if_missing(db, "images", "purpose", "TEXT NOT NULL DEFAULT 'chat'")
     await _add_column_if_missing(db, "images", "params", "TEXT")
     await _backfill_ai_turns_fts(db)
@@ -82,19 +51,10 @@ async def apply_migrations(db: Database) -> None:
     log.info("Схема БД применена")
 
 
-# Типы связи, которых больше нет (Этап 46, 2026-09-27: связь одна —
-# знакомство). Их присутствие в CHECK живой таблицы значит «схема до
-# этапа 46» — миграция ниже пересоздаёт таблицу с CHECK только на
-# 'acquaintance' и переписывает старые строки в знакомство.
 _LEGACY_RELATION_TYPES = ("friend", "family", "spouse")
 
 
 async def _migrate_guest_relationships_check(db: Database, schema: str) -> None:
-    """SQLite не умеет ALTER CHECK — таблица хранит реальные подтверждённые
-    связи (в отличие от vpn_check_states выше, это не оперативные данные),
-    поэтому не дропаем, а пересоздаём с переносом строк. Любая прежняя
-    связь (друг/знакомый/родство/супруг(а), в том числе самая первая схема
-    42.6.1) становится знакомством: знали друг друга — значит знакомы."""
     cur = await db.conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='guest_relationships'"
     )
@@ -114,11 +74,6 @@ async def _migrate_guest_relationships_check(db: Database, schema: str) -> None:
 
 
 async def _backfill_ai_turns_fts(db: Database) -> None:
-    """Этап 50 (2026-09-30): ходы /ai, записанные до появления ai_turns_fts,
-    в индекс не попали (триггер в schema.sql ловит только новые записи) —
-    заливаем их один раз (с той же заменой «ё» → «е», что и триггер).
-    Признак «ещё не заливали» — пустой индекс при непустой ai_turns: после
-    заливки и дальше триггер держит их вровень."""
     cur = await db.conn.execute("SELECT 1 FROM ai_turns_fts LIMIT 1")
     if await cur.fetchone() is not None:
         return

@@ -1,5 +1,3 @@
-"""Тексты сообщений о событиях здоровья (HTML). Без БД и aiogram."""
-
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -28,6 +26,7 @@ from sa_home_bot.domain.models import (
     PowerEvent,
     SmartChange,
 )
+from sa_home_bot.utils.timefmt import format_dhms, format_local
 
 _KIND_WORD_EVENT = {KIND_CPU: "CPU", KIND_GPU: "GPU"}
 
@@ -37,10 +36,9 @@ def _kind_word(kind: str) -> str:
 
 
 def render_event(event: Event) -> str:
-    """Текст уведомления для события перегрева/возврата к норме."""
     label = escape(event.label)
     temp = f"{event.temperature_c:.1f}°C"
-    when = event.at.astimezone().strftime("%H:%M:%S")
+    when = format_local(event.at, "%H:%M:%S")
     kind = _kind_word(event.kind)
     body = f"\nТемпература: <b>{temp}</b>\nВремя: {when}"
     if event.type == EVENT_OVERHEAT_STARTED:
@@ -51,17 +49,15 @@ def render_event(event: Event) -> str:
 
 
 def render_host_event(event: HostEvent) -> str:
-    """Текст уведомления о host-метрике VPS (steal/iowait/память/…)."""
     label = escape(event.label)
     val = fmt_host_value(event.value, event.unit)
-    when = event.at.astimezone().strftime("%H:%M:%S")
+    when = format_local(event.at, "%H:%M:%S")
     if event.type == EVENT_HOST_DEGRADED:
         hint = f" — {escape(event.hint)}" if event.hint else ""
         return f"⚠️ <b>{label}: {val}</b>{hint}\nВремя: {when}"
     return f"✅ <b>{label}</b> вернулся к норме ({val})\nВремя: {when}"
 
 
-# Метрики карточки VPS-ноды (в этом порядке, по пунктам).
 _HOST_CARD_METRICS = (
     "steal_pct",
     "iowait_pct",
@@ -89,21 +85,16 @@ _HOST_SHORT_LABEL = {
 
 
 def render_host_line(state: HostMetricState) -> str:
-    """Один пункт host-метрики в карточке ноды."""
     mark = "⚠️ " if state.status == ALERTING else ""
     short = _HOST_SHORT_LABEL.get(state.metric, state.label)
     val = fmt_host_value(state.value, state.unit)
     suffix = ""
     if state.status == ALERTING and state.alerting_since is not None:
-        suffix = f" (с {state.alerting_since.astimezone().strftime('%H:%M')})"
+        suffix = f" (с {format_local(state.alerting_since, '%H:%M')})"
     return f" • {mark}{short}: <b>{val}</b>{suffix}"
 
 
 def render_host_block(states: list[HostMetricState]) -> str:
-    """Здоровье VPS для карточки ноды — заголовок + метрики пунктами.
-
-    Заголовок ⚠️ вместо 📊, если хоть одна метрика в alerting. PSI/OOM в карточке
-    показываются только когда сами в alerting (иначе шумно)."""
     if not states:
         return ""
     by_metric = {s.metric: s for s in states}
@@ -115,7 +106,7 @@ def render_host_block(states: list[HostMetricState]) -> str:
         if st is not None:
             lines.append(render_host_line(st))
             shown.add(metric)
-    for st in alerting:  # алертящие метрики вне основного списка (psi/oom)
+    for st in alerting:
         if st.metric not in shown:
             lines.append(render_host_line(st))
     return "\n".join(lines)
@@ -129,7 +120,6 @@ def _health_word(health: str | None) -> str:
 
 
 def render_smart_change(change: SmartChange) -> str:
-    """Текст уведомления об изменении SMART-здоровья диска."""
     label = escape(change.label)
     if change.event_type == EVENT_SMART_DEGRADED:
         lines = [f"⚠️ <b>SMART: ухудшение</b> — диск «{label}»"]
@@ -147,45 +137,25 @@ def render_smart_change(change: SmartChange) -> str:
 
 
 def render_state_line(state: HealthState) -> str:
-    """Одна строка состояния компонента для /status."""
     icon = "🔥" if state.status == ALERTING else "✅"
     label = escape(state.label)
     temp = f"{state.temperature_c:.1f}°C"
     kind = _kind_word(state.kind)
     suffix = ""
     if state.status == ALERTING and state.alerting_since is not None:
-        suffix = f" с {state.alerting_since.astimezone().strftime('%H:%M:%S')}"
+        suffix = f" с {format_local(state.alerting_since, '%H:%M:%S')}"
     return f"{icon} {kind} «{label}»: <b>{temp}</b>{suffix}"
 
 
-def _fmt_dt(dt) -> str:
-    # last даёт время с локальным offset, journal — в UTC; приводим к единой
-    # локальной TZ процесса, чтобы обе метки печатались в одном поясе.
-    return dt.astimezone().strftime("%m/%d %H:%M")
+def _format_local_month_day_time(dt) -> str:
+    return format_local(dt, "%m/%d %H:%M")
 
 
-def _fmt_duration(td) -> str:
-    """Простой в d/h/m/s, только ненулевые единицы: «9m» / «8h 26m» / «1d 2h»."""
-    total = int(td.total_seconds())
-    if total < 0:
-        total = 0
-    days, rem = divmod(total, 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes, seconds = divmod(rem, 60)
-    parts = []
-    if days:
-        parts.append(f"{days}d")
-    if hours:
-        parts.append(f"{hours}h")
-    if minutes:
-        parts.append(f"{minutes}m")
-    if seconds or not parts:
-        parts.append(f"{seconds}s")
-    return " ".join(parts)
+def _format_dhms_en(td) -> str:
+    return format_dhms(td.total_seconds(), days="d", hours="h", minutes="m", secs="s")
 
 
-def _fmt_uptime_short(td) -> str:
-    """Аптайм одной крупнейшей единицей по-английски: «1 d» / «5 h» / «17 m»."""
+def _format_largest_unit_en(td) -> str:
     total = int(td.total_seconds())
     if total < 0:
         total = 0
@@ -198,20 +168,20 @@ def _fmt_uptime_short(td) -> str:
         return f"{hours} h"
     if minutes:
         return f"{minutes} m"
-    return "&lt;1 m"  # &lt; — «<» экранирован для HTML parse_mode
+    return "&lt;1 m"
 
 
 def render_outage_line(e: PowerEvent) -> str:
-    """Одна строка отключения: «⚡ 07/05 10:57 - 07/05 11:06 (9m)»."""
     icon = "🔌" if e.kind == POWER_CLEAN else "⚡"
-    down = _fmt_dt(e.down_at) if e.down_at else "?"
-    up = _fmt_dt(e.up_at) if e.up_at else "?"
-    tail = f" ({_fmt_duration(e.downtime)})" if e.downtime is not None else ""
+    down = _format_local_month_day_time(e.down_at) if e.down_at else "?"
+    up = _format_local_month_day_time(e.up_at) if e.up_at else "?"
+    tail = ""
+    if e.downtime is not None:
+        tail = f" ({_format_dhms_en(e.downtime)})"
     return f"{icon} {down} - {up}{tail}"
 
 
 def render_downtime(events: list[PowerEvent], offset: int = 0) -> str:
-    """Сообщение /downtime — страница отключений машины (постранично по 10)."""
     if not events:
         if offset:
             return "Дальше отключений нет."
@@ -227,7 +197,6 @@ def render_downtime(events: list[PowerEvent], offset: int = 0) -> str:
 
 
 def render_status_full(states: list[HealthState]) -> str:
-    """Подробный статус компонентов (/status_full) — по строке на компонент."""
     if not states:
         return "Пока нет данных — сканер ещё не снимал срез."
     alerting = [s for s in states if s.status == ALERTING]
@@ -239,19 +208,6 @@ def render_status_full(states: list[HealthState]) -> str:
 
 _DISK_ICON = {DISK_OK: "✅", DISK_WARN: "⚠️", DISK_FAIL: "❌"}
 
-# Пороги «настроения» (🥶/🙂/🥵/🔥) — те же warn_c/crit_c, что уже настроены в
-# config.sensors для реальных алертов (не независимая шкала): 🥵 совпадает с
-# приближением к предупреждению, 🔥 — с уже сработавшим алертом. Так эмодзи не
-# противоречит факту наличия/отсутствия уведомления.
-#
-# «Холодно» — порог ниже реальных алертов, датащитами не регламентируется
-# (нижний предел там 0°C, что бессмысленно как бытовой ориентир): для дисков —
-# обычная комнатная температура (по паспортам Seagate Momentus 5400.6 и Hitachi
-# Travelstar Z5K320 — рабочий диапазон 0-60°C, ниже комнатной работающий диск
-# практически не бывает); для CPU — измеренный холостой ход этой машины
-# 33-37°C (см. CLAUDE.md), Tjunction max Celeron N3350 ≈105°C; для GPU —
-# измеренный холостой ход Tesla V100 SXM2 на mycraft (33-41°C, см. память
-# tesla-v100-sxm2-thermal-check).
 _DISK_TEMP_COLD_C = 25.0
 _CPU_TEMP_COLD_C = 35.0
 _GPU_TEMP_COLD_C = 40.0
@@ -284,7 +240,6 @@ def _fmt_gb(nbytes: int) -> str:
 
 
 def _disk_usage(d: DiskSummary) -> str:
-    """Занятое место: «7 из 57 ГБ (10%)» (было — свободное; теперь занятое)."""
     if not d.total_bytes:
         return "не смонтирован"
     used = d.total_bytes - (d.free_bytes or 0)
@@ -292,19 +247,10 @@ def _disk_usage(d: DiskSummary) -> str:
     return f"{_fmt_gb(used)} из {_fmt_gb(d.total_bytes)} ГБ ({pct}%)"
 
 
-# Вид носителя → слово в заголовке строки диска.
 _KIND_WORD = {"hdd": "HDD", "ssd": "SSD", "nvme": "NVMe", "emmc": "eMMC"}
 
 
 def render_disk_line(d: DiskSummary, warn_c: float, crit_c: float) -> str:
-    """Строка диска: «NVMe Samsung 970» + «27°C 🥶| 117 из 245 ГБ (50%)».
-
-    У eMMC SMART физически нет — иконку здоровья не показываем вовсе
-    («eMMC: 7 из 57 ГБ (10%)»). У SMART-способных дисков ❔ значит ровно
-    «данных SMART нет» (нет прав/программы/холодный старт); причину объясняет
-    ⚠️-строка requirements в сводке. `warn_c`/`crit_c` — пороги алертов дисков
-    из config.sensors.disks (та же шкала, что и для реальных уведомлений).
-    """
     word = _KIND_WORD.get(d.kind, "HDD")
     is_emmc = d.kind == "emmc"
     heading = word if is_emmc else f"{word} {escape(d.model) if d.model else '?'}"
@@ -317,14 +263,6 @@ def render_disk_line(d: DiskSummary, warn_c: float, crit_c: float) -> str:
 
 
 def render_gpu_line(state: HealthState, warn_c: float, crit_c: float) -> str:
-    """Строка одной видеокарты: «✅ GPU Tesla V100-SXM2-16GB: 41.0°C 🙂».
-
-    В отличие от CPU (одна агрегированная строка по максимуму среди ядер/
-    сенсоров-однотипок), у GPU каждая карта — отдельное физическое устройство
-    с собственной идентичностью (например, V100 SXM2 и RTX 3060 вели себя
-    совершенно по-разному, пока обе временно стояли на mycraft на время
-    настройки Tesla) — поэтому строка на карту, не максимум по всем.
-    """
     label = escape(state.label)
     mood = _gpu_temp_mood(state.temperature_c, warn_c, crit_c)
     icon = "🔥" if state.status == ALERTING else "✅"
@@ -345,16 +283,9 @@ def render_status_summary(
     disk_warn_c: float,
     disk_crit_c: float,
 ) -> str:
-    """Краткая сводка (/status): время отчёта, аптайм, температуры, диски, отключение.
-
-    Порядок температурного блока — CPU → GPU → диски. `*_warn_c`/`*_crit_c` —
-    пороги алертов из config.sensors (те же, что уже настроены для реальных
-    уведомлений о перегреве/SMART) — используются и для эмодзи-«настроения»
-    температуры, чтобы иконка не противоречила факту срабатывания алерта.
-    """
-    lines = [now.astimezone().strftime("%Y-%m-%d %H:%M")]
+    lines = [format_local(now, "%Y-%m-%d %H:%M")]
     if uptime is not None:
-        lines.append(f"uptime: {_fmt_uptime_short(uptime)}")
+        lines.append(f"uptime: {_format_largest_unit_en(uptime)}")
     if last_outage is not None:
         lines.append(f"last off: {render_outage_line(last_outage)}")
 
@@ -377,16 +308,11 @@ def render_status_summary(
 
 def _fmt_run(run: dict) -> str:
     icon = {"ok": "✅", "error": "❌", "running": "⏳"}.get(run["status"], "•")
-    started = run["started_at"]
-    try:
-        started = datetime.fromisoformat(started).astimezone().strftime("%m-%d %H:%M:%S")
-    except (ValueError, TypeError):
-        pass
+    started = format_local(run["started_at"], "%m-%d %H:%M:%S", tolerant=True)
     return f"{icon} {run['job_type']} @ {started}"
 
 
 def render_stats(counts: dict, runs: list[dict]) -> str:
-    """Сводка прогонов сканера (/stats) из job_runs."""
     if not runs:
         return "Прогонов сканера ещё не было."
     total = sum(counts.values())

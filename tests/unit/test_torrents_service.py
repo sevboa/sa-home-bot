@@ -1,6 +1,3 @@
-"""Служба torrents: describe, добавление по magnet/URL и по base64-файлу,
-проверка допустимой директории, пауза/запуск раздач и свободное место."""
-
 import base64
 
 import pytest
@@ -122,8 +119,6 @@ def fake_qbittorrent(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def fake_disk(monkeypatch):
-    """Свободное место — не с машины, где идут тесты (на alfred /mnt/data
-    существует, в CI нет — иначе результат теста зависел бы от хоста)."""
     usage = {"free": 100 * GIB, "total": 300 * GIB}
     monkeypatch.setattr(
         torrents_service, "_disk_usage", lambda path: (usage["free"], usage["total"])
@@ -200,15 +195,12 @@ async def test_qbittorrent_api_error_becomes_internal(fake_qbittorrent):
             "add", {"source": "magnet:?xt=urn:btih:abc", "save_path": SAVE_DIRS[0]}
         )
     assert excinfo.value.code == ERR_INTERNAL
-    assert fake_qbittorrent.logged_out  # finally логаутится даже при ошибке
+    assert fake_qbittorrent.logged_out
 
 
 async def test_command_unknown_action_raises_value_error():
     with pytest.raises(ValueError):
         await TorrentsService(_settings()).run_command("remove", {})
-
-
-# --- list: read-only состояние закачек (для /ai-тула swarm_status) ---
 
 
 async def test_list_returns_narrow_slice_without_paths(fake_qbittorrent):
@@ -240,7 +232,6 @@ async def test_list_returns_narrow_slice_without_paths(fake_qbittorrent):
             "added_on": 0,
         }
     ]
-    # Путь на диске и хэш наружу не уезжают — см. докстринг службы.
     assert "save_path" not in result["torrents"][0]
     assert "hash" not in result["torrents"][0]
 
@@ -283,9 +274,6 @@ async def test_list_reports_current_speed_limit(fake_qbittorrent):
 
 
 async def test_list_with_hash_flag_exposes_hash_for_bot_ui(fake_qbittorrent):
-    """with_hash — не объявленный ActionParam действия list, модель дать его
-    не может (тул строит схему из describe); только бот-панель вызывает
-    команду с этим флагом напрямую."""
     fake_qbittorrent.info = [
         {"name": "Foo", "state": "downloading", "progress": 0.5, "dlspeed": 0, "hash": "abc123"}
     ]
@@ -337,8 +325,6 @@ async def test_list_limits_and_sorts_on_qbittorrent_side(fake_qbittorrent):
 
 
 async def test_list_hides_placeholder_eta(fake_qbittorrent):
-    """qBittorrent отдаёт 8640000 как «неизвестно» — модель не должна
-    пересказывать это как реальные 100 суток."""
     fake_qbittorrent.info = [
         {"name": "Seeding", "state": "stalledUP", "progress": 1.0, "dlspeed": 0, "eta": 8640000},
         {"name": "Paused", "state": "pausedDL", "progress": 0.1, "dlspeed": 0, "eta": -1},
@@ -349,8 +335,6 @@ async def test_list_hides_placeholder_eta(fake_qbittorrent):
 
 
 async def test_list_marks_paused_in_both_qbittorrent_dialects(fake_qbittorrent):
-    """«stalledUP»/«stoppedUP» — внутренние строки qBittorrent (в 5.x paused*
-    переименованы в stopped*); признак паузы должен быть явным полем."""
     fake_qbittorrent.info = [
         {"name": "Old", "state": "pausedDL", "progress": 0.5, "dlspeed": 0, "eta": -1},
         {"name": "New", "state": "stoppedUP", "progress": 1.0, "dlspeed": 0, "eta": -1},
@@ -368,8 +352,6 @@ async def test_list_api_error_becomes_internal(fake_qbittorrent):
     assert fake_qbittorrent.logged_out
 
 
-# --- pause/resume: адресация раздачи по имени (см. докстринг службы) ---
-
 _TORRENTS = [
     {"name": "Foo.S01", "hash": "aaa111", "amount_left": 3 * GIB},
     {"name": "Foo.S02", "hash": "bbb222", "amount_left": 1 * GIB},
@@ -378,8 +360,6 @@ _TORRENTS = [
 
 
 async def test_pause_by_exact_name_wins_over_substring(fake_qbittorrent):
-    """«Foo.S01» — подстрока никого больше, а вот «Foo» было бы неоднозначно:
-    точное совпадение проверяется первым (см. _select)."""
     fake_qbittorrent.info = list(_TORRENTS)
     result = await TorrentsService(_settings()).run_command("pause", {"name": "foo.s01"})
     assert result == {"paused": ["Foo.S01"], "count": 1}
@@ -394,8 +374,6 @@ async def test_resume_by_recognisable_part_of_name(fake_qbittorrent):
 
 
 async def test_pause_ambiguous_name_asks_to_be_precise(fake_qbittorrent):
-    """Несколько подходящих — не «остановим все похожие на всякий случай»,
-    а честная ошибка со списком кандидатов."""
     fake_qbittorrent.info = list(_TORRENTS)
     with pytest.raises(ProtoError) as excinfo:
         await TorrentsService(_settings()).run_command("pause", {"name": "Foo"})
@@ -433,9 +411,6 @@ async def test_pause_api_error_becomes_internal(fake_qbittorrent):
     assert fake_qbittorrent.logged_out
 
 
-# --- space: хватает ли места ---
-
-
 async def test_space_reports_dirs_and_pending_bytes(fake_qbittorrent):
     fake_qbittorrent.info = list(_TORRENTS)
     result = await TorrentsService(_settings()).run_command("space", {})
@@ -445,15 +420,11 @@ async def test_space_reports_dirs_and_pending_bytes(fake_qbittorrent):
         "free_bytes": 100 * GIB,
         "total_bytes": 300 * GIB,
     }
-    # Уже обещанное текущим закачкам — иначе «свободно 100 ГиБ» вводит в
-    # заблуждение, когда 4 из них уже расписаны.
     assert result["downloading_left_bytes"] == 4 * GIB
     assert result["min_free_bytes"] == torrents_service.MIN_FREE_BYTES
 
 
 async def test_space_survives_dead_qbittorrent(fake_qbittorrent):
-    """На вопрос «хватает ли места» сам клиент торрентов не нужен — молчащий
-    qBittorrent отнимает только downloading_left_bytes."""
     fake_qbittorrent.fail_with = qbittorrentapi.APIConnectionError("down")
     result = await TorrentsService(_settings()).run_command("space", {})
     assert result["downloading_left_bytes"] is None
@@ -468,8 +439,6 @@ async def test_space_marks_unmounted_dir(monkeypatch):
 
 
 async def test_add_refuses_when_disk_is_almost_full(fake_disk, fake_qbittorrent):
-    """Размер раздачи по magnet заранее не знает никто — но добить диск до
-    нуля, когда там уже нечего занимать, служба не даёт."""
     fake_disk["free"] = 1 * GIB
     with pytest.raises(ProtoError) as excinfo:
         await TorrentsService(_settings()).run_command(
@@ -477,10 +446,7 @@ async def test_add_refuses_when_disk_is_almost_full(fake_disk, fake_qbittorrent)
         )
     assert excinfo.value.code == ERR_BAD_REQUEST
     assert "мало места" in excinfo.value.message
-    assert fake_qbittorrent.calls == []  # до qBittorrent дело не дошло
-
-
-# --- search: ищет сам торрент-клиент своими плагинами ---
+    assert fake_qbittorrent.calls == []
 
 
 _FOUND = [
@@ -509,7 +475,7 @@ async def test_search_returns_narrow_slice_sorted_by_seeders(fake_qbittorrent):
 
     assert result["query"] == "задача трёх тел"
     assert [r["name"] for r in result["results"]] == [
-        "3 Body Problem S01 2160p",  # больше сидов — первым
+        "3 Body Problem S01 2160p",
         "3 Body Problem S01 1080p",
     ]
     assert result["results"][0] == {
@@ -521,14 +487,10 @@ async def test_search_returns_narrow_slice_sorted_by_seeders(fake_qbittorrent):
         "page": "https://rutracker.org/forum/viewtopic.php?t=6503561",
     }
     assert fake_qbittorrent.search_kwargs["plugins"] == "enabled"
-    # Задание живёт в qBittorrent, пока его не удалят — иначе каждый вопрос
-    # оставлял бы мусор.
     assert fake_qbittorrent.deleted == [7]
 
 
 async def test_search_reports_total_when_more_than_shown(fake_qbittorrent):
-    """qBittorrent отдаёт total независимо от limit — если находок больше,
-    чем поместилось в выдачу, модель должна об этом узнать."""
     fake_qbittorrent.found = list(_FOUND)
     result = await TorrentsService(_settings()).run_command(
         "search", {"query": "задача трёх тел", "limit": 1}
@@ -562,12 +524,8 @@ async def test_search_limit_is_capped(fake_qbittorrent):
     assert fake_qbittorrent.results_limit == torrents_service.SEARCH_LIMIT
 
 
-# --- search_smart: якорь-слово трекеру, AND по словам в Python ---
-
 _SCATTERED = [
     {
-        # Слова запроса есть, но не подряд и не по порядку — обычный search
-        # (непрерывная фраза) такое не находит вовсе.
         "fileName": "Body Problem, 3: Extended Cut S01 1080p",
         "fileSize": 60 * GIB,
         "nbSeeders": 50,
@@ -576,7 +534,6 @@ _SCATTERED = [
         "descrLink": "https://rutracker.org/forum/viewtopic.php?t=1",
     },
     {
-        # Тоже подходит по словам, но сидов меньше — должна уйти за первую.
         "fileName": "3, Body Problem — Recut S01 720p",
         "fileSize": 30 * GIB,
         "nbSeeders": 10,
@@ -585,8 +542,6 @@ _SCATTERED = [
         "descrLink": "https://rutracker.org/forum/viewtopic.php?t=3",
     },
     {
-        # Больше сидов, но ни одно слово запроса не подходит — фильтр должен
-        # выкинуть её раньше сортировки, иначе она обошла бы настоящую находку.
         "fileName": "Something Unrelated",
         "fileSize": 1 * GIB,
         "nbSeeders": 999,
@@ -612,7 +567,7 @@ async def test_search_smart_sends_phrase_as_pattern_and_filters_by_words(fake_qb
         "search_smart", {"phrase": "problem", "words": "3 body"}
     )
     assert [r["name"] for r in result["results"]] == [
-        "Body Problem, 3: Extended Cut S01 1080p",  # больше сидов — первым
+        "Body Problem, 3: Extended Cut S01 1080p",
         "3, Body Problem — Recut S01 720p",
     ]
     assert result["count"] == 2
@@ -632,8 +587,6 @@ _PHRASE_HITS = [
         "descrLink": "https://rutracker.org/forum/viewtopic.php?t=1",
     },
     {
-        # phrase совпала, но нет слова "2160p" из words — должна отсеяться,
-        # несмотря на рекордные сиды.
         "fileName": "3 Body Problem S01 720p",
         "fileSize": 30 * GIB,
         "nbSeeders": 999,
@@ -675,7 +628,7 @@ async def test_search_smart_without_phrase_is_bad_request(fake_qbittorrent):
     with pytest.raises(ProtoError) as excinfo:
         await TorrentsService(_settings()).run_command("search_smart", {"words": "2024 1080p"})
     assert excinfo.value.code == ERR_BAD_REQUEST
-    assert fake_qbittorrent.search_kwargs == {}  # до трекера дело не дошло
+    assert fake_qbittorrent.search_kwargs == {}
 
 
 async def test_search_smart_without_args_is_bad_request():
@@ -711,12 +664,7 @@ async def test_search_smart_turns_plugin_failure_into_a_real_error(fake_qbittorr
     assert "403" in excinfo.value.message
 
 
-# --- add по находке: метафайл качает плагин, не qBittorrent ---
-
-
 async def test_add_search_result_fetches_torrent_via_plugin(fake_qbittorrent, monkeypatch):
-    """С трекера под логином qBittorrent по ссылке получил бы страницу входа —
-    файл отдаёт сам плагин своей сессией (nova2dl)."""
     fetched = []
 
     def fake_fetch(self, plugin, url):
@@ -736,8 +684,6 @@ async def test_add_search_result_fetches_torrent_via_plugin(fake_qbittorrent, mo
 
 
 async def test_add_url_from_site_without_plugin_is_refused(fake_qbittorrent):
-    """«Скачай вот по этой ссылке» из разговора — не наш случай: без плагина
-    ни авторизации, ни доверия к адресу нет."""
     with pytest.raises(ProtoError) as excinfo:
         await TorrentsService(_settings()).run_command(
             "add", {"source": "https://example.org/foo.torrent", "save_path": SAVE_DIRS[0]}
@@ -753,23 +699,15 @@ def test_plugin_lookup_matches_by_host_not_prefix():
         {"name": "sleeping", "enabled": False, "url": "https://rutor.info/"},
     ]
     match = TorrentsService._plugin_for
-    # Другой путь того же сайта — тот же плагин.
     assert match(plugins, "https://rutracker.org/forum/dl.php?t=1") == "rutracker"
     assert match(plugins, "https://rutracker.org/anything") == "rutracker"
-    # Живая находка 2026-07-29: rutor ищет на rutor.info, а качать отдаёт с
-    # d.rutor.info — поддомен это тот же сайт, иначе своя же находка
-    # отвергалась бы как «ссылка с чужого сайта».
     assert match([{"name": "rutor", "enabled": True, "url": "https://rutor.info/"}],
                  "https://d.rutor.info/download/977537") == "rutor"
-    # Выключенный плагин не в счёт, чужой сайт — тем более.
     assert match(plugins, "https://rutor.info/torrent/1") is None
     assert match(plugins, "https://example.org/x.torrent") is None
 
 
 async def test_search_turns_plugin_failure_into_a_real_error(fake_qbittorrent):
-    """Сбой плагин отдаёт не ошибкой, а фальшивой находкой с рекордными
-    сидами — пропустить её в модель значит предложить человеку скачать
-    «раздачу» с текстом ошибки в имени."""
     fake_qbittorrent.found = [
         {
             "fileName": "[3 Body Problem][Error]: Request to login.php failed with status: 403",
@@ -803,14 +741,12 @@ async def test_search_keeps_real_results_when_one_plugin_failed(fake_qbittorrent
 
 
 def test_query_ladder_goes_from_exact_to_broad():
-    """Живая находка: трекер ищет запрос как непрерывную фразу в заголовке —
-    год и качество обнуляют выдачу, а модель их упорно дописывает."""
     ladder = torrents_service._query_ladder(
         "Задача трёх тел / 3 Body Problem [S01] (2024) WEBRip 1080p от Kerob | L2"
     )
-    assert ladder[0].startswith("Задача трёх тел /")  # сперва как просили
+    assert ladder[0].startswith("Задача трёх тел /")
     assert "2024" not in ladder[1] and "1080p" not in ladder[1] and "S01" not in ladder[1]
-    assert "Задача трёх тел" in ladder  # до рабочего варианта лестница доходит
+    assert "Задача трёх тел" in ladder
     assert len(ladder) <= torrents_service.MAX_QUERY_ATTEMPTS
 
 
@@ -837,7 +773,7 @@ async def test_search_retries_shorter_when_nothing_found(fake_qbittorrent):
 
     assert result["count"] == 2
     assert result["used_query"] == "Задача трёх тел"
-    assert tried[0] == "Задача трёх тел (2024) WEBRip 1080p"  # сперва как просили
+    assert tried[0] == "Задача трёх тел (2024) WEBRip 1080p"
 
 
 async def test_search_reports_used_query_only_when_it_differs(fake_qbittorrent):
@@ -845,8 +781,6 @@ async def test_search_reports_used_query_only_when_it_differs(fake_qbittorrent):
     result = await TorrentsService(_settings()).run_command("search", {"query": "3 body problem"})
     assert "used_query" not in result
 
-
-# --- details: карточка одной раздачи со страницы трекера ---
 
 _PAGE_HTML = """
 <html><head><title>t</title><script>var x=1;</script></head><body>
@@ -863,19 +797,16 @@ _PAGE_HTML = """
 
 
 async def test_details_keeps_technical_card_behind_a_long_synopsis(monkeypatch):
-    """Живая находка: на руторе «Качество/Видео/Аудио» лежит ПОСЛЕ длинного
-    синопсиса — наивные «первые N символов» теряют ровно то, ради чего
-    страницу и открывают."""
     monkeypatch.setattr(
         TorrentsService, "_fetch_page", lambda self, url: _PAGE_HTML, raising=False
     )
 
     text = torrents_service._page_summary(torrents_service._page_text(_PAGE_HTML))
 
-    assert "Задача трёх тел" in text  # голова страницы
-    assert "Качество : WEB-DLRip" in text  # и техническая карточка
+    assert "Задача трёх тел" in text
+    assert "Качество : WEB-DLRip" in text
     assert "Видео : 720x304, XviD" in text
-    assert "Топ Категории" not in text  # навигация вырезана
+    assert "Топ Категории" not in text
     assert len(text) < 2200
 
 

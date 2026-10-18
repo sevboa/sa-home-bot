@@ -1,41 +1,3 @@
-"""TasksService — генерализованные отложенные задачи роя (служба tasks).
-
-Замена старого тула remind (писал готовый текст прямо в БД бота, доставка
-— константная фраза, живая находка 2026-07-24: пользователь явно попросил
-отдельный сервис роя, а не доработку внутри бота — задачи может ставить
-любой узел по протоколу, не только тул remind из /ai).
-
-Задача = due_at + произвольная протокольная команда (dst_node/dst_service/
-action/args) + timeout_s + непрозрачные meta — эта служба их не читает,
-только хранит и возвращает целиком в событии ``task_result``/``task_prewake``
-тому, кто задачу создал (обычно бот, bot/node_events.py — доставка в
-Telegram и запись в ai_turns остаются у него: у этой службы нет доступа ни
-к Telegram, ни к БД бота, только к своей очереди, как и у остальных служб
-роя).
-
-Один специальный ``action`` — ``chat_loop`` (tasks/protocol.py) — не
-форвардится как обычная команда, а прогоняется через полный цикл
-tool-calling поверх llm.chat (sa_home_bot.llm_chat.run_chat_loop): это
-единственный сейчас существующий «богатый» тип задачи, ради которого весь
-этот сервис и был выделен — модель может поставить такую задачу САМА СЕБЕ
-через тул remind (self-scheduling, инструменту исполнения всё равно, кто
-создал задачу — человек через /ai или модель во время собственного ответа).
-
-Прогрев (prewake_loop) — за PREWAKE_LEAD_S до due_at, если dst не отвечает
-или спит, будим его заранее (тот же WoL-путь, что /wake, см. wake_core.py),
-чтобы ответ пришёл ровно в срок.
-
-Живая находка 2026-07-27 (инцидент 19:34-19:39, напоминание не доставлено).
-Прежняя схема — единственная попытка прогрева и мгновенный отказ на самом
-сроке, если цель не тёплая (решение пользователя 2026-07-24: холодный старт
-не должен растягивать момент срабатывания) — на практике дала худшее из
-двух: WoL из этой службы не уходил ВООБЩЕ (пустой кэш wake-реквизитов, см.
-wake_core.resolve_wake_info), 5 минут форы пропали впустую, а на сроке
-задача сдалась за 6 секунд. Новая схема (решение пользователя 2026-07-27):
-фора увеличена до 10 минут, а на сроке служба сама будит цель и повторяет
-попытки до FIRE_GRACE_S после due_at — лучше напоминание с опозданием в
-пару минут, чем «пропущено»."""
-
 from __future__ import annotations
 
 import asyncio
@@ -48,14 +10,13 @@ from typing import Any
 
 from sa_home_bot import __version__, wake_core
 from sa_home_bot.bot import tools as ai_tools
-from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
+from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.llm_chat import run_chat_loop
+from sa_home_bot.proto.errors import SERVICE_CALL_ERRORS, is_service_unavailable
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
-    ERR_UNAVAILABLE,
-    ERR_UNKNOWN_DST,
     ActionParam,
     ActionSpec,
     Address,
@@ -68,14 +29,8 @@ from sa_home_bot.tasks import protocol
 
 log = logging.getLogger(__name__)
 
-# За сколько до срока начинать будить цель. Решение пользователя 2026-07-27:
-# 10 минут — холодный старт winpc плюс загрузка 35B-модели в память заведомо
-# укладываются, и ответ приходит ровно в срок, а не после него.
 PREWAKE_LEAD_S = 600.0
 POLL_INTERVAL_S = 30.0
-# Сколько после due_at ещё пытаться, если цель так и не поднялась (решение
-# пользователя 2026-07-27). Дальше — честное "пропущено": напоминание,
-# опоздавшее на десятки минут, уже вреднее молчания.
 FIRE_GRACE_S = 300.0
 FIRE_RETRY_INTERVAL_S = 30.0
 
@@ -84,20 +39,6 @@ EventEmitter = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 async def _noop_emit(event_type: str, data: dict[str, Any]) -> None:
     pass
-
-
-def _is_unavailable(exc: Exception) -> bool:
-    """Та же классификация, что у bot/ai_flow.py::_is_unavailable —
-    константы дублируются, а не импортируется сам модуль (там aiogram,
-    этой службе он не нужен, см. докстринг файла). Решение пользователя
-    2026-08-05: сбой "модель недоступна в моменте" не должен сразу сдаваться
-    честным "не удалось найти Альфреда" — стоит повторить в рамках
-    FIRE_GRACE_S, как уже делает прогрев/побудка (см. _fire_chat_loop).
-    Детерминированные ошибки (плохой запрос, внутренний сбой) сюда не
-    попадают — повтор их не лечит, только жжёт бюджет впустую."""
-    if isinstance(exc, ServiceUnavailableError):
-        return True
-    return isinstance(exc, ProtoError) and exc.code in (ERR_UNAVAILABLE, ERR_UNKNOWN_DST)
 
 
 class TasksService:
@@ -114,31 +55,10 @@ class TasksService:
         self._node_link = node_link
         self._emit = emit
         self._node = socket.gethostname()
-        # Права заказчика задачи. Читаются из того же конфига, что у бота
-        # (подписки — часть Settings), потому что БД бота этой службе
-        # недоступна. Резолв — в МОМЕНТ СРАБАТЫВАНИЯ по meta["chat_id"], а не
-        # снимком в meta при создании: если право отобрали, пока задача ждала
-        # в очереди, отложенный ответ им уже не воспользуется. Не
-        # «оптимизировать» в снимок — это и есть смысл конструкции.
-        # Живой баг 2026-08-06: без guest_subscriptions книга видела только
-        # владельца/семью из статического конфига — ни одного гостя. До
-        # моста доставки (см. bot/tools.py::ToolContext.emit) это было
-        # незаметно (ctx.book сюда вообще не доходил), но как только book
-        # стал доступен guests_list/tell/notify_guest внутри remind, тул
-        # guests_list начал честно врать «гостей с такими условиями нет» —
-        # ровно то же самое расхождение, из-за которого app.py строит книгу
-        # бота с ДВУМЯ аргументами, а не одним.
         self._book = SubscriptionBook.from_config(
             settings.subscriptions, settings.guest_subscriptions
         )
-        # Идущие прогревы: fire_loop дожидается прогрева СВОЕЙ задачи, а не
-        # читает presence посреди него. Живая находка 2026-07-27: циклы
-        # независимы, и задача со сроком меньше PREWAKE_LEAD_S получала
-        # прогрев и срабатывание практически одновременно — presence видела
-        # ещё не поднятую ноду и задача падала при живом идущем прогреве.
         self._prewake_inflight: dict[int, asyncio.Task] = {}
-        # Кому уже показали «шаги» (EVENT_TASK_PREWAKE waking) — чтобы не
-        # повторять то же сообщение на срабатывании.
         self._waking_announced: set[int] = set()
 
     def describe(self) -> ServiceDescription:
@@ -268,9 +188,6 @@ class TasksService:
             dst_service,
             task_action,
             task_args or {},
-            # Дефолт — бюджет запроса к модели: единственный «богатый» тип
-            # задачи (chat_loop) заведомо не укладывается в прежние 60с, а
-            # обычным командам такой запас не мешает.
             float(timeout_s) if timeout_s else self._settings.llm.request_timeout_s,
             meta or {},
             due_at.astimezone(UTC),
@@ -283,12 +200,6 @@ class TasksService:
         return {"task_id": task_id}
 
     async def _fire_now(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Разбудить задачу раньше due_at — по событию, не по будильнику
-        (см. protocol.ACTION_FIRE_NOW). Идемпотентно: задача, которую уже
-        отыграли (по этому же событию раньше, или по due_at, или повторным
-        fire_now), просто не находится — ``fired_at IS NULL`` в
-        ``get_pending_task`` и есть вся защита от двойного срабатывания,
-        та же, что у обычного `_fire_due`."""
         task_id = args.get("task_id")
         if not isinstance(task_id, int):
             raise ProtoError(ERR_BAD_REQUEST, "task_id обязателен и должен быть числом")
@@ -297,17 +208,11 @@ class TasksService:
             return {"fired": False, "reason": "нет такой задачи или уже сработала"}
         now = datetime.now(tz=UTC)
         await self._store.mark_task_fired(row["id"], now)
-        # Waiter (если был) больше не актуален — задача сработала именно по
-        # нему; чистим и на случай fire_now без match_event (напр. ручной
-        # вызов), чтобы строка не осталась мёртвой навсегда.
         await self._store.pop_event_waiter(row["id"])
         asyncio.create_task(self._fire_one_safe(row), name=f"task-fire-now-{row['id']}")
         return {"fired": True}
 
     async def _match_event(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Событие роя пришло (node, event_type) — разбудить, если кто-то
-        его ждал (remind after_event). Пара lookup+fire_now в одном RPC:
-        вызывающему (bot/node_events.py) не нужно знать про task_id вовсе."""
         node = args.get("node")
         event_type = args.get("event_type")
         node_ok = isinstance(node, str) and bool(node)
@@ -320,26 +225,21 @@ class TasksService:
         fired = await self._fire_now({"task_id": task_id})
         return {"matched": bool(fired.get("fired")), "task_id": task_id}
 
-    # --- прогрев заранее ---
 
     async def prewake_loop(self) -> None:
         while True:
             await asyncio.sleep(POLL_INTERVAL_S)
             try:
                 await self._prewake_due()
-            except Exception:  # noqa: BLE001 — сбой одного тика не должен ронять цикл
+            except Exception:  # noqa: BLE001
                 log.exception("tasks: сбой прогрева")
 
     async def _prewake_due(self) -> None:
         deadline = datetime.now(tz=UTC) + timedelta(seconds=PREWAKE_LEAD_S)
         for row in await self._store.tasks_needing_prewake(deadline):
             if row["action"] == protocol.ACTION_TIMER:
-                # Будильнику будить некого (см. protocol.ACTION_TIMER).
                 await self._store.mark_task_prewake_done(row["id"])
                 continue
-            # Сразу помечаем — иначе следующий тик (через 30с) попробует
-            # снова, пока предыдущая попытка (прогрев может занять минуты)
-            # ещё идёт.
             await self._store.mark_task_prewake_done(row["id"])
             task_id = row["id"]
             job = asyncio.create_task(self._prewake_one_safe(row), name=f"tasks-prewake-{task_id}")
@@ -349,7 +249,7 @@ class TasksService:
     async def _prewake_one_safe(self, row: dict) -> None:
         try:
             await self._prewake_one(row)
-        except Exception:  # noqa: BLE001 — фоновая задача, сбой не должен пропасть молча
+        except Exception:  # noqa: BLE001
             log.exception("tasks: сбой прогрева задачи id=%s", row["id"])
 
     async def _prewake_one(self, row: dict) -> None:
@@ -362,7 +262,7 @@ class TasksService:
         )
         if state is not None and not state.get("asleep"):
             log.info("tasks: задача id=%s — цель уже тёплая, прогрев не нужен", task_id)
-            return  # тихо: показывать пользователю нечего
+            return
 
         await self._announce_waking(task_id, meta)
         outcome = await wake_core.ensure_service_ready(
@@ -370,7 +270,6 @@ class TasksService:
             self._store,
             row["dst_node"],
             row["dst_service"],
-            # До срока ещё PREWAKE_LEAD_S — здесь можно ждать прогрев целиком.
             warmup_timeout_s=self._settings.llm.warmup_timeout_s,
         )
         log.info("tasks: прогрев задачи id=%s -> %s", task_id, outcome)
@@ -379,16 +278,11 @@ class TasksService:
                 protocol.EVENT_TASK_PREWAKE, {"task_id": task_id, "meta": meta, "status": "ready"}
             )
             return
-        # Не сдаёмся насовсем: на сроке будет ещё одна серия попыток
-        # (_fire_chat_loop), поэтому здесь НЕ эмитим failed — иначе
-        # пользователь получил бы «не смог» от ещё не проигранной задачи.
         log.warning(
             "tasks: прогрев задачи id=%s не удался (%s), повторим на сроке", task_id, outcome
         )
 
     async def _announce_waking(self, task_id: int, meta: dict) -> None:
-        """«Шаги» показываем один раз на задачу — прогрев и срабатывание
-        могут оба упереться в спящую ноду, дублировать сообщение незачем."""
         if task_id in self._waking_announced:
             return
         self._waking_announced.add(task_id)
@@ -396,7 +290,6 @@ class TasksService:
             protocol.EVENT_TASK_PREWAKE, {"task_id": task_id, "meta": meta, "status": "waking"}
         )
 
-    # --- срабатывание ---
 
     async def fire_loop(self) -> None:
         while True:
@@ -409,13 +302,7 @@ class TasksService:
     async def _fire_due(self) -> None:
         now = datetime.now(tz=UTC)
         for row in await self._store.due_tasks(now):
-            # Списываем сразу — исполнение теперь небыстрое (живой запрос к
-            # модели, до row["timeout_s"]) и не должно попасть под
-            # повторный тик опроса, пока предыдущая попытка ещё идёт.
             await self._store.mark_task_fired(row["id"], now)
-            # Сработала по due_at-таймауту, не по событию (иначе match_event
-            # уже забрал бы waiter раньше) — ждать больше нечего, снимаем,
-            # чтобы строка не осталась мёртвой навсегда.
             await self._store.pop_event_waiter(row["id"])
             asyncio.create_task(self._fire_one_safe(row), name=f"task-fire-{row['id']}")
 
@@ -425,16 +312,12 @@ class TasksService:
         except Exception:  # noqa: BLE001
             log.exception("tasks: сбой срабатывания задачи id=%s", row["id"])
         finally:
-            # Задача отыграна — её пометка о показанных «шагах» больше не
-            # нужна (иначе множество росло бы всю жизнь процесса).
             self._waking_announced.discard(row["id"])
 
     async def _fire_one(self, row: dict) -> None:
         dst = Address(node=row["dst_node"], service=row["dst_service"])
         meta = json.loads(row["meta_json"])
 
-        # Прогрев этой же задачи может быть ещё в работе (срок ближе, чем
-        # PREWAKE_LEAD_S) — дождаться его, а не гонять с ним наперегонки.
         job = self._prewake_inflight.get(row["id"])
         if job is not None and not job.done():
             log.info("tasks: задача id=%s ждёт свой идущий прогрев", row["id"])
@@ -444,8 +327,6 @@ class TasksService:
             await self._fire_chat_loop(row, dst, meta)
             return
         if row["action"] == protocol.ACTION_TIMER:
-            # Чистый будильник — исполнять нечего, dst не трогаем (см.
-            # protocol.ACTION_TIMER).
             await self._emit(
                 protocol.EVENT_TASK_RESULT,
                 {"task_id": row["id"], "meta": meta, "ok": True, "result": {}},
@@ -457,7 +338,7 @@ class TasksService:
             result = await self._node_link.command(
                 row["action"], task_args, dst=dst, timeout=row["timeout_s"]
             )
-        except (ServiceUnavailableError, ProtoError) as exc:
+        except SERVICE_CALL_ERRORS as exc:
             await self._emit(
                 protocol.EVENT_TASK_RESULT,
                 {"task_id": row["id"], "meta": meta, "ok": False, "error": str(exc)},
@@ -469,11 +350,6 @@ class TasksService:
         )
 
     async def _fire_chat_loop(self, row: dict, dst: Address, meta: dict) -> None:
-        # Решение пользователя 2026-07-27: на сроке служба сама доводит цель
-        # до готовности (WoL + ожидание + прогрев) и повторяет попытки до
-        # FIRE_GRACE_S. Прежний вариант — presence на 6с и мгновенный отказ —
-        # означал, что спящая машина гарантированно съедала напоминание
-        # (инцидент 19:34, см. докстринг модуля).
         task_id = row["id"]
         loop = asyncio.get_running_loop()
         deadline = loop.time() + FIRE_GRACE_S
@@ -484,11 +360,7 @@ class TasksService:
                 self._store,
                 row["dst_node"],
                 row["dst_service"],
-                # Не выходить за общий бюджет задачи ради одного ожидания WoL.
                 wake_timeout_s=min(wake_core.WAKE_POLL_TIMEOUT_S, max(deadline - loop.time(), 0.0)),
-                # То же и для прогрева: его собственный потолок (360 с)
-                # рассчитан на prewake, где до срока ещё десять минут; здесь
-                # срок уже наступил, и ждать дольше остатка бессмысленно.
                 warmup_timeout_s=max(deadline - loop.time(), 0.0),
             )
             if outcome == wake_core.READY:
@@ -528,56 +400,23 @@ class TasksService:
             trigger_message_id=meta.get("trigger_message_id"),
             settings=self._settings,
             node_link=self._node_link,
-            # См. self._book: права на момент срабатывания, не на момент
-            # создания задачи. Подписки уже нет → None → тулы без прав.
             subscription=self._book.for_chat(chat_id) if isinstance(chat_id, int) else None,
-            # Живой инцидент 2026-08-05: модель, разбуженная по событию,
-            # заново ставила remind на то же (node, event_type) — tool_remind
-            # сверяет это с woken_by и жёстко отказывает (см. bot/tools.py).
             woken_by=(awaited_node, awaited_event)
             if isinstance(awaited_node, str) and isinstance(awaited_event, str)
             else None,
-            # Живой баг 2026-08-05 (второй заход): без восстановления отсюда
-            # ЭТА задача-продолжение, если сама зовёт remind (следующий шаг
-            # цепочки обновления роя), клала в meta НОВОЙ задачи
-            # message_thread_id=None — тред терялся уже после первого
-            # self-scheduled прыжка, хотя доставка САМОГО этого срабатывания
-            # (bot/node_events.py) топик уже уважала. Та же логика, что и у
-            # woken_by чуть выше.
             message_thread_id=meta.get("message_thread_id"),
-            # Живая находка 2026-08-06: self._book — та же SubscriptionBook,
-            # что уже используется парой строк выше для subscription, и её
-            # хватает guests_list/резолвингу получателя (tell/notify_guest) —
-            # им нужен только конфиг, не живой Telegram. emit — мост для
-            # РЕАЛЬНОЙ отправки (см. ai_tools.ToolContext.emit): своего
-            # notifier у этого процесса нет и не будет, а через него бот
-            # доставит сообщение по EVENT_DELIVER_MESSAGE.
             book=self._book,
             emit=self._emit,
         )
         async def _emit_tool_call(name: str, call_args: dict[str, Any], result: str) -> None:
-            # bot/node_events.py ретранслирует в дебаг-группу через
-            # notify_tool_call (эта служба Telegram не видит). args/result
-            # едут вместе с именем (живой баг 2026-08-05) — иначе кнопке
-            # «развернуть» на той стороне нечего показывать.
             await self._emit(
                 protocol.EVENT_TOOL_CALL, {"name": name, "args": call_args, "result": result}
             )
 
-        # Уровень рассуждения намерением-строкой (off|low|medium|high); как он
-        # станет параметром Ollama — решает профиль модели на стороне службы
-        # llm (llm/model_profiles.py). Старые задачи в БД могли сохранить
-        # булев "think" (до v0.97.0) — маппим для совместимости.
         reason = task_args.get("reason")
         if not isinstance(reason, str):
             legacy = task_args.get("think", True)
             reason = "off" if legacy is False else "high"
-        # Повтор в рамках того же deadline, что уже отведён на побудку выше
-        # (решение пользователя 2026-08-05): "модель недоступна прямо
-        # сейчас" — не повод сразу сдаваться честным "не нашли Альфреда",
-        # если время до due_at+FIRE_GRACE_S ещё есть. Только для реально
-        # переходных сбоев (_is_unavailable) — детерминированные ошибки
-        # (баг в запросе, внутренний сбой модели) повтор не лечит.
         while True:
             try:
                 raw = await run_chat_loop(
@@ -592,8 +431,9 @@ class TasksService:
                     on_tool_call=_emit_tool_call,
                 )
                 break
-            except (ServiceUnavailableError, ProtoError) as exc:
-                if not _is_unavailable(exc) or deadline - loop.time() <= FIRE_RETRY_INTERVAL_S:
+            except SERVICE_CALL_ERRORS as exc:
+                out_of_time = deadline - loop.time() <= FIRE_RETRY_INTERVAL_S
+                if not is_service_unavailable(exc) or out_of_time:
                     log.warning(
                         "tasks: задача id=%s — запрос к модели не удался: %s", task_id, exc
                     )

@@ -1,5 +1,3 @@
-"""Обёртка над aiosqlite: WAL, внешние ключи, транзакции."""
-
 from __future__ import annotations
 
 import logging
@@ -41,7 +39,6 @@ class Database:
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
-        """Транзакция: commit при успехе, rollback при исключении."""
         conn = self.conn
         try:
             yield conn

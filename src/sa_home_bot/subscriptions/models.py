@@ -1,16 +1,9 @@
-"""Доменная модель подписки. Без quiet_hours (сознательно, см. ARCHITECTURE §4.5)."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
 WILDCARD = "*"
 
-# Откуда взялась подписка. Владельческая (config) правится человеком в
-# config.toml/пакете инстанса; гостевая (guest) выдана инвайт-кодом и живёт в
-# гостевом пакете, который ведёт сам бот (subscriptions/guests.py). Различие
-# нужно ровно в двух местах: что перезаписывать при выдаче/отзыве гостя и что
-# показывать в /guests — прав оно не касается.
 SOURCE_CONFIG = "config"
 SOURCE_GUEST = "guest"
 
@@ -24,8 +17,8 @@ class Subscription:
     broken: bool = False
     source: str = SOURCE_CONFIG
     invited_by_chat_id: int = 0
-    invited_at: str = ""  # UTC ISO
-    invited_user: str = ""  # как подписался гость, для /guests
+    invited_at: str = ""
+    invited_user: str = ""
 
     @property
     def is_guest(self) -> bool:
@@ -46,19 +39,6 @@ class Subscription:
         return WILDCARD in self.allowed_commands or command in self.allowed_commands
 
     def allows_action(self, action_id: str, service: str) -> bool:
-        """Право на действие службы (кнопки из describe).
-
-        Полная форма в конфиге — ``действие@служба`` (``restart@node``);
-        голое имя (``scan_now``) тоже принимается — совместимость со старыми
-        конфигами. С появлением удалённых нод форма расширится до
-        ``действие@служба@нода``.
-
-        Групповые права (без перечисления каждого действия по имени):
-        ``*@служба`` — любое действие этой службы (новое умение на службе,
-        объявленное через describe, сразу доступно без правки конфига —
-        то же самое свойство, что у динамического UI бота); голый ``*`` —
-        вообще любая команда/действие (полный доступ, для админа).
-        """
         if self.broken:
             return False
         return (
