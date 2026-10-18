@@ -32,6 +32,9 @@ class _FakePeer:
         self.node_kind = "workstation"
         self.left = False
         self.wake_info = None
+        self.rtt_ms = None
+        self.loss = 0.0
+        self.peer_links: dict = {}
         self._ok = ok
         self._payload = payload or {}
         self._raise = raise_error
@@ -39,6 +42,9 @@ class _FakePeer:
 
     def downtime_s(self) -> float:
         return 0.0
+
+    def cost_ms(self) -> float | None:
+        return None
 
     async def forward(self, env: Envelope) -> Envelope:
         self.calls.append(env)
