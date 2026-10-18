@@ -180,9 +180,7 @@ async def test_apk_set_file_id_persists_and_reset_on_new_version(env, monkeypatc
         apk_client, "download_sync", lambda url, dest, timeout: dest.write_bytes(content_v1)
     )
     await svc.run_command(vpn_protocol.ACTION_APK_INFO, {})
-    await svc.run_command(
-        vpn_protocol.ACTION_APK_SET_FILE_ID, {"telegram_file_id": "tg-file-1"}
-    )
+    await svc.run_command(vpn_protocol.ACTION_APK_SET_FILE_ID, {"telegram_file_id": "tg-file-1"})
     svc._apk_checked_at = None
     info = await svc.run_command(vpn_protocol.ACTION_APK_INFO, {})
     assert info["telegram_file_id"] == "tg-file-1"

@@ -1,24 +1,3 @@
-"""Выдача настроек в экспертном режиме /vpn (этап 57.4): тексты и кнопки.
-
-Экраны (``vpn_card:<код><ключ устройства>``, право ``vpn_card@vpn``):
-  l — «Получить настройки» (57.11): одно пересылаемое сообщение со ссылкой на страницу
-      настроек (URL-кнопка, без callback-кнопок, не удаляется по TTL)
-  g — «Другие способы»: запасные пути без страницы (VLESS · Hiddify / AmneziaWG)
-  a — AmneziaWG: выбор страны
-  n — «➕ Новое устройство»: выбор платформы (имя — как в мастере)
-  r — «🔄 Перевыпустить ключи» (57.5): галочки по выданным подключениям; значение
-      ``r<ключ>[-<подпись списка>-<маска>]``, маска — hex, бит i = i-й выданный
-      транспорт в стабильном порядке (страны как у серверов, VLESS перед AmneziaWG);
-      подпись (4 hex) — хэш этого списка: изменился между нажатиями — выбор сброшен
-
-Действия, которые могут выпустить ключ, идут под ``issue@vpn`` / ``reissue@vpn``
-(``issue:~<вид><ключ>[:<нода>]``): v — VLESS · Hiddify (довыпускает недостающие
-страны), s — файл настроек ещё раз, g — AmneziaWG в стране (``reissue:~g…`` —
-после предупреждения «новый заменит старый»), n<платформа> — новое устройство.
-
-Модуль чистый (без сети): логику и отправку ведёт bot/handlers/vpn.py.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -26,30 +5,18 @@ import html
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from sa_home_bot.bot import commands
+from sa_home_bot.bot import vpn_callbacks, vpn_keyboards
 from sa_home_bot.bot import vpn_devices as vd
 from sa_home_bot.bot import vpn_wizard as wizard
+from sa_home_bot.bot.ui.keyboards import button, markup
 from sa_home_bot.config import VpnConfig
 from sa_home_bot.domain import vpn_check
 from sa_home_bot.vpn import protocol as vpn_protocol
 
-SERVICE = vpn_protocol.SERVICE_NAME
-CARD_ACTION = "vpn_card"
-EXPERT_PREFIX = "~"
-
-# Экраны ``vpn_card``.
-SCREEN_PICK, SCREEN_AWG, SCREEN_NEW = "g", "a", "n"
-SCREEN_LINK = "l"  # одно сообщение со ссылкой на страницу настроек (57.11)
-# Виды действий ``issue:~<вид>…`` / ``reissue:~<вид>…``.
-KIND_VLESS, KIND_FILE, KIND_AWG, KIND_NEW = "v", "s", "g", "n"
-# Перевыпуск по выбранным: ``reissue:~m<ключ>-<подпись>-<маска>``.
-SCREEN_REISSUE, KIND_MULTI = "r", "m"
-# После переустановки сервера (57.7): ``vpn_card:R<ключ>-<хэш ноды>-<коды транспортов>`` —
-# экран перевыпуска с заранее отмеченными задетыми подключениями этой страны.
-SCREEN_RESTORE = "R"
 _TRANSPORT_CODE = {vd.REALITY: "v", vd.AWG: "a"}
 
 APK_NO_STORE = "nostore"
+APK_SEND = "send"
 MAY_NOT_WORK = "сейчас может не работать"
 
 NO_STORE_TEXT = (
@@ -61,45 +28,35 @@ NO_AWG_TEXT = "AmneziaVPN сейчас не выдаётся ни в одной 
 VLESS_FILE_CAPTION = "Настройки Hiddify. Нажмите на файл и выберите «Hiddify»."
 
 
-def card_cb(screen: str, key: str = "") -> str:
-    return commands.action_callback(CARD_ACTION, f"{screen}{key}", service=SERVICE)
-
-
-def action_cb(action: str, kind: str, key: str = "", node: str | None = None) -> str:
-    return commands.action_callback(
-        action, f"{EXPERT_PREFIX}{kind}{key}", node_id=node, service=SERVICE
-    )
-
-
-def _device_cb(key: str) -> str:
-    return card_cb("d", key)
-
-
-# --- выбор технологии ------------------------------------------------------
-
-
 PAGE_BUTTON = "📶 Открыть настройки"
 PAGE_CARD_BUTTON = "📶 Настройки на странице"
 OTHER_WAYS_BUTTON = "Другие способы"
+CANCEL_TEXT = "Отмена"
+TO_DEVICE_TEXT = "⬅️ К устройству"
 
+MAX_REISSUE_BITS = 16
+LIST_CHANGED_TEXT = "Список изменился, выберите заново."
+NOTHING_PICKED_TEXT = "Ничего не выбрано."
 
 page_link_text = wizard.page_link_text
 
 
+def _device_cb(key: str) -> str:
+    return vpn_callbacks.card_cb(vpn_callbacks.SCREEN_DEVICE, key)
+
+
+def _issue_cb(kind: str, key: str, node: str | None = None) -> str:
+    return vpn_callbacks.expert_cb(vpn_protocol.ACTION_ISSUE, kind, key, node)
+
+
 def page_link_keyboard(page_url: str) -> InlineKeyboardMarkup:
-    """Только URL-кнопка: callback-кнопки у получателя пересылки не работают."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=PAGE_BUTTON, url=page_url)]]
-    )
+    return markup([InlineKeyboardButton(text=PAGE_BUTTON, url=page_url)])
 
 
 def new_device_link_keyboard(page_url: str, key: str) -> InlineKeyboardMarkup:
-    """Новое устройство из «Управления»: та же URL-кнопка + возврат к карточке."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=PAGE_BUTTON, url=page_url)],
-            [InlineKeyboardButton(text="⬅️ К устройству", callback_data=_device_cb(key))],
-        ]
+    return markup(
+        [InlineKeyboardButton(text=PAGE_BUTTON, url=page_url)],
+        [button(TO_DEVICE_TEXT, _device_cb(key))],
     )
 
 
@@ -108,25 +65,14 @@ def pick_text(label: str) -> str:
 
 
 def pick_keyboard(key: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⚡ AmneziaVPN", callback_data=card_cb(SCREEN_AWG, key))],
-            [
-                InlineKeyboardButton(
-                    text=f"🛡 {vd.TRANSPORT_NAME[vd.REALITY]}",
-                    callback_data=action_cb(vpn_protocol.ACTION_ISSUE, KIND_VLESS, key),
-                )
-            ],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data=_device_cb(key))],
-        ]
+    return markup(
+        [button("⚡ AmneziaVPN", vpn_callbacks.card_cb(vpn_callbacks.SCREEN_AWG, key))],
+        [button(f"🛡 {vd.TRANSPORT_NAME[vd.REALITY]}", _issue_cb(vpn_callbacks.KIND_VLESS, key))],
+        vpn_keyboards.back_row(_device_cb(key)),
     )
 
 
-# --- VLESS · Hiddify -------------------------------------------------------
-
-
 def had_vless_handshake(device: vd.Device) -> bool:
-    """Хоть одно VLESS-подключение устройства уже выходило на связь."""
     return any(c.transport == vd.REALITY and c.last_handshake_at for c in device.issued)
 
 
@@ -139,8 +85,6 @@ def vless_text(
     added: list[str],
     reissued: bool = False,
 ) -> str:
-    """``links`` — (название страны, vless://-ссылка); ``added`` — страны,
-    довыпущенные только что."""
     lines = [f"🛡 <b>{html.escape(label)}</b> · {vd.TRANSPORT_NAME[vd.REALITY]}", ""]
     if file_sent and has_page:
         lines += [
@@ -174,32 +118,20 @@ def vless_keyboard(
     file_again_key: str | None,
     qr_buttons: list[tuple[str, str]],
 ) -> InlineKeyboardMarkup:
-    """``file_again_key`` — ключ устройства для «⚙️ Файл настроек ещё раз» (None —
-    кнопки нет); ``qr_buttons`` — (подпись, callback) по стране."""
     rows: list[list[InlineKeyboardButton]] = []
     if page_url:
         rows.append([InlineKeyboardButton(text="🔌 Подключить", url=page_url)])
     if file_again_key:
         rows.append(
-            [
-                InlineKeyboardButton(
-                    text="⚙️ Файл настроек ещё раз",
-                    callback_data=action_cb(vpn_protocol.ACTION_ISSUE, KIND_FILE, file_again_key),
-                )
-            ]
+            [button("⚙️ Файл настроек ещё раз", _issue_cb(vpn_callbacks.KIND_FILE, file_again_key))]
         )
     if qr_buttons:
-        rows.append(
-            [InlineKeyboardButton(text=text, callback_data=data) for text, data in qr_buttons]
-        )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+        rows.append([button(text, data) for text, data in qr_buttons])
+    return markup(*rows)
 
 
 def qr_button_text(country: vd.Country, multi: bool) -> str:
     return f"📷 QR {country.short}" if multi else "📷 QR"
-
-
-# --- AmneziaWG -------------------------------------------------------------
 
 
 def awg_pick_text(label: str) -> str:
@@ -217,15 +149,15 @@ def awg_country_button_text(server: dict) -> str:
 def awg_pick_keyboard(key: str, servers: list[dict]) -> InlineKeyboardMarkup:
     rows = [
         [
-            InlineKeyboardButton(
-                text=awg_country_button_text(server),
-                callback_data=action_cb(vpn_protocol.ACTION_ISSUE, KIND_AWG, key, server["node"]),
+            button(
+                awg_country_button_text(server),
+                _issue_cb(vpn_callbacks.KIND_AWG_COUNTRY, key, server["node"]),
             )
         ]
         for server in servers
     ]
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=card_cb(SCREEN_PICK, key))])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    rows.append(vpn_keyboards.back_row(vpn_callbacks.card_cb(vpn_callbacks.SCREEN_PICK, key)))
+    return markup(*rows)
 
 
 def awg_replace_text(label: str, country: vd.Country) -> str:
@@ -236,15 +168,15 @@ def awg_replace_text(label: str, country: vd.Country) -> str:
 
 
 def awg_replace_keyboard(key: str, node: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Выпустить новый",
-                    callback_data=action_cb(vpn_protocol.ACTION_REISSUE, KIND_AWG, key, node),
+    return markup(
+        [
+            button(
+                "Выпустить новый",
+                vpn_callbacks.expert_cb(
+                    vpn_protocol.ACTION_REISSUE, vpn_callbacks.KIND_AWG_COUNTRY, key, node
                 ),
-                InlineKeyboardButton(text="Отмена", callback_data=card_cb(SCREEN_AWG, key)),
-            ]
+            ),
+            button(CANCEL_TEXT, vpn_callbacks.card_cb(vpn_callbacks.SCREEN_AWG, key)),
         ]
     )
 
@@ -271,82 +203,51 @@ def awg_steps_keyboard(cfg: VpnConfig, qr_callback: str | None) -> InlineKeyboar
         ]
     ]
     if qr_callback:
-        rows.append(
-            [InlineKeyboardButton(text="📷 QR для другого устройства", callback_data=qr_callback)]
-        )
+        rows.append([button("📷 QR для другого устройства", qr_callback)])
     rows.append(
         [
-            InlineKeyboardButton(
-                text="Магазин недоступен?",
-                callback_data=commands.action_callback("apk", APK_NO_STORE, service=SERVICE),
+            button(
+                "Магазин недоступен?",
+                vpn_callbacks.vpn_callback(vpn_callbacks.ACTION_APK, APK_NO_STORE),
             )
         ]
     )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return markup(*rows)
 
 
 def no_store_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📦 Скачать AmneziaWG (.apk)",
-                    callback_data=commands.action_callback("apk", "send", service=SERVICE),
-                )
-            ]
+    return markup(
+        [
+            button(
+                "📦 Скачать AmneziaWG (.apk)",
+                vpn_callbacks.vpn_callback(vpn_callbacks.ACTION_APK, APK_SEND),
+            )
         ]
     )
 
 
-# --- новое устройство ------------------------------------------------------
-
-
 def new_device_keyboard() -> InlineKeyboardMarkup:
-    rows = [
+    return markup(
         [
-            InlineKeyboardButton(
-                text=text,
-                callback_data=action_cb(vpn_protocol.ACTION_ISSUE, KIND_NEW, code),
-            )
+            button(text, _issue_cb(vpn_callbacks.KIND_NEW, code))
             for code, text in wizard.PICK_BUTTONS.items()
         ],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=card_cb("m"))],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+        vpn_keyboards.back_row(vpn_callbacks.card_cb(vpn_callbacks.SCREEN_LIST)),
+    )
 
 
 def create_failed_keyboard(platform: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔁 Попробовать ещё раз",
-                    callback_data=action_cb(vpn_protocol.ACTION_ISSUE, KIND_NEW, platform),
-                )
-            ],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data=card_cb("m"))],
-        ]
+    return markup(
+        [button(vpn_keyboards.RETRY_TEXT, _issue_cb(vpn_callbacks.KIND_NEW, platform))],
+        vpn_keyboards.back_row(vpn_callbacks.card_cb(vpn_callbacks.SCREEN_LIST)),
     )
 
 
 def back_keyboard(key: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data=card_cb(SCREEN_PICK, key))]
-        ]
-    )
-
-
-# --- перевыпуск по выбранным подключениям (57.5) ----------------------------
-
-MAX_REISSUE_BITS = 16
-LIST_CHANGED_TEXT = "Список изменился, выберите заново."
-NOTHING_PICKED_TEXT = "Ничего не выбрано."
+    return markup(vpn_keyboards.back_row(vpn_callbacks.card_cb(vpn_callbacks.SCREEN_PICK, key)))
 
 
 def reissue_connections(device: vd.Device) -> list[vd.Connection]:
-    """Выданные подключения в стабильном порядке (его задаёт ``build_devices``);
-    бит маски = индекс в этом списке."""
     return [c for c in device.issued if c.transport in vd.TRANSPORT_NAME][:MAX_REISSUE_BITS]
 
 
@@ -364,7 +265,6 @@ def selected(conns: list[vd.Connection], mask: int) -> list[vd.Connection]:
 
 
 def parse_selection(rest: str) -> tuple[str, str | None, int]:
-    """``<ключ>[-<подпись>-<маска>]`` → (ключ, подпись | None, маска); мусор — без выбора."""
     key, _, tail = rest.partition("-")
     sig, _, mask_hex = tail.partition("-")
     if not sig:
@@ -375,13 +275,17 @@ def parse_selection(rest: str) -> tuple[str, str | None, int]:
         return key, sig, 0
 
 
+def _selection_value(key: str, conns: list[vd.Connection], mask: int) -> str:
+    return f"{key}-{list_signature(conns)}-{mask:x}"
+
+
 def reissue_select_cb(key: str, conns: list[vd.Connection], mask: int) -> str:
-    return card_cb(SCREEN_REISSUE, f"{key}-{list_signature(conns)}-{mask:x}")
+    return vpn_callbacks.card_cb(vpn_callbacks.SCREEN_REISSUE, _selection_value(key, conns, mask))
 
 
 def reissue_run_cb(key: str, conns: list[vd.Connection], mask: int) -> str:
-    return action_cb(
-        vpn_protocol.ACTION_REISSUE, KIND_MULTI, f"{key}-{list_signature(conns)}-{mask:x}"
+    return vpn_callbacks.expert_cb(
+        vpn_protocol.ACTION_REISSUE, vpn_callbacks.KIND_MULTI, _selection_value(key, conns, mask)
     )
 
 
@@ -411,35 +315,25 @@ def reissue_select_keyboard(
     last_node: str | None = None
     for i, conn in enumerate(conns):
         mark = "☑️" if mask >> i & 1 else "☐"
-        button = InlineKeyboardButton(
-            text=f"{mark} {reissue_conn_text(conn, countries)}",
-            callback_data=reissue_select_cb(key, conns, mask ^ (1 << i)),
+        toggle = button(
+            f"{mark} {reissue_conn_text(conn, countries)}",
+            reissue_select_cb(key, conns, mask ^ (1 << i)),
         )
         if rows and conn.node == last_node:
-            rows[-1].append(button)
+            rows[-1].append(toggle)
         else:
-            rows.append([button])
+            rows.append([toggle])
         last_node = conn.node
     everything = all_mask(conns)
     if everything and mask != everything:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="Выбрать все", callback_data=reissue_select_cb(key, conns, everything)
-                )
-            ]
-        )
+        rows.append([button("Выбрать все", reissue_select_cb(key, conns, everything))])
     last: list[InlineKeyboardButton] = []
     count = len(selected(conns, mask))
     if count and can_run:
-        last.append(
-            InlineKeyboardButton(
-                text=f"🔄 Перевыпустить ({count})", callback_data=reissue_run_cb(key, conns, mask)
-            )
-        )
-    last.append(InlineKeyboardButton(text="Отмена", callback_data=_device_cb(key)))
+        last.append(button(f"🔄 Перевыпустить ({count})", reissue_run_cb(key, conns, mask)))
+    last.append(button(CANCEL_TEXT, _device_cb(key)))
     rows.append(last)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return markup(*rows)
 
 
 def reissue_result_text(label: str, done: list[str], failed: list[tuple[str, str]]) -> str:
@@ -456,14 +350,7 @@ def reissue_result_text(label: str, done: list[str], failed: list[tuple[str, str
 
 
 def reissue_result_keyboard(key: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ К устройству", callback_data=_device_cb(key))]
-        ]
-    )
-
-
-# --- «сервер переустановлен» (57.7): предвыбор на экране перевыпуска ---------
+    return markup([button(TO_DEVICE_TEXT, _device_cb(key))])
 
 
 def node_hash(node: str) -> str:
@@ -472,7 +359,7 @@ def node_hash(node: str) -> str:
 
 def restore_cb(key: str, node: str, transports: list[str]) -> str:
     codes = "".join(_TRANSPORT_CODE[t] for t in vd.TRANSPORT_ORDER if t in transports)
-    return card_cb(SCREEN_RESTORE, f"{key}-{node_hash(node)}-{codes}")
+    return vpn_callbacks.card_cb(vpn_callbacks.SCREEN_RESTORE, f"{key}-{node_hash(node)}-{codes}")
 
 
 def parse_restore(rest: str) -> tuple[str, str, str]:
@@ -482,7 +369,6 @@ def parse_restore(rest: str) -> tuple[str, str, str]:
 
 
 def restore_mask(conns: list[vd.Connection], nh: str, codes: str) -> int:
-    """Маска выбора: подключения страны с хэшем ``nh`` и транспортами из ``codes``."""
     mask = 0
     for i, conn in enumerate(conns):
         if node_hash(conn.node) == nh and _TRANSPORT_CODE.get(conn.transport) in codes:

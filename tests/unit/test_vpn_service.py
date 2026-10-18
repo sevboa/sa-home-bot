@@ -151,9 +151,7 @@ async def test_issue_rejects_bad_label(env):
     svc, _backend, _events = env
     for bad in ("x" * 65, "a\nb"):
         with pytest.raises(ProtoError):
-            await svc.run_command(
-                vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "device_label": bad}
-            )
+            await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": CHAT, "device_label": bad})
 
 
 async def test_issue_reports_prior_device_count(env):
@@ -280,9 +278,7 @@ async def test_sampler_month_rollover_keeps_separate_history(env, monkeypatch):
     monkeypatch.setattr(svc_module, "_month_key", lambda when: "2026-02")
     await svc.sample_once()
 
-    cur = await svc._db.conn.execute(
-        "SELECT month, used_bytes FROM vpn_peer_usage ORDER BY month"
-    )
+    cur = await svc._db.conn.execute("SELECT month, used_bytes FROM vpn_peer_usage ORDER BY month")
     rows = {row["month"]: row["used_bytes"] for row in await cur.fetchall()}
     assert rows == {"2026-01": 1000, "2026-02": 500}
 
@@ -403,9 +399,7 @@ async def test_usage_without_chat_id_keeps_allowed_guest_without_devices(env):
 
 async def test_usage_without_chat_id_drops_guest_whose_access_was_revoked(env):
     svc, _backend, _events = env
-    await svc.run_command(
-        vpn_protocol.ACTION_SET_ACCESS, {"chat_id": OTHER_CHAT, "allowed": False}
-    )
+    await svc.run_command(vpn_protocol.ACTION_SET_ACCESS, {"chat_id": OTHER_CHAT, "allowed": False})
     summary = await svc.run_command(vpn_protocol.ACTION_USAGE, {})
     assert [row["chat_id"] for row in summary["chats"]] == [CHAT]
     assert summary["node"]["reserved_bytes"] == GB
@@ -414,9 +408,7 @@ async def test_usage_without_chat_id_drops_guest_whose_access_was_revoked(env):
 async def test_usage_without_chat_id_still_shows_revoked_access_with_live_peers(env):
     svc, _backend, _events = env
     await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": OTHER_CHAT})
-    await svc.run_command(
-        vpn_protocol.ACTION_SET_ACCESS, {"chat_id": OTHER_CHAT, "allowed": False}
-    )
+    await svc.run_command(vpn_protocol.ACTION_SET_ACCESS, {"chat_id": OTHER_CHAT, "allowed": False})
     summary = await svc.run_command(vpn_protocol.ACTION_USAGE, {})
     by_chat = {row["chat_id"]: row for row in summary["chats"]}
     assert by_chat[OTHER_CHAT]["allowed"] is False
@@ -424,9 +416,7 @@ async def test_usage_without_chat_id_still_shows_revoked_access_with_live_peers(
 
 async def test_resolve_request_approve_grants_quota(env):
     svc, _backend, events = env
-    req = await svc.run_command(
-        vpn_protocol.ACTION_REQUEST_EXTRA, {"chat_id": CHAT, "bytes": GB}
-    )
+    req = await svc.run_command(vpn_protocol.ACTION_REQUEST_EXTRA, {"chat_id": CHAT, "bytes": GB})
     before = await svc.run_command(vpn_protocol.ACTION_USAGE, {"chat_id": CHAT})
 
     result = await svc.run_command(
@@ -441,9 +431,7 @@ async def test_resolve_request_approve_grants_quota(env):
 
 async def test_resolve_request_deny_does_not_grant(env):
     svc, _backend, _events = env
-    req = await svc.run_command(
-        vpn_protocol.ACTION_REQUEST_EXTRA, {"chat_id": CHAT, "bytes": GB}
-    )
+    req = await svc.run_command(vpn_protocol.ACTION_REQUEST_EXTRA, {"chat_id": CHAT, "bytes": GB})
     before = await svc.run_command(vpn_protocol.ACTION_USAGE, {"chat_id": CHAT})
     result = await svc.run_command(
         vpn_protocol.ACTION_RESOLVE_REQUEST,
@@ -456,9 +444,7 @@ async def test_resolve_request_deny_does_not_grant(env):
 
 async def test_resolve_request_twice_is_rejected(env):
     svc, _backend, _events = env
-    req = await svc.run_command(
-        vpn_protocol.ACTION_REQUEST_EXTRA, {"chat_id": CHAT, "bytes": GB}
-    )
+    req = await svc.run_command(vpn_protocol.ACTION_REQUEST_EXTRA, {"chat_id": CHAT, "bytes": GB})
     await svc.run_command(
         vpn_protocol.ACTION_RESOLVE_REQUEST, {"request_id": req["request_id"], "approve": True}
     )
@@ -496,9 +482,7 @@ async def test_peers_lists_all_chats_for_admin(env):
 
 async def test_set_quota_admin_sets_absolute_limit(env):
     svc, _backend, _events = env
-    await svc.run_command(
-        vpn_protocol.ACTION_SET_QUOTA, {"chat_id": CHAT, "bytes": 5 * GB}
-    )
+    await svc.run_command(vpn_protocol.ACTION_SET_QUOTA, {"chat_id": CHAT, "bytes": 5 * GB})
     usage = await svc.run_command(vpn_protocol.ACTION_USAGE, {"chat_id": CHAT})
     assert usage["limit_bytes"] == 5 * GB
 
@@ -560,9 +544,7 @@ async def test_reissue_refused_without_access_keeps_old_device(env):
             vpn_protocol.ACTION_REISSUE,
             {"chat_id": CHAT, "device_label": issued["device_label"]},
         )
-    cur = await svc._db.conn.execute(
-        "SELECT status FROM vpn_peers WHERE chat_id = ?", (CHAT,)
-    )
+    cur = await svc._db.conn.execute("SELECT status FROM vpn_peers WHERE chat_id = ?", (CHAT,))
     assert [row["status"] for row in await cur.fetchall()] == ["active"]
     assert backend.peers == {}
 
@@ -667,9 +649,7 @@ async def test_node_probe_needs_no_access_grant(env):
     svc, backend, _events = env
     from sa_home_bot.vpn.service import NODE_SENTINEL_CHAT_ID
 
-    result = await svc.run_command(
-        vpn_protocol.ACTION_ISSUE, {"chat_id": NODE_SENTINEL_CHAT_ID}
-    )
+    result = await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": NODE_SENTINEL_CHAT_ID})
     assert result["config_text"]
     await svc.reconcile()
     assert len(backend.peers) == 1
@@ -1129,9 +1109,7 @@ async def test_get_vless_returns_same_link_without_reissue(env_both):
 async def test_get_vless_unavailable_on_awg_only_node(env):
     svc, _backend, _events = env
     with pytest.raises(ProtoError):
-        await svc.run_command(
-            vpn_protocol.ACTION_GET_VLESS, {"chat_id": CHAT, "device_label": "x"}
-        )
+        await svc.run_command(vpn_protocol.ACTION_GET_VLESS, {"chat_id": CHAT, "device_label": "x"})
     assert vpn_protocol.ACTION_GET_VLESS not in svc.describe().capabilities
 
 

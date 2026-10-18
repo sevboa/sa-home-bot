@@ -1,25 +1,3 @@
-"""«⚠️ Сообщить о проблеме» и «💬 Ответить» в /vpn (этап 57.6b).
-
-Чистый модуль: тексты, клавиатуры, контекст для владельца и память ожиданий
-reply. Сеть и отправка — в bot/vpn_help.py и bot/handlers/vpn.py.
-
-Колбэки (``act:vpn:…``):
-  report:m[<ключ>]      — экран причин (с карточки устройства — ключ устройства)
-  report:f              — то же, но из «❓ Помощь»
-  report:c|s|w[<ключ>]  — причина кнопкой: не подключается / медленно / сайты
-  report:o[<ключ>]      — «Другое»: бот просит описание reply на своё сообщение
-  reply:<chat_id>       — владельцу: «💬 Ответить» человеку
-
-Права. ``report@vpn`` отдельным тумблером не выдаётся: он есть у каждого, у кого
-есть ``usage@vpn`` (своя карточка /vpn), см. ``can_report``; middleware
-(bot/middlewares.py) пропускает кнопку по тому же правилу. ``reply@vpn`` —
-только у админов (``*``), как и любое «неперечисленное» умение службы.
-
-Ожидания reply живут в памяти процесса: ``(chat_id, message_id запроса бота)``
-→ кто нажал и зачем. После рестарта бота или через ``REPLY_TTL_S`` reply уже
-не принимается («Время ответа вышло»).
-"""
-
 from __future__ import annotations
 
 import html
@@ -29,20 +7,19 @@ from datetime import tzinfo
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from sa_home_bot.bot import commands
+from sa_home_bot.bot import vpn_callbacks, vpn_check_view, vpn_format, vpn_keyboards, vpn_rights
 from sa_home_bot.bot import vpn_devices as vd
-from sa_home_bot.domain import vpn_check
+from sa_home_bot.bot.ui.keyboards import button, markup
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.vpn import protocol as vpn_protocol
 
-SERVICE = vpn_protocol.SERVICE_NAME
+SERVICE = vpn_callbacks.SERVICE
 REPORT_ACTION = "report"
 REPLY_ACTION = "reply"
 
 MENU, MENU_FAQ = "m", "f"
 CONNECT, SLOW, SITES, OTHER = "c", "s", "w", "o"
 
-# код → (кнопка, причина для владельца)
 REASONS: dict[str, tuple[str, str]] = {
     CONNECT: ("🔌 Не подключается", "не подключается"),
     SLOW: ("🐢 Работает медленно", "работает медленно"),
@@ -69,37 +46,28 @@ KIND_REPORT, KIND_ANSWER = "report", "answer"
 
 
 def can_report(subscription: Subscription | None) -> bool:
-    """«Сообщить о проблеме» — у каждого, у кого есть VPN (usage@vpn), и у тех,
-    кому ``report@vpn`` выдан явно."""
-    return subscription is not None and (
-        subscription.allows_action(REPORT_ACTION, SERVICE)
-        or subscription.allows_action(vpn_protocol.ACTION_USAGE, SERVICE)
+    return vpn_rights.allows(subscription, REPORT_ACTION) or vpn_rights.allows(
+        subscription, vpn_protocol.ACTION_USAGE
     )
 
 
 def can_reply(subscription: Subscription | None) -> bool:
-    return subscription is not None and subscription.allows_action(REPLY_ACTION, SERVICE)
-
-
-# --- callback_data ---------------------------------------------------------
+    return vpn_rights.allows(subscription, REPLY_ACTION)
 
 
 def report_cb(value: str = MENU, key: str = "") -> str:
-    return commands.action_callback(REPORT_ACTION, f"{value}{key}", service=SERVICE)
+    return vpn_callbacks.vpn_callback(REPORT_ACTION, f"{value}{key}")
 
 
 def reply_cb(chat_id: int) -> str:
-    return commands.action_callback(REPLY_ACTION, str(chat_id), service=SERVICE)
+    return vpn_callbacks.vpn_callback(REPLY_ACTION, str(chat_id))
 
 
 def report_button(key: str = "", *, faq: bool = False) -> InlineKeyboardButton:
-    return InlineKeyboardButton(
-        text=REPORT_BUTTON, callback_data=report_cb(MENU_FAQ if faq else MENU, key)
-    )
+    return button(REPORT_BUTTON, report_cb(MENU_FAQ if faq else MENU, key))
 
 
 def parse_report(value: str | None) -> tuple[str, str]:
-    """``<код><ключ>`` → (код, ключ); пусто или незнакомое — экран причин."""
     if not value:
         return MENU, ""
     code, key = value[:1], value[1:]
@@ -110,50 +78,28 @@ def parse_report(value: str | None) -> tuple[str, str]:
     return MENU, ""
 
 
-# --- экран причин ----------------------------------------------------------
-
-
 def menu_keyboard(key: str, *, back_cb: str) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text=text, callback_data=report_cb(code, key))]
-        for code, (text, _reason) in REASONS.items()
-    ]
-    rows.append([InlineKeyboardButton(text=OTHER_BUTTON, callback_data=report_cb(OTHER, key))])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_cb)])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def done_keyboard(home_cb: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="📶 На главную", callback_data=home_cb)]]
-    )
+    rows = [[button(text, report_cb(code, key))] for code, (text, _reason) in REASONS.items()]
+    rows.append([button(OTHER_BUTTON, report_cb(OTHER, key))])
+    rows.append(vpn_keyboards.back_row(back_cb))
+    return markup(*rows)
 
 
 def owner_keyboard(chat_id: int, guest_cb: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="💬 Ответить", callback_data=reply_cb(chat_id)),
-                InlineKeyboardButton(text="👤 Карточка гостя", callback_data=guest_cb),
-            ]
-        ]
-    )
+    return markup([button("💬 Ответить", reply_cb(chat_id)), button("👤 Карточка гостя", guest_cb)])
 
 
 def owner_prompt(name: str) -> str:
     return f"Ответ для {name} — ответьте на это сообщение."
 
 
-# --- ожидания reply --------------------------------------------------------
-
-
 @dataclass
 class Pending:
-    kind: str  # KIND_REPORT | KIND_ANSWER
-    user_id: int  # кому разрешено ответить
+    kind: str
+    user_id: int
     created: float
     device_key: str = ""
-    target_chat: int = 0  # для KIND_ANSWER — кому уйдёт ответ
+    target_chat: int = 0
 
 
 _pending: dict[tuple[int, int], Pending] = {}
@@ -186,16 +132,13 @@ def is_expired(entry: Pending) -> bool:
     return time.monotonic() - entry.created > REPLY_TTL_S
 
 
-# --- контекст для владельца ------------------------------------------------
-
-
 def _node_status(device: vd.Device, node: str, *, tz: tzinfo | None) -> str:
     conns = [c for c in device.issued if c.node == node]
     if not conns:
         return "не выдано"
     stamps = [c.last_handshake_at for c in conns if c.last_handshake_at]
     if stamps:
-        return f"на связи {vd.fmt_stamp(max(stamps), tz=tz)}"
+        return f"на связи {vpn_format.format_stamp(max(stamps), tz=tz)}"
     return "ещё не подключалось"
 
 
@@ -208,9 +151,6 @@ def _transports_text(device: vd.Device) -> str:
     return " + ".join(seen)
 
 
-_CHECK_ICON = {vpn_check.OK: "🟢", vpn_check.PARTIAL: "🟠", vpn_check.ALERTING: "🔴"}
-
-
 def context_lines(
     servers: list[dict],
     down: list[dict],
@@ -218,9 +158,6 @@ def context_lines(
     *,
     tz: tzinfo | None = None,
 ) -> list[str]:
-    """Строки под «Причиной»: устройство(а), связь по странам, проверки, трафик.
-    ``servers`` — свежий usage по ответившим нодам, ``down`` — не ответившие
-    (про них так и пишем). Результат — HTML, названия экранируются здесь."""
     countries = vd.countries_of(servers)
     for server in down:
         node = server.get("node")
@@ -260,9 +197,9 @@ def context_lines(
 
     checks = []
     for server in servers:
-        health = vd._server_health(server)
+        health = vd.server_health(server)
         if health is not None and server.get("node"):
-            checks.append(f"{where(server['node'])} {_CHECK_ICON.get(health, '❔')}")
+            checks.append(f"{where(server['node'])} {vpn_check_view.STATUS_ICON.get(health, '❔')}")
     if checks:
         lines.append("Проверки: " + " · ".join(checks))
 
@@ -270,8 +207,8 @@ def context_lines(
     for server in servers:
         if not server.get("node"):
             continue
-        used = int(server.get("used_bytes") or 0) / 1_000_000_000
-        limit = int(server.get("limit_bytes") or 0) / 1_000_000_000
+        used = vpn_format.bytes_to_gb(int(server.get("used_bytes") or 0))
+        limit = vpn_format.bytes_to_gb(int(server.get("limit_bytes") or 0))
         text = f"{used:.1f} / {limit:.0f} ГБ"
         traffic.append(f"{where(server['node'])} {text}" if len(servers) > 1 else text)
     if traffic:

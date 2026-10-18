@@ -1,85 +1,53 @@
-"""bot/handlers/vpn.py: экспертный режим (57.3) — главная, список, карточка
-устройства, удаление с подтверждением, «🔧 Починить страну»."""
-
 from __future__ import annotations
 
 import pytest
 
-from sa_home_bot.bot import commands, vpn_nodes
+from sa_home_bot.bot import commands, vpn_callbacks, vpn_nodes, vpn_screens
 from sa_home_bot.bot import vpn_devices as vd
 from sa_home_bot.bot import vpn_settings as vs
 from sa_home_bot.bot.handlers import vpn as h
-from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.proto.messages import ProtoError
 from sa_home_bot.vpn import protocol as vpn_protocol
 
-from .test_vpn_handler import (
+from .vpn_support import (
     ADMIN,
+    GB,
     GUEST_FULL,
-    FakeCallback,
+    KEY,
+    LABEL,
     FakeNodeLink,
-    FakeNotifier,
-    _config,
+    all_buttons,
+    button_texts,
+    make_conn,
+    make_srv,
+    press,
 )
-
-GB = 10**9
-
-
-def _conn(transport, hs=None, *, broken=False, created="2026-10-01T10:00:00+00:00"):
-    return {
-        "transport": transport,
-        "status": "active",
-        "last_handshake_at": hs,
-        "created_at": created,
-        "broken": broken,
-        "used_bytes": 0,
-    }
-
-
-def _srv(node, label, entries, **over):
-    return {
-        "node": node,
-        "label": label,
-        "allowed": True,
-        "limit_bytes": 100 * GB,
-        "remaining_bytes": 87 * GB,
-        "used_bytes": 13 * GB,
-        "transports": ["reality", "awg"],
-        "proxy_available": True,
-        "device_usage": entries,
-        "devices": [],
-        "check": [],
-    } | over
 
 
 def _servers(*, broken=True):
-    nl = _srv(
+    nl = make_srv(
         "jeeves",
         "🇳🇱 Нидерланды",
         [
             {
                 "device_label": "📱 Очень длинное имя устройства для проверки лимита",
                 "used_bytes": int(8.7 * GB),
-                "connections": [_conn("reality", "2026-10-10T14:02:00+00:00")],
+                "connections": [make_conn("reality", "2026-10-10T14:02:00+00:00")],
             }
         ],
     )
-    us = _srv(
+    us = make_srv(
         "wooster",
         "🇺🇸 США",
         [
             {
                 "device_label": "📱 Очень длинное имя устройства для проверки лимита",
                 "used_bytes": int(0.4 * GB),
-                "connections": [_conn("reality"), _conn("awg", broken=broken)],
+                "connections": [make_conn("reality"), make_conn("awg", broken=broken)],
             }
         ],
     )
     return [nl, us]
-
-
-LABEL = "📱 Очень длинное имя устройства для проверки лимита"
-KEY = vd.device_key(LABEL)
 
 
 class Link(FakeNodeLink):
@@ -103,8 +71,7 @@ class Link(FakeNodeLink):
 
 
 @pytest.fixture(autouse=True)
-def _fanout(monkeypatch, tmp_path):
-    monkeypatch.setattr(vpn_nodes, "KNOWN_SERVERS_PATH", tmp_path / "known.json")
+def _fanout(monkeypatch):
     state = {"servers": _servers()}
 
     async def fake_fanout(node_link, action, args):
@@ -114,37 +81,26 @@ def _fanout(monkeypatch, tmp_path):
     return state
 
 
-def _all_buttons(markup):
-    return [b for row in markup.inline_keyboard for b in row]
-
-
-def _texts(markup):
-    return [b.text for b in _all_buttons(markup)]
-
-
 async def _press(data, sub=GUEST_FULL, link=None, chat_id=778):
-    link = link or Link(None)
-    notifier = FakeNotifier()
-    cb = FakeCallback(data, chat_id=chat_id)
-    pend = PendingVpnSecrets()
-    await h.handle_action(cb, link, notifier, _config(), sub, pend)
-    return cb, link, notifier
+    return await press(data, sub=sub, link=link or Link(None), chat_id=chat_id)
 
 
 def test_all_callbacks_fit_64_bytes():
     servers = _servers()
     device = vd.build_devices(servers)[0]
     markups = [
-        h._home_keyboard(servers, subscription=ADMIN, self_serve_nodes=["jeeves", "wooster"]),
-        h._list_keyboard(vd.build_devices(servers), subscription=ADMIN),
+        vpn_screens.home_keyboard(
+            servers, subscription=ADMIN, self_serve_nodes=["jeeves", "wooster"]
+        ),
+        vpn_screens.list_keyboard(vd.build_devices(servers), subscription=ADMIN),
         h._card_keyboard_for_device(device, servers, subscription=ADMIN),
         vs.reissue_select_keyboard(
             device, vs.reissue_connections(device), vd.countries_of(servers), 5
         ),
-        h._delete_keyboard(device),
-    ]  # экраны мастера — в test_vpn_wizard.py
+        vpn_screens.delete_keyboard(device),
+    ]
     for markup in markups:
-        for button in _all_buttons(markup):
+        for button in all_buttons(markup):
             assert len(button.callback_data.encode()) <= 64, button.callback_data
 
 
@@ -153,20 +109,18 @@ async def test_home_for_user_with_devices(_fanout):
     text, markup = cb.message.edits[-1], cb.message.edit_markups[-1]
     assert text.startswith("📶 <b>VPN</b>")
     assert "🇳🇱 Нидерланды: осталось 87 ГБ из 100 до " in text
-    flat = _texts(markup)
+    flat = button_texts(markup)
     assert "⚙️ Управление устройствами" in flat and "❓ Помощь" in flat
-    # устройства есть — новое подключается из «Управления», не с главной
     assert "➕ Новое устройство" not in flat and "📱 Подключить по шагам" not in flat
     assert "⚠️ Сообщить о проблеме" in flat
     assert not any("Перевыпустить" in t or "Отозвать" in t for t in flat)
 
 
 async def test_home_without_devices_is_old_card_in_group(_fanout):
-    # В личке без устройств открывается мастер (test_vpn_wizard.py); в группе мастера нет.
-    _fanout["servers"] = [_srv("jeeves", "", [], devices=[])]
+    _fanout["servers"] = [make_srv("jeeves", "", [], devices=[])]
     cb, _, _ = await _press("act:vpn:vpn_card", chat_id=-100)
     assert "📶 <b>VPN</b>" in cb.message.edits[-1]
-    assert "Управление" not in " ".join(_texts(cb.message.edit_markups[-1]))
+    assert "Управление" not in " ".join(button_texts(cb.message.edit_markups[-1]))
 
 
 async def test_home_shows_warning_in_words(_fanout):
@@ -180,11 +134,11 @@ async def test_home_shows_warning_in_words(_fanout):
 
 
 async def test_list_screen():
-    cb, _, _ = await _press(f"act:vpn:vpn_card:{h._SCREEN_LIST}")
+    cb, _, _ = await _press(f"act:vpn:vpn_card:{vpn_callbacks.SCREEN_LIST}")
     text, markup = cb.message.edits[-1], cb.message.edit_markups[-1]
     assert text.startswith("⚙️ <b>Мои устройства</b>")
     assert "9.1 ГБ, на связи 10.10" in text
-    texts = _texts(markup)
+    texts = button_texts(markup)
     assert texts[0].startswith("📱 Очень длинное")
     assert "➕ Новое устройство" in texts and "⬅️ Назад" in texts
 
@@ -194,7 +148,7 @@ async def test_device_card_with_fix_button_for_broken_country():
     text, markup = cb.message.edits[-1], cb.message.edit_markups[-1]
     assert "🇳🇱 Нидерланды — 8.7 ГБ" in text
     assert "🇺🇸 AmneziaVPN — 🔧 сервер его не помнит" in text
-    texts = _texts(markup)
+    texts = button_texts(markup)
     assert "🔧 Починить 🇺🇸" in texts
     assert "🔄 Перевыпустить ключи" in texts and "🗑 Удалить устройство" in texts
     assert "⬅️ К устройствам" in texts
@@ -204,7 +158,7 @@ async def test_device_card_with_fix_button_for_broken_country():
 async def test_device_card_without_broken_has_no_fix(_fanout):
     _fanout["servers"] = _servers(broken=False)
     cb, _, _ = await _press(f"act:vpn:vpn_card:d{KEY}")
-    assert not any("Починить" in t for t in _texts(cb.message.edit_markups[-1]))
+    assert not any("Починить" in t for t in button_texts(cb.message.edit_markups[-1]))
 
 
 async def test_card_buttons_follow_rights():
@@ -212,7 +166,7 @@ async def test_card_buttons_follow_rights():
         chat_id=779, name="v", allowed_commands=frozenset({"usage@vpn", "vpn_card@vpn"})
     )
     cb, _, _ = await _press(f"act:vpn:vpn_card:d{KEY}", sub=view_only, chat_id=779)
-    assert _texts(cb.message.edit_markups[-1]) == ["⚠️ Сообщить о проблеме", "⬅️ К устройствам"]
+    assert button_texts(cb.message.edit_markups[-1]) == ["⚠️ Сообщить о проблеме", "⬅️ К устройствам"]
 
 
 async def test_unknown_device_goes_back_to_list():
@@ -224,7 +178,7 @@ async def test_unknown_device_goes_back_to_list():
 async def test_delete_asks_confirmation_first():
     cb, link, _ = await _press(f"act:vpn:vpn_card:x{KEY}")
     assert "Удалить" in cb.message.edits[-1] and "во всех странах" in cb.message.edits[-1]
-    assert _texts(cb.message.edit_markups[-1]) == ["Да, удалить", "Отмена"]
+    assert button_texts(cb.message.edit_markups[-1]) == ["Да, удалить", "Отмена"]
     assert not [c for c in link.calls if c[0] == vpn_protocol.ACTION_REVOKE]
 
 
@@ -261,8 +215,8 @@ async def test_fix_reissues_only_broken_in_that_country_and_delivers_secret():
         if act == vpn_protocol.ACTION_REISSUE
     ]
     assert reissues == [("wooster", {"chat_id": 778, "device_label": LABEL, "transport": "awg"})]
-    assert notifier.sent_direct  # _send_secret отработал: кнопка «Дать файл конфига»
-    assert cb.message.edits  # карточка перерисована
+    assert notifier.sent_direct
+    assert cb.message.edits
 
 
 async def test_fix_in_group_chat_refused():
@@ -273,7 +227,7 @@ async def test_fix_in_group_chat_refused():
 
 async def test_reissue_menu_lists_only_issued_unchecked():
     cb, _, _ = await _press(f"act:vpn:vpn_card:r{KEY}")
-    texts = _texts(cb.message.edit_markups[-1])
+    texts = button_texts(cb.message.edit_markups[-1])
     assert texts == [
         "☐ 🇳🇱 VLESS · Hiddify",
         "☐ 🇺🇸 AmneziaVPN",
@@ -285,10 +239,10 @@ async def test_reissue_menu_lists_only_issued_unchecked():
 
 async def test_new_device_and_help_buttons():
     cb, _, _ = await _press("act:vpn:vpn_card")
-    buttons = {b.text: b.callback_data for b in _all_buttons(cb.message.edit_markups[-1])}
+    buttons = {b.text: b.callback_data for b in all_buttons(cb.message.edit_markups[-1])}
     assert buttons["❓ Помощь"] == commands.action_callback("apk", service="vpn")
     cb, _, _ = await _press("act:vpn:vpn_card:m")
-    buttons = {b.text: b.callback_data for b in _all_buttons(cb.message.edit_markups[-1])}
+    buttons = {b.text: b.callback_data for b in all_buttons(cb.message.edit_markups[-1])}
     assert buttons["➕ Новое устройство"] == commands.action_callback(
         "vpn_card", "n", service="vpn"
     )

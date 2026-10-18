@@ -1,5 +1,3 @@
-"""«❓ Помощь» и «✈️ Прокси Telegram» в /vpn (этап 57.6)."""
-
 from __future__ import annotations
 
 import base64
@@ -13,8 +11,15 @@ from sa_home_bot.config import Settings, VpnConfig
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.vpn import protocol as vpn_protocol
 
-from .test_vpn_expert import _all_buttons, _texts
-from .test_vpn_handler import GUEST_FULL, FakeCallback, FakeNodeLink, FakeNotifier
+from .vpn_support import (
+    GUEST_FULL,
+    FakeCallback,
+    FakeNodeLink,
+    FakeNotifier,
+    all_buttons,
+    button_texts,
+    press,
+)
 
 CFG = Settings(vpn=VpnConfig())
 PROXY_GUEST = Subscription(
@@ -52,19 +57,14 @@ def results(monkeypatch):
 
 
 async def _press(data, sub=GUEST_FULL, chat_id=778):
-    cb = FakeCallback(data, chat_id=chat_id)
-    notifier = FakeNotifier()
-    await h.handle_action(cb, FakeNodeLink(), notifier, CFG, sub, PendingVpnSecrets())
+    cb, _, notifier = await press(data, sub=sub, chat_id=chat_id, cfg=CFG)
     return cb, notifier
-
-
-# --- справка -----------------------------------------------------------------
 
 
 async def test_faq_list_has_all_questions_and_report_button():
     cb, _ = await _press("act:vpn:apk")
     markup = cb.message.edit_markups[-1]
-    assert _texts(markup) == [
+    assert button_texts(markup) == [
         "Чем отличается AmneziaVPN?",
         "Что такое Hiddify?",
         "Не подключается",
@@ -80,9 +80,9 @@ async def test_faq_list_has_all_questions_and_report_button():
 async def test_every_answer_has_back_to_questions_and_short_callbacks(code):
     cb, _ = await _press(f"act:vpn:apk:q{code}")
     markup = cb.message.edit_markups[-1]
-    assert _texts(markup)[-1] == "⬅️ К вопросам"
-    assert _all_buttons(markup)[-1].callback_data == "act:vpn:apk"
-    for button in _all_buttons(markup):
+    assert button_texts(markup)[-1] == "⬅️ К вопросам"
+    assert all_buttons(markup)[-1].callback_data == "act:vpn:apk"
+    for button in all_buttons(markup):
         assert button.url or len(button.callback_data.encode()) <= 64
     assert len(cb.message.edits[-1].splitlines()) <= 5
 
@@ -90,7 +90,7 @@ async def test_every_answer_has_back_to_questions_and_short_callbacks(code):
 async def test_hiddify_answer_has_text_and_hiddify_stores_only():
     cb, _ = await _press("act:vpn:apk:qh")
     assert "«VLESS · Hiddify»" in cb.message.edits[-1] and "одно и то же" in cb.message.edits[-1]
-    urls = [b.url for b in _all_buttons(cb.message.edit_markups[-1]) if b.url]
+    urls = [b.url for b in all_buttons(cb.message.edit_markups[-1]) if b.url]
     assert CFG.vpn.hiddify_ios_app_store_url in urls and CFG.vpn.hiddify_google_play_url in urls
     assert CFG.vpn.ios_app_store_url not in urls
 
@@ -99,7 +99,7 @@ async def test_amneziawg_answer_links_only_amneziavpn():
     cb, _ = await _press("act:vpn:apk:qa")
     text = cb.message.edits[-1]
     assert "AmneziaVPN" in text and "VLESS · Hiddify" in text
-    urls = [b.url for b in _all_buttons(cb.message.edit_markups[-1]) if b.url]
+    urls = [b.url for b in all_buttons(cb.message.edit_markups[-1]) if b.url]
     assert urls == [
         CFG.vpn.amneziavpn_ios_app_store_url,
         CFG.vpn.amneziavpn_google_play_url,
@@ -110,16 +110,16 @@ async def test_amneziawg_answer_links_only_amneziavpn():
 
 async def test_device_answer_has_wizard_button_only_with_issue_right():
     cb, _ = await _press("act:vpn:apk:qd")
-    assert "📱 Подключить по шагам" in _texts(cb.message.edit_markups[-1])
+    assert "📱 Подключить по шагам" in button_texts(cb.message.edit_markups[-1])
     cb, _ = await _press("act:vpn:apk:qd", sub=PROXY_GUEST)
-    assert "📱 Подключить по шагам" not in _texts(cb.message.edit_markups[-1])
+    assert "📱 Подключить по шагам" not in button_texts(cb.message.edit_markups[-1])
 
 
 async def test_store_answer_has_apk_and_hiddify_site():
     cb, _ = await _press("act:vpn:apk:qs")
     markup = cb.message.edit_markups[-1]
-    assert "act:vpn:apk:send" in [b.callback_data for b in _all_buttons(markup)]
-    urls = [b.url for b in _all_buttons(markup) if b.url]
+    assert "act:vpn:apk:send" in [b.callback_data for b in all_buttons(markup)]
+    urls = [b.url for b in all_buttons(markup) if b.url]
     assert CFG.vpn.hiddify_site_url in urls and CFG.vpn.hiddify_releases_url in urls
     assert "лучше, чем ничего" in cb.message.edits[-1]
 
@@ -134,51 +134,37 @@ async def test_unknown_question_falls_back_to_list():
     assert cb.message.edits[-1] == vpn_faq.LIST_TEXT
 
 
-async def test_old_apps_screen_is_gone_from_home_keyboards():
-    flat = " ".join(
-        b.text
-        for row in h._card_keyboard(
-            [], subscription=GUEST_FULL, self_serve_nodes=[]
-        ).inline_keyboard
-        for b in row
-    )
-    assert "Приложение" not in flat and "❓ Помощь" in flat
-
-
-# --- прокси ------------------------------------------------------------------
-
-
 async def test_proxy_screen_url_buttons_per_country(results):
     cb, _ = await _press(f"act:vpn:{vpn_protocol.ACTION_PROXY_LINK}", sub=PROXY_GUEST, chat_id=779)
     text = cb.message.edits[-1]
     assert "Telegram без VPN" in text and SECRET not in text
     markup = cb.message.edit_markups[-1]
-    buttons = _all_buttons(markup)
+    buttons = all_buttons(markup)
     connect = [b for b in buttons if b.text.endswith("Подключить")]
     assert [b.text for b in connect] == ["🇳🇱 Подключить", "🇺🇸 Подключить"]
     assert all(b.url.startswith("https://t.me/proxy?") for b in connect)
     assert [b.text for b in buttons if "QR" in b.text] == ["📷 QR 🇳🇱", "📷 QR 🇺🇸"]
-    assert "⚙️ Секрет и порт" not in _texts(markup)  # гостю — нет
+    assert "⚙️ Секрет и порт" not in button_texts(markup)
     for b in buttons:
         assert b.url or len(b.callback_data.encode()) <= 64
 
 
 async def test_proxy_screen_admin_gets_secret_button(results):
     cb, _ = await _press(f"act:vpn:{vpn_protocol.ACTION_PROXY_LINK}")
-    assert "⚙️ Секрет и порт" in _texts(cb.message.edit_markups[-1])
+    assert "⚙️ Секрет и порт" in button_texts(cb.message.edit_markups[-1])
 
 
 async def test_proxy_dead_node_has_no_buttons(results):
     results["r"] = [_proxy("wooster", "🇺🇸 США")]
     cb, _ = await _press(f"act:vpn:{vpn_protocol.ACTION_PROXY_LINK}")
-    texts = _texts(cb.message.edit_markups[-1])
+    texts = button_texts(cb.message.edit_markups[-1])
     assert "🇺🇸 Подключить" in texts and "🇳🇱 Подключить" not in texts
-    assert "📷 QR" in texts  # одна страна — без флага
+    assert "📷 QR" in texts
 
 
 async def test_proxy_secret_screen_admin_only(results):
     cb, _ = await _press(f"act:vpn:proxy_link:{vpn_proxy_screen.VALUE_SECRET}", sub=PROXY_GUEST)
-    assert cb.message.answers == []  # секрета гостю не показано
+    assert cb.message.answers == []
     assert cb.answered and cb.answered[-1][1].get("show_alert")
     cb, _ = await _press(f"act:vpn:proxy_link:{vpn_proxy_screen.VALUE_SECRET}")
     assert len(cb.message.answers) == 2
