@@ -1,5 +1,3 @@
-"""Этап 52: сборка автовыбора маршрута — стартовые маршруты, оповещения."""
-
 from __future__ import annotations
 
 import json
@@ -14,6 +12,7 @@ from sa_home_bot.bot.egress_app import (
     startup_routes,
 )
 from sa_home_bot.config import TelegramConfig
+from tests.unit.support.fakes import Clock, FakeNotifier
 
 J = "socks5://100.109.139.95:1080"
 W = "socks5://100.93.141.23:1080"
@@ -84,25 +83,16 @@ class _Book:
         return [_Sub(1, ["*"]), _Sub(2, ["status"])]
 
 
-class _Notifier:
-    def __init__(self) -> None:
-        self.sent: list[tuple[int, str]] = []
-
-    async def send_direct(self, chat_id, text, **kwargs):
-        self.sent.append((chat_id, text))
-        return 1
-
-
 async def test_switch_notices_antispam():
-    t = [0.0]
-    notifier = _Notifier()
-    notices = SwitchNotices(_Book(), notifier, clock=lambda: t[0])
+    clock = Clock(0.0)
+    notifier = FakeNotifier()
+    notices = SwitchNotices(_Book(), notifier, clock=clock)
     await notices.on_switched(DIRECT, J, "r", [])
-    t[0] += 60
+    clock.advance(60)
     await notices.on_switched(J, W, "r", [])
     await notices.on_switched(W, DIRECT, "r", [])
-    assert [c for c, _ in notifier.sent] == [1]  # только админ, один раз
-    t[0] += NOTICE_MIN_INTERVAL_S
+    assert [c for c, _ in notifier.sent] == [1]
+    clock.advance(NOTICE_MIN_INTERVAL_S)
     await notices.on_switched(DIRECT, J, "r", [])
     assert len(notifier.sent) == 2
     assert "ещё 2 раз" in notifier.sent[1][1]

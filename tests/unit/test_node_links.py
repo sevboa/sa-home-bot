@@ -1,5 +1,3 @@
-"""node_links: генерация и разбор ссылок-команд /node_* и /svc_*."""
-
 from sa_home_bot.bot.node_links import (
     match_name,
     node_command,
@@ -11,16 +9,13 @@ from sa_home_bot.bot.node_links import (
 KNOWN = ["alfred", "arch-t480", "winpc"]
 
 
-# --- Нормализация и генерация ---
-
-
 def test_normalize_replaces_dashes_and_lowercases():
     assert normalize("arch-t480") == "arch_t480"
     assert normalize("Telegram-Bot") == "telegram_bot"
 
 
 def test_normalize_rejects_unrepresentable():
-    assert normalize("нода") is None  # кириллица не влезает в команду Telegram
+    assert normalize("нода") is None
     assert normalize("node with space") is None
     assert normalize("") is None
 
@@ -38,10 +33,7 @@ def test_svc_command():
 
 def test_command_length_limit():
     long_id = "x" * 40
-    assert node_command(long_id) is None  # >32 символов — команду не собрать
-
-
-# --- Разбор ---
+    assert node_command(long_id) is None
 
 
 def test_match_name_normalized():
@@ -51,9 +43,6 @@ def test_match_name_normalized():
 
 
 def test_resolve_svc_candidates_longest_prefix_first():
-    # /svc_arch_t480_telegram_bot: длиннейший префикс-нода — arch-t480,
-    # хвост — telegram_bot. Нода "arch" (будь она в рое) шла бы вторым
-    # кандидатом с хвостом t480_telegram_bot.
     known = [*KNOWN, "arch"]
     candidates = resolve_svc_candidates("arch_t480_telegram_bot", known)
     assert candidates[0] == ("arch-t480", "telegram_bot")

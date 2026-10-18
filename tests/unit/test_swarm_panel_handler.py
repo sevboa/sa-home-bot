@@ -1,43 +1,12 @@
-"""Обработчики новой иерархии /swarm (bot/handlers/swarm_panel.py): панель →
-умения/ноды → карточки, всё редрайвом одного сообщения (edit_text), по
-образцу test_self_restart.py / test_check_update_handler.py."""
-
-import pytest_asyncio
-
 from sa_home_bot.bot import commands
 from sa_home_bot.bot.handlers.swarm_panel import cmd_swarm, on_swarm_screen
+from sa_home_bot.bot.node_view import NODE_DOWN_TEXT
+from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.config import Settings, TelegramConfig
-from sa_home_bot.db.connection import Database
-from sa_home_bot.db.migrations import apply_migrations
-from sa_home_bot.db.store import Store
 from sa_home_bot.proto.messages import ActionSpec, ServiceDescription, ServiceInfo
 from sa_home_bot.subscriptions.models import Subscription
-
-
-class FakeMessage:
-    def __init__(self) -> None:
-        self.answers: list[str] = []
-        self.edits: list[str] = []
-        self.edit_keyboards: list = []
-
-    async def answer(self, text, reply_markup=None, **kwargs):
-        self.answers.append(text)
-
-    async def edit_text(self, text, reply_markup=None, **kwargs):
-        self.edits.append(text)
-        self.edit_keyboards.append(reply_markup)
-
-
-class FakeCallback:
-    def __init__(self, data: str) -> None:
-        self.data = data
-        self.id = "cb-1"
-        self.message = FakeMessage()
-        self.answered: list = []
-
-    async def answer(self, *args, **kwargs):
-        self.answered.append(args)
-
+from tests.unit.support.fakes import FakeCallback, FakeMessage
+from tests.unit.swarm_support import DeadNodeLink, callback_codes
 
 OWN_STATE = {
     "node": "alfred",
@@ -57,12 +26,6 @@ PEER_STATE = {
 
 
 class FakeNodeLink:
-    """Маршрутизация по dst, как FakeNodeLink в test_swarm_view.py — плюс
-    describe/command, нужные карточкам и check_updates_summary. Адрес с
-    node=None (own-монитор в node_view.py) нормализуется в реальный id own
-    ноды — так его видит и wake_core.collect_reports (тот всегда шлёт
-    настоящий id, даже для своей ноды)."""
-
     display_name = "нода"
     connected = True
 
@@ -84,8 +47,6 @@ class FakeNodeLink:
             return self._own
         if key in self._routes:
             return self._routes[key]
-        from sa_home_bot.bot.service_link import ServiceUnavailableError
-
         raise ServiceUnavailableError("нет связи")
 
     async def describe(self, dst=None):
@@ -135,25 +96,12 @@ class FakeAppsLink:
         }
 
 
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    db = Database(tmp_path / "bot.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
-
-
 def _settings() -> Settings:
     return Settings(telegram=TelegramConfig(token="x"), subscriptions=[])
 
 
 def _sub(*allowed: str) -> Subscription:
     return Subscription(chat_id=1, name="me", allowed_commands=frozenset(allowed))
-
-
-def _codes(kb) -> list[str]:
-    return [b.callback_data for row in kb.inline_keyboard for b in row] if kb else []
 
 
 async def _screen(callback, store, node_link=None, apps_link=None, subscription=None):
@@ -167,9 +115,6 @@ async def _screen(callback, store, node_link=None, apps_link=None, subscription=
     )
 
 
-# --- /swarm ------------------------------------------------------------
-
-
 async def test_cmd_swarm_renders_panel_in_one_message(store):
     message = FakeMessage()
     await cmd_swarm(
@@ -181,31 +126,20 @@ async def test_cmd_swarm_renders_panel_in_one_message(store):
         subscription=_sub("nodes"),
     )
     assert len(message.answers) == 1
-    assert "2 нод, в сети 1" in message.answers[0]  # own отвечает, mycraft — нет маршрута
+    assert "2 нод, в сети 1" in message.answers[0]
 
 
 async def test_cmd_swarm_reports_node_down(store):
-    class DeadLink(FakeNodeLink):
-        async def get_state(self, dst=None):
-            from sa_home_bot.bot.service_link import ServiceUnavailableError
-
-            raise ServiceUnavailableError("нет связи")
-
     message = FakeMessage()
     await cmd_swarm(
         message,
-        node_link=DeadLink(),
+        node_link=DeadNodeLink(),
         apps_link=FakeAppsLink(),
         store=store,
         config=_settings(),
         subscription=_sub("nodes"),
     )
-    from sa_home_bot.bot.node_view import NODE_DOWN_TEXT
-
     assert message.answers == [NODE_DOWN_TEXT]
-
-
-# --- sw_panel / sw_nodes -------------------------------------------------
 
 
 async def test_sw_panel_redraws_in_place(store):
@@ -218,12 +152,9 @@ async def test_sw_panel_redraws_in_place(store):
 async def test_sw_nodes_lists_own_with_dash_and_peer_with_real_id(store):
     callback = FakeCallback(f"st:{commands.SWARM_NODES_CODE}:0")
     await _screen(callback, store)
-    codes = _codes(callback.message.edit_keyboards[0])
+    codes = callback_codes(callback.message.edit_keyboards[0])
     assert f"st:{commands.SWARM_NODE_CODE}:-" in codes
     assert f"st:{commands.SWARM_NODE_CODE}:mycraft" in codes
-
-
-# --- sw_node -------------------------------------------------------------
 
 
 async def test_sw_node_own_card(store):
@@ -245,24 +176,18 @@ async def test_sw_node_peer_card(store):
     assert "Нода mycraft" in callback.message.edits[0]
 
 
-# --- sw_svcs / sw_svc ------------------------------------------------------
-
-
 async def test_sw_svcs_then_svc_own_node(store):
     node_link = FakeNodeLink()
     callback = FakeCallback(f"st:{commands.SWARM_SVCS_CODE}:-:0")
     await _screen(callback, store, node_link=node_link)
-    codes = _codes(callback.message.edit_keyboards[0])
+    codes = callback_codes(callback.message.edit_keyboards[0])
     assert f"st:{commands.SWARM_SVC_CODE}:-:monitor" in codes
 
     callback2 = FakeCallback(f"st:{commands.SWARM_SVC_CODE}:-:monitor")
     await _screen(callback2, store, node_link=node_link)
     assert "Служба monitor" in callback2.message.edits[0]
-    back_codes = _codes(callback2.message.edit_keyboards[0])
+    back_codes = callback_codes(callback2.message.edit_keyboards[0])
     assert f"st:{commands.SWARM_SVCS_CODE}:-:0" in back_codes
-
-
-# --- sw_skills / sw_skill --------------------------------------------------
 
 
 async def test_sw_skills_then_skill_card(store):
@@ -272,13 +197,13 @@ async def test_sw_skills_then_skill_card(store):
 
     callback = FakeCallback(f"st:{commands.SWARM_SKILLS_CODE}:0")
     await _screen(callback, store, apps_link=apps_link, subscription=sub)
-    codes = _codes(callback.message.edit_keyboards[0])
+    codes = callback_codes(callback.message.edit_keyboards[0])
     assert f"st:{commands.SWARM_SKILL_CODE}:jellyfin" in codes
 
     callback2 = FakeCallback(f"st:{commands.SWARM_SKILL_CODE}:jellyfin")
     await _screen(callback2, store, apps_link=apps_link, subscription=sub)
     assert "Jellyfin" in callback2.message.edits[0]
-    back_codes = _codes(callback2.message.edit_keyboards[0])
+    back_codes = callback_codes(callback2.message.edit_keyboards[0])
     assert f"st:{commands.SWARM_SKILLS_CODE}:0" in back_codes
 
 
@@ -288,15 +213,12 @@ async def test_sw_skill_denied_without_app_right(store):
     callback = FakeCallback(f"st:{commands.SWARM_SKILL_CODE}:jellyfin")
     await _screen(callback, store, apps_link=apps_link, subscription=_sub("nodes"))
     assert callback.message.edits == []
-    assert callback.answered[0][0] == "⛔️ Недоступно"
-
-
-# --- sw_update ------------------------------------------------------------
+    assert callback.answered[0][0][0] == "⛔️ Недоступно"
 
 
 async def test_sw_update_answers_toast_then_edits_with_result(store):
     node_link = FakeNodeLink(check_update={"latest": "0.70.0"})
     callback = FakeCallback(f"st:{commands.SWARM_UPDATE_CODE}")
     await _screen(callback, store, node_link=node_link)
-    assert callback.answered[0][0] == "Проверяю обновления…"
+    assert callback.answered[0][0][0] == "Проверяю обновления…"
     assert "0.70.0" in callback.message.edits[0]
