@@ -26,6 +26,7 @@ from sa_home_bot.domain.models import (
     PowerEvent,
     SmartChange,
 )
+from sa_home_bot.utils.timefmt import format_dhms, format_local
 
 _KIND_WORD_EVENT = {KIND_CPU: "CPU", KIND_GPU: "GPU"}
 
@@ -37,7 +38,7 @@ def _kind_word(kind: str) -> str:
 def render_event(event: Event) -> str:
     label = escape(event.label)
     temp = f"{event.temperature_c:.1f}°C"
-    when = event.at.astimezone().strftime("%H:%M:%S")
+    when = format_local(event.at, "%H:%M:%S")
     kind = _kind_word(event.kind)
     body = f"\nТемпература: <b>{temp}</b>\nВремя: {when}"
     if event.type == EVENT_OVERHEAT_STARTED:
@@ -50,7 +51,7 @@ def render_event(event: Event) -> str:
 def render_host_event(event: HostEvent) -> str:
     label = escape(event.label)
     val = fmt_host_value(event.value, event.unit)
-    when = event.at.astimezone().strftime("%H:%M:%S")
+    when = format_local(event.at, "%H:%M:%S")
     if event.type == EVENT_HOST_DEGRADED:
         hint = f" — {escape(event.hint)}" if event.hint else ""
         return f"⚠️ <b>{label}: {val}</b>{hint}\nВремя: {when}"
@@ -89,7 +90,7 @@ def render_host_line(state: HostMetricState) -> str:
     val = fmt_host_value(state.value, state.unit)
     suffix = ""
     if state.status == ALERTING and state.alerting_since is not None:
-        suffix = f" (с {state.alerting_since.astimezone().strftime('%H:%M')})"
+        suffix = f" (с {format_local(state.alerting_since, '%H:%M')})"
     return f" • {mark}{short}: <b>{val}</b>{suffix}"
 
 
@@ -142,34 +143,19 @@ def render_state_line(state: HealthState) -> str:
     kind = _kind_word(state.kind)
     suffix = ""
     if state.status == ALERTING and state.alerting_since is not None:
-        suffix = f" с {state.alerting_since.astimezone().strftime('%H:%M:%S')}"
+        suffix = f" с {format_local(state.alerting_since, '%H:%M:%S')}"
     return f"{icon} {kind} «{label}»: <b>{temp}</b>{suffix}"
 
 
-def _fmt_dt(dt) -> str:
-    return dt.astimezone().strftime("%m/%d %H:%M")
+def _format_local_month_day_time(dt) -> str:
+    return format_local(dt, "%m/%d %H:%M")
 
 
-def _fmt_duration(td) -> str:
-    total = int(td.total_seconds())
-    if total < 0:
-        total = 0
-    days, rem = divmod(total, 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes, seconds = divmod(rem, 60)
-    parts = []
-    if days:
-        parts.append(f"{days}d")
-    if hours:
-        parts.append(f"{hours}h")
-    if minutes:
-        parts.append(f"{minutes}m")
-    if seconds or not parts:
-        parts.append(f"{seconds}s")
-    return " ".join(parts)
+def _format_dhms_en(td) -> str:
+    return format_dhms(td.total_seconds(), days="d", hours="h", minutes="m", secs="s")
 
 
-def _fmt_uptime_short(td) -> str:
+def _format_largest_unit_en(td) -> str:
     total = int(td.total_seconds())
     if total < 0:
         total = 0
@@ -187,9 +173,11 @@ def _fmt_uptime_short(td) -> str:
 
 def render_outage_line(e: PowerEvent) -> str:
     icon = "🔌" if e.kind == POWER_CLEAN else "⚡"
-    down = _fmt_dt(e.down_at) if e.down_at else "?"
-    up = _fmt_dt(e.up_at) if e.up_at else "?"
-    tail = f" ({_fmt_duration(e.downtime)})" if e.downtime is not None else ""
+    down = _format_local_month_day_time(e.down_at) if e.down_at else "?"
+    up = _format_local_month_day_time(e.up_at) if e.up_at else "?"
+    tail = ""
+    if e.downtime is not None:
+        tail = f" ({_format_dhms_en(e.downtime)})"
     return f"{icon} {down} - {up}{tail}"
 
 
@@ -295,9 +283,9 @@ def render_status_summary(
     disk_warn_c: float,
     disk_crit_c: float,
 ) -> str:
-    lines = [now.astimezone().strftime("%Y-%m-%d %H:%M")]
+    lines = [format_local(now, "%Y-%m-%d %H:%M")]
     if uptime is not None:
-        lines.append(f"uptime: {_fmt_uptime_short(uptime)}")
+        lines.append(f"uptime: {_format_largest_unit_en(uptime)}")
     if last_outage is not None:
         lines.append(f"last off: {render_outage_line(last_outage)}")
 
@@ -320,11 +308,7 @@ def render_status_summary(
 
 def _fmt_run(run: dict) -> str:
     icon = {"ok": "✅", "error": "❌", "running": "⏳"}.get(run["status"], "•")
-    started = run["started_at"]
-    try:
-        started = datetime.fromisoformat(started).astimezone().strftime("%m-%d %H:%M:%S")
-    except (ValueError, TypeError):
-        pass
+    started = format_local(run["started_at"], "%m-%d %H:%M:%S", tolerant=True)
     return f"{icon} {run['job_type']} @ {started}"
 
 
