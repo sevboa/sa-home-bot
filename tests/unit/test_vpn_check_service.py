@@ -1,10 +1,3 @@
-"""Служба vpn_check: describe, запуск проверки, эфемерный подъём/останов
-туннеля, пуш результата в vpn, обработка HTTP-ошибок и сбоев curl/awg-quick.
-
-39.0.7(d): служба больше не хранит единственный netns/iface в конфиге —
-слоты (что реально настроено локально) передаются явно в конструктор (в
-проде — ``node/vpn_probe_state.py::load()``, здесь — фикстуры ниже)."""
-
 from __future__ import annotations
 
 import asyncio
@@ -63,17 +56,6 @@ class _FakeStderr:
 
 
 class _FakeProc:
-    """Двойник asyncio.subprocess.Process. Два режима:
-
-    - «завершившийся» (``alive=False``, по умолчанию) — как раньше, только
-      ``communicate()`` (awg-quick up/down, curl, ip route get — все
-      короткоживущие команды через ``_run``).
-    - «живой» (``alive=True``) — для xray-пробника (39.0.7(e)): долгоживущий
-      процесс, ``returncode`` остаётся ``None`` пока не позвали
-      ``terminate()``/``kill()``, ``wait()`` возвращает управление сразу
-      после (в реальном asyncio она ждала бы фактического выхода, здесь
-      это ни к чему — событийный цикл в тестах никто не крутит отдельно)."""
-
     def __init__(
         self, stdout: bytes = b"", stderr: bytes = b"", returncode: int | None = 0, *, alive=False
     ) -> None:
@@ -84,7 +66,7 @@ class _FakeProc:
         self.terminated = False
         self.killed = False
 
-    async def communicate(self) -> tuple[bytes, bytes]:
+    async def communicate(self, input=None) -> tuple[bytes, bytes]:
         return self._stdout, self._stderr_bytes
 
     def terminate(self) -> None:
@@ -100,9 +82,6 @@ class _FakeProc:
 
 
 class _FakeNodeLink:
-    # Своя нода не держит vpn (пробник живёт на alfred) — отчёт фанаутится
-    # на живые vpn-инстансы роя (vpn_nodes.fanout), не в одну через
-    # resolve_vpn_dst.
     state: dict = {
         "node": "wooster",
         "kind": "vps",
@@ -147,16 +126,9 @@ def _patch_curl(
     reality_up_ok: bool = True,
     reality_up_err: bytes = b"",
 ) -> list[tuple]:
-    """``results``: target url -> (stdout, stderr, code) для curl к целям.
-    Гейт по умолчанию «здоровый»: ``awg-quick up``/xray-пробник проходят,
-    маршрут из netns идёт через ``route_dev`` (None → `ip route get`
-    падает, только для awg), внешний IP из netns (``netns_ip``) отличается
-    от IP хоста (``host_ip``). ``asyncio.sleep`` замокан на no-op — иначе
-    ретраи `_wait_for_route`/пауза после запуска xray реально ждали бы
-    секунды в каждом тесте."""
     calls: list[tuple] = []
 
-    async def fake_create_subprocess_exec(*cmd, stdout=None, stderr=None):
+    async def fake_create_subprocess_exec(*cmd, stdin=None, stdout=None, stderr=None):
         calls.append(cmd)
         if any("awg-quick" in c for c in cmd):
             if "up" in cmd:
@@ -165,7 +137,7 @@ def _patch_curl(
                     if tunnel_up_ok
                     else _FakeProc(b"", tunnel_up_err, 1)
                 )
-            return _FakeProc(b"", b"", 0)  # down — best-effort, всегда «ок» в тестах
+            return _FakeProc(b"", b"", 0)
         if any("xray" in c for c in cmd):
             return (
                 _FakeProc(alive=True)
@@ -191,8 +163,6 @@ def _patch_curl(
 
 
 def _target_curl_calls(calls: list[tuple]) -> list[tuple]:
-    """Только вызовы curl к целям проверки — без гейта/тоннеля (route get /
-    ip-echo / awg-quick up|down)."""
     return [
         c
         for c in calls
@@ -251,7 +221,6 @@ async def test_self_check_is_excluded(monkeypatch):
     calls = _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
     node_link = _FakeNodeLink()
     service = _service(node_link)
-    # Своя нода (socket.gethostname()) совпадает с проверяемым сервером.
     result = await service.run_command(
         "check", {"server": service._node, "targets": ["https://1.1.1.1"]}
     )
@@ -295,7 +264,7 @@ async def test_report_is_dropped_when_no_vpn_in_swarm(monkeypatch):
     node_link = _FakeNodeLink()
     node_link.state = {"node": "alfred", "peers": [], "services": []}
     await _service(node_link)._run_and_report(PROBE_SERVER, [_slot()], ["https://1.1.1.1"])
-    assert node_link.calls == []  # некому слать — и не пытаемся
+    assert node_link.calls == []
 
 
 async def test_run_and_report_pushes_ok_result(monkeypatch):
@@ -354,7 +323,6 @@ async def test_ephemeral_tunnel_brought_up_and_torn_down_around_checks(monkeypat
     down_calls = _tunnel_calls(calls, "down")
     assert len(up_calls) == 1 and "awg-probe0" in up_calls[0]
     assert len(down_calls) == 1 and "awg-probe0" in down_calls[0]
-    # Порядок: up идёт раньше проверки целей, down — после.
     up_idx = calls.index(up_calls[0])
     down_idx = calls.index(down_calls[0])
     target_idx = calls.index(_target_curl_calls(calls)[0])
@@ -381,7 +349,6 @@ async def test_tunnel_up_failure_fails_all_targets_without_curling(monkeypatch):
     assert res["ok"] is False
     assert "awg-quick up" in res["error"]
     assert _target_curl_calls(calls) == []
-    # up "не прошёл", но down всё равно best-effort вызывается.
     assert len(_tunnel_calls(calls, "down")) == 1
 
 
@@ -399,9 +366,6 @@ async def test_tunnel_up_permission_error_hints_nodectl_fix(monkeypatch):
 
 
 async def test_two_slots_for_same_server_are_both_checked(monkeypatch):
-    # Сервер несёт оба транспорта, и оба провижинены на этой ноде — один
-    # dispatch-запрос ("проверьте jeeves") должен прогнать оба слота и
-    # вернуть по строке результата на каждый.
     calls = _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
     node_link = _FakeNodeLink()
     slots = [_slot(), _reality_slot()]
@@ -412,15 +376,11 @@ async def test_two_slots_for_same_server_are_both_checked(monkeypatch):
     transports = {r["transport"] for r in results}
     assert transports == {"awg", "reality"}
     assert all(r["ok"] is True for r in results)
-    # Оба туннеля поднимались/гасились независимо друг от друга.
     assert len(_tunnel_calls(calls, "up")) == 1
     assert len(_xray_calls(calls)) == 1
 
 
 async def test_unsupported_transport_reports_soft_error_without_crashing(monkeypatch):
-    # Задел на будущее: слот с транспортом, для которого ещё нет ни одной
-    # реализации в этой службе (ни awg, ни reality) — не должен ронять
-    # проверку соседних слотов, только сам себе как мягкая ошибка.
     calls = _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
     node_link = _FakeNodeLink()
     unknown_slot = _slot(transport="openvpn", netns="vpn-probe-jeeves-openvpn", iface=None)
@@ -486,13 +446,11 @@ async def test_reality_tunnel_up_permission_error_hints_nodectl_fix(monkeypatch)
 
 
 async def test_reality_gate_uses_socks_exit_ip_not_route(monkeypatch):
-    # Reality не переписывает default route — гейт не должен дёргать
-    # `ip route get` вообще, только сверку exit-IP через сам SOCKS.
     calls = _patch_curl(
         monkeypatch,
         {"https://1.1.1.1": (b"200", b"", 0)},
         netns_ip="198.51.100.9",
-        host_ip="198.51.100.9",  # совпадает с хостом — трафик мимо VPN
+        host_ip="198.51.100.9",
     )
     node_link = _FakeNodeLink()
     slot = _reality_slot()
@@ -506,8 +464,6 @@ async def test_reality_gate_uses_socks_exit_ip_not_route(monkeypatch):
 
 
 async def test_gate_fails_all_targets_when_route_bypasses_tunnel(monkeypatch):
-    # route_dev != iface → пробник не в туннеле → все цели падают одной
-    # ошибкой, curl к самим целям даже не зовётся.
     calls = _patch_curl(
         monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)}, route_dev="vprobe-veth1"
     )
@@ -520,8 +476,6 @@ async def test_gate_fails_all_targets_when_route_bypasses_tunnel(monkeypatch):
 
 
 async def test_gate_fails_when_exit_ip_equals_host_ip(monkeypatch):
-    # Маршрут вроде через туннель, но внешний IP из netns == IP хоста →
-    # трафик всё равно идёт мимо VPN.
     calls = _patch_curl(
         monkeypatch,
         {"https://1.1.1.1": (b"200", b"", 0)},
@@ -537,8 +491,6 @@ async def test_gate_fails_when_exit_ip_equals_host_ip(monkeypatch):
 
 
 async def test_gate_skips_exit_ip_check_on_vpn_exit_node(monkeypatch):
-    # На самой VPN-ноде (назначение "vpn") IP туннеля == IP хоста — это
-    # норма, сверку exit-IP не делаем, проверки идут как обычно.
     from sa_home_bot.config import NodeConfig
 
     _patch_curl(
@@ -569,10 +521,9 @@ async def test_gate_reports_missing_sudoers_hint(monkeypatch):
 
 
 async def test_gate_detects_localized_sudo_password_prompt(monkeypatch):
-    # Русская локаль ноды: `sudo -n` пишет «sudo: требуется указать пароль».
     calls = _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
 
-    async def ru_locale(*cmd, stdout=None, stderr=None):
+    async def ru_locale(*cmd, stdin=None, stdout=None, stderr=None):
         calls.append(cmd)
         if any("awg-quick" in c for c in cmd):
             return _FakeProc(b"", b"", 0)
@@ -605,12 +556,7 @@ async def test_run_and_report_multiple_targets(monkeypatch):
     assert _result_for(node_link, "https://api.telegram.org")["ok"] is False
 
 
-# --- HEAD вместо GET: проверке нужен код ответа, не тело (2026-09-20) ---
-
-
 async def test_target_is_probed_with_head_not_get(monkeypatch):
-    """GET заставлял curl скачивать тело целиком — youtube.com это ~870 КБ на
-    каждый слот каждые 5 минут, прямо в лимит трафика VPN-сервера."""
     calls = _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
     node_link = _FakeNodeLink()
     await _service(node_link)._run_and_report(PROBE_SERVER, [_slot()], ["https://1.1.1.1"])
@@ -621,12 +567,10 @@ async def test_target_is_probed_with_head_not_get(monkeypatch):
 
 
 async def test_head_rejected_falls_back_to_get(monkeypatch):
-    """405 — цель жива, просто не принимает HEAD: повторяем GET, иначе
-    получили бы ложный «недоступно» на ровном месте."""
-    codes = iter([b"405", b"200"])  # первый вызов (HEAD) → 405, второй (GET) → 200
+    codes = iter([b"405", b"200"])
     calls = _patch_curl(monkeypatch, {"https://strict.example": (b"", b"", 0)})
 
-    async def _next_code(*cmd, stdout=None, stderr=None):
+    async def _next_code(*cmd, stdin=None, stdout=None, stderr=None):
         calls.append(cmd)
         if "curl" in cmd and cmd[-1] == "https://strict.example":
             return _FakeProc(next(codes), b"", 0)
@@ -640,7 +584,7 @@ async def test_head_rejected_falls_back_to_get(monkeypatch):
     node_link = _FakeNodeLink()
     await _service(node_link)._run_and_report(PROBE_SERVER, [_slot()], ["https://strict.example"])
     curl_calls = _target_curl_calls(calls)
-    assert ["-I" in c for c in curl_calls] == [True, False]  # HEAD, затем откат на GET
+    assert ["-I" in c for c in curl_calls] == [True, False]
     result = _result_for(node_link, "https://strict.example")
     assert result["ok"] is True
-    assert "http_code" not in result  # внутренний признак в отчёт не уходит
+    assert "http_code" not in result

@@ -1,5 +1,3 @@
-"""NodeService и nodectl-рендер: describe, get_state, команды, таблица статуса."""
-
 import pytest
 
 from sa_home_bot.node.peers import NodeRouter, PeerLink
@@ -22,7 +20,6 @@ def _fake_supervisor() -> tuple[Supervisor, Recorded]:
     sup = Supervisor(["monitor", "telegram-bot"], "config.toml", emit=emit)
     rec = Recorded()
 
-    # Не запускаем реальные процессы: подменяем управление записью вызовов.
     for name, svc in sup.services.items():
         async def start(n=name):
             rec.calls.append(f"start:{n}")
@@ -72,7 +69,7 @@ async def test_unknown_service_is_bad_request():
     with pytest.raises(ProtoError) as exc_info:
         await NodeService(sup).run_command("start", {"name": "ghost"})
     assert exc_info.value.code == "bad_request"
-    assert "monitor" in exc_info.value.message  # подсказывает известные
+    assert "monitor" in exc_info.value.message
 
 
 def test_report_ready_action_declared_and_hidden_from_ui():
@@ -81,8 +78,6 @@ def test_report_ready_action_declared_and_hidden_from_ui():
     assert action is not None
     names = [p.name for p in action.params]
     assert set(names) == {"name", "ready"}
-    # Без choices — человеку в UI кнопкой не рисуется, зовёт только сам
-    # дочерний процесс службы по уже открытому node_link.
     assert all(p.choices is None for p in action.params)
 
 
@@ -110,14 +105,14 @@ async def test_report_ready_unknown_slot_is_bad_request():
     with pytest.raises(ProtoError) as exc_info:
         await svc.run_command("report_ready", {"name": "ghost", "ready": True})
     assert exc_info.value.code == "bad_request"
-    assert lease.calls == []  # не дошли до аренды
+    assert lease.calls == []
 
 
 async def test_report_ready_without_lease_is_noop():
     sup, _ = _fake_supervisor()
-    svc = NodeService(sup)  # lease=None (сборки/тесты без аренды)
+    svc = NodeService(sup)
     result = await svc.run_command("report_ready", {"name": "telegram-bot", "ready": True})
-    assert result == {"name": "telegram-bot", "ready": True}  # не падает
+    assert result == {"name": "telegram-bot", "ready": True}
 
 
 async def test_power_actions_declared_and_scheduled(monkeypatch):
@@ -133,8 +128,6 @@ async def test_power_actions_declared_and_scheduled(monkeypatch):
     async def fake_runner(argv):
         ran.append(argv)
 
-    # power-действия доступны только там, где машину штатно уводят в офлайн
-    # (workstation) — см. NodeTraits.power_controllable.
     svc = NodeService(
         sup, power_runner=fake_runner, node_kind=node_kinds.KIND_WORKSTATION
     )
@@ -146,15 +139,12 @@ async def test_power_actions_declared_and_scheduled(monkeypatch):
 
     result = await svc.run_command("poweroff", {})
     assert result["scheduled"] == "poweroff"
-    await asyncio.sleep(0.05)  # дать отложенной задаче выполниться
+    await asyncio.sleep(0.05)
     assert ran == [["systemctl", "poweroff"]]
 
 
 @pytest.mark.parametrize("kind", ["server", "vps"])
 async def test_power_actions_not_declared_for_always_on_kinds(kind):
-    """server/vps: недоступность — авария, поэтому добровольный увод в офлайн
-    (даже своей же кнопкой) без явного оверрайда не предлагается вообще —
-    см. NodeTraits.power_controllable."""
     sup, _ = _fake_supervisor()
     svc = NodeService(sup, node_kind=kind)
     desc = svc.describe()
@@ -163,10 +153,6 @@ async def test_power_actions_not_declared_for_always_on_kinds(kind):
 
 
 async def test_power_actions_declared_for_server_with_explicit_override(monkeypatch):
-    """[node].power_controllable=true в конфиге — явное разрешение выключать/
-    перезагружать конкретный домашний сервер, не меняя always_on/алерты о
-    пропаже. VPS без такого оверрайда по-прежнему не получает кнопок (см.
-    тест выше) — только явно настроенная машина."""
     import asyncio
 
     from sa_home_bot.node import service as service_module
@@ -192,7 +178,6 @@ async def test_power_actions_declared_for_server_with_explicit_override(monkeypa
 
 
 async def test_power_controllable_override_can_also_disable():
-    """Явный false отключает кнопки даже там, где тип машины их бы дал."""
     sup, _ = _fake_supervisor()
     svc = NodeService(sup, node_kind="workstation", power_controllable=False)
     desc = svc.describe()
@@ -229,7 +214,6 @@ async def test_get_state_has_uptime():
     sup, _ = _fake_supervisor()
     state = await NodeService(sup).get_state()
     assert state["uptime_s"] >= 0
-    # на Linux /proc/uptime всегда есть; поле не None и растёт от загрузки
     assert state["system_uptime_s"] > 0
 
 
@@ -258,10 +242,10 @@ def test_render_status_table():
     assert "Нода alfred (v0.8.0)" in text
     assert "🟢 running" in text and "🔴 stopped" in text
     assert "123" in text and "—" in text
-    assert "Пиры" not in text  # без пиров секция не рисуется
-    assert "Аптайм" not in text  # без полей аптайма строка не рисуется
+    assert "Пиры" not in text
+    assert "Аптайм" not in text
 
-    state["system_uptime_s"] = 90061.0  # 1д 1ч 1м 1с
+    state["system_uptime_s"] = 90061.0
     state["uptime_s"] = 65.0
     text = render_status(state)
     assert "Аптайм: система 1д 1ч 1м 1с · нода 1м 5с" in text
@@ -277,16 +261,11 @@ def test_render_services_empty():
     assert "не назначены" in render_services([])
 
 
-# --- assign/unassign: назначения в рантайме (этап 17) ---
-
-
 def test_describe_declares_assign_and_unassign():
     sup, _ = _fake_supervisor()
     desc = NodeService(sup).describe()
     assign = desc.find_action("assign")
     assert assign is not None
-    # llm сознательно не в ASSIGNMENT_ARGS — не супервизируется (живая находка
-    # 2026-07-23, node/supervisor.py::EXTERNALLY_MANAGED_ASSIGNMENTS).
     assert set(assign.params[0].choices) == {
         "monitor",
         "telegram-bot",
@@ -301,7 +280,7 @@ def test_describe_declares_assign_and_unassign():
     }
     unassign = desc.find_action("unassign")
     assert unassign is not None
-    assert set(unassign.params[0].choices) == {"monitor", "telegram-bot"}  # только назначенные
+    assert set(unassign.params[0].choices) == {"monitor", "telegram-bot"}
 
 
 async def test_assign_starts_service_and_persists(tmp_path, monkeypatch):
@@ -342,7 +321,7 @@ async def test_assign_idempotent_reuses_existing_service(monkeypatch):
     svc = NodeService(sup)
 
     await svc.run_command("assign", {"name": "monitor"})
-    assert sup.get("monitor") is original  # не пересоздана
+    assert sup.get("monitor") is original
     assert started == ["monitor"]
 
 
@@ -381,9 +360,6 @@ async def test_unassign_unknown_service_is_bad_request():
     with pytest.raises(ProtoError) as exc_info:
         await NodeService(sup).run_command("unassign", {"name": "ghost"})
     assert exc_info.value.code == "bad_request"
-
-
-# --- check_update/update: самообновление через pipx (без рестарта) ---
 
 
 def test_update_actions_not_declared_without_update_source():
@@ -455,7 +431,6 @@ async def test_check_update_reports_versions(monkeypatch):
         "repo": "https://github.com/x/y.git",
         "running": svc.describe().info.version,
         "installed": "0.21.0",
-        # "v"-префикс тега снят — сравнимо с installed/running (PEP 440, без "v")
         "latest": "0.22.0",
     }
 
@@ -488,11 +463,8 @@ async def test_update_already_current_does_not_reinstall(monkeypatch):
         return True, "ok"
 
     monkeypatch.setattr(service_module.node_update, "latest_tag", fake_latest)
-    # installed_version() — реальный importlib.metadata.version(), без "v" (PEP 440)
     monkeypatch.setattr(service_module.node_update, "installed_version", lambda: "0.22.0")
     monkeypatch.setattr(service_module.node_update, "pipx_reinstall", fake_reinstall)
-    # running тоже "0.22.0" — тест про "уже установлено, реинсталл не нужен",
-    # а не про restart_required (тот проверяется отдельно, ниже).
     monkeypatch.setattr(service_module, "__version__", "0.22.0")
 
     sup, _ = _fake_supervisor()
@@ -500,17 +472,12 @@ async def test_update_already_current_does_not_reinstall(monkeypatch):
     result = await svc.run_command("update", {})
 
     assert result == {"up_to_date": True, "version": "0.22.0", "restart_required": False}
-    assert called == []  # pipx не звали
+    assert called == []
 
 
 async def test_update_already_installed_but_not_yet_running_reports_restart_required(
     monkeypatch,
 ):
-    """Живой баг 2026-08-04: update лёг на диск раньше (в прошлом вызове), но
-    restart_node ещё не делали — installed уже совпадает с target, но
-    ПРОЦЕСС всё ещё исполняет старую версию. up_to_date не должен молчать об
-    этом (Альфред читал "up_to_date" как "полностью готово" и пропускал
-    обязательный restart_node — см. bot/tools.py::tool_node_manage)."""
     from sa_home_bot.node import service as service_module
 
     async def fake_latest(repo_url):
@@ -518,7 +485,7 @@ async def test_update_already_installed_but_not_yet_running_reports_restart_requ
 
     monkeypatch.setattr(service_module.node_update, "latest_tag", fake_latest)
     monkeypatch.setattr(service_module.node_update, "installed_version", lambda: "0.22.0")
-    monkeypatch.setattr(service_module, "__version__", "0.21.0")  # ещё старая, не рестартовали
+    monkeypatch.setattr(service_module, "__version__", "0.21.0")
 
     sup, _ = _fake_supervisor()
     svc = NodeService(sup, update_source="https://github.com/x/y.git")
@@ -553,7 +520,7 @@ async def test_update_schedules_background_reinstall_and_emits_event(monkeypatch
     result = await svc.run_command("update", {})
     assert result == {"scheduled": True, "target_version": "0.22.0"}
 
-    await asyncio.sleep(0.05)  # дать фоновой задаче выполниться
+    await asyncio.sleep(0.05)
     assert events == [("update_finished", {"ok": True, "version": "0.22.0", "error": None})]
     assert svc._last_update == {"ok": True, "version": "0.22.0", "error": None}
 
@@ -591,9 +558,6 @@ async def test_update_concurrent_call_is_bad_request(monkeypatch):
     await asyncio.sleep(0.05)
 
 
-# --- update на win32: дёргаем задачу планировщика, а не pipx в процессе ---
-
-
 async def test_update_on_win32_triggers_scheduled_task_not_pipx(monkeypatch):
     import asyncio
 
@@ -622,7 +586,7 @@ async def test_update_on_win32_triggers_scheduled_task_not_pipx(monkeypatch):
     result = await svc.run_command("update", {})
     assert result == {"scheduled": True, "target_version": "0.22.0", "via": "scheduled_task"}
 
-    await asyncio.sleep(0.05)  # дать фоновой задаче выполниться
+    await asyncio.sleep(0.05)
     assert triggered == [True]
     assert svc._updating is False
 
@@ -682,9 +646,6 @@ async def test_update_on_win32_already_current_does_not_trigger_task(monkeypatch
 
     assert result == {"up_to_date": True, "version": "0.22.0", "restart_required": False}
     assert triggered == []
-
-
-# --- send_wol / get_state()["wake"]: рой сам отправляет WoL (этап 19 п.6) ---
 
 
 def test_describe_declares_send_wol_with_mac_param():
@@ -756,12 +717,10 @@ def test_resolve_endpoint_relative_to_config_dir(tmp_path):
     config = tmp_path / "config.toml"
     config.write_text('[node]\nsocket = "./data/node.sock"\n[swarm]\ntoken = "t"\n')
     args = argparse.Namespace(socket=None, config=str(config))
-    # Относительный сокет из конфига — относительно каталога конфига, не CWD.
     endpoint, token = _resolve_endpoint(args)
     assert endpoint == UnixEndpoint(tmp_path.resolve() / "data/node.sock")
     assert token == "t"
 
-    # Явный --socket всегда важнее конфига (и понимает tcp://).
     args = argparse.Namespace(socket="/run/x.sock", config=str(config))
     assert _resolve_endpoint(args)[0] == UnixEndpoint(Path("/run/x.sock"))
     args = argparse.Namespace(socket="tcp://127.0.0.1:8710", config=str(config))
@@ -774,8 +733,6 @@ def test_resolve_endpoint_falls_back_to_xdg_config(tmp_path, monkeypatch):
     from sa_home_bot.nodectl import _resolve_endpoint
     from sa_home_bot.proto.endpoints import TcpEndpoint
 
-    # CWD без config.toml, зато конфиг лежит в ~/.config/sa-home-bot/
-    # (нода, установленная через pipx) — nodectl должен найти его сам.
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     xdg = tmp_path / ".config" / "sa-home-bot"
@@ -790,13 +747,6 @@ def test_resolve_endpoint_falls_back_to_xdg_config(tmp_path, monkeypatch):
 
 
 async def test_get_state_shows_externally_managed_service():
-    """Внешне управляемое назначение (llm) супервизор не спавнит, поэтому его
-    нет в `supervisor.services` — но рой обязан о нём знать.
-
-    Живой баг 2026-07-28: на winpc работающая llm вообще не показывалась ни в
-    /nodes, ни в `nodectl status` («на ноде winpc нет службы llm»), потому что
-    список брался только из супервизора.
-    """
     sup, _ = _fake_supervisor()
     router = NodeRouter(
         "winpc",
@@ -807,22 +757,15 @@ async def test_get_state_shows_externally_managed_service():
     llm = next((s for s in state["services"] if s["name"] == "llm"), None)
     assert llm is not None, "внешне управляемая служба не попала в состояние ноды"
     assert llm["external"] is True
-    # Связи с ней нет (линк не запускали) — статус честный, а не выдуманный.
     assert llm["status"] == STOPPED
-    # Супервизируемые службы никуда не делись.
     assert "monitor" in [s["name"] for s in state["services"]]
 
 
 def test_render_services_marks_external():
-    """nodectl помечает внешнюю службу — иначе пустые pid/рестарты читаются
-    как поломка."""
     table = render_services(
         [{"name": "llm", "status": "running", "pid": None, "restarts": 0, "external": True}]
     )
     assert "llm (внешняя)" in table
-
-
-# --- Автовыключение по простою Alfred (idle_poweroff) -----------------------
 
 
 def test_close_ssh_sessions_declared_only_with_power_controllable():
@@ -835,11 +778,6 @@ def test_close_ssh_sessions_declared_only_with_power_controllable():
 
 
 def _stub_no_blockers(monkeypatch, service_module):
-    """SSH и tmux оба пусты — без этого реальные `ssh_sessions.list_tmux_sessions`/
-    `kill_tmux_server` уходили бы в настоящий `tmux` этой (тестовой) машины,
-    а не мокнутой mycraft — живая находка 2026-08-03 при добавлении tmux-
-    проверки: на машине, где гоняются тесты, tmux реально установлен."""
-
     async def no_ssh():
         return []
 
@@ -851,8 +789,6 @@ def _stub_no_blockers(monkeypatch, service_module):
 
 
 async def test_maybe_auto_poweroff_idle_noop_when_disabled(monkeypatch):
-    """idle_poweroff=False (дефолт) — простой Alfred не выключает машину,
-    даже если она вообще power_controllable."""
     from sa_home_bot.node import service as service_module
 
     sup, _ = _fake_supervisor()
@@ -868,9 +804,6 @@ async def test_maybe_auto_poweroff_idle_noop_when_disabled(monkeypatch):
 
 
 async def test_maybe_auto_poweroff_idle_powers_off_without_sessions(monkeypatch):
-    """Решение владельца 2026-09-23: простаивающая машина именно гаснет,
-    не уходит в suspend (будится по WoL). История режимов — в докстринге
-    node/service.py::maybe_auto_poweroff_idle."""
     import asyncio
 
     from sa_home_bot.node import service as service_module
@@ -931,7 +864,7 @@ async def test_maybe_auto_poweroff_idle_blocked_by_ssh_session(monkeypatch):
         emit=emit,
     )
     await svc.maybe_auto_poweroff_idle()
-    assert ran == []  # выключение отложено
+    assert ran == []
     assert len(emitted) == 1
     event_type, data = emitted[0]
     assert event_type == "idle_power_blocked"
@@ -939,8 +872,6 @@ async def test_maybe_auto_poweroff_idle_blocked_by_ssh_session(monkeypatch):
 
 
 async def test_maybe_auto_poweroff_idle_blocked_by_tmux_without_ssh(monkeypatch):
-    """Живая находка 2026-08-03: tmux переживает разрыв SSH — сигнал простоя
-    нужен и без единой открытой logind-сессии."""
     from sa_home_bot.node import service as service_module
 
     sup, _ = _fake_supervisor()

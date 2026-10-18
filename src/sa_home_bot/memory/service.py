@@ -1,57 +1,10 @@
-"""MemoryService — ServiceHandler службы memory (долгая память Альфреда).
-
-Зачем: у модели нет памяти между разговорами. Всё, что Альфред «знает», —
-это либо персонажный промпт (статика, лежит на ноде с llm и стоит контекста
-на КАЖДОМ вызове), либо текущий тред. «Качаем в /mnt/data/pr», «смотрим в
-озвучке LostFilm», «jeeves — это VDS» хранить было негде.
-
-**Память — по чату** (решение пользователя 2026-07-29): сказанное в личке не
-должно всплыть в общей группе. `chat_id` проставляет не модель, а бот
-(bot/tools.py) — модель этого параметра не видит вовсе и до чужой памяти
-дотянуться не может.
-
-Поверх этого несколько осей (просьба пользователя 2026-07-29, `family` —
-2026-08-03):
-
-* `scope="common"` — общее знание дома: кто такой Альфред, как он выглядит,
-  что умеет рой, кто есть кто. Видно из любого разговора, потому что это не
-  чья-то тайна, а справочник. Смысл в том, чтобы вынести справочную часть из
-  персонажного промпта, который иначе целиком едет в контекст на КАЖДОМ
-  вызове. Такие записи заводит человек руками (`nodectl call memory
-  remember scope=common …`) — тул модели этого параметра не даёт, чтобы
-  сказанное в одном чате не стало вдруг общим знанием.
-* `scope="family"` — то же самое, но видно не отовсюду, а только из чатов,
-  перечисленных в `[memory].family_chat_ids` (свои люди — семья, а не любой
-  гость/группа). Живая находка 2026-08-02: человек рассказал Альфреду свой
-  день рождения в СВОЁМ личном чате, а спросили про это из ЧУЖОГО (тоже
-  семейного) чата — обычный `scope="chat"` этого не показывает, а
-  `scope="common"` показал бы кому угодно, вплоть до случайного гостя по
-  инвайту. Как и `common`, заводится только человеком руками — тул модели
-  этого параметра тоже не даёт.
-* `sensitive=true` — личное (адрес, здоровье, деньги, документы). Никогда не
-  бывает `common` (служба откажет), а в контекст уезжает с оговоркой «знай,
-  но вслух не пересказывай» (bot/ai_flow.py). Честно про границы: жёсткая
-  здесь только видимость — sensitive-факт физически не покидает свой чат;
-  «не произноси вслух» — это просьба к модели, а не гарантия.
-
-Поиск — обычный полнотекстовый (FTS5 из системного sqlite, никаких новых
-зависимостей и никаких эмбеддингов). Эмбеддинги сознательно не заводим:
-единственная машина с моделями — winpc, которая штатно спит, а память
-обязана отвечать всегда. Токенайзер `trigram`, а не стандартный: он ищет по
-подстроке, что для русского практичнее — «озвучк» находит «озвучке». Полной
-морфологии это не даёт («качаю» не найдёт «качаем»), и обещать её не надо:
-запрос из нескольких слов вытягивает нужное (см. _match_query — слова
-объединяются через OR, а не AND).
-"""
-
 from __future__ import annotations
 
-import re
 import socket
-from datetime import UTC, datetime
 from typing import Any
 
 from sa_home_bot import __version__
+from sa_home_bot.chat_scope import require_chat_id
 from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.memory.protocol import (
@@ -72,49 +25,20 @@ from sa_home_bot.proto.messages import (
     ServiceDescription,
     ServiceInfo,
 )
+from sa_home_bot.proto.server import undeclared_action
+from sa_home_bot.text_search import MIN_WORD_CHARS, WORD_RE, fts_or_query
+from sa_home_bot.utils.clock import utc_now
+from sa_home_bot.utils.text import stem
 
-# Факт — это одна мысль, а не пересказ разговора: длинные записи и вспоминать
-# бесполезно (они подойдут под любой запрос), и в контекст модели их не
-# вставить — там на всю память отведены сотни знаков (bot/ai_flow.py).
 MAX_FACT_CHARS = 400
-# Сколько фактов отдавать. Больше трёх в контекст всё равно не влезет, но
-# оставляем запас для ручных вызовов через nodectl.
 DEFAULT_RECALL = 3
 MAX_RECALL = 10
-# Короче трёх букв триграммный индекс не ищет в принципе, а предлоги и союзы
-# как поисковые слова только шумят.
-MIN_WORD_CHARS = 3
 SCOPES = (SCOPE_CHAT, SCOPE_FAMILY, SCOPE_COMMON)
-_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
-
-
-def _stem(word: str) -> str:
-    """Слово → его начало, по которому ищем.
-
-    Живая находка 2026-07-29 (первый же настоящий прогон): записали «смотрим
-    в озвучкЕ», спросили «какая у нас озвучкА» — ноль находок. Триграммный
-    индекс ищет подстроку целиком, и хвост «-ка» в «озвучке» не встречается.
-    Отрезание окончания превращает поиск в поиск по началу слова, что и
-    нужно: «озвуч» найдёт и «озвучке», и «озвучка», и «озвучкой». Это не
-    морфология, а грубое приближение — зато без словарей и зависимостей.
-    """
-    if len(word) >= 6:
-        return word[:-2]
-    if len(word) >= 4:
-        return word[:-1]
-    return word
 
 
 def _match_query(text: str) -> str:
-    """Текст сообщения → выражение MATCH для FTS5.
-
-    Слова объединяются через OR: совпадение хотя бы по одному слову лучше,
-    чем ничего (ранжирование bm25 само поднимет запись, где совпало больше).
-    Каждое слово — в кавычках как фраза: иначе пунктуация и служебные слова
-    FTS5 (`AND`, `NOT`, `*`) из живого сообщения ломают разбор запроса.
-    """
-    words = [w for w in _WORD_RE.findall(text.lower()) if len(w) >= MIN_WORD_CHARS]
-    return " OR ".join(f'"{_stem(w)}"' for w in dict.fromkeys(words))
+    words = [w for w in WORD_RE.findall(text.lower()) if len(w) >= MIN_WORD_CHARS]
+    return fts_or_query(stem(w) for w in dict.fromkeys(words))
 
 
 def _row_to_fact(row: Any) -> dict[str, Any]:
@@ -199,18 +123,9 @@ class MemoryService:
 
     @staticmethod
     def _chat_id(args: dict[str, Any]) -> int:
-        raw = args.get("chat_id")
-        if raw is None:
-            raise ProtoError(ERR_BAD_REQUEST, "не указан chat_id — память у каждого чата своя")
-        try:
-            return int(raw)
-        except (TypeError, ValueError) as exc:
-            raise ProtoError(ERR_BAD_REQUEST, f"chat_id должен быть числом: {raw!r}") from exc
+        return require_chat_id(args, "память у каждого чата своя")
 
     def _is_family_chat(self, chat_id: int) -> bool:
-        """Только статический [memory].family_chat_ids: гостевой флаг
-        «семья» (guest_family в запросе) убран 2026-09-27 — присланный
-        старым ботом, он игнорируется."""
         return chat_id in self._cfg.family_chat_ids
 
     def _scope(self, args: dict[str, Any], *, chat_id: int, sensitive: bool) -> str:
@@ -220,16 +135,12 @@ class MemoryService:
                 ERR_BAD_REQUEST, f"неизвестный scope: {scope!r} (есть: chat, family, common)"
             )
         if scope == SCOPE_COMMON and sensitive:
-            # Не «предупредим и запишем», а отказ: общее знание видно во всех
-            # чатах, и личное там не место по определению.
             raise ProtoError(
                 ERR_BAD_REQUEST,
                 "личный факт не может быть общим: sensitive-записи живут только "
                 "в том разговоре, где их сказали",
             )
         if scope == SCOPE_FAMILY and not self._is_family_chat(chat_id):
-            # Иначе чат, не входящий в семью, мог бы записать факт, который
-            # семья потом увидит у себя, — граница держится в обе стороны.
             raise ProtoError(
                 ERR_BAD_REQUEST,
                 "scope=family доступен только чатам из [memory].family_chat_ids",
@@ -249,7 +160,7 @@ class MemoryService:
                 f"слишком длинно ({len(text)} знаков, максимум {MAX_FACT_CHARS}) — "
                 "запоминай одну мысль, а не пересказ разговора",
             )
-        now = datetime.now(tz=UTC).isoformat()
+        now = utc_now().isoformat()
         cur = await self._db.conn.execute(
             "INSERT INTO facts (text, chat_id, scope, sensitive, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -258,29 +169,32 @@ class MemoryService:
         await self._db.conn.commit()
         return {"id": cur.lastrowid, "text": text, "scope": scope, "sensitive": sensitive}
 
+    def _visible_to(self, chat_id: int) -> tuple[str, list[Any]]:
+        scopes = [SCOPE_COMMON]
+        if self._is_family_chat(chat_id):
+            scopes.append(SCOPE_FAMILY)
+        clause = "(chat_id = ?" + " OR scope = ?" * len(scopes) + ")"
+        return clause, [chat_id, *scopes]
+
+    async def _select_facts(self, tail_sql: str, params: list[Any]) -> dict[str, Any]:
+        cur = await self._db.conn.execute(
+            "SELECT rowid AS id, text, scope, sensitive, created_at FROM facts " + tail_sql,
+            params,
+        )
+        facts = [_row_to_fact(row) for row in await cur.fetchall()]
+        return {"facts": facts, "count": len(facts)}
+
     async def _recall(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)
         limit = min(int(args.get("limit") or DEFAULT_RECALL), MAX_RECALL)
         match = _match_query(str(args.get("query") or ""))
         if not match:
             return {"facts": [], "count": 0}
-        # Общее знание дома видно из любого разговора; семейное — только из
-        # чатов-родственников; всё остальное — только из своего. Это и есть
-        # граница приватности, и держится она запросом, а не обещанием модели
-        # молчать.
-        sql = (
-            "SELECT rowid AS id, text, scope, sensitive, created_at FROM facts "
-            "WHERE facts MATCH ? AND (chat_id = ? OR scope = ?"
+        visible_sql, visible_params = self._visible_to(chat_id)
+        return await self._select_facts(
+            f"WHERE facts MATCH ? AND {visible_sql} ORDER BY rank LIMIT ?",
+            [match, *visible_params, limit],
         )
-        params: list[Any] = [match, chat_id, SCOPE_COMMON]
-        if self._is_family_chat(chat_id):
-            sql += " OR scope = ?"
-            params.append(SCOPE_FAMILY)
-        sql += ") ORDER BY rank LIMIT ?"
-        params.append(limit)
-        cur = await self._db.conn.execute(sql, params)
-        facts = [_row_to_fact(row) for row in await cur.fetchall()]
-        return {"facts": facts, "count": len(facts)}
 
     async def _forget(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)
@@ -288,9 +202,6 @@ class MemoryService:
             fact_id = int(args.get("id"))  # type: ignore[arg-type]
         except (TypeError, ValueError) as exc:
             raise ProtoError(ERR_BAD_REQUEST, "не указан номер факта (id)") from exc
-        # chat_id в условии — не формальность: без него один чат стирал бы
-        # память другого, зная лишь номер. Общее знание тоже не стираем из
-        # случайного чата: его заводит человек руками, пусть руками и убирает.
         cur = await self._db.conn.execute(
             "DELETE FROM facts WHERE rowid = ? AND chat_id = ? AND scope = ?",
             (fact_id, chat_id, SCOPE_CHAT),
@@ -301,19 +212,10 @@ class MemoryService:
     async def _list(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)
         limit = min(int(args.get("limit") or MAX_RECALL), MAX_RECALL)
-        sql = (
-            "SELECT rowid AS id, text, scope, sensitive, created_at "
-            "FROM facts WHERE chat_id = ? OR scope = ?"
+        visible_sql, visible_params = self._visible_to(chat_id)
+        return await self._select_facts(
+            f"WHERE {visible_sql} ORDER BY rowid DESC LIMIT ?", [*visible_params, limit]
         )
-        params: list[Any] = [chat_id, SCOPE_COMMON]
-        if self._is_family_chat(chat_id):
-            sql += " OR scope = ?"
-            params.append(SCOPE_FAMILY)
-        sql += " ORDER BY rowid DESC LIMIT ?"
-        params.append(limit)
-        cur = await self._db.conn.execute(sql, params)
-        facts = [_row_to_fact(row) for row in await cur.fetchall()]
-        return {"facts": facts, "count": len(facts)}
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if action == ACTION_REMEMBER:
@@ -324,5 +226,4 @@ class MemoryService:
             return await self._forget(args)
         if action == ACTION_LIST:
             return await self._list(args)
-        # Сервер валидирует action по describe — сюда неизвестное не доходит.
-        raise ValueError(f"необъявленное действие: {action}")
+        raise undeclared_action(action)

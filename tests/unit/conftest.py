@@ -1,11 +1,13 @@
-"""Общие фикстуры и хелперы для тестов."""
-
 from __future__ import annotations
 
 from datetime import UTC, datetime
 
 import pytest
+import pytest_asyncio
 
+from sa_home_bot.db.connection import Database
+from sa_home_bot.db.migrations import apply_migrations
+from sa_home_bot.db.store import Store
 from sa_home_bot.domain.models import KIND_CPU, SensorReading
 from sa_home_bot.domain.policy import ComponentPolicy, FixedThresholdPolicy
 
@@ -44,8 +46,15 @@ def cpu_policy(
 
 @pytest.fixture(autouse=True)
 def _isolated_known_vpn_servers(tmp_path, monkeypatch):
-    """Память о VPN-серверах (bot/vpn_nodes.py) — файл в ./data; тесты не должны
-    ни писать в настоящий, ни читать оттуда."""
     from sa_home_bot.bot import vpn_nodes
 
     monkeypatch.setattr(vpn_nodes, "KNOWN_SERVERS_PATH", tmp_path / "vpn_known_servers.json")
+
+
+@pytest_asyncio.fixture
+async def store(tmp_path):
+    db = Database(tmp_path / "test.sqlite")
+    await db.open()
+    await apply_migrations(db)
+    yield Store(db)
+    await db.close()

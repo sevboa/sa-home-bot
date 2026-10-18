@@ -1,14 +1,3 @@
-"""Опись вещей (/items) и кнопки карточки сюжетного предмета (Этап 49.3,
-bot/interactives/items.py).
-
-callback_data «it:<id предмета>:<кнопка>»; права — Interactives.
-handle_item_click по from_user.id (кнопка работает только у владельца).
-Под карточкой и в описи — «Действия»: сообщение сменяется перечнем
-действий вида (items.ItemKind.actions) с «Назад»; кнопки формы тула
-item_action — сюда же. У «Проклятой радиостанции» действие ставит старую
-станцию или убирает её — это и есть переключатель картавости Альфреда.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -19,7 +8,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from sa_home_bot.bot import commands
-from sa_home_bot.bot.interactives import engine
+from sa_home_bot.bot.interactives import keyboards
 from sa_home_bot.bot.interactives.engine import Interactives
 
 log = logging.getLogger(__name__)
@@ -27,9 +16,9 @@ log = logging.getLogger(__name__)
 router = Router(name="items")
 
 
-@router.callback_query(F.data.startswith(f"{engine.ITEM_CALLBACK_PREFIX}:"))
+@router.callback_query(F.data.startswith(f"{keyboards.ITEM_CALLBACK_PREFIX}:"))
 async def cb_item(callback: CallbackQuery, interactives: Interactives | None = None) -> None:
-    parsed = engine.parse_item_callback(callback.data)
+    parsed = keyboards.parse_item_callback(callback.data)
     message = callback.message
     if (
         parsed is None
@@ -61,7 +50,6 @@ async def cb_item(callback: CallbackQuery, interactives: Interactives | None = N
         else:
             await message.edit_reply_markup(reply_markup=markup)
     except TelegramBadRequest as exc:
-        # Итог уже записан (речь переключена) — правка карточки лишь косметика.
         log.info("items: карточку не поправить (chat=%s): %s", message.chat.id, exc)
 
 

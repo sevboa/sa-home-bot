@@ -1,5 +1,3 @@
-"""Интеграция SensorScanJob: норма → перегрев → норма через реальную БД."""
-
 from datetime import datetime, timedelta
 
 import pytest_asyncio
@@ -102,16 +100,13 @@ async def test_overheat_then_clear_full_cycle(ctx):
     assert alerts == 1
     assert clears == 1
 
-    # Ровно два сообщения: перегрев, затем остыл reply'ем на перегрев.
     assert len(notifier.sent) == 2
     alert_msg, clear_msg = notifier.sent
     assert alert_msg[2] is None
     assert "Перегрев" in alert_msg[1]
     assert "остыл" in clear_msg[1]
-    # reply_to_message_id остывшего = message_id перегрева (101).
     assert clear_msg[2] == 101
 
-    # Итоговое состояние — ok, ничего не висит pending.
     final = await context.store.get_all_states()
     assert final[0].status == "ok"
     assert await context.store.pending_alerts() == []
@@ -121,7 +116,6 @@ async def test_overheat_then_clear_full_cycle(ctx):
 async def test_no_duplicate_alert_while_still_hot(ctx):
     context, notifier = ctx
     job = SensorScanJob()
-    # Первые 4 тика: 40,95,95,95 — alert на 3-м, на 4-м дубля быть не должно.
     for _ in range(4):
         await job.run(context)
     alert_sends = [s for s in notifier.sent if "Перегрев" in s[1]]
@@ -129,9 +123,6 @@ async def test_no_duplicate_alert_while_still_hot(ctx):
 
 
 async def test_run_caches_disk_summaries_in_store(ctx):
-    """Живой баг 2026-07-18: /swarm и /status считали диски вживую на каждый
-    запрос — теперь их снимает SensorScanJob и кладёт в Store, отдача клиенту
-    (MonitorService.get_state) читает готовый кэш."""
     context, _ = ctx
     disks = [DiskSummary("NVMe", "ok", 45.0, 100, 200, "Samsung 980", "nvme")]
     context.sensors = FakeSensors([40], disks=disks)
@@ -142,9 +133,6 @@ async def test_run_caches_disk_summaries_in_store(ctx):
 
 
 class FakeGpuSensors:
-    """Отдаёт одно GPU-показание (kind=gpu) — проверить, что скан резолвит
-    его к config.sensors.gpu, а не по умолчанию к disk-порогам."""
-
     def __init__(self, temps: list[float]) -> None:
         self._temps = temps
         self._i = 0
@@ -181,8 +169,6 @@ async def gpu_ctx(tmp_path):
                 consecutive_to_alert=2,
                 consecutive_to_clear=2,
             ),
-            # Порог дисков нарочно другой — если бы GPU резолвился на него,
-            # тест ниже не заметил бы перегрев на 85°C (< disk warn_c).
             disks=DiskSensorConfig(enabled=True, warn_c=200.0, crit_c=250.0),
         ),
         subscriptions=[],
@@ -209,8 +195,6 @@ async def test_gpu_reading_uses_gpu_thresholds_not_disk(gpu_ctx):
 
 
 class FakeHostSensors:
-    """Отдаёт host-метрики VPS (kind=host) — проверить отдельный пайплайн скана."""
-
     def __init__(self, steal_seq: list[float]) -> None:
         self._seq = steal_seq
         self._i = 0
@@ -276,7 +260,7 @@ async def test_host_scan_alerts_and_recovers(host_ctx):
     assert await context.store.pending_host_alerts() == []
 
     trend = await context.store.host_trend("steal_pct", 24, BASE_TIME + timedelta(hours=1))
-    assert sum(b["samples"] for b in trend) == 6  # история пишется всегда
+    assert sum(b["samples"] for b in trend) == 6
 
 
 async def test_host_scan_advances_kernel_journal_cursor(host_ctx):
@@ -287,17 +271,14 @@ async def test_host_scan_advances_kernel_journal_cursor(host_ctx):
 
     await job.run(context)
     cursor_after_first = await context.store.get_state(KERNEL_SCAN_STATE_KEY)
-    assert cursor_after_first is not None  # курсор проставлен
+    assert cursor_after_first is not None
 
     await job.run(context)
-    # первый прогон — окно без курсора, второй — получил сохранённый курсор
     assert context.sensors.kernel_since_calls[0] is None
     assert context.sensors.kernel_since_calls[1] == datetime.fromisoformat(cursor_after_first)
 
 
 async def test_disabled_disks_clears_stale_summary_cache(ctx):
-    """vps: датчик дисков выключен — старый кэш DiskSummary затирается, чтобы
-    в карточке ноды не висел призрачный диск."""
     context, _ = ctx
     await context.store.save_disk_summaries(
         [DiskSummary("HDD", None, None, 1, 2, None, "hdd")]

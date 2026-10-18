@@ -1,5 +1,3 @@
-"""ServiceLink: запросы, недоступный монитор, переподключение, события."""
-
 import asyncio
 import shutil
 import tempfile
@@ -29,7 +27,6 @@ class FakeMonitor:
 
 @pytest.fixture
 def sock_dir():
-    # Свой короткий tempdir: путь unix-сокета ограничен ~108 байтами.
     tmpdir = Path(tempfile.mkdtemp(prefix="sa-link-"))
     yield tmpdir
     shutil.rmtree(tmpdir, ignore_errors=True)
@@ -46,7 +43,6 @@ async def test_requests_and_unavailable(sock_dir):
     link = ServiceLink(socket_path, reconnect_delay=0.1)
     await link.start()
     try:
-        # Монитора нет — запрос отваливается сразу и понятно.
         with pytest.raises(ServiceUnavailableError):
             await link.get_state()
 
@@ -79,7 +75,6 @@ async def test_reconnects_and_receives_events(sock_dir):
     try:
         await _wait_connected(link)
 
-        # Монитор перезапустился.
         await server.stop()
         async with asyncio.timeout(5.0):
             while link.connected:
@@ -89,7 +84,6 @@ async def test_reconnects_and_receives_events(sock_dir):
         await server2.start()
         await _wait_connected(link)
 
-        # После реконнекта события снова доходят.
         delivered = await server2.broadcast_event("overheat_started", {"component_id": "x"})
         assert delivered == 1
         async with asyncio.timeout(5.0):

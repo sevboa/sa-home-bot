@@ -1,10 +1,3 @@
-"""/draw — отладка режимов генерации (Этап 49, bot/draw_debug.py).
-
-Право — ``draw`` (у владельца открыто по ``*``), команда скрыта из меню.
-Кнопки «/draw clean» — свой префикс «draw:», право проверяется здесь же тем
-же правилом.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -25,28 +18,25 @@ from aiogram.types import (
 )
 from PIL import Image
 
-from sa_home_bot.bot import commands, draw_debug
+from sa_home_bot.bot import commands, draw_debug, image_tools
 from sa_home_bot.bot.away import KIND_SUMMON, AwayService
 from sa_home_bot.bot.draw_debug import DrawCommand, DrawRequest, DrawSyntaxError
 from sa_home_bot.bot.image_tools import (
     ACTION_GENERATE_IMAGE,
-    LLM_NODE,
-    LLM_SERVICE,
     upscale_png,
 )
-from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
+from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
-from sa_home_bot.proto.messages import Address, ProtoError
+from sa_home_bot.proto.addresses import LLM_ADDRESS
+from sa_home_bot.proto.errors import SERVICE_CALL_ERRORS
 from sa_home_bot.subscriptions.models import Subscription
 
 log = logging.getLogger(__name__)
 
 router = Router(name="draw")
 
-# Первая сцена с образцом ещё и грузит IP-Adapter (+2.5 ГБ с диска).
 _MIN_TIMEOUT_S = 300.0
-# Чужое фото-образец ужимаем до родного размера SD1.5 — меньше гнать по сети.
 _REF_MAX_PX = 512
 
 
@@ -61,10 +51,6 @@ def _ref_from_photo(data: bytes) -> bytes:
 async def _find_ref(
     message: Message, request: DrawRequest, store: Store
 ) -> tuple[bytes, str] | str | None:
-    """(png, подпись образца), текст ошибки или None (образца нет).
-
-    Порядок: ``ref=ID``, картинка, приложенная к самой команде (команда в
-    подписи), картинка, на которую ответили."""
     if request.ref_id is not None:
         row = await store.image_by_id(request.ref_id)
         if row is None:
@@ -137,8 +123,6 @@ async def cmd_draw(
         return
     request = parsed
 
-    # Этап 51: пока Альфред в городе, GPU не трогаем — рисование тоже ждёт
-    # (служебные подкоманды help/keep/clean выше работают).
     if away is not None and await away.intercept(message, kind=KIND_SUMMON):
         return
 
@@ -171,25 +155,23 @@ async def cmd_draw(
         result = await node_link.command(
             ACTION_GENERATE_IMAGE,
             args,
-            dst=Address(node=LLM_NODE, service=LLM_SERVICE),
+            dst=LLM_ADDRESS,
             timeout=max(cfg.imagegen_request_timeout_s, _MIN_TIMEOUT_S),
         )
-    except (ServiceUnavailableError, ProtoError, TimeoutError) as exc:
+    except (*SERVICE_CALL_ERRORS, TimeoutError) as exc:
         await waiting.edit_text(f"⚠️ не нарисовалось: {exc}")
         return
 
-    png = base64.b64decode(result["png_b64"])
     author = message.from_user.full_name if message.from_user else None
-    image_id = await store.add_image(
+    png, image_id = await image_tools.record_generated(
+        store,
+        result,
         chat_id=message.chat.id,
         author=author,
         prompt_ru=request.description,
-        prompt_en=str(result.get("prompt") or request.description),
+        fallback_prompt_en=request.description,
         caption=f"отладка {request.mode}",
-        width=int(result["width"]),
-        height=int(result["height"]),
         colors=int(result.get("colors") or 0),
-        png=png,
         now=datetime.now(tz=UTC),
         purpose="debug",
         params=json.dumps(

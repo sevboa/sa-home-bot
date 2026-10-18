@@ -1,5 +1,3 @@
-"""События монитора в боте: payload → доменная модель → нужный dispatch-вызов."""
-
 from datetime import UTC, datetime
 
 from sa_home_bot.bot.monitor_events import build_event_handler
@@ -54,7 +52,6 @@ def _overheat(event_type: str) -> Event:
 
 
 async def test_overheat_roundtrip_monitor_to_bot():
-    """Сериализация монитора → парсинг бота даёт исходное событие."""
     dispatcher = RecordingDispatcher()
     handle = build_event_handler(dispatcher)
     original = _overheat(EVENT_OVERHEAT_STARTED)
@@ -97,8 +94,8 @@ async def test_unknown_and_invalid_events_do_not_crash():
     dispatcher = RecordingDispatcher()
     handle = build_event_handler(dispatcher)
 
-    await handle(make_event("service_started", {"pid": 1}))  # неизвестный тип
-    await handle(make_event(EVENT_OVERHEAT_STARTED, {"garbage": True}))  # битый payload
+    await handle(make_event("service_started", {"pid": 1}))
+    await handle(make_event(EVENT_OVERHEAT_STARTED, {"garbage": True}))
 
     assert dispatcher.alerts == dispatcher.clears == dispatcher.smarts == []
 

@@ -1,6 +1,3 @@
-"""Дебаг-кнопка «развернуть/скрыть» под сообщением о вызове инструмента:
-хранилище, рендеринг, переключение вида и жизнь после рестарта."""
-
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -55,8 +52,6 @@ def _debug_book() -> SubscriptionBook:
                 name="debug",
                 event_types=frozenset({lifecycle.EVENT_ALFRED_TOOL_CALL}),
             ),
-            # Подписка с "*" в event_types дебаг-канал НЕ получает (живая
-            # находка 2026-07-27: иначе спам на каждой реплике).
             Subscription(chat_id=2, name="admin", event_types=frozenset({"*"})),
         ]
     )
@@ -81,7 +76,6 @@ async def test_notification_carries_expand_button_when_details_known():
 
 
 async def test_notification_without_details_has_no_button():
-    """Событие от службы tasks несёт только имя тула — разворачивать нечего."""
     notifier = FakeNotifier()
     await lifecycle.notify_tool_call(_debug_book(), notifier, "remind")
     assert notifier.sent[0][2] is None
@@ -104,7 +98,6 @@ async def test_expand_shows_input_and_output_then_collapses():
 
 
 async def test_lost_details_after_restart_say_so():
-    """Хранилище живёт в памяти процесса — после рестарта показывать нечего."""
     callback = FakeCallback(f"{tool_debug.CALLBACK_PREFIX}:{tool_debug.SHOW}:deadbeef")
     await handler.cb_tool_debug(callback, ToolCalls())
     assert callback.answers == [(tool_debug.LOST_TEXT, True)]
@@ -127,8 +120,6 @@ def test_long_output_is_clipped_not_dropped():
 
 
 def test_html_in_tool_output_is_escaped():
-    """Выдача трекера — чужой текст: «<b>» в имени раздачи не должен
-    ломать разметку сообщения."""
     call = ToolCall(name="torrents", args={}, result="<b>Задача</b> & Co")
     assert "&lt;b&gt;" in tool_debug.render_full(call)
 
@@ -140,6 +131,5 @@ def test_keyboard_callback_data_fits_telegram_limit():
 
 
 def test_render_short_matches_the_old_wording():
-    """Текст короткого сообщения не менялся — дебаг-канал узнаваем."""
     assert tool_debug.render_short("calc") == "🔧 Alfred вызвал инструмент: calc"
-    assert SimpleNamespace  # noqa: B018 — импорт используется в фейках выше
+    assert SimpleNamespace

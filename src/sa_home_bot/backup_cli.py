@@ -1,14 +1,3 @@
-"""`sa-home-bot backup keygen` — пара ключей для бэкапа identity vpn-серверов (Этап 39.0.8).
-
-Запускать на alfred: приватный ключ остаётся там (файл 0600, на экран не выводится),
-публичный печатается — его кладут в ``[backup].recipient_public_key`` vpn-нод.
-Конфиг для keygen не нужен.
-
-``sa-home-bot [-c конфиг] backup list <нода>`` и ``backup restore <нода> --dry-run ДИР |
---apply`` — восстановление vpn-сервера из копии напарника (39.0.8(d), backup/restore.py).
-Нужен конфиг alfred: ``[backup].private_key_file`` и доступ к своей ноде роя.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -83,11 +72,6 @@ def _load_private(settings: Any) -> bytes:
 
 
 async def _open_ask(settings: Any, config_path: str | None, holder: str | None, node: str):
-    """Клиент к своей ноде + функция «спросить службу vpn у хранителя».
-
-    Хранитель — ``--holder`` или первый живой пир, у которого есть копия ``node``.
-    Возвращает ``(client, ask, holder)``.
-    """
     from sa_home_bot.backup.restore import RestoreError
     from sa_home_bot.backup.serve import ACTION_STORE_LIST
     from sa_home_bot.nodectl import _default_config
@@ -149,8 +133,6 @@ async def _run_restore(args: argparse.Namespace) -> int:
     from sa_home_bot.config import Settings
     from sa_home_bot.nodectl import _default_config
 
-    # Без --config — конфиг по умолчанию, как у nodectl: иначе Settings.load(None)
-    # даёт дефолты (сокет ./data/node.sock, пустой [backup]) и связи с нодой нет.
     if args.config is None:
         args.config = _default_config()
     settings = Settings.load(args.config)

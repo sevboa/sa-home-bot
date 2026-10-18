@@ -1,18 +1,7 @@
-"""Этап 52: автовыбор маршрута до Telegram Bot API (direct ↔ SOCKS5 нод роя).
-
-Здоровье и пинг прокси берутся из уже собранных ``vpn_check`` замеров
-(действие ``telegram_egress`` службы ``vpn``) — отдельных проб прокси нет.
-Здоровье direct — это успех обычных запросов бота (детектор-middleware);
-пока сидим на прокси, раз в тик делается один прямой ``getMe``.
-
-Маршрут — строка: ``"direct"`` либо URL прокси ``"socks5://host:port"``.
-Модуль сам ничего не оповещает: события ``on_switched``/``on_recovered``
-привязывает главная сессия.
-"""
-
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
@@ -33,10 +22,12 @@ from aiogram.methods import GetMe
 from aiohttp import TCPConnector
 
 from sa_home_bot.config import TelegramConfig
+from sa_home_bot.utils.lifespan import cancel_task
+from sa_home_bot.vpn.protocol import ACTION_TELEGRAM_EGRESS
 
 log = logging.getLogger(__name__)
 
-try:  # aiohttp_socks — опциональная зависимость aiogram
+try:
     from aiohttp_socks import ProxyConnectionError, ProxyError, ProxyTimeoutError
 
     _PROXY_ERRORS: tuple[type[BaseException], ...] = (
@@ -48,31 +39,21 @@ except ImportError:  # pragma: no cover
     _PROXY_ERRORS = ()
 
 DIRECT = "direct"
-TICK_S = 300.0  # в такт vpn_check
-BAN_S = 15 * 60.0  # бан прокси, на котором детектор поймал ошибки
-DIRECT_RETURN_STREAK = 2  # успешных прямых проверок подряд для возврата
-SWITCH_GAIN_FACTOR = 2.0  # между прокси: выигрыш > 2× …
-SWITCH_GAIN_MS = 300  # … и > 300 мс
+TICK_S = 300.0
+BAN_S = 15 * 60.0
+DIRECT_RETURN_STREAK = 2
+SWITCH_GAIN_FACTOR = 2.0
+SWITCH_GAIN_MS = 300
 TROUBLE_CONSECUTIVE = 3
 TROUBLE_NO_SUCCESS_S = 60.0
 DIRECT_PROBE_TIMEOUT_S = 8.0
-EGRESS_ACTION = "telegram_egress"
-
-
-try:  # константу добавляет vpn/protocol.py (Этап 52, A1)
-    from sa_home_bot.vpn.protocol import ACTION_TELEGRAM_EGRESS as EGRESS_ACTION  # type: ignore
-except ImportError:  # pragma: no cover
-    pass
-
-
-# ---------------------------------------------------------------- выбор маршрута
 
 
 @dataclass(frozen=True)
 class Candidate:
-    route: str  # URL прокси
+    route: str
     label: str
-    ms: int | None  # None — не замерен (extra_proxies)
+    ms: int | None
     valid: bool
 
 
@@ -84,15 +65,10 @@ class Decision:
 
 
 def socks_url(socks: str) -> str:
-    """``host:port`` → ``socks5://host:port``; готовый URL не трогаем."""
     return socks if "://" in socks else f"socks5://{socks}"
 
 
 def normalize_candidates(raw: list[dict], extra_proxies: list[str]) -> list[Candidate]:
-    """Ответы ``telegram_egress`` + ручные прокси → кандидаты.
-
-    Валиден: есть ``socks``, ``check`` не null, ``ok`` и не ``stale``. Замеренные
-    отсортированы по ``ms``, невалидные и ручные (без замера) — следом."""
     out: list[Candidate] = []
     seen: set[str] = set()
     for item in raw:
@@ -130,12 +106,6 @@ def choose_route(
     prefer_direct: bool = True,
     extra_proxies: list[str] | None = None,
 ) -> Decision:
-    """Чистый выбор маршрута (без I/O).
-
-    ``direct_ok`` — direct сейчас считается живым (для текущего direct: нет
-    беды у детектора); ``direct_streak`` — подряд успешных прямых проверок
-    (нужно ≥ 2, чтобы вернуться с прокси). ``bans`` — {route: время конца бана}.
-    """
     cands = normalize_candidates(candidates, extra_proxies or [])
     usable = [c for c in cands if c.valid and bans.get(c.route, 0.0) <= now]
     by_route = {c.route: c for c in usable}
@@ -153,7 +123,6 @@ def choose_route(
     cur = by_route.get(current)
     best = usable[0] if usable else None
     if current != DIRECT and cur is not None:
-        # Текущий прокси годен — меняем только при заметном выигрыше.
         if (
             best is not None
             and best.route != cur.route
@@ -170,21 +139,15 @@ def choose_route(
         if current == DIRECT and direct_ok and not prefer_direct:
             return Decision(DIRECT, "direct жив", False)
         return Decision(best.route, why, True)
-    if direct_usable:  # prefer_direct=False, но кроме direct ничего нет
+    if direct_usable:
         if current == DIRECT:
             return Decision(DIRECT, "direct жив", False)
         return Decision(DIRECT, "кандидатов нет, direct жив", True)
     return Decision(current, "кандидатов нет", False)
 
 
-# ------------------------------------------------------ переключение сессии
-
-
 def apply_route(session: AiohttpSession, route: str) -> None:
-    """Переключить живой ``AiohttpSession`` на маршрут (коннектор сменится на
-    ближайшем запросе; long-poll aiogram переподнимет сам)."""
     if route == DIRECT:
-        # Setter ``proxy`` к direct не возвращает — повторяем __init__ aiogram.
         session._connector_type = TCPConnector
         session._connector_init = {
             "ssl": ssl.create_default_context(cafile=certifi.where()),
@@ -202,9 +165,6 @@ def current_route(session: AiohttpSession) -> str:
     return DIRECT if not proxy else str(proxy)
 
 
-# ------------------------------------------------------------------ детектор
-
-
 _NETWORK_ERRORS: tuple[type[BaseException], ...] = (
     TelegramNetworkError,
     aiohttp.ClientError,
@@ -214,15 +174,6 @@ _NETWORK_ERRORS: tuple[type[BaseException], ...] = (
 
 
 class TroubleDetector(BaseRequestMiddleware):
-    """Считает подряд сетевые ошибки запросов к Bot API.
-
-    Триггер: ``TROUBLE_CONSECUTIVE`` подряд либо нет успеха ``TROUBLE_NO_SUCCESS_S``
-    при наличии неудачных попыток. Таймаут ``getUpdates`` — тоже сбой: штатный
-    long-poll возвращает пустой список, а не таймаут, и при блокировке DROP'ом
-    (как в KZ) ошибки приходят именно таймаутами — без них молчащий бот сбоя не
-    заметил бы. Успех сбрасывает счётчик; первый успех после сработавшего
-    триггера зовёт ``on_recovered`` (даже если между ними сменился маршрут)."""
-
     def __init__(
         self,
         on_trouble: Callable[[], Any] | None = None,
@@ -235,13 +186,9 @@ class TroubleDetector(BaseRequestMiddleware):
         self.failures = 0
         self.last_success = clock()
         self.troubled = False
-        # Был сбой, а успеха после него ещё не было — переживает reset(),
-        # иначе on_recovered (флаш outbox) потерялся бы при смене маршрута.
         self._awaiting_recovery = False
 
     def reset(self) -> None:
-        """Начать счёт заново (после смены маршрута). Снимает ``troubled`` —
-        иначе сбой на НОВОМ маршруте уже не дал бы триггера."""
         self.failures = 0
         self.last_success = self._clock()
         self.troubled = False
@@ -252,20 +199,17 @@ class TroubleDetector(BaseRequestMiddleware):
         self.troubled = False
         if self._awaiting_recovery:
             self._awaiting_recovery = False
-            _call_cb(self.on_recovered)
+            _fire_callback(self.on_recovered)
 
     def record_failure(self) -> None:
         self.failures += 1
         if self.troubled:
             return
         now = self._clock()
-        if (
-            self.failures >= TROUBLE_CONSECUTIVE
-            or now - self.last_success >= TROUBLE_NO_SUCCESS_S
-        ):
+        if self.failures >= TROUBLE_CONSECUTIVE or now - self.last_success >= TROUBLE_NO_SUCCESS_S:
             self.troubled = True
             self._awaiting_recovery = True
-            _call_cb(self.on_trouble)
+            _fire_callback(self.on_trouble)
 
     async def __call__(self, make_request, bot, method):  # type: ignore[override]
         try:
@@ -277,36 +221,38 @@ class TroubleDetector(BaseRequestMiddleware):
         return result
 
 
-def _call_cb(cb: Callable[[], Any] | None) -> None:
-    """Синхронный вызов колбэка; корутину запускаем задачей."""
+def _fire_callback(cb: Callable[..., Any] | None, *args: Any) -> None:
     if cb is None:
         return
     try:
-        res = cb()
+        res = cb(*args)
         if inspect.isawaitable(res):
             asyncio.ensure_future(res)
     except Exception:
-        log.exception("egress: колбэк детектора упал")
+        log.exception("egress: колбэк упал")
 
 
-# ------------------------------------------------------------ сбор кандидатов
+async def _await_callback(cb: Callable[..., Any] | None, *args: Any) -> None:
+    if cb is None:
+        return
+    try:
+        res = cb(*args)
+        if inspect.isawaitable(res):
+            await res
+    except Exception:
+        log.exception("egress: колбэк упал")
 
 
 def make_fetch_candidates(node_link: Any, observer: str) -> Callable[[], Awaitable[list[dict]]]:
-    """Фабрика ``fetch_candidates``: ответы ``telegram_egress`` всех живых vpn-нод."""
     from sa_home_bot.bot import vpn_nodes
 
     async def _fetch() -> list[dict]:
-        return await vpn_nodes.fanout(node_link, EGRESS_ACTION, {"observer": observer})
+        return await vpn_nodes.fanout(node_link, ACTION_TELEGRAM_EGRESS, {"observer": observer})
 
     return _fetch
 
 
-# ---------------------------------------------------------------- состояние
-
-
 def load_saved_state(path: Path) -> dict | None:
-    """Последний рабочий маршрут; битый/отсутствующий файл = нет состояния."""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -327,12 +273,7 @@ def save_state(path: Path, data: dict) -> None:
         log.warning("egress: не удалось сохранить состояние в %s", path, exc_info=True)
 
 
-# ------------------------------------------------------------------ менеджер
-
-
 class EgressManager:
-    """Фоновый менеджер маршрута до Bot API (режим ``proxy_mode="auto"``)."""
-
     def __init__(
         self,
         bot: Bot,
@@ -354,7 +295,7 @@ class EgressManager:
         self.on_recovered: Callable[[], Any] | None = None
 
         self.route = current_route(bot.session)
-        self.label = DIRECT if self.route == DIRECT else self.route
+        self.label = self.route
         self.ms: int | None = None
         self.since = clock()
         self.direct_ok = True
@@ -367,11 +308,9 @@ class EgressManager:
         self._lock = asyncio.Lock()
         self.detector = TroubleDetector(
             on_trouble=self._trouble.set,
-            on_recovered=lambda: self._fire(self.on_recovered),
+            on_recovered=lambda: _fire_callback(self.on_recovered),
             clock=clock,
         )
-
-    # --- жизненный цикл
 
     def start(self) -> None:
         self.bot.session.middleware(self.detector)
@@ -379,12 +318,7 @@ class EgressManager:
 
     async def stop(self) -> None:
         task, self._task = self._task, None
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        await cancel_task(task)
 
     async def _loop(self) -> None:
         trouble_wait: asyncio.Task | None = None
@@ -407,10 +341,7 @@ class EgressManager:
         except Exception:
             log.exception("egress: сбой в %s", getattr(fn, "__name__", fn))
 
-    # --- реакции
-
     async def handle_trouble(self) -> None:
-        """Детектор поймал ошибки на текущем маршруте."""
         async with self._lock:
             if self.route == DIRECT:
                 self.direct_ok = False
@@ -430,8 +361,6 @@ class EgressManager:
                     self.direct_streak = 0
                     self.direct_ok = False
             else:
-                # Тихий бот (нет успешных запросов дольше тика) — проверяем
-                # direct сами, а не верим отсутствию ошибок.
                 idle = self._clock() - self.detector.last_success >= TICK_S
                 self.direct_ok = not self.detector.troubled and (
                     not idle or await self._probe_direct()
@@ -472,11 +401,8 @@ class EgressManager:
         apply_route(self.bot.session, dec.route)
         self.route = dec.route
         self.since = self._clock()
-        if dec.route == DIRECT:
-            self.label, self.ms = DIRECT, None
-        else:
-            self.label, self.ms = dec.route, None
-            self._refresh_meta(cands)
+        self.label, self.ms = dec.route, None
+        self._refresh_meta(cands)
         self.detector.reset()
         self._persist()
         log.warning("egress: %s → %s (%s; %s)", old, dec.route, why, dec.reason)
@@ -492,9 +418,7 @@ class EgressManager:
                 for c in cands
             ],
         ]
-        await self._fire_async(self.on_switched, old, dec.route, f"{why}: {dec.reason}", details)
-
-    # --- вспомогательное
+        await _await_callback(self.on_switched, old, dec.route, f"{why}: {dec.reason}", details)
 
     def _persist(self) -> None:
         save_state(
@@ -503,31 +427,9 @@ class EgressManager:
         )
 
     def state(self) -> dict:
-        """Для карточки ноды: ``route``, ``label``, ``ms``, ``since``."""
         return {"route": self.route, "label": self.label, "ms": self.ms, "since": self.since}
 
-    def _fire(self, cb: Callable[..., Any] | None, *args: Any) -> None:
-        if cb is None:
-            return
-        try:
-            res = cb(*args)
-            if inspect.isawaitable(res):
-                asyncio.ensure_future(res)
-        except Exception:
-            log.exception("egress: колбэк упал")
-
-    async def _fire_async(self, cb: Callable[..., Any] | None, *args: Any) -> None:
-        if cb is None:
-            return
-        try:
-            res = cb(*args)
-            if inspect.isawaitable(res):
-                await res
-        except Exception:
-            log.exception("egress: колбэк упал")
-
     async def _default_probe_direct(self) -> bool:
-        """Один прямой ``getMe`` через отдельную короткоживущую direct-сессию."""
         session = AiohttpSession()
         try:
             await asyncio.wait_for(
@@ -538,7 +440,5 @@ class EgressManager:
         except Exception:
             return False
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 await session.close()
-            except Exception:  # pragma: no cover
-                pass

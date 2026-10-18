@@ -1,12 +1,3 @@
-"""Клиент протокола v0: запрос-ответ по id + приём событий.
-
-Одно подключение к своей локальной ноде/службе (unix-сокет или TCP; на TCP
-`connect()` сам проходит auth токеном). Фоновая задача читает сокет: ответы
-резолвят ожидающие future по id запроса, события уходят в callback
-`on_event`. Падение callback'а не валит читателя. Переподключение — забота
-вызывающего (этап 13: бот переживает обрыв и реконнектится).
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -43,8 +34,6 @@ EventCallback = Callable[[Envelope], Awaitable[None]]
 
 DEFAULT_TIMEOUT = 10.0
 
-# Потолок на закрытие соединения (см. close): полумёртвый сокет не должен
-# задерживать переподключение.
 CLOSE_TIMEOUT_S = 5.0
 
 
@@ -62,8 +51,6 @@ class ProtoClient:
         self._endpoint = parse_endpoint(endpoint)
         self._token = token
         self._src = src
-        # Инкарнация нашего процесса (см. node/peers.py::NODE_INCARNATION):
-        # едет в auth, чтобы сосед отличил наш перезапуск от переподключения.
         self._incarnation = incarnation
         self._on_event = on_event
         self._timeout = timeout
@@ -91,11 +78,6 @@ class ProtoClient:
                 enable_tcp_keepalive(raw_sock)
         self._reader_task = asyncio.create_task(self._read_loop(), name="proto-client-reader")
         if isinstance(self._endpoint, TcpEndpoint):
-            # TCP требует auth первым сообщением; неверный токен → ProtoError.
-            # Заодно представляемся: по имени узла сервер понимает, что сосед
-            # ПЕРЕподключился, и роняет свой протухший исходящий линк к нему
-            # (см. node/peers.py::reconnect_now). Поле необязательное — нода
-            # старой версии просто его не заметит.
             auth_payload: dict[str, Any] = {"token": self._token}
             if self._src is not None and self._src.node:
                 auth_payload["node"] = self._src.node
@@ -115,25 +97,12 @@ class ProtoClient:
         if self._writer is not None:
             writer, self._writer = self._writer, None
             writer.close()
-            # Живая находка 2026-07-28: без таймаута `wait_closed()` виснет на
-            # полумёртвом сокете (данные в Send-Q не уходят, FIN не
-            # подтверждается) — и вешает весь цикл переподключения PeerLink,
-            # который зовёт close() перед новой попыткой. Сокет всё равно уже
-            # closed(); дожидаться подтверждения не обязательно.
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(writer.wait_closed(), timeout=CLOSE_TIMEOUT_S)
         self._reader = None
         self._fail_pending(ConnectionError("клиент закрыт"))
 
     def abort(self) -> None:
-        """Синхронно оборвать соединение, не дожидаясь закрытия.
-
-        Роняет читающую задачу — а с ней и `join()` у того, кто держит этот
-        клиент; полное `close()` делает уже он, в одном месте. Так убран
-        источник гонки: раньше `close()` звали параллельно из heartbeat и из
-        reconnect_now, и они переплетались на общих полях (живая находка
-        2026-07-28: линк после этого не переподключался вовсе).
-        """
         if self._reader_task is not None:
             self._reader_task.cancel()
         if self._writer is not None:
@@ -141,11 +110,9 @@ class ProtoClient:
                 self._writer.close()
 
     async def join(self) -> None:
-        """Дождаться завершения фоновой читающей задачи (EOF/обрыв/закрытие)."""
         if self._reader_task is not None:
             await self._reader_task
 
-    # --- Запросы ---
 
     async def hello(self, dst: Address | None = None) -> ServiceInfo:
         payload = await self.request(MSG_HELLO, dst=dst)
@@ -178,12 +145,6 @@ class ProtoClient:
         dst: Address | None = None,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        """Отправить запрос и дождаться ответа. ProtoError при ok=False.
-
-        ``timeout`` — переопределить таймаут ожидания для этого конкретного
-        запроса (едет в конверте как ``timeout_s`` и переживает форвард через
-        чужие ноды, см. докстринг `Envelope`); без него — `self._timeout`.
-        """
         env = make_request(type_, payload, src=self._src, dst=dst, timeout_s=timeout)
         response = await self.forward(env)
         if response.ok is not True:
@@ -191,12 +152,6 @@ class ProtoClient:
         return response.payload
 
     async def forward(self, env: Envelope) -> Envelope:
-        """Переслать готовый конверт и вернуть весь конверт ответа (id сохраняется).
-
-        Для маршрутизации нодой: чужой запрос уходит как есть, ответ (включая
-        ok=False) возвращается конвертом, а не исключением — нода отдаёт его
-        исходному клиенту без переупаковки.
-        """
         if self._writer is None:
             raise ConnectionError("клиент не подключён")
         if self._reader_task is not None and self._reader_task.done():
@@ -212,7 +167,6 @@ class ProtoClient:
         finally:
             self._pending.pop(env.id, None)
 
-    # --- Чтение сокета ---
 
     async def _read_loop(self) -> None:
         assert self._reader is not None
@@ -220,7 +174,7 @@ class ProtoClient:
             while True:
                 line = await self._reader.readline()
                 if not line:
-                    break  # EOF — сервер закрыл соединение
+                    break
                 if line.strip() == b"":
                     continue
                 try:
@@ -245,7 +199,7 @@ class ProtoClient:
                 return
             try:
                 await self._on_event(env)
-            except Exception:  # noqa: BLE001 — callback не должен валить читателя
+            except Exception:
                 log.exception("ProtoClient: обработчик события упал")
             return
         log.warning("ProtoClient: неожиданный тип сообщения от сервера: %s", env.type)

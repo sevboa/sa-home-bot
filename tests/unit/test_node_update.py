@@ -1,9 +1,3 @@
-"""node/update.py: детектирование установки, парсинг тегов, pipx-вызов.
-
-Реальные pipx/git/сеть не участвуют — subprocess.run/create_subprocess_exec
-и importlib.metadata монкипатчатся.
-"""
-
 from __future__ import annotations
 
 import importlib.metadata
@@ -12,19 +6,14 @@ import json
 from sa_home_bot.node import update
 from sa_home_bot.utils.version import version_key
 
-# --- version_key ---
-
 
 def test_version_key_purely_numeric():
     assert version_key("0.21.0") == (0, 21, 0)
-    assert version_key("1.2.3") < version_key("1.10.0")  # не лексикографически
+    assert version_key("1.2.3") < version_key("1.10.0")
 
 
 def test_version_key_nonnumeric_component_is_zero():
-    assert version_key("0.21.0-rc1") == (0, 21, 0)  # "0-rc1" не парсится → 0
-
-
-# --- installed_version() ---
+    assert version_key("0.21.0-rc1") == (0, 21, 0)
 
 
 class _FakeDist:
@@ -51,9 +40,6 @@ def test_installed_version_none_when_not_found(monkeypatch):
     assert update.installed_version() is None
 
 
-# --- origin_repo_url() ---
-
-
 def test_origin_repo_url_editable_install_is_none(monkeypatch):
     direct_url = json.dumps({"dir_info": {"editable": True}, "url": "file:///home/x/repo"})
     monkeypatch.setattr(
@@ -76,7 +62,6 @@ def test_origin_repo_url_git_install_returns_url(monkeypatch):
 
 
 def test_origin_repo_url_non_git_source_is_none(monkeypatch):
-    # Обычный pip install из PyPI — не VCS, обновлять через git+pipx нечего.
     direct_url = json.dumps({"url": "https://pypi.org/simple/sa-home-bot/"})
     monkeypatch.setattr(
         importlib.metadata, "distribution", lambda name: _FakeDist(direct_url=direct_url)
@@ -99,9 +84,6 @@ def test_origin_repo_url_package_not_found(monkeypatch):
     assert update.origin_repo_url() is None
 
 
-# --- _parse_tags() / latest_tag() ---
-
-
 def test_parse_tags_extracts_semver_refs():
     output = (
         "abc123\trefs/tags/v0.20.0\n"
@@ -113,8 +95,6 @@ def test_parse_tags_extracts_semver_refs():
 
 
 def test_latest_tag_sync_picks_highest_semver_not_lexicographic(monkeypatch):
-    # v0.9.0 лексикографически "больше" v0.21.0 — сравнение обязано быть
-    # покомпонентным (version_key), а не строковым.
     class FakeCompleted:
         returncode = 0
         stdout = "a\trefs/tags/v0.9.0\nb\trefs/tags/v0.21.0\nc\trefs/tags/v0.2.0\n"
@@ -154,9 +134,6 @@ async def test_latest_tag_none_on_empty(monkeypatch):
     assert await update.latest_tag("https://x") is None
 
 
-# --- pipx_reinstall() ---
-
-
 class _FakeProc:
     def __init__(self, returncode, output=b""):
         self.returncode = returncode
@@ -186,15 +163,10 @@ async def test_pipx_reinstall_success(monkeypatch):
         "--force",
         "git+https://x/repo.git@v0.22.0",
     )
-    # PIPX_HOME передан явно — без него pipx под другим аккаунтом (Windows
-    # LocalSystem-служба) ставит пакет мимо реально работающего venv'а
-    # (живой баг 2026-07-17, см. _pipx_home).
     assert kwargs["env"]["PIPX_HOME"] == update._pipx_home()
 
 
 async def test_pipx_reinstall_keeps_installed_extras(monkeypatch):
-    # Живая находка 2026-09-24: голый git+… терял экстры (tts и её пин
-    # numpy<2.5) — спецификация должна нести экстры текущей установки.
     calls = []
 
     async def fake_exec(*args, **kwargs):
@@ -238,9 +210,6 @@ def test_installed_extras_none_without_metadata(tmp_path, monkeypatch):
 
 
 def test_pipx_home_derived_from_running_interpreter(monkeypatch):
-    # Path() платформозависим (POSIX-тест не парсит "\\" как разделитель) —
-    # формула ("4-й родитель") на Windows проверена живьём 2026-07-17:
-    # C:\...\pipx\pipx\venvs\sa-home-bot\Scripts\python.exe → C:\...\pipx\pipx.
     fake_python = "/home/x/.local/share/pipx/venvs/sa-home-bot/bin/python"
     monkeypatch.setattr(update.sys, "executable", fake_python)
     assert update._pipx_home() == "/home/x/.local/share/pipx"

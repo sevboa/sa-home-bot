@@ -1,54 +1,24 @@
-"""/alfred (видимый в меню) и /ai (скрытый алиас, как /swarm↔/nodes) —
-диалог с Альфредом (LLM-служба на winpc), продолжение через reply.
-
-Дизайн диалога — LLM_INTEGRATION_PLAN.md §6 (dialogue_id = message_id
-команды, которой начат тред; реплай-цепочка резолвится через ai_turns, не
-через дерево Telegram-реплаев). Presence/wake-сценарий и форматирование
-ответа — bot/ai_flow.py.
-
-**Telegram Private Chat Topics (этап 32, IMPLEMENTATION_PLAN.md, добавлено
-2026-08-01):** если сообщение отправлено внутри топика личного чата
-(`message.message_thread_id` не пуст), `dialogue_id` — это id топика, а не
-message_id сообщения. Дальше топик и есть тред: любое сообщение внутри
-него — продолжение, без обязательного reply на сообщение бота (в отличие
-от треда без топика, где reply по-прежнему единственный способ
-продолжить). `aiogram` сам пробрасывает `message_thread_id` в
-`message.answer()`/`.reply()` — ответ уезжает в тот же топик без
-дополнительных параметров. Живой спайк на боевом боте (2026-08-01):
-`createForumTopic`/`sendMessage(message_thread_id=…)`/`editMessageText`
-внутри топика личного чата отработали с первой попытки — регрессия Bot
-API 10.0, которую ловили другие проекты (`sendMessage` с
-`message_thread_id` → `400: message thread not found`), на этом боте не
-воспроизвелась.
-"""
-
 from __future__ import annotations
 
-import asyncio
-import base64
-import html
 import logging
-from datetime import UTC, datetime
 from typing import Any
 
 from aiogram import Router
 from aiogram.filters import Command, Filter
 from aiogram.types import Message
 
-from sa_home_bot.bot import (
-    ai_flow,
-    commands,
-    dialogue_context,
-    voice_mode,
-    voice_stt,
-    voice_tts,
+from sa_home_bot.bot import ai_flow, ai_turns, commands
+from sa_home_bot.bot.ai_reply import (
+    TurnServices,
+    ask_and_reply,
+    dialogue_id_of,
+    rich_session_for,
 )
-from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.away import KIND_SUMMON, KIND_TEXT, AwayService
 from sa_home_bot.bot.interactives.engine import Interactives
-from sa_home_bot.bot.notifier import Notifier, chunk_text
+from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.pending_actions import PendingActions
-from sa_home_bot.bot.rich_stream import RichDraftPolicy, RichStreamSession
+from sa_home_bot.bot.rich_stream import RichStreamSession
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import Settings
@@ -57,32 +27,19 @@ from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 
 router = Router(name="ai")
-# catchall — неявные триггеры (без /alfred, без reply): любое сообщение в
-# личке, упоминание бота через @ в группе. Заведён отдельным роутером —
-# регистрируется в setup.py ПОСЛЕДНИМ (после apps), чтобы не перехватывать
-# то, что предназначено другим роутерам (magnet-ссылки в torrents и т.п.);
-# router (выше) с точными фильтрами (команда, реплай на свой тред)
-# остаётся зарегистрирован рано, как раньше.
 catchall_router = Router(name="ai_catchall")
 log = logging.getLogger(__name__)
 
-ALFRED_PREFIX = "<b>Альфред:</b> "
-# Без текста после /alfred — не системная заглушка "диалог начат", а сама
-# модель здоровается (решение пользователя 2026-07-23: локальная модель,
-# незачем экономить обращения к ней ради заготовленной строки — иначе одна
-# и та же неизменная фраза на каждый /alfred быстро выдаёт, что это бот).
-# Сама директива в историю диалога НЕ попадает — только то, что модель
-# ответит на неё, как на первый (и единственный пока) ход ассистента.
-OPENING_PROMPT = (
-    "Тебя только что позвали, без конкретного вопроса. Поприветствуй "
-    "коротко, в характере — дай понять, что ты здесь и готов слушать."
-)
+PRIVATE = "private"
+GROUP_TYPES = ("group", "supergroup")
+
+
+def _may_talk_to_alfred(subscription: Subscription | None) -> bool:
+    right = commands.required_right(commands.ALFRED.name)
+    return subscription is not None and subscription.allows_command(right)
 
 
 def _greeting_portrait(message: Message, interactives: Interactives | None) -> None:
-    """Приветствие без вопроса — следом портрет Альфреда в кабинете
-    (2026-10-05, Interactives.start_greeting_portrait): рисуется в фоне и
-    приходит после ответа, ответ его не ждёт."""
     if interactives is None or message.chat is None or message.from_user is None:
         return
     interactives.start_greeting_portrait(
@@ -93,120 +50,7 @@ def _greeting_portrait(message: Message, interactives: Interactives | None) -> N
     )
 
 
-# Реплай в тред без текста (фото без подписи, геолокация, документ и т.п.) —
-# тоже не молчим (раньше просто игнорировали, диалог как будто не реагировал),
-# а сообщаем модели, что ход был пустым — та же логика, что и OPENING_PROMPT:
-# директива не сохраняется как ход диалога, только ответ на неё. Стикер сюда
-# больше не попадает — у него своя ветка, см. STICKER_PROMPT.
-EMPTY_REPLY_PROMPT = (
-    "Пользователь ответил в этом треде, не написав никакого текста "
-    "(например, геолокацией или документом без подписи). Отреагируй коротко, "
-    "в характере — переспроси или отметь, что не расслышал."
-)
-# Мультимодальный /ai (2026-08-10) — bot/handlers/ai.py::_handle_photo_message.
-# PHOTO_MARKER — плейсхолдер в ai_turns.content: сама картинка туда не
-# попадает (см. photo_path), иначе история диалога, которая целиком
-# пересобирается и гонится по сети роя на каждый ход, распухала бы с
-# каждым фото в треде.
-PHOTO_MARKER = "[фото]"
-PHOTO_NO_CAPTION_PROMPT = (
-    "Пользователь прислал фото без подписи. Посмотри на изображение и "
-    "опиши, что видишь, или мягко уточни, что именно интересует."
-)
-PHOTO_TOO_LARGE_TEXT = (
-    "<b>Альфред:</b> Простите, это фото слишком тяжёлое — пришлите, "
-    "пожалуйста, поменьше или сожмите перед отправкой."
-)
-# Запас от proto/messages.py::MAX_MESSAGE_BYTES (1 МиБ, лимит на весь
-# конверт протокола роя) — под декларации тулов, текст истории и служебные
-# поля запроса; base64 сам по себе раздувает байты на треть. Фото уже сжато
-# Telegram'ом (это message.photo, не message.document) — на практике порог
-# срабатывает редко.
-_MAX_RAW_IMAGE_B64_BYTES = 800_000
-# Стикеры (2026-08-11) — bot/handlers/ai.py::_handle_sticker_message.
-# Telegram генерирует статичный thumbnail (JPEG/WEBP, ~320×320) для ЛЮБОГО
-# стикера, включая анимированные (.tgs) и видео (.webm) — этого достаточно,
-# декодировать Lottie/webm не нужно. Переиспользует тот же pipeline, что и
-# фото (raw_image/photo_path, llm/vision.py), т.к. Pillow сам распознаёт
-# формат по байтам. В отличие от фото — не хард-отказ при проблеме с
-# картинкой (см. _handle_sticker_message): у стикера есть emoji-тег, есть
-# на что реагировать даже без превью.
-STICKER_MARKER = "[стикер]"
-STICKER_PROMPT = (
-    "Пользователь прислал стикер (эмодзи-тег: {emoji}). Посмотри на "
-    "картинку — что на ней и какую эмоцию или жест она передаёт. Это не "
-    "фото, а стикер — реплика без слов в переписке, поэтому в ответе не "
-    "пересказывай картинку дословно, а отреагируй на неё так, как обычно "
-    "реагируют на стикер в чате (эмоция, шутка, реакция). Ответь коротко, "
-    "в характере."
-)
-STICKER_PROMPT_NO_IMAGE = (
-    "Пользователь прислал стикер (эмодзи-тег: {emoji}), но превью-картинка "
-    "недоступна. Отреагируй на сам факт стикера с этим эмодзи — коротко, "
-    "в характере, не выдумывай, что на нём изображено."
-)
-# Дешёвый статус-плейсхолдер (не настоящее размышление модели — то
-# зависит от роутера, THINK_MARKER, llm/prompt.py, и с картинками никак не
-# связано, проверено по логам mycraft 2026-08-11). Только rich-режим, как у
-# статусов тулов (ai_flow.py::_announce_tool_start) — без plain-фолбэка:
-# скачивание thumbnail — доли секунды, отдельное persist-сообщение в
-# typing_plain было бы просто мельканием перед самим ответом.
-STICKER_LOOKING_TEXT_PLAIN = "Альфред разглядывает стикер"
-# Тот же плейсхолдер, но для фото (решение пользователя 2026-08-11: у
-# стикера теперь есть, а у фото молчание — непоследовательно). Раньше фото
-# отвечало без единого визуального сигнала, что картинка вообще дошла до
-# обработки, — на скачивании оригинала (крупнее thumbnail стикера) это
-# заметнее, чем на стикере.
-PHOTO_LOOKING_TEXT_PLAIN = "Альфред разглядывает фото"
-
-
-def _format_answer(raw: str) -> str:
-    return ALFRED_PREFIX + html.escape(raw.strip())
-
-
-def _rich_session_for(message: Message, config: Settings) -> RichStreamSession | None:
-    """Этап 34, Фаза 2 (Rich-стрим ответов): response_mode != "rich" (резерв
-    LlmConfig.response_mode, config.py) — None, дальше всё идёт по старому
-    пути. "rich" — сессия заводится ВСЕГДА (нужна для finalize() что в
-    приватном чате, что в группе); стрим-черновики (on_partial) вызывающий
-    (_do_ask_and_reply) подключает только для приватных чатов — Bot API
-    ограничивает sendRichMessageDraft приватным чатом (см. докстринг
-    bot/rich_stream.py), в группах та же сессия просто не получает
-    on_partial-тиков и в конце шлёт один цельный sendRichMessage."""
-    if config.llm.response_mode != "rich" or message.chat is None or message.bot is None:
-        return None
-    # Этап 34.3: частота черновиков и режим без стрима — из конфига ноды.
-    return RichStreamSession(
-        message.bot,
-        message.chat.id,
-        message_thread_id=message.message_thread_id,
-        policy=RichDraftPolicy.from_llm_config(config.llm),
-    )
-
-
-async def _load_history(
-    store: Store, config: Settings, chat_id: int, dialogue_id: int
-) -> dialogue_context.DialogueHistory:
-    """История треда для модели — Этап 50: одна сборка вместо семи копий
-    ``[{role, content} for r in ai_turns]`` по хендлерам. Краткое содержание
-    сжатого начала, укорачивание старых ответов, ожидание идущего сжатия —
-    bot/dialogue_context.py::load_history."""
-    return await dialogue_context.load_history(store, config, chat_id, dialogue_id)
-
-
-def _dialogue_id_for(message: Message) -> int:
-    """id диалога: id топика (Private Chat Topics), если сообщение отправлено
-    внутри него — весь топик тогда один тред. Иначе — message_id этого
-    сообщения, как раньше (новый тред на каждое непарное сообщение вне
-    топика)."""
-    return message.message_thread_id or message.message_id
-
-
 class AiReplyContinuation(Filter):
-    """Реплай на сообщение бота из уже начатого треда /ai — резолвится по
-    ai_turns (не по дереву Telegram-реплаев). Реплай на что-то другое эту
-    фичу не трогает — обычный пропуск дальше по цепочке роутеров."""
-
     async def __call__(self, message: Message, store: Store) -> bool | dict:
         if message.reply_to_message is None or message.chat is None:
             return False
@@ -216,72 +60,51 @@ class AiReplyContinuation(Filter):
         return {"ai_dialogue_id": row["dialogue_id"]}
 
 
-class PrivateChatText(Filter):
-    """Любое обычное текстовое сообщение в личке — там нет других
-    собеседников и других команд, которым текст мог бы предназначаться, так
-    что молчаливое "разговариваем с Альфредом по умолчанию" уместно.
-    Команды (текст с "/") сюда не попадают — их разбирают другие роутеры."""
+class PrivateChatContent(Filter):
+    def __init__(self, *attributes: str) -> None:
+        self._attributes = attributes
 
     async def __call__(self, message: Message) -> bool:
         return (
             message.chat is not None
-            and message.chat.type == "private"
+            and message.chat.type == PRIVATE
+            and any(bool(getattr(message, name)) for name in self._attributes)
+        )
+
+
+class PrivateChatText(Filter):
+    async def __call__(self, message: Message) -> bool:
+        return (
+            message.chat is not None
+            and message.chat.type == PRIVATE
             and bool(message.text)
             and not message.text.startswith("/")
         )
 
 
-class PrivateChatPhoto(Filter):
-    """Фото (с подписью или без) первым сообщением в личке — как
-    PrivateChatText, но для message.photo. Не конфликтует с ним: у фото
-    message.text всегда None (подпись — отдельное поле message.caption).
-    Реплай в уже начатый тред фото сюда не попадает — тот перехватывается
-    AiReplyContinuation (router регистрируется раньше catchall_router, см.
-    setup.py)."""
-
-    async def __call__(self, message: Message) -> bool:
-        return message.chat is not None and message.chat.type == "private" and bool(message.photo)
+class PrivateChatPhoto(PrivateChatContent):
+    def __init__(self) -> None:
+        super().__init__("photo")
 
 
-class PrivateChatVoice(Filter):
-    """Голосовое сообщение первым сообщением в личке — как PrivateChatPhoto,
-    но для message.voice. Реплай в уже начатый тред голосовым сюда не
-    попадает — тот перехватывается AiReplyContinuation."""
-
-    async def __call__(self, message: Message) -> bool:
-        return message.chat is not None and message.chat.type == "private" and bool(message.voice)
+class PrivateChatVoice(PrivateChatContent):
+    def __init__(self) -> None:
+        super().__init__("voice")
 
 
-class PrivateChatSticker(Filter):
-    """Стикер первым сообщением в личке — как PrivateChatPhoto, но для
-    message.sticker. Реплай в уже начатый тред стикером сюда не попадает —
-    тот перехватывается AiReplyContinuation."""
-
-    async def __call__(self, message: Message) -> bool:
-        return message.chat is not None and message.chat.type == "private" and bool(message.sticker)
+class PrivateChatSticker(PrivateChatContent):
+    def __init__(self) -> None:
+        super().__init__("sticker")
 
 
-class PrivateChatOtherMedia(Filter):
-    """Кружочек или аудиофайл в личке (не голосовое — у него свой путь).
-    Обычному режиму они не нужны (Альфред их не слушает), поэтому хендлер
-    ниже что-то делает только пока он в городе (Этап 51: файл копится и
-    распознаётся по возвращении)."""
-
-    async def __call__(self, message: Message) -> bool:
-        return (
-            message.chat is not None
-            and message.chat.type == "private"
-            and (bool(message.video_note) or bool(message.audio))
-        )
+class PrivateChatOtherMedia(PrivateChatContent):
+    def __init__(self) -> None:
+        super().__init__("video_note", "audio")
 
 
 class GroupMention(Filter):
-    """Упоминание бота через @username в группе — единственный неявный
-    триггер там (в отличие от личек группа шумная, отвечать на каждое
-    сообщение нельзя)."""
-
     async def __call__(self, message: Message, bot_username: str) -> bool | dict:
-        if message.chat is None or message.chat.type not in ("group", "supergroup"):
+        if message.chat is None or message.chat.type not in GROUP_TYPES:
             return False
         if not message.text or not message.entities:
             return False
@@ -294,6 +117,36 @@ class GroupMention(Filter):
                 rest = message.text[: entity.offset] + message.text[entity.offset + entity.length :]
                 return {"mention_prompt": rest.strip()}
         return False
+
+
+async def _ask_and_reply(
+    message: Message,
+    node_link: ServiceLink,
+    store: Store,
+    config: Settings,
+    book: SubscriptionBook,
+    notifier: Notifier,
+    dialogue_id: int,
+    history: list[dict[str, Any]],
+    active_ai_chats: ai_flow.ActiveAiChats,
+    tool_calls: ToolCalls,
+    rich_session: RichStreamSession | None,
+    *,
+    pending_actions: PendingActions | None = None,
+    interactives: Interactives | None = None,
+) -> str | None:
+    services = TurnServices(
+        node_link=node_link,
+        store=store,
+        config=config,
+        book=book,
+        notifier=notifier,
+        active_ai_chats=active_ai_chats,
+        tool_calls=tool_calls,
+        pending_actions=pending_actions,
+        interactives=interactives,
+    )
+    return await ask_and_reply(message, services, dialogue_id, history, rich_session)
 
 
 @router.message(Command(commands.ALFRED.name, commands.AI.name))
@@ -310,51 +163,42 @@ async def cmd_ai(
     interactives: Interactives | None = None,
     away: AwayService | None = None,
 ) -> None:
-    dialogue_id = _dialogue_id_for(message)
+    dialogue_id = dialogue_id_of(message)
     in_topic = message.message_thread_id is not None
     parts = (message.text or "").split(maxsplit=1)
     prompt = parts[1].strip() if len(parts) > 1 else ""
 
-    # Этап 51: Альфред в городе — записка вместо ответа (владельцу тоже).
     if away is not None and await away.intercept(
         message, kind=KIND_TEXT if prompt else KIND_SUMMON, text=prompt, dialogue_id=dialogue_id
     ):
         return
 
     if prompt:
-        now = datetime.now(tz=UTC)
-        sender = message.from_user
-        await store.record_ai_turn(
-            message.chat.id,
-            message.message_id,
-            dialogue_id,
-            "user",
-            prompt,
-            now,
-            user_id=sender.id if sender else None,
-            user_name=ai_flow.display_name(sender),
-        )
+        await ai_turns.record_user_turn(store, message, dialogue_id, prompt)
 
     if in_topic:
-        # Топик — уже тред сам по себе: /alfred внутри него не сбрасывает
-        # контекст (в отличие от /alfred вне топика, который всегда начинает
-        # диалог заново), а продолжает то, что там уже накопилось — как
-        # обычное сообщение в этом же топике (см. on_private_message).
-        history = await _load_history(store, config, message.chat.id, dialogue_id)
+        history = await ai_turns.load_thread_history(store, config, message, dialogue_id)
         if not prompt:
-            history.append({"role": "user", "content": OPENING_PROMPT})
+            history.append({"role": "user", "content": ai_turns.OPENING_PROMPT})
     elif prompt:
         history = [{"role": "user", "content": prompt}]
     else:
-        # Директива-приветствие не сохраняется как ход диалога — только то,
-        # что модель на неё ответит (см. OPENING_PROMPT выше).
-        history = [{"role": "user", "content": OPENING_PROMPT}]
+        history = [{"role": "user", "content": ai_turns.OPENING_PROMPT}]
     if not prompt:
         _greeting_portrait(message, interactives)
 
     await _ask_and_reply(
-        message, node_link, store, config, book, notifier, dialogue_id, history,
-        active_ai_chats, tool_calls, _rich_session_for(message, config),
+        message,
+        node_link,
+        store,
+        config,
+        book,
+        notifier,
+        dialogue_id,
+        history,
+        active_ai_chats,
+        tool_calls,
+        rich_session_for(message, config),
         pending_actions=pending_actions,
         interactives=interactives,
     )
@@ -376,73 +220,49 @@ async def on_ai_reply(
     interactives: Interactives | None = None,
     away: AwayService | None = None,
 ) -> None:
-    # AuthorizationMiddleware не проверяет права на не-командные сообщения —
-    # проверяем право сами (защита от продолжения треда в чате, у которого
-    # право chat@llm с тех пор отозвали).
-    right = commands.required_right(commands.ALFRED.name)
-    if subscription is None or not subscription.allows_command(right):
+    if not _may_talk_to_alfred(subscription):
         return
-    # Этап 51: Альфред в городе — до голоса/зрения, GPU не трогаем вовсе.
     if away is not None and await away.intercept(
         message, dialogue_id=ai_dialogue_id, continuing=True
     ):
         return
     text = (message.text or "").strip()
-    # Считается один раз на весь ход и делится между голосовым статусом
-    # (см. _handle_voice_message) и финальным ответом Альфреда ниже — общий
-    # черновик, не два независимых (см. докстринг _ask_and_reply).
-    rich_session = _rich_session_for(message, config)
+    rich_session = rich_session_for(message, config)
 
     if message.photo:
-        # Живая находка 2026-08-10 (мультимодальный /ai): раньше фото-реплай
-        # с подписью в уже идущем треде молча терял подпись — message.text
-        # у фото-сообщения всегда None (подпись — message.caption), поэтому
-        # такой ход проваливался в ветку EMPTY_REPLY_PROMPT ниже, как будто
-        # подписи не было вовсе.
-        history = await _handle_photo_message(
-            message, store, config, ai_dialogue_id, rich_session
-        )
+        history = await ai_turns.photo_history(message, store, config, ai_dialogue_id, rich_session)
         if history is None:
-            await message.answer(PHOTO_TOO_LARGE_TEXT)
+            await message.answer(ai_turns.PHOTO_TOO_LARGE_TEXT)
             return
     elif message.voice:
-        # Голосовой ответ в уже начатом треде — voice_stt сама шлёт вежливый
-        # текст на любой отказ (слишком длинное/недоступно/не расслышал), в
-        # отличие от фото-ветки выше здесь не нужен отдельный текст на месте.
-        history = await _handle_voice_message(
+        history = await ai_turns.voice_history(
             message, store, config, node_link, ai_dialogue_id, rich_session
         )
         if history is None:
             return
     elif message.sticker:
-        # В отличие от фото/голоса — тотальная функция, без отказа: у
-        # стикера есть emoji-тег, есть на что реагировать даже без превью.
-        history = await _handle_sticker_message(
+        history = await ai_turns.sticker_history(
             message, store, config, ai_dialogue_id, rich_session
         )
     elif text:
-        now = datetime.now(tz=UTC)
-        sender = message.from_user
-        await store.record_ai_turn(
-            message.chat.id,
-            message.message_id,
-            ai_dialogue_id,
-            "user",
-            text,
-            now,
-            user_id=sender.id if sender else None,
-            user_name=ai_flow.display_name(sender),
-        )
-        history = await _load_history(store, config, message.chat.id, ai_dialogue_id)
+        history = await ai_turns.record_text_turn(store, config, message, ai_dialogue_id, text)
     else:
-        # Пустой ход не пишем в ai_turns (как OPENING_PROMPT) — модель видит
-        # директиву только в этом запросе, история треда её не запоминает.
-        history = await _load_history(store, config, message.chat.id, ai_dialogue_id)
-        history.append({"role": "user", "content": EMPTY_REPLY_PROMPT})
+        history = await ai_turns.history_with_directive(
+            store, config, message, ai_dialogue_id, ai_turns.EMPTY_REPLY_PROMPT
+        )
 
     await _ask_and_reply(
-        message, node_link, store, config, book, notifier, ai_dialogue_id, history,
-        active_ai_chats, tool_calls, rich_session,
+        message,
+        node_link,
+        store,
+        config,
+        book,
+        notifier,
+        ai_dialogue_id,
+        history,
+        active_ai_chats,
+        tool_calls,
+        rich_session,
         pending_actions=pending_actions,
         interactives=interactives,
     )
@@ -463,42 +283,27 @@ async def on_private_message(
     interactives: Interactives | None = None,
     away: AwayService | None = None,
 ) -> None:
-    # Не команда — AuthorizationMiddleware её не проверяла, права смотрим сами
-    # (как в on_ai_reply); в неавторизованной личке просто молчим.
-    right = commands.required_right(commands.ALFRED.name)
-    if subscription is None or not subscription.allows_command(right):
+    if not _may_talk_to_alfred(subscription):
         return
-
     text = message.text.strip()
+    dialogue_id = dialogue_id_of(message)
     if away is not None and await away.intercept(
-        message, kind=KIND_TEXT, text=text, dialogue_id=_dialogue_id_for(message)
+        message, kind=KIND_TEXT, text=text, dialogue_id=dialogue_id
     ):
         return
-    # Без топика и без reply — всегда новый тред (как /alfred), а не
-    # продолжение самого свежего: иначе история в личке растёт бесконечно,
-    # ничем не ограниченная (живой баг 2026-08-01). Продолжить такой тред
-    # по-прежнему можно реплаем — см. AiReplyContinuation. Внутри топика
-    # (Private Chat Topics) эта проблема решена нормально: dialogue_id — id
-    # топика, любое сообщение в нём само по себе продолжение, reply не нужен.
-    dialogue_id = _dialogue_id_for(message)
-
-    now = datetime.now(tz=UTC)
-    sender = message.from_user
-    await store.record_ai_turn(
-        message.chat.id,
-        message.message_id,
-        dialogue_id,
-        "user",
-        text,
-        now,
-        user_id=sender.id if sender else None,
-        user_name=ai_flow.display_name(sender),
-    )
-    history = await _load_history(store, config, message.chat.id, dialogue_id)
-
+    history = await ai_turns.record_text_turn(store, config, message, dialogue_id, text)
     await _ask_and_reply(
-        message, node_link, store, config, book, notifier, dialogue_id, history,
-        active_ai_chats, tool_calls, _rich_session_for(message, config),
+        message,
+        node_link,
+        store,
+        config,
+        book,
+        notifier,
+        dialogue_id,
+        history,
+        active_ai_chats,
+        tool_calls,
+        rich_session_for(message, config),
         pending_actions=pending_actions,
         interactives=interactives,
     )
@@ -519,28 +324,28 @@ async def on_private_photo(
     interactives: Interactives | None = None,
     away: AwayService | None = None,
 ) -> None:
-    right = commands.required_right(commands.ALFRED.name)
-    if subscription is None or not subscription.allows_command(right):
+    if not _may_talk_to_alfred(subscription):
         return
-
-    if away is not None and await away.intercept(message, dialogue_id=_dialogue_id_for(message)):
+    dialogue_id = dialogue_id_of(message)
+    if away is not None and await away.intercept(message, dialogue_id=dialogue_id):
         return
-
-    # Та же логика нового треда, что у on_private_message: без топика и без
-    # reply — всегда новый тред, продолжить можно реплаем (AiReplyContinuation).
-    dialogue_id = _dialogue_id_for(message)
-    # Одна сессия на весь ход — статус "разглядывает" на время скачивания и
-    # финальный ответ Альфреда делят один и тот же черновик (та же механика,
-    # что у on_private_sticker/on_private_voice).
-    rich_session = _rich_session_for(message, config)
-    history = await _handle_photo_message(message, store, config, dialogue_id, rich_session)
+    rich_session = rich_session_for(message, config)
+    history = await ai_turns.photo_history(message, store, config, dialogue_id, rich_session)
     if history is None:
-        await message.answer(PHOTO_TOO_LARGE_TEXT)
+        await message.answer(ai_turns.PHOTO_TOO_LARGE_TEXT)
         return
-
     await _ask_and_reply(
-        message, node_link, store, config, book, notifier, dialogue_id, history,
-        active_ai_chats, tool_calls, rich_session,
+        message,
+        node_link,
+        store,
+        config,
+        book,
+        notifier,
+        dialogue_id,
+        history,
+        active_ai_chats,
+        tool_calls,
+        rich_session,
         pending_actions=pending_actions,
         interactives=interactives,
     )
@@ -561,30 +366,29 @@ async def on_private_voice(
     interactives: Interactives | None = None,
     away: AwayService | None = None,
 ) -> None:
-    right = commands.required_right(commands.ALFRED.name)
-    if subscription is None or not subscription.allows_command(right):
+    if not _may_talk_to_alfred(subscription):
         return
-
-    if away is not None and await away.intercept(message, dialogue_id=_dialogue_id_for(message)):
+    dialogue_id = dialogue_id_of(message)
+    if away is not None and await away.intercept(message, dialogue_id=dialogue_id):
         return
-
-    # Та же логика нового треда, что у on_private_message/on_private_photo:
-    # без топика и без reply — всегда новый тред, продолжить можно реплаем
-    # (AiReplyContinuation).
-    dialogue_id = _dialogue_id_for(message)
-    # Одна сессия на весь ход — статус "слушаю" во время распознавания и
-    # финальный ответ Альфреда делят один и тот же черновик (см. докстринг
-    # _ask_and_reply).
-    rich_session = _rich_session_for(message, config)
-    history = await _handle_voice_message(
+    rich_session = rich_session_for(message, config)
+    history = await ai_turns.voice_history(
         message, store, config, node_link, dialogue_id, rich_session
     )
     if history is None:
         return
-
     await _ask_and_reply(
-        message, node_link, store, config, book, notifier, dialogue_id, history,
-        active_ai_chats, tool_calls, rich_session,
+        message,
+        node_link,
+        store,
+        config,
+        book,
+        notifier,
+        dialogue_id,
+        history,
+        active_ai_chats,
+        tool_calls,
+        rich_session,
         pending_actions=pending_actions,
         interactives=interactives,
     )
@@ -605,26 +409,25 @@ async def on_private_sticker(
     interactives: Interactives | None = None,
     away: AwayService | None = None,
 ) -> None:
-    right = commands.required_right(commands.ALFRED.name)
-    if subscription is None or not subscription.allows_command(right):
+    if not _may_talk_to_alfred(subscription):
         return
-
-    if away is not None and await away.intercept(message, dialogue_id=_dialogue_id_for(message)):
+    dialogue_id = dialogue_id_of(message)
+    if away is not None and await away.intercept(message, dialogue_id=dialogue_id):
         return
-
-    # Та же логика нового треда, что у on_private_message/on_private_photo:
-    # без топика и без reply — всегда новый тред, продолжить можно реплаем
-    # (AiReplyContinuation).
-    dialogue_id = _dialogue_id_for(message)
-    # Одна сессия на весь ход — статус "разглядывает" на время скачивания
-    # thumbnail и финальный ответ Альфреда делят один и тот же черновик
-    # (та же механика, что у on_private_voice).
-    rich_session = _rich_session_for(message, config)
-    history = await _handle_sticker_message(message, store, config, dialogue_id, rich_session)
-
+    rich_session = rich_session_for(message, config)
+    history = await ai_turns.sticker_history(message, store, config, dialogue_id, rich_session)
     await _ask_and_reply(
-        message, node_link, store, config, book, notifier, dialogue_id, history,
-        active_ai_chats, tool_calls, rich_session,
+        message,
+        node_link,
+        store,
+        config,
+        book,
+        notifier,
+        dialogue_id,
+        history,
+        active_ai_chats,
+        tool_calls,
+        rich_session,
         pending_actions=pending_actions,
         interactives=interactives,
     )
@@ -636,11 +439,10 @@ async def on_private_other_media(
     away: AwayService | None = None,
     subscription: Subscription | None = None,
 ) -> None:
-    right = commands.required_right(commands.ALFRED.name)
-    if subscription is None or not subscription.allows_command(right):
+    if not _may_talk_to_alfred(subscription):
         return
     if away is not None:
-        await away.intercept(message, dialogue_id=_dialogue_id_for(message))
+        await away.intercept(message, dialogue_id=dialogue_id_of(message))
 
 
 @catchall_router.message(GroupMention())
@@ -659,11 +461,9 @@ async def on_group_mention(
     interactives: Interactives | None = None,
     away: AwayService | None = None,
 ) -> None:
-    right = commands.required_right(commands.ALFRED.name)
-    if subscription is None or not subscription.allows_command(right):
+    if not _may_talk_to_alfred(subscription):
         return
-
-    dialogue_id = _dialogue_id_for(message)
+    dialogue_id = dialogue_id_of(message)
     if away is not None and await away.intercept(
         message,
         kind=KIND_TEXT if mention_prompt else KIND_SUMMON,
@@ -672,27 +472,24 @@ async def on_group_mention(
     ):
         return
     if mention_prompt:
-        now = datetime.now(tz=UTC)
-        sender = message.from_user
-        await store.record_ai_turn(
-            message.chat.id,
-            message.message_id,
-            dialogue_id,
-            "user",
-            mention_prompt,
-            now,
-            user_id=sender.id if sender else None,
-            user_name=ai_flow.display_name(sender),
-        )
-        history = [{"role": "user", "content": mention_prompt}]
+        await ai_turns.record_user_turn(store, message, dialogue_id, mention_prompt)
+        history: list[dict[str, Any]] = [{"role": "user", "content": mention_prompt}]
     else:
-        # Позвали без текста — та же заглушка-директива, что и голый /alfred.
-        history = [{"role": "user", "content": OPENING_PROMPT}]
+        history = [{"role": "user", "content": ai_turns.OPENING_PROMPT}]
         _greeting_portrait(message, interactives)
 
     await _ask_and_reply(
-        message, node_link, store, config, book, notifier, dialogue_id, history,
-        active_ai_chats, tool_calls, _rich_session_for(message, config),
+        message,
+        node_link,
+        store,
+        config,
+        book,
+        notifier,
+        dialogue_id,
+        history,
+        active_ai_chats,
+        tool_calls,
+        rich_session_for(message, config),
         pending_actions=pending_actions,
         interactives=interactives,
     )
@@ -713,16 +510,6 @@ async def start_dialogue(
     interactives: Interactives | None = None,
     away: AwayService | None = None,
 ) -> str | None:
-    """Начать тред директивой, как голый /alfred, — но не по команде человека.
-
-    Нужна приватному входу (bot/handlers/invites.py): гостя встречает сам
-    Альфред, а не заготовленная строка. Директива в историю не пишется —
-    только ответ на неё (та же логика, что у OPENING_PROMPT).
-
-    Возвращает текст ответа Альфреда; None — не нашли (сообщение об этом
-    пользователю уже ушло, но вызывающий может добавить своё, см. приветствие
-    гостя).
-    """
     if away is not None and await away.intercept(message, kind=KIND_SUMMON):
         return None
     _greeting_portrait(message, interactives)
@@ -733,572 +520,11 @@ async def start_dialogue(
         config,
         book,
         notifier,
-        _dialogue_id_for(message),
+        dialogue_id_of(message),
         [{"role": "user", "content": prompt}],
         active_ai_chats,
         tool_calls,
-        _rich_session_for(message, config),
+        rich_session_for(message, config),
         pending_actions=pending_actions,
         interactives=interactives,
-    )
-
-
-async def _handle_photo_message(
-    message: Message,
-    store: Store,
-    config: Settings,
-    dialogue_id: int,
-    rich_session: RichStreamSession | None,
-) -> list[dict[str, Any]] | None:
-    """Скачать фото пользователя (наибольшее разрешение, message.photo[-1]),
-    записать плейсхолдер + photo_path в ai_turns, собрать history с
-    ``raw_image`` на последнем (текущем) ходе — ресайз и хранение делает
-    служба llm (см. llm/vision.py, llm/service.py::run_command), не эта
-    машина (alfred и так несёт на себе бота, cron, tailscale и т.п. на
-    слабом CPU — решение пользователя 2026-08-10).
-
-    None — фото не влезает в протокольный лимит (см. _MAX_RAW_IMAGE_B64_BYTES):
-    ничего не записано, вызывающий должен показать вежливый отказ
-    (PHOTO_TOO_LARGE_TEXT) и не звать модель вовсе.
-
-    ``rich_session`` — та же сессия, что пойдёт в финальный ответ Альфреда
-    (см. вызывающих и _handle_sticker_message): статус
-    PHOTO_LOOKING_TEXT_PLAIN на время скачивания сменится либо реальным
-    ответом, либо следующим статусом.
-    """
-    if rich_session is not None:
-        await rich_session.push_status(PHOTO_LOOKING_TEXT_PLAIN)
-    photo = message.photo[-1]
-    buf = await message.bot.download(photo)
-    raw = buf.read()
-    photo_b64 = base64.b64encode(raw).decode()
-    if len(photo_b64) > _MAX_RAW_IMAGE_B64_BYTES:
-        return None
-
-    photo_key = ai_flow.photo_key_for(message)
-    caption = (message.caption or "").strip()
-    persisted = f"{PHOTO_MARKER} {caption}".strip() if caption else PHOTO_MARKER
-    now = datetime.now(tz=UTC)
-    sender = message.from_user
-    await store.record_ai_turn(
-        message.chat.id,
-        message.message_id,
-        dialogue_id,
-        "user",
-        persisted,
-        now,
-        user_id=sender.id if sender else None,
-        user_name=ai_flow.display_name(sender),
-        photo_path=photo_key,
-    )
-    history = await _load_history(store, config, message.chat.id, dialogue_id)
-    if history:
-        history[-1] = {
-            "role": "user",
-            "content": caption or PHOTO_NO_CAPTION_PROMPT,
-            "raw_image": photo_b64,
-        }
-    return history
-
-
-async def _handle_sticker_message(
-    message: Message,
-    store: Store,
-    config: Settings,
-    dialogue_id: int,
-    rich_session: RichStreamSession | None,
-) -> list[dict[str, Any]]:
-    """Скачать статичный thumbnail стикера (Telegram генерирует его для
-    любого типа — статичный/анимированный/видео), записать плейсхолдер +
-    photo_path в ai_turns, собрать history с ``raw_image`` на последнем ходе
-    — тот же pipeline, что у фото (см. _handle_photo_message).
-
-    В отличие от фото — тотальная функция, всегда возвращает history: нет
-    thumbnail или он не влезает в протокольный лимит — просто идём без
-    raw_image (STICKER_PROMPT_NO_IMAGE), не отказываем в ответе вовсе.
-    У стикера есть emoji-тег, есть на что реагировать даже без картинки.
-
-    ``rich_session`` — та же сессия, что пойдёт в финальный ответ Альфреда
-    (см. вызывающих): статус STICKER_LOOKING_TEXT_PLAIN на время скачивания
-    thumbnail сменится либо реальным ответом, либо следующим статусом —
-    та же механика, что у voice_stt.VOICE_LISTENING_TEXT.
-    """
-    sticker = message.sticker
-    emoji = sticker.emoji
-    thumb_b64: str | None = None
-    photo_key: str | None = None
-
-    if sticker.thumbnail is not None:
-        if rich_session is not None:
-            await rich_session.push_status(STICKER_LOOKING_TEXT_PLAIN)
-        buf = await message.bot.download(sticker.thumbnail)
-        raw = buf.read()
-        candidate = base64.b64encode(raw).decode()
-        if len(candidate) <= _MAX_RAW_IMAGE_B64_BYTES:
-            thumb_b64 = candidate
-            photo_key = ai_flow.photo_key_for(message)
-
-    persisted = f"{STICKER_MARKER} {emoji}".strip() if emoji else STICKER_MARKER
-    now = datetime.now(tz=UTC)
-    sender = message.from_user
-    await store.record_ai_turn(
-        message.chat.id,
-        message.message_id,
-        dialogue_id,
-        "user",
-        persisted,
-        now,
-        user_id=sender.id if sender else None,
-        user_name=ai_flow.display_name(sender),
-        photo_path=photo_key,
-    )
-    history = await _load_history(store, config, message.chat.id, dialogue_id)
-    if history:
-        if thumb_b64:
-            history[-1] = {
-                "role": "user",
-                "content": STICKER_PROMPT.format(emoji=emoji or "не указан"),
-                "raw_image": thumb_b64,
-            }
-        else:
-            history[-1] = {
-                "role": "user",
-                "content": STICKER_PROMPT_NO_IMAGE.format(emoji=emoji or "не указан"),
-            }
-    return history
-
-
-async def _handle_voice_message(
-    message: Message,
-    store: Store,
-    config: Settings,
-    node_link: ServiceLink,
-    dialogue_id: int,
-    rich_session: RichStreamSession | None,
-) -> list[dict[str, Any]] | None:
-    """Распознать голосовое (voice_stt.transcribe_voice_message), записать
-    транскрипт как обычную user-реплику в ai_turns, собрать history.
-
-    В отличие от ``_handle_photo_message``, картинка тут ни при чём —
-    транскрипт УЖЕ обычный текст, отдельного маркера/поля в ai_turns не
-    нужно (в отличие от PHOTO_MARKER/photo_path).
-
-    ``rich_session`` — та же сессия, что пойдёт в финальный ``_ask_and_reply``
-    (см. вызывающих): статус "слушаю" во время распознавания и финальный
-    ответ Альфреда должны делить один и тот же черновик.
-
-    ``None`` — voice_stt уже отправила пользователю вежливый текст (слишком
-    длинное/недоступно/не расслышал), вызывающий не должен звать модель.
-    """
-    transcript = await voice_stt.transcribe_voice_message(
-        message, node_link, store, config, rich_session
-    )
-    if transcript is None:
-        return None
-
-    now = datetime.now(tz=UTC)
-    sender = message.from_user
-    await store.record_ai_turn(
-        message.chat.id,
-        message.message_id,
-        dialogue_id,
-        "user",
-        transcript,
-        now,
-        user_id=sender.id if sender else None,
-        user_name=ai_flow.display_name(sender),
-    )
-    return await _load_history(store, config, message.chat.id, dialogue_id)
-
-
-async def _ask_and_reply(
-    message: Message,
-    node_link: ServiceLink,
-    store: Store,
-    config: Settings,
-    book: SubscriptionBook,
-    notifier: Notifier,
-    dialogue_id: int,
-    history: list[dict[str, Any]],
-    active_ai_chats: ai_flow.ActiveAiChats,
-    tool_calls: ToolCalls,
-    rich_session: RichStreamSession | None,
-    *,
-    pending_actions: PendingActions | None = None,
-    interactives: Interactives | None = None,
-) -> str | None:
-    """Текст ответа Альфреда, если он реально уехал в чат, иначе None.
-
-    Возврат нужен приветствию гостя (bot/handlers/invites.py): не нашли
-    Альфреда — впущенного нельзя оставить без единого слова, а нашли —
-    надо убедиться, что в приветствии есть обещанная подсказка про меню.
-    Обычным путям (/alfred, реплай, личка) результат не нужен, они его
-    игнорируют.
-
-    ``rich_session`` — уже разрешённая вызывающим (``_rich_session_for``)
-    сессия (``None`` вне rich-режима). Голосовым путям (см.
-    ``_handle_voice_message``) нужна ОДНА сессия на весь ход: статус
-    "слушаю" во время распознавания и финальный ответ Альфреда должны
-    делить один и тот же черновик, а не создавать два независимых —
-    поэтому сессия резолвится у вызывающего, а не здесь заново.
-    """
-    # Регистрация задачи (не просто chat_id — см. докстринг ActiveAiChats,
-    # второй заход) на время запроса: bot/app.py::_shutdown() перед разрывом
-    # связи со службами уведомляет RESTART_TEXT'ом и ОТМЕНЯЕТ эту задачу —
-    # без этого редеплой во время долгого think-ответа либо обрывает запрос
-    # голой сетевой ошибкой, либо (после первой попытки чинить) шлёт голую
-    # ошибку ВМЕСТЕ с RESTART_TEXT — гонка, не гарантия.
-    chat_id = message.chat.id if message.chat else None
-    task = asyncio.current_task()
-    active_ai_chats.register(chat_id, task)
-    try:
-        return await _do_ask_and_reply(
-            message, node_link, store, config, book, notifier, dialogue_id, history, tool_calls,
-            rich_session, pending_actions=pending_actions, interactives=interactives,
-        )
-    finally:
-        active_ai_chats.unregister(chat_id, task)
-
-
-async def _turn_sent_picture(store: Store, message: Message, dialogue_id: int) -> bool:
-    """В этом ходе Альфред уже снимал/рисовал (take_photo, generate_image) —
-    эмоциональное селфи к ответу не нужно."""
-    calls = await store.tool_calls_for_dialogue(message.chat.id, dialogue_id)
-    return any(
-        c["trigger_message_id"] == message.message_id
-        and c["tool_name"] in dialogue_context.HISTORY_TOOLS
-        for c in calls
-    )
-
-
-async def _do_ask_and_reply(
-    message: Message,
-    node_link: ServiceLink,
-    store: Store,
-    config: Settings,
-    book: SubscriptionBook,
-    notifier: Notifier,
-    dialogue_id: int,
-    history: list[dict[str, Any]],
-    tool_calls: ToolCalls,
-    rich_session: RichStreamSession | None,
-    *,
-    pending_actions: PendingActions | None = None,
-    interactives: Interactives | None = None,
-) -> str | None:
-    # typing-индикатор (keep-alive, пока модель реально готовит ответ) —
-    # внутри ai_flow.request_alfred, вокруг самого вызова модели (не здесь и
-    # не сразу на приём сообщения: во время presence-проверки и прогрева
-    # контейнера/машины у пользователя уже есть текстовые «шаги»/«Агнольд»,
-    # решение пользователя 2026-08-01, см. bot/notifier.py::typing_action).
-    # Ячейка под «Альфреда отпустили» (тул dismiss): сам тул ничего не гасит —
-    # ответ в этот момент ещё генерируется той самой моделью, которую предстоит
-    # выгрузить (см. bot/tools.py::DismissalBox). Исполняем ниже, после того
-    # как прощание реально уехало в чат.
-    dismissal = ai_tools.DismissalBox()
-    # Ремарка «Логопеда» (llm/speech_therapy.py) заполняется во время
-    # запроса, но отправляется отдельным сообщением ПОСЛЕ основного ответа
-    # ниже — см. ai_flow.SpeechRemarkBox про то, почему не сразу.
-    speech_remark = ai_flow.SpeechRemarkBox()
-    # Этап 34, Фаза 2: rich_session — не None только при response_mode="rich"
-    # (config.llm) — используется ниже для финальной отправки в любом чате;
-    # уже разрешена вызывающим (см. докстринг _ask_and_reply про почему).
-    # Стрим-черновики (on_partial в request_alfred) — только в приватных
-    # чатах, см. _rich_session_for.
-    #
-    # Живая находка при аудите механизма пробуждения (2026-08-26,
-    # Приложение 5 плана): очистка rich_session (finalize/finalize_status)
-    # раньше была разбросана по конкретным веткам ниже — необработанное
-    # исключение, пустой ответ модели или отмена задачи хендлера (рестарт
-    # бота) молча оставляли активный черновик тикать через keep-alive до
-    # 30-минутного защитного потолка (rich_stream.py::_KEEPALIVE_MAX_IDLE_S),
-    # пользователь видел протухший статус вместо/помимо реального сообщения
-    # об ошибке. try/finally ниже — единая гарантия: ЛЮБОЙ выход из этой
-    # функции (успех, ожидаемая ошибка, баг, CancelledError) останавливает
-    # keep-alive; если сессия уже штатно финализирована ниже, aclose() —
-    # no-op (см. её докстринг).
-    is_private = message.chat is not None and message.chat.type == "private"
-    # Этап 47: интерактивы — сцена/согласие/«чистая речь» собеседника
-    # решаются ДО запроса к модели (bot/interactives/engine.py). Сбой здесь
-    # не должен ронять обычный ход — тогда просто без сцены.
-    turn_plan = None
-    if interactives is not None and message.chat is not None:
-        current_turn = history[-1] if history else None
-        user_text = (
-            current_turn["content"]
-            if isinstance(current_turn, dict) and isinstance(current_turn.get("content"), str)
-            else ""
-        )
-        try:
-            turn_plan = await interactives.before_turn(
-                message.chat.id,
-                message.from_user.id if message.from_user else None,
-                user_text,
-                is_private=is_private,
-            )
-        except Exception:  # noqa: BLE001
-            log.exception("ai: интерактивы — before_turn упал (chat=%s)", message.chat.id)
-    try:
-        try:
-            raw = await ai_flow.request_alfred(
-                message, node_link, store, config, history, dialogue_id, book, notifier,
-                dismissal, tool_calls, speech_remark,
-                rich_session if is_private else None,
-                # Только если сервис есть (прод, app.py) — подмены
-                # request_alfred в тестах этого ключа не знают.
-                **({"pending_actions": pending_actions} if pending_actions is not None else {}),
-                **(
-                    {"interactive_turn": turn_plan, "interactives": interactives}
-                    if interactives is not None
-                    else {}
-                ),
-            )
-        except Exception as exc:  # noqa: BLE001 — страховка: баг тут не должен быть молчаливым
-            log.exception("ai: необработанная ошибка в диалоге chat=%s", message.chat.id)
-            await message.answer("<b>Альфред:</b> Прошу прощения, что-то пошло не так, сэр.")
-            await ai_flow.notify_admins(
-                book,
-                notifier,
-                f"🔥 /ai (chat={message.chat.id}): необработанное исключение {exc!r}",
-            )
-            return None
-        if raw is None:
-            return None  # недоступность/ошибка уже сообщена пользователю (ai_flow)
-        if raw == ai_flow.SILENT_REPLY:
-            # Тул закончил ход без реплики (take_photo): ход ждёт снимок —
-            # статусы съёмки в черновике, реплика Альфреда придёт подписью к
-            # нему. Черновик гасит finally ниже.
-            if interactives is not None and message.chat is not None:
-                on_status = (
-                    rich_session.push_status if rich_session is not None and is_private else None
-                )
-                await interactives.wait_photo(message.chat.id, on_status)
-            return None
-        if not raw.strip():
-            # Живая находка 2026-07-29: модель может вернуть пустой текст (у
-            # неё кончилось окно контекста — декларации тулов плюс выдача
-            # поиска), и пользователь получал сообщение из одного префикса
-            # «Альфред:». Пустая реплика не ход диалога: в ai_turns не
-            # пишем, отвечаем тем же персонажем, что и на сбой генерации, а
-            # подробности — админу.
-            log.warning("ai: пустой ответ модели (chat=%s)", message.chat.id)
-            await message.answer(ai_flow.ALBERT_HICCUP)
-            await ai_flow.notify_admins(
-                book, notifier, f"⚠️ /ai (chat={message.chat.id}): модель вернула пустой ответ"
-            )
-            return None
-        # Голосовой режим (тумблер per-chat, тул voice_mode) — голос ВМЕСТО
-        # текста, не вместе: при успехе текстовое сообщение с полным ответом
-        # в чат не идёт вовсе (решение пользователя 2026-08-11). Любой сбой
-        # синтеза/отправки — тихий откат на обычный текстовый путь ниже, raw
-        # всё равно пишется в ai_turns целиком независимо от способа доставки.
-        audio_bytes: bytes | None = None
-        voice_on = message.chat is not None and await voice_mode.is_enabled(
-            store, message.chat.id
-        )
-        # Эмоциональное селфи (2026-10-05, Interactives.mood_selfie): в яркий
-        # момент реплика уходит подписью к снимку Альфреда ВМЕСТО текста. Не в
-        # голосовом режиме и не в ходе, где уже слали картинку; любой сбой —
-        # selfie_id None, и ответ идёт обычным путём ниже. Черновик гасит finally.
-        selfie_id: int | None = None
-        if interactives is not None and message.chat is not None and not voice_on:
-            try:
-                if not await _turn_sent_picture(store, message, dialogue_id):
-                    selfie_id = await interactives.mood_selfie(
-                        message.chat.id,
-                        message.from_user.id if message.from_user else None,
-                        getattr(turn_plan, "user_text", ""),
-                        raw,
-                        message_thread_id=message.message_thread_id,
-                        trigger_message_id=message.message_id,
-                        on_status=rich_session.push_status
-                        if rich_session is not None and is_private
-                        else None,
-                    )
-            except Exception:  # noqa: BLE001 — селфи не должно терять ответ
-                log.exception("ai: селфи к ответу упало (chat=%s)", message.chat.id)
-                selfie_id = None
-        if voice_on:
-            audio_bytes = await voice_tts.synthesize_voice_reply(
-                message, node_link, store, config, rich_session, raw
-            )
-        if audio_bytes is not None:
-            voice_message_id = await notifier.send_voice(
-                message.chat.id,
-                audio_bytes,
-                filename="alfred.ogg",
-                message_thread_id=message.message_thread_id,
-            )
-            if voice_message_id is not None:
-                if rich_session is not None:
-                    await rich_session.finalize_status(voice_tts.VOICE_REPLY_SENT_MD)
-                sent_message_id = voice_message_id
-            else:
-                audio_bytes = None
-        if selfie_id is not None:
-            sent_message_id = selfie_id
-        elif audio_bytes is None:
-            if rich_session is not None:
-                sent_message_id = await _send_alfred_reply_rich(
-                    message, raw, rich_session, notifier
-                )
-                if sent_message_id is None:
-                    # Не прошла ни rich-отправка, ни плейн-фолбэк внутри
-                    # _send_alfred_reply_rich. Готовый ответ модели терять
-                    # молча нельзя — кладём его целиком в лог узла (этап A,
-                    # 2026-08-30: раньше на этом пути raw не логировался
-                    # нигде и содержимое ответа пропадало бесследно), а
-                    # админу — начало текста (полностью может не влезть и
-                    # само упереться в тот же сбой доставки).
-                    log.error(
-                        "ai: ответ не доставлен ни rich, ни обычным текстом (chat=%s).\n"
-                        "Полный текст ответа Альфреда:\n%s",
-                        message.chat.id,
-                        raw,
-                    )
-                    await ai_flow.notify_admins(
-                        book,
-                        notifier,
-                        f"⚠️ /ai (chat={message.chat.id}): ответ Альфреда не доставлен "
-                        f"(rich и текстовый фолбэк оба не прошли). Полный текст — в логе "
-                        f"узла. Начало:\n\n{html.escape(raw[:1500])}",
-                    )
-                    return None
-            else:
-                sent = await _send_alfred_reply(message, raw)
-                sent_message_id = sent.message_id
-        await store.record_ai_turn(
-            message.chat.id, sent_message_id, dialogue_id, "assistant", raw, datetime.now(tz=UTC)
-        )
-        # Этап 42.2: ход диалога → эпизод графа, best-effort ПОСЛЕ доставки
-        # ответа (см. ai_flow.piggyback_dialogue_episode). Ход пользователя
-        # берём из ai_turns тем же message_id, каким его туда записал
-        # соответствующий обработчик выше (cmd_ai/on_private_message/
-        # _handle_photo_message и т.д.) — так эпизод несёт персистентный
-        # текст хода (с PHOTO_MARKER/STICKER_MARKER и т.п.), а не служебный
-        # промпт для модели (STICKER_PROMPT/PHOTO_NO_CAPTION_PROMPT), который
-        # в history подменяет его для мультимодальных ходов. Директивы без
-        # сохранённого хода (OPENING_PROMPT/EMPTY_REPLY_PROMPT) — user_turn
-        # тут None, пропускаем: это не реальная реплика собеседника.
-        user_turn = await store.ai_turn(message.chat.id, message.message_id)
-        if user_turn is not None:
-            await ai_flow.piggyback_dialogue_episode(
-                node_link, message.chat.id, str(user_turn["content"]), raw
-            )
-        if getattr(history, "compress_after", False) and message.chat is not None:
-            # Этап 50: порог окна сработал на этом ходе — Альфред уже сказал в
-            # ответе, что ненадолго отлучится (ai_flow.request_alfred). Сжатие
-            # старых ходов — фоном, ПОСЛЕ доставки ответа: ответ его не ждёт,
-            # а следующий ход треда дождётся (dialogue_context.load_history).
-            dialogue_context.COMPRESSOR.schedule(
-                node_link,
-                store,
-                config,
-                message.chat.id,
-                dialogue_id,
-                ai_flow.llm_address(),
-                num_ctx=await ai_flow.resolve_num_ctx(config, store, ai_flow.llm_address()),
-            )
-        if speech_remark.text is not None:
-            # Отдельным сообщением, БЕЗ html.escape (см. _format_answer) —
-            # ремарка сама генерирует безопасный HTML (llm/speech_therapy.py:
-            # слова-подстановки берутся из regex [А-Яа-яЁё]+, спецсимволов не
-            # бывает), экранировать её как обычный текст модели — снова
-            # сломать <i>-тег буквально в тег текста.
-            await message.answer(speech_remark.text)
-        if turn_plan is not None and interactives is not None:
-            # Ведущий — ПОСЛЕ ответа Альфреда: ответ его не ждёт.
-            try:
-                await interactives.after_turn(
-                    turn_plan,
-                    raw,
-                    dialogue_id=dialogue_id,
-                    message_thread_id=message.message_thread_id,
-                )
-            except Exception:  # noqa: BLE001 — сбой сцены не должен ронять ход
-                log.exception("ai: интерактивы — after_turn упал (chat=%s)", message.chat.id)
-        if dismissal.mode is not None:
-            # Ход диалога уже записан: если машину выключат, а тред потом
-            # продолжат реплаем — история не потеряется, Альфреда просто
-            # разбудят.
-            await ai_flow.perform_dismissal(message, node_link, dismissal.mode, book, notifier)
-        return raw
-    finally:
-        if rich_session is not None:
-            await rich_session.aclose()
-        # Формы подтверждения, открытые тулом за этот ход (Этап 45,
-        # request_acquaintance), — строго ПОСЛЕ речи Альфреда, при
-        # любом её исходе (ответ, «Альбегт», сбой). Не при отмене задачи
-        # (рестарт бота): тогда форму дошлёт PendingActions.recover().
-        current = asyncio.current_task()
-        if (
-            pending_actions is not None
-            and message.chat is not None
-            and not (current is not None and current.cancelling())
-        ):
-            try:
-                await pending_actions.flush_drafts(
-                    message.chat.id, dialogue_id, message.message_thread_id
-                )
-            except Exception:  # noqa: BLE001 — сбой формы не должен ронять ход
-                log.exception("ai: не удалось отправить формы (chat=%s)", message.chat.id)
-        # Формы интерактивов (Этап 47) — тем же правилом: после речи, не
-        # при отмене задачи (тогда очередь в памяти просто сбрасывается).
-        if interactives is not None and message.chat is not None:
-            if current is not None and current.cancelling():
-                interactives.discard_forms(message.chat.id)
-            else:
-                try:
-                    await interactives.flush_forms(
-                        message.chat.id,
-                        turn_plan,
-                        dialogue_id=dialogue_id,
-                        message_thread_id=message.message_thread_id,
-                    )
-                except Exception:  # noqa: BLE001
-                    log.exception("ai: не удалось отправить формы сцены (chat=%s)", message.chat.id)
-
-
-async def _send_alfred_reply(message: Message, raw: str) -> Message:
-    """Отправить ответ Альфреда, при необходимости несколькими сообщениями.
-
-    Промпт (llm/prompt.py) просит модель укладываться в ~3500 знаков и
-    самой предлагать продолжение — но это не гарантия (модель может
-    промахнуться), а Telegram режёт сообщение на 4096 символах. Без этой
-    страховки длинный ответ ронял бы весь хендлер необработанным
-    TelegramBadRequest. Возвращает последнее отправленное сообщение —
-    именно на него отвечает пользователь, продолжая тред."""
-    chunks = chunk_text(_format_answer(raw))
-    sent = await message.reply(chunks[0])
-    for chunk in chunks[1:]:
-        sent = await message.answer(chunk)
-    return sent
-
-
-async def _send_alfred_reply_rich(
-    message: Message, raw: str, session: RichStreamSession, notifier: Notifier
-) -> int | None:
-    """Rich-эквивалент _send_alfred_reply (этап 34, Фаза 2) — без
-    chunk_text/MAX_LEN: лимит Rich Message значительно выше (см.
-    IMPLEMENTATION_PLAN.md, этап 34). session.finalize сама делает ретраи
-    транзиентных сбоёв доставки (bot/notifier.py::send_with_retry) и
-    возвращает None только когда rich-отправка так и не прошла: либо связь
-    до Telegram не поднялась за все попытки, либо Bot API отверг саму
-    rich-разметку (TelegramBadRequest — is_permanent_send_error).
-
-    Этап A (2026-08-30): в обоих случаях терять готовый ответ модели
-    нельзя — откатываемся на обычный sendMessage (Notifier.send_direct →
-    _send_one, те же ретраи), плейн-HTML вместо rich-разметки, поэтому
-    content-ошибка rich его не заденет. Возвращает message_id
-    доставленного сообщения (rich или фолбэк) либо None, если не прошло
-    вообще ничего."""
-    sent = await session.finalize(raw, reply_to_message_id=message.message_id)
-    if sent is not None:
-        return sent.message_id
-    log.warning("ai: rich-ответ не ушёл — откат на обычный текст (chat=%s)", message.chat.id)
-    return await notifier.send_direct(
-        message.chat.id,
-        _format_answer(raw),
-        reply_to_message_id=message.message_id,
-        message_thread_id=message.message_thread_id,
     )

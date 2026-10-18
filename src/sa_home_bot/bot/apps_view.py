@@ -1,34 +1,20 @@
-"""Скилы-приложения: исполнение и карточка (qBittorrent, Jellyfin, …).
-
-Скилл — команда первого уровня в меню бота, имя и заголовок приходят из
-describe службы apps (ARCHITECTURE §11, правило 3). Бот в систему не ходит:
-command к службе apps → карточка с состоянием юнита и ссылками на веб-морду,
-плюс кнопки управления (start/stop/restart — реальный systemd-юнит, не
-только просмотр статуса), если право на них есть в подписке.
-"""
-
 from __future__ import annotations
+
+from collections.abc import Sequence
 
 from aiogram.types import InlineKeyboardMarkup
 
-from sa_home_bot.bot import actions
+from sa_home_bot.bot import actions, commands
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
-from sa_home_bot.proto.messages import ERR_NEEDS_PRIVILEGE, ProtoError
+from sa_home_bot.proto.messages import ERR_NEEDS_PRIVILEGE, ActionSpec, ProtoError
 from sa_home_bot.subscriptions.models import Subscription
 
 APPS_SERVICE = "apps"
 
 QBITTORRENT_APP_ID = "qbittorrent"
 
-# Приложения, скрытые из общих списков умений (меню бота, /start) и из
-# прямого вызова голой командой (bot/handlers/apps.py) — карточка доступна
-# только специализированным путём. qbittorrent теперь открывается кнопкой
-# внутри /torrents (bot/torrents_view.py::build_app_view) — отдельная
-# команда/пункт меню только дублировала бы вход и путала (два места на одно
-# и то же, а из /torrents кнопка ведёт на карточку без кнопок управления).
 HIDDEN_MENU_APP_IDS = frozenset({QBITTORRENT_APP_ID})
 
-# Статус systemd-юнита приложения → человеку.
 _APP_STATUS = {
     "active": "✅ работает",
     "inactive": "⏹ остановлен",
@@ -36,8 +22,19 @@ _APP_STATUS = {
 }
 
 
+def visible_skill_actions(
+    subscription: Subscription | None, app_actions: Sequence[ActionSpec]
+) -> list[ActionSpec]:
+    return [
+        action
+        for action in app_actions
+        if not action.params
+        and action.id not in HIDDEN_MENU_APP_IDS
+        and commands.can_run_action(subscription, action.id, APPS_SERVICE)
+    ]
+
+
 def render_app_card(app: dict) -> str:
-    """Карточка приложения — ответ службы apps на command <id>/start/stop/restart."""
     status = _APP_STATUS.get(app.get("status", ""), f"❔ {app.get('status', '?')}")
     lines = [
         f"{app.get('title', app.get('id', '?'))} — {status}",
@@ -58,7 +55,6 @@ async def run_app_skill(
     action_id: str,
     value: str | None = None,
 ) -> tuple[str, InlineKeyboardMarkup | None]:
-    """Выполнить скилл/управление apps, вернуть (текст карточки, кнопки)."""
     action = await actions.find_action(apps_link, action_id)
     if action is None:
         text = (

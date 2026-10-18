@@ -1,7 +1,3 @@
-"""APK-поток службы vpn: свежесть по (фейковому) GitHub API, кэш на диске,
-проверка размера/sha256, чанкование, сброс file_id, поведение при
-недоступном GitHub (stale)."""
-
 from __future__ import annotations
 
 import base64
@@ -105,7 +101,7 @@ async def test_apk_info_skips_redownload_when_version_unchanged(env, monkeypatch
     monkeypatch.setattr(apk_client, "download_sync", fake_download)
 
     await svc.run_command(vpn_protocol.ACTION_APK_INFO, {})
-    svc._apk_checked_at = None  # обойти memo, чтобы дошло до сверки версии
+    svc._apk_checked_at = None
     await svc.run_command(vpn_protocol.ACTION_APK_INFO, {})
     assert calls["n"] == 1
 
@@ -114,7 +110,6 @@ async def test_apk_info_sha_mismatch_does_not_replace_cache(env, monkeypatch):
     svc, tmp_path = env
     real_content = b"real-bytes"
     release = _release("2.0.1", real_content)
-    # digest в релизе не совпадёт с тем, что реально скачается.
 
     def fake_download(url, dest, timeout):
         dest.write_bytes(b"corrupted-bytes")
@@ -125,7 +120,6 @@ async def test_apk_info_sha_mismatch_does_not_replace_cache(env, monkeypatch):
     with pytest.raises(ProtoError):
         await svc.run_command(vpn_protocol.ACTION_APK_INFO, {})
     assert not list((tmp_path / "apk-cache").glob("*.apk"))
-    # временный файл тоже не должен оставаться мусором.
     assert not list((tmp_path / "apk-cache").glob(".*"))
 
 
@@ -148,12 +142,12 @@ async def test_apk_info_stale_when_github_unavailable_but_cache_exists(env, monk
     monkeypatch.setattr(apk_client, "latest_release_sync", fail)
     info = await svc.run_command(vpn_protocol.ACTION_APK_INFO, {})
     assert info["stale"] is True
-    assert info["version"] == "2.0.1"  # старый кэш всё равно отдаётся
+    assert info["version"] == "2.0.1"
 
 
 async def test_apk_chunk_roundtrip_and_eof(env, monkeypatch):
     svc, _tmp_path = env
-    content = bytes(range(256)) * 10  # 2560 байт
+    content = bytes(range(256)) * 10
     monkeypatch.setattr(
         apk_client, "latest_release_sync", lambda repo, timeout: _release("2.0.1", content)
     )
@@ -186,9 +180,7 @@ async def test_apk_set_file_id_persists_and_reset_on_new_version(env, monkeypatc
         apk_client, "download_sync", lambda url, dest, timeout: dest.write_bytes(content_v1)
     )
     await svc.run_command(vpn_protocol.ACTION_APK_INFO, {})
-    await svc.run_command(
-        vpn_protocol.ACTION_APK_SET_FILE_ID, {"telegram_file_id": "tg-file-1"}
-    )
+    await svc.run_command(vpn_protocol.ACTION_APK_SET_FILE_ID, {"telegram_file_id": "tg-file-1"})
     svc._apk_checked_at = None
     info = await svc.run_command(vpn_protocol.ACTION_APK_INFO, {})
     assert info["telegram_file_id"] == "tg-file-1"

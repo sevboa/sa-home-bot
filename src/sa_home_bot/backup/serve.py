@@ -1,25 +1,3 @@
-"""Отдача запечатанных копий напарником для восстановления (39.0.8(d)).
-
-Живёт в службе ``vpn`` ноды-хранителя (рядом с ``backup_snapshot_get``): хранилище
-``BackupStore`` пишут и процесс ноды (identity), и служба vpn (снапшоты), читать
-удобнее всего оттуда, где уже есть приёмник напарника. Объявляется только при
-заданном ``[backup].partner`` — то есть на нодах пары.
-
-Кто может звать: любой участник роя с токеном ``[swarm].token`` (как и любое
-действие любой службы). Это приемлемо, потому что (1) блобы запечатаны на
-публичный ключ alfred — без приватного ключа из ``[backup].private_key_file``
-это шум; (2) в открытом виде отдаются лишь метаданные (время, число строк
-таблиц), не содержимое; (3) отдаётся только копия ЗАДАННОГО напарника
-(``[backup].partner``) — произвольный путь/имя из запроса не принимается.
-Лишнего права «расшифровать» на ноде-хранителе нет вообще.
-
-Действия:
-- ``backup_store_list {node}`` → ``{node, identity: [{label, meta}], snapshot: [{label, meta}]}``;
-- ``backup_store_get {node, kind=identity|snapshot, label=latest}`` →
-  ``{kind, label, meta, sealed(base64)}``. Сообщение протокола ≤ 1 МиБ, блоб снапшота
-  ≤ ``MAX_SEALED_BYTES`` (640 КиБ) в base64 влезает.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -34,7 +12,7 @@ KINDS = ("identity", "snapshot")
 
 
 class ServeError(Exception):
-    """Запрос отклонён (чужая нода, нет такой версии, неверный вид)."""
+    pass
 
 
 def action_specs() -> list[ActionSpec]:
@@ -64,7 +42,6 @@ def _check_node(partner: str, args: dict[str, Any]) -> str:
 
 
 def handle(store: BackupStore, partner: str, action: str, args: dict[str, Any]) -> dict | None:
-    """None — действие не наше."""
     if action == ACTION_STORE_LIST:
         node = _check_node(partner, args)
         return {

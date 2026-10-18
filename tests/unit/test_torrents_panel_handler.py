@@ -1,7 +1,3 @@
-"""Обработчики панели /torrents (bot/handlers/torrents_panel.py): список →
-карточка раздачи, пауза/старт, лимит скорости — всё редрайвом одного
-сообщения (edit_text), по образцу test_swarm_panel_handler.py."""
-
 from sa_home_bot.bot import commands
 from sa_home_bot.bot.handlers.torrents_panel import cmd_torrents, on_torrents_screen
 from sa_home_bot.bot.service_link import ServiceUnavailableError
@@ -65,9 +61,6 @@ class FakeTorrentsLink:
         self.commands.append((action, args or {}))
         if self._unavailable:
             raise ServiceUnavailableError("нет связи")
-        # fail_with бьёт по самому действию (pause/resume/speed_limit), а не
-        # по вспомогательному list, которым хендлер сначала находит раздачу —
-        # иначе до проверяемого вызова дело бы не доходило вовсе.
         if self._fail_with is not None and action != "list":
             raise self._fail_with
         if action == "list":
@@ -125,9 +118,6 @@ def _codes(kb) -> list[str]:
     return [b.callback_data for row in kb.inline_keyboard for b in row] if kb else []
 
 
-# --- /torrents ---------------------------------------------------------
-
-
 async def test_cmd_torrents_renders_list_in_one_message():
     message = FakeMessage()
     link = FakeTorrentsLink(torrents=[_torrent()])
@@ -143,18 +133,12 @@ async def test_cmd_torrents_reports_unavailable_service():
     assert message.answers == [UNAVAILABLE_TEXT]
 
 
-# --- t_list --------------------------------------------------------------
-
-
 async def test_t_list_redraws_in_place():
     callback = FakeCallback(f"st:{commands.TORRENTS_LIST_CODE}:0")
     link = FakeTorrentsLink(torrents=[_torrent()])
     await on_torrents_screen(callback, torrents_link=link, apps_link=FakeAppsLink())
     assert len(callback.message.edits) == 1
     assert callback.message.answers == []
-
-
-# --- t_card ----------------------------------------------------------------
 
 
 async def test_t_card_shows_torrent_details():
@@ -171,9 +155,6 @@ async def test_t_card_missing_hash_shows_alert():
     await on_torrents_screen(callback, torrents_link=link, apps_link=FakeAppsLink())
     assert callback.message.edits == []
     assert callback.answered[0][1].get("show_alert") is True
-
-
-# --- t_toggle ----------------------------------------------------------------
 
 
 async def test_t_toggle_pauses_running_torrent_and_redraws_card():
@@ -203,9 +184,6 @@ async def test_t_toggle_reports_proto_error():
     assert callback.answered[0][1].get("show_alert") is True
 
 
-# --- t_speed -----------------------------------------------------------------
-
-
 async def test_t_speed_applies_limit_and_keeps_offset():
     from sa_home_bot.bot.torrents_view import TORRENTS_PAGE_SIZE
 
@@ -216,10 +194,7 @@ async def test_t_speed_applies_limit_and_keeps_offset():
     assert ("speed_limit", {"mbps": 2}) in link.commands
     assert "2 МБ/с" in callback.message.edits[-1]
     codes = _codes(callback.message.edit_keyboards[-1])
-    assert "st:t_speed:5:8" in codes  # пресеты сохранили offset страницы
-
-
-# --- t_app ---------------------------------------------------------------
+    assert "st:t_speed:5:8" in codes
 
 
 async def test_t_app_shows_qbittorrent_card_without_manage_buttons():
@@ -233,5 +208,5 @@ async def test_t_app_shows_qbittorrent_card_without_manage_buttons():
     kb = callback.message.edit_keyboards[-1]
     texts = [b.text for row in kb.inline_keyboard for b in row]
     codes = _codes(kb)
-    assert texts == ["🔄 Обновить", "⬅️ Назад"]  # без start/stop/restart
+    assert texts == ["🔄 Обновить", "⬅️ Назад"]
     assert codes == ["st:t_app", "st:t_list:0"]

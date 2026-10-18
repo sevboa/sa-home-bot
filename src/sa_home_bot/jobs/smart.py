@@ -1,20 +1,6 @@
-"""SmartScanJob — нечастый снимок SMART-счётчиков дисков + алерт на изменения.
-
-Read-only опрос smartctl (``-H -A``), без self-test'ов — диск не изнашивается.
-Дельта считается против последнего снимка в БД (baseline): рост сбойных
-секторов / падение класса здоровья → уведомление о деградации; обратное
-изменение → о восстановлении.
-
-Идемпотентность: baseline сдвигается только после того, как алерт доставлен
-хотя бы одному подписчику (или слать некому). Если подписчики есть, но доставка
-целиком провалилась (бот офлайн), baseline НЕ двигаем — деградацию повторим на
-следующем прогоне, а не потеряем.
-"""
-
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
 
 from sa_home_bot.domain.smart import diff_smart
 from sa_home_bot.jobs.base import JobContext, JobResult
@@ -23,10 +9,6 @@ log = logging.getLogger(__name__)
 
 DEDUP_KEY = "smart-scan"
 JOB_TYPE = "smart_scan"
-
-
-def _now() -> datetime:
-    return datetime.now(tz=UTC)
 
 
 class SmartScanJob:
@@ -51,8 +33,6 @@ class SmartScanJob:
             changes += 1
             result = await ctx.dispatcher.dispatch_smart(change)
             if not result.handled:
-                # Адресаты есть, но никому не дошло — не сдвигаем baseline,
-                # чтобы повторить деградацию на следующем прогоне.
                 log.warning(
                     "SMART-алерт по %s не доставлен — повтор на следующем прогоне",
                     change.component_id,

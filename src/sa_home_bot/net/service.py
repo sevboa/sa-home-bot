@@ -1,18 +1,3 @@
-"""NetService — ServiceHandler службы net: веб-поиск через локальный SearXNG.
-
-Тонкая обёртка над своим экземпляром SearXNG (LLM_INTEGRATION_PLAN.md §9).
-Сам SearXNG — не часть этого репозитория: ставится на ноду отдельно (venv +
-uWSGI под systemd, слушает 127.0.0.1) и удобно заводится как приложение в
-``[[apps.items]]``, чтобы им можно было управлять уже существующей службой
-apps.
-
-Почему служба, а не прямой вызов из бота (как погода и курсы валют в
-bot/tools.py): SearXNG слушает ЛОКАЛЬНЫЙ порт конкретной ноды, то есть это
-именно операция этой машины, а не публичный API, одинаково доступный
-отовсюду. Наружу (в tailnet) его при этом не выставляем — ходит только эта
-служба, а рой уже умеет доставлять запрос до неё с любой ноды.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -32,6 +17,7 @@ from sa_home_bot.proto.messages import (
     ServiceDescription,
     ServiceInfo,
 )
+from sa_home_bot.proto.server import undeclared_action
 
 log = logging.getLogger(__name__)
 
@@ -57,8 +43,6 @@ class NetService:
         )
 
     async def get_state(self) -> dict[str, Any]:
-        # Живость поисковика проверяем дешёвым запросом: без него состояние
-        # службы говорило бы «работаю» и при мёртвом SearXNG.
         try:
             await searxng.search(
                 self._cfg.searxng_url,
@@ -80,8 +64,7 @@ class NetService:
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if action != ACTION_SEARCH:
-            # Сервер валидирует action по describe — сюда неизвестное не доходит.
-            raise ValueError(f"необъявленное действие: {action}")
+            raise undeclared_action(action)
         query = str(args.get("query") or "").strip()
         if not query:
             raise ProtoError(ERR_BAD_REQUEST, "не указан поисковый запрос (query)")

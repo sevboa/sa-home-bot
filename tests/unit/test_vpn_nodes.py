@@ -1,6 +1,3 @@
-"""bot/vpn_nodes.py: динамический поиск нод со службой ``vpn`` и выбор
-адресата команды (этап 39, фаза 0 — серверов AmneziaWG может быть > 1)."""
-
 from __future__ import annotations
 
 from sa_home_bot.bot import vpn_nodes
@@ -8,8 +5,6 @@ from sa_home_bot.bot.service_link import ServiceUnavailableError
 
 
 class FakeLink:
-    """Двойник ServiceLink: get_state(dst) отдаёт состояние по ноде."""
-
     def __init__(self, own: dict, peer_states: dict[str, dict] | None = None) -> None:
         self._own = own
         self._peers = peer_states or {}
@@ -79,7 +74,7 @@ async def test_dead_peer_is_not_queried():
         [_svc("monitor")],
         peers=[{"id": "jeeves", "alive": False, "kind": "vps"}],
     )
-    link = FakeLink(own, {})  # jeeves-состояния нет — но его и не спросят
+    link = FakeLink(own, {})
     assert await vpn_nodes.live_vpn_nodes(link) == []
 
 
@@ -119,7 +114,6 @@ async def test_resolve_falls_back_to_first_live_when_server_gone():
         peers=[{"id": "wooster", "alive": True, "kind": "vps"}],
     )
     link = FakeLink(own, {"wooster": _node_state("wooster", [_svc("vpn")])})
-    # Подключение заведено на jeeves, но jeeves сейчас VPN не держит.
     dst = await vpn_nodes.resolve_vpn_dst(link, server="jeeves")
     assert dst.node == "wooster"
 
@@ -130,8 +124,6 @@ async def test_resolve_none_when_no_vpn_anywhere():
 
 
 class FanoutLink(FakeLink):
-    """FakeLink + command(): отвечает по адресату, мёртвые ноды падают."""
-
     def __init__(self, own, peer_states=None, *, answers=None, dead=()) -> None:
         super().__init__(own, peer_states)
         self._answers = answers or {}
@@ -187,9 +179,6 @@ async def test_fanout_empty_when_no_vpn_anywhere():
 
 
 class ServiceStateLink(FakeLink):
-    """Различает опрос ноды (service="node") и опрос самой службы vpn —
-    именно так и ходит live_vpn_servers."""
-
     def __init__(self, own, peer_states, vpn_states, *, dead=()) -> None:
         super().__init__(own, peer_states)
         self._vpn_states = vpn_states
@@ -217,18 +206,13 @@ async def test_live_vpn_servers_reports_label_and_transports():
             "node": "jeeves",
             "label": "🇳🇱 Нидерланды",
             "transports": ["awg", "reality"],
-            # Нода проверок не прислала (старая версия) — пустой список,
-            # пикер просто нарисует кнопку без индикатора.
             "check": [],
         },
-        # label пуст — карточка подставит id ноды
         {"node": "wooster", "label": "", "transports": ["reality"], "check": []},
     ]
 
 
 async def test_live_vpn_servers_passes_check_rollup_through():
-    """Индикатор доступности (39.0.7(f)) едет из get_state службы в пикер как
-    есть — bot/vpn_nodes ничего в нём не считает."""
     rollup = [{"server": "jeeves", "transport": "awg", "status": "partial", "observers": 2}]
     link = ServiceStateLink(
         _two_vpn_nodes(),
@@ -295,5 +279,4 @@ def test_unavailable_servers_are_known_nodes_without_answer(tmp_path, monkeypatc
     )
     down = vpn_nodes.unavailable_servers([{"node": "jeeves", "label": "🇳🇱 Нидерланды"}])
     assert down == [{"node": "wooster", "label": "🇺🇸 США", "unavailable": True}]
-    # Сервер, ни разу не отвечавший, неизвестен — выдумывать его нельзя.
     assert vpn_nodes.unavailable_servers([]) != [] and len(vpn_nodes.unavailable_servers([])) == 2

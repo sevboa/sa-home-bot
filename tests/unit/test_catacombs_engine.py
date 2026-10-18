@@ -1,21 +1,12 @@
-"""Катакомбы в разговоре (Этап 59.4–59.5): сценарий-прогулка, тулы walk/go,
-описание от Ведущего, запомненные кадры, особые места, быстрые переходы,
-возврат после простоя, канарейка (гость вне списка не видит ничего)."""
-
 from __future__ import annotations
 
 import asyncio
-import base64
-import io
 import json
-from datetime import UTC, datetime, timedelta
-
-import pytest_asyncio
-from PIL import Image
+from datetime import timedelta
 
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.handlers.interactives import cmd_interactives
-from sa_home_bot.bot.interactives import acts, engine, places, underground
+from sa_home_bot.bot.interactives import acts, places, registry, underground
 from sa_home_bot.bot.interactives import catacombs as cat
 from sa_home_bot.bot.interactives.base import (
     STATUS_ACTIVE,
@@ -25,128 +16,16 @@ from sa_home_bot.bot.interactives.base import (
     Run,
 )
 from sa_home_bot.bot.interactives.catacombs import CatacombsState, Maze, Node, Passage
-from sa_home_bot.bot.interactives.engine import Interactives
-from sa_home_bot.bot.interactives.transylvania import Transylvania
-from sa_home_bot.config import LlmConfig, Settings
-from sa_home_bot.db.connection import Database
-from sa_home_bot.db.migrations import apply_migrations
-from sa_home_bot.db.store import Store
 from sa_home_bot.subscriptions.models import Subscription
-
-CANARY = 1101
-GUEST = 1102
-
-
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    db = Database(tmp_path / "test.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
-
-
-def _png() -> bytes:
-    buf = io.BytesIO()
-    Image.new("RGB", (8, 8), "brown").save(buf, format="PNG")
-    return buf.getvalue()
-
-
-class FakeNotifier:
-    def __init__(self) -> None:
-        self.sent: list[tuple[int, str]] = []
-        self.photos: list[tuple[int, object, str | None]] = []
-
-    async def send_direct(self, chat_id, text, reply_markup=None, **_kw):
-        self.sent.append((chat_id, text))
-        return 1000 + len(self.sent)
-
-    async def send_photo_ex(self, chat_id, photo, *, caption=None, **_kw):
-        self.photos.append((chat_id, photo, caption))
-        return 500 + len(self.photos), f"file-{len(self.photos)}"
-
-
-class FakeLink:
-    def __init__(self) -> None:
-        self.director_replies: list[str] = []
-        self.director_inputs: list[str] = []
-        self.director_systems: list[str] = []
-        self.describe_inputs: list[str] = []
-        self.describe_fail = False
-        self.generated: list[dict] = []
-
-    async def command(self, action, args, dst=None, timeout=None):
-        if action == "chat" and args.get("role") == "director":
-            if args.get("system") == underground.DESCRIBE_SYSTEM:
-                self.describe_inputs.append(args["messages"][0]["content"])
-                if self.describe_fail:
-                    raise TimeoutError
-                n = len(self.describe_inputs)
-                return {
-                    "response": json.dumps(
-                        {
-                            "passage": {
-                                "describe": f"Коридор {n} с рыжими потёками",
-                                "spots": ["ящик у стены"],
-                            },
-                            "node": {"describe": f"Перекрёсток {n}, на полу кости", "spots": []},
-                        },
-                        ensure_ascii=False,
-                    )
-                }
-            self.director_systems.append(args["system"])
-            self.director_inputs.append(args["messages"][0]["content"])
-            return {"response": self.director_replies.pop(0) if self.director_replies else "{}"}
-        if action == "chat":
-            return {"response": "Готово, сэр."}
-        if action == "generate_image":
-            self.generated.append(args)
-            return {
-                "png_b64": base64.b64encode(_png()).decode(),
-                "width": 8,
-                "height": 8,
-                "prompt": "p",
-                "seed": 7,
-            }
-        if action == "chat_progress":
-            return {"partial": "draw", "done": True}
-        raise AssertionError(action)
-
-
-class Clock:
-    def __init__(self) -> None:
-        self.now = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
-
-    def __call__(self) -> datetime:
-        return self.now
-
-
-class Dice:
-    def __init__(self, *values: float) -> None:
-        self.values = list(values) or [0.99]
-
-    def __call__(self) -> float:
-        return self.values.pop(0) if len(self.values) > 1 else self.values[0]
-
-
-async def _clear() -> int:
-    return 0
-
-
-def _make(store, *, canary=(CANARY,), dice=None, clock=None):
-    notifier, link = FakeNotifier(), FakeLink()
-    svc = Interactives(
-        store,
-        notifier,
-        Settings(llm=LlmConfig(model="m", interactives_canary_user_ids=list(canary))),
-        lambda: link,
-        now=clock or Clock(),
-        choose=lambda options: options[0],
-        rng=dice or Dice(0.99),
-        transylvania=Transylvania(fetch=_clear),
-    )
-    svc.spoken = []
-    return svc, notifier, link
+from tests.unit.interactives_kit import (
+    CANARY,
+    DEFAULT_NOW,
+    GUEST,
+    Dice,
+    make_service,
+    tool_context,
+)
+from tests.unit.support.fakes import Clock
 
 
 async def _open(svc, user=CANARY):
@@ -194,7 +73,6 @@ async def _step(svc, store, direction=None, *, frames=True):
 
 
 def _maze_with_darkroom(user=CANARY) -> tuple[Maze, str]:
-    """Вход, проход длиной 2 вперёд от входа и тупик с проявочной."""
     maze = Maze.new(user, 7)
     side = maze.entry_heading
     far = cat._step((0, 0), side, 2)
@@ -209,13 +87,10 @@ def _maze_with_darkroom(user=CANARY) -> tuple[Maze, str]:
     return maze, side
 
 
-# --- сценарий и реестр ---
-
-
 def test_scenario_is_canary_manual_and_never_triggered_by_words():
     scenario = underground.CATACOMBS
     assert scenario.canary and scenario.trigger == "manual"
-    assert engine.REGISTRY["catacombs"] is scenario
+    assert registry.REGISTRY["catacombs"] is scenario
     assert not scenario.trigger_re.search("в катакомбы спустимся? катакомбы!")
     assert scenario.last_stage == 0 and scenario.min_turns_before_finale > 10**6
     assert "никогда не говори" in scenario.scene_frame
@@ -231,7 +106,7 @@ def test_special_rooms_registered_by_catalog():
     dark = places.PLACES["darkroom"]
     for word in ("красный", "ванноч", "верёвк", "увеличител"):
         assert word in dark.canon_ru.lower()
-    assert dark.specials == (places.DARKROOM_CAMERA,)  # 59.6: первый обыск — фотоаппарат
+    assert dark.specials == (places.DARKROOM_CAMERA,)
     assert underground.PLACE_CATACOMBS not in places.PLACES
 
 
@@ -257,41 +132,14 @@ def test_normalize_direction():
     assert underground.normalize_direction(5) is None
 
 
-# --- канарейка ---
-
-
-def _ctx(svc, user_id):
-    return ai_tools.ToolContext(
-        chat_id=user_id,
-        dialogue_id=None,
-        trigger_message_id=None,
-        settings=Settings(llm=LlmConfig(model="m")),
-        interactives=svc,
-        user_id=user_id,
-    )
-
-
-async def test_walk_and_go_declarations_reach_only_canaries(store):
-    svc, _, _ = _make(store)
-    kit = ai_tools.tools_for(Subscription(name="me", chat_id=1, allowed_commands=frozenset({"*"})))
-    assert {"walk", "go", "search"} <= kit.handlers.keys()
-    assert ai_tools.CANARY_TOOLS == {"search", "walk", "go", "act"}
-    guest_kit = ai_tools.for_context(kit, _ctx(svc, GUEST))
-    for name in ("walk", "go", "search"):
-        assert name not in guest_kit.handlers
-        assert all(d["function"]["name"] != name for d in guest_kit.declarations)
-    assert ai_tools.for_context(kit, _ctx(svc, CANARY)) is kit
-
-
 async def test_forged_walk_and_go_by_non_canary_do_nothing(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     kit = ai_tools.tools_for(Subscription(name="me", chat_id=1, allowed_commands=frozenset({"*"})))
     before = {k: await store.get_state(k) for k in await store.state_keys("")}
-    # Подделанный вызов: ни от обычного гостя, ни от канарейки вне личного чата.
-    assert await kit.handlers["walk"](_ctx(svc, GUEST), {"direction": "left"}) == (
+    assert await kit.handlers["walk"](tool_context(svc, GUEST), {"direction": "left"}) == (
         underground.TOOL_WALK_UNAVAILABLE
     )
-    assert await kit.handlers["go"](_ctx(svc, GUEST), {"place": "catacombs"}) == (
+    assert await kit.handlers["go"](tool_context(svc, GUEST), {"place": "catacombs"}) == (
         underground.TOOL_GO_UNAVAILABLE
     )
     assert await svc.tool_walk(GUEST, GUEST, "left") == underground.TOOL_WALK_UNAVAILABLE
@@ -303,7 +151,7 @@ async def test_forged_walk_and_go_by_non_canary_do_nothing(store):
 
 
 async def test_catacombs_never_offered_or_continued_for_others(store):
-    svc, notifier, _ = _make(store)
+    svc, notifier, _ = make_service(store)
     await _open(svc, GUEST)
     await InteractiveStore(store).save_run(
         Run(scenario="catacombs", chat_id=GUEST, user_id=GUEST, status=STATUS_ACTIVE)
@@ -313,23 +161,17 @@ async def test_catacombs_never_offered_or_continued_for_others(store):
     plan = await svc.before_turn(GUEST, GUEST, "Спустись в катакомбы", is_private=True)
     assert plan.scenario is None and plan.note is None and not plan.scene
     assert {k: await store.get_state(k) for k in await store.state_keys("")} == before
-    # А канарейке слова в катакомбы ничего не запускают: формы нет, запускает тул.
     plan = await svc.before_turn(CANARY, CANARY, "Спустись в катакомбы", is_private=True)
     assert not plan.offered and notifier.sent == []
 
 
-# --- go: быстрые переходы ---
-
-
 async def test_go_refuses_until_unlocked_and_unknown(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     assert await svc.tool_go(CANARY, CANARY, "cellar") == underground.TOOL_GO_CELLAR_LOCKED
     assert await svc.tool_go(CANARY, CANARY, "catacombs") == underground.TOOL_GO_NO_WAY
     assert await svc.tool_go(CANARY, CANARY, "darkroom") == underground.TOOL_GO_NO_WAY
-    # Незнакомое место — действие для Ведущего; из кабинета вне сцены его нет.
     assert await svc.tool_go(CANARY, CANARY, "в космос") == acts.TOOL_ACT_CABINET
     assert await places.get_at(store, CANARY) is None
-    # Ключ есть, лаза нет: в подвал можно, в катакомбы нет.
     await svc._state.set_effect(places.EFFECT_CELLAR_UNLOCKED, CANARY, "1")
     assert "спустился в подвал" in await svc.tool_go(CANARY, CANARY, "cellar")
     assert (await places.get_at(store, CANARY)).place == places.PLACE_CELLAR
@@ -337,16 +179,15 @@ async def test_go_refuses_until_unlocked_and_unknown(store):
 
 
 async def test_go_catacombs_starts_walk_at_the_hatch(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     text = await _descend(svc, store, frames=False)
     assert "к самому началу" in text and "катакомбы" in text.lower()
     at = await places.get_at(store, CANARY)
     assert at.place == "catacombs" and at.node["node"] == [0, 0]
     maze = await cat.load(store, CANARY)
-    assert maze.nodes[(0, 0)].describe  # вход описан Ведущим при первом спуске
+    assert maze.nodes[(0, 0)].describe
     run = await InteractiveStore(store).load_run(CANARY, "catacombs")
     assert run.status == STATUS_ACTIVE
-    # Кадр входа ушёл гостю только после реплики (flush), и только один.
     assert notifier.photos == []
     await _frames(svc)
     assert len(notifier.photos) == 1 and len(link.generated) == 1
@@ -356,9 +197,9 @@ async def test_go_catacombs_starts_walk_at_the_hatch(store):
 
 
 async def test_go_again_to_the_hatch_resets_position_and_shows_no_frames(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _descend(svc, store)
-    await _step(svc, store)  # куда-то зашли
+    await _step(svc, store)
     maze, state = await _vision(store)
     assert state.node != (0, 0) or state.passage
     shots = len(notifier.photos)
@@ -368,18 +209,17 @@ async def test_go_again_to_the_hatch_resets_position_and_shows_no_frames(store):
     maze, state = await _vision(store)
     assert state.node == (0, 0) and state.passage is None and state.room is None
     assert state.heading == maze.entry_heading
-    assert len(notifier.photos) == shots  # «знакомой дорогой», без кадров
+    assert len(notifier.photos) == shots
 
 
 async def test_go_to_cellar_and_cabinet_end_the_walk(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     await _descend(svc, store)
     assert (await InteractiveStore(store).load_run(CANARY, "catacombs")).status == STATUS_ACTIVE
     text = await svc.tool_go(CANARY, CANARY, "cellar")
     assert "в подвал" in text
     assert (await places.get_at(store, CANARY)).place == places.PLACE_CELLAR
     assert (await InteractiveStore(store).load_run(CANARY, "catacombs")).status == STATUS_DONE
-    # Из подвала — в катакомбы и сразу домой.
     await svc.tool_go(CANARY, CANARY, "catacombs")
     assert await svc.tool_go(CANARY, CANARY, "cabinet") == underground.TOOL_GO_HOME
     assert (await places.get_at(store, CANARY)).in_cabinet
@@ -387,7 +227,7 @@ async def test_go_to_cellar_and_cabinet_end_the_walk(store):
 
 
 async def test_go_is_busy_during_another_scene_but_closes_finished_cellar(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     await _open(svc)
     radio_run = Run(scenario="radio", chat_id=CANARY, user_id=CANARY, status=STATUS_ACTIVE)
     await InteractiveStore(store).save_run(radio_run)
@@ -404,14 +244,14 @@ async def test_go_is_busy_during_another_scene_but_closes_finished_cellar(store)
 
 
 async def test_cellar_hint_offers_catacombs_and_found_rooms_by_name(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     await _open(svc)
     await _seed_maze(store)
     await svc.tool_go(CANARY, CANARY, "cellar")
     room = await svc._room(CANARY, CANARY)
     where = await svc._where_ru(room, CANARY, in_scene=False)
     assert "лаз в катакомбы" in where and "go" in where
-    assert "проявочная" not in where  # ещё не найдена
+    assert "проявочная" not in where
     maze, _ = _maze_with_darkroom()
     maze.found.append("darkroom")
     await cat.save(store, maze)
@@ -419,23 +259,20 @@ async def test_cellar_hint_offers_catacombs_and_found_rooms_by_name(store):
     assert "старая проявочная (darkroom)" in where
 
 
-# --- walk: ход, описание, кадры ---
-
-
 async def test_walk_not_in_catacombs_and_bad_direction(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     assert await svc.tool_walk(CANARY, CANARY, "left") == underground.TOOL_WALK_NOT_HERE
     await _descend(svc, store)
     assert await svc.tool_walk(CANARY, CANARY, "вбок") == underground.TOOL_WALK_BAD_DIRECTION
 
 
 async def test_walk_builds_describes_once_and_saves_position(store):
-    svc, _, link = _make(store)
+    svc, _, link = make_service(store)
     await _descend(svc, store)
     link.describe_inputs.clear()
     maze_before, _ = await _vision(store)
     text = await _step(svc, store, frames=False)
-    assert len(link.describe_inputs) == 1  # проход и узел — одним вопросом
+    assert len(link.describe_inputs) == 1
     assert "passage" in link.describe_inputs[0] and "node" in link.describe_inputs[0]
     maze, state = await _vision(store)
     assert len(maze.passages) == 1 and state.node != (0, 0)
@@ -443,23 +280,21 @@ async def test_walk_builds_describes_once_and_saves_position(store):
     here = maze.nodes[state.node]
     assert passage.describe.startswith("Коридор") and here.describe.startswith("Перекрёсток")
     assert [s.name for s in passage.spots] == ["ящик у стены"]
-    # Результат тула — что увидел Альфред (look) и как об этом сказать.
     assert "Перекрёсток" in text and "ящик у стены" not in text.split("Перекрёсток")[0]
     assert "ещё не хоженый проход" in text or "назад" in text
     at = await places.get_at(store, CANARY)
     assert at.node["node"] == list(state.node) and at.heading == state.heading
     assert maze_before.seed == maze.seed
-    # Описание не перетирается: вернуться и пройти снова — Ведущего не зовём.
     link.describe_inputs.clear()
     await svc.tool_walk(CANARY, CANARY, "back")
-    await svc.tool_walk(CANARY, CANARY, "back")  # развернулись у входа — снова туда
+    await svc.tool_walk(CANARY, CANARY, "back")
     assert link.describe_inputs == []
     maze2, _ = await _vision(store)
     assert maze2.passages[passage.id].describe == passage.describe
 
 
 async def test_walk_director_failure_uses_fallback_descriptions(store):
-    svc, _, link = _make(store)
+    svc, _, link = make_service(store)
     await _descend(svc, store)
     link.describe_fail = True
     text = await _step(svc, store, frames=False)
@@ -471,7 +306,7 @@ async def test_walk_director_failure_uses_fallback_descriptions(store):
 
 
 async def test_walk_without_node_link_still_works(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     await _descend(svc, store)
     svc._get_node_link = lambda: None
     text = await _step(svc, store, frames=False)
@@ -479,14 +314,13 @@ async def test_walk_without_node_link_still_works(store):
 
 
 async def test_frames_come_after_the_reply_and_are_remembered(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _descend(svc, store)
     shots, drawn = len(notifier.photos), len(link.generated)
     text = await svc.tool_walk(CANARY, CANARY, await _first_exit(store))
     assert "придёт" in text
-    assert len(notifier.photos) == shots  # до flush ничего не ушло
+    assert len(notifier.photos) == shots
     await _frames(svc)
-    # Новый проход — один кадр: узел, куда пришли; коридор отдельно не рисуется.
     assert len(notifier.photos) == shots + 1 and len(link.generated) == drawn + 1
     maze, state = await _vision(store)
     passage = next(iter(maze.passages.values()))
@@ -502,7 +336,7 @@ async def test_frames_come_after_the_reply_and_are_remembered(store):
 
 
 async def test_known_places_are_shown_by_file_id_without_generation(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _descend(svc, store)
     await _step(svc, store)
     maze, state = await _vision(store)
@@ -512,43 +346,41 @@ async def test_known_places_are_shown_by_file_id_without_generation(store):
     await _frames(svc)
     await svc.tool_walk(CANARY, CANARY, "back")
     await _frames(svc)
-    assert len(link.generated) == drawn  # mycraft не будим
+    assert len(link.generated) == drawn
     assert len(notifier.photos) == shots + 2
-    # Повторный показ узла — ровно тот же file_id.
     assert notifier.photos[-1][1] == node_file
 
 
 async def test_node_is_redrawn_only_when_its_exits_change(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _descend(svc, store)
     await _step(svc, store)
     maze, state = await _vision(store)
     node = maze.nodes[state.node]
     assert not cat.node_needs_frame(node)
-    node.exits["N" if "N" not in node.exits else "S"] = None  # выход открылся
+    node.exits["N" if "N" not in node.exits else "S"] = None
     await cat.save(store, maze)
     drawn = len(link.generated)
     await svc.tool_walk(CANARY, CANARY, "back")
     await _frames(svc)
     await svc.tool_walk(CANARY, CANARY, "back")
     await _frames(svc)
-    assert len(link.generated) == drawn + 1  # перерисован один узел
+    assert len(link.generated) == drawn + 1
     maze, state = await _vision(store)
     node = maze.nodes[state.node]
     assert not cat.node_needs_frame(node) and node.image_key == cat.node_frame_key(node)
 
 
 async def test_frames_per_turn_capped_and_skipped_when_camera_busy(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _descend(svc, store)
     svc._photo_busy.add(CANARY)
     await svc.tool_walk(CANARY, CANARY, await _first_exit(store))
     await svc.flush_frames(CANARY)
     await asyncio.gather(*list(svc._photo_tasks))
     maze, state = await _vision(store)
-    assert all(p.image_id is None for p in maze.passages.values())  # ничего не запомнено
+    assert all(p.image_id is None for p in maze.passages.values())
     svc._photo_busy.discard(CANARY)
-    # discard_forms (ход отменён) сбрасывает очередь кадров.
     await svc.tool_walk(CANARY, CANARY, "back")
     svc.discard_forms(CANARY)
     drawn = len(link.generated)
@@ -557,7 +389,7 @@ async def test_frames_per_turn_capped_and_skipped_when_camera_busy(store):
 
 
 async def test_remember_frame_ignored_after_reset(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _descend(svc, store)
     await svc.tool_walk(CANARY, CANARY, await _first_exit(store))
     await svc.flush_frames(CANARY)
@@ -570,8 +402,6 @@ def test_plan_frames_one_node_frame_per_step():
     maze = Maze.new(1, 7)
     state = CatacombsState.at_entrance(maze)
     res = cat.walk(state, maze, "forward")
-    # Новый проход — всё равно один кадр: узел, куда пришли (живая находка
-    # 2026-10-15: кадр коридора перед ним выглядел вторым ответом).
     frames = underground.plan_frames(1, maze, res)
     assert [f.kind for f in frames] == ["node"]
     assert "Alfred" not in frames[0].room.canon.canon_en
@@ -593,11 +423,8 @@ def test_frame_canon_en_structure_and_spots():
     assert "lever" in underground.frame_canon_en(maze, res.passage, wall=True)
 
 
-# --- сцена: заметка, Ведущий, простой ---
-
-
 async def test_scene_note_and_director_input_after_walk(store):
-    svc, _, link = _make(store)
+    svc, _, link = make_service(store)
     await _descend(svc, store)
     plan = await svc.before_turn(CANARY, CANARY, "Ну что там?", is_private=True)
     assert plan.scene is False or plan.scenario == "catacombs"
@@ -611,14 +438,13 @@ async def test_scene_note_and_director_input_after_walk(store):
     assert "Шаг (определён кодом" in last and "new_passage" in last
     run = await InteractiveStore(store).load_run(CANARY, "catacombs")
     assert run.status == STATUS_ACTIVE and run.turns_total == 1
-    # Через ход старый шаг Ведущему уже не уходит.
     plan = await svc.before_turn(CANARY, CANARY, "И?", is_private=True)
     await svc.after_turn(plan, "Тихо.", dialogue_id=77)
     assert "Шаг (определён" not in link.director_inputs[-1]
 
 
 async def test_director_idle_takes_alfred_home_from_catacombs(store):
-    svc, _, link = _make(store)
+    svc, _, link = make_service(store)
     await _descend(svc, store)
     plan = await svc.before_turn(CANARY, CANARY, "Кстати, анекдот", is_private=True)
     link.director_replies = [json.dumps({"active": False})]
@@ -631,25 +457,24 @@ async def test_director_idle_takes_alfred_home_from_catacombs(store):
 
 
 async def test_guest_silence_returns_alfred_from_catacombs(store):
-    clock = Clock()
-    svc, _, _ = _make(store, clock=clock)
+    clock = Clock(DEFAULT_NOW)
+    svc, _, _ = make_service(store, clock=clock)
     await _descend(svc, store)
     clock.now += timedelta(hours=1, minutes=50)
     plan = await svc.before_turn(CANARY, CANARY, "Я тут", is_private=True)
-    assert plan.scene  # ещё внизу
+    assert plan.scene
     clock.now += timedelta(hours=2, minutes=1)
     plan = await svc.before_turn(CANARY, CANARY, "Я снова тут", is_private=True)
     assert not plan.scene
     assert "вернулся из катакомб к себе в кабинет" in plan.note
     assert (await places.get_at(store, CANARY)).in_cabinet
     assert (await InteractiveStore(store).load_run(CANARY, "catacombs")).status == STATUS_IDLE
-    # Заново спуститься можно: прогулка начинается свежей.
     await svc.tool_go(CANARY, CANARY, "catacombs")
     assert (await InteractiveStore(store).load_run(CANARY, "catacombs")).status == STATUS_ACTIVE
 
 
 async def test_walk_up_goes_to_the_cellar_and_ends_the_walk(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     await _descend(svc, store)
     await _step(svc, store)
     text = await svc.tool_walk(CANARY, CANARY, "up")
@@ -660,39 +485,31 @@ async def test_walk_up_goes_to_the_cellar_and_ends_the_walk(store):
     assert not plan.scene
 
 
-# --- обыск и снимки в лабиринте ---
-
-
 async def test_search_in_corridor_uses_spots_and_finds_nothing_special(store):
-    svc, _, _ = _make(store, dice=Dice(0.99))
+    svc, _, _ = make_service(store, dice=Dice(0.99))
     await _descend(svc, store)
     await _step(svc, store)
-    await svc.tool_walk(CANARY, CANARY, "back")  # снова у входа
-    # Место поиска есть у прохода только на самом проходе — идём туда и встаём
-    # перед стеной нельзя, поэтому обыскиваем то, что назвал Альфред.
+    await svc.tool_walk(CANARY, CANARY, "back")
     out = await svc.tool_search(CANARY, CANARY, "ящик у стены")
-    assert "Ты обыскал" in out and "Ничего интересного" in out  # rng 0.99 — пусто
+    assert "Ты обыскал" in out and "Ничего интересного" in out
     assert underground.TOOL_FRAME_NOTE in out
-    # Картинка обысканного места ждёт конца реплики.
-    assert [f.kind for f in svc._ug().pending[CANARY].frames] == ["spot"]
+    assert [f.kind for f in svc._frames.pending[CANARY].frames] == ["spot"]
     maze, state = await _vision(store)
     node = maze.nodes[state.node]
     assert [s.name for s in node.spots] == ["ящик у стены"] and node.spots[0].searched
     again = await svc.tool_search(CANARY, CANARY, "в ящике у стены")
     assert places.SEARCH_REPEAT_TEXT in again
-    # Названное вне списка обыскивается как новое место.
     svc._rng = Dice(0.0)
     out = await svc.tool_search(CANARY, CANARY, "кучу костей")
     assert "Ничего ценного, лишь мелочь" in out
     maze, state = await _vision(store)
     assert {s.name for s in maze.nodes[state.node].spots} == {"ящик у стены", "кучу костей"}
-    # Идущей прогулке итог виден Ведущему.
     run = await InteractiveStore(store).load_run(CANARY, "catacombs")
     assert "кучу костей" in run.world["search_outcome"]
 
 
 async def test_search_frame_is_drawn_once_and_remembered(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _descend(svc, store)
     await _step(svc, store)
     await _frames(svc)
@@ -704,7 +521,6 @@ async def test_search_frame_is_drawn_once_and_remembered(store):
     maze, state = await _vision(store)
     spot = maze.nodes[state.node].spots[-1]
     assert spot.image_id and spot.file_id
-    # Повторный обыск — та же картинка по file_id, без генерации.
     await svc.tool_search(CANARY, CANARY, "ящик у стены")
     await _frames(svc)
     assert len(link.generated) == drawn + 1
@@ -712,22 +528,20 @@ async def test_search_frame_is_drawn_once_and_remembered(store):
 
 
 async def test_take_photo_in_corridor_shows_remembered_frame_and_spot_closeup(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _descend(svc, store)
     await _step(svc, store)
     maze, state = await _vision(store)
     node_file = maze.nodes[state.node].file_id
     drawn = len(link.generated)
     out = await svc.tool_take_photo(CANARY, CANARY, {})
-    assert out == underground.TOOL_FRAME_STARTED  # не TOOL_PHOTO_STARTED: хода это не закончит
+    assert out == underground.TOOL_FRAME_STARTED
     await _frames(svc)
     assert len(link.generated) == drawn and notifier.photos[-1][1] == node_file
-    # Крупный план места поиска на проходе: рисуется один раз и запоминается.
     await svc.tool_walk(CANARY, CANARY, "back")
     await _frames(svc)
     maze, state = await _vision(store)
     passage = next(iter(maze.passages.values()))
-    # место поиска проходной (на узле его нет): берём место прохода
     node = maze.nodes[state.node]
     node.spots = [cat.Spot("ящик у стены")]
     await cat.save(store, maze)
@@ -748,7 +562,7 @@ async def test_take_photo_in_corridor_shows_remembered_frame_and_spot_closeup(st
 
 
 async def test_selfie_in_corridor_uses_the_ordinary_path(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _descend(svc, store)
     out = await svc.tool_take_photo(CANARY, CANARY, {"selfie": True})
     assert out != underground.TOOL_FRAME_STARTED
@@ -756,9 +570,6 @@ async def test_selfie_in_corridor_uses_the_ordinary_path(store):
     request = link.generated[-1]
     assert request["light"] == places.UNDERGROUND_LIGHT_EN and request["loras"]
     assert "catacomb" in request["description"]
-
-
-# --- особые места ---
 
 
 async def _at_darkroom_door(svc, store):
@@ -771,28 +582,25 @@ async def _at_darkroom_door(svc, store):
 
 
 async def test_special_room_found_entered_searched_and_left(store):
-    svc, notifier, link = _make(store, dice=Dice(0.99))
+    svc, notifier, link = make_service(store, dice=Dice(0.99))
     await _at_darkroom_door(svc, store)
     text = await svc.tool_walk(CANARY, CANARY, "forward")
     await _frames(svc)
     maze, state = await _vision(store)
     assert maze.found == ["darkroom"] and "старая проявочная" in text
     shots = len(notifier.photos)
-    door_image = maze.nodes[state.node].image_id  # кадр узла-двери нарисован при подходе
+    door_image = maze.nodes[state.node].image_id
     text = await svc.tool_walk(CANARY, CANARY, "enter")
     assert "красный фонарь" in text and "search" in text
     maze, state = await _vision(store)
     assert state.room == "darkroom"
     room = await svc._room(CANARY, CANARY)
     assert room.canon.id == "darkroom" and not room.temp
-    # Снимок комнаты — каждый раз новый и ни к чему не привязан.
     await _frames(svc)
     assert len(notifier.photos) == shots + 1
     assert "red safelight" in link.generated[-1]["description"]
     maze, _ = await _vision(store)
-    assert maze.nodes[state.node].image_id == door_image  # снимок комнаты в лабиринт не пишется
-    # Обыск в особом месте — обычный путь: итог решил код, Ведущий обставляет
-    # его синхронно (Этап 59.7), обысканное помечено.
+    assert maze.nodes[state.node].image_id == door_image
     link.director_replies = [json.dumps({"result": "В ванночке плёнка.", "stage": 0})]
     out = await svc.tool_search(CANARY, CANARY, "ванночки")
     assert "В ванночке плёнка." in out
@@ -802,9 +610,7 @@ async def test_special_room_found_entered_searched_and_left(store):
     )
     link.director_replies = [json.dumps({"result": "Всё то же.", "stage": 0})]
     await svc.tool_search(CANARY, CANARY, "ванночки")
-    # повторный обыск ничего не даёт
     assert places.SEARCH_REPEAT_TEXT in link.director_inputs[-1]
-    # Выйти нельзя иначе как назад.
     assert "один путь" in await svc.tool_walk(CANARY, CANARY, "forward")
     left = await svc.tool_walk(CANARY, CANARY, "back")
     assert "вышел" in left
@@ -812,7 +618,7 @@ async def test_special_room_found_entered_searched_and_left(store):
 
 
 async def test_go_to_special_room_by_name_faces_the_door(store):
-    svc, notifier, _ = _make(store)
+    svc, notifier, _ = make_service(store)
     await _open(svc)
     assert await svc.tool_go(CANARY, CANARY, "darkroom") == underground.TOOL_GO_NOT_FOUND
     maze, side = _maze_with_darkroom()
@@ -824,24 +630,22 @@ async def test_go_to_special_room_by_name_faces_the_door(store):
     text = await svc.tool_go(CANARY, CANARY, "darkroom")
     await _frames(svc)
     assert "старая проявочная" in text and "красный фонарь" in text
-    assert len(notifier.photos) == shots  # без кадров по пути
+    assert len(notifier.photos) == shots
     maze, state = await _vision(store)
     assert state.room == "darkroom" and state.node == maze.special_nodes["darkroom"]
-    assert cat.to_relative(state.heading, side) == "forward"  # выход за спиной
+    assert cat.to_relative(state.heading, side) == "forward"
     assert (await svc._room(CANARY, CANARY)).canon.id == "darkroom"
-    # Выход из комнаты — в тот же тупик; «в катакомбы» всегда к лазу.
     assert "вышел" in await svc.tool_walk(CANARY, CANARY, "back")
     await svc.tool_go(CANARY, CANARY, "catacombs")
     maze, state = await _vision(store)
     assert state.node == (0, 0) and state.room is None
-    # Из подвала — тоже по имени.
     await svc.tool_go(CANARY, CANARY, "cellar")
     assert "старая проявочная" in (await svc.tool_go(CANARY, CANARY, "проявочная"))
     assert (await places.get_at(store, CANARY)).place == "catacombs"
 
 
 async def test_special_room_photo_is_not_remembered(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _at_darkroom_door(svc, store)
     await svc.tool_walk(CANARY, CANARY, "forward")
     await svc.tool_walk(CANARY, CANARY, "enter")
@@ -849,13 +653,10 @@ async def test_special_room_photo_is_not_remembered(store):
     drawn = len(link.generated)
     assert await svc.tool_take_photo(CANARY, CANARY, {})
     await asyncio.gather(*list(svc._photo_tasks))
-    assert len(link.generated) == drawn + 1  # каждый раз заново
+    assert len(link.generated) == drawn + 1
     assert await svc.tool_take_photo(CANARY, CANARY, {})
     await asyncio.gather(*list(svc._photo_tasks))
     assert len(link.generated) == drawn + 2
-
-
-# --- отладка и сброс ---
 
 
 class FakeMessage:
@@ -874,7 +675,7 @@ class FakeCommand:
 
 
 async def test_debug_where_shows_node_heading_and_explored_count(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     await _descend(svc, store)
     await _step(svc, store)
     message = FakeMessage(CANARY)
@@ -884,7 +685,6 @@ async def test_debug_where_shows_node_heading_and_explored_count(store):
     maze, state = await _vision(store)
     assert f"узел ({state.node[0]},{state.node[1]}), heading {state.heading}" in extra
     assert f"разведано узлов {len(maze.nodes)}" in extra
-    # Вне катакомб ответ — прежний чистый JSON.
     await svc.tool_walk(CANARY, CANARY, "up")
     message = FakeMessage(CANARY)
     await cmd_interactives(message, FakeCommand("where"), svc)
@@ -892,7 +692,7 @@ async def test_debug_where_shows_node_heading_and_explored_count(store):
 
 
 async def test_reset_catacombs_clears_position_maze_run_and_special_rooms(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     await _at_darkroom_door(svc, store)
     await svc.tool_walk(CANARY, CANARY, "forward")
     await svc.tool_walk(CANARY, CANARY, "enter")
@@ -905,32 +705,28 @@ async def test_reset_catacombs_clears_position_maze_run_and_special_rooms(store)
     assert not [k for k in keys if k.startswith(("alfred_at", "catacombs:", "location"))]
     assert not [k for k in keys if k.startswith("interactive_run") and k.endswith("catacombs")]
     assert not [k for k in keys if "darkroom" in k]
-    # Флаг открытия лаза принадлежит подвалу и остаётся.
     assert f"user_effect:catacombs_open:{CANARY}" in keys
     assert (await svc._room(CANARY, CANARY)).place == "cabinet"
 
 
-# --- подключение к ходу /ai ---
-
-
 async def test_flush_forms_sends_frames_after_the_reply(store):
-    svc, notifier, link = _make(store)
+    svc, notifier, link = make_service(store)
     await _descend(svc, store)
     shots = len(notifier.photos)
     plan = await svc.before_turn(CANARY, CANARY, "Налево", is_private=True)
     await svc.tool_walk(CANARY, CANARY, await _first_exit(store))
     await svc.after_turn(plan, "Иду.", dialogue_id=77)
-    assert len(notifier.photos) == shots  # реплика ещё не ушла — кадров нет
+    assert len(notifier.photos) == shots
     await svc.flush_forms(CANARY, plan, dialogue_id=77)
     await asyncio.gather(*list(svc._photo_tasks))
-    assert len(notifier.photos) == shots + 1  # один кадр на шаг
+    assert len(notifier.photos) == shots + 1
 
 
 async def test_canary_handlers_walk_through_the_toolkit(store):
-    svc, _, _ = _make(store)
+    svc, _, _ = make_service(store)
     await _descend(svc, store)
     kit = ai_tools.tools_for(Subscription(name="me", chat_id=1, allowed_commands=frozenset({"*"})))
-    ctx = _ctx(svc, CANARY)
+    ctx = tool_context(svc, CANARY)
     out = await kit.handlers["walk"](ctx, {"direction": await _first_exit(store)})
     assert "Ты пошёл" in out
     assert "Знакомой дорогой" in await kit.handlers["go"](ctx, {"place": "cellar"})

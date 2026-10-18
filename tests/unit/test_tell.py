@@ -1,11 +1,10 @@
-"""Тул tell: Альфред передаёт человеку личное сообщение (этап 28)."""
-
 from __future__ import annotations
 
 import pytest
 
 from sa_home_bot.bot import recipients
 from sa_home_bot.bot import tools as ai_tools
+from sa_home_bot.bot.tools import delivery as tool_delivery
 from sa_home_bot.config import (
     GuestSubscriptionConfig,
     Settings,
@@ -43,7 +42,6 @@ def _people(book: SubscriptionBook | None = None) -> PeopleBook:
         book or _book(),
         {
             ANDREY_CHAT: {"name": "Андрей Иванов", "gender": "m"},
-            # Есть карточка, но подписки нет — писать ему нельзя.
             4242: {"name": "Пётр Незнакомый", "gender": "m"},
         },
         {ANDREY_CHAT: ("Андрей", "andrey"), 4242: ("Пётр", "stranger")},
@@ -61,12 +59,8 @@ class FakeNotifier:
 
 
 class FakeStore:
-    # По умолчанию владелец (chat 1) знаком с Андреем: механика доставки
-    # (лимиты, запись хода, мост tasks) проверяется на законной паре; права —
-    # в разделе «этап 36/46» ниже, на _permission_book.
     def __init__(self, acquainted: tuple[tuple[int, int], ...] = ((1, ANDREY_CHAT),)) -> None:
         self.turns: list[tuple] = []
-        # Подтверждённые знакомства (Этап 46) — пары chat_id.
         self._acquainted = acquainted
 
     async def relationships_for(self, chat_id, status="confirmed"):
@@ -81,10 +75,6 @@ class FakeStore:
 
 
 class FakeEmit:
-    """Мост службы tasks (ctx.emit) — вместо настоящего notifier собирает
-    события EVENT_DELIVER_MESSAGE, которые в проде уходят боту (см.
-    bot/node_events.py::_handle_deliver_message)."""
-
     def __init__(self) -> None:
         self.events: list[tuple[str, dict]] = []
 
@@ -105,17 +95,11 @@ def _ctx(**over):
     )
     defaults.update(over)
     defaults.setdefault("people", _people(defaults.get("book")))
-    # В реальном потоке (bot/ai_flow.py) ctx.subscription — это подписка
-    # САМОГО звонящего чата, не получателя; здесь по умолчанию берём её из
-    # book по chat_id, как и наяву, если тест не передал subscription сам.
     defaults.setdefault(
         "subscription",
         defaults["book"].for_chat(defaults["chat_id"]) if defaults.get("book") else None,
     )
     return ai_tools.ToolContext(**defaults)
-
-
-# --- резолвер получателей ------------------------------------------------
 
 
 @pytest.mark.parametrize("query", ["Андрей", "андрей", "@andrey", "andrey", "Андрей Иванов"])
@@ -125,13 +109,10 @@ def test_recipient_found_by_name_and_username(query):
 
 
 def test_person_without_subscription_is_not_a_recipient():
-    """Знать человека и иметь право ему написать — разные вещи: право даёт
-    приглашение, а не запись в [[people]]."""
     assert recipients.find_recipients("Пётр", _book(), _people()) == []
 
 
 def test_group_chat_is_never_a_recipient():
-    """«Передать лично» в группу — это не лично."""
     assert recipients.find_recipients("family_room", _book(), _people()) == []
 
 
@@ -140,7 +121,6 @@ def test_unknown_name_finds_nobody():
 
 
 def test_partial_word_does_not_match_by_middle():
-    # «дрей» — это середина слова, такому совпадению доверять нельзя.
     assert recipients.find_recipients("дрей", _book(), _people()) == []
 
 
@@ -155,9 +135,6 @@ def test_ambiguity_returns_all_candidates():
     assert sorted(r.chat_id for r in found) == [11, 12]
 
 
-# --- сам тул -------------------------------------------------------------
-
-
 async def test_tell_delivers_message_and_records_turn():
     notifier = FakeNotifier()
     store = FakeStore()
@@ -169,8 +146,7 @@ async def test_tell_delivers_message_and_records_turn():
     chat_id, text = notifier.sent[0]
     assert chat_id == ANDREY_CHAT
     assert "Ужин в семь" in text
-    assert "Алексей" in text  # видно, по чьей просьбе
-    # Доставленное — ход диалога получателя: он сможет ответить реплаем.
+    assert "Алексей" in text
     assert store.turns == [(ANDREY_CHAT, 777, 777, "assistant", "Ужин в семь")]
 
 
@@ -207,7 +183,7 @@ async def test_tell_does_not_write_into_the_same_chat():
 
 
 async def test_tell_reports_failed_delivery():
-    notifier = FakeNotifier(message_id=None)  # бот заблокирован получателем
+    notifier = FakeNotifier(message_id=None)
     store = FakeStore()
     result = await ai_tools.tool_tell(
         _ctx(notifier=notifier, store=store), {"recipient_id": ANDREY_CHAT, "text": "привет"}
@@ -217,31 +193,21 @@ async def test_tell_reports_failed_delivery():
 
 
 async def test_tell_unavailable_without_notifier():
-    """У службы tasks нет ни книги подписок, ни отправителя — тул не
-    отказывает, а честно не умеет (то же, что dismiss без dismissal)."""
     ctx = ai_tools.ToolContext(chat_id=1, dialogue_id=1, trigger_message_id=1, settings=Settings())
     result = await ai_tools.tool_tell(ctx, {"recipient_id": ANDREY_CHAT, "text": "привет"})
     assert result.startswith("недоступно")
 
 
 async def test_tell_delivers_via_emit_bridge_when_no_notifier(monkeypatch):
-    """Служба tasks (self-scheduled remind, живая находка 2026-08-06): своей
-    книги подписок и моста хватает на резолвинг + доставку, даже без
-    настоящего notifier — тул просит бота отправить через
-    EVENT_DELIVER_MESSAGE, а не честно отказывает.
-
-    Свои лимитеры (см. test_tell_stops_at_the_hourly_limit) — общие
-    ``_tell_limiter``/``_tell_broadcast_limiter`` за счёт множества других
-    тестов этого файла, шлющих с chat_id=1, к этому месту почти наверняка
-    исчерпаны, а формулировка отказа по получателю сама содержит слово
-    "получил" и могла бы ложно пройти наивную проверку."""
     from sa_home_bot.bot import invites
 
     monkeypatch.setattr(
-        ai_tools, "_tell_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR)
+        tool_delivery,
+        "_tell_limiter",
+        invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR),
     )
     monkeypatch.setattr(
-        ai_tools,
+        tool_delivery,
         "_tell_broadcast_limiter",
         invites.AttemptLimiter(ai_tools.TELL_MAX_TOTAL_PER_HOUR),
     )
@@ -257,7 +223,6 @@ async def test_tell_delivers_via_emit_bridge_when_no_notifier(monkeypatch):
     assert data["chat_id"] == ANDREY_CHAT
     assert "Ужин в семь" in data["html"]
     assert data["plain"] == "Ужин в семь"
-    # Store в tasks нет — знакомство проверит бот перед отправкой.
     assert data["require_acquaintance"] == [1, ANDREY_CHAT]
 
 
@@ -278,9 +243,9 @@ async def test_tell_needs_both_arguments():
 async def test_tell_stops_at_the_hourly_limit(monkeypatch):
     from sa_home_bot.bot import invites
 
-    monkeypatch.setattr(ai_tools, "_tell_limiter", invites.AttemptLimiter(2))
+    monkeypatch.setattr(tool_delivery, "_tell_limiter", invites.AttemptLimiter(2))
     monkeypatch.setattr(
-        ai_tools,
+        tool_delivery,
         "_tell_broadcast_limiter",
         invites.AttemptLimiter(ai_tools.TELL_MAX_TOTAL_PER_HOUR),
     )
@@ -292,20 +257,16 @@ async def test_tell_stops_at_the_hourly_limit(monkeypatch):
         )
     result = await ai_tools.tool_tell(ctx, {"recipient_id": ANDREY_CHAT, "text": "привет"})
     assert "не сейчас" in result
-    assert "Андрей Иванов" in result  # отказ по КОНКРЕТНОМУ получателю, не общий
+    assert "Андрей Иванов" in result
     assert len(notifier.sent) == 2
 
 
 async def test_tell_broadcast_to_many_recipients_not_blocked_by_per_recipient_limit(monkeypatch):
-    # Живой инцидент 2026-08-06: рассылка ОДНОГО уведомления 10 РАЗНЫМ
-    # гостям исчерпывала прежний единый лимит на автора (10/час) целиком —
-    # хотя каждый получил ровно одно сообщение, что не спам. Теперь потолок
-    # на получателя (2 в этом тесте) не мешает рассылке разным людям.
     from sa_home_bot.bot import invites
 
-    monkeypatch.setattr(ai_tools, "_tell_limiter", invites.AttemptLimiter(2))
+    monkeypatch.setattr(tool_delivery, "_tell_limiter", invites.AttemptLimiter(2))
     monkeypatch.setattr(
-        ai_tools,
+        tool_delivery,
         "_tell_broadcast_limiter",
         invites.AttemptLimiter(ai_tools.TELL_MAX_TOTAL_PER_HOUR),
     )
@@ -331,15 +292,14 @@ async def test_tell_broadcast_to_many_recipients_not_blocked_by_per_recipient_li
 
 
 async def test_tell_broadcast_total_limit_stops_mass_send(monkeypatch):
-    # Общий потолок рассылки — страховка от по-настоящему массовой рассылки
-    # (например, если гостей окажется больше сотни), даже если по получателю
-    # лимит не тронут.
     from sa_home_bot.bot import invites
 
     monkeypatch.setattr(
-        ai_tools, "_tell_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR)
+        tool_delivery,
+        "_tell_limiter",
+        invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR),
     )
-    monkeypatch.setattr(ai_tools, "_tell_broadcast_limiter", invites.AttemptLimiter(2))
+    monkeypatch.setattr(tool_delivery, "_tell_broadcast_limiter", invites.AttemptLimiter(2))
     book = SubscriptionBook.from_config(
         [SubscriptionConfig(name="me", chat_id=1, allowed_commands=["*"])],
         [
@@ -365,14 +325,10 @@ async def test_tell_broadcast_total_limit_stops_mass_send(monkeypatch):
     assert len(notifier.sent) == 2
 
 
-# --- права ---------------------------------------------------------------
-
-
 def test_tell_is_declared_only_with_its_right():
     admin = _book().for_chat(1)
     guest = _book().for_chat(ANDREY_CHAT)
     assert "tell" in ai_tools.tools_for(admin).handlers
-    # Гость по умолчанию (chat@llm) писать другим не может.
     assert "tell" not in ai_tools.tools_for(guest).handlers
     assert "tell" not in ai_tools.tools_for(None).handlers
 
@@ -390,13 +346,11 @@ def test_rendered_message_escapes_html():
     assert "Алексей &amp; Co" in rendered
 
 
-# --- этап 36: владелец всегда доступен; этап 46: знакомые — друг другу ----
-
 OWNER_CHAT = 1
-PLAIN_GUEST_CHAT = 600  # tell@llm — может писать только владельцу
-FAMILY_A_CHAT = 601  # tell@llm, знаком с Б (в тестах, где передан store)
-FAMILY_B_CHAT = 602  # tell@llm
-PRIVILEGED_GUEST_CHAT = 603  # tell@llm + упразднённое tell_guests@llm
+PLAIN_GUEST_CHAT = 600
+FAMILY_A_CHAT = 601
+FAMILY_B_CHAT = 602
+PRIVILEGED_GUEST_CHAT = 603
 
 
 def _permission_book() -> SubscriptionBook:
@@ -458,8 +412,6 @@ async def test_tell_guest_cannot_reach_another_guest_without_right_or_acquaintan
     [(FAMILY_A_CHAT, FAMILY_B_CHAT), (FAMILY_B_CHAT, FAMILY_A_CHAT)],
 )
 async def test_tell_acquaintances_reach_each_other_both_ways(sender, target):
-    """Этап 46: подтверждённое знакомство открывает tell в обе стороны без
-    tell_guests@llm, независимо от того, кто предлагал (guest_a/guest_b)."""
     book = _permission_book()
     notifier = FakeNotifier()
     store = FakeStore(acquainted=((FAMILY_A_CHAT, FAMILY_B_CHAT),))
@@ -470,7 +422,6 @@ async def test_tell_acquaintances_reach_each_other_both_ways(sender, target):
 
 
 async def test_tell_acquaintance_opens_only_that_pair():
-    """Знакомство — точечное: знакомый с Б не может писать третьему гостю."""
     book = _permission_book()
     notifier = FakeNotifier()
     store = FakeStore(acquainted=((FAMILY_A_CHAT, FAMILY_B_CHAT),))
@@ -483,7 +434,6 @@ async def test_tell_acquaintance_opens_only_that_pair():
 
 
 async def test_tell_without_store_refuses_non_acquainted_guest():
-    """В службе tasks Store нет — знакомство не проверить, честный отказ."""
     book = _permission_book()
     notifier = FakeNotifier()
     ctx = _ctx(chat_id=FAMILY_A_CHAT, book=book, notifier=notifier, store=None, settings=Settings())
@@ -492,8 +442,6 @@ async def test_tell_without_store_refuses_non_acquainted_guest():
 
 
 async def test_retired_tell_guests_right_no_longer_opens_strangers():
-    """Этап 46 (решение 2026-09-27): обходов знакомства больше нет —
-    tell_guests@llm упразднено и снимается с гостя при загрузке пакета."""
     book = _permission_book()
     assert "tell_guests@llm" not in book.for_chat(PRIVILEGED_GUEST_CHAT).allowed_commands
     notifier = FakeNotifier()
@@ -510,8 +458,6 @@ async def test_retired_tell_guests_right_no_longer_opens_strangers():
 
 
 async def test_owner_needs_acquaintance_too_and_is_pointed_to_notify_guest():
-    """Владелец лично (tell) — такой же гость: незнакомому не передаёт, но
-    получает подсказку про официальный notify_guest."""
     book = _permission_book()
     notifier = FakeNotifier()
     ctx = _ctx(
@@ -553,14 +499,6 @@ async def test_any_guest_reaches_owner_without_acquaintance():
     assert "передано" in result
 
 
-# --- обращение к владельцу по роли, а не по личному имени -----------------
-#
-# _book() (в отличие от _permission_book()) называет владельческую подписку
-# технически "me" — как в прод-конфиге (instances/telegram-bot.alfred.toml),
-# а не "owner" — чтобы не подловить случайное совпадение имени со словом
-# роли (см. AUTHORIZATION.md, находка "владелец без гостевого имени").
-
-
 async def test_tell_reaches_owner_by_role_word_not_name():
     notifier = FakeNotifier()
     ctx = _ctx(chat_id=ANDREY_CHAT, book=_book(), notifier=notifier, settings=Settings())
@@ -569,7 +507,7 @@ async def test_tell_reaches_owner_by_role_word_not_name():
     )
     assert "передано" in result
     chat_id, text = notifier.sent[0]
-    assert chat_id == 1  # chat_id владельца в _book()
+    assert chat_id == 1
     assert "к вам как к владельцу" in text
 
 
@@ -586,9 +524,6 @@ async def test_tell_by_personal_name_has_no_owner_role_marker():
     chat_id, text = notifier.sent[0]
     assert chat_id == 1
     assert "к вам как к владельцу" not in text
-
-
-# --- notify_persona/notify_guest: официальное уведомление владельца гостю --
 
 
 async def test_notify_tools_are_declared_only_for_owner():
@@ -638,10 +573,6 @@ async def test_notify_guest_uses_exactly_the_given_persona():
 
 
 async def test_notify_guest_tolerates_emoji_stuck_to_persona_name():
-    # Живой баг 2026-08-05: модель скопировала persona вместе с эмодзи из
-    # ответа notify_persona ("Админ 🤓" вместо "Админ") — точное совпадение
-    # по словарю такое не находило и отказывало, хотя notify_persona был
-    # вызван как положено.
     notifier = FakeNotifier()
     ctx = _ctx(chat_id=1, book=_book(), notifier=notifier, settings=Settings())
     result = await ai_tools.tool_notify_guest(
@@ -653,8 +584,6 @@ async def test_notify_guest_tolerates_emoji_stuck_to_persona_name():
 
 
 async def test_notify_guest_can_target_the_owner_themselves():
-    # В отличие от tell, у notify_guest есть смысл слать себе (self-напоминание
-    # в стиле персонажа, например через remind) — "тот же чат" не отказ.
     notifier = FakeNotifier()
     ctx = _ctx(chat_id=1, book=_book(), notifier=notifier, settings=Settings())
     result = await ai_tools.tool_notify_guest(
@@ -685,23 +614,16 @@ async def test_notify_guest_requires_persona():
     assert notifier.sent == []
 
 
-# --- notify_guest из self-scheduled remind (служба tasks) — живой баг
-# 2026-08-06: утренний remind звал notify_persona (работал — своих
-# зависимостей нет), а notify_guest падал в "недоступно: сейчас я не могу
-# никому написать", хотя владелец просил себя же уведомить в стиле
-# персонажа. Мост (ctx.emit) чинит именно этот сценарий.
-
-
 async def test_notify_guest_delivers_via_emit_bridge_when_no_notifier(monkeypatch):
-    # Те же общие лимитеры, что и у теста tell чуть выше — сбрасываем по
-    # той же причине (см. его докстринг).
     from sa_home_bot.bot import invites
 
     monkeypatch.setattr(
-        ai_tools, "_tell_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR)
+        tool_delivery,
+        "_tell_limiter",
+        invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR),
     )
     monkeypatch.setattr(
-        ai_tools,
+        tool_delivery,
         "_tell_broadcast_limiter",
         invites.AttemptLimiter(ai_tools.TELL_MAX_TOTAL_PER_HOUR),
     )
@@ -715,7 +637,7 @@ async def test_notify_guest_delivers_via_emit_bridge_when_no_notifier(monkeypatc
     assert len(emit.events) == 1
     event_type, data = emit.events[0]
     assert event_type == task_protocol.EVENT_DELIVER_MESSAGE
-    assert data["chat_id"] == 1  # self-напоминание владельцу
+    assert data["chat_id"] == 1
     assert "Админ" in data["html"]
     assert "Протокол «Утро» активирован" in data["plain"]
     assert "передано" in result
@@ -731,9 +653,6 @@ async def test_notify_guest_still_unavailable_without_notifier_or_emit():
     assert result.startswith("недоступно")
 
 
-# --- решение 2026-09-27: владелец по роли — всем, по имени — знакомым ------
-
-
 def _owner_people() -> PeopleBook:
     return people_book(
         _permission_book(),
@@ -743,7 +662,6 @@ def _owner_people() -> PeopleBook:
 
 
 async def test_owner_by_personal_name_needs_acquaintance():
-    """«Передай Алексею» — владелец как обычный человек: без знакомства нельзя."""
     notifier = FakeNotifier()
     ctx = _ctx(
         chat_id=PLAIN_GUEST_CHAT,
@@ -756,7 +674,6 @@ async def test_owner_by_personal_name_needs_acquaintance():
     assert "не знакомы" in result and "владельцу" in result
     assert notifier.sent == []
 
-    # А по роли — тому же человеку, тем же гостем, без знакомства.
     result = await ai_tools.tool_tell(
         ctx, {"recipient_id": OWNER_CHAT, "to_owner_role": True, "text": "привет"}
     )
@@ -800,9 +717,6 @@ def _twins_book() -> SubscriptionBook:
             )
         ],
     )
-
-
-# --- Этап 54.4: find_person — id по описанию, только среди допустимых -----
 
 
 def _find_ctx(chat_id, acquainted, **over):
@@ -866,8 +780,6 @@ async def test_find_person_owner_sees_all_guests():
 
 
 async def test_find_person_nick_wins_over_surrounding_words():
-    """Живая находка 2026-10-09: «Александр Сергеевич Севбо @ksytal_as»
-    целиком не совпадал ни с одной меткой — @ник ищется отдельно."""
     book = SubscriptionBook.from_config(
         [SubscriptionConfig(name="owner", chat_id=OWNER_CHAT, allowed_commands=["*"])],
         [
@@ -887,8 +799,6 @@ async def test_find_person_nick_wins_over_surrounding_words():
 
 
 async def test_find_person_by_words_and_cyrillic_nick():
-    """Живая находка 2026-10-09: «Андрей который кейн» — ни целиком, ни по
-    основам; по отдельным словам и транслиту «кейн» → @kein находится."""
     book = SubscriptionBook.from_config(
         [SubscriptionConfig(name="owner", chat_id=OWNER_CHAT, allowed_commands=["*"])],
         [
@@ -920,7 +830,6 @@ async def test_find_person_for_acquaintance_points_to_request_acquaintance():
 
 
 def _cards() -> PeopleBook:
-    """Одна карточка: прозвище «Мила» у FAMILY_B_CHAT, женщина — сама сказала."""
     return people_book(
         _twins_book(), {FAMILY_B_CHAT: {"gender": "f", "alias": ["Мила"]}}, by_id=FAMILY_B_CHAT
     )
@@ -957,11 +866,7 @@ async def test_tell_owner_role_flag_requires_the_owner_id():
     assert result.startswith("ошибка: to_owner_role")
 
 
-# --- живой баг 2026-09-28: «передай маме» → модель угадала не того -------
-
-
 async def test_refusal_lists_acquaintances_with_ids_and_id_resolves():
-    """Отказ/«не знаю» подсказывает знакомых с id; повтор по id — доходит."""
     notifier = FakeNotifier()
     ctx = _ctx(
         chat_id=OWNER_CHAT,
@@ -998,16 +903,9 @@ async def test_id_of_non_acquaintance_still_refused():
 
 
 async def test_guests_list_shows_card_name_first_with_nick():
-    """Живые находки 2026-10-09/10: брат владельца был в списке как «Kein»,
-    а с именем в «ещё: …» модель его всё равно не нашла — имя читает по
-    началу строки. Имя из карточки — первым, подпись подписки — в «ещё»."""
     book = SubscriptionBook.from_config(
         [SubscriptionConfig(name="me", chat_id=1, allowed_commands=["*"])],
-        [
-            GuestSubscriptionConfig(
-                name="Kein", chat_id=ANDREY_CHAT, allowed_commands=["chat@llm"]
-            )
-        ],
+        [GuestSubscriptionConfig(name="Kein", chat_id=ANDREY_CHAT, allowed_commands=["chat@llm"])],
     )
     ctx = _ctx(book=book)
     result = await ai_tools.tool_guests_list(ctx, {})
@@ -1017,8 +915,6 @@ async def test_guests_list_shows_card_name_first_with_nick():
 
 
 async def test_find_person_finds_brother_by_card_name_not_namesake():
-    """Живая находка 2026-10-10: «Андрей Севбо» — брат владельца в подписке
-    «Kein», рядом гость Andrey (@AndreyPietilya). Карточка решает, кто есть кто."""
     book = SubscriptionBook.from_config(
         [SubscriptionConfig(name="me", chat_id=1, allowed_commands=["*"])],
         [

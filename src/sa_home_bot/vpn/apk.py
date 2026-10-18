@@ -1,17 +1,6 @@
-"""Клиент GitHub Releases для официального APK AmneziaWG — сетевой слой
-кэша, который держит vpn/service.py.
-
-Только ``urllib`` + ``asyncio.to_thread`` (как net/searxng.py и llm/ollama.py
-— в проекте сознательно нет httpx/aiohttp). Свежесть проверяется через API
-на КАЖДЫЙ запрос гостя (с коротким memo в самой службе — см.
-VpnService._apk_info), а не по расписанию: кэш на jeeves — это ускоритель
-доставки, а не источник правды о версии.
-"""
-
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import shutil
 import urllib.error
@@ -19,25 +8,21 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from sa_home_bot.utils.http import get_json
+
 log = logging.getLogger(__name__)
 
 _HEADERS = {"User-Agent": "sa-home-bot", "Accept": "application/vnd.github+json"}
 
 
 class ApkFetchError(RuntimeError):
-    """GitHub недоступен/ответил не тем — не значит, что кэша нет вовсе."""
-
-
-def _get_json_sync(url: str, timeout: float) -> Any:
-    req = urllib.request.Request(url, headers=_HEADERS)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — GitHub API, https
-        return json.loads(resp.read())
+    pass
 
 
 def latest_release_sync(repo: str, timeout: float) -> dict[str, Any]:
     url = f"https://api.github.com/repos/{repo}/releases/latest"
     try:
-        payload = _get_json_sync(url, timeout)
+        payload = get_json(url, timeout, _HEADERS)
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         raise ApkFetchError(str(exc)) from exc
     if not isinstance(payload, dict):
@@ -53,8 +38,6 @@ def pick_apk_asset(assets: list[Any]) -> dict[str, Any] | None:
 
 
 def asset_sha256(asset: dict[str, Any]) -> str | None:
-    """sha256 из поля ``digest`` (``"sha256:...."``) — GitHub его отдаёт не
-    для всех релизов; отсутствие не ошибка, тогда сверяем только размер."""
     digest = asset.get("digest")
     if isinstance(digest, str) and digest.startswith("sha256:"):
         return digest.removeprefix("sha256:")
@@ -63,7 +46,7 @@ def asset_sha256(asset: dict[str, Any]) -> str | None:
 
 def download_sync(url: str, dest: Path, timeout: float) -> None:
     req = urllib.request.Request(url, headers=_HEADERS)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — GitHub, https
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         with open(dest, "wb") as f:
             shutil.copyfileobj(resp, f)
 

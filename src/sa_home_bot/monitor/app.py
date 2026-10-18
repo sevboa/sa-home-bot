@@ -1,10 +1,3 @@
-"""Сборка и жизненный цикл службы monitor (отдельный процесс).
-
-Монитор владеет датчиками, порогами, планировщиком и собственной БД; наружу —
-только протокол v0 (unix-сокет): get_state, command scan_now, поток событий.
-Telegram он не знает; доставка людям — забота бота-клиента.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -30,24 +23,19 @@ log = logging.getLogger(__name__)
 
 
 async def run_monitor(settings: Settings) -> None:
-    # 1. Своя БД монитора (не БД бота) + миграции.
     db = Database(settings.monitor.db_path)
     await db.open()
     await apply_migrations(db)
     store = Store(db)
 
-    # 2. Датчики, очередь, proto-сервер.
     sensors = SensorSource(settings.sensors)
     queue = DedupQueue()
     service = MonitorService(settings, store, queue)
     server = ProtoServer(settings.monitor.socket, service, token=settings.swarm.token)
-    # Обработчики сигналов — до start(): он ждёт появления своего адреса
-    # (см. proto/server.py), и всё это время остановка иначе не обрабатывалась бы.
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
     await server.start()
 
-    # 3. Worker: события уходят broadcast'ом по протоколу.
     ctx = JobContext(
         store=store,
         sensors=sensors,
@@ -57,8 +45,6 @@ async def run_monitor(settings: Settings) -> None:
     worker = JobWorker(queue, ctx)
     worker_task = asyncio.create_task(worker.run(), name="job-worker")
 
-    # 4. Scheduler + разовые снимки на старте (baseline и кэш дисков сразу,
-    # не через минуту ожидания первого тика scan_cron).
     scheduler = build_scheduler()
     register_jobs(scheduler, queue, settings)
     scheduler.start()

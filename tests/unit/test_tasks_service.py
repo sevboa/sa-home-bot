@@ -1,26 +1,12 @@
-"""Служба tasks: прогрев заранее и срабатывание отложенной задачи.
-
-Живая находка 2026-07-27 (инцидент 19:34-19:39, напоминание не доставлено):
-тестов на эту службу не было вовсе, и три дефекта дожили до прода — WoL из
-неё не уходил никогда, на сроке она сдавалась за 6 секунд без единой попытки
-разбудить цель, а прогрев и срабатывание одной задачи гонялись наперегонки.
-Здесь зафиксировано поведение после разбора.
-"""
-
 from __future__ import annotations
 
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 
-import pytest_asyncio
-
 from sa_home_bot import wake_core
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.config import GuestSubscriptionConfig, Settings
-from sa_home_bot.db.connection import Database
-from sa_home_bot.db.migrations import apply_migrations
-from sa_home_bot.db.store import Store
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     ERR_UNAVAILABLE,
@@ -33,8 +19,6 @@ from sa_home_bot.tasks.service import TasksService
 
 WINPC_WAKE = {"mac": "04:92:26:da:63:7c", "ip": "192.168.0.105", "broadcast": "192.168.0.255"}
 
-# Своя нода видит спящую winpc: связи нет, но реквизиты WoL известны с её
-# последнего hello (node/peers.py::PeerLink.wake_info).
 OWN_STATE = {
     "node": "alfred",
     "wake": {"mac": "7c:83:34:b4:59:ac", "ip": "192.168.0.100", "broadcast": "192.168.0.255"},
@@ -85,15 +69,6 @@ class FakeEmitter:
         return [d for t, d in self.events if t == protocol.EVENT_TASK_RESULT]
 
 
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    db = Database(tmp_path / "test.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
-
-
 def _chat_row(task_id: int = 1, timeout_s: float = 60.0) -> dict:
     return {
         "id": task_id,
@@ -111,7 +86,6 @@ def _service(store, link, emitter):
 
 
 async def test_create_defaults_timeout_to_llm_budget(store):
-    # Прежний дефолт 60с не покрывал даже одного прохода chat_loop.
     svc = _service(store, FakeNodeLink(OWN_STATE), FakeEmitter())
     due = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat()
     await svc.run_command(
@@ -128,8 +102,6 @@ async def test_create_defaults_timeout_to_llm_budget(store):
 
 
 async def test_fire_wakes_sleeping_node_and_delivers(store, monkeypatch):
-    # Главный сценарий инцидента: на сроке цель спит. Раньше это давало
-    # мгновенное «пропущено», теперь служба сама будит её и доставляет.
     async def fake_chat_loop(*args, **kwargs):
         return "Блины ждут, сэг"
 
@@ -139,7 +111,7 @@ async def test_fire_wakes_sleeping_node_and_delivers(store, monkeypatch):
 
     await _service(store, link, emitter)._fire_one(_chat_row())
 
-    assert "send_wol" in link.commands  # magic packet реально ушёл
+    assert "send_wol" in link.commands
     assert emitter.results() == [
         {
             "task_id": 1,
@@ -151,9 +123,6 @@ async def test_fire_wakes_sleeping_node_and_delivers(store, monkeypatch):
 
 
 async def test_fire_chat_loop_emits_tool_call_with_args_and_result(store, monkeypatch):
-    # Живой баг 2026-08-05: раньше EVENT_TOOL_CALL нёс только {"name": ...} —
-    # кнопке «развернуть» на стороне бота (bot/node_events.py) было нечего
-    # показывать. args/result теперь должны доехать вместе с именем.
     async def fake_chat_loop(*args, **kwargs):
         await kwargs["on_tool_call"]("calc", {"expression": "1+1"}, "2")
         return "готово"
@@ -169,10 +138,6 @@ async def test_fire_chat_loop_emits_tool_call_with_args_and_result(store, monkey
 
 
 async def test_fire_chat_loop_restores_woken_by_from_meta(store, monkeypatch):
-    # Живой инцидент 2026-08-05: модель, разбуженная по (node, event_type),
-    # заново ставила remind на то же самое событие — бесконечный цикл.
-    # ToolContext.woken_by должен быть восстановлен из meta, иначе
-    # tool_remind нечем сверять запрет (см. bot/tools.py::tool_remind).
     captured: dict = {}
 
     async def fake_chat_loop(*args, **kwargs):
@@ -199,10 +164,6 @@ async def test_fire_chat_loop_restores_woken_by_from_meta(store, monkeypatch):
 
 
 async def test_fire_chat_loop_restores_message_thread_id_from_meta(store, monkeypatch):
-    # Живой баг 2026-08-05 (второй заход): без восстановления отсюда
-    # ЭТА задача-продолжение теряла топик уже после первого self-scheduled
-    # прыжка remind (следующий шаг цепочки обновления роя уезжал бы в
-    # meta["message_thread_id"]=None у СЛЕДУЮЩЕЙ задачи).
     captured: dict = {}
 
     async def fake_chat_loop(*args, **kwargs):
@@ -238,17 +199,12 @@ async def test_fire_chat_loop_woken_by_none_without_awaited_meta(store, monkeypa
     link = FakeNodeLink(OWN_STATE, routes={"winpc:llm": {"asleep": False}})
     svc = _service(store, link, FakeEmitter())
 
-    await svc._fire_one(_chat_row())  # META без awaited_node/awaited_event
+    await svc._fire_one(_chat_row())
 
     assert captured["tool_ctx"].woken_by is None
 
 
 async def test_fire_chat_loop_wires_book_and_emit_bridge(store, monkeypatch):
-    # Живая находка 2026-08-06: tell/notify_guest, вызванные ИЗ сработавшей
-    # chat_loop-задачи (self-scheduled remind), падали в "недоступно" — у
-    # ToolContext не было ни book, ни моста доставки, хотя своя
-    # SubscriptionBook (self._book) и своя очередь событий (self._emit) у
-    # службы уже есть, просто не прокидывались дальше.
     captured: dict = {}
 
     async def fake_chat_loop(*args, **kwargs):
@@ -272,14 +228,6 @@ async def test_fire_chat_loop_wires_book_and_emit_bridge(store, monkeypatch):
 
 
 def test_book_includes_guest_subscriptions_not_just_owner(store):
-    # Живой баг 2026-08-06 (инцидент с задачей id=129 на alfred): self._book
-    # строился только из settings.subscriptions — без settings.
-    # guest_subscriptions ни один гость не попадал в книгу remind-
-    # продолжений. Незаметно, пока ctx.book вообще не доходил до тулов; как
-    # только он стал доступен (см. _fire_chat_loop), guests_list внутри
-    # remind начал честно, но неверно отвечать "гостей с такими условиями
-    # нет" — тот же конфиг, что app.py:67 собирает книгу бота с ОБОИМИ
-    # аргументами.
     settings = Settings(
         guest_subscriptions=[
             GuestSubscriptionConfig(name="Гость", chat_id=999, allowed_commands=["chat@llm"])
@@ -291,25 +239,20 @@ def test_book_includes_guest_subscriptions_not_just_owner(store):
 
 
 async def test_fire_gives_up_after_grace(store, monkeypatch):
-    # Цель не поднялась за отведённое время — честное «пропущено», но лишь
-    # после повторных попыток, а не с первой presence-проверки.
     monkeypatch.setattr(tasks_service, "FIRE_GRACE_S", 0.05)
     monkeypatch.setattr(tasks_service, "FIRE_RETRY_INTERVAL_S", 0.01)
     monkeypatch.setattr(wake_core, "WAKE_POLL_TIMEOUT_S", 0.0)
-    link = FakeNodeLink(OWN_STATE)  # WoL уходит, но служба так и не появляется
+    link = FakeNodeLink(OWN_STATE)
     emitter = FakeEmitter()
 
     await _service(store, link, emitter)._fire_one(_chat_row())
 
-    assert link.commands.count("send_wol") >= 2  # именно повторяли, а не сдались сразу
+    assert link.commands.count("send_wol") >= 2
     assert emitter.results()[0]["ok"] is False
-    assert emitter.statuses() == ["waking"]  # «шаги» показаны ровно один раз
+    assert emitter.statuses() == ["waking"]
 
 
 async def test_fire_waits_for_inflight_prewake(store, monkeypatch):
-    # Задача со сроком ближе PREWAKE_LEAD_S получает прогрев и срабатывание
-    # почти одновременно: fire обязан дождаться прогрева, а не читать
-    # presence посреди него.
     order: list[str] = []
 
     async def slow_prewake(row):
@@ -329,7 +272,7 @@ async def test_fire_waits_for_inflight_prewake(store, monkeypatch):
     row = _chat_row()
     job = asyncio.create_task(svc._prewake_one_safe(row))
     svc._prewake_inflight[row["id"]] = job
-    await asyncio.sleep(0)  # дать прогреву стартовать
+    await asyncio.sleep(0)
     await svc._fire_one(row)
     await job
 
@@ -337,8 +280,6 @@ async def test_fire_waits_for_inflight_prewake(store, monkeypatch):
 
 
 async def test_prewake_failure_is_not_reported_as_final(store, monkeypatch):
-    # Прогрев — лишь оптимизация: его неудача не должна выглядеть для
-    # пользователя как проигранная задача, впереди ещё попытки на сроке.
     monkeypatch.setattr(wake_core, "WAKE_POLL_TIMEOUT_S", 0.0)
     emitter = FakeEmitter()
     svc = _service(store, FakeNodeLink(OWN_STATE), emitter)
@@ -356,11 +297,8 @@ async def test_prewake_is_silent_when_target_already_warm(store):
 
     await _service(store, link, emitter)._prewake_one(_chat_row())
 
-    assert emitter.events == []  # ни «шагов», ни WoL — показывать нечего
+    assert emitter.events == []
     assert link.commands == []
-
-
-# --- fire_now: разбудить задачу по событию, а не по due_at (remind after_event) ---
 
 
 async def test_fire_now_fires_pending_task_before_due_at(store, monkeypatch):
@@ -387,7 +325,7 @@ async def test_fire_now_fires_pending_task_before_due_at(store, monkeypatch):
     result = await svc.run_command(protocol.ACTION_FIRE_NOW, {"task_id": task_id})
     assert result == {"fired": True}
     for _ in range(10):
-        await asyncio.sleep(0)  # дать фоновой задаче (asyncio.create_task) выполниться
+        await asyncio.sleep(0)
 
     assert emitter.results() == [
         {
@@ -397,14 +335,10 @@ async def test_fire_now_fires_pending_task_before_due_at(store, monkeypatch):
             "result": {"response": "разбужен по событию"},
         }
     ]
-    # due_at не наступил — обычный опрос очереди не должен найти её снова.
     assert await store.due_tasks(datetime.now(tz=UTC)) == []
 
 
 async def test_fire_chat_loop_passes_reason_from_task_args(store, monkeypatch):
-    # С v0.97.0 задача хранит намерение-уровень reason (перевод в параметр
-    # Ollama — профиль модели на стороне службы llm). Оно должно пройти
-    # JSON-круг и доехать до run_chat_loop как есть.
     captured: dict = {}
 
     async def fake_chat_loop(node_link, dst, timeout, messages, tool_ctx, reason, **kwargs):
@@ -425,8 +359,6 @@ async def test_fire_chat_loop_passes_reason_from_task_args(store, monkeypatch):
 
 
 async def test_fire_chat_loop_maps_legacy_think_to_reason(store, monkeypatch):
-    # Задачи, сохранённые до v0.97.0, несут булев think — маппим для
-    # совместимости: False → "off", всё прочее → "high".
     captured: dict = {}
 
     async def fake_chat_loop(node_link, dst, timeout, messages, tool_ctx, reason, **kwargs):
@@ -447,9 +379,6 @@ async def test_fire_chat_loop_maps_legacy_think_to_reason(store, monkeypatch):
 
 
 async def test_fire_chat_loop_retries_transient_unavailable_then_succeeds(store, monkeypatch):
-    # Решение пользователя 2026-08-05: сбой "модель недоступна прямо сейчас"
-    # не должен сразу сдаваться "не нашли Альфреда" — есть время до
-    # deadline, стоит повторить.
     monkeypatch.setattr(tasks_service, "FIRE_RETRY_INTERVAL_S", 0.01)
     attempts: list[int] = []
 
@@ -491,13 +420,11 @@ async def test_fire_chat_loop_gives_up_after_grace_on_persistent_unavailable(sto
 
     await _service(store, link, emitter)._fire_one(_chat_row())
 
-    assert len(attempts) >= 2  # именно повторяли, а не сдались с первого раза
+    assert len(attempts) >= 2
     assert emitter.results()[0]["ok"] is False
 
 
 async def test_fire_chat_loop_does_not_retry_deterministic_bad_request(store, monkeypatch):
-    # Ошибка в самом запросе (например, наш собственный баг с think) —
-    # повтор её не лечит, только жжёт бюджет: должен упасть с первой попытки.
     monkeypatch.setattr(tasks_service, "FIRE_GRACE_S", 5.0)
     monkeypatch.setattr(tasks_service, "FIRE_RETRY_INTERVAL_S", 0.01)
     attempts: list[int] = []
@@ -517,9 +444,6 @@ async def test_fire_chat_loop_does_not_retry_deterministic_bad_request(store, mo
 
 
 async def test_fire_chat_loop_retries_on_unavailable_proto_error_code(store, monkeypatch):
-    # ERR_UNAVAILABLE от службы llm классифицируется как переходный сбой
-    # ровно как и ServiceUnavailableError (bot/ai_flow.py::_is_unavailable —
-    # та же классификация, дублирована в tasks/service.py).
     monkeypatch.setattr(tasks_service, "FIRE_RETRY_INTERVAL_S", 0.01)
     attempts: list[int] = []
 
@@ -550,7 +474,7 @@ async def test_fire_chat_loop_defaults_reason_high_when_task_args_bare(store, mo
     link = FakeNodeLink(OWN_STATE, routes={"winpc:llm": {"asleep": False}})
     svc = _service(store, link, FakeEmitter())
 
-    row = _chat_row()  # args_json без reason/think — дефолт "high"
+    row = _chat_row()
     await svc._fire_one(row)
 
     assert captured["reason"] == "high"
@@ -602,9 +526,6 @@ async def test_fire_now_rejects_non_int_task_id(store):
         raise AssertionError("ожидался ProtoError")
 
 
-# --- await_event/match_event: ждать событие роя, не будильник (remind after_event) ---
-
-
 async def test_create_with_await_event_registers_waiter(store):
     svc = _service(store, FakeNodeLink(OWN_STATE), FakeEmitter())
     due = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat()
@@ -648,7 +569,7 @@ async def test_create_rejects_malformed_await_event(store):
                 "dst_node": "winpc",
                 "dst_service": "llm",
                 "action": protocol.ACTION_CHAT_LOOP,
-                "await_event": {"node": "arch-t480"},  # без event_type
+                "await_event": {"node": "arch-t480"},
             },
         )
     except ProtoError as exc:
@@ -694,7 +615,6 @@ async def test_match_event_fires_matching_waiter(store, monkeypatch):
             "result": {"response": "продолжаю по плану"},
         }
     ]
-    # Снята — второй такой же событие уже не найдёт задачу снова.
     second = await svc.run_command(
         protocol.ACTION_MATCH_EVENT, {"node": "arch-t480", "event_type": "update_finished"}
     )
@@ -726,7 +646,6 @@ async def test_match_event_wrong_node_does_not_fire(store):
         protocol.ACTION_MATCH_EVENT, {"node": "mycraft", "event_type": "update_finished"}
     )
     assert result == {"matched": False}
-    # Ожидание arch-t480 всё ещё на месте.
     assert await store.pop_event_waiter_for("arch-t480", "update_finished") is not None
 
 
@@ -741,8 +660,6 @@ async def test_match_event_rejects_missing_args(store):
 
 
 async def test_fire_due_cleans_up_leftover_waiter_on_timeout(store, monkeypatch):
-    # Событие так и не пришло — сработала по due_at. Строка ожидания не
-    # должна остаться мёртвой навсегда.
     async def fake_chat_loop(*args, **kwargs):
         return "не подтвердилось, но всё равно продолжаю"
 
@@ -758,7 +675,7 @@ async def test_fire_due_cleans_up_leftover_waiter_on_timeout(store, monkeypatch)
         {"messages": [{"role": "user", "content": "x"}]},
         60.0,
         META,
-        now - timedelta(seconds=1),  # уже просрочено
+        now - timedelta(seconds=1),
         now,
     )
     await store.add_event_waiter(task_id, "arch-t480", "update_finished", now)
@@ -768,9 +685,6 @@ async def test_fire_due_cleans_up_leftover_waiter_on_timeout(store, monkeypatch)
         await asyncio.sleep(0)
 
     assert await store.pop_event_waiter_for("arch-t480", "update_finished") is None
-
-
-# --- timer: чистый будильник (Этап 45, экспирация форм подтверждения) ---
 
 
 async def test_timer_fires_result_without_touching_dst(store):
@@ -789,5 +703,5 @@ async def test_timer_fires_result_without_touching_dst(store):
         await asyncio.sleep(0)
 
     assert emitter.results() == [{"task_id": task_id, "meta": meta, "ok": True, "result": {}}]
-    assert emitter.statuses() == []  # будильнику будить некого
+    assert emitter.statuses() == []
     assert link.commands == []

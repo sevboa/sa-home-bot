@@ -1,7 +1,3 @@
-"""bot/rich_stream.py: RichStreamSession (этап 34, Фаза 2 — Rich-стрим
-ответов Альфреда). notify_admins/Notifier плейн-путь не трогается здесь —
-см. test_ai_handler.py."""
-
 from __future__ import annotations
 
 import asyncio
@@ -15,8 +11,6 @@ from sa_home_bot.bot import notifier as notifier_module
 from sa_home_bot.bot import rich_stream as rich_stream_module
 from sa_home_bot.bot.rich_stream import ALFRED_PREFIX_MD, RichDraftPolicy, RichStreamSession
 
-# Этап 34.3: ограничитель выключен — для тестов механики, не троттлинга
-# (дедуп, форма пейлоада, ретраи финала). keep-alive — далеко за концом теста.
 FAST = RichDraftPolicy(min_interval_s=0.0, min_growth_chars=0, keepalive_idle_s=3600.0)
 
 
@@ -37,14 +31,10 @@ class FakeBot:
         self.rich_calls = 0
         self._next_id = 1
         self.typing_actions: list[int] = []
-        # Этап 34.3: общий журнал вызовов по порядку — для проверки, что
-        # после финала не всплывает черновик/typing.
         self.events: list[str] = []
         self.draft_retry_after_times = 0
         self.draft_retry_after_s: float = 5
-        # Если задан — отправка черновика «висит» на нём (как медленная сеть).
         self.draft_gate: asyncio.Future | None = None
-        # Вызывается в начале send_rich_message — снимок состояния сессии.
         self.on_rich = None
 
     async def send_rich_message_draft(
@@ -112,8 +102,6 @@ def fast_retry_sleep(monkeypatch):
 
 @pytest.fixture(autouse=True)
 async def cancel_leftover_tasks():
-    # Фоновая задача сессии (_pump, этап 34.3) живёт до finalize/aclose;
-    # тесты механики её не закрывают — гасим, чтобы не текла между тестами.
     yield
     current = asyncio.current_task()
     leftovers = [t for t in asyncio.all_tasks() if t is not current]
@@ -131,8 +119,6 @@ class FakeClock:
 
 
 async def _wait_until(cond, timeout: float = 2.0) -> None:
-    # asyncio.sleep в этом модуле подменён (fast_retry_sleep) и не отдаёт
-    # управление — ждём настоящим таймером цикла событий.
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while not cond():
@@ -166,10 +152,10 @@ async def test_on_partial_skips_unchanged_and_empty_text():
     bot = FakeBot()
     session = RichStreamSession(bot, chat_id=1, policy=FAST)
 
-    await session.on_partial("", done=False)  # пусто — пропуск
+    await session.on_partial("", done=False)
     await session.on_partial("текст", done=False)
-    await session.on_partial("текст", done=False)  # не изменилось — пропуск
-    await session.on_partial("текст ещё", done=True)  # done игнорируется здесь
+    await session.on_partial("текст", done=False)
+    await session.on_partial("текст ещё", done=True)
 
     assert [d["markdown"] for d in bot.drafts] == [
         ALFRED_PREFIX_MD + "текст",
@@ -182,30 +168,23 @@ async def test_on_partial_swallows_telegram_errors():
     bot.draft_fails_times = 1
     session = RichStreamSession(bot, chat_id=1)
 
-    await session.on_partial("текст", done=False)  # не бросает
+    await session.on_partial("текст", done=False)
 
     assert bot.drafts == []
 
 
 async def test_on_partial_swallows_network_errors():
-    # Живая находка 2026-08-29: реальный сбой в проде был не TelegramAPIError,
-    # а aiohttp_socks.ProxyTimeoutError (зависший SOCKS-прокси до Telegram) —
-    # обычный Exception без общего предка с TelegramAPIError. Раньше он
-    # улетал наверх и ронял весь /ai-ответ ещё до обращения к модели.
     bot = FakeBot()
     bot.draft_fails_times = 1
     bot.draft_fail_exception = ConnectionError("proxy timed out: 60")
     session = RichStreamSession(bot, chat_id=1)
 
-    await session.on_partial("текст", done=False)  # не бросает
+    await session.on_partial("текст", done=False)
 
     assert bot.drafts == []
 
 
 async def test_push_status_sends_thinking_block():
-    # Blocks вместо markdown — Telegram сам рисует серую анимацию для
-    # InputRichBlockThinking, оборачивать текст самим (курсив и т.п.) не
-    # нужно и нельзя (это отдельный тип блока, не markdown-разметка).
     bot = FakeBot()
     session = RichStreamSession(bot, chat_id=1)
 
@@ -220,7 +199,7 @@ async def test_push_status_dedups_consecutive_identical_status():
     session = RichStreamSession(bot, chat_id=1, policy=FAST)
 
     await session.push_status("Альфред думает")
-    await session.push_status("Альфред думает")  # не изменилось — пропуск
+    await session.push_status("Альфред думает")
     await session.push_status("Альфред сёрфит")
 
     assert [d["blocks"] for d in bot.drafts] == [
@@ -230,13 +209,11 @@ async def test_push_status_dedups_consecutive_identical_status():
 
 
 async def test_push_status_and_on_partial_share_dedup_state():
-    # Общий self._last_sent между двумя путями (md vs think) — но сигнатуры
-    # разного вида, поэтому одинаковый сырой текст не гасит второй вызов.
     bot = FakeBot()
     session = RichStreamSession(bot, chat_id=1, policy=FAST)
 
-    await session.push_status("текст")  # thinking-блок
-    await session.on_partial("текст", done=False)  # markdown — не дедупится
+    await session.push_status("текст")
+    await session.on_partial("текст", done=False)
 
     assert bot.drafts[0]["blocks"] == [InputRichBlockThinking(text="текст")]
     assert bot.drafts[1]["markdown"] == ALFRED_PREFIX_MD + "текст"
@@ -247,21 +224,18 @@ async def test_push_status_swallows_telegram_errors():
     bot.draft_fails_times = 1
     session = RichStreamSession(bot, chat_id=1)
 
-    await session.push_status("статус")  # не бросает
+    await session.push_status("статус")
 
     assert bot.drafts == []
 
 
 async def test_push_status_swallows_network_errors():
-    # См. test_on_partial_swallows_network_errors — тот же класс бага: это
-    # именно тот путь (ai_flow.py::_announce_steps/_on_phase_change), который
-    # реально падал в проде до статуса ответа модели.
     bot = FakeBot()
     bot.draft_fails_times = 1
     bot.draft_fail_exception = ConnectionError("proxy timed out: 60")
     session = RichStreamSession(bot, chat_id=1)
 
-    await session.push_status("статус")  # не бросает
+    await session.push_status("статус")
 
     assert bot.drafts == []
 
@@ -284,7 +258,7 @@ async def test_finalize_sends_rich_message_with_reply_and_prefix():
     assert sent is not None
     assert bot.sent[0]["chat_id"] == 42
     assert bot.sent[0]["message_thread_id"] == 9
-    assert bot.sent[0]["markdown"] == ALFRED_PREFIX_MD + "ответ"  # .strip()
+    assert bot.sent[0]["markdown"] == ALFRED_PREFIX_MD + "ответ"
     assert bot.sent[0]["reply_parameters"].message_id == 100
 
 
@@ -305,12 +279,12 @@ async def test_finalize_retries_on_429():
     sent = await session.finalize("ответ")
 
     assert sent is not None
-    assert len(bot.sent) == 1  # одна успешная попытка после ретрая
+    assert len(bot.sent) == 1
 
 
 async def test_finalize_gives_up_after_exhausting_retries():
     bot = FakeBot()
-    bot.retry_after_times = notifier_module.MAX_RETRIES  # больше, чем попыток
+    bot.retry_after_times = notifier_module.MAX_RETRIES
     session = RichStreamSession(bot, chat_id=1)
 
     sent = await session.finalize("ответ")
@@ -320,12 +294,9 @@ async def test_finalize_gives_up_after_exhausting_retries():
 
 
 async def test_finalize_retries_transient_network_error_then_succeeds():
-    # Живая находка 2026-08-30: транзиентный сбой связи до Telegram (не 429,
-    # напр. зависший SOCKS-прокси — ConnectionError) раньше давал None с
-    # первой попытки и молча терял готовый ответ модели. Теперь ретраится.
     bot = FakeBot()
     bot.rich_fail_exception = ConnectionError("proxy timed out: 60")
-    bot.rich_fails_times = 2  # два обрыва, третья попытка проходит
+    bot.rich_fails_times = 2
     session = RichStreamSession(bot, chat_id=1)
 
     sent = await session.finalize("ответ")
@@ -338,7 +309,7 @@ async def test_finalize_retries_transient_network_error_then_succeeds():
 async def test_finalize_gives_up_after_exhausting_transient_retries():
     bot = FakeBot()
     bot.rich_fail_exception = ConnectionError("proxy timed out: 60")
-    bot.rich_fails_times = 99  # ни одна попытка не пройдёт
+    bot.rich_fails_times = 99
     session = RichStreamSession(bot, chat_id=1)
 
     sent = await session.finalize("ответ")
@@ -349,9 +320,6 @@ async def test_finalize_gives_up_after_exhausting_transient_retries():
 
 
 async def test_finalize_does_not_retry_permanent_bad_request():
-    # Bot API отверг саму rich-разметку — повтор того же payload не поможет,
-    # сдаёмся сразу (вызывающий деградирует формат, см. ai.py::
-    # _send_alfred_reply_rich).
     bot = FakeBot()
     bot.rich_fail_exception = TelegramBadRequest(method=None, message="can't parse entities")
     bot.rich_fails_times = 1
@@ -364,8 +332,6 @@ async def test_finalize_does_not_retry_permanent_bad_request():
 
 
 async def test_finalize_status_sends_without_prefix_or_reply():
-    # Реплика другого персонажа (Агнольда) — не Альфреда: без
-    # ALFRED_PREFIX_MD и без привязки к конкретному сообщению пользователя.
     bot = FakeBot()
     session = RichStreamSession(bot, chat_id=42, message_thread_id=9)
 
@@ -379,11 +345,6 @@ async def test_finalize_status_sends_without_prefix_or_reply():
 
 
 async def test_finalize_status_resets_dedup_so_next_status_is_not_swallowed():
-    # Живая находка 2026-08-10 (третий заход): finalize_status вытесняет
-    # активный черновик реальным сообщением — следующий push_status с ТЕМ ЖЕ
-    # текстом, что был в черновике до неё, должен всё равно уйти, а не молча
-    # пропасть из-за дедупа (черновик, к которому относился дедуп, уже не
-    # тот, что на экране).
     bot = FakeBot()
     session = RichStreamSession(bot, chat_id=1, policy=FAST)
 
@@ -397,34 +358,26 @@ async def test_finalize_status_resets_dedup_so_next_status_is_not_swallowed():
     ]
 
 
-# --- этап 34.3 (2026-09-30): щадящий стрим черновиков. Живая находка:
-# частая смена sendRichMessageDraft в личке вешает Telegram (особенно
-# Android), а у метода свой лимит строже editMessageText (429 с
-# retry_after ~5 с при ~1.3 с между черновиками). Решения «слать ли сейчас»
-# проверяются на FakeClock без фоновой задачи; то, что досылает сама
-# фоновая задача (_pump), — на настоящих коротких интервалах.
-
-
 async def test_text_drafts_throttled_by_interval_latest_wins():
     bot, clock = FakeBot(), FakeClock()
     policy = RichDraftPolicy(min_interval_s=6.0, min_growth_chars=0, keepalive_idle_s=3600.0)
     session = RichStreamSession(bot, chat_id=1, policy=policy, clock=clock)
 
-    await session.on_partial("a", done=False)  # первый черновик — сразу
+    await session.on_partial("a", done=False)
     clock.t += 1
-    await session.on_partial("ab", done=False)  # рано — в очередь
+    await session.on_partial("ab", done=False)
     clock.t += 1
-    await session.on_partial("abc", done=False)  # вытесняет "ab" в очереди
+    await session.on_partial("abc", done=False)
     assert [d["markdown"] for d in bot.drafts] == [ALFRED_PREFIX_MD + "a"]
 
-    clock.t += 4.5  # 6.5 с от первого
+    clock.t += 4.5
     await session.on_partial("abcd", done=False)
 
     assert [d["markdown"] for d in bot.drafts] == [
         ALFRED_PREFIX_MD + "a",
         ALFRED_PREFIX_MD + "abcd",
     ]
-    assert session._stats.coalesced == 2  # "ab" и "abc" так и не ушли
+    assert session._stats.coalesced == 2
     await session.aclose()
 
 
@@ -433,10 +386,10 @@ async def test_text_drafts_require_min_growth():
     policy = RichDraftPolicy(min_interval_s=0.0, min_growth_chars=10, keepalive_idle_s=3600.0)
     session = RichStreamSession(bot, chat_id=1, policy=policy, clock=clock)
 
-    await session.on_partial("x" * 5, done=False)  # первый кусок — без условия прироста
-    await session.on_partial("x" * 12, done=False)  # +7 — мало
-    await session.on_partial("x" * 15, done=False)  # +10 от показанного — пора
-    await session.on_partial("y" * 3, done=False)  # короче показанного: новый раунд — сразу
+    await session.on_partial("x" * 5, done=False)
+    await session.on_partial("x" * 12, done=False)
+    await session.on_partial("x" * 15, done=False)
+    await session.on_partial("y" * 3, done=False)
 
     assert [d["markdown"] for d in bot.drafts] == [
         ALFRED_PREFIX_MD + "x" * 5,
@@ -459,8 +412,6 @@ async def test_first_text_after_status_skips_growth_condition():
 
 
 async def test_single_limiter_shared_by_status_and_text():
-    # Статус и текст — один лимит Telegram на draft: текст сразу после
-    # статуса ждёт интервал, а не уходит вторым запросом подряд.
     bot, clock = FakeBot(), FakeClock()
     policy = RichDraftPolicy(min_interval_s=6.0, min_growth_chars=0, keepalive_idle_s=3600.0)
     session = RichStreamSession(bot, chat_id=1, policy=policy, clock=clock)
@@ -503,21 +454,21 @@ async def test_retry_after_pauses_all_drafts_and_keeps_content(caplog):
     session = RichStreamSession(bot, chat_id=1, policy=policy, clock=clock)
 
     with caplog.at_level(logging.WARNING, logger="sa_home_bot.bot.rich_stream"):
-        await session.push_status("шаги")  # 429 — не бросает, контент в очереди
+        await session.push_status("шаги")
     assert bot.drafts == []
     assert "429" in caplog.text
     assert session._pending is not None
 
     clock.t += 3
-    await session.on_partial("текст", done=False)  # ещё пауза — только в очередь
+    await session.on_partial("текст", done=False)
     assert bot.drafts == []
 
-    clock.t += 2.5  # retry_after истёк
+    clock.t += 2.5
     await session.on_partial("текст ещё", done=False)
     assert [d["markdown"] for d in bot.drafts] == [ALFRED_PREFIX_MD + "текст ещё"]
     assert session._stats.retry_after == 1
 
-    sent = await session.finalize("ответ")  # ответ не уронен
+    sent = await session.finalize("ответ")
     assert sent is not None
 
 
@@ -552,13 +503,11 @@ async def test_other_draft_failures_warned_with_limit(caplog, monkeypatch):
 
 
 async def test_keepalive_only_when_idle():
-    # Пока текст идёт, keep-alive не шлёт ничего сверх него; замолчал
-    # генератор — черновик освежается.
     bot = FakeBot()
     policy = RichDraftPolicy(min_interval_s=0.0, min_growth_chars=0, keepalive_idle_s=0.3)
     session = RichStreamSession(bot, chat_id=1, policy=policy)
 
-    for i in range(10):  # ~0.5 с активного стрима, дольше keepalive_idle_s
+    for i in range(10):
         await session.on_partial("x" * (i + 1), done=False)
         await _real_pause(0.05)
     assert session._stats.keepalive == 0
@@ -575,7 +524,7 @@ async def test_keepalive_flushes_small_tail_below_growth_threshold():
     session = RichStreamSession(bot, chat_id=1, policy=policy)
 
     await session.on_partial("a", done=False)
-    await session.on_partial("ab", done=False)  # +1 — ждёт
+    await session.on_partial("ab", done=False)
     await _wait_until(lambda: len(bot.drafts) >= 2)
 
     assert bot.drafts[1]["markdown"] == ALFRED_PREFIX_MD + "ab"
@@ -607,13 +556,11 @@ async def test_finalize_stops_pump_before_rich_message():
 
     assert snapshot == {"pump": None, "typing": None, "active": None}
     assert task.done()
-    await _real_pause(0.2)  # keep-alive, будь он жив, успел бы тикнуть
+    await _real_pause(0.2)
     assert bot.events == ["draft", "rich"]
 
 
 async def test_inflight_keepalive_cannot_land_after_final():
-    # Тик keep-alive завис на медленной сети ровно в момент финала —
-    # раньше он мог дойти до Telegram уже ПОСЛЕ реплики.
     bot = FakeBot()
     policy = RichDraftPolicy(min_interval_s=0.0, min_growth_chars=0, keepalive_idle_s=0.05)
     session = RichStreamSession(bot, chat_id=1, policy=policy)
@@ -621,10 +568,8 @@ async def test_inflight_keepalive_cannot_land_after_final():
     await session.push_status("шаги")
     loop = asyncio.get_running_loop()
     bot.draft_gate = loop.create_future()
-    await _real_pause(0.15)  # keep-alive стартовал и висит на draft_gate
+    await _real_pause(0.15)
     await session.finalize("ответ")
-    # Отмена фоновой задачи отменила и само ожидание отправки — если бы
-    # задача не была остановлена, открытый шлюз пропустил бы черновик.
     if not bot.draft_gate.done():
         bot.draft_gate.set_result(None)
     await _real_pause(0.1)
@@ -659,8 +604,8 @@ async def test_streaming_disabled_sends_only_typing_and_final(caplog):
 
     assert sent is not None
     assert bot.drafts == []
-    assert len(bot.typing_actions) == 1  # один старт, без перезапусков
-    assert snapshot == {"typing": None}  # typing погашен ДО финала
+    assert len(bot.typing_actions) == 1
+    assert snapshot == {"typing": None}
     assert bot.sent[0]["markdown"] == ALFRED_PREFIX_MD + "ответ"
     assert session._pump_task is None
 

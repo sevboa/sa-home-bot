@@ -1,13 +1,9 @@
-"""Карточка человека (Этап 58): PeopleBook, перенос в карточки, профиль
-Telegram из апдейтов."""
-
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
-import pytest_asyncio
 from aiogram.types import User
 
 from sa_home_bot.bot.middlewares import ProfileMiddleware
@@ -17,9 +13,6 @@ from sa_home_bot.config import (
     Settings,
     SubscriptionConfig,
 )
-from sa_home_bot.db.connection import Database
-from sa_home_bot.db.migrations import apply_migrations
-from sa_home_bot.db.store import Store
 from sa_home_bot.people import seed
 from sa_home_bot.people.book import PeopleBook, split_label
 from sa_home_bot.people.claims import ClaimError, build_cards, normalize_claim
@@ -31,15 +24,6 @@ OWNER = 188548043
 KEIN = 518571647
 PIETILYA = 348284076
 NATASHA = 1243270013
-
-
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    db = Database(tmp_path / "test.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
 
 
 def _book() -> SubscriptionBook:
@@ -56,9 +40,6 @@ def _book() -> SubscriptionBook:
             guest("Наташа Сорокина (@nava40a)", NATASHA),
         ],
     )
-
-
-# --- PeopleBook ----------------------------------------------------------
 
 
 def test_split_label():
@@ -117,9 +98,6 @@ def test_empty_book_falls_back_to_subscription():
     assert people.gender(NATASHA) is None
 
 
-# --- claims --------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("field", "raw", "value"),
     [
@@ -146,9 +124,6 @@ def test_build_cards_picks_single_fields():
     assert cards[1]["birth_date"] is None
 
 
-# --- перенос (58.2) --------------------------------------------------------
-
-
 def _settings() -> Settings:
     return Settings(
         people=[
@@ -162,7 +137,6 @@ def _settings() -> Settings:
                 birth_date="1990-04-29",
             ),
             PersonConfig(telegram_id=KEIN, full_name="Андрей Александрович Севбо", gender="m"),
-            # без id — по нику подписки
             PersonConfig(telegram_username="nava40a", full_name="Наталья Вадимовна", gender="f"),
         ]
     )
@@ -174,7 +148,7 @@ async def test_seed_local_moves_config_and_profiles_once(store):
     await store.record_ai_turn(KEIN, 1, 1, "user", "привет", now, KEIN, "Kein (@kein)")
 
     await seed.seed_local(store, _settings(), book, now)
-    await seed.seed_local(store, _settings(), book, now)  # второй раз — ничего
+    await seed.seed_local(store, _settings(), book, now)
 
     people = await PeopleBook.load(store, book)
     assert people.display(KEIN) == "Андрей Александрович Севбо (@kein)"
@@ -222,10 +196,7 @@ async def test_seed_from_graph_keeps_sources_and_retries_when_asleep(store):
     people = await PeopleBook.load(store, book)
     assert people.card(NATASHA)["gender"]["strength"] == "self"
     assert people.card(NATASHA)["aliases"][0]["by_id"] == OWNER
-    assert await seed.seed_from_graph(store, book, asleep) is True  # уже перенесено
-
-
-# --- профиль Telegram ----------------------------------------------------
+    assert await seed.seed_from_graph(store, book, asleep) is True
 
 
 async def test_profile_middleware_writes_only_on_change(store):
@@ -240,7 +211,7 @@ async def test_profile_middleware_writes_only_on_change(store):
     await middleware(handler, event, {})
     first = await store.person_profiles()
     await middleware(handler, event, {})
-    assert await store.person_profiles() == first  # seen_at не тронут — записи не было
+    assert await store.person_profiles() == first
 
     renamed = SimpleNamespace(
         from_user=User(id=KEIN, is_bot=False, first_name="Андрей", last_name="Севбо")

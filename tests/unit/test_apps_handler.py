@@ -1,7 +1,3 @@
-"""Голая команда-скилл приложения (bot/handlers/apps.py::cmd_app_skill):
-известная команда исполняется, неизвестная и скрытая (HIDDEN_MENU_APP_IDS)
-игнорируются одинаково молча."""
-
 from types import SimpleNamespace
 
 from sa_home_bot.bot.handlers.apps import cmd_app_skill
@@ -48,9 +44,6 @@ async def test_known_skill_runs():
 
 
 async def test_hidden_app_id_is_ignored_even_with_full_rights():
-    """qbittorrent убран из голого вызова (apps_view.HIDDEN_MENU_APP_IDS) —
-    доступен только кнопкой внутри /torrents; полный доступ (*) на это не
-    влияет, команда должна молчать так же, как незнакомая."""
     message = FakeMessage("/qbittorrent")
     link = FakeAppsLink()
     await cmd_app_skill(message, apps_link=link, subscription=_sub("*"))

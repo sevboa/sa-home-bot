@@ -2,11 +2,8 @@ import json
 from datetime import datetime, timedelta
 
 import pytest
-import pytest_asyncio
 
-from sa_home_bot.db.connection import Database
-from sa_home_bot.db.migrations import apply_migrations
-from sa_home_bot.db.store import NOTIF_ALERT, Store
+from sa_home_bot.db.store import NOTIF_ALERT
 from sa_home_bot.domain.models import (
     ALERTING,
     OK,
@@ -17,15 +14,6 @@ from sa_home_bot.domain.models import (
 )
 
 from .conftest import BASE_TIME, make_reading
-
-
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    db = Database(tmp_path / "test.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
 
 
 def _state(status, temp, since=None, count=0):
@@ -46,7 +34,7 @@ async def test_app_state_roundtrip(store):
 
 
 async def test_disk_summaries_roundtrip(store):
-    assert await store.get_disk_summaries() is None  # до первого SensorScanJob
+    assert await store.get_disk_summaries() is None
 
     disks = [
         DiskSummary("NVMe", "ok", 45.0, 100, 200, "Samsung 980", "nvme"),
@@ -60,19 +48,16 @@ async def test_disk_summaries_roundtrip(store):
 
 
 async def test_apply_diff_insert_then_alert_pending(store):
-    # Сначала обычное ok-состояние.
     await store.apply_diff(HealthDiff([_state(OK, 40.0)], []), BASE_TIME)
     known = await store.get_known_states()
     assert known["cpu:pkg"].status == OK
 
-    # Переход в alerting.
     tr = Transition("cpu:pkg", "cpu", "Package", OK, ALERTING, 95.0, BASE_TIME)
     await store.apply_diff(HealthDiff([_state(ALERTING, 95.0, BASE_TIME)], [tr]), BASE_TIME)
 
     pending = await store.pending_alerts()
     assert [p.component_id for p in pending] == ["cpu:pkg"]
 
-    # После пометки доставленным — не pending (идемпотентность).
     await store.mark_alert_notified("cpu:pkg", BASE_TIME)
     assert await store.pending_alerts() == []
 
@@ -92,7 +77,6 @@ async def test_cleared_pending_only_after_alert_notified(store):
 
 
 async def test_new_alert_cycle_resets_flags(store):
-    # Полный цикл: alert -> notified -> clear -> notified.
     tr_alert = Transition("cpu:pkg", "cpu", "Package", OK, ALERTING, 95.0, BASE_TIME)
     await store.apply_diff(HealthDiff([_state(ALERTING, 95.0, BASE_TIME)], [tr_alert]), BASE_TIME)
     await store.mark_alert_notified("cpu:pkg", BASE_TIME)
@@ -102,15 +86,12 @@ async def test_new_alert_cycle_resets_flags(store):
     assert await store.pending_alerts() == []
     assert await store.pending_clears() == []
 
-    # Новый перегрев — флаги сброшены, снова pending alert.
     tr_alert2 = Transition("cpu:pkg", "cpu", "Package", OK, ALERTING, 96.0, BASE_TIME)
     await store.apply_diff(HealthDiff([_state(ALERTING, 96.0, BASE_TIME)], [tr_alert2]), BASE_TIME)
     assert [p.component_id for p in await store.pending_alerts()] == ["cpu:pkg"]
 
 
 async def test_apply_diff_purges_stale_components_within_scanned_kind(store):
-    # GPU сменил индекс (gpu:0 -> gpu:1) в рамках одного скана: старый
-    # component_id не должен остаться "призраком" навсегда.
     gpu0 = HealthState("gpu:0", "gpu", "Tesla", OK, 37.0, 0, None)
     await store.apply_diff(HealthDiff([gpu0], []), BASE_TIME)
     assert "gpu:0" in await store.get_known_states()
@@ -123,8 +104,6 @@ async def test_apply_diff_purges_stale_components_within_scanned_kind(store):
 
 
 async def test_apply_diff_keeps_other_kinds_when_one_kind_not_scanned(store):
-    # Датчик диска отключён в конфиге в этом скане (в diff.states его нет
-    # вовсе) — его историю не должно задеть чистка чужого вида (cpu).
     disk = HealthState("disk:nvme", "disk", "NVMe", OK, 40.0, 0, None)
     await store.apply_diff(HealthDiff([disk], []), BASE_TIME)
 
@@ -162,37 +141,47 @@ async def test_prune_job_runs(store, keep):
     assert len(await store.recent_job_runs(limit=100)) == keep
 
 
-# --- swarm_events (журнал для Альфреда, bot/node_events.py) ---
+def _minutes(n):
+    return BASE_TIME + timedelta(minutes=n)
 
 
-async def test_recent_events_newest_first(store):
-    await store.record_event("node_down", "mycraft", "пропала", BASE_TIME)
-    await store.record_event(
-        "node_returned", "mycraft", "вернулась", BASE_TIME + timedelta(minutes=1)
-    )
-    events = await store.recent_events(limit=10)
-    assert [e["event_type"] for e in events] == ["node_returned", "node_down"]
-
-
-async def test_recent_events_filters_by_node(store):
-    await store.record_event("node_down", "mycraft", "mycraft пропала", BASE_TIME)
-    await store.record_event("node_down", "jeeves", "jeeves пропала", BASE_TIME)
-    events = await store.recent_events(node="jeeves", limit=10)
-    assert [e["text"] for e in events] == ["jeeves пропала"]
-
-
-async def test_recent_events_filters_by_since(store):
-    await store.record_event("node_down", "mycraft", "старое", BASE_TIME)
-    await store.record_event("node_up", "mycraft", "свежее", BASE_TIME + timedelta(hours=2))
-    events = await store.recent_events(since=BASE_TIME + timedelta(hours=1), limit=10)
-    assert [e["text"] for e in events] == ["свежее"]
-
-
-async def test_recent_events_respects_limit(store):
-    for i in range(5):
-        await store.record_event("node_up", "mycraft", str(i), BASE_TIME + timedelta(minutes=i))
-    events = await store.recent_events(limit=2)
-    assert [e["text"] for e in events] == ["4", "3"]
+@pytest.mark.parametrize(
+    ("recorded", "query", "expected_texts"),
+    [
+        pytest.param(
+            [("node_down", "mycraft", "пропала", 0), ("node_returned", "mycraft", "вернулась", 1)],
+            {"limit": 10},
+            ["вернулась", "пропала"],
+            id="newest_first",
+        ),
+        pytest.param(
+            [
+                ("node_down", "mycraft", "mycraft пропала", 0),
+                ("node_down", "jeeves", "jeeves пропала", 0),
+            ],
+            {"node": "jeeves", "limit": 10},
+            ["jeeves пропала"],
+            id="filters_by_node",
+        ),
+        pytest.param(
+            [("node_down", "mycraft", "старое", 0), ("node_up", "mycraft", "свежее", 120)],
+            {"since": _minutes(60), "limit": 10},
+            ["свежее"],
+            id="filters_by_since",
+        ),
+        pytest.param(
+            [("node_up", "mycraft", str(i), i) for i in range(5)],
+            {"limit": 2},
+            ["4", "3"],
+            id="respects_limit",
+        ),
+    ],
+)
+async def test_recent_events(store, recorded, query, expected_texts):
+    for event_type, node, text, minute in recorded:
+        await store.record_event(event_type, node, text, _minutes(minute))
+    events = await store.recent_events(**query)
+    assert [e["text"] for e in events] == expected_texts
 
 
 async def test_prune_swarm_events_keeps_last(store):
@@ -204,33 +193,21 @@ async def test_prune_swarm_events_keeps_last(store):
     assert [e["text"] for e in events] == ["9", "8", "7"]
 
 
-# --- readings / baseline_stats ---
-
-
-async def test_baseline_stats_empty(store):
-    stats = await store.baseline_stats("cpu:pkg", window=100)
-    assert stats.count == 0
-    assert stats.mean == 0.0
-    assert stats.std == 0.0
-
-
-async def test_baseline_stats_mean_and_std(store):
-    for t in (38.0, 40.0, 42.0):
+@pytest.mark.parametrize(
+    ("temperatures", "window", "count", "mean", "std"),
+    [
+        pytest.param([], 100, 0, 0.0, 0.0, id="empty"),
+        pytest.param([38.0, 40.0, 42.0], 100, 3, 40.0, (8 / 3) ** 0.5, id="mean_and_std"),
+        pytest.param([10.0, 20.0, 30.0, 40.0, 50.0], 2, 2, 45.0, 5.0, id="respects_window"),
+    ],
+)
+async def test_baseline_stats(store, temperatures, window, count, mean, std):
+    for t in temperatures:
         await store.record_readings([make_reading(t)])
-    stats = await store.baseline_stats("cpu:pkg", window=100)
-    assert stats.count == 3
-    assert stats.mean == pytest.approx(40.0)
-    # популяционное std для {38,40,42} = sqrt(8/3) ≈ 1.633
-    assert stats.std == pytest.approx((8 / 3) ** 0.5)
-
-
-async def test_baseline_stats_respects_window(store):
-    for t in (10.0, 20.0, 30.0, 40.0, 50.0):
-        await store.record_readings([make_reading(t)])
-    # Окно 2 -> последние два (40, 50).
-    stats = await store.baseline_stats("cpu:pkg", window=2)
-    assert stats.count == 2
-    assert stats.mean == pytest.approx(45.0)
+    stats = await store.baseline_stats("cpu:pkg", window=window)
+    assert stats.count == count
+    assert stats.mean == pytest.approx(mean)
+    assert stats.std == pytest.approx(std)
 
 
 async def test_baseline_stats_isolated_per_component(store):
@@ -255,12 +232,10 @@ async def test_prune_readings_keeps_last_per_component(store):
             ]
         )
     deleted = await store.prune_readings(keep_per_component=3)
-    assert deleted == 14  # (10 - 3) на каждый из двух компонентов
+    assert deleted == 14
     assert (await store.baseline_stats("cpu:pkg", window=100)).count == 3
     assert (await store.baseline_stats("disk:/dev/sda", window=100)).count == 3
 
-
-# --- ai_turns (/ai) ---
 
 CHAT_ID = 111
 
@@ -272,7 +247,6 @@ async def test_ai_turn_resolves_reply(store):
     assert row["dialogue_id"] == 500
     assert row["role"] == "user"
     assert row["content"] == "привет"
-    # Другой чат с тем же message_id — не совпадает (PK составной).
     assert await store.ai_turn(CHAT_ID + 1, 500) is None
 
 
@@ -302,11 +276,7 @@ async def test_latest_ai_dialogue_returns_most_recent_by_message_id(store):
         CHAT_ID, 600, 600, "user", "новый диалог", BASE_TIME + timedelta(seconds=2)
     )
     assert await store.latest_ai_dialogue(CHAT_ID) == 600
-    # Другой чат не влияет.
     assert await store.latest_ai_dialogue(CHAT_ID + 1) is None
-
-
-# --- ai_tool_calls (трасса вызовов тулов /ai, живая находка 2026-07-24) ---
 
 
 async def test_tool_calls_for_dialogue_empty_when_none_recorded(store):
@@ -335,8 +305,6 @@ async def test_tool_calls_for_dialogue_ordered_and_isolated(store):
     assert [r["tool_name"] for r in rows] == ["calc", "get_time"]
 
 
-# --- guest_relationships (Этап 42.6.1, связи между гостями) ---
-
 GUEST_A = 111
 GUEST_B = 222
 GUEST_C = 333
@@ -363,9 +331,6 @@ async def test_relationships_for_finds_both_roles(store):
     assert [r["id"] for r in await store.relationships_for(GUEST_A)] == [row["id"]]
     assert [r["id"] for r in await store.relationships_for(GUEST_B)] == [row["id"]]
     assert await store.relationships_for(GUEST_C) == []
-
-
-# --- pending_actions (Этап 45, формы подтверждения) ---
 
 
 async def _draft(store, initiator=GUEST_A, addressee=GUEST_B):
@@ -396,7 +361,6 @@ async def test_transition_pending_action_is_atomic_and_single_shot(store):
     assert submitted["status"] == "pending"
     assert submitted["submitted_at"] is not None
     assert datetime.fromisoformat(submitted["expires_at"]) == later + timedelta(hours=72)
-    # Второй «Отправить» — строка уже не draft.
     assert (
         await store.transition_pending_action(
             row["id"], ("draft",), "pending", later, expires_at=later
@@ -408,7 +372,6 @@ async def test_transition_pending_action_is_atomic_and_single_shot(store):
     )
     assert decided["status"] == "rejected"
     assert decided["decided_by"] == GUEST_B
-    # Экспирация после решения — no-op.
     assert (
         await store.transition_pending_action(row["id"], ("draft", "pending"), "expired", later)
         is None
@@ -444,7 +407,6 @@ async def test_pending_actions_needing_delivery(store):
     await store.set_pending_action_message(expired_draft["id"], "notice_message_id", 11)
     assert await store.pending_actions_needing_delivery() == []
 
-    # Этап 46: принятое ждёт ещё и поздравления адресату.
     await store.transition_pending_action(
         offer["id"], ("pending",), "accepted", BASE_TIME, decided_by=GUEST_B
     )
@@ -452,9 +414,6 @@ async def test_pending_actions_needing_delivery(store):
     assert [r["id"] for r in await store.pending_actions_needing_delivery()] == [offer["id"]]
     await store.set_pending_action_message(offer["id"], "welcome_message_id", 13)
     assert await store.pending_actions_needing_delivery() == []
-
-
-# --- tasks (служба tasks, отложенные задачи роя) ---
 
 
 async def _create_task(store, *, text: str, due_at, created_at=BASE_TIME):
@@ -517,13 +476,9 @@ async def test_get_pending_task_none_when_fired_or_missing(store):
     assert await store.get_pending_task(task_id + 999) is None
 
 
-# --- event_waiters (remind after_event, bot/tools.py) ---
-
-
 async def test_pop_event_waiter_for_matches_and_removes(store):
     await store.add_event_waiter(1, "arch-t480", "restart_applied", BASE_TIME)
     assert await store.pop_event_waiter_for("arch-t480", "restart_applied") == 1
-    # Снята — повторно то же событие уже никого не находит.
     assert await store.pop_event_waiter_for("arch-t480", "restart_applied") is None
 
 
@@ -531,7 +486,6 @@ async def test_pop_event_waiter_for_no_match_leaves_others(store):
     await store.add_event_waiter(1, "arch-t480", "restart_applied", BASE_TIME)
     assert await store.pop_event_waiter_for("mycraft", "restart_applied") is None
     assert await store.pop_event_waiter_for("arch-t480", "update_finished") is None
-    # Не задет — правильная пара всё ещё находится.
     assert await store.pop_event_waiter_for("arch-t480", "restart_applied") == 1
 
 
@@ -539,9 +493,6 @@ async def test_pop_event_waiter_removes_by_task_id_regardless_of_event(store):
     await store.add_event_waiter(1, "arch-t480", "restart_applied", BASE_TIME)
     await store.pop_event_waiter(1)
     assert await store.pop_event_waiter_for("arch-t480", "restart_applied") is None
-
-
-# --- host-метрики VPS (domain/host.py, этап 38) ---
 
 
 def _host_diff(status, value, metric="steal_pct", since=None, count=0):
@@ -574,14 +525,14 @@ async def test_host_state_roundtrip_and_pending_alert(store):
 async def test_host_trend_buckets_by_ten_minutes(store):
     from sa_home_bot.domain.host import HostMetricReading
 
-    for i in range(15):  # 15 срезов по минуте — два 10-минутных бакета
+    for i in range(15):
         at = BASE_TIME + timedelta(minutes=i)
         await store.record_host_readings(
             [HostMetricReading("host:steal_pct", "steal_pct", "CPU steal", float(i), "%", at)]
         )
 
     trend = await store.host_trend("steal_pct", hours=24, now=BASE_TIME + timedelta(minutes=20))
-    assert len(trend) == 2  # минуты 0..9 и 10..14 (BASE_TIME на :00)
+    assert len(trend) == 2
     assert trend[0]["samples"] == 10
     assert trend[0]["avg"] == pytest.approx(4.5)
     assert trend[1]["samples"] == 5

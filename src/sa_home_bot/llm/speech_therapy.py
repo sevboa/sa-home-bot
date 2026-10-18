@@ -1,50 +1,13 @@
-"""Логопед: вероятностная, излечимая картавость Альфреда (р→г/Р→Г).
-
-Заменяет прежнюю безусловную побуквенную замену (`prompt.py::apply_speech_defect`,
-удалена) на стейтфул-механику. Состояние — общее для процесса службы llm:
-вероятность искажения слова с «р» стартует со 100% и снижается на 0.1% за
-каждую «коррекцию» логопеда, пока не дойдёт до 0% (полное излечение,
-разовое — назад не возвращается). Коррекция выбранного слова также
-навсегда исключает его из будущих искажений.
-
-Единица счёта — слово (`[А-Яа-яЁё]+`), не буква. На каждом слове-кандидате
-с «р» (кроме уже исключённых) — независимая проверка визита логопеда с
-фиксированной вероятностью `_VISIT_PROBABILITY_PER_WORD`, не более одного
-визита за вызов `process()` (= одно сообщение). Эта вероятность НЕ зависит
-от текущей error_probability — иначе процесс самозамедляется: чем ниже
-вероятность ошибки, тем реже случаются искажения, тем реже накапливался бы
-порог визита, и полное излечение потребовало бы порядка сотен тысяч слов
-(посчитано и согласовано с пользователем как непрактичное). Константы ниже
-подобраны как эквивалент исходной идеи «каждые 20 слов — 50% шанс визита»,
-но без переносимого между сообщениями счётчика.
-
-Закреплённые (pinned) чаты (`LlmConfig.speech_therapy_pinned_chat_ids`) —
-искажают ВСЕ слова с «р» всегда, включая уже исключённые глобально; не
-участвуют в общем прогрессе лечения и не читают/не пишут `excluded_words`/
-`error_probability`/`cured`.
-
-«Чистая речь» гостя (``clear_user_ids``, Этап 47) — гость прошёл интерактив
-«Проклятый передатчик» (bot/interactives/radio.py) и сменил устройство связи:
-для него Альфред не картавит и Логопед не приходит, во всех его чатах.
-Источник правды — БД бота (app_state), здесь зеркало: бот передаёт флаг
-``speech_clear`` в каждом живом запросе (самовосстановление после сна/
-рестартов mycraft) и отдельным действием ``set_speech_clear`` на
-переключении. Зеркало нужно путям без бота — задачам службы tasks, которые
-знают только chat_id (в личке он совпадает с user_id). Pinned-чаты сильнее:
-там картавость всегда."""
-
 from __future__ import annotations
 
-import contextlib
-import os
 import random
 import re
-import tempfile
 from collections.abc import Callable
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
+
+from sa_home_bot.utils.files import load_model, save_model
 
 if TYPE_CHECKING:
     from sa_home_bot.config import LlmConfig
@@ -53,21 +16,11 @@ _WORD_RE = re.compile(r"[А-Яа-яЁё]+")
 _HAS_R_RE = re.compile(r"[рР]")
 _CORRUPT_MAP = str.maketrans({"р": "г", "Р": "Г"})
 
-# Подобраны эмпирически (согласовано с пользователем 2026-08-03): исходная
-# идея «каждые 20 слов — 50% шанс визита логопеда» без переносимого
-# счётчика превращается в независимую проверку на каждом слове-кандидате.
 _WORDS_PER_VISIT = 20
 _VISIT_CHANCE = 0.5
-_VISIT_PROBABILITY_PER_WORD = _VISIT_CHANCE / _WORDS_PER_VISIT  # 0.025
-_PROBABILITY_STEP = 0.001  # 1000 коррекций 100% → 0%
+_VISIT_PROBABILITY_PER_WORD = _VISIT_CHANCE / _WORDS_PER_VISIT
+_PROBABILITY_STEP = 0.001
 
-# Фразы ремарки на визит логопеда — карикатура на придирчивого специалиста
-# (решение пользователя 2026-08-04, по мотивам «скажи р-р-р-р, скажи эррр,
-# не гыыы»). Первые — привязаны к конкретному слову ({corrupt}/{word} — как
-# вышло/как надо), дальше — общие придирки без слова. ``.format()`` безопасен
-# для обеих категорий: шаблоны без плейсхолдеров просто игнорируют лишние
-# kwargs. Индекс [0] — канонiчная формулировка (см. тесты, детерминированные
-# на rand=0.0 всегда попадают именно в неё).
 _REMARK_TEMPLATES: tuple[str, ...] = (
     "Не «{corrupt}», а «{word}»!",
     "«{corrupt}»? Р-р-р-р-р! Ещё раз: «{word}»!",
@@ -108,9 +61,6 @@ def _corrupt_word(word: str) -> str:
 def _pick_remark(rand_value: float, word: str) -> str:
     idx = min(len(_REMARK_TEMPLATES) - 1, int(rand_value * len(_REMARK_TEMPLATES)))
     body = _REMARK_TEMPLATES[idx].format(corrupt=_corrupt_word(word), word=word)
-    # Имя — жирным, как у остальных персонажей (bot/handlers/ai.py::
-    # ALFRED_PREFIX = "<b>Альфред:</b> "), сама реплика — курсивом (решение
-    # пользователя 2026-08-04).
     return f"🗣 <b>Логопед:</b> <i>{body}</i>"
 
 
@@ -121,33 +71,12 @@ class SpeechTherapyState(BaseModel):
     cured: bool = False
     clear_user_ids: list[int] = Field(default_factory=list)
 
-    @classmethod
-    def load(cls, path: str | Path) -> SpeechTherapyState:
-        p = Path(path)
-        if not p.exists():
-            return cls()
-        return cls.model_validate_json(p.read_bytes())
-
-    def save(self, path: str | Path) -> None:
-        """Атомарная запись: temp-файл в том же каталоге + `os.replace`."""
-        p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(dir=p.parent, prefix=f".{p.name}.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write(self.model_dump_json(indent=2))
-            os.replace(tmp_name, p)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp_name)
-            raise
-
 
 class SpeechTherapist:
     def __init__(self, cfg: LlmConfig, *, rand: Callable[[], float] = random.random) -> None:
         self._cfg = cfg
         self._rand = rand
-        self._state = SpeechTherapyState.load(cfg.speech_therapy_state_path)
+        self._state = load_model(SpeechTherapyState, cfg.speech_therapy_state_path)
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -161,35 +90,21 @@ class SpeechTherapist:
         return user_id in self._state.clear_user_ids
 
     def set_clear(self, user_id: int, clear: bool) -> bool:
-        """Идемпотентно; True — состояние изменилось (и сохранено)."""
         if clear == self.is_clear(user_id):
             return False
         if clear:
             self._state.clear_user_ids.append(user_id)
         else:
             self._state.clear_user_ids.remove(user_id)
-        self._state.save(self._cfg.speech_therapy_state_path)
+        save_model(self._state, self._cfg.speech_therapy_state_path)
         return True
 
     def process(
         self, text: str, chat_id: int | None, user_id: int | None = None
     ) -> tuple[str, str | None, bool]:
-        """Синхронно (см. докстринг модуля — никакого await внутри, это
-        инвариант атомарности между параллельными вызовами run_command).
-
-        Возвращает (искажённый текст БЕЗ ремарки логопеда, ремарка визита
-        или None, только что вылечился ли Альфред этим вызовом — True ровно
-        на переходе cured False→True). Ремарка отдаётся отдельно от текста —
-        вызывающий (llm/service.py) решает, что с ней делать; раньше она
-        дописывалась в тот же текст, что ломало HTML-форматирование выше по
-        стеку (bot/handlers/ai.py экранирует ВЕСЬ текст персонажа как plain
-        text) и превращало ремарку в хвост одного с ответом сообщения вместо
-        отдельной реплики (решение пользователя 2026-08-03)."""
         pinned = chat_id is not None and chat_id in self._cfg.speech_therapy_pinned_chat_ids
         if not pinned and self._state.cured:
             return text, None, False
-        # Чей это ответ: адресат (user_id от бота), без него — chat_id (в
-        # личке это тот же человек; задачи tasks передают только chat_id).
         speaker = user_id if user_id is not None else chat_id
         if not pinned and speaker is not None and self.is_clear(speaker):
             return text, None, False
@@ -230,7 +145,7 @@ class SpeechTherapist:
                     just_cured = True
 
         if changed:
-            self._state.save(self._cfg.speech_therapy_state_path)
+            save_model(self._state, self._cfg.speech_therapy_state_path)
 
         final_text = "".join(result)
         return final_text, remark, just_cured

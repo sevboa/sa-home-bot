@@ -1,7 +1,6 @@
-"""Хендлер torrents: распознавание .torrent-документа, имя из magnet-ссылки,
-кнопки директорий из describe."""
-
 from types import SimpleNamespace
+
+import pytest
 
 from sa_home_bot.bot.handlers import torrents as torrents_handler
 from sa_home_bot.proto.messages import ActionParam, ActionSpec
@@ -15,30 +14,28 @@ def _message_with_document(file_name: str | None, mime_type: str | None = None):
     return SimpleNamespace(document=doc)
 
 
-def test_is_torrent_document_by_extension():
-    assert torrents_handler._is_torrent_document(_message_with_document("ubuntu.torrent"))
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (_message_with_document("ubuntu.torrent"), True),
+        (_message_with_document("ubuntu.bin", mime_type="application/x-bittorrent"), True),
+        (_message_with_document("photo.jpg"), False),
+        (SimpleNamespace(document=None), False),
+    ],
+)
+def test_is_torrent_document(message, expected):
+    assert torrents_handler._is_torrent_document(message) is expected
 
 
-def test_is_torrent_document_by_mime_type():
-    msg = _message_with_document("ubuntu.bin", mime_type="application/x-bittorrent")
-    assert torrents_handler._is_torrent_document(msg)
-
-
-def test_is_torrent_document_rejects_other_files():
-    assert not torrents_handler._is_torrent_document(_message_with_document("photo.jpg"))
-
-
-def test_is_torrent_document_no_document():
-    assert not torrents_handler._is_torrent_document(SimpleNamespace(document=None))
-
-
-def test_magnet_name_extracts_dn_param():
-    magnet = "magnet:?xt=urn:btih:abc&dn=Ubuntu%2022.04&tr=udp://tracker"
-    assert torrents_handler._magnet_name(magnet) == "Ubuntu 22.04"
-
-
-def test_magnet_name_fallback_without_dn():
-    assert torrents_handler._magnet_name("magnet:?xt=urn:btih:abc") == "magnet-ссылка"
+@pytest.mark.parametrize(
+    ("magnet", "expected"),
+    [
+        ("magnet:?xt=urn:btih:abc&dn=Ubuntu%2022.04&tr=udp://tracker", "Ubuntu 22.04"),
+        ("magnet:?xt=urn:btih:abc", "magnet-ссылка"),
+    ],
+)
+def test_magnet_name(magnet, expected):
+    assert torrents_handler._magnet_name(magnet) == expected
 
 
 class FakeLink:

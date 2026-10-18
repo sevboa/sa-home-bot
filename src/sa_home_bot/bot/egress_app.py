@@ -1,14 +1,6 @@
-"""Этап 52: сборка автовыбора маршрута до Bot API в процессе бота.
-
-``bot/egress.py`` — сама логика (выбор, детектор, менеджер) и ничего не
-оповещает; здесь — то, что связывает её с остальным ботом: стартовый маршрут,
-оповещения админов о переключении (с антиспамом) и флаш outbox.
-"""
-
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import html
 import logging
 import time
@@ -23,6 +15,7 @@ from sa_home_bot.bot.outbox import flush_outbox
 from sa_home_bot.bot.telegram_retry import REQUEST_TIMEOUT_S
 from sa_home_bot.config import TelegramConfig
 from sa_home_bot.db.store import Store
+from sa_home_bot.utils.lifespan import cancel_task
 
 log = logging.getLogger(__name__)
 
@@ -32,10 +25,6 @@ OUTBOX_FLUSH_INTERVAL_S = 60.0
 
 
 def startup_routes(cfg: TelegramConfig, state_path: Path = EGRESS_STATE_PATH) -> list[str]:
-    """Порядок проб на старте в режиме ``auto``: последний рабочий маршрут,
-    затем ``proxy`` из конфига, direct, ``extra_proxies``. Рой на старте ещё
-    не опрошен (node_link поднимается позже), поэтому только то, что известно
-    локально — ``extra_proxies`` стоит держать с SOCKS обеих VPS."""
     saved = load_saved_state(state_path)
     order = [
         saved["route"] if saved else "",
@@ -51,14 +40,11 @@ def startup_routes(cfg: TelegramConfig, state_path: Path = EGRESS_STATE_PATH) ->
 
 
 async def pick_startup_route(bot: Bot, routes: list[str]) -> str | None:
-    """Первый маршрут, на котором прошёл ``getMe`` (одна попытка на маршрут).
-    ``None`` — не прошёл ни один; сессия остаётся на первом, дальше вызывающий
-    делает обычный ``call_with_network_retry``."""
     for route in routes:
         apply_route(bot.session, route)
         try:
             await bot.get_me(request_timeout=REQUEST_TIMEOUT_S)
-        except Exception as exc:  # noqa: BLE001 — любой сбой = маршрут не годен
+        except Exception as exc:
             log.warning("egress: на старте %s не отвечает: %s", route, exc)
             continue
         if route != routes[0]:
@@ -99,9 +85,6 @@ def render_switch(old: str, new: str, reason: str, candidates: list[dict]) -> st
 
 
 class SwitchNotices:
-    """Оповещения админов о переключении: не чаще ``NOTICE_MIN_INTERVAL_S``;
-    подавленные переключения сворачиваются в строку следующего оповещения."""
-
     def __init__(
         self, book, notifier: Notifier, clock: Callable[[], float] = time.monotonic
     ) -> None:
@@ -126,8 +109,6 @@ class SwitchNotices:
 
 
 class OutboxFlusher:
-    """Флаш outbox раз в минуту и сразу по восстановлению связи."""
-
     def __init__(self, notifier: Notifier, store: Store) -> None:
         self._notifier = notifier
         self._store = store
@@ -136,7 +117,7 @@ class OutboxFlusher:
     async def flush(self) -> None:
         try:
             sent = await flush_outbox(self._notifier, self._store)
-        except Exception:  # noqa: BLE001 — флаш не должен ронять бота
+        except Exception:
             log.warning("outbox: флаш упал", exc_info=True)
             return
         if sent:
@@ -155,7 +136,4 @@ class OutboxFlusher:
 
     async def stop(self) -> None:
         task, self._task = self._task, None
-        if task is not None:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        await cancel_task(task)

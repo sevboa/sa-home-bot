@@ -1,10 +1,3 @@
-"""Межнодовая маршрутизация: «спроси любого» через NodeRouter + PeerLink.
-
-Стенд: «удалённая нода» (winpc/monitor) на unix-сокете + «своя нода» (alfred)
-с маршрутизатором. Клиент говорит только со своей нодой; адресация — dst
-конверта.
-"""
-
 import asyncio
 import shutil
 import tempfile
@@ -28,8 +21,6 @@ from sa_home_bot.proto.server import ProtoServer
 
 
 class FakeRemoteMonitor:
-    """Служба «удалённой» ноды."""
-
     def describe(self) -> ServiceDescription:
         return ServiceDescription(
             info=ServiceInfo(node="winpc", service="monitor", version="0.11.0"),
@@ -45,8 +36,6 @@ class FakeRemoteMonitor:
 
 
 class FakeLocalNode:
-    """Сервис «своей» ноды (alfred) — то, что отвечает без маршрутизации."""
-
     def describe(self) -> ServiceDescription:
         return ServiceDescription(
             info=ServiceInfo(node="alfred", service="node", version="0.11.0"),
@@ -63,10 +52,8 @@ class FakeLocalNode:
 @pytest.fixture
 async def swarm():
     tmpdir = Path(tempfile.mkdtemp(prefix="sa-swarm-"))
-    # «Удалённая» нода winpc.
     remote = ProtoServer(tmpdir / "winpc.sock", FakeRemoteMonitor())
     await remote.start()
-    # Линк alfred → winpc и маршрутизатор alfred'а.
     peer = PeerLink("winpc", tmpdir / "winpc.sock", reconnect_delay=0.1)
     await peer.start()
     router = NodeRouter("alfred", peers={"winpc": peer})
@@ -80,10 +67,8 @@ async def swarm():
         relayed.append(env)
         got_relayed.set()
 
-    # Клиент (как бот/nodectl): говорит только со своей нодой alfred.
     client = ProtoClient(tmpdir / "alfred.sock", on_event=on_event, timeout=5.0)
     await client.connect()
-    # Дождаться, пока линк до winpc поднимется.
     for _ in range(100):
         if peer.alive:
             break
@@ -118,7 +103,6 @@ async def test_remote_error_comes_back_as_is(swarm):
 
 async def test_local_dst_stays_local(swarm):
     _, _, _, _, client, _, _ = swarm
-    # Без dst и с явным своим node — отвечает своя нода.
     assert (await client.get_state())["node"] == "alfred"
     state = await client.get_state(dst=Address(node="alfred", service="node"))
     assert state["local"] is True
@@ -134,16 +118,15 @@ async def test_unknown_node_rejected(swarm):
 async def test_dead_peer_fails_fast(swarm):
     remote, peer, _, _, client, _, _ = swarm
     await remote.stop()
-    await asyncio.sleep(0.05)  # линк замечает обрыв
+    await asyncio.sleep(0.05)
     with pytest.raises(ProtoError) as exc_info:
         await client.get_state(dst=Address(node="winpc", service="monitor"))
     assert exc_info.value.code == ERR_UNAVAILABLE
 
 
 async def test_local_service_proxy(swarm):
-    # dst.service=monitor на своей ноде → прокси к локальной службе.
     remote, peer, router, _, client, _, _ = swarm
-    router.local_services["monitor"] = peer  # переиспользуем стенд как «локальный monitor»
+    router.local_services["monitor"] = peer
     state = await client.get_state(dst=Address(service="monitor"))
     assert state["cpu_c"] == 47.5
 
@@ -153,7 +136,6 @@ async def test_local_service_proxy(swarm):
 
 
 async def test_peer_event_relayed_with_original_src():
-    """Событие пира ретранслируется клиентам ноды; src оригинала сохраняется."""
     tmpdir = Path(tempfile.mkdtemp(prefix="sa-relay-"))
     try:
         remote = ProtoServer(tmpdir / "winpc.sock", FakeRemoteMonitor())
@@ -161,7 +143,6 @@ async def test_peer_event_relayed_with_original_src():
         local_server: ProtoServer | None = None
 
         async def on_peer_event(env):
-            # как в node/app.py: своё эхо не ретранслируем
             if env.src is not None and env.src.node == "alfred":
                 return
             await local_server.broadcast_envelope(env)
@@ -190,7 +171,7 @@ async def test_peer_event_relayed_with_original_src():
         await remote.broadcast_event("overheat_started", {"component_id": "cpu"})
         await asyncio.wait_for(got.wait(), timeout=5.0)
         assert events[0].payload["event"] == "overheat_started"
-        assert events[0].src.node == "winpc"  # источник не переписан
+        assert events[0].src.node == "winpc"
 
         await client.close()
         await peer.stop()
@@ -200,12 +181,8 @@ async def test_peer_event_relayed_with_original_src():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-# --- add_local_service/remove_local_service, add_peer/remove_peer (этап 17/18) ---
-
-
 async def test_add_and_remove_local_service(swarm):
     remote, peer, router, _, client, _, _ = swarm
-    # Переиспользуем уже поднятый линк на "remote" как будто это локальная apps.
     extra = PeerLink("apps", peer.endpoint, reconnect_delay=0.1)
     await router.add_local_service("apps", extra)
     try:
@@ -221,12 +198,11 @@ async def test_add_and_remove_local_service(swarm):
             await client.get_state(dst=Address(service="apps"))
         assert exc_info.value.code == ERR_UNKNOWN_DST
     finally:
-        await router.remove_local_service("apps")  # idempotent — на случай ассерта выше
+        await router.remove_local_service("apps")
 
 
 async def test_add_and_remove_peer(swarm):
     remote, _, router, _, client, _, _ = swarm
-    # Новый пир "arch" на том же сокете, что "winpc" (для теста годится).
     new_peer = PeerLink("arch", remote.endpoints[0], reconnect_delay=0.1)
     await router.add_peer(new_peer)
     try:

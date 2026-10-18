@@ -1,29 +1,10 @@
-"""Стык 44.1 (bot/tools.py::schedule_agent_dialogue) ↔ 44.2
-(bot/node_events.py::_handle_task_result): meta, которую реально кладёт
-schedule_agent_dialogue в tasks.create, при доставке результата должна
-рождать новый dialogue_id = message_id первого отправленного сообщения —
-без переизобретения формы meta вручную (в отличие от test_tools.py/
-test_node_events.py, которые проверяют каждую половину изолированно)."""
-
 from sa_home_bot.bot import tools
 from sa_home_bot.bot.node_events import build_node_event_handler
 from sa_home_bot.config import SubscriptionConfig
 from sa_home_bot.proto.messages import Address, make_event
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.tasks import protocol as task_protocol
-
-
-class _FakeNodeLink:
-    """Тот же двойник, что tests/unit/test_tools.py::_FakeNodeLink — не
-    импортируется оттуда намеренно (в этом дереве тестовые модули не тянут
-    друг друга, см. соседние файлы), только форма важна для стыка."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, dict, object]] = []
-
-    async def command(self, action, args=None, dst=None, *, timeout=None):
-        self.calls.append((action, args or {}, dst))
-        return {"task_id": 1}
+from tests.unit.support.fakes import FakeNodeLink
 
 
 class _FakeNotifier:
@@ -40,7 +21,7 @@ class _FakeNotifier:
         **kwargs,
     ):
         self.sent.append((chat_id, text))
-        return 99  # message_id только что отправленного первого сообщения
+        return 99
 
 
 class _FakeStore:
@@ -61,13 +42,12 @@ def _book() -> SubscriptionBook:
 
 
 async def test_schedule_agent_dialogue_meta_spawns_new_thread_end_to_end():
-    link = _FakeNodeLink()
+    link = FakeNodeLink(result={"task_id": 1})
     messages = [{"role": "user", "content": "A сказал(а), что ты его друг — подтверждаешь?"}]
     other_chat_id = 222
 
     await tools.schedule_agent_dialogue(link, other_chat_id, messages, "high", 60.0)
 
-    # meta, реально созданная schedule_agent_dialogue — не переписываем вручную.
     _action, create_args, _dst = link.calls[0]
     real_meta = create_args["meta"]
     assert "dialogue_id" not in real_meta
@@ -93,6 +73,6 @@ async def test_schedule_agent_dialogue_meta_spawns_new_thread_end_to_end():
     args, _kwargs = store.recorded_turns[0]
     chat_id, sent_id, dialogue_id, role = args[:4]
     assert chat_id == other_chat_id
-    assert sent_id == 99  # message_id, вернул _FakeNotifier
-    assert dialogue_id == sent_id  # новый тред рождён из sent_id, не пуст
+    assert sent_id == 99
+    assert dialogue_id == sent_id
     assert role == "assistant"

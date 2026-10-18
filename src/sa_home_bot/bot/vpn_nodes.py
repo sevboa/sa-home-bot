@@ -1,20 +1,3 @@
-"""Где в рое живёт служба ``vpn`` — динамически, вместо хардкода jeeves.
-
-Этап 39, фаза 0 (39.0.2): у wooster теперь тоже белый IP, серверов
-AmneziaWG может быть больше одного. Бот перестаёт слать команды на
-``Address(node="jeeves", …)`` и находит ноды с запущенной службой ``vpn``
-по их состоянию (``state["services"]``) — тем же приёмом, каким карточка
-ноды берёт список служб для ``/nodes`` (bot/node_view.py).
-
-Модуль намеренно без импорта aiogram: его тянет и bot/tools.py, а тот —
-служба tasks (см. докстринг wake_core про тот же запрет).
-
-``resolve_vpn_dst`` выбирает ОДНУ ноду-адресата (держателя конкретного
-подключения, ``vpn_peers.server``, либо первую живую), а ``fanout`` (39.0.5)
-собирает ответы со ВСЕХ живых серверов — карточка ``/vpn`` показывает
-подключения и квоту каждой локации отдельно.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -26,13 +9,10 @@ from pathlib import Path
 from sa_home_bot import wake_core
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.proto.messages import Address, ProtoError
-from sa_home_bot.vpn.protocol import SERVICE_NAME
+from sa_home_bot.vpn.protocol import ACTION_USAGE, SERVICE_NAME, TRANSPORT_AWG, TRANSPORT_REALITY
 
 log = logging.getLogger(__name__)
 
-# Память о серверах, которые хоть раз отвечали: мёртвая нода о себе ничего не
-# скажет (ни метки, ни службы), а админу в /vpn надо показать «Сервер
-# недоступен», а не молча потерять локацию. Файл переживает рестарт бота.
 KNOWN_SERVERS_PATH = Path("./data/vpn_known_servers.json")
 
 
@@ -44,8 +24,6 @@ def _carries_vpn(state: dict) -> bool:
 
 
 async def live_vpn_nodes(node_link: ServiceLink) -> list[str]:
-    """Id нод с запущенной службой ``vpn``, своя — первой. Пустой список —
-    ни одна нода роя сейчас VPN не держит либо рой недоступен."""
     try:
         own_state = await node_link.get_state()
     except (ServiceUnavailableError, ProtoError):
@@ -60,13 +38,7 @@ async def live_vpn_nodes(node_link: ServiceLink) -> list[str]:
     return nodes
 
 
-async def resolve_vpn_dst(
-    node_link: ServiceLink, *, server: str | None = None
-) -> Address | None:
-    """Адрес службы ``vpn`` для команды. ``server`` — предпочтительная нода
-    (``vpn_peers.server`` конкретного подключения); если она сейчас не на
-    связи или VPN не держит — берётся первая живая. ``None`` — VPN в рое
-    нет ни на одной ноде."""
+async def resolve_vpn_dst(node_link: ServiceLink, *, server: str | None = None) -> Address | None:
     nodes = await live_vpn_nodes(node_link)
     if not nodes:
         return None
@@ -75,8 +47,6 @@ async def resolve_vpn_dst(
 
 
 async def live_vpn_servers(node_link: ServiceLink) -> list[dict]:
-    """``[{node, label, transports}]`` по всем живым VPN-серверам — дёшево
-    (``get_state`` службы), чтобы нарисовать выбор локации перед выдачей."""
     nodes = await live_vpn_nodes(node_link)
     if not nodes:
         return []
@@ -90,9 +60,6 @@ async def live_vpn_servers(node_link: ServiceLink) -> list[dict]:
             "node": node_id,
             "label": state.get("label") or "",
             "transports": state.get("transports") or [],
-            # Индикатор доступности по транспортам (39.0.7(f)) — пикеру
-            # локации есть что показать рядом с кнопкой. Старая нода поля не
-            # шлёт: пустой список читается как «проверок нет», без индикатора.
             "check": state.get("check") or [],
         }
 
@@ -102,21 +69,11 @@ async def live_vpn_servers(node_link: ServiceLink) -> list[dict]:
 
 @dataclass(frozen=True, order=True)
 class ProbeTarget:
-    """Одна пара (сервер, транспорт), которую пробнику (39.0.7(d)) стоит
-    проверять — из чего именно строится netns/veth/имена, решает
-    node/fixups.py, здесь только сам список пар."""
-
     server: str
     transport: str
 
 
 async def probe_targets(node_link: ServiceLink, *, exclude: str) -> list[ProbeTarget]:
-    """Все живые (сервер, транспорт) кроме ``exclude`` (своя нода —
-    self-check исключён по решению владельца 2026-09-18, см.
-    vpn_check/service.py). Раскладывает ``live_vpn_servers()`` (по одной
-    записи на сервер) в плоский список пар — по одной на каждый транспорт
-    сервера. Отсортирован (детерминизм для node/fixups.py: индекс пары в
-    этом списке участвует в именовании netns/veth/подсетей)."""
     servers = await live_vpn_servers(node_link)
     targets = [
         ProbeTarget(server=s["node"], transport=t)
@@ -128,11 +85,6 @@ async def probe_targets(node_link: ServiceLink, *, exclude: str) -> list[ProbeTa
 
 
 async def fanout(node_link: ServiceLink, action: str, args: dict) -> list[dict]:
-    """Позвать ``action`` на всех живых vpn-нодах, вернуть ответы ответивших.
-
-    Нода, отвалившаяся между опросом живых и самим вызовом, просто выпадает из
-    результата: карточка с одним живым сервером полезнее отказа целиком. Пустой
-    список — VPN в рое не держит никто (или рой недоступен)."""
     targets = await live_vpn_nodes(node_link)
     if not targets:
         return []
@@ -158,8 +110,6 @@ def _load_known() -> dict[str, str]:
 
 
 def remember_servers(answered: list[dict]) -> None:
-    """Запомнить ``node → label`` у ответивших серверов (usage-ответы несут оба
-    поля). Пишет файл только при изменении."""
     known = _load_known()
     updated = dict(known)
     for server in answered:
@@ -175,12 +125,52 @@ def remember_servers(answered: list[dict]) -> None:
         log.warning("vpn: не удалось сохранить список известных серверов", exc_info=True)
 
 
+def known_server_label(node: str) -> str:
+    return _load_known().get(node, "")
+
+
 def unavailable_servers(answered: list[dict]) -> list[dict]:
-    """Известные серверы, не попавшие в ``answered`` (нода лежит или служба
-    vpn на ней не отвечает): ``[{node, label, unavailable: True}]``."""
     seen = {server.get("node") for server in answered}
     return [
         {"node": node, "label": label, "unavailable": True}
         for node, label in sorted(_load_known().items())
         if node not in seen
     ]
+
+
+async def fanout_usage(node_link: ServiceLink, chat_id: int) -> list[dict]:
+    return await fanout(node_link, ACTION_USAGE, {"chat_id": chat_id})
+
+
+async def usage_for_chat(node_link: ServiceLink, chat_id: int) -> list[dict]:
+    answered = await fanout_usage(node_link, chat_id)
+    remember_servers(answered)
+    return answered
+
+
+def is_allowed(server: dict) -> bool:
+    return bool(server.get("allowed", True))
+
+
+def allowed_servers(servers: list[dict]) -> list[dict]:
+    return [server for server in servers if is_allowed(server)]
+
+
+def server_label(server: dict) -> str:
+    return server.get("label") or server.get("node") or "сервер"
+
+
+def _open_with_transport(servers: list[dict], transport: str) -> list[dict]:
+    return [s for s in servers if is_allowed(s) and transport in (s.get("transports") or [])]
+
+
+def has_reality_server(servers: list[dict]) -> bool:
+    return bool(_open_with_transport(servers, TRANSPORT_REALITY))
+
+
+def awg_servers(servers: list[dict]) -> list[dict]:
+    return [s for s in _open_with_transport(servers, TRANSPORT_AWG) if s.get("node")]
+
+
+def reality_servers(servers: list[dict]) -> list[dict]:
+    return [s for s in _open_with_transport(servers, TRANSPORT_REALITY) if s.get("node")]

@@ -1,13 +1,3 @@
-"""Кто есть кто (Этап 58): снимок карточек, профилей Telegram и подписок.
-
-Грузится одним заходом на ход /ai (людей — десятки) и дальше отвечает
-синхронно: тулы и справка спрашивают имя, метки для поиска и пол отсюда, а
-не сшивают подписку, конфиг и граф каждый по-своему.
-
-Отображаемое имя: имя из карточки → имя из профиля Telegram → имя
-подписки. @ник — из профиля, иначе из подписки («Имя (@ник)»).
-"""
-
 from __future__ import annotations
 
 import re
@@ -18,7 +8,6 @@ from sa_home_bot.people.claims import Card
 
 _HANDLE_RE = re.compile(r"\(@([A-Za-z0-9_]{3,})\)")
 
-# Виды меток — их видит модель в причине совпадения find_person.
 LABEL_NAME = "имя"
 LABEL_ALIAS = "прозвище"
 LABEL_TELEGRAM = "имя в Telegram"
@@ -27,8 +16,6 @@ LABEL_SUBSCRIPTION = "имя при приглашении"
 
 
 def split_label(label: str) -> tuple[str, str]:
-    """«Имя Фамилия (@ник)» → («Имя Фамилия», «ник»): так бот пишет
-    invited_user и ai_turns.user_name."""
     match = _HANDLE_RE.search(label or "")
     if match is None:
         return " ".join((label or "").split()), ""
@@ -45,7 +32,7 @@ class PeopleBook:
     ) -> None:
         self._cards = people_claims.build_cards(claims)
         self._profiles = {int(p["user_id"]): p for p in profiles}
-        self._book = book  # SubscriptionBook | None
+        self._book = book
 
     @classmethod
     async def load(cls, store: Any, book: Any | None = None) -> PeopleBook:
@@ -53,7 +40,6 @@ class PeopleBook:
 
     @classmethod
     def empty(cls, book: Any | None = None) -> PeopleBook:
-        """Без БД (служба tasks, MCP-агент): только имена подписок."""
         return cls([], [], book)
 
     def card(self, person_id: int) -> Card:
@@ -88,7 +74,6 @@ class PeopleBook:
         return ""
 
     def name(self, person_id: int) -> str | None:
-        """Как человека называть: карточка → Telegram → подписка."""
         named = self.value(person_id, people_claims.FIELD_NAME) or self._telegram_name(person_id)
         if named:
             return named
@@ -98,7 +83,6 @@ class PeopleBook:
         return split_label(sub.invited_user or sub.name)[0] or None
 
     def display(self, person_id: int) -> str | None:
-        """«Андрей Александрович Севбо (@kein)» — имя и ник, если он есть."""
         name = self.name(person_id)
         if name is None:
             return None
@@ -106,9 +90,6 @@ class PeopleBook:
         return f"{name} (@{nick})" if nick and nick.casefold() not in name.casefold() else name
 
     def labels(self, person_id: int) -> list[tuple[str, str]]:
-        """Все имена человека с видом метки — для поиска и для «ещё: …».
-        Подпись подписки владельца («me») в метки не идёт: это технический
-        ключ, гость не должен находить владельца по нему."""
         own: list[tuple[str, str]] = []
         card = self._cards.get(person_id) or {}
         own += [(LABEL_NAME, n) for n in card.get("names") or []]

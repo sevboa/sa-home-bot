@@ -1,17 +1,3 @@
-"""Источник температур на Windows: LibreHardwareMonitor (LHM).
-
-На Windows `psutil.sensors_temperatures()` не существует, а WMI на десктопах
-обычно пуст — температуры CPU и дисков читаем через LibreHardwareMonitorLib.dll
-(pythonnet), решение этапа 19 от 2026-07-10. DLL и объект ``Computer``
-загружаются один раз на процесс (инициализация дорогая), на каждый срез —
-только ``Update()``.
-
-Чистые парсеры работают с деревом простых dict'ов (см. ``_hardware_node``) —
-pythonnet нужен только на реальной Windows, тесты гоняются на фикстурах на
-любой ОС. Блокирующие вызовы делает вызывающий код через run_in_executor
-(инвариант ARCHITECTURE.md §9.6).
-"""
-
 from __future__ import annotations
 
 import concurrent.futures
@@ -29,37 +15,27 @@ log = logging.getLogger(__name__)
 
 DLL_NAME = "LibreHardwareMonitorLib.dll"
 
-# Имена HardwareType/SensorType из LHM (str(enum) даёт имя члена).
 HW_CPU = "Cpu"
 HW_STORAGE = "Storage"
 SENSOR_TEMPERATURE = "Temperature"
-SENSOR_COMPOSITE_TEMPERATURE = "Composite Temperature"  # основной сенсор NVMe в LHM
+SENSOR_COMPOSITE_TEMPERATURE = "Composite Temperature"
 
 _KIND_LABEL = {KIND_HDD: "HDD", KIND_SSD: "SSD", KIND_NVME: "NVMe"}
 
-# Сенсоры типа Temperature, которые НЕ являются показаниями — это настроенные
-# LHM пороги (у NVMe: 80°C и там, и там), max()-fallback иначе принимает их
-# за самое горячее реальное показание (живой баг 2026-07-17: 55°C → 80°C).
 _TEMP_THRESHOLD_NAMES = {"Warning Temperature", "Critical Temperature"}
 
 
 class LhmUnavailable(Exception):
-    """LHM недоступен (нет pythonnet / dll / ошибка .NET) — причина в тексте."""
-
-
-# --- Чистые парсеры (тестируются на фикстурах) ---
+    pass
 
 
 def _walk(tree: list[dict]):
-    """Все узлы дерева hardware, включая subhardware (в глубину)."""
     for node in tree:
         yield node
         yield from _walk(node.get("subhardware", []))
 
 
 def _temp_sensors(node: dict) -> list[dict]:
-    """Температурные сенсоры с правдоподобным значением: None и ≤0°C — мусор
-    (без прав администратора LHM не грузит драйвер и отдаёт нули)."""
     return [
         s
         for s in node.get("sensors", [])
@@ -70,13 +46,10 @@ def _temp_sensors(node: dict) -> list[dict]:
 
 
 def _hw_key(node: dict) -> str:
-    """Стабильный ключ железки: LHM Identifier ("/amdcpu/0", "/nvme/1")."""
     return str(node.get("id") or node.get("name") or "?")
 
 
 def cpu_readings_from_tree(tree: list[dict], now: datetime) -> list[SensorReading]:
-    """Температуры CPU из дерева LHM — по одной записи на сенсор (как на
-    Linux psutil даёт по записи на ядро/package)."""
     readings: list[SensorReading] = []
     for node in _walk(tree):
         if node.get("type") != HW_CPU:
@@ -97,14 +70,6 @@ def cpu_readings_from_tree(tree: list[dict], now: datetime) -> list[SensorReadin
 
 
 def disk_readings_from_tree(tree: list[dict], now: datetime) -> list[SensorReading]:
-    """Температуры дисков — одна запись на физический диск.
-
-    У NVMe LHM отдаёт несколько температурных сенсоров ("Composite
-    Temperature", "Temperature #1/2", плюс пороги "Warning/Critical
-    Temperature" — не показания, отфильтрованы в `_temp_sensors`):
-    приоритет основному "Temperature"/"Composite Temperature", иначе
-    максимум остальных — для алертов интересен самый горячий датчик.
-    """
     readings: list[SensorReading] = []
     for node in _walk(tree):
         if node.get("type") != HW_STORAGE:
@@ -136,11 +101,6 @@ def _disk_temp(node: dict) -> float | None:
 
 
 def _lhm_disk_kind(hw_key: str, name: str) -> str:
-    """Вид носителя по LHM Identifier и имени (модели).
-
-    Точной классификации LHM не даёт: NVMe виден по identifier ("/nvme/N"),
-    SATA SSD — только эвристикой по модели, остальное считаем HDD.
-    """
     if "/nvme/" in hw_key.lower() or "nvme" in name.lower():
         return KIND_NVME
     if "ssd" in name.lower():
@@ -149,13 +109,6 @@ def _lhm_disk_kind(hw_key: str, name: str) -> str:
 
 
 def disk_summaries_from_tree(tree: list[dict]) -> list[DiskSummary]:
-    """Сводка по дискам для /status из дерева LHM (Windows-путь).
-
-    SMART-здоровье и свободное место пока None: health придёт со SmartScanJob
-    (smartctl для Windows), а сопоставление физический диск ↔ буквы томов
-    требует WMI — следующая итерация. Метки — как на Linux: номер только
-    когда дисков одного вида больше одного.
-    """
     storage = [n for n in _walk(tree) if n.get("type") == HW_STORAGE]
     kinds = [_lhm_disk_kind(_hw_key(n), str(n.get("name") or "")) for n in storage]
     per_kind: dict[str, int] = {}
@@ -184,24 +137,13 @@ def disk_summaries_from_tree(tree: list[dict]) -> list[DiskSummary]:
     return summaries
 
 
-# --- Обвязка pythonnet (работает только на Windows) ---
-
-_computer = None  # кэш LHM Computer: Open() дорогой, живёт до конца процесса
-_last_error: str | None = None  # последняя причина недоступности (для requirements)
-_warned = False  # предупреждение в лог — один раз, не каждым сканом
-_cpu_temps_missing = False  # CPU в дереве есть, температур нет — типично «не админ»
-_runtime_load_attempted = False  # pythonnet.load() вызван (успешно или нет) — не повторяем
+_computer = None
+_last_error: str | None = None
+_warned = False
+_cpu_temps_missing = False
+_runtime_load_attempted = False
 _runtime_lock = threading.Lock()
 
-# hw.Update() иногда виснет навсегда вместо исключения (живая находка
-# 2026-07-20 — конкретное железо, похоже, съёмный картридер без носителя).
-# Python не может прибить нативный/.NET-вызов изнутри потока — вместо этого
-# гоним каждый Update() в отдельном пуле с таймаутом; зависший вызов так и
-# останется висеть там навсегда (утечёт один поток), но раз зависший
-# Identifier мы больше не трогаем — второй раз тот же узел не подвесит
-# новый поток. Пул отдельный от дефолтного executor'а вызывающего кода,
-# чтобы утёкшие потоки не отъедали его у остальных блокирующих операций
-# (smartctl и т.п.).
 HW_UPDATE_TIMEOUT_S = 5.0
 _hw_update_pool = concurrent.futures.ThreadPoolExecutor(
     max_workers=8, thread_name_prefix="lhm-hw-update"
@@ -211,42 +153,24 @@ _blacklist_lock = threading.Lock()
 
 
 def _ensure_runtime() -> None:
-    """Явно загрузить .NET-runtime ДО первого ``import clr`` — РОВНО ОДИН РАЗ.
-
-    Автозагрузка pythonnet на живой машине (2026-07-17) подняла runtime не
-    полностью — ``clr`` остался пустышкой без ``AddReference``; с явным
-    "netfx" работает. PYTHONNET_RUNTIME уважается.
-
-    Живой баг 2026-07-17 (второй заход): вызывался без защиты от повторного/
-    параллельного вызова — ``lhm_problem()`` (requirements-проверка в
-    ``get_state()``, event loop) и реальное чтение датчиков (sensor_scan,
-    executor-поток) оба звали ``_ensure_runtime()``, и при совпадении по
-    времени ДВА потока одновременно инициализировали pythonnet — гонка
-    ломала ``clr`` ещё сильнее (`no attribute '_add_pending_namespaces'`,
-    внутренняя структура CLR-хостинга, не просто "AddReference отсутствует").
-    Инициализация .NET-рантайма в принципе рассчитана на один раз за
-    процесс — лочим и не повторяем, даже если первая попытка не удалась
-    (повтор только усугубляет, не чинит).
-    """
     global _runtime_load_attempted
     if _runtime_load_attempted:
         return
     with _runtime_lock:
-        if _runtime_load_attempted:  # ждали лок, пока другой поток уже попробовал
+        if _runtime_load_attempted:
             return
         _runtime_load_attempted = True
         try:
-            import pythonnet  # noqa: PLC0415 — ставится только на Windows
+            import pythonnet
         except ImportError:
-            return  # нет pythonnet — import clr скажет об этом понятной подсказкой
+            return
         try:
             pythonnet.load(os.environ.get("PYTHONNET_RUNTIME", "netfx"))
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
 
 def dll_candidates(configured: str = "") -> list[Path]:
-    """Где искать LibreHardwareMonitorLib.dll, если путь не задан в конфиге."""
     if configured:
         return [Path(configured)]
     candidates: list[Path] = []
@@ -254,7 +178,6 @@ def dll_candidates(configured: str = "") -> list[Path]:
         base = os.environ.get(env)
         if not base:
             continue
-        # куда кладёт deploy/install-node.ps1 / рядом с обычной установкой LHM
         candidates.append(Path(base) / "sa-home-bot" / DLL_NAME)
         candidates.append(Path(base) / "LibreHardwareMonitor" / DLL_NAME)
     return candidates
@@ -273,7 +196,7 @@ def _open_computer(dll: Path):
         return _computer
     _ensure_runtime()
     try:
-        import clr  # pythonnet; ставится только на Windows
+        import clr
     except ImportError as exc:
         raise LhmUnavailable(
             "нет пакета pythonnet — переустановите ноду: pipx install "
@@ -281,7 +204,7 @@ def _open_computer(dll: Path):
         ) from exc
     sys.path.append(str(dll.parent))
     clr.AddReference(dll.stem)
-    from LibreHardwareMonitor import Hardware  # noqa: PLC0415 — появляется после AddReference
+    from LibreHardwareMonitor import Hardware
 
     computer = Hardware.Computer()
     computer.IsCpuEnabled = True
@@ -292,25 +215,6 @@ def _open_computer(dll: Path):
 
 
 def _update_with_timeout(hw) -> None:
-    """``hw.Update()`` с таймаутом и баном зависшего узла.
-
-    Живая находка 2026-07-20: CPU и диски читаются из разных потоков
-    executor'а (SensorSource.read_all → asyncio.gather) без блокировки —
-    конкурентный ``hw.Update()`` на общем ``_computer`` иногда ронял LHM с
-    IndexOutOfRangeException (StorageDevice.ToggleSpaceSensors). Пробовали
-    сериализовать весь проход одним ``threading.Lock`` — стало СТРОГО хуже:
-    JobWorker строго последовательный (worker/worker.py — один job зараз), и
-    вместо гонки-с-быстрым-крашем конкретное железо (похоже, тот же
-    картридер) без гонки просто зависает в ``hw.Update()`` навсегда — лок
-    держался вечно, весь сбор датчиков на ноде намертво стоял без единой
-    ошибки в логе, до ручного рестарта службы.
-
-    Вместо лока — таймаут: гоним ``Update()`` в отдельном пуле, ждём не
-    дольше ``HW_UPDATE_TIMEOUT_S``. Если не уложился — Python не может
-    прибить зависший поток (нативный/.NET-вызов не прерывается изнутри), но
-    Identifier запоминаем как забаненный и больше НЕ пытаемся обновлять —
-    один зависший узел утекает ровно один раз, не с каждым сканом.
-    """
     hw_id = str(hw.Identifier)
     if hw_id in _blacklisted_hw_ids:
         return
@@ -330,7 +234,6 @@ def _update_with_timeout(hw) -> None:
 
 
 def _hardware_node(hw) -> dict:
-    """LHM IHardware → дерево простых dict'ов (формат чистых парсеров выше)."""
     _update_with_timeout(hw)
     return {
         "id": str(hw.Identifier),
@@ -351,20 +254,14 @@ def _hardware_node(hw) -> dict:
 
 
 def _safe_hardware_node(hw) -> dict | None:
-    """``_hardware_node()``, но одно проблемное устройство (исключение, не
-    только таймаут — см. ``_update_with_timeout``) не должно ронять сбор
-    остальных: раньше единственное упавшее storage-железо гасило ВЕСЬ срез
-    (включая уже честно прочитанный CPU) — см. ``_safe_tree``, которая
-    ловила это на уровне всего дерева целиком."""
     try:
         return _hardware_node(hw)
-    except Exception:  # noqa: BLE001 — один узел не должен ронять остальные
+    except Exception:
         log.warning("LHM: узел %s пропущен из-за ошибки", hw.Identifier, exc_info=True)
         return None
 
 
 def read_tree_sync(dll_path: str = "") -> list[dict]:
-    """Снять срез дерева датчиков LHM (блокирующе, через executor вызывающего)."""
     dll = find_dll(dll_path)
     if dll is None:
         looked = ", ".join(str(c) for c in dll_candidates(dll_path)) or "—"
@@ -377,14 +274,12 @@ def read_tree_sync(dll_path: str = "") -> list[dict]:
 
 
 def _safe_tree(dll_path: str) -> list[dict]:
-    """Дерево LHM или пустой срез: причина запоминается для requirements,
-    в лог — одним предупреждением, не каждым сканом."""
     global _last_error, _warned
     try:
         tree = read_tree_sync(dll_path)
     except LhmUnavailable as exc:
         _last_error = str(exc)
-    except Exception as exc:  # noqa: BLE001 — .NET/interop не должен ронять скан
+    except Exception as exc:
         _last_error = f"ошибка LibreHardwareMonitor: {exc}"
     else:
         _last_error = None
@@ -413,12 +308,6 @@ def read_disk_summaries_sync(dll_path: str) -> list[DiskSummary]:
 
 
 def lhm_problem(dll_path: str = "") -> dict | None:
-    """Проблема LHM в формате requirements монитора (``{id,status,hint}``).
-
-    None — всё в порядке или не Windows (на Linux LHM не нужен). Формат — как
-    у ``RequirementRegistry.problem_for``, но LHM — не программа в PATH
-    (dll + pythonnet), поэтому диагностика своя.
-    """
     if sys.platform != "win32":
         return None
     hint: str | None = None
@@ -436,7 +325,7 @@ def lhm_problem(dll_path: str = "") -> dict | None:
             "[sensors.lhm].dll_path — температуры CPU/дисков"
         )
     if hint is None:
-        hint = _last_error  # ошибка последнего реального чтения (если была)
+        hint = _last_error
     if hint is not None:
         return {"id": "lhm", "status": "missing_program", "hint": hint}
     if _cpu_temps_missing:

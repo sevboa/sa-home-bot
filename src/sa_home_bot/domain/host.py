@@ -1,12 +1,3 @@
-"""Host-метрики VPS: здоровье ноды по /proc, а не по термозонам и SMART.
-
-У виртуалки нет температур, зато есть свои индикаторы деградации: переподписка
-провайдером (CPU steal), контеншн хранилища (iowait), давление памяти, заполнение
-маленького диска. Модель показания здесь **отдельная** от температурной
-(`domain/models.SensorReading`) — значение это %, load или счётчик, не °C — но
-гистерезисный КА переиспользуется (`domain/hysteresis.reconcile_band`).
-"""
-
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -14,30 +5,26 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from sa_home_bot.domain.hysteresis import reconcile_band
-from sa_home_bot.domain.models import ALERTING, OK, KnownState
+from sa_home_bot.domain.models import OK, KnownState
 from sa_home_bot.domain.policy import BAND_MID, BAND_OVER, BAND_UNDER
 
-KIND_HOST = "host"
+EVENT_HOST_DEGRADED = "host_degraded"
+EVENT_HOST_RECOVERED = "host_recovered"
 
-EVENT_HOST_DEGRADED = "host_degraded"  # host-метрика ушла за порог
-EVENT_HOST_RECOVERED = "host_recovered"  # вернулась в норму
-
-DIR_ABOVE = "above"  # тревога при росте (steal, iowait, load, диск…)
-DIR_BELOW = "below"  # тревога при падении (свободная память)
+DIR_ABOVE = "above"
+DIR_BELOW = "below"
 
 
 @dataclass(frozen=True)
 class HostMetricSpec:
-    """Определение одной host-метрики: смысл, единица, направление, пороги."""
-
     metric: str
     label: str
-    unit: str  # "%" | "" (load) | "/мин" (oom)
-    direction: str  # DIR_ABOVE | DIR_BELOW
+    unit: str
+    direction: str
     warn: float
     crit: float
-    hysteresis: float  # мёртвая зона возврата (в единицах метрики)
-    hint: str  # доп. фраза в тексте оповещения
+    hysteresis: float
+    hint: str
 
     def band(self, value: float) -> str:
         if self.direction == DIR_ABOVE:
@@ -46,7 +33,6 @@ class HostMetricSpec:
             if value <= self.warn - self.hysteresis:
                 return BAND_UNDER
             return BAND_MID
-        # DIR_BELOW: низкое значение — плохо
         if value <= self.warn:
             return BAND_OVER
         if value >= self.warn + self.hysteresis:
@@ -54,7 +40,6 @@ class HostMetricSpec:
         return BAND_MID
 
     def with_thresholds(self, warn: float, crit: float) -> HostMetricSpec:
-        """Копия с порогами из конфига ноды (дефолты перекрываются)."""
         return HostMetricSpec(
             metric=self.metric,
             label=self.label,
@@ -67,7 +52,6 @@ class HostMetricSpec:
         )
 
 
-# Реестр метрик + дефолтные пороги (перекрываются в [sensors.host] конфига ноды).
 METRICS: dict[str, HostMetricSpec] = {
     "steal_pct": HostMetricSpec(
         "steal_pct", "CPU steal", "%", DIR_ABOVE, 10.0, 25.0, 3.0,
@@ -125,7 +109,6 @@ METRICS: dict[str, HostMetricSpec] = {
 
 
 def fmt_host_value(value: float, unit: str) -> str:
-    """Человекочитаемое значение: «32%», «1.8», «2/мин»."""
     if unit == "%":
         return f"{value:.0f}%"
     if unit == "":
@@ -135,9 +118,7 @@ def fmt_host_value(value: float, unit: str) -> str:
 
 @dataclass(frozen=True)
 class HostMetricReading:
-    """Мгновенное показание одной host-метрики."""
-
-    component_id: str  # "host:steal_pct"
+    component_id: str
     metric: str
     label: str
     value: float
@@ -147,14 +128,12 @@ class HostMetricReading:
 
 @dataclass(frozen=True)
 class HostMetricState:
-    """Вычисленное состояние host-метрики (выход reconciliation, в БД)."""
-
     component_id: str
     metric: str
     label: str
     value: float
     unit: str
-    status: str  # OK | ALERTING
+    status: str
     consecutive_count: int
     alerting_since: datetime | None
 
@@ -180,9 +159,7 @@ class HostHealthDiff:
 
 @dataclass(frozen=True)
 class HostEvent:
-    """Событие host-метрики, производное от перехода. Рассылается подписчикам."""
-
-    type: str  # EVENT_HOST_DEGRADED | EVENT_HOST_RECOVERED
+    type: str
     component_id: str
     metric: str
     label: str
@@ -194,8 +171,6 @@ class HostEvent:
 
 @dataclass(frozen=True)
 class HostMetricPolicy:
-    """Спека метрики + параметры анти-дребезга (из конфига ноды)."""
-
     spec: HostMetricSpec
     consecutive_to_alert: int
     consecutive_to_clear: int
@@ -210,7 +185,6 @@ def compute_host_diff(
     resolve_policy: HostPolicyResolver,
     now: datetime,
 ) -> HostHealthDiff:
-    """Сравнить срез host-показаний с известным состоянием (та же машина, что у температур)."""
     states: list[HostMetricState] = []
     transitions: list[HostTransition] = []
     for reading in current:
@@ -254,27 +228,3 @@ def compute_host_diff(
                 )
             )
     return HostHealthDiff(states=states, transitions=transitions)
-
-
-def classify_host_events(transitions: list[HostTransition]) -> list[HostEvent]:
-    events: list[HostEvent] = []
-    for tr in transitions:
-        if tr.from_status == OK and tr.to_status == ALERTING:
-            event_type = EVENT_HOST_DEGRADED
-        elif tr.from_status == ALERTING and tr.to_status == OK:
-            event_type = EVENT_HOST_RECOVERED
-        else:
-            continue
-        events.append(
-            HostEvent(
-                type=event_type,
-                component_id=tr.component_id,
-                metric=tr.metric,
-                label=tr.label,
-                value=tr.value,
-                unit=tr.unit,
-                hint=tr.hint,
-                at=tr.at,
-            )
-        )
-    return events

@@ -1,9 +1,3 @@
-"""bot/image_tools.py: тулы /ai generate_image и find_image (Этап 48).
-
-Store — настоящий (sqlite во временном каталоге), node_link и notifier —
-фейки: нода llm «рисует» заранее заготовленный PNG, notifier записывает, что
-и как ушло в Telegram, и отдаёт выдуманный file_id."""
-
 from __future__ import annotations
 
 import base64
@@ -54,8 +48,6 @@ class FakeNodeLink:
 
 
 class FakeNotifier:
-    """``results`` — очередь ответов send_photo_ex; кончилась — успешная отправка."""
-
     def __init__(self, results: list | None = None) -> None:
         self.results = list(results or [])
         self.sent: list[dict] = []
@@ -122,9 +114,6 @@ async def _add(store, *, chat_id=CHAT, caption="Красный дракон", pr
     return image_id
 
 
-# --- generate ---
-
-
 async def test_generate_saves_sends_stores_file_id_and_remembers(store):
     link, notifier, remember = FakeNodeLink(), FakeNotifier(), Remember()
     ctx = _ctx(store, node_link=link, notifier=notifier)
@@ -143,14 +132,12 @@ async def test_generate_saves_sends_stores_file_id_and_remembers(store):
     assert sent["chat_id"] == CHAT
     assert sent["caption"] == "Красный дракон"
     assert (sent["thread"], sent["reply_to"]) == (7, 42)
-    # в чат уходит увеличенная копия (16 → 64 при display_px=64), в БД — маленькая
     assert Image.open(io.BytesIO(sent["photo"])).size == (64, 64)
 
     [row] = await store.recent_images(CHAT)
     image = await store.get_image(CHAT, row["id"])
     assert image["png"] == link.png
     assert image["prompt_ru"] == "дракон над замком"
-    # в БД — промпт, который реально ушёл в модель (после промптера)
     assert image["prompt_en"] == "red dragon, old castle, sunset"
     assert image["author"] == "Сева"
     assert image["telegram_file_id"] == "file-501"
@@ -250,9 +237,6 @@ async def test_generate_telegram_refused_keeps_image_without_file_id(store):
     assert remember.episodes == []
 
 
-# --- find ---
-
-
 async def test_find_by_id_resends_by_file_id_without_bytes(store):
     image_id = await _add(store, file_id="tg-file-abc")
     notifier = FakeNotifier()
@@ -332,7 +316,7 @@ async def test_find_no_match_lists_recent_candidates(store):
     newest_five = list(reversed(ids))[:5]
     for image_id in newest_five:
         assert f"#{image_id}" in result
-    assert f"#{ids[0]} " not in result  # самые старые за пределами списка
+    assert f"#{ids[0]} " not in result
     assert result.index(f"#{ids[-1]}") < result.index(f"#{ids[-2]}")
 
 
@@ -359,8 +343,6 @@ async def test_generate_accepts_legacy_prompt_en(store):
 
 
 async def test_generate_alfred_himself_adds_his_lora_and_subject(store):
-    """«Нарисуй себя» (2026-10-05): alfred=true — LoRA облика и Альфред
-    первым в описании; без флага — как раньше."""
     link = FakeNodeLink()
     ctx = _ctx(store, node_link=link)
     args = {"description": "на пляже в шезлонге", "prompt_ru": "ты на пляже", "alfred": True}

@@ -1,35 +1,3 @@
-"""Места Альфреда (Этап 59.1, IMPLEMENTATION_PLAN.md): не один кабинет, а
-несколько комнат, и Альфред стоит в одной из них.
-
-Два вида мест (решение владельца 2026-10-10):
-
-- **комната** — кабинет, подвал, места поиска ключа, особые места катакомб.
-  Устроена как кабинет (cabinet.py): канон в коде, особенности гостя от
-  Ведущего, следы сцены, снимок каждый раз рисуется заново. Кабинет — одна из
-  комнат: его ключ ``location:cabinet:<гость>`` и формат хранения прежние
-  (существующие данные читаются как были), поэтому для кабинета остаётся
-  сам ``cabinet.Cabinet``; ``Room`` — его наследник для прочих комнат с ключом
-  ``location:<id>:<гость>``;
-- **лабиринт** — катакомбы (catacombs.py, 59.4, отдельный модуль): здесь
-  только поля ``node``/``heading`` положения Альфреда.
-
-Положение Альфреда — ``app_state`` ``alfred_at:<гость>``: ``{place, node?,
-heading?, since}``. «Где ты», take_photo и кадры Ведущего берут место
-отсюда. Канарейка (59.C): для гостя вне ``llm.interactives_canary_user_ids``
-положение игнорируется — Альфред всегда в кабинете, и ничего не пишется.
-
-Временные места (поиск ключа: кладовая, кухня, библиотека…) в хранилище не
-попадают: канон придумывает Ведущий на ходу, комната живёт в ``Run.world``
-сценария (``world["rooms"]``), а в ``alfred_at.place`` — её временный id.
-
-Обыск (тул ``search``): что найдено, решает код по таблице находок места
-(``RoomCanon.specials`` — особая находка, иначе пусто или мелочь для
-антуража); обысканное помечается, повторный обыск там ничего не даёт.
-Особая находка может выдать вещь гостю (``Find.item``, Этап 59.6: старый
-фотоаппарат в проявочной): вещь заводит код (engine.tool_search), Ведущий
-придумывает ей приметы и заметку (``found_item`` его ответа).
-"""
-
 from __future__ import annotations
 
 import json
@@ -49,20 +17,14 @@ if TYPE_CHECKING:
 PLACE_CABINET = cabinet_mod.LOCATION
 PLACE_CELLAR_DOOR = "cellar_door"
 PLACE_CELLAR = "cellar"
-# Временные места поиска — id вида «t1», «t2» (Run.world["rooms"]).
 TEMP_PREFIX = "t"
 
 GROUP_CABINET = "cabinet"
 GROUP_CELLAR = "cellar"
 GROUP_CATACOMBS = "catacombs"
 
-# Темп кадра подземелья: свет — фонарь Альфреда, без времени суток и погоды
-# (план 59.0: кэш картинок поэтому стабилен).
 UNDERGROUND_LIGHT_EN = "dim lantern light, deep shadows"
-# Ключ состояния комнаты без окна: вместо погоды и времени суток (59.7).
 NO_OUTSIDE_KEY = "lantern"
-# В негатив рисунка комнат без окна (59.7): окон и дневного света там нет,
-# а кадр иначе рисует их под потолком (живой прогон 2026-10-13).
 NO_WINDOW_NEGATIVE_EN = "window, daylight, sunlight, sky"
 
 TEMP_NAME_MAX = 40
@@ -73,15 +35,6 @@ TEMP_ROOMS_KEEP = 8
 
 @dataclass(frozen=True)
 class Find:
-    """Особая находка места: срабатывает, когда обыскивают то, что назвал
-    Альфред (``pattern`` по тексту ``where``). Один раз на гостя в месте —
-    обысканное помечается.
-
-    Этап 59.6: ``pattern=None`` — подходит любое место; ``first`` — только
-    самый первый обыск комнаты (что бы Альфред ни назвал); ``item`` — вид
-    вещи из ``items.KINDS``, которую находка выдаёт гостю (если она у него
-    уже есть, находка пропускается — дальше трофей или пусто)."""
-
     pattern: re.Pattern[str] | None
     text: str
     item: str | None = None
@@ -95,31 +48,23 @@ class Find:
 
 @dataclass(frozen=True)
 class RoomCanon:
-    """Канон комнаты — общий для всех гостей (особенности у каждого свои)."""
-
     id: str
-    name_ru: str  # «подвал» — как её называет Альфред
-    in_ru: str  # «в подвале»
+    name_ru: str
+    in_ru: str
     canon_ru: str
-    canon_en: str  # для снимка: коротко, 77 токенов CLIP
-    caption: str  # подпись общего снимка
-    scene_caption: str  # подпись кадра сцены
-    stem: str  # корень названия для «общий вид подвала»
-    in_en: str  # «in a dark stone cellar» — для селфи
+    canon_en: str
+    caption: str
+    scene_caption: str
+    stem: str
+    in_en: str
     group: str = GROUP_CELLAR
     windowed: bool = False
     light_en: str | None = UNDERGROUND_LIGHT_EN
-    # Мелочь для антуража и её шанс; пусто — «ничего» (план: «почти всегда
-    # пусто или мелочь»).
     trinkets: tuple[str, ...] = ()
     trinket_chance: float = 0.35
     specials: tuple[Find, ...] = ()
-    # Склонения для Ведущего и Альфреда: «подвала» и «из подвала».
     of_ru: str = "этого места"
     from_ru: str = "оттуда, где был"
-    # Основы названия места для распознавания в просьбах (regex-фрагменты,
-    # без групп захвата): по ним take_photo и search узнают, что названо
-    # другое место (``foreign_place``).
     names: tuple[str, ...] = ()
 
 
@@ -197,8 +142,6 @@ CELLAR_CANON = RoomCanon(
     ),
 )
 
-# Реестр комнат с каноном в коде. Особые места катакомб (59.5) регистрирует
-# catacombs.py через ``register``.
 PLACES: dict[str, RoomCanon] = {
     canon.id: canon for canon in (CABINET_CANON, CELLAR_DOOR_CANON, CELLAR_CANON)
 }
@@ -209,8 +152,6 @@ def register(canon: RoomCanon) -> None:
     NAMEABLE[canon.id] = canon
 
 
-# Места, названия которых распознаются в просьбах: все комнаты реестра и
-# катакомбы (их в ``PLACES`` нет — это лабиринт, а не комната).
 NAMEABLE: dict[str, RoomCanon] = dict(PLACES)
 
 
@@ -218,22 +159,12 @@ def register_nameable(canon: RoomCanon) -> None:
     NAMEABLE[canon.id] = canon
 
 
-# --- какое место названо в просьбе (Этап 59.7) ---
-
-# Лаз принадлежит и подвалу (он там, за бочкой), и катакомбам (он ведёт в
-# них): из любого из двух он «здесь». Название — как его называет Альфред.
 _HATCH_RE = r"\bлаз(?:а|у|ом|е|ы)?\b"
 _HATCH_IDS = frozenset({PLACE_CELLAR, "catacombs"})
 _HATCH_NAME = "лаз в катакомбы"
 
 
 def foreign_place(text: str, here: str) -> str | None:
-    """Название другого места, если в ``text`` (focus, подпись, ``where``)
-    названо не то, где Альфред стоит (``here`` — id места). None — чужих мест
-    нет. Словарь основ — ``RoomCanon.names``, без LLM: самое левое совпадение
-    выигрывает, поэтому «дверь подвала» — это лестница у двери, а не подвал, а
-    «винный погреб» — не подвал. Временные комнаты Ведущего по названию не
-    узнаются."""
     low = text.casefold()
     parts: list[tuple[frozenset[str], str]] = []
     patterns: list[str] = []
@@ -250,17 +181,12 @@ def foreign_place(text: str, here: str) -> str | None:
     return None
 
 
-# --- положение Альфреда ---
-
-# Заметка Альфреду на следующий ход после самовозврата в кабинет (простой
-# гостя дольше порога или Ведущий вернул idle): о возвращении он скажет сам.
 RETURN_NOTE = (
     "Пока собеседник молчал, ты вернулся {from_ru} к себе в кабинет и снова за "
     "своим столом. Скажи об этом сам одной фразой, в образе дворецкого, и "
     "продолжай разговор."
 )
 RETURN_FROM_UNKNOWN = "из подземелья"
-# «Где ты» в подвале, когда лаз уже найден (Этап 59.2).
 CELLAR_HATCH_HINT = (
     " Отсюда есть лаз в катакомбы — ты сам можешь предложить собеседнику спуститься."
 )
@@ -268,12 +194,6 @@ CELLAR_HATCH_HINT = (
 
 @dataclass
 class At:
-    """``alfred_at:<гость>``. ``node``/``heading`` — лабиринт катакомб (59.4),
-    движок их не трогает. ``touched`` — когда гость последний раз говорил с
-    Альфредом, пока тот вне кабинета (для возврата после простоя).
-    ``returned_from`` — Альфред только что поднялся в кабинет сам и обязан
-    сказать об этом следующим ходом."""
-
     place: str = PLACE_CABINET
     since: str | None = None
     node: Any = None
@@ -325,7 +245,6 @@ async def set_at(store: Store, user_id: int, at: At) -> None:
 
 
 def is_idle(at: At, now: datetime, hours: float) -> bool:
-    """Гость молчит дольше порога — Альфред вне кабинета пора вернуть."""
     last = parse_iso(at.touched) or parse_iso(at.since)
     return last is not None and now - last >= timedelta(hours=hours)
 
@@ -335,21 +254,26 @@ def new_at(place: str, now: datetime, **extra: Any) -> At:
     return At(place=place, since=stamp, touched=stamp, **extra)
 
 
-# --- комнаты ---
-
-
 @dataclass
 class Room(Cabinet):
-    """Комната, кроме кабинета. Особенности/следы/снимки — как у кабинета и в
-    том же JSON, ключ ``location:<id>:<гость>``; временная комната (``temp``)
-    в хранилище не попадает — она в ``Run.world``."""
-
     canon: RoomCanon = field(default=CELLAR_CANON)
     temp: bool = False
 
     @property
     def place(self) -> str:
         return self.canon.id
+
+    @property
+    def is_study(self) -> bool:
+        return False
+
+    @property
+    def name_ru(self) -> str:
+        return self.canon.name_ru
+
+    @property
+    def in_ru(self) -> str:
+        return self.canon.in_ru
 
     @property
     def canon_ru(self) -> str:
@@ -399,7 +323,6 @@ class Room(Cabinet):
         return self.canon.stem in low and len(low.split()) <= 3
 
     def state_key(self, outside_key: str) -> str:
-        # Без окна снаружи ничего не видно: ни погоды, ни времени суток (59.7).
         if not self.canon.windowed:
             outside_key = NO_OUTSIDE_KEY
         return f"{self.canon.id}:{super().state_key(outside_key)}"
@@ -432,8 +355,6 @@ async def load_room(store: Store, user_id: int, place: str) -> Room:
 
 
 async def save_room(store: Store, room: Room) -> None:
-    # Формат хранения — ровно кабинетский (cabinet.save): id и канон комнаты в
-    # JSON не пишем — id в ключе, канон в коде.
     data = {
         "user_id": room.user_id,
         "features": room.features,
@@ -456,16 +377,11 @@ async def save_searched(store: Store, user_id: int, place: str, searched: list[s
     await store.set_state(searched_key(place, user_id), json.dumps(searched, ensure_ascii=False))
 
 
-# --- временные комнаты (Run.world["rooms"]) ---
-
-
 def _clip(value: Any, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit].rstrip(" .,;")
 
 
 def temp_spec(raw: Any) -> dict[str, str] | None:
-    """Описание временного места от Ведущего (``move_to``) → чистый словарь.
-    Нужны хотя бы название и канон; иначе None — перемещения нет."""
     if not isinstance(raw, dict):
         return None
     name = _clip(raw.get("name"), TEMP_NAME_MAX)
@@ -478,7 +394,6 @@ def temp_spec(raw: Any) -> dict[str, str] | None:
 
 
 def temp_id_for(world: dict[str, Any], name: str) -> str:
-    """Id временной комнаты по названию: повторный заход — та же комната."""
     rooms: dict[str, Any] = world.setdefault("rooms", {})
     for tid, data in rooms.items():
         if str(data.get("name", "")).casefold() == name.casefold():
@@ -490,12 +405,10 @@ def temp_id_for(world: dict[str, Any], name: str) -> str:
 
 
 def put_temp_room(world: dict[str, Any], spec: dict[str, str]) -> str:
-    """Записать (или обновить канон) временную комнату в мир сцены, вернуть id."""
     tid = temp_id_for(world, spec["name"])
     rooms: dict[str, Any] = world["rooms"]
     entry = rooms.setdefault(tid, {"features": [], "scene": [], "searched": []})
     entry.update(spec)
-    # Лимит: старые уходят первыми (текущую оставляем).
     while len(rooms) > TEMP_ROOMS_KEEP:
         oldest = next(k for k in rooms if k != tid)
         del rooms[oldest]
@@ -535,21 +448,17 @@ def temp_room(world: dict[str, Any], user_id: int, tid: str) -> Room | None:
 
 
 def store_temp_room(world: dict[str, Any], room: Room) -> None:
-    """Вернуть изменения комнаты (особенности, следы) в мир сцены."""
     data = (world.get("rooms") or {}).get(room.canon.id)
     if isinstance(data, dict):
         data["features"] = list(room.features)
         data["scene"] = list(room.scene)
 
 
-# --- обыск ---
-
 _PREPOSITIONS = frozenset({"в", "во", "на", "под", "за", "у", "около", "возле", "над", "из"})
 _NOT_WORD = re.compile(r"[^\w\s]", re.UNICODE)
 
 
 def normalize_where(where: str) -> str:
-    """«В ящике стола!» и «ящик стола» — одно и то же место."""
     words = [w for w in _NOT_WORD.sub(" ", where.casefold()).split() if w]
     while words and words[0] in _PREPOSITIONS:
         words.pop(0)
@@ -565,8 +474,8 @@ SEARCH_KIND_EMPTY = "empty"
 @dataclass(frozen=True)
 class SearchResult:
     kind: str
-    text: str  # что нашёл Альфред — словами для него
-    item: str | None = None  # вид вещи, выданной находкой (Find.item)
+    text: str
+    item: str | None = None
 
 
 SEARCH_REPEAT_TEXT = "Это место ты уже обыскал — ничего нового там нет."
@@ -583,11 +492,6 @@ def search_room(
     choose: Callable[[tuple[str, ...]], str],
     have_items: frozenset[str] = frozenset(),
 ) -> SearchResult:
-    """Итог обыска ``where`` в комнате по таблице находок. ``searched``
-    (нормализованные названия обысканного) дописывается — повторный обыск
-    того же ничего не даёт. ``have_items`` — виды вещей, что уже есть у
-    гостя: находка с такой вещью пропускается (фотоаппарат не выдаётся
-    дважды)."""
     norm = normalize_where(where) or "здесь"
     if norm in searched:
         return SearchResult(SEARCH_KIND_REPEAT, SEARCH_REPEAT_TEXT)
@@ -604,11 +508,6 @@ def search_room(
     return SearchResult(SEARCH_KIND_EMPTY, SEARCH_EMPTY_TEXT)
 
 
-# Находка проявочной (Этап 59.5/59.6): первый обыск в ней — всегда старый
-# фотоаппарат, что бы Альфред ни назвал; Альфред вспоминает, что сам оставил
-# его здесь. Канон проявочной (особое место катакомб) подключает эту находку
-# в ``RoomCanon.specials``; производителя и модель придумывает Ведущий
-# (``found_item``) либо запасной список вида (items.CAMERA).
 DARKROOM_CAMERA_TEXT = (
     "На полке среди склянок ты находишь старый фотоаппарат — и сразу узнаёшь "
     "его: ты сам оставил его здесь когда-то и успел позабыть."
@@ -621,10 +520,6 @@ DARKROOM_CAMERA = Find(
 )
 
 
-# --- «Где ты» каждый ход и запрет чужого места (Этап 59.7) ---
-
-# Правило в system Альфреда на каждом ходу канарейки: место знает код, а не
-# слова — Альфред никуда не «спускается» сам.
 MOVE_RULE = (
     "Перейти в другое место ты можешь только инструментом (go или walk): "
     "словами ты никуда не уходишь, а «спустился» или «поднялся» говоришь лишь "
@@ -634,7 +529,6 @@ MOVE_RULE = (
 WINDOW_YES = "Здесь есть окно."
 WINDOW_NO = "Окон здесь нет, света снаружи нет — только твой фонарь."
 WHERE_NOTE = "Где ты сейчас: {here}.{detail}"
-# Выходы из места, где нет приписки «Где ты» (кабинет, лестница, подвал…).
 EXIT_HOME = " Домой, в кабинет, — go(cabinet)."
 EXIT_CABINET_TO = " Отсюда знакомой дорогой (go): {targets}."
 
@@ -656,25 +550,17 @@ TOOL_SEARCH_ELSEWHERE = (
 )
 
 
-# --- сброс прогресса (отладка, /interactives reset) ---
-
 RESET_SCOPES = ("cellar", "catacombs", "all")
 
-# Флаги гостя (user_effect:<ключ>:<гость>).
 EFFECT_CELLAR_UNLOCKED = "cellar_unlocked"
 EFFECT_CATACOMBS_OPEN = "catacombs_open"
 CATACOMBS_KEY = "catacombs:{user_id}"
-# Сколько обычных ходов подряд было в чате без сцены (спонтанный триггер 59.2).
 PLAIN_TURNS_KEY = "interactives_plain:{chat_id}"
 
 
 async def reset_progress(
     store: Store, user_id: int, scope: str, chat_id: int | None = None
 ) -> list[str]:
-    """Стереть прогресс гостя по Этапу 59: ``cellar`` — подвал (ход сцены,
-    завершённость, флаги, положение, комнаты подвала), ``catacombs`` —
-    катакомбы (лабиринт, их комнаты, сцена), ``all`` — всё и сразу. Кабинет и
-    его данные не трогаются никогда. Возвращает стёртые ключи (для отчёта)."""
     scenarios = {
         "cellar": ("cellar",),
         "catacombs": ("catacombs",),
@@ -708,14 +594,9 @@ async def reset_progress(
             if len(parts) != 3 or parts[2] != str(user_id) or parts[1] == PLACE_CABINET:
                 continue
             canon = PLACES.get(parts[1])
-            # Комната, которой нет в реестре, — особое место катакомб, ещё не
-            # зарегистрированное в этом процессе.
             group = canon.group if canon is not None else GROUP_CATACOMBS
             if group in groups:
                 await drop(key)
-    # Вещи и эффекты этапа (59.3, 59.6): вещь не стираем, а помечаем
-    # израсходованной — из описи она пропадает и находится заново; эффект
-    # снимаем. Вино — с подвалом, фотоаппарат — с катакомбами.
     stage_items = {"cellar": (("wine", "tipsy"),), "catacombs": (("camera", "camera"),)}
     for scenario in scenarios:
         for item_type, effect in stage_items[scenario]:
@@ -738,19 +619,14 @@ async def _run_owner(store: Store, key: str) -> int | None:
         return None
 
 
-# --- тул search (engine.Interactives.tool_search) ---
-
 SEARCH_WHERE_MAX = 120
 TOOL_SEARCH_UNAVAILABLE = "недоступно: порыскать можно только в живом разговоре"
 TOOL_SEARCH_NO_WHERE = "Скажи, что именно ты обыскиваешь: ящик, полку, бочку, угол…"
-# Вне сцены Ведущего нет — итог отдаётся сразу.
 TOOL_SEARCH_FREE = (
     "Ты обыскал «{where}». {found} Расскажи об этом собеседнику своими "
     "словами, ничего не добавляя от себя."
 )
 
-# Находка с вещью (Find.item, Этап 59.6). Ведущему — что найдено и что
-# придумать; Альфреду без Ведущего — сразу, с запасной заметкой вещи.
 SEARCH_ITEM_DIRECTOR = (
     "Альфред обыскал «{where}». {text} Он забирает находку с собой: это вещь "
     "«{name}». Опиши, как она выглядит (поле found_item)."

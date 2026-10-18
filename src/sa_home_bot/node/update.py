@@ -1,12 +1,3 @@
-"""Самообновление ноды через pipx — механика без сети, где это возможно.
-
-pipx (в отличие от `nodectl fix`/sudo) не требует root — переустановку можно
-делать прямо из долгоживущего процесса ноды, без отдельного короткоживущего
-процесса с интерактивным терминалом. Уже загруженный в память код текущего
-процесса переустановка файлов на диске не трогает — «увидеть» новую версию
-можно только после рестарта, который выполняет человек (`restart_node`).
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -28,25 +19,11 @@ PACKAGE_NAME = "sa-home-bot"
 
 _TAG_RE = re.compile(r"v\d+(?:\.\d+)*")
 
-# ls-remote — короткая read-only сетевая операция, вызывается синхронно внутри
-# check_update/update и ждёт ответа клиент (nodectl/бот) с таймаутом
-# DEFAULT_TIMEOUT протокола. Держим заметно меньше него — иначе клиент
-# сдаётся раньше, чем сервер успевает честно ответить "сеть не сработала", и
-# вместо аккуратной ошибки прилетает голый TimeoutError на всё соединение.
 LS_REMOTE_TIMEOUT_S = DEFAULT_TIMEOUT - 3
-# pipx install — git clone + сборка пакета, но это фоновая задача
-# (asyncio.create_task в node/service.py) — клиент её не ждёт, таймаут можно
-# держать большим.
 PIPX_INSTALL_TIMEOUT_S = 300
 
 
 def installed_version() -> str | None:
-    """Версия пакета НА ДИСКЕ прямо сейчас (не то, что выполняется в памяти).
-
-    Перечитывается каждый раз — после `pipx install --force` увидит новую
-    версию, пока сам процесс не перезапущен (см. `__version__` — то, что
-    реально исполняется, зафиксировано при импорте и не меняется).
-    """
     importlib.invalidate_caches()
     try:
         return importlib.metadata.version(PACKAGE_NAME)
@@ -55,11 +32,6 @@ def installed_version() -> str | None:
 
 
 def origin_repo_url() -> str | None:
-    """Git-репозиторий, из которого поставлен этот пакет (PEP 610).
-
-    None — editable-установка (dev-чекаут: `pip install -e .`), пакет не
-    найден, или он поставлен не из git — обновлять через pipx нечего.
-    """
     try:
         dist = importlib.metadata.distribution(PACKAGE_NAME)
         raw = dist.read_text("direct_url.json")
@@ -80,7 +52,6 @@ def origin_repo_url() -> str | None:
 
 
 def _parse_tags(ls_remote_output: str) -> list[str]:
-    """`git ls-remote --tags --refs` → список имён тегов вида vX.Y.Z…"""
     tags = []
     for line in ls_remote_output.splitlines():
         _, _, ref = line.partition("refs/tags/")
@@ -110,25 +81,11 @@ def _latest_tag_sync(repo_url: str) -> str | None:
 
 
 async def latest_tag(repo_url: str) -> str | None:
-    """Самый свежий тег `vX.Y.Z…` в репозитории (read-only, без токена)."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _latest_tag_sync, repo_url)
 
 
 def _pipx_home() -> str:
-    """PIPX_HOME, вычисленный от РЕАЛЬНО работающего интерпретатора, а не
-    унаследованный от аккаунта, который зовёт pipx.
-
-    pipx-венв всегда имеет структуру ``<PIPX_HOME>/venvs/<pkg>/{bin,Scripts}/
-    python[.exe]`` — четвёртый родитель ``sys.executable`` и есть PIPX_HOME.
-
-    Живой баг 2026-07-17: Windows-служба идёт от LocalSystem, у которого
-    СВОЙ %LOCALAPPDATA% (системный профиль), отличный от того, откуда
-    реально запущен процесс. Без явного PIPX_HOME `pipx install --force`
-    молча ставит пакет в venv ПОД LocalSystem — "успешно", но мимо venv'а,
-    из которого служба фактически работает; `installed_version()` после
-    такого "обновления" честно продолжает видеть старую версию.
-    """
     return str(Path(sys.executable).parents[3])
 
 
@@ -136,15 +93,6 @@ _EXTRAS_RE = re.compile(r"\s*" + re.escape(PACKAGE_NAME) + r"\s*\[([^\]]*)\]")
 
 
 def _installed_extras() -> str | None:
-    """Экстры, с которыми пакет стоит сейчас, — из pipx_metadata.json
-    работающего venv'а (``main_package.package_or_url``), напр. "stt,tts".
-
-    Живая находка 2026-09-24: update ставил голый ``git+<repo>@<ref>`` —
-    экстры (tts/stt/graph_memory…) выпадали из спецификации и из metadata,
-    их пины (numpy<2.5 у tts) переставали учитываться, и `--force-reinstall`
-    молча притащил numpy 2.5.3, сломав импорт TTS.api. None — metadata нет
-    (не pipx) или экстр не было.
-    """
     meta = Path(sys.executable).parents[1] / "pipx_metadata.json"
     try:
         data = json.loads(meta.read_text(encoding="utf-8"))
@@ -159,12 +107,6 @@ def _installed_extras() -> str | None:
 
 
 async def pipx_reinstall(repo_url: str, ref: str) -> tuple[bool, str]:
-    """`pipx install --force [sa-home-bot[<extras>] @ ]git+<repo_url>@<ref>` —
-    без sudo, без TTY. Экстры текущей установки сохраняются (_installed_extras).
-
-    Возвращает (успех, хвост вывода для диагностики). Не бросает исключений
-    наружу — вызывающий код (фоновая задача) сам решает, что делать с провалом.
-    """
     spec = f"git+{repo_url}@{ref}"
     extras = _installed_extras()
     if extras:
@@ -187,31 +129,16 @@ async def pipx_reinstall(repo_url: str, ref: str) -> tuple[bool, str]:
         return False, str(exc)
     output = stdout.decode(errors="replace").strip()
     if proc.returncode != 0:
-        return False, output[-2000:]  # хвост — обычно там суть ошибки
+        return False, output[-2000:]
     return True, output[-2000:]
 
 
-# Имя задачи из install-node.ps1 (Register-ScheduledTask -TaskName ...) — вне
-# синхронизации с ним нет, но оба места в одном репозитории и меняются вместе.
 WINDOWS_AUTOUPDATE_TASK_NAME = "sa-home-node-autoupdate"
 
 SCHTASKS_RUN_TIMEOUT_S = 30
 
 
 async def trigger_scheduled_task(task_name: str = WINDOWS_AUTOUPDATE_TASK_NAME) -> tuple[bool, str]:
-    """Дёрнуть Windows-задачу планировщика прямо сейчас, не дожидаясь суточного
-    расписания.
-
-    На win32 `pipx install --force` из процесса ноды структурно не работает
-    (WinError 5 — venv-DLL/exe держит открытыми ЭТОТ ЖЕ работающий процесс,
-    живые находки 2026-07-17/2026-07-19) — единственный рабочий путь внешний:
-    deploy/win-auto-update.ps1, зарегистрированный install-node.ps1 как
-    задача планировщика от SYSTEM. Служба ноды сама тоже идёт от LocalSystem
-    (WinSW без <serviceaccount> — деplой/sa-home-node.xml), поэтому прав на
-    `schtasks /run` над SYSTEM-задачей у неё достаточно. Задача сама стопает
-    службу → pipx install → стартует — вызвавший это процесс скоро умрёт,
-    ответ на RPC уходит раньше (fire-and-forget), см. NodeService._update().
-    """
     try:
         proc = await asyncio.create_subprocess_exec(
             "schtasks",

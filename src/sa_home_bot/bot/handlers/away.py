@@ -1,15 +1,6 @@
-"""/away, /back и кнопки напоминания — «Альфред в городе» (Этап 51, bot/away.py).
-
-Только владельцу (``*`` в allowed_commands): ``/away <срок> [причина]``,
-``/away +1ч`` (продлить), ``/back``, ``/away`` без аргументов — статус. Кнопки
-напоминания за 15 минут до срока — ``away:ext:<минуты>`` и ``away:back``.
-Это служебные команды: работают и пока Альфред в городе.
-"""
-
 from __future__ import annotations
 
 import logging
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -35,6 +26,7 @@ from sa_home_bot.config import Settings
 from sa_home_bot.people import claims as people_claims
 from sa_home_bot.people.book import PeopleBook
 from sa_home_bot.subscriptions.models import Subscription
+from sa_home_bot.utils.timefmt import zone_or_none
 
 log = logging.getLogger(__name__)
 
@@ -44,21 +36,17 @@ CLAMPED_TEXT = " Срок урезан до потолка: возвращени
 
 
 async def _owner_tz(away: AwayService, user):
-    """Часовой пояс владельца для «до 23:00»: из его карточки (Этап 58),
-    иначе — пояс сервера."""
     if user is not None:
         people = PeopleBook(await away.store.person_claims(), [])
         tz = people.value(user.id, people_claims.FIELD_TIMEZONE)
-        if tz:
-            try:
-                return ZoneInfo(tz)
-            except ZoneInfoNotFoundError:
-                pass
+        zone = zone_or_none(tz)
+        if zone is not None:
+            return zone
     return local_tz()
 
 
 def _is_owner(subscription: Subscription | None) -> bool:
-    return subscription is not None and not subscription.broken and subscription.is_owner
+    return subscription is not None and subscription.is_owner
 
 
 @router.message(Command(commands.AWAY.name))

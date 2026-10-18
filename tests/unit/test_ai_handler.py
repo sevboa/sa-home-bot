@@ -1,34 +1,20 @@
-"""/alfred (+ скрытый алиас /ai): новый диалог (с текстом/без), продолжение
-через reply, права на реплай, уведомление админов о сбоях. Presence/wake-
-сценарий уже покрыт test_ai_flow.py — здесь он замокан
-(ai_flow.request_alfred), тестируется только оркестрация хендлера
-(bot/handlers/ai.py): запись ai_turns, резолв reply, форматирование."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-import pytest_asyncio
+import pytest
 
-from sa_home_bot.bot import ai_flow, voice_mode
+from sa_home_bot.bot import ai_flow, ai_lines, ai_reply, ai_turns, voice_mode
 from sa_home_bot.bot.handlers import ai as ai_handler
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import Settings
-from sa_home_bot.db.connection import Database
-from sa_home_bot.db.migrations import apply_migrations
-from sa_home_bot.db.store import Store
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 
 
 def _plain_settings() -> Settings:
-    """Этот файл тестирует именно "typing_plain"-путь (chunk_text, HTML-
-    escape, message.reply/answer) — presence/wake уже покрыт test_ai_flow.py.
-    Rich-путь (этап 34, Фаза 2, дефолт LlmConfig.response_mode с 2026-08-09)
-    — отдельно, см. test_ai_handler_rich.py; FakeBot здесь не реализует
-    send_rich_message/send_rich_message_draft."""
     settings = Settings()
     settings.llm.response_mode = "typing_plain"
     return settings
@@ -94,8 +80,6 @@ class FakeMessage:
         self.quote = None
 
     async def answer(self, text, **kwargs):
-        # aiogram реально пробрасывает message_thread_id из контекста
-        # исходного сообщения — здесь тот же эффект, для реалистичности тестов.
         sent = FakeMessage(self.chat.id, message_thread_id=self.message_thread_id)
         sent.text = text
         self.sent.append(text)
@@ -106,9 +90,6 @@ class FakeMessage:
 
 
 class FakeRichSession:
-    """Заглушка RichStreamSession — только push_status, для проверки
-    STICKER_LOOKING_TEXT_PLAIN (_handle_sticker_message)."""
-
     def __init__(self) -> None:
         self.statuses: list[str] = []
 
@@ -136,15 +117,6 @@ class FakeNotifier:
         return self._send_voice_result
 
 
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    db = Database(tmp_path / "test.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
-
-
 def _sub(*allowed: str) -> Subscription:
     return Subscription(chat_id=1, name="me", allowed_commands=frozenset(allowed))
 
@@ -160,9 +132,6 @@ def _admin_book() -> SubscriptionBook:
 
 
 async def test_cmd_ai_without_text_asks_model_for_greeting(store, monkeypatch):
-    # Без текста — не заготовленная строка, а сама модель здоровается
-    # (решение пользователя 2026-07-23: не экономить обращения к локальной
-    # модели). Директива-приветствие в историю не пишется, только ответ.
     seen_history = []
 
     async def fake_request(
@@ -181,9 +150,8 @@ async def test_cmd_ai_without_text_asks_model_for_greeting(store, monkeypatch):
         tool_calls=ToolCalls(),
     )
 
-    assert seen_history == [[{"role": "user", "content": ai_handler.OPENING_PROMPT}]]
-    assert message.sent == [ai_handler._format_answer("Да, сэг? Слушаю вас")]
-    # Только ответ ассистента — сама директива не осела в истории диалога.
+    assert seen_history == [[{"role": "user", "content": ai_turns.OPENING_PROMPT}]]
+    assert message.sent == [ai_reply.format_answer("Да, сэг? Слушаю вас")]
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert len(rows) == 1
     assert rows[0]["role"] == "assistant"
@@ -195,7 +163,7 @@ async def test_cmd_ai_without_text_unavailable_records_nothing(store, monkeypatc
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
         tool_calls=None, speech_remark=None, rich_session=None
     ):
-        return None  # ai_flow уже сообщил пользователю сама
+        return None
 
     monkeypatch.setattr(ai_flow, "request_alfred", fake_unavailable)
     message = FakeMessage(1, text="/alfred")
@@ -207,7 +175,7 @@ async def test_cmd_ai_without_text_unavailable_records_nothing(store, monkeypatc
     )
 
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
-    assert rows == []  # директива нигде не сохраняется — начать нечего
+    assert rows == []
 
 
 async def test_cmd_ai_with_text_calls_ai_flow_and_records_both_turns(store, monkeypatch):
@@ -221,7 +189,7 @@ async def test_cmd_ai_with_text_calls_ai_flow_and_records_both_turns(store, monk
         return "Добгый день, сэ"
 
     monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
-    message = FakeMessage(1, text="/ai привет")  # алиас — работает так же, как /alfred
+    message = FakeMessage(1, text="/ai привет")
 
     await ai_handler.cmd_ai(
         message, node_link=None, store=store, config=_plain_settings(),
@@ -230,7 +198,7 @@ async def test_cmd_ai_with_text_calls_ai_flow_and_records_both_turns(store, monk
     )
 
     assert seen_history == [[{"role": "user", "content": "привет"}]]
-    assert message.sent == [ai_handler._format_answer("Добгый день, сэ")]
+    assert message.sent == [ai_reply.format_answer("Добгый день, сэ")]
 
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert [r["role"] for r in rows] == ["user", "assistant"]
@@ -239,9 +207,6 @@ async def test_cmd_ai_with_text_calls_ai_flow_and_records_both_turns(store, monk
 
 
 async def test_turn_ended_by_photo_tool_sends_nothing(store, monkeypatch):
-    """take_photo закончил ход: в чат ничего, в историю — только реплика
-    собеседника; Альфред заговорит вместе со снимком."""
-
     async def fake_request(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
         tool_calls=None, speech_remark=None, rich_session=None
@@ -263,9 +228,6 @@ async def test_turn_ended_by_photo_tool_sends_nothing(store, monkeypatch):
 
 
 async def test_turn_ended_by_photo_tool_waits_for_the_photo(store, monkeypatch):
-    """Ход ждёт снимок (статусы съёмки — в черновике хода), реплика
-    Альфреда придёт подписью к нему."""
-
     async def fake_request(*_args, **_kw):
         return ai_flow.SILENT_REPLY
 
@@ -295,8 +257,6 @@ async def test_turn_ended_by_photo_tool_waits_for_the_photo(store, monkeypatch):
 
 
 async def test_cmd_ai_with_text_piggybacks_a_dialogue_episode(store, monkeypatch):
-    """Этап 42.2: по завершении хода Альфреда ai_flow.piggyback_dialogue_
-    episode зовётся с персистентным текстом обоих ходов."""
     seen_episodes = []
 
     async def fake_request(
@@ -322,8 +282,6 @@ async def test_cmd_ai_with_text_piggybacks_a_dialogue_episode(store, monkeypatch
 
 
 async def test_cmd_ai_without_text_does_not_piggyback_the_opening_prompt(store, monkeypatch):
-    """OPENING_PROMPT — директива, не реальный ход собеседника (см. докстринг
-    ai_handler.cmd_ai) — не должна порождать эпизод графа."""
     seen_episodes = []
 
     async def fake_request(
@@ -349,9 +307,6 @@ async def test_cmd_ai_without_text_does_not_piggyback_the_opening_prompt(store, 
 
 
 async def test_cmd_ai_long_response_is_split_across_telegram_messages(store, monkeypatch):
-    # Промпт (llm/prompt.py) просит модель уложиться в ~3500 знаков — но это
-    # не гарантия, а Telegram режёт на 4096. Без чанкования в
-    # _send_alfred_reply длинный ответ уронил бы хендлер TelegramBadRequest.
     long_answer = "Жили-были. " * 500
 
     async def fake_request(
@@ -369,13 +324,13 @@ async def test_cmd_ai_long_response_is_split_across_telegram_messages(store, mon
         tool_calls=ToolCalls(),
     )
 
-    expected_chunks = ai_handler.chunk_text(ai_handler._format_answer(long_answer))
-    assert len(expected_chunks) > 1  # проверка не имеет смысла на одном чанке
+    expected_chunks = ai_reply.chunk_text(ai_reply.format_answer(long_answer))
+    assert len(expected_chunks) > 1
     assert message.sent == expected_chunks
 
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert rows[-1]["role"] == "assistant"
-    assert rows[-1]["content"] == long_answer  # в БД — цельный текст, не куски
+    assert rows[-1]["content"] == long_answer
 
 
 async def test_cmd_ai_returns_none_from_ai_flow_sends_nothing_extra(store, monkeypatch):
@@ -383,7 +338,7 @@ async def test_cmd_ai_returns_none_from_ai_flow_sends_nothing_extra(store, monke
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
         tool_calls=None, speech_remark=None, rich_session=None
     ):
-        return None  # ai_flow уже сообщил пользователю сама (не тестируем тут)
+        return None
 
     monkeypatch.setattr(ai_flow, "request_alfred", fake_unavailable)
     message = FakeMessage(1, text="/alfred привет")
@@ -395,13 +350,8 @@ async def test_cmd_ai_returns_none_from_ai_flow_sends_nothing_extra(store, monke
     )
 
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
-    assert len(rows) == 1  # только реплика юзера, ответ ассистента не записан
+    assert len(rows) == 1
     assert rows[0]["role"] == "user"
-
-
-# --- голосовой режим ответа (тумблер voice_mode, п.5 плана: голос ВМЕСТО
-# текста) — synthesize_voice_reply замокан целиком, своя логика проверяется
-# отдельно в test_voice_tts.py, здесь только оркестрация ai.py ---
 
 
 def _fake_request_returns(text: str):
@@ -422,7 +372,7 @@ async def test_cmd_ai_voice_mode_enabled_sends_voice_instead_of_text(store, monk
         return b"fake-ogg-bytes"
 
     monkeypatch.setattr(ai_flow, "request_alfred", _fake_request_returns("Добрый вечер, сэр."))
-    monkeypatch.setattr(ai_handler.voice_tts, "synthesize_voice_reply", fake_synthesize)
+    monkeypatch.setattr(ai_reply.voice_tts, "synthesize_voice_reply", fake_synthesize)
     message = FakeMessage(1, text="/alfred привет")
     notifier = FakeNotifier()
 
@@ -432,14 +382,11 @@ async def test_cmd_ai_voice_mode_enabled_sends_voice_instead_of_text(store, monk
         tool_calls=ToolCalls(),
     )
 
-    assert message.sent == []  # текст не ушёл вовсе — голос вместо текста
+    assert message.sent == []
     assert notifier.sent_voices == [(1, b"fake-ogg-bytes")]
 
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert [r["role"] for r in rows] == ["user", "assistant"]
-    # raw-текст всё равно пишется в ai_turns целиком, независимо от способа
-    # доставки (решение из плана, п.9) — история для следующих ходов модели
-    # не зависит от голосового режима.
     assert rows[1]["content"] == "Добрый вечер, сэр."
 
 
@@ -447,10 +394,10 @@ async def test_cmd_ai_voice_mode_enabled_synthesis_fails_falls_back_to_text(stor
     await voice_mode.set_enabled(store, 1, True)
 
     async def fake_synthesize_fails(message, node_link, store_, config, rich_session, text):
-        return None  # служба недоступна / ffmpeg упал / что угодно
+        return None
 
     monkeypatch.setattr(ai_flow, "request_alfred", _fake_request_returns("Добрый вечер, сэр."))
-    monkeypatch.setattr(ai_handler.voice_tts, "synthesize_voice_reply", fake_synthesize_fails)
+    monkeypatch.setattr(ai_reply.voice_tts, "synthesize_voice_reply", fake_synthesize_fails)
     message = FakeMessage(1, text="/alfred привет")
     notifier = FakeNotifier()
 
@@ -461,8 +408,7 @@ async def test_cmd_ai_voice_mode_enabled_synthesis_fails_falls_back_to_text(stor
     )
 
     assert notifier.sent_voices == []
-    # Тихий откат на обычный текстовый путь — пользователь не остаётся без ответа.
-    assert message.sent == [ai_handler._format_answer("Добрый вечер, сэр.")]
+    assert message.sent == [ai_reply.format_answer("Добрый вечер, сэр.")]
 
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert rows[1]["content"] == "Добрый вечер, сэр."
@@ -477,9 +423,9 @@ async def test_cmd_ai_voice_mode_enabled_but_telegram_rejects_voice_falls_back_t
         return b"fake-ogg-bytes"
 
     monkeypatch.setattr(ai_flow, "request_alfred", _fake_request_returns("Добрый вечер, сэр."))
-    monkeypatch.setattr(ai_handler.voice_tts, "synthesize_voice_reply", fake_synthesize)
+    monkeypatch.setattr(ai_reply.voice_tts, "synthesize_voice_reply", fake_synthesize)
     message = FakeMessage(1, text="/alfred привет")
-    notifier = FakeNotifier(send_voice_result=None)  # Telegram отверг файл
+    notifier = FakeNotifier(send_voice_result=None)
 
     await ai_handler.cmd_ai(
         message, node_link=None, store=store, config=_plain_settings(),
@@ -488,7 +434,7 @@ async def test_cmd_ai_voice_mode_enabled_but_telegram_rejects_voice_falls_back_t
     )
 
     assert notifier.sent_voices == [(1, b"fake-ogg-bytes")]
-    assert message.sent == [ai_handler._format_answer("Добрый вечер, сэр.")]
+    assert message.sent == [ai_reply.format_answer("Добрый вечер, сэр.")]
 
 
 async def test_cmd_ai_voice_mode_disabled_never_calls_synthesize(store, monkeypatch):
@@ -500,7 +446,7 @@ async def test_cmd_ai_voice_mode_disabled_never_calls_synthesize(store, monkeypa
         return b"should-not-be-called"
 
     monkeypatch.setattr(ai_flow, "request_alfred", _fake_request_returns("Добрый вечер, сэр."))
-    monkeypatch.setattr(ai_handler.voice_tts, "synthesize_voice_reply", fake_synthesize)
+    monkeypatch.setattr(ai_reply.voice_tts, "synthesize_voice_reply", fake_synthesize)
     message = FakeMessage(1, text="/alfred привет")
     notifier = FakeNotifier()
 
@@ -512,7 +458,7 @@ async def test_cmd_ai_voice_mode_disabled_never_calls_synthesize(store, monkeypa
 
     assert called is False
     assert notifier.sent_voices == []
-    assert message.sent == [ai_handler._format_answer("Добрый вечер, сэр.")]
+    assert message.sent == [ai_reply.format_answer("Добрый вечер, сэр.")]
 
 
 async def test_cmd_ai_unhandled_exception_apologizes_and_notifies_admin(store, monkeypatch):
@@ -537,15 +483,9 @@ async def test_cmd_ai_unhandled_exception_apologizes_and_notifies_admin(store, m
     admin_chat_id, admin_text = notifier.sent[0]
     assert admin_chat_id == 999
     assert "RuntimeError" in admin_text
-    # Ответ ассистента не записан — только реплика юзера.
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert len(rows) == 1
     assert rows[0]["role"] == "user"
-
-
-# --- active_ai_chats: регистрация chat_id на время запроса (живая находка
-# 2026-07-24 — bot/app.py::_shutdown рассылает RESTART_TEXT по этому
-# множеству перед закрытием сессии, см. ai_flow.ActiveAiChats) ---
 
 
 async def test_ask_and_reply_registers_chat_while_request_in_flight(store, monkeypatch):
@@ -568,8 +508,8 @@ async def test_ask_and_reply_registers_chat_while_request_in_flight(store, monke
         tool_calls=ToolCalls(),
     )
 
-    assert list(seen_snapshot[0]) == [1]  # зарегистрирован во время самого запроса
-    assert active_ai_chats.snapshot() == {}  # и снят по завершении
+    assert list(seen_snapshot[0]) == [1]
+    assert active_ai_chats.snapshot() == {}
 
 
 async def test_ask_and_reply_unregisters_chat_even_on_exception(store, monkeypatch):
@@ -615,27 +555,6 @@ async def test_ai_reply_continuation_filter_ignores_non_reply(store):
     assert await filt(plain, store) is False
 
 
-async def test_on_ai_reply_denied_without_right(store):
-    await store.record_ai_turn(1, 500, 500, "assistant", "", _now())
-    message = FakeMessage(1, text="продолжение")
-
-    await ai_handler.on_ai_reply(
-        message,
-        ai_dialogue_id=500,
-        node_link=None,
-        store=store,
-        config=_plain_settings(),
-        book=_admin_book(),
-        notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
-        tool_calls=ToolCalls(),
-        subscription=_sub(),  # без права chat@llm
-    )
-
-    assert message.sent == []
-    rows = await store.ai_turns_for_dialogue(1, 500)
-    assert len(rows) == 1  # заглушка, без нового хода
-
-
 async def test_on_ai_reply_appends_history_and_answers(store, monkeypatch):
     await store.record_ai_turn(1, 500, 500, "user", "первый вопрос", _now())
     await store.record_ai_turn(1, 501, 500, "assistant", "первый ответ", _now())
@@ -671,13 +590,10 @@ async def test_on_ai_reply_appends_history_and_answers(store, monkeypatch):
             {"role": "user", "content": "продолжаю"},
         ]
     ]
-    assert message.sent == [ai_handler._format_answer("втогой ответ")]
+    assert message.sent == [ai_reply.format_answer("втогой ответ")]
 
 
 async def test_on_ai_reply_without_text_still_asks_model(store, monkeypatch):
-    # Реплай стикером/фото без подписи (message.text пуст) — раньше молча
-    # игнорировался, теперь модель всё равно спрашивают, с пометкой, что
-    # ход был пустым (директива не пишется в ai_turns).
     await store.record_ai_turn(1, 500, 500, "assistant", "", _now())
 
     seen_history = []
@@ -690,7 +606,7 @@ async def test_on_ai_reply_without_text_still_asks_model(store, monkeypatch):
         return "Простите, не расслышал, сэр"
 
     monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
-    message = FakeMessage(1, text=None)  # стикер и т.п. — text=None
+    message = FakeMessage(1, text=None)
 
     await ai_handler.on_ai_reply(
         message,
@@ -704,77 +620,12 @@ async def test_on_ai_reply_without_text_still_asks_model(store, monkeypatch):
         subscription=_sub("chat@llm"),
     )
 
-    assert seen_history == [[{"role": "user", "content": ai_handler.EMPTY_REPLY_PROMPT}]]
-    assert message.sent == [ai_handler._format_answer("Простите, не расслышал, сэр")]
+    assert seen_history == [[{"role": "user", "content": ai_turns.EMPTY_REPLY_PROMPT}]]
+    assert message.sent == [ai_reply.format_answer("Простите, не расслышал, сэр")]
 
-    # Директива не осела в истории — только ответ ассистента.
     rows = await store.ai_turns_for_dialogue(1, 500)
     assert [r["role"] for r in rows] == ["assistant", "assistant"]
     assert rows[-1]["content"] == "Простите, не расслышал, сэр"
-
-
-# --- неявные триггеры: любое сообщение в личке, @упоминание в группе
-# (живая просьба пользователя 2026-07-23) ---
-
-
-async def test_private_chat_text_filter_matches_plain_text():
-    filt = ai_handler.PrivateChatText()
-    msg = FakeMessage(1, text="как дела", chat_type="private")
-    assert await filt(msg) is True
-
-
-async def test_private_chat_text_filter_ignores_commands():
-    filt = ai_handler.PrivateChatText()
-    msg = FakeMessage(1, text="/status", chat_type="private")
-    assert await filt(msg) is False
-
-
-async def test_private_chat_text_filter_ignores_groups():
-    filt = ai_handler.PrivateChatText()
-    msg = FakeMessage(1, text="как дела", chat_type="group")
-    assert await filt(msg) is False
-
-
-async def test_private_chat_text_filter_ignores_empty_text():
-    filt = ai_handler.PrivateChatText()
-    msg = FakeMessage(1, text=None, chat_type="private")
-    assert await filt(msg) is False
-
-
-async def test_private_chat_photo_filter_matches_photo():
-    filt = ai_handler.PrivateChatPhoto()
-    msg = FakeMessage(1, photo=["size1"], chat_type="private")
-    assert await filt(msg) is True
-
-
-async def test_private_chat_photo_filter_ignores_text_only():
-    filt = ai_handler.PrivateChatPhoto()
-    msg = FakeMessage(1, text="привет", chat_type="private")
-    assert await filt(msg) is False
-
-
-async def test_private_chat_photo_filter_ignores_groups():
-    filt = ai_handler.PrivateChatPhoto()
-    msg = FakeMessage(1, photo=["size1"], chat_type="group")
-    assert await filt(msg) is False
-
-
-async def test_private_chat_sticker_filter_matches_sticker():
-    filt = ai_handler.PrivateChatSticker()
-    msg = FakeMessage(1, sticker=FakeSticker(), chat_type="private")
-    assert await filt(msg) is True
-
-
-async def test_private_chat_sticker_filter_ignores_text_only():
-    filt = ai_handler.PrivateChatSticker()
-    msg = FakeMessage(1, text="привет", chat_type="private")
-    assert await filt(msg) is False
-
-
-async def test_private_chat_sticker_filter_ignores_groups():
-    filt = ai_handler.PrivateChatSticker()
-    msg = FakeMessage(1, sticker=FakeSticker(), chat_type="group")
-    assert await filt(msg) is False
 
 
 async def test_group_mention_filter_matches_and_strips_mention():
@@ -823,7 +674,7 @@ async def test_on_private_message_starts_new_dialogue_when_none_exists(store, mo
     )
 
     assert seen_history == [[{"role": "user", "content": "добрый вечер"}]]
-    assert message.sent == [ai_handler._format_answer("Здгавствуйте, сэ")]
+    assert message.sent == [ai_reply.format_answer("Здгавствуйте, сэ")]
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert [r["role"] for r in rows] == ["user", "assistant"]
 
@@ -831,9 +682,6 @@ async def test_on_private_message_starts_new_dialogue_when_none_exists(store, mo
 async def test_on_private_message_always_starts_new_dialogue_even_with_prior_history(
     store, monkeypatch
 ):
-    # Без reply — всегда новый тред, а не бесконечное пополнение самого
-    # свежего (живой баг 2026-08-01: история в личке росла без предела).
-    # Продолжить старый тред по-прежнему можно реплаем на сообщение бота.
     await store.record_ai_turn(1, 500, 500, "user", "первый вопрос", _now())
     await store.record_ai_turn(1, 501, 500, "assistant", "первый ответ", _now())
 
@@ -858,24 +706,9 @@ async def test_on_private_message_always_starts_new_dialogue_even_with_prior_his
 
     assert seen_history == [[{"role": "user", "content": "а что насчёт этого?"}]]
     old_thread = await store.ai_turns_for_dialogue(1, 500)
-    assert len(old_thread) == 2  # старый тред не тронут
+    assert len(old_thread) == 2
     new_thread = await store.ai_turns_for_dialogue(1, message.message_id)
     assert [r["role"] for r in new_thread] == ["user", "assistant"]
-
-
-async def test_on_private_message_denied_without_right(store):
-    message = FakeMessage(1, text="привет", chat_type="private")
-
-    await ai_handler.on_private_message(
-        message, node_link=None, store=store, config=_plain_settings(),
-        book=_admin_book(), notifier=FakeNotifier(),
-        active_ai_chats=ai_flow.ActiveAiChats(),
-        tool_calls=ToolCalls(), subscription=_sub(),
-    )
-
-    assert message.sent == []
-    rows = await store.ai_turns_for_dialogue(1, message.message_id)
-    assert rows == []
 
 
 async def test_on_private_photo_with_caption_sends_raw_image_and_persists_photo_path(
@@ -932,10 +765,10 @@ async def test_on_private_photo_without_caption_uses_default_prompt(store, monke
         tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
     )
 
-    assert seen_history[0][-1]["content"] == ai_handler.PHOTO_NO_CAPTION_PROMPT
+    assert seen_history[0][-1]["content"] == ai_turns.PHOTO_NO_CAPTION_PROMPT
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     user_row = next(r for r in rows if r["role"] == "user")
-    assert user_row["content"] == ai_handler.PHOTO_MARKER
+    assert user_row["content"] == ai_turns.PHOTO_MARKER
 
 
 async def test_on_private_photo_too_large_declines_without_asking_model(store, monkeypatch):
@@ -943,7 +776,7 @@ async def test_on_private_photo_too_large_declines_without_asking_model(store, m
         raise AssertionError("слишком большое фото не должно уходить в request_alfred")
 
     monkeypatch.setattr(ai_flow, "request_alfred", fail_request)
-    monkeypatch.setattr(ai_handler, "_MAX_RAW_IMAGE_B64_BYTES", 4)
+    monkeypatch.setattr(ai_turns, "MAX_RAW_IMAGE_B64_BYTES", 4)
     message = FakeMessage(1, photo=["size1"], chat_type="private")
 
     await ai_handler.on_private_photo(
@@ -953,33 +786,18 @@ async def test_on_private_photo_too_large_declines_without_asking_model(store, m
         tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
     )
 
-    assert message.sent == [ai_handler.PHOTO_TOO_LARGE_TEXT]
+    assert message.sent == [ai_turns.PHOTO_TOO_LARGE_TEXT]
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
-    assert rows == []  # ничего не записано — как в плане
+    assert rows == []
 
 
 async def test_handle_photo_message_pushes_looking_status_when_rich(store):
     rich_session = FakeRichSession()
     message = FakeMessage(1, photo=["size1"], chat_type="private")
 
-    await ai_handler._handle_photo_message(message, store, _plain_settings(), 999, rich_session)
+    await ai_turns.photo_history(message, store, _plain_settings(), 999, rich_session)
 
-    assert rich_session.statuses == [ai_handler.PHOTO_LOOKING_TEXT_PLAIN]
-
-
-async def test_on_private_photo_denied_without_right(store):
-    message = FakeMessage(1, photo=["size1"], chat_type="private")
-
-    await ai_handler.on_private_photo(
-        message, node_link=None, store=store, config=_plain_settings(),
-        book=_admin_book(), notifier=FakeNotifier(),
-        active_ai_chats=ai_flow.ActiveAiChats(),
-        tool_calls=ToolCalls(), subscription=_sub(),
-    )
-
-    assert message.sent == []
-    rows = await store.ai_turns_for_dialogue(1, message.message_id)
-    assert rows == []
+    assert rich_session.statuses == [ai_turns.PHOTO_LOOKING_TEXT_PLAIN]
 
 
 async def test_on_private_sticker_with_emoji_sends_raw_image_and_persists_photo_path(
@@ -1010,7 +828,7 @@ async def test_on_private_sticker_with_emoji_sends_raw_image_and_persists_photo_
     assert len(seen_history) == 1 and len(seen_history[0]) == 1
     turn = seen_history[0][0]
     assert turn["role"] == "user"
-    assert turn["content"] == ai_handler.STICKER_PROMPT.format(emoji="😂")
+    assert turn["content"] == ai_turns.STICKER_PROMPT.format(emoji="😂")
     assert isinstance(turn["raw_image"], str) and turn["raw_image"]
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     user_row = next(r for r in rows if r["role"] == "user")
@@ -1041,7 +859,7 @@ async def test_on_private_sticker_without_thumbnail_falls_back_to_text_only(stor
     assert message.bot.downloaded == []
     turn = seen_history[0][0]
     assert "raw_image" not in turn
-    assert turn["content"] == ai_handler.STICKER_PROMPT_NO_IMAGE.format(emoji="😂")
+    assert turn["content"] == ai_turns.STICKER_PROMPT_NO_IMAGE.format(emoji="😂")
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     user_row = next(r for r in rows if r["role"] == "user")
     assert user_row["content"] == "[стикер] 😂"
@@ -1059,7 +877,7 @@ async def test_on_private_sticker_too_large_falls_back_to_text_only(store, monke
         return "ответ"
 
     monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
-    monkeypatch.setattr(ai_handler, "_MAX_RAW_IMAGE_B64_BYTES", 4)
+    monkeypatch.setattr(ai_turns, "MAX_RAW_IMAGE_B64_BYTES", 4)
     message = FakeMessage(
         1, sticker=FakeSticker(emoji="😂", thumbnail="thumb1"), chat_type="private"
     )
@@ -1071,7 +889,6 @@ async def test_on_private_sticker_too_large_falls_back_to_text_only(store, monke
         tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
     )
 
-    # Не отказываем, как у фото, — просто идём без картинки (см. план).
     turn = seen_history[0][0]
     assert "raw_image" not in turn
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
@@ -1098,7 +915,7 @@ async def test_on_private_sticker_without_emoji_uses_marker_only(store, monkeypa
 
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     user_row = next(r for r in rows if r["role"] == "user")
-    assert user_row["content"] == ai_handler.STICKER_MARKER
+    assert user_row["content"] == ai_turns.STICKER_MARKER
 
 
 async def test_handle_sticker_message_pushes_looking_status_when_rich(store):
@@ -1107,33 +924,18 @@ async def test_handle_sticker_message_pushes_looking_status_when_rich(store):
         1, sticker=FakeSticker(emoji="😂", thumbnail="thumb1"), chat_type="private"
     )
 
-    await ai_handler._handle_sticker_message(message, store, _plain_settings(), 999, rich_session)
+    await ai_turns.sticker_history(message, store, _plain_settings(), 999, rich_session)
 
-    assert rich_session.statuses == [ai_handler.STICKER_LOOKING_TEXT_PLAIN]
+    assert rich_session.statuses == [ai_turns.STICKER_LOOKING_TEXT_PLAIN]
 
 
 async def test_handle_sticker_message_no_status_without_thumbnail(store):
     rich_session = FakeRichSession()
     message = FakeMessage(1, sticker=FakeSticker(emoji="😂", thumbnail=None), chat_type="private")
 
-    await ai_handler._handle_sticker_message(message, store, _plain_settings(), 999, rich_session)
+    await ai_turns.sticker_history(message, store, _plain_settings(), 999, rich_session)
 
     assert rich_session.statuses == []
-
-
-async def test_on_private_sticker_denied_without_right(store):
-    message = FakeMessage(1, sticker=FakeSticker(), chat_type="private")
-
-    await ai_handler.on_private_sticker(
-        message, node_link=None, store=store, config=_plain_settings(),
-        book=_admin_book(), notifier=FakeNotifier(),
-        active_ai_chats=ai_flow.ActiveAiChats(),
-        tool_calls=ToolCalls(), subscription=_sub(),
-    )
-
-    assert message.sent == []
-    rows = await store.ai_turns_for_dialogue(1, message.message_id)
-    assert rows == []
 
 
 async def test_on_private_voice_records_transcript_and_calls_ai_flow(store, monkeypatch):
@@ -1149,7 +951,7 @@ async def test_on_private_voice_records_transcript_and_calls_ai_flow(store, monk
         seen_history.append(history)
         return "Добрый день, сэр"
 
-    monkeypatch.setattr(ai_handler.voice_stt, "transcribe_voice_message", fake_transcribe)
+    monkeypatch.setattr(ai_turns.voice_stt, "transcribe_voice_message", fake_transcribe)
     monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
     message = FakeMessage(1, voice="voice-obj", chat_type="private")
 
@@ -1168,13 +970,12 @@ async def test_on_private_voice_records_transcript_and_calls_ai_flow(store, monk
 
 async def test_on_private_voice_none_transcript_declines_without_asking_model(store, monkeypatch):
     async def fake_transcribe(message, node_link, store_, config, rich_session):
-        # voice_stt уже отправила пользователю вежливый текст сама.
         return None
 
     async def fail_request(*args, **kwargs):
         raise AssertionError("без транскрипта не должно уходить в request_alfred")
 
-    monkeypatch.setattr(ai_handler.voice_stt, "transcribe_voice_message", fake_transcribe)
+    monkeypatch.setattr(ai_turns.voice_stt, "transcribe_voice_message", fake_transcribe)
     monkeypatch.setattr(ai_flow, "request_alfred", fail_request)
     message = FakeMessage(1, voice="voice-obj", chat_type="private")
 
@@ -1185,21 +986,6 @@ async def test_on_private_voice_none_transcript_declines_without_asking_model(st
         tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
     )
 
-    rows = await store.ai_turns_for_dialogue(1, message.message_id)
-    assert rows == []  # ничего не записано — как у фото при отказе
-
-
-async def test_on_private_voice_denied_without_right(store):
-    message = FakeMessage(1, voice="voice-obj", chat_type="private")
-
-    await ai_handler.on_private_voice(
-        message, node_link=None, store=store, config=_plain_settings(),
-        book=_admin_book(), notifier=FakeNotifier(),
-        active_ai_chats=ai_flow.ActiveAiChats(),
-        tool_calls=ToolCalls(), subscription=_sub(),
-    )
-
-    assert message.sent == []
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert rows == []
 
@@ -1221,7 +1007,7 @@ async def test_on_ai_reply_with_voice_calls_ai_flow_with_transcript(store, monke
         seen_history.append(history)
         return "Слушаю, сэр"
 
-    monkeypatch.setattr(ai_handler.voice_stt, "transcribe_voice_message", fake_transcribe)
+    monkeypatch.setattr(ai_turns.voice_stt, "transcribe_voice_message", fake_transcribe)
     monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
     message = FakeMessage(1, voice="voice-obj", reply_to=reply_to, chat_type="private")
 
@@ -1246,7 +1032,7 @@ async def test_on_ai_reply_with_voice_none_transcript_sends_nothing_extra(store,
     async def fail_request(*args, **kwargs):
         raise AssertionError("без транскрипта не должно уходить в request_alfred")
 
-    monkeypatch.setattr(ai_handler.voice_stt, "transcribe_voice_message", fake_transcribe)
+    monkeypatch.setattr(ai_turns.voice_stt, "transcribe_voice_message", fake_transcribe)
     monkeypatch.setattr(ai_flow, "request_alfred", fail_request)
     message = FakeMessage(1, voice="voice-obj", reply_to=reply_to, chat_type="private")
 
@@ -1258,7 +1044,7 @@ async def test_on_ai_reply_with_voice_none_transcript_sends_nothing_extra(store,
     )
 
     rows = await store.ai_turns_for_dialogue(1, 500)
-    assert [r["role"] for r in rows] == ["assistant"]  # только затравка, ничего не добавилось
+    assert [r["role"] for r in rows] == ["assistant"]
 
 
 async def test_on_ai_reply_with_sticker_calls_ai_flow_with_image(store, monkeypatch):
@@ -1289,14 +1075,11 @@ async def test_on_ai_reply_with_sticker_calls_ai_flow_with_image(store, monkeypa
     )
 
     turn = seen_history[0][-1]
-    assert turn["content"] == ai_handler.STICKER_PROMPT.format(emoji="😂")
+    assert turn["content"] == ai_turns.STICKER_PROMPT.format(emoji="😂")
     assert isinstance(turn["raw_image"], str) and turn["raw_image"]
 
 
 async def test_on_ai_reply_with_photo_caption_is_not_lost_as_empty_reply(store, monkeypatch):
-    # Живая находка 2026-08-10: фото-реплай в уже идущем треде раньше молча
-    # терял подпись (message.text у фото всегда None) и проваливался в
-    # EMPTY_REPLY_PROMPT, как будто подписи не было вовсе.
     await store.record_ai_turn(1, 500, 500, "assistant", "начало треда", _now())
     seen_history = []
 
@@ -1352,7 +1135,7 @@ async def test_on_group_mention_with_text_starts_fresh_dialogue(store, monkeypat
     )
 
     assert seen_history == [[{"role": "user", "content": "какая погода?"}]]
-    assert message.sent == [ai_handler._format_answer("Слушаю, сэ")]
+    assert message.sent == [ai_reply.format_answer("Слушаю, сэ")]
 
 
 async def test_on_group_mention_without_text_asks_model_for_greeting(store, monkeypatch):
@@ -1375,26 +1158,10 @@ async def test_on_group_mention_without_text_asks_model_for_greeting(store, monk
         tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
     )
 
-    assert seen_history == [[{"role": "user", "content": ai_handler.OPENING_PROMPT}]]
+    assert seen_history == [[{"role": "user", "content": ai_turns.OPENING_PROMPT}]]
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
-    assert len(rows) == 1  # директива-приветствие не записана, только ответ
+    assert len(rows) == 1
     assert rows[0]["role"] == "assistant"
-
-
-async def test_on_group_mention_denied_without_right(store):
-    message = FakeMessage(1, text="@alfredbot привет", chat_type="group")
-
-    await ai_handler.on_group_mention(
-        message, mention_prompt="привет", node_link=None, store=store,
-        config=_plain_settings(), book=_admin_book(), notifier=FakeNotifier(),
-        active_ai_chats=ai_flow.ActiveAiChats(),
-        tool_calls=ToolCalls(), subscription=_sub(),
-    )
-
-    assert message.sent == []
-
-
-# --- роспуск: гасим только ПОСЛЕ того, как прощание уехало в чат ---
 
 
 async def test_dismissal_runs_after_the_farewell_is_sent(store, monkeypatch):
@@ -1408,7 +1175,6 @@ async def test_dismissal_runs_after_the_farewell_is_sent(store, monkeypatch):
         return "Всего добгого, сэг"
 
     async def fake_perform(message, node_link, mode, book, notifier):
-        # Снимок на момент выключения: прощание уже отправлено, ход записан.
         seen.append((mode, list(message.sent), await store.ai_turns_for_dialogue(1, dialogue_id)))
 
     monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
@@ -1425,13 +1191,11 @@ async def test_dismissal_runs_after_the_farewell_is_sent(store, monkeypatch):
     assert len(seen) == 1
     mode, sent_at_that_moment, rows = seen[0]
     assert mode == "off"
-    assert sent_at_that_moment == [ai_handler._format_answer("Всего добгого, сэг")]
+    assert sent_at_that_moment == [ai_reply.format_answer("Всего добгого, сэг")]
     assert [r["role"] for r in rows] == ["user", "assistant"]
 
 
 async def test_no_dismissal_when_alfred_never_answered(store, monkeypatch):
-    """Ответа не было (нода не отозвалась) — прощаться не с чем, и гасить
-    машину по намерению, о котором пользователь ничего не услышал, нельзя."""
     performed = []
 
     async def fake_request(
@@ -1457,10 +1221,6 @@ async def test_no_dismissal_when_alfred_never_answered(store, monkeypatch):
     assert performed == []
 
 
-# --- Telegram Private Chat Topics: dialogue_id = id топика, любое
-# сообщение внутри него — продолжение без reply (этап 32, 2026-08-01) ---
-
-
 async def test_cmd_ai_in_topic_dialogue_id_is_the_topic_not_the_message(store, monkeypatch):
     async def fake_request(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
@@ -1477,8 +1237,6 @@ async def test_cmd_ai_in_topic_dialogue_id_is_the_topic_not_the_message(store, m
         tool_calls=ToolCalls(),
     )
 
-    # Тред привязан к топику (777), а не к message_id этого сообщения —
-    # ai_turns_for_dialogue по message_id ничего не найдёт.
     assert await store.ai_turns_for_dialogue(1, message.message_id) == []
     rows = await store.ai_turns_for_dialogue(1, 777)
     assert [r["role"] for r in rows] == ["user", "assistant"]
@@ -1498,8 +1256,6 @@ async def test_cmd_ai_in_topic_continues_existing_topic_history(store, monkeypat
         return "втогой ответ"
 
     monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
-    # /alfred внутри топика — НЕ сбрасывает контекст, в отличие от /alfred
-    # вне топика (там каждый вызов — новый тред).
     message = FakeMessage(1, text="/alfred а что насчёт этого?", message_thread_id=777)
 
     await ai_handler.cmd_ai(
@@ -1539,13 +1295,11 @@ async def test_cmd_ai_in_topic_without_text_continues_with_opening_prompt(store,
         tool_calls=ToolCalls(),
     )
 
-    # Голый /alfred внутри топика с уже начатой историей — не заменяет её
-    # заготовкой, а дописывает директиву-приветствие в конец.
     assert seen_history == [
         [
             {"role": "user", "content": "первый вопрос"},
             {"role": "assistant", "content": "первый ответ"},
-            {"role": "user", "content": ai_handler.OPENING_PROMPT},
+            {"role": "user", "content": ai_turns.OPENING_PROMPT},
         ]
     ]
 
@@ -1569,13 +1323,10 @@ async def test_cmd_ai_in_fresh_topic_without_text_is_same_as_outside_topic(store
         tool_calls=ToolCalls(),
     )
 
-    assert seen_history == [[{"role": "user", "content": ai_handler.OPENING_PROMPT}]]
+    assert seen_history == [[{"role": "user", "content": ai_turns.OPENING_PROMPT}]]
 
 
 async def test_on_private_message_in_topic_continues_same_topic_without_reply(store, monkeypatch):
-    # В отличие от чата без топиков (см. test_on_private_message_always_
-    # starts_new_dialogue_even_with_prior_history) — внутри топика reply не
-    # нужен вовсе, любое сообщение в нём само по себе продолжение.
     seen_history = []
 
     async def fake_request(
@@ -1613,17 +1364,7 @@ async def test_on_private_message_in_topic_continues_same_topic_without_reply(st
     assert [r["role"] for r in rows] == ["user", "assistant", "user", "assistant"]
 
 
-# typing-индикатор: раньше проверялся здесь (разовый вызов на приём
-# сообщения), теперь живёт внутри ai_flow.request_alfred как keep-alive
-# вокруг самого вызова модели (решение пользователя 2026-08-01) — эта функция
-# в тестах хендлера как раз замокана, так что покрытие переехало целиком в
-# test_ai_flow.py (test_typing_*).
-
-
 async def test_empty_model_answer_is_not_sent_as_a_bare_prefix(store, monkeypatch):
-    """Живая находка: у модели кончалось окно контекста и она возвращала
-    пустой текст — в чат уходило сообщение из одного «Альфред:»."""
-
     async def fake_empty(
         message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
         tool_calls=None, speech_remark=None, rich_session=None
@@ -1640,20 +1381,13 @@ async def test_empty_model_answer_is_not_sent_as_a_bare_prefix(store, monkeypatc
         tool_calls=ToolCalls(),
     )
 
-    assert message.sent == [ai_flow.ALBERT_HICCUP]
+    assert message.sent == [ai_lines.ALBERT_HICCUP]
     assert notifier.sent and "пустой ответ" in notifier.sent[0][1]
-    # Пустая реплика — не ход диалога: в истории её нет.
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert [r["role"] for r in rows] == ["user"]
 
 
-# --- _send_alfred_reply_rich: фолбэк на обычный текст (этап A, 2026-08-30) ---
-
-
 class _FakeFinalizeSession:
-    """Заглушка RichStreamSession только под _send_alfred_reply_rich —
-    fake из test_rich_stream.py покрывает саму механику finalize()."""
-
     def __init__(self, finalize_result) -> None:
         self._finalize_result = finalize_result
         self.finalize_calls = 0
@@ -1669,25 +1403,23 @@ async def test_send_alfred_reply_rich_returns_message_id_on_success():
     session = _FakeFinalizeSession(FakeMessage(1))
     notifier = FakeNotifier()
 
-    result = await ai_handler._send_alfred_reply_rich(message, "ответ", session, notifier)
+    result = await ai_reply.send_alfred_reply_rich(message, "ответ", session, notifier)
 
     assert result == session._finalize_result.message_id
-    assert notifier.sent == []  # фолбэк не понадобился
+    assert notifier.sent == []
 
 
 async def test_send_alfred_reply_rich_falls_back_to_plain_when_rich_fails():
-    # finalize вернул None (rich не прошёл — связь либо разметка). Готовый
-    # ответ терять нельзя: уходит обычным текстом через send_direct.
     message = FakeMessage(1, text="/alfred привет")
     session = _FakeFinalizeSession(None)
     notifier = FakeNotifier(send_direct_result=777)
 
-    result = await ai_handler._send_alfred_reply_rich(
+    result = await ai_reply.send_alfred_reply_rich(
         message, "ответ модели", session, notifier
     )
 
     assert result == 777
-    assert notifier.sent == [(1, ai_handler._format_answer("ответ модели"))]
+    assert notifier.sent == [(1, ai_reply.format_answer("ответ модели"))]
 
 
 async def test_send_alfred_reply_rich_returns_none_when_both_paths_fail():
@@ -1695,12 +1427,9 @@ async def test_send_alfred_reply_rich_returns_none_when_both_paths_fail():
     session = _FakeFinalizeSession(None)
     notifier = FakeNotifier(send_direct_result=None)
 
-    result = await ai_handler._send_alfred_reply_rich(message, "ответ", session, notifier)
+    result = await ai_reply.send_alfred_reply_rich(message, "ответ", session, notifier)
 
     assert result is None
-
-
-# --- интерактивы (Этап 47): план хода ДО запроса, Ведущий и формы ПОСЛЕ ---
 
 
 class FakeInteractives:
@@ -1756,9 +1485,6 @@ async def test_interactives_wrap_the_turn_in_order(store, monkeypatch):
 async def test_history_is_shared_builder_and_compression_scheduled_after_reply(
     store, monkeypatch
 ):
-    """Этап 50: история собирается dialogue_context.load_history (одна
-    сборка на все пути), а если request_alfred отметил срабатывание порога —
-    фоновое сжатие треда запускается ПОСЛЕ доставки ответа."""
     from sa_home_bot.bot import dialogue_context
 
     await store.record_ai_turn(1, 500, 77, "user", "первый вопрос", _now())
@@ -1775,7 +1501,6 @@ async def test_history_is_shared_builder_and_compression_scheduled_after_reply(
         return "Отвечаю, и позвольте отлучиться"
 
     def fake_schedule(node_link, store_, config, chat_id, dialogue_id, dst, *, num_ctx):
-        # Ответ к этому моменту уже записан в ai_turns — значит доставлен.
         events.append(f"schedule:{chat_id}:{dialogue_id}")
         return True
 
@@ -1796,9 +1521,6 @@ async def test_history_is_shared_builder_and_compression_scheduled_after_reply(
 
 
 async def test_bare_greeting_starts_alfreds_portrait_but_a_question_does_not(store, monkeypatch):
-    """Голое приветствие — следом портрет Альфреда в кабинете (2026-10-05);
-    вопрос — обычный ход, без портрета."""
-
     async def fake_request(*_args, **_kw):
         return "Слушаю, сэг."
 
@@ -1834,9 +1556,6 @@ async def test_bare_greeting_starts_alfreds_portrait_but_a_question_does_not(sto
     assert portraits.started == [(1, 7, portraits.started[0][2])]
 
 
-# --- эмоциональное селфи к ответу (2026-10-05) ---
-
-
 def _request_with_interactives(text: str):
     async def fake_request(*_args, **_kw):
         return text
@@ -1866,7 +1585,6 @@ async def test_mood_selfie_replaces_the_text_reply(store, monkeypatch):
         tool_calls=ToolCalls(), interactives=interactives,
     )
 
-    # Текст не ушёл, реплика — подпись к фото; ход записан с id фото.
     assert message.sent == []
     ((chat_id, reply, kw),) = interactives.calls
     assert (chat_id, reply) == (1, "Какая дегзость!")
@@ -1886,7 +1604,7 @@ async def test_no_mood_selfie_sends_text_as_usual(store, monkeypatch):
         tool_calls=ToolCalls(), interactives=interactives,
     )
 
-    assert message.sent == [ai_handler._format_answer("Добгый день")]
+    assert message.sent == [ai_reply.format_answer("Добгый день")]
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert rows[-1]["role"] == "assistant"
 
@@ -1906,4 +1624,64 @@ async def test_mood_selfie_skipped_when_turn_already_sent_a_picture(store, monke
         tool_calls=ToolCalls(), interactives=interactives,
     )
 
-    assert interactives.calls == [] and message.sent == [ai_handler._format_answer("Вот, пгошу")]
+    assert interactives.calls == [] and message.sent == [ai_reply.format_answer("Вот, пгошу")]
+
+
+@pytest.mark.parametrize(
+    ("filter_class", "message_kwargs", "expected"),
+    [
+        (ai_handler.PrivateChatText, {"text": "как дела"}, True),
+        (ai_handler.PrivateChatText, {"text": "/status"}, False),
+        (ai_handler.PrivateChatText, {"text": "как дела", "chat_type": "group"}, False),
+        (ai_handler.PrivateChatText, {"text": None}, False),
+        (ai_handler.PrivateChatPhoto, {"photo": ["size1"]}, True),
+        (ai_handler.PrivateChatPhoto, {"text": "привет"}, False),
+        (ai_handler.PrivateChatPhoto, {"photo": ["size1"], "chat_type": "group"}, False),
+        (ai_handler.PrivateChatSticker, {"sticker": FakeSticker()}, True),
+        (ai_handler.PrivateChatSticker, {"text": "привет"}, False),
+        (ai_handler.PrivateChatSticker, {"sticker": FakeSticker(), "chat_type": "group"}, False),
+    ],
+)
+async def test_private_chat_filters(filter_class, message_kwargs, expected):
+    message_kwargs = {"chat_type": "private", **message_kwargs}
+    assert await filter_class()(FakeMessage(1, **message_kwargs)) is expected
+
+
+@pytest.mark.parametrize(
+    ("handler", "message_kwargs", "handler_kwargs"),
+    [
+        (ai_handler.on_private_message, {"text": "привет"}, {}),
+        (ai_handler.on_private_photo, {"photo": ["size1"]}, {}),
+        (ai_handler.on_private_sticker, {"sticker": FakeSticker()}, {}),
+        (ai_handler.on_private_voice, {"voice": "voice-obj"}, {}),
+        (
+            ai_handler.on_group_mention,
+            {"text": "@alfredbot привет", "chat_type": "group"},
+            {"mention_prompt": "привет"},
+        ),
+        (ai_handler.on_ai_reply, {"text": "продолжение"}, {"ai_dialogue_id": 500}),
+    ],
+    ids=["text", "photo", "sticker", "voice", "group_mention", "reply"],
+)
+async def test_handlers_ignore_chats_without_the_chat_right(
+    store, handler, message_kwargs, handler_kwargs
+):
+    await store.record_ai_turn(1, 500, 500, "assistant", "", _now())
+    message = FakeMessage(1, **{"chat_type": "private", **message_kwargs})
+
+    await handler(
+        message,
+        node_link=None,
+        store=store,
+        config=_plain_settings(),
+        book=_admin_book(),
+        notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(),
+        subscription=_sub(),
+        **handler_kwargs,
+    )
+
+    assert message.sent == []
+    assert len(await store.ai_turns_for_dialogue(1, 500)) == 1
+    assert await store.ai_turns_for_dialogue(1, message.message_id) == []

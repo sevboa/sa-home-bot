@@ -1,17 +1,3 @@
-"""`sa-home-bot away set|extend|back|status` — «Альфред в городе» из консоли (Этап 51).
-
-Для Claude и владельца на сервере: перед обслуживанием/занятием mycraft
-отправить Альфреда в город, после — вернуть. Пишет ту же запись
-``app_state["alfred_away"]`` в БД бота, что и Telegram-команды (bot/away.py);
-бот читает её на каждом входящем, поэтому перезапуск не нужен. Изменение,
-сделанное от имени Claude (по умолчанию), бот сообщает владельцу в Telegram —
-CLI кладёт сообщение в очередь, бот отправляет его на ближайшем проходе
-(до минуты).
-
-Схему БД CLI не трогает (её ведёт бот), нет файла БД — отказ, а не создание
-пустой.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -50,7 +36,7 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
 
 
 async def _run(args: argparse.Namespace, settings: Settings) -> int:
-    from sa_home_bot.bot.away import (  # noqa: PLC0415 — тяжёлые импорты только для этой команды
+    from sa_home_bot.bot.away import (
         SET_BY_CLAUDE,
         AwayError,
         AwayService,
@@ -59,8 +45,8 @@ async def _run(args: argparse.Namespace, settings: Settings) -> int:
         parse_extend,
         status_text,
     )
-    from sa_home_bot.db.connection import Database  # noqa: PLC0415
-    from sa_home_bot.db.store import Store  # noqa: PLC0415
+    from sa_home_bot.db.connection import Database
+    from sa_home_bot.db.store import Store
 
     path = settings.database.path
     if not path.exists():
@@ -97,7 +83,7 @@ async def _run(args: argparse.Namespace, settings: Settings) -> int:
                 show(text)
                 if notify:
                     await service.queue_notice("Claude продлил отъезд Альфреда. " + text)
-            else:  # back
+            else:
                 state, immediate = await service.back()
                 text = (
                     "Альфред вернулся, ждать некому."

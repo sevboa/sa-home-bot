@@ -1,9 +1,3 @@
-"""Планировщик: cron-триггеры кладут job'ы в очередь.
-
-В callback'е планировщика — только put в DedupQueue (ARCHITECTURE §4). Все
-cron-job'ы: coalesce=True, max_instances=1 (инвариант §9.4).
-"""
-
 from __future__ import annotations
 
 import logging
@@ -25,42 +19,31 @@ def build_scheduler() -> AsyncIOScheduler:
 
 
 def register_jobs(scheduler: AsyncIOScheduler, queue: DedupQueue, config: Settings) -> None:
-    async def enqueue_scan() -> None:
-        await queue.put(SensorScanJob())
-
-    async def enqueue_smart() -> None:
-        await queue.put(SmartScanJob())
-
-    async def enqueue_housekeeping() -> None:
-        await queue.put(HousekeepingJob())
-
-    scheduler.add_job(
-        enqueue_scan,
-        CronTrigger.from_crontab(config.schedule.scan_cron, timezone="UTC"),
-        id="sensor_scan",
-        coalesce=True,
-        max_instances=1,
-        replace_existing=True,
+    schedule = config.schedule
+    jobs = (
+        ("sensor_scan", schedule.scan_cron, SensorScanJob),
+        ("smart_scan", schedule.smart_cron, SmartScanJob),
+        ("housekeeping", schedule.housekeeping_cron, HousekeepingJob),
     )
-    scheduler.add_job(
-        enqueue_smart,
-        CronTrigger.from_crontab(config.schedule.smart_cron, timezone="UTC"),
-        id="smart_scan",
-        coalesce=True,
-        max_instances=1,
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        enqueue_housekeeping,
-        CronTrigger.from_crontab(config.schedule.housekeeping_cron, timezone="UTC"),
-        id="housekeeping",
-        coalesce=True,
-        max_instances=1,
-        replace_existing=True,
-    )
+    for job_id, cron, job_class in jobs:
+        scheduler.add_job(
+            _enqueuer(queue, job_class),
+            CronTrigger.from_crontab(cron, timezone="UTC"),
+            id=job_id,
+            coalesce=True,
+            max_instances=1,
+            replace_existing=True,
+        )
     log.info(
         "Запланировано: scan=%s, smart=%s, housekeeping=%s",
-        config.schedule.scan_cron,
-        config.schedule.smart_cron,
-        config.schedule.housekeeping_cron,
+        schedule.scan_cron,
+        schedule.smart_cron,
+        schedule.housekeeping_cron,
     )
+
+
+def _enqueuer(queue: DedupQueue, job_class: type):
+    async def enqueue() -> None:
+        await queue.put(job_class())
+
+    return enqueue

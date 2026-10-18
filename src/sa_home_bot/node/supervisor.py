@@ -1,12 +1,3 @@
-"""Супервизор: дочерние процессы служб, рестарт упавших, события жизненного цикла.
-
-Одна ``SupervisedService`` = одно назначение. Цикл наблюдения: запустить →
-ждать выхода → если не останавливали сами, эмитить ``service_failed``, выждать
-паузу и перезапустить. Остановка — SIGTERM, по таймауту SIGKILL. События уходят
-через async-callback ``emit(event_type, data)`` — в приложении это broadcast
-proto-сервера ноды, в тестах — список.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -16,29 +7,22 @@ import signal
 import subprocess
 import sys
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
 
 from sa_home_bot.node import assignments as assignments_mod
 from sa_home_bot.node.assignments import Assignment
 from sa_home_bot.services import registry
+from sa_home_bot.utils.clock import utc_now
 
 log = logging.getLogger(__name__)
 
 
 def spawn_kwargs() -> dict:
-    """Доп. аргументы запуска дочернего процесса службы.
-
-    Windows: отдельная process group — только так дочернюю службу можно
-    остановить мягко (CTRL_BREAK_EVENT доставляется группе; в группе родителя
-    он прилетел бы и самой ноде)."""
     if sys.platform == "win32":
         return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
     return {}
 
 
 def terminate_gracefully(proc: asyncio.subprocess.Process) -> None:
-    """Попросить процесс завершиться: SIGTERM; на Windows — CTRL_BREAK_EVENT
-    (``proc.terminate()`` там = TerminateProcess, без шанса попрощаться)."""
     if sys.platform == "win32":
         proc.send_signal(signal.CTRL_BREAK_EVENT)
     else:
@@ -46,35 +30,21 @@ def terminate_gracefully(proc: asyncio.subprocess.Process) -> None:
 
 EventEmitter = Callable[[str, dict], Awaitable[None]]
 
-# Статусы службы (наружу, в get_state ноды).
 RUNNING = "running"
-RESTARTING = "restarting"  # упала, ждёт паузу перед перезапуском
-STOPPED = "stopped"  # остановлена вручную или ещё не запускалась
+RESTARTING = "restarting"
+STOPPED = "stopped"
 
 EVENT_SERVICE_STARTED = "service_started"
 EVENT_SERVICE_FAILED = "service_failed"
 EVENT_SERVICE_STOPPED = "service_stopped"
 EVENT_SERVICE_FENCED = "service_fenced"
 
-# Служба вышла потому, что её вытеснил другой её же экземпляр: для бота это
-# 409 Conflict от Telegram — у токена может быть лишь один поллер. Отдельный
-# код, а не обычное падение: перезапускать тут нечего, надо замолчать
-# (см. node/lease.py::note_fenced).
 FENCED_EXIT_CODE = 11
 
-# Сколько ждать выхода задачи наблюдения после того, как процесс службы уже
-# погашен: она либо выходит сразу, либо спит перед перезапуском — дольше ждать
-# нечего (этап 29).
 SUPERVISE_EXIT_TIMEOUT_S = 5.0
 
 
-def _now_iso() -> str:
-    return datetime.now(tz=UTC).isoformat()
-
-
 class SupervisedService:
-    """Одна служба под супервизией: процесс + цикл наблюдения."""
-
     def __init__(
         self,
         name: str,
@@ -90,8 +60,6 @@ class SupervisedService:
         self.name = name
         self._on_fenced = on_fenced
         self._on_spawned = on_spawned
-        # Назначение целиком (роль, инстанс, приоритет) — нужно аренде
-        # лидерства и репликации пакетов, супервизии самой хватает cli_args.
         self.assignment = assignment or Assignment(service=name)
         self._cli_args = cli_args
         self._emit = emit
@@ -100,14 +68,13 @@ class SupervisedService:
 
         self._proc: asyncio.subprocess.Process | None = None
         self._task: asyncio.Task | None = None
-        self._spawned = asyncio.Event()  # первый запуск процесса состоялся
+        self._spawned = asyncio.Event()
         self._desired_running = False
         self._status = STOPPED
-        self.restarts = 0  # перезапусков после падений
+        self.restarts = 0
         self.last_exit_code: int | None = None
         self.started_at: str | None = None
 
-    # --- Наружу (get_state ноды) ---
 
     @property
     def status(self) -> str:
@@ -119,12 +86,6 @@ class SupervisedService:
 
     @property
     def process_alive(self) -> bool:
-        """Реально ли жив процесс прямо сейчас — не то же самое, что
-        status==RUNNING (тот обновится в RESTARTING/STOPPED только когда
-        _run() САМА успеет обработать выход). LeaseManager обязан проверять
-        именно этот флаг перед stop(), не status — живой инцидент
-        2026-08-12: гонка теряла падение процесса под видом штатной
-        остановки (см. node/lease.py::_decide)."""
         return self._proc is not None and self._proc.returncode is None
 
     def to_dict(self) -> dict:
@@ -140,7 +101,6 @@ class SupervisedService:
             "role": self.assignment.role,
         }
 
-    # --- Управление ---
 
     async def start(self) -> None:
         if self._desired_running:
@@ -148,14 +108,7 @@ class SupervisedService:
         self._desired_running = True
         self._spawned.clear()
         self._task = asyncio.create_task(self._run(), name=f"supervise-{self.name}")
-        # Страховка: если _run() всё же умрёт с необработанным исключением
-        # (не должно происходить после фикса самого цикла ниже, но тихая
-        # смерть fire-and-forget задачи иначе осталась бы совсем незаметной —
-        # self._task держит на неё ссылку, поэтому даже дефолтный обработчик
-        # asyncio "Task exception was never retrieved" не сработает).
         self._task.add_done_callback(self._on_task_done)
-        # Дождаться фактического запуска, чтобы ответ start/restart отражал
-        # реальное состояние, а не снимок до спавна процесса.
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._spawned.wait(), timeout=5.0)
 
@@ -186,10 +139,6 @@ class SupervisedService:
                 await proc.wait()
         if self._task is not None:
             task, self._task = self._task, None
-            # Задача наблюдения обязана выйти сама (`_desired_running=False`),
-            # но ждать её без потолка нельзя: она может спать перед
-            # перезапуском или писать событие полумёртвому клиенту, а останов
-            # ноды не должен зависеть от этого (этап 29).
             done, _ = await asyncio.wait({task}, timeout=SUPERVISE_EXIT_TIMEOUT_S)
             if not done:
                 log.warning(
@@ -207,7 +156,6 @@ class SupervisedService:
         await self.stop()
         await self.start()
 
-    # --- Цикл наблюдения ---
 
     async def _run(self) -> None:
         while self._desired_running:
@@ -217,7 +165,7 @@ class SupervisedService:
                 )
             except OSError as exc:
                 log.error("Не удалось запустить службу %s: %s", self.name, exc)
-                self._spawned.set()  # попытка была — start() не должен висеть
+                self._spawned.set()
                 await self._emit(
                     EVENT_SERVICE_FAILED, {"name": self.name, "error": str(exc)}
                 )
@@ -225,19 +173,11 @@ class SupervisedService:
                 await asyncio.sleep(self._restart_delay)
                 continue
 
-            # Всё, что ниже, обёрнуто в try/except: наблюдающая задача — это
-            # fire-and-forget asyncio.create_task без add_done_callback (кроме
-            # диагностической страховки в start()), и необработанное
-            # исключение здесь (например из самого _emit — broadcast упавшему
-            # клиенту в момент нестабильной сети) тихо убивало бы её навсегда,
-            # оставляя службу «ничьей»: start()/restart() после этого — no-op,
-            # пока _desired_running уже True (живой инцидент 2026-08-08,
-            # telegram-bot@alfred провисел без перезапуска ~20 минут).
             try:
                 self._proc = proc
                 self._status = RUNNING
                 self._spawned.set()
-                self.started_at = _now_iso()
+                self.started_at = utc_now().isoformat()
                 log.info("Служба %s запущена (pid=%s)", self.name, proc.pid)
                 if self._on_spawned is not None:
                     self._on_spawned(self.name)
@@ -247,12 +187,6 @@ class SupervisedService:
                 self._proc = None
                 self.last_exit_code = rc
                 if not self._desired_running:
-                    # Кто-то (stop()/restart() или LeaseManager через них)
-                    # уже снял desired_running к этому моменту — раньше эта
-                    # ветка была абсолютно немой и именно отсутствие лога
-                    # было единственной уликой живого инцидента 2026-08-12,
-                    # когда падение процесса маскировалось под штатную
-                    # остановку. stop() сам эмитит service_stopped.
                     log.info(
                         "Служба %s: процесс завершился (код %s) во время "
                         "остановки (desired_running уже снят) — не перезапускаю",
@@ -260,10 +194,6 @@ class SupervisedService:
                     )
                     break
                 if rc == FENCED_EXIT_CODE:
-                    # Служба сама сообщила: её вытеснил другой экземпляр (для
-                    # бота это 409 от Telegram). Перезапускать её — значит
-                    # мешать тому, кто держит службу по праву; решение отдаём
-                    # аренде.
                     log.warning("Служба %s вытеснена другим экземпляром — не перезапускаю",
                                 self.name)
                     self._desired_running = False
@@ -300,8 +230,6 @@ class SupervisedService:
 
 
 class Supervisor:
-    """Набор служб ноды по конфигу назначений."""
-
     def __init__(
         self,
         assignments: list[str],
@@ -347,8 +275,6 @@ class Supervisor:
             raise ValueError(f"неизвестное назначение: {assignment.service!r}")
         cli_args = svc_spec.cli_args
         if assignment.instance:
-            # Инстансная служба читает свой пакет настроек — без этого она
-            # поднялась бы на общем конфиге, то есть не на тех настройках.
             cli_args += ["--instance", assignment.instance]
         if self._config_path is not None:
             cli_args += ["--config", str(self._config_path)]
@@ -365,10 +291,6 @@ class Supervisor:
 
     async def start_all(self) -> None:
         for svc in self.services.values():
-            # Службы-синглтоны поднимает не старт ноды, а аренда лидерства
-            # (node/lease.py) — и активную тоже. Иначе вернувшаяся основная
-            # нода запустила бы второй поллер поверх работающего резерва, и
-            # 409 от Telegram прилетел бы как раз ей, законному владельцу.
             spec = registry.spec(svc.assignment.service)
             if spec is not None and spec.singleton:
                 log.info("Служба %s — синглтон: запуск решает аренда лидерства", svc.name)
@@ -376,7 +298,6 @@ class Supervisor:
             await svc.start()
 
     async def stop_all(self) -> None:
-        # Останавливаем в обратном порядке назначений (бот раньше монитора).
         for svc in reversed(list(self.services.values())):
             with contextlib.suppress(Exception):
                 await svc.stop()
@@ -385,22 +306,15 @@ class Supervisor:
         return self.services.get(name)
 
     def assign(self, name: str) -> SupervisedService:
-        """Добавить назначение в рантайме (без рестарта ноды).
-
-        ``name`` — строка назначения целиком (``telegram-bot@alfred:standby``).
-        Идемпотентно: уже назначенная служба возвращается как есть, не
-        пересоздаётся (и не теряет счётчик рестартов/pid).
-        """
         assignment = assignments_mod.parse(name)
         existing = self.services.get(assignment.key)
         if existing is not None:
             return existing
-        svc = self._make_service(assignment)  # ValueError на неизвестное имя — наружу
+        svc = self._make_service(assignment)
         self.services[assignment.key] = svc
         return svc
 
     async def unassign(self, name: str) -> None:
-        """Снять назначение: остановить и убрать из-под супервизии."""
         svc = self.services.pop(name, None)
         if svc is not None:
             await svc.stop()

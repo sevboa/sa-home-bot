@@ -1,8 +1,3 @@
-"""Синтез голосовых ответов (llm/tts.py) — Coqui XTTS v2 и ffmpeg замокан
-целиком: модуль не тянется как зависимость теста, проверяем только нашу
-обвязку (референс проверяется, временные файлы создаются/удаляются, модель
-кэшируется по процессу)."""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,13 +6,6 @@ import pytest
 
 from sa_home_bot.config import LlmConfig
 from sa_home_bot.llm import tts as llm_tts
-
-
-@pytest.fixture(autouse=True)
-def _reset_model_cache(monkeypatch):
-    # _model — модульный синглтон (см. докстринг llm/tts.py) — без сброса
-    # между тестами один тест "прогрел" бы модель для всех последующих.
-    monkeypatch.setattr(llm_tts, "_model", None)
 
 
 class _FakeXttsModel:
@@ -55,7 +43,7 @@ async def test_synthesize_speech_calls_model_and_cleans_temp_files(tmp_path, mon
     async def fake_get_model(cfg):
         return model
 
-    monkeypatch.setattr(llm_tts, "_get_model", fake_get_model)
+    monkeypatch.setattr(llm_tts._model, "get", fake_get_model)
     monkeypatch.setattr(llm_tts, "_wav_to_ogg", _fake_wav_to_ogg_factory(b"fake-ogg-bytes"))
 
     cfg = _cfg(tmp_path)
@@ -67,7 +55,6 @@ async def test_synthesize_speech_calls_model_and_cleans_temp_files(tmp_path, mon
     assert call["text"] == "Добрый вечер, сэр."
     assert call["language"] == cfg.tts_language
     assert call["speaker"] == llm_tts._SPEAKER_ID
-    # Временные wav/ogg удалены после синтеза — каталог остался пустым.
     assert list(cfg.tts_tmp_dir.iterdir()) == []
 
 
@@ -86,7 +73,7 @@ async def test_synthesize_speech_cleans_temp_files_even_on_ffmpeg_failure(tmp_pa
     async def fake_wav_to_ogg_fail(wav_path, ogg_path, cfg):
         raise RuntimeError("ffmpeg упал")
 
-    monkeypatch.setattr(llm_tts, "_get_model", fake_get_model)
+    monkeypatch.setattr(llm_tts._model, "get", fake_get_model)
     monkeypatch.setattr(llm_tts, "_wav_to_ogg", fake_wav_to_ogg_fail)
 
     cfg = _cfg(tmp_path)
@@ -94,20 +81,3 @@ async def test_synthesize_speech_cleans_temp_files_even_on_ffmpeg_failure(tmp_pa
         await llm_tts.synthesize_speech("текст", cfg)
 
     assert list(cfg.tts_tmp_dir.iterdir()) == []
-
-
-async def test_get_model_loads_once_and_caches(tmp_path, monkeypatch):
-    calls = []
-
-    def fake_load(cfg):
-        calls.append(cfg)
-        return _FakeXttsModel()
-
-    monkeypatch.setattr(llm_tts, "_load_model_sync", fake_load)
-
-    cfg = _cfg(tmp_path)
-    m1 = await llm_tts._get_model(cfg)
-    m2 = await llm_tts._get_model(cfg)
-
-    assert m1 is m2
-    assert len(calls) == 1

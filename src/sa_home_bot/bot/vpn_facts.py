@@ -1,9 +1,3 @@
-"""Ответы справки /vpn — один источник для кнопок «❓ Помощь» (bot/vpn_faq.py)
-и для описания инструмента ``vpn`` Альфреда (bot/tools.py, этап 57.8).
-
-Чистые строки, без aiogram: модуль безопасно импортирует и tools.py.
-"""
-
 from __future__ import annotations
 
 Q_HIDDIFY, Q_AWG, Q_TROUBLE, Q_DEVICE = "h", "a", "c", "d"

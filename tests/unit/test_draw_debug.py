@@ -1,5 +1,3 @@
-"""Отладочный /draw (Этап 49): разбор команды и подпись."""
-
 from __future__ import annotations
 
 import html
@@ -33,7 +31,6 @@ def test_plain_mode_and_description():
 
 
 def test_keys_only_before_description():
-    # «raw» внутри описания — часть описания, не ключ
     req = draw_debug.parse("item raw seed=42 s=0,6 raw meat on a plate")
     assert req.raw is True
     assert req.numbers == {"seed": 42, "strength": 0.6}
@@ -51,17 +48,17 @@ def test_ref_context_and_negative():
     assert req.negative == "people, text"
     args = req.service_args()
     assert args["ip_scale"] == 0.35 and args["style"] is False
-    assert "ref" not in args  # образец кладёт обработчик байтами
+    assert "ref" not in args
     assert req.params()["ref"] == 7
 
 
 @pytest.mark.parametrize(
     "text",
     [
-        "paint кот",  # неизвестный режим
-        "item",  # нет описания
+        "paint кот",
+        "item",
         "item seed=abc кот",
-        "item s=2 кот",  # вне диапазона
+        "item s=2 кот",
         "variant ip=0.4 кот",
         "scene s=0.5 кот",
     ],
@@ -143,7 +140,6 @@ def test_caption_shows_model():
 
 
 def test_help_fits_one_message():
-    # Лимит Telegram считается по тексту после разбора HTML.
     visible = html.unescape(re.sub(r"<[^>]+>", "", draw_debug.HELP))
     assert len(visible) < 4096
 

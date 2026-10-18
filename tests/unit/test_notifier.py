@@ -1,12 +1,3 @@
-"""bot/notifier.py: TypingIndicator и Notifier — ретраи/устойчивость к сбоям.
-
-Живая находка 2026-08-29: реальный сбой в проде (зависший SOCKS-прокси до
-Telegram, aiohttp_socks.ProxyTimeoutError) — обычный Exception без общего
-предка с TelegramAPIError. Все методы ниже задуманы best-effort/с ретраем
-именно на такие сбои связи (докстринги "не критично"/"ретраи 429"), но раньше
-ловили только TelegramAPIError и роняли вызывающего на первом же сетевом
-таймауте. См. тот же класс бага в test_rich_stream.py."""
-
 from __future__ import annotations
 
 import pytest
@@ -64,7 +55,7 @@ async def test_typing_indicator_start_swallows_network_errors():
     bot.fail_times = 1
     indicator = TypingIndicator(bot, chat_id=1)
 
-    await indicator.start()  # не бросает — see docstring "не критично"
+    await indicator.start()
     await indicator.stop()
 
     assert bot.typing_calls == 1
@@ -83,13 +74,9 @@ async def test_send_direct_retries_on_429_then_succeeds():
 
 
 async def test_send_direct_retries_transient_network_error_then_succeeds():
-    # Живая находка 2026-08-30: раньше первый же не-429 сбой (моргнувший
-    # SOCKS-прокси до Telegram) давал return None без повтора — на пути
-    # финальной отправки ответа это молча его теряло. Теперь транзиентный
-    # сбой ретраится, как и 429.
     bot = FakeBot()
     bot.fail_exception = ConnectionError("proxy timed out: 60")
-    bot.fail_times = 2  # два обрыва, третья попытка проходит
+    bot.fail_times = 2
     notifier = Notifier(bot)
 
     message_id = await notifier.send_direct(1, "привет")
@@ -101,19 +88,17 @@ async def test_send_direct_retries_transient_network_error_then_succeeds():
 
 async def test_send_direct_swallows_network_error_and_returns_none():
     bot = FakeBot()
-    bot.fail_times = MAX_RETRIES  # ни одна попытка не пройдёт
+    bot.fail_times = MAX_RETRIES
     notifier = Notifier(bot)
 
-    message_id = await notifier.send_direct(1, "привет")  # не бросает
+    message_id = await notifier.send_direct(1, "привет")
 
     assert message_id is None
     assert bot.sent == []
-    assert bot.send_message_calls == MAX_RETRIES  # все попытки израсходованы
+    assert bot.send_message_calls == MAX_RETRIES
 
 
 async def test_send_direct_does_not_retry_permanent_bad_request():
-    # TelegramBadRequest (битая разметка / слишком длинно) повтором того же
-    # payload не лечится — сдаёмся сразу, попытки не тратим.
     bot = FakeBot()
     bot.fail_exception = TelegramBadRequest(method=None, message="can't parse entities")
     bot.fail_times = 1
@@ -130,6 +115,62 @@ async def test_delete_message_swallows_network_errors():
     bot.fail_times = 1
     notifier = Notifier(bot)
 
-    await notifier.delete_message(1, 42)  # не бросает
+    await notifier.delete_message(1, 42)
 
     assert bot.deleted == []
+
+
+class _MediaMessage:
+    message_id = 7
+
+    class document:
+        file_id = "doc-file-id"
+
+
+class _MediaBot:
+    def __init__(self, failures: list[Exception]) -> None:
+        self.failures = failures
+        self.calls = 0
+
+    async def _send(self, *_args, **_kwargs):
+        self.calls += 1
+        if self.failures:
+            raise self.failures.pop(0)
+        return _MediaMessage()
+
+    send_document = send_photo = send_voice = _send
+
+
+MEDIA_SENDERS = [
+    ("send_document", (7, "doc-file-id")),
+    ("send_photo", 7),
+    ("send_voice", 7),
+]
+
+
+@pytest.mark.parametrize(("method", "expected"), MEDIA_SENDERS)
+async def test_media_send_retries_429_and_transient_then_succeeds(method, expected):
+    bot = _MediaBot(
+        [TelegramRetryAfter(None, "flood", retry_after=0), ConnectionError("proxy timed out")]
+    )
+
+    result = await getattr(Notifier(bot), method)(1, b"payload", filename="f.bin")
+
+    assert result == expected
+    assert bot.calls == 3
+
+
+@pytest.mark.parametrize(("method", "expected"), MEDIA_SENDERS)
+async def test_media_send_gives_up_after_max_retries(method, expected):
+    bot = _MediaBot([ConnectionError("proxy timed out")] * MAX_RETRIES)
+
+    assert await getattr(Notifier(bot), method)(1, b"payload") is None
+    assert bot.calls == MAX_RETRIES
+
+
+@pytest.mark.parametrize(("method", "expected"), MEDIA_SENDERS)
+async def test_media_send_does_not_retry_permanent_error(method, expected):
+    bot = _MediaBot([TelegramBadRequest(method=None, message="wrong file")])
+
+    assert await getattr(Notifier(bot), method)(1, b"payload") is None
+    assert bot.calls == 1

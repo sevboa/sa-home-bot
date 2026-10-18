@@ -1,6 +1,3 @@
-"""Восстановление vpn-сервера (39.0.8(d)): отдача копий, list/dry-run, выбор снапшота,
-применение на ноде, защита от затирания, полный round-trip jeeves -> wooster -> restore."""
-
 from __future__ import annotations
 
 import json
@@ -26,7 +23,7 @@ from sa_home_bot.proto.messages import ProtoError
 
 PRIV, PUB = sealed.generate_keypair()
 AWG_PRIV, _ = sealed.generate_keypair()
-AWG_KEY = sealed.dump_key(AWG_PRIV)  # формат ключа WireGuard тот же: base64 от 32 байт
+AWG_KEY = sealed.dump_key(AWG_PRIV)
 XRAY = {
     "inbounds": [
         {"tag": "api-in", "protocol": "dokodemo-door"},
@@ -79,7 +76,6 @@ async def _fill(db, peers=2):
 
 @pytest_asyncio.fixture
 async def world(tmp_path):
-    """jeeves (источник) -> хранилище wooster. Возвращает всё нужное тестам."""
     jeeves = _settings(tmp_path, "jeeves", "wooster")
     wooster = _settings(tmp_path, "wooster", "jeeves")
     db = Database(jeeves.vpn.db_path)
@@ -87,7 +83,6 @@ async def world(tmp_path):
     await apply_migrations(db)
     await _fill(db)
 
-    # identity: собираем как публикатор jeeves, кладём в хранилище wooster
     class Awg:
         async def __call__(self):
             return AWG_KEY
@@ -125,9 +120,6 @@ async def _unused(action, args):  # pragma: no cover
     raise AssertionError
 
 
-# --- отдача копий -----------------------------------------------------------------
-
-
 async def test_serve_list_and_get(world):
     ask = world["ask"]
     listing = await ask(serve.ACTION_STORE_LIST, {"node": "jeeves"})
@@ -137,7 +129,6 @@ async def test_serve_list_and_get(world):
     assert listing["snapshot"][0]["meta"]["rows"]["vpn_peers"] == 2
     got = await ask(serve.ACTION_STORE_GET, {"node": "jeeves", "kind": "identity"})
     assert got["label"] == "latest" and got["sealed"]
-    # блоб запечатан: открытого ключа сервера в нём нет
     assert AWG_KEY.encode() not in got["sealed"].encode()
 
 
@@ -154,7 +145,7 @@ async def test_serve_refuses_foreign_node_and_unknown(world):
 async def test_serve_history_labels(world):
     store = world["store"]
     meta = InstanceMeta("vpn-identity", "jeeves", 2, "h2", "2026-10-06T10:00:00+00:00", "jeeves")
-    store.save_identity("jeeves", b"other-blob", meta)  # прежняя уйдёт в history
+    store.save_identity("jeeves", b"other-blob", meta)
     listing = await world["ask"](serve.ACTION_STORE_LIST, {"node": "jeeves"})
     labels = [v["label"] for v in listing["identity"]]
     assert labels[0] == "latest" and len(labels) == 2
@@ -162,9 +153,6 @@ async def test_serve_history_labels(world):
         serve.ACTION_STORE_GET, {"node": "jeeves", "kind": "identity", "label": labels[1]}
     )
     assert old["sealed"]
-
-
-# --- выбор снапшота -------------------------------------------------------------------
 
 
 def _v(label, peers, empty=False):
@@ -184,11 +172,7 @@ def test_pick_snapshot_empty_latest_refused_with_hint():
     assert rs.pick_snapshot(vs, "latest") == "latest"
     with pytest.raises(rs.RestoreError):
         rs.pick_snapshot(vs, "nope")
-    # пустой latest, а ненпустого нет — восстанавливать нечего, но это не отказ
     assert rs.pick_snapshot([_v("latest", 0, True)], None) == "latest"
-
-
-# --- fetch / dry-run -------------------------------------------------------------------
 
 
 async def test_fetch_bundle_matches_source(world):
@@ -221,14 +205,10 @@ async def test_dry_run_dir_permissions_and_content(world, tmp_path):
     assert "пиров 2" in summary and sealed.dump_key(
         sealed.public_from_private(AWG_PRIV)
     ) in summary
-    assert AWG_KEY not in summary and "REALPRIV" not in summary  # секретов в сводке нет
-    # каталог можно прочитать обратно как бандл
+    assert AWG_KEY not in summary and "REALPRIV" not in summary
     assert rs.load_bundle(d)["identity"] == bundle["identity"]
-    with pytest.raises(rs.RestoreError):  # непустой каталог не затираем
+    with pytest.raises(rs.RestoreError):
         rs.write_dir(d, bundle)
-
-
-# --- применение -----------------------------------------------------------------------
 
 
 class FakeIO:
@@ -251,9 +231,8 @@ class FakeIO:
 
 
 def _target(tmp_path, node="jeeves"):
-    """Чистая пересобранная нода: свой конфиг, БД нет, awg0.conf со СВЕЖИМИ ключами."""
     s = _settings(tmp_path / "new", node, "wooster", release=False)
-    s.vpn.jc = 99  # свежесгенерированная обфускация — должна быть заменена
+    s.vpn.jc = 99
     cfg = tmp_path / "new" / "config.toml"
     cfg.parent.mkdir(parents=True, exist_ok=True)
     cfg.write_text(
@@ -287,7 +266,7 @@ async def test_apply_identity_and_rows(world, tmp_path):
     conf = io.files[awg]
     assert f"PrivateKey = {AWG_KEY}" in conf and "FRESH" not in conf
     assert "Jc = 7" in conf and "H1 = 1000001" in conf
-    assert "Address = 10.9.0.1/24" in conf and "[Peer]\nPublicKey = x" in conf  # прочее цело
+    assert "Address = 10.9.0.1/24" in conf and "[Peer]\nPublicKey = x" in conf
     assert conf.count("PrivateKey") == 1 and conf.count("Jc") == 1
     assert "REALITY_PRIVATE_KEY=REALPRIV" in io.files[env]
     assert "REALITY_PUBLIC_KEY=REALPUB" in io.files[env] and "SHORT_ID=ab12" in io.files[env]
@@ -304,8 +283,7 @@ async def test_apply_identity_and_rows(world, tmp_path):
     assert toml["node"]["id"] == "jeeves" and toml["backup"]["partner"] == "wooster"
     assert (cfg.parent / "config.toml.pre-restore").exists()
     assert io.restarted == ["awg-quick@awg0", "xray.service"]
-    assert publish_allowed(s)  # публикация снова разрешена
-    # строки: id сохранён, counters не перенесены, usage ссылается на тот же peer_id
+    assert publish_allowed(s)
     db = Database(s.vpn.db_path)
     await db.open()
     try:
@@ -319,7 +297,6 @@ async def test_apply_identity_and_rows(world, tmp_path):
             "SELECT allowed FROM vpn_chat_access WHERE chat_id = ?", (CHAT,)
         )
         assert (await cur.fetchone())[0] == 1
-        # новый пир получает id после восстановленных (AUTOINCREMENT не сброшен)
         await db.conn.execute(
             "INSERT INTO vpn_peers (chat_id, device_label, public_key, address, created_at) "
             "VALUES (1, 'n', 'pubN', '10.9.0.9', 't')")
@@ -337,7 +314,7 @@ async def test_apply_creates_minimal_awg_conf_when_absent(world, tmp_path):
     await bapply.apply_bundle(bundle, s, config_path=cfg, io=io, awg_conf=awg,
                               reality_env=tmp_path / "r.env", log=lambda m: None)
     assert io.files[awg].startswith("[Interface]\n") and AWG_KEY in io.files[awg]
-    assert io.restarted == []  # поднимать нечего — ставит setup-скрипт, он ключ сохранит
+    assert io.restarted == []
 
 
 async def test_apply_refuses_foreign_node_and_nonempty_db(world, tmp_path):
@@ -355,7 +332,7 @@ async def test_apply_refuses_foreign_node_and_nonempty_db(world, tmp_path):
     with pytest.raises(bapply.ApplyError, match="--wipe-db"):
         await bapply.apply_bundle(bundle, s, config_path=cfg, io=io, awg_conf=tmp_path / "a",
                                   reality_env=tmp_path / "r", log=lambda m: None)
-    assert io.files == {} and not publish_allowed(s)  # до отказа ничего не писали
+    assert io.files == {} and not publish_allowed(s)
     await bapply.apply_bundle(bundle, s, config_path=cfg, io=io, awg_conf=tmp_path / "a",
                               reality_env=tmp_path / "r", wipe_db=True, log=lambda m: None)
     assert publish_allowed(s)
@@ -380,9 +357,6 @@ def test_patch_awg_conf_adds_missing_keys():
     awg = {"private_key": "K", "obfuscation": {"jc": 1, "h1": 9}}
     out = bapply.patch_awg_conf("[Interface]\nAddress = 1\n[Peer]\nX = 1\n", awg)
     assert out == "[Interface]\nAddress = 1\nPrivateKey = K\nJc = 1\nH1 = 9\n[Peer]\nX = 1\n"
-
-
-# --- защита от затирания ----------------------------------------------------------------
 
 
 async def test_publish_held_until_marker(tmp_path):
@@ -410,12 +384,9 @@ async def test_publish_held_until_marker(tmp_path):
     await db.close()
 
 
-# --- полный round-trip ------------------------------------------------------------------
-
-
 async def test_round_trip_jeeves_to_wooster_and_back(world, tmp_path):
     bundle = await rs.fetch_bundle(world["ask"], "jeeves", PRIV)
-    wire = rs.bundle_to_bytes(bundle)  # так бандл едет по ssh
+    wire = rs.bundle_to_bytes(bundle)
     staged = tmp_path / "staged.json"
     staged.write_bytes(wire)
     os.chmod(staged, 0o600)
@@ -425,11 +396,9 @@ async def test_round_trip_jeeves_to_wooster_and_back(world, tmp_path):
     io = FakeIO()
     await bapply.apply_bundle(loaded, s, config_path=cfg, io=io, awg_conf=awg,
                               reality_env=tmp_path / "r.env", log=lambda m: None)
-    # тот же ключ сервера: публичный ключ из восстановленного файла == исходный
     restored_priv = [ln.split(" = ")[1] for ln in io.files[awg].splitlines()
                      if ln.startswith("PrivateKey")][0]
     assert rs.awg_public_key(restored_priv) == rs.awg_public_key(AWG_KEY)
-    # и те же строки БД
     from sa_home_bot.backup.snapshot import dump_tables
 
     db = Database(s.vpn.db_path)

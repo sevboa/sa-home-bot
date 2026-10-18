@@ -1,9 +1,3 @@
-"""Сборка и жизненный цикл службы torrents (отдельный процесс).
-
-Минимальная служба: proto-сервер поверх TorrentsService, без БД и
-планировщика — состояние читается из qBittorrent на каждый запрос.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -19,8 +13,6 @@ log = logging.getLogger(__name__)
 async def run_torrents(settings: Settings) -> None:
     service = TorrentsService(settings)
     server = ProtoServer(settings.torrents.socket, service, token=settings.swarm.token)
-    # Обработчики сигналов — до start(): он ждёт появления своего адреса
-    # (см. proto/server.py), и всё это время остановка иначе не обрабатывалась бы.
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
     await server.start()

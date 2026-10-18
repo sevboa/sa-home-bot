@@ -1,5 +1,3 @@
-"""utils/ssh_sessions.py: разбор loginctl, фильтр Remote=yes, terminate-session."""
-
 from __future__ import annotations
 
 from sa_home_bot.utils import ssh_sessions
@@ -110,4 +108,4 @@ async def test_kill_tmux_server_noop_when_not_installed(monkeypatch):
 
     monkeypatch.setattr(ssh_sessions, "_run", fake)
 
-    await ssh_sessions.kill_tmux_server()  # не бросает
+    await ssh_sessions.kill_tmux_server()

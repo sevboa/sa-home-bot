@@ -1,6 +1,3 @@
-"""Художник-промптер (llm/image_prompt.py): подгонка
-под 77 токенов CLIP, разбор ответа модели и откат на описание при сбое."""
-
 from __future__ import annotations
 
 import json
@@ -18,7 +15,6 @@ def _words(text: str) -> int:
 def test_fit_prompt_drops_tail_tags_until_template_fits():
     prompt = "dragon, castle, sunset, clouds, birds, river"
     fitted = image_prompt.fit_prompt(prompt, TEMPLATE, _words, limit=8)
-    # dragon castle sunset + 5 слов шаблона = 8
     assert fitted == "dragon, castle, sunset"
 
 
@@ -64,5 +60,4 @@ def test_build_request_puts_retake_emphasis_before_the_picture():
     assert "FAILED to show: меч на стене" in text
     assert text.index("FAILED") < text.index("Picture:")
     assert "FAILED" not in image_prompt.build_request("меч", "scene", "room")
-    # free без контекста, но с упором — уже не «как есть».
     assert image_prompt.build_request("кот", emphasize=["кот"]) != "кот"

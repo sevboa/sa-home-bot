@@ -1,5 +1,3 @@
-"""Smoke-тест жизненного цикла app.run без сети (Bot/Dispatcher замоканы)."""
-
 import asyncio
 from types import SimpleNamespace
 
@@ -74,7 +72,6 @@ async def test_app_boots_and_shuts_down_cleanly(tmp_path, monkeypatch):
     settings = Settings(
         telegram=TelegramConfig(token="x"),
         database=DatabaseConfig(path=db_path),
-        # Монитор не запущен — ServiceLink просто крутит переподключение в фоне.
         monitor=MonitorConfig(
             socket=str(tmp_path / "monitor.sock"), db_path=tmp_path / "monitor.sqlite"
         ),
@@ -85,11 +82,9 @@ async def test_app_boots_and_shuts_down_cleanly(tmp_path, monkeypatch):
 
     await asyncio.wait_for(run(settings), timeout=10)
 
-    # Приветствие (старт) и прощание (shutdown) должны уйти подписчику.
     assert any("посту" in t or "сбоя" in t for t in fake_bot.sent)
     assert any("офлайн" in t for t in fake_bot.sent)
 
-    # Флаг чистого завершения выставлен.
     db = Database(db_path)
     await db.open()
     await apply_migrations(db)

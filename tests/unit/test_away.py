@@ -1,11 +1,3 @@
-"""«Альфред в городе» (Этап 51): разбор срока, остаток, потолок 24 ч,
-продление, перехват (владелец тоже), проход планировщика (напоминание,
-«задерживается», принудительный возврат) и разбор очереди при возвращении
-(порядок, голосовые, повтор после падения).
-
-Модель, wake и распознавание замоканы: проверяется оркестрация (bot/away.py,
-bot/away_return.py, хендлеры), а не LLM."""
-
 from __future__ import annotations
 
 import io
@@ -18,7 +10,7 @@ import pytest
 import pytest_asyncio
 
 from sa_home_bot import wake_core
-from sa_home_bot.bot import ai_flow, away, away_return, voice_stt
+from sa_home_bot.bot import ai_flow, ai_reply, ai_turns, away, away_return, voice_stt
 from sa_home_bot.bot.away import (
     ALFRED_AWAY_KEY,
     MAX_AWAY,
@@ -85,9 +77,6 @@ def clock():
 @pytest.fixture
 def service(store, tmp_path, clock):
     return AwayService(store, _settings(tmp_path), clock=clock)
-
-
-# ------------------------------------------------------------------ фейки
 
 
 class FakeBot:
@@ -204,16 +193,12 @@ async def _away(service, hours=3, **kwargs) -> AwayState:
     return state
 
 
-# ------------------------------------------------------------- разбор срока
-
-
 def test_parse_duration_forms():
     assert parse_duration("3ч") == (timedelta(hours=3), "")
     assert parse_duration("1ч30м датасет") == (timedelta(hours=1, minutes=30), "датасет")
     assert parse_duration("90 минут") == (timedelta(minutes=90), "")
     assert parse_duration("1.5h") == (timedelta(minutes=90), "")
     assert parse_duration("2 часа обучение LoRA") == (timedelta(hours=2), "обучение LoRA")
-    # число без единицы и чужое слово — не срок
     assert parse_duration("3") is None
     assert parse_duration("датасет 3ч") is None
 
@@ -225,11 +210,10 @@ def test_parse_away_args_duration_and_reason():
 
 
 def test_parse_away_args_clock_today_and_tomorrow_rollover():
-    tz = ZoneInfo("Asia/Almaty")  # T0 = 17:00 по Алматы
+    tz = ZoneInfo("Asia/Almaty")
     until, reason = parse_away_args("до 23:00 датасет", T0, tz)
-    assert until == datetime(2026, 10, 4, 18, 0, tzinfo=UTC)  # 23:00 Алматы
+    assert until == datetime(2026, 10, 4, 18, 0, tzinfo=UTC)
     assert reason == "датасет"
-    # 16:00 по Алматы уже прошло — это завтра
     until, _ = parse_away_args("до 16:00", T0, tz)
     assert until == datetime(2026, 10, 5, 11, 0, tzinfo=UTC)
 
@@ -253,14 +237,11 @@ def test_parse_extend():
         parse_extend("+скоро")
 
 
-# ---------------------------------------------------------- остаток времени
-
-
 @pytest.mark.parametrize(
     ("seconds", "expected"),
     [
         (2 * 3600 + 15 * 60, "через 2 ч 15 мин"),
-        (2 * 3600 + 14 * 60 + 10, "через 2 ч 15 мин"),  # минуты вверх
+        (2 * 3600 + 14 * 60 + 10, "через 2 ч 15 мин"),
         (3600, "через 1 ч"),
         (40 * 60, "через 40 мин"),
         (61, "через 2 мин"),
@@ -281,7 +262,6 @@ def _state(**kwargs) -> AwayState:
 
 
 def test_note_text_variants_use_castle_clock():
-    # T0 = 12:00 UTC = 15:00 в Бухаресте (EEST)
     state = _state(until=T0 + timedelta(hours=3))
     assert note_text(state, T0) == (
         "Альфред спустился в город по делам. Обещал вернуться к 18:00 по замковым "
@@ -310,9 +290,6 @@ def test_status_text():
         "причина: датасет &lt;b&gt;."
     )
     assert "Альфред и так дома" in status_text(None, T0, UTC_TZ)
-
-
-# ------------------------------------------------------------------- потолок
 
 
 def test_clamp_until():
@@ -345,10 +322,9 @@ async def test_extend_counts_resets_notes_and_respects_ceiling(service, clock):
     state = await service.extend(timedelta(hours=1))
     assert state.extended == 1
     assert state.until == T0 + timedelta(hours=4)
-    assert state.noted == {}  # записка после продления — заново
+    assert state.noted == {}
     assert state.set_by == "claude" and state.reason == "датасет"
 
-    # до потолка осталось 20 часов: +30ч урезается, дальше продлевать нельзя
     state = await service.extend(timedelta(hours=30))
     assert state.until == T0 + MAX_AWAY
     with pytest.raises(AwayError, match="Потолок"):
@@ -357,7 +333,7 @@ async def test_extend_counts_resets_notes_and_respects_ceiling(service, clock):
 
 async def test_extend_after_deadline_counts_from_now(service, clock):
     await _away(service, hours=1)
-    clock.advance(hours=2)  # срок прошёл, Альфред «задерживается»
+    clock.advance(hours=2)
     state = await service.extend(timedelta(hours=1))
     assert state.until == clock.now + timedelta(hours=1)
 
@@ -389,9 +365,6 @@ async def test_corrupted_state_means_home(store, service):
     assert not await service.intercept(msg, kind=away.KIND_TEXT, text="привет")
 
 
-# ------------------------------------------------------------------- перехват
-
-
 async def test_intercept_when_home_does_nothing(service, store):
     msg = FakeMessage(1, "привет")
     assert not await service.intercept(msg, kind=away.KIND_TEXT, text="привет", dialogue_id=1)
@@ -414,7 +387,6 @@ async def test_intercept_records_turn_pending_and_notes(service, store, clock):
     assert entry["last_message_id"] == first.message_id
     assert entry["user"]["username"] == "anya"
 
-    # второе сообщение сводится в тот же диалог, записка не чаще раза в 30 мин
     second = FakeMessage(1, "ты тут?")
     await service.intercept(second, kind=away.KIND_TEXT, text="ты тут?", dialogue_id=222)
     assert second.sent == []
@@ -425,7 +397,7 @@ async def test_intercept_records_turn_pending_and_notes(service, store, clock):
     clock.advance(minutes=31)
     third = FakeMessage(1, "ау")
     await service.intercept(third, kind=away.KIND_TEXT, text="ау", dialogue_id=333)
-    assert third.sent  # прошло N минут — записка снова
+    assert third.sent
 
 
 async def test_intercept_note_again_after_extend(service):
@@ -466,8 +438,7 @@ async def test_intercept_photo_sticker_and_summon(service, store):
     sticker = FakeMessage(1, sticker=FakeSticker("😂"))
     await service.intercept(sticker, dialogue_id=1)
     assert (await store.ai_turn(1, sticker.message_id))["content"] == "[стикер] 😂"
-    # голый /alfred: записки достаточно, в очередь не встаёт
-    await service.clear()  # снять очередь и начать заново
+    await service.clear()
     await _away(service)
     summon = FakeMessage(2, "/alfred")
     assert await service.intercept(summon, kind=away.KIND_SUMMON, dialogue_id=1)
@@ -486,7 +457,7 @@ async def test_intercept_downloads_voice_immediately(service, store, tmp_path):
     )
     (row,) = await store.away_media_for_chat(1)
     assert row["kind"] == "voice" and row["duration_s"] == 12 and row["file_id"] == "v1"
-    assert row["path"].startswith(str(tmp_path))  # рядом с БД бота, не /mnt/scratch
+    assert row["path"].startswith(str(tmp_path))
     assert open(row["path"], "rb").read() == b"OGG-DATA"
 
     note = FakeMessage(1, video_note=FakeFile("vn1", 3))
@@ -516,9 +487,6 @@ async def test_intercept_duplicate_update_is_ignored(service, store):
     assert len(await store.ai_turns_for_dialogue(1, 1)) == 1
 
 
-# ------------------------------------------------------- хендлеры: перехват
-
-
 def _boom(*args, **kwargs):
     raise AssertionError("модель/зрение/голос не должны вызываться, пока Альфред в городе")
 
@@ -531,8 +499,8 @@ def no_model(monkeypatch):
     monkeypatch.setattr(ai_flow, "request_alfred", boom)
     monkeypatch.setattr(voice_stt, "transcribe_voice_message", boom)
     monkeypatch.setattr(ai_handler, "_ask_and_reply", boom)
-    monkeypatch.setattr(ai_handler, "_handle_photo_message", boom)
-    monkeypatch.setattr(ai_handler, "_handle_sticker_message", boom)
+    monkeypatch.setattr(ai_turns, "photo_history", boom)
+    monkeypatch.setattr(ai_turns, "sticker_history", boom)
 
 
 def _ai_kwargs(store, service, tmp_path):
@@ -586,8 +554,7 @@ async def test_all_ai_entry_points_intercepted(store, service, tmp_path, no_mode
     for m in (text, photo, voice, sticker, reply, note):
         assert await store.ai_turn(1, m.message_id) is not None
     assert (await store.ai_turn(5, group.message_id))["content"] == "вопрос"
-    # голос ушёл в очередь на распознавание, а не в voice_stt
-    assert len(await store.away_media_for_chat(1)) == 2  # голосовое + кружочек
+    assert len(await store.away_media_for_chat(1)) == 2
 
 
 async def test_start_dialogue_intercepted(store, service, tmp_path, no_model):
@@ -651,9 +618,6 @@ async def test_interactive_click_answers_with_note(service):
     assert answers and "Альфред спустился в город" in answers[0][0] and answers[0][1]
 
 
-# ------------------------------------------------------- команды владельца
-
-
 async def test_cmd_away_status_set_extend_back(store, service, tmp_path, clock):
     from aiogram.filters import CommandObject
 
@@ -699,7 +663,7 @@ async def test_away_commands_owner_only(store, service, tmp_path):
         msg, CommandObject(prefix="/", command="away", args="3ч"), _settings(tmp_path),
         away=service, subscription=guest,
     )
-    assert await service.load() is None  # право «away» без «*» — не владелец
+    assert await service.load() is None
 
 
 async def test_away_buttons(store, service, tmp_path):
@@ -727,9 +691,6 @@ async def test_away_buttons(store, service, tmp_path):
     assert "Продлил" in edited[0] and "вернулся" in edited[1]
 
 
-# ----------------------------------------------- проход: напоминание, потолок
-
-
 class NoReturn:
     async def run_pass(self):
         return 0
@@ -741,31 +702,29 @@ async def test_runner_reminder_once_overdue_stays_and_ceiling(service, clock):
     await _away(service, hours=1)
 
     await runner.tick()
-    assert notifier.sent == []  # до срока больше 15 минут
+    assert notifier.sent == []
 
-    clock.advance(minutes=46)  # до срока 14 минут
+    clock.advance(minutes=46)
     await runner.tick()
     await runner.tick()
-    assert len(notifier.sent) == 1  # напоминание один раз
+    assert len(notifier.sent) == 1
     chat_id, text, markup = notifier.sent[0]
     assert chat_id == 999 and "через 14 мин" in text
     labels = [b.text for row in markup.inline_keyboard for b in row]
     assert labels == ["+30м", "+1ч", "+2ч", "Вернуться сейчас"]
 
-    clock.advance(hours=2)  # срок давно прошёл — режим НЕ снят
+    clock.advance(hours=2)
     await runner.tick()
     state = await service.load()
     assert state is not None and state.phase == away.PHASE_AWAY
     assert "вот-вот должен вернуться" in note_text(state, clock.now)
     assert len(notifier.sent) == 1
 
-    # продление → новое напоминание перед новым сроком
     await service.extend(timedelta(hours=1))
     clock.advance(minutes=50)
     await runner.tick()
     assert len(notifier.sent) == 2
 
-    # потолок 24 ч — принудительное возвращение
     clock.now = T0 + MAX_AWAY
     msg = FakeMessage(3, "ау")
     await service.intercept(msg, kind=away.KIND_TEXT, text="ау", dialogue_id=1)
@@ -791,15 +750,10 @@ async def test_runner_delivers_claude_notices_to_owner(service):
     await runner.tick()
     assert [(c, t) for c, t, _ in notifier.sent] == [(999, "Claude отправил Альфреда в город.")]
     await runner.tick()
-    assert len(notifier.sent) == 1  # очередь опустела
-
-
-# ------------------------------------------------------------ возвращение
+    assert len(notifier.sent) == 1
 
 
 class ReturnEnv:
-    """Стенд разбора очереди: _ask_and_reply, wake и STT замоканы."""
-
     def __init__(self, store, service, tmp_path, monkeypatch):
         self.store = store
         self.service = service
@@ -812,8 +766,7 @@ class ReturnEnv:
         self.notifier = FakeNotifier()
         self.stt_error: Exception | None = None
 
-        async def fake_ask(message, node_link, store_, config, book, notifier, dialogue_id,
-                           history, active, tool_calls, rich, **kwargs):
+        async def fake_ask(message, services, dialogue_id, history, rich):
             self.asked.append(
                 {
                     "chat_id": message.chat.id,
@@ -837,7 +790,7 @@ class ReturnEnv:
             self.transcribed.append(raw)
             return self.transcript if not callable(self.transcript) else self.transcript(raw)
 
-        monkeypatch.setattr(ai_handler, "_ask_and_reply", fake_ask)
+        monkeypatch.setattr(ai_reply, "ask_and_reply", fake_ask)
         monkeypatch.setattr(wake_core, "ensure_service_ready", fake_ready)
         monkeypatch.setattr(voice_stt, "transcribe_bytes", fake_stt)
         self.returner = AwayReturn(
@@ -853,7 +806,7 @@ class ReturnEnv:
 
     async def message(self, chat_id, text=None, *, user=None, thread=None, **kw):
         msg = FakeMessage(chat_id, text, user=user, thread=thread, **kw)
-        dialogue_id = thread or msg.message_id  # как ai_handler._dialogue_id_for
+        dialogue_id = thread or msg.message_id
         if text is not None and not kw:
             await self.service.intercept(
                 msg, kind=away.KIND_TEXT, text=text, dialogue_id=dialogue_id
@@ -871,13 +824,13 @@ def env(store, service, tmp_path, monkeypatch):
 async def test_return_waits_for_llm_and_does_nothing_before_back(env, service):
     await _away(service)
     await env.message(1, "привет")
-    assert await env.returner.run_pass() == 0  # фаза away — не разбираем
+    assert await env.returner.run_pass() == 0
     assert env.asked == []
 
     await service.back()
     env.ready = wake_core.UNREACHABLE
     assert await env.returner.run_pass() == 0
-    assert env.asked == []  # модель не готова — ждём, чат остаётся в очереди
+    assert env.asked == []
     assert (await service.load()).pending
 
 
@@ -887,19 +840,19 @@ async def test_return_chats_one_by_one_in_order_replying_to_last_message(env, se
     b1 = await env.message(2, "второй чат")
     a2 = await env.message(
         1, "и ещё", user=FakeUser(7, "Аня", username="anya")
-    )  # тот же чат — одним запросом
+    )
     await service.back()
 
     assert await env.returner.run_pass() == 2
-    assert [a["chat_id"] for a in env.asked] == [1, 2]  # по порядку первого сообщения
+    assert [a["chat_id"] for a in env.asked] == [1, 2]
     first = env.asked[0]
-    assert first["message_id"] == a2.message_id  # реплай на последнее
+    assert first["message_id"] == a2.message_id
     assert first["user"].username == "anya"
     contents = [m["content"] for m in first["history"]]
     assert contents[-1] == "и ещё" and contents[-2] == away_return.RETURN_NOTE
     assert first["history"][-2]["role"] == "system"
     assert contents[:-2] == ["первый"]
-    assert await service.load() is None  # очередь пуста — режим снят
+    assert await service.load() is None
     assert b1.message_id == env.asked[1]["message_id"]
 
 
@@ -916,10 +869,9 @@ async def test_return_transcribes_voices_in_order_before_asking(env, service, st
     await service.back()
 
     assert await env.returner.run_pass() == 1
-    assert env.transcribed == [b"first", b"second"]  # по порядку сообщений
+    assert env.transcribed == [b"first", b"second"]
     contents = [m["content"] for m in env.asked[0]["history"]]
     assert contents[0] == "текст до"
-    # вставка «вернулся из города» — перед последней репликой собеседника
     assert contents[1:] == [
         "расшифровка first", away_return.RETURN_NOTE, "расшифровка second"
     ]
@@ -927,7 +879,7 @@ async def test_return_transcribes_voices_in_order_before_asking(env, service, st
     assert await store.away_media_for_chat(1) == []
     import os
 
-    assert not any(os.path.exists(p) for p in paths)  # файлы удалены
+    assert not any(os.path.exists(p) for p in paths)
 
 
 async def test_return_voice_failure_marks_history(env, service, store):
@@ -938,7 +890,7 @@ async def test_return_voice_failure_marks_history(env, service, store):
     await service.back()
     assert await env.returner.run_pass() == 1
     assert (await store.ai_turn(1, v.message_id))["content"] == "[голосовое, не удалось разобрать]"
-    assert env.asked  # ответ всё равно один
+    assert env.asked
 
 
 async def test_return_voice_limit_per_chat(env, service, store):
@@ -965,11 +917,11 @@ async def test_return_retry_after_failed_delivery_and_drop(env, service, store):
 
     await env.returner.run_pass()
     state = await service.load()
-    assert set(state.pending) == {"1"}  # второй доставлен и снят, первый ждёт
+    assert set(state.pending) == {"1"}
     assert state.attempts == {"1": 1}
 
     await env.returner.run_pass()
-    await env.returner.run_pass()  # третья неудача — чат снимается, владельцу сообщение
+    await env.returner.run_pass()
     assert await service.load() is None
     assert any("чату 1" in text for _, text, _ in env.notifier.sent)
 
@@ -982,15 +934,13 @@ async def test_return_retry_after_failed_delivery_and_drop(env, service, store):
 
 
 async def test_return_resumes_after_crash_midway(env, service, store):
-    """Упали после распознавания первого голосового: заглушка уже подменена,
-    строка away_media осталась — продолжаем со второго, без повторного STT."""
     await _away(service)
     bot = FakeBot({"v1": b"one", "v2": b"two"})
     v1 = FakeMessage(1, voice=FakeFile("v1", 5), bot=bot)
     v2 = FakeMessage(1, voice=FakeFile("v2", 5), bot=bot)
     await env.service.intercept(v1, dialogue_id=1)
     await env.service.intercept(v2, dialogue_id=1)
-    await store.set_ai_turn_content(1, v1.message_id, "уже распознано")  # как до падения
+    await store.set_ai_turn_content(1, v1.message_id, "уже распознано")
     await service.back()
 
     assert await env.returner.run_pass() == 1
@@ -1006,7 +956,7 @@ async def test_return_new_message_during_answer_keeps_chat_queued(env, service, 
     await service.back()
     late = FakeMessage(1, "пока вы отвечали")
 
-    original = ai_handler._ask_and_reply
+    original = ai_reply.ask_and_reply
 
     async def ask_then_message(*args, **kwargs):
         result = await original(*args, **kwargs)
@@ -1014,8 +964,8 @@ async def test_return_new_message_during_answer_keeps_chat_queued(env, service, 
             await service.intercept(late, kind=away.KIND_TEXT, text=late.text, dialogue_id=1)
         return result
 
-    monkeypatch.setattr(ai_handler, "_ask_and_reply", ask_then_message)
-    assert await env.returner.run_pass() == 2  # второй круг — на новое сообщение
+    monkeypatch.setattr(ai_reply, "ask_and_reply", ask_then_message)
+    assert await env.returner.run_pass() == 2
     assert [a["message_id"] for a in env.asked] == [first.message_id, late.message_id]
     assert await service.load() is None
 
@@ -1065,7 +1015,7 @@ async def test_update_state_retries_on_concurrent_change(store):
 
     async def racing_get(key):
         value = await original(key)
-        if calls["n"] == 0:  # между чтением и записью состояние успел сменить «другой процесс»
+        if calls["n"] == 0:
             calls["n"] += 1
             await store.set_state(key, "чужое")
         return value
@@ -1073,9 +1023,6 @@ async def test_update_state_retries_on_concurrent_change(store):
     store.get_state = racing_get
     assert await store.update_state("k", fn) == "чужоеx"
     assert seen == [None, "чужое"]
-
-
-# --------------------------------------------------------------------- CLI
 
 
 def _cli_args(*argv):
@@ -1099,7 +1046,7 @@ async def test_cli_set_extend_status_back_and_notices(tmp_path, capsys):
 
     assert await _run(_cli_args("set", "3h", "--reason", "датасет"), settings) == 0
     assert "в городе до" in capsys.readouterr().out
-    assert await _run(_cli_args("set", "1h"), settings) == 1  # уже в городе
+    assert await _run(_cli_args("set", "1h"), settings) == 1
     assert await _run(_cli_args("extend", "1h"), settings) == 0
     assert await _run(_cli_args("status"), settings) == 0
     out = capsys.readouterr().out
@@ -1114,7 +1061,6 @@ async def test_cli_set_extend_status_back_and_notices(tmp_path, capsys):
         notices = await service.take_notices()
     finally:
         await db.close()
-    # о каждом изменении от Claude бот сообщит владельцу
     assert [n.split(".")[0] for n in notices] == [
         "Claude отправил Альфреда в город",
         "Claude продлил отъезд Альфреда",

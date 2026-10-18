@@ -1,58 +1,23 @@
-"""Константы протокола службы graph_memory — намеренно без единого импорта
-внутри пакета проекта (только строковые литералы), как memory/protocol.py,
-net/protocol.py и tasks/protocol.py.
-
-Живут отдельно от graph_memory/service.py, чтобы bot/tools.py и
-bot/ai_flow.py могли их импортировать, не утягивая саму службу (и тяжёлые
-зависимости graphiti-core/neo4j) в бота.
-"""
-
 from __future__ import annotations
 
 SERVICE_NAME = "graph_memory"
 
-# ОСЛАБЛЕННЫЙ инвариант в отличие от memory.NODE_ID: там нода обязана быть
-# доступна ВСЕГДА (см. memory/protocol.py), здесь — нет. graph_memory пинуется
-# на mycraft, потому что там живёт Neo4j и Ollama (LLM-экстракция/эмбеддинги),
-# а mycraft штатно уходит в suspend при простое GPU. Недоступность этой
-# службы во время сна mycraft — предусмотренная деградация («деградация при
-# недоступности пира», ARCHITECTURE.md §11), не авария: recall_graph_facts
-# (bot/ai_flow.py) в этом случае молча отдаёт [], а обычная память (`memory`,
-# NODE_ID=alfred) продолжает работать как всегда. Не путать эти два NODE_ID.
 NODE_ID = "mycraft"
+
+MAX_EPISODE_CHARS = 400
+EPISODE_TIMEOUT_S = 2.0
 
 ACTION_ADD_EPISODE = "add_episode"
 ACTION_SEARCH = "search"
 ACTION_QUEUE_STATUS = "queue_status"
 
-# Источник эпизода — раздельные константы, чтобы разные piggyback-пути
-# (bot/tools.py, bot/ai_flow.py) не путали свои эпизоды под одним source и
-# чтобы будущий фильтр по episode_source (IMPLEMENTATION_PLAN.md, Этап 42.2,
-# "при необходимости") мог их различить.
 EPISODE_SOURCE_MEMORY_FACT = "memory_fact"
-# Этап 42.2: piggyback поверх завершённого хода /ai (bot/ai_flow.py::
-# piggyback_dialogue_episode) — реплика собеседника + ответ Альфреда.
 EPISODE_SOURCE_DIALOGUE_TURN = "dialogue_turn"
-# Этап 42.2: повторный просмотр фото (bot/tools.py::tool_look_at_photo) —
-# по образцу EPISODE_SOURCE_MEMORY_FACT.
 EPISODE_SOURCE_LOOK_AT_PHOTO = "look_at_photo"
-# Этап 42.2: ссылка (URL), упомянутая в ходе диалога — тот же текст хода,
-# что и EPISODE_SOURCE_DIALOGUE_TURN, но отдельным эпизодом/source, чтобы
-# граф впоследствии мог отвечать "что мы обсуждали по этой ссылке".
 EPISODE_SOURCE_LINK = "link"
-# Этап 42.3: успешный web_search (bot/tools.py::tool_web_search) — сырая
-# выдача SearXNG (запрос + заголовки/выдержки), ради чего изначально и
-# затевалась графовая память (IMPLEMENTATION_PLAN.md, Этап 42.3).
 EPISODE_SOURCE_WEB_SEARCH = "web_search"
-# Этап 48: нарисованная картинка (bot/tools.py::tool_generate_image →
-# bot/image_tools.py::generate) — просьба собеседника и подпись, чтобы граф
-# помнил «что мы рисовали» и отвечал на это без таблицы images.
 EPISODE_SOURCE_IMAGE = "image"
 
-# Этап 54: карточки людей — пол, имя, прозвища по Telegram id. Отдельный
-# общий раздел графа (не str(chat_id)): пол собеседника, сказанный в одном
-# чате, обязан быть известен во всех. Пишутся прямым Cypher, без
-# LLM-экстракции — это утверждение, а не текст для разбора.
 ACTION_PERSON_CLAIM = "person_claim"
 ACTION_PERSON_CARDS = "person_cards"
 PEOPLE_GROUP_ID = "people"
@@ -63,7 +28,5 @@ PERSON_FIELD_ALIAS = "alias"
 GENDER_MALE = "m"
 GENDER_FEMALE = "f"
 
-# Вес утверждения выводит служба из by_id == subject_id: «сам о себе» —
-# сильное, о другом (знакомство проверяет бот до вызова) — слабое.
 CLAIM_STRENGTH_SELF = "self"
 CLAIM_STRENGTH_ACQUAINTANCE = "acquaintance"

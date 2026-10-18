@@ -1,13 +1,3 @@
-"""Адаптер температуры GPU через `nvidia-smi`.
-
-С проприетарным NVIDIA-драйвером `hwmon` температуру не публикует (в отличие
-от `nouveau`) — единственный источник это `nvidia-smi` (живая находка при
-установке Tesla V100 SXM2 на mycraft, см. CLAUDE.md/память). Один вызов
-опрашивает сразу все карты на машине, если их несколько (как было на mycraft,
-пока рядом с Tesla временно стояла RTX 3060) — парсинг вынесен в чистую
-функцию для тестов на фикстурах.
-"""
-
 from __future__ import annotations
 
 import csv
@@ -37,11 +27,6 @@ _QUERY_FIELDS = "index,name,temperature.gpu"
 
 
 def parse_nvidia_smi_csv(output: str, now: datetime) -> list[SensorReading]:
-    """Разобрать `nvidia-smi --query-gpu=index,name,temperature.gpu --format=csv,noheader,nounits`.
-
-    Одна строка на карту. Температура ``[N/A]`` (карта её не отдаёт) —
-    строка пропускается, а не падает со скана остальных.
-    """
     readings: list[SensorReading] = []
     for row in csv.reader(io.StringIO(output)):
         if len(row) < 3:
@@ -66,7 +51,6 @@ def parse_nvidia_smi_csv(output: str, now: datetime) -> list[SensorReading]:
 
 
 def read_gpu_sync(now: datetime) -> list[SensorReading]:
-    """Снять температуры всех GPU (блокирующе, через `nvidia-smi`)."""
     diagnosis = NVIDIA_SMI_REQUIREMENT.diagnose()
     if diagnosis is not RequirementStatus.OK:
         requirements_registry.report(NVIDIA_SMI_REQUIREMENT, diagnosis)
@@ -84,7 +68,7 @@ def read_gpu_sync(now: datetime) -> list[SensorReading]:
             timeout=NVIDIA_SMI_TIMEOUT_S,
             check=True,
         )
-    except Exception as exc:  # noqa: BLE001 — источник опционален
+    except Exception as exc:
         log.warning("nvidia-smi не сработал: %s", exc)
         return []
     requirements_registry.report(NVIDIA_SMI_REQUIREMENT, RequirementStatus.OK)

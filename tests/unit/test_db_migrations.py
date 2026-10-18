@@ -1,11 +1,3 @@
-"""Точечные миграции db/migrations.py, которые не покрыты фактом простого
-"apply_migrations работает" в других тестах: пересоздание
-guest_relationships под CHECK только на 'acquaintance' (Этап 46,
-2026-09-27 — связь между гостями одна, знакомство) и колонка
-pending_actions.welcome_message_id. На живом alfred таблица уже существует
-со старым CHECK и реальными строками — пересоздание обязано их сохранить,
-переписав тип в знакомство."""
-
 from __future__ import annotations
 
 import pytest
@@ -30,9 +22,9 @@ _OLD_TABLE = (
 @pytest.mark.parametrize(
     "check",
     [
-        "'friend', 'acquaintance'",  # 42.6.1
-        "'friend', 'acquaintance', 'family'",  # 42.6.5, alfred v0.112.13
-        "'friend', 'acquaintance', 'family', 'spouse'",  # 42.6.7, alfred v0.113.0
+        "'friend', 'acquaintance'",
+        "'friend', 'acquaintance', 'family'",
+        "'friend', 'acquaintance', 'family', 'spouse'",
     ],
 )
 async def test_guest_relationships_old_types_become_acquaintance(tmp_path, check):
@@ -62,7 +54,6 @@ async def test_guest_relationships_old_types_become_acquaintance(tmp_path, check
     ]
     assert rows[0]["confirmed_at"] == "2026-09-01T00:05:00+00:00"
 
-    # Новый CHECK старые типы больше не принимает.
     with pytest.raises(Exception, match="CHECK"):
         await db.conn.execute(
             "INSERT INTO guest_relationships "
@@ -73,7 +64,6 @@ async def test_guest_relationships_old_types_become_acquaintance(tmp_path, check
 
 
 async def test_pending_actions_gets_welcome_message_id(tmp_path):
-    """Таблица pending_actions v0.113.0 — без welcome_message_id."""
     db = Database(tmp_path / "v113.sqlite")
     await db.open()
     await db.conn.execute(
@@ -95,7 +85,6 @@ async def test_pending_actions_gets_welcome_message_id(tmp_path):
 
     cur = await db.conn.execute("PRAGMA table_info(pending_actions)")
     assert "welcome_message_id" in {r["name"] for r in await cur.fetchall()}
-    # Принятая до Этапа 46 форма поздравления не ждёт — recover() её не тронет.
     store = Store(db)
     assert await store.pending_actions_needing_delivery() == []
     await db.close()
@@ -105,7 +94,7 @@ async def test_apply_migrations_idempotent_acquaintance_only(tmp_path):
     db = Database(tmp_path / "fresh.sqlite")
     await db.open()
     await apply_migrations(db)
-    await apply_migrations(db)  # повторный прогон не должен падать/дублировать
+    await apply_migrations(db)
     cur = await db.conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='guest_relationships'"
     )

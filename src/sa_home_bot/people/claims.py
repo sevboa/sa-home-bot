@@ -1,16 +1,3 @@
-"""Утверждения о человеке и карточка из них (Этап 58) — чистая логика без
-БД, чтобы её проверяли юниты.
-
-Утверждение — «by_id сказал, что у subject_id поле field = value». Хранит их
-таблица ``person_claims`` (db/schema.sql) на alfred.
-
-Правило веса (решение владельца 2026-10-08, этап 54): сказанное человеком о
-себе — сильное, из сильных действует последнее; сказанное знакомым — слабое
-и работает, только пока сам человек не сказал иначе. У владельца особого
-веса нет. Источник (by_id) сохраняется, чтобы Альфред мог ответить «откуда
-знаешь».
-"""
-
 from __future__ import annotations
 
 from datetime import date
@@ -28,15 +15,12 @@ GENDER_FEMALE = "f"
 STRENGTH_SELF = "self"
 STRENGTH_ACQUAINTANCE = "acquaintance"
 
-# Поля с одним итоговым значением; прозвищ — несколько.
 SINGLE_FIELDS = (FIELD_GENDER, FIELD_NAME, FIELD_BIRTH_DATE, FIELD_CITY, FIELD_TIMEZONE)
 FIELDS = (*SINGLE_FIELDS, FIELD_ALIAS)
 MAX_VALUE_CHARS = 64
-# Прозвищ на карточке — не больше этого, свежие вперёд: справка перед
-# каждым ходом не должна разрастаться от болтливого знакомого.
 MAX_ALIASES = 8
 
-_GENDER_WORDS = {
+GENDER_WORDS = {
     GENDER_MALE: GENDER_MALE,
     "male": GENDER_MALE,
     "м": GENDER_MALE,
@@ -55,7 +39,7 @@ Card = dict[str, Any]
 
 
 class ClaimError(ValueError):
-    """Утверждение не прошло проверку — текст годится для ответа модели."""
+    pass
 
 
 def strength_for(subject_id: int, by_id: int) -> str:
@@ -63,7 +47,6 @@ def strength_for(subject_id: int, by_id: int) -> str:
 
 
 def normalize_claim(field: str, value: Any) -> tuple[str, str]:
-    """(field, value) в каноническом виде или ClaimError."""
     field = str(field or "").strip().lower()
     if field not in FIELDS:
         raise ClaimError(f"неизвестное поле {field!r}, есть: {', '.join(FIELDS)}")
@@ -71,7 +54,7 @@ def normalize_claim(field: str, value: Any) -> tuple[str, str]:
     if not text:
         raise ClaimError(f"пустое значение для {field}")
     if field == FIELD_GENDER:
-        gender = _GENDER_WORDS.get(text.lower())
+        gender = GENDER_WORDS.get(text.lower())
         if gender is None:
             raise ClaimError(f"пол — {GENDER_MALE} или {GENDER_FEMALE}, а не {text!r}")
         return field, gender
@@ -93,8 +76,7 @@ def normalize_claim(field: str, value: Any) -> tuple[str, str]:
     return field, text
 
 
-def _pick(claims: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Последнее сильное, иначе последнее слабое."""
+def pick_claim(claims: list[dict[str, Any]]) -> dict[str, Any] | None:
     for strength in (STRENGTH_SELF, STRENGTH_ACQUAINTANCE):
         same = [c for c in claims if c["strength"] == strength]
         if same:
@@ -102,7 +84,7 @@ def _pick(claims: list[dict[str, Any]]) -> dict[str, Any] | None:
     return None
 
 
-def _public(claim: dict[str, Any]) -> dict[str, Any]:
+def public_claim(claim: dict[str, Any]) -> dict[str, Any]:
     return {
         "value": claim["value"],
         "by_id": claim["by_id"],
@@ -111,32 +93,35 @@ def _public(claim: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_cards(claims: list[dict[str, Any]]) -> dict[int, Card]:
-    """Утверждения → карточки по subject_id: на каждое поле из SINGLE_FIELDS
-    итог ({value, by_id, strength, at} или None), ``aliases`` — прозвища,
-    ``names`` — все когда-либо названные имена, свежие вперёд (по ним ищут:
-    человек мог представиться иначе, а знают его по-прежнему).
-
-    Прозвища не вытесняют друг друга, одно значение — одна запись: сильная
-    версия, иначе свежайшая."""
+def group_by_subject(claims: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
     by_subject: dict[int, list[dict[str, Any]]] = {}
     for claim in claims:
         by_subject.setdefault(int(claim["subject_id"]), []).append(claim)
+    return by_subject
+
+
+def picked_claim(own: list[dict[str, Any]], field: str) -> dict[str, Any] | None:
+    picked = pick_claim([c for c in own if c["field"] == field])
+    return public_claim(picked) if picked else None
+
+
+def collect_aliases(own: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    aliases: dict[str, dict[str, Any]] = {}
+    for claim in own:
+        if claim["field"] != FIELD_ALIAS:
+            continue
+        key = claim["value"].casefold()
+        aliases[key] = pick_claim([c for c in (aliases.get(key), claim) if c])  # type: ignore[assignment]
+    return [
+        public_claim(c) for c in sorted(aliases.values(), key=lambda c: c["at"], reverse=True)
+    ][:MAX_ALIASES]
+
+
+def build_cards(claims: list[dict[str, Any]]) -> dict[int, Card]:
     cards: dict[int, Card] = {}
-    for subject_id, own in by_subject.items():
-        card: Card = {}
-        for field in SINGLE_FIELDS:
-            picked = _pick([c for c in own if c["field"] == field])
-            card[field] = _public(picked) if picked else None
-        aliases: dict[str, dict[str, Any]] = {}
-        for claim in own:
-            if claim["field"] != FIELD_ALIAS:
-                continue
-            key = claim["value"].casefold()
-            aliases[key] = _pick([c for c in (aliases.get(key), claim) if c])  # type: ignore[assignment]
-        card["aliases"] = [
-            _public(c) for c in sorted(aliases.values(), key=lambda c: c["at"], reverse=True)
-        ][:MAX_ALIASES]
+    for subject_id, own in group_by_subject(claims).items():
+        card: Card = {field: picked_claim(own, field) for field in SINGLE_FIELDS}
+        card["aliases"] = collect_aliases(own)
         names: list[str] = []
         for claim in sorted(own, key=lambda c: c["at"], reverse=True):
             if claim["field"] == FIELD_NAME and claim["value"] not in names:

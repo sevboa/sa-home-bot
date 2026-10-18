@@ -1,11 +1,10 @@
-"""Супервизия: старт, падение → рестарт → события, ручной стоп, рестарт-команда."""
-
 import asyncio
 import contextlib
 import logging
 
 import pytest
 
+from sa_home_bot.node.assignments import ROLE_STANDBY
 from sa_home_bot.node.supervisor import (
     EVENT_SERVICE_FAILED,
     EVENT_SERVICE_STARTED,
@@ -37,7 +36,6 @@ class Events:
 
 
 def _service(events: Events, code: str, **kw) -> SupervisedService:
-    """Служба-подопытный: python -c "<code>" вместо sa-home-bot."""
     svc = SupervisedService(
         "fake",
         ["-c", code],
@@ -45,13 +43,11 @@ def _service(events: Events, code: str, **kw) -> SupervisedService:
         restart_delay_s=kw.get("restart_delay_s", 0.1),
         stop_timeout_s=kw.get("stop_timeout_s", 5.0),
     )
-    # Подменяем модульный запуск на python -c (см. _run: -m sa_home_bot).
     return svc
 
 
 @pytest.fixture(autouse=True)
 def _patch_module_launch(monkeypatch):
-    """Запускаем python -c <code> вместо python -m sa_home_bot <args>."""
     import sa_home_bot.node.supervisor as sup
 
     real_exec = asyncio.create_subprocess_exec
@@ -68,7 +64,6 @@ async def test_crash_restart_and_events():
     svc = _service(events, "import sys; sys.exit(3)")
     await svc.start()
 
-    # Падает → событие failed → рестарт → снова started.
     await events.wait_for(EVENT_SERVICE_FAILED, count=1)
     await events.wait_for(EVENT_SERVICE_STARTED, count=2)
     assert svc.restarts >= 1
@@ -89,7 +84,6 @@ async def test_long_running_service_stays_up_and_stops_cleanly():
 
     await svc.stop()
     assert svc.status == STOPPED
-    # Ручной стоп — это НЕ падение: failed не эмитился, рестартов нет.
     types = [t for t, _ in events.items]
     assert EVENT_SERVICE_FAILED not in types
     assert svc.restarts == 0
@@ -112,12 +106,10 @@ async def test_restart_command():
 
 async def test_sigkill_after_stop_timeout():
     events = Events()
-    # Служба игнорирует SIGTERM — стоп должен добить SIGKILL'ом за stop_timeout.
     code = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
     svc = _service(events, code, stop_timeout_s=0.5)
     await svc.start()
     await events.wait_for(EVENT_SERVICE_STARTED)
-    # Дать процессу успеть поставить обработчик сигнала.
     await asyncio.sleep(0.5)
 
     async with asyncio.timeout(10):
@@ -125,15 +117,7 @@ async def test_sigkill_after_stop_timeout():
     assert svc.status == STOPPED
 
 
-# --- устойчивость цикла наблюдения к исключениям (фикс 2026-08-08) ---
-
-
 async def test_service_restarts_even_if_emit_raises():
-    """Падение самого emit (например broadcast упавшему клиенту в момент
-    нестабильной сети) не должно убивать наблюдающую задачу навсегда —
-    иначе служба остаётся «ничьей» без единого следа в логе (живой инцидент:
-    telegram-bot@alfred провисел без перезапуска ~20 минут)."""
-
     async def raising_emit(event_type: str, data: dict) -> None:
         raise RuntimeError("нода недоступна прямо сейчас")
 
@@ -147,9 +131,7 @@ async def test_service_restarts_even_if_emit_raises():
         while svc.restarts < 3:
             await asyncio.sleep(0.02)
 
-    assert svc.restarts >= 3  # продолжает падать/перезапускаться, а не молчит
-    # stop() эмитит EVENT_SERVICE_STOPPED сам, вне цикла наблюдения — не
-    # предмет этого теста (тот же raising_emit уронит и его, это ожидаемо).
+    assert svc.restarts >= 3
     with contextlib.suppress(RuntimeError):
         await svc.stop()
 
@@ -170,10 +152,6 @@ async def test_on_spawned_called_on_every_spawn():
 
 
 async def test_on_task_done_logs_unhandled_exception(caplog):
-    """Диагностическая страховка: если _run() всё же умрёт необработанной —
-    это не должно теряться молча (в реальном инциденте не нашлось даже
-    "Task exception was never retrieved" — self._task держит ссылку и
-    не даёт задаче собраться GC)."""
     events = Events()
     svc = SupervisedService("fake", ["-c", "pass"], emit=events.emit)
 
@@ -199,18 +177,43 @@ async def test_supervisor_skips_unknown_assignment():
 
 
 async def test_supervisor_skips_externally_managed_llm_silently():
-    # WSL2 требует интерактивную сессию, которой у Session-0 службы нет
-    # (живая находка 2026-07-23) — супервизор не пытается спавнить "llm",
-    # но это не "неизвестное назначение" (не логируется как ошибка), а
-    # намеренный пропуск: маршрутизация к ней всё равно строится отдельно
-    # в build_router() по тому же списку assignments (node/app.py).
     events = Events()
     sup = Supervisor(["monitor", "llm"], None, emit=events.emit)
     assert list(sup.services) == ["monitor"]
     assert sup.get("llm") is None
 
 
-# --- assign/unassign: назначения в рантайме, без рестарта ноды ---
+def test_supervisor_keys_slots_by_service_and_instance():
+    sup = Supervisor(["telegram-bot@alfred", "telegram-bot@work"], None, emit=Events().emit)
+    assert set(sup.services) == {"telegram-bot@alfred", "telegram-bot@work"}
+
+
+def test_instanced_service_is_spawned_with_its_package():
+    sup = Supervisor(["telegram-bot@alfred"], "/etc/sa/config.toml", emit=Events().emit)
+    args = sup.services["telegram-bot@alfred"]._cli_args
+    assert args == ["--service", "bot", "--instance", "alfred",
+                    "--config", "/etc/sa/config.toml"]
+
+
+async def test_standby_is_not_started_by_node_startup():
+    sup = Supervisor(["telegram-bot@alfred:standby"], None, emit=Events().emit)
+    await sup.start_all()
+    slot = sup.services["telegram-bot@alfred"]
+    assert slot.status == "stopped"
+    assert slot.pid is None
+
+
+def test_malformed_assignment_is_skipped_not_fatal(caplog):
+    sup = Supervisor(["monitor", "@broken"], None, emit=Events().emit)
+    assert set(sup.services) == {"monitor"}
+
+
+def test_slot_dict_exposes_role_and_instance():
+    sup = Supervisor(["telegram-bot@alfred:standby"], None, emit=Events().emit)
+    data = sup.services["telegram-bot@alfred"].to_dict()
+    assert data["service"] == "telegram-bot"
+    assert data["instance"] == "alfred"
+    assert data["role"] == ROLE_STANDBY
 
 
 async def test_assign_adds_service_without_starting_it():
@@ -218,14 +221,14 @@ async def test_assign_adds_service_without_starting_it():
     sup = Supervisor([], None, emit=events.emit)
     svc = sup.assign("apps")
     assert list(sup.services) == ["apps"]
-    assert svc.status == STOPPED  # assign не стартует сама, это отдельный шаг
+    assert svc.status == STOPPED
 
 
 async def test_assign_is_idempotent_returns_same_instance():
     events = Events()
     sup = Supervisor(["monitor"], None, emit=events.emit)
     existing = sup.get("monitor")
-    assert sup.assign("monitor") is existing  # не пересоздаёт уже назначенную
+    assert sup.assign("monitor") is existing
 
 
 def test_assign_unknown_name_raises():
@@ -246,10 +249,7 @@ async def test_unassign_removes_and_stops_service():
 async def test_unassign_unknown_name_is_noop():
     events = Events()
     sup = Supervisor([], None, emit=events.emit)
-    await sup.unassign("no-such-service")  # не бросает
-
-
-# --- Windows-специфика: process group при спавне, CTRL_BREAK вместо terminate ---
+    await sup.unassign("no-such-service")
 
 
 def test_spawn_kwargs_empty_on_linux():

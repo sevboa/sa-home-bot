@@ -1,10 +1,3 @@
-"""Ядро reconciliation: срез датчиков + известное состояние из БД → diff.
-
-Здесь же реализован анти-дребезг (гистерезис): переход фиксируется только если
-показание держится в нужной зоне N подряд снятых срезов. Чистые функции, без БД,
-сети и aiogram — тестируются изолированно.
-"""
-
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -12,11 +5,7 @@ from datetime import datetime
 
 from sa_home_bot.domain.hysteresis import reconcile_band
 from sa_home_bot.domain.models import (
-    ALERTING,
-    EVENT_OVERHEAT_CLEARED,
-    EVENT_OVERHEAT_STARTED,
     OK,
-    Event,
     HealthDiff,
     HealthState,
     KnownState,
@@ -77,7 +66,6 @@ def compute_health_diff(
     resolve_policy: PolicyResolver,
     now: datetime,
 ) -> HealthDiff:
-    """Сравнить срез показаний с известным состоянием, вернуть новый срез + переходы."""
     states: list[HealthState] = []
     transitions: list[Transition] = []
     for reading in current:
@@ -89,26 +77,3 @@ def compute_health_diff(
         if transition is not None:
             transitions.append(transition)
     return HealthDiff(states=states, transitions=transitions)
-
-
-def classify_events(transitions: list[Transition]) -> list[Event]:
-    """Превратить переходы в события для рассылки."""
-    events: list[Event] = []
-    for tr in transitions:
-        if tr.from_status == OK and tr.to_status == ALERTING:
-            event_type = EVENT_OVERHEAT_STARTED
-        elif tr.from_status == ALERTING and tr.to_status == OK:
-            event_type = EVENT_OVERHEAT_CLEARED
-        else:
-            continue
-        events.append(
-            Event(
-                type=event_type,
-                component_id=tr.component_id,
-                kind=tr.kind,
-                label=tr.label,
-                temperature_c=tr.temperature_c,
-                at=tr.at,
-            )
-        )
-    return events

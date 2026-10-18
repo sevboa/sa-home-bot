@@ -1,5 +1,3 @@
-"""Присоединение к рою по токену (этап 18): swarm_join/join, замыкание сетки."""
-
 import shutil
 import tempfile
 from pathlib import Path
@@ -12,6 +10,7 @@ from sa_home_bot.node.app import (
     _relay_peer_event,
     build_router,
     make_link_factories,
+    peer_candidates,
     peer_kinds,
 )
 from sa_home_bot.node.peers import NodeRouter, PeerLink
@@ -31,13 +30,10 @@ def _bare_service(**kw) -> NodeService:
     return NodeService(sup, **kw)
 
 
-# --- _swarm_join: валидация (без реальной сети — свои проверки) ---
-
-
 async def test_swarm_join_requires_node_id_and_endpoint():
     svc = _bare_service(own_endpoint="tcp://a:8710")
     with pytest.raises(ProtoError) as exc_info:
-        await svc.run_command("swarm_join", {"node_id": "b"})  # нет endpoint
+        await svc.run_command("swarm_join", {"node_id": "b"})
     assert exc_info.value.code == "bad_request"
 
 
@@ -65,9 +61,6 @@ async def test_join_requires_endpoint():
     with pytest.raises(ProtoError) as exc_info:
         await svc.run_command("join", {})
     assert exc_info.value.code == "bad_request"
-
-
-# --- Реальный round-trip: две ноды, unix-сокеты, без токена ---
 
 
 @pytest.fixture
@@ -118,10 +111,8 @@ async def test_join_connects_both_directions_and_persists(two_nodes):
     result = await svc_b.join(str(a_listen))
     assert result["peers_added"] == ["A"]
 
-    # B знает A напрямую (только что присоединился).
     assert "A" in router_b.peers
     assert NodeState.load(path_b).peers[0].id == "A"
-    # A тоже узнал B (swarm_join регистрирует пришедшего).
     assert "B" in router_a.peers
     assert NodeState.load(path_a).peers[0].id == "B"
 
@@ -141,11 +132,8 @@ async def test_swarm_join_idempotent_second_call_same_endpoint(two_nodes):
 
     await svc_b.join(str(a_listen))
     first_link = router_a.peers["B"]
-    await svc_b.join(str(a_listen))  # повторно — тот же endpoint
-    assert router_a.peers["B"] is first_link  # не пересоздан
-
-
-# --- Замыкание сетки: node_joined от пира → авто-подключение (_relay_peer_event) ---
+    await svc_b.join(str(a_listen))
+    assert router_a.peers["B"] is first_link
 
 
 async def test_relay_peer_event_auto_adds_new_peer(tmp_path):
@@ -154,7 +142,7 @@ async def test_relay_peer_event_auto_adds_new_peer(tmp_path):
 
     async def fake_add_peer(link: PeerLink) -> None:
         added.append((link.name, str(link.endpoint)))
-        router.peers[link.name] = link  # без реальной сети
+        router.peers[link.name] = link
 
     router.add_peer = fake_add_peer  # type: ignore[method-assign]
 
@@ -184,12 +172,12 @@ async def test_relay_peer_event_auto_adds_new_peer(tmp_path):
 async def test_relay_peer_event_ignores_own_echo():
     router = NodeRouter("A")
     calls = []
-    router.add_peer = lambda link: calls.append(link)  # не должно вызваться
+    router.add_peer = lambda link: calls.append(link)
 
     env = make_event(
         "node_joined",
         {"node_id": "C", "endpoint": "tcp://c:8710"},
-        src=Address(node="A", service="node"),  # эхо самой себя
+        src=Address(node="A", service="node"),
     )
     await _relay_peer_event(
         env,
@@ -205,13 +193,6 @@ async def test_relay_peer_event_ignores_own_echo():
 
 
 async def test_relay_peer_event_local_service_same_node_id_is_not_echo():
-    """Живой баг на проде 2026-07-24: событие локальной службы (tasks на
-    ноде alfred) репортует src.node == "alfred" — тот же id, что и у самой
-    ноды-маршрутизатора (не потому что это эхо, а потому что служба и нода
-    физически один и тот же узел). Без is_local=True это неотличимо от
-    "моё же событие вернулось от соседа" и молча дропалось — task_result
-    никогда не доходил до бота (см. tasks-service-redesign, TASK_KIND_LLM_CHAT
-    молчаливо терялся). is_local=True обязан пропустить его дальше."""
     router = NodeRouter("alfred")
     broadcasts: list[str] = []
 
@@ -222,7 +203,7 @@ async def test_relay_peer_event_local_service_same_node_id_is_not_echo():
     env = make_event(
         "task_result",
         {"task_id": 1, "ok": True},
-        src=Address(node="alfred", service="tasks"),  # локальная служба, НЕ эхо
+        src=Address(node="alfred", service="tasks"),
     )
     await _relay_peer_event(
         env,
@@ -235,12 +216,10 @@ async def test_relay_peer_event_local_service_same_node_id_is_not_echo():
         seen=SeenEvents(),
         is_local=True,
     )
-    assert broadcasts == [env.id]  # не дропнуто
+    assert broadcasts == [env.id]
 
 
 async def test_relay_peer_event_peer_same_node_id_still_treated_as_echo():
-    # Тот же env, но is_local=False (по умолчанию, как для реальных пиров)
-    # — эхо-проверка должна сработать как раньше, ничего не сломано.
     router = NodeRouter("alfred")
 
     class _FakeServer:
@@ -261,7 +240,7 @@ async def test_relay_peer_event_peer_same_node_id_still_treated_as_echo():
         make_peer_link=PeerLink,
         server=_FakeServer(),
         seen=SeenEvents(),
-    )  # is_local не передан — default False
+    )
 
 
 async def test_build_router_wires_local_services_to_on_local_event():
@@ -286,15 +265,10 @@ def test_peer_kinds_state_wins_over_toml():
     nodes = [SwarmNodeConfig(id="jeeves", endpoint="tcp://a:8710", kind="server")]
     extra = [SwarmNodeConfig(id="jeeves", endpoint="tcp://a:8710", kind="vps")]
     assert peer_kinds(nodes, extra) == {"jeeves": "vps"}
-    # пустой тип не попадает в карту — фолбэка нет, будить неоткуда
     assert peer_kinds([SwarmNodeConfig(id="x", endpoint="tcp://b:8710")], []) == {}
 
 
 async def test_build_router_seeds_peer_kind_from_persistent_state():
-    """Тип недоступного соседа известен сразу после рестарта своей ноды —
-    из персистентного состояния (его туда пишет PresenceWatcher). Без этого
-    сводка роя путает пропавший сервер/VDS с уснувшей рабочей станцией,
-    пока сосед не пришлёт hello."""
     settings = Settings()
     make_peer_link, make_local_link = make_link_factories(
         settings, "alfred", lambda e: None, lambda e: None
@@ -302,15 +276,10 @@ async def test_build_router_seeds_peer_kind_from_persistent_state():
     extra = [SwarmNodeConfig(id="jeeves", endpoint="tcp://z:8710", kind="vps")]
     router = build_router(settings, "alfred", [], extra, make_peer_link, make_local_link)
     assert router.peers["jeeves"].node_kind == "vps"
-    # тот же тип виден в presence-срезе, который читает бот через get_state
     assert router.peers_state()[0]["kind"] == "vps"
 
 
 async def test_link_factories_wire_events_and_identity():
-    """Фабрики — единственный источник правды: пир получает on_peer_event и
-    self_node (представление в auth), локальная служба — on_local_event.
-    Живой баг (аудит 2026-07-28): динамические линки из node/service.py
-    собирались без того и другого — события терялись до рестарта ноды."""
     settings = Settings()
 
     def on_peer_event(e):
@@ -331,8 +300,6 @@ async def test_link_factories_wire_events_and_identity():
 
 
 async def test_swarm_join_and_join_use_peer_link_factory(two_nodes):
-    """Динамические линки (join с обеих сторон) обязаны собираться фабрикой —
-    иначе присоединившаяся нода глуха к событиям роя до своего рестарта."""
     router_a, _, _, svc_a, _, a_listen = two_nodes["a"]
     router_b, _, _, svc_b, _, _ = two_nodes["b"]
 
@@ -353,14 +320,13 @@ async def test_swarm_join_and_join_use_peer_link_factory(two_nodes):
     )
 
     await svc_b.join(str(a_listen))
-    # Обе стороны собрали линк своей фабрикой: on_event на месте.
     assert router_b.peers["A"]._on_event is on_peer_event_b
     assert router_a.peers["B"]._on_event is on_peer_event_a
 
 
 async def test_relay_peer_event_skips_already_known_peer():
     router = NodeRouter("B")
-    router.peers["C"] = PeerLink("C", "tcp://c:8710")  # уже известен
+    router.peers["C"] = PeerLink("C", "tcp://c:8710")
     calls = []
     router.add_peer = lambda link: calls.append(link)
 
@@ -379,16 +345,10 @@ async def test_relay_peer_event_skips_already_known_peer():
         server=None,
         seen=SeenEvents(),
     )
-    assert calls == []  # уже в router.peers — не трогаем
-
-
-# --- Дедуп ретрансляции: живой инцидент 2026-07-17, шторм в связном рое ---
+    assert calls == []
 
 
 async def test_relay_peer_event_deduplicates_by_envelope_id():
-    """В полносвязном рое одно событие приходит несколькими путями —
-    вторая (и дальнейшие) копия ТОГО ЖЕ env.id не должна ретранслироваться
-    заново, иначе это лавина (см. SeenEvents docstring)."""
     router = NodeRouter("B")
     broadcasts: list[str] = []
 
@@ -402,7 +362,7 @@ async def test_relay_peer_event_deduplicates_by_envelope_id():
         src=Address(node="A", service="node"),
     )
     seen = SeenEvents()
-    for _ in range(3):  # три "копии" одного и того же события (разные пути)
+    for _ in range(3):
         await _relay_peer_event(
             env,
             node_id="B",
@@ -414,7 +374,7 @@ async def test_relay_peer_event_deduplicates_by_envelope_id():
             seen=seen,
         )
 
-    assert broadcasts == [env.id]  # разослано ровно один раз
+    assert broadcasts == [env.id]
 
 
 async def test_seen_events_bounded_size():
@@ -423,6 +383,92 @@ async def test_seen_events_bounded_size():
     seen = _SeenEvents(maxsize=3)
     for i in range(5):
         assert seen.seen(f"id{i}") is False
-    # старые id вытеснены — id0/id1 больше не считаются виденными
     assert seen.seen("id0") is False
-    assert seen.seen("id4") is True  # свежий всё ещё в наборе
+    assert seen.seen("id4") is True
+
+
+def test_адреса_пира_берутся_из_состояния_вперёд_конфига():
+    toml = [SwarmNodeConfig(id="winpc", endpoint="tcp://100.78.225.83:8710")]
+    state = [
+        SwarmNodeConfig(
+            id="winpc",
+            endpoint="tcp://192.168.0.105:8710",
+            endpoints=["tcp://100.78.225.83:8710"],
+        )
+    ]
+    assert peer_candidates(toml, state) == {
+        "winpc": ["tcp://192.168.0.105:8710", "tcp://100.78.225.83:8710"]
+    }
+
+
+def test_пир_только_из_конфига_работает_как_раньше():
+    toml = [SwarmNodeConfig(id="winpc", endpoint="tcp://100.78.225.83:8710")]
+    assert peer_candidates(toml, []) == {"winpc": ["tcp://100.78.225.83:8710"]}
+
+
+def _service(**kw) -> NodeService:
+    return NodeService(Supervisor([], None, emit=_emit), node_id="alfred", **kw)
+
+
+def test_нода_называет_рою_то_что_реально_слушает():
+    live = ["tcp://192.168.0.100:8710"]
+    svc = _service(own_endpoint="tcp://100.73.52.92:8710", advertise=lambda: list(live))
+    assert svc.describe().info.endpoints == ("tcp://192.168.0.100:8710",)
+    live.append("tcp://100.73.52.92:8710")
+    assert len(svc.describe().info.endpoints) == 2
+
+
+def test_без_живого_списка_объявляется_настроенный_адрес():
+    svc = _service(own_endpoint="tcp://100.73.52.92:8710", advertise=lambda: [])
+    assert svc.describe().info.endpoints == ("tcp://100.73.52.92:8710",)
+
+
+async def test_swarm_join_возит_все_адреса_обеих_сторон():
+    router = NodeRouter("alfred")
+    created: list[tuple[str, list[str]]] = []
+
+    async def fake_add_peer(link: PeerLink) -> None:
+        created.append((link.name, link.endpoints))
+        router.peers[link.name] = link
+
+    router.add_peer = fake_add_peer  # type: ignore[method-assign]
+    svc = NodeService(
+        Supervisor([], None, emit=_emit),
+        router,
+        node_id="alfred",
+        own_endpoint="tcp://100.73.52.92:8710",
+        advertise=lambda: ["tcp://192.168.0.100:8710", "tcp://100.73.52.92:8710"],
+    )
+
+    result = await svc.run_command(
+        "swarm_join",
+        {
+            "node_id": "winpc",
+            "endpoint": "tcp://192.168.0.105:8710",
+            "endpoints": ["tcp://192.168.0.105:8710", "tcp://100.78.225.83:8710"],
+        },
+    )
+
+    assert created == [
+        ("winpc", ["tcp://192.168.0.105:8710", "tcp://100.78.225.83:8710"])
+    ]
+    assert result["peers"][0]["endpoints"] == [
+        "tcp://192.168.0.100:8710",
+        "tcp://100.73.52.92:8710",
+    ]
+
+
+async def test_swarm_join_от_ноды_старой_версии_работает_как_раньше():
+    router = NodeRouter("alfred")
+    created: list[list[str]] = []
+
+    async def fake_add_peer(link: PeerLink) -> None:
+        created.append(link.endpoints)
+        router.peers[link.name] = link
+
+    router.add_peer = fake_add_peer  # type: ignore[method-assign]
+    svc = NodeService(
+        Supervisor([], None, emit=_emit), router, node_id="alfred", own_endpoint="tcp://a:8710"
+    )
+    await svc.run_command("swarm_join", {"node_id": "winpc", "endpoint": "tcp://old:8710"})
+    assert created == [["tcp://old:8710"]]

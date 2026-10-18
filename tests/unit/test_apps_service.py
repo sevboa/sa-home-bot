@@ -1,6 +1,3 @@
-"""Служба apps: describe из конфига, состояние юнитов, карточка по command,
-управление start/stop/restart юнита."""
-
 import pytest
 
 from sa_home_bot.apps import service as apps_service
@@ -42,9 +39,7 @@ def test_describe_declares_app_and_manage_actions():
     assert desc.capabilities == ("qbittorrent", "jellyfin")
     ids = [a.id for a in desc.actions]
     assert ids == ["qbittorrent", "jellyfin", "start", "stop", "restart"]
-    # Персональные карточки-действия — без параметров, как раньше.
     assert desc.find_action("qbittorrent").params == ()
-    # Управляющие действия — общий параметр name с choices = id приложений.
     for action in ("start", "stop", "restart"):
         spec = desc.find_action(action)
         assert spec.params[0].name == "name"
@@ -59,10 +54,6 @@ async def test_get_state_reports_all_apps(fake_status):
     assert by_id["jellyfin"]["status"] == "inactive"
 
 
-# --- {lan_ip} в url: адрес ноды уже "уезжал" дважды (IMPLEMENTATION_PLAN.md,
-# этап 31), хардкодить его в конфиге не годится ---
-
-
 def test_resolve_urls_substitutes_lan_ip(monkeypatch):
     monkeypatch.setattr(apps_service, "local_lan_ipv4_address", lambda: "192.168.0.102")
     resolved = apps_service._resolve_urls(
@@ -72,8 +63,6 @@ def test_resolve_urls_substitutes_lan_ip(monkeypatch):
 
 
 def test_resolve_urls_drops_placeholder_without_lan_ip(monkeypatch):
-    # Нет LAN-интерфейса (напр. только tailscale) — лучше не показать ссылку
-    # вовсе, чем показать битую "http://{lan_ip}:8080".
     monkeypatch.setattr(apps_service, "local_lan_ipv4_address", lambda: None)
     resolved = apps_service._resolve_urls(
         ["http://{lan_ip}:8080", "http://alfred.tail61d88b.ts.net:8080"]
@@ -111,9 +100,6 @@ async def test_command_unknown_app_raises(fake_status):
         await AppsService(_settings()).run_command("nope", {})
 
 
-# --- start/stop/restart: реальное управление юнитом ---
-
-
 async def test_manage_action_unknown_name_raises_bad_request(fake_status):
     with pytest.raises(ProtoError):
         await AppsService(_settings()).run_command("start", {"name": "nope"})
@@ -130,7 +116,7 @@ async def test_manage_action_success_returns_fresh_card(fake_status, monkeypatch
 
     assert calls == [("restart", "jellyfin.service")]
     assert result["id"] == "jellyfin"
-    assert result["status"] == "inactive"  # свежая карточка, взята из fake_status
+    assert result["status"] == "inactive"
 
 
 async def test_run_systemctl_permission_denied_raises_needs_privilege(monkeypatch):
@@ -179,4 +165,4 @@ async def test_run_systemctl_success_no_raise(monkeypatch):
         return FakeProc()
 
     monkeypatch.setattr(apps_service.asyncio, "create_subprocess_exec", fake_exec)
-    await apps_service._run_systemctl("stop", "jellyfin.service")  # не бросает
+    await apps_service._run_systemctl("stop", "jellyfin.service")

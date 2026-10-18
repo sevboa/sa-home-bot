@@ -1,5 +1,3 @@
-"""Тесты sealed box для бэкапов (backup/sealed.py, backup_cli.py)."""
-
 from __future__ import annotations
 
 import argparse
@@ -92,7 +90,7 @@ def test_keygen_cli(tmp_path, capsys):
     printed = capsys.readouterr().out
     assert sealed.dump_key(sealed.public_from_private(priv)) in printed
     assert sealed.dump_key(priv) not in printed
-    assert args._run(args) == 1  # не затирает
+    assert args._run(args) == 1
 
 
 def test_config_defaults_and_section(tmp_path):

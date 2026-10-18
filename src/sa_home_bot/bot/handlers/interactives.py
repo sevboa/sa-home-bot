@@ -1,10 +1,3 @@
-"""Кнопки интерактивов и тумблер /interactives (Этап 47, bot/interactives).
-
-callback_data «ia:<сценарий>:<кнопка>» несёт только сценарий и кнопку —
-состояние сцены в app_state бота. Права проверяет Interactives.handle_click
-по from_user.id (форма — только тому гостю, чья сцена), а не по чату.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -16,7 +9,7 @@ from aiogram.types import CallbackQuery, Message
 
 from sa_home_bot.bot import commands
 from sa_home_bot.bot.away import AwayService
-from sa_home_bot.bot.interactives import engine
+from sa_home_bot.bot.interactives import keyboards
 from sa_home_bot.bot.interactives.engine import Interactives
 
 log = logging.getLogger(__name__)
@@ -24,19 +17,18 @@ log = logging.getLogger(__name__)
 router = Router(name="interactives")
 
 
-@router.callback_query(F.data.startswith(f"{engine.CALLBACK_PREFIX}:"))
+@router.callback_query(F.data.startswith(f"{keyboards.CALLBACK_PREFIX}:"))
 async def cb_interactive(
     callback: CallbackQuery,
     interactives: Interactives | None = None,
     away: AwayService | None = None,
 ) -> None:
-    # Этап 51: пока Альфред в городе, сцены не продолжаем (ведущий — это модель).
     if away is not None:
         note = await away.note_for_click()
         if note is not None:
             await callback.answer(note, show_alert=True)
             return
-    parsed = engine.parse_callback(callback.data)
+    parsed = keyboards.parse_callback(callback.data)
     message = callback.message
     if (
         parsed is None
@@ -56,7 +48,7 @@ async def cb_interactive(
         message_id=message.message_id,
         message_thread_id=getattr(message, "message_thread_id", None),
     )
-    alert = button == engine.BTN_EXIT
+    alert = button == keyboards.BTN_EXIT
     await callback.answer(answer, show_alert=alert)
     try:
         if new_text is not None:
@@ -64,8 +56,6 @@ async def cb_interactive(
         elif drop_keyboard:
             await message.edit_reply_markup(reply_markup=None)
     except TelegramBadRequest as exc:
-        # «message is not modified», удалённое сообщение и т.п. — итог уже
-        # записан в app_state, правка формы лишь косметика.
         log.info("interactives: форму не поправить (chat=%s): %s", message.chat.id, exc)
 
 
@@ -78,8 +68,6 @@ async def cmd_interactives(
     arg = (command.args or "").strip().lower()
     chat_id = message.chat.id
     user_id = message.from_user.id if message.from_user is not None else None
-    # Отладка Этапа 59 (скрытые подкоманды, только канарейкам; прочие уходят
-    # дальше и получают прежнее «Использование»).
     words = arg.split()
     if words and words[0] in ("cellar", "reset", "where") and interactives.canary_ok(user_id):
         assert user_id is not None
@@ -95,13 +83,13 @@ async def cmd_interactives(
         return
     if arg in ("off", "выкл", "нет"):
         await interactives.set_opted_out(chat_id, True)
-        await message.answer(engine.OPT_OUT_TEXT)
+        await message.answer(keyboards.OPT_OUT_TEXT)
         return
     if arg in ("", "on", "вкл", "да"):
         if arg == "" and not await interactives.is_opted_out(chat_id):
             await message.answer("Интерактивы в этом чате включены. Выключить — /interactives off.")
             return
         await interactives.set_opted_out(chat_id, False)
-        await message.answer(engine.OPT_IN_TEXT)
+        await message.answer(keyboards.OPT_IN_TEXT)
         return
     await message.answer("Использование: /interactives on | off")

@@ -1,13 +1,3 @@
-"""ServiceLink — подключение бота к локальной службе (monitor, node) по протоколу.
-
-Одно подключение на службу. Обрыв не валит бота: фоновая задача
-переподключается с паузой, а запросы в этот момент получают
-ServiceUnavailableError — хендлеры отвечают человеку «служба недоступна».
-Pending-алерты монитор досылает сам (у него handled=False, пока не было ни
-одного клиента). После каждого подключения кэшируется describe — из него
-фронтенд строит кнопки действий, даже если служба сейчас недоступна.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -19,24 +9,18 @@ from typing import Any
 
 from sa_home_bot.proto.client import EventCallback, ProtoClient
 from sa_home_bot.proto.endpoints import Endpoint, parse_endpoint
+from sa_home_bot.proto.errors import ServiceUnavailableError
 from sa_home_bot.proto.messages import ActionSpec, Address, ProtoError, ServiceDescription
+from sa_home_bot.utils.lifespan import cancel_task
 
 log = logging.getLogger(__name__)
 
 RECONNECT_DELAY_S = 5.0
-
-
-class ServiceUnavailableError(RuntimeError):
-    """Нет живого соединения со службой."""
+_LINK_ERRORS = (ConnectionError, OSError, TimeoutError, ProtoError)
 
 
 class ServiceTimeoutError(ServiceUnavailableError):
-    """Соединение есть, но ответа на запрос не дождались.
-
-    Подкласс — чтобы все, кто ловит ServiceUnavailableError, вели себя как
-    раньше; отдельно его различает только тот, кому важно, что повтор
-    запроса тут не поможет (см. llm_chat.py::_call_chat_with_retry).
-    """
+    pass
 
 
 class ServiceLink:
@@ -64,26 +48,12 @@ class ServiceLink:
     def connected(self) -> bool:
         return self._client is not None
 
-    @property
-    def cached_description(self) -> ServiceDescription | None:
-        """describe с последнего подключения (None, если ещё не подключались)."""
-        return self._description
-
     async def start(self) -> None:
-        self._task = asyncio.create_task(
-            self._run(), name=f"service-link-{self.display_name}"
-        )
+        self._task = asyncio.create_task(self._run(), name=f"service-link-{self.display_name}")
 
     async def stop(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
-
-    # --- Запросы к службе ---
+        await cancel_task(self._task)
+        self._task = None
 
     async def get_state(self, dst: Address | None = None) -> dict[str, Any]:
         client = self._require_client()
@@ -109,39 +79,28 @@ class ServiceLink:
             raise ServiceUnavailableError(str(exc)) from exc
 
     async def describe(self, dst: Address | None = None) -> ServiceDescription | None:
-        """describe «в моменте», без кэша — для запроса к чужой ноде (dst).
-
-        Своя служба обычно обходится кэширующим `.actions()`; это — для
-        случая, когда describe нужен именно сейчас и именно с этим dst
-        (карточка/действия пира).
-        """
         client = self._client
         if client is None:
             return None
         try:
             return await client.describe(dst=dst)
-        except (ConnectionError, OSError, TimeoutError, ProtoError):
+        except _LINK_ERRORS:
             return None
 
     async def actions(self) -> tuple[ActionSpec, ...]:
-        """Действия своей службы: живой describe, при недоступности — кэш или пусто."""
         client = self._client
         if client is not None:
             try:
                 self._description = await client.describe()
-            except (ConnectionError, OSError, TimeoutError, ProtoError):
+            except _LINK_ERRORS:
                 pass
         return self._description.actions if self._description is not None else ()
 
     def _require_client(self) -> ProtoClient:
         client = self._client
         if client is None:
-            raise ServiceUnavailableError(
-                f"нет соединения: {self.display_name} ({self._endpoint})"
-            )
+            raise ServiceUnavailableError(f"нет соединения: {self.display_name} ({self._endpoint})")
         return client
-
-    # --- Фоновое переподключение ---
 
     async def _run(self) -> None:
         logged_down = False
@@ -166,10 +125,9 @@ class ServiceLink:
                 logged_down = False
                 self._client = client
                 if self._on_connected is not None:
-                    # Свежий describe уже в кэше — подписчик может перестроить UI.
                     try:
                         await self._on_connected()
-                    except Exception:  # noqa: BLE001 — хук не должен рвать соединение
+                    except Exception:
                         log.warning(
                             "Ошибка on_connected-хука службы %s",
                             self.display_name,
@@ -179,10 +137,8 @@ class ServiceLink:
                     await client.join()
                 finally:
                     self._client = None
-                log.warning(
-                    "Связь со службой %s потеряна, переподключение...", self.display_name
-                )
-            except (ConnectionError, OSError, TimeoutError, ProtoError) as exc:
+                log.warning("Связь со службой %s потеряна, переподключение...", self.display_name)
+            except _LINK_ERRORS as exc:
                 if not logged_down:
                     log.warning(
                         "Служба %s недоступна (%s) — переподключение каждые %.0f с",

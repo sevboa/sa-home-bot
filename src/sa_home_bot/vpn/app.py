@@ -1,14 +1,3 @@
-"""Сборка и жизненный цикл службы vpn (отдельный процесс, обычно на jeeves).
-
-По образцу tasks/app.py: proto-сервер поверх VpnService плюс своя БД (общая
-схема проекта). Фоновый цикл — сэмплер трафика (usage_loop). При старте
-пробуем один раз свести интерфейс с БД (reconcile) — после рестарта jeeves
-awg0 пуст, а БД помнит всех активных пиров; неудача (sudoers ещё не
-поставлен через ``nodectl fix``) не должна мешать службе подняться —
-`get_state`/`describe` и хотя бы `issue` дальше сработают попыткой, а
-диагноз ``ERR_NEEDS_PRIVILEGE`` объяснит, что делать.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -20,6 +9,7 @@ from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
+from sa_home_bot.proto.emitter import DeferredEmitter
 from sa_home_bot.proto.messages import Address
 from sa_home_bot.proto.server import ProtoServer
 from sa_home_bot.reality.xray import RealXrayBackend
@@ -40,8 +30,6 @@ async def run_vpn(settings: Settings) -> None:
     transports = settings.vpn.transports or [TRANSPORT_AWG]
     awg_on = TRANSPORT_AWG in transports
 
-    # AwgBackend конструируется без побочных эффектов (хранит имя интерфейса);
-    # реально к `awg` служба ходит только когда awg среди транспортов ноды.
     backend = RealAwgBackend(settings.vpn.interface)
 
     reality_backend = None
@@ -58,24 +46,15 @@ async def run_vpn(settings: Settings) -> None:
                 settings.vpn.reality.port,
             )
 
-    # Клиент к своей же локальной ноде — для рассылки проверок доступности
-    # (vpn/service.py::_dispatch_checks → node/service.py::ACTION_TRIGGER_PEERS
-    # → vpn_check на нодах из [vpn].check_nodes).
     node_link = ServiceLink(
         settings.node.socket, token=settings.swarm.token, display_name="нода (vpn)"
     )
     await node_link.start()
 
-    server: ProtoServer | None = None
-
-    async def emit(event_type: str, data: dict) -> None:
-        if server is not None:
-            await server.broadcast_event(event_type, data)
-
+    emitter = DeferredEmitter()
     service = VpnService(
-        settings, db, backend, emit, node_link=node_link, reality_backend=reality_backend
+        settings, db, backend, emitter, node_link=node_link, reality_backend=reality_backend
     )
-    # Бэкап снапшота БД у напарника (39.0.8(c)): выключен без [backup].partner.
     partner = settings.backup.partner.strip()
 
     async def ask_partner(action: str, args: dict) -> dict:
@@ -87,12 +66,9 @@ async def run_vpn(settings: Settings) -> None:
     if service.backup is not None:
         await service.backup.start()
     await service.backfill_server()
-    # Строго до reconcile ниже: иначе первый же реконсайл снял бы с интерфейса
-    # пиры всех, кому допуск ещё не проставлен.
     await service.backfill_access()
     server = ProtoServer(settings.vpn.socket, service, token=settings.swarm.token)
-    # Обработчики сигналов — до start(): он ждёт появления своего адреса
-    # (см. proto/server.py), и всё это время остановка иначе не обрабатывалась бы.
+    emitter.bind(server)
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
     await server.start()
@@ -102,8 +78,6 @@ async def run_vpn(settings: Settings) -> None:
     with contextlib.suppress(Exception):
         await service.check_restore()
 
-    # Подписка Hiddify и https-страница (57.10). Не вышло поднять — служба
-    # живёт без неё (get_subscription вернёт понятную ошибку).
     sub_web: SubscriptionWeb | None = None
     if reality_backend is not None and settings.vpn.sub_port > 0:
         sub_web = SubscriptionWeb(settings.vpn, service.resolve_subscription, service.web_issue_awg)
@@ -114,8 +88,6 @@ async def run_vpn(settings: Settings) -> None:
             log.exception("vpn: страница подписки не запустилась")
 
     usage_task = asyncio.create_task(service.usage_loop(), name="vpn-usage-loop")
-    # Проверки доступности (vpn_check) — только для awg-нод: у reality-only
-    # ноды нет netns-пробника AmneziaWG.
     tasks = [usage_task]
     if awg_on:
         tasks.append(asyncio.create_task(service.check_loop(), name="vpn-check-loop"))

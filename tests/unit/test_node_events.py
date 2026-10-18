@@ -1,17 +1,9 @@
-"""bot/node_events.py: node_joined/update_finished → системное уведомление,
-llm_idle_sleep/llm_service_restart/task_prewake/task_result → адресное
-сообщение в конкретные чаты (последние два — от службы tasks, генерализация
-2026-07-24 старого напоминания в отдельный сервис отложенных задач),
-llm_speech_cured → буквально всем подпискам (broadcast_all, не через
-event_types opt-in — Логопед долечил Альфреда, должны узнать все, включая
-гостей)."""
-
 from unittest.mock import ANY
 
 import pytest
 from aiogram.types import InputRichBlockThinking
 
-from sa_home_bot.bot.ai_flow import (
+from sa_home_bot.bot.ai_lines import (
     ALBERT_ASLEEP,
     ALBERT_ASLEEP_MD,
     ALBERT_TASK_MISSED,
@@ -26,7 +18,6 @@ from sa_home_bot.bot.ai_flow import (
     STEPS_TEXT_PLAIN,
 )
 from sa_home_bot.bot.node_events import (
-    EVENT_RESTART_APPLIED,
     TaskRichSessions,
     _handle_task_result,
     build_close_ssh_keyboard,
@@ -42,16 +33,15 @@ from sa_home_bot.bot.node_events import (
 from sa_home_bot.bot.rich_stream import ALFRED_PREFIX_MD
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import Settings, SubscriptionConfig
+from sa_home_bot.node.events import EVENT_RESTART_APPLIED
 from sa_home_bot.proto.messages import Address, make_event
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.tasks import protocol as task_protocol
+from tests.unit.support.fakes import FakeNotifier as SupportNotifier
 
 
 class FakeBot:
-    """Тот же двойник, что и tests/unit/test_rich_stream.py::FakeBot —
-    свой экземпляр здесь, чтобы не тянуть тестовый модуль как зависимость."""
-
     def __init__(self) -> None:
         self.drafts: list[dict] = []
         self.sent: list[dict] = []
@@ -87,31 +77,15 @@ class FakeBot:
         return type("FakeSentMessage", (), {"message_id": msg_id})()
 
 
-class FakeNotifier:
+class FakeNotifier(SupportNotifier):
     def __init__(self, bot: FakeBot | None = None) -> None:
-        self.sent: list[tuple[int, str]] = []
-        # Отдельно — с reply_to_message_id/message_thread_id, для тестов
-        # task_prewake/task_result (остальные тесты этого файла ими не
-        # пользуются).
-        self.sent_full: list[tuple[int, str, int | None, int | None]] = []
-        self.reply_markups: list[object] = []
-        # Только для rich-тестов task_prewake/task_result (TaskRichSessions
-        # читает .bot) — остальные тесты этого файла его не трогают.
+        super().__init__(send_direct_result=99)
         self.bot = bot
 
-    async def send_direct(
-        self,
-        chat_id,
-        text,
-        reply_to_message_id=None,
-        reply_markup=None,
-        message_thread_id=None,
-        **kwargs,
-    ):
-        self.sent.append((chat_id, text))
-        self.sent_full.append((chat_id, text, reply_to_message_id, message_thread_id))
-        self.reply_markups.append(reply_markup)
-        return 99
+    @property
+    def sent_full(self) -> list[tuple[int, str, int | None, int | None]]:
+        rows = zip(self.sent, self.reply_tos, self.threads, strict=True)
+        return [(chat, text, reply_to, thread) for (chat, text), reply_to, thread in rows]
 
 
 class FakeStore:
@@ -121,9 +95,7 @@ class FakeStore:
         self._acquainted = acquainted
 
     async def relationships_for(self, chat_id, status="confirmed"):
-        return [
-            {"guest_a": a, "guest_b": b} for a, b in self._acquainted if chat_id in (a, b)
-        ]
+        return [{"guest_a": a, "guest_b": b} for a, b in self._acquainted if chat_id in (a, b)]
 
     async def record_ai_turn(self, *args, **kwargs):
         self.recorded_turns.append((args, kwargs))
@@ -164,10 +136,6 @@ async def test_handler_broadcasts_system_on_node_joined():
 
 
 async def test_handler_journals_system_events_for_alfred():
-    """Живой повод 2026-08-04: у Альфреда не было доступа к тому, что уже
-    произошло — только к текущему состоянию. Системные события (тот же
-    текст, что уходит в рассылку) теперь пишутся в журнал (db/schema.sql::
-    swarm_events) через store.record_event, до broadcast_system."""
     book = _book()
     notifier = FakeNotifier()
     store = FakeStore()
@@ -211,9 +179,6 @@ async def test_handler_ignores_event_without_node_id():
     assert notifier.sent == []
 
 
-# --- update_finished: самообновление ноды (без рестарта — только диагностика) ---
-
-
 def test_render_update_finished_success_mentions_restart_node():
     text = render_update_finished("arch-t480", True, "0.22.0", None)
     assert "arch-t480" in text and "0.22.0" in text
@@ -238,8 +203,6 @@ async def test_handler_broadcasts_on_update_finished_success():
     store = FakeStore()
     handler = build_node_event_handler(book, notifier, store)
 
-    # Событие описывает саму себя: src — та нода, что обновилась (в отличие
-    # от node_joined, где src — сосед, принявший присоединение).
     env = make_event(
         "update_finished",
         {"ok": True, "version": "0.22.0", "error": None},
@@ -267,12 +230,6 @@ async def test_handler_broadcasts_on_update_finished_failure():
 
 
 class FakeMatchEventLink:
-    """Двойник ServiceLink(node) для _maybe_fire_event_waiter — фиксирует
-    вызовы match_event без реального протокола. Матчинг (есть ли ожидающая
-    задача) теперь решает сама служба tasks (tasks/service.py::
-    _match_event) — бот только шлёт (node, event_type), не зная про
-    task_id вовсе (решение пользователя 2026-08-05, живой инцидент)."""
-
     def __init__(self, *, raises: Exception | None = None) -> None:
         self.calls: list[tuple[str, dict, object]] = []
         self._raises = raises
@@ -320,7 +277,8 @@ async def test_handler_calls_match_event_on_restart_applied():
 
 
 async def test_handler_calls_match_event_on_update_finished():
-    from sa_home_bot.bot.node_events import EVENT_UPDATE_FINISHED, render_update_finished
+    from sa_home_bot.bot.node_events import render_update_finished
+    from sa_home_bot.node.events import EVENT_UPDATE_FINISHED
 
     book, notifier, store = _book(), FakeNotifier(), FakeStore()
     link = FakeMatchEventLink()
@@ -353,14 +311,14 @@ async def test_handler_match_event_failure_is_swallowed_not_raised():
         {"from": "0.72.0", "to": "0.73.0"},
         src=Address(node="arch-t480", service="node"),
     )
-    await handler(env)  # не поднимает — обработка события не должна упасть
+    await handler(env)
 
     assert notifier.sent == [(1, render_restart_applied("arch-t480", "0.72.0", "0.73.0"))]
 
 
 async def test_handler_without_get_node_link_does_not_crash():
     book, notifier, store = _book(), FakeNotifier(), FakeStore()
-    handler = build_node_event_handler(book, notifier, store)  # без get_node_link
+    handler = build_node_event_handler(book, notifier, store)
     env = make_event(
         EVENT_RESTART_APPLIED,
         {"from": "0.72.0", "to": "0.73.0"},
@@ -425,17 +383,10 @@ async def test_handler_restart_event_with_no_chats_sends_nothing():
     assert notifier.sent == []
 
 
-# --- llm_speech_cured: Логопед долечил Альфреда — всем, включая гостей без
-# opt-in (в отличие от system-событий через broadcast_system) ---
-
-
 async def test_handler_broadcasts_speech_cured_to_everyone_including_guests():
     book = SubscriptionBook(
         [
-            # Обычная подписка без "system"/"*" в event_types — accepting()
-            # её бы не нашла, broadcast_all находит.
             Subscription(name="plain", chat_id=1, event_types=frozenset({"overheat_started"})),
-            # Гостевая — event_types пуст по умолчанию (нет opt-in вообще).
             Subscription(name="guest", chat_id=2, source="guest", event_types=frozenset()),
             Subscription(name="dead", chat_id=3, broken=True, event_types=frozenset({"*"})),
         ]
@@ -449,8 +400,6 @@ async def test_handler_broadcasts_speech_cured_to_everyone_including_guests():
 
     assert notifier.sent == [(1, render_speech_cured()), (2, render_speech_cured())]
 
-
-# --- task_prewake/task_result: служба tasks (см. tasks/protocol.py) ---
 
 _LLM_CHAT_META = {
     "kind": task_protocol.TASK_KIND_LLM_CHAT,
@@ -473,8 +422,6 @@ async def test_task_prewake_waking_sends_steps_text():
 
 
 async def test_task_prewake_replies_into_the_right_topic():
-    # Тот же живой баг 2026-08-05, что и у task_result — «шаги» тоже уезжали
-    # в общий топик без message_thread_id в meta.
     book, notifier, store = _book(), FakeNotifier(), FakeStore()
     handler = build_node_event_handler(book, notifier, store)
     meta = {**_LLM_CHAT_META, "message_thread_id": 42}
@@ -553,13 +500,11 @@ async def test_task_result_success_replies_to_trigger_and_records_turn():
     assert notifier.sent_full == [(7, "<b>Альфред:</b> Полил цветы, сэр", 501, None)]
     assert len(store.recorded_turns) == 1
     args, _kwargs = store.recorded_turns[0]
-    assert args[:4] == (7, 99, 500, "assistant")  # 99 — message_id, вернул FakeNotifier
+    assert args[:4] == (7, 99, 500, "assistant")
     assert args[4] == "Полил цветы, сэр"
 
 
 async def test_task_result_success_replies_into_the_right_topic():
-    # Живой баг 2026-08-05: без message_thread_id в meta ответ tasks уезжал
-    # в общий топик личного чата, а не туда, где реально шёл запрос.
     book, notifier, store = _book(), FakeNotifier(), FakeStore()
     handler = build_node_event_handler(book, notifier, store)
     meta = {**_LLM_CHAT_META, "message_thread_id": 42}
@@ -574,11 +519,6 @@ async def test_task_result_success_replies_into_the_right_topic():
 
 
 async def test_task_result_without_dialogue_id_spawns_new_thread_from_sent_id():
-    # Этап 44.2: проактивный агент (bot/tools.py::schedule_agent_dialogue,
-    # 44.1) ставит задачу без dialogue_id/trigger_message_id — первое
-    # сообщение чужому собеседнику, готового треда ещё нет. Рождённый
-    # dialogue_id должен совпасть с message_id только что отправленного
-    # сообщения (та же схема, что у обычного /ai).
     book, notifier, store = _book(), FakeNotifier(), FakeStore()
     handler = build_node_event_handler(book, notifier, store)
     meta = {"kind": task_protocol.TASK_KIND_LLM_CHAT, "chat_id": 7}
@@ -599,8 +539,6 @@ async def test_task_result_without_dialogue_id_spawns_new_thread_from_sent_id():
     ]
     assert len(store.recorded_turns) == 1
     args, _kwargs = store.recorded_turns[0]
-    # 99 — message_id, вернул FakeNotifier; dialogue_id должен стать тем же
-    # значением (новый тред рождён из sent_id), а не остаться None.
     assert args[:4] == (7, 99, 99, "assistant")
     assert args[4] == "Здравствуйте, разрешите представиться"
 
@@ -633,16 +571,6 @@ async def test_task_result_ignores_non_llm_chat_kind():
     assert store.recorded_turns == []
 
 
-# --- task_prewake/task_result: rich-путь (TaskRichSessions, живая находка
-# 2026-08-10, четвёртый заход) — та же RichStreamSession-механика, что у
-# живого /ai, а не отдельный plain-поток notifier.send_direct вперемешку с
-# ним. Тесты выше (без config=Settings()) проверяют, что старый
-# plain-фолбэк не тронут; здесь — что при rich включённом «шаги»/«Агнольд»/
-# «Альбегт»/итоговый ответ этой же задачи используют ОДИН и тот же
-# draft_id/сессию, без отдельных персистентных «шагов» и без второго
-# «Агнольда».
-
-
 async def test_task_prewake_waking_uses_rich_thinking_block_when_rich():
     book, store = _book(), FakeStore()
     bot = FakeBot()
@@ -655,7 +583,7 @@ async def test_task_prewake_waking_uses_rich_thinking_block_when_rich():
     )
     await handler(env)
 
-    assert notifier.sent == []  # plain-путь не тронут
+    assert notifier.sent == []
     assert bot.drafts == [
         {
             "chat_id": 7,
@@ -683,7 +611,7 @@ async def test_task_prewake_ready_replaces_same_draft_with_agnold():
         )
 
     assert notifier.sent == []
-    assert len(bot.drafts) == 1  # ровно один черновик «шаги», не подменённый вторым
+    assert len(bot.drafts) == 1
     assert bot.sent == [
         {
             "chat_id": 7,
@@ -745,11 +673,6 @@ async def test_task_prewake_failed_warmup_uses_albert_asleep_rich():
 
 
 async def test_task_result_success_reuses_session_started_by_prewake():
-    # Живой сценарий (13:59 UTC, 2026-08-10): задача прогрелась и стала
-    # «ready» задолго до срока, «Агнольд» уже персистентен — итоговый ответ
-    # на самом сроке не должен снова показывать «шаги»/второго «Агнольда»,
-    # просто продолжает ту же сессию своим собственным персистентным
-    # сообщением.
     book, store = _book(), FakeStore()
     bot = FakeBot()
     notifier = FakeNotifier(bot)
@@ -777,7 +700,7 @@ async def test_task_result_success_reuses_session_started_by_prewake():
     )
 
     assert notifier.sent == []
-    assert len(bot.drafts) == 1  # ни одного лишнего черновика «шаги»
+    assert len(bot.drafts) == 1
     assert [s["markdown"] for s in bot.sent] == [
         ARNOLD_WAKING_MD,
         ALFRED_PREFIX_MD + "Полил цветы, сэр",
@@ -806,15 +729,7 @@ async def test_task_result_failure_uses_albert_task_missed_rich_with_reply():
     assert store.recorded_turns == []
 
 
-# --- tool_call: дебаг-канал вызовов тула из self-scheduled remind (служба
-# tasks) — живой баг 2026-08-05, args/result раньше не доезжали вовсе ---
-
-
 def _tool_call_book() -> SubscriptionBook:
-    # event_types должен явно включать alfred_tool_call — notify_tool_call
-    # намеренно не трактует "*" как охват (см. её докстринг), обычный _book()
-    # с event_types=["*"] тула не получит. Имя не _admin_book — та занята
-    # ниже (idle_power_blocked), а имена в этом модуле резолвятся поздно.
     return SubscriptionBook.from_config(
         [SubscriptionConfig(name="admin", chat_id=9, event_types=["alfred_tool_call"])]
     )
@@ -831,7 +746,7 @@ async def test_tool_call_without_debug_store_sends_short_text_without_button():
     await handler(env)
 
     assert notifier.sent == [(9, "🔧 Alfred вызвал инструмент: calc")]
-    assert notifier.reply_markups == [None]
+    assert notifier.markups == [None]
 
 
 async def test_tool_call_with_debug_store_attaches_expand_button_with_real_args_result():
@@ -846,7 +761,7 @@ async def test_tool_call_with_debug_store_attaches_expand_button_with_real_args_
     await handler(env)
 
     assert notifier.sent == [(9, "🔧 Alfred вызвал инструмент: calc")]
-    markup = notifier.reply_markups[0]
+    markup = notifier.markups[0]
     assert markup is not None
     token = markup.inline_keyboard[0][0].callback_data.split(":")[-1]
     call = tool_calls.get(token)
@@ -854,12 +769,6 @@ async def test_tool_call_with_debug_store_attaches_expand_button_with_real_args_
     assert call.name == "calc"
     assert call.args == {"expression": "1+1"}
     assert call.result == "2"
-
-
-# --- deliver_message: мост доставки для tell/notify_guest, вызванных ИЗ
-# сработавшей chat_loop-задачи (self-scheduled remind) — живая находка
-# 2026-08-06, служба tasks не умеет отправлять сама, см. tasks/protocol.py::
-# EVENT_DELIVER_MESSAGE и bot/tools.py::ToolContext.emit.
 
 
 async def test_deliver_message_sends_html_and_records_plain_turn():
@@ -875,7 +784,7 @@ async def test_deliver_message_sends_html_and_records_plain_turn():
     assert notifier.sent_full == [(7, "<b>Граф</b>: пора спать", None, None)]
     assert len(store.recorded_turns) == 1
     args, _kwargs = store.recorded_turns[0]
-    assert args[:4] == (7, 99, 99, "assistant")  # 99 — message_id, вернул FakeNotifier
+    assert args[:4] == (7, 99, 99, "assistant")
     assert args[4] == "пора спать"
 
 
@@ -928,8 +837,6 @@ async def test_deliver_message_does_not_record_turn_on_failed_send():
 
 
 async def test_deliver_message_checks_acquaintance_for_tasks_tell():
-    """Этап 46: tell из службы tasks не может проверить знакомство сам (нет
-    Store) — бот проверяет перед отправкой и молча не шлёт незнакомому."""
     data = {"chat_id": 7, "html": "текст", "plain": "текст", "require_acquaintance": [5, 7]}
     src = Address(node="alfred", service="tasks")
 
@@ -947,8 +854,6 @@ async def test_deliver_message_checks_acquaintance_for_tasks_tell():
 
 
 async def test_handler_broadcasts_on_node_leaving_and_returned():
-    """Этап 23: штатный уход и возвращение — системные уведомления для
-    любого типа машины (в отличие от аварийных node_down/node_up)."""
     book = _book()
     notifier = FakeNotifier()
     handler = build_node_event_handler(book, notifier, FakeStore())
@@ -972,9 +877,6 @@ async def test_handler_broadcasts_on_node_leaving_and_returned():
         (1, render_node_leaving("winpc")),
         (1, render_node_returned("winpc")),
     ]
-
-
-# --- idle_power_blocked: автовыключение отложено открытой SSH-сессией ------
 
 
 def _admin_book() -> SubscriptionBook:
@@ -1011,16 +913,11 @@ async def test_handler_notifies_admins_with_close_ssh_button():
 
     expected_text = render_idle_power_blocked("mycraft", ["sevboa, pts/0, с 01:08"])
     assert notifier.sent == [(999, expected_text)]
-    assert notifier.reply_markups == [build_close_ssh_keyboard("mycraft")]
-    # Админский алерт (не broadcast_system) — тоже в журнал, см. решение
-    # пользователя 2026-08-04: «системные + админские».
+    assert notifier.markups == [build_close_ssh_keyboard("mycraft")]
     assert store.recorded_events == [("idle_power_blocked", "mycraft", expected_text, ANY)]
 
 
 async def test_handler_ignores_idle_power_blocked_without_sessions():
-    """Пустой список — событие бы эмитилось только если сессии есть
-    (node/service.py::maybe_auto_poweroff_idle), но handler защищается и
-    от пустых/битых данных, как и у остальных событий этого модуля."""
     book = _admin_book()
     notifier = FakeNotifier()
     handler = build_node_event_handler(book, notifier, FakeStore())
@@ -1035,8 +932,6 @@ async def test_handler_ignores_idle_power_blocked_without_sessions():
 
 
 async def test_handler_does_not_notify_non_admin_chats_on_idle_power_blocked():
-    """`_book()` (не admin) не должна получить это — WILDCARD в allowed_commands
-    нужен именно для notify_admins, event_types="*" тут ни при чём."""
     book = _book()
     notifier = FakeNotifier()
     handler = build_node_event_handler(book, notifier, FakeStore())
@@ -1053,9 +948,6 @@ async def test_handler_does_not_notify_non_admin_chats_on_idle_power_blocked():
 
 
 async def test_task_result_closes_and_forgets_session_even_if_delivery_fails():
-    # Этап 34.3 (2026-09-30): падение посреди _handle_task_result (здесь —
-    # запись хода в БД после финала) раньше оставляло сессию в словаре, а
-    # её фоновую задачу — освежать черновик до получасового потолка.
     class BrokenStore(FakeStore):
         async def record_ai_turn(self, *args, **kwargs):
             raise RuntimeError("БД недоступна")
