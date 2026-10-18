@@ -1,5 +1,3 @@
-"""Локальные команды бэкапа nodectl работают из рабочего каталога ноды."""
-
 from __future__ import annotations
 
 import argparse

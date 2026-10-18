@@ -1,17 +1,3 @@
-"""`sa-home-bot init` — установка новой ноды без git-checkout (см. cli.py).
-
-Раньше единственный путь завести ноду — это склонировать репозиторий только
-за ``config.example.toml`` и ``deploy/sa-home-node.service``, вручную выставить
-в них id/kind/token/join и путём проб поправить абсолютные пути. Эта команда
-делает то же самое одним вызовом: пишет минимальный ``config.toml`` (только
-``[node]``/``[swarm]`` — остальные секции подтягивают дефолты из ``config.py``,
-как и раньше) и, на Linux, user-юнит systemd с уже подставленными путями.
-
-Работает и интерактивно (спрашивает недостающее), и флагами — второе для
-сценария «поставить ноду по SSH одной командой», где спросить не у кого
-(нет tty).
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -32,12 +18,27 @@ DEFAULT_DATA_DIR = Path("~/.local/share/sa-home-bot").expanduser()
 
 KIND_CHOICES = ("server", "workstation", "vps")
 
+INIT_DESCRIPTION = (
+    '`sa-home-bot init` — установка новой ноды без git-checkout (см. cli.py).\n'
+    '\n'
+    'Раньше единственный путь завести ноду — это склонировать репозиторий только\n'
+    'за ``config.example.toml`` и ``deploy/sa-home-node.service``, вручную выставить\n'
+    'в них id/kind/token/join и путём проб поправить абсолютные пути. Эта команда\n'
+    'делает то же самое одним вызовом: пишет минимальный ``config.toml`` (только\n'
+    '``[node]``/``[swarm]`` — остальные секции подтягивают дефолты из ``config.py``,\n'
+    'как и раньше) и, на Linux, user-юнит systemd с уже подставленными путями.\n'
+    '\n'
+    'Работает и интерактивно (спрашивает недостающее), и флагами — второе для\n'
+    'сценария «поставить ноду по SSH одной командой», где спросить не у кого\n'
+    '(нет tty).\n'
+)
+
 
 def add_init_subparser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         "init",
         help="создать config.toml новой ноды (и, на Linux, systemd-юнит) без git-checkout",
-        description=__doc__,
+        description=INIT_DESCRIPTION,
     )
     parser.add_argument(
         "--config",
@@ -100,18 +101,9 @@ def _split_csv(value: str) -> list[str]:
 
 
 def _toml_scalar(value: str | list[str]) -> str:
-    # JSON-синтаксис строк и списков строк совпадает с TOML — не изобретаем
-    # свой экранизатор ради десятка полей.
     return json.dumps(value, ensure_ascii=False)
 
 
-# Сокет/БД каждой службы по умолчанию — относительный путь ("./data/x.sock"),
-# который две разные программы резолвят от РАЗНЫХ каталогов: сам сервис — от
-# своего WorkingDirectory (data_dir), а `nodectl` — от каталога config.toml
-# (nodectl.py::_resolve_endpoint). Если это разные каталоги (а они разные —
-# конфиг в ~/.config, данные в ~/.local/share), `nodectl status` ищет сокет
-# не там и не находит («No such file or directory») — живой баг 2026-08-01
-# на mycraft. Лечится тем же, чем на alfred в проде: путь абсолютный.
 _SERVICE_PATH_DEFAULTS: dict[str, dict[str, str]] = {
     "database": {"path": "sentinel.sqlite"},
     "monitor": {"socket": "monitor.sock", "db_path": "monitor.sqlite"},
@@ -158,10 +150,6 @@ def _render_config(*, node_id: str, kind: str, assignments: list[str],
 
 
 def _render_systemd_unit(*, exec_path: str, config_path: Path, data_dir: Path) -> str:
-    # Не Path(exec_path).parent: при pipx-установке exec_path может резолвиться
-    # до .local/share/pipx/venvs/.../bin (см. вызывающий код) — там нет обёртки
-    # smartctl. Обёртка всегда лежит в ~/.local/bin (см. fixups.SMARTCTL_WRAPPER_PATH),
-    # её и кладём первой в PATH.
     local_bin = str(SMARTCTL_WRAPPER_PATH.parent)
     return (
         "[Unit]\n"
@@ -187,9 +175,6 @@ def _render_systemd_unit(*, exec_path: str, config_path: Path, data_dir: Path) -
 
 
 def _run_step(cmd: list[str]) -> bool:
-    """Выполнить команду, унаследовав stdio (чтобы `sudo` мог спросить пароль
-    прямо в терминале). Возвращает успех; сама печатает, если не вышло —
-    вызывающий код это не фатально, юнит всё равно можно поднять руками."""
     print(f"$ {' '.join(cmd)}")
     try:
         subprocess.run(cmd, check=True)
@@ -208,7 +193,6 @@ def _enable_and_start(*, interactive: bool) -> None:
     ok = _run_step(["systemctl", "--user", "enable", "--now", "sa-home-node"]) and ok
 
     if interactive:
-        # sudo сам спросит пароль на терминале — здесь есть кому его ввести.
         _run_step(["sudo", "loginctl", "enable-linger", getpass.getuser()])
     else:
         print(
@@ -228,11 +212,6 @@ def _enable_and_start(*, interactive: bool) -> None:
 
 
 def _apply_init_fixups(config_path: Path, *, interactive: bool) -> None:
-    """Сразу после первой установки доустановить/донастроить то, что нельзя
-    сделать без root (WoL, polkit-разрешение на power-действия и т.п.) —
-    те же рецепты, что и `nodectl fix` (node/fixups.py), просто без отдельного
-    ручного вызова. Что именно нужно — решает `needed()` каждого фикса по
-    типу машины/назначениям, здесь про конкретные фиксы ничего не знаем."""
     if not sys.platform.startswith("linux"):
         return
     settings = Settings.load(config_path)
@@ -254,9 +233,118 @@ def _apply_init_fixups(config_path: Path, *, interactive: bool) -> None:
         )
 
 
+def _resolve_kind(args: argparse.Namespace, interactive: bool) -> str:
+    if args.kind is not None:
+        return args.kind
+    if not interactive:
+        return "workstation"
+    kind = _prompt("Тип машины (server/workstation/vps)", "workstation")
+    if kind not in KIND_CHOICES:
+        print(f"Неизвестный тип {kind!r}, беру workstation", file=sys.stderr)
+        return "workstation"
+    return kind
+
+
+def _resolve_assignments(args: argparse.Namespace, interactive: bool) -> list[str]:
+    if args.assignments is not None:
+        return _split_csv(args.assignments)
+    if not interactive:
+        return []
+    return _split_csv(
+        _prompt("Что нода поднимает (через запятую, пусто — просто вступить в рой)", "")
+    )
+
+
+def _resolve_listen(args: argparse.Namespace, interactive: bool, kind: str) -> list[str]:
+    if args.listen is not None:
+        return _split_csv(args.listen)
+    if kind != "vps":
+        return ["tcp://0.0.0.0:8710"]
+    if not interactive:
+        print(
+            "listen пуст (kind=vps) — нода не сможет вступить в рой, "
+            "пока не задашь --listen явно",
+            file=sys.stderr,
+        )
+        return []
+    listen = _split_csv(
+        _prompt(
+            "Публичная машина (vps) — адрес(а) для входящих соединений от "
+            "пиров, НЕ 0.0.0.0: явный приватный/tailscale-адрес, иначе рой "
+            "торчит в интернет",
+            "",
+        )
+    )
+    while not listen and not _prompt_yes_no(
+        "Пусто — нода не сможет вступить в рой вовсе (swarm_join требует наш "
+        "адрес). Точно оставить пустым?",
+        False,
+    ):
+        listen = _split_csv(_prompt("Адрес(а) для входящих соединений от пиров", ""))
+    return listen
+
+
+def _resolve_join(args: argparse.Namespace, interactive: bool) -> tuple[str, bool]:
+    if args.join is not None:
+        return args.join, False
+    if not interactive:
+        return "", False
+    founding_new_swarm = not _prompt_yes_no(
+        "В этой локальной сети уже есть рой (другие ноды sa-home-bot)?", True
+    )
+    if founding_new_swarm:
+        return "", True
+    join = _prompt(
+        "IP:порт соседа, если знаешь (пусто — понадеемся на LAN-маячок: "
+        "он сам найдёт и присоединится по общему токену)",
+        "",
+    )
+    return join, False
+
+
+def _resolve_token(
+    args: argparse.Namespace, interactive: bool, join: str, founding_new_swarm: bool
+) -> str | None:
+    if args.token is not None:
+        return args.token
+    must_paste_token = bool(join) or (interactive and not founding_new_swarm)
+    if not must_paste_token:
+        if not interactive:
+            return secrets.token_urlsafe(32)
+        generated = secrets.token_urlsafe(32)
+        if _prompt_yes_no(
+            f"Это первая нода — сгенерировать новый токен роя ({generated[:8]}…)?", True
+        ):
+            return generated
+        return _prompt("Вставь токен")
+    if not interactive:
+        return None
+    token = _prompt(
+        "Токен роя (тот же, что в config.toml существующей ноды — "
+        "см. `grep -A3 '^\\[swarm\\]' " + str(DEFAULT_CONFIG_PATH) + "` на ней)"
+    )
+    while not token:
+        token = _prompt("Токен обязателен, повтори")
+    return token
+
+
+def _write_systemd_unit(*, config_path: Path, data_dir: Path, force: bool) -> bool:
+    unit_path = Path("~/.config/systemd/user/sa-home-node.service").expanduser()
+    if unit_path.exists() and not force:
+        print(f"{unit_path} уже существует — не трогаю (--force, чтобы переписать)")
+        return False
+    exec_path = shutil.which("sa-home-bot") or str(Path(sys.argv[0]).resolve())
+    unit_path.parent.mkdir(parents=True, exist_ok=True)
+    unit_content = _render_systemd_unit(
+        exec_path=exec_path, config_path=config_path, data_dir=data_dir
+    )
+    unit_path.write_text(unit_content, encoding="utf-8")
+    print(f"Записан {unit_path}")
+    return True
+
+
 def run_init(args: argparse.Namespace) -> int:
     interactive = not args.non_interactive and sys.stdin.isatty()
-    missing_for_noninteractive: list[str] = []
 
     config_path = Path(args.config).expanduser()
     data_dir = Path(args.data_dir).expanduser()
@@ -266,110 +354,15 @@ def run_init(args: argparse.Namespace) -> int:
         default_id = socket.gethostname()
         node_id = _prompt("Имя ноды в рое", default_id) if interactive else default_id
 
-    kind = args.kind
-    if kind is None:
-        if interactive:
-            kind = _prompt("Тип машины (server/workstation/vps)", "workstation")
-            if kind not in KIND_CHOICES:
-                print(f"Неизвестный тип {kind!r}, беру workstation", file=sys.stderr)
-                kind = "workstation"
-        else:
-            kind = "workstation"
+    kind = _resolve_kind(args, interactive)
+    assignments = _resolve_assignments(args, interactive)
+    listen = _resolve_listen(args, interactive, kind)
+    join, founding_new_swarm = _resolve_join(args, interactive)
+    token = _resolve_token(args, interactive, join, founding_new_swarm)
 
-    assignments = _split_csv(args.assignments) if args.assignments is not None else None
-    if assignments is None:
-        assignments = (
-            _split_csv(_prompt(
-                "Что нода поднимает (через запятую, пусто — просто вступить в рой)", ""
-            ))
-            if interactive
-            else []
-        )
-
-    # Пустой listen — не "только исходящие", а "нельзя вступить в рой вовсе":
-    # swarm_join на принимающей стороне требует наш endpoint
-    # (node/service.py::_swarm_join, ERR_BAD_REQUEST без него), а его неоткуда
-    # взять без хотя бы одного слушаемого TCP-адреса (_advertised() вернёт
-    # пусто) — живой баг 2026-08-01 на mycraft, из-за него не проходил join.
-    # Для vps (публичный IP) дефолт 0.0.0.0 давать нельзя — светить рой в
-    # интернет («Node jeeves»): там нужен явный tailscale/приватный адрес.
-    listen = _split_csv(args.listen) if args.listen is not None else None
-    if listen is None:
-        if kind != "vps":
-            # server/workstation — обычная машина за роутером: слушать все
-            # интерфейсы безопасно (том числе, эта дальнейшая переменная не
-            # переспрашивается, а просто применяется). --listen всё ещё
-            # переопределяет, если нужен конкретный интерфейс.
-            listen = ["tcp://0.0.0.0:8710"]
-        elif interactive:
-            listen = _split_csv(_prompt(
-                "Публичная машина (vps) — адрес(а) для входящих соединений от "
-                "пиров, НЕ 0.0.0.0: явный приватный/tailscale-адрес, иначе рой "
-                "торчит в интернет", "",
-            ))
-            while not listen and not _prompt_yes_no(
-                "Пусто — нода не сможет вступить в рой вовсе (swarm_join требует наш "
-                "адрес). Точно оставить пустым?", False,
-            ):
-                listen = _split_csv(_prompt("Адрес(а) для входящих соединений от пиров", ""))
-        else:
-            listen = []
-            print(
-                "listen пуст (kind=vps) — нода не сможет вступить в рой, "
-                "пока не задашь --listen явно",
-                file=sys.stderr,
-            )
-
-    # Пусто у join не обязательно значит «нода — первая»: если рой уже есть в
-    # ЭТОЙ ЖЕ локальной сети, LAN-маячок (node/discovery.py) сам разошлёт
-    # запрос и присоединится, как только совпадёт [swarm].token — вводить IP
-    # руками для этого не нужно. Поэтому решаем отдельно, прежде чем решать
-    # про токен: не знаем адрес — не значит основываем новый рой.
-    join = args.join
-    founding_new_swarm = False
-    if join is None:
-        if interactive:
-            founding_new_swarm = not _prompt_yes_no(
-                "В этой локальной сети уже есть рой (другие ноды sa-home-bot)?", True
-            )
-            join = "" if founding_new_swarm else _prompt(
-                "IP:порт соседа, если знаешь (пусто — понадеемся на LAN-маячок: "
-                "он сам найдёт и присоединится по общему токену)", ""
-            )
-        else:
-            join = ""
-
-    token = args.token
     if token is None:
-        # Токен обязателен всюду, кроме случая «эта нода основывает новый
-        # рой» — тогда безопасно предложить сгенерировать новый.
-        must_paste_token = bool(join) or (interactive and not founding_new_swarm)
-        if must_paste_token:
-            if interactive:
-                token = _prompt(
-                    "Токен роя (тот же, что в config.toml существующей ноды — "
-                    "см. `grep -A3 '^\\[swarm\\]' " + str(DEFAULT_CONFIG_PATH) + "` на ней)"
-                )
-                while not token:
-                    token = _prompt("Токен обязателен, повтори")
-            else:
-                missing_for_noninteractive.append("--token (обязателен вместе с --join)")
-                token = ""
-        else:
-            if interactive:
-                generated = secrets.token_urlsafe(32)
-                if _prompt_yes_no(
-                    f"Это первая нода — сгенерировать новый токен роя ({generated[:8]}…)?", True
-                ):
-                    token = generated
-                else:
-                    token = _prompt("Вставь токен")
-            else:
-                token = secrets.token_urlsafe(32)
-
-    if missing_for_noninteractive:
         print(
-            "Не хватает значений для --non-interactive: " + ", ".join(missing_for_noninteractive),
+            "Не хватает значений для --non-interactive: --token (обязателен вместе с --join)",
             file=sys.stderr,
         )
         return 2
@@ -384,8 +377,15 @@ def run_init(args: argparse.Namespace) -> int:
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
-        _render_config(node_id=node_id, kind=kind, assignments=assignments,
-                        listen=listen, token=token, join=join, data_dir=data_dir),
+        _render_config(
+            node_id=node_id,
+            kind=kind,
+            assignments=assignments,
+            listen=listen,
+            token=token,
+            join=join,
+            data_dir=data_dir,
+        ),
         encoding="utf-8",
     )
     (data_dir / "data").mkdir(parents=True, exist_ok=True)
@@ -396,18 +396,9 @@ def run_init(args: argparse.Namespace) -> int:
 
     unit_written = False
     if not args.no_systemd_unit and sys.platform.startswith("linux"):
-        unit_path = Path("~/.config/systemd/user/sa-home-node.service").expanduser()
-        if unit_path.exists() and not args.force:
-            print(f"{unit_path} уже существует — не трогаю (--force, чтобы переписать)")
-        else:
-            exec_path = shutil.which("sa-home-bot") or str(Path(sys.argv[0]).resolve())
-            unit_path.parent.mkdir(parents=True, exist_ok=True)
-            unit_content = _render_systemd_unit(
-                exec_path=exec_path, config_path=config_path, data_dir=data_dir
-            )
-            unit_path.write_text(unit_content, encoding="utf-8")
-            print(f"Записан {unit_path}")
-            unit_written = True
+        unit_written = _write_systemd_unit(
+            config_path=config_path, data_dir=data_dir, force=args.force
+        )
 
     if not join:
         print(f"\nТокен роя (сохрани — понадобится для следующих нод): {token}")
