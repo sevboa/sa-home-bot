@@ -15,7 +15,7 @@ from PIL import Image
 
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.handlers.interactives import cmd_interactives
-from sa_home_bot.bot.interactives import acts, engine, places, underground
+from sa_home_bot.bot.interactives import acts, places, registry, underground
 from sa_home_bot.bot.interactives import catacombs as cat
 from sa_home_bot.bot.interactives.base import (
     STATUS_ACTIVE,
@@ -215,7 +215,7 @@ def _maze_with_darkroom(user=CANARY) -> tuple[Maze, str]:
 def test_scenario_is_canary_manual_and_never_triggered_by_words():
     scenario = underground.CATACOMBS
     assert scenario.canary and scenario.trigger == "manual"
-    assert engine.REGISTRY["catacombs"] is scenario
+    assert registry.REGISTRY["catacombs"] is scenario
     assert not scenario.trigger_re.search("в катакомбы спустимся? катакомбы!")
     assert scenario.last_stage == 0 and scenario.min_turns_before_finale > 10**6
     assert "никогда не говори" in scenario.scene_frame
@@ -674,7 +674,7 @@ async def test_search_in_corridor_uses_spots_and_finds_nothing_special(store):
     assert "Ты обыскал" in out and "Ничего интересного" in out  # rng 0.99 — пусто
     assert underground.TOOL_FRAME_NOTE in out
     # Картинка обысканного места ждёт конца реплики.
-    assert [f.kind for f in svc._ug().pending[CANARY].frames] == ["spot"]
+    assert [f.kind for f in svc._frames.pending[CANARY].frames] == ["spot"]
     maze, state = await _vision(store)
     node = maze.nodes[state.node]
     assert [s.name for s in node.spots] == ["ящик у стены"] and node.spots[0].searched

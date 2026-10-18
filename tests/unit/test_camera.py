@@ -10,7 +10,7 @@ import re
 import pytest
 import pytest_asyncio
 
-from sa_home_bot.bot.interactives import engine, items, places, radio
+from sa_home_bot.bot.interactives import items, keyboards, photo_text, places, radio
 from sa_home_bot.bot.interactives.base import STATUS_ACTIVE, Run
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
@@ -159,7 +159,7 @@ async def test_card_and_inventory_show_the_invented_model(store):
     camera = await _camera(svc)
     await store.update_item(camera["id"], note="Цейс «Икофлекс», 1938")
     camera = await store.item_by_id(camera["id"])
-    caption = engine.item_caption(items.CAMERA, camera, False)
+    caption = keyboards.item_caption(items.CAMERA, camera, False)
     assert "Аппарат: Цейс «Икофлекс», 1938." in caption and "в чулане" in caption
     lines = await svc.manor_lines(CANARY, [camera])
     assert "Аппарат: Цейс «Икофлекс», 1938." in lines
@@ -288,9 +288,9 @@ def test_photo_state_key_separates_sizes():
 
     cab = cabinet.Cabinet(user_id=1)
     out = Outside(phase="day", weather="clear", local_time="13:00")
-    plain = engine.photo_state_key(cab, out, None)
+    plain = photo_text.photo_state_key(cab, out, None)
     assert plain == cab.state_key(out.key)  # прежний ключ байт-в-байт
-    assert engine.photo_state_key(cab, out, None, 128) == plain + "#px128"
+    assert photo_text.photo_state_key(cab, out, None, 128) == plain + "#px128"
 
 
 # --- прежнее поведение ---
@@ -304,9 +304,9 @@ def test_radio_texts_are_unchanged():
         fault=radio.ITEM_CARD_FAULT.format(fault="из-под крышки идёт дым"),
         where=radio.ITEM_CARD_INSTALLED,
     )
-    assert engine.item_caption(items.RADIO, item, True) == old
+    assert keyboards.item_caption(items.RADIO, item, True) == old
     assert items.RADIO.where_ru(items.PLACE_DESK) == "на столе в кабинете"
-    assert engine.item_actions_caption(items.RADIO, items.PLACE_STOREROOM) == (
+    assert keyboards.item_actions_caption(items.RADIO, items.PLACE_STOREROOM) == (
         radio.ITEM_ACTIONS_CAPTION.format(name=items.RADIO.name, where=radio.ITEM_PLACE_STORED)
     )
     assert items.RADIO.traits_ru(["пыль", "нет такой"]) == ["покрыта пылью и паутиной"]

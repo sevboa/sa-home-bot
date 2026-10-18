@@ -9,7 +9,7 @@ import asyncio
 import pytest
 import pytest_asyncio
 
-from sa_home_bot.bot.interactives import cabinet, engine, places, underground
+from sa_home_bot.bot.interactives import cabinet, photo_text, places, underground
 from sa_home_bot.bot.interactives.cabinet import Cabinet
 from sa_home_bot.bot.interactives.places import Room
 from sa_home_bot.db.connection import Database
@@ -84,11 +84,11 @@ def test_wine_cellar_is_not_the_cellar():
 def test_general_view_cabinet_noun_belongs_to_the_cabinet_only():
     study = Cabinet(user_id=1)
     cellar = Room(user_id=1, canon=places.CELLAR_CANON)
-    assert engine.is_general_view("Мой кабинет", study)
-    assert not engine.is_general_view("Мой кабинет", cellar)
-    assert not engine.is_general_view("Кабинет Альфреда", cellar)
-    assert engine.is_general_view("общий вид", cellar)
-    assert engine.is_general_view("комнату", cellar)
+    assert photo_text.is_general_view("Мой кабинет", study)
+    assert not photo_text.is_general_view("Мой кабинет", cellar)
+    assert not photo_text.is_general_view("Кабинет Альфреда", cellar)
+    assert photo_text.is_general_view("общий вид", cellar)
+    assert photo_text.is_general_view("комнату", cellar)
 
 
 # --- комнаты без окна ---
@@ -105,8 +105,8 @@ def test_windowless_state_key_has_no_weather():
 
 def test_photo_negative_adds_window_only_without_one():
     cellar = Room(user_id=1, canon=places.CELLAR_CANON)
-    assert engine.photo_negative(Cabinet(user_id=1)) == cabinet.PHOTO_NEGATIVE_EN
-    negative = engine.photo_negative(cellar)
+    assert photo_text.photo_negative(Cabinet(user_id=1)) == cabinet.PHOTO_NEGATIVE_EN
+    negative = photo_text.photo_negative(cellar)
     assert negative.startswith(cabinet.PHOTO_NEGATIVE_EN)
     assert "window" in negative and "daylight" in negative
 

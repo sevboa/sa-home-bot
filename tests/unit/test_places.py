@@ -10,9 +10,10 @@ from datetime import UTC, datetime, timedelta
 import pytest_asyncio
 
 from sa_home_bot.bot import tools as ai_tools
-from sa_home_bot.bot.interactives import cabinet, engine, places
+from sa_home_bot.bot.interactives import cabinet, photo_text, places
 from sa_home_bot.bot.interactives.cabinet import Cabinet
-from sa_home_bot.bot.interactives.engine import Interactives, photo_description
+from sa_home_bot.bot.interactives.engine import Interactives
+from sa_home_bot.bot.interactives.photo_text import photo_description
 from sa_home_bot.bot.interactives.places import Room
 from sa_home_bot.bot.interactives.transylvania import Outside, Transylvania
 from sa_home_bot.config import LlmConfig, Settings
@@ -177,9 +178,9 @@ def test_photo_description_uses_the_room_canon_and_light():
 def test_selfie_in_a_room_is_not_in_the_study():
     out = Outside(phase="day", weather="clear", local_time="13:00")
     room = Room(user_id=1, canon=places.CELLAR_CANON)
-    text = engine.selfie_description(room, out, "", None)
+    text = photo_text.selfie_description(room, out, "", None)
     assert "study" not in text and "dark stone cellar" in text
-    posed = engine.selfie_description(room, out, "спиной к зрителю", None)
+    posed = photo_text.selfie_description(room, out, "спиной к зрителю", None)
     assert "study" not in posed
 
 

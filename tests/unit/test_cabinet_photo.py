@@ -12,7 +12,7 @@ import pytest
 import pytest_asyncio
 from PIL import Image
 
-from sa_home_bot.bot.interactives import cabinet, engine, radio, transylvania
+from sa_home_bot.bot.interactives import cabinet, photo_text, photos, radio, transylvania
 from sa_home_bot.bot.interactives.base import Run
 from sa_home_bot.bot.interactives.director import (
     FEATURES_SYSTEM,
@@ -21,7 +21,8 @@ from sa_home_bot.bot.interactives.director import (
     build_director_input,
     parse_decision,
 )
-from sa_home_bot.bot.interactives.engine import Interactives, photo_description
+from sa_home_bot.bot.interactives.engine import Interactives
+from sa_home_bot.bot.interactives.photo_text import photo_description
 from sa_home_bot.bot.interactives.transylvania import Outside, Transylvania
 from sa_home_bot.config import LlmConfig, Settings
 from sa_home_bot.db.connection import Database
@@ -293,7 +294,7 @@ async def test_first_photo_invents_features_then_same_state_is_reused(store):
     assert "чучело совы" in gen["description"] and "candlelit" in gen["description"]
     assert len(notifier.photos) == 1 and isinstance(notifier.photos[0][1], bytes)
     image = await store.image_by_id(next(iter(cab.photos.values())))
-    assert image["purpose"] == engine.PHOTO_PURPOSE
+    assert image["purpose"] == photo_text.PHOTO_PURPOSE
     # Ничего не изменилось, но снимок уже в этом чате — второй раз тот же не
     # шлём, снимаем заново (живая находка 2026-10-02).
     assert await svc.tool_take_photo(GUEST, GUEST, {}) == cabinet.TOOL_PHOTO_STARTED
@@ -350,7 +351,7 @@ async def test_one_photo_at_a_time_and_daily_limit(store, monkeypatch):
     await svc.tool_take_photo(GUEST, GUEST, {"focus": "камин"})
     assert await svc.tool_take_photo(GUEST, GUEST, {"focus": "окно"}) == cabinet.TOOL_PHOTO_BUSY
     await _drain(svc)
-    monkeypatch.setattr(engine, "PHOTO_DAILY_LIMIT", 1)
+    monkeypatch.setattr(photos, "PHOTO_DAILY_LIMIT", 1)
     assert await svc.tool_take_photo(GUEST, GUEST, {"focus": "окно"}) == cabinet.TOOL_PHOTO_LIMIT
 
 
@@ -389,7 +390,7 @@ def test_director_parses_mood():
     assert parse_decision(json.dumps({"mood": "жуть"}), 0).mood is None
     assert parse_decision(json.dumps({"mood": "rot"}), 0).mood == "rot"
     assert parse_decision(json.dumps({"mood": "весело"}), 0).mood is None
-    assert set(engine.MOOD_PRESETS) == set(MOODS.values()) - {MOOD_PLAIN}
+    assert set(photo_text.MOOD_PRESETS) == set(MOODS.values()) - {MOOD_PLAIN}
 
 
 async def test_mood_picks_model_and_lora_for_scene_frames(store):
@@ -475,7 +476,7 @@ async def test_director_frames_key_moments_not_too_often(store):
     (gen,) = link.generated()
     assert gen["mode"] == "scene" and gen["description"] == "лампа"
     assert "лампа вспыхнула" in gen["context"]
-    assert notifier.photos[-1][2] == engine.PHOTO_SCENE_CAPTION
+    assert notifier.photos[-1][2] == photo_text.PHOTO_SCENE_CAPTION
     # Сразу ещё раз — рано, пропускаем.
     await _scene_turn(svc, link, {"stage": 0, "photo": "камин"})
     assert len(link.generated()) == 1
@@ -610,7 +611,7 @@ async def test_take_photo_joins_the_scene_photo_and_speaks_with_it(store):
         GUEST,
         GUEST,
         focus="передатчик",
-        caption=engine.PHOTO_SCENE_CAPTION,
+        caption=photo_text.PHOTO_SCENE_CAPTION,
         happening="по корпусу прошла рябь",
         outside=Outside(phase="night", weather=None, local_time="00:00"),
         message_thread_id=None,
@@ -661,7 +662,7 @@ async def test_scene_frames_are_not_narrated(store):
 async def test_photo_statuses_follow_the_phases(store, monkeypatch):
     """Ход ждёт снимок: промптер — «наводит фотоаппарат», рисование и
     подпись — «проявляет снимок»."""
-    monkeypatch.setattr(engine, "PHOTO_PHASE_POLL_S", 0)
+    monkeypatch.setattr(photos, "PHOTO_PHASE_POLL_S", 0)
     phases = ["compose", "compose", "draw"]
     gate = asyncio.Event()
 
@@ -745,10 +746,10 @@ async def test_missing_subject_on_a_scene_frame_is_a_separate_line(store):
 
 def test_retake_emphasis_matches_rephrased_items():
     prev = {"missing": ["Собака у камина"]}
-    assert engine.retake_emphasis(prev, ["собака", "кресло"]) == ["собака"]
-    assert engine.retake_emphasis(prev, ["кресло"]) == []
-    assert engine.retake_emphasis(None, ["собака"]) == []
-    assert engine.retake_emphasis({"missing": []}, ["собака"]) == []
+    assert photo_text.retake_emphasis(prev, ["собака", "кресло"]) == ["собака"]
+    assert photo_text.retake_emphasis(prev, ["кресло"]) == []
+    assert photo_text.retake_emphasis(None, ["собака"]) == []
+    assert photo_text.retake_emphasis({"missing": []}, ["собака"]) == []
 
 
 async def test_lost_photo_is_announced_not_silent(store):
@@ -880,9 +881,9 @@ def test_selfie_in_pose_gets_bare_room_without_features():
     cab = cabinet.Cabinet(user_id=GUEST, features=["сова"])
     out = Outside(phase="night", weather="clear", local_time="01:00")
     for focus in ("стоит спиной у окна", "в профиль с подсвечником", "идёт по коридору"):
-        desc = engine.selfie_description(cab, out, focus, None)
+        desc = photo_text.selfie_description(cab, out, focus, None)
         assert f"Room: {cabinet.SELFIE_POSE_ROOM_EN}." in desc and "сова" not in desc
-    desc = engine.selfie_description(cab, out, "за столом с бокалом вина", None)
+    desc = photo_text.selfie_description(cab, out, "за столом с бокалом вина", None)
     assert cabinet.CANON_EN in desc and "сова" in desc
 
 
@@ -900,10 +901,10 @@ async def test_closeup_photo_gets_colour_light(store):
 def test_window_view_regex_takes_views_not_window_items():
     for focus in ("вид из окна", "Вид из моего окна", "окно с видом на горизонт",
                   "окно и вид за ним", "вид на ночной замок из окна", "лес за окном"):
-        assert engine.WINDOW_VIEW_RE.search(focus), focus
+        assert photo_text.WINDOW_VIEW_RE.search(focus), focus
     for focus in ("подоконник со свечой", "оконная рама с трещиной", "чучело совы",
                   "треснувшее стекло радиопередатчика"):
-        assert not engine.WINDOW_VIEW_RE.search(focus), focus
+        assert not photo_text.WINDOW_VIEW_RE.search(focus), focus
 
 
 async def test_window_view_is_general_light_and_moves_light_at_night(store):
@@ -976,7 +977,7 @@ async def test_mood_selfie_carries_the_reply_as_caption_with_face_emphasized(sto
     # Подпись — сам ответ (html-экранированный), а не новая реплика LLM.
     (chat, _photo, caption) = notifier.photos[0]
     assert chat == GUEST
-    assert caption == engine.ALFRED_PHOTO_PREFIX + "Это возмутительно, сэр &amp; всё такое."
+    assert caption == photo_text.ALFRED_PHOTO_PREFIX + "Это возмутительно, сэр &amp; всё такое."
     assert link.lines() == []
     assert statuses[0] == cabinet.PHOTO_STATUS_AIMING
     image = await store.image_by_id(1)

@@ -4,12 +4,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import timedelta
 
 import pytest_asyncio
 
-from sa_home_bot.bot.interactives import engine, items, places
+from sa_home_bot.bot.interactives import items, keyboards, places
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
@@ -80,7 +81,7 @@ async def test_inventory_and_card_speak_in_wine_words(store):
     text, markup = await svc.inventory(CANARY)
     assert "Бутылка вина" in text and "в подвале, у входа" in text
     assert markup is not None
-    caption = engine.item_caption(items.WINE, item, False)
+    caption = keyboards.item_caption(items.WINE, item, False)
     assert "На этикетке" in caption and "радиостанц" not in caption
     lines = await svc.manor_lines(CANARY, [item])
     assert "action=drink" in lines
@@ -113,7 +114,7 @@ async def test_drink_consumes_the_bottle_and_sets_tipsy_for_three_hours(store):
     assert raw["expires_at"] == (clock.now + timedelta(hours=3)).isoformat()
     # Альфред: реплика после глотка и снимок с бокалом (селфи).
     assert svc.spoken and "распили" in svc.spoken[0][0]
-    await engine.asyncio.gather(*list(svc._photo_tasks))
+    await asyncio.gather(*list(svc._photo_tasks))
     shot = link.generated[-1]
     assert "glass of dark red wine" in shot["description"]
     assert "size" not in shot  # обычный размер: фотоаппарата нет

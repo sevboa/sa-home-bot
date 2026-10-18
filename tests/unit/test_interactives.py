@@ -15,7 +15,7 @@ import pytest
 import pytest_asyncio
 
 from sa_home_bot.bot import tools as ai_tools
-from sa_home_bot.bot.interactives import engine, radio
+from sa_home_bot.bot.interactives import keyboards, radio, registry
 from sa_home_bot.bot.interactives.base import (
     STATUS_ACTIVE,
     STATUS_DECLINED,
@@ -27,7 +27,8 @@ from sa_home_bot.bot.interactives.base import (
     Run,
 )
 from sa_home_bot.bot.interactives.director import DirectorDecision, parse_decision
-from sa_home_bot.bot.interactives.engine import Interactives, apply_decision
+from sa_home_bot.bot.interactives.engine import Interactives
+from sa_home_bot.bot.interactives.scene import apply_decision
 from sa_home_bot.bot.interactives.transylvania import Transylvania
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.config import LlmConfig, Settings
@@ -49,7 +50,7 @@ FAST_RADIO = dataclasses.replace(
 @pytest.fixture(autouse=True)
 def _fast_radio(monkeypatch):
     monkeypatch.setattr(radio, "RADIO", FAST_RADIO)
-    monkeypatch.setitem(engine.REGISTRY, FAST_RADIO.id, FAST_RADIO)
+    monkeypatch.setitem(registry.REGISTRY, FAST_RADIO.id, FAST_RADIO)
 
 
 def test_radio_pacing_stage_needs_two_turns_and_finale_not_before_tenth():
@@ -171,9 +172,9 @@ async def _run(store, chat=GUEST) -> Run:
 
 async def _play(svc, store):
     await _turn(svc, COMPLAINT)
-    assert await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_PLAY) == (
+    assert await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_PLAY) == (
         "Хорошо.",
-        radio.RADIO.offer_text + engine.OFFER_YES_SUFFIX,
+        radio.RADIO.offer_text + keyboards.offer_suffix("Да"),
         True,
     )
 
@@ -226,7 +227,7 @@ async def test_play_starts_scene_with_note_for_alfred(store):
 async def test_yes_makes_alfred_react_with_conversation_context(store):
     svc, _, link = _make(store)
     await _turn(svc, COMPLAINT, reply="Я говогю безупгечно.")
-    await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_PLAY)
+    await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_PLAY)
     created = [args for action, args in link.calls if action == task_protocol.ACTION_CREATE]
     assert len(created) == 1
     directive = created[0]["args"]["messages"][0]["content"]
@@ -240,7 +241,7 @@ async def test_yes_reply_goes_to_the_forms_thread_and_dialogue(store):
     await _turn(svc, COMPLAINT)
     form_id = notifier._next  # форма согласия записана в диалог 77
     await svc.handle_click(
-        GUEST, GUEST, "radio", engine.BTN_PLAY, message_id=form_id, message_thread_id=42
+        GUEST, GUEST, "radio", keyboards.BTN_PLAY, message_id=form_id, message_thread_id=42
     )
     meta = next(a for act, a in link.calls if act == task_protocol.ACTION_CREATE)["meta"]
     assert meta["message_thread_id"] == 42
@@ -251,7 +252,7 @@ async def test_yes_reply_goes_to_the_forms_thread_and_dialogue(store):
 async def test_no_keeps_alfred_silent(store):
     svc, _, link = _make(store)
     await _turn(svc, COMPLAINT)
-    await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_NEVER)
+    await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_NEVER)
     assert task_protocol.ACTION_CREATE not in link.actions()
 
 
@@ -339,7 +340,7 @@ async def test_later_gives_cooldown_then_offers_again(store):
     clock = Clock()
     svc, notifier, _ = _make(store, clock=clock)
     await _turn(svc, COMPLAINT)
-    await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_LATER)
+    await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_LATER)
     assert (await _run(store)).status == STATUS_DECLINED
     await _turn(svc, COMPLAINT)
     assert len(notifier.texts(GUEST)) == 1  # в кулдауне — молчим
@@ -354,8 +355,8 @@ async def test_no_is_only_a_pause_not_an_opt_out(store):
     clock = Clock()
     svc, notifier, _ = _make(store, clock=clock)
     await _turn(svc, COMPLAINT)
-    answer, text, _ = await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_NEVER)
-    assert text == radio.RADIO.offer_text + engine.OFFER_NO_SUFFIX
+    answer, text, _ = await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_NEVER)
+    assert text == radio.RADIO.offer_text + keyboards.offer_suffix("Нет")
     assert not await svc.is_opted_out(GUEST)
     await _turn(svc, COMPLAINT)
     assert len(notifier.texts(GUEST)) == 1  # пауза — не предлагаем
@@ -369,9 +370,9 @@ async def test_offer_expires_after_ttl(store):
     svc, _, _ = _make(store, clock=clock)
     await _turn(svc, COMPLAINT)
     clock.now += timedelta(hours=2)
-    assert await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_PLAY) == (
+    assert await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_PLAY) == (
         "Вопрос уже неактуален.",
-        radio.RADIO.offer_text + engine.OFFER_EXPIRED_SUFFIX,
+        radio.RADIO.offer_text + keyboards.OFFER_EXPIRED_SUFFIX,
         True,
     )
     assert (await _run(store)).status == STATUS_DECLINED
@@ -380,18 +381,18 @@ async def test_offer_expires_after_ttl(store):
 async def test_offer_buttons_only_for_that_guest_and_only_once(store):
     svc, _, _ = _make(store)
     await _turn(svc, COMPLAINT)
-    assert (await svc.handle_click(GUEST, OTHER, "radio", engine.BTN_PLAY))[0] == (
+    assert (await svc.handle_click(GUEST, OTHER, "radio", keyboards.BTN_PLAY))[0] == (
         "Эта форма не для вас."
     )
-    await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_PLAY)
-    assert (await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_LATER))[0] == "Уже решено."
+    await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_PLAY)
+    assert (await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_LATER))[0] == "Уже решено."
 
 
 async def test_exit_button_pauses_and_next_complaint_asks_again(store):
     svc, notifier, _ = _make(store)
     await _play(svc, store)
-    answer, text, drop = await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_EXIT)
-    assert (answer, text, drop) == (engine.EXIT_ALERT, None, True)
+    answer, text, drop = await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_EXIT)
+    assert (answer, text, drop) == (keyboards.EXIT_ALERT, None, True)
     assert (await _run(store)).status == STATUS_PAUSED
     plan = await _turn(svc, COMPLAINT)
     assert plan.offered
@@ -572,7 +573,7 @@ async def test_swap_accept_completes_globally_and_clears_speech(store):
     await _reach_finale(svc, store, link)
     assert await ai_tools.tool_swap_radio(_ctx(svc), {}) == radio.TOOL_SWAP_FORM
     await svc.flush_forms(GUEST)
-    answer, text, _ = await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_SWAP)
+    answer, text, _ = await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_SWAP)
     assert text == radio.SWAP_ACCEPTED_TEXT
     assert (await _run(store)).status == STATUS_DONE
     assert ("set_speech_clear", {"user_id": GUEST, "clear": True}) in link.calls
@@ -583,14 +584,14 @@ async def test_swap_accept_completes_globally_and_clears_speech(store):
     other = await svc.before_turn(GROUP, OTHER, "привет", is_private=False)
     assert other.speech_clear is False
     # Повторное нажатие — уже решено.
-    assert (await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_SWAP))[0] == "Уже решено."
+    assert (await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_SWAP))[0] == "Уже решено."
 
 
 async def test_swap_works_when_llm_asleep_mirror_heals_later(store):
     svc, _, link = _make(store)
     await _reach_finale(svc, store, link)
     link.fail_llm = True
-    _, text, _ = await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_SWAP)
+    _, text, _ = await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_SWAP)
     assert text == radio.SWAP_ACCEPTED_TEXT
     assert await svc.speech_clear(GUEST) is True
 
@@ -598,7 +599,7 @@ async def test_swap_works_when_llm_asleep_mirror_heals_later(store):
 async def test_keep_old_radio_leaves_finale_open(store):
     svc, _, link = _make(store)
     await _reach_finale(svc, store, link)
-    assert (await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_KEEP))[1] == (
+    assert (await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_KEEP))[1] == (
         radio.SWAP_KEPT_TEXT
     )
     run = await _run(store)
@@ -610,10 +611,10 @@ async def test_return_old_radio_only_after_completion(store):
     svc, notifier, link = _make(store)
     # До завершения «вернуть» нет: тул лишь предлагает сцену.
     assert await ai_tools.tool_swap_radio(_ctx(svc), {}) == radio.TOOL_OFFER
-    assert (await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_RETURN_OLD))[0] == (
+    assert (await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_RETURN_OLD))[0] == (
         "Эта форма не для вас."
     )
-    await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_LATER)
+    await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_LATER)
     await InteractiveStore(store).mark_completed("radio", GUEST)
     await InteractiveStore(store).set_effect("speech_clear", GUEST, "1")
     # После — переключатель, в любом чате, без сцены.
@@ -621,14 +622,14 @@ async def test_return_old_radio_only_after_completion(store):
     assert await ai_tools.tool_swap_radio(ctx, {}) == radio.TOOL_RETURN_FORM
     await svc.flush_forms(GROUP)
     assert notifier.texts(GROUP) == [radio.RETURN_FORM_TEXT]
-    _, text, _ = await svc.handle_click(GROUP, GUEST, "radio", engine.BTN_RETURN_OLD)
+    _, text, _ = await svc.handle_click(GROUP, GUEST, "radio", keyboards.BTN_RETURN_OLD)
     assert text == radio.RETURN_ACCEPTED_TEXT
     assert await svc.speech_clear(GUEST) is False
     assert await ai_tools.tool_swap_radio(ctx, {}) == radio.TOOL_REINSTALL_FORM
-    _, text, _ = await svc.handle_click(GROUP, GUEST, "radio", engine.BTN_INSTALL_NEW)
+    _, text, _ = await svc.handle_click(GROUP, GUEST, "radio", keyboards.BTN_INSTALL_NEW)
     assert text == radio.REINSTALL_ACCEPTED_TEXT
     assert await svc.speech_clear(GUEST) is True
-    assert (await svc.handle_click(GROUP, GUEST, "radio", engine.BTN_INSTALL_NEW))[0] == "Уже так."
+    assert (await svc.handle_click(GROUP, GUEST, "radio", keyboards.BTN_INSTALL_NEW))[0] == "Уже так."
 
 
 async def test_progress_is_per_chat(store):

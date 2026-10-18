@@ -16,7 +16,7 @@ from aiogram.types import CallbackQuery, Message
 
 from sa_home_bot.bot import commands
 from sa_home_bot.bot.away import AwayService
-from sa_home_bot.bot.interactives import engine
+from sa_home_bot.bot.interactives import keyboards
 from sa_home_bot.bot.interactives.engine import Interactives
 
 log = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 router = Router(name="interactives")
 
 
-@router.callback_query(F.data.startswith(f"{engine.CALLBACK_PREFIX}:"))
+@router.callback_query(F.data.startswith(f"{keyboards.CALLBACK_PREFIX}:"))
 async def cb_interactive(
     callback: CallbackQuery,
     interactives: Interactives | None = None,
@@ -36,7 +36,7 @@ async def cb_interactive(
         if note is not None:
             await callback.answer(note, show_alert=True)
             return
-    parsed = engine.parse_callback(callback.data)
+    parsed = keyboards.parse_callback(callback.data)
     message = callback.message
     if (
         parsed is None
@@ -56,7 +56,7 @@ async def cb_interactive(
         message_id=message.message_id,
         message_thread_id=getattr(message, "message_thread_id", None),
     )
-    alert = button == engine.BTN_EXIT
+    alert = button == keyboards.BTN_EXIT
     await callback.answer(answer, show_alert=alert)
     try:
         if new_text is not None:
@@ -95,13 +95,13 @@ async def cmd_interactives(
         return
     if arg in ("off", "выкл", "нет"):
         await interactives.set_opted_out(chat_id, True)
-        await message.answer(engine.OPT_OUT_TEXT)
+        await message.answer(keyboards.OPT_OUT_TEXT)
         return
     if arg in ("", "on", "вкл", "да"):
         if arg == "" and not await interactives.is_opted_out(chat_id):
             await message.answer("Интерактивы в этом чате включены. Выключить — /interactives off.")
             return
         await interactives.set_opted_out(chat_id, False)
-        await message.answer(engine.OPT_IN_TEXT)
+        await message.answer(keyboards.OPT_IN_TEXT)
         return
     await message.answer("Использование: /interactives on | off")

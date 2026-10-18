@@ -14,7 +14,7 @@ import pytest_asyncio
 from PIL import Image
 
 from sa_home_bot.bot.handlers.interactives import cmd_interactives
-from sa_home_bot.bot.interactives import cellar, engine, places, radio
+from sa_home_bot.bot.interactives import cellar, keyboards, offers, places, radio, registry
 from sa_home_bot.bot.interactives.base import (
     STATUS_ACTIVE,
     STATUS_DECLINED,
@@ -23,6 +23,7 @@ from sa_home_bot.bot.interactives.base import (
     STATUS_OFFERED,
     InteractiveStore,
     Run,
+    parse_iso,
 )
 from sa_home_bot.bot.interactives.engine import Interactives
 from sa_home_bot.bot.interactives.transylvania import Transylvania
@@ -191,7 +192,7 @@ async def _offered(svc, store):
 
 async def _active(svc, store):
     await _offered(svc, store)
-    answer = await svc.handle_click(CANARY, CANARY, cellar.SCENARIO_ID, engine.BTN_PLAY)
+    answer = await svc.handle_click(CANARY, CANARY, cellar.SCENARIO_ID, keyboards.BTN_PLAY)
     assert answer[0] == "Хорошо."
     assert (await _run(store)).status == STATUS_ACTIVE
 
@@ -289,7 +290,7 @@ async def test_spontaneous_only_in_private_and_not_when_opted_out(store):
 async def test_spontaneous_not_during_another_scene(store):
     svc, notifier, _ = _make(store, dice=Dice(0.0))
     await _turn(svc, "Альфред, ты картавишь!")  # радио предложено
-    await svc.handle_click(CANARY, CANARY, radio.RADIO.id, engine.BTN_PLAY)  # и идёт
+    await svc.handle_click(CANARY, CANARY, radio.RADIO.id, keyboards.BTN_PLAY)  # и идёт
     for _ in range(6):
         plan = await _turn(svc)
         assert plan.scenario != cellar.SCENARIO_ID
@@ -330,7 +331,7 @@ async def test_refusal_cools_down_for_three_days(store):
     clock = Clock()
     svc, notifier, _ = _make(store, dice=Dice(0.0), clock=clock)
     await _offered(svc, store)
-    answer = await svc.handle_click(CANARY, CANARY, cellar.SCENARIO_ID, engine.BTN_NEVER)
+    answer = await svc.handle_click(CANARY, CANARY, cellar.SCENARIO_ID, keyboards.BTN_NEVER)
     assert answer[1] == cellar.OFFER_TEXT + "\n<i>— Не обращать внимания</i>"
     run = await _run(store)
     assert run.status == STATUS_DECLINED
@@ -347,7 +348,7 @@ async def test_refusal_cools_down_for_three_days(store):
 async def test_yes_button_text_and_alfred_goes_to_the_cellar_door(store):
     svc, _, _ = _make(store, dice=Dice(0.0))
     await _offered(svc, store)
-    answer = await svc.handle_click(CANARY, CANARY, cellar.SCENARIO_ID, engine.BTN_PLAY)
+    answer = await svc.handle_click(CANARY, CANARY, cellar.SCENARIO_ID, keyboards.BTN_PLAY)
     assert answer == ("Хорошо.", cellar.OFFER_TEXT + "\n<i>— Проверьте</i>", True)
     at = await places.get_at(store, CANARY)
     assert at is not None and at.place == places.PLACE_CELLAR_DOOR
@@ -364,7 +365,7 @@ async def test_yes_in_words_starts_the_scene_this_turn(store):
     offer_id = notifier._next
     plan = await svc.before_turn(CANARY, CANARY, "Да, проверь, что там внизу", is_private=True)
     assert plan.scene and plan.scenario == cellar.SCENARIO_ID
-    assert engine.AGREED_BY_WORDS_NOTE in plan.note
+    assert offers.AGREED_BY_WORDS_NOTE in plan.note
     assert (await _run(store)).status == STATUS_ACTIVE
     at = await places.get_at(store, CANARY)
     assert at is not None and at.place == places.PLACE_CELLAR_DOOR
@@ -380,7 +381,7 @@ async def test_no_in_words_declines_with_cooldown(store):
     assert not plan.scene
     run = await _run(store)
     assert run.status == STATUS_DECLINED
-    assert engine.parse_iso(run.declined_until) > svc._now() + timedelta(days=2)
+    assert parse_iso(run.declined_until) > svc._now() + timedelta(days=2)
     assert notifier.edited[-1][2].endswith("<i>— Не обращать внимания</i>")
 
 
@@ -390,7 +391,7 @@ async def test_other_talk_keeps_the_offer_and_its_buttons(store):
     await _turn(svc, "Разошли всем уведомление про VPN")
     assert (await _run(store)).status == STATUS_OFFERED
     assert notifier.unmarked == [] and notifier.edited == []
-    answer = await svc.handle_click(CANARY, CANARY, cellar.SCENARIO_ID, engine.BTN_PLAY)
+    answer = await svc.handle_click(CANARY, CANARY, cellar.SCENARIO_ID, keyboards.BTN_PLAY)
     assert answer[0] == "Хорошо."
 
 
@@ -407,12 +408,12 @@ async def test_offer_still_expires_after_an_hour(store):
 
 @pytest.mark.parametrize("text", ["не проверяй", "Какая погода?", "проверка связи", "данные"])
 def test_words_regexes_do_not_misread(text):
-    assert not engine.OFFER_YES_WORDS_RE.match(text)
+    assert not offers.OFFER_YES_WORDS_RE.match(text)
 
 
 @pytest.mark.parametrize("text", ["да", "Ну давай", "Проверьте", "сходи глянь", "пойдём вниз"])
 def test_yes_words(text):
-    assert engine.OFFER_YES_WORDS_RE.match(text) and not engine.OFFER_NO_WORDS_RE.match(text)
+    assert offers.OFFER_YES_WORDS_RE.match(text) and not offers.OFFER_NO_WORDS_RE.match(text)
 
 
 async def test_spontaneous_knock_not_on_a_photo_request(store):
@@ -830,7 +831,7 @@ async def test_radio_scene_pulls_a_canary_back_to_the_study_but_canary_scenes_ke
         stage_places=(),
         start_place=None,
     )
-    engine.REGISTRY["ghost"] = ghost
+    registry.REGISTRY["ghost"] = ghost
     try:
         await svc._state.save_run(
             Run(scenario="ghost", chat_id=CANARY, user_id=CANARY, status=STATUS_ACTIVE)
@@ -849,4 +850,4 @@ async def test_radio_scene_pulls_a_canary_back_to_the_study_but_canary_scenes_ke
         assert plan.scenario == "radio"
         assert (await places.get_at(store, CANARY)).in_cabinet
     finally:
-        engine.REGISTRY.pop("ghost", None)
+        registry.REGISTRY.pop("ghost", None)

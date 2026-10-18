@@ -19,7 +19,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from sa_home_bot.bot import commands
-from sa_home_bot.bot.interactives import engine
+from sa_home_bot.bot.interactives import keyboards
 from sa_home_bot.bot.interactives.engine import Interactives
 
 log = logging.getLogger(__name__)
@@ -27,9 +27,9 @@ log = logging.getLogger(__name__)
 router = Router(name="items")
 
 
-@router.callback_query(F.data.startswith(f"{engine.ITEM_CALLBACK_PREFIX}:"))
+@router.callback_query(F.data.startswith(f"{keyboards.ITEM_CALLBACK_PREFIX}:"))
 async def cb_item(callback: CallbackQuery, interactives: Interactives | None = None) -> None:
-    parsed = engine.parse_item_callback(callback.data)
+    parsed = keyboards.parse_item_callback(callback.data)
     message = callback.message
     if (
         parsed is None

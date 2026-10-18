@@ -195,15 +195,6 @@ def passage_id(a: Cell, a_side: str) -> str:
     return f"{a[0]},{a[1]}{a_side}"
 
 
-def _cell_key(cell: Cell) -> str:
-    return f"{cell[0]},{cell[1]}"
-
-
-def _parse_cell(raw: str) -> Cell:
-    x, y = raw.split(",")
-    return (int(x), int(y))
-
-
 def _place_to_dict(p: Described) -> dict[str, Any]:
     return {
         "describe": p.describe,
@@ -428,9 +419,6 @@ class Maze:
             self._open.discard((node.cell, side))
 
     # --- доступ ---
-
-    def node_at(self, cell: Cell) -> Node:
-        return self.nodes[cell]
 
     def passage_of(self, node: Node, side: str) -> Passage | None:
         pid = node.exits.get(side)
@@ -730,11 +718,13 @@ def set_description(place: Described, describe: str, spots: list[str] | None = N
     place.spots = [Spot(name=s.strip()) for s in (spots or []) if s and s.strip()]
 
 
-def set_image(place: Described, image_id: int, file_id: str | None = None) -> None:
+def set_image(
+    place: Described, image_id: int, file_id: str | None = None, *, image_key: str | None = None
+) -> None:
     place.image_id = image_id
     place.file_id = file_id
     if isinstance(place, Node):
-        place.image_key = node_frame_key(place)
+        place.image_key = image_key if image_key is not None else node_frame_key(place)
 
 
 # --- навигация ---

@@ -9,7 +9,15 @@ import json
 import pytest_asyncio
 
 from sa_home_bot.bot import tools as ai_tools
-from sa_home_bot.bot.interactives import acts, cellar, director, engine, places, underground
+from sa_home_bot.bot.interactives import (
+    acts,
+    cellar,
+    director,
+    keyboards,
+    photo_text,
+    places,
+    underground,
+)
 from sa_home_bot.bot.interactives.base import STATUS_ACTIVE, STATUS_DONE, Run
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
@@ -243,7 +251,7 @@ async def test_facts_are_seen_by_alfred_the_director_and_the_snapshot(store):
     await svc.after_turn(plan, "Ну?", dialogue_id=1)
     assert "- доски сняты" in link.director_inputs[-1]
     # Снимок: состояние сцены в описании общего вида.
-    description, _ = engine.photo_description(
+    description, _ = photo_text.photo_description(
         await svc._room(CANARY, CANARY),
         await svc._transylvania.outside(svc._now()),
         "",
@@ -343,7 +351,7 @@ async def test_act_in_the_study_outside_a_scene_has_nothing_to_do(store):
 async def test_act_during_the_radio_scene_is_not_for_the_director(store):
     svc, _, link = _make(store, dice=Dice(0.99))
     await _turn(svc, "Альфред, ты картавишь!")
-    await svc.handle_click(CANARY, CANARY, "radio", engine.BTN_PLAY)
+    await svc.handle_click(CANARY, CANARY, "radio", keyboards.BTN_PLAY)
     await _begin(svc, "Что с радио?")
     assert await svc.tool_act(CANARY, CANARY, "покрутить ручку") == acts.TOOL_ACT_CABINET
     assert link.director_inputs == []
@@ -391,7 +399,7 @@ def test_declaration_and_registration():
 
 def test_scene_frames_demand_acts_for_physical_actions():
     assert "только инструментом act" in cellar.CELLAR.scene_frame
-    assert "только инструментом act" in engine.underground.CATACOMBS.scene_frame
+    assert "только инструментом act" in underground.CATACOMBS.scene_frame
     # Альфред заранее не знает про замок; Ведущему сказано, что он за досками.
     assert "замок" not in cellar.CELLAR.ladder[0].lower()
     assert "РЖАВЫЙ ЗАПЕРТЫЙ ЗАМОК" in cellar.CELLAR.act_prompt

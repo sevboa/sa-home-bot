@@ -15,7 +15,7 @@ import pytest
 import pytest_asyncio
 from PIL import Image
 
-from sa_home_bot.bot.interactives import cellar, engine, radio
+from sa_home_bot.bot.interactives import cellar, keyboards, radio, registry
 from sa_home_bot.bot.interactives.base import STATUS_OFFERED, InteractiveStore, Run
 from sa_home_bot.bot.interactives.engine import Interactives
 from sa_home_bot.bot.interactives.transylvania import Transylvania
@@ -78,7 +78,7 @@ def ghost(monkeypatch):
         offer_text="Вы слышите шорох?",
         trigger_re=re.compile("призрак"),
     )
-    monkeypatch.setitem(engine.REGISTRY, GHOST_ID, scenario)
+    monkeypatch.setitem(registry.REGISTRY, GHOST_ID, scenario)
     return scenario
 
 
@@ -126,7 +126,7 @@ async def test_forged_click_on_canary_scenario_is_refused(store, ghost):
     svc = _make(store)
     run = Run(scenario=GHOST_ID, chat_id=GUEST, user_id=GUEST, status=STATUS_OFFERED)
     await InteractiveStore(store).save_run(run)
-    answer, text, drop = await svc.handle_click(GUEST, GUEST, GHOST_ID, engine.BTN_PLAY)
+    answer, text, drop = await svc.handle_click(GUEST, GUEST, GHOST_ID, keyboards.BTN_PLAY)
     assert (answer, text, drop) == ("Эта форма не для вас.", None, False)
     assert (await svc._state.load_run(GUEST, GHOST_ID)).status == STATUS_OFFERED
 
@@ -264,7 +264,7 @@ async def test_radio_and_cabinet_flow_for_non_canary_is_the_old_one(store):
     _, text, markup = notifier.sent[-1]
     assert text == radio.RADIO.offer_text
     assert [b.text for row in markup.inline_keyboard for b in row] == ["Да", "Нет"]
-    await svc.handle_click(GUEST, GUEST, "radio", engine.BTN_PLAY)
+    await svc.handle_click(GUEST, GUEST, "radio", keyboards.BTN_PLAY)
     plan = await svc.before_turn(GUEST, GUEST, "Слышу «пгивет»", is_private=True)
     assert plan.scene and "За окном" not in plan.note
     await svc.after_turn(plan, "Проверю антенну.", dialogue_id=77)
