@@ -30,6 +30,7 @@ from sa_home_bot.proto.messages import (
     ServiceDescription,
     ServiceInfo,
 )
+from sa_home_bot.proto.server import undeclared_action
 
 log = logging.getLogger(__name__)
 
@@ -661,7 +662,7 @@ class TorrentsService:
             key = "paused" if action == ACTION_PAUSE else "resumed"
             return {key: names, "count": len(names)}
         if action != ACTION_ADD:
-            raise ValueError(f"необъявленное действие: {action}")
+            raise undeclared_action(action)
         source = str(args.get("source") or "")
         name = str(args.get("name") or "торрент")
         save_path = str(args.get("save_path") or "")

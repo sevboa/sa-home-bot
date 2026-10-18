@@ -4,15 +4,7 @@ from sa_home_bot.config import SubscriptionConfig
 from sa_home_bot.proto.messages import Address, make_event
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.tasks import protocol as task_protocol
-
-
-class _FakeNodeLink:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, dict, object]] = []
-
-    async def command(self, action, args=None, dst=None, *, timeout=None):
-        self.calls.append((action, args or {}, dst))
-        return {"task_id": 1}
+from tests.unit.support.fakes import FakeNodeLink
 
 
 class _FakeNotifier:
@@ -50,7 +42,7 @@ def _book() -> SubscriptionBook:
 
 
 async def test_schedule_agent_dialogue_meta_spawns_new_thread_end_to_end():
-    link = _FakeNodeLink()
+    link = FakeNodeLink(result={"task_id": 1})
     messages = [{"role": "user", "content": "A сказал(а), что ты его друг — подтверждаешь?"}]
     other_chat_id = 222
 

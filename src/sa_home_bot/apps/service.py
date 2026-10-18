@@ -17,6 +17,7 @@ from sa_home_bot.proto.messages import (
     ServiceDescription,
     ServiceInfo,
 )
+from sa_home_bot.proto.server import undeclared_action
 from sa_home_bot.utils.requirements import looks_like_permission_error
 
 SERVICE_NAME = "apps"
@@ -138,5 +139,5 @@ class AppsService:
             return await self._app_dict(app)
         app = self._apps.get(action)
         if app is None:
-            raise ValueError(f"необъявленное действие: {action}")
+            raise undeclared_action(action)
         return await self._app_dict(app)

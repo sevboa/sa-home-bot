@@ -41,6 +41,7 @@ from sa_home_bot.proto.messages import (
     ServiceDescription,
     ServiceInfo,
 )
+from sa_home_bot.proto.server import undeclared_action
 from sa_home_bot.reality.client_config import (
     RealityParams,
     render_deep_link,
@@ -2106,4 +2107,4 @@ class VpnService:
             return await self._proxy_rotate_secret(args)
         if action == ACTION_PROXY_USAGE:
             return await self._proxy_usage(args)
-        raise ValueError(f"необъявленное действие: {action}")
+        raise undeclared_action(action)

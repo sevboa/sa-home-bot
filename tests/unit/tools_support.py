@@ -6,6 +6,7 @@ from sa_home_bot.bot import tools
 from sa_home_bot.config import Settings
 from sa_home_bot.proto.errors import ServiceUnavailableError
 from sa_home_bot.subscriptions.models import Subscription
+from tests.unit.support.fakes import FakeNodeLink as SupportNodeLink
 
 CHAT_ID = 111
 
@@ -62,16 +63,9 @@ def declared_enum(tool: str, param: str, subscription) -> list[Any]:
     return declaration["function"]["parameters"]["properties"][param]["enum"]
 
 
-class FakeNodeLink:
+class FakeNodeLink(SupportNodeLink):
     def __init__(self, *, raises: Exception | None = None) -> None:
-        self.calls: list[tuple[str, dict, object]] = []
-        self._raises = raises
-
-    async def command(self, action, args=None, dst=None, *, timeout=None):
-        self.calls.append((action, args or {}, dst))
-        if self._raises is not None:
-            raise self._raises
-        return {"task_id": 1}
+        super().__init__(result={"task_id": 1}, error=raises)
 
 
 OWN_STATE = {

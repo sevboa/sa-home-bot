@@ -19,6 +19,7 @@ from sa_home_bot.proto.messages import (
     ServiceDescription,
     ServiceInfo,
 )
+from sa_home_bot.proto.server import undeclared_action
 from sa_home_bot.sensors.disks import SMARTCTL_REQUIREMENT
 from sa_home_bot.sensors.gpu import NVIDIA_SMI_REQUIREMENT
 from sa_home_bot.sensors.host import KERNEL_JOURNAL_REQUIREMENT
@@ -195,7 +196,7 @@ class MonitorService:
             return await self._downtime_page(args)
         if action == ACTION_HOST_TREND:
             return await self._host_trend_page(args)
-        raise ValueError(f"необъявленное действие: {action}")
+        raise undeclared_action(action)
 
     async def _host_trend_page(self, args: dict[str, Any]) -> dict[str, Any]:
         metric = str(args.get("metric", "")).strip()

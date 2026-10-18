@@ -17,6 +17,7 @@ from sa_home_bot.proto.messages import (
     ServiceDescription,
     ServiceInfo,
 )
+from sa_home_bot.proto.server import undeclared_action
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ class NetService:
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if action != ACTION_SEARCH:
-            raise ValueError(f"необъявленное действие: {action}")
+            raise undeclared_action(action)
         query = str(args.get("query") or "").strip()
         if not query:
             raise ProtoError(ERR_BAD_REQUEST, "не указан поисковый запрос (query)")

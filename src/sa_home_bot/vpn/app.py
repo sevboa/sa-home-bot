@@ -9,6 +9,7 @@ from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
+from sa_home_bot.proto.emitter import DeferredEmitter
 from sa_home_bot.proto.messages import Address
 from sa_home_bot.proto.server import ProtoServer
 from sa_home_bot.reality.xray import RealXrayBackend
@@ -50,14 +51,9 @@ async def run_vpn(settings: Settings) -> None:
     )
     await node_link.start()
 
-    server: ProtoServer | None = None
-
-    async def emit(event_type: str, data: dict) -> None:
-        if server is not None:
-            await server.broadcast_event(event_type, data)
-
+    emitter = DeferredEmitter()
     service = VpnService(
-        settings, db, backend, emit, node_link=node_link, reality_backend=reality_backend
+        settings, db, backend, emitter, node_link=node_link, reality_backend=reality_backend
     )
     partner = settings.backup.partner.strip()
 
@@ -72,6 +68,7 @@ async def run_vpn(settings: Settings) -> None:
     await service.backfill_server()
     await service.backfill_access()
     server = ProtoServer(settings.vpn.socket, service, token=settings.swarm.token)
+    emitter.bind(server)
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
     await server.start()

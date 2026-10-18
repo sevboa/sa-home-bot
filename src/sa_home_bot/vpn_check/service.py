@@ -23,6 +23,7 @@ from sa_home_bot.proto.messages import (
     ServiceDescription,
     ServiceInfo,
 )
+from sa_home_bot.proto.server import undeclared_action
 from sa_home_bot.utils.process import run
 from sa_home_bot.utils.requirements import looks_like_sudo_denied, looks_like_sudo_message
 from sa_home_bot.vpn_check.protocol import ACTION_CHECK, SERVICE_NAME
@@ -83,7 +84,7 @@ class VpnCheckService:
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if action != ACTION_CHECK:
-            raise ValueError(f"необъявленное действие: {action}")
+            raise undeclared_action(action)
         targets = args.get("targets")
         if not isinstance(targets, list) or not targets:
             raise ProtoError(ERR_BAD_REQUEST, "targets должен быть непустым списком URL")

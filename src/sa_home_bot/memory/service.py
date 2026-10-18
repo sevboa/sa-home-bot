@@ -25,6 +25,7 @@ from sa_home_bot.proto.messages import (
     ServiceDescription,
     ServiceInfo,
 )
+from sa_home_bot.proto.server import undeclared_action
 from sa_home_bot.text_search import MIN_WORD_CHARS, WORD_RE, fts_or_query
 from sa_home_bot.utils.clock import utc_now
 from sa_home_bot.utils.text import stem
@@ -225,4 +226,4 @@ class MemoryService:
             return await self._forget(args)
         if action == ACTION_LIST:
             return await self._list(args)
-        raise ValueError(f"необъявленное действие: {action}")
+        raise undeclared_action(action)

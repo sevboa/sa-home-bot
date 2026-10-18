@@ -6,6 +6,7 @@ import logging
 
 from sa_home_bot.config import Settings
 from sa_home_bot.llm.service import LlmService
+from sa_home_bot.proto.emitter import DeferredEmitter
 from sa_home_bot.proto.server import ProtoServer
 from sa_home_bot.utils.lifespan import Lifespan
 
@@ -13,14 +14,10 @@ log = logging.getLogger(__name__)
 
 
 async def run_llm(settings: Settings) -> None:
-    server: ProtoServer | None = None
-
-    async def emit(event_type: str, data: dict) -> None:
-        if server is not None:
-            await server.broadcast_event(event_type, data)
-
-    service = LlmService(settings, emit=emit)
+    emitter = DeferredEmitter()
+    service = LlmService(settings, emit=emitter)
     server = ProtoServer(settings.llm.socket, service, token=settings.swarm.token)
+    emitter.bind(server)
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
     await server.start()

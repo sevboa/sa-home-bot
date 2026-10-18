@@ -35,6 +35,7 @@ from sa_home_bot.proto.messages import (
     ServiceDescription,
     ServiceInfo,
 )
+from sa_home_bot.proto.server import undeclared_action
 from sa_home_bot.utils.clock import utc_now
 
 log = logging.getLogger(__name__)
@@ -354,7 +355,7 @@ class GraphMemoryService:
             return await self._person_claim(args)
         if action == ACTION_PERSON_CARDS:
             return await self._person_cards(args)
-        raise ValueError(f"необъявленное действие: {action}")
+        raise undeclared_action(action)
 
 
     async def _reset_stuck_processing(self) -> None:

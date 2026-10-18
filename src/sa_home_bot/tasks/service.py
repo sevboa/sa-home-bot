@@ -24,6 +24,7 @@ from sa_home_bot.proto.messages import (
     ServiceDescription,
     ServiceInfo,
 )
+from sa_home_bot.proto.server import undeclared_action
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.tasks import protocol
 
@@ -141,7 +142,7 @@ class TasksService:
             return await self._fire_now(args)
         if action == protocol.ACTION_MATCH_EVENT:
             return await self._match_event(args)
-        raise ValueError(f"необъявленное действие: {action}")
+        raise undeclared_action(action)
 
     async def _create(self, args: dict[str, Any]) -> dict[str, Any]:
         due_raw = args.get("due_at")

@@ -52,6 +52,7 @@ from sa_home_bot.proto.messages import (
     ServiceInfo,
     new_id,
 )
+from sa_home_bot.proto.server import undeclared_action
 from sa_home_bot.utils.clock import utc_now
 from sa_home_bot.utils.ids import random_seed32
 
@@ -959,7 +960,7 @@ class LlmService:
             await ollama.preload(self._cfg)
             await self._touch()
             return {"asleep": False}
-        raise ValueError(f"необъявленное действие: {action}")
+        raise undeclared_action(action)
 
     async def _paste_item(
         self,
