@@ -1403,7 +1403,7 @@ class LlmService:
     async def _emit_speech_cured(self) -> None:
         try:
             await self._emit(EVENT_SPEECH_CURED, {})
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("llm: не удалось эмитить %s", EVENT_SPEECH_CURED)
 
     async def _sleep_now(self, *, quiet: bool = False) -> None:
@@ -1420,7 +1420,7 @@ class LlmService:
             self._active_chat_ids.clear()
             try:
                 await self._emit(EVENT_IDLE_SLEEP, {"chat_ids": chat_ids})
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("llm: не удалось эмитить %s", EVENT_IDLE_SLEEP)
 
     async def notify_restart(self) -> None:
@@ -1429,7 +1429,7 @@ class LlmService:
         chat_ids = sorted(self._active_chat_ids)
         try:
             await self._emit(EVENT_SERVICE_RESTART, {"chat_ids": chat_ids})
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("llm: не удалось эмитить %s", EVENT_SERVICE_RESTART)
 
     async def _maybe_sleep_idle(self) -> None:
@@ -1440,7 +1440,7 @@ class LlmService:
             await self._sleep_now()
             try:
                 await self._emit(EVENT_WENT_IDLE, {})
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("llm: не удалось эмитить %s", EVENT_WENT_IDLE)
 
     async def idle_loop(self) -> None:

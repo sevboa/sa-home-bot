@@ -152,7 +152,7 @@ class GraphMemoryService:
                 return self._graphiti
             try:
                 self._graphiti = await self._build_graphiti()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 raise ProtoError(
                     ERR_UNAVAILABLE, f"graph_memory: Neo4j/Ollama недоступны: {exc}"
                 ) from exc
@@ -270,7 +270,7 @@ class GraphMemoryService:
             )
         except TimeoutError as exc:
             raise ProtoError(ERR_UNAVAILABLE, "graph_memory: поиск не уложился в таймаут") from exc
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise ProtoError(ERR_UNAVAILABLE, f"graph_memory: сбой поиска: {exc}") from exc
         facts = [edge.fact for edge in edges]
         return {"facts": facts, "count": len(facts)}
@@ -308,7 +308,7 @@ class GraphMemoryService:
             )
         except TimeoutError as exc:
             raise ProtoError(ERR_UNAVAILABLE, "graph_memory: Neo4j не ответил вовремя") from exc
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise ProtoError(ERR_UNAVAILABLE, f"graph_memory: сбой Neo4j: {exc}") from exc
 
     async def _person_claim(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -393,7 +393,7 @@ class GraphMemoryService:
                 ),
                 timeout=self._cfg.ingest_timeout_s,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             attempts = row["attempts"] + 1
             failed = attempts >= MAX_ATTEMPTS
             log.warning(

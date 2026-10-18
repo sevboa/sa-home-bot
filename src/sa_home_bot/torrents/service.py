@@ -298,7 +298,7 @@ class TorrentsService:
                 "(проверьте [torrents].search_engine_dir)",
             )
         try:
-            proc = subprocess.run(  # noqa: S603
+            proc = subprocess.run(
                 [sys.executable, str(nova), plugin, url],
                 capture_output=True,
                 timeout=PLUGIN_FETCH_TIMEOUT_S,
@@ -358,7 +358,7 @@ class TorrentsService:
 
         request = urllib.request.Request(page, headers={"User-Agent": DETAILS_UA})
         try:
-            with urllib.request.urlopen(request, timeout=DETAILS_TIMEOUT_S) as resp:  # noqa: S310
+            with urllib.request.urlopen(request, timeout=DETAILS_TIMEOUT_S) as resp:
                 raw = resp.read()
                 charset = resp.headers.get_content_charset() or "utf-8"
         except (urllib.error.URLError, TimeoutError, OSError) as exc:

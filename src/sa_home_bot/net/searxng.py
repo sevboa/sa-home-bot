@@ -18,7 +18,7 @@ class SearxngError(RuntimeError):
 
 
 def _get_json_sync(url: str, timeout: float) -> Any:
-    with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
         return json.loads(resp.read())
 
 

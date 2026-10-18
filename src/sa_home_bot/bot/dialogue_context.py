@@ -303,7 +303,7 @@ async def recall_verbatim(
             max_message_id=history.max_hidden_id,
             limit=_RECALL_CANDIDATES,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("dialogue_context: поиск по ai_turns_fts упал (chat=%s)", chat_id)
         return None, 0
     if not hits:
@@ -470,7 +470,7 @@ class DialogueCompressor:
                 dialogue_id,
                 timeout,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     async def compress_now(
@@ -493,7 +493,7 @@ class DialogueCompressor:
             await self._compress(
                 target, min_turns=target.settings.llm.context_min_compress_turns
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception(
                 "dialogue_context: фоновое сжатие упало (chat=%s, dialogue=%s)",
                 target.chat_id,

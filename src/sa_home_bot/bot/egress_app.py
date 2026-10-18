@@ -44,7 +44,7 @@ async def pick_startup_route(bot: Bot, routes: list[str]) -> str | None:
         apply_route(bot.session, route)
         try:
             await bot.get_me(request_timeout=REQUEST_TIMEOUT_S)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("egress: на старте %s не отвечает: %s", route, exc)
             continue
         if route != routes[0]:
@@ -117,7 +117,7 @@ class OutboxFlusher:
     async def flush(self) -> None:
         try:
             sent = await flush_outbox(self._notifier, self._store)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.warning("outbox: флаш упал", exc_info=True)
             return
         if sent:

@@ -168,7 +168,7 @@ def read_uptime_sync() -> timedelta | None:
 
         boot = datetime.fromtimestamp(psutil.boot_time(), tz=UTC)
         return datetime.now(tz=UTC) - boot
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("Не удалось получить аптайм: %s", exc)
         return None
 

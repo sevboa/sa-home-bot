@@ -168,7 +168,7 @@ class AwayReturn:
             history.insert(len(history) - 1, wrap_context_note(RETURN_NOTE))
             message = build_message(self._notifier.bot, chat_id, entry)
             raw = await self._ask(message, node_link, dialogue_id, history)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("away: возвращение — чат %s не разобран", chat_id)
             raw = None
             last_id = 0
@@ -188,7 +188,7 @@ class AwayReturn:
         dialogue_id: int,
         history: list[dict[str, Any]],
     ) -> str | None:
-        from sa_home_bot.bot.handlers import ai as ai_handler  # noqa: PLC0415
+        from sa_home_bot.bot.handlers import ai as ai_handler
 
         return await ai_handler._ask_and_reply(
             message,
@@ -254,7 +254,7 @@ class AwayReturn:
             try:
                 buf = await self._notifier.bot.download(file_id)
                 return buf.read() if buf is not None else None
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.warning("away: файл не скачать по file_id", exc_info=True)
         return None
 
@@ -292,7 +292,7 @@ class AwayRunner:
                 await self.tick()
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("away: проход не удался")
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._kick.wait(), self._tick_s)

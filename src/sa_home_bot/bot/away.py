@@ -535,7 +535,7 @@ class AwayService:
             if fresh is not None:
                 try:
                     await message.reply(f"<i>{note_text(fresh, now)}</i>")
-                except Exception:  # noqa: BLE001
+                except Exception:
                     log.warning("away: записка не ушла (chat=%s)", chat_id, exc_info=True)
         return True
 
@@ -563,7 +563,7 @@ class AwayService:
     async def _content_for(
         self, message: Message, kind: str, text: str, media: tuple[str, Any] | None
     ) -> str | None:
-        from sa_home_bot.bot.handlers import ai as ai_handler  # noqa: PLC0415
+        from sa_home_bot.bot.handlers import ai as ai_handler
 
         if kind == KIND_TEXT:
             return text
@@ -617,7 +617,7 @@ class AwayService:
             target = self.media_dir / f"{chat_id}_{message.message_id}.{kind}"
             await message.bot.download(obj, destination=target)
             path = str(target)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.warning(
                 "away: не удалось скачать файл (chat=%s, msg=%s)", chat_id, message.message_id,
                 exc_info=True,

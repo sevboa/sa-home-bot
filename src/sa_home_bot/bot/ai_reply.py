@@ -100,7 +100,7 @@ async def _plan_interactive_turn(
             user_text,
             is_private=_is_private(message),
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("ai: интерактивы — before_turn упал (chat=%s)", message.chat.id)
         return None
 
@@ -187,7 +187,7 @@ async def _request_reply(
             streaming_session,
             **_request_extras(services, turn_plan),
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.exception("ai: необработанная ошибка в диалоге chat=%s", message.chat.id)
         await message.answer(UNHANDLED_ERROR_TEXT)
         await ai_flow.notify_admins(
@@ -249,7 +249,7 @@ async def _mood_selfie(
             trigger_message_id=message.message_id,
             on_status=streaming_session.push_status if streaming_session is not None else None,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("ai: селфи к ответу упало (chat=%s)", message.chat.id)
         return None
 
@@ -357,7 +357,7 @@ async def _after_delivery(
                 dialogue_id=dialogue_id,
                 message_thread_id=message.message_thread_id,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("ai: интерактивы — after_turn упал (chat=%s)", message.chat.id)
     if dismissal.mode is not None:
         await ai_flow.perform_dismissal(
@@ -381,7 +381,7 @@ async def _close_turn(
             await services.pending_actions.flush_drafts(
                 message.chat.id, dialogue_id, message.message_thread_id
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("ai: не удалось отправить формы (chat=%s)", message.chat.id)
     interactives = services.interactives
     if interactives is not None and message.chat is not None:
@@ -395,7 +395,7 @@ async def _close_turn(
                     dialogue_id=dialogue_id,
                     message_thread_id=message.message_thread_id,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("ai: не удалось отправить формы сцены (chat=%s)", message.chat.id)
 
 

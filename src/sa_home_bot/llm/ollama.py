@@ -50,7 +50,7 @@ def _json_post_request(url: str, payload: dict[str, Any]) -> urllib.request.Requ
 
 def _post_json_sync(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
     try:
-        with urllib.request.urlopen(_json_post_request(url, payload), timeout=timeout) as resp:  # noqa: S310
+        with urllib.request.urlopen(_json_post_request(url, payload), timeout=timeout) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         _append_error_body(exc)
@@ -67,7 +67,7 @@ def _post_json_stream_sync(
     thinking_parts: list[str] = []
     final: dict[str, Any] = {}
     try:
-        with urllib.request.urlopen(_json_post_request(url, payload), timeout=timeout) as resp:  # noqa: S310
+        with urllib.request.urlopen(_json_post_request(url, payload), timeout=timeout) as resp:
             for raw_line in resp:
                 line = raw_line.strip()
                 if not line:

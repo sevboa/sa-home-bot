@@ -105,7 +105,7 @@ class AgentMcpTools:
         )
         try:
             result_text = await handler(tool_ctx, dict(params.arguments or {}))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("agent.mcp_tools: тул %s упал", params.name)
             return types.CallToolResult(
                 content=[

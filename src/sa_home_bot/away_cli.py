@@ -36,7 +36,7 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
 
 
 async def _run(args: argparse.Namespace, settings: Settings) -> int:
-    from sa_home_bot.bot.away import (  # noqa: PLC0415
+    from sa_home_bot.bot.away import (
         SET_BY_CLAUDE,
         AwayError,
         AwayService,
@@ -45,8 +45,8 @@ async def _run(args: argparse.Namespace, settings: Settings) -> int:
         parse_extend,
         status_text,
     )
-    from sa_home_bot.db.connection import Database  # noqa: PLC0415
-    from sa_home_bot.db.store import Store  # noqa: PLC0415
+    from sa_home_bot.db.connection import Database
+    from sa_home_bot.db.store import Store
 
     path = settings.database.path
     if not path.exists():

@@ -472,7 +472,7 @@ class _AlfredTurn:
                 done_reason=stats.done_reason,
                 at=utc_now(),
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("ai_flow: не удалось сохранить замер окна (chat=%s)", self.log_chat_id)
 
     def _tool_context(self) -> ai_tools.ToolContext:

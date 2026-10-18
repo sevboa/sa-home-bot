@@ -57,7 +57,7 @@ class ShutdownBudget:
                 self._dumped = True
                 dump_pending_tasks()
             return False
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("Останов: шаг «%s» завершился ошибкой", name)
             return False
 

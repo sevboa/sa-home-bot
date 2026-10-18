@@ -33,6 +33,6 @@ class JobWorker:
                 run_id, "ok", utc_now(), metrics_json=result.to_json()
             )
             log.info("Job %s завершён: %s", job.job_type, result.to_json())
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("Job %s упал", job.job_type)
             await self._ctx.store.finish_job_run(run_id, "error", utc_now(), error=str(exc))

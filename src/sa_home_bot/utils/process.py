@@ -26,7 +26,7 @@ async def run(
     argv: list[str] | tuple[str, ...],
     *,
     timeout: float | None = None,
-    input: bytes | None = None,  # noqa: A002
+    input: bytes | None = None,
     stdout: Stream = asyncio.subprocess.PIPE,
     stderr: Stream = asyncio.subprocess.PIPE,
 ) -> ProcResult:

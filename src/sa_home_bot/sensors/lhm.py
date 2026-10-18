@@ -161,12 +161,12 @@ def _ensure_runtime() -> None:
             return
         _runtime_load_attempted = True
         try:
-            import pythonnet  # noqa: PLC0415
+            import pythonnet
         except ImportError:
             return
         try:
             pythonnet.load(os.environ.get("PYTHONNET_RUNTIME", "netfx"))
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
 
@@ -204,7 +204,7 @@ def _open_computer(dll: Path):
         ) from exc
     sys.path.append(str(dll.parent))
     clr.AddReference(dll.stem)
-    from LibreHardwareMonitor import Hardware  # noqa: PLC0415
+    from LibreHardwareMonitor import Hardware
 
     computer = Hardware.Computer()
     computer.IsCpuEnabled = True
@@ -256,7 +256,7 @@ def _hardware_node(hw) -> dict:
 def _safe_hardware_node(hw) -> dict | None:
     try:
         return _hardware_node(hw)
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.warning("LHM: узел %s пропущен из-за ошибки", hw.Identifier, exc_info=True)
         return None
 
@@ -279,7 +279,7 @@ def _safe_tree(dll_path: str) -> list[dict]:
         tree = read_tree_sync(dll_path)
     except LhmUnavailable as exc:
         _last_error = str(exc)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         _last_error = f"ошибка LibreHardwareMonitor: {exc}"
     else:
         _last_error = None

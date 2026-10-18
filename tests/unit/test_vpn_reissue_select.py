@@ -5,7 +5,7 @@ from sa_home_bot.bot import vpn_settings as vs
 from sa_home_bot.proto.messages import ProtoError
 from sa_home_bot.vpn import protocol as vpn_protocol
 
-from .test_vpn_expert import KEY, Link, _press, _servers  # noqa: F401
+from .test_vpn_expert import KEY, Link, _press, _servers
 from .test_vpn_expert import _fanout as _fanout
 from .vpn_support import all_buttons, button_texts, make_conn
 

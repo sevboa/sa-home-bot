@@ -222,7 +222,7 @@ async def run_chat_loop(
                     await on_tool_start(name, call_args)
                 try:
                     tool_result = await handler(tool_ctx, call_args)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     log.exception("llm_chat: тул %s упал (chat=%s)", name, log_chat_id)
                     tool_result = f"внутренняя ошибка инструмента: {exc}"
             log.info(

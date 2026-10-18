@@ -192,7 +192,7 @@ async def test_invites_disabled_without_guest_package(store):
 
 async def test_guest_can_be_revoked(store, tmp_path):
     gate = _gate(store, tmp_path)
-    book = gate._book  # noqa: SLF001
+    book = gate._book
     code, _ = await gate.issue(chat_id=1, user_id=None)
     await gate.try_admit(77, code)
 
@@ -210,7 +210,7 @@ async def test_add_guest_right_updates_book_and_package(store, tmp_path):
     updated = gate.add_guest_right(77, "usage@vpn")
     assert updated is not None
     assert updated.allows_command("usage@vpn")
-    assert gate._book.for_chat(77).allows_command("usage@vpn")  # noqa: SLF001
+    assert gate._book.for_chat(77).allows_command("usage@vpn")
 
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     assert "usage@vpn" in data["guest_subscriptions"][0]["allowed_commands"]
@@ -251,7 +251,7 @@ async def test_group_is_granted_in_one_package_rewrite(store, tmp_path):
     await gate.try_admit(77, code)
 
     group = guest_rights.group("vpn")
-    sub = gate._book.for_chat(77)  # noqa: SLF001
+    sub = gate._book.for_chat(77)
     updated = gate.set_guest_rights(77, sub.allowed_commands | group.rights)
     assert updated is not None
     assert group.rights <= updated.allowed_commands
@@ -267,10 +267,10 @@ async def test_group_removal_leaves_other_rights_alone(store, tmp_path):
     await gate.try_admit(77, code)
 
     group = guest_rights.group("vpn")
-    gate.set_guest_rights(77, gate._book.for_chat(77).allowed_commands | group.rights)  # noqa: SLF001
+    gate.set_guest_rights(77, gate._book.for_chat(77).allowed_commands | group.rights)
     updated = gate.set_guest_rights(
         77,
-        gate._book.for_chat(77).allowed_commands - group.rights,  # noqa: SLF001
+        gate._book.for_chat(77).allowed_commands - group.rights,
     )
     assert not (group.rights & updated.allowed_commands)
     assert updated.allowed_commands == frozenset({"chat@llm", "search@net"})

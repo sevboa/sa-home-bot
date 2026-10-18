@@ -140,7 +140,7 @@ class SnapshotSource:
             if self._due():
                 try:
                     await self._rebuild()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     log.exception("Бэкап снапшота vpn: сбой сборки")
             return self._cached
 
@@ -179,7 +179,7 @@ class SnapshotSource:
         if snap is not None and self._notify is not None:
             try:
                 await self._notify()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.debug("Бэкап снапшота vpn: напарник не уведомлён (%s)", exc)
 
     async def handle_get(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -254,7 +254,7 @@ class SnapshotReceiver:
             self._wake.clear()
             try:
                 await self.pull_once()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.debug("Бэкап снапшота vpn: не удалось забрать у %s (%s)", self._partner, exc)
 
 

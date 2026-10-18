@@ -20,7 +20,7 @@ class ApkFetchError(RuntimeError):
 
 def _get_json_sync(url: str, timeout: float) -> Any:
     req = urllib.request.Request(url, headers=_HEADERS)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
 
 
@@ -51,7 +51,7 @@ def asset_sha256(asset: dict[str, Any]) -> str | None:
 
 def download_sync(url: str, dest: Path, timeout: float) -> None:
     req = urllib.request.Request(url, headers=_HEADERS)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         with open(dest, "wb") as f:
             shutil.copyfileobj(resp, f)
 

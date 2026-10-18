@@ -90,7 +90,7 @@ class ActionBus:
         for handler in self._subscribers.get(event_type, []):
             try:
                 await handler(data)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("pending_actions: подписчик %s упал", event_type)
 
 
@@ -602,7 +602,7 @@ class PendingActions:
         for task in list(self._timers):
             try:
                 await task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            except (asyncio.CancelledError, Exception):
                 pass
 
 
@@ -624,7 +624,7 @@ class PendingActions:
             if asyncio.iscoroutine(coro):
                 coro.close()
             raise
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("pending_actions: сбой отложенного действия")
 
     async def _edit(self, row: dict, column: str, text: str) -> None:

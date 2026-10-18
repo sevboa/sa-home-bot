@@ -357,7 +357,7 @@ class SubscriptionWeb:
             result = await self._issue_awg(
                 found.chat_id, found.device_label, node_id, replace=node.awg_key
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("vpn: выдача AmneziaVPN со страницы не удалась: %s", exc)
             return self._json({"ok": False, "error": "failed", "nonce": nxt}, 502)
         conf = str(result.get("config_text") or "")

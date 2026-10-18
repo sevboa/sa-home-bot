@@ -66,7 +66,7 @@ class _FakeProc:
         self.terminated = False
         self.killed = False
 
-    async def communicate(self, input=None) -> tuple[bytes, bytes]:  # noqa: A002
+    async def communicate(self, input=None) -> tuple[bytes, bytes]:
         return self._stdout, self._stderr_bytes
 
     def terminate(self) -> None:

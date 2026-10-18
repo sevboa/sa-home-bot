@@ -128,7 +128,7 @@ def _run_smartctl(args: list[str]) -> dict | None:
     except subprocess.TimeoutExpired:
         log.warning("smartctl %s: таймаут %dс", " ".join(args), SMARTCTL_TIMEOUT_S)
         return None
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("smartctl %s не сработал: %s", " ".join(args), exc)
         return None
     if not out.stdout.strip():

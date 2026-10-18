@@ -47,7 +47,7 @@ class TypingIndicator:
             await self._bot.send_chat_action(
                 self._chat_id, "typing", message_thread_id=self._message_thread_id
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     async def _loop(self) -> None:
@@ -116,7 +116,7 @@ async def send_with_retry(
             wait = exc.retry_after + 1
             log.warning("429 от Telegram (chat=%s, %s), жду %ss", chat_id, action, wait)
             await asyncio.sleep(wait)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             if not await _wait_and_report_if_retryable(exc, action, chat_id, attempt):
                 if outcome is not None and not is_permanent_send_error(exc):
                     outcome["transient"] = True
@@ -241,7 +241,7 @@ class Notifier:
                 "Сообщение для chat=%s поставлено в outbox (%s, чанков: %s)",
                 chat_id, kind, len(chunks),
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("Не удалось поставить сообщение в outbox (chat=%s)", chat_id)
 
     async def _send_chunk(
@@ -414,5 +414,5 @@ class Notifier:
         return msg.message_id if msg is not None else None
 
     async def delete_message(self, chat_id: int, message_id: int) -> None:
-        with contextlib.suppress(Exception):  # noqa: BLE001
+        with contextlib.suppress(Exception):
             await self._bot.delete_message(chat_id, message_id)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from tests.unit.support.fakes import FakeUser
 
 
-def user(first_name, last_name=None, username=None, id=1):  # noqa: A002
+def user(first_name, last_name=None, username=None, id=1):
     return FakeUser(id=id, first_name=first_name, last_name=last_name, username=username)
 
 

@@ -153,7 +153,7 @@ class Outside:
 
 
 def _fetch_code_sync() -> tuple[int, int | None]:
-    with urllib.request.urlopen(WEATHER_URL, timeout=WEATHER_TIMEOUT_S) as resp:  # noqa: S310
+    with urllib.request.urlopen(WEATHER_URL, timeout=WEATHER_TIMEOUT_S) as resp:
         cur = json.loads(resp.read())["current"]
     cloud = cur.get("cloud_cover")
     return int(cur["weather_code"]), int(cloud) if cloud is not None else None

@@ -43,7 +43,7 @@ async def refresh_chat_menu(
             await bot.delete_my_commands(scope=scope)
         else:
             await bot.set_my_commands(build_menu_commands(subscription, app_actions), scope=scope)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("Не удалось обновить меню chat_id=%s: %s", chat_id, exc)
 
 
@@ -54,7 +54,7 @@ async def set_bot_commands(
 ) -> None:
     try:
         await bot.delete_my_commands(scope=BotCommandScopeDefault())
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("Не удалось очистить меню по умолчанию: %s", exc)
 
     for sub in book.all():

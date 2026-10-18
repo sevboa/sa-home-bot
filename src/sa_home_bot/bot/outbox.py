@@ -76,7 +76,7 @@ async def flush_outbox(
                     log.warning("outbox: 429 от Telegram, жду %ss", wait)
                     await sleep(wait)
                     continue
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     if is_permanent_send_error(exc):
                         log.warning(
                             "outbox: запись %s (chat=%s) не доставить, удаляю: %s",

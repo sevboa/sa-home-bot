@@ -199,7 +199,7 @@ class ProtoClient:
                 return
             try:
                 await self._on_event(env)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("ProtoClient: обработчик события упал")
             return
         log.warning("ProtoClient: неожиданный тип сообщения от сервера: %s", env.type)

@@ -202,7 +202,9 @@ async def test_tell_delivers_via_emit_bridge_when_no_notifier(monkeypatch):
     from sa_home_bot.bot import invites
 
     monkeypatch.setattr(
-        tool_delivery, "_tell_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR)
+        tool_delivery,
+        "_tell_limiter",
+        invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR),
     )
     monkeypatch.setattr(
         tool_delivery,
@@ -293,7 +295,9 @@ async def test_tell_broadcast_total_limit_stops_mass_send(monkeypatch):
     from sa_home_bot.bot import invites
 
     monkeypatch.setattr(
-        tool_delivery, "_tell_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR)
+        tool_delivery,
+        "_tell_limiter",
+        invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR),
     )
     monkeypatch.setattr(tool_delivery, "_tell_broadcast_limiter", invites.AttemptLimiter(2))
     book = SubscriptionBook.from_config(
@@ -614,7 +618,9 @@ async def test_notify_guest_delivers_via_emit_bridge_when_no_notifier(monkeypatc
     from sa_home_bot.bot import invites
 
     monkeypatch.setattr(
-        tool_delivery, "_tell_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR)
+        tool_delivery,
+        "_tell_limiter",
+        invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR),
     )
     monkeypatch.setattr(
         tool_delivery,
@@ -899,11 +905,7 @@ async def test_id_of_non_acquaintance_still_refused():
 async def test_guests_list_shows_card_name_first_with_nick():
     book = SubscriptionBook.from_config(
         [SubscriptionConfig(name="me", chat_id=1, allowed_commands=["*"])],
-        [
-            GuestSubscriptionConfig(
-                name="Kein", chat_id=ANDREY_CHAT, allowed_commands=["chat@llm"]
-            )
-        ],
+        [GuestSubscriptionConfig(name="Kein", chat_id=ANDREY_CHAT, allowed_commands=["chat@llm"])],
     )
     ctx = _ctx(book=book)
     result = await ai_tools.tool_guests_list(ctx, {})

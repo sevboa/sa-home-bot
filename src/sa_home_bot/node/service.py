@@ -654,7 +654,7 @@ class NodeService:
         async def run() -> None:
             try:
                 ok, output = await node_update.trigger_scheduled_task()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 ok, output = False, str(exc)
             finally:
                 self._updating = False
@@ -678,7 +678,7 @@ class NodeService:
         async def run() -> None:
             try:
                 ok, output = await node_update.pipx_reinstall(repo, git_ref)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 ok, output = False, str(exc)
             finally:
                 self._updating = False

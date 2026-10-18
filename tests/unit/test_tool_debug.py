@@ -132,4 +132,4 @@ def test_keyboard_callback_data_fits_telegram_limit():
 
 def test_render_short_matches_the_old_wording():
     assert tool_debug.render_short("calc") == "🔧 Alfred вызвал инструмент: calc"
-    assert SimpleNamespace  # noqa: B018
+    assert SimpleNamespace

@@ -74,7 +74,7 @@ def read_cpu_sync(now: datetime, lhm_dll_path: str = "") -> list[SensorReading]:
             readings = parse_psutil_temps(data, now)
             if readings:
                 return readings
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("psutil.sensors_temperatures недоступен: %s", exc)
 
     sensors_bin = shutil.which("sensors")
@@ -88,7 +88,7 @@ def read_cpu_sync(now: datetime, lhm_dll_path: str = "") -> list[SensorReading]:
                 check=True,
             )
             return parse_lm_sensors(json.loads(out.stdout), now)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("fallback `sensors -j` не сработал: %s", exc)
 
     log.warning("Не удалось получить температуру CPU ни одним способом")

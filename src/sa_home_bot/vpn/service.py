@@ -367,7 +367,7 @@ class VpnService:
         if self._has(TRANSPORT_AWG):
             try:
                 server_pubkey = await self._server_public_key()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.warning("vpn: не удалось прочитать публичный ключ awg-сервера", exc_info=True)
         return {
             "node": self._node,
@@ -572,7 +572,7 @@ class VpnService:
                 else None
             )
             live_key = await self._server_public_key() if self._has(TRANSPORT_AWG) else None
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.warning("vpn: сверка пиров с сервером не удалась", exc_info=True)
             return devices
         for device in devices:
@@ -677,7 +677,7 @@ class VpnService:
         try:
             if self._has(TRANSPORT_AWG):
                 fingerprints[TRANSPORT_AWG] = await self._server_public_key()
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.warning("vpn: сверка ключа awg-сервера после старта не удалась", exc_info=True)
         if (
             self._reality_enabled
@@ -1691,7 +1691,7 @@ class VpnService:
             await asyncio.sleep(self._cfg.sample_interval_s)
             try:
                 await self.sample_once()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("vpn: сбой сэмплера трафика")
 
 
@@ -1725,7 +1725,7 @@ class VpnService:
             await asyncio.sleep(self._cfg.check_interval_s)
             try:
                 await self._dispatch_checks()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("vpn: сбой цикла проверок доступности")
 
     async def _report_check(self, args: dict[str, Any]) -> dict[str, Any]:

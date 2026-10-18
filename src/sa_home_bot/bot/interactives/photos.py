@@ -305,7 +305,7 @@ class PhotosMixin(EngineCore):
             return
         try:
             await on_status(text)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.debug("interactives: статус снимка не показан (chat=%s)", chat_id, exc_info=True)
 
     async def _follow_photo_phases(
@@ -483,7 +483,7 @@ class PhotosMixin(EngineCore):
                 reply_to_message_id=reply_to,
                 message_thread_id=message_thread_id,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("interactives: не сказал о пропавшем снимке (chat=%s)", chat_id)
 
     async def _photo_pending(self) -> dict[str, Any]:

@@ -12,7 +12,7 @@ JSON_FETCH_ERRORS = (urllib.error.URLError, TimeoutError, OSError, ValueError)
 
 def get_json(url: str, timeout: float, headers: Mapping[str, str] | None = None) -> Any:
     target = urllib.request.Request(url, headers=dict(headers)) if headers else url
-    with urllib.request.urlopen(target, timeout=timeout) as response:  # noqa: S310
+    with urllib.request.urlopen(target, timeout=timeout) as response:
         return json.loads(response.read())
 
 

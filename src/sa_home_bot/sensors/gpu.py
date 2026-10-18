@@ -68,7 +68,7 @@ def read_gpu_sync(now: datetime) -> list[SensorReading]:
             timeout=NVIDIA_SMI_TIMEOUT_S,
             check=True,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("nvidia-smi не сработал: %s", exc)
         return []
     requirements_registry.report(NVIDIA_SMI_REQUIREMENT, RequirementStatus.OK)

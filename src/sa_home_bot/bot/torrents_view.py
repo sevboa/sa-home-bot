@@ -7,7 +7,7 @@ from typing import Any
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sa_home_bot.bot import commands
-from sa_home_bot.bot.pagination import clamp_offset, nav_row  # noqa: F401
+from sa_home_bot.bot.pagination import clamp_offset, nav_row
 from sa_home_bot.runtime import format_duration
 
 TORRENTS_PAGE_SIZE = 8

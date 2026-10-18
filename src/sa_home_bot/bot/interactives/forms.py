@@ -165,7 +165,7 @@ class FormsMixin(EngineCore):
         for entry in mine:
             try:
                 await self._dismiss_one(chat_id, entry)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.info(
                     "interactives: кнопки не сняты (chat=%s, %s)", chat_id, entry, exc_info=True
                 )

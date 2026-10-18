@@ -171,11 +171,11 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
         egress.start()
     try:
         await pending_actions.recover()
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("pending_actions: восстановление на старте не удалось")
     try:
         await interactives.recover()
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("interactives: восстановление на старте не удалось")
 
     async def refresh_menu() -> None:
@@ -317,7 +317,7 @@ async def _shutdown(
     for chat_id, task in active_ai_chats.snapshot().items():
         try:
             await notifier.send_direct(chat_id, RESTART_TEXT)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.warning("Не удалось известить chat=%s о рестарте", chat_id, exc_info=True)
         if not task.done():
             task.cancel()
@@ -325,7 +325,7 @@ async def _shutdown(
             await task
         except asyncio.CancelledError:
             pass
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.warning("/ai-задача chat=%s упала при остановке", chat_id, exc_info=True)
 
     if egress is not None:
@@ -339,7 +339,7 @@ async def _shutdown(
             await away_task
         except asyncio.CancelledError:
             pass
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.warning("away-задача упала при остановке", exc_info=True)
 
     if people_seed_task is not None and not people_seed_task.done():
@@ -366,7 +366,7 @@ async def _shutdown(
         await polling_task
     except asyncio.CancelledError:
         pass
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.warning("polling завершился с ошибкой", exc_info=True)
 
     await broadcast_system(book, notifier, render_shutdown())

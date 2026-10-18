@@ -455,7 +455,7 @@ async def _other_countries_work(node_link, chat_id: int, node: str) -> bool:
         answered = await vpn_nodes.fanout(
             node_link, vpn_protocol.ACTION_USAGE, {"chat_id": chat_id}
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         return False
     return vpn_notify.others_with_quota(answered, node)
 
@@ -527,7 +527,7 @@ async def _handle_vpn_event(name, data, book, notifier, store, node_link) -> Non
                     vpn_notify.restored_guest_text(country, devices),
                     reply_markup=vpn_notify.restored_guest_keyboard(country, devices),
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.warning("vpn: не доставил «сервер переустановлен» в %s", guest, exc_info=True)
         text = vpn_notify.restored_owner_text(country, items)
         await _record_and_notify_admins(book, notifier, store, name, data.get("node"), text)

@@ -107,7 +107,7 @@ class SubscriptionBook:
                     attempts=2,
                     delay_s=3.0,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 self._mark_broken(sub.chat_id)
                 issue = ValidationIssue(sub.chat_id, sub.name, str(exc))
                 issues.append(issue)

@@ -231,7 +231,7 @@ class TasksService:
             await asyncio.sleep(POLL_INTERVAL_S)
             try:
                 await self._prewake_due()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("tasks: сбой прогрева")
 
     async def _prewake_due(self) -> None:
@@ -249,7 +249,7 @@ class TasksService:
     async def _prewake_one_safe(self, row: dict) -> None:
         try:
             await self._prewake_one(row)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("tasks: сбой прогрева задачи id=%s", row["id"])
 
     async def _prewake_one(self, row: dict) -> None:
@@ -296,7 +296,7 @@ class TasksService:
             await asyncio.sleep(POLL_INTERVAL_S)
             try:
                 await self._fire_due()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("tasks: сбой опроса очереди")
 
     async def _fire_due(self) -> None:
@@ -309,7 +309,7 @@ class TasksService:
     async def _fire_one_safe(self, row: dict) -> None:
         try:
             await self._fire_one(row)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("tasks: сбой срабатывания задачи id=%s", row["id"])
         finally:
             self._waking_announced.discard(row["id"])

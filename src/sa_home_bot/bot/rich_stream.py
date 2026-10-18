@@ -143,7 +143,7 @@ class RichStreamSession:
                 exc.retry_after,
             )
             return False
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._stats.failures += 1
             self._warn(
                 self._stats.failures,

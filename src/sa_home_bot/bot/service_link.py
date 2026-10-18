@@ -127,7 +127,7 @@ class ServiceLink:
                 if self._on_connected is not None:
                     try:
                         await self._on_connected()
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         log.warning(
                             "Ошибка on_connected-хука службы %s",
                             self.display_name,
