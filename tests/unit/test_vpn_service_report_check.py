@@ -87,12 +87,6 @@ async def _report(
     )
 
 
-async def test_single_failure_does_not_alert(env):
-    svc, events, _ = env
-    await _report(svc, "jeeves", False, "timeout")
-    assert not any(name == vpn_protocol.EVENT_VPN_CHECK_FAILED for name, _ in events)
-
-
 async def test_alerts_only_once_after_threshold_then_mutes(env):
     svc, events, _ = env
     await _report(svc, "jeeves", False, "timeout")

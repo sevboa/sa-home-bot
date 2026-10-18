@@ -23,7 +23,6 @@ class _Backend(RealXrayBackend):
         return self._replies.pop(0) if self._replies else ""
 
 
-@pytest.mark.asyncio
 async def test_add_client_snippet_has_port_and_decryption() -> None:
     be = _Backend(["add user: c1-phone\nresult: ok\nAdded 1 user(s) in total."])
     await be.add_client("uuid-1", "c1-phone", "xtls-rprx-vision")
@@ -38,7 +37,6 @@ async def test_add_client_snippet_has_port_and_decryption() -> None:
     assert be.calls[0][0] == "adu"
 
 
-@pytest.mark.asyncio
 async def test_add_client_raises_on_silent_zero_added() -> None:
     be = _Backend(
         [
@@ -51,7 +49,6 @@ async def test_add_client_raises_on_silent_zero_added() -> None:
         await be.add_client("uuid-1", "c1-phone", "xtls-rprx-vision")
 
 
-@pytest.mark.asyncio
 async def test_remove_client_swallows_not_found() -> None:
     class _NF(_Backend):
         async def _run(self, *args: str, stdin: bytes | None = None) -> str:
@@ -60,7 +57,6 @@ async def test_remove_client_swallows_not_found() -> None:
     await _NF().remove_client("c1-gone")
 
 
-@pytest.mark.asyncio
 async def test_list_clients_parses_tag_query() -> None:
     payload = json.dumps(
         {

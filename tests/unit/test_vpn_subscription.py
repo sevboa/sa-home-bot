@@ -1016,6 +1016,15 @@ CONF = (
 )
 
 
+def _decode_amnezia_key(key: str) -> dict:
+    import json
+    import zlib
+
+    body = key.removeprefix("vpn://")
+    raw = base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))
+    return json.loads(zlib.decompress(raw[4:]))
+
+
 def test_amnezia_key_roundtrip_matches_conf():
     import json
     import zlib
@@ -1028,7 +1037,6 @@ def test_amnezia_key_roundtrip_matches_conf():
     body = zlib.decompress(raw[4:])
     assert int.from_bytes(raw[:4], "big") == len(body)
     cfg = json.loads(body)
-    assert cfg == ak.decode_key(key)
     assert cfg["description"] == "🇳🇱 📱 iPhone" and cfg["hostName"] == "203.0.113.7"
     assert cfg["defaultContainer"] == "amnezia-awg" and cfg["dns1"] == "1.1.1.1"
     (cont,) = cfg["containers"]
@@ -1057,7 +1065,7 @@ def test_amnezia_key_from_real_client_conf_and_errors():
 
     cfg = _cfg("203.0.113.7", "x")
     conf = render_client_conf(cfg, "PRIV", "10.9.0.4", "SRVPUB")
-    parsed = ak.decode_key(ak.build_key(conf, "n"))
+    parsed = _decode_amnezia_key(ak.build_key(conf, "n"))
     import json
 
     last = json.loads(parsed["containers"][0]["awg"]["last_config"])

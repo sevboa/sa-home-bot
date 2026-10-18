@@ -1,24 +1,20 @@
 from __future__ import annotations
 
+import pytest
+
 from sa_home_bot.vpn import protocol as vpn_protocol
 
 NL = "🇳🇱 Нидерланды"
 US = "🇺🇸 США"
 
 
-def test_country_code_from_flag_emoji():
-    assert vpn_protocol.country_code(NL) == "NL"
-    assert vpn_protocol.country_code(US) == "US"
-
-
-def test_country_code_empty_without_flag():
-    assert vpn_protocol.country_code("Нидерланды") == ""
-    assert vpn_protocol.country_code("") == ""
-
-
-def test_country_flag_extracted_for_profile_name():
-    assert vpn_protocol.country_flag(NL) == "🇳🇱"
-    assert vpn_protocol.country_flag("Нидерланды") == ""
+@pytest.mark.parametrize(
+    ("location", "code", "flag"),
+    [(NL, "NL", "🇳🇱"), (US, "US", "🇺🇸"), ("Нидерланды", "", ""), ("", "", "")],
+)
+def test_country_code_and_flag_come_from_flag_emoji(location, code, flag):
+    assert vpn_protocol.country_code(location) == code
+    assert vpn_protocol.country_flag(location) == flag
 
 
 def test_awg_filename_carries_type_and_country():

@@ -76,24 +76,6 @@ def q_compress(data: bytes) -> bytes:
     return len(data).to_bytes(4, "big") + zlib.compress(data, 6)
 
 
-def q_uncompress(data: bytes) -> bytes:
-    size = int.from_bytes(data[:4], "big")
-    out = zlib.decompress(data[4:])
-    if len(out) != size:
-        raise ValueError("длина в заголовке qCompress не совпала")
-    return out
-
-
 def build_key(conf_text: str, name: str) -> str:
     raw = json.dumps(build_config(conf_text, name), ensure_ascii=False).encode()
     return PREFIX + base64.urlsafe_b64encode(q_compress(raw)).decode().rstrip("=")
-
-
-def decode_key(key: str) -> dict:
-    body = key.strip().removeprefix(PREFIX)
-    raw = base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))
-    try:
-        raw = q_uncompress(raw)
-    except (zlib.error, ValueError):
-        pass
-    return json.loads(raw)

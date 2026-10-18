@@ -127,21 +127,18 @@ def test_state_and_transition_carry_server_and_transport():
     assert transition.transport == "reality"
 
 
-def test_rollup_all_ok():
-    assert rollup_status([OK, OK, OK]) == OK
-
-
-def test_rollup_all_alerting():
-    assert rollup_status([ALERTING, ALERTING]) == ALERTING
-
-
-def test_rollup_mixed_is_partial():
-    assert rollup_status([OK, ALERTING]) == PARTIAL
-
-
-def test_rollup_single_observer():
-    assert rollup_status([OK]) == OK
-    assert rollup_status([ALERTING]) == ALERTING
+@pytest.mark.parametrize(
+    ("statuses", "expected"),
+    [
+        ([OK, OK, OK], OK),
+        ([ALERTING, ALERTING], ALERTING),
+        ([OK, ALERTING], PARTIAL),
+        ([OK], OK),
+        ([ALERTING], ALERTING),
+    ],
+)
+def test_rollup(statuses, expected):
+    assert rollup_status(statuses) == expected
 
 
 def test_rollup_empty_raises():
