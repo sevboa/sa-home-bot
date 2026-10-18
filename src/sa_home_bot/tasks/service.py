@@ -48,14 +48,13 @@ from typing import Any
 
 from sa_home_bot import __version__, wake_core
 from sa_home_bot.bot import tools as ai_tools
-from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
+from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.llm_chat import run_chat_loop
+from sa_home_bot.proto.errors import SERVICE_CALL_ERRORS, is_service_unavailable
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
-    ERR_UNAVAILABLE,
-    ERR_UNKNOWN_DST,
     ActionParam,
     ActionSpec,
     Address,
@@ -84,20 +83,6 @@ EventEmitter = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 async def _noop_emit(event_type: str, data: dict[str, Any]) -> None:
     pass
-
-
-def _is_unavailable(exc: Exception) -> bool:
-    """Та же классификация, что у bot/ai_flow.py::_is_unavailable —
-    константы дублируются, а не импортируется сам модуль (там aiogram,
-    этой службе он не нужен, см. докстринг файла). Решение пользователя
-    2026-08-05: сбой "модель недоступна в моменте" не должен сразу сдаваться
-    честным "не удалось найти Альфреда" — стоит повторить в рамках
-    FIRE_GRACE_S, как уже делает прогрев/побудка (см. _fire_chat_loop).
-    Детерминированные ошибки (плохой запрос, внутренний сбой) сюда не
-    попадают — повтор их не лечит, только жжёт бюджет впустую."""
-    if isinstance(exc, ServiceUnavailableError):
-        return True
-    return isinstance(exc, ProtoError) and exc.code in (ERR_UNAVAILABLE, ERR_UNKNOWN_DST)
 
 
 class TasksService:
@@ -457,7 +442,7 @@ class TasksService:
             result = await self._node_link.command(
                 row["action"], task_args, dst=dst, timeout=row["timeout_s"]
             )
-        except (ServiceUnavailableError, ProtoError) as exc:
+        except SERVICE_CALL_ERRORS as exc:
             await self._emit(
                 protocol.EVENT_TASK_RESULT,
                 {"task_id": row["id"], "meta": meta, "ok": False, "error": str(exc)},
@@ -576,7 +561,7 @@ class TasksService:
         # (решение пользователя 2026-08-05): "модель недоступна прямо
         # сейчас" — не повод сразу сдаваться честным "не нашли Альфреда",
         # если время до due_at+FIRE_GRACE_S ещё есть. Только для реально
-        # переходных сбоев (_is_unavailable) — детерминированные ошибки
+        # переходных сбоев (is_service_unavailable) — детерминированные ошибки
         # (баг в запросе, внутренний сбой модели) повтор не лечит.
         while True:
             try:
@@ -592,8 +577,9 @@ class TasksService:
                     on_tool_call=_emit_tool_call,
                 )
                 break
-            except (ServiceUnavailableError, ProtoError) as exc:
-                if not _is_unavailable(exc) or deadline - loop.time() <= FIRE_RETRY_INTERVAL_S:
+            except SERVICE_CALL_ERRORS as exc:
+                out_of_time = deadline - loop.time() <= FIRE_RETRY_INTERVAL_S
+                if not is_service_unavailable(exc) or out_of_time:
                     log.warning(
                         "tasks: задача id=%s — запрос к модели не удался: %s", task_id, exc
                     )

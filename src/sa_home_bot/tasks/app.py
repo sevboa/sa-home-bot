@@ -17,6 +17,7 @@ from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
+from sa_home_bot.proto.emitter import DeferredEmitter
 from sa_home_bot.proto.server import ProtoServer
 from sa_home_bot.tasks.service import TasksService
 from sa_home_bot.utils.lifespan import Lifespan
@@ -38,14 +39,10 @@ async def run_tasks(settings: Settings) -> None:
     # server создаётся после service (тот же приём, что node/app.py::run_node
     # и llm/app.py::run_llm) — emit замыкается на переменную server, реально
     # дёргается уже после server.start().
-    server: ProtoServer | None = None
-
-    async def emit(event_type: str, data: dict) -> None:
-        if server is not None:
-            await server.broadcast_event(event_type, data)
-
-    service = TasksService(settings, store, node_link, emit=emit)
+    emitter = DeferredEmitter()
+    service = TasksService(settings, store, node_link, emit=emitter)
     server = ProtoServer(settings.tasks.socket, service, token=settings.swarm.token)
+    emitter.bind(server)
     # Обработчики сигналов — до start(): он ждёт появления своего адреса
     # (см. proto/server.py), и всё это время остановка иначе не обрабатывалась бы.
     lifespan = Lifespan()

@@ -297,7 +297,7 @@ def _disk_usage(path: str) -> tuple[int | None, int | None]:
 
 # qBittorrent отдаёт eta = 8640000 (100 суток) как «неизвестно/бесконечность»
 # для стоящих и раздающихся торрентов, а не как реальную оценку.
-_ETA_UNKNOWN_S = 8640000
+QBIT_ETA_INFINITY_SECONDS = 8640000
 
 
 def _eta_or_none(raw: Any) -> int | None:
@@ -305,7 +305,7 @@ def _eta_or_none(raw: Any) -> int | None:
         eta = int(raw)
     except (TypeError, ValueError):
         return None
-    return None if eta < 0 or eta >= _ETA_UNKNOWN_S else eta
+    return None if eta < 0 or eta >= QBIT_ETA_INFINITY_SECONDS else eta
 
 
 class TorrentsService:
