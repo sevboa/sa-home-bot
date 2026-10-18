@@ -1,16 +1,3 @@
-"""Слой устройств /vpn (этап 57.2): ответы ``usage`` всех нод → устройства.
-
-Устройство — это ``device_label``, общий для всех нод и транспортов; под ним до
-четырёх подключений {нода × транспорт}. Отдельной таблицы нет: каждая нода
-отдаёт в ``usage`` с ``chat_id`` свою часть (``device_usage``), здесь они
-склеиваются по имени. Модуль чистый — без aiogram и сети, поэтому годится и
-боту, и ``tool_vpn``; тексты экранов эксперт-режима тоже здесь (клавиатуры —
-в bot/vpn_expert_view.py).
-
-Пробник ``chat_id=0`` сюда не попадает: ответы запрашиваются по chat_id
-человека, а на всякий случай ``build_devices`` его всё равно не знает.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -24,18 +11,13 @@ from sa_home_bot.vpn import protocol as vpn_protocol
 
 REALITY = vpn_protocol.TRANSPORT_REALITY
 AWG = vpn_protocol.TRANSPORT_AWG
-# VLESS первым — с него начинают; незнакомые транспорты (нода новее бота) — в хвост.
-TRANSPORT_ORDER = (AWG, REALITY)  # 57.13: AmneziaVPN первым
-# Имена транспортов в текстах: «VLESS · Hiddify» всегда вместе, AmneziaWG — без
-# оговорок про страны (решение владельца 2026-10-10).
+TRANSPORT_ORDER = (AWG, REALITY)
 TRANSPORT_NAME = {REALITY: "VLESS · Hiddify", AWG: "AmneziaVPN"}
 TECHNICAL_TRANSPORT_NAME = {AWG: "AmneziaVPN", REALITY: "VLESS (Reality)"}
 
 
 @dataclass(frozen=True)
 class Country:
-    """Страна = сервер (нода). ``label`` — «🇳🇱 Нидерланды» из [vpn].location."""
-
     node: str
     label: str
 
@@ -45,14 +27,12 @@ class Country:
 
     @property
     def name(self) -> str:
-        """«🇳🇱 Нидерланды» → «Нидерланды»; без флага — как есть (или id ноды)."""
         flag = self.flag
         text = self.label.replace(flag, "", 1).strip() if flag else self.label.strip()
         return text or self.node
 
     @property
     def short(self) -> str:
-        """Флаг, а без флага — название: для узких кнопок."""
         return self.flag or self.name
 
 
@@ -60,7 +40,7 @@ class Country:
 class Connection:
     node: str
     transport: str
-    status: str  # active | …; не выданное подключение — запись с ``issued=False``
+    status: str
     last_handshake_at: str | None
     created_at: str | None
     broken: bool
@@ -76,7 +56,6 @@ class Connection:
 class Device:
     label: str
     connections: list[Connection] = field(default_factory=list)
-    # node → трафик устройства на этой ноде за месяц (включая перевыпущенные ключи)
     traffic_by_node: dict[str, int] = field(default_factory=dict)
     first_created_at: str = ""
 
@@ -99,11 +78,9 @@ class Device:
 
     @property
     def never_connected(self) -> bool:
-        """Ни одно подключение ещё ни разу не выходило на связь."""
         return not self.last_handshake_at
 
     def broken_nodes(self) -> list[str]:
-        """Ноды (в порядке появления), где у устройства есть «сломанные» подключения."""
         seen: list[str] = []
         for conn in self.issued:
             if conn.broken and conn.node not in seen:
@@ -121,8 +98,6 @@ class Device:
 
 
 def device_key(label: str) -> str:
-    """Короткий стабильный ключ устройства для callback_data (лимит 64 байта,
-    имя может быть длинным/кириллицей). Обратно разрешается по свежему usage."""
     return hashlib.sha1(label.encode("utf-8")).hexdigest()[:8]
 
 
@@ -144,8 +119,6 @@ def sorted_transports(transports: list[str]) -> list[str]:
 
 
 def _entries(server: dict) -> list[dict]:
-    """``device_usage`` ноды; у ноды старее 57.1 его нет — собираем из ``devices``
-    (трафик тогда неизвестен и считается нулём)."""
     usage = server.get("device_usage")
     if usage is not None:
         return usage
@@ -168,8 +141,6 @@ def _entries(server: dict) -> list[dict]:
 
 
 def build_devices(servers: list[dict]) -> list[Device]:
-    """Склеить ответы ``usage`` нод (по одному на ноду, уже отфильтрованные по
-    допуску) в устройства. Порядок — по самому раннему подключению."""
     by_label: dict[str, Device] = {}
     for server in servers:
         node = server.get("node")
@@ -206,8 +177,6 @@ def build_devices(servers: list[dict]) -> list[Device]:
 
 
 def card_rows(device: Device, servers: list[dict]) -> list[Connection]:
-    """Строки раздела «Подключения»: выданные + «не выдано» по транспортам,
-    которые нода умеет. Порядок: страны как в ``servers``, VLESS перед AmneziaWG."""
     rows: list[Connection] = []
     for server in servers:
         node = server.get("node")
@@ -232,13 +201,7 @@ def card_rows(device: Device, servers: list[dict]) -> list[Connection]:
     return rows
 
 
-# --- сводка для главной ----------------------------------------------------
-
-
 def server_health(server: dict) -> str | None:
-    """Свёрнутый статус проверок страны или None, если проверок нет. Если есть
-    проверка VLESS — смотрим её (это основной способ подключения); иначе по
-    всем транспортам."""
     rows = [r for r in (server.get("check") or []) if r.get("status")]
     if not rows:
         return None
@@ -253,7 +216,6 @@ _FALLBACK_LINE = "Если одна страна не работает — вы�
 
 
 def transport_health(server: dict, transport: str) -> str | None:
-    """Свёрнутый статус проверок одного транспорта в стране или None, если данных нет."""
     statuses = [
         r["status"]
         for r in (server.get("check") or [])
@@ -263,9 +225,6 @@ def transport_health(server: dict, transport: str) -> str | None:
 
 
 def home_summary(servers: list[dict], *, now: datetime | None = None) -> list[str]:
-    """Строки сводки главной: по стране — статус проверки (если есть данные) и остаток
-    квоты до 1 числа; в конце подсказка выбрать другую страну, если одна не работает,
-    а другая работает. Одна страна без данных проверки — одна строка без названия."""
     now = now or datetime.now(UTC)
     reset = vpn_format.next_reset_phrase(now)
     multi = len(servers) > 1
@@ -296,9 +255,6 @@ def home_summary(servers: list[dict], *, now: datetime | None = None) -> list[st
     return lines
 
 
-# --- тексты экранов --------------------------------------------------------
-
-
 def home_text(
     servers: list[dict], *, unavailable: list[dict] | None = None, now: datetime | None = None
 ) -> str:
@@ -311,7 +267,6 @@ def home_text(
 
 
 def conn_status(conn: Connection, *, tz: tzinfo | None = None) -> str:
-    """Статус подключения словами для карточки."""
     if not conn.issued:
         return "не выдано"
     if conn.broken:

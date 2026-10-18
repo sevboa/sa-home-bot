@@ -1,5 +1,3 @@
-"""«⚠️ Сообщить о проблеме» / «💬 Ответить» в /vpn (этап 57.6b)."""
-
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -17,8 +15,17 @@ from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.vpn import protocol as vpn_protocol
 
-from .test_vpn_expert import KEY, LABEL, _conn, _srv, _texts
-from .test_vpn_handler import GUEST_FULL, FakeCallback, FakeNodeLink, FakeNotifier
+from .vpn_support import (
+    GUEST_FULL,
+    KEY,
+    LABEL,
+    FakeCallback,
+    FakeNodeLink,
+    FakeNotifier,
+    button_texts,
+    make_conn,
+    make_srv,
+)
 
 OWNER = Subscription(chat_id=1, name="owner", allowed_commands=frozenset({"*"}))
 VIEW_ONLY = Subscription(chat_id=779, name="v", allowed_commands=frozenset({"usage@vpn"}))
@@ -37,30 +44,29 @@ class Sent:
 
 
 def _servers(*, hs="2026-10-10T14:02:00+00:00", check=True):
-    nl = _srv(
+    nl = make_srv(
         "jeeves",
         "🇳🇱 Нидерланды",
         [
             {
                 "device_label": LABEL,
                 "used_bytes": 0,
-                "connections": [_conn("reality", hs)],
+                "connections": [make_conn("reality", hs)],
             }
         ],
         check=[{"transport": "reality", "status": "ok"}] if check else [],
     )
-    us = _srv(
+    us = make_srv(
         "wooster",
         "🇺🇸 США",
-        [{"device_label": LABEL, "used_bytes": 0, "connections": [_conn("reality")]}],
+        [{"device_label": LABEL, "used_bytes": 0, "connections": [make_conn("reality")]}],
         check=[{"transport": "reality", "status": "partial"}] if check else [],
     )
     return [nl, us]
 
 
 @pytest.fixture(autouse=True)
-def _env(monkeypatch, tmp_path):
-    monkeypatch.setattr(vpn_nodes, "KNOWN_SERVERS_PATH", tmp_path / "known.json")
+def _env(monkeypatch):
     vpn_help.reset_throttle()
     vpn_report.reset_pending()
     state = {"servers": _servers()}
@@ -132,14 +138,11 @@ async def _reply(message, notifier, sub=GUEST_FULL, book=None):
     return True
 
 
-# --- экраны ------------------------------------------------------------------
-
-
 async def test_menu_from_home_device_and_faq_have_right_back():
     cb, _ = await _press("act:vpn:report:m")
     assert cb.message.edits[-1] == "Что случилось?"
     markup = cb.message.edit_markups[-1]
-    assert _texts(markup) == [
+    assert button_texts(markup) == [
         "🔌 Не подключается",
         "🐢 Работает медленно",
         "🌐 Не открываются сайты",
@@ -171,9 +174,6 @@ def test_every_report_callback_fits_64_bytes():
     assert all(len(c.encode()) <= 64 for c in cbs)
 
 
-# --- причины кнопкой и уведомление ------------------------------------------
-
-
 async def test_reason_button_sends_full_owner_notification():
     cb, notifier = await _press(f"act:vpn:report:c{KEY}")
     assert cb.message.edits[-1] == "✅ Передал владельцу. Ответ придёт сюда."
@@ -196,7 +196,7 @@ async def test_no_device_lists_all_devices_and_down_node_is_named(_env, monkeypa
     cb, notifier = await _press("act:vpn:report:s")
     text = notifier.sent_direct[0][1]
     assert "Причина: работает медленно" in text
-    assert "Устройства:" not in text  # устройство одно — формат одного
+    assert "Устройства:" not in text
     assert f"Устройство: {LABEL} · VLESS · Hiddify" in text
     assert "🇺🇸 нода не ответила" in text and "Проверки" not in text
 
@@ -204,7 +204,7 @@ async def test_no_device_lists_all_devices_and_down_node_is_named(_env, monkeypa
 async def test_several_devices_shown_briefly(_env):
     servers = _servers()
     servers[0]["device_usage"].append(
-        {"device_label": "💻 Компьютер", "used_bytes": 0, "connections": [_conn("reality")]}
+        {"device_label": "💻 Компьютер", "used_bytes": 0, "connections": [make_conn("reality")]}
     )
     _env["servers"] = servers
     _, notifier = await _press("act:vpn:report:w")
@@ -212,9 +212,6 @@ async def test_several_devices_shown_briefly(_env):
     assert "Причина: не открываются сайты" in text
     assert "Устройства:\n" in text and f"• {LABEL} — 🇳🇱 на связи" in text
     assert "• 💻 Компьютер — 🇳🇱 ещё не подключалось" in text
-
-
-# --- «Другое» и reply --------------------------------------------------------
 
 
 async def test_other_asks_with_force_reply_and_own_reply_reaches_owner():
@@ -230,16 +227,15 @@ async def test_other_asks_with_force_reply_and_own_reply_reaches_owner():
     sent = notifier2.sent_direct[0][1]
     assert "Причина: Не грузится &lt;YouTube&gt;" in sent
     assert f"Устройство: {LABEL}" in sent
-    # одно ожидание — одна заявка
     assert vpn_report.lookup(778, 500) is None
 
 
 async def test_foreign_or_unrelated_reply_is_ignored():
     await _press("act:vpn:report:o", mid=500)
     notifier = FakeNotifier()
-    assert not await _reply(_msg("привет", 500, user_id=999), notifier)  # чужой человек
-    assert not await _reply(_msg("привет", 501), notifier)  # reply на другое сообщение
-    assert not await _reply(_msg("/vpn", 500), notifier)  # команда
+    assert not await _reply(_msg("привет", 500, user_id=999), notifier)
+    assert not await _reply(_msg("привет", 501), notifier)
+    assert not await _reply(_msg("/vpn", 500), notifier)
     assert not notifier.sent_direct
 
 
@@ -253,13 +249,10 @@ async def test_expired_reply_is_refused(monkeypatch):
     assert vpn_report.lookup(778, 500) is None
 
 
-# --- троттлинг общий ---------------------------------------------------------
-
-
 async def test_throttle_is_shared_with_wizard_help(monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr(vpn_help.time, "monotonic", lambda: clock[0])
-    _, n1 = await _press("act:vpn:vpn_card:whci" + KEY)  # мастер: «Позвать на помощь»
+    _, n1 = await _press("act:vpn:vpn_card:whci" + KEY)
     assert len(n1.sent_direct) == 1
     cb, n2 = await _press(f"act:vpn:report:c{KEY}")
     assert not n2.sent_direct and cb.answered[0][0] == ("Уже передал, ждите ответа.",)
@@ -268,19 +261,16 @@ async def test_throttle_is_shared_with_wizard_help(monkeypatch):
     clock[0] += 601
     _, n3 = await _press(f"act:vpn:report:c{KEY}")
     assert len(n3.sent_direct) == 1
-    _, n4 = await _press("act:vpn:vpn_card:whci" + KEY)  # и наоборот
+    _, n4 = await _press("act:vpn:vpn_card:whci" + KEY)
     assert not n4.sent_direct
 
 
 async def test_reply_while_throttled_says_so():
     await _press("act:vpn:report:o", mid=500)
-    await _press(f"act:vpn:report:c{KEY}")  # заявка ушла кнопкой, пока ждали описание
+    await _press(f"act:vpn:report:c{KEY}")
     msg = _msg("ещё", 500)
     assert await _reply(msg, FakeNotifier())
     assert msg.sent == ["Уже передал, ждите ответа."]
-
-
-# --- «💬 Ответить» -----------------------------------------------------------
 
 
 async def test_owner_reply_button_and_forwarding():
@@ -307,11 +297,7 @@ async def test_reply_button_is_admin_only():
         sub=GUEST_FULL.__class__(chat_id=778, name="g", allowed_commands=frozenset({"usage@vpn"})),
     )
     assert cb.answered[0][1] == {"show_alert": True} and not cb.asked and not notifier.sent_direct
-    # не админ не получает ожидание даже подделав id
     assert vpn_report.lookup(778, 500) is None
-
-
-# --- права -------------------------------------------------------------------
 
 
 def test_can_report_rights():
@@ -371,5 +357,5 @@ def test_vpn_toggles_do_not_include_report():
     from sa_home_bot.bot import vpn_admin_view
 
     assert not any("report@vpn" in t.rights for t in vpn_admin_view.VPN_TOGGLES)
-    assert vd  # импорт нужен модулю для KEY
+    assert vd
     assert vpn_protocol.SERVICE_NAME == "vpn"

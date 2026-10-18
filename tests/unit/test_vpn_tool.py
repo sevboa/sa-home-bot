@@ -1,6 +1,3 @@
-"""tool_vpn на модели устройств (этап 57.8): статус, «подключить» (мастер),
-«дать настройки», «сообщить о проблеме»; права, секреты, chat_id=0."""
-
 from __future__ import annotations
 
 import pytest
@@ -160,7 +157,7 @@ async def test_status_has_countries_quota_devices_no_secrets():
     assert "«iPhone»" in out and "9.1 ГБ" in out
     assert "<b>" not in out
     _no_secrets(out)
-    assert ctx.node_link.commands == []  # статус — только fanout usage
+    assert ctx.node_link.commands == []
 
 
 async def test_status_without_devices():
@@ -178,7 +175,7 @@ async def test_issue_sends_wizard_button_not_keys():
     assert chat == GUEST_CHAT
     buttons = [b.text for row in markup.inline_keyboard for b in row]
     assert "📱 Подключить по шагам" in buttons
-    assert ctx.node_link.commands == []  # ни issue, ни reissue в службу
+    assert ctx.node_link.commands == []
     assert not notifier.documents and not notifier.photos
     _no_secrets(out)
 
@@ -206,7 +203,7 @@ async def test_issue_for_recipient_admin_only_and_goes_to_recipient():
     ctx = _ctx(sub=ADMIN, chat_id=ADMIN_CHAT, notifier=notifier)
     out = await ai_tools.tool_vpn(ctx, {"action": "issue", "recipient": "Наталья"})
     assert out.startswith("готово")
-    assert notifier.sent[0][0] == 999222111  # не тому, кто просил
+    assert notifier.sent[0][0] == 999222111
 
 
 async def test_issue_unknown_recipient():
@@ -274,7 +271,7 @@ async def test_rights_follow_buttons():
         d for d in ai_tools.tools_for(only_usage).declarations if d["function"]["name"] == "vpn"
     )
     enum = decl["function"]["parameters"]["properties"]["action"]["enum"]
-    assert enum == ["usage", "report"]  # report — по usage@vpn, settings — нет vpn_card
+    assert enum == ["usage", "report"]
     out = await ai_tools.tool_vpn(_ctx(sub=only_usage), {"action": "issue"})
     assert out.startswith("не умею")
     assert (
@@ -330,7 +327,7 @@ def test_description_carries_faq_answers():
         "переименуйте",
     ):
         assert needle in desc
-    assert "бабуш" in desc  # запрет упоминать
+    assert "бабуш" in desc
 
 
 def test_status_text_pure():

@@ -1,12 +1,3 @@
-"""Тексты и кнопки VPN-уведомлений (этап 57.7).
-
-Единый вид: страна (флаг, а в длинных фразах и название) в каждом сообщении гостю
-и владельцу. Страна определяется по ноде-источнику события: служба vpn кладёт в
-событие ``node`` и ``location`` ([vpn].location, «🇳🇱 Нидерланды»); у ноды старее
-57.7 ``location`` нет — тогда берём запомненную подпись ноды, а нет и её — пишем
-без страны. Тексты на «вы», без пола; пробник ``chat_id=0`` сюда не попадает.
-"""
-
 from __future__ import annotations
 
 import html
@@ -27,7 +18,6 @@ from sa_home_bot.bot.ui.keyboards import button, markup
 from sa_home_bot.utils.plural import plural_ru
 from sa_home_bot.vpn import protocol as vpn_protocol
 
-# «в Нидерландах» — страну в предложном падеже по названию из [vpn].location.
 _IN_COUNTRY = {
     "Нидерланды": "в Нидерландах",
     "США": "в США",
@@ -51,7 +41,6 @@ _IN_COUNTRY = {
 
 
 def country_of(data: dict) -> vd.Country:
-    """Страна по ноде-источнику события."""
     node = str(data.get("node") or "")
     label = str(data.get("location") or "")
     if not label and node:
@@ -60,20 +49,15 @@ def country_of(data: dict) -> vd.Country:
 
 
 def tag(country: vd.Country) -> str:
-    """«VPN 🇳🇱» / «VPN» — заголовок любого уведомления."""
     return f"VPN {country.flag}" if country.flag else "VPN"
 
 
 def in_country(country: vd.Country) -> str:
-    """«в Нидерландах»; страна неизвестна — пусто."""
     return _IN_COUNTRY.get(country.name, "")
 
 
 def _remaining_gb(size: int) -> str:
     return f"{vpn_format.bytes_to_gb(max(size, 0)):.1f}"
-
-
-# --- квота -------------------------------------------------------------------
 
 
 def quota_warning_text(country: vd.Country, remaining_bytes: int) -> str:
@@ -99,7 +83,6 @@ def grant_keyboard(country: vd.Country) -> InlineKeyboardMarkup:
 
 
 def others_with_quota(servers: Iterable[dict], node: str) -> bool:
-    """Есть ли у человека другие открытые страны с остатком (ответы usage)."""
     return any(
         s.get("node") != node
         and s.get("allowed", True)
@@ -115,11 +98,7 @@ def extra_resolved_text(country: vd.Country, approved: bool) -> str:
     return f"🚫 {tag(country)}: заявка на доп. трафик отклонена."
 
 
-# --- владельцу ---------------------------------------------------------------
-
-
 def _where_admin(country: vd.Country) -> str:
-    """«🇳🇱 Нидерланды» — для владельца с названием; нет подписи — id ноды."""
     return html.escape(country.label or country.node or "?")
 
 
@@ -144,9 +123,6 @@ def peer_issued_text(country: vd.Country, chat_id: int, device_label: str) -> st
     )
 
 
-# --- новый доступ ------------------------------------------------------------
-
-
 def access_opened_text(country: vd.Country, base_gb: float, *, has_devices: bool | None) -> str:
     where = html.escape(country.label or country.node or "VPN")
     text = f"📶 Вам открыт VPN: {where}, {base_gb:.0f} ГБ в месяц."
@@ -168,11 +144,7 @@ def access_keyboard(*, has_devices: bool | None) -> InlineKeyboardMarkup:
     return markup([button("📶 Открыть VPN", vpn_callbacks.home_cb())])
 
 
-# --- сервер переустановлен ---------------------------------------------------
-
-
 def real_affected(affected: object) -> list[dict]:
-    """Задетые без пробника ``chat_id=0`` и без мусора."""
     out: list[dict] = []
     for item in affected if isinstance(affected, list) else []:
         if not isinstance(item, dict):
@@ -188,7 +160,6 @@ def real_affected(affected: object) -> list[dict]:
 
 
 def group_by_chat(items: list[dict]) -> dict[int, dict[str, list[str]]]:
-    """chat_id → {device_label → [transport…]} в порядке появления."""
     grouped: dict[int, dict[str, list[str]]] = {}
     for item in items:
         transports = grouped.setdefault(item["chat_id"], {}).setdefault(item["device_label"], [])

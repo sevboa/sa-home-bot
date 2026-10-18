@@ -1,20 +1,3 @@
-"""Приватные ключи VPN, ещё не отданные вторым способом, — держим В ПАМЯТИ
-ЭТОГО ПРОЦЕССА и только до первого запроса (кнопка под сообщением) или TTL
-(``[vpn].config_message_ttl_s``), никогда в БД: vpn/service.py и так не
-хранит приватный ключ (см. его докстринг) — секрет существует только на пути
-от генерации до вручения гостю.
-
-Способ, отправленный сразу (bot/handlers/vpn.py::_send_secret), уже несёт тот
-же секрет — отложенная выдача второго способа не добавляет отдельного уровня
-защиты сама по себе, только удобство (не спамить гостя сразу двумя
-сообщениями подряд, дать выбор). ``reveal`` — какой способ прячется за
-кнопкой: "file" (первый способ был QR) или "qr" (первый способ был файл).
-
-Токен в callback_data — короткий (``secrets.token_urlsafe``), а не сам
-секрет: Telegram ограничивает callback_data 64 байтами, туда весь конфиг не
-влезает.
-"""
-
 from __future__ import annotations
 
 import secrets
@@ -30,20 +13,12 @@ class PendingVpnSecret:
     qr_png_b64: str | None
     reveal: Literal["file", "qr"]
     transport: Literal["awg", "reality"] = "awg"
-    # Только для reality: vless://-ссылка и Hiddify deep-link (у awg их нет —
-    # весь конфиг в .conf-файле).
     share_url: str | None = None
     deep_link: str | None = None
-    # Локация сервера-держателя («🇳🇱 Нидерланды») — чтобы отложенная выдача
-    # назвала файл так же, как немедленная (bot/handlers/vpn.py::_name_prefix).
     location: str = ""
 
 
 class PendingVpnSecrets:
-    """Реестр процесса — не переживает рестарт (как и всё остальное
-    в оперативной памяти бота): после рестарта старые токены просто не
-    находятся, гость увидит «ссылка устарела» и попросит доступ заново."""
-
     def __init__(self) -> None:
         self._items: dict[str, tuple[PendingVpnSecret, float]] = {}
 
@@ -77,7 +52,6 @@ class PendingVpnSecrets:
         return token
 
     def pop(self, token: str) -> PendingVpnSecret | None:
-        """Забрать и удалить — файл по одной ссылке отдаём ровно один раз."""
         entry = self._items.pop(token, None)
         if entry is None:
             return None

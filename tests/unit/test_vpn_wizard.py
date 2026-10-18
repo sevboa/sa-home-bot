@@ -1,5 +1,3 @@
-"""bot/handlers/vpn.py + bot/vpn_wizard.py: пошаговая настройка (57.3a)."""
-
 from __future__ import annotations
 
 import pytest
@@ -7,21 +5,22 @@ import pytest
 from sa_home_bot.bot import vpn_devices as vd
 from sa_home_bot.bot import vpn_help, vpn_keyboards, vpn_nodes
 from sa_home_bot.bot import vpn_wizard as w
-from sa_home_bot.bot.handlers import vpn as h
-from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings, VpnConfig
 from sa_home_bot.proto.messages import ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.vpn import protocol as vpn_protocol
 
-from .test_vpn_expert import _all_buttons, _conn, _srv, _texts
-from .test_vpn_handler import (
+from .vpn_support import (
     ADMIN,
     GUEST_FULL,
-    FakeCallback,
     FakeNodeLink,
-    FakeNotifier,
+    all_buttons,
+    button_texts,
+    last_edit,
+    make_conn,
+    make_srv,
+    press,
 )
 
 OWNER = Subscription(chat_id=1, name="owner", allowed_commands=frozenset({"*"}))
@@ -54,8 +53,8 @@ class Link(FakeNodeLink):
 
 def _empty():
     return [
-        _srv("jeeves", "🇳🇱 Нидерланды", [], transports=["reality"]),
-        _srv("wooster", "🇺🇸 США", [], transports=["reality", "awg"]),
+        make_srv("jeeves", "🇳🇱 Нидерланды", [], transports=["reality"]),
+        make_srv("wooster", "🇺🇸 США", [], transports=["reality", "awg"]),
     ]
 
 
@@ -67,15 +66,14 @@ def _with(label, *, hs=None, nodes=("jeeves", "wooster")):
                 {
                     "device_label": label,
                     "used_bytes": 0,
-                    "connections": [_conn("reality", hs)],
+                    "connections": [make_conn("reality", hs)],
                 }
             ]
     return srv
 
 
 @pytest.fixture(autouse=True)
-def _env(monkeypatch, tmp_path):
-    monkeypatch.setattr(vpn_nodes, "KNOWN_SERVERS_PATH", tmp_path / "known.json")
+def _env(monkeypatch):
     vpn_help.reset_throttle()
     state = {"servers": _empty()}
 
@@ -93,38 +91,37 @@ def _cfg(**kw):
 
 
 async def _press(data, sub=GUEST_FULL, link=None, chat_id=778, cfg=None, book=None, notifier=None):
-    link = link or Link()
-    notifier = notifier or FakeNotifier()
-    cb = FakeCallback(data, chat_id=chat_id)
-    cb.from_user = User()
-    await h.handle_action(cb, link, notifier, cfg or _cfg(), sub, PendingVpnSecrets(), book)
-    return cb, link, notifier
-
-
-def _last(cb):
-    return cb.message.edits[-1], cb.message.edit_markups[-1]
-
-
-# --- первый экран ------------------------------------------------------------
+    return await press(
+        data,
+        sub=sub,
+        link=link or Link(),
+        chat_id=chat_id,
+        cfg=cfg or _cfg(),
+        book=book,
+        notifier=notifier,
+        user=User(),
+    )
 
 
 async def test_no_devices_shows_wizard_intro():
     cb, _, _ = await _press("act:vpn:vpn_card")
-    text, markup = _last(cb)
+    text, markup = last_edit(cb)
     assert text == (
         "📶 <b>VPN</b>\n\nПодключим ваш телефон или компьютер?\n"
         "Проведу по шагам — займёт пару минут."
     )
-    assert _texts(markup) == ["📱 Подключить по шагам", "⚙️ Я разберусь сам"]
+    assert button_texts(markup) == ["📱 Подключить по шагам", "⚙️ Я разберусь сам"]
 
 
 async def test_expert_choice_shows_old_card_and_is_not_remembered():
     cb, _, _ = await _press("act:vpn:vpn_card:wx")
-    text, markup = _last(cb)
-    assert "Подключим" not in text and "Устройств нет" not in "".join(_texts(markup))
-    assert "⚙️ Управление устройствами" in _texts(markup) or "📱 Приложение" in _texts(markup)
+    text, markup = last_edit(cb)
+    assert "Подключим" not in text and "Устройств нет" not in "".join(button_texts(markup))
+    assert "⚙️ Управление устройствами" in button_texts(markup) or "📱 Приложение" in button_texts(
+        markup
+    )
     cb, _, _ = await _press("act:vpn:vpn_card")
-    assert "Подключим ваш телефон" in _last(cb)[0]
+    assert "Подключим ваш телефон" in last_edit(cb)[0]
 
 
 async def test_no_wizard_without_issue_right_or_reality_or_in_group(_env):
@@ -132,35 +129,31 @@ async def test_no_wizard_without_issue_right_or_reality_or_in_group(_env):
         chat_id=5, name="v", allowed_commands=frozenset({"usage@vpn", "vpn_card@vpn"})
     )
     cb, _, _ = await _press("act:vpn:vpn_card", sub=view, chat_id=5)
-    assert "Подключим" not in _last(cb)[0]
+    assert "Подключим" not in last_edit(cb)[0]
     cb, _, _ = await _press("act:vpn:vpn_card", chat_id=-100)
-    assert "Подключим" not in _last(cb)[0]
-    _env["servers"] = [_srv("jeeves", "🇳🇱", [], transports=["awg"])]
+    assert "Подключим" not in last_edit(cb)[0]
+    _env["servers"] = [make_srv("jeeves", "🇳🇱", [], transports=["awg"])]
     cb, _, _ = await _press("act:vpn:vpn_card")
-    assert "Подключим" not in _last(cb)[0]
+    assert "Подключим" not in last_edit(cb)[0]
 
 
 async def test_wizard_button_in_list_not_on_home_when_devices_exist(_env):
     _env["servers"] = _with("📱 iPhone")
     cb, _, _ = await _press("act:vpn:vpn_card")
-    assert "📱 Подключить по шагам" not in _texts(cb.message.edit_markups[-1])
+    assert "📱 Подключить по шагам" not in button_texts(cb.message.edit_markups[-1])
     cb, _, _ = await _press("act:vpn:vpn_card:m")
-    assert "📱 Подключить по шагам" in _texts(cb.message.edit_markups[-1])
+    assert "📱 Подключить по шагам" in button_texts(cb.message.edit_markups[-1])
 
 
 async def test_pick_screen():
     cb, _, _ = await _press("act:vpn:vpn_card:wp")
-    text, markup = _last(cb)
+    text, markup = last_edit(cb)
     assert text == "Какое у вас устройство?"
-    assert _texts(markup) == ["🍎 iPhone", "🤖 Android", "💻 Компьютер", "⬅️ Назад"]
-
-
-# --- создание устройства ------------------------------------------------------
+    assert button_texts(markup) == ["🍎 iPhone", "🤖 Android", "💻 Компьютер", "⬅️ Назад"]
 
 
 @pytest.fixture(autouse=True)
 def _first_flower(monkeypatch):
-    """Цветок для имени выбирается случайно — в тестах берём первый свободный."""
     monkeypatch.setattr(w.random, "choice", lambda seq: seq[0])
 
 
@@ -175,7 +168,7 @@ async def test_create_issues_vless_in_every_country_and_shows_page_step():
     assert all(
         a == {"chat_id": 778, "device_label": "📱 Rose", "transport": "reality"} for _, a in issues
     )
-    text, markup = _last(cb)
+    text, markup = last_edit(cb)
     assert text == (
         "📶 <b>Настройки VPN · 📱 Rose</b>\n"
         "Откройте ссылку на устройстве, которое подключаете (телефон или компьютер) — там всё "
@@ -184,16 +177,16 @@ async def test_create_issues_vless_in_every_country_and_shows_page_step():
         "Ссылку можно переслать. Не делитесь ей с чужими: по ней подключается это устройство."
     )
     assert "⋮" not in text
-    page = _all_buttons(markup)[0]
+    page = all_buttons(markup)[0]
     assert page.text == "📶 Открыть настройки" and page.url == "https://1.2.3.4:8444/s/tok"
-    assert _texts(markup)[1:] == ["✅ Готово", "🙋 Не получается"]
+    assert button_texts(markup)[1:] == ["✅ Готово", "🙋 Не получается"]
 
 
 @pytest.mark.parametrize(("code", "label"), [("a", "🤖 Rose"), ("c", "💻 Rose")])
 async def test_platforms(code, label):
     cb, link, _ = await _press(f"act:vpn:issue:~w{code}", cfg=_cfg(wizard_settings_file=False))
     assert link.calls[0][1]["device_label"] == label
-    first = _all_buttons(_last(cb)[1])[0]
+    first = all_buttons(last_edit(cb)[1])[0]
     assert first.text == "📶 Открыть настройки" and "/s/tok" in first.url
 
 
@@ -201,7 +194,6 @@ def test_device_names_are_flowers_with_platform_emoji():
     ip = w.PLATFORMS["i"]
     rose, lily = vpn_protocol.FLOWER_NAMES[:2]
     assert w.next_label(ip, set()) == f"📱 {rose}"
-    # цветок занят и с другим эмодзи, и без него (старые «Rose»)
     assert w.next_label(ip, {f"🤖 {rose}"}) == f"📱 {lily}"
     assert w.next_label(w.PLATFORMS["a"], {rose}) == f"🤖 {lily}"
     every = set(vpn_protocol.FLOWER_NAMES)
@@ -218,14 +210,14 @@ async def test_partial_node_failure_continues():
     cb, link, _ = await _press(
         "act:vpn:issue:~wi", link=Link(fail_nodes={"wooster"}), cfg=_cfg(wizard_settings_file=False)
     )
-    assert _last(cb)[0].startswith("📶 <b>Настройки VPN")
+    assert last_edit(cb)[0].startswith("📶 <b>Настройки VPN")
 
 
 async def test_all_nodes_failing_says_so_and_offers_help():
     cb, _, _ = await _press("act:vpn:issue:~wi", link=Link(fail_all=True))
-    text, markup = _last(cb)
+    text, markup = last_edit(cb)
     assert "серверы сейчас не отвечают" in text and "позовите на помощь" in text
-    assert _texts(markup) == ["🔁 Попробовать ещё раз", "🙋 Позвать на помощь", "⬅️ Назад"]
+    assert button_texts(markup) == ["🔁 Попробовать ещё раз", "🙋 Позвать на помощь", "⬅️ Назад"]
 
 
 async def test_create_refused_in_group():
@@ -234,15 +226,12 @@ async def test_create_refused_in_group():
     assert not [c for c in link.calls if c[0] == vpn_protocol.ACTION_ISSUE]
 
 
-# --- шаги и нумерация ---------------------------------------------------------
-
 LABEL = "📱 iPhone"
 KEY = vd.device_key(LABEL)
 
 
 async def test_no_file_step_by_default_page_first(_env):
     _env["servers"] = _with(LABEL)
-    # старая кнопка шага «файл» ведёт на страницу: файла в Telegram больше нет
     cb, _, notifier = await _press(f"act:vpn:vpn_card:wbi{KEY}")
     assert cb.message.edits[-1].startswith("📶 <b>Настройки VPN")
     assert not notifier.sent_documents
@@ -254,10 +243,10 @@ async def test_no_file_step_when_vless_already_worked(_env):
         s["device_usage"] += mine["device_usage"]
     _env["servers"] = other
     cb, _, _ = await _press(f"act:vpn:vpn_card:wai{KEY}")
-    text, markup = _last(cb)
-    assert text.startswith("📶 <b>Настройки VPN") and "Шаг" not in text  # единственный шаг
-    ready = [b for b in _all_buttons(markup) if b.text == "✅ Готово"][0]
-    assert ready.callback_data.endswith(f":wdi{KEY}")  # сразу проверка
+    text, markup = last_edit(cb)
+    assert text.startswith("📶 <b>Настройки VPN") and "Шаг" not in text
+    ready = [b for b in all_buttons(markup) if b.text == "✅ Готово"][0]
+    assert ready.callback_data.endswith(f":wdi{KEY}")
 
 
 async def test_no_file_step_when_flag_off(_env):
@@ -281,38 +270,35 @@ async def test_file_step_never_in_group(_env):
 async def test_connect_step_has_subscription_button(_env):
     _env["servers"] = _with(LABEL)
     cb, _, _ = await _press(f"act:vpn:vpn_card:wci{KEY}")
-    connect = _all_buttons(_last(cb)[1])[0]
+    connect = all_buttons(last_edit(cb)[1])[0]
     assert connect.text == "📶 Открыть настройки" and connect.url == "https://1.2.3.4:8444/s/tok"
 
 
 async def test_check_and_done_screens(_env):
     _env["servers"] = _with(LABEL)
     cb, _, _ = await _press(f"act:vpn:vpn_card:wdi{KEY}")
-    text, markup = _last(cb)
+    text, markup = last_edit(cb)
     assert text == "Нажмите большую круглую кнопку в середине Hiddify.\nЗаработало?"
-    assert _texts(markup) == ["✅ Да!", "❌ Нет"]
+    assert button_texts(markup) == ["✅ Да!", "❌ Нет"]
     cb, _, _ = await _press("act:vpn:vpn_card:wy")
-    assert _last(cb)[0] == "🎉 Готово! Теперь VPN включается этой круглой кнопкой."
-    assert _texts(_last(cb)[1]) == ["📶 На главную"]
+    assert last_edit(cb)[0] == "🎉 Готово! Теперь VPN включается этой круглой кнопкой."
+    assert button_texts(last_edit(cb)[1]) == ["📶 На главную"]
 
 
 async def test_fail_screen_and_other_country(_env):
     cb, _, _ = await _press(f"act:vpn:vpn_card:wfci{KEY}")
-    text, markup = _last(cb)
+    text, markup = last_edit(cb)
     assert text == "Ничего страшного."
-    assert _texts(markup) == [
+    assert button_texts(markup) == [
         "🔁 Попробовать другую страну",
         "🙋 Позвать на помощь",
         "⬅️ Назад к шагу",
     ]
-    assert not any("Спросить Альфреда" in t for t in _texts(markup))
-    back = _all_buttons(markup)[-1].callback_data
+    assert not any("Спросить Альфреда" in t for t in button_texts(markup))
+    back = all_buttons(markup)[-1].callback_data
     assert back.endswith(f":wci{KEY}")
     cb, _, _ = await _press(f"act:vpn:vpn_card:woci{KEY}")
-    assert _last(cb)[0] == "В Hiddify нажмите на название подключения и выберите другую страну."
-
-
-# --- помощь ------------------------------------------------------------------
+    assert last_edit(cb)[0] == "В Hiddify нажмите на название подключения и выберите другую страну."
 
 
 def _book():
@@ -333,7 +319,7 @@ async def test_help_notifies_owner_with_context_and_card_button(_env):
     reply_btn, card_btn = notifier.sent_direct_markups[0].inline_keyboard[0]
     assert reply_btn.callback_data == "act:vpn:reply:778"
     assert card_btn.callback_data == "act:vpn:peers:g778"
-    assert _last(cb)[0] == "✅ Передал владельцу. Ответ придёт сюда."
+    assert last_edit(cb)[0] == "✅ Передал владельцу. Ответ придёт сюда."
 
 
 async def test_help_throttled_per_person(_env, monkeypatch):
@@ -348,7 +334,7 @@ async def test_help_throttled_per_person(_env, monkeypatch):
     other, _, n3 = await _press(
         f"act:vpn:vpn_card:whci{KEY}", book=book, chat_id=779, sub=GUEST_FULL
     )
-    assert len(n3.sent_direct) == 1  # другой человек
+    assert len(n3.sent_direct) == 1
     clock[0] += 601
     _, _, n4 = await _press(f"act:vpn:vpn_card:whci{KEY}", book=book)
     assert len(n4.sent_direct) == 1
@@ -364,10 +350,7 @@ async def test_help_on_check_step_and_without_book(_env):
     _, _, notifier = await _press(f"act:vpn:vpn_card:whdi{KEY}", book=_book())
     assert "на проверке" in notifier.sent_direct[0][1]
     cb, _, n = await _press(f"act:vpn:vpn_card:whdi{KEY}", book=None)
-    assert not n.sent_direct and "некому передать" in _last(cb)[0]
-
-
-# --- callback_data -----------------------------------------------------------
+    assert not n.sent_direct and "некому передать" in last_edit(cb)[0]
 
 
 def test_every_wizard_callback_fits_64_bytes():
@@ -383,7 +366,7 @@ def test_every_wizard_callback_fits_64_bytes():
         for step in (w.CONNECT, w.CHECK):
             markups.append(w.step_keyboard(step, platform, key, page_url="https://x/s/t"))
     for markup in markups:
-        for button in _all_buttons(markup):
+        for button in all_buttons(markup):
             if button.callback_data:
                 assert len(button.callback_data.encode()) <= 64, button.callback_data
-    assert ADMIN  # импорт используется
+    assert ADMIN

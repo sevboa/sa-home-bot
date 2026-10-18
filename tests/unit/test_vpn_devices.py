@@ -1,6 +1,3 @@
-"""bot/vpn_devices.py: склейка ответов usage всех нод в устройства (57.2),
-сводка главной и тексты экспертного режима."""
-
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -11,7 +8,7 @@ NOW = datetime(2026, 10, 10, 12, 0, tzinfo=UTC)
 GB = 10**9
 
 
-def _conn(transport, hs=None, *, broken=False, used=0, created="2026-10-01T10:00:00+00:00"):
+def make_conn(transport, hs=None, *, broken=False, used=0, created="2026-10-01T10:00:00+00:00"):
     return {
         "transport": transport,
         "status": "active",
@@ -41,12 +38,12 @@ NL = _server(
         {
             "device_label": "iPhone",
             "used_bytes": int(8.7 * GB),
-            "connections": [_conn("reality", "2026-10-10T14:02:00+00:00")],
+            "connections": [make_conn("reality", "2026-10-10T14:02:00+00:00")],
         },
         {
             "device_label": "Rose",
             "used_bytes": 0,
-            "connections": [_conn("awg", created="2026-10-05T10:00:00+00:00")],
+            "connections": [make_conn("awg", created="2026-10-05T10:00:00+00:00")],
         },
     ],
 )
@@ -58,8 +55,8 @@ US = _server(
             "device_label": "iPhone",
             "used_bytes": int(0.4 * GB),
             "connections": [
-                _conn("reality"),
-                _conn("awg", broken=True, created="2026-10-02T10:00:00+00:00"),
+                make_conn("reality"),
+                make_conn("awg", broken=True, created="2026-10-02T10:00:00+00:00"),
             ],
         }
     ],
@@ -182,7 +179,6 @@ def test_summary_no_hint_when_all_ok_or_all_bad_or_no_data():
     us_bad = _server("wooster", "🇺🇸 США", [], check=bad)
     all_bad = vd.home_summary([nl_bad, us_bad], now=NOW)
     assert not any("выберите" in line for line in all_bad)
-    # данных нет — статус не пишем, только остаток
     (line,) = vd.home_summary([_server("jeeves", "🇳🇱 Нидерланды", [])], now=NOW)
     assert line == "Осталось 87 ГБ из 100 до 1 ноября."
 
@@ -196,7 +192,6 @@ def test_summary_single_country_with_status():
 
 
 def test_summary_looks_at_vless_first():
-    """AmneziaVPN красный, но VLESS (основной способ) зелёный — страна работает."""
     srv = _server(
         "wooster", "🇺🇸 США", [], check=[_check("awg", "alerting"), _check("reality", "ok")]
     )

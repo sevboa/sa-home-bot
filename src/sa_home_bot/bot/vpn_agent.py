@@ -1,14 +1,3 @@
-"""Действия ``tool_vpn`` Альфреда на новой модели устройств (этап 57.8).
-
-Тул и кнопки /vpn — два входа в одно и то же: статус считается из
-``vpn_devices``, «подключить» и «дать настройки» присылают человеку те же
-экраны с кнопками (мастер ``vpn_wizard``, «📥 Получить настройки»
-``vpn_settings``), «сообщить о проблеме» идёт через ``vpn_help`` тем же
-форматом и с тем же троттлингом. Секреты (ключи, ссылки vless, QR) здесь не
-проходят вообще: их выдают только кнопки, сообщениями бота с удалением по TTL.
-Модулю aiogram нужен ради клавиатур, поэтому tools.py импортирует его лениво.
-"""
-
 from __future__ import annotations
 
 import html
@@ -21,7 +10,6 @@ MAX_REASON = vpn_report.MAX_DESCRIPTION
 
 
 async def servers_for(node_link: Any, chat_id: int) -> tuple[list[dict], list[dict]]:
-    """Свежий usage человека по всем нодам: (открытые ему сервера, ответившие все)."""
     answered = await vpn_nodes.usage_for_chat(node_link, chat_id)
     return vpn_nodes.allowed_servers(answered), answered
 
@@ -31,8 +19,6 @@ def _plain(text: str) -> str:
 
 
 def status_text(servers: list[dict]) -> str:
-    """Статус для модели: страны ✅/⚠️, остаток квоты, устройства (трафик и связь).
-    Только то, что видно на экране /vpn, — без ключей и ссылок."""
     if not servers:
         return "VPN не открыт: ни одной страны для этого человека."
     lines = [_plain(line) for line in vd.home_summary(servers)]
@@ -52,12 +38,10 @@ def status_text(servers: list[dict]) -> str:
 
 
 def wizard_available(servers: list[dict]) -> bool:
-    """Тот же критерий, что у /vpn: есть открытая страна с VLESS."""
     return vpn_nodes.has_reality_server(servers)
 
 
 async def send_wizard(notifier: Any, chat_id: int, thread_id: int | None) -> int | None:
-    """Первый экран мастера — сообщением, дальше человек ведёт себя кнопками."""
     return await notifier.send_direct(
         chat_id,
         vpn_wizard.INTRO_TEXT,
@@ -80,7 +64,6 @@ def find_device(servers: list[dict], label: str) -> vd.Device | None:
 async def send_settings(
     notifier: Any, chat_id: int, thread_id: int | None, device: vd.Device
 ) -> int | None:
-    """Экран «📥 Получить настройки» устройства — как кнопка на его карточке."""
     return await notifier.send_direct(
         chat_id,
         vpn_settings.pick_text(device.label),
@@ -102,8 +85,6 @@ async def submit_report(
     answered: list[dict],
     device_key: str = "",
 ) -> vpn_help.Outcome:
-    """Заявка владельцу — тот же формат и троттлинг, что у «⚠️ Сообщить о проблеме».
-    ``reason`` — слова человека, экранируются здесь."""
     blocked = vpn_help.blocked_outcome(book, chat_id)
     if blocked is not None:
         return blocked

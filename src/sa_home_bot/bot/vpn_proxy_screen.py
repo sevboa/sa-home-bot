@@ -1,12 +1,3 @@
-"""Экран «✈️ Прокси Telegram» (этап 57.6): кнопки по странам вместо ссылок.
-
-Действие ``proxy_link`` (право ``proxy_link@vpn``): значение пусто — экран,
-``qr`` + node_id — QR этой страны, ``d`` — «⚙️ Секрет и порт» (подробности
-показываются только тем, у кого есть ``proxy_rotate_secret@vpn``; проверка в
-обработчике, кнопка рисуется только им). Нода, не ответившая на опрос, в
-``results`` не попала — её кнопок нет.
-"""
-
 from __future__ import annotations
 
 import html
@@ -40,7 +31,6 @@ def country_of(result: dict) -> Country:
 
 
 def _link(result: dict) -> str:
-    # Кнопке-ссылке годится https; tg:// — запасной вариант, если нода не прислала.
     return str(result.get("t_me_link") or result.get("tg_link") or "")
 
 

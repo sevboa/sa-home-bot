@@ -1,31 +1,3 @@
-"""Экраны «👥 Все гости» в /vpn: кому на какой локации открыт VPN и на
-сколько гигабайт (решение пользователя 2026-09-18).
-
-Здесь решается ГДЕ, СКОЛЬКО и ЧТО ИМЕННО можно гостю внутри VPN.
-
-Разделение с /guests (решение пользователя 2026-09-24): там группа «📶 VPN»
-выдаётся и снимается целиком — «пускаем ли вообще», — а тонкая настройка
-живёт здесь. Тонкого две оси, и они разные по природе:
-
-- ГДЕ и СКОЛЬКО — допуск к конкретной локации и её постоянная база в ГБ.
-  Правом это не выражается и не может быть (§3.5 AUTHORIZATION.md): локации
-  живут в рое, а не в списке строк конфига, и у каждой свой счёт за трафик.
-  Хранится в самой службе — таблица `vpn_chat_access` каждой ноды.
-- ЧТО ИМЕННО — тумблеры ``VPN_TOGGLES``: видеть карточку, управлять
-  устройствами, докупать трафик, прокси Telegram. Это уже обычные права
-  (`действие@vpn`) в гостевой подписке, правятся `Gatekeeper.set_guest_rights`.
-
-Иерархия — «телефонное меню» в одном сообщении, как /guests
-(bot/guests_view.py): список гостей → карточка гостя (его локации + кнопка
-«🔐 Права VPN») → экран локации (тумблер доступа + гигабайты) либо экран прав
-(тумблеры умений). Модуль только рендерит из готовых данных; сеть и запись —
-в bot/handlers/vpn.py.
-
-Права экранов — обычные `действие@vpn` (CallbackAuthorizationMiddleware):
-смотреть — `peers@vpn`, менять допуск/квоту — `set_access@vpn`, менять
-умения гостя — `set_rights@vpn`.
-"""
-
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -43,49 +15,29 @@ from sa_home_bot.vpn import protocol as vpn_protocol
 SERVICE = vpn_callbacks.SERVICE
 GUEST_PAGE_SIZE = 8
 
-# Ходовые размеры личной квоты. Свободный ввод числа потребовал бы FSM,
-# которого в боте нет нигде, а эти пять значений закрывают живые случаи;
-# точная цифра между ними набирается кнопками «±50».
 QUOTA_PRESETS_GB = (50, 100, 200, 500, 1000)
 QUOTA_STEP_GB = 50
 
 _MAX_NAME_LEN = 40
 
-# Экран (не операция) внутри админского раздела — отдельного действия службы
-# под него не заводим, право то же, что у списка пиров: `peers@vpn`.
 _SCREEN = vpn_protocol.ACTION_PEERS
-_GUEST_PREFIX = "g"  # act:vpn:peers:g<chat_id>[_<нода>]
+_GUEST_PREFIX = "g"
 
-# Группа прав, по которой список сортируется (bot/guest_rights.py).
 _VPN_GROUP_KEY = "vpn"
 
-# Действие правки умений гостя. Службы у него нет — книга подписок живёт в
-# боте, нода про неё не знает; имя нужно только как идентификатор права
-# `set_rights@vpn` и как часть callback_data (тот же приём, что у `vpn_card`).
 ACTION_SET_RIGHTS = "set_rights"
-_RIGHTS_PREFIX = "r"  # act:vpn:peers:r<chat_id>
+_RIGHTS_PREFIX = "r"
 
 
 @dataclass(frozen=True)
 class RightToggle:
-    """Умение внутри VPN — одной кнопкой, хотя прав за ним несколько.
-
-    Право поштучно здесь не тумблер: «выпустить устройство» без «перевыпустить»
-    и «отозвать» — не половина умения, а сломанное умение (гость выпустит ключ
-    и не сможет его сменить). Поэтому тумблер = рабочий комплект, а поштучная
-    правка остаётся доступной руками в config.toml для владельческих подписок.
-    """
-
-    key: str  # короткий id, едет в callback_data
+    key: str
     label: str
     rights: frozenset[str]
     note: str = ""
 
 
 VPN_TOGGLES: tuple[RightToggle, ...] = (
-    # Входной билет: без usage@vpn команда /vpn гостю недоступна вовсе
-    # (bot/commands.py::VPN), поэтому снятие этого тумблера гасит и все
-    # остальные экраны — про это прямо сказано на странице.
     RightToggle(
         key="see",
         label="👁 Видеть карточку /vpn",
@@ -128,31 +80,18 @@ def location_cb(chat_id: int, node: str) -> str:
 
 
 def rights_cb(chat_id: int) -> str:
-    """Экран умений гостя — читается под тем же `peers@vpn`, что и остальной
-    админский раздел: это тот же просмотр, только другой срез."""
     return vpn_callbacks.vpn_callback(_SCREEN, f"{_RIGHTS_PREFIX}{chat_id}")
 
 
 def toggle_cb(chat_id: int, key: str) -> str:
-    """``act:vpn:set_rights:<chat_id>_<ключ тумблера>`` — право `set_rights@vpn`.
-
-    Что включить, а что выключить, кнопка не несёт: состояние читается из
-    подписки в момент нажатия (``toggle_rights``). Иначе две вкладки одного
-    экрана у владельца разъезжались бы — нажатая на устаревшей кнопке
-    «выключить» сняла бы право, которое он только что выдал с другой.
-    """
     return vpn_callbacks.vpn_callback(ACTION_SET_RIGHTS, f"{chat_id}_{key}")
 
 
 def set_access_cb(chat_id: int, node: str, arg: str) -> str:
-    """``act:vpn:set_access:<chat_id>_<arg>:<нода>`` — arg это ``on``/``off``
-    либо число гигабайт. Составное значение — принятая в vpn.py конвенция
-    (см. resolve_request)."""
     return vpn_callbacks.vpn_callback(vpn_protocol.ACTION_SET_ACCESS, f"{chat_id}_{arg}", node)
 
 
 def parse_guest_value(value: str | None) -> int | None:
-    """``g<chat_id>`` → chat_id (None — это не экран гостя, а номер страницы)."""
     if not value or not value.startswith(_GUEST_PREFIX):
         return None
     try:
@@ -162,7 +101,6 @@ def parse_guest_value(value: str | None) -> int | None:
 
 
 def parse_rights_value(value: str | None) -> int | None:
-    """``r<chat_id>`` → chat_id (None — это не экран умений)."""
     if not value or not value.startswith(_RIGHTS_PREFIX):
         return None
     try:
@@ -172,7 +110,6 @@ def parse_rights_value(value: str | None) -> int | None:
 
 
 def parse_set_access_value(value: str | None) -> tuple[int, str] | None:
-    """``<chat_id>_<arg>`` → (chat_id, arg)."""
     if not value or "_" not in value:
         return None
     raw_chat, _, arg = value.partition("_")
@@ -183,13 +120,6 @@ def parse_set_access_value(value: str | None) -> tuple[int, str] | None:
 
 
 def server_name(server: dict) -> str:
-    """Как назвать локацию на этих экранах — флагом, если он в метке есть.
-
-    `[vpn].location` — это «🇳🇱 Нидерланды», и слово рядом с флагом ничего не
-    добавляет: флаг уже называет страну (решение владельца 2026-09-19).
-    Метка без флага (или её отсутствие) показывается как есть — там сокращать
-    нечего.
-    """
     label = str(server.get("label") or "")
     return vpn_protocol.country_flag(label) or label or str(server.get("node") or "?")
 
@@ -199,12 +129,6 @@ def _access_mark(server: dict) -> str:
 
 
 def has_any_vpn_right(sub: Subscription) -> bool:
-    """Выдана ли чату группа «📶 VPN» (хоть одно право из неё).
-
-    Хоть одно, а не весь набор: группу могли доправить руками в конфиге или
-    снять одно право — человек всё равно «по VPN». Проверка идёт через
-    ``allows_action``, поэтому `*` и `*@vpn` тоже считаются.
-    """
     group = guest_rights.group(_VPN_GROUP_KEY)
     if group is None:
         return False
@@ -212,38 +136,20 @@ def has_any_vpn_right(sub: Subscription) -> bool:
 
 
 def _sub_allows_right(sub: Subscription, right: str) -> bool:
-    """Считаем по ``allows_action``, а не вхождением строки в
-    ``allowed_commands``: владельцу с `*` или `*@vpn` (config.toml) экран
-    должен показывать включённое, а не пустые квадратики."""
     return sub.allows_action(right.split("@", 1)[0], SERVICE)
 
 
 def toggle_state(sub: Subscription, toggle: RightToggle) -> bool:
-    """Выдан ли комплект ЦЕЛИКОМ."""
     return all(_sub_allows_right(sub, right) for right in toggle.rights)
 
 
 def toggle_mark(sub: Subscription, toggle: RightToggle) -> str:
-    """✅ весь комплект · 🔸 неполный · ⬜ ничего.
-
-    Неполный — не теоретический случай: гости, впущенные до появления
-    `vpn_card@vpn` в группе, живут с `usage@vpn` без него, и показывать им
-    пустой квадратик было бы неправдой — карточка-то открывается.
-    """
     if toggle_state(sub, toggle):
         return "✅"
     return "🔸" if any(_sub_allows_right(sub, right) for right in toggle.rights) else "⬜"
 
 
 def toggle_rights(sub: Subscription, toggle: RightToggle) -> frozenset[str]:
-    """Новый набор прав гостя после нажатия: снять, если комплект выдан
-    целиком, иначе дожать его до полного.
-
-    Неполный набор дожимается, а не снимается, — тот же приём, что на странице
-    «Добавить право» в /guests: частичный комплект (выдали issue, не выдали
-    reissue) — это сломанное умение, и вероятнее, что его хотят починить, а не
-    добить. Чтобы снять — нажать второй раз, уже на полном.
-    """
     if toggle_state(sub, toggle):
         return sub.allowed_commands - toggle.rights
     return sub.allowed_commands | toggle.rights
@@ -254,10 +160,6 @@ def toggle_by_key(key: str) -> RightToggle | None:
 
 
 def sort_guests(guests: Sequence[Subscription]) -> list[Subscription]:
-    """Сначала те, кому группа VPN выдана — с ними тут и работают; остальные
-    ниже, но видны (кому-то из них доступ как раз и собираются открыть).
-    Сортировка устойчивая, внутри половин порядок книги подписок не меняется.
-    """
     return sorted(guests, key=lambda sub: not has_any_vpn_right(sub))
 
 

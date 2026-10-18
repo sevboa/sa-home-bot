@@ -1,5 +1,3 @@
-"""Этап 57.7: VPN-уведомления со страной, «сервер переустановлен», без «jeeves»."""
-
 from __future__ import annotations
 
 from sa_home_bot.bot import vpn_callbacks, vpn_notify, vpn_settings
@@ -35,12 +33,10 @@ class Store:
 
 
 class Link:
-    """Ответы usage другой страны (для «Другие страны работают»)."""
-
     def __init__(self, servers=()):
         self.servers = list(servers)
 
-    async def request(self, *a, **kw):  # pragma: no cover — fanout идёт через vpn_nodes
+    async def request(self, *a, **kw):  # pragma: no cover
         raise AssertionError
 
 
@@ -68,9 +64,6 @@ def _buttons(markup):
     return [(b.text, b.callback_data) for row in markup.inline_keyboard for b in row]
 
 
-# --- определение страны ------------------------------------------------------
-
-
 def test_country_from_event_location():
     c = vpn_notify.country_of({"node": "jeeves", "location": NL})
     assert (c.node, c.flag, c.name) == ("jeeves", "🇳🇱", "Нидерланды")
@@ -85,9 +78,6 @@ def test_country_unknown_has_no_flag(monkeypatch):
     monkeypatch.setattr("sa_home_bot.bot.vpn_nodes._load_known", lambda: {})
     c = vpn_notify.country_of({"node": "x1"})
     assert vpn_notify.tag(c) == "VPN" and vpn_notify.in_country(c) == ""
-
-
-# --- тексты квоты ------------------------------------------------------------
 
 
 def test_quota_texts():
@@ -165,9 +155,6 @@ async def test_probe_chat_zero_gets_nothing(monkeypatch):
     assert notifier.sent == [] and store.events == []
 
 
-# --- владельцу ---------------------------------------------------------------
-
-
 async def test_node_quota_warning_has_no_hardcoded_jeeves(monkeypatch):
     notifier, store, send = _run(monkeypatch)
     data = {"used_bytes": 800 * 10**9, "limit_bytes": 1000 * 10**9}
@@ -195,9 +182,6 @@ async def test_admin_texts_carry_country(monkeypatch):
     await send(vp.EVENT_VPN_PEER_ISSUED, {"chat_id": GUEST, "device_label": "📱 iPhone", **where})
     assert notifier.sent[0][1].startswith("✋ VPN 🇺🇸: гость")
     assert notifier.sent[1][1] == f"🔐 VPN 🇺🇸: выдан доступ гостю <code>{GUEST}</code> (📱 iPhone)."
-
-
-# --- новый доступ ------------------------------------------------------------
 
 
 def test_access_opened_texts():
@@ -249,11 +233,8 @@ async def test_notify_guest_access_handler(monkeypatch):
     await admin.notify_guest_access(notifier, GUEST, server, opened=False)
     assert notifier.sent[0][1] == "📶 VPN 🇺🇸: доступ закрыт."
     notifier = Notifier()
-    await admin.notify_guest_access(notifier, -5, server, opened=True)  # не личка
+    await admin.notify_guest_access(notifier, -5, server, opened=True)
     assert notifier.sent == []
-
-
-# --- сервер переустановлен ---------------------------------------------------
 
 
 def _item(chat, label, transport):
@@ -368,19 +349,16 @@ async def test_restore_one_failed_delivery_does_not_block_others(monkeypatch):
     assert sorted(c for c, _t, _m in notifier.sent) == [OTHER, ADMIN]
 
 
-# --- предвыбор на экране перевыпуска ----------------------------------------
-
-
-def _conn(node, transport):
+def make_conn(node, transport):
     return vd.Connection(node, transport, "active", None, None, False, 0)
 
 
 def test_restore_mask_selects_only_affected_of_that_country():
     conns = [
-        _conn("jeeves", "reality"),
-        _conn("jeeves", "awg"),
-        _conn("wooster", "reality"),
-        _conn("wooster", "awg"),
+        make_conn("jeeves", "reality"),
+        make_conn("jeeves", "awg"),
+        make_conn("wooster", "reality"),
+        make_conn("wooster", "awg"),
     ]
     nh = vpn_settings.node_hash("jeeves")
     assert vpn_settings.restore_mask(conns, nh, "va") == 0b0011

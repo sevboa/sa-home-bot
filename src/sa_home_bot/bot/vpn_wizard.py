@@ -1,20 +1,3 @@
-"""Пошаговая настройка /vpn (этап 57.3a): тексты, нумерация, кнопки.
-
-Состояние живёт в callback_data (``act:vpn:vpn_card:w<экран><…>``, право
-``vpn_card@vpn`` есть у любого гостя с VPN); создаёт устройство отдельная
-кнопка ``act:vpn:issue:~w<платформа>`` — под обычным ``issue@vpn``.
-
-Экраны (``w`` + код):
-  p — выбор устройства              x — «Я разберусь сам» (старая карточка)
-  b/c/d — шаги: файл настроек (если включён) / страница настроек / проверка
-  (57.11: установка и подключение живут на странице; код ``a`` остаётся для
-  старых кнопок и ведёт на страницу)
-  y — «Заработало»                  f/o/h + <шаг><платформа><ключ> — «Не
-  получается» / другая страна / позвать на помощь. Шаг ``n`` — устройство не
-  удалось создать (ключа нет).
-Платформа — одна буква (i/a/c), ключ устройства — ``vpn_devices.device_key``.
-"""
-
 from __future__ import annotations
 
 import html
@@ -29,11 +12,10 @@ from sa_home_bot.vpn import protocol as vpn_protocol
 
 PREFIX = "w"
 
-# Коды экранов.
 PICK, EXPERT = "p", "x"
 INSTALL, FILE, CONNECT, CHECK = "a", "b", "c", "d"
 DONE, FAIL, OTHER, HELP = "y", "f", "o", "h"
-NOT_CREATED = "n"  # «шаг» для помощи, когда устройство не удалось создать
+NOT_CREATED = "n"
 
 INTRO_TEXT = (
     "📶 <b>VPN</b>\n\nПодключим ваш телефон или компьютер?\nПроведу по шагам — займёт пару минут."
@@ -61,7 +43,7 @@ BACK_TO_STEP_TEXT = "⬅️ Назад к шагу"
 class Platform:
     code: str
     emoji: str
-    name: str  # «iPhone»
+    name: str
 
     @property
     def label(self) -> str:
@@ -77,8 +59,6 @@ PICK_BUTTONS = {"i": "🍎 iPhone", "a": "🤖 Android", "c": "💻 Компью
 
 
 def next_label(platform: Platform, existing: set[str]) -> str:
-    """«🤖 Peony»: эмодзи платформы + цветок, которого у человека ещё нет (с эмодзи
-    или без — старые устройства звались просто «Rose»). Цветы кончились — с номером."""
     taken = {label.split(" ", 1)[-1] for label in existing}
     free = [name for name in vpn_protocol.FLOWER_NAMES if name not in taken]
     if free:

@@ -1,25 +1,3 @@
-"""«⚠️ Сообщить о проблеме» и «💬 Ответить» в /vpn (этап 57.6b).
-
-Чистый модуль: тексты, клавиатуры, контекст для владельца и память ожиданий
-reply. Сеть и отправка — в bot/vpn_help.py и bot/handlers/vpn.py.
-
-Колбэки (``act:vpn:…``):
-  report:m[<ключ>]      — экран причин (с карточки устройства — ключ устройства)
-  report:f              — то же, но из «❓ Помощь»
-  report:c|s|w[<ключ>]  — причина кнопкой: не подключается / медленно / сайты
-  report:o[<ключ>]      — «Другое»: бот просит описание reply на своё сообщение
-  reply:<chat_id>       — владельцу: «💬 Ответить» человеку
-
-Права. ``report@vpn`` отдельным тумблером не выдаётся: он есть у каждого, у кого
-есть ``usage@vpn`` (своя карточка /vpn), см. ``can_report``; middleware
-(bot/middlewares.py) пропускает кнопку по тому же правилу. ``reply@vpn`` —
-только у админов (``*``), как и любое «неперечисленное» умение службы.
-
-Ожидания reply живут в памяти процесса: ``(chat_id, message_id запроса бота)``
-→ кто нажал и зачем. После рестарта бота или через ``REPLY_TTL_S`` reply уже
-не принимается («Время ответа вышло»).
-"""
-
 from __future__ import annotations
 
 import html
@@ -42,7 +20,6 @@ REPLY_ACTION = "reply"
 MENU, MENU_FAQ = "m", "f"
 CONNECT, SLOW, SITES, OTHER = "c", "s", "w", "o"
 
-# код → (кнопка, причина для владельца)
 REASONS: dict[str, tuple[str, str]] = {
     CONNECT: ("🔌 Не подключается", "не подключается"),
     SLOW: ("🐢 Работает медленно", "работает медленно"),
@@ -78,9 +55,6 @@ def can_reply(subscription: Subscription | None) -> bool:
     return vpn_rights.allows(subscription, REPLY_ACTION)
 
 
-# --- callback_data ---------------------------------------------------------
-
-
 def report_cb(value: str = MENU, key: str = "") -> str:
     return vpn_callbacks.vpn_callback(REPORT_ACTION, f"{value}{key}")
 
@@ -94,7 +68,6 @@ def report_button(key: str = "", *, faq: bool = False) -> InlineKeyboardButton:
 
 
 def parse_report(value: str | None) -> tuple[str, str]:
-    """``<код><ключ>`` → (код, ключ); пусто или незнакомое — экран причин."""
     if not value:
         return MENU, ""
     code, key = value[:1], value[1:]
@@ -103,9 +76,6 @@ def parse_report(value: str | None) -> tuple[str, str]:
     if code in (MENU, CONNECT, SLOW, SITES, OTHER):
         return code, key
     return MENU, ""
-
-
-# --- экран причин ----------------------------------------------------------
 
 
 def menu_keyboard(key: str, *, back_cb: str) -> InlineKeyboardMarkup:
@@ -123,16 +93,13 @@ def owner_prompt(name: str) -> str:
     return f"Ответ для {name} — ответьте на это сообщение."
 
 
-# --- ожидания reply --------------------------------------------------------
-
-
 @dataclass
 class Pending:
-    kind: str  # KIND_REPORT | KIND_ANSWER
-    user_id: int  # кому разрешено ответить
+    kind: str
+    user_id: int
     created: float
     device_key: str = ""
-    target_chat: int = 0  # для KIND_ANSWER — кому уйдёт ответ
+    target_chat: int = 0
 
 
 _pending: dict[tuple[int, int], Pending] = {}
@@ -165,9 +132,6 @@ def is_expired(entry: Pending) -> bool:
     return time.monotonic() - entry.created > REPLY_TTL_S
 
 
-# --- контекст для владельца ------------------------------------------------
-
-
 def _node_status(device: vd.Device, node: str, *, tz: tzinfo | None) -> str:
     conns = [c for c in device.issued if c.node == node]
     if not conns:
@@ -194,9 +158,6 @@ def context_lines(
     *,
     tz: tzinfo | None = None,
 ) -> list[str]:
-    """Строки под «Причиной»: устройство(а), связь по странам, проверки, трафик.
-    ``servers`` — свежий usage по ответившим нодам, ``down`` — не ответившие
-    (про них так и пишем). Результат — HTML, названия экранируются здесь."""
     countries = vd.countries_of(servers)
     for server in down:
         node = server.get("node")
