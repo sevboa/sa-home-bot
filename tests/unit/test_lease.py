@@ -409,7 +409,7 @@ async def test_first_decision_waits_for_peer_links_to_settle():
     peer.down_since = None  # соединение ещё даже не пробовали
     slot = FakeSlot("telegram-bot@alfred")
     lease, _ = _lease("alfred", KIND_SERVER, slot, peer)
-    lease._settle_s = 0.6
+    lease._settle_s = 0.1
 
     await lease.start()
     await lease.stop()
