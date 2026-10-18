@@ -160,11 +160,7 @@ def _patch_curl(
         calls.append(cmd)
         if any("awg-quick" in c for c in cmd):
             if "up" in cmd:
-                return (
-                    _FakeProc(b"", b"", 0)
-                    if tunnel_up_ok
-                    else _FakeProc(b"", tunnel_up_err, 1)
-                )
+                return _FakeProc(b"", b"", 0) if tunnel_up_ok else _FakeProc(b"", tunnel_up_err, 1)
             return _FakeProc(b"", b"", 0)  # down — best-effort, всегда «ок» в тестах
         if any("xray" in c for c in cmd):
             return (
@@ -194,9 +190,7 @@ def _target_curl_calls(calls: list[tuple]) -> list[tuple]:
     """Только вызовы curl к целям проверки — без гейта/тоннеля (route get /
     ip-echo / awg-quick up|down)."""
     return [
-        c
-        for c in calls
-        if "curl" in c and c[-1] != _IP_ECHO and not ("route" in c and "get" in c)
+        c for c in calls if "curl" in c and c[-1] != _IP_ECHO and not ("route" in c and "get" in c)
     ]
 
 
@@ -405,9 +399,7 @@ async def test_two_slots_for_same_server_are_both_checked(monkeypatch):
     calls = _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
     node_link = _FakeNodeLink()
     slots = [_slot(), _reality_slot()]
-    await _service(node_link, slots=slots)._run_and_report(
-        PROBE_SERVER, slots, ["https://1.1.1.1"]
-    )
+    await _service(node_link, slots=slots)._run_and_report(PROBE_SERVER, slots, ["https://1.1.1.1"])
     results = node_link.calls[0]["args"]["results"]
     transports = {r["transport"] for r in results}
     assert transports == {"awg", "reality"}

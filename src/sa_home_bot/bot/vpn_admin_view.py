@@ -34,12 +34,13 @@ from html import escape
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from sa_home_bot.bot import commands, guest_rights
+from sa_home_bot.bot import guest_rights, vpn_callbacks, vpn_format, vpn_keyboards
 from sa_home_bot.bot.pagination import nav_row
+from sa_home_bot.bot.ui.keyboards import button, markup
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.vpn import protocol as vpn_protocol
 
-SERVICE = vpn_protocol.SERVICE_NAME
+SERVICE = vpn_callbacks.SERVICE
 GUEST_PAGE_SIZE = 8
 
 # Ходовые размеры личной квоты. Свободный ввод числа потребовал бы FSM,
@@ -49,7 +50,6 @@ QUOTA_PRESETS_GB = (50, 100, 200, 500, 1000)
 QUOTA_STEP_GB = 50
 
 _MAX_NAME_LEN = 40
-_GB = 1_000_000_000
 
 # Экран (не операция) внутри админского раздела — отдельного действия службы
 # под него не заводим, право то же, что у списка пиров: `peers@vpn`.
@@ -116,23 +116,21 @@ _TOGGLE_BY_KEY = {toggle.key: toggle for toggle in VPN_TOGGLES}
 
 
 def guests_cb(offset: int = 0) -> str:
-    return commands.action_callback(_SCREEN, str(offset), service=SERVICE)
+    return vpn_callbacks.vpn_callback(_SCREEN, str(offset))
 
 
 def guest_cb(chat_id: int) -> str:
-    return commands.action_callback(_SCREEN, f"{_GUEST_PREFIX}{chat_id}", service=SERVICE)
+    return vpn_callbacks.vpn_callback(_SCREEN, f"{_GUEST_PREFIX}{chat_id}")
 
 
 def location_cb(chat_id: int, node: str) -> str:
-    return commands.action_callback(
-        _SCREEN, f"{_GUEST_PREFIX}{chat_id}", service=SERVICE, node_id=node
-    )
+    return vpn_callbacks.vpn_callback(_SCREEN, f"{_GUEST_PREFIX}{chat_id}", node)
 
 
 def rights_cb(chat_id: int) -> str:
     """Экран умений гостя — читается под тем же `peers@vpn`, что и остальной
     админский раздел: это тот же просмотр, только другой срез."""
-    return commands.action_callback(_SCREEN, f"{_RIGHTS_PREFIX}{chat_id}", service=SERVICE)
+    return vpn_callbacks.vpn_callback(_SCREEN, f"{_RIGHTS_PREFIX}{chat_id}")
 
 
 def toggle_cb(chat_id: int, key: str) -> str:
@@ -143,18 +141,14 @@ def toggle_cb(chat_id: int, key: str) -> str:
     экрана у владельца разъезжались бы — нажатая на устаревшей кнопке
     «выключить» сняла бы право, которое он только что выдал с другой.
     """
-    return commands.action_callback(
-        ACTION_SET_RIGHTS, f"{chat_id}_{key}", service=SERVICE
-    )
+    return vpn_callbacks.vpn_callback(ACTION_SET_RIGHTS, f"{chat_id}_{key}")
 
 
 def set_access_cb(chat_id: int, node: str, arg: str) -> str:
     """``act:vpn:set_access:<chat_id>_<arg>:<нода>`` — arg это ``on``/``off``
     либо число гигабайт. Составное значение — принятая в vpn.py конвенция
     (см. resolve_request)."""
-    return commands.action_callback(
-        vpn_protocol.ACTION_SET_ACCESS, f"{chat_id}_{arg}", service=SERVICE, node_id=node
-    )
+    return vpn_callbacks.vpn_callback(vpn_protocol.ACTION_SET_ACCESS, f"{chat_id}_{arg}", node)
 
 
 def parse_guest_value(value: str | None) -> int | None:
@@ -188,10 +182,6 @@ def parse_set_access_value(value: str | None) -> tuple[int, str] | None:
         return None
 
 
-def _gb(value: int) -> float:
-    return value / _GB
-
-
 def server_name(server: dict) -> str:
     """Как назвать локацию на этих экранах — флагом, если он в метке есть.
 
@@ -208,7 +198,7 @@ def _access_mark(server: dict) -> str:
     return "✅" if server.get("allowed") else "⬜"
 
 
-def in_vpn_group(sub: Subscription) -> bool:
+def has_any_vpn_right(sub: Subscription) -> bool:
     """Выдана ли чату группа «📶 VPN» (хоть одно право из неё).
 
     Хоть одно, а не весь набор: группу могли доправить руками в конфиге или
@@ -221,7 +211,7 @@ def in_vpn_group(sub: Subscription) -> bool:
     return any(sub.allows_action(right.split("@", 1)[0], SERVICE) for right in group.rights)
 
 
-def _has(sub: Subscription, right: str) -> bool:
+def _sub_allows_right(sub: Subscription, right: str) -> bool:
     """Считаем по ``allows_action``, а не вхождением строки в
     ``allowed_commands``: владельцу с `*` или `*@vpn` (config.toml) экран
     должен показывать включённое, а не пустые квадратики."""
@@ -230,7 +220,7 @@ def _has(sub: Subscription, right: str) -> bool:
 
 def toggle_state(sub: Subscription, toggle: RightToggle) -> bool:
     """Выдан ли комплект ЦЕЛИКОМ."""
-    return all(_has(sub, right) for right in toggle.rights)
+    return all(_sub_allows_right(sub, right) for right in toggle.rights)
 
 
 def toggle_mark(sub: Subscription, toggle: RightToggle) -> str:
@@ -242,7 +232,7 @@ def toggle_mark(sub: Subscription, toggle: RightToggle) -> str:
     """
     if toggle_state(sub, toggle):
         return "✅"
-    return "🔸" if any(_has(sub, right) for right in toggle.rights) else "⬜"
+    return "🔸" if any(_sub_allows_right(sub, right) for right in toggle.rights) else "⬜"
 
 
 def toggle_rights(sub: Subscription, toggle: RightToggle) -> frozenset[str]:
@@ -268,21 +258,12 @@ def sort_guests(guests: Sequence[Subscription]) -> list[Subscription]:
     ниже, но видны (кому-то из них доступ как раз и собираются открыть).
     Сортировка устойчивая, внутри половин порядок книги подписок не меняется.
     """
-    return sorted(guests, key=lambda sub: not in_vpn_group(sub))
-
-
-# --- список гостей ---------------------------------------------------------
+    return sorted(guests, key=lambda sub: not has_any_vpn_right(sub))
 
 
 def build_guests_view(
     guests: Sequence[Subscription], access: dict[int, list[dict]], offset: int
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """``access`` — ответы usage по каждому гостю, по одному на локацию.
-
-    Список берётся из подписок бота, а не из сводки службы: иначе не видно
-    того, кому ещё ничего не выдавали, — а именно ему и надо выдать. Порядок
-    задаёт ``sort_guests``: сверху те, кому группа «📶 VPN» уже выдана.
-    """
     guests = sort_guests(guests)
     lines = [f"👥 <b>Гости VPN</b> ({len(guests)})", ""]
     if not guests:
@@ -293,37 +274,21 @@ def build_guests_view(
         opened = [s for s in servers if s.get("allowed")]
         if opened:
             where = ", ".join(
-                f"{server_name(s)} {_gb(s.get('used_bytes', 0)):.0f}/"
-                f"{_gb(s.get('limit_bytes', 0)):.0f} ГБ"
+                f"{server_name(s)} {vpn_format.bytes_to_gb(s.get('used_bytes', 0)):.0f}/"
+                f"{vpn_format.bytes_to_gb(s.get('limit_bytes', 0)):.0f} ГБ"
                 for s in opened
             )
         else:
             where = "доступа нет"
         lines.append(f"• {escape(guest.name)} — {escape(where)}")
     buttons = [
-        [
-            InlineKeyboardButton(
-                text=f"👤 {guest.name}"[:_MAX_NAME_LEN],
-                callback_data=guest_cb(guest.chat_id),
-            )
-        ]
-        for guest in page
+        [button(f"👤 {guest.name}"[:_MAX_NAME_LEN], guest_cb(guest.chat_id))] for guest in page
     ]
     nav = nav_row(offset, GUEST_PAGE_SIZE, len(guests), guests_cb)
     if nav:
         buttons.append(nav)
-    buttons.append(
-        [
-            InlineKeyboardButton(
-                text="⬅️ К карточке",
-                callback_data=commands.action_callback("vpn_card", service=SERVICE),
-            )
-        ]
-    )
-    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-# --- карточка гостя: его локации -------------------------------------------
+    buttons.append(vpn_keyboards.back_row(vpn_callbacks.home_cb(), "⬅️ К карточке"))
+    return "\n".join(lines), markup(*buttons)
 
 
 def build_guest_view(
@@ -338,19 +303,16 @@ def build_guest_view(
         f"👤 <b>{escape(guest.name)}</b>",
         "",
         f"chat_id: <code>{guest.chat_id}</code>",
-        # Умения — сразу на карточке: иначе, чтобы понять, почему у гостя с
-        # открытой локацией ничего не работает, пришлось бы зайти на соседний
-        # экран и вернуться.
         "Умения: " + (escape(", ".join(enabled)) if enabled else "нет"),
         "",
     ]
     if not servers:
         lines.append("Ни одна нода с VPN сейчас не на связи.")
     for server in servers:
-        used = _gb(server.get("used_bytes", 0))
-        limit = _gb(server.get("limit_bytes", 0))
+        used = vpn_format.bytes_to_gb(server.get("used_bytes", 0))
+        limit = vpn_format.bytes_to_gb(server.get("limit_bytes", 0))
         if server.get("allowed"):
-            base = _gb(server.get("base_limit_bytes", 0))
+            base = vpn_format.bytes_to_gb(server.get("base_limit_bytes", 0))
             personal = " (личная)" if server.get("personal_base") else " (общая)"
             lines.append(
                 f"{_access_mark(server)} <b>{escape(server_name(server))}</b>: "
@@ -360,32 +322,20 @@ def build_guest_view(
             lines.append(f"{_access_mark(server)} <b>{escape(server_name(server))}</b>: закрыт")
     buttons = [
         [
-            InlineKeyboardButton(
-                text=f"{_access_mark(server)} {server_name(server)}"[:_MAX_NAME_LEN],
-                callback_data=location_cb(guest.chat_id, str(server.get("node"))),
+            button(
+                f"{_access_mark(server)} {server_name(server)}"[:_MAX_NAME_LEN],
+                location_cb(guest.chat_id, str(server.get("node"))),
             )
         ]
         for server in servers
         if server.get("node")
     ]
-    buttons.append(
-        [
-            InlineKeyboardButton(
-                text="🔐 Права VPN",
-                callback_data=rights_cb(guest.chat_id),
-            )
-        ]
-    )
-    buttons.append([InlineKeyboardButton(text="⬅️ К списку", callback_data=guests_cb(0))])
-    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-# --- карточка гостя: его умения --------------------------------------------
+    buttons.append([button("🔐 Права VPN", rights_cb(guest.chat_id))])
+    buttons.append([button("⬅️ К списку", guests_cb(0))])
+    return "\n".join(lines), markup(*buttons)
 
 
 def build_rights_view(guest: Subscription) -> tuple[str, InlineKeyboardMarkup]:
-    """Тумблеры умений внутри VPN. Допуск к локациям тут не трогается — это
-    соседний экран и другая ось (см. докстринг модуля)."""
     lines = [
         f"🔐 <b>Права VPN — {escape(guest.name)}</b>",
         "",
@@ -395,82 +345,70 @@ def build_rights_view(guest: Subscription) -> tuple[str, InlineKeyboardMarkup]:
         if toggle.note:
             lines.append(f"   <i>{escape(toggle.note)}</i>")
     lines.append("")
-    # Про владельческие подписки тут говорить нечего: экран открывается только
-    # из списка гостей (``book.guests()``), а он их не содержит — их права
-    # по-прежнему правятся конфигом и рестартом (AUTHORIZATION.md §2).
     lines.append("Правится сразу, без перезапуска.")
     buttons = [
         [
-            InlineKeyboardButton(
-                text=f"{toggle_mark(guest, toggle)} {toggle.label}"[:_MAX_NAME_LEN],
-                callback_data=toggle_cb(guest.chat_id, toggle.key),
+            button(
+                f"{toggle_mark(guest, toggle)} {toggle.label}"[:_MAX_NAME_LEN],
+                toggle_cb(guest.chat_id, toggle.key),
             )
         ]
         for toggle in VPN_TOGGLES
     ]
-    buttons.append(
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=guest_cb(guest.chat_id))]
+    buttons.append(vpn_keyboards.back_row(guest_cb(guest.chat_id)))
+    return "\n".join(lines), markup(*buttons)
+
+
+def _preset_rows(chat_id: int, node: str, base_gb: float) -> list[list[InlineKeyboardButton]]:
+    buttons = [
+        button(
+            f"{'•' if abs(preset - base_gb) < 0.5 else ''}{preset} ГБ",
+            set_access_cb(chat_id, node, str(preset)),
+        )
+        for preset in QUOTA_PRESETS_GB
+    ]
+    rows = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
+    rows.append(
+        [
+            button(
+                f"➖{QUOTA_STEP_GB}",
+                set_access_cb(chat_id, node, str(max(QUOTA_STEP_GB, int(base_gb) - QUOTA_STEP_GB))),
+            ),
+            button(
+                f"➕{QUOTA_STEP_GB}",
+                set_access_cb(chat_id, node, str(int(base_gb) + QUOTA_STEP_GB)),
+            ),
+        ]
     )
-    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-# --- экран локации ---------------------------------------------------------
+    return rows
 
 
 def build_location_view(guest: Subscription, server: dict) -> tuple[str, InlineKeyboardMarkup]:
     chat_id = guest.chat_id
     node = str(server.get("node"))
     allowed = bool(server.get("allowed"))
-    base_gb = _gb(server.get("base_limit_bytes", 0))
+    base_gb = vpn_format.bytes_to_gb(server.get("base_limit_bytes", 0))
     lines = [
         f"📶 <b>{escape(server_name(server))}</b> — {escape(guest.name)}",
         "",
         "Доступ: " + ("✅ открыт" if allowed else "⬜ закрыт"),
         f"База: {base_gb:.0f} ГБ в месяц"
         + (" (личная)" if server.get("personal_base") else " (общая)"),
-        f"Израсходовано: {_gb(server.get('used_bytes', 0)):.1f} / "
-        f"{_gb(server.get('limit_bytes', 0)):.0f} ГБ",
+        f"Израсходовано: {vpn_format.bytes_to_gb(server.get('used_bytes', 0)):.1f} / "
+        f"{vpn_format.bytes_to_gb(server.get('limit_bytes', 0)):.0f} ГБ",
     ]
     if allowed:
         lines.append("")
         lines.append("Гигабайты — это постоянная база: каждый месяц столько же.")
     buttons: list[list[InlineKeyboardButton]] = [
         [
-            InlineKeyboardButton(
-                text="⬜ Закрыть доступ" if allowed else "✅ Открыть доступ",
-                callback_data=set_access_cb(chat_id, node, "off" if allowed else "on"),
+            button(
+                "⬜ Закрыть доступ" if allowed else "✅ Открыть доступ",
+                set_access_cb(chat_id, node, "off" if allowed else "on"),
             )
         ]
     ]
     if allowed:
-        # Пресеты — по три в ряд, чтобы экран не растягивался в столбец.
-        row: list[InlineKeyboardButton] = []
-        for preset in QUOTA_PRESETS_GB:
-            mark = "•" if abs(preset - base_gb) < 0.5 else ""
-            row.append(
-                InlineKeyboardButton(
-                    text=f"{mark}{preset} ГБ",
-                    callback_data=set_access_cb(chat_id, node, str(preset)),
-                )
-            )
-            if len(row) == 3:
-                buttons.append(row)
-                row = []
-        if row:
-            buttons.append(row)
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text=f"➖{QUOTA_STEP_GB}",
-                    callback_data=set_access_cb(
-                        chat_id, node, str(max(QUOTA_STEP_GB, int(base_gb) - QUOTA_STEP_GB))
-                    ),
-                ),
-                InlineKeyboardButton(
-                    text=f"➕{QUOTA_STEP_GB}",
-                    callback_data=set_access_cb(chat_id, node, str(int(base_gb) + QUOTA_STEP_GB)),
-                ),
-            ]
-        )
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=guest_cb(chat_id))])
-    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
+        buttons.extend(_preset_rows(chat_id, node, base_gb))
+    buttons.append(vpn_keyboards.back_row(guest_cb(chat_id)))
+    return "\n".join(lines), markup(*buttons)

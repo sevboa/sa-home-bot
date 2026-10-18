@@ -29,13 +29,13 @@ from datetime import tzinfo
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from sa_home_bot.bot import commands
+from sa_home_bot.bot import vpn_callbacks, vpn_check_view, vpn_format, vpn_keyboards, vpn_rights
 from sa_home_bot.bot import vpn_devices as vd
-from sa_home_bot.domain import vpn_check
+from sa_home_bot.bot.ui.keyboards import button, markup
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.vpn import protocol as vpn_protocol
 
-SERVICE = vpn_protocol.SERVICE_NAME
+SERVICE = vpn_callbacks.SERVICE
 REPORT_ACTION = "report"
 REPLY_ACTION = "reply"
 
@@ -69,33 +69,28 @@ KIND_REPORT, KIND_ANSWER = "report", "answer"
 
 
 def can_report(subscription: Subscription | None) -> bool:
-    """«Сообщить о проблеме» — у каждого, у кого есть VPN (usage@vpn), и у тех,
-    кому ``report@vpn`` выдан явно."""
-    return subscription is not None and (
-        subscription.allows_action(REPORT_ACTION, SERVICE)
-        or subscription.allows_action(vpn_protocol.ACTION_USAGE, SERVICE)
+    return vpn_rights.allows(subscription, REPORT_ACTION) or vpn_rights.allows(
+        subscription, vpn_protocol.ACTION_USAGE
     )
 
 
 def can_reply(subscription: Subscription | None) -> bool:
-    return subscription is not None and subscription.allows_action(REPLY_ACTION, SERVICE)
+    return vpn_rights.allows(subscription, REPLY_ACTION)
 
 
 # --- callback_data ---------------------------------------------------------
 
 
 def report_cb(value: str = MENU, key: str = "") -> str:
-    return commands.action_callback(REPORT_ACTION, f"{value}{key}", service=SERVICE)
+    return vpn_callbacks.vpn_callback(REPORT_ACTION, f"{value}{key}")
 
 
 def reply_cb(chat_id: int) -> str:
-    return commands.action_callback(REPLY_ACTION, str(chat_id), service=SERVICE)
+    return vpn_callbacks.vpn_callback(REPLY_ACTION, str(chat_id))
 
 
 def report_button(key: str = "", *, faq: bool = False) -> InlineKeyboardButton:
-    return InlineKeyboardButton(
-        text=REPORT_BUTTON, callback_data=report_cb(MENU_FAQ if faq else MENU, key)
-    )
+    return button(REPORT_BUTTON, report_cb(MENU_FAQ if faq else MENU, key))
 
 
 def parse_report(value: str | None) -> tuple[str, str]:
@@ -114,30 +109,14 @@ def parse_report(value: str | None) -> tuple[str, str]:
 
 
 def menu_keyboard(key: str, *, back_cb: str) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text=text, callback_data=report_cb(code, key))]
-        for code, (text, _reason) in REASONS.items()
-    ]
-    rows.append([InlineKeyboardButton(text=OTHER_BUTTON, callback_data=report_cb(OTHER, key))])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_cb)])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def done_keyboard(home_cb: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="📶 На главную", callback_data=home_cb)]]
-    )
+    rows = [[button(text, report_cb(code, key))] for code, (text, _reason) in REASONS.items()]
+    rows.append([button(OTHER_BUTTON, report_cb(OTHER, key))])
+    rows.append(vpn_keyboards.back_row(back_cb))
+    return markup(*rows)
 
 
 def owner_keyboard(chat_id: int, guest_cb: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="💬 Ответить", callback_data=reply_cb(chat_id)),
-                InlineKeyboardButton(text="👤 Карточка гостя", callback_data=guest_cb),
-            ]
-        ]
-    )
+    return markup([button("💬 Ответить", reply_cb(chat_id)), button("👤 Карточка гостя", guest_cb)])
 
 
 def owner_prompt(name: str) -> str:
@@ -195,7 +174,7 @@ def _node_status(device: vd.Device, node: str, *, tz: tzinfo | None) -> str:
         return "не выдано"
     stamps = [c.last_handshake_at for c in conns if c.last_handshake_at]
     if stamps:
-        return f"на связи {vd.fmt_stamp(max(stamps), tz=tz)}"
+        return f"на связи {vpn_format.format_stamp(max(stamps), tz=tz)}"
     return "ещё не подключалось"
 
 
@@ -206,9 +185,6 @@ def _transports_text(device: vd.Device) -> str:
         if name not in seen:
             seen.append(name)
     return " + ".join(seen)
-
-
-_CHECK_ICON = {vpn_check.OK: "🟢", vpn_check.PARTIAL: "🟠", vpn_check.ALERTING: "🔴"}
 
 
 def context_lines(
@@ -260,9 +236,9 @@ def context_lines(
 
     checks = []
     for server in servers:
-        health = vd._server_health(server)
+        health = vd.server_health(server)
         if health is not None and server.get("node"):
-            checks.append(f"{where(server['node'])} {_CHECK_ICON.get(health, '❔')}")
+            checks.append(f"{where(server['node'])} {vpn_check_view.STATUS_ICON.get(health, '❔')}")
     if checks:
         lines.append("Проверки: " + " · ".join(checks))
 
@@ -270,8 +246,8 @@ def context_lines(
     for server in servers:
         if not server.get("node"):
             continue
-        used = int(server.get("used_bytes") or 0) / 1_000_000_000
-        limit = int(server.get("limit_bytes") or 0) / 1_000_000_000
+        used = vpn_format.bytes_to_gb(int(server.get("used_bytes") or 0))
+        limit = vpn_format.bytes_to_gb(int(server.get("limit_bytes") or 0))
         text = f"{used:.1f} / {limit:.0f} ГБ"
         traffic.append(f"{where(server['node'])} {text}" if len(servers) > 1 else text)
     if traffic:

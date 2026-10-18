@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import pytest
 
+from sa_home_bot.bot import vpn_callbacks, vpn_delivery, vpn_nodes, vpn_settings, vpn_wizard
 from sa_home_bot.bot import vpn_devices as vd
-from sa_home_bot.bot import vpn_nodes, vpn_settings, vpn_wizard
 from sa_home_bot.bot.handlers import vpn as h
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings, VpnConfig
@@ -185,12 +185,14 @@ async def test_vless_qr_buttons_are_independent_and_secrets_get_deleted():
     # нажатая кнопка уходит, остальное на месте
     from types import SimpleNamespace
 
-    left = h._without_button(
+    left = vpn_delivery.without_button(
         SimpleNamespace(reply_markup=notifier.sent_direct_markups[0]), qr[0].callback_data
     )
     assert _texts(left) == ["🔌 Подключить", "📷 QR 🇺🇸"]
     only = SimpleNamespace(reply_markup=left)
-    assert h._without_button(only, qr[1].callback_data).inline_keyboard == [left.inline_keyboard[0]]
+    assert vpn_delivery.without_button(only, qr[1].callback_data).inline_keyboard == [
+        left.inline_keyboard[0]
+    ]
 
 
 async def test_vless_refused_in_group_chat():
@@ -317,7 +319,7 @@ async def test_new_device_pick_platform_then_get_settings_screen(_env):
     assert _texts(markup) == ["📶 Открыть настройки", "⬅️ К устройству"]
     buttons = _all_buttons(markup)
     assert buttons[0].url == "https://1.2.3.4:8444/s/tok"
-    assert buttons[1].callback_data == vpn_settings.card_cb("d", vd.device_key(label))
+    assert buttons[1].callback_data == vpn_callbacks.card_cb("d", vd.device_key(label))
 
 
 async def test_new_device_label_gets_number_when_taken():

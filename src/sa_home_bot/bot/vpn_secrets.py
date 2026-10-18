@@ -20,6 +20,7 @@ from __future__ import annotations
 import secrets
 import time
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -27,8 +28,8 @@ class PendingVpnSecret:
     config_text: str
     device_label: str
     qr_png_b64: str | None
-    reveal: str  # "file" | "qr" — что отдать по кнопке
-    transport: str = "awg"  # awg | reality — какой способ вручения (см. bot/handlers/vpn.py)
+    reveal: Literal["file", "qr"]
+    transport: Literal["awg", "reality"] = "awg"
     # Только для reality: vless://-ссылка и Hiddify deep-link (у awg их нет —
     # весь конфиг в .conf-файле).
     share_url: str | None = None

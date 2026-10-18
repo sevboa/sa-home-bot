@@ -23,13 +23,10 @@ from dataclasses import dataclass
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from sa_home_bot.bot import commands
-from sa_home_bot.bot import vpn_devices as vd
-from sa_home_bot.config import VpnConfig
+from sa_home_bot.bot import vpn_callbacks, vpn_keyboards
+from sa_home_bot.bot.ui.keyboards import button, markup
 from sa_home_bot.vpn import protocol as vpn_protocol
 
-SERVICE = vpn_protocol.SERVICE_NAME
-CARD_ACTION = "vpn_card"
 PREFIX = "w"
 
 # Коды экранов.
@@ -37,7 +34,6 @@ PICK, EXPERT = "p", "x"
 INSTALL, FILE, CONNECT, CHECK = "a", "b", "c", "d"
 DONE, FAIL, OTHER, HELP = "y", "f", "o", "h"
 NOT_CREATED = "n"  # «шаг» для помощи, когда устройство не удалось создать
-STEP_ORDER = (FILE, CONNECT)
 
 INTRO_TEXT = (
     "📶 <b>VPN</b>\n\nПодключим ваш телефон или компьютер?\nПроведу по шагам — займёт пару минут."
@@ -58,7 +54,7 @@ UNAVAILABLE_TEXT = (
     "Не получилось подготовить этот шаг — сервер не ответил.\n"
     "Повторите чуть позже или позовите на помощь."
 )
-FILE_CAPTION = "Настройки Hiddify. Нажмите на файл и выберите «Hiddify»."
+BACK_TO_STEP_TEXT = "⬅️ Назад к шагу"
 
 
 @dataclass(frozen=True)
@@ -66,7 +62,6 @@ class Platform:
     code: str
     emoji: str
     name: str  # «iPhone»
-    store_button: str
 
     @property
     def label(self) -> str:
@@ -74,18 +69,11 @@ class Platform:
 
 
 PLATFORMS: dict[str, Platform] = {
-    "i": Platform("i", "📱", "iPhone", "⬇️ Открыть App Store"),
-    "a": Platform("a", "🤖", "Android", "⬇️ Открыть Google Play"),
-    "c": Platform("c", "💻", "Компьютер", "⬇️ Открыть сайт Hiddify"),
+    "i": Platform("i", "📱", "iPhone"),
+    "a": Platform("a", "🤖", "Android"),
+    "c": Platform("c", "💻", "Компьютер"),
 }
 PICK_BUTTONS = {"i": "🍎 iPhone", "a": "🤖 Android", "c": "💻 Компьютер"}
-
-
-def store_url(platform: Platform, cfg: VpnConfig) -> str:
-    return {
-        "i": cfg.hiddify_ios_app_store_url,
-        "a": cfg.hiddify_google_play_url,
-    }.get(platform.code, cfg.hiddify_site_url)
 
 
 def next_label(platform: Platform, existing: set[str]) -> str:
@@ -101,44 +89,18 @@ def next_label(platform: Platform, existing: set[str]) -> str:
     return f"{platform.emoji} {vpn_protocol.FLOWER_NAMES[0]} {n}"
 
 
-def needs_settings_file(cfg: VpnConfig, devices: list[vd.Device], key: str) -> bool:
-    """С 57.13 всегда ``False``: настройки нового или существующего устройства — сразу
-    страница на сайте (файл в Telegram остался только под «Другие способы»)."""
-    return False
-
-
-def steps(needs_file: bool) -> list[str]:
-    return [s for s in STEP_ORDER if s != FILE or needs_file]
-
-
-def step_title(code: str, needs_file: bool) -> str | None:
-    order = steps(needs_file)
-    if code not in order:
-        return None
-    return f"Шаг {order.index(code) + 1} из {len(order)}"
-
-
-def next_step(code: str, needs_file: bool) -> str:
-    order = steps(needs_file)
-    return order[order.index(code) + 1] if order.index(code) + 1 < len(order) else CHECK
-
-
-def stuck_text(code: str, platform: Platform | None, needs_file: bool) -> str:
-    """Причина для владельца: «застрял(а) на шаге 2 из 3 (iPhone)»."""
+def stuck_text(code: str, platform: Platform | None) -> str:
     where = f" ({platform.name})" if platform else ""
     if code == NOT_CREATED:
         return f"не удалось подготовить подключение{where}"
     if code == CHECK:
         return f"застрял(а) на проверке: после подключения не заработало{where}"
-    title = step_title(code, needs_file)
-    return f"застрял(а) на шаге {title.removeprefix('Шаг ') if title else code}{where}"
-
-
-# --- callback_data ---------------------------------------------------------
+    step = "1 из 1" if code == CONNECT else code
+    return f"застрял(а) на шаге {step}{where}"
 
 
 def card_cb(code: str, rest: str = "") -> str:
-    return commands.action_callback(CARD_ACTION, f"{PREFIX}{code}{rest}", service=SERVICE)
+    return vpn_callbacks.card_cb(f"{PREFIX}{code}{rest}")
 
 
 def ctx(platform: str, key: str = "") -> str:
@@ -146,55 +108,40 @@ def ctx(platform: str, key: str = "") -> str:
 
 
 def create_cb(platform: str) -> str:
-    return commands.action_callback(
-        vpn_protocol.ACTION_ISSUE, f"~{PREFIX}{platform}", service=SERVICE
-    )
-
-
-def home_cb() -> str:
-    return commands.action_callback(CARD_ACTION, service=SERVICE)
+    return vpn_callbacks.expert_cb(vpn_protocol.ACTION_ISSUE, PREFIX, platform)
 
 
 def wizard_button() -> InlineKeyboardButton:
-    return InlineKeyboardButton(text="📱 Подключить по шагам", callback_data=card_cb(PICK))
+    return button("📱 Подключить по шагам", card_cb(PICK))
 
 
 def parse(value: str) -> tuple[str, str, str]:
-    """``w<код><остаток>`` → (код, шаг-для-f/o/h или '', остаток). Для f/o/h
-    остаток = ``<платформа><ключ>``, шаг вынут отдельно."""
     code, rest = value[1:2], value[2:]
     if code in (FAIL, OTHER, HELP):
         return code, rest[:1], rest[1:]
     return code, "", rest
 
 
-# --- клавиатуры ------------------------------------------------------------
+def _step_callback(step: str, platform: str, key: str) -> str:
+    return card_cb(PICK) if step == NOT_CREATED else card_cb(step, ctx(platform, key))
+
+
+def _help_button(step: str, platform: str, key: str) -> list[InlineKeyboardButton]:
+    return [button(vpn_keyboards.CALL_FOR_HELP_TEXT, card_cb(HELP, f"{step}{ctx(platform, key)}"))]
 
 
 def intro_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [wizard_button()],
-            [InlineKeyboardButton(text="⚙️ Я разберусь сам", callback_data=card_cb(EXPERT))],
-        ]
-    )
+    return markup([wizard_button()], [button("⚙️ Я разберусь сам", card_cb(EXPERT))])
 
 
 def pick_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text=text, callback_data=create_cb(code))
-                for code, text in PICK_BUTTONS.items()
-            ],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data=home_cb())],
-        ]
+    return markup(
+        [button(text, create_cb(code)) for code, text in PICK_BUTTONS.items()],
+        vpn_keyboards.back_row(vpn_callbacks.home_cb()),
     )
 
 
 def page_link_text(label: str, page_url: str) -> str:
-    """Сообщение для пересылки тому, чей это телефон. Ссылка — текстом (на
-    случай, если кнопка не пересланa), дальше всё по шагам на самой странице."""
     return (
         f"📶 <b>Настройки VPN · {html.escape(label)}</b>\n"
         "Откройте ссылку на устройстве, которое подключаете (телефон или компьютер) — там всё "
@@ -204,68 +151,30 @@ def page_link_text(label: str, page_url: str) -> str:
     )
 
 
-def connect_text(label: str, page_url: str, title: str | None = None) -> str:
-    """Шаг «Откройте страницу настроек» — то же пересылаемое сообщение, что в карточке."""
-    head = f"<b>{title}</b>\n" if title else ""
-    return head + page_link_text(label, page_url)
-
-
 def step_keyboard(
-    code: str,
-    platform: Platform,
-    key: str,
-    cfg: VpnConfig,
-    *,
-    needs_file: bool,
-    page_url: str | None = None,
+    code: str, platform: Platform, key: str, *, page_url: str | None = None
 ) -> InlineKeyboardMarkup:
     p = platform.code
-    stuck = InlineKeyboardButton(
-        text="🙋 Не получается", callback_data=card_cb(FAIL, f"{code}{ctx(p, key)}")
-    )
-    rows: list[list[InlineKeyboardButton]] = []
+    stuck_callback = card_cb(FAIL, f"{code}{ctx(p, key)}")
     if code == CHECK:
-        rows.append(
-            [
-                InlineKeyboardButton(text="✅ Да!", callback_data=card_cb(DONE)),
-                InlineKeyboardButton(
-                    text="❌ Нет", callback_data=card_cb(FAIL, f"{code}{ctx(p, key)}")
-                ),
-            ]
-        )
-        return InlineKeyboardMarkup(inline_keyboard=rows)
-    if code == INSTALL:
-        rows.append(
-            [InlineKeyboardButton(text=platform.store_button, url=store_url(platform, cfg))]
-        )
+        return markup([button("✅ Да!", card_cb(DONE)), button("❌ Нет", stuck_callback)])
+    rows: list[list[InlineKeyboardButton]] = []
     if code == CONNECT and page_url:
         rows.append([InlineKeyboardButton(text="📶 Открыть настройки", url=page_url)])
-    ready = InlineKeyboardButton(
-        text="✅ Готово", callback_data=card_cb(next_step(code, needs_file), ctx(p, key))
-    )
+    stuck = button("🙋 Не получается", stuck_callback)
+    ready = button("✅ Готово", card_cb(CHECK, ctx(p, key)))
     rows.append([ready, stuck] if not (code == CONNECT and not page_url) else [stuck])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return markup(*rows)
 
 
-def fail_keyboard(
-    step: str, platform: str, key: str, *, can_help: bool = True
-) -> InlineKeyboardMarkup:
-    tail = f"{step}{ctx(platform, key)}"
-    back = card_cb(PICK) if step == NOT_CREATED else card_cb(step, ctx(platform, key))
+def fail_keyboard(step: str, platform: str, key: str) -> InlineKeyboardMarkup:
     rows = []
     if step != NOT_CREATED:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="🔁 Попробовать другую страну", callback_data=card_cb(OTHER, tail)
-                )
-            ]
-        )
-    rows.append(
-        [InlineKeyboardButton(text="🙋 Позвать на помощь", callback_data=card_cb(HELP, tail))]
-    )
-    rows.append([InlineKeyboardButton(text="⬅️ Назад к шагу", callback_data=back)])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+        tail = f"{step}{ctx(platform, key)}"
+        rows.append([button("🔁 Попробовать другую страну", card_cb(OTHER, tail))])
+    rows.append(_help_button(step, platform, key))
+    rows.append(vpn_keyboards.back_row(_step_callback(step, platform, key), BACK_TO_STEP_TEXT))
+    return markup(*rows)
 
 
 def back_to_step_keyboard(
@@ -273,57 +182,21 @@ def back_to_step_keyboard(
 ) -> InlineKeyboardMarkup:
     rows = []
     if help_button:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="🙋 Позвать на помощь",
-                    callback_data=card_cb(HELP, f"{step}{ctx(platform, key)}"),
-                )
-            ]
-        )
-    back = card_cb(PICK) if step == NOT_CREATED else card_cb(step, ctx(platform, key))
-    rows.append([InlineKeyboardButton(text="⬅️ Назад к шагу", callback_data=back)])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def done_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="📶 На главную", callback_data=home_cb())]]
-    )
+        rows.append(_help_button(step, platform, key))
+    rows.append(vpn_keyboards.back_row(_step_callback(step, platform, key), BACK_TO_STEP_TEXT))
+    return markup(*rows)
 
 
 def create_failed_keyboard(platform: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔁 Попробовать ещё раз", callback_data=create_cb(platform)
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🙋 Позвать на помощь",
-                    callback_data=card_cb(HELP, f"{NOT_CREATED}{platform}"),
-                )
-            ],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data=home_cb())],
-        ]
+    return markup(
+        [button(vpn_keyboards.RETRY_TEXT, create_cb(platform))],
+        _help_button(NOT_CREATED, platform, ""),
+        vpn_keyboards.back_row(vpn_callbacks.home_cb()),
     )
 
 
 def unavailable_keyboard(step: str, platform: str, key: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔁 Повторить", callback_data=card_cb(step, ctx(platform, key))
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🙋 Позвать на помощь",
-                    callback_data=card_cb(HELP, f"{step}{ctx(platform, key)}"),
-                )
-            ],
-        ]
+    return markup(
+        [button("🔁 Повторить", card_cb(step, ctx(platform, key)))],
+        _help_button(step, platform, key),
     )

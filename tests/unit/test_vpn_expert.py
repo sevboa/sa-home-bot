@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from sa_home_bot.bot import commands, vpn_nodes
+from sa_home_bot.bot import commands, vpn_callbacks, vpn_nodes, vpn_screens
 from sa_home_bot.bot import vpn_devices as vd
 from sa_home_bot.bot import vpn_settings as vs
 from sa_home_bot.bot.handlers import vpn as h
@@ -135,13 +135,15 @@ def test_all_callbacks_fit_64_bytes():
     servers = _servers()
     device = vd.build_devices(servers)[0]
     markups = [
-        h._home_keyboard(servers, subscription=ADMIN, self_serve_nodes=["jeeves", "wooster"]),
-        h._list_keyboard(vd.build_devices(servers), subscription=ADMIN),
+        vpn_screens.home_keyboard(
+            servers, subscription=ADMIN, self_serve_nodes=["jeeves", "wooster"]
+        ),
+        vpn_screens.list_keyboard(vd.build_devices(servers), subscription=ADMIN),
         h._card_keyboard_for_device(device, servers, subscription=ADMIN),
         vs.reissue_select_keyboard(
             device, vs.reissue_connections(device), vd.countries_of(servers), 5
         ),
-        h._delete_keyboard(device),
+        vpn_screens.delete_keyboard(device),
     ]  # экраны мастера — в test_vpn_wizard.py
     for markup in markups:
         for button in _all_buttons(markup):
@@ -180,7 +182,7 @@ async def test_home_shows_warning_in_words(_fanout):
 
 
 async def test_list_screen():
-    cb, _, _ = await _press(f"act:vpn:vpn_card:{h._SCREEN_LIST}")
+    cb, _, _ = await _press(f"act:vpn:vpn_card:{vpn_callbacks.SCREEN_LIST}")
     text, markup = cb.message.edits[-1], cb.message.edit_markups[-1]
     assert text.startswith("⚙️ <b>Мои устройства</b>")
     assert "9.1 ГБ, на связи 10.10" in text

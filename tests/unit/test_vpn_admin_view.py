@@ -9,9 +9,7 @@ GB = 1_000_000_000
 
 
 def _guest(chat_id: int, name: str = "Аня", rights: frozenset[str] = frozenset()) -> Subscription:
-    return Subscription(
-        name=name, chat_id=chat_id, source=SOURCE_GUEST, allowed_commands=rights
-    )
+    return Subscription(name=name, chat_id=chat_id, source=SOURCE_GUEST, allowed_commands=rights)
 
 
 def _vpn_guest(chat_id: int, name: str = "Аня") -> Subscription:
@@ -75,16 +73,16 @@ def test_sort_guests_keeps_order_inside_halves():
     assert [g.chat_id for g in vpn_admin_view.sort_guests(guests)] == [22, 44, 11, 33]
 
 
-def test_in_vpn_group_counts_partial_and_wildcards():
+def test_has_any_vpn_right_counts_partial_and_wildcards():
     group = guest_rights.group("vpn")
-    assert vpn_admin_view.in_vpn_group(_vpn_guest(1))
+    assert vpn_admin_view.has_any_vpn_right(_vpn_guest(1))
     # Одного права хватает: группу могли доправить руками или снять лишнее.
-    assert vpn_admin_view.in_vpn_group(_guest(2, rights=frozenset({"usage@vpn"})))
+    assert vpn_admin_view.has_any_vpn_right(_guest(2, rights=frozenset({"usage@vpn"})))
     # Групповые формы из конфига тоже считаются.
-    assert vpn_admin_view.in_vpn_group(_guest(3, rights=frozenset({"*@vpn"})))
-    assert vpn_admin_view.in_vpn_group(_guest(4, rights=frozenset({"*"})))
-    assert not vpn_admin_view.in_vpn_group(_guest(5, rights=frozenset({"chat@llm"})))
-    assert not vpn_admin_view.in_vpn_group(_guest(6))
+    assert vpn_admin_view.has_any_vpn_right(_guest(3, rights=frozenset({"*@vpn"})))
+    assert vpn_admin_view.has_any_vpn_right(_guest(4, rights=frozenset({"*"})))
+    assert not vpn_admin_view.has_any_vpn_right(_guest(5, rights=frozenset({"chat@llm"})))
+    assert not vpn_admin_view.has_any_vpn_right(_guest(6))
     assert group is not None  # каталог на месте — иначе тест бессмысленен
 
 

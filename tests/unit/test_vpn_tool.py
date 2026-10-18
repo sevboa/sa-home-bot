@@ -79,8 +79,15 @@ class _Notifier:
         self.documents: list = []
         self.photos: list = []
 
-    async def send_direct(self, chat_id, text, reply_to_message_id=None, reply_markup=None,
-                          message_thread_id=None, **kw):
+    async def send_direct(
+        self,
+        chat_id,
+        text,
+        reply_to_message_id=None,
+        reply_markup=None,
+        message_thread_id=None,
+        **kw,
+    ):
         self.sent.append((chat_id, text, reply_markup))
         return 1
 
@@ -309,9 +316,7 @@ async def test_apk_defaults_to_hiddify_stores_only_amnezia_vpn_otherwise():
 
 
 def test_description_carries_faq_answers():
-    decl = next(
-        d for d in ai_tools.tools_for(ADMIN).declarations if d["function"]["name"] == "vpn"
-    )
+    decl = next(d for d in ai_tools.tools_for(ADMIN).declarations if d["function"]["name"] == "vpn")
     desc = decl["function"]["description"]
     for needle in (
         vpn_facts.ANSWERS[vpn_facts.Q_HIDDIFY],

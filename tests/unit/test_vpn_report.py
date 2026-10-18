@@ -9,6 +9,7 @@ import pytest
 from sa_home_bot.bot import vpn_devices as vd
 from sa_home_bot.bot import vpn_help, vpn_nodes, vpn_report
 from sa_home_bot.bot.handlers import vpn as h
+from sa_home_bot.bot.handlers.vpn import reports as hreports
 from sa_home_bot.bot.middlewares import CallbackAuthorizationMiddleware
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings, VpnConfig
@@ -351,7 +352,7 @@ async def test_middleware_rights(data, sub, allowed):
 
 async def test_probe_chat_zero_is_never_reported():
     notifier = FakeNotifier()
-    out = await h._submit_report(
+    out = await hreports.submit_report(
         FakeNodeLink(),
         notifier,
         _book(),

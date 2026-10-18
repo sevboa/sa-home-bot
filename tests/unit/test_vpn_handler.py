@@ -7,8 +7,17 @@ import asyncio
 
 import pytest_asyncio
 
-from sa_home_bot.bot import commands, vpn_admin_view
+from sa_home_bot.bot import (
+    commands,
+    vpn_admin_view,
+    vpn_check_view,
+    vpn_legacy_card,
+    vpn_nodes,
+    vpn_proxy_screen,
+    vpn_screens,
+)
 from sa_home_bot.bot.handlers import vpn as vpn_handlers
+from sa_home_bot.bot.handlers.vpn import context as hctx
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings, VpnConfig
@@ -209,7 +218,7 @@ def _server(**over) -> dict:
 
 
 async def test_card_keyboard_offers_revoke_button_per_device():
-    keyboard = vpn_handlers._card_keyboard(
+    keyboard = vpn_legacy_card.card_keyboard(
         [_server(devices=[{"device_label": "Rose"}])],
         subscription=GUEST_FULL,
         self_serve_nodes=[],
@@ -224,7 +233,7 @@ async def test_card_keyboard_shows_proxy_on_reality_only_node_with_proxy():
     """Прокси Telegram живёт на VPS сам по себе: на reality-only ноде он есть
     (wooster, 2026-09-06). Проверка сети там тоже есть — с 39.0.7 пробник
     умеет reality, а состояние проверок реплицировано на все живые vpn."""
-    keyboard = vpn_handlers._card_keyboard(
+    keyboard = vpn_legacy_card.card_keyboard(
         [_server(transports=["reality"], proxy_available=True)],
         subscription=ADMIN,
         self_serve_nodes=[],
@@ -242,7 +251,7 @@ def _check(transport: str, status: str, *, server: str = "jeeves", observers: in
 def test_card_shows_transport_health_indicators():
     """39.0.7(f): гость видит доступность по транспортам прямо в карточке —
     VLESS первым, как и в пикере технологии."""
-    text = vpn_handlers._usage_text(
+    text = vpn_legacy_card.usage_text(
         [
             _server(
                 transports=["awg", "reality"],
@@ -254,7 +263,7 @@ def test_card_shows_transport_health_indicators():
 
 
 def test_card_shows_partial_as_orange_with_legend():
-    text = vpn_handlers._usage_text(
+    text = vpn_legacy_card.usage_text(
         [_server(transports=["reality"], check=[_check("reality", "partial")])]
     )
     assert "VLESS (Reality) 🟠" in text
@@ -262,7 +271,7 @@ def test_card_shows_partial_as_orange_with_legend():
 
 
 def test_card_omits_legend_when_everything_is_green():
-    text = vpn_handlers._usage_text(
+    text = vpn_legacy_card.usage_text(
         [_server(transports=["reality"], check=[_check("reality", "ok")])]
     )
     assert "🟢" in text
@@ -272,7 +281,7 @@ def test_card_omits_legend_when_everything_is_green():
 def test_card_without_check_data_shows_no_indicator():
     """Проверок ещё не было (или все протухли) — рисовать нечего: выдуманный
     зелёный хуже отсутствия индикатора."""
-    text = vpn_handlers._usage_text([_server(transports=["awg"], check=[])])
+    text = vpn_legacy_card.usage_text([_server(transports=["awg"], check=[])])
     assert "🛰" not in text
     assert "🟢" not in text
 
@@ -280,7 +289,7 @@ def test_card_without_check_data_shows_no_indicator():
 def test_server_picker_marks_location_with_worst_case_icon():
     """На кнопке места на разбивку нет — один сводный цвет: один транспорт
     видно, другой нет → 🟠 на всю локацию."""
-    keyboard = vpn_handlers._server_picker_keyboard(
+    keyboard = vpn_screens.server_picker_keyboard(
         [
             {
                 "node": "jeeves",
@@ -297,7 +306,7 @@ def test_server_picker_marks_location_with_worst_case_icon():
 
 
 def test_transport_picker_marks_each_technology():
-    keyboard = vpn_handlers._transport_picker_keyboard(
+    keyboard = vpn_screens.transport_picker_keyboard(
         ["awg", "reality"],
         "jeeves",
         {"awg": "🔴", "reality": "🟢"},
@@ -331,7 +340,7 @@ def test_check_status_text_groups_observers_under_pair():
             "last_error": None,
         },
     ]
-    text = vpn_handlers._check_status_text(
+    text = vpn_check_view.status_text(
         states, rollup=[_check("reality", "partial", server="wooster")]
     )
     assert "<b>wooster</b> · VLESS (Reality) 🟠" in text
@@ -372,9 +381,7 @@ def test_check_status_text_collapses_multiple_targets_per_observer():
             "last_error": "curl exit 28",
         },
     ]
-    text = vpn_handlers._check_status_text(
-        states, rollup=[_check("awg", "alerting", server="jeeves")]
-    )
+    text = vpn_check_view.status_text(states, rollup=[_check("awg", "alerting", server="jeeves")])
     # Ровно одна строка на наблюдателя, а не три.
     assert text.count("<code>alfred</code>") == 1
     assert "1.1.1.1 631 мс" in text
@@ -385,19 +392,19 @@ def test_check_status_text_collapses_multiple_targets_per_observer():
 
 
 def test_target_label_shortens_known_hosts():
-    assert vpn_handlers._target_label("https://1.1.1.1") == "1.1.1.1"
-    assert vpn_handlers._target_label("https://api.telegram.org") == "telegram"
-    assert vpn_handlers._target_label("https://www.youtube.com") == "youtube"
+    assert vpn_check_view.target_label("https://1.1.1.1") == "1.1.1.1"
+    assert vpn_check_view.target_label("https://api.telegram.org") == "telegram"
+    assert vpn_check_view.target_label("https://www.youtube.com") == "youtube"
 
 
 def test_short_error_maps_curl_timeout():
-    assert vpn_handlers._short_error("curl exit 28") == "таймаут"
-    assert vpn_handlers._short_error("http 403") == "http 403"
-    assert vpn_handlers._short_error(None) == "ошибка"
+    assert vpn_check_view.short_error("curl exit 28") == "таймаут"
+    assert vpn_check_view.short_error("http 403") == "http 403"
+    assert vpn_check_view.short_error(None) == "ошибка"
 
 
 async def test_card_keyboard_hides_proxy_when_not_configured():
-    keyboard = vpn_handlers._card_keyboard(
+    keyboard = vpn_legacy_card.card_keyboard(
         [_server(transports=["reality"], proxy_available=False)],
         subscription=ADMIN,
         self_serve_nodes=[],
@@ -475,7 +482,7 @@ class TwoServersLink(MultiVpnLink):
 
 
 async def test_card_keyboard_pins_connection_server_into_callback():
-    keyboard = vpn_handlers._card_keyboard(
+    keyboard = vpn_legacy_card.card_keyboard(
         [_server(devices=[{"device_label": "Rose", "server": "wooster"}])],
         subscription=GUEST_FULL,
         self_serve_nodes=[],
@@ -496,10 +503,10 @@ async def test_card_hides_location_without_access():
         "jeeves": link.usages["jeeves"],
         "wooster": link.usages["wooster"] | {"allowed": False},
     }
-    error, servers, _down = await vpn_handlers._card(link, 777)
+    error, servers, _down = await hctx.fetch_card(link, 777)
     assert error is None
     assert [s["node"] for s in servers] == ["jeeves"]
-    text = vpn_handlers._usage_text(servers)
+    text = vpn_legacy_card.usage_text(servers)
     assert "🇺🇸 США" not in text and "Лютик" not in text
 
 
@@ -508,24 +515,24 @@ async def test_card_says_access_not_granted_when_nothing_is_open():
     link.usages = {
         node: usage | {"allowed": False} for node, usage in TwoServersLink.usages.items()
     }
-    error, servers, _down = await vpn_handlers._card(link, 777)
+    error, servers, _down = await hctx.fetch_card(link, 777)
     assert servers == []
     assert "не выдан" in error
-    assert error != vpn_handlers._VPN_UNAVAILABLE  # это не сбой связи
+    assert error != hctx.VPN_UNAVAILABLE  # это не сбой связи
 
 
 async def test_card_without_allowed_field_behaves_as_allowed():
     """Старая служба поля не шлёт: на время раската гость не должен потерять
     свою карточку (bot/handlers/vpn.py::_is_allowed)."""
     server = {k: v for k, v in _server().items() if k != "allowed"}
-    assert vpn_handlers._allowed_servers([server]) == [server]
+    assert vpn_nodes.allowed_servers([server]) == [server]
 
 
 async def test_self_serve_button_not_offered_for_closed_location():
     config = _config()
     config.vpn.warn_remaining_gb = 1000  # порог заведомо выше остатка
     closed = _server(allowed=False, remaining_bytes=0)
-    assert vpn_handlers._self_serve_nodes([closed], config) == []
+    assert hctx.self_serve_nodes([closed], config) == []
 
 
 async def test_server_picker_offers_only_open_locations():
@@ -534,7 +541,7 @@ async def test_server_picker_offers_only_open_locations():
         "jeeves": link.usages["jeeves"] | {"allowed": False},
         "wooster": link.usages["wooster"],
     }
-    assert [s["node"] for s in await vpn_handlers._live_servers_for(link, 777)] == ["wooster"]
+    assert [s["node"] for s in await hctx.live_servers_for(link, 777)] == ["wooster"]
 
 
 async def test_single_open_location_is_pinned_instead_of_first_live():
@@ -556,17 +563,17 @@ async def test_single_open_location_is_pinned_instead_of_first_live():
 
 
 async def test_card_merges_devices_from_both_servers():
-    error, servers, _down = await vpn_handlers._card(TwoServersLink(), 777)
+    error, servers, _down = await hctx.fetch_card(TwoServersLink(), 777)
     assert error is None
     assert [s["node"] for s in servers] == ["jeeves", "wooster"]
-    text = vpn_handlers._usage_text(servers)
+    text = vpn_legacy_card.usage_text(servers)
     assert "Ромашка" in text and "Лютик" in text
     assert "🇳🇱 Нидерланды" in text and "🇺🇸 США" in text
 
 
 async def test_card_keeps_quota_per_server_without_summing():
-    _error, servers, _down = await vpn_handlers._card(TwoServersLink(), 777)
-    text = vpn_handlers._usage_text(servers)
+    _error, servers, _down = await hctx.fetch_card(TwoServersLink(), 777)
+    text = vpn_legacy_card.usage_text(servers)
     # Две раздельные квоты по 500 ГБ, а не одна на 1000 — счёт за трафик у
     # каждого VPS свой (решение владельца 2026-09-18).
     assert text.count("/ 500 ГБ") == 2
@@ -576,10 +583,10 @@ async def test_card_keeps_quota_per_server_without_summing():
 async def test_card_survives_dead_second_server():
     link = TwoServersLink()
     link.dead = "wooster"
-    error, servers, _down = await vpn_handlers._card(link, 777)
+    error, servers, _down = await hctx.fetch_card(link, 777)
     assert error is None
     assert [s["node"] for s in servers] == ["jeeves"]
-    assert "Ромашка" in vpn_handlers._usage_text(servers)
+    assert "Ромашка" in vpn_legacy_card.usage_text(servers)
 
 
 async def test_grant_extra_button_per_server_near_limit():
@@ -587,7 +594,7 @@ async def test_grant_extra_button_per_server_near_limit():
         _server(node="jeeves", label="🇳🇱 Нидерланды", remaining_bytes=10 * 10**9),
         _server(node="wooster", label="🇺🇸 США", remaining_bytes=400 * 10**9),
     ]
-    keyboard = vpn_handlers._card_keyboard(
+    keyboard = vpn_legacy_card.card_keyboard(
         servers, subscription=GUEST_FULL, self_serve_nodes=["jeeves"]
     )
     top_row = keyboard.inline_keyboard[0]
@@ -679,7 +686,7 @@ async def test_card_reports_unavailable_when_no_vpn_in_swarm():
             "services": [{"name": "monitor", "service": "monitor", "status": "running"}],
         }
 
-    error, servers, _down = await vpn_handlers._card(NoVpn(), 777)
+    error, servers, _down = await hctx.fetch_card(NoVpn(), 777)
     assert servers == []
     assert "недоступна" in error
 
@@ -858,7 +865,7 @@ async def test_check_status_edits_card_in_place():
 
 
 def test_check_status_keyboard_has_back_and_refresh_buttons():
-    keyboard = vpn_handlers._check_status_keyboard()
+    keyboard = vpn_check_view.status_keyboard()
     texts = [b.text for row in keyboard.inline_keyboard for b in row]
     assert any("Назад" in t for t in texts)
     assert any("Обновить" in t for t in texts)
@@ -866,10 +873,10 @@ def test_check_status_keyboard_has_back_and_refresh_buttons():
 
 
 def test_check_status_text_pending_hint():
-    text = vpn_handlers._check_status_text([], pending=True)
+    text = vpn_check_view.status_text([], pending=True)
     assert "⏳" in text
     assert "Обновить" in text
-    assert "⏳" not in vpn_handlers._check_status_text([], pending=False)
+    assert "⏳" not in vpn_check_view.status_text([], pending=False)
 
 
 async def test_check_now_edits_message_with_pending_hint_not_new_message():
@@ -1003,7 +1010,7 @@ ANYA = Subscription(chat_id=777, name="Аня", source=SOURCE_GUEST)
 async def test_all_guests_button_leads_to_admin_screen():
     """Кнопка рисуется по peers@vpn — под тем же правом должна и работать
     (раньше слала usage_all и отказывала админу с точечным правом)."""
-    keyboard = vpn_handlers._card_keyboard([_server()], subscription=ADMIN, self_serve_nodes=[])
+    keyboard = vpn_legacy_card.card_keyboard([_server()], subscription=ADMIN, self_serve_nodes=[])
     flat = [b for row in keyboard.inline_keyboard for b in row]
     button = next(b for b in flat if "Все гости" in b.text)
     assert button.callback_data == vpn_admin_view.guests_cb(0)
@@ -1108,7 +1115,7 @@ PROXY_GUEST = Subscription(
 async def test_proxy_button_is_gated_by_right_not_by_admin():
     """Раньше кнопка жила внутри `if is_admin` — прокси нельзя было открыть
     гостю в принципе. Теперь гейт — право `proxy_link@vpn`."""
-    keyboard = vpn_handlers._card_keyboard(
+    keyboard = vpn_legacy_card.card_keyboard(
         [_server(proxy_available=True)], subscription=PROXY_GUEST, self_serve_nodes=[]
     )
     flat = " ".join(b.text for row in keyboard.inline_keyboard for b in row)
@@ -1118,7 +1125,7 @@ async def test_proxy_button_is_gated_by_right_not_by_admin():
 
 async def test_proxy_button_hidden_without_the_right():
     """GUEST — обычный комплект VPN без прокси: кнопки быть не должно."""
-    keyboard = vpn_handlers._card_keyboard(
+    keyboard = vpn_legacy_card.card_keyboard(
         [_server(proxy_available=True)], subscription=GUEST, self_serve_nodes=[]
     )
     flat = " ".join(b.text for row in keyboard.inline_keyboard for b in row)
@@ -1128,7 +1135,7 @@ async def test_proxy_button_hidden_without_the_right():
 async def test_card_shows_only_buttons_the_guest_may_press():
     """Гостю-«только прокси» незачем видеть четыре кнопки, каждая из которых
     ответит «⛔️ Недоступно»."""
-    keyboard = vpn_handlers._card_keyboard(
+    keyboard = vpn_legacy_card.card_keyboard(
         [_server(proxy_available=True, devices=[{"device_label": "Rose"}])],
         subscription=PROXY_GUEST,
         self_serve_nodes=["jeeves"],
@@ -1183,8 +1190,8 @@ def test_proxy_text_keeps_socks_address_for_admin_only():
     """SOCKS5 — служебный вход для ботов внутри tailnet: гостю бесполезен, а
     внутренний адрес ноды ему знать незачем."""
     result = _proxy_result()
-    assert "100.109.139.95" in vpn_handlers._proxy_text(result, admin=True)
-    guest_text = vpn_handlers._proxy_text(result, admin=False)
+    assert "100.109.139.95" in vpn_proxy_screen.proxy_text(result, admin=True)
+    guest_text = vpn_proxy_screen.proxy_text(result, admin=False)
     assert "100.109.139.95" not in guest_text
     assert "SOCKS5" not in guest_text
     # Само подключение гость получает полностью.
@@ -1194,8 +1201,8 @@ def test_proxy_text_keeps_socks_address_for_admin_only():
 def test_proxy_keyboard_has_no_rotate_button_for_guest():
     """Смена секрета рвёт ссылку у всех — такую кнопку гостю не показываем
     даже с отказом по нажатию."""
-    assert vpn_handlers._proxy_keyboard("jeeves", can_rotate=False) is None
-    admin_kb = vpn_handlers._proxy_keyboard("jeeves", can_rotate=True)
+    assert vpn_proxy_screen.rotate_keyboard("jeeves", can_rotate=False) is None
+    admin_kb = vpn_proxy_screen.rotate_keyboard("jeeves", can_rotate=True)
     assert admin_kb is not None
     assert "Сменить секрет" in admin_kb.inline_keyboard[0][0].text
 
@@ -1295,7 +1302,7 @@ async def test_toggle_refuses_subscription_outside_the_guest_list():
 
 
 def test_usage_text_marks_unavailable_server():
-    text = vpn_handlers._usage_text(
+    text = vpn_legacy_card.usage_text(
         [_server()],
         unavailable=[{"node": "wooster", "label": "🇺🇸 США", "unavailable": True}],
     )
@@ -1305,17 +1312,17 @@ def test_usage_text_marks_unavailable_server():
 async def test_card_shows_unavailable_server_to_admin_only(monkeypatch):
     """wooster раньше отвечал (запомнен), теперь молчит: админу — «недоступен»,
     гостю — ничего (допуск гостя хранит сама лежащая нода)."""
-    vpn_handlers.vpn_nodes.remember_servers([{"node": "wooster", "label": "🇺🇸 США"}])
+    vpn_nodes.remember_servers([{"node": "wooster", "label": "🇺🇸 США"}])
 
     async def only_jeeves(*_args, **_kwargs):
         return [_server(node="jeeves")]
 
-    monkeypatch.setattr(vpn_handlers.vpn_nodes, "fanout", only_jeeves)
+    monkeypatch.setattr(vpn_nodes, "fanout", only_jeeves)
     admin = Subscription(name="o", chat_id=1, allowed_commands=frozenset({"*"}))
     guest = Subscription(name="g", chat_id=2, source="guest")
-    _error, _servers, down = await vpn_handlers._card(object(), 777, admin)
+    _error, _servers, down = await hctx.fetch_card(object(), 777, admin)
     assert [d["node"] for d in down] == ["wooster"]
-    _error, _servers, down = await vpn_handlers._card(object(), 777, guest)
+    _error, _servers, down = await hctx.fetch_card(object(), 777, guest)
     assert down == []
 
 
@@ -1324,19 +1331,19 @@ async def test_card_shows_unavailable_server_to_admin_only(monkeypatch):
 
 def test_card_marks_broken_device_with_wrench_and_reissue_hint():
     server = _server(devices=[{"device_label": "Rose", "server": "jeeves", "broken": True}])
-    text = vpn_handlers._usage_text([server])
+    text = vpn_legacy_card.usage_text([server])
     assert "🔧 «Rose» не отвечает" in text and "перевыпустите" in text
 
 
 def test_card_does_not_mark_healthy_or_old_node_device():
     healthy = {"device_label": "Rose", "server": "jeeves", "broken": False}
     old_node = {"device_label": "Lily", "server": "jeeves"}  # поля нет — нода старая
-    text = vpn_handlers._usage_text([_server(devices=[healthy, old_node])])
+    text = vpn_legacy_card.usage_text([_server(devices=[healthy, old_node])])
     assert "🔧" not in text
 
 
 def test_card_unavailable_server_shows_no_wrench():
-    text = vpn_handlers._usage_text(
+    text = vpn_legacy_card.usage_text(
         [_server(devices=[{"device_label": "Rose", "server": "jeeves", "broken": False}])],
         unavailable=[{"node": "wooster", "label": "🇺🇸 США"}],
     )

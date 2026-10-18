@@ -12,23 +12,18 @@
 from __future__ import annotations
 
 import html
-import logging
 from typing import Any
 
 from sa_home_bot.bot import vpn_devices as vd
-from sa_home_bot.bot import vpn_help, vpn_nodes, vpn_report, vpn_settings, vpn_wizard
-from sa_home_bot.vpn import protocol as vpn_protocol
-
-log = logging.getLogger(__name__)
+from sa_home_bot.bot import vpn_format, vpn_help, vpn_nodes, vpn_report, vpn_settings, vpn_wizard
 
 MAX_REASON = vpn_report.MAX_DESCRIPTION
 
 
 async def servers_for(node_link: Any, chat_id: int) -> tuple[list[dict], list[dict]]:
     """Свежий usage человека по всем нодам: (открытые ему сервера, ответившие все)."""
-    answered = await vpn_nodes.fanout(node_link, vpn_protocol.ACTION_USAGE, {"chat_id": chat_id})
-    vpn_nodes.remember_servers(answered)
-    return [s for s in answered if s.get("allowed", True)], answered
+    answered = await vpn_nodes.usage_for_chat(node_link, chat_id)
+    return vpn_nodes.allowed_servers(answered), answered
 
 
 def _plain(text: str) -> str:
@@ -49,7 +44,8 @@ def status_text(servers: list[dict]) -> str:
         if dev.never_connected:
             tail = "ещё не подключалось"
         else:
-            tail = f"{vd.fmt_gb(dev.used_bytes)}, на связи {vd.fmt_stamp(dev.last_handshake_at)}"
+            traffic = vpn_format.format_gb(dev.used_bytes)
+            tail = f"{traffic}, на связи {vpn_format.format_stamp(dev.last_handshake_at)}"
         broken = " (сервер не помнит ключ — нужен перевыпуск)" if dev.broken_nodes() else ""
         lines.append(f"Устройство «{dev.label}» — {tail}{broken}")
     return "\n".join(lines)
@@ -57,7 +53,7 @@ def status_text(servers: list[dict]) -> str:
 
 def wizard_available(servers: list[dict]) -> bool:
     """Тот же критерий, что у /vpn: есть открытая страна с VLESS."""
-    return any(vpn_protocol.TRANSPORT_REALITY in (s.get("transports") or []) for s in servers)
+    return vpn_nodes.has_reality_server(servers)
 
 
 async def send_wizard(notifier: Any, chat_id: int, thread_id: int | None) -> int | None:
@@ -108,20 +104,15 @@ async def submit_report(
 ) -> vpn_help.Outcome:
     """Заявка владельцу — тот же формат и троттлинг, что у «⚠️ Сообщить о проблеме».
     ``reason`` — слова человека, экранируются здесь."""
-    if chat_id == 0:  # пробник, не человек
-        return "nobody"
+    blocked = vpn_help.blocked_outcome(book, chat_id)
+    if blocked is not None:
+        return blocked
     text = html.escape(reason.strip()[:MAX_REASON]) + " (со слов человека, через Альфреда)"
-    try:
-        down = vpn_nodes.unavailable_servers(answered)
-        context = vpn_report.context_lines(servers, down, device_key)
-    except Exception:  # noqa: BLE001 — контекст не стоит срыва заявки
-        log.warning("Контекст заявки по VPN не собрался (chat=%s)", chat_id, exc_info=True)
-        context = []
     return await vpn_help.send_help_request(
         book,
         notifier,
         chat_id=chat_id,
         who=vpn_help.who_text(name, username),
         reason=text,
-        context=context,
+        context=vpn_help.context_or_empty(servers, answered, device_key),
     )

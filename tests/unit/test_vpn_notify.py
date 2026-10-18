@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
-
+from sa_home_bot.bot import vpn_callbacks, vpn_notify, vpn_settings
 from sa_home_bot.bot import vpn_devices as vd
-from sa_home_bot.bot import vpn_notify, vpn_settings
 from sa_home_bot.bot.node_events import build_node_event_handler
 from sa_home_bot.config import SubscriptionConfig
 from sa_home_bot.proto.messages import Address, make_event
@@ -194,9 +192,7 @@ async def test_admin_texts_carry_country(monkeypatch):
     await send(
         vp.EVENT_VPN_EXTRA_REQUESTED, {"chat_id": GUEST, "bytes": 10**11, "request_id": 7, **where}
     )
-    await send(
-        vp.EVENT_VPN_PEER_ISSUED, {"chat_id": GUEST, "device_label": "📱 iPhone", **where}
-    )
+    await send(vp.EVENT_VPN_PEER_ISSUED, {"chat_id": GUEST, "device_label": "📱 iPhone", **where})
     assert notifier.sent[0][1].startswith("✋ VPN 🇺🇸: гость")
     assert notifier.sent[1][1] == f"🔐 VPN 🇺🇸: выдан доступ гостю <code>{GUEST}</code> (📱 iPhone)."
 
@@ -225,39 +221,35 @@ def test_access_keyboard_wizard_or_home():
 
 
 async def test_notify_guest_access_handler(monkeypatch):
-    from sa_home_bot.bot.handlers import vpn as handler
+    from sa_home_bot.bot.handlers.vpn import admin
 
     async def fake_card(link, chat_id, subscription=None):
         return None, servers, []
 
-    monkeypatch.setattr(handler, "_card", fake_card)
+    monkeypatch.setattr(admin, "fetch_card", fake_card)
     notifier = Notifier()
     server = {"node": "wooster", "label": US, "base_limit_bytes": 100 * 10**9, "allowed": True}
     servers = []
-    await handler._notify_guest_access(notifier, GUEST, server, opened=True, node_link=object())
+    await admin.notify_guest_access(notifier, GUEST, server, opened=True, node_link=object())
     assert notifier.sent[0][1] == "📶 Вам открыт VPN: 🇺🇸 США, 100 ГБ в месяц."
     assert _buttons(notifier.sent[0][2])[0][0] == "📱 Подключить по шагам"
     servers = [
         {
             "node": "jeeves",
             "label": NL,
-            "devices": [
-                {"device_label": "📱 iPhone", "transport": "reality", "status": "active"}
-            ],
+            "devices": [{"device_label": "📱 iPhone", "transport": "reality", "status": "active"}],
         }
     ]
     notifier = Notifier()
-    monkeypatch.setattr(
-        handler.vpn_devices, "build_devices", lambda s: [object()] if s else []
-    )
-    await handler._notify_guest_access(notifier, GUEST, server, opened=True, node_link=object())
+    monkeypatch.setattr(admin.vpn_devices, "build_devices", lambda s: [object()] if s else [])
+    await admin.notify_guest_access(notifier, GUEST, server, opened=True, node_link=object())
     assert "Страна появится в Hiddify сама" in notifier.sent[0][1]
     assert _buttons(notifier.sent[0][2])[0][0] == "📶 Открыть VPN"
     notifier = Notifier()
-    await handler._notify_guest_access(notifier, GUEST, server, opened=False)
+    await admin.notify_guest_access(notifier, GUEST, server, opened=False)
     assert notifier.sent[0][1] == "📶 VPN 🇺🇸: доступ закрыт."
     notifier = Notifier()
-    await handler._notify_guest_access(notifier, -5, server, opened=True)  # не личка
+    await admin.notify_guest_access(notifier, -5, server, opened=True)  # не личка
     assert notifier.sent == []
 
 
@@ -317,7 +309,7 @@ async def test_restore_several_devices_leads_to_manage_list(monkeypatch):
     by_chat = {c: (t, m) for c, t, m in notifier.sent}
     text, markup = by_chat[GUEST]
     assert "📱 iPhone (AmneziaVPN), 🌸 Rose (VLESS · Hiddify)" in text
-    assert _buttons(markup) == [("Обновить", vpn_settings.card_cb("m"))]
+    assert _buttons(markup) == [("Обновить", vpn_callbacks.card_cb("m"))]
     assert "Hiddify обновится сам" in by_chat[OTHER][0]
     assert by_chat[ADMIN][0] == (
         "🔧 VPN 🇳🇱: сервер переустановлен, задето 3 подключения у 2 человек."
@@ -398,7 +390,12 @@ def test_restore_mask_selects_only_affected_of_that_country():
 
 
 def test_plural_forms():
-    for n, form in ((1, "подключение"), (2, "подключения"), (5, "подключений"), (11, "подключений")):
+    for n, form in (
+        (1, "подключение"),
+        (2, "подключения"),
+        (5, "подключений"),
+        (11, "подключений"),
+    ):
         text = vpn_notify.restored_owner_text(
             vd.Country("j", NL), [_item(i + 1, "d", "awg") for i in range(n)]
         )

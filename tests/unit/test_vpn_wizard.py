@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from sa_home_bot.bot import vpn_devices as vd
-from sa_home_bot.bot import vpn_help, vpn_nodes
+from sa_home_bot.bot import vpn_help, vpn_keyboards, vpn_nodes
 from sa_home_bot.bot import vpn_wizard as w
 from sa_home_bot.bot.handlers import vpn as h
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
@@ -372,19 +372,16 @@ async def test_help_on_check_step_and_without_book(_env):
 
 def test_every_wizard_callback_fits_64_bytes():
     key = "f" * 8
-    cfg = VpnConfig()
-    markups = [w.intro_keyboard(), w.pick_keyboard(), w.done_keyboard()]
+    markups = [w.intro_keyboard(), w.pick_keyboard(), vpn_keyboards.done_keyboard()]
     for p in w.PLATFORMS:
         platform = w.PLATFORMS[p]
         markups.append(w.create_failed_keyboard(p))
-        for step in (*w.STEP_ORDER, w.CHECK, w.NOT_CREATED):
+        for step in (w.CONNECT, w.CHECK, w.NOT_CREATED):
             markups.append(w.fail_keyboard(step, p, key))
             markups.append(w.back_to_step_keyboard(step, p, key, help_button=True))
             markups.append(w.unavailable_keyboard(step, p, key))
-        for step in (*w.STEP_ORDER, w.CHECK):
-            markups.append(
-                w.step_keyboard(step, platform, key, cfg, needs_file=True, page_url="https://x/s/t")
-            )
+        for step in (w.CONNECT, w.CHECK):
+            markups.append(w.step_keyboard(step, platform, key, page_url="https://x/s/t"))
     for markup in markups:
         for button in _all_buttons(markup):
             if button.callback_data:

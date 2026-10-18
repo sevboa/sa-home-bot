@@ -12,13 +12,16 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from sa_home_bot.bot import commands, vpn_facts, vpn_report, vpn_settings, vpn_wizard
+from sa_home_bot.bot import (
+    vpn_callbacks,
+    vpn_facts,
+    vpn_keyboards,
+    vpn_report,
+    vpn_settings,
+    vpn_wizard,
+)
+from sa_home_bot.bot.ui.keyboards import button, markup
 from sa_home_bot.config import VpnConfig
-from sa_home_bot.vpn import protocol as vpn_protocol
-
-SERVICE = vpn_protocol.SERVICE_NAME
-ACTION = "apk"
-HOME_ACTION = "vpn_card"
 
 Q_PREFIX = "q"
 Q_HIDDIFY, Q_AWG, Q_TROUBLE, Q_DEVICE = (
@@ -49,39 +52,28 @@ HIDDIFY_NO_STORE = "Hiddify можно скачать и с сайта — кн�
 
 
 def list_cb() -> str:
-    return commands.action_callback(ACTION, service=SERVICE)
+    return vpn_callbacks.vpn_callback(vpn_callbacks.ACTION_APK)
 
 
 def question_cb(code: str) -> str:
-    return commands.action_callback(ACTION, f"{Q_PREFIX}{code}", service=SERVICE)
+    return vpn_callbacks.vpn_callback(vpn_callbacks.ACTION_APK, f"{Q_PREFIX}{code}")
 
 
 def parse_question(value: str | None) -> str | None:
-    """``q<код>`` → код известного ответа, иначе None."""
-    if (
-        value
-        and value.startswith(Q_PREFIX)
-        and value[len(Q_PREFIX) :]
-        in {
-            *ANSWERS,
-            Q_STORE,
-        }
-    ):
-        return value[len(Q_PREFIX) :]
-    return None
+    if not value or not value.startswith(Q_PREFIX):
+        return None
+    code = value[len(Q_PREFIX) :]
+    return code if code in {*ANSWERS, Q_STORE} else None
 
 
 def list_keyboard(*, home_cb: str, report: bool = False) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text=text, callback_data=question_cb(code))]
-        for code, text in QUESTIONS
-    ]
-    last = [InlineKeyboardButton(text=ASK_BUTTON, callback_data=question_cb(Q_ASK))]
+    rows = [[button(text, question_cb(code))] for code, text in QUESTIONS]
+    last = [button(ASK_BUTTON, question_cb(Q_ASK))]
     if report:
         last.append(vpn_report.report_button(faq=True))
     rows.append(last)
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=home_cb)])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    rows.append(vpn_keyboards.back_row(home_cb))
+    return markup(*rows)
 
 
 def _hiddify_buttons(cfg: VpnConfig) -> list[list[InlineKeyboardButton]]:
@@ -127,11 +119,11 @@ def answer_keyboard(code: str, cfg: VpnConfig, *, can_wizard: bool) -> InlineKey
     elif code == Q_AWG:
         rows += _amnezia_buttons(cfg)
     elif code == Q_TROUBLE:
-        rows.append([InlineKeyboardButton(text=ASK_BUTTON, callback_data=question_cb(Q_ASK))])
+        rows.append([button(ASK_BUTTON, question_cb(Q_ASK))])
     elif code == Q_DEVICE and can_wizard:
         rows.append([vpn_wizard.wizard_button()])
     elif code == Q_STORE:
         rows += vpn_settings.no_store_keyboard().inline_keyboard
         rows += _hiddify_buttons(cfg)[1:]
-    rows.append([InlineKeyboardButton(text=BACK_BUTTON, callback_data=list_cb())])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    rows.append(vpn_keyboards.back_row(list_cb(), BACK_BUTTON))
+    return markup(*rows)

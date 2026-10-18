@@ -26,7 +26,7 @@ from pathlib import Path
 from sa_home_bot import wake_core
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.proto.messages import Address, ProtoError
-from sa_home_bot.vpn.protocol import SERVICE_NAME
+from sa_home_bot.vpn.protocol import ACTION_USAGE, SERVICE_NAME, TRANSPORT_AWG, TRANSPORT_REALITY
 
 log = logging.getLogger(__name__)
 
@@ -60,9 +60,7 @@ async def live_vpn_nodes(node_link: ServiceLink) -> list[str]:
     return nodes
 
 
-async def resolve_vpn_dst(
-    node_link: ServiceLink, *, server: str | None = None
-) -> Address | None:
+async def resolve_vpn_dst(node_link: ServiceLink, *, server: str | None = None) -> Address | None:
     """Адрес службы ``vpn`` для команды. ``server`` — предпочтительная нода
     (``vpn_peers.server`` конкретного подключения); если она сейчас не на
     связи или VPN не держит — берётся первая живая. ``None`` — VPN в рое
@@ -175,6 +173,10 @@ def remember_servers(answered: list[dict]) -> None:
         log.warning("vpn: не удалось сохранить список известных серверов", exc_info=True)
 
 
+def known_server_label(node: str) -> str:
+    return _load_known().get(node, "")
+
+
 def unavailable_servers(answered: list[dict]) -> list[dict]:
     """Известные серверы, не попавшие в ``answered`` (нода лежит или служба
     vpn на ней не отвечает): ``[{node, label, unavailable: True}]``."""
@@ -184,3 +186,41 @@ def unavailable_servers(answered: list[dict]) -> list[dict]:
         for node, label in sorted(_load_known().items())
         if node not in seen
     ]
+
+
+async def fanout_usage(node_link: ServiceLink, chat_id: int) -> list[dict]:
+    return await fanout(node_link, ACTION_USAGE, {"chat_id": chat_id})
+
+
+async def usage_for_chat(node_link: ServiceLink, chat_id: int) -> list[dict]:
+    answered = await fanout_usage(node_link, chat_id)
+    remember_servers(answered)
+    return answered
+
+
+def is_allowed(server: dict) -> bool:
+    return bool(server.get("allowed", True))
+
+
+def allowed_servers(servers: list[dict]) -> list[dict]:
+    return [server for server in servers if is_allowed(server)]
+
+
+def server_label(server: dict) -> str:
+    return server.get("label") or server.get("node") or "сервер"
+
+
+def _open_with_transport(servers: list[dict], transport: str) -> list[dict]:
+    return [s for s in servers if is_allowed(s) and transport in (s.get("transports") or [])]
+
+
+def has_reality_server(servers: list[dict]) -> bool:
+    return bool(_open_with_transport(servers, TRANSPORT_REALITY))
+
+
+def awg_servers(servers: list[dict]) -> list[dict]:
+    return [s for s in _open_with_transport(servers, TRANSPORT_AWG) if s.get("node")]
+
+
+def reality_servers(servers: list[dict]) -> list[dict]:
+    return [s for s in _open_with_transport(servers, TRANSPORT_REALITY) if s.get("node")]
