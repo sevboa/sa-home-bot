@@ -1,42 +1,9 @@
-"""nodectl — локальная консоль управления нодой (базовый интерфейс ноды).
-
-Подключается к endpoint'у сервиса ноды по протоколу v0:
-
-    nodectl status                # нода и её службы
-    nodectl start|stop|restart X  # управление службой
-    nodectl restart_node          # перезапустить саму ноду (не службу)
-    nodectl poweroff|reboot|suspend  # питание машины
-    nodectl events                # живой хвост событий (Ctrl+C — выход)
-    nodectl fix                   # доустановить/донастроить права на месте
-                                  # (интерактивный sudo, см. node/fixups.py) —
-                                  # единственная команда, которая НЕ ходит по
-                                  # протоколу к ноде, а работает локально
-    nodectl restore-stage|restore-apply|backup-release
-                                  # восстановление vpn-сервера из бэкапа напарника
-                                  # (39.0.8(d)); тоже локальные, см. run_restore_*
-    nodectl check_update          # что в репозитории vs что работает/на диске
-    nodectl update                # pipx install --force до последнего тега;
-                                  # НЕ перезапускает процесс — только доустанавливает
-                                  # файлы, restart_node потом делает человек
-    nodectl -n winpc status       # то же о ноде winpc («спроси любого»:
-                                  # запрос идёт своей ноде, та пересылает)
-    nodectl describe torrents     # какие умения объявляет служба
-    nodectl call torrents search query="задача трёх тел"
-                                  # вызвать любое умение любой службы роя —
-                                  # тем же путём, каким это делает Альфред
-                                  # (bot/tools.py); ответ печатается как JSON
-
-Endpoint берётся из --socket (путь unix-сокета или tcp://host:port), либо из
-[node].socket указанного --config, либо из первого найденного конфига по
-умолчанию (./config.toml, потом ~/.config/sa-home-bot/config.toml), либо
-дефолт ./data/node.sock. Токен для tcp — [swarm].token конфига.
-"""
-
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 from datetime import datetime
@@ -54,9 +21,8 @@ from sa_home_bot.proto.messages import (
     ServiceDescription,
 )
 from sa_home_bot.runtime import format_duration
+from sa_home_bot.utils.files import write_private
 
-# Кандидаты конфига без --config: рабочий каталог (разработка на alfred),
-# затем XDG-путь (нода, установленная через pipx).
 DEFAULT_CONFIGS = ("./config.toml", "~/.config/sa-home-bot/config.toml")
 
 
@@ -67,29 +33,27 @@ def _default_config() -> str | None:
             return str(path)
     return None
 
-# Рабочий каталог службы ноды (deploy/sa-home-node.service: WorkingDirectory).
-# Относительные пути конфига (`./data/node-state.json`, `[vpn].db_path`)
-# резолвятся от него — локальные команды, которые трогают данные ноды, обязаны
-# работать оттуда же, а не из каталога, где их запустили (иначе маркер
-# публикации бэкапа и бандл восстановления уезжают в ~/data).
 NODE_WORKDIR = "~/.local/share/sa-home-bot"
 
 
 def _enter_node_workdir(args: argparse.Namespace) -> None:
-    import os
-
-    if args.config is not None:  # относительный --config — от места запуска
+    if args.config is not None:
         args.config = str(Path(args.config).expanduser().resolve())
     workdir = Path(NODE_WORKDIR).expanduser()
     if workdir.is_dir():
         os.chdir(workdir)
 
 
+def _config_path(args: argparse.Namespace) -> str | None:
+    return args.config if args.config is not None else _default_config()
+
+
+def _load_settings(args: argparse.Namespace) -> Settings:
+    return Settings.load(_config_path(args))
+
+
 _STATUS_ICON = {"running": "🟢", "restarting": "🟠", "stopped": "🔴"}
 
-# Действия без параметров, объявленные динамически (describe): нода может
-# их не поддерживать (напр. restart_node без колбэка) — тогда сервер вернёт
-# unknown_action, а не молчаливо съест команду.
 NO_ARG_ACTIONS = ("restart_node", "poweroff", "reboot", "suspend")
 
 
@@ -155,9 +119,6 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="ключ=значение",
         help="аргументы действия; true/false/числа распознаются по виду",
     )
-    # Долгие умения (llm warmup/ask грузят модель — на 35B это минуты) с
-    # дефолтом в 10 с проверить было нельзя: консоль отвечала «нода не
-    # ответила вовремя», хотя служба честно работала (живой разбор 2026-07-30).
     p.add_argument(
         "--timeout",
         type=float,
@@ -186,13 +147,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _resolve_endpoint(args: argparse.Namespace) -> tuple[Endpoint, str]:
-    """Endpoint ноды + токен ([swarm].token — нужен только для tcp)."""
-    config_path = args.config if args.config is not None else _default_config()
+    config_path = _config_path(args)
     settings = Settings.load(config_path)
     if args.socket:
         return parse_endpoint(args.socket), settings.swarm.token
-    # Относительный путь в конфиге — относительно каталога конфига, а не CWD:
-    # так `nodectl -c ~/proj/config.toml status` работает из любого каталога.
     base = Path(config_path).resolve().parent if config_path is not None else None
     return resolve_endpoint(settings.node.socket, base), settings.swarm.token
 
@@ -209,8 +167,6 @@ def render_services(services: list[dict]) -> str:
     rows = [("СЛУЖБА", "СОСТОЯНИЕ", "PID", "РЕСТАРТЫ", "ЗАПУЩЕНА")]
     for svc in services:
         icon = _STATUS_ICON.get(svc.get("status", ""), "⚪")
-        # Внешне управляемая (llm на Windows) — пометка, чтобы «—» вместо pid
-        # и времени старта читались как «чужой процесс», а не как поломка.
         name = svc.get("name", "?")
         if svc.get("external"):
             name += " (внешняя)"
@@ -289,9 +245,6 @@ def render_event(env: Envelope) -> str:
 
 
 def _run_fix(args: argparse.Namespace) -> int:
-    """``nodectl fix`` — единственная команда, работающая локально (не по
-    протоколу): читает конфиг напрямую, чинит недостающие права интерактивным
-    sudo. См. `node/fixups.py`."""
     if sys.platform == "win32":
         print(
             "nodectl fix пока не поддерживается на Windows: все рецепты — про "
@@ -300,8 +253,7 @@ def _run_fix(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    config_path = args.config if args.config is not None else _default_config()
-    settings = Settings.load(config_path)
+    settings = _load_settings(args)
     fixups = build_fixups(settings)
     if not fixups:
         print("Все известные фиксы либо не нужны для текущих назначений, либо уже применены.")
@@ -322,32 +274,24 @@ def _staged_bundle_path(settings: Settings) -> Path:
 
 
 def _run_restore_stage(args: argparse.Namespace) -> int:
-    """``nodectl restore-stage`` — положить бандл (stdin) в каталог данных ноды, 0600."""
-    import os
-
     _enter_node_workdir(args)
-    config_path = args.config if args.config is not None else _default_config()
-    settings = Settings.load(config_path)
+    settings = _load_settings(args)
     data = sys.stdin.buffer.read()
     if not data.strip():
         print("Пустой ввод: бандл не получен.", file=sys.stderr)
         return 1
     path = _staged_bundle_path(settings)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as fh:
-        fh.write(data)
+    write_private(path, data, make_parents=True)
     print(f"Бандл принят: {path}")
     return 0
 
 
 def _run_restore_apply(args: argparse.Namespace) -> int:
-    """``nodectl restore-apply`` — применить бандл локально (интерактивный sudo)."""
     from sa_home_bot.backup import apply as backup_apply
     from sa_home_bot.backup import restore as backup_restore
 
     _enter_node_workdir(args)
-    config_path = args.config if args.config is not None else _default_config()
+    config_path = _config_path(args)
     if config_path is None:
         print("Нет config.toml ноды (укажите --config).", file=sys.stderr)
         return 2
@@ -371,11 +315,11 @@ def _run_restore_apply(args: argparse.Namespace) -> int:
     except (backup_restore.RestoreError, backup_apply.ApplyError) as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 1
-    except Exception as exc:  # FixupError от sudo и пр.
+    except Exception as exc:
         print(f"Не удалось применить: {exc}", file=sys.stderr)
         return 1
     if bundle_path.is_file() and bundle_path == _staged_bundle_path(settings):
-        bundle_path.unlink(missing_ok=True)  # на диске были приватные ключи
+        bundle_path.unlink(missing_ok=True)
     print(
         "\nГотово. Дальше: если setup-скрипты ещё не запускали — deploy/setup-awg-jeeves.sh и/или "
         "deploy/setup-reality-server.sh (ключи из восстановленных файлов сохранятся), затем "
@@ -385,35 +329,20 @@ def _run_restore_apply(args: argparse.Namespace) -> int:
 
 
 def _run_backup_release(args: argparse.Namespace) -> int:
-    """``nodectl backup-release`` — явно разрешить публикацию бэкапа (backup/hold.py)."""
     from sa_home_bot.backup.hold import allow_publish
 
     _enter_node_workdir(args)
-    config_path = args.config if args.config is not None else _default_config()
-    settings = Settings.load(config_path)
+    settings = _load_settings(args)
     path = allow_publish(settings, "backup-release")
     print(f"Публикация бэкапа разрешена: {path}")
     return 0
 
 
 def _service_dst(args: argparse.Namespace) -> Address:
-    """Адресат для call/describe: своя нода, если -n не задан.
-
-    Служба указывается всегда — в этом и смысл команды: дотянуться до любого
-    умения роя ровно тем же путём, каким ходит Альфред (bot/tools.py), а не
-    только до самого супервизора.
-    """
     return Address(node=args.node, service=args.service)
 
 
 def _call_args(pairs: list[str]) -> dict[str, Any]:
-    """``ключ=значение`` → аргументы действия.
-
-    Тип угадывается по виду значения: протокол разрешает только
-    string|int|float|bool (PROTOCOL.md), а из командной строки всё приходит
-    строками — без распознавания `quiet=true` уехало бы строкой «true».
-    Значение может содержать «=» (magnet-ссылки), поэтому режем по первому.
-    """
     args: dict[str, Any] = {}
     for pair in pairs:
         key, sep, raw = pair.partition("=")
@@ -447,10 +376,6 @@ def render_describe(desc: ServiceDescription) -> str:
 
 
 async def _llm_probe(client: ProtoClient, dst: Address, timeout: float) -> None:
-    """Быстрая проверка модели службы llm: какой профиль подтянулся и
-    отвечает ли модель на chat с рассуждением выкл/вкл (ловит 400 «does not
-    support thinking» и подобное). Сделано командой, чтобы не повторять руками
-    тот же тест при каждой смене модели."""
     desc = await client.describe(dst=dst)
     model = desc.capabilities[0] if desc.capabilities else "?"
     prof = desc.model_profile or {}
@@ -479,7 +404,6 @@ async def _llm_probe(client: ProtoClient, dst: Address, timeout: float) -> None:
 
 async def _run(args: argparse.Namespace) -> int:
     endpoint, token = _resolve_endpoint(args)
-    # -n/--node: адресат в конверте, пересылку делает своя нода (§11 п. 2).
     dst = Address(node=args.node, service="node") if args.node else None
 
     events_mode = args.command == "events"
@@ -535,7 +459,7 @@ async def _run(args: argparse.Namespace) -> int:
         elif events_mode:
             info = await client.hello()
             print(f"События ноды {info.node} (Ctrl+C — выход):", flush=True)
-            await client.join()  # живём, пока сервер не закроет соединение
+            await client.join()
             print("Соединение закрыто нодой.", file=sys.stderr)
     except ProtoError as exc:
         print(f"Ошибка: {exc.message}", file=sys.stderr)

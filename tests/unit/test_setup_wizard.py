@@ -1,11 +1,3 @@
-"""`sa-home-bot init` — генерация config.toml/юнита без git-checkout.
-
-Фиксирует контракт: неинтерактивный режим либо использует дефолты/генерирует
-токен, либо падает с понятным сообщением (а не молча создаёт нерабочий рой),
-интерактивный — реально спрашивает через input(), существующий файл не летит
-в мусорку без --force.
-"""
-
 from __future__ import annotations
 
 import tomllib
@@ -46,12 +38,6 @@ def test_non_interactive_without_join_generates_token(tmp_path):
 
 
 def test_service_sockets_are_absolute_not_relative_to_config_dir(tmp_path):
-    """nodectl резолвит `[node].socket` от каталога config.toml, а сам сервис —
-    от своего WorkingDirectory (data_dir); если это разные каталоги (обычная
-    установка: config в ~/.config, данные в ~/.local/share), относительный
-    путь ломает `nodectl status` («No such file or directory») — живой баг
-    2026-08-01. Значит все сокеты/БД обязаны быть абсолютными путями внутри
-    data_dir, а не значением по умолчанию из config.py."""
     config_path = tmp_path / "unrelated-dir" / "config.toml"
     data_dir = tmp_path / "data-dir"
     args = _parser_args([
@@ -120,10 +106,6 @@ def test_non_interactive_with_join_and_token_writes_join(tmp_path):
 
 
 def test_non_interactive_defaults_listen_to_all_interfaces(tmp_path):
-    """Живой баг 2026-08-01 на mycraft: пустой listen проходит валидацию
-    config.toml, но node/service.py::_swarm_join требует наш endpoint —
-    с пустым listen у ноды его нет, и join падает всегда с bad_request.
-    Дефолт больше не пустой (кроме vps, см. следующий тест)."""
     config_path = tmp_path / "config.toml"
     args = _parser_args([
         "init", "--non-interactive",
@@ -140,9 +122,6 @@ def test_non_interactive_defaults_listen_to_all_interfaces(tmp_path):
 
 
 def test_non_interactive_vps_listen_stays_empty_but_warns(tmp_path, capsys):
-    """vps — публичный IP (см. node-jeeves): 0.0.0.0 туда светить нельзя,
-    нужен явный приватный/tailscale-адрес. Раз его не дали — предупреждаем,
-    а не молча ломаем join, как это было на mycraft."""
     config_path = tmp_path / "config.toml"
     args = _parser_args([
         "init", "--non-interactive",
@@ -160,16 +139,13 @@ def test_non_interactive_vps_listen_stays_empty_but_warns(tmp_path, capsys):
 
 
 def test_interactive_refuses_empty_listen_unless_confirmed(tmp_path, monkeypatch):
-    """kind=vps — единственный случай, где дефолт listen сам по себе пуст,
-    так что ответ "" на первую попытку реально даёт пустой список (для
-    server/workstation дефолт непустой, и "" вернул бы его же)."""
     monkeypatch.setattr(setup_wizard.sys.stdin, "isatty", lambda: True)
     answers = iter([
-        "",                      # listen попытка 1: пусто (дефолт для vps тоже пуст)
-        "n",                     # "точно оставить пустым?" — нет
-        "tcp://100.64.0.5:8710", # listen попытка 2: реальный адрес
-        "n",                     # рой ещё не существует
-        "y",                     # сгенерировать токен
+        "",
+        "n",
+        "tcp://100.64.0.5:8710",
+        "n",
+        "y",
     ])
     monkeypatch.setattr("builtins.input", lambda *_a: next(answers))
 
@@ -221,12 +197,12 @@ def test_force_overwrites_existing_config(tmp_path):
 def test_interactive_prompts_fill_in_missing_values(tmp_path, monkeypatch):
     monkeypatch.setattr(setup_wizard.sys.stdin, "isatty", lambda: True)
     answers = iter([
-        "mycraft",       # node id
-        "workstation",   # kind
-        "monitor",       # assignments (listen для non-vps больше не спрашивается)
-        "n",             # рой в этой LAN ещё не существует — эта нода первая
-        "n",             # не генерировать токен...
-        "pasted-token",  # ...а вставить свой
+        "mycraft",
+        "workstation",
+        "monitor",
+        "n",
+        "n",
+        "pasted-token",
     ])
     monkeypatch.setattr("builtins.input", lambda *_a: next(answers))
 
@@ -248,19 +224,14 @@ def test_interactive_prompts_fill_in_missing_values(tmp_path, monkeypatch):
 
 
 def test_interactive_existing_swarm_without_known_address_requires_token(tmp_path, monkeypatch):
-    """Идея пользователя 2026-08-01: не заставлять вводить IP — LAN-маячок сам
-    найдёт соседа по общему токену (node/discovery.py уже это умеет). Значит
-    «есть рой, но адрес не знаю» обязана требовать вставить токен, а не
-    предлагать сгенерировать новый (это сломало бы автообнаружение — токены
-    не совпали бы)."""
     monkeypatch.setattr(setup_wizard.sys.stdin, "isatty", lambda: True)
     answers = iter([
-        "mycraft",              # node id
-        "server",               # kind
-        "",                     # assignments (listen для non-vps больше не спрашивается)
-        "y",                    # да, рой в этой LAN уже есть
-        "",                     # IP соседа не знаю — понадеемся на маячок
-        "existing-real-token",  # токен обязателен, не предлагали генерировать
+        "mycraft",
+        "server",
+        "",
+        "y",
+        "",
+        "existing-real-token",
     ])
     monkeypatch.setattr("builtins.input", lambda *_a: next(answers))
 
@@ -280,10 +251,6 @@ def test_interactive_existing_swarm_without_known_address_requires_token(tmp_pat
 
 
 def test_nodectl_resolves_same_socket_as_the_running_node(tmp_path):
-    """Воспроизводит живой баг 2026-08-01: конфиг лежит не там же, где данные
-    (обычная установка — ~/.config vs ~/.local/share), поэтому `nodectl`
-    (резолвит от каталога конфига) обязан прийти к тому же сокету, что и сам
-    процесс ноды (резолвит от WorkingDirectory=data_dir)."""
     config_path = tmp_path / "config-dir" / "config.toml"
     data_dir = tmp_path / "data-dir"
     args = _parser_args([
@@ -337,8 +304,6 @@ def test_render_systemd_unit_uses_absolute_paths(tmp_path, monkeypatch):
 
     assert f"WorkingDirectory={data_dir}" in content
     assert f"--config {config_path}" in content
-    # PATH всегда начинается с ~/.local/bin (там обёртка smartctl из fixups),
-    # независимо от того, откуда реально резолвился exec_path (см. баг pipx).
     assert "Environment=PATH=/home/x/.local/bin:" in content
 
 
