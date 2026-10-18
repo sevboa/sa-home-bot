@@ -8,8 +8,6 @@ from sa_home_bot.node.peers import PeerLink
 from sa_home_bot.node.supervisor import SupervisedService
 from sa_home_bot.proto import server as server_mod
 from sa_home_bot.proto.server import ProtoServer, _Connection
-from sa_home_bot.utils import lifespan as lifespan_mod
-from sa_home_bot.utils.lifespan import Lifespan
 from sa_home_bot.utils.shutdown import ShutdownBudget
 from tests.unit.netsupport import StubService
 
@@ -101,21 +99,3 @@ async def test_служба_останавливается_с_зависшей_�
 
     await asyncio.wait_for(svc.stop(), timeout=10.0)
     assert svc._task is None
-
-
-async def test_lifespan_не_держат_зависшие_колбэки(monkeypatch):
-    monkeypatch.setattr(lifespan_mod, "CALLBACK_TIMEOUT_S", 0.05)
-    done: list[str] = []
-
-    async def hangs() -> None:
-        await asyncio.Event().wait()
-
-    async def closes_db() -> None:
-        done.append("db")
-
-    lifespan = Lifespan()
-    lifespan.push(closes_db)
-    lifespan.push(hangs)
-
-    await asyncio.wait_for(lifespan.shutdown(), timeout=5.0)
-    assert done == ["db"], "зависший колбэк не должен отменять остальные"

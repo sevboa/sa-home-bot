@@ -40,7 +40,7 @@ from sa_home_bot.node.events import (
     EVENT_LLM_SPEECH_CURED,
     EVENT_LLM_WENT_IDLE,
 )
-from sa_home_bot.proto.addresses import LLM_SERVICE
+from sa_home_bot.proto.addresses import LLM_SERVICE, ROLE_DIRECTOR, ROLE_SUMMARIZER
 from sa_home_bot.proto.chunks import CHUNK_BYTES
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
@@ -120,8 +120,6 @@ _ITEM_ATTEMPTS_MAX = 4
 
 ACTION_SET_SPEECH_CLEAR = "set_speech_clear"
 
-ROLE_DIRECTOR = "director"
-ROLE_SUMMARIZER = "summarizer"
 _SUMMARIZER_OPTIONS: dict[str, Any] = {"temperature": 0, "num_predict": 2048}
 
 PHOTO_PROCESS_FAILED_TEXT = (

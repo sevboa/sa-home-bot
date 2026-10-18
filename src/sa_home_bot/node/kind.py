@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, get_args
 
 NodeKind = Literal["server", "workstation", "vps"]
 
 KIND_SERVER: NodeKind = "server"
 KIND_WORKSTATION: NodeKind = "workstation"
 KIND_VPS: NodeKind = "vps"
+
+
+def known_kinds() -> tuple[str, ...]:
+    return get_args(NodeKind)
 
 
 @dataclass(frozen=True)

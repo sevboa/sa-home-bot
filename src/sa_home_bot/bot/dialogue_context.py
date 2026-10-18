@@ -15,6 +15,7 @@ from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.llm_chat import ACTION_CHAT, ChatStats
+from sa_home_bot.proto.addresses import ROLE_SUMMARIZER
 from sa_home_bot.proto.messages import Address
 from sa_home_bot.text_search import MIN_WORD_CHARS, WORD_RE, fts_or_query
 from sa_home_bot.utils.clock import utc_now
@@ -22,7 +23,6 @@ from sa_home_bot.utils.text import clip, stem
 
 log = logging.getLogger(__name__)
 
-ROLE_SUMMARIZER = "summarizer"
 
 SUMMARY_PREFIX = "Краткое содержание начала разговора: "
 RECALL_HEADER = (

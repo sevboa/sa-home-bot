@@ -13,8 +13,7 @@
 
 ## Публичный API пакета `sa_home_bot.node.fixups`
 `build_fixups(settings)`, `run_fixups(fixups)`, `Fixup`, `FixupError`, `SMARTCTL_WRAPPER_PATH`.
-Для `backup/apply.py::SudoIO` сохранены приватные алиасы `_sudo`, `_run`, `_privileged_exists`,
-`_read_privileged` (они же `privileged.run_sudo/run_user/path_exists/read_text`).
+`backup/apply.py::SudoIO` работает через `node.fixups.privileged` напрямую (`read_text_if_exists`, `temp_file` + `install_from(mode="0600", make_parents=True)`, `unit_is_active`, `run_user`/`run_sudo`).
 
 ## Модули
 | Модуль | Что внутри |

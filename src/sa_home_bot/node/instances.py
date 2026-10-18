@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
 import logging
-import os
-import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+
+from sa_home_bot.utils.files import atomic_write
 
 log = logging.getLogger(__name__)
 
@@ -83,19 +82,6 @@ class InstanceMeta:
 
 def content_hash(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
-
-
-def atomic_write(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        os.replace(tmp_name, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
 
 
 def instances_dir(config_path: str | Path | None, override: str = "") -> Path | None:

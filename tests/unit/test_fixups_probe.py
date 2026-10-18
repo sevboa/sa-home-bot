@@ -573,4 +573,3 @@ def test_legacy_cleanup_fixup_demands_work_only_while_legacy_alive(root, legacy_
 def test_fixups_package_keeps_external_api():
     assert fixups.build_fixups is build_fixups
     assert fixups.SMARTCTL_WRAPPER_PATH.name == "smartctl"
-    assert {"_sudo", "_run", "_privileged_exists", "_read_privileged"} <= set(dir(fixups))

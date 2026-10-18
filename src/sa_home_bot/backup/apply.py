@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import subprocess
-import tempfile
 import tomllib
 from collections.abc import Callable
 from pathlib import Path
@@ -15,6 +13,7 @@ from sa_home_bot.backup.snapshot import SNAPSHOT_TABLES
 from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
+from sa_home_bot.node.fixups import privileged
 from sa_home_bot.toml_emit import toml_table
 from sa_home_bot.utils.files import atomic_write
 
@@ -45,33 +44,20 @@ class PrivilegedIO(Protocol):
 
 class SudoIO:
     def read_root(self, path: Path) -> str | None:
-        from sa_home_bot.node.fixups import _privileged_exists, _read_privileged
-
-        return _read_privileged(path) if _privileged_exists(path) else None
+        return privileged.read_text_if_exists(path)
 
     def write_root(self, path: Path, text: str) -> None:
-        from sa_home_bot.node.fixups import _sudo
-
-        with tempfile.NamedTemporaryFile("w", suffix=".restore", delete=False) as tmp:
-            tmp.write(text)
-            tmp_path = Path(tmp.name)
-        try:
-            _sudo(["install", "-D", "-m", "0600", "-o", "root", "-g", "root",
-                   str(tmp_path), str(path)])
-        finally:
-            tmp_path.unlink(missing_ok=True)
+        with privileged.temp_file(text, ".restore") as tmp:
+            privileged.install_from(tmp, path, mode="0600", make_parents=True)
 
     def unit_active(self, unit: str, *, user: bool = False) -> bool:
-        argv = ["systemctl", *(["--user"] if user else []), "is-active", "--quiet", unit]
-        return subprocess.run(argv).returncode == 0
+        return privileged.unit_is_active(unit, user=user)
 
     def restart(self, unit: str, *, user: bool = False) -> None:
-        from sa_home_bot.node.fixups import _run, _sudo
-
         if user:
-            _run(["systemctl", "--user", "restart", unit])
+            privileged.run_user(["systemctl", "--user", "restart", unit])
         else:
-            _sudo(["systemctl", "restart", unit])
+            privileged.run_sudo(["systemctl", "restart", unit])
 
 
 def patch_awg_conf(text: str, awg: dict[str, Any]) -> str:

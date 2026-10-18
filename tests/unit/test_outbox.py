@@ -3,32 +3,19 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-import pytest_asyncio
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
 from sa_home_bot.bot import notifier as notifier_module
 from sa_home_bot.bot.notifier import MAX_RETRIES, Notifier
 from sa_home_bot.bot.outbox import flush_outbox
-from sa_home_bot.db.connection import Database
-from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import (
     OUTBOX_KIND_ALERT,
     OUTBOX_KIND_DELIVER,
     OUTBOX_KIND_INTERACTIVE,
     OUTBOX_KIND_TASK,
-    Store,
 )
 
 T0 = datetime(2026, 10, 5, 12, 0, 0, tzinfo=UTC)
-
-
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    db = Database(tmp_path / "t.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
 
 
 class FakeBot:
@@ -73,7 +60,7 @@ async def test_ttl_by_kind(store):
         OUTBOX_KIND_TASK, OUTBOX_KIND_DELIVER}
     assert await store.outbox_due(T0 + timedelta(hours=25)) == []
     assert await store.outbox_expire(T0 + timedelta(hours=7)) == 2
-    assert await store.outbox_count() == 2
+    assert len(await store.outbox_due(T0)) == 2
 
 
 async def test_dedup_replaces_old(store):
@@ -91,7 +78,7 @@ async def test_order_by_created_at(store):
     n = await flush_outbox(Notifier(bot), store, now=T0 + timedelta(seconds=10))
     assert n == 2
     assert [t.split("\n")[0] for _, t in bot.sent] == ["a", "b"]
-    assert await store.outbox_count() == 0
+    assert await store.outbox_due(T0) == []
 
 
 async def test_flush_429_waits_and_retries(store):
@@ -126,7 +113,7 @@ async def test_permanent_deletes_and_continues(store):
     bot.script = [TelegramForbiddenError(method=None, message="blocked")]  # type: ignore[arg-type]
     assert await flush_outbox(Notifier(bot), store, now=T0) == 1
     assert bot.sent == [(1, "b")]
-    assert await store.outbox_count() == 0
+    assert await store.outbox_due(T0) == []
 
 
 async def test_late_mark(store):
@@ -155,7 +142,7 @@ async def test_notifier_permanent_not_enqueued(store):
     bot = FakeBot()
     bot.script = [_bad()]
     assert await Notifier(bot, outbox=store).send_direct(5, "hi") is None
-    assert await store.outbox_count() == 0
+    assert await store.outbox_due(T0) == []
 
 
 async def test_notifier_without_outbox_old_behavior():

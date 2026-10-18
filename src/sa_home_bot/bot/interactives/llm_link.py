@@ -4,13 +4,12 @@ import logging
 from typing import Any
 
 from sa_home_bot.bot.service_link import ServiceLink
-from sa_home_bot.proto.addresses import LLM_ADDRESS
+from sa_home_bot.proto.addresses import LLM_ADDRESS, ROLE_DIRECTOR
 from sa_home_bot.proto.errors import SERVICE_CALL_ERRORS
 
 log = logging.getLogger(__name__)
 
 ACTION_CHAT = "chat"
-ROLE_DIRECTOR = "director"
 LLM_CALL_ERRORS = (*SERVICE_CALL_ERRORS, TimeoutError, OSError)
 
 

@@ -186,10 +186,6 @@ class Store:
             )
             return cur.rowcount
 
-    async def outbox_count(self) -> int:
-        cur = await self.db.conn.execute("SELECT COUNT(*) AS n FROM outbox")
-        return (await cur.fetchone())["n"]
-
 
     async def start_job_run(self, job_type: str, started_at: datetime) -> int:
         async with self.db.transaction() as conn:

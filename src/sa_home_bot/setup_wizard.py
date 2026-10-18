@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import getpass
-import json
 import secrets
 import shutil
 import socket
@@ -12,11 +11,11 @@ from pathlib import Path
 
 from sa_home_bot.config import Settings
 from sa_home_bot.node.fixups import SMARTCTL_WRAPPER_PATH, build_fixups, run_fixups
+from sa_home_bot.node.kind import known_kinds
+from sa_home_bot.toml_emit import toml_value
 
 DEFAULT_CONFIG_PATH = Path("~/.config/sa-home-bot/config.toml").expanduser()
 DEFAULT_DATA_DIR = Path("~/.local/share/sa-home-bot").expanduser()
-
-KIND_CHOICES = ("server", "workstation", "vps")
 
 INIT_DESCRIPTION = (
     '`sa-home-bot init` — установка новой ноды без git-checkout (см. cli.py).\n'
@@ -51,7 +50,7 @@ def add_init_subparser(subparsers: argparse._SubParsersAction) -> None:
         help=f"рабочий каталог ноды — там же данные/сокеты (по умолчанию {DEFAULT_DATA_DIR})",
     )
     parser.add_argument("--node-id", default=None, help="имя ноды в рое (по умолчанию — hostname)")
-    parser.add_argument("--kind", choices=KIND_CHOICES, default=None,
+    parser.add_argument("--kind", choices=known_kinds(), default=None,
                          help="тип машины: server (24/7) | workstation (спит/будится) | vps")
     parser.add_argument("--assignments", default=None,
                          help="что нода поднимает, через запятую, напр. 'monitor,apps' "
@@ -100,10 +99,6 @@ def _split_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def _toml_scalar(value: str | list[str]) -> str:
-    return json.dumps(value, ensure_ascii=False)
-
-
 _SERVICE_PATH_DEFAULTS: dict[str, dict[str, str]] = {
     "database": {"path": "sentinel.sqlite"},
     "monitor": {"socket": "monitor.sock", "db_path": "monitor.sqlite"},
@@ -123,7 +118,7 @@ def _render_service_paths(data_dir: Path) -> str:
         lines.append(f"[{section}]")
         for field, filename in fields.items():
             absolute = data_dir / "data" / filename
-            lines.append(f"{field} = {_toml_scalar(str(absolute))}")
+            lines.append(f"{field} = {toml_value(str(absolute))}")
         lines.append("")
     return "\n".join(lines)
 
@@ -136,16 +131,16 @@ def _render_config(*, node_id: str, kind: str, assignments: list[str],
         "# дефолты из кода, правь руками (см. config.example.toml в репозитории).\n"
         "\n"
         "[node]\n"
-        f"id = {_toml_scalar(node_id)}\n"
-        f"kind = {_toml_scalar(kind)}\n"
-        f"socket = {_toml_scalar(str(data_dir / 'data' / 'node.sock'))}\n"
-        f"assignments = {_toml_scalar(assignments)}\n"
-        f"listen = {_toml_scalar(listen)}\n"
+        f"id = {toml_value(node_id)}\n"
+        f"kind = {toml_value(kind)}\n"
+        f"socket = {toml_value(str(data_dir / 'data' / 'node.sock'))}\n"
+        f"assignments = {toml_value(assignments)}\n"
+        f"listen = {toml_value(listen)}\n"
         "\n"
         + _render_service_paths(data_dir)
         + "\n[swarm]\n"
-        f"token = {_toml_scalar(token)}\n"
-        f"join = {_toml_scalar(join)}\n"
+        f"token = {toml_value(token)}\n"
+        f"join = {toml_value(join)}\n"
     )
 
 
@@ -239,7 +234,7 @@ def _resolve_kind(args: argparse.Namespace, interactive: bool) -> str:
     if not interactive:
         return "workstation"
     kind = _prompt("Тип машины (server/workstation/vps)", "workstation")
-    if kind not in KIND_CHOICES:
+    if kind not in known_kinds():
         print(f"Неизвестный тип {kind!r}, беру workstation", file=sys.stderr)
         return "workstation"
     return kind
