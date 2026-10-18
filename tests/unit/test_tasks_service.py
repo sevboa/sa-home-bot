@@ -4,14 +4,9 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 
-import pytest_asyncio
-
 from sa_home_bot import wake_core
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.config import GuestSubscriptionConfig, Settings
-from sa_home_bot.db.connection import Database
-from sa_home_bot.db.migrations import apply_migrations
-from sa_home_bot.db.store import Store
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     ERR_UNAVAILABLE,
@@ -72,15 +67,6 @@ class FakeEmitter:
 
     def results(self) -> list[dict]:
         return [d for t, d in self.events if t == protocol.EVENT_TASK_RESULT]
-
-
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    db = Database(tmp_path / "test.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
 
 
 def _chat_row(task_id: int = 1, timeout_s: float = 60.0) -> dict:

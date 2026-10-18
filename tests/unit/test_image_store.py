@@ -2,25 +2,12 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-import pytest_asyncio
-
-from sa_home_bot.db.connection import Database
-from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
 
 from .conftest import BASE_TIME
 
 CHAT = 100
 OTHER_CHAT = 200
-
-
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    db = Database(tmp_path / "test.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
 
 
 async def _add(store: Store, *, chat_id: int = CHAT, caption: str = "Рыжий кот",

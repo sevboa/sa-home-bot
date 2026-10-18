@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-import pytest_asyncio
-
 from sa_home_bot.bot.dispatch import TelegramEventDispatcher
 from sa_home_bot.config import (
     DiskSensorConfig,
@@ -12,9 +10,6 @@ from sa_home_bot.config import (
     SubscriptionConfig,
     TelegramConfig,
 )
-from sa_home_bot.db.connection import Database
-from sa_home_bot.db.migrations import apply_migrations
-from sa_home_bot.db.store import Store
 from sa_home_bot.domain.models import (
     DISK_FAIL,
     DISK_OK,
@@ -173,15 +168,6 @@ def _settings() -> Settings:
         sensors=SensorsConfig(disks=DiskSensorConfig(devices=["/dev/sdb:sat"])),
         subscriptions=[],
     )
-
-
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    db = Database(tmp_path / "smart.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
 
 
 def _ctx(store, sensors, notifier) -> JobContext:

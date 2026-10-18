@@ -2,11 +2,8 @@ import json
 from datetime import datetime, timedelta
 
 import pytest
-import pytest_asyncio
 
-from sa_home_bot.db.connection import Database
-from sa_home_bot.db.migrations import apply_migrations
-from sa_home_bot.db.store import NOTIF_ALERT, Store
+from sa_home_bot.db.store import NOTIF_ALERT
 from sa_home_bot.domain.models import (
     ALERTING,
     OK,
@@ -17,15 +14,6 @@ from sa_home_bot.domain.models import (
 )
 
 from .conftest import BASE_TIME, make_reading
-
-
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    db = Database(tmp_path / "test.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
 
 
 def _state(status, temp, since=None, count=0):
@@ -153,34 +141,47 @@ async def test_prune_job_runs(store, keep):
     assert len(await store.recent_job_runs(limit=100)) == keep
 
 
-async def test_recent_events_newest_first(store):
-    await store.record_event("node_down", "mycraft", "пропала", BASE_TIME)
-    await store.record_event(
-        "node_returned", "mycraft", "вернулась", BASE_TIME + timedelta(minutes=1)
-    )
-    events = await store.recent_events(limit=10)
-    assert [e["event_type"] for e in events] == ["node_returned", "node_down"]
+def _minutes(n):
+    return BASE_TIME + timedelta(minutes=n)
 
 
-async def test_recent_events_filters_by_node(store):
-    await store.record_event("node_down", "mycraft", "mycraft пропала", BASE_TIME)
-    await store.record_event("node_down", "jeeves", "jeeves пропала", BASE_TIME)
-    events = await store.recent_events(node="jeeves", limit=10)
-    assert [e["text"] for e in events] == ["jeeves пропала"]
-
-
-async def test_recent_events_filters_by_since(store):
-    await store.record_event("node_down", "mycraft", "старое", BASE_TIME)
-    await store.record_event("node_up", "mycraft", "свежее", BASE_TIME + timedelta(hours=2))
-    events = await store.recent_events(since=BASE_TIME + timedelta(hours=1), limit=10)
-    assert [e["text"] for e in events] == ["свежее"]
-
-
-async def test_recent_events_respects_limit(store):
-    for i in range(5):
-        await store.record_event("node_up", "mycraft", str(i), BASE_TIME + timedelta(minutes=i))
-    events = await store.recent_events(limit=2)
-    assert [e["text"] for e in events] == ["4", "3"]
+@pytest.mark.parametrize(
+    ("recorded", "query", "expected_texts"),
+    [
+        pytest.param(
+            [("node_down", "mycraft", "пропала", 0), ("node_returned", "mycraft", "вернулась", 1)],
+            {"limit": 10},
+            ["вернулась", "пропала"],
+            id="newest_first",
+        ),
+        pytest.param(
+            [
+                ("node_down", "mycraft", "mycraft пропала", 0),
+                ("node_down", "jeeves", "jeeves пропала", 0),
+            ],
+            {"node": "jeeves", "limit": 10},
+            ["jeeves пропала"],
+            id="filters_by_node",
+        ),
+        pytest.param(
+            [("node_down", "mycraft", "старое", 0), ("node_up", "mycraft", "свежее", 120)],
+            {"since": _minutes(60), "limit": 10},
+            ["свежее"],
+            id="filters_by_since",
+        ),
+        pytest.param(
+            [("node_up", "mycraft", str(i), i) for i in range(5)],
+            {"limit": 2},
+            ["4", "3"],
+            id="respects_limit",
+        ),
+    ],
+)
+async def test_recent_events(store, recorded, query, expected_texts):
+    for event_type, node, text, minute in recorded:
+        await store.record_event(event_type, node, text, _minutes(minute))
+    events = await store.recent_events(**query)
+    assert [e["text"] for e in events] == expected_texts
 
 
 async def test_prune_swarm_events_keeps_last(store):
@@ -192,28 +193,21 @@ async def test_prune_swarm_events_keeps_last(store):
     assert [e["text"] for e in events] == ["9", "8", "7"]
 
 
-async def test_baseline_stats_empty(store):
-    stats = await store.baseline_stats("cpu:pkg", window=100)
-    assert stats.count == 0
-    assert stats.mean == 0.0
-    assert stats.std == 0.0
-
-
-async def test_baseline_stats_mean_and_std(store):
-    for t in (38.0, 40.0, 42.0):
+@pytest.mark.parametrize(
+    ("temperatures", "window", "count", "mean", "std"),
+    [
+        pytest.param([], 100, 0, 0.0, 0.0, id="empty"),
+        pytest.param([38.0, 40.0, 42.0], 100, 3, 40.0, (8 / 3) ** 0.5, id="mean_and_std"),
+        pytest.param([10.0, 20.0, 30.0, 40.0, 50.0], 2, 2, 45.0, 5.0, id="respects_window"),
+    ],
+)
+async def test_baseline_stats(store, temperatures, window, count, mean, std):
+    for t in temperatures:
         await store.record_readings([make_reading(t)])
-    stats = await store.baseline_stats("cpu:pkg", window=100)
-    assert stats.count == 3
-    assert stats.mean == pytest.approx(40.0)
-    assert stats.std == pytest.approx((8 / 3) ** 0.5)
-
-
-async def test_baseline_stats_respects_window(store):
-    for t in (10.0, 20.0, 30.0, 40.0, 50.0):
-        await store.record_readings([make_reading(t)])
-    stats = await store.baseline_stats("cpu:pkg", window=2)
-    assert stats.count == 2
-    assert stats.mean == pytest.approx(45.0)
+    stats = await store.baseline_stats("cpu:pkg", window=window)
+    assert stats.count == count
+    assert stats.mean == pytest.approx(mean)
+    assert stats.std == pytest.approx(std)
 
 
 async def test_baseline_stats_isolated_per_component(store):
