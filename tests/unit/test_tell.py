@@ -4,6 +4,7 @@ import pytest
 
 from sa_home_bot.bot import recipients
 from sa_home_bot.bot import tools as ai_tools
+from sa_home_bot.bot.tools import delivery as tool_delivery
 from sa_home_bot.config import (
     GuestSubscriptionConfig,
     Settings,
@@ -201,10 +202,10 @@ async def test_tell_delivers_via_emit_bridge_when_no_notifier(monkeypatch):
     from sa_home_bot.bot import invites
 
     monkeypatch.setattr(
-        ai_tools, "_tell_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR)
+        tool_delivery, "_tell_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR)
     )
     monkeypatch.setattr(
-        ai_tools,
+        tool_delivery,
         "_tell_broadcast_limiter",
         invites.AttemptLimiter(ai_tools.TELL_MAX_TOTAL_PER_HOUR),
     )
@@ -240,9 +241,9 @@ async def test_tell_needs_both_arguments():
 async def test_tell_stops_at_the_hourly_limit(monkeypatch):
     from sa_home_bot.bot import invites
 
-    monkeypatch.setattr(ai_tools, "_tell_limiter", invites.AttemptLimiter(2))
+    monkeypatch.setattr(tool_delivery, "_tell_limiter", invites.AttemptLimiter(2))
     monkeypatch.setattr(
-        ai_tools,
+        tool_delivery,
         "_tell_broadcast_limiter",
         invites.AttemptLimiter(ai_tools.TELL_MAX_TOTAL_PER_HOUR),
     )
@@ -261,9 +262,9 @@ async def test_tell_stops_at_the_hourly_limit(monkeypatch):
 async def test_tell_broadcast_to_many_recipients_not_blocked_by_per_recipient_limit(monkeypatch):
     from sa_home_bot.bot import invites
 
-    monkeypatch.setattr(ai_tools, "_tell_limiter", invites.AttemptLimiter(2))
+    monkeypatch.setattr(tool_delivery, "_tell_limiter", invites.AttemptLimiter(2))
     monkeypatch.setattr(
-        ai_tools,
+        tool_delivery,
         "_tell_broadcast_limiter",
         invites.AttemptLimiter(ai_tools.TELL_MAX_TOTAL_PER_HOUR),
     )
@@ -292,9 +293,9 @@ async def test_tell_broadcast_total_limit_stops_mass_send(monkeypatch):
     from sa_home_bot.bot import invites
 
     monkeypatch.setattr(
-        ai_tools, "_tell_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR)
+        tool_delivery, "_tell_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR)
     )
-    monkeypatch.setattr(ai_tools, "_tell_broadcast_limiter", invites.AttemptLimiter(2))
+    monkeypatch.setattr(tool_delivery, "_tell_broadcast_limiter", invites.AttemptLimiter(2))
     book = SubscriptionBook.from_config(
         [SubscriptionConfig(name="me", chat_id=1, allowed_commands=["*"])],
         [
@@ -613,10 +614,10 @@ async def test_notify_guest_delivers_via_emit_bridge_when_no_notifier(monkeypatc
     from sa_home_bot.bot import invites
 
     monkeypatch.setattr(
-        ai_tools, "_tell_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR)
+        tool_delivery, "_tell_limiter", invites.AttemptLimiter(ai_tools.TELL_MAX_PER_RECIPIENT_PER_HOUR)
     )
     monkeypatch.setattr(
-        ai_tools,
+        tool_delivery,
         "_tell_broadcast_limiter",
         invites.AttemptLimiter(ai_tools.TELL_MAX_TOTAL_PER_HOUR),
     )
