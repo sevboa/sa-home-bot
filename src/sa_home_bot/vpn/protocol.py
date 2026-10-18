@@ -7,7 +7,6 @@ SERVICE_NAME = "vpn"
 
 GB = 1_000_000_000
 PROBE_CHAT_ID = 0
-NODE_SENTINEL_CHAT_ID = PROBE_CHAT_ID
 
 FLOWER_NAMES = (
     "Rose",
@@ -86,6 +85,10 @@ def secret_filename(transport: str, device_label: str, location: str = "") -> st
     budget = _MAX_TUNNEL_NAME - len(prefix) - len(stamp) - 1
     return f"{prefix}{slug[:budget]}_{stamp}.conf"
 
+
+ACTION_VPN_CARD = "vpn_card"
+ACTION_VPN_APK = "apk"
+ACTION_VPN_USAGE_ALL = "usage_all"
 ACTION_PEERS = "peers"
 ACTION_ISSUE = "issue"
 ACTION_REISSUE = "reissue"

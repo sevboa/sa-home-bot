@@ -29,7 +29,6 @@ from sa_home_bot.vpn import protocol as vpn_protocol
 
 VPN_PROBE_AWG_CONF_DIR = Path("/etc/amnezia/amneziawg")
 VPN_PROBE_SUDOERS_FILE = "50-sa-home-node-vpn-probe"
-VPN_PROBE_CHAT_ID = 0
 SUPPORTED_PROBE_TRANSPORTS = ("awg", "reality")
 ISSUE_TIMEOUT_S = 20.0
 
@@ -64,7 +63,7 @@ async def _fetch_probe_config(settings: Settings, slot: vpn_probe_state.ProbeSlo
             raise FixupError(f"vpn@{slot.server} сейчас недоступна — конфиг пробника взять негде")
         result = await client.command(
             vpn_protocol.ACTION_ISSUE,
-            {"chat_id": VPN_PROBE_CHAT_ID, "transport": slot.transport},
+            {"chat_id": vpn_protocol.PROBE_CHAT_ID, "transport": slot.transport},
             dst=dst,
             timeout=ISSUE_TIMEOUT_S,
         )

@@ -12,17 +12,21 @@ from sa_home_bot.config import Settings, SwarmNodeConfig
 from sa_home_bot.node import assignments as assignments_mod
 from sa_home_bot.node import update as node_update
 from sa_home_bot.node.discovery import SwarmDiscovery
+from sa_home_bot.node.events import (
+    EVENT_INSTANCE_CONFIG_CHANGED,
+    EVENT_LLM_WENT_IDLE,
+    EVENT_NODE_JOINED,
+    EVENT_NODE_LEAVING,
+    EVENT_RESTART_APPLIED,
+)
 from sa_home_bot.node.instances import InstanceStore, instances_dir
 from sa_home_bot.node.lease import LeaseManager
 from sa_home_bot.node.peers import LOCAL_HEARTBEAT_TIMEOUT_S, NodeRouter, PeerLink
-from sa_home_bot.node.replication import (
-    EVENT_INSTANCE_CONFIG_CHANGED,
-    ConfigReplicator,
-)
-from sa_home_bot.node.service import EVENT_NODE_JOINED, EVENT_RESTART_APPLIED, NodeService
+from sa_home_bot.node.replication import ConfigReplicator
+from sa_home_bot.node.service import NodeService
 from sa_home_bot.node.state import NodeState
 from sa_home_bot.node.supervisor import Supervisor
-from sa_home_bot.node.watch import EVENT_NODE_LEAVING, PresenceWatcher
+from sa_home_bot.node.watch import PresenceWatcher
 from sa_home_bot.proto.emitter import DeferredEmitter
 from sa_home_bot.proto.endpoints import merge_endpoints
 from sa_home_bot.proto.messages import MSG_EVENT, Envelope, ProtoError
@@ -41,7 +45,6 @@ LinkFactory = Callable[[str, "str | Sequence[str]"], PeerLink]
 
 SEEN_EVENT_IDS_CAPACITY = 2048
 
-EVENT_LLM_WENT_IDLE = "llm_went_idle"
 
 MAX_RELAY_HOPS = 8
 
@@ -260,9 +263,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
     async def on_local_event(env: Envelope) -> None:
         await relay(env, is_local=True)
         if env.payload.get("event") == EVENT_LLM_WENT_IDLE and node_service is not None:
-            asyncio.create_task(
-                node_service.maybe_auto_poweroff_idle(), name="idle-poweroff-check"
-            )
+            asyncio.create_task(node_service.maybe_auto_poweroff_idle(), name="idle-poweroff-check")
 
     def on_peer_endpoints(peer_id: str, endpoints: list[str]) -> None:
         if not endpoints:
@@ -311,7 +312,9 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
             router=router,
             emit=emit,
             **identity_replicator_hooks(
-                settings, package_store, node_id,
+                settings,
+                package_store,
+                node_id,
                 vpn_assigned=assignments_mod.has_service(effective_assignments, "vpn"),
             ),
         )
@@ -346,6 +349,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         make_peer_link=make_peer_link,
         make_local_link=make_local_link,
     )
+
     def on_peer_connect(peer_node: str) -> None:
         link = router.peers.get(peer_node)
         if link is not None:

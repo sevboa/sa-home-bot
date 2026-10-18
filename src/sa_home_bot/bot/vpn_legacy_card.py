@@ -112,7 +112,7 @@ def card_keyboard(
     multi = len(servers) > 1
     devices = [device for server in servers for device in (server.get("devices") or [])]
     top_row: list[InlineKeyboardButton] = []
-    if vpn_rights.allows(subscription, _cb.ACTION_APK):
+    if vpn_rights.allows(subscription, vpn_protocol.ACTION_VPN_APK):
         top_row.append(vpn_keyboards.help_button())
     needy = (
         self_serve_nodes if vpn_rights.allows(subscription, vpn_protocol.ACTION_GRANT_EXTRA) else []

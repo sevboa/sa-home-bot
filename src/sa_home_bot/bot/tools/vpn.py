@@ -21,7 +21,6 @@ from sa_home_bot.bot.tools.core import (
 from sa_home_bot.proto.messages import Address, ProtoError
 from sa_home_bot.vpn import protocol as vpn_protocol
 
-_VPN_ACTION_APK = "apk"
 _VPN_ACTION_SETTINGS = "settings"
 _VPN_ACTION_REPORT = "report"
 _VPN_NO_PRIVATE = "недоступно: настройки доступа отдаю только в личном чате, не в группе"
@@ -53,7 +52,7 @@ async def _vpn_recipient(ctx: ToolContext, who: str) -> tuple[int | None, str]:
 async def _vpn_person_action(ctx: ToolContext, action: str, args: dict[str, Any]) -> str:
     from sa_home_bot.bot import vpn_agent
 
-    if ctx.chat_id is None or ctx.chat_id == 0:
+    if ctx.chat_id is None or ctx.chat_id == vpn_protocol.PROBE_CHAT_ID:
         return "недоступно: VPN привязан к человеку, а сейчас его нет"
     chat_id = ctx.chat_id
     thread_id = ctx.message_thread_id
@@ -115,9 +114,11 @@ async def _vpn_person_action(ctx: ToolContext, action: str, args: dict[str, Any]
     if ctx.notifier is None or ctx.book is None:
         return "недоступно: сейчас не могу передать сообщение владельцу"
     servers, answered = await vpn_agent.servers_for(ctx.node_link, chat_id)
-    device = vpn_agent.find_device(servers, str(args.get("device_label") or "")) if args.get(
-        "device_label"
-    ) else None
+    device = (
+        vpn_agent.find_device(servers, str(args.get("device_label") or ""))
+        if args.get("device_label")
+        else None
+    )
     name = ctx.author or str(chat_id)
     username = ctx.people.username(chat_id) if ctx.people is not None else None
     outcome = await vpn_agent.submit_report(
@@ -172,7 +173,7 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
         _VPN_ACTION_REPORT,
     ):
         return await _vpn_person_action(ctx, action, args)
-    elif action == _VPN_ACTION_APK:
+    elif action == vpn_protocol.ACTION_VPN_APK:
         return await _vpn_apps(ctx, dst, str(args.get("app") or "hiddify"))
     elif action == vpn_protocol.ACTION_RESOLVE_REQUEST:
         raw_id = args.get("request_id")
@@ -188,13 +189,13 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
     ):
         payload = {}
     else:
-        if ctx.chat_id is None or ctx.chat_id == 0:
+        if ctx.chat_id is None or ctx.chat_id == vpn_protocol.PROBE_CHAT_ID:
             return "недоступно: VPN привязан к человеку, а сейчас его нет"
         payload = {"chat_id": ctx.chat_id}
         if action == vpn_protocol.ACTION_REQUEST_EXTRA:
             gb = args.get("gb")
             if gb:
-                payload["bytes"] = int(float(gb) * 1_000_000_000)
+                payload["bytes"] = int(float(gb) * vpn_protocol.GB)
 
     result = await call_service(
         ctx,
@@ -252,7 +253,7 @@ _VPN_VARIANTS = VariantRights(
     rights=(
         (vpn_protocol.ACTION_USAGE, ActionRight(vpn_protocol.ACTION_USAGE, _VPN_SERVICE)),
         (vpn_protocol.ACTION_ISSUE, ActionRight(vpn_protocol.ACTION_ISSUE, _VPN_SERVICE)),
-        (_VPN_ACTION_SETTINGS, ActionRight("vpn_card", _VPN_SERVICE)),
+        (_VPN_ACTION_SETTINGS, ActionRight(vpn_protocol.ACTION_VPN_CARD, _VPN_SERVICE)),
         (_VPN_ACTION_REPORT, ActionRight(vpn_protocol.ACTION_USAGE, _VPN_SERVICE)),
         (
             vpn_protocol.ACTION_GRANT_EXTRA,
@@ -262,7 +263,7 @@ _VPN_VARIANTS = VariantRights(
             vpn_protocol.ACTION_REQUEST_EXTRA,
             ActionRight(vpn_protocol.ACTION_REQUEST_EXTRA, _VPN_SERVICE),
         ),
-        (_VPN_ACTION_APK, ActionRight(_VPN_ACTION_APK, _VPN_SERVICE)),
+        (vpn_protocol.ACTION_VPN_APK, ActionRight(vpn_protocol.ACTION_VPN_APK, _VPN_SERVICE)),
         (vpn_protocol.ACTION_PEERS, ActionRight(vpn_protocol.ACTION_PEERS, _VPN_SERVICE)),
         (
             vpn_protocol.ACTION_RESOLVE_REQUEST,

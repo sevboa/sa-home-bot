@@ -18,7 +18,6 @@ from sa_home_bot.bot.ai_flow import (
     STEPS_TEXT_PLAIN,
 )
 from sa_home_bot.bot.node_events import (
-    EVENT_RESTART_APPLIED,
     TaskRichSessions,
     _handle_task_result,
     build_close_ssh_keyboard,
@@ -34,6 +33,7 @@ from sa_home_bot.bot.node_events import (
 from sa_home_bot.bot.rich_stream import ALFRED_PREFIX_MD
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import Settings, SubscriptionConfig
+from sa_home_bot.node.events import EVENT_RESTART_APPLIED
 from sa_home_bot.proto.messages import Address, make_event
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
@@ -277,7 +277,8 @@ async def test_handler_calls_match_event_on_restart_applied():
 
 
 async def test_handler_calls_match_event_on_update_finished():
-    from sa_home_bot.bot.node_events import EVENT_UPDATE_FINISHED, render_update_finished
+    from sa_home_bot.bot.node_events import render_update_finished
+    from sa_home_bot.node.events import EVENT_UPDATE_FINISHED
 
     book, notifier, store = _book(), FakeNotifier(), FakeStore()
     link = FakeMatchEventLink()

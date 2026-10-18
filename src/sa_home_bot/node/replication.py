@@ -6,6 +6,7 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from sa_home_bot.node.assignments import Assignment
+from sa_home_bot.node.events import EVENT_INSTANCE_CONFIG_CHANGED
 from sa_home_bot.node.instances import (
     InstanceMeta,
     InstanceStore,
@@ -27,8 +28,6 @@ from sa_home_bot.proto.messages import (
 from sa_home_bot.utils.lifespan import cancel_task
 
 log = logging.getLogger(__name__)
-
-EVENT_INSTANCE_CONFIG_CHANGED = "instance_config_changed"
 
 ACTION_LIST_INSTANCES = "list_instances"
 ACTION_GET_INSTANCE_CONFIG = "get_instance_config"
@@ -70,12 +69,9 @@ class ConfigReplicator:
         self._before_announce = before_announce
         self._on_applied = on_applied
 
-
     def _my_instances(self) -> list[Assignment]:
         return [
-            svc.assignment
-            for svc in self._supervisor.services.values()
-            if svc.assignment.instance
+            svc.assignment for svc in self._supervisor.services.values() if svc.assignment.instance
         ]
 
     def _cares_about(self, service: str, instance: str) -> bool:
@@ -97,7 +93,6 @@ class ConfigReplicator:
     def local_revisions(self) -> list[dict]:
         return [m.to_dict() for m in self._store.known()]
 
-
     async def announce_local_changes(self) -> list[InstanceMeta]:
         if self._before_announce is not None:
             try:
@@ -110,7 +105,6 @@ class ConfigReplicator:
             if not is_satellite(meta.instance):
                 await self._apply_to_running_service(meta)
         return changed
-
 
     async def on_config_changed(self, env: Envelope) -> None:
         data = env.payload.get("data", {})
@@ -181,13 +175,16 @@ class ConfigReplicator:
         except (ProtoError, TimeoutError, ConnectionError, OSError) as exc:
             log.warning(
                 "Репликация: не удалось забрать пакет %s с ноды %s (%s) — попробую позже",
-                slot_key(meta.service, meta.instance), source, exc,
+                slot_key(meta.service, meta.instance),
+                source,
+                exc,
             )
             return
         if not response.ok:
             log.warning(
                 "Репликация: нода %s отказала в пакете %s (%s)",
-                source, slot_key(meta.service, meta.instance),
+                source,
+                slot_key(meta.service, meta.instance),
                 (response.error or {}).get("message", "?"),
             )
             return
@@ -217,10 +214,10 @@ class ConfigReplicator:
             return
         log.info(
             "Пакет %s обновлён до ревизии %d — перезапускаю службу",
-            slot.name, meta.rev,
+            slot.name,
+            meta.rev,
         )
         await slot.restart()
-
 
     def package_payload(self, service: str, instance: str) -> dict | None:
         data = self._store.read_package(service, instance)
@@ -228,7 +225,6 @@ class ConfigReplicator:
         if data is None or meta is None:
             return None
         return {"meta": meta.to_dict(), "content": _encode_package(data)}
-
 
     async def tick(self) -> None:
         await self.announce_local_changes()

@@ -4,13 +4,9 @@ import logging
 import time
 
 from sa_home_bot.node.assignments import parse
+from sa_home_bot.node.events import EVENT_SINGLETON_ACTIVATED, EVENT_SINGLETON_YIELDED
 from sa_home_bot.node.kind import KIND_SERVER, KIND_VPS
-from sa_home_bot.node.lease import (
-    EVENT_SINGLETON_ACTIVATED,
-    EVENT_SINGLETON_YIELDED,
-    LeaseManager,
-    rank,
-)
+from sa_home_bot.node.lease import LeaseManager, rank
 from sa_home_bot.node.peers import NodeRouter
 from sa_home_bot.node.supervisor import FENCED_EXIT_CODE, RUNNING, STOPPED, Supervisor
 from sa_home_bot.proto.messages import Envelope
@@ -54,8 +50,13 @@ class FakeSlot:
 
 
 def _lease(
-    node_id: str, node_kind: str, slot: FakeSlot, *peers,
-    grace_s: float = 120.0, ready_timeout_s: float = 9999.0, stuck_warn_s: float = 9999.0,
+    node_id: str,
+    node_kind: str,
+    slot: FakeSlot,
+    *peers,
+    grace_s: float = 120.0,
+    ready_timeout_s: float = 9999.0,
+    stuck_warn_s: float = 9999.0,
 ):
     events: list[tuple[str, dict]] = []
 
@@ -66,14 +67,28 @@ def _lease(
     supervisor.services[slot.name] = slot
     router = NodeRouter(node_id, peers={p.name: p for p in peers})
     manager = LeaseManager(
-        node_id, node_kind, supervisor, router=router, emit=emit,
-        grace_s=grace_s, ready_timeout_s=ready_timeout_s, stuck_warn_s=stuck_warn_s,
+        node_id,
+        node_kind,
+        supervisor,
+        router=router,
+        emit=emit,
+        grace_s=grace_s,
+        ready_timeout_s=ready_timeout_s,
+        stuck_warn_s=stuck_warn_s,
     )
     return manager, events
 
 
-def _entry(node: str, *, running=False, claiming=False, ready=False, role="active",
-           priority=100, fenced=False) -> dict:
+def _entry(
+    node: str,
+    *,
+    running=False,
+    claiming=False,
+    ready=False,
+    role="active",
+    priority=100,
+    fenced=False,
+) -> dict:
     return {
         "node": node,
         "role": role,
@@ -312,15 +327,16 @@ async def test_supervisor_does_not_restart_a_fenced_service(monkeypatch):
     real_exec = asyncio.create_subprocess_exec
 
     async def fake_exec(python, dash_m, module, *args, **kwargs):
-        return await real_exec(
-            python, "-c", f"import sys; sys.exit({FENCED_EXIT_CODE})", **kwargs
-        )
+        return await real_exec(python, "-c", f"import sys; sys.exit({FENCED_EXIT_CODE})", **kwargs)
 
     monkeypatch.setattr(sup_mod.asyncio, "create_subprocess_exec", fake_exec)
 
     noted: list[str] = []
     sup = Supervisor(
-        ["telegram-bot@alfred"], None, emit=_noop, restart_delay_s=0.01,
+        ["telegram-bot@alfred"],
+        None,
+        emit=_noop,
+        restart_delay_s=0.01,
         on_fenced=noted.append,
     )
     slot = sup.services["telegram-bot@alfred"]

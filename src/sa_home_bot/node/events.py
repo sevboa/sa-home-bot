@@ -1,0 +1,20 @@
+from __future__ import annotations
+
+ACTION_SWARM_JOIN = "swarm_join"
+ACTION_CLOSE_SSH_SESSIONS = "close_ssh_sessions"
+
+EVENT_NODE_JOINED = "node_joined"
+EVENT_NODE_DOWN = "node_down"
+EVENT_NODE_UP = "node_up"
+EVENT_NODE_LEAVING = "node_leaving"
+EVENT_NODE_RETURNED = "node_returned"
+EVENT_UPDATE_FINISHED = "update_finished"
+EVENT_RESTART_APPLIED = "restart_applied"
+EVENT_IDLE_POWER_BLOCKED = "idle_power_blocked"
+EVENT_SINGLETON_ACTIVATED = "singleton_activated"
+EVENT_SINGLETON_YIELDED = "singleton_yielded"
+EVENT_INSTANCE_CONFIG_CHANGED = "instance_config_changed"
+EVENT_LLM_IDLE_SLEEP = "llm_idle_sleep"
+EVENT_LLM_SERVICE_RESTART = "llm_service_restart"
+EVENT_LLM_WENT_IDLE = "llm_went_idle"
+EVENT_LLM_SPEECH_CURED = "llm_speech_cured"

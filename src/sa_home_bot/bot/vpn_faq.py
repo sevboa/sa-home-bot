@@ -12,6 +12,7 @@ from sa_home_bot.bot import (
 )
 from sa_home_bot.bot.ui.keyboards import button, markup
 from sa_home_bot.config import VpnConfig
+from sa_home_bot.vpn import protocol as vpn_protocol
 
 Q_PREFIX = "q"
 Q_HIDDIFY, Q_AWG, Q_TROUBLE, Q_DEVICE = (
@@ -42,11 +43,11 @@ HIDDIFY_NO_STORE = "Hiddify можно скачать и с сайта — кн�
 
 
 def list_cb() -> str:
-    return vpn_callbacks.vpn_callback(vpn_callbacks.ACTION_APK)
+    return vpn_callbacks.vpn_callback(vpn_protocol.ACTION_VPN_APK)
 
 
 def question_cb(code: str) -> str:
-    return vpn_callbacks.vpn_callback(vpn_callbacks.ACTION_APK, f"{Q_PREFIX}{code}")
+    return vpn_callbacks.vpn_callback(vpn_protocol.ACTION_VPN_APK, f"{Q_PREFIX}{code}")
 
 
 def parse_question(value: str | None) -> str | None:

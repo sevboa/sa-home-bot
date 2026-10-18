@@ -79,7 +79,7 @@ def home_keyboard(
     if not has_devices and vpn_rights.allows(subscription, vpn_protocol.ACTION_ISSUE):
         rows.append([vpn_wizard.wizard_button()])
     rows.append([button("⚙️ Управление устройствами", _cb.card_cb(_cb.SCREEN_LIST))])
-    if vpn_rights.allows(subscription, _cb.ACTION_APK):
+    if vpn_rights.allows(subscription, vpn_protocol.ACTION_VPN_APK):
         rows.append([vpn_keyboards.help_button()])
     _append(rows, proxy_row(servers, subscription))
     if vpn_report.can_report(subscription):

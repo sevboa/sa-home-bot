@@ -24,7 +24,7 @@ def done_keyboard(home_cb: str | None = None) -> InlineKeyboardMarkup:
 
 
 def help_button() -> InlineKeyboardButton:
-    return button(HELP_TEXT, vpn_callbacks.vpn_callback(vpn_callbacks.ACTION_APK))
+    return button(HELP_TEXT, vpn_callbacks.vpn_callback(vpn_protocol.ACTION_VPN_APK))
 
 
 def grant_extra_button(node: str | None, suffix: str = "") -> InlineKeyboardButton:

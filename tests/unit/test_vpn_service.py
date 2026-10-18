@@ -647,9 +647,9 @@ async def test_get_state_advertises_access_control(env):
 
 async def test_node_probe_needs_no_access_grant(env):
     svc, backend, _events = env
-    from sa_home_bot.vpn.service import NODE_SENTINEL_CHAT_ID
+    from sa_home_bot.vpn.service import PROBE_CHAT_ID
 
-    result = await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": NODE_SENTINEL_CHAT_ID})
+    result = await svc.run_command(vpn_protocol.ACTION_ISSUE, {"chat_id": PROBE_CHAT_ID})
     assert result["config_text"]
     await svc.reconcile()
     assert len(backend.peers) == 1

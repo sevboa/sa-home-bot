@@ -7,6 +7,7 @@ from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.bot.tools.core import ToolContext, ToolSpec
 from sa_home_bot.config import reminder_reason
 from sa_home_bot.llm.prompt import wrap_system_directive
+from sa_home_bot.node.events import EVENT_RESTART_APPLIED, EVENT_UPDATE_FINISHED
 from sa_home_bot.proto.addresses import (
     LLM_NODE,
     LLM_SERVICE,
@@ -16,9 +17,6 @@ from sa_home_bot.proto.errors import ServiceUnavailableError
 from sa_home_bot.proto.messages import ProtoError
 from sa_home_bot.tasks import protocol as task_protocol
 from sa_home_bot.utils.clock import utc_now
-
-EVENT_UPDATE_FINISHED = "update_finished"
-EVENT_RESTART_APPLIED = "restart_applied"
 
 RESTART_EVENT_FALLBACK_S = 300.0
 
@@ -65,9 +63,8 @@ async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
         event_node = str(after_event.get("node") or "").strip()
         event_type = str(after_event.get("event") or "").strip()
         if not event_node or event_type not in _AFTER_EVENT_TYPES:
-            return (
-                "ошибка: after_event.node обязателен, after_event.event — одно из "
-                + ", ".join(_AFTER_EVENT_TYPES)
+            return "ошибка: after_event.node обязателен, after_event.event — одно из " + ", ".join(
+                _AFTER_EVENT_TYPES
             )
         if ctx.woken_by == (event_node, event_type):
             return (
@@ -104,7 +101,7 @@ async def tool_remind(ctx: ToolContext, args: dict[str, Any]) -> str:
             "check_update) — событие могло не прийти вовсе, тогда честно скажи, "
             "что не подтвердилось, не выдавай желаемое за случившееся. Просто "
             "вызови нужный тул — время сейчас проверять не нужно. НЕ зови "
-            f"remind(after_event={{\"node\": \"{event_node}\", \"event\": "
+            f'remind(after_event={{"node": "{event_node}", "event": '
             f'"{event_type}"}}) снова — это то самое событие, по которому тебя '
             "только что разбудили, ставить его ожидание заново — зациклиться."
         )
@@ -247,6 +244,4 @@ _DECL_REMIND: dict[str, Any] = {
 }
 
 
-REMIND = ToolSpec(
-    name="remind", handler=tool_remind, declaration=_DECL_REMIND, telegram_only=True
-)
+REMIND = ToolSpec(name="remind", handler=tool_remind, declaration=_DECL_REMIND, telegram_only=True)

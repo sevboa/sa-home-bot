@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from sa_home_bot.node import app as node_app
-from sa_home_bot.node.service import EVENT_RESTART_APPLIED
+from sa_home_bot.node.events import EVENT_RESTART_APPLIED
 from sa_home_bot.node.state import NodeState
 
 

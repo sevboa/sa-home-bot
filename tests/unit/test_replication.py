@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+from sa_home_bot.node.events import EVENT_INSTANCE_CONFIG_CHANGED
 from sa_home_bot.node.instances import InstanceMeta, InstanceStore, content_hash
 from sa_home_bot.node.peers import NodeRouter
 from sa_home_bot.node.replication import (
     ACTION_GET_INSTANCE_CONFIG,
-    EVENT_INSTANCE_CONFIG_CHANGED,
     ConfigReplicator,
 )
 from sa_home_bot.node.service import NodeService
@@ -16,8 +16,15 @@ NEWER = b'[telegram]\ntoken = "222:bbb"\n'
 
 
 class FakePeer:
-    def __init__(self, node_id: str, *, state: dict | None = None, package: bytes | None = None,
-                 meta: InstanceMeta | None = None, alive: bool = True):
+    def __init__(
+        self,
+        node_id: str,
+        *,
+        state: dict | None = None,
+        package: bytes | None = None,
+        meta: InstanceMeta | None = None,
+        alive: bool = True,
+    ):
         self.name = node_id
         self.endpoint = f"tcp://{node_id}:8710"
         self.alive = alive
@@ -148,9 +155,7 @@ async def test_older_announced_revision_is_not_pulled(tmp_path):
 
 async def test_catch_up_pulls_newer_revision_from_a_peer(tmp_path):
     meta = _meta(7, NEWER, node="alfred")
-    peer = FakePeer(
-        "alfred", state={"instances": [meta.to_dict()]}, package=NEWER, meta=meta
-    )
+    peer = FakePeer("alfred", state={"instances": [meta.to_dict()]}, package=NEWER, meta=meta)
     rep, store, _, _ = _replicator(
         tmp_path, assignments=["telegram-bot@alfred:standby"], peers=[peer]
     )
@@ -166,9 +171,7 @@ async def test_catch_up_skips_a_sleeping_peer(tmp_path):
     peer = FakePeer(
         "winpc", state={"instances": [meta.to_dict()]}, package=NEWER, meta=meta, alive=False
     )
-    rep, _, _, _ = _replicator(
-        tmp_path, assignments=["telegram-bot@alfred:standby"], peers=[peer]
-    )
+    rep, _, _, _ = _replicator(tmp_path, assignments=["telegram-bot@alfred:standby"], peers=[peer])
     await rep.sync_from_peers()
     assert peer.requests == []
 
@@ -276,9 +279,7 @@ async def test_satellite_of_our_instance_is_pulled(tmp_path):
 
 
 async def test_local_guest_edit_does_not_restart_the_bot(tmp_path):
-    rep, store, supervisor, events = _replicator(
-        tmp_path, assignments=["telegram-bot@alfred"]
-    )
+    rep, store, supervisor, events = _replicator(tmp_path, assignments=["telegram-bot@alfred"])
     path = store.package_path("telegram-bot", "alfred.guests")
     path.parent.mkdir(parents=True)
     path.write_bytes(GUESTS)
@@ -306,9 +307,7 @@ async def test_incoming_guest_package_restarts_the_owner_slot(tmp_path):
         origin_node="jeeves2",
     )
     peer = FakePeer("jeeves2", package=GUESTS, meta=meta)
-    rep, _, supervisor, _ = _replicator(
-        tmp_path, assignments=["telegram-bot@alfred"], peers=[peer]
-    )
+    rep, _, supervisor, _ = _replicator(tmp_path, assignments=["telegram-bot@alfred"], peers=[peer])
     slot = supervisor.services["telegram-bot@alfred"]
     restarted: list[bool] = []
 

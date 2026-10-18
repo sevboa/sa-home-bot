@@ -34,6 +34,12 @@ from sa_home_bot.llm.prompt import (
 )
 from sa_home_bot.llm.speech_therapy import SpeechTherapist
 from sa_home_bot.llm.ttl_store import TtlStore
+from sa_home_bot.node.events import (
+    EVENT_LLM_IDLE_SLEEP,
+    EVENT_LLM_SERVICE_RESTART,
+    EVENT_LLM_SPEECH_CURED,
+    EVENT_LLM_WENT_IDLE,
+)
 from sa_home_bot.proto.addresses import LLM_SERVICE
 from sa_home_bot.proto.chunks import CHUNK_BYTES
 from sa_home_bot.proto.messages import (
@@ -78,6 +84,7 @@ def _log_ollama_timings(what: str, result: dict[str, Any]) -> None:
         result.get("done_reason", "?"),
     )
 
+
 def _usage_stats(cfg: LlmConfig, result: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key in ("prompt_eval_count", "eval_count", "done_reason"):
@@ -121,11 +128,6 @@ PHOTO_PROCESS_FAILED_TEXT = (
     "Не получилось обработать фото — возможно, файл повреждён. Пришлите его ещё раз, сэр."
 )
 PHOTO_NOT_FOUND_TEXT = "Не нахожу это фото — похоже, сохранённая копия уже устарела."
-
-EVENT_IDLE_SLEEP = "llm_idle_sleep"
-EVENT_SERVICE_RESTART = "llm_service_restart"
-EVENT_WENT_IDLE = "llm_went_idle"
-EVENT_SPEECH_CURED = "llm_speech_cured"
 
 _IDLE_CHECK_INTERVAL_S = 60.0
 _STREAMING_ENTRY_TTL_S = 120.0
@@ -173,8 +175,10 @@ def _imagegen_options(args: dict[str, Any]) -> dict[str, Any]:
             ERR_BAD_REQUEST, f"неизвестная модель {model!r}, есть: {', '.join(imagegen.MODELS)}"
         )
     if (
-        model is not None and imagegen.MODELS[model].kind != "sd15"
-        and ref is not None and mode == "scene"
+        model is not None
+        and imagegen.MODELS[model].kind != "sd15"
+        and ref is not None
+        and mode == "scene"
     ):
         raise ProtoError(
             ERR_BAD_REQUEST, f"у {model} нет IP-Adapter — сцена с образцом только на SD1.5"
@@ -274,6 +278,7 @@ def _paste_option(raw: Any, ref: Image.Image | None) -> dict[str, Any] | None:
         "hint": " ".join(hint.split())[:200] if isinstance(hint, str) else "",
     }
 
+
 class LlmService:
     def __init__(
         self,
@@ -295,8 +300,7 @@ class LlmService:
         if "num_ctx" not in self._cfg.model_fields_set:
             self._cfg.num_ctx = self._profile.num_ctx
         (log.warning if not matched else log.info)(
-            "llm: model %s → профиль %s (control=%s, router=%s, num_ctx=%s, "
-            "thinking_hidden=%s)%s",
+            "llm: model %s → профиль %s (control=%s, router=%s, num_ctx=%s, thinking_hidden=%s)%s",
             self._cfg.model,
             self._profile.name,
             self._profile.think_control,
@@ -325,9 +329,7 @@ class LlmService:
         return ServiceDescription(
             info=ServiceInfo(node=self._node, service=SERVICE_NAME, version=__version__),
             capabilities=(self._cfg.model,),
-            model_profile=replace(
-                self._profile.summary(), num_ctx=self._cfg.num_ctx
-            ).to_payload(),
+            model_profile=replace(self._profile.summary(), num_ctx=self._cfg.num_ctx).to_payload(),
             actions=(
                 ActionSpec(
                     id=ACTION_ASK,
@@ -587,9 +589,7 @@ class LlmService:
                             required=True,
                             title="Архетип и черты по-английски, веса compel «(…)1.3»",
                         ),
-                        ActionParam(
-                            name="key", type="string", required=True, title="Ключ вырезки"
-                        ),
+                        ActionParam(name="key", type="string", required=True, title="Ключ вырезки"),
                         ActionParam(name="seed", type="int", required=False, title="Зерно"),
                         ActionParam(
                             name="attempts",
@@ -653,9 +653,7 @@ class LlmService:
                     title="Включить/выключить картавость для гостя (Этап 47)",
                     params=(
                         ActionParam(name="user_id", type="int", required=True, title="Гость"),
-                        ActionParam(
-                            name="clear", type="bool", required=True, title="Чистая речь"
-                        ),
+                        ActionParam(name="clear", type="bool", required=True, title="Чистая речь"),
                     ),
                 ),
             ),
@@ -717,9 +715,7 @@ class LlmService:
             result = await ollama.generate(self._cfg, prompt, self._persona_prompt)
             _log_ollama_timings("ask", result)
             cleaned = strip_math_notation(result.get("response", ""))
-            response, remark, just_cured = self._speech.process(
-                cleaned, chat_id, speaker
-            )
+            response, remark, just_cured = self._speech.process(cleaned, chat_id, speaker)
             if just_cured:
                 await self._emit_speech_cured()
             out: dict[str, Any] = {"response": response, "model": self._cfg.model}
@@ -764,9 +760,7 @@ class LlmService:
             await self._touch(chat_id)
             speaker = self._speech_target(args)
             request_id = args.get("request_id")
-            if request_id is not None and (
-                not isinstance(request_id, str) or not request_id
-            ):
+            if request_id is not None and (not isinstance(request_id, str) or not request_id):
                 raise ProtoError(ERR_BAD_REQUEST, "request_id должен быть непустой строкой")
             if request_id:
                 result = await self._chat_streamed(
@@ -784,9 +778,7 @@ class LlmService:
                     **_usage_stats(self._cfg, result),
                 }
             cleaned = strip_math_notation(message.get("content", ""))
-            reply, remark, just_cured = self._speech.process(
-                cleaned, chat_id, speaker
-            )
+            reply, remark, just_cured = self._speech.process(cleaned, chat_id, speaker)
             if just_cured:
                 await self._emit_speech_cured()
             out: dict[str, Any] = {
@@ -830,9 +822,7 @@ class LlmService:
             _log_ollama_timings("look_at_photo", result)
             message = result.get("message", {})
             cleaned = strip_math_notation(message.get("content", ""))
-            reply, remark, just_cured = self._speech.process(
-                cleaned, chat_id, speaker
-            )
+            reply, remark, just_cured = self._speech.process(cleaned, chat_id, speaker)
             if just_cured:
                 await self._emit_speech_cured()
             out = {"response": reply, "model": self._cfg.model}
@@ -877,9 +867,7 @@ class LlmService:
             elif isinstance(session_id, str) and session_id:
                 buf = self._stt_uploads.pop(session_id)
                 if buf is None:
-                    raise ProtoError(
-                        ERR_BAD_REQUEST, f"неизвестная сессия загрузки: {session_id}"
-                    )
+                    raise ProtoError(ERR_BAD_REQUEST, f"неизвестная сессия загрузки: {session_id}")
                 raw_bytes = bytes(buf)
                 expected_size = args.get("expected_size")
                 if isinstance(expected_size, int) and expected_size != len(raw_bytes):
@@ -987,9 +975,7 @@ class LlmService:
         where = where or item_paste.PLACEMENTS[paste["place"]]
         if paste["width"] is not None:
             where = replace(where, width=paste["width"] * scene["original"].width)
-        pasted, mask, box = await asyncio.to_thread(
-            item_paste.paste, scene["original"], cut, where
-        )
+        pasted, mask, box = await asyncio.to_thread(item_paste.paste, scene["original"], cut, where)
         prompt = scene["prompt"]
         if paste["hint"]:
             prompt = f"{prompt}, {paste['hint']}"
@@ -1012,9 +998,7 @@ class LlmService:
         except Exception:
             log.warning("imagegen: вставка предмета не удалась", exc_info=True)
             raise ProtoError(ERR_INTERNAL, "не удалось нарисовать картинку") from None
-        final = await asyncio.to_thread(
-            item_paste.restore, harmonized["original"], pasted, mask
-        )
+        final = await asyncio.to_thread(item_paste.restore, harmonized["original"], pasted, mask)
         png, width, height = imagegen.shrink_to_png(
             final,
             options["size"] or self._cfg.imagegen_size,
@@ -1022,7 +1006,10 @@ class LlmService:
         )
         log.info(
             "imagegen: предмет %s (%s) вставлен в %s за %.1fс",
-            paste["key"], paste["place"], box, harmonized["seconds"],
+            paste["key"],
+            paste["place"],
+            box,
+            harmonized["seconds"],
         )
         return {
             **scene,
@@ -1033,9 +1020,7 @@ class LlmService:
             "seconds": scene["seconds"] + harmonized["seconds"],
         }, box
 
-    async def _desk_placement(
-        self, scene: Image.Image, place: str
-    ) -> item_paste.Placement | None:
+    async def _desk_placement(self, scene: Image.Image, place: str) -> item_paste.Placement | None:
         try:
             image_b64 = await asyncio.to_thread(vision.jpeg_b64, scene)
             result = await ollama.chat(
@@ -1089,9 +1074,7 @@ class LlmService:
                 )
                 prompt_seconds = time.monotonic() - started
                 negative = negative or agent_negative
-                log.info(
-                    "imagegen: промптер за %.1fс: %r -> %r", prompt_seconds, request, prompt
-                )
+                log.info("imagegen: промптер за %.1fс: %r -> %r", prompt_seconds, request, prompt)
             else:
                 prompt = source
         if not options["raw"]:
@@ -1215,9 +1198,7 @@ class LlmService:
 
             def preview(image: Image.Image, verdict: dict[str, Any] = verdict) -> bool:
                 future = asyncio.run_coroutine_threadsafe(
-                    photo_check.inspect(
-                        vision.jpeg_b64(image), checks, self._cfg, think=think
-                    ),
+                    photo_check.inspect(vision.jpeg_b64(image), checks, self._cfg, think=think),
                     loop,
                 )
                 try:
@@ -1258,8 +1239,12 @@ class LlmService:
                 best = (result, inspection)
             if misses == 0:
                 break
-            log.info("imagegen: портрет %s, зерно %s: нет %s", key, result["seed"],
-                     inspection["missing"] if inspection else [])
+            log.info(
+                "imagegen: портрет %s, зерно %s: нет %s",
+                key,
+                result["seed"],
+                inspection["missing"] if inspection else [],
+            )
         assert best is not None
         result, inspection = best
         restyle = _restyle_option(args.get("restyle"))
@@ -1307,9 +1292,7 @@ class LlmService:
             "answers": inspection.get("answers", {}) if inspection else {},
         }
 
-    async def _inspect_snapshot(
-        self, args: dict[str, Any], original: Any
-    ) -> dict[str, Any] | None:
+    async def _inspect_snapshot(self, args: dict[str, Any], original: Any) -> dict[str, Any] | None:
         keep_key = args.get("keep_key")
         if original is None or not isinstance(keep_key, str) or not keep_key or "/" in keep_key:
             return None
@@ -1357,9 +1340,7 @@ class LlmService:
         finally:
             self._finish_streaming(request_id)
 
-    async def _director_chat(
-        self, messages: list[Any], args: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def _director_chat(self, messages: list[Any], args: dict[str, Any]) -> dict[str, Any]:
         system = args.get("system")
         if not isinstance(system, str) or not system:
             raise ProtoError(ERR_BAD_REQUEST, "для role=director нужен непустой system")
@@ -1378,9 +1359,7 @@ class LlmService:
             "model": self._cfg.model,
         }
 
-    async def _summarizer_chat(
-        self, messages: list[Any], args: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def _summarizer_chat(self, messages: list[Any], args: dict[str, Any]) -> dict[str, Any]:
         system = args.get("system")
         if not isinstance(system, str) or not system:
             raise ProtoError(ERR_BAD_REQUEST, "для role=summarizer нужен непустой system")
@@ -1402,9 +1381,9 @@ class LlmService:
 
     async def _emit_speech_cured(self) -> None:
         try:
-            await self._emit(EVENT_SPEECH_CURED, {})
+            await self._emit(EVENT_LLM_SPEECH_CURED, {})
         except Exception:
-            log.exception("llm: не удалось эмитить %s", EVENT_SPEECH_CURED)
+            log.exception("llm: не удалось эмитить %s", EVENT_LLM_SPEECH_CURED)
 
     async def _sleep_now(self, *, quiet: bool = False) -> None:
         await ollama.stop(self._cfg)
@@ -1419,18 +1398,18 @@ class LlmService:
             chat_ids = sorted(self._active_chat_ids)
             self._active_chat_ids.clear()
             try:
-                await self._emit(EVENT_IDLE_SLEEP, {"chat_ids": chat_ids})
+                await self._emit(EVENT_LLM_IDLE_SLEEP, {"chat_ids": chat_ids})
             except Exception:
-                log.exception("llm: не удалось эмитить %s", EVENT_IDLE_SLEEP)
+                log.exception("llm: не удалось эмитить %s", EVENT_LLM_IDLE_SLEEP)
 
     async def notify_restart(self) -> None:
         if not self._active_chat_ids:
             return
         chat_ids = sorted(self._active_chat_ids)
         try:
-            await self._emit(EVENT_SERVICE_RESTART, {"chat_ids": chat_ids})
+            await self._emit(EVENT_LLM_SERVICE_RESTART, {"chat_ids": chat_ids})
         except Exception:
-            log.exception("llm: не удалось эмитить %s", EVENT_SERVICE_RESTART)
+            log.exception("llm: не удалось эмитить %s", EVENT_LLM_SERVICE_RESTART)
 
     async def _maybe_sleep_idle(self) -> None:
         if self._asleep:
@@ -1439,9 +1418,9 @@ class LlmService:
         if idle_for >= self._cfg.idle_sleep_after_s:
             await self._sleep_now()
             try:
-                await self._emit(EVENT_WENT_IDLE, {})
+                await self._emit(EVENT_LLM_WENT_IDLE, {})
             except Exception:
-                log.exception("llm: не удалось эмитить %s", EVENT_WENT_IDLE)
+                log.exception("llm: не удалось эмитить %s", EVENT_LLM_WENT_IDLE)
 
     async def idle_loop(self) -> None:
         while True:

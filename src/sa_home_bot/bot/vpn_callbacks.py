@@ -5,10 +5,6 @@ from sa_home_bot.vpn import protocol as vpn_protocol
 
 SERVICE = vpn_protocol.SERVICE_NAME
 
-ACTION_VPN_CARD = "vpn_card"
-ACTION_APK = "apk"
-ACTION_USAGE_ALL = "usage_all"
-
 EXPERT_PREFIX = "~"
 TRANSPORT_PICK_PREFIX = "t_"
 SECRET_TOKEN_PREFIX = "f_"
@@ -33,11 +29,9 @@ KIND_REISSUE_AWG = "a"
 KIND_FIX = "f"
 KIND_DELETE = "d"
 
-PROBE_CHAT_ID = 0
-
 
 def is_probe(chat_id: int) -> bool:
-    return chat_id == PROBE_CHAT_ID
+    return chat_id == vpn_protocol.PROBE_CHAT_ID
 
 
 def vpn_callback(action: str, value: str | None = None, node: str | None = None) -> str:
@@ -45,7 +39,7 @@ def vpn_callback(action: str, value: str | None = None, node: str | None = None)
 
 
 def card_cb(screen: str = "", key: str = "") -> str:
-    return vpn_callback(ACTION_VPN_CARD, f"{screen}{key}")
+    return vpn_callback(vpn_protocol.ACTION_VPN_CARD, f"{screen}{key}")
 
 
 def home_cb() -> str:

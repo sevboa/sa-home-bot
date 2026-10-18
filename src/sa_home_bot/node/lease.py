@@ -6,6 +6,7 @@ import logging
 import time
 
 from sa_home_bot.node.assignments import ROLE_ACTIVE, Assignment
+from sa_home_bot.node.events import EVENT_SINGLETON_ACTIVATED, EVENT_SINGLETON_YIELDED
 from sa_home_bot.node.kind import traits_for
 from sa_home_bot.node.peers import NodeRouter
 from sa_home_bot.node.supervisor import RUNNING, EventEmitter, Supervisor
@@ -25,9 +26,6 @@ STARTUP_SETTLE_S = 15.0
 SUPERIOR_READY_TIMEOUT_S = 45.0
 
 STUCK_WARN_S = 600.0
-
-EVENT_SINGLETON_ACTIVATED = "singleton_activated"
-EVENT_SINGLETON_YIELDED = "singleton_yielded"
 
 
 _ROLE_RANK = {ROLE_ACTIVE: 1}
@@ -84,7 +82,6 @@ class LeaseManager:
         self._stuck_warned: set[str] = set()
         self._task: asyncio.Task | None = None
 
-
     def _slots(self) -> list:
         return [
             svc
@@ -108,7 +105,6 @@ class LeaseManager:
 
     def set_ready(self, slot_name: str, ready: bool) -> None:
         self._ready[slot_name] = ready
-
 
     async def _peer_singletons(self) -> dict[str, list[dict]]:
         by_slot: dict[str, list[dict]] = {}
@@ -140,7 +136,6 @@ class LeaseManager:
         raw = record.get("rank") or [0, 0, record.get("node", "")]
         return (int(raw[0]), int(raw[1]), str(raw[2]))
 
-
     async def tick(self) -> None:
         slots = self._slots()
         if not slots:
@@ -169,9 +164,7 @@ class LeaseManager:
                         slot.name,
                     )
                     return
-                log.info(
-                    "Аренда %s: старшая нода вернулась — уступаю", slot.name
-                )
+                log.info("Аренда %s: старшая нода вернулась — уступаю", slot.name)
                 await slot.stop()
                 await self._emit(
                     EVENT_SINGLETON_YIELDED,
@@ -190,8 +183,11 @@ class LeaseManager:
                 "Аренда %s: слот не работает уже %.0fс без перезапуска "
                 "(superior_holds=%s, claiming=%s, ready=%s) — проверьте "
                 "сеть/состояние процесса на нодах, держащих эту службу",
-                slot.name, now - since_stuck, superior_holds,
-                slot.name in self._claiming, self._ready.get(slot.name, False),
+                slot.name,
+                now - since_stuck,
+                superior_holds,
+                slot.name in self._claiming,
+                self._ready.get(slot.name, False),
             )
 
         if superior_holds:
@@ -200,15 +196,14 @@ class LeaseManager:
             since = self._yielded_since.get(slot.name)
             if since is not None and now - since >= self._ready_timeout_s:
                 superior_ready = any(
-                    p.get("ready")
-                    for p in superiors
-                    if p.get("running") or p.get("claiming")
+                    p.get("ready") for p in superiors if p.get("running") or p.get("claiming")
                 )
                 if not superior_ready:
                     log.warning(
                         "Аренда %s: старшая нода не подтвердила готовность за "
                         "%.0f с — забираю слот обратно",
-                        slot.name, self._ready_timeout_s,
+                        slot.name,
+                        self._ready_timeout_s,
                     )
                     self._yielded_since.pop(slot.name, None)
                     await slot.start()
@@ -229,7 +224,8 @@ class LeaseManager:
             if slot.name not in self._claiming:
                 log.info(
                     "Аренда %s: службу держит %s, объявляю притязание",
-                    slot.name, running_inferior[0].get("node"),
+                    slot.name,
+                    running_inferior[0].get("node"),
                 )
             self._claiming.add(slot.name)
             self._silent_since.pop(slot.name, None)
@@ -247,10 +243,7 @@ class LeaseManager:
         self._claiming.discard(slot.name)
         self._silent_since.pop(slot.name, None)
         await slot.start()
-        await self._emit(
-            EVENT_SINGLETON_ACTIVATED, {"slot": slot.name, "node": self._node_id}
-        )
-
+        await self._emit(EVENT_SINGLETON_ACTIVATED, {"slot": slot.name, "node": self._node_id})
 
     def note_fenced(self, slot_name: str) -> None:
         self._fenced_until[slot_name] = time.monotonic() + self._holdoff_s
@@ -258,9 +251,9 @@ class LeaseManager:
         self._silent_since.pop(slot_name, None)
         log.warning(
             "Аренда %s: службу вытеснил другой экземпляр (409) — молчу %.0f с",
-            slot_name, self._holdoff_s,
+            slot_name,
+            self._holdoff_s,
         )
-
 
     async def _settle(self) -> None:
         if self._router is None or not self._router.peers:

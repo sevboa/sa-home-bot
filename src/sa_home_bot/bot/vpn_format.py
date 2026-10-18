@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, tzinfo
 
-GB = 1_000_000_000
+from sa_home_bot.vpn.protocol import GB
 
 _MONTHS_NOMINATIVE = (
     "январь февраль март апрель май июнь июль август сентябрь октябрь ноябрь декабрь"

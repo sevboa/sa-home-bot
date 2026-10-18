@@ -208,7 +208,7 @@ def awg_steps_keyboard(cfg: VpnConfig, qr_callback: str | None) -> InlineKeyboar
         [
             button(
                 "Магазин недоступен?",
-                vpn_callbacks.vpn_callback(vpn_callbacks.ACTION_APK, APK_NO_STORE),
+                vpn_callbacks.vpn_callback(vpn_protocol.ACTION_VPN_APK, APK_NO_STORE),
             )
         ]
     )
@@ -220,7 +220,7 @@ def no_store_keyboard() -> InlineKeyboardMarkup:
         [
             button(
                 "📦 Скачать AmneziaWG (.apk)",
-                vpn_callbacks.vpn_callback(vpn_callbacks.ACTION_APK, APK_SEND),
+                vpn_callbacks.vpn_callback(vpn_protocol.ACTION_VPN_APK, APK_SEND),
             )
         ]
     )

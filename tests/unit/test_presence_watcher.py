@@ -1,15 +1,11 @@
 from __future__ import annotations
 
 from sa_home_bot.node.app import SeenEvents, _relay_peer_event
+from sa_home_bot.node.events import EVENT_NODE_DOWN, EVENT_NODE_RETURNED, EVENT_NODE_UP
 from sa_home_bot.node.kind import KIND_VPS, KIND_WORKSTATION
 from sa_home_bot.node.peers import NodeRouter, PeerLink
 from sa_home_bot.node.state import NodeState
-from sa_home_bot.node.watch import (
-    EVENT_NODE_DOWN,
-    EVENT_NODE_RETURNED,
-    EVENT_NODE_UP,
-    PresenceWatcher,
-)
+from sa_home_bot.node.watch import PresenceWatcher
 from sa_home_bot.proto.messages import Address, make_event
 
 
@@ -257,8 +253,6 @@ async def test_kind_of_an_unreachable_peer_is_remembered(tmp_path):
     link.alive = False
     link.node_kind = ""
     link._down_s = 600
-    watcher2, events = _watcher(
-        "alfred", link, state=reloaded, state_path=str(state_path)
-    )
+    watcher2, events = _watcher("alfred", link, state=reloaded, state_path=str(state_path))
     await watcher2.check_once()
     assert [e[0] for e in events] == [EVENT_NODE_DOWN]

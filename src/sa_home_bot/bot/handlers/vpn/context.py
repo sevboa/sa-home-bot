@@ -11,12 +11,12 @@ from sa_home_bot.bot.invites import Gatekeeper
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.ui.redraw import redraw
-from sa_home_bot.bot.vpn_format import GB
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings
 from sa_home_bot.proto.messages import Address, ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
+from sa_home_bot.vpn.protocol import GB
 
 log = logging.getLogger(__name__)
 

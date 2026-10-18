@@ -4,6 +4,7 @@ import json
 from functools import partial
 
 from sa_home_bot.bot import tools
+from sa_home_bot.node import events
 from sa_home_bot.proto.errors import ServiceUnavailableError
 from sa_home_bot.proto.messages import Address, ProtoError
 from sa_home_bot.tasks import protocol as task_protocol
@@ -62,7 +63,7 @@ async def test_node_manage_update_scheduled_auto_schedules_wake_and_warns(store)
     _action, create_args = create_calls[0]
     assert create_args["await_event"] == {
         "node": "winpc",
-        "event_type": tools.EVENT_UPDATE_FINISHED,
+        "event_type": events.EVENT_UPDATE_FINISHED,
     }
 
 
@@ -114,7 +115,7 @@ async def test_node_manage_update_scheduled_on_own_node_resolves_its_id(store):
     assert len(create_calls) == 1
     assert create_calls[0]["await_event"] == {
         "node": "alfred",
-        "event_type": tools.EVENT_UPDATE_FINISHED,
+        "event_type": events.EVENT_UPDATE_FINISHED,
     }
 
 
@@ -153,7 +154,7 @@ async def test_node_manage_restart_remote_node_targets_dst(store):
     assert len(create_calls) == 1
     assert create_calls[0]["await_event"] == {
         "node": "winpc",
-        "event_type": tools.EVENT_RESTART_APPLIED,
+        "event_type": events.EVENT_RESTART_APPLIED,
     }
     directive = create_calls[0]["args"]["messages"][-1]["content"]
     assert "следующая нода" not in directive

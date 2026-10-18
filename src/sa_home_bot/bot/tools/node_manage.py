@@ -13,8 +13,9 @@ from sa_home_bot.bot.tools.core import (
     call_service,
     text_arg,
 )
-from sa_home_bot.bot.tools.remind import EVENT_RESTART_APPLIED, EVENT_UPDATE_FINISHED, tool_remind
+from sa_home_bot.bot.tools.remind import tool_remind
 from sa_home_bot.bot.tools.swarm import own_state
+from sa_home_bot.node.events import EVENT_RESTART_APPLIED, EVENT_UPDATE_FINISHED
 from sa_home_bot.proto.addresses import (
     NODE_SERVICE,
 )
@@ -78,9 +79,7 @@ async def tool_node_manage(ctx: ToolContext, args: dict[str, Any]) -> str:
         return dst
 
     where = wanted_node or "своя нода"
-    result = await call_service(
-        ctx, action, {}, dst, unavailable_subject=f"{where} не ответил(а)"
-    )
+    result = await call_service(ctx, action, {}, dst, unavailable_subject=f"{where} не ответил(а)")
     if isinstance(result, str):
         return result
 

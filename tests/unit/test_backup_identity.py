@@ -46,7 +46,8 @@ def _settings(
         jc=jc,
         transports=["awg", "reality"] if reality else ["awg"],
         reality=RealityTransportConfig(server_public_key="PUBK", short_id="ab12")
-        if reality else None,
+        if reality
+        else None,
     )
     settings = Settings(
         vpn=vpn,
@@ -73,8 +74,11 @@ class AwgKey:
 def _publisher(settings, tmp_path, node="jeeves", awg=None, xray=XRAY):
     store = InstanceStore(tmp_path / node / "instances", node)
     pub = IdentityPublisher(
-        settings, store, node,
-        read_awg_private_key=awg or AwgKey(), read_xray=lambda: xray,
+        settings,
+        store,
+        node,
+        read_awg_private_key=awg or AwgKey(),
+        read_xray=lambda: xray,
     )
     return pub, store
 
@@ -84,7 +88,9 @@ def test_collect_has_all_static_parts(tmp_path):
     assert doc["awg"]["private_key"] == AWG_KEY
     assert doc["awg"]["obfuscation"]["jc"] == 5 and doc["awg"]["obfuscation"]["h4"] == 8
     assert doc["reality"] == {
-        "inbound_tag": "reality-in", "private_key": "REALPRIV", "short_ids": ["ab12"],
+        "inbound_tag": "reality-in",
+        "private_key": "REALPRIV",
+        "short_ids": ["ab12"],
     }
     assert doc["config"]["vpn"]["endpoint_host"] == "1.2.3.4"
     assert "reality" not in doc["config"]["vpn"]
@@ -140,8 +146,11 @@ async def test_revision_grows_when_identity_changes(tmp_path):
     await pub.publish_if_changed()
     store.refresh(IDENTITY_SERVICE, "jeeves")
     pub2 = IdentityPublisher(
-        _settings(tmp_path, jc=9), store, "jeeves",
-        read_awg_private_key=AwgKey(), read_xray=lambda: XRAY,
+        _settings(tmp_path, jc=9),
+        store,
+        "jeeves",
+        read_awg_private_key=AwgKey(),
+        read_xray=lambda: XRAY,
     )
     assert await pub2.publish_if_changed() is True
     assert store.refresh(IDENTITY_SERVICE, "jeeves").rev == 2
@@ -198,15 +207,20 @@ def _node(tmp_path, node, partner, peers=(), assignments=("vpn",), awg=None, **k
     hooks = replicator_hooks(settings, store, node, vpn_assigned=True)
     if "before_announce" in hooks:
         pub = IdentityPublisher(
-            settings, store, node,
-            read_awg_private_key=awg or AwgKey(), read_xray=lambda: XRAY,
+            settings,
+            store,
+            node,
+            read_awg_private_key=awg or AwgKey(),
+            read_xray=lambda: XRAY,
         )
         hooks["before_announce"] = pub.publish_if_changed
     rep = ConfigReplicator(
-        node, store,
+        node,
+        store,
         supervisor=Supervisor(list(assignments), None, emit=emit),
         router=NodeRouter(node, peers={p.name: p for p in peers}),
-        emit=emit, **hooks,
+        emit=emit,
+        **hooks,
     )
     return rep, store, events, settings
 
@@ -217,8 +231,10 @@ def _source_peer(rep, store, node="jeeves"):
 
     meta = InstanceMeta.from_dict(payload["meta"])
     return FakePeer(
-        node, state={"instances": rep.local_revisions()},
-        package=payload["content"].encode(), meta=meta,
+        node,
+        state={"instances": rep.local_revisions()},
+        package=payload["content"].encode(),
+        meta=meta,
     )
 
 
@@ -245,7 +261,7 @@ async def test_partner_stores_sealed_copy_passively(tmp_path):
 
 
 async def test_announced_event_triggers_pull_on_partner_only(tmp_path):
-    from sa_home_bot.node.replication import EVENT_INSTANCE_CONFIG_CHANGED
+    from sa_home_bot.node.events import EVENT_INSTANCE_CONFIG_CHANGED
     from sa_home_bot.proto.messages import Address, make_event
 
     src, src_store, events, _ = _node(tmp_path, "jeeves", "wooster")

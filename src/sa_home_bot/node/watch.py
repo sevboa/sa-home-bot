@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from sa_home_bot.node.events import EVENT_NODE_DOWN, EVENT_NODE_RETURNED, EVENT_NODE_UP
 from sa_home_bot.node.kind import traits_for
 from sa_home_bot.node.peers import NodeRouter
 from sa_home_bot.node.state import NodeState
@@ -12,11 +13,6 @@ from sa_home_bot.utils.lifespan import cancel_task
 log = logging.getLogger(__name__)
 
 POLL_INTERVAL_S = 30.0
-
-EVENT_NODE_DOWN = "node_down"
-EVENT_NODE_UP = "node_up"
-EVENT_NODE_LEAVING = "node_leaving"
-EVENT_NODE_RETURNED = "node_returned"
 
 
 class PresenceWatcher:

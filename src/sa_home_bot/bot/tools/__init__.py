@@ -70,8 +70,6 @@ from sa_home_bot.bot.tools.pictures import (
 )
 from sa_home_bot.bot.tools.registry import TOOLS, tools_for
 from sa_home_bot.bot.tools.remind import (
-    EVENT_RESTART_APPLIED,
-    EVENT_UPDATE_FINISHED,
     schedule_agent_dialogue,
     tool_remind,
 )
@@ -95,8 +93,6 @@ __all__ = [
     "DISMISS_OFF",
     "DISMISS_SLEEP",
     "DismissalBox",
-    "EVENT_RESTART_APPLIED",
-    "EVENT_UPDATE_FINISHED",
     "LLM_NODE",
     "LLM_SERVICE",
     "NEED_RECIPIENT_ID",

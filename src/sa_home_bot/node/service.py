@@ -11,6 +11,13 @@ from sa_home_bot import __version__, wol
 from sa_home_bot.node import assignments as assignments_mod
 from sa_home_bot.node import kind as node_kinds
 from sa_home_bot.node import update as node_update
+from sa_home_bot.node.events import (
+    ACTION_CLOSE_SSH_SESSIONS,
+    ACTION_SWARM_JOIN,
+    EVENT_IDLE_POWER_BLOCKED,
+    EVENT_NODE_JOINED,
+    EVENT_UPDATE_FINISHED,
+)
 from sa_home_bot.node.lease import LeaseManager
 from sa_home_bot.node.peers import LOCAL_HEARTBEAT_TIMEOUT_S, NodeRouter, PeerLink
 from sa_home_bot.node.replication import (
@@ -53,9 +60,7 @@ ACTION_RESTART = "restart"
 ACTION_ASSIGN = "assign"
 ACTION_UNASSIGN = "unassign"
 
-ACTION_SWARM_JOIN = "swarm_join"
 ACTION_JOIN = "join"
-EVENT_NODE_JOINED = "node_joined"
 
 ACTION_RESTART_NODE = "restart_node"
 
@@ -63,15 +68,10 @@ ACTION_POWEROFF = "poweroff"
 ACTION_REBOOT = "reboot"
 ACTION_SUSPEND = "suspend"
 
-ACTION_CLOSE_SSH_SESSIONS = "close_ssh_sessions"
 CLOSE_SSH_SESSIONS_TITLE = "🔌 Закрыть SSH+tmux и выключить"
-EVENT_IDLE_POWER_BLOCKED = "idle_power_blocked"
 
 ACTION_CHECK_UPDATE = "check_update"
 ACTION_UPDATE = "update"
-EVENT_UPDATE_FINISHED = "update_finished"
-
-EVENT_RESTART_APPLIED = "restart_applied"
 
 ACTION_SEND_WOL = "send_wol"
 
@@ -125,6 +125,7 @@ async def _default_power_runner(argv: list[str]) -> None:
             stderr.decode(errors="replace").strip(),
         )
 
+
 class NodeService:
     def __init__(
         self,
@@ -159,9 +160,7 @@ class NodeService:
         self._traits = node_kinds.traits_for(node_kind)
         self._runtime = Runtime()
         controllable = (
-            self._traits.power_controllable
-            if power_controllable is None
-            else power_controllable
+            self._traits.power_controllable if power_controllable is None else power_controllable
         )
         self._power = power_commands() if controllable else {}
         self._power_runner = power_runner or _default_power_runner
@@ -271,16 +270,9 @@ class NodeService:
                     if self._update_source is not None
                     else ()
                 ),
+                *(ActionSpec(id=action, title=_POWER_TITLES[action]) for action in self._power),
                 *(
-                    ActionSpec(id=action, title=_POWER_TITLES[action])
-                    for action in self._power
-                ),
-                *(
-                    (
-                        ActionSpec(
-                            id=ACTION_CLOSE_SSH_SESSIONS, title=CLOSE_SSH_SESSIONS_TITLE
-                        ),
-                    )
+                    (ActionSpec(id=ACTION_CLOSE_SSH_SESSIONS, title=CLOSE_SSH_SESSIONS_TITLE),)
                     if ACTION_POWEROFF in self._power
                     else ()
                 ),
@@ -289,9 +281,7 @@ class NodeService:
                         ActionSpec(
                             id=ACTION_LIST_INSTANCES,
                             title="📦 Пакеты настроек",
-                            params=(
-                                ActionParam(name="service", required=True, title="Служба"),
-                            ),
+                            params=(ActionParam(name="service", required=True, title="Служба"),),
                         ),
                         ActionSpec(
                             id=ACTION_GET_INSTANCE_CONFIG,
@@ -590,7 +580,7 @@ class NodeService:
         try:
             await client.connect()
             result = await client.command(
-                "swarm_join",
+                ACTION_SWARM_JOIN,
                 {
                     "node_id": self._node,
                     "endpoint": advertised[0] if advertised else self._own_endpoint,

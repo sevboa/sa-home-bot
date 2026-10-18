@@ -92,7 +92,6 @@ from sa_home_bot.vpn.protocol import (
     EVENT_VPN_SERVER_RESTORED,
     FLOWER_NAMES,
     GB,
-    NODE_SENTINEL_CHAT_ID,
     PROBE_CHAT_ID,
     PROXY_SECRET_SEED,
     SERVICE_NAME,
@@ -380,7 +379,6 @@ class VpnService:
             "access_control": True,
         }
 
-
     @staticmethod
     def _chat_id(args: dict[str, Any]) -> int:
         raw = args.get("chat_id")
@@ -412,7 +410,7 @@ class VpnService:
 
     async def _allowed_chats(self) -> set[int]:
         cur = await self._db.conn.execute("SELECT chat_id FROM vpn_chat_access WHERE allowed = 1")
-        return {row["chat_id"] for row in await cur.fetchall()} | {NODE_SENTINEL_CHAT_ID}
+        return {row["chat_id"] for row in await cur.fetchall()} | {PROBE_CHAT_ID}
 
     async def _quota_state(self, chat_id: int, month: str) -> dict[str, Any]:
         cur = await self._db.conn.execute(
@@ -463,7 +461,7 @@ class VpnService:
         return int(row["total"] or 0)
 
     async def _access(self, chat_id: int) -> tuple[bool, int | None]:
-        if chat_id == NODE_SENTINEL_CHAT_ID:
+        if chat_id == PROBE_CHAT_ID:
             return True, None
         cur = await self._db.conn.execute(
             "SELECT allowed, base_bytes FROM vpn_chat_access WHERE chat_id = ?", (chat_id,)
@@ -566,11 +564,7 @@ class VpnService:
             live_awg = (
                 set((await self._backend.transfer()).keys()) if self._has(TRANSPORT_AWG) else None
             )
-            live_r = (
-                await self._reality.list_clients()
-                if self._reality_enabled
-                else None
-            )
+            live_r = await self._reality.list_clients() if self._reality_enabled else None
             live_key = await self._server_public_key() if self._has(TRANSPORT_AWG) else None
         except Exception:
             log.warning("vpn: сверка пиров с сервером не удалась", exc_info=True)
@@ -590,7 +584,6 @@ class VpnService:
             elif live_r is not None and not withheld:
                 device["broken"] = row["address"] not in live_r
         return devices
-
 
     async def backfill_server(self) -> None:
         cur = await self._db.conn.execute(
@@ -617,7 +610,6 @@ class VpnService:
         orphans = [row["chat_id"] for row in await cur.fetchall()]
         if orphans:
             log.info("vpn: гости с историей, но без активных пиров — допуск не выдан: %s", orphans)
-
 
     async def reconcile(self) -> None:
         month = _month_key(utc_now())
@@ -657,7 +649,6 @@ class VpnService:
                 if email not in current_r:
                     await self._reality.add_client(client_uuid, email, self._reality_cfg.flow)
 
-
     async def _meta_get(self, key: str) -> str | None:
         cur = await self._db.conn.execute("SELECT value FROM vpn_meta WHERE key = ?", (key,))
         row = await cur.fetchone()
@@ -679,10 +670,7 @@ class VpnService:
                 fingerprints[TRANSPORT_AWG] = await self._server_public_key()
         except Exception:
             log.warning("vpn: сверка ключа awg-сервера после старта не удалась", exc_info=True)
-        if (
-            self._reality_enabled
-            and self._reality_cfg.server_public_key
-        ):
+        if self._reality_enabled and self._reality_cfg.server_public_key:
             fingerprints[TRANSPORT_REALITY] = self._reality_cfg.server_public_key
         affected: dict[tuple[int, str, str], None] = {}
         key_changed = False
@@ -713,7 +701,6 @@ class VpnService:
                 {"node": self._node, "location": self._cfg.location, "affected": items},
             )
         return items
-
 
     async def _active_labels(self, chat_id: int) -> set[str]:
         cur = await self._db.conn.execute(
@@ -966,7 +953,6 @@ class VpnService:
             "location": self._cfg.location,
         }
 
-
     async def _get_subscription(self, args: dict[str, Any]) -> dict[str, Any]:
         chat_id = self._chat_id(args)
         device_label = self._required_device_label(args)
@@ -1035,7 +1021,7 @@ class VpnService:
         cur = await self._db.conn.execute(
             "SELECT chat_id, device_label, public_key FROM vpn_peers "
             "WHERE status = 'active' AND COALESCE(transport, 'awg') = ? AND chat_id != ?",
-            (TRANSPORT_REALITY, NODE_SENTINEL_CHAT_ID),
+            (TRANSPORT_REALITY, PROBE_CHAT_ID),
         )
         for row in await cur.fetchall():
             if subs.token_matches(self._sub_secret, token, row["chat_id"], row["device_label"]):
@@ -1111,7 +1097,7 @@ class VpnService:
         label = str(args.get("device_label") or "")
         if (
             not chat_id
-            or chat_id == NODE_SENTINEL_CHAT_ID
+            or chat_id == PROBE_CHAT_ID
             or not label
             or not subs.token_matches(self._sub_secret, token, chat_id, label)
         ):
@@ -1265,7 +1251,6 @@ class VpnService:
             for row in await cur.fetchall()
         ]
         return {"peers": peers}
-
 
     async def _usage(self, args: dict[str, Any]) -> dict[str, Any]:
         month = _month_key(utc_now())
@@ -1506,15 +1491,14 @@ class VpnService:
         threshold = limit - self._cfg.warn_remaining_gb * GB
         if total < threshold:
             return
-        state = await self._quota_state(NODE_SENTINEL_CHAT_ID, month)
+        state = await self._quota_state(PROBE_CHAT_ID, month)
         if state["warned_limit_bytes"] == limit:
             return
-        await self._set_quota_state(NODE_SENTINEL_CHAT_ID, month, warned_limit_bytes=limit)
+        await self._set_quota_state(PROBE_CHAT_ID, month, warned_limit_bytes=limit)
         await self._emit(
             EVENT_VPN_NODE_QUOTA_WARNING,
             {"used_bytes": total, "limit_bytes": limit, **self._where()},
         )
-
 
     PROXY_PEER_IDS = {"mtg": -1, "socks": -2}
 
@@ -1615,7 +1599,6 @@ class VpnService:
             )
         await self._db.conn.commit()
 
-
     async def sample_once(self) -> None:
         now = utc_now()
         month = _month_key(now)
@@ -1693,7 +1676,6 @@ class VpnService:
                 await self.sample_once()
             except Exception:
                 log.exception("vpn: сбой сэмплера трафика")
-
 
     async def _dispatch_checks(self) -> dict[str, Any]:
         if self._node_link is None:
@@ -1947,7 +1929,6 @@ class VpnService:
             for (pair_server, transport), rows in sorted(by_pair.items())
         ]
 
-
     async def _apk_row(self) -> dict[str, Any] | None:
         cur = await self._db.conn.execute(
             "SELECT version, file_name, size, sha256, path, telegram_file_id, checked_at "
@@ -2064,7 +2045,6 @@ class VpnService:
         )
         await self._db.conn.commit()
         return {"ok": True}
-
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if self.backup is not None:

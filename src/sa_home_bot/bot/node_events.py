@@ -32,6 +32,22 @@ from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.bot.ui.keyboards import single_button
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import OUTBOX_KIND_DELIVER, OUTBOX_KIND_TASK, Store
+from sa_home_bot.node.events import (
+    ACTION_CLOSE_SSH_SESSIONS,
+    EVENT_IDLE_POWER_BLOCKED,
+    EVENT_LLM_IDLE_SLEEP,
+    EVENT_LLM_SERVICE_RESTART,
+    EVENT_LLM_SPEECH_CURED,
+    EVENT_NODE_DOWN,
+    EVENT_NODE_JOINED,
+    EVENT_NODE_LEAVING,
+    EVENT_NODE_RETURNED,
+    EVENT_NODE_UP,
+    EVENT_RESTART_APPLIED,
+    EVENT_SINGLETON_ACTIVATED,
+    EVENT_SINGLETON_YIELDED,
+    EVENT_UPDATE_FINISHED,
+)
 from sa_home_bot.proto.addresses import NODE_SERVICE, TASKS_ADDRESS
 from sa_home_bot.proto.errors import SERVICE_CALL_ERRORS
 from sa_home_bot.proto.messages import Envelope
@@ -42,20 +58,6 @@ from sa_home_bot.vpn import protocol as vpn_protocol
 
 log = logging.getLogger(__name__)
 
-EVENT_NODE_JOINED = "node_joined"
-EVENT_NODE_DOWN = "node_down"
-EVENT_NODE_UP = "node_up"
-EVENT_NODE_LEAVING = "node_leaving"
-EVENT_NODE_RETURNED = "node_returned"
-EVENT_UPDATE_FINISHED = "update_finished"
-EVENT_RESTART_APPLIED = "restart_applied"
-EVENT_SINGLETON_ACTIVATED = "singleton_activated"
-EVENT_SINGLETON_YIELDED = "singleton_yielded"
-EVENT_LLM_IDLE_SLEEP = "llm_idle_sleep"
-EVENT_LLM_SERVICE_RESTART = "llm_service_restart"
-EVENT_LLM_SPEECH_CURED = "llm_speech_cured"
-EVENT_IDLE_POWER_BLOCKED = "idle_power_blocked"
-ACTION_CLOSE_SSH_SESSIONS = "close_ssh_sessions"
 
 _NODE_STATE_EVENTS = (EVENT_NODE_DOWN, EVENT_NODE_UP, EVENT_NODE_LEAVING, EVENT_NODE_RETURNED)
 _SINGLETON_EVENTS = (EVENT_SINGLETON_ACTIVATED, EVENT_SINGLETON_YIELDED)
