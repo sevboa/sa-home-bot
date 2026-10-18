@@ -16,11 +16,11 @@ import signal
 import subprocess
 import sys
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
 
 from sa_home_bot.node import assignments as assignments_mod
 from sa_home_bot.node.assignments import Assignment
 from sa_home_bot.services import registry
+from sa_home_bot.utils.clock import utc_now
 
 log = logging.getLogger(__name__)
 
@@ -66,10 +66,6 @@ FENCED_EXIT_CODE = 11
 # погашен: она либо выходит сразу, либо спит перед перезапуском — дольше ждать
 # нечего (этап 29).
 SUPERVISE_EXIT_TIMEOUT_S = 5.0
-
-
-def _now_iso() -> str:
-    return datetime.now(tz=UTC).isoformat()
 
 
 class SupervisedService:
@@ -237,7 +233,7 @@ class SupervisedService:
                 self._proc = proc
                 self._status = RUNNING
                 self._spawned.set()
-                self.started_at = _now_iso()
+                self.started_at = utc_now().isoformat()
                 log.info("Служба %s запущена (pid=%s)", self.name, proc.pid)
                 if self._on_spawned is not None:
                     self._on_spawned(self.name)

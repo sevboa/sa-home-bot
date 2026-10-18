@@ -20,14 +20,13 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 
-from sa_home_bot.config import SwarmNodeConfig
 from sa_home_bot.node.kind import traits_for
 from sa_home_bot.node.peers import NodeRouter
 from sa_home_bot.node.state import NodeState
 from sa_home_bot.node.supervisor import EventEmitter
+from sa_home_bot.utils.lifespan import cancel_task
 
 log = logging.getLogger(__name__)
 
@@ -83,11 +82,8 @@ class PresenceWatcher:
         self._task = asyncio.create_task(self._run(), name="presence-watcher")
 
     async def stop(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
-            self._task = None
+        await cancel_task(self._task)
+        self._task = None
 
     def _is_announcer(self) -> bool:
         """Объявляю ли пропажи я. Наименьший id среди себя и живых соседей —
@@ -97,43 +93,23 @@ class PresenceWatcher:
         return all(self._node_id < name for name in alive)
 
     def _remember_kinds(self) -> None:
-        """Сохранить узнанные типы соседей в состоянии ноды."""
         if self._state is None or self._state_path is None:
             return
-        by_id = {p.id: p for p in self._state.peers}
         changed = False
         for link in self._router.peers.values():
-            if not link.node_kind:
-                continue
-            peer = by_id.get(link.name)
-            if peer is None:
-                self._state.peers.append(
-                    SwarmNodeConfig(
-                        id=link.name,
-                        endpoint=str(link.endpoint),
-                        # Все известные пути к соседу, а не только текущий:
-                        # запись, впервые созданная здесь, не должна терять
-                        # выученные адреса (этап 24).
-                        endpoints=[e for e in link.endpoints if e != str(link.endpoint)],
-                        kind=link.node_kind,
-                    )
-                )
-                changed = True
-            elif peer.kind != link.node_kind:
-                peer.kind = link.node_kind
+            if link.node_kind and self._state.record_peer_kind(
+                link.name, str(link.endpoint), link.endpoints, link.node_kind
+            ):
                 changed = True
         if changed:
             self._state.save(self._state_path)
 
     def _known_kind(self, peer_id: str) -> str:
-        """Тип соседа: из живого линка, иначе из сохранённого состояния."""
         link = self._router.peers.get(peer_id)
         if link is not None and link.node_kind:
             return link.node_kind
         if self._state is not None:
-            for peer in self._state.peers:
-                if peer.id == peer_id:
-                    return peer.kind
+            return self._state.peer_kind(peer_id)
         return ""
 
     async def check_once(self) -> None:
@@ -168,7 +144,7 @@ class PresenceWatcher:
                 continue
             if link.left:
                 continue  # предупредила об уходе — недоступность не авария
-            if not traits_for(self._known_kind(link.name)).alerts_when_unreachable:
+            if not traits_for(self._known_kind(link.name)).always_on:
                 continue  # машина, которая штатно бывает выключена — молчим
             # Помечаем пропавшей независимо от того, объявляем ли мы: иначе
             # после смены объявителя посыпались бы запоздалые дубли.

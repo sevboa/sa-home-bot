@@ -74,7 +74,6 @@ def test_refresh_all_finds_every_package(tmp_path):
     other.write_bytes(b'[telegram]\ntoken = "222:bbb"\n')
     changed = {m.instance for m in store.refresh_all()}
     assert changed == {"alfred", "work"}
-    assert set(store.instances_of("telegram-bot")) == {"alfred", "work"}
 
 
 def test_corrupt_sidecar_is_treated_as_missing(tmp_path):

@@ -2,26 +2,23 @@
 
 Тесты фиксируют то, что раньше жило в трёх местах: чем службу спавнить
 (ASSIGNMENT_ARGS), как её запустить руками (--service choices) и куда к ней
-стучаться (local_service_endpoints).
+стучаться (service_endpoints).
 """
 
 from __future__ import annotations
 
-import pytest
-
 from sa_home_bot.config import Settings
-from sa_home_bot.node.app import local_service_endpoints
-from sa_home_bot.node.supervisor import Supervisor
 from sa_home_bot.services import registry
 
 
 def test_known_services():
-    assert set(registry.known_names()) == {
+    assert set(registry.SERVICES) == {
         "monitor",
         "telegram-bot",
         "apps",
         "torrents",
-        "tasks", "memory",
+        "tasks",
+        "memory",
         "graph_memory",
         "net",
         "llm",
@@ -54,21 +51,8 @@ def test_llm_is_externally_managed_and_not_assignable():
     assert llm.endpoint_attr == "llm.socket"
 
 
-def test_supervisor_skips_externally_managed(caplog):
-    sup = Supervisor(["llm", "monitor"], None, emit=_noop_emit)
-    assert "llm" not in sup.services
-    assert "monitor" in sup.services
-
-
-def test_supervisor_rejects_unknown_assignment():
-    sup = Supervisor(["no-such-service"], None, emit=_noop_emit)
-    assert sup.services == {}
-    with pytest.raises(ValueError):
-        sup.assign("no-such-service")
-
-
 def test_service_endpoints_cover_services_with_own_server():
-    endpoints = local_service_endpoints(Settings())
+    endpoints = registry.service_endpoints(Settings())
     # Бот — клиент, своего proto-сервера у него нет: маршрутизировать нечего.
     assert "telegram-bot" not in endpoints
     assert set(endpoints) == {
@@ -80,14 +64,4 @@ def test_service_endpoints_cover_services_with_own_server():
 def test_telegram_bot_is_the_singleton_with_its_own_config_package():
     bot = registry.SERVICES["telegram-bot"]
     assert bot.singleton and bot.instanced
-    assert registry.singleton_names() == ("telegram-bot",)
-
-
-def test_monitor_no_longer_requires_hardware_sensors():
-    """Этап 38: monitor работает и на VDS (host-метрики из /proc), флаг снят."""
-    assert not registry.SERVICES["monitor"].needs_hardware_sensors
-    assert not registry.SERVICES["apps"].needs_hardware_sensors
-
-
-async def _noop_emit(event_type: str, data: dict) -> None:
-    return None
+    assert [name for name, svc in registry.SERVICES.items() if svc.singleton] == ["telegram-bot"]

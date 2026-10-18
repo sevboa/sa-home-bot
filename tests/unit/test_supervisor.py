@@ -6,6 +6,7 @@ import logging
 
 import pytest
 
+from sa_home_bot.node.assignments import ROLE_STANDBY
 from sa_home_bot.node.supervisor import (
     EVENT_SERVICE_FAILED,
     EVENT_SERVICE_STARTED,
@@ -208,6 +209,41 @@ async def test_supervisor_skips_externally_managed_llm_silently():
     sup = Supervisor(["monitor", "llm"], None, emit=events.emit)
     assert list(sup.services) == ["monitor"]
     assert sup.get("llm") is None
+
+
+def test_supervisor_keys_slots_by_service_and_instance():
+    sup = Supervisor(["telegram-bot@alfred", "telegram-bot@work"], None, emit=Events().emit)
+    assert set(sup.services) == {"telegram-bot@alfred", "telegram-bot@work"}
+
+
+def test_instanced_service_is_spawned_with_its_package():
+    sup = Supervisor(["telegram-bot@alfred"], "/etc/sa/config.toml", emit=Events().emit)
+    args = sup.services["telegram-bot@alfred"]._cli_args
+    assert args == ["--service", "bot", "--instance", "alfred",
+                    "--config", "/etc/sa/config.toml"]
+
+
+async def test_standby_is_not_started_by_node_startup():
+    """Резерв поднимает аренда лидерства, а не старт ноды — иначе два поллера
+    одного токена стартовали бы одновременно."""
+    sup = Supervisor(["telegram-bot@alfred:standby"], None, emit=Events().emit)
+    await sup.start_all()
+    slot = sup.services["telegram-bot@alfred"]
+    assert slot.status == "stopped"
+    assert slot.pid is None
+
+
+def test_malformed_assignment_is_skipped_not_fatal(caplog):
+    sup = Supervisor(["monitor", "@broken"], None, emit=Events().emit)
+    assert set(sup.services) == {"monitor"}
+
+
+def test_slot_dict_exposes_role_and_instance():
+    sup = Supervisor(["telegram-bot@alfred:standby"], None, emit=Events().emit)
+    data = sup.services["telegram-bot@alfred"].to_dict()
+    assert data["service"] == "telegram-bot"
+    assert data["instance"] == "alfred"
+    assert data["role"] == ROLE_STANDBY
 
 
 # --- assign/unassign: назначения в рантайме, без рестарта ноды ---

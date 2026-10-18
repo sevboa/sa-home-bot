@@ -23,50 +23,21 @@ from sa_home_bot.proto.endpoints import TcpEndpoint
 from sa_home_bot.proto.messages import (
     ERR_TIMEOUT,
     MSG_COMMAND,
-    ActionSpec,
     ProtoError,
     ServiceDescription,
-    ServiceInfo,
     make_request,
 )
 from sa_home_bot.proto.server import ProtoServer
+from tests.unit.netsupport import StubService
+from tests.unit.support.waiting import wait_for
+
+pytest_plugins = ["tests.unit.sock_fixture"]
 
 
-class FakePeerService:
-    """Служба «соседа». Тесты подменяют её `describe`, чтобы сосед перестал
-    отвечать, не рвя соединение (сокет жив, процесс завис — то, чего TCP не
-    видит в принципе)."""
-
-    def describe(self) -> ServiceDescription:
-        return ServiceDescription(
-            info=ServiceInfo(node="winpc", service="node", version="0.42.0"),
-            capabilities=(),
-            actions=(ActionSpec(id="noop", title="Ничего"),),
-        )
-
-    async def get_state(self) -> dict:
-        return {"node": "winpc"}
-
-    async def run_command(self, action: str, args: dict) -> dict:
-        return {"accepted": True}
-
-
-@pytest.fixture
 def sock_dir():
     path = Path(tempfile.mkdtemp())
     yield path
     shutil.rmtree(path, ignore_errors=True)
-
-
-async def _wait_for(predicate, timeout: float = 5.0) -> bool:
-    """Дождаться условия, не привязываясь к точным таймингам планировщика."""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while loop.time() < deadline:
-        if predicate():
-            return True
-        await asyncio.sleep(0.01)
-    return False
 
 
 @pytest.mark.asyncio
@@ -80,7 +51,7 @@ async def test_heartbeat_рвёт_линк_когда_сосед_переста�
     monkeypatch.setattr(peers_mod, "HEARTBEAT_TIMEOUT_S", 0.05)
     monkeypatch.setattr(peers_mod, "HEARTBEAT_MISSES", 2)
 
-    service = FakePeerService()
+    service = StubService("winpc")
     endpoint = f"unix://{sock_dir / 'peer.sock'}"
     server = ProtoServer(endpoint, service)
     await server.start()
@@ -88,7 +59,7 @@ async def test_heartbeat_рвёт_линк_когда_сосед_переста�
     link = PeerLink("winpc", endpoint, reconnect_delay=60.0)
     await link.start()
     try:
-        assert await _wait_for(lambda: link.alive), "линк не поднялся"
+        assert await wait_for(lambda: link.alive), "линк не поднялся"
 
         # hello обслуживается из describe() — вешаем именно его: соединение
         # при этом остаётся полностью исправным, отвечать перестаёт служба.
@@ -97,7 +68,7 @@ async def test_heartbeat_рвёт_линк_когда_сосед_переста�
 
         service.describe = hanging_describe  # type: ignore[method-assign]
 
-        assert await _wait_for(lambda: not link.alive), (
+        assert await wait_for(lambda: not link.alive), (
             "heartbeat не заметил, что сосед перестал отвечать"
         )
     finally:
@@ -108,7 +79,7 @@ async def test_heartbeat_рвёт_линк_когда_сосед_переста�
 @pytest.mark.asyncio
 async def test_reconnect_now_поднимает_связь_заново(sock_dir):
     """Принудительный сброс линка не убивает его насовсем — он переподключается."""
-    service = FakePeerService()
+    service = StubService("winpc")
     endpoint = f"unix://{sock_dir / 'peer.sock'}"
     server = ProtoServer(endpoint, service)
     await server.start()
@@ -116,10 +87,10 @@ async def test_reconnect_now_поднимает_связь_заново(sock_dir
     link = PeerLink("winpc", endpoint, reconnect_delay=0.05)
     await link.start()
     try:
-        assert await _wait_for(lambda: link.alive)
+        assert await wait_for(lambda: link.alive)
         link.reconnect_now("тест")
-        assert await _wait_for(lambda: not link.alive), "линк не сбросился"
-        assert await _wait_for(lambda: link.alive), "линк не переподключился"
+        assert await wait_for(lambda: not link.alive), "линк не сбросился"
+        assert await wait_for(lambda: link.alive), "линк не переподключился"
     finally:
         await link.stop()
         await server.stop()
@@ -131,7 +102,7 @@ async def test_перезапустившийся_сосед_роняет_ста
     колбэк и закрывает его прошлое соединение (иначе они копятся: на проде
     их было четыре, по одному на каждый ребут winpc)."""
     connected: list[str] = []
-    service = FakePeerService()
+    service = StubService("winpc")
     server = ProtoServer(
         TcpEndpoint("127.0.0.1", 0), service, token="s3cret", on_peer_connect=connected.append
     )
@@ -143,7 +114,7 @@ async def test_перезапустившийся_сосед_роняет_ста
             "winpc", f"tcp://{addr.host}:{addr.port}", token="s3cret", self_node="alfred"
         )
         await first.start()
-        assert await _wait_for(lambda: first.alive)
+        assert await wait_for(lambda: first.alive)
         # Первое соединение: сравнивать не с чем, дёргать нечего.
         assert connected == []
         assert server.connection_count == 1
@@ -154,8 +125,8 @@ async def test_перезапустившийся_сосед_роняет_ста
             "winpc", f"tcp://{addr.host}:{addr.port}", token="s3cret", self_node="alfred"
         )
         await second.start()
-        assert await _wait_for(lambda: connected == ["alfred"])
-        assert await _wait_for(lambda: server.connection_count == 1), (
+        assert await wait_for(lambda: connected == ["alfred"])
+        assert await wait_for(lambda: server.connection_count == 1), (
             f"старое соединение не закрыто: {server.connection_count}"
         )
     finally:
@@ -174,7 +145,7 @@ async def test_переподключение_без_перезапуска_не
     свой линк к alfred, и так каждые 10 с по кругу.
     """
     connected: list[str] = []
-    service = FakePeerService()
+    service = StubService("winpc")
     server = ProtoServer(
         TcpEndpoint("127.0.0.1", 0), service, token="s3cret", on_peer_connect=connected.append
     )
@@ -189,10 +160,10 @@ async def test_переподключение_без_перезапуска_не
     )
     await link.start()
     try:
-        assert await _wait_for(lambda: link.alive)
+        assert await wait_for(lambda: link.alive)
         for _ in range(3):
             link.reconnect_now("тест")
-            assert await _wait_for(lambda: link.alive)
+            assert await wait_for(lambda: link.alive)
         assert connected == [], f"колбэк сработал на переподключении: {connected}"
     finally:
         await link.stop()
@@ -204,7 +175,7 @@ async def test_клиент_без_self_node_не_ломает_auth():
     """Локальные службы и старые ноды не представляются — auth обязан
     работать как раньше, колбэк просто не зовётся."""
     connected: list[str] = []
-    service = FakePeerService()
+    service = StubService("winpc")
     server = ProtoServer(
         TcpEndpoint("127.0.0.1", 0), service, token="s3cret", on_peer_connect=connected.append
     )
@@ -243,7 +214,7 @@ async def test_сервер_ждёт_появления_своего_адрес�
 
     monkeypatch.setattr(server_mod.asyncio, "start_server", flaky_start_server)
 
-    server = ProtoServer(TcpEndpoint("127.0.0.1", 0), FakePeerService(), token="s3cret")
+    server = ProtoServer(TcpEndpoint("127.0.0.1", 0), StubService("winpc"), token="s3cret")
     await server.start()
     try:
         assert attempts["n"] == 3, "сервер не дождался появления адреса"
@@ -271,7 +242,7 @@ async def test_занятый_порт_не_ждём(monkeypatch):
 
     monkeypatch.setattr(server_mod.asyncio, "start_server", busy_start_server)
 
-    server = ProtoServer(TcpEndpoint("127.0.0.1", 9999), FakePeerService(), token="s3cret")
+    server = ProtoServer(TcpEndpoint("127.0.0.1", 9999), StubService("winpc"), token="s3cret")
     with pytest.raises(OSError) as exc:
         await server.start()
     assert exc.value.errno == errno_mod.EADDRINUSE
@@ -290,7 +261,7 @@ async def test_close_не_виснет_на_полумёртвом_сокете(
 
     monkeypatch.setattr(client_mod, "CLOSE_TIMEOUT_S", 0.05)
 
-    service = FakePeerService()
+    service = StubService("winpc")
     endpoint = f"unix://{sock_dir / 'peer.sock'}"
     server = ProtoServer(endpoint, service)
     await server.start()
@@ -321,7 +292,7 @@ async def test_одновременный_разрыв_и_heartbeat_не_уби�
     monkeypatch.setattr(peers_mod, "HEARTBEAT_TIMEOUT_S", 0.02)
     monkeypatch.setattr(peers_mod, "HEARTBEAT_MISSES", 1)
 
-    service = FakePeerService()
+    service = StubService("winpc")
     endpoint = f"unix://{sock_dir / 'peer.sock'}"
     server = ProtoServer(endpoint, service)
     await server.start()
@@ -329,13 +300,13 @@ async def test_одновременный_разрыв_и_heartbeat_не_уби�
     link = PeerLink("winpc", endpoint, reconnect_delay=0.05)
     await link.start()
     try:
-        assert await _wait_for(lambda: link.alive)
+        assert await wait_for(lambda: link.alive)
         # Оба пути разрыва одновременно, несколько раз подряд.
         for _ in range(5):
             link.reconnect_now("гонка")
             link.reconnect_now("гонка ещё раз")
             await asyncio.sleep(0.03)
-        assert await _wait_for(lambda: link.alive, timeout=10.0), (
+        assert await wait_for(lambda: link.alive, timeout=10.0), (
             "линк не переподключился после гонки разрывов"
         )
     finally:
@@ -346,7 +317,7 @@ async def test_одновременный_разрыв_и_heartbeat_не_уби�
 @pytest.mark.asyncio
 async def test_цикл_переподключения_переживает_любую_ошибку(sock_dir, monkeypatch, caplog):
     """Неожиданное исключение не должно убивать задачу линка молча."""
-    service = FakePeerService()
+    service = StubService("winpc")
     endpoint = f"unix://{sock_dir / 'peer.sock'}"
     server = ProtoServer(endpoint, service)
     await server.start()
@@ -365,7 +336,7 @@ async def test_цикл_переподключения_переживает_лю
     link = PeerLink("winpc", endpoint, reconnect_delay=0.05)
     await link.start()
     try:
-        assert await _wait_for(lambda: link.alive, timeout=10.0), (
+        assert await wait_for(lambda: link.alive, timeout=10.0), (
             "линк умер на непредвиденной ошибке вместо повторной попытки"
         )
     finally:
@@ -379,7 +350,7 @@ async def test_медленный_запрос_не_рвёт_линк(sock_dir):
     forward() ронял всё соединение, и следующий раунд chat по тому же линку
     получал «недоступно». Таймаут одного запроса — это медленная служба, а не
     мёртвый линк: запрос получает ошибку timeout, линк остаётся жив."""
-    service = FakePeerService()
+    service = StubService("winpc")
     release = asyncio.Event()
 
     async def slow_command(action: str, args: dict) -> dict:
@@ -394,7 +365,7 @@ async def test_медленный_запрос_не_рвёт_линк(sock_dir):
     link = PeerLink("winpc", endpoint, reconnect_delay=60.0)
     await link.start()
     try:
-        assert await _wait_for(lambda: link.alive)
+        assert await wait_for(lambda: link.alive)
         env = make_request(
             MSG_COMMAND, {"action": "noop", "args": {}}, src=None, dst=None, timeout_s=0.1
         )

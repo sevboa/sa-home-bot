@@ -48,13 +48,7 @@ class NodeTraits:
 
     always_on: bool
     wakeable: bool
-    hardware_sensors: bool
     lease_priority: int
-
-    @property
-    def alerts_when_unreachable(self) -> bool:
-        """Сообщать ли рою о длительной недоступности этой ноды."""
-        return self.always_on
 
     @property
     def power_controllable(self) -> bool:
@@ -70,23 +64,17 @@ class NodeTraits:
 
 TRAITS: dict[str, NodeTraits] = {
     # Домашний сервер: 24/7, реальное железо, первый кандидат на синглтоны.
-    KIND_SERVER: NodeTraits(
-        always_on=True, wakeable=False, hardware_sensors=True, lease_priority=100
-    ),
+    KIND_SERVER: NodeTraits(always_on=True, wakeable=False, lease_priority=100),
     # Виртуалка: 24/7, но датчиков железа нет; резерв синглтонов — её роль.
-    KIND_VPS: NodeTraits(
-        always_on=True, wakeable=False, hardware_sensors=False, lease_priority=50
-    ),
+    KIND_VPS: NodeTraits(always_on=True, wakeable=False, lease_priority=50),
     # Рабочая станция/ноутбук: спит и выключается — это норма, зато будится.
-    KIND_WORKSTATION: NodeTraits(
-        always_on=False, wakeable=True, hardware_sensors=True, lease_priority=10
-    ),
+    KIND_WORKSTATION: NodeTraits(always_on=False, wakeable=True, lease_priority=10),
 }
 
 # Тип неизвестной (например, более старой) ноды: считаем её обычным сервером —
 # самое безобидное допущение, кроме одного, поэтому alerts о ней не шлём
 # (см. traits_for: неизвестный тип отдаёт always_on=False).
-_UNKNOWN = NodeTraits(always_on=False, wakeable=False, hardware_sensors=True, lease_priority=0)
+_UNKNOWN = NodeTraits(always_on=False, wakeable=False, lease_priority=0)
 
 
 def traits_for(kind: str | None) -> NodeTraits:
@@ -96,7 +84,3 @@ def traits_for(kind: str | None) -> NodeTraits:
     if not kind:
         return _UNKNOWN
     return TRAITS.get(kind, _UNKNOWN)
-
-
-def known_kinds() -> tuple[str, ...]:
-    return (KIND_SERVER, KIND_WORKSTATION, KIND_VPS)

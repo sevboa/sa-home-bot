@@ -58,14 +58,6 @@ class Assignment:
     def standby(self) -> bool:
         return self.role == ROLE_STANDBY
 
-    def to_str(self) -> str:
-        text = self.key
-        if self.role != ROLE_ACTIVE:
-            text += f":{self.role}"
-        if self.priority is not None:
-            text += f":{_PRIO_PREFIX}{self.priority}"
-        return text
-
 
 def parse(text: str) -> Assignment:
     """Разобрать строку назначения. Пустая/битая — AssignmentError."""
@@ -92,18 +84,22 @@ def parse(text: str) -> Assignment:
     return Assignment(service=service, instance=instance, role=role, priority=priority)
 
 
-def has_service(items: list[str], service: str) -> bool:
-    """Назначена ли ноде служба — в любой роли и с любым инстансом."""
+def parse_valid(items: list[str]) -> list[Assignment]:
+    parsed = []
     for item in items:
         try:
-            if parse(item).service == service:
-                return True
+            parsed.append(parse(item))
         except AssignmentError:
             continue
-    return False
+    return parsed
 
 
-def parse_all(items: list[str]) -> list[Assignment]:
-    """Разобрать список назначений, пропуская непонятные (с исключением наверх
-    разбирается вызывающий — здесь только форма строки)."""
-    return [parse(item) for item in items]
+def has_service(items: list[str], service: str) -> bool:
+    return any(a.service == service for a in parse_valid(items))
+
+
+def key_or_raw(text: str) -> str:
+    try:
+        return parse(text).key
+    except AssignmentError:
+        return text

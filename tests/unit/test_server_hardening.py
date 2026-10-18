@@ -9,48 +9,21 @@
 import asyncio
 import socket
 
-from sa_home_bot.node.app import MAX_EVENT_HOPS, SeenEvents, _relay_peer_event
+from sa_home_bot.node.app import MAX_RELAY_HOPS, SeenEvents, _relay_peer_event
 from sa_home_bot.node.peers import NodeRouter, PeerLink
 from sa_home_bot.node.state import NodeState
 from sa_home_bot.proto import server as server_mod
 from sa_home_bot.proto.client import ProtoClient
 from sa_home_bot.proto.endpoints import TcpEndpoint
 from sa_home_bot.proto.messages import (
-    ActionSpec,
     Address,
-    ServiceDescription,
-    ServiceInfo,
     decode,
     encode,
     make_event,
 )
 from sa_home_bot.proto.server import ProtoServer
-
-
-class FakeService:
-    def describe(self) -> ServiceDescription:
-        return ServiceDescription(
-            info=ServiceInfo(node="alfred", service="node", version="0.43.0"),
-            capabilities=(),
-            actions=(ActionSpec(id="noop", title="Ничего"),),
-        )
-
-    async def get_state(self) -> dict:
-        return {}
-
-    async def run_command(self, action: str, args: dict) -> dict:
-        return {}
-
-
-async def _wait_for(predicate, timeout: float = 5.0) -> bool:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while loop.time() < deadline:
-        if predicate():
-            return True
-        await asyncio.sleep(0.01)
-    return False
-
+from tests.unit.netsupport import StubService
+from tests.unit.support.waiting import wait_for
 
 # --- hops: второй предохранитель от шторма ---
 
@@ -104,7 +77,7 @@ async def test_событие_с_превышением_hops_дропается(
 
     env = dataclasses.replace(
         make_event("update_finished", {}, src=Address(node="A", service="node")),
-        hops=MAX_EVENT_HOPS,
+        hops=MAX_RELAY_HOPS,
     )
     await _relay_peer_event(
         env,
@@ -125,7 +98,7 @@ async def test_broadcast_не_виснет_на_полумёртвом_клие�
     monkeypatch.setattr(server_mod, "SEND_TIMEOUT_S", 0.1)
 
     endpoint = f"unix://{tmp_path / 'node.sock'}"
-    server = ProtoServer(endpoint, FakeService())
+    server = ProtoServer(endpoint, StubService("alfred"))
     await server.start()
 
     healthy = ProtoClient(endpoint)
@@ -133,7 +106,7 @@ async def test_broadcast_не_виснет_на_полумёртвом_клие�
     await healthy.connect()
     await stuck.connect()
     try:
-        assert await _wait_for(lambda: server.connection_count == 2)
+        assert await wait_for(lambda: server.connection_count == 2)
         # Одно из соединений «залипает»: его send больше никогда не завершается.
         victim = next(iter(server._connections))
 
@@ -158,7 +131,7 @@ async def test_broadcast_не_виснет_на_полумёртвом_клие�
 async def test_молчащее_соединение_закрывается_по_auth_таймауту(monkeypatch):
     monkeypatch.setattr(server_mod, "AUTH_TIMEOUT_S", 0.1)
 
-    server = ProtoServer(TcpEndpoint("127.0.0.1", 0), FakeService(), token="s3cret")
+    server = ProtoServer(TcpEndpoint("127.0.0.1", 0), StubService("alfred"), token="s3cret")
     await server.start()
     addr = server.endpoint
     try:
@@ -172,13 +145,13 @@ async def test_молчащее_соединение_закрывается_по
 
 
 async def test_принятый_сокет_получает_keepalive():
-    server = ProtoServer(TcpEndpoint("127.0.0.1", 0), FakeService(), token="s3cret")
+    server = ProtoServer(TcpEndpoint("127.0.0.1", 0), StubService("alfred"), token="s3cret")
     await server.start()
     addr = server.endpoint
     client = ProtoClient(f"tcp://{addr.host}:{addr.port}", token="s3cret")
     try:
         await client.connect()
-        assert await _wait_for(lambda: server.connection_count == 1)
+        assert await wait_for(lambda: server.connection_count == 1)
         conn = next(iter(server._connections))
         raw = conn.writer.get_extra_info("socket")
         assert raw.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) == 1

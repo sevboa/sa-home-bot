@@ -9,14 +9,13 @@
 
 from __future__ import annotations
 
-import contextlib
-import os
-import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
 from sa_home_bot.config import SwarmNodeConfig
+from sa_home_bot.utils.files import load_model, save_model
 
 
 class NodeState(BaseModel):
@@ -34,21 +33,46 @@ class NodeState(BaseModel):
 
     @classmethod
     def load(cls, path: str | Path) -> NodeState:
-        p = Path(path)
-        if not p.exists():
-            return cls()
-        return cls.model_validate_json(p.read_bytes())
+        return load_model(cls, path)
 
     def save(self, path: str | Path) -> None:
-        """Атомарная запись: temp-файл в том же каталоге + `os.replace`."""
-        p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(dir=p.parent, prefix=f".{p.name}.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write(self.model_dump_json(indent=2))
-            os.replace(tmp_name, p)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp_name)
-            raise
+        save_model(self, path)
+
+    def remember_peer(self, node_id: str, endpoint: str, endpoints: Sequence[str] = ()) -> None:
+        known = self._peer(node_id)
+        others = [p for p in self.peers if p.id != node_id]
+        self.peers = [
+            *others,
+            SwarmNodeConfig(
+                id=node_id,
+                endpoint=endpoint,
+                endpoints=[e for e in endpoints if e != endpoint],
+                kind=known.kind if known is not None else "",
+            ),
+        ]
+
+    def record_peer_kind(
+        self, node_id: str, endpoint: str, endpoints: Sequence[str], kind: str
+    ) -> bool:
+        known = self._peer(node_id)
+        if known is None:
+            self.peers.append(
+                SwarmNodeConfig(
+                    id=node_id,
+                    endpoint=endpoint,
+                    endpoints=[e for e in endpoints if e != endpoint],
+                    kind=kind,
+                )
+            )
+            return True
+        if known.kind != kind:
+            known.kind = kind
+            return True
+        return False
+
+    def peer_kind(self, node_id: str) -> str:
+        known = self._peer(node_id)
+        return known.kind if known is not None else ""
+
+    def _peer(self, node_id: str) -> SwarmNodeConfig | None:
+        return next((p for p in self.peers if p.id == node_id), None)

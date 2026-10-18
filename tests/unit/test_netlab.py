@@ -17,39 +17,13 @@ from sa_home_bot.proto.client import ProtoClient
 from sa_home_bot.proto.endpoints import TcpEndpoint
 from sa_home_bot.proto.messages import (
     MSG_GET_STATE,
-    ActionSpec,
     ProtoError,
-    ServiceDescription,
-    ServiceInfo,
     make_request,
 )
 from sa_home_bot.proto.server import ProtoServer
 from tests.netlab import NetLabProxy
-
-
-class FakePeerService:
-    def describe(self) -> ServiceDescription:
-        return ServiceDescription(
-            info=ServiceInfo(node="winpc", service="node", version="0.43.0"),
-            capabilities=(),
-            actions=(ActionSpec(id="noop", title="Ничего"),),
-        )
-
-    async def get_state(self) -> dict:
-        return {"node": "winpc"}
-
-    async def run_command(self, action: str, args: dict) -> dict:
-        return {"accepted": True}
-
-
-async def _wait_for(predicate, timeout: float = 5.0) -> bool:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while loop.time() < deadline:
-        if predicate():
-            return True
-        await asyncio.sleep(0.01)
-    return False
+from tests.unit.netsupport import StubService
+from tests.unit.support.waiting import wait_for
 
 
 @pytest.fixture
@@ -63,7 +37,7 @@ async def stand(monkeypatch):
     monkeypatch.setattr(peers_mod, "HEARTBEAT_MISSES", 2)
     monkeypatch.setattr(client_mod, "CLOSE_TIMEOUT_S", 0.05)
 
-    server = ProtoServer(TcpEndpoint("127.0.0.1", 0), FakePeerService(), token="s3cret")
+    server = ProtoServer(TcpEndpoint("127.0.0.1", 0), StubService("winpc"), token="s3cret")
     await server.start()
     proxy = NetLabProxy("127.0.0.1", server.endpoint.port)
     await proxy.start()
@@ -71,7 +45,7 @@ async def stand(monkeypatch):
         "winpc", proxy.endpoint, token="s3cret", self_node="alfred", reconnect_delay=0.05
     )
     await link.start()
-    assert await _wait_for(lambda: link.alive), "линк через прокси не поднялся"
+    assert await wait_for(lambda: link.alive), "линк через прокси не поднялся"
     yield server, proxy, link
     await link.stop()
     await proxy.stop()
@@ -97,9 +71,9 @@ async def test_half_open_обнаруживается_и_линк_воскрес
     """
     server, proxy, link = stand
     proxy.freeze()
-    assert await _wait_for(lambda: not link.alive), "heartbeat не заметил half-open"
+    assert await wait_for(lambda: not link.alive), "heartbeat не заметил half-open"
     proxy.unfreeze()
-    assert await _wait_for(lambda: link.alive), "линк не воскрес после разморозки"
+    assert await wait_for(lambda: link.alive), "линк не воскрес после разморозки"
 
 
 @pytest.mark.asyncio
@@ -111,11 +85,11 @@ async def test_внезапная_смерть_без_FIN_и_возвращен�
     """
     server, proxy, link = stand
     await proxy.drop_silently()
-    assert await _wait_for(lambda: not link.alive), "смерть соседа не замечена"
+    assert await wait_for(lambda: not link.alive), "смерть соседа не замечена"
     # Несколько циклов «connection refused» — задача линка обязана выжить.
     await asyncio.sleep(0.3)
     await proxy.restore()
-    assert await _wait_for(lambda: link.alive), "линк не восстановился после возвращения"
+    assert await wait_for(lambda: link.alive), "линк не восстановился после возвращения"
 
 
 @pytest.mark.asyncio
@@ -128,7 +102,7 @@ async def test_запрос_в_замороженную_сеть_не_висне
     with pytest.raises((ProtoError, TimeoutError)):
         await asyncio.wait_for(link.forward(env), timeout=2.0)
     proxy.unfreeze()
-    assert await _wait_for(lambda: link.alive), "линк не восстановился после отказа"
+    assert await wait_for(lambda: link.alive), "линк не восстановился после отказа"
 
 
 @pytest.mark.asyncio

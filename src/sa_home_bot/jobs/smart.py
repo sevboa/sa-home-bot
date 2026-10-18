@@ -14,7 +14,6 @@ Read-only опрос smartctl (``-H -A``), без self-test'ов — диск н
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
 
 from sa_home_bot.domain.smart import diff_smart
 from sa_home_bot.jobs.base import JobContext, JobResult
@@ -23,10 +22,6 @@ log = logging.getLogger(__name__)
 
 DEDUP_KEY = "smart-scan"
 JOB_TYPE = "smart_scan"
-
-
-def _now() -> datetime:
-    return datetime.now(tz=UTC)
 
 
 class SmartScanJob:

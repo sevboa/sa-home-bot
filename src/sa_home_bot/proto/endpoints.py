@@ -270,3 +270,12 @@ def resolve_endpoint(value: str | Path | Endpoint, base_dir: Path | None = None)
     ):
         return UnixEndpoint(base_dir / endpoint.path)
     return endpoint
+
+
+def merge_endpoints(first: str, raw: object) -> list[str]:
+    values = [first] if first else []
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str) and item and item not in values:
+                values.append(item)
+    return values

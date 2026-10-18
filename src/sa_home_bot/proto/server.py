@@ -565,6 +565,10 @@ class ProtoServer:
         return make_response(request, result)
 
 
+def undeclared_action(action: str) -> ValueError:
+    return ValueError(f"необъявленное действие: {action}")
+
+
 def decode_request(line: bytes) -> Envelope:
     """Декодировать строку и убедиться, что это запрос."""
     env = decode(line)

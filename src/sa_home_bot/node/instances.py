@@ -225,9 +225,6 @@ class InstanceStore:
                 metas.append(meta)
         return metas
 
-    def instances_of(self, service: str) -> list[str]:
-        return [m.instance for m in self.known() if m.service == service]
-
     # --- локальные правки ---------------------------------------------------
 
     def refresh(self, service: str, instance: str) -> InstanceMeta | None:

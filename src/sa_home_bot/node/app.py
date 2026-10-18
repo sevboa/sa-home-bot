@@ -35,6 +35,8 @@ from sa_home_bot.node.service import EVENT_NODE_JOINED, EVENT_RESTART_APPLIED, N
 from sa_home_bot.node.state import NodeState
 from sa_home_bot.node.supervisor import Supervisor
 from sa_home_bot.node.watch import EVENT_NODE_LEAVING, PresenceWatcher
+from sa_home_bot.proto.emitter import DeferredEmitter
+from sa_home_bot.proto.endpoints import merge_endpoints
 from sa_home_bot.proto.messages import MSG_EVENT, Envelope, ProtoError
 from sa_home_bot.proto.server import ProtoServer
 from sa_home_bot.services import registry
@@ -56,19 +58,14 @@ HARD_EXIT_MARGIN_S = 15.0
 # обязательными колбэками.
 LinkFactory = Callable[[str, "str | Sequence[str]"], PeerLink]
 
-# Локальные службы со своим proto-сервером, к которым нода умеет
-# проксировать (telegram-bot — клиент, своего сервера у него нет).
-# Состав — из реестра служб (services/registry.py), а не из списка здесь.
-def local_service_endpoints(settings: Settings) -> dict[str, str]:
-    return registry.service_endpoints(settings)
-
-
 # Размер дедуп-набора: изначально 512 «событий мало», но с тех пор через тот
 # же канал ходят tool_call/task_result/llm_idle_sleep/алерты монитора — при
 # всплеске больше maxsize РАЗНЫХ id за время оборота циркулирующей копии
 # старый id вытесняется и событие принимается повторно, т.е. защита протекает
 # ровно в штормовом сценарии. 2048 строк-ключей — копейки по памяти.
-_MAX_SEEN_EVENTS = 2048
+SEEN_EVENT_IDS_CAPACITY = 2048
+
+EVENT_LLM_WENT_IDLE = "llm_went_idle"
 
 # Второй предохранитель от шторма ретрансляции, НЕЗАВИСИМЫЙ от дедупа
 # (ARCHITECTURE §11: «TTL/hop-limit в конверте — предохранитель на случай
@@ -76,7 +73,7 @@ _MAX_SEEN_EVENTS = 2048
 # рестарт ноды сбрасывает набор, переполнение вытесняет старые id. Диаметр
 # полного графа — 1 хоп, будущего Chord — O(log n): 8 хватает с запасом,
 # а лавине — нет.
-MAX_EVENT_HOPS = 8
+MAX_RELAY_HOPS = 8
 
 
 class SeenEvents:
@@ -97,7 +94,7 @@ class SeenEvents:
     надёжный ключ дедупа.
     """
 
-    def __init__(self, maxsize: int = _MAX_SEEN_EVENTS) -> None:
+    def __init__(self, maxsize: int = SEEN_EVENT_IDS_CAPACITY) -> None:
         self._maxsize = maxsize
         self._ids: dict[str, None] = {}
 
@@ -109,18 +106,6 @@ class SeenEvents:
         if len(self._ids) > self._maxsize:
             self._ids.pop(next(iter(self._ids)))
         return False
-
-
-def _safe_parse_all(items: list[str]) -> list[assignments_mod.Assignment]:
-    """Разобрать назначения, пропустив битые: об их непонятности уже сказал
-    супервизор — второй раз ругаться на то же самое незачем."""
-    parsed = []
-    for item in items:
-        try:
-            parsed.append(assignments_mod.parse(item))
-        except assignments_mod.AssignmentError:
-            continue
-    return parsed
 
 
 def make_link_factories(
@@ -252,53 +237,13 @@ def build_router(
             link.node_kind = node_kind
     # Маршрут строится по ИМЕНИ СЛУЖБЫ, а не по строке назначения целиком:
     # "telegram-bot@alfred:standby" — это всё та же служба telegram-bot.
-    assigned_services = {a.service for a in _safe_parse_all(assignments)}
+    assigned_services = {a.service for a in assignments_mod.parse_valid(assignments)}
     local = {
         name: make_local_link(name, endpoint)
-        for name, endpoint in local_service_endpoints(settings).items()
+        for name, endpoint in registry.service_endpoints(settings).items()
         if name in assigned_services
     }
     return NodeRouter(node_id, peers=peers, local_services=local)
-
-
-def update_source_for_this_platform() -> str | None:
-    """origin_repo_url() — умение (check_update/update) объявляется, если
-    пакет поставлен из git, независимо от ОС.
-
-    На win32 сама переустановка (`NodeService._update()`) не зовёт
-    pipx_reinstall в процессе — `pipx install --force` там пытается
-    перезаписать sa-home-node.exe и venv-DLL, которые держит открытыми ЭТОТ
-    ЖЕ работающий процесс (WinError 5/32, живые находки 2026-07-17/
-    2026-07-19). Вместо этого она дёргает Windows-задачу планировщика
-    (deploy/win-auto-update.ps1, `node_update.trigger_scheduled_task()`) —
-    та делает честный стоп→install→старт извне.
-    """
-    return node_update.origin_repo_url()
-
-
-def _remember_peer(
-    state: NodeState, node_id: str, endpoint: str, endpoints: Sequence[str] = ()
-) -> None:
-    """Персистентный справочник пиров: id + последний удачный адрес + все
-    остальные известные пути к нему (этап 24), не полный конфиг.
-
-    Тип соседа (его пишет PresenceWatcher, node/watch.py) при перезаписи
-    сохраняется: он узнаётся из hello и нужен именно тогда, когда соседа уже
-    не спросить — потерять его на обновлении адресов значило бы разучиться
-    отличать «сервер пропал» от «рабочая станция уснула».
-    """
-    known = next((p for p in state.peers if p.id == node_id), None)
-    others = [p for p in state.peers if p.id != node_id]
-    rest = [e for e in endpoints if e != endpoint]
-    state.peers = [
-        *others,
-        SwarmNodeConfig(
-            id=node_id,
-            endpoint=endpoint,
-            endpoints=rest,
-            kind=known.kind if known is not None else "",
-        ),
-    ]
 
 
 # Живой баг 2026-08-05: emit() сразу после server.start() шлёт в
@@ -403,14 +348,14 @@ async def _relay_peer_event(
     одно событие приходит несколькими путями, а без дедупа каждый узел
     ретранслирует КАЖДУЮ полученную копию заново — лавина (см. SeenEvents).
     Второй, независимый рубеж — счётчик ретрансляций в конверте: событие,
-    пережившее MAX_EVENT_HOPS пересылок, уже точно циркулирует по кругу
+    пережившее MAX_RELAY_HOPS пересылок, уже точно циркулирует по кругу
     (диаметр полного графа — 1), дальше не идёт.
     """
     if not is_local and env.src is not None and env.src.node == node_id:
         return
     if seen.seen(env.id):
         return
-    if env.hops >= MAX_EVENT_HOPS:
+    if env.hops >= MAX_RELAY_HOPS:
         log.warning(
             "Рой: событие %s (%s) пережило %d ретрансляций — дропаю (циркуляция?)",
             env.payload.get("event"),
@@ -424,13 +369,10 @@ async def _relay_peer_event(
         if new_id and new_endpoint and new_id != node_id and new_id not in router.peers:
             # Новый узел назвал все свои адреса (этап 24) — связываемся по
             # лучшему из них, а не по одному, попавшему в событие.
-            raw = data.get("endpoints")
-            candidates = [new_endpoint]
-            if isinstance(raw, list):
-                candidates += [e for e in raw if isinstance(e, str) and e and e != new_endpoint]
+            candidates = merge_endpoints(new_endpoint, data.get("endpoints"))
             link = make_peer_link(new_id, candidates)
             await router.add_peer(link)
-            _remember_peer(state, new_id, new_endpoint, candidates)
+            state.remember_peer(new_id, new_endpoint, candidates)
             state.save(state_path)
             log.info("Рой: авто-подключение к %s (%s) по node_joined", new_id, candidates)
     if (
@@ -460,6 +402,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
     """Запустить ноду; вернуть True, если перед выходом запрошен само-рестарт
     (см. `restart_node` — cli.main() тогда делает os.execv на том же PID)."""
     # Сервер создаётся до супервизора: emit замыкается на его broadcast.
+    emit = DeferredEmitter()
     server: ProtoServer | None = None
     replicator: ConfigReplicator | None = None
     lease: LeaseManager | None = None
@@ -479,35 +422,25 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         log.warning("Нода %s: запрошен само-рестарт", node_id)
         lifespan.trigger()
 
-    async def emit(event_type: str, data: dict) -> None:
-        if server is not None:
-            await server.broadcast_event(event_type, data)
+    async def relay(env: Envelope, *, is_local: bool) -> None:
+        await _relay_peer_event(
+            env,
+            node_id=node_id,
+            router=router,
+            state=state,
+            state_path=settings.node.state_path,
+            make_peer_link=make_peer_link,
+            server=server,
+            seen=seen_events,
+            is_local=is_local,
+            replicator=None if is_local else replicator,
+        )
 
     async def on_peer_event(env: Envelope) -> None:
-        await _relay_peer_event(
-            env,
-            node_id=node_id,
-            router=router,
-            state=state,
-            state_path=settings.node.state_path,
-            make_peer_link=make_peer_link,
-            server=server,
-            seen=seen_events,
-            replicator=replicator,
-        )
+        await relay(env, is_local=False)
 
     async def on_local_event(env: Envelope) -> None:
-        await _relay_peer_event(
-            env,
-            node_id=node_id,
-            router=router,
-            state=state,
-            state_path=settings.node.state_path,
-            make_peer_link=make_peer_link,
-            server=server,
-            seen=seen_events,
-            is_local=True,
-        )
+        await relay(env, is_local=True)
         # Строковый литерал, не импорт из llm/service.py — та же конвенция,
         # что и в bot/node_events.py::EVENT_LLM_IDLE_SLEEP. `llm_went_idle`
         # (не `llm_idle_sleep`!) — эмитится ТОЛЬКО из _maybe_sleep_idle
@@ -518,7 +451,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         # Alfred просто ни разу не заговорили). Ручной роспуск Alfred
         # (llm/service.py::_sleep_now(quiet=True)) не эмитит НИ ОДНО из двух
         # событий — машину сам по себе не гасит.
-        if env.payload.get("event") == "llm_went_idle" and node_service is not None:
+        if env.payload.get("event") == EVENT_LLM_WENT_IDLE and node_service is not None:
             asyncio.create_task(
                 node_service.maybe_auto_poweroff_idle(), name="idle-poweroff-check"
             )
@@ -528,7 +461,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         сохранить, чтобы не переучиваться после каждого рестарта."""
         if not endpoints:
             return
-        _remember_peer(state, peer_id, endpoints[0], endpoints)
+        state.remember_peer(peer_id, endpoints[0], endpoints)
         state.save(settings.node.state_path)
 
     make_peer_link, make_local_link = make_link_factories(
@@ -610,7 +543,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         restart_node=request_restart,
         state=state,
         state_path=settings.node.state_path,
-        local_service_endpoints=local_service_endpoints(settings),
+        local_service_endpoints=registry.service_endpoints(settings),
         swarm_token=settings.swarm.token,
         # Настроенный адрес объявляет умения join/swarm_join (он статичен и
         # известен сразу), а рою нода называет то, что РЕАЛЬНО слушает —
@@ -621,7 +554,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         # Дешёвая файловая проверка (без сети) — editable/не-git установка
         # (dev-чекаут) или win32 дают None, и check_update/update не
         # объявляются (см. update_source_for_this_platform).
-        update_source=update_source_for_this_platform(),
+        update_source=node_update.origin_repo_url(),
         node_kind=settings.node.kind,
         power_controllable=settings.node.power_controllable,
         idle_poweroff=settings.node.idle_poweroff,
@@ -654,6 +587,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         router=router.route,
         on_peer_connect=on_peer_connect,
     )
+    emit.bind(server)
     await server.start()
     # Фоновой задачей, не await: доставка ретраится до ANNOUNCE_VERSION_
     # WINDOW_S, пока соседи/локальные службы переподключаются — ждать это

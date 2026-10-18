@@ -18,7 +18,6 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from sa_home_bot import __version__, wol
-from sa_home_bot.config import SwarmNodeConfig
 from sa_home_bot.node import assignments as assignments_mod
 from sa_home_bot.node import kind as node_kinds
 from sa_home_bot.node import update as node_update
@@ -32,6 +31,7 @@ from sa_home_bot.node.replication import (
 from sa_home_bot.node.state import NodeState
 from sa_home_bot.node.supervisor import EventEmitter, Supervisor
 from sa_home_bot.proto.client import ProtoClient
+from sa_home_bot.proto.endpoints import merge_endpoints
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     ERR_INTERNAL,
@@ -46,6 +46,7 @@ from sa_home_bot.proto.messages import (
     ServiceInfo,
     make_request,
 )
+from sa_home_bot.proto.server import undeclared_action
 from sa_home_bot.runtime import Runtime
 from sa_home_bot.services import registry
 from sa_home_bot.utils import ssh_sessions
@@ -149,21 +150,6 @@ _POWER_TITLES = {
     ACTION_REBOOT: "🔃 Перезагрузить машину",
     ACTION_SUSPEND: "🌙 Усыпить машину",
 }
-
-
-def _endpoint_list(raw: Any, *, first: str) -> list[str]:
-    """Список адресов из сообщения роя, с ``first`` во главе.
-
-    Поле ``endpoints`` появилось в этапе 24 и необязательно: нода старой
-    версии присылает только ``endpoint``, и тогда список из него одного —
-    ровно прежнее поведение.
-    """
-    values = [first] if first else []
-    if isinstance(raw, list):
-        for item in raw:
-            if isinstance(item, str) and item and item not in values:
-                values.append(item)
-    return values
 
 
 async def _default_power_runner(argv: list[str]) -> None:
@@ -287,21 +273,6 @@ class NodeService:
         не нашёлся» выясняется только по логам."""
         self._discovery_state = state
 
-    def _assignable_here(self) -> tuple[str, ...]:
-        """Что осмысленно назначить именно этой машине.
-
-        Служба, которой нужны термозоны и SMART, на виртуалке бессмысленна —
-        не предлагаем её в choices, чтобы бот не рисовал кнопку, ведущую к
-        службе, которой нечего мерить. Уже назначенное (правкой конфига,
-        например) при этом работает — фильтр только про предложение.
-        """
-        names = registry.assignable_names()
-        if self._traits.hardware_sensors:
-            return names
-        return tuple(
-            n for n in names if not registry.SERVICES[n].needs_hardware_sensors
-        )
-
     def describe(self) -> ServiceDescription:
         # choices — имена служб под супервизией: фронтенд строит кнопку на
         # каждое значение, ничего не хардкодя.
@@ -317,7 +288,7 @@ class NodeService:
             type="string",
             required=True,
             title="Назначение",
-            choices=self._assignable_here(),
+            choices=registry.assignable_names(),
         )
         mac_param = ActionParam(name="mac", type="string", required=True, title="MAC цели")
         return ServiceDescription(
@@ -553,8 +524,7 @@ class NodeService:
             return await self._unassign(name)
         svc = self._supervisor.get(name)
         if svc is None:
-            known = ", ".join(self._supervisor.services) or "нет служб"
-            raise ProtoError(ERR_BAD_REQUEST, f"нет такой службы: {name!r} (есть: {known})")
+            raise self._no_such_service(name)
         if action == ACTION_START:
             await svc.start()
         elif action == ACTION_STOP:
@@ -562,9 +532,12 @@ class NodeService:
         elif action == ACTION_RESTART:
             await svc.restart()
         else:
-            # Сервер валидирует action по describe — сюда неизвестное не доходит.
-            raise ValueError(f"необъявленное действие: {action}")
+            raise undeclared_action(action)
         return {"service": svc.to_dict()}
+
+    def _no_such_service(self, name: str) -> ProtoError:
+        known = ", ".join(self._supervisor.services) or "нет служб"
+        return ProtoError(ERR_BAD_REQUEST, f"нет такой службы: {name!r} (есть: {known})")
 
     async def _assign(self, name: str) -> dict[str, Any]:
         """Назначить службу в рантайме: поднять процесс + (если есть свой
@@ -598,24 +571,16 @@ class NodeService:
     async def _unassign(self, name: str) -> dict[str, Any]:
         # Снять можно и по ключу слота ("telegram-bot@alfred"), и по строке
         # назначения целиком — так же, как её задавали.
-        try:
-            key = assignments_mod.parse(name).key
-        except assignments_mod.AssignmentError:
-            key = name
+        key = assignments_mod.key_or_raw(name)
         if self._supervisor.get(key) is None:
-            known = ", ".join(self._supervisor.services) or "нет служб"
-            raise ProtoError(ERR_BAD_REQUEST, f"нет такой службы: {name!r} (есть: {known})")
+            raise self._no_such_service(name)
         service = self._supervisor.services[key].assignment.service
         await self._supervisor.unassign(key)
         if self._router is not None:
             await self._router.remove_local_service(service)
         # В состоянии лежит исходная строка назначения — найти её по ключу.
         for item in list(self._state.assignments):
-            try:
-                same = assignments_mod.parse(item).key == key
-            except assignments_mod.AssignmentError:
-                same = item == key
-            if same:
+            if assignments_mod.key_or_raw(item) == key:
                 self._state.assignments.remove(item)
                 self._save_state()
         return {"unassigned": name}
@@ -652,8 +617,7 @@ class NodeService:
         на этой сборке/в тестах — тихий no-op, а не падение."""
         name = str(args.get("name", ""))
         if self._supervisor.get(name) is None:
-            known = ", ".join(self._supervisor.services) or "нет служб"
-            raise ProtoError(ERR_BAD_REQUEST, f"нет такой службы: {name!r} (есть: {known})")
+            raise self._no_such_service(name)
         ready = bool(args.get("ready", True))
         if self._lease is not None:
             self._lease.set_ready(name, ready)
@@ -734,7 +698,7 @@ class NodeService:
         caller_endpoint = str(args.get("endpoint", ""))
         # Список адресов присоединяющегося (этап 24) — необязательный: нода
         # старой версии пришлёт только endpoint, и это по-прежнему работает.
-        caller_endpoints = _endpoint_list(args.get("endpoints"), first=caller_endpoint)
+        caller_endpoints = merge_endpoints(caller_endpoint, args.get("endpoints"))
         if not caller_id or not caller_endpoint:
             raise ProtoError(ERR_BAD_REQUEST, "swarm_join требует node_id и endpoint")
         if caller_id == self._node:
@@ -747,7 +711,8 @@ class NodeService:
                     await self._router.remove_peer(caller_id)
                 link = self._make_peer_link(caller_id, caller_endpoints)
                 await self._router.add_peer(link)
-            self._remember_peer(caller_id, caller_endpoint, caller_endpoints)
+            self._state.remember_peer(caller_id, caller_endpoint, caller_endpoints)
+            self._save_state()
 
         if self._emit is not None:
             await self._emit(
@@ -771,26 +736,6 @@ class NodeService:
         if self._router is not None:
             peers += self._router.peers_state()
         return {"peers": peers}
-
-    def _remember_peer(self, node_id: str, endpoint: str, endpoints: Sequence[str] = ()) -> None:
-        """Персистентный справочник пиров (не полный конфиг соседа — только
-        id + последний удачный адрес + прочие известные пути, node/state.py).
-
-        Тип соседа при перезаписи сохраняется — см. node/app.py::_remember_peer.
-        """
-        known = next((p for p in self._state.peers if p.id == node_id), None)
-        others = [p for p in self._state.peers if p.id != node_id]
-        rest = [e for e in endpoints if e != endpoint]
-        self._state.peers = [
-            *others,
-            SwarmNodeConfig(
-                id=node_id,
-                endpoint=endpoint,
-                endpoints=rest,
-                kind=known.kind if known is not None else "",
-            ),
-        ]
-        self._save_state()
 
     async def join(self, endpoint: str) -> dict[str, Any]:
         """Присоединиться к рою через уже существующую ноду: разовый запрос
@@ -826,10 +771,11 @@ class NodeService:
                 pid, peer_endpoint = peer.get("id"), peer.get("endpoint")
                 if not pid or not peer_endpoint or pid == self._node or pid in self._router.peers:
                     continue
-                peer_endpoints = _endpoint_list(peer.get("endpoints"), first=peer_endpoint)
+                peer_endpoints = merge_endpoints(peer_endpoint, peer.get("endpoints"))
                 link = self._make_peer_link(pid, peer_endpoints)
                 await self._router.add_peer(link)
-                self._remember_peer(pid, peer_endpoint, peer_endpoints)
+                self._state.remember_peer(pid, peer_endpoint, peer_endpoints)
+                self._save_state()
                 added.append(pid)
         return {"joined_via": endpoint, "peers_added": added}
 

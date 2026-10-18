@@ -18,25 +18,12 @@ import pytest
 
 from sa_home_bot.node.peers import PeerLink
 from sa_home_bot.node.supervisor import SupervisedService
-from sa_home_bot.proto.messages import ActionSpec, ServiceDescription, ServiceInfo
 from sa_home_bot.proto.server import ProtoServer, _Connection
 from sa_home_bot.utils.lifespan import Lifespan
 from sa_home_bot.utils.shutdown import ShutdownBudget
+from tests.unit.netsupport import StubService
 
-
-class FakeService:
-    def describe(self) -> ServiceDescription:
-        return ServiceDescription(
-            info=ServiceInfo(node="peer", service="node", version="0.0.0"),
-            capabilities=(),
-            actions=(ActionSpec(id="noop", title="Ничего"),),
-        )
-
-    async def get_state(self) -> dict:
-        return {}
-
-    async def run_command(self, action: str, args: dict) -> dict:
-        return {}
+pytest_plugins = ["tests.unit.sock_fixture"]
 
 
 class HangingWriter:
@@ -59,7 +46,6 @@ class HangingWriter:
         return default
 
 
-@pytest.fixture
 def sock_dir():
     path = Path(tempfile.mkdtemp())
     yield path
@@ -94,7 +80,7 @@ async def test_бюджет_не_даёт_шагам_сложиться_за_о�
 async def test_proto_сервер_останавливается_с_полумёртвым_клиентом(sock_dir):
     """Именно здесь останов ноды мог зависнуть навсегда: `wait_closed()` у
     клиента с забитым Send-Q не возвращается ни через минуту, ни через час."""
-    server = ProtoServer(f"unix://{sock_dir / 'node.sock'}", FakeService())
+    server = ProtoServer(f"unix://{sock_dir / 'node.sock'}", StubService("peer"))
     await server.start()
     server._connections.add(_Connection(HangingWriter(), authenticated=True))
 
@@ -113,7 +99,7 @@ async def test_погашенный_линк_не_переподключаетс
     в каком бы состоянии его ни застали.
     """
     endpoint = f"unix://{sock_dir / 'peer.sock'}"
-    server = ProtoServer(endpoint, FakeService())
+    server = ProtoServer(endpoint, StubService("peer"))
     await server.start()
 
     link = PeerLink("peer", endpoint, reconnect_delay=0.05)

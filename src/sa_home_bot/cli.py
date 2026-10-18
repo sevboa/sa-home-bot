@@ -96,56 +96,13 @@ def main(argv: list[str] | None = None) -> int:
 
     configure_logging(settings.logging.level, settings.logging.format)
 
-    # Импорт здесь, чтобы --check-config не тянул тяжёлые зависимости.
-    if args.service == "node":
-        from sa_home_bot.node.app import run_node
-
-        # Ноде нужен путь к конфигу — она передаёт его дочерним службам.
-        coro = run_node(settings, config_path=args.config)
-    elif args.service == "monitor":
-        from sa_home_bot.monitor.app import run_monitor
-
-        coro = run_monitor(settings)
-    elif args.service == "apps":
-        from sa_home_bot.apps.app import run_apps
-
-        coro = run_apps(settings)
-    elif args.service == "torrents":
-        from sa_home_bot.torrents.app import run_torrents
-
-        coro = run_torrents(settings)
-    elif args.service == "llm":
-        from sa_home_bot.llm.app import run_llm
-
-        coro = run_llm(settings)
-    elif args.service == "tasks":
-        from sa_home_bot.tasks.app import run_tasks
-
-        coro = run_tasks(settings)
-    elif args.service == "net":
-        from sa_home_bot.net.app import run_net
-
-        coro = run_net(settings)
-    elif args.service == "memory":
-        from sa_home_bot.memory.app import run_memory
-
-        coro = run_memory(settings)
-    elif args.service == "graph_memory":
-        from sa_home_bot.graph_memory.app import run_graph_memory
-
-        coro = run_graph_memory(settings)
-    elif args.service == "vpn":
-        from sa_home_bot.vpn.app import run_vpn
-
-        coro = run_vpn(settings)
-    elif args.service == "vpn_check":
-        from sa_home_bot.vpn_check.app import run_vpn_check
-
-        coro = run_vpn_check(settings)
+    runner = registry.load_runner(args.service)
+    if args.service == registry.NODE_CLI_NAME:
+        coro = runner(settings, config_path=args.config)
+    elif args.service == registry.SERVICES["telegram-bot"].cli_name:
+        coro = runner(settings, instance=args.instance)
     else:
-        from sa_home_bot.app import run
-
-        coro = run(settings, instance=args.instance)
+        coro = runner(settings)
 
     try:
         result = asyncio.run(coro)

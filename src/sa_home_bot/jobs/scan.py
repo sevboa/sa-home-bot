@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import datetime
 
 from sa_home_bot.domain.health import compute_health_diff
 from sa_home_bot.domain.host import (
@@ -40,15 +40,12 @@ from sa_home_bot.domain.policy import (
 )
 from sa_home_bot.jobs.base import JobContext, JobResult
 from sa_home_bot.sensors.host import KERNEL_SCAN_STATE_KEY
+from sa_home_bot.utils.clock import utc_now
 
 log = logging.getLogger(__name__)
 
 DEDUP_KEY = "sensor-scan"
 JOB_TYPE = "sensor_scan"
-
-
-def _now() -> datetime:
-    return datetime.now(tz=UTC)
 
 
 def _cfg_for_kind(config, kind: str):
@@ -94,7 +91,7 @@ class SensorScanJob:
         return resolve
 
     async def run(self, ctx: JobContext) -> JobResult:
-        now = _now()
+        now = utc_now()
         readings = await ctx.sensors.read_all()
         sensors_cfg = ctx.config.sensors
         uses_baseline = "baseline" in (

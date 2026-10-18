@@ -6,7 +6,7 @@ import pytest
 
 from sa_home_bot.node.kind import KIND_SERVER, KIND_VPS, KIND_WORKSTATION, traits_for
 from sa_home_bot.node.peers import NodeRouter
-from sa_home_bot.node.service import ACTION_ASSIGN, NodeService
+from sa_home_bot.node.service import NodeService
 from sa_home_bot.node.state import NodeState
 from sa_home_bot.node.supervisor import Supervisor
 from sa_home_bot.node.watch import EVENT_NODE_DOWN, EVENT_NODE_UP, PresenceWatcher
@@ -46,20 +46,15 @@ def _watcher(node_id: str, *links: FakeLink, **kw) -> tuple[PresenceWatcher, lis
 
 
 def test_server_and_vps_are_expected_online_workstation_is_not():
-    assert traits_for(KIND_SERVER).alerts_when_unreachable
-    assert traits_for(KIND_VPS).alerts_when_unreachable
-    assert not traits_for(KIND_WORKSTATION).alerts_when_unreachable
+    assert traits_for(KIND_SERVER).always_on
+    assert traits_for(KIND_VPS).always_on
+    assert not traits_for(KIND_WORKSTATION).always_on
 
 
 def test_only_workstation_is_wakeable():
     assert traits_for(KIND_WORKSTATION).wakeable
     assert not traits_for(KIND_SERVER).wakeable
     assert not traits_for(KIND_VPS).wakeable
-
-
-def test_vps_has_no_hardware_sensors():
-    assert not traits_for(KIND_VPS).hardware_sensors
-    assert traits_for(KIND_SERVER).hardware_sensors
 
 
 def test_lease_priority_prefers_the_machine_more_likely_to_be_on():
@@ -73,27 +68,10 @@ def test_lease_priority_prefers_the_machine_more_likely_to_be_on():
 def test_unknown_kind_is_conservative():
     """Нода старой версии не шумит алертами и не отбирает синглтон."""
     unknown = traits_for("")
-    assert not unknown.alerts_when_unreachable
+    assert not unknown.always_on
     assert not unknown.wakeable
     assert unknown.lease_priority == 0
     assert traits_for("нечто") == unknown
-
-
-# --- фильтр назначений по типу ----------------------------------------------
-
-
-def _assign_choices(kind: str) -> tuple[str, ...]:
-    svc = NodeService(Supervisor([], None, emit=_noop), node_kind=kind)
-    action = next(a for a in svc.describe().actions if a.id == ACTION_ASSIGN)
-    return action.params[0].choices
-
-
-def test_monitor_is_offered_on_a_vps_too():
-    # Этап 38: на VDS monitor мерит host-метрики из /proc (steal/iowait/память/
-    # диск), а не температуры — поэтому его туда назначать осмысленно.
-    assert "monitor" in _assign_choices(KIND_SERVER)
-    assert "monitor" in _assign_choices(KIND_VPS)
-    assert "telegram-bot" in _assign_choices(KIND_VPS)
 
 
 def test_node_reports_its_kind_in_hello_and_state():

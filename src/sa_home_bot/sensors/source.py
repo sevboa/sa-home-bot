@@ -7,16 +7,13 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import datetime
 
 from sa_home_bot.config import SensorsConfig
 from sa_home_bot.domain.host import HostMetricReading
 from sa_home_bot.domain.models import DiskSummary, SensorReading, SmartSnapshot
 from sa_home_bot.sensors import cpu, disks, gpu, host
-
-
-def _now() -> datetime:
-    return datetime.now(tz=UTC)
+from sa_home_bot.utils.clock import utc_now
 
 
 class SensorSource:
@@ -28,14 +25,14 @@ class SensorSource:
             return []
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            None, cpu.read_cpu_sync, _now(), self._config.lhm.dll_path
+            None, cpu.read_cpu_sync, utc_now(), self._config.lhm.dll_path
         )
 
     async def read_gpu(self) -> list[SensorReading]:
         if not self._config.gpu.enabled:
             return []
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, gpu.read_gpu_sync, _now())
+        return await loop.run_in_executor(None, gpu.read_gpu_sync, utc_now())
 
     async def read_disks(self) -> list[SensorReading]:
         if not self._config.disks.enabled:
@@ -43,7 +40,7 @@ class SensorSource:
         loop = asyncio.get_running_loop()
         devices = list(self._config.disks.devices)
         return await loop.run_in_executor(
-            None, disks.read_disks_sync, devices, _now(), self._config.lhm.dll_path
+            None, disks.read_disks_sync, devices, utc_now(), self._config.lhm.dll_path
         )
 
     async def read_host(
@@ -60,7 +57,7 @@ class SensorSource:
         return await loop.run_in_executor(
             None,
             host.read_host_sync,
-            _now(),
+            utc_now(),
             self._config.host.sample_window_s,
             kernel_since,
         )
@@ -79,7 +76,7 @@ class SensorSource:
         loop = asyncio.get_running_loop()
         devices = list(self._config.disks.devices)
         return await loop.run_in_executor(
-            None, disks.read_smart_snapshots_sync, devices, _now()
+            None, disks.read_smart_snapshots_sync, devices, utc_now()
         )
 
     async def read_disk_summaries(
