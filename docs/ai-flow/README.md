@@ -20,7 +20,7 @@
 - `bot/ai_lines.py` — реплики Альфреда и персонажей сбоев (HTML/MD/plain-пары), статусы тулов.
 - `bot/ai_turns.py` — запись хода пользователя и сборка истории для текста/фото/стикера/голоса, служебные директивы.
 - `bot/ai_reply.py` — доставка ответа (текст, rich, голос, селфи), хвост хода, `TurnServices`.
-- `bot/handlers/ai.py` — фильтры и обработчики aiogram; `_ask_and_reply`, `_rich_session_for`, `_dialogue_id_for`, `PHOTO_MARKER`, `STICKER_MARKER` оставлены как совместимые имена (их используют `bot/away.py`, `bot/away_return.py`, `test_away.py`).
+- `bot/handlers/ai.py` — фильтры и обработчики aiogram; `_ask_and_reply` — тонкая обёртка над `ai_reply.ask_and_reply` для обработчиков (`bot/away_return.py` вызывает `ai_reply.ask_and_reply` напрямую).
 - `bot/dialogue_context.py`, `llm_chat.py`, `bot/rich_stream.py`, `bot/voice_*.py`, `bot/pending_actions.py`, `bot/tool_debug.py`, `bot/people_cards.py` — как в темах выше.
 - `bot/alfred_voice.py` — префиксы «Альфред:» (HTML и markdown), `bot/service_errors.py` — кортеж `UNREACHABLE_ERRORS`.
 - `memory/`, `graph_memory/` (+ `client.py::add_episode`), `people/`, `text_search.py` (слова и FTS-запрос), `chat_scope.py` (`chat_id` из аргументов службы).
