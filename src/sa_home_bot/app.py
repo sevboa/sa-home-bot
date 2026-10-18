@@ -7,7 +7,8 @@ import socket
 
 from aiogram.exceptions import TelegramConflictError
 
-from sa_home_bot.bot.ai_flow import RESTART_TEXT, ActiveAiChats
+from sa_home_bot.bot.ai_flow import ActiveAiChats
+from sa_home_bot.bot.ai_lines import RESTART_TEXT
 from sa_home_bot.bot.away import AwayService
 from sa_home_bot.bot.away_return import AwayReturn, AwayRunner
 from sa_home_bot.bot.dispatch import TelegramEventDispatcher

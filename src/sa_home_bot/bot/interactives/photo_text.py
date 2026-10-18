@@ -229,6 +229,3 @@ def portrait_description(
         parts.append("Also visible: " + "; ".join(features) + ".")
     parts.append(f"Room: {cab.canon_en}.")
     return " ".join(parts)
-
-
-ALFRED_PHOTO_PREFIX = "<b>Альфред:</b> "

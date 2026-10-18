@@ -10,6 +10,7 @@ from datetime import timedelta
 from typing import Any
 
 from sa_home_bot.bot import image_tools
+from sa_home_bot.bot.alfred_voice import ALFRED_PREFIX_HTML
 from sa_home_bot.bot.interactives import cabinet as cabinet_mod
 from sa_home_bot.bot.interactives import items as items_mod
 from sa_home_bot.bot.interactives import places, radio, underground
@@ -17,7 +18,6 @@ from sa_home_bot.bot.interactives.cabinet import Cabinet
 from sa_home_bot.bot.interactives.core import EngineCore
 from sa_home_bot.bot.interactives.llm_link import LLM_CALL_ERRORS, ask_chat
 from sa_home_bot.bot.interactives.photo_text import (
-    ALFRED_PHOTO_PREFIX,
     MOOD_PRESETS,
     PHOTO_PURPOSE,
     PORTRAIT_PURPOSE,
@@ -682,7 +682,7 @@ class PhotosMixin(EngineCore):
             image_id,
             chat_id,
             image_tools.upscale_png(png, cfg.imagegen_display_px),
-            caption=ALFRED_PHOTO_PREFIX + html.escape(line) if line else caption,
+            caption=ALFRED_PREFIX_HTML + html.escape(line) if line else caption,
             message_thread_id=message_thread_id,
             reply_to_message_id=trigger_message_id,
         )

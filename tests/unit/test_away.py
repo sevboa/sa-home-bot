@@ -10,7 +10,7 @@ import pytest
 import pytest_asyncio
 
 from sa_home_bot import wake_core
-from sa_home_bot.bot import ai_flow, away, away_return, voice_stt
+from sa_home_bot.bot import ai_flow, ai_reply, ai_turns, away, away_return, voice_stt
 from sa_home_bot.bot.away import (
     ALFRED_AWAY_KEY,
     MAX_AWAY,
@@ -499,8 +499,8 @@ def no_model(monkeypatch):
     monkeypatch.setattr(ai_flow, "request_alfred", boom)
     monkeypatch.setattr(voice_stt, "transcribe_voice_message", boom)
     monkeypatch.setattr(ai_handler, "_ask_and_reply", boom)
-    monkeypatch.setattr(ai_handler, "_handle_photo_message", boom)
-    monkeypatch.setattr(ai_handler, "_handle_sticker_message", boom)
+    monkeypatch.setattr(ai_turns, "photo_history", boom)
+    monkeypatch.setattr(ai_turns, "sticker_history", boom)
 
 
 def _ai_kwargs(store, service, tmp_path):
@@ -766,8 +766,7 @@ class ReturnEnv:
         self.notifier = FakeNotifier()
         self.stt_error: Exception | None = None
 
-        async def fake_ask(message, node_link, store_, config, book, notifier, dialogue_id,
-                           history, active, tool_calls, rich, **kwargs):
+        async def fake_ask(message, services, dialogue_id, history, rich):
             self.asked.append(
                 {
                     "chat_id": message.chat.id,
@@ -791,7 +790,7 @@ class ReturnEnv:
             self.transcribed.append(raw)
             return self.transcript if not callable(self.transcript) else self.transcript(raw)
 
-        monkeypatch.setattr(ai_handler, "_ask_and_reply", fake_ask)
+        monkeypatch.setattr(ai_reply, "ask_and_reply", fake_ask)
         monkeypatch.setattr(wake_core, "ensure_service_ready", fake_ready)
         monkeypatch.setattr(voice_stt, "transcribe_bytes", fake_stt)
         self.returner = AwayReturn(
@@ -957,7 +956,7 @@ async def test_return_new_message_during_answer_keeps_chat_queued(env, service, 
     await service.back()
     late = FakeMessage(1, "пока вы отвечали")
 
-    original = ai_handler._ask_and_reply
+    original = ai_reply.ask_and_reply
 
     async def ask_then_message(*args, **kwargs):
         result = await original(*args, **kwargs)
@@ -965,7 +964,7 @@ async def test_return_new_message_during_answer_keeps_chat_queued(env, service, 
             await service.intercept(late, kind=away.KIND_TEXT, text=late.text, dialogue_id=1)
         return result
 
-    monkeypatch.setattr(ai_handler, "_ask_and_reply", ask_then_message)
+    monkeypatch.setattr(ai_reply, "ask_and_reply", ask_then_message)
     assert await env.returner.run_pass() == 2
     assert [a["message_id"] for a in env.asked] == [first.message_id, late.message_id]
     assert await service.load() is None

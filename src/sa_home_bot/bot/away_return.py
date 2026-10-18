@@ -12,7 +12,8 @@ from aiogram import Bot
 from aiogram.types import Chat, Message, User
 
 from sa_home_bot import wake_core
-from sa_home_bot.bot import ai_flow, dialogue_context, voice_stt
+from sa_home_bot.bot import ai_flow, ai_reply, dialogue_context, voice_stt
+from sa_home_bot.bot.ai_reply import TurnServices, rich_session_for
 from sa_home_bot.bot.away import (
     MAX_VOICE_SECONDS_PER_CHAT,
     MAX_VOICES_PER_CHAT,
@@ -33,6 +34,7 @@ from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
 from sa_home_bot.llm.prompt import wrap_context_note
+from sa_home_bot.proto.addresses import LLM_NODE, LLM_SERVICE
 from sa_home_bot.proto.messages import ProtoError
 
 log = logging.getLogger(__name__)
@@ -116,8 +118,8 @@ class AwayReturn:
         outcome = await wake_core.ensure_service_ready(
             node_link,
             self._store,
-            ai_flow.LLM_NODE,
-            ai_flow.LLM_SERVICE,
+            LLM_NODE,
+            LLM_SERVICE,
             warmup_timeout_s=self._config.llm.warmup_timeout_s,
         )
         if outcome != wake_core.READY:
@@ -188,22 +190,23 @@ class AwayReturn:
         dialogue_id: int,
         history: list[dict[str, Any]],
     ) -> str | None:
-        from sa_home_bot.bot.handlers import ai as ai_handler
-
-        return await ai_handler._ask_and_reply(
-            message,
-            node_link,
-            self._store,
-            self._config,
-            self._book,
-            self._notifier,
-            dialogue_id,
-            history,
-            self._active_ai_chats,
-            self._tool_calls,
-            ai_handler._rich_session_for(message, self._config),
+        services = TurnServices(
+            node_link=node_link,
+            store=self._store,
+            config=self._config,
+            book=self._book,
+            notifier=self._notifier,
+            active_ai_chats=self._active_ai_chats,
+            tool_calls=self._tool_calls,
             pending_actions=self._pending_actions,
             interactives=self._interactives,
+        )
+        return await ai_reply.ask_and_reply(
+            message,
+            services,
+            dialogue_id,
+            history,
+            rich_session_for(message, self._config),
         )
 
 

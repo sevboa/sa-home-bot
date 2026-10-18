@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from sa_home_bot.bot import ai_flow, ai_reply, ai_turns, voice_mode
+from sa_home_bot.bot import ai_flow, ai_lines, ai_reply, ai_turns, voice_mode
 from sa_home_bot.bot.handlers import ai as ai_handler
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import Settings
@@ -1381,7 +1381,7 @@ async def test_empty_model_answer_is_not_sent_as_a_bare_prefix(store, monkeypatc
         tool_calls=ToolCalls(),
     )
 
-    assert message.sent == [ai_flow.ALBERT_HICCUP]
+    assert message.sent == [ai_lines.ALBERT_HICCUP]
     assert notifier.sent and "пустой ответ" in notifier.sent[0][1]
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert [r["role"] for r in rows] == ["user"]

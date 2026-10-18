@@ -8,7 +8,7 @@ from aiogram.types import InlineKeyboardMarkup
 
 from sa_home_bot.bot import commands, vpn_nodes, vpn_notify
 from sa_home_bot.bot import tools as ai_tools
-from sa_home_bot.bot.ai_flow import (
+from sa_home_bot.bot.ai_lines import (
     ALBERT_ASLEEP,
     ALBERT_ASLEEP_MD,
     ALBERT_TASK_MISSED,
@@ -22,6 +22,7 @@ from sa_home_bot.bot.ai_flow import (
     STEPS_TEXT,
     STEPS_TEXT_PLAIN,
 )
+from sa_home_bot.bot.alfred_voice import ALFRED_PREFIX_HTML
 from sa_home_bot.bot.handlers.vpn import resolve_request_callback
 from sa_home_bot.bot.lifecycle import broadcast_all, broadcast_system, notify_tool_call
 from sa_home_bot.bot.notifier import Notifier, notify_admins
@@ -69,7 +70,7 @@ _VPN_CHECK_EVENTS = (
 
 
 def _format_alfred_reply(raw: str) -> str:
-    return f"<b>Альфред:</b> {html.escape(raw.strip())}"
+    return ALFRED_PREFIX_HTML + html.escape(raw.strip())
 
 
 class TaskRichSessions:

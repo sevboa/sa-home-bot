@@ -474,7 +474,6 @@ def test_welcome_prompt_demands_the_menu_hint():
 async def test_welcome_prompt_uses_what_memory_knows(store, tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from sa_home_bot.bot import ai_flow
     from sa_home_bot.bot.handlers import invites as invite_handlers
 
     asked: list[str] = []
@@ -483,7 +482,7 @@ async def test_welcome_prompt_uses_what_memory_knows(store, tmp_path, monkeypatc
         asked.append(query)
         return ["любит чай без сахара"]
 
-    monkeypatch.setattr(ai_flow, "recall_facts", fake_recall)
+    monkeypatch.setattr(invite_handlers, "recall_facts", fake_recall)
     gate = _gate(store, tmp_path)
     code, _ = await gate.issue(chat_id=1, user_id=None)
     admission = await gate.try_admit(77, code, user_name="Наташа Сорокина (@nava40a)")
@@ -500,13 +499,12 @@ async def test_welcome_prompt_uses_what_memory_knows(store, tmp_path, monkeypatc
 async def test_welcome_prompt_without_memory_is_the_plain_directive(store, tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from sa_home_bot.bot import ai_flow
     from sa_home_bot.bot.handlers import invites as invite_handlers
 
     async def fake_recall(node_link, chat_id, query):
         return []
 
-    monkeypatch.setattr(ai_flow, "recall_facts", fake_recall)
+    monkeypatch.setattr(invite_handlers, "recall_facts", fake_recall)
     gate = _gate(store, tmp_path)
     code, _ = await gate.issue(chat_id=1, user_id=None)
     admission = await gate.try_admit(77, code, user_name="Никто")

@@ -12,8 +12,7 @@ from aiogram.types import Message
 from sa_home_bot import wake_core
 from sa_home_bot.bot import dialogue_context
 from sa_home_bot.bot import tools as ai_tools
-from sa_home_bot.bot.ai_context import (  # noqa: F401
-    ALFRED_TIMEZONE,
+from sa_home_bot.bot.ai_context import (
     LENGTH_NOTE,
     build_context_note,
     display_name,
@@ -22,19 +21,15 @@ from sa_home_bot.bot.ai_context import (  # noqa: F401
     recall_graph_facts,
     replied_picture_note,
 )
-from sa_home_bot.bot.ai_lines import (  # noqa: F401
+from sa_home_bot.bot.ai_lines import (
     ALBERT_ASLEEP,
     ALBERT_ASLEEP_MD,
     ALBERT_HICCUP,
     ALBERT_HICCUP_MD,
-    ALBERT_TASK_MISSED,
-    ALBERT_TASK_MISSED_MD,
     ALBERT_UNAVAILABLE,
     ALBERT_UNAVAILABLE_MD,
     ARNOLD_WAKING,
     ARNOLD_WAKING_MD,
-    CLOSING_TEXT,
-    RESTART_TEXT,
     STEPS_TEXT,
     STEPS_TEXT_PLAIN,
     SURFING_TEXT,
@@ -72,9 +67,6 @@ from sa_home_bot.utils.clock import utc_now
 log = logging.getLogger(__name__)
 
 SILENT_REPLY = "\x00silent"
-
-WAKE_POLL_TIMEOUT_S = wake_core.WAKE_POLL_TIMEOUT_S
-WAKE_POLL_INTERVAL_S = wake_core.WAKE_POLL_INTERVAL_S
 
 PROFILE_TTL_S = 300.0
 _profile_cache: dict[str, tuple[float, ModelProfileSummary | None]] = {}
@@ -300,8 +292,8 @@ class _AlfredTurn:
             self.store,
             LLM_NODE,
             LLM_SERVICE,
-            wake_timeout_s=WAKE_POLL_TIMEOUT_S,
-            wake_poll_interval_s=WAKE_POLL_INTERVAL_S,
+            wake_timeout_s=wake_core.WAKE_POLL_TIMEOUT_S,
+            wake_poll_interval_s=wake_core.WAKE_POLL_INTERVAL_S,
             warmup_timeout_s=self.settings.llm.warmup_timeout_s,
             on_phase_change=self._on_phase_change,
         )

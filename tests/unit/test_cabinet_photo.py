@@ -8,6 +8,7 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 
 from sa_home_bot.bot import image_tools
+from sa_home_bot.bot.alfred_voice import ALFRED_PREFIX_HTML
 from sa_home_bot.bot.interactives import cabinet, photo_text, photos, radio, transylvania
 from sa_home_bot.bot.interactives.base import Run
 from sa_home_bot.bot.interactives.director import (
@@ -808,7 +809,7 @@ async def test_mood_selfie_carries_the_reply_as_caption_with_face_emphasized(sto
     assert "expect" not in gen and "keep_key" not in gen
     (chat, _photo, caption) = notifier.photos[0]
     assert chat == GUEST
-    assert caption == photo_text.ALFRED_PHOTO_PREFIX + "Это возмутительно, сэр &amp; всё такое."
+    assert caption == ALFRED_PREFIX_HTML + "Это возмутительно, сэр &amp; всё такое."
     assert link.lines() == []
     assert statuses[0] == cabinet.PHOTO_STATUS_AIMING
     image = await store.image_by_id(1)

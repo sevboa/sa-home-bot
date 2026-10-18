@@ -9,12 +9,11 @@ from typing import Any
 
 from PIL import Image
 
-from sa_home_bot.proto.addresses import LLM_ADDRESS, LLM_SERVICE
+from sa_home_bot.proto.addresses import LLM_ADDRESS
 from sa_home_bot.proto.errors import SERVICE_CALL_ERRORS
 
 log = logging.getLogger(__name__)
 
-__all__ = ["LLM_SERVICE"]
 ACTION_GENERATE_IMAGE = "generate_image"
 ALFRED_LORA = ("alfred", 0.5)
 

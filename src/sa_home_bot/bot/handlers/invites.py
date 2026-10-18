@@ -9,6 +9,7 @@ from aiogram.filters import Command, CommandObject, Filter
 from aiogram.types import CallbackQuery, Message
 
 from sa_home_bot.bot import ai_flow, commands, guest_rights, guests_view, invites
+from sa_home_bot.bot.ai_context import recall_facts
 from sa_home_bot.bot.away import KIND_SUMMON, AwayService
 from sa_home_bot.bot.handlers import ai as ai_handlers
 from sa_home_bot.bot.handlers import vpn as vpn_handlers
@@ -401,7 +402,7 @@ async def _welcome_prompt(
     node_link: ServiceLink, message: Message, subscription: Subscription
 ) -> str:
     query = (subscription.invited_user or subscription.name).split(" (@")[0]
-    facts = await ai_flow.recall_facts(node_link, message.chat.id, query)
+    facts = await recall_facts(node_link, message.chat.id, query)
     if not facts:
         return WELCOME_PROMPT
     known = "; ".join(facts)

@@ -11,6 +11,7 @@ from sa_home_bot.bot.tools.memory import piggyback_graph_episode
 from sa_home_bot.graph_memory import protocol as graph_memory_protocol
 from sa_home_bot.proto.addresses import (
     LLM_ADDRESS,
+    LLM_SERVICE,
 )
 from sa_home_bot.proto.errors import ServiceUnavailableError
 from sa_home_bot.proto.messages import ProtoError
@@ -146,7 +147,7 @@ GENERATE_IMAGE = ToolSpec(
     name="generate_image",
     handler=tool_generate_image,
     declaration=image_tools.GENERATE_IMAGE_DECLARATION,
-    requires=ActionRight(image_tools.ACTION_GENERATE_IMAGE, image_tools.LLM_SERVICE),
+    requires=ActionRight(image_tools.ACTION_GENERATE_IMAGE, LLM_SERVICE),
 )
 
 FIND_IMAGE = ToolSpec(

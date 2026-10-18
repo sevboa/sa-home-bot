@@ -10,13 +10,13 @@ from datetime import timedelta
 from typing import Any
 
 from sa_home_bot.bot import image_tools
+from sa_home_bot.bot.alfred_voice import ALFRED_PREFIX_HTML
 from sa_home_bot.bot.interactives import cabinet as cabinet_mod
 from sa_home_bot.bot.interactives import places
 from sa_home_bot.bot.interactives.core import EngineCore
 from sa_home_bot.bot.interactives.director import json_object
 from sa_home_bot.bot.interactives.llm_link import LLM_CALL_ERRORS, ask_as_director
 from sa_home_bot.bot.interactives.photo_text import (
-    ALFRED_PHOTO_PREFIX,
     MOOD_PRESETS,
     photo_negative,
     selfie_description,
@@ -34,7 +34,7 @@ class MoodSelfieMixin(EngineCore):
             return False
         if not reply.strip() or len(reply) > cabinet_mod.PHOTO_LINE_MAX:
             return False
-        if len(ALFRED_PHOTO_PREFIX + html.escape(reply)) > cabinet_mod.PHOTO_CAPTION_MAX:
+        if len(ALFRED_PREFIX_HTML + html.escape(reply)) > cabinet_mod.PHOTO_CAPTION_MAX:
             return False
         now = self._now()
         purpose = cabinet_mod.SELFIE_MOOD_PURPOSE
@@ -220,7 +220,7 @@ class MoodSelfieMixin(EngineCore):
                 image_id,
                 chat_id,
                 image_tools.upscale_png(png, cfg.imagegen_display_px),
-                caption=ALFRED_PHOTO_PREFIX + html.escape(reply),
+                caption=ALFRED_PREFIX_HTML + html.escape(reply),
                 message_thread_id=message_thread_id,
                 reply_to_message_id=trigger_message_id,
             )

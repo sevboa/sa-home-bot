@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest_asyncio
 
-from sa_home_bot.bot import ai_flow, dialogue_context
+from sa_home_bot.bot import ai_flow, ai_lines, dialogue_context
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.config import LlmConfig, Settings
 from sa_home_bot.db.migrations import apply_migrations
@@ -449,7 +449,7 @@ async def test_rescue_on_length_compresses_and_regenerates(store):
     assert raw == "Полный ответ."
     assert len(message.answers) == 1
     assert any(line in message.answers[0] for line in dialogue_context.STEP_AWAY_LINES)
-    assert ai_flow.ALBERT_HICCUP not in message.answers
+    assert ai_lines.ALBERT_HICCUP not in message.answers
     assert len(link.summary_calls) == 1
     summary = await store.latest_dialogue_summary(CHAT, DIALOGUE)
     assert summary is not None

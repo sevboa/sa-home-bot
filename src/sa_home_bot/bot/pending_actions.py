@@ -13,7 +13,7 @@ from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.bot.ui.callback_data import pack, unpack_id_and_button
 from sa_home_bot.bot.ui.keyboards import button, markup
-from sa_home_bot.config import Settings
+from sa_home_bot.config import Settings, reminder_reason
 from sa_home_bot.db.store import Store
 from sa_home_bot.llm.prompt import wrap_system_directive
 from sa_home_bot.proto.addresses import TASKS_ADDRESS
@@ -501,7 +501,7 @@ class PendingActions:
                     node_link,
                     chat_id,
                     [wrap_system_directive(directive)],
-                    ai_tools.reminder_reason(self._settings.llm),
+                    reminder_reason(self._settings.llm),
                     self._settings.llm.request_timeout_s,
                     meta_extra={"pending_action_id": row["id"], "pending_action_stage": stage},
                 )

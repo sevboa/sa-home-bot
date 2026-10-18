@@ -8,9 +8,9 @@ from zoneinfo import ZoneInfo
 from aiogram.types import Message, User
 
 from sa_home_bot.bot import people_cards
-from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.service_errors import UNREACHABLE_ERRORS
 from sa_home_bot.bot.service_link import ServiceLink
+from sa_home_bot.bot.tools.get_time import WEEKDAYS_RU
 from sa_home_bot.db.store import Store
 from sa_home_bot.graph_memory import protocol as graph_memory_protocol
 from sa_home_bot.memory import protocol as memory_protocol
@@ -186,7 +186,7 @@ def _speaker_life_note(people: PeopleBook, person_id: int) -> str | None:
             where = f" в {city}" if city else ""
             parts.append(
                 f"У {prepositional}{where} сейчас "
-                f"{local_now:%H:%M} ({ai_tools.WEEKDAYS_RU[local_now.weekday()]}) — "
+                f"{local_now:%H:%M} ({WEEKDAYS_RU[local_now.weekday()]}) — "
                 f"это {possessive} часовой пояс, а не пояс сервера выше; называй "
                 "именно это время, если спросят, который час, или это иначе уместно."
             )
@@ -340,7 +340,7 @@ def _server_time_note() -> str:
     offset = now_local.strftime("%z")
     return (
         f"Точное время сейчас (пояс сервера, UTC{offset[:3]}:{offset[3:]}): "
-        f"{now_local:%Y-%m-%d %H:%M} ({ai_tools.WEEKDAYS_RU[now_local.weekday()]}). "
+        f"{now_local:%Y-%m-%d %H:%M} ({WEEKDAYS_RU[now_local.weekday()]}). "
         "Это ПОЯС СЕРВЕРА, не обязательно пояс собеседника — если тебя "
         "спросят, в каком поясе сейчас сам собеседник, и ниже нет отдельной "
         "строки про его/её местное время — честно скажи, что не знаешь, не "
@@ -352,7 +352,7 @@ def _alfred_local_time_note() -> str:
     alfred_now = datetime.now(ZoneInfo(ALFRED_TIMEZONE))
     return (
         f"Отдельно: ТВОЁ (Альфреда) личное время сейчас — там, где ты живёшь: "
-        f"{alfred_now:%H:%M} ({ai_tools.WEEKDAYS_RU[alfred_now.weekday()]}). Своё "
+        f"{alfred_now:%H:%M} ({WEEKDAYS_RU[alfred_now.weekday()]}). Своё "
         "место жительства ты не скрываешь, если прямо спросят, где ты живёшь или "
         "который час у ТЕБЯ (не у собеседника и не пояс сервера выше) — называй "
         "именно это время; про сам город — см. свой характер."

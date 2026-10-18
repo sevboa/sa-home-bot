@@ -149,14 +149,6 @@ async def _ask_and_reply(
     return await ask_and_reply(message, services, dialogue_id, history, rich_session)
 
 
-_rich_session_for = rich_session_for
-_dialogue_id_for = dialogue_id_of
-_handle_photo_message = ai_turns.photo_history
-_handle_sticker_message = ai_turns.sticker_history
-PHOTO_MARKER = ai_turns.PHOTO_MARKER
-STICKER_MARKER = ai_turns.STICKER_MARKER
-
-
 @router.message(Command(commands.ALFRED.name, commands.AI.name))
 async def cmd_ai(
     message: Message,

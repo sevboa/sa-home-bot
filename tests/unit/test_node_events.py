@@ -3,7 +3,7 @@ from unittest.mock import ANY
 import pytest
 from aiogram.types import InputRichBlockThinking
 
-from sa_home_bot.bot.ai_flow import (
+from sa_home_bot.bot.ai_lines import (
     ALBERT_ASLEEP,
     ALBERT_ASLEEP_MD,
     ALBERT_TASK_MISSED,

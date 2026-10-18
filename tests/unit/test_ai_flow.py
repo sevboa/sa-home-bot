@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from sa_home_bot import llm_chat
-from sa_home_bot.bot import ai_flow, wake_state
+from sa_home_bot import llm_chat, wake_core
+from sa_home_bot.bot import ai_flow, ai_lines, wake_state
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.config import LlmConfig, Settings
@@ -225,8 +225,8 @@ async def test_fast_path_no_narrative_when_node_already_up(store):
     assert router_args["reason"] == "off"
     assert router_args["tools"] == [
         d
-        for d in ai_flow.ai_tools.tools_for(_admin_book().for_chat(1)).declarations
-        if d["function"]["name"] not in ai_flow.ai_tools.CANARY_TOOLS
+        for d in ai_tools.tools_for(_admin_book().for_chat(1)).declarations
+        if d["function"]["name"] not in ai_tools.CANARY_TOOLS
     ]
     assert router_args["role"] == "router"
     persona_args = link.command_calls[1][1]
@@ -370,7 +370,7 @@ async def test_tool_call_round_limit_squeezes_answer_without_tools(store):
     raw = await _ask(message, link, store, "...")
 
     assert raw == "Двá, сэг"
-    assert ai_flow.ALBERT_HICCUP not in message.answers
+    assert ai_lines.ALBERT_HICCUP not in message.answers
     squeeze_args = link.command_calls[llm_chat.MAX_TOOL_ROUNDS][1]
     assert squeeze_args["tools"] == []
 
@@ -389,7 +389,7 @@ async def test_empty_answer_after_round_limit_is_still_a_hiccup(store):
     raw = await _ask(message, link, store, "...")
 
     assert raw is None
-    assert message.answers == [ai_flow.ALBERT_HICCUP]
+    assert message.answers == [ai_lines.ALBERT_HICCUP]
 
 
 def test_think_marker_survives_llm_service_transforms(tmp_path):
@@ -418,7 +418,7 @@ async def test_router_level_maps_to_reason(store):
     assert link.command_calls[0][1]["reason"] == "off"
     assert link.command_calls[1][1]["reason"] == "medium"
     assert "think" not in link.command_calls[1][1]
-    assert message.answers == [ai_flow.THINKING_TEXT]
+    assert message.answers == [ai_lines.THINKING_TEXT]
 
 
 async def test_scene_turn_does_not_think(store):
@@ -456,15 +456,15 @@ async def test_router_uses_describe_profile_when_mode_not_pinned(store):
 
 async def test_unavailable_wake_sent_but_still_unreachable_after_30s(store, monkeypatch):
     await wake_state.remember(store, "mycraft", MYCRAFT_WAKE)
-    monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
-    monkeypatch.setattr(ai_flow, "WAKE_POLL_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(wake_core, "WAKE_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(wake_core, "WAKE_POLL_TIMEOUT_S", 0.05)
     message = FakeMessage()
     link = FakeNodeLink(get_state_routes={})
 
     raw = await _ask(message, link, store)
 
     assert raw is None
-    assert message.answers == [ai_flow.STEPS_TEXT, ai_flow.ALBERT_UNAVAILABLE]
+    assert message.answers == [ai_lines.STEPS_TEXT, ai_lines.ALBERT_UNAVAILABLE]
     assert link.wol_sent == [{"mac": MYCRAFT_WAKE["mac"]}]
 
 
@@ -481,13 +481,13 @@ async def test_ask_discovers_unavailable_despite_fresh_presence_reports_immediat
     raw = await _ask(message, link, store)
 
     assert raw is None
-    assert message.answers == [ai_flow.ALBERT_UNAVAILABLE]
+    assert message.answers == [ai_lines.ALBERT_UNAVAILABLE]
     assert link.wol_sent == []
 
 
 async def test_wake_succeeds_but_warmup_fails_after_wake(store, monkeypatch):
     await wake_state.remember(store, "mycraft", MYCRAFT_WAKE)
-    monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(wake_core, "WAKE_POLL_INTERVAL_S", 0.01)
     message = FakeMessage()
     notifier = _notifier()
     link = FakeNodeLink(
@@ -499,10 +499,10 @@ async def test_wake_succeeds_but_warmup_fails_after_wake(store, monkeypatch):
 
     assert raw is None
     assert message.answers == [
-        ai_flow.STEPS_TEXT,
-        ai_flow.ARNOLD_WAKING,
-        ai_flow.STEPS_TEXT,
-        ai_flow.ALBERT_ASLEEP,
+        ai_lines.STEPS_TEXT,
+        ai_lines.ARNOLD_WAKING,
+        ai_lines.STEPS_TEXT,
+        ai_lines.ALBERT_ASLEEP,
     ]
     assert link.command_calls[-1] == ("warmup", {}, "mycraft")
     assert len(notifier.sent) == 1
@@ -516,7 +516,7 @@ async def test_node_alive_but_service_down_skips_wake_reports_crashed(store):
     raw = await _ask(message, link, store, notifier=notifier)
 
     assert raw is None
-    assert message.answers == [ai_flow.ALBERT_UNAVAILABLE]
+    assert message.answers == [ai_lines.ALBERT_UNAVAILABLE]
     assert link.wol_sent == []
     assert link.command_calls == []
     assert len(notifier.sent) == 1
@@ -627,7 +627,7 @@ async def test_web_search_announces_surfing_once_per_request(store):
     raw = await _ask(message, link, store, "что нового?")
 
     assert raw == "Вот что нашёл, сэг"
-    assert message.answers.count(ai_flow.SURFING_TEXT) == 1
+    assert message.answers.count(ai_lines.SURFING_TEXT) == 1
     calls = await store.tool_calls_for_dialogue(message.chat.id, 1)
     assert [c["tool_name"] for c in calls] == ["web_search", "web_search"]
 
@@ -645,7 +645,7 @@ async def test_other_tools_do_not_announce_surfing(store):
 
     await _ask(message, link, store, "2+2")
 
-    assert ai_flow.SURFING_TEXT not in message.answers
+    assert ai_lines.SURFING_TEXT not in message.answers
 
 
 async def test_tool_status_pushed_for_every_call_when_rich_session_present(store):
@@ -664,8 +664,8 @@ async def test_tool_status_pushed_for_every_call_when_rich_session_present(store
     raw = await _ask(message, link, store, "что нового?", rich_session=rich_session)
 
     assert raw == "Вот что нашёл, сэг"
-    assert ai_flow.SURFING_TEXT not in message.answers
-    assert rich_session.statuses == [ai_flow.TOOL_STATUS_TEXT["web_search"]] * 2
+    assert ai_lines.SURFING_TEXT not in message.answers
+    assert rich_session.statuses == [ai_lines.TOOL_STATUS_TEXT["web_search"]] * 2
 
 
 async def test_tool_status_uses_per_tool_phrase(store):
@@ -682,13 +682,13 @@ async def test_tool_status_uses_per_tool_phrase(store):
 
     await _ask(message, link, store, "2+2", rich_session=rich_session)
 
-    assert rich_session.statuses == [ai_flow.TOOL_STATUS_TEXT["calc"]]
+    assert rich_session.statuses == [ai_lines.TOOL_STATUS_TEXT["calc"]]
 
 
 def test_tool_status_covers_every_registered_tool():
     admin = Subscription(chat_id=1, name="admin", allowed_commands=frozenset({"*"}))
     toolkit = ai_tools.tools_for(admin)
-    missing = set(toolkit.handlers) - set(ai_flow.TOOL_STATUS_TEXT)
+    missing = set(toolkit.handlers) - set(ai_lines.TOOL_STATUS_TEXT)
     assert missing == set()
 
 
@@ -713,7 +713,7 @@ class FakeDismissLink:
 
 async def test_dismiss_tool_powers_nothing_off_during_the_request(store):
     message = FakeMessage()
-    box = ai_flow.ai_tools.DismissalBox()
+    box = ai_tools.DismissalBox()
     link = FakeNodeLink(
         chat_results=[
             {"tool_calls": [{"function": {"name": "dismiss", "arguments": {"mode": "off"}}}]},
@@ -734,12 +734,10 @@ async def test_perform_dismissal_powers_off_even_if_model_did_not_unload(store):
     message = FakeMessage()
     link = FakeDismissLink(fail_on="sleep")
 
-    await ai_flow.perform_dismissal(
-        message, link, ai_flow.ai_tools.DISMISS_OFF, _admin_book(), _notifier()
-    )
+    await ai_flow.perform_dismissal(message, link, ai_tools.DISMISS_OFF, _admin_book(), _notifier())
 
     assert [c[0] for c in link.calls] == ["sleep", "poweroff"]
-    assert message.answers == [ai_flow.DISMISS_TEXTS[ai_flow.ai_tools.DISMISS_OFF]]
+    assert message.answers == [ai_flow.DISMISS_TEXTS[ai_tools.DISMISS_OFF]]
 
 
 async def test_perform_dismissal_reports_when_machine_stayed_up(store):
@@ -747,9 +745,7 @@ async def test_perform_dismissal_reports_when_machine_stayed_up(store):
     notifier = _notifier()
     link = FakeDismissLink(fail_on="poweroff")
 
-    await ai_flow.perform_dismissal(
-        message, link, ai_flow.ai_tools.DISMISS_OFF, _admin_book(), notifier
-    )
+    await ai_flow.perform_dismissal(message, link, ai_tools.DISMISS_OFF, _admin_book(), notifier)
 
     assert message.answers == [ai_flow.DISMISS_FAILED_TEXT]
     assert notifier.sent and "poweroff" in notifier.sent[0][1]
@@ -760,9 +756,7 @@ async def test_perform_dismissal_model_only_failure_is_reported(store):
     notifier = _notifier()
     link = FakeDismissLink(fail_on="sleep")
 
-    await ai_flow.perform_dismissal(
-        message, link, ai_flow.ai_tools.DISMISS_MODEL, _admin_book(), notifier
-    )
+    await ai_flow.perform_dismissal(message, link, ai_tools.DISMISS_MODEL, _admin_book(), notifier)
 
     assert message.answers == [ai_flow.DISMISS_FAILED_TEXT]
     assert notifier.sent and "llm.sleep" in notifier.sent[0][1]
@@ -943,8 +937,8 @@ async def test_typing_uses_the_topic_thread_id(store):
 
 
 async def test_typing_does_not_fire_while_node_unreachable_and_no_wake_data(store, monkeypatch):
-    monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
-    monkeypatch.setattr(ai_flow, "WAKE_POLL_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(wake_core, "WAKE_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(wake_core, "WAKE_POLL_TIMEOUT_S", 0.05)
     message = FakeMessage()
     link = FakeNodeLink()
 
@@ -1050,7 +1044,7 @@ async def test_escalates_to_thinking_when_router_asks(store, mode):
 
     assert raw == "Точный ответ после раздумий"
     assert _shown(message, session) == _expected(
-        mode, plain=[ai_flow.THINKING_TEXT], statuses=[ai_flow.THINKING_TEXT_PLAIN]
+        mode, plain=[ai_lines.THINKING_TEXT], statuses=[ai_lines.THINKING_TEXT_PLAIN]
     )
     router_args, persona_args = link.command_calls[0][1], link.command_calls[1][1]
     assert router_args["role"] == "router"
@@ -1073,7 +1067,7 @@ async def test_asleep_model_shows_steps_but_no_wake(store, mode):
 
     assert raw == "Секунду, сэг"
     assert _shown(message, session) == _expected(
-        mode, plain=[ai_flow.STEPS_TEXT], statuses=[ai_flow.STEPS_TEXT_PLAIN]
+        mode, plain=[ai_lines.STEPS_TEXT], statuses=[ai_lines.STEPS_TEXT_PLAIN]
     )
     assert link.wol_sent == []
 
@@ -1091,9 +1085,9 @@ async def test_asleep_warmup_fails_answers_as_albert(store, mode):
     assert raw is None
     assert _shown(message, session) == _expected(
         mode,
-        plain=[ai_flow.STEPS_TEXT, ai_flow.ALBERT_ASLEEP],
-        statuses=[ai_flow.STEPS_TEXT_PLAIN],
-        finalized=[ai_flow.ALBERT_ASLEEP_MD],
+        plain=[ai_lines.STEPS_TEXT, ai_lines.ALBERT_ASLEEP],
+        statuses=[ai_lines.STEPS_TEXT_PLAIN],
+        finalized=[ai_lines.ALBERT_ASLEEP_MD],
     )
     assert link.wol_sent == []
     assert link.command_calls == [("warmup", {}, "mycraft")]
@@ -1103,7 +1097,7 @@ async def test_asleep_warmup_fails_answers_as_albert(store, mode):
 @pytest.mark.parametrize("mode", MODES)
 async def test_unavailable_then_woken_within_30s(store, monkeypatch, mode):
     await wake_state.remember(store, "mycraft", MYCRAFT_WAKE)
-    monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(wake_core, "WAKE_POLL_INTERVAL_S", 0.01)
     message, session = FakeMessage(), _session(mode)
     link = FakeNodeLink(
         chat_results=[{"response": ROUTE_OK}, {"response": "Сейчас подойду"}],
@@ -1115,9 +1109,9 @@ async def test_unavailable_then_woken_within_30s(store, monkeypatch, mode):
     assert raw == "Сейчас подойду"
     assert _shown(message, session) == _expected(
         mode,
-        plain=[ai_flow.STEPS_TEXT, ai_flow.ARNOLD_WAKING, ai_flow.STEPS_TEXT],
-        statuses=[ai_flow.STEPS_TEXT_PLAIN, ai_flow.STEPS_TEXT_PLAIN],
-        finalized=[ai_flow.ARNOLD_WAKING_MD],
+        plain=[ai_lines.STEPS_TEXT, ai_lines.ARNOLD_WAKING, ai_lines.STEPS_TEXT],
+        statuses=[ai_lines.STEPS_TEXT_PLAIN, ai_lines.STEPS_TEXT_PLAIN],
+        finalized=[ai_lines.ARNOLD_WAKING_MD],
     )
     assert link.wol_sent == [{"mac": MYCRAFT_WAKE["mac"]}]
     assert ("warmup", {}, "mycraft") in link.command_calls
@@ -1125,8 +1119,8 @@ async def test_unavailable_then_woken_within_30s(store, monkeypatch, mode):
 
 @pytest.mark.parametrize("mode", MODES)
 async def test_unavailable_and_no_wake_data_gives_up_immediately(store, monkeypatch, mode):
-    monkeypatch.setattr(ai_flow, "WAKE_POLL_INTERVAL_S", 0.01)
-    monkeypatch.setattr(ai_flow, "WAKE_POLL_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(wake_core, "WAKE_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(wake_core, "WAKE_POLL_TIMEOUT_S", 0.05)
     message, session = FakeMessage(), _session(mode)
     link = FakeNodeLink()
 
@@ -1135,9 +1129,9 @@ async def test_unavailable_and_no_wake_data_gives_up_immediately(store, monkeypa
     assert raw is None
     assert _shown(message, session) == _expected(
         mode,
-        plain=[ai_flow.STEPS_TEXT, ai_flow.ALBERT_UNAVAILABLE],
-        statuses=[ai_flow.STEPS_TEXT_PLAIN],
-        finalized=[ai_flow.ALBERT_UNAVAILABLE_MD],
+        plain=[ai_lines.STEPS_TEXT, ai_lines.ALBERT_UNAVAILABLE],
+        statuses=[ai_lines.STEPS_TEXT_PLAIN],
+        finalized=[ai_lines.ALBERT_UNAVAILABLE_MD],
     )
     assert link.wol_sent == []
     assert link.command_calls == []
@@ -1152,7 +1146,7 @@ async def test_internal_error_answers_user_and_notifies_admin(store, mode):
 
     assert raw is None
     assert _shown(message, session) == _expected(
-        mode, plain=[ai_flow.ALBERT_HICCUP], finalized=[ai_flow.ALBERT_HICCUP_MD]
+        mode, plain=[ai_lines.ALBERT_HICCUP], finalized=[ai_lines.ALBERT_HICCUP_MD]
     )
     assert "Ollama" not in "".join(message.answers)
     assert link.wol_sent == []

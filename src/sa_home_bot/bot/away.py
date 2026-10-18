@@ -13,7 +13,8 @@ from zoneinfo import ZoneInfo
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from sa_home_bot.bot.ai_flow import ALFRED_TIMEZONE, display_name
+from sa_home_bot.bot import ai_turns
+from sa_home_bot.bot.ai_context import ALFRED_TIMEZONE, display_name
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
 
@@ -563,17 +564,15 @@ class AwayService:
     async def _content_for(
         self, message: Message, kind: str, text: str, media: tuple[str, Any] | None
     ) -> str | None:
-        from sa_home_bot.bot.handlers import ai as ai_handler
-
         if kind == KIND_TEXT:
             return text
         if kind == KIND_PHOTO:
             caption = (message.caption or "").strip()
-            marker = ai_handler.PHOTO_MARKER
+            marker = ai_turns.PHOTO_MARKER
             return f"{marker} {caption}".strip()
         if kind == KIND_STICKER:
             emoji = message.sticker.emoji if message.sticker else None
-            marker = ai_handler.STICKER_MARKER
+            marker = ai_turns.STICKER_MARKER
             return f"{marker} {emoji}".strip() if emoji else marker
         if kind == KIND_MEDIA and media is not None:
             return media_stub(media[0])

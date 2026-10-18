@@ -8,11 +8,11 @@ from typing import Any
 
 from aiogram.types import Message
 
-from sa_home_bot.bot import ai_flow, dialogue_context, voice_mode, voice_tts
+from sa_home_bot.bot import ai_flow, ai_lines, dialogue_context, voice_mode, voice_tts
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.alfred_voice import ALFRED_PREFIX_HTML
 from sa_home_bot.bot.interactives.engine import Interactives
-from sa_home_bot.bot.notifier import Notifier, chunk_text
+from sa_home_bot.bot.notifier import Notifier, chunk_text, notify_admins
 from sa_home_bot.bot.pending_actions import PendingActions
 from sa_home_bot.bot.rich_stream import RichDraftPolicy, RichStreamSession
 from sa_home_bot.bot.service_link import ServiceLink
@@ -190,7 +190,7 @@ async def _request_reply(
     except Exception as exc:
         log.exception("ai: необработанная ошибка в диалоге chat=%s", message.chat.id)
         await message.answer(UNHANDLED_ERROR_TEXT)
-        await ai_flow.notify_admins(
+        await notify_admins(
             services.book,
             services.notifier,
             f"🔥 /ai (chat={message.chat.id}): необработанное исключение {exc!r}",
@@ -209,8 +209,8 @@ async def _wait_for_tool_photo(
 
 async def _report_empty_reply(message: Message, services: TurnServices) -> None:
     log.warning("ai: пустой ответ модели (chat=%s)", message.chat.id)
-    await message.answer(ai_flow.ALBERT_HICCUP)
-    await ai_flow.notify_admins(
+    await message.answer(ai_lines.ALBERT_HICCUP)
+    await notify_admins(
         services.book,
         services.notifier,
         f"⚠️ /ai (chat={message.chat.id}): модель вернула пустой ответ",
@@ -311,7 +311,7 @@ async def _deliver_text(
             message.chat.id,
             raw,
         )
-        await ai_flow.notify_admins(
+        await notify_admins(
             services.book,
             services.notifier,
             f"⚠️ /ai (chat={message.chat.id}): ответ Альфреда не доставлен "

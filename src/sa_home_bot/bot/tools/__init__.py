@@ -41,7 +41,7 @@ from sa_home_bot.bot.tools.delivery import (
     TELL_MAX_TOTAL_PER_HOUR,
     parse_recipient_id,
 )
-from sa_home_bot.bot.tools.get_time import WEEKDAYS_RU, place_now, tool_get_time
+from sa_home_bot.bot.tools.get_time import place_now, tool_get_time
 from sa_home_bot.bot.tools.guests_list import tool_guests_list
 from sa_home_bot.bot.tools.interactive_tools import (
     tool_act,
@@ -79,8 +79,6 @@ from sa_home_bot.bot.tools.torrents import tool_torrents
 from sa_home_bot.bot.tools.vpn import tool_vpn
 from sa_home_bot.bot.tools.weather import tool_get_weather
 from sa_home_bot.bot.tools.web_search import tool_web_search
-from sa_home_bot.config import reminder_reason
-from sa_home_bot.proto.addresses import LLM_NODE, LLM_SERVICE
 from sa_home_bot.proto.messages import ProtoError
 from sa_home_bot.vpn import protocol as vpn_protocol
 
@@ -93,8 +91,6 @@ __all__ = [
     "DISMISS_OFF",
     "DISMISS_SLEEP",
     "DismissalBox",
-    "LLM_NODE",
-    "LLM_SERVICE",
     "NEED_RECIPIENT_ID",
     "ProtoError",
     "RELATION_ACQUAINTANCE",
@@ -108,7 +104,6 @@ __all__ = [
     "ToolKit",
     "ToolSpec",
     "VariantRights",
-    "WEEKDAYS_RU",
     "_DECL_REQUEST_ACQUAINTANCE",
     "_NOTIFY_PERSONAS",
     "acquaintance_conflict",
@@ -118,7 +113,6 @@ __all__ = [
     "parse_recipient_id",
     "place_now",
     "random",
-    "reminder_reason",
     "render_notify",
     "render_tell",
     "schedule_agent_dialogue",

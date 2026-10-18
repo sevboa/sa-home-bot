@@ -5,7 +5,7 @@ import io
 import pytest
 
 from sa_home_bot import wake_core
-from sa_home_bot.bot import ai_flow, voice_stt
+from sa_home_bot.bot import ai_lines, voice_stt
 from sa_home_bot.config import LlmConfig, Settings
 
 
@@ -118,7 +118,7 @@ async def test_unavailable_when_service_not_ready(monkeypatch):
     result = await voice_stt.transcribe_voice_message(message, link, store=None, config=_settings())
 
     assert result is None
-    assert ai_flow.ALBERT_UNAVAILABLE in message.sent
+    assert ai_lines.ALBERT_UNAVAILABLE in message.sent
     assert message.bot.download_calls == 0
     assert link.commands == []
 
@@ -131,7 +131,7 @@ async def test_waiting_text_shown_when_initially_asleep(monkeypatch):
     result = await voice_stt.transcribe_voice_message(message, link, store=None, config=_settings())
 
     assert result == "разбудили и распознали"
-    assert message.sent == [ai_flow.STEPS_TEXT, voice_stt.VOICE_LISTENING_TEXT]
+    assert message.sent == [ai_lines.STEPS_TEXT, voice_stt.VOICE_LISTENING_TEXT]
 
 
 async def test_success_returns_transcript_without_waiting_text_when_already_warm(monkeypatch):
@@ -176,7 +176,7 @@ async def test_service_error_sends_hiccup_text(monkeypatch):
     result = await voice_stt.transcribe_voice_message(message, link, store=None, config=_settings())
 
     assert result is None
-    assert message.sent == [voice_stt.VOICE_LISTENING_TEXT, ai_flow.ALBERT_HICCUP]
+    assert message.sent == [voice_stt.VOICE_LISTENING_TEXT, ai_lines.ALBERT_HICCUP]
 
 
 async def test_large_voice_uses_chunked_upload_with_session(monkeypatch):
@@ -209,7 +209,7 @@ async def test_any_non_ready_outcome_is_treated_as_unavailable(monkeypatch, outc
     result = await voice_stt.transcribe_voice_message(message, link, store=None, config=_settings())
 
     assert result is None
-    assert message.sent == [ai_flow.ALBERT_UNAVAILABLE]
+    assert message.sent == [ai_lines.ALBERT_UNAVAILABLE]
 
 
 async def test_rich_session_gets_listening_status_not_message_answer(monkeypatch):
@@ -241,7 +241,10 @@ async def test_rich_session_wake_wait_pushes_steps_status(monkeypatch):
     )
 
     assert result == "разбудили"
-    assert rich_session.statuses == [ai_flow.STEPS_TEXT_PLAIN, voice_stt.VOICE_LISTENING_TEXT_PLAIN]
+    assert rich_session.statuses == [
+        ai_lines.STEPS_TEXT_PLAIN,
+        voice_stt.VOICE_LISTENING_TEXT_PLAIN,
+    ]
 
 
 async def test_rich_session_unavailable_finalizes_status_not_message_answer(monkeypatch):
@@ -256,7 +259,7 @@ async def test_rich_session_unavailable_finalizes_status_not_message_answer(monk
 
     assert result is None
     assert message.sent == []
-    assert rich_session.finalized == [ai_flow.ALBERT_UNAVAILABLE_MD]
+    assert rich_session.finalized == [ai_lines.ALBERT_UNAVAILABLE_MD]
 
 
 async def test_rich_session_empty_transcript_finalizes_status(monkeypatch):

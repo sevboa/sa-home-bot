@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from sa_home_bot.bot import tools
+from sa_home_bot.proto.addresses import LLM_NODE, LLM_SERVICE
 from sa_home_bot.proto.errors import ServiceUnavailableError
 from tests.unit.tools_support import (
     CHAT_ID,
@@ -60,8 +61,8 @@ async def test_look_at_photo_success_calls_service_with_stored_key(store):
     action, args, dst = link.calls[0]
     assert action == tools.ACTION_LOOK_AT_PHOTO
     assert args == {"photo_key": "111_1", "question": "какого цвета кот?", "chat_id": CHAT_ID}
-    assert dst.node == tools.LLM_NODE
-    assert dst.service == tools.LLM_SERVICE
+    assert dst.node == LLM_NODE
+    assert dst.service == LLM_SERVICE
 
 
 async def _alfred_picture(store, *, purpose="photo", message_id=500):

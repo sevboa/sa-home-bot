@@ -11,6 +11,7 @@ from sa_home_bot.config import (
     Settings,
 )
 from sa_home_bot.llm import prompt
+from sa_home_bot.proto.addresses import LLM_NODE, LLM_SERVICE
 from sa_home_bot.proto.errors import ServiceUnavailableError
 from sa_home_bot.tasks import protocol as task_protocol
 from tests.unit.tools_support import (
@@ -93,8 +94,8 @@ async def test_remind_creates_task_for_future_time():
     assert action == task_protocol.ACTION_CREATE
     assert dst.node == task_protocol.NODE_ID
     assert dst.service == task_protocol.SERVICE_NAME
-    assert args["dst_node"] == tools.LLM_NODE
-    assert args["dst_service"] == tools.LLM_SERVICE
+    assert args["dst_node"] == LLM_NODE
+    assert args["dst_service"] == LLM_SERVICE
     assert args["action"] == task_protocol.ACTION_CHAT_LOOP
     assert args["meta"]["kind"] == task_protocol.TASK_KIND_LLM_CHAT
     assert args["meta"]["chat_id"] == CHAT_ID
@@ -328,8 +329,8 @@ async def test_schedule_agent_dialogue_creates_chat_loop_task_without_dialogue_i
     assert action == task_protocol.ACTION_CREATE
     assert dst.node == task_protocol.NODE_ID
     assert dst.service == task_protocol.SERVICE_NAME
-    assert args["dst_node"] == tools.LLM_NODE
-    assert args["dst_service"] == tools.LLM_SERVICE
+    assert args["dst_node"] == LLM_NODE
+    assert args["dst_service"] == LLM_SERVICE
     assert args["action"] == task_protocol.ACTION_CHAT_LOOP
     assert args["args"] == {"messages": messages, "reason": "high", "chat_id": other_chat_id}
     assert args["timeout_s"] == 60.0
