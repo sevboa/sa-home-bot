@@ -1,29 +1,23 @@
-"""Обработка динамических действий «act:…» (питание, службы, апп-скилы, VPN).
-
-/swarm (алиас /nodes) переехал в bot/handlers/swarm_panel.py вместе со всей
-иерархией панели роя — здесь остался только разбор `act:`-кнопок. Права на
-callback уже проверены CallbackAuthorizationMiddleware (`действие@служба`).
-Здесь только маршрутизация к нужному линку и рендер.
-"""
-
 from __future__ import annotations
 
 import contextlib
 import logging
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup
 
 from sa_home_bot.bot import actions, apps_view, commands, node_view
 from sa_home_bot.bot.handlers import vpn as vpn_handlers
 from sa_home_bot.bot.invites import Gatekeeper
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
+from sa_home_bot.bot.ui.redraw import redraw
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
-from sa_home_bot.proto.messages import Address, ProtoError
+from sa_home_bot.proto.addresses import MONITOR_SERVICE, NODE_SERVICE, node_address
+from sa_home_bot.proto.errors import SERVICE_CALL_ERRORS
+from sa_home_bot.proto.messages import ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.vpn import protocol as vpn_protocol
@@ -32,8 +26,9 @@ log = logging.getLogger(__name__)
 
 router = Router(name="node")
 
-# Имя собственной службы бота в назначениях ноды (см. services/registry.py).
 SELF_SERVICE_NAME = "telegram-bot"
+ACTION_RESTART_NODE = "restart_node"
+ACTION_CHECK_UPDATE = "check_update"
 
 SELF_RESTART_TEXT = "🔄 Перезапускаюсь, вернусь через минуту."
 SELF_STOP_TEXT = (
@@ -41,18 +36,13 @@ SELF_STOP_TEXT = (
     "<code>nodectl start telegram-bot</code>."
 )
 
-# Ключ app_state с id последнего callback'а само-рестарта — защита от
-# переигрыша: Telegram мог не подтвердить offset до смерти процесса, и после
-# рестарта тот же callback приедет снова (иначе бот перезапускал бы себя в цикле).
 SELF_RESTART_CB_KEY = "self_restart_cb"
 
 
 def _is_self_shutdown(action_id: str, value: str | None, node_id: str | None) -> bool:
-    """Действие, убивающее сам процесс бота: stop/restart своей службы
-    telegram-bot или само-рестарт своей ноды (нода перезапускает и детей)."""
     if node_id is not None:
-        return False  # чужой telegram-bot — обычная ветка
-    if action_id == "restart_node":
+        return False
+    if action_id == ACTION_RESTART_NODE:
         return True
     return action_id in ("stop", "restart") and value == SELF_SERVICE_NAME
 
@@ -60,12 +50,6 @@ def _is_self_shutdown(action_id: str, value: str | None, node_id: str | None) ->
 async def _handle_self_shutdown(
     callback: CallbackQuery, store: Store, node_link: ServiceLink, action_id: str, value: str | None
 ) -> None:
-    """Спец-кейс: бот просит ноду убить себя же.
-
-    Ответ ноды не дождаться (нода ждёт нашей смерти) — прощаемся ДО команды,
-    ошибки рвущегося линка глотаем, карточку не перерисовываем. После подъёма
-    штатное «Сторож снова на посту» шлёт lifecycle.
-    """
     if await store.get_state(SELF_RESTART_CB_KEY) == callback.id:
         log.warning("Повторный callback само-рестарта %s — игнорирую", callback.id)
         await callback.answer()
@@ -73,10 +57,8 @@ async def _handle_self_shutdown(
     await store.set_state(SELF_RESTART_CB_KEY, callback.id)
 
     await callback.answer()
-    await callback.message.answer(
-        SELF_STOP_TEXT if action_id == "stop" else SELF_RESTART_TEXT
-    )
-    with contextlib.suppress(ServiceUnavailableError, ProtoError, TimeoutError):
+    await callback.message.answer(SELF_STOP_TEXT if action_id == "stop" else SELF_RESTART_TEXT)
+    with contextlib.suppress(*SERVICE_CALL_ERRORS, TimeoutError):
         args = {"name": value} if value else {}
         await node_link.command(action_id, args)
 
@@ -84,23 +66,14 @@ async def _handle_self_shutdown(
 async def _run_node_action(
     node_link: ServiceLink, action_id: str, value: str | None, node_id: str | None
 ) -> tuple[str | None, dict | None]:
-    """Выполнить действие ноды (свою или пира); (текст ошибки, ответ команды).
-
-    Ответ нужен действиям без побочного эффекта на карточке (`check_update`
-    ничего не меняет в get_state() — редрайв карточки не покажет результат,
-    его надо явно отрисовать вызывающему)."""
-    dst = Address(node=node_id, service=node_view.NODE_SERVICE) if node_id else None
+    dst = node_address(node_id)
     action = await actions.find_action(node_link, action_id, dst=dst)
     if action is None:
         return "Действие недоступно.", None
     try:
         result = await node_link.command(action.id, actions.build_args(action, value), dst=dst)
     except ServiceUnavailableError:
-        return (
-            f"⚠️ Нода «{node_id}» недоступна (нет связи или она спит)."
-            if node_id
-            else node_view.NODE_DOWN_TEXT
-        ), None
+        return node_view.node_unavailable_text(node_id), None
     except ProtoError as exc:
         return f"⚠️ Ошибка: {exc.message}", None
     return None, result
@@ -118,6 +91,43 @@ def _format_check_update(result: dict) -> str:
     return f"✅ Обновлений нет — установлена последняя версия (v{installed})"
 
 
+async def _node_action_screen(
+    node_link: ServiceLink,
+    subscription: Subscription | None,
+    action_id: str,
+    value: str | None,
+    node_id: str | None,
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    if action_id in (node_view.ACTION_ASSIGN, node_view.ACTION_UNASSIGN):
+        if subscription is not None and subscription.allows_command(commands.NODES.name):
+            return await node_view.build_services_page_view(node_link, subscription, node_id, 0)
+        return await node_view.build_node_card_view(node_link, subscription, node_id)
+    if value is not None:
+        return await node_view.build_service_card_view(node_link, subscription, value, node_id)
+    return await node_view.build_node_card_view(node_link, subscription, node_id)
+
+
+async def _handle_node_action(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    subscription: Subscription | None,
+    action_id: str,
+    value: str | None,
+    node_id: str | None,
+) -> None:
+    error, result = await _run_node_action(node_link, action_id, value, node_id)
+    if error is not None:
+        await callback.message.answer(error)
+    elif action_id == ACTION_CHECK_UPDATE:
+        await callback.message.answer(_format_check_update(result or {}))
+    else:
+        text, keyboard = await _node_action_screen(
+            node_link, subscription, action_id, value, node_id
+        )
+        await redraw(callback, text, keyboard)
+    await callback.answer("Готово" if error is None else None)
+
+
 @router.callback_query(F.data.startswith(f"{commands.ACTION_CALLBACK_PREFIX}:"))
 async def on_dynamic_action(
     callback: CallbackQuery,
@@ -128,9 +138,6 @@ async def on_dynamic_action(
     config: Settings,
     pending_vpn_secrets: PendingVpnSecrets,
     book: SubscriptionBook,
-    # Оба приходят из workflow_data (app.py) — необязательны здесь только ради
-    # тестов, которые зовут хендлер напрямую и до правки гостевых прав не
-    # доходят; без них экран умений честно скажет, что недоступен.
     gate: Gatekeeper | None = None,
     bot: Bot | None = None,
     subscription: Subscription | None = None,
@@ -142,9 +149,6 @@ async def on_dynamic_action(
     service, action_id, value, node_id = parsed
 
     if service == vpn_protocol.SERVICE_NAME:
-        # Право на кнопку уже проверено (CallbackAuthorizationMiddleware),
-        # но handle_action ждёт не-None subscription — сюда без подписки не
-        # дойти (SilenceGate отсекает раньше).
         if subscription is not None:
             await vpn_handlers.handle_action(
                 callback,
@@ -162,69 +166,21 @@ async def on_dynamic_action(
             await callback.answer()
         return
 
-    if service == node_view.NODE_SERVICE and _is_self_shutdown(action_id, value, node_id):
+    if service == NODE_SERVICE and _is_self_shutdown(action_id, value, node_id):
         await _handle_self_shutdown(callback, store, node_link, action_id, value)
         return
 
-    if service == node_view.NODE_SERVICE:
-        error, result = await _run_node_action(node_link, action_id, value, node_id)
-        if error is not None:
-            await callback.message.answer(error)
-        elif action_id == "check_update":
-            # Без побочного эффекта на get_state() — карточку перерисовывать
-            # незачем, результат некому больше показать, кроме как тут.
-            await callback.message.answer(_format_check_update(result or {}))
-        elif action_id in ("assign", "unassign"):
-            # Назначение/снятие — глубже карточки ноды: у кого есть право
-            # `nodes`, кнопка «➕ Назначить X» теперь на экране «Службы»
-            # (node_view.build_services_list_view) — туда и возвращаем; у
-            # кого права нет, их единственный экран — сама карточка ноды.
-            if subscription is not None and subscription.allows_command(
-                commands.NODES.name
-            ):
-                text, keyboard = await node_view.build_services_page_view(
-                    node_link, subscription, node_id, 0
-                )
-            else:
-                text, keyboard = await node_view.build_node_card_view(
-                    node_link, subscription, node_id
-                )
-            with contextlib.suppress(TelegramBadRequest):
-                await callback.message.edit_text(text, reply_markup=keyboard)
-        elif value is not None:
-            # Действие над службой (своей или пира) — перерисовать её карточку.
-            text, keyboard = await node_view.build_service_card_view(
-                node_link, subscription, value, node_id
-            )
-            with contextlib.suppress(TelegramBadRequest):
-                await callback.message.edit_text(text, reply_markup=keyboard)
-        else:
-            # Питание — перерисовать карточку самой ноды.
-            text, keyboard = await node_view.build_node_card_view(
-                node_link, subscription, node_id
-            )
-            with contextlib.suppress(TelegramBadRequest):
-                await callback.message.edit_text(text, reply_markup=keyboard)
-        await callback.answer("Готово" if error is None else None)
+    if service == NODE_SERVICE:
+        await _handle_node_action(callback, node_link, subscription, action_id, value, node_id)
         return
 
     if service == apps_view.APPS_SERVICE:
-        # Карточка умения (голая команда/svc или экран панели /swarm) —
-        # редрав на месте, не новое сообщение (единое сообщение — тот же
-        # приём, что у карточки ноды/службы чуть выше). Кнопка «⬅️ Назад»,
-        # добавленная панелью (bot/swarm_panel.py::build_skill_card_view) на
-        # входе, на этом редраве не переживёт — карточка умения сама по себе
-        # не знает, кто её открыл; не критично, полноценная навигация назад
-        # остаётся через /swarm.
         text, keyboard = await apps_view.run_app_skill(apps_link, subscription, action_id, value)
-        with contextlib.suppress(TelegramBadRequest):
-            await callback.message.edit_text(
-                text, reply_markup=keyboard, disable_web_page_preview=True
-            )
+        await redraw(callback, text, keyboard, disable_web_page_preview=True)
         await callback.answer()
         return
 
-    if service == "monitor":
+    if service == MONITOR_SERVICE:
         text = await actions.run_action(
             store, node_link, service, action_id, value, node_id=node_id
         )

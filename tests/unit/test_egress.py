@@ -1,5 +1,3 @@
-"""Этап 52: выбор маршрута до Bot API, переключение сессии, детектор, менеджер."""
-
 from __future__ import annotations
 
 import asyncio
@@ -22,6 +20,7 @@ from sa_home_bot.bot.egress import (
     load_saved_state,
 )
 from sa_home_bot.config import TelegramConfig
+from tests.unit.support.fakes import Clock
 
 TOKEN = "123456:ABCDEF"
 J = "socks5://100.1.1.1:1080"
@@ -51,9 +50,6 @@ def pick(current=DIRECT, direct_ok=False, streak=0, cands=(), bans=None, now=100
         now=now,
         **kw,
     )
-
-
-# --- чистый выбор
 
 
 def test_direct_stays_when_alive():
@@ -93,12 +89,12 @@ def test_prefer_direct_false_stays_on_proxy():
 def test_proxy_switch_hysteresis():
     slow = cand("jeeves", "100.1.1.1:1080", 1000)
     fast = cand("wooster", "100.2.2.2:1080", 400)
-    assert pick(J, False, 0, [slow, fast]).route == W  # 1000 > 2*400 и разница > 300
+    assert pick(J, False, 0, [slow, fast]).route == W
     close = cand("jeeves", "100.1.1.1:1080", 700)
-    assert not pick(J, False, 0, [close, fast]).changed  # выигрыш < 2×
+    assert not pick(J, False, 0, [close, fast]).changed
     small = cand("jeeves", "100.1.1.1:1080", 280)
     tiny = cand("wooster", "100.2.2.2:1080", 100)
-    assert not pick(J, False, 0, [small, tiny]).changed  # > 2×, но < 300 мс
+    assert not pick(J, False, 0, [small, tiny]).changed
 
 
 def test_current_proxy_invalid_or_banned_switches():
@@ -106,7 +102,6 @@ def test_current_proxy_invalid_or_banned_switches():
     assert pick(J, False, 0, [stale, WC]).route == W
     d = pick(J, False, 0, [JC, WC], bans={J: 2000.0}, now=1000.0)
     assert d.route == W
-    # бан истёк
     assert not pick(J, False, 0, [JC, WC], bans={J: 900.0}, now=1000.0).changed
 
 
@@ -125,9 +120,6 @@ def test_no_candidates_keeps_route():
     assert (d.route, d.changed) == (J, False)
 
 
-# --- сессия
-
-
 def test_apply_route_direct_and_proxy():
     s = AiohttpSession(proxy=J)
     assert s.proxy == J
@@ -143,17 +135,6 @@ def test_apply_route_direct_and_proxy():
     assert s.proxy == W and s._should_reset_connector
     assert s._connector_type is not TCPConnector
     assert egress.current_route(s) == W
-
-
-# --- детектор
-
-
-class Clock:
-    def __init__(self, t=1000.0):
-        self.t = t
-
-    def __call__(self):
-        return self.t
 
 
 async def _ok(bot, method):
@@ -175,7 +156,7 @@ async def test_detector_three_consecutive():
         with pytest.raises(TelegramNetworkError):
             await det(_failing(err), None, GetMe())
     assert not hits
-    await det(_ok, None, GetMe())  # успех сбрасывает
+    await det(_ok, None, GetMe())
     for _ in range(3):
         with pytest.raises(TelegramNetworkError):
             await det(_failing(err), None, GetMe())
@@ -189,14 +170,13 @@ async def test_detector_no_success_60s():
     with pytest.raises(asyncio.TimeoutError):
         await det(_failing(TimeoutError()), None, GetMe())
     assert not hits
-    clock.t += 61
+    clock.advance(61)
     with pytest.raises(asyncio.TimeoutError):
         await det(_failing(TimeoutError()), None, GetMe())
     assert hits == [1]
 
 
 async def test_detector_getupdates_timeout_counts_and_recovery():
-    """Таймаут getUpdates — сбой (блокировка DROP'ом приходит таймаутами)."""
     hits, rec = [], []
     det = TroubleDetector(
         on_trouble=lambda: hits.append(1), on_recovered=lambda: rec.append(1), clock=Clock()
@@ -211,8 +191,6 @@ async def test_detector_getupdates_timeout_counts_and_recovery():
 
 
 async def test_detector_retriggers_after_reset_and_keeps_recovery():
-    """После смены маршрута (reset) сбой на новом маршруте снова триггерит,
-    а on_recovered всё равно приходит на первом успехе."""
     hits, rec = [], []
     det = TroubleDetector(
         on_trouble=lambda: hits.append(1), on_recovered=lambda: rec.append(1), clock=Clock()
@@ -231,9 +209,6 @@ async def test_detector_retriggers_after_reset_and_keeps_recovery():
     assert rec == [1]
 
 
-# --- состояние
-
-
 def test_state_save_load(tmp_path):
     p = tmp_path / "sub" / "egress.json"
     assert load_saved_state(p) is None
@@ -243,9 +218,6 @@ def test_state_save_load(tmp_path):
     assert load_saved_state(p) is None
     p.write_text(json.dumps([1]), encoding="utf-8")
     assert load_saved_state(p) is None
-
-
-# --- менеджер
 
 
 def make_manager(tmp_path, cands, probe, **cfg_kw):
@@ -283,11 +255,9 @@ async def test_manager_trouble_tick_flow(tmp_path):
     assert m.state()["route"] == J and m.state()["ms"] == 200
     assert load_saved_state(tmp_path / "egress.json")["route"] == J
 
-    # на прокси поймали ошибки → бан, берём wooster
     await m.handle_trouble()
     assert m.route == W and J in m.bans
 
-    # direct ожил: нужен второй тик
     box["probe"] = True
     await m.tick()
     assert m.route == W
