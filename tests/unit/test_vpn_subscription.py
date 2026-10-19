@@ -477,6 +477,10 @@ async def test_web_subscription_and_page(client):
     assert (await resp.text()).startswith("vless://")
     page = await cl.get(f"/s/{token}")
     assert page.status == 200 and page.content_type == "text/html"
+    for kind in (subs.BRIDGE_HIDDIFY, subs.BRIDGE_AMNEZIA):
+        bridge = await cl.get(f"/s/{token}/{kind}")
+        assert bridge.status == 200 and "Вся страница настроек" in await bridge.text()
+        assert (await cl.get("/s/" + "A" * 32 + "/" + kind)).status == 404
     text = await page.text()
     assert "Добавить в Hiddify" in text and f"/sub/{token}" in text
 
@@ -720,6 +724,7 @@ async def test_awg_post_issues_missing_keys_local_and_remote_json_no_store(awg_s
         j = await resp.json()
         assert j["ok"] and j["key"].startswith("vpn://") and j["filename"].startswith(name)
         assert "[Interface]" in j["conf"] and j["qr"].startswith("data:image/svg+xml")
+        assert j["add_qr"].startswith("data:image/svg+xml") and j["add_qr"] != j["qr"]
         assert j["nonce"]
         row = await svc._active_row(CHAT, "📱 iPhone", vpn_protocol.TRANSPORT_AWG)
         assert row is not None
@@ -1087,15 +1092,52 @@ def test_page_order_hiddify_first_amnezia_main_no_autoissue():
 
 def test_page_other_ways_have_store_qrs_and_open_awg_alternatives():
     page = _page(_awg_sub(), awg_forms=FORMS)
-    assert "Скачать Hiddify на телефон — наведите камеру на QR" in page
-    assert "Скачать AmneziaVPN на телефон — наведите камеру на QR" in page
+    assert "<b>📲 Скачать приложение Hiddify</b> — наведите камеру телефона" in page
+    assert "<b>📲 Скачать приложение AmneziaVPN</b> — наведите камеру телефона" in page
     assert 'alt="QR-код: Hiddify в Google Play"' in page
     assert 'alt="QR-код: AmneziaVPN в App Store"' in page
-    assert "в Hiddify «+» &rarr; «Сканировать QR-код»" in page
+    assert "<b>🔎 Для сканера внутри Hiddify</b> («+» &rarr; «Сканировать QR-код»)" in page
+    assert "камера телефона по ней только скачает файл" in page
+    assert "Создать подключение в Hiddify" not in page
+    assert "'🔎 Для сканера внутри AmneziaVPN '" in page and "'➕ Создать подключение '" in page
     assert '<details id="awgmore"><summary' in page and 'id="awgmore" hidden' not in page
-    assert page.index("Скачать AmneziaVPN") > page.index('id="awgmore"')
+    assert page.index("Скачать приложение AmneziaVPN") > page.index('id="awgmore"')
     assert "QR-код подключения появятся здесь" in page
-    assert "Скачать AmneziaVPN" not in _page()
+    assert "Скачать приложение AmneziaVPN" not in _page()
+
+
+def test_page_hiddify_add_qr_labeled_and_large():
+    page = _page(add_qr_data_uri="data:image/svg+xml;base64,ADD")
+    assert "<b>➕ Создать подключение в Hiddify</b> — наведите камеру" in page
+    assert '<img class="lg" src="data:image/svg+xml;base64,ADD"' in page
+    assert page.index("Создать подключение в Hiddify") < page.index("Для сканера внутри Hiddify")
+
+
+def test_hiddify_bridge_opens_app_with_routes():
+    page = subs.render_hiddify_bridge(
+        _sub(),
+        sub_url="https://h:8444/sub/tok",
+        links=LINKS,
+        platform="android",
+        page_path="/s/tok",
+    )
+    assert 'id="open" href="hiddify://import/https://h:8444/sub/tok?format=singbox"' in page
+    assert "location.href = a.href" in page and 'href="/s/tok"' in page
+    assert "apps.apple.com/x" in page and "play.google.com/x" not in page
+
+
+def test_amnezia_bridge_reads_key_from_fragment_only():
+    android = subs.render_amnezia_bridge(
+        _labeled("Rose"), links=LINKS, platform="android", page_path="/s/tok"
+    )
+    assert "location.hash" in android and "history.replaceState" in android
+    assert "vpn://" not in android.split("<script>")[0]
+    assert "play.google.com/amnezia" in android and "apps.apple.com/amnezia" not in android
+    assert "Сейчас откроется AmneziaVPN" in android
+    ios = subs.render_amnezia_bridge(
+        _labeled("Rose"), links=LINKS, platform="ios", page_path="/s/tok"
+    )
+    assert "«📋 Скопировать ключ»" in ios and 'PLATFORM = "ios"' in ios
 
 
 def _labeled(label):

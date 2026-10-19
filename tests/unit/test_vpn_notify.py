@@ -191,7 +191,7 @@ def test_access_opened_texts():
     withdev = vpn_notify.access_opened_text(us, 100, has_devices=True)
     assert withdev.startswith(plain)
     assert "Страна появится в Hiddify сама" in withdev
-    assert "«📥 Получить настройки» в «⚙️ Управление»" in withdev
+    assert "«📥 Получить настройки» в «⚙️ Управление устройствами» → устройство" in withdev
     assert vpn_notify.access_closed_text(us) == "📶 VPN 🇺🇸: доступ закрыт."
 
 

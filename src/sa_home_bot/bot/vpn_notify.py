@@ -129,7 +129,7 @@ def access_opened_text(country: vd.Country, base_gb: float, *, has_devices: bool
     if has_devices:
         text += (
             "\nСтрана появится в Hiddify сама; для AmneziaVPN — «📥 Получить настройки» "
-            "в «⚙️ Управление»."
+            "в «⚙️ Управление устройствами» → устройство."
         )
     return text
 

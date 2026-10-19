@@ -332,6 +332,7 @@ ol { margin:8px 0 0; padding-left:22px; } li { margin:6px 0; }
 .qr img { width:220px; height:220px; max-width:100%; background:#fff; padding:8px;
   border-radius:12px; }
 .qr img.sm { width:150px; height:150px; }
+.qr img.lg { width:280px; height:280px; }
 .qr .hint { margin-top:4px; }
 a.l { color:var(--accent); margin-right:12px; display:inline-block; }
 input.t { width:100%; padding:10px; border-radius:10px; border:1px solid var(--line);
@@ -405,7 +406,7 @@ def _store_qrs(app: str, pairs: list[tuple[str, str]]) -> str:
     if not cells:
         return ""
     return (
-        f'<p class="hint">Скачать {e(app)} на телефон — наведите камеру на QR:</p>'
+        f'<p class="hint"><b>📲 Скачать приложение {e(app)}</b> — наведите камеру телефона:</p>'
         f'<div class="pair">{"".join(cells)}</div>'
     )
 
@@ -472,6 +473,14 @@ def detect_platform(user_agent: str) -> str:
 _HIDDIFY_FIRST = (
     '<p class="hint">Поставьте его первым: при включённом Hiddify выпускается ключ для '
     "основного способа — AmneziaVPN (ниже), и он выручит, если AmneziaVPN не подключится.</p>"
+)
+
+
+_HIDDIFY_ADD_QR = (
+    '<div class="qr"><p class="hint"><b>➕ Создать подключение в Hiddify</b> — наведите камеру '
+    "телефона, на котором уже установлен Hiddify: откроется приложение и добавит подключение. "
+    "Можно показать другому человеку: он подключится от имени этого устройства.</p>"
+    '<img class="lg" src="{src}" alt="QR-код: создать подключение Hiddify"></div>'
 )
 
 
@@ -712,6 +721,12 @@ _AWG_JS = r"""(function () {
     });
     setAct(cell, b);
   }
+  function qrBlock(src, size, title, tail, alt) {
+    var q = el('div', 'qr'), p = el('p', 'hint'), img = el('img', size);
+    p.appendChild(el('b', '', title)); p.appendChild(document.createTextNode(tail));
+    img.src = src; img.alt = alt; q.appendChild(p); q.appendChild(img);
+    return q;
+  }
   function more_(cell, j) {
     var node = cell.getAttribute('data-node'), old = moreBody.querySelector('[data-for="' + node + '"]');
     if (old) moreBody.removeChild(old);
@@ -729,11 +744,13 @@ _AWG_JS = r"""(function () {
       catch (e) { a.hidden = true; }
       blk.appendChild(a);
     }
-    if (j.qr) {
-      var q = el('div', 'qr'), img = el('img'); img.src = j.qr; img.alt = 'QR-код настроек AmneziaVPN';
-      q.appendChild(el('p', 'hint', 'QR-код подключения ' + flag(cell) + ': в AmneziaVPN «+» → QR-код.'));
-      q.appendChild(img); blk.appendChild(q);
-    }
+    if (j.add_qr) blk.appendChild(qrBlock(j.add_qr, 'lg', '➕ Создать подключение ' + flag(cell)
+      + ' в AmneziaVPN', ' — наведите камеру телефона, на котором уже установлен AmneziaVPN: '
+      + 'откроется страница и добавит подключение в приложение. Можно показать другому '
+      + 'человеку: он подключится от имени этого устройства.', 'QR-код: создать подключение AmneziaVPN'));
+    if (j.qr) blk.appendChild(qrBlock(j.qr, '', '🔎 Для сканера внутри AmneziaVPN ' + flag(cell),
+      ' («+» → QR-код). Камерой телефона не сканируйте — это текст настроек.',
+      'QR-код для сканера внутри AmneziaVPN'));
     moreBody.appendChild(blk);
     var hint = document.getElementById('awgmorehint'); if (hint) hint.hidden = true;
   }
@@ -780,6 +797,7 @@ def render_page(
     awg_forms: dict[str, str] | None = None,
     platform: str = PLATFORM_OTHER,
     path: str = "",
+    add_qr_data_uri: str = "",
 ) -> str:
     e = html.escape
     title = f"📶 VPN · {sub.device_label}"
@@ -820,7 +838,8 @@ def render_page(
 <p class="hint" id="copied" hidden>Ссылка скопирована. В Hiddify: «+» &rarr; «Добавить из буфера обмена».</p>
 <a class="btn alt" download href="{e(routed, quote=True)}">⬇️ Файл настроек</a>
 {_store_qrs("Hiddify", pairs)}
-<div class="qr"><p class="hint">QR-код подключения: в Hiddify «+» &rarr; «Сканировать QR-код».</p><img src="{e(qr_data_uri, quote=True)}" alt="QR-код ссылки подписки"></div>
+{_HIDDIFY_ADD_QR.format(src=e(add_qr_data_uri, quote=True)) if add_qr_data_uri else ""}
+<div class="qr"><p class="hint"><b>🔎 Для сканера внутри Hiddify</b> («+» &rarr; «Сканировать QR-код»). Это ссылка на файл настроек (JSON): камера телефона по ней только скачает файл.</p><img src="{e(qr_data_uri, quote=True)}" alt="QR-код для сканера внутри Hiddify"></div>
 </details>
 </div>
 {_awg_card(sub, awg_forms or {}, platform, links)}
@@ -839,3 +858,99 @@ def render_page(
             )
         )
     return _layout(title, body, script)
+
+
+BRIDGE_HIDDIFY = "hiddify"
+BRIDGE_AMNEZIA = "amnezia"
+
+_BRIDGE_HIDDIFY_JS = r"""(function () {
+  var a = document.getElementById('open');
+  if (a && /android|iphone|ipad|ipod/i.test(navigator.userAgent)) location.href = a.href;
+})();"""
+
+_BRIDGE_AMNEZIA_JS = r"""(function () {
+  var PLATFORM = __PLATFORM__;
+  var key = '';
+  try { key = decodeURIComponent(location.hash.slice(1)); } catch (e) {}
+  var bad = document.getElementById('bad'), box = document.getElementById('ok');
+  if (!/^vpn:\/\/[A-Za-z0-9_=-]+$/.test(key)) { bad.hidden = false; return; }
+  try { history.replaceState(null, '', location.pathname); } catch (e) {}
+  box.hidden = false;
+  var a = document.getElementById('open'), c = document.getElementById('copy');
+  a.href = key;
+  if (PLATFORM === 'ios') { a.hidden = true; c.className = 'btn'; }
+  c.addEventListener('click', function () {
+    function done() { c.textContent = '✅ Скопировано'; }
+    function legacy() {
+      var t = document.createElement('textarea'); t.value = key; t.style.position = 'fixed';
+      t.style.opacity = '0'; document.body.appendChild(t); t.focus(); t.select();
+      try { if (document.execCommand('copy')) done(); } catch (e) {}
+      document.body.removeChild(t);
+    }
+    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(key).then(done, legacy);
+    else legacy();
+  });
+  if (PLATFORM !== 'ios') location.href = key;
+})();"""
+
+
+def bridge_path(page_path: str, kind: str) -> str:
+    return f"{page_path}/{kind}"
+
+
+def _bridge_stores(sub: Subscription, platform: str, android: str, ios: str, site: str) -> str:
+    device = device_platform(sub.device_label)
+    if not device and platform in (PLATFORM_ANDROID, PLATFORM_IOS):
+        device = platform
+    return _links(*_stores(device, android, ios, site))
+
+
+def render_hiddify_bridge(
+    sub: Subscription, *, sub_url: str, links: PageLinks, platform: str, page_path: str
+) -> str:
+    e = html.escape
+    link = deep_link(sub_url + "?format=singbox", sub.device_label)
+    stores = _bridge_stores(
+        sub, platform, links.hiddify_android, links.hiddify_ios, links.hiddify_site
+    )
+    body = f"""<h1>➕ Подключение Hiddify</h1>
+<div class="card">
+<p>Сейчас откроется Hiddify и предложит добавить подключение «{e(profile_title(sub.device_label))}» — подтвердите.</p>
+<a class="btn" id="open" href="{e(link, quote=True)}">➕ Добавить в Hiddify</a>
+<p class="hint">Не открылось — установите Hiddify и нажмите кнопку ещё раз:<br>{stores}</p>
+<p class="hint">Потом в Hiddify нажмите «{HIDDIFY_ON}».</p>
+<a class="btn alt" href="{e(page_path, quote=True)}">📶 Вся страница настроек</a>
+</div>"""
+    return _layout("➕ Подключение Hiddify", body, _BRIDGE_HIDDIFY_JS)
+
+
+def render_amnezia_bridge(
+    sub: Subscription, *, links: PageLinks, platform: str, page_path: str
+) -> str:
+    e = html.escape
+    stores = _bridge_stores(
+        sub, platform, links.amnezia_android, links.amnezia_ios, links.amnezia_site
+    )
+    if platform == PLATFORM_IOS:
+        how = (
+            "Нажмите «📋 Скопировать ключ», в AmneziaVPN нажмите «+», в поле «Вставьте ключ» — "
+            "«Вставить», затем «Продолжить»."
+        )
+    else:
+        how = "Сейчас откроется AmneziaVPN и предложит добавить подключение — подтвердите."
+    body = f"""<h1>➕ Подключение AmneziaVPN</h1>
+<div class="card" id="bad" hidden><p>Ссылка неполная — отсканируйте QR-код ещё раз.</p></div>
+<div class="card" id="ok" hidden>
+<p>{e(how)}</p>
+<a class="btn" id="open" href="">➕ Добавить в AmneziaVPN</a>
+<button class="btn alt" id="copy" type="button">📋 Скопировать ключ</button>
+<p class="hint">Не открылось — установите именно AmneziaVPN (не AmneziaWG) и попробуйте ещё раз:<br>{stores}</p>
+<p class="hint">Потом в AmneziaVPN нажмите «{AWG_ON}».</p>
+</div>
+<noscript><p class="hint">Для добавления нужен JavaScript.</p></noscript>
+<div class="card"><a class="btn alt" href="{e(page_path, quote=True)}">📶 Вся страница настроек</a></div>"""
+    return _layout(
+        "➕ Подключение AmneziaVPN",
+        body,
+        _BRIDGE_AMNEZIA_JS.replace("__PLATFORM__", json.dumps(platform)),
+    )

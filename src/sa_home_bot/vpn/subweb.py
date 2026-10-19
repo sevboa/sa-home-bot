@@ -139,6 +139,8 @@ class SubscriptionWeb:
         app.router.add_get("/s/{token}", self._page)
         app.router.add_get("/s/{token}/where", self._where)
         app.router.add_post("/s/{token}/awg", self._awg_post)
+        app.router.add_get("/s/{token}/" + sub.BRIDGE_HIDDIFY, self._hiddify_bridge)
+        app.router.add_get("/s/{token}/" + sub.BRIDGE_AMNEZIA, self._amnezia_bridge)
         app.router.add_get("/sub/{token}", self._sub)
         return app
 
@@ -303,10 +305,42 @@ class SubscriptionWeb:
             awg_forms=forms,
             platform=sub.detect_platform(request.headers.get("User-Agent", "")),
             path=f"/s/{token}",
+            add_qr_data_uri=qr.svg_data_uri(
+                sub.bridge_path(self.page_url(token), sub.BRIDGE_HIDDIFY)
+            ),
         )
         resp = self._html(body)
         resp.headers["content-security-policy"] = sub.page_csp(found.nodes)
         return resp
+
+    async def _hiddify_bridge(self, request: web.Request) -> web.Response:
+        found = await self._lookup(request)
+        if found is None or not found.entries:
+            return _not_found()
+        token = request.match_info["token"]
+        return self._html(
+            sub.render_hiddify_bridge(
+                found,
+                sub_url=self.sub_url(token),
+                links=self._links,
+                platform=sub.detect_platform(request.headers.get("User-Agent", "")),
+                page_path=f"/s/{token}",
+            )
+        )
+
+    async def _amnezia_bridge(self, request: web.Request) -> web.Response:
+        found = await self._lookup(request)
+        if found is None or not found.entries:
+            return _not_found()
+        token = request.match_info["token"]
+        return self._html(
+            sub.render_amnezia_bridge(
+                found,
+                links=self._links,
+                platform=sub.detect_platform(request.headers.get("User-Agent", "")),
+                page_path=f"/s/{token}",
+            )
+        )
 
     async def _where(self, request: web.Request) -> web.Response:
         found = await self._lookup(request)
@@ -380,6 +414,14 @@ class SubscriptionWeb:
                 "conf": conf,
                 "filename": filename,
                 "qr": qr.svg_data_uri(conf),
+                "add_qr": (
+                    qr.svg_data_uri(
+                        f"{sub.bridge_path(self.page_url(token), sub.BRIDGE_AMNEZIA)}#{key}",
+                        error="l",
+                    )
+                    if key
+                    else ""
+                ),
                 "nonce": nxt,
             }
         )

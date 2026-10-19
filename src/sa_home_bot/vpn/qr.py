@@ -17,5 +17,5 @@ def png_b64(text: str) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def svg_data_uri(text: str) -> str:
-    return segno.make(text, error=QR_ERROR_LEVEL).svg_data_uri(scale=SVG_SCALE, border=QR_BORDER)
+def svg_data_uri(text: str, error: str = QR_ERROR_LEVEL) -> str:
+    return segno.make(text, error=error).svg_data_uri(scale=SVG_SCALE, border=QR_BORDER)
