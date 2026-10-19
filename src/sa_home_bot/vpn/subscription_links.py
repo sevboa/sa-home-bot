@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import time
 from datetime import datetime, timedelta
 from typing import Any
@@ -221,11 +222,15 @@ class SubscriptionLinksMixin:
         for node, reply in answers:
             if reply is None:
                 entries += self._sub_stale.get((token, node), [])
+                stale = self._sub_stale_info.get((token, node))
+                if stale is not None:
+                    nodes.append(dataclasses.replace(stale, health="", awg=False, awg_key=False))
                 continue
             try:
                 if reply.get("info"):
                     info = subs.NodeInfo.from_wire(reply["info"], local=node == self._node_id)
                     nodes.append(info)
+                    self._sub_stale_info[(token, node)] = info
             except (KeyError, TypeError, ValueError):
                 pass
             if not reply.get("found"):
@@ -259,6 +264,8 @@ class SubscriptionLinksMixin:
             )
         if len(self._sub_cache) > 2000:
             self._sub_cache.clear()
+        if len(self._sub_stale_info) > 4000:
+            self._sub_stale_info.clear()
         self._sub_cache[token] = (now, result)
         return result
 

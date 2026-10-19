@@ -409,6 +409,9 @@ async def test_peer_down_keeps_last_known_country(swarm):
     link.down.add("wooster")
     sub = await a.resolve_subscription(token)
     assert [e.name for e in sub.entries] == ["🇳🇱 Нидерланды", "🇺🇸 США"]
+    peer = next(n for n in sub.nodes if n.node == "wooster")
+    assert peer.ip == "198.51.100.2" and peer.health == "" and not peer.awg
+    assert subs.detect_exit("198.51.100.2", sub.nodes, a._cfg.subnet) == "🇺🇸 США"
 
 
 async def test_revoked_device_is_gone_everywhere(swarm):

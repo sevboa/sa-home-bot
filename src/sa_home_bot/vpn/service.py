@@ -127,6 +127,7 @@ class VpnService(
         self.sub_web: Any = None
         self._sub_cache: dict[str, tuple[float, subs.Subscription | None]] = {}
         self._sub_stale: dict[tuple[str, str], list[subs.SubEntry]] = {}
+        self._sub_stale_info: dict[tuple[str, str], subs.NodeInfo] = {}
         self._peer_nodes_cache: tuple[float, list[str]] | None = None
 
     def _has(self, transport: str) -> bool:
