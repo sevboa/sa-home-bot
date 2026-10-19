@@ -18,8 +18,79 @@ from sa_home_bot.vpn.service_common import (
     log,
 )
 
+ONLINE_WINDOW_S = 300
+
+
+def _stamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        when = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=UTC)
+
 
 class UsageMixin:
+    async def _live(self, fetch, rows: list, transport: str) -> dict:
+        if not any((row["transport"] or TRANSPORT_AWG) == transport for row in rows):
+            return {}
+        try:
+            return await fetch()
+        except Exception:
+            log.warning("vpn: живой опрос %s для проверки устройства не удался", transport)
+            return {}
+
+    async def _device_online(self, args: dict[str, Any]) -> dict[str, Any]:
+        chat_id = self._chat_id(args)
+        label = self._required_device_label(args)
+        cur = await self._db.conn.execute(
+            "SELECT p.transport, p.public_key, p.address, p.last_handshake_at, "
+            "c.last_rx, c.last_tx FROM vpn_peers p "
+            "LEFT JOIN vpn_counters c ON c.public_key = p.public_key "
+            "WHERE p.chat_id = ? AND p.device_label = ? AND p.status = 'active'",
+            (chat_id, label),
+        )
+        rows = await cur.fetchall()
+        handshakes = (
+            await self._live(self._backend.latest_handshakes, rows, TRANSPORT_AWG)
+            if self._has(TRANSPORT_AWG)
+            else {}
+        )
+        stats = (
+            await self._live(self._reality.stats, rows, TRANSPORT_REALITY)
+            if self._reality is not None
+            else {}
+        )
+        now = utc_now()
+        connections = []
+        for row in rows:
+            transport = row["transport"] or TRANSPORT_AWG
+            seen = _stamp(row["last_handshake_at"])
+            if transport == TRANSPORT_AWG:
+                ts = handshakes.get(row["public_key"], 0)
+                if ts:
+                    live = datetime.fromtimestamp(ts, tz=UTC)
+                    seen = max(seen, live) if seen else live
+            elif row["address"] in stats:
+                a, b = stats[row["address"]]
+                if row["last_rx"] is not None and a + b > row["last_rx"] + row["last_tx"]:
+                    seen = now
+            online = seen is not None and (now - seen).total_seconds() <= ONLINE_WINDOW_S
+            connections.append(
+                {
+                    "transport": transport,
+                    "online": online,
+                    "seen_at": seen.isoformat() if seen else None,
+                }
+            )
+        return {
+            "node": self._node,
+            "label": self._cfg.location,
+            "device_label": label,
+            "connections": connections,
+        }
+
     async def _device_usage(
         self, chat_id: int, month: str, devices: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:

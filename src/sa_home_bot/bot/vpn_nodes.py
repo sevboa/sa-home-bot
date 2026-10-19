@@ -9,7 +9,13 @@ from pathlib import Path
 from sa_home_bot import wake_core
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.proto.messages import Address, ProtoError
-from sa_home_bot.vpn.protocol import ACTION_USAGE, SERVICE_NAME, TRANSPORT_AWG, TRANSPORT_REALITY
+from sa_home_bot.vpn.protocol import (
+    ACTION_DEVICE_ONLINE,
+    ACTION_USAGE,
+    SERVICE_NAME,
+    TRANSPORT_AWG,
+    TRANSPORT_REALITY,
+)
 
 log = logging.getLogger(__name__)
 
@@ -140,6 +146,12 @@ def unavailable_servers(answered: list[dict]) -> list[dict]:
 
 async def fanout_usage(node_link: ServiceLink, chat_id: int) -> list[dict]:
     return await fanout(node_link, ACTION_USAGE, {"chat_id": chat_id})
+
+
+async def device_online(node_link: ServiceLink, chat_id: int, label: str) -> list[dict]:
+    return await fanout(
+        node_link, ACTION_DEVICE_ONLINE, {"chat_id": chat_id, "device_label": label}
+    )
 
 
 async def usage_for_chat(node_link: ServiceLink, chat_id: int) -> list[dict]:

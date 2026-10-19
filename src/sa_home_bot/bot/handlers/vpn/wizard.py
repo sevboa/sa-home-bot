@@ -140,12 +140,31 @@ async def show(ctx: Ctx, value: str) -> None:
         await callback.answer("Устройство не найдено — начнём заново.", show_alert=True)
         await ctx.edit(vpn_wizard.PICK_TEXT, vpn_wizard.pick_keyboard())
         return
-    await callback.answer()
     if code == vpn_wizard.CHECK:
-        await ctx.edit(vpn_wizard.CHECK_TEXT, vpn_wizard.step_keyboard(code, platform, key))
+        await _check(ctx, platform, key, device.label)
         return
+    await callback.answer()
     page_url = await subscription_page_url(ctx.node_link, ctx.chat_id, device)
     await _show_connect_step(ctx, platform, key, device.label, page_url)
+
+
+async def _check(ctx: Ctx, platform: vpn_wizard.Platform, key: str, label: str) -> None:
+    await ctx.callback.answer("Проверяю подключение…")
+    answered = await vpn_nodes.device_online(ctx.node_link, ctx.chat_id, label)
+    if not answered:
+        await ctx.edit(
+            vpn_wizard.CHECK_TEXT, vpn_wizard.step_keyboard(vpn_wizard.CHECK, platform, key)
+        )
+        return
+    found = vpn_wizard.online_connection(answered)
+    if found is None:
+        await ctx.edit(
+            vpn_wizard.NOT_CONNECTED_TEXT, vpn_wizard.not_connected_keyboard(platform.code, key)
+        )
+        return
+    transport, server = found
+    method = vpn_devices.TRANSPORT_NAME.get(transport, transport)
+    await ctx.edit(vpn_wizard.connected_text(method, server), vpn_keyboards.done_keyboard())
 
 
 async def _help(ctx: Ctx, platform: vpn_wizard.Platform, step: str, key: str) -> None:

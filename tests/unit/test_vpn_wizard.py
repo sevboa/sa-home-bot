@@ -80,6 +80,9 @@ def _env(monkeypatch):
     async def fake_fanout(node_link, action, args):
         if action == vpn_protocol.ACTION_GET_SUBSCRIPTION:
             return [{"page_url": "https://1.2.3.4:8444/s/tok"}]
+        if action == vpn_protocol.ACTION_DEVICE_ONLINE:
+            state["online_args"] = args
+            return state.get("online", [])
         return state["servers"]
 
     monkeypatch.setattr(vpn_nodes, "fanout", fake_fanout)
@@ -371,3 +374,56 @@ def test_every_wizard_callback_fits_64_bytes():
             if button.callback_data:
                 assert len(button.callback_data.encode()) <= 64, button.callback_data
     assert ADMIN
+
+
+def _online(*conns, node="jeeves", label="🇳🇱 Нидерланды"):
+    return {"node": node, "label": label, "connections": list(conns)}
+
+
+async def test_check_not_connected_offers_retry_help_home(_env):
+    _env["servers"] = _with(LABEL)
+    _env["online"] = [
+        _online({"transport": "reality", "online": False, "seen_at": None}),
+        _online(node="wooster", label="🇺🇸 США"),
+    ]
+    cb, _, _ = await _press(f"act:vpn:vpn_card:wdi{KEY}")
+    assert _env["online_args"] == {"chat_id": 778, "device_label": LABEL}
+    text, markup = last_edit(cb)
+    assert text == w.NOT_CONNECTED_TEXT
+    assert button_texts(markup) == [
+        "🔁 Повторить попытку",
+        vpn_keyboards.CALL_FOR_HELP_TEXT,
+        vpn_keyboards.HOME_TEXT,
+    ]
+    retry, help_, home = all_buttons(markup)
+    assert retry.callback_data.endswith(f":wci{KEY}")
+    assert help_.callback_data.endswith(f":whdi{KEY}")
+    cb, _, _ = await _press(retry.callback_data)
+    assert all_buttons(last_edit(cb)[1])[0].text == "📶 Открыть настройки"
+    cb, _, _ = await _press(home.callback_data)
+    assert "📶 Открыть настройки" not in button_texts(last_edit(cb)[1])
+
+
+async def test_check_connected_names_method_and_freshest_server(_env):
+    _env["servers"] = _with(LABEL)
+    _env["online"] = [
+        _online({"transport": "reality", "online": True, "seen_at": "2026-10-19T10:00:00+00:00"}),
+        _online(
+            {"transport": "awg", "online": True, "seen_at": "2026-10-19T10:05:00+00:00"},
+            node="wooster",
+            label="🇺🇸 США",
+        ),
+    ]
+    cb, _, _ = await _press(f"act:vpn:vpn_card:wdi{KEY}")
+    text, markup = last_edit(cb)
+    assert text.startswith("🎉 Готово! Подключено через <b>AmneziaVPN</b>, сервер <b>🇺🇸 США</b>.")
+    assert button_texts(markup) == [vpn_keyboards.HOME_TEXT]
+
+
+def test_online_connection_ignores_offline_and_empty():
+    assert w.online_connection([]) is None
+    assert w.online_connection([_online({"transport": "awg", "online": False})]) is None
+    assert w.online_connection([_online({"transport": "reality", "online": True})]) == (
+        "reality",
+        "🇳🇱 Нидерланды",
+    )

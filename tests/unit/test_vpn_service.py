@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from urllib.parse import quote
 
 import pytest
@@ -1196,3 +1197,50 @@ async def test_check_restore_key_change_without_affected_still_emits(env_both):
 async def test_quota_events_carry_node_and_location(env_both):
     svc, awg, xray, events = env_both
     assert svc._where() == {"node": svc._node, "location": svc._cfg.location}
+
+
+async def _online(svc, label):
+    return await svc.run_command(
+        vpn_protocol.ACTION_DEVICE_ONLINE, {"chat_id": CHAT, "device_label": label}
+    )
+
+
+async def test_device_online_awg_live_handshake(env_both):
+    svc, awg, _xray, _events = env_both
+    res = await svc.run_command(
+        vpn_protocol.ACTION_ISSUE,
+        {"chat_id": CHAT, "device_label": "🤖 Peony", "transport": TRANSPORT_AWG},
+    )
+    assert [c["online"] for c in (await _online(svc, "🤖 Peony"))["connections"]] == [False]
+    pub = next(iter(awg.peers))
+    awg.handshakes[pub] = int(time.time()) - 30
+    answer = await _online(svc, "🤖 Peony")
+    assert answer["device_label"] == "🤖 Peony" and answer["node"]
+    assert answer["connections"] == [
+        {"transport": TRANSPORT_AWG, "online": True, "seen_at": answer["connections"][0]["seen_at"]}
+    ]
+    awg.handshakes[pub] = int(time.time()) - 3600
+    assert not (await _online(svc, "🤖 Peony"))["connections"][0]["online"]
+    assert res["device_label"] == "🤖 Peony"
+
+
+async def test_device_online_reality_by_live_traffic_growth(env_both):
+    svc, _awg, xray, _events = env_both
+    label = (await _issue_reality(svc))["device_label"]
+    cur = await svc._db.conn.execute(
+        "SELECT address FROM vpn_peers WHERE device_label = ?", (label,)
+    )
+    email = (await cur.fetchone())["address"]
+    xray.set_traffic(email, 100, 100)
+    await svc.sample_once()
+    await svc._db.conn.execute("UPDATE vpn_peers SET last_handshake_at = NULL")
+    await svc._db.conn.commit()
+    assert not (await _online(svc, label))["connections"][0]["online"]
+    xray.set_traffic(email, 150, 300)
+    conn = (await _online(svc, label))["connections"][0]
+    assert conn["transport"] == TRANSPORT_REALITY and conn["online"]
+
+
+async def test_device_online_unknown_device_has_no_connections(env_both):
+    svc, _awg, _xray, _events = env_both
+    assert (await _online(svc, "нет такого"))["connections"] == []

@@ -33,6 +33,7 @@ from sa_home_bot.vpn.protocol import (
     ACTION_APK_SET_FILE_ID,
     ACTION_CHECK_NOW,
     ACTION_CHECK_STATUS,
+    ACTION_DEVICE_ONLINE,
     ACTION_GET_SUBSCRIPTION,
     ACTION_GET_VLESS,
     ACTION_GRANT_EXTRA,
@@ -174,6 +175,11 @@ class VpnService(
                 id=ACTION_USAGE,
                 title="📊 Расход",
                 params=(ActionParam(name="chat_id", type="int", required=False, title="Чей"),),
+            ),
+            ActionSpec(
+                id=ACTION_DEVICE_ONLINE,
+                title="📶 На связи ли устройство",
+                params=(chat_id_param, device_param),
             ),
             ActionSpec(
                 id=ACTION_SET_QUOTA,
@@ -362,6 +368,8 @@ class VpnService(
             return {"gen": await self._device_gen(self._chat_id(args), label)}
         if action == ACTION_USAGE:
             return await self._usage(args)
+        if action == ACTION_DEVICE_ONLINE:
+            return await self._device_online(args)
         if action == ACTION_SET_QUOTA:
             return await self._set_quota(args)
         if action == ACTION_SET_ACCESS:

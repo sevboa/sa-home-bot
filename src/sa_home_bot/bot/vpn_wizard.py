@@ -32,6 +32,13 @@ DONE_TEXT = (
     "если AmneziaVPN не подключается."
 )
 FAIL_TEXT = "Ничего страшного."
+NOT_CONNECTED_TEXT = (
+    "Пока не вижу подключения этого устройства.\n"
+    "Включите VPN в приложении: в Hiddify — «Нажмите для подключения», "
+    "в AmneziaVPN — «Подключиться».\n"
+    "Попробуем ещё раз или позвать на помощь?"
+)
+RETRY_STEP_TEXT = "🔁 Повторить попытку"
 OTHER_TEXT = (
     "Выберите другую страну: в Hiddify — нажмите на название подключения, "
     "в AmneziaVPN — выберите другое подключение на главном экране."
@@ -88,6 +95,29 @@ def stuck_text(code: str, platform: Platform | None) -> str:
         return f"застрял(а) на проверке: после подключения не заработало{where}"
     step = "1 из 1" if code == CONNECT else code
     return f"застрял(а) на шаге {step}{where}"
+
+
+def connected_text(method: str, server: str) -> str:
+    return (
+        f"🎉 Готово! Подключено через <b>{html.escape(method)}</b>, сервер "
+        f"<b>{html.escape(server)}</b>.\n"
+        "Включать VPN — в приложении: в Hiddify — «Нажмите для подключения», в AmneziaVPN — "
+        "«Подключиться». Пользуйтесь AmneziaVPN — он быстрее, а Hiddify включайте, если "
+        "AmneziaVPN не подключается."
+    )
+
+
+def online_connection(answered: list[dict]) -> tuple[str, str] | None:
+    best: tuple[str, str, str] | None = None
+    for server in answered:
+        for conn in server.get("connections") or []:
+            if not conn.get("online"):
+                continue
+            seen = str(conn.get("seen_at") or "")
+            if best is None or seen > best[0]:
+                name = server.get("label") or server.get("node") or "сервер"
+                best = (seen, str(conn.get("transport") or ""), str(name))
+    return None if best is None else (best[1], best[2])
 
 
 def card_cb(code: str, rest: str = "") -> str:
@@ -157,6 +187,14 @@ def step_keyboard(
     ready = button("✅ Готово", card_cb(CHECK, ctx(p, key)))
     rows.append([ready, stuck] if not (code == CONNECT and not page_url) else [stuck])
     return markup(*rows)
+
+
+def not_connected_keyboard(platform: str, key: str) -> InlineKeyboardMarkup:
+    return markup(
+        [button(RETRY_STEP_TEXT, card_cb(CONNECT, ctx(platform, key)))],
+        _help_button(CHECK, platform, key),
+        back_row(vpn_callbacks.home_cb(), vpn_keyboards.HOME_TEXT),
+    )
 
 
 def fail_keyboard(step: str, platform: str, key: str) -> InlineKeyboardMarkup:
