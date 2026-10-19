@@ -964,6 +964,10 @@ def test_detect_via_only_for_own_node():
     assert subs.detect_via("198.51.100.1", nodes, net) == "vless"
     assert subs.detect_via("198.51.100.2", nodes, net) == ""
     assert subs.detect_via("203.0.113.9", nodes, net) == ""
+    assert subs.detect_exit("198.51.100.2", nodes, net) == "🇺🇸 США"
+    assert subs.detect_exit("198.51.100.1", nodes, net) == ""
+    assert subs.detect_exit("10.9.0.3", nodes, net) == ""
+    assert subs.detect_exit("203.0.113.9", nodes, net) == ""
 
 
 async def test_where_endpoint_cors_token_and_answers(awg_swarm):
@@ -972,7 +976,7 @@ async def test_where_endpoint_cors_token_and_answers(awg_swarm):
     base_b = "https://198.51.100.2:18444"
     resp = await cl.get(f"/s/{token}/where", headers={"Origin": base_b})
     assert resp.status == 200 and resp.content_type == "application/json"
-    assert await resp.json() == {"via": "vless"}
+    assert await resp.json() == {"via": "vless", "exit": "", "ip": "127.0.0.1"}
     assert resp.headers["Access-Control-Allow-Origin"] == base_b
     assert resp.headers["Vary"] == "Origin"
     assert "Server" not in resp.headers and resp.headers["Cache-Control"] == "no-store"
@@ -980,12 +984,13 @@ async def test_where_endpoint_cors_token_and_answers(awg_swarm):
         r = await cl.get(f"/s/{token}/where", headers=hdrs)
         assert r.status == 200 and "Access-Control-Allow-Origin" not in r.headers
     a._cfg.subnet = "127.0.0.0/8"
-    assert (await (await cl.get(f"/s/{token}/where")).json()) == {"via": "awg"}
+    where = await (await cl.get(f"/s/{token}/where")).json()
+    assert where == {"via": "awg", "exit": "", "ip": "127.0.0.1"}
     a._cfg.subnet = "10.9.0.0/29"
     a._cfg.reality.endpoint_host = a._cfg.endpoint_host = "198.51.100.9"
     a._sub_cache.clear()
-    assert (await (await cl.get(f"/s/{token}/where")).json()) == {"via": ""}
-    assert (await (await cl.get(f"/s/{token}/where")).text()) == '{"via": ""}'
+    where = await (await cl.get(f"/s/{token}/where")).json()
+    assert where == {"via": "", "exit": "", "ip": "127.0.0.1"}
 
 
 async def test_where_unknown_token_and_methods_are_bare_404(awg_swarm):
@@ -1109,7 +1114,7 @@ def test_page_other_ways_have_store_qrs_and_open_awg_alternatives():
 def test_page_hiddify_add_qr_labeled_and_large():
     page = _page(add_qr_data_uri="data:image/svg+xml;base64,ADD")
     assert "<b>➕ Создать подключение в Hiddify</b> — наведите камеру" in page
-    assert '<img class="lg" src="data:image/svg+xml;base64,ADD"' in page
+    assert '<img src="data:image/svg+xml;base64,ADD"' in page
     assert page.index("Создать подключение в Hiddify") < page.index("Для сканера внутри Hiddify")
 
 
@@ -1165,3 +1170,19 @@ def test_page_hints_when_app_does_not_open():
     page = _page(_awg_sub(), awg_forms=FORMS, platform="android")
     assert page.index("Если Hiddify не открылся — проверьте ещё раз") > page.index('id="add"')
     assert "Если AmneziaVPN не открылся — проверьте ещё раз, что приложение установлено" in page
+
+
+def test_page_js_treats_neighbor_exit_as_amnezia():
+    page = _page(status=subs.VpnStatus(False))
+    assert "exit: (j && j.exit) || ''" in page
+    assert "show('on', '✅ VPN включён — ' + out.exit, 'Способ: ' + METHODS.awg)" in page
+    assert page.index("var hit = ") < page.index("var out = ")
+
+
+
+def test_page_qrs_share_one_size_and_off_check_shows_seen_address():
+    page = _page(_awg_sub(), awg_forms=FORMS, status=subs.VpnStatus(False), add_qr_data_uri="d:x")
+    assert ".qr img { display:block; margin:0 auto; width:260px;" in page
+    assert 'class="sm" src' not in page and 'class="lg"' not in page and "'lg'" not in page
+    assert '<p class="hint" id="stdiag" hidden></p>' in page
+    assert "Серверы видят ваш адрес: " in page and "Per-App Proxy" in page

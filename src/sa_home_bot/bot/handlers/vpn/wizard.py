@@ -141,16 +141,19 @@ async def show(ctx: Ctx, value: str) -> None:
         await ctx.edit(vpn_wizard.PICK_TEXT, vpn_wizard.pick_keyboard())
         return
     if code == vpn_wizard.CHECK:
-        await _check(ctx, platform, key, device.label)
+        await _check(ctx, platform, key, device)
         return
     await callback.answer()
     page_url = await subscription_page_url(ctx.node_link, ctx.chat_id, device)
     await _show_connect_step(ctx, platform, key, device.label, page_url)
 
 
-async def _check(ctx: Ctx, platform: vpn_wizard.Platform, key: str, label: str) -> None:
+async def _check(
+    ctx: Ctx, platform: vpn_wizard.Platform, key: str, device: vpn_devices.Device
+) -> None:
     await ctx.callback.answer("Проверяю подключение…")
-    answered = await vpn_nodes.device_online(ctx.node_link, ctx.chat_id, label)
+    await ctx.edit(vpn_wizard.checking_text(device.label), None)
+    answered = await vpn_nodes.device_online(ctx.node_link, ctx.chat_id, device.label)
     if not answered:
         await ctx.edit(
             vpn_wizard.CHECK_TEXT, vpn_wizard.step_keyboard(vpn_wizard.CHECK, platform, key)
@@ -158,8 +161,10 @@ async def _check(ctx: Ctx, platform: vpn_wizard.Platform, key: str, label: str) 
         return
     found = vpn_wizard.online_connection(answered)
     if found is None:
+        page_url = await subscription_page_url(ctx.node_link, ctx.chat_id, device)
         await ctx.edit(
-            vpn_wizard.NOT_CONNECTED_TEXT, vpn_wizard.not_connected_keyboard(platform.code, key)
+            vpn_wizard.not_connected_text(device.label),
+            vpn_wizard.not_connected_keyboard(platform.code, key, page_url=page_url),
         )
         return
     transport, server = found

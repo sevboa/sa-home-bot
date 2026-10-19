@@ -203,6 +203,11 @@ def detect_via(addr: str, nodes: tuple[NodeInfo, ...], local_subnet: str) -> str
     return VIA_AWG if status.method == METHOD_AWG else VIA_VLESS
 
 
+def detect_exit(addr: str, nodes: tuple[NodeInfo, ...], local_subnet: str) -> str:
+    status = detect_status(addr, nodes, local_subnet)
+    return status.name if status.on and not status.method else ""
+
+
 def check_nodes(nodes: tuple[NodeInfo, ...]) -> list[dict[str, str]]:
     return [{"n": n.name, "u": n.base} for n in nodes if n.base.startswith("https://")]
 
@@ -329,10 +334,8 @@ h2 { font-size:18px; margin:0 0 8px; }
 .hint { color:var(--muted); font-size:14px; margin:8px 0 0; }
 ol { margin:8px 0 0; padding-left:22px; } li { margin:6px 0; }
 .qr { text-align:center; }
-.qr img { width:220px; height:220px; max-width:100%; background:#fff; padding:8px;
-  border-radius:12px; }
-.qr img.sm { width:150px; height:150px; }
-.qr img.lg { width:280px; height:280px; }
+.qr img { display:block; margin:0 auto; width:260px; max-width:100%; height:auto;
+  aspect-ratio:1/1; background:#fff; padding:8px; border-radius:12px; }
 .qr .hint { margin-top:4px; }
 a.l { color:var(--accent); margin-right:12px; display:inline-block; }
 input.t { width:100%; padding:10px; border-radius:10px; border:1px solid var(--line);
@@ -398,7 +401,7 @@ def _store_qrs(app: str, pairs: list[tuple[str, str]]) -> str:
     e = html.escape
     pairs = [(name, url) for name, url in pairs if name != "Сайт"]
     cells = [
-        f'<div class="cell qr"><img class="sm" src="{e(_qr(url), quote=True)}" '
+        f'<div class="qr"><img src="{e(_qr(url), quote=True)}" '
         f'alt="QR-код: {e(app)} в {e(name)}"><p class="hint">{e(name)}</p></div>'
         for name, url in pairs
         if url
@@ -407,7 +410,7 @@ def _store_qrs(app: str, pairs: list[tuple[str, str]]) -> str:
         return ""
     return (
         f'<p class="hint"><b>📲 Скачать приложение {e(app)}</b> — наведите камеру телефона:</p>'
-        f'<div class="pair">{"".join(cells)}</div>'
+        f'{"".join(cells)}'
     )
 
 
@@ -431,7 +434,8 @@ def _status_card(status: VpnStatus | None) -> str:
         )
     return (
         '<div class="card" id="stcard"><p class="status off" id="st">❌ VPN сейчас выключен</p>'
-        f'<p class="hint" id="stm">{_OFF_HINT}</p>{again}</div>'
+        f'<p class="hint" id="stm">{_OFF_HINT}</p>'
+        f'<p class="hint" id="stdiag" hidden></p>{again}</div>'
     )
 
 
@@ -480,7 +484,7 @@ _HIDDIFY_ADD_QR = (
     '<div class="qr"><p class="hint"><b>➕ Создать подключение в Hiddify</b> — наведите камеру '
     "телефона, на котором уже установлен Hiddify: откроется приложение и добавит подключение. "
     "Можно показать другому человеку: он подключится от имени этого устройства.</p>"
-    '<img class="lg" src="{src}" alt="QR-код: создать подключение Hiddify"></div>'
+    '<img src="{src}" alt="QR-код: создать подключение Hiddify"></div>'
 )
 
 
@@ -596,13 +600,14 @@ _PAGE_JS = r"""(function () {
   });
   var st = document.getElementById('st'), stm = document.getElementById('stm');
   var stcard = document.getElementById('stcard');
-  var again = document.getElementById('recheck');
+  var again = document.getElementById('recheck'), diag = document.getElementById('stdiag');
   var METHODS = { awg: 'AmneziaVPN', vless: 'VLESS · Hiddify' };
   function show(cls, text, hint) {
     if (!st) return;
     st.className = 'status ' + cls; st.textContent = text;
     if (stcard) stcard.className = 'card' + (cls === 'on' ? ' ok' : '');
     if (stm) { stm.textContent = hint; stm.hidden = !hint; }
+    if (diag) diag.hidden = true;
   }
   // Каждая нода отвечает только за себя: идёт ли трафик через неё и каким способом.
   function ask(n) {
@@ -615,7 +620,11 @@ _PAGE_JS = r"""(function () {
       fetch(n.u + WHERE, { cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer',
                            signal: ctl ? ctl.signal : undefined })
         .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
-        .then(function (j) { clearTimeout(timer); resolve({ n: n.n, via: (j && j.via) || '' }); })
+        .then(function (j) {
+          clearTimeout(timer);
+          resolve({ n: n.n, via: (j && j.via) || '', exit: (j && j.exit) || '',
+                    ip: (j && j.ip) || '' });
+        })
         .catch(function () { clearTimeout(timer); resolve({ n: n.n, err: true }); });
     });
   }
@@ -629,8 +638,22 @@ _PAGE_JS = r"""(function () {
         show('on', '✅ VPN включён — ' + hit.n, 'Способ: ' + METHODS[hit.via]);
         return true;
       }
+      var out = rs.filter(function (r) { return r.exit; })[0];
+      if (out) {
+        show('on', '✅ VPN включён — ' + out.exit, 'Способ: ' + METHODS.awg);
+        return true;
+      }
       if (rs.some(function (r) { return !r.err; })) {
         show('off', '❌ VPN сейчас выключен', OFF_HINT);
+        var seen = rs.filter(function (r) { return r.ip; })
+          .map(function (r) { return r.n + ' — ' + r.ip; });
+        if (diag && seen.length) {
+          diag.textContent = 'Страница пришла не через VPN. Серверы видят ваш адрес: '
+            + seen.join('; ') + '. Если VPN включён, значит браузер идёт мимо него: '
+            + 'в Hiddify проверьте, что выключены «Per-App Proxy» (только выбранные '
+            + 'приложения) и WARP.';
+          diag.hidden = false;
+        }
       } else if (init) {
         show(init.c, init.t, init.h);  // ни одна нода не ответила — решение сервера
       }
@@ -744,7 +767,7 @@ _AWG_JS = r"""(function () {
       catch (e) { a.hidden = true; }
       blk.appendChild(a);
     }
-    if (j.add_qr) blk.appendChild(qrBlock(j.add_qr, 'lg', '➕ Создать подключение ' + flag(cell)
+    if (j.add_qr) blk.appendChild(qrBlock(j.add_qr, '', '➕ Создать подключение ' + flag(cell)
       + ' в AmneziaVPN', ' — наведите камеру телефона, на котором уже установлен AmneziaVPN: '
       + 'откроется страница и добавит подключение в приложение. Можно показать другому '
       + 'человеку: он подключится от имени этого устройства.', 'QR-код: создать подключение AmneziaVPN'));

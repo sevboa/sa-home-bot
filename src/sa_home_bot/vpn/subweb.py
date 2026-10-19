@@ -346,9 +346,16 @@ class SubscriptionWeb:
         found = await self._lookup(request)
         if found is None or not found.entries:
             return _not_found()
-        via = sub.detect_via(request.remote or "", found.nodes, self._cfg.subnet)
+        addr = request.remote or ""
+        answer = {
+            "via": sub.detect_via(addr, found.nodes, self._cfg.subnet),
+            "exit": sub.detect_exit(addr, found.nodes, self._cfg.subnet),
+            "ip": addr,
+        }
         resp = _Response(
-            text=json.dumps({"via": via}), content_type="application/json", charset="utf-8"
+            text=json.dumps(answer, ensure_ascii=False),
+            content_type="application/json",
+            charset="utf-8",
         )
         origin = request.headers.get("Origin", "")
         if origin and origin in {n.base for n in found.nodes if n.base}:

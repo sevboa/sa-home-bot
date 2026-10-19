@@ -32,13 +32,7 @@ DONE_TEXT = (
     "если AmneziaVPN не подключается."
 )
 FAIL_TEXT = "Ничего страшного."
-NOT_CONNECTED_TEXT = (
-    "Пока не вижу подключения этого устройства.\n"
-    "Включите VPN в приложении: в Hiddify — «Нажмите для подключения», "
-    "в AmneziaVPN — «Подключиться».\n"
-    "Попробуем ещё раз или позвать на помощь?"
-)
-RETRY_STEP_TEXT = "🔁 Повторить попытку"
+RECHECK_TEXT = "🔄 Проверить ещё раз"
 OTHER_TEXT = (
     "Выберите другую страну: в Hiddify — нажмите на название подключения, "
     "в AmneziaVPN — выберите другое подключение на главном экране."
@@ -95,6 +89,22 @@ def stuck_text(code: str, platform: Platform | None) -> str:
         return f"застрял(а) на проверке: после подключения не заработало{where}"
     step = "1 из 1" if code == CONNECT else code
     return f"застрял(а) на шаге {step}{where}"
+
+
+def checking_text(label: str) -> str:
+    return f"⏳ Проверяю подключение «{html.escape(label)}»…"
+
+
+def not_connected_text(label: str) -> str:
+    name = html.escape(label)
+    return (
+        f"Пока не вижу подключения устройства «{name}».\n\n"
+        "Проверка видит только VPN, включённый подключением этого устройства:\n"
+        f"• в Hiddify — профиль «VPN · {name}»;\n"
+        f"• в AmneziaVPN — подключение «{name}» с флагом страны.\n\n"
+        "Включите его (в Hiddify — «Нажмите для подключения», в AmneziaVPN — «Подключиться») "
+        f"и нажмите «{RECHECK_TEXT}». Не выходит — позовите на помощь."
+    )
 
 
 def connected_text(method: str, server: str) -> str:
@@ -189,9 +199,14 @@ def step_keyboard(
     return markup(*rows)
 
 
-def not_connected_keyboard(platform: str, key: str) -> InlineKeyboardMarkup:
+def not_connected_keyboard(
+    platform: str, key: str, *, page_url: str | None = None
+) -> InlineKeyboardMarkup:
+    rows = [[button(RECHECK_TEXT, card_cb(CHECK, ctx(platform, key)))]]
+    if page_url:
+        rows.append([InlineKeyboardButton(text="📶 Открыть настройки", url=page_url)])
     return markup(
-        [button(RETRY_STEP_TEXT, card_cb(CONNECT, ctx(platform, key)))],
+        *rows,
         _help_button(CHECK, platform, key),
         back_row(vpn_callbacks.home_cb(), vpn_keyboards.HOME_TEXT),
     )

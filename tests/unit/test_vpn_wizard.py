@@ -380,7 +380,7 @@ def _online(*conns, node="jeeves", label="🇳🇱 Нидерланды"):
     return {"node": node, "label": label, "connections": list(conns)}
 
 
-async def test_check_not_connected_offers_retry_help_home(_env):
+async def test_check_not_connected_offers_recheck_settings_help_home(_env):
     _env["servers"] = _with(LABEL)
     _env["online"] = [
         _online({"transport": "reality", "online": False, "seen_at": None}),
@@ -388,18 +388,23 @@ async def test_check_not_connected_offers_retry_help_home(_env):
     ]
     cb, _, _ = await _press(f"act:vpn:vpn_card:wdi{KEY}")
     assert _env["online_args"] == {"chat_id": 778, "device_label": LABEL}
+    assert cb.message.edits[0] == f"⏳ Проверяю подключение «{LABEL}»…"
     text, markup = last_edit(cb)
-    assert text == w.NOT_CONNECTED_TEXT
+    assert text == w.not_connected_text(LABEL)
+    assert f"профиль «VPN · {LABEL}»" in text and f"подключение «{LABEL}» с флагом" in text
     assert button_texts(markup) == [
-        "🔁 Повторить попытку",
+        "🔄 Проверить ещё раз",
+        "📶 Открыть настройки",
         vpn_keyboards.CALL_FOR_HELP_TEXT,
         vpn_keyboards.HOME_TEXT,
     ]
-    retry, help_, home = all_buttons(markup)
-    assert retry.callback_data.endswith(f":wci{KEY}")
+    recheck, settings, help_, home = all_buttons(markup)
+    assert recheck.callback_data == f"act:vpn:vpn_card:wdi{KEY}"
+    assert settings.url == "https://1.2.3.4:8444/s/tok"
     assert help_.callback_data.endswith(f":whdi{KEY}")
-    cb, _, _ = await _press(retry.callback_data)
-    assert all_buttons(last_edit(cb)[1])[0].text == "📶 Открыть настройки"
+    _env["online"] = [_online({"transport": "reality", "online": True, "seen_at": "x"})]
+    cb, _, _ = await _press(recheck.callback_data)
+    assert last_edit(cb)[0].startswith("🎉 Готово! Подключено через <b>VLESS · Hiddify</b>")
     cb, _, _ = await _press(home.callback_data)
     assert "📶 Открыть настройки" not in button_texts(last_edit(cb)[1])
 
