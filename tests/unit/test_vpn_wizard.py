@@ -172,7 +172,8 @@ async def test_create_issues_vless_in_every_country_and_shows_page_step():
     assert text == (
         "📶 <b>Настройки VPN · 📱 Rose</b>\n"
         "Откройте ссылку на устройстве, которое подключаете (телефон или компьютер) — там всё "
-        "по шагам: AmneziaVPN, Hiddify и проверка, что VPN включён.\n"
+        "по шагам: сначала резервный Hiddify, потом основной AmneziaVPN (он быстрее) и проверка, "
+        "что VPN включён.\n"
         "https://1.2.3.4:8444/s/tok\n"
         "Ссылку можно переслать. Не делитесь ей с чужими: по ней подключается это устройство."
     )
@@ -278,10 +279,10 @@ async def test_check_and_done_screens(_env):
     _env["servers"] = _with(LABEL)
     cb, _, _ = await _press(f"act:vpn:vpn_card:wdi{KEY}")
     text, markup = last_edit(cb)
-    assert text == "Нажмите большую круглую кнопку в середине Hiddify.\nЗаработало?"
+    assert text == w.CHECK_TEXT and "«Нажмите для подключения»" in text
     assert button_texts(markup) == ["✅ Да!", "❌ Нет"]
     cb, _, _ = await _press("act:vpn:vpn_card:wy")
-    assert last_edit(cb)[0] == "🎉 Готово! Теперь VPN включается этой круглой кнопкой."
+    assert last_edit(cb)[0] == w.DONE_TEXT and "«Подключиться»" in w.DONE_TEXT
     assert button_texts(last_edit(cb)[1]) == ["📶 На главную"]
 
 
@@ -298,7 +299,7 @@ async def test_fail_screen_and_other_country(_env):
     back = all_buttons(markup)[-1].callback_data
     assert back.endswith(f":wci{KEY}")
     cb, _, _ = await _press(f"act:vpn:vpn_card:woci{KEY}")
-    assert last_edit(cb)[0] == "В Hiddify нажмите на название подключения и выберите другую страну."
+    assert last_edit(cb)[0] == w.OTHER_TEXT and "AmneziaVPN" in w.OTHER_TEXT
 
 
 def _book():

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import hmac
 import html
@@ -19,6 +20,7 @@ from sa_home_bot.reality.client_config import (
     render_singbox_multi,
     render_vless_url,
 )
+from sa_home_bot.vpn import qr
 from sa_home_bot.vpn.protocol import GB, country_flag
 
 TOKEN_LEN = 32
@@ -329,6 +331,8 @@ ol { margin:8px 0 0; padding-left:22px; } li { margin:6px 0; }
 .qr { text-align:center; }
 .qr img { width:220px; height:220px; max-width:100%; background:#fff; padding:8px;
   border-radius:12px; }
+.qr img.sm { width:150px; height:150px; }
+.qr .hint { margin-top:4px; }
 a.l { color:var(--accent); margin-right:12px; display:inline-block; }
 input.t { width:100%; padding:10px; border-radius:10px; border:1px solid var(--line);
   background:var(--bg); color:var(--fg); font:13px monospace; margin-top:10px; }
@@ -373,7 +377,43 @@ def _links(*pairs: tuple[str, str]) -> str:
     )
 
 
-_OFF_HINT = "Включите VPN (в Hiddify — круглая кнопка) и вернитесь на эту страницу."
+HIDDIFY_ON = "Нажмите для подключения"
+AWG_ON = "Подключиться"
+@functools.lru_cache(maxsize=16)
+def _qr(url: str) -> str:
+    return qr.svg_data_uri(url)
+
+
+def _stores(device: str, android: str, ios: str, site: str) -> list[tuple[str, str]]:
+    pairs = {
+        PLATFORM_ANDROID: [("Google Play", android)],
+        PLATFORM_IOS: [("App Store", ios)],
+        PLATFORM_DESKTOP: [("Сайт", site)],
+    }
+    return pairs.get(device, [("Google Play", android), ("App Store", ios), ("Сайт", site)])
+
+
+def _store_qrs(app: str, pairs: list[tuple[str, str]]) -> str:
+    e = html.escape
+    pairs = [(name, url) for name, url in pairs if name != "Сайт"]
+    cells = [
+        f'<div class="cell qr"><img class="sm" src="{e(_qr(url), quote=True)}" '
+        f'alt="QR-код: {e(app)} в {e(name)}"><p class="hint">{e(name)}</p></div>'
+        for name, url in pairs
+        if url
+    ]
+    if not cells:
+        return ""
+    return (
+        f'<p class="hint">Скачать {e(app)} на телефон — наведите камеру на QR:</p>'
+        f'<div class="pair">{"".join(cells)}</div>'
+    )
+
+
+_OFF_HINT = (
+    f"Включите VPN: в Hiddify — кнопка «{HIDDIFY_ON}», в AmneziaVPN — «{AWG_ON}». "
+    "Потом вернитесь на эту страницу."
+)
 
 
 def _status_card(status: VpnStatus | None) -> str:
@@ -408,6 +448,16 @@ def _countries_card(sub: Subscription) -> str:
 
 
 PLATFORM_ANDROID, PLATFORM_IOS, PLATFORM_OTHER = "android", "ios", "other"
+PLATFORM_DESKTOP = "desktop"
+_LABEL_PLATFORMS = {"📱": PLATFORM_IOS, "🤖": PLATFORM_ANDROID, "💻": PLATFORM_DESKTOP}
+
+
+def device_platform(label: str) -> str:
+    return _LABEL_PLATFORMS.get(label.split(" ", 1)[0], "")
+
+
+def _steps_platform(device: str, platform: str) -> str:
+    return PLATFORM_OTHER if device == PLATFORM_DESKTOP else device or platform
 
 
 def detect_platform(user_agent: str) -> str:
@@ -419,10 +469,21 @@ def detect_platform(user_agent: str) -> str:
     return PLATFORM_OTHER
 
 
-_CHECK_STEP = (
-    "Включите VPN, вернитесь на эту страницу и нажмите «🔄 Проверить ещё раз» — "
-    "должно загореться зелёное «✅ VPN включён»."
+_HIDDIFY_FIRST = (
+    '<p class="hint">Поставьте его первым: при включённом Hiddify выпускается ключ для '
+    "основного способа — AmneziaVPN (ниже), и он выручит, если AmneziaVPN не подключится.</p>"
 )
+
+
+def _check_step(method: str) -> str:
+    return (
+        "Вернитесь на эту страницу и нажмите «🔄 Проверить ещё раз» — должно загореться "
+        f"зелёное «✅ VPN включён» и «Способ: {method}»."
+    )
+
+
+def _steps(steps: list[str]) -> str:
+    return "<ol>" + "".join(f"<li>{step}</li>" for step in steps) + "</ol>"
 
 
 def _awg_steps(platform: str, stores: str) -> str:
@@ -431,40 +492,47 @@ def _awg_steps(platform: str, stores: str) -> str:
         "без него ключ не заработает:"
         f"<br>{stores}"
     )
+    issue = (
+        "Включите Hiddify — без него выпуск ключа может не сработать. Нажмите "
+        "«🔑 Сгенерировать ключ» с нужной страной, а если ключ уже выпускался — "
+        "«🔄 Перевыпустить» (два раза). Только после этого появится кнопка {add}."
+    )
     if platform == PLATFORM_IOS:
-        steps = [
-            install,
-            "Нажмите «📋 Скопировать» с нужной страной.",
-            "В AmneziaVPN нажмите «+», в поле «Вставьте ключ» — «Вставить», затем «Продолжить».",
-            "Если хотите, так же добавьте другую страну.",
-            _CHECK_STEP,
+        add = [
+            issue.format(add="«📋 Скопировать»"),
+            "Нажмите «📋 Скопировать». В AmneziaVPN нажмите «+», в поле «Вставьте ключ» — "
+            "«Вставить», затем «Продолжить».",
         ]
     elif platform == PLATFORM_ANDROID:
-        steps = [
-            install,
-            "Нажмите «➕ Подключить» с нужной страной — откроется AmneziaVPN, подтвердите добавление.",
-            _CHECK_STEP,
+        add = [
+            issue.format(add="«➕ Подключить»"),
+            "Нажмите «➕ Подключить» — откроется AmneziaVPN, подтвердите добавление.",
         ]
     else:
-        steps = [
-            install,
+        add = [
+            issue.format(add="«➕ Подключить»"),
             "Нажмите «➕ Подключить» — если AmneziaVPN не открылся, нажмите «📋 Скопировать», "
             "в AmneziaVPN «+» → «Вставьте ключ» → «Вставить» → «Продолжить». "
             "Файл .conf — в «Другие способы» ниже.",
-            _CHECK_STEP,
         ]
-    return "<ol>" + "".join(f"<li>{step}</li>" for step in steps) + "</ol>"
+    steps = [
+        install,
+        *add,
+        "Другую страну можно добавить так же.",
+        f"В AmneziaVPN нажмите «{AWG_ON}» — Hiddify при этом отключится: одновременно "
+        "работает только один VPN.",
+        _check_step(METHOD_AWG),
+    ]
+    return _steps(steps)
 
 
 def _awg_card(sub: Subscription, forms: dict[str, str], platform: str, links: PageLinks) -> str:
     e = html.escape
     if not forms:
         return ""
-    stores = _links(
-        ("Google Play", links.amnezia_android),
-        ("App Store", links.amnezia_ios),
-        ("Сайт", links.amnezia_site),
-    )
+    device = device_platform(sub.device_label)
+    pairs = _stores(device, links.amnezia_android, links.amnezia_ios, links.amnezia_site)
+    stores = _links(*pairs)
     cells = []
     for node in sub.nodes:
         nonce = forms.get(node.node)
@@ -484,15 +552,20 @@ def _awg_card(sub: Subscription, forms: dict[str, str], platform: str, links: Pa
             f'<p class="hint msg">{e(msg)}</p></div>'
         )
     return (
-        '<div class="card"><details id="awg" open><summary>AmneziaVPN — основной способ, обычно быстрее'
+        '<div class="card"><details id="awg" open><summary>AmneziaVPN — основной способ, быстрее'
         "</summary>"
-        f"{_awg_steps(platform, stores)}"
+        '<p class="hint">Рекомендуем пользоваться им: обычно он быстрее Hiddify. Hiddify держите '
+        "как резерв — на случай, если AmneziaVPN в какой-то стране не подключается.</p>"
+        f"{_awg_steps(_steps_platform(device, platform), stores)}"
         f'<div class="pair">{"".join(cells)}</div>'
         '<p class="hint">Ключ на сервере не хранится и показывается один раз. Выпущенный раньше '
         "показать нельзя — его можно только перевыпустить: старый перестанет работать.</p>"
         '<noscript><p class="hint">Для выдачи ключей нужен JavaScript. Запросите ключ в боте: '
         "/vpn → «Другие способы».</p></noscript>"
-        '<details id="awgmore" hidden><summary class="sm">Другие способы</summary>'
+        '<details id="awgmore"><summary class="sm">Другие способы</summary>'
+        + _store_qrs("AmneziaVPN", pairs)
+        + '<p class="hint" id="awgmorehint">Ключ, файл .conf и QR-код подключения появятся здесь '
+        "после «🔑 Сгенерировать ключ» или «🔄 Перевыпустить».</p>"
         '<div id="awgmorebody"></div></details>'
         "</details></div>"
     )
@@ -658,9 +731,11 @@ _AWG_JS = r"""(function () {
     }
     if (j.qr) {
       var q = el('div', 'qr'), img = el('img'); img.src = j.qr; img.alt = 'QR-код настроек AmneziaVPN';
+      q.appendChild(el('p', 'hint', 'QR-код подключения ' + flag(cell) + ': в AmneziaVPN «+» → QR-код.'));
       q.appendChild(img); blk.appendChild(q);
     }
-    moreBody.appendChild(blk); more.hidden = false;
+    moreBody.appendChild(blk);
+    var hint = document.getElementById('awgmorehint'); if (hint) hint.hidden = true;
   }
   function ready(cell, j) {
     var holder = el('div'), f = flag(cell);
@@ -676,8 +751,10 @@ _AWG_JS = r"""(function () {
       holder.appendChild(c);
     }
     setAct(cell, holder);
-    setMsg(cell, j.key ? 'Ключ показан один раз — добавьте его в AmneziaVPN сейчас.'
-      : 'Ключ собрать не вышло — используйте файл в «Другие способы».');
+    setMsg(cell, !j.key ? 'Ключ собрать не вышло — используйте файл в «Другие способы».'
+      : 'Ключ показан один раз — добавьте его в AmneziaVPN сейчас.' + (PLATFORM === 'ios' ? ''
+        : ' Если AmneziaVPN не открылся — проверьте ещё раз, что приложение установлено, '
+          + 'или воспользуйтесь «Другие способы» ниже.'));
     more_(cell, j);
     if (!j.key) more.open = true;
   }
@@ -705,38 +782,48 @@ def render_page(
     path: str = "",
 ) -> str:
     e = html.escape
-    link = deep_link(sub_url, sub.device_label)
     title = f"📶 VPN · {sub.device_label}"
-    stores = _links(
-        ("Google Play", links.hiddify_android),
-        ("App Store", links.hiddify_ios),
-        ("Сайт", links.hiddify_site),
+    pairs = _stores(
+        device_platform(sub.device_label),
+        links.hiddify_android,
+        links.hiddify_ios,
+        links.hiddify_site,
+    )
+    stores = _links(*pairs)
+    routed = sub_url + "?format=singbox"
+    steps = _steps(
+        [
+            f"Убедитесь, что установлено приложение <b>Hiddify</b>:<br>{stores}",
+            "Нажмите «➕ Добавить в Hiddify» ниже и подтвердите добавление в Hiddify.",
+            f"В Hiddify нажмите большую кнопку «{HIDDIFY_ON}».",
+            _check_step(METHOD_VLESS),
+            *(
+                ["Не выключая Hiddify, переходите к AmneziaVPN ниже — им и пользуйтесь."]
+                if awg_forms
+                else []
+            ),
+        ]
     )
     body = f"""<h1>{e(title)}</h1>
 {_status_card(status)}
-{_awg_card(sub, awg_forms or {}, platform, links)}
 <div class="card">
-<h2>VLESS · Hiddify{" — запасной способ" if awg_forms else ""}</h2>
-{'<p class="hint">Если AmneziaVPN не подключается — используйте Hiddify.</p>' if awg_forms else ""}
-<ol>
-<li>Убедитесь, что установлено приложение <b>Hiddify</b>:<br>{stores}</li>
-<li>Нажмите кнопку ниже и подтвердите добавление в Hiddify.</li>
-<li>{e(_CHECK_STEP)}</li>
-</ol>
-<a class="btn" id="add" href="{e(link, quote=True)}">➕ Добавить в Hiddify</a>
+<h2>VLESS · Hiddify{" — резервный способ" if awg_forms else ""}</h2>
+{_HIDDIFY_FIRST if awg_forms else ""}
+{steps}
+<a class="btn" id="add" href="{e(deep_link(routed, sub.device_label), quote=True)}">➕ Добавить в Hiddify</a>
+<p class="hint">Если Hiddify не открылся — проверьте ещё раз, что приложение установлено, или воспользуйтесь «Другие способы» ниже.</p>
+<p class="hint">Российские сайты открываются напрямую, остальное — через VPN.</p>
 <details style="margin-top:12px"><summary class="sm">Другие способы</summary>
-<p class="hint">🧪 Проверка (временно): профиль Hiddify сразу с маршрутами — российские сайты
-напрямую, остальное через VPN. После добавления выберите в Hiddify профиль «· маршруты».
-Проверка: 2ip.io должен показать ваш настоящий адрес, а ifconfig.me — страну VPN.</p>
-<a class="btn alt" id="addroutes" href="{e(deep_link(sub_url + "?format=singbox", sub.device_label), quote=True)}">🧪 Hiddify с маршрутами</a>
 <p class="hint">Не открылось? Откройте эту страницу в обычном браузере или добавьте вручную.</p>
 <button class="btn alt" id="copy" type="button">📋 Скопировать ссылку</button>
-<input class="t" id="url" readonly value="{e(sub_url, quote=True)}" aria-label="Ссылка подписки">
+<input class="t" id="url" readonly value="{e(routed, quote=True)}" aria-label="Ссылка подписки">
 <p class="hint" id="copied" hidden>Ссылка скопирована. В Hiddify: «+» &rarr; «Добавить из буфера обмена».</p>
-<a class="btn alt" download href="{e(sub_url + "?format=singbox", quote=True)}">⬇️ Файл настроек</a>
-<div class="qr"><p class="hint">QR для другого устройства:</p><img src="{e(qr_data_uri, quote=True)}" alt="QR-код ссылки подписки"></div>
+<a class="btn alt" download href="{e(routed, quote=True)}">⬇️ Файл настроек</a>
+{_store_qrs("Hiddify", pairs)}
+<div class="qr"><p class="hint">QR-код подключения: в Hiddify «+» &rarr; «Сканировать QR-код».</p><img src="{e(qr_data_uri, quote=True)}" alt="QR-код ссылки подписки"></div>
 </details>
 </div>
+{_awg_card(sub, awg_forms or {}, platform, links)}
 {_countries_card(sub)}"""
     nodes_json = json.dumps(check_nodes(sub.nodes), ensure_ascii=False).replace("<", "\\u003c")
     where = json.dumps(f"{path}/where") if path else '""'

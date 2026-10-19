@@ -297,7 +297,7 @@ class SubscriptionWeb:
         body = sub.render_page(
             found,
             sub_url=self.sub_url(token),
-            qr_data_uri=qr.svg_data_uri(self.sub_url(token)),
+            qr_data_uri=qr.svg_data_uri(self.sub_url(token) + "?format=singbox"),
             links=self._links,
             status=status,
             awg_forms=forms,

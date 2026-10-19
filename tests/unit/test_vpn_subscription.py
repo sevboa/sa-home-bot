@@ -196,6 +196,9 @@ LINKS = subs.PageLinks(
 )
 
 
+CHECK = "нажмите «🔄 Проверить ещё раз» — должно загореться зелёное «✅ VPN включён»"
+
+
 def _page(sub=None, **kw):
     return subs.render_page(
         sub or _sub(),
@@ -210,16 +213,17 @@ def _page(sub=None, **kw):
 def test_page_hiddify_one_button_others_folded_no_autoopen():
     page = _page()
     assert "📶 VPN · 📱 iPhone" in page and "VLESS · Hiddify" in page
-    assert 'href="hiddify://import/https://h:8444/sub/tok"' in page
-    assert "➕ Добавить в Hiddify" in page
+    assert 'id="add" href="hiddify://import/https://h:8444/sub/tok?format=singbox"' in page
+    assert 'href="hiddify://import/https://h:8444/sub/tok"' not in page
+    assert "➕ Добавить в Hiddify" in page and "🧪" not in page
+    assert "В Hiddify нажмите большую кнопку «Нажмите для подключения»" in page
     assert "Убедитесь, что установлено приложение <b>Hiddify</b>" in page
-    assert "apps.apple.com/x" in page and "play.google.com/x" in page
-    assert "нажмите «🔄 Проверить ещё раз» — должно загореться зелёное «✅ VPN включён»" in page
+    assert "apps.apple.com/x" in page and "play.google.com/x" not in page
+    assert f"{CHECK} и «Способ: VLESS · Hiddify»" in page
     other = page.index("Другие способы")
     for marker in ("📋 Скопировать ссылку", "data:image/svg+xml", "⬇️ Файл настроек"):
         assert page.index(marker) > other
-    assert 'href="hiddify://import/https://h:8444/sub/tok?format=singbox"' in page
-    assert page.index("🧪 Hiddify с маршрутами") > page.index("➕ Добавить в Hiddify")
+    assert 'value="https://h:8444/sub/tok?format=singbox"' in page
     assert "localStorage" not in page and "setTimeout(function () { location" not in page
     assert "AUTO" not in page and "autoOpen" not in page
     assert "http://" not in page and 'src="http' not in page
@@ -272,7 +276,7 @@ FORMS = {"jeeves": "N1", "wooster": "N2"}
 
 def test_page_awg_block_collapsed_cells_per_country_no_forms():
     page = _page(_awg_sub(), awg_forms=FORMS)
-    assert '<details id="awg" open><summary>AmneziaVPN — основной способ, обычно быстрее' in page
+    assert '<details id="awg" open><summary>AmneziaVPN — основной способ, быстрее' in page
     assert 'data-node="jeeves"' in page and 'data-nonce="N1"' in page and 'data-have="0"' in page
     assert "<form" not in page and "/awg" in page
     assert "🔑 Сгенерировать ключ 🇳🇱" in page and "🔑 Сгенерировать ключ 🇺🇸" in page
@@ -308,7 +312,12 @@ def test_page_awg_layout_per_platform():
         )
         assert "без него ключ не заработает" in page
         assert "play.google.com/amnezia" in page and "apps.apple.com/amnezia" in page
-        assert "нажмите «🔄 Проверить ещё раз» — должно загореться зелёное «✅ VPN включён»" in page
+        assert f"{CHECK} и «Способ: AmneziaVPN»" in page
+        assert "без него выпуск ключа может не сработать" in page
+        assert "«🔑 Сгенерировать ключ»" in page and "«🔄 Перевыпустить» (два раза)" in page
+        assert "В AmneziaVPN нажмите «Подключиться»" in page
+    assert "Только после этого появится кнопка «➕ Подключить»" in android
+    assert "Только после этого появится кнопка «📋 Скопировать»" in ios
     assert 'PLATFORM = "android"' in android and "«➕ Подключить»" in android
     assert "Вставьте ключ" not in android
     assert 'PLATFORM = "ios"' in ios and "«📋 Скопировать»" in ios
@@ -1061,14 +1070,56 @@ def test_amnezia_key_from_real_client_conf_and_errors():
         ak.build_key("[Interface]\nAddress = 1.2.3.4/32\n", "n")
 
 
-def test_page_order_amnezia_first_hiddify_fallback_no_autoissue():
+def test_page_order_hiddify_first_amnezia_main_no_autoissue():
     page = _page(_awg_sub(), awg_forms=FORMS, status=subs.VpnStatus(False))
     assert (
         page.index('id="stcard"')
-        < page.index("AmneziaVPN — основной")
-        < page.index("VLESS · Hiddify")
+        < page.index("VLESS · Hiddify — резервный способ")
+        < page.index("AmneziaVPN — основной способ, быстрее")
     )
-    assert "запасной способ" in page and "Если AmneziaVPN не подключается" in page
+    assert "Поставьте его первым" in page and "Рекомендуем пользоваться им" in page
+    assert "Не выключая Hiddify, переходите к AmneziaVPN ниже" in page
+    assert "переходите к AmneziaVPN" not in _page()
     assert "toggle" not in page
     plain = _page()
-    assert "запасной способ" not in plain
+    assert "резервный способ" not in plain and "Поставьте его первым" not in plain
+
+
+def test_page_other_ways_have_store_qrs_and_open_awg_alternatives():
+    page = _page(_awg_sub(), awg_forms=FORMS)
+    assert "Скачать Hiddify на телефон — наведите камеру на QR" in page
+    assert "Скачать AmneziaVPN на телефон — наведите камеру на QR" in page
+    assert 'alt="QR-код: Hiddify в Google Play"' in page
+    assert 'alt="QR-код: AmneziaVPN в App Store"' in page
+    assert "в Hiddify «+» &rarr; «Сканировать QR-код»" in page
+    assert '<details id="awgmore"><summary' in page and 'id="awgmore" hidden' not in page
+    assert page.index("Скачать AmneziaVPN") > page.index('id="awgmore"')
+    assert "QR-код подключения появятся здесь" in page
+    assert "Скачать AmneziaVPN" not in _page()
+
+
+def _labeled(label):
+    return subs.Subscription(label, _sub().entries, nodes=_awg_sub().nodes)
+
+
+def test_page_links_and_qrs_only_for_the_device_being_connected():
+    android = _page(_labeled("🤖 Peony"), awg_forms=FORMS, platform="other")
+    assert "play.google.com/x" in android and "play.google.com/amnezia" in android
+    assert "apps.apple.com" not in android and "hiddify.com" not in android
+    assert 'alt="QR-код: AmneziaVPN в Google Play"' in android
+    assert "Только после этого появится кнопка «➕ Подключить»" in android
+    ios = _page(_labeled("📱 iPhone"), awg_forms=FORMS, platform="other")
+    assert "apps.apple.com/amnezia" in ios and "play.google.com" not in ios
+    assert "Только после этого появится кнопка «📋 Скопировать»" in ios
+    desktop = _page(_labeled("💻 Rose"), awg_forms=FORMS, platform="android")
+    assert "hiddify.com" in desktop and "amnezia.org" in desktop
+    assert "play.google.com" not in desktop and "apps.apple.com" not in desktop
+    assert "наведите камеру на QR" not in desktop and "Файл .conf" in desktop
+    old = _page(_labeled("Rose"), awg_forms=FORMS, platform="ios")
+    assert "play.google.com/x" in old and "apps.apple.com/x" in old and "hiddify.com" in old
+
+
+def test_page_hints_when_app_does_not_open():
+    page = _page(_awg_sub(), awg_forms=FORMS, platform="android")
+    assert page.index("Если Hiddify не открылся — проверьте ещё раз") > page.index('id="add"')
+    assert "Если AmneziaVPN не открылся — проверьте ещё раз, что приложение установлено" in page
