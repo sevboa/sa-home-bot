@@ -94,6 +94,12 @@ def test_dns_blocked_via_tunnel_rest_direct() -> None:
     tags = {s["tag"]: s for s in dns["servers"]}
     assert tags["proxy-dns"]["detour"] == "proxy"
     assert tags["direct-dns"]["detour"] == "direct"
+    assert tags["direct-dns"]["address_resolver"] == "bootstrap-dns"
+    assert tags["bootstrap-dns"] == {
+        "tag": "bootstrap-dns",
+        "address": "77.88.8.8",
+        "detour": "direct",
+    }
     blocked_rule = next(r for r in dns["rules"] if r.get("rule_set") == ["ru-blocked"])
     assert blocked_rule["server"] == "proxy-dns"
     assert dns["final"] == "direct-dns"

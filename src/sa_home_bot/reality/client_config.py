@@ -112,8 +112,10 @@ def _singbox_config(params: RealityParams, client_uuid: str, *, all_proxy: bool)
                 {
                     "tag": "direct-dns",
                     "address": "https://common.dot.dns.yandex.net/dns-query",
+                    "address_resolver": "bootstrap-dns",
                     "detour": "direct",
                 },
+                {"tag": "bootstrap-dns", "address": "77.88.8.8", "detour": "direct"},
             ],
             "rules": dns_rules,
             "final": dns_final,
