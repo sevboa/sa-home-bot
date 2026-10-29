@@ -269,6 +269,7 @@ class LlmConfig(BaseModel):
     imagegen_model_dir: Path = Path("./data/imagegen-models")
     imagegen_civitai_token: str = ""
     imagegen_display_px: int = Field(default=512, ge=64, le=2048)
+    imagegen_fast_decode: bool = False
     imagegen_daily_limit: int = Field(default=0, ge=0)
     items_dir: Path = Path("./data/items")
     item_harmonize_strength: float = Field(default=0.35, gt=0, le=1.0)

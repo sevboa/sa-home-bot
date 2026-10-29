@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from sa_home_bot.bot.interactives import catacombs, places
+from sa_home_bot.bot.interactives import catacombs, frame_heroes, places
 from sa_home_bot.bot.interactives.base import (
     Run,
     Scenario,
@@ -598,6 +598,7 @@ class Frame:
     focus: str = ""
     spot: str | None = None
     file_id: str | None = None
+    request_en: str = ""
 
     @property
     def remembered(self) -> bool:
@@ -620,16 +621,56 @@ def _cell_str(cell: tuple[int, int]) -> str:
     return f"{cell[0]},{cell[1]}"
 
 
+_HERO_VIEWS = {"entrance": "shaft", "special": "door", "dead_end": "dead_end"}
+
+
+def hero_view(maze: Maze, place: Node | Passage, *, wall: bool = False) -> str:
+    if isinstance(place, Passage):
+        return "lever" if wall else "open"
+    return _HERO_VIEWS.get(node_kind(maze, place), "open")
+
+
+def _hero_salt(maze: Maze, owner: str) -> str:
+    return f"{maze.seed}:{owner}"
+
+
+def _neighbor_heroes(maze: Maze, place: Node | Passage) -> set[str]:
+    if not isinstance(place, Node):
+        return set()
+    out: set[str] = set()
+    for pid in place.exits.values():
+        passage = maze.passages.get(pid) if pid else None
+        if passage is None:
+            continue
+        other = maze.nodes.get(passage.other(place.cell))
+        if other is not None:
+            out.add(frame_heroes.own_hero(_hero_salt(maze, "node:" + _cell_str(other.cell))))
+    return out
+
+
+def frame_request_en(maze: Maze, place: Node | Passage, owner: str, *, wall: bool = False) -> str:
+    special = place.special if isinstance(place, Node) else None
+    hero = frame_heroes.place_hero(
+        _hero_salt(maze, owner),
+        hero_view(maze, place, wall=wall),
+        special,
+        _neighbor_heroes(maze, place),
+    )
+    return frame_heroes.frame_request(hero, place.describe or "")
+
+
 def node_frame(user_id: int, maze: Maze, node: Node) -> Frame:
     cached = None if catacombs.node_needs_frame(node) else node.file_id
     state = CatacombsState(node=node.cell, heading=maze.entry_heading)
+    owner = "node:" + _cell_str(node.cell)
     return Frame(
         kind="node",
-        owner="node:" + _cell_str(node.cell),
+        owner=owner,
         key=catacombs.node_frame_key(node),
         caption=frame_caption(maze, node),
         room=labyrinth_room(user_id, maze, state),
         file_id=cached,
+        request_en=frame_request_en(maze, node, owner),
     )
 
 
@@ -646,13 +687,15 @@ def passage_frame(user_id: int, maze: Maze, passage: Passage, *, wall: bool = Fa
             canon_ru=UNDERGROUND_INTRO + (passage.describe or "Каменный коридор."),
         )
         room = Room(user_id=user_id, canon=canon, temp=True)
+    owner = "passage:" + passage.id
     return Frame(
         kind="passage",
-        owner="passage:" + passage.id,
+        owner=owner,
         key=catacombs.passage_frame_key(passage),
         caption=frame_caption(maze, passage, wall=wall),
         room=room,
         file_id=cached,
+        request_en=frame_request_en(maze, passage, owner, wall=wall),
     )
 
 

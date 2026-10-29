@@ -6,7 +6,7 @@ from datetime import timedelta
 
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.handlers.interactives import cmd_interactives
-from sa_home_bot.bot.interactives import acts, places, registry, underground
+from sa_home_bot.bot.interactives import acts, frame_heroes, places, registry, underground
 from sa_home_bot.bot.interactives import catacombs as cat
 from sa_home_bot.bot.interactives.base import (
     STATUS_ACTIVE,
@@ -329,7 +329,10 @@ async def test_frames_come_after_the_reply_and_are_remembered(store):
     assert node.image_id and node.file_id and node.image_key == cat.node_frame_key(node)
     assert node.file_id == "file-2"
     request = link.generated[-1]
-    assert request["light"] == places.UNDERGROUND_LIGHT_EN
+    assert request["light"] == ""
+    assert request["description"].startswith("Main subject, in the foreground")
+    assert request["hero_weight"] == frame_heroes.HERO_WEIGHT
+    assert frame_heroes.FRAME_NEGATIVE_EN in request["negative_extra"]
     assert "Alfred" not in request["description"] and "loras" not in request
     assert "keep_key" not in request and "paste" not in request
     assert "light_move" not in request

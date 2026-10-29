@@ -107,6 +107,17 @@ def put_second(prompt: str, extra: str, *, move: bool = False) -> str:
     return ", ".join([*tags[:1], *new, *tags[1:]])
 
 
+def weight_tags(prompt: str, first: float, last: float = 1.0) -> str:
+    tags = [t.replace("(", "").replace(")", "") for t in split_tags(prompt)]
+    if not tags:
+        return prompt
+    if first != 1.0:
+        tags[0] = f"({tags[0]}){first:g}"
+    if last != 1.0 and len(tags) > 2:
+        tags[-1] = f"({tags[-1]}){last:g}"
+    return ", ".join(tags)
+
+
 def fit_prompt(
     prompt: str, template: str, count_tokens: Callable[[str], int], limit: int = CLIP_MAX_TOKENS
 ) -> str:

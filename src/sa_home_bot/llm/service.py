@@ -232,6 +232,8 @@ def _imagegen_options(args: dict[str, Any]) -> dict[str, Any]:
         "paste": paste,
         "light": " ".join(light.split())[:160] if isinstance(light, str) else "",
         "light_move": args.get("light_move") is True,
+        "hero_weight": _bounded_number_arg(args, "hero_weight", float, 1.0, 1.5),
+        "place_weight": _bounded_number_arg(args, "place_weight", float, 1.0, 1.5),
     }
 
 
@@ -1109,6 +1111,11 @@ class LlmService:
                     colors=options["colors"],
                     model=options["model"],
                     loras=options["loras"],
+                    weights=(
+                        (options["hero_weight"], options["place_weight"] or 1.0)
+                        if options["hero_weight"] and not options["raw"] and options["ref"] is None
+                        else None
+                    ),
                 )
             except imagegen.ImagegenError as exc:
                 log.warning("imagegen: %s", exc)

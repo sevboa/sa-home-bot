@@ -24,6 +24,7 @@ MODES = ("free", "item", "variant", "scene")
 DEFAULT_STRENGTH = 0.55
 DEFAULT_IP_SCALE = 0.4
 _TAESDXL_REPO = "madebyollin/taesdxl"
+_TAESD_REPO = "madebyollin/taesd"
 _IP_REPO = "h94/IP-Adapter"
 _IP_WEIGHT = "ip-adapter_sd15_light.bin"
 
@@ -144,6 +145,7 @@ class _Loaded:
         self.ip_loaded = False
         self.loras: set[str] = set()
         self.taesd: Any = None
+        self.taesd_sd: Any = None
         self.compel: Any = None
 
 
@@ -151,6 +153,20 @@ def _prompt_kwargs(loaded: _Loaded, prompt: str, negative: str, job: dict) -> di
     if not job.get("weighted"):
         return {"prompt": prompt, "negative_prompt": negative or None}
     import torch
+
+    if loaded.spec.kind == "sd15":
+        if loaded.compel is None:
+            from compel import Compel
+
+            pipe = loaded.pipe
+            loaded.compel = Compel(
+                tokenizer=pipe.tokenizer, text_encoder=pipe.text_encoder, truncate_long_prompts=True
+            )
+        with torch.no_grad():
+            pos = loaded.compel(prompt)
+            neg = loaded.compel(negative or "")
+            pos, neg = loaded.compel.pad_conditioning_tensors_to_same_length([pos, neg])
+        return {"prompt_embeds": pos, "negative_prompt_embeds": neg}
 
     if loaded.compel is None:
         from compel import Compel, ReturnedEmbeddingsType
@@ -332,6 +348,31 @@ def _fit_ref(ref: Image.Image) -> Image.Image:
     return ImageOps.fit(ref.convert("RGB"), (_NATIVE_PX, _NATIVE_PX), Image.Resampling.LANCZOS)
 
 
+def _decode_fast(loaded: _Loaded, latents: Any, cfg: LlmConfig) -> Image.Image:
+    import torch
+
+    vae = loaded.pipe.vae
+    if loaded.taesd_sd is None:
+        from diffusers import AutoencoderTiny
+
+        loaded.taesd_sd = AutoencoderTiny.from_pretrained(
+            _TAESD_REPO, torch_dtype=vae.dtype, cache_dir=str(cfg.imagegen_model_dir)
+        ).to(vae.device)
+    with torch.no_grad():
+        image = loaded.taesd_sd.decode(latents.to(vae.dtype)).sample
+    return loaded.pipe.image_processor.postprocess(image, output_type="pil")[0]
+
+
+def _txt2img(loaded: _Loaded, cfg: LlmConfig, job: dict, **kwargs: Any) -> Image.Image:
+    call = {
+        "num_inference_steps": job["steps"], "width": _NATIVE_PX, "height": _NATIVE_PX, **kwargs,
+    }
+    if not (cfg.imagegen_fast_decode and loaded.spec.kind == "sd15"):
+        return loaded.pipe(**call).images[0]
+    latents = loaded.pipe(**call, output_type="latent").images
+    return _decode_fast(loaded, latents, cfg)
+
+
 def _generate_sync(
     loaded: _Loaded, prompt: str, negative: str, cfg: LlmConfig, job: dict
 ) -> Image.Image:
@@ -386,15 +427,14 @@ def _generate_sync(
             log.info("imagegen: IP-Adapter загружен за %.1fс", time.monotonic() - started)
         pipe.set_ip_adapter_scale(ip_scale)
         common["ip_adapter_image"] = ref
+    if wants_ip:
+        return pipe(
+            prompt, num_inference_steps=job["steps"], width=_NATIVE_PX, height=_NATIVE_PX, **common,
+        ).images[0]
     if job.get("weighted"):
         del common["negative_prompt"]
-        return pipe(
-            **_prompt_kwargs(loaded, prompt, negative, job),
-            num_inference_steps=job["steps"], width=_NATIVE_PX, height=_NATIVE_PX, **common,
-        ).images[0]
-    return pipe(
-        prompt, num_inference_steps=job["steps"], width=_NATIVE_PX, height=_NATIVE_PX, **common,
-    ).images[0]
+        return _txt2img(loaded, cfg, job, **_prompt_kwargs(loaded, prompt, negative, job), **common)
+    return _txt2img(loaded, cfg, job, prompt=prompt, **common)
 
 
 async def generate_image(
@@ -416,8 +456,11 @@ async def generate_image(
     loras: list[tuple[str, float]] | None = None,
     preview: Callable[[Image.Image], bool] | None = None,
     weighted: bool = False,
+    weights: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     model, spec = resolve_model(model, cfg)
+    if weights is not None and (spec.kind != "sd15" or ref is not None):
+        raise ValueError("веса тегов — только SD1.5 без образца")
     if (preview is not None or weighted) and (
         spec.kind != "sdxl-turbo" or ref is not None or loras
     ):
@@ -444,6 +487,9 @@ async def generate_image(
     if fit:
         prompt = image_prompt.fit_prompt(prompt, template, count_tokens)
     subject = prompt
+    if weights is not None:
+        prompt = image_prompt.weight_tags(prompt, *weights)
+        weighted = True
     if style:
         prompt, negative = apply_style(prompt, negative, cfg)
     if seed is None:

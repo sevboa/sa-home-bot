@@ -61,3 +61,11 @@ def test_build_request_puts_retake_emphasis_before_the_picture():
     assert text.index("FAILED") < text.index("Picture:")
     assert "FAILED" not in image_prompt.build_request("меч", "scene", "room")
     assert image_prompt.build_request("кот", emphasize=["кот"]) != "кот"
+
+
+def test_weight_tags_weights_first_and_last_tag_and_drops_brackets():
+    weighted = image_prompt.weight_tags("chest (old), torch, catacomb", 1.3)
+    assert weighted == "(chest old)1.3, torch, catacomb"
+    weighted = image_prompt.weight_tags("chest, torch, catacomb", 1.2, 1.1)
+    assert weighted == "(chest)1.2, torch, (catacomb)1.1"
+    assert image_prompt.weight_tags("chest, torch", 1.0, 1.1) == "chest, torch"

@@ -165,6 +165,26 @@ async def test_generate_image_negative_extra_is_appended(monkeypatch):
     assert seen == [f"blurry, monochrome, {HANDS}", f"text, monochrome, {HANDS}", ""]
 
 
+async def test_generate_image_hero_weight_goes_to_generator(monkeypatch):
+    seen = []
+
+    async def fake_generate(prompt, negative, cfg, **kwargs):
+        seen.append(kwargs["weights"])
+        return {"png": b"x", "width": 1, "height": 1, "seconds": 0.0}
+
+    monkeypatch.setattr(llm_service.imagegen, "generate_image", fake_generate)
+    svc = _svc(imagegen_enabled=True)
+    await svc.run_command("generate_image", {"prompt": "a cat", "hero_weight": 1.3})
+    both = {"hero_weight": 1.2, "place_weight": 1.1}
+    await svc.run_command("generate_image", {"prompt": "a cat", **both})
+    await svc.run_command("generate_image", {"prompt": "a cat", "raw": True, "hero_weight": 1.3})
+    await svc.run_command("generate_image", {"prompt": "a cat"})
+    assert seen == [(1.3, 1.0), (1.2, 1.1), None, None]
+    with pytest.raises(ProtoError) as err:
+        await svc.run_command("generate_image", {"prompt": "a cat", "hero_weight": 2.0})
+    assert err.value.code == ERR_BAD_REQUEST
+
+
 async def test_generate_image_hands_negative_once(monkeypatch):
     seen = []
 
@@ -267,6 +287,28 @@ def test_generate_sync_passes_guidance_from_config():
     assert seen["guidance_scale"] == 1.5
     assert seen["num_inference_steps"] == 6
     assert seen["negative_prompt"] is None
+
+
+def test_generate_sync_fast_decode_takes_latents_through_taesd(monkeypatch):
+    from sa_home_bot.llm import imagegen
+
+    seen = {}
+
+    class _Pipe:
+        def __call__(self, prompt, **kw):
+            seen.update(kw)
+
+            class _R:
+                images = "latents"
+
+            return _R()
+
+    monkeypatch.setattr(imagegen, "_decode_fast", lambda loaded, latents, cfg: f"decoded {latents}")
+    cfg = LlmConfig(model="qwen2.5:7b", imagegen_fast_decode=True)
+    job = {"ref": None, "steps": 6, "guidance": 1.5}
+    loaded = imagegen._Loaded(_Pipe(), imagegen.MODELS["dream"])
+    assert imagegen._generate_sync(loaded, "a cat", "", cfg, job) == "decoded latents"
+    assert seen["output_type"] == "latent"
 
 
 async def test_generate_image_description_goes_through_prompt_agent(monkeypatch):

@@ -12,8 +12,8 @@ from typing import Any
 from sa_home_bot.bot import image_tools
 from sa_home_bot.bot.alfred_voice import ALFRED_PREFIX_HTML
 from sa_home_bot.bot.interactives import cabinet as cabinet_mod
+from sa_home_bot.bot.interactives import frame_heroes, places, radio, underground
 from sa_home_bot.bot.interactives import items as items_mod
-from sa_home_bot.bot.interactives import places, radio, underground
 from sa_home_bot.bot.interactives.cabinet import Cabinet
 from sa_home_bot.bot.interactives.core import EngineCore
 from sa_home_bot.bot.interactives.llm_link import LLM_CALL_ERRORS, ask_chat
@@ -548,8 +548,11 @@ class PhotosMixin(EngineCore):
             if selfie or not cab.is_study
             else await self._item_shot(chat_id, user_id, focus, draw=True)
         )
+        hero_frame = frame is not None and bool(frame.request_en) and not focus and not selfie
         if selfie:
             description, context = selfie_description(cab, outside, focus, happening), ""
+        elif hero_frame:
+            description, context = frame.request_en, ""
         else:
             description, context = photo_description(
                 cab,
@@ -598,6 +601,11 @@ class PhotosMixin(EngineCore):
             and bool(focus or (shot is not None and shot.place == "closeup"))
         )
         request["light"] = cab.light_en(outside, closeup=closeup)
+        if hero_frame:
+            request["light"] = ""
+            request["hero_weight"] = frame_heroes.HERO_WEIGHT
+            request["place_weight"] = frame_heroes.PLACE_WEIGHT
+            request["negative_extra"] += f", {frame_heroes.FRAME_NEGATIVE_EN}"
         if cab.windowed and outside.light == PHASE_NIGHT and not closeup:
             request["light_move"] = True
         if shot is not None:

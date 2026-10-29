@@ -610,6 +610,10 @@ Ollama и sa-home-bot держат модель тёплой одинаково�
   API-токен Civitai (civitai.com → Account → API Keys): часть LoRA для
   /draw lora= без него не скачивается (401). Пусто — только открытые.
 
+- `imagegen_fast_decode: bool = False`
+  TAESD вместо полного VAE при декодировании SD1.5 без образца (−16% времени
+  кадра на CPU, на 64 px неотличимо; см. platform-llm/imagegen.md).
+
 - `imagegen_display_px: int = Field(default=512, ge=64, le=2048)`
   Сторона бота (тулы generate_image/find_image): до какого размера
   растягивать картинку при отправке (nearest-neighbor, целым множителем —
