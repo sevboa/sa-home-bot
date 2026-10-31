@@ -87,9 +87,8 @@ async def scenario_stop_unassigned(store):
     await store.queue.post_from_client(CLIENT, job.id, S.MSG_STOP, {})
 
 
-async def scenario_stop_foreign(store):
-    job = await submit(store)
-    await store.queue.claim(OTHER_EXECUTOR, [MODEL])
+async def scenario_stop_running(store):
+    job = await running(store)
     await store.queue.post_from_client(CLIENT, job.id, S.MSG_STOP, {})
 
 
@@ -104,13 +103,13 @@ async def scenario_stop_foreign(store):
         (scenario_answer_read, False),
         (scenario_released, False),
         (scenario_resumed, True),
-        (scenario_stop_unassigned, True),
-        (scenario_stop_foreign, False),
+        (scenario_stop_unassigned, False),
+        (scenario_stop_running, True),
     ],
 )
 async def test_pending_work(store, scenario, expected):
     await scenario(store)
-    assert await store.queue.pending_work(EXECUTOR) is expected
+    assert await store.queue.pending_work() is expected
 
 
 class FakeEnsure:
@@ -157,11 +156,11 @@ async def test_fresh_heartbeat_does_not_wake(store, waker, ensure):
     assert ensure.calls == []
 
 
-async def test_heartbeat_of_other_executor_does_not_count(store, waker, ensure):
+async def test_fresh_heartbeat_under_other_token_name_does_not_wake(store, waker, ensure):
     await submit(store)
     await beat(store, OTHER_EXECUTOR)
-    await waker.step()
-    assert len(ensure.calls) == 1
+    assert await waker.step() is None
+    assert ensure.calls == []
 
 
 async def test_stale_heartbeat_wakes(store, waker, ensure, monkeypatch):

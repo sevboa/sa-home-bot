@@ -33,9 +33,9 @@ class ExecutorWaker:
         self._last_attempt: float | None = None
 
     async def step(self) -> str | None:
-        if not await self._store.queue.pending_work(self._executor_node):
+        if not await self._store.queue.pending_work():
             return None
-        if await self._store.executor_alive(self._executor_node):
+        if await self._store.executor_alive():
             return None
         now = self._clock()
         if self._last_attempt is not None and now - self._last_attempt < WAKE_BACKOFF_S:

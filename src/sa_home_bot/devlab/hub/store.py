@@ -134,11 +134,11 @@ class HubStore:
                 ),
             )
 
-    async def executor_alive(self, name: str) -> bool:
+    async def executor_alive(self) -> bool:
         border = (utc_now() - timedelta(seconds=HEARTBEAT_FRESH_S)).isoformat()
         cur = await self._db.conn.execute(
-            "SELECT 1 FROM heartbeats WHERE name = ? AND role = ? AND seen >= ?",
-            (name, protocol.ROLE_EXECUTOR, border),
+            "SELECT 1 FROM heartbeats WHERE role = ? AND seen >= ?",
+            (protocol.ROLE_EXECUTOR, border),
         )
         return await cur.fetchone() is not None
 

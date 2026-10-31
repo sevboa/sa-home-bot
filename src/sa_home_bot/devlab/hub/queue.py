@@ -377,20 +377,19 @@ class HubQueue:
                 )
             return messages
 
-    async def pending_work(self, executor: str) -> bool:
+    async def pending_work(self) -> bool:
         cur = await self._db.conn.execute(
             "SELECT 1 FROM jobs WHERE status = ? AND kind = ?"
             " UNION ALL"
             " SELECT 1 FROM messages m JOIN jobs j ON j.id = m.job_id"
             " WHERE m.direction = ? AND m.read_at IS NULL AND m.kind != ?"
-            " AND (j.executor IS NULL OR j.executor = ?)"
+            " AND j.executor IS NOT NULL"
             " LIMIT 1",
             (
                 protocol.STATUS_QUEUED,
                 protocol.JOB_KIND_AGENT,
                 protocol.DIRECTION_TO_EXECUTOR,
                 protocol.MSG_RELEASE,
-                executor,
             ),
         )
         return await cur.fetchone() is not None
