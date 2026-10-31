@@ -140,6 +140,14 @@ async def test_fetch_without_token_is_401(server):
     assert resp.status == 401
 
 
+async def test_gateway_cannot_read_repos(server, store):
+    token = await store.issue_token("jeeves", protocol.ROLE_GATEWAY)
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"/git/{PROJECT}.git/info/refs?service=git-upload-pack"
+    resp = await server.get(url, headers=headers)
+    assert resp.status == 403
+
+
 async def test_unknown_project_is_404(server, tokens):
     headers = {"Authorization": f"Bearer {tokens[protocol.ROLE_CLIENT]}"}
     resp = await server.get("/git/nope.git/info/refs?service=git-upload-pack", headers=headers)

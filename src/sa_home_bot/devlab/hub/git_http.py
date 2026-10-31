@@ -8,7 +8,7 @@ import os
 from aiohttp import web
 
 from sa_home_bot.devlab import protocol
-from sa_home_bot.devlab.hub.http import PRINCIPAL_KEY, STORE_KEY
+from sa_home_bot.devlab.hub.http import PRINCIPAL_KEY, STORE_KEY, roles
 from sa_home_bot.devlab.hub.queue import PROJECT_NAME_RE
 
 log = logging.getLogger(__name__)
@@ -101,6 +101,7 @@ async def read_head(stdout: asyncio.StreamReader) -> tuple[bytes, bytes]:
         buffer += chunk
 
 
+@roles(protocol.ROLE_CLIENT, protocol.ROLE_EXECUTOR)
 async def handle_git(request: web.Request) -> web.StreamResponse:
     tail = request.match_info["tail"]
     parsed = split_repo_path(tail)
