@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from sa_home_bot.devlab import protocol
+from sa_home_bot.devlab.hub import repos
 from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.devlab.hub.store import HubStore
 
@@ -109,6 +110,14 @@ async def submit(
     base_branch: str,
     priority: int = 0,
 ) -> Any:
+    if await ctx.store.queue.has_project(project) and not await repos.branch_exists(
+        ctx.store.git_root, project, base_branch
+    ):
+        raise HubError(
+            f"в хабе нет ветки {base_branch!r}: запушь её, "
+            f"git push {protocol.HTTP_GIT_PREFIX}{project}{protocol.GIT_REPO_SUFFIX} "
+            f"HEAD:{base_branch}"
+        )
     job = await ctx.store.queue.submit(
         ctx.client, project, model, task, priority=priority, base_branch=base_branch
     )

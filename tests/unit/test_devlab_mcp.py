@@ -11,6 +11,7 @@ from mcp.client.streamable_http import streamable_http_client
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub import http, mcp_http
 from sa_home_bot.devlab.hub.store import HubStore
+from sa_home_bot.utils.process import run
 
 PROJECT = "proj"
 MODEL = "qwen"
@@ -74,6 +75,19 @@ async def call(client, headers, tool, **arguments):
     return result["isError"], json.loads(text) if not result["isError"] else text
 
 
+async def register(client, store, headers, branch=BASE):
+    is_error, _ = await call(client, headers, protocol.TOOL_PROJECT_ADD, name=PROJECT)
+    assert not is_error
+    repo = str(store.git_root / f"{PROJECT}{protocol.GIT_REPO_SUFFIX}")
+    tree = await run(["git", "--git-dir", repo, "hash-object", "-t", "tree", "/dev/null"])
+    ident = ["-c", "user.name=t", "-c", "user.email=t@t"]
+    commit = await run(
+        ["git", *ident, "--git-dir", repo, "commit-tree", tree.stdout_text.strip(), "-m", "b"]
+    )
+    ref = protocol.HEADS_REF_PREFIX + branch
+    await run(["git", "--git-dir", repo, "update-ref", ref, commit.stdout_text.strip()])
+
+
 async def submit(client, headers, **overrides):
     arguments = {
         "project": PROJECT,
@@ -134,7 +148,7 @@ async def test_protocol_basics(client, alice):
 
 
 async def test_job_lifecycle(client, store, alice):
-    assert not (await call(client, alice, protocol.TOOL_PROJECT_ADD, name=PROJECT))[0]
+    await register(client, store, alice)
     _, submitted = await submit(client, alice)
     job_id = submitted["job"]["id"]
     assert submitted["job"]["base_branch"] == BASE
@@ -175,7 +189,7 @@ async def test_job_lifecycle(client, store, alice):
 
 
 async def test_known_model_gives_no_warning(client, store, alice):
-    await call(client, alice, protocol.TOOL_PROJECT_ADD, name=PROJECT)
+    await register(client, store, alice)
     gateway = await store.issue_token("gw", protocol.ROLE_GATEWAY)
     principal = await store.authenticate(gateway)
     await store.heartbeat(principal, {protocol.FIELD_MODELS: [{protocol.MODEL_NAME: MODEL}]})
@@ -185,15 +199,22 @@ async def test_known_model_gives_no_warning(client, store, alice):
     assert submitted["warnings"] == []
 
 
+async def test_submit_without_base_branch_pushed(client, store, alice):
+    await register(client, store, alice)
+    is_error, text = await submit(client, alice, base_branch="base/missing")
+    assert is_error and "git push" in text and "base/missing" in text
+    assert await store.queue.list_jobs() == []
+
+
 async def test_release_requires_waiting_owner(client, store, alice):
-    await call(client, alice, protocol.TOOL_PROJECT_ADD, name=PROJECT)
+    await register(client, store, alice)
     _, submitted = await submit(client, alice)
     is_error, text = await call(client, alice, protocol.TOOL_RELEASE, id=submitted["job"]["id"])
     assert is_error and "release" in text
 
 
 async def test_other_client_sees_nothing(client, store, alice, bob):
-    await call(client, alice, protocol.TOOL_PROJECT_ADD, name=PROJECT)
+    await register(client, store, alice)
     _, submitted = await submit(client, alice)
     job_id = submitted["job"]["id"]
     assert (await call(client, bob, protocol.TOOL_LIST))[1] == []
@@ -224,8 +245,8 @@ async def test_other_client_sees_nothing(client, store, alice, bob):
         (protocol.TOOL_STOP, {"id": "a", "extra": 1}),
     ],
 )
-async def test_hub_error_becomes_tool_error(client, alice, tool, arguments):
-    await call(client, alice, protocol.TOOL_PROJECT_ADD, name=PROJECT)
+async def test_hub_error_becomes_tool_error(client, store, alice, tool, arguments):
+    await register(client, store, alice)
     is_error, text = await call(client, alice, tool, **arguments)
     assert is_error and text
 

@@ -50,3 +50,15 @@ async def init_bare(git_root: Path, name: str) -> Path:
         await _git("-C", str(repo), "config", key, value)
     install_hook(repo)
     return repo
+
+
+async def branch_exists(git_root: Path, project: str, branch: str) -> bool:
+    repo = repo_path(git_root, project)
+    if not repo.is_dir():
+        return False
+    ref = protocol.HEADS_REF_PREFIX + branch
+    result = await run(
+        ["git", "--git-dir", str(repo), "rev-parse", "--verify", "--quiet", ref],
+        timeout=GIT_TIMEOUT_S,
+    )
+    return result.returncode == 0
