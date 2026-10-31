@@ -6202,7 +6202,7 @@ jeeves. Агент коммитит каждый чих в ветку прогр
 - Инструменты MCP: `devlab_models`, `devlab_project_add`, `devlab_projects`, `devlab_submit`,
   `devlab_list`, `devlab_status`, `devlab_inbox`, `devlab_ack`, `devlab_answer`, `devlab_resume`,
   `devlab_stop`, `devlab_release`. Ни один не ждёт mycraft.
-- Действия для исполнителя и шлюзов (proto роя): `claim`, `post`, `poll`, `heartbeat`
+- HTTP API хаба для исполнителя и шлюзов (по токену, не proto роя): `claim`, `post`, `poll`, `heartbeat`
   (жив, занятость; у шлюзов — каталог моделей и остатки лимитов).
 - Ресурсы MCP: шаблон task.md, «как пользоваться мастерской».
 

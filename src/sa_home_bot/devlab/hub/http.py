@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from aiohttp import web
 
 from sa_home_bot.devlab import protocol
+from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.devlab.hub.store import HubStore, Principal
 
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
@@ -51,13 +52,21 @@ async def auth_middleware(request: web.Request, handler: Handler) -> web.StreamR
     return await handler(request)
 
 
+@web.middleware
+async def error_middleware(request: web.Request, handler: Handler) -> web.StreamResponse:
+    try:
+        return await handler(request)
+    except HubError as exc:
+        return web.json_response({protocol.FIELD_ERROR: str(exc)}, status=400)
+
+
 @public
 async def health(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "service": protocol.SERVICE_NAME})
 
 
 def build_app(store: HubStore) -> web.Application:
-    app = web.Application(middlewares=[auth_middleware])
+    app = web.Application(middlewares=[error_middleware, auth_middleware])
     app[STORE_KEY] = store
     app.router.add_get(protocol.HTTP_HEALTH_PATH, health)
     return app

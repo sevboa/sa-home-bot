@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 from sa_home_bot.db.connection import Database
 from sa_home_bot.devlab import protocol
@@ -15,6 +18,7 @@ HUB_DB_NAME = "hub.sqlite"
 GIT_DIR_NAME = "git"
 TOKEN_BYTES = 32
 NAME_MAX_CHARS = 64
+HEARTBEAT_FRESH_S = 120
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tokens (
@@ -23,6 +27,12 @@ CREATE TABLE IF NOT EXISTS tokens (
     hash TEXT NOT NULL UNIQUE,
     created TEXT NOT NULL,
     revoked TEXT
+);
+CREATE TABLE IF NOT EXISTS heartbeats (
+    name TEXT PRIMARY KEY,
+    role TEXT NOT NULL,
+    data TEXT NOT NULL,
+    seen TEXT NOT NULL
 );
 """
 
@@ -103,3 +113,39 @@ class HubStore:
         cur = await self._db.conn.execute("SELECT count(*) AS n FROM tokens WHERE revoked IS NULL")
         row = await cur.fetchone()
         return row["n"] if row else 0
+
+    async def heartbeat(self, principal: Principal, data: dict[str, Any]) -> None:
+        if principal.role == protocol.ROLE_GATEWAY:
+            models = data.get(protocol.FIELD_MODELS)
+            if not isinstance(models, list) or not all(
+                isinstance(m, dict) and m.get(protocol.MODEL_NAME) for m in models
+            ):
+                raise HubError("heartbeat шлюза: models — список объектов с непустым name")
+        async with self._db.transaction() as conn:
+            await conn.execute(
+                "INSERT INTO heartbeats (name, role, data, seen) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(name) DO UPDATE SET role = excluded.role, data = excluded.data,"
+                " seen = excluded.seen",
+                (
+                    principal.name,
+                    principal.role,
+                    json.dumps(data, ensure_ascii=False),
+                    utc_now().isoformat(),
+                ),
+            )
+
+    async def models(self) -> list[dict[str, Any]]:
+        border = (utc_now() - timedelta(seconds=HEARTBEAT_FRESH_S)).isoformat()
+        cur = await self._db.conn.execute(
+            "SELECT name, data FROM heartbeats WHERE role = ? AND seen >= ? ORDER BY name",
+            (protocol.ROLE_GATEWAY, border),
+        )
+        catalog: list[dict[str, Any]] = []
+        for row in await cur.fetchall():
+            data = json.loads(row["data"])
+            limits = data.get(protocol.FIELD_LIMITS)
+            catalog.extend(
+                {**model, protocol.MODEL_GATEWAY: row["name"], protocol.FIELD_LIMITS: limits}
+                for model in data[protocol.FIELD_MODELS]
+            )
+        return catalog
