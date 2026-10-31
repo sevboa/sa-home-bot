@@ -208,3 +208,16 @@ async def test_answer_after_release_wakes(store, waker, ensure):
     await store.queue.post_from_client(CLIENT, job.id, S.MSG_ANSWER, {})
     await waker.step()
     assert len(ensure.calls) == 1
+
+
+async def scenario_queued_test(store):
+    await store.queue.submit_test(CLIENT, PROJECT, "master")
+
+
+async def test_pending_work_with_test_jobs(store):
+    await scenario_empty(store)
+    assert await store.queue.pending_work() is False
+    await scenario_queued_test(store)
+    assert await store.queue.pending_work() is True
+    await store.queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
+    assert await store.queue.pending_work() is False

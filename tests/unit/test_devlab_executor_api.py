@@ -276,3 +276,119 @@ async def test_introspect_is_gateway_only(client, store, role):
         protocol.HTTP_INTROSPECT_PATH, json={protocol.FIELD_TOKEN: "x"}, headers=headers
     )
     assert resp.status == 403
+
+
+DONE = {
+    protocol.PAYLOAD_EXIT_CODE: 0,
+    protocol.PAYLOAD_DURATION_S: 1.5,
+    protocol.PAYLOAD_SUMMARY: {
+        protocol.SUMMARY_PASSED: 3,
+        protocol.SUMMARY_FAILED: 0,
+        protocol.SUMMARY_ERRORS: 0,
+        protocol.SUMMARY_SKIPPED: 0,
+    },
+}
+
+
+async def test_claim_by_kinds_and_test_done_over_http(client, store, executor):
+    await store.queue.submit("me", PROJECT, MODEL, "task")
+    test_job = await store.queue.submit_test("me", PROJECT, "master")
+    body = {protocol.FIELD_MODELS: [MODEL], protocol.FIELD_KINDS: [protocol.JOB_KIND_TEST]}
+    status, claimed = await call(client, protocol.HTTP_CLAIM_PATH, executor, body)
+    assert (status, claimed[protocol.FIELD_JOB]["id"]) == (200, test_job.id)
+    assert claimed[protocol.FIELD_JOB]["params"][protocol.FIELD_REF] == "master"
+    _, second = await call(client, protocol.HTTP_CLAIM_PATH, executor, body)
+    assert second[protocol.FIELD_JOB] is None
+    status, _ = await call(
+        client,
+        protocol.HTTP_POST_PATH,
+        executor,
+        {
+            protocol.FIELD_JOB_ID: test_job.id,
+            protocol.FIELD_KIND: protocol.MSG_TEST_DONE,
+            protocol.FIELD_PAYLOAD: DONE,
+        },
+    )
+    assert status == 200
+    assert (await store.queue.get_job(test_job.id)).status == protocol.STATUS_DONE
+
+
+@pytest.mark.parametrize("kinds", ["test", ["nope"], [1]])
+async def test_claim_rejects_bad_kinds(client, executor, kinds):
+    body = {protocol.FIELD_MODELS: [], protocol.FIELD_KINDS: kinds}
+    status, _ = await call(client, protocol.HTTP_CLAIM_PATH, executor, body)
+    assert status == 400
+
+
+async def upload(client, headers, job_id, data, name=protocol.LOG_FILE_OUTPUT):
+    resp = await client.put(
+        protocol.HTTP_LOG_PATH,
+        params={protocol.FIELD_NAME: name},
+        data=data,
+        headers={**headers, protocol.HEADER_JOB: job_id},
+    )
+    return resp.status
+
+
+async def running_test(client, store, executor):
+    job = await store.queue.submit_test("me", PROJECT, "master")
+    await call(
+        client,
+        protocol.HTTP_CLAIM_PATH,
+        executor,
+        {protocol.FIELD_MODELS: [], protocol.FIELD_KINDS: [protocol.JOB_KIND_TEST]},
+    )
+    return job
+
+
+async def test_log_upload_is_stored_and_replaced(client, store, executor):
+    job = await running_test(client, store, executor)
+    assert await upload(client, executor, job.id, b"first") == 200
+    assert await upload(client, executor, job.id, b"second", protocol.LOG_FILE_JUNIT) == 200
+    assert await upload(client, executor, job.id, b"third") == 200
+    directory = store.logs_root / job.id
+    assert (directory / protocol.LOG_FILE_OUTPUT).read_bytes() == b"third"
+    assert (directory / protocol.LOG_FILE_JUNIT).read_bytes() == b"second"
+    assert sorted(p.name for p in directory.iterdir()) == sorted(protocol.LOG_FILES)
+
+
+async def test_log_upload_of_other_executors_job_is_refused(client, store, executor):
+    job = await running_test(client, store, executor)
+    other = await token_for(store, "pc2", protocol.ROLE_EXECUTOR)
+    assert await upload(client, other, job.id, b"x") == 400
+    assert not (store.logs_root / job.id).exists()
+
+
+@pytest.mark.parametrize("name", ["evil.sh", "../x", ""])
+async def test_log_upload_rejects_other_names(client, store, executor, name):
+    job = await running_test(client, store, executor)
+    assert await upload(client, executor, job.id, b"x", name) == 400
+
+
+async def test_log_upload_rejects_unclaimed_agent_and_unknown_jobs(client, store, executor):
+    queued = await store.queue.submit_test("me", PROJECT, "master")
+    agent = await store.queue.submit("me", PROJECT, MODEL, "task")
+    for job_id in (queued.id, agent.id, "zzzzzz"):
+        assert await upload(client, executor, job_id, b"x") == 400
+
+
+async def test_log_upload_limit_is_enforced_and_leaves_no_file(
+    client, store, executor, monkeypatch
+):
+    monkeypatch.setattr(protocol, "LOG_MAX_BYTES", 100)
+    job = await running_test(client, store, executor)
+    assert await upload(client, executor, job.id, b"a" * 101) == 413
+    assert not (store.logs_root / job.id).exists()
+
+    async def chunks():
+        for _ in range(11):
+            yield b"a" * 10
+
+    assert await upload(client, executor, job.id, chunks()) == 413
+    assert list((store.logs_root / job.id).iterdir()) == []
+    assert await upload(client, executor, job.id, b"a" * 100) == 200
+
+
+async def test_log_upload_needs_executor_role(client, store):
+    headers = await token_for(store, "me", protocol.ROLE_CLIENT)
+    assert await upload(client, headers, "zzzzzz", b"x") == 403

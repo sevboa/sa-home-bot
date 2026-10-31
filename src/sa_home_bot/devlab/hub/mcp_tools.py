@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from sa_home_bot.devlab import protocol
-from sa_home_bot.devlab.hub import repos
+from sa_home_bot.devlab.hub import joblogs, repos
 from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.devlab.hub.store import HubStore
 
@@ -124,6 +124,58 @@ async def submit(
     return {"job": job_view(job, with_task=False), "warnings": await model_warnings(ctx, model)}
 
 
+async def test_outcome(ctx: Context, job: Any) -> Any:
+    if job.status == protocol.STATUS_DONE:
+        message = await ctx.store.queue.last_message(job.id, protocol.MSG_TEST_DONE)
+    elif job.status in protocol.TERMINAL_STATUSES:
+        message = await ctx.store.queue.last_message(job.id, job.status)
+    else:
+        message = None
+    return message.payload if message else None
+
+
+async def test(
+    ctx: Context,
+    project: str,
+    ref: str,
+    cmd: str = "",
+    args: list[str] | None = None,
+    wait: int = 0,
+) -> Any:
+    if not 0 <= wait <= protocol.TEST_WAIT_MAX_S:
+        raise HubError(f"wait: от 0 до {protocol.TEST_WAIT_MAX_S} секунд")
+    if await ctx.store.queue.has_project(project) and not await repos.ref_exists(
+        ctx.store.git_root, project, ref
+    ):
+        raise HubError(
+            f"в хабе нет ref {ref!r}: запушь снимок, "
+            f"git push {protocol.HTTP_GIT_PREFIX}{project}{protocol.GIT_REPO_SUFFIX} "
+            f"HEAD:{protocol.TEST_BRANCH_PREFIX}{ctx.client}/<n>"
+        )
+    job = await ctx.store.queue.submit_test(ctx.client, project, ref, cmd, args)
+    if wait:
+        job = await ctx.store.queue.wait_terminal(job.id, wait)
+    return {"job": job_view(job, with_task=False), "result": await test_outcome(ctx, job)}
+
+
+async def test_log(ctx: Context, id: str, file: str = protocol.LOG_FILE_OUTPUT) -> Any:
+    job = await ctx.store.queue.get_job(id, ctx.client)
+    if job.kind != protocol.JOB_KIND_TEST:
+        raise HubError(f"задание {id} не test")
+    tail = joblogs.read_tail(ctx.store.logs_root, id, file, protocol.LOG_TAIL_MAX_BYTES)
+    if tail is None:
+        raise HubError(f"у задания {id} (статус {job.status}) нет файла {file}")
+    text, size = tail
+    return {
+        "id": id,
+        "file": file,
+        protocol.FIELD_REF: job.params[protocol.FIELD_REF],
+        "bytes": size,
+        "truncated": size > protocol.LOG_TAIL_MAX_BYTES,
+        "text": text,
+    }
+
+
 async def list_jobs(ctx: Context, statuses: list[str] | None = None) -> Any:
     if statuses is not None:
         unknown = [s for s in statuses if s not in protocol.STATUSES]
@@ -230,6 +282,35 @@ TOOLS: tuple[Tool, ...] = (
             Param("priority", "integer", "Приоритет, больше — раньше. По умолчанию 0."),
         ),
         submit,
+    ),
+    Tool(
+        protocol.TOOL_TEST,
+        "Прогнать тесты проекта на исполнителе. Снимок рабочей копии заранее пушится в ветку"
+        " test/<ваше имя>/<n>, её (или ветку, или sha) передайте в ref. Задания test идут раньше"
+        " заданий агентов. Если wait > 0, ждём результат до этого срока, иначе (или если не"
+        " дождались) вернётся задание, а результат test_done придёт в devlab_inbox.",
+        (
+            Param("project", "string", "Имя зарегистрированного проекта.", required=True),
+            Param("ref", "string", "Ветка или коммит в репозитории проекта.", required=True),
+            Param("cmd", "string", "Команда; пусто: из .devlab.toml проекта."),
+            Param("args", "array", "Аргументы команды: пути, -k, -x."),
+            Param(
+                "wait",
+                "integer",
+                f"Сколько секунд ждать результата, до {protocol.TEST_WAIT_MAX_S}. По умолчанию 0.",
+            ),
+        ),
+        test,
+    ),
+    Tool(
+        protocol.TOOL_TEST_LOG,
+        "Хвост полного лога (или junit.xml) своего задания test: последние 64 КиБ, размер файла"
+        " и ref задания.",
+        (
+            ID,
+            Param("file", "string", "output.log (по умолчанию) или junit.xml."),
+        ),
+        test_log,
     ),
     Tool(
         protocol.TOOL_LIST,

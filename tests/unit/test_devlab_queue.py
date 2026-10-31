@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 
 import pytest
@@ -129,8 +130,6 @@ async def test_submit_defaults_and_validation(queue):
     assert (await submit(queue)).id != job.id
     with pytest.raises(HubError):
         await queue.submit(CLIENT, "нет-такого", MODEL, TASK)
-    with pytest.raises(HubError):
-        await queue.submit(CLIENT, PROJECT, MODEL, TASK, kind=S.JOB_KIND_TEST)
     with pytest.raises(HubError):
         await queue.submit(CLIENT, PROJECT, " ", TASK)
     with pytest.raises(HubError):
@@ -303,3 +302,176 @@ async def test_list_jobs_filters(queue):
     assert {j.id for j in await queue.list_jobs()} == {queued.id, running.id, other.id}
     assert {j.id for j in await queue.list_jobs(client=CLIENT)} == {queued.id, running.id}
     assert [j.id for j in await queue.list_jobs(statuses=[S.STATUS_RUNNING])] == [running.id]
+
+
+async def submit_test(queue, client=CLIENT, **overrides):
+    return await queue.submit_test(client, PROJECT, **{"ref": "test/c/1", **overrides})
+
+
+def done_payload(**overrides):
+    return {
+        S.PAYLOAD_EXIT_CODE: 1,
+        S.PAYLOAD_DURATION_S: 12.5,
+        S.PAYLOAD_SUMMARY: {
+            S.SUMMARY_PASSED: 9,
+            S.SUMMARY_FAILED: 1,
+            S.SUMMARY_ERRORS: 0,
+            S.SUMMARY_SKIPPED: 2,
+        },
+        S.PAYLOAD_FAILURES: [{"name": "t::a", "excerpt": "assert 1 == 2"}],
+        S.PAYLOAD_TAIL: "1 failed",
+        **overrides,
+    }
+
+
+async def test_submit_test_stores_params(queue):
+    job = await submit_test(queue, cmd=" pytest ", args=["-x", "tests/a.py"])
+    assert job.kind == S.JOB_KIND_TEST
+    assert job.params == {
+        S.FIELD_REF: "test/c/1",
+        S.FIELD_CMD: "pytest",
+        S.FIELD_ARGS: ["-x", "tests/a.py"],
+    }
+    assert (await submit_test(queue)).params[S.FIELD_CMD] == ""
+
+
+@pytest.mark.parametrize("ref", ["", " ", "-x", "a b"])
+async def test_submit_test_rejects_bad_ref(queue, ref):
+    with pytest.raises(HubError):
+        await submit_test(queue, ref=ref)
+
+
+async def test_submit_test_unknown_project(queue):
+    with pytest.raises(HubError):
+        await queue.submit_test(CLIENT, "нет", "master")
+
+
+async def test_test_jobs_go_before_agent_jobs_whatever_priority(queue):
+    await submit(queue, priority=50)
+    test_job = await submit_test(queue)
+    claimed = await queue.claim(EXECUTOR, [MODEL], [S.JOB_KIND_AGENT, S.JOB_KIND_TEST])
+    assert claimed.id == test_job.id
+
+
+async def test_claim_by_kinds_is_separate(queue):
+    agent = await submit(queue)
+    test_job = await submit_test(queue)
+    assert await queue.claim(EXECUTOR, [MODEL], [S.JOB_KIND_TEST]) is not None
+    assert await queue.claim(EXECUTOR, [MODEL], [S.JOB_KIND_TEST]) is None
+    assert await queue.claim(EXECUTOR, [], [S.JOB_KIND_AGENT]) is None
+    assert (await queue.claim(EXECUTOR, [MODEL])).id == agent.id
+    assert (await queue.get_job(test_job.id)).status == S.STATUS_RUNNING
+
+
+async def test_test_claim_needs_no_models(queue):
+    job = await submit_test(queue)
+    assert (await queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])).id == job.id
+
+
+async def test_claim_unknown_kind_is_rejected(queue):
+    with pytest.raises(HubError):
+        await queue.claim(EXECUTOR, [MODEL], ["nope"])
+
+
+async def test_test_done_finishes_job_and_keeps_result(queue):
+    job = await submit_test(queue)
+    await queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
+    await queue.post_from_executor(job.id, S.MSG_TEST_DONE, done_payload(), executor=EXECUTOR)
+    assert (await queue.get_job(job.id)).status == S.STATUS_DONE
+    message = await queue.last_message(job.id, S.MSG_TEST_DONE)
+    assert message.payload[S.PAYLOAD_EXIT_CODE] == 1
+    assert [m.kind for m in await queue.inbox(CLIENT)] == [S.MSG_TEST_DONE]
+
+
+async def test_test_job_transitions(queue):
+    stopped = await submit_test(queue)
+    await queue.post_from_client(CLIENT, stopped.id, S.MSG_STOP, {})
+    assert (await queue.get_job(stopped.id)).status == S.STATUS_STOPPED
+    failed = await submit_test(queue)
+    await queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
+    await queue.post_from_executor(failed.id, S.MSG_FAILED, {S.PAYLOAD_TEXT: "нет образа"})
+    assert (await queue.get_job(failed.id)).status == S.STATUS_FAILED
+    await queue.post_from_client(CLIENT, failed.id, S.MSG_RESUME, {})
+    assert (await queue.get_job(failed.id)).status == S.STATUS_QUEUED
+
+
+async def test_test_job_rejects_question_and_agent_rejects_test_done(queue):
+    test_job = await submit_test(queue)
+    agent = await running_job(queue)
+    await queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
+    with pytest.raises(HubError):
+        await queue.post_from_executor(test_job.id, S.MSG_QUESTION, {S.PAYLOAD_TEXT: "?"})
+    with pytest.raises(HubError):
+        await queue.post_from_executor(agent.id, S.MSG_TEST_DONE, done_payload())
+    assert (await queue.get_job(test_job.id)).status == S.STATUS_RUNNING
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {S.PAYLOAD_EXIT_CODE: "0"},
+        {S.PAYLOAD_EXIT_CODE: True},
+        {S.PAYLOAD_DURATION_S: -1},
+        {S.PAYLOAD_SUMMARY: {S.SUMMARY_PASSED: 1}},
+        {S.PAYLOAD_SUMMARY: "ok"},
+        {S.PAYLOAD_FAILURES: "x"},
+        {S.PAYLOAD_TAIL: 5},
+    ],
+)
+async def test_test_done_payload_is_validated(queue, bad):
+    job = await submit_test(queue)
+    await queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
+    with pytest.raises(HubError):
+        await queue.post_from_executor(job.id, S.MSG_TEST_DONE, done_payload(**bad))
+    assert (await queue.get_job(job.id)).status == S.STATUS_RUNNING
+
+
+async def test_pending_work_counts_queued_test(queue):
+    assert await queue.pending_work() is False
+    job = await submit_test(queue)
+    assert await queue.pending_work() is True
+    await queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
+    assert await queue.pending_work() is False
+    await queue.post_from_executor(job.id, S.MSG_TEST_DONE, done_payload())
+    assert await queue.pending_work() is False
+
+
+async def test_wait_terminal_wakes_on_finish(queue):
+    job = await submit_test(queue)
+    await queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
+    waiter = asyncio.create_task(queue.wait_terminal(job.id, 30))
+    await asyncio.sleep(0.05)
+    assert not waiter.done()
+    await queue.post_from_executor(job.id, S.MSG_TEST_DONE, done_payload())
+    assert (await asyncio.wait_for(waiter, 1)).status == S.STATUS_DONE
+
+
+async def test_wait_terminal_times_out_with_current_job(queue):
+    job = await submit_test(queue)
+    result = await queue.wait_terminal(job.id, 0.05)
+    assert result.status == S.STATUS_QUEUED
+
+
+async def test_wait_terminal_returns_at_once_for_finished(queue):
+    job = await submit_test(queue)
+    await queue.post_from_client(CLIENT, job.id, S.MSG_STOP, {})
+    assert (await asyncio.wait_for(queue.wait_terminal(job.id, 30), 1)).status == S.STATUS_STOPPED
+
+
+async def test_purge_removes_logs_of_old_test_jobs_only(queue):
+    old = await submit_test(queue)
+    fresh = await submit_test(queue)
+    await queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
+    await queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
+    for job in (old, fresh):
+        directory = queue.logs_root / job.id
+        directory.mkdir(parents=True)
+        (directory / S.LOG_FILE_OUTPUT).write_text("x")
+        await queue.post_from_executor(job.id, S.MSG_TEST_DONE, done_payload())
+    await queue.purge(5, now=utc_now() + timedelta(days=6))
+    assert not (queue.logs_root / old.id).exists()
+    assert not (queue.logs_root / fresh.id).exists()
+    third = await submit_test(queue)
+    (queue.logs_root / third.id).mkdir(parents=True)
+    await queue.purge(5)
+    assert (queue.logs_root / third.id).exists()

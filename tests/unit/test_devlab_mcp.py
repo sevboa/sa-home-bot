@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx2
@@ -22,6 +23,8 @@ TOOL_NAMES = {
     protocol.TOOL_PROJECT_ADD,
     protocol.TOOL_PROJECTS,
     protocol.TOOL_SUBMIT,
+    protocol.TOOL_TEST,
+    protocol.TOOL_TEST_LOG,
     protocol.TOOL_LIST,
     protocol.TOOL_STATUS,
     protocol.TOOL_INBOX,
@@ -277,3 +280,168 @@ async def test_roles(client, store, role, status):
     body = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
     resp = await client.post(protocol.HTTP_MCP_PATH, json=body, headers=headers)
     assert resp.status == status
+
+
+async def push_ref(store, name):
+    repo = str(store.git_root / f"{PROJECT}{protocol.GIT_REPO_SUFFIX}")
+    sha = await run(["git", "--git-dir", repo, "rev-parse", f"refs/heads/{BASE}"])
+    await run(
+        ["git", "--git-dir", repo, "update-ref", f"refs/heads/{name}", sha.stdout_text.strip()]
+    )
+    return sha.stdout_text.strip()
+
+
+DONE = {
+    protocol.PAYLOAD_EXIT_CODE: 1,
+    protocol.PAYLOAD_DURATION_S: 3.0,
+    protocol.PAYLOAD_SUMMARY: {
+        protocol.SUMMARY_PASSED: 1,
+        protocol.SUMMARY_FAILED: 1,
+        protocol.SUMMARY_ERRORS: 0,
+        protocol.SUMMARY_SKIPPED: 0,
+    },
+}
+
+
+async def claim_test(store):
+    return await store.queue.claim("pc", [], [protocol.JOB_KIND_TEST])
+
+
+async def test_devlab_test_queues_without_waiting(client, store, alice):
+    await register(client, store, alice)
+    await push_ref(store, "test/alice/1")
+    is_error, queued = await call(
+        client, alice, protocol.TOOL_TEST, project=PROJECT, ref="test/alice/1", args=["-x"]
+    )
+    assert not is_error
+    assert queued["result"] is None
+    job = queued["job"]
+    assert (job["kind"], job["status"]) == (protocol.JOB_KIND_TEST, protocol.STATUS_QUEUED)
+    assert job["params"][protocol.FIELD_ARGS] == ["-x"]
+    assert (await claim_test(store)).id == job["id"]
+
+
+async def test_devlab_test_accepts_sha(client, store, alice):
+    await register(client, store, alice)
+    sha = await push_ref(store, "test/alice/1")
+    is_error, queued = await call(client, alice, protocol.TOOL_TEST, project=PROJECT, ref=sha)
+    assert not is_error and queued["job"]["params"][protocol.FIELD_REF] == sha
+
+
+@pytest.mark.parametrize("ref", ["test/alice/nope", "0" * 40, "-x"])
+async def test_devlab_test_missing_ref_hints_push(client, store, alice, ref):
+    await register(client, store, alice)
+    is_error, text = await call(client, alice, protocol.TOOL_TEST, project=PROJECT, ref=ref)
+    assert is_error and "git push" in text and "test/alice/" in text
+    assert await store.queue.list_jobs() == []
+
+
+@pytest.mark.parametrize("wait", [-1, protocol.TEST_WAIT_MAX_S + 1])
+async def test_devlab_test_wait_is_bounded(client, store, alice, wait):
+    await register(client, store, alice)
+    is_error, _ = await call(
+        client, alice, protocol.TOOL_TEST, project=PROJECT, ref=BASE, wait=wait
+    )
+    assert is_error
+
+
+async def test_devlab_test_wait_returns_result_in_time(client, store, alice):
+    await register(client, store, alice)
+    waiting = asyncio.create_task(
+        call(client, alice, protocol.TOOL_TEST, project=PROJECT, ref=BASE, wait=30)
+    )
+    job = None
+    while job is None:
+        await asyncio.sleep(0.01)
+        job = await claim_test(store)
+    assert not waiting.done()
+    await store.queue.post_from_executor(job.id, protocol.MSG_TEST_DONE, DONE, executor="pc")
+    is_error, done = await asyncio.wait_for(waiting, 2)
+    assert not is_error
+    assert done["job"]["status"] == protocol.STATUS_DONE
+    assert done["result"][protocol.PAYLOAD_EXIT_CODE] == 1
+
+
+async def test_devlab_test_wait_failure_returns_reason(client, store, alice):
+    await register(client, store, alice)
+    waiting = asyncio.create_task(
+        call(client, alice, protocol.TOOL_TEST, project=PROJECT, ref=BASE, wait=30)
+    )
+    job = None
+    while job is None:
+        await asyncio.sleep(0.01)
+        job = await claim_test(store)
+    await store.queue.post_from_executor(
+        job.id, protocol.MSG_FAILED, {protocol.PAYLOAD_TEXT: "нет образа"}, executor="pc"
+    )
+    _, failed = await asyncio.wait_for(waiting, 2)
+    assert failed["job"]["status"] == protocol.STATUS_FAILED
+    assert failed["result"][protocol.PAYLOAD_TEXT] == "нет образа"
+
+
+async def test_devlab_test_wait_timeout_returns_id_and_result_goes_to_inbox(
+    client, store, alice, monkeypatch
+):
+    await register(client, store, alice)
+    monkeypatch.setattr(protocol, "TEST_WAIT_MAX_S", 1)
+    started = asyncio.get_running_loop().time()
+    is_error, queued = await call(
+        client, alice, protocol.TOOL_TEST, project=PROJECT, ref=BASE, wait=1
+    )
+    assert not is_error and queued["result"] is None
+    assert queued["job"]["status"] == protocol.STATUS_QUEUED
+    assert asyncio.get_running_loop().time() - started < 3
+    job = await claim_test(store)
+    await store.queue.post_from_executor(job.id, protocol.MSG_TEST_DONE, DONE, executor="pc")
+    _, inbox = await call(client, alice, protocol.TOOL_INBOX)
+    assert [m["kind"] for m in inbox["messages"]] == [protocol.MSG_TEST_DONE]
+
+
+async def test_devlab_test_wait_does_not_block_other_requests(client, store, alice, bob):
+    await register(client, store, alice)
+    waiting = asyncio.create_task(
+        call(client, alice, protocol.TOOL_TEST, project=PROJECT, ref=BASE, wait=30)
+    )
+    await asyncio.sleep(0.1)
+    assert not waiting.done()
+    is_error, projects = await asyncio.wait_for(call(client, bob, protocol.TOOL_PROJECTS), 1)
+    assert not is_error and projects == [PROJECT]
+    assert (await asyncio.wait_for(client.get(protocol.HTTP_HEALTH_PATH), 1)).status == 200
+    waiting.cancel()
+
+
+async def test_devlab_test_log_returns_tail_and_ref(client, store, alice, bob, monkeypatch):
+    await register(client, store, alice)
+    _, queued = await call(client, alice, protocol.TOOL_TEST, project=PROJECT, ref=BASE)
+    job_id = queued["job"]["id"]
+    is_error, text = await call(client, alice, protocol.TOOL_TEST_LOG, id=job_id)
+    assert is_error and "нет файла" in text
+    directory = store.logs_root / job_id
+    directory.mkdir(parents=True)
+    (directory / protocol.LOG_FILE_OUTPUT).write_text("0123456789")
+    (directory / protocol.LOG_FILE_JUNIT).write_text("<xml/>")
+    _, full = await call(client, alice, protocol.TOOL_TEST_LOG, id=job_id)
+    assert (full["text"], full["truncated"], full["bytes"], full["ref"]) == (
+        "0123456789",
+        False,
+        10,
+        BASE,
+    )
+    monkeypatch.setattr(protocol, "LOG_TAIL_MAX_BYTES", 4)
+    _, tail = await call(client, alice, protocol.TOOL_TEST_LOG, id=job_id)
+    assert (tail["text"], tail["truncated"]) == ("6789", True)
+    _, junit = await call(
+        client, alice, protocol.TOOL_TEST_LOG, id=job_id, file=protocol.LOG_FILE_JUNIT
+    )
+    assert junit["text"] == "ml/>"
+    is_error, _ = await call(client, alice, protocol.TOOL_TEST_LOG, id=job_id, file="../x")
+    assert is_error
+    is_error, _ = await call(client, bob, protocol.TOOL_TEST_LOG, id=job_id)
+    assert is_error
+
+
+async def test_devlab_test_log_rejects_agent_job(client, store, alice):
+    await register(client, store, alice)
+    _, submitted = await submit(client, alice)
+    is_error, _ = await call(client, alice, protocol.TOOL_TEST_LOG, id=submitted["job"]["id"])
+    assert is_error

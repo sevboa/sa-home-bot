@@ -7,8 +7,11 @@ from typing import Any
 from aiohttp import web
 
 from sa_home_bot.devlab import protocol
+from sa_home_bot.devlab.hub import joblogs
 from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.devlab.hub.http import NODES_KEY, PRINCIPAL_KEY, STORE_KEY, roles
+
+LOG_CHUNK_BYTES = 64 * 1024
 
 
 async def json_body(request: web.Request) -> dict[str, Any]:
@@ -27,7 +30,10 @@ async def claim(request: web.Request) -> web.Response:
     models = body.get(protocol.FIELD_MODELS)
     if not isinstance(models, list) or not all(isinstance(m, str) for m in models):
         raise HubError("claim: models — список строк")
-    job = await request.app[STORE_KEY].queue.claim(request[PRINCIPAL_KEY].name, models)
+    kinds = body.get(protocol.FIELD_KINDS, [protocol.JOB_KIND_AGENT])
+    if not isinstance(kinds, list) or not all(isinstance(k, str) for k in kinds):
+        raise HubError("claim: kinds — список строк")
+    job = await request.app[STORE_KEY].queue.claim(request[PRINCIPAL_KEY].name, models, kinds)
     return web.json_response({protocol.FIELD_JOB: asdict(job) if job else None})
 
 
@@ -43,6 +49,31 @@ async def post(request: web.Request) -> web.Response:
         job_id, kind, payload, executor=request[PRINCIPAL_KEY].name
     )
     return web.json_response({protocol.FIELD_SEQ: message.seq})
+
+
+@roles(protocol.ROLE_EXECUTOR)
+async def upload_log(request: web.Request) -> web.Response:
+    store = request.app[STORE_KEY]
+    job_id = request.headers.get(protocol.HEADER_JOB, "")
+    name = joblogs.check_name(request.query.get(protocol.FIELD_NAME, ""))
+    job = await store.queue.get_job(job_id)
+    if job.kind != protocol.JOB_KIND_TEST or job.executor != request[PRINCIPAL_KEY].name:
+        raise HubError(f"задание {job_id!r}: логи принимаются только от своего исполнителя test")
+    if job.status == protocol.STATUS_QUEUED:
+        raise HubError(f"задание {job_id}: ещё не взято")
+    if request.content_length is not None and request.content_length > protocol.LOG_MAX_BYTES:
+        raise web.HTTPRequestEntityTooLarge(
+            max_size=protocol.LOG_MAX_BYTES, actual_size=request.content_length
+        )
+    try:
+        size = await joblogs.save(
+            store.logs_root, job_id, name, request.content.iter_chunked(LOG_CHUNK_BYTES)
+        )
+    except joblogs.LogTooLarge as exc:
+        raise web.HTTPRequestEntityTooLarge(
+            max_size=protocol.LOG_MAX_BYTES, actual_size=protocol.LOG_MAX_BYTES + 1, text=str(exc)
+        ) from exc
+    return web.json_response({protocol.FIELD_NAME: name, "bytes": size})
 
 
 @roles(protocol.ROLE_EXECUTOR)
@@ -92,6 +123,7 @@ async def introspect(request: web.Request) -> web.Response:
 def add_routes(app: web.Application) -> None:
     app.router.add_post(protocol.HTTP_CLAIM_PATH, claim)
     app.router.add_post(protocol.HTTP_POST_PATH, post)
+    app.router.add_put(protocol.HTTP_LOG_PATH, upload_log)
     app.router.add_post(protocol.HTTP_POLL_PATH, poll)
     app.router.add_post(protocol.HTTP_HEARTBEAT_PATH, heartbeat)
     app.router.add_post(protocol.HTTP_INTROSPECT_PATH, introspect)

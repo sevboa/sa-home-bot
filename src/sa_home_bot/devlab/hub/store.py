@@ -16,6 +16,7 @@ from sa_home_bot.utils.clock import utc_now
 
 HUB_DB_NAME = "hub.sqlite"
 GIT_DIR_NAME = "git"
+LOGS_DIR_NAME = "logs"
 TOKEN_BYTES = 32
 NAME_MAX_CHARS = 64
 HEARTBEAT_FRESH_S = 120
@@ -62,7 +63,8 @@ class HubStore:
     def __init__(self, data_dir: Path) -> None:
         self._db = Database(data_dir / HUB_DB_NAME)
         self.git_root = data_dir / GIT_DIR_NAME
-        self.queue = queue.HubQueue(self._db)
+        self.logs_root = data_dir / LOGS_DIR_NAME
+        self.queue = queue.HubQueue(self._db, self.logs_root)
 
     async def open(self) -> None:
         await self._db.open()

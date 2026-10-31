@@ -5,8 +5,7 @@
 Ошибки правил — `HubError` (`devlab/hub/errors.py`). Таблица переходов — `protocol.TRANSITIONS`.
 
 ### Задание
-`id` — 6 символов без похожих знаков (`base/<id>` — ветка базы), вид `agent` (`test` зарезервирован
-под Этап 61 и отклоняется), проект (должен быть в `projects`; bare-репо создаёт 60.3.3), клиент
+`id` — 6 символов без похожих знаков (`base/<id>` — ветка базы), вид `agent` или `test` (см. «Задания test»), проект (должен быть в `projects`; bare-репо создаёт 60.3.3), клиент
 (имя токена), модель, `task.md`, приоритет (больше — раньше, по умолчанию 0), статус, `executor`,
 времена `created/started/finished`, расход `tokens` и `cost_usd`.
 
@@ -34,8 +33,8 @@
 | `stop` | к исполнителю | → stopped |
 | `release` | к исполнителю | только задание в `waiting_owner`, статус не меняется: исполнитель перестаёт держать mycraft бодрым, не дожидаясь `owner_wait_s` (60.6) |
 
-- `claim(executor, models)` атомарно берёт queued-задание: приоритет по убыванию, затем порядок
-  постановки, только модели из списка; ставит `running`, `executor`, `started` (сообщение `started`
+- `claim(executor, models, kinds)` атомарно берёт queued-задание: сначала `test`, затем приоритет по
+  убыванию и порядок постановки; `agent` только с моделью из списка и только если `agent` есть в `kinds`; ставит `running`, `executor`, `started` (сообщение `started`
   исполнитель шлёт сам).
 - `stop` на queued сразу даёт клиенту `stopped` (исполнителя нет). `stop` на running/waiting_owner
   сразу переводит в `stopped` и кладёт `stop` исполнителю; его позднее `stopped` только
@@ -50,4 +49,32 @@
 - Исполнитель: `poll(since, job_id | executor)` — сообщения к исполнителю; выданное помечается
   прочитанным, но повторный `poll` с прежним `since` вернёт его снова.
 - `purge(retention_days)`: удаляются сообщения с `read_at` старше срока
-  (`mailbox_retention_days`); непрочитанные не удаляются никогда. Вызов по расписанию — см. [api.md](api.md) («Очистка ящика»).
+  (`mailbox_retention_days`); непрочитанные не удаляются никогда. Заодно удаляются каталоги логов
+  `<data_dir>/logs/<id>/` заданий `test`, завершённых раньше срока. Вызов по расписанию — см. [api.md](api.md) («Очистка ящика»).
+
+### Задания test (Этап 61.1, 2026-11-01)
+Прогон тестов клиента на исполнителе, модель не нужна (`model`, `task.md`, `base_branch` пустые).
+Параметры лежат в колонке `jobs.params` (JSON, поле `Job.params`): `ref` (ветка или sha, проверяется
+`git rev-parse --verify <ref>^{commit}` при постановке), `cmd` (пусто: исполнитель берёт команду из
+`.devlab.toml` проекта), `args` (список строк). Ставит `HubQueue.submit_test`; `ref` не начинается
+с `-` и без пробелов.
+
+- **Приоритет и слот.** `claim` ставит `test` перед любым `agent`, приоритет агентов не учитывается.
+  Исполнитель передаёт `kinds`, которые готов взять сейчас: отдельный слот под тесты спрашивает
+  `kinds=["test"]`, слот агента `kinds=["agent"]` с моделями. `kinds` по умолчанию `["agent"]`.
+- **Переходы** те же (`protocol.TRANSITIONS`): queued → running (`claim`) → done / failed; `stop` из
+  queued и running; `resume` возвращает завершённое в queued (повторный прогон). `question` у
+  `test` недопустим, `test_done` у `agent` недопустим.
+- **`test_done`** (`protocol.MSG_TEST_DONE`, от исполнителя, running → done). Прогон дошёл до конца,
+  красные тесты это тоже `done`, вердикт в `payload.exit_code`. Сбой самого исполнителя (нет
+  образа, не скачался ref) — `failed` с `payload.text`. Payload: `exit_code` (int), `duration_s`,
+  `summary` {`passed`, `failed`, `errors`, `skipped`}, `failures` (список объектов, например
+  `{name, excerpt}`), `tail` (хвост вывода). Сводка живёт только в сообщении ящика, колонки нет:
+  `HubQueue.last_message(job_id, kind)` отдаёт её MCP.
+- **Ожидание.** `HubQueue.wait_terminal(job_id, timeout)` ждёт `asyncio.Event` задания, который
+  будит `post_from_executor` и `post_from_client` после коммита; БД не опрашивается. По сроку
+  возвращает текущее задание.
+- **Логи.** Полный лог (`output.log`) и junit-xml (`junit.xml`) лежат в `<data_dir>/logs/<id>/`
+  (`devlab/hub/joblogs.py`), не в БД. Запись идёт во временный `.part` и подменяется целиком;
+  повторная загрузка заменяет файл.
+

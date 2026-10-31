@@ -9,7 +9,8 @@
 
 | путь | роль | тело | ответ |
 |---|---|---|---|
-| `/api/claim` | executor | `models`: список имён, доступных исполнителю | `job`: задание (поля `Job`) или `null`; задание уже `running`, `executor` = имя токена |
+| `/api/claim` | executor | `models`: список имён, доступных исполнителю; `kinds`: виды, которые готов взять (`agent`, `test`; по умолчанию `["agent"]`) | `job`: задание (поля `Job`, у `test` в `params` ref, cmd, args) или `null`; задание уже `running`, `executor` = имя токена |
+| `PUT /api/log` | executor | заголовок `X-Devlab-Job` (id), query `name` = `output.log` или `junit.xml`, тело потоком | `name`, `bytes`; только свой `test`, не `queued`; больше `LOG_MAX_BYTES` (50 МБ) — 413, файла не остаётся; чужое/неизвестное задание — 400 |
 | `/api/post` | executor | `job_id`, `kind` (из `EXECUTOR_MESSAGES`), `payload` | `seq` сообщения; переходы статусов и расход (`tokens`, `cost_usd`) считает `HubQueue.post_from_executor` |
 | `/api/poll` | executor | `since` (по умолчанию 0) | `messages` (answer, resume, stop, release по заданиям этого исполнителя), `cursor` |
 | `/api/heartbeat` | executor, gateway | исполнитель: `busy`, `jobs`; шлюз: `models` и `limits` | `ok` |
@@ -57,6 +58,8 @@ JSON-RPC 2.0 через POST, ответ `application/json` (без SSE и бе�
 | `devlab_project_add` | `name` | регистрирует проект и bare-репозиторий; в ответе `git_path` |
 | `devlab_projects` | — | список проектов |
 | `devlab_submit` | `project`, `model`, `task`, `base_branch` (`base/...`), `priority` | ставит задание; `warnings`, если модели нет в каталоге (задание всё равно ждёт её) |
+| `devlab_test` | `project`, `ref`, `cmd`, `args`, `wait` | ставит задание `test`; `wait` секунд (0..1800) ждёт результата |
+| `devlab_test_log` | `id`, `file` | хвост лога своего `test` (64 КиБ) |
 | `devlab_list` | `statuses` | свои задания без текста task.md |
 | `devlab_status` | `id` | своё задание целиком |
 | `devlab_inbox` | `since`, `limit` | сообщения к клиенту с курсором `cursor` |
@@ -88,3 +91,18 @@ claude mcp add --transport http devlab http://alfred.tail61d88b.ts.net:8720/mcp 
 Синтаксис сверен с `claude mcp add --help` (2026-11-01).
 Порт 8720 взят из задания, реальный — `[devlab_hub] port`. На ноде роя эту команду выполняет
 `nodectl devlab connect` ([tokens.md](tokens.md)); запросы принимаются только с IP ноды, чьё имя у токена.
+
+### devlab_test и devlab_test_log (Этап 61.1, 2026-11-01)
+- `devlab_test`: нет `ref` в репозитории проекта (`repos.ref_exists`, `rev-parse --verify
+  <ref>^{commit}`, ветка или sha) — сразу ошибка с подсказкой
+  `git push <git_path> HEAD:test/<имя клиента>/<n>`. Ответ: `{job, result}`. `result` — payload
+  `test_done` (или `failed` с `text`), если задание закончилось за `wait`, иначе `null`:
+  задание остаётся в очереди, результат придёт в `devlab_inbox` сообщением `test_done`.
+- Ожидание асинхронное: корутина висит на `asyncio.Event`, сервер и другие запросы не блокируются
+  (тест гоняет параллельный запрос). Потолок `wait` — `protocol.TEST_WAIT_MAX_S` (1800 с); aiohttp
+  сам не обрывает обработчик, но клиент MCP может иметь свой тайм-аут вызова инструмента, и тогда
+  клиенту надо передавать `wait` меньше него и добирать результат через `devlab_inbox`.
+- `devlab_test_log`: только свой `test`; отдаёт `{id, file, ref, bytes, truncated, text}`, `text` —
+  последние `LOG_TAIL_MAX_BYTES` (64 КиБ) файла `output.log` (`file=junit.xml` для junit). Нет файла —
+  ошибка со статусом задания.
+

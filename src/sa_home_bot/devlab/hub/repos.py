@@ -62,3 +62,14 @@ async def branch_exists(git_root: Path, project: str, branch: str) -> bool:
         timeout=GIT_TIMEOUT_S,
     )
     return result.returncode == 0
+
+
+async def ref_exists(git_root: Path, project: str, ref: str) -> bool:
+    repo = repo_path(git_root, project)
+    if not repo.is_dir() or ref.startswith("-"):
+        return False
+    result = await run(
+        ["git", "--git-dir", str(repo), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+        timeout=GIT_TIMEOUT_S,
+    )
+    return result.returncode == 0

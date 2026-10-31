@@ -219,3 +219,42 @@ async def test_gzip_request_body_is_accepted(server, tokens, work):
     payload = await resp.read()
     assert resp.status == 200
     assert b"PACK" in payload
+
+
+@pytest.mark.parametrize(
+    ("role", "user", "ref", "old", "new", "allowed"),
+    [
+        (protocol.ROLE_CLIENT, "laptop", "refs/heads/test/laptop/1", ZERO, SHA, True),
+        (protocol.ROLE_CLIENT, "laptop", "refs/heads/test/laptop/a/b", SHA, SHA, True),
+        (protocol.ROLE_CLIENT, "laptop", "refs/heads/test/laptop/1", SHA, ZERO, False),
+        (protocol.ROLE_CLIENT, "laptop", "refs/heads/test/other/1", ZERO, SHA, False),
+        (protocol.ROLE_CLIENT, "laptop", "refs/heads/test/laptop/", ZERO, SHA, False),
+        (protocol.ROLE_CLIENT, "laptop", "refs/heads/test/laptop", ZERO, SHA, False),
+        (protocol.ROLE_CLIENT, "laptop", "refs/heads/test/laptop2/1", ZERO, SHA, False),
+        (protocol.ROLE_CLIENT, "", "refs/heads/test/laptop/1", ZERO, SHA, False),
+        (protocol.ROLE_CLIENT, "a/b", "refs/heads/test/a/b/1", ZERO, SHA, False),
+        (protocol.ROLE_EXECUTOR, "pc", "refs/heads/test/laptop/1", SHA, ZERO, True),
+        (protocol.ROLE_EXECUTOR, "pc", "refs/heads/test/laptop/1", ZERO, SHA, False),
+        (protocol.ROLE_EXECUTOR, "pc", "refs/heads/test/laptop/1", SHA, SHA, False),
+        (protocol.ROLE_GATEWAY, "gw", "refs/heads/test/gw/1", ZERO, SHA, False),
+    ],
+)
+def test_check_ref_test_branches(role, user, ref, old, new, allowed):
+    assert (refpolicy.check_ref(role, ref, old, new, user) is None) is allowed
+
+
+async def test_test_branches_through_real_git(server, tokens, work):
+    url = remote_url(server)
+    client = auth(tokens[protocol.ROLE_CLIENT])
+    executor = auth(tokens[protocol.ROLE_EXECUTOR])
+    own = await arun_git(work, *client, "push", url, "master:refs/heads/test/laptop/1")
+    assert own.returncode == 0, own.stderr
+    foreign = await arun_git(work, *client, "push", url, "master:refs/heads/test/pc/1")
+    assert foreign.returncode != 0
+    assert "devlab: отклонено (laptop)" in foreign.stderr
+    own_delete = await arun_git(work, *client, "push", url, ":refs/heads/test/laptop/1")
+    assert own_delete.returncode != 0
+    executor_create = await arun_git(work, *executor, "push", url, "master:refs/heads/test/pc/1")
+    assert executor_create.returncode != 0
+    removed = await arun_git(work, *executor, "push", url, ":refs/heads/test/laptop/1")
+    assert removed.returncode == 0, removed.stderr
