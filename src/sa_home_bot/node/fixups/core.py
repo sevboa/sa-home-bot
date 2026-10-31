@@ -22,7 +22,7 @@ class Fixup:
 def _check_or_false(fixup: Fixup) -> bool:
     try:
         return fixup.check()
-    except FixupError as exc:
+    except (FixupError, OSError) as exc:
         print(f"  ⚠️ {fixup.title}: проверка не удалась ({exc}) — пробую применить")
         return False
 

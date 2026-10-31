@@ -19,6 +19,7 @@ from sa_home_bot.node.fixups.privileged import (
     install_package,
     install_root_file,
     install_sudoers_snippet,
+    path_exists,
     run_sudo,
 )
 from sa_home_bot.sensors.disks import SMARTCTL_REQUIREMENT
@@ -76,14 +77,14 @@ def smartctl_wrapper_content(real_path: str) -> str:
 
 
 def _smartctl_sudoers_check() -> bool:
-    return (SUDOERS_DIR / SMARTCTL_SUDOERS_FILE).exists() and SMARTCTL_WRAPPER_PATH.exists()
+    return path_exists(SUDOERS_DIR / SMARTCTL_SUDOERS_FILE) and SMARTCTL_WRAPPER_PATH.exists()
 
 
 def _smartctl_sudoers_apply() -> None:
     path = real_smartctl_path()
     if path is None:
         raise FixupError("smartctl не найден в PATH — сначала install-smartmontools")
-    if not (SUDOERS_DIR / SMARTCTL_SUDOERS_FILE).exists():
+    if not path_exists(SUDOERS_DIR / SMARTCTL_SUDOERS_FILE):
         install_sudoers_snippet(SMARTCTL_SUDOERS_FILE, smartctl_sudoers_content(path, getuser()))
     if not SMARTCTL_WRAPPER_PATH.exists():
         SMARTCTL_WRAPPER_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -196,7 +197,7 @@ def make_apps_unit_fixup(app: AppConfig) -> Fixup:
     filename = f"50-sa-home-node-apps-{app.id}"
 
     def check() -> bool:
-        return (SUDOERS_DIR / filename).exists()
+        return path_exists(SUDOERS_DIR / filename)
 
     def apply() -> None:
         systemctl = shutil.which("systemctl") or "/usr/bin/systemctl"
@@ -226,7 +227,7 @@ def power_polkit_rule_content(user: str) -> str:
 
 
 def _power_control_check() -> bool:
-    return POWER_POLKIT_RULE_FILE.exists()
+    return path_exists(POWER_POLKIT_RULE_FILE)
 
 
 def _power_control_apply() -> None:
@@ -266,7 +267,7 @@ def wol_unit_content(ethtool_path: str, iface: str) -> str:
 
 
 def _wol_check() -> bool:
-    return WOL_UNIT_FILE.exists()
+    return path_exists(WOL_UNIT_FILE)
 
 
 def _wol_apply() -> None:

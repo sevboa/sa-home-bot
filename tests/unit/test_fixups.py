@@ -37,17 +37,18 @@ def _make_executable(path: Path) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
+@pytest.mark.parametrize("error", [FixupError("sudo без TTY"), PermissionError(13, "rules.d")])
 @pytest.mark.parametrize(
     ("raises_after_apply", "expected_failed"), [(False, []), (True, ["flaky"])]
 )
-def test_run_fixups_survives_check_raising(raises_after_apply, expected_failed):
+def test_run_fixups_survives_check_raising(error, raises_after_apply, expected_failed):
     applied, after_checked = [], []
     check_calls = []
 
     def flaky_check() -> bool:
         check_calls.append(1)
         if len(check_calls) == 1 or raises_after_apply:
-            raise FixupError("sudo без TTY")
+            raise error
         return True
 
     flaky = core.Fixup(
@@ -281,6 +282,16 @@ def test_power_control_apply_installs_polkit_package_when_rules_dir_missing(root
         "/etc/polkit-1/rules.d",
     ]
     assert "polkit.addRule" in root.installed[str(host.POWER_POLKIT_RULE_FILE)]
+
+
+def test_power_control_check_asks_sudo_when_rules_dir_is_private(root, monkeypatch):
+    def denied(path, *args, **kwargs):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(Path, "exists", denied)
+    root.files[str(host.POWER_POLKIT_RULE_FILE)] = "rule"
+    assert host.POWER_CONTROL_POLKIT.check() is True
+    assert ["test", "-e", str(host.POWER_POLKIT_RULE_FILE)] in root.sudo_calls
 
 
 def test_power_control_apply_skips_package_when_rules_dir_exists(root, monkeypatch):
