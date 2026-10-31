@@ -248,13 +248,16 @@ async def test_resume_rejects_bad_model(queue, payload):
     assert (await queue.get_job(job.id)).status == S.STATUS_FAILED
 
 
-async def test_release_only_after_finish(queue):
+async def test_release_only_while_waiting_owner(queue):
     job = await running_job(queue)
     with pytest.raises(HubError):
         await queue.post_from_client(CLIENT, job.id, S.MSG_RELEASE)
-    await queue.post_from_executor(job.id, S.MSG_DONE)
+    await queue.post_from_executor(job.id, S.MSG_QUESTION, {S.PAYLOAD_TEXT: "?"})
     await queue.post_from_client(CLIENT, job.id, S.MSG_RELEASE)
-    assert (await queue.get_job(job.id)).status == S.STATUS_DONE
+    assert (await queue.get_job(job.id)).status == S.STATUS_WAITING_OWNER
+    await queue.post_from_executor(job.id, S.MSG_FAILED)
+    with pytest.raises(HubError):
+        await queue.post_from_client(CLIENT, job.id, S.MSG_RELEASE)
 
 
 async def test_spend_is_summed_over_messages(queue):

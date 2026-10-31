@@ -297,8 +297,8 @@ class HubQueue:
                     await self._post(
                         conn, job_id, protocol.DIRECTION_TO_CLIENT, protocol.MSG_STOPPED, {}
                     )
-            elif job.status not in protocol.TERMINAL_STATUSES:
-                raise HubError(f"release только для завершённого задания, сейчас {job.status}")
+            elif job.status != protocol.STATUS_WAITING_OWNER:
+                raise HubError(f"release только для задания, ждущего ответа, сейчас {job.status}")
             return await self._post(conn, job_id, protocol.DIRECTION_TO_EXECUTOR, kind, payload)
 
     async def inbox(self, client: str, since: int = 0, limit: int = DEFAULT_PAGE) -> list[Message]:
