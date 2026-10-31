@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import stat
 
 import pytest
@@ -10,9 +11,10 @@ from sa_home_bot.config import Settings
 from sa_home_bot.devlab import connect as devlab_connect
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub import connect_http, http
+from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.devlab.hub.nodes import SwarmNodes, node_at
 from sa_home_bot.devlab.hub.service import HubService
-from sa_home_bot.devlab.hub.store import HubStore
+from sa_home_bot.devlab.hub.store import HUB_DB_NAME, HubStore, Principal, hash_token
 from sa_home_bot.proto.messages import ProtoError
 from tests.unit.support.fakes import LOOPBACK, Clock, FakeNodes
 
@@ -160,12 +162,79 @@ async def test_connect_rejects_bad_swarm_token_and_foreign_address(store, nodes,
     assert await store.count_active() == 0
 
 
-async def test_connect_does_not_touch_executor_token(store):
+async def test_connect_leaves_other_roles_of_the_node_alone(store):
     executor = await store.issue_token("laptop", protocol.ROLE_EXECUTOR)
+    gateway = await store.issue_token("laptop", protocol.ROLE_GATEWAY)
     async with await serve(store, FakeNodes({"laptop": {LOOPBACK}})) as client:
         resp = await client.post(protocol.HTTP_CONNECT_PATH, headers=connect_headers())
-        assert resp.status == 400
+        assert resp.status == 200
+        for token in (executor, gateway, (await resp.json())[protocol.FIELD_TOKEN]):
+            assert (await client.get(GUARDED_PATH, headers=bearer(token))).status == 200
+        await client.post(protocol.HTTP_CONNECT_PATH, headers=connect_headers())
         assert (await client.get(GUARDED_PATH, headers=bearer(executor))).status == 200
+
+
+async def test_node_holds_one_token_per_role_and_revokes_by_role(store):
+    client = await store.issue_token("mycraft", protocol.ROLE_CLIENT)
+    executor = await store.issue_token("mycraft", protocol.ROLE_EXECUTOR)
+    with pytest.raises(HubError):
+        await store.issue_token("mycraft", protocol.ROLE_EXECUTOR)
+    with pytest.raises(HubError):
+        await store.revoke_token("mycraft")
+    with pytest.raises(HubError):
+        await store.revoke_token("mycraft", protocol.ROLE_GATEWAY)
+    await store.revoke_token("mycraft", protocol.ROLE_EXECUTOR)
+    assert await store.authenticate(executor) is None
+    assert (await store.authenticate(client)).role == protocol.ROLE_CLIENT
+    await store.revoke_token("mycraft")
+    assert await store.authenticate(client) is None
+
+
+async def test_heartbeats_are_kept_per_node_and_role(store):
+    beat = {protocol.FIELD_MODELS: [{protocol.MODEL_NAME: "flint"}]}
+    await store.heartbeat(Principal("mycraft", protocol.ROLE_EXECUTOR), {})
+    await store.heartbeat(Principal("mycraft", protocol.ROLE_GATEWAY), beat)
+    assert await store.executor_alive()
+    assert [m[protocol.MODEL_NAME] for m in await store.models()] == ["flint"]
+
+
+LEGACY_SCHEMA = """
+CREATE TABLE tokens (
+    name TEXT PRIMARY KEY, role TEXT NOT NULL, hash TEXT NOT NULL UNIQUE,
+    created TEXT NOT NULL, revoked TEXT
+);
+CREATE TABLE heartbeats (
+    name TEXT PRIMARY KEY, role TEXT NOT NULL, data TEXT NOT NULL, seen TEXT NOT NULL
+);
+"""
+
+
+async def test_legacy_name_keyed_database_is_migrated_keeping_tokens(tmp_path):
+    token = "dlh_legacy"
+    with sqlite3.connect(tmp_path / HUB_DB_NAME) as legacy:
+        legacy.executescript(LEGACY_SCHEMA)
+        legacy.execute(
+            "INSERT INTO tokens VALUES (?, ?, ?, ?, NULL)",
+            ("alfred", protocol.ROLE_CLIENT, hash_token(token), "2026-11-01T00:00:00+00:00"),
+        )
+        legacy.execute(
+            "INSERT INTO heartbeats VALUES ('pc', ?, '{}', '2026-11-01T00:00:00+00:00')",
+            (protocol.ROLE_EXECUTOR,),
+        )
+    migrated = HubStore(tmp_path)
+    await migrated.open()
+    try:
+        assert (await migrated.authenticate(token)) == Principal("alfred", protocol.ROLE_CLIENT)
+        await migrated.issue_token("alfred", protocol.ROLE_EXECUTOR)
+        assert (await migrated.authenticate(token)).role == protocol.ROLE_CLIENT
+        cur = await migrated._db.conn.execute("SELECT count(*) AS n FROM heartbeats")
+        assert (await cur.fetchone())["n"] == 1
+    finally:
+        await migrated.close()
+    reopened = HubStore(tmp_path)
+    await reopened.open()
+    assert (await reopened.authenticate(token)).name == "alfred"
+    await reopened.close()
 
 
 async def test_issue_token_name_must_be_swarm_node(store):

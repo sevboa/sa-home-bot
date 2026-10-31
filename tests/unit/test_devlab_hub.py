@@ -127,4 +127,4 @@ def test_token_actions_are_callable_by_nodectl(tmp_path):
     issue = description.find_action(protocol.ACTION_ISSUE_TOKEN)
     revoke = description.find_action(protocol.ACTION_REVOKE_TOKEN)
     assert issue is not None and [p.name for p in issue.params] == ["name", "role"]
-    assert revoke is not None and [p.name for p in revoke.params] == ["name"]
+    assert revoke is not None and [p.name for p in revoke.params] == ["name", "role"]

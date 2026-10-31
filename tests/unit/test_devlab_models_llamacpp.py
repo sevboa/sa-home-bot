@@ -93,7 +93,7 @@ class FakeLlama:
 
 
 class StubHub:
-    async def introspect(self, token: str):
+    async def introspect(self, token: str, address: str):
         return type("Principal", (), {"role": protocol.ROLE_EXECUTOR})()
 
 

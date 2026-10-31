@@ -35,7 +35,7 @@ class HubClient:
         self._session = session or aiohttp.ClientSession(timeout=HUB_TIMEOUT)
         self._clock = clock
         self._ttl_s = ttl_s
-        self._cache: dict[str, tuple[float, Principal | None]] = {}
+        self._cache: dict[tuple[str, str], tuple[float, Principal | None]] = {}
 
     async def close(self) -> None:
         await self._session.close()
@@ -50,8 +50,8 @@ class HubClient:
         except (aiohttp.ClientError, TimeoutError) as exc:
             log.warning("Heartbeat в хаб не прошёл: %s", type(exc).__name__)
 
-    async def introspect(self, token: str) -> Principal | None:
-        key = hash_token(token)
+    async def introspect(self, token: str, address: str) -> Principal | None:
+        key = (hash_token(token), address)
         now = self._clock()
         cached = self._cache.get(key)
         if cached is not None and cached[0] > now:
@@ -59,7 +59,7 @@ class HubClient:
         try:
             async with self._session.post(
                 self._url + protocol.HTTP_INTROSPECT_PATH,
-                json={protocol.FIELD_TOKEN: token},
+                json={protocol.FIELD_TOKEN: token, protocol.FIELD_ADDRESS: address},
                 headers=self._headers,
             ) as resp:
                 if resp.status == 404:

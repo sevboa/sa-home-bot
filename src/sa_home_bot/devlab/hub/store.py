@@ -22,19 +22,26 @@ HEARTBEAT_FRESH_S = 120
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tokens (
-    name TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
     role TEXT NOT NULL,
     hash TEXT NOT NULL UNIQUE,
     created TEXT NOT NULL,
-    revoked TEXT
+    revoked TEXT,
+    PRIMARY KEY (name, role)
 );
 CREATE TABLE IF NOT EXISTS heartbeats (
-    name TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
     role TEXT NOT NULL,
     data TEXT NOT NULL,
-    seen TEXT NOT NULL
+    seen TEXT NOT NULL,
+    PRIMARY KEY (name, role)
 );
 """
+
+KEYED_TABLES = {
+    "tokens": "name, role, hash, created, revoked",
+    "heartbeats": "name, role, data, seen",
+}
 
 
 @dataclass(frozen=True)
@@ -59,8 +66,23 @@ class HubStore:
 
     async def open(self) -> None:
         await self._db.open()
+        legacy = [t for t in KEYED_TABLES if await self._keyed_by_name_only(t)]
+        for table in legacy:
+            await self._db.conn.execute(f"ALTER TABLE {table} RENAME TO {table}_legacy")
         await self._db.conn.executescript(SCHEMA + queue.SCHEMA)
+        for table in legacy:
+            columns = KEYED_TABLES[table]
+            await self._db.conn.execute(
+                f"INSERT INTO {table} ({columns}) SELECT {columns} FROM {table}_legacy"
+            )
+            await self._db.conn.execute(f"DROP TABLE {table}_legacy")
         await self._db.conn.commit()
+
+    async def _keyed_by_name_only(self, table: str) -> bool:
+        cur = await self._db.conn.execute(f"PRAGMA table_info({table})")
+        columns = await cur.fetchall()
+        key = {row["name"] for row in columns if row["pk"]}
+        return bool(columns) and key == {"name"}
 
     async def close(self) -> None:
         await self._db.close()
@@ -81,32 +103,39 @@ class HubStore:
             raise HubError(f"неизвестная роль {role!r}, есть: {', '.join(protocol.ROLES)}")
         token = new_token()
         async with self._db.transaction() as conn:
-            cur = await conn.execute("SELECT revoked FROM tokens WHERE name = ?", (name,))
+            cur = await conn.execute(
+                "SELECT revoked FROM tokens WHERE name = ? AND role = ?", (name, role)
+            )
             row = await cur.fetchone()
             if row is not None and row["revoked"] is None and not replace:
                 raise HubError(f"токен {name!r} уже выпущен: сначала revoke_token")
-            await conn.execute("DELETE FROM tokens WHERE name = ?", (name,))
+            await conn.execute("DELETE FROM tokens WHERE name = ? AND role = ?", (name, role))
             await conn.execute(
                 "INSERT INTO tokens (name, role, hash, created) VALUES (?, ?, ?, ?)",
                 (name, role, hash_token(token), utc_now().isoformat()),
             )
         return token
 
-    async def active_role(self, name: str) -> str | None:
-        cur = await self._db.conn.execute(
-            "SELECT role FROM tokens WHERE name = ? AND revoked IS NULL", (name,)
-        )
-        row = await cur.fetchone()
-        return row["role"] if row else None
-
-    async def revoke_token(self, name: str) -> None:
+    async def revoke_token(self, name: str, role: str = "") -> None:
+        name = name.strip()
         async with self._db.transaction() as conn:
             cur = await conn.execute(
-                "UPDATE tokens SET revoked = ? WHERE name = ? AND revoked IS NULL",
-                (utc_now().isoformat(), name.strip()),
+                "SELECT role FROM tokens WHERE name = ? AND revoked IS NULL", (name,)
             )
-            if cur.rowcount == 0:
+            active = [row["role"] for row in await cur.fetchall()]
+            if not active:
                 raise HubError(f"активного токена {name!r} нет")
+            if not role and len(active) > 1:
+                raise HubError(
+                    f"у {name!r} активны роли {', '.join(sorted(active))}: укажи role"
+                )
+            target = role or active[0]
+            if target not in active:
+                raise HubError(f"активного токена {name!r} роли {target!r} нет")
+            await conn.execute(
+                "UPDATE tokens SET revoked = ? WHERE name = ? AND role = ?",
+                (utc_now().isoformat(), name, target),
+            )
 
     async def authenticate(self, token: str) -> Principal | None:
         cur = await self._db.conn.execute(
@@ -131,8 +160,7 @@ class HubStore:
         async with self._db.transaction() as conn:
             await conn.execute(
                 "INSERT INTO heartbeats (name, role, data, seen) VALUES (?, ?, ?, ?)"
-                " ON CONFLICT(name) DO UPDATE SET role = excluded.role, data = excluded.data,"
-                " seen = excluded.seen",
+                " ON CONFLICT(name, role) DO UPDATE SET data = excluded.data, seen = excluded.seen",
                 (
                     principal.name,
                     principal.role,

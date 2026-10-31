@@ -107,7 +107,7 @@ class Gateway:
         if not token:
             raise web.HTTPUnauthorized(headers={"WWW-Authenticate": "Bearer"})
         try:
-            principal = await self.hub.introspect(token)
+            principal = await self.hub.introspect(token, request.remote or "")
         except HubUnavailableError as exc:
             log.warning("Хаб недоступен для проверки токена: %s", exc)
             raise web.HTTPServiceUnavailable() from exc

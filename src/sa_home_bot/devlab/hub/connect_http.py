@@ -5,7 +5,6 @@ import hmac
 from aiohttp import web
 
 from sa_home_bot.devlab import protocol
-from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.devlab.hub.http import NODES_KEY, STORE_KEY, SWARM_TOKEN_KEY, public
 from sa_home_bot.devlab.hub.nodes import node_at
 
@@ -24,9 +23,6 @@ async def connect(request: web.Request) -> web.Response:
     if name is None:
         raise web.HTTPForbidden()
     store = request.app[STORE_KEY]
-    current = await store.active_role(name)
-    if current is not None and current != protocol.ROLE_CLIENT:
-        raise HubError(f"у ноды {name!r} уже есть токен роли {current}: connect его не трогает")
     token = await store.issue_token(name, protocol.ROLE_CLIENT, replace=True)
     return web.json_response(
         {

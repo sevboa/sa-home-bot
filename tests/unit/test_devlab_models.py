@@ -75,11 +75,13 @@ class Provider:
 class FakeHub:
     def __init__(self) -> None:
         self.introspect_calls = 0
+        self.addresses: list[str] = []
         self.heartbeats: list[dict] = []
 
     async def introspect(self, request: web.Request) -> web.Response:
         self.introspect_calls += 1
         body = await request.json()
+        self.addresses.append(body[protocol.FIELD_ADDRESS])
         principal = PRINCIPALS.get(body[protocol.FIELD_TOKEN])
         if principal is None:
             raise web.HTTPNotFound()
@@ -225,6 +227,15 @@ async def test_introspect_answer_is_cached_then_expires(setup, hub_state, clock,
     clock.now += INTROSPECT_TTL_S + 1
     await client.get(protocol.HTTP_MODELS_PATH, headers=headers)
     assert hub_state.introspect_calls == 2
+
+
+async def test_introspect_sends_client_address_and_caches_per_address(setup, hub_state):
+    gateway, client = await setup()
+    await client.get(protocol.HTTP_MODELS_PATH, headers=AUTH)
+    assert hub_state.addresses == ["127.0.0.1"]
+    await gateway.hub.introspect(EXECUTOR_TOKEN, "100.64.0.9")
+    await gateway.hub.introspect(EXECUTOR_TOKEN, "100.64.0.9")
+    assert hub_state.addresses == ["127.0.0.1", "100.64.0.9"]
 
 
 async def test_rpm_waits_for_window_instead_of_failing(setup, clock):

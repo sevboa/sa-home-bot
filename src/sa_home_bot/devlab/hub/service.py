@@ -25,7 +25,14 @@ TOKEN_ACTIONS = (
         title="Выпустить токен",
         params=(NAME_PARAM, ActionParam(name="role", title="Роль", choices=protocol.ROLES)),
     ),
-    ActionSpec(id=protocol.ACTION_REVOKE_TOKEN, title="Отозвать токен", params=(NAME_PARAM,)),
+    ActionSpec(
+        id=protocol.ACTION_REVOKE_TOKEN,
+        title="Отозвать токен",
+        params=(
+            NAME_PARAM,
+            ActionParam(name="role", title="Роль", required=False, choices=protocol.ROLES),
+        ),
+    ),
 )
 
 
@@ -64,6 +71,6 @@ class HubService:
                 raise HubError(f"имя токена должно быть нодой роя: {name!r} нет среди {nodes}")
             return {"name": name, "role": role, "token": await self._store.issue_token(name, role)}
         if action == protocol.ACTION_REVOKE_TOKEN:
-            await self._store.revoke_token(name)
+            await self._store.revoke_token(name, str(args.get("role", "")))
             return {"name": name, "revoked": True}
         raise undeclared_action(action)

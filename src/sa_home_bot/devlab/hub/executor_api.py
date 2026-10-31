@@ -8,7 +8,7 @@ from aiohttp import web
 
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub.errors import HubError
-from sa_home_bot.devlab.hub.http import PRINCIPAL_KEY, STORE_KEY, roles
+from sa_home_bot.devlab.hub.http import NODES_KEY, PRINCIPAL_KEY, STORE_KEY, roles
 
 
 async def json_body(request: web.Request) -> dict[str, Any]:
@@ -75,8 +75,14 @@ async def introspect(request: web.Request) -> web.Response:
     token = body.get(protocol.FIELD_TOKEN)
     if not isinstance(token, str) or not token:
         raise HubError("introspect: token — непустая строка")
+    address = body.get(protocol.FIELD_ADDRESS)
+    if not isinstance(address, str) or not address:
+        raise HubError("introspect: address — непустая строка")
     principal = await request.app[STORE_KEY].authenticate(token)
     if principal is None or principal.role != protocol.ROLE_EXECUTOR:
+        raise web.HTTPNotFound()
+    node_ips = (await request.app[NODES_KEY].addresses()).get(principal.name, frozenset())
+    if address not in node_ips:
         raise web.HTTPNotFound()
     return web.json_response(
         {protocol.FIELD_NAME: principal.name, protocol.FIELD_ROLE: principal.role}

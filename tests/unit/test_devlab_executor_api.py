@@ -12,7 +12,7 @@ from sa_home_bot.devlab.hub import executor_api, http
 from sa_home_bot.devlab.hub import store as store_module
 from sa_home_bot.devlab.hub.store import HubStore
 from sa_home_bot.utils.clock import utc_now
-from tests.unit.support.fakes import FakeNodes
+from tests.unit.support.fakes import LOOPBACK, FakeNodes
 
 MODEL = "qwen"
 PROJECT = "proj"
@@ -39,6 +39,10 @@ async def client(store):
     executor_api.add_routes(app)
     async with TestClient(TestServer(app)) as test_client:
         yield test_client
+
+
+def introspect_body(token, address=LOOPBACK):
+    return {protocol.FIELD_TOKEN: token, protocol.FIELD_ADDRESS: address}
 
 
 async def token_for(store, name, role):
@@ -229,7 +233,7 @@ async def test_purge_loop_calls_purge_repeatedly():
 async def test_gateway_introspects_live_token(client, store, gateway):
     token = await store.issue_token("runner", protocol.ROLE_EXECUTOR)
     status, body = await call(
-        client, protocol.HTTP_INTROSPECT_PATH, gateway, {protocol.FIELD_TOKEN: token}
+        client, protocol.HTTP_INTROSPECT_PATH, gateway, introspect_body(token)
     )
     assert status == 200
     assert body == {protocol.FIELD_NAME: "runner", protocol.FIELD_ROLE: protocol.ROLE_EXECUTOR}
@@ -239,8 +243,9 @@ async def test_introspect_refuses_revoked_unknown_and_malformed(client, store, g
     token = await store.issue_token("runner", protocol.ROLE_EXECUTOR)
     await store.revoke_token("runner")
     for body, expected in (
-        ({protocol.FIELD_TOKEN: token}, 404),
-        ({protocol.FIELD_TOKEN: "dlh_nope"}, 404),
+        (introspect_body(token), 404),
+        (introspect_body("dlh_nope"), 404),
+        ({protocol.FIELD_TOKEN: token}, 400),
         ({}, 400),
     ):
         resp = await client.post(protocol.HTTP_INTROSPECT_PATH, json=body, headers=gateway)
@@ -251,7 +256,15 @@ async def test_introspect_refuses_revoked_unknown_and_malformed(client, store, g
 async def test_introspect_hides_non_executor_tokens(client, store, gateway, role):
     token = await store.issue_token("other-one", role)
     resp = await client.post(
-        protocol.HTTP_INTROSPECT_PATH, json={protocol.FIELD_TOKEN: token}, headers=gateway
+        protocol.HTTP_INTROSPECT_PATH, json=introspect_body(token), headers=gateway
+    )
+    assert resp.status == 404
+
+
+async def test_introspect_confirms_only_from_token_node_address(client, store, gateway):
+    token = await store.issue_token("runner", protocol.ROLE_EXECUTOR)
+    resp = await client.post(
+        protocol.HTTP_INTROSPECT_PATH, json=introspect_body(token, "100.64.0.9"), headers=gateway
     )
     assert resp.status == 404
 
