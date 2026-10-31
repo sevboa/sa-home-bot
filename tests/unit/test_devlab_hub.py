@@ -121,10 +121,9 @@ async def test_duplicate_active_name_rejected(store):
         await service.run_command(protocol.ACTION_ISSUE_TOKEN, args)
 
 
-def test_token_actions_are_not_buttons_of_swarm_panel(tmp_path):
+def test_token_actions_are_callable_by_nodectl(tmp_path):
     description = HubService(HubStore(tmp_path)).describe()
-    assert description.actions == ()
-    assert set(description.capabilities) == {
-        protocol.ACTION_ISSUE_TOKEN,
-        protocol.ACTION_REVOKE_TOKEN,
-    }
+    issue = description.find_action(protocol.ACTION_ISSUE_TOKEN)
+    revoke = description.find_action(protocol.ACTION_REVOKE_TOKEN)
+    assert issue is not None and [p.name for p in issue.params] == ["name", "role"]
+    assert revoke is not None and [p.name for p in revoke.params] == ["name"]

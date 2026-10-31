@@ -4,8 +4,11 @@
   (name, role, hash, created, revoked).
 - `devlab/hub/service.py` — действия ноды `issue_token name= role=` и `revoke_token name=`
   (`nodectl call devlab_hub issue_token name=... role=...`).
-  Они объявлены только в `capabilities`, не в `actions`: `actions` бот рисует кнопками панели роя,
-  а токен не должен выпускаться и показываться в Telegram (решение владельца).
+  Они объявлены в `actions`: `nodectl call` (proto `command`) принимает только действия из
+  `actions`, `capabilities` не вызываемы. Кнопками в Telegram они не становятся: карточка службы
+  в панели роя рисует только действия ноды. Токен в Telegram не выпускается и не показывается
+  (решение владельца). Находка 2026-11-01: в v0.151.0 действия были только в `capabilities`,
+  и `nodectl call devlab_hub issue_token` отвечал «нет такого действия» — исправлено в v0.151.1.
 - `devlab/hub/http.py` — middleware проверяет `Authorization: Bearer`; нет токена, плохой или
   отозванный — 401. Маршрут `/health` помечен `@public` и открыт.
 
