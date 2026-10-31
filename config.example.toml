@@ -662,6 +662,13 @@ wait_timeout_s = 120.0             # сколько ждать ответа на
 [devlab]
 root = "/models/sa-home/devlab"   # корень мастерской на ноде исполнителя (Этап 60)
 user = "devlab"                    # системный пользователь, от которого живут контейнеры задач
+# Служба devlab (`sa-home-bot --service devlab`, Этап 61.2): исполнитель заданий test на ноде mycraft.
+# Токен роли executor — только в instance-конфиге ноды.
+hub_url = ""                       # адрес хаба, напр. "http://alfred.tail61d88b.ts.net:8720"
+hub_token = ""                     # токен роли executor (`nodectl call devlab_hub issue_token`)
+work_dir = ""                      # пусто = <root>/executor (зеркала проектов, каталоги заданий, state.json)
+poll_interval_s = 5.0              # период опроса хаба: claim и сообщения для исполнителя
+heartbeat_interval_s = 30.0        # период heartbeat (busy, текущие задания)
 
 [logging]
 level = "INFO"

@@ -255,6 +255,19 @@ instance-конфиге ноды.
     `cpus = ""` — список/диапазон ядер для `taskset -c`; `idle_unload_s = 600` — выгрузка после
     простоя (0 — не выгружать); `extra_args = []` — дополнительные аргументы `llama-server`.
 
+## DevlabConfig
+
+Таблица `[devlab]`: корень мастерской ноды исполнителя и служба `devlab` (исполнитель заданий
+`test`, Этап 61.2a, `docs/devlab/executor.md`). Секрет `hub_token` — только в instance-конфиге ноды.
+
+- `root: str = "/models/sa-home/devlab"` — корень мастерской на ноде исполнителя.
+- `user: str = "devlab"` — системный пользователь контейнеров задач (обёртка 60.1).
+- `hub_url: str = ""` — адрес хаба, например `http://alfred.tail61d88b.ts.net:8720`.
+- `hub_token: str = ""` — токен роли `executor`; не логируется, в argv git не попадает.
+- `work_dir: str = ""` — пусто: `<root>/executor` (зеркала `mirrors/`, задания `jobs/`, `state.json`).
+- `poll_interval_s: float = 5.0` — период опроса хаба (`claim` и `poll`), больше 0.
+- `heartbeat_interval_s: float = 30.0` — период heartbeat, больше 0.
+
 ## TasksConfig
 
 Служба tasks (`sa-home-bot --service tasks`) — генерализованные

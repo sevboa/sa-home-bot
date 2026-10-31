@@ -6334,6 +6334,13 @@ Colibri) и контейнеры задач ему уступают:
   в `refpolicy`, вид `test` в очереди (приоритет над агентами, `claim` по `kinds`), `test_done`,
   загрузка логов `PUT /api/log`, `devlab_test` с ожиданием, `devlab_test_log`, будильник. Описание:
   `docs/devlab/{queue,api,git}.md`. Дальше 61.2 исполнитель на mycraft, 61.3 скил `devlab-test`.
+- **61.2a ✅ Исполнитель `devlab`: ядро для заданий `test`** (2026-11-01, ветка worktree, не влито):
+  служба `devlab`, `[devlab]` (`hub_url`, `hub_token`, `work_dir`, интервалы), цикл heartbeat/claim/poll,
+  bare-зеркало проекта и `git archive` коммита, `.devlab.toml` (`[test]`), интерфейс `TestRunner` с
+  фейком в тестах, сводка из junit или текста pytest, логи, `test_done`/`failed`/`stopped`, удаление
+  `test/*`, курсор poll на диске. Общий HTTP-клиент хаба вынесен в `devlab/hubhttp.py`. Описание:
+  `docs/devlab/executor.md`. Дальше 61.2b: контейнерный `TestRunner` через обёртку 60.1, `image`/`setup`,
+  `-n` по ядрам слота, `build_runner` в `executor/app.py`.
 
 **Зачем.** Тесты sa-home-bot (~3800) гоняются на Celeron alfred или на ноутбуке. Второй вид
 заданий исполнителя — `test`: Claude на любом компьютере гоняет тесты своей рабочей копии на

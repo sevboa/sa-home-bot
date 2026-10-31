@@ -284,6 +284,7 @@ def test_describe_declares_assign_and_unassign():
         "devlab_hub",
         "net",
         "devlab_models",
+        "devlab",
         "vpn",
         "vpn_check",
     }

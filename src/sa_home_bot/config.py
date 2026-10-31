@@ -143,6 +143,11 @@ class WakeConfig(BaseModel):
 class DevlabConfig(BaseModel):
     root: str = "/models/sa-home/devlab"
     user: str = "devlab"
+    hub_url: str = ""
+    hub_token: str = ""
+    work_dir: str = ""
+    poll_interval_s: float = Field(default=5.0, gt=0)
+    heartbeat_interval_s: float = Field(default=30.0, gt=0)
 
 
 class MonitorConfig(BaseModel):

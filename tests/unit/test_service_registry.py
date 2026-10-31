@@ -15,6 +15,7 @@ def test_known_services():
         "graph_memory",
         "devlab_hub",
         "devlab_models",
+        "devlab",
         "net",
         "llm",
         "vpn",

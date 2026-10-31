@@ -4,6 +4,8 @@ import importlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from sa_home_bot.devlab import protocol
+
 if TYPE_CHECKING:  # pragma: no cover
     from sa_home_bot.config import Settings
 
@@ -91,6 +93,11 @@ _SPECS: tuple[ServiceSpec, ...] = (
         name="devlab_models",
         cli_name="devlab_models",
         runner="sa_home_bot.devlab.models.app:run_models",
+    ),
+    ServiceSpec(
+        name=protocol.EXECUTOR_SERVICE,
+        cli_name=protocol.EXECUTOR_SERVICE,
+        runner="sa_home_bot.devlab.executor.app:run_executor",
     ),
     ServiceSpec(
         name="vpn", cli_name="vpn", runner="sa_home_bot.vpn.app:run_vpn", endpoint_attr="vpn.socket"

@@ -1,0 +1,3 @@
+[test]
+cmd = "python -m pytest -q"
+timeout_s = 3600

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import io
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
+from sa_home_bot.devlab.executor.runner import JUNIT_FILE, RunResult
 from sa_home_bot.proto.errors import ServiceUnavailableError
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -309,3 +311,42 @@ class FakeNodes:
 
     async def addresses(self) -> dict[str, frozenset[str]]:
         return {name: frozenset(ips) for name, ips in self.nodes.items()}
+
+
+class FakeTestRunner:
+    def __init__(
+        self,
+        output: bytes = b"1 passed in 0.01s\n",
+        exit_code: int = 0,
+        junit: bytes | None = None,
+        timed_out: bool = False,
+        error: Exception | None = None,
+        block: bool = False,
+    ) -> None:
+        self.output = output
+        self.exit_code = exit_code
+        self.junit = junit
+        self.timed_out = timed_out
+        self.error = error
+        self.block = block
+        self.requests: list[Any] = []
+        self.cancelled: list[str] = []
+        self.workdir_files: list[str] = []
+        self.started = asyncio.Event()
+        self._release = asyncio.Event()
+
+    async def run(self, request: Any) -> Any:
+        self.requests.append(request)
+        self.workdir_files = sorted(p.name for p in request.workdir.iterdir())
+        self.started.set()
+        if self.error is not None:
+            raise self.error
+        if self.block:
+            await self._release.wait()
+        if self.junit is not None:
+            (request.workdir / JUNIT_FILE).write_bytes(self.junit)
+        return RunResult(self.exit_code, self.output, self.timed_out)
+
+    async def cancel(self, job_id: str) -> None:
+        self.cancelled.append(job_id)
+        self._release.set()
