@@ -186,6 +186,14 @@ class GraphMemoryConfig(BaseModel):
     search_timeout_s: float = 15.0
 
 
+class DevlabHubConfig(BaseModel):
+    socket: str = "./data/devlab_hub.sock"
+    port: int = Field(default=8720, ge=1, le=65535)
+    data_dir: Path = Path("/mnt/data/devlab")
+    bind_host: str = ""
+    mailbox_retention_days: int = Field(default=30, ge=1)
+
+
 class TasksConfig(BaseModel):
     socket: str = "./data/tasks.sock"
     db_path: Path = Path("./data/tasks.sqlite")
@@ -537,6 +545,7 @@ class Settings(BaseSettings):
     tasks: TasksConfig = Field(default_factory=TasksConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     graph_memory: GraphMemoryConfig = Field(default_factory=GraphMemoryConfig)
+    devlab_hub: DevlabHubConfig = Field(default_factory=DevlabHubConfig)
     net: NetConfig = Field(default_factory=NetConfig)
     vpn: VpnConfig = Field(default_factory=VpnConfig)
     vpn_check: VpnCheckConfig = Field(default_factory=VpnCheckConfig)

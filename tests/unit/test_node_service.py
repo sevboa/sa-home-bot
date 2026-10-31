@@ -281,6 +281,7 @@ def test_describe_declares_assign_and_unassign():
         "tasks",
         "memory",
         "graph_memory",
+        "devlab_hub",
         "net",
         "vpn",
         "vpn_check",

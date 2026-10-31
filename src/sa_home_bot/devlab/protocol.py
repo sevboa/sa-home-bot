@@ -1,0 +1,50 @@
+from __future__ import annotations
+
+SERVICE_NAME = "devlab_hub"
+
+NODE_ID = "alfred"
+
+ACTION_CLAIM = "claim"
+ACTION_POST = "post"
+ACTION_POLL = "poll"
+ACTION_HEARTBEAT = "heartbeat"
+ACTION_ISSUE_TOKEN = "issue_token"
+ACTION_REVOKE_TOKEN = "revoke_token"
+
+ROLE_CLIENT = "client"
+ROLE_EXECUTOR = "executor"
+ROLE_GATEWAY = "gateway"
+ROLES = (ROLE_CLIENT, ROLE_EXECUTOR, ROLE_GATEWAY)
+
+STATUS_QUEUED = "queued"
+STATUS_RUNNING = "running"
+STATUS_WAITING_OWNER = "waiting_owner"
+STATUS_DONE = "done"
+STATUS_FAILED = "failed"
+STATUS_STOPPED = "stopped"
+ACTIVE_STATUSES = (STATUS_RUNNING, STATUS_WAITING_OWNER)
+TERMINAL_STATUSES = (STATUS_DONE, STATUS_FAILED, STATUS_STOPPED)
+
+MSG_STARTED = "started"
+MSG_STEP_DONE = "step_done"
+MSG_QUESTION = "question"
+MSG_DONE = "done"
+MSG_FAILED = "failed"
+MSG_STOPPED = "stopped"
+EXECUTOR_MESSAGES = (MSG_STARTED, MSG_STEP_DONE, MSG_QUESTION, MSG_DONE, MSG_FAILED, MSG_STOPPED)
+
+MSG_ANSWER = "answer"
+MSG_RESUME = "resume"
+MSG_STOP = "stop"
+MSG_RELEASE = "release"
+CLIENT_MESSAGES = (MSG_ANSWER, MSG_RESUME, MSG_STOP, MSG_RELEASE)
+
+DIRECTION_TO_CLIENT = "client"
+DIRECTION_TO_EXECUTOR = "executor"
+
+HTTP_HEALTH_PATH = "/health"
+HTTP_MCP_PATH = "/mcp"
+HTTP_GIT_PREFIX = "/git/"
+HTTP_API_PREFIX = "/api/"
+
+TOKEN_PREFIX = "dlh_"

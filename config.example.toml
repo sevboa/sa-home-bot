@@ -380,6 +380,15 @@ embedding_model = "nomic-embed-text"
 ingest_timeout_s = 120.0
 search_timeout_s = 15.0
 
+# Служба devlab_hub (`sa-home-bot --service devlab_hub`, Этап 60.3): хаб мастерской,
+# HTTP только на адресе tailscale0 (bind_host пуст) или на явно заданном.
+[devlab_hub]
+socket = "./data/devlab_hub.sock"
+port = 8720
+data_dir = "/mnt/data/devlab"
+bind_host = ""
+mailbox_retention_days = 30
+
 [tasks]
 socket = "./data/tasks.sock"
 db_path = "./data/tasks.sqlite"

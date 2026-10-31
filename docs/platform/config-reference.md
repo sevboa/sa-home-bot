@@ -210,6 +210,18 @@ OLLAMA_NUM_PARALLEL>1 (риск нехватки VRAM на две одновре
   источник правды про персонажную модель, чтобы графовая память не могла
   разъехаться с ней при апгрейде модели на mycraft.
 
+## DevlabHubConfig
+
+Служба devlab_hub (`sa-home-bot --service devlab_hub`, Этап 60.3), singleton на alfred.
+Подробности: `docs/devlab/hub.md`.
+
+- `socket: str = "./data/devlab_hub.sock"` — сокет ноды для `nodectl call`.
+- `port: int = 8720` — HTTP-порт хаба (1..65535).
+- `data_dir: Path = /mnt/data/devlab` — каталог данных (`hub.sqlite`, позже git и ящик).
+- `bind_host: str = ""` — пусто: адрес tailscale0 через `tailscale ip -4`; явное значение
+  нужно для стендов и тестов.
+- `mailbox_retention_days: int = 30` — срок хранения почтового ящика (используется с 60.3.2).
+
 ## TasksConfig
 
 Служба tasks (`sa-home-bot --service tasks`) — генерализованные

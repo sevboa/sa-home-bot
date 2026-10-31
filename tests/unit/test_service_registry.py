@@ -13,6 +13,7 @@ def test_known_services():
         "tasks",
         "memory",
         "graph_memory",
+        "devlab_hub",
         "net",
         "llm",
         "vpn",
@@ -53,4 +54,7 @@ def test_service_endpoints_cover_services_with_own_server():
 def test_telegram_bot_is_the_singleton_with_its_own_config_package():
     bot = registry.SERVICES["telegram-bot"]
     assert bot.singleton and bot.instanced
-    assert [name for name, svc in registry.SERVICES.items() if svc.singleton] == ["telegram-bot"]
+    assert [name for name, svc in registry.SERVICES.items() if svc.singleton] == [
+        "telegram-bot",
+        "devlab_hub",
+    ]

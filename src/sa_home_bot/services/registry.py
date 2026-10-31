@@ -81,6 +81,13 @@ _SPECS: tuple[ServiceSpec, ...] = (
         externally_managed=True,
     ),
     ServiceSpec(
+        name="devlab_hub",
+        cli_name="devlab_hub",
+        runner="sa_home_bot.devlab.hub.app:run_hub",
+        endpoint_attr="devlab_hub.socket",
+        singleton=True,
+    ),
+    ServiceSpec(
         name="vpn", cli_name="vpn", runner="sa_home_bot.vpn.app:run_vpn", endpoint_attr="vpn.socket"
     ),
     ServiceSpec(
