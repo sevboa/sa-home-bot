@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from datetime import timedelta
 
 import pytest
 
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub.errors import HubError
-from sa_home_bot.devlab.hub.store import HubStore
+from sa_home_bot.devlab.hub.queue import SCHEMA as S_QUEUE_SCHEMA
+from sa_home_bot.devlab.hub.store import HUB_DB_NAME, HubStore
 from sa_home_bot.utils.clock import utc_now
 
 CLIENT = "claude-laptop"
@@ -475,3 +477,32 @@ async def test_purge_removes_logs_of_old_test_jobs_only(queue):
     (queue.logs_root / third.id).mkdir(parents=True)
     await queue.purge(5)
     assert (queue.logs_root / third.id).exists()
+
+
+async def test_open_migrates_jobs_without_params(tmp_path):
+    schema_v0152 = S_QUEUE_SCHEMA.replace(",\n    params TEXT NOT NULL DEFAULT '{}'", "")
+    assert "params" not in schema_v0152
+    with sqlite3.connect(tmp_path / HUB_DB_NAME) as old:
+        old.executescript(schema_v0152)
+        old.execute("INSERT INTO projects VALUES (?, '2026-11-01T00:00:00+00:00')", (PROJECT,))
+        old.execute(
+            "INSERT INTO jobs (id, kind, project, client, model, task, base_branch, status,"
+            " created) VALUES ('old111', 'agent', ?, ?, ?, 't', 'base/x', 'queued',"
+            " '2026-11-01T00:00:00+00:00')",
+            (PROJECT, CLIENT, MODEL),
+        )
+    store = HubStore(tmp_path)
+    await store.open()
+    try:
+        assert await store.queue.projects() == [PROJECT]
+        assert (await store.queue.get_job("old111")).params == {}
+        test_job = await store.queue.submit_test(CLIENT, PROJECT, "master", args=["-x"])
+        claimed = await store.queue.claim(EXECUTOR, [MODEL], [S.JOB_KIND_TEST])
+        assert claimed.id == test_job.id
+        assert claimed.params[S.FIELD_ARGS] == ["-x"]
+        assert (await store.queue.claim(EXECUTOR, [MODEL])).id == "old111"
+    finally:
+        await store.close()
+    reopened = HubStore(tmp_path)
+    await reopened.open()
+    await reopened.close()

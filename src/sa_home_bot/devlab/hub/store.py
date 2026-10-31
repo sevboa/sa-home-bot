@@ -78,7 +78,13 @@ class HubStore:
                 f"INSERT INTO {table} ({columns}) SELECT {columns} FROM {table}_legacy"
             )
             await self._db.conn.execute(f"DROP TABLE {table}_legacy")
+        if not await self._has_column("jobs", queue.PARAMS_COLUMN):
+            await self._db.conn.execute(queue.ADD_PARAMS_COLUMN)
         await self._db.conn.commit()
+
+    async def _has_column(self, table: str, column: str) -> bool:
+        cur = await self._db.conn.execute(f"PRAGMA table_info({table})")
+        return any(row["name"] == column for row in await cur.fetchall())
 
     async def _keyed_by_name_only(self, table: str) -> bool:
         cur = await self._db.conn.execute(f"PRAGMA table_info({table})")

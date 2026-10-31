@@ -64,6 +64,9 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS messages_job ON messages (job_id, direction, seq);
 """
 
+PARAMS_COLUMN = "params"
+ADD_PARAMS_COLUMN = "ALTER TABLE jobs ADD COLUMN params TEXT NOT NULL DEFAULT '{}'"
+
 JOB_COLUMNS = (
     "id, kind, project, client, model, task, base_branch, priority, status, executor, "
     "created, started, finished, tokens, cost_usd, params"
