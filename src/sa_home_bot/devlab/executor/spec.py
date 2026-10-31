@@ -29,6 +29,7 @@ class TestSection(BaseModel):
 class ProjectSpec(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
+    project: str = ""
     test: TestSection = Field(default_factory=TestSection)
 
 

@@ -12,6 +12,7 @@ from typing import Any
 
 from sa_home_bot.config import Settings
 from sa_home_bot.devlab import connect as devlab_connect
+from sa_home_bot.devlab import snapshot as devlab_snapshot
 from sa_home_bot.node.fixups import build_fixups, run_fixups
 from sa_home_bot.proto.client import ProtoClient
 from sa_home_bot.proto.endpoints import Endpoint, parse_endpoint, resolve_endpoint
@@ -112,8 +113,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p = sub.add_parser("devlab", help="мастерская devlab: подключение этой ноды к хабу")
     p.add_argument(
-        "devlab_command", choices=("connect",), help="connect: получить токен и подключить MCP"
+        "devlab_command",
+        choices=("connect", "snapshot"),
+        help="connect: получить токен, подключить MCP, поставить скил; "
+        "snapshot: снять рабочую копию и запушить на хаб, вывести ref для devlab_test",
     )
+    p.add_argument(
+        "--project", default="", help="snapshot: проект на хабе (по умолчанию из .devlab.toml)"
+    )
+    p.add_argument("--client", default="", help="snapshot: имя клиента (по умолчанию имя ноды)")
     p = sub.add_parser(
         "call", help="вызвать любое умение любой службы роя (то же, что делает Альфред)"
     )
@@ -493,7 +501,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "backup-release":
         return _run_backup_release(args)
     if args.command == "devlab":
-        return asyncio.run(devlab_connect.connect(_load_settings(args)))
+        settings = _load_settings(args)
+        if args.devlab_command == "snapshot":
+            return devlab_snapshot.snapshot(settings, project=args.project, client=args.client)
+        return asyncio.run(devlab_connect.connect(settings))
     try:
         return asyncio.run(_run(args))
     except KeyboardInterrupt:

@@ -72,7 +72,7 @@ nodectl = "sa_home_bot.nodectl:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-sa_home_bot = ["db/schema.sql", "llm/model-profiles.toml", "devlab/hub/resources/*.md"]
+sa_home_bot = ["db/schema.sql", "llm/model-profiles.toml", "devlab/hub/resources/*.md", "devlab/skills/*/SKILL.md"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

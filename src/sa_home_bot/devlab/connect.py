@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Awaitable, Callable
+from importlib import resources
 from pathlib import Path
 
 import aiohttp
@@ -15,6 +16,10 @@ from sa_home_bot.utils.files import write_private
 TOKEN_PATH = "~/.config/sa-home-bot/devlab-token"
 CONNECT_TIMEOUT = aiohttp.ClientTimeout(total=15)
 CLAUDE_BINARY = "claude"
+SKILLS_DIR = "~/.claude/skills"
+SKILL_NAME = "devlab-test"
+SKILL_FILE = "SKILL.md"
+TEST_WAIT_ADVICE_S = 240
 
 Fetch = Callable[[str, str], Awaitable[str]]
 Runner = Callable[[list[str]], int]
@@ -67,6 +72,22 @@ def mcp_add_hint(url: str, token_path: Path) -> str:
     )
 
 
+def skill_source() -> str:
+    package = resources.files("sa_home_bot.devlab")
+    return package.joinpath("skills", SKILL_NAME, SKILL_FILE).read_text("utf-8")
+
+
+def install_skill(skills_dir: str = SKILLS_DIR) -> str:
+    target = Path(skills_dir).expanduser() / SKILL_NAME / SKILL_FILE
+    text = skill_source()
+    if target.is_file() and target.read_text("utf-8") == text:
+        return "current"
+    state = "updated" if target.exists() else "installed"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, "utf-8")
+    return state
+
+
 def _run(argv: list[str]) -> int:
     return subprocess.run(argv, check=False).returncode
 
@@ -75,6 +96,7 @@ async def connect(
     settings: Settings,
     *,
     token_path: str = TOKEN_PATH,
+    skills_dir: str = SKILLS_DIR,
     fetch: Fetch = fetch_token,
     runner: Runner = _run,
     which: Callable[[str], str | None] = shutil.which,
@@ -88,6 +110,12 @@ async def connect(
     path = Path(token_path).expanduser()
     write_private(path, token + "\n", enforce_mode=True, make_parents=True)
     print(f"Токен записан в {path}")
+    skill_state = install_skill(skills_dir)
+    print(f"Скил {SKILL_NAME} ({skill_state}): {Path(skills_dir).expanduser() / SKILL_NAME}")
+    print(
+        f"devlab_test wait: до {TEST_WAIT_ADVICE_S} с, у MCP по HTTP idle-тайм-аут 5 минут "
+        "(CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT, мс; 0 отключает проверку)"
+    )
     if which(CLAUDE_BINARY) is None:
         print("claude не найден в PATH. Подключи MCP вручную:")
         print(mcp_add_hint(url, path))

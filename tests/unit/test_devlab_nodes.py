@@ -273,12 +273,16 @@ async def test_nodectl_connect_writes_private_file_and_hides_token(tmp_path, cap
     code = await devlab_connect.connect(
         settings(),
         token_path=str(path),
+        skills_dir=str(tmp_path / "skills"),
         fetch=fetch,
         runner=lambda argv: ran.append(argv) or 0,
         which=lambda name: "/usr/bin/claude",
     )
     out = capsys.readouterr()
     assert code == 0
+    assert (tmp_path / "skills" / "devlab-test" / "SKILL.md").read_text() == (
+        devlab_connect.skill_source()
+    )
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert path.read_text().strip() == "dlh_secret"
     assert "dlh_secret" not in out.out + out.err
@@ -295,7 +299,11 @@ async def test_nodectl_connect_without_claude_prints_command_without_token(tmp_p
         return "dlh_secret"
 
     code = await devlab_connect.connect(
-        settings(), token_path=str(path), fetch=fetch, which=lambda name: None
+        settings(),
+        token_path=str(path),
+        skills_dir=str(tmp_path / "skills"),
+        fetch=fetch,
+        which=lambda name: None,
     )
     out = capsys.readouterr().out
     assert code == 0

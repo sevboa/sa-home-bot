@@ -6346,6 +6346,13 @@ Colibri) и контейнеры задач ему уступают:
   `finally`), обёртка получила `create … [cpuset]` и `sync-out <id> [файл]`, `[test] setup_files`/`env`,
   `[devlab] test_*`, `.devlab.toml` sa-home-bot с образом python 3.13. `-n` по ядрам не включён (xdist
   нет в dev-зависимостях). Дальше 61.3 скил `devlab-test`.
+- **61.3 ✅ Снимок и скил `devlab-test`** (2026-11-01, ветка worktree, не влито): `nodectl devlab snapshot`
+  (`devlab/snapshot.py`: временный коммит через отдельный `GIT_INDEX_FILE`, push в `test/<нода>/<n>`,
+  токен только через `GIT_CONFIG_*`), поле `project` в `.devlab.toml`, скил в пакете
+  (`devlab/skills/devlab-test/SKILL.md`), `.claude/skills/devlab-test` — симлинк, `connect` ставит
+  скил в `~/.claude/skills`, строка в CLAUDE.md. Предел ожидания: idle-тайм-аут MCP по HTTP 5 мин, значит
+  `wait` ≤ 240 с, дальше опрос. Описание: `docs/devlab/client-test.md`. Осталось: живой прогон после
+  выката (хаб на alfred, исполнитель на mycraft), проверка `connect` на ноутбуке/Windows-ПК.
 
 **Зачем.** Тесты sa-home-bot (~3800) гоняются на Celeron alfred или на ноутбуке. Второй вид
 заданий исполнителя — `test`: Claude на любом компьютере гоняет тесты своей рабочей копии на

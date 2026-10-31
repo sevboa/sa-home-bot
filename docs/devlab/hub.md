@@ -11,6 +11,7 @@
 - [api.md](api.md) — HTTP API исполнителя и шлюзов, каталог моделей, MCP клиента.
 - [models.md](models.md) — шлюз моделей `devlab_models`: проксирование, лимиты, учёт, introspect.
 - [wake.md](wake.md) — пробуждение ноды исполнителя.
+- [client-test.md](client-test.md) — клиент тестов: `nodectl devlab snapshot`, скил `devlab-test`, предел `wait` (61.3).
 - [executor.md](executor.md) — исполнитель `devlab`: задания `test`, `.devlab.toml`, конфиг (61.2a).
 
 ## Что есть
