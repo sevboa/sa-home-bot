@@ -611,6 +611,10 @@ broadcast = "255.255.255.255"      # broadcast-адрес подсети, нап
 port = 9                           # стандартный порт WoL (7 или 9)
 wait_timeout_s = 120.0             # сколько ждать ответа на ping после пробуждения
 
+[devlab]
+root = "/models/sa-home/devlab"   # корень мастерской на ноде исполнителя (Этап 60)
+user = "devlab"                    # системный пользователь, от которого живут контейнеры задач
+
 [logging]
 level = "INFO"
 format = "plain"                   # plain | json

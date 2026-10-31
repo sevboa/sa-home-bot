@@ -94,6 +94,12 @@ Wake-on-LAN для внешней машины (например, домашне
 ``ip`` опционален: если задан, /wake сначала проверит, не в сети ли машина
 уже, а после отправки magic packet подождёт ответа на ping.
 
+## DevlabConfig
+
+Мастерская роя (Этап 60, [docs/node-fixups/fixups.md](../node-fixups/fixups.md)).
+``root`` — корень на ноде исполнителя, дом пользователя ``user`` — ``<root>/home``.
+Пока читается только фиксами `nodectl fix` (60.1).
+
 ## MonitorConfig
 
 Служба monitor (отдельный процесс, `sa-home-bot --service monitor`).
