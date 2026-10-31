@@ -69,8 +69,23 @@ async def heartbeat(request: web.Request) -> web.Response:
     return web.json_response({protocol.FIELD_OK: True})
 
 
+@roles(protocol.ROLE_GATEWAY)
+async def introspect(request: web.Request) -> web.Response:
+    body = await json_body(request)
+    token = body.get(protocol.FIELD_TOKEN)
+    if not isinstance(token, str) or not token:
+        raise HubError("introspect: token — непустая строка")
+    principal = await request.app[STORE_KEY].authenticate(token)
+    if principal is None:
+        raise web.HTTPNotFound()
+    return web.json_response(
+        {protocol.FIELD_NAME: principal.name, protocol.FIELD_ROLE: principal.role}
+    )
+
+
 def add_routes(app: web.Application) -> None:
     app.router.add_post(protocol.HTTP_CLAIM_PATH, claim)
     app.router.add_post(protocol.HTTP_POST_PATH, post)
     app.router.add_post(protocol.HTTP_POLL_PATH, poll)
     app.router.add_post(protocol.HTTP_HEARTBEAT_PATH, heartbeat)
+    app.router.add_post(protocol.HTTP_INTROSPECT_PATH, introspect)

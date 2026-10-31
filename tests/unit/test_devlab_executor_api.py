@@ -223,3 +223,33 @@ async def test_purge_loop_calls_purge_repeatedly():
         await asyncio.sleep(0)
     task.cancel()
     assert calls[:3] == [9, 9, 9]
+
+
+async def test_gateway_introspects_live_token(client, store, gateway):
+    token = await store.issue_token("runner", protocol.ROLE_EXECUTOR)
+    status, body = await call(
+        client, protocol.HTTP_INTROSPECT_PATH, gateway, {protocol.FIELD_TOKEN: token}
+    )
+    assert status == 200
+    assert body == {protocol.FIELD_NAME: "runner", protocol.FIELD_ROLE: protocol.ROLE_EXECUTOR}
+
+
+async def test_introspect_refuses_revoked_unknown_and_malformed(client, store, gateway):
+    token = await store.issue_token("runner", protocol.ROLE_EXECUTOR)
+    await store.revoke_token("runner")
+    for body, expected in (
+        ({protocol.FIELD_TOKEN: token}, 404),
+        ({protocol.FIELD_TOKEN: "dlh_nope"}, 404),
+        ({}, 400),
+    ):
+        resp = await client.post(protocol.HTTP_INTROSPECT_PATH, json=body, headers=gateway)
+        assert resp.status == expected
+
+
+@pytest.mark.parametrize("role", [protocol.ROLE_CLIENT, protocol.ROLE_EXECUTOR])
+async def test_introspect_is_gateway_only(client, store, role):
+    headers = await token_for(store, "other", role)
+    resp = await client.post(
+        protocol.HTTP_INTROSPECT_PATH, json={protocol.FIELD_TOKEN: "x"}, headers=headers
+    )
+    assert resp.status == 403

@@ -88,6 +88,11 @@ _SPECS: tuple[ServiceSpec, ...] = (
         singleton=True,
     ),
     ServiceSpec(
+        name="devlab_models",
+        cli_name="devlab_models",
+        runner="sa_home_bot.devlab.models.app:run_models",
+    ),
+    ServiceSpec(
         name="vpn", cli_name="vpn", runner="sa_home_bot.vpn.app:run_vpn", endpoint_attr="vpn.socket"
     ),
     ServiceSpec(

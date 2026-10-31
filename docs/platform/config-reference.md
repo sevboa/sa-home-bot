@@ -224,6 +224,26 @@ OLLAMA_NUM_PARALLEL>1 (риск нехватки VRAM на две одновре
 - `executor_node: str = "mycraft"` — нода исполнителя: её хаб будит (WoL через `wake_core`), когда
   есть работа, а heartbeat молчит. С именем токена исполнителя не связана.
 
+## DevlabModelsConfig
+
+Служба devlab_models (`sa-home-bot --service devlab_models`, Этап 60.4.1), по экземпляру на ноду,
+не singleton. Подробности: `docs/devlab/models.md`. Секреты (`hub_token`, `api_key`) — только в
+instance-конфиге ноды.
+
+- `hub_url: str = ""` — адрес хаба, например `http://alfred.tail61d88b.ts.net:8720`.
+- `hub_token: str = ""` — токен роли `gateway` (`nodectl call devlab_hub issue_token ... role=gateway`).
+- `port: int = 8721` — HTTP-порт шлюза (1..65535).
+- `bind_host: str = ""` — пусто: адрес tailscale0 через `tailscale ip -4` (функция хаба).
+- `data_dir: Path = ./data/devlab_models` — каталог данных (`ledger.sqlite`).
+- Таблицы `[devlab_models.<имя>]` — по одной на модель (`DevlabModelConfig`), имя видят клиенты:
+  - `kind = "openai"` — единственный вид пока (`llamacpp` — 60.4.2);
+  - `base_url`, `model` — адрес API провайдера (без `/chat/completions`) и имя модели у него;
+  - `api_key = ""` — ключ провайдера; не логируется и не уходит в heartbeat;
+  - `proxy = ""` — HTTP(S)-прокси к провайдеру;
+  - `free = false`, `price_in_per_m = 0.0`, `price_out_per_m = 0.0` — признак и цена за 1M токенов;
+  - `rpm = 0`, `rpd = 0` — лимиты провайдера в минуту и в сутки, 0 — без лимита;
+  - `context = 0` — окно контекста; `remote = true` — внешний API.
+
 ## TasksConfig
 
 Служба tasks (`sa-home-bot --service tasks`) — генерализованные

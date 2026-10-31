@@ -283,6 +283,7 @@ def test_describe_declares_assign_and_unassign():
         "graph_memory",
         "devlab_hub",
         "net",
+        "devlab_models",
         "vpn",
         "vpn_check",
     }

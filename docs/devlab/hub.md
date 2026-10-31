@@ -9,6 +9,7 @@
 - [queue.md](queue.md) — задание, статусы и переходы, ящик сообщений, курсоры, очистка.
 - [git.md](git.md) — bare-репозитории, `http-backend`, права веток, хук `pre-receive`.
 - [api.md](api.md) — HTTP API исполнителя и шлюзов, каталог моделей, MCP клиента.
+- [models.md](models.md) — шлюз моделей `devlab_models`: проксирование, лимиты, учёт, introspect.
 - [wake.md](wake.md) — пробуждение ноды исполнителя.
 
 ## Что есть

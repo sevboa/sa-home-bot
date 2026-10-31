@@ -390,6 +390,29 @@ bind_host = ""
 mailbox_retention_days = 30
 executor_node = "mycraft"
 
+# Служба devlab_models (`sa-home-bot --service devlab_models`, Этап 60.4.1): шлюз моделей
+# мастерской. hub_token и api_key держать только в instances/<...>.toml этой ноды.
+[devlab_models]
+hub_url = "http://alfred.tail61d88b.ts.net:8720"
+hub_token = ""
+port = 8721
+bind_host = ""
+data_dir = "./data/devlab_models"
+
+[devlab_models.openrouter-free]
+kind = "openai"
+base_url = "https://openrouter.ai/api/v1"
+model = "meta-llama/llama-3.3-70b-instruct:free"
+api_key = ""
+proxy = ""
+free = true
+price_in_per_m = 0.0
+price_out_per_m = 0.0
+rpm = 20
+rpd = 200
+context = 65536
+remote = true
+
 [tasks]
 socket = "./data/tasks.sock"
 db_path = "./data/tasks.sqlite"

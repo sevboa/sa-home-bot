@@ -30,6 +30,9 @@ def unknown_config_keys(
     unknown: list[str] = []
     for key, value in data.items():
         field = model.model_fields.get(key)
+        if field is None and model is DevlabModelsConfig and isinstance(value, dict):
+            unknown += unknown_config_keys(value, DevlabModelConfig, f"{prefix}{key}.")
+            continue
         if field is None:
             unknown.append(prefix + key)
             continue
@@ -193,6 +196,41 @@ class DevlabHubConfig(BaseModel):
     bind_host: str = ""
     mailbox_retention_days: int = Field(default=30, ge=1)
     executor_node: str = "mycraft"
+
+
+class DevlabModelConfig(BaseModel):
+    kind: Literal["openai"] = "openai"
+    base_url: str = ""
+    model: str = ""
+    api_key: str = ""
+    proxy: str = ""
+    free: bool = False
+    price_in_per_m: float = Field(default=0.0, ge=0)
+    price_out_per_m: float = Field(default=0.0, ge=0)
+    rpm: int = Field(default=0, ge=0)
+    rpd: int = Field(default=0, ge=0)
+    context: int = Field(default=0, ge=0)
+    remote: bool = True
+
+
+class DevlabModelsConfig(BaseModel):
+    hub_url: str = ""
+    hub_token: str = ""
+    port: int = Field(default=8721, ge=1, le=65535)
+    bind_host: str = ""
+    data_dir: Path = Path("./data/devlab_models")
+    entries: dict[str, DevlabModelConfig] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _collect_entries(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        own = {k: v for k, v in data.items() if k in cls.model_fields}
+        own["entries"] = {
+            k: v for k, v in data.items() if k not in cls.model_fields and isinstance(v, dict)
+        }
+        return own
 
 
 class TasksConfig(BaseModel):
@@ -547,6 +585,7 @@ class Settings(BaseSettings):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     graph_memory: GraphMemoryConfig = Field(default_factory=GraphMemoryConfig)
     devlab_hub: DevlabHubConfig = Field(default_factory=DevlabHubConfig)
+    devlab_models: DevlabModelsConfig = Field(default_factory=DevlabModelsConfig)
     net: NetConfig = Field(default_factory=NetConfig)
     vpn: VpnConfig = Field(default_factory=VpnConfig)
     vpn_check: VpnCheckConfig = Field(default_factory=VpnCheckConfig)
