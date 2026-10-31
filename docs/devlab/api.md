@@ -84,5 +84,5 @@ submit → inbox/answer → fetch `agent/<id>` → ревью → resume или 
 claude mcp add --transport http devlab http://alfred.tail61d88b.ts.net:8720/mcp \
   --header "Authorization: Bearer <токен>"
 ```
-Синтаксис дан по памяти, вживую не проверен: при расхождении смотреть `claude mcp add --help`.
+Синтаксис сверен с `claude mcp add --help` (2026-11-01).
 Порт 8720 взят из задания, реальный — `[devlab_hub] port`.
