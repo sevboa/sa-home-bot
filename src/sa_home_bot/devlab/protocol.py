@@ -3,6 +3,7 @@ from __future__ import annotations
 SERVICE_NAME = "devlab_hub"
 
 NODE_ID = "alfred"
+EXECUTOR_SERVICE = "devlab"
 
 ACTION_CLAIM = "claim"
 ACTION_POST = "post"

@@ -6,12 +6,17 @@ import logging
 
 from aiohttp import web
 
+from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.config import Settings
+from sa_home_bot.db.connection import Database
+from sa_home_bot.db.migrations import apply_migrations
+from sa_home_bot.db.store import Store
 from sa_home_bot.devlab.hub import executor_api, git_http, mcp_http
 from sa_home_bot.devlab.hub.http import build_app
 from sa_home_bot.devlab.hub.queue import HubQueue
 from sa_home_bot.devlab.hub.service import HubService
 from sa_home_bot.devlab.hub.store import HubStore
+from sa_home_bot.devlab.hub.waker import WAKE_STEP_INTERVAL_S, ExecutorWaker
 from sa_home_bot.proto.server import ProtoServer
 from sa_home_bot.utils.lifespan import Lifespan
 from sa_home_bot.utils.process import run
@@ -20,6 +25,7 @@ log = logging.getLogger(__name__)
 
 TAILSCALE_IP_TIMEOUT_S = 10.0
 PURGE_INTERVAL_S = 24 * 3600.0
+WAKE_DB_NAME = "wake.sqlite"
 
 
 async def purge_loop(
@@ -31,6 +37,15 @@ async def purge_loop(
             log.info("Очистка ящика: удалено сообщений %d", removed)
         except Exception:
             log.exception("Очистка ящика не удалась")
+        await asyncio.sleep(interval_s)
+
+
+async def wake_loop(waker: ExecutorWaker, interval_s: float = WAKE_STEP_INTERVAL_S) -> None:
+    while True:
+        try:
+            await waker.step()
+        except Exception:
+            log.exception("Шаг будильника исполнителя не удался")
         await asyncio.sleep(interval_s)
 
 
@@ -50,6 +65,14 @@ async def run_hub(settings: Settings) -> None:
     host = cfg.bind_host or await tailscale_address()
     store = HubStore(cfg.data_dir)
     await store.open()
+    wake_db = Database(cfg.data_dir / WAKE_DB_NAME)
+    await wake_db.open()
+    await apply_migrations(wake_db)
+    node_link = ServiceLink(
+        settings.node.socket, token=settings.swarm.token, display_name="нода (devlab_hub)"
+    )
+    await node_link.start()
+    waker = ExecutorWaker(store, node_link, Store(wake_db), cfg.executor_node)
     server = ProtoServer(cfg.socket, HubService(store), token=settings.swarm.token)
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
@@ -63,12 +86,17 @@ async def run_hub(settings: Settings) -> None:
     await web.TCPSite(runner, host, cfg.port).start()
     log.info("Служба devlab_hub запущена: http://%s:%d, данные %s", host, cfg.port, cfg.data_dir)
     purge_task = asyncio.create_task(purge_loop(store.queue, cfg.mailbox_retention_days))
+    wake_task = asyncio.create_task(wake_loop(waker))
     try:
         await lifespan.wait()
     finally:
-        purge_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await purge_task
+        for task in (purge_task, wake_task):
+            task.cancel()
+        for task in (purge_task, wake_task):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await node_link.stop()
+        await wake_db.close()
         log.info("Останов службы devlab_hub...")
         await runner.cleanup()
         await server.stop()

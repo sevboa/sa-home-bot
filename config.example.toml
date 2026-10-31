@@ -388,6 +388,7 @@ port = 8720
 data_dir = "/mnt/data/devlab"
 bind_host = ""
 mailbox_retention_days = 30
+executor_node = "mycraft"
 
 [tasks]
 socket = "./data/tasks.sock"
