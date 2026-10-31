@@ -13,7 +13,7 @@
 | `/api/post` | executor | `job_id`, `kind` (из `EXECUTOR_MESSAGES`), `payload` | `seq` сообщения; переходы статусов и расход (`tokens`, `cost_usd`) считает `HubQueue.post_from_executor` |
 | `/api/poll` | executor | `since` (по умолчанию 0) | `messages` (answer, resume, stop, release по заданиям этого исполнителя), `cursor` |
 | `/api/heartbeat` | executor, gateway | исполнитель: `busy`, `jobs`; шлюз: `models` и `limits` | `ok` |
-| `/api/introspect` | gateway | `token`: токен, предъявленный шлюзу | `name`, `role`; 404 для неизвестного или отозванного токена |
+| `/api/introspect` | gateway | `token`: токен, предъявленный шлюзу | `name`, `role`; 404 для неизвестного, отозванного и любого не-executor токена |
 
 - `poll`: `cursor` — `seq` последнего выданного, его исполнитель передаёт в следующем `since`
   (курсор хранит исполнитель; выданное помечается прочитанным, это основа `purge`). Исполнитель

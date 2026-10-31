@@ -246,6 +246,15 @@ async def test_introspect_refuses_revoked_unknown_and_malformed(client, store, g
         assert resp.status == expected
 
 
+@pytest.mark.parametrize("role", [protocol.ROLE_CLIENT, protocol.ROLE_GATEWAY])
+async def test_introspect_hides_non_executor_tokens(client, store, gateway, role):
+    token = await store.issue_token("other-one", role)
+    resp = await client.post(
+        protocol.HTTP_INTROSPECT_PATH, json={protocol.FIELD_TOKEN: token}, headers=gateway
+    )
+    assert resp.status == 404
+
+
 @pytest.mark.parametrize("role", [protocol.ROLE_CLIENT, protocol.ROLE_EXECUTOR])
 async def test_introspect_is_gateway_only(client, store, role):
     headers = await token_for(store, "other", role)

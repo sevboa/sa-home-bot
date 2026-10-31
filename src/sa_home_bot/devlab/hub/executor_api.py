@@ -76,7 +76,7 @@ async def introspect(request: web.Request) -> web.Response:
     if not isinstance(token, str) or not token:
         raise HubError("introspect: token — непустая строка")
     principal = await request.app[STORE_KEY].authenticate(token)
-    if principal is None:
+    if principal is None or principal.role != protocol.ROLE_EXECUTOR:
         raise web.HTTPNotFound()
     return web.json_response(
         {protocol.FIELD_NAME: principal.name, protocol.FIELD_ROLE: principal.role}
