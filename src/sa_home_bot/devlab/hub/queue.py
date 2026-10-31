@@ -18,6 +18,7 @@ from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.utils.clock import utc_now
 
 PROJECT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+BRANCH_TAIL_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 JOB_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
 JOB_ID_LENGTH = 6
 JOB_ID_ATTEMPTS = 20
@@ -119,6 +120,16 @@ def _spend(payload: dict[str, Any]) -> tuple[int, float]:
     return int(tokens), float(cost)
 
 
+def _valid_base_branch(name: str) -> bool:
+    tail = name[len(protocol.BASE_BRANCH_PREFIX) :]
+    return (
+        name.startswith(protocol.BASE_BRANCH_PREFIX)
+        and bool(tail)
+        and BRANCH_TAIL_RE.match(tail) is not None
+        and ".." not in name
+    )
+
+
 def _in(values: Collection[Any]) -> str:
     return ",".join("?" * len(values))
 
@@ -166,6 +177,7 @@ class HubQueue:
         task: str,
         priority: int = 0,
         kind: str = protocol.JOB_KIND_AGENT,
+        base_branch: str | None = None,
     ) -> Job:
         if kind not in protocol.JOB_KINDS:
             raise HubError(
@@ -175,6 +187,8 @@ class HubQueue:
             raise HubError("у задания должны быть модель и task.md")
         if isinstance(priority, bool) or not isinstance(priority, int):
             raise HubError("приоритет — целое число")
+        if base_branch is not None and not _valid_base_branch(base_branch):
+            raise HubError(f"базовая ветка: {protocol.BASE_BRANCH_PREFIX}<имя>, без пробелов и ..")
         async with self._tx() as conn:
             cur = await conn.execute("SELECT 1 FROM projects WHERE name = ?", (project,))
             if not await cur.fetchone():
@@ -190,7 +204,7 @@ class HubQueue:
                     client,
                     model.strip(),
                     task,
-                    protocol.BASE_BRANCH_PREFIX + job_id,
+                    base_branch or protocol.BASE_BRANCH_PREFIX + job_id,
                     priority,
                     protocol.STATUS_QUEUED,
                     utc_now().isoformat(),
@@ -198,8 +212,11 @@ class HubQueue:
             )
             return await self._load(conn, job_id)
 
-    async def get_job(self, job_id: str) -> Job:
-        return await self._load(self._db.conn, job_id)
+    async def get_job(self, job_id: str, client: str | None = None) -> Job:
+        job = await self._load(self._db.conn, job_id)
+        if client is not None and job.client != client:
+            raise HubError(f"задания {job_id!r} нет")
+        return job
 
     async def list_jobs(
         self, client: str | None = None, statuses: Collection[str] | None = None

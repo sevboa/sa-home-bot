@@ -7,7 +7,7 @@ import logging
 from aiohttp import web
 
 from sa_home_bot.config import Settings
-from sa_home_bot.devlab.hub import executor_api, git_http
+from sa_home_bot.devlab.hub import executor_api, git_http, mcp_http
 from sa_home_bot.devlab.hub.http import build_app
 from sa_home_bot.devlab.hub.queue import HubQueue
 from sa_home_bot.devlab.hub.service import HubService
@@ -57,6 +57,7 @@ async def run_hub(settings: Settings) -> None:
     app = build_app(store)
     git_http.add_routes(app)
     executor_api.add_routes(app)
+    mcp_http.add_routes(app)
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, host, cfg.port).start()
