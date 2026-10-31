@@ -235,14 +235,23 @@ instance-конфиге ноды.
 - `port: int = 8721` — HTTP-порт шлюза (1..65535).
 - `bind_host: str = ""` — пусто: адрес tailscale0 через `tailscale ip -4` (функция хаба).
 - `data_dir: Path = ./data/devlab_models` — каталог данных (`ledger.sqlite`).
+- `llamacpp_bin: str = "llama-server"` — бинарник llama.cpp (из PATH или полный путь).
+- `llamacpp_port_min = 8730`, `llamacpp_port_max = 8749` — диапазон локальных портов
+  `127.0.0.1` под модели `llamacpp`: порт = `min` + номер модели среди `llamacpp` в конфиге;
+  не хватило портов — служба не стартует.
 - Таблицы `[devlab_models.<имя>]` — по одной на модель (`DevlabModelConfig`), имя видят клиенты:
-  - `kind = "openai"` — единственный вид пока (`llamacpp` — 60.4.2);
+  - `kind = "openai"` (по умолчанию) или `"llamacpp"` (локальный llama.cpp, `docs/devlab/models.md`);
   - `base_url`, `model` — адрес API провайдера (без `/chat/completions`) и имя модели у него;
   - `api_key = ""` — ключ провайдера; не логируется и не уходит в heartbeat;
   - `proxy = ""` — HTTP(S)-прокси к провайдеру;
   - `free = false`, `price_in_per_m = 0.0`, `price_out_per_m = 0.0` — признак и цена за 1M токенов;
   - `rpm = 0`, `rpd = 0` — лимиты провайдера в минуту и в сутки, 0 — без лимита;
-  - `context = 0` — окно контекста; `remote = true` — внешний API.
+  - `context = 0` — окно контекста; `remote = true` — внешний API;
+  - только `llamacpp` (для него `free = true` и `remote = false` по умолчанию):
+    `gguf` — путь к файлу (обязателен); `threads = 0` — потоки (0: не передавать, решает
+    llama.cpp); `threads_night = 0` — потоки ночью (хранится, логика — 60.6);
+    `cpus = ""` — список/диапазон ядер для `taskset -c`; `idle_unload_s = 600` — выгрузка после
+    простоя (0 — не выгружать); `extra_args = []` — дополнительные аргументы `llama-server`.
 
 ## TasksConfig
 

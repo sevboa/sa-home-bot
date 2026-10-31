@@ -199,7 +199,7 @@ class DevlabHubConfig(BaseModel):
 
 
 class DevlabModelConfig(BaseModel):
-    kind: Literal["openai"] = "openai"
+    kind: Literal["openai", "llamacpp"] = "openai"
     base_url: str = ""
     model: str = ""
     api_key: str = ""
@@ -211,6 +211,25 @@ class DevlabModelConfig(BaseModel):
     rpd: int = Field(default=0, ge=0)
     context: int = Field(default=0, ge=0)
     remote: bool = True
+    gguf: str = ""
+    threads: int = Field(default=0, ge=0)
+    threads_night: int = Field(default=0, ge=0)
+    cpus: str = ""
+    idle_unload_s: int = Field(default=600, ge=0)
+    extra_args: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _local_defaults(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("kind") == "llamacpp":
+            return {"free": True, "remote": False, **data}
+        return data
+
+    @model_validator(mode="after")
+    def _llamacpp_needs_gguf(self) -> DevlabModelConfig:
+        if self.kind == "llamacpp" and not self.gguf:
+            raise ValueError("kind=llamacpp требует gguf")
+        return self
 
 
 class DevlabModelsConfig(BaseModel):
@@ -219,6 +238,9 @@ class DevlabModelsConfig(BaseModel):
     port: int = Field(default=8721, ge=1, le=65535)
     bind_host: str = ""
     data_dir: Path = Path("./data/devlab_models")
+    llamacpp_bin: str = "llama-server"
+    llamacpp_port_min: int = Field(default=8730, ge=1, le=65535)
+    llamacpp_port_max: int = Field(default=8749, ge=1, le=65535)
     entries: dict[str, DevlabModelConfig] = Field(default_factory=dict)
 
     @model_validator(mode="before")

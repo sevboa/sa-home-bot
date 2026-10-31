@@ -36,7 +36,7 @@ async def run_models(settings: Settings) -> None:
             "devlab_models: нужны hub_url, hub_token и хотя бы одна [devlab_models.<имя>]"
         )
     host = cfg.bind_host or await tailscale_address()
-    backends = {name: build_backend(name, spec) for name, spec in cfg.entries.items()}
+    backends = {name: build_backend(name, spec, cfg) for name, spec in cfg.entries.items()}
     windows = {name: RateWindow(spec.rpm) for name, spec in cfg.entries.items()}
     ledger = Ledger(cfg.data_dir)
     await ledger.open()

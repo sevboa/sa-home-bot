@@ -3,15 +3,15 @@
 Этап 60, задача 60.4.1. Служба на ноде с моделями (по экземпляру на ноду, не singleton):
 OpenAI-совместимый HTTP-сервер на адресе tailscale0, который проксирует запросы исполнителя к
 провайдеру, соблюдает его лимиты, считает токены и $ и раз в несколько секунд сообщает хабу
-каталог и остатки лимитов. Код: `devlab/models/`. Вид `llamacpp` (локальный llama.cpp) — 60.4.2.
+каталог и остатки лимитов. Код: `devlab/models/`. Вид `llamacpp` (локальный llama.cpp, 60.4.2) — раздел «Локальные модели».
 
 ## Устройство
 - `gateway.py` — HTTP: `GET /health` (публичный), `GET /v1/models`, `POST /v1/chat/completions`
   (имена путей и заголовка `X-Devlab-Job` — `devlab/protocol.py`). `stream: true` передаётся
   потоком: чанки провайдера пишутся клиенту по мере прихода, ответ целиком не буферизуется.
 - `backends.py` — вид модели = отдельный бэкенд с общим интерфейсом `ModelBackend`
-  (`chat(payload)` отдаёт ответ провайдера). Реестр `BACKENDS` по `kind`; `llamacpp` добавит
-  своего наследника, остальной код не меняется. `openai` — `aiohttp`-сессия, `Authorization:
+  (`chat(payload)` отдаёт ответ провайдера). Реестр `BACKENDS` по `kind`; `llamacpp` — наследник
+  `HttpBackend` (общий HTTP-прокси с `openai`). `openai` — `aiohttp`-сессия, `Authorization:
   Bearer <api_key>`, `model` в теле подменяется на `model` из конфига, `proxy` опционален.
 - `limits.py` — `RateWindow`: скользящее окно `rpm`.
 - `ledger.py` — SQLite `ledger.sqlite` в `data_dir`.
@@ -72,11 +72,49 @@ remote = true
 ## Heartbeat
 Раз в `HEARTBEAT_INTERVAL_S` (четверть `HEARTBEAT_FRESH_S` хаба) `POST /api/heartbeat`:
 - `models`: на модель `name`, `kind`, `free`, `price_in`, `price_out`, `context`, `remote`;
+  для `llamacpp` ещё `loaded` (поднята ли модель сейчас); `threads` клиенту не нужны и не отдаются;
 - `limits`: `{<имя>: {"rpd_left": <остаток или null>}}`.
 
 Ошибка сети пишется в журнал, цикл продолжается. Ключи провайдеров не попадают в heartbeat,
 ответы, журнал и тексты ошибок (провайдер недоступен — 502 с фиксированным текстом); это проверяет
 `tests/unit/test_devlab_models.py`.
+
+## Локальные модели (llamacpp)
+Этап 60.4.2. `LlamaCppBackend` (`backends.py`). GPU не используется: аргумент
+`--n-gpu-layers 0` фиксирован, GPU днём принадлежит gemma. Ollama не участвует.
+- Запуск по требованию: первый запрос поднимает `llama-server` как transient user-юнит
+  `systemd-run --user --quiet --collect --unit=sa-home-devlab-model-<имя> --slice=sa-home-devlab.slice
+  --property=CPUWeight=10 [taskset -c <cpus>] <llamacpp_bin> --model <gguf> --host 127.0.0.1
+  --port <порт> --n-gpu-layers 0 [--ctx-size <context>] [--threads <threads>] <extra_args>`.
+  Имена юнита и slice, вес — `devlab/protocol.py` (`MODEL_UNIT_PREFIX`, `DEVLAB_SLICE`,
+  `DEVLAB_SLICE_CPU_WEIGHT`), оттуда их берёт 60.6. Заморозка slice и ночной режим — 60.6, здесь
+  не сделаны; `threads_night` пока только хранится.
+- Готовность: опрос `GET /health` раз в секунду, таймаут 900 с (`LLAMA_HEALTH_TIMEOUT_S`);
+  перед каждым опросом проверяется `systemctl --user is-active`. Запуск идёт под lock, параллельные
+  первые запросы ждут один процесс. Перед стартом юнит гасится (хвост прошлого запуска).
+- Выгрузка: фоновая проверка раз в 15 с; без запросов дольше `idle_unload_s` юнит останавливается
+  (`systemctl --user stop`). Запрос считается активным от приёма до конца ответа, поэтому
+  stream не прерывается. При остановке службы модели гасятся.
+- Падения: упавший юнит замечается при следующем запросе или проверке и поднимается заново.
+  Три падения или неудачных старта за 10 минут — 503 с текстом о времени следующей попытки, без
+  бесконечного перезапуска.
+
+Пример для Flint (GLM/Colibri сюда не относится: отдельный бэкенд, не llama.cpp, будет после
+замеров стенда):
+
+```toml
+[devlab_models]
+llamacpp_bin = "/opt/llama.cpp/build/bin/llama-server"
+
+[devlab_models.flint]
+kind = "llamacpp"
+gguf = "/models/sa-home/devlab/flint.gguf"
+context = 32768
+threads = 8
+threads_night = 12
+cpus = "0-11"
+idle_unload_s = 600
+```
 
 ## Не сделано
 Выкат (назначение службы на jeeves/mycraft, токены, instance-конфиги) — за владельцем.

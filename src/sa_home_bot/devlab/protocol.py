@@ -118,10 +118,14 @@ MODEL_PRICE_IN = "price_in"
 MODEL_PRICE_OUT = "price_out"
 MODEL_CONTEXT = "context"
 MODEL_REMOTE = "remote"
+MODEL_LOADED = "loaded"
 LIMIT_RPD_LEFT = "rpd_left"
 MODEL_KIND_OPENAI = "openai"
 MODEL_KIND_LLAMACPP = "llamacpp"
 MODEL_GATEWAY = "gateway"
+DEVLAB_SLICE = "sa-home-devlab.slice"
+MODEL_UNIT_PREFIX = "sa-home-devlab-model-"
+DEVLAB_SLICE_CPU_WEIGHT = 10
 
 MCP_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 MCP_SERVER_NAME = "devlab-hub"

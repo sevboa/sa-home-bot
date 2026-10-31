@@ -9,7 +9,7 @@ from aiohttp import web
 
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub.http import BEARER_PREFIX, Handler
-from sa_home_bot.devlab.models.backends import ModelBackend
+from sa_home_bot.devlab.models.backends import ModelBackend, ModelUnavailableError
 from sa_home_bot.devlab.models.hubclient import HubClient, HubUnavailableError
 from sa_home_bot.devlab.models.ledger import Ledger
 from sa_home_bot.devlab.models.limits import RateWindow
@@ -77,17 +77,19 @@ class Gateway:
         limits: dict[str, Any] = {}
         for name, backend in self.backends.items():
             spec = backend.spec
-            models.append(
-                {
-                    protocol.MODEL_NAME: name,
-                    protocol.MODEL_KIND: spec.kind,
-                    protocol.MODEL_FREE: spec.free,
-                    protocol.MODEL_PRICE_IN: spec.price_in_per_m,
-                    protocol.MODEL_PRICE_OUT: spec.price_out_per_m,
-                    protocol.MODEL_CONTEXT: spec.context,
-                    protocol.MODEL_REMOTE: spec.remote,
-                }
-            )
+            entry: dict[str, Any] = {
+                protocol.MODEL_NAME: name,
+                protocol.MODEL_KIND: spec.kind,
+                protocol.MODEL_FREE: spec.free,
+                protocol.MODEL_PRICE_IN: spec.price_in_per_m,
+                protocol.MODEL_PRICE_OUT: spec.price_out_per_m,
+                protocol.MODEL_CONTEXT: spec.context,
+                protocol.MODEL_REMOTE: spec.remote,
+            }
+            loaded = backend.loaded()
+            if loaded is not None:
+                entry[protocol.MODEL_LOADED] = loaded
+            models.append(entry)
             left = None
             if spec.rpd:
                 left = max(0, spec.rpd - await self.ledger.requests_today(name))
@@ -154,6 +156,8 @@ class Gateway:
             }
         try:
             upstream = await backend.chat(payload)
+        except ModelUnavailableError as exc:
+            return error_response(503, str(exc))
         except (aiohttp.ClientError, TimeoutError) as exc:
             log.warning("Провайдер %s недоступен: %s", backend.name, type(exc).__name__)
             return error_response(502, "провайдер недоступен")
@@ -169,6 +173,7 @@ class Gateway:
                     body=data, status=upstream.status, content_type=upstream.content_type
                 )
         finally:
+            backend.finished()
             await self._record(backend, job, sniffer)
 
     async def _relay_stream(

@@ -398,6 +398,9 @@ hub_token = ""
 port = 8721
 bind_host = ""
 data_dir = "./data/devlab_models"
+llamacpp_bin = "llama-server"
+llamacpp_port_min = 8730
+llamacpp_port_max = 8749
 
 [devlab_models.openrouter-free]
 kind = "openai"
@@ -412,6 +415,18 @@ rpm = 20
 rpd = 200
 context = 65536
 remote = true
+
+# Локальная модель (Этап 60.4.2): llama-server поднимается по первому запросу
+# как user-юнит в sa-home-devlab.slice и выгружается после idle_unload_s простоя.
+# [devlab_models.flint]
+# kind = "llamacpp"
+# gguf = "/models/sa-home/devlab/flint.gguf"
+# context = 32768
+# threads = 8
+# threads_night = 12
+# cpus = ""
+# idle_unload_s = 600
+# extra_args = []
 
 [tasks]
 socket = "./data/tasks.sock"
