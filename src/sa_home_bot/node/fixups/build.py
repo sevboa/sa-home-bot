@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from sa_home_bot.config import Settings
-from sa_home_bot.node.fixups import host, needs, probe_net, probe_tunnel, proxy, vpn_server
+from sa_home_bot.node.fixups import devlab, host, needs, probe_net, probe_tunnel, proxy, vpn_server
 from sa_home_bot.node.fixups.core import Fixup
 
 
@@ -27,6 +27,7 @@ def build_fixups(settings: Settings) -> list[Fixup]:
         host.JOURNALCTL_GROUP,
         host.POWER_CONTROL_POLKIT,
         host.WOL_ENABLE,
+        *devlab.devlab_fixups(settings),
         vpn_server.make_awg_sudoers_fixup(settings),
         vpn_server.make_awg_ufw_fixup(settings),
         vpn_server.make_sub_ufw_fixup(settings),

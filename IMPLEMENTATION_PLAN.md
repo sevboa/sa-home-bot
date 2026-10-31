@@ -6164,18 +6164,19 @@ jeeves. Агент коммитит каждый чих в ветку прогр
 - Хаб будит mycraft (WoL через `wake_core`), когда есть `queued` или ответ на `waiting_owner`,
   а исполнитель молчит.
 
-#### 60.1 Фиксы mycraft (`nodectl fix`)
+#### 60.1 Фиксы mycraft (`nodectl fix`) (сделано, код без выката)
 `needed`: служба `devlab` или `devlab_models` назначена ноде.
-- `install-podman` — podman, uidmap, passt; `check()`: `podman` находится (`find_executable`).
-- `devlab-user` — системный пользователь `devlab`, домашний и рабочие каталоги в
-  `/models/sa-home/devlab` (`/home` на mycraft почти полон); `check()`: пользователь есть.
+- `install-podman` — podman, uidmap, passt; `check()`: `podman` и `newuidmap` находятся (`find_executable`).
+- `devlab-user` — системный пользователь `devlab`, дом и рабочие каталоги в
+  `/models/sa-home/devlab/home` (`/home` на mycraft почти полон; `[devlab] root`); `check()`: пользователь есть.
 - `devlab-subids` — диапазоны `devlab` в `/etc/subuid` и `/etc/subgid`; `check()`: строки есть.
-- `devlab-linger` — `loginctl enable-linger devlab`; `check()`: `Linger=yes`.
-- `devlab-sudoers` — root-обёртка `/usr/local/libexec/sa-home-devlab` (фиксированный набор
+- `devlab-linger` — `loginctl enable-linger devlab`; `check()`: есть `/var/lib/systemd/linger/devlab`.
+- `devlab-sudoers` — обёртка `/usr/local/libexec/sa-home-devlab`, исполняемая от `devlab` (фиксированный набор
   подкоманд: собрать образ, создать/запустить/остановить/удалить контейнер задачи, выполнить
   команду в контейнере, синхронизировать рабочую копию) и снипет `NOPASSWD` на
   `sudo -n -u devlab <обёртка>`; `check()`: содержимое обоих равно ожидаемому.
 - Хабу на alfred фиксы не нужны.
+- Код: `node/fixups/devlab.py`, решения — `docs/node-fixups/fixups.md` («devlab»).
 
 #### 60.2 Стенд: модели, обвязка, контейнеры (без прода)
 - Образ для sa-home-bot (python 3.13 + зависимости), кэш окружения по хэшу рецепта и lock-файлов;

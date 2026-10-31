@@ -137,6 +137,11 @@ class WakeConfig(BaseModel):
     wait_timeout_s: float = Field(default=120.0, gt=0)
 
 
+class DevlabConfig(BaseModel):
+    root: str = "/models/sa-home/devlab"
+    user: str = "devlab"
+
+
 class MonitorConfig(BaseModel):
     socket: str = "./data/monitor.sock"
     db_path: Path = Path("./data/monitor.sqlite")
@@ -539,6 +544,7 @@ class Settings(BaseSettings):
     node: NodeConfig = Field(default_factory=NodeConfig)
     swarm: SwarmConfig = Field(default_factory=SwarmConfig)
     wake: WakeConfig = Field(default_factory=WakeConfig)
+    devlab: DevlabConfig = Field(default_factory=DevlabConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     backup: BackupConfig = Field(default_factory=BackupConfig)
     invites: InvitesConfig = Field(default_factory=InvitesConfig)

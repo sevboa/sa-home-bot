@@ -38,3 +38,10 @@ def vpn_awg(settings: Settings) -> bool:
 
 def vpn_check(settings: Settings) -> bool:
     return assignments.has_service(settings.node.assignments, "vpn_check")
+
+
+def devlab(settings: Settings) -> bool:
+    return any(
+        assignments.has_service(settings.node.assignments, name)
+        for name in ("devlab", "devlab_models")
+    )

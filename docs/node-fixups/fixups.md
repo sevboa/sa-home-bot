@@ -26,6 +26,7 @@
 | `vpn_server.py` | sudoers awg, ufw-порты awg и подписки Hiddify, forward/NAT awg-сервера под ufw |
 | `probe_net.py`, `probe_tunnel.py` | netns-пробники `vpn_check` (см. [vpn-probes.md](vpn-probes.md)) |
 | `proxy.py` | mtg + microsocks, счётчики трафика прокси в nftables |
+| `devlab.py` | мастерская devlab (Этап 60.1): podman, пользователь `devlab`, subuid/subgid, linger, обёртка контейнеров + sudoers |
 | `toolchain.py` | сборка amneziawg-tools, xray-core, mtg |
 | `build.py` | `build_fixups`: порядок фиксов |
 
@@ -51,6 +52,11 @@
 | `vpn-check-probe-sudoers`, `vpn-check-probe-state` | содержимое равно |
 | `proxy-units` | бинарь mtg, оба user-юнита, оба активны |
 | `proxy-firewall` | на счётчики ссылаются ПРАВИЛА цепочки `input` (не только существуют объекты-счётчики) |
+| `install-podman` | находятся `podman` и `newuidmap` |
+| `devlab-user` | `getent passwd devlab` успешен |
+| `devlab-subids` | у `devlab` есть строки и в `/etc/subuid`, и в `/etc/subgid` |
+| `devlab-linger` | есть `/var/lib/systemd/linger/devlab` |
+| `devlab-sudoers` | обёртка и sudoers-снипет РАВНЫ ожидаемым |
 
 `run_fixups` терпит падение самого `check()` (`FixupError` — например `sudo cat` без TTY/кэша):
 проверка считается отрицательной и пробуется `apply()`. Живой краш 2026-08-17: необработанный
@@ -80,6 +86,31 @@
 - Генерируемые sudoers/юниты/скрипты проверялись побайтно до/после рефакторинга одноразовым
   golden-сравнением (последовательность подпроцессов и содержимое устанавливаемых файлов) — менять
   их текст без причины нельзя: `check()` ряда фиксов сравнивает содержимое с ожидаемым.
+
+## devlab (Этап 60.1, 2026-10-31)
+Фиксы нужны ноде, которой назначена служба `devlab` или `devlab_models` (`needs.devlab`).
+Конфиг `[devlab]`: `root` (по умолчанию `/models/sa-home/devlab`), `user` (`devlab`).
+- Дом `devlab` — `<root>/home`, а не сам `<root>`: в `<root>` от владельца лежат стенд 60.2,
+  модели и загрузки, `useradd --create-home` в существующий чужой каталог не сменил бы владельца.
+  `/home` на mycraft почти полон, хранилище podman (`~/.local/share/containers`) живёт в доме.
+- Пользователь системный (`--system`, оболочка `nologin`) — такому useradd не выдаёт subuid сам,
+  поэтому отдельный `devlab-subids`: диапазон 65536 начинается сразу после максимального занятого
+  в `/etc/subuid`/`/etc/subgid` (на mycraft `sevboa` и `davidr` заняли до 231071).
+- Обёртка `/usr/local/libexec/sa-home-devlab` (root:root 0755, редактировать её `devlab` не может)
+  исполняется ОТ `devlab`, не от root: снипет `<пользователь ноды> ALL=(devlab) NOPASSWD: <обёртка> *`,
+  вызов `sudo -n -u devlab <обёртка> …`. Root исполнителю не нужен — podman rootless.
+- Подкоманды обёртки: `sync-in <id>` (tar со stdin в `~/work/<id>`, каталог пересоздаётся),
+  `sync-out <id>` (tar рабочей копии в stdout), `clean <id>`, `build <id> <образ>` (Containerfile
+  со stdin, контекст — рабочая копия, сеть при сборке есть), `create <id> <образ> <cpus> <память>`,
+  `start|stop|rm <id>`, `exec <id> <таймаут> <команда>`, `ps`, `images`, `prune`.
+  Имена — только `[a-z0-9-]`, не с дефиса; числа и размеры проверяются; контейнеры `devlab-<id>`,
+  образы `devlab/<имя>`.
+- Контейнер задачи создаётся с `--network none`, квотами CPU/памяти и `--pids-limit 4096`;
+  рабочая копия монтируется в `/work`. Рабочие копии передаются tar-потоком, чтобы `devlab` не
+  требовалось читать каталоги пользователя ноды.
+- До Этапа 60.5 служба `devlab` не зарегистрирована в `services/registry.py`: супервизор на
+  назначение `devlab` пишет «Неизвестное назначение … — пропускаю». Это ожидаемо, назначение
+  нужно только чтобы `nodectl fix` выбрал фиксы.
 
 ## Известное отличие после рефакторинга
 `awg-ufw-port.apply` теперь, как и `sub-ufw-ports`, перед `ufw allow` читает `ufw status` и не
