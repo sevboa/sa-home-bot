@@ -7,6 +7,8 @@ from pathlib import Path
 
 from sa_home_bot.db.connection import Database
 from sa_home_bot.devlab import protocol
+from sa_home_bot.devlab.hub import queue
+from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.utils.clock import utc_now
 
 HUB_DB_NAME = "hub.sqlite"
@@ -22,10 +24,6 @@ CREATE TABLE IF NOT EXISTS tokens (
     revoked TEXT
 );
 """
-
-
-class HubError(Exception):
-    pass
 
 
 @dataclass(frozen=True)
@@ -45,10 +43,11 @@ def new_token() -> str:
 class HubStore:
     def __init__(self, data_dir: Path) -> None:
         self._db = Database(data_dir / HUB_DB_NAME)
+        self.queue = queue.HubQueue(self._db)
 
     async def open(self) -> None:
         await self._db.open()
-        await self._db.conn.executescript(SCHEMA)
+        await self._db.conn.executescript(SCHEMA + queue.SCHEMA)
         await self._db.conn.commit()
 
     async def close(self) -> None:

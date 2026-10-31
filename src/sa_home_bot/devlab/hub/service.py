@@ -5,7 +5,8 @@ from typing import Any
 
 from sa_home_bot import __version__
 from sa_home_bot.devlab import protocol
-from sa_home_bot.devlab.hub.store import HubError, HubStore
+from sa_home_bot.devlab.hub.errors import HubError
+from sa_home_bot.devlab.hub.store import HubStore
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     ProtoError,
