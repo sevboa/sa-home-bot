@@ -6194,7 +6194,7 @@ jeeves. Агент коммитит каждый чих в ветку прогр
 - Итог — модели по умолчанию (локальная, бесплатная API, платная), обвязка, окна, раскладка
   потоков между моделью и контейнерами; в docs.
 
-#### 60.3 Хаб `devlab_hub` (alfred)
+#### 60.3 Хаб `devlab_hub` (alfred) (сделано, код без выката)
 - `ServiceSpec(name="devlab_hub", cli_name="devlab_hub",
   runner="sa_home_bot.devlab.hub.app:run_hub", endpoint_attr="devlab_hub.socket", singleton=True)`,
   назначение — alfred; конфиг `[devlab_hub]` (порт, каталог данных, срок хранения ящика).

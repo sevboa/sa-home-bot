@@ -60,6 +60,14 @@ async def tailscale_address() -> str:
     return words[0]
 
 
+def build_hub_app(store: HubStore) -> web.Application:
+    app = build_app(store)
+    git_http.add_routes(app)
+    executor_api.add_routes(app)
+    mcp_http.add_routes(app)
+    return app
+
+
 async def run_hub(settings: Settings) -> None:
     cfg = settings.devlab_hub
     host = cfg.bind_host or await tailscale_address()
@@ -77,11 +85,7 @@ async def run_hub(settings: Settings) -> None:
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
     await server.start()
-    app = build_app(store)
-    git_http.add_routes(app)
-    executor_api.add_routes(app)
-    mcp_http.add_routes(app)
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(build_hub_app(store))
     await runner.setup()
     await web.TCPSite(runner, host, cfg.port).start()
     log.info("Служба devlab_hub запущена: http://%s:%d, данные %s", host, cfg.port, cfg.data_dir)
