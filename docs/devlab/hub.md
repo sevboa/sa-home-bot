@@ -14,6 +14,8 @@
   (name, role, hash, created, revoked).
 - `devlab/hub/service.py` — действия ноды `issue_token name= role=` и `revoke_token name=`
   (`nodectl call devlab_hub issue_token name=... role=...`).
+  Они объявлены только в `capabilities`, не в `actions`: `actions` бот рисует кнопками панели роя,
+  а токен не должен выпускаться и показываться в Telegram (решение владельца).
 
 ## Решения
 - Токен `dlh_` + `secrets.token_urlsafe(32)`, в БД только sha256. Открытый вид возвращается один раз

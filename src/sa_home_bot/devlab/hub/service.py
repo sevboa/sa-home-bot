@@ -8,15 +8,11 @@ from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub.store import HubError, HubStore
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
-    ActionParam,
-    ActionSpec,
     ProtoError,
     ServiceDescription,
     ServiceInfo,
 )
 from sa_home_bot.proto.server import undeclared_action
-
-_NAME = ActionParam(name="name", title="Имя токена (компьютер или нода)")
 
 
 class HubService:
@@ -28,19 +24,6 @@ class HubService:
         return ServiceDescription(
             info=ServiceInfo(node=self._node, service=protocol.SERVICE_NAME, version=__version__),
             capabilities=(protocol.ACTION_ISSUE_TOKEN, protocol.ACTION_REVOKE_TOKEN),
-            actions=(
-                ActionSpec(
-                    id=protocol.ACTION_ISSUE_TOKEN,
-                    title="🔑 Выпустить токен",
-                    params=(
-                        _NAME,
-                        ActionParam(name="role", title="Роль", choices=protocol.ROLES),
-                    ),
-                ),
-                ActionSpec(
-                    id=protocol.ACTION_REVOKE_TOKEN, title="🔑 Отозвать токен", params=(_NAME,)
-                ),
-            ),
         )
 
     async def get_state(self) -> dict[str, Any]:
