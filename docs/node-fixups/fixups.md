@@ -102,7 +102,9 @@
 - Подкоманды обёртки: `sync-in <id>` (tar со stdin в `~/work/<id>`, каталог пересоздаётся),
   `sync-out <id> [файл]` (tar рабочей копии или одного файла в stdout; имя файла — `[A-Za-z0-9._-]`,
   не `.`/`..`), `clean <id>`, `build <id> <образ>` (Containerfile
-  со stdin, контекст — рабочая копия, сеть при сборке есть),
+  со stdin пишется во временный файл `~/work/<id>.containerfile`: `podman build --file -` под sudo
+  падает с `open /dev/stdin: permission denied`, живая находка 2026-11-01; контекст — рабочая копия,
+  сеть при сборке есть),
   `create <id> <образ> <cpus> <память> [cpuset]` (cpuset — `--cpuset-cpus`, только цифры, `,` и `-`,
   начинается с цифры; Этап 61.2b),
   `start|stop|rm <id>`, `exec <id> <таймаут> <команда>`, `ps`, `images`, `prune`.

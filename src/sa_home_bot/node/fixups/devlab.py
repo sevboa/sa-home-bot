@@ -174,11 +174,17 @@ sync-out)
     ;;
 clean)
     name "${{1:-}}"
+    rm -f "${{WORK:?}}/$1.containerfile"
     exec rm -rf "${{WORK:?}}/$1"
     ;;
 build)
     name "${{1:-}}"; name "${{2:-}}"
-    exec podman build --tag "devlab/$2" --file - "$WORK/$1"
+    spec="$WORK/$1.containerfile"
+    cat > "$spec"
+    status=0
+    podman build --tag "devlab/$2" --file "$spec" "$WORK/$1" || status=$?
+    rm -f "$spec"
+    exit "$status"
     ;;
 create)
     name "${{1:-}}"; name "${{2:-}}"; number "${{3:-}}"; size "${{4:-}}"
