@@ -162,6 +162,8 @@ class TestWorker:
                 timeout_s=spec.timeout_s,
                 image=spec.image,
                 setup=tuple(spec.setup),
+                setup_files=tuple(spec.setup_files),
+                env=tuple(spec.env.items()),
             )
         )
         duration = time.monotonic() - started

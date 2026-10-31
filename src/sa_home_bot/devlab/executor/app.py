@@ -7,6 +7,7 @@ from pathlib import Path
 
 from sa_home_bot.config import DevlabConfig, Settings
 from sa_home_bot.devlab.executor.hub import ExecutorHub
+from sa_home_bot.devlab.executor.podman import PodmanTestRunner
 from sa_home_bot.devlab.executor.runner import TestRunner
 from sa_home_bot.devlab.executor.worker import TestWorker, WorkerSettings
 from sa_home_bot.utils.lifespan import Lifespan
@@ -17,7 +18,7 @@ EXECUTOR_DIR = "executor"
 
 
 def build_runner(cfg: DevlabConfig) -> TestRunner:
-    raise RuntimeError("devlab: контейнерный TestRunner появится в Этапе 61.2b")
+    return PodmanTestRunner(cfg)
 
 
 def work_dir_of(cfg: DevlabConfig) -> Path:

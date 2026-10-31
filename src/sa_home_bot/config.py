@@ -140,6 +140,9 @@ class WakeConfig(BaseModel):
     wait_timeout_s: float = Field(default=120.0, gt=0)
 
 
+CPUSET_PATTERN = r"^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$"
+
+
 class DevlabConfig(BaseModel):
     root: str = "/models/sa-home/devlab"
     user: str = "devlab"
@@ -148,6 +151,11 @@ class DevlabConfig(BaseModel):
     work_dir: str = ""
     poll_interval_s: float = Field(default=5.0, gt=0)
     heartbeat_interval_s: float = Field(default=30.0, gt=0)
+    test_image: str = "docker.io/library/python:3.13-slim"
+    test_cpuset: str = Field(default="6-11,18-23", pattern=CPUSET_PATTERN)
+    test_cpus: float = Field(default=12.0, gt=0)
+    test_memory: str = Field(default="24g", pattern=r"^[0-9]+[kmg]$")
+    build_timeout_s: float = Field(default=1800.0, gt=0)
 
 
 class MonitorConfig(BaseModel):

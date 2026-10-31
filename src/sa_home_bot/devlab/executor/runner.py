@@ -15,6 +15,8 @@ class RunRequest:
     timeout_s: float
     image: str = ""
     setup: tuple[str, ...] = field(default_factory=tuple)
+    setup_files: tuple[str, ...] = field(default_factory=tuple)
+    env: tuple[tuple[str, str], ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)

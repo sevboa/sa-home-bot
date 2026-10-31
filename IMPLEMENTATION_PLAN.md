@@ -6339,8 +6339,13 @@ Colibri) и контейнеры задач ему уступают:
   bare-зеркало проекта и `git archive` коммита, `.devlab.toml` (`[test]`), интерфейс `TestRunner` с
   фейком в тестах, сводка из junit или текста pytest, логи, `test_done`/`failed`/`stopped`, удаление
   `test/*`, курсор poll на диске. Общий HTTP-клиент хаба вынесен в `devlab/hubhttp.py`. Описание:
-  `docs/devlab/executor.md`. Дальше 61.2b: контейнерный `TestRunner` через обёртку 60.1, `image`/`setup`,
-  `-n` по ядрам слота, `build_runner` в `executor/app.py`.
+  `docs/devlab/executor.md`.
+- **61.2b ✅ Контейнерный `TestRunner`** (2026-11-01, ветка worktree, не влито): `executor/podman.py`
+  (`PodmanTestRunner` через обёртку 60.1: sync-in, сборка/кэш образа по хэшу `image`+`setup`+`setup_files`+`env`,
+  контейнер без сети с `--cpuset-cpus`/`--cpus`/`--memory`, таймаут, `cancel`, `sync-out` junit, уборка в
+  `finally`), обёртка получила `create … [cpuset]` и `sync-out <id> [файл]`, `[test] setup_files`/`env`,
+  `[devlab] test_*`, `.devlab.toml` sa-home-bot с образом python 3.13. `-n` по ядрам не включён (xdist
+  нет в dev-зависимостях). Дальше 61.3 скил `devlab-test`.
 
 **Зачем.** Тесты sa-home-bot (~3800) гоняются на Celeron alfred или на ноутбуке. Второй вид
 заданий исполнителя — `test`: Claude на любом компьютере гоняет тесты своей рабочей копии на

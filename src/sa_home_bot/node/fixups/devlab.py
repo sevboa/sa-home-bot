@@ -150,6 +150,10 @@ WORK="$HOME/work"
 fail() {{ echo "sa-home-devlab: $*" >&2; exit 2; }}
 name() {{ case "${{1:-}}" in ""|-*|*[!a-z0-9-]*) fail "плохое имя: ${{1:-}}";; esac; }}
 number() {{ case "${{1:-}}" in ""|*[!0-9.]*) fail "не число: ${{1:-}}";; esac; }}
+cpuset() {{ case "${{1:-}}" in ""|[!0-9]*|*[!0-9,-]*) fail "не список ядер: ${{1:-}}";; esac; }}
+filename() {{
+    case "${{1:-}}" in ""|.|..|*[!A-Za-z0-9._-]*) fail "плохое имя файла: ${{1:-}}";; esac
+}}
 size() {{ case "${{1:-}}" in ""|*[!0-9kmg]*) fail "не размер: ${{1:-}}";; esac; }}
 cmd="${{1:-}}"
 if [ $# -gt 0 ]; then shift; fi
@@ -162,6 +166,10 @@ sync-in)
     ;;
 sync-out)
     name "${{1:-}}"
+    if [ $# -ge 2 ]; then
+        filename "$2"
+        exec tar -c -C "$WORK/$1" -- "$2"
+    fi
     exec tar -c -C "$WORK/$1" .
     ;;
 clean)
@@ -174,7 +182,13 @@ build)
     ;;
 create)
     name "${{1:-}}"; name "${{2:-}}"; number "${{3:-}}"; size "${{4:-}}"
+    set_cpus=""
+    if [ $# -ge 5 ]; then
+        cpuset "$5"
+        set_cpus="$5"
+    fi
     exec podman run --detach --name "devlab-$1" --network none --cpus "$3" --memory "$4" \\
+        ${{set_cpus:+--cpuset-cpus "$set_cpus"}} \\
         --pids-limit 4096 --volume "$WORK/$1:/work" --workdir /work "devlab/$2" sleep infinity
     ;;
 start)

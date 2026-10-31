@@ -22,6 +22,8 @@ class TestSection(BaseModel):
     timeout_s: float = Field(default=DEFAULT_TIMEOUT_S, gt=0)
     image: str = ""
     setup: list[str] = Field(default_factory=list)
+    setup_files: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
 
 
 class ProjectSpec(BaseModel):

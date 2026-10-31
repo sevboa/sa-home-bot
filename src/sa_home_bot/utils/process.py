@@ -42,5 +42,11 @@ async def run(
     exchange = proc.communicate(input)
     if timeout is not None:
         exchange = asyncio.wait_for(exchange, timeout=timeout)
-    out, err = await exchange
+    try:
+        out, err = await exchange
+    except BaseException:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+        raise
     return ProcResult(proc.returncode or 0, out or b"", err or b"")

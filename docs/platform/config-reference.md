@@ -267,6 +267,11 @@ instance-конфиге ноды.
 - `work_dir: str = ""` — пусто: `<root>/executor` (зеркала `mirrors/`, задания `jobs/`, `state.json`).
 - `poll_interval_s: float = 5.0` — период опроса хаба (`claim` и `poll`), больше 0.
 - `heartbeat_interval_s: float = 30.0` — период heartbeat, больше 0.
+- `test_image: str = "docker.io/library/python:3.13-slim"` — базовый образ, если в `.devlab.toml` нет `image`.
+- `test_cpuset: str = "6-11,18-23"` — ядра контейнера теста (`--cpuset-cpus`), только цифры, `,` и `-`.
+- `test_cpus: float = 12.0` — квота CPU (`--cpus`), больше 0.
+- `test_memory: str = "24g"` — лимит памяти контейнера, `<число>[kmg]`.
+- `build_timeout_s: float = 1800.0` — таймаут сборки образа, больше 0.
 
 ## TasksConfig
 

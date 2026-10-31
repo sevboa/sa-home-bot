@@ -669,6 +669,11 @@ hub_token = ""                     # токен роли executor (`nodectl call
 work_dir = ""                      # пусто = <root>/executor (зеркала проектов, каталоги заданий, state.json)
 poll_interval_s = 5.0              # период опроса хаба: claim и сообщения для исполнителя
 heartbeat_interval_s = 30.0        # период heartbeat (busy, текущие задания)
+test_image = "docker.io/library/python:3.13-slim"  # образ, если в .devlab.toml нет image
+test_cpuset = "6-11,18-23"         # ядра контейнера теста (--cpuset-cpus)
+test_cpus = 12.0                   # квота CPU контейнера (--cpus)
+test_memory = "24g"                # лимит памяти контейнера
+build_timeout_s = 1800.0           # таймаут сборки образа (setup из .devlab.toml)
 
 [logging]
 level = "INFO"
