@@ -5,7 +5,7 @@
 проверяет `tests/unit/test_devlab_e2e.py` (сборка приложения — `app.build_hub_app`).
 
 ## Разделы
-- [tokens.md](tokens.md) — токены, роли, `issue_token` / `revoke_token`.
+- [tokens.md](tokens.md) — токены, роли, привязка к нодам роя, `connect`, `issue_token` / `revoke_token`.
 - [queue.md](queue.md) — задание, статусы и переходы, ящик сообщений, курсоры, очистка.
 - [git.md](git.md) — bare-репозитории, `http-backend`, права веток, хук `pre-receive`.
 - [api.md](api.md) — HTTP API исполнителя и шлюзов, каталог моделей, MCP клиента.
@@ -43,9 +43,13 @@
    службы (`sevboa`). Не на Seagate `/mnt/scratch`: в хабе токены и единственные копии веток.
 6. Перезапустить ноду alfred (`nodectl restart_node`), проверить `nodectl status` и
    `curl http://<адрес tailscale0 alfred>:8720/health` (ответ `{"ok": true, ...}`).
-7. Выпустить токен клиента на alfred в терминале (не в Telegram, токен показывается один раз):
-   `nodectl call devlab_hub issue_token name=<имя> role=client`.
-8. На машине клиента подключить MCP (команда в [api.md](api.md), «Подключение в Claude Code»):
-   `claude mcp add --transport http devlab http://alfred.tail61d88b.ts.net:8720/mcp --header "Authorization: Bearer <токен>"`.
+7. Хаб принимает только ноды роя (60.3.8, [tokens.md](tokens.md)): токен привязан к IP ноды с тем же
+   именем. Токены executor и gateway выпускаются на alfred в терминале (не в Telegram, токен
+   показывается один раз), имя = нода: `nodectl call devlab_hub issue_token name=<нода> role=<роль>`.
+8. На каждой ноде-клиенте (в рое должна стоять нода и совпадать `[swarm].token`):
+   `nodectl devlab connect`. Команда сама получает токен client у хаба, пишет его в
+   `~/.config/sa-home-bot/devlab-token` и подключает MCP через `claude mcp add` (команда в
+   [api.md](api.md), «Подключение в Claude Code»). Выданный раньше токен `alfred` (client)
+   `connect` перевыпустит.
 9. Проверить цикл: `devlab_project_add`, `git push` базы в `base/<имя>`, `devlab_submit`; до
    готовности 60.5 задание останется в `queued`.

@@ -196,6 +196,7 @@ class DevlabHubConfig(BaseModel):
     bind_host: str = ""
     mailbox_retention_days: int = Field(default=30, ge=1)
     executor_node: str = "mycraft"
+    hub_node: str = "alfred"
 
 
 class DevlabModelConfig(BaseModel):

@@ -12,6 +12,7 @@ from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub import http, mcp_http
 from sa_home_bot.devlab.hub.store import HubStore
 from sa_home_bot.utils.process import run
+from tests.unit.support.fakes import FakeNodes
 
 PROJECT = "proj"
 MODEL = "qwen"
@@ -42,7 +43,7 @@ async def store(tmp_path):
 
 @pytest.fixture
 async def client(store):
-    app = http.build_app(store)
+    app = http.build_app(store, FakeNodes())
     mcp_http.add_routes(app)
     async with TestClient(TestServer(app)) as test_client:
         yield test_client

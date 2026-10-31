@@ -12,6 +12,7 @@ from sa_home_bot.devlab.hub import executor_api, http
 from sa_home_bot.devlab.hub import store as store_module
 from sa_home_bot.devlab.hub.store import HubStore
 from sa_home_bot.utils.clock import utc_now
+from tests.unit.support.fakes import FakeNodes
 
 MODEL = "qwen"
 PROJECT = "proj"
@@ -34,7 +35,7 @@ async def store(tmp_path):
 
 @pytest.fixture
 async def client(store):
-    app = http.build_app(store)
+    app = http.build_app(store, FakeNodes())
     executor_api.add_routes(app)
     async with TestClient(TestServer(app)) as test_client:
         yield test_client

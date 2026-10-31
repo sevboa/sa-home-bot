@@ -86,4 +86,5 @@ claude mcp add --transport http devlab http://alfred.tail61d88b.ts.net:8720/mcp 
   --header "Authorization: Bearer <токен>"
 ```
 Синтаксис сверен с `claude mcp add --help` (2026-11-01).
-Порт 8720 взят из задания, реальный — `[devlab_hub] port`.
+Порт 8720 взят из задания, реальный — `[devlab_hub] port`. На ноде роя эту команду выполняет
+`nodectl devlab connect` ([tokens.md](tokens.md)); запросы принимаются только с IP ноды, чьё имя у токена.

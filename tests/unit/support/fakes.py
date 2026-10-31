@@ -284,3 +284,28 @@ class Clock:
             self.now += timedelta(seconds=seconds, **timedelta_options)
         else:
             self.now += seconds + timedelta(**timedelta_options).total_seconds()
+
+
+LOOPBACK = "127.0.0.1"
+TEST_NODE_NAMES = (
+    "alice",
+    "bob",
+    "cl",
+    "gw",
+    "jeeves",
+    "laptop",
+    "other",
+    "other-one",
+    "pc",
+    "pc2",
+    "runner",
+    "who",
+)
+
+
+class FakeNodes:
+    def __init__(self, nodes: dict[str, set[str]] | None = None) -> None:
+        self.nodes = nodes if nodes is not None else {n: {LOOPBACK} for n in TEST_NODE_NAMES}
+
+    async def addresses(self) -> dict[str, frozenset[str]]:
+        return {name: frozenset(ips) for name, ips in self.nodes.items()}

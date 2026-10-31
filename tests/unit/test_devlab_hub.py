@@ -9,6 +9,7 @@ from sa_home_bot.devlab.hub import http
 from sa_home_bot.devlab.hub.service import HubService
 from sa_home_bot.devlab.hub.store import HubStore, hash_token
 from sa_home_bot.proto.messages import ProtoError
+from tests.unit.support.fakes import FakeNodes
 
 GUARDED_PATH = "/guarded"
 
@@ -28,7 +29,7 @@ async def store(tmp_path):
 
 @pytest.fixture
 async def client(store):
-    app = http.build_app(store)
+    app = http.build_app(store, FakeNodes())
     app.router.add_get(GUARDED_PATH, guarded)
     async with TestClient(TestServer(app)) as test_client:
         yield test_client
@@ -86,7 +87,7 @@ async def test_token_is_stored_only_as_hash(store, tmp_path):
 
 
 async def test_issue_and_revoke_through_service(store):
-    service = HubService(store)
+    service = HubService(store, FakeNodes())
     issued = await service.run_command(
         protocol.ACTION_ISSUE_TOKEN, {"name": "pc", "role": protocol.ROLE_CLIENT}
     )
@@ -110,11 +111,11 @@ async def test_issue_and_revoke_through_service(store):
 )
 async def test_service_rejects_bad_requests(store, action, args):
     with pytest.raises(ProtoError):
-        await HubService(store).run_command(action, args)
+        await HubService(store, FakeNodes()).run_command(action, args)
 
 
 async def test_duplicate_active_name_rejected(store):
-    service = HubService(store)
+    service = HubService(store, FakeNodes())
     args = {"name": "pc", "role": protocol.ROLE_CLIENT}
     await service.run_command(protocol.ACTION_ISSUE_TOKEN, args)
     with pytest.raises(ProtoError):
@@ -122,7 +123,7 @@ async def test_duplicate_active_name_rejected(store):
 
 
 def test_token_actions_are_callable_by_nodectl(tmp_path):
-    description = HubService(HubStore(tmp_path)).describe()
+    description = HubService(HubStore(tmp_path), FakeNodes()).describe()
     issue = description.find_action(protocol.ACTION_ISSUE_TOKEN)
     revoke = description.find_action(protocol.ACTION_REVOKE_TOKEN)
     assert issue is not None and [p.name for p in issue.params] == ["name", "role"]

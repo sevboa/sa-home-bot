@@ -13,6 +13,7 @@ from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub import git_http, http, refpolicy, repos
 from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.devlab.hub.store import HubStore
+from tests.unit.support.fakes import FakeNodes
 
 PROJECT = "demo"
 ZERO = refpolicy.ZERO_SHA
@@ -31,7 +32,7 @@ async def store(tmp_path):
 
 @pytest.fixture
 async def server(store):
-    app = http.build_app(store)
+    app = http.build_app(store, FakeNodes())
     git_http.add_routes(app)
     async with TestClient(TestServer(app)) as test_client:
         yield test_client

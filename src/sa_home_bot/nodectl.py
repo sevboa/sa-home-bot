@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from sa_home_bot.config import Settings
+from sa_home_bot.devlab import connect as devlab_connect
 from sa_home_bot.node.fixups import build_fixups, run_fixups
 from sa_home_bot.proto.client import ProtoClient
 from sa_home_bot.proto.endpoints import Endpoint, parse_endpoint, resolve_endpoint
@@ -108,6 +109,10 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "backup-release",
         help="разрешить этой ноде публиковать бэкап напарнику (новый сервер / первый деплой)",
+    )
+    p = sub.add_parser("devlab", help="мастерская devlab: подключение этой ноды к хабу")
+    p.add_argument(
+        "devlab_command", choices=("connect",), help="connect: получить токен и подключить MCP"
     )
     p = sub.add_parser(
         "call", help="вызвать любое умение любой службы роя (то же, что делает Альфред)"
@@ -487,6 +492,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_restore_apply(args)
     if args.command == "backup-release":
         return _run_backup_release(args)
+    if args.command == "devlab":
+        return asyncio.run(devlab_connect.connect(_load_settings(args)))
     try:
         return asyncio.run(_run(args))
     except KeyboardInterrupt:

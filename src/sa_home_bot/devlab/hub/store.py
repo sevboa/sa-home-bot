@@ -73,7 +73,7 @@ class HubStore:
             await self.queue.remove_project(name)
             raise
 
-    async def issue_token(self, name: str, role: str) -> str:
+    async def issue_token(self, name: str, role: str, replace: bool = False) -> str:
         name = name.strip()
         if not name or len(name) > NAME_MAX_CHARS:
             raise HubError(f"имя токена: от 1 до {NAME_MAX_CHARS} символов")
@@ -83,7 +83,7 @@ class HubStore:
         async with self._db.transaction() as conn:
             cur = await conn.execute("SELECT revoked FROM tokens WHERE name = ?", (name,))
             row = await cur.fetchone()
-            if row is not None and row["revoked"] is None:
+            if row is not None and row["revoked"] is None and not replace:
                 raise HubError(f"токен {name!r} уже выпущен: сначала revoke_token")
             await conn.execute("DELETE FROM tokens WHERE name = ?", (name,))
             await conn.execute(
@@ -91,6 +91,13 @@ class HubStore:
                 (name, role, hash_token(token), utc_now().isoformat()),
             )
         return token
+
+    async def active_role(self, name: str) -> str | None:
+        cur = await self._db.conn.execute(
+            "SELECT role FROM tokens WHERE name = ? AND revoked IS NULL", (name,)
+        )
+        row = await cur.fetchone()
+        return row["role"] if row else None
 
     async def revoke_token(self, name: str) -> None:
         async with self._db.transaction() as conn:

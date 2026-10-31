@@ -6,6 +6,7 @@ from typing import Any
 from sa_home_bot import __version__
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub.errors import HubError
+from sa_home_bot.devlab.hub.nodes import NodeDirectory
 from sa_home_bot.devlab.hub.store import HubStore
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
@@ -29,8 +30,9 @@ TOKEN_ACTIONS = (
 
 
 class HubService:
-    def __init__(self, store: HubStore) -> None:
+    def __init__(self, store: HubStore, nodes: NodeDirectory) -> None:
         self._store = store
+        self._nodes = nodes
         self._node = socket.gethostname()
 
     def describe(self) -> ServiceDescription:
@@ -56,6 +58,10 @@ class HubService:
         name = str(args.get("name", ""))
         if action == protocol.ACTION_ISSUE_TOKEN:
             role = str(args.get("role", ""))
+            known = await self._nodes.addresses()
+            if len(known) > 1 and name.strip() not in known:
+                nodes = ", ".join(sorted(known))
+                raise HubError(f"имя токена должно быть нодой роя: {name!r} нет среди {nodes}")
             return {"name": name, "role": role, "token": await self._store.issue_token(name, role)}
         if action == protocol.ACTION_REVOKE_TOKEN:
             await self._store.revoke_token(name)

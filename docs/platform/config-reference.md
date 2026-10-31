@@ -221,6 +221,8 @@ OLLAMA_NUM_PARALLEL>1 (риск нехватки VRAM на две одновре
 - `bind_host: str = ""` — пусто: адрес tailscale0 через `tailscale ip -4`; явное значение
   нужно для стендов и тестов.
 - `mailbox_retention_days: int = 30` — срок хранения почтового ящика (используется с 60.3.2).
+- `hub_node: str = "alfred"` — нода хаба для клиентской команды `nodectl devlab connect`
+  (URL `http://<hub_node>:<port>` по tailscale-имени).
 - `executor_node: str = "mycraft"` — нода исполнителя: её хаб будит (WoL через `wake_core`), когда
   есть работа, а heartbeat молчит. С именем токена исполнителя не связана.
 

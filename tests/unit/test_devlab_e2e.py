@@ -10,6 +10,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub.app import build_hub_app
 from sa_home_bot.devlab.hub.store import HubStore
+from tests.unit.support.fakes import FakeNodes
 from tests.unit.test_devlab_git import arun_git, auth, run_git
 
 PROJECT = "demo"
@@ -22,7 +23,7 @@ async def hub(tmp_path):
     (tmp_path / "hub").mkdir()
     store = HubStore(tmp_path / "hub")
     await store.open()
-    async with TestClient(TestServer(build_hub_app(store))) as client:
+    async with TestClient(TestServer(build_hub_app(store, FakeNodes()))) as client:
         yield client, store
     await store.close()
 

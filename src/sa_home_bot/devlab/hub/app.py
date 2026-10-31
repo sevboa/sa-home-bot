@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import socket
 
 from aiohttp import web
 
@@ -11,8 +12,9 @@ from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
-from sa_home_bot.devlab.hub import executor_api, git_http, mcp_http
+from sa_home_bot.devlab.hub import connect_http, executor_api, git_http, mcp_http
 from sa_home_bot.devlab.hub.http import build_app
+from sa_home_bot.devlab.hub.nodes import NodeDirectory, SwarmNodes
 from sa_home_bot.devlab.hub.queue import HubQueue
 from sa_home_bot.devlab.hub.service import HubService
 from sa_home_bot.devlab.hub.store import HubStore
@@ -60,8 +62,11 @@ async def tailscale_address() -> str:
     return words[0]
 
 
-def build_hub_app(store: HubStore) -> web.Application:
-    app = build_app(store)
+def build_hub_app(
+    store: HubStore, nodes: NodeDirectory, swarm_token: str = ""
+) -> web.Application:
+    app = build_app(store, nodes, swarm_token)
+    connect_http.add_routes(app)
     git_http.add_routes(app)
     executor_api.add_routes(app)
     mcp_http.add_routes(app)
@@ -81,11 +86,12 @@ async def run_hub(settings: Settings) -> None:
     )
     await node_link.start()
     waker = ExecutorWaker(store, node_link, Store(wake_db), cfg.executor_node)
-    server = ProtoServer(cfg.socket, HubService(store), token=settings.swarm.token)
+    nodes = SwarmNodes(node_link.get_state, settings.node.id or socket.gethostname(), host)
+    server = ProtoServer(cfg.socket, HubService(store, nodes), token=settings.swarm.token)
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
     await server.start()
-    runner = web.AppRunner(build_hub_app(store))
+    runner = web.AppRunner(build_hub_app(store, nodes, settings.swarm.token))
     await runner.setup()
     await web.TCPSite(runner, host, cfg.port).start()
     log.info("Служба devlab_hub запущена: http://%s:%d, данные %s", host, cfg.port, cfg.data_dir)

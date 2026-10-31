@@ -6,6 +6,7 @@ from aiohttp import web
 
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub.errors import HubError
+from sa_home_bot.devlab.hub.nodes import NodeDirectory
 from sa_home_bot.devlab.hub.store import HubStore, Principal
 
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
@@ -15,6 +16,8 @@ PUBLIC_ATTR = "devlab_public"
 ROLES_ATTR = "devlab_roles"
 PRINCIPAL_KEY = web.RequestKey("principal", Principal)
 STORE_KEY = web.AppKey("store", HubStore)
+NODES_KEY = web.AppKey("nodes", NodeDirectory)
+SWARM_TOKEN_KEY = web.AppKey("swarm_token", str)
 
 
 def public(handler: Handler) -> Handler:
@@ -45,6 +48,9 @@ async def auth_middleware(request: web.Request, handler: Handler) -> web.StreamR
     principal = await request.app[STORE_KEY].authenticate(token) if token else None
     if principal is None:
         raise web.HTTPUnauthorized(headers={"WWW-Authenticate": "Bearer"})
+    node_ips = (await request.app[NODES_KEY].addresses()).get(principal.name, frozenset())
+    if request.remote not in node_ips:
+        raise web.HTTPForbidden()
     allowed = getattr(handler, ROLES_ATTR, None)
     if allowed is not None and principal.role not in allowed:
         raise web.HTTPForbidden()
@@ -65,8 +71,10 @@ async def health(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "service": protocol.SERVICE_NAME})
 
 
-def build_app(store: HubStore) -> web.Application:
+def build_app(store: HubStore, nodes: NodeDirectory, swarm_token: str = "") -> web.Application:
     app = web.Application(middlewares=[error_middleware, auth_middleware])
     app[STORE_KEY] = store
+    app[NODES_KEY] = nodes
+    app[SWARM_TOKEN_KEY] = swarm_token
     app.router.add_get(protocol.HTTP_HEALTH_PATH, health)
     return app
